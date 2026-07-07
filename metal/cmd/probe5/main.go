@@ -52,6 +52,18 @@ func main() {
 	fmt.Printf("boot-EL: %d (verwacht 2: TF-A/armstub op EL3)\n", b.BootEL())
 	fmt.Printf("MPIDR: %#x → core %d (A76: aff1-nummering)\n", raspi.MPIDR(), b.CoreID())
 
+	// Geheugen: bewijst het universele pad — de Pi-firmware hoort x0 = DTB
+	// mee te geven (ARM64 Linux-boot-protocol), cpuinit legde 'm op DTBPtr.
+	dtb := dev.Read64(uintptr(rpi5.DTBPtr))
+	fmt.Printf("DTB-pointer (x0 bij boot): %#x\n", dtb)
+	if n := b.MemTotal(); n > 0 {
+		fmt.Printf("geheugen: %d MB DRAM (uit /memory in de DTB) — x0-pad werkt op de Pi!\n", n>>20)
+	} else if dtb != 0 {
+		fmt.Printf("geheugen: DTB-detectie faalde — magic-woord @ ptr = %#x (DTB elders?)\n", dev.Read32(uintptr(dtb)))
+	} else {
+		fmt.Println("geheugen: x0 = 0 — firmware gaf geen DTB-pointer (val terug op mailbox, P2b)")
+	}
+
 	// Goroutines + heap: bewijs dat de runtime echt draait.
 	done := make(chan int, 4)
 	for i := range 4 {
