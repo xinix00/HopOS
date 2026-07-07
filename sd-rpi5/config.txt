@@ -1,0 +1,8 @@
+# HopOS probe5 — Raspberry Pi 5 (zie docs/rpi5.md)
+arm_64bit=1
+kernel=kernel_2712.img
+# DTB buiten onze RAM-declaratie (de firmware eist een DTB op de kaart,
+# de probe gebruikt hem niet).
+device_tree_address=0x0f000000
+# Bootloader-logs op de debug-UART: bewijst meteen dat de kabel werkt.
+uart_2ndstage=1

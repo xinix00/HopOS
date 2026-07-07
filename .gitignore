@@ -1,0 +1,4 @@
+*.elf
+nvme.img
+*.md
+.claude/

@@ -1,0 +1,483 @@
+// HopOS fase-1-demo op QEMU -M virt: de HOP-kern (core 0) beheert app-slots
+// zoals HOP's HopRunner dat straks doet — Start (met MemoryLimit-patch),
+// Status (power + heartbeat), Stop (kill), en restart. Drie apps op drie
+// cores, elk een eigen Go-runtime in een eigen partitie.
+//
+// In het echte systeem komen de images gesigneerd uit S3 via de HOP-agent;
+// hier zijn ze embedded — laden/starten/stoppen is identiek.
+
+//go:build qemuvirt
+
+package main
+
+import (
+	"bytes"
+	_ "embed"
+	"fmt"
+	"hash/fnv"
+	"net"
+	"net/http"
+	"runtime"
+	"time"
+
+	"hop-os/metal/board"
+	_ "hop-os/metal/board/qemuvirt" // registreert het board (init) + tamago-hooks
+	"hop-os/metal/hopfs"
+	"hop-os/metal/hopnet"
+	"hop-os/metal/hopswitch"
+	"hop-os/metal/layout"
+	"hop-os/metal/nvme"
+	"hop-os/metal/slots"
+)
+
+// nvmeDemo bewijst PCIe-ECAM + de eigen NVMe-driver (fase-3-voorwerk):
+// enumereer bus 0, wijs zelf BAR0 toe (er is geen firmware die dat deed),
+// schrijf een blok scratch en lees het terug. Geeft de controller terug —
+// daar bouwt hopfs (de storage-laag) op verder.
+func nvmeDemo() (*nvme.Controller, error) {
+	win := board.Current().PCIe()
+	ctrl, err := nvme.Probe(win, layout.NVMeDMABase, layout.NVMeDMASize)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Printf("nvme: %q, %d blokken × %dB @ %#x\n",
+		ctrl.Model, ctrl.Blocks, ctrl.BlockSize, uint64(win.MMIOBase))
+
+	wr := make([]byte, 4096)
+	for i := range wr {
+		wr[i] = byte(i*7 + 3)
+	}
+	if err := ctrl.Write(8, wr); err != nil {
+		return nil, err
+	}
+	rd := make([]byte, 4096)
+	if err := ctrl.Read(8, rd); err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(wr, rd) {
+		return nil, fmt.Errorf("teruggelezen blok verschilt van geschreven blok")
+	}
+	return ctrl, nil
+}
+
+// waitExit wacht tot de app in een slot netjes geëxit is en geeft de code.
+func waitExit(slot int, timeout time.Duration) (uint64, error) {
+	deadline := time.Now().Add(timeout)
+	for slots.Get(slot).App != layout.StatusExited {
+		if time.Now().After(deadline) {
+			return 0, fmt.Errorf("slot %d meldt geen exit", slot)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return slots.Get(slot).ExitCode, nil
+}
+
+// fnv64 is FNV-1a (hash/fnv) — dezelfde stdlib-som als de reader-app rekent.
+func fnv64(b []byte) uint64 {
+	h := fnv.New64a()
+	h.Write(b)
+	return h.Sum64()
+}
+
+// serveHello opent de demo-poort: het bewijs dat de netstack werkt.
+func serveHello() error {
+	l, err := net.Listen("tcp4", ":80")
+	if err != nil {
+		return fmt.Errorf("listen :80: %w", err)
+	}
+	go http.Serve(l, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "HopOS leeft — bare-metal Go op %s, geen Linux aan boord.\n", board.Current().Net().IP)
+	}))
+	return nil
+}
+
+// drainLogs abonneert op het logkanaal van de actieve servicer van een slot
+// en multiplext de regels geprefixt naar de console — wat HOP's
+// LogBroadcaster (GetStdout) doet. Per Start opnieuw aanroepen: elke start
+// krijgt een verse servicer (en dus een vers kanaal).
+func drainLogs(slot int, count *int) {
+	for line := range slots.Logs(slot) {
+		fmt.Printf("[slot%d] %s\n", slot, line)
+		if count != nil {
+			*count++
+		}
+	}
+}
+
+// Per slot gelinkte varianten van dezelfde app (zie image/qemu-virt-run.sh).
+var (
+	//go:embed app1.elf
+	app1 []byte
+	//go:embed app2.elf
+	app2 []byte
+	//go:embed app3.elf
+	app3 []byte
+)
+
+func fail(what string, err error) {
+	fmt.Printf("FAIL %s: %v\nHOPOS_SLOTS_FAIL\n", what, err)
+	for {
+		time.Sleep(time.Hour)
+	}
+}
+
+func main() {
+	fmt.Println("")
+	fmt.Println("HopOS (virt): bare-metal Go op arm64 — geen Linux aan boord")
+	fmt.Printf("runtime %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
+
+	major, minor := board.Current().PSCIVersion()
+	fmt.Printf("PSCI versie %d.%d (boot-EL%d, conduit %s)\n",
+		major, minor, board.Current().BootEL(), map[bool]string{true: "SMC", false: "HVC"}[board.Current().BootEL() >= 2])
+
+	if err := hopnet.Up(); err != nil {
+		fail("net", err)
+	}
+	// De interne L2-switch (per-slot netwerk) — vóór de eerste slots.Start.
+	if err := hopswitch.Up(); err != nil {
+		fail("switch", err)
+	}
+	if err := serveHello(); err != nil {
+		fail("http", err)
+	}
+
+	// Klok via SNTP — zonder RTC begint alles op 1970; TLS eist echte tijd.
+	if err := hopnet.SyncTime("pool.ntp.org:123"); err != nil {
+		fail("sntp", err)
+	}
+	if time.Now().Year() < 2026 {
+		fail("sntp", fmt.Errorf("klok nog niet gezet: %s", time.Now()))
+	}
+	fmt.Printf("HOPOS_CLOCK_OK — klok via SNTP: %s\n", time.Now().UTC().Format(time.RFC3339))
+
+	disk, err := nvmeDemo()
+	if err != nil {
+		fail("nvme", err)
+	}
+	fmt.Println("HOPOS_NVME_OK — eigen PCIe-ECAM + NVMe-driver: blok geschreven en teruggelezen")
+
+	// De storage-laag van deze node: hopfs op de NVMe. Vanaf hier kunnen
+	// tasks volumes mounten en via de hop-ABI bij hun bestanden.
+	fsys := hopfs.New(disk)
+	slots.UseFS(fsys)
+
+	// Drie apps, drie cores — met verschillende MemoryLimits uit het
+	// "manifest": bewijs dat HOP de RAM-declaratie per start bepaalt.
+	apps := []struct {
+		slot  int
+		image []byte
+		limit uint64
+		env   map[string]string
+	}{
+		{1, app1, 96 << 20, map[string]string{"BUCKET": "hop-apps", "ROLE": "worker"}},
+		{2, app2, 64 << 20, map[string]string{"BUCKET": "hop-cache"}},
+		{3, app3, 112 << 20, map[string]string{"BUCKET": "hop-db", "ROLE": "reader"}},
+	}
+
+	logCounts := make([]int, len(apps)+2)
+	for _, a := range apps {
+		if err := slots.Start(a.slot, a.image, a.limit, a.env, nil, nil); err != nil {
+			fail("start", err)
+		}
+		go drainLogs(a.slot, &logCounts[a.slot])
+	}
+	for _, a := range apps {
+		if err := slots.WaitReady(a.slot, 5*time.Second); err != nil {
+			fail("ready", err)
+		}
+	}
+
+	// Heartbeats en ring-logs laten lopen, dan status tonen.
+	time.Sleep(900 * time.Millisecond)
+	for _, a := range apps {
+		if logCounts[a.slot] == 0 {
+			fail("ring", fmt.Errorf("geen ring-logs van slot %d", a.slot))
+		}
+	}
+	for _, a := range apps {
+		s := slots.Get(a.slot)
+		fmt.Printf("slot %d: core=on=%v app=%d hb=%d ram=%dMB (limiet was %dMB)\n",
+			a.slot, s.CoreOn, s.App, s.Heartbeat, s.RAMSize>>20, a.limit>>20)
+		if !s.CoreOn || s.App != layout.StatusReady || s.Heartbeat == 0 || s.RAMSize != a.limit {
+			fail("status", fmt.Errorf("slot %d inconsistent", a.slot))
+		}
+	}
+
+	// Kill + restart van slot 2 — de Runner.Stop/Run-cyclus.
+	fmt.Println("stop slot 2 (kill-flag)...")
+	if err := slots.Stop(2, 3*time.Second); err != nil {
+		fail("stop", err)
+	}
+	s := slots.Get(2)
+	fmt.Printf("slot 2 gestopt: core-on=%v app=%d exit=%d\n", s.CoreOn, s.App, s.ExitCode)
+
+	fmt.Println("herstart slot 2 met 32MB...")
+	if err := slots.Start(2, app2, 32<<20, map[string]string{"BUCKET": "hop-cache-v2"}, nil, nil); err != nil {
+		fail("restart", err)
+	}
+	go drainLogs(2, nil)
+	if err := slots.WaitReady(2, 5*time.Second); err != nil {
+		fail("restart-ready", err)
+	}
+	s = slots.Get(2)
+	fmt.Printf("slot 2 terug: core-on=%v app=%d ram=%dMB\n", s.CoreOn, s.App, s.RAMSize>>20)
+
+	time.Sleep(500 * time.Millisecond) // ring-logs van de herstarte app tonen
+
+	// Stage-2-isolatie bewijzen (alleen bij een EL2-boot): een app die
+	// buiten zijn kooi grijpt wordt door de MMU-grens gestopt — de
+	// EL2-vector zet de core uit zónder dat de app EXITED meldt.
+	if board.Current().BootEL() >= 2 {
+		fmt.Println("isolatietest: slot 2 herstart met PROBE=hop...")
+		if err := slots.Stop(2, 3*time.Second); err != nil {
+			fail("iso-stop", err)
+		}
+		if err := slots.Start(2, app2, 32<<20, map[string]string{"PROBE": "hop"}, nil, nil); err != nil {
+			fail("iso-start", err)
+		}
+		go drainLogs(2, nil)
+		if err := slots.WaitReady(2, 5*time.Second); err != nil {
+			fail("iso-ready", err)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for board.Current().AffinityInfo(2) != board.PowerOff {
+			if time.Now().After(deadline) {
+				fail("isolatie", fmt.Errorf("app leest HOP-geheugen zonder fault"))
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		s := slots.Get(2)
+		if s.App == layout.StatusExited {
+			fail("isolatie", fmt.Errorf("app exitte netjes (%d) — fault verwacht", s.ExitCode))
+		}
+		// Fault-rapportage: de EL2-vector hoort syndroom en adres van de
+		// gestrande greep op de ctrl-page te hebben gezet.
+		fmt.Printf("fault-rapport slot 2: vec=%d esr=%#x far=%#x\n", s.FaultVec, s.FaultESR, s.FaultFAR)
+		if s.FaultVec != layout.FaultSync || s.FaultFAR != layout.HopRAMStart {
+			fail("faultinfo", fmt.Errorf("verwacht vec=%d far=%#x", layout.FaultSync, uint64(layout.HopRAMStart)))
+		}
+		time.Sleep(200 * time.Millisecond) // laatste ring-logs tonen
+		fmt.Println("HOPOS_ISOLATIE_OK — stage-2-kooi hard bewezen: core off buiten eigen slot")
+	}
+
+	// Hard-kill (alleen onder EL2, net als de isolatietest): een app die in
+	// een lus zonder preemptiepunt hangt negeert de kill-flag; slots.Stop
+	// escaleert dan naar de SGI die via de EL2-vectoren de core uitzet.
+	if board.Current().BootEL() >= 2 {
+		fmt.Println("hard-kill: slot 2 start met HANG=spin...")
+		if err := slots.Start(2, app2, 32<<20, map[string]string{"HANG": "spin"}, nil, nil); err != nil {
+			fail("hang-start", err)
+		}
+		go drainLogs(2, nil)
+		if err := slots.WaitReady(2, 5*time.Second); err != nil {
+			fail("hang-ready", err)
+		}
+		time.Sleep(300 * time.Millisecond) // laat hem echt hangen
+		if err := slots.Stop(2, time.Second); err != nil {
+			fail("hard-kill", err)
+		}
+		s := slots.Get(2)
+		fmt.Printf("hard-kill-rapport slot 2: vec=%d (verwacht %d=SGI)\n", s.FaultVec, layout.FaultIRQ)
+		if s.App == layout.StatusExited {
+			fail("hard-kill", fmt.Errorf("app exitte netjes — hij hoorde te hangen"))
+		}
+		if s.FaultVec != layout.FaultIRQ {
+			fail("hard-kill", fmt.Errorf("vec=%d, verwacht %d (IRQ)", s.FaultVec, layout.FaultIRQ))
+		}
+		fmt.Println("HOPOS_HARDKILL_OK — hangende app via SGI van zijn core gezet")
+	}
+
+	// Volumes-demo (het storage-model, PLAN.md §3): een writer-app zet de
+	// dataset in het gemounte /data (op de NVMe), twee reader-apps met
+	// dezelfde mount lezen hem parallel en melden hun checksum als exitcode;
+	// een app zónder mount ziet /data helemaal niet, en andermans eigen root
+	// en '..'-escapes zijn dicht. Nul gedeeld geheugen — alles via HOP.
+	dataMount := map[string]string{"/data": "/data"}
+	for slot := 1; slot <= 2; slot++ {
+		if board.Current().AffinityInfo(uint64(slot)) != board.PowerOff {
+			if err := slots.Stop(slot, 3*time.Second); err != nil {
+				fail("vol-stop", err)
+			}
+		}
+	}
+
+	fmt.Println("volumes: writer (slot 1, mount /data) schrijft de dataset...")
+	if err := slots.Start(1, app1, 64<<20, map[string]string{"FSDEMO": "writer"}, dataMount, nil); err != nil {
+		fail("vol-writer", err)
+	}
+	go drainLogs(1, nil)
+	if code, err := waitExit(1, 10*time.Second); err != nil || code != 0 {
+		fail("vol-writer", fmt.Errorf("exit=%d, err=%v", code, err))
+	}
+
+	// HOP rekent zelf de som over hetzelfde bestand in de storage-laag.
+	dbBytes := make([]byte, 100<<10)
+	if n, err := fsys.ReadAt("/data/db.bin", 0, dbBytes); err != nil || n != len(dbBytes) {
+		fail("vol-check", fmt.Errorf("db.bin lezen: n=%d, %v", n, err))
+	}
+	sum := fnv64(dbBytes)
+
+	fmt.Println("volumes: readers (slot 1+2, mount /data) lezen parallel...")
+	winApps := map[int][]byte{1: app1, 2: app2}
+	for slot := 1; slot <= 2; slot++ {
+		if err := slots.Start(slot, winApps[slot], 64<<20, map[string]string{"FSDEMO": "reader"}, dataMount, nil); err != nil {
+			fail("vol-reader", err)
+		}
+		go drainLogs(slot, nil)
+	}
+	for slot := 1; slot <= 2; slot++ {
+		code, err := waitExit(slot, 15*time.Second)
+		if err != nil {
+			fail("vol-reader", err)
+		}
+		if code != sum {
+			fail("vol-reader", fmt.Errorf("slot %d checksum %#x ≠ HOP-som %#x", slot, code, sum))
+		}
+		fmt.Printf("slot %d las /data/db.bin: checksum %#x = HOP-som\n", slot, sum)
+	}
+
+	fmt.Println("volumes: app zonder mount (slot 2) hoort /data niet te zien...")
+	if err := slots.Start(2, app2, 32<<20, map[string]string{"FSDEMO": "denied"}, nil, nil); err != nil {
+		fail("vol-denied", err)
+	}
+	go drainLogs(2, nil)
+	if code, err := waitExit(2, 10*time.Second); err != nil || code != 0 {
+		fail("vol-denied", fmt.Errorf("exit=%d, err=%v", code, err))
+	}
+	fmt.Println("HOPOS_VOLUMES_OK — volumes: gedeeld pad, eigen root, mount-grens afgedwongen")
+
+	// Fetch-demo: de app vraagt HOP een URL naar /data te downloaden (de
+	// bulk gaat buiten de ring om). Doelwit: HOP's eigen hello-server —
+	// zelfstandig en deterministisch (HOP mag als vertrouwde kern elk adres
+	// bereiken; zie fetchClient in slots/rpc.go).
+	fmt.Println("fetch: slot 1 laat HOP een URL naar /data/hello.txt halen...")
+	fetchEnv := map[string]string{"FSDEMO": "fetch", "FETCH_URL": "http://" + board.Current().Net().IP + "/"}
+	if err := slots.Start(1, app1, 64<<20, fetchEnv, dataMount, nil); err != nil {
+		fail("fetch", err)
+	}
+	go drainLogs(1, nil)
+	if code, err := waitExit(1, 15*time.Second); err != nil || code != 0 {
+		fail("fetch", fmt.Errorf("exit=%d, err=%v", code, err))
+	}
+	hello := make([]byte, 256)
+	n, err := fsys.ReadAt("/data/hello.txt", 0, hello)
+	if err != nil || !bytes.Contains(hello[:n], []byte("HopOS leeft")) {
+		fail("fetch", fmt.Errorf("hello.txt onverwacht (n=%d, %v): %q", n, err, hello[:n]))
+	}
+	fmt.Println("HOPOS_FETCH_OK — fetch via HOP: download landde in het volume")
+
+	// Per-slot netwerk: elke app een eigen netstack over de frame-ringen,
+	// HOP schuift alleen frames (metal/hopswitch). Twee bewijzen: HOP → app
+	// over de interne stack (gateway-pad), en app → app zonder dat er een
+	// TCP-stack op core 0 aan te pas komt.
+	fmt.Println("netdemo: slot 1 luistert op het interne net...")
+	if err := slots.Start(1, app1, 64<<20, map[string]string{"NETDEMO": "listen"}, nil, nil); err != nil {
+		fail("net-listen", err)
+	}
+	go drainLogs(1, nil)
+	if err := slots.WaitReady(1, 5*time.Second); err != nil {
+		fail("net-listen", err)
+	}
+
+	// HOP → app: dial over de interne stack, met retries — READY betekent
+	// nog niet dat de listener al open is.
+	addr := hopswitch.SlotIP(1) + ":8080"
+	var conn net.Conn
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+		if conn, err = hopswitch.Dial(addr, time.Second); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			fail("net-hop-dial", err)
+		}
+	}
+	if _, err := conn.Write([]byte("ping van " + hopswitch.HostIP + "\n")); err != nil {
+		fail("net-hop-dial", err)
+	}
+	pong := make([]byte, 64)
+	n, err = conn.Read(pong)
+	conn.Close()
+	want := "pong ping van " + hopswitch.HostIP + "\n"
+	if err != nil || string(pong[:n]) != want {
+		fail("net-hop-dial", fmt.Errorf("antwoord %q (%v), verwacht %q", pong[:n], err, want))
+	}
+	fmt.Printf("netdemo: HOP → %s beantwoord over de interne stack\n", addr)
+
+	// App → app: slot 2 dialt slot 1; exit 0 = pong geverifieerd.
+	fmt.Println("netdemo: slot 2 dialt slot 1 — app↔app, HOP kopieert alleen frames...")
+	dialEnv := map[string]string{"NETDEMO": "dial", "NET_DIAL": addr}
+	if err := slots.Start(2, app2, 64<<20, dialEnv, nil, nil); err != nil {
+		fail("net-dial", err)
+	}
+	go drainLogs(2, nil)
+	if code, err := waitExit(2, 15*time.Second); err != nil || code != 0 {
+		fail("net-dial", fmt.Errorf("exit=%d, err=%v", code, err))
+	}
+	if err := slots.Stop(1, 3*time.Second); err != nil {
+		fail("net-stop", err)
+	}
+	fmt.Println("HOPOS_NET_SLOT_OK — per-slot netstack + L2-switch: HOP→app en app↔app bewezen")
+
+	// Poort-publicatie (stateloze DNAT): node-IP:8080 → slot 1, via de
+	// ports-tabel van Start — exact de HopRunner-route, inclusief de
+	// ER_PORT_*-conventie (app bindt het nummer dat HOP hem gaf). Het bewijs
+	// komt per definitie van búíten QEMU: nc via de hostfwd in
+	// qemu-virt-run.sh (host :18080 → 10.0.2.15:8080 → DNAT → slot 1).
+	// De listener blijft draaien; main slaapt hierna toch voor eeuwig.
+	portsEnv := map[string]string{"NETDEMO": "listen", "ER_PORT_HTTP": "8080"}
+	if err := slots.Start(1, app1, 64<<20, portsEnv, nil, map[string]int{"http": 8080}); err != nil {
+		fail("ports", err)
+	}
+	go drainLogs(1, nil)
+	if err := slots.WaitReady(1, 5*time.Second); err != nil {
+		fail("ports", err)
+	}
+	fmt.Println("HOPOS_PORTS_READY — tcp/8080 doorgerouterd naar slot 1 (test extern: nc host:18080)")
+
+	// Self-relocating spike (PLAN §4.4): één artifact voor elk slot — de
+	// stage-2-map ís de relocatie (canoniek linkadres → eigen partitie, de
+	// MMU vertaalt). app1 is gelinkt voor het slot-1-bereik en draait hier
+	// op slot 2 én 3 tegelijk; beide loggen RAM @ 0x50000000 (hun virtuele
+	// beeld) terwijl ze fysiek in eigen partities leven.
+	if board.Current().BootEL() >= 2 {
+		fmt.Println("reloc: zelfde artifact (slot-1-gelinkt) naar slot 2 en 3...")
+		if board.Current().AffinityInfo(3) != board.PowerOff {
+			if err := slots.Stop(3, 3*time.Second); err != nil {
+				fail("reloc-stop", err)
+			}
+		}
+		for slot := 2; slot <= 3; slot++ {
+			if err := slots.Start(slot, app1, 64<<20, map[string]string{"ROLE": "reloc"}, nil, nil); err != nil {
+				fail("reloc", err)
+			}
+			go drainLogs(slot, nil)
+		}
+		for slot := 2; slot <= 3; slot++ {
+			if err := slots.WaitReady(slot, 5*time.Second); err != nil {
+				fail("reloc-ready", err)
+			}
+		}
+		time.Sleep(600 * time.Millisecond) // ring-logs + heartbeats laten lopen
+		for slot := 2; slot <= 3; slot++ {
+			s := slots.Get(slot)
+			if !s.CoreOn || s.Heartbeat == 0 || s.RAMSize != 64<<20 {
+				fail("reloc-status", fmt.Errorf("slot %d: on=%v hb=%d ram=%dMB", slot, s.CoreOn, s.Heartbeat, s.RAMSize>>20))
+			}
+		}
+		fmt.Println("HOPOS_RELOC_OK — zelfde artifact draait op slot 2 én 3: stage-2 is de relocatie")
+	} else {
+		// EL1-steiger: geen stage-2, dus een slot-1-image op slot 2 hoort
+		// met een duidelijke fout te weigeren — niet stil te corrumperen.
+		if err := slots.Start(2, app1, 64<<20, nil, nil, nil); err == nil {
+			fail("reloc-el1", fmt.Errorf("slot-1-image op slot 2 hoort op EL1 te weigeren"))
+		} else {
+			fmt.Printf("reloc: EL1-guard werkt: %v\n", err)
+		}
+	}
+
+	fmt.Println("HOPOS_SLOTS_OK — slots + MemoryLimit + hop-ABI-logring werken")
+
+	for {
+		time.Sleep(time.Hour)
+	}
+}
