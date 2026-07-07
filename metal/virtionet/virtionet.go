@@ -259,8 +259,33 @@ func (n *Net) recycleRx(descIdx uint16) {
 	n.notify(rxQueue)
 }
 
-// Transmit verstuurt één ethernet-frame (synchroon: wacht op voltooiing).
+// Transmit plaatst één ethernet-frame in de TX-queue (gepipelined: posten en
+// teruggeven, niet per frame op voltooiing wachten). Zo kunnen tot qsize frames
+// tegelijk in flight zijn i.p.v. één round-trip per frame. De aanroepers zijn
+// geserialiseerd (hopswitch.uplinkTxMu), dus de tx-state heeft geen eigen lock.
+//
+// Bufferhergebruik is veilig zonder per-frame-wachten: slot = availIdx % qsize,
+// dus de buffer van dit slot werd het laatst gebruikt op availIdx-qsize. We
+// blokkeren alleen als de ring vol is (availIdx - used.idx >= qsize) — dan is
+// die oudste frame nog niet verzonden en zou overschrijven het corrumperen.
 func (n *Net) Transmit(buf []byte) error {
+	n.tx.lastUsed = dev.Read16(n.tx.used + 2) // voltooide descriptors terugnemen
+	if n.tx.availIdx-n.tx.lastUsed >= uint16(n.qsize) {
+		// Ring vol: kort wachten tot het device een descriptor vrijgeeft.
+		full := true
+		for i := 0; i < 1_000_000; i++ {
+			n.tx.lastUsed = dev.Read16(n.tx.used + 2)
+			if n.tx.availIdx-n.tx.lastUsed < uint16(n.qsize) {
+				full = false
+				break
+			}
+		}
+		if full {
+			n.TxErr++
+			return errors.New("virtionet: TX-queue vol (timeout)")
+		}
+	}
+
 	slot := int(n.tx.availIdx) % n.qsize
 	bufAddr := n.tx.bufs + uintptr(slot*bufSize)
 
@@ -279,15 +304,6 @@ func (n *Net) Transmit(buf []byte) error {
 	dev.Write16(n.tx.avail+2, n.tx.availIdx)
 	dev.MB()
 	n.notify(txQueue)
-
-	// Wachten tot het device de descriptor heeft verwerkt.
-	for i := 0; i < 1_000_000; i++ {
-		if dev.Read16(n.tx.used+2) == n.tx.availIdx {
-			n.tx.lastUsed = n.tx.availIdx
-			n.TxCount++
-			return nil
-		}
-	}
-	n.TxErr++
-	return errors.New("virtionet: TX timeout")
+	n.TxCount++
+	return nil
 }

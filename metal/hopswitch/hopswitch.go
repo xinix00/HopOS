@@ -162,6 +162,11 @@ func Detach(i int) {
 // Eén goroutine — daarmee is HOP vanzelf de enige producer per RX-ring en
 // de enige consumer per TX-ring (SPSC zonder verdere sloten).
 func loop() {
+	// Eén hergebruikte leesbuffer voor alle TX-ringen (de switch-lus is één
+	// goroutine): geen allocatie per frame op de netwerk-hot-path. forward
+	// kopieert het frame synchroon in de dst-ring(en)/uplink; alleen toHost
+	// geeft het aan een kanaal door en kopieert daarom zelf.
+	buf := make([]byte, layout.NetRingDataCap)
 	for {
 		worked := false
 		mu.Lock()
@@ -181,14 +186,14 @@ func loop() {
 				continue
 			}
 			for range maxBurst {
-				typ, p, ok := pt.tx.Read()
+				typ, n, ok := pt.tx.ReadInto(buf)
 				if !ok {
 					break
 				}
 				if typ != ring.TypeFrame {
 					continue
 				}
-				forward(i, p)
+				forward(i, buf[:n])
 				worked = true
 			}
 		}
@@ -238,8 +243,12 @@ func forward(src int, p []byte) {
 }
 
 func toHost(p []byte) {
+	// p wijst naar de hergebruikte switch-leesbuffer; kopiëren vóór het door
+	// het kanaal aan HOP's stack-goroutine te geven (die leest 'm later pas).
+	pp := make([]byte, len(p))
+	copy(pp, p)
 	select {
-	case hostIn <- p:
+	case hostIn <- pp:
 	default:
 	}
 }

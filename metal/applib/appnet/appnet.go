@@ -31,13 +31,15 @@ type nic struct {
 }
 
 // Receive levert één frame uit de RX-ring (0 = niets; go-net pollt).
-// Uitsluitend door de RX-lus van go-net aangeroepen — één consumer.
+// Uitsluitend door de RX-lus van go-net aangeroepen — één consumer. ReadInto
+// leest het frame rechtstreeks in buf: geen allocatie én geen extra kopie per
+// frame (buf is ruim MTU-groot, dus elk doorgezet Ethernet-frame past).
 func (n *nic) Receive(buf []byte) (int, error) {
-	typ, p, ok := n.rx.Read()
+	typ, m, ok := n.rx.ReadInto(buf)
 	if !ok || typ != ring.TypeFrame {
 		return 0, nil
 	}
-	return copy(buf, p), nil
+	return m, nil
 }
 
 // Transmit zet één frame in de TX-ring; vol = drop (TCP herstelt).

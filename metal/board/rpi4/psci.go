@@ -1,13 +1,12 @@
-package rpi5
+package rpi4
 
 // PSCI loopt via de gedeelde raspi-laag (TF-A/armstub op EL3, conduit SMC —
 // zie board/raspi/psci.go); dit bestand vertaalt alleen core-indexen naar
-// A76-MPIDR-targets (aff1).
+// A72-MPIDR-targets (aff0).
 //
-// LET OP (meetpunt probe): de standaard Pi-armstub zet secundaire cores
-// mogelijk al "aan" (CPU_ON → ALREADY_ON). Dan vervangen we hem met een
-// zelfgebouwde upstream-TF-A bl31.bin (armstub=bl31.bin in config.txt), die
-// cores netjes geparkeerd houdt tot CPU_ON. Zie docs/rpi5.md.
+// LET OP: anders dan op de Pi 5 is TF-A hier geen "mogelijk nodig" maar een
+// harde eis — de stock armstub8 heeft helemaal geen PSCI (spin-table) en
+// een SMC hangt dan. Zie docs/rpi4.md en sd-rpi4/LEESMIJ.txt.
 
 import "hop-os/metal/board/raspi"
 

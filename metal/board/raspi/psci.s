@@ -1,4 +1,4 @@
-// PSCI-conduits volgens SMCCC (args in R0-R3, resultaat in R0). Op de Pi 5
+// PSCI-conduits volgens SMCCC (args in R0-R3, resultaat in R0). Op de Pi's
 // zit de provider (TF-A BL31, de armstub) op EL3 onder ons → SMC #0. De
 // HVC-variant bestaat voor het (theoretische) EL1-boot-pad, zelfde patroon
 // als board/qemuvirt.

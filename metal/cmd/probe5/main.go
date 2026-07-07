@@ -20,6 +20,7 @@ import (
 	_ "unsafe"
 
 	"hop-os/metal/board"
+	"hop-os/metal/board/raspi"
 	"hop-os/metal/board/rpi5"
 	"hop-os/metal/dev"
 	"hop-os/metal/gem"
@@ -35,24 +36,12 @@ var ramStart uint = 0x00200000
 //go:linkname ramSize runtime/goos.RamSize
 var ramSize uint = 0x08000000
 
-// parkCode: per instructie via dev.Write32 op rpi5.ParkCode geplant (MMU van
+// parkCode: per instructie via dev.Write32 op raspi.ParkBase geplant (MMU van
 // de doelcore staat uit; adres onder onze RAM-declaratie → ongecachet
 // geschreven). De core meldt zich met '0'+ctx op de UART, zet een teller op
-// rpi5.ParkCount + ctx*8, en parkeert in een WFE-lus.
-var parkCode = []uint32{
-	0xD2820001, // movz x1, #0x1000
-	0xF2A0FA01, // movk x1, #0x07d0, lsl #16
-	0xF2C00021, // movk x1, #0x1, lsl #32     (x1 = UART DR)
-	0x1100C002, // add  w2, w0, #0x30         ('0' + ctx)
-	0xB9000022, // str  w2, [x1]
-	0xD2900003, // movz x3, #0x8000
-	0xF2A003E3, // movk x3, #0x1f, lsl #16    (x3 = ParkCount)
-	0x8B000C63, // add  x3, x3, x0, lsl #3    (+ ctx*8)
-	0xD2800024, // movz x4, #1
-	0xF9000064, // str  x4, [x3]
-	0xD503205F, // wfe
-	0x17FFFFFF, // b .-4 (wfe-lus)
-}
+// raspi.ParkCount + ctx*8, en parkeert in een WFE-lus (gedeelde generator:
+// board/raspi/park.go).
+var parkCode = raspi.ParkCode(rpi5.UART0Base)
 
 func main() {
 	fmt.Println("")
@@ -61,7 +50,7 @@ func main() {
 
 	b := board.Current()
 	fmt.Printf("boot-EL: %d (verwacht 2: TF-A/armstub op EL3)\n", b.BootEL())
-	fmt.Printf("MPIDR: %#x → core %d (A76: aff1-nummering)\n", rpi5.MPIDR(), b.CoreID())
+	fmt.Printf("MPIDR: %#x → core %d (A76: aff1-nummering)\n", raspi.MPIDR(), b.CoreID())
 
 	// Goroutines + heap: bewijs dat de runtime echt draait.
 	done := make(chan int, 4)
@@ -92,28 +81,28 @@ func main() {
 
 	// Park-code planten en tellers vegen.
 	for i, ins := range parkCode {
-		dev.Write32(uintptr(rpi5.ParkCode)+uintptr(i)*4, ins)
+		dev.Write32(uintptr(raspi.ParkBase)+uintptr(i)*4, ins)
 	}
-	dev.Clear(uintptr(rpi5.ParkCount), 4*8)
+	dev.Clear(uintptr(raspi.ParkCount), 4*8)
 	dev.MB()
 
 	// CPU_ON per core: het beslispunt van deze probe.
 	ok := true
 	for core := uint64(1); core <= 3; core++ {
-		ret := rpi5.CPUOn(core, uint64(rpi5.ParkCode), core)
+		ret := rpi5.CPUOn(core, uint64(raspi.ParkBase), core)
 		fmt.Printf("CPU_ON core %d: ret=%d", core, ret)
-		if ret == rpi5.PSCI_ALREADY_ON {
+		if ret == raspi.PSCI_ALREADY_ON {
 			fmt.Println(" (ALREADY_ON — standaard armstub houdt cores vast: bouw TF-A bl31.bin, zie docs/rpi5.md)")
 			ok = false
 			continue
 		}
-		if ret != rpi5.PSCI_SUCCESS {
+		if ret != raspi.PSCI_SUCCESS {
 			fmt.Println(" (FOUT)")
 			ok = false
 			continue
 		}
 		time.Sleep(200 * time.Millisecond)
-		alive := dev.Read64(uintptr(rpi5.ParkCount) + uintptr(core)*8)
+		alive := dev.Read64(uintptr(raspi.ParkCount) + uintptr(core)*8)
 		fmt.Printf(" → levensteken=%d, AFFINITY_INFO=%s\n", alive, powstr(b.AffinityInfo(core)))
 		if alive != 1 {
 			ok = false

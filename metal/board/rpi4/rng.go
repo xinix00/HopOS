@@ -1,4 +1,4 @@
-package rpi5
+package rpi4
 
 import (
 	_ "unsafe"
@@ -7,11 +7,10 @@ import (
 )
 
 // PLACEHOLDER-entropie voor de bring-up: xorshift64* geseed met de cycle
-// counter — zelfde steiger als board/qemuvirt. NIET cryptografisch: vóór er
-// TLS/keys op de Pi draaien (P2, agent) moet dit de BCM2712-hardware-RNG
-// (RNG200) of een jitter-DRBG worden. Zie docs/rpi5.md. (De Pi 4 heeft
-// hetzelfde RNG200-blok op een ander adres — die driver wordt t.z.t. één
-// gedeeld stuk in board/raspi.)
+// counter — zelfde steiger als board/rpi5 en board/qemuvirt. NIET
+// cryptografisch: vóór er TLS/keys op de Pi draaien (P2, agent) moet dit de
+// hardware-RNG worden (RNG200 op RNG200Base — zelfde blok als de Pi 5, dus
+// t.z.t. één gedeelde driver in board/raspi).
 
 var rngState uint64
 

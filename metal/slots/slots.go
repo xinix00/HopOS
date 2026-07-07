@@ -88,13 +88,17 @@ func (s *servicer) run() {
 	defer close(s.logs)
 	out := ring.Open(layout.RingOutbox(s.slot))
 	in := ring.Open(layout.RingInbox(s.slot))
+	// Eén hergebruikte leesbuffer i.p.v. een allocatie per record: de payload
+	// wordt synchroon verwerkt (log → string-kopie; RPC → handle retourneert
+	// vóór de volgende lees), dus hergebruik is veilig.
+	buf := make([]byte, layout.RingDataCap)
 	for {
 		select {
 		case <-s.stop:
 			return
 		default:
 		}
-		typ, p, ok := out.Read()
+		typ, n, ok := out.ReadInto(buf)
 		if !ok {
 			if out.Corrupt() || board.Current().AffinityInfo(uint64(s.slot)) == board.PowerOff {
 				return
@@ -106,6 +110,7 @@ func (s *servicer) run() {
 			}
 			continue
 		}
+		p := buf[:n]
 		switch typ {
 		case ring.TypeLog:
 			select {

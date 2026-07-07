@@ -5,9 +5,11 @@
 // image/mkkernel) en levert ons op EL2 af; PSCI komt van de armstub
 // (TF-A BL31) op EL3 via SMC.
 //
-// Het pakket levert de verplichte tamago runtime-hooks (RamStackOffset,
-// Hwinit1, Printk, Nanotime, InitRNG, GetRandomData; RamStart/RamSize komen
-// uit de image) en registreert zich als board.Board (board.go).
+// Alles wat de Pi 4 en Pi 5 delen (PSCI/SMCCC, MPIDR-read, timers/idle,
+// de runtime-hooks Hwinit1/Nanotime/RamStackOffset, het park/scratch-plan)
+// zit in board/raspi; hier staat alleen het BCM2712-eigene: UART-adres
+// (printk + cpuinit.s), GIC-basis, MPIDR-nummering (A76: aff1) en de RNG.
+// board.go registreert het geheel als board.Board.
 //
 // Geverifieerd vs. nog te meten op het board: zie docs/rpi5.md — de
 // probe-image (metal/cmd/probe5) rapporteert de aannames via de debug-UART.
@@ -15,13 +17,7 @@
 // Alleen voor GOOS=tamago GOARCH=arm64.
 package rpi5
 
-import (
-	_ "unsafe"
-
-	"github.com/usbarmory/tamago/arm64"
-
-	"hop-os/metal/idle"
-)
+import "hop-os/metal/board/raspi"
 
 // BCM2712-adressen (40-bit MMIO boven 4GB; tamago's identity-map dekt 512GB,
 // alles buiten de RAM-declaratie is device-nGnRnE).
@@ -40,53 +36,12 @@ const (
 	GICBase  = 0x107fff8000
 	GICDBase = GICBase + 0x1000
 	GICCBase = GICBase + 0x2000
-
-	// bootScratch: cpuinit.s schrijft er het boot-EL (vóór de drop naar
-	// EL1); BootEL() leest het. Ligt onder elke RAM-declaratie (kernel laadt
-	// op 0x200000) en buiten het TF-A/firmware-gebied (< 0x80000). De DTB
-	// wordt met device_tree_address in config.txt bewust elders gelegd.
-	bootScratch = 0x1FF000
-
-	// parkBase/parkCount: scratch voor de probe (park-code voor secundaire
-	// cores + hun levensteken-tellers). Zelfde vrije regio als bootScratch.
-	ParkCode  = 0x1F0000
-	ParkCount = 0x1F8000
 )
-
-// ARM64 core-instantie (zelfde constructie als board/qemuvirt).
-var ARM64 = &arm64.CPU{
-	TimerOffset: 1,
-}
-
-//go:linkname ramStackOffset runtime/goos.RamStackOffset
-var ramStackOffset uint = 0x100
-
-// hwinit1: post-World lagere-laag-init. CNTFRQ is door de firmware/TF-A
-// gezet; InitGenericTimers(0, 0) berekent alleen de TimerMultiplier.
-//
-//go:linkname hwinit1 runtime/goos.Hwinit1
-func hwinit1() {
-	ARM64.Init()
-	ARM64.EnableCache()
-	ARM64.InitGenericTimers(0, 0)
-	idle.Enable() // ná Init (die zet de default governor)
-}
-
-//go:linkname nanotime runtime/goos.Nanotime
-func nanotime() int64 {
-	return ARM64.GetTime()
-}
-
-// mpidr leest MPIDR_EL1 (cpu_arm64.s).
-func mpidr() uint64
-
-// MPIDR geeft het rauwe register (de probe rapporteert 'm ter verificatie).
-func MPIDR() uint64 { return mpidr() }
 
 // CoreID geeft de eigen core-index. LET OP: de Cortex-A76 nummert cores in
 // affiniteit-1 (MT-formaat: aff0 = thread, altijd 0) — anders dan QEMU's
-// A53 (aff0). Zie ook target() in psci.go.
-func CoreID() int { return int(mpidr() >> 8 & 0xFF) }
+// A53 en de Pi 4's A72 (aff0). Zie ook target() in psci.go.
+func CoreID() int { return int(raspi.MPIDR() >> 8 & 0xFF) }
 
 // target vertaalt een core-index naar het PSCI/MPIDR-target voor de A76.
 func target(core uint64) uint64 { return core << 8 }
