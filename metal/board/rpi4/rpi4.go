@@ -47,6 +47,11 @@ const (
 	// RNG200: zelfde hardware-RNG-blok als de Pi 5 (daar op 0x107d208000);
 	// de echte driver wordt t.z.t. één gedeeld stuk in board/raspi (P2).
 	RNG200Base = 0xFE104000
+
+	// DTBPtr: cpuinit.s legt hier (primary, MMU uit) de DTB-pointer die de
+	// firmware in x0 meegaf — zelfde laag-DRAM-plek als de Pi 5 (+8 na de
+	// boot-EL-scratch). board.MemTotal parset 'm met metal/fdt.
+	DTBPtr = 0x1FF008
 )
 
 // CoreID geeft de eigen core-index. De Cortex-A72 nummert cores in

@@ -36,6 +36,11 @@ const (
 	GICBase  = 0x107fff8000
 	GICDBase = GICBase + 0x1000
 	GICCBase = GICBase + 0x2000
+
+	// DTBPtr: cpuinit.s legt hier (primary, MMU uit) de DTB-pointer die de
+	// firmware in x0 meegaf — laag DRAM onder de kernel, zelfde plek als de
+	// boot-EL-scratch (+8). board.MemTotal parset 'm met metal/fdt.
+	DTBPtr = 0x1FF008
 )
 
 // CoreID geeft de eigen core-index. LET OP: de Cortex-A76 nummert cores in

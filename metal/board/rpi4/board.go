@@ -8,6 +8,7 @@ package rpi4
 import (
 	"hop-os/metal/board"
 	"hop-os/metal/board/raspi"
+	"hop-os/metal/fdt"
 )
 
 // machine is de board-implementatie voor de Raspberry Pi 4 (BCM2711).
@@ -19,6 +20,15 @@ func init() { board.Use(machine{}) }
 
 func (machine) BootEL() int { return int(BootEL()) }
 func (machine) CoreID() int { return CoreID() }
+
+// MemTotal leest de DTB (cpuinit.s → DTBPtr) en telt het /memory-node op.
+// 0 = niet gevonden. Op het board te verifiëren (zie docs/rpi4.md).
+func (machine) MemTotal() uint64 {
+	if n, ok := fdt.MemTotal(DTBPtr); ok {
+		return n
+	}
+	return 0
+}
 
 // CoreClass: de Pi 4 is homogeen (4× Cortex-A72) — net als op de Pi 5 zijn
 // alle slots big-class ("big" = de beste klasse die dít board heeft; een

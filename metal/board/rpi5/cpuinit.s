@@ -16,10 +16,12 @@
 #include "textflag.h"
 
 #define BOOT_SCRATCH 0x1FF000
+#define DTB_PTR      0x1FF008
 #define UART_DR 0x107d001000
 #define UART_FR 0x107d001018
 
 TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
+	MOVD	R0, R9		// x0 = DTB-pointer bij firmware-boot; bewaren vóór clobber
 	// Levensteken 1: 'P' (Pi) — de firmware heeft de UART al geconfigureerd.
 	MOVD	$UART_FR, R2
 wait1:
@@ -47,6 +49,10 @@ el2:
 	// boot-EL naar de scratch (MMU uit; gewone DRAM-write).
 	MOVD	$BOOT_SCRATCH, R1
 	MOVD	R0, (R1)
+	// DTB-pointer opslaan (metal/fdt → board.MemTotal). Alleen de primary komt
+	// op el2; app-cores entreren cpuinit op EL1 via de trampoline.
+	MOVD	$DTB_PTR, R1
+	MOVD	R9, (R1)
 	// HCR_EL2: RW(31)=1 — EL1 draait AArch64. Stage-2 (VM-bit) blijft uit;
 	// fase P1 hangt hier de app-core-variant met VTTBR_EL2 + VM aan.
 	MOVD	$1<<31, R0

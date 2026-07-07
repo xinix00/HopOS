@@ -89,6 +89,24 @@ func main() {
 	cfg.Node.IP = board.Current().Net().IP
 	cfg.Node.Port = 8080 // leader-API = 9080
 
+	// Geheugen dat we HOP aanbieden. HOP kent per job de MemoryLimit en
+	// overspawnt nooit (leader-capaciteit) — dus dit getal is de ceiling
+	// waartegen hij plant. We melden het gedetecteerde DRAM (uit de DTB),
+	// maar begrensd tot wat de huidige slot-layout ook echt kan waarmaken
+	// (11 × SlotStride): tot de dynamische partities er zijn (gap #1, deel 2)
+	// zou méér aanbieden HOP jobs laten plaatsen die slots.Start weigert.
+	slotCap := uint64(layout.MaxSlots) * layout.SlotStride
+	offer := slotCap
+	if total := board.Current().MemTotal(); total > 0 {
+		fmt.Printf("geheugen: %d MB DRAM gedetecteerd (DTB); slot-layout kan er nu %d MB van benutten\n",
+			total>>20, slotCap>>20)
+		if total < offer {
+			offer = total // klein board: nooit meer aanbieden dan er fysiek is
+		}
+	} else {
+		fmt.Printf("geheugen: DTB-detectie faalde — val terug op slot-layout (%d MB)\n", slotCap>>20)
+	}
+
 	fmt.Printf("HOP-agent start: node %s, agent :%d, leader :%d — HOPOS_AGENT_UP\n",
 		cfg.Node.ID, cfg.Node.Port, cfg.Node.Port+1000)
 
@@ -97,7 +115,7 @@ func main() {
 		Config:      cfg,
 		NodeID:      cfg.Node.ID,
 		Slots:       sm,
-		MemoryBytes: uint64(layout.MaxSlots) * layout.SlotStride,
+		MemoryBytes: offer,
 	})
 	fail("agent", err)
 }

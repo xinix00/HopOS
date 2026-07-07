@@ -45,6 +45,12 @@ type Board interface {
 	CoreID() int               // eigen core-index (= slotnummer voor app-cores)
 	CoreClass(core int) string // clusterklasse ("small"/"mid"/"big")
 
+	// MemTotal is de door de firmware gerapporteerde DRAM-grootte in bytes
+	// (uit de Device Tree, metal/fdt), of 0 als detectie faalde. HOP krijgt
+	// dit naast de core-count, zodat de leader tegen de echte RAM-ceiling
+	// plant — de per-job MemoryLimit is de bescherming, HOP overspawnt niet.
+	MemTotal() uint64
+
 	// Generieke-timer-offset: wall-ns bij tellerstand nul, gedeeld over alle
 	// cores (dus HOP's offset geldt 1-op-1 voor elke app).
 	TimerOffset() int64

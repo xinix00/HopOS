@@ -15,7 +15,9 @@ import (
 
 	"github.com/usbarmory/tamago/arm64"
 
+	"hop-os/metal/fdt"
 	"hop-os/metal/idle"
+	"hop-os/metal/layout"
 )
 
 // QEMU virt memory map (hw/arm/virt.c, stabiel gedocumenteerd).
@@ -44,12 +46,30 @@ var ramStackOffset uint = 0x100
 // hwinit1: post-World lagere-laag-init. QEMU zet CNTFRQ zelf, dus
 // InitGenericTimers(0, 0) berekent alleen de TimerMultiplier.
 //
+// memTotal is het bij boot gedetecteerde DRAM (0 = onbekend). Vroeg parsen
+// (hier, niet lui bij MemTotal): QEMU legt de DTB in laag RAM dat de runtime
+// later hergebruikt, dus tegen main-tijd is hij weg.
+var memTotal uint64
+
 //go:linkname hwinit1 runtime/goos.Hwinit1
 func hwinit1() {
 	ARM64.Init()
 	ARM64.EnableCache()
 	ARM64.InitGenericTimers(0, 0)
 	idle.Enable() // ná Init (die zet de default governor)
+
+	// Alleen de HOP-core (0) kreeg de DTB-pointer in x0 en heeft de scratch
+	// leesbaar; app-cores (stage-2) mogen 0xB000_0008 niet aanraken.
+	// De firmware geeft de DTB-pointer in x0 (cpuinit → layout.DTBPtr). Werkt
+	// waar de firmware die conventie honoreert (TF-A op O6N, en te verifiëren
+	// op de Pi); QEMU -kernel <ELF> zet x0 níét → detectie faalt en de
+	// aanroeper valt terug op het statische slot-plan. Alleen core 0 heeft de
+	// scratch leesbaar (app-cores: stage-2).
+	if CoreID() == 0 {
+		if n, ok := fdt.MemTotal(layout.DTBPtr); ok {
+			memTotal = n
+		}
+	}
 }
 
 //go:linkname nanotime runtime/goos.Nanotime

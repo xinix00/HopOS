@@ -8,6 +8,7 @@ package rpi5
 import (
 	"hop-os/metal/board"
 	"hop-os/metal/board/raspi"
+	"hop-os/metal/fdt"
 )
 
 // machine is de board-implementatie voor de Raspberry Pi 5 (BCM2712).
@@ -19,6 +20,17 @@ func init() { board.Use(machine{}) }
 
 func (machine) BootEL() int { return int(BootEL()) }
 func (machine) CoreID() int { return CoreID() }
+
+// MemTotal leest de DTB die de firmware in x0 meegaf (cpuinit.s → DTBPtr) en
+// telt het /memory-node op. 0 = niet gevonden. LET OP: op het board te
+// verifiëren (levert de Pi-firmware de DTB-pointer in x0 aan een raw kernel?
+// zie docs/rpi5.md); de VideoCore-mailbox is de tweede bron (P2b).
+func (machine) MemTotal() uint64 {
+	if n, ok := fdt.MemTotal(DTBPtr); ok {
+		return n
+	}
+	return 0
+}
 
 // CoreClass: de Pi 5 is homogeen (4× Cortex-A76) — per PLAN.md fase P zijn
 // alle slots big-class.

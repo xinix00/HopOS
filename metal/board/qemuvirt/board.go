@@ -18,6 +18,10 @@ func init() { board.Use(machine{}) }
 func (machine) BootEL() int { return int(BootEL()) }
 func (machine) CoreID() int { return CoreID() }
 
+// MemTotal geeft het bij boot (hwinit1) gedetecteerde DRAM; 0 = niet
+// gevonden → de aanroeper valt terug op het statische slot-plan.
+func (machine) MemTotal() uint64 { return memTotal }
+
 // CoreClass geeft de cluster-klasse van core i op de O6N-indeling (1-3 small,
 // 4-7 mid, 8-11 big). In QEMU zijn de cores homogeen; dit is de beoogde mapping
 // die op echt ijzer via MPIDR/DT wordt bevestigd. Board-kennis, geen slot-kennis.

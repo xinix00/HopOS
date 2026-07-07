@@ -21,8 +21,10 @@
 #include "textflag.h"
 
 #define BOOT_SCRATCH 0xB0000000
+#define DTB_PTR      0xB0000008
 
 TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
+	MOVD	R0, R9		// x0 = DTB-pointer bij firmware-boot; bewaren vóór clobber
 	MRS	CurrentEL, R0
 	LSR	$2, R0, R0
 	AND	$0b11, R0, R0
@@ -39,6 +41,11 @@ el2:
 	// boot-EL naar de scratch (alleen HOP-core komt hier; MMU uit).
 	MOVD	$BOOT_SCRATCH, R1
 	MOVD	R0, (R1)
+	// DTB-pointer opslaan zodat de runtime later het /memory-node kan lezen
+	// (metal/fdt → board.MemTotal). Alleen de primary komt op el2; app-cores
+	// entreren cpuinit op EL1 via de trampoline, dus geen stage-2-fault.
+	MOVD	$DTB_PTR, R1
+	MOVD	R9, (R1)
 	// HCR_EL2: RW(31)=1 — EL1 draait AArch64. Stage-2 (VM-bit) blijft uit;
 	// de app-core-variant zet hier straks VTTBR_EL2 + VM.
 	MOVD	$1<<31, R0

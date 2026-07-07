@@ -43,6 +43,10 @@ const (
 	CtrlBase    = 0xB0000000
 	CtrlStride  = 0x1000
 	BootScratch = CtrlBase
+	// DTBPtr: cpuinit legt hier (primary, MMU uit) de DTB-pointer neer die de
+	// firmware in x0 meegaf; board.MemTotal parset 'm met metal/fdt. Zelfde
+	// device-page als BootScratch (offset +8), dus coherent zonder cache-werk.
+	DTBPtr = BootScratch + 8
 
 	// hop-ABI ringen per slot: outbox (app → HOP: logs én RPC-requests) en
 	// inbox (HOP → app: RPC-responses). Later desgewenst een sneller bulkpad
