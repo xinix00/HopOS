@@ -32,7 +32,6 @@ const (
 
 	// hop-ABI recordtypes.
 	TypeLog     = 1 // app → HOP (outbox): logregel
-	TypeExitAck = 2 // gereserveerd
 	TypeRPCReq  = 3 // app → HOP (outbox): hop-ABI-request (zie metal/hopabi)
 	TypeRPCResp = 4 // HOP → app (inbox): hop-ABI-response
 	TypeFrame   = 5 // frame-ringen: één rauw Ethernet-frame (metal/hopswitch)
@@ -100,54 +99,16 @@ func (r *Ring) Write(typ uint32, p []byte) bool {
 	return true
 }
 
-// Read haalt het volgende record op; ok=false als de ring leeg is. Alleen
-// door de consumer aan te roepen. PAD-records worden intern overgeslagen.
+// ReadInto haalt het volgende record op en kopieert de payload in buf (door
+// de consument hergebruikt — geen allocatie per record). n is de
+// payloadlengte; ok=false als de ring leeg is. Alleen door de consumer aan
+// te roepen; PAD-records worden intern overgeslagen.
 //
-// De ringinhoud komt van de producer (de app) en is onvertrouwd: een header
-// die niet binnen de gepubliceerde bytes of de bufferrand past markeert de
-// ring als corrupt en Read levert definitief niets meer (zie Corrupt) — een
-// app mag HOP nooit tot een reuzenallocatie kunnen verleiden.
-func (r *Ring) Read() (typ uint32, p []byte, ok bool) {
-	if r.corrupt {
-		return 0, nil, false
-	}
-	for {
-		head, tail := r.head(), r.tail()
-		if head == tail {
-			return 0, nil, false
-		}
-		dev.MB() // index gezien → payload zichtbaar
-
-		addr := r.base + dataOff + uintptr(tail%r.size)
-		hdr := dev.Read64(addr)
-		length, rtyp := uint32(hdr), uint32(hdr>>32)
-		need := recHdr + align8(uint64(length))
-
-		if need > head-tail || need > r.size-tail%r.size {
-			r.corrupt = true
-			return 0, nil, false
-		}
-
-		if rtyp == TypePad {
-			dev.MB() // header gelezen vóór de ruimte vrijgeven
-			r.setTail(tail + need)
-			continue
-		}
-		p = make([]byte, length)
-		dev.CopyOut(p, addr+recHdr)
-		dev.MB() // payload gekopieerd vóór de ruimte vrijgeven
-		r.setTail(tail + need)
-		return rtyp, p, true
-	}
-}
-
-// ReadInto is als Read maar kopieert de payload in buf (door de consument
-// hergebruikt) i.p.v. per record te alloceren — voor hot paths zoals de
-// frame-switch en de servicer-lus. n is de payloadlengte; ok=false als de ring
-// leeg is. buf moet minstens één maximaal record (r.size, ruim genoeg) kunnen
-// bevatten; een payload die niet past telt als een onmogelijke header en
-// markeert de ring corrupt (nooit een reuzenkopie forceren). PAD-records worden
-// intern overgeslagen.
+// De ringinhoud komt van de producer en is onvertrouwd: een header die niet
+// binnen de gepubliceerde bytes, de bufferrand óf buf past markeert de ring
+// als corrupt en ReadInto levert definitief niets meer (zie Corrupt) — een
+// producer mag de consument nooit tot een reuzenkopie kunnen verleiden. buf
+// moet minstens één maximaal record kunnen bevatten.
 func (r *Ring) ReadInto(buf []byte) (typ uint32, n int, ok bool) {
 	if r.corrupt {
 		return 0, 0, false

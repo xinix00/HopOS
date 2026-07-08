@@ -2,8 +2,8 @@
 // vast (fase 1). Eén bron van waarheid voor alle images: de HOP-kern
 // (core 0) en de app-slots. QEMU: -m 2G → RAM 0x40000000..0xBFFFFFFF.
 //
-// De linkadressen (TEXT_START = slotbase + 0x10000) staan in
-// image/qemu-virt-run.sh en moeten met deze constanten in sync blijven.
+// Het linkadres (TEXT_START = SlotBase(1) + 0x10000) staat in
+// image/qemu-run.sh en moet met deze constanten in sync blijven.
 //
 //	0x40000000  HOP-kern (core 0), 256MB
 //	0x50000000  slot 1 (core 1), 128MB
@@ -50,8 +50,8 @@ const (
 	// device gemapt → coherent zonder cache-onderhoud. Uitsluitend
 	// gealigneerde 64-bit loads/stores gebruiken (zie metal/dev).
 	// Pagina 0 (= CtrlBase) is de boot-scratch: cpuinit (board/qemuvirt)
-	// schrijft er vóór de EL-drop het boot-EL; de PSCI-conduitkeuze
-	// (EL2-boot ⇒ SMC, EL1-boot ⇒ HVC) leest 'm. Slots gebruiken 1..MaxSlots.
+	// schrijft er vóór de EL-drop het boot-EL; de EL2-eis van de mains
+	// (BootEL ≥ 2, anders weigeren) leest 'm. Slots gebruiken 1..MaxSlots.
 	CtrlBase    = 0xB0000000
 	CtrlStride  = 0x1000
 	BootScratch = CtrlBase
@@ -107,11 +107,6 @@ func TopAddr() uint64 { return NetRingBase + uint64(MaxSlots)*NetRingStride }
 // Minder dan dit ⇒ slots/ringen vallen buiten het fysieke RAM: HopOS moet
 // dan weigeren i.p.v. fantoom-geheugen uit te delen.
 func RequiredRAM() uint64 { return TopAddr() - HopRAMStart }
-
-// SlotCapacity is het totale app-geheugen dat de slots samen kunnen dragen
-// (de som van de partities). Dit is wat HOP als plaatsings-ceiling krijgt —
-// HOP kent per job de MemoryLimit en overspawnt daar nooit overheen.
-func SlotCapacity() uint64 { return uint64(MaxSlots) * SlotStride }
 
 // Stage2Table geeft de basis van het stage-2-tabelblok van slot i.
 func Stage2Table(i int) uintptr {

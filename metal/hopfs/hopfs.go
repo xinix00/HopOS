@@ -262,7 +262,6 @@ func (f *FS) WriteAt(path string, off uint64, p []byte) error {
 	}
 	name := segs[len(segs)-1]
 	n, ok := parent.children[name]
-	created := false
 	if !ok {
 		if f.nodes >= maxNodes {
 			return fmt.Errorf("hopfs: te veel bestanden/dirs (max %d)", maxNodes)
@@ -270,32 +269,15 @@ func (f *FS) WriteAt(path string, off uint64, p []byte) error {
 		n = &node{}
 		parent.children[name] = n
 		f.nodes++
-		created = true
 	} else if n.dir {
 		return fmt.Errorf("hopfs: %q is een directory", path)
 	}
 
-	// Bij een fout (schijf vol, disk-I/O) de zojuist gealloceerde blokken én
-	// een vers aangemaakte node terugdraaien — anders lekt een mislukte write
-	// blijvend blokken en metadata.
-	orig := len(n.blocks)
-	// Terugdraaien bij een fout halverwege: nieuw gealloceerde blokken vrijgeven
-	// en ingevulde gaten (index < orig) terugzetten. De payload kan een gat
-	// vóór orig echt maken, dus n.blocks[orig:] afkappen volstaat niet.
-	var newlyAlloc []uint32
-	var filled []int
-	fail := func(e error) error {
-		f.free = append(f.free, newlyAlloc...)
-		for _, idx := range filled {
-			n.blocks[idx] = holeBlock
-		}
-		n.blocks = n.blocks[:orig]
-		if created {
-			delete(parent.children, name)
-			f.nodes--
-		}
-		return e
-	}
+	// Foutsemantiek is POSIX-achtig: een write die halverwege faalt (schijf
+	// vol, disk-I/O) laat een deels geschreven bestand achter. Onderweg
+	// gealloceerde blokken blijven gewoon van het bestand (Remove geeft ze
+	// terug, en bij boot is alles sowieso leeg) — geen lek, dus ook geen
+	// terugdraai-administratie. Alleen size wordt pas bij succes bijgewerkt.
 
 	// Groei tot het benodigde aantal blokken met GATEN: geen alloc, geen
 	// disk-write. Een gat leest als nul en wordt pas een echt blok als de
@@ -320,11 +302,7 @@ func (f *FS) WriteAt(path string, off uint64, p []byte) error {
 		if fresh {
 			b, err := f.alloc()
 			if err != nil {
-				return fail(err)
-			}
-			newlyAlloc = append(newlyAlloc, b)
-			if int(bi) < orig {
-				filled = append(filled, int(bi))
+				return err
 			}
 			n.blocks[bi] = b
 		}
@@ -333,12 +311,12 @@ func (f *FS) WriteAt(path string, off uint64, p []byte) error {
 			if fresh {
 				buf = [BlockSize]byte{} // vers gat leest als nul → geen disk-read
 			} else if err := f.disk.Read(lba, buf[:]); err != nil {
-				return fail(err)
+				return err
 			}
 		}
 		copy(buf[bo:bo+chunk], p[done:done+chunk])
 		if err := f.disk.Write(lba, buf[:]); err != nil {
-			return fail(err)
+			return err
 		}
 		done += chunk
 	}

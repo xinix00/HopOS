@@ -39,15 +39,18 @@ const (
 	// boot-EL-scratch (+8). board.MemTotal parset 'm met metal/fdt.
 	DTBPtr = 0x1FF008
 
-	// VideoCore-mailbox (property-interface, metal/vcmbox): framebuffer,
-	// geheugensplitsing, later klok/temperatuur (P2b). Uit de DTB:
-	// soc@107c000000/mailbox@7c013880, ranges 0x0 → 0x10_00000000.
-	MboxBase = 0x107c013880
+	// AVS-monitor (thermiek): brcm,bcm2711-thermal in de BCM2712-DTB —
+	// temperatuur = slope×raw + offset uit de thermal-zone (zie probe5).
+	AVSMonBase = 0x107d542000
+
+	// Externe PCIe-controller (pciex1, de FFC waar NVMe/AI-HAT's wonen;
+	// brcm,bcm2712-pcie). RP1 hangt op z'n broer pcie@1000120000.
+	PCIeX1Base = 0x1000110000
 )
 
 // CoreID geeft de eigen core-index. LET OP: de Cortex-A76 nummert cores in
 // affiniteit-1 (MT-formaat: aff0 = thread, altijd 0) — anders dan QEMU's
-// A53 en de Pi 4's A72 (aff0). Zie ook target() in psci.go.
+// A53 en de Pi 4's A72 (aff0). Zie ook target() hieronder (PSCI, board.go).
 func CoreID() int { return int(raspi.MPIDR() >> 8 & 0xFF) }
 
 // target vertaalt een core-index naar het PSCI/MPIDR-target voor de A76.

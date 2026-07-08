@@ -1,12 +1,13 @@
 // Package psci bevat de gedeelde PSCI/SMCCC-primitieven (ARM DEN 0022): de
-// functie-ID's, de return-codes en de twee conduit-stubs (HVC/SMC #0). Eén
-// bron van waarheid voor die waarden — een verkeerde functie-ID of return-code
-// hoort maar op één plek te leven, niet per board hergedefinieerd.
+// functie-ID's, de return-codes en de conduit-stub (SMC #0). Eén bron van
+// waarheid voor die waarden — een verkeerde functie-ID of return-code hoort
+// maar op één plek te leven, niet per board hergedefinieerd.
 //
-// Wat NIET hier woont: de conduitkeuze (HVC vs SMC) en de core-index→MPIDR-
-// vertaling zijn boardspecifiek (het boot-EL staat op een board-eigen scratch,
-// de MPIDR-nummering verschilt per cluster) — die blijven in het board-pakket,
-// dat HVC/SMC hieruit aanroept.
+// De conduit is altijd SMC: HopOS eist een EL2-boot (stage-2-isolatie is een
+// invariant, geen optie), dus de PSCI-provider zit per definitie ónder ons
+// (TF-A op Pi/O6N, QEMU met virtualization=on). Wat NIET hier woont: de
+// core-index→MPIDR-vertaling is boardspecifiek (de nummering verschilt per
+// cluster) — die blijft in het board-pakket.
 //
 // Alleen voor GOOS=tamago GOARCH=arm64.
 package psci
@@ -35,8 +36,6 @@ const (
 	ALREADY_ON     = -4
 )
 
-// HVC/SMC doen een HVC/SMC #0 met vier argumenten (SMCCC: args in R0-R3,
-// resultaat in R0). Zie psci.s. Het board kiest welke conduit past bij waar de
-// firmware ons afleverde (HVC = hypervisor boven ons, SMC = firmware onder ons).
-func HVC(fn, a1, a2, a3 uint64) uint64
+// SMC doet een SMC #0 met vier argumenten (SMCCC: args in R0-R3, resultaat
+// in R0). Zie psci.s.
 func SMC(fn, a1, a2, a3 uint64) uint64

@@ -1,5 +1,6 @@
-// Package qemuvirt biedt HopOS-support voor de QEMU `-M virt` arm64-machine:
-// PL011-console, generic timers, en PSCI (HVC-conduit, door QEMU geleverd).
+// Package qemuvirt biedt HopOS-support voor de QEMU `-M virt` arm64-machine
+// (virtualization=on — HopOS eist EL2): PL011-console, generic timers, en
+// PSCI (SMC-conduit, door QEMU geleverd).
 //
 // Dit is ons multikernel-referentiedoel in fase 1: in tegenstelling tot QEMU's
 // imx8mp-evk (directe -kernel boot, geen TF-A) levert virt gegarandeerd PSCI,

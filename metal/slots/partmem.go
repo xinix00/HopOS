@@ -1,9 +1,9 @@
 package slots
 
-// Partitie-allocator: op een EL2-boot krijgt elke slot precies de MemoryLimit
-// die HOP voor die job vroeg — de een 128MB, de ander 640MB — uit één pool,
-// i.p.v. een vaste gelijke slab per core. Dat is "software in de vorm van de
-// machine": HOP zegt hoeveel een app alloceert, HopOS deelt exact dat uit en
+// Partitie-allocator: elke slot krijgt precies de MemoryLimit die HOP voor
+// die job vroeg — de een 128MB, de ander 640MB — uit één pool, i.p.v. een
+// vaste gelijke slab per core. Dat is "software in de vorm van de machine":
+// HOP zegt hoeveel een app alloceert, HopOS deelt exact dat uit en
 // overspawnt nooit (de pool is de harde grens).
 //
 // De pool is het slot-venster [SlotsBase, CtrlBase) — fysiek RAM dat de
@@ -11,9 +11,6 @@ package slots
 // self-relocating map ontkoppelt IPA van PA, dus variabele fysieke partities
 // passen er zó in). First-fit met coalescing bij vrijgave houdt fragmentatie
 // klein; 2MB-uitlijning omdat de stage-2-partitieblokken 2MB zijn.
-//
-// Alleen EL2 gebruikt dit; de EL1-steiger heeft geen stage-2 en houdt de
-// vaste per-slot slabs (linkadres = fysiek adres).
 
 import (
 	"fmt"
@@ -60,7 +57,7 @@ func partAlloc(i int, size uint64) (uint64, error) {
 }
 
 // partRelease geeft de reservering van slot i terug aan de pool (coalescing).
-// No-op als slot i niets gealloceerd had (EL1, of al vrij).
+// No-op als slot i niets gealloceerd had (al vrij).
 func partRelease(i int) {
 	partMu.Lock()
 	defer partMu.Unlock()
@@ -99,7 +96,7 @@ func releaseLocked(i int) {
 // die HOP krijgt. HOP overspawnt daar (per-job MemoryLimit) nooit overheen.
 func PoolBytes() uint64 { return layout.CtrlBase - layout.SlotsBase }
 
-// maxLimitFor begrenst een EL2-partitie: hij moet binnen één 1GB-blok vanaf
+// maxLimitFor begrenst een partitie: hij moet binnen één 1GB-blok vanaf
 // linkBase blijven (de stage-2-kooi mapt de partitie met één L2-tabel) én
 // onder CtrlBase (waar het IPA-beeld van de app z'n control-page verwacht).
 // Een grotere app vergt een multi-GB stage-2 (later) of een groter venster

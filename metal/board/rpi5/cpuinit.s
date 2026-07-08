@@ -56,12 +56,10 @@ ledoff:
 	SUBS	$1, R4
 	BNE	blink
 
-	// Levensteken 1: 'P' (Pi) — ALLEEN mét debug-sessie. Zonder sessie is de
-	// PL011 mogelijk ongeklokt en kan zelfs de FR-read de bus laten stallen;
-	// daar helpt geen poll-limiet tegen (de eerste read komt nooit terug).
-	// Weghalen zodra de Debug Probe er is: verwijder de B hieronder.
-	B	uartklaar
-
+	// Levensteken 1: 'P' (Pi). Begrensd gepolld: een dode FIFO-vol-vlag kost
+	// hooguit de poll, nooit de boot. (Blijft de boot ná de LED-knippers
+	// stil hangen zónder debug-sessie, dan stalt de FR-read de bus — meet
+	// dat mét de Debug Probe aangesloten, zie docs/rpi5.md.)
 	MOVD	$UART_FR, R2
 	MOVD	$100000, R4
 wait1:
@@ -88,7 +86,7 @@ uartklaar:
 	BEQ	el2
 	CMP	$3, R0
 	BEQ	el3
-	// EL1-boot (onverwacht op de Pi): scratch blijft 0 ⇒ conduit HVC.
+	// EL1-boot (onverwacht op de Pi): scratch blijft 0 ⇒ de main weigert.
 	B	·cpuinitEL1(SB)
 
 el2:

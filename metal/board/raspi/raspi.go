@@ -38,13 +38,6 @@ const (
 	// de drop naar EL1); BootEL() leest het. Moet gelijk zijn aan de
 	// BOOT_SCRATCH-#define in de cpuinit.s van beide boards.
 	BootScratch = 0x1FF000
-
-	// MboxScratch: property-buffer voor de VideoCore-mailbox (metal/vcmbox).
-	// Onder de RAM-declaratie → voor ons device-gemapt (ongecachet), voor de
-	// VC gewone DRAM; < 4GB en 16-byte-gealigneerd zoals het 32-bit
-	// mailbox-register eist. Vrij gat tussen ParkCount (32 bytes tellers)
-	// en BootScratch.
-	MboxScratch = 0x1F9000
 )
 
 // ARM64 core-instantie (zelfde constructie als board/qemuvirt).
@@ -89,3 +82,10 @@ func CNTFRQ() uint64 { return cntfrq() }
 // CNTPCT geeft de rauwe fysieke counter. Kan trappen als EL1PCTEN uit staat
 // (zie cpu_arm64.s) — kondig de read aan vóór je hem doet.
 func CNTPCT() uint64 { return cntpct() }
+
+// spin (cpu_arm64.s) draait n afhankelijke SUBS-iteraties.
+func spin(n uint64)
+
+// Spin brandt n CPU-cycli (±dual-issue-marge) — met CNTPCT eromheen is dat
+// de kloksnelheidsmeting van de probes.
+func Spin(n uint64) { spin(n) }

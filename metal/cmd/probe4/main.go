@@ -88,8 +88,7 @@ func main() {
 	fmt.Println("PSCI: versie opvragen via SMC (vereist TF-A bl31.bin als armstub —")
 	fmt.Println("      blijft het hier stil: stock armstub8 zonder PSCI, zie LEESMIJ)...")
 	major, minor := b.PSCIVersion()
-	fmt.Printf("PSCI versie %d.%d (conduit %s)\n",
-		major, minor, map[bool]string{true: "SMC", false: "HVC"}[b.BootEL() >= 2])
+	fmt.Printf("PSCI versie %d.%d (conduit SMC)\n", major, minor)
 
 	for core := uint64(1); core <= 3; core++ {
 		fmt.Printf("AFFINITY_INFO core %d: %s\n", core, b.AffinityInfo(core))
@@ -105,7 +104,7 @@ func main() {
 	// CPU_ON per core: het beslispunt van deze probe.
 	ok := true
 	for core := uint64(1); core <= 3; core++ {
-		ret := rpi4.CPUOn(core, uint64(raspi.ParkBase), core)
+		ret := b.CPUOn(core, uint64(raspi.ParkBase), core)
 		fmt.Printf("CPU_ON core %d: ret=%d", core, ret)
 		if ret == psci.ALREADY_ON {
 			fmt.Println(" (ALREADY_ON — parkeert de armstub niet via PSCI? TF-A correct geladen? zie docs/rpi4.md)")

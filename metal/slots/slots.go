@@ -194,8 +194,7 @@ func checkSlot(i int) error {
 // RAM-declaratie naar memLimit en wekt de core. De image is een gewone
 // tamago-ELF, canoniek gelinkt (TEXT_START = SlotBase(1)+0x10000): de
 // stage-2-map legt het canonieke bereik op de partitie van dít slot, dus
-// één artifact draait op elk slot. Op de EL1-steiger (geen stage-2) moet
-// het linkadres wél bij het slot horen (per-slot varianten, als vanouds).
+// één artifact draait op elk slot.
 //
 // mounts is de volume-tabel van de task (shared path → local path, de vorm
 // van HOP's Job.Volumes): de task ziet zijn eigen lege root plus uitsluitend
@@ -238,44 +237,32 @@ func Start(i int, image []byte, memLimit uint64, env map[string]string, mounts m
 	// Het linkadres van de image bepaalt zijn IPA-bereik; de stage-2-map
 	// legt dat op de fysieke partitie van dít slot. Images zijn canoniek
 	// gelinkt (slot-1-bereik) en draaien zo op elk slot — de MMU is de
-	// relocatie. Alleen de EL1-steiger (geen stage-2) eist linkadres = slot.
+	// relocatie.
 	if f.Entry < layout.SlotsBase || f.Entry >= layout.SlotsBase+layout.MaxSlots*uint64(layout.SlotStride) {
 		return fmt.Errorf("entry %#x valt buiten elk slotbereik", f.Entry)
 	}
 	linked := int((f.Entry-layout.SlotsBase)/layout.SlotStride) + 1
 	linkBase := layout.SlotBase(linked)
 
-	// base/size = de fysieke partitie. Op EL2 dynamisch uit de pool
-	// gealloceerd op precies memLimit (de een 128MB, de ander 640MB); op de
-	// EL1-steiger (geen stage-2) is het de vaste slab op het linkadres.
-	// started markeert een geslaagde start: valt Start eerder uit, dan geeft
-	// de defer de gealloceerde partitie terug.
-	var started bool
-	var base, size uint64
-	if board.Current().BootEL() >= 2 {
-		if max := maxLimitFor(linkBase); memLimit > max {
-			return fmt.Errorf("memLimit %#x > %#x (één GB vanaf linkadres %#x; groter vergt vensteruitbreiding)", memLimit, max, linkBase)
-		}
-		pbase, err := partAlloc(i, memLimit)
-		if err != nil {
-			return err
-		}
-		base, size = pbase, align2M(memLimit)
-		// Vanaf hier faalt niets zonder de partitie terug te geven.
-		defer func() {
-			if !started {
-				partRelease(i)
-			}
-		}()
-	} else {
-		if linked != i {
-			return fmt.Errorf("image gelinkt voor slot %d op slot %d vergt stage-2 (EL2-boot)", linked, i)
-		}
-		base, size = layout.SlotBase(i), uint64(layout.SlotStride)
-		if memLimit > size {
-			return fmt.Errorf("memLimit %#x > slab %#x (EL1-steiger heeft vaste slots)", memLimit, size)
-		}
+	// base/size = de fysieke partitie: dynamisch uit de pool gealloceerd op
+	// precies memLimit (de een 128MB, de ander 640MB). started markeert een
+	// geslaagde start: valt Start eerder uit, dan geeft de defer de
+	// gealloceerde partitie terug.
+	if max := maxLimitFor(linkBase); memLimit > max {
+		return fmt.Errorf("memLimit %#x > %#x (één GB vanaf linkadres %#x; groter vergt vensteruitbreiding)", memLimit, max, linkBase)
 	}
+	base, err := partAlloc(i, memLimit)
+	if err != nil {
+		return err
+	}
+	size := align2M(memLimit)
+	var started bool
+	// Vanaf hier faalt niets zonder de partitie terug te geven.
+	defer func() {
+		if !started {
+			partRelease(i)
+		}
+	}()
 	delta := base - linkBase // PA = linkadres + delta (identiek slot: 0)
 
 	// Segmenten naar de partitie. Headervelden zijn input — overflow-veilig
@@ -372,29 +359,23 @@ func Start(i int, image []byte, memLimit uint64, env map[string]string, mounts m
 	ring.Init(layout.NetRingTX(i), layout.NetRingDataCap)
 	ring.Init(layout.NetRingRX(i), layout.NetRingDataCap)
 
-	// Bij een EL2-boot krijgt de core stage-2-isolatie: CPU_ON wijst naar
-	// HOP's EL2-trampoline (ctx = slot) die de hier gebouwde tabel activeert
-	// en pas dan naar de app-entry dropt (een canoniek IPA — de stage-2
-	// vertaalt hem naar deze partitie). De app-image draait nooit op EL2.
-	// Bij een EL1-boot (QEMU zonder virtualization=on) is er geen EL2 en
-	// dus geen hardware-kooi — het directe pad blijft dan bestaan.
-	entry, ctx := f.Entry, uint64(0)
-	if board.Current().BootEL() >= 2 {
-		vectorsOnce.Do(stage2.InitVectors)
-		l1, err := stage2.Build(i, linkBase, base, size)
-		if err != nil {
-			return fmt.Errorf("stage-2 slot %d: %w", i, err)
-		}
-		ctrlWrite(i, layout.CtrlEntry, f.Entry)
-		ctrlWrite(i, layout.CtrlS2Table, l1)
-		entry, ctx = board.Current().S2TrampPC(), uint64(i)
-		// Een pending kill-SGI van een eerdere hard-kill zou de verse app
-		// direct zijn core kosten.
-		board.Current().SGIClearPending(uint64(i))
+	// De core krijgt stage-2-isolatie: CPU_ON wijst naar HOP's EL2-trampoline
+	// (ctx = slot) die de hier gebouwde tabel activeert en pas dan naar de
+	// app-entry dropt (een canoniek IPA — de stage-2 vertaalt hem naar deze
+	// partitie). De app-image draait nooit op EL2.
+	vectorsOnce.Do(stage2.InitVectors)
+	l1, err := stage2.Build(i, linkBase, base, size)
+	if err != nil {
+		return fmt.Errorf("stage-2 slot %d: %w", i, err)
 	}
+	ctrlWrite(i, layout.CtrlEntry, f.Entry)
+	ctrlWrite(i, layout.CtrlS2Table, l1)
+	// Een pending kill-SGI van een eerdere hard-kill zou de verse app
+	// direct zijn core kosten.
+	board.Current().SGIClearPending(uint64(i))
 	ctrlWrite(i, layout.CtrlStatus, layout.StatusBooting)
 
-	if ret := board.Current().CPUOn(uint64(i), entry, ctx); ret != board.PSCISuccess {
+	if ret := board.Current().CPUOn(uint64(i), board.Current().S2TrampPC(), uint64(i)); ret != board.PSCISuccess {
 		return fmt.Errorf("PSCI CPU_ON slot %d: %d", i, ret)
 	}
 
@@ -413,9 +394,9 @@ var vectorsOnce sync.Once
 
 // Stop vraagt de app in slot i zichzelf te beëindigen (kill-flag; de app-lib
 // zet de core uit via CPU_OFF) en wacht tot de core uit is. Negeert de app de
-// kill-flag (hang), dan volgt onder een EL2-boot de hard-kill: een SGI die
-// naar de EL2-vectoren trapt (HCR.IMO, door de app niet te maskeren) en de
-// core via CPU_OFF uitzet — Status meldt dan layout.FaultIRQ.
+// kill-flag (hang), dan volgt de hard-kill: een SGI die naar de EL2-vectoren
+// trapt (HCR.IMO, door de app niet te maskeren) en de core via CPU_OFF
+// uitzet — Status meldt dan layout.FaultIRQ.
 func Stop(i int, timeout time.Duration) error {
 	if err := checkSlot(i); err != nil {
 		return err
@@ -424,9 +405,6 @@ func Stop(i int, timeout time.Duration) error {
 	if waitOff(i, timeout) {
 		releaseSlot(i)
 		return nil
-	}
-	if board.Current().BootEL() < 2 {
-		return fmt.Errorf("slot %d negeert kill (hang?) — hard-kill vergt een EL2-boot", i)
 	}
 	board.Current().SGIKill(uint64(i))
 	if waitOff(i, time.Second) {

@@ -30,11 +30,12 @@ type App struct {
 	RAMStart uint64 // eigen partitiebasis
 	RAMSize  uint64 // eigen (door HOP gepatchte) RAM-declaratie
 
-	env map[string]string // door HOP meegegeven bij start
-	mu  sync.Mutex        // outbox is SPSC: één producer tegelijk (logs + RPC)
-	seq uint32
-	out *ring.Ring // hop-ABI outbox (app → HOP)
-	in  *ring.Ring // hop-ABI inbox (HOP → app)
+	env  map[string]string // door HOP meegegeven bij start
+	mu   sync.Mutex        // outbox is SPSC: één producer tegelijk (logs + RPC)
+	seq  uint32
+	out  *ring.Ring // hop-ABI outbox (app → HOP)
+	in   *ring.Ring // hop-ABI inbox (HOP → app)
+	rbuf []byte     // hergebruikte leesbuffer (onder mu, zoals seq)
 }
 
 func (a *App) ctrl(off uintptr) *uint64 {
@@ -55,6 +56,7 @@ func Init() *App {
 
 	a.out = ring.Open(layout.RingOutbox(a.Slot))
 	a.in = ring.Open(layout.RingInbox(a.Slot))
+	a.rbuf = make([]byte, layout.RingDataCap)
 	a.env = a.readEnv()
 
 	// Klok overnemen van HOP (die synct via SNTP): zonder dit begint elke
@@ -128,7 +130,7 @@ func (a *App) rpc(req hopabi.Req, timeout time.Duration) (hopabi.Resp, error) {
 		time.Sleep(time.Millisecond)
 	}
 	for {
-		typ, p, ok := a.in.Read()
+		typ, n, ok := a.in.ReadInto(a.rbuf)
 		if !ok {
 			if time.Now().After(deadline) {
 				return hopabi.Resp{}, fmt.Errorf("hop-ABI: geen antwoord op op %d", req.Op)
@@ -139,13 +141,16 @@ func (a *App) rpc(req hopabi.Req, timeout time.Duration) (hopabi.Resp, error) {
 		if typ != ring.TypeRPCResp {
 			continue
 		}
-		resp, err := hopabi.DecodeResp(p)
+		resp, err := hopabi.DecodeResp(a.rbuf[:n])
 		if err != nil {
 			return hopabi.Resp{}, err
 		}
 		if resp.Seq != req.Seq {
 			continue
 		}
+		// resp.Data wijst in de hergebruikte leesbuffer: kopiëren vóór hij
+		// de mutex (en dus de volgende ReadInto) overleeft.
+		resp.Data = append([]byte(nil), resp.Data...)
 		if resp.Status != hopabi.StatusOK {
 			return resp, fmt.Errorf("hop-ABI op %d: status %d: %s", req.Op, resp.Status, resp.Data)
 		}

@@ -1,8 +1,6 @@
 package qemuvirt
 
 import (
-	"fmt"
-
 	"github.com/usbarmory/tamago/dma"
 
 	"hop-os/metal/dev"
@@ -52,14 +50,4 @@ func ProbeVirtioNet() (base uint64, irq int) {
 		}
 	}
 	return 0, 0
-}
-
-// DumpVirtioSlots print magic/version/device-id van de eerste mmio-slots
-// (diagnose: welke transport gebruikt QEMU?).
-func DumpVirtioSlots() {
-	for i := 0; i < 4; i++ { // beperkt: hoge slots kunnen niet-backed zijn (abort)
-		b := uintptr(virtioMMIOBase + i*virtioMMIOStride)
-		fmt.Printf("mmio[%d] @%#x magic=%#x ver=%d id=%d\n",
-			i, b, dev.Read32(b+regMagic), dev.Read32(b+regVersion), dev.Read32(b+regDeviceID))
-	}
 }

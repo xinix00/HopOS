@@ -26,3 +26,13 @@ TEXT ·cntpct(SB),NOSPLIT,$0-8
 	WORD	$0xd53be020	// mrs x0, cntpct_el0
 	MOVD	R0, ret+0(FP)
 	RET
+
+// spin draait n afhankelijke SUBS-iteraties (~1 cycle/iter op een A76 met
+// I-cache aan): tegen CNTPCT gezet meet dit de effectieve kloksnelheid —
+// de firmware-default vóór wij ooit aan clocking doen (P2b).
+TEXT ·spin(SB),NOSPLIT,$0-8
+	MOVD	n+0(FP), R0
+spinlus:
+	SUBS	$1, R0
+	BNE	spinlus
+	RET

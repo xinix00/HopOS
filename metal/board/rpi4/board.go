@@ -23,7 +23,7 @@ type machine struct{}
 // (verplicht, voor de tamago runtime-hooks).
 func init() { board.Use(machine{}) }
 
-func (machine) BootEL() int { return int(BootEL()) }
+func (machine) BootEL() int { return int(raspi.BootEL()) }
 func (machine) CoreID() int { return CoreID() }
 
 // MemTotal leest de DTB (cpuinit.s → DTBPtr) en telt het /memory-node op.
@@ -46,12 +46,17 @@ func (machine) TimerOffset() int64     { return raspi.ARM64.TimerOffset }
 func (machine) SetTimerOffset(o int64) { raspi.ARM64.TimerOffset = o }
 func (machine) SetWallTime(ns int64)   { raspi.ARM64.SetTime(ns) }
 
-func (machine) CPUOn(core, entry, ctx uint64) int64 { return CPUOn(core, entry, ctx) }
-func (machine) CPUOff() int64                       { return CPUOff() }
+// PSCI loopt via de gedeelde raspi-laag; hier wordt alleen de core-index
+// naar het A72-MPIDR-target vertaald (aff0). LET OP: anders dan op de Pi 5
+// is TF-A hier geen "mogelijk nodig" maar een harde eis — de stock armstub8
+// heeft helemaal geen PSCI (spin-table) en een SMC hangt dan. Zie
+// docs/rpi4.md en sd-rpi4/LEESMIJ.txt.
+func (machine) CPUOn(core, entry, ctx uint64) int64 { return raspi.CPUOn(target(core), entry, ctx) }
+func (machine) CPUOff() int64                       { return raspi.CPUOff() }
 func (machine) AffinityInfo(core uint64) board.PowerState {
-	return board.PowerState(AffinityInfo(core))
+	return board.PowerState(raspi.AffinityInfo(target(core)))
 }
-func (machine) PSCIVersion() (major, minor uint16) { return PSCIVersion() }
+func (machine) PSCIVersion() (major, minor uint16) { return raspi.PSCIVersion() }
 
 // SGIKill/SGIClearPending: fase P1 — GICv2 (GIC-400) via GICD_SGIR, plus de
 // EL2-vectoren/trampoline. Tot die tijd is aanroepen een programmeerfout.

@@ -47,7 +47,6 @@ const (
 	// NWCFG-bits.
 	cfgSpeed100 = 1 << 0
 	cfgFD       = 1 << 1
-	cfgCopyAll  = 1 << 4 // promiscuous (bring-up/diagnose)
 	cfgGigabit  = 1 << 10
 	cfgRxFCS    = 1 << 17 // FCS strippen van RX-frames
 	cfgMDCShift = 18      // MDC-divisor (3 bits): pclk/x — 0b100 = /48
@@ -317,16 +316,4 @@ func (n *Net) Transmit(buf []byte) error {
 	n.wr(regNWCtrl, ctrlMgmtEn|ctrlRxEn|ctrlTxEn|ctrlTxStart)
 	n.txHead = (n.txHead + 1) % nTx
 	return nil
-}
-
-// Promiscuous zet COPYALL aan/uit (bring-up: alles zien vóór het MAC-filter
-// bewezen is).
-func (n *Net) Promiscuous(on bool) {
-	cfg := n.rd(regNWCfg)
-	if on {
-		cfg |= cfgCopyAll
-	} else {
-		cfg &^= cfgCopyAll
-	}
-	n.wr(regNWCfg, cfg)
 }

@@ -1,8 +1,9 @@
 // De referentie-app voor fase 1: een eigen Go-runtime die HOP-OS in een
 // slot laadt en op een eigen core start. Via applib meldt hij zich READY,
-// stuurt heartbeats en gehoorzaamt de kill-flag. Per slot gelinkt
-// (TEXT_START = SlotBase+0x10000, zie image/qemu-virt-run.sh); de
-// RAM-declaratie wordt door HopOS bij het laden gepatcht (job.MemoryLimit).
+// stuurt heartbeats en gehoorzaamt de kill-flag. Canoniek gelinkt
+// (TEXT_START = SlotBase(1)+0x10000, zie image/qemu-run.sh) — de stage-2-map
+// legt hem op de partitie van elk slot; de RAM-declaratie wordt door HopOS
+// bij het laden gepatcht (job.MemoryLimit).
 package main
 
 import (

@@ -4,11 +4,10 @@
 // leader-API (:9080), de agent (:8080) downloadt de app-image en start hem
 // op een vrije core — dezelfde HOP-bytes als op Linux/macOS, zonder Linux.
 //
-// Steiger (fase 1): standalone-cluster (deze node is z'n eigen leader) en
-// app-images zijn per slot gelinkt — de artifact-URL moet dus matchen met het
-// slot dat HopRunner kiest (eerste vrije). Beide gaan eruit zodra
-// hoplockserver-over-netwerk (fase 2) en het definitieve imageformaat
-// (fase 4, PLAN.md §4.4) er zijn.
+// Steiger (fase 1): standalone-cluster (deze node is z'n eigen leader);
+// gaat eruit zodra hoplockserver-over-netwerk (fase 2) er is. App-images
+// zijn canoniek gelinkt (slot-1-bereik): één artifact draait op elk slot,
+// de stage-2-map is de relocatie.
 package main
 
 import (
@@ -50,9 +49,14 @@ func main() {
 	fmt.Println("HopOS: HOP-agent bare-metal op arm64 — geen Linux aan boord")
 	fmt.Printf("runtime %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
 
+	// Vóór de eerste PSCI-call (SMC): HopOS eist een EL2-boot — de
+	// stage-2-kooi is een invariant, geen optie.
+	if el := board.Current().BootEL(); el < 2 {
+		fail("boot", fmt.Errorf("EL%d-boot: HopOS vereist EL2 (QEMU: virtualization=on)", el))
+	}
+
 	major, minor := board.Current().PSCIVersion()
-	fmt.Printf("PSCI versie %d.%d (boot-EL%d, conduit %s)\n",
-		major, minor, board.Current().BootEL(), map[bool]string{true: "SMC", false: "HVC"}[board.Current().BootEL() >= 2])
+	fmt.Printf("PSCI versie %d.%d (boot-EL%d, conduit SMC)\n", major, minor, board.Current().BootEL())
 
 	if err := hopnet.Up(); err != nil {
 		fail("net", err)

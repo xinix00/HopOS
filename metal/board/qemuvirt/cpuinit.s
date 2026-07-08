@@ -5,8 +5,9 @@
 //
 //   - EL1 op AArch64 (HCR_EL2.RW), fysieke timer/counter vrij voor EL1
 //     (CNTHCTL_EL2), CNTVOFF op 0;
-//   - het boot-EL naar de scratch (layout.BootScratch) voor de
-//     PSCI-conduitkeuze (EL2-boot ⇒ SMC, EL1-boot ⇒ HVC);
+//   - het boot-EL naar de scratch (layout.BootScratch); de mains eisen
+//     daar ≥2 (EL1-boot = weigeren, HopOS kan zonder EL2 zijn kooi niet
+//     waarmaken);
 //   - drop naar EL1 en door naar de tamago-runtime.
 //
 // Dit is tevens de plek waar fase-4-isolatie aanhaakt: op app-cores
@@ -33,8 +34,8 @@ TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	BEQ	el2
 	CMP	$3, R0
 	BEQ	el3
-	// EL1-boot: scratch blijft 0 ⇒ PSCI-conduit HVC. Níét schrijven — een
-	// app-core onder stage-2 heeft de scratch read-only gemapt.
+	// EL1-boot: scratch blijft 0 ⇒ de main weigert (BootEL < 2). Níét
+	// schrijven — een app-core onder stage-2 heeft de scratch read-only.
 	B	·cpuinitEL1(SB)
 
 el2:

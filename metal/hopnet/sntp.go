@@ -65,7 +65,3 @@ func syncOnce(server string) error {
 	board.Current().SetWallTime(ns)
 	return nil
 }
-
-// WallOffset geeft de actuele klok-offset (wall-ns bij tellerstand nul) —
-// slots schrijft deze op de control-page zodat elke app dezelfde klok krijgt.
-func WallOffset() int64 { return board.Current().TimerOffset() }

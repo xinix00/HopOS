@@ -82,11 +82,6 @@ type Net struct {
 	qsize int
 	rx    vq
 	tx    vq
-
-	RxCount uint64
-	RxCalls uint64
-	TxCount uint64
-	TxErr   uint64
 }
 
 // vq is één split-virtqueue.
@@ -219,7 +214,6 @@ func (n *Net) notify(queue uint32) { n.wr8(regQueueNotify, queue) }
 // Receive haalt één ethernet-frame op (non-blocking: n=0 als er niets is).
 // Voldoet aan go-net's NetworkDevice.
 func (n *Net) Receive(buf []byte) (int, error) {
-	n.RxCalls++
 	usedIdx := dev.Read16(n.rx.used + 2)
 	if usedIdx == n.rx.lastUsed {
 		return 0, nil
@@ -239,7 +233,6 @@ func (n *Net) Receive(buf []byte) (int, error) {
 		dev.CopyOut(buf[:frame], n.rx.bufs+uintptr(int(descIdx)*bufSize)+hdrLen)
 		n.recycleRx(descIdx)
 		n.rx.lastUsed++
-		n.RxCount++
 		return frame, nil
 	}
 
@@ -281,7 +274,6 @@ func (n *Net) Transmit(buf []byte) error {
 			}
 		}
 		if full {
-			n.TxErr++
 			return errors.New("virtionet: TX-queue vol (timeout)")
 		}
 	}
@@ -304,6 +296,5 @@ func (n *Net) Transmit(buf []byte) error {
 	dev.Write16(n.tx.avail+2, n.tx.availIdx)
 	dev.MB()
 	n.notify(txQueue)
-	n.TxCount++
 	return nil
 }

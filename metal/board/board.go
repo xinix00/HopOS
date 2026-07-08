@@ -62,7 +62,7 @@ type PCIeWindow struct {
 // behalve CPUOff, dat de aanroepende core zelf uitzet.
 type Board interface {
 	// Boot & topologie.
-	BootEL() int               // 1 = EL1-boot (HVC-conduit), ≥2 = EL2-boot (SMC)
+	BootEL() int               // ≥2 vereist (stage-2-kooi); 1 = EL1: mains weigeren
 	CoreID() int               // eigen core-index (= slotnummer voor app-cores)
 	CoreClass(core int) string // clusterklasse ("small"/"mid"/"big")
 

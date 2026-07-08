@@ -43,7 +43,7 @@ wait1:
 	BEQ	el2
 	CMP	$3, R0
 	BEQ	el3
-	// EL1-boot (onverwacht op de Pi): scratch blijft 0 ⇒ conduit HVC.
+	// EL1-boot (onverwacht op de Pi): scratch blijft 0 ⇒ de main weigert.
 	B	·cpuinitEL1(SB)
 
 el2:

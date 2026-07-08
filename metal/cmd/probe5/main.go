@@ -1,16 +1,25 @@
 // probe5 — de fase-P-"verifieer eerst"-image voor de Raspberry Pi 5: het
 // eerste dat op het board geflasht wordt. Rapporteert via de debug-UART
-// alles waar het HopOS-ontwerp op leunt, in oplopende spanning:
+// (JST-SH-connector, Raspberry Pi Debug Probe) alles waar het HopOS-ontwerp
+// op leunt, in oplopende spanning:
 //
 //  1. de tamago Go-runtime leeft (banner, goroutines, heap);
-//  2. boot-EL (verwacht 2), MPIDR (A76: core in aff1), klokfrequentie;
-//  3. de generic timer loopt op wandkloksnelheid (gemeten slaap);
-//  4. PSCI: versie, AFFINITY_INFO van cores 1-3;
-//  5. CPU_ON per core naar geplante park-code → levensteken per core.
+//  2. boot-EL (verwacht 2), MPIDR (A76: core in aff1), DTB/RAM via x0;
+//  3. de generic timer: CNTFRQ, lopende counter, time.Sleep (boot-meting
+//     2026-07-08: main hing in z'n eerste Sleep — dus expliciet verhoord,
+//     elk punt aangekondigd vóór de mogelijk-fatale stap);
+//  4. CPU: effectieve kloksnelheid (firmware-default) en temperatuur (AVS);
+//  5. PSCI: versie, AFFINITY_INFO, CPU_ON per core → levensteken per core;
+//  6. PCIe: externe poort (pciex1 — NVMe/HAT) en RP1 (netprobe → GEM/PHY).
 //
 // Uitkomst 5 is hét beslispunt: meldt de standaard armstub ALREADY_ON, dan
 // bouwen we upstream TF-A als bl31.bin (armstub= in config.txt) — zie
-// docs/rpi5.md. Bouwen/flashen: image/rpi5-probe.sh.
+// docs/rpi5.md. Bouwen/flashen: image/rpi5-probe.sh. LET OP config.txt:
+// os_check=0 is op de Pi 5 verplicht voor niet-Linux-kernels.
+//
+// De ACT-LED is het kabelvrije levensteken: 3× knipperen = cpuinit draait
+// (plus 1 korte puls = EL1 bereikt), 2× = timer bewezen, 1Hz-hartslag =
+// probe compleet.
 package main
 
 import (
@@ -23,11 +32,8 @@ import (
 	"hop-os/metal/board/raspi"
 	"hop-os/metal/board/rpi5"
 	"hop-os/metal/dev"
-	"hop-os/metal/fbcons"
-	"hop-os/metal/fdt"
 	"hop-os/metal/gem"
 	"hop-os/metal/psci"
-	"hop-os/metal/vcmbox"
 )
 
 // RAM-declaratie: 128MB vanaf de kernel-load (0x200000) — ruim binnen elke
@@ -42,14 +48,13 @@ var ramSize uint = 0x08000000
 
 // parkCode: per instructie via dev.Write32 op raspi.ParkBase geplant (MMU van
 // de doelcore staat uit; adres onder onze RAM-declaratie → ongecachet
-// geschreven). De core zet een teller op raspi.ParkCount + ctx*8 en parkeert
-// in een WFE-lus (gedeelde generator: board/raspi/park.go). UART-teken uit
-// (arg 0) zolang er geen debug-sessie is — zie uartLive in console.go; met
-// Debug Probe: raspi.ParkCode(rpi5.UART0Base).
-var parkCode = raspi.ParkCode(0)
+// geschreven). De core meldt zich met '0'+ctx op de UART, zet een teller op
+// raspi.ParkCount + ctx*8 en parkeert in een WFE-lus (gedeelde generator:
+// board/raspi/park.go).
+var parkCode = raspi.ParkCode(rpi5.UART0Base)
 
 // blink geeft n korte pulsen op de groene ACT-LED. Gebruikt time.Sleep —
-// dus pas ná de timer-diagnose inzetten; daarvóór is busyBlink het kanaal.
+// dus pas inzetten nadat de timer-diagnose de klok bewezen heeft.
 func blink(n int) {
 	for range n {
 		rpi5.LED(true)
@@ -60,123 +65,15 @@ func blink(n int) {
 	time.Sleep(400 * time.Millisecond)
 }
 
-// busyBlink knippert klokvrij: MMIO-reads als tijdsbasis (device-memory is
-// per definitie ongecachet, ~100ns per read → ~0,3s per fase), bruikbaar
-// zolang de generic timer verdacht is (boot-meting 2026-07-08: main hing in
-// z'n eerste Sleep). De mailbox-statusread is side-effect-vrij.
-func busyBlink(n int) {
-	wait := func() {
-		for range 3_000_000 {
-			dev.Read32(uintptr(rpi5.MboxBase) + 0x18)
-		}
-	}
-	for range n {
-		rpi5.LED(true)
-		wait()
-		rpi5.LED(false)
-		wait()
-	}
-	wait()
-	wait()
-}
-
-// splash: het HDMI-levensteken (gewenst door Derek, docs/rpi5.md). Bewust
-// ASCII-only — fbcons degradeert multibyte-UTF-8 tot '?'.
-func splash() {
-	fbcons.SetColor(0xFF7CE87C) // zacht groen; G-kanaal is byteorder-neutraal
-	fmt.Println()
-	fmt.Println(`   (\(\`)
-	fmt.Println(`   ( -.-)     HopOS v0.1.0 - probe5`)
-	fmt.Println(`   o_(")(")   aarch64 - pure Go - geen Linux aan boord`)
-	fbcons.SetColor(0xFFFFFFFF)
-	fmt.Println()
-}
-
 func main() {
-	// GEEN time.Sleep en geen goroutines vóór de timer-diagnose op het
-	// scherm staat: boot-meting 2026-07-08 — main hing in z'n eerste
-	// Sleep (LED bleef stokstijf aan), dus de klok is verdacht tot het
-	// scherm anders bewijst. LED continu aan = "Go-main draait".
+	// LED continu aan = "Go-main draait" — vóór de eerste print, want een
+	// dode UART mag de boot niet verhullen. Géén Sleep vóór de timer-diagnose.
 	rpi5.LEDInit()
 	rpi5.LED(true)
 
 	fmt.Println("")
 	fmt.Println("HopOS probe5: bare-metal Go op de Raspberry Pi 5 — geen Linux aan boord")
 	fmt.Printf("runtime %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
-
-	// Framebuffer éérst (vcmbox is klokvrij begrensd): het scherm is het
-	// rapportkanaal voor alles hierna. Twee routes: de mailbox (Pi 4-stijl;
-	// op de Pi 5 vermoedelijk dood — geen start.elf-runtime meer) en de
-	// firmware-simplefb uit de DTB (/chosen — wat Linux' early console ook
-	// gebruikt). LED-taal: 3× busy = framebuffer beet en ga tekenen;
-	// 5× busy = mailbox faalde (dan volgt de DTB-poging).
-	fmt.Println("hdmi: VideoCore-mailbox (0x107c013880) → framebuffer 1280x720/32bpp...")
-	mbox := &vcmbox.Chan{Base: rpi5.MboxBase, Buf: raspi.MboxScratch}
-	fbUp := false
-	if fb, ok := mbox.FBInit(1280, 720); ok {
-		busyBlink(3)
-		fbcons.Init(fb.Base, fb.Width, fb.Height, fb.Pitch)
-		fbUp = true
-		splash() // vanaf hier spiegelt printk álles naar het scherm
-		fmt.Printf("hdmi: framebuffer %dx%d @ %#x, pitch %d, %d KB (mailbox)\n",
-			fb.Width, fb.Height, fb.Base, fb.Pitch, fb.Size>>10)
-	} else {
-		busyBlink(5)
-		fmt.Println("hdmi: mailbox-fb faalde — firmware-simplefb uit de DTB proberen (/chosen)...")
-		// Eerst de x0-pointer (cpuinit → DTBPtr); zet de firmware die niet in
-		// bare-metal-modus, dan het adres dat wijzelf kozen (config.txt:
-		// device_tree_address=0x0f000000).
-		sfb, ok := fdt.Framebuffer(uintptr(dev.Read64(rpi5.DTBPtr)))
-		if !ok {
-			sfb, ok = fdt.Framebuffer(0x0f000000)
-		}
-		if ok && sfb.BPP == 32 {
-			busyBlink(3)
-			fbcons.Init(uintptr(sfb.Base), int(sfb.Width), int(sfb.Height), int(sfb.Stride))
-			fbUp = true
-			splash()
-			fmt.Printf("hdmi: firmware-simplefb %dx%d @ %#x, stride %d (DTB /chosen)\n",
-				sfb.Width, sfb.Height, sfb.Base, sfb.Stride)
-		} else {
-			fmt.Println("hdmi: ook geen simplefb in de DTB — scherm blijft donker, LED-taal is het kanaal")
-		}
-	}
-	if fbUp {
-		rpi5.LED(false) // scherm werkt: LED weer vrij als signaal
-	}
-
-	// ── Timer-diagnose, klokvrij gemeten, elk punt aangekondigd vóór de
-	// mogelijk-fatale stap (bevriest het scherm: de laatste regel = dader).
-	fmt.Printf("timer: CNTFRQ_EL0 = %d Hz (verwacht 54000000; 0 = firmware zette 'm niet → Sleep hangt)\n", raspi.CNTFRQ())
-	fmt.Println("timer: CNTPCT_EL0 lezen (trapt dit, dan staat EL1PCTEN uit)...")
-	c0 := raspi.CNTPCT()
-	for i := 0; i < 1000; i++ {
-		_ = raspi.CNTPCT()
-	}
-	c1 := raspi.CNTPCT()
-	fmt.Printf("timer: CNTPCT %d → %d (delta %d; 0 = counter staat stil)\n", c0, c1, c1-c0)
-	fmt.Println("timer: time.Now() proberen...")
-	t0 := time.Now()
-	fmt.Printf("timer: time.Now() = %v\n", t0)
-	fmt.Println("timer: time.Sleep(100ms) proberen (hangt dit: tamago-timerpad stuk ondanks CNTFRQ)...")
-	s0 := raspi.CNTPCT()
-	time.Sleep(100 * time.Millisecond)
-	s1 := raspi.CNTPCT()
-	fmt.Printf("timer: Sleep(100ms) duurde %d counter-ticks (verwacht ~5400000 bij 54MHz)\n", s1-s0)
-	blink(2) // vanaf hier mag de LED weer knipperen: timer bewezen
-
-	// Bonus-meetdata over hetzelfde kanaal — met als hoofdprijs de échte
-	// VC-carveout-grens waar het P1-slot-plan om vraagt (docs/rpi5.md).
-	if rev, ok := mbox.FirmwareRev(); ok {
-		fmt.Printf("mailbox: firmware-rev %#x\n", rev)
-	}
-	if rev, ok := mbox.BoardRev(); ok {
-		fmt.Printf("mailbox: board-rev %#x\n", rev)
-	}
-	if armBase, armSize, vcBase, vcSize, ok := mbox.MemSplit(); ok {
-		fmt.Printf("mailbox: ARM-geheugen %#x + %d MB, VC-carveout %#x + %d MB (P1-plangrens)\n",
-			armBase, armSize>>20, vcBase, vcSize>>20)
-	}
 
 	b := board.Current()
 	fmt.Printf("boot-EL: %d (verwacht 2: TF-A/armstub op EL3)\n", b.BootEL())
@@ -191,7 +88,47 @@ func main() {
 	} else if dtb != 0 {
 		fmt.Printf("geheugen: DTB-detectie faalde — magic-woord @ ptr = %#x (DTB elders?)\n", dev.Read32(uintptr(dtb)))
 	} else {
-		fmt.Println("geheugen: x0 = 0 — firmware gaf geen DTB-pointer (val terug op mailbox, P2b)")
+		fmt.Println("geheugen: x0 = 0 — firmware gaf geen DTB-pointer (bare-metal-modus? DTB ligt op 0x0f000000)")
+	}
+
+	// ── Timer-diagnose: elk punt aangekondigd vóór de mogelijk-fatale stap
+	// (bevriest de output, dan is de laatste regel de dader).
+	fmt.Printf("timer: CNTFRQ_EL0 = %d Hz (verwacht 54000000; 0 = firmware zette 'm niet → Sleep hangt)\n", raspi.CNTFRQ())
+	fmt.Println("timer: CNTPCT_EL0 lezen (trapt dit, dan staat EL1PCTEN uit)...")
+	c0 := raspi.CNTPCT()
+	for i := 0; i < 1000; i++ {
+		_ = raspi.CNTPCT()
+	}
+	c1 := raspi.CNTPCT()
+	fmt.Printf("timer: CNTPCT %d → %d (delta %d; 0 = counter staat stil)\n", c0, c1, c1-c0)
+	fmt.Println("timer: time.Sleep(100ms) proberen (hangt dit: tamago-timerpad stuk ondanks CNTFRQ)...")
+	s0 := raspi.CNTPCT()
+	time.Sleep(100 * time.Millisecond)
+	s1 := raspi.CNTPCT()
+	fmt.Printf("timer: Sleep(100ms) duurde %d counter-ticks (verwacht ~5400000 bij 54MHz)\n", s1-s0)
+	blink(2) // timer bewezen: LED mag weer knipperen
+
+	// CPU-klok: afhankelijke SUBS-lus (~1 cycle/iter) tegen de 54MHz-counter.
+	// Dit is de firmware-default — het vertrekpunt voor klokbeleid (P2b).
+	const spinIters = 100_000_000
+	k0 := raspi.CNTPCT()
+	raspi.Spin(spinIters)
+	k1 := raspi.CNTPCT()
+	if d := k1 - k0; d > 0 {
+		fmt.Printf("cpu: ~%d MHz effectief (SUBS-lus, ±dual-issue-marge; A76-default vaak 1500)\n",
+			spinIters*54/d)
+	}
+
+	// Temperatuur: AVS-monitor (0x107d542000 + 0x200), bcm2711-thermal-
+	// formule met de coëfficiënten uit de BCM2712-DTB: t = 450000 − 550×raw
+	// (milligraden; geldig-bits 16|10).
+	fmt.Println("temp: AVS_RO_TEMP_STATUS lezen op 0x107d542200...")
+	raw := dev.Read32(uintptr(rpi5.AVSMonBase) + 0x200)
+	if raw&(1<<16|1<<10) != 0 {
+		mC := 450000 - 550*int64(raw&0x3FF)
+		fmt.Printf("temp: %d.%d °C (raw %#x)\n", mC/1000, (mC%1000)/100, raw)
+	} else {
+		fmt.Printf("temp: sensor meldt ongeldig (raw %#x)\n", raw)
 	}
 
 	// Goroutines + heap: bewijs dat de runtime echt draait.
@@ -207,15 +144,8 @@ func main() {
 	}
 	fmt.Println("goroutines: OK")
 
-	// Timer: een 500ms-slaap moet ~500ms wandklok duren (CNTFRQ van de
-	// firmware klopt dan).
-	t1 := time.Now()
-	time.Sleep(500 * time.Millisecond)
-	fmt.Printf("timer: 500ms slaap duurde %v\n", time.Since(t1))
-
 	major, minor := b.PSCIVersion()
-	fmt.Printf("PSCI versie %d.%d (conduit %s)\n",
-		major, minor, map[bool]string{true: "SMC", false: "HVC"}[b.BootEL() >= 2])
+	fmt.Printf("PSCI versie %d.%d (conduit SMC)\n", major, minor)
 
 	for core := uint64(1); core <= 3; core++ {
 		fmt.Printf("AFFINITY_INFO core %d: %s\n", core, b.AffinityInfo(core))
@@ -231,7 +161,7 @@ func main() {
 	// CPU_ON per core: het beslispunt van deze probe.
 	ok := true
 	for core := uint64(1); core <= 3; core++ {
-		ret := rpi5.CPUOn(core, uint64(raspi.ParkBase), core)
+		ret := b.CPUOn(core, uint64(raspi.ParkBase), core)
 		fmt.Printf("CPU_ON core %d: ret=%d", core, ret)
 		if ret == psci.ALREADY_ON {
 			fmt.Println(" (ALREADY_ON — standaard armstub houdt cores vast: bouw TF-A bl31.bin, zie docs/rpi5.md)")
@@ -257,6 +187,25 @@ func main() {
 		fmt.Println("HOPOS_PI5_PROBE_DEELS — zie de regels hierboven; dit is meetdata, geen crash")
 	}
 
+	// ── PCIe-probe (fase P2-voorwerk, read-only): de externe poort (pciex1,
+	// de FFC voor NVMe/HAT's — brcm,bcm2712-pcie, brcmstb-registerlayout).
+	// Config-reads alleen bij een actieve link (anders completion-timeout).
+	fmt.Println("nvmeprobe 1: pciex1-status lezen op 0x1000114068 (brcmstb MISC_PCIE_STATUS)...")
+	st := dev.Read32(uintptr(rpi5.PCIeX1Base) + 0x4068)
+	fmt.Printf("nvmeprobe 1: status=%#x — PHY-link=%v, data-link=%v (firmware traint deze poort normaal níét)\n",
+		st, st&0x10 != 0, st&0x20 != 0)
+	fmt.Printf("nvmeprobe 1: RC vendor/device = %#x (verwacht 0x14e4xxxx, Broadcom)\n",
+		dev.Read32(uintptr(rpi5.PCIeX1Base)))
+	if st&0x20 != 0 {
+		// EXT_CFG: bus 1, dev 0, fn 0 → endpoint-ID (NVMe? Hailo 0x1e60?).
+		dev.Write32(uintptr(rpi5.PCIeX1Base)+0x9000, 1<<20)
+		dev.MB()
+		fmt.Printf("nvmeprobe 2: endpoint vendor/device = %#x\n",
+			dev.Read32(uintptr(rpi5.PCIeX1Base)+0x8000))
+	} else {
+		fmt.Println("nvmeprobe 2: link down — RC-bring-up is P2-werk (zelfde NVMe-driver als QEMU/O6N)")
+	}
+
 	// ── Netprobe (fase P2-voorwerk): read-only metingen voor de GEM-driver
 	// (metal/gem). Elke stap kondigt zich aan vóór de read: blijft de output
 	// daar steken, dan wijst de laatste regel de boosdoener aan.
@@ -266,7 +215,7 @@ func main() {
 	fmt.Printf("netprobe 1: RP1 CHIP_ID=%#x PLATFORM=%#x (0xffffffff = dode link)\n", chipID, platform)
 
 	fmt.Println("netprobe 2: root-complex inbound-window (DMA-offset voor de GEM)...")
-	fmt.Printf("netprobe 2: RC_BAR2_CONFIG lo=%#x hi=%#x (Linux-conventie: PCIe 0x10_00000000 → DRAM 0)\n",
+	fmt.Printf("netprobe 2: RC_BAR2_CONFIG lo=%#x hi=%#x (Linux-conventie: PCIe 0x10_0000_0000 → DRAM 0)\n",
 		dev.Read32(uintptr(rpi5.RCBar2ConfigLo)), dev.Read32(uintptr(rpi5.RCBar2ConfigHi)))
 
 	fmt.Println("netprobe 3: GEM module-ID op 0x1f00100000...")
@@ -294,8 +243,8 @@ func main() {
 
 	// PID-1-regel: main keert nooit terug. De ACT-LED wordt de hartslag:
 	// knippert hij op 1Hz, dan is de probe tot híér gekomen en leeft de
-	// runtime nog — stopt hij, dan wijst de laatste schermregel de dader aan.
-	fmt.Println("klaar — ACT-LED knippert nu als hartslag (1Hz); dit scherm blijft staan")
+	// runtime nog — stopt hij, dan wijst de laatste UART-regel de dader aan.
+	fmt.Println("klaar — ACT-LED knippert nu als hartslag (1Hz)")
 	for {
 		rpi5.LED(true)
 		time.Sleep(500 * time.Millisecond)
