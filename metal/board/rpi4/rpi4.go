@@ -28,10 +28,7 @@ const (
 	// zodra hij zelf logt — config.txt: uart_2ndstage=1 — dus printk hoeft
 	// alleen DR te vullen; dtoverlay=disable-bt houdt de PL011 bij de
 	// header (anders claimt Bluetooth hem).
-	UART0Base = 0xFE201000
-	uartDR    = UART0Base + 0x00
-	uartFR    = UART0Base + 0x18
-	frTXFF    = 1 << 5
+	UART0Base = 0xFE201000 // PL011-poke via metal/pl011 (offsets/bit gedeeld)
 
 	// GIC-400 (GICv2, zelfde blok en layout als de Pi 5, andere basis).
 	// Fase P1: hard-kill-SGI's via GICD_SGIR; de probe raakt de GIC niet.

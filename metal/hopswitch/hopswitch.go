@@ -120,12 +120,22 @@ func Up() error {
 		buf := make([]byte, gnet.MTU+gnet.EthernetMaximumSize)
 		nic := hostNIC{}
 		for {
-			n, err := nic.Receive(buf)
-			if n == 0 || err != nil {
-				time.Sleep(300 * time.Microsecond)
-				continue
-			}
-			iface.Stack.RecvInboundPacket(buf[:n])
+			// Per-iteratie recover: een panic in Receive (→ natInbound) of in
+			// gvisor's RecvInboundPacket mag core 0 niet vellen — pakket
+			// droppen, RX draait door. Zie switchPass.
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						fmt.Printf("HOPOS_RX_PANIC: %v — pakket gedropt, RX draait door\n", r)
+					}
+				}()
+				n, err := nic.Receive(buf)
+				if n == 0 || err != nil {
+					time.Sleep(300 * time.Microsecond)
+					return
+				}
+				iface.Stack.RecvInboundPacket(buf[:n])
+			}()
 		}
 	}()
 
@@ -168,40 +178,53 @@ func loop() {
 	// geeft het aan een kanaal door en kopieert daarom zelf.
 	buf := make([]byte, layout.NetRingDataCap)
 	for {
-		worked := false
-		mu.Lock()
-	host:
-		for range maxBurst {
-			select {
-			case p := <-hostOut:
-				forward(0, p)
-				worked = true
-			default:
-				break host
-			}
-		}
-		for i := 1; i <= layout.MaxSlots; i++ {
-			pt := ports[i]
-			if pt == nil {
-				continue
-			}
-			for range maxBurst {
-				typ, n, ok := pt.tx.ReadInto(buf)
-				if !ok {
-					break
-				}
-				if typ != ring.TypeFrame {
-					continue
-				}
-				forward(i, buf[:n])
-				worked = true
-			}
-		}
-		mu.Unlock()
-		if !worked {
+		if !switchPass(buf) {
 			time.Sleep(200 * time.Microsecond)
 		}
 	}
+}
+
+// switchPass draint alle poorten één ronde onder mu. Diepteverdediging: een
+// panic (een bug, of frame-inhoud die tot in gvisor/nat reikt) mag core 0 —
+// en dus álle slots — niet vellen. De defer ontgrendelt mu (ook bij een panic,
+// anders deadlockt de volgende ronde) en recovert: het frame wordt gedropt en
+// de switch draait door.
+func switchPass(buf []byte) (worked bool) {
+	mu.Lock()
+	defer func() {
+		mu.Unlock()
+		if r := recover(); r != nil {
+			fmt.Printf("HOPOS_SWITCH_PANIC: %v — frame gedropt, switch draait door\n", r)
+		}
+	}()
+host:
+	for range maxBurst {
+		select {
+		case p := <-hostOut:
+			forward(0, p)
+			worked = true
+		default:
+			break host
+		}
+	}
+	for i := 1; i <= layout.MaxSlots; i++ {
+		pt := ports[i]
+		if pt == nil {
+			continue
+		}
+		for range maxBurst {
+			typ, n, ok := pt.tx.ReadInto(buf)
+			if !ok {
+				break
+			}
+			if typ != ring.TypeFrame {
+				continue
+			}
+			forward(i, buf[:n])
+			worked = true
+		}
+	}
+	return worked
 }
 
 // forward bezorgt één frame op grond van de dst-MAC — meer switch is er

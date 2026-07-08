@@ -15,8 +15,6 @@ import (
 
 	"hop-os/metal/board"
 	"hop-os/metal/hopswitch"
-	"hop-os/metal/layout"
-	"hop-os/metal/virtionet"
 )
 
 // Up initialiseert de NIC en de netstack en hangt ze in het net-package. Het
@@ -24,20 +22,20 @@ import (
 // defaults; op echt ijzer straks een board met DHCP/DT).
 func Up() error {
 	nc := board.Current().Net()
-	base, _ := board.Current().ProbeNIC()
-	if base == 0 {
-		return fmt.Errorf("geen (moderne) virtio-net gevonden")
+	// De board levert een kant-en-klaar go-net-device (driver + init zijn
+	// board-kennis); hopnet weet niet welke NIC dit is.
+	nic, hw, err := board.Current().ProbeNIC()
+	if err != nil {
+		return fmt.Errorf("nic: %w", err)
 	}
-
-	nic := &virtionet.Net{Base: uintptr(base)}
-	if err := nic.Init(layout.NetDMABase, layout.NetDMASize); err != nil {
-		return fmt.Errorf("virtio-net init: %w", err)
+	if nic == nil {
+		return fmt.Errorf("geen NIC gevonden")
 	}
-	mac := net.HardwareAddr(nic.MAC[:]).String()
+	mac := hw.String()
 
 	// De NIC achter de NAT-shim van de switch: frames voor gepubliceerde
 	// task-poorten worden vóór HOP's stack afgevangen en doorgerouterd.
-	uplink, err := hopswitch.WrapUplink(nic, nc.IP, net.HardwareAddr(nic.MAC[:]))
+	uplink, err := hopswitch.WrapUplink(nic, nc.IP, hw)
 	if err != nil {
 		return err
 	}

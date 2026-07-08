@@ -28,11 +28,23 @@ const (
 	NVMeDMABase = DMABase + NetDMASize
 	NVMeDMASize = DMASize - NetDMASize
 
-	// App-slots 1..11: vaste stride; de werkelijke RAM-declaratie van een
-	// app wordt bij het laden gepatcht naar job.MemoryLimit (≤ stride).
+	// App-slots: vaste stride; de werkelijke RAM-declaratie van een app wordt
+	// bij het laden gepatcht naar job.MemoryLimit (≤ stride). De stride is de
+	// max app-grootte.
+	//
+	// Aantal × stride is begrensd door het slot-venster [SlotsBase, CtrlBase)
+	// = 1,5GB (CtrlBase is asm-vergrendeld, zie TopAddr). In dat venster kies
+	// je: veel kleine slots óf weinig grote. QEMU (-smp 4) en de Pi hebben
+	// 4 cores → HOP op core 0 + 3 app-slots; 1,5GB/3 = 512MB per app. Dat is
+	// niet alleen ruimer dan de oude 11×128MB, het is ook wat de 4-core-boards
+	// écht hebben. De O6N (12 cores, veel meer RAM) krijgt in fase 3/4 een
+	// eigen layout met een groter venster (control-regio's omhoog = asm-werk,
+	// op dát board te verifiëren) en dan weer 11 slots. Canoniek IPA
+	// [SlotsBase, SlotsBase+512MB) blijft binnen één GB → stage-2 mapt met
+	// één L2-tabel (geen GB-kruising).
 	SlotsBase  = 0x50000000
-	SlotStride = 0x08000000 // 128MB partitie per slot
-	MaxSlots   = 11
+	SlotStride = 0x20000000 // 512MB partitie per slot
+	MaxSlots   = 3
 
 	// Control-pages: buiten alle RAM-declaraties → door alle MMU's als
 	// device gemapt → coherent zonder cache-onderhoud. Uitsluitend
@@ -77,6 +89,29 @@ const (
 	NetRXOff       = 0x100000
 	NetRingDataCap = 0xFF000 // datacapaciteit per richting (1MB - 4KB slack)
 )
+
+// TopAddr is het hoogste fysieke adres dat dit (statische, QEMU-vormige)
+// plan aanraakt: de netring-regio van de laatste slot. Alle vaste regio's
+// (HOP, DMA, slots, ctrl/ring/stage2/netring) liggen tussen HopRAMStart en
+// hier — dus dít is de RAM die de node minstens moet hebben.
+//
+// LET OP: de control-regio's (CtrlBase.. = 0xB0000000) zijn in assembly
+// hardgecodeerd (board/*/el2.s, cpuinit.s, stage2.InitVectors), en apps zijn
+// op SlotsBase gelinkt. Het slot-venster [SlotsBase, CtrlBase) is daarmee
+// vast ~1,5GB. Een groter board z'n RAM benutten vergt die asm-adressen
+// omhoog + de stage-2-kooi opnieuw verifiëren op dat board — bewust
+// per-board werk in fase P1/2, niet blind hier.
+func TopAddr() uint64 { return NetRingBase + uint64(MaxSlots)*NetRingStride }
+
+// RequiredRAM is hoeveel aaneengesloten DRAM vanaf HopRAMStart het plan eist.
+// Minder dan dit ⇒ slots/ringen vallen buiten het fysieke RAM: HopOS moet
+// dan weigeren i.p.v. fantoom-geheugen uit te delen.
+func RequiredRAM() uint64 { return TopAddr() - HopRAMStart }
+
+// SlotCapacity is het totale app-geheugen dat de slots samen kunnen dragen
+// (de som van de partities). Dit is wat HOP als plaatsings-ceiling krijgt —
+// HOP kent per job de MemoryLimit en overspawnt daar nooit overheen.
+func SlotCapacity() uint64 { return uint64(MaxSlots) * SlotStride }
 
 // Stage2Table geeft de basis van het stage-2-tabelblok van slot i.
 func Stage2Table(i int) uintptr {

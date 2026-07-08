@@ -10,7 +10,11 @@
 // totale grootte begrensd — een kromme DTB levert (0,false), geen panic.
 package fdt
 
-import "hop-os/metal/dev"
+import (
+	"math/bits"
+
+	"hop-os/metal/dev"
+)
 
 const (
 	magic      = 0xd00dfeed
@@ -26,8 +30,7 @@ const (
 // be32/be64 lezen een big-endian woord van een fysiek adres (device- of
 // normal-memory; dev doet gealigneerde toegang).
 func be32(addr uintptr) uint32 {
-	b := dev.Read32(addr)
-	return b>>24 | b>>8&0xff00 | b<<8&0xff0000 | b<<24
+	return bits.ReverseBytes32(dev.Read32(addr))
 }
 
 func be64(addr uintptr) uint64 {
@@ -54,7 +57,16 @@ func MemTotal(base uintptr) (uint64, bool) {
 
 	p := base + uintptr(structOff)
 	end := base + uintptr(totalSize)
+
+	// depth: root = 1, /memory = 2 (direct kind van de root). De root's
+	// #address-cells/#size-cells bepalen de vorm van /memory's reg-tupels; we
+	// lezen ze i.p.v. 2/2 aan te nemen (historische Pi-DT's wijken af). Default
+	// per Devicetree-spec (address=2, size=1) als de root ze niet noemt. Alleen
+	// 1 of 2 cellen (32/64-bit) ondersteund — daarbuiten veilig (0,false).
+	depth := 0
 	inMemNode := false
+	addrCells := uint32(2)
+	sizeCells := uint32(1)
 	var total uint64
 	found := false
 
@@ -63,16 +75,18 @@ func MemTotal(base uintptr) (uint64, bool) {
 		p += 4
 		switch tok {
 		case tokBegin:
+			depth++
 			// Node-naam: null-getermineerd, gepad tot 4. "memory" of
-			// "memory@<addr>" is het node dat we zoeken.
+			// "memory@<addr>" op depth 2 is het node dat we zoeken.
 			name := p
 			for p < end && dev.Read8(p) != 0 {
 				p++
 			}
-			inMemNode = isMemory(name, p)
+			inMemNode = depth == 2 && isMemory(name, p)
 			p = align4(p + 1) // voorbij de nul, dan padden
 		case tokEnd:
 			inMemNode = false
+			depth--
 		case tokProp:
 			if p+8 > end {
 				return 0, false
@@ -85,11 +99,36 @@ func MemTotal(base uintptr) (uint64, bool) {
 			if p > end {
 				return 0, false
 			}
-			// In /memory: de "reg"-property is [ (addr64,size64) ... ];
+			// nameOff is onvertrouwde firmware-input: begrens 'm binnen de blob
+			// vóór er ook maar één byte gelezen wordt — anders wijst
+			// base+stringsOff+nameOff ~4GB verderop → OOB-read → data-abort.
+			nameAddr := uint64(stringsOff) + uint64(nameOff)
+			if nameAddr >= uint64(totalSize) {
+				continue // kromme nameOff: sla deze prop over
+			}
+			np := base + uintptr(nameAddr)
+			// Root-cellen (depth 1) leggen /memory's reg-vorm vast.
+			if depth == 1 && plen == 4 {
+				if propIs(np, end, "#address-cells") {
+					addrCells = be32(data)
+				} else if propIs(np, end, "#size-cells") {
+					sizeCells = be32(data)
+				}
+			}
+			// In /memory: reg = [ (addr,size) ... ] met root's cell-counts;
 			// tel de size-cellen op.
-			if inMemNode && propIs(base+uintptr(stringsOff)+uintptr(nameOff), "reg") {
-				for off := uintptr(0); off+16 <= uintptr(plen); off += 16 {
-					total += be64(data + off + 8)
+			if inMemNode && propIs(np, end, "reg") {
+				if addrCells == 0 || addrCells > 2 || sizeCells == 0 || sizeCells > 2 {
+					return 0, false // niet-ondersteunde cell-vorm
+				}
+				stride := uintptr(addrCells+sizeCells) * 4
+				szOff := uintptr(addrCells) * 4
+				for off := uintptr(0); off+stride <= uintptr(plen); off += stride {
+					if sizeCells == 1 {
+						total += uint64(be32(data + off + szOff))
+					} else {
+						total += be64(data + off + szOff)
+					}
 					found = true
 				}
 			}
@@ -127,12 +166,14 @@ func isMemory(start, end uintptr) bool {
 	return next == end || dev.Read8(next) == '@'
 }
 
-// propIs vergelijkt een null-getermineerde string in de strings-block met s.
-func propIs(addr uintptr, s string) bool {
+// propIs vergelijkt een null-getermineerde string in de strings-block met s,
+// begrensd tot end: een string die tot buiten de blob zou reiken is geen
+// match (de end-check short-circuit vóór elke dev.Read8 → geen OOB-read).
+func propIs(addr, end uintptr, s string) bool {
 	for i := 0; i < len(s); i++ {
-		if dev.Read8(addr+uintptr(i)) != s[i] {
+		if addr+uintptr(i) >= end || dev.Read8(addr+uintptr(i)) != s[i] {
 			return false
 		}
 	}
-	return dev.Read8(addr+uintptr(len(s))) == 0
+	return addr+uintptr(len(s)) < end && dev.Read8(addr+uintptr(len(s))) == 0
 }

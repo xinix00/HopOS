@@ -14,7 +14,6 @@ import (
 	"bytes"
 	_ "embed"
 	"fmt"
-	"hash/fnv"
 	"net"
 	"net/http"
 	"runtime"
@@ -22,6 +21,7 @@ import (
 
 	"hop-os/metal/board"
 	_ "hop-os/metal/board/qemuvirt" // registreert het board (init) + tamago-hooks
+	"hop-os/metal/checksum"
 	"hop-os/metal/hopfs"
 	"hop-os/metal/hopnet"
 	"hop-os/metal/hopswitch"
@@ -70,13 +70,6 @@ func waitExit(slot int, timeout time.Duration) (uint64, error) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	return slots.Get(slot).ExitCode, nil
-}
-
-// fnv64 is FNV-1a (hash/fnv) — dezelfde stdlib-som als de reader-app rekent.
-func fnv64(b []byte) uint64 {
-	h := fnv.New64a()
-	h.Write(b)
-	return h.Sum64()
 }
 
 // serveHello opent de demo-poort: het bewijs dat de netstack werkt.
@@ -169,9 +162,9 @@ func main() {
 		limit uint64
 		env   map[string]string
 	}{
-		{1, app1, 96 << 20, map[string]string{"BUCKET": "hop-apps", "ROLE": "worker"}},
+		{1, app1, 400 << 20, map[string]string{"BUCKET": "hop-apps", "ROLE": "worker"}}, // >128MB: bewijst de ruimere slots
 		{2, app2, 64 << 20, map[string]string{"BUCKET": "hop-cache"}},
-		{3, app3, 112 << 20, map[string]string{"BUCKET": "hop-db", "ROLE": "reader"}},
+		{3, app3, 256 << 20, map[string]string{"BUCKET": "hop-db", "ROLE": "reader"}},
 	}
 
 	logCounts := make([]int, len(apps)+2)
@@ -315,7 +308,7 @@ func main() {
 	if n, err := fsys.ReadAt("/data/db.bin", 0, dbBytes); err != nil || n != len(dbBytes) {
 		fail("vol-check", fmt.Errorf("db.bin lezen: n=%d, %v", n, err))
 	}
-	sum := fnv64(dbBytes)
+	sum := checksum.FNV64(dbBytes)
 
 	fmt.Println("volumes: readers (slot 1+2, mount /data) lezen parallel...")
 	winApps := map[int][]byte{1: app1, 2: app2}

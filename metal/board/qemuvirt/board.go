@@ -5,7 +5,16 @@ package qemuvirt
 // (cluster-topologie in slots, slirp-IP's in hopnet, ECAM/MMIO in pcie) wonen
 // nu hier — het ene punt dat per board verandert.
 
-import "hop-os/metal/board"
+import (
+	"fmt"
+	"net"
+
+	gnet "github.com/usbarmory/go-net"
+
+	"hop-os/metal/board"
+	"hop-os/metal/layout"
+	"hop-os/metal/virtionet"
+)
 
 // machine is de board-implementatie voor de QEMU -M virt arm64-machine.
 type machine struct{}
@@ -22,19 +31,15 @@ func (machine) CoreID() int { return CoreID() }
 // gevonden → de aanroeper valt terug op het statische slot-plan.
 func (machine) MemTotal() uint64 { return memTotal }
 
-// CoreClass geeft de cluster-klasse van core i op de O6N-indeling (1-3 small,
-// 4-7 mid, 8-11 big). In QEMU zijn de cores homogeen; dit is de beoogde mapping
-// die op echt ijzer via MPIDR/DT wordt bevestigd. Board-kennis, geen slot-kennis.
-func (machine) CoreClass(i int) string {
-	switch {
-	case i >= 8:
-		return "big"
-	case i >= 4:
-		return "mid"
-	default:
-		return "small"
-	}
-}
+// CoreClass geeft de clusterklasse van slot i. QEMU -M virt heeft homogene
+// cores (alle cortex-a53), dus één klasse voor álle slots — net als de
+// (eveneens homogene) Pi-boards, die "big" = de beste/enige klasse melden.
+// HOP's plaatsing doet exact-match op klasse: een job die expliciet een andere
+// klasse vraagt hoort op dit testboard niet te passen (de tri-cluster is de
+// O6N — fase 3/4, een eigen board). Eerder stond hier een verzonnen
+// 1-3/4-7/8-11-split die met MaxSlots=3 álle slots "small" maakte → elke
+// mid/big-job permanent onplaatsbaar. Board-kennis, geen slot-kennis.
+func (machine) CoreClass(i int) string { return "big" }
 
 func (machine) TimerOffset() int64     { return ARM64.TimerOffset }
 func (machine) SetTimerOffset(o int64) { ARM64.TimerOffset = o }
@@ -51,7 +56,20 @@ func (machine) SGIKill(core uint64)         { SGIKill(core) }
 func (machine) SGIClearPending(core uint64) { SGIClearPending(core) }
 func (machine) S2TrampPC() uint64           { return S2TrampPC() }
 
-func (machine) ProbeNIC() (base uint64, irq int) { return ProbeVirtioNet() }
+// ProbeNIC vindt het virtio-net-mmio-slot, construeert de driver en zet 'm
+// klaar in de net-DMA-subregio. Zo blijft de driverkeuze board-kennis en is
+// hopnet NIC-agnostisch.
+func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
+	base, _ := ProbeVirtioNet()
+	if base == 0 {
+		return nil, nil, nil // geen (moderne) virtio-net gevonden
+	}
+	nic := &virtionet.Net{Base: uintptr(base)}
+	if err := nic.Init(layout.NetDMABase, layout.NetDMASize); err != nil {
+		return nil, nil, fmt.Errorf("virtio-net init: %w", err)
+	}
+	return nic, net.HardwareAddr(nic.MAC[:]), nil
+}
 
 // Net geeft het interne net-plan: de QEMU slirp-defaults (-netdev user). Op
 // echt ijzer komt dit straks uit DHCP/DT — dan een ander board.

@@ -28,6 +28,12 @@ const (
 	etIPv4   = 0x0800
 	protoTCP = 6
 	protoUDP = 17
+
+	// maxNextHop begrenst de geleerde client→next-hop-tabel. De key is het
+	// (spoofbare) bron-IP, dus zonder plafond laat een stroom gespoofte IP's
+	// HOP's heap op core 0 vollopen. ~4096 entries (elk ~24B) is ruim voor
+	// echt verkeer maar hard begrensd.
+	maxNextHop = 4096
 )
 
 // pub is één gepubliceerde poort. HOP's conventie (ER_PORT_*): de app bindt
@@ -149,8 +155,24 @@ func ipv4L4(f []byte) (ihl int, proto byte, ok bool) {
 	}
 	ihl = int(ip[0]&0xf) * 4
 	proto = ip[9]
-	if ihl < 20 || len(ip) < ihl+8 || (proto != protoTCP && proto != protoUDP) ||
-		binary.BigEndian.Uint16(ip[6:])&0x1fff != 0 {
+	if ihl < 20 || binary.BigEndian.Uint16(ip[6:])&0x1fff != 0 {
+		return 0, 0, false
+	}
+	// rewriteL4 herschrijft de L4-checksum: TCP op l4[16:18] (vereist dus de
+	// volledige 20-byte header), UDP op l4[6:8] (8-byte header). De
+	// framelengte komt van de NIC (aanvaller-gecontroleerd op de draad); een
+	// te korte header hier weigeren, niet straks in rewriteL4 op een slice
+	// buiten bereik paniek — dat zou de hele node platleggen.
+	switch proto {
+	case protoTCP:
+		if len(ip) < ihl+20 {
+			return 0, 0, false
+		}
+	case protoUDP:
+		if len(ip) < ihl+8 {
+			return 0, 0, false
+		}
+	default:
 		return 0, 0, false
 	}
 	return ihl, proto, true
@@ -183,8 +205,15 @@ func natInbound(f []byte) bool {
 		return false
 	}
 
-	// Leer de L2-next-hop van deze client voor het antwoordpad.
-	nextHopFor[binary.BigEndian.Uint32(ip[12:])] = [6]byte(f[6:12])
+	// Leer de L2-next-hop van deze client voor het antwoordpad. Bij het
+	// plafond de tabel legen i.p.v. onbegrensd groeien: actieve clients
+	// herleren bij hun volgende inbound frame (hooguit één antwoord mist,
+	// TCP herstelt) — een gespoofte-IP-stroom kan HOP's heap zo niet vellen.
+	clientIP := binary.BigEndian.Uint32(ip[12:])
+	if _, known := nextHopFor[clientIP]; !known && len(nextHopFor) >= maxNextHop {
+		nextHopFor = map[uint32][6]byte{}
+	}
+	nextHopFor[clientIP] = [6]byte(f[6:12])
 
 	oldIP := binary.BigEndian.Uint32(ip[16:])
 	newIP := slotIP4(m.slot)
@@ -256,6 +285,12 @@ func rewriteL4(l4 []byte, proto byte, portOff int, oldIP, newIP uint32, oldPort,
 	}
 	fixCsum32(l4[csumOff:], oldIP, newIP) // pseudo-header
 	fixCsum16(l4[csumOff:], oldPort, newPort)
+	// RFC 768: een berekende UDP-checksum van 0x0000 betekent "geen checksum"
+	// en moet als 0xFFFF verzonden worden. De incrementele update kan op 0
+	// uitkomen; corrigeer dat (TCP en IP mogen 0x0000 wél houden).
+	if proto == protoUDP && binary.BigEndian.Uint16(l4[csumOff:]) == 0 {
+		binary.BigEndian.PutUint16(l4[csumOff:], 0xFFFF)
+	}
 }
 
 // fixCsum16 werkt een internet-checksum (big-endian op b[0:2]) incrementeel

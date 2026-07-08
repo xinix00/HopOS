@@ -15,7 +15,7 @@ cd "$DIR/metal"
 #    alleen nog voor de EL1-steiger. Zonder -s: de symboltabel is nodig
 #    zodat de slot-manager RamStart/RamSize kan patchen (job.MemoryLimit).
 for i in 1 2 3; do
-	base=$(printf '%#x' $((0x50000000 + (i - 1) * 0x08000000 + 0x10000)))
+	base=$(printf '%#x' $((0x50000000 + (i - 1) * 0x20000000 + 0x10000)))
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags linkcpuinit -trimpath \
 		-ldflags "-w -T $base -R 0x1000" -o "app$i.elf" ./appspike

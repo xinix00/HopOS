@@ -26,6 +26,7 @@ import (
 	"hop-os/metal/board/raspi"
 	"hop-os/metal/board/rpi4"
 	"hop-os/metal/dev"
+	"hop-os/metal/psci"
 )
 
 // RAM-declaratie: 128MB vanaf de kernel-load — ruim binnen elk Pi 4-model
@@ -91,7 +92,7 @@ func main() {
 		major, minor, map[bool]string{true: "SMC", false: "HVC"}[b.BootEL() >= 2])
 
 	for core := uint64(1); core <= 3; core++ {
-		fmt.Printf("AFFINITY_INFO core %d: %s\n", core, powstr(b.AffinityInfo(core)))
+		fmt.Printf("AFFINITY_INFO core %d: %s\n", core, b.AffinityInfo(core))
 	}
 
 	// Park-code planten en tellers vegen.
@@ -106,19 +107,19 @@ func main() {
 	for core := uint64(1); core <= 3; core++ {
 		ret := rpi4.CPUOn(core, uint64(raspi.ParkBase), core)
 		fmt.Printf("CPU_ON core %d: ret=%d", core, ret)
-		if ret == raspi.PSCI_ALREADY_ON {
+		if ret == psci.ALREADY_ON {
 			fmt.Println(" (ALREADY_ON — parkeert de armstub niet via PSCI? TF-A correct geladen? zie docs/rpi4.md)")
 			ok = false
 			continue
 		}
-		if ret != raspi.PSCI_SUCCESS {
+		if ret != psci.SUCCESS {
 			fmt.Println(" (FOUT)")
 			ok = false
 			continue
 		}
 		time.Sleep(200 * time.Millisecond)
 		alive := dev.Read64(uintptr(raspi.ParkCount) + uintptr(core)*8)
-		fmt.Printf(" → levensteken=%d, AFFINITY_INFO=%s\n", alive, powstr(b.AffinityInfo(core)))
+		fmt.Printf(" → levensteken=%d, AFFINITY_INFO=%s\n", alive, b.AffinityInfo(core))
 		if alive != 1 {
 			ok = false
 		}
@@ -146,16 +147,4 @@ func main() {
 	for {
 		time.Sleep(time.Hour)
 	}
-}
-
-func powstr(s board.PowerState) string {
-	switch s {
-	case board.PowerOn:
-		return "ON"
-	case board.PowerOff:
-		return "OFF"
-	case board.PowerOnPending:
-		return "ON_PENDING"
-	}
-	return fmt.Sprintf("?%d", int(s))
 }

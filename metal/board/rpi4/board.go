@@ -6,8 +6,13 @@ package rpi4
 // stille fallback.
 
 import (
+	"net"
+
+	gnet "github.com/usbarmory/go-net"
+
 	"hop-os/metal/board"
 	"hop-os/metal/board/raspi"
+	"hop-os/metal/dev"
 	"hop-os/metal/fdt"
 )
 
@@ -22,9 +27,11 @@ func (machine) BootEL() int { return int(BootEL()) }
 func (machine) CoreID() int { return CoreID() }
 
 // MemTotal leest de DTB (cpuinit.s → DTBPtr) en telt het /memory-node op.
-// 0 = niet gevonden. Op het board te verifiëren (zie docs/rpi4.md).
+// 0 = niet gevonden. DTBPtr is het scratch-woord waarin cpuinit x0 legde, dus
+// eerst dereferencen: het woord bevat het DTB-adres. Op het board te
+// verifiëren (zie docs/rpi4.md).
 func (machine) MemTotal() uint64 {
-	if n, ok := fdt.MemTotal(DTBPtr); ok {
+	if n, ok := fdt.MemTotal(uintptr(dev.Read64(DTBPtr))); ok {
 		return n
 	}
 	return 0
@@ -55,8 +62,8 @@ func (machine) SGIClearPending(core uint64) { panic("rpi4: SGI-clear is fase P1 
 func (machine) S2TrampPC() uint64 { panic("rpi4: EL2-trampoline is fase P1") }
 
 // ProbeNIC: fase P2 — de NIC is de geïntegreerde GENET (0xFD580000); er is
-// nog geen driver en dus geen netwerkpad.
-func (machine) ProbeNIC() (base uint64, irq int) { return 0, 0 }
+// nog geen driver en dus geen netwerkpad, dus nog geen device.
+func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) { return nil, nil, nil }
 
 // Net: fase P2 — komt uit DHCP zodra de GENET-driver er is.
 func (machine) Net() board.NetConfig { return board.NetConfig{} }

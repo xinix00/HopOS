@@ -2,3 +2,7 @@
 nvme.img
 *.md
 .claude/
+
+# Gegenereerde SD-kernelimages (regenereerbaar uit de ELF's via image/*-probe.sh);
+# de LEESMIJ.txt en config.txt in die dirs blijven wél getrackt.
+sd-*/kernel*.img

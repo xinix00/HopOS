@@ -19,6 +19,14 @@ import (
 // BlockSize is de logische blokmaat (8 NVMe-LBA's van 512B).
 const BlockSize = 4096
 
+// holeBlock is de sentinel voor een niet-gealloceerd gat in een bestand: een
+// blokindex die de payload (nog) niet raakte. Leest als nul en kost geen
+// schijf. Zo is een schrijf op een grote offset O(payload) i.p.v. het hele
+// gat 0..off vol te nullen onder f.mu — dat bevroor alle andere slots' fs-RPC's
+// (één sparse write van 1 byte op schijf-4096 = seconden schijf-I/O onder lock).
+// Geldige blokindexen zijn 0..max-1 met max ≤ 2^32-1, dus ^uint32(0) botst nooit.
+const holeBlock = ^uint32(0)
+
 // maxNodes begrenst het aantal nodes in de boom. Anders dan bestandsgrootte
 // (die de schijf zelf begrenst) leeft de metadata volledig in HOP's RAM: een
 // app die eindeloos kleine bestanden aanmaakt gebruikt ~0 schijf maar laat
@@ -206,6 +214,11 @@ func (f *FS) ReadAt(path string, off uint64, p []byte) (int, error) {
 		if chunk > want-done {
 			chunk = want - done
 		}
+		if n.blocks[bi] == holeBlock { // gat: leest als nul
+			clear(p[done : done+chunk])
+			done += chunk
+			continue
+		}
 		if err := f.disk.Read(f.lba(n.blocks[bi]), buf[:]); err != nil {
 			return int(done), err
 		}
@@ -266,11 +279,17 @@ func (f *FS) WriteAt(path string, off uint64, p []byte) error {
 	// een vers aangemaakte node terugdraaien — anders lekt een mislukte write
 	// blijvend blokken en metadata.
 	orig := len(n.blocks)
+	// Terugdraaien bij een fout halverwege: nieuw gealloceerde blokken vrijgeven
+	// en ingevulde gaten (index < orig) terugzetten. De payload kan een gat
+	// vóór orig echt maken, dus n.blocks[orig:] afkappen volstaat niet.
+	var newlyAlloc []uint32
+	var filled []int
 	fail := func(e error) error {
-		if extra := n.blocks[orig:]; len(extra) > 0 {
-			f.free = append(f.free, extra...)
-			n.blocks = n.blocks[:orig]
+		f.free = append(f.free, newlyAlloc...)
+		for _, idx := range filled {
+			n.blocks[idx] = holeBlock
 		}
+		n.blocks = n.blocks[:orig]
 		if created {
 			delete(parent.children, name)
 			f.nodes--
@@ -278,23 +297,13 @@ func (f *FS) WriteAt(path string, off uint64, p []byte) error {
 		return e
 	}
 
-	for uint64(len(n.blocks))*BlockSize < end {
-		b, err := f.alloc()
-		if err != nil {
-			return fail(err)
-		}
-		// Blokken die de payload-lus hierna volledig overschrijft hoeven niet
-		// eerst met nullen gevuld te worden — dat scheelt de helft van de
-		// disk-writes bij een normale (sequentiële) write. Alleen het gat vóór
-		// off en een deels geraakt staartblok wél nullen.
-		bi := uint64(len(n.blocks))
-		if bi*BlockSize < off || (bi+1)*BlockSize > end {
-			var zero [BlockSize]byte
-			if err := f.disk.Write(f.lba(b), zero[:]); err != nil {
-				return fail(err)
-			}
-		}
-		n.blocks = append(n.blocks, b)
+	// Groei tot het benodigde aantal blokken met GATEN: geen alloc, geen
+	// disk-write. Een gat leest als nul en wordt pas een echt blok als de
+	// payload het hieronder raakt — sparse, dus een schrijf op een grote
+	// offset kost geen schijf-I/O voor het gat.
+	need := (end + BlockSize - 1) / BlockSize
+	for uint64(len(n.blocks)) < need {
+		n.blocks = append(n.blocks, holeBlock)
 	}
 
 	var buf [BlockSize]byte
@@ -306,9 +315,24 @@ func (f *FS) WriteAt(path string, off uint64, p []byte) error {
 		if chunk > uint64(len(p))-done {
 			chunk = uint64(len(p)) - done
 		}
+		// Raakt de payload een gat, dan nú pas een echt blok alloceren.
+		fresh := n.blocks[bi] == holeBlock
+		if fresh {
+			b, err := f.alloc()
+			if err != nil {
+				return fail(err)
+			}
+			newlyAlloc = append(newlyAlloc, b)
+			if int(bi) < orig {
+				filled = append(filled, int(bi))
+			}
+			n.blocks[bi] = b
+		}
 		lba := f.lba(n.blocks[bi])
-		if chunk < BlockSize { // read-modify-write voor een deelblok
-			if err := f.disk.Read(lba, buf[:]); err != nil {
+		if chunk < BlockSize { // deelblok: bestaande inhoud behouden
+			if fresh {
+				buf = [BlockSize]byte{} // vers gat leest als nul → geen disk-read
+			} else if err := f.disk.Read(lba, buf[:]); err != nil {
 				return fail(err)
 			}
 		}
@@ -373,5 +397,9 @@ func (f *FS) release(n *node) {
 		}
 		return
 	}
-	f.free = append(f.free, n.blocks...)
+	for _, b := range n.blocks {
+		if b != holeBlock { // gaten zijn nooit gealloceerd
+			f.free = append(f.free, b)
+		}
+	}
 }

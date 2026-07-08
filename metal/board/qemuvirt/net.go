@@ -28,7 +28,12 @@ const (
 func init() {
 	// Globale DMA-regio voor virtio-ringen en -buffers: gereserveerd stuk
 	// bovenin de HOP-partitie, buiten de RAM-declaratie (→ niet gecached).
-	dma.Init(layout.DMABase, layout.DMASize)
+	// LET OP: alleen de net-subregio (NetDMASize), NIET de volle DMASize — de
+	// NVMe-driver krijgt zijn eigen subregio (NVMeDMABase/NVMeDMASize) expliciet
+	// via nvme.Probe. Claimde de globale tamago-allocator de volle 16MB, dan kon
+	// dma.Alloc geheugen uit de NVMe-subregio uitdelen → botsing met de
+	// NVMe-DMA-buffers.
+	dma.Init(layout.DMABase, layout.NetDMASize)
 }
 
 // ProbeVirtioNet zoekt het virtio-mmio-slot met de netwerkkaart en geeft de

@@ -86,6 +86,17 @@ func claimServicer(i int, root string, mounts [][2]string) *servicer {
 func (s *servicer) run() {
 	defer close(s.done)
 	defer close(s.logs)
+	// Diepteverdediging: één servicer-panic (een bug in handle/fs/fetch, of een
+	// onverwachte record-inhoud) mag core 0 — en dus álle andere slots — niet
+	// vellen. Recover, log zichtbaar, en laat alléén deze goroutine sterven;
+	// het slot kan herstart worden. Dit dekt geen validatie af (die hoort bij
+	// de bron), het begrenst de blast-radius. Deze defer staat als laatste
+	// geregistreerd → draait als eerste bij het afwikkelen, vóór de closes.
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("HOPOS_SERVICER_PANIC slot %d: %v\n", s.slot, r)
+		}
+	}()
 	out := ring.Open(layout.RingOutbox(s.slot))
 	in := ring.Open(layout.RingInbox(s.slot))
 	// Eén hergebruikte leesbuffer i.p.v. een allocatie per record: de payload
@@ -208,9 +219,8 @@ func Start(i int, image []byte, memLimit uint64, env map[string]string, mounts m
 	if err != nil {
 		return err
 	}
-	base, size := layout.SlotBase(i), uint64(layout.SlotStride)
-	if memLimit == 0 || memLimit > size {
-		return fmt.Errorf("memLimit %#x ongeldig (max %#x)", memLimit, size)
+	if memLimit == 0 {
+		return fmt.Errorf("memLimit 0 ongeldig")
 	}
 	envBlob := encodeEnv(env)
 	if len(envBlob) > layout.CtrlEnvMax {
@@ -233,10 +243,39 @@ func Start(i int, image []byte, memLimit uint64, env map[string]string, mounts m
 		return fmt.Errorf("entry %#x valt buiten elk slotbereik", f.Entry)
 	}
 	linked := int((f.Entry-layout.SlotsBase)/layout.SlotStride) + 1
-	if linked != i && board.Current().BootEL() < 2 {
-		return fmt.Errorf("image gelinkt voor slot %d op slot %d vergt stage-2 (EL2-boot)", linked, i)
-	}
 	linkBase := layout.SlotBase(linked)
+
+	// base/size = de fysieke partitie. Op EL2 dynamisch uit de pool
+	// gealloceerd op precies memLimit (de een 128MB, de ander 640MB); op de
+	// EL1-steiger (geen stage-2) is het de vaste slab op het linkadres.
+	// started markeert een geslaagde start: valt Start eerder uit, dan geeft
+	// de defer de gealloceerde partitie terug.
+	var started bool
+	var base, size uint64
+	if board.Current().BootEL() >= 2 {
+		if max := maxLimitFor(linkBase); memLimit > max {
+			return fmt.Errorf("memLimit %#x > %#x (één GB vanaf linkadres %#x; groter vergt vensteruitbreiding)", memLimit, max, linkBase)
+		}
+		pbase, err := partAlloc(i, memLimit)
+		if err != nil {
+			return err
+		}
+		base, size = pbase, align2M(memLimit)
+		// Vanaf hier faalt niets zonder de partitie terug te geven.
+		defer func() {
+			if !started {
+				partRelease(i)
+			}
+		}()
+	} else {
+		if linked != i {
+			return fmt.Errorf("image gelinkt voor slot %d op slot %d vergt stage-2 (EL2-boot)", linked, i)
+		}
+		base, size = layout.SlotBase(i), uint64(layout.SlotStride)
+		if memLimit > size {
+			return fmt.Errorf("memLimit %#x > slab %#x (EL1-steiger heeft vaste slots)", memLimit, size)
+		}
+	}
 	delta := base - linkBase // PA = linkadres + delta (identiek slot: 0)
 
 	// Segmenten naar de partitie. Headervelden zijn input — overflow-veilig
@@ -342,7 +381,7 @@ func Start(i int, image []byte, memLimit uint64, env map[string]string, mounts m
 	entry, ctx := f.Entry, uint64(0)
 	if board.Current().BootEL() >= 2 {
 		vectorsOnce.Do(stage2.InitVectors)
-		l1, err := stage2.Build(i, linkBase)
+		l1, err := stage2.Build(i, linkBase, base, size)
 		if err != nil {
 			return fmt.Errorf("stage-2 slot %d: %w", i, err)
 		}
@@ -365,6 +404,7 @@ func Start(i int, image []byte, memLimit uint64, env map[string]string, mounts m
 			return fmt.Errorf("poort %q: %w", name, err)
 		}
 	}
+	started = true // partitie blijft van deze task tot Stop
 	go claimServicer(i, root, mtab).run()
 	return nil
 }
@@ -382,8 +422,7 @@ func Stop(i int, timeout time.Duration) error {
 	}
 	ctrlWrite(i, layout.CtrlKill, 1)
 	if waitOff(i, timeout) {
-		hopswitch.Detach(i)
-		hopswitch.UnpublishSlot(i)
+		releaseSlot(i)
 		return nil
 	}
 	if board.Current().BootEL() < 2 {
@@ -391,11 +430,18 @@ func Stop(i int, timeout time.Duration) error {
 	}
 	board.Current().SGIKill(uint64(i))
 	if waitOff(i, time.Second) {
-		hopswitch.Detach(i)
-		hopswitch.UnpublishSlot(i)
+		releaseSlot(i)
 		return nil
 	}
 	return fmt.Errorf("slot %d is ook na de hard-kill-SGI niet uit", i)
+}
+
+// releaseSlot maakt een gestopt slot vrij: van de switch af, poorten in, en
+// de partitie terug naar de pool (de core is uit, dus niemand raakt hem meer).
+func releaseSlot(i int) {
+	hopswitch.Detach(i)
+	hopswitch.UnpublishSlot(i)
+	partRelease(i)
 }
 
 // waitOff polt tot de core van slot i uit is.
@@ -461,8 +507,31 @@ func Logs(i int) <-chan string {
 	return s.logs
 }
 
-// NumSlots is het aantal app-slots (= cores 1..MaxSlots).
-func NumSlots() int { return layout.MaxSlots }
+var (
+	numSlotsOnce sync.Once
+	numSlots     int
+)
+
+// NumSlots is het aantal bruikbare app-slots: cores 1..MaxSlots die PSCI
+// herkent. Het layout reserveert MaxSlots plekken, maar een node kan minder
+// cores hebben (QEMU -smp < MaxSlots+1, of een kleiner board). Zonder deze
+// probe adverteert HOP slots zonder core: allocateSlot kiest er een, Start
+// doet AFFINITY_INFO → PSCI INVALID_PARAMS → "core niet uit" → de job is
+// permanent onplaatsbaar. We tellen de aaneengesloten bestaande cores, één
+// keer (de topologie ligt vast na boot).
+func NumSlots() int {
+	numSlotsOnce.Do(func() {
+		for i := 1; i <= layout.MaxSlots; i++ {
+			switch board.Current().AffinityInfo(uint64(i)) {
+			case board.PowerOn, board.PowerOff, board.PowerOnPending:
+				numSlots = i // geldige core: schuif de grens op
+			default:
+				return // eerste ontbrekende core (INVALID_PARAMS): stop
+			}
+		}
+	})
+	return numSlots
+}
 
 // CoreClass geeft de cluster-klasse van slot i. De indeling is board-kennis
 // (de O6N-tri-clustertopologie), dus komt van het actieve board — slots kent

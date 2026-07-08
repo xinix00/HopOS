@@ -7,7 +7,6 @@ package main
 
 import (
 	"bufio"
-	"hash/fnv"
 	"net"
 	"runtime"
 	"time"
@@ -16,6 +15,7 @@ import (
 	"hop-os/metal/applib"
 	"hop-os/metal/applib/appnet"
 	_ "hop-os/metal/board/qemuvirt"
+	"hop-os/metal/checksum"
 	"hop-os/metal/layout"
 )
 
@@ -75,7 +75,7 @@ func main() {
 			app.Logf("FSDEMO reader: LEK — '..'-escape werkt")
 			exit(app, 3)
 		}
-		sum := fnv64(b)
+		sum := checksum.FNV64(b)
 		app.Logf("FSDEMO reader: %d bytes, checksum %#x", len(b), sum)
 		exit(app, sum)
 
@@ -190,13 +190,4 @@ func main() {
 func exit(app *applib.App, code uint64) {
 	time.Sleep(100 * time.Millisecond)
 	app.Exit(code)
-}
-
-// fnv64 is FNV-1a (hash/fnv); HOP rekent met dezelfde stdlib-som over hetzelfde
-// bestand — één bron van waarheid, geen hand-getypte constanten die kunnen
-// afwijken tussen app en HOP.
-func fnv64(b []byte) uint64 {
-	h := fnv.New64a()
-	h.Write(b)
-	return h.Sum64()
 }

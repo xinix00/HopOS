@@ -26,10 +26,7 @@ const (
 	// ttyAMA10). De firmware initialiseert hem (baud 115200) zodra hij zelf
 	// bootlogs schrijft — config.txt: uart_2ndstage=1 — dus printk hoeft
 	// alleen DR te vullen; wij programmeren geen clocks.
-	UART0Base = 0x107d001000
-	uartDR    = UART0Base + 0x00
-	uartFR    = UART0Base + 0x18
-	frTXFF    = 1 << 5
+	UART0Base = 0x107d001000 // PL011-poke via metal/pl011 (offsets/bit gedeeld)
 
 	// GIC-400 (GICv2 — géén v3: SGI's gaan hier via GICD_SGIR, niet via
 	// systeemregisters). Fase P1: hard-kill-SGI's; de probe raakt de GIC niet.

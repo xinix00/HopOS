@@ -89,22 +89,24 @@ func main() {
 	cfg.Node.IP = board.Current().Net().IP
 	cfg.Node.Port = 8080 // leader-API = 9080
 
-	// Geheugen dat we HOP aanbieden. HOP kent per job de MemoryLimit en
-	// overspawnt nooit (leader-capaciteit) — dus dit getal is de ceiling
-	// waartegen hij plant. We melden het gedetecteerde DRAM (uit de DTB),
-	// maar begrensd tot wat de huidige slot-layout ook echt kan waarmaken
-	// (11 × SlotStride): tot de dynamische partities er zijn (gap #1, deel 2)
-	// zou méér aanbieden HOP jobs laten plaatsen die slots.Start weigert.
-	slotCap := uint64(layout.MaxSlots) * layout.SlotStride
-	offer := slotCap
+	// Geheugen. HOP kent per job de MemoryLimit en overspawnt nooit — dus het
+	// getal dat we aanbieden is de plaatsings-ceiling. Twee dingen bewaken:
+	//  1. Heeft de node fysiek genoeg RAM voor het (statische) layout? Zo
+	//     niet, dan zouden slots/ringen buiten het echte RAM vallen — stille
+	//     corruptie. Dan weigeren we hard i.p.v. door te draaien.
+	//  2. Bied HOP exact de slot-capaciteit aan die we kunnen waarmaken.
+	// De gedetecteerde DRAM (via de DTB, x0) is de bron; faalt de detectie,
+	// dan vertrouwen we op het layout (QEMU zet x0 niet — zie board/fdt).
+	offer := slots.PoolBytes() // HOP alloceert hieruit per job (dynamische partities)
 	if total := board.Current().MemTotal(); total > 0 {
-		fmt.Printf("geheugen: %d MB DRAM gedetecteerd (DTB); slot-layout kan er nu %d MB van benutten\n",
-			total>>20, slotCap>>20)
-		if total < offer {
-			offer = total // klein board: nooit meer aanbieden dan er fysiek is
+		if total < layout.RequiredRAM() {
+			fail("geheugen", fmt.Errorf("node heeft %d MB DRAM, layout vereist %d MB (slots/ringen zouden buiten RAM vallen)",
+				total>>20, layout.RequiredRAM()>>20))
 		}
+		fmt.Printf("geheugen: %d MB DRAM (DTB) — layout vereist %d MB; HOP krijgt een %d MB partitie-pool (per job dynamisch)\n",
+			total>>20, layout.RequiredRAM()>>20, offer>>20)
 	} else {
-		fmt.Printf("geheugen: DTB-detectie faalde — val terug op slot-layout (%d MB)\n", slotCap>>20)
+		fmt.Printf("geheugen: DTB-detectie faalde — vertrouw op het layout, HOP krijgt een %d MB partitie-pool (per job dynamisch)\n", offer>>20)
 	}
 
 	fmt.Printf("HOP-agent start: node %s, agent :%d, leader :%d — HOPOS_AGENT_UP\n",

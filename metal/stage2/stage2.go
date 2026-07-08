@@ -30,6 +30,7 @@ import (
 
 	"hop-os/metal/dev"
 	"hop-os/metal/layout"
+	"hop-os/metal/psci"
 )
 
 // Descriptor-bits (stage-2): AF, SH=inner, S2AP en MemAttr per gebruik.
@@ -63,23 +64,34 @@ const (
 // core-index) en zet dan de core uit via PSCI CPU_OFF. HOP ziet "core off
 // zonder StatusExited" mét syndroom: hard gestopt, slot direct herbruikbaar.
 func InitVectors() {
+	// CtrlBase en PSCI_CPU_OFF moeten met één movz (+movk) te laden zijn: de
+	// adres-immediates hieronder worden uit de constanten gerekend, niet
+	// hand-gebakken, zodat de asm nooit stil kan afwijken van layout/psci.
+	// Deze invariant bewaakt dat (layout is compile-time, dus dit is in feite
+	// een build-time-check die als panic bij de eerste boot verschijnt).
+	if uint64(layout.CtrlBase)>>32 != 0 || uint64(layout.CtrlBase)&0xFFFF != 0 {
+		panic("stage2: CtrlBase moet 32-bit en 16-bit-shiftbaar zijn (één movz)")
+	}
+	if psci.CPU_OFF>>32 != 0 {
+		panic("stage2: PSCI_CPU_OFF past niet in 32 bits (movz+movk)")
+	}
 	handler := func(v uint32) []uint32 {
 		return []uint32{
-			0xd53800a0,            // mrs  x0, mpidr_el1
-			0x92401c00,            // and  x0, x0, #0xff          (slot = aff0)
-			0xd2b60001,            // movz x1, #0xB000, lsl #16   (layout.CtrlBase)
-			0x8b003021,            // add  x1, x1, x0, lsl #12    (eigen ctrl-page)
-			0xd2800004 | (v+1)<<5, // movz x4, #(v+1)
-			0xf9003424,            // str  x4, [x1, #0x68]        (layout.CtrlFaultVec)
-			0xd53c5202,            // mrs  x2, esr_el2
-			0xf9002c22,            // str  x2, [x1, #0x58]        (layout.CtrlFaultESR)
-			0xd53c6003,            // mrs  x3, far_el2
-			0xf9003023,            // str  x3, [x1, #0x60]        (layout.CtrlFaultFAR)
-			0xd5033fbf,            // dmb  sy                      (publiceer vóór CPU_OFF)
-			0xd2b08000,            // movz x0, #0x8400, lsl #16   (PSCI_CPU_OFF = 0x84000002)
-			0xf2800040,            // movk x0, #0x0002
-			0xd4000003,            // smc  #0
-			0x14000000,            // b .  (onbereikbaar)
+			0xd53800a0,                              // mrs  x0, mpidr_el1
+			0x92401c00,                              // and  x0, x0, #0xff        (slot = aff0)
+			movz(1, uint32(layout.CtrlBase>>16), 16), // movz x1, #(CtrlBase>>16), lsl #16
+			0x8b003021,                              // add  x1, x1, x0, lsl #12  (eigen ctrl-page)
+			movz(4, v+1, 0),                         // movz x4, #(v+1)
+			strX(4, 1, layout.CtrlFaultVec),         // str  x4, [x1, #CtrlFaultVec]
+			0xd53c5202,                              // mrs  x2, esr_el2
+			strX(2, 1, layout.CtrlFaultESR),         // str  x2, [x1, #CtrlFaultESR]
+			0xd53c6003,                              // mrs  x3, far_el2
+			strX(3, 1, layout.CtrlFaultFAR),         // str  x3, [x1, #CtrlFaultFAR]
+			0xd5033fbf,                              // dmb  sy                    (publiceer vóór CPU_OFF)
+			movz(0, uint32(psci.CPU_OFF>>16), 16),   // movz x0, #(CPU_OFF>>16), lsl #16
+			movk(0, uint32(psci.CPU_OFF&0xffff), 0), // movk x0, #(CPU_OFF&0xffff)
+			0xd4000003,                              // smc  #0
+			0x14000000,                              // b .  (onbereikbaar)
 		}
 	}
 	dev.Clear(uintptr(layout.Stage2Base), 0x800)
@@ -91,13 +103,31 @@ func InitVectors() {
 	dev.MB()
 }
 
+// Minimale AArch64-encoders voor de vector-generator: één bron van waarheid
+// (de constanten) i.p.v. hand-gebakken instructiewoorden. Zie ARM ARM C6.2.
+//
+//	movz Xd, #imm16, lsl #shift   (shift ∈ {0,16,32,48})
+//	movk Xd, #imm16, lsl #shift
+//	str  Xt, [Xn, #off]           (off veelvoud van 8, 64-bit)
+func movz(rd, imm16, shift uint32) uint32 {
+	return 0xD2800000 | (shift/16)<<21 | (imm16&0xFFFF)<<5 | rd&0x1F
+}
+
+func movk(rd, imm16, shift uint32) uint32 {
+	return 0xF2800000 | (shift/16)<<21 | (imm16&0xFFFF)<<5 | rd&0x1F
+}
+
+func strX(rt, rn, off uint32) uint32 {
+	return 0xF9000000 | (off/8)<<10 | (rn&0x1F)<<5 | rt&0x1F
+}
+
 // Build schrijft de stage-2-tabellen voor slot i en geeft het fysieke adres
 // van de L1-tabel terug (voor VTTBR_EL2, gezet door de EL2-trampoline).
-// ipaBase is het linkadres-bereik van de image (de partitiebasis van het
-// slot waarvoor hij gelinkt is — canoniek slot 1); dat IPA-bereik wordt op
-// de fysieke partitie van slot i gelegd. ipaBase == SlotBase(i) is de oude
-// identity-map.
-func Build(i int, ipaBase uint64) (uint64, error) {
+// ipaBase is het linkadres-bereik van de image; paBase/size is de fysieke
+// partitie die HOP voor deze task alloceerde (variabel per job). Het
+// IPA-bereik [ipaBase, ipaBase+size) wordt op [paBase, paBase+size) gelegd.
+// size ≤ één 1GB-blok vanaf ipaBase (aanroeper begrenst dit) → één L2-tabel.
+func Build(i int, ipaBase, paBase, size uint64) (uint64, error) {
 	if i < 1 || i > layout.MaxSlots {
 		return 0, fmt.Errorf("slot %d buiten bereik", i)
 	}
@@ -110,11 +140,9 @@ func Build(i int, ipaBase uint64) (uint64, error) {
 	l3Ctrl := uint64(base + l3CtrlOff)
 	l3Ring := uint64(base + l3RingOff)
 
-	// L1: 1GB-entries. Een IPA-bereik in het GB van de ctrl/ring-regio
-	// (legacy per-slot images voor slot 7-11) deelt zijn L2 met de
-	// device-L3's (indexes botsen niet: partitie ≤ idx 319, ctrl/ring op
-	// 384/392, net-ringen op 408+).
-	slotBase := layout.SlotBase(i)
+	// L1: 1GB-entries. Een IPA-bereik in het GB van de ctrl/ring-regio deelt
+	// zijn L2 met de device-L3's (indexes botsen niet: partitie ≤ idx 351,
+	// ctrl/ring op 384/392, net-ringen op 408+).
 	partL2 := l2Part
 	if ipaBase>>30 == uint64(layout.CtrlBase)>>30 {
 		partL2 = l2Dev
@@ -122,11 +150,11 @@ func Build(i int, ipaBase uint64) (uint64, error) {
 	dev.Write64(base+l1Off+uintptr(ipaBase>>30)*8, partL2|descTable)
 	dev.Write64(base+l1Off+uintptr(uint64(layout.CtrlBase)>>30)*8, l2Dev|descTable)
 
-	// Partitie als 2MB-blokken: IPA (linkadres) → PA (eigen partitie).
+	// Partitie als 2MB-blokken: IPA (linkadres) → PA (gealloceerde partitie).
 	gbBase := ipaBase &^ ((1 << 30) - 1)
-	for off := uint64(0); off < layout.SlotStride; off += 2 << 20 {
+	for off := uint64(0); off < size; off += 2 << 20 {
 		idx := (ipaBase + off - gbBase) >> 21
-		dev.Write64(uintptr(partL2)+uintptr(idx)*8, (slotBase+off)|blockRW)
+		dev.Write64(uintptr(partL2)+uintptr(idx)*8, (paBase+off)|blockRW)
 	}
 
 	// L2dev → L3's voor de ctrl- en ring-regio (pagina-granulariteit).

@@ -6,8 +6,13 @@ package rpi5
 // stille fallback.
 
 import (
+	"net"
+
+	gnet "github.com/usbarmory/go-net"
+
 	"hop-os/metal/board"
 	"hop-os/metal/board/raspi"
+	"hop-os/metal/dev"
 	"hop-os/metal/fdt"
 )
 
@@ -22,11 +27,13 @@ func (machine) BootEL() int { return int(BootEL()) }
 func (machine) CoreID() int { return CoreID() }
 
 // MemTotal leest de DTB die de firmware in x0 meegaf (cpuinit.s → DTBPtr) en
-// telt het /memory-node op. 0 = niet gevonden. LET OP: op het board te
-// verifiëren (levert de Pi-firmware de DTB-pointer in x0 aan een raw kernel?
-// zie docs/rpi5.md); de VideoCore-mailbox is de tweede bron (P2b).
+// telt het /memory-node op. 0 = niet gevonden. DTBPtr is het scratch-woord
+// waarin cpuinit x0 legde, dus eerst dereferencen: het woord bevat het
+// DTB-adres. LET OP: op het board te verifiëren (levert de Pi-firmware de
+// DTB-pointer in x0 aan een raw kernel? zie docs/rpi5.md); de
+// VideoCore-mailbox is de tweede bron (P2b).
 func (machine) MemTotal() uint64 {
-	if n, ok := fdt.MemTotal(DTBPtr); ok {
+	if n, ok := fdt.MemTotal(uintptr(dev.Read64(DTBPtr))); ok {
 		return n
 	}
 	return 0
@@ -56,8 +63,8 @@ func (machine) SGIClearPending(core uint64) { panic("rpi5: SGI-clear is fase P1 
 func (machine) S2TrampPC() uint64 { panic("rpi5: EL2-trampoline is fase P1") }
 
 // ProbeNIC: fase P2 — de NIC hangt achter de RP1-southbridge (PCIe, Cadence
-// GEM); er is nog geen netwerkpad.
-func (machine) ProbeNIC() (base uint64, irq int) { return 0, 0 }
+// GEM, metal/gem); er is nog geen netwerkpad, dus nog geen device.
+func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) { return nil, nil, nil }
 
 // Net: fase P2 — komt uit DHCP zodra de GEM-driver er is.
 func (machine) Net() board.NetConfig { return board.NetConfig{} }

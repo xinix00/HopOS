@@ -15,6 +15,7 @@ import (
 
 	"github.com/usbarmory/tamago/arm64"
 
+	"hop-os/metal/dev"
 	"hop-os/metal/fdt"
 	"hop-os/metal/idle"
 	"hop-os/metal/layout"
@@ -22,10 +23,7 @@ import (
 
 // QEMU virt memory map (hw/arm/virt.c, stabiel gedocumenteerd).
 const (
-	UART0Base = 0x09000000 // PL011
-	uartDR    = UART0Base + 0x00
-	uartFR    = UART0Base + 0x18
-	frTXFF    = 1 << 5
+	UART0Base = 0x09000000 // PL011-poke via metal/pl011 (offsets/bit gedeeld)
 
 	GICDBase = 0x08000000 // GICv3 distributor (nog ongebruikt)
 	GICRBase = 0x080a0000 // GICv3 redistributors
@@ -66,7 +64,10 @@ func hwinit1() {
 	// aanroeper valt terug op het statische slot-plan. Alleen core 0 heeft de
 	// scratch leesbaar (app-cores: stage-2).
 	if CoreID() == 0 {
-		if n, ok := fdt.MemTotal(layout.DTBPtr); ok {
+		// layout.DTBPtr is het scratch-woord waarin cpuinit x0 legde; eerst
+		// dereferencen naar het echte DTB-adres. Op QEMU -kernel is x0=0 →
+		// Read64 geeft 0 → MemTotal(0) is (0,false) → nette fallback.
+		if n, ok := fdt.MemTotal(uintptr(dev.Read64(layout.DTBPtr))); ok {
 			memTotal = n
 		}
 	}

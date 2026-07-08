@@ -114,6 +114,12 @@ func (a *App) rpc(req hopabi.Req, timeout time.Duration) (hopabi.Resp, error) {
 	a.seq++
 	req.Seq = a.seq
 	payload := hopabi.EncodeReq(req)
+	// Spiegel van de servicer-kant (slots.go): een request die nóóit in de
+	// outbox past zou de Write-lus hieronder de volle timeout laten spinnen en
+	// dan misleidend "outbox blijft vol" geven. Meteen een grootte-fout.
+	if !a.out.Fits(len(payload)) {
+		return hopabi.Resp{}, fmt.Errorf("hop-ABI: request %d bytes past niet in de outbox", len(payload))
+	}
 	deadline := time.Now().Add(timeout)
 	for !a.out.Write(ring.TypeRPCReq, payload) {
 		if time.Now().After(deadline) {

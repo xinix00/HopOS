@@ -74,6 +74,9 @@ const (
 	txWrap = 1 << 30
 	txLast = 1 << 15
 
+	// txTimeout begrenst de wacht op een vrije TX-descriptor (Transmit).
+	txTimeout = 100 * time.Millisecond
+
 	// MDIO-frame (MAN-register).
 	manClause22 = 1 << 30
 	manRead     = 0b10 << 28
@@ -291,7 +294,14 @@ func (n *Net) Transmit(buf []byte) error {
 		return fmt.Errorf("gem: frame %d > %d", len(buf), mtuBuf)
 	}
 	d := n.txRing + uintptr(n.txHead)*16
+	// Wacht op een vrije descriptor, maar begrensd — net als AutoNeg/virtionet
+	// een deadline hebben. Een dode/hangende DMA mag deze goroutine (en dus de
+	// caller) niet eeuwig laten busy-waiten.
+	deadline := time.Now().Add(txTimeout)
 	for dev.Read32(d+4)&txUsed == 0 { // DMA nog bezig met deze descriptor
+		if time.Now().After(deadline) {
+			return fmt.Errorf("gem: TX-descriptor %d blijft bezig na %v (DMA hangt?)", n.txHead, txTimeout)
+		}
 	}
 	bus := uint64(n.txBufs+uintptr(n.txHead)*mtuBuf) + n.BusOff
 	dev.Copy(n.txBufs+uintptr(n.txHead)*mtuBuf, buf)

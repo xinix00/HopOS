@@ -8,6 +8,13 @@
 // edit-ronde door elke "generieke" package.
 package board
 
+import (
+	"fmt"
+	"net"
+
+	gnet "github.com/usbarmory/go-net"
+)
+
 // PowerState is de powertoestand van een core (PSCI AFFINITY_INFO, ARM DEN 0022).
 type PowerState int
 
@@ -16,6 +23,20 @@ const (
 	PowerOff       PowerState = 1
 	PowerOnPending PowerState = 2
 )
+
+// String maakt PowerState een fmt.Stringer, zodat %s de leesbare toestand
+// geeft (gedeeld door de probes i.p.v. een powstr-kopie per main).
+func (s PowerState) String() string {
+	switch s {
+	case PowerOn:
+		return "ON"
+	case PowerOff:
+		return "OFF"
+	case PowerOnPending:
+		return "ON_PENDING"
+	}
+	return fmt.Sprintf("?%d", int(s))
+}
 
 // PSCISuccess is de PSCI-return-code voor succes (SMCCC).
 const PSCISuccess int64 = 0
@@ -71,8 +92,13 @@ type Board interface {
 	// onder stage-2-isolatie.
 	S2TrampPC() uint64
 
-	// Netwerk.
-	ProbeNIC() (base uint64, irq int)
+	// Netwerk. ProbeNIC construeert én initialiseert de NIC van dit board — de
+	// board kent de driver (virtio-net op QEMU, Cadence GEM op de Pi, RTL8126
+	// op de O6N) en geeft 'm als go-net-device terug plus zijn MAC (die zit op
+	// het concrete driver-type, niet op de NetworkDevice-interface). Zo blijft
+	// hopnet driver-agnostisch. Een nil device = geen NIC gevonden; een error =
+	// wel gevonden maar de init faalde.
+	ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error)
 	Net() NetConfig
 
 	// PCIe-adresplan.
