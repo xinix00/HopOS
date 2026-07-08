@@ -38,6 +38,13 @@ const (
 	// de drop naar EL1); BootEL() leest het. Moet gelijk zijn aan de
 	// BOOT_SCRATCH-#define in de cpuinit.s van beide boards.
 	BootScratch = 0x1FF000
+
+	// MboxScratch: property-buffer voor de VideoCore-mailbox (metal/vcmbox).
+	// Onder de RAM-declaratie → voor ons device-gemapt (ongecachet), voor de
+	// VC gewone DRAM; < 4GB en 16-byte-gealigneerd zoals het 32-bit
+	// mailbox-register eist. Vrij gat tussen ParkCount (32 bytes tellers)
+	// en BootScratch.
+	MboxScratch = 0x1F9000
 )
 
 // ARM64 core-instantie (zelfde constructie als board/qemuvirt).
@@ -70,3 +77,15 @@ func mpidr() uint64
 // MPIDR geeft het rauwe register; de nummering (aff0 op de A72, aff1 op de
 // A76) is boardspecifiek — zie CoreID in het board-pakket.
 func MPIDR() uint64 { return mpidr() }
+
+// cntfrq/cntpct lezen de generic-timer-registers (cpu_arm64.s).
+func cntfrq() uint64
+func cntpct() uint64
+
+// CNTFRQ geeft de counterfrequentie die de firmware zette (verwacht 54MHz op
+// de Pi; 0 = niet gezet → tamago's timers en time.Sleep zijn dan dood).
+func CNTFRQ() uint64 { return cntfrq() }
+
+// CNTPCT geeft de rauwe fysieke counter. Kan trappen als EL1PCTEN uit staat
+// (zie cpu_arm64.s) — kondig de read aan vóór je hem doet.
+func CNTPCT() uint64 { return cntpct() }

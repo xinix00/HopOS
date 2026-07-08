@@ -19,12 +19,54 @@
 #define DTB_PTR      0x1FF008
 #define UART_DR 0x107d001000
 #define UART_FR 0x107d001018
+#define GIO_AON 0x107d517c00	// brcmstb-GIO bank 0: +0 ODEN, +4 DATA, +8 IODIR
+#define LED_BIT $0x200		// ACT-LED = pin 9, active-low (DTB: led-act)
 
 TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	MOVD	R0, R9		// x0 = DTB-pointer bij firmware-boot; bewaren vóór clobber
-	// Levensteken 1: 'P' (Pi) — de firmware heeft de UART al geconfigureerd.
+
+	// Levensteken 0 — de ACT-LED, vóór álles: de UART hieronder kan zonder
+	// JST-sessie dood zijn (ongeklokt → FR-poll hangt), de always-on-GPIO
+	// niet. 3× traag knipperen = "onze eerste instructies draaien".
+	// Delay = domme SUBS-lus (~0,1-0,5s per fase, frequentie-afhankelijk):
+	// nul systeemregister-gokken in het blindste stuk van de boot.
+	MOVD	$GIO_AON, R2
+	MOVWU	0(R2), R3
+	BIC	LED_BIT, R3
+	MOVW	R3, 0(R2)	// ODEN: push-pull
+	MOVWU	8(R2), R3
+	BIC	LED_BIT, R3
+	MOVW	R3, 8(R2)	// IODIR: output (1 = input)
+	MOVD	$3, R4
+blink:
+	MOVWU	4(R2), R3
+	BIC	LED_BIT, R3
+	MOVW	R3, 4(R2)	// DATA bit 9 laag = LED aan
+	MOVD	$0x400000, R5
+ledon:
+	SUBS	$1, R5
+	BNE	ledon
+	MOVWU	4(R2), R3
+	ORR	LED_BIT, R3
+	MOVW	R3, 4(R2)	// LED uit
+	MOVD	$0x400000, R5
+ledoff:
+	SUBS	$1, R5
+	BNE	ledoff
+	SUBS	$1, R4
+	BNE	blink
+
+	// Levensteken 1: 'P' (Pi) — ALLEEN mét debug-sessie. Zonder sessie is de
+	// PL011 mogelijk ongeklokt en kan zelfs de FR-read de bus laten stallen;
+	// daar helpt geen poll-limiet tegen (de eerste read komt nooit terug).
+	// Weghalen zodra de Debug Probe er is: verwijder de B hieronder.
+	B	uartklaar
+
 	MOVD	$UART_FR, R2
+	MOVD	$100000, R4
 wait1:
+	SUBS	$1, R4
+	BEQ	uartklaar	// FR.TXFF blijft vol → UART dood: overslaan
 	MOVWU	(R2), R3
 	TBNZ	$5, R3, wait1	// FR.TXFF: FIFO vol → poll
 	MOVD	$UART_DR, R2
@@ -37,6 +79,10 @@ wait1:
 	AND	$0b11, R0, R0
 	ADD	$0x30, R0, R3	// '0' + EL
 	MOVW	R3, (R2)
+uartklaar:
+	MRS	CurrentEL, R0	// (opnieuw: het UART-pad kan overgeslagen zijn)
+	LSR	$2, R0, R0
+	AND	$0b11, R0, R0
 
 	CMP	$2, R0
 	BEQ	el2
@@ -101,6 +147,21 @@ el3:
 	ERET
 
 TEXT ·cpuinitEL1(SB),NOSPLIT|NOFRAME,$0
+	// Levensteken 3: één korte LED-puls — de ERET naar het absolute
+	// linkadres is gelukt (firmware laadde ons écht op het load-adres) en we
+	// draaien op EL1. Daarna: 3 traag + 1 kort gezien = asm-keten compleet.
+	MOVD	$GIO_AON, R2
+	MOVWU	4(R2), R3
+	BIC	LED_BIT, R3
+	MOVW	R3, 4(R2)
+	MOVD	$0x200000, R5
+led1on:
+	SUBS	$1, R5
+	BNE	led1on
+	MOVWU	4(R2), R3
+	ORR	LED_BIT, R3
+	MOVW	R3, 4(R2)
+
 	// SCTLR_EL1: alignment-check en MMU uit (tamago zet ze zelf weer aan).
 	MRS	SCTLR_EL1, R0
 	BIC	$1<<1, R0

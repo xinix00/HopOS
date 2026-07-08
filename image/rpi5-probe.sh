@@ -15,17 +15,29 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 	"$TAMAGO" build -tags linkcpuinit -trimpath \
 	-ldflags "-s -w -T 0x210000 -R 0x1000" -o probe5.elf ./cmd/probe5
 
-# 2. ELF → kernel_2712.img (raw + arm64 Image-header). Als los bestand
-#    gedraaid: stdlib-only, geen module nodig.
+# 2. ELF → kernel_2712.img, RAW (het Circle-recept): géén arm64-Image-magic,
+#    plat bestand, code0-branch op byte 0; de firmware springt blind naar
+#    kernel_address (expliciet in config.txt, zoals Circle doet). Boot-
+#    metingen 2026-07-08: het Image-pad (magic, raw én gzip) weigerde onze
+#    kernel geluidloos — nul levenstekens — terwijl ditzelfde board Linux
+#    boot; het raw-pad is door Circle op de Pi 5 bewezen.
 cd "$DIR"
 mkdir -p sd-rpi5
-go run "$DIR/image/mkkernel/main.go" -elf metal/probe5.elf -o sd-rpi5/kernel_2712.img -load 0x200000
+go run "$DIR/image/mkkernel/main.go" -elf metal/probe5.elf -o sd-rpi5/kernel_2712.img -load 0x200000 -raw
 
 # 3. config.txt + instructies.
 cat > sd-rpi5/config.txt <<'EOF'
 # HopOS probe5 — Raspberry Pi 5 (zie docs/rpi5.md)
 arm_64bit=1
 kernel=kernel_2712.img
+# DE sleutel voor bare metal op de Pi 5 (gevonden 2026-07-08 na 5 stille
+# boots): zonder os_check=0 neemt de EEPROM-bootloader aan dat hij Linux
+# laadt en valideert hij het image daarop — elk niet-Linux-image sneuvelt
+# geluidloos vóór de eerste eigen instructie. Bestond niet op de Pi 4.
+os_check=0
+# Raw image (geen arm64-magic) → de firmware springt naar kernel_address;
+# expliciet zetten, zoals Circle (config64.txt) dat doet.
+kernel_address=0x200000
 # DTB buiten onze RAM-declaratie (de firmware eist een DTB op de kaart,
 # de probe gebruikt hem niet).
 device_tree_address=0x0f000000

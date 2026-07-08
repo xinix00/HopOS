@@ -9,12 +9,18 @@ package raspi
 // ParkCode bouwt de park-instructiereeks voor een board met het gegeven
 // UART-DR-adres. Planten: woord voor woord (32-bit) op ParkBase schrijven
 // (dev.Write32), dan CPU_ON met entry=ParkBase en de core-index als ctx.
+// uartDR = 0 slaat het UART-teken over: op de Pi 5 zonder debug-sessie is
+// elke toegang tot de (mogelijk ongeklokte) PL011 verdacht — een gestalde
+// bus-access kent geen timeout en zou de core dood parkeren.
 func ParkCode(uartDR uint64) []uint32 {
-	code := loadAddr(1, uartDR) // x1 = UART DR
-	code = append(code,
-		0x1100C002, // add w2, w0, #0x30   ('0' + ctx)
-		0xB9000022, // str w2, [x1]
-	)
+	var code []uint32
+	if uartDR != 0 {
+		code = loadAddr(1, uartDR) // x1 = UART DR
+		code = append(code,
+			0x1100C002, // add w2, w0, #0x30   ('0' + ctx)
+			0xB9000022, // str w2, [x1]
+		)
+	}
 	code = append(code, loadAddr(3, ParkCount)...) // x3 = ParkCount
 	return append(code,
 		0x8B000C63, // add x3, x3, x0, lsl #3   (+ ctx*8)

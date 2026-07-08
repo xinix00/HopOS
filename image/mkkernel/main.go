@@ -27,6 +27,7 @@ func main() {
 	elfPath := flag.String("elf", "", "invoer-ELF (tamago-image)")
 	outPath := flag.String("o", "kernel_2712.img", "uitvoerbestand")
 	loadAddr := flag.Uint64("load", 0x200000, "laadadres (kernel_address; arm64-default van de Pi-firmware)")
+	raw := flag.Bool("raw", false, "geen arm64 Image-header: alleen de code0-branch, géén ARM\\x64-magic — de firmware behandelt het bestand dan als raw binary en springt blind naar kernel_address (het Circle-recept; boot-meting 2026-07-08: het Image-pad mét magic weigerde onze kernel zonder enig levensteken, het raw-pad is op de Pi 5 bewezen)")
 	flag.Parse()
 	if *elfPath == "" {
 		die("-elf is verplicht")
@@ -71,14 +72,17 @@ func main() {
 		}
 	}
 
-	// arm64 Image-header (Linux Documentation/arch/arm64/booting.rst):
-	// code0 = branch naar de entry, magic "ARM\x64", 4K-pages, LE.
+	// code0: branch naar de entry — in beide modi het eerste instructiewoord.
 	binary.LittleEndian.PutUint32(img[0:], 0x14000000|uint32((f.Entry-load)/4)&0x03FFFFFF) // code0: b entry
-	binary.LittleEndian.PutUint32(img[4:], 0)                                              // code1
-	binary.LittleEndian.PutUint64(img[8:], 0)                                              // text_offset
-	binary.LittleEndian.PutUint64(img[16:], memEnd)                                        // image_size (incl. BSS)
-	binary.LittleEndian.PutUint64(img[24:], 0b010)                                         // flags: LE, 4K
-	binary.LittleEndian.PutUint32(img[56:], 0x644d5241)                                    // magic "ARM\x64"
+	if !*raw {
+		// arm64 Image-header (Linux Documentation/arch/arm64/booting.rst):
+		// magic "ARM\x64", 4K-pages, LE. Zonder -raw; zie de -raw-flag.
+		binary.LittleEndian.PutUint32(img[4:], 0)       // code1
+		binary.LittleEndian.PutUint64(img[8:], 0)       // text_offset
+		binary.LittleEndian.PutUint64(img[16:], memEnd) // image_size (incl. BSS)
+		binary.LittleEndian.PutUint64(img[24:], 0b010)  // flags: LE, 4K
+		binary.LittleEndian.PutUint32(img[56:], 0x644d5241) // magic "ARM\x64"
+	}
 
 	if err := os.WriteFile(*outPath, img, 0o644); err != nil {
 		die("%v", err)

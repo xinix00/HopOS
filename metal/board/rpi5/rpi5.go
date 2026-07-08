@@ -38,6 +38,11 @@ const (
 	// firmware in x0 meegaf — laag DRAM onder de kernel, zelfde plek als de
 	// boot-EL-scratch (+8). board.MemTotal parset 'm met metal/fdt.
 	DTBPtr = 0x1FF008
+
+	// VideoCore-mailbox (property-interface, metal/vcmbox): framebuffer,
+	// geheugensplitsing, later klok/temperatuur (P2b). Uit de DTB:
+	// soc@107c000000/mailbox@7c013880, ranges 0x0 → 0x10_00000000.
+	MboxBase = 0x107c013880
 )
 
 // CoreID geeft de eigen core-index. LET OP: de Cortex-A76 nummert cores in

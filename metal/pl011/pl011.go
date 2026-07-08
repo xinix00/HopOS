@@ -16,12 +16,27 @@ const (
 	frTXFF = 1 << 5 // TX FIFO full
 )
 
-// Putc stuurt één byte naar de PL011 op base en pollt tot de TX-FIFO ruimte
-// heeft. Een pure functie met een compile-time base — veilig als printk-hook
-// vóór init(), zonder runtime-parametrisatie. De firmware heeft de UART al
-// geconfigureerd (uart_2ndstage=1 op de Pi); wij raken alleen DR en FR aan.
+// dead: de TX-FIFO-vol-vlag bleef ooit voorbij de poll-grens staan — een
+// ongeklokte/dode PL011 (bv. de Pi 5-debug-UART zonder sessie) leest all-ones
+// en zou printk anders eeuwig gijzelen. Eén UART per board, dus één vlag.
+var dead bool
+
+// Putc stuurt één byte naar de PL011 op base en pollt begrensd tot de
+// TX-FIFO ruimte heeft. Een pure functie met een compile-time base — veilig
+// als printk-hook vóór init(), zonder runtime-parametrisatie. De firmware
+// heeft de UART al geconfigureerd (uart_2ndstage=1 op de Pi); wij raken
+// alleen DR en FR aan. De poll-grens (~1M reads ≫ 16 tekens @ 115200) haalt
+// een dode UART uit het printpad i.p.v. de boot te laten hangen; HDMI/LED
+// (fbcons, docs/rpi5.md) zijn dan de kanalen.
 func Putc(base uintptr, c byte) {
-	for dev.Read32(base+fr)&frTXFF != 0 {
+	if dead {
+		return
+	}
+	for i := 0; dev.Read32(base+fr)&frTXFF != 0; i++ {
+		if i > 1<<20 {
+			dead = true
+			return
+		}
 	}
 	dev.Write32(base+dr, uint32(c))
 }
