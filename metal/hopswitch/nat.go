@@ -1,15 +1,24 @@
-// Poort-publicatie: stateloze DNAT tussen de externe NIC en het interne net.
-// Elke gepubliceerde poort heeft een vaste bestemming (node-IP:poort →
-// slot-IP:poort), dus per pakket worden alleen de headers herschreven en de
-// checksums incrementeel bijgewerkt (RFC 1624) — geen conntrack, geen
-// TCP-terminatie op core 0: het externe verkeer wordt doorgerouterd, niet
-// getunneld.
+// NAT tussen de externe NIC en het interne net — twee richtingen, geen tunnel:
 //
-// Bewust niet gedekt (conntrack nodig, pas bouwen bij behoefte): hairpin
-// (een interne client die via het nóde-IP naar een gepubliceerde poort
-// dialt — gebruik het slot-IP) en masquerade voor uitgaand app-verkeer
-// (uitgaand loopt via fetch/HOP). Niet-eerste IP-fragmenten dragen geen
-// L4-header en gaan ongemoeid naar de HOP-stack (die ze negeert).
+//   - Poort-publicatie (DNAT): een vaste bestemming node-IP:poort → slot-IP:
+//     poort. Stateloos: per pakket alleen headers herschrijven, checksums
+//     incrementeel (RFC 1624). natInbound (extern → slot) en natFromSlot
+//     (slot-antwoord → extern).
+//   - Uitgaand (masquerade / PAT): een app dialt naar buiten; HOP herschrijft
+//     bron slot-IP:poort → node-IP:node-poort en houdt een kleine conntrack
+//     bij zodat het antwoord terugvindt. TCP én UDP (DNS, QUIC). natOutbound
+//     (slot → extern) en de reply-tak in natInbound. Nooit TCP-terminatie op
+//     core 0 — HOP herschrijft alleen headers en schuift het frame door.
+//
+// De L2-next-hop (dst-MAC de NIC op) komt uit een neighbor-cache die passief
+// leert uit inbound frames: srcIP→srcMAC, en een frame van búíten ons subnet
+// is via de gateway gerelayed → dat is de gateway-MAC (de fallback voor een
+// nog-niet-geziene bestemming). HOP's eigen boot-verkeer (SNTP off-subnet, DNS
+// on-subnet) vult beide vóór de eerste app draait.
+//
+// Bewust niet gedekt (KISS, pas bij behoefte): hairpin (interne client naar
+// het node-IP — gebruik het slot-IP) en een bestemming op HOP's eigen subnet
+// die HOP zelf nog nooit sprak (geen neighbor → drop, de retransmit leert 'm).
 package hopswitch
 
 import (
@@ -17,6 +26,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	gnet "github.com/usbarmory/go-net"
 
@@ -29,11 +39,24 @@ const (
 	protoTCP = 6
 	protoUDP = 17
 
-	// maxNextHop begrenst de geleerde client→next-hop-tabel. De key is het
-	// (spoofbare) bron-IP, dus zonder plafond laat een stroom gespoofte IP's
-	// HOP's heap op core 0 vollopen. ~4096 entries (elk ~24B) is ruim voor
-	// echt verkeer maar hard begrensd.
-	maxNextHop = 4096
+	// Masquerade-poortbereik (PAT) en conntrack-grenzen. MasqBase/MasqEnd is
+	// bewust disjunct van het efemere bereik van HOP's eigen externe stack
+	// (hopnet begrenst die op [16000, MasqBase)): anders zou een inbound
+	// antwoord op HOP's eigen DNS/S3-poort per ongeluk een masquerade-flow naar
+	// dezelfde peer kunnen matchen. Het plafond maxFlows is de anti-DoS-grens
+	// (zoals bij de neighbor-cache): een app kan HOP's heap op core 0 nooit
+	// laten vollopen. Idle-timeouts ruimen dode flows op — geen TCP-toestand
+	// (FIN/RST) volgen, alleen inactiviteit; keepalives van een langlopende
+	// tunnel (cloudflared ~30-90s) blijven ruim binnen tcpIdle.
+	MasqBase = 20000
+	MasqEnd  = 60000
+	maxFlows = 4096
+	tcpIdle  = 300 * time.Second
+	udpIdle  = 60 * time.Second
+
+	// maxNeigh begrenst de neighbor-cache (spoofbare srcIP als key): bij het
+	// plafond legen en herleren, net als de oude next-hop-tabel.
+	maxNeigh = 4096
 )
 
 // pub is één gepubliceerde poort. HOP's conventie (ER_PORT_*): de app bindt
@@ -46,33 +69,78 @@ type pub struct {
 	slotPort uint16
 }
 
-// NAT-state, onder het switch-mutex (mu): het uitgaande pad loopt toch al
-// door de switch-lus, en Publish/Unpublish zijn zeldzaam.
-var (
-	pubs       []pub
-	uplink     *Uplink
-	nextHopFor = map[uint32][6]byte{} // client-IP → L2-next-hop (geleerd van inbound)
-	uplinkTxMu sync.Mutex
-)
-
-// Uplink omhult de externe NIC: inkomende frames voor gepubliceerde poorten
-// worden vóór de gvisor-stack afgevangen (DNAT → interne switch); de
-// zendkant krijgt een mutex omdat gvisor én de NAT er allebei op zenden
-// (virtionet.Transmit is zelf niet goroutine-veilig).
-type Uplink struct {
-	nic gnet.NetworkDevice
-	ip  uint32
-	mac [6]byte
+// flow is één uitgaande masquerade-verbinding.
+type flow struct {
+	proto    byte
+	slot     int
+	slotIP   uint32
+	slotPort uint16
+	dstIP    uint32
+	dstPort  uint16
+	nodePort uint16
+	seen     time.Time
 }
 
+// fkey/rkey: forward-lookup (slot → nieuw/bestaand flow) en reverse-lookup
+// (inbound antwoord → flow, op node-poort + peer).
+type fkey struct {
+	proto        byte
+	sIP, dIP     uint32
+	sPort, dPort uint16
+}
+type rkey struct {
+	proto byte
+	nPort uint16
+	pIP   uint32
+	pPort uint16
+}
+
+// Alle NAT-state onder het switch-mutex (mu, hopswitch.go): het uitgaande pad
+// loopt toch al door de switch-lus (onder mu), Publish/Unpublish zijn zeldzaam
+// en natInbound (uplink-RX-goroutine) neemt mu zelf.
+var (
+	pubs   []pub
+	uplink *Uplink
+
+	neigh   = map[uint32][6]byte{} // IP → L2-next-hop (passief geleerd)
+	gwMAC   [6]byte                // gateway-MAC (van off-subnet inbound)
+	gwKnown bool
+
+	flowsFwd  = map[fkey]*flow{}
+	flowsRev  = map[rkey]*flow{}
+	masqNext  = uint16(MasqBase)
+	flowsFull bool // eenmalig loggen bij een volle pool
+)
+
+// Uplink omhult de externe NIC: inkomende frames voor gepubliceerde poorten of
+// masquerade-antwoorden worden vóór de gvisor-stack afgevangen (→ interne
+// switch); de zendkant krijgt een mutex omdat gvisor én de NAT er allebei op
+// zenden (de NIC-Transmit is zelf niet goroutine-veilig).
+type Uplink struct {
+	nic  gnet.NetworkDevice
+	ip   uint32
+	mask uint32
+	mac  [6]byte
+}
+
+// uplinkTxMu serialiseert de zendkant: gvisor (hopnet) én de NAT zenden
+// allebei op de externe NIC, en NIC-Transmit is niet goroutine-veilig.
+var uplinkTxMu sync.Mutex
+
 // WrapUplink registreert de externe NIC bij de NAT en geeft de wrapper terug
-// die hopnet in zijn go-net-Interface hangt. nodeIP is het externe node-IP.
-func WrapUplink(nic gnet.NetworkDevice, nodeIP string, mac net.HardwareAddr) (*Uplink, error) {
-	ip4 := net.ParseIP(nodeIP).To4()
-	if ip4 == nil || len(mac) != 6 {
-		return nil, fmt.Errorf("uplink: ongeldig IP %q of MAC %v", nodeIP, mac)
+// die hopnet in zijn go-net-Interface hangt. cidr is het externe node-adres
+// mét prefix (bv. "10.0.2.15/24") — het masker bepaalt wat "off-subnet" is.
+func WrapUplink(nic gnet.NetworkDevice, cidr string, mac net.HardwareAddr) (*Uplink, error) {
+	ip, ipnet, err := net.ParseCIDR(cidr)
+	ip4 := ip.To4()
+	if err != nil || ip4 == nil || len(mac) != 6 {
+		return nil, fmt.Errorf("uplink: ongeldige CIDR %q of MAC %v", cidr, mac)
 	}
-	u := &Uplink{nic: nic, ip: binary.BigEndian.Uint32(ip4)}
+	u := &Uplink{
+		nic:  nic,
+		ip:   binary.BigEndian.Uint32(ip4),
+		mask: binary.BigEndian.Uint32(ipnet.Mask),
+	}
 	copy(u.mac[:], mac)
 	mu.Lock()
 	uplink = u
@@ -80,8 +148,9 @@ func WrapUplink(nic gnet.NetworkDevice, nodeIP string, mac net.HardwareAddr) (*U
 	return u, nil
 }
 
-// Receive haalt één frame van de NIC; frames voor gepubliceerde poorten
-// worden geclaimd (DNAT, het interne net op) en bereiken de HOP-stack nooit.
+// Receive haalt één frame van de NIC; frames voor gepubliceerde poorten of
+// lopende masquerade-flows worden geclaimd (→ interne switch) en bereiken de
+// HOP-stack nooit.
 func (u *Uplink) Receive(buf []byte) (int, error) {
 	n, err := u.nic.Receive(buf)
 	if n == 0 || err != nil {
@@ -130,7 +199,8 @@ func Publish(proto string, nodePort uint16, slot int, slotPort uint16) error {
 	return nil
 }
 
-// UnpublishSlot trekt alle publicaties van slot i in.
+// UnpublishSlot trekt alle publicaties van slot i in en ruimt zijn
+// masquerade-flows op (poorten meteen vrij; de core is toch uit).
 func UnpublishSlot(i int) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -141,6 +211,12 @@ func UnpublishSlot(i int) {
 		}
 	}
 	pubs = keep
+	for k, fl := range flowsFwd {
+		if fl.slot == i {
+			delete(flowsRev, rkey{fl.proto, fl.nodePort, fl.dstIP, fl.dstPort})
+			delete(flowsFwd, k)
+		}
+	}
 }
 
 // ipv4L4 valideert een IPv4-frame met TCP/UDP en volledige L4-header en
@@ -158,11 +234,9 @@ func ipv4L4(f []byte) (ihl int, proto byte, ok bool) {
 	if ihl < 20 || binary.BigEndian.Uint16(ip[6:])&0x1fff != 0 {
 		return 0, 0, false
 	}
-	// rewriteL4 herschrijft de L4-checksum: TCP op l4[16:18] (vereist dus de
-	// volledige 20-byte header), UDP op l4[6:8] (8-byte header). De
-	// framelengte komt van de NIC (aanvaller-gecontroleerd op de draad); een
-	// te korte header hier weigeren, niet straks in rewriteL4 op een slice
-	// buiten bereik paniek — dat zou de hele node platleggen.
+	// rewriteL4 raakt bij TCP l4[16:18] (volledige 20-byte header) en bij UDP
+	// l4[6:8] (8-byte header) aan; een te korte header hier weigeren i.p.v.
+	// straks een slice buiten bereik paniek (dat velt de hele node).
 	switch proto {
 	case protoTCP:
 		if len(ip) < ihl+20 {
@@ -178,8 +252,36 @@ func ipv4L4(f []byte) (ihl int, proto byte, ok bool) {
 	return ihl, proto, true
 }
 
-// natInbound: frame van de externe NIC; true = geclaimd. DNAT: dst node-IP:
-// nodePort → slot-IP:slotPort, dan als gewoon intern frame de switch in.
+// onSubnet meldt of ip op HOP's externe subnet ligt (dan is de neighbor-MAC
+// de echte host; anders is het verkeer via de gateway gerelayed).
+func onSubnet(ip uint32) bool { return uplink != nil && ip&uplink.mask == uplink.ip&uplink.mask }
+
+// learnLocked leert de L2-next-hop uit een inbound frame (mu vast): srcIP →
+// srcMAC, en een off-subnet bron betekent dat srcMAC de gateway is.
+func learnLocked(srcIP uint32, mac []byte) {
+	if _, known := neigh[srcIP]; !known && len(neigh) >= maxNeigh {
+		neigh = map[uint32][6]byte{} // plafond: legen en herleren
+	}
+	neigh[srcIP] = [6]byte(mac)
+	if !onSubnet(srcIP) {
+		gwMAC, gwKnown = [6]byte(mac), true
+	}
+}
+
+// l2For geeft de dst-MAC om dstIP te bereiken (mu vast): de geleerde neighbor,
+// of de gateway voor een off-subnet/onbekende bestemming.
+func l2For(dstIP uint32) ([6]byte, bool) {
+	if onSubnet(dstIP) {
+		if m, ok := neigh[dstIP]; ok {
+			return m, true
+		}
+	}
+	return gwMAC, gwKnown
+}
+
+// natInbound: frame van de externe NIC; true = geclaimd. Leert de neighbor,
+// probeert dan een masquerade-antwoord (lopende uitgaande flow) en anders
+// DNAT (gepubliceerde poort).
 func natInbound(f []byte) bool {
 	ihl, proto, ok := ipv4L4(f)
 	if !ok {
@@ -187,13 +289,50 @@ func natInbound(f []byte) bool {
 	}
 	ip := f[ethLen:]
 	l4 := ip[ihl:]
-	dport := binary.BigEndian.Uint16(l4[2:])
+	srcIP := binary.BigEndian.Uint32(ip[12:])
 
 	mu.Lock()
 	defer mu.Unlock()
-	if uplink == nil || binary.BigEndian.Uint32(ip[16:]) != uplink.ip {
+	if uplink == nil {
 		return false
 	}
+	learnLocked(srcIP, f[6:12])
+	if replyInLocked(f, ip, l4, proto) {
+		return true
+	}
+	return dnatInLocked(f, ip, l4, proto)
+}
+
+// replyInLocked vertaalt een inbound antwoord op een masquerade-flow terug en
+// injecteert het de switch in (mu vast); true = geclaimd.
+func replyInLocked(f, ip, l4 []byte, proto byte) bool {
+	if binary.BigEndian.Uint32(ip[16:]) != uplink.ip {
+		return false
+	}
+	peerIP := binary.BigEndian.Uint32(ip[12:])
+	peerPort := binary.BigEndian.Uint16(l4[0:])
+	nodePort := binary.BigEndian.Uint16(l4[2:])
+	fl := flowsRev[rkey{proto, nodePort, peerIP, peerPort}]
+	if fl == nil {
+		return false
+	}
+	fl.seen = time.Now()
+	binary.BigEndian.PutUint32(ip[16:], fl.slotIP)
+	fixCsum32(ip[10:], uplink.ip, fl.slotIP) // IP-header checksum
+	rewriteL4(l4, proto, 2, uplink.ip, fl.slotIP, nodePort, fl.slotPort)
+	mac := layout.SlotMAC(fl.slot)
+	copy(f[0:6], mac[:])
+	copy(f[6:12], hostMAC[:])
+	injectFrame(f)
+	return true
+}
+
+// dnatInLocked: DNAT van node-IP:nodePort → slot-IP:slotPort (mu vast).
+func dnatInLocked(f, ip, l4 []byte, proto byte) bool {
+	if binary.BigEndian.Uint32(ip[16:]) != uplink.ip {
+		return false
+	}
+	dport := binary.BigEndian.Uint16(l4[2:])
 	var m *pub
 	for j := range pubs {
 		if pubs[j].proto == proto && pubs[j].nodePort == dport {
@@ -204,39 +343,32 @@ func natInbound(f []byte) bool {
 	if m == nil {
 		return false
 	}
-
-	// Leer de L2-next-hop van deze client voor het antwoordpad. Bij het
-	// plafond de tabel legen i.p.v. onbegrensd groeien: actieve clients
-	// herleren bij hun volgende inbound frame (hooguit één antwoord mist,
-	// TCP herstelt) — een gespoofte-IP-stroom kan HOP's heap zo niet vellen.
-	clientIP := binary.BigEndian.Uint32(ip[12:])
-	if _, known := nextHopFor[clientIP]; !known && len(nextHopFor) >= maxNextHop {
-		nextHopFor = map[uint32][6]byte{}
-	}
-	nextHopFor[clientIP] = [6]byte(f[6:12])
-
 	oldIP := binary.BigEndian.Uint32(ip[16:])
-	newIP := slotIP4(m.slot)
+	newIP := layout.SlotIP4(m.slot)
 	binary.BigEndian.PutUint32(ip[16:], newIP)
 	fixCsum32(ip[10:], oldIP, newIP)
 	rewriteL4(l4, proto, 2, oldIP, newIP, dport, m.slotPort)
-
-	copy(f[0:6], slotMACBytes(m.slot))
-	copy(f[6:12], hostMACBytes)
-	p := make([]byte, len(f))
-	copy(p, f)
-	// Via het host-kanaal de switch in: forward(0, ·) routeert op de
-	// dst-MAC naar het slot. Vol = drop (TCP herstelt).
-	select {
-	case hostOut <- p:
-	default:
-	}
+	mac := layout.SlotMAC(m.slot)
+	copy(f[0:6], mac[:])
+	copy(f[6:12], hostMAC[:])
+	injectFrame(f)
 	return true
 }
 
-// natFromSlot (onder mu, vanuit de switch-lus): frame van slot src richting
-// de gateway; true = geclaimd. Het antwoordpad: SNAT slot-IP:slotPort →
-// node-IP:nodePort en de externe NIC uit.
+// injectFrame kopieert f (wijst naar de gedeelde leesbuffer) en zet het op de
+// inject-queue van de switch; vol = drop (TCP herstelt).
+func injectFrame(f []byte) {
+	p := make([]byte, len(f))
+	copy(p, f)
+	select {
+	case inject <- p:
+	default:
+	}
+}
+
+// natFromSlot (mu vast, vanuit de switch-lus): frame van slot src richting de
+// gateway; true = geclaimd. Het antwoordpad van een gepubliceerde poort: SNAT
+// slot-IP:slotPort → node-IP:nodePort en de externe NIC uit.
 func natFromSlot(src int, f []byte) bool {
 	ihl, proto, ok := ipv4L4(f)
 	if !ok || uplink == nil {
@@ -256,20 +388,125 @@ func natFromSlot(src int, f []byte) bool {
 	if m == nil {
 		return false
 	}
-	nextHop, seen := nextHopFor[binary.BigEndian.Uint32(ip[16:])]
-	if !seen {
-		return true // nooit inbound van deze client gezien: drop
+	nextHop, known := l2For(binary.BigEndian.Uint32(ip[16:]))
+	if !known {
+		return true // next-hop onbekend: drop, de retransmit leert 'm
 	}
-
 	oldIP := binary.BigEndian.Uint32(ip[12:])
 	binary.BigEndian.PutUint32(ip[12:], uplink.ip)
 	fixCsum32(ip[10:], oldIP, uplink.ip)
 	rewriteL4(l4, proto, 0, oldIP, uplink.ip, sport, m.nodePort)
-
 	copy(f[0:6], nextHop[:])
 	copy(f[6:12], uplink.mac[:])
 	uplink.Transmit(f)
 	return true
+}
+
+// natOutbound (mu vast, vanuit de switch-lus): een app dialt naar buiten.
+// Masquerade: bron slot-IP:slotPort → node-IP:node-poort (uit de conntrack),
+// dan de externe NIC uit. true = afgehandeld (ook als het gedropt is).
+func natOutbound(src int, f []byte) bool {
+	ihl, proto, ok := ipv4L4(f)
+	if !ok || uplink == nil {
+		return false
+	}
+	ip := f[ethLen:]
+	l4 := ip[ihl:]
+	dstIP := binary.BigEndian.Uint32(ip[16:])
+	slotIP := layout.SlotIP4(src)
+	sport := binary.BigEndian.Uint16(l4[0:])
+	dport := binary.BigEndian.Uint16(l4[2:])
+
+	nextHop, known := l2For(dstIP)
+	if !known {
+		return true // gateway/next-hop nog niet geleerd: drop, retransmit volgt
+	}
+	fl := flowFor(proto, src, slotIP, sport, dstIP, dport)
+	if fl == nil {
+		return true // pool vol: drop
+	}
+	fl.seen = time.Now()
+	binary.BigEndian.PutUint32(ip[12:], uplink.ip)
+	fixCsum32(ip[10:], slotIP, uplink.ip)
+	rewriteL4(l4, proto, 0, slotIP, uplink.ip, sport, fl.nodePort)
+	copy(f[0:6], nextHop[:])
+	copy(f[6:12], uplink.mac[:])
+	uplink.Transmit(f)
+	return true
+}
+
+// flowFor vindt of maakt de conntrack-entry voor een uitgaande flow (mu vast);
+// nil als de pool vol is (na een sweep van verlopen flows).
+func flowFor(proto byte, slot int, slotIP uint32, slotPort uint16, dstIP uint32, dstPort uint16) *flow {
+	k := fkey{proto, slotIP, dstIP, slotPort, dstPort}
+	if fl := flowsFwd[k]; fl != nil {
+		return fl
+	}
+	if len(flowsFwd) >= maxFlows {
+		sweepExpired()
+		if len(flowsFwd) >= maxFlows {
+			if !flowsFull {
+				flowsFull = true
+				fmt.Printf("HOPOS_MASQ_FULL: conntrack vol (%d) — nieuwe uitgaande flows gedropt\n", maxFlows)
+			}
+			return nil
+		}
+	}
+	flowsFull = false
+	np, ok := allocPort(proto, dstIP, dstPort)
+	if !ok {
+		return nil
+	}
+	fl := &flow{proto: proto, slot: slot, slotIP: slotIP, slotPort: slotPort,
+		dstIP: dstIP, dstPort: dstPort, nodePort: np}
+	flowsFwd[k] = fl
+	flowsRev[rkey{proto, np, dstIP, dstPort}] = fl
+	return fl
+}
+
+// allocPort kiest een vrij node-poortnummer voor een nieuwe flow: rollend door
+// [masqBase, masqEnd), en het mag niet botsen met een lopende flow naar dezelfde
+// peer, noch met een gepubliceerde poort (die is voor DNAT gereserveerd).
+func allocPort(proto byte, dstIP uint32, dstPort uint16) (uint16, bool) {
+	for range MasqEnd - MasqBase {
+		p := masqNext
+		if masqNext++; masqNext >= MasqEnd {
+			masqNext = MasqBase
+		}
+		if _, busy := flowsRev[rkey{proto, p, dstIP, dstPort}]; busy {
+			continue
+		}
+		if publishedLocked(proto, p) {
+			continue
+		}
+		return p, true
+	}
+	return 0, false
+}
+
+// publishedLocked meldt of node-poort p (proto) een gepubliceerde poort is.
+func publishedLocked(proto byte, p uint16) bool {
+	for _, e := range pubs {
+		if e.proto == proto && e.nodePort == p {
+			return true
+		}
+	}
+	return false
+}
+
+// sweepExpired verwijdert flows die langer dan hun idle-timeout stil waren.
+func sweepExpired() {
+	now := time.Now()
+	for k, fl := range flowsFwd {
+		idle := udpIdle
+		if fl.proto == protoTCP {
+			idle = tcpIdle
+		}
+		if now.Sub(fl.seen) > idle {
+			delete(flowsRev, rkey{fl.proto, fl.nodePort, fl.dstIP, fl.dstPort})
+			delete(flowsFwd, k)
+		}
+	}
 }
 
 // rewriteL4 werkt poort (op portOff: 0 = src, 2 = dst) en checksum van een

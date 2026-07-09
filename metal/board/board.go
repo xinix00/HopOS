@@ -13,6 +13,8 @@ import (
 	"net"
 
 	gnet "github.com/usbarmory/go-net"
+
+	"hop-os/metal/fb"
 )
 
 // PowerState is de powertoestand van een core (PSCI AFFINITY_INFO, ARM DEN 0022).
@@ -55,7 +57,6 @@ type NetConfig struct {
 type PCIeWindow struct {
 	ECAMBase uintptr
 	MMIOBase uintptr
-	MMIOSize uintptr
 }
 
 // Board is één concreet board. Alle methodes draaien op de HOP-kern (core 0),
@@ -103,6 +104,13 @@ type Board interface {
 
 	// PCIe-adresplan.
 	PCIe() PCIeWindow
+
+	// Framebuffer geeft de firmware-framebuffer voor de log-console (metal/fb),
+	// ontdekt via een universeel mechanisme — geen driver: UEFI GOP of de
+	// device-tree simple-framebuffer. ok=false als het board er (nog) geen
+	// heeft (QEMU -nographic, of een board vóór zijn beeld-fase). Discovery is
+	// board-kennis; het renderen erna is gedeeld.
+	Framebuffer() (fb.Desc, bool)
 }
 
 // active is het geregistreerde board (nil tot Use — vóór elke board-call).

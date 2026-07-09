@@ -37,7 +37,7 @@ const (
 	// DTBPtr: cpuinit.s legt hier (primary, MMU uit) de DTB-pointer die de
 	// firmware in x0 meegaf — laag DRAM onder de kernel, zelfde plek als de
 	// boot-EL-scratch (+8). board.MemTotal parset 'm met metal/fdt.
-	DTBPtr = 0x1FF008
+	DTBPtr = 0x7F008
 
 	// AVS-monitor (thermiek): brcm,bcm2711-thermal in de BCM2712-DTB —
 	// temperatuur = slope×raw + offset uit de thermal-zone (zie probe5).

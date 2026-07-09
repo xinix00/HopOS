@@ -13,6 +13,7 @@ import (
 	"hop-os/metal/board"
 	"hop-os/metal/board/raspi"
 	"hop-os/metal/dev"
+	"hop-os/metal/fb"
 	"hop-os/metal/fdt"
 )
 
@@ -78,3 +79,8 @@ func (machine) Net() board.NetConfig { return board.NetConfig{} }
 // PCIe: fase P2 — de RP1 hangt aan de BCM2712-PCIe; het adresplan volgt bij
 // de RP1-bring-up.
 func (machine) PCIe() board.PCIeWindow { return board.PCIeWindow{} }
+
+// Framebuffer: de firmware-simple-framebuffer uit de DTB (HDMI-log-console
+// zonder debug-kabel). Op het board te verifiëren (levert de Pi-firmware een
+// /chosen/framebuffer aan een raw kernel? zie docs/rpi5.md).
+func (machine) Framebuffer() (fb.Desc, bool) { return raspi.Framebuffer(DTBPtr) }

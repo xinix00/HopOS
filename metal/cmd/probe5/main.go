@@ -32,16 +32,21 @@ import (
 	"hop-os/metal/board/raspi"
 	"hop-os/metal/board/rpi5"
 	"hop-os/metal/dev"
+	"hop-os/metal/fb"
 	"hop-os/metal/gem"
 	"hop-os/metal/psci"
 )
 
-// RAM-declaratie: 128MB vanaf de kernel-load (0x200000) — ruim binnen elke
-// Pi 5-variant, onder het VC/firmware-gebied bovenin en boven TF-A onderin.
-// De DTB is met device_tree_address bewust búíten dit bereik gelegd.
+// RAM-declaratie: 128MB vanaf de kernel-load. ONTDEKT 2026-07-09 (sessie 2,
+// XN-kooi + ADRP-analyse): de Pi 5-EEPROM-bootloader NEGEERT kernel_address
+// en laadt raw images altijd op 0x80000 — drie dagen "MMU-wedge" bleek een
+// image dat op 0x80000 draaide terwijl alles op 0x200000 gelinkt was (PC-
+// relatieve asm werkte, absolute Go-funcvals/literals wezen 0x180000 ernaast,
+// en de multi-level map markeerde de échte code-pagina's als device+XN).
+// Dus: linken op de werkelijkheid — load 0x80000, text +0x10000 = 0x90000.
 //
 //go:linkname ramStart runtime/goos.RamStart
-var ramStart uint = 0x00200000
+var ramStart uint = 0x00080000
 
 //go:linkname ramSize runtime/goos.RamSize
 var ramSize uint = 0x08000000
@@ -76,6 +81,18 @@ func main() {
 	fmt.Printf("runtime %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
 
 	b := board.Current()
+
+	// HDMI-log (metal/fb): gebruikt het beeld dat de firmware al aanzette
+	// (DT-simplefb) — meteen een meetpunt: laat de firmware in bare-metal-
+	// modus (os_check=0) een framebuffer achter? Vanaf Init spiegelt printk.
+	if desc, ok := b.Framebuffer(); ok {
+		fb.Init(desc)
+		fmt.Printf("fb: firmware-framebuffer %dx%d @ %#x (stride %d, %d bpp) — log ook op HDMI\n",
+			desc.Width, desc.Height, desc.Base, desc.Stride, desc.BPP)
+	} else {
+		fmt.Println("fb: geen simplefb in de DTB — log alleen op de UART")
+	}
+
 	fmt.Printf("boot-EL: %d (verwacht 2: TF-A/armstub op EL3)\n", b.BootEL())
 	fmt.Printf("MPIDR: %#x → core %d (A76: aff1-nummering)\n", raspi.MPIDR(), b.CoreID())
 

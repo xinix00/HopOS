@@ -22,6 +22,7 @@ import (
 
 	"hop-os/metal/board"
 	_ "hop-os/metal/board/qemuvirt" // registreert het board (init) + tamago-hooks
+	"hop-os/metal/fb"
 	"hop-os/metal/hopfs"
 	"hop-os/metal/hopnet"
 	"hop-os/metal/hopswitch"
@@ -57,6 +58,15 @@ func main() {
 
 	major, minor := board.Current().PSCIVersion()
 	fmt.Printf("PSCI versie %d.%d (boot-EL%d, conduit SMC)\n", major, minor, board.Current().BootEL())
+
+	// Log-console op de firmware-framebuffer als het board er een heeft — het
+	// beeld-kanaal voor een node zónder debug-kabel. Zo niet (QEMU -nographic,
+	// board vóór zijn beeld-fase): no-op, printk blijft naar UART/log.
+	if d, ok := board.Current().Framebuffer(); ok {
+		fb.Init(d)
+		fmt.Printf("console: framebuffer %dx%d @ %#x (%d-bpp) — logs op scherm\n",
+			d.Width, d.Height, uint64(d.Base), d.BPP)
+	}
 
 	if err := hopnet.Up(); err != nil {
 		fail("net", err)

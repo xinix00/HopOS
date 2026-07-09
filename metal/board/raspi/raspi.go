@@ -22,22 +22,25 @@ import (
 
 	"github.com/usbarmory/tamago/arm64"
 
+	"hop-os/metal/dev"
 	"hop-os/metal/idle"
 )
 
-// Gedeeld geheugenplan onder de kernel-load (0x200000) en boven het
-// firmware/TF-A-gebied (< 0x80000). Geldig op beide boards ómdat beide op
-// 0x200000 laden (zie docs/rpi5.md resp. docs/rpi4.md).
+// Gedeeld geheugenplan ONDER 0x80000 — want (gemeten 2026-07-09): de Pi 5-
+// EEPROM-bootloader negeert kernel_address en laadt raw images op 0x80000;
+// de Pi 4 laadt op 0x200000 (kernel_address gehonoreerd) dus voor die board
+// ligt dit gebied nog ruimer onder de load. Boven het TF-A/armstub-gebied
+// (< ~0x20000) blijven.
 const (
 	// ParkBase/ParkCount: park-code voor secundaire cores en hun
 	// levensteken-tellers (geplant door de probes, zie ParkCode).
-	ParkBase  = 0x1F0000
-	ParkCount = 0x1F8000
+	ParkBase  = 0x70000
+	ParkCount = 0x78000
 
 	// BootScratch: cpuinit.s van het board schrijft er het boot-EL (vóór
 	// de drop naar EL1); BootEL() leest het. Moet gelijk zijn aan de
 	// BOOT_SCRATCH-#define in de cpuinit.s van beide boards.
-	BootScratch = 0x1FF000
+	BootScratch = 0x7F000
 )
 
 // ARM64 core-instantie (zelfde constructie als board/qemuvirt).
@@ -53,6 +56,12 @@ var ramStackOffset uint = 0x100
 //
 //go:linkname hwinit1 runtime/goos.Hwinit1
 func hwinit1() {
+	// 'H'-marker (rauwe DR-poke, geen FIFO-poll): de runtime leeft en is
+	// door rt0 + Hwinit0 (tamago's vroege MMU-init) heen — bisect-punt
+	// tussen 'R' (cpuinit) en de main-banner. UART-adres is op beide Pi's
+	// device-gemapt; op een board zonder UART is dit een schrijf in de leegte.
+	dev.Write32(0x107d001000, 'H')
+
 	ARM64.Init()
 	ARM64.EnableCache()
 	ARM64.InitGenericTimers(0, 0)

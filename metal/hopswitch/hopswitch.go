@@ -2,57 +2,49 @@
 // elke app-core draait een eigen netstack (applib/appnet) over rauwe
 // Ethernet-frames door de per-slot frame-ringen; HOP kopieert die frames
 // uitsluitend ring-naar-ring op de dst-MAC — app↔app-verkeer raakt nooit
-// een TCP-stack op core 0. "Apps rekenen, HOP sjouwt data", maar dan zonder
-// twee keer door core 0's hele TCP-stack te tunnelen.
+// een TCP-stack op core 0. "Apps rekenen, HOP sjouwt data."
 //
-// Adressering is deterministisch, geen tabellen die leren: slot i heeft MAC
-// 02:00:00:00:00:<i> en IP 10.100.0.<i+1>/24; HOP zelf hangt als gewone
-// deelnemer aan de switch (MAC ..:00, IP 10.100.0.1) via een eigen go-net
-// Interface — daarmee kan HOP apps bereiken (health/control) zonder zijn
-// externe stack (hopnet) aan te raken.
+// HOP heeft géén eigen interne TCP-stack meer. Wat de apps van de gateway
+// nodig hebben is precies twee dingen, en die doet de switch zelf:
+//   - ARP voor de gateway (10.100.0.1) beantwoorden (arpReplyGateway);
+//   - uitgaand verkeer naar buiten masqueraden en de antwoorden terug
+//     injecteren (nat.go) — geen tunnel, alleen header-herschrijving.
+//
+// Adressering is deterministisch, geen tabellen die leren: het net-plan
+// (subnet, per-slot IP/MAC, gateway) leeft in metal/layout, zodat de switch
+// en de app-stacks nooit uiteenlopen. HOP is de gateway op .1 (MAC ..:00).
 package hopswitch
 
 import (
-	"context"
 	"fmt"
-	"net"
 	"sync"
-	"syscall"
 	"time"
-
-	gnet "github.com/usbarmory/go-net"
 
 	"hop-os/metal/layout"
 	"hop-os/metal/ring"
 )
 
-// Het interne subnet: HOP = .1, slot i = .(i+1).
 const (
-	HostIP  = "10.100.0.1"
-	prefix  = 24
-	hostMAC = "02:00:00:00:00:00"
+	prefix = layout.NetPrefix
 
 	// maxBurst begrenst het aantal frames per poort per switch-ronde, zodat
 	// één drukke poort de rest niet verhongert.
 	maxBurst = 64
 )
 
-// SlotIP geeft het interne IP van slot i.
-func SlotIP(i int) string { return fmt.Sprintf("10.100.0.%d", i+1) }
-
-// slotIP4 is SlotIP als uint32 (big-endian volgorde).
-func slotIP4(i int) uint32 { return 10<<24 | 100<<16 | uint32(i+1) }
-
-// slotMACBytes / hostMACBytes: de deterministische MACs als bytes.
-func slotMACBytes(i int) []byte { return []byte{0x02, 0, 0, 0, 0, byte(i)} }
-
-var hostMACBytes = []byte{0x02, 0, 0, 0, 0, 0}
-
-// NetCfg geeft de twee control-page-woorden (layout.CtrlNetIP/CtrlNetGW)
-// waarmee HOP de net-config van slot i aan de app meegeeft.
-func NetCfg(i int) (ipCfg, gwCfg uint64) {
-	return uint64(slotIP4(i)) | uint64(prefix)<<32, uint64(10)<<24 | uint64(100)<<16 | 1
+// ip4str formatteert een big-endian IPv4-uint32.
+func ip4str(v uint32) string {
+	return fmt.Sprintf("%d.%d.%d.%d", byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
 }
+
+// HostIP is HOP's interne adres (de gateway), SlotIP dat van slot i — beide
+// uit het net-plan in layout, als string voor de mains.
+var HostIP = ip4str(layout.HostIP4())
+
+func SlotIP(i int) string { return ip4str(layout.SlotIP4(i)) }
+
+// hostMAC is HOP's MAC op het interne net (slot 0 → ..:00).
+var hostMAC = layout.SlotMAC(0)
 
 // port is één switch-poort: de frame-ringen van een actief slot. De switch
 // is per richting de enige tegenhanger van de app (SPSC): consumer op TX,
@@ -67,78 +59,21 @@ var (
 	ports [layout.MaxSlots + 1]*port
 	up    bool
 
-	// HOP's eigen aansluiting op de switch: de gvisor-stack levert frames
-	// via hostOut aan de switch-lus en krijgt ze binnen via hostIn — de
-	// kanalen spelen de rol die de frame-ringen voor een slot spelen.
-	hostStack *gnet.GVisorStack
-	hostIn    chan []byte
-	hostOut   chan []byte
+	// inject draagt frames van de uplink-kant (DNAT-inbound en
+	// masquerade-antwoorden, nat.go) naar de switch-lus, die ze op hun
+	// dst-MAC bij het juiste slot aflevert. Ontkoppelt de uplink-RX-goroutine
+	// van de switch-lus (geen gedeeld slot, geen deadlock op mu).
+	inject chan []byte
 )
 
-// hostNIC is het go-net NetworkDevice van HOP's interne stack.
-type hostNIC struct{}
-
-func (hostNIC) Receive(buf []byte) (int, error) {
-	select {
-	case p := <-hostIn:
-		return copy(buf, p), nil
-	default:
-		return 0, nil
-	}
-}
-
-func (hostNIC) Transmit(buf []byte) error {
-	p := make([]byte, len(buf))
-	copy(p, buf)
-	select {
-	case hostOut <- p:
-	default: // vol: drop, zoals een echte switch — TCP herstelt
-	}
-	return nil
-}
-
-// Up start de switch-lus en HOP's interne stack; idempotent. Aanroepen vóór
-// de eerste slots.Start.
+// Up start de switch-lus; idempotent. Aanroepen vóór de eerste slots.Start.
 func Up() error {
 	mu.Lock()
 	defer mu.Unlock()
 	if up {
 		return nil
 	}
-	hostIn = make(chan []byte, 256)
-	hostOut = make(chan []byte, 256)
-
-	hostStack = gnet.NewGVisorStack(1)
-	iface := &gnet.Interface{NetworkDevice: hostNIC{}, Stack: hostStack}
-	if err := iface.Init(fmt.Sprintf("%s/%d", HostIP, prefix), hostMAC, ""); err != nil {
-		return fmt.Errorf("interne stack: %w", err)
-	}
-	iface.Stack.EnableICMP()
-
-	// RX-lus met microslaap i.p.v. gnet's Gosched-spin (zie metal/idle).
-	go func() {
-		buf := make([]byte, gnet.MTU+gnet.EthernetMaximumSize)
-		nic := hostNIC{}
-		for {
-			// Per-iteratie recover: een panic in Receive (→ natInbound) of in
-			// gvisor's RecvInboundPacket mag core 0 niet vellen — pakket
-			// droppen, RX draait door. Zie switchPass.
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						fmt.Printf("HOPOS_RX_PANIC: %v — pakket gedropt, RX draait door\n", r)
-					}
-				}()
-				n, err := nic.Receive(buf)
-				if n == 0 || err != nil {
-					time.Sleep(300 * time.Microsecond)
-					return
-				}
-				iface.Stack.RecvInboundPacket(buf[:n])
-			}()
-		}
-	}()
-
+	inject = make(chan []byte, 256)
 	go loop()
 	up = true
 	return nil
@@ -168,14 +103,13 @@ func Detach(i int) {
 	ports[i] = nil
 }
 
-// loop is dé switch: drain alle poorten, bezorg per frame op dst-MAC.
-// Eén goroutine — daarmee is HOP vanzelf de enige producer per RX-ring en
-// de enige consumer per TX-ring (SPSC zonder verdere sloten).
+// loop is dé switch: drain de inject-queue en alle poorten, bezorg per frame
+// op dst-MAC. Eén goroutine — daarmee is HOP vanzelf de enige producer per
+// RX-ring en de enige consumer per TX-ring (SPSC zonder verdere sloten).
 func loop() {
 	// Eén hergebruikte leesbuffer voor alle TX-ringen (de switch-lus is één
 	// goroutine): geen allocatie per frame op de netwerk-hot-path. forward
-	// kopieert het frame synchroon in de dst-ring(en)/uplink; alleen toHost
-	// geeft het aan een kanaal door en kopieert daarom zelf.
+	// kopieert het frame synchroon in de dst-ring(en) of via nat de uplink.
 	buf := make([]byte, layout.NetRingDataCap)
 	for {
 		if !switchPass(buf) {
@@ -184,11 +118,11 @@ func loop() {
 	}
 }
 
-// switchPass draint alle poorten één ronde onder mu. Diepteverdediging: een
-// panic (een bug, of frame-inhoud die tot in gvisor/nat reikt) mag core 0 —
-// en dus álle slots — niet vellen. De defer ontgrendelt mu (ook bij een panic,
-// anders deadlockt de volgende ronde) en recovert: het frame wordt gedropt en
-// de switch draait door.
+// switchPass draint de inject-queue en alle poorten één ronde onder mu.
+// Diepteverdediging: een panic (een bug, of frame-inhoud die tot in nat
+// reikt) mag core 0 — en dus álle slots — niet vellen. De defer ontgrendelt
+// mu (ook bij een panic, anders deadlockt de volgende ronde) en recovert: het
+// frame wordt gedropt en de switch draait door.
 func switchPass(buf []byte) (worked bool) {
 	mu.Lock()
 	defer func() {
@@ -197,16 +131,16 @@ func switchPass(buf []byte) (worked bool) {
 			fmt.Printf("HOPOS_SWITCH_PANIC: %v — frame gedropt, switch draait door\n", r)
 		}
 	}()
-host:
 	for range maxBurst {
 		select {
-		case p := <-hostOut:
+		case p := <-inject:
 			forward(0, p)
 			worked = true
 		default:
-			break host
+			goto slots
 		}
 	}
+slots:
 	for i := 1; i <= layout.MaxSlots; i++ {
 		pt := ports[i]
 		if pt == nil {
@@ -229,19 +163,19 @@ host:
 
 // forward bezorgt één frame op grond van de dst-MAC — meer switch is er
 // niet. Onbekende bestemming of volle ring = drop (zoals echt Ethernet).
-// Aanroepen met mu vast (vanuit loop).
+// Aanroepen met mu vast (vanuit switchPass).
 func forward(src int, p []byte) {
 	if len(p) < 14 {
 		return
 	}
 	if p[0]&1 != 0 { // broadcast/multicast (ARP): iedereen behalve de bron
+		if arpReplyGateway(src, p) { // who-has de gateway? HOP antwoordt zelf
+			return
+		}
 		for i := 1; i <= layout.MaxSlots; i++ {
 			if i != src && ports[i] != nil {
 				ports[i].rx.Write(ring.TypeFrame, p)
 			}
-		}
-		if src != 0 {
-			toHost(p)
 		}
 		return
 	}
@@ -249,14 +183,15 @@ func forward(src int, p []byte) {
 		return // geen switch-MAC
 	}
 	dst := int(p[5])
-	if dst == 0 {
+	if dst == 0 { // naar HOP toe (de gateway-MAC)
 		if src != 0 {
-			// Eerst de NAT: antwoorden van een gepubliceerde poort gaan
-			// herschreven de externe NIC uit; de rest is voor HOP zelf.
+			// Eerst het antwoord van een gepubliceerde poort (SNAT de externe
+			// NIC uit); anders uitgaand verkeer masqueraden. Wat geen van beide
+			// is (er is verder geen interne HOP-stack meer) valt weg.
 			if natFromSlot(src, p) {
 				return
 			}
-			toHost(p)
+			natOutbound(src, p)
 		}
 		return
 	}
@@ -265,45 +200,43 @@ func forward(src int, p []byte) {
 	}
 }
 
-func toHost(p []byte) {
-	// p wijst naar de hergebruikte switch-leesbuffer; kopiëren vóór het door
-	// het kanaal aan HOP's stack-goroutine te geven (die leest 'm later pas).
-	pp := make([]byte, len(p))
-	copy(pp, p)
-	select {
-	case hostIn <- pp:
-	default:
+// arpReplyGateway beantwoordt een ARP-request voor de gateway (10.100.0.1)
+// namens HOP en schrijft het antwoord in de RX-ring van de vragende slot;
+// true = afgehandeld. Andere ARP's (slot ↔ slot) worden gewoon geflood, die
+// beantwoordt de doel-slot zelf. Aanroepen met mu vast.
+//
+// ARP-payload (RFC 826, na de 14-byte Ethernet-kop): htype(2) ptype(2)
+// hlen(1) plen(1) oper(2) sha(6) spa(4) tha(6) tpa(4) = 28 bytes.
+func arpReplyGateway(src int, p []byte) bool {
+	if src < 1 || src > layout.MaxSlots || ports[src] == nil {
+		return false
 	}
-}
+	if len(p) < ethLen+28 || p[12] != 0x08 || p[13] != 0x06 {
+		return false // geen ARP
+	}
+	a := p[ethLen:]
+	// Ethernet/IPv4-request (oper=1) naar het gateway-IP?
+	if a[0] != 0x00 || a[1] != 0x01 || a[2] != 0x08 || a[3] != 0x00 || a[6] != 0x00 || a[7] != 0x01 {
+		return false
+	}
+	tpa := uint32(a[24])<<24 | uint32(a[25])<<16 | uint32(a[26])<<8 | uint32(a[27])
+	if tpa != layout.HostIP4() {
+		return false // niet voor de gateway: laat het floodpad het doen
+	}
+	sha := a[8:14]  // vragende MAC
+	spa := a[14:18] // vragende IP
 
-// Dial opent een TCP-verbinding over het interne net (HOP → app, bv. voor
-// health-checks). HOP's gewone net.Dial blijft aan de externe stack
-// (hopnet) hangen; dit is de expliciete weg naar de slots.
-func Dial(addr string, timeout time.Duration) (net.Conn, error) {
-	mu.Lock()
-	s := hostStack
-	mu.Unlock()
-	if s == nil {
-		return nil, fmt.Errorf("switch niet gestart (Up)")
-	}
-	host, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		return nil, err
-	}
-	var portNum int
-	if _, err := fmt.Sscanf(portStr, "%d", &portNum); err != nil {
-		return nil, fmt.Errorf("poort %q: %w", portStr, err)
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return nil, fmt.Errorf("geen IP: %q", host)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	c, err := s.Socket(ctx, "tcp4", syscall.AF_INET, syscall.SOCK_STREAM,
-		nil, &net.TCPAddr{IP: ip, Port: portNum})
-	if err != nil {
-		return nil, err
-	}
-	return c.(net.Conn), nil
+	var r [ethLen + 28]byte
+	copy(r[0:6], sha)         // dst = de vrager
+	copy(r[6:12], hostMAC[:]) // src = HOP
+	r[12], r[13] = 0x08, 0x06 // ARP
+	b := r[ethLen:]
+	b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7] = 0x00, 0x01, 0x08, 0x00, 6, 4, 0x00, 0x02 // reply
+	copy(b[8:14], hostMAC[:])                                                                 // sha = HOP
+	gw := layout.HostIP4()
+	b[14], b[15], b[16], b[17] = byte(gw>>24), byte(gw>>16), byte(gw>>8), byte(gw) // spa = gateway
+	copy(b[18:24], sha)                                                            // tha = de vrager
+	copy(b[24:28], spa)                                                            // tpa = zijn IP
+	ports[src].rx.Write(ring.TypeFrame, r[:])
+	return true
 }

@@ -157,14 +157,7 @@ const (
 	CtrlWallOff   = 0x40 // HOP → app: klok-offset (wall-ns bij tellerstand 0;
 	// de generic-timer-teller is gedeeld over alle cores, dus HOP's offset
 	// geldt exact voor elke app — int64 als uint64-bits, 0 = geen klok)
-
-	// Net-config van dit slot (HOP → app; gelezen door applib/appnet):
-	// CtrlNetIP bits 0..31 = eigen IPv4 (big-endian als uint32), bits
-	// 32..39 = prefixlengte; 0 = geen netwerk ingericht. CtrlNetGW bits
-	// 0..31 = gateway-IPv4 (HOP op het interne net). De MAC is
-	// deterministisch 02:00:00:00:00:<slot> — geen veld nodig.
-	CtrlNetIP = 0x48
-	CtrlNetGW = 0x50
+	// (0x48/0x50 vrij: het interne net is nu volledig afgeleid, zie NetPlan.)
 
 	// Door de EL2-vectoren (stage2.InitVectors) geschreven vlak vóór de
 	// CPU_OFF, zodat HOP kan loggen wáárom een slot viel. LET OP: deze
@@ -195,3 +188,25 @@ const (
 	FaultSync = 9  // synchroon vanuit EL1 (idx 8): stage-2-fault, ESR/FAR geldig
 	FaultIRQ  = 10 // IRQ vanuit EL1 (idx 9): hard-kill-SGI van HOP
 )
+
+// Intern net (per-slot netwerk: metal/hopswitch aan de HOP-kant,
+// applib/appnet aan de app-kant). Deterministisch, geen tabellen die leren:
+// HOP is de gateway op .1, slot i op .(i+1)/24, MAC 02:00:00:00:00:<slot>
+// (HOP = ..:00). Eén bron van waarheid, zodat de switch en de app-stack nooit
+// uiteenlopen — daarom hoeft HOP dit niet meer per slot op de control-page te
+// schrijven; beide kanten leiden het uit het slotnummer af.
+const (
+	NetPrefix  = 24
+	netA, netB = 10, 100 // subnet 10.100.0.0/24
+)
+
+// SlotIP4 geeft het interne IPv4 van slot i als big-endian uint32; slot 0 is
+// HOP zelf (.1), slot i een app (.(i+1)).
+func SlotIP4(i int) uint32 { return netA<<24 | netB<<16 | uint32(i+1) }
+
+// HostIP4 is HOP's interne adres — de gateway die de apps als default route
+// krijgen (en waarvoor de switch ARP beantwoordt).
+func HostIP4() uint32 { return SlotIP4(0) }
+
+// SlotMAC geeft de deterministische MAC van slot i (HOP = slot 0 → ..:00).
+func SlotMAC(i int) [6]byte { return [6]byte{0x02, 0, 0, 0, 0, byte(i)} }

@@ -33,9 +33,11 @@ func Up() error {
 	}
 	mac := hw.String()
 
-	// De NIC achter de NAT-shim van de switch: frames voor gepubliceerde
-	// task-poorten worden vóór HOP's stack afgevangen en doorgerouterd.
-	uplink, err := hopswitch.WrapUplink(nic, nc.IP, hw)
+	// De NIC achter de NAT-shim van de switch: inbound frames voor
+	// gepubliceerde poorten of lopende masquerade-flows worden vóór HOP's
+	// stack afgevangen. De CIDR (niet alleen het IP) mee, zodat de NAT weet
+	// wat "off-subnet" is (dan is de next-hop de gateway).
+	uplink, err := hopswitch.WrapUplink(nic, nc.CIDR, hw)
 	if err != nil {
 		return err
 	}
@@ -54,6 +56,12 @@ func Up() error {
 	}
 	if err := iface.Init(nc.CIDR, mac, nc.GW); err != nil {
 		return fmt.Errorf("netstack init: %w", err)
+	}
+	// HOP's eigen efemere bronpoorten onder het masquerade-bereik houden: de
+	// NAT deelt node-poorten uit vanaf hopswitch.MasqBase, dus een inbound
+	// antwoord op HOP's eigen poort kan nooit per ongeluk een app-flow matchen.
+	if e := gs.Stack.SetPortRange(16000, hopswitch.MasqBase-1); e != nil {
+		return fmt.Errorf("poortbereik: %v", e)
 	}
 	iface.HandleStackErr = func(err error, tx bool) {
 		fmt.Printf("netstack (tx=%v): %v\n", tx, err)

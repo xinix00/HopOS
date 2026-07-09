@@ -13,6 +13,7 @@ import (
 	"hop-os/metal/board"
 	"hop-os/metal/board/raspi"
 	"hop-os/metal/dev"
+	"hop-os/metal/fb"
 	"hop-os/metal/fdt"
 )
 
@@ -76,3 +77,7 @@ func (machine) Net() board.NetConfig { return board.NetConfig{} }
 // PCIe: n.v.t. — de enige PCIe-lane van de BCM2711 zit vast aan de
 // VL805-USB-controller; geen NVMe op dit board (CM4 uitgezonderd).
 func (machine) PCIe() board.PCIeWindow { return board.PCIeWindow{} }
+
+// Framebuffer: de firmware-simple-framebuffer uit de DTB (HDMI-log-console
+// zonder debug-kabel). Op het board te verifiëren (zie docs/rpi4.md).
+func (machine) Framebuffer() (fb.Desc, bool) { return raspi.Framebuffer(DTBPtr) }

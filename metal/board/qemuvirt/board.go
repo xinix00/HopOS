@@ -12,6 +12,7 @@ import (
 	gnet "github.com/usbarmory/go-net"
 
 	"hop-os/metal/board"
+	"hop-os/metal/fb"
 	"hop-os/metal/layout"
 	"hop-os/metal/virtionet"
 )
@@ -88,6 +89,10 @@ func (machine) PCIe() board.PCIeWindow {
 	return board.PCIeWindow{
 		ECAMBase: 0x3f000000,
 		MMIOBase: 0x10000000,
-		MMIOSize: 0x2eff0000,
 	}
 }
+
+// Framebuffer: geen. QEMU -M virt draait -nographic (console = UART); er is
+// geen firmware-framebuffer. Zou je ooit een beeld willen op virt, dan is dat
+// -device ramfb (fw_cfg) — bewust niet gebouwd: dev-target, geen edge-node.
+func (machine) Framebuffer() (fb.Desc, bool) { return fb.Desc{}, false }

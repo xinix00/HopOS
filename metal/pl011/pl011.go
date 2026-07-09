@@ -26,8 +26,8 @@ var dead bool
 // als printk-hook vóór init(), zonder runtime-parametrisatie. De firmware
 // heeft de UART al geconfigureerd (uart_2ndstage=1 op de Pi); wij raken
 // alleen DR en FR aan. De poll-grens (~1M reads ≫ 16 tekens @ 115200) haalt
-// een dode UART uit het printpad i.p.v. de boot te laten hangen; HDMI/LED
-// (fbcons, docs/rpi5.md) zijn dan de kanalen.
+// een dode UART uit het printpad i.p.v. de boot te laten hangen (op een board
+// zonder bereikbare UART is de LED, of straks de netwerk-log, het kanaal).
 func Putc(base uintptr, c byte) {
 	if dead {
 		return

@@ -168,6 +168,47 @@ func main() {
 		}
 		app.Logf("NETDEMO dial: %s → %s: pong ontvangen — app↔app zonder HOP-TCP", ip, app.Env("NET_DIAL"))
 		exit(app, 0)
+
+	case "out":
+		// Uitgaand naar buiten: één DNS-query (UDP) naar de node-resolver die
+		// HOP als HOP_DNS meegaf. HOP masquerade't de query (slot-IP:poort →
+		// node-IP:node-poort) de externe NIC uit en het antwoord terug — een
+		// respóns bewijst de hele round-trip, ongeacht wat erin staat. Dít is
+		// het pad dat straks cloudflared/servers naar buiten gebruiken.
+		if _, err := appnet.Up(app); err != nil {
+			app.Logf("NETDEMO out: %v", err)
+			exit(app, 1)
+		}
+		dns := app.Env("HOP_DNS")
+		if dns == "" {
+			app.Logf("NETDEMO out: geen HOP_DNS meegegeven")
+			exit(app, 1)
+		}
+		conn, err := net.Dial("udp4", dns)
+		if err != nil {
+			app.Logf("NETDEMO out: dial %s: %v", dns, err)
+			exit(app, 1)
+		}
+		defer conn.Close()
+		// Minimale DNS A-query voor "a.root-servers.net" (id 0x1234, RD).
+		query := []byte{
+			0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x01, 'a', 0x0c, 'r', 'o', 'o', 't', '-', 's', 'e', 'r', 'v', 'e', 'r', 's',
+			0x03, 'n', 'e', 't', 0x00, 0x00, 0x01, 0x00, 0x01,
+		}
+		if _, err := conn.Write(query); err != nil {
+			app.Logf("NETDEMO out: write: %v", err)
+			exit(app, 1)
+		}
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		resp := make([]byte, 512)
+		n, err := conn.Read(resp)
+		if err != nil || n < 12 || resp[0] != 0x12 || resp[1] != 0x34 {
+			app.Logf("NETDEMO out: geen bruikbaar DNS-antwoord (n=%d, %v)", n, err)
+			exit(app, 1)
+		}
+		app.Logf("NETDEMO out: DNS-antwoord van %s (%d bytes) — uitgaande masquerade werkt", dns, n)
+		exit(app, 0)
 	}
 
 	// Hanger: een lege lus zonder preemptiepunt monopoliseert de core — de

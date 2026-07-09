@@ -8,12 +8,12 @@ set -e
 TAMAGO="${TAMAGO:-$HOME/tamago-go/bin/go}"
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-# 1. De probe-image: canoniek gelinkt op load (0x200000) + 0x10000; de eerste
-#    64 bytes van het bestand worden de arm64 Image-header (mkkernel).
+# 1. De probe-image: gelinkt op de WERKELIJKE load (0x80000, zie hieronder)
+#    + 0x10000; de eerste 64 bytes van het bestand worden de header (mkkernel).
 cd "$DIR/metal"
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags linkcpuinit -trimpath \
-	-ldflags "-s -w -T 0x210000 -R 0x1000" -o probe5.elf ./cmd/probe5
+	-ldflags "-s -w -T 0x90000 -R 0x1000" -o probe5.elf ./cmd/probe5
 
 # 2. ELF → kernel_2712.img, RAW (het Circle-recept): géén arm64-Image-magic,
 #    plat bestand, code0-branch op byte 0; de firmware springt blind naar
@@ -23,7 +23,7 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 #    boot; het raw-pad is door Circle op de Pi 5 bewezen.
 cd "$DIR"
 mkdir -p sd-rpi5
-go run "$DIR/image/mkkernel/main.go" -elf metal/probe5.elf -o sd-rpi5/kernel_2712.img -load 0x200000 -raw
+go run "$DIR/image/mkkernel/main.go" -elf metal/probe5.elf -o sd-rpi5/kernel_2712.img -load 0x80000 -raw
 
 # 3. config.txt + instructies.
 cat > sd-rpi5/config.txt <<'EOF'
@@ -35,9 +35,11 @@ kernel=kernel_2712.img
 # laadt en valideert hij het image daarop — elk niet-Linux-image sneuvelt
 # geluidloos vóór de eerste eigen instructie. Bestond niet op de Pi 4.
 os_check=0
-# Raw image (geen arm64-magic) → de firmware springt naar kernel_address;
-# expliciet zetten, zoals Circle (config64.txt) dat doet.
-kernel_address=0x200000
+# Raw image (geen arm64-magic) → de firmware laadt op de Pi 5-default 0x80000
+# en springt naar byte 0 (code0-branch). LET OP (gemeten 2026-07-09 sessie 2,
+# XN-kooi): kernel_address wordt door de Pi 5-EEPROM-bootloader GENEGEERD —
+# zet hem niet, link op 0x80000 (+0x10000 voor text). Drie dagen "MMU-wedge"
+# was in werkelijkheid dit adres-verschil.
 # DTB buiten onze RAM-declaratie (de firmware eist een DTB op de kaart,
 # de probe gebruikt hem niet).
 device_tree_address=0x0f000000

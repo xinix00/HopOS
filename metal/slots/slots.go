@@ -221,7 +221,11 @@ func Start(i int, image []byte, memLimit uint64, env map[string]string, mounts m
 	if memLimit == 0 {
 		return fmt.Errorf("memLimit 0 ongeldig")
 	}
-	envBlob := encodeEnv(env)
+	// DNS-resolver van de node meegeven, zodat een app die naar buiten praat
+	// (cloudflared, servers) namen kan opzoeken — de query loopt als gewoon
+	// UDP door de masquerade. HOP zet 'm als env (net als ER_PORT_*), tenzij
+	// de job 'm al expliciet koos. Leeg (Pi vóór P2) = geen HOP_DNS.
+	envBlob := encodeEnv(withDNS(env, board.Current().Net().DNS))
 	if len(envBlob) > layout.CtrlEnvMax {
 		return fmt.Errorf("env te groot: %d > %d bytes", len(envBlob), layout.CtrlEnvMax)
 	}
@@ -348,12 +352,10 @@ func Start(i int, image []byte, memLimit uint64, env map[string]string, mounts m
 	ctrlWrite(i, layout.CtrlEnvLen, uint64(len(envBlob)))
 	// Klok doorgeven: de teller is gedeeld, dus HOP's offset geldt 1-op-1.
 	ctrlWrite(i, layout.CtrlWallOff, uint64(board.Current().TimerOffset()))
-	// Net-config: elke task krijgt een adres op het interne net (zoals elke
-	// container een IP krijgt); de app initieert alleen een stack als hij
-	// appnet.Up aanroept.
-	ipCfg, gwCfg := hopswitch.NetCfg(i)
-	ctrlWrite(i, layout.CtrlNetIP, ipCfg)
-	ctrlWrite(i, layout.CtrlNetGW, gwCfg)
+	// Geen net-config meer op de control-page: elke task heeft altijd een adres
+	// op het interne net en leidt IP/gateway/MAC deterministisch af uit zijn
+	// slotnummer (layout-net-plan, gedeeld met de switch); de app initieert een
+	// stack pas als hij appnet.Up aanroept.
 	ring.Init(layout.RingOutbox(i), layout.RingDataCap)
 	ring.Init(layout.RingInbox(i), layout.RingDataCap)
 	ring.Init(layout.NetRingTX(i), layout.NetRingDataCap)
@@ -515,6 +517,24 @@ func NumSlots() int {
 // (de O6N-tri-clustertopologie), dus komt van het actieve board — slots kent
 // hem niet zelf. Blijft hier als dunne doorgeef voor slotmgr.
 func CoreClass(i int) string { return board.Current().CoreClass(i) }
+
+// withDNS geeft een kopie van env met HOP_DNS gezet op de node-resolver,
+// tenzij dns leeg is of de job de sleutel al koos. Kopie: de env-map is van de
+// aanroeper (HOP's Job), die muteren we niet.
+func withDNS(env map[string]string, dns string) map[string]string {
+	if dns == "" {
+		return env
+	}
+	if _, set := env["HOP_DNS"]; set {
+		return env
+	}
+	out := make(map[string]string, len(env)+1)
+	for k, v := range env {
+		out[k] = v
+	}
+	out["HOP_DNS"] = dns
+	return out
+}
 
 // encodeEnv serialiseert een env-map tot "key=val\n"-bytes (stabiele volgorde
 // niet nodig; de app leest per regel).

@@ -18,10 +18,13 @@ import (
 	"net/http"
 	"runtime"
 	"time"
+	"unsafe"
 
 	"hop-os/metal/board"
 	_ "hop-os/metal/board/qemuvirt" // registreert het board (init) + tamago-hooks
 	"hop-os/metal/checksum"
+	"hop-os/metal/dev"
+	"hop-os/metal/fb"
 	"hop-os/metal/hopfs"
 	"hop-os/metal/hopnet"
 	"hop-os/metal/hopswitch"
@@ -71,6 +74,57 @@ func waitExit(slot int, timeout time.Duration) (uint64, error) {
 	}
 	return slots.Get(slot).ExitCode, nil
 }
+
+// fbconsDemo bewijst de universele log-console (metal/fb) op de échte
+// toolchain: QEMU -M virt heeft geen firmware-framebuffer, dus we richten er
+// zelf één in in gewoon RAM, laten de renderer erin tekenen en lezen de pixels
+// terug. Dit is exact het pad dat op een board de GOP/simplefb-buffer voedt
+// (alleen de discovery verschilt) — plus de printk-mirror, want fmt-output
+// gaat na Init ook naar deze buffer. Daarna Disable: de rest van de demo
+// mirrort niet in dit wegwerp-buffertje.
+func fbconsDemo() error {
+	const w, h = 64, 32
+	const stride = w * 4
+	buf := make([]byte, h*stride)
+	base := uintptr(unsafe.Pointer(&buf[0]))
+	fb.Init(fb.Desc{Base: base, Width: w, Height: h, Stride: stride, BPP: 32})
+	if !fb.Active() {
+		return fmt.Errorf("fb.Init activeerde de console niet")
+	}
+	// Init veegt uniform naar de achtergrondkleur.
+	bg := dev.Read32(base)
+	for off := 0; off < len(buf); off += 4 {
+		if dev.Read32(base+uintptr(off)) != bg {
+			fb.Disable()
+			return fmt.Errorf("Init veegde niet uniform (@%d)", off)
+		}
+	}
+	// Een dichte glyph tekenen; de eerste 16x16-cel moet nu voorgrondpixels
+	// hebben, en de cel ernaast onaangeroerd (geen schrijven buiten de cel).
+	fb.SetColor(0xFFFFFFFF)
+	fb.Putc('#')
+	fgSeen := false
+	for gy := 0; gy < cellPx; gy++ {
+		for gx := 0; gx < cellPx; gx++ {
+			if dev.Read32(base+uintptr(gy*stride+gx*4)) != bg {
+				fgSeen = true
+			}
+		}
+	}
+	if !fgSeen {
+		fb.Disable()
+		return fmt.Errorf("glyph tekende geen enkele pixel")
+	}
+	if dev.Read32(base+uintptr(2*cellPx*4)) != bg { // ruim voorbij cel 0, rij 0
+		fb.Disable()
+		return fmt.Errorf("glyph schreef buiten zijn cel")
+	}
+	fb.Disable()
+	return nil
+}
+
+// cellPx is de pixelmaat van één tekencel in metal/fb (8x8-font op 2×).
+const cellPx = 16
 
 // serveHello opent de demo-poort: het bewijs dat de netstack werkt.
 func serveHello() error {
@@ -123,6 +177,14 @@ func main() {
 
 	major, minor := board.Current().PSCIVersion()
 	fmt.Printf("PSCI versie %d.%d (boot-EL%d, conduit SMC)\n", major, minor, board.Current().BootEL())
+
+	// Universele log-console (metal/fb) — vroeg, vóór er goroutines loggen.
+	// QEMU heeft geen firmware-framebuffer, dus we bewijzen de renderer op een
+	// RAM-buffer; op een board voedt board.Framebuffer() (GOP/simplefb) 'm.
+	if err := fbconsDemo(); err != nil {
+		fail("fbcons", err)
+	}
+	fmt.Println("HOPOS_FBCONS_OK — universele fb-log-console: renderer + printk-mirror bewezen")
 
 	if err := hopnet.Up(); err != nil {
 		fail("net", err)
@@ -355,9 +417,9 @@ func main() {
 	fmt.Println("HOPOS_FETCH_OK — fetch via HOP: download landde in het volume")
 
 	// Per-slot netwerk: elke app een eigen netstack over de frame-ringen,
-	// HOP schuift alleen frames (metal/hopswitch). Twee bewijzen: HOP → app
-	// over de interne stack (gateway-pad), en app → app zonder dat er een
-	// TCP-stack op core 0 aan te pas komt.
+	// HOP schuift alleen frames (metal/hopswitch). Bewijs: app → app zonder
+	// dat er een TCP-stack op core 0 aan te pas komt (HOP is enkel L2-switch +
+	// ARP-responder voor de gateway).
 	fmt.Println("netdemo: slot 1 luistert op het interne net...")
 	if err := slots.Start(1, app, 64<<20, map[string]string{"NETDEMO": "listen"}, nil, nil); err != nil {
 		fail("net-listen", err)
@@ -367,31 +429,9 @@ func main() {
 		fail("net-listen", err)
 	}
 
-	// HOP → app: dial over de interne stack, met retries — READY betekent
-	// nog niet dat de listener al open is.
+	// App → app: slot 2 dialt slot 1 (via de gateway-ARP van de switch); exit
+	// 0 = pong geverifieerd.
 	addr := hopswitch.SlotIP(1) + ":8080"
-	var conn net.Conn
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(100 * time.Millisecond) {
-		if conn, err = hopswitch.Dial(addr, time.Second); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			fail("net-hop-dial", err)
-		}
-	}
-	if _, err := conn.Write([]byte("ping van " + hopswitch.HostIP + "\n")); err != nil {
-		fail("net-hop-dial", err)
-	}
-	pong := make([]byte, 64)
-	n, err = conn.Read(pong)
-	conn.Close()
-	want := "pong ping van " + hopswitch.HostIP + "\n"
-	if err != nil || string(pong[:n]) != want {
-		fail("net-hop-dial", fmt.Errorf("antwoord %q (%v), verwacht %q", pong[:n], err, want))
-	}
-	fmt.Printf("netdemo: HOP → %s beantwoord over de interne stack\n", addr)
-
-	// App → app: slot 2 dialt slot 1; exit 0 = pong geverifieerd.
 	fmt.Println("netdemo: slot 2 dialt slot 1 — app↔app, HOP kopieert alleen frames...")
 	dialEnv := map[string]string{"NETDEMO": "dial", "NET_DIAL": addr}
 	if err := slots.Start(2, app, 64<<20, dialEnv, nil, nil); err != nil {
@@ -404,7 +444,22 @@ func main() {
 	if err := slots.Stop(1, 3*time.Second); err != nil {
 		fail("net-stop", err)
 	}
-	fmt.Println("HOPOS_NET_SLOT_OK — per-slot netstack + L2-switch: HOP→app en app↔app bewezen")
+	fmt.Println("HOPOS_NET_SLOT_OK — per-slot netstack + L2-switch: app↔app bewezen")
+
+	// Uitgaand (masquerade): een app dialt naar buiten — hier een DNS-query
+	// (UDP) naar de node-resolver. HOP herschrijft bron slot-IP:poort →
+	// node-IP:node-poort en het antwoord terug; nul TCP-terminatie op core 0.
+	// Dit is het pad voor cloudflared/servers. (De query verlaat QEMU via
+	// slirp; een antwoord bewijst de round-trip.)
+	fmt.Println("netdemo: slot 2 doet een uitgaande DNS-query — masquerade naar buiten...")
+	if err := slots.Start(2, app, 64<<20, map[string]string{"NETDEMO": "out"}, nil, nil); err != nil {
+		fail("net-out", err)
+	}
+	go drainLogs(2, nil)
+	if code, err := waitExit(2, 15*time.Second); err != nil || code != 0 {
+		fail("net-out", fmt.Errorf("exit=%d, err=%v", code, err))
+	}
+	fmt.Println("HOPOS_OUTBOUND_OK — uitgaande masquerade: app → buiten → app, HOP herschrijft alleen headers")
 
 	// Poort-publicatie (stateloze DNAT): node-IP:8080 → slot 1, via de
 	// ports-tabel van Start — exact de HopRunner-route, inclusief de

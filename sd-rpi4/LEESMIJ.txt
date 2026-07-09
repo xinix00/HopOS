@@ -23,9 +23,15 @@ UART: PL011 op de 40-pins header — pin 8 (TXD), pin 10 (RXD), pin 6 (GND),
 Verwachte volgorde op de UART:
   1. bootloader-logs (uart_2ndstage);
   2. "P2" — ons vroegste levensteken: cpuinit draait, boot-EL = 2 (TF-A);
-  3. de probe-banner + metingen, afgesloten met
+  3. "Rp00000000000exxxx" — de PC-dump: bewijs dat de firmware ons écht op
+     0x80000 laadde (moet ~0xE-Fxxxx zijn; iets ánders = laadadres-probleem,
+     zie docs/handoff-pi5-mmu.md voor het Pi 5-verhaal);
+  4. de MMU-ladder "@$abc t MNCId hH eEZ" (two-stage: blokkenkaart → echte
+     kaart) en dan de probe-banner + metingen, afgesloten met
      HOPOS_PI4_PROBE_OK        → alles klopt, P1 kan los;
      HOPOS_PI4_PROBE_DEELS     → lees de regels erboven: meetdata.
+  Een fault verschijnt als XE<esr>L<elr>F<far>R<lr>S<sp>+stack (EL1) of
+  YE... (EL2) — decodeerbaar, geen stille hang.
 
 Blijft het stil ná de regel "PSCI: versie opvragen via SMC...": bl31.bin
 ontbreekt of wordt niet geladen (armstub-regel in config.txt) — de SMC

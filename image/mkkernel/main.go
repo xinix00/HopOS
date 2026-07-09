@@ -62,7 +62,12 @@ func main() {
 		die("entry %#x ongeldig voor load %#x", f.Entry, load)
 	}
 
-	img := make([]byte, fileEnd)
+	// Tot en met memEnd (niet fileEnd): de BSS moet als expliciete nullen in
+	// het bestand — een raw image heeft geen loader die p_memsz zeroet, en
+	// de runtime op DRAM-restanten laten starten gaf de "zwervende dood in
+	// schedinit" (garbage mutex → semasleep → wilde deref; gemeten
+	// 2026-07-09, ESR 0x96000004 @ runtime.semasleep). Kost ~170KB extra.
+	img := make([]byte, memEnd)
 	for _, p := range f.Progs {
 		if p.Type != elf.PT_LOAD || p.Filesz == 0 {
 			continue

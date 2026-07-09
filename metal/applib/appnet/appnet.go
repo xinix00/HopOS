@@ -18,7 +18,6 @@ import (
 	gnet "github.com/usbarmory/go-net"
 
 	"hop-os/metal/applib"
-	"hop-os/metal/dev"
 	"hop-os/metal/layout"
 	"hop-os/metal/ring"
 )
@@ -54,34 +53,34 @@ func ip4str(v uint32) string {
 	return fmt.Sprintf("%d.%d.%d.%d", byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
 }
 
-// Up brengt de eigen netstack op met de config die HOP bij de start op de
-// control-page zette en hangt hem in Go's net-package; geeft het eigen IP
-// terug. Fout als HOP geen netwerk voor dit slot inrichtte.
+// Up brengt de eigen netstack op en hangt hem in Go's net-package; geeft het
+// eigen IP terug. Alle config is afgeleid uit het slotnummer via het gedeelde
+// net-plan (layout) — HOP hoeft niets per slot door te geven; de switch en de
+// app-stack leiden hetzelfde IP/gateway/MAC af, dus ze lopen nooit uiteen.
 func Up(a *applib.App) (string, error) {
-	ipCfg := dev.Read64(layout.CtrlPage(a.Slot) + layout.CtrlNetIP)
-	if ipCfg == 0 {
-		return "", fmt.Errorf("geen netwerk ingericht voor slot %d", a.Slot)
-	}
-	gwCfg := dev.Read64(layout.CtrlPage(a.Slot) + layout.CtrlNetGW)
-
-	ip := ip4str(uint32(ipCfg))
-	cidr := fmt.Sprintf("%s/%d", ip, ipCfg>>32&0xFF)
-	mac := fmt.Sprintf("02:00:00:00:00:%02x", a.Slot)
+	ip := ip4str(layout.SlotIP4(a.Slot))
+	cidr := fmt.Sprintf("%s/%d", ip, layout.NetPrefix)
+	m := layout.SlotMAC(a.Slot)
+	mac := fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", m[0], m[1], m[2], m[3], m[4], m[5])
 
 	nd := &nic{
 		tx: ring.Open(layout.NetRingTX(a.Slot)),
 		rx: ring.Open(layout.NetRingRX(a.Slot)),
 	}
 	iface := &gnet.Interface{NetworkDevice: nd}
-	if err := iface.Init(cidr, mac, ip4str(uint32(gwCfg))); err != nil {
+	if err := iface.Init(cidr, mac, ip4str(layout.HostIP4())); err != nil {
 		return "", fmt.Errorf("netstack init: %w", err)
 	}
 	iface.Stack.EnableICMP()
 
 	// In Go's standaard net-package hangen: hierna werken net.Listen en
-	// net.Dial voor deze app. Geen DNS op het interne net — IP's zijn
-	// deterministisch (hopswitch.SlotIP) en komen via env binnen.
+	// net.Dial voor deze app. Interne IP's zijn deterministisch (geen DNS
+	// nodig); voor uitgaand verkeer krijgt de app de node-resolver via HOP_DNS
+	// mee (queries lopen als UDP door HOP's masquerade).
 	net.SocketFunc = iface.Stack.Socket
+	if dns := a.Env("HOP_DNS"); dns != "" {
+		net.SetDefaultNS([]string{dns})
+	}
 
 	// RX-lus met microslaap i.p.v. gnet's Gosched-spin: een idle job laat
 	// zo zijn hele core slapen (zie metal/idle).

@@ -6,9 +6,11 @@ kernel=kernel_2712.img
 # laadt en valideert hij het image daarop — elk niet-Linux-image sneuvelt
 # geluidloos vóór de eerste eigen instructie. Bestond niet op de Pi 4.
 os_check=0
-# Raw image (geen arm64-magic) → de firmware springt naar kernel_address;
-# expliciet zetten, zoals Circle (config64.txt) dat doet.
-kernel_address=0x200000
+# Raw image (geen arm64-magic) → de firmware laadt op de Pi 5-default 0x80000
+# en springt naar byte 0 (code0-branch). LET OP (gemeten 2026-07-09 sessie 2,
+# XN-kooi): kernel_address wordt door de Pi 5-EEPROM-bootloader GENEGEERD —
+# zet hem niet, link op 0x80000 (+0x10000 voor text). Drie dagen "MMU-wedge"
+# was in werkelijkheid dit adres-verschil.
 # DTB buiten onze RAM-declaratie (de firmware eist een DTB op de kaart,
 # de probe gebruikt hem niet).
 device_tree_address=0x0f000000

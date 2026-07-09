@@ -1,8 +1,9 @@
 # HopOS probe4 — Raspberry Pi 4 (zie docs/rpi4.md)
 arm_64bit=1
 kernel=kernel8.img
-# Zelfde geheugenplan als de Pi 5: kernel op 0x200000 (Pi 4-default is 0x80000).
-kernel_address=0x200000
+# Kernel op de Pi-default 0x80000 (geen kernel_address: de Pi 5 negeert die
+# optie toch — laadadres-les 2026-07-09 — en zo laden beide boards identiek;
+# het image is op 0x90000 gelinkt en de p-marker op de UART bewijst het).
 # DTB buiten onze RAM-declaratie (de firmware eist een DTB op de kaart; de
 # probe gebruikt hem niet, TF-A patcht hem alleen).
 device_tree_address=0x0f000000

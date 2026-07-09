@@ -8,27 +8,30 @@ set -e
 TAMAGO="${TAMAGO:-$HOME/tamago-go/bin/go}"
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-# 1. De probe-image: canoniek gelinkt op load (0x200000) + 0x10000 — zelfde
-#    plan als de Pi 5, want config.txt zet kernel_address=0x200000 (de Pi 4-
-#    default is 0x80000). De eerste 64 bytes worden de arm64 Image-header.
+# 1. De probe-image: gelinkt op de Pi-DEFAULT load 0x80000 + 0x10000 — de
+#    laadadres-les van de Pi 5 (2026-07-09): kernel_address wordt daar door
+#    de EEPROM-bootloader genegeerd; door overal op 0x80000 te laden zijn
+#    beide boards identiek en is die optie nergens meer nodig. De eerste
+#    64 bytes worden de arm64 Image-header.
 cd "$DIR/metal"
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags linkcpuinit -trimpath \
-	-ldflags "-s -w -T 0x210000 -R 0x1000" -o probe4.elf ./cmd/probe4
+	-ldflags "-s -w -T 0x90000 -R 0x1000" -o probe4.elf ./cmd/probe4
 
-# 2. ELF → kernel8.img (raw + arm64 Image-header). Als los bestand
-#    gedraaid: stdlib-only, geen module nodig.
+# 2. ELF → kernel8.img (raw + arm64 Image-header, incl. BSS als nullen —
+#    mkkernel schrijft t/m memEnd). Als los bestand gedraaid: stdlib-only.
 cd "$DIR"
 mkdir -p sd-rpi4
-go run "$DIR/image/mkkernel/main.go" -elf metal/probe4.elf -o sd-rpi4/kernel8.img -load 0x200000
+go run "$DIR/image/mkkernel/main.go" -elf metal/probe4.elf -o sd-rpi4/kernel8.img -load 0x80000
 
 # 3. config.txt + instructies.
 cat > sd-rpi4/config.txt <<'EOF'
 # HopOS probe4 — Raspberry Pi 4 (zie docs/rpi4.md)
 arm_64bit=1
 kernel=kernel8.img
-# Zelfde geheugenplan als de Pi 5: kernel op 0x200000 (Pi 4-default is 0x80000).
-kernel_address=0x200000
+# Kernel op de Pi-default 0x80000 (geen kernel_address: de Pi 5 negeert die
+# optie toch — laadadres-les 2026-07-09 — en zo laden beide boards identiek;
+# het image is op 0x90000 gelinkt en de p-marker op de UART bewijst het).
 # DTB buiten onze RAM-declaratie (de firmware eist een DTB op de kaart; de
 # probe gebruikt hem niet, TF-A patcht hem alleen).
 device_tree_address=0x0f000000
@@ -68,9 +71,15 @@ UART: PL011 op de 40-pins header — pin 8 (TXD), pin 10 (RXD), pin 6 (GND),
 Verwachte volgorde op de UART:
   1. bootloader-logs (uart_2ndstage);
   2. "P2" — ons vroegste levensteken: cpuinit draait, boot-EL = 2 (TF-A);
-  3. de probe-banner + metingen, afgesloten met
+  3. "Rp00000000000exxxx" — de PC-dump: bewijs dat de firmware ons écht op
+     0x80000 laadde (moet ~0xE-Fxxxx zijn; iets ánders = laadadres-probleem,
+     zie docs/handoff-pi5-mmu.md voor het Pi 5-verhaal);
+  4. de MMU-ladder "@$abc t MNCId hH eEZ" (two-stage: blokkenkaart → echte
+     kaart) en dan de probe-banner + metingen, afgesloten met
      HOPOS_PI4_PROBE_OK        → alles klopt, P1 kan los;
      HOPOS_PI4_PROBE_DEELS     → lees de regels erboven: meetdata.
+  Een fault verschijnt als XE<esr>L<elr>F<far>R<lr>S<sp>+stack (EL1) of
+  YE... (EL2) — decodeerbaar, geen stille hang.
 
 Blijft het stil ná de regel "PSCI: versie opvragen via SMC...": bl31.bin
 ontbreekt of wordt niet geladen (armstub-regel in config.txt) — de SMC

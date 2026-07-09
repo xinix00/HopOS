@@ -29,3 +29,4 @@ replace (
 	github.com/xinix00/hoplockserver => /Users/derek/Git/easy/hoplockserver
 	hop => /Users/derek/Git/easy/hop
 )
+

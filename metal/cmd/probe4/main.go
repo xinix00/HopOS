@@ -30,12 +30,14 @@ import (
 )
 
 // RAM-declaratie: 128MB vanaf de kernel-load — ruim binnen elk Pi 4-model
-// (1-8GB). kernel_address=0x200000 in config.txt maakt het geheugenplan
-// gelijk aan de Pi 5 (default zou hier 0x80000 zijn); de DTB is met
-// device_tree_address bewust búíten dit bereik gelegd.
+// (1-8GB). Zelfde plan als de Pi 5 ná de laadadres-ontdekking (2026-07-09):
+// laden op de Pi-default 0x80000, text op +0x10000 = 0x90000, en géén
+// kernel_address in config.txt — de Pi 5 negeert die optie toch en zo laden
+// beide boards identiek. De DTB ligt met device_tree_address búíten dit
+// bereik.
 //
 //go:linkname ramStart runtime/goos.RamStart
-var ramStart uint = 0x00200000
+var ramStart uint = 0x00080000
 
 //go:linkname ramSize runtime/goos.RamSize
 var ramSize uint = 0x08000000
