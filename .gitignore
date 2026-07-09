@@ -1,6 +1,7 @@
 *.elf
 nvme.img
 *.md
+!README.md
 .claude/
 
 # Gegenereerde SD-kernelimages (regenereerbaar uit de ELF's via image/*-probe.sh);
