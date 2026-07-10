@@ -127,6 +127,11 @@ type Plan struct {
 	// HVC-revoke-handler in (offset 0x400) en laat de rest staan — een board
 	// mag daar zijn boot-diagnostiek hebben (rpi5: de faultdump-tabel).
 	BootScratchPA uint64   // boot-EL-scratch + DTB-pointer (cpuinit-vast, board-asm)
+	NetDMAPA      uint64   // NIC-DMA-regio (NetDMASize; buiten élke RAM-declaratie
+	// → device-gemapt → coherent met de NIC zonder cache-onderhoud). Optioneel
+	// (0 = board gebruikt een eigen constante of heeft geen NIC-DMA-plan):
+	// QEMU houdt de vaste NetDMABase binnen HOP's partitie, de Pi-boards
+	// leggen 'm hier vast en DTBPool snijdt 'm uit de pool.
 	Pool          []Region // vrij DRAM voor app-partities (2MB-korrel)
 }
 
@@ -154,6 +159,15 @@ func UsePlan(p Plan) {
 		panic("layout: Plan.Pool is leeg — geen partitie-geheugen")
 	}
 	plan = p
+}
+
+// NetDMAPA geeft de fysieke NIC-DMA-regio van het plan (NetDMASize groot).
+// Alleen geldig op boards die 'm zetten (zie het Plan-veld).
+func NetDMAPA() uintptr {
+	if plan.NetDMAPA == 0 {
+		panic("layout: Plan.NetDMAPA niet gezet — dit board heeft geen NIC-DMA-plan")
+	}
+	return pa(plan.NetDMAPA)
 }
 
 // pa bewaakt dat niemand het PA-plan raakt vóór een board het zette.
@@ -212,6 +226,46 @@ func ParkMboxPA(core int) uintptr {
 func Pool() []Region {
 	pa(plan.CtrlPA) // guard
 	return plan.Pool
+}
+
+// CarvePool bouwt een partitie-pool uit de fysieke geheugenbanken (uit de DTB)
+// minus alle holes (HOP-kern, control-regio's, DTB, /memreserve/). Pure
+// interval-rekenkunde — geen DTB-kennis, board-neutraal. Elk resultaat wordt
+// naar binnen 2MB-uitgelijnd (stage-2-blokken zijn 2MB) en stukken < min
+// vallen weg. Zo benut een board zijn volledige RAM (meerdere banken, ook
+// boven 4GB) zonder ooit een hole uit te delen. Leeg = de aanroeper valt terug.
+func CarvePool(banks, holes []Region, min uint64) []Region {
+	regs := append([]Region(nil), banks...)
+	// Elke hole uit elke overlappende bank knippen (kan 'm splitsen).
+	for _, h := range holes {
+		hEnd := h.Base + h.Size
+		var next []Region
+		for _, r := range regs {
+			rEnd := r.Base + r.Size
+			if hEnd <= r.Base || h.Base >= rEnd { // geen overlap
+				next = append(next, r)
+				continue
+			}
+			if h.Base > r.Base { // stuk vóór de hole
+				next = append(next, Region{Base: r.Base, Size: h.Base - r.Base})
+			}
+			if hEnd < rEnd { // stuk ná de hole
+				next = append(next, Region{Base: hEnd, Size: rEnd - hEnd})
+			}
+		}
+		regs = append([]Region(nil), next...)
+	}
+	// 2MB-uitlijnen (naar binnen) en te kleine stukken droppen.
+	const mb2 = 2 << 20
+	var out []Region
+	for _, r := range regs {
+		base := (r.Base + mb2 - 1) &^ (mb2 - 1)
+		end := (r.Base + r.Size) &^ (mb2 - 1)
+		if end > base && end-base >= min {
+			out = append(out, Region{Base: base, Size: end - base})
+		}
+	}
+	return out
 }
 
 // TopAddr is het hoogste fysieke adres dat het PA-plan aanraakt (regio's +

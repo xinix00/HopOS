@@ -21,9 +21,10 @@ import (
 // IP-plan en de NIC-probe komen van het actieve board (op QEMU de slirp-
 // defaults; op echt ijzer straks een board met DHCP/DT).
 func Up() error {
-	nc := board.Current().Net()
 	// De board levert een kant-en-klaar go-net-device (driver + init zijn
-	// board-kennis); hopnet weet niet welke NIC dit is.
+	// board-kennis); hopnet weet niet welke NIC dit is. ProbeNIC vóór Net():
+	// op echt ijzer (Pi 5) haalt de probe zelf de DHCP-lease die Net() daarna
+	// rapporteert — die volgorde is het contract.
 	nic, hw, err := board.Current().ProbeNIC()
 	if err != nil {
 		return fmt.Errorf("nic: %w", err)
@@ -32,6 +33,7 @@ func Up() error {
 		return fmt.Errorf("geen NIC gevonden")
 	}
 	mac := hw.String()
+	nc := board.Current().Net()
 
 	// De NIC achter de NAT-shim van de switch: inbound frames voor
 	// gepubliceerde poorten of lopende masquerade-flows worden vóór HOP's

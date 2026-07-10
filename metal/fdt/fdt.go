@@ -39,38 +39,49 @@ func be64(addr uintptr) uint64 {
 	return uint64(be32(addr))<<32 | uint64(be32(addr+4))
 }
 
-// MemTotal parset de DTB op base en geeft de som van alle /memory-reg-
-// groottes (bytes). ok=false bij een ongeldige of onbegrepen blob, zodat de
-// aanroeper op een veilige default kan terugvallen.
-//
-// Aanname: #address-cells = #size-cells = 2 (64-bit) — de arm64-standaard,
-// bevestigd voor QEMU virt en de Raspberry Pi. Wijkt een board hiervan af,
-// dan valt de detectie terug op de default (en dat is zichtbaar in de log).
+// Region is een fysieke geheugenrange (bytes). Losgekoppeld van layout.Region
+// zodat fdt een generieke DTB-lezer blijft; de aanroeper converteert.
+type Region struct{ Addr, Size uint64 }
+
+// MemTotal geeft de som van alle /memory-banken (bytes). ok=false bij een
+// ongeldige blob, zodat de aanroeper op een veilige default kan terugvallen.
 func MemTotal(base uintptr) (uint64, bool) {
-	if base == 0 || be32(base) != magic {
+	regs, ok := MemRegions(base)
+	if !ok {
 		return 0, false
+	}
+	var total uint64
+	for _, r := range regs {
+		total += r.Size
+	}
+	return total, true
+}
+
+// MemRegions parset de DTB op base en geeft álle /memory-banken (elk een
+// (adres,grootte)-tupel). ok=false bij een ongeldige of onbegrepen blob.
+//
+// Cell-vorm uit de root's #address-cells/#size-cells (default 2/1 per spec);
+// alleen 1 of 2 cellen (32/64-bit) ondersteund. Onvertrouwde firmware-input:
+// elke offset wordt begrensd — een kromme DTB levert (nil,false), geen panic.
+func MemRegions(base uintptr) ([]Region, bool) {
+	if base == 0 || be32(base) != magic {
+		return nil, false
 	}
 	structOff := be32(base + 8)
 	stringsOff := be32(base + 12)
 	totalSize := be32(base + 4)
 	if totalSize > maxBlob || structOff >= totalSize || stringsOff >= totalSize {
-		return 0, false
+		return nil, false
 	}
 
 	p := base + uintptr(structOff)
 	end := base + uintptr(totalSize)
 
-	// depth: root = 1, /memory = 2 (direct kind van de root). De root's
-	// #address-cells/#size-cells bepalen de vorm van /memory's reg-tupels; we
-	// lezen ze i.p.v. 2/2 aan te nemen (historische Pi-DT's wijken af). Default
-	// per Devicetree-spec (address=2, size=1) als de root ze niet noemt. Alleen
-	// 1 of 2 cellen (32/64-bit) ondersteund — daarbuiten veilig (0,false).
 	depth := 0
 	inMemNode := false
 	addrCells := uint32(2)
 	sizeCells := uint32(1)
-	var total uint64
-	found := false
+	var regs []Region
 
 	for p+4 <= end {
 		tok := be32(p)
@@ -78,20 +89,18 @@ func MemTotal(base uintptr) (uint64, bool) {
 		switch tok {
 		case tokBegin:
 			depth++
-			// Node-naam: null-getermineerd, gepad tot 4. "memory" of
-			// "memory@<addr>" op depth 2 is het node dat we zoeken.
 			name := p
 			for p < end && dev.Read8(p) != 0 {
 				p++
 			}
 			inMemNode = depth == 2 && isMemory(name, p)
-			p = align4(p + 1) // voorbij de nul, dan padden
+			p = align4(p + 1)
 		case tokEnd:
 			inMemNode = false
 			depth--
 		case tokProp:
 			if p+8 > end {
-				return 0, false
+				return nil, false
 			}
 			plen := be32(p)
 			nameOff := be32(p + 4)
@@ -99,17 +108,13 @@ func MemTotal(base uintptr) (uint64, bool) {
 			data := p
 			p = align4(p + uintptr(plen))
 			if p > end {
-				return 0, false
+				return nil, false
 			}
-			// nameOff is onvertrouwde firmware-input: begrens 'm binnen de blob
-			// vóór er ook maar één byte gelezen wordt — anders wijst
-			// base+stringsOff+nameOff ~4GB verderop → OOB-read → data-abort.
 			nameAddr := uint64(stringsOff) + uint64(nameOff)
 			if nameAddr >= uint64(totalSize) {
-				continue // kromme nameOff: sla deze prop over
+				continue
 			}
 			np := base + uintptr(nameAddr)
-			// Root-cellen (depth 1) leggen /memory's reg-vorm vast.
 			if depth == 1 && plen == 4 {
 				if propIs(np, end, "#address-cells") {
 					addrCells = be32(data)
@@ -117,37 +122,145 @@ func MemTotal(base uintptr) (uint64, bool) {
 					sizeCells = be32(data)
 				}
 			}
-			// In /memory: reg = [ (addr,size) ... ] met root's cell-counts;
-			// tel de size-cellen op.
+			// In /memory: reg = [ (addr,size) ... ] met root's cell-counts.
 			if inMemNode && propIs(np, end, "reg") {
 				if addrCells == 0 || addrCells > 2 || sizeCells == 0 || sizeCells > 2 {
-					return 0, false // niet-ondersteunde cell-vorm
+					return nil, false
 				}
 				stride := uintptr(addrCells+sizeCells) * 4
 				szOff := uintptr(addrCells) * 4
 				for off := uintptr(0); off+stride <= uintptr(plen); off += stride {
-					if sizeCells == 1 {
-						total += uint64(be32(data + off + szOff))
+					var a, s uint64
+					if addrCells == 1 {
+						a = uint64(be32(data + off))
 					} else {
-						total += be64(data + off + szOff)
+						a = be64(data + off)
 					}
-					found = true
+					if sizeCells == 1 {
+						s = uint64(be32(data + off + szOff))
+					} else {
+						s = be64(data + off + szOff)
+					}
+					regs = append(regs, Region{Addr: a, Size: s})
 				}
 			}
 		case tokNop:
 		case tokEndTree:
-			if found {
-				return total, true
-			}
-			return 0, false
+			return regs, len(regs) > 0
 		default:
-			return 0, false
+			return nil, false
 		}
 	}
-	if found {
-		return total, true
+	return regs, len(regs) > 0
+}
+
+// RootString leest een string-property van de root-node (bv. "serial-number",
+// door de Pi-firmware gezet) — de stabiele bron voor een board-identiteit
+// zoals de MAC. ok=false bij een kromme blob of ontbrekende property.
+func RootString(base uintptr, name string) (string, bool) {
+	if base == 0 || be32(base) != magic {
+		return "", false
 	}
-	return 0, false
+	structOff := be32(base + 8)
+	stringsOff := be32(base + 12)
+	totalSize := be32(base + 4)
+	if totalSize > maxBlob || structOff >= totalSize || stringsOff >= totalSize {
+		return "", false
+	}
+
+	p := base + uintptr(structOff)
+	end := base + uintptr(totalSize)
+	depth := 0
+
+	for p+4 <= end {
+		tok := be32(p)
+		p += 4
+		switch tok {
+		case tokBegin:
+			depth++
+			for p < end && dev.Read8(p) != 0 {
+				p++
+			}
+			p = align4(p + 1)
+		case tokEnd:
+			depth--
+		case tokProp:
+			if p+8 > end {
+				return "", false
+			}
+			plen := be32(p)
+			nameOff := be32(p + 4)
+			p += 8
+			data := p
+			p = align4(p + uintptr(plen))
+			if p > end {
+				return "", false
+			}
+			np := base + uintptr(stringsOff) + uintptr(nameOff)
+			if depth == 1 && uint64(stringsOff)+uint64(nameOff) < uint64(totalSize) && propIs(np, end, name) {
+				// Null-getermineerde string; de terminator niet meenemen.
+				b := make([]byte, 0, plen)
+				for i := uintptr(0); i < uintptr(plen); i++ {
+					c := dev.Read8(data + i)
+					if c == 0 {
+						break
+					}
+					b = append(b, c)
+				}
+				return string(b), true
+			}
+		case tokNop:
+		case tokEndTree:
+			return "", false
+		default:
+			return "", false
+		}
+	}
+	return "", false
+}
+
+// MemReserve leest het /memreserve/-blok uit de DTB-header (off_mem_rsvmap,
+// base+16): een array {u64 adres, u64 grootte} afgesloten door {0,0}. Dit zijn
+// regio's die de firmware/TF-A voor zichzelf houdt — nooit uitdelen als pool.
+// Leeg (of nil bij een kromme blob) is geldig: veel boards reserveren niets.
+func MemReserve(base uintptr) []Region {
+	if base == 0 || be32(base) != magic {
+		return nil
+	}
+	totalSize := be32(base + 4)
+	rsvOff := be32(base + 16)
+	if totalSize > maxBlob || rsvOff >= totalSize {
+		return nil
+	}
+	var regs []Region
+	p := base + uintptr(rsvOff)
+	end := base + uintptr(totalSize)
+	for p+16 <= end {
+		a := be64(p)
+		s := be64(p + 8)
+		p += 16
+		if a == 0 && s == 0 {
+			break // terminator
+		}
+		regs = append(regs, Region{Addr: a, Size: s})
+		if len(regs) > 64 { // sanity: een gezonde DTB heeft er een handvol
+			break
+		}
+	}
+	return regs
+}
+
+// BlobSize geeft de totale DTB-grootte (bytes) uit de header; 0 bij een
+// ongeldige blob. Voor de aanroeper die de DTB-regio zelf uit de pool wil
+// snijden (de firmware legde 'm ergens in RAM neer).
+func BlobSize(base uintptr) uint64 {
+	if base == 0 || be32(base) != magic {
+		return 0
+	}
+	if sz := be32(base + 4); sz <= maxBlob {
+		return uint64(sz)
+	}
+	return 0
 }
 
 func align4(a uintptr) uintptr { return (a + 3) &^ 3 }

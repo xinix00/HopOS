@@ -21,6 +21,7 @@ package rpi4
 
 import (
 	"hop-os/metal/board/raspi"
+	"hop-os/metal/dev"
 	"hop-os/metal/layout"
 )
 
@@ -33,17 +34,28 @@ import (
 const revokeVecAsm = 0x8B000 // = faultdump2-tabel in cpuinit.s (VBAR_EL2 core 0)
 
 func init() {
-	layout.UsePlan(layout.Plan{
+	// Alleen de HOP-core (MPIDR-aff 0) zet het plan — het leest de DTB fysiek,
+	// wat een app-core onder stage-2 niet kan (en niet nodig heeft: HOP bezit
+	// het plan). Zie de uitgebreide toelichting in board/rpi5/rpi5.go.
+	if raspi.MPIDR()&0xFFFFFF != 0 {
+		return
+	}
+	p := layout.Plan{
 		CtrlPA:        0x10000000,
 		RingPA:        0x11000000,
 		Stage2PA:      0x12000000,
 		RevokeVecPA:   revokeVecAsm,
 		NetRingPA:     0x13000000,
 		BootScratchPA: raspi.BootScratch, // 0x7F000, cpuinit-vast
-		Pool: []layout.Region{
-			{Base: 0x20000000, Size: 0x20000000}, // 512MB
-		},
-	})
+		NetDMAPA:      0x14000000,        // NIC-DMA (GENET, fase P2 — zelfde plek als de Pi 5)
+	}
+	// Pool = het volledige DRAM (DTB /memory) minus de vaste regio's; terugval
+	// op een conservatieve 512MB (past in élke Pi 4-variant) als de DTB faalt.
+	p.Pool = raspi.DTBPool(uintptr(dev.Read64(DTBPtr)), p)
+	if len(p.Pool) == 0 {
+		p.Pool = []layout.Region{{Base: 0x20000000, Size: 0x20000000}}
+	}
+	layout.UsePlan(p)
 }
 
 // BCM2711-adressen ("low peripheral mode", de default: MMIO onder 4GB).

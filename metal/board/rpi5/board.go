@@ -6,16 +6,22 @@ package rpi5
 // stille fallback.
 
 import (
+	"fmt"
 	"net"
+	"time"
 
 	gnet "github.com/usbarmory/go-net"
 
 	"hop-os/metal/board"
 	"hop-os/metal/board/raspi"
+	"hop-os/metal/brcmpcie"
 	"hop-os/metal/dev"
+	"hop-os/metal/dhcp"
 	"hop-os/metal/el2"
 	"hop-os/metal/fb"
 	"hop-os/metal/fdt"
+	"hop-os/metal/gem"
+	"hop-os/metal/layout"
 )
 
 // machine is de board-implementatie voor de Raspberry Pi 5 (BCM2712).
@@ -72,12 +78,128 @@ func (machine) S2TrampPC() uint64    { return el2.S2TrampPC() }
 func (machine) S2SMPTrampPC() uint64 { return el2.S2SMPTrampPC() }
 func (machine) SMPStubPC() uint64    { return el2.SMPStubPC() }
 
-// ProbeNIC: fase P2 — de NIC hangt achter de RP1-southbridge (PCIe, Cadence
-// GEM, metal/gem); er is nog geen netwerkpad, dus nog geen device.
-func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) { return nil, nil, nil }
+// lease bewaart wat ProbeNIC via DHCP ophaalde; Net() leest hem. hopnet.Up
+// roept ProbeNIC vóór Net() aan (die volgorde is het contract).
+var lease dhcp.Lease
 
-// Net: fase P2 — komt uit DHCP zodra de GEM-driver er is.
-func (machine) Net() board.NetConfig { return board.NetConfig{} }
+// ProbeNIC brengt de hele netwerkketen op — elke stap boardvast bewezen met
+// probe6 (2026-07-10, runs 2/4/5): RESCAL → pcie2-RC (54MHz-PLL!) →
+// link-training (gen2 x4) → RP1-enumeratie (1de4:0001) → BAR's (BAR1 → PCIe
+// 0x0, de DMA-loopback-eis) → PHY-reset via RP1-GPIO32 → autonegotiatie →
+// GEM-init (DBW uit DCFG1) → DHCP-lease. De firmware doet hier niets van;
+// vanaf de EEPROM-handoff is dit pad volledig van HOP.
+func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
+	if !brcmpcie.Rescal(uintptr(PCIeRescal)) {
+		return nil, nil, fmt.Errorf("rp1: RESCAL-kalibratie bevestigt niet")
+	}
+	rc := &brcmpcie.RC{
+		Base:     uintptr(PCIe2Base),
+		SWInit:   uintptr(PCIeSWInit),
+		SWInitID: PCIe2SWInit,
+		Gen:      2,
+		Out:      brcmpcie.OutWin{CPU: RP1Base, PCIe: 0, Size: 0x1000_0000},
+		In: []brcmpcie.InWin{
+			{PCIe: 0, CPU: RP1Base, Size: 0x40_0000},          // RP1-loopback (BAR1)
+			{PCIe: 0x10_0000_0000, CPU: 0, Size: 0x10_0000_0000}, // al het DRAM
+		},
+	}
+	if rcMode, _ := rc.Setup(); !rcMode {
+		return nil, nil, fmt.Errorf("rp1: pcie2 strapt niet als root-complex (status %#x)", rc.Status())
+	}
+	if _, dl := rc.StartLink(); !dl {
+		return nil, nil, fmt.Errorf("rp1: PCIe-link traint niet (status %#x)", rc.Status())
+	}
+	rc.OpenBridge()
+
+	if id := rc.CfgRead32(1, 0, 0, 0); id != 0x1_1de4 { // device 0x0001, vendor 0x1de4
+		return nil, nil, fmt.Errorf("rp1: endpoint meldt %#x (verwacht 0x11de4)", id)
+	}
+	// BAR's: vaste toewijzing (groottes gemeten met probe6: 16KB/4MB/64KB).
+	// BAR1 MOET op PCIe 0x0 (RP1's eigen DMA bereikt zijn peripherals via de
+	// loopback door het inbound-window hierboven).
+	rc.CfgWrite32(1, 0, 0, 0x10, 0x100_0000) // BAR0
+	rc.CfgWrite32(1, 0, 0, 0x14, 0x0)        // BAR1: peripheral-venster
+	rc.CfgWrite32(1, 0, 0, 0x18, 0x101_0000) // BAR2: SRAM
+	rc.CfgWrite32(1, 0, 0, 0x04, rc.CfgRead32(1, 0, 0, 0x04)|0x6)
+	dev.MB()
+
+	// De ethernet-PHY (BCM54213PE) hangt in reset aan RP1-GPIO32 (actief-
+	// laag, 5ms — DT phy-reset-gpios; gemeten: zonder dit géén PHY op MDIO).
+	RP1GPIOOut(32, false)
+	time.Sleep(10 * time.Millisecond)
+	RP1GPIOOut(32, true)
+	time.Sleep(50 * time.Millisecond)
+
+	nic := &gem.Net{
+		Base:   uintptr(RP1EthBase),
+		BusOff: 0x10_0000_0000, // RP1-masters → PCIe → RC-inbound → DRAM 0
+		MAC:    macFromSerial(),
+	}
+	nic.MDIOEnable()
+	addr, _, _, found := nic.PHYScan()
+	if !found {
+		return nil, nil, fmt.Errorf("rp1: geen PHY op de MDIO-bus")
+	}
+	speed, fd, err := nic.AutoNeg(addr, 8*time.Second)
+	if err != nil {
+		return nil, nil, fmt.Errorf("rp1: %w", err)
+	}
+	if err := nic.Init(layout.NetDMAPA(), layout.NetDMASize, speed, fd); err != nil {
+		return nil, nil, err
+	}
+
+	l, err := dhcp.Acquire(nic, nic.MAC, 15*time.Second)
+	if err != nil {
+		return nil, nil, err
+	}
+	lease = l
+	return nic, net.HardwareAddr(nic.MAC[:]), nil
+}
+
+// Net geeft de DHCP-lease die ProbeNIC haalde. Geen resolver in de lease →
+// de gateway als DNS (thuisrouters resolven vrijwel altijd zelf).
+func (machine) Net() board.NetConfig {
+	dns := lease.DNSString()
+	if dns == "0.0.0.0" {
+		dns = lease.GWString()
+	}
+	return board.NetConfig{
+		IP:   lease.IPString(),
+		CIDR: lease.CIDR(),
+		GW:   lease.GWString(),
+		DNS:  dns + ":53",
+	}
+}
+
+// macFromSerial bouwt een stabiel, lokaal beheerd MAC-adres (02:48 = "H")
+// uit het board-serial dat de firmware in de DTB zet (/serial-number,
+// "10000000xxxxxxxx"): uniek per board, gelijk over elke boot — precies wat
+// een DHCP-server nodig heeft om dezelfde lease terug te geven.
+func macFromSerial() [6]byte {
+	mac := [6]byte{0x02, 0x48, 0x4f, 0x50, 0x00, 0x05} // terugval: "HOP" 05
+	s, ok := fdt.RootString(uintptr(dev.Read64(DTBPtr)), "serial-number")
+	if !ok || len(s) < 8 {
+		return mac
+	}
+	// De laatste 8 hexcijfers → 4 bytes (mac[2:6]); één krom teken = terugval.
+	var b [4]byte
+	for i, c := range s[len(s)-8:] {
+		var v byte
+		switch {
+		case c >= '0' && c <= '9':
+			v = byte(c - '0')
+		case c >= 'a' && c <= 'f':
+			v = byte(c-'a') + 10
+		case c >= 'A' && c <= 'F':
+			v = byte(c-'A') + 10
+		default:
+			return mac
+		}
+		b[i/2] = b[i/2]<<4 | v
+	}
+	copy(mac[2:], b[:])
+	return mac
+}
 
 // PCIe: fase P2 — de RP1 hangt aan de BCM2712-PCIe; het adresplan volgt bij
 // de RP1-bring-up.

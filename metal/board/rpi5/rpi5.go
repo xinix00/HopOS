@@ -19,6 +19,7 @@ package rpi5
 
 import (
 	"hop-os/metal/board/raspi"
+	"hop-os/metal/dev"
 	"hop-os/metal/layout"
 )
 
@@ -40,17 +41,32 @@ import (
 const revokeVecAsm = 0x8B000
 
 func init() {
-	layout.UsePlan(layout.Plan{
+	// Alleen de HOP-core (MPIDR-aff 0) berekent en zet het plan: het leest de
+	// DTB fysiek (0x7F008 + de blob), en dat adres bestaat niet in de kooi van
+	// een app-core (die draait onder stage-2). Een app-core heeft het plan ook
+	// niet nodig — HOP bezit het en gebruikt de *PA-accessors; de app kent
+	// alleen de IPA-constanten. Zonder deze guard faultt elke app bij zijn eigen
+	// board-init (gemeten 2026-07-10: far=0x7f008).
+	if raspi.MPIDR()&0xFFFFFF != 0 {
+		return
+	}
+	p := layout.Plan{
 		CtrlPA:        0x10000000,
 		RingPA:        0x11000000,
 		Stage2PA:      0x12000000,
 		RevokeVecPA:   revokeVecAsm,
 		NetRingPA:     0x13000000,
 		BootScratchPA: raspi.BootScratch, // 0x7F000, cpuinit-vast
-		Pool: []layout.Region{
-			{Base: 0x20000000, Size: 0x60000000}, // 512MB..2GB
-		},
-	})
+		NetDMAPA:      0x14000000,        // GEM-ringen/buffers (buiten RAM-decl → ongecachet)
+	}
+	// De pool = het volledige DRAM (DTB /memory, ook boven 4GB) minus de vaste
+	// regio's. Faalt de DTB-lezing, val terug op een conservatieve vaste pool
+	// (512MB, past in élke Pi 5) — nooit fantoom-RAM uitdelen.
+	p.Pool = raspi.DTBPool(uintptr(dev.Read64(DTBPtr)), p)
+	if len(p.Pool) == 0 {
+		p.Pool = []layout.Region{{Base: 0x20000000, Size: 0x20000000}}
+	}
+	layout.UsePlan(p)
 }
 
 // BCM2712-adressen (40-bit MMIO boven 4GB; tamago's identity-map dekt 512GB,

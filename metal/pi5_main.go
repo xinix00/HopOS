@@ -25,6 +25,7 @@ import (
 
 	"hop-os/metal/board"
 	_ "hop-os/metal/board/rpi5" // registreert het board (init) + tamago-hooks
+	"hop-os/metal/hopnet"
 	"hop-os/metal/layout"
 	"hop-os/metal/slots"
 )
@@ -221,6 +222,22 @@ func main() {
 	fmt.Println("HOPOS_PI5_SMP_OK — één app op twee A76-cores, gedeelde heap, GC en teardown bewezen")
 
 	fmt.Println("HOPOS_PI5_MULTIKERNEL_OK — fase P1: de multikernel draait op echt silicium")
+
+	// ── 6. P2: netwerk. De hele keten is van HOP zelf — PCIe-RC-training,
+	// RP1, GEM-DMA, DHCP — en daarboven de gVisor-stack in Go's net-package
+	// (hopnet, zelfde code als QEMU). NTP als levend bewijs: een échte
+	// UDP-roundtrip het internet op, en de node kent daarna de wandkloktijd.
+	fmt.Println("net: PCIe→RP1→GEM opbrengen + DHCP (kabel erin!)...")
+	if err := hopnet.Up(); err != nil {
+		fmt.Printf("net: %v — node draait door zonder netwerk\n", err)
+	} else {
+		if err := hopnet.SyncTime("pool.ntp.org:123"); err != nil {
+			fmt.Printf("ntp: %v\n", err)
+		} else {
+			fmt.Printf("ntp: kloktijd gezet — %s\n", time.Now().Format(time.RFC3339))
+		}
+		fmt.Println("HOPOS_PI5_NET_OK — fase P2-netwerk: de node praat met de wereld")
+	}
 
 	// Klaar met de acceptatie — de node blijft draaien (in P2/P3 komt hier de
 	// agent + HopRunner, jobs via de leader-API).

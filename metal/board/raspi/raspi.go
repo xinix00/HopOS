@@ -22,7 +22,9 @@ import (
 	"github.com/usbarmory/tamago/arm64"
 
 	"hop-os/metal/dev"
+	"hop-os/metal/fdt"
 	"hop-os/metal/idle"
+	"hop-os/metal/layout"
 )
 
 // Gedeeld geheugenplan ONDER 0x80000 — want (gemeten 2026-07-09): de Pi 5-
@@ -40,7 +42,48 @@ const (
 	// de drop naar EL1); BootEL() leest het. Moet gelijk zijn aan de
 	// BOOT_SCRATCH-#define in de cpuinit.s van beide boards.
 	BootScratch = 0x7F000
+
+	// HopKernelEnd: het einde van de HOP-kern-regio (load 0x80000 + 128MB
+	// RAM-declaratie, zie mem_rpi4/mem_rpi5). Alles eronder — de HOP-runtime,
+	// TF-A/armstub (laadt op 0x0), park/scratch (0x70000-0x7F008) — is voor de
+	// partitie-pool verboden terrein.
+	HopKernelEnd = 0x8080000
 )
+
+// DTBPool berekent de partitie-pool uit het volledige DRAM van dit board (de
+// DTB /memory-banken, ook boven 4GB) minus alle vaste regio's: de HOP-kern,
+// de control-regio's van het plan (ctrl/ring/stage-2/net-ring), de DTB zelf en
+// de firmware-/memreserve/-blokken. Board-neutraal (Pi 4 en Pi 5 identiek).
+// Leeg als de DTB onleesbaar is — de aanroeper valt dan terug op een
+// conservatieve vaste pool i.p.v. fantoom-RAM uit te delen.
+func DTBPool(dtbPtr uintptr, p layout.Plan) []layout.Region {
+	memregs, ok := fdt.MemRegions(dtbPtr)
+	if !ok {
+		return nil
+	}
+	banks := make([]layout.Region, 0, len(memregs))
+	for _, r := range memregs {
+		banks = append(banks, layout.Region{Base: r.Addr, Size: r.Size})
+	}
+
+	holes := []layout.Region{
+		{Base: 0, Size: HopKernelEnd}, // HOP-kern + laag geheugen (TF-A/scratch/park)
+		{Base: p.CtrlPA, Size: uint64(layout.MaxSlots+1) * layout.CtrlStride},
+		{Base: p.RingPA, Size: uint64(layout.MaxSlots) * layout.RingStride},
+		{Base: p.Stage2PA, Size: uint64(layout.MaxSlots+1) * layout.Stage2Stride},
+		{Base: p.NetRingPA, Size: uint64(layout.MaxSlots) * layout.NetRingStride},
+	}
+	if p.NetDMAPA != 0 {
+		holes = append(holes, layout.Region{Base: p.NetDMAPA, Size: layout.NetDMASize})
+	}
+	if sz := fdt.BlobSize(dtbPtr); sz > 0 {
+		holes = append(holes, layout.Region{Base: uint64(dtbPtr), Size: sz})
+	}
+	for _, r := range fdt.MemReserve(dtbPtr) {
+		holes = append(holes, layout.Region{Base: r.Addr, Size: r.Size})
+	}
+	return layout.CarvePool(banks, holes, 2<<20)
+}
 
 // ARM64 core-instantie (zelfde constructie als board/qemuvirt).
 var ARM64 = &arm64.CPU{

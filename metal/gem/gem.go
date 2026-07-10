@@ -32,16 +32,20 @@ const (
 	regRxStatus = 0x020
 	regIDR      = 0x02C // interrupt disable
 	regMAN      = 0x034 // PHY maintenance (MDIO)
-	regSpAddr1B = 0x088 // MAC-adres bottom
-	regSpAddr1T = 0x08C // MAC-adres top
-	regModuleID = 0x0FC // module/revisie-ID (leesbaar zonder init)
-	regTBQPH    = 0x4C8 // TX queue base, hoge 32 bits (64-bit DMA)
-	regRBQPH    = 0x4D4 // RX queue base, hoge 32 bits
+	regPBufRxCut = 0x044 // RX partial store&forward (uit = 0)
+	regSpAddr1B  = 0x088 // MAC-adres bottom
+	regSpAddr1T  = 0x08C // MAC-adres top
+	regModuleID  = 0x0FC // module/revisie-ID (leesbaar zonder init)
+	regDCFG1     = 0x280 // design config 1: DBWDEF [27:25] = AXI-busbreedte
+	regDCFG6     = 0x294 // design config 6: queue-mask [7:0], DAW64 bit 23
+	regTBQPH     = 0x4C8 // TX queue base, hoge 32 bits (64-bit DMA)
+	regRBQPH     = 0x4D4 // RX queue base, hoge 32 bits
 
 	// NWCTRL-bits.
 	ctrlRxEn    = 1 << 2
 	ctrlTxEn    = 1 << 3
 	ctrlMgmtEn  = 1 << 4 // MDIO-poort aan
+	ctrlClrStat = 1 << 5 // statistiekentellers wissen (macb_reset_hw)
 	ctrlTxStart = 1 << 9
 
 	// NWCFG-bits.
@@ -51,6 +55,11 @@ const (
 	cfgRxFCS    = 1 << 17 // FCS strippen van RX-frames
 	cfgMDCShift = 18      // MDC-divisor (3 bits): pclk/x — 0b100 = /48
 	cfgMDCDiv48 = 0b100 << cfgMDCShift
+	cfgDBWShift = 21 // databusbreedte [22:21]: 0=32, 1=64, 2=128 — MOET de
+	// gesynthetiseerde AXI-breedte (DCFG1.DBWDEF) matchen; GEMETEN 2026-07-10
+	// (probe6 run 4): met DBW=0 op de RP1-GEM is álle DMA dood (TGO blijft
+	// hangen, nul RX) terwijl MDIO gewoon werkt — Cadence-vereiste, zie
+	// macb_dbw() in de Linux-referentie.
 
 	// NWSTATUS-bits.
 	statusMDIOIdle = 1 << 2
@@ -104,6 +113,14 @@ func (n *Net) wr(off uintptr, v uint32) { dev.Write32(n.Base+off, v) }
 // ModuleID geeft het GEM module/revisie-register — de eerste read-only
 // verificatie dat het registerblok echt antwoordt.
 func (n *Net) ModuleID() uint32 { return n.rd(regModuleID) }
+
+// DesignCfg geeft (DCFG1, DCFG6): de gesynthetiseerde AXI-busbreedte
+// (DBWDEF [27:25]), het queue-mask [7:0] en DAW64 (bit 23) — de
+// hardware-eigenschappen waar Init zich naar richt (diagnose/probe).
+func (n *Net) DesignCfg() (dcfg1, dcfg6 uint32) { return n.rd(regDCFG1), n.rd(regDCFG6) }
+
+// TxStatus geeft het rauwe TSR (bit 3 = TGO: zender actief; diagnose).
+func (n *Net) TxStatus() uint32 { return n.rd(regTxStatus) }
 
 // MDIORead leest een clause-22 PHY-register (blokkeert tot de bus vrij is).
 func (n *Net) MDIORead(phy, reg int) uint16 {
@@ -200,11 +217,14 @@ func (n *Net) Init(dmaBase, dmaSize uintptr, speed int, fd bool) error {
 	n.rxBufs = dmaBase + nRx*16 + nTx*16
 	n.txBufs = n.rxBufs + nRx*mtuBuf
 
-	// Alles uit, interrupts dicht (we pollen), status wissen.
+	// Alles uit, interrupts dicht (we pollen), status wissen — het volledige
+	// macb_reset_hw-recept (tellers, alle statusbits, RX-cut-through uit).
 	n.wr(regNWCtrl, 0)
+	n.wr(regNWCtrl, ctrlClrStat)
 	n.wr(regIDR, 0xFFFFFFFF)
-	n.wr(regTxStatus, 0xFF)
-	n.wr(regRxStatus, 0x0F)
+	n.wr(regTxStatus, 0xFFFFFFFF)
+	n.wr(regRxStatus, 0xFFFFFFFF)
+	n.wr(regPBufRxCut, 0)
 
 	// RX-ring: descriptors wijzen naar eigen buffers; DMA is eigenaar.
 	for i := 0; i < nRx; i++ {
@@ -237,7 +257,17 @@ func (n *Net) Init(dmaBase, dmaSize uintptr, speed int, fd bool) error {
 	n.wr(regSpAddr1B, uint32(n.MAC[0])|uint32(n.MAC[1])<<8|uint32(n.MAC[2])<<16|uint32(n.MAC[3])<<24)
 	n.wr(regSpAddr1T, uint32(n.MAC[4])|uint32(n.MAC[5])<<8)
 
-	cfg := uint32(cfgMDCDiv48 | cfgRxFCS)
+	// Databusbreedte uit de hardware zelf (DCFG1.DBWDEF: 4=128, 2=64, 1=32) —
+	// zie de toelichting bij cfgDBWShift.
+	var dbw uint32
+	switch d := n.rd(regDCFG1) >> 25 & 0x7; {
+	case d >= 4:
+		dbw = 2 << cfgDBWShift
+	case d >= 2:
+		dbw = 1 << cfgDBWShift
+	}
+
+	cfg := uint32(cfgMDCDiv48|cfgRxFCS) | dbw
 	if fd {
 		cfg |= cfgFD
 	}
@@ -314,6 +344,21 @@ func (n *Net) Transmit(buf []byte) error {
 	dev.Write32(d+4, w1)
 	dev.MB()
 	n.wr(regNWCtrl, ctrlMgmtEn|ctrlRxEn|ctrlTxEn|ctrlTxStart)
+
+	// RP1-eigenaardigheid (Linux-referentie macb_main.c, "TSTART write
+	// might get dropped"): over de PCIe-backed AXI kan de TSTART-schrijf
+	// verloren gaan terwijl de DMA net stopt. Linux geeft hem via de
+	// IRQ-lus opnieuw; wij pollen kort en herhalen zolang de descriptor
+	// van de hardware blijft (USED=0) én de zender niet actief is.
+	for range 100 {
+		if dev.Read32(d+4)&txUsed != 0 { // verstuurd
+			break
+		}
+		if n.rd(regTxStatus)&(1<<3) == 0 { // TGO laag: DMA stilgevallen
+			n.wr(regNWCtrl, ctrlMgmtEn|ctrlRxEn|ctrlTxEn|ctrlTxStart)
+		}
+		time.Sleep(10 * time.Microsecond)
+	}
 	n.txHead = (n.txHead + 1) % nTx
 	return nil
 }
