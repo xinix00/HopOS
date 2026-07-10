@@ -15,10 +15,6 @@ import (
 	"hop-os/metal/psci"
 )
 
-// S2TrampPC geeft het fysieke adres van de EL2-trampoline (el2.s): het
-// CPU_ON-entrypoint voor app-cores onder stage-2-isolatie.
-func S2TrampPC() uint64
-
 // BootEL geeft het exception level waarop de firmware ons afleverde. Alleen
 // het EL2/EL3-pad van cpuinit.s schrijft de scratch (het EL1-pad mag dat
 // niet: app-cores hebben 'm read-only onder stage-2) — 0 betekent dus EL1.

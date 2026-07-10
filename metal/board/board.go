@@ -85,13 +85,20 @@ type Board interface {
 	AffinityInfo(core uint64) PowerState
 	PSCIVersion() (major, minor uint16)
 
-	// Hard-kill via de interrupt-controller (de GIC-variant is board-specifiek).
-	SGIKill(core uint64)
-	SGIClearPending(core uint64)
-
 	// S2TrampPC is het fysieke entrypoint van de EL2-trampoline voor app-cores
-	// onder stage-2-isolatie.
+	// onder stage-2-isolatie. De hard-kill vereist géén board-methode meer: die
+	// loopt board-neutraal via stage2.Revoke (stage-2-intrekking + HVC/TLBI),
+	// niet via de interrupt-controller.
 	S2TrampPC() uint64
+
+	// SMP (fase 5): één app over meerdere cores met een gedeelde heap. Een
+	// secundaire core komt op via CPU_ON naar S2SMPTrampPC (fysiek, in de
+	// HOP-image) en ERET't naar SMPStubPC (de EL1-stub in het app-image, IPA).
+	// HOP publiceert S2SMPTrampPC op de control-page; de app leest 'm en gebruikt
+	// SMPStubPC (zijn eigen symbool) als ELR-doel. De app blijft oblivious — de
+	// OS-laag (goos.Task) brengt de cores op, app-code raakt dit niet aan.
+	S2SMPTrampPC() uint64
+	SMPStubPC() uint64
 
 	// Netwerk. ProbeNIC construeert én initialiseert de NIC van dit board — de
 	// board kent de driver (virtio-net op QEMU, Cadence GEM op de Pi, RTL8126

@@ -61,13 +61,15 @@ func (machine) AffinityInfo(core uint64) board.PowerState {
 }
 func (machine) PSCIVersion() (major, minor uint16) { return raspi.PSCIVersion() }
 
-// SGIKill/SGIClearPending: fase P1 — GICv2 (GIC-400) via GICD_SGIR, plus de
-// EL2-vectoren/trampoline. Tot die tijd is aanroepen een programmeerfout.
-func (machine) SGIKill(core uint64)         { panic("rpi5: hard-kill-SGI is fase P1 (GICv2)") }
-func (machine) SGIClearPending(core uint64) { panic("rpi5: SGI-clear is fase P1 (GICv2)") }
-
-// S2TrampPC: fase P1 — de EL2-trampoline (stage-2-kooi) is nog niet geport.
-func (machine) S2TrampPC() uint64 { panic("rpi5: EL2-trampoline is fase P1") }
+// Stage-2/SMP: de trampolines zelf zijn board-neutraal (gedeeld metal/el2 —
+// geen GIC, geen MPIDR; de hard-kill loopt via stage2.Revoke) en de vectoren
+// halen het slot uit VTTBR_EL2.VMID. Wat fase P1 hier nog vergt is geen port
+// maar verificatie op het board: het adresplan (layout op Pi-DRAM),
+// cache-maintenance in het image-loadpad (A76 is echt, QEMU verhulde dat) en
+// VBAR_EL2 → RevokeVecBase in cpuinit. Tot die verificatie: expliciet afwezig.
+func (machine) S2TrampPC() uint64    { panic("rpi5: stage-2-kooi is fase P1 (verificatie op board)") }
+func (machine) S2SMPTrampPC() uint64 { panic("rpi5: SMP is fase P1 (verificatie op board)") }
+func (machine) SMPStubPC() uint64    { panic("rpi5: SMP is fase P1 (verificatie op board)") }
 
 // ProbeNIC: fase P2 — de NIC hangt achter de RP1-southbridge (PCIe, Cadence
 // GEM, metal/gem); er is nog geen netwerkpad, dus nog geen device.

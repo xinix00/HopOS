@@ -22,6 +22,7 @@ import (
 	"hop-os/metal/hopabi"
 	"hop-os/metal/layout"
 	"hop-os/metal/ring"
+	"hop-os/metal/smp"
 )
 
 // App is het handle dat Init teruggeeft.
@@ -66,6 +67,15 @@ func Init() *App {
 	}
 
 	*a.ctrl(layout.CtrlRAMSize) = a.RAMSize
+
+	// SMP (fase 5): de OS-laag brengt de door HOP toegewezen extra cores
+	// transparant op (goos.Task) en zet GOMAXPROCS=N. De app krijgt zo N cores
+	// "as is" — parallelle goroutines op een gedeelde heap — zonder dat app-code
+	// er iets van merkt of aan hoeft te doen. Configure is een no-op bij één
+	// core, dus hier geen SMP-vertakking. Vóór READY, zodat wie op READY wacht
+	// meteen de volledige machine ziet.
+	smp.Configure(a.Slot, int(*a.ctrl(layout.CtrlCores)))
+
 	*a.ctrl(layout.CtrlStatus) = layout.StatusReady
 
 	go a.watch()

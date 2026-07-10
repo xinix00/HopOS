@@ -23,6 +23,8 @@
 
 #define BOOT_SCRATCH 0xB0000000
 #define DTB_PTR      0xB0000008
+#define REVOKE_VEC   0xC2000800	// = layout.RevokeVecPA() van het qemuvirt-plan
+				// (pariteit gecheckt in qemuvirt.go init)
 
 TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	MOVD	R0, R9		// x0 = DTB-pointer bij firmware-boot; bewaren vóór clobber
@@ -47,6 +49,14 @@ el2:
 	// entreren cpuinit op EL1 via de trampoline, dus geen stage-2-fault.
 	MOVD	$DTB_PTR, R1
 	MOVD	R9, (R1)
+
+	// VBAR_EL2 van de HOP-core → de revoke-vectoren (stage2.InitVectors vult
+	// ze na boot; de hard-kill-HVC uit stage2.Revoke landt daar en doet
+	// TLBI ALLE1IS). Alleen core 0 komt op dit el2-pad; app-cores entreren op
+	// EL1 via de trampoline en zetten hun eigen VBAR_EL2 op Stage2Base.
+	MOVD	$REVOKE_VEC, R0
+	WORD	$0xd51cc000	// msr vbar_el2, x0
+
 	// HCR_EL2: RW(31)=1 — EL1 draait AArch64. Stage-2 (VM-bit) blijft uit;
 	// de app-core-variant zet hier straks VTTBR_EL2 + VM.
 	MOVD	$1<<31, R0

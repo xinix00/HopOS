@@ -59,13 +59,13 @@ func (machine) AffinityInfo(core uint64) board.PowerState {
 }
 func (machine) PSCIVersion() (major, minor uint16) { return raspi.PSCIVersion() }
 
-// SGIKill/SGIClearPending: fase P1 — GICv2 (GIC-400) via GICD_SGIR, plus de
-// EL2-vectoren/trampoline. Tot die tijd is aanroepen een programmeerfout.
-func (machine) SGIKill(core uint64)         { panic("rpi4: hard-kill-SGI is fase P1 (GICv2)") }
-func (machine) SGIClearPending(core uint64) { panic("rpi4: SGI-clear is fase P1 (GICv2)") }
-
-// S2TrampPC: fase P1 — de EL2-trampoline (stage-2-kooi) is nog niet geport.
-func (machine) S2TrampPC() uint64 { panic("rpi4: EL2-trampoline is fase P1") }
+// Stage-2/SMP: de trampolines zijn board-neutraal (gedeeld metal/el2 — geen
+// GIC, geen MPIDR; slot uit VTTBR_EL2.VMID). Fase P1 = verificatie op het
+// board (adresplan, cache-maintenance in het loadpad, VBAR_EL2 in cpuinit),
+// geen port. Tot die verificatie: expliciet afwezig.
+func (machine) S2TrampPC() uint64    { panic("rpi4: stage-2-kooi is fase P1 (verificatie op board)") }
+func (machine) S2SMPTrampPC() uint64 { panic("rpi4: SMP is fase P1 (verificatie op board)") }
+func (machine) SMPStubPC() uint64    { panic("rpi4: SMP is fase P1 (verificatie op board)") }
 
 // ProbeNIC: fase P2 — de NIC is de geïntegreerde GENET (0xFD580000); er is
 // nog geen driver en dus geen netwerkpad, dus nog geen device.

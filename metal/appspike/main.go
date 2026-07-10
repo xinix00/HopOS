@@ -10,11 +10,14 @@ import (
 	"bufio"
 	"net"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
 	"hop-os/metal/applib"
 	"hop-os/metal/applib/appnet"
+	"hop-os/metal/board"
 	_ "hop-os/metal/board/qemuvirt"
 	"hop-os/metal/checksum"
 	"hop-os/metal/layout"
@@ -28,6 +31,13 @@ func main() {
 	app.Logf("Go-runtime leeft (%s), RAM %dMB @ %#x, klok=%s, BUCKET=%q ROLE=%q",
 		runtime.Version(), app.RAMSize>>20, app.RAMStart,
 		time.Now().UTC().Format("2006-01-02T15:04:05Z"), app.Env("BUCKET"), app.Env("ROLE"))
+
+	// SMP (fase 5): één app, meerdere cores, gedeelde heap. De app deed hier
+	// niets bijzonders — applib gaf hem GOMAXPROCS=N "as is". Deze rol bewijst
+	// dat het echt parallel is.
+	if app.Env("SMP") == "bench" {
+		smpBench(app)
+	}
 
 	// Isolatietest: grijp bewust buiten de eigen kooi. Onder stage-2 hoort
 	// de load te faulten → EL2-vector → CPU_OFF; de tweede logregel mag
@@ -232,4 +242,134 @@ func main() {
 func exit(app *applib.App, code uint64) {
 	time.Sleep(100 * time.Millisecond)
 	app.Exit(code)
+}
+
+// smpSink houdt reken-resultaten levend zodat de compiler het werk niet weggooit.
+var smpSink uint64
+
+// smpBench bewijst fase 5: de app draait op meerdere cores met één gedeelde
+// heap, en heeft daar zelf niets voor hoeven doen (applib zette GOMAXPROCS).
+func smpBench(app *applib.App) {
+	n := runtime.GOMAXPROCS(0)
+	app.Logf("SMP: app ziet %d cores (GOMAXPROCS), RAM %dMB — app-code deed hier niets voor", n, app.RAMSize>>20)
+	if n < 2 {
+		app.Logf("SMP: minder dan 2 cores toegewezen — geen SMP")
+		exit(app, 1)
+	}
+
+	// 1) Parallellisme-bewijs: N CPU-drukke goroutines tegelijk; elk telt per
+	// iteratie op welke core hij draaide. Zien we werk op de secundaire core(s),
+	// dan verdeelt de runtime de goroutines écht over meerdere cores. Elke
+	// goroutine yield't af en toe (Gosched) zodat de scheduler kan spreiden.
+	var ran [12]atomic.Uint64
+	var wg0 sync.WaitGroup
+	const workers = 8
+	for g := 0; g < workers; g++ {
+		wg0.Add(1)
+		go func() {
+			defer wg0.Done()
+			for i := 0; i < 2000; i++ {
+				ran[board.Current().CoreID()%len(ran)].Add(1)
+				for j := 0; j < 20000; j++ {
+				}
+				if i%50 == 0 {
+					runtime.Gosched()
+				}
+			}
+		}()
+	}
+	wg0.Wait()
+	spread := 0
+	for c := 1; c < len(ran); c++ {
+		if v := ran[c].Load(); v > 0 {
+			spread++
+			app.Logf("SMP: core %d draaide %d iteraties", c, v)
+		}
+	}
+	if spread < 2 {
+		app.Logf("SMP: werk liep op %d core(s) — geen echt parallellisme", spread)
+		exit(app, 2)
+	}
+	app.Logf("SMP: goroutines liepen parallel op %d cores — echte multi-core", spread)
+
+	// 2) Gedeelde heap: twee goroutines vullen om-en-om dezelfde slice (één
+	// adresruimte, nul berichten ertussen) en HOP zit er niet tussen. Verifieer.
+	const N = 1 << 20
+	shared := make([]uint32, N)
+	var wg sync.WaitGroup
+	for g := 0; g < 2; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := g; i < N; i += 2 {
+				shared[i] = uint32(i)
+			}
+		}(g)
+	}
+	wg.Wait()
+	var sum uint64
+	for i := 0; i < N; i++ {
+		if shared[i] != uint32(i) {
+			app.Logf("SMP: gedeelde slice corrupt @ %d (=%d)", i, shared[i])
+			exit(app, 3)
+		}
+		sum += uint64(shared[i])
+	}
+	app.Logf("SMP: gedeelde heap OK — %d elementen door twee cores beschreven (som %d)", N, sum)
+
+	// 3) GC over de gedeelde heap: allocatie-druk op alle cores + een volledige
+	// GC-cyclus; de stop-the-world moet elke core bereiken (ReadMemStats/GC
+	// zouden anders hangen). Overleven = de coöperatieve STW werkt cross-core.
+	gc0 := gcCount()
+	var wg2 sync.WaitGroup
+	for g := 0; g < n; g++ {
+		wg2.Add(1)
+		go func() {
+			defer wg2.Done()
+			var keep [][]byte
+			for i := 0; i < 300; i++ {
+				keep = append(keep, make([]byte, 4096))
+				if len(keep) > 32 {
+					keep = keep[16:]
+				}
+			}
+			atomic.AddUint64(&smpSink, uint64(len(keep)))
+		}()
+	}
+	wg2.Wait()
+	runtime.GC()
+	app.Logf("SMP: GC overleefd op de gedeelde heap (NumGC %d→%d) — cross-core STW werkt", gc0, gcCount())
+
+	// 4) Speedup (informatief; onder emulatie variabel): zelfde werk serieel vs.
+	// over n goroutines. Het rendezvous is het harde bewijs; dit is de maat.
+	const W = 6_000_000
+	t1 := time.Now()
+	smpWork(W)
+	d1 := time.Since(t1)
+	t2 := time.Now()
+	var wg3 sync.WaitGroup
+	for g := 0; g < n; g++ {
+		wg3.Add(1)
+		go func() { defer wg3.Done(); smpWork(W / n) }()
+	}
+	wg3.Wait()
+	d2 := time.Since(t2)
+	app.Logf("SMP: werk serieel %v, parallel(%d) %v → %.2fx", d1, n, d2, float64(d1)/float64(d2))
+
+	exit(app, 0)
+}
+
+//go:noinline
+func smpWork(iters int) {
+	var s uint64
+	for i := 0; i < iters; i++ {
+		s += uint64(i)*2654435761 ^ s>>13
+	}
+	atomic.AddUint64(&smpSink, s)
+}
+
+func gcCount() uint32 {
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	return ms.NumGC
 }

@@ -66,8 +66,11 @@ esac
 # virtio-net expliciet op de mmio-bus (virt zet 'm anders op PCIe) + modern
 # (force-legacy=false → versie 2). highmem-ecam=off houdt de PCIe-ECAM op
 # 0x3f000000 (32-bit; zie metal/pcie).
+# -m 3G: het qemuvirt-PA-plan legt ctrl/ringen/stage-2 bewust op 0xC0000000+
+# (non-identity t.o.v. de IPA's — bewijst de IPA/PA-splitsing), dus de RAM
+# moet tot voorbij 0xC4600000 reiken.
 exec qemu-system-aarch64 -M virt,gic-version=3,highmem-ecam=off,virtualization=on \
-	-cpu cortex-a53 -smp "$SMP" -m 2G \
+	-cpu cortex-a53 -smp "$SMP" -m 3G \
 	-nographic -monitor none -serial stdio \
 	-global virtio-mmio.force-legacy=false \
 	-device virtio-net-device,netdev=n0,bus=virtio-mmio-bus.0 \

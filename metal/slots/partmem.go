@@ -6,11 +6,13 @@ package slots
 // HOP zegt hoeveel een app alloceert, HopOS deelt exact dat uit en
 // overspawnt nooit (de pool is de harde grens).
 //
-// De pool is het slot-venster [SlotsBase, CtrlBase) — fysiek RAM dat de
-// stage-2-kooi per slot op het canonieke IPA-adres van de app legt (de
-// self-relocating map ontkoppelt IPA van PA, dus variabele fysieke partities
-// passen er zó in). First-fit met coalescing bij vrijgave houdt fragmentatie
-// klein; 2MB-uitlijning omdat de stage-2-partitieblokken 2MB zijn.
+// De pool is het vrije DRAM van het bóárd (layout.Plan.Pool — op de Pi de
+// volledige 8GB minus HOP en firmware-carveouts, geen artificiële limiet):
+// fysiek RAM dat de stage-2-kooi per slot op het canonieke IPA-adres van de
+// app legt (de map ontkoppelt IPA van PA, dus variabele fysieke partities —
+// desnoods in meerdere losse DRAM-regio's — passen er zó in). First-fit met
+// coalescing bij vrijgave houdt fragmentatie klein; 2MB-uitlijning omdat de
+// stage-2-partitieblokken 2MB zijn.
 
 import (
 	"fmt"
@@ -25,9 +27,18 @@ type region struct{ base, size uint64 }
 
 var (
 	partMu   sync.Mutex
-	partFree = []region{{layout.SlotsBase, layout.CtrlBase - layout.SlotsBase}}
+	partOnce sync.Once
+	partFree []region                    // vrije stukken, lazy uit het board-plan
 	partOf   [layout.MaxSlots + 1]region // per slot: de actieve reservering (size 0 = geen)
 )
+
+// poolInit laadt de pool van het board-plan — lazy (eerste allocatie), want
+// de init-volgorde tussen dit pakket en het board-pakket is niet gegarandeerd.
+func poolInit() {
+	for _, r := range layout.Pool() {
+		partFree = append(partFree, region{r.Base, r.Size})
+	}
+}
 
 func align2M(n uint64) uint64 { return (n + part2M - 1) &^ (part2M - 1) }
 
@@ -36,6 +47,7 @@ func align2M(n uint64) uint64 { return (n + part2M - 1) &^ (part2M - 1) }
 // vrijgegeven (defensief bij een re-Start). Fout als de pool geen
 // aaneengesloten gat van deze maat meer heeft.
 func partAlloc(i int, size uint64) (uint64, error) {
+	partOnce.Do(poolInit)
 	size = align2M(size)
 	partMu.Lock()
 	defer partMu.Unlock()
@@ -94,7 +106,13 @@ func releaseLocked(i int) {
 
 // PoolBytes is de totale grootte van de partitie-pool — de plaatsings-ceiling
 // die HOP krijgt. HOP overspawnt daar (per-job MemoryLimit) nooit overheen.
-func PoolBytes() uint64 { return layout.CtrlBase - layout.SlotsBase }
+func PoolBytes() uint64 {
+	var n uint64
+	for _, r := range layout.Pool() {
+		n += r.Size
+	}
+	return n
+}
 
 // maxLimitFor begrenst een partitie: hij moet binnen één 1GB-blok vanaf
 // linkBase blijven (de stage-2-kooi mapt de partitie met één L2-tabel) én

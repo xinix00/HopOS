@@ -12,6 +12,7 @@ import (
 	gnet "github.com/usbarmory/go-net"
 
 	"hop-os/metal/board"
+	"hop-os/metal/el2"
 	"hop-os/metal/fb"
 	"hop-os/metal/layout"
 	"hop-os/metal/virtionet"
@@ -53,9 +54,11 @@ func (machine) AffinityInfo(core uint64) board.PowerState {
 }
 func (machine) PSCIVersion() (major, minor uint16) { return PSCIVersion() }
 
-func (machine) SGIKill(core uint64)         { SGIKill(core) }
-func (machine) SGIClearPending(core uint64) { SGIClearPending(core) }
-func (machine) S2TrampPC() uint64           { return S2TrampPC() }
+// De EL2-trampolines (stage-2-kooi + SMP) zijn board-neutraal en wonen in het
+// gedeelde metal/el2-pakket; dit board geeft alleen de symbooladressen door.
+func (machine) S2TrampPC() uint64    { return el2.S2TrampPC() }
+func (machine) S2SMPTrampPC() uint64 { return el2.S2SMPTrampPC() }
+func (machine) SMPStubPC() uint64    { return el2.SMPStubPC() }
 
 // ProbeNIC vindt het virtio-net-mmio-slot, construeert de driver en zet 'm
 // klaar in de net-DMA-subregio. Zo blijft de driverkeuze board-kennis en is

@@ -1,21 +1,27 @@
-// Package layout legt het fysieke geheugenplan van HopOS op QEMU -M virt
-// vast (fase 1). Eén bron van waarheid voor alle images: de HOP-kern
-// (core 0) en de app-slots. QEMU: -m 2G → RAM 0x40000000..0xBFFFFFFF.
+// Package layout is het geheugenplan van HopOS, in twee lagen:
 //
+//   - De IPA-ABI (constanten): wat een ápp ziet — zijn canonieke linkadres
+//     (SlotBase), zijn control-page (CtrlBase), zijn ringen. Dit is het
+//     contract tussen HOP en elk app-image en is op élk board identiek: één
+//     canoniek artifact, de stage-2 vertaalt. Deze constanten wijzigen =
+//     app-ABI breken.
+//   - Het PA-plan (Plan, per board via UsePlan): wáár dat alles fysiek ligt —
+//     control-pages, ringen, stage-2-tabellen en de partitie-pool. QEMU zet
+//     een bewust van de IPA's afwijkend plan (bewijst de splitsing); de Pi
+//     legt de pool op zijn volledige DRAM (geen artificiële limiet).
+//
+// HOP-code gebruikt de *PA-accessors (CtrlPagePA, RingOutboxPA, ...);
+// app-code (applib/appnet/smp) de IPA-functies (CtrlPage, RingOutbox, ...).
 // Het linkadres (TEXT_START = SlotBase(1) + 0x10000) staat in
-// image/qemu-run.sh en moet met deze constanten in sync blijven.
-//
-//	0x40000000  HOP-kern (core 0), 256MB
-//	0x50000000  slot 1 (core 1), 128MB
-//	0x58000000  slot 2 (core 2), 128MB
-//	...         t/m slot 11 (core 11) → eindigt op 0xA8000000
-//	0xB0000000  control-pages: per slot één pagina (status/kill/heartbeat)
+// image/qemu-run.sh en moet met de IPA-constanten in sync blijven.
 package layout
 
 const (
-	// Core 0 — de HOP-kern. De bovenste 16MB van de partitie is DMA-regio
-	// (virtio-ringen/buffers) en valt buiten de RAM-declaratie van de
-	// runtime, zodat hij device-gemapt en dus niet gecached is.
+	// Core 0 — de HOP-kern op QEMU -M virt (RAM begint daar op 0x40000000; op
+	// de Pi is HOP's thuis het EEPROM-laadadres en heeft de board-main eigen
+	// waarden). De bovenste 16MB van de partitie is DMA-regio (virtio-ringen/
+	// buffers) en valt buiten de RAM-declaratie van de runtime, zodat hij
+	// device-gemapt en dus niet gecached is.
 	HopRAMStart = 0x40000000
 	HopRAMSize  = 0x0F000000 // 240MB voor de Go-runtime
 	DMABase     = 0x4F000000
@@ -28,61 +34,59 @@ const (
 	NVMeDMABase = DMABase + NetDMASize
 	NVMeDMASize = DMASize - NetDMASize
 
-	// App-slots: vaste stride; de werkelijke RAM-declaratie van een app wordt
-	// bij het laden gepatcht naar job.MemoryLimit (≤ stride). De stride is de
-	// max app-grootte.
-	//
-	// Aantal × stride is begrensd door het slot-venster [SlotsBase, CtrlBase)
-	// = 1,5GB (CtrlBase is asm-vergrendeld, zie TopAddr). In dat venster kies
-	// je: veel kleine slots óf weinig grote. QEMU (-smp 4) en de Pi hebben
-	// 4 cores → HOP op core 0 + 3 app-slots; 1,5GB/3 = 512MB per app. Dat is
-	// niet alleen ruimer dan de oude 11×128MB, het is ook wat de 4-core-boards
-	// écht hebben. De O6N (12 cores, veel meer RAM) krijgt in fase 3/4 een
-	// eigen layout met een groter venster (control-regio's omhoog = asm-werk,
-	// op dát board te verifiëren) en dan weer 11 slots. Canoniek IPA
-	// [SlotsBase, SlotsBase+512MB) blijft binnen één GB → stage-2 mapt met
-	// één L2-tabel (geen GB-kruising).
+	// App-slots (IPA-ABI): het canonieke adresbeeld van een app. Elke image is
+	// op het slot-1-bereik gelinkt; de stage-2 legt dat IPA-venster op de
+	// fysieke partitie die partAlloc uit de pool van het board sneed (precies
+	// job.MemoryLimit groot — de werkelijke RAM-declaratie wordt bij het laden
+	// gepatcht). De stride is dus een IPA-vorm, geen fysieke reservering; de
+	// fysieke capaciteit is de pool (Plan.Pool). Canoniek IPA binnen één GB →
+	// stage-2 mapt met één L2-tabel (tevens de per-app maat-grens, zie
+	// maxLimitFor in slots).
 	SlotsBase  = 0x50000000
-	SlotStride = 0x20000000 // 512MB partitie per slot
+	SlotStride = 0x20000000 // 512MB IPA-venster per slot
 	MaxSlots   = 3
 
-	// Control-pages: buiten alle RAM-declaraties → door alle MMU's als
-	// device gemapt → coherent zonder cache-onderhoud. Uitsluitend
+	// Control-pages (IPA-ABI): buiten alle RAM-declaraties → door alle MMU's
+	// als device gemapt → coherent zonder cache-onderhoud. Uitsluitend
 	// gealigneerde 64-bit loads/stores gebruiken (zie metal/dev).
-	// Pagina 0 (= CtrlBase) is de boot-scratch: cpuinit (board/qemuvirt)
-	// schrijft er vóór de EL-drop het boot-EL; de EL2-eis van de mains
-	// (BootEL ≥ 2, anders weigeren) leest 'm. Slots gebruiken 1..MaxSlots.
+	// Pagina 0 (= CtrlBase) is de boot-scratch: cpuinit schrijft er vóór de
+	// EL-drop het boot-EL; de EL2-eis van de mains (BootEL ≥ 2, anders
+	// weigeren) leest 'm. Slots gebruiken 1..MaxSlots. Fysiek liggen de pages
+	// op Plan.CtrlPA (de stage-2 vertaalt); alleen de boot-scratch heeft een
+	// eigen fysieke plek (Plan.BootScratchPA — cpuinit draait vóór alles).
 	CtrlBase    = 0xB0000000
 	CtrlStride  = 0x1000
 	BootScratch = CtrlBase
-	// DTBPtr: cpuinit legt hier (primary, MMU uit) de DTB-pointer neer die de
-	// firmware in x0 meegaf; board.MemTotal parset 'm met metal/fdt. Zelfde
-	// device-page als BootScratch (offset +8), dus coherent zonder cache-werk.
+	// DTBPtr (IPA): cpuinit legt op de scratch-page (offset +8) de DTB-pointer
+	// neer die de firmware in x0 meegaf; board.MemTotal parset 'm met
+	// metal/fdt. HOP leest 'm fysiek via DTBPtrPA().
 	DTBPtr = BootScratch + 8
 
-	// hop-ABI ringen per slot: outbox (app → HOP: logs én RPC-requests) en
-	// inbox (HOP → app: RPC-responses). Later desgewenst een sneller bulkpad
-	// per slot — privé HOP↔app, nooit gedeeld tussen apps.
+	// hop-ABI ringen per slot (IPA-ABI): outbox (app → HOP: logs én
+	// RPC-requests) en inbox (HOP → app: RPC-responses). Fysiek op Plan.RingPA.
 	RingBase    = 0xB1000000
 	RingStride  = 0x10000 // 64KB per slot
 	OutboxOff   = 0x0
 	InboxOff    = 0x8000
 	RingDataCap = 0x7000 // datacapaciteit per ring (28KB, 8-voud)
 
-	// Stage-2-gebied (alleen bij een EL2-boot in gebruik): door HOP
-	// geschreven, door de EL2-trampoline gelezen, voor app-cores onzichtbaar
-	// (staat in geen enkele stage-2-map). +0x0: EL2-parkeervectoren (2KB-
-	// aligned); per slot i een tabelblok op Stage2Base + i*Stage2Stride
-	// (L1 +0x0, L2-laag +0x1000/+0x2000, L3-ctrl +0x3000, L3-ring +0x4000).
-	Stage2Base   = 0xB2000000
-	Stage2Stride = 0x10000
+	// Stage-2-gebied: door HOP geschreven, door de EL2-trampoline/walker
+	// gelezen, voor app-cores onzichtbaar (staat in geen enkele stage-2-map) —
+	// dus puur fysiek, geen IPA: de basis is Plan.Stage2PA. De indeling ervan
+	// is wél universeel: +0x0 de gedeelde EL2-parkeervectoren (2KB-aligned),
+	// +0x800 de revoke-vectoren van de HOP-core (de hard-kill-HVC → TLBI;
+	// cpuinit zet VBAR_EL2 van core 0 hierheen), en per slot i ≥ 1 een
+	// tabelblok op +i*Stage2Stride (L1 +0x0, L2 +0x1000/+0x2000,
+	// L3-ctrl +0x3000, L3-ring +0x4000).
+	Stage2Stride  = 0x10000
+	revokeVecOff  = 0x800
 
-	// Frame-ringen per slot (per-slot netwerk): elke app draait een eigen
-	// netstack over rauwe Ethernet-frames; HOP is enkel een L2-switch die
-	// frames ring-naar-ring kopieert (metal/hopswitch). Per slot één
+	// Frame-ringen per slot (IPA-ABI, per-slot netwerk): elke app draait een
+	// eigen netstack over rauwe Ethernet-frames; HOP is enkel een L2-switch
+	// die frames ring-naar-ring kopieert (metal/hopswitch). Per slot één
 	// 2MB-blok — TX (app → switch) onderin, RX (switch → app) bovenin —
 	// zodat de stage-2-kooi het als één blockRW mapt. Device-gemapt, buiten
-	// alle RAM-declaraties → coherent. 11 slots = 0xB3000000..0xB4600000.
+	// alle RAM-declaraties → coherent. Fysiek op Plan.NetRingPA.
 	NetRingBase    = 0xB3000000
 	NetRingStride  = 0x200000 // 2MB per slot
 	NetTXOff       = 0x0
@@ -90,56 +94,155 @@ const (
 	NetRingDataCap = 0xFF000 // datacapaciteit per richting (1MB - 4KB slack)
 )
 
-// TopAddr is het hoogste fysieke adres dat dit (statische, QEMU-vormige)
-// plan aanraakt: de netring-regio van de laatste slot. Alle vaste regio's
-// (HOP, DMA, slots, ctrl/ring/stage2/netring) liggen tussen HopRAMStart en
-// hier — dus dít is de RAM die de node minstens moet hebben.
-//
-// LET OP: de control-regio's (CtrlBase.. = 0xB0000000) zijn in assembly
-// hardgecodeerd (board/*/el2.s, cpuinit.s, stage2.InitVectors), en apps zijn
-// op SlotsBase gelinkt. Het slot-venster [SlotsBase, CtrlBase) is daarmee
-// vast ~1,5GB. Een groter board z'n RAM benutten vergt die asm-adressen
-// omhoog + de stage-2-kooi opnieuw verifiëren op dat board — bewust
-// per-board werk in fase P1/2, niet blind hier.
-func TopAddr() uint64 { return NetRingBase + uint64(MaxSlots)*NetRingStride }
+// Region is een aaneengesloten stuk vrij DRAM (fysiek).
+type Region struct{ Base, Size uint64 }
+
+// Plan is de fysieke (PA-)kant van het geheugenplan: wáár op dít board de
+// control-pages, ringen, stage-2-tabellen en de partitie-pool echt liggen.
+// Het board zet zijn plan bij het laden met UsePlan; HOP-code leest het via
+// de *PA-accessors. Apps zien hier niets van — hun IPA-beeld (de constanten
+// hierboven) is op elk board gelijk en de stage-2 vertaalt.
+type Plan struct {
+	CtrlPA        uint64   // control-pages: MaxSlots+1 pagina's (4KB-aligned)
+	RingPA        uint64   // hop-ABI-ringen: MaxSlots × RingStride (4KB-aligned)
+	NetRingPA     uint64   // frame-ringen: MaxSlots × NetRingStride (2MB-aligned!)
+	Stage2PA      uint64   // vectoren + tabelblokken: (MaxSlots+1) × Stage2Stride (2KB-aligned)
+	BootScratchPA uint64   // boot-EL-scratch + DTB-pointer (cpuinit-vast, board-asm)
+	Pool          []Region // vrij DRAM voor app-partities (2MB-korrel)
+}
+
+var plan Plan
+
+// UsePlan registreert het PA-plan van het board. Eenmalig, in het init() van
+// het board-pakket (elke binary importeert zijn board al). Valideert de
+// uitlijningseisen die de stage-2-structuur stelt — liever hier hard falen
+// dan een scheve map op een core.
+func UsePlan(p Plan) {
+	switch {
+	case p.CtrlPA == 0 || p.CtrlPA&0xFFF != 0:
+		panic("layout: Plan.CtrlPA ontbreekt of niet 4KB-aligned")
+	case p.RingPA == 0 || p.RingPA&0xFFF != 0:
+		panic("layout: Plan.RingPA ontbreekt of niet 4KB-aligned")
+	case p.NetRingPA == 0 || p.NetRingPA&(NetRingStride-1) != 0:
+		panic("layout: Plan.NetRingPA ontbreekt of niet 2MB-aligned")
+	case p.Stage2PA == 0 || p.Stage2PA&0x7FF != 0:
+		panic("layout: Plan.Stage2PA ontbreekt of niet 2KB-aligned (VBAR-eis)")
+	case p.BootScratchPA == 0:
+		panic("layout: Plan.BootScratchPA ontbreekt")
+	case len(p.Pool) == 0:
+		panic("layout: Plan.Pool is leeg — geen partitie-geheugen")
+	}
+	plan = p
+}
+
+// pa bewaakt dat niemand het PA-plan raakt vóór een board het zette.
+func pa(v uint64) uintptr {
+	if plan.CtrlPA == 0 {
+		panic("layout: geen PA-plan — board-init mist layout.UsePlan")
+	}
+	return uintptr(v)
+}
+
+// CtrlPagePA geeft de fysieke control-page van slot i (HOP-kant; de app leest
+// dezelfde page via IPA CtrlPage(i)).
+func CtrlPagePA(i int) uintptr { return pa(plan.CtrlPA + uint64(i)*CtrlStride) }
+
+// BootScratchPA/DTBPtrPA: de fysieke boot-scratch (cpuinit-vast).
+func BootScratchPA() uintptr { return pa(plan.BootScratchPA) }
+func DTBPtrPA() uintptr      { return pa(plan.BootScratchPA + 8) }
+
+// RingOutboxPA/RingInboxPA: de fysieke hop-ABI-ringen van slot i.
+func RingOutboxPA(i int) uintptr {
+	return pa(plan.RingPA + uint64(i-1)*RingStride + OutboxOff)
+}
+func RingInboxPA(i int) uintptr {
+	return pa(plan.RingPA + uint64(i-1)*RingStride + InboxOff)
+}
+
+// NetRingTXPA/NetRingRXPA: de fysieke frame-ringen van slot i.
+func NetRingTXPA(i int) uintptr {
+	return pa(plan.NetRingPA + uint64(i-1)*NetRingStride + NetTXOff)
+}
+func NetRingRXPA(i int) uintptr {
+	return pa(plan.NetRingPA + uint64(i-1)*NetRingStride + NetRXOff)
+}
+
+// VecBasePA is de fysieke basis van de gedeelde EL2-vectoren (app-cores);
+// RevokeVecPA die van de revoke-vectoren van de HOP-core (cpuinit-asm moet
+// hiermee overeenkomen — het board checkt dat in zijn init).
+func VecBasePA() uintptr   { return pa(plan.Stage2PA) }
+func RevokeVecPA() uintptr { return pa(plan.Stage2PA + revokeVecOff) }
+
+// Stage2TablePA geeft de fysieke basis van het stage-2-tabelblok van slot i.
+func Stage2TablePA(i int) uintptr {
+	return pa(plan.Stage2PA + uint64(i)*Stage2Stride)
+}
+
+// Pool geeft de partitie-pool van het board (voor slots/partmem).
+func Pool() []Region {
+	pa(plan.CtrlPA) // guard
+	return plan.Pool
+}
+
+// TopAddr is het hoogste fysieke adres dat het PA-plan aanraakt (regio's +
+// pool). RequiredRAM (TopAddr − HopRAMStart) is wat de QEMU-vormige mains als
+// ondergrens tegen MemTotal houden; een board-main met een eigen thuisadres
+// bewaakt zijn plan zelf (de pool ís daar al op MemTotal gesneden).
+func TopAddr() uint64 {
+	pa(plan.CtrlPA) // guard
+	top := plan.CtrlPA + uint64(MaxSlots+1)*CtrlStride
+	for _, c := range []uint64{
+		plan.RingPA + uint64(MaxSlots)*RingStride,
+		plan.NetRingPA + uint64(MaxSlots)*NetRingStride,
+		plan.Stage2PA + uint64(MaxSlots+1)*Stage2Stride,
+	} {
+		if c > top {
+			top = c
+		}
+	}
+	for _, r := range plan.Pool {
+		if end := r.Base + r.Size; end > top {
+			top = end
+		}
+	}
+	return top
+}
 
 // RequiredRAM is hoeveel aaneengesloten DRAM vanaf HopRAMStart het plan eist.
 // Minder dan dit ⇒ slots/ringen vallen buiten het fysieke RAM: HopOS moet
 // dan weigeren i.p.v. fantoom-geheugen uit te delen.
 func RequiredRAM() uint64 { return TopAddr() - HopRAMStart }
 
-// Stage2Table geeft de basis van het stage-2-tabelblok van slot i.
-func Stage2Table(i int) uintptr {
-	return uintptr(Stage2Base + uint64(i)*Stage2Stride)
-}
-
-// RingOutbox geeft het outbox-ringadres (app → HOP) van slot i.
+// RingOutbox geeft het outbox-ringadres (app → HOP) van slot i — IPA (app-kant;
+// HOP gebruikt RingOutboxPA).
 func RingOutbox(i int) uintptr {
 	return uintptr(RingBase + uint64(i-1)*RingStride + OutboxOff)
 }
 
-// RingInbox geeft het inbox-ringadres (HOP → app) van slot i.
+// RingInbox geeft het inbox-ringadres (HOP → app) van slot i — IPA.
 func RingInbox(i int) uintptr {
 	return uintptr(RingBase + uint64(i-1)*RingStride + InboxOff)
 }
 
-// NetRingTX geeft de frame-TX-ring (app → switch) van slot i; tevens de
-// (2MB-gealigneerde) basis van het net-ring-blok voor de stage-2-map.
+// NetRingTX geeft de frame-TX-ring (app → switch) van slot i — IPA; tevens de
+// (2MB-gealigneerde) basis van het net-ring-blok in de stage-2-map.
 func NetRingTX(i int) uintptr {
 	return uintptr(NetRingBase + uint64(i-1)*NetRingStride + NetTXOff)
 }
 
-// NetRingRX geeft de frame-RX-ring (switch → app) van slot i.
+// NetRingRX geeft de frame-RX-ring (switch → app) van slot i — IPA.
 func NetRingRX(i int) uintptr {
 	return uintptr(NetRingBase + uint64(i-1)*NetRingStride + NetRXOff)
 }
 
-// SlotBase geeft de partitiebasis van slot i (1-based, = core-index).
+// SlotBase geeft de canonieke IPA-basis van slot i (1-based, = core-index) —
+// het linkadres-bereik; de fysieke partitie komt uit de pool (partAlloc).
 func SlotBase(i int) uint64 {
 	return SlotsBase + uint64(i-1)*SlotStride
 }
 
-// CtrlPage geeft het control-page-adres van slot i.
+// CtrlPage geeft het control-page-adres van slot i — IPA (app-kant; HOP
+// gebruikt CtrlPagePA).
 func CtrlPage(i int) uintptr {
 	return uintptr(CtrlBase + uint64(i)*CtrlStride)
 }
@@ -157,15 +260,48 @@ const (
 	CtrlWallOff   = 0x40 // HOP → app: klok-offset (wall-ns bij tellerstand 0;
 	// de generic-timer-teller is gedeeld over alle cores, dus HOP's offset
 	// geldt exact voor elke app — int64 als uint64-bits, 0 = geen klok)
-	// (0x48/0x50 vrij: het interne net is nu volledig afgeleid, zie NetPlan.)
+
+	// De EL2-trampolines (metal/el2) zijn data-gedreven: PSCI CPU_ON krijgt de
+	// fysieke control-page als ctx en de trampoline leest er alles van. HOP
+	// schrijft deze velden bij Start; de offsets staan als literals in de asm —
+	// bij verplaatsen ook metal/el2/*.s aanpassen.
+	CtrlSelfPA = 0x48 // HOP → app/tramp: fysiek adres van déze control-page
+	// (de app kent alleen IPA's, maar moet bij SMP de PA als CPU_ON-ctx geven)
+	CtrlVecPA = 0x50 // HOP → tramp: fysieke basis EL2-vectoren (VBAR_EL2)
 
 	// Door de EL2-vectoren (stage2.InitVectors) geschreven vlak vóór de
 	// CPU_OFF, zodat HOP kan loggen wáárom een slot viel. LET OP: deze
 	// offsets staan als str-immediates in de vector-encodings — bij
-	// verplaatsen ook stage2.InitVectors aanpassen.
+	// verplaatsen ook stage2.InitVectors aanpassen. Zowel een echte
+	// kooi-overtreding (app greep buiten zijn slot) als HOP's hard-kill
+	// (stage-2-intrekking) landen hier als FaultSync: beide zijn een
+	// synchrone stage-2-fault. Bij een hard-kill kent HOP de context (het
+	// riep Stop → Revoke aan); een spontane FaultSync = een ontsnappingspoging.
 	CtrlFaultESR = 0x58 // ESR_EL2: exception syndrome
 	CtrlFaultFAR = 0x60 // FAR_EL2: faultadres
 	CtrlFaultVec = 0x68 // vectorindex + 1 (0 = geen fault gezien)
+
+	// SMP (fase 5): één app over meerdere cores, gedeelde heap. HOP zet bij
+	// Start het aantal cores en waar de app zijn extra cores mag opbrengen; de
+	// app-runtime (OS-laag, niet app-code) leest ze en brengt de secundaire
+	// cores op via goos.Task. De app zelf is oblivious — hij krijgt N cores
+	// "as is" en parallelt via GOMAXPROCS.
+	CtrlCores      = 0x70 // HOP → app: aantal cores (≥1; 1 = geen SMP)
+	CtrlSMPSecBase = 0x78 // HOP → app: eerste secundaire core-index (primair+1)
+	CtrlSMPTramp   = 0x80 // HOP → app: fysiek adres EL2 SMP-trampoline (HOP-image)
+
+	// SMP-handoff (app → secundaire core): goos.Task schrijft hier de M-context
+	// voor de core die het opbrengt, de EL2-trampoline leest ze. Onder een
+	// mutex geschreven (één core-boot tegelijk), dus één handoff-venster volstaat.
+	CtrlSMPSp   = 0x88 // stacktop voor de nieuwe M (IPA)
+	CtrlSMPMp   = 0x90 // *m (IPA)
+	CtrlSMPG0   = 0x98 // *g (g0 van de nieuwe M, IPA)
+	CtrlSMPFn    = 0xA0 // entry (mstart, IPA)
+	CtrlSMPStub  = 0xA8 // app-IPA van de EL1-stub waar de EL2-tramp naar ERET't
+	CtrlSMPTtbr0 = 0xB0 // stage-1 L1-tabel voor de nieuwe core (= RamStart+0x4000,
+	// IPA); zo hoeft de EL1-stub géén geheugen te lezen vóór zijn MMU aan staat
+	// (elke pre-MMU-lees zou een primaire-gecachte waarde stale kunnen zien)
+	CtrlSlot = 0xB8 // HOP → tramp: slotnummer = VMID (de app is oblivious)
 
 	// Env-blob: door HOP geschreven "key=val\n..."-bytes die de app-lib bij
 	// start inleest (de Docker-vorm: env meegegeven bij het starten). Vervangt
@@ -184,9 +320,11 @@ const (
 
 // CtrlFaultVec-waarden (vectorindex + 1; de relevante paden benoemd).
 const (
-	FaultNone = 0  // geen fault gezien sinds de laatste start
-	FaultSync = 9  // synchroon vanuit EL1 (idx 8): stage-2-fault, ESR/FAR geldig
-	FaultIRQ  = 10 // IRQ vanuit EL1 (idx 9): hard-kill-SGI van HOP
+	FaultNone = 0 // geen fault gezien sinds de laatste start
+	FaultSync = 9 // synchroon vanuit EL1 (idx 8): stage-2-fault, ESR/FAR geldig.
+	// Zowel een kooi-overtreding als HOP's hard-kill (stage-2-intrekking) landen
+	// hier: beide zijn een stage-2 translatie-fault. Er is geen aparte IRQ-route
+	// meer (de hard-kill gebruikt geen GIC/SGI).
 )
 
 // Intern net (per-slot netwerk: metal/hopswitch aan de HOP-kant,

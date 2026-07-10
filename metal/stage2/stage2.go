@@ -58,50 +58,122 @@ const (
 
 // InitVectors schrijft de gedeelde EL2-vectoren op Stage2Base (2KB-aligned
 // per architectuur-eis; 16 entries met stride 0x80). Elke EL2-exception —
-// een stage-2-fault (de app greep buiten zijn kooi) of de hard-kill-SGI van
-// HOP — rapporteert eerst wáárom hij viel op de eigen control-page
-// (vectorindex+1, ESR_EL2, FAR_EL2; slot = MPIDR aff0, op virt gelijk aan de
-// core-index) en zet dan de core uit via PSCI CPU_OFF. HOP ziet "core off
-// zonder StatusExited" mét syndroom: hard gestopt, slot direct herbruikbaar.
+// een stage-2-fault, of de app nu spontaan buiten zijn kooi greep óf HOP zijn
+// stage-2-map introk (de hard-kill, zie Revoke) — rapporteert eerst wáárom hij
+// viel op de eigen control-page (vectorindex+1, ESR_EL2, FAR_EL2) en zet dan de
+// core uit via PSCI CPU_OFF. HOP ziet "core off zonder StatusExited" mét
+// syndroom: hard gestopt, slot direct herbruikbaar.
+//
+// Het slot komt uit VTTBR_EL2.VMID — door onze eigen trampoline op het
+// slotnummer gezet, door de app onaantastbaar, en board-neutraal (géén
+// MPIDR-decodering: QEMU codeert het corenummer in aff0, de Pi-A76 in aff1 —
+// de VMID is op beide identiek). Bovendien rapporteert een secundaire SMP-core
+// zo op de page van zíjn app (VMID = primair slot), niet op de ctrl-page van
+// zijn eigen core-index, die aan niemand toebehoort.
+//
+// Tevens de revoke-vectoren van de HOP-core zelf op RevokeVecBase: één handler
+// (op de HVC-offset) die TLBI ALLE1IS doet. HOP draait op EL1 en kan die
+// EL2-instructie niet direct uitvoeren; Revoke doet er een HVC voor. Zie Revoke.
 func InitVectors() {
-	// CtrlBase en PSCI_CPU_OFF moeten met één movz (+movk) te laden zijn: de
-	// adres-immediates hieronder worden uit de constanten gerekend, niet
-	// hand-gebakken, zodat de asm nooit stil kan afwijken van layout/psci.
-	// Deze invariant bewaakt dat (layout is compile-time, dus dit is in feite
-	// een build-time-check die als panic bij de eerste boot verschijnt).
-	if uint64(layout.CtrlBase)>>32 != 0 || uint64(layout.CtrlBase)&0xFFFF != 0 {
-		panic("stage2: CtrlBase moet 32-bit en 16-bit-shiftbaar zijn (één movz)")
-	}
 	if psci.CPU_OFF>>32 != 0 {
 		panic("stage2: PSCI_CPU_OFF past niet in 32 bits (movz+movk)")
 	}
+	// De fysieke ctrl-basis komt uit het board-plan en kan élk 48-bit-adres
+	// zijn: altijd movz+movk+movk (bits 32-47/16-31/0-15). De 4KB-uitlijning
+	// (bits 0-11 vrij voor slot<<12) bewaakt layout.UsePlan.
+	ctrlPA := uint64(layout.CtrlPagePA(0))
 	handler := func(v uint32) []uint32 {
 		return []uint32{
-			0xd53800a0,                              // mrs  x0, mpidr_el1
-			0x92401c00,                              // and  x0, x0, #0xff        (slot = aff0)
-			movz(1, uint32(layout.CtrlBase>>16), 16), // movz x1, #(CtrlBase>>16), lsl #16
-			0x8b003021,                              // add  x1, x1, x0, lsl #12  (eigen ctrl-page)
-			movz(4, v+1, 0),                         // movz x4, #(v+1)
-			strX(4, 1, layout.CtrlFaultVec),         // str  x4, [x1, #CtrlFaultVec]
-			0xd53c5202,                              // mrs  x2, esr_el2
-			strX(2, 1, layout.CtrlFaultESR),         // str  x2, [x1, #CtrlFaultESR]
-			0xd53c6003,                              // mrs  x3, far_el2
-			strX(3, 1, layout.CtrlFaultFAR),         // str  x3, [x1, #CtrlFaultFAR]
-			0xd5033fbf,                              // dmb  sy                    (publiceer vóór CPU_OFF)
-			movz(0, uint32(psci.CPU_OFF>>16), 16),   // movz x0, #(CPU_OFF>>16), lsl #16
-			movk(0, uint32(psci.CPU_OFF&0xffff), 0), // movk x0, #(CPU_OFF&0xffff)
-			0xd4000003,                              // smc  #0
-			0x14000000,                              // b .  (onbereikbaar)
+			0xd53c2100,                            // mrs  x0, vttbr_el2
+			0xd370fc00,                            // lsr  x0, x0, #48          (slot = VMID)
+			movz(1, uint32(ctrlPA>>32), 32),       // movz x1, #(ctrlPA>>32), lsl #32
+			movk(1, uint32(ctrlPA>>16), 16),       // movk x1, #(ctrlPA>>16), lsl #16
+			movk(1, uint32(ctrlPA), 0),            // movk x1, #(ctrlPA&0xffff)
+			0x8b003021,                            // add  x1, x1, x0, lsl #12  (eigen ctrl-page)
+			movz(4, v+1, 0),                       // movz x4, #(v+1)
+			strX(4, 1, layout.CtrlFaultVec),       // str  x4, [x1, #CtrlFaultVec]
+			0xd53c5202,                            // mrs  x2, esr_el2
+			strX(2, 1, layout.CtrlFaultESR),       // str  x2, [x1, #CtrlFaultESR]
+			0xd53c6003,                            // mrs  x3, far_el2
+			strX(3, 1, layout.CtrlFaultFAR),       // str  x3, [x1, #CtrlFaultFAR]
+			0xd5033fbf,                            // dmb  sy                    (publiceer vóór CPU_OFF)
+			movz(0, uint32(psci.CPU_OFF>>16), 16), // movz x0, #(CPU_OFF>>16), lsl #16
+			movk(0, uint32(psci.CPU_OFF), 0),      // movk x0, #(CPU_OFF&0xffff)
+			0xd4000003,                            // smc  #0
+			0x14000000,                            // b .  (onbereikbaar)
 		}
 	}
-	dev.Clear(uintptr(layout.Stage2Base), 0x800)
+	// App-core-vectoren op VecBasePA: elke EL2-exception → rapporteer + CPU_OFF.
+	// Er is geen aparte IRQ-vector: de hard-kill loopt niet via een IRQ maar
+	// via een stage-2-fault (Revoke trekt de map in), die op de synchrone vector
+	// (idx 8) landt — hetzelfde pad als een spontane kooi-overtreding.
+	vecs := layout.VecBasePA()
+	dev.Clear(vecs, 0x800)
 	for v := uintptr(0); v < 16; v++ {
 		for w, ins := range handler(uint32(v)) {
-			dev.Write32(uintptr(layout.Stage2Base)+v*0x80+uintptr(w)*4, ins)
+			dev.Write32(vecs+v*0x80+uintptr(w)*4, ins)
 		}
 	}
+
+	// Revoke-vectoren van de HOP-core zelf op RevokeVecPA. Alleen de synchrone
+	// exception vanuit een lager EL (offset 0x400) is bereikbaar: daar landt de
+	// HVC uit Revoke. De handler doet TLBI ALLE1IS (invalideert álle EL1&0
+	// stage-1+2-vertalingen inner-shareable) en keert terug. De andere apps
+	// her-walken meteen hun geldige tabel (nanoseconden); het net-ingetrokken
+	// slot walkt zijn genulde tabel → stage-2-fault → CPU_OFF. cpuinit heeft
+	// VBAR_EL2 van core 0 al hierop gezet (het board checkt die pariteit).
+	rvecs := layout.RevokeVecPA()
+	dev.Clear(rvecs, 0x800)
+	revoke := []uint32{
+		0xd50c839f, // tlbi alle1is
+		0xd5033f9f, // dsb  sy
+		0xd5033fdf, // isb
+		0xd69f03e0, // eret
+	}
+	for w, ins := range revoke {
+		dev.Write32(rvecs+0x400+uintptr(w)*4, ins)
+	}
+	// Vectoren worden als instructies gefetcht (EL2); ongecached geschreven,
+	// dus vegen zodat ook een cacheable fetch (SCTLR_EL2.I-staat is
+	// firmware-afhankelijk) ze vers uit DRAM haalt. Eénmalig bij boot.
+	dev.CleanInv(vecs, 0x800)
+	dev.CleanInv(rvecs, 0x800)
 	dev.MB()
 }
+
+// Revoke voert de hard-kill uit op slot i: HOP nult de stage-2-tabel van het
+// slot en doet één HVC → TLBI ALLE1IS (via de revoke-vector, want de TLBI is
+// EL2-only en HOP draait op EL1). Elke core van dít slot — bij een SMP-app delen
+// ze één tabel en één VMID — faultt daarna op zijn eerstvolgende vertaalde
+// toegang op zijn eigen EL2-vectoren en zet zichzelf via CPU_OFF uit. Geen
+// interrupt-controller nodig. De aanroeper (slots.Stop) polt daarna AFFINITY_INFO.
+//
+// EERLIJKE GRENS: dit vangt elke core die geheugen aanraakt of instructies
+// fetcht met een verse vertaling — dat is alles wat vooruitgang boekt. Een
+// pathologische self-branch-lus (`for {}` → `b .`) die de front-end mogelijk uit
+// een loop-buffer serveert zónder te hertranslateren is de enige twijfel; dat is
+// per silicium te meten (op QEMU dwingt de HANG=spin-test het af).
+func Revoke(i int) {
+	// De hele tabel-blok van het slot nullen: de L1-entries worden ongeldig, dus
+	// élke IPA in dit slot faultt. Volgorde is hier heilig — de walker van de
+	// app drááit nog en leest de tabellen cacheable:
+	//
+	//  1. eerst de zeros schrijven (DRAM is dan al ongeldig),
+	//  2. dan CleanInv: gooit de tabel-lines die de walker cachede weg (altijd
+	//     clean — walkers schrijven niet), zodat een her-walk uit DRAM = zeros
+	//     leest. Andersom (vegen vóór het nullen) kon de nog-draaiende walker
+	//     tussen de veeg en de zeros de óúde tabel opnieuw cachen → de app zou
+	//     de kill overleven op echt silicium (QEMU verhult dit).
+	//  3. dan pas de TLBI (via de HVC): ook de al-vertaalde TLB-entries weg.
+	dev.Clear(layout.Stage2TablePA(i), layout.Stage2Stride)
+	dev.CleanInv(layout.Stage2TablePA(i), layout.Stage2Stride)
+	dev.MB()
+	hvcRevoke()
+}
+
+// hvcRevoke doet HVC #0 vanuit EL1 → de revoke-vector op EL2 (TLBI ALLE1IS).
+// De handler raakt geen GP-registers, dus niets te bewaren. Zie revoke_arm64.s.
+func hvcRevoke()
 
 // Minimale AArch64-encoders voor de vector-generator: één bron van waarheid
 // (de constanten) i.p.v. hand-gebakken instructiewoorden. Zie ARM ARM C6.2.
@@ -131,7 +203,7 @@ func Build(i int, ipaBase, paBase, size uint64) (uint64, error) {
 	if i < 1 || i > layout.MaxSlots {
 		return 0, fmt.Errorf("slot %d buiten bereik", i)
 	}
-	base := layout.Stage2Table(i)
+	base := layout.Stage2TablePA(i)
 	dev.Clear(base, layout.Stage2Stride)
 
 	l1 := uint64(base + l1Off)
@@ -140,6 +212,12 @@ func Build(i int, ipaBase, paBase, size uint64) (uint64, error) {
 	l3Ctrl := uint64(base + l3CtrlOff)
 	l3Ring := uint64(base + l3RingOff)
 
+	// De tabel is de IPA→PA-vertaling: alle índexen hieronder komen uit het
+	// IPA-beeld (de universele layout-constanten die de app ziet), alle
+	// wáárden zijn fysiek (de partitie uit de pool, de plan-PA's van
+	// ctrl/ringen). Op QEMU wijken die bewust van elkaar af — zo bewijst de
+	// regressie de splitsing.
+	//
 	// L1: 1GB-entries. Een IPA-bereik in het GB van de ctrl/ring-regio deelt
 	// zijn L2 met de device-L3's (indexes botsen niet: partitie ≤ idx 351,
 	// ctrl/ring op 384/392, net-ringen op 408+).
@@ -160,26 +238,36 @@ func Build(i int, ipaBase, paBase, size uint64) (uint64, error) {
 	// L2dev → L3's voor de ctrl- en ring-regio (pagina-granulariteit).
 	devGB := uint64(layout.CtrlBase) &^ ((1 << 30) - 1)
 	dev.Write64(uintptr(l2Dev)+uintptr((uint64(layout.CtrlBase)-devGB)>>21)*8, l3Ctrl|descTable)
-	ringPA := uint64(layout.RingOutbox(i)) &^ ((2 << 20) - 1)
-	dev.Write64(uintptr(l2Dev)+uintptr((ringPA-devGB)>>21)*8, l3Ring|descTable)
+	ringIPA := uint64(layout.RingOutbox(i)) &^ ((2 << 20) - 1)
+	dev.Write64(uintptr(l2Dev)+uintptr((ringIPA-devGB)>>21)*8, l3Ring|descTable)
 
-	// Het eigen 2MB net-ring-blok (frame-ringen app↔switch) als één blok RW;
+	// Het eigen 2MB net-ring-blok (frame-ringen app↔switch) als één blok RW —
+	// IPA-blok → fysiek plan-blok (2MB-aligned, bewaakt door UsePlan);
 	// andermans blokken staan nergens in deze map.
-	netPA := uint64(layout.NetRingTX(i))
-	dev.Write64(uintptr(l2Dev)+uintptr((netPA-devGB)>>21)*8, netPA|blockRW)
+	netIPA := uint64(layout.NetRingTX(i))
+	dev.Write64(uintptr(l2Dev)+uintptr((netIPA-devGB)>>21)*8, uint64(layout.NetRingTXPA(i))|blockRW)
 
-	// L3ctrl: boot-scratch read-only (conduitkeuze), eigen ctrl-page RW.
-	dev.Write64(uintptr(l3Ctrl)+0*8, uint64(layout.BootScratch)|pageRO)
-	ctrl := uint64(layout.CtrlPage(i))
-	dev.Write64(uintptr(l3Ctrl)+uintptr((ctrl-uint64(layout.CtrlBase))>>12)*8, ctrl|pageRW)
+	// L3ctrl: boot-scratch read-only op zijn IPA (conduitkeuze), eigen
+	// ctrl-page RW — elk naar hun fysieke plek uit het plan.
+	dev.Write64(uintptr(l3Ctrl)+0*8, uint64(layout.BootScratchPA())|pageRO)
+	ctrlIPA := uint64(layout.CtrlPage(i))
+	dev.Write64(uintptr(l3Ctrl)+uintptr((ctrlIPA-uint64(layout.CtrlBase))>>12)*8,
+		uint64(layout.CtrlPagePA(i))|pageRW)
 
-	// L3ring: de eigen 64KB ring-regio.
+	// L3ring: de eigen 64KB ring-regio, pagina voor pagina IPA → plan-PA.
 	ring := uint64(layout.RingOutbox(i))
 	for off := uint64(0); off < layout.RingStride; off += 4 << 10 {
-		pa := ring + off
-		dev.Write64(uintptr(l3Ring)+uintptr((pa-ringPA)>>12)*8, pa|pageRW)
+		ipa := ring + off
+		dev.Write64(uintptr(l3Ring)+uintptr((ipa-ringIPA)>>12)*8,
+			(uint64(layout.RingOutboxPA(i))+off)|pageRW)
 	}
 
+	// Coherentie ná de tabel-writes: de page-table-walker van de app-core leest
+	// deze tabellen cacheable (VTCR IRGN/ORGN=WB), HOP schreef ze ongecached.
+	// Een stale (clean) line van een eerdere huurder van dit tabelblok zou de
+	// walker een oude tabel laten walken. Vegen vóór CPU_ON; er draait nu geen
+	// walker op dit blok, dus niets kan tussen de veeg en de start hercachen.
+	dev.CleanInv(base, layout.Stage2Stride)
 	dev.MB()
 	return l1, nil
 }

@@ -26,9 +26,34 @@ import (
 const (
 	UART0Base = 0x09000000 // PL011-poke via metal/pl011 (offsets/bit gedeeld)
 
-	GICDBase = 0x08000000 // GICv3 distributor (nog ongebruikt)
-	GICRBase = 0x080a0000 // GICv3 redistributors
+	// revokeVecAsm moet byte-gelijk zijn aan #define REVOKE_VEC in cpuinit.s
+	// (VBAR_EL2 van core 0 wordt vóór Go gezet); init() checkt de pariteit
+	// met het plan hieronder.
+	revokeVecAsm = 0xC2000800
 )
+
+// Het PA-plan van dit board — BEWUST verschoven t.o.v. de IPA-constanten
+// (ctrl/ringen/tabellen op 0xC0000000+ terwijl apps ze op 0xB0000000 zien,
+// en een pool in twee losse regio's): op QEMU is identity de valkuil die
+// IPA/PA-verwisselingen verhult, dus maakt de proeftuin ze juist ongelijk —
+// elke verwisseling knalt dan in de regressie i.p.v. pas op een board.
+// Vereist -m 3G (image/qemu-run.sh): RAM tot 0x100000000.
+func init() {
+	layout.UsePlan(layout.Plan{
+		CtrlPA:        0xC0000000,
+		RingPA:        0xC1000000,
+		Stage2PA:      0xC2000000,
+		NetRingPA:     0xC3000000,
+		BootScratchPA: 0xB0000000, // cpuinit-vast (BOOT_SCRATCH/DTB_PTR)
+		Pool: []layout.Region{
+			{Base: 0x50000000, Size: 0x60000000}, // 1,5GB — het klassieke venster
+			{Base: 0xB1000000, Size: 0x0F000000}, // 240MB — bewijst multi-regio
+		},
+	})
+	if uint64(layout.RevokeVecPA()) != revokeVecAsm {
+		panic("qemuvirt: REVOKE_VEC in cpuinit.s wijkt af van het PA-plan")
+	}
+}
 
 // ARM64 core-instantie (zelfde constructie als tamago's imx8mp).
 var ARM64 = &arm64.CPU{

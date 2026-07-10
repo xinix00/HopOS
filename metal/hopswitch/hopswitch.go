@@ -87,8 +87,8 @@ func Attach(i int) {
 	mu.Lock()
 	defer mu.Unlock()
 	ports[i] = &port{
-		tx: ring.Open(layout.NetRingTX(i)),
-		rx: ring.Open(layout.NetRingRX(i)),
+		tx: ring.Open(layout.NetRingTXPA(i)),
+		rx: ring.Open(layout.NetRingRXPA(i)),
 	}
 }
 

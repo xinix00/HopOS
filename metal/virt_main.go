@@ -231,7 +231,7 @@ func main() {
 
 	logCounts := make([]int, len(apps)+2)
 	for _, a := range apps {
-		if err := slots.Start(a.slot, app, a.limit, a.env, nil, nil); err != nil {
+		if err := slots.Start(a.slot, app, a.limit, 1, a.env, nil, nil); err != nil {
 			fail("start", err)
 		}
 		go drainLogs(a.slot, &logCounts[a.slot])
@@ -267,7 +267,7 @@ func main() {
 	fmt.Printf("slot 2 gestopt: core-on=%v app=%d exit=%d\n", s.CoreOn, s.App, s.ExitCode)
 
 	fmt.Println("herstart slot 2 met 32MB...")
-	if err := slots.Start(2, app, 32<<20, map[string]string{"BUCKET": "hop-cache-v2"}, nil, nil); err != nil {
+	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"BUCKET": "hop-cache-v2"}, nil, nil); err != nil {
 		fail("restart", err)
 	}
 	go drainLogs(2, nil)
@@ -286,7 +286,7 @@ func main() {
 	if err := slots.Stop(2, 3*time.Second); err != nil {
 		fail("iso-stop", err)
 	}
-	if err := slots.Start(2, app, 32<<20, map[string]string{"PROBE": "hop"}, nil, nil); err != nil {
+	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"PROBE": "hop"}, nil, nil); err != nil {
 		fail("iso-start", err)
 	}
 	go drainLogs(2, nil)
@@ -314,10 +314,13 @@ func main() {
 	fmt.Println("HOPOS_ISOLATIE_OK — stage-2-kooi hard bewezen: core off buiten eigen slot")
 
 	// Hard-kill: een app die in een lus zonder preemptiepunt hangt negeert
-	// de kill-flag; slots.Stop escaleert dan naar de SGI die via de
-	// EL2-vectoren de core uitzet.
+	// de kill-flag; slots.Stop escaleert dan naar stage2.Revoke, die de
+	// stage-2-map van het slot intrekt (HVC→TLBI) zodat de core op zijn
+	// eerstvolgende fetch naar de EL2-vectoren faultt en zichzelf uitzet.
+	// HANG=spin is een `for {}` (self-branch, géén geheugentoegang): meteen het
+	// pathologische geval — vangt de intrekking dít, dan vangt hij alles.
 	fmt.Println("hard-kill: slot 2 start met HANG=spin...")
-	if err := slots.Start(2, app, 32<<20, map[string]string{"HANG": "spin"}, nil, nil); err != nil {
+	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"HANG": "spin"}, nil, nil); err != nil {
 		fail("hang-start", err)
 	}
 	go drainLogs(2, nil)
@@ -329,14 +332,14 @@ func main() {
 		fail("hard-kill", err)
 	}
 	s = slots.Get(2)
-	fmt.Printf("hard-kill-rapport slot 2: vec=%d (verwacht %d=SGI)\n", s.FaultVec, layout.FaultIRQ)
+	fmt.Printf("hard-kill-rapport slot 2: vec=%d (verwacht %d=stage-2-fault)\n", s.FaultVec, layout.FaultSync)
 	if s.App == layout.StatusExited {
 		fail("hard-kill", fmt.Errorf("app exitte netjes — hij hoorde te hangen"))
 	}
-	if s.FaultVec != layout.FaultIRQ {
-		fail("hard-kill", fmt.Errorf("vec=%d, verwacht %d (IRQ)", s.FaultVec, layout.FaultIRQ))
+	if s.FaultVec != layout.FaultSync {
+		fail("hard-kill", fmt.Errorf("vec=%d, verwacht %d (stage-2-fault)", s.FaultVec, layout.FaultSync))
 	}
-	fmt.Println("HOPOS_HARDKILL_OK — hangende app via SGI van zijn core gezet")
+	fmt.Println("HOPOS_HARDKILL_OK — hangende app via stage-2-intrekking van zijn core gezet")
 
 	// Volumes-demo (het storage-model, PLAN.md §3): een writer-app zet de
 	// dataset in het gemounte /data (op de NVMe), twee reader-apps met
@@ -353,7 +356,7 @@ func main() {
 	}
 
 	fmt.Println("volumes: writer (slot 1, mount /data) schrijft de dataset...")
-	if err := slots.Start(1, app, 64<<20, map[string]string{"FSDEMO": "writer"}, dataMount, nil); err != nil {
+	if err := slots.Start(1, app, 64<<20, 1, map[string]string{"FSDEMO": "writer"}, dataMount, nil); err != nil {
 		fail("vol-writer", err)
 	}
 	go drainLogs(1, nil)
@@ -370,7 +373,7 @@ func main() {
 
 	fmt.Println("volumes: readers (slot 1+2, mount /data) lezen parallel...")
 	for slot := 1; slot <= 2; slot++ {
-		if err := slots.Start(slot, app, 64<<20, map[string]string{"FSDEMO": "reader"}, dataMount, nil); err != nil {
+		if err := slots.Start(slot, app, 64<<20, 1, map[string]string{"FSDEMO": "reader"}, dataMount, nil); err != nil {
 			fail("vol-reader", err)
 		}
 		go drainLogs(slot, nil)
@@ -387,7 +390,7 @@ func main() {
 	}
 
 	fmt.Println("volumes: app zonder mount (slot 2) hoort /data niet te zien...")
-	if err := slots.Start(2, app, 32<<20, map[string]string{"FSDEMO": "denied"}, nil, nil); err != nil {
+	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"FSDEMO": "denied"}, nil, nil); err != nil {
 		fail("vol-denied", err)
 	}
 	go drainLogs(2, nil)
@@ -402,7 +405,7 @@ func main() {
 	// bereiken; zie fetchClient in slots/rpc.go).
 	fmt.Println("fetch: slot 1 laat HOP een URL naar /data/hello.txt halen...")
 	fetchEnv := map[string]string{"FSDEMO": "fetch", "FETCH_URL": "http://" + board.Current().Net().IP + "/"}
-	if err := slots.Start(1, app, 64<<20, fetchEnv, dataMount, nil); err != nil {
+	if err := slots.Start(1, app, 64<<20, 1, fetchEnv, dataMount, nil); err != nil {
 		fail("fetch", err)
 	}
 	go drainLogs(1, nil)
@@ -421,7 +424,7 @@ func main() {
 	// dat er een TCP-stack op core 0 aan te pas komt (HOP is enkel L2-switch +
 	// ARP-responder voor de gateway).
 	fmt.Println("netdemo: slot 1 luistert op het interne net...")
-	if err := slots.Start(1, app, 64<<20, map[string]string{"NETDEMO": "listen"}, nil, nil); err != nil {
+	if err := slots.Start(1, app, 64<<20, 1, map[string]string{"NETDEMO": "listen"}, nil, nil); err != nil {
 		fail("net-listen", err)
 	}
 	go drainLogs(1, nil)
@@ -434,7 +437,7 @@ func main() {
 	addr := hopswitch.SlotIP(1) + ":8080"
 	fmt.Println("netdemo: slot 2 dialt slot 1 — app↔app, HOP kopieert alleen frames...")
 	dialEnv := map[string]string{"NETDEMO": "dial", "NET_DIAL": addr}
-	if err := slots.Start(2, app, 64<<20, dialEnv, nil, nil); err != nil {
+	if err := slots.Start(2, app, 64<<20, 1, dialEnv, nil, nil); err != nil {
 		fail("net-dial", err)
 	}
 	go drainLogs(2, nil)
@@ -452,7 +455,7 @@ func main() {
 	// Dit is het pad voor cloudflared/servers. (De query verlaat QEMU via
 	// slirp; een antwoord bewijst de round-trip.)
 	fmt.Println("netdemo: slot 2 doet een uitgaande DNS-query — masquerade naar buiten...")
-	if err := slots.Start(2, app, 64<<20, map[string]string{"NETDEMO": "out"}, nil, nil); err != nil {
+	if err := slots.Start(2, app, 64<<20, 1, map[string]string{"NETDEMO": "out"}, nil, nil); err != nil {
 		fail("net-out", err)
 	}
 	go drainLogs(2, nil)
@@ -468,7 +471,7 @@ func main() {
 	// qemu-run.sh (host :18080 → 10.0.2.15:8080 → DNAT → slot 1).
 	// De listener blijft draaien; main slaapt hierna toch voor eeuwig.
 	portsEnv := map[string]string{"NETDEMO": "listen", "ER_PORT_HTTP": "8080"}
-	if err := slots.Start(1, app, 64<<20, portsEnv, nil, map[string]int{"http": 8080}); err != nil {
+	if err := slots.Start(1, app, 64<<20, 1, portsEnv, nil, map[string]int{"http": 8080}); err != nil {
 		fail("ports", err)
 	}
 	go drainLogs(1, nil)
@@ -489,7 +492,7 @@ func main() {
 		}
 	}
 	for slot := 2; slot <= 3; slot++ {
-		if err := slots.Start(slot, app, 64<<20, map[string]string{"ROLE": "reloc"}, nil, nil); err != nil {
+		if err := slots.Start(slot, app, 64<<20, 1, map[string]string{"ROLE": "reloc"}, nil, nil); err != nil {
 			fail("reloc", err)
 		}
 		go drainLogs(slot, nil)
@@ -507,6 +510,38 @@ func main() {
 		}
 	}
 	fmt.Println("HOPOS_RELOC_OK — zelfde artifact draait op slot 2 én 3: stage-2 is de relocatie")
+
+	// SMP (fase 5): één app over meerdere cores met een gedeelde heap. HOP geeft
+	// cores + memory (hier cores=2, zoals HOP's CPUShares/1024); de app krijgt
+	// twee cores "as is" en parallelt via GOMAXPROCS — app-code doet er niets
+	// voor. cores=2 gebruikt slot 1 (primair) + core 2 (secundair), dus eerst
+	// 1-3 vrijmaken.
+	fmt.Println("smp: slot 1 als 2-core app (gedeelde heap), core 2 secundair...")
+	for slot := 1; slot <= 3; slot++ {
+		if board.Current().AffinityInfo(uint64(slot)) != board.PowerOff {
+			if err := slots.Stop(slot, 3*time.Second); err != nil {
+				fail("smp-stop", err)
+			}
+		}
+	}
+	if err := slots.Start(1, app, 128<<20, 2, map[string]string{"SMP": "bench"}, nil, nil); err != nil {
+		fail("smp-start", err)
+	}
+	go drainLogs(1, nil)
+	code, err := waitExit(1, 30*time.Second)
+	if err != nil || code != 0 {
+		fail("smp", fmt.Errorf("exit=%d, err=%v", code, err))
+	}
+	// Teardown: alle cores van de SMP-app moeten afgaan (primair + secundair).
+	if err := slots.Stop(1, 5*time.Second); err != nil {
+		fail("smp-teardown", err)
+	}
+	for _, c := range []int{1, 2} {
+		if board.Current().AffinityInfo(uint64(c)) != board.PowerOff {
+			fail("smp-teardown", fmt.Errorf("core %d nog aan na teardown", c))
+		}
+	}
+	fmt.Println("HOPOS_SMP_OK — één app op twee cores, gedeelde heap: rendezvous + GC bewezen, cores netjes afgebroken")
 
 	fmt.Println("HOPOS_SLOTS_OK — slots + MemoryLimit + hop-ABI-logring werken")
 
