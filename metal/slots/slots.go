@@ -109,9 +109,16 @@ func (s *servicer) run() {
 			return
 		default:
 		}
+		// SMP-dispatch: de app-runtime kan geparkeerde cores niet zelf starten
+		// (de mailboxen liggen buiten elke stage-2-map), dus vraagt ze via
+		// CtrlSMPReq aan; HOP dispatcht namens hem. Onder de app-bootLock, dus
+		// hooguit één verzoek tegelijk.
+		s.dispatchSMP()
 		typ, n, ok := out.ReadInto(buf)
 		if !ok {
-			if out.Corrupt() || board.Current().AffinityInfo(uint64(s.slot)) == board.PowerOff {
+			// Geen outbox-werk: stoppen zodra de core parkeerde (niet meer
+			// draait) of de ring corrupt is.
+			if out.Corrupt() || !coreRunning(s.slot) {
 				return
 			}
 			select {
@@ -148,6 +155,37 @@ func (s *servicer) run() {
 	}
 }
 
+// dispatchSMP kijkt of de app-runtime een extra SMP-core vroeg (CtrlSMPReq,
+// gezet door goos.Task) en dispatcht die namens hem. De app kan het niet zelf:
+// de parkeer-mailboxen liggen bewust buiten elke stage-2-map, zodat een app
+// nooit een core (van zichzelf of een ander) kan opbrengen — alleen HOP.
+// Ctx = de fysieke control-page van de primaire (de SMP-trampoline leest daar
+// de M-context, gedeelde stage-2 en VMID van); de secundaire mailbox gaat via
+// CtrlSMPMbox mee (de primaire page is gedeeld). Klaar → CtrlSMPReq weer 0,
+// waar de app op wacht.
+func (s *servicer) dispatchSMP() {
+	c := int(ctrlRead(s.slot, layout.CtrlSMPReq))
+	if c == 0 {
+		return
+	}
+	cores := int(ctrlRead(s.slot, layout.CtrlCores))
+	if c <= s.slot || c > s.slot+cores-1 || c > layout.MaxSlots {
+		// Buiten het toegewezen core-bereik: weiger (de app hoort dit niet te
+		// vragen). Verzoek intrekken zodat de app niet eeuwig wacht.
+		fmt.Printf("HOPOS_SMP_REJECT slot %d: core %d buiten [%d,%d]\n", s.slot, c, s.slot+1, s.slot+cores-1)
+		ctrlWrite(s.slot, layout.CtrlSMPReq, 0)
+		dev.MB()
+		return
+	}
+	ctrlWrite(s.slot, layout.CtrlSMPMbox, uint64(layout.ParkMboxPA(c)))
+	dev.MB()
+	if err := dispatchCore(c, board.Current().S2SMPTrampPC(), uint64(layout.CtrlPagePA(s.slot))); err != nil {
+		fmt.Printf("HOPOS_SMP_DISPATCH_FAIL slot %d core %d: %v\n", s.slot, c, err)
+	}
+	ctrlWrite(s.slot, layout.CtrlSMPReq, 0) // app-handshake: verzoek afgehandeld
+	dev.MB()
+}
+
 // Namen van de runtime-symbolen die bij het laden gepatcht worden. Zo wordt
 // HOP's job.MemoryLimit letterlijk de RAM-declaratie van de app-runtime —
 // een harde fysieke grens, nul handhavingscode.
@@ -165,6 +203,57 @@ func ctrlRead(slot int, off uintptr) uint64 {
 
 func ctrlWrite(slot int, off uintptr, v uint64) {
 	dev.Write64(layout.CtrlPagePA(slot)+off, v)
+}
+
+// Parkeer-model: HopOS bezit zijn cores. Een gestopte/gevelde app-core gaat
+// niet terug naar de firmware (PSCI CPU_OFF is op de Pi 5-stock een one-way
+// door) maar parkeert op EL2 in de WFE-lus (stage2.InitVectors). De mailbox
+// (buiten elke stage-2-map — de app kan zichzelf dus niet dispatchen) is de
+// enige bron van waarheid over de core-toestand:
+//
+//	word0 == 0  cold   — nooit geparkeerd; eerste bring-up gaat via PSCI CPU_ON
+//	word0 == 1  parked — gestopt en wachtend op dispatch
+//	word0 >= 2  running — word0 draagt de ctx (fysieke ctrl-page) die HOP zette
+const (
+	mboxCold   = 0
+	mboxParked = 1
+)
+
+func mboxWord0(core int) uint64 { return dev.Read64(layout.ParkMboxPA(core)) }
+
+// coreRunning is true zolang de app op deze core draait (nog niet geparkeerd).
+func coreRunning(core int) bool { return mboxWord0(core) >= 2 }
+
+// dispatchCore start een core op entry met ctx in x0. Cold (nooit geparkeerd):
+// PSCI CPU_ON — de éénmalige bring-up per core. Anders (geparkeerd): schrijf
+// {ctx, entry} in de mailbox en wek de WFE-lus met SEV; die springt de
+// (idempotente) trampoline in. Zet word0 sowieso op ctx zodat coreRunning klopt.
+func dispatchCore(core int, entry, ctx uint64) error {
+	mbox := layout.ParkMboxPA(core)
+	cold := dev.Read64(mbox) == mboxCold
+	dev.Write64(mbox+8, entry) // word1 = doel-PC
+	dev.Write64(mbox+0, ctx)   // word0 = ctx (= "running")
+	dev.MB()
+	if cold {
+		if ret := board.Current().CPUOn(uint64(core), entry, ctx); ret != board.PSCISuccess {
+			return fmt.Errorf("PSCI CPU_ON core %d: %d", core, ret)
+		}
+		return nil
+	}
+	dev.SEV() // geparkeerde core: wek de WFE-lus
+	return nil
+}
+
+// waitStopped polt tot core geparkeerd is (mailbox word0 == mboxParked).
+func waitStopped(core int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if mboxWord0(core) == mboxParked {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
 }
 
 // Status van een slot zoals HOP het ziet.
@@ -224,19 +313,24 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 	if memLimit == 0 {
 		return fmt.Errorf("memLimit 0 ongeldig")
 	}
+	// De EL2-vectoren + parkeerlus + mailboxen moeten klaar zijn vóór de
+	// eerste dispatch (mailbox cold-detectie leest een geveegde mailbox).
+	vectorsOnce.Do(stage2.InitVectors)
+
 	// SMP (fase 5): cores ≥ 1. cores > 1 = één app over meerdere cores met een
-	// gedeelde heap; de app CPU_ON't zijn extra cores zelf (via de OS-laag) op
-	// de partitie van dít slot. De secundaire cores moeten binnen bereik en uit
-	// zijn (dat laatste checkt tevens dat geen andere app ze draait).
+	// gedeelde heap op de partitie van dít slot; de OS-laag vraagt de extra
+	// cores lazy op (goos.Task → CtrlSMPReq → HOP dispatcht). De cores moeten
+	// binnen bereik en beschikbaar zijn — d.w.z. niet draaiend (geparkeerd of
+	// cold mag: dat is precies een core die HOP kan (her)starten).
 	if cores < 1 {
 		cores = 1
 	}
 	if i+cores-1 > layout.MaxSlots {
 		return fmt.Errorf("SMP: %d cores vanaf slot %d overschrijden MaxSlots %d", cores, i, layout.MaxSlots)
 	}
-	for c := i + 1; c < i+cores; c++ {
-		if on := board.Current().AffinityInfo(uint64(c)); on != board.PowerOff {
-			return fmt.Errorf("SMP-core %d is niet uit (AFFINITY_INFO=%d)", c, on)
+	for c := i; c < i+cores; c++ {
+		if coreRunning(c) {
+			return fmt.Errorf("core %d draait nog (niet geparkeerd/cold)", c)
 		}
 	}
 	// DNS-resolver van de node meegeven, zodat een app die naar buiten praat
@@ -246,9 +340,6 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 	envBlob := encodeEnv(withDNS(env, board.Current().Net().DNS))
 	if len(envBlob) > layout.CtrlEnvMax {
 		return fmt.Errorf("env te groot: %d > %d bytes", len(envBlob), layout.CtrlEnvMax)
-	}
-	if on := board.Current().AffinityInfo(uint64(i)); on != board.PowerOff {
-		return fmt.Errorf("core %d is niet uit (AFFINITY_INFO=%d)", i, on)
 	}
 
 	f, err := elf.NewFile(bytes.NewReader(image))
@@ -287,6 +378,15 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 	}()
 	delta := base - linkBase // PA = linkadres + delta (identiek slot: 0)
 
+	// Coherentie vóór de ongecachte writes: de vórige huurder van deze partitie
+	// draaide cacheable — niet alleen op de ELF-segmenten maar op zijn hele heap.
+	// Een app die faultte/gekilld werd flushte niets; zijn dirty lines zitten nog
+	// in de (geparkeerde) core z'n cache en zouden bij evictie de verse image óf
+	// de heap van de nieuwe app overschrijven (QEMU verhult dit — geen caches;
+	// op de A76 is het echt, gemeten 2026-07-10: crash op de 2e herstart-na-fault).
+	// Dus de HÉLE partitie in één keer clean+invalidaten, niet enkel de segmenten.
+	dev.CleanInv(uintptr(base), uintptr(size))
+
 	// Segmenten naar de partitie. Headervelden zijn input — overflow-veilig
 	// rekenen, anders wordt een corrupte image een geheugenveger. Bounds
 	// gelden in het link-bereik; geschreven wordt op linkadres+delta.
@@ -303,13 +403,6 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 		if n, err := p.ReadAt(buf, 0); err != nil || uint64(n) != p.Filesz {
 			return fmt.Errorf("segment lezen: %d/%d, %v", n, p.Filesz, err)
 		}
-		// Coherentie vóór de ongecachte writes: de vorige app raakte deze
-		// fysieke regels cacheable — een achtergebleven dirty line zou bij een
-		// latere evictie de verse image-bytes overschrijven (QEMU verhult dit,
-		// op de A76 is het echt — de parkcode-les van de Pi-probe). De
-		// symbol-patches verderop vallen binnen deze segmenten, dus dit dekt
-		// alles wat HOP aan de partitie schrijft.
-		dev.CleanInv(uintptr(p.Paddr+delta), uintptr(p.Memsz))
 		dev.Copy(uintptr(p.Paddr+delta), buf)
 		dev.Clear(uintptr(p.Paddr+delta)+uintptr(p.Filesz), p.Memsz-p.Filesz)
 	}
@@ -386,41 +479,35 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 	ring.Init(layout.NetRingTXPA(i), layout.NetRingDataCap)
 	ring.Init(layout.NetRingRXPA(i), layout.NetRingDataCap)
 
-	// De core krijgt stage-2-isolatie: CPU_ON wijst naar HOP's EL2-trampoline
-	// (ctx = slot) die de hier gebouwde tabel activeert en pas dan naar de
-	// app-entry dropt (een canoniek IPA — de stage-2 vertaalt hem naar deze
-	// partitie). De app-image draait nooit op EL2.
-	vectorsOnce.Do(stage2.InitVectors)
+	// De core krijgt stage-2-isolatie: de EL2-trampoline activeert de hier
+	// gebouwde tabel en dropt pas dan naar de app-entry (een canoniek IPA — de
+	// stage-2 vertaalt hem naar deze partitie). De app-image draait nooit op
+	// EL2. De trampoline is data-gedreven: alles staat op deze control-page.
 	l1, err := stage2.Build(i, linkBase, base, size)
 	if err != nil {
 		return fmt.Errorf("stage-2 slot %d: %w", i, err)
 	}
 	ctrlWrite(i, layout.CtrlEntry, f.Entry)
 	ctrlWrite(i, layout.CtrlS2Table, l1)
-	// De EL2-trampoline is data-gedreven: alles wat hij nodig heeft staat op
-	// deze page — zijn vectoren (VBAR_EL2), zijn VMID (= slot) en, voor het
-	// SMP-pad, het fysieke adres van de page zelf (de app kent alleen IPA's
-	// maar moet bij CPU_ON van een secundaire core de PA als ctx geven).
 	ctrlWrite(i, layout.CtrlVecPA, uint64(layout.VecBasePA()))
 	ctrlWrite(i, layout.CtrlSlot, uint64(i))
-	ctrlWrite(i, layout.CtrlSelfPA, uint64(layout.CtrlPagePA(i)))
-	// Het aantal cores op de control-page; de app-OS-laag leest 'm en brengt bij
-	// cores > 1 de extra cores op. Altijd zetten (ook 1 = gewone app), zodat de
-	// app-kant niet hoeft te weten of dit SMP is.
+	ctrlWrite(i, layout.CtrlMboxPA, uint64(layout.ParkMboxPA(i))) // → TPIDR_EL2
+	// Het aantal cores op de control-page; de app-OS-laag leest 'm en vraagt bij
+	// cores > 1 de extra cores lazy op (CtrlSMPReq → HOP dispatcht). Altijd
+	// zetten (ook 1 = gewone app), zodat de app-kant niet hoeft te weten of dit
+	// SMP is.
 	ctrlWrite(i, layout.CtrlCores, uint64(cores))
 	if cores > 1 {
 		// Fysiek adres van de EL2 SMP-trampoline publiceren (op ditzelfde slot
 		// z'n partitie/stage-2 → gedeelde heap).
 		ctrlWrite(i, layout.CtrlSMPTramp, board.Current().S2SMPTrampPC())
 	}
-	// Geen SGI-restanten meer te wissen: de hard-kill gebruikt geen interrupt.
-	// stage2.Build hierboven schreef de tabel sowieso vers (een eerdere
-	// Stop→Revoke nulde 'm), dus er is geen intrek-toestand die overleeft.
 	ctrlWrite(i, layout.CtrlStatus, layout.StatusBooting)
 
-	if ret := board.Current().CPUOn(uint64(i), board.Current().S2TrampPC(),
-		uint64(layout.CtrlPagePA(i))); ret != board.PSCISuccess {
-		return fmt.Errorf("PSCI CPU_ON slot %d: %d", i, ret)
+	// Startschot: cold → PSCI CPU_ON (eerste bring-up), geparkeerd → mailbox +
+	// SEV. Ctx = de fysieke control-page; de trampoline leest er alles van.
+	if err := dispatchCore(i, board.Current().S2TrampPC(), uint64(layout.CtrlPagePA(i))); err != nil {
+		return err
 	}
 
 	hopswitch.Attach(i)
@@ -436,31 +523,30 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 
 var vectorsOnce sync.Once
 
-// Stop beëindigt de app in slot i en wacht tot al zijn cores uit zijn. Eén pad
-// voor één core én voor een SMP-app (meerdere cores): de kill-flag geeft de app
-// een coöperatieve kans (de kill-watcher zet zijn core via CPU_OFF uit, met een
-// nette exit-status). Draait daarna nog een core — de secundaire cores van een
-// SMP-app, of een hangende core — dan doet HOP de hard-kill via stage2.Revoke:
-// het nult de stage-2-map van dit slot en doet één HVC→TLBI, waarna élke core
-// van het slot (ze delen tabel én VMID) op zijn eerstvolgende vertaalde toegang
-// naar de EL2-vectoren faultt en zichzelf via CPU_OFF uitzet (Status meldt dan
-// layout.FaultSync). PSCI kent geen remote CPU_OFF, dus dwingen we de core zelf
-// tot een fault — geen interrupt-controller nodig, board-neutraal.
+// Stop beëindigt de app in slot i en wacht tot al zijn cores geparkeerd zijn.
+// Eén pad voor één core én voor een SMP-app: de kill-flag geeft de app een
+// coöperatieve kans (de kill-watcher exit't via HVC → de core parkeert netjes,
+// met exit-status). Parkeert daarna nog een core niet — de secundaire cores van
+// een SMP-app, of een hangende core — dan doet HOP de hard-kill via
+// stage2.Revoke: het nult de stage-2-map van dit slot en doet één HVC→TLBI,
+// waarna élke core van het slot (ze delen tabel én VMID) op zijn eerstvolgende
+// vertaalde toegang naar de EL2-vectoren faultt en dáár parkeert (Status meldt
+// dan layout.FaultSync). De cores gaan nóóit terug naar de firmware — HopOS
+// bezit ze en herstart ze via hun mailbox.
 func Stop(i int, timeout time.Duration) error {
 	if err := checkSlot(i); err != nil {
 		return err
 	}
 	ctrlWrite(i, layout.CtrlKill, 1)
-	// Coöperatieve kans voor de app (de kill-watcher exit't zijn eigen core);
-	// bij één core is dit meteen klaar, bij SMP stopt hooguit de core met de
-	// watcher hier netjes.
-	waitOff(i, timeout)
+	dev.MB()
+	// Coöperatieve kans voor de app (de kill-watcher parkeert zijn eigen core).
+	waitStopped(i, timeout)
 	// Draait er nog iets? Hoeveel cores de app heeft staat op zijn control-page
 	// (CtrlCores, door Start gezet) — de enige bron van waarheid.
 	cores := appCores(i)
 	stillOn := false
 	for _, c := range cores {
-		if board.Current().AffinityInfo(uint64(c)) != board.PowerOff {
+		if coreRunning(c) {
 			stillOn = true
 			break
 		}
@@ -470,11 +556,11 @@ func Stop(i int, timeout time.Duration) error {
 		// Eén intrekking velt álle cores van het slot (gedeelde tabel/VMID).
 		stage2.Revoke(i)
 		for _, c := range cores {
-			if board.Current().AffinityInfo(uint64(c)) == board.PowerOff {
+			if !coreRunning(c) {
 				continue
 			}
-			if !waitOff(c, time.Second) {
-				stopErr = fmt.Errorf("slot %d: core %d ging ook na de stage-2-intrekking niet uit", i, c)
+			if !waitStopped(c, time.Second) {
+				stopErr = fmt.Errorf("slot %d: core %d parkeerde ook na de stage-2-intrekking niet", i, c)
 			}
 		}
 	}
@@ -483,14 +569,16 @@ func Stop(i int, timeout time.Duration) error {
 }
 
 // releaseSlot maakt een gestopt slot vrij: van de switch af, poorten in, en
-// de partitie terug naar de pool (de core is uit, dus niemand raakt hem meer).
+// de partitie terug naar de pool (de cores zijn geparkeerd, dus niemand raakt
+// het geheugen meer — pas bij een volgende Start worden ze her-gedispatcht).
 func releaseSlot(i int) {
 	hopswitch.Detach(i)
 	hopswitch.UnpublishSlot(i)
 	partRelease(i)
 }
 
-// waitOff polt tot de core van slot i uit is.
+// waitOff polt tot de core van slot i uit is (PSCI — nog gebruikt door de
+// cold-probe NumSlots; het lifecycle-pad gebruikt waitStopped/de mailbox).
 func waitOff(i int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -508,10 +596,11 @@ func Get(i int) Status {
 		return Status{}
 	}
 	return Status{
-		// ON_PENDING telt als aan: vlak na CPU_ON is de core nog onderweg —
-		// wie dat als "uit" rapporteert laat HOP een bootende app als crash
-		// zien (en het restart-beleid onnodig ingrijpen).
-		CoreOn:    board.Current().AffinityInfo(uint64(i)) != board.PowerOff,
+		// CoreOn = de app draait (mailbox word0 draagt de ctx). Een geparkeerde
+		// (gestopte) of cold core telt als niet-aan. Dit is nu de mailbox, niet
+		// PSCI AFFINITY_INFO: geparkeerde cores staan PSCI-gezien nog "on" (ze
+		// deden nooit CPU_OFF), maar draaien geen app meer.
+		CoreOn:    coreRunning(i),
 		App:       ctrlRead(i, layout.CtrlStatus),
 		ExitCode:  ctrlRead(i, layout.CtrlExitCode),
 		Heartbeat: ctrlRead(i, layout.CtrlHeartbeat),
@@ -567,6 +656,12 @@ var (
 // keer (de topologie ligt vast na boot).
 func NumSlots() int {
 	numSlotsOnce.Do(func() {
+		// Verse DRAM is geen nul (QEMU verhulde dat — Pi-meting 2026-07-10):
+		// de control-page van een nooit-gestart slot zou anders garbage als
+		// status/fault rapporteren. Eén keer vegen, vóór de eerste Get/Start.
+		for i := 1; i <= layout.MaxSlots; i++ {
+			dev.Clear(layout.CtrlPagePA(i), layout.CtrlStride)
+		}
 		for i := 1; i <= layout.MaxSlots; i++ {
 			switch board.Current().AffinityInfo(uint64(i)) {
 			case board.PowerOn, board.PowerOff, board.PowerOnPending:

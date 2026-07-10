@@ -30,18 +30,13 @@ import (
 	"hop-os/metal/board"
 	"hop-os/metal/dev"
 	"hop-os/metal/layout"
-	"hop-os/metal/psci"
 )
 
 var (
 	primarySlot int    // slot (= core-index) van de primaire core
 	lastCore    int    // hoogste core-index van de app (primair + secundairen)
-	trampPhys   uint64 // fysiek adres EL2 SMP-trampoline (van HOP, control-page)
-	selfPA      uint64 // fysiek adres van de eigen control-page (CPU_ON-ctx —
-	// de trampoline leest er de handoff; de app kent zelf alleen IPA's, dus
-	// HOP publiceerde de PA op de page: layout.CtrlSelfPA)
-	stubIPA uint64 // app-IPA van de EL1-stub (ELR-doel na de trampoline)
-	ttbr0   uint64 // gedeelde stage-1 L1-tabel (RamStart+0x4000, IPA)
+	stubIPA     uint64 // app-IPA van de EL1-stub (ELR-doel na de trampoline)
+	ttbr0       uint64 // gedeelde stage-1 L1-tabel (RamStart+0x4000, IPA)
 
 	nextCore int    // volgende op te brengen secundaire core (onder bootLock)
 	bootLock uint32 // spinlock: één core-boot tegelijk (één handoff-venster)
@@ -64,8 +59,6 @@ func Configure(prim, cores int) {
 	primarySlot = prim
 	lastCore = prim + cores - 1
 	nextCore = prim + 1
-	trampPhys = dev.Read64(layout.CtrlPage(prim) + layout.CtrlSMPTramp)
-	selfPA = dev.Read64(layout.CtrlPage(prim) + layout.CtrlSelfPA)
 	stubIPA = board.Current().SMPStubPC()
 
 	// Gedeelde stage-1 L1 = de tabel die de primaire in InitMMU bouwde, op
@@ -86,13 +79,14 @@ func Configure(prim, cores int) {
 }
 
 // task is de goos.Task-hook: de runtime roept 'm aan (vanuit newosproc) als hij
-// een extra OS-thread wil. Wij vertalen dat naar "breng een gereserveerde core
-// op". Draait in scheduler-context (m.p kan nil zijn): dus géén allocatie, géén
-// Go-parking — enkel atomics, device-stores en PSCI (SMC). De M-context (sp/mp/
-// g0/fn) komt van de runtime; wij leggen 'm op de control-page zodat de
-// EL2-trampoline 'm oppikt zodra de core bootet.
+// een extra OS-thread wil. De app mág geen cores opbrengen — de parkeer-
+// mailboxen liggen buiten elke stage-2-map, precies zodat een app dat niet kan.
+// Dus: leg de M-context op de control-page en vraag HOP via CtrlSMPReq de core
+// te dispatchen (HOP kiest cold-PSCI of geparkeerd-SEV). Draait in
+// scheduler-context (m.p kan nil zijn): géén allocatie, géén Go-parking — enkel
+// atomics en device-stores; het wachten is een spin (HOP is een andere core).
 func task(sp, mp, gp, fn unsafe.Pointer) {
-	// Serialiseer op het enkele handoff-venster: één core tegelijk opbrengen.
+	// Serialiseer op het enkele handoff-venster: één core-verzoek tegelijk.
 	// nextCore staat daardoor onder de lock (geen atomic nodig).
 	for !atomic.CompareAndSwapUint32(&bootLock, 0, 1) {
 	}
@@ -103,7 +97,7 @@ func task(sp, mp, gp, fn unsafe.Pointer) {
 		atomic.StoreUint32(&bootLock, 0)
 		panic("smp: runtime vroeg meer OS-threads dan toegewezen cores")
 	}
-	sec := uint64(nextCore)
+	sec := nextCore
 	nextCore++
 
 	cp := layout.CtrlPage(primarySlot)
@@ -113,15 +107,13 @@ func task(sp, mp, gp, fn unsafe.Pointer) {
 	dev.Write64(cp+layout.CtrlSMPFn, uint64(uintptr(fn)))
 	dev.Write64(cp+layout.CtrlSMPStub, stubIPA)
 	dev.Write64(cp+layout.CtrlSMPTtbr0, ttbr0)
-	dev.MB() // handoff zichtbaar vóór de core bootet
+	dev.MB() // handoff zichtbaar vóór het verzoek
 
-	// ctx = fysiek adres van de primaire control-page → de trampoline leest er
-	// de handoff, de stage-2-tabel en de VMID van de primaire → gedeelde
-	// partitie/heap. (PA, want de trampoline draait met MMU uit.)
-	psci.SMC(psci.CPU_ON, sec, trampPhys, selfPA)
-
-	// Wacht tot de core echt draait vóór we het handoff-venster vrijgeven.
-	for psci.SMC(psci.AFFINITY_INFO, sec, 0, 0) != psci.AffinityOn {
+	// Verzoek: HOP's servicer ziet CtrlSMPReq, dispatcht de core (naar de
+	// SMP-trampoline, die de handoff hierboven oppikt) en zet 'm weer op 0.
+	dev.Write64(cp+layout.CtrlSMPReq, uint64(sec))
+	dev.MB()
+	for dev.Read64(cp+layout.CtrlSMPReq) != 0 {
 	}
 	atomic.StoreUint32(&bootLock, 0)
 }

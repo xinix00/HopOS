@@ -294,7 +294,7 @@ func main() {
 		fail("iso-ready", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
-	for board.Current().AffinityInfo(2) != board.PowerOff {
+	for slots.Get(2).CoreOn {
 		if time.Now().After(deadline) {
 			fail("isolatie", fmt.Errorf("app leest HOP-geheugen zonder fault"))
 		}
@@ -341,6 +341,35 @@ func main() {
 	}
 	fmt.Println("HOPOS_HARDKILL_OK — hangende app via stage-2-intrekking van zijn core gezet")
 
+	// KILL → HERSTART op DEZELFDE core: de kern van het parkeer-model. De
+	// zojuist gevelde core (slot 2) is niet teruggegeven aan de firmware maar
+	// geparkeerd op EL2; een verse app moet er meteen op kunnen draaien —
+	// zónder PSCI CPU_ON (die core is nooit uitgezet). Bewijs: nieuwe app boot,
+	// wordt READY, logt en heeft een lopende heartbeat op precies die core.
+	fmt.Println("herstart-na-kill: verse app op de zojuist gevelde core (slot 2)...")
+	var rekLogs int
+	if err := slots.Start(2, app, 48<<20, 1, map[string]string{"ROLE": "na-kill"}, nil, nil); err != nil {
+		fail("rekill-start", err)
+	}
+	go drainLogs(2, &rekLogs)
+	if err := slots.WaitReady(2, 5*time.Second); err != nil {
+		fail("rekill-ready", err)
+	}
+	time.Sleep(600 * time.Millisecond)
+	s = slots.Get(2)
+	fmt.Printf("herstart slot 2: core-on=%v app=%d hb=%d ram=%dMB logs=%d vec=%d\n",
+		s.CoreOn, s.App, s.Heartbeat, s.RAMSize>>20, rekLogs, s.FaultVec)
+	if !s.CoreOn || s.App != layout.StatusReady || s.Heartbeat == 0 || s.RAMSize != 48<<20 || rekLogs == 0 {
+		fail("rekill", fmt.Errorf("verse app kwam niet op na een hard-kill (geparkeerde core niet herbruikbaar?)"))
+	}
+	if s.FaultVec != layout.FaultNone {
+		fail("rekill", fmt.Errorf("verse app erfde een fault-rapport (vec=%d) — control-page niet vers", s.FaultVec))
+	}
+	if err := slots.Stop(2, 3*time.Second); err != nil {
+		fail("rekill-stop", err)
+	}
+	fmt.Println("HOPOS_REKILL_OK — geparkeerde core herbruikt: kill → verse app op dezelfde core, geen firmware-roundtrip")
+
 	// Volumes-demo (het storage-model, PLAN.md §3): een writer-app zet de
 	// dataset in het gemounte /data (op de NVMe), twee reader-apps met
 	// dezelfde mount lezen hem parallel en melden hun checksum als exitcode;
@@ -348,7 +377,7 @@ func main() {
 	// en '..'-escapes zijn dicht. Nul gedeeld geheugen — alles via HOP.
 	dataMount := map[string]string{"/data": "/data"}
 	for slot := 1; slot <= 2; slot++ {
-		if board.Current().AffinityInfo(uint64(slot)) != board.PowerOff {
+		if slots.Get(slot).CoreOn {
 			if err := slots.Stop(slot, 3*time.Second); err != nil {
 				fail("vol-stop", err)
 			}
@@ -486,7 +515,7 @@ func main() {
 	// op slot 2 én 3 tegelijk; beide loggen RAM @ 0x50000000 (hun virtuele
 	// beeld) terwijl ze fysiek in eigen partities leven.
 	fmt.Println("reloc: zelfde artifact (slot-1-gelinkt) naar slot 2 en 3...")
-	if board.Current().AffinityInfo(3) != board.PowerOff {
+	if slots.Get(3).CoreOn {
 		if err := slots.Stop(3, 3*time.Second); err != nil {
 			fail("reloc-stop", err)
 		}
@@ -518,7 +547,7 @@ func main() {
 	// 1-3 vrijmaken.
 	fmt.Println("smp: slot 1 als 2-core app (gedeelde heap), core 2 secundair...")
 	for slot := 1; slot <= 3; slot++ {
-		if board.Current().AffinityInfo(uint64(slot)) != board.PowerOff {
+		if slots.Get(slot).CoreOn {
 			if err := slots.Stop(slot, 3*time.Second); err != nil {
 				fail("smp-stop", err)
 			}
@@ -537,7 +566,7 @@ func main() {
 		fail("smp-teardown", err)
 	}
 	for _, c := range []int{1, 2} {
-		if board.Current().AffinityInfo(uint64(c)) != board.PowerOff {
+		if slots.Get(c).CoreOn {
 			fail("smp-teardown", fmt.Errorf("core %d nog aan na teardown", c))
 		}
 	}

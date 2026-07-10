@@ -271,7 +271,14 @@ func (a *App) watch() {
 func (a *App) Exit(code uint64) {
 	*a.ctrl(layout.CtrlExitCode) = code
 	*a.ctrl(layout.CtrlStatus) = layout.StatusExited
-	board.Current().CPUOff()
+	dev.MB() // status zichtbaar vóór we de core aan HopOS teruggeven
+	// Coöperatief stoppen via HVC → HopOS parkeert de core op EL2 (geen PSCI
+	// CPU_OFF: dat geeft de core aan de firmware terug en op de Pi 5-stock
+	// komt hij dan nooit terug). HopOS bezit zijn cores.
+	hvcExit()
 	for {
 	} // onbereikbaar
 }
+
+// hvcExit trapt naar HopOS' EL2-parkeerpad (zie park_arm64.s).
+func hvcExit()

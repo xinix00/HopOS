@@ -73,13 +73,28 @@ const (
 	// Stage-2-gebied: door HOP geschreven, door de EL2-trampoline/walker
 	// gelezen, voor app-cores onzichtbaar (staat in geen enkele stage-2-map) —
 	// dus puur fysiek, geen IPA: de basis is Plan.Stage2PA. De indeling ervan
-	// is wél universeel: +0x0 de gedeelde EL2-parkeervectoren (2KB-aligned),
-	// +0x800 de revoke-vectoren van de HOP-core (de hard-kill-HVC → TLBI;
-	// cpuinit zet VBAR_EL2 van core 0 hierheen), en per slot i ≥ 1 een
-	// tabelblok op +i*Stage2Stride (L1 +0x0, L2 +0x1000/+0x2000,
-	// L3-ctrl +0x3000, L3-ring +0x4000).
-	Stage2Stride  = 0x10000
-	revokeVecOff  = 0x800
+	// is wél universeel: +0x0 de gedeelde EL2-vectoren van de app-cores
+	// (2KB-aligned), en per slot i ≥ 1 een tabelblok op +i*Stage2Stride
+	// (L1 +0x0, L2 +0x1000/+0x2000, L3-ctrl +0x3000, L3-ring +0x4000).
+	// De revoke-vectoren van de HOP-core staan apart (Plan.RevokeVecPA):
+	// dat is de tabel waar cpuinit VBAR_EL2 van core 0 heen zette — een board
+	// mag daar zijn eigen boot-diagnostiek in hebben (rpi5: de faultdump-
+	// tabel); InitVectors plugt er alleen de HVC-handler in.
+	Stage2Stride = 0x10000
+
+	// Parkeer-machinerie (in het slot-0-blok, ná de vectoren; QEMU's
+	// revoke-tabel zit op +0x800..+0x1000): HopOS bezit zijn cores — een
+	// gestopte app-core gaat NIET terug naar de firmware (PSCI CPU_OFF is op
+	// de Pi 5-stockfirmware een one-way door, gemeten 2026-07-10) maar
+	// parkeert op EL2 in een WFE-lus op zijn mailbox. HOP herstart 'm door
+	// {ctx, doel-PC} in de mailbox te schrijven + SEV; de lus springt dan de
+	// (idempotente) trampoline in. PSCI CPU_ON is alleen nog de éérste
+	// bring-up per core. Mailbox-woord 0: 0 = cold (nooit geparkeerd),
+	// 1 = geparkeerd, 2 = dispatch bevestigd, anders = ctx (startschot);
+	// woord 1: doel-PC.
+	parkCodeOff = 0x1000
+	parkMboxOff = 0x1100
+	ParkMboxLen = 16 // bytes per core-mailbox (ctx + pc)
 
 	// Frame-ringen per slot (IPA-ABI, per-slot netwerk): elke app draait een
 	// eigen netstack over rauwe Ethernet-frames; HOP is enkel een L2-switch
@@ -106,7 +121,11 @@ type Plan struct {
 	CtrlPA        uint64   // control-pages: MaxSlots+1 pagina's (4KB-aligned)
 	RingPA        uint64   // hop-ABI-ringen: MaxSlots × RingStride (4KB-aligned)
 	NetRingPA     uint64   // frame-ringen: MaxSlots × NetRingStride (2MB-aligned!)
-	Stage2PA      uint64   // vectoren + tabelblokken: (MaxSlots+1) × Stage2Stride (2KB-aligned)
+	Stage2PA      uint64   // app-core-vectoren + tabelblokken: (MaxSlots+1) × Stage2Stride (2KB-aligned)
+	RevokeVecPA   uint64   // EL2-vectortabel van de HOP-core (2KB-aligned): waar
+	// cpuinit VBAR_EL2 van core 0 heen zette. InitVectors plugt er alleen de
+	// HVC-revoke-handler in (offset 0x400) en laat de rest staan — een board
+	// mag daar zijn boot-diagnostiek hebben (rpi5: de faultdump-tabel).
 	BootScratchPA uint64   // boot-EL-scratch + DTB-pointer (cpuinit-vast, board-asm)
 	Pool          []Region // vrij DRAM voor app-partities (2MB-korrel)
 }
@@ -127,6 +146,8 @@ func UsePlan(p Plan) {
 		panic("layout: Plan.NetRingPA ontbreekt of niet 2MB-aligned")
 	case p.Stage2PA == 0 || p.Stage2PA&0x7FF != 0:
 		panic("layout: Plan.Stage2PA ontbreekt of niet 2KB-aligned (VBAR-eis)")
+	case p.RevokeVecPA == 0 || p.RevokeVecPA&0x7FF != 0:
+		panic("layout: Plan.RevokeVecPA ontbreekt of niet 2KB-aligned (VBAR-eis)")
 	case p.BootScratchPA == 0:
 		panic("layout: Plan.BootScratchPA ontbreekt")
 	case len(p.Pool) == 0:
@@ -168,14 +189,23 @@ func NetRingRXPA(i int) uintptr {
 }
 
 // VecBasePA is de fysieke basis van de gedeelde EL2-vectoren (app-cores);
-// RevokeVecPA die van de revoke-vectoren van de HOP-core (cpuinit-asm moet
+// RevokeVecPA die van de vectortabel van de HOP-core (cpuinit-asm moet
 // hiermee overeenkomen — het board checkt dat in zijn init).
 func VecBasePA() uintptr   { return pa(plan.Stage2PA) }
-func RevokeVecPA() uintptr { return pa(plan.Stage2PA + revokeVecOff) }
+func RevokeVecPA() uintptr { return pa(plan.RevokeVecPA) }
 
 // Stage2TablePA geeft de fysieke basis van het stage-2-tabelblok van slot i.
 func Stage2TablePA(i int) uintptr {
 	return pa(plan.Stage2PA + uint64(i)*Stage2Stride)
+}
+
+// ParkCodePA is de fysieke plek van de EL2-parkeerlus (door InitVectors
+// gegenereerd; de vectoren springen erheen i.p.v. PSCI CPU_OFF te doen).
+func ParkCodePA() uintptr { return pa(plan.Stage2PA + parkCodeOff) }
+
+// ParkMboxPA geeft de parkeer-mailbox van een core (16 bytes: ctx + doel-PC).
+func ParkMboxPA(core int) uintptr {
+	return pa(plan.Stage2PA + parkMboxOff + uint64(core)*ParkMboxLen)
 }
 
 // Pool geeft de partitie-pool van het board (voor slots/partmem).
@@ -302,6 +332,18 @@ const (
 	// IPA); zo hoeft de EL1-stub géén geheugen te lezen vóór zijn MMU aan staat
 	// (elke pre-MMU-lees zou een primaire-gecachte waarde stale kunnen zien)
 	CtrlSlot = 0xB8 // HOP → tramp: slotnummer = VMID (de app is oblivious)
+	// CtrlSMPReq (app → HOP): core-index die de app-runtime als extra SMP-core
+	// wil (goos.Task). De app kan geparkeerde cores niet zelf dispatchen (de
+	// mailboxen zijn bewust buiten elke stage-2-map); HOP's servicer ziet het
+	// verzoek, valideert het tegen CtrlCores en dispatcht. 0 = geen verzoek.
+	CtrlSMPReq = 0xC0
+	// CtrlMboxPA (HOP → tramp): fysiek adres van de parkeer-mailbox van déze
+	// core; de trampoline zet 'm in TPIDR_EL2 zodat de parkeerlus 'm terugvindt
+	// zonder MPIDR-decodering. CtrlSMPMbox: idem voor de secundaire SMP-core
+	// die HOP dispatcht (de primaire ctrl-page is gedeeld, dus de secundaire
+	// mailbox komt via dit aparte veld dat HOP vlak vóór de dispatch zet).
+	CtrlMboxPA  = 0xC8
+	CtrlSMPMbox = 0xD0
 
 	// Env-blob: door HOP geschreven "key=val\n..."-bytes die de app-lib bij
 	// start inleest (de Docker-vorm: env meegegeven bij het starten). Vervangt

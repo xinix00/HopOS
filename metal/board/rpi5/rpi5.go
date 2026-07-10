@@ -17,7 +17,41 @@
 // Alleen voor GOOS=tamago GOARCH=arm64.
 package rpi5
 
-import "hop-os/metal/board/raspi"
+import (
+	"hop-os/metal/board/raspi"
+	"hop-os/metal/layout"
+)
+
+// Het PA-plan van de Pi 5 (fase P1): wáár control-pages, ringen en
+// stage-2-tabellen fysiek liggen, en welk DRAM de partitie-pool is. Alles in
+// laag DRAM, ruim vrij van: TF-A/armstub (< ~0x20000), park/scratch
+// (0x70000-0x7F008), de HOP-kern (load 0x80000 + 128MB = tot 0x8080000) en
+// de DTB (0x0F000000, device_tree_address in config.txt).
+//
+// De pool is voor de bring-up bewust conservatief — 512MB..2GB, gegarandeerd
+// binnen de eerste /memory-range van elke 4/8GB-Pi. De volle 8GB benutten
+// (regio's uit de DTB-/memory-ranges + /memreserve/) is de vervolgstap zodra
+// de main die ranges op het board heeft geprint (verifieer eerst); de
+// pool-vorm ([]Region) en VTCR PS=40-bit kunnen het al aan.
+// revokeVecAsm = de EL2-vectortabel (faultdump2, 0x8B000) die cpuinit.s al
+// voor de boot-diagnostiek installeert en waar VBAR_EL2 van core 0 op staat.
+// De revoke-HVC-handler wordt daar door stage2.InitVectors ingeplugd (offset
+// 0x400 — sync vanuit lager EL); de andere 15 vectoren blijven de Y-dump.
+const revokeVecAsm = 0x8B000
+
+func init() {
+	layout.UsePlan(layout.Plan{
+		CtrlPA:        0x10000000,
+		RingPA:        0x11000000,
+		Stage2PA:      0x12000000,
+		RevokeVecPA:   revokeVecAsm,
+		NetRingPA:     0x13000000,
+		BootScratchPA: raspi.BootScratch, // 0x7F000, cpuinit-vast
+		Pool: []layout.Region{
+			{Base: 0x20000000, Size: 0x60000000}, // 512MB..2GB
+		},
+	})
+}
 
 // BCM2712-adressen (40-bit MMIO boven 4GB; tamago's identity-map dekt 512GB,
 // alles buiten de RAM-declaratie is device-nGnRnE).

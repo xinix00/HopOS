@@ -44,6 +44,12 @@ TEXT smpEL2Tramp(SB),NOSPLIT|NOFRAME,$0
 	MOVD	0x38(R1), R2	// layout.CtrlS2Table  → gedeelde stage-2 L1 (fysiek)
 	MOVD	0xB8(R1), R6	// layout.CtrlSlot     → VMID (primair slot)
 
+	// TPIDR_EL2 = fysieke parkeer-mailbox van déze secundaire core. De
+	// primaire ctrl-page is gedeeld, dus de secundaire mailbox komt via een
+	// eigen veld dat HOP vlak vóór de dispatch zette (CtrlSMPMbox).
+	MOVD	0xD0(R1), R7	// layout.CtrlSMPMbox
+	WORD	$0xd51cd047	// msr tpidr_el2, x7
+
 	// EL2-vectoren (zelfde als de app-cores: een stage-2-fault parkeert/CPU_OFF't).
 	MOVD	0x50(R1), R3	// layout.CtrlVecPA
 	WORD	$0xd51cc003	// msr vbar_el2, x3
@@ -73,6 +79,16 @@ TEXT smpEL2Tramp(SB),NOSPLIT|NOFRAME,$0
 	WORD	$0xd51ce104	// msr cnthctl_el2, x4
 	MOVD	$0, R4
 	WORD	$0xd51ce064	// msr cntvoff_el2, x4
+
+	// EL1-staat NIET erven (zelfde silicium-les als el2.s): een warme CPU_ON
+	// erft de EL1-staat van de vorige huurder — met MMU aan zou zelfs de
+	// fetch van de EL1-stub door stale tabellen vertalen. SCTLR_EL1 schoon
+	// (de stub zet 'm daarna zelf op met de gedeelde tabel) en CPTR_EL2
+	// zonder FP-traps (mstart begint met FP).
+	MOVD	$0x30d00800, R4
+	MSR	R4, SCTLR_EL1
+	MOVD	$0x33FF, R4
+	WORD	$0xd51c1144	// msr cptr_el2, x4
 
 	// SPSR_EL2: EL1h, DAIF gemaskeerd.
 	MOVD	$0, R4

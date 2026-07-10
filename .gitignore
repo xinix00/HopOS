@@ -4,9 +4,10 @@ nvme.img
 !README.md
 .claude/
 
-# Gegenereerde SD-kernelimages (regenereerbaar uit de ELF's via image/*-probe.sh);
+# Gegenereerde SD-kernelimages (regenereerbaar uit de ELF's via image/*.sh);
 # de LEESMIJ.txt en config.txt in die dirs blijven wél getrackt.
 sd-*/kernel*.img
+sd-*/hop-*.img
 
 # Kaart-payload naast de kernelimages: firmware-downloads + zelfgebouwde TF-A
 # (herkomst en bouwrecept in sd-*/LEESMIJ.txt).

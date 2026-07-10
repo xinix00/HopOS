@@ -30,6 +30,12 @@ TEXT s2tramp(SB),NOSPLIT|NOFRAME,$0
 	MOVD	0x30(R0), R3	// layout.CtrlEntry   → app-entry (IPA)
 	MOVD	0xB8(R0), R6	// layout.CtrlSlot    → VMID
 
+	// TPIDR_EL2 = fysieke parkeer-mailbox van deze core: de parkeerlus
+	// (ParkCodePA) vindt 'm daar terug zonder MPIDR. Overleeft de EL1-app
+	// (TPIDR_EL2 is EL2-only). Idempotent bij herdispatch.
+	MOVD	0xC8(R0), R7	// layout.CtrlMboxPA
+	WORD	$0xd51cd047	// msr tpidr_el2, x7
+
 	// VTCR_EL2: 4KB-granule, 32-bit IPA, PS=40-bit PA-output (de pool kan
 	// boven 4GB liggen — de hoge helft van een 8GB-Pi).
 	MOVD	$0x80023560, R4
@@ -55,6 +61,19 @@ TEXT s2tramp(SB),NOSPLIT|NOFRAME,$0
 	WORD	$0xd51ce104	// msr cnthctl_el2, x4
 	MOVD	$0, R4
 	WORD	$0xd51ce064	// msr cntvoff_el2, x4
+
+	// EL1-staat NIET erven — de silicium-les (Pi 5, 2026-07-10): bij een
+	// warme CPU_ON (core was eerder van een ándere app en deed CPU_OFF)
+	// initieert TF-A alleen EL2; EL1 is dan wat de vorige huurder achterliet
+	// — MMU áán, oude TTBR/VBAR — en de allereerste EL1-fetch na de ERET zou
+	// door stale tabellen vertalen. QEMU verhulde dit (volledige vCPU-reset
+	// bij CPU_ON). Dus expliciet, zoals cpuinit dat voor de primary doet:
+	// SCTLR_EL1 = 0x30d00800 (RES1-bits; M/C/I/A/WXN uit) en CPTR_EL2 =
+	// 0x33FF (TFP=0 — anders trapt tamago's eerste FP-instructie naar EL2).
+	MOVD	$0x30d00800, R4
+	MSR	R4, SCTLR_EL1
+	MOVD	$0x33FF, R4
+	WORD	$0xd51c1144	// msr cptr_el2, x4
 
 	// Drop naar EL1 op de app-entry (EL1h, DAIF gemaskeerd).
 	MOVD	$0, R4

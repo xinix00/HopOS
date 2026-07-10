@@ -25,6 +25,20 @@
 TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	MOVD	R0, R9		// x0 = DTB-pointer bij firmware-boot; bewaren vóór clobber
 
+	// App-cores (fase P1) entreren hier op EL1, via de EL2-trampoline en
+	// ónder stage-2: LED/UART/scratch zijn daar niet gemapt — één MMIO-poke
+	// en de EL2-vector zet de core uit. Dus vóór álles: EL1 → het schone
+	// app-pad (geen MMIO, geen noodvectoren, geen dcinv). De primary komt op
+	// de Pi altijd op EL2 binnen (TF-A/armstub) en krijgt hieronder de volle
+	// diagnostiek.
+	MRS	CurrentEL, R0
+	LSR	$2, R0, R0
+	AND	$0b11, R0, R0
+	CMP	$1, R0
+	BNE	primary
+	B	·cpuinitEL1App(SB)
+
+primary:
 	// Levensteken 0 — de ACT-LED, vóór álles: de UART hieronder kan zonder
 	// JST-sessie dood zijn (ongeklokt → FR-poll hangt), de always-on-GPIO
 	// niet. 3× traag knipperen = "onze eerste instructies draaien".
@@ -84,8 +98,15 @@ el2:
 	// op el2; app-cores entreren cpuinit op EL1 via de trampoline.
 	MOVD	$DTB_PTR, R1
 	MOVD	R9, (R1)
+
+	// VBAR_EL2 van de HOP-core wordt verderop op de faultdump2-tabel
+	// (0x8B000) gezet — dat ís layout.RevokeVecPA van het rpi5-plan:
+	// stage2.InitVectors plugt daar de revoke-HVC-handler in (offset 0x400),
+	// de rest blijft de Y-dump-diagnostiek. App-cores entreren op EL1 via de
+	// trampoline en krijgen hun eigen VBAR_EL2 (CtrlVecPA) van de trampoline.
+
 	// HCR_EL2: RW(31)=1 — EL1 draait AArch64. Stage-2 (VM-bit) blijft uit;
-	// fase P1 hangt hier de app-core-variant met VTTBR_EL2 + VM aan.
+	// de EL2-trampoline (metal/el2) zet VTTBR_EL2 + VM op de app-cores.
 	MOVD	$1<<31, R0
 	WORD	$0xd51c1100	// msr hcr_el2, x0
 
@@ -415,3 +436,26 @@ uhexpr:
 	CBNZ	R5, uhexlus
 	MOVD	R11, R30
 	RET
+
+// cpuinitEL1App: het schone EL1-pad voor een app-core onder stage-2 (fase
+// P1). Géén MMIO (LED/UART/noodvectoren zijn in de kooi niet gemapt — élke
+// fout wordt al door de EL2-vectoren gerapporteerd + CPU_OFF), géén dcinv
+// (HOP veegde de partitie met dev.CleanInv vóór het laden en de core komt
+// uit reset met schone L1-caches). Alleen: SCTLR schoon, stack uit de
+// (door HOP gepatchte) RAM-declaratie, en door naar de runtime — identiek
+// aan het QEMU-app-pad (board/qemuvirt/cpuinit.s).
+TEXT ·cpuinitEL1App(SB),NOSPLIT|NOFRAME,$0
+	MRS	SCTLR_EL1, R0
+	BIC	$1<<1, R0
+	BIC	$1<<0, R0
+	MSR	R0, SCTLR_EL1
+	ISB	$15
+
+	MOVD	runtime∕goos·RamStart(SB), R1
+	MOVD	R1, RSP
+	MOVD	runtime∕goos·RamSize(SB), R1
+	MOVD	runtime∕goos·RamStackOffset(SB), R2
+	ADD	R1, RSP
+	SUB	R2, RSP
+
+	B	_rt0_tamago_start(SB)

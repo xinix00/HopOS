@@ -13,6 +13,7 @@ import (
 	"hop-os/metal/board"
 	"hop-os/metal/board/raspi"
 	"hop-os/metal/dev"
+	"hop-os/metal/el2"
 	"hop-os/metal/fb"
 	"hop-os/metal/fdt"
 )
@@ -61,15 +62,15 @@ func (machine) AffinityInfo(core uint64) board.PowerState {
 }
 func (machine) PSCIVersion() (major, minor uint16) { return raspi.PSCIVersion() }
 
-// Stage-2/SMP: de trampolines zelf zijn board-neutraal (gedeeld metal/el2 —
-// geen GIC, geen MPIDR; de hard-kill loopt via stage2.Revoke) en de vectoren
-// halen het slot uit VTTBR_EL2.VMID. Wat fase P1 hier nog vergt is geen port
-// maar verificatie op het board: het adresplan (layout op Pi-DRAM),
-// cache-maintenance in het image-loadpad (A76 is echt, QEMU verhulde dat) en
-// VBAR_EL2 → RevokeVecBase in cpuinit. Tot die verificatie: expliciet afwezig.
-func (machine) S2TrampPC() uint64    { panic("rpi5: stage-2-kooi is fase P1 (verificatie op board)") }
-func (machine) S2SMPTrampPC() uint64 { panic("rpi5: SMP is fase P1 (verificatie op board)") }
-func (machine) SMPStubPC() uint64    { panic("rpi5: SMP is fase P1 (verificatie op board)") }
+// Stage-2/SMP: de trampolines zijn board-neutraal en data-gedreven (gedeeld
+// metal/el2 — geen GIC, geen MPIDR, geen ingebakken adressen; de hard-kill
+// loopt via stage2.Revoke). Dit board levert het PA-plan (rpi5.go) en
+// VBAR_EL2 → REVOKE_VEC in cpuinit; de rest is hier één-op-één doorgeven.
+// Fase-P1-acceptatie = het isolatie/hard-kill/SMP-bewijs op het board zelf
+// (metal/pi5_main.go).
+func (machine) S2TrampPC() uint64    { return el2.S2TrampPC() }
+func (machine) S2SMPTrampPC() uint64 { return el2.S2SMPTrampPC() }
+func (machine) SMPStubPC() uint64    { return el2.SMPStubPC() }
 
 // ProbeNIC: fase P2 — de NIC hangt achter de RP1-southbridge (PCIe, Cadence
 // GEM, metal/gem); er is nog geen netwerkpad, dus nog geen device.

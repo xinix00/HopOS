@@ -7,6 +7,14 @@ TEXT ·MB(SB),NOSPLIT,$0
 	WORD	$0xd5033fbf	// dmb sy
 	RET
 
+// SEV: wek geparkeerde cores (WFE) — HOP dispatcht een core door zijn mailbox
+// te schrijven en dan SEV te doen. DSB vooraf zodat de mailbox-write al
+// zichtbaar is als de core ontwaakt.
+TEXT ·SEV(SB),NOSPLIT,$0
+	WORD	$0xd5033f9f	// dsb sy
+	WORD	$0xd503209f	// sev
+	RET
+
 // CleanInv: DC CIVAC (clean+invalidate naar PoC) per cache-regel over
 // [addr, addr+size), afgesloten met DSB SY. By-VA-maintenance broadcast door
 // het hele inner-shareable domein, dus dit veegt de regels uit álle caches

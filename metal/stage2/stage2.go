@@ -30,7 +30,6 @@ import (
 
 	"hop-os/metal/dev"
 	"hop-os/metal/layout"
-	"hop-os/metal/psci"
 )
 
 // Descriptor-bits (stage-2): AF, SH=inner, S2AP en MemAttr per gebruik.
@@ -75,38 +74,69 @@ const (
 // (op de HVC-offset) die TLBI ALLE1IS doet. HOP draait op EL1 en kan die
 // EL2-instructie niet direct uitvoeren; Revoke doet er een HVC voor. Zie Revoke.
 func InitVectors() {
-	if psci.CPU_OFF>>32 != 0 {
-		panic("stage2: PSCI_CPU_OFF past niet in 32 bits (movz+movk)")
-	}
-	// De fysieke ctrl-basis komt uit het board-plan en kan élk 48-bit-adres
-	// zijn: altijd movz+movk+movk (bits 32-47/16-31/0-15). De 4KB-uitlijning
-	// (bits 0-11 vrij voor slot<<12) bewaakt layout.UsePlan.
+	// De fysieke ctrl-basis en het parkeeradres komen uit het board-plan en
+	// kunnen élk 48-bit-adres zijn: altijd movz+movk+movk (bits 32-47/16-31/
+	// 0-15). De 4KB-uitlijning van ctrl (bits 0-11 vrij voor slot<<12) bewaakt
+	// layout.UsePlan.
 	ctrlPA := uint64(layout.CtrlPagePA(0))
-	handler := func(v uint32) []uint32 {
+	parkPA := uint64(layout.ParkCodePA())
+
+	// parkTo(rd): laad parkPA in x<rd> en spring erheen (BR). HopOS bezit zijn
+	// cores — een gevelde/gestopte app-core gaat NIET terug naar de firmware
+	// (PSCI CPU_OFF is op de Pi 5-stock een one-way door) maar parkeert op EL2
+	// in de WFE-lus op ParkCodePA. HOP dispatcht 'm later via zijn mailbox.
+	parkTo := func(rd uint32) []uint32 {
 		return []uint32{
-			0xd53c2100,                            // mrs  x0, vttbr_el2
-			0xd370fc00,                            // lsr  x0, x0, #48          (slot = VMID)
-			movz(1, uint32(ctrlPA>>32), 32),       // movz x1, #(ctrlPA>>32), lsl #32
-			movk(1, uint32(ctrlPA>>16), 16),       // movk x1, #(ctrlPA>>16), lsl #16
-			movk(1, uint32(ctrlPA), 0),            // movk x1, #(ctrlPA&0xffff)
-			0x8b003021,                            // add  x1, x1, x0, lsl #12  (eigen ctrl-page)
-			movz(4, v+1, 0),                       // movz x4, #(v+1)
-			strX(4, 1, layout.CtrlFaultVec),       // str  x4, [x1, #CtrlFaultVec]
-			0xd53c5202,                            // mrs  x2, esr_el2
-			strX(2, 1, layout.CtrlFaultESR),       // str  x2, [x1, #CtrlFaultESR]
-			0xd53c6003,                            // mrs  x3, far_el2
-			strX(3, 1, layout.CtrlFaultFAR),       // str  x3, [x1, #CtrlFaultFAR]
-			0xd5033fbf,                            // dmb  sy                    (publiceer vóór CPU_OFF)
-			movz(0, uint32(psci.CPU_OFF>>16), 16), // movz x0, #(CPU_OFF>>16), lsl #16
-			movk(0, uint32(psci.CPU_OFF), 0),      // movk x0, #(CPU_OFF&0xffff)
-			0xd4000003,                            // smc  #0
-			0x14000000,                            // b .  (onbereikbaar)
+			movz(rd, uint32(parkPA>>32), 32),
+			movk(rd, uint32(parkPA>>16), 16),
+			movk(rd, uint32(parkPA), 0),
+			0xD61F0000 | (rd&0x1F)<<5, // br  x<rd>
 		}
 	}
-	// App-core-vectoren op VecBasePA: elke EL2-exception → rapporteer + CPU_OFF.
-	// Er is geen aparte IRQ-vector: de hard-kill loopt niet via een IRQ maar
-	// via een stage-2-fault (Revoke trekt de map in), die op de synchrone vector
-	// (idx 8) landt — hetzelfde pad als een spontane kooi-overtreding.
+	// report: schrijf vec/esr/far op de eigen control-page (slot = VTTBR.VMID),
+	// gevolgd door parkeren. Clobbert x0-x5.
+	report := func(v uint32) []uint32 {
+		ins := []uint32{
+			0xd53c2100,                      // mrs  x0, vttbr_el2
+			0xd370fc00,                      // lsr  x0, x0, #48          (slot = VMID)
+			movz(1, uint32(ctrlPA>>32), 32), // movz x1, #(ctrlPA>>32), lsl #32
+			movk(1, uint32(ctrlPA>>16), 16), // movk x1, #(ctrlPA>>16), lsl #16
+			movk(1, uint32(ctrlPA), 0),      // movk x1, #(ctrlPA&0xffff)
+			0x8b003021,                      // add  x1, x1, x0, lsl #12  (eigen ctrl-page)
+			movz(4, v+1, 0),                 // movz x4, #(v+1)
+			strX(4, 1, layout.CtrlFaultVec), // str  x4, [x1, #CtrlFaultVec]
+			0xd53c5202,                      // mrs  x2, esr_el2
+			strX(2, 1, layout.CtrlFaultESR), // str  x2, [x1, #CtrlFaultESR]
+			0xd53c6003,                      // mrs  x3, far_el2
+			strX(3, 1, layout.CtrlFaultFAR), // str  x3, [x1, #CtrlFaultFAR]
+			0xd5033fbf,                      // dmb  sy   (publiceer vóór parkeren)
+		}
+		return append(ins, parkTo(5)...)
+	}
+	handler := func(v uint32) []uint32 {
+		if v != 8 {
+			return report(v)
+		}
+		// Index 8 = synchrone exception vanuit EL1: óf een stage-2-fault
+		// (kooi-overtreding / Revoke's ingetrokken map — rapporteren) óf de
+		// coöperatieve exit-HVC van applib (EC=0x16 — de app zette al
+		// StatusExited, dus niet als fault rapporteren, meteen parkeren).
+		// De HVC-tak springt naar het parkTo-blok = de laatste 4 instructies
+		// van report(v). Vanaf de b.eq (index 3) is dat offset
+		// 4 + (len(rep)-4) - 3 = len(rep)-3 instructies vooruit.
+		rep := report(v)
+		off := uint32(len(rep) - 3)
+		head := []uint32{
+			0xd53c5202,                    // mrs  x2, esr_el2
+			0xD35AFC43,                    // lsr  x3, x2, #26          (EC)
+			0xF100587F,                    // cmp  x3, #0x16            (HVC64?)
+			0x54000000 | (off&0x7FFFF)<<5, // b.eq +off (EQ) → parkeren, geen report
+		}
+		return append(head, rep...)
+	}
+	// App-core-vectoren op VecBasePA: elke EL2-exception → rapporteer + parkeer.
+	// Geen aparte IRQ-vector: de hard-kill loopt via een stage-2-fault (Revoke
+	// trekt de map in), die net als een spontane kooi-overtreding op idx 8 landt.
 	vecs := layout.VecBasePA()
 	dev.Clear(vecs, 0x800)
 	for v := uintptr(0); v < 16; v++ {
@@ -115,15 +145,43 @@ func InitVectors() {
 		}
 	}
 
-	// Revoke-vectoren van de HOP-core zelf op RevokeVecPA. Alleen de synchrone
-	// exception vanuit een lager EL (offset 0x400) is bereikbaar: daar landt de
-	// HVC uit Revoke. De handler doet TLBI ALLE1IS (invalideert álle EL1&0
-	// stage-1+2-vertalingen inner-shareable) en keert terug. De andere apps
-	// her-walken meteen hun geldige tabel (nanoseconden); het net-ingetrokken
-	// slot walkt zijn genulde tabel → stage-2-fault → CPU_OFF. cpuinit heeft
-	// VBAR_EL2 van core 0 al hierop gezet (het board checkt die pariteit).
+	// De parkeerlus op ParkCodePA: TPIDR_EL2 wijst (door de trampoline gezet)
+	// naar de eigen mailbox {ctx, doel-PC}. Meld "geparkeerd" (word0=1), wek
+	// HOP, en WFE tot HOP een ctx schrijft; spring dan de trampoline in
+	// (idempotent — zet stage-2/VBAR/TPIDR opnieuw). Board-neutraal: geen
+	// MPIDR-decodering, de identiteit zit in TPIDR_EL2.
+	park := []uint32{
+		0xd53cd048, // mrs  x8, tpidr_el2        (x8 = mailbox-PA)
+		0xd2800029, // mov  x9, #1
+		0xf9000109, // str  x9, [x8]             (word0 = 1: geparkeerd, idle)
+		0xd5033f9f, // dsb  sy
+		0xd503209f, // sev                        (wek HOP's waitStopped)
+		0xd503205f, // wfe                        ← lus
+		0xf9400100, // ldr  x0, [x8]             (word0)
+		0xf100041f, // cmp  x0, #1
+		0x54ffffa0, // b.eq -3 (→ wfe)           (nog geen dispatch)
+		0xd5033fbf, // dmb  sy
+		0xf9400501, // ldr  x1, [x8, #8]         (doel-PC)
+		0xd61f0020, // br   x1                    (→ trampoline, x0 = ctx)
+	}
+	pc := layout.ParkCodePA()
+	for w, ins := range park {
+		dev.Write32(pc+uintptr(w)*4, ins)
+	}
+	// Mailboxen schoon: verse DRAM is geen nul (Pi-meting) — word0=0 betekent
+	// "cold" (nooit geparkeerd → eerste bring-up via PSCI).
+	dev.Clear(pc+0x100, uint64(layout.MaxSlots+1)*layout.ParkMboxLen)
+
+	// De revoke-handler van de HOP-core: ingeplugd op offset 0x400 (synchrone
+	// exception vanuit een lager EL) van de vectortabel waar cpuinit VBAR_EL2
+	// van core 0 op zette (Plan.RevokeVecPA). Alleen dát slot — de rest van de
+	// tabel blijft van het board (rpi5: de faultdump-bootdiagnostiek; QEMU:
+	// leeg). Daar landt de HVC uit Revoke; de handler doet TLBI ALLE1IS
+	// (invalideert álle EL1&0 stage-1+2-vertalingen inner-shareable) en keert
+	// terug. De andere apps her-walken meteen hun geldige tabel (nanoseconden);
+	// het net-ingetrokken slot walkt zijn genulde tabel → stage-2-fault →
+	// CPU_OFF.
 	rvecs := layout.RevokeVecPA()
-	dev.Clear(rvecs, 0x800)
 	revoke := []uint32{
 		0xd50c839f, // tlbi alle1is
 		0xd5033f9f, // dsb  sy

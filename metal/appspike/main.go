@@ -18,7 +18,6 @@ import (
 	"hop-os/metal/applib"
 	"hop-os/metal/applib/appnet"
 	"hop-os/metal/board"
-	_ "hop-os/metal/board/qemuvirt"
 	"hop-os/metal/checksum"
 	"hop-os/metal/layout"
 )

@@ -1,9 +1,8 @@
 // Package raspi is de gedeelde board-laag voor de Raspberry Pi-familie
 // (BCM2711 = Pi 4, BCM2712 = Pi 5). Beide boards booten identiek: de
-// firmware laadt een raw arm64-Image op 0x200000 (Pi 5-default; op de Pi 4
-// zetten we kernel_address=0x200000 in config.txt zodat het geheugenplan
-// één-op-één gelijk is) en levert ons op EL2 af met TF-A/armstub op EL3 →
-// PSCI via SMC.
+// firmware laadt een raw image op 0x80000 (de Pi 5-EEPROM negeert
+// kernel_address — gemeten 2026-07-09; de Pi 4 laadt daar per default) en
+// levert ons op EL2 af met TF-A/armstub op EL3 → PSCI via SMC.
 //
 // Taakverdeling met de dunne board-pakketten (board/rpi4, board/rpi5):
 //
@@ -58,9 +57,13 @@ var ramStackOffset uint = 0x100
 func hwinit1() {
 	// 'H'-marker (rauwe DR-poke, geen FIFO-poll): de runtime leeft en is
 	// door rt0 + Hwinit0 (tamago's vroege MMU-init) heen — bisect-punt
-	// tussen 'R' (cpuinit) en de main-banner. UART-adres is op beide Pi's
-	// device-gemapt; op een board zonder UART is dit een schrijf in de leegte.
-	dev.Write32(0x107d001000, 'H')
+	// tussen 'R' (cpuinit) en de main-banner. ALLEEN op de primaire core
+	// (MPIDR-affiniteit 0 — dekt A72-aff0 én A76-aff1): een app-core draait
+	// onder stage-2 zonder mapping voor het UART-adres, dus dezelfde poke zou
+	// een app daar bij boot meteen zijn core kosten (fault → CPU_OFF).
+	if MPIDR()&0xFFFFFF == 0 {
+		dev.Write32(0x107d001000, 'H')
+	}
 
 	ARM64.Init()
 	ARM64.EnableCache()

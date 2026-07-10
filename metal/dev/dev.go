@@ -111,6 +111,12 @@ func Clear(dst uintptr, n uint64) {
 // index-update, en andersom bij het lezen. Zie dev_arm64.s.
 func MB()
 
+// SEV genereert een event (WFE-wakeup) voor álle cores in het domein — HOP
+// gebruikt het om een geparkeerde app-core te dispatchen (mailbox schrijven,
+// dan SEV). Bevat een DSB SY zodat de mailbox-write zichtbaar is vóór de wake.
+// Zie dev_arm64.s.
+func SEV()
+
 // CleanInv veegt [addr, addr+size) uit alle caches: DC CIVAC per regel
 // (broadcast inner-shareable, alle cores/levels) + DSB. Nodig overal waar HOP
 // ongecached schrijft aan geheugen dat een app-core cacheable raakt(e):
