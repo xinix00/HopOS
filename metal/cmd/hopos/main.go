@@ -15,13 +15,11 @@ import (
 	"fmt"
 	"runtime"
 	"time"
-	_ "unsafe"
 
 	"hop/pkg/agentboot"
 	"hop/pkg/config"
 
 	"hop-os/metal/board"
-	_ "hop-os/metal/board/qemuvirt" // registreert het board (init) + tamago-hooks
 	"hop-os/metal/fb"
 	"hop-os/metal/hopfs"
 	"hop-os/metal/hopnet"
@@ -31,12 +29,6 @@ import (
 	"hop-os/metal/slotmgr"
 	"hop-os/metal/slots"
 )
-
-//go:linkname ramStart runtime/goos.RamStart
-var ramStart uint = layout.HopRAMStart
-
-//go:linkname ramSize runtime/goos.RamSize
-var ramSize uint = layout.HopRAMSize
 
 func fail(what string, err error) {
 	fmt.Printf("FAIL %s: %v\nHOPOS_AGENT_FAIL\n", what, err)
@@ -87,7 +79,11 @@ func main() {
 
 	// Storage: eigen PCIe-enumeratie → NVMe-driver → hopfs. Zonder schijf
 	// draait de node door, maar jobs met volumes weigeren dan bij Start.
-	if disk, err := nvme.Probe(board.Current().PCIe(), layout.NVMeDMABase, layout.NVMeDMASize); err != nil {
+	// Een board zonder ECAM-plan (Pi 5: NVMe loopt daar straks via de
+	// brcmstb-RC, metal/brcmpcie) slaat de probe over.
+	if win := board.Current().PCIe(); win.ECAMBase == 0 {
+		fmt.Println("storage: geen ECAM-plan op dit board — node draait zonder volumes (NVMe volgt)")
+	} else if disk, err := nvme.Probe(win, layout.NVMeDMABase, layout.NVMeDMASize); err != nil {
 		fmt.Printf("storage: %v — node draait zonder volumes\n", err)
 	} else {
 		slots.UseFS(hopfs.New(disk))
