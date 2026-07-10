@@ -19,7 +19,32 @@
 // Alleen voor GOOS=tamago GOARCH=arm64.
 package rpi4
 
-import "hop-os/metal/board/raspi"
+import (
+	"hop-os/metal/board/raspi"
+	"hop-os/metal/layout"
+)
+
+// Het PA-plan van de Pi 4 (fase P1) — zelfde recept als de Pi 5, op adressen
+// die in élke Pi 4-RAM-variant passen (1/2/4/8GB). Alles ruim vrij van:
+// TF-A/armstub (< ~0x20000), park/scratch (0x70000-0x7F008), de HOP-kern
+// (load 0x80000 + 128MB) en de DTB (0x0f000000). De pool is bewust
+// conservatief (512MB) zodat 'm ook een 1GB-Pi 4 dekt; de volle RAM benutten
+// (DTB /memory + /memreserve/) is de vervolgstap, net als op de Pi 5.
+const revokeVecAsm = 0x8B000 // = faultdump2-tabel in cpuinit.s (VBAR_EL2 core 0)
+
+func init() {
+	layout.UsePlan(layout.Plan{
+		CtrlPA:        0x10000000,
+		RingPA:        0x11000000,
+		Stage2PA:      0x12000000,
+		RevokeVecPA:   revokeVecAsm,
+		NetRingPA:     0x13000000,
+		BootScratchPA: raspi.BootScratch, // 0x7F000, cpuinit-vast
+		Pool: []layout.Region{
+			{Base: 0x20000000, Size: 0x20000000}, // 512MB
+		},
+	})
+}
 
 // BCM2711-adressen ("low peripheral mode", de default: MMIO onder 4GB).
 const (
@@ -46,9 +71,10 @@ const (
 	RNG200Base = 0xFE104000
 
 	// DTBPtr: cpuinit.s legt hier (primary, MMU uit) de DTB-pointer die de
-	// firmware in x0 meegaf — zelfde laag-DRAM-plek als de Pi 5 (+8 na de
-	// boot-EL-scratch). board.MemTotal parset 'm met metal/fdt.
-	DTBPtr = 0x1FF008
+	// firmware in x0 meegaf — +8 na de boot-EL-scratch (raspi.BootScratch =
+	// 0x7F000, gelijk aan het DTB_PTR-#define in cpuinit.s). board.MemTotal
+	// parset 'm met metal/fdt.
+	DTBPtr = 0x7F008
 )
 
 // CoreID geeft de eigen core-index. De Cortex-A72 nummert cores in

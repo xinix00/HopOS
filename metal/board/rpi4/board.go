@@ -13,6 +13,7 @@ import (
 	"hop-os/metal/board"
 	"hop-os/metal/board/raspi"
 	"hop-os/metal/dev"
+	"hop-os/metal/el2"
 	"hop-os/metal/fb"
 	"hop-os/metal/fdt"
 )
@@ -59,13 +60,14 @@ func (machine) AffinityInfo(core uint64) board.PowerState {
 }
 func (machine) PSCIVersion() (major, minor uint16) { return raspi.PSCIVersion() }
 
-// Stage-2/SMP: de trampolines zijn board-neutraal (gedeeld metal/el2 — geen
-// GIC, geen MPIDR; slot uit VTTBR_EL2.VMID). Fase P1 = verificatie op het
-// board (adresplan, cache-maintenance in het loadpad, VBAR_EL2 in cpuinit),
-// geen port. Tot die verificatie: expliciet afwezig.
-func (machine) S2TrampPC() uint64    { panic("rpi4: stage-2-kooi is fase P1 (verificatie op board)") }
-func (machine) S2SMPTrampPC() uint64 { panic("rpi4: SMP is fase P1 (verificatie op board)") }
-func (machine) SMPStubPC() uint64    { panic("rpi4: SMP is fase P1 (verificatie op board)") }
+// Stage-2/SMP: de trampolines zijn board-neutraal en data-gedreven (gedeeld
+// metal/el2 — geen GIC, geen MPIDR, geen ingebakken adressen; de hard-kill
+// loopt via stage2.Revoke, cores parkeren op EL2). Dit board levert het
+// PA-plan (rpi4.go) en de faultdump2-tabel op 0x8B000 als RevokeVecPA; de rest
+// is hier één-op-één doorgeven.
+func (machine) S2TrampPC() uint64    { return el2.S2TrampPC() }
+func (machine) S2SMPTrampPC() uint64 { return el2.S2SMPTrampPC() }
+func (machine) SMPStubPC() uint64    { return el2.SMPStubPC() }
 
 // ProbeNIC: fase P2 — de NIC is de geïntegreerde GENET (0xFD580000); er is
 // nog geen driver en dus geen netwerkpad, dus nog geen device.

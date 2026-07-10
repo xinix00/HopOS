@@ -1,20 +1,15 @@
-//go:build rpi5
+//go:build rpi4
 
-// pi5_main — de fase-P1-acceptatie op de Raspberry Pi 5: de multikernel op
-// echt silicium. Zelfde slots-machinerie als virt_main (de code ís gedeeld:
-// metal/el2-trampolines, stage2, slots, smp), maar dit draaiboek bewijst
-// precies de drie dingen die alleen het board kan bewijzen:
+// pi4_main — de fase-P1-acceptatie op de Raspberry Pi 4: dezelfde multikernel
+// als op de Pi 5, op de oudere Cortex-A72. De code ís gedeeld (metal/el2,
+// stage2, slots, smp); dit draaiboek bewijst op dít silicium: stage-2-isolatie,
+// de hard-kill via stage-2-intrekking, core-recycling via het parkeer-model
+// (geen firmware-roundtrip) en SMP met gedeelde heap. Enige board-verschil:
+// de A72 nummert cores in aff0 (de Pi 5-A76 in aff1) en de stock-firmware
+// levert géén PSCI, dus TF-A bl31.bin is als armstub verplicht (image/
+// rpi4-hopos.sh, config.txt armstub=bl31.bin).
 //
-//  1. ISOLATIE — de stage-2-kooi op de A76: een app die buiten zijn partitie
-//     grijpt wordt door de EL2-vector geveld (fault-rapport + CPU_OFF).
-//  2. HARD-KILL — stage-2-intrekking velt een `for {}`-spin óók op de echte
-//     A76-front-end (QEMU/TCG kon dat niet bewijzen).
-//  3. SMP — één app op 2 cores met gedeelde heap, cross-core GC, en de
-//     teardown die beide cores uitzet. Plus: de cache-maintenance
-//     (dev.CleanInv in het loadpad en om de stage-2-tabellen) doet op de A76
-//     écht werk — herhaalde starts op dezelfde partitie zijn de test.
-//
-// Rapportage via de debug-UART (JST-SH). Bouwen/flashen: image/rpi5-hopos.sh.
+// Rapportage via de PL011 op GPIO14/15. Bouwen/flashen: image/rpi4-hopos.sh.
 package main
 
 import (
@@ -24,29 +19,27 @@ import (
 	"time"
 
 	"hop-os/metal/board"
-	_ "hop-os/metal/board/rpi5" // registreert het board (init) + tamago-hooks
+	_ "hop-os/metal/board/rpi4" // registreert het board (init) + tamago-hooks
 	"hop-os/metal/layout"
 	"hop-os/metal/slots"
 )
 
-// Zelfde canonieke app als op QEMU (slot-1-IPA), alleen met rpi5-runtime-hooks
-// gebouwd (-tags rpi5). Eén artifact draait op elk slot — de stage-2 is de
-// relocatie, ook hier.
+// Zelfde canonieke app als op QEMU/Pi 5 (slot-1-IPA), met rpi4-runtime-hooks
+// gebouwd (-tags rpi4). Eén artifact draait op elk slot — de stage-2 is de
+// relocatie.
 //
-//go:embed app5.elf
+//go:embed app4.elf
 var app []byte
 
 func fail(what string, err error) {
 	fmt.Printf("FAIL %s: %v\n", what, err)
-	// Sectie-rapport vóór de stilstand: de fault-registratie van de
-	// EL2-vectoren plus de powertoestand — zodat élke fail meetdata is.
 	for i := 1; i <= slots.NumSlots(); i++ {
 		s := slots.Get(i)
 		fmt.Printf("  slot %d: core=%s app=%d hb=%d vec=%d esr=%#x far=%#x\n",
 			i, board.Current().AffinityInfo(uint64(i)), s.App, s.Heartbeat,
 			s.FaultVec, s.FaultESR, s.FaultFAR)
 	}
-	fmt.Println("HOPOS_PI5_MULTIKERNEL_FAIL")
+	fmt.Println("HOPOS_PI4_MULTIKERNEL_FAIL")
 	for {
 		time.Sleep(time.Hour)
 	}
@@ -74,19 +67,15 @@ func waitExit(slot int, timeout time.Duration) (uint64, error) {
 
 func main() {
 	fmt.Println("")
-	fmt.Println("HopOS (rpi5): bare-metal multikernel op de Pi 5 — geen Linux aan boord")
+	fmt.Println("HopOS (rpi4): bare-metal multikernel op de Pi 4 — geen Linux aan boord")
 	fmt.Printf("runtime %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
 
-	// EL2-boot is de invariant — zonder EL2 geen stage-2-kooi.
 	if el := board.Current().BootEL(); el < 2 {
-		fail("boot", fmt.Errorf("EL%d-boot: HopOS vereist EL2 (TF-A/armstub op EL3)", el))
+		fail("boot", fmt.Errorf("EL%d-boot: HopOS vereist EL2 (TF-A bl31 als armstub)", el))
 	}
 	major, minor := board.Current().PSCIVersion()
 	fmt.Printf("PSCI versie %d.%d (boot-EL%d, conduit SMC)\n", major, minor, board.Current().BootEL())
 
-	// Meetpunt voor de pool-uitbreiding naar de volle 8GB (vervolgstap): het
-	// door de firmware gerapporteerde DRAM. De bring-up-pool is bewust
-	// conservatief 512MB..2GB (board/rpi5/rpi5.go).
 	if total := board.Current().MemTotal(); total > 0 {
 		fmt.Printf("DRAM volgens DTB: %d MB (pool nu: %d MB — uitbreiden is de vervolgstap)\n",
 			total>>20, slots.PoolBytes()>>20)
@@ -115,11 +104,9 @@ func main() {
 	if err := slots.Stop(1, 3*time.Second); err != nil {
 		fail("stop", err)
 	}
-	fmt.Println("HOPOS_PI5_SLOTS_OK — app gestart, ring-logs en heartbeat gezien, coöperatief gestopt")
+	fmt.Println("HOPOS_PI4_SLOTS_OK — app gestart, ring-logs en heartbeat gezien, coöperatief gestopt")
 
-	// ── 2. Isolatie: de kooi op de A76. PROBE=hop laat de app HOP-geheugen ──
-	// lezen (IPA 0x40000000 — nooit gemapt); de EL2-vector moet rapporteren
-	// en de core uitzetten, zónder nette exit.
+	// ── 2. Isolatie: de kooi op de A72. ──
 	fmt.Println("isolatietest: slot 1 start met PROBE=hop...")
 	if err := slots.Start(1, app, 32<<20, 1, map[string]string{"PROBE": "hop"}, nil, nil); err != nil {
 		fail("iso-start", err)
@@ -146,12 +133,9 @@ func main() {
 	if err := slots.Stop(1, time.Second); err != nil {
 		fail("iso-teardown", err)
 	}
-	fmt.Println("HOPOS_PI5_ISOLATIE_OK — stage-2-kooi hard bewezen op de A76")
+	fmt.Println("HOPOS_PI4_ISOLATIE_OK — stage-2-kooi hard bewezen op de A72")
 
-	// ── 3. Hard-kill: stage-2-intrekking op de echte A76-front-end. ──
-	// HANG=spin is een `for {}` (self-branch, géén geheugentoegang) — de
-	// scherpste test: hertranslateert de A76-front-end na de TLBI, dan faultt
-	// hij op de genulde tabel en zet zichzelf uit. Dít kon QEMU niet bewijzen.
+	// ── 3. Hard-kill: stage-2-intrekking op de A72-front-end. ──
 	fmt.Println("hard-kill: slot 1 start met HANG=spin...")
 	if err := slots.Start(1, app, 32<<20, 1, map[string]string{"HANG": "spin"}, nil, nil); err != nil {
 		fail("hang-start", err)
@@ -160,7 +144,7 @@ func main() {
 	if err := slots.WaitReady(1, 5*time.Second); err != nil {
 		fail("hang-ready", err)
 	}
-	time.Sleep(300 * time.Millisecond) // laat hem echt hangen
+	time.Sleep(300 * time.Millisecond)
 	if err := slots.Stop(1, time.Second); err != nil {
 		fail("hard-kill", err)
 	}
@@ -172,11 +156,9 @@ func main() {
 	if s.FaultVec != layout.FaultSync {
 		fail("hard-kill", fmt.Errorf("vec=%d, verwacht %d (stage-2-fault)", s.FaultVec, layout.FaultSync))
 	}
-	fmt.Println("HOPOS_PI5_HARDKILL_OK — for{}-spin geveld door stage-2-intrekking op de A76")
+	fmt.Println("HOPOS_PI4_HARDKILL_OK — for{}-spin geveld door stage-2-intrekking op de A72")
 
-	// ── 4. Relocatie + cache-discipline: zelfde artifact op een ander slot, ──
-	// en herstart op een zojuist gebruikte partitie (stale-line-test: zonder
-	// de CleanInv in het loadpad is dít waar het op echt silicium misgaat).
+	// ── 4. Relocatie + cache-discipline: herstart op een gebruikte partitie. ──
 	fmt.Println("relocatie: zelfde artifact op slot 2, daarna herstart op slot 1...")
 	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"ROLE": "reloc"}, nil, nil); err != nil {
 		fail("reloc-start", err)
@@ -198,7 +180,7 @@ func main() {
 	if err := slots.Stop(1, 3*time.Second); err != nil {
 		fail("reuse-stop", err)
 	}
-	fmt.Println("HOPOS_PI5_RELOC_OK — canoniek artifact op meerdere slots + herstart op gebruikte partitie")
+	fmt.Println("HOPOS_PI4_RELOC_OK — canoniek artifact op meerdere slots + herstart op gebruikte partitie")
 
 	// ── 5. SMP: één app op 2 cores, gedeelde heap, GC, nette teardown. ──
 	fmt.Println("smp: slot 1 als 2-core app (gedeelde heap), core 2 secundair...")
@@ -218,11 +200,9 @@ func main() {
 			fail("smp-teardown", fmt.Errorf("core %d nog aan na teardown", c))
 		}
 	}
-	fmt.Println("HOPOS_PI5_SMP_OK — één app op twee A76-cores, gedeelde heap, GC en teardown bewezen")
+	fmt.Println("HOPOS_PI4_SMP_OK — één app op twee A72-cores, gedeelde heap, GC en teardown bewezen")
 
-	fmt.Println("HOPOS_PI5_MULTIKERNEL_OK — fase P1: de multikernel draait op echt silicium")
+	fmt.Println("HOPOS_PI4_MULTIKERNEL_OK — fase P1: de multikernel draait op de Pi 4")
 
-	// Klaar met de acceptatie — de node blijft draaien (in P2/P3 komt hier de
-	// agent + HopRunner, jobs via de leader-API).
 	select {}
 }

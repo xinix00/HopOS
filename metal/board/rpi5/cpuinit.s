@@ -19,14 +19,12 @@
 #define DTB_PTR      0x7F008
 #define UART_DR 0x107d001000
 #define UART_FR 0x107d001018
-#define GIO_AON 0x107d517c00	// brcmstb-GIO bank 0: +0 ODEN, +4 DATA, +8 IODIR
-#define LED_BIT $0x200		// ACT-LED = pin 9, active-low (DTB: led-act)
 
 TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	MOVD	R0, R9		// x0 = DTB-pointer bij firmware-boot; bewaren vóór clobber
 
 	// App-cores (fase P1) entreren hier op EL1, via de EL2-trampoline en
-	// ónder stage-2: LED/UART/scratch zijn daar niet gemapt — één MMIO-poke
+	// ónder stage-2: UART/scratch zijn daar niet gemapt — één MMIO-poke
 	// en de EL2-vector zet de core uit. Dus vóór álles: EL1 → het schone
 	// app-pad (geen MMIO, geen noodvectoren, geen dcinv). De primary komt op
 	// de Pi altijd op EL2 binnen (TF-A/armstub) en krijgt hieronder de volle
@@ -39,28 +37,10 @@ TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	B	·cpuinitEL1App(SB)
 
 primary:
-	// Levensteken 0 — de ACT-LED, vóór álles: de UART hieronder kan zonder
-	// JST-sessie dood zijn (ongeklokt → FR-poll hangt), de always-on-GPIO
-	// niet. 3× traag knipperen = "onze eerste instructies draaien".
-	// Delay = domme SUBS-lus (~0,1-0,5s per fase, frequentie-afhankelijk):
-	// nul systeemregister-gokken in het blindste stuk van de boot.
-	MOVD	$GIO_AON, R2
-	MOVWU	0(R2), R3
-	BIC	LED_BIT, R3
-	MOVW	R3, 0(R2)	// ODEN: push-pull
-	MOVWU	8(R2), R3
-	BIC	LED_BIT, R3
-	MOVW	R3, 8(R2)	// IODIR: output (1 = input)
-	// Enkel LED AAN als vroegst levensteken (het 3×-knipperen is eruit:
-	// kostte 3s per boot-cyclus en de UART ziet nu alles).
-	MOVWU	4(R2), R3
-	BIC	LED_BIT, R3
-	MOVW	R3, 4(R2)	// DATA bit 9 laag = LED aan
-
 	// Levensteken 1: 'P' (Pi). Begrensd gepolld: een dode FIFO-vol-vlag kost
-	// hooguit de poll, nooit de boot. (Blijft de boot ná de LED-knippers
-	// stil hangen zónder debug-sessie, dan stalt de FR-read de bus — meet
-	// dat mét de Debug Probe aangesloten, zie docs/rpi5.md.)
+	// hooguit de poll, nooit de boot. (Blijft de boot stil hangen zónder
+	// debug-sessie, dan stalt de FR-read de bus — meet dat mét de Debug Probe
+	// aangesloten, zie docs/rpi5.md.)
 	MOVD	$UART_FR, R2
 	MOVD	$100000, R4
 wait1:
@@ -233,21 +213,6 @@ el3:
 	ERET
 
 TEXT ·cpuinitEL1(SB),NOSPLIT|NOFRAME,$0
-	// Levensteken 3: één korte LED-puls — de ERET naar het absolute
-	// linkadres is gelukt (firmware laadde ons écht op het load-adres) en we
-	// draaien op EL1. Daarna: 3 traag + 1 kort gezien = asm-keten compleet.
-	MOVD	$GIO_AON, R2
-	MOVWU	4(R2), R3
-	BIC	LED_BIT, R3
-	MOVW	R3, 4(R2)
-	MOVD	$0x200000, R5
-led1on:
-	SUBS	$1, R5
-	BNE	led1on
-	MOVWU	4(R2), R3
-	ORR	LED_BIT, R3
-	MOVW	R3, 4(R2)
-
 	// Noodvectoren voor het boot-venster (tot tamago zijn eigen vectors
 	// zet): elke EL1-exceptie → ·faultdump (X + ESR/ELR/FAR in hex op de
 	// UART) i.p.v. een stille hang. Tabel op 0x8A000: 2KB-gealigneerd,

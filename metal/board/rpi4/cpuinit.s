@@ -34,6 +34,19 @@
 TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	MOVD	R0, R9		// x0 = DTB-pointer bij firmware-boot; bewaren vóór clobber
 
+	// App-cores (fase P1) entreren hier op EL1, via de EL2-trampoline en
+	// ónder stage-2: UART/scratch zijn daar niet gemapt — één MMIO-poke en de
+	// EL2-vector velt de core. Dus vóór álles: EL1 → het schone app-pad (geen
+	// MMIO, geen noodvectoren, geen dcinv). De primary komt altijd op EL2
+	// binnen (TF-A bl31) en krijgt hieronder de volle diagnostiek.
+	MRS	CurrentEL, R0
+	LSR	$2, R0, R0
+	AND	$0b11, R0, R0
+	CMP	$1, R0
+	BNE	primary
+	B	·cpuinitEL1App(SB)
+
+primary:
 	// Levensteken 1: 'P' (Pi). Begrensd gepolld: een dode FIFO-vol-vlag
 	// kost hooguit de poll, nooit de boot.
 	MOVD	$UART_FR, R2
@@ -371,3 +384,25 @@ uhexpr:
 	CBNZ	R5, uhexlus
 	MOVD	R11, R30
 	RET
+
+// cpuinitEL1App: het schone EL1-pad voor een app-core onder stage-2 (fase
+// P1). Géén MMIO (UART/noodvectoren zijn in de kooi niet gemapt — élke fout
+// wordt al door de EL2-vectoren gerapporteerd + geparkeerd), géén dcinv (HOP
+// veegde de partitie met dev.CleanInv vóór het laden). Alleen: SCTLR schoon,
+// stack uit de (door HOP gepatchte) RAM-declaratie, door naar de runtime —
+// identiek aan het rpi5/qemu-app-pad.
+TEXT ·cpuinitEL1App(SB),NOSPLIT|NOFRAME,$0
+	MRS	SCTLR_EL1, R0
+	BIC	$1<<1, R0
+	BIC	$1<<0, R0
+	MSR	R0, SCTLR_EL1
+	ISB	$15
+
+	MOVD	runtime∕goos·RamStart(SB), R1
+	MOVD	R1, RSP
+	MOVD	runtime∕goos·RamSize(SB), R1
+	MOVD	runtime∕goos·RamStackOffset(SB), R2
+	ADD	R1, RSP
+	SUB	R2, RSP
+
+	B	_rt0_tamago_start(SB)

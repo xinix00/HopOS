@@ -1,17 +1,10 @@
-# HopOS probe4 — Raspberry Pi 4 (zie docs/rpi4.md)
+# HopOS multikernel (fase P1) — Raspberry Pi 4 (zie docs/rpi4.md)
 arm_64bit=1
 kernel=kernel8.img
-# Kernel op de Pi-default 0x80000 (geen kernel_address: de Pi 5 negeert die
-# optie toch — laadadres-les 2026-07-09 — en zo laden beide boards identiek;
-# het image is op 0x90000 gelinkt en de p-marker op de UART bewijst het).
-# DTB buiten onze RAM-declaratie (de firmware eist een DTB op de kaart; de
-# probe gebruikt hem niet, TF-A patcht hem alleen).
 device_tree_address=0x0f000000
-# TF-A BL31 als armstub: levert PSCI — de stock armstub8 heeft dat NIET
-# (spin-table) en dan hangt onze eerste SMC. Bouwinstructie: LEESMIJ.txt.
+# TF-A BL31 als armstub: levert PSCI (CPU_ON voor de cold bring-up). De stock
+# armstub8 heeft dat NIET — dan hangt de eerste SMC.
 armstub=bl31.bin
-# Bootloader-logs op de PL011 (GPIO14/15): bewijst meteen dat de kabel werkt
-# én configureert de UART voor onze printk.
 uart_2ndstage=1
 # Houd de PL011 bij GPIO14/15 (anders claimt Bluetooth hem).
 dtoverlay=disable-bt

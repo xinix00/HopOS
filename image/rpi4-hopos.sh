@@ -1,0 +1,65 @@
+#!/bin/sh
+# Bouw de fase-P1-multikernel voor de Raspberry Pi 4 (metal/pi4_main.go):
+# HOP-kern + embedded canonieke app-image, als raw kernel8.img. Zelfde
+# boot-recept als de probe (image/rpi4-probe.sh); zie docs/rpi4.md.
+#
+# TF-A bl31.bin is VERPLICHT als armstub (de stock armstub8 heeft geen PSCI):
+#   cd ~/arm-trusted-firmware
+#   gmake PLAT=rpi4 CROSS_COMPILE=aarch64-elf- OC=aarch64-elf-objcopy \
+#         OD=aarch64-elf-objdump DEBUG=0 bl31
+#   cp build/rpi4/release/bl31.bin <dit repo>/sd-rpi4/
+#
+# Flashen (kaart-conventie: Linux-bestanden blijven staan):
+#   cp sd-rpi4/kernel8.img sd-rpi4/config.txt sd-rpi4/bl31.bin /Volumes/bootfs/
+#   sync && diskutil eject /Volumes/bootfs
+# UART meekijken (GPIO14/15 → USB-serieel):
+#   /bin/sh -c 'exec 4<>/dev/cu.usbserial-XXXX; stty -f /dev/cu.usbserial-XXXX 115200 raw; exec cat <&4'
+
+set -e
+
+TAMAGO="${TAMAGO:-$HOME/tamago-go/bin/go}"
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+cd "$DIR/metal"
+
+# 1. De app-image: canoniek gelinkt (slot-1-IPA) met rpi4-runtime-hooks. Zonder
+#    -s: de symboltabel is nodig voor de RamStart/RamSize-patch (job.MemoryLimit).
+GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
+	"$TAMAGO" build -tags "rpi4 linkcpuinit" -trimpath \
+	-ldflags "-w -T 0x50010000 -R 0x1000" -o app4.elf ./appspike
+
+# 2. De HOP-kern (embed app4.elf): gelinkt op de werkelijke load 0x80000 (+0x10000).
+GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
+	"$TAMAGO" build -tags "rpi4 linkcpuinit" -trimpath \
+	-ldflags "-s -w -T 0x90000 -R 0x1000" -o hopos4.elf .
+
+# 3. ELF → RAW kernel8.img (géén arm64-Image-header: die triggert het
+#    relocatie-protocol en de Pi 4-firmware verplaatst ons dan naar 0x200000
+#    — gemeten 2026-07-10 aan de 'p'-marker, terwijl we op 0x90000 linken. Met
+#    -raw laadt de firmware plat op 0x80000 en springt naar byte 0, precies
+#    zoals de Pi 5. Incl. BSS-nullen t/m memEnd.).
+cd "$DIR"
+mkdir -p sd-rpi4
+go run "$DIR/image/mkkernel/main.go" -elf metal/hopos4.elf -o sd-rpi4/kernel8.img -load 0x80000 -raw
+
+# 4. config.txt — kernel wijst naar ons; bl31.bin als armstub (PSCI).
+cat > sd-rpi4/config.txt <<'EOF'
+# HopOS multikernel (fase P1) — Raspberry Pi 4 (zie docs/rpi4.md)
+arm_64bit=1
+kernel=kernel8.img
+device_tree_address=0x0f000000
+# TF-A BL31 als armstub: levert PSCI (CPU_ON voor de cold bring-up). De stock
+# armstub8 heeft dat NIET — dan hangt de eerste SMC.
+armstub=bl31.bin
+uart_2ndstage=1
+# Houd de PL011 bij GPIO14/15 (anders claimt Bluetooth hem).
+dtoverlay=disable-bt
+EOF
+
+# 5. bl31.bin meenemen als hij naast de build ligt (anders zelf kopiëren, zie kop).
+if [ -f "$HOME/arm-trusted-firmware/build/rpi4/release/bl31.bin" ]; then
+	cp "$HOME/arm-trusted-firmware/build/rpi4/release/bl31.bin" sd-rpi4/bl31.bin
+fi
+
+echo "sd-rpi4/kernel8.img ($(du -h sd-rpi4/kernel8.img | cut -f1)) + config.txt + bl31.bin klaar."
+echo "flash: cp sd-rpi4/kernel8.img sd-rpi4/config.txt sd-rpi4/bl31.bin /Volumes/bootfs/ && sync && diskutil eject /Volumes/bootfs"
