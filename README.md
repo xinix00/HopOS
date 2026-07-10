@@ -31,7 +31,7 @@ firmware ──boot──▶ one Go image (EL2)
 ```
 
 - **Dedicated cores, one app each.** HOP loads an image into a slot partition and starts the core via PSCI — milliseconds. Done or killed = core reset, slot free. Cores are never time-sliced or shared between apps.
-- **1 to N cores per app** *(in active development)*: an app can be given multiple dedicated cores, with Go's own runtime spreading its goroutines across them over a shared heap. Sharing within one app is one trust domain — app-to-app isolation is unaffected.
+- **1 to N cores per app** *(working in QEMU; Raspberry Pi bring-up in progress)*: an app can be given multiple dedicated cores, with Go's own runtime spreading its goroutines across them over a shared heap. Sharing within one app is one trust domain — app-to-app isolation is unaffected.
 - **Isolation is hardware, not policy.** HopOS requires an EL2 boot: every slot runs inside a stage-2 MMU cage and can't even *address* HOP's memory or another slot's. This is an invariant, not an option — an EL1 boot is refused.
 - **One artifact for every slot.** App images are linked once at a canonical address; the stage-2 mapping *is* the relocation. No per-slot builds, no relocation shims.
 - **Apps never share memory with each other.** Cooperation happens through messages (per-slot ring buffers to HOP, network between apps) and through shared *files* — never shared mutable state across app boundaries.
@@ -39,7 +39,7 @@ firmware ──boot──▶ one Go image (EL2)
 ## What an app gets
 
 ### CPU — 1 to N dedicated cores
-An app runs on cores that belong to it exclusively: no context switches, no preemption by other apps, full clock speed. Multi-core apps (in active development) keep the same model — each core is still exclusive to that one app; the Go runtime distributes goroutines across them. Placement is declarative by core class (`big` / `mid` / `small` on tri-cluster boards) — what requires a heuristic EAS scheduler on Linux is a manifest field here. Hang detection and hard-kill (via SGI) reset only the affected app's cores; every other slot keeps running.
+An app runs on cores that belong to it exclusively: no context switches, no preemption by other apps, full clock speed. Multi-core apps keep the same model — each core is still exclusive to that one app; the Go runtime distributes goroutines across them. Placement is declarative by core class (`big` / `mid` / `small` on tri-cluster boards) — what requires a heuristic EAS scheduler on Linux is a manifest field here. Hang detection and hard-kill (via SGI) reset only the affected app's cores; every other slot keeps running.
 
 ### Memory — split at the hardware level
 A job asks for exactly the memory it needs — one gets 128 MB, another 640 MB — and HOP carves precisely that from a single pool (dynamic partitions, not fixed slabs). The boundary is enforced by per-core stage-2 page tables, so a compromised or crashed app is physically confined to its own partition. Total RAM is discovered from the device tree at boot, like everything else here: universal mechanisms over board-specific ones.
@@ -101,7 +101,7 @@ The probes and the QEMU demo build from public modules only. `metal/cmd/hopos` �
 
 ## Status
 
-Working today: the full multikernel (slots, stage-2 isolation, dynamic memory partitions, hard-kill), per-app networking with full NAT, NVMe storage with shared volumes, framebuffer + UART consoles, and boot on real Raspberry Pi 5 silicon. In progress: multi-core apps — 1 to N dedicated cores per app on a shared heap. On the roadmap: Orion O6N bring-up, native NIC and NVMe drivers at line rate, and ed25519 signing of app images.
+Working today: the full multikernel (slots, stage-2 isolation, dynamic memory partitions, hard-kill), per-app networking with full NAT, NVMe storage with shared volumes, framebuffer + UART consoles, and boot on real Raspberry Pi 5 silicon. Multi-core apps (1 to N dedicated cores per app on a shared heap) work in QEMU; Raspberry Pi bring-up is in progress. On the roadmap: Orion O6N bring-up, native NIC and NVMe drivers at line rate, and ed25519 signing of app images.
 
 Built on [TamaGo](https://github.com/usbarmory/tamago) (bare-metal Go) and [gVisor's netstack](https://gvisor.dev) (pure-Go TCP/IP).
 
