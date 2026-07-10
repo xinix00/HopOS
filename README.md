@@ -67,7 +67,7 @@ No shell. No exec, no second binary, no users. No persistence. No VMs, WASM or c
 | Target | Status |
 |---|---|
 | QEMU `-M virt` | Full system: slots, isolation, hard-kill, NAT in/out, storage, fb console — marker-based regression suite |
-| Raspberry Pi 5 | **Runs the full multikernel on real silicon**: stage-2 isolation, hard-kill and multi-core apps (shared-heap SMP, cross-core GC) proven on the A76 cores |
+| Raspberry Pi 5 | **Runs the full multikernel on real silicon**: stage-2 isolation, hard-kill and multi-core apps (shared-heap SMP, cross-core GC) proven on the A76 cores. Native networking: own PCIe (link training) + GEM drivers, DHCP, NTP |
 | Raspberry Pi 4 | **Runs the full multikernel on real silicon**: same P1 acceptance as the Pi 5, proven on the A72 cores |
 | Radxa Orion O6N (12-core CIX P1) | Primary production target: 1 HOP core + 11 app slots across big/mid/small clusters |
 
@@ -101,7 +101,7 @@ The probes and the QEMU demo build from public modules only. `metal/cmd/hopos` �
 
 ## Status
 
-Working today: the full multikernel (slots, stage-2 isolation, dynamic memory partitions, hard-kill), multi-core apps (1 to N dedicated cores per app on a shared heap), per-app networking with full NAT, NVMe storage with shared volumes, and framebuffer + UART consoles — proven in QEMU and on Raspberry Pi 4 and 5 hardware. On the roadmap: Orion O6N bring-up, native NIC and NVMe drivers at line rate, and ed25519 signing of app images.
+Working today: the full multikernel (slots, stage-2 isolation, dynamic memory partitions, hard-kill), multi-core apps (1 to N dedicated cores per app on a shared heap), per-app networking with full NAT, NVMe storage with shared volumes, and framebuffer + UART consoles — proven in QEMU and on Raspberry Pi 4 and 5 hardware. On the Pi 5 the network path is fully self-hosted: HopOS trains the PCIe link itself (the firmware doesn't) and drives the RP1 GEM NIC with its own drivers, then DHCP and NTP. On the roadmap: Orion O6N bring-up, NVMe on real hardware, line-rate throughput, and ed25519 signing of app images.
 
 Built on [TamaGo](https://github.com/usbarmory/tamago) (bare-metal Go) and [gVisor's netstack](https://gvisor.dev) (pure-Go TCP/IP).
 
