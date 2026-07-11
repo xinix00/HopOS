@@ -60,7 +60,7 @@ There is no GPU driver and no mode-setting. HopOS writes its log console into th
 
 ## What it deliberately doesn't have
 
-No shell. No exec, no second binary, no users. No persistence. No VMs, WASM or containers. No heuristic schedulers, no DVFS governors (an idle core is simply switched off or parked in WFE). No display driver. No Linux.
+No shell. No exec, no second binary, no users. No persistence. No VMs, WASM or containers. No heuristic schedulers or load-guessing DVFS governors — an idle core is parked in WFE or switched off, and clock policy follows a deterministic idle signal: sustained full idle clocks the node down, the first real work clocks it straight back up (~10 ms). No display driver. No Linux.
 
 ## Hardware
 
