@@ -6,16 +6,21 @@ package rpi4
 // stille fallback.
 
 import (
+	"fmt"
 	"net"
+	"time"
 
 	gnet "github.com/usbarmory/go-net"
 
 	"hop-os/metal/board"
 	"hop-os/metal/board/raspi"
 	"hop-os/metal/dev"
+	"hop-os/metal/dhcp"
 	"hop-os/metal/el2"
 	"hop-os/metal/fb"
 	"hop-os/metal/fdt"
+	"hop-os/metal/genet"
+	"hop-os/metal/layout"
 )
 
 // machine is de board-implementatie voor de Raspberry Pi 4 (BCM2711).
@@ -69,12 +74,58 @@ func (machine) S2TrampPC() uint64    { return el2.S2TrampPC() }
 func (machine) S2SMPTrampPC() uint64 { return el2.S2SMPTrampPC() }
 func (machine) SMPStubPC() uint64    { return el2.SMPStubPC() }
 
-// ProbeNIC: fase P2 — de NIC is de geïntegreerde GENET (0xFD580000); er is
-// nog geen driver en dus geen netwerkpad, dus nog geen device.
-func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) { return nil, nil, nil }
+// lease bewaart wat ProbeNIC via DHCP ophaalde; Net() leest hem. hopnet.Up
+// roept ProbeNIC vóór Net() aan (die volgorde is het contract).
+var lease dhcp.Lease
 
-// Net: fase P2 — komt uit DHCP zodra de GENET-driver er is.
-func (machine) Net() board.NetConfig { return board.NetConfig{} }
+// ProbeNIC brengt de GENET-keten op — boardvast bewezen met probe7
+// (2026-07-11, één boot): v5-rev → MAC-reset (U-Boot-sequence) → PHY-scan
+// (BCM54213PE op adres 1, géén reset-GPIO hier) → autonegotiatie →
+// ring-16-DMA in de plan-regio → DHCP-lease. Geen PCIe zoals de Pi 5: de
+// GENET is direct memory-mapped en de firmware laat hem gewoon met rust.
+func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
+	nic := &genet.Net{
+		Base: uintptr(GENETBase),
+		MAC:  raspi.MACFromSerial(uintptr(dev.Read64(DTBPtr)), 0x04),
+	}
+	if rev := nic.Rev() >> 24 & 0xF; rev != 6 {
+		return nil, nil, fmt.Errorf("genet: rev-nibble %d (verwacht 6 = v5)", rev)
+	}
+	nic.Reset()
+	addr, _, _, found := nic.PHYScan()
+	if !found {
+		return nil, nil, fmt.Errorf("genet: geen PHY op de MDIO-bus")
+	}
+	speed, fd, err := nic.AutoNeg(addr, 8*time.Second)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := nic.Init(layout.NetDMAPA(), layout.NetDMASize, speed, fd); err != nil {
+		return nil, nil, err
+	}
+
+	l, err := dhcp.Acquire(nic, nic.MAC, 15*time.Second)
+	if err != nil {
+		return nil, nil, err
+	}
+	lease = l
+	return nic, net.HardwareAddr(nic.MAC[:]), nil
+}
+
+// Net geeft de DHCP-lease die ProbeNIC haalde. Geen resolver in de lease →
+// de gateway als DNS (thuisrouters resolven vrijwel altijd zelf).
+func (machine) Net() board.NetConfig {
+	dns := lease.DNSString()
+	if dns == "0.0.0.0" {
+		dns = lease.GWString()
+	}
+	return board.NetConfig{
+		IP:   lease.IPString(),
+		CIDR: lease.CIDR(),
+		GW:   lease.GWString(),
+		DNS:  dns + ":53",
+	}
+}
 
 // PCIe: n.v.t. — de enige PCIe-lane van de BCM2711 zit vast aan de
 // VL805-USB-controller; geen NVMe op dit board (CM4 uitgezonderd).

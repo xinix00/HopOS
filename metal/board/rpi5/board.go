@@ -133,7 +133,7 @@ func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
 	nic := &gem.Net{
 		Base:   uintptr(RP1EthBase),
 		BusOff: 0x10_0000_0000, // RP1-masters → PCIe → RC-inbound → DRAM 0
-		MAC:    macFromSerial(),
+		MAC:    raspi.MACFromSerial(uintptr(dev.Read64(DTBPtr)), 0x05),
 	}
 	nic.MDIOEnable()
 	addr, _, _, found := nic.PHYScan()
@@ -171,35 +171,6 @@ func (machine) Net() board.NetConfig {
 	}
 }
 
-// macFromSerial bouwt een stabiel, lokaal beheerd MAC-adres (02:48 = "H")
-// uit het board-serial dat de firmware in de DTB zet (/serial-number,
-// "10000000xxxxxxxx"): uniek per board, gelijk over elke boot — precies wat
-// een DHCP-server nodig heeft om dezelfde lease terug te geven.
-func macFromSerial() [6]byte {
-	mac := [6]byte{0x02, 0x48, 0x4f, 0x50, 0x00, 0x05} // terugval: "HOP" 05
-	s, ok := fdt.RootString(uintptr(dev.Read64(DTBPtr)), "serial-number")
-	if !ok || len(s) < 8 {
-		return mac
-	}
-	// De laatste 8 hexcijfers → 4 bytes (mac[2:6]); één krom teken = terugval.
-	var b [4]byte
-	for i, c := range s[len(s)-8:] {
-		var v byte
-		switch {
-		case c >= '0' && c <= '9':
-			v = byte(c - '0')
-		case c >= 'a' && c <= 'f':
-			v = byte(c-'a') + 10
-		case c >= 'A' && c <= 'F':
-			v = byte(c-'A') + 10
-		default:
-			return mac
-		}
-		b[i/2] = b[i/2]<<4 | v
-	}
-	copy(mac[2:], b[:])
-	return mac
-}
 
 // PCIe: fase P2 — de RP1 hangt aan de BCM2712-PCIe; het adresplan volgt bij
 // de RP1-bring-up.

@@ -33,10 +33,12 @@ type Lease struct {
 
 func ipStr(a [4]byte) string { return fmt.Sprintf("%d.%d.%d.%d", a[0], a[1], a[2], a[3]) }
 
-// IPString/GWString/DNSString geven de velden in tekstvorm (board.NetConfig).
-func (l Lease) IPString() string  { return ipStr(l.IP) }
-func (l Lease) GWString() string  { return ipStr(l.GW) }
-func (l Lease) DNSString() string { return ipStr(l.DNS) }
+// IPString/GWString/DNSString/ServerString geven de velden in tekstvorm
+// (board.NetConfig, diagnose).
+func (l Lease) IPString() string     { return ipStr(l.IP) }
+func (l Lease) GWString() string     { return ipStr(l.GW) }
+func (l Lease) DNSString() string    { return ipStr(l.DNS) }
+func (l Lease) ServerString() string { return ipStr(l.Server) }
 
 // CIDR geeft "ip/prefix" — de vorm die de netstack (gnet.Interface) eet.
 func (l Lease) CIDR() string {

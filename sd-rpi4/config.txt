@@ -1,9 +1,8 @@
-# HopOS multikernel (fase P1) — Raspberry Pi 4 (zie docs/rpi4.md)
+# HopOS: de echte HOP-agent (fase P2) — Raspberry Pi 4 (zie docs/rpi4.md)
 arm_64bit=1
 kernel=kernel8.img
 device_tree_address=0x0f000000
-# TF-A BL31 als armstub: levert PSCI (CPU_ON voor de cold bring-up). De stock
-# armstub8 heeft dat NIET — dan hangt de eerste SMC.
+# TF-A BL31 als armstub: levert PSCI. De stock armstub8 heeft dat NIET.
 armstub=bl31.bin
 uart_2ndstage=1
 # Houd de PL011 bij GPIO14/15 (anders claimt Bluetooth hem).
