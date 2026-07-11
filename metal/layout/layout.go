@@ -398,6 +398,14 @@ const (
 	// mailbox komt via dit aparte veld dat HOP vlak vóór de dispatch zet).
 	CtrlMboxPA  = 0xC8
 	CtrlSMPMbox = 0xD0
+	// CtrlIdle (app → HOP): idle-tik-teller. De idle-governor (metal/idle)
+	// verhoogt hem één keer per idle-ronde (event-stream, ~1,2ms bij 54MHz);
+	// tikt de teller op vol tempo dan is de core idle, staat hij stil dan
+	// draait er code. De klokwachter (metal/dvfs, OS-taak op de HOP-core)
+	// leest de delta's en klokt de node op/terug — HOP is oblivious. Bij
+	// SMP delen de cores van een slot deze teller: de wachter deelt het
+	// verwachte tempo door CtrlCores.
+	CtrlIdle = 0xD8
 
 	// Env-blob: door HOP geschreven "key=val\n..."-bytes die de app-lib bij
 	// start inleest (de Docker-vorm: env meegegeven bij het starten). Vervangt

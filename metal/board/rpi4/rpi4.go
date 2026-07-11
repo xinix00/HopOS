@@ -87,6 +87,10 @@ const (
 	// 0x7F000, gelijk aan het DTB_PTR-#define in cpuinit.s). board.MemTotal
 	// parset 'm met metal/fdt.
 	DTBPtr = 0x7F008
+
+	// VideoCore-firmware-mailbox (brcm,bcm2835-mbox, klassieke basis) —
+	// metal/vcmail: temperatuur, ARM-klok, board-MAC.
+	VCMailBase = 0xFE00B880
 )
 
 // CoreID geeft de eigen core-index. De Cortex-A72 nummert cores in

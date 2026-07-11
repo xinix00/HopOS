@@ -37,9 +37,31 @@ func fail(what string, err error) {
 	}
 }
 
+// boardExtra: optioneel board-specifiek nawerk (gezet door board_*.go in
+// zijn init) — de Pi's starten er het klokbeleid mee.
+var boardExtra func()
+
+// bunny: Dereks origineel (2026-07-11) — oren netjes boven het snuitje.
+// Bewust geen architectuur in de tagline: ARM64 is het heden, maar AMD64-
+// boardjes liggen al klaar (Derek).
+var bunny = []string{
+	`   (\(\`,
+	`   ( -.-)     HopOS`,
+	`   o_(")(")   --------------`,
+	`              the Go-only OS`,
+	``, // witregel: scheidt de vaste header zichtbaar van de scrollende log
+}
+
 func main() {
+	// Dereks bunny — het origineel, door hemzelf aangeleverd (2026-07-11).
+	// Op de UART als banner; op het scherm als vaste header (fb.Header,
+	// verderop) die nooit mee-scrolt — zoals Linux zijn logo bovenin laat
+	// staan. Zo verdwijnt hij ook nooit meer in een context-compactie. Hop!
 	fmt.Println("")
-	fmt.Println("HopOS: HOP-agent bare-metal op arm64 — geen Linux aan boord")
+	for _, r := range bunny {
+		fmt.Println(r)
+	}
+	fmt.Println("")
 	fmt.Printf("runtime %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
 
 	// Vóór de eerste PSCI-call (SMC): HopOS eist een EL2-boot — de
@@ -56,6 +78,7 @@ func main() {
 	// board vóór zijn beeld-fase): no-op, printk blijft naar UART/log.
 	if d, ok := board.Current().Framebuffer(); ok {
 		fb.Init(d)
+		fb.Header(bunny...) // vaste bunny bovenin, de logs scrollen eronder
 		fmt.Printf("console: framebuffer %dx%d @ %#x (%d-bpp) — logs op scherm\n",
 			d.Width, d.Height, uint64(d.Base), d.BPP)
 	}
@@ -89,6 +112,13 @@ func main() {
 		slots.UseFS(hopfs.New(disk))
 		fmt.Printf("storage: nvme %q, %dMB — volumes beschikbaar\n",
 			disk.Model, disk.Blocks*disk.BlockSize>>20)
+	}
+
+	// Board-specifiek nawerk: op de Pi's start hier het klokbeleid +
+	// de thermiek-telemetrie (metal/dvfs via de firmware-mailbox); QEMU
+	// heeft geen mailbox en laat de hook leeg. HOP zelf blijft oblivious.
+	if boardExtra != nil {
+		boardExtra()
 	}
 
 	sm := slotmgr.New()

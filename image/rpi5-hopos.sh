@@ -49,6 +49,10 @@ os_check=0
 device_tree_address=0x0f000000
 # Bootloader-logs op de debug-UART: bewijst meteen dat de kabel werkt.
 uart_2ndstage=1
+# Lagere idle-vloer voor het dvfs-klokbeleid (metal/dvfs vraagt de min op
+# en volgt): zonder deze regel klemt de Pi 5-firmware op 1500MHz (gemeten
+# 2026-07-11). Accepteert de firmware 800 niet, dan meldt de dvfs-regel dat.
+arm_freq_min=800
 EOF
 
 echo "sd-rpi5/hop-hopos5.img ($(du -h sd-rpi5/hop-hopos5.img | cut -f1)) + config.txt klaar."

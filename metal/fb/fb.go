@@ -28,8 +28,10 @@ type Desc struct {
 	BPP           int     // 32 (x8r8g8b8) of 16 (r5g6b5)
 }
 
-// scale: 8x8-glyphs op 2× = 16x16-cellen — leesbaar op een TV-foto.
-const (
+// scale wordt bij Init uit de framebuffer-maat afgeleid (Derek, 2026-07-11:
+// 2× beviel op 1080p): volwaardige schermen krijgen 16×16-cellen (120×67 op
+// 1080p), kleine buffers (zelftests) rauwe 8×8-glyphs.
+var (
 	scale = 2
 	cellW = 8 * scale
 	cellH = 8 * scale
@@ -40,6 +42,7 @@ var (
 	bpx        int    // bytes per pixel (2 of 4)
 	cols, rows int    // tekencellen
 	x, y       int    // cursor (cel)
+	top        int    // eerste log-rij (0, of ónder de vaste Header-regels)
 	fg         uint32 = 0xFFFFFFFF
 	bg         uint32 = 0xFF101828 // donker blauwgrijs: "beeld doet het" ≠ zwart scherm
 	active     bool
@@ -61,11 +64,17 @@ func Init(desc Desc) {
 		return
 	}
 	d = desc
+	// Schaal uit de buffermaat: ≥720 pixelrijen = een echt scherm → 2×.
+	scale = 1
+	if desc.Height >= 720 {
+		scale = 2
+	}
+	cellW, cellH = 8*scale, 8*scale
 	cols, rows = desc.Width/cellW, desc.Height/cellH
 	if cols == 0 || rows == 0 {
 		return // scherm kleiner dan één cel: niets te tekenen
 	}
-	x, y = 0, 0
+	x, y, top = 0, 0, 0
 	active = true
 	for py := 0; py < d.Height; py++ {
 		for px := 0; px < d.Width; px++ {
@@ -76,6 +85,31 @@ func Init(desc Desc) {
 
 // Active meldt of er een framebuffer actief is (false = Putc is een no-op).
 func Active() bool { return active }
+
+// Header tekent vaste regels bovenaan die nooit mee-scrollen — zoals Linux
+// zijn logo bovenin laat staan (Dereks bunny, 2026-07-11). De log begint en
+// wrapt voortaan ónder de header. Aanroepen ná Init; een tweede Init reset.
+func Header(lines ...string) {
+	if !active {
+		return
+	}
+	n := len(lines)
+	if n > rows-1 {
+		n = rows - 1
+	}
+	for i := 0; i < n; i++ {
+		s := lines[i]
+		for j := 0; j < len(s) && j < cols; j++ {
+			c := s[j]
+			if c < 0x20 || c >= 0x80 {
+				c = '?'
+			}
+			glyph(j, i, int(c))
+		}
+	}
+	top = n
+	x, y = 0, top
+}
 
 // Disable ontkoppelt de console (bv. als de buffer ongeldig wordt, of na een
 // zelftest); Putc is daarna weer een no-op.
@@ -115,13 +149,14 @@ func Putc(c byte) {
 	x++
 }
 
-// newline schuift de cursor; onderaan wrapt hij naar boven. De doelregel
-// wordt eerst geveegd zodat oude tekst nooit door nieuwe heen schemert.
+// newline schuift de cursor; onderaan wrapt hij terug naar de eerste
+// log-rij (onder de header). De doelregel wordt eerst geveegd zodat oude
+// tekst nooit door nieuwe heen schemert.
 func newline() {
 	x = 0
 	y++
 	if y >= rows {
-		y = 0
+		y = top
 	}
 	clearRow(y)
 }

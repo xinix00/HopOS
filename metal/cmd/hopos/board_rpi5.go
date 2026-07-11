@@ -10,7 +10,11 @@ package main
 import (
 	_ "unsafe"
 
-	_ "hop-os/metal/board/rpi5" // registreert het board (init) + tamago-hooks
+	"hop-os/metal/board/raspi"
+	"hop-os/metal/board/rpi5" // registreert het board (init) + tamago-hooks
+	"hop-os/metal/dvfs"
+	"hop-os/metal/layout"
+	"hop-os/metal/vcmail"
 )
 
 //go:linkname ramStart runtime/goos.RamStart
@@ -18,3 +22,18 @@ var ramStart uint = 0x00080000
 
 //go:linkname ramSize runtime/goos.RamSize
 var ramSize uint = 0x08000000
+
+// Klokbeleid (docs/plan-p2b-soak.md): klok volgt idle, via de firmware-
+// mailbox van dit board. TickHz = CNTFRQ/65536 (het event-stream-tempo van
+// de idle-teller, zie metal/idle: EVNTI=15 → periode 2^16 tellerticks).
+func init() {
+	boardExtra = func() {
+		dvfs.Start(dvfs.Config{
+			Mbox:    &vcmail.Mbox{Base: uintptr(rpi5.VCMailBase), Buf: uintptr(raspi.VCMailBuf)},
+			LowHz:   600_000_000,
+			TickHz:  raspi.CNTFRQ() / 65536,
+			Slots:   layout.MaxSlots,
+			Verbose: true, // flanken loggen (soak-diagnose)
+		})
+	}
+}

@@ -96,6 +96,11 @@ const (
 	// Externe PCIe-controller (pciex1, de FFC waar NVMe/AI-HAT's wonen;
 	// brcm,bcm2712-pcie). RP1 hangt op z'n broer pcie@1000120000.
 	PCIeX1Base = 0x1000110000
+
+	// VideoCore-firmware-mailbox (brcm,bcm2835-mbox; DT mailbox@7c013880,
+	// soc-ranges 0x7c000000 → 0x10_7c000000) — metal/vcmail: temperatuur,
+	// ARM-klok, board-MAC.
+	VCMailBase = 0x10_7C01_3880
 )
 
 // CoreID geeft de eigen core-index. LET OP: de Cortex-A76 nummert cores in

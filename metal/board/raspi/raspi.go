@@ -38,6 +38,11 @@ const (
 	ParkBase  = 0x70000
 	ParkCount = 0x78000
 
+	// VCMailBuf: de property-buffer voor de firmware-mailbox (metal/vcmail).
+	// 16-byte-gealigneerd, laag DRAM (VC-bereik), buiten elke RAM-declaratie
+	// (ongecachet), en vrij van park/scratch (0x70000-0x78040, 0x7F000+).
+	VCMailBuf = 0x7E000
+
 	// BootScratch: cpuinit.s van het board schrijft er het boot-EL (vóór
 	// de drop naar EL1); BootEL() leest het. Moet gelijk zijn aan de
 	// BOOT_SCRATCH-#define in de cpuinit.s van beide boards.

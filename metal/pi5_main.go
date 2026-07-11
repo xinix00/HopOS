@@ -24,10 +24,13 @@ import (
 	"time"
 
 	"hop-os/metal/board"
-	_ "hop-os/metal/board/rpi5" // registreert het board (init) + tamago-hooks
+	"hop-os/metal/board/raspi"
+	"hop-os/metal/board/rpi5" // registreert het board (init) + tamago-hooks
+	"hop-os/metal/dvfs"
 	"hop-os/metal/hopnet"
 	"hop-os/metal/layout"
 	"hop-os/metal/slots"
+	"hop-os/metal/vcmail"
 )
 
 // Zelfde canonieke app als op QEMU (slot-1-IPA), alleen met rpi5-runtime-hooks
@@ -82,6 +85,18 @@ func main() {
 	if el := board.Current().BootEL(); el < 2 {
 		fail("boot", fmt.Errorf("EL%d-boot: HopOS vereist EL2 (TF-A/armstub op EL3)", el))
 	}
+
+	// Klokbeleid (P2b, docs/plan-p2b-soak.md) — vroeg gestart zodat de
+	// acceptatiesecties hieronder meteen de flanken bewijzen: de SMP-bench
+	// brandt echt (→ "druk"), de stiltes erna klokken terug. Verbose: elke
+	// flank op de UART.
+	dvfs.Start(dvfs.Config{
+		Mbox:    &vcmail.Mbox{Base: uintptr(rpi5.VCMailBase), Buf: uintptr(raspi.VCMailBuf)},
+		LowHz:   600_000_000,
+		TickHz:  raspi.CNTFRQ() / 65536,
+		Slots:   layout.MaxSlots,
+		Verbose: true,
+	})
 	major, minor := board.Current().PSCIVersion()
 	fmt.Printf("PSCI versie %d.%d (boot-EL%d, conduit SMC)\n", major, minor, board.Current().BootEL())
 
@@ -238,6 +253,24 @@ func main() {
 		}
 		fmt.Println("HOPOS_PI5_NET_OK — fase P2-netwerk: de node praat met de wereld")
 	}
+
+	// ── 7. dvfs: het flank-bewijs (P2b). Eerst 35s stilte → de wachter
+	// klokt naar de vloer; dan een app die echt rekent (de SMP-bench) → de
+	// druk-flank hoort binnen ~10ms te vuren (zie de dvfs-regels).
+	fmt.Println("dvfs-test: 35s stilte voor de laag-flank...")
+	time.Sleep(35 * time.Second)
+	fmt.Println("dvfs-test: rekenende app starten — verwacht een druk-flank...")
+	if err := slots.Start(1, app, 128<<20, 2, map[string]string{"SMP": "bench"}, nil, nil); err != nil {
+		fail("dvfs-start", err)
+	}
+	go drainLogs(1, nil)
+	if _, err := waitExit(1, 30*time.Second); err != nil {
+		fail("dvfs-bench", err)
+	}
+	if err := slots.Stop(1, 5*time.Second); err != nil {
+		fail("dvfs-stop", err)
+	}
+	fmt.Println("HOPOS_PI5_DVFS_OK — flanken zichtbaar in de dvfs-regels hierboven")
 
 	// Klaar met de acceptatie — de node blijft draaien (in P2/P3 komt hier de
 	// agent + HopRunner, jobs via de leader-API).

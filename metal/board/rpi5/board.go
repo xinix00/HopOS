@@ -22,6 +22,7 @@ import (
 	"hop-os/metal/fdt"
 	"hop-os/metal/gem"
 	"hop-os/metal/layout"
+	"hop-os/metal/vcmail"
 )
 
 // machine is de board-implementatie voor de Raspberry Pi 5 (BCM2712).
@@ -176,7 +177,31 @@ func (machine) Net() board.NetConfig {
 // de RP1-bring-up.
 func (machine) PCIe() board.PCIeWindow { return board.PCIeWindow{} }
 
-// Framebuffer: de firmware-simple-framebuffer uit de DTB (HDMI-log-console
-// zonder debug-kabel). Op het board te verifiëren (levert de Pi-firmware een
-// /chosen/framebuffer aan een raw kernel? zie docs/rpi5.md).
-func (machine) Framebuffer() (fb.Desc, bool) { return raspi.Framebuffer(DTBPtr) }
+// Framebuffer: eerst de simple-framebuffer uit de DTB proberen; GEMETEN
+// 2026-07-11 (agent-boot met HDMI): de Pi 5-firmware activeert het scherm
+// maar laat GEEN simplefb-node achter voor raw kernels — dus is de terugval
+// het framebuffer zélf opeisen via de firmware-mailbox (vcmail.AllocFB,
+// het officiële pad; nog steeds "firmware-buffer, geen driver").
+func (machine) Framebuffer() (fb.Desc, bool) {
+	if d, ok := raspi.Framebuffer(DTBPtr); ok {
+		return d, true
+	}
+	m := &vcmail.Mbox{Base: uintptr(VCMailBase), Buf: uintptr(raspi.VCMailBuf)}
+	f, ok := m.AllocFB(1920, 1080)
+	if !ok {
+		return fb.Desc{}, false
+	}
+	// De respons telt, niet het verzoek — en bínnen de respons telt de
+	// PITCH: gemeten 2026-07-11 meldt de depth-tag 32 terwijl de scanout op
+	// de 16bpp-bootsplash-config blijft draaien (stride 3840 = 1920×2). De
+	// pitch beschrijft wat de scanout écht leest, dus dáár leiden we de
+	// pixeldiepte uit af. fb rendert beide dieptes.
+	if f.Width == 0 {
+		return fb.Desc{}, false
+	}
+	return fb.Desc{
+		Base:  f.Base,
+		Width: int(f.Width), Height: int(f.Height),
+		Stride: int(f.Pitch), BPP: int(f.Pitch / f.Width * 8),
+	}, true
+}

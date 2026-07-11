@@ -20,6 +20,7 @@ import (
 	"hop-os/metal/board"
 	"hop-os/metal/dev"
 	"hop-os/metal/hopabi"
+	"hop-os/metal/idle"
 	"hop-os/metal/layout"
 	"hop-os/metal/ring"
 	"hop-os/metal/smp"
@@ -75,6 +76,11 @@ func Init() *App {
 	// core, dus hier geen SMP-vertakking. Vóór READY, zodat wie op READY wacht
 	// meteen de volledige machine ziet.
 	smp.Configure(a.Slot, int(*a.ctrl(layout.CtrlCores)))
+
+	// Idle-tik-teller publiceren (metal/idle → CtrlIdle): het klok-signaal
+	// voor de wachter op de HOP-core. OS-laag-werk — de app merkt er niets
+	// van, net als bij SMP.
+	idle.Publish(layout.CtrlPage(a.Slot) + layout.CtrlIdle)
 
 	*a.ctrl(layout.CtrlStatus) = layout.StatusReady
 

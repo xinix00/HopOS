@@ -38,6 +38,15 @@ func main() {
 		smpBench(app)
 	}
 
+	// Soak-rol (P2b, docs/plan-p2b-soak.md): permanent CPU branden + heap
+	// churnen op alle cores, met een telemetrieregel per minuut. De
+	// heartbeat loopt vanzelf (applib), kill werkt gewoon — dit is de
+	// "zware taak" voor de 24-uurs-soak; hij triggert continu de
+	// dvfs-druk-flank.
+	if app.Env("BURN") != "" {
+		burn(app)
+	}
+
 	// Isolatietest: grijp bewust buiten de eigen kooi. Onder stage-2 hoort
 	// de load te faulten → EL2-vector → CPU_OFF; de tweede logregel mag
 	// nooit verschijnen.
