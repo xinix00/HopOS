@@ -154,10 +154,25 @@ func MemRegions(base uintptr) ([]Region, bool) {
 	return regs, len(regs) > 0
 }
 
+// Bootargs geeft /chosen/bootargs — de boot-parameterregel (op de Pi:
+// cmdline.txt, door de firmware in de DTB gezet). Hét kanaal voor
+// node-configuratie zonder rebuild (Derek, 2026-07-11): hopos.*-sleutels
+// erin, de rest (Linux-restanten) wordt genegeerd door de parser.
+func Bootargs(base uintptr) (string, bool) {
+	return nodeString(base, "chosen", "bootargs")
+}
+
 // RootString leest een string-property van de root-node (bv. "serial-number",
 // door de Pi-firmware gezet) — de stabiele bron voor een board-identiteit
 // zoals de MAC. ok=false bij een kromme blob of ontbrekende property.
 func RootString(base uintptr, name string) (string, bool) {
+	return nodeString(base, "", name)
+}
+
+// nodeString leest een string-property: node="" = de root zelf, anders het
+// directe kind met die naam (bv. "chosen"). ok=false bij een kromme blob of
+// ontbrekende property.
+func nodeString(base uintptr, node, name string) (string, bool) {
 	if base == 0 || be32(base) != magic {
 		return "", false
 	}
@@ -171,6 +186,7 @@ func RootString(base uintptr, name string) (string, bool) {
 	p := base + uintptr(structOff)
 	end := base + uintptr(totalSize)
 	depth := 0
+	inNode := node == "" // root-props zitten op depth 1
 
 	for p+4 <= end {
 		tok := be32(p)
@@ -178,11 +194,18 @@ func RootString(base uintptr, name string) (string, bool) {
 		switch tok {
 		case tokBegin:
 			depth++
+			nameStart := p
 			for p < end && dev.Read8(p) != 0 {
 				p++
 			}
+			if node != "" {
+				inNode = depth == 2 && nameIs(nameStart, p, node, false)
+			}
 			p = align4(p + 1)
 		case tokEnd:
+			if node != "" && depth == 2 {
+				inNode = false
+			}
 			depth--
 		case tokProp:
 			if p+8 > end {
@@ -196,8 +219,12 @@ func RootString(base uintptr, name string) (string, bool) {
 			if p > end {
 				return "", false
 			}
+			wantDepth := 1
+			if node != "" {
+				wantDepth = 2
+			}
 			np := base + uintptr(stringsOff) + uintptr(nameOff)
-			if depth == 1 && uint64(stringsOff)+uint64(nameOff) < uint64(totalSize) && propIs(np, end, name) {
+			if inNode && depth == wantDepth && uint64(stringsOff)+uint64(nameOff) < uint64(totalSize) && propIs(np, end, name) {
 				// Null-getermineerde string; de terminator niet meenemen.
 				b := make([]byte, 0, plen)
 				for i := uintptr(0); i < uintptr(plen); i++ {

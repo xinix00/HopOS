@@ -255,6 +255,40 @@ func exit(app *applib.App, code uint64) {
 // smpSink houdt reken-resultaten levend zodat de compiler het werk niet weggooit.
 var smpSink uint64
 
+// burn is de soak-werklast (P2b): alle cores permanent aan het rekenen +
+// een bescheiden heap-churn (GC-druk), met elke minuut één telemetrieregel
+// door de logring. Keert nooit terug — HOP's kill/stop beëindigt hem.
+func burn(app *applib.App) {
+	n := runtime.GOMAXPROCS(0)
+	app.Logf("BURN: soak-last op %d core(s), RAM %dMB — brand tot de kill", n, app.RAMSize>>20)
+	var iters uint64
+	for c := 0; c < n; c++ {
+		go func() {
+			buf := make([]byte, 0, 1<<16)
+			var acc uint64
+			for i := uint64(1); ; i++ {
+				acc = acc*6364136223846793005 + i // rekenwerk (LCG)
+				if i&0xFFFFF == 0 {
+					buf = append(buf, byte(acc)) // heap-churn → GC-druk
+					if len(buf) == cap(buf) {
+						buf = make([]byte, 0, 1<<16)
+					}
+					atomic.AddUint64(&iters, 1) // 1 tel per ~1M iteraties
+				}
+				smpSink = acc
+			}
+		}()
+	}
+	var ms runtime.MemStats
+	for {
+		time.Sleep(time.Minute)
+		runtime.ReadMemStats(&ms)
+		app.Logf("BURN: %dM iteraties, GC=%d, heap=%dKB, klok=%s",
+			atomic.LoadUint64(&iters), ms.NumGC, ms.HeapAlloc>>10,
+			time.Now().UTC().Format("15:04:05Z"))
+	}
+}
+
 // smpBench bewijst fase 5: de app draait op meerdere cores met één gedeelde
 // heap, en heeft daar zelf niets voor hoeven doen (applib zette GOMAXPROCS).
 func smpBench(app *applib.App) {

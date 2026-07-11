@@ -41,6 +41,11 @@ func fail(what string, err error) {
 // zijn init) — de Pi's starten er het klokbeleid mee.
 var boardExtra func()
 
+// nodeName: board-specifieke node-identiteit. Op de Pi's: eerst de
+// boot-parameter hopos.node= (cmdline.txt op de kaart — configureren
+// zonder rebuild), anders "hopos-<serial>"; "" = generieke naam.
+var nodeName = func() string { return "" }
+
 // bunny: Dereks origineel (2026-07-11) — oren netjes boven het snuitje.
 // Bewust geen architectuur in de tagline: ARM64 is het heden, maar AMD64-
 // boardjes liggen al klaar (Derek).
@@ -99,6 +104,17 @@ func main() {
 	} else {
 		fmt.Printf("klok: %s (SNTP)\n", time.Now().UTC().Format(time.RFC3339))
 	}
+	// Hersync per uur tegen drift (P2b/C6; de teller loopt op de 54MHz-
+	// kristal — prima, maar een soak-dag is lang). Stilletjes: alleen
+	// falen is het loggen waard.
+	go func() {
+		for {
+			time.Sleep(time.Hour)
+			if err := hopnet.SyncTime("pool.ntp.org:123"); err != nil {
+				fmt.Printf("klok: hersync mislukt (%v) — volgende poging over een uur\n", err)
+			}
+		}
+	}()
 
 	// Storage: eigen PCIe-enumeratie → NVMe-driver → hopfs. Zonder schijf
 	// draait de node door, maar jobs met volumes weigeren dan bij Start.
@@ -125,7 +141,13 @@ func main() {
 
 	cfg := config.DefaultConfig()
 	cfg.Cluster.Name = "hopos"
+	// Node-identiteit (P2b/C5): boot-parameter of board-serial — twee nodes
+	// op één LAN mogen nooit allebei "hopos-1" heten. QEMU heeft geen van
+	// beide en houdt de oude naam.
 	cfg.Node.ID = "hopos-1"
+	if n := nodeName(); n != "" {
+		cfg.Node.ID = n
+	}
 	cfg.Node.IP = board.Current().Net().IP
 	cfg.Node.Port = 8080 // leader-API = 9080
 

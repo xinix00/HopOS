@@ -11,6 +11,7 @@ import (
 
 	"hop-os/metal/board/raspi"
 	"hop-os/metal/board/rpi4" // registreert het board (init) + tamago-hooks
+	"hop-os/metal/dev"
 	"hop-os/metal/dvfs"
 	"hop-os/metal/layout"
 	"hop-os/metal/vcmail"
@@ -33,5 +34,20 @@ func init() {
 			Slots:   layout.MaxSlots,
 			Verbose: true, // flanken loggen (soak-diagnose)
 		})
+	}
+}
+
+// Node-identiteit (P2b/C5): eerst de boot-parameter hopos.node= uit
+// cmdline.txt (configureren zonder rebuild), anders het board-serial.
+func init() {
+	nodeName = func() string {
+		dtb := uintptr(dev.Read64(rpi4.DTBPtr))
+		if n := raspi.BootParam(dtb, "hopos.node"); n != "" {
+			return n
+		}
+		if s := raspi.SerialSuffix(dtb); s != "" {
+			return "hopos-" + s
+		}
+		return ""
 	}
 }

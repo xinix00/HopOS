@@ -17,6 +17,8 @@
 package raspi
 
 import (
+	"strings"
+
 	_ "unsafe"
 
 	"github.com/usbarmory/tamago/arm64"
@@ -88,6 +90,35 @@ func DTBPool(dtbPtr uintptr, p layout.Plan) []layout.Region {
 		holes = append(holes, layout.Region{Base: r.Addr, Size: r.Size})
 	}
 	return layout.CarvePool(banks, holes, 2<<20)
+}
+
+// BootParam leest een boot-parameter (key=value) van de cmdline: op de Pi
+// is dat cmdline.txt op de SD-kaart, door de firmware in /chosen/bootargs
+// gezet — node-configuratie zonder rebuild (Derek, 2026-07-11). Sleutels
+// zijn hopos.*-geprefixt zodat Linux-restanten op de kaart onschadelijk
+// zijn. Leeg = niet aanwezig.
+func BootParam(dtb uintptr, key string) string {
+	args, ok := fdt.Bootargs(dtb)
+	if !ok {
+		return ""
+	}
+	for _, tok := range strings.Fields(args) {
+		if v, found := strings.CutPrefix(tok, key+"="); found {
+			return v
+		}
+	}
+	return ""
+}
+
+// SerialSuffix geeft de laatste 8 hexcijfers van het board-serial uit de
+// DTB (/serial-number) — de stabiele node-identiteit (node-ID, MAC). Leeg
+// bij een onleesbaar serial; de aanroeper kiest dan zijn terugval.
+func SerialSuffix(dtb uintptr) string {
+	s, ok := fdt.RootString(dtb, "serial-number")
+	if !ok || len(s) < 8 {
+		return ""
+	}
+	return s[len(s)-8:]
 }
 
 // MACFromSerial bouwt een stabiel, lokaal beheerd MAC-adres (02:48 = "H")
