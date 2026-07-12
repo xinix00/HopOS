@@ -39,65 +39,33 @@ import (
 // RAM-declaratie: zie probe5 — de Pi 5-EEPROM laadt raw images op 0x80000.
 //
 //go:linkname ramStart runtime/goos.RamStart
-var ramStart uint = 0x00080000
+var ramStart uint = raspi.HopKernelStart
 
 //go:linkname ramSize runtime/goos.RamSize
-var ramSize uint = 0x08000000
+var ramSize uint = raspi.HopKernelSize
 
-// barAssign meet en programmeert de memory-BAR's van één endpoint: eerst
-// alle groottes opmeten (all-ones-schrijftruc), dan bar1 op PCIe 0x0 en de
-// rest daarachter. Geeft het PCIe-adres per BAR-index (0xffffffffffffffff =
-// niet aanwezig). Alles wordt geprint — dit is een meting, geen aanname.
+// barAssign meet en programmeert de memory-BAR's van één endpoint via het
+// gedeelde brcmpcie.AssignBARs (zelfde codepad als de rpi5-board-bring-up) en
+// print de meting — dit is een probe, dus de groottes en toewijzingen komen op
+// de UART. Geeft het PCIe-adres per BAR-index (^0 = niet aanwezig).
 func barAssign(rc *brcmpcie.RC, bus, devno int) [6]uint64 {
-	var addr [6]uint64
-	var size [6]uint64
-	var is64 [6]bool
-	for i := range addr {
-		addr[i] = ^uint64(0)
-	}
+	addr, size, is64 := rc.AssignBARs(bus, devno)
 	for i := 0; i < 6; i++ {
-		off := uintptr(0x10 + i*4)
-		rc.CfgWrite32(bus, devno, 0, off, 0xffffffff)
-		lo := rc.CfgRead32(bus, devno, 0, off)
-		if lo == 0 || lo == 0xffffffff {
+		if size[i] == 0 {
 			continue
 		}
-		if lo&0x7 == 0x4 { // 64-bit memory-BAR: neemt ook slot i+1
-			rc.CfgWrite32(bus, devno, 0, off+4, 0xffffffff)
-			hi := rc.CfgRead32(bus, devno, 0, off+4)
-			size[i] = ^(uint64(hi)<<32 | uint64(lo&^0xf)) + 1
-			is64[i] = true
-		} else {
-			size[i] = uint64(^(lo &^ 0xf) + 1)
-		}
-		fmt.Printf("  BAR%d: size=%#x 64-bit=%v prefetch=%v\n", i, size[i], is64[i], lo&0x8 != 0)
+		fmt.Printf("  BAR%d: size=%#x 64-bit=%v\n", i, size[i], is64[i])
 		if is64[i] {
 			i++
 		}
-	}
-	// Toewijzen: BAR1 → 0x0 (DMA-loopback-eis), cursor voor de rest erachter.
-	cursor := size[1]
-	if cursor < 0x1000000 {
-		cursor = 0x1000000 // minstens 16MB vrijhouden na BAR1
 	}
 	for i := 0; i < 6; i++ {
 		if size[i] == 0 {
 			continue
 		}
-		a := uint64(0) // BAR1 blijft op 0x0
-		if i != 1 {
-			a = (cursor + size[i] - 1) &^ (size[i] - 1) // uitlijnen op eigen grootte
-			cursor = a + size[i]
-		}
-		addr[i] = a
-		off := uintptr(0x10 + i*4)
-		rc.CfgWrite32(bus, devno, 0, off, uint32(a))
+		fmt.Printf("  BAR%d → PCIe %#x\n", i, addr[i])
 		if is64[i] {
-			rc.CfgWrite32(bus, devno, 0, off+4, uint32(a>>32))
-		}
-		fmt.Printf("  BAR%d → PCIe %#x\n", i, a)
-		if is64[i] {
-			i++ // 64-bit BAR nam ook slot i+1
+			i++
 		}
 	}
 	return addr
@@ -195,11 +163,11 @@ func dhcpDiscover(mac [6]byte) []byte {
 	udp[4], udp[5] = byte(ul>>8), byte(ul)
 
 	bp := f[42:]
-	bp[0], bp[1], bp[2] = 1, 1, 6                  // BOOTREQUEST, ethernet, hlen
-	copy(bp[4:8], []byte{'H', 'O', 'P', '6'})      // xid
-	bp[10] = 0x80                                  // broadcast-flag
-	copy(bp[28:34], mac[:])                        // chaddr
-	copy(bp[236:240], []byte{99, 130, 83, 99})     // DHCP-magic
+	bp[0], bp[1], bp[2] = 1, 1, 6                      // BOOTREQUEST, ethernet, hlen
+	copy(bp[4:8], []byte{'H', 'O', 'P', '6'})          // xid
+	bp[10] = 0x80                                      // broadcast-flag
+	copy(bp[28:34], mac[:])                            // chaddr
+	copy(bp[236:240], []byte{99, 130, 83, 99})         // DHCP-magic
 	copy(bp[240:], []byte{53, 1, 1, 55, 2, 1, 3, 255}) // DISCOVER; vraag subnet+router
 	return f
 }

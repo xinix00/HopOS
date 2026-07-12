@@ -168,7 +168,10 @@ func (s *servicer) dispatchSMP() {
 	if c == 0 {
 		return
 	}
-	cores := int(ctrlRead(s.slot, layout.CtrlCores))
+	// Vertrouwde core-telling uit HOP-geheugen (slotCores), NOOIT ctrlRead
+	// (CtrlCores) — die page is app-schrijfbaar; een opgehoogde CtrlCores zou
+	// anders een app buurcores in zijn kooi laten trekken. Zie smp.go.
+	cores := coreCount(s.slot)
 	if c <= s.slot || c > s.slot+cores-1 || c > layout.MaxSlots {
 		// Buiten het toegewezen core-bereik: weiger (de app hoort dit niet te
 		// vragen). Verzoek intrekken zodat de app niet eeuwig wacht.
@@ -229,6 +232,14 @@ func coreRunning(core int) bool { return mboxWord0(core) >= 2 }
 // {ctx, entry} in de mailbox en wek de WFE-lus met SEV; die springt de
 // (idempotente) trampoline in. Zet word0 sowieso op ctx zodat coreRunning klopt.
 func dispatchCore(core int, entry, ctx uint64) error {
+	// Nooit een core dispatchen die al draait: dat zou een app (of een tweede
+	// Start) een core midden in de uitvoering laten kapen. Start's pad checkt dit
+	// al vóór de aanroep (coreRunning-lus), maar de lazy-SMP-weg (dispatchSMP,
+	// met een app-beïnvloed core-nummer uit CtrlSMPReq) komt hier ook langs — dus
+	// de guard hoort hier, op het gedeelde punt.
+	if coreRunning(core) {
+		return fmt.Errorf("core %d draait al (mailbox word0 >= 2) — dispatch geweigerd", core)
+	}
 	mbox := layout.ParkMboxPA(core)
 	cold := dev.Read64(mbox) == mboxCold
 	dev.Write64(mbox+8, entry) // word1 = doel-PC
@@ -362,7 +373,7 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 	// geslaagde start: valt Start eerder uit, dan geeft de defer de
 	// gealloceerde partitie terug.
 	if max := maxLimitFor(linkBase); memLimit > max {
-		return fmt.Errorf("memLimit %#x > %#x (één GB vanaf linkadres %#x; groter vergt vensteruitbreiding)", memLimit, max, linkBase)
+		return fmt.Errorf("memLimit %d MB > %d MB slot-cap (één GB-blok vanaf linkadres %#x, geklemd onder CtrlBase; groter vergt vensteruitbreiding — zie slots/partmem.go)", memLimit>>20, max>>20, linkBase)
 	}
 	base, err := partAlloc(i, memLimit)
 	if err != nil {
@@ -495,7 +506,10 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 	// Het aantal cores op de control-page; de app-OS-laag leest 'm en vraagt bij
 	// cores > 1 de extra cores lazy op (CtrlSMPReq → HOP dispatcht). Altijd
 	// zetten (ook 1 = gewone app), zodat de app-kant niet hoeft te weten of dit
-	// SMP is.
+	// SMP is. LET OP: dit is HOP → app-informatie; HOP vertrouwt de readback
+	// NOOIT (de app kan de page herschrijven). De vertrouwde bron voor HOP's
+	// eigen beslissingen is slotCores, hier uit het al-gevalideerde `cores` gezet.
+	slotCores[i] = cores
 	ctrlWrite(i, layout.CtrlCores, uint64(cores))
 	if cores > 1 {
 		// Fysiek adres van de EL2 SMP-trampoline publiceren (op ditzelfde slot
@@ -504,18 +518,26 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 	}
 	ctrlWrite(i, layout.CtrlStatus, layout.StatusBooting)
 
-	// Startschot: cold → PSCI CPU_ON (eerste bring-up), geparkeerd → mailbox +
-	// SEV. Ctx = de fysieke control-page; de trampoline leest er alles van.
-	if err := dispatchCore(i, board.Current().S2TrampPC(), uint64(layout.CtrlPagePA(i))); err != nil {
-		return err
-	}
-
+	// Poorten publiceren en de slot aan de switch hangen VÓÓR het startschot:
+	// faalt Publish, dan geeft de defer de partitie terug terwijl er nog geen
+	// app op draait. Ná een geslaagde dispatchCore zou datzelfde faalpad de
+	// partitie vrijgeven met een nog-lévende app erin — de pool kan 'm dan
+	// heruitdelen aan een ander slot: isolatiebreuk. Attach/Publish zetten alleen
+	// switch/NAT-state en hebben de draaiende core niet nodig, dus dit mag ervóór;
+	// ná de dispatch volgt meteen started=true, zonder faalbare stap ertussen.
 	hopswitch.Attach(i)
 	for name, p := range ports {
 		if err := hopswitch.Publish("tcp", uint16(p), i, uint16(p)); err != nil {
 			return fmt.Errorf("poort %q: %w", name, err)
 		}
 	}
+
+	// Startschot: cold → PSCI CPU_ON (eerste bring-up), geparkeerd → mailbox +
+	// SEV. Ctx = de fysieke control-page; de trampoline leest er alles van.
+	if err := dispatchCore(i, board.Current().S2TrampPC(), uint64(layout.CtrlPagePA(i))); err != nil {
+		return err
+	}
+
 	started = true // partitie blijft van deze task tot Stop
 	go claimServicer(i, root, mtab).run()
 	return nil
@@ -541,8 +563,10 @@ func Stop(i int, timeout time.Duration) error {
 	dev.MB()
 	// Coöperatieve kans voor de app (de kill-watcher parkeert zijn eigen core).
 	waitStopped(i, timeout)
-	// Draait er nog iets? Hoeveel cores de app heeft staat op zijn control-page
-	// (CtrlCores, door Start gezet) — de enige bron van waarheid.
+	// Draait er nog iets? Hoeveel cores de app heeft komt uit HOP's eigen
+	// slotCores (door Start gezet) — NIET uit de app-schrijfbare CtrlCores: een
+	// verlaagde CtrlCores zou anders levende secundaire cores voor deze scan
+	// verbergen en releaseSlot een nog-draaiende partitie laten vrijgeven.
 	cores := appCores(i)
 	stillOn := false
 	for _, c := range cores {
@@ -575,19 +599,9 @@ func releaseSlot(i int) {
 	hopswitch.Detach(i)
 	hopswitch.UnpublishSlot(i)
 	partRelease(i)
-}
-
-// waitOff polt tot de core van slot i uit is (PSCI — nog gebruikt door de
-// cold-probe NumSlots; het lifecycle-pad gebruikt waitStopped/de mailbox).
-func waitOff(i int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if board.Current().AffinityInfo(uint64(i)) == board.PowerOff {
-			return true
-		}
-		time.Sleep(10 * time.Millisecond)
+	if i >= 1 && i <= layout.MaxSlots {
+		slotCores[i] = 0 // vertrouwde core-telling wissen (zie smp.go)
 	}
-	return false
 }
 
 // Get geeft de actuele status van slot i (nulwaarde bij ongeldige index).
@@ -662,13 +676,46 @@ func NumSlots() int {
 		for i := 1; i <= layout.MaxSlots; i++ {
 			dev.Clear(layout.CtrlPagePA(i), layout.CtrlStride)
 		}
+		// PSCI-telling: schuif de grens op zolang een core een écht power-woord
+		// meldt; stop bij het eerste antwoord buiten {On,Off,OnPending} — dat is
+		// een ontbrekende core (INVALID_PARAMS) óf een PSCI-fout/onimplementatie.
+		// We onthouden of we op zo'n fout stopten (i.p.v. netjes MaxSlots te
+		// halen), zodat de diagnose hieronder het verschil kan benoemen.
+		probed := 0
+		truncated := false
 		for i := 1; i <= layout.MaxSlots; i++ {
 			switch board.Current().AffinityInfo(uint64(i)) {
 			case board.PowerOn, board.PowerOff, board.PowerOnPending:
-				numSlots = i // geldige core: schuif de grens op
+				probed = i // geldige core: schuif de grens op
 			default:
-				return // eerste ontbrekende core (INVALID_PARAMS): stop
+				truncated = true // PSCI-fout/ontbrekende core: stop de telling
 			}
+			if truncated {
+				break
+			}
+		}
+		numSlots = probed
+
+		// Board-hint: een board dat weet hoeveel app-cores het heeft (PSCI
+		// AFFINITY_INFO onbetrouwbaar op sommige silicium) mag dat declareren via
+		// board.CoreCountHinter. Boards met werkende AFFINITY_INFO (QEMU, Pi)
+		// doen dat niet — dan blijft de PSCI-telling leidend.
+		hint := 0
+		if h, ok := board.Current().(board.CoreCountHinter); ok {
+			hint = h.ExpectedAppCores()
+		}
+		switch {
+		case hint > 0 && probed < hint:
+			if hint > layout.MaxSlots {
+				hint = layout.MaxSlots // het layout reserveert niet meer dan dit
+			}
+			fmt.Printf("HOPOS_NUMSLOTS_HINT: PSCI telde %d app-core(s) (getrunceerd=%v), board declareert er %d — de board-hint is leidend\n",
+				probed, truncated, hint)
+			numSlots = hint
+		case probed == 0:
+			// Geen enkele app-core én geen board-hint: HOP zou nul slots
+			// adverteren en elke job permanent onplaatsbaar maken. Luid, niet stil.
+			fmt.Println("HOPOS_NUMSLOTS_ZERO: geen enkele app-core via PSCI AFFINITY_INFO (core 1 gaf al een fout/INVALID_PARAMS) — HOP adverteert 0 slots; is AFFINITY_INFO op dit board geïmplementeerd? Een board.CoreCountHinter kan dit overbruggen")
 		}
 	})
 	return numSlots

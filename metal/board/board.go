@@ -14,6 +14,7 @@ import (
 
 	gnet "github.com/usbarmory/go-net"
 
+	"hop-os/metal/dhcp"
 	"hop-os/metal/fb"
 )
 
@@ -50,6 +51,15 @@ type NetConfig struct {
 	CIDR string // adres/prefix, bv. "10.0.2.15/24"
 	GW   string // gateway
 	DNS  string // resolver, "host:poort"
+}
+
+// LeaseHolder wordt optioneel geïmplementeerd door boards die hun IP via DHCP
+// kregen (de Pi's): hopnet vraagt na de stack-bring-up de lease op en start
+// dhcp.KeepAlive zodat hij niet verloopt. Boards met een statische config
+// (qemuvirt) implementeren het niet — dan draait er geen renewal. De bool is
+// false als er (nog) geen verkregen lease is.
+type LeaseHolder interface {
+	DHCPLease() (dhcp.Lease, bool)
 }
 
 // PCIeWindow is het ECAM- en MMIO-adresplan van een board (fase 3): omdat wij
@@ -118,6 +128,18 @@ type Board interface {
 	// heeft (QEMU -nographic, of een board vóór zijn beeld-fase). Discovery is
 	// board-kennis; het renderen erna is gedeeld.
 	Framebuffer() (fb.Desc, bool)
+}
+
+// CoreCountHinter is een OPTIONEEL contract naast Board: een board dat zijn
+// app-core-aantal kent mag het declareren, zodat slots.NumSlots een
+// onbetrouwbare PSCI AFFINITY_INFO kan overbruggen — op sommige silicium meldt
+// AFFINITY_INFO INVALID_PARAMS voor bestaande cores, waardoor de core-telling
+// stil op 0 (of te laag) uitkomt en HOP nul slots adverteert. ExpectedAppCores
+// geeft het aantal app-cores (cores 1..N, dus exclusief HOP's core 0). Boards
+// met werkende AFFINITY_INFO (QEMU, Pi) implementeren dit NIET — de PSCI-telling
+// blijft dan leidend; slots.NumSlots type-assert hier optioneel op.
+type CoreCountHinter interface {
+	ExpectedAppCores() int
 }
 
 // active is het geregistreerde board (nil tot Use — vóór elke board-call).

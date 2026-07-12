@@ -47,6 +47,10 @@ uart_2ndstage=1
 # en volgt): zonder deze regel klemt de Pi 5-firmware op 1500MHz (gemeten
 # 2026-07-11). Accepteert de firmware 800 niet, dan meldt de dvfs-regel dat.
 arm_freq_min=800
+# Thermische cap voor fanloos bedrijf (turbo-ceiling; arm_freq_max bestaat
+# NIET, arm_freq ís het max — gemeten 2026-07-11). dvfs volgt dit firmware-
+# max vanzelf via de mailbox: 2400MHz liep zonder fan binnen minuten naar 84°C.
+arm_freq=1500
 EOF
 
 echo "sd-rpi5/hop-agent5.img ($(du -h sd-rpi5/hop-agent5.img | cut -f1)) + config.txt klaar." >&2

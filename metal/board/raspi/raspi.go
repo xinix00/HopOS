@@ -50,12 +50,24 @@ const (
 	// BOOT_SCRATCH-#define in de cpuinit.s van beide boards.
 	BootScratch = 0x7F000
 
-	// HopKernelEnd: het einde van de HOP-kern-regio (load 0x80000 + 128MB
-	// RAM-declaratie, zie mem_rpi4/mem_rpi5). Alles eronder — de HOP-runtime,
-	// TF-A/armstub (laadt op 0x0), park/scratch (0x70000-0x7F008) — is voor de
-	// partitie-pool verboden terrein.
-	HopKernelEnd = 0x8080000
+	// HopKernelStart/HopKernelSize: het laadadres en de grootte van de
+	// HOP-kern-RAM-declaratie (mem_raspi.go: raw load op 0x80000, 128MB). De
+	// go:linkname ramStart/ramSize-vars in élk Pi-main-pakket (agent,
+	// multikernel, probe4/5/6/7) initialiseren hierop — één bron voor de
+	// kern-omvang i.p.v. de losse 0x00080000/0x08000000-literals.
+	HopKernelStart = 0x80000
+	HopKernelSize  = 0x8000000 // 128MB
+
+	// HopKernelEnd: het einde van de HOP-kern-regio (= start + size). Alles
+	// eronder — de HOP-runtime, TF-A/armstub (laadt op 0x0), park/scratch
+	// (0x70000-0x7F008) — is voor de partitie-pool verboden terrein.
+	HopKernelEnd = HopKernelStart + HopKernelSize
 )
+
+// DTB geeft de DTB-pointer die de firmware in x0 meegaf: cpuinit.s legde die op
+// het scratch-woord (BootScratch+8) — dus eerst dereferencen. Board-neutraal
+// (de scratch-plek is gelijk op Pi 4 en Pi 5, zie de cpuinit.s-#defines).
+func DTB() uintptr { return uintptr(dev.Read64(BootScratch + 8)) }
 
 // DTBPool berekent de partitie-pool uit het volledige DRAM van dit board (de
 // DTB /memory-banken, ook boven 4GB) minus alle vaste regio's: de HOP-kern,

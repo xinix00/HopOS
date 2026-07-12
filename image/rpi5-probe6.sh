@@ -18,7 +18,9 @@ cd "$DIR"
 mkdir -p sd-rpi5
 go run "$DIR/image/mkkernel/main.go" -elf metal/probe6.elf -o sd-rpi5/kernel_2712.img -load 0x80000 -raw
 
-cat > sd-rpi5/config.txt <<'EOF'
+# config-probe6.txt (gitignored) — komt als config.txt op de kaart; het
+# getrackte config.txt is de agent-config en blijft ongemoeid.
+cat > sd-rpi5/config-probe6.txt <<'EOF'
 # HopOS probe6 — PCIe-bring-up op de Raspberry Pi 5 (zie docs/rpi5.md)
 arm_64bit=1
 kernel=kernel_2712.img
@@ -27,5 +29,5 @@ device_tree_address=0x0f000000
 uart_2ndstage=1
 EOF
 
-echo "sd-rpi5/ klaar: probe6 als kernel_2712.img (+ config.txt)" >&2
+echo "sd-rpi5/ klaar: probe6 als kernel_2712.img (+ config-probe6.txt → kaart: als config.txt)" >&2
 echo "meting: UART 115200 op de debug-connector; kabel in de ethernet-poort!" >&2

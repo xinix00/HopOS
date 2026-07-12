@@ -8,6 +8,8 @@ github.com/usbarmory/go-net v0.0.0-20260626130943-dad9ef39fd9b h1:QOgzNwGI3ZFJzr
 github.com/usbarmory/go-net v0.0.0-20260626130943-dad9ef39fd9b/go.mod h1:buOhhKgCq3hxLvQ3QUMVHZy5XKcxFcx4zjOgGc2PEas=
 github.com/usbarmory/tamago v1.26.4 h1:laFvRANKgVYFHxLHjIlhqJCc3Xm+qMyab2SlUoNw6zY=
 github.com/usbarmory/tamago v1.26.4/go.mod h1:HZkb+ZkzFl8aCxAuF7exsKX+XaNM0mYG9Iv7ooX1WDY=
+golang.org/x/crypto/x509roots/fallback v0.0.0-20260709184058-243e02a382f8 h1:OZy0hsjD/gbnVKENxnVK6I3e4bdKwYy4R3dfdKosYyA=
+golang.org/x/crypto/x509roots/fallback v0.0.0-20260709184058-243e02a382f8/go.mod h1:+UoQFNBq2p2wO+Q6ddVtYc25GZ6VNdOMyyrd4nrqrKs=
 golang.org/x/sys v0.44.0 h1:ildZl3J4uzeKP07r2F++Op7E9B29JRUy+a27EibtBTQ=
 golang.org/x/sys v0.44.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
 golang.org/x/time v0.7.0 h1:ntUhktv3OPE6TgYxXWv9vKvUSJyIFJlyohwbkEwPrKQ=

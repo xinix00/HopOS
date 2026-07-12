@@ -18,20 +18,21 @@ import (
 	"time"
 
 	"hop-os/metal/dev"
+	"hop-os/metal/mdio"
 )
 
 // Cadence GEM-registeroffsets (macb/u-boot-conventie).
 const (
-	regNWCtrl   = 0x000 // network control
-	regNWCfg    = 0x004 // network config
-	regNWStatus = 0x008 // network status
-	regDMACfg   = 0x010 // DMA config
-	regTxStatus = 0x014
-	regRxQBase  = 0x018
-	regTxQBase  = 0x01C
-	regRxStatus = 0x020
-	regIDR      = 0x02C // interrupt disable
-	regMAN      = 0x034 // PHY maintenance (MDIO)
+	regNWCtrl    = 0x000 // network control
+	regNWCfg     = 0x004 // network config
+	regNWStatus  = 0x008 // network status
+	regDMACfg    = 0x010 // DMA config
+	regTxStatus  = 0x014
+	regRxQBase   = 0x018
+	regTxQBase   = 0x01C
+	regRxStatus  = 0x020
+	regIDR       = 0x02C // interrupt disable
+	regMAN       = 0x034 // PHY maintenance (MDIO)
 	regPBufRxCut = 0x044 // RX partial store&forward (uit = 0)
 	regSpAddr1B  = 0x088 // MAC-adres bottom
 	regSpAddr1T  = 0x08C // MAC-adres top
@@ -138,7 +139,10 @@ func (n *Net) MDIOWrite(phy, reg int, val uint16) {
 }
 
 func (n *Net) mdioWait() {
-	for n.rd(regNWStatus)&statusMDIOIdle == 0 {
+	for range 100_000 { // enkele µs typisch; ruim begrensd, nooit eeuwig
+		if n.rd(regNWStatus)&statusMDIOIdle != 0 {
+			return
+		}
 	}
 }
 
@@ -150,58 +154,16 @@ func (n *Net) MDIOEnable() {
 }
 
 // PHYScan zoekt PHY's op de MDIO-bus en geeft (adres, id1, id2) van de
-// eerste hit; de BCM54213PE meldt zich met OUI 0x600d.
+// eerste hit; de BCM54213PE meldt zich met OUI 0x600d. Gedeeld met genet:
+// zie metal/mdio (zelfde PHY, zelfde clause-22-scan).
 func (n *Net) PHYScan() (addr int, id1, id2 uint16, found bool) {
-	for a := 0; a < 32; a++ {
-		v1 := n.MDIORead(a, 2)
-		if v1 == 0xFFFF || v1 == 0 {
-			continue
-		}
-		return a, v1, n.MDIORead(a, 3), true
-	}
-	return 0, 0, 0, false
+	return mdio.Scan(n)
 }
 
 // AutoNeg start autonegotiatie op de PHY en wacht op een link; geeft
-// (snelheid in Mbps, full-duplex).
+// (snelheid in Mbps, full-duplex). Gedeeld met genet via metal/mdio.
 func (n *Net) AutoNeg(phy int, timeout time.Duration) (speed int, fd bool, err error) {
-	const (
-		bmcr = 0
-		bmsr = 1
-		adv  = 4
-		lpa  = 5
-		gctl = 9
-		gsta = 10
-	)
-	// Adverteer alles: 10/100 HD/FD + 1000FD, dan autoneg (her)starten.
-	n.MDIOWrite(phy, adv, 0x01E1)  // 10/100 HD+FD, 802.3
-	n.MDIOWrite(phy, gctl, 0x0200) // 1000BASE-T FD
-	n.MDIOWrite(phy, bmcr, 0x1200) // ANENABLE|ANRESTART
-	deadline := time.Now().Add(timeout)
-	for {
-		s := n.MDIORead(phy, bmsr)
-		if s&(1<<5) != 0 && s&(1<<2) != 0 { // AN complete + link up
-			break
-		}
-		if time.Now().After(deadline) {
-			return 0, false, fmt.Errorf("gem: geen link binnen %v (BMSR %#x)", timeout, s)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if n.MDIORead(phy, gsta)&(1<<11) != 0 { // LP 1000FD
-		return 1000, true, nil
-	}
-	l := n.MDIORead(phy, lpa)
-	switch {
-	case l&(1<<8) != 0:
-		return 100, true, nil
-	case l&(1<<7) != 0:
-		return 100, false, nil
-	case l&(1<<6) != 0:
-		return 10, true, nil
-	default:
-		return 10, false, nil
-	}
+	return mdio.AutoNeg(n, phy, timeout)
 }
 
 // Init zet ringen en MAC-config klaar in de DMA-regio (device-gemapt →

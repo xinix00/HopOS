@@ -20,8 +20,10 @@
 package rpi4
 
 import (
+	"fmt"
+
 	"hop-os/metal/board/raspi"
-	"hop-os/metal/dev"
+	"hop-os/metal/fdt"
 	"hop-os/metal/layout"
 )
 
@@ -40,6 +42,14 @@ func init() {
 	if raspi.MPIDR()&0xFFFFFF != 0 {
 		return
 	}
+	// RNG200-basis bekendmaken aan de gedeelde raspi-RNG (crypto/rand) — ACHTER
+	// de guard: appspike linkt dit board, dus een app draait deze init ook. Zou
+	// RNG200Base vóór de guard gezet worden, dan wees getRandomData in de app
+	// naar RNG200-MMIO dat in zijn stage-2-kooi niet gemapt is → fault bij de
+	// eerste crypto/rand (gvisor-seed). Achter de guard blijft de RNG200Base van
+	// een app 0, en dan valt getRandomData terug op de PRNG. Alleen HOP mapt en
+	// gebruikt dit MMIO — net als het plan hieronder.
+	raspi.RNG200Base = RNG200Base
 	p := layout.Plan{
 		CtrlPA:        0x10000000,
 		RingPA:        0x11000000,
@@ -51,8 +61,13 @@ func init() {
 	}
 	// Pool = het volledige DRAM (DTB /memory) minus de vaste regio's; terugval
 	// op een conservatieve 512MB (past in élke Pi 4-variant) als de DTB faalt.
-	p.Pool = raspi.DTBPool(uintptr(dev.Read64(DTBPtr)), p)
+	// LUID: op een Pi met geldige DTB loopt dit pad nooit — loopt het wél
+	// (kromme/afwezige blob), dan geen stille degradatie.
+	dtb := raspi.DTB()
+	p.Pool = raspi.DTBPool(dtb, p)
 	if len(p.Pool) == 0 {
+		fmt.Printf("WAARSCHUWING HOPOS_POOL_FALLBACK: geen bruikbare DTB /memory (dtb=%#x, geldig=%v) — partitie-pool valt terug op de vaste 512MB [0x20000000,0x40000000); de RAM-sanity draait dan op het layout, niet op gemeten RAM\n",
+			dtb, fdt.Valid(dtb))
 		p.Pool = []layout.Region{{Base: 0x20000000, Size: 0x20000000}}
 	}
 	layout.UsePlan(p)
@@ -78,8 +93,9 @@ const (
 	// De probe leest alleen SYS_REV_CTRL (+0x0) en de UMAC-MAC-registers.
 	GENETBase = 0xFD580000
 
-	// RNG200: zelfde hardware-RNG-blok als de Pi 5 (daar op 0x107d208000);
-	// de echte driver wordt t.z.t. één gedeeld stuk in board/raspi (P2).
+	// RNG200: het Broadcom iproc-rng200-blok (BCM2711). De gedeelde driver zit
+	// in board/raspi/rng.go; init() geeft dit adres door via raspi.RNG200Base.
+	// De Pi 5 heeft hetzelfde blok op een ander adres (rpi5.go).
 	RNG200Base = 0xFE104000
 
 	// DTBPtr: cpuinit.s legt hier (primary, MMU uit) de DTB-pointer die de

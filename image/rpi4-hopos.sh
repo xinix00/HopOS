@@ -9,8 +9,11 @@
 #         OD=aarch64-elf-objdump DEBUG=0 bl31
 #   cp build/rpi4/release/bl31.bin <dit repo>/sd-rpi4/
 #
-# Flashen (kaart-conventie: Linux-bestanden blijven staan):
-#   cp sd-rpi4/kernel8.img sd-rpi4/config.txt sd-rpi4/bl31.bin /Volumes/bootfs/
+# Flashen (kaart-conventie: Linux-bestanden blijven staan). config-hopos.txt
+# komt AS config.txt op de kaart; het getrackte sd-rpi4/config.txt is de
+# agent-config en blijft ongemoeid:
+#   cp sd-rpi4/kernel8.img sd-rpi4/bl31.bin /Volumes/bootfs/
+#   cp sd-rpi4/config-hopos.txt /Volumes/bootfs/config.txt
 #   sync && diskutil eject /Volumes/bootfs
 # UART meekijken (GPIO14/15 → USB-serieel):
 #   /bin/sh -c 'exec 4<>/dev/cu.usbserial-XXXX; stty -f /dev/cu.usbserial-XXXX 115200 raw; exec cat <&4'
@@ -42,8 +45,10 @@ cd "$DIR"
 mkdir -p sd-rpi4
 go run "$DIR/image/mkkernel/main.go" -elf metal/hopos4.elf -o sd-rpi4/kernel8.img -load 0x80000 -raw
 
-# 4. config.txt — kernel wijst naar ons; bl31.bin als armstub (PSCI).
-cat > sd-rpi4/config.txt <<'EOF'
+# 4. config-hopos.txt (gitignored) — kernel wijst naar ons; bl31.bin als armstub
+#    (PSCI). Het getrackte config.txt is de agent-config; die overschrijven we
+#    niet, deze komt bij het flashen als config.txt op de kaart.
+cat > sd-rpi4/config-hopos.txt <<'EOF'
 # HopOS multikernel (fase P1) — Raspberry Pi 4 (zie docs/rpi4.md)
 arm_64bit=1
 kernel=kernel8.img
@@ -61,5 +66,5 @@ if [ -f "$HOME/arm-trusted-firmware/build/rpi4/release/bl31.bin" ]; then
 	cp "$HOME/arm-trusted-firmware/build/rpi4/release/bl31.bin" sd-rpi4/bl31.bin
 fi
 
-echo "sd-rpi4/kernel8.img ($(du -h sd-rpi4/kernel8.img | cut -f1)) + config.txt + bl31.bin klaar."
-echo "flash: cp sd-rpi4/kernel8.img sd-rpi4/config.txt sd-rpi4/bl31.bin /Volumes/bootfs/ && sync && diskutil eject /Volumes/bootfs"
+echo "sd-rpi4/kernel8.img ($(du -h sd-rpi4/kernel8.img | cut -f1)) + config-hopos.txt + bl31.bin klaar."
+echo "flash: cp sd-rpi4/kernel8.img sd-rpi4/bl31.bin /Volumes/bootfs/ && cp sd-rpi4/config-hopos.txt /Volumes/bootfs/config.txt && sync && diskutil eject /Volumes/bootfs"

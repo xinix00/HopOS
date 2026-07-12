@@ -13,6 +13,7 @@ require (
 	github.com/soypat/lneto v0.1.1-0.20260609173350-82f946154800 // indirect
 	github.com/xinix00/hoplock v0.0.0-00010101000000-000000000000 // indirect
 	github.com/xinix00/hoplockserver v0.0.0-00010101000000-000000000000 // indirect
+	golang.org/x/crypto/x509roots/fallback v0.0.0-20260709184058-243e02a382f8 // indirect
 	golang.org/x/sys v0.44.0 // indirect
 	golang.org/x/time v0.7.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
@@ -29,4 +30,3 @@ replace (
 	github.com/xinix00/hoplockserver => /Users/derek/Git/easy/hoplockserver
 	hop => /Users/derek/Git/easy/hop
 )
-

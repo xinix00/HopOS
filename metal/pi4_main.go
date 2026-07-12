@@ -45,25 +45,7 @@ func fail(what string, err error) {
 	}
 }
 
-func drainLogs(slot int, count *int) {
-	for line := range slots.Logs(slot) {
-		fmt.Printf("[slot%d] %s\n", slot, line)
-		if count != nil {
-			*count++
-		}
-	}
-}
-
-func waitExit(slot int, timeout time.Duration) (uint64, error) {
-	deadline := time.Now().Add(timeout)
-	for slots.Get(slot).App != layout.StatusExited {
-		if time.Now().After(deadline) {
-			return 0, fmt.Errorf("slot %d meldt geen exit", slot)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return slots.Get(slot).ExitCode, nil
-}
+// drainLogs en waitExit zijn gedeeld met de Pi 5-main (metal/raspi_main.go).
 
 func main() {
 	fmt.Println("")

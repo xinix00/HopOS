@@ -11,25 +11,26 @@
 // de BCM7712-codepaden). De BCM2712-eigenaardigheden die dáár verstopt
 // zitten en zonder welke niets werkt:
 //
-//   1. RESCAL: één gedeeld analoog kalibratieblok voor alle drie de
-//      controllers — één keer starten en pollen vóór de eerste bridge.
-//   2. Bridge-reset via de externe SW_INIT-resetcontroller (bank/bit),
-//      niet via het RGR1_SW_INIT_1-register van oudere chips.
-//   3. PERST# via PCIE_MISC_PCIE_CTRL bit 2 (PERSTB, actief-laag-invers:
-//      1 = deassert), niet via HARD_DEBUG.
-//   4. HARD_DEBUG ligt op 0x4304 (oudere chips: 0x4204); SerDes komt uit
-//      IDDQ door bit 27 te wissen.
-//   5. De PLL van de PHY verwacht af fabriek een 100MHz-refclk; de Pi 5
-//      heeft een 54MHz-kristal. Zonder de MDIO-herprogrammering in
-//      PostSetup (blok 0x1600) traint de link NOOIT — dit was ons
-//      0xdeaddead-raadsel.
-//   6. Elk inbound-window (RC-"BAR") heeft óók een UBUS-remap-register
-//      met ACCESS_EN nodig; oudere chips hebben die niet.
+//  1. RESCAL: één gedeeld analoog kalibratieblok voor alle drie de
+//     controllers — één keer starten en pollen vóór de eerste bridge.
+//  2. Bridge-reset via de externe SW_INIT-resetcontroller (bank/bit),
+//     niet via het RGR1_SW_INIT_1-register van oudere chips.
+//  3. PERST# via PCIE_MISC_PCIE_CTRL bit 2 (PERSTB, actief-laag-invers:
+//     1 = deassert), niet via HARD_DEBUG.
+//  4. HARD_DEBUG ligt op 0x4304 (oudere chips: 0x4204); SerDes komt uit
+//     IDDQ door bit 27 te wissen.
+//  5. De PLL van de PHY verwacht af fabriek een 100MHz-refclk; de Pi 5
+//     heeft een 54MHz-kristal. Zonder de MDIO-herprogrammering in
+//     PostSetup (blok 0x1600) traint de link NOOIT — dit was ons
+//     0xdeaddead-raadsel.
+//  6. Elk inbound-window (RC-"BAR") heeft óók een UBUS-remap-register
+//     met ACCESS_EN nodig; oudere chips hebben die niet.
 //
 // Alleen voor GOOS=tamago GOARCH=arm64 (MMIO via metal/dev).
 package brcmpcie
 
 import (
+	"fmt"
 	"math/bits"
 	"time"
 
@@ -132,8 +133,8 @@ type RC struct {
 	In       []InWin // RC-BAR 1..n (max 10 op de BCM2712)
 }
 
-func (rc *RC) rd(off uintptr) uint32     { return dev.Read32(rc.Base + off) }
-func (rc *RC) wr(off uintptr, v uint32)  { dev.Write32(rc.Base+off, v) }
+func (rc *RC) rd(off uintptr) uint32           { return dev.Read32(rc.Base + off) }
+func (rc *RC) wr(off uintptr, v uint32)        { dev.Write32(rc.Base+off, v) }
 func (rc *RC) mod(off uintptr, mask, v uint32) { rc.wr(off, rc.rd(off)&^mask|v) }
 
 // bridgeReset bedient de SW_INIT-resetcontroller: bank = ID>>5 (stride 0x18),
@@ -241,10 +242,10 @@ func (rc *RC) postSetup2712() bool {
 	time.Sleep(200 * time.Microsecond)
 	rc.mod(cfgPhyCtl15, 0xff, 0x12) // PM-klokperiode 18.52ns = 1/54MHz
 
-	rc.mod(miscUBUSCtrl, 0, 1<<13|1<<19)   // reply-err/decerr onderdrukken
-	rc.wr(miscAXIRdErrData, 0xffffffff)    // mislukte read → all-ones
-	rc.wr(miscUBUSTmo, 0x0B2D0000)         // UBUS-timeout ~250ms
-	rc.wr(miscCfgRetryTmo, 0x0ABA0000)     // config-retry-timeout ~240ms
+	rc.mod(miscUBUSCtrl, 0, 1<<13|1<<19) // reply-err/decerr onderdrukken
+	rc.wr(miscAXIRdErrData, 0xffffffff)  // mislukte read → all-ones
+	rc.wr(miscUBUSTmo, 0x0B2D0000)       // UBUS-timeout ~250ms
+	rc.wr(miscCfgRetryTmo, 0x0ABA0000)   // config-retry-timeout ~240ms
 
 	v := rc.rd(miscAXIIntfCtrl)
 	v = v&^uint32(1<<7) | 1<<13 | 1<<12 | 1<<11
@@ -342,4 +343,117 @@ func (rc *RC) OpenBridge() {
 	limit := uint32(rc.Out.PCIe + rc.Out.Size - 1)
 	rc.wr(cfgMemBase, limit&0xfff00000|base>>16&0xfff0)
 	rc.mod(cfgCommand, 0, 0x6) // mem-decode + master
+}
+
+// EPBar is één BAR-toewijzing op de endpoint achter de RC (bus 1, dev 0, fn 0):
+// Off = config-offset (0x10, 0x14, …), Val = het te schrijven basisadres. Omdat
+// HOP zonder firmware-hulp boot wijst niemand deze BAR's toe — de aanroeper geeft
+// de gemeten adressen mee (de RP1-eis "BAR1 → PCIe 0x0" is gewoon een Val=0).
+type EPBar struct {
+	Off uintptr
+	Val uint32
+}
+
+// BringConfig parametriseert BringUp met de board-specifieke stukken die géén
+// deel zijn van de generieke root-complex-sequence: het gedeelde RESCAL-blok, de
+// verwachte endpoint-ID en de BAR-toewijzingen. De RC-instantie zelf (Base,
+// SWInit, Gen, in/out-windows) draagt de rest van het adresplan.
+type BringConfig struct {
+	Rescal uintptr // gedeeld analoog kalibratieblok (0 = overslaan)
+	WantID uint32  // verwachte vendor<<16|device van de endpoint op bus 1 (0 = niet checken)
+	Bars   []EPBar // BAR-toewijzingen op de endpoint
+}
+
+// BringUp voert de volledige root-complex-bring-upsequence uit — Rescal →
+// Setup → StartLink → OpenBridge → endpoint-ID controleren → BAR's toewijzen →
+// mem-decode/bus-mastering aan — en centraliseert zo de orkestratie die eerst
+// in elke board-ProbeNIC herhaald stond. Het board levert alleen nog de RC-
+// config + BringConfig; de vaste sequence woont hier, bij de RC-primitieven.
+func (rc *RC) BringUp(cfg BringConfig) error {
+	if cfg.Rescal != 0 && !Rescal(cfg.Rescal) {
+		return fmt.Errorf("brcmpcie: RESCAL-kalibratie bevestigt niet")
+	}
+	if rcMode, _ := rc.Setup(); !rcMode {
+		return fmt.Errorf("brcmpcie: controller strapt niet als root-complex (status %#x)", rc.Status())
+	}
+	if _, dl := rc.StartLink(); !dl {
+		return fmt.Errorf("brcmpcie: PCIe-link traint niet (status %#x)", rc.Status())
+	}
+	rc.OpenBridge()
+
+	if cfg.WantID != 0 {
+		if id := rc.CfgRead32(1, 0, 0, 0); id != cfg.WantID {
+			return fmt.Errorf("brcmpcie: endpoint meldt %#x (verwacht %#x)", id, cfg.WantID)
+		}
+	}
+	for _, b := range cfg.Bars {
+		rc.CfgWrite32(1, 0, 0, b.Off, b.Val)
+	}
+	// mem-decode + bus-mastering op de endpoint aanzetten.
+	rc.CfgWrite32(1, 0, 0, cfgCommand, rc.CfgRead32(1, 0, 0, cfgCommand)|0x6)
+	dev.MB()
+	return nil
+}
+
+// AssignBARs meet en programmeert de memory-BAR's van één endpoint (bus/devno,
+// fn 0) achter deze root-complex: eerst alle groottes opmeten (de
+// all-ones-schrijftruc + teruglezen), dan BAR1 → PCIe 0x0 (de RP1-DMA-
+// loopback-eis) en de rest aaneengesloten daarachter, elk uitgelijnd op zijn
+// eigen grootte, met minstens 16MB tussen BAR1 en de rest. Geeft per BAR-index
+// het toegewezen PCIe-adres (^0 = afwezig), de gemeten grootte (0 = afwezig) en
+// of het een 64-bit BAR was (die neemt óók de volgende index in).
+//
+// Eén codepad voor twee aanroepers: de rpi5-board-bring-up (stil — de
+// terugwaardes worden genegeerd) en probe6 (die de meting uit de returns
+// print). LET OP: dit schrijft per BAR een 64-bit hi-word alleen als de BAR
+// zich als 64-bit meldt — zo blijft een aangrenzende 32-bit BAR (bv. RP1's
+// buren) ongemoeid, anders dan pcie.SetBAR64 dat altijd 64-bit schrijft.
+func (rc *RC) AssignBARs(bus, devno int) (addr, size [6]uint64, is64 [6]bool) {
+	for i := range addr {
+		addr[i] = ^uint64(0)
+	}
+	for i := 0; i < 6; i++ {
+		off := uintptr(0x10 + i*4)
+		rc.CfgWrite32(bus, devno, 0, off, 0xffffffff)
+		lo := rc.CfgRead32(bus, devno, 0, off)
+		if lo == 0 || lo == 0xffffffff {
+			continue
+		}
+		if lo&0x7 == 0x4 { // 64-bit memory-BAR: neemt ook slot i+1
+			rc.CfgWrite32(bus, devno, 0, off+4, 0xffffffff)
+			hi := rc.CfgRead32(bus, devno, 0, off+4)
+			size[i] = ^(uint64(hi)<<32 | uint64(lo&^0xf)) + 1
+			is64[i] = true
+		} else {
+			size[i] = uint64(^(lo &^ 0xf) + 1)
+		}
+		if is64[i] {
+			i++
+		}
+	}
+	// Toewijzen: BAR1 → 0x0 (DMA-loopback-eis), cursor voor de rest erachter.
+	cursor := size[1]
+	if cursor < 0x1000000 {
+		cursor = 0x1000000 // minstens 16MB vrijhouden na BAR1
+	}
+	for i := 0; i < 6; i++ {
+		if size[i] == 0 {
+			continue
+		}
+		a := uint64(0) // BAR1 blijft op 0x0
+		if i != 1 {
+			a = (cursor + size[i] - 1) &^ (size[i] - 1) // uitlijnen op eigen grootte
+			cursor = a + size[i]
+		}
+		addr[i] = a
+		off := uintptr(0x10 + i*4)
+		rc.CfgWrite32(bus, devno, 0, off, uint32(a))
+		if is64[i] {
+			rc.CfgWrite32(bus, devno, 0, off+4, uint32(a>>32))
+		}
+		if is64[i] {
+			i++ // 64-bit BAR nam ook slot i+1
+		}
+	}
+	return addr, size, is64
 }

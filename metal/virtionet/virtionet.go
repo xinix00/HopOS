@@ -222,7 +222,20 @@ func (n *Net) Receive(buf []byte) (int, error) {
 
 	slot := uintptr(n.rx.lastUsed % uint16(n.qsize))
 	elem := n.rx.used + 4 + slot*8
-	descIdx := uint16(dev.Read32(elem)) // used_elem.id
+	descIdx := uint16(dev.Read32(elem)) // used_elem.id (device-eigen: valideren!)
+
+	// De used-ring is device-eigen: een corrupt of kwaadaardig device kan hier
+	// een id buiten [0, qsize) plaatsen. Ongecontroleerd is descIdx een rauwe
+	// pointer-index in setDesc/recycleRx (OOB write via unsafe-pointer-rekenwerk)
+	// en in CopyOut (OOB read). Drop de entry veilig — niet recyclen, want we
+	// weten niet welke buffer erbij hoort (we verliezen hooguit één RX-descriptor
+	// bij dit device-fout-event) — en ga verder. Dit is het patroon dat de
+	// toekomstige RTL8126-driver overneemt.
+	if int(descIdx) >= n.qsize {
+		n.rx.lastUsed++
+		return 0, nil
+	}
+
 	length := int(dev.Read32(elem + 4)) // used_elem.len (incl. virtio-hdr)
 
 	if length > hdrLen {

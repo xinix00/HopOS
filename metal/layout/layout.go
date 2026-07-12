@@ -118,21 +118,21 @@ type Region struct{ Base, Size uint64 }
 // de *PA-accessors. Apps zien hier niets van — hun IPA-beeld (de constanten
 // hierboven) is op elk board gelijk en de stage-2 vertaalt.
 type Plan struct {
-	CtrlPA        uint64   // control-pages: MaxSlots+1 pagina's (4KB-aligned)
-	RingPA        uint64   // hop-ABI-ringen: MaxSlots × RingStride (4KB-aligned)
-	NetRingPA     uint64   // frame-ringen: MaxSlots × NetRingStride (2MB-aligned!)
-	Stage2PA      uint64   // app-core-vectoren + tabelblokken: (MaxSlots+1) × Stage2Stride (2KB-aligned)
-	RevokeVecPA   uint64   // EL2-vectortabel van de HOP-core (2KB-aligned): waar
+	CtrlPA      uint64 // control-pages: MaxSlots+1 pagina's (4KB-aligned)
+	RingPA      uint64 // hop-ABI-ringen: MaxSlots × RingStride (4KB-aligned)
+	NetRingPA   uint64 // frame-ringen: MaxSlots × NetRingStride (2MB-aligned!)
+	Stage2PA    uint64 // app-core-vectoren + tabelblokken: (MaxSlots+1) × Stage2Stride (2KB-aligned)
+	RevokeVecPA uint64 // EL2-vectortabel van de HOP-core (2KB-aligned): waar
 	// cpuinit VBAR_EL2 van core 0 heen zette. InitVectors plugt er alleen de
 	// HVC-revoke-handler in (offset 0x400) en laat de rest staan — een board
 	// mag daar zijn boot-diagnostiek hebben (rpi5: de faultdump-tabel).
-	BootScratchPA uint64   // boot-EL-scratch + DTB-pointer (cpuinit-vast, board-asm)
-	NetDMAPA      uint64   // NIC-DMA-regio (NetDMASize; buiten élke RAM-declaratie
+	BootScratchPA uint64 // boot-EL-scratch + DTB-pointer (cpuinit-vast, board-asm)
+	NetDMAPA      uint64 // NIC-DMA-regio (NetDMASize; buiten élke RAM-declaratie
 	// → device-gemapt → coherent met de NIC zonder cache-onderhoud). Optioneel
 	// (0 = board gebruikt een eigen constante of heeft geen NIC-DMA-plan):
 	// QEMU houdt de vaste NetDMABase binnen HOP's partitie, de Pi-boards
 	// leggen 'm hier vast en DTBPool snijdt 'm uit de pool.
-	Pool          []Region // vrij DRAM voor app-partities (2MB-korrel)
+	Pool []Region // vrij DRAM voor app-partities (2MB-korrel)
 }
 
 var plan Plan
@@ -349,8 +349,6 @@ const (
 	// fysieke control-page als ctx en de trampoline leest er alles van. HOP
 	// schrijft deze velden bij Start; de offsets staan als literals in de asm —
 	// bij verplaatsen ook metal/el2/*.s aanpassen.
-	CtrlSelfPA = 0x48 // HOP → app/tramp: fysiek adres van déze control-page
-	// (de app kent alleen IPA's, maar moet bij SMP de PA als CPU_ON-ctx geven)
 	CtrlVecPA = 0x50 // HOP → tramp: fysieke basis EL2-vectoren (VBAR_EL2)
 
 	// Door de EL2-vectoren (stage2.InitVectors) geschreven vlak vóór de
@@ -370,16 +368,15 @@ const (
 	// app-runtime (OS-laag, niet app-code) leest ze en brengt de secundaire
 	// cores op via goos.Task. De app zelf is oblivious — hij krijgt N cores
 	// "as is" en parallelt via GOMAXPROCS.
-	CtrlCores      = 0x70 // HOP → app: aantal cores (≥1; 1 = geen SMP)
-	CtrlSMPSecBase = 0x78 // HOP → app: eerste secundaire core-index (primair+1)
-	CtrlSMPTramp   = 0x80 // HOP → app: fysiek adres EL2 SMP-trampoline (HOP-image)
+	CtrlCores    = 0x70 // HOP → app: aantal cores (≥1; 1 = geen SMP)
+	CtrlSMPTramp = 0x80 // HOP → app: fysiek adres EL2 SMP-trampoline (HOP-image)
 
 	// SMP-handoff (app → secundaire core): goos.Task schrijft hier de M-context
 	// voor de core die het opbrengt, de EL2-trampoline leest ze. Onder een
 	// mutex geschreven (één core-boot tegelijk), dus één handoff-venster volstaat.
-	CtrlSMPSp   = 0x88 // stacktop voor de nieuwe M (IPA)
-	CtrlSMPMp   = 0x90 // *m (IPA)
-	CtrlSMPG0   = 0x98 // *g (g0 van de nieuwe M, IPA)
+	CtrlSMPSp    = 0x88 // stacktop voor de nieuwe M (IPA)
+	CtrlSMPMp    = 0x90 // *m (IPA)
+	CtrlSMPG0    = 0x98 // *g (g0 van de nieuwe M, IPA)
 	CtrlSMPFn    = 0xA0 // entry (mstart, IPA)
 	CtrlSMPStub  = 0xA8 // app-IPA van de EL1-stub waar de EL2-tramp naar ERET't
 	CtrlSMPTtbr0 = 0xB0 // stage-1 L1-tabel voor de nieuwe core (= RamStart+0x4000,

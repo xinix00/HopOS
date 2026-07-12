@@ -14,7 +14,6 @@ import (
 
 	"hop-os/metal/board"
 	"hop-os/metal/board/raspi"
-	"hop-os/metal/dev"
 	"hop-os/metal/dhcp"
 	"hop-os/metal/el2"
 	"hop-os/metal/fb"
@@ -38,7 +37,7 @@ func (machine) CoreID() int { return CoreID() }
 // eerst dereferencen: het woord bevat het DTB-adres. Op het board te
 // verifiëren (zie docs/rpi4.md).
 func (machine) MemTotal() uint64 {
-	if n, ok := fdt.MemTotal(uintptr(dev.Read64(DTBPtr))); ok {
+	if n, ok := fdt.MemTotal(raspi.DTB()); ok {
 		return n
 	}
 	return 0
@@ -78,7 +77,7 @@ func (machine) SMPStubPC() uint64    { return el2.SMPStubPC() }
 // roept ProbeNIC vóór Net() aan (die volgorde is het contract).
 var lease dhcp.Lease
 
-// ProbeNIC brengt de GENET-keten op — boardvast bewezen met probe7
+// ProbeNIC brengt de GENET-keten op — boardvast bewezen op echte hardware
 // (2026-07-11, één boot): v5-rev → MAC-reset (U-Boot-sequence) → PHY-scan
 // (BCM54213PE op adres 1, géén reset-GPIO hier) → autonegotiatie →
 // ring-16-DMA in de plan-regio → DHCP-lease. Geen PCIe zoals de Pi 5: de
@@ -86,7 +85,7 @@ var lease dhcp.Lease
 func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
 	nic := &genet.Net{
 		Base: uintptr(GENETBase),
-		MAC:  raspi.MACFromSerial(uintptr(dev.Read64(DTBPtr)), 0x04),
+		MAC:  raspi.MACFromSerial(raspi.DTB(), 0x04),
 	}
 	if rev := nic.Rev() >> 24 & 0xF; rev != 6 {
 		return nil, nil, fmt.Errorf("genet: rev-nibble %d (verwacht 6 = v5)", rev)
@@ -112,25 +111,26 @@ func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
 	return nic, net.HardwareAddr(nic.MAC[:]), nil
 }
 
-// Net geeft de DHCP-lease die ProbeNIC haalde. Geen resolver in de lease →
-// de gateway als DNS (thuisrouters resolven vrijwel altijd zelf).
-func (machine) Net() board.NetConfig {
-	dns := lease.DNSString()
-	if dns == "0.0.0.0" {
-		dns = lease.GWString()
-	}
-	return board.NetConfig{
-		IP:   lease.IPString(),
-		CIDR: lease.CIDR(),
-		GW:   lease.GWString(),
-		DNS:  dns + ":53",
-	}
-}
+// Net geeft de DHCP-lease die ProbeNIC haalde, omgezet naar board.NetConfig
+// via de gedeelde raspi-helper (identiek aan de Pi 5).
+func (machine) Net() board.NetConfig { return raspi.NetFromLease(lease) }
+
+// DHCPLease geeft de door ProbeNIC verkregen lease (board.LeaseHolder), zodat
+// hopnet er na de stack-bring-up dhcp.KeepAlive op start. false vóór een echte
+// ACK (dan is er niets te vernieuwen).
+func (machine) DHCPLease() (dhcp.Lease, bool) { return lease, lease.Acquired }
 
 // PCIe: n.v.t. — de enige PCIe-lane van de BCM2711 zit vast aan de
 // VL805-USB-controller; geen NVMe op dit board (CM4 uitgezonderd).
 func (machine) PCIe() board.PCIeWindow { return board.PCIeWindow{} }
 
-// Framebuffer: de firmware-simple-framebuffer uit de DTB (HDMI-log-console
-// zonder debug-kabel). Op het board te verifiëren (zie docs/rpi4.md).
-func (machine) Framebuffer() (fb.Desc, bool) { return raspi.Framebuffer(DTBPtr) }
+// Framebuffer: DTB-simplefb met mailbox-terugval — de gedeelde raspi-
+// discovery (zie board/raspi/fb.go; gemeten 2026-07-11: zonder de terugval
+// bleef de Pi 4 op het regenboog-splashscherm hangen).
+func (machine) Framebuffer() (fb.Desc, bool) {
+	return raspi.FramebufferVC(DTBPtr, uintptr(VCMailBase))
+}
+
+// EnableTimestamps zet de per-regel-console-stempel aan (optionele interface,
+// door cmd/hopos ná de boot-banner aangeroepen). Zie board/raspi/console_ts.go.
+func (machine) EnableTimestamps() { raspi.LogTimestamps(true) }

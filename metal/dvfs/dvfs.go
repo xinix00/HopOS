@@ -36,6 +36,12 @@ type Config struct {
 	Verbose bool         // true: log elke flank (soak-diagnose)
 }
 
+// Het "vol"-plafond is GEEN veld hier: dvfs volgt gewoon het firmware-maximum
+// (MaxClockRate). Een thermische cap zet je in config.txt met arm_freq_max —
+// de firmware rapporteert dat dan als max en dvfs pakt het vanzelf op (nul
+// code). Zo bleef een fanloze Pi 5 onder de 85°C-throttle in de 24u-soak
+// (2026-07-11: 2400MHz liep binnen minuten naar 84°C, arm_freq_max=1800 niet).
+
 const (
 	sample   = 10 * time.Millisecond // reactietijd omhoog
 	cooldown = 30 * time.Second      // hysterese omlaag
@@ -51,7 +57,7 @@ const (
 func Start(cfg Config) {
 	max, ok := cfg.Mbox.MaxClockRate(vcmail.ClockARM)
 	if !ok {
-		fmt.Println("dvfs: mailbox antwoordt niet — geen klokbeleid (firmware-default blijft)")
+		fmt.Println("dvfs: mailbox not responding — clock policy disabled (staying on firmware default)")
 		return
 	}
 	// De firmware klemt op zijn eigen minimum (GEMETEN 2026-07-11, Pi 5:
@@ -61,7 +67,7 @@ func Start(cfg Config) {
 		cfg.LowHz = min
 	}
 	cur, _ := cfg.Mbox.ClockRate(vcmail.ClockARM)
-	fmt.Printf("dvfs: ARM %d MHz (firmware min/max %d/%d) — beleid: klok volgt idle, stil-stand %d\n",
+	fmt.Printf("dvfs: ARM %d MHz (firmware min/max %d/%d) — policy: clock follows idle, quiet floor %d MHz\n",
 		cur/1_000_000, cfg.LowHz/1_000_000, max/1_000_000, cfg.LowHz/1_000_000)
 	go watch(cfg, max)
 }
@@ -79,7 +85,7 @@ func watch(cfg Config, maxHz uint32) {
 				fmt.Printf("dvfs: → %d MHz (%s)\n", actual/1_000_000, why)
 			}
 		} else {
-			fmt.Println("dvfs: SetClockRate faalt — beleid pauzeert deze flank")
+			fmt.Println("dvfs: SetClockRate failed — skipping this transition")
 		}
 	}
 
@@ -88,7 +94,7 @@ func watch(cfg Config, maxHz uint32) {
 	// P1-acceptatie draaide per ongeluk op 800MHz): boot-werk verdient de
 	// volle klok, daarna regeert het beleid.
 	high := true
-	set(maxHz, "start")
+	set(maxHz, "boot")
 
 	for {
 		time.Sleep(sample)
@@ -125,20 +131,20 @@ func watch(cfg Config, maxHz uint32) {
 		switch {
 		case busy && !high:
 			high = true
-			set(maxHz, "druk")
+			set(maxHz, "busy")
 		case busy:
 			quiet = time.Now()
 		case high && time.Since(quiet) > cooldown:
 			high = false
-			set(cfg.LowHz, "30s stil")
+			set(cfg.LowHz, "idle 30s")
 		}
 
 		if time.Since(lastTele) >= telemetr {
 			lastTele = time.Now()
 			mC, _ := cfg.Mbox.Temp()
 			hz, _ := cfg.Mbox.ClockRate(vcmail.ClockARM)
-			fmt.Printf("dvfs: telemetrie — %d.%d°C, ARM %d MHz, stand=%s\n",
-				mC/1000, mC%1000/100, hz/1_000_000, map[bool]string{true: "vol", false: "stil"}[high])
+			fmt.Printf("dvfs: telemetry — %d.%d°C, ARM %d MHz, state=%s\n",
+				mC/1000, mC%1000/100, hz/1_000_000, map[bool]string{true: "full", false: "quiet"}[high])
 		}
 	}
 }

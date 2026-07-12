@@ -4,8 +4,10 @@
 # bootloader. Zelfde boot-recept als de probe (image/rpi5-probe.sh — os_check,
 # raw op 0x80000, DTB op 0x0F000000); zie docs/rpi5.md voor het dossier.
 #
-# Flashen (kaart-conventie: Linux-bestanden blijven staan):
-#   cp sd-rpi5/hop-hopos5.img /Volumes/bootfs/ && cp sd-rpi5/config.txt /Volumes/bootfs/
+# Flashen (kaart-conventie: Linux-bestanden blijven staan). config-hopos.txt
+# komt AS config.txt op de kaart; het getrackte sd-rpi5/config.txt is de
+# agent-config en blijft ongemoeid:
+#   cp sd-rpi5/hop-hopos5.img /Volumes/bootfs/ && cp sd-rpi5/config-hopos.txt /Volumes/bootfs/config.txt
 #   sync && diskutil eject /Volumes/bootfs
 # UART meekijken (kabeltje in de U-poort):
 #   /bin/sh -c 'exec 4<>/dev/cu.usbmodem11302; stty -f /dev/cu.usbmodem11302 115200 raw; exec cat <&4'
@@ -35,8 +37,10 @@ cd "$DIR"
 mkdir -p sd-rpi5
 go run "$DIR/image/mkkernel/main.go" -elf metal/hopos5.elf -o sd-rpi5/hop-hopos5.img -load 0x80000 -raw
 
-# 4. config.txt — zelfde poortwachters als de probe, kernel wijst naar ons.
-cat > sd-rpi5/config.txt <<'EOF'
+# 4. config-hopos.txt (gitignored) — zelfde poortwachters als de probe, kernel
+#    wijst naar ons. Het getrackte config.txt is de agent-config; deze komt bij
+#    het flashen als config.txt op de kaart.
+cat > sd-rpi5/config-hopos.txt <<'EOF'
 # HopOS multikernel (fase P1) — Raspberry Pi 5 (zie docs/rpi5.md)
 arm_64bit=1
 kernel=hop-hopos5.img
@@ -55,5 +59,5 @@ uart_2ndstage=1
 arm_freq_min=800
 EOF
 
-echo "sd-rpi5/hop-hopos5.img ($(du -h sd-rpi5/hop-hopos5.img | cut -f1)) + config.txt klaar."
-echo "flash: cp sd-rpi5/hop-hopos5.img sd-rpi5/config.txt /Volumes/bootfs/ && sync && diskutil eject /Volumes/bootfs"
+echo "sd-rpi5/hop-hopos5.img ($(du -h sd-rpi5/hop-hopos5.img | cut -f1)) + config-hopos.txt klaar."
+echo "flash: cp sd-rpi5/hop-hopos5.img /Volumes/bootfs/ && cp sd-rpi5/config-hopos.txt /Volumes/bootfs/config.txt && sync && diskutil eject /Volumes/bootfs"

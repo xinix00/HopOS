@@ -2,23 +2,52 @@ package slots
 
 // SMP (fase 5): een app met cores > 1 draait op één primair slot plus de
 // cores-1 cores erna (primair+1 .. primair+cores-1), samen op één gedeelde
-// heap. Hoeveel cores een app heeft staat op zijn control-page (CtrlCores, door
-// Start gezet) — dat is de enige bron van waarheid, dus er is geen aparte
-// reserverings-administratie nodig: de geheugenisolatie zit in de stage-2-kooi
-// (hardware), en de capaciteits-accounting (welke cores vrij zijn) doet HOP's
-// HopRunner. Start weigert al te beginnen op een core die niet uit is.
+// heap. De geheugenisolatie zit in de stage-2-kooi (hardware), en de
+// capaciteits-accounting (welke cores vrij zijn) doet HOP's HopRunner. Start
+// weigert al te beginnen op een core die niet uit is.
+//
+// SECURITY (isolatie-invariant): het aantal cores van een app MAG NIET uit de
+// control-page (CtrlCores) worden teruggelezen voor vertrouwensbeslissingen.
+// Die page ligt pageRW in de stage-2-kooi van de app (stage2.go), dus een
+// kwaadwillende app kan CtrlCores herschrijven. Zou HOP hem terugvertrouwen,
+// dan kon de app:
+//   - CtrlCores ophogen en zo via CtrlSMPReq buurcores (van een ander slot) in
+//     zijn eigen kooi laten dispatchen (dispatchSMP-bereikcheck);
+//   - CtrlCores verlagen zodat Stop's stillOn-scan levende secundaire cores mist
+//     en releaseSlot een partitie vrijgeeft waarvan cores nog draaien.
+// Daarom houdt HOP een eigen, vertrouwde per-slot core-telling in HOP-geheugen
+// (slotCores), gezet uit Start's al-gevalideerde `cores`-argument. dispatchSMP
+// en appCores lezen HIER, nooit ctrlRead(CtrlCores). Start blíjft CtrlCores op
+// de page schrijven (de app-OS-laag en de dvfs-governor lezen 'm) — alleen de
+// readback wordt nooit vertrouwd.
 
 import "hop-os/metal/layout"
+
+// slotCores is HOP's vertrouwde bron van waarheid voor het aantal cores per
+// slot: gezet door Start (uit het al-gevalideerde `cores`-argument), gewist door
+// releaseSlot. 0 = geen actieve reservering. Enkel de HOP-kern (core 0) muteert
+// en leest deze array — net als partOf — dus Go-synchronisatie is niet nodig.
+var slotCores [layout.MaxSlots + 1]int
+
+// coreCount geeft het vertrouwde core-aantal van slot i (minstens 1). Nooit uit
+// de app-schrijfbare control-page — zie de pakketnoot hierboven.
+func coreCount(i int) int {
+	if i < 1 || i > layout.MaxSlots {
+		return 1
+	}
+	c := slotCores[i]
+	if c < 1 {
+		c = 1
+	}
+	return c
+}
 
 // appCores geeft álle cores van de app op slot i: de primaire plus, bij een
 // SMP-app, zijn secundaire cores. Voor een gewone app is dat gewoon [i]. Zo kan
 // het lifecycle-pad (Stop) één keer over de cores lopen, ongeacht of het er één
-// of meerdere zijn.
+// of meerdere zijn. Het aantal komt uit HOP's eigen slotCores, niet CtrlCores.
 func appCores(i int) []int {
-	cores := int(ctrlRead(i, layout.CtrlCores))
-	if cores < 1 {
-		cores = 1
-	}
+	cores := coreCount(i)
 	all := make([]int, 0, cores)
 	for c := i; c < i+cores; c++ {
 		all = append(all, c)

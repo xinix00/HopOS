@@ -29,6 +29,21 @@ const (
 	maxBlob = 2 << 20 // een DTB > 2MB is onzin: begrenst al ons rekenwerk
 )
 
+// Valid meldt of op base een geldige DTB-blob staat: een niet-nul-pointer met
+// het FDT-magic (0xd00dfeed, big-endian) op offset 0 en een header-grootte
+// binnen maxBlob. Dé onderscheidende test voor "kreeg dit board een device-tree
+// mee?" — op UEFI/ACPI-firmware (de O6N) is er geen DTB en wijst de scratch-
+// pointer naar rommel, waar elke reader terecht (…,false) op teruggeeft; met
+// Valid kan de aanroeper dat expliciet vaststellen en er LUID op reageren
+// (waarschuwen + veilige terugval) i.p.v. stil te degraderen.
+func Valid(base uintptr) bool {
+	if base == 0 || be32(base) != magic {
+		return false
+	}
+	sz := be32(base + 4)
+	return sz >= 8 && sz <= maxBlob
+}
+
 // be32/be64 lezen een big-endian woord van een fysiek adres (device- of
 // normal-memory; dev doet gealigneerde toegang).
 func be32(addr uintptr) uint32 {

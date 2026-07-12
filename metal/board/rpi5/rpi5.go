@@ -18,8 +18,10 @@
 package rpi5
 
 import (
+	"fmt"
+
 	"hop-os/metal/board/raspi"
-	"hop-os/metal/dev"
+	"hop-os/metal/fdt"
 	"hop-os/metal/layout"
 )
 
@@ -41,6 +43,8 @@ import (
 const revokeVecAsm = 0x8B000
 
 func init() {
+	// Board-specifiek RNG200-basisadres bekendmaken aan de gedeelde raspi-RNG
+	// (board/raspi/rng.go leest RNG200Base voor crypto/rand). Vóór de MPIDR-guard:
 	// Alleen de HOP-core (MPIDR-aff 0) berekent en zet het plan: het leest de
 	// DTB fysiek (0x7F008 + de blob), en dat adres bestaat niet in de kooi van
 	// een app-core (die draait onder stage-2). Een app-core heeft het plan ook
@@ -50,6 +54,13 @@ func init() {
 	if raspi.MPIDR()&0xFFFFFF != 0 {
 		return
 	}
+	// RNG200-basis bekendmaken aan de gedeelde raspi-RNG (crypto/rand) — ACHTER
+	// de guard: appspike linkt dit board, dus een app draait deze init ook. Zou
+	// RNG200Base vóór de guard gezet worden, dan wees getRandomData in de app
+	// naar RNG200-MMIO dat in zijn stage-2-kooi niet gemapt is → fault bij de
+	// eerste crypto/rand. Achter de guard blijft de RNG200Base van een app 0, en
+	// dan valt getRandomData terug op de PRNG. Alleen HOP mapt en gebruikt dit MMIO.
+	raspi.RNG200Base = RNG200Base
 	p := layout.Plan{
 		CtrlPA:        0x10000000,
 		RingPA:        0x11000000,
@@ -61,9 +72,14 @@ func init() {
 	}
 	// De pool = het volledige DRAM (DTB /memory, ook boven 4GB) minus de vaste
 	// regio's. Faalt de DTB-lezing, val terug op een conservatieve vaste pool
-	// (512MB, past in élke Pi 5) — nooit fantoom-RAM uitdelen.
-	p.Pool = raspi.DTBPool(uintptr(dev.Read64(DTBPtr)), p)
+	// (512MB, past in élke Pi 5) — nooit fantoom-RAM uitdelen. Die terugval is
+	// LUID: op een Pi met geldige DTB hoort dit pad nooit te lopen, dus als het
+	// wél loopt (kromme/afwezige blob) mag het niet stil degraderen.
+	dtb := raspi.DTB()
+	p.Pool = raspi.DTBPool(dtb, p)
 	if len(p.Pool) == 0 {
+		fmt.Printf("WAARSCHUWING HOPOS_POOL_FALLBACK: geen bruikbare DTB /memory (dtb=%#x, geldig=%v) — partitie-pool valt terug op de vaste 512MB [0x20000000,0x40000000); de RAM-sanity draait dan op het layout, niet op gemeten RAM\n",
+			dtb, fdt.Valid(dtb))
 		p.Pool = []layout.Region{{Base: 0x20000000, Size: 0x20000000}}
 	}
 	layout.UsePlan(p)
@@ -88,6 +104,11 @@ const (
 	// firmware in x0 meegaf — laag DRAM onder de kernel, zelfde plek als de
 	// boot-EL-scratch (+8). board.MemTotal parset 'm met metal/fdt.
 	DTBPtr = 0x7F008
+
+	// RNG200: het Broadcom iproc-rng200-blok (BCM2712) — hetzelfde blok als de
+	// Pi 4 (daar op 0xFE104000), hier op 40-bit MMIO. De gedeelde driver zit in
+	// board/raspi/rng.go; init() geeft dit adres door via raspi.RNG200Base.
+	RNG200Base = 0x107d208000
 
 	// AVS-monitor (thermiek): brcm,bcm2711-thermal in de BCM2712-DTB —
 	// temperatuur = slope×raw + offset uit de thermal-zone (zie probe5).

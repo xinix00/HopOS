@@ -18,10 +18,10 @@ import (
 )
 
 //go:linkname ramStart runtime/goos.RamStart
-var ramStart uint = 0x00080000
+var ramStart uint = raspi.HopKernelStart
 
 //go:linkname ramSize runtime/goos.RamSize
-var ramSize uint = 0x08000000
+var ramSize uint = raspi.HopKernelSize
 
 // Klokbeleid (docs/plan-p2b-soak.md): identiek aan de Pi 5, alleen de
 // mailbox-basis verschilt. TickHz = CNTFRQ/65536 (event-stream-tempo).

@@ -12,6 +12,7 @@ package dhcp
 import (
 	"fmt"
 	"math/bits"
+	"net"
 	"time"
 )
 
@@ -29,6 +30,22 @@ type Lease struct {
 	GW     [4]byte // optie 3 (eerste router)
 	DNS    [4]byte // optie 6 (eerste resolver; 0.0.0.0 = geen)
 	Server [4]byte // optie 54 (de lessor)
+
+	// Lease-timers uit de ACK (seconden). LeaseSecs = optie 51 (totale duur;
+	// 0xFFFFFFFF = oneindig). T1Secs/T2Secs = optie 58/59 (renew-/rebind-tijd);
+	// afwezig (0) → val terug op 0.5·LeaseSecs voor de vernieuwing (KeepAlive).
+	LeaseSecs uint32
+	T1Secs    uint32
+	T2Secs    uint32
+
+	// Acquired markeert een echt uit een ACK verkregen lease (vs. de nulwaarde);
+	// KeepAlive draait alleen op een verkregen lease.
+	Acquired bool
+}
+
+// be32 leest een 4-byte big-endian veld (DHCP-optiewaarden 51/58/59).
+func be32(d []byte) uint32 {
+	return uint32(d[0])<<24 | uint32(d[1])<<16 | uint32(d[2])<<8 | uint32(d[3])
 }
 
 func ipStr(a [4]byte) string { return fmt.Sprintf("%d.%d.%d.%d", a[0], a[1], a[2], a[3]) }
@@ -74,8 +91,126 @@ func Acquire(nic NIC, mac [6]byte, timeout time.Duration) (Lease, error) {
 			return Lease{}, fmt.Errorf("dhcp: TX: %w", err)
 		}
 		if ack, ok := await(nic, mac, xid, 5, deadline); ok { // ACK
+			ack.Acquired = true
 			return ack, nil
 		}
+	}
+}
+
+// Renew vernieuwt de lease met een unicast RFC-2131-RENEW (ciaddr = lease-IP,
+// een REQUEST rechtstreeks naar de lessor, géén optie 50/54) — maar via de
+// gVisor-netstack (het net-pakket), niet via rauwe frames. Dat is de kern van de
+// RX-veiligheid: na bring-up bezit hopnet's rxLoop de NIC-RX (de driverringen
+// zijn lock-vrij, dus een tweede Receive-lus zou ze desynchroniseren), maar de
+// stack doet zelf de RX-demux (UDP-poort 68) én de TX-serialisatie. Renew leent
+// dus geen NIC — het opent een UDP-socket op de stack. Vereist dat hopnet de
+// stack al in net.SocketFunc hing (Up doet dat vóór het KeepAlive start).
+func Renew(l Lease, mac [6]byte, timeout time.Duration) (Lease, error) {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IP(l.IP[:]), Port: 68})
+	if err != nil {
+		return Lease{}, fmt.Errorf("dhcp renew: bind :68: %w", err)
+	}
+	defer conn.Close()
+
+	xid := uint32(time.Now().UnixNano()) | 1
+	req := bootp(mac, xid, 3, l.IP, false, nil) // REQUEST, ciaddr = lease-IP, unicast
+	if _, err := conn.WriteToUDP(req, &net.UDPAddr{IP: net.IP(l.Server[:]), Port: 67}); err != nil {
+		return Lease{}, fmt.Errorf("dhcp renew: TX: %w", err)
+	}
+
+	conn.SetReadDeadline(time.Now().Add(timeout))
+	buf := make([]byte, 1536)
+	for {
+		n, _, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			return Lease{}, fmt.Errorf("dhcp renew: geen ACK binnen %v: %w", timeout, err)
+		}
+		nl, ok := parseBootp(buf[:n], mac, xid, 5) // ACK
+		if !ok {
+			continue // ander of laat pakket op :68 — binnen de deadline doorlezen
+		}
+		nl.Acquired = true
+		// Een RENEW-ACK herhaalt masker/router/DNS/server soms niet; draag de
+		// bestaande waarde dan door (de lease-tijden komen wél altijd mee).
+		if nl.Mask == ([4]byte{}) {
+			nl.Mask = l.Mask
+		}
+		if nl.GW == ([4]byte{}) {
+			nl.GW = l.GW
+		}
+		if nl.DNS == ([4]byte{}) {
+			nl.DNS = l.DNS
+		}
+		if nl.Server == ([4]byte{}) {
+			nl.Server = l.Server
+		}
+		return nl, nil
+	}
+}
+
+// KeepAlive houdt de lease levend in een eigen goroutine: het slaapt tot T1
+// (optie 58, of anders 0.5·lease-tijd) en doet dan een unicast-RENEW via de
+// netstack (Renew). Lukt dat niet, dan blijft het tot ~T2 kort proberen; daarna
+// geeft het luid op (de node behoudt zijn IP tot de router het heruitdeelt — een
+// reboot re-acquire't; een broadcast-rebind op T2 is de nette vervolgstap).
+//
+// RX-veilig: Renew loopt volledig over de netstack, dus KeepAlive raakt de
+// NIC-RX niet en mag náást hopnet's rxLoop draaien. Start het PAS nadat hopnet
+// de stack in net.SocketFunc hing (hopnet.Up doet dat op het juiste moment).
+func KeepAlive(mac [6]byte, lease Lease) {
+	for {
+		wait := lease.renewAfter()
+		if wait <= 0 {
+			return // onbekende of oneindige lease: niets te timen
+		}
+		sleepChunked(wait)
+
+		renewed := false
+		for attempt := 0; attempt < 6; attempt++ {
+			l, err := Renew(lease, mac, 10*time.Second)
+			if err == nil {
+				lease = l
+				renewed = true
+				fmt.Printf("dhcp: lease renewed — %s (%ds remaining) HOPOS_DHCP_RENEW\n",
+					lease.IPString(), lease.LeaseSecs)
+				break
+			}
+			fmt.Printf("dhcp: renew attempt %d failed (%v)\n", attempt+1, err)
+			time.Sleep(30 * time.Second)
+		}
+		if !renewed {
+			fmt.Printf("dhcp: lease NOT renewed — keeping %s until the router reclaims it HOPOS_DHCP_RENEW_FAIL\n",
+				lease.IPString())
+			return
+		}
+	}
+}
+
+// sleepChunked slaapt d in plakken van een minuut en telt zelf: tamago heeft
+// ÉÉN tijdbasis, dus een SNTP-kloksprong (epoch→nu bij boot) laat een kale
+// Sleep(d) in één keer aflopen — dat wás de "renewal bij boot" (gemeten
+// 2026-07-11). Geplakt kost een sprong hooguit één plak.
+func sleepChunked(d time.Duration) {
+	const chunk = time.Minute
+	for ; d > chunk; d -= chunk {
+		time.Sleep(chunk)
+	}
+	time.Sleep(d)
+}
+
+// renewAfter geeft de wachttijd tot de eerstvolgende vernieuwing: T1 (optie 58)
+// indien bekend, anders de helft van de lease-tijd. 0 = geen timing (onbekende
+// of oneindige lease → geen vernieuwing).
+func (l Lease) renewAfter() time.Duration {
+	switch {
+	case l.LeaseSecs == 0xFFFFFFFF:
+		return 0 // oneindige lease: nooit vernieuwen
+	case l.T1Secs > 0:
+		return time.Duration(l.T1Secs) * time.Second
+	case l.LeaseSecs > 0:
+		return time.Duration(l.LeaseSecs/2) * time.Second
+	default:
+		return 0
 	}
 }
 
@@ -125,15 +260,31 @@ func packet(mac [6]byte, xid uint32, msgtype byte, extra []byte) []byte {
 	ul := tot - 20
 	udp[4], udp[5] = byte(ul>>8), byte(ul)
 
-	bp := f[42:]
+	// De BOOTP-payload: broadcast-DORA (ciaddr 0, broadcast-flag aan → het
+	// antwoord komt als broadcast, onafhankelijk van het RX-unicast-filter).
+	copy(f[42:], bootp(mac, xid, msgtype, [4]byte{}, true, extra))
+	return f
+}
+
+// bootp bouwt de BOOTP/DHCP-boodschap (de UDP-payload los van het frame):
+// op/htype/hlen, xid, ciaddr (het lease-IP bij een RENEW, anders 0), chaddr,
+// DHCP-magic en de opties (53 msgtype + 55 parameter-request voor masker/
+// router/DNS/lease/T1/T2 + de aanroeper-extra's + einde 255). bcast zet de
+// broadcast-flag (DISCOVER/DORA bij boot, nog zonder IP); een unicast RENEW,
+// die al een IP heeft en rechtstreeks met de lessor praat, laat 'm uit.
+func bootp(mac [6]byte, xid uint32, msgtype byte, ciaddr [4]byte, bcast bool, extra []byte) []byte {
+	bp := make([]byte, 300)
 	bp[0], bp[1], bp[2] = 1, 1, 6 // BOOTREQUEST, ethernet, hlen
 	bp[4], bp[5], bp[6], bp[7] = byte(xid>>24), byte(xid>>16), byte(xid>>8), byte(xid)
-	bp[10] = 0x80 // broadcast-flag
+	if bcast {
+		bp[10] = 0x80 // broadcast-flag
+	}
+	copy(bp[12:16], ciaddr[:]) // ciaddr: gezet bij RENEW (RFC 2131 §4.3.2)
 	copy(bp[28:34], mac[:])
 	copy(bp[236:240], []byte{99, 130, 83, 99}) // DHCP-magic
-	o := append([]byte{53, 1, msgtype, 55, 3, 1, 3, 6}, extra...)
+	o := append([]byte{53, 1, msgtype, 55, 6, 1, 3, 6, 51, 58, 59}, extra...)
 	copy(bp[240:], append(o, 255))
-	return f
+	return bp
 }
 
 // checksum is de standaard 16-bit one's-complement over de IP-header.
@@ -159,8 +310,15 @@ func parse(f []byte, mac [6]byte, xid uint32, msgtype byte) (Lease, bool) {
 	if len(udp) < 8+240 || udp[2] != 0 || udp[3] != 68 { // dst-poort 68
 		return Lease{}, false
 	}
-	bp := udp[8:]
-	if bp[0] != 2 { // BOOTREPLY
+	return parseBootp(udp[8:], mac, xid, msgtype)
+}
+
+// parseBootp licht de lease uit een BOOTP/DHCP-boodschap (de UDP-payload, los
+// van het frame — de vorm die zowel het boot-pad (parse na frame-unwrap) als
+// de netstack-RENEW (Renew leest de payload rechtstreeks uit de socket) voedt):
+// BOOTREPLY, onze xid en chaddr, optie 53 = msgtype.
+func parseBootp(bp []byte, mac [6]byte, xid uint32, msgtype byte) (Lease, bool) {
+	if len(bp) < 240 || bp[0] != 2 { // BOOTREPLY
 		return Lease{}, false
 	}
 	if uint32(bp[4])<<24|uint32(bp[5])<<16|uint32(bp[6])<<8|uint32(bp[7]) != xid {
@@ -210,6 +368,18 @@ func parse(f []byte, mac [6]byte, xid uint32, msgtype byte) (Lease, bool) {
 		case 54:
 			if ln >= 4 {
 				copy(l.Server[:], d)
+			}
+		case 51: // lease-tijd (seconden)
+			if ln >= 4 {
+				l.LeaseSecs = be32(d)
+			}
+		case 58: // T1 (renew-tijd)
+			if ln >= 4 {
+				l.T1Secs = be32(d)
+			}
+		case 59: // T2 (rebind-tijd)
+			if ln >= 4 {
+				l.T2Secs = be32(d)
 			}
 		}
 		i += 2 + ln

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"hop-os/metal/dev"
+	"hop-os/metal/mdio"
 )
 
 // Registeroffsets vanaf de GENET-basis (bcmgenet.h, GENET_V5-hw_params).
@@ -39,15 +40,15 @@ const (
 	rbufCtrl         = 0x300 // bit1 = ALIGN_2B (2 pad-bytes vóór elk RX-frame)
 	rbufTBufSizeCtrl = 0x3B4
 
-	umacCmd        = 0x808 // TX_EN 0, RX_EN 1, speed [3:2], PROMISC 4, SW_RESET 13, LCL_LOOP_EN 15
-	umacMAC0       = 0x80C
-	umacMAC1       = 0x810
-	umacMaxFrame   = 0x814
-	umacTxFlush    = 0xB34
-	umacMIBCtrl    = 0xD80
-	umacMDIOCmd    = 0xE14 // START_BUSY 29, READ_FAIL 28, RD 2<<26, WR 1<<26, phy<<21, reg<<16, data
-	umacMDFCtrl    = 0xE50 // filter-enable-bits: filter n = bit 16-n
-	umacMDFAddr    = 0xE54 // 17 filters × 2 woorden
+	umacCmd      = 0x808 // TX_EN 0, RX_EN 1, speed [3:2], PROMISC 4, SW_RESET 13, LCL_LOOP_EN 15
+	umacMAC0     = 0x80C
+	umacMAC1     = 0x810
+	umacMaxFrame = 0x814
+	umacTxFlush  = 0xB34
+	umacMIBCtrl  = 0xD80
+	umacMDIOCmd  = 0xE14 // START_BUSY 29, READ_FAIL 28, RD 2<<26, WR 1<<26, phy<<21, reg<<16, data
+	umacMDFCtrl  = 0xE50 // filter-enable-bits: filter n = bit 16-n
+	umacMDFAddr  = 0xE54 // 17 filters × 2 woorden
 
 	// DMA: 256 descriptors van 3 woorden (12 bytes), dáárna de ringregisters
 	// (0x40 per ring, ring 16 = de default), dáárna de gedeelde registers.
@@ -63,10 +64,8 @@ const (
 	tdmaBurst   = 0x504C
 
 	// LENGTH_STATUS-bits (woord 0 van elke descriptor; lengte in [27:16]).
-	dmaOwn  = 0x8000
-	dmaEOP  = 0x4000
-	dmaSOP  = 0x2000
-	dmaWrap = 0x1000
+	dmaEOP = 0x4000
+	dmaSOP = 0x2000
 	// TX: QTAG [12:7] moet 0x3F zijn (valkuil 1) + CRC laten aanhangen.
 	txQTag      = 0x3F << 7
 	txAppendCRC = 0x0040
@@ -85,12 +84,12 @@ type Net struct {
 	MAC  [6]byte
 
 	rxBufs, txBufs uintptr
-	rxPtr, txPtr   int    // descriptor-pointer, mod 256
-	rxCons, txProd uint32 // vrijlopende index, mod 0x10000 (valkuil 3)
+	rxCons, txProd uint32 // vrijlopende index, mod 0x10000 (valkuil 3); de
+	// descriptor-pointer is int(...)%nBD — nBD deelt 0x10000, dus consistent.
 }
 
-func (n *Net) rd(off uintptr) uint32     { return dev.Read32(n.Base + off) }
-func (n *Net) wr(off uintptr, v uint32)  { dev.Write32(n.Base+off, v) }
+func (n *Net) rd(off uintptr) uint32           { return dev.Read32(n.Base + off) }
+func (n *Net) wr(off uintptr, v uint32)        { dev.Write32(n.Base+off, v) }
 func (n *Net) mod(off uintptr, mask, v uint32) { n.wr(off, n.rd(off)&^mask|v) }
 
 // Rev geeft het rauwe SYS_REV_CTRL-register; nibble [27:24] hoort 6 te zijn
@@ -132,7 +131,9 @@ func (n *Net) Reset() {
 // MDIORead leest een clause-22 PHY-register via de interne unimac-MDIO.
 func (n *Net) MDIORead(phy, reg int) uint16 {
 	n.wr(umacMDIOCmd, 2<<26|uint32(phy&0x1F)<<21|uint32(reg&0x1F)<<16)
-	n.mdioKick()
+	if !n.mdioKick() { // START_BUSY bleef staan: transactie niet voltooid
+		return 0xFFFF // zelfde "geen PHY / mislukte read"-sentinel als PHYScan filtert
+	}
 	v := n.rd(umacMDIOCmd)
 	if v&(1<<28) != 0 { // READ_FAIL
 		return 0xFFFF
@@ -146,60 +147,29 @@ func (n *Net) MDIOWrite(phy, reg int, val uint16) {
 	n.mdioKick()
 }
 
-// mdioKick zet START_BUSY en wacht (begrensd) tot de transactie klaar is.
-func (n *Net) mdioKick() {
+// mdioKick zet START_BUSY en wacht (begrensd) tot de transactie klaar is;
+// geeft true als START_BUSY binnen de grens wiste, false bij een stall.
+func (n *Net) mdioKick() bool {
 	n.mod(umacMDIOCmd, 0, 1<<29)
 	for range 100_000 { // ~25µs typisch; ruim begrensd, nooit eeuwig
 		if n.rd(umacMDIOCmd)&(1<<29) == 0 {
-			return
+			return true
 		}
 	}
+	return false
 }
 
 // PHYScan zoekt PHY's op de MDIO-bus — de BCM54213PE hoort op adres 1
-// (DT ethernet-phy@1), id1 0x600d, géén reset-GPIO op dit board.
+// (DT ethernet-phy@1), id1 0x600d, géén reset-GPIO op dit board. Gedeeld met
+// gem via metal/mdio (zelfde PHY-chip als de Pi 5, andere MDIO-master).
 func (n *Net) PHYScan() (addr int, id1, id2 uint16, found bool) {
-	for a := 0; a < 32; a++ {
-		v1 := n.MDIORead(a, 2)
-		if v1 == 0xFFFF || v1 == 0 {
-			continue
-		}
-		return a, v1, n.MDIORead(a, 3), true
-	}
-	return 0, 0, 0, false
+	return mdio.Scan(n)
 }
 
 // AutoNeg start autonegotiatie en wacht op een link — zelfde logica als
-// metal/gem (zelfde PHY-chip als de Pi 5, andere MDIO-master).
+// metal/gem, gedeeld via metal/mdio (zelfde PHY-chip als de Pi 5).
 func (n *Net) AutoNeg(phy int, timeout time.Duration) (speed int, fd bool, err error) {
-	n.MDIOWrite(phy, 4, 0x01E1)  // 10/100 HD+FD, 802.3
-	n.MDIOWrite(phy, 9, 0x0200)  // 1000BASE-T FD
-	n.MDIOWrite(phy, 0, 0x1200)  // ANENABLE|ANRESTART
-	deadline := time.Now().Add(timeout)
-	for {
-		s := n.MDIORead(phy, 1)
-		if s&(1<<5) != 0 && s&(1<<2) != 0 { // AN complete + link
-			break
-		}
-		if time.Now().After(deadline) {
-			return 0, false, fmt.Errorf("genet: geen link binnen %v (BMSR %#x)", timeout, s)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if n.MDIORead(phy, 10)&(1<<11) != 0 {
-		return 1000, true, nil
-	}
-	l := n.MDIORead(phy, 5)
-	switch {
-	case l&(1<<8) != 0:
-		return 100, true, nil
-	case l&(1<<7) != 0:
-		return 100, false, nil
-	case l&(1<<6) != 0:
-		return 10, true, nil
-	default:
-		return 10, false, nil
-	}
+	return mdio.AutoNeg(n, phy, timeout)
 }
 
 // Init zet MAC-adres/filters, ringen en DMA klaar en schakelt de zender en
@@ -245,26 +215,39 @@ func (n *Net) Init(dmaBase, dmaSize uintptr, speed int, fd bool) error {
 	n.wr(rdmaBurst, 8) // BCM2711: dma_max_burst_length = 8
 	n.wr(rdmaRing16+0x14, 0)
 	n.wr(rdmaRing16+0x1C, nBD*3-1)
-	n.wr(rdmaRing16+0x2C, 0)
-	n.wr(rdmaRing16+0x00, 0)
-	// Indices op de hardware-stand uitlijnen (valkuil 5: niet aannemen dat
-	// ze 0 zijn — de bootloader kan de NIC gebruikt hebben).
-	n.rxCons = n.rd(rdmaRing16+0x08) & 0xFFFF // PROD (bovenste helft = discard-teller, valkuil 4)
-	n.wr(rdmaRing16+0x0C, n.rxCons)
-	n.rxPtr = int(n.rxCons) % nBD
+	n.wr(rdmaRing16+0x2C, 0) // READ_PTR
+	n.wr(rdmaRing16+0x00, 0) // WRITE_PTR
+	// RING-INDEX-INVARIANT: onze software-index (int(rxCons)%nBD) en de registers
+	// die de hardware advanceert (PROD +0x08 = HW-producer, CONS +0x0C = wij)
+	// MOETEN vanaf één bekende stand starten. De vorige code lijnde uit op een
+	// mogelijk-niet-nul leftover-PROD (valkuil 5: bootloader/netboot) terwijl het
+	// WRITE_PTR/READ_PTR hierboven op 0 werd geforceerd — als de DMA zijn volgende
+	// slot uit WRITE_PTR afleidt i.p.v. PROD%256, desynchroniseert dat bij een
+	// netboot/warm-reboot (PROD!=0) de DMA-schrijfpositie en onze index.
+	// De DMA staat hier uit (rdmaCtrl-enable boven gewist), dus we forceren PROD
+	// én CONS expliciet naar 0 — dezelfde bekende nul-stand als een SD-cold-boot
+	// (waar PROD al 0 is: dat pad blijft dus ongewijzigd). Zo kunnen index en
+	// register niet uiteenlopen, ongeacht wat de bootloader achterliet.
+	// NOG TE VERIFIËREN op een echt netboot/warm-reboot (PROD!=0 vóór onze init).
+	n.wr(rdmaRing16+0x08, 0) // PROD := 0 (incl. discard-teller in de bovenste helft, valkuil 4)
+	n.wr(rdmaRing16+0x0C, 0) // CONS := 0
+	n.rxCons = 0
 	n.wr(rdmaRing16+0x10, nBD<<16|bufSize)
 	n.wr(rdmaRing16+0x28, 5<<16|nBD>>4) // XON/XOFF
 	n.wr(rdmaRingCfg, 1<<16)
 
-	// TX-ring 16.
+	// TX-ring 16. Zelfde ring-index-invariant als RX (zie daar): CONS (+0x08) is
+	// hier de HW-consumer, PROD (+0x0C) advanceren wij. Forceer beide én de
+	// pointerregisters naar 0 i.p.v. uit te lijnen op een leftover-CONS; DMA
+	// staat uit. NOG TE VERIFIËREN op een echt netboot/warm-reboot.
 	n.wr(tdmaBurst, 8)
 	n.wr(tdmaRing16+0x14, 0)
 	n.wr(tdmaRing16+0x1C, nBD*3-1)
-	n.wr(tdmaRing16+0x00, 0)
-	n.wr(tdmaRing16+0x2C, 0)
-	n.txProd = n.rd(tdmaRing16+0x08) & 0xFFFF // CONS
-	n.wr(tdmaRing16+0x0C, n.txProd)
-	n.txPtr = int(n.txProd) % nBD
+	n.wr(tdmaRing16+0x00, 0) // READ_PTR
+	n.wr(tdmaRing16+0x2C, 0) // WRITE_PTR
+	n.wr(tdmaRing16+0x08, 0) // CONS := 0
+	n.wr(tdmaRing16+0x0C, 0) // PROD := 0
+	n.txProd = 0
 	n.wr(tdmaRing16+0x28, 0)
 	n.wr(tdmaRing16+0x10, nBD<<16|bufSize)
 	n.wr(tdmaRingCfg, 1<<16)
@@ -298,7 +281,11 @@ func (n *Net) Receive(buf []byte) (int, error) {
 	if n.rd(rdmaRing16+0x08)&0xFFFF == n.rxCons {
 		return 0, nil
 	}
-	ls := n.rd(rxBD + uintptr(n.rxPtr)*12)
+	// Ordent de PROD-check vóór het lezen van LENGTH_STATUS/de buffer, net als
+	// gem/virtionet; wordt load-bearing zodra de buffers Normal-NC gemapt worden.
+	dev.MB()
+	i := int(n.rxCons) % nBD // descriptor-pointer, mod nBD (nBD deelt 0x10000)
+	ls := n.rd(rxBD + uintptr(i)*12)
 	length := int(ls >> 16 & 0xFFF)
 	flags := ls & 0xFFFF
 
@@ -311,9 +298,8 @@ func (n *Net) Receive(buf []byte) (int, error) {
 		if got > len(buf) {
 			got = len(buf)
 		}
-		dev.CopyOut(buf[:got], n.rxBufs+uintptr(n.rxPtr)*bufSize+2)
+		dev.CopyOut(buf[:got], n.rxBufs+uintptr(i)*bufSize+2)
 	}
-	n.rxPtr = (n.rxPtr + 1) % nBD
 	n.rxCons = (n.rxCons + 1) & 0xFFFF
 	n.wr(rdmaRing16+0x0C, n.rxCons)
 	return got, nil
@@ -332,14 +318,14 @@ func (n *Net) Transmit(buf []byte) error {
 			return fmt.Errorf("genet: TX-ring blijft vol na %v (DMA hangt?)", txTimeout)
 		}
 	}
-	dst := n.txBufs + uintptr(n.txPtr)*bufSize
+	i := int(n.txProd) % nBD // descriptor-pointer, mod nBD (nBD deelt 0x10000)
+	dst := n.txBufs + uintptr(i)*bufSize
 	dev.Copy(dst, buf)
-	bd := txBD + uintptr(n.txPtr)*12
+	bd := txBD + uintptr(i)*12
 	n.wr(bd+4, uint32(uint64(dst)))
 	n.wr(bd+8, uint32(uint64(dst)>>32))
 	dev.MB()
 	n.wr(bd, uint32(len(buf))<<16|txQTag|txAppendCRC|dmaSOP|dmaEOP)
-	n.txPtr = (n.txPtr + 1) % nBD
 	n.txProd = (n.txProd + 1) & 0xFFFF
 	n.wr(tdmaRing16+0x0C, n.txProd) // PROD-schrijf = de kick
 	return nil

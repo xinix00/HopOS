@@ -1,5 +1,7 @@
 *.elf
 nvme.img
+# Soak-/monitorlogs (tools/soak-*.sh schrijven ze in de repo-root).
+*.log
 *.md
 !README.md
 .claude/
@@ -8,6 +10,12 @@ nvme.img
 # de LEESMIJ.txt en config.txt in die dirs blijven wél getrackt.
 sd-*/kernel*.img
 sd-*/hop-*.img
+
+# Per-image config-varianten: config.txt is de getrackte agent/productie-config;
+# de probe/hopos-scripts schrijven hun eigen config-<variant>.txt (die bij het
+# flashen als config.txt op de kaart komt) i.p.v. het getrackte bestand te
+# overschrijven — zo blijft de tree schoon bij het bouwen van een niet-agent-image.
+sd-*/config-*.txt
 
 # Kaart-payload naast de kernelimages: firmware-downloads + zelfgebouwde TF-A
 # (herkomst en bouwrecept in sd-*/LEESMIJ.txt).

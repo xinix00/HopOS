@@ -24,8 +24,9 @@ cd "$DIR"
 mkdir -p sd-rpi4
 go run "$DIR/image/mkkernel/main.go" -elf metal/probe4.elf -o sd-rpi4/kernel8.img -load 0x80000
 
-# 3. config.txt + instructies.
-cat > sd-rpi4/config.txt <<'EOF'
+# 3. config-probe4.txt (gitignored; komt als config.txt op de kaart — het
+#    getrackte config.txt is de agent-config) + instructies.
+cat > sd-rpi4/config-probe4.txt <<'EOF'
 # HopOS probe4 — Raspberry Pi 4 (zie docs/rpi4.md)
 arm_64bit=1
 kernel=kernel8.img
@@ -90,4 +91,4 @@ Komt er wel bootloader-log maar geen "P2": stuur de laatste regels door —
 dan faalt het laden van de kernel (config.txt/DTB/armstub-probleem).
 EOF
 
-echo "sd-rpi4/ klaar: kernel8.img + config.txt + LEESMIJ.txt (bl31.bin/DTB/start4.elf zelf toevoegen, zie LEESMIJ)" >&2
+echo "sd-rpi4/ klaar: kernel8.img + config-probe4.txt + LEESMIJ.txt (kaart: config-probe4.txt AS config.txt; bl31.bin/DTB/start4.elf zelf toevoegen, zie LEESMIJ)" >&2

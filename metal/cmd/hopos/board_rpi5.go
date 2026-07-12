@@ -19,10 +19,10 @@ import (
 )
 
 //go:linkname ramStart runtime/goos.RamStart
-var ramStart uint = 0x00080000
+var ramStart uint = raspi.HopKernelStart
 
 //go:linkname ramSize runtime/goos.RamSize
-var ramSize uint = 0x08000000
+var ramSize uint = raspi.HopKernelSize
 
 // Klokbeleid (docs/plan-p2b-soak.md): klok volgt idle, via de firmware-
 // mailbox van dit board. TickHz = CNTFRQ/65536 (het event-stream-tempo van

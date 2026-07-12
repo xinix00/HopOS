@@ -13,42 +13,66 @@ import (
 	"hop-os/metal/dev"
 )
 
-// Config-space-registers (type 0 header).
+// Config-space-registers (type 0/1 header).
 const (
 	cfgVendorID = 0x00
 	cfgCommand  = 0x04
 	cfgClass    = 0x08
+	cfgHdrType  = 0x0c // dword: cacheline/latency/headertype[23:16]/BIST
 	cfgBAR0     = 0x10
+	cfgPriBus   = 0x18 // type-1: primary[7:0]/secondary[15:8]/subordinate[23:16]
 
 	cmdMem    = 1 << 1
 	cmdMaster = 1 << 2
+
+	hdrTypeMask = 0x7f // headertype[6:0] (bit 7 = multifunction)
+	hdrBridge   = 0x01 // type-1 header = PCI-PCI-bridge
 )
 
-// Device is één functie op bus 0 (fn 0; multi-function hebben we niet nodig).
+// Device is één PCIe-functie. Bus 0, fn 0 blijft de default (Bus/Fn = 0), zodat
+// de vlakke bus-0-Scan onveranderd werkt; de bus-walk (WalkBridges) vult Bus/Fn
+// voor endpoints achter root-poorten op de O6N.
 type Device struct {
+	Bus      int
 	Dev      int
+	Fn       int
 	VendorID uint16
 	DeviceID uint16
 	Class    uint32  // 24-bit klassecode (base<<16 | sub<<8 | progif)
-	ecam     uintptr // ECAM-basis van het board (gezet door Scan)
+	HdrType  uint8   // headertype[6:0]: 0 = endpoint, 1 = PCI-PCI-bridge
+	ecam     uintptr // ECAM-basis van het board (gezet door Scan/ScanBus)
 }
 
 func (d *Device) String() string {
-	return fmt.Sprintf("00:%02x.0 %04x:%04x klasse %06x", d.Dev, d.VendorID, d.DeviceID, d.Class)
+	return fmt.Sprintf("%02x:%02x.%x %04x:%04x klasse %06x", d.Bus, d.Dev, d.Fn, d.VendorID, d.DeviceID, d.Class)
 }
 
-// cfg geeft het ECAM-adres van register off van functie (bus 0, d.Dev, fn 0).
+// IsBridge meldt of dit een type-1 PCI-PCI-bridge is (root-poort/switch),
+// waarachter nog een bus met endpoints hangt.
+func (d *Device) IsBridge() bool { return d.HdrType == hdrBridge }
+
+// cfg geeft het ECAM-adres van register off van deze functie. Standaard ECAM:
+// base + (bus<<20)|(dev<<15)|(fn<<12) + off. Voor bus 0, fn 0 valt dit terug op
+// base + dev<<15 + off — identiek aan de oorspronkelijke vlakke formule.
 func (d *Device) cfg(off uintptr) uintptr {
-	return d.ecam + uintptr(d.Dev)<<15 + off
+	return d.ecam + uintptr(d.Bus)<<20 + uintptr(d.Dev)<<15 + uintptr(d.Fn)<<12 + off
 }
 
 // Scan enumereert bus 0 (fn 0 per device) in het ECAM-venster van het board.
 // De ECAM-basis is board-specifiek (QEMU virt vs O6N/ACPI MCFG), dus komt via
-// de PCIeWindow mee i.p.v. als package-constante.
+// de PCIeWindow mee i.p.v. als package-constante. Dunne wrapper om ScanBus(0):
+// het bestaande vlakke pad (QEMU-virt NVMe via metal/nvme) blijft ongewijzigd.
 func Scan(win board.PCIeWindow) []*Device {
+	return ScanBus(win, 0)
+}
+
+// ScanBus enumereert één bus (32 devices, fn 0) in het ECAM-venster. Additief
+// naast Scan: dezelfde per-device-uitlezing, maar met een bus-parameter zodat de
+// bus-walk buiten bus 0 kan kijken. Leest ook het headertype (type-1 = bridge).
+func ScanBus(win board.PCIeWindow, bus int) []*Device {
 	var found []*Device
 	for devno := 0; devno < 32; devno++ {
-		d := &Device{Dev: devno, ecam: win.ECAMBase}
+		d := &Device{Bus: bus, Dev: devno, ecam: win.ECAMBase}
 		id := dev.Read32(d.cfg(cfgVendorID))
 		if id == 0xffffffff || id&0xffff == 0 {
 			continue
@@ -56,9 +80,53 @@ func Scan(win board.PCIeWindow) []*Device {
 		d.VendorID = uint16(id)
 		d.DeviceID = uint16(id >> 16)
 		d.Class = dev.Read32(d.cfg(cfgClass)) >> 8
+		d.HdrType = uint8(dev.Read32(d.cfg(cfgHdrType))>>16) & hdrTypeMask
 		found = append(found, d)
 	}
 	return found
+}
+
+// setBridgeBuses schrijft de primary/secondary/subordinate-busnummers in het
+// type-1-header (offset 0x18); de secondary-latency-timer [31:24] blijft staan.
+func (d *Device) setBridgeBuses(primary, secondary, subordinate int) {
+	reg := d.cfg(cfgPriBus)
+	v := dev.Read32(reg) & 0xff000000
+	v |= uint32(primary&0xff) | uint32(secondary&0xff)<<8 | uint32(subordinate&0xff)<<16
+	dev.Write32(reg, v)
+	dev.MB()
+}
+
+// WalkBridges enumereert de hele PCIe-hiërarchie diepte-eerst vanaf bus 0 en
+// programmeert op elke aangetroffen type-1-bridge de secondary/subordinate-
+// busnummers (het klassieke enumeratie-recept: ken een bridge een secondary-bus
+// toe, open subordinate wijd, daal af, knijp subordinate daarna dicht op het
+// hoogst gebruikte busnummer). Geeft álle endpoints (type-0) over elke bus terug.
+//
+// Additief en NIET aangeroepen door bestaande code: de QEMU-virt/Pi-paden
+// gebruiken de vlakke Scan. Bedoeld voor de O6N, waar endpoints (RTL8126, NVMe)
+// achter root-poort-bridges hangen. STATUS: de busnummer-programmering is nog
+// niet op silicium geverifieerd (QEMU-virt en de Pi's hebben geen bridge op hun
+// pad) — additief en onbereikbaar vanuit het huidige pad, dus zonder regressie,
+// maar het bridge-programmeer-deel moet op de O6N nog worden bewezen.
+func WalkBridges(win board.PCIeWindow) []*Device {
+	var endpoints []*Device
+	next := 1 // volgend vrij uit te delen busnummer
+	var walk func(bus int)
+	walk = func(bus int) {
+		for _, d := range ScanBus(win, bus) {
+			if !d.IsBridge() {
+				endpoints = append(endpoints, d)
+				continue
+			}
+			sec := next
+			next++
+			d.setBridgeBuses(bus, sec, 0xff) // subordinate wijd tijdens de afdaling
+			walk(sec)
+			d.setBridgeBuses(bus, sec, next-1) // dichtknijpen op het echt gebruikte bereik
+		}
+	}
+	walk(0)
+	return endpoints
 }
 
 // SetBAR64 programmeert een 64-bit memory-BAR (idx = BAR-nummer) op addr en

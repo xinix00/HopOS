@@ -13,8 +13,15 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"runtime"
 	"time"
+
+	// TLS-wortels: tamago heeft geen OS en dus geen system-CA-store — zonder
+	// deze fallback-bundel (de Mozilla-roots die Go zelf meelevert) faalt
+	// élke https-fetch op certificaatvalidatie. Nodig voor het S3-artifact-
+	// pad (P2b, gemeten 2026-07-11: lege x509-pool op de node).
+	_ "golang.org/x/crypto/x509roots/fallback"
 
 	"hop/pkg/agentboot"
 	"hop/pkg/config"
@@ -67,16 +74,25 @@ func main() {
 		fmt.Println(r)
 	}
 	fmt.Println("")
+
+	// Uniforme per-regel-timestamps op de console — ná de bunny (die blijft
+	// schoon). Het log-pakket (hop-agent/leader) zet z'n eigen datum uit
+	// zodat er nooit een dubbele stempel komt; de console-hook levert er één.
+	log.SetFlags(0)
+	if b, ok := board.Current().(interface{ EnableTimestamps() }); ok {
+		b.EnableTimestamps()
+	}
+
 	fmt.Printf("runtime %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
 
 	// Vóór de eerste PSCI-call (SMC): HopOS eist een EL2-boot — de
 	// stage-2-kooi is een invariant, geen optie.
 	if el := board.Current().BootEL(); el < 2 {
-		fail("boot", fmt.Errorf("EL%d-boot: HopOS vereist EL2 (QEMU: virtualization=on)", el))
+		fail("boot", fmt.Errorf("booted at EL%d: HopOS requires EL2 (QEMU: virtualization=on)", el))
 	}
 
 	major, minor := board.Current().PSCIVersion()
-	fmt.Printf("PSCI versie %d.%d (boot-EL%d, conduit SMC)\n", major, minor, board.Current().BootEL())
+	fmt.Printf("psci: v%d.%d (boot EL%d, SMC conduit)\n", major, minor, board.Current().BootEL())
 
 	// Log-console op de firmware-framebuffer als het board er een heeft — het
 	// beeld-kanaal voor een node zónder debug-kabel. Zo niet (QEMU -nographic,
@@ -84,12 +100,18 @@ func main() {
 	if d, ok := board.Current().Framebuffer(); ok {
 		fb.Init(d)
 		fb.Header(bunny...) // vaste bunny bovenin, de logs scrollen eronder
-		fmt.Printf("console: framebuffer %dx%d @ %#x (%d-bpp) — logs op scherm\n",
+		fmt.Printf("console: framebuffer %dx%d @ %#x, %d bpp — mirroring log to display\n",
 			d.Width, d.Height, uint64(d.Base), d.BPP)
 	}
 
-	if err := hopnet.Up(); err != nil {
-		fail("net", err)
+	// Netwerk opbrengen. Geen harde eis (net als storage en SNTP hieronder):
+	// een board dat geen link/DHCP krijgt (ProbeNIC faalt hard na zijn eigen
+	// time-outs) draait door als headless/compute-node i.p.v. permanent te
+	// hangen. Extern verkeer (leader-API, image-download) is dan weg, maar de
+	// node blijft leven en kan later herstellen — degradeer, niet fail().
+	netErr := hopnet.Up()
+	if netErr != nil {
+		fmt.Printf("net: %v — continuing headless/compute-only (no external network)\n", netErr)
 	}
 	// De interne L2-switch (per-slot netwerk): elke task krijgt een adres op
 	// het interne net en kan met appnet een eigen stack opbrengen.
@@ -100,9 +122,9 @@ func main() {
 	// Klok via SNTP. Geen harde eis: HOP's HMAC-auth is klok-vrij, dus een
 	// node zonder bereikbare NTP-server draait door — alleen TLS faalt dan.
 	if err := hopnet.SyncTime("pool.ntp.org:123"); err != nil {
-		fmt.Printf("klok: sntp mislukt (%v) — tijd blijft 1970, TLS zal falen\n", err)
+		fmt.Printf("clock: SNTP failed (%v) — time remains at epoch, TLS will fail\n", err)
 	} else {
-		fmt.Printf("klok: %s (SNTP)\n", time.Now().UTC().Format(time.RFC3339))
+		fmt.Printf("clock: %s (SNTP)\n", time.Now().UTC().Format(time.RFC3339))
 	}
 	// Hersync per uur tegen drift (P2b/C6; de teller loopt op de 54MHz-
 	// kristal — prima, maar een soak-dag is lang). Stilletjes: alleen
@@ -111,7 +133,7 @@ func main() {
 		for {
 			time.Sleep(time.Hour)
 			if err := hopnet.SyncTime("pool.ntp.org:123"); err != nil {
-				fmt.Printf("klok: hersync mislukt (%v) — volgende poging over een uur\n", err)
+				fmt.Printf("clock: resync failed (%v) — retrying in one hour\n", err)
 			}
 		}
 	}()
@@ -121,12 +143,12 @@ func main() {
 	// Een board zonder ECAM-plan (Pi 5: NVMe loopt daar straks via de
 	// brcmstb-RC, metal/brcmpcie) slaat de probe over.
 	if win := board.Current().PCIe(); win.ECAMBase == 0 {
-		fmt.Println("storage: geen ECAM-plan op dit board — node draait zonder volumes (NVMe volgt)")
+		fmt.Println("storage: no ECAM window on this board — running without volumes (NVMe pending)")
 	} else if disk, err := nvme.Probe(win, layout.NVMeDMABase, layout.NVMeDMASize); err != nil {
-		fmt.Printf("storage: %v — node draait zonder volumes\n", err)
+		fmt.Printf("storage: %v — running without volumes\n", err)
 	} else {
 		slots.UseFS(hopfs.New(disk))
-		fmt.Printf("storage: nvme %q, %dMB — volumes beschikbaar\n",
+		fmt.Printf("storage: nvme %q, %d MB — volumes available\n",
 			disk.Model, disk.Blocks*disk.BlockSize>>20)
 	}
 
@@ -162,16 +184,34 @@ func main() {
 	offer := slots.PoolBytes() // HOP alloceert hieruit per job (dynamische partities)
 	if total := board.Current().MemTotal(); total > 0 {
 		if total < layout.RequiredRAM() {
-			fail("geheugen", fmt.Errorf("node heeft %d MB DRAM, layout vereist %d MB (slots/ringen zouden buiten RAM vallen)",
+			fail("memory", fmt.Errorf("node has %d MB DRAM, layout requires %d MB (slots/rings would fall outside RAM)",
 				total>>20, layout.RequiredRAM()>>20))
 		}
-		fmt.Printf("geheugen: %d MB DRAM (DTB) — layout vereist %d MB; HOP krijgt een %d MB partitie-pool (per job dynamisch)\n",
+		fmt.Printf("memory: %d MB DRAM (DTB) — layout requires %d MB; offering HOP a %d MB partition pool (allocated per job)\n",
 			total>>20, layout.RequiredRAM()>>20, offer>>20)
 	} else {
-		fmt.Printf("geheugen: DTB-detectie faalde — vertrouw op het layout, HOP krijgt een %d MB partitie-pool (per job dynamisch)\n", offer>>20)
+		// LUID, niet stil: geen geldige DTB (UEFI/ACPI, of een kromme blob) →
+		// MemTotal==0. De RAM-sanity-check hierboven (fysiek genoeg voor het
+		// layout?) wordt daardoor OVERGESLAGEN en de pool is een terugval, niet
+		// gemeten RAM. Op dit board draait HOP blind op de statische aannames.
+		fmt.Printf("WARNING HOPOS_RAM_CHECK_SKIPPED: no valid DTB (MemTotal=0) — skipping the RAM sanity check against layout.RequiredRAM (%d MB); trusting the static layout, offering HOP a %d MB partition pool (allocated per job)\n",
+			layout.RequiredRAM()>>20, offer>>20)
 	}
 
-	fmt.Printf("HOP-agent start: node %s, agent :%d, leader :%d — HOPOS_AGENT_UP\n",
+	// Zonder extern netwerk kan de agent/leader niet luisteren: net.SocketFunc is
+	// nil, dus agentboot.Run zou meteen falen en fail("agent") de node alsnog
+	// permanent hangen — ná een misleidend HOPOS_AGENT_UP. Degradeer echt: de
+	// interne switch, klok, storage en dvfs draaien al; blijf headless leven
+	// (een reboot of latere link herstelt) i.p.v. de agent te starten en te faulten.
+	if netErr != nil {
+		fmt.Printf("hop: headless — no external network, agent/leader not started; node %s stays alive HOPOS_NODE_HEADLESS\n",
+			cfg.Node.ID)
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
+
+	fmt.Printf("hop: agent starting — node %s, agent :%d, leader :%d — HOPOS_AGENT_UP\n",
 		cfg.Node.ID, cfg.Node.Port, cfg.Node.Port+1000)
 
 	// PID-1-regel: Run blokkeert; keert hij terug, dan is dat een fout.

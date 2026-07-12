@@ -27,7 +27,7 @@ func main() {
 
 	// Loggen loopt via de hop-ABI-ring naar de HOP-kern — niet rechtstreeks
 	// naar de UART, zodat output van alle slots netjes gemultiplext wordt.
-	app.Logf("Go-runtime leeft (%s), RAM %dMB @ %#x, klok=%s, BUCKET=%q ROLE=%q",
+	app.Logf("runtime up (%s), RAM %d MB @ %#x, clock=%s, BUCKET=%q ROLE=%q",
 		runtime.Version(), app.RAMSize>>20, app.RAMStart,
 		time.Now().UTC().Format("2006-01-02T15:04:05Z"), app.Env("BUCKET"), app.Env("ROLE"))
 
@@ -255,18 +255,30 @@ func exit(app *applib.App, code uint64) {
 // smpSink houdt reken-resultaten levend zodat de compiler het werk niet weggooit.
 var smpSink uint64
 
-// burn is de soak-werklast (P2b): alle cores permanent aan het rekenen +
-// een bescheiden heap-churn (GC-druk), met elke minuut één telemetrieregel
-// door de logring. Keert nooit terug — HOP's kill/stop beëindigt hem.
+// burn is de soak-werklast (P2b): alle cores rekenen + heap-churn (GC-druk),
+// maar in een RITME van 10 min werk / 5 min rust i.p.v. dauerlast (Derek,
+// 2026-07-11). Zo test de soak de dvfs-TERUGKLOK op zijn ontwerp-premisse —
+// een app die LEEFT maar idlet moet terugklokken — niet alleen het opklokken.
+// Tijdens rust slapen de workers, de idle-governor tikt door → dvfs ziet
+// idle → klokt naar de vloer. Keert nooit terug; HOP's kill/stop beëindigt.
 func burn(app *applib.App) {
 	n := runtime.GOMAXPROCS(0)
-	app.Logf("BURN: soak-last op %d core(s), RAM %dMB — brand tot de kill", n, app.RAMSize>>20)
+	const workSecs, restSecs = 600, 300
+	app.Logf("BURN: soak load on %d core(s), RAM %d MB — %ds work / %ds rest cycle",
+		n, app.RAMSize>>20, workSecs, restSecs)
+
+	var burning atomic.Bool
+	burning.Store(true)
 	var iters uint64
 	for c := 0; c < n; c++ {
 		go func() {
 			buf := make([]byte, 0, 1<<16)
 			var acc uint64
 			for i := uint64(1); ; i++ {
+				if !burning.Load() {
+					time.Sleep(50 * time.Millisecond) // rust: laat de core idlen
+					continue
+				}
 				acc = acc*6364136223846793005 + i // rekenwerk (LCG)
 				if i&0xFFFFF == 0 {
 					buf = append(buf, byte(acc)) // heap-churn → GC-druk
@@ -274,16 +286,36 @@ func burn(app *applib.App) {
 						buf = make([]byte, 0, 1<<16)
 					}
 					atomic.AddUint64(&iters, 1) // 1 tel per ~1M iteraties
+					// AFGEVEN: op een 1-core slot (GOMAXPROCS=1, en tamago heeft
+					// geen signal-based async preemption) starft een strakke
+					// rekenlus z'n eigen timer-goroutines — de fase-controller
+					// en telemetrie kwamen nooit aan de beurt (gemeten
+					// 2026-07-12). Een compute-lus MOET coöperatief afgeven; dit
+					// is de app z'n verantwoordelijkheid, geen OS-taak (de
+					// stage-2-kooi zorgt dat 't hooguit de eigen core raakt).
+					runtime.Gosched()
 				}
 				smpSink = acc
 			}
 		}()
 	}
+	// Fase-controller: wissel werk↔rust en log elke overgang (het dvfs-bewijs).
+	go func() {
+		for {
+			time.Sleep(workSecs * time.Second)
+			burning.Store(false)
+			app.Logf("BURN: rest %ds — cores idle, dvfs should clock down", restSecs)
+			time.Sleep(restSecs * time.Second)
+			burning.Store(true)
+			app.Logf("BURN: work %ds — cores busy, dvfs should clock up", workSecs)
+		}
+	}()
+
 	var ms runtime.MemStats
 	for {
 		time.Sleep(time.Minute)
 		runtime.ReadMemStats(&ms)
-		app.Logf("BURN: %dM iteraties, GC=%d, heap=%dKB, klok=%s",
+		app.Logf("BURN: %dM iterations, GC=%d, heap=%d KB, clock=%s",
 			atomic.LoadUint64(&iters), ms.NumGC, ms.HeapAlloc>>10,
 			time.Now().UTC().Format("15:04:05Z"))
 	}

@@ -117,8 +117,14 @@ func PoolBytes() uint64 {
 // maxLimitFor begrenst een partitie: hij moet binnen één 1GB-blok vanaf
 // linkBase blijven (de stage-2-kooi mapt de partitie met één L2-tabel) én
 // onder CtrlBase (waar het IPA-beeld van de app z'n control-page verwacht).
-// Een grotere app vergt een multi-GB stage-2 (later) of een groter venster
-// (control-regio's omhoog = asm-werk, per board).
+// Voor het canonieke linkBase 0x50000000 komt dat uit op 768MB (0x30000000):
+// [0x40000000,0x80000000) is het GB-blok, minus de 0x10000000 tussen linkBase
+// en dat blok. Dit is een bewuste, gedeelde slot-cap — geen bug.
+//
+// De lift wanneer de eerste app > 768MB verschijnt: het venster verruimen —
+// de control-regio's (CtrlBase e.v.) omhoog schuiven zodat een groter GB-blok
+// past, óf een multi-GB stage-2-map (meer dan één L2-tabel per partitie). Beide
+// zijn asm-/layout-werk per board; tot dan is 768MB de harde per-slot-ceiling.
 func maxLimitFor(linkBase uint64) uint64 {
 	gbEnd := (linkBase &^ (1<<30 - 1)) + (1 << 30)
 	if gbEnd > layout.CtrlBase {

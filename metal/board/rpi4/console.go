@@ -23,6 +23,9 @@ func printk(c byte) {
 	if raspi.MPIDR()&0xFFFFFF != 0 {
 		return // app-core: geen toegang tot de UART (kooi)
 	}
-	pl011.Putc(UART0Base, c)
-	fb.Putc(c)
+	// Via de gedeelde stamper: één uniforme "dd-MM HH:mm"-prefix per regel.
+	raspi.ConsoleByte(c, func(b byte) {
+		pl011.Putc(UART0Base, b)
+		fb.Putc(b)
+	})
 }

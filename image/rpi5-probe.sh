@@ -25,8 +25,9 @@ cd "$DIR"
 mkdir -p sd-rpi5
 go run "$DIR/image/mkkernel/main.go" -elf metal/probe5.elf -o sd-rpi5/kernel_2712.img -load 0x80000 -raw
 
-# 3. config.txt + instructies.
-cat > sd-rpi5/config.txt <<'EOF'
+# 3. config-probe5.txt (gitignored; komt als config.txt op de kaart — het
+#    getrackte config.txt is de agent-config) + instructies.
+cat > sd-rpi5/config-probe5.txt <<'EOF'
 # HopOS probe5 — Raspberry Pi 5 (zie docs/rpi5.md)
 arm_64bit=1
 kernel=kernel_2712.img
@@ -75,4 +76,4 @@ Komt er wel bootloader-log maar geen "P2": stuur de laatste regels door —
 dan faalt het laden van de kernel (config.txt/DTB-probleem).
 EOF
 
-echo "sd-rpi5/ klaar: kernel_2712.img + config.txt + LEESMIJ.txt" >&2
+echo "sd-rpi5/ klaar: kernel_2712.img + config-probe5.txt + LEESMIJ.txt (kaart: config-probe5.txt AS config.txt)" >&2

@@ -14,6 +14,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 
 	"hop-os/metal/board"
+	"hop-os/metal/dhcp"
 	"hop-os/metal/hopswitch"
 )
 
@@ -79,6 +80,19 @@ func Up() error {
 	// idle-governor (metal/idle) de core echt kan laten slapen als het stil
 	// is; onder last wordt er nooit geslapen (ring leeg = pas dan slapen).
 	go rxLoop(uplink, iface)
+
+	// DHCP-lease levend houden: heeft dit board een verkregen lease (de Pi's),
+	// dan vernieuwt KeepAlive hem op T1 via de netstack (UDP-RENEW) — dat kan
+	// pas nú, want het leunt op net.SocketFunc hierboven en op rxLoop die de
+	// stack voedt. Boards met statische config (qemuvirt) zijn geen LeaseHolder
+	// en slaan dit over.
+	if lh, ok := board.Current().(board.LeaseHolder); ok {
+		if l, has := lh.DHCPLease(); has {
+			var m [6]byte
+			copy(m[:], hw)
+			go dhcp.KeepAlive(m, l)
+		}
+	}
 
 	fmt.Printf("net: %s (mac %s, gw %s) — HOPOS_NET_UP\n", nc.IP, mac, nc.GW)
 	return nil

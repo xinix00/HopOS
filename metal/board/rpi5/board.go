@@ -15,14 +15,12 @@ import (
 	"hop-os/metal/board"
 	"hop-os/metal/board/raspi"
 	"hop-os/metal/brcmpcie"
-	"hop-os/metal/dev"
 	"hop-os/metal/dhcp"
 	"hop-os/metal/el2"
 	"hop-os/metal/fb"
 	"hop-os/metal/fdt"
 	"hop-os/metal/gem"
 	"hop-os/metal/layout"
-	"hop-os/metal/vcmail"
 )
 
 // machine is de board-implementatie voor de Raspberry Pi 5 (BCM2712).
@@ -42,7 +40,7 @@ func (machine) CoreID() int { return CoreID() }
 // DTB-pointer in x0 aan een raw kernel? zie docs/rpi5.md); de
 // VideoCore-mailbox is de tweede bron (P2b).
 func (machine) MemTotal() uint64 {
-	if n, ok := fdt.MemTotal(uintptr(dev.Read64(DTBPtr))); ok {
+	if n, ok := fdt.MemTotal(raspi.DTB()); ok {
 		return n
 	}
 	return 0
@@ -90,9 +88,10 @@ var lease dhcp.Lease
 // GEM-init (DBW uit DCFG1) → DHCP-lease. De firmware doet hier niets van;
 // vanaf de EEPROM-handoff is dit pad volledig van HOP.
 func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
-	if !brcmpcie.Rescal(uintptr(PCIeRescal)) {
-		return nil, nil, fmt.Errorf("rp1: RESCAL-kalibratie bevestigt niet")
-	}
+	// Het RP1-specifieke adresplan: de RC-basis/reset, het link-plafond en de
+	// in/out-windows. De generieke bring-up-sequence (Rescal→Setup→StartLink→
+	// OpenBridge→endpoint-check→BAR's→enable) woont nu in brcmpcie.RC.BringUp;
+	// hier blijft alleen wat écht RP1 is.
 	rc := &brcmpcie.RC{
 		Base:     uintptr(PCIe2Base),
 		SWInit:   uintptr(PCIeSWInit),
@@ -100,29 +99,24 @@ func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
 		Gen:      2,
 		Out:      brcmpcie.OutWin{CPU: RP1Base, PCIe: 0, Size: 0x1000_0000},
 		In: []brcmpcie.InWin{
-			{PCIe: 0, CPU: RP1Base, Size: 0x40_0000},          // RP1-loopback (BAR1)
+			{PCIe: 0, CPU: RP1Base, Size: 0x40_0000},             // RP1-loopback (BAR1)
 			{PCIe: 0x10_0000_0000, CPU: 0, Size: 0x10_0000_0000}, // al het DRAM
 		},
-	}
-	if rcMode, _ := rc.Setup(); !rcMode {
-		return nil, nil, fmt.Errorf("rp1: pcie2 strapt niet als root-complex (status %#x)", rc.Status())
-	}
-	if _, dl := rc.StartLink(); !dl {
-		return nil, nil, fmt.Errorf("rp1: PCIe-link traint niet (status %#x)", rc.Status())
-	}
-	rc.OpenBridge()
-
-	if id := rc.CfgRead32(1, 0, 0, 0); id != 0x1_1de4 { // device 0x0001, vendor 0x1de4
-		return nil, nil, fmt.Errorf("rp1: endpoint meldt %#x (verwacht 0x11de4)", id)
 	}
 	// BAR's: vaste toewijzing (groottes gemeten met probe6: 16KB/4MB/64KB).
 	// BAR1 MOET op PCIe 0x0 (RP1's eigen DMA bereikt zijn peripherals via de
 	// loopback door het inbound-window hierboven).
-	rc.CfgWrite32(1, 0, 0, 0x10, 0x100_0000) // BAR0
-	rc.CfgWrite32(1, 0, 0, 0x14, 0x0)        // BAR1: peripheral-venster
-	rc.CfgWrite32(1, 0, 0, 0x18, 0x101_0000) // BAR2: SRAM
-	rc.CfgWrite32(1, 0, 0, 0x04, rc.CfgRead32(1, 0, 0, 0x04)|0x6)
-	dev.MB()
+	if err := rc.BringUp(brcmpcie.BringConfig{
+		Rescal: uintptr(PCIeRescal),
+		WantID: 0x1_1de4, // device 0x0001, vendor 0x1de4
+		Bars: []brcmpcie.EPBar{
+			{Off: 0x10, Val: 0x100_0000}, // BAR0
+			{Off: 0x14, Val: 0x0},        // BAR1: peripheral-venster (PCIe 0x0, DMA-loopback)
+			{Off: 0x18, Val: 0x101_0000}, // BAR2: SRAM
+		},
+	}); err != nil {
+		return nil, nil, fmt.Errorf("rp1: %w", err)
+	}
 
 	// De ethernet-PHY (BCM54213PE) hangt in reset aan RP1-GPIO32 (actief-
 	// laag, 5ms — DT phy-reset-gpios; gemeten: zonder dit géén PHY op MDIO).
@@ -134,7 +128,7 @@ func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
 	nic := &gem.Net{
 		Base:   uintptr(RP1EthBase),
 		BusOff: 0x10_0000_0000, // RP1-masters → PCIe → RC-inbound → DRAM 0
-		MAC:    raspi.MACFromSerial(uintptr(dev.Read64(DTBPtr)), 0x05),
+		MAC:    raspi.MACFromSerial(raspi.DTB(), 0x05),
 	}
 	nic.MDIOEnable()
 	addr, _, _, found := nic.PHYScan()
@@ -157,51 +151,26 @@ func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
 	return nic, net.HardwareAddr(nic.MAC[:]), nil
 }
 
-// Net geeft de DHCP-lease die ProbeNIC haalde. Geen resolver in de lease →
-// de gateway als DNS (thuisrouters resolven vrijwel altijd zelf).
-func (machine) Net() board.NetConfig {
-	dns := lease.DNSString()
-	if dns == "0.0.0.0" {
-		dns = lease.GWString()
-	}
-	return board.NetConfig{
-		IP:   lease.IPString(),
-		CIDR: lease.CIDR(),
-		GW:   lease.GWString(),
-		DNS:  dns + ":53",
-	}
-}
+// Net geeft de DHCP-lease die ProbeNIC haalde, omgezet naar board.NetConfig
+// via de gedeelde raspi-helper (identiek aan de Pi 4).
+func (machine) Net() board.NetConfig { return raspi.NetFromLease(lease) }
 
+// DHCPLease geeft de door ProbeNIC verkregen lease (board.LeaseHolder), zodat
+// hopnet er na de stack-bring-up dhcp.KeepAlive op start. false vóór een echte
+// ACK (dan is er niets te vernieuwen).
+func (machine) DHCPLease() (dhcp.Lease, bool) { return lease, lease.Acquired }
 
 // PCIe: fase P2 — de RP1 hangt aan de BCM2712-PCIe; het adresplan volgt bij
 // de RP1-bring-up.
 func (machine) PCIe() board.PCIeWindow { return board.PCIeWindow{} }
 
-// Framebuffer: eerst de simple-framebuffer uit de DTB proberen; GEMETEN
-// 2026-07-11 (agent-boot met HDMI): de Pi 5-firmware activeert het scherm
-// maar laat GEEN simplefb-node achter voor raw kernels — dus is de terugval
-// het framebuffer zélf opeisen via de firmware-mailbox (vcmail.AllocFB,
-// het officiële pad; nog steeds "firmware-buffer, geen driver").
+// Framebuffer: DTB-simplefb met mailbox-terugval — de gedeelde raspi-
+// discovery (zie board/raspi/fb.go voor het meetverhaal); hier alleen de
+// boardadressen.
 func (machine) Framebuffer() (fb.Desc, bool) {
-	if d, ok := raspi.Framebuffer(DTBPtr); ok {
-		return d, true
-	}
-	m := &vcmail.Mbox{Base: uintptr(VCMailBase), Buf: uintptr(raspi.VCMailBuf)}
-	f, ok := m.AllocFB(1920, 1080)
-	if !ok {
-		return fb.Desc{}, false
-	}
-	// De respons telt, niet het verzoek — en bínnen de respons telt de
-	// PITCH: gemeten 2026-07-11 meldt de depth-tag 32 terwijl de scanout op
-	// de 16bpp-bootsplash-config blijft draaien (stride 3840 = 1920×2). De
-	// pitch beschrijft wat de scanout écht leest, dus dáár leiden we de
-	// pixeldiepte uit af. fb rendert beide dieptes.
-	if f.Width == 0 {
-		return fb.Desc{}, false
-	}
-	return fb.Desc{
-		Base:  f.Base,
-		Width: int(f.Width), Height: int(f.Height),
-		Stride: int(f.Pitch), BPP: int(f.Pitch / f.Width * 8),
-	}, true
+	return raspi.FramebufferVC(DTBPtr, uintptr(VCMailBase))
 }
+
+// EnableTimestamps zet de per-regel-console-stempel aan (optionele interface,
+// door cmd/hopos ná de boot-banner aangeroepen). Zie board/raspi/console_ts.go.
+func (machine) EnableTimestamps() { raspi.LogTimestamps(true) }

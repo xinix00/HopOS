@@ -46,10 +46,10 @@ import (
 // Dus: linken op de werkelijkheid — load 0x80000, text +0x10000 = 0x90000.
 //
 //go:linkname ramStart runtime/goos.RamStart
-var ramStart uint = 0x00080000
+var ramStart uint = raspi.HopKernelStart
 
 //go:linkname ramSize runtime/goos.RamSize
-var ramSize uint = 0x08000000
+var ramSize uint = raspi.HopKernelSize
 
 // parkCode: per instructie via dev.Write32 op raspi.ParkBase geplant (MMU van
 // de doelcore staat uit; adres onder onze RAM-declaratie → ongecachet

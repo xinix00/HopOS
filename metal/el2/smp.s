@@ -26,10 +26,10 @@
 #include "textflag.h"
 
 // smpEL2Tramp: entry voor een secundaire SMP-core (EL2, MMU uit). x0 = het
-// FYSIEKE adres van de control-page van de primaire (ctx van PSCI CPU_ON —
-// de app las 'm van zijn eigen page, layout.CtrlSelfPA, door HOP bij Start
-// gezet: de app kent alleen IPA's). Data-gedreven zoals el2.s: geen #defines,
-// board-neutraal onder elk PA-plan.
+// FYSIEKE adres van de control-page van de primaire — de app geeft die PA mee
+// als ctx-argument van PSCI CPU_ON, dus de trampoline krijgt 'm rechtstreeks
+// in x0 (de app kent verder alleen IPA's). Data-gedreven zoals el2.s: geen
+// #defines, board-neutraal onder elk PA-plan.
 TEXT smpEL2Tramp(SB),NOSPLIT|NOFRAME,$0
 	MOVD	R0, R1		// R1 = control-page van de primaire (fysiek)
 
