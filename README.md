@@ -99,11 +99,11 @@ TAMAGO=~/tamago-go/bin/go image/qemu-run.sh agent    # the real agent + leader A
 TAMAGO=~/tamago-go/bin/go image/rpi5-probe.sh
 ```
 
-The probes and the QEMU demo build from public modules only. `metal/cmd/hopos` — the full agent — additionally depends on the HOP orchestrator, which lives in a separate module that is not public yet.
+The probes and the QEMU demo build from public modules only. `metal/cmd/hopos` — the full agent — additionally depends on the [HOP orchestrator](https://github.com/xinix00/hop), which is open source as well.
 
 ## Status
 
-Working today: the full multikernel (slots, stage-2 isolation, dynamic memory partitions, hard-kill), multi-core apps (1 to N dedicated cores per app on a shared heap), per-app networking with full NAT, NVMe storage with shared volumes, and framebuffer + UART consoles — proven in QEMU and on Raspberry Pi 4 and 5 hardware. On the Pi 5 the network path is fully self-hosted: HopOS trains the PCIe link itself (the firmware doesn't) and drives the RP1 GEM NIC with its own drivers, then DHCP and NTP. On the roadmap: Orion O6N bring-up, NVMe on real hardware, line-rate throughput, and ed25519 signing of app images.
+Working today: the full multikernel (slots, stage-2 isolation, dynamic memory partitions, hard-kill), multi-core apps (1 to N dedicated cores per app on a shared heap), per-app networking with full NAT, NVMe storage with shared volumes, and framebuffer + UART consoles — proven in QEMU and on Raspberry Pi 4 and 5 hardware. On the Pi 5 the network path is fully self-hosted: HopOS trains the PCIe link itself (the firmware doesn't) and drives the RP1 GEM NIC with its own drivers, then DHCP and NTP. On the roadmap: Orion O6N bring-up, NVMe on real hardware, and line-rate throughput.
 
 Built on [TamaGo](https://github.com/usbarmory/tamago) (bare-metal Go) and [gVisor's netstack](https://gvisor.dev) (pure-Go TCP/IP).
 
