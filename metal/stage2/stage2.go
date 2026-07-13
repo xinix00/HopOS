@@ -229,10 +229,6 @@ func Revoke(i int) {
 	hvcRevoke()
 }
 
-// hvcRevoke doet HVC #0 vanuit EL1 → de revoke-vector op EL2 (TLBI ALLE1IS).
-// De handler raakt geen GP-registers, dus niets te bewaren. Zie revoke_arm64.s.
-func hvcRevoke()
-
 // Minimale AArch64-encoders voor de vector-generator: één bron van waarheid
 // (de constanten) i.p.v. hand-gebakken instructiewoorden. Zie ARM ARM C6.2.
 //

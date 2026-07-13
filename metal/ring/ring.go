@@ -78,6 +78,9 @@ func (r *Ring) Write(typ uint32, p []byte) bool {
 		return false // onredelijk groot record
 	}
 	head, tail := r.head(), r.tail()
+	if head-tail > r.size {
+		return false // onmogelijke indexen (malafide consument): niets schrijven
+	}
 
 	// Past het record nog aaneengesloten tot het einde van de buffer?
 	if contig := r.size - head%r.size; need > contig {
@@ -105,9 +108,10 @@ func (r *Ring) Write(typ uint32, p []byte) bool {
 // te roepen; PAD-records worden intern overgeslagen.
 //
 // De ringinhoud komt van de producer en is onvertrouwd: een header die niet
-// binnen de gepubliceerde bytes, de bufferrand óf buf past markeert de ring
-// als corrupt en ReadInto levert definitief niets meer (zie Corrupt) — een
-// producer mag de consument nooit tot een reuzenkopie kunnen verleiden. buf
+// binnen de gepubliceerde bytes, de bufferrand óf buf past — of een head die
+// meer dan size vóórloopt op tail — markeert de ring als corrupt en ReadInto
+// levert definitief niets meer (zie Corrupt). Een producer mag de consument
+// nooit tot een reuzenkopie of een eindeloze PAD-skip kunnen verleiden. buf
 // moet minstens één maximaal record kunnen bevatten.
 func (r *Ring) ReadInto(buf []byte) (typ uint32, n int, ok bool) {
 	if r.corrupt {
@@ -116,6 +120,13 @@ func (r *Ring) ReadInto(buf []byte) (typ uint32, n int, ok bool) {
 	for {
 		head, tail := r.head(), r.tail()
 		if head == tail {
+			return 0, 0, false
+		}
+		// Meer gepubliceerd dan de buffer groot is kan alleen met een verzonnen
+		// head — en een reusachtige head boven louter PAD-records zou de
+		// skip-lus hieronder miljarden ronden gunnen (livelock op de HOP-core).
+		if head-tail > r.size {
+			r.corrupt = true
 			return 0, 0, false
 		}
 		dev.MB() // index gezien → payload zichtbaar
