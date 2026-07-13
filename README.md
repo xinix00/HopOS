@@ -75,6 +75,8 @@ No shell. No exec, no second binary, no users. No persistence. No VMs, WASM or c
 
 The Pi 5 boot requirements are non-obvious and documented in [`sd-rpi5/`](sd-rpi5/): the EEPROM bootloader validates images as Linux kernels unless `os_check=0`, silently ignores `kernel_address`, and always loads raw images at `0x80000`.
 
+C1-stepping BCM2712 silicon has an interconnect erratum (fabric deadlock when sustained PCIe inbound DMA coincides with fabric-wide operations, fixed in D0) that HopOS works around in three layers — see [docs/bcm2712-c1-erratum.md](docs/bcm2712-c1-erratum.md).
+
 ## Repository layout
 
 ```

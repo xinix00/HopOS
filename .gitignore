@@ -4,6 +4,7 @@ nvme.img
 *.log
 *.md
 !README.md
+!docs/bcm2712-c1-erratum.md
 .claude/
 
 # Gegenereerde SD-kernelimages (regenereerbaar uit de ELF's via image/*.sh);
