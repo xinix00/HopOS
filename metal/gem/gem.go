@@ -38,6 +38,14 @@ const (
 	regSpAddr1T  = 0x08C // MAC-adres top
 	regModuleID  = 0x0FC // module/revisie-ID (leesbaar zonder init)
 	regDCFG1     = 0x280 // design config 1: DBWDEF [27:25] = AXI-busbreedte
+	// AMP (AXI Max Pipeline, macb.h GEM_AMP): outstanding-limieten van de
+	// GEM-AXI-master — AR2R [7:0] reads, AW2W [15:8] writes, AW2B_FILL bit 16
+	// (outstanding-writes tellen tot de B-response i.p.v. het W-kanaal).
+	regAMP      = 0x054
+	ampAR2RMax8 = 8       // rp1.dtsi: cdns,ar2r-max-pipe = 8
+	ampAW2WMax8 = 8 << 8  // rp1.dtsi: cdns,aw2w-max-pipe = 8
+	ampAW2BFill = 1 << 16 // rp1.dtsi: cdns,use-aw2b-fill
+
 	regDCFG6     = 0x294 // design config 6: queue-mask [7:0], DAW64 bit 23
 	regTBQPH     = 0x4C8 // TX queue base, hoge 32 bits (64-bit DMA)
 	regRBQPH     = 0x4D4 // RX queue base, hoge 32 bits
@@ -53,6 +61,7 @@ const (
 	cfgSpeed100 = 1 << 0
 	cfgFD       = 1 << 1
 	cfgGigabit  = 1 << 10
+	cfgPAE      = 1 << 13 // pause-frames sturen bij volle RX-FIFO (macb MACB_PAE)
 	cfgRxFCS    = 1 << 17 // FCS strippen van RX-frames
 	cfgMDCShift = 18      // MDC-divisor (3 bits): pclk/x — 0b100 = /48
 	cfgMDCDiv48 = 0b100 << cfgMDCShift
@@ -106,6 +115,7 @@ type Net struct {
 	rxRing, txRing uintptr // descriptor-ringen (4 woorden per descriptor)
 	rxBufs, txBufs uintptr
 	rxHead, txHead int
+	rxOff          bool // Quiesce actief: RX-DMA uit (zie Quiesce)
 }
 
 func (n *Net) rd(off uintptr) uint32    { return dev.Read32(n.Base + off) }
@@ -229,7 +239,10 @@ func (n *Net) Init(dmaBase, dmaSize uintptr, speed int, fd bool) error {
 		dbw = 1 << cfgDBWShift
 	}
 
-	cfg := uint32(cfgMDCDiv48|cfgRxFCS) | dbw
+	// PAE (pause-frames, macb MACB_PAE): laat de MAC bij een vollopende
+	// RX-FIFO zelf pause-frames sturen i.p.v. de druk ongedempt op de
+	// GEM-DMA/AXI te laten staan (referentie-agent #4, freeze-jacht 13-07).
+	cfg := uint32(cfgMDCDiv48|cfgRxFCS|cfgPAE) | dbw
 	if fd {
 		cfg |= cfgFD
 	}
@@ -241,6 +254,15 @@ func (n *Net) Init(dmaBase, dmaSize uintptr, speed int, fd bool) error {
 	}
 	n.wr(regNWCfg, cfg)
 
+	// RP1-specifiek (rp1.dtsi: cdns,aw2w-max-pipe/ar2r-max-pipe/use-aw2b-fill;
+	// Linux macb gem_init_axi, kernel-breed alléén voor de RP1 gezet): begrens
+	// de outstanding AXI-reads/writes van de GEM-DMA tot 8/8 en tel writes tot
+	// de B-response (AW2B_FILL) — de GEM-DMA steekt hier een AXI→PCIe-brug
+	// over waar posted writes lang onderweg zijn. Zonder deze rem zet
+	// sustained RX-DMA de brug vol in-flight writes en valt de hele
+	// SoC-fabric stil (de stille totale freeze, jacht van 2026-07-13).
+	n.wr(regAMP, n.rd(regAMP)&^uint32(0x1FFFF)|ampAR2RMax8|ampAW2WMax8|ampAW2BFill)
+
 	n.wr(regDMACfg, dmaBurstIncr16|dmaTxPBufFull|dmaRxPBufFull|
 		uint32(mtuBuf/64)<<dmaRxSizeShift|dmaAddr64)
 
@@ -251,8 +273,29 @@ func (n *Net) Init(dmaBase, dmaSize uintptr, speed int, fd bool) error {
 	n.wr(regTxQBase, uint32(txBus))
 	n.wr(regTBQPH, uint32(txBus>>32))
 
-	n.wr(regNWCtrl, ctrlMgmtEn|ctrlRxEn|ctrlTxEn)
+	n.wr(regNWCtrl, n.ctrlBits())
 	return nil
+}
+
+// ctrlBits geeft de actuele NWCtrl-basisbits: RX alleen aan als er geen
+// quiesce actief is. Eén bron voor Init/Transmit/Quiesce.
+func (n *Net) ctrlBits() uint32 {
+	bits := uint32(ctrlMgmtEn | ctrlTxEn)
+	if !n.rxOff {
+		bits |= ctrlRxEn
+	}
+	return bits
+}
+
+// Quiesce zet de RX-DMA tijdelijk stil (freeze-jacht 13-07): het C1-erratum
+// (QoS-forwarding-search AXI→SDC) botst met de fabric-brede operaties van een
+// slot-Start (imagecopy, stage-2-CleanInv, heap-zeroing/TLBI van de bootende
+// core). Geen inbound DMA tijdens dat venster = geen botsing; gedropte frames
+// zijn gewoon Ethernet — TCP zendt opnieuw. TX blijft aan (uitgaand raakt de
+// race niet en zo blijven ACK's/heartbeats lopen).
+func (n *Net) Quiesce(off bool) {
+	n.rxOff = off
+	n.wr(regNWCtrl, n.ctrlBits())
 }
 
 // Receive haalt één frame op (0 = niets) — go-net NetworkDevice.
@@ -305,7 +348,7 @@ func (n *Net) Transmit(buf []byte) error {
 	dev.MB()
 	dev.Write32(d+4, w1)
 	dev.MB()
-	n.wr(regNWCtrl, ctrlMgmtEn|ctrlRxEn|ctrlTxEn|ctrlTxStart)
+	n.wr(regNWCtrl, n.ctrlBits()|ctrlTxStart)
 
 	// RP1-eigenaardigheid (Linux-referentie macb_main.c, "TSTART write
 	// might get dropped"): over de PCIe-backed AXI kan de TSTART-schrijf
@@ -317,7 +360,7 @@ func (n *Net) Transmit(buf []byte) error {
 			break
 		}
 		if n.rd(regTxStatus)&(1<<3) == 0 { // TGO laag: DMA stilgevallen
-			n.wr(regNWCtrl, ctrlMgmtEn|ctrlRxEn|ctrlTxEn|ctrlTxStart)
+			n.wr(regNWCtrl, n.ctrlBits()|ctrlTxStart)
 		}
 		time.Sleep(10 * time.Microsecond)
 	}

@@ -68,6 +68,10 @@ const (
 	miscWin0BaseHi   = 0x4080 // + 8*win: base-MB >> 12 [7:0]
 	miscWin0LimitHi  = 0x4084 // + 8*win
 	miscCtrl1        = 0x40a0
+	miscVDMQoSMapHi  = 0x4164 // VDM-prioriteit → AXI-QoS-map (hoge nibbles)
+	miscVDMQoSMapLo  = 0x4168 // idem, lage nibbles
+	rcTLVDMCtl0      = 0x0a20 // VDM_ENABLED|IGNORETAG|IGNOREVNDRID [18:16]
+	rcTLVDMCtl1      = 0x0a0c // VDM VendorID-match
 	miscUBUSCtrl     = 0x40a4
 	miscUBUSTmo      = 0x40a8
 	miscUBUSBar1Rmp  = 0x40ac // UBUS-remap n≤3: +8*(n-1); HI op +4
@@ -180,10 +184,15 @@ func (rc *RC) Setup() (rcMode, mdioOK bool) {
 
 	// MISC_CTRL: SCB_ACCESS_EN | CFG_READ_UR_MODE (config-reads naar niets
 	// geven 0xffffffff i.p.v. een bus-abort) | RCB_MPS | RCB_64B;
-	// MAX_BURST_SIZE [21:20] = 0x2 (512B, het generieke pad voor de 2712).
+	// MAX_BURST_SIZE [21:20] = 0x1 = 128B — de BCM2712-SPECIFIEKE waarde
+	// (pcie-brcmstb.c: `else if (type == BCM2712) burst = 0x1 /* 128 bytes */`,
+	// zelfde patroon als de beruchte 2711-quirk). Eerder stond hier 0x2/512B
+	// ("generiek pad") — 4× wat Linux dit silicium toestaat, op precies het
+	// inbound-pad (GEM-DMA → SDC/DRAM) van de stille totale freeze
+	// (freeze-jacht 2026-07-13, referentie-agent ronde 2).
 	v := rc.rd(miscCtrl)
 	v |= 0x1000 | 0x2000 | 0x400 | 0x80
-	v = v&^uint32(0x300000) | 0x200000
+	v = v&^uint32(0x300000) | 0x100000
 	rc.wr(miscCtrl, v)
 
 	// Inbound-windows (RC-BAR's, 1-genummerd) — élk met zijn UBUS-remap
@@ -251,10 +260,28 @@ func (rc *RC) postSetup2712() bool {
 	v = v&^uint32(1<<7) | 1<<13 | 1<<12 | 1<<11
 	rc.wr(miscAXIIntfCtrl, v)
 	if rc.rd(miscAXIIntfCtrl)&(1<<12) == 0 {
-		// 2712C1/x1-poort: bit 12 pakt niet → outstanding requests knijpen.
-		rc.mod(miscAXIIntfCtrl, 0x3f, 15)
+		// C1-silicium: de échte QoS-fixes (bits 11/12/13, "chicken bits for
+		// 2712D0") zijn hier Reserved-0 — de kapotte QoS-forwarding-search in
+		// het AXI→SDC-pad is op C1 alleen te DEMPEN door outstanding requests
+		// te knijpen (Linux: best-effort 15). Wij knijpen harder: 4 — de
+		// outstanding-sweep van de freeze-jacht (13-07, agent-ronde 3); elke
+		// stap omlaag verkleint het race-venster van het erratum.
+		rc.mod(miscAXIIntfCtrl, 0x3f, 4)
+		fmt.Printf("brcmpcie: C1 silicon detected (QoS fix bits reserved) — AXI outstanding throttled to 4\n")
+	} else {
+		fmt.Printf("brcmpcie: D0 silicon (QoS fix bits active)\n")
 	}
-	rc.mod(miscCtrl1, 1<<5, 0) // VDM-QoS uit (default)
+	// VDM-QoS AAN — de Pi 5-DT eist dit voor de RP1-poort (bcm2712-rpi-5-b.dts:
+	// brcm,vdm-qos-map = 0xbbaa9888; brcm_pcie_set_tc_qos). De RP1 stúúrt
+	// QoS-VDM's (paniek-prioritering) zodra zijn interne FIFO's vollopen —
+	// precies het sustained-RX-moment. Met VDM-receptie uit (de oude regel
+	// hier) landen die berichten op een dove RC. (Freeze-jacht 2026-07-13,
+	// referentie-agent ronde 2, delta #2.)
+	rc.wr(miscVDMQoSMapHi, 0xbbaa9888)
+	rc.wr(miscVDMQoSMapLo, 0xbbaa9888)
+	rc.wr(rcTLVDMCtl1, 0) // match VendorID 0
+	rc.mod(rcTLVDMCtl0, 0, 0x70000) // VDM_ENABLED|VDM_IGNORETAG|VDM_IGNOREVNDRID
+	rc.mod(miscCtrl1, 0, 1<<5)      // EN_VDM_QOS_CONTROL
 	return ok
 }
 

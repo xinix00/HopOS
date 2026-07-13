@@ -8,6 +8,7 @@
 package main
 
 import (
+	"time"
 	_ "unsafe"
 
 	"hop-os/metal/board/raspi"
@@ -28,6 +29,16 @@ var ramSize uint = raspi.HopKernelSize
 // mailbox van dit board. TickHz = CNTFRQ/65536 (het event-stream-tempo van
 // de idle-teller, zie metal/idle: EVNTI=15 → periode 2^16 tellerticks).
 func init() {
+	// Hardware-watchdog METEEN (freeze-jacht 13-07): niet pas bij agent-start
+	// maar vóór álles — gemeten (13-07 ~09:20): een watchdog-reset kan de
+	// RP1/PCIe zo achterlaten dat de vólgende boot in de firmware/bring-up
+	// strandt; met de teller vanaf seconde nul cyclet ook zo'n hang zichzelf
+	// tot een boot slaagt. De aai-goroutine draait zodra de scheduler leeft.
+	// Uitschakelbaar met hopos.wd=off in cmdline.txt (géén rebuild): voor een
+	// JTAG-postmortem moet een bevroren node blijven stáán i.p.v. rebooten.
+	if raspi.BootParam(uintptr(dev.Read64(rpi5.DTBPtr)), "hopos.wd") != "off" {
+		raspi.WatchdogStart(12 * time.Second)
+	}
 	boardExtra = func() {
 		dvfs.Start(dvfs.Config{
 			Mbox:    &vcmail.Mbox{Base: uintptr(rpi5.VCMailBase), Buf: uintptr(raspi.VCMailBuf)},

@@ -61,6 +61,7 @@ func init() {
 	// eerste crypto/rand. Achter de guard blijft de RNG200Base van een app 0, en
 	// dan valt getRandomData terug op de PRNG. Alleen HOP mapt en gebruikt dit MMIO.
 	raspi.RNG200Base = RNG200Base
+	raspi.WatchdogBase = 0x10_7d20_0000 // PM-blok (bcm2712.dtsi watchdog@7d200000)
 	p := layout.Plan{
 		CtrlPA:        0x10000000,
 		RingPA:        0x11000000,

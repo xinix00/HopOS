@@ -7,6 +7,7 @@
 package main
 
 import (
+	"time"
 	_ "unsafe"
 
 	"hop-os/metal/board/raspi"
@@ -26,6 +27,12 @@ var ramSize uint = raspi.HopKernelSize
 // Klokbeleid (docs/plan-p2b-soak.md): identiek aan de Pi 5, alleen de
 // mailbox-basis verschilt. TickHz = CNTFRQ/65536 (event-stream-tempo).
 func init() {
+	// Hardware-watchdog, generiek via raspi (zelfde PM-registerfamilie als de
+	// Pi 5): vroeg gewapend zodat ook een hangende boot zichzelf reset-cyclet.
+	// Uitschakelbaar met hopos.wd=off in cmdline.txt.
+	if raspi.BootParam(uintptr(dev.Read64(rpi4.DTBPtr)), "hopos.wd") != "off" {
+		raspi.WatchdogStart(12 * time.Second)
+	}
 	boardExtra = func() {
 		dvfs.Start(dvfs.Config{
 			Mbox:    &vcmail.Mbox{Base: uintptr(rpi4.VCMailBase), Buf: uintptr(raspi.VCMailBuf)},

@@ -81,6 +81,21 @@ func (machine) SMPStubPC() uint64    { return el2.SMPStubPC() }
 // roept ProbeNIC vóór Net() aan (die volgorde is het contract).
 var lease dhcp.Lease
 
+// theNIC is de door ProbeNIC gebouwde GEM (voor NetQuiesce); nil vóór P2-init.
+var theNIC *gem.Net
+
+// NetQuiesce (board.NetQuiescer): RX-DMA tijdelijk stil rond de
+// slot-vensters — de C1-erratum-workaround. Vóór netwerk-init een no-op.
+func (machine) NetQuiesce(off bool) {
+	if theNIC != nil {
+		theNIC.Quiesce(off)
+	}
+}
+
+// LifecyclePace (board.LifecyclePacer): minimale adempauze tussen
+// slot-lifecycles op dit board — C1-erratum-demper naast NetQuiesce.
+func (machine) LifecyclePace() time.Duration { return 500 * time.Millisecond }
+
 // ProbeNIC brengt de hele netwerkketen op — elke stap boardvast bewezen met
 // probe6 (2026-07-10, runs 2/4/5): RESCAL → pcie2-RC (54MHz-PLL!) →
 // link-training (gen2 x4) → RP1-enumeratie (1de4:0001) → BAR's (BAR1 → PCIe
@@ -101,6 +116,12 @@ func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
 		In: []brcmpcie.InWin{
 			{PCIe: 0, CPU: RP1Base, Size: 0x40_0000},             // RP1-loopback (BAR1)
 			{PCIe: 0x10_0000_0000, CPU: 0, Size: 0x10_0000_0000}, // al het DRAM
+			// MIP0: het MSI-X-doel van de RP1 (bcm2712.dtsi dma-ranges: PCIe
+			// 0xff_ffff_f000 → 0x10_0013_0000, 4KB). De RP1 vuurt peripheral-
+			// IRQ's als MSI-writes op dít adres af; zonder window slaat zo'n
+			// write op een ongemapt PCIe-adres — kansgedreven fabric-gif midden
+			// in de RX-stroom (freeze-jacht 13-07, referentie-agent delta #2).
+			{PCIe: 0xff_ffff_f000, CPU: 0x10_0013_0000, Size: 0x1000},
 		},
 	}
 	// BAR's: vaste toewijzing (groottes gemeten met probe6: 16KB/4MB/64KB).
@@ -130,6 +151,7 @@ func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
 		BusOff: 0x10_0000_0000, // RP1-masters → PCIe → RC-inbound → DRAM 0
 		MAC:    raspi.MACFromSerial(raspi.DTB(), 0x05),
 	}
+	theNIC = nic // voor NetQuiesce (slots-Start-venster, freeze-jacht 13-07)
 	nic.MDIOEnable()
 	addr, _, _, found := nic.PHYScan()
 	if !found {

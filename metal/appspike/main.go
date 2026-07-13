@@ -9,6 +9,7 @@ package main
 import (
 	"bufio"
 	"net"
+	"net/http"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -45,6 +46,14 @@ func main() {
 	// dvfs-druk-flank.
 	if app.Env("BURN") != "" {
 		burn(app)
+	}
+
+	// Downloader-rol (freeze-jacht 13-07, idee Derek): sustained RX-DMA door
+	// het VOLLE slot-pad (eigen netstack → switch → NAT-masquerade → GEM),
+	// zonder job-churn en zonder core-0-buffering — streamen en weggooien.
+	// Plain HTTP: test en passant of TLS-crypto een freeze-ingrediënt is.
+	if url := app.Env("DOWNLOAD"); url != "" {
+		download(app, url)
 	}
 
 	// Isolatietest: grijp bewust buiten de eigen kooi. Onder stage-2 hoort
@@ -267,57 +276,100 @@ func burn(app *applib.App) {
 	app.Logf("BURN: soak load on %d core(s), RAM %d MB — %ds work / %ds rest cycle",
 		n, app.RAMSize>>20, workSecs, restSecs)
 
-	var burning atomic.Bool
-	burning.Store(true)
+	// ZELF-TIMEND: geen aparte controller-goroutine (die op een 1-core slot
+	// door de rekenlus gestarfd kan worden). Elke worker leidt z'n fase af
+	// uit de wandklok en rekent in korte bursts met een yield ertussen —
+	// tijdens werk brandt de core, tijdens rust slaapt hij (core idle →
+	// dvfs klokt terug). Zo hangt er niets van een niet-geschedulede
+	// goroutine af. Gemeten 2026-07-12: dit was de betrouwbare vorm.
+	const cycle = workSecs + restSecs
 	var iters uint64
 	for c := 0; c < n; c++ {
 		go func() {
-			buf := make([]byte, 0, 1<<16)
 			var acc uint64
-			for i := uint64(1); ; i++ {
-				if !burning.Load() {
-					time.Sleep(50 * time.Millisecond) // rust: laat de core idlen
+			for {
+				if time.Now().Unix()%cycle >= workSecs { // rust-venster
+					time.Sleep(200 * time.Millisecond)
 					continue
 				}
-				acc = acc*6364136223846793005 + i // rekenwerk (LCG)
-				if i&0xFFFFF == 0 {
-					buf = append(buf, byte(acc)) // heap-churn → GC-druk
-					if len(buf) == cap(buf) {
-						buf = make([]byte, 0, 1<<16)
-					}
-					atomic.AddUint64(&iters, 1) // 1 tel per ~1M iteraties
-					// AFGEVEN: op een 1-core slot (GOMAXPROCS=1, en tamago heeft
-					// geen signal-based async preemption) starft een strakke
-					// rekenlus z'n eigen timer-goroutines — de fase-controller
-					// en telemetrie kwamen nooit aan de beurt (gemeten
-					// 2026-07-12). Een compute-lus MOET coöperatief afgeven; dit
-					// is de app z'n verantwoordelijkheid, geen OS-taak (de
-					// stage-2-kooi zorgt dat 't hooguit de eigen core raakt).
-					runtime.Gosched()
+				for k := 0; k < 1<<19; k++ { // ~0,3ms rekenburst
+					acc = acc*6364136223846793005 + uint64(k)
 				}
 				smpSink = acc
+				atomic.AddUint64(&iters, 1)
+				runtime.Gosched() // afgeven: telemetrie/heartbeat krijgen de core
 			}
 		}()
 	}
-	// Fase-controller: wissel werk↔rust en log elke overgang (het dvfs-bewijs).
-	go func() {
-		for {
-			time.Sleep(workSecs * time.Second)
-			burning.Store(false)
-			app.Logf("BURN: rest %ds — cores idle, dvfs should clock down", restSecs)
-			time.Sleep(restSecs * time.Second)
-			burning.Store(true)
-			app.Logf("BURN: work %ds — cores busy, dvfs should clock up", workSecs)
-		}
-	}()
 
 	var ms runtime.MemStats
+	inWork := true
 	for {
-		time.Sleep(time.Minute)
+		time.Sleep(10 * time.Second)
+		nowWork := time.Now().Unix()%cycle < workSecs
+		if nowWork != inWork { // fase-overgang loggen (dvfs-bewijs)
+			inWork = nowWork
+			if inWork {
+				app.Logf("BURN: work phase — cores busy, dvfs should clock up")
+			} else {
+				app.Logf("BURN: rest phase — cores idle, dvfs should clock down")
+			}
+		}
 		runtime.ReadMemStats(&ms)
-		app.Logf("BURN: %dM iterations, GC=%d, heap=%d KB, clock=%s",
+		app.Logf("BURN: %dM bursts, GC=%d, heap=%d KB, phase=%s, clock=%s",
 			atomic.LoadUint64(&iters), ms.NumGC, ms.HeapAlloc>>10,
+			map[bool]string{true: "work", false: "rest"}[inWork],
 			time.Now().UTC().Format("15:04:05Z"))
+	}
+}
+
+// download is de sustained-RX-DMA-rol (freeze-jacht 13-07): eindeloos een
+// groot bestand streamen door de eigen netstack en de bytes weggooien — het
+// volle slot-pad (appnet → switch → NAT → GEM) onder continue inbound-druk,
+// zonder churn en zonder buffering. Plain HTTP houdt TLS buiten het
+// experiment. Body.Read blokkeert (yield), dus heartbeat/kill lopen gewoon.
+func download(app *applib.App, url string) {
+	ip, err := appnet.Up(app)
+	if err != nil {
+		app.Logf("DOWNLOAD: netstack: %v", err)
+		return
+	}
+	if d := app.Env("HOP_DNS"); d != "" {
+		net.SetDefaultNS([]string{d})
+	}
+	app.Logf("DOWNLOAD: stack up on %s — streaming %s to /dev/null", ip, url)
+	buf := make([]byte, 32<<10)
+	var total, last uint64
+	for round := 1; ; round++ {
+		resp, err := http.Get(url)
+		if err != nil {
+			app.Logf("DOWNLOAD: %v — retry in 5s", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		if round == 1 || resp.StatusCode != 200 {
+			app.Logf("DOWNLOAD: HTTP %s, length %d", resp.Status, resp.ContentLength)
+		}
+		if resp.StatusCode != 200 {
+			resp.Body.Close()
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		var n uint64
+		for {
+			k, err := resp.Body.Read(buf)
+			n += uint64(k)
+			total += uint64(k)
+			if total-last >= 100<<20 {
+				last = total
+				app.Logf("DOWNLOAD: %d MB total (round %d)", total>>20, round)
+			}
+			if err != nil {
+				break
+			}
+		}
+		resp.Body.Close()
+		app.Logf("DOWNLOAD: round %d done — %d MB this round, %d MB total", round, n>>20, total>>20)
 	}
 }
 

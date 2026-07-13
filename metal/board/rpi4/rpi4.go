@@ -50,6 +50,7 @@ func init() {
 	// een app 0, en dan valt getRandomData terug op de PRNG. Alleen HOP mapt en
 	// gebruikt dit MMIO — net als het plan hieronder.
 	raspi.RNG200Base = RNG200Base
+	raspi.WatchdogBase = 0xFE100000 // PM-blok (bcm2711, zelfde registerfamilie)
 	p := layout.Plan{
 		CtrlPA:        0x10000000,
 		RingPA:        0x11000000,

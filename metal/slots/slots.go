@@ -47,6 +47,43 @@ var (
 	servicers = map[int]*servicer{}
 )
 
+// De slot-lifecycle (Start/Stop) is GESERIALISEERD en draait in een
+// DMA-stil venster — generieke semantiek, geen board-paadje: een task start
+// liever een fractie trager maar schoon in zijn eigen huisje. De fabric-brede
+// operaties van een lifecycle (imagecopy, stage-2-CleanInv, heap-zeroing en
+// TLBI's van een bootende of parkerende core) lopen zo nooit gelijktijdig
+// met elkaar óf met inbound netwerk-DMA. Aanleiding: het BCM2712-C1-erratum
+// (gemeten 2026-07-13) — maar safe-by-default is het ontwerp; silicium dat
+// zelfs dít niet trekt kopen we niet. quiesce() werkt via board.NetQuiescer
+// (optioneel): boards zonder stilzetbare NIC hebben géén venster nodig.
+var (
+	lifecycleMu   sync.Mutex
+	lastLifecycle time.Time // voor de adempauze (board.LifecyclePacer)
+)
+
+func quiesce(off bool) {
+	if q, ok := board.Current().(board.NetQuiescer); ok {
+		q.NetQuiesce(off)
+	}
+}
+
+// drain laat na het sluiten van het venster de in-flight DMA landen: RX uit
+// stopt níeuwe transacties, maar posted writes die al in de pijp zitten
+// (NIC→fabric→DRAM) landen vlak daarna nog. Twee milliseconden is ruim voor
+// elke pijpdiepte — generieke silicium-hygiëne, geen board-specifiek pad.
+func drain() { time.Sleep(2 * time.Millisecond) }
+
+// pace wacht (onder lifecycleMu, mét RX aan) tot de board-adempauze sinds de
+// vorige lifecycle verstreken is, en stempelt het nieuwe beginmoment.
+func pace() {
+	if p, ok := board.Current().(board.LifecyclePacer); ok {
+		if d := p.LifecyclePace() - time.Since(lastLifecycle); d > 0 {
+			time.Sleep(d)
+		}
+	}
+	lastLifecycle = time.Now()
+}
+
 // evictServicer stopt de actieve servicer van slot i en wacht tot hij weg is.
 func evictServicer(i int) {
 	svcMu.Lock()
@@ -312,6 +349,15 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 	if err := checkSlot(i); err != nil {
 		return err
 	}
+	// Eén lifecycle tegelijk, in een DMA-stil venster (zie lifecycleMu):
+	// gewone defers dekken álle paden — het venster sluit pas na de
+	// WaitReady onderaan, zodat ook de app-boot (heap-zeroing) erbinnen valt.
+	lifecycleMu.Lock()
+	defer lifecycleMu.Unlock()
+	pace()
+	quiesce(true)
+	drain()
+	defer quiesce(false)
 	for name, p := range ports {
 		if p < 1 || p > 65535 {
 			return fmt.Errorf("poort %q: %d ongeldig", name, p)
@@ -540,6 +586,12 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 
 	started = true // partitie blijft van deze task tot Stop
 	go claimServicer(i, root, mtab).run()
+
+	// Synchroon wachten tot de app READY meldt (runtime-boot met heap-zeroing
+	// en TLBI's klaar) — dan pas sluiten de defers het DMA-stille venster.
+	// Best-effort deadline: een app die láng doet over z'n init houdt de
+	// lifecycle niet eeuwig vast.
+	_ = WaitReady(i, 3*time.Second)
 	return nil
 }
 
@@ -559,6 +611,15 @@ func Stop(i int, timeout time.Duration) error {
 	if err := checkSlot(i); err != nil {
 		return err
 	}
+	// Eén lifecycle tegelijk, in een DMA-stil venster (zie lifecycleMu): ook
+	// de coöperatieve kill parkeert een core — gemeten (13-07, torture):
+	// kill+park naast lopende RX-DMA is dodelijk op C1.
+	lifecycleMu.Lock()
+	defer lifecycleMu.Unlock()
+	pace()
+	quiesce(true)
+	drain()
+	defer quiesce(false)
 	ctrlWrite(i, layout.CtrlKill, 1)
 	dev.MB()
 	// Coöperatieve kans voor de app (de kill-watcher parkeert zijn eigen core).
