@@ -261,14 +261,23 @@ func (a *App) Fetch(url, path string) (uint64, error) {
 	return resp.Size, err
 }
 
-// watch verstuurt heartbeats en gehoorzaamt de kill-flag.
+// watch verstuurt heartbeats, gehoorzaamt de kill-flag en rapporteert elke
+// ~2s de eigen geheugen-draw (MemStats.Sys → CtrlMemSys), zodat HOP per task
+// weet wat hij gebrúíkt naast wat hij mág. ReadMemStats is een korte
+// stop-the-world — op deze cadans verwaarloosbaar.
 func (a *App) watch() {
 	hb := a.ctrl(layout.CtrlHeartbeat)
 	kill := a.ctrl(layout.CtrlKill)
-	for {
+	mem := a.ctrl(layout.CtrlMemSys)
+	var ms runtime.MemStats
+	for tick := 0; ; tick++ {
 		*hb++
 		if *kill != 0 {
 			a.Exit(0)
+		}
+		if tick%40 == 0 { // 40 × 50ms = 2s
+			runtime.ReadMemStats(&ms)
+			*mem = ms.Sys
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

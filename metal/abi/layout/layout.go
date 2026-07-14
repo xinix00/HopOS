@@ -465,6 +465,15 @@ const (
 	// isolatie: een verkeerde maat faalt hooguit de ELF-parse van deze partitie.
 	CtrlStagedSize = 0xE0
 
+	// App → HOP: de werkelijke geheugen-draw van de app — runtime MemStats.Sys,
+	// alles wat de Go-runtime uit zijn RamSize heeft geclaimd (heap+stacks+
+	// runtime; de statische image zit er niet in, die kent HOP al van het
+	// artifact). De applib-watch ververst hem elke ~2s naast de heartbeat;
+	// HOP leest hem in slots.Get en rapporteert per task ("HOP weet niet
+	// alleen wat een app mág, maar ook wat hij gebrúíkt"). 0 = nog niet
+	// gerapporteerd (de control-page wordt bij elke start geveegd).
+	CtrlMemSys = 0xE8
+
 	// Env-blob: door HOP geschreven "key=val\n..."-bytes die de app-lib bij
 	// start inleest (de Docker-vorm: env meegegeven bij het starten). Vervangt
 	// het kernel-envp dat bare metal niet heeft.

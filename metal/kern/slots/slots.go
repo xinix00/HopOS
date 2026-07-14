@@ -315,6 +315,7 @@ type Status struct {
 	ExitCode  uint64
 	Heartbeat uint64
 	RAMSize   uint64 // door de app gerapporteerde (gepatchte) RAM-maat
+	MemSys    uint64 // werkelijke draw: MemStats.Sys van de app (0 = nog niet gemeld)
 
 	// Door de EL2-vectoren gerapporteerd bij een onvrijwillig einde:
 	// FaultVec = layout.FaultSync (stage-2-fault; ESR/FAR geldig) — zowel bij
@@ -875,6 +876,7 @@ func Get(i int) Status {
 		ExitCode:  ctrlRead(i, layout.CtrlExitCode),
 		Heartbeat: ctrlRead(i, layout.CtrlHeartbeat),
 		RAMSize:   ctrlRead(i, layout.CtrlRAMSize),
+		MemSys:    ctrlRead(i, layout.CtrlMemSys),
 		FaultVec:  ctrlRead(i, layout.CtrlFaultVec),
 		FaultESR:  ctrlRead(i, layout.CtrlFaultESR),
 		FaultFAR:  ctrlRead(i, layout.CtrlFaultFAR),
