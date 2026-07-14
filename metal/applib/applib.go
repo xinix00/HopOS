@@ -11,6 +11,7 @@ package applib
 
 import (
 	"fmt"
+	"io"
 	"runtime"
 	"strings"
 	"sync"
@@ -281,6 +282,64 @@ func (a *App) Exit(code uint64) {
 	// Coöperatief stoppen via HVC → HopOS parkeert de core op EL2 (geen PSCI
 	// CPU_OFF: dat geeft de core aan de firmware terug en op de Pi 5-stock
 	// komt hij dan nooit terug). HopOS bezit zijn cores.
+	hvcExit()
+	for {
+	} // onbereikbaar
+}
+
+// StageImage is de kern van "de app downloadt zijn eigen image": stream r (de
+// gedownloade image, imgSize bytes) de STAGING bovenin de eigen partitie in —
+// precies waar HOP 'm bij het plaatsen verwacht (slots.StartStaged) — en sein
+// HOP dan "staged". De core parkeert daarna; HOP her-dispatcht 'm op de echte
+// app. StageImage keert dus niet terug bij succes.
+//
+// De hele download draait op DEZE core, DEZE netstack, in DEZE partitie: één
+// node-netstack draagt nooit 127 verbindingen, en een te grote/kapotte image
+// raakt hooguit dit ene slot ("crasht hooguit daar").
+func (a *App) StageImage(r io.Reader, imgSize int64) error {
+	if imgSize <= 0 {
+		return fmt.Errorf("StageImage: onbekende image-grootte (Content-Length vereist)")
+	}
+	staged := (uint64(imgSize) + 7) &^ 7 // 8-uitgelijnd (device-reads bij HOP)
+	if staged >= a.RAMSize {
+		return fmt.Errorf("StageImage: image %d bytes past niet in partitie %d MB", imgSize, a.RAMSize>>20)
+	}
+	// Bovenin de eigen partitie — waar straks de stack/heap-top komt, maar die
+	// bestaat nog niet: de echte app draait pas ná het plaatsen. HOP leest deze
+	// IPA (stage-2 vertaalt naar dezelfde fysieke plek) bij StartStaged.
+	stageAddr := uintptr(a.RAMStart + a.RAMSize - staged)
+	var buf [64 << 10]byte
+	var got int64
+	for got < imgSize {
+		n, rerr := r.Read(buf[:])
+		if n > 0 {
+			if got+int64(n) > imgSize {
+				return fmt.Errorf("StageImage: image groter dan aangekondigd")
+			}
+			dev.Copy(stageAddr+uintptr(got), buf[:n])
+			got += int64(n)
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return fmt.Errorf("StageImage: download: %w", rerr)
+		}
+	}
+	if got != imgSize {
+		return fmt.Errorf("StageImage: image incompleet: %d van %d bytes", got, imgSize)
+	}
+	// Onze cacheable writes naar de staging naar RAM duwen: HOP leest die regio
+	// ongecachet (device) bij het plaatsen — zonder deze flush ziet hij stale RAM.
+	dev.CleanInv(stageAddr, uintptr(staged))
+	// Seinen: eerst de maat, dan de status (HOP leest de maat pas ná StatusStaged).
+	*a.ctrl(layout.CtrlStagedSize) = uint64(imgSize)
+	dev.MB()
+	*a.ctrl(layout.CtrlStatus) = layout.StatusStaged
+	dev.MB()
+	// De core aan HopOS teruggeven (park, net als Exit) — maar met StatusStaged,
+	// dus HOP plaatst de echte app en her-dispatcht deze core i.p.v. het slot
+	// vrij te geven. Keert nooit terug.
 	hvcExit()
 	for {
 	} // onbereikbaar

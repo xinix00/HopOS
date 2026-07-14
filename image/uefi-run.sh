@@ -34,9 +34,19 @@ CPU="${CPU:-neoverse-n1}"
 MODE="${1:-probe}"
 [ $# -gt 0 ] && shift # rest gaat door naar QEMU (zie "$@" aan het eind)
 
-# De venster-kandidaten: de stub kiest bij boot de eerste die vrij is (zie
-# metal/board/uefi). Gespreid over het lage Altra-DRAM (0x80000000..
-# 0xFFFFFFFF; 0x90000000 daar bezet, gemeten) + een lage QEMU-terugvaller.
+# De venster-kandidaten: de stub kiest bij boot de eerste waar AllocatePages
+# slaagt (zie metal/board/uefi). Elke kandidaat heeft nú 544MB aaneengesloten
+# vrij RAM nodig vanaf zijn basis: RamSize 256MB (0x10000000) + carve 288MB
+# (0x12000000) = 0x22000000 — de claim GROEIDE mee met de layout-opschaling
+# (was 128MB toen deze lijst werd gekozen). De slot-pool komt daarná uit ál het
+# resterende bruikbare DRAM (usablePool), niet meer alleen boven de claim.
+#
+# LET OP (review golf-2 #5): deze lijst is nog niet herijkt tegen de 544MB-
+# claim. Leg 'm naast de vrije-regio-dump die de stub bij "RAM WINDOW BUSY"
+# print — een kandidaat waar base+0x22000000 in bezet/BootServices-RAM valt
+# (op de Altra o.a. rond 0x90000000, gemeten) faalt de AllocatePages en wordt
+# overgeslagen; als álle zes falen hangt de boot. Gespreid over het lage
+# Altra-DRAM (0x80000000..0xFFFFFFFF) + een lage QEMU-terugvaller.
 SLOTS="${SLOTS:-0xB0000000 0xA0000000 0xC8000000 0x88000000 0xE8000000 0x50000000}"
 
 case "$MODE" in
@@ -58,26 +68,45 @@ esac
 
 cd "$DIR/metal"
 
-# In agent-modus ook de app-image (canoniek gelinkt, slot-1-IPA; zonder -s:
-# slots.Start patcht RamStart/RamSize/slotHint per job).
+# Tags: de node-image bakt in agent-modus de apploader ín (embedloader) — geen
+# externe URL, self-contained. De probe heeft 'm niet nodig.
+TAGS="uefi linkcpuinit"
+[ "$MODE" = agent ] && TAGS="$TAGS embedloader"
+
+# In agent-modus de app-image (die de apps zelf downloaden, via de http.server
+# geserveerd als HOP_IMAGE_URL) én de universele apploader. De apploader wordt
+# NIET geserveerd maar íngebakken in de node: hij landt op de go:embed-plek
+# (apploaderblob/apploader.elf) zodat de node-build (embedloader) 'm meeneemt.
+# Canoniek gelinkt (slot-1-IPA; zonder -s: slots patcht RamStart/RamSize/slotHint).
 if [ "$MODE" = agent ]; then
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "uefi linkcpuinit" -trimpath \
 		-ldflags "-w -T 0x50010000 -R 0x1000" -o app-uefi.elf ./appspike
+	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
+		"$TAMAGO" build -tags "uefi linkcpuinit" -trimpath \
+		-ldflags "-w -T 0x50010000 -R 0x1000" -o apploaderblob/apploader.elf ./apploader
 fi
 
 # 1. Eén ELF per venster-kandidaat (zelfde build, ander -T). Parallel linken:
-#    zes onafhankelijke builds, wall-clock ≈ één i.p.v. zes.
+#    zes onafhankelijke builds, wall-clock ≈ één i.p.v. zes. PID's verzamelen
+#    en per stuk waiten: een kaal `wait` returnt onder `set -e` ALTIJD 0, dus
+#    een gefaalde background-link zou stil doorglippen en mkkernel de STALE
+#    .elf van de vorige run verpakken (namen zijn stabiel + gitignored) —
+#    dan boot je ongemerkt code van gisteren (op de Altra: een verloren cyclus).
 ELFS=""
+PIDS=""
 for base in $SLOTS; do
 	text=$(printf '0x%X' $((base + 0x10000)))
 	out="hopos-uefi-$MODE-$base.elf"
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-		"$TAMAGO" build -tags "uefi linkcpuinit" -trimpath \
+		"$TAMAGO" build -tags "$TAGS" -trimpath \
 		-ldflags "-w -T $text -R 0x1000" -o "$out" "$PKG" &
+	PIDS="$PIDS $!"
 	ELFS="$ELFS -elf metal/$out"
 done
-wait
+for pid in $PIDS; do
+	wait "$pid" || { echo "FOUT: venster-link (pid $pid) faalde — build afgebroken" >&2; exit 1; }
+done
 
 # 2. ELFs → één zelfkiezende BOOTAA64.EFI in de ESP-boom. GO111MODULE=off:
 #    mkkernel is puur stdlib en de repo-root heeft geen go.mod (de module

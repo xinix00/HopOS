@@ -431,6 +431,12 @@ const (
 	// verwachte tempo door CtrlCores.
 	CtrlIdle = 0xD8
 
+	// Apploader → HOP: de grootte van de image die de loader in de staging
+	// bovenin zijn eigen partitie heeft gedownload. HOP leest 'm bij StatusStaged
+	// en plaatst de echte app vanaf de staging (StartStaged). Niet vertrouwd voor
+	// isolatie: een verkeerde maat faalt hooguit de ELF-parse van deze partitie.
+	CtrlStagedSize = 0xE0
+
 	// Env-blob: door HOP geschreven "key=val\n..."-bytes die de app-lib bij
 	// start inleest (de Docker-vorm: env meegegeven bij het starten). Vervangt
 	// het kernel-envp dat bare metal niet heeft.
@@ -444,6 +450,8 @@ const (
 	StatusBooting = 1 // HOP heeft CPU_ON gedaan, app-runtime nog niet klaar
 	StatusReady   = 2 // app-runtime draait (gezet door applib)
 	StatusExited  = 3 // app is gestopt (exitcode in CtrlExitCode)
+	StatusStaged  = 4 // apploader heeft de echte image gestaged + geparkeerd;
+	// HOP plaatst 'm en her-dispatcht de core (StartStaged)
 )
 
 // CtrlFaultVec-waarden (vectorindex + 1; de relevante paden benoemd).

@@ -81,12 +81,19 @@ func Up() error {
 }
 
 // Attach koppelt slot i aan de switch (door slots.Start, ná de ring-init).
+// No-op zolang de switch niet Up() is: ports is dan nog nil (lazy op de
+// runtime-MaxSlots gedimensioneerd), en een board dat geen switch draait
+// (de Pi-mains starten slots zonder hopswitch.Up) mag hier niet crashen —
+// vóór de array→slice-wissel was dit een onschuldige no-op.
 func Attach(i int) {
 	if i < 1 || i > layout.MaxSlots {
 		return
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	if !up {
+		return
+	}
 	ports[i] = &port{
 		tx: ring.Open(layout.NetRingTXPA(i)),
 		rx: ring.Open(layout.NetRingRXPA(i)),
@@ -101,6 +108,9 @@ func Detach(i int) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	if !up {
+		return
+	}
 	ports[i] = nil
 }
 

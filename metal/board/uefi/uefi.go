@@ -187,10 +187,10 @@ type MemDesc struct {
 
 // UEFI-memory-types (UEFI-spec 7.2). Ná ExitBootServices is niet alleen
 // EfiConventionalMemory vrij: de firmware geeft óók haar boot-services-code
-// en -data terug (de OS mag die dan hergebruiken). Op de Altra ligt onze
-// slot-pool (0xB8000000) in EfiBootServicesData — echt RAM, alleen in het
+// en -data terug (de OS mag die dan hergebruiken). Op de Altra valt een groot
+// deel van het vrije DRAM in EfiBootServicesData — echt RAM, alleen in het
 // boot-snapshot nog als "boot-services" geboekt; alleen op conventional
-// filteren paniekte daar onterecht (gemeten 14-07). Reserved/MMIO/ACPI/
+// filteren zou dat onterecht weggooien (gemeten 14-07). Reserved/MMIO/ACPI/
 // runtime blijven verboden.
 const (
 	EfiLoaderCode       = 1

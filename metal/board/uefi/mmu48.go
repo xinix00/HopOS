@@ -136,26 +136,51 @@ func mapGB(pa uint64) bool {
 	return true
 }
 
-// UnmapHigh geeft de highL1-slot van de 512GB-regio rond base terug (L0-entry
-// invalid, poolslot vrij, TLB gewist). Voor scan-en-verwerp: een ECAM-segment
-// zonder onze NIC hoeft niet gemapt te blijven — anders vult de kleine pool
-// zich met segmenten die we niet gebruiken (de Altra heeft tot 8 PCIe-
-// segmenten, elk in een eigen 512GB-regio; de pool heeft er 6). Onder de
-// vlakke 512GB is er niets te doen.
-func UnmapHigh(base uint64) {
-	if base < vaLimit {
+// UnmapHigh geeft de 1GB-blokken van [base, base+size) terug (invalide L1-
+// ingangen; TLB gewist). Voor scan-en-verwerp: een ECAM-segment zonder onze
+// NIC hoeft niet gemapt te blijven — anders vult de kleine pool zich met
+// segmenten die we niet gebruiken (de Altra heeft tot 8 PCIe-segmenten, elk in
+// een eigen 512GB-regio; de pool heeft er 6). Onder de vlakke 512GB niets te
+// doen.
+//
+// Precies-per-blok (review golf-2 #8): alléén de eigen 1GB-blokken worden
+// geïnvalideerd, en de highL1-poolpagina + L0-ingang gaan pas terug wanneer die
+// pagina géén geldige ingang meer heeft. Zo overleeft een ándere mapping in
+// dezelfde 512GB-regio (de UART, de GOP-framebuffer, een buur-ECAM) het
+// verwerpen van dit segment — de oude versie sloopte de hele regio en liet de
+// eerstvolgende printk in een niet-gemapte console faulten (de stille
+// "blue screen zonder tekst"-modus van 13-07).
+func UnmapHigh(base, size uint64) {
+	if size == 0 || base < vaLimit {
 		return
 	}
-	l0idx := base >> 39
-	for i := range highL1 {
-		if highL1[i] == l0idx {
-			*(*uint64)(unsafe.Pointer(Base() + l0Off + uintptr(l0idx)*8)) = 0
-			highL1[i] = 0
-			dev.MB()
-			tlbiAll()
-			return
+	for pa := base &^ uint64(gb-1); pa < base+size; pa += gb {
+		l0idx := pa >> 39
+		for i := range highL1 {
+			if highL1[i] != l0idx {
+				continue
+			}
+			l1 := Base() + highL1Off + uintptr(i)*4096
+			l1idx := (pa >> 30) & 0x1FF
+			*(*uint64)(unsafe.Pointer(l1 + uintptr(l1idx)*8)) = 0
+			// L1-pagina helemaal leeg? Dan pas de regio (L0-ingang + poolslot)
+			// teruggeven; anders blijft een buur-mapping in dezelfde regio staan.
+			empty := true
+			for off := uintptr(0); off < 4096; off += 8 {
+				if *(*uint64)(unsafe.Pointer(l1 + off)) != 0 {
+					empty = false
+					break
+				}
+			}
+			if empty {
+				*(*uint64)(unsafe.Pointer(Base() + l0Off + uintptr(l0idx)*8)) = 0
+				highL1[i] = 0
+			}
+			break
 		}
 	}
+	dev.MB()
+	tlbiAll()
 }
 
 // VAStatus rapporteert de 48-bit-MMU-toestand voor diagnose op het scherm

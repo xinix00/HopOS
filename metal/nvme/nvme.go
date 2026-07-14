@@ -146,10 +146,16 @@ func (c *Controller) submit(q *queue, m cmd) error {
 }
 
 // Probe zoekt de NVMe-controller op bus 0 in het PCIe-venster van het board,
-// wijst zelf BAR0 toe (er is geen firmware die dat deed), zet memory-decode +
-// bus-mastering aan en initialiseert de driver op de gegeven DMA-regio. De
-// gedeelde storage-opstart van elke HOP-main (voorheen los in nvmeDemo en
-// storageUp — de demo doet daarna nog een scratch-zelftest, productie niet).
+// zet memory-decode + bus-mastering aan en initialiseert de driver op de
+// gegeven DMA-regio. De gedeelde storage-opstart van elke HOP-main (voorheen
+// los in nvmeDemo en storageUp — de demo doet daarna nog een scratch-zelftest,
+// productie niet).
+//
+// BAR0: op een kale fabric (win.MMIOBase != 0) wijzen wij hem zelf toe; op
+// een firmware-geconfigureerd platform (UEFI/ACPI: win.MMIOBase == 0) wees de
+// firmware hem al toe en LEZEN we hem — hem overschrijven met SetBAR64(0, 0)
+// zou de controller op PA 0 zetten (op QEMU de flash-alias, op de Altra een
+// data-abort). Zelfde read-only conventie als het igb-pad.
 func Probe(win board.PCIeWindow, dmaBase uintptr, dmaSize uint64) (*Controller, error) {
 	var nd *pcie.Device
 	for _, d := range pcie.Scan(win) {
@@ -160,9 +166,20 @@ func Probe(win board.PCIeWindow, dmaBase uintptr, dmaSize uint64) (*Controller, 
 	if nd == nil {
 		return nil, fmt.Errorf("nvme: no device on bus 0")
 	}
-	nd.SetBAR64(0, uint64(win.MMIOBase))
+	base := win.MMIOBase
+	if base == 0 {
+		// Firmware-toegewezen BAR0 (de firmware deed de toewijzing); een hoge
+		// BAR vergt dat het board hem al bereikbaar maakte (MapHigh), net als
+		// bij igb — op de kale-fabric-boards ligt hij laag/vlak.
+		base = uintptr(nd.BAR(0))
+		if base == 0 {
+			return nil, fmt.Errorf("nvme: BAR0 not assigned (firmware MMIOBase=0 and device BAR0=0)")
+		}
+	} else {
+		nd.SetBAR64(0, uint64(base))
+	}
 	nd.Enable()
-	c := &Controller{Base: win.MMIOBase}
+	c := &Controller{Base: base}
 	if err := c.Init(dmaBase, dmaSize); err != nil {
 		return nil, err
 	}

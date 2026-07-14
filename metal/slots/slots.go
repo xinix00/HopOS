@@ -13,13 +13,13 @@
 package slots
 
 import (
-	"bytes"
 	"debug/elf"
 	"fmt"
 	"io"
 	"sync"
 	"time"
 
+	"hop-os/metal/apploaderblob"
 	"hop-os/metal/board"
 	"hop-os/metal/dev"
 	"hop-os/metal/hopswitch"
@@ -334,28 +334,9 @@ func checkSlot(i int) error {
 	return nil
 }
 
-// Start laadt image in slot i (1-based, = core-index), patcht de
-// RAM-declaratie naar memLimit en wekt de core. De image is een gewone
-// tamago-ELF, canoniek gelinkt (TEXT_START = SlotBase(1)+0x10000): de
-// stage-2-map legt het canonieke bereik op de partitie van dít slot, dus
-// één artifact draait op elk slot.
-//
-// mounts is de volume-tabel van de task (shared path → local path, de vorm
-// van HOP's Job.Volumes): de task ziet zijn eigen lege root plus uitsluitend
-// de gemounte shared dirs — de toegangsgrens op storage, zoals de
-// stage-2-kooi dat op geheugen is. Een shared dir ontstaat bij de eerste
-// mount. Vereist een storage-laag (UseFS); zonder mounts is fs optioneel.
-//
-// ports (naam → poort, HOP's Task.Ports) worden na de start gepubliceerd:
-// node-IP:poort → dit slot (stateloze DNAT bij de switch), zelfde nummer
-// aan beide kanten — de app leest hem uit ER_PORT_* en bindt hem zelf.
-func Start(i int, image []byte, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int) error {
-	return StartStream(i, bytes.NewReader(image), int64(len(image)), memLimit, cores, env, mounts, ports)
-}
-
 // devReaderAt is een io.ReaderAt over een stuk device-geheugen (de partitie-
-// staging waar StartStream de image in streamt) — zo parseert debug/elf de
-// ELF zonder dat het bestand ooit volledig in de kern-RAM staat.
+// staging waar de image in staat) — zo parseert debug/elf de ELF zonder dat
+// het bestand ooit volledig in de kern-RAM staat.
 type devReaderAt struct {
 	base uintptr
 	size int64
@@ -376,20 +357,30 @@ func (d devReaderAt) ReadAt(p []byte, off int64) (int, error) {
 	return n, nil
 }
 
-// StartStream is Start's streamende kern: het leest de image uit src (een
-// io.Reader — een download-body of een bytes.Reader) rechtstreeks de
-// slot-partitie in, en parseert+plaatst de ELF vanuit dát device-geheugen.
-// Zo is core 0 nooit de download-trechter: de kern houdt per fetch alleen een
-// kleine stream-buffer vast (dev.Move/CopyOut werken op vaste stack-buffers),
-// niet de hele image — 127 gelijktijdige fetches passen zo probleemloos, en
-// een te grote/kapotte image raakt hooguit zijn eigen partitie. size is de
-// verwachte bytegrootte (Content-Length; de []byte-wrapper geeft len).
-func StartStream(i int, src io.Reader, imgSize int64, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int) error {
+// Start laadt image in slot i (1-based, = core-index): de bytes gaan de staging
+// bovenin de partitie in, waarna de ELF daaruit geparsed en geplaatst wordt
+// (placeFromStaging), de RAM-declaratie naar memLimit gepatcht, en de core
+// gewekt. De image is een gewone tamago-ELF, canoniek gelinkt (TEXT_START =
+// SlotBase(1)+0x10000): de stage-2-map legt het canonieke bereik op de partitie
+// van dít slot, dus één artifact draait op elk slot.
+//
+// image is een in-memory slice — de ingebakken apploader (StartLoader) of een
+// Pi-demo-image — GÉÉN io.Reader/download-body meer: de app downloadt zijn eigen
+// image zelf (apploader → StartStaged). Zo leest core 0 hier nooit van het
+// netwerk terwijl de NIC gequiesced is (dat gaf een deadlock — finding #3) en
+// buffert de kern nooit 127 downloads tegelijk. De blob is gedeeld (ingebakken),
+// dus dev.Copy hieronder alloceert niets per start.
+//
+// mounts is de volume-tabel (shared path → local path, HOP's Job.Volumes): de
+// task ziet zijn eigen lege root plus de gemounte shared dirs. ports (HOP's
+// Task.Ports) worden na de start gepubliceerd (stateloze DNAT bij de switch).
+func Start(i int, image []byte, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int) error {
 	if err := checkSlot(i); err != nil {
 		return err
 	}
+	imgSize := int64(len(image))
 	if imgSize <= 0 {
-		return fmt.Errorf("StartStream: onbekende/lege image-grootte %d (Content-Length vereist)", imgSize)
+		return fmt.Errorf("Start: lege image")
 	}
 	// Eén lifecycle tegelijk, in een DMA-stil venster (zie lifecycleMu):
 	// gewone defers dekken álle paden — het venster sluit pas na de
@@ -463,37 +454,44 @@ func StartStream(i int, src io.Reader, imgSize int64, memLimit uint64, cores int
 	// caches; op de A76 echt, gemeten 2026-07-10). Hele partitie in één keer.
 	dev.CleanInv(uintptr(base), uintptr(size))
 
-	// De image de partitie in STREAMEN — bovenaan (staging), zodat de laag
-	// geplaatste segmenten er niet mee botsen en core 0 nooit de hele image
-	// vasthoudt (download-in-app-memory: een te grote/kapotte image raakt
-	// hooguit deze partitie). 8-uitgelijnd zodat de device-reads netjes vallen.
+	// De image bovenin de partitie plaatsen (staging), zodat de laag geplaatste
+	// segmenten er niet mee botsen. 8-uitgelijnd zodat de device-reads bij het
+	// parsen netjes vallen. Eén dev.Copy van de gedeelde in-memory blob — geen
+	// per-start-allocatie, geen netwerk (finding #3).
 	staged := (uint64(imgSize) + 7) &^ 7
 	if staged >= size {
 		return fmt.Errorf("image %d bytes past niet in partitie %d MB", imgSize, size>>20)
 	}
 	stageAddr := uintptr(base + size - staged)
-	var buf [64 << 10]byte
-	var got int64
-	for got < imgSize {
-		n, rerr := src.Read(buf[:])
-		if n > 0 {
-			if got+int64(n) > imgSize {
-				return fmt.Errorf("image groter dan aangekondigd (%d > %d)", got+int64(n), imgSize)
-			}
-			dev.Copy(stageAddr+uintptr(got), buf[:n])
-			got += int64(n)
-		}
-		if rerr == io.EOF {
-			break
-		}
-		if rerr != nil {
-			return fmt.Errorf("image streamen: %w", rerr)
-		}
-	}
-	if got != imgSize {
-		return fmt.Errorf("image incompleet: %d van %d bytes", got, imgSize)
-	}
+	dev.Copy(stageAddr, image)
 
+	if err := placeFromStaging(i, base, size, stageAddr, imgSize, memLimit, cores, envBlob, mtab, ports); err != nil {
+		return err
+	}
+	started = true // partitie blijft van deze task tot Stop
+	return nil
+}
+
+// StartLoader laadt de universele apploader (metal/apploader, ingebakken via
+// apploaderblob) in slot i op één core. Die downloadt op zíjn eigen core+netstack
+// de echte app-image (env HOP_IMAGE_URL) zijn eigen partitie in en seint
+// "staged"; HOP plaatst 'm dan met StartStaged. De partitie wordt op memLimit
+// gealloceerd — die de echte app in fase 2 hergebruikt. De loader is een gedeelde
+// ingebakken blob (geen fetch, geen per-start-kopie). Vereist -tags embedloader.
+func StartLoader(i int, memLimit uint64, env map[string]string) error {
+	if len(apploaderblob.Loader) == 0 {
+		return fmt.Errorf("apploader niet ingebakken (bouw de node met -tags embedloader)")
+	}
+	return Start(i, apploaderblob.Loader, memLimit, 1, env, nil, nil)
+}
+
+// placeFromStaging is de tweede helft van een slot-start: de image staat al in
+// de staging bovenin de partitie — óf door Start (een ingebakken blob, zoals de
+// apploader), óf door de apploader vanaf zíjn eigen download (StartStaged). Van
+// hieraf is alles geprivilegieerd HOP-werk: ELF parsen, segmenten plaatsen,
+// RAM-symbolen patchen, stage-2 bouwen en de core (her)dispatchen. Eén bron van
+// waarheid voor beide startpaden.
+func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64, memLimit uint64, cores int, envBlob []byte, mtab [][2]string, ports map[string]int) error {
 	// Parsen vanuit de gestreamde device-kopie (geen kern-RAM-kopie).
 	f, err := elf.NewFile(devReaderAt{base: stageAddr, size: imgSize})
 	if err != nil {
@@ -526,6 +524,14 @@ func StartStream(i int, src io.Reader, imgSize int64, memLimit uint64, cores int
 			p.Paddr < linkBase || p.Paddr > linkBase+size-p.Memsz {
 			return fmt.Errorf("segment %#x+%#x (file %#x) outside link range of slot %d (%#x+%#x)",
 				p.Paddr, p.Memsz, p.Filesz, linked, linkBase, size)
+		}
+		// p.Off is óók input (de image komt van het netwerk): de bron-read
+		// [stageAddr+Off, +Off+Filesz) moet binnen de gestreamde image blijven,
+		// anders leest dev.Move buiten de staging — een andere partitie, HOP-RAM
+		// of MMIO — de eigen (leesbare) partitie in. Overflow-veilig getoetst.
+		if p.Off > uint64(imgSize) || p.Filesz > uint64(imgSize)-p.Off {
+			return fmt.Errorf("segment file-offset %#x+%#x outside staged image (%d bytes) of slot %d",
+				p.Off, p.Filesz, imgSize, linked)
 		}
 		if p.Paddr+delta+p.Memsz > uint64(stageAddr) {
 			return fmt.Errorf("segment %#x+%#x botst met de image-staging (partitie te klein)", p.Paddr, p.Memsz)
@@ -667,7 +673,6 @@ func StartStream(i int, src io.Reader, imgSize int64, memLimit uint64, cores int
 		return err
 	}
 
-	started = true // partitie blijft van deze task tot Stop
 	go claimServicer(i, root, mtab).run()
 
 	// Synchroon wachten tot de app READY meldt (runtime-boot met heap-zeroing
@@ -676,6 +681,77 @@ func StartStream(i int, src io.Reader, imgSize int64, memLimit uint64, cores int
 	// lifecycle niet eeuwig vast.
 	_ = WaitReady(i, 3*time.Second)
 	return nil
+}
+
+// StartStaged plaatst de échte app vanaf de image die de apploader al in de
+// staging bovenin de partitie heeft gedownload (control-page StatusStaged). De
+// partitie is al gealloceerd (fase 1: de runner startte de apploader via
+// StartStream), dus we hergebruiken 'm, plaatsen de app eroverheen en
+// her-dispatchen de geparkeerde core. Zo verhuist het downloaden naar de app
+// (eigen core+netstack), terwijl het geprivilegieerde plaatsen bij HOP blijft.
+//
+// imgSize komt van de control-page (door de loader gezet) en is NIET vertrouwd:
+// een verkeerde maat faalt hooguit de ELF-parse/segment-validatie van dít slot.
+func StartStaged(i int, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int) error {
+	if err := checkSlot(i); err != nil {
+		return err
+	}
+	// De grootte die de loader in de staging heeft gezet (control-page). Niet
+	// vertrouwd — een verkeerde maat faalt hooguit de ELF-parse van dit slot.
+	imgSize := int64(ctrlRead(i, layout.CtrlStagedSize))
+	if imgSize <= 0 {
+		return fmt.Errorf("StartStaged: geen gestagede image in slot %d (CtrlStagedSize=%d)", i, imgSize)
+	}
+	lifecycleMu.Lock()
+	defer lifecycleMu.Unlock()
+	pace()
+	quiesce(true)
+	drain()
+	defer quiesce(false)
+	for name, p := range ports {
+		if p < 1 || p > 65535 {
+			return fmt.Errorf("poort %q: %d ongeldig", name, p)
+		}
+	}
+	mtab, err := mountTable(mounts)
+	if err != nil {
+		return err
+	}
+	if memLimit == 0 {
+		return fmt.Errorf("memLimit 0 ongeldig")
+	}
+	if cores < 1 {
+		cores = 1
+	}
+	if i+cores-1 > layout.MaxSlots {
+		return fmt.Errorf("SMP: %d cores vanaf slot %d overschrijden MaxSlots %d", cores, i, layout.MaxSlots)
+	}
+	// De apploader parkeerde na het seinen; zijn core (en de secundaire cores van
+	// een SMP-app) mogen niet meer draaien vóór we eroverheen plaatsen.
+	for c := i; c < i+cores; c++ {
+		if coreRunning(c) {
+			return fmt.Errorf("core %d still running (loader not parked?)", c)
+		}
+	}
+	envBlob := encodeEnv(withDNS(env, board.Current().Net().DNS))
+	if len(envBlob) > layout.CtrlEnvMax {
+		return fmt.Errorf("env te groot: %d > %d bytes", len(envBlob), layout.CtrlEnvMax)
+	}
+	// De partitie van fase 1 (de loader) hergebruiken — niet opnieuw alloceren.
+	base, size, ok := partitionOf(i)
+	if !ok {
+		return fmt.Errorf("StartStaged: slot %d heeft geen partitie (loader niet gestart?)", i)
+	}
+	staged := (uint64(imgSize) + 7) &^ 7
+	if staged >= size {
+		return fmt.Errorf("staged image %d bytes past niet in partitie %d MB", imgSize, size>>20)
+	}
+	stageAddr := uintptr(base + size - staged)
+	// Coherentie: de loader draaide cacheable; zijn dirty lines wegschrijven+
+	// invalideren vóór we de echte app er ongecachet overheen plaatsen. De loader
+	// flushte de staging zelf al (StageImage); dit dekt de rest van de partitie.
+	dev.CleanInv(uintptr(base), uintptr(size))
+	return placeFromStaging(i, base, size, stageAddr, imgSize, memLimit, cores, envBlob, mtab, ports)
 }
 
 var vectorsOnce sync.Once

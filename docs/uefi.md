@@ -175,7 +175,7 @@ emuleert). **End-to-end bewezen (13-07) tegen QEMU's igb (82576,
 wijzen niets toe), reset + MAC-autoload uit RAL0/RAH0, MDIC → PHY
 BMCR-autoneg-herstart (zónder die herstart komt de link niet op — gemeten;
 Linux doet hem ook altijd), link 1000FD, ringen in een
-memory-map-geverifieerd DMA-venster (uefi.IsConventional) direct boven de
+memory-map-geverifieerd DMA-venster (uefi.IsUsableRAM) direct boven de
 RAM-partitie, en een volledige DHCP-lease als TX+RX+DMA-bewijs in één.
 I210-verschillen t.o.v. QEMU's 82576 die op het bord gemeten moeten worden:
 device-ID 8086:1533, NVM-MAC-autoload, echte PHY-autoneg-tijd (QEMU is
@@ -193,8 +193,9 @@ boot-entries in de varstore ongeldig → EDK2 valt in de Shell; verse
 `image/uefi-run.sh agent` bouwt en boot de échte node (agent + leader +
 slots + stage-2 + NAT) op het uefi-board — zelfde script als de probe, één
 mode-argument verschil: MADT→CPUOn/CoreID, MCFG→igb, GOP-scherm,
-layout-plan in de "carve" (32MB tussen de Go-RAM en het einde van de
-stub-claim; pariteit met CARVE_SIZE/REVOKE_OFF in init.s), VBAR_EL2 in
+layout-plan in de "carve" (288MB tussen de 256MB Go-RAM en het einde van de
+stub-claim — samen een 544MB-claim per venster, gedimensioneerd voor
+SlotCap=128 slots; pariteit met CARVE_SIZE/REVOKE_OFF in init.s), VBAR_EL2 in
 bootKernel, SBSA-watchdog uit de GTDT, 48-bit-MMU via mmu48.go. Bewezen:
 job gesubmit → artifact-fetch → slot-start → app RUNNING, restart_count 0.
 

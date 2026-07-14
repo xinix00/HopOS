@@ -72,8 +72,12 @@ func partAlloc(i int, size uint64) (uint64, error) {
 }
 
 // partRelease geeft de reservering van slot i terug aan de pool (coalescing).
-// No-op als slot i niets gealloceerd had (al vrij).
+// No-op als slot i niets gealloceerd had (al vrij). partOnce.Do óók hier:
+// een Stop vóór de allereerste Start (defensieve cleanup/reconcile) bereikt
+// releaseLocked anders met partOf==nil → nil-deref-panic; en releaseSlot
+// schrijft ná deze aanroep slotCores[i], dat poolInit tegelijk alloceert.
 func partRelease(i int) {
+	partOnce.Do(poolInit)
 	partMu.Lock()
 	defer partMu.Unlock()
 	releaseLocked(i)
@@ -105,6 +109,19 @@ func releaseLocked(i int) {
 		partFree[pos-1].size += partFree[pos].size
 		partFree = append(partFree[:pos], partFree[pos+1:]...)
 	}
+}
+
+// partitionOf geeft de actieve reservering van slot i terug (base, size). ok=
+// false als slot i niets gealloceerd heeft. Gebruikt door StartStaged om de
+// partitie van fase 1 (de apploader) te hergebruiken voor de echte app.
+func partitionOf(i int) (base, size uint64, ok bool) {
+	partOnce.Do(poolInit)
+	partMu.Lock()
+	defer partMu.Unlock()
+	if i < 0 || i >= len(partOf) || partOf[i].size == 0 {
+		return 0, 0, false
+	}
+	return partOf[i].base, partOf[i].size, true
 }
 
 // PoolBytes is de totale grootte van de partitie-pool — de plaatsings-ceiling

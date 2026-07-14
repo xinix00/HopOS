@@ -73,6 +73,17 @@ func init() {
 		return
 	}
 
+	// Alles hieronder is HOP-kern-werk: het PA-plan en de slot-pool. Een
+	// app-image entreert cpuinit op EL1 (de el2-trampoline), slaat de
+	// firmware-stub over en heeft dus géén memory-map — sysTable/memmapSize
+	// blijven 0 (zelfde signaal dat extendVA gebruikt). Dan is er niets te
+	// plannen: de app draait onder stage-2 op zijn canonieke IPA, HOP deelt
+	// de pool uit. Zonder deze guard panicte usablePool() (lege map → 0 vrij)
+	// bij élke jobstart, stil (uart/fb zijn in een app-image niet gezet).
+	if sysTable == 0 {
+		return
+	}
+
 	// Slots volgen de ontdekte cores — geen kunstmatige limiet, de fysieke
 	// grens van dit ijzer (127 op de Altra, 3 op QEMU -smp 4). madtCPUs is
 	// door hwinit1 al gevuld (die draait vóór package-init). SetMaxSlots
@@ -113,7 +124,6 @@ func init() {
 	// met zichzelf): bootKernel schrijft wat de #defines in init.s WERKELIJK
 	// waren (VBAR_EL2-doel, CARVE_SIZE, MEMMAP_CAP) — drift panict hier,
 	// vóór er ooit een revoke-HVC naar een verkeerde pagina vectort.
-	// Alleen in HOP-context (app-images draaien bootKernel niet).
 	if vbarEL2Val != 0 {
 		switch {
 		case vbarEL2Val != b+revokeOff:
@@ -304,7 +314,7 @@ func eachECAM(fn func(win board.PCIeWindow, startBus int) bool) bool {
 		if fn(board.PCIeWindow{ECAMBase: uintptr(e.Base)}, int(e.StartBus)) {
 			return true // treffer: laat dit segment gemapt (fn gebruikt het nog)
 		}
-		UnmapHigh(base) // geen treffer: slot teruggeven zodat de pool niet volloopt
+		UnmapHigh(base, size) // geen treffer: blokken teruggeven zodat de pool niet volloopt
 	}
 	return false
 }
