@@ -28,13 +28,16 @@ type region struct{ base, size uint64 }
 var (
 	partMu   sync.Mutex
 	partOnce sync.Once
-	partFree []region                    // vrije stukken, lazy uit het board-plan
-	partOf   [layout.MaxSlots + 1]region // per slot: de actieve reservering (size 0 = geen)
+	partFree []region // vrije stukken, lazy uit het board-plan
+	partOf   []region // per slot: de actieve reservering (size 0 = geen); lazy
+	// op layout.MaxSlots+1 gedimensioneerd (het board zet MaxSlots vóór gebruik)
 )
 
 // poolInit laadt de pool van het board-plan — lazy (eerste allocatie), want
 // de init-volgorde tussen dit pakket en het board-pakket is niet gegarandeerd.
 func poolInit() {
+	partOf = make([]region, layout.MaxSlots+1)
+	slotCores = make([]int, layout.MaxSlots+1)
 	for _, r := range layout.Pool() {
 		partFree = append(partFree, region{r.Base, r.Size})
 	}
@@ -65,7 +68,7 @@ func partAlloc(i int, size uint64) (uint64, error) {
 		partOf[i] = region{base, size}
 		return base, nil
 	}
-	return 0, fmt.Errorf("partitie %d MB past niet in de pool (vol of gefragmenteerd)", size>>20)
+	return 0, fmt.Errorf("partition %d MB does not fit the pool (full or fragmented)", size>>20)
 }
 
 // partRelease geeft de reservering van slot i terug aan de pool (coalescing).

@@ -39,3 +39,9 @@ const (
 // SMC doet een SMC #0 met vier argumenten (SMCCC: args in R0-R3, resultaat
 // in R0). Zie psci.s.
 func SMC(fn, a1, a2, a3 uint64) uint64
+
+// SMC4 doet een SMC #0 en geeft R0-R3 terug. Nodig voor SMCCC-functies die
+// hun resultaat niet in R0 alleen leveren maar over R1-R3 verspreiden — met
+// name TRNG_RND (Arm DEN 0098): R0 = statuscode, R1:R2:R3 = de entropie. Zie
+// psci.s.
+func SMC4(fn, a1, a2, a3 uint64) (r0, r1, r2, r3 uint64)

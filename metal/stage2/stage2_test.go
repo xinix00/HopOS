@@ -252,7 +252,7 @@ func TestIsolatieTussenSlots(t *testing.T) {
 		{"ctrl-page", uint64(layout.CtrlPagePA(2)), layout.CtrlStride},
 		{"hop-ringen", uint64(layout.RingOutboxPA(2)), layout.RingStride},
 		{"net-ringen", uint64(layout.NetRingTXPA(2)), layout.NetRingStride},
-		{"stage-2-tabellen", uint64(layout.Stage2TablePA(0)), (layout.MaxSlots + 1) * layout.Stage2Stride},
+		{"stage-2-tabellen", uint64(layout.Stage2TablePA(0)), uint64(layout.MaxSlots+1) * layout.Stage2Stride},
 	}
 	roGezien := 0
 	for _, l := range walk(t, 1) {

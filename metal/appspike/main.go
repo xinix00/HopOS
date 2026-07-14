@@ -248,10 +248,29 @@ func main() {
 		}
 	}
 
-	// "Werk": periodiek een logregel; heartbeat en kill lopen via applib.
-	for i := 1; ; i++ {
-		time.Sleep(400 * time.Millisecond)
-		app.Logf("werkje %d klaar", i)
+	// Standaard-rol: een long-running service — de werklast voor de brede
+	// SMP-test (N taken → N slots → N cores, elk hier). Elke ronde een korte
+	// rekenburst gevolgd door een korte pauze: de pauze is het yield-punt
+	// (heartbeat en kill-flag krijgen de core) én houdt een zwaar overboekte
+	// QEMU bij. Af en toe — niet elke ronde, anders overstemmen 127 apps de
+	// console — een levensteken met het slotnummer (in een slot is CoreID het
+	// door HOP gepatchte slotHint), het rondetal (bewijst dat hij écht itereert)
+	// en de uptime. Geen exit: een HOP-app is een service.
+	start := time.Now()
+	next := start.Add(12 * time.Second)
+	var acc, rounds uint64
+	for {
+		for k := 0; k < 1<<18; k++ { // korte rekenburst (~honderden µs)
+			acc = acc*6364136223846793005 + uint64(k)
+		}
+		smpSink = acc
+		rounds++
+		if now := time.Now(); now.After(next) {
+			app.Logf("service alive: slot %d, %d rounds, up %s",
+				board.Current().CoreID(), rounds, time.Since(start).Round(time.Second))
+			next = now.Add(12 * time.Second)
+		}
+		time.Sleep(250 * time.Millisecond)
 	}
 }
 

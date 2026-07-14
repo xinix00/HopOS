@@ -21,18 +21,19 @@ package slots
 // de page schrijven (de app-OS-laag en de dvfs-governor lezen 'm) — alleen de
 // readback wordt nooit vertrouwd.
 
-import "hop-os/metal/layout"
-
 // slotCores is HOP's vertrouwde bron van waarheid voor het aantal cores per
 // slot: gezet door Start (uit het al-gevalideerde `cores`-argument), gewist door
 // releaseSlot. 0 = geen actieve reservering. Enkel de HOP-kern (core 0) muteert
 // en leest deze array — net als partOf — dus Go-synchronisatie is niet nodig.
-var slotCores [layout.MaxSlots + 1]int
+// slotCores is een slice (lazy op layout.MaxSlots+1 gedimensioneerd in
+// poolInit, ná board.SetMaxSlots) i.p.v. een vaste array — MaxSlots is nu
+// runtime (het board volgt zijn ontdekte cores).
+var slotCores []int
 
 // coreCount geeft het vertrouwde core-aantal van slot i (minstens 1). Nooit uit
 // de app-schrijfbare control-page — zie de pakketnoot hierboven.
 func coreCount(i int) int {
-	if i < 1 || i > layout.MaxSlots {
+	if i < 1 || i >= len(slotCores) {
 		return 1
 	}
 	c := slotCores[i]

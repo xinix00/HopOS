@@ -11,6 +11,7 @@
 package slotmgr
 
 import (
+	"io"
 	"time"
 
 	"hop/pkg/hopos"
@@ -28,6 +29,10 @@ func (Manager) CoreClass(slot int) string { return slots.CoreClass(slot) }
 
 func (Manager) Start(slot int, image []byte, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int) error {
 	return slots.Start(slot, image, memLimit, cores, env, mounts, ports)
+}
+
+func (Manager) StartStream(slot int, src io.Reader, size int64, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int) error {
+	return slots.StartStream(slot, src, size, memLimit, cores, env, mounts, ports)
 }
 
 func (Manager) Stop(slot int, timeout time.Duration) error {

@@ -31,7 +31,7 @@ func Up() error {
 		return fmt.Errorf("nic: %w", err)
 	}
 	if nic == nil {
-		return fmt.Errorf("geen NIC gevonden")
+		return fmt.Errorf("no NIC found")
 	}
 	mac := hw.String()
 	nc := board.Current().Net()

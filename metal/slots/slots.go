@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"debug/elf"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -212,7 +213,7 @@ func (s *servicer) dispatchSMP() {
 	if c <= s.slot || c > s.slot+cores-1 || c > layout.MaxSlots {
 		// Buiten het toegewezen core-bereik: weiger (de app hoort dit niet te
 		// vragen). Verzoek intrekken zodat de app niet eeuwig wacht.
-		fmt.Printf("HOPOS_SMP_REJECT slot %d: core %d buiten [%d,%d]\n", s.slot, c, s.slot+1, s.slot+cores-1)
+		fmt.Printf("HOPOS_SMP_REJECT slot %d: core %d outside [%d,%d]\n", s.slot, c, s.slot+1, s.slot+cores-1)
 		ctrlWrite(s.slot, layout.CtrlSMPReq, 0)
 		dev.MB()
 		return
@@ -232,6 +233,9 @@ func (s *servicer) dispatchSMP() {
 const (
 	symRAMStart = "runtime/goos.RamStart"
 	symRAMSize  = "runtime/goos.RamSize"
+	// Slot-identiteit voor app-images op UEFI/ACPI-servers (zie de patch in
+	// Start; alleen gepatcht als het symbool bestaat).
+	symSlotHint = "hop-os/metal/board/uefi.slotHint"
 )
 
 // ctrlRead/ctrlWrite: 64-bit velden op een control-page (device-gemapt).
@@ -325,7 +329,7 @@ type Status struct {
 // de control-page- en ringadressen worden er rechtstreeks uit berekend.
 func checkSlot(i int) error {
 	if i < 1 || i > layout.MaxSlots {
-		return fmt.Errorf("slot %d buiten bereik 1..%d", i, layout.MaxSlots)
+		return fmt.Errorf("slot %d out of range 1..%d", i, layout.MaxSlots)
 	}
 	return nil
 }
@@ -346,8 +350,46 @@ func checkSlot(i int) error {
 // node-IP:poort → dit slot (stateloze DNAT bij de switch), zelfde nummer
 // aan beide kanten — de app leest hem uit ER_PORT_* en bindt hem zelf.
 func Start(i int, image []byte, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int) error {
+	return StartStream(i, bytes.NewReader(image), int64(len(image)), memLimit, cores, env, mounts, ports)
+}
+
+// devReaderAt is een io.ReaderAt over een stuk device-geheugen (de partitie-
+// staging waar StartStream de image in streamt) — zo parseert debug/elf de
+// ELF zonder dat het bestand ooit volledig in de kern-RAM staat.
+type devReaderAt struct {
+	base uintptr
+	size int64
+}
+
+func (d devReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 || off >= d.size {
+		return 0, io.EOF
+	}
+	n := len(p)
+	if int64(n) > d.size-off {
+		n = int(d.size - off)
+	}
+	dev.CopyOut(p[:n], d.base+uintptr(off))
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+// StartStream is Start's streamende kern: het leest de image uit src (een
+// io.Reader — een download-body of een bytes.Reader) rechtstreeks de
+// slot-partitie in, en parseert+plaatst de ELF vanuit dát device-geheugen.
+// Zo is core 0 nooit de download-trechter: de kern houdt per fetch alleen een
+// kleine stream-buffer vast (dev.Move/CopyOut werken op vaste stack-buffers),
+// niet de hele image — 127 gelijktijdige fetches passen zo probleemloos, en
+// een te grote/kapotte image raakt hooguit zijn eigen partitie. size is de
+// verwachte bytegrootte (Content-Length; de []byte-wrapper geeft len).
+func StartStream(i int, src io.Reader, imgSize int64, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int) error {
 	if err := checkSlot(i); err != nil {
 		return err
+	}
+	if imgSize <= 0 {
+		return fmt.Errorf("StartStream: onbekende/lege image-grootte %d (Content-Length vereist)", imgSize)
 	}
 	// Eén lifecycle tegelijk, in een DMA-stil venster (zie lifecycleMu):
 	// gewone defers dekken álle paden — het venster sluit pas na de
@@ -387,7 +429,7 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 	}
 	for c := i; c < i+cores; c++ {
 		if coreRunning(c) {
-			return fmt.Errorf("core %d draait nog (niet geparkeerd/cold)", c)
+			return fmt.Errorf("core %d still running (not parked/cold)", c)
 		}
 	}
 	// DNS-resolver van de node meegeven, zodat een app die naar buiten praat
@@ -399,7 +441,61 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 		return fmt.Errorf("env te groot: %d > %d bytes", len(envBlob), layout.CtrlEnvMax)
 	}
 
-	f, err := elf.NewFile(bytes.NewReader(image))
+	// De fysieke partitie éérst alloceren (partAlloc heeft alleen i+memLimit
+	// nodig, niet het linkadres): we streamen de image erin vóór we hem
+	// parsen. started markeert een geslaagde start: valt StartStream eerder
+	// uit, dan geeft de defer de gealloceerde partitie terug.
+	base, err := partAlloc(i, memLimit)
+	if err != nil {
+		return err
+	}
+	size := align2M(memLimit)
+	var started bool
+	defer func() {
+		if !started {
+			partRelease(i)
+		}
+	}()
+
+	// Coherentie vóór de ongecachte writes: de vórige huurder draaide
+	// cacheable (hele heap); zijn dirty lines eerst wegschrijven+invalideren,
+	// anders clobberen ze straks onze verse image (QEMU verhult dit — geen
+	// caches; op de A76 echt, gemeten 2026-07-10). Hele partitie in één keer.
+	dev.CleanInv(uintptr(base), uintptr(size))
+
+	// De image de partitie in STREAMEN — bovenaan (staging), zodat de laag
+	// geplaatste segmenten er niet mee botsen en core 0 nooit de hele image
+	// vasthoudt (download-in-app-memory: een te grote/kapotte image raakt
+	// hooguit deze partitie). 8-uitgelijnd zodat de device-reads netjes vallen.
+	staged := (uint64(imgSize) + 7) &^ 7
+	if staged >= size {
+		return fmt.Errorf("image %d bytes past niet in partitie %d MB", imgSize, size>>20)
+	}
+	stageAddr := uintptr(base + size - staged)
+	var buf [64 << 10]byte
+	var got int64
+	for got < imgSize {
+		n, rerr := src.Read(buf[:])
+		if n > 0 {
+			if got+int64(n) > imgSize {
+				return fmt.Errorf("image groter dan aangekondigd (%d > %d)", got+int64(n), imgSize)
+			}
+			dev.Copy(stageAddr+uintptr(got), buf[:n])
+			got += int64(n)
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return fmt.Errorf("image streamen: %w", rerr)
+		}
+	}
+	if got != imgSize {
+		return fmt.Errorf("image incompleet: %d van %d bytes", got, imgSize)
+	}
+
+	// Parsen vanuit de gestreamde device-kopie (geen kern-RAM-kopie).
+	f, err := elf.NewFile(devReaderAt{base: stageAddr, size: imgSize})
 	if err != nil {
 		return fmt.Errorf("elf parse: %w", err)
 	}
@@ -408,59 +504,33 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 	// legt dat op de fysieke partitie van dít slot. Images zijn canoniek
 	// gelinkt (slot-1-bereik) en draaien zo op elk slot — de MMU is de
 	// relocatie.
-	if f.Entry < layout.SlotsBase || f.Entry >= layout.SlotsBase+layout.MaxSlots*uint64(layout.SlotStride) {
-		return fmt.Errorf("entry %#x valt buiten elk slotbereik", f.Entry)
+	if f.Entry < layout.SlotsBase || f.Entry >= layout.SlotsBase+uint64(layout.MaxSlots)*uint64(layout.SlotStride) {
+		return fmt.Errorf("entry %#x outside every slot range", f.Entry)
 	}
 	linked := int((f.Entry-layout.SlotsBase)/layout.SlotStride) + 1
 	linkBase := layout.SlotBase(linked)
-
-	// base/size = de fysieke partitie: dynamisch uit de pool gealloceerd op
-	// precies memLimit (de een 128MB, de ander 640MB). started markeert een
-	// geslaagde start: valt Start eerder uit, dan geeft de defer de
-	// gealloceerde partitie terug.
 	if max := maxLimitFor(linkBase); memLimit > max {
 		return fmt.Errorf("memLimit %d MB > %d MB slot-cap (één GB-blok vanaf linkadres %#x, geklemd onder CtrlBase; groter vergt vensteruitbreiding — zie slots/partmem.go)", memLimit>>20, max>>20, linkBase)
 	}
-	base, err := partAlloc(i, memLimit)
-	if err != nil {
-		return err
-	}
-	size := align2M(memLimit)
-	var started bool
-	// Vanaf hier faalt niets zonder de partitie terug te geven.
-	defer func() {
-		if !started {
-			partRelease(i)
-		}
-	}()
 	delta := base - linkBase // PA = linkadres + delta (identiek slot: 0)
 
-	// Coherentie vóór de ongecachte writes: de vórige huurder van deze partitie
-	// draaide cacheable — niet alleen op de ELF-segmenten maar op zijn hele heap.
-	// Een app die faultte/gekilld werd flushte niets; zijn dirty lines zitten nog
-	// in de (geparkeerde) core z'n cache en zouden bij evictie de verse image óf
-	// de heap van de nieuwe app overschrijven (QEMU verhult dit — geen caches;
-	// op de A76 is het echt, gemeten 2026-07-10: crash op de 2e herstart-na-fault).
-	// Dus de HÉLE partitie in één keer clean+invalidaten, niet enkel de segmenten.
-	dev.CleanInv(uintptr(base), uintptr(size))
-
-	// Segmenten naar de partitie. Headervelden zijn input — overflow-veilig
-	// rekenen, anders wordt een corrupte image een geheugenveger. Bounds
-	// gelden in het link-bereik; geschreven wordt op linkadres+delta.
+	// Segmenten naar de partitie, device→device (dev.Move, kleine stack-buffer
+	// — geen kern-RAM voor de hele image). Headervelden zijn input:
+	// overflow-veilig begrenzen, én het segment mag de staging bovenin niet
+	// raken (anders overschrijven we de bron tijdens het kopiëren).
 	for _, p := range f.Progs {
 		if p.Type != elf.PT_LOAD {
 			continue
 		}
 		if p.Filesz > p.Memsz || p.Memsz > size ||
 			p.Paddr < linkBase || p.Paddr > linkBase+size-p.Memsz {
-			return fmt.Errorf("segment %#x+%#x (file %#x) valt buiten linkbereik slot %d (%#x+%#x)",
+			return fmt.Errorf("segment %#x+%#x (file %#x) outside link range of slot %d (%#x+%#x)",
 				p.Paddr, p.Memsz, p.Filesz, linked, linkBase, size)
 		}
-		buf := make([]byte, p.Filesz)
-		if n, err := p.ReadAt(buf, 0); err != nil || uint64(n) != p.Filesz {
-			return fmt.Errorf("segment lezen: %d/%d, %v", n, p.Filesz, err)
+		if p.Paddr+delta+p.Memsz > uint64(stageAddr) {
+			return fmt.Errorf("segment %#x+%#x botst met de image-staging (partitie te klein)", p.Paddr, p.Memsz)
 		}
-		dev.Copy(uintptr(p.Paddr+delta), buf)
+		dev.Move(uintptr(p.Paddr+delta), stageAddr+uintptr(p.Off), p.Filesz)
 		dev.Clear(uintptr(p.Paddr+delta)+uintptr(p.Filesz), p.Memsz-p.Filesz)
 	}
 
@@ -478,7 +548,7 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 			continue
 		}
 		if s.Value%8 != 0 || s.Value < linkBase || s.Value > linkBase+size-8 {
-			return fmt.Errorf("symbool %s (%#x) valt buiten linkbereik slot %d", s.Name, s.Value, linked)
+			return fmt.Errorf("symbol %s (%#x) outside link range of slot %d", s.Name, s.Value, linked)
 		}
 		v := linkBase
 		if s.Name == symRAMSize {
@@ -488,7 +558,20 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 		patched++
 	}
 	if patched != 2 {
-		return fmt.Errorf("RAM-symbolen niet gevonden (%d/2 gepatcht)", patched)
+		return fmt.Errorf("RAM symbols not found (%d/2 patched)", patched)
+	}
+
+	// Optioneel slot-hint-symbool (uefi-app-images): op servers is MPIDR
+	// géén slotnummer (Altra: aff0 altijd 0), dus HOP vertelt de app bij
+	// Start zíjn slot. Additief: Pi/virt-images hebben het symbool niet en
+	// merken hier niets van.
+	for _, s := range syms {
+		if s.Name != symSlotHint {
+			continue
+		}
+		if s.Value%8 == 0 && s.Value >= linkBase && s.Value <= linkBase+size-8 {
+			dev.Write64(uintptr(s.Value+delta), uint64(i))
+		}
 	}
 
 	// SPSC-hygiëne: geen oude servicer meer op deze ringen vóór her-init,
@@ -515,7 +598,7 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 			}
 		}
 	} else if len(mtab) > 0 {
-		return fmt.Errorf("mounts gevraagd maar geen storage-laag (UseFS)")
+		return fmt.Errorf("mounts requested but no storage layer (UseFS)")
 	}
 
 	// Control-page vegen, env-blob schrijven, hop-ABI-ringen klaarzetten,
@@ -645,7 +728,7 @@ func Stop(i int, timeout time.Duration) error {
 				continue
 			}
 			if !waitStopped(c, time.Second) {
-				stopErr = fmt.Errorf("slot %d: core %d parkeerde ook na de stage-2-intrekking niet", i, c)
+				stopErr = fmt.Errorf("slot %d: core %d did not park even after stage-2 revocation", i, c)
 			}
 		}
 	}
@@ -698,7 +781,7 @@ func WaitReady(i int, timeout time.Duration) error {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	return fmt.Errorf("slot %d niet ready binnen %v", i, timeout)
+	return fmt.Errorf("slot %d not ready within %v", i, timeout)
 }
 
 // Logs geeft het logkanaal van de actieve servicer van slot i (gevuld uit de

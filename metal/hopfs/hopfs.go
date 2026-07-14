@@ -70,7 +70,7 @@ func split(path string) ([]string, error) {
 		switch s {
 		case "", ".":
 		case "..":
-			return nil, fmt.Errorf("hopfs: '..' niet toegestaan (%q)", path)
+			return nil, fmt.Errorf("hopfs: '..' not allowed (%q)", path)
 		default:
 			segs = append(segs, s)
 		}
@@ -83,7 +83,7 @@ func (f *FS) walk(segs []string, mkParents bool) (*node, error) {
 	n := f.root
 	for i, s := range segs {
 		if !n.dir {
-			return nil, fmt.Errorf("hopfs: %q is geen directory", strings.Join(segs[:i], "/"))
+			return nil, fmt.Errorf("hopfs: %q is not a directory", strings.Join(segs[:i], "/"))
 		}
 		child, ok := n.children[s]
 		if !ok {
@@ -152,7 +152,7 @@ func (f *FS) List(path string) ([]string, error) {
 		return nil, err
 	}
 	if !n.dir {
-		return nil, fmt.Errorf("hopfs: %q is geen directory", path)
+		return nil, fmt.Errorf("hopfs: %q is not a directory", path)
 	}
 	var names []string
 	for name, c := range n.children {
@@ -178,7 +178,7 @@ func (f *FS) MkdirAll(path string) error {
 		return err
 	}
 	if !n.dir {
-		return fmt.Errorf("hopfs: %q bestaat als bestand", path)
+		return fmt.Errorf("hopfs: %q exists as a file", path)
 	}
 	return nil
 }
@@ -196,7 +196,7 @@ func (f *FS) ReadAt(path string, off uint64, p []byte) (int, error) {
 		return 0, err
 	}
 	if n.dir {
-		return 0, fmt.Errorf("hopfs: %q is een directory", path)
+		return 0, fmt.Errorf("hopfs: %q is a directory", path)
 	}
 	if off >= n.size {
 		return 0, nil
@@ -270,7 +270,7 @@ func (f *FS) WriteAt(path string, off uint64, p []byte) error {
 		parent.children[name] = n
 		f.nodes++
 	} else if n.dir {
-		return fmt.Errorf("hopfs: %q is een directory", path)
+		return fmt.Errorf("hopfs: %q is a directory", path)
 	}
 
 	// Foutsemantiek is POSIX-achtig: een write die halverwege faalt (schijf
@@ -360,7 +360,7 @@ func (f *FS) remove(path string, recursive bool) error {
 		return errNoEnt
 	}
 	if n.dir && len(n.children) > 0 && !recursive {
-		return fmt.Errorf("hopfs: %q is niet leeg", path)
+		return fmt.Errorf("hopfs: %q is not empty", path)
 	}
 	f.release(n)
 	delete(parent.children, name)

@@ -26,6 +26,8 @@ type Desc struct {
 	Width, Height int     // pixels
 	Stride        int     // bytes per pixelrij
 	BPP           int     // 32 (x8r8g8b8) of 16 (r5g6b5)
+	SwapRB        bool    // rood/blauw wisselen: GOP PixelFormat 0 (RGB) i.p.v.
+	// de gangbare BGR — anders staat alles blauw waar rood hoort (en omgekeerd).
 }
 
 // scale wordt bij Init uit de framebuffer-maat afgeleid (Derek, 2026-07-11:
@@ -40,6 +42,7 @@ var (
 var (
 	d          Desc
 	bpx        int    // bytes per pixel (2 of 4)
+	swapRB     bool   // zie Desc.SwapRB
 	cols, rows int    // tekencellen
 	x, y       int    // cursor (cel)
 	top        int    // eerste log-rij (0, of ónder de vaste Header-regels)
@@ -64,6 +67,7 @@ func Init(desc Desc) {
 		return
 	}
 	d = desc
+	swapRB = desc.SwapRB
 	// Schaal uit de buffermaat: ≥720 pixelrijen = een echt scherm → 2×.
 	scale = 1
 	if desc.Height >= 720 {
@@ -194,6 +198,9 @@ func glyph(cx, cy, c int) {
 // een 16-bpp-scherm. De device-store is gealigneerd (px*bpx, bpx ∈ {2,4}).
 func putpx(px, py int, argb uint32) {
 	off := uintptr(py*d.Stride + px*bpx)
+	if swapRB { // RGB-framebuffer: R en B ruilen (argb blijft 0xAARRGGBB in code)
+		argb = argb&0xFF00FF00 | (argb&0xFF)<<16 | (argb>>16)&0xFF
+	}
 	if bpx == 2 {
 		r, g, b := (argb>>16)&0xff, (argb>>8)&0xff, argb&0xff
 		dev.Write16(d.Base+off, uint16((r>>3)<<11|(g>>2)<<5|(b>>3)))

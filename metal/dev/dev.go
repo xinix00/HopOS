@@ -107,6 +107,25 @@ func Clear(dst uintptr, n uint64) {
 	}
 }
 
+// Move kopieert n bytes van fysiek adres src naar fysiek adres dst — beide
+// device-geheugen, elke (ook verschillende) alignment. Via een vaste
+// stack-buffer (geen heap): zo kan de kern een image de slot-partitie in
+// streamen zonder ooit het hele bestand in de eigen RAM te houden (de
+// download-in-app-memory-aanpak: core 0 blijft klein, een op-hol-geslagen
+// image raakt hooguit zijn eigen partitie).
+func Move(dst, src uintptr, n uint64) {
+	var buf [4096]byte
+	for i := uint64(0); i < n; {
+		c := n - i
+		if c > uint64(len(buf)) {
+			c = uint64(len(buf))
+		}
+		CopyOut(buf[:c], src+uintptr(i))
+		Copy(dst+uintptr(i), buf[:c])
+		i += c
+	}
+}
+
 // MB, SEV en CleanInv (barrières, core-wakeup, cache-onderhoud) staan per
 // doel apart: dev_tamago.go (assembly, het board) en dev_host.go (no-ops,
 // unit-tests op de ontwikkelmachine).

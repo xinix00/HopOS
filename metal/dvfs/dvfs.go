@@ -74,8 +74,8 @@ func Start(cfg Config) {
 
 // watch is de wachter: samplen, flanken schakelen, telemetrie.
 func watch(cfg Config, maxHz uint32) {
-	var last [layout.MaxSlots + 1]uint64 // [0] = HOP-core, [1..] = slots
-	var seen [layout.MaxSlots + 1]bool   // eerste sample per actief slot = ijken
+	last := make([]uint64, layout.MaxSlots+1) // [0] = HOP-core, [1..] = slots
+	seen := make([]bool, layout.MaxSlots+1)   // eerste sample per actief slot = ijken
 	quiet := time.Now()                  // sinds wanneer alles idle is
 	lastTele := time.Now()
 

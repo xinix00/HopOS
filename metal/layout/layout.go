@@ -44,7 +44,14 @@ const (
 	// maxLimitFor in slots).
 	SlotsBase  = 0x50000000
 	SlotStride = 0x20000000 // 512MB IPA-venster per slot
-	MaxSlots   = 3
+
+	// SlotCap is de compile-time bovengrens op het aantal slots: de fysieke
+	// per-slot regio's (control/ringen/net-ringen/stage-2) worden hiervoor
+	// gereserveerd in de carve, en de stub-claim (init.s) dekt hem. Een board
+	// gebruikt er runtime MaxSlots van (= zijn ontdekte app-cores). 128 dekt
+	// de Ampere Altra (127 app-cores); de Pi's/QEMU zetten MaxSlots lager en
+	// laten de rest ongebruikt.
+	SlotCap = 128
 
 	// Control-pages (IPA-ABI): buiten alle RAM-declaraties → door alle MMU's
 	// als device gemapt → coherent zonder cache-onderhoud. Uitsluitend
@@ -108,6 +115,26 @@ const (
 	NetRXOff       = 0x100000
 	NetRingDataCap = 0xFF000 // datacapaciteit per richting (1MB - 4KB slack)
 )
+
+// MaxSlots is het aantal app-slots dat deze node gebruikt — geen kunstmatige
+// limiet maar de FYSIEKE grens van het board: het aantal ontdekte app-cores
+// (127 op de Ampere Altra, 3 op de Pi, 11 op de O6N). Een board zet het bij
+// het laden met SetMaxSlots uit zijn discovery; default 3 voor boards die het
+// (nog) niet doen. De fysieke per-slot regio's worden voor SlotCap
+// gereserveerd, dus MaxSlots mag runtime variëren zonder de carve te raken.
+var MaxSlots = 3
+
+// SetMaxSlots zet het gebruikte slot-aantal (geklemd op [1, SlotCap]).
+// Aanroepen vóór het eerste slot-gebruik (board-init, vóór UsePlan/NumSlots).
+func SetMaxSlots(n int) {
+	switch {
+	case n < 1:
+		n = 1
+	case n > SlotCap:
+		n = SlotCap
+	}
+	MaxSlots = n
+}
 
 // Region is een aaneengesloten stuk vrij DRAM (fysiek).
 type Region struct{ Base, Size uint64 }

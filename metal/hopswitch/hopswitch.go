@@ -56,7 +56,7 @@ type port struct {
 
 var (
 	mu    sync.Mutex
-	ports [layout.MaxSlots + 1]*port
+	ports []*port // [1..MaxSlots]; in Up() gedimensioneerd (MaxSlots is runtime)
 	up    bool
 
 	// inject draagt frames van de uplink-kant (DNAT-inbound en
@@ -73,6 +73,7 @@ func Up() error {
 	if up {
 		return nil
 	}
+	ports = make([]*port, layout.MaxSlots+1) // MaxSlots staat vast na board-init
 	inject = make(chan []byte, 256)
 	go loop()
 	up = true

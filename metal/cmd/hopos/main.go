@@ -182,7 +182,19 @@ func main() {
 	// De gedetecteerde DRAM (via de DTB, x0) is de bron; faalt de detectie,
 	// dan vertrouwen we op het layout (QEMU zet x0 niet — zie board/fdt).
 	offer := slots.PoolBytes() // HOP alloceert hieruit per job (dynamische partities)
-	if total := board.Current().MemTotal(); total > 0 {
+	// Zelf-plannende boards (uefi/ACPI) hebben de pool al op de gemeten vrije
+	// RAM getrimd (board-init, UsableRun) — dan is de RequiredRAM-check
+	// betekenisloos (hij mengt bovendien de board-eigen adressen met qemuvirt's
+	// HopRAMStart). Alleen de statische-layout-mains (QEMU/Pi) toetsen tegen
+	// RequiredRAM.
+	selfPlanned := false
+	if sp, ok := board.Current().(interface{ SelfPlannedPool() bool }); ok {
+		selfPlanned = sp.SelfPlannedPool()
+	}
+	if total := board.Current().MemTotal(); selfPlanned {
+		fmt.Printf("memory: %d MB DRAM — board trimmed the pool to free RAM; offering HOP a %d MB partition pool (allocated per job)\n",
+			total>>20, offer>>20)
+	} else if total > 0 {
 		if total < layout.RequiredRAM() {
 			fail("memory", fmt.Errorf("node has %d MB DRAM, layout requires %d MB (slots/rings would fall outside RAM)",
 				total>>20, layout.RequiredRAM()>>20))

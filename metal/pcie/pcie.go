@@ -44,7 +44,7 @@ type Device struct {
 }
 
 func (d *Device) String() string {
-	return fmt.Sprintf("%02x:%02x.%x %04x:%04x klasse %06x", d.Bus, d.Dev, d.Fn, d.VendorID, d.DeviceID, d.Class)
+	return fmt.Sprintf("%02x:%02x.%x %04x:%04x class %06x", d.Bus, d.Dev, d.Fn, d.VendorID, d.DeviceID, d.Class)
 }
 
 // IsBridge meldt of dit een type-1 PCI-PCI-bridge is (root-poort/switch),
@@ -72,18 +72,29 @@ func Scan(win board.PCIeWindow) []*Device {
 func ScanBus(win board.PCIeWindow, bus int) []*Device {
 	var found []*Device
 	for devno := 0; devno < 32; devno++ {
-		d := &Device{Bus: bus, Dev: devno, ecam: win.ECAMBase}
-		id := dev.Read32(d.cfg(cfgVendorID))
-		if id == 0xffffffff || id&0xffff == 0 {
-			continue
+		if d, _, ok := probeFn(win, bus, devno, 0); ok {
+			found = append(found, d)
 		}
-		d.VendorID = uint16(id)
-		d.DeviceID = uint16(id >> 16)
-		d.Class = dev.Read32(d.cfg(cfgClass)) >> 8
-		d.HdrType = uint8(dev.Read32(d.cfg(cfgHdrType))>>16) & hdrTypeMask
-		found = append(found, d)
 	}
 	return found
+}
+
+// probeFn leest één (bus,dev,fn) uit de config-space en vult een Device.
+// Geeft (device, ruw-headertype-byte, aanwezig): het ruwe headertype draagt
+// bit 7 (multifunctie), dat ScanConfigured nodig heeft en HdrType wegmaskt.
+// Eén decode-plek voor beide scanners (vlak en hiërarchisch).
+func probeFn(win board.PCIeWindow, bus, devno, fn int) (*Device, uint8, bool) {
+	d := &Device{Bus: bus, Dev: devno, Fn: fn, ecam: win.ECAMBase}
+	id := dev.Read32(d.cfg(cfgVendorID))
+	if id == 0xffffffff || id&0xffff == 0 {
+		return nil, 0, false
+	}
+	hdr := uint8(dev.Read32(d.cfg(cfgHdrType)) >> 16)
+	d.VendorID = uint16(id)
+	d.DeviceID = uint16(id >> 16)
+	d.Class = dev.Read32(d.cfg(cfgClass)) >> 8
+	d.HdrType = hdr & hdrTypeMask
+	return d, hdr, true
 }
 
 // setBridgeBuses schrijft de primary/secondary/subordinate-busnummers in het
@@ -129,6 +140,44 @@ func WalkBridges(win board.PCIeWindow) []*Device {
 	return endpoints
 }
 
+// ScanConfigured enumereert een hiërarchie die de firmware al geconfigureerd
+// heeft (UEFI/ACPI-platforms zoals de Ampere Altra): puur read-only — de
+// secondary-busnummers komen uit de bridges zelf, in plaats van dat wij ze
+// uitdelen (dat doet WalkBridges, voor kale fabrics zonder firmware). Meldt
+// óók bridges (root-poorten) en álle functies van multifunctie-devices — een
+// dual-port-NIC is twee functies, en juist bij discovery wil je beide zien.
+func ScanConfigured(win board.PCIeWindow, startBus int) []*Device {
+	var out []*Device
+	seen := map[int]bool{} // lussen breken op malafide/dubbele bridge-config
+	var walk func(bus int)
+	walk = func(bus int) {
+		if bus < 0 || bus > 0xff || seen[bus] {
+			return
+		}
+		seen[bus] = true
+		for devno := 0; devno < 32; devno++ {
+			for fn := 0; fn < 8; fn++ {
+				d, hdr, ok := probeFn(win, bus, devno, fn)
+				if !ok {
+					if fn == 0 {
+						break // geen device: functies >0 bestaan dan ook niet
+					}
+					continue // gat in een multifunctie-reeks is legaal
+				}
+				out = append(out, d)
+				if d.IsBridge() {
+					walk(int(dev.Read32(d.cfg(cfgPriBus)) >> 8 & 0xff))
+				}
+				if fn == 0 && hdr&0x80 == 0 {
+					break // bit 7 = multifunctie; niet gezet → alleen fn 0
+				}
+			}
+		}
+	}
+	walk(startBus)
+	return out
+}
+
 // SetBAR64 programmeert een 64-bit memory-BAR (idx = BAR-nummer) op addr en
 // geeft de door het device gerapporteerde grootte terug.
 func (d *Device) SetBAR64(idx int, addr uint64) uint64 {
@@ -144,6 +193,19 @@ func (d *Device) SetBAR64(idx int, addr uint64) uint64 {
 	dev.Write32(lo, uint32(addr)|uint32(szLo&0xf))
 	dev.Write32(hi, uint32(addr>>32))
 	return size
+}
+
+// BAR leest het adres van memory-BAR idx zoals de firmware het toewees —
+// read-only, voor al geconfigureerde platforms (UEFI/ACPI: de Altra); kale
+// fabrics wijzen zelf toe met SetBAR64. 64-bit BARs (type-bits 0b10) lezen
+// de hoge helft uit BAR idx+1.
+func (d *Device) BAR(idx int) uint64 {
+	lo := dev.Read32(d.cfg(cfgBAR0 + uintptr(idx)*4))
+	addr := uint64(lo) &^ 0xf
+	if lo>>1&0b11 == 0b10 {
+		addr |= uint64(dev.Read32(d.cfg(cfgBAR0+uintptr(idx+1)*4))) << 32
+	}
+	return addr
 }
 
 // Enable zet memory-decode en bus-mastering (DMA) aan.

@@ -5,7 +5,15 @@ nvme.img
 *.md
 !README.md
 !docs/bcm2712-c1-erratum.md
+!docs/uefi.md
+!docs/app-memory.md
 .claude/
+
+# UEFI-buildartifacts (image/uefi-run.sh, image/uefi-agent.sh): de ESP-bomen
+# met BOOTAA64.EFI en de EDK2-varstore zijn regenereerbaar/lokaal.
+uefi-esp/
+uefi-esp-agent/
+uefi-vars.fd
 
 # Gegenereerde SD-kernelimages (regenereerbaar uit de ELF's via image/*.sh);
 # de LEESMIJ.txt en config.txt in die dirs blijven wél getrackt.

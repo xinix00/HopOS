@@ -70,7 +70,7 @@ func Acquire(nic NIC, mac [6]byte, timeout time.Duration) (Lease, error) {
 	deadline := time.Now().Add(timeout)
 	for ronde := uint32(1); ; ronde++ {
 		if !time.Now().Before(deadline) {
-			return Lease{}, fmt.Errorf("dhcp: geen lease binnen %v", timeout)
+			return Lease{}, fmt.Errorf("dhcp: no lease within %v", timeout)
 		}
 		xid := 0x484F5000 | ronde // "HOP" + ronde
 
@@ -123,7 +123,7 @@ func Renew(l Lease, mac [6]byte, timeout time.Duration) (Lease, error) {
 	for {
 		n, _, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			return Lease{}, fmt.Errorf("dhcp renew: geen ACK binnen %v: %w", timeout, err)
+			return Lease{}, fmt.Errorf("dhcp renew: no ACK within %v: %w", timeout, err)
 		}
 		nl, ok := parseBootp(buf[:n], mac, xid, 5) // ACK
 		if !ok {

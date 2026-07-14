@@ -1,4 +1,4 @@
-//go:build !rpi5 && !rpi4
+//go:build !rpi5 && !rpi4 && !uefi
 
 package main
 

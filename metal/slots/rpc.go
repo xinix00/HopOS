@@ -62,7 +62,7 @@ func mountTable(mounts map[string]string) ([][2]string, error) {
 			return nil, err
 		}
 		if l == "/" {
-			return nil, fmt.Errorf("mount %q: '/' overmounten kan niet (de eigen root blijft van de task)", shared)
+			return nil, fmt.Errorf("mount %q: cannot overmount '/' (the task keeps its own root)", shared)
 		}
 		if seen[l] {
 			return nil, fmt.Errorf("mount %q: local pad %q dubbel", shared, l)
@@ -118,7 +118,7 @@ func (s *servicer) handle(payload []byte) []byte {
 		return hopabi.EncodeResp(hopabi.Resp{Status: hopabi.StatusError, Data: []byte(err.Error())})
 	}
 	if fsys == nil {
-		return fail(req, fmt.Errorf("geen storage-laag aan boord"))
+		return fail(req, fmt.Errorf("no storage layer on board"))
 	}
 
 	switch req.Op {

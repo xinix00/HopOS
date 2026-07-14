@@ -183,7 +183,7 @@ func Publish(proto string, nodePort uint16, slot int, slotPort uint16) error {
 		return fmt.Errorf("publish: proto %q (tcp/udp)", proto)
 	}
 	if slot < 1 || slot > layout.MaxSlots {
-		return fmt.Errorf("publish: slot %d buiten bereik", slot)
+		return fmt.Errorf("publish: slot %d out of range", slot)
 	}
 	if nodePort == 0 || slotPort == 0 {
 		return fmt.Errorf("publish: poort 0")

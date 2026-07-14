@@ -54,6 +54,23 @@ type NetConfig struct {
 	DNS  string // resolver, "host:poort"
 }
 
+// NetFromLease zet een DHCP-lease om in het NetConfig dat HOP verwacht.
+// Geen resolver in de lease → de gateway als DNS (thuisrouters resolven
+// vrijwel altijd zelf); poort 53. Gedeeld door elk DHCP-board (Pi's, uefi)
+// zodat de omzetting één plek heeft.
+func NetFromLease(l dhcp.Lease) NetConfig {
+	dns := l.DNSString()
+	if dns == "0.0.0.0" {
+		dns = l.GWString()
+	}
+	return NetConfig{
+		IP:   l.IPString(),
+		CIDR: l.CIDR(),
+		GW:   l.GWString(),
+		DNS:  dns + ":53",
+	}
+}
+
 // LeaseHolder wordt optioneel geïmplementeerd door boards die hun IP via DHCP
 // kregen (de Pi's): hopnet vraagt na de stack-bring-up de lease op en start
 // dhcp.KeepAlive zodat hij niet verloopt. Boards met een statische config

@@ -93,7 +93,7 @@ func (c *Controller) waitCSTS(rdy uint32, timeout time.Duration) error {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	return fmt.Errorf("nvme: CSTS.RDY werd geen %d", rdy)
+	return fmt.Errorf("nvme: CSTS.RDY never became %d", rdy)
 }
 
 // cmd is een 64-byte submission-entry in opbouw.
@@ -140,7 +140,7 @@ func (c *Controller) submit(q *queue, m cmd) error {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("nvme: timeout op command %#x", m.opc)
+			return fmt.Errorf("nvme: timeout on command %#x", m.opc)
 		}
 	}
 }
@@ -158,7 +158,7 @@ func Probe(win board.PCIeWindow, dmaBase uintptr, dmaSize uint64) (*Controller, 
 		}
 	}
 	if nd == nil {
-		return nil, fmt.Errorf("nvme: geen device op bus 0")
+		return nil, fmt.Errorf("nvme: no device on bus 0")
 	}
 	nd.SetBAR64(0, uint64(win.MMIOBase))
 	nd.Enable()
@@ -241,7 +241,7 @@ func (c *Controller) xfer(opc uint32, lba uint64, p []byte, write bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if uint64(len(p)) > 4096 || uint64(len(p))%c.BlockSize != 0 {
-		return fmt.Errorf("nvme: lengte %d geen blokveelvoud (bs=%d, max 4096)", len(p), c.BlockSize)
+		return fmt.Errorf("nvme: length %d not a block multiple (bs=%d, max 4096)", len(p), c.BlockSize)
 	}
 	nlb := uint64(len(p)) / c.BlockSize
 	if lba+nlb > c.Blocks {
