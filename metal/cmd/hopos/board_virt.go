@@ -9,7 +9,7 @@ import (
 	_ "unsafe"
 
 	"hop-os/metal/abi/layout"
-	_ "hop-os/metal/board/qemuvirt" // registreert het board (init) + tamago-hooks
+	_ "hop-os/metal/board/qemuvirt/hop" // registreert het board (init) + basis-hooks
 )
 
 //go:linkname ramStart runtime/goos.RamStart

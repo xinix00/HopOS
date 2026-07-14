@@ -25,6 +25,7 @@ import (
 	"hop-os/metal/board"
 	"hop-os/metal/board/raspi"
 	"hop-os/metal/board/rpi4"
+	_ "hop-os/metal/board/rpi4/hop" // board.Board-registratie (board.Current in de probe)
 	"hop-os/metal/cpu/psci"
 	"hop-os/metal/dev"
 )

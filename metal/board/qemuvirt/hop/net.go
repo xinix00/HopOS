@@ -1,4 +1,4 @@
-package qemuvirt
+package hop
 
 import (
 	"github.com/usbarmory/tamago/dma"
@@ -26,17 +26,19 @@ const (
 func init() {
 	// Globale DMA-regio voor virtio-ringen en -buffers: gereserveerd stuk
 	// bovenin de HOP-partitie, buiten de RAM-declaratie (→ niet gecached).
-	// LET OP: alleen de net-subregio (NetDMASize), NIET de volle DMASize — de
-	// NVMe-driver krijgt zijn eigen subregio (NVMeDMABase/NVMeDMASize) expliciet
-	// via nvme.Probe. Claimde de globale tamago-allocator de volle 16MB, dan kon
-	// dma.Alloc geheugen uit de NVMe-subregio uitdelen → botsing met de
-	// NVMe-DMA-buffers.
+	// In de hop-helft, niet de basis: alleen de HOP-kern draait drivers — een
+	// app-image heeft geen DMA-allocator nodig (en de regio ligt buiten zijn
+	// kooi). LET OP: alleen de net-subregio (NetDMASize), NIET de volle
+	// DMASize — de NVMe-driver krijgt zijn eigen subregio (NVMeDMABase/
+	// NVMeDMASize) expliciet via nvme.Probe. Claimde de globale
+	// tamago-allocator de volle 16MB, dan kon dma.Alloc geheugen uit de
+	// NVMe-subregio uitdelen → botsing met de NVMe-DMA-buffers.
 	dma.Init(layout.DMABase, layout.NetDMASize)
 }
 
-// ProbeVirtioNet zoekt het virtio-mmio-slot met de netwerkkaart en geeft de
+// probeVirtioNet zoekt het virtio-mmio-slot met de netwerkkaart en geeft de
 // registerbasis + SPI-interruptnummer terug (0,0 = niet gevonden).
-func ProbeVirtioNet() (base uint64, irq int) {
+func probeVirtioNet() (base uint64, irq int) {
 	for i := range virtioMMIOSlots {
 		b := uintptr(virtioMMIOBase + i*virtioMMIOStride)
 		if dev.Read32(b+regMagic) != virtioMagic {

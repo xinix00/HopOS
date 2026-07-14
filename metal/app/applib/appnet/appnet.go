@@ -49,16 +49,13 @@ func (n *nic) Transmit(buf []byte) error {
 	return nil
 }
 
-func ip4str(v uint32) string {
-	return fmt.Sprintf("%d.%d.%d.%d", byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
-}
-
 // Up brengt de eigen netstack op en hangt hem in Go's net-package; geeft het
 // eigen IP terug. Alle config is afgeleid uit het slotnummer via het gedeelde
 // net-plan (layout) — HOP hoeft niets per slot door te geven; de switch en de
-// app-stack leiden hetzelfde IP/gateway/MAC af, dus ze lopen nooit uiteen.
+// app-stack leiden hetzelfde IP/gateway/MAC af (layout.IP4Str incluis), dus
+// ze lopen nooit uiteen.
 func Up(a *applib.App) (string, error) {
-	ip := ip4str(layout.SlotIP4(a.Slot))
+	ip := layout.IP4Str(layout.SlotIP4(a.Slot))
 	cidr := fmt.Sprintf("%s/%d", ip, layout.NetPrefix)
 	m := layout.SlotMAC(a.Slot)
 	mac := fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", m[0], m[1], m[2], m[3], m[4], m[5])
@@ -68,7 +65,7 @@ func Up(a *applib.App) (string, error) {
 		rx: ring.Open(layout.NetRingRX(a.Slot)),
 	}
 	iface := &gnet.Interface{NetworkDevice: nd}
-	if err := iface.Init(cidr, mac, ip4str(layout.HostIP4())); err != nil {
+	if err := iface.Init(cidr, mac, layout.IP4Str(layout.HostIP4())); err != nil {
 		return "", fmt.Errorf("netstack init: %w", err)
 	}
 	iface.Stack.EnableICMP()

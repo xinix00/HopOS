@@ -113,5 +113,6 @@ const (
 // affiniteit-0 (géén MT-formaat) — anders dan de A76 op de Pi 5 (aff1)!
 func CoreID() int { return int(raspi.MPIDR() & 0xFF) }
 
-// target vertaalt een core-index naar het PSCI/MPIDR-target voor de A72.
-func target(core uint64) uint64 { return core }
+// Target vertaalt een core-index naar het PSCI/MPIDR-target voor de A72
+// (exported voor de PSCI-forwards in board/rpi4/hop).
+func Target(core uint64) uint64 { return core }

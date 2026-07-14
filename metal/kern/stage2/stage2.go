@@ -253,9 +253,16 @@ func strX(rt, rn, off uint32) uint32 {
 // partitie die HOP voor deze task alloceerde (variabel per job). Het
 // IPA-bereik [ipaBase, ipaBase+size) wordt op [paBase, paBase+size) gelegd.
 // size ≤ één 1GB-blok vanaf ipaBase (aanroeper begrenst dit) → één L2-tabel.
-func Build(i int, ipaBase, paBase, size uint64) (uint64, error) {
+// netRingPA is de fysieke net-ring van dít slot (de partitie-staart,
+// base+appRAM — kern/slots berekent hem per lifecycle, er is geen register):
+// één 2MB-blok, dus 2MB-aligned (partAlloc's korrel garandeert dat; hier de
+// wacht, want een scheve basis wordt een scheve MMU-map).
+func Build(i int, ipaBase, paBase, size, netRingPA uint64) (uint64, error) {
 	if i < 1 || i > layout.MaxSlots {
 		return 0, fmt.Errorf("slot %d buiten bereik", i)
+	}
+	if netRingPA == 0 || netRingPA&(layout.NetRingStride-1) != 0 {
+		return 0, fmt.Errorf("net-ring-PA %#x ontbreekt of niet 2MB-aligned", netRingPA)
 	}
 	base := layout.Stage2TablePA(i)
 	dev.Clear(base, layout.Stage2Stride)
@@ -299,7 +306,7 @@ func Build(i int, ipaBase, paBase, size uint64) (uint64, error) {
 	// IPA-blok → fysiek plan-blok (2MB-aligned, bewaakt door UsePlan);
 	// andermans blokken staan nergens in deze map.
 	netIPA := uint64(layout.NetRingTX(i))
-	dev.Write64(uintptr(l2Dev)+uintptr((netIPA-devGB)>>21)*8, uint64(layout.NetRingTXPA(i))|blockRW)
+	dev.Write64(uintptr(l2Dev)+uintptr((netIPA-devGB)>>21)*8, netRingPA|blockRW)
 
 	// L3ctrl: boot-scratch read-only op zijn IPA (conduitkeuze), eigen
 	// ctrl-page RW — elk naar hun fysieke plek uit het plan.

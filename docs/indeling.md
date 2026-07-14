@@ -60,11 +60,22 @@ níét — die leeft in `app/applib` (gVisor over de abi-ringen).
 loader als go:embed-bytes in de node-binary). Hoort hier: alles wat alleen
 core 0 als vertrouwde kern doet.
 
-**`board/`** — de hardware-integrator: per board de bedrading van cpu + fw +
-driver + net/dhcp tot een werkend platform (`qemuvirt`, `rpi4`, `rpi5`,
-`uefi`), met `raspi` als SoC-gedeelde laag onder rpi4/rpi5 — dat is het
-precedent voor toekomstige SoC-packages (O6N/cixp1: onder board/, naast de
-boards die hem gebruiken).
+**`board/`** — de hardware-integrator, per board in TWEE helften:
+
+- **de basis** (`board/<x>`): wat élk image — ook een app — nodig heeft om op
+  te draaien: runtime-hooks (hwinit/printk/rng/timers), cpuinit-asm, het
+  PA-plan en de registratie van het app-contract (`board/appboard`: CoreID +
+  SetTimerOffset — het enige dat een app van zijn board ziet).
+- **de HOP-bedrading** (`board/<x>/hop`): de volledige `board.Board`-
+  implementatie mét drivers (ProbeNIC, PCIe, framebuffer-discovery, DHCP).
+  Alleen cmd/-binaries importeren deze helft.
+
+Zo linkt een app-image nooit de driverstack van zijn board mee (gemeten: ~2,5k
+regels gem/brcmpcie/dhcp/vcmail per Pi-5-app-image, door de linker niet te
+elimineren omdat het interface-methods waren). `raspi` is de SoC-gedeelde laag
+onder rpi4/rpi5 (met `raspi/vcfb` als gedeelde hop-helft voor de
+framebuffer-discovery) — dat is het precedent voor toekomstige SoC-packages
+(O6N/cixp1: onder board/, naast de boards die hem gebruiken).
 
 **`app/`** — alles wat ín een slot draait: `applib` (runtime + appnet),
 `appspike` (de referentie-app), `apploader` (downloadt het echte app-image
@@ -75,19 +86,28 @@ fase-P1-kern met ingebakken app-image), `probe4/5/6`, `probeuefi`.
 
 ## De importrichting
 
-Pijlen wijzen alleen omlaag; concreet, afdwingbaar bij review:
+Pijlen wijzen alleen omlaag; concreet, en AFGEDWONGEN door
+`tools/importcheck.go` (draait in tools/test.sh, leest ook code achter
+build-tags — een verkeerde import is een buildfout, geen reviewtaak; de
+regel-tabel dáár en dit hoofdstuk horen samen te wijzigen):
 
 1. `dev` importeert niets; `abi` alleen `dev`; `fw` alleen `dev`.
 2. **`app/` importeert nooit `kern/`, `net/` of `driver/`.** De app-kant
-   kent HOP uitsluitend via `abi/` (+ `dev`/`cpu`/`board` om op te draaien).
-   Dit is de isolatie op source-niveau: een app kán niet tegen HOP-internals
-   linken.
+   kent HOP uitsluitend via `abi/` (+ `dev`/`cpu`/`board/appboard`/de
+   board-basis om op te draaien). Dit is de isolatie op source-niveau: een
+   app kán niet tegen HOP-internals linken — ook niet transitief, want de
+   board-basis mag uit `driver/` uitsluitend de console-uitzondering
+   (`pl011`/`fb`; printk is een runtime-hook en kan niet init-geïnjecteerd
+   worden zonder vroege bootdiagnose te verliezen) en nooit `net/` of het
+   board-contract.
 3. **Niets importeert `app/`** (behalve app/ zelf en de app-binaries). De
    loader komt de node-binary in als bytes (`kern/apploaderblob`), niet als
    import.
-4. `board/` integreert de hardware-kant (cpu, fw, driver, net/dhcp);
+4. `board/<x>/hop` integreert de hardware-kant (cpu, fw, driver, net/dhcp);
    `kern/` integreert de OS-kant (abi, net, driver/nvme via hopfs);
-   `cmd/` knoopt board + kern aan elkaar. Andersom nooit.
+   `cmd/` knoopt board-hop + kern aan elkaar. Andersom nooit.
+5. `board/appboard` (het app-contract) importeert niets; het contract
+   `board` alleen appboard + de typen die het draagt (driver/fb, net/dhcp).
 
 ## Buildoutput
 
@@ -107,7 +127,8 @@ code (gitignored via `*.elf`):
 4. CPU-instructie, EL-niveau of architectuur-firmware? → `cpu/`.
 5. Alleen voor core 0 als vertrouwde kern? → `kern/`.
 6. HOP's netwerkvlak? → `net/`. Draait het in een slot? → `app/`.
-7. Bedrading van één board of SoC? → `board/<naam>`.
+7. Bedrading van één board of SoC? → `board/<naam>`: runtime-hooks/boot in
+   de basis, alles met drivers in `board/<naam>/hop`.
 8. Is het een binary? → HOP-kant `cmd/`, app-kant `app/`.
 9. Past het nergens? Eerst overleggen, niet een elfde categorie beginnen.
 

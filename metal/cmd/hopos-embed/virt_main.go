@@ -23,7 +23,7 @@ import (
 	"hop-os/metal/abi/checksum"
 	"hop-os/metal/abi/layout"
 	"hop-os/metal/board"
-	_ "hop-os/metal/board/qemuvirt" // registreert het board (init) + tamago-hooks
+	_ "hop-os/metal/board/qemuvirt/hop" // registreert het board (init) + basis-hooks
 	"hop-os/metal/dev"
 	"hop-os/metal/driver/fb"
 	"hop-os/metal/driver/nvme"

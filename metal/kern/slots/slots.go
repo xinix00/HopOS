@@ -85,6 +85,78 @@ func pace() {
 	lastLifecycle = time.Now()
 }
 
+// lifecycleWindow opent het DMA-stille lifecycle-venster: geserialiseerd
+// (lifecycleMu), gepaced, NIC gequiesced en de in-flight DMA gedraineerd. De
+// teruggegeven closer heropent in omgekeerde volgorde — gebruik als
+//
+//	defer lifecycleWindow()()
+//
+// zodat het venster op élk pad (ook errors) weer opent. Eén definitie voor
+// Start, StartStaged en Stop: het trio lock+pace+quiesce+drain kan niet meer
+// per pad uit de pas lopen.
+func lifecycleWindow() func() {
+	lifecycleMu.Lock()
+	pace()
+	quiesce(true)
+	drain()
+	return func() {
+		quiesce(false)
+		lifecycleMu.Unlock()
+	}
+}
+
+// prepStart valideert de pure job-invoer van een slot-start — alles wat geen
+// lock of stille hardware nodig heeft — VÓÓR het lifecycle-venster: een
+// kapotte job opent het venster nooit, en het DMA-stille venster zelf blijft
+// zo kort mogelijk. Eén definitie voor Start én StartStaged (het was ~45
+// regels letterlijke duplicatie op een ABI-kritisch pad). Geeft de
+// mount-tabel, de env-blob en het genormaliseerde core-aantal terug.
+func prepStart(i int, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int) (mtab [][2]string, envBlob []byte, coresOut int, err error) {
+	if err := checkSlot(i); err != nil {
+		return nil, nil, 0, err
+	}
+	for name, p := range ports {
+		if p < 1 || p > 65535 {
+			return nil, nil, 0, fmt.Errorf("poort %q: %d ongeldig", name, p)
+		}
+	}
+	if mtab, err = mountTable(mounts); err != nil {
+		return nil, nil, 0, err
+	}
+	if memLimit == 0 {
+		return nil, nil, 0, fmt.Errorf("memLimit 0 ongeldig")
+	}
+	// SMP (fase 5): cores ≥ 1. cores > 1 = één app over meerdere cores met
+	// een gedeelde heap op de partitie van dít slot; de OS-laag vraagt de
+	// extra cores lazy op (goos.Task → CtrlSMPReq → HOP dispatcht).
+	if cores < 1 {
+		cores = 1
+	}
+	if i+cores-1 > layout.MaxSlots {
+		return nil, nil, 0, fmt.Errorf("SMP: %d cores vanaf slot %d overschrijden MaxSlots %d", cores, i, layout.MaxSlots)
+	}
+	// DNS-resolver van de node meegeven, zodat een app die naar buiten praat
+	// (cloudflared, servers) namen kan opzoeken — de query loopt als gewoon
+	// UDP door de masquerade. HOP zet 'm als env (net als ER_PORT_*), tenzij
+	// de job 'm al expliciet koos. Leeg (Pi vóór P2) = geen HOP_DNS.
+	envBlob = encodeEnv(withDNS(env, board.Current().Net().DNS))
+	if len(envBlob) > layout.CtrlEnvMax {
+		return nil, nil, 0, fmt.Errorf("env te groot: %d > %d bytes", len(envBlob), layout.CtrlEnvMax)
+	}
+	return mtab, envBlob, cores, nil
+}
+
+// coresFree bewaakt (ín het venster) dat de cores van het slot niet draaien —
+// geparkeerd of cold mag: dat is precies een core die HOP kan (her)starten.
+func coresFree(i, cores int, why string) error {
+	for c := i; c < i+cores; c++ {
+		if coreRunning(c) {
+			return fmt.Errorf("core %d still running (%s)", c, why)
+		}
+	}
+	return nil
+}
+
 // evictServicer stopt de actieve servicer van slot i en wacht tot hij weg is.
 func evictServicer(i int) {
 	svcMu.Lock()
@@ -97,9 +169,12 @@ func evictServicer(i int) {
 	}
 }
 
-// claimServicer verdringt de oude servicer van slot i en registreert een
-// nieuwe (nog niet gestart — Start doet dat na de ring-init).
-func claimServicer(i int, root string, mounts [][2]string) *servicer {
+// registerServicer registreert de nieuwe servicer van slot i (nog niet
+// gestart — placeFromStaging start hem ná de ring-init). Verdringen hoeft
+// hier niet meer: evictServicer draait altijd eerder op hetzelfde pad, onder
+// dezelfde lifecycleMu, en registratie gebeurt nérgens anders — er kán dus
+// geen oude servicer meer staan.
+func registerServicer(i int, root string, mounts [][2]string) *servicer {
 	s := &servicer{
 		slot:   i,
 		stop:   make(chan struct{}),
@@ -109,13 +184,8 @@ func claimServicer(i int, root string, mounts [][2]string) *servicer {
 		mounts: mounts,
 	}
 	svcMu.Lock()
-	old := servicers[i]
 	servicers[i] = s
 	svcMu.Unlock()
-	if old != nil {
-		close(old.stop)
-		<-old.done
-	}
 	return s
 }
 
@@ -376,72 +446,36 @@ func (d devReaderAt) ReadAt(p []byte, off int64) (int, error) {
 // task ziet zijn eigen lege root plus de gemounte shared dirs. ports (HOP's
 // Task.Ports) worden na de start gepubliceerd (stateloze DNAT bij de switch).
 func Start(i int, image []byte, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int) error {
-	if err := checkSlot(i); err != nil {
-		return err
-	}
 	imgSize := int64(len(image))
 	if imgSize <= 0 {
 		return fmt.Errorf("Start: lege image")
 	}
-	// Eén lifecycle tegelijk, in een DMA-stil venster (zie lifecycleMu):
-	// gewone defers dekken álle paden — het venster sluit pas na de
-	// WaitReady onderaan, zodat ook de app-boot (heap-zeroing) erbinnen valt.
-	lifecycleMu.Lock()
-	defer lifecycleMu.Unlock()
-	pace()
-	quiesce(true)
-	drain()
-	defer quiesce(false)
-	for name, p := range ports {
-		if p < 1 || p > 65535 {
-			return fmt.Errorf("poort %q: %d ongeldig", name, p)
-		}
-	}
-	mtab, err := mountTable(mounts)
+	// Pure invoervalidatie vóór het venster (prepStart); size/appRAM zijn ook
+	// puur rekenwerk.
+	mtab, envBlob, cores, err := prepStart(i, memLimit, cores, env, mounts, ports)
 	if err != nil {
 		return err
 	}
-	if memLimit == 0 {
-		return fmt.Errorf("memLimit 0 ongeldig")
+	size := align2M(memLimit)
+	appRAM, err := appRAMSize(size)
+	if err != nil {
+		return err
 	}
+	// Eén lifecycle tegelijk, in een DMA-stil venster: de defer dekt álle
+	// paden — het venster sluit pas na de WaitReady onderaan, zodat ook de
+	// app-boot (heap-zeroing) erbinnen valt.
+	defer lifecycleWindow()()
 	// De EL2-vectoren + parkeerlus + mailboxen moeten klaar zijn vóór de
 	// eerste dispatch (mailbox cold-detectie leest een geveegde mailbox).
 	vectorsOnce.Do(stage2.InitVectors)
-
-	// SMP (fase 5): cores ≥ 1. cores > 1 = één app over meerdere cores met een
-	// gedeelde heap op de partitie van dít slot; de OS-laag vraagt de extra
-	// cores lazy op (goos.Task → CtrlSMPReq → HOP dispatcht). De cores moeten
-	// binnen bereik en beschikbaar zijn — d.w.z. niet draaiend (geparkeerd of
-	// cold mag: dat is precies een core die HOP kan (her)starten).
-	if cores < 1 {
-		cores = 1
-	}
-	if i+cores-1 > layout.MaxSlots {
-		return fmt.Errorf("SMP: %d cores vanaf slot %d overschrijden MaxSlots %d", cores, i, layout.MaxSlots)
-	}
-	for c := i; c < i+cores; c++ {
-		if coreRunning(c) {
-			return fmt.Errorf("core %d still running (not parked/cold)", c)
-		}
-	}
-	// DNS-resolver van de node meegeven, zodat een app die naar buiten praat
-	// (cloudflared, servers) namen kan opzoeken — de query loopt als gewoon
-	// UDP door de masquerade. HOP zet 'm als env (net als ER_PORT_*), tenzij
-	// de job 'm al expliciet koos. Leeg (Pi vóór P2) = geen HOP_DNS.
-	envBlob := encodeEnv(withDNS(env, board.Current().Net().DNS))
-	if len(envBlob) > layout.CtrlEnvMax {
-		return fmt.Errorf("env te groot: %d > %d bytes", len(envBlob), layout.CtrlEnvMax)
+	if err := coresFree(i, cores, "not parked/cold"); err != nil {
+		return err
 	}
 
 	// De fysieke partitie éérst alloceren (partAlloc heeft alleen i+memLimit
 	// nodig, niet het linkadres): we kopiëren de image erin vóór we hem
 	// parsen. started markeert een geslaagde start: valt Start eerder
 	// uit, dan geeft de defer de gealloceerde partitie terug.
-	size := align2M(memLimit)
-	appRAM, err := appRAMSize(size)
-	if err != nil {
-		return err
-	}
 	base, err := partAlloc(i, memLimit)
 	if err != nil {
 		return err
@@ -459,16 +493,16 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 	// caches; op de A76 echt, gemeten 2026-07-10). Hele partitie in één keer.
 	dev.CleanInv(uintptr(base), uintptr(size))
 
-	// De image bovenin het app-RAM plaatsen (staging), zodat de laag geplaatste
-	// segmenten er niet mee botsen; de net-ring dáárboven (de partitie-staart)
-	// blijft vrij. 8-uitgelijnd zodat de device-reads bij het parsen netjes
-	// vallen. Eén dev.Copy van de gedeelde in-memory blob — geen
+	// De image bovenin het app-RAM plaatsen (staging, layout.StageAddr — het
+	// gedeelde contract met de apploader), zodat de laag geplaatste segmenten
+	// er niet mee botsen; de net-ring dáárboven (de partitie-staart) blijft
+	// vrij. Eén dev.Copy van de gedeelde in-memory blob — geen
 	// per-start-allocatie, geen netwerk (finding #3).
-	staged := (uint64(imgSize) + 7) &^ 7
-	if staged >= appRAM {
+	addr, _, fits := layout.StageAddr(base, appRAM, imgSize)
+	if !fits {
 		return fmt.Errorf("image %d bytes past niet in partitie %d MB (app-RAM %d MB)", imgSize, size>>20, appRAM>>20)
 	}
-	stageAddr := uintptr(base + appRAM - staged)
+	stageAddr := uintptr(addr)
 	dev.Copy(stageAddr, image)
 
 	if err := placeFromStaging(i, base, size, stageAddr, imgSize, memLimit, cores, envBlob, mtab, ports); err != nil {
@@ -513,14 +547,15 @@ func appRAMSize(size uint64) (uint64, error) {
 // RAM-symbolen patchen, stage-2 bouwen en de core (her)dispatchen. Eén bron van
 // waarheid voor beide startpaden.
 func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64, memLimit uint64, cores int, envBlob []byte, mtab [][2]string, ports map[string]int) error {
-	// De net-ring van dit slot: de partitie-staart. Registreren vóór alles wat
-	// de accessors leest (ring-init, hopswitch.Attach, stage2.Build). Idempotent
-	// bij StartStaged (zelfde partitie als fase 1); gewist door partRelease.
+	// De net-ring van dit slot: de partitie-staart. Puur een lokale berekening —
+	// de PA gaat als parameter naar ring-init, hopswitch.Attach en stage2.Build,
+	// dus er bestaat geen register dat stale kan worden (de PA leeft precies zo
+	// lang als de partitie).
 	appRAM, err := appRAMSize(size)
 	if err != nil {
 		return err
 	}
-	layout.SetNetRingPA(i, base+appRAM)
+	netPA := base + appRAM
 	// Parsen vanuit de gestreamde device-kopie (geen kern-RAM-kopie).
 	f, err := elf.NewFile(devReaderAt{base: stageAddr, size: imgSize})
 	if err != nil {
@@ -579,36 +614,31 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 	}
 	patched := 0
 	for _, s := range syms {
-		if s.Name != symRAMStart && s.Name != symRAMSize {
-			continue
+		switch s.Name {
+		case symRAMStart, symRAMSize:
+			if s.Value%8 != 0 || s.Value < linkBase || s.Value > linkBase+appRAM-8 {
+				return fmt.Errorf("symbol %s (%#x) outside link range of slot %d", s.Name, s.Value, linked)
+			}
+			// RamSize = app-RAM (partitie − net-ring), niet de kale memLimit:
+			// de app mag de staart nooit als heap/stack declareren (appRAMSize).
+			v := linkBase
+			if s.Name == symRAMSize {
+				v = appRAM
+			}
+			dev.Write64(uintptr(s.Value+delta), v)
+			patched++
+		case symSlotHint:
+			// Optioneel slot-hint-symbool (uefi-app-images): op servers is
+			// MPIDR géén slotnummer (Altra: aff0 altijd 0), dus HOP vertelt de
+			// app bij Start zíjn slot. Additief: Pi/virt-images hebben het
+			// symbool niet en merken hier niets van.
+			if s.Value%8 == 0 && s.Value >= linkBase && s.Value <= linkBase+appRAM-8 {
+				dev.Write64(uintptr(s.Value+delta), uint64(i))
+			}
 		}
-		if s.Value%8 != 0 || s.Value < linkBase || s.Value > linkBase+appRAM-8 {
-			return fmt.Errorf("symbol %s (%#x) outside link range of slot %d", s.Name, s.Value, linked)
-		}
-		// RamSize = app-RAM (partitie − net-ring), niet de kale memLimit: de
-		// app mag de staart nooit als heap/stack declareren (appRAMSize).
-		v := linkBase
-		if s.Name == symRAMSize {
-			v = appRAM
-		}
-		dev.Write64(uintptr(s.Value+delta), v)
-		patched++
 	}
 	if patched != 2 {
 		return fmt.Errorf("RAM symbols not found (%d/2 patched)", patched)
-	}
-
-	// Optioneel slot-hint-symbool (uefi-app-images): op servers is MPIDR
-	// géén slotnummer (Altra: aff0 altijd 0), dus HOP vertelt de app bij
-	// Start zíjn slot. Additief: Pi/virt-images hebben het symbool niet en
-	// merken hier niets van.
-	for _, s := range syms {
-		if s.Name != symSlotHint {
-			continue
-		}
-		if s.Value%8 == 0 && s.Value >= linkBase && s.Value <= linkBase+appRAM-8 {
-			dev.Write64(uintptr(s.Value+delta), uint64(i))
-		}
 	}
 
 	// SPSC-hygiëne: geen oude servicer meer op deze ringen vóór her-init,
@@ -653,14 +683,14 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 	// stack pas als hij appnet.Up aanroept.
 	ring.Init(layout.RingOutboxPA(i), layout.RingDataCap)
 	ring.Init(layout.RingInboxPA(i), layout.RingDataCap)
-	ring.Init(layout.NetRingTXPA(i), layout.NetRingDataCap)
-	ring.Init(layout.NetRingRXPA(i), layout.NetRingDataCap)
+	ring.Init(uintptr(netPA)+layout.NetTXOff, layout.NetRingDataCap)
+	ring.Init(uintptr(netPA)+layout.NetRXOff, layout.NetRingDataCap)
 
 	// De core krijgt stage-2-isolatie: de EL2-trampoline activeert de hier
 	// gebouwde tabel en dropt pas dan naar de app-entry (een canoniek IPA — de
 	// stage-2 vertaalt hem naar deze partitie). De app-image draait nooit op
 	// EL2. De trampoline is data-gedreven: alles staat op deze control-page.
-	l1, err := stage2.Build(i, linkBase, base, size)
+	l1, err := stage2.Build(i, linkBase, base, size, netPA)
 	if err != nil {
 		return fmt.Errorf("stage-2 slot %d: %w", i, err)
 	}
@@ -691,7 +721,7 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 	// heruitdelen aan een ander slot: isolatiebreuk. Attach/Publish zetten alleen
 	// switch/NAT-state en hebben de draaiende core niet nodig, dus dit mag ervóór;
 	// ná de dispatch volgt meteen started=true, zonder faalbare stap ertussen.
-	hopswitch.Attach(i)
+	hopswitch.Attach(i, uintptr(netPA))
 	for name, p := range ports {
 		if err := hopswitch.Publish("tcp", uint16(p), i, uint16(p)); err != nil {
 			return fmt.Errorf("poort %q: %w", name, err)
@@ -704,7 +734,7 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 		return err
 	}
 
-	go claimServicer(i, root, mtab).run()
+	go registerServicer(i, root, mtab).run()
 
 	// Synchroon wachten tot de app READY meldt (runtime-boot met heap-zeroing
 	// en TLBI's klaar) — dan pas sluiten de defers het DMA-stille venster.
@@ -724,7 +754,9 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 // imgSize komt van de control-page (door de loader gezet) en is NIET vertrouwd:
 // een verkeerde maat faalt hooguit de ELF-parse/segment-validatie van dít slot.
 func StartStaged(i int, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int) error {
-	if err := checkSlot(i); err != nil {
+	// Pure invoervalidatie vóór het venster — gedeeld met Start (prepStart).
+	mtab, envBlob, cores, err := prepStart(i, memLimit, cores, env, mounts, ports)
+	if err != nil {
 		return err
 	}
 	// De grootte die de loader in de staging heeft gezet (control-page). Niet
@@ -733,57 +765,30 @@ func StartStaged(i int, memLimit uint64, cores int, env map[string]string, mount
 	if imgSize <= 0 {
 		return fmt.Errorf("StartStaged: geen gestagede image in slot %d (CtrlStagedSize=%d)", i, imgSize)
 	}
-	lifecycleMu.Lock()
-	defer lifecycleMu.Unlock()
-	pace()
-	quiesce(true)
-	drain()
-	defer quiesce(false)
-	for name, p := range ports {
-		if p < 1 || p > 65535 {
-			return fmt.Errorf("poort %q: %d ongeldig", name, p)
-		}
-	}
-	mtab, err := mountTable(mounts)
-	if err != nil {
+	defer lifecycleWindow()()
+	vectorsOnce.Do(stage2.InitVectors)
+	// De apploader parkeerde na het seinen; zijn core (en de secundaire cores
+	// van een SMP-app) mogen niet meer draaien vóór we eroverheen plaatsen.
+	if err := coresFree(i, cores, "loader not parked?"); err != nil {
 		return err
-	}
-	if memLimit == 0 {
-		return fmt.Errorf("memLimit 0 ongeldig")
-	}
-	if cores < 1 {
-		cores = 1
-	}
-	if i+cores-1 > layout.MaxSlots {
-		return fmt.Errorf("SMP: %d cores vanaf slot %d overschrijden MaxSlots %d", cores, i, layout.MaxSlots)
-	}
-	// De apploader parkeerde na het seinen; zijn core (en de secundaire cores van
-	// een SMP-app) mogen niet meer draaien vóór we eroverheen plaatsen.
-	for c := i; c < i+cores; c++ {
-		if coreRunning(c) {
-			return fmt.Errorf("core %d still running (loader not parked?)", c)
-		}
-	}
-	envBlob := encodeEnv(withDNS(env, board.Current().Net().DNS))
-	if len(envBlob) > layout.CtrlEnvMax {
-		return fmt.Errorf("env te groot: %d > %d bytes", len(envBlob), layout.CtrlEnvMax)
 	}
 	// De partitie van fase 1 (de loader) hergebruiken — niet opnieuw alloceren.
 	base, size, ok := partitionOf(i)
 	if !ok {
 		return fmt.Errorf("StartStaged: slot %d heeft geen partitie (loader niet gestart?)", i)
 	}
-	// De loader stagede op RamStart+RamSize−staged met zíjn gepatchte
-	// RamSize = appRAM — dezelfde formule hier, anders lezen we naast de image.
+	// De loader stagede via layout.StageAddr met zíjn gepatchte RamSize =
+	// appRAM — zelfde functie hier, dus de compiler bewaakt dat we op dezelfde
+	// plek lezen als waar hij schreef.
 	appRAM, err := appRAMSize(size)
 	if err != nil {
 		return err
 	}
-	staged := (uint64(imgSize) + 7) &^ 7
-	if staged >= appRAM {
+	addr, _, fits := layout.StageAddr(base, appRAM, imgSize)
+	if !fits {
 		return fmt.Errorf("staged image %d bytes past niet in partitie %d MB (app-RAM %d MB)", imgSize, size>>20, appRAM>>20)
 	}
-	stageAddr := uintptr(base + appRAM - staged)
+	stageAddr := uintptr(addr)
 	// Coherentie: de loader draaide cacheable; zijn dirty lines wegschrijven+
 	// invalideren vóór we de echte app er ongecachet overheen plaatsen. De loader
 	// flushte de staging zelf al (StageImage); dit dekt de rest van de partitie.
@@ -807,15 +812,10 @@ func Stop(i int, timeout time.Duration) error {
 	if err := checkSlot(i); err != nil {
 		return err
 	}
-	// Eén lifecycle tegelijk, in een DMA-stil venster (zie lifecycleMu): ook
-	// de coöperatieve kill parkeert een core — gemeten (13-07, torture):
-	// kill+park naast lopende RX-DMA is dodelijk op C1.
-	lifecycleMu.Lock()
-	defer lifecycleMu.Unlock()
-	pace()
-	quiesce(true)
-	drain()
-	defer quiesce(false)
+	// Eén lifecycle tegelijk, in een DMA-stil venster: ook de coöperatieve
+	// kill parkeert een core — gemeten (13-07, torture): kill+park naast
+	// lopende RX-DMA is dodelijk op C1.
+	defer lifecycleWindow()()
 	ctrlWrite(i, layout.CtrlKill, 1)
 	dev.MB()
 	// Coöperatieve kans voor de app (de kill-watcher parkeert zijn eigen core).
@@ -824,9 +824,9 @@ func Stop(i int, timeout time.Duration) error {
 	// slotCores (door Start gezet) — NIET uit de app-schrijfbare CtrlCores: een
 	// verlaagde CtrlCores zou anders levende secundaire cores voor deze scan
 	// verbergen en releaseSlot een nog-draaiende partitie laten vrijgeven.
-	cores := appCores(i)
+	n := coreCount(i)
 	stillOn := false
-	for _, c := range cores {
+	for c := i; c < i+n; c++ {
 		if coreRunning(c) {
 			stillOn = true
 			break
@@ -836,7 +836,7 @@ func Stop(i int, timeout time.Duration) error {
 	if stillOn {
 		// Eén intrekking velt álle cores van het slot (gedeelde tabel/VMID).
 		stage2.Revoke(i)
-		for _, c := range cores {
+		for c := i; c < i+n; c++ {
 			if !coreRunning(c) {
 				continue
 			}

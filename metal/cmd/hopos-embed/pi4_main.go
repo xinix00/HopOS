@@ -20,7 +20,7 @@ import (
 
 	"hop-os/metal/abi/layout"
 	"hop-os/metal/board"
-	_ "hop-os/metal/board/rpi4" // registreert het board (init) + tamago-hooks
+	_ "hop-os/metal/board/rpi4/hop" // registreert het board (init) + basis-hooks
 	"hop-os/metal/kern/slots"
 )
 

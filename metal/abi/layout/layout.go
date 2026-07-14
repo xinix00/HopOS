@@ -16,6 +16,8 @@
 // image/qemu-run.sh en moet met de IPA-constanten in sync blijven.
 package layout
 
+import "fmt"
+
 const (
 	// Core 0 — de HOP-kern op QEMU -M virt (RAM begint daar op 0x40000000; op
 	// de Pi is HOP's thuis het EEPROM-laadadres en heeft de board-main eigen
@@ -119,6 +121,27 @@ const (
 	NetRingDataCap = 0xFF000 // datacapaciteit per richting (1MB - 4KB slack)
 )
 
+// StageAddr is het staging-contract tussen HOP en de apploader: de image
+// landt 8-uitgelijnd tegen de bovenkant van het app-RAM. Beide kanten rekenen
+// met dezelfde functie — de app in IPA (RAMStart+RAMSize), HOP in PA
+// (partitiebasis+appRAM) — dus de compiler bewaakt de pariteit die eerst een
+// comment moest bewaken ("dezelfde formule, anders lezen we naast de image").
+// ok=false: de image past niet (of imgSize is onzin).
+func StageAddr(ramBase, ramSize uint64, imgSize int64) (addr, staged uint64, ok bool) {
+	staged = (uint64(imgSize) + 7) &^ 7
+	if imgSize <= 0 || staged >= ramSize {
+		return 0, staged, false
+	}
+	return ramBase + ramSize - staged, staged, true
+}
+
+// IP4Str formatteert een adres uit het layout-net-plan (uint32,
+// host-volgorde) als dotted-quad — de string-vorm hoort bij de bron van het
+// plan, niet gekopieerd bij elke gebruiker (hopswitch, appnet).
+func IP4Str(v uint32) string {
+	return fmt.Sprintf("%d.%d.%d.%d", byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+}
+
 // MaxSlots is het aantal app-slots dat deze node gebruikt — geen kunstmatige
 // limiet maar de FYSIEKE grens van het board: het aantal ontdekte app-cores
 // (127 op de Ampere Altra, 3 op de Pi, 11 op de O6N). Een board zet het bij
@@ -221,42 +244,11 @@ func RingInboxPA(i int) uintptr {
 	return pa(plan.RingPA + uint64(i-1)*RingStride + InboxOff)
 }
 
-// netRingPA is de per-slot fysieke net-ring-basis: de bovenste NetRingStride
-// van de partitie van het slot. Geen plan-veld maar een runtime-tabel, omdat
-// partities per job worden gealloceerd — kern/slots registreert de staart bij
-// Start (vóór ring-init/Attach/stage-2) en wist hem bij partRelease.
-var netRingPA [SlotCap + 1]uint64
-
-// SetNetRingPA registreert (pa=0: wist) de fysieke net-ring-basis van slot i.
-// 2MB-aligned — de stage-2 mapt hem als één blok; partAlloc's 2MB-korrel
-// garandeert dat voor elke partitie-staart.
-func SetNetRingPA(i int, pa uint64) {
-	if i < 1 || i > SlotCap {
-		panic("layout: SetNetRingPA: slot buiten [1, SlotCap]")
-	}
-	if pa&(NetRingStride-1) != 0 {
-		panic("layout: SetNetRingPA: basis niet 2MB-aligned")
-	}
-	netRingPA[i] = pa
-}
-
-// NetRingTXPA/NetRingRXPA: de fysieke frame-ringen van slot i. Alleen geldig
-// terwijl het slot een partitie heeft (tussen Start en release) — daarbuiten
-// is er geen ring en panict dit luid i.p.v. een stale PA te geven.
-func NetRingTXPA(i int) uintptr {
-	return uintptr(netRingBase(i) + NetTXOff)
-}
-func NetRingRXPA(i int) uintptr {
-	return uintptr(netRingBase(i) + NetRXOff)
-}
-
-func netRingBase(i int) uint64 {
-	v := netRingPA[i]
-	if v == 0 {
-		panic("layout: net-ring-PA niet gezet — slot zonder actieve partitie (kern/slots registreert hem bij Start)")
-	}
-	return v
-}
+// De fysieke net-ring-basis van een slot (de bovenste NetRingStride van zijn
+// partitie) is bewust GEEN accessor hier: partities leven per job, dus die PA
+// bestaat alleen tijdens een lifecycle. kern/slots berekent hem (base+appRAM)
+// en geeft hem als parameter door aan ring-init, hopswitch.Attach en
+// stage2.Build — er is geen register dat stale kan worden.
 
 // VecBasePA is de fysieke basis van de gedeelde EL2-vectoren (app-cores);
 // RevokeVecPA die van de vectortabel van de HOP-core (cpuinit-asm moet
@@ -309,7 +301,7 @@ func CarvePool(banks, holes []Region, min uint64) []Region {
 				next = append(next, Region{Base: hEnd, Size: rEnd - hEnd})
 			}
 		}
-		regs = append([]Region(nil), next...)
+		regs = next // per hole-ronde vers opgebouwd — geen kopie nodig
 	}
 	// 2MB-uitlijnen (naar binnen) en te kleine stukken droppen.
 	const mb2 = 2 << 20

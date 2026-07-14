@@ -1,9 +1,10 @@
-package qemuvirt
-
-// board.go maakt van qemuvirt een board.Board en registreert hem bij het laden.
-// Alle board-specifieke waarden die vroeger in generieke packages lekten
-// (cluster-topologie in slots, slirp-IP's in hopnet, ECAM/MMIO in pcie) wonen
-// nu hier — het ene punt dat per board verandert.
+// Package hop is de HOP-bedrading van het qemuvirt-board: de volledige
+// board.Board-implementatie mét drivers (virtio-net, DMA-init). Alleen
+// HOP-kant-binaries (cmd/) importeren deze helft; app-images importeren
+// uitsluitend de basis (board/qemuvirt: runtime-hooks + appboard-contract)
+// en linken zo nooit tegen de driverstack — de isolatie op source-niveau uit
+// docs/indeling.md, nu ook voor de board-laag.
+package hop
 
 import (
 	"fmt"
@@ -13,6 +14,7 @@ import (
 
 	"hop-os/metal/abi/layout"
 	"hop-os/metal/board"
+	"hop-os/metal/board/qemuvirt"
 	"hop-os/metal/cpu/el2"
 	"hop-os/metal/driver/fb"
 	"hop-os/metal/driver/nic/virtionet"
@@ -21,17 +23,17 @@ import (
 // machine is de board-implementatie voor de QEMU -M virt arm64-machine.
 type machine struct{}
 
-// init registreert dit board. Elke binary importeert qemuvirt al (verplicht,
-// voor de tamago runtime-hooks), dus board.Current() is meteen geldig — geen
-// expliciete Use()-aanroep in de mains nodig.
+// init registreert dit board. Elke HOP-binary importeert deze hop-helft
+// (cmd/hopos/board_virt.go), dus board.Current() is meteen geldig; de basis
+// registreerde het app-contract (appboard) al in háár init.
 func init() { board.Use(machine{}) }
 
-func (machine) BootEL() int { return int(BootEL()) }
-func (machine) CoreID() int { return CoreID() }
+func (machine) BootEL() int { return int(qemuvirt.BootEL()) }
+func (machine) CoreID() int { return qemuvirt.CoreID() }
 
 // MemTotal geeft het bij boot (hwinit1) gedetecteerde DRAM; 0 = niet
 // gevonden → de aanroeper valt terug op het statische slot-plan.
-func (machine) MemTotal() uint64 { return memTotal }
+func (machine) MemTotal() uint64 { return qemuvirt.MemTotal() }
 
 // CoreClass geeft de clusterklasse van slot i. QEMU -M virt heeft homogene
 // cores (alle cortex-a53), dus één klasse voor álle slots — net als de
@@ -43,28 +45,29 @@ func (machine) MemTotal() uint64 { return memTotal }
 // mid/big-job permanent onplaatsbaar. Board-kennis, geen slot-kennis.
 func (machine) CoreClass(i int) string { return "big" }
 
-func (machine) TimerOffset() int64     { return ARM64.TimerOffset }
-func (machine) SetTimerOffset(o int64) { ARM64.TimerOffset = o }
-func (machine) SetWallTime(ns int64)   { ARM64.SetTime(ns) }
+func (machine) TimerOffset() int64     { return qemuvirt.ARM64.TimerOffset }
+func (machine) SetTimerOffset(o int64) { qemuvirt.ARM64.TimerOffset = o }
+func (machine) SetWallTime(ns int64)   { qemuvirt.ARM64.SetTime(ns) }
 
-func (machine) CPUOn(core, entry, ctx uint64) int64 { return CPUOn(core, entry, ctx) }
-func (machine) CPUOff() int64                       { return CPUOff() }
+func (machine) CPUOn(core, entry, ctx uint64) int64 { return qemuvirt.CPUOn(core, entry, ctx) }
+func (machine) CPUOff() int64                       { return qemuvirt.CPUOff() }
 func (machine) AffinityInfo(core uint64) board.PowerState {
-	return board.PowerState(AffinityInfo(core))
+	return board.PowerState(qemuvirt.AffinityInfo(core))
 }
-func (machine) PSCIVersion() (major, minor uint16) { return PSCIVersion() }
+func (machine) PSCIVersion() (major, minor uint16) { return qemuvirt.PSCIVersion() }
 
 // De EL2-trampolines (stage-2-kooi + SMP) zijn board-neutraal en wonen in het
 // gedeelde metal/el2-pakket; dit board geeft alleen de symbooladressen door.
+// De EL1-SMP-stub heeft geen board-methode meer: de app-OS-laag (metal/cpu/smp)
+// leest zijn eigen el2.SMPStubPC rechtstreeks.
 func (machine) S2TrampPC() uint64    { return el2.S2TrampPC() }
 func (machine) S2SMPTrampPC() uint64 { return el2.S2SMPTrampPC() }
-func (machine) SMPStubPC() uint64    { return el2.SMPStubPC() }
 
 // ProbeNIC vindt het virtio-net-mmio-slot, construeert de driver en zet 'm
 // klaar in de net-DMA-subregio. Zo blijft de driverkeuze board-kennis en is
 // hopnet NIC-agnostisch.
 func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
-	base, _ := ProbeVirtioNet()
+	base, _ := probeVirtioNet()
 	if base == 0 {
 		return nil, nil, nil // geen (moderne) virtio-net gevonden
 	}

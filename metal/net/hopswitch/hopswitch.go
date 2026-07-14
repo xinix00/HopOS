@@ -32,16 +32,12 @@ const (
 	maxBurst = 64
 )
 
-// ip4str formatteert een big-endian IPv4-uint32.
-func ip4str(v uint32) string {
-	return fmt.Sprintf("%d.%d.%d.%d", byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
-}
-
 // HostIP is HOP's interne adres (de gateway), SlotIP dat van slot i — beide
-// uit het net-plan in layout, als string voor de mains.
-var HostIP = ip4str(layout.HostIP4())
+// uit het net-plan in layout, als string voor de mains (layout.IP4Str: de
+// string-vorm woont bij de bron van het plan).
+var HostIP = layout.IP4Str(layout.HostIP4())
 
-func SlotIP(i int) string { return ip4str(layout.SlotIP4(i)) }
+func SlotIP(i int) string { return layout.IP4Str(layout.SlotIP4(i)) }
 
 // hostMAC is HOP's MAC op het interne net (slot 0 → ..:00).
 var hostMAC = layout.SlotMAC(0)
@@ -81,11 +77,14 @@ func Up() error {
 }
 
 // Attach koppelt slot i aan de switch (door slots.Start, ná de ring-init).
+// netPA is de fysieke net-ring-basis van dít slot — de partitie-staart, door
+// kern/slots per lifecycle berekend en als parameter meegegeven (er is geen
+// register dat stale kan worden); de TX/RX-offsets komen uit het layout-plan.
 // No-op zolang de switch niet Up() is: ports is dan nog nil (lazy op de
 // runtime-MaxSlots gedimensioneerd), en een board dat geen switch draait
 // (de Pi-mains starten slots zonder hopswitch.Up) mag hier niet crashen —
 // vóór de array→slice-wissel was dit een onschuldige no-op.
-func Attach(i int) {
+func Attach(i int, netPA uintptr) {
 	if i < 1 || i > layout.MaxSlots {
 		return
 	}
@@ -95,8 +94,8 @@ func Attach(i int) {
 		return
 	}
 	ports[i] = &port{
-		tx: ring.Open(layout.NetRingTXPA(i)),
-		rx: ring.Open(layout.NetRingRXPA(i)),
+		tx: ring.Open(netPA + layout.NetTXOff),
+		rx: ring.Open(netPA + layout.NetRXOff),
 	}
 }
 

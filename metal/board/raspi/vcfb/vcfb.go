@@ -1,14 +1,16 @@
-package raspi
-
-// De log-console (metal/driver/fb) op de Pi: eerst de universele simple-framebuffer
-// uit de DTB (wat Linux' early console ook leest), en anders — GEMETEN
-// 2026-07-11 op beide boards: de Pi-firmware laat aan raw kernels géén
-// simplefb-node na, ook niet met HDMI erin — het framebuffer zelf opeisen
-// via de VideoCore-mailbox (vcmail.AllocFB, het officiële pad; nog steeds
-// "firmware-buffer, geen driver"). Discovery hier, één keer voor Pi 4 en
-// Pi 5; het renderen zit in metal/driver/fb.
+// Package vcfb is de gedeelde Pi-framebuffer-discovery voor de HOP-helften
+// van rpi4/rpi5 (board/<x>/hop): eerst de universele simple-framebuffer uit
+// de DTB (wat Linux' early console ook leest), en anders — GEMETEN 2026-07-11
+// op beide boards: de Pi-firmware laat aan raw kernels géén simplefb-node na,
+// ook niet met HDMI erin — het framebuffer zelf opeisen via de
+// VideoCore-mailbox (vcmail.AllocFB, het officiële pad; nog steeds
+// "firmware-buffer, geen driver"). Bewust búíten de raspi-basis: dit
+// importeert vcmail/fb en is puur HOP-werk — een app-image (dat de basis wél
+// linkt) heeft hier niets te zoeken. Het renderen zit in metal/driver/fb.
+package vcfb
 
 import (
+	"hop-os/metal/board/raspi"
 	"hop-os/metal/dev"
 	"hop-os/metal/driver/fb"
 	"hop-os/metal/driver/vcmail"
@@ -46,7 +48,7 @@ func FramebufferVC(dtbPtr, mboxBase uintptr) (fb.Desc, bool) {
 	if d, ok := Framebuffer(dtbPtr); ok {
 		return d, true
 	}
-	m := &vcmail.Mbox{Base: mboxBase, Buf: uintptr(VCMailBuf)}
+	m := &vcmail.Mbox{Base: mboxBase, Buf: uintptr(raspi.VCMailBuf)}
 	f, ok := m.AllocFB(1920, 1080)
 	if !ok || f.Width == 0 {
 		return fb.Desc{}, false

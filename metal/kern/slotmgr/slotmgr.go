@@ -47,6 +47,9 @@ func (Manager) Status(slot int) hopos.SlotStatus {
 		Heartbeat: s.Heartbeat,
 		RAMSize:   s.RAMSize,
 		MemSys:    s.MemSys,
+		FaultVec:  s.FaultVec,
+		FaultESR:  s.FaultESR,
+		FaultFAR:  s.FaultFAR,
 	}
 }
 

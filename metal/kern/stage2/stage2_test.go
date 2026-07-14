@@ -40,14 +40,13 @@ func TestMain(m *testing.M) {
 		BootScratchPA: tBootScratchPA,
 		Pool:          []layout.Region{{Base: tPoolPA, Size: 1 << 30}},
 	})
-	// Net-ringen zijn geen plan-veld meer maar per-slot runtime-registraties
-	// (partitie-staart, kern/slots). De tests bouwen kooien zonder slots.Start,
-	// dus registreer hier per slot een eigen 2MB-blok op de oude testplek.
-	for i := 1; i <= layout.MaxSlots; i++ {
-		layout.SetNetRingPA(i, tNetRingPA+uint64(i-1)*layout.NetRingStride)
-	}
 	os.Exit(m.Run())
 }
+
+// tNetPA is de net-ring-PA die de tests aan Build meegeven — per slot een
+// eigen 2MB-blok, zoals kern/slots hem uit de partitie-staart berekent (de PA
+// is een parameter, geen registratie).
+func tNetPA(i int) uint64 { return tNetRingPA + uint64(i-1)*layout.NetRingStride }
 
 func rd(pa uint64) uint64 { return dev.Read64(uintptr(pa)) }
 
@@ -55,10 +54,10 @@ func rd(pa uint64) uint64 { return dev.Read64(uintptr(pa)) }
 func paOf(d uint64) uint64 { return d & 0x0000_FFFF_FFFF_F000 }
 
 func TestBuildBereik(t *testing.T) {
-	if _, err := Build(0, layout.SlotBase(1), tPoolPA, 2<<20); err == nil {
+	if _, err := Build(0, layout.SlotBase(1), tPoolPA, 2<<20, tNetPA(1)); err == nil {
 		t.Error("slot 0 geaccepteerd")
 	}
-	if _, err := Build(layout.MaxSlots+1, layout.SlotBase(1), tPoolPA, 2<<20); err == nil {
+	if _, err := Build(layout.MaxSlots+1, layout.SlotBase(1), tPoolPA, 2<<20, tNetPA(1)); err == nil {
 		t.Error("slot buiten MaxSlots geaccepteerd")
 	}
 }
@@ -67,7 +66,7 @@ func TestBuildBereik(t *testing.T) {
 func TestBuildSlot1(t *testing.T) {
 	const size = 64 << 20 // 64MB-partitie
 	ipa := layout.SlotBase(1)
-	l1, err := Build(1, ipa, tPoolPA, size)
+	l1, err := Build(1, ipa, tPoolPA, size, tNetPA(1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +112,7 @@ func TestBuildSlot1(t *testing.T) {
 		case 392:
 			want = base + l3RingOff | descTable
 		case 408:
-			want = uint64(layout.NetRingTXPA(1)) | blockRW
+			want = tNetPA(1) | blockRW
 		}
 		if got != want {
 			t.Fatalf("L2dev[%d] = %#x, verwacht %#x", idx, got, want)
@@ -156,7 +155,7 @@ func TestBuildSlot3DeeltGBMetDevices(t *testing.T) {
 	if ipa>>30 != layout.CtrlBase>>30 {
 		t.Fatalf("testaanname stuk: SlotBase(3)=%#x ligt niet in het ctrl-GB", ipa)
 	}
-	if _, err := Build(3, ipa, tPoolPA, size); err != nil {
+	if _, err := Build(3, ipa, tPoolPA, size, tNetPA(3)); err != nil {
 		t.Fatal(err)
 	}
 	base := uint64(layout.Stage2TablePA(3))
@@ -187,7 +186,7 @@ func TestBuildSlot3DeeltGBMetDevices(t *testing.T) {
 		case idx == 392:
 			want = base + l3RingOff | descTable
 		case idx == 408+3-1:
-			want = uint64(layout.NetRingTXPA(3)) | blockRW
+			want = tNetPA(3) | blockRW
 		}
 		if got != want {
 			t.Fatalf("L2dev[%d] = %#x, verwacht %#x", idx, got, want)
@@ -242,10 +241,10 @@ func walk(t *testing.T, i int) []leaf {
 func TestIsolatieTussenSlots(t *testing.T) {
 	const size = 64 << 20
 	pa1, pa2 := uint64(tPoolPA), uint64(tPoolPA+size)
-	if _, err := Build(1, layout.SlotBase(1), pa1, size); err != nil {
+	if _, err := Build(1, layout.SlotBase(1), pa1, size, tNetPA(1)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Build(2, layout.SlotBase(2), pa2, size); err != nil {
+	if _, err := Build(2, layout.SlotBase(2), pa2, size, tNetPA(2)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -256,7 +255,7 @@ func TestIsolatieTussenSlots(t *testing.T) {
 		{"partitie", pa2, size},
 		{"ctrl-page", uint64(layout.CtrlPagePA(2)), layout.CtrlStride},
 		{"hop-ringen", uint64(layout.RingOutboxPA(2)), layout.RingStride},
-		{"net-ringen", uint64(layout.NetRingTXPA(2)), layout.NetRingStride},
+		{"net-ringen", tNetPA(2), layout.NetRingStride},
 		{"stage-2-tabellen", uint64(layout.Stage2TablePA(0)), uint64(layout.MaxSlots+1) * layout.Stage2Stride},
 	}
 	roGezien := 0
@@ -284,10 +283,10 @@ func TestIsolatieTussenSlots(t *testing.T) {
 // laten staan (Build hoort eerst te vegen).
 func TestRebuildVeegtOudeMap(t *testing.T) {
 	ipa := layout.SlotBase(1)
-	if _, err := Build(1, ipa, tPoolPA, 64<<20); err != nil {
+	if _, err := Build(1, ipa, tPoolPA, 64<<20, tNetPA(1)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Build(1, ipa, tPoolPA, 8<<20); err != nil {
+	if _, err := Build(1, ipa, tPoolPA, 8<<20, tNetPA(1)); err != nil {
 		t.Fatal(err)
 	}
 	blokken := 0

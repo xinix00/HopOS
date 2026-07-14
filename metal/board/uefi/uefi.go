@@ -108,6 +108,11 @@ var hexLine [40]uint16
 // filtert op PixelFormat 0/1: 0=RGB, 1=BGR). gopDesc() decodeert het.
 var gopInfo [3]uint64
 
+// GOPFramebuffer geeft het firmware-beeld dat de stub bewaarde — de
+// board.Board.Framebuffer-bron voor de hop-helft (hwinit1 deed fb.Init al
+// voor de vroege console; de main mag opnieuw — Init is idempotent genoeg).
+func GOPFramebuffer() (fb.Desc, bool) { return gopDesc(false) }
+
 // gopDesc decodeert gopInfo tot een fb.Desc. mapHigh=true (hwinit1) mapt het
 // venster actief via MapHigh; false (Framebuffer, ná die map) checkt alleen
 // Reachable. false-retour = geen bruikbaar/bereikbaar beeld. Eén decode-plek

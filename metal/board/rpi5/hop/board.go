@@ -1,9 +1,13 @@
-package rpi5
-
-// board.go maakt van rpi5 een board.Board en registreert hem bij het laden.
+// Package hop is de HOP-bedrading van het rpi5-board: de volledige
+// board.Board-implementatie mét drivers (brcmpcie → RP1 → GEM → DHCP,
+// framebuffer). Alleen HOP-kant-binaries (cmd/) importeren deze helft;
+// app-images importeren uitsluitend de basis (board/rpi5: runtime-hooks +
+// appboard-contract) en linken zo nooit tegen de driverstack.
+//
 // Fase-P-status: boot/PSCI/console/timers zijn er; de rest is expliciet
 // afwezig tot de bijbehorende fase — een aanroep ervan is een bug, geen
 // stille fallback.
+package hop
 
 import (
 	"fmt"
@@ -15,6 +19,8 @@ import (
 	"hop-os/metal/abi/layout"
 	"hop-os/metal/board"
 	"hop-os/metal/board/raspi"
+	"hop-os/metal/board/raspi/vcfb"
+	"hop-os/metal/board/rpi5"
 	"hop-os/metal/cpu/el2"
 	"hop-os/metal/driver/brcmpcie"
 	"hop-os/metal/driver/fb"
@@ -26,12 +32,13 @@ import (
 // machine is de board-implementatie voor de Raspberry Pi 5 (BCM2712).
 type machine struct{}
 
-// init registreert dit board: elke rpi5-binary importeert dit pakket al
-// (verplicht, voor de tamago runtime-hooks).
+// init registreert dit board: elke HOP-binary voor de Pi 5 importeert deze
+// hop-helft (cmd/hopos/board_rpi5.go); de basis registreerde het app-contract
+// (appboard) al in háár init.
 func init() { board.Use(machine{}) }
 
 func (machine) BootEL() int { return int(raspi.BootEL()) }
-func (machine) CoreID() int { return CoreID() }
+func (machine) CoreID() int { return rpi5.CoreID() }
 
 // MemTotal leest de DTB die de firmware in x0 meegaf (cpuinit.s → DTBPtr) en
 // telt het /memory-node op. 0 = niet gevonden. DTBPtr is het scratch-woord
@@ -55,15 +62,17 @@ func (machine) SetTimerOffset(o int64) { raspi.ARM64.TimerOffset = o }
 func (machine) SetWallTime(ns int64)   { raspi.ARM64.SetTime(ns) }
 
 // PSCI loopt via de gedeelde raspi-laag (TF-A/armstub op EL3, conduit SMC);
-// hier wordt alleen de core-index naar het A76-MPIDR-target vertaald (aff1).
-// LET OP (meetpunt probe): de standaard Pi-armstub zet secundaire cores
-// mogelijk al "aan" (CPU_ON → ALREADY_ON) — dan vervangen we hem door een
-// zelfgebouwde upstream-TF-A bl31.bin (armstub= in config.txt), die cores
-// netjes geparkeerd houdt tot CPU_ON. Zie docs/rpi5.md.
-func (machine) CPUOn(core, entry, ctx uint64) int64 { return raspi.CPUOn(target(core), entry, ctx) }
-func (machine) CPUOff() int64                       { return raspi.CPUOff() }
+// hier wordt alleen de core-index naar het A76-MPIDR-target vertaald (aff1,
+// rpi5.Target). LET OP (meetpunt probe): de standaard Pi-armstub zet
+// secundaire cores mogelijk al "aan" (CPU_ON → ALREADY_ON) — dan vervangen we
+// hem door een zelfgebouwde upstream-TF-A bl31.bin (armstub= in config.txt),
+// die cores netjes geparkeerd houdt tot CPU_ON. Zie docs/rpi5.md.
+func (machine) CPUOn(core, entry, ctx uint64) int64 {
+	return raspi.CPUOn(rpi5.Target(core), entry, ctx)
+}
+func (machine) CPUOff() int64 { return raspi.CPUOff() }
 func (machine) AffinityInfo(core uint64) board.PowerState {
-	return board.PowerState(raspi.AffinityInfo(target(core)))
+	return board.PowerState(raspi.AffinityInfo(rpi5.Target(core)))
 }
 func (machine) PSCIVersion() (major, minor uint16) { return raspi.PSCIVersion() }
 
@@ -75,7 +84,6 @@ func (machine) PSCIVersion() (major, minor uint16) { return raspi.PSCIVersion() 
 // (metal/pi5_main.go).
 func (machine) S2TrampPC() uint64    { return el2.S2TrampPC() }
 func (machine) S2SMPTrampPC() uint64 { return el2.S2SMPTrampPC() }
-func (machine) SMPStubPC() uint64    { return el2.SMPStubPC() }
 
 // lease bewaart wat ProbeNIC via DHCP ophaalde; Net() leest hem. hopnet.Up
 // roept ProbeNIC vóór Net() aan (die volgorde is het contract).
@@ -108,13 +116,13 @@ func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
 	// OpenBridge→endpoint-check→BAR's→enable) woont nu in brcmpcie.RC.BringUp;
 	// hier blijft alleen wat écht RP1 is.
 	rc := &brcmpcie.RC{
-		Base:     uintptr(PCIe2Base),
-		SWInit:   uintptr(PCIeSWInit),
-		SWInitID: PCIe2SWInit,
+		Base:     uintptr(rpi5.PCIe2Base),
+		SWInit:   uintptr(rpi5.PCIeSWInit),
+		SWInitID: rpi5.PCIe2SWInit,
 		Gen:      2,
-		Out:      brcmpcie.OutWin{CPU: RP1Base, PCIe: 0, Size: 0x1000_0000},
+		Out:      brcmpcie.OutWin{CPU: rpi5.RP1Base, PCIe: 0, Size: 0x1000_0000},
 		In: []brcmpcie.InWin{
-			{PCIe: 0, CPU: RP1Base, Size: 0x40_0000},             // RP1-loopback (BAR1)
+			{PCIe: 0, CPU: rpi5.RP1Base, Size: 0x40_0000},        // RP1-loopback (BAR1)
 			{PCIe: 0x10_0000_0000, CPU: 0, Size: 0x10_0000_0000}, // al het DRAM
 			// MIP0: het MSI-X-doel van de RP1 (bcm2712.dtsi dma-ranges: PCIe
 			// 0xff_ffff_f000 → 0x10_0013_0000, 4KB). De RP1 vuurt peripheral-
@@ -128,7 +136,7 @@ func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
 	// BAR1 MOET op PCIe 0x0 (RP1's eigen DMA bereikt zijn peripherals via de
 	// loopback door het inbound-window hierboven).
 	if err := rc.BringUp(brcmpcie.BringConfig{
-		Rescal: uintptr(PCIeRescal),
+		Rescal: uintptr(rpi5.PCIeRescal),
 		WantID: 0x1_1de4, // device 0x0001, vendor 0x1de4
 		Bars: []brcmpcie.EPBar{
 			{Off: 0x10, Val: 0x100_0000}, // BAR0
@@ -141,13 +149,13 @@ func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
 
 	// De ethernet-PHY (BCM54213PE) hangt in reset aan RP1-GPIO32 (actief-
 	// laag, 5ms — DT phy-reset-gpios; gemeten: zonder dit géén PHY op MDIO).
-	RP1GPIOOut(32, false)
+	rpi5.RP1GPIOOut(32, false)
 	time.Sleep(10 * time.Millisecond)
-	RP1GPIOOut(32, true)
+	rpi5.RP1GPIOOut(32, true)
 	time.Sleep(50 * time.Millisecond)
 
 	nic := &gem.Net{
-		Base:   uintptr(RP1EthBase),
+		Base:   uintptr(rpi5.RP1EthBase),
 		BusOff: 0x10_0000_0000, // RP1-masters → PCIe → RC-inbound → DRAM 0
 		MAC:    raspi.MACFromSerial(raspi.DTB(), 0x05),
 	}
@@ -174,8 +182,8 @@ func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
 }
 
 // Net geeft de DHCP-lease die ProbeNIC haalde, omgezet naar board.NetConfig
-// via de gedeelde raspi-helper (identiek aan de Pi 4).
-func (machine) Net() board.NetConfig { return raspi.NetFromLease(lease) }
+// via de gedeelde omzetting in metal/board (identiek aan de Pi 4).
+func (machine) Net() board.NetConfig { return board.NetFromLease(lease) }
 
 // DHCPLease geeft de door ProbeNIC verkregen lease (board.LeaseHolder), zodat
 // hopnet er na de stack-bring-up dhcp.KeepAlive op start. false vóór een echte
@@ -186,11 +194,10 @@ func (machine) DHCPLease() (dhcp.Lease, bool) { return lease, lease.Acquired }
 // de RP1-bring-up.
 func (machine) PCIe() board.PCIeWindow { return board.PCIeWindow{} }
 
-// Framebuffer: DTB-simplefb met mailbox-terugval — de gedeelde raspi-
-// discovery (zie board/raspi/fb.go voor het meetverhaal); hier alleen de
-// boardadressen.
+// Framebuffer: DTB-simplefb met mailbox-terugval — de gedeelde Pi-discovery
+// (zie board/raspi/vcfb voor het meetverhaal); hier alleen de boardadressen.
 func (machine) Framebuffer() (fb.Desc, bool) {
-	return raspi.FramebufferVC(DTBPtr, uintptr(VCMailBase))
+	return vcfb.FramebufferVC(rpi5.DTBPtr, uintptr(rpi5.VCMailBase))
 }
 
 // EnableTimestamps zet de per-regel-console-stempel aan (optionele interface,

@@ -21,7 +21,7 @@ import (
 	"hop-os/metal/abi/hopabi"
 	"hop-os/metal/abi/layout"
 	"hop-os/metal/abi/ring"
-	"hop-os/metal/board"
+	"hop-os/metal/board/appboard"
 	"hop-os/metal/cpu/idle"
 	"hop-os/metal/cpu/smp"
 	"hop-os/metal/dev"
@@ -52,7 +52,7 @@ func (a *App) ctrl(off uintptr) *uint64 {
 func Init() *App {
 	start, end := runtime.MemRegion()
 	a := &App{
-		Slot:     board.Current().CoreID(),
+		Slot:     appboard.Current().CoreID(),
 		RAMStart: uint64(start),
 		RAMSize:  uint64(end - start),
 	}
@@ -65,7 +65,7 @@ func Init() *App {
 	// Klok overnemen van HOP (die synct via SNTP): zonder dit begint elke
 	// app-runtime op 1970. De teller is gedeeld, de offset dus ook.
 	if off := *a.ctrl(layout.CtrlWallOff); off != 0 {
-		board.Current().SetTimerOffset(int64(off))
+		appboard.Current().SetTimerOffset(int64(off))
 	}
 
 	*a.ctrl(layout.CtrlRAMSize) = a.RAMSize
@@ -309,14 +309,15 @@ func (a *App) StageImage(r io.Reader, imgSize int64) error {
 	if imgSize <= 0 {
 		return fmt.Errorf("StageImage: onbekende image-grootte (Content-Length vereist)")
 	}
-	staged := (uint64(imgSize) + 7) &^ 7 // 8-uitgelijnd (device-reads bij HOP)
-	if staged >= a.RAMSize {
+	// Bovenin de eigen partitie — waar straks de stack/heap-top komt, maar die
+	// bestaat nog niet: de echte app draait pas ná het plaatsen. layout.StageAddr
+	// is het gedeelde contract: HOP rekent bij StartStaged met dezelfde functie
+	// (dáár in PA, hier in IPA — de stage-2 vertaalt naar dezelfde fysieke plek).
+	addr, staged, fits := layout.StageAddr(a.RAMStart, a.RAMSize, imgSize)
+	if !fits {
 		return fmt.Errorf("StageImage: image %d bytes past niet in partitie %d MB", imgSize, a.RAMSize>>20)
 	}
-	// Bovenin de eigen partitie — waar straks de stack/heap-top komt, maar die
-	// bestaat nog niet: de echte app draait pas ná het plaatsen. HOP leest deze
-	// IPA (stage-2 vertaalt naar dezelfde fysieke plek) bij StartStaged.
-	stageAddr := uintptr(a.RAMStart + a.RAMSize - staged)
+	stageAddr := uintptr(addr)
 	var buf [64 << 10]byte
 	var got int64
 	for got < imgSize {

@@ -15,6 +15,7 @@ import (
 
 	gnet "github.com/usbarmory/go-net"
 
+	"hop-os/metal/board/appboard"
 	"hop-os/metal/driver/fb"
 	"hop-os/metal/net/dhcp"
 )
@@ -108,12 +109,16 @@ type PCIeWindow struct {
 	MMIOBase uintptr
 }
 
-// Board is één concreet board. Alle methodes draaien op de HOP-kern (core 0),
-// behalve CPUOff, dat de aanroepende core zelf uitzet.
+// Board is één concreet board — het volledige HOP-contract, geïmplementeerd
+// door de hop-helft van elk board-pakket (board/<x>/hop). Het embedt het
+// app-contract (appboard.Board: CoreID, SetTimerOffset), dat de basis-helft
+// apart registreert voor app-images. Alle methodes draaien op de HOP-kern
+// (core 0), behalve CPUOff, dat de aanroepende core zelf uitzet.
 type Board interface {
+	appboard.Board // CoreID + SetTimerOffset (de app-zichtbare kern)
+
 	// Boot & topologie.
 	BootEL() int               // ≥2 vereist (stage-2-kooi); 1 = EL1: mains weigeren
-	CoreID() int               // eigen core-index (= slotnummer voor app-cores)
 	CoreClass(core int) string // clusterklasse ("small"/"mid"/"big")
 
 	// MemTotal is de door de firmware gerapporteerde DRAM-grootte in bytes
@@ -123,9 +128,9 @@ type Board interface {
 	MemTotal() uint64
 
 	// Generieke-timer-offset: wall-ns bij tellerstand nul, gedeeld over alle
-	// cores (dus HOP's offset geldt 1-op-1 voor elke app).
+	// cores (dus HOP's offset geldt 1-op-1 voor elke app). De setter zit in het
+	// ge-embedde appboard.Board.
 	TimerOffset() int64
-	SetTimerOffset(off int64)
 	SetWallTime(ns int64)
 
 	// PSCI power-control (return: PSCISuccess of een foutcode).
@@ -142,12 +147,11 @@ type Board interface {
 
 	// SMP (fase 5): één app over meerdere cores met een gedeelde heap. Een
 	// secundaire core komt op via CPU_ON naar S2SMPTrampPC (fysiek, in de
-	// HOP-image) en ERET't naar SMPStubPC (de EL1-stub in het app-image, IPA).
-	// HOP publiceert S2SMPTrampPC op de control-page; de app leest 'm en gebruikt
-	// SMPStubPC (zijn eigen symbool) als ELR-doel. De app blijft oblivious — de
-	// OS-laag (goos.Task) brengt de cores op, app-code raakt dit niet aan.
+	// HOP-image) en ERET't naar de EL1-stub in het app-image. HOP publiceert
+	// S2SMPTrampPC op de control-page; de app-OS-laag (metal/cpu/smp) haalt
+	// zijn eigen stub-adres rechtstreeks bij el2.SMPStubPC — dat is op elk
+	// board hetzelfde symbool, dus geen board-methode. De app blijft oblivious.
 	S2SMPTrampPC() uint64
-	SMPStubPC() uint64
 
 	// Netwerk. ProbeNIC construeert én initialiseert de NIC van dit board — de
 	// board kent de driver (virtio-net op QEMU, Cadence GEM op de Pi, RTL8126

@@ -20,7 +20,7 @@ import (
 	"hop-os/metal/abi/layout"
 	"hop-os/metal/app/applib"
 	"hop-os/metal/app/applib/appnet"
-	"hop-os/metal/board"
+	"hop-os/metal/board/appboard"
 )
 
 func main() {
@@ -267,7 +267,7 @@ func main() {
 		rounds++
 		if now := time.Now(); now.After(next) {
 			app.Logf("service alive: slot %d, %d rounds, up %s",
-				board.Current().CoreID(), rounds, time.Since(start).Round(time.Second))
+				appboard.Current().CoreID(), rounds, time.Since(start).Round(time.Second))
 			next = now.Add(12 * time.Second)
 		}
 		time.Sleep(250 * time.Millisecond)
@@ -414,7 +414,7 @@ func smpBench(app *applib.App) {
 		go func() {
 			defer wg0.Done()
 			for i := 0; i < 2000; i++ {
-				ran[board.Current().CoreID()%len(ran)].Add(1)
+				ran[appboard.Current().CoreID()%len(ran)].Add(1)
 				for j := 0; j < 20000; j++ {
 				}
 				if i%50 == 0 {

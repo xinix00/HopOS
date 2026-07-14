@@ -133,11 +133,18 @@ func (n *Net) DesignCfg() (dcfg1, dcfg6 uint32) { return n.rd(regDCFG1), n.rd(re
 // TxStatus geeft het rauwe TSR (bit 3 = TGO: zender actief; diagnose).
 func (n *Net) TxStatus() uint32 { return n.rd(regTxStatus) }
 
-// MDIORead leest een clause-22 PHY-register (blokkeert tot de bus vrij is).
+// MDIORead leest een clause-22 PHY-register (wacht begrensd tot de bus vrij
+// is). Blijft de bus hangen — vóór of ná de transactie — dan zou het
+// MAN-register garbage leveren; daarom dezelfde "geen PHY / mislukte
+// read"-sentinel als genet (0xFFFF), die PHYScan/AutoNeg al filteren.
 func (n *Net) MDIORead(phy, reg int) uint16 {
-	n.mdioWait()
+	if !n.mdioWait() {
+		return 0xFFFF
+	}
 	n.wr(regMAN, manClause22|manRead|uint32(phy&0x1F)<<23|uint32(reg&0x1F)<<18|manMustBe10)
-	n.mdioWait()
+	if !n.mdioWait() {
+		return 0xFFFF
+	}
 	return uint16(n.rd(regMAN))
 }
 
@@ -148,12 +155,14 @@ func (n *Net) MDIOWrite(phy, reg int, val uint16) {
 	n.mdioWait()
 }
 
-func (n *Net) mdioWait() {
+// mdioWait wacht (begrensd) tot de MDIO-bus vrij is; false bij een stall.
+func (n *Net) mdioWait() bool {
 	for range 100_000 { // enkele µs typisch; ruim begrensd, nooit eeuwig
 		if n.rd(regNWStatus)&statusMDIOIdle != 0 {
-			return
+			return true
 		}
 	}
+	return false
 }
 
 // MDIOEnable zet alleen de management-poort aan (voor de probe: MDIO-scan

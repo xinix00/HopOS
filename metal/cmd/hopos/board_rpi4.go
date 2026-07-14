@@ -12,7 +12,8 @@ import (
 
 	"hop-os/metal/abi/layout"
 	"hop-os/metal/board/raspi"
-	"hop-os/metal/board/rpi4" // registreert het board (init) + tamago-hooks
+	"hop-os/metal/board/rpi4"
+	_ "hop-os/metal/board/rpi4/hop" // registreert het board (init); de basis levert de tamago-hooks
 	"hop-os/metal/dev"
 	"hop-os/metal/driver/dvfs"
 	"hop-os/metal/driver/vcmail"

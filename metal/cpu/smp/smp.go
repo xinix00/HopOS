@@ -28,7 +28,7 @@ import (
 	"unsafe"
 
 	"hop-os/metal/abi/layout"
-	"hop-os/metal/board"
+	"hop-os/metal/cpu/el2"
 	"hop-os/metal/dev"
 )
 
@@ -59,7 +59,9 @@ func Configure(prim, cores int) {
 	primarySlot = prim
 	lastCore = prim + cores - 1
 	nextCore = prim + 1
-	stubIPA = board.Current().SMPStubPC()
+	// De EL1-stub is ons eigen symbool (cpu/el2 smp.s, in élk app-image
+	// gelinkt) — op elk board hetzelfde, dus rechtstreeks en zonder board-omweg.
+	stubIPA = el2.SMPStubPC()
 
 	// Gedeelde stage-1 L1 = de tabel die de primaire in InitMMU bouwde, op
 	// RamStart+0x4000 (IPA). De secundaire core zet zijn TTBR0_EL1 hierop → hij

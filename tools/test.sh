@@ -14,6 +14,10 @@
 set -e
 cd "$(dirname "$0")/../metal"
 
+# Importrichting van docs/indeling.md — een verkeerde import is een buildfout,
+# geen reviewtaak (tools/importcheck.go leest ook code achter build-tags).
+go run ../tools/importcheck.go
+
 go test "$@" \
 	./abi/ring ./net/hopswitch ./kern/stage2 ./abi/layout ./net/dhcp ./abi/hopabi ./abi/checksum \
 	./fw/fdt ./kern/hopfs ./driver/vcmail ./driver/nic/mdio ./kern/slots

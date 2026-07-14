@@ -112,3 +112,7 @@ func mpidr() uint64
 // onafhankelijk is van het linkadres (images zijn canoniek gelinkt en
 // draaien via de stage-2-vertaling op elk slot).
 func CoreID() int { return int(mpidr() & 0xFF) }
+
+// MemTotal geeft het bij boot (hwinit1) gedetecteerde DRAM (0 = onbekend) —
+// accessor voor de hop-helft (board.Board.MemTotal).
+func MemTotal() uint64 { return memTotal }

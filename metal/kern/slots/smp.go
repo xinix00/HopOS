@@ -17,7 +17,7 @@ package slots
 //     en releaseSlot een partitie vrijgeeft waarvan cores nog draaien.
 // Daarom houdt HOP een eigen, vertrouwde per-slot core-telling in HOP-geheugen
 // (slotCores), gezet uit Start's al-gevalideerde `cores`-argument. dispatchSMP
-// en appCores lezen HIER, nooit ctrlRead(CtrlCores). Start blíjft CtrlCores op
+// en coreCount lezen HIER, nooit ctrlRead(CtrlCores). Start blíjft CtrlCores op
 // de page schrijven (de app-OS-laag en de dvfs-governor lezen 'm) — alleen de
 // readback wordt nooit vertrouwd.
 
@@ -41,17 +41,4 @@ func coreCount(i int) int {
 		c = 1
 	}
 	return c
-}
-
-// appCores geeft álle cores van de app op slot i: de primaire plus, bij een
-// SMP-app, zijn secundaire cores. Voor een gewone app is dat gewoon [i]. Zo kan
-// het lifecycle-pad (Stop) één keer over de cores lopen, ongeacht of het er één
-// of meerdere zijn. Het aantal komt uit HOP's eigen slotCores, niet CtrlCores.
-func appCores(i int) []int {
-	cores := coreCount(i)
-	all := make([]int, 0, cores)
-	for c := i; c < i+cores; c++ {
-		all = append(all, c)
-	}
-	return all
 }

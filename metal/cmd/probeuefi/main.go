@@ -27,6 +27,7 @@ import (
 
 	"hop-os/metal/board"
 	"hop-os/metal/board/uefi"
+	_ "hop-os/metal/board/uefi/hop" // board.Board-registratie (board.Current in de probe)
 	"hop-os/metal/cpu/psci"
 	"hop-os/metal/cpu/trng"
 	"hop-os/metal/driver/nic/igb"

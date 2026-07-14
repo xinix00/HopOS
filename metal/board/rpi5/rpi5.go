@@ -129,5 +129,6 @@ const (
 // A53 en de Pi 4's A72 (aff0). Zie ook target() hieronder (PSCI, board.go).
 func CoreID() int { return int(raspi.MPIDR() >> 8 & 0xFF) }
 
-// target vertaalt een core-index naar het PSCI/MPIDR-target voor de A76.
-func target(core uint64) uint64 { return core << 8 }
+// Target vertaalt een core-index naar het PSCI/MPIDR-target voor de A76
+// (exported voor de PSCI-forwards in board/rpi5/hop).
+func Target(core uint64) uint64 { return core << 8 }

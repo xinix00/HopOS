@@ -1,9 +1,13 @@
-package rpi4
-
-// board.go maakt van rpi4 een board.Board en registreert hem bij het laden.
+// Package hop is de HOP-bedrading van het rpi4-board: de volledige
+// board.Board-implementatie mét drivers (GENET, DHCP, framebuffer). Alleen
+// HOP-kant-binaries (cmd/) importeren deze helft; app-images importeren
+// uitsluitend de basis (board/rpi4: runtime-hooks + appboard-contract) en
+// linken zo nooit tegen de driverstack.
+//
 // Fase-P-status: boot/PSCI/console/timers zijn er; de rest is expliciet
 // afwezig tot de bijbehorende fase — een aanroep ervan is een bug, geen
 // stille fallback.
+package hop
 
 import (
 	"fmt"
@@ -15,6 +19,8 @@ import (
 	"hop-os/metal/abi/layout"
 	"hop-os/metal/board"
 	"hop-os/metal/board/raspi"
+	"hop-os/metal/board/raspi/vcfb"
+	"hop-os/metal/board/rpi4"
 	"hop-os/metal/cpu/el2"
 	"hop-os/metal/driver/fb"
 	"hop-os/metal/driver/nic/genet"
@@ -25,12 +31,13 @@ import (
 // machine is de board-implementatie voor de Raspberry Pi 4 (BCM2711).
 type machine struct{}
 
-// init registreert dit board: elke rpi4-binary importeert dit pakket al
-// (verplicht, voor de tamago runtime-hooks).
+// init registreert dit board: elke HOP-binary voor de Pi 4 importeert deze
+// hop-helft (cmd/hopos/board_rpi4.go); de basis registreerde het app-contract
+// (appboard) al in háár init.
 func init() { board.Use(machine{}) }
 
 func (machine) BootEL() int { return int(raspi.BootEL()) }
-func (machine) CoreID() int { return CoreID() }
+func (machine) CoreID() int { return rpi4.CoreID() }
 
 // MemTotal leest de DTB (cpuinit.s → DTBPtr) en telt het /memory-node op.
 // 0 = niet gevonden. DTBPtr is het scratch-woord waarin cpuinit x0 legde, dus
@@ -53,14 +60,16 @@ func (machine) SetTimerOffset(o int64) { raspi.ARM64.TimerOffset = o }
 func (machine) SetWallTime(ns int64)   { raspi.ARM64.SetTime(ns) }
 
 // PSCI loopt via de gedeelde raspi-laag; hier wordt alleen de core-index
-// naar het A72-MPIDR-target vertaald (aff0). LET OP: anders dan op de Pi 5
-// is TF-A hier geen "mogelijk nodig" maar een harde eis — de stock armstub8
-// heeft helemaal geen PSCI (spin-table) en een SMC hangt dan. Zie
+// naar het A72-MPIDR-target vertaald (aff0, rpi4.Target). LET OP: anders dan
+// op de Pi 5 is TF-A hier geen "mogelijk nodig" maar een harde eis — de stock
+// armstub8 heeft helemaal geen PSCI (spin-table) en een SMC hangt dan. Zie
 // docs/rpi4.md en sd-rpi4/LEESMIJ.txt.
-func (machine) CPUOn(core, entry, ctx uint64) int64 { return raspi.CPUOn(target(core), entry, ctx) }
-func (machine) CPUOff() int64                       { return raspi.CPUOff() }
+func (machine) CPUOn(core, entry, ctx uint64) int64 {
+	return raspi.CPUOn(rpi4.Target(core), entry, ctx)
+}
+func (machine) CPUOff() int64 { return raspi.CPUOff() }
 func (machine) AffinityInfo(core uint64) board.PowerState {
-	return board.PowerState(raspi.AffinityInfo(target(core)))
+	return board.PowerState(raspi.AffinityInfo(rpi4.Target(core)))
 }
 func (machine) PSCIVersion() (major, minor uint16) { return raspi.PSCIVersion() }
 
@@ -71,7 +80,6 @@ func (machine) PSCIVersion() (major, minor uint16) { return raspi.PSCIVersion() 
 // is hier één-op-één doorgeven.
 func (machine) S2TrampPC() uint64    { return el2.S2TrampPC() }
 func (machine) S2SMPTrampPC() uint64 { return el2.S2SMPTrampPC() }
-func (machine) SMPStubPC() uint64    { return el2.SMPStubPC() }
 
 // lease bewaart wat ProbeNIC via DHCP ophaalde; Net() leest hem. hopnet.Up
 // roept ProbeNIC vóór Net() aan (die volgorde is het contract).
@@ -84,7 +92,7 @@ var lease dhcp.Lease
 // GENET is direct memory-mapped en de firmware laat hem gewoon met rust.
 func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
 	nic := &genet.Net{
-		Base: uintptr(GENETBase),
+		Base: uintptr(rpi4.GENETBase),
 		MAC:  raspi.MACFromSerial(raspi.DTB(), 0x04),
 	}
 	if rev := nic.Rev() >> 24 & 0xF; rev != 6 {
@@ -112,8 +120,8 @@ func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
 }
 
 // Net geeft de DHCP-lease die ProbeNIC haalde, omgezet naar board.NetConfig
-// via de gedeelde raspi-helper (identiek aan de Pi 5).
-func (machine) Net() board.NetConfig { return raspi.NetFromLease(lease) }
+// via de gedeelde omzetting in metal/board (identiek aan de Pi 5).
+func (machine) Net() board.NetConfig { return board.NetFromLease(lease) }
 
 // DHCPLease geeft de door ProbeNIC verkregen lease (board.LeaseHolder), zodat
 // hopnet er na de stack-bring-up dhcp.KeepAlive op start. false vóór een echte
@@ -124,11 +132,11 @@ func (machine) DHCPLease() (dhcp.Lease, bool) { return lease, lease.Acquired }
 // VL805-USB-controller; geen NVMe op dit board (CM4 uitgezonderd).
 func (machine) PCIe() board.PCIeWindow { return board.PCIeWindow{} }
 
-// Framebuffer: DTB-simplefb met mailbox-terugval — de gedeelde raspi-
-// discovery (zie board/raspi/fb.go; gemeten 2026-07-11: zonder de terugval
-// bleef de Pi 4 op het regenboog-splashscherm hangen).
+// Framebuffer: DTB-simplefb met mailbox-terugval — de gedeelde Pi-discovery
+// (zie board/raspi/vcfb; gemeten 2026-07-11: zonder de terugval bleef de
+// Pi 4 op het regenboog-splashscherm hangen).
 func (machine) Framebuffer() (fb.Desc, bool) {
-	return raspi.FramebufferVC(DTBPtr, uintptr(VCMailBase))
+	return vcfb.FramebufferVC(rpi4.DTBPtr, uintptr(rpi4.VCMailBase))
 }
 
 // EnableTimestamps zet de per-regel-console-stempel aan (optionele interface,
