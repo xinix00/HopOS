@@ -53,10 +53,10 @@ func allowed(cat, imp string) bool {
 	case "cpu":
 		return imp == "dev" || ifirst == "abi" || ifirst == "cpu"
 	case "driver":
-		// board (exact) is het contract: drivers nemen board.PCIeWindow aan.
-		// cpu ligt ónder driver (lagenvolgorde indeling.md): dvfs leest
-		// bijvoorbeeld de idle-tik-teller (cpu/idle).
-		return imp == "dev" || imp == "board" ||
+		// Drivers kennen het board-contract niet (pcie.Window woont sinds
+		// 14-07 bij pcie zelf). cpu ligt ónder driver (lagenvolgorde
+		// indeling.md): dvfs leest bijvoorbeeld de idle-tik-teller (cpu/idle).
+		return imp == "dev" ||
 			ifirst == "abi" || ifirst == "cpu" || ifirst == "fw" || ifirst == "driver"
 	case "net":
 		return imp == "dev" || imp == "board" || ifirst == "abi" || ifirst == "net"
@@ -67,7 +67,9 @@ func allowed(cat, imp string) bool {
 	case "appboard":
 		return false // het app-contract importeert niets
 	case "board-contract":
-		return imp == "board/appboard" || imp == "driver/fb" || imp == "net/dhcp"
+		// Alleen de typen die het contract draagt (fb.Desc, pcie.Window,
+		// dhcp.Lease) plus het ge-embedde app-contract.
+		return imp == "board/appboard" || imp == "driver/fb" || imp == "driver/pcie" || imp == "net/dhcp"
 	case "board-basis":
 		// De basis-helft wordt in élk app-image gelinkt: geen contract, geen
 		// net/kern, en uit driver/ uitsluitend de console-uitzondering

@@ -106,7 +106,7 @@ var lease dhcp.Lease
 // eachECAM roept fn aan voor elk bereikbaar (via MapHigh) MCFG-segment tot
 // fn true geeft; meldt of er een treffer was. Eén plek voor de MCFG→ECAM-
 // walk die ProbeNIC en PCIe delen. Geen ACPI/MCFG → geen treffer.
-func eachECAM(fn func(win board.PCIeWindow, startBus int) bool) bool {
+func eachECAM(fn func(win pcie.Window, startBus int) bool) bool {
 	t := uefi.Tables()
 	if t == nil {
 		return false
@@ -125,7 +125,7 @@ func eachECAM(fn func(win board.PCIeWindow, startBus int) bool) bool {
 				base, uefi.MapFailReason(base), base>>39, ext, tcr, pr, used, max)
 			continue
 		}
-		if fn(board.PCIeWindow{ECAMBase: uintptr(e.Base)}, int(e.StartBus)) {
+		if fn(pcie.Window{ECAMBase: uintptr(e.Base)}, int(e.StartBus)) {
 			return true // treffer: laat dit segment gemapt (fn gebruikt het nog)
 		}
 		uefi.UnmapHigh(base, size) // geen treffer: blokken teruggeven zodat de pool niet volloopt
@@ -138,7 +138,7 @@ func eachECAM(fn func(win board.PCIeWindow, startBus int) bool) bool {
 // (Altra: boven de vlakke 512GB, gemeten 13-07).
 func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
 	var d *pcie.Device
-	eachECAM(func(win board.PCIeWindow, startBus int) bool {
+	eachECAM(func(win pcie.Window, startBus int) bool {
 		for _, c := range pcie.ScanConfigured(win, startBus) {
 			if c.VendorID == 0x8086 && igb.Supported(c.DeviceID) {
 				d = c
@@ -187,9 +187,9 @@ func (machine) DHCPLease() (dhcp.Lease, bool) { return lease, lease.Acquired }
 // PCIe: het eerste bereikbare MCFG-segment als ECAM-venster (NVMe-fase;
 // MMIOBase blijft 0 — BAR's zijn op UEFI-platforms al door de firmware
 // toegewezen, HOP hoeft niets uit te delen).
-func (machine) PCIe() board.PCIeWindow {
-	var win board.PCIeWindow
-	eachECAM(func(w board.PCIeWindow, _ int) bool {
+func (machine) PCIe() pcie.Window {
+	var win pcie.Window
+	eachECAM(func(w pcie.Window, _ int) bool {
 		win = w
 		return true // eerste bereikbare segment volstaat
 	})

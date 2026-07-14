@@ -69,6 +69,10 @@ const (
 	bufSize   = 2048 // per RX/TX-buffer
 	maxQueue  = 256
 	descBytes = 16
+
+	// txTimeout begrenst de wacht op een vrije TX-descriptor — dezelfde
+	// tijd-deadline als gem/genet/igb (dit was de enige teller-lus).
+	txTimeout = 100 * time.Millisecond
 )
 
 // Net is een virtio-net-instantie op MMIO-basis Base, met een bump-allocator
@@ -278,17 +282,13 @@ func (n *Net) recycleRx(descIdx uint16) {
 func (n *Net) Transmit(buf []byte) error {
 	n.tx.lastUsed = dev.Read16(n.tx.used + 2) // voltooide descriptors terugnemen
 	if n.tx.availIdx-n.tx.lastUsed >= uint16(n.qsize) {
-		// Ring vol: kort wachten tot het device een descriptor vrijgeeft.
-		full := true
-		for i := 0; i < 1_000_000; i++ {
-			n.tx.lastUsed = dev.Read16(n.tx.used + 2)
-			if n.tx.availIdx-n.tx.lastUsed < uint16(n.qsize) {
-				full = false
-				break
+		// Ring vol: begrensd wachten tot het device een descriptor vrijgeeft.
+		deadline := time.Now().Add(txTimeout)
+		for n.tx.availIdx-n.tx.lastUsed >= uint16(n.qsize) {
+			if time.Now().After(deadline) {
+				return errors.New("virtionet: TX-queue vol (timeout)")
 			}
-		}
-		if full {
-			return errors.New("virtionet: TX-queue vol (timeout)")
+			n.tx.lastUsed = dev.Read16(n.tx.used + 2)
 		}
 	}
 

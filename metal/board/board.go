@@ -17,6 +17,7 @@ import (
 
 	"hop-os/metal/board/appboard"
 	"hop-os/metal/driver/fb"
+	"hop-os/metal/driver/pcie"
 	"hop-os/metal/net/dhcp"
 )
 
@@ -102,12 +103,10 @@ type LifecyclePacer interface {
 	LifecyclePace() time.Duration
 }
 
-// PCIeWindow is het ECAM- en MMIO-adresplan van een board (fase 3): omdat wij
-// zonder firmware-hulp booten wijst HOP zelf de BAR's toe uit MMIOBase.
-type PCIeWindow struct {
-	ECAMBase uintptr
-	MMIOBase uintptr
-}
+// Het ECAM/MMIO-adresplan van een board is pcie.Window: het type woont bij
+// zijn gebruiker (metal/driver/pcie, zoals fb.Desc bij fb) zodat driver/
+// niets van dit contract hoeft te importeren; het board levert alleen de
+// waarden via PCIe().
 
 // Board is één concreet board — het volledige HOP-contract, geïmplementeerd
 // door de hop-helft van elk board-pakket (board/<x>/hop). Het embedt het
@@ -163,7 +162,7 @@ type Board interface {
 	Net() NetConfig
 
 	// PCIe-adresplan.
-	PCIe() PCIeWindow
+	PCIe() pcie.Window
 
 	// Framebuffer geeft de firmware-framebuffer voor de log-console (metal/driver/fb),
 	// ontdekt via een universeel mechanisme — geen driver: UEFI GOP of de

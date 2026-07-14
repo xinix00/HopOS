@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"hop-os/metal/board"
 	"hop-os/metal/dev"
 	"hop-os/metal/driver/pcie"
 )
@@ -156,7 +155,7 @@ func (c *Controller) submit(q *queue, m cmd) error {
 // firmware hem al toe en LEZEN we hem — hem overschrijven met SetBAR64(0, 0)
 // zou de controller op PA 0 zetten (op QEMU de flash-alias, op de Altra een
 // data-abort). Zelfde read-only conventie als het igb-pad.
-func Probe(win board.PCIeWindow, dmaBase uintptr, dmaSize uint64) (*Controller, error) {
+func Probe(win pcie.Window, dmaBase uintptr, dmaSize uint64) (*Controller, error) {
 	var nd *pcie.Device
 	for _, d := range pcie.Scan(win) {
 		if d.Class>>8 == 0x0108 { // mass storage / NVM express

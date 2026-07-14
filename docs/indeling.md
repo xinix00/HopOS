@@ -107,7 +107,9 @@ regel-tabel dáár en dit hoofdstuk horen samen te wijzigen):
    `kern/` integreert de OS-kant (abi, net, driver/nvme via hopfs);
    `cmd/` knoopt board-hop + kern aan elkaar. Andersom nooit.
 5. `board/appboard` (het app-contract) importeert niets; het contract
-   `board` alleen appboard + de typen die het draagt (driver/fb, net/dhcp).
+   `board` alleen appboard + de typen die het draagt (driver/fb,
+   driver/pcie, net/dhcp). `driver/` importeert board dus nóóit — types die
+   drivers aannemen (pcie.Window, fb.Desc) wonen bij de driver zelf.
 
 ## Buildoutput
 

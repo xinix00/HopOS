@@ -25,7 +25,6 @@ import (
 	"time"
 	_ "unsafe" // go:linkname (RAM-declaratie)
 
-	"hop-os/metal/board"
 	"hop-os/metal/board/uefi"
 	_ "hop-os/metal/board/uefi/hop" // board.Board-registratie (board.Current in de probe)
 	"hop-os/metal/cpu/psci"
@@ -147,7 +146,7 @@ func main() {
 				say("  ECAM unreachable (MapHigh failed) — segment skipped\n")
 				continue
 			}
-			win := board.PCIeWindow{ECAMBase: uintptr(e.Base)}
+			win := pcie.Window{ECAMBase: uintptr(e.Base)}
 			for _, d := range pcie.ScanConfigured(win, int(e.StartBus)) {
 				tag := ""
 				switch d.Class >> 16 {

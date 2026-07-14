@@ -9,9 +9,19 @@ package pcie
 import (
 	"fmt"
 
-	"hop-os/metal/board"
 	"hop-os/metal/dev"
 )
+
+// Window is het ECAM- en MMIO-adresplan waarin gescand en toegewezen wordt.
+// Het bóárd levert hem (board.Board.PCIe — QEMU: constanten; UEFI/ACPI: de
+// MCFG), maar het type woont hier bij de gebruiker — net als fb.Desc bij fb —
+// zodat driver/ niets van het board-contract hoeft te importeren. MMIOBase is
+// het venster waaruit HOP zelf BAR's toewijst op kale fabrics; 0 = de
+// firmware wees al toe (dan is BAR() de leesweg).
+type Window struct {
+	ECAMBase uintptr
+	MMIOBase uintptr
+}
 
 // Config-space-registers (type 0/1 header).
 const (
@@ -60,16 +70,16 @@ func (d *Device) cfg(off uintptr) uintptr {
 
 // Scan enumereert bus 0 (fn 0 per device) in het ECAM-venster van het board.
 // De ECAM-basis is board-specifiek (QEMU virt vs O6N/ACPI MCFG), dus komt via
-// de PCIeWindow mee i.p.v. als package-constante. Dunne wrapper om ScanBus(0):
+// de Window mee i.p.v. als package-constante. Dunne wrapper om ScanBus(0):
 // het bestaande vlakke pad (QEMU-virt NVMe via metal/driver/nvme) blijft ongewijzigd.
-func Scan(win board.PCIeWindow) []*Device {
+func Scan(win Window) []*Device {
 	return ScanBus(win, 0)
 }
 
 // ScanBus enumereert één bus (32 devices, fn 0) in het ECAM-venster. Additief
 // naast Scan: dezelfde per-device-uitlezing, maar met een bus-parameter zodat de
 // bus-walk buiten bus 0 kan kijken. Leest ook het headertype (type-1 = bridge).
-func ScanBus(win board.PCIeWindow, bus int) []*Device {
+func ScanBus(win Window, bus int) []*Device {
 	var found []*Device
 	for devno := 0; devno < 32; devno++ {
 		if d, _, ok := probeFn(win, bus, devno, 0); ok {
@@ -83,7 +93,7 @@ func ScanBus(win board.PCIeWindow, bus int) []*Device {
 // Geeft (device, ruw-headertype-byte, aanwezig): het ruwe headertype draagt
 // bit 7 (multifunctie), dat ScanConfigured nodig heeft en HdrType wegmaskt.
 // Eén decode-plek voor beide scanners (vlak en hiërarchisch).
-func probeFn(win board.PCIeWindow, bus, devno, fn int) (*Device, uint8, bool) {
+func probeFn(win Window, bus, devno, fn int) (*Device, uint8, bool) {
 	d := &Device{Bus: bus, Dev: devno, Fn: fn, ecam: win.ECAMBase}
 	id := dev.Read32(d.cfg(cfgVendorID))
 	if id == 0xffffffff || id&0xffff == 0 {
@@ -119,7 +129,7 @@ func (d *Device) setBridgeBuses(primary, secondary, subordinate int) {
 // niet op silicium geverifieerd (QEMU-virt en de Pi's hebben geen bridge op hun
 // pad) — additief en onbereikbaar vanuit het huidige pad, dus zonder regressie,
 // maar het bridge-programmeer-deel moet op de O6N nog worden bewezen.
-func WalkBridges(win board.PCIeWindow) []*Device {
+func WalkBridges(win Window) []*Device {
 	var endpoints []*Device
 	next := 1 // volgend vrij uit te delen busnummer
 	var walk func(bus int)
@@ -146,7 +156,7 @@ func WalkBridges(win board.PCIeWindow) []*Device {
 // uitdelen (dat doet WalkBridges, voor kale fabrics zonder firmware). Meldt
 // óók bridges (root-poorten) en álle functies van multifunctie-devices — een
 // dual-port-NIC is twee functies, en juist bij discovery wil je beide zien.
-func ScanConfigured(win board.PCIeWindow, startBus int) []*Device {
+func ScanConfigured(win Window, startBus int) []*Device {
 	var out []*Device
 	seen := map[int]bool{} // lussen breken op malafide/dubbele bridge-config
 	var walk func(bus int)

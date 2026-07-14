@@ -24,6 +24,7 @@ import (
 	"hop-os/metal/cpu/el2"
 	"hop-os/metal/driver/brcmpcie"
 	"hop-os/metal/driver/fb"
+	"hop-os/metal/driver/pcie"
 	"hop-os/metal/driver/nic/gem"
 	"hop-os/metal/fw/fdt"
 	"hop-os/metal/net/dhcp"
@@ -192,7 +193,7 @@ func (machine) DHCPLease() (dhcp.Lease, bool) { return lease, lease.Acquired }
 
 // PCIe: fase P2 — de RP1 hangt aan de BCM2712-PCIe; het adresplan volgt bij
 // de RP1-bring-up.
-func (machine) PCIe() board.PCIeWindow { return board.PCIeWindow{} }
+func (machine) PCIe() pcie.Window { return pcie.Window{} }
 
 // Framebuffer: DTB-simplefb met mailbox-terugval — de gedeelde Pi-discovery
 // (zie board/raspi/vcfb voor het meetverhaal); hier alleen de boardadressen.

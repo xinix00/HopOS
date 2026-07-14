@@ -17,6 +17,7 @@ import (
 	"hop-os/metal/board/qemuvirt"
 	"hop-os/metal/cpu/el2"
 	"hop-os/metal/driver/fb"
+	"hop-os/metal/driver/pcie"
 	"hop-os/metal/driver/nic/virtionet"
 )
 
@@ -91,8 +92,8 @@ func (machine) Net() board.NetConfig {
 
 // PCIe geeft het adresplan van QEMU -M virt (hw/arm/virt.c, highmem-ecam=off):
 // ECAM en het 32-bit MMIO-venster waaruit HOP zelf de BAR's toewijst.
-func (machine) PCIe() board.PCIeWindow {
-	return board.PCIeWindow{
+func (machine) PCIe() pcie.Window {
+	return pcie.Window{
 		ECAMBase: 0x3f000000,
 		MMIOBase: 0x10000000,
 	}
