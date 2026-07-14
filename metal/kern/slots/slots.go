@@ -436,11 +436,15 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 	// nodig, niet het linkadres): we kopiëren de image erin vóór we hem
 	// parsen. started markeert een geslaagde start: valt Start eerder
 	// uit, dan geeft de defer de gealloceerde partitie terug.
+	size := align2M(memLimit)
+	appRAM, err := appRAMSize(size)
+	if err != nil {
+		return err
+	}
 	base, err := partAlloc(i, memLimit)
 	if err != nil {
 		return err
 	}
-	size := align2M(memLimit)
 	var started bool
 	defer func() {
 		if !started {
@@ -454,15 +458,16 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 	// caches; op de A76 echt, gemeten 2026-07-10). Hele partitie in één keer.
 	dev.CleanInv(uintptr(base), uintptr(size))
 
-	// De image bovenin de partitie plaatsen (staging), zodat de laag geplaatste
-	// segmenten er niet mee botsen. 8-uitgelijnd zodat de device-reads bij het
-	// parsen netjes vallen. Eén dev.Copy van de gedeelde in-memory blob — geen
+	// De image bovenin het app-RAM plaatsen (staging), zodat de laag geplaatste
+	// segmenten er niet mee botsen; de net-ring dáárboven (de partitie-staart)
+	// blijft vrij. 8-uitgelijnd zodat de device-reads bij het parsen netjes
+	// vallen. Eén dev.Copy van de gedeelde in-memory blob — geen
 	// per-start-allocatie, geen netwerk (finding #3).
 	staged := (uint64(imgSize) + 7) &^ 7
-	if staged >= size {
-		return fmt.Errorf("image %d bytes past niet in partitie %d MB", imgSize, size>>20)
+	if staged >= appRAM {
+		return fmt.Errorf("image %d bytes past niet in partitie %d MB (app-RAM %d MB)", imgSize, size>>20, appRAM>>20)
 	}
-	stageAddr := uintptr(base + size - staged)
+	stageAddr := uintptr(base + appRAM - staged)
 	dev.Copy(stageAddr, image)
 
 	if err := placeFromStaging(i, base, size, stageAddr, imgSize, memLimit, cores, envBlob, mtab, ports); err != nil {
@@ -485,6 +490,21 @@ func StartLoader(i int, memLimit uint64, env map[string]string) error {
 	return Start(i, apploaderblob.Loader, memLimit, 1, env, nil, nil)
 }
 
+// appRAMSize is het deel van de partitie dat de app als RAM ziet: de bovenste
+// NetRingStride is zijn net-ring ("512MB → 510 Go + 2 netbuffer"). Zo komt het
+// ring-geheugen uit de eigen memLimit van de job — er draait geen statische
+// SlotCap-reservering meer in het board-plan — en blijft de coherentie gratis:
+// de app declareert de staart niet als RAM (zijn stage-1 mapt hem nooit
+// cacheable), HOP raakt hem alleen device-side, en de bestaande CleanInv over
+// de hele partitie veegt de dirty lines van de vórige huurder.
+func appRAMSize(size uint64) (uint64, error) {
+	if size < 2*layout.NetRingStride {
+		return 0, fmt.Errorf("memLimit te klein: partitie %d MB laat geen app-RAM over naast de %d MB net-ring",
+			size>>20, uint64(layout.NetRingStride)>>20)
+	}
+	return size - layout.NetRingStride, nil
+}
+
 // placeFromStaging is de tweede helft van een slot-start: de image staat al in
 // de staging bovenin de partitie — óf door Start (een ingebakken blob, zoals de
 // apploader), óf door de apploader vanaf zíjn eigen download (StartStaged). Van
@@ -492,6 +512,14 @@ func StartLoader(i int, memLimit uint64, env map[string]string) error {
 // RAM-symbolen patchen, stage-2 bouwen en de core (her)dispatchen. Eén bron van
 // waarheid voor beide startpaden.
 func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64, memLimit uint64, cores int, envBlob []byte, mtab [][2]string, ports map[string]int) error {
+	// De net-ring van dit slot: de partitie-staart. Registreren vóór alles wat
+	// de accessors leest (ring-init, hopswitch.Attach, stage2.Build). Idempotent
+	// bij StartStaged (zelfde partitie als fase 1); gewist door partRelease.
+	appRAM, err := appRAMSize(size)
+	if err != nil {
+		return err
+	}
+	layout.SetNetRingPA(i, base+appRAM)
 	// Parsen vanuit de gestreamde device-kopie (geen kern-RAM-kopie).
 	f, err := elf.NewFile(devReaderAt{base: stageAddr, size: imgSize})
 	if err != nil {
@@ -520,10 +548,10 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 		if p.Type != elf.PT_LOAD {
 			continue
 		}
-		if p.Filesz > p.Memsz || p.Memsz > size ||
-			p.Paddr < linkBase || p.Paddr > linkBase+size-p.Memsz {
+		if p.Filesz > p.Memsz || p.Memsz > appRAM ||
+			p.Paddr < linkBase || p.Paddr > linkBase+appRAM-p.Memsz {
 			return fmt.Errorf("segment %#x+%#x (file %#x) outside link range of slot %d (%#x+%#x)",
-				p.Paddr, p.Memsz, p.Filesz, linked, linkBase, size)
+				p.Paddr, p.Memsz, p.Filesz, linked, linkBase, appRAM)
 		}
 		// p.Off is óók input (de image komt van het netwerk): de bron-read
 		// [stageAddr+Off, +Off+Filesz) moet binnen de gestreamde image blijven,
@@ -553,12 +581,14 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 		if s.Name != symRAMStart && s.Name != symRAMSize {
 			continue
 		}
-		if s.Value%8 != 0 || s.Value < linkBase || s.Value > linkBase+size-8 {
+		if s.Value%8 != 0 || s.Value < linkBase || s.Value > linkBase+appRAM-8 {
 			return fmt.Errorf("symbol %s (%#x) outside link range of slot %d", s.Name, s.Value, linked)
 		}
+		// RamSize = app-RAM (partitie − net-ring), niet de kale memLimit: de
+		// app mag de staart nooit als heap/stack declareren (appRAMSize).
 		v := linkBase
 		if s.Name == symRAMSize {
-			v = memLimit
+			v = appRAM
 		}
 		dev.Write64(uintptr(s.Value+delta), v)
 		patched++
@@ -575,7 +605,7 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 		if s.Name != symSlotHint {
 			continue
 		}
-		if s.Value%8 == 0 && s.Value >= linkBase && s.Value <= linkBase+size-8 {
+		if s.Value%8 == 0 && s.Value >= linkBase && s.Value <= linkBase+appRAM-8 {
 			dev.Write64(uintptr(s.Value+delta), uint64(i))
 		}
 	}
@@ -742,11 +772,17 @@ func StartStaged(i int, memLimit uint64, cores int, env map[string]string, mount
 	if !ok {
 		return fmt.Errorf("StartStaged: slot %d heeft geen partitie (loader niet gestart?)", i)
 	}
-	staged := (uint64(imgSize) + 7) &^ 7
-	if staged >= size {
-		return fmt.Errorf("staged image %d bytes past niet in partitie %d MB", imgSize, size>>20)
+	// De loader stagede op RamStart+RamSize−staged met zíjn gepatchte
+	// RamSize = appRAM — dezelfde formule hier, anders lezen we naast de image.
+	appRAM, err := appRAMSize(size)
+	if err != nil {
+		return err
 	}
-	stageAddr := uintptr(base + size - staged)
+	staged := (uint64(imgSize) + 7) &^ 7
+	if staged >= appRAM {
+		return fmt.Errorf("staged image %d bytes past niet in partitie %d MB (app-RAM %d MB)", imgSize, size>>20, appRAM>>20)
+	}
+	stageAddr := uintptr(base + appRAM - staged)
 	// Coherentie: de loader draaide cacheable; zijn dirty lines wegschrijven+
 	// invalideren vóór we de echte app er ongecachet overheen plaatsen. De loader
 	// flushte de staging zelf al (StageImage); dit dekt de rest van de partitie.

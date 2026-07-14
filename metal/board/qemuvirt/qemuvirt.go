@@ -44,7 +44,6 @@ func init() {
 		RingPA:        0xC1000000,
 		Stage2PA:      0xC2000000,
 		RevokeVecPA:   revokeVecAsm, // cpuinit zet VBAR_EL2 van core 0 hierheen
-		NetRingPA:     0xC3000000,
 		BootScratchPA: 0xB0000000, // cpuinit-vast (BOOT_SCRATCH/DTB_PTR)
 		Pool: []layout.Region{
 			{Base: 0x50000000, Size: 0x60000000}, // 1,5GB — het klassieke venster

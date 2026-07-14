@@ -67,7 +67,6 @@ func init() {
 		RingPA:        0x11000000,
 		Stage2PA:      0x12000000,
 		RevokeVecPA:   revokeVecAsm,
-		NetRingPA:     0x13000000,
 		BootScratchPA: raspi.BootScratch, // 0x7F000, cpuinit-vast
 		NetDMAPA:      0x14000000,        // GEM-ringen/buffers (buiten RAM-decl → ongecachet)
 	}

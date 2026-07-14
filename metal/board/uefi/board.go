@@ -39,21 +39,25 @@ type machine struct{}
 // De carve draagt de per-slot fysieke regio's, gedimensioneerd voor
 // layout.SlotCap (128) — niet voor de runtime-MaxSlots — zodat de
 // stub-claim (init.s CARVE_SIZE, compile-time) hem altijd dekt; de node
-// gebruikt er min(cores,128) van. Net-ringen (2MB/slot) zijn de grote hap:
-// 128×2MB = 256MB. HOP-kern-RAM staat op 256MB (server-headroom voor de
-// fetch-golven; de echte fetch-cap zit in de agent).
+// gebruikt er min(cores,128) van. De net-ringen liggen hier níét (meer): die
+// leven in de staart van de eigen partitie van elk slot (zie kern/slots
+// appRAMSize) en schalen zo mee met wat er draait — daarmee kromp de carve
+// van 288MB naar 32MB. HOP-kern-RAM staat op 64MB — gemeten (14-07): idle
+// 5MB Sys, 7-slot-storm-piek 14MB Sys bovenop een ~17.5MB statische image
+// (code + de ingebakken apploader-blob). Sinds elke app zíjn eigen image
+// downloadt draagt de kern geen fetch-golf meer, dus de oude 256MB-headroom
+// verviel; 64MB is ~2× de gemeten piek en past ook op kleine devices.
+// Totale claim (venster): 64 + 32 = 96MB.
 const (
-	carveOff  = 0x10000000 // = ramSize (Go-RAM 256MB)
-	carveSize = 0x12000000 // CARVE_SIZE in init.s (288MB, dekt t/m scratch)
+	carveOff  = 0x04000000 // = ramSize (Go-RAM 64MB)
+	carveSize = 0x02000000 // CARVE_SIZE in init.s (32MB, dekt t/m scratch)
 
 	ctrlOff    = carveOff + 0x000000  // (SlotCap+1)×4KB, 1MB gereserveerd
 	ringOff    = carveOff + 0x100000  // SlotCap×64KB = 8MB
 	stage2Off  = carveOff + 0x900000  // (SlotCap+1)×64KB ≈ 8MB
 	revokeOff  = carveOff + 0x900800  // REVOKE_OFF in init.s (stage2 slot-0 +0x800)
-	netRingOff = carveOff + 0x1200000 // SlotCap×2MB = 256MB; 2MB-aligned (carveOff
-	// en offset zijn 2MB-veelvouden, elke venster-kandidaat Base ook)
-	netDMAOff  = carveOff + 0x11200000 // + NetDMASize (8MB)
-	scratchOff = carveOff + 0x11A00000
+	netDMAOff  = carveOff + 0x1200000 // NetDMASize (8MB)
+	scratchOff = carveOff + 0x1A00000
 
 	poolOff = carveOff + carveSize // einde van HOP's voetafdruk (kern-RAM + carve)
 
@@ -114,7 +118,6 @@ func init() {
 		RingPA:        b + ringOff,
 		Stage2PA:      b + stage2Off,
 		RevokeVecPA:   b + revokeOff,
-		NetRingPA:     b + netRingOff,
 		NetDMAPA:      b + netDMAOff,
 		BootScratchPA: b + scratchOff,
 		Pool:          pool,

@@ -35,18 +35,19 @@ MODE="${1:-probe}"
 [ $# -gt 0 ] && shift # rest gaat door naar QEMU (zie "$@" aan het eind)
 
 # De venster-kandidaten: de stub kiest bij boot de eerste waar AllocatePages
-# slaagt (zie metal/board/uefi). Elke kandidaat heeft nú 544MB aaneengesloten
-# vrij RAM nodig vanaf zijn basis: RamSize 256MB (0x10000000) + carve 288MB
-# (0x12000000) = 0x22000000 — de claim GROEIDE mee met de layout-opschaling
-# (was 128MB toen deze lijst werd gekozen). De slot-pool komt daarná uit ál het
-# resterende bruikbare DRAM (usablePool), niet meer alleen boven de claim.
+# slaagt (zie metal/board/uefi). Elke kandidaat heeft 96MB aaneengesloten
+# vrij RAM nodig vanaf zijn basis: Go-RAM 64MB (0x04000000, gemeten: piek
+# 14MB Sys + ~17.5MB image) + carve 32MB (0x02000000, de net-ringen verhuisden
+# naar de partitie-staart van elk slot) = 0x06000000. De slot-pool komt
+# daarná uit ál het resterende bruikbare DRAM (usablePool).
 #
-# LET OP (review golf-2 #5): deze lijst is nog niet herijkt tegen de 544MB-
-# claim. Leg 'm naast de vrije-regio-dump die de stub bij "RAM WINDOW BUSY"
-# print — een kandidaat waar base+0x22000000 in bezet/BootServices-RAM valt
-# (op de Altra o.a. rond 0x90000000, gemeten) faalt de AllocatePages en wordt
-# overgeslagen; als álle zes falen hangt de boot. Gespreid over het lage
-# Altra-DRAM (0x80000000..0xFFFFFFFF) + een lage QEMU-terugvaller.
+# Herijking (review golf-2 #5): AFGEROND door de krimp — de lijst werd ooit
+# voor een 128MB-claim gekozen en de claim is nu 96MB, dus elke kandidaat
+# vraagt mínder dan waarvoor hij is geprikt. Faalt er tóch een (bezet RAM,
+# Altra: o.a. rond 0x90000000), dan slaat de stub 'm over; falen álle zes,
+# dan print hij "RAM WINDOW BUSY" + de vrije regio's — voeg dan een kandidaat
+# toe. Gespreid over het lage Altra-DRAM (0x80000000..0xFFFFFFFF) + een lage
+# QEMU-terugvaller.
 SLOTS="${SLOTS:-0xB0000000 0xA0000000 0xC8000000 0x88000000 0xE8000000 0x50000000}"
 
 case "$MODE" in

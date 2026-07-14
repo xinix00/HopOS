@@ -108,7 +108,10 @@ const (
 	// die frames ring-naar-ring kopieert (metal/net/hopswitch). Per slot één
 	// 2MB-blok — TX (app → switch) onderin, RX (switch → app) bovenin —
 	// zodat de stage-2-kooi het als één blockRW mapt. Device-gemapt, buiten
-	// alle RAM-declaraties → coherent. Fysiek op Plan.NetRingPA.
+	// alle RAM-declaraties → coherent. Fysiek: de bovenste NetRingStride van
+	// de eigen partitie van het slot (RamSize = partitie − NetRingStride, zie
+	// kern/slots) — ring-geheugen schaalt zo mee met wat er écht draait,
+	// geen statische SlotCap-reservering in het board-plan.
 	NetRingBase    = 0xB3000000
 	NetRingStride  = 0x200000 // 2MB per slot
 	NetTXOff       = 0x0
@@ -147,7 +150,6 @@ type Region struct{ Base, Size uint64 }
 type Plan struct {
 	CtrlPA      uint64 // control-pages: MaxSlots+1 pagina's (4KB-aligned)
 	RingPA      uint64 // hop-ABI-ringen: MaxSlots × RingStride (4KB-aligned)
-	NetRingPA   uint64 // frame-ringen: MaxSlots × NetRingStride (2MB-aligned!)
 	Stage2PA    uint64 // app-core-vectoren + tabelblokken: (MaxSlots+1) × Stage2Stride (2KB-aligned)
 	RevokeVecPA uint64 // EL2-vectortabel van de HOP-core (2KB-aligned): waar
 	// cpuinit VBAR_EL2 van core 0 heen zette. InitVectors plugt er alleen de
@@ -174,8 +176,6 @@ func UsePlan(p Plan) {
 		panic("layout: Plan.CtrlPA ontbreekt of niet 4KB-aligned")
 	case p.RingPA == 0 || p.RingPA&0xFFF != 0:
 		panic("layout: Plan.RingPA ontbreekt of niet 4KB-aligned")
-	case p.NetRingPA == 0 || p.NetRingPA&(NetRingStride-1) != 0:
-		panic("layout: Plan.NetRingPA ontbreekt of niet 2MB-aligned")
 	case p.Stage2PA == 0 || p.Stage2PA&0x7FF != 0:
 		panic("layout: Plan.Stage2PA ontbreekt of niet 2KB-aligned (VBAR-eis)")
 	case p.RevokeVecPA == 0 || p.RevokeVecPA&0x7FF != 0:
@@ -221,12 +221,41 @@ func RingInboxPA(i int) uintptr {
 	return pa(plan.RingPA + uint64(i-1)*RingStride + InboxOff)
 }
 
-// NetRingTXPA/NetRingRXPA: de fysieke frame-ringen van slot i.
+// netRingPA is de per-slot fysieke net-ring-basis: de bovenste NetRingStride
+// van de partitie van het slot. Geen plan-veld maar een runtime-tabel, omdat
+// partities per job worden gealloceerd — kern/slots registreert de staart bij
+// Start (vóór ring-init/Attach/stage-2) en wist hem bij partRelease.
+var netRingPA [SlotCap + 1]uint64
+
+// SetNetRingPA registreert (pa=0: wist) de fysieke net-ring-basis van slot i.
+// 2MB-aligned — de stage-2 mapt hem als één blok; partAlloc's 2MB-korrel
+// garandeert dat voor elke partitie-staart.
+func SetNetRingPA(i int, pa uint64) {
+	if i < 1 || i > SlotCap {
+		panic("layout: SetNetRingPA: slot buiten [1, SlotCap]")
+	}
+	if pa&(NetRingStride-1) != 0 {
+		panic("layout: SetNetRingPA: basis niet 2MB-aligned")
+	}
+	netRingPA[i] = pa
+}
+
+// NetRingTXPA/NetRingRXPA: de fysieke frame-ringen van slot i. Alleen geldig
+// terwijl het slot een partitie heeft (tussen Start en release) — daarbuiten
+// is er geen ring en panict dit luid i.p.v. een stale PA te geven.
 func NetRingTXPA(i int) uintptr {
-	return pa(plan.NetRingPA + uint64(i-1)*NetRingStride + NetTXOff)
+	return uintptr(netRingBase(i) + NetTXOff)
 }
 func NetRingRXPA(i int) uintptr {
-	return pa(plan.NetRingPA + uint64(i-1)*NetRingStride + NetRXOff)
+	return uintptr(netRingBase(i) + NetRXOff)
+}
+
+func netRingBase(i int) uint64 {
+	v := netRingPA[i]
+	if v == 0 {
+		panic("layout: net-ring-PA niet gezet — slot zonder actieve partitie (kern/slots registreert hem bij Start)")
+	}
+	return v
 }
 
 // VecBasePA is de fysieke basis van de gedeelde EL2-vectoren (app-cores);
@@ -304,7 +333,6 @@ func TopAddr() uint64 {
 	top := plan.CtrlPA + uint64(MaxSlots+1)*CtrlStride
 	for _, c := range []uint64{
 		plan.RingPA + uint64(MaxSlots)*RingStride,
-		plan.NetRingPA + uint64(MaxSlots)*NetRingStride,
 		plan.Stage2PA + uint64(MaxSlots+1)*Stage2Stride,
 	} {
 		if c > top {

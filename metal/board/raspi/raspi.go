@@ -90,7 +90,6 @@ func DTBPool(dtbPtr uintptr, p layout.Plan) []layout.Region {
 		{Base: p.CtrlPA, Size: uint64(layout.MaxSlots+1) * layout.CtrlStride},
 		{Base: p.RingPA, Size: uint64(layout.MaxSlots) * layout.RingStride},
 		{Base: p.Stage2PA, Size: uint64(layout.MaxSlots+1) * layout.Stage2Stride},
-		{Base: p.NetRingPA, Size: uint64(layout.MaxSlots) * layout.NetRingStride},
 	}
 	if p.NetDMAPA != 0 {
 		holes = append(holes, layout.Region{Base: p.NetDMAPA, Size: layout.NetDMASize})

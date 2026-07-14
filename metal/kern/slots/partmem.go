@@ -92,6 +92,10 @@ func releaseLocked(i int) {
 		return
 	}
 	partOf[i] = region{}
+	// De net-ring lag in de staart van deze partitie — registratie wissen,
+	// zodat een stale PA-lees (na hergebruik: andermans geheugen!) luid
+	// panict i.p.v. stil een verkeerd blok te raken.
+	layout.SetNetRingPA(i, 0)
 
 	// Gesorteerd (op base) invoegen, dan met beide buren samensmelten.
 	pos := 0

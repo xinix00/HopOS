@@ -35,12 +35,17 @@ func TestMain(m *testing.M) {
 	layout.UsePlan(layout.Plan{
 		CtrlPA:        tCtrlPA,
 		RingPA:        tRingPA,
-		NetRingPA:     tNetRingPA,
 		Stage2PA:      uint64(base),
 		RevokeVecPA:   tRevokeVecPA,
 		BootScratchPA: tBootScratchPA,
 		Pool:          []layout.Region{{Base: tPoolPA, Size: 1 << 30}},
 	})
+	// Net-ringen zijn geen plan-veld meer maar per-slot runtime-registraties
+	// (partitie-staart, kern/slots). De tests bouwen kooien zonder slots.Start,
+	// dus registreer hier per slot een eigen 2MB-blok op de oude testplek.
+	for i := 1; i <= layout.MaxSlots; i++ {
+		layout.SetNetRingPA(i, tNetRingPA+uint64(i-1)*layout.NetRingStride)
+	}
 	os.Exit(m.Run())
 }
 
