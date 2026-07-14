@@ -69,6 +69,7 @@ No shell. No exec, no second binary, no users. No persistence. No VMs, WASM or c
 | Target | Status |
 |---|---|
 | QEMU `-M virt` | Full system: slots, isolation, hard-kill, NAT in/out, storage, fb console — marker-based regression suite |
+| Ampere Altra (128-core) | **Boots bare-metal through the generic UEFI + ACPI path**: PE/COFF bootloader (`BOOTAA64.EFI`), ACPI discovery (cores, ECAM, UART, PSCI), own igb/I210 network driver, SMCCC TRNG. QEMU + EDK2 exercises the identical path |
 | Raspberry Pi 5 | **Runs the full multikernel on real silicon** — stage-2 isolation, hard-kill and multi-core apps (shared-heap SMP, cross-core GC) proven on the A76 cores. Native networking (own PCIe link training + GEM drivers, DHCP, NTP); runs the full HOP agent as a node on the LAN |
 | Raspberry Pi 4 | **Runs the full multikernel on real silicon** — same acceptance suite as the Pi 5, proven on the A72 cores. Native networking (own GENET v5 driver, DHCP, NTP); runs the full HOP agent as a node on the LAN |
 | Radxa Orion O6N (12-core CIX P1) | Primary production target: 1 HOP core + 11 app slots across big/mid/small clusters |
