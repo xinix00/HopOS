@@ -27,11 +27,11 @@ import (
 
 	"hop-os/metal/board"
 	"hop-os/metal/board/uefi"
-	"hop-os/metal/dhcp"
-	"hop-os/metal/igb"
-	"hop-os/metal/pcie"
-	"hop-os/metal/psci"
-	"hop-os/metal/trng"
+	"hop-os/metal/cpu/psci"
+	"hop-os/metal/cpu/trng"
+	"hop-os/metal/driver/nic/igb"
+	"hop-os/metal/driver/pcie"
+	"hop-os/metal/net/dhcp"
 )
 
 // RAM-declaratie: RamStart wordt door mkkernel -pe per venster-variant

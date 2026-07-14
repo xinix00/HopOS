@@ -11,12 +11,12 @@ import (
 	"time"
 	_ "unsafe"
 
+	"hop-os/metal/abi/layout"
 	"hop-os/metal/board/raspi"
 	"hop-os/metal/board/rpi5" // registreert het board (init) + tamago-hooks
 	"hop-os/metal/dev"
-	"hop-os/metal/dvfs"
-	"hop-os/metal/layout"
-	"hop-os/metal/vcmail"
+	"hop-os/metal/driver/dvfs"
+	"hop-os/metal/driver/vcmail"
 )
 
 //go:linkname ramStart runtime/goos.RamStart
@@ -27,7 +27,7 @@ var ramSize uint = raspi.HopKernelSize
 
 // Klokbeleid (docs/plan-p2b-soak.md): klok volgt idle, via de firmware-
 // mailbox van dit board. TickHz = CNTFRQ/65536 (het event-stream-tempo van
-// de idle-teller, zie metal/idle: EVNTI=15 → periode 2^16 tellerticks).
+// de idle-teller, zie metal/cpu/idle: EVNTI=15 → periode 2^16 tellerticks).
 func init() {
 	// Hardware-watchdog METEEN (freeze-jacht 13-07): niet pas bij agent-start
 	// maar vóór álles — gemeten (13-07 ~09:20): een watchdog-reset kan de

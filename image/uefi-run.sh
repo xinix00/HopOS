@@ -14,7 +14,7 @@
 # virtualization=on levert ons op EL2 af (de HopOS-eis).
 #
 # Job submitten in agent-modus (poorten via hostfwd):
-#   python3 -m http.server 8000 --directory metal &   # serveert app-uefi.elf
+#   python3 -m http.server 8000 --directory metal/out &   # serveert app-uefi.elf
 #   curl -X POST http://127.0.0.1:9080/v1/jobs -d '{
 #     "name":"werkje","driver":"hop","tags":{"core-class":"big"},
 #     "artifacts":[{"url":"http://10.0.2.2:8000/app-uefi.elf"}],
@@ -67,6 +67,7 @@ agent)
 esac
 
 cd "$DIR/metal"
+mkdir -p out
 
 # Tags: de node-image bakt in agent-modus de apploader ín (embedloader) — geen
 # externe URL, self-contained. De probe heeft 'm niet nodig.
@@ -76,15 +77,15 @@ TAGS="uefi linkcpuinit"
 # In agent-modus de app-image (die de apps zelf downloaden, via de http.server
 # geserveerd als HOP_IMAGE_URL) én de universele apploader. De apploader wordt
 # NIET geserveerd maar íngebakken in de node: hij landt op de go:embed-plek
-# (apploaderblob/apploader.elf) zodat de node-build (embedloader) 'm meeneemt.
+# (kern/apploaderblob/apploader.elf) zodat de node-build (embedloader) 'm meeneemt.
 # Canoniek gelinkt (slot-1-IPA; zonder -s: slots patcht RamStart/RamSize/slotHint).
 if [ "$MODE" = agent ]; then
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "uefi linkcpuinit" -trimpath \
-		-ldflags "-w -T 0x50010000 -R 0x1000" -o app-uefi.elf ./appspike
+		-ldflags "-w -T 0x50010000 -R 0x1000" -o out/app-uefi.elf ./app/appspike
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "uefi linkcpuinit" -trimpath \
-		-ldflags "-w -T 0x50010000 -R 0x1000" -o apploaderblob/apploader.elf ./apploader
+		-ldflags "-w -T 0x50010000 -R 0x1000" -o kern/apploaderblob/apploader.elf ./app/apploader
 fi
 
 # 1. Eén ELF per venster-kandidaat (zelfde build, ander -T). Parallel linken:
@@ -100,9 +101,9 @@ for base in $SLOTS; do
 	out="hopos-uefi-$MODE-$base.elf"
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "$TAGS" -trimpath \
-		-ldflags "-w -T $text -R 0x1000" -o "$out" "$PKG" &
+		-ldflags "-w -T $text -R 0x1000" -o "out/$out" "$PKG" &
 	PIDS="$PIDS $!"
-	ELFS="$ELFS -elf metal/$out"
+	ELFS="$ELFS -elf metal/out/$out"
 done
 for pid in $PIDS; do
 	wait "$pid" || { echo "FOUT: venster-link (pid $pid) faalde — build afgebroken" >&2; exit 1; }
@@ -119,7 +120,7 @@ GO111MODULE=off go run "$DIR/image/mkkernel/main.go" "$DIR/image/mkkernel/pe.go"
 
 # 3. Verse varstore (boot-entries verouderen bij een topologie-wijziging →
 #    EDK2 valt anders in de Shell i.p.v. onze BOOTAA64 te booten).
-dd if=/dev/zero of=uefi-vars.fd bs=1m count=64 2>/dev/null
+dd if=/dev/zero of=metal/out/uefi-vars.fd bs=1m count=64 2>/dev/null
 
 echo "BOOTAA64.EFI ($(du -h "$ESP/EFI/BOOT/BOOTAA64.EFI" | cut -f1), mode=$MODE) klaar — EDK2 boot..." >&2
 [ "$MODE" = agent ] && echo "agent: curl http://127.0.0.1:8080/health · leader: curl http://127.0.0.1:9080/health" >&2
@@ -132,7 +133,7 @@ exec qemu-system-aarch64 -M virt,gic-version=3,virtualization=on \
 	-boot menu=on,splash-time=0 \
 	-nographic -monitor none -serial stdio \
 	-drive if=pflash,format=raw,readonly=on,file="$QEMU_SHARE/edk2-aarch64-code.fd" \
-	-drive if=pflash,format=raw,file=uefi-vars.fd \
+	-drive if=pflash,format=raw,file=metal/out/uefi-vars.fd \
 	-device qemu-xhci \
 	-drive file=fat:rw:"$ESP",format=raw,if=none,id=esp \
 	-device usb-storage,drive=esp \

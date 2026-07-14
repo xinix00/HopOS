@@ -1,5 +1,11 @@
+# go:embed-artifacts die náást hun package moeten liggen (cmd/hopos-embed/,
+# apploaderblob/) + firmware-elfs op de SD-bomen (start4.elf).
 *.elf
-nvme.img
+
+# Alle overige buildoutput van image/*.sh (kernels, probes, app-images,
+# nvme-scratchdisk, EDK2-varstore) landt in metal/out/.
+metal/out/
+
 # Soak-/monitorlogs (tools/soak-*.sh schrijven ze in de repo-root).
 *.log
 *.md
@@ -7,13 +13,13 @@ nvme.img
 !docs/bcm2712-c1-erratum.md
 !docs/uefi.md
 !docs/app-memory.md
+!docs/indeling.md
 .claude/
 
-# UEFI-buildartifacts (image/uefi-run.sh, image/uefi-agent.sh): de ESP-bomen
-# met BOOTAA64.EFI en de EDK2-varstore zijn regenereerbaar/lokaal.
+# UEFI-buildartifacts (image/uefi-run.sh): de ESP-bomen met BOOTAA64.EFI
+# zijn regenereerbaar/lokaal.
 uefi-esp/
 uefi-esp-agent/
-uefi-vars.fd
 
 # Gegenereerde SD-kernelimages (regenereerbaar uit de ELF's via image/*.sh);
 # de LEESMIJ.txt en config.txt in die dirs blijven wél getrackt.

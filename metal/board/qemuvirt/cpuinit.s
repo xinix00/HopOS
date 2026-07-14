@@ -45,7 +45,7 @@ el2:
 	MOVD	$BOOT_SCRATCH, R1
 	MOVD	R0, (R1)
 	// DTB-pointer opslaan zodat de runtime later het /memory-node kan lezen
-	// (metal/fdt → board.MemTotal). Alleen de primary komt op el2; app-cores
+	// (metal/fw/fdt → board.MemTotal). Alleen de primary komt op el2; app-cores
 	// entreren cpuinit op EL1 via de trampoline, dus geen stage-2-fault.
 	MOVD	$DTB_PTR, R1
 	MOVD	R9, (R1)

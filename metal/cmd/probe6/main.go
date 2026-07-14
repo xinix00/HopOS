@@ -3,7 +3,7 @@
 // GEMETEN met probe5 (2026-07-10): de firmware traint geen enkele PCIe-link.
 // RP1 (netwerk) én pciex1 (NVMe) zijn bij boot onbereikbaar: alle reads door
 // het venster gaven 0xdeaddead, PHYLINKUP=DL_ACTIVE=0. Deze probe doet wat
-// Linux elke boot doet (metal/brcmpcie, recept uit pcie-brcmstb.c):
+// Linux elke boot doet (metal/driver/brcmpcie, recept uit pcie-brcmstb.c):
 //
 //  1. RESCAL-kalibratie (één gedeeld analoog blok voor alle controllers);
 //  2. pcie2 (RP1): bridge-reset, SerDes wekken, windows, en dé sleutel —
@@ -31,9 +31,9 @@ import (
 
 	"hop-os/metal/board/raspi"
 	"hop-os/metal/board/rpi5"
-	"hop-os/metal/brcmpcie"
 	"hop-os/metal/dev"
-	"hop-os/metal/gem"
+	"hop-os/metal/driver/brcmpcie"
+	"hop-os/metal/driver/nic/gem"
 )
 
 // RAM-declaratie: zie probe5 — de Pi 5-EEPROM laadt raw images op 0x80000.
@@ -341,7 +341,7 @@ func main() {
 		fmt.Println("nvmeprobe 2: geen link — leeg slot, of meetdata als RP1 wél trainde")
 	}
 
-	fmt.Println("HOPOS_PI5_PCIE_KLAAR — stuur alle regels door; dit kalibreert metal/brcmpcie")
+	fmt.Println("HOPOS_PI5_PCIE_KLAAR — stuur alle regels door; dit kalibreert metal/driver/brcmpcie")
 	fmt.Println("klaar — ACT-LED knippert nu als hartslag (1Hz)")
 	for {
 		rpi5.LED(true)

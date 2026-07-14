@@ -19,15 +19,15 @@ import (
 
 	gnet "github.com/usbarmory/go-net"
 
-	"hop-os/metal/acpi"
+	"hop-os/metal/abi/layout"
 	"hop-os/metal/board"
-	"hop-os/metal/dhcp"
-	"hop-os/metal/el2"
-	"hop-os/metal/fb"
-	"hop-os/metal/igb"
-	"hop-os/metal/layout"
-	"hop-os/metal/pcie"
-	"hop-os/metal/psci"
+	"hop-os/metal/cpu/el2"
+	"hop-os/metal/cpu/psci"
+	"hop-os/metal/driver/fb"
+	"hop-os/metal/driver/nic/igb"
+	"hop-os/metal/driver/pcie"
+	"hop-os/metal/fw/acpi"
+	"hop-os/metal/net/dhcp"
 )
 
 // machine is de board-implementatie voor UEFI/ACPI-platforms.
@@ -136,14 +136,13 @@ func init() {
 	}
 }
 
-
 // usablePool verzamelt ÁLLE ná-ExitBootServices vrije, bereikbare RAM als
 // slot-pool — geen artificiële limiet (Dereks principe: wat het OS ontdekt,
 // moet HOP kunnen alloceren; net als de cores→slots). De vroegere 8GB-cap
 // gooide de rest weg. Bronnen:
 //
 //   - élke bruikbare memory-map-regio (usableRAM: conventional + boot-services
-//     + loader), niet alleen de ene run direct boven de claim — vrij RAM ligt
+//   - loader), niet alleen de ene run direct boven de claim — vrij RAM ligt
 //     ook ónder onze venster-keuze (gemeten: 0x48000000+1664MB) en voorbij de
 //     oude 8GB;
 //   - minus HOP's eigen voetafdruk [Base, Base+poolOff) (kern-RAM + carve; die
@@ -151,7 +150,7 @@ func init() {
 //   - geklemd op het MMU-bereik (vaLimit = 512GB; DRAM daarboven vergt 48-bit
 //     VA — backlog, bewust nu niet). 2MB-uitgelijnd voor de stage-2-blokken.
 //
-// De partitie-allocator (metal/slots/partmem) doet first-fit met coalescing
+// De partitie-allocator (metal/kern/slots/partmem) doet first-fit met coalescing
 // over meerdere regio's, dus losse stukken passen zó in het plan.
 func usablePool() []layout.Region {
 	b := uint64(Base())
@@ -272,7 +271,7 @@ func (machine) ExpectedAppCores() int {
 	return len(madtCPUs) - 1
 }
 
-// Stage-2/SMP: board-neutraal (metal/el2), identiek aan qemuvirt.
+// Stage-2/SMP: board-neutraal (metal/cpu/el2), identiek aan qemuvirt.
 func (machine) S2TrampPC() uint64    { return el2.S2TrampPC() }
 func (machine) S2SMPTrampPC() uint64 { return el2.S2SMPTrampPC() }
 func (machine) SMPStubPC() uint64    { return el2.SMPStubPC() }

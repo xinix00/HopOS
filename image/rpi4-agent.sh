@@ -1,7 +1,7 @@
 #!/bin/sh
 # Bouw de ECHTE HOP-agent voor de Raspberry Pi 4 (metal/cmd/hopos + rpi4-
 # board): dezelfde hop/pkg/agentboot-bytes als op de Pi 5/QEMU/Linux, met de
-# GENET-NIC (metal/genet). Boot-recept identiek aan rpi4-hopos.sh (raw
+# GENET-NIC (metal/driver/nic/genet). Boot-recept identiek aan rpi4-hopos.sh (raw
 # kernel8.img op 0x80000, TF-A bl31.bin als armstub).
 #
 # Na de boot (UART meldt het IP):
@@ -14,21 +14,22 @@ TAMAGO="${TAMAGO:-$HOME/tamago-go/bin/go}"
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 cd "$DIR/metal"
+mkdir -p out
 
 # 1. De app-image voor jobs: canoniek gelinkt (slot-1-IPA), rpi4-hooks.
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags "rpi4 linkcpuinit" -trimpath \
-	-ldflags "-w -T 0x50010000 -R 0x1000" -o app4.elf ./appspike
+	-ldflags "-w -T 0x50010000 -R 0x1000" -o out/app4.elf ./app/appspike
 
 # 2. De agent-kern: cmd/hopos met het rpi4-board (build-tag kiest board_rpi4.go).
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags "rpi4 linkcpuinit" -trimpath \
-	-ldflags "-s -w -T 0x90000 -R 0x1000" -o agent4.elf ./cmd/hopos
+	-ldflags "-s -w -T 0x90000 -R 0x1000" -o out/agent4.elf ./cmd/hopos
 
 # 3. ELF → raw kernel8.img.
 cd "$DIR"
 mkdir -p sd-rpi4
-go run "$DIR/image/mkkernel/main.go" -elf metal/agent4.elf -o sd-rpi4/kernel8.img -load 0x80000 -raw
+go run "$DIR/image/mkkernel/main.go" "$DIR/image/mkkernel/pe.go" -elf metal/out/agent4.elf -o sd-rpi4/kernel8.img -load 0x80000 -raw
 
 # 4. config.txt — zelfde poortwachters als rpi4-hopos.sh.
 cat > sd-rpi4/config.txt <<'EOF'

@@ -1,18 +1,18 @@
 package raspi
 
-// De log-console (metal/fb) op de Pi: eerst de universele simple-framebuffer
+// De log-console (metal/driver/fb) op de Pi: eerst de universele simple-framebuffer
 // uit de DTB (wat Linux' early console ook leest), en anders — GEMETEN
 // 2026-07-11 op beide boards: de Pi-firmware laat aan raw kernels géén
 // simplefb-node na, ook niet met HDMI erin — het framebuffer zelf opeisen
 // via de VideoCore-mailbox (vcmail.AllocFB, het officiële pad; nog steeds
 // "firmware-buffer, geen driver"). Discovery hier, één keer voor Pi 4 en
-// Pi 5; het renderen zit in metal/fb.
+// Pi 5; het renderen zit in metal/driver/fb.
 
 import (
 	"hop-os/metal/dev"
-	"hop-os/metal/fb"
-	"hop-os/metal/fdt"
-	"hop-os/metal/vcmail"
+	"hop-os/metal/driver/fb"
+	"hop-os/metal/driver/vcmail"
+	"hop-os/metal/fw/fdt"
 )
 
 // Framebuffer leest de simple-framebuffer uit de DTB waarvan cpuinit de
@@ -41,7 +41,7 @@ func Framebuffer(dtbPtr uintptr) (fb.Desc, bool) {
 // gemeten 2026-07-11 (Pi 5) meldt de depth-tag 32 terwijl de scanout op de
 // 16bpp-bootsplash-config blijft draaien (stride 3840 = 1920×2). De pitch
 // beschrijft wat de scanout écht leest, dus dáár leiden we de pixeldiepte
-// uit af; metal/fb rendert beide dieptes.
+// uit af; metal/driver/fb rendert beide dieptes.
 func FramebufferVC(dtbPtr, mboxBase uintptr) (fb.Desc, bool) {
 	if d, ok := Framebuffer(dtbPtr); ok {
 		return d, true

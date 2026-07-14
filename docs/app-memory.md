@@ -6,8 +6,8 @@ uit de pool sneed. Een app kan niets anders zien — geen ander slot, niet de
 HOP-kern, niet de control-structuren van een buur. Isolatie is de MMU, niet
 een afspraak.
 
-Bron: `metal/layout` (de IPA-constanten + het board-PA-plan), `metal/slots`
-(laden/plaatsen), `metal/stage2` (de kooi). Een app is een **service of hij
+Bron: `metal/abi/layout` (de IPA-constanten + het board-PA-plan), `metal/kern/slots`
+(laden/plaatsen), `metal/kern/stage2` (de kooi). Een app is een **service of hij
 bestaat niet** — een app die stopt telt als crash; batch-werk = één service
 met meerdere threads.
 
@@ -35,12 +35,13 @@ met meerdere threads.
 0xB300_0000   net-ringen (2MB)     TX (app→switch) / RX (switch→app), rauwe frames
 ```
 
-`RamStart` en `RamSize` worden door HOP bij het laden **in de image gepatcht**
-(`slots.StartStream`): RamStart blijft het canonieke linkadres (0x50000000),
+`RamStart` en `RamSize` worden door HOP bij het plaatsen **in de image gepatcht**
+(`slots.placeFromStaging`, het gedeelde plaats-pad van `Start`/`StartStaged`):
+RamStart blijft het canonieke linkadres (0x50000000),
 RamSize = de `job.MemoryLimit`. De app-runtime alloceert heap/stack dus binnen
 precies zijn toegewezen partitie. De control-page/ringen op 0xB000_0000+ zijn
 per slot canoniek en door stage-2 naar de fysieke per-slot pagina's gemapt —
-dit is de hele hop-ABI (`metal/applib`); alles daarbuiten bestaat voor de app
+dit is de hele hop-ABI (`metal/app/applib`); alles daarbuiten bestaat voor de app
 niet.
 
 ## Fysiek (wat HOP beheert, per slot)
@@ -56,26 +57,48 @@ de partitie, op het board-PA-plan (`Plan.CtrlPA/RingPA/NetRingPA/Stage2PA`),
 elk per slot op `base + slot*stride`. Ze liggen buiten élke RAM-declaratie →
 device-gemapt → coherent zonder cache-onderhoud.
 
-## Laadtijd: de image streamt de partitie in (sinds 14-07)
+## Laadtijd: elke app haalt zijn eigen image op (twee-fase)
 
-HOP buffert de app-image **nooit volledig in de kern-RAM** (dat was de
-core-0-OOM onder een job-storm). In plaats daarvan streamt `slots.StartStream`
-de download-body rechtstreeks een **staging-gebied bovenin de partitie** in
-(`base + size − afgerond(imagegrootte)`), parseert de ELF uit dát
-device-geheugen (`devReaderAt`) en plaatst de segmenten device→device
-(`dev.Move`, 4KB stack-buffer). Core 0 houdt zo per fetch alleen ~64KB vast,
-niet de hele image — 127 gelijktijdige fetches passen probleemloos, en een
-te grote/kapotte image raakt hooguit zijn eigen partitie.
+Elke core is onafhankelijk en heeft zijn **eigen opstart**: een app downloadt
+zijn eigen image, op zíjn eigen core en netstack, rechtstreeks in zíjn eigen
+partitie. Alles wat bij het starten kan gebeuren — de download, het parsen, het
+in RAM zetten — speelt zich binnen die ene sectie af. Gaat er iets mis (trage of
+kapotte download, te grote image, netwerkfout), dan raakt dat hooguit dat ene
+slot; de buren en de kern merken er niets van. **Core 0 (de HOP-kern) blijft
+daardoor altijd veilig**: hij draagt nooit een app-image of een download, laat
+staan 127 tegelijk.
 
-De staging leeft **alleen tijdens het laden**: hij ligt bovenin, waar straks
-de stack/heap-top komt, en is al verlaten vóór de app z'n eerste instructie
-draait (de segmenten staan dan onderin, de core wordt pas daarna gewekt). Een
-segment dat tot in de staging zou reiken wordt geweigerd (partitie te klein).
+De opstart in drie stappen:
+
+1. **HOP laadt de universele apploader** (`metal/app/apploader`) in de slot. Die zit
+   ín de node-binary gebakken (`metal/kern/apploaderblob`, `//go:embed`, bouwtag
+   `embedloader`) — een gedeelde blob, geen externe URL, geen fetch:
+   `slots.StartLoader` kopieert 'm de partitie in en wekt de core (1 core,
+   `HOP_IMAGE_URL` in de env).
+2. **De apploader downloadt de echte image** over zíjn eigen netstack (`appnet`)
+   naar een **staging-gebied bovenin zíjn eigen partitie**
+   (`RamStart + RamSize − afgerond(imagegrootte)`), flusht de cache en seint HOP
+   "staged" op de control-page (`StatusStaged` + `CtrlStagedSize`), waarna hij
+   zijn core parkeert. Dít is de sectie waarin een startfout blijft.
+3. **HOP plaatst de echte app** (`slots.StartStaged` → `placeFromStaging`):
+   parseert de ELF uit die staging (`devReaderAt`), plaatst de segmenten
+   device→device (`dev.Move`, 4KB stack-buffer), patcht RamStart/RamSize/slotHint,
+   bouwt de stage-2-kooi en **her-dispatcht de geparkeerde core** op de echte app.
+
+Het downloaden verdeelt zich zo over evenveel netstacks als er cores zijn — nooit
+één trechter. Het geprivilegieerde deel (ELF plaatsen, stage-2 bouwen, core
+dispatchen) blijft bij HOP: een app op EL1 kan zijn eigen kooi niet bouwen, dat
+is de isolatie-invariant.
+
+De staging leeft **alleen tijdens het laden**: hij ligt bovenin, waar straks de
+stack/heap-top komt, en is verlaten vóór de echte app z'n eerste instructie
+draait. Een segment dat tot in de staging zou reiken wordt geweigerd (partitie
+te klein).
 
 ## Grenzen
 
 - **Per-app maximum** = één GB-blok vanaf het linkadres, geklemd onder
-  0xB000_0000 (de control-IPA's) — zie `maxLimitFor` in `metal/slots`. Groter
+  0xB000_0000 (de control-IPA's) — zie `maxLimitFor` in `metal/kern/slots`. Groter
   vergt een breder IPA-venster.
 - **Aantal slots** = het aantal ontdekte app-cores (`layout.MaxSlots`, runtime
   gezet door het board: 127 op de Altra, 3 op de Pi, 11 op de O6N), begrensd

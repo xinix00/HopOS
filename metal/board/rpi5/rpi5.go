@@ -20,9 +20,9 @@ package rpi5
 import (
 	"fmt"
 
+	"hop-os/metal/abi/layout"
 	"hop-os/metal/board/raspi"
-	"hop-os/metal/fdt"
-	"hop-os/metal/layout"
+	"hop-os/metal/fw/fdt"
 )
 
 // Het PA-plan van de Pi 5 (fase P1): wáár control-pages, ringen en
@@ -93,7 +93,7 @@ const (
 	// ttyAMA10). De firmware initialiseert hem (baud 115200) zodra hij zelf
 	// bootlogs schrijft — config.txt: uart_2ndstage=1 — dus printk hoeft
 	// alleen DR te vullen; wij programmeren geen clocks.
-	UART0Base = 0x107d001000 // PL011-poke via metal/pl011 (offsets/bit gedeeld)
+	UART0Base = 0x107d001000 // PL011-poke via metal/driver/pl011 (offsets/bit gedeeld)
 
 	// GIC-400 (GICv2 — géén v3: SGI's gaan hier via GICD_SGIR, niet via
 	// systeemregisters). Fase P1: hard-kill-SGI's; de probe raakt de GIC niet.
@@ -103,7 +103,7 @@ const (
 
 	// DTBPtr: cpuinit.s legt hier (primary, MMU uit) de DTB-pointer die de
 	// firmware in x0 meegaf — laag DRAM onder de kernel, zelfde plek als de
-	// boot-EL-scratch (+8). board.MemTotal parset 'm met metal/fdt.
+	// boot-EL-scratch (+8). board.MemTotal parset 'm met metal/fw/fdt.
 	DTBPtr = 0x7F008
 
 	// RNG200: het Broadcom iproc-rng200-blok (BCM2712) — hetzelfde blok als de
@@ -120,7 +120,7 @@ const (
 	PCIeX1Base = 0x1000110000
 
 	// VideoCore-firmware-mailbox (brcm,bcm2835-mbox; DT mailbox@7c013880,
-	// soc-ranges 0x7c000000 → 0x10_7c000000) — metal/vcmail: temperatuur,
+	// soc-ranges 0x7c000000 → 0x10_7c000000) — metal/driver/vcmail: temperatuur,
 	// ARM-klok, board-MAC.
 	VCMailBase = 0x10_7C01_3880
 )

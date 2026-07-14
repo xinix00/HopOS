@@ -1,5 +1,5 @@
 #!/bin/sh
-# Bouw de fase-P1-multikernel voor de Raspberry Pi 4 (metal/pi4_main.go):
+# Bouw de fase-P1-multikernel voor de Raspberry Pi 4 (metal/cmd/hopos-embed):
 # HOP-kern + embedded canonieke app-image, als raw kernel8.img. Zelfde
 # boot-recept als de probe (image/rpi4-probe.sh); zie docs/rpi4.md.
 #
@@ -24,17 +24,18 @@ TAMAGO="${TAMAGO:-$HOME/tamago-go/bin/go}"
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 cd "$DIR/metal"
+mkdir -p out
 
 # 1. De app-image: canoniek gelinkt (slot-1-IPA) met rpi4-runtime-hooks. Zonder
 #    -s: de symboltabel is nodig voor de RamStart/RamSize-patch (job.MemoryLimit).
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags "rpi4 linkcpuinit" -trimpath \
-	-ldflags "-w -T 0x50010000 -R 0x1000" -o app4.elf ./appspike
+	-ldflags "-w -T 0x50010000 -R 0x1000" -o cmd/hopos-embed/app4.elf ./app/appspike
 
 # 2. De HOP-kern (embed app4.elf): gelinkt op de werkelijke load 0x80000 (+0x10000).
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags "rpi4 linkcpuinit" -trimpath \
-	-ldflags "-s -w -T 0x90000 -R 0x1000" -o hopos4.elf .
+	-ldflags "-s -w -T 0x90000 -R 0x1000" -o out/hopos4.elf ./cmd/hopos-embed
 
 # 3. ELF → RAW kernel8.img (géén arm64-Image-header: die triggert het
 #    relocatie-protocol en de Pi 4-firmware verplaatst ons dan naar 0x200000
@@ -43,7 +44,7 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 #    zoals de Pi 5. Incl. BSS-nullen t/m memEnd.).
 cd "$DIR"
 mkdir -p sd-rpi4
-go run "$DIR/image/mkkernel/main.go" -elf metal/hopos4.elf -o sd-rpi4/kernel8.img -load 0x80000 -raw
+go run "$DIR/image/mkkernel/main.go" "$DIR/image/mkkernel/pe.go" -elf metal/out/hopos4.elf -o sd-rpi4/kernel8.img -load 0x80000 -raw
 
 # 4. config-hopos.txt (gitignored) — kernel wijst naar ons; bl31.bin als armstub
 #    (PSCI). Het getrackte config.txt is de agent-config; die overschrijven we

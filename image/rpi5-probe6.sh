@@ -10,13 +10,14 @@ TAMAGO="${TAMAGO:-$HOME/tamago-go/bin/go}"
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 cd "$DIR/metal"
+mkdir -p out
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags linkcpuinit -trimpath \
-	-ldflags "-s -w -T 0x90000 -R 0x1000" -o probe6.elf ./cmd/probe6
+	-ldflags "-s -w -T 0x90000 -R 0x1000" -o out/probe6.elf ./cmd/probe6
 
 cd "$DIR"
 mkdir -p sd-rpi5
-go run "$DIR/image/mkkernel/main.go" -elf metal/probe6.elf -o sd-rpi5/kernel_2712.img -load 0x80000 -raw
+go run "$DIR/image/mkkernel/main.go" "$DIR/image/mkkernel/pe.go" -elf metal/out/probe6.elf -o sd-rpi5/kernel_2712.img -load 0x80000 -raw
 
 # config-probe6.txt (gitignored) — komt als config.txt op de kaart; het
 # getrackte config.txt is de agent-config en blijft ongemoeid.

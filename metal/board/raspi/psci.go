@@ -4,7 +4,7 @@ package raspi
 // armstub, BL31) op EL3 en levert ons op EL2 af. cpuinit.s schrijft het
 // boot-EL op de scratch; de mains weigeren te draaien als daar geen ≥2 staat,
 // dus een onverwachte EL1-aflevering faalt zichtbaar vóór de eerste SMC. De
-// functie-ID's, return-codes en de SMC-stub wonen in metal/psci (gedeeld met
+// functie-ID's, return-codes en de SMC-stub wonen in metal/cpu/psci (gedeeld met
 // qemuvirt).
 //
 // De vertaling core-index → MPIDR-target is boardspecifiek (A72: aff0,
@@ -13,7 +13,7 @@ package raspi
 import (
 	"unsafe"
 
-	"hop-os/metal/psci"
+	"hop-os/metal/cpu/psci"
 )
 
 // BootEL geeft het exception level waarop de firmware ons afleverde (door

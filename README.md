@@ -81,13 +81,29 @@ C1-stepping BCM2712 silicon has an interconnect erratum (fabric deadlock when su
 ## Repository layout
 
 ```
-metal/    the OS: boot + boards (rpi4, rpi5, qemu-virt), stage-2 isolation,
-          message rings, L2 switch + NAT, NVMe + file layer, PSCI core
-          lifecycle, device-tree parsing, framebuffer console
-image/    build & run scripts (QEMU demo/agent, SD-card probe images)
-sd-rpi4/  SD-card payload + flashing notes (Dutch)
-sd-rpi5/  SD-card payload + flashing notes (Dutch)
+metal/       the OS — one Go module, layered by trust and direction:
+  abi/         the HOP↔app contract: control-page ABI, memory layout,
+               message rings, content checksums
+  kern/        the orchestrator: slots, stage-2 isolation cage, file
+               layer, embedded app loader
+  cpu/         the ARM64 layer: EL2, PSCI, SMP bring-up, idle, TRNG
+  net/         HOP's network plane: L2 frame switch + NAT, DHCP
+  driver/      device drivers, one package per device
+               (nic/: GEM, GENET v5, igb/I210, virtio-net, MDIO)
+  fw/          hardware discovery: device tree (FDT) and ACPI parsing
+  board/       per-board wiring: qemu-virt, rpi4, rpi5, generic UEFI
+  app/         the app side: runtime library, reference app, loader
+  cmd/         the binaries: hopos (the agent), hopos-embed, probes
+  dev/         the MMIO primitive everything builds on
+  out/         build output (gitignored)
+image/       build & run scripts (QEMU demo/agent, SD-card images, UEFI ESP)
+sd-rpi4/     SD-card payload + flashing notes (Dutch)
+sd-rpi5/     SD-card payload + flashing notes (Dutch)
 ```
+
+The placement and import-direction rules (apps can never link against
+HOP internals — the app side sees only `abi/`) are documented in
+[docs/indeling.md](docs/indeling.md) (Dutch).
 
 ## Building & running
 

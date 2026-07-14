@@ -2,7 +2,7 @@
 # Host-tests + tamago-compile-gate.
 #
 #   1. go test op de ontwikkelmachine: de logica-packages compileren daar
-#      dankzij de host-stubs in metal/dev en metal/stage2 (barrières/cache-
+#      dankzij de host-stubs in metal/dev en metal/kern/stage2 (barrières/cache-
 #      onderhoud zijn no-ops; het protocol is wat de tests bewijzen, de
 #      barrière-plaatsing bewijst het board). Packages zonder tests draaien
 #      mee als compile-check.
@@ -15,8 +15,8 @@ set -e
 cd "$(dirname "$0")/../metal"
 
 go test "$@" \
-	./ring ./hopswitch ./stage2 ./layout ./dhcp ./hopabi ./checksum \
-	./fdt ./hopfs ./vcmail ./mdio ./slots
+	./abi/ring ./net/hopswitch ./kern/stage2 ./abi/layout ./net/dhcp ./abi/hopabi ./abi/checksum \
+	./fw/fdt ./kern/hopfs ./driver/vcmail ./driver/nic/mdio ./kern/slots
 
 TAMAGO="${TAMAGO:-$HOME/tamago-go/bin/go}"
 if [ ! -x "$TAMAGO" ]; then
@@ -25,7 +25,7 @@ if [ ! -x "$TAMAGO" ]; then
 fi
 for tags in "linkcpuinit" "rpi4 linkcpuinit" "rpi5 linkcpuinit" "uefi linkcpuinit"; do
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-		"$TAMAGO" build -tags "$tags" -o /dev/null ./appspike
+		"$TAMAGO" build -tags "$tags" -o /dev/null ./app/appspike
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "$tags" -o /dev/null ./cmd/hopos
 done

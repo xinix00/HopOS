@@ -4,14 +4,14 @@ import (
 	_ "unsafe" // voor go:linkname
 
 	"hop-os/metal/board/raspi"
-	"hop-os/metal/fb"
-	"hop-os/metal/pl011"
+	"hop-os/metal/driver/fb"
+	"hop-os/metal/driver/pl011"
 )
 
 // printk stuurt één byte naar de PL011 op GPIO14/15 en spiegelt naar de
-// HDMI-log-console (metal/fb) zodra die actief is — het beeld-kanaal zonder
+// HDMI-log-console (metal/driver/fb) zodra die actief is — het beeld-kanaal zonder
 // debug-kabel. De bootloader configureerde de UART al (uart_2ndstage=1); de
-// poke-logica en de PrimeCell-offsets wonen in metal/pl011.
+// poke-logica en de PrimeCell-offsets wonen in metal/driver/pl011.
 //
 // ALLEEN de HOP-core (MPIDR-affiniteit 0) bezit de UART/fb. Een app-core draait
 // onder stage-2 en heeft die MMIO niet in zijn kooi — een runtime-print zou daar

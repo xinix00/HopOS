@@ -16,15 +16,15 @@ import (
 
 	"github.com/usbarmory/tamago/arm64"
 
+	"hop-os/metal/abi/layout"
+	"hop-os/metal/cpu/idle"
 	"hop-os/metal/dev"
-	"hop-os/metal/fdt"
-	"hop-os/metal/idle"
-	"hop-os/metal/layout"
+	"hop-os/metal/fw/fdt"
 )
 
 // QEMU virt memory map (hw/arm/virt.c, stabiel gedocumenteerd).
 const (
-	UART0Base = 0x09000000 // PL011-poke via metal/pl011 (offsets/bit gedeeld)
+	UART0Base = 0x09000000 // PL011-poke via metal/driver/pl011 (offsets/bit gedeeld)
 
 	// revokeVecAsm moet byte-gelijk zijn aan #define REVOKE_VEC in cpuinit.s
 	// (VBAR_EL2 van core 0 wordt vóór Go gezet); init() checkt de pariteit
@@ -62,7 +62,7 @@ var ARM64 = &arm64.CPU{
 }
 
 // RamStart en RamSize worden door elke image zelf gedefinieerd (HOP-kern en
-// app-images hebben elk een eigen partitie — zie metal/layout); alleen de
+// app-images hebben elk een eigen partitie — zie metal/abi/layout); alleen de
 // stack-offset is voor iedereen gelijk.
 //
 //go:linkname ramStackOffset runtime/goos.RamStackOffset

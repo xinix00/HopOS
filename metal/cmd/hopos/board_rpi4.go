@@ -3,19 +3,19 @@
 // board_rpi4.go — de Raspberry Pi 4-kant van de agent-main: dezelfde
 // HOP-agent-bytes, met de rpi4-runtime-hooks en de RAM-declaratie van het
 // board (raw load op 0x80000, 128MB HOP-kern — zie pi4_main/mem_rpi4).
-// Netwerk = de geïntegreerde GENET v5 (metal/genet, P2 bewezen 2026-07-11).
+// Netwerk = de geïntegreerde GENET v5 (metal/driver/nic/genet, P2 bewezen 2026-07-11).
 package main
 
 import (
 	"time"
 	_ "unsafe"
 
+	"hop-os/metal/abi/layout"
 	"hop-os/metal/board/raspi"
 	"hop-os/metal/board/rpi4" // registreert het board (init) + tamago-hooks
 	"hop-os/metal/dev"
-	"hop-os/metal/dvfs"
-	"hop-os/metal/layout"
-	"hop-os/metal/vcmail"
+	"hop-os/metal/driver/dvfs"
+	"hop-os/metal/driver/vcmail"
 )
 
 //go:linkname ramStart runtime/goos.RamStart

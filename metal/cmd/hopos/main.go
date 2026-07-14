@@ -26,15 +26,15 @@ import (
 	"hop/pkg/agentboot"
 	"hop/pkg/config"
 
+	"hop-os/metal/abi/layout"
 	"hop-os/metal/board"
-	"hop-os/metal/fb"
-	"hop-os/metal/hopfs"
-	"hop-os/metal/hopnet"
-	"hop-os/metal/hopswitch"
-	"hop-os/metal/layout"
-	"hop-os/metal/nvme"
-	"hop-os/metal/slotmgr"
-	"hop-os/metal/slots"
+	"hop-os/metal/driver/fb"
+	"hop-os/metal/driver/nvme"
+	"hop-os/metal/kern/hopfs"
+	"hop-os/metal/kern/slotmgr"
+	"hop-os/metal/kern/slots"
+	"hop-os/metal/net/hopnet"
+	"hop-os/metal/net/hopswitch"
 )
 
 func fail(what string, err error) {
@@ -141,7 +141,7 @@ func main() {
 	// Storage: eigen PCIe-enumeratie → NVMe-driver → hopfs. Zonder schijf
 	// draait de node door, maar jobs met volumes weigeren dan bij Start.
 	// Een board zonder ECAM-plan (Pi 5: NVMe loopt daar straks via de
-	// brcmstb-RC, metal/brcmpcie) slaat de probe over.
+	// brcmstb-RC, metal/driver/brcmpcie) slaat de probe over.
 	if win := board.Current().PCIe(); win.ECAMBase == 0 {
 		fmt.Println("storage: no ECAM window on this board — running without volumes (NVMe pending)")
 	} else if disk, err := nvme.Probe(win, layout.NVMeDMABase, layout.NVMeDMASize); err != nil {
@@ -153,7 +153,7 @@ func main() {
 	}
 
 	// Board-specifiek nawerk: op de Pi's start hier het klokbeleid +
-	// de thermiek-telemetrie (metal/dvfs via de firmware-mailbox); QEMU
+	// de thermiek-telemetrie (metal/driver/dvfs via de firmware-mailbox); QEMU
 	// heeft geen mailbox en laat de hook leeg. HOP zelf blijft oblivious.
 	if boardExtra != nil {
 		boardExtra()

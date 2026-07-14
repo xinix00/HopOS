@@ -1,5 +1,5 @@
 #!/bin/sh
-# Bouw de fase-P1-multikernel voor de Raspberry Pi 5 (metal/pi5_main.go):
+# Bouw de fase-P1-multikernel voor de Raspberry Pi 5 (metal/cmd/hopos-embed):
 # HOP-kern + embedded canonieke app-image, als raw kernel voor de EEPROM-
 # bootloader. Zelfde boot-recept als de probe (image/rpi5-probe.sh — os_check,
 # raw op 0x80000, DTB op 0x0F000000); zie docs/rpi5.md voor het dossier.
@@ -18,24 +18,25 @@ TAMAGO="${TAMAGO:-$HOME/tamago-go/bin/go}"
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 cd "$DIR/metal"
+mkdir -p out
 
 # 1. De app-image: canoniek gelinkt (slot-1-IPA, zelfde -T als op QEMU) maar
 #    met de rpi5-runtime-hooks (-tags rpi5). Zonder -s: de symboltabel is
 #    nodig zodat slots.Start RamStart/RamSize kan patchen (job.MemoryLimit).
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags "rpi5 linkcpuinit" -trimpath \
-	-ldflags "-w -T 0x50010000 -R 0x1000" -o app5.elf ./appspike
+	-ldflags "-w -T 0x50010000 -R 0x1000" -o cmd/hopos-embed/app5.elf ./app/appspike
 
 # 2. De HOP-kern (embed app5.elf): gelinkt op de werkelijke load 0x80000
 #    (+0x10000 voor text) — de Pi 5-EEPROM negeert kernel_address.
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags "rpi5 linkcpuinit" -trimpath \
-	-ldflags "-s -w -T 0x90000 -R 0x1000" -o hopos5.elf .
+	-ldflags "-s -w -T 0x90000 -R 0x1000" -o out/hopos5.elf ./cmd/hopos-embed
 
 # 3. ELF → raw image (Circle-recept, incl. BSS-nullen t/m memEnd — mkkernel).
 cd "$DIR"
 mkdir -p sd-rpi5
-go run "$DIR/image/mkkernel/main.go" -elf metal/hopos5.elf -o sd-rpi5/hop-hopos5.img -load 0x80000 -raw
+go run "$DIR/image/mkkernel/main.go" "$DIR/image/mkkernel/pe.go" -elf metal/out/hopos5.elf -o sd-rpi5/hop-hopos5.img -load 0x80000 -raw
 
 # 4. config-hopos.txt (gitignored) — zelfde poortwachters als de probe, kernel
 #    wijst naar ons. Het getrackte config.txt is de agent-config; deze komt bij
@@ -53,7 +54,7 @@ os_check=0
 device_tree_address=0x0f000000
 # Bootloader-logs op de debug-UART: bewijst meteen dat de kabel werkt.
 uart_2ndstage=1
-# Lagere idle-vloer voor het dvfs-klokbeleid (metal/dvfs vraagt de min op
+# Lagere idle-vloer voor het dvfs-klokbeleid (metal/driver/dvfs vraagt de min op
 # en volgt): zonder deze regel klemt de Pi 5-firmware op 1500MHz (gemeten
 # 2026-07-11). Accepteert de firmware 800 niet, dan meldt de dvfs-regel dat.
 arm_freq_min=800

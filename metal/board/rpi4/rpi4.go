@@ -22,9 +22,9 @@ package rpi4
 import (
 	"fmt"
 
+	"hop-os/metal/abi/layout"
 	"hop-os/metal/board/raspi"
-	"hop-os/metal/fdt"
-	"hop-os/metal/layout"
+	"hop-os/metal/fw/fdt"
 )
 
 // Het PA-plan van de Pi 4 (fase P1) — zelfde recept als de Pi 5, op adressen
@@ -81,7 +81,7 @@ const (
 	// zodra hij zelf logt — config.txt: uart_2ndstage=1 — dus printk hoeft
 	// alleen DR te vullen; dtoverlay=disable-bt houdt de PL011 bij de
 	// header (anders claimt Bluetooth hem).
-	UART0Base = 0xFE201000 // PL011-poke via metal/pl011 (offsets/bit gedeeld)
+	UART0Base = 0xFE201000 // PL011-poke via metal/driver/pl011 (offsets/bit gedeeld)
 
 	// GIC-400 (GICv2, zelfde blok en layout als de Pi 5, andere basis).
 	// Fase P1: hard-kill-SGI's via GICD_SGIR; de probe raakt de GIC niet.
@@ -90,7 +90,7 @@ const (
 	GICCBase = GICBase + 0x2000
 
 	// GENET v5: de geïntegreerde NIC (géén RP1/PCIe zoals de Pi 5 —
-	// metal/gem geldt hier niet; fase P2 wordt een eigen GENET-driver).
+	// metal/driver/nic/gem geldt hier niet; fase P2 wordt een eigen GENET-driver).
 	// De probe leest alleen SYS_REV_CTRL (+0x0) en de UMAC-MAC-registers.
 	GENETBase = 0xFD580000
 
@@ -102,11 +102,11 @@ const (
 	// DTBPtr: cpuinit.s legt hier (primary, MMU uit) de DTB-pointer die de
 	// firmware in x0 meegaf — +8 na de boot-EL-scratch (raspi.BootScratch =
 	// 0x7F000, gelijk aan het DTB_PTR-#define in cpuinit.s). board.MemTotal
-	// parset 'm met metal/fdt.
+	// parset 'm met metal/fw/fdt.
 	DTBPtr = 0x7F008
 
 	// VideoCore-firmware-mailbox (brcm,bcm2835-mbox, klassieke basis) —
-	// metal/vcmail: temperatuur, ARM-klok, board-MAC.
+	// metal/driver/vcmail: temperatuur, ARM-klok, board-MAC.
 	VCMailBase = 0xFE00B880
 )
 

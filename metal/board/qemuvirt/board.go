@@ -11,11 +11,11 @@ import (
 
 	gnet "github.com/usbarmory/go-net"
 
+	"hop-os/metal/abi/layout"
 	"hop-os/metal/board"
-	"hop-os/metal/el2"
-	"hop-os/metal/fb"
-	"hop-os/metal/layout"
-	"hop-os/metal/virtionet"
+	"hop-os/metal/cpu/el2"
+	"hop-os/metal/driver/fb"
+	"hop-os/metal/driver/nic/virtionet"
 )
 
 // machine is de board-implementatie voor de QEMU -M virt arm64-machine.

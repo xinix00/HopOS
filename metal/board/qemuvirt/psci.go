@@ -5,14 +5,14 @@ package qemuvirt
 // provider zit per definitie onder ons. cpuinit.s schrijft het boot-EL op de
 // scratch-pagina — de mains weigeren te draaien als daar geen ≥2 staat, dus
 // een onverwachte EL1-aflevering faalt zichtbaar vóór de eerste PSCI-call.
-// De functie-ID's, return-codes en de SMC-stub wonen in metal/psci (gedeeld
+// De functie-ID's, return-codes en de SMC-stub wonen in metal/cpu/psci (gedeeld
 // met board/raspi).
 
 import (
 	"unsafe"
 
-	"hop-os/metal/layout"
-	"hop-os/metal/psci"
+	"hop-os/metal/abi/layout"
+	"hop-os/metal/cpu/psci"
 )
 
 // BootEL geeft het exception level waarop de firmware ons afleverde. Alleen

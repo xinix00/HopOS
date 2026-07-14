@@ -23,10 +23,10 @@ import (
 
 	"github.com/usbarmory/tamago/arm64"
 
+	"hop-os/metal/abi/layout"
+	"hop-os/metal/cpu/idle"
 	"hop-os/metal/dev"
-	"hop-os/metal/fdt"
-	"hop-os/metal/idle"
-	"hop-os/metal/layout"
+	"hop-os/metal/fw/fdt"
 )
 
 // Gedeeld geheugenplan ONDER 0x80000 — want (gemeten 2026-07-09): de Pi 5-
@@ -40,7 +40,7 @@ const (
 	ParkBase  = 0x70000
 	ParkCount = 0x78000
 
-	// VCMailBuf: de property-buffer voor de firmware-mailbox (metal/vcmail).
+	// VCMailBuf: de property-buffer voor de firmware-mailbox (metal/driver/vcmail).
 	// 16-byte-gealigneerd, laag DRAM (VC-bereik), buiten elke RAM-declaratie
 	// (ongecachet), en vrij van park/scratch (0x70000-0x78040, 0x7F000+).
 	VCMailBuf = 0x7E000

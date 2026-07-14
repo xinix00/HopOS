@@ -15,8 +15,8 @@ import (
 
 	gnet "github.com/usbarmory/go-net"
 
-	"hop-os/metal/dhcp"
-	"hop-os/metal/fb"
+	"hop-os/metal/driver/fb"
+	"hop-os/metal/net/dhcp"
 )
 
 // PowerState is de powertoestand van een core (PSCI AFFINITY_INFO, ARM DEN 0022).
@@ -82,7 +82,7 @@ type LeaseHolder interface {
 
 // NetQuiescer wordt optioneel geïmplementeerd door boards waarvan de NIC-DMA
 // tijdelijk stilgezet moet kunnen worden rond fabric-gevoelige vensters
-// (metal/slots: Start/Stop). Aanleiding: het BCM2712-C1-erratum (kapotte
+// (metal/kern/slots: Start/Stop). Aanleiding: het BCM2712-C1-erratum (kapotte
 // QoS-forwarding-search in het AXI→SDC-pad, alleen in D0-silicium gefixt) —
 // inbound RX-DMA botst daar kansgedreven met de cache/TLBI-stormen van een
 // slot-levenscyclus, met een totale stille SoC-freeze als gevolg (gemeten
@@ -117,7 +117,7 @@ type Board interface {
 	CoreClass(core int) string // clusterklasse ("small"/"mid"/"big")
 
 	// MemTotal is de door de firmware gerapporteerde DRAM-grootte in bytes
-	// (uit de Device Tree, metal/fdt), of 0 als detectie faalde. HOP krijgt
+	// (uit de Device Tree, metal/fw/fdt), of 0 als detectie faalde. HOP krijgt
 	// dit naast de core-count, zodat de leader tegen de echte RAM-ceiling
 	// plant — de per-job MemoryLimit is de bescherming, HOP overspawnt niet.
 	MemTotal() uint64
@@ -161,7 +161,7 @@ type Board interface {
 	// PCIe-adresplan.
 	PCIe() PCIeWindow
 
-	// Framebuffer geeft de firmware-framebuffer voor de log-console (metal/fb),
+	// Framebuffer geeft de firmware-framebuffer voor de log-console (metal/driver/fb),
 	// ontdekt via een universeel mechanisme — geen driver: UEFI GOP of de
 	// device-tree simple-framebuffer. ok=false als het board er (nog) geen
 	// heeft (QEMU -nographic, of een board vóór zijn beeld-fase). Discovery is

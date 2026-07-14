@@ -7,7 +7,7 @@
 # Na de boot (UART meldt het IP):
 #   agent:  curl http://<ip>:8080/health
 #   leader: curl http://<ip>:9080/health
-# Job submitten vanaf de Mac (app5.elf serveren met python3 -m http.server):
+# Job submitten vanaf de Mac (metal/out/app5.elf serveren met python3 -m http.server):
 #   curl -X POST http://<ip>:9080/v1/jobs -d '{"name":"werkje","driver":"hop",
 #     "artifacts":[{"url":"http://<mac-ip>:8000/app5.elf"}],
 #     "memory_limit":100663296}'
@@ -18,22 +18,23 @@ TAMAGO="${TAMAGO:-$HOME/tamago-go/bin/go}"
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 cd "$DIR/metal"
+mkdir -p out
 
 # 1. De app-image voor jobs: canoniek gelinkt (slot-1-IPA), rpi5-hooks.
 #    Zonder -s: slots.Start patcht RamStart/RamSize via de symboltabel.
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags "rpi5 linkcpuinit" -trimpath \
-	-ldflags "-w -T 0x50010000 -R 0x1000" -o app5.elf ./appspike
+	-ldflags "-w -T 0x50010000 -R 0x1000" -o out/app5.elf ./app/appspike
 
 # 2. De agent-kern: cmd/hopos met het rpi5-board (build-tag kiest board_rpi5.go).
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags "rpi5 linkcpuinit" -trimpath \
-	-ldflags "-s -w -T 0x90000 -R 0x1000" -o agent5.elf ./cmd/hopos
+	-ldflags "-s -w -T 0x90000 -R 0x1000" -o out/agent5.elf ./cmd/hopos
 
 # 3. ELF → raw image (Circle-recept, mkkernel).
 cd "$DIR"
 mkdir -p sd-rpi5
-go run "$DIR/image/mkkernel/main.go" -elf metal/agent5.elf -o sd-rpi5/hop-agent5.img -load 0x80000 -raw
+go run "$DIR/image/mkkernel/main.go" "$DIR/image/mkkernel/pe.go" -elf metal/out/agent5.elf -o sd-rpi5/hop-agent5.img -load 0x80000 -raw
 
 # 4. config.txt — zelfde poortwachters, kernel wijst naar de agent.
 cat > sd-rpi5/config.txt <<'EOF'
@@ -43,7 +44,7 @@ kernel=hop-agent5.img
 os_check=0
 device_tree_address=0x0f000000
 uart_2ndstage=1
-# Lagere idle-vloer voor het dvfs-klokbeleid (metal/dvfs vraagt de min op
+# Lagere idle-vloer voor het dvfs-klokbeleid (metal/driver/dvfs vraagt de min op
 # en volgt): zonder deze regel klemt de Pi 5-firmware op 1500MHz (gemeten
 # 2026-07-11). Accepteert de firmware 800 niet, dan meldt de dvfs-regel dat.
 arm_freq_min=800

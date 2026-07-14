@@ -11,9 +11,10 @@ DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # 1. De probe-image: gelinkt op de WERKELIJKE load (0x80000, zie hieronder)
 #    + 0x10000; de eerste 64 bytes van het bestand worden de header (mkkernel).
 cd "$DIR/metal"
+mkdir -p out
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags linkcpuinit -trimpath \
-	-ldflags "-s -w -T 0x90000 -R 0x1000" -o probe5.elf ./cmd/probe5
+	-ldflags "-s -w -T 0x90000 -R 0x1000" -o out/probe5.elf ./cmd/probe5
 
 # 2. ELF → kernel_2712.img, RAW (het Circle-recept): géén arm64-Image-magic,
 #    plat bestand, code0-branch op byte 0; de firmware springt blind naar
@@ -23,7 +24,7 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 #    boot; het raw-pad is door Circle op de Pi 5 bewezen.
 cd "$DIR"
 mkdir -p sd-rpi5
-go run "$DIR/image/mkkernel/main.go" -elf metal/probe5.elf -o sd-rpi5/kernel_2712.img -load 0x80000 -raw
+go run "$DIR/image/mkkernel/main.go" "$DIR/image/mkkernel/pe.go" -elf metal/out/probe5.elf -o sd-rpi5/kernel_2712.img -load 0x80000 -raw
 
 # 3. config-probe5.txt (gitignored; komt als config.txt op de kaart — het
 #    getrackte config.txt is de agent-config) + instructies.

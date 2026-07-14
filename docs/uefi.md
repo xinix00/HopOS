@@ -7,7 +7,7 @@ een levende PSCI 1.1-SMC-call en PCIe-enumeratie door de MCFG-ECAM. De weg
 is byte-voor-byte dezelfde als op de echte Altra: FAT-medium →
 `EFI/BOOT/BOOTAA64.EFI`.
 
-Code: `metal/board/uefi` (stub + goos-hooks), `metal/acpi` (tabellen),
+Code: `metal/board/uefi` (stub + goos-hooks), `metal/fw/acpi` (tabellen),
 `metal/cmd/probeuefi` (de discovery-probe), `image/mkkernel -pe`
 (PE/COFF-verpakking), `image/uefi-run.sh` (QEMU-proeftuin).
 
@@ -64,7 +64,7 @@ op een stick, en één bestand boot overal.
    Strikte W^X-serverfirmware eist dit sowieso.
 2. **ACPI-tabellen zijn device-gemapt → geen Go-memmove.** De tabellen
    liggen buiten onze RAM-declaratie (nGnRnE): unaligned access = alignment
-   fault (EL1 exception in `slicebytetostring`). Fix: `metal/acpi` kopieert
+   fault (EL1 exception in `slicebytetostring`). Fix: `metal/fw/acpi` kopieert
    eerst met uitgelijnde `dev.Read32`-reads naar eigen RAM en parseert de
    kopie. (Zelfde les als de DTB op de Pi.)
 3. **HCR_EL2.E2H.** CPU's met VHE (Neoverse-N1 = de Altra!): EDK2 zet
@@ -115,7 +115,7 @@ C7 3C 88 81`. EFI_MEMORY_DESCRIPTOR: Type@0 (u32), PhysicalStart@8,
 NumberOfPages@0x18 — **itereer met de teruggegeven DescriptorSize** (0x30
 bij EDK2, niet sizeof=0x28).
 
-ACPI-offsets (metal/acpi): RSDP: rev@15 (≥2), XSDT@24. SDT-header 36B.
+ACPI-offsets (metal/fw/acpi): RSDP: rev@15 (≥2), XSDT@24. SDT-header 36B.
 MADT: entries@44; GICC=type 0x0B (len 76/80/82 per ACPI-versie — parse op
 Length): UID@8, Flags@12 (bit0 Enabled), **MPIDR@68**; GICD=0x0C (24B):
 base@8. MCFG: entries@44, 16B: base/segment/startbus/endbus. SPCR:
@@ -167,7 +167,7 @@ ARM_BOOT_ARCH@129: bit0=PSCI, bit1=HVC-conduit (0 = SMC).
 ## De NIC: Intel I210 (igb-familie) — driver bewezen
 
 Derek bevestigde: de Altra Dev Kit heeft de Intel I210 (Linux: igb).
-`metal/igb` is de HopOS-driver — gem.go-vorm (polled, één RX/TX-queue,
+`metal/driver/nic/igb` is de HopOS-driver — gem.go-vorm (polled, één RX/TX-queue,
 go-net NetworkDevice), maar met de igb-registerfamilie en **advanced
 descriptors** (het enige type dat Linux gebruikt én dat QEMU's igb-model
 emuleert). **End-to-end bewezen (13-07) tegen QEMU's igb (82576,

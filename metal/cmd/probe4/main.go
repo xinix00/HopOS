@@ -25,8 +25,8 @@ import (
 	"hop-os/metal/board"
 	"hop-os/metal/board/raspi"
 	"hop-os/metal/board/rpi4"
+	"hop-os/metal/cpu/psci"
 	"hop-os/metal/dev"
-	"hop-os/metal/psci"
 )
 
 // RAM-declaratie: 128MB vanaf de kernel-load — ruim binnen elk Pi 4-model
@@ -133,7 +133,7 @@ func main() {
 	}
 
 	// ── Netprobe (fase P2-voorwerk): de Pi 4-NIC is de geïntegreerde GENET
-	// (geen RP1/PCIe zoals de Pi 5 — metal/gem geldt hier dus niet; P2 wordt
+	// (geen RP1/PCIe zoals de Pi 5 — metal/driver/nic/gem geldt hier dus niet; P2 wordt
 	// een eigen GENET-driver). Read-only, aangekondigd vóór elke read.
 	fmt.Println("netprobe 1: GENET SYS_REV_CTRL lezen op 0xfd580000 (hangt dit: blok niet geklokt)...")
 	rev := dev.Read32(uintptr(rpi4.GENETBase) + genetRev)

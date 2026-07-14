@@ -12,14 +12,14 @@ import (
 
 	gnet "github.com/usbarmory/go-net"
 
+	"hop-os/metal/abi/layout"
 	"hop-os/metal/board"
 	"hop-os/metal/board/raspi"
-	"hop-os/metal/dhcp"
-	"hop-os/metal/el2"
-	"hop-os/metal/fb"
-	"hop-os/metal/fdt"
-	"hop-os/metal/genet"
-	"hop-os/metal/layout"
+	"hop-os/metal/cpu/el2"
+	"hop-os/metal/driver/fb"
+	"hop-os/metal/driver/nic/genet"
+	"hop-os/metal/fw/fdt"
+	"hop-os/metal/net/dhcp"
 )
 
 // machine is de board-implementatie voor de Raspberry Pi 4 (BCM2711).
@@ -65,7 +65,7 @@ func (machine) AffinityInfo(core uint64) board.PowerState {
 func (machine) PSCIVersion() (major, minor uint16) { return raspi.PSCIVersion() }
 
 // Stage-2/SMP: de trampolines zijn board-neutraal en data-gedreven (gedeeld
-// metal/el2 — geen GIC, geen MPIDR, geen ingebakken adressen; de hard-kill
+// metal/cpu/el2 — geen GIC, geen MPIDR, geen ingebakken adressen; de hard-kill
 // loopt via stage2.Revoke, cores parkeren op EL2). Dit board levert het
 // PA-plan (rpi4.go) en de faultdump2-tabel op 0x8B000 als RevokeVecPA; de rest
 // is hier één-op-één doorgeven.

@@ -3,7 +3,7 @@
 // -M virt + EDK2 als proeftuin die exact dezelfde weg bewandelt (BOOTAA64.EFI
 // op een FAT-medium). Waar de Pi's board-specifieke bring-up nodig hebben,
 // is dit het universele pad: de firmware beschrijft het ijzer (ACPI), wij
-// lezen het uit (metal/acpi) — ontwerpprincipe "universeel boven
+// lezen het uit (metal/fw/acpi) — ontwerpprincipe "universeel boven
 // board-specifiek".
 //
 // De boot-keten (init.s):
@@ -34,11 +34,11 @@ import (
 
 	"github.com/usbarmory/tamago/arm64"
 
-	"hop-os/metal/acpi"
-	"hop-os/metal/fb"
-	"hop-os/metal/idle"
-	"hop-os/metal/pl011"
-	"hop-os/metal/trng"
+	"hop-os/metal/cpu/idle"
+	"hop-os/metal/cpu/trng"
+	"hop-os/metal/driver/fb"
+	"hop-os/metal/driver/pl011"
+	"hop-os/metal/fw/acpi"
 )
 
 // KernelSize: de grootte van de RAM-partitie van de HOP-kern. Het
@@ -193,10 +193,10 @@ type MemDesc struct {
 // filteren zou dat onterecht weggooien (gemeten 14-07). Reserved/MMIO/ACPI/
 // runtime blijven verboden.
 const (
-	EfiLoaderCode       = 1
-	EfiLoaderData       = 2
-	EfiBootServicesCode = 3
-	EfiBootServicesData = 4
+	EfiLoaderCode         = 1
+	EfiLoaderData         = 2
+	EfiBootServicesCode   = 3
+	EfiBootServicesData   = 4
 	EfiConventionalMemory = 7
 )
 
@@ -394,7 +394,7 @@ func nanotime() int64 {
 }
 
 // Hash-DRBG op SHA-256: out_i = H(state ‖ ctr ‖ 0), state' = H(state ‖ ctr
-// ‖ 1). De seed komt bij voorkeur uit een hardware-TRNG (metal/trng: FEAT_RNG
+// ‖ 1). De seed komt bij voorkeur uit een hardware-TRNG (metal/cpu/trng: FEAT_RNG
 // op de O6N, SMCCC TRNG/DEN 0098 op de Altra); ontbreekt die, dan valt initRNG
 // terug op timing-jitter (jitterSeed). Jitter is op echt silicium een serieuze
 // bron (cache/branch/DRAM-variatie in de meetlussen, het jitterentropy-
@@ -405,7 +405,7 @@ func nanotime() int64 {
 //
 // Bewust géén EFI_RNG_PROTOCOL: dat bleek eeuwig te kunnen blokkeren in
 // firmware zonder werkende TRNG (gemeten 13-07, review #5). SMCCC TRNG loopt
-// via een EL3-monitor en is met de EL3-check in metal/trng crash-veilig.
+// via een EL3-monitor en is met de EL3-check in metal/cpu/trng crash-veilig.
 const reseedInterval = 1 << 20 // bytes tussen twee TRNG-herzaaiingen
 
 var (

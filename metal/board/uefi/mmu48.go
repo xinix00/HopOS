@@ -37,10 +37,10 @@ const (
 	// (l3pageTableStart + l3pageTableSize*8) — die overschrijven was de
 	// stille exit(1) van 13-07. Het gat 0x9000..0x10000 is precies
 	// 1 L0 + highL1Max pagina's.
-	l0Off      = 0x9000  // onze L0 (4KB)
-	highL1Off  = 0xA000  // pool van L1-pagina's (hoge regio's)
-	highL1Max  = 6       // 0xA000..0xFFFF — tot de image (text op +0x10000)
-	tamagoL1   = 0x4000  // tamago's L1 (InitMMU-conventie, arm64/mmu.go)
+	l0Off     = 0x9000 // onze L0 (4KB)
+	highL1Off = 0xA000 // pool van L1-pagina's (hoge regio's)
+	highL1Max = 6      // 0xA000..0xFFFF — tot de image (text op +0x10000)
+	tamagoL1  = 0x4000 // tamago's L1 (InitMMU-conventie, arm64/mmu.go)
 
 	// Descriptor-bits (zelfde encodering als tamago's mmu.go).
 	tteTable  = 0b11
@@ -74,8 +74,8 @@ func extendVA() {
 		ips = 5 // 48-bit is genoeg; 52-bit vergt een ander granule-verhaal
 	}
 	tcr := readTCR()
-	tcr = tcr&^uint64(0x3F) | 16          // T0SZ: 64-48
-	tcr = tcr&^(uint64(7)<<32) | ips<<32  // IPS
+	tcr = tcr&^uint64(0x3F) | 16         // T0SZ: 64-48
+	tcr = tcr&^(uint64(7)<<32) | ips<<32 // IPS
 	dev.MB()
 	switchMMU(tcr, uint64(l0))
 	vaExtended = true

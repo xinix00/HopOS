@@ -14,15 +14,16 @@ DIR="$(cd "$(dirname "$0")/.." && pwd)"
 #    beide boards identiek en is die optie nergens meer nodig. De eerste
 #    64 bytes worden de arm64 Image-header.
 cd "$DIR/metal"
+mkdir -p out
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags linkcpuinit -trimpath \
-	-ldflags "-s -w -T 0x90000 -R 0x1000" -o probe4.elf ./cmd/probe4
+	-ldflags "-s -w -T 0x90000 -R 0x1000" -o out/probe4.elf ./cmd/probe4
 
 # 2. ELF → kernel8.img (raw + arm64 Image-header, incl. BSS als nullen —
 #    mkkernel schrijft t/m memEnd). Als los bestand gedraaid: stdlib-only.
 cd "$DIR"
 mkdir -p sd-rpi4
-go run "$DIR/image/mkkernel/main.go" -elf metal/probe4.elf -o sd-rpi4/kernel8.img -load 0x80000
+go run "$DIR/image/mkkernel/main.go" "$DIR/image/mkkernel/pe.go" -elf metal/out/probe4.elf -o sd-rpi4/kernel8.img -load 0x80000
 
 # 3. config-probe4.txt (gitignored; komt als config.txt op de kaart — het
 #    getrackte config.txt is de agent-config) + instructies.

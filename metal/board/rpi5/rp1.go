@@ -8,7 +8,7 @@ import "hop-os/metal/dev"
 // traint de PCIe-link NIET — CHIP_ID las 0xdeaddead, PHYLINKUP=DL_ACTIVE=0.
 // De bootloader laadt de RP1-firmware via I²C (vóór er PCIe bestaat) en
 // gebruikt de link daarna niet; het OS traint hem zelf, elke boot — Linux
-// ook. Dat doet metal/brcmpcie (probe6 verifieert de sequence).
+// ook. Dat doet metal/driver/brcmpcie (probe6 verifieert de sequence).
 //
 // DMA-richting (belangrijk voor de GEM): RP1's 40-bit bus-masters (ethernet-
 // DMA) sturen adressen 0x00_0000_0000..512G 1:1 als PCIe-upstream door
@@ -40,15 +40,15 @@ const (
 	RCBar2ConfigHi = PCIe2Base + 0x4038
 
 	// De gedeelde reset-infrastructuur van alle drie de PCIe-controllers
-	// (metal/brcmpcie): RESCAL = het analoge kalibratieblok
+	// (metal/driver/brcmpcie): RESCAL = het analoge kalibratieblok
 	// (brcm,bcm7216-pcie-sata-rescal), één keer per boot; PCIeSWInit = de
 	// brcm,brcmstb-reset SW_INIT-bank (bank = ID>>5, stride 0x18) met de
 	// bridge-reset-ID's 42/43/44 voor pcie0/1/2 (uit de BCM2712-DT).
-	PCIeRescal   = 0x10_0011_9500
-	PCIeSWInit   = 0x10_0150_4318
-	PCIe0SWInit  = 42
-	PCIe1SWInit  = 43
-	PCIe2SWInit  = 44
+	PCIeRescal  = 0x10_0011_9500
+	PCIeSWInit  = 0x10_0150_4318
+	PCIe0SWInit = 42
+	PCIe1SWInit = 43
+	PCIe2SWInit = 44
 
 	// Outbound-CPU-vensters per controller (BCM2712-DT "ranges", 32-bit
 	// non-prefetch-venster → PCIe-adres 0x0): pcie1 = de FFC (M.2/NVMe).
@@ -65,7 +65,7 @@ const (
 // RP1GPIOOut zet één RP1-GPIO als software-output (funcsel 5 = sys_rio) op
 // het gegeven niveau: eerst het niveau in het RIO-register, dán pas
 // output-enable — geen glitch. Alleen bruikbaar bij een getrainde
-// PCIe-link (metal/brcmpcie) met BAR1 op PCIe 0x0.
+// PCIe-link (metal/driver/brcmpcie) met BAR1 op PCIe 0x0.
 func RP1GPIOOut(pin int, high bool) {
 	bank, off := 0, pin
 	switch {

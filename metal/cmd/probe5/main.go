@@ -31,10 +31,10 @@ import (
 	"hop-os/metal/board"
 	"hop-os/metal/board/raspi"
 	"hop-os/metal/board/rpi5"
+	"hop-os/metal/cpu/psci"
 	"hop-os/metal/dev"
-	"hop-os/metal/fb"
-	"hop-os/metal/gem"
-	"hop-os/metal/psci"
+	"hop-os/metal/driver/fb"
+	"hop-os/metal/driver/nic/gem"
 )
 
 // RAM-declaratie: 128MB vanaf de kernel-load. ONTDEKT 2026-07-09 (sessie 2,
@@ -82,7 +82,7 @@ func main() {
 
 	b := board.Current()
 
-	// HDMI-log (metal/fb): gebruikt het beeld dat de firmware al aanzette
+	// HDMI-log (metal/driver/fb): gebruikt het beeld dat de firmware al aanzette
 	// (DT-simplefb) — meteen een meetpunt: laat de firmware in bare-metal-
 	// modus (os_check=0) een framebuffer achter? Vanaf Init spiegelt printk.
 	if desc, ok := b.Framebuffer(); ok {
@@ -224,7 +224,7 @@ func main() {
 	}
 
 	// ── Netprobe (fase P2-voorwerk): read-only metingen voor de GEM-driver
-	// (metal/gem). Elke stap kondigt zich aan vóór de read: blijft de output
+	// (metal/driver/nic/gem). Elke stap kondigt zich aan vóór de read: blijft de output
 	// daar steken, dan wijst de laatste regel de boosdoener aan.
 	fmt.Println("netprobe 1: RP1-venster — sysinfo lezen op 0x1f00000000 (hangt dit: PCIe-link niet actief)...")
 	chipID := dev.Read32(uintptr(rpi5.RP1SysInfo))
@@ -256,7 +256,7 @@ func main() {
 	} else {
 		fmt.Println("netprobe 4: geen PHY gevonden (reset via RP1-GPIO nodig? → volgende iteratie)")
 	}
-	fmt.Println("HOPOS_PI5_NETPROBE_KLAAR — stuur deze regels door; hiermee kalibreren we metal/gem")
+	fmt.Println("HOPOS_PI5_NETPROBE_KLAAR — stuur deze regels door; hiermee kalibreren we metal/driver/nic/gem")
 
 	// PID-1-regel: main keert nooit terug. De ACT-LED wordt de hartslag:
 	// knippert hij op 1Hz, dan is de probe tot híér gekomen en leeft de

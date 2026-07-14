@@ -8,8 +8,8 @@ package main
 import (
 	_ "unsafe"
 
+	"hop-os/metal/abi/layout"
 	_ "hop-os/metal/board/qemuvirt" // registreert het board (init) + tamago-hooks
-	"hop-os/metal/layout"
 )
 
 //go:linkname ramStart runtime/goos.RamStart
