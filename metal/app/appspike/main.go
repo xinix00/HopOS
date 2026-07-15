@@ -22,6 +22,7 @@ import (
 	"hop-os/metal/app/applib/appnet"
 	"hop-os/metal/board/appboard"
 	"hop-os/metal/board/hopslot"
+	"hop-os/metal/cpu/psci"
 )
 
 func main() {
@@ -65,6 +66,17 @@ func main() {
 		time.Sleep(100 * time.Millisecond) // logregel eerst de ring uit
 		v := *(*uint64)(unsafe.Pointer(uintptr(layout.HopRAMStart)))
 		app.Logf("PROBE: gelekt: %#x — GEEN isolatie!", v)
+	}
+
+	// Isolatietest 2: praat bewust met de firmware. Een app heeft géén
+	// legitieme SMC (zelfs SMP-bring-up loopt via HOP; exit is een HVC), dus
+	// HCR_EL2.TSC hoort dit als EC=0x17 op de EL2-vector te trappen — de
+	// tweede logregel mag nooit verschijnen.
+	if app.Env("PROBE") == "smc" {
+		app.Logf("PROBE: SMC PSCI_VERSION vanuit de kooi — EL2 hoort dit te trappen")
+		time.Sleep(100 * time.Millisecond) // logregel eerst de ring uit
+		v := psci.SMC(psci.VERSION, 0, 0, 0)
+		app.Logf("PROBE: firmware antwoordde %#x — GEEN SMC-kooi!", v)
 	}
 
 	// Volumes-demo (het storage-model van het plan): elke rol bewijst een

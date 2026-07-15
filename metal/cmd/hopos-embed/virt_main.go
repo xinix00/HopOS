@@ -315,6 +315,35 @@ func main() {
 	time.Sleep(200 * time.Millisecond) // laatste ring-logs tonen
 	fmt.Println("HOPOS_ISOLATIE_OK — stage-2-kooi hard bewezen: core off buiten eigen slot")
 
+	// SMC-kooi: een app die met de firmware wil praten wordt door HCR_EL2.TSC
+	// op EL2 getrapt — zelfde vangnet als de geheugen-kooi, ander luik. Er
+	// bestaat geen legitieme app-SMC (SMP-bring-up loopt via HOP, exit is een
+	// HVC), dus het ESR hoort EC=0x17 (trapped SMC64) te dragen.
+	fmt.Println("isolatietest: slot 2 start met PROBE=smc...")
+	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"PROBE": "smc"}, nil, nil); err != nil {
+		fail("smc-start", err)
+	}
+	go drainLogs(2, nil)
+	if err := slots.WaitReady(2, 5*time.Second); err != nil {
+		fail("smc-ready", err)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for slots.Get(2).CoreOn {
+		if time.Now().After(deadline) {
+			fail("smc-kooi", fmt.Errorf("app deed een SMC zonder fault"))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	s = slots.Get(2)
+	if s.App == layout.StatusExited {
+		fail("smc-kooi", fmt.Errorf("app exitte netjes (%d) — fault verwacht", s.ExitCode))
+	}
+	fmt.Printf("fault-rapport slot 2: vec=%d esr=%#x (EC=%#x)\n", s.FaultVec, s.FaultESR, (s.FaultESR>>26)&0x3F)
+	if s.FaultVec != layout.FaultSync || (s.FaultESR>>26)&0x3F != 0x17 {
+		fail("smc-faultinfo", fmt.Errorf("verwacht vec=%d EC=0x17, kreeg vec=%d EC=%#x", layout.FaultSync, s.FaultVec, (s.FaultESR>>26)&0x3F))
+	}
+	fmt.Println("HOPOS_SMCKOOI_OK — SMC uit de kooi getrapt: een app praat nooit met de firmware")
+
 	// Hard-kill: een app die in een lus zonder preemptiepunt hangt negeert
 	// de kill-flag; slots.Stop escaleert dan naar stage2.Revoke, die de
 	// stage-2-map van het slot intrekt (HVC→TLBI) zodat de core op zijn

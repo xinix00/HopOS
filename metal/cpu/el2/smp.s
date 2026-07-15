@@ -74,10 +74,13 @@ vtcrps2:
 	WORD	$0xd50c87df	// tlbi vmalls12e1
 	DSB	$15
 
-	// HCR_EL2: RW(31) | VM(0, stage-2 aan). Geen IMO(4)/GIC: de hard-kill loopt
-	// via stage-2-intrekking (Revoke), niet via een IRQ — een secundaire SMP-core
-	// deelt tabel én VMID met de primaire, dus dezelfde TLBI velt ook hem.
+	// HCR_EL2: RW(31) | TSC(19, trap SMC — zie el2.s: een app-SMC bestaat
+	// niet, dus trap = ontsnappingspoging) | VM(0, stage-2 aan). Geen
+	// IMO(4)/GIC: de hard-kill loopt via stage-2-intrekking (Revoke), niet via
+	// een IRQ — een secundaire SMP-core deelt tabel én VMID met de primaire,
+	// dus dezelfde TLBI velt ook hem.
 	MOVD	$1<<31, R4
+	ORR	$1<<19, R4, R4
 	ORR	$1, R4, R4
 	WORD	$0xd51c1104	// msr hcr_el2, x4
 
@@ -97,6 +100,13 @@ vtcrps2:
 	MSR	R4, SCTLR_EL1
 	MOVD	$0x33FF, R4
 	WORD	$0xd51c1144	// msr cptr_el2, x4
+
+	// I-cache leeg vóór de drop — zelfde warme-herdispatch-hygiëne als
+	// el2.s (zie dáár): een secundaire core kan als eerdere huurder stale
+	// instructies voor deze canonieke adressen vasthouden.
+	WORD	$0xd508751f	// ic iallu
+	DSB	$15
+	ISB	$15
 
 	// SPSR_EL2: EL1h, DAIF gemaskeerd.
 	MOVD	$0, R4

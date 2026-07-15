@@ -9,10 +9,12 @@ import (
 )
 
 // Het uefi-recept (board/uefi/uefi.go), MMIO-vrij en dus board-onafhankelijk:
-// een SHA-256-DRBG geseed uit trng.Fill (RNDR-instructie waar het silicium
-// FEAT_RNG heeft; SMCCC-TRNG alleen mét EL3-monitor) en anders timing-jitter
-// uit de arch-counter. Is er een hardwarebron, dan herzaait de DRBG zich elke
-// reseedInterval bytes.
+// een SHA-256-DRBG geseed uit trng.FillCPU (RNDR-instructie waar het silicium
+// FEAT_RNG heeft) en anders timing-jitter uit de arch-counter. Bewust NIET
+// trng.Fill: dat valt terug op SMCCC-TRNG — een firmware-SMC, en een gekooide
+// app praat nooit met EL3 (HCR_EL2.TSC trapt elke SMC uit de kooi; op de
+// Altra, zonder FEAT_RNG, zou de allereerste seed de app vellen). Is er een
+// hardwarebron, dan herzaait de DRBG zich elke reseedInterval bytes.
 
 const reseedInterval = 1 << 20 // bytes tussen twee TRNG-herzaaiingen
 
@@ -26,7 +28,7 @@ var (
 //go:linkname initRNG runtime/goos.InitRNG
 func initRNG() {
 	var seed [48]byte
-	if src, ok := trng.Fill(seed[:]); ok {
+	if src, ok := trng.FillCPU(seed[:]); ok {
 		rngSource = src
 	} else {
 		jitterSeed(seed[:])
@@ -58,7 +60,7 @@ func jitterSeed(dst []byte) {
 // steeds veilig) en proberen we bij de volgende drempel opnieuw.
 func reseed() {
 	var fresh [24]byte
-	if _, ok := trng.Fill(fresh[:]); ok {
+	if _, ok := trng.FillCPU(fresh[:]); ok {
 		var in [56]byte
 		copy(in[:32], drbgState[:])
 		copy(in[32:], fresh[:])

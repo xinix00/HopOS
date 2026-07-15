@@ -14,6 +14,11 @@
 // (jitter-DRBG in het board). Board-onafhankelijk: één bron van waarheid voor
 // de entropie-hardware, de boards kiezen alleen de terugvaller.
 //
+// Fill (met SMCCC-terugval) is voor de HOP-kern; gekooide apps gebruiken
+// FillCPU: een app praat nooit met de firmware — HCR_EL2.TSC trapt elke SMC
+// uit de kooi als isolatie-overtreding, dus het SMCCC-pad is daar per
+// definitie verboden terrein.
+//
 // Alleen voor GOOS=tamago GOARCH=arm64.
 package trng
 
@@ -45,16 +50,29 @@ func el3Present() bool
 
 // Fill vult dst volledig met hardware-entropie en geeft de gebruikte bron
 // terug ("rndr" of "smccc-trng"). ok=false ⇒ geen hardwarebron beschikbaar;
-// de aanroeper seedt dan zelf.
+// de aanroeper seedt dan zelf. Alleen voor de HOP-kern: het SMCCC-pad is een
+// firmware-call — gekooide apps gebruiken FillCPU.
 func Fill(dst []byte) (source string, ok bool) {
+	if src, ok := FillCPU(dst); ok {
+		return src, true
+	}
+	if len(dst) != 0 && el3Present() && fillSMCCC(dst) {
+		return "smccc-trng", true
+	}
+	return "", false
+}
+
+// FillCPU vult dst uitsluitend uit de CPU-instructiebron (RNDR, FEAT_RNG) —
+// géén firmware-SMC. De bron voor gekooide apps: HCR_EL2.TSC trapt elke SMC
+// uit de kooi (isolatie-invariant "een app praat nooit met EL3"), dus zelfs
+// een póging via SMCCC zou de app vellen. ok=false ⇒ geen FEAT_RNG (o.a. de
+// Altra's Neoverse N1, Armv8.2); de aanroeper seedt dan zelf (jitter).
+func FillCPU(dst []byte) (source string, ok bool) {
 	if len(dst) == 0 {
 		return "", false
 	}
 	if rndrSupported() && fillRNDR(dst) {
 		return "rndr", true
-	}
-	if el3Present() && fillSMCCC(dst) {
-		return "smccc-trng", true
 	}
 	return "", false
 }

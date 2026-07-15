@@ -60,10 +60,16 @@ vtcrps:
 	WORD	$0xd50c87df	// tlbi vmalls12e1
 	DSB	$15
 
-	// HCR_EL2: RW(31, EL1=AArch64) | VM(0, stage-2 aan voor EL1&0). Geen
-	// IMO(4): de hard-kill loopt niet via een IRQ maar via stage-2-intrekking
-	// (HOP nult de map + TLBI → deze core faultt synchroon naar de vectoren).
+	// HCR_EL2: RW(31, EL1=AArch64) | TSC(19, trap SMC) | VM(0, stage-2 aan
+	// voor EL1&0). TSC maakt "een app praat nooit met de firmware" hard: er
+	// bestáát geen legitieme app-SMC (zelfs SMP-bring-up loopt via HOP,
+	// CtrlSMPReq; exit is een HVC) — een SMC uit de kooi is dus per definitie
+	// een ontsnappingspoging en landt als EC=0x17 op de EL2-vectoren
+	// (report + park), net als een stage-2-fault. Geen IMO(4): de hard-kill
+	// loopt niet via een IRQ maar via stage-2-intrekking (HOP nult de map +
+	// TLBI → deze core faultt synchroon naar de vectoren).
 	MOVD	$1<<31, R4
+	ORR	$1<<19, R4, R4
 	ORR	$1, R4, R4
 	WORD	$0xd51c1104	// msr hcr_el2, x4
 
@@ -86,6 +92,19 @@ vtcrps:
 	MSR	R4, SCTLR_EL1
 	MOVD	$0x33FF, R4
 	WORD	$0xd51c1144	// msr cptr_el2, x4
+
+	// I-cache van déze core leeg vóór de drop. Elke app linkt op hetzelfde
+	// canonieke adres, dus bij een WARME herdispatch (park → mailbox → hier)
+	// houdt de PIPT-I$ nog de INSTRUCTIES VAN DE VORIGE HUURDER voor exact
+	// deze partitie-PA's vast — HOP's DC CIVAC bij het plaatsen raakt de
+	// I-zijde nooit, en alleen een koude PSCI CPU_ON krijgt TF-A's
+	// cache-hygiëne. Zonder deze regel executeert de nieuwe app de code van
+	// de oude (Altra-vondst 15-07: eerste huurder leeft, élke herdispatch
+	// dood bij boot; QEMU-TCG verhult dit — geen I$-model). Slot = core,
+	// dus lokaal (IALLU) is compleet.
+	WORD	$0xd508751f	// ic iallu
+	DSB	$15
+	ISB	$15
 
 	// Drop naar EL1 op de app-entry (EL1h, DAIF gemaskeerd).
 	MOVD	$0, R4

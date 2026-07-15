@@ -390,6 +390,7 @@ type Status struct {
 	Heartbeat uint64
 	RAMSize   uint64 // door de app gerapporteerde (gepatchte) RAM-maat
 	MemSys    uint64 // werkelijke draw: MemStats.Sys van de app (0 = nog niet gemeld)
+	Idle      uint64 // idle-governor-tikken (cpu/idle → CtrlIdle; 0 = nooit geïdled)
 
 	// Door de EL2-vectoren gerapporteerd bij een onvrijwillig einde:
 	// FaultVec = layout.FaultSync (stage-2-fault; ESR/FAR geldig) — zowel bij
@@ -466,9 +467,12 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 		return err
 	}
 	// Eén lifecycle tegelijk, in een DMA-stil venster: de defer dekt álle
-	// paden — het venster sluit pas na de WaitReady onderaan, zodat ook de
-	// app-boot (heap-zeroing) erbinnen valt.
+	// paden — op quiescer-boards sluit het venster pas na de WaitReady
+	// onderaan placeFromStaging, zodat ook de app-boot (heap-zeroing)
+	// erbinnen valt. t0 meet de venster-tijd: dít is wat de convoy bij een
+	// storm serialiseert, dus dit hoort zichtbaar te zijn op een headless node.
 	defer lifecycleWindow()()
+	t0 := time.Now()
 	// De EL2-vectoren + parkeerlus + mailboxen moeten klaar zijn vóór de
 	// eerste dispatch (mailbox cold-detectie leest een geveegde mailbox).
 	vectorsOnce.Do(stage2.InitVectors)
@@ -516,6 +520,7 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 		return err
 	}
 	started = true // partitie blijft van deze task tot Stop
+	fmt.Printf("slot %d: image placed in %s\n", i, time.Since(t0).Round(time.Millisecond))
 	return nil
 }
 
@@ -744,11 +749,18 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 
 	go registerServicer(i, root, mtab).run()
 
-	// Synchroon wachten tot de app READY meldt (runtime-boot met heap-zeroing
-	// en TLBI's klaar) — dan pas sluiten de defers het DMA-stille venster.
-	// Best-effort deadline: een app die láng doet over z'n init houdt de
-	// lifecycle niet eeuwig vast.
-	_ = WaitReady(i, 3*time.Second)
+	// Alleen op boards met een écht DMA-stil venster (NetQuiescer — de
+	// C1-erratum-familie) wachten we hier tot de app READY meldt: dáár hoort
+	// ook de app-boot (heap-zeroing, TLBI's) binnen het venster te vallen.
+	// Overal anders is quiesce een no-op en zou dit de geserialiseerde
+	// lifecycle tot 3s per start vasthouden — bij 127 slots een convoy van
+	// minuten (Altra-meting 15-07). Daar boot de app parallel verder; wie
+	// READY nodig heeft pollt WaitReady zelf. Best-effort deadline: een app
+	// die láng doet over z'n init houdt de lifecycle ook op de Pi niet eeuwig
+	// vast.
+	if _, ok := board.Current().(board.NetQuiescer); ok {
+		_ = WaitReady(i, 3*time.Second)
+	}
 	return nil
 }
 
@@ -774,6 +786,7 @@ func StartStaged(i int, memLimit uint64, cores int, env map[string]string, mount
 		return fmt.Errorf("StartStaged: geen gestagede image in slot %d (CtrlStagedSize=%d)", i, imgSize)
 	}
 	defer lifecycleWindow()()
+	t0 := time.Now() // venster-tijd — wat de convoy serialiseert (zie Start)
 	vectorsOnce.Do(stage2.InitVectors)
 	// De apploader parkeerde na het seinen; zijn core (en de secundaire cores
 	// van een SMP-app) mogen niet meer draaien vóór we eroverheen plaatsen.
@@ -801,7 +814,11 @@ func StartStaged(i int, memLimit uint64, cores int, env map[string]string, mount
 	// invalideren vóór we de echte app er ongecachet overheen plaatsen. De loader
 	// flushte de staging zelf al (StageImage); dit dekt de rest van de partitie.
 	dev.CleanInv(uintptr(base), uintptr(size))
-	return placeFromStaging(i, base, size, stageAddr, imgSize, memLimit, cores, envBlob, mtab, ports)
+	if err := placeFromStaging(i, base, size, stageAddr, imgSize, memLimit, cores, envBlob, mtab, ports); err != nil {
+		return err
+	}
+	fmt.Printf("slot %d: staged app placed in %s\n", i, time.Since(t0).Round(time.Millisecond))
+	return nil
 }
 
 var vectorsOnce sync.Once
@@ -820,11 +837,23 @@ func Stop(i int, timeout time.Duration) error {
 	if err := checkSlot(i); err != nil {
 		return err
 	}
+	// De kill-flag vroeg — vóór het geserialiseerde venster — zodat bij een
+	// stort-stop (delete-storm) álle apps alvast parallel richting hun park
+	// gaan terwijl eerdere Stops nog in het venster staan; anders krijgt app
+	// N+1 zijn flag pas als Stop N volledig klaar is en betaalt élke stop de
+	// volle wachttijd serieel (Altra-meting 15-07: 127 deletes ≈ tientallen
+	// minuten). Alleen op boards zonder DMA-stil venster: op de C1-familie
+	// (NetQuiescer) hoort ook het coöperatieve park bínnen het venster te
+	// vallen (kill+park naast lopende RX-DMA is daar dodelijk — 13-07).
+	if _, ok := board.Current().(board.NetQuiescer); !ok {
+		ctrlWrite(i, layout.CtrlKill, 1)
+		dev.MB()
+	}
 	// Eén lifecycle tegelijk, in een DMA-stil venster: ook de coöperatieve
 	// kill parkeert een core — gemeten (13-07, torture): kill+park naast
 	// lopende RX-DMA is dodelijk op C1.
 	defer lifecycleWindow()()
-	ctrlWrite(i, layout.CtrlKill, 1)
+	ctrlWrite(i, layout.CtrlKill, 1) // idempotent na het vroege pad
 	dev.MB()
 	// Coöperatieve kans voor de app (de kill-watcher parkeert zijn eigen core).
 	waitStopped(i, timeout)
@@ -885,6 +914,7 @@ func Get(i int) Status {
 		Heartbeat: ctrlRead(i, layout.CtrlHeartbeat),
 		RAMSize:   ctrlRead(i, layout.CtrlRAMSize),
 		MemSys:    ctrlRead(i, layout.CtrlMemSys),
+		Idle:      ctrlRead(i, layout.CtrlIdle),
 		FaultVec:  ctrlRead(i, layout.CtrlFaultVec),
 		FaultESR:  ctrlRead(i, layout.CtrlFaultESR),
 		FaultFAR:  ctrlRead(i, layout.CtrlFaultFAR),
