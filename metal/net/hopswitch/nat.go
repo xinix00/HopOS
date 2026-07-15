@@ -156,6 +156,9 @@ func (u *Uplink) Receive(buf []byte) (int, error) {
 	if n == 0 || err != nil {
 		return n, err
 	}
+	// ARP eerst (niet claimen — gvisor wil replies óók zien voor de eigen
+	// node-stack): de reply op onze first-contact-request leert de neighbor.
+	arpLearn(buf[:n])
 	if natInbound(buf[:n]) {
 		return 0, nil
 	}
@@ -268,6 +271,68 @@ func learnLocked(srcIP uint32, mac []byte) {
 	}
 }
 
+// arpLast rate-limit de eigen ARP-requests (per bestemming max 1/s): een
+// storm van 127 loaders naar dezelfde onbekende host mag geen ARP-storm
+// worden. Zelfde plafond-tactiek als neigh: legen en herleren.
+var arpLast = map[uint32]time.Time{}
+
+// arpForLocked stuurt een ARP-request voor een on-subnet bestemming (mu
+// vast). Off-subnet gaat via de gateway en die leert passief (elk inbound
+// pakket van buiten draagt zijn MAC); on-subnet first-contact niet — daar is
+// dit de enige weg.
+func arpForLocked(dstIP uint32) {
+	if uplink == nil || !onSubnet(dstIP) {
+		return
+	}
+	if t, ok := arpLast[dstIP]; ok && time.Since(t) < time.Second {
+		return
+	}
+	if len(arpLast) >= maxNeigh {
+		arpLast = map[uint32]time.Time{}
+	}
+	arpLast[dstIP] = time.Now()
+	var f [42]byte
+	for i := range 6 {
+		f[i] = 0xFF // broadcast
+	}
+	copy(f[6:12], uplink.mac[:])
+	f[12], f[13] = 0x08, 0x06 // ARP
+	a := f[14:]
+	a[0], a[1], a[2], a[3], a[4], a[5] = 0, 1, 0x08, 0, 6, 4 // eth/IPv4
+	a[7] = 1                                                 // oper = request
+	copy(a[8:14], uplink.mac[:])
+	binary.BigEndian.PutUint32(a[14:], uplink.ip)
+	// tha (a[18:24]) blijft 0 — onbekend, dat is de vraag.
+	binary.BigEndian.PutUint32(a[24:], dstIP)
+	uplink.Transmit(f[:])
+}
+
+// arpLearn leert spa→sha uit een inbound ARP (reply én request dragen beide
+// een geldig sender-paar). Alleen on-subnet en spa ≠ 0: een ARP-probe
+// (spa 0.0.0.0, RFC 5227) draagt geen bruikbaar adres — en zou via
+// learnLocked's off-subnet-tak zelfs het gateway-MAC vergiftigen.
+func arpLearn(f []byte) {
+	if len(f) < 42 || f[12] != 0x08 || f[13] != 0x06 {
+		return
+	}
+	a := f[14:]
+	if binary.BigEndian.Uint16(a[0:]) != 1 || a[2] != 0x08 || a[3] != 0 || a[4] != 6 || a[5] != 4 {
+		return
+	}
+	if op := binary.BigEndian.Uint16(a[6:]); op != 1 && op != 2 {
+		return
+	}
+	spa := binary.BigEndian.Uint32(a[14:])
+	if spa == 0 {
+		return
+	}
+	mu.Lock()
+	if onSubnet(spa) {
+		learnLocked(spa, a[8:14])
+	}
+	mu.Unlock()
+}
+
 // l2For geeft de dst-MAC om dstIP te bereiken (mu vast): de geleerde neighbor,
 // of de gateway voor een off-subnet/onbekende bestemming.
 func l2For(dstIP uint32) ([6]byte, bool) {
@@ -296,7 +361,13 @@ func natInbound(f []byte) bool {
 	if uplink == nil {
 		return false
 	}
-	learnLocked(srcIP, f[6:12])
+	// srcIP 0.0.0.0 (DHCP-discover/request van een buurman, broadcast) of een
+	// multicast-bron-MAC niet leren: 0.0.0.0 is off-subnet en zou via
+	// learnLocked het gateway-MAC vergiftigen — elk apparaat op het LAN dat
+	// DHCP't werd dan even "de gateway" (review-kruimel #10).
+	if srcIP != 0 && f[6]&1 == 0 {
+		learnLocked(srcIP, f[6:12])
+	}
 	if replyInLocked(f, ip, l4, proto) {
 		return true
 	}
@@ -419,7 +490,12 @@ func natOutbound(src int, f []byte) bool {
 
 	nextHop, known := l2For(dstIP)
 	if !known {
-		return true // gateway/next-hop nog niet geleerd: drop, retransmit volgt
+		// First-contact (Altra 14-07): een on-subnet bestemming die ons nooit
+		// eerder iets stuurde is onbekend — passief leren komt dan nooit. Vraag
+		// het net (ARP-request, rate-limited); de reply leert de neighbor
+		// (arpLearn) en de TCP-retransmit van de app vindt 'm daarna.
+		arpForLocked(dstIP)
+		return true // next-hop (nog) niet geleerd: drop, retransmit volgt
 	}
 	fl := flowFor(proto, src, slotIP, sport, dstIP, dport)
 	if fl == nil {

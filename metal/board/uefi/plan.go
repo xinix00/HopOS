@@ -12,6 +12,7 @@ package uefi
 
 import (
 	"fmt"
+	"sort"
 
 	"hop-os/metal/abi/layout"
 	"hop-os/metal/fw/acpi"
@@ -95,6 +96,17 @@ func init() {
 	}
 	fmt.Printf("uefi: slot pool %d MB free RAM in %d region(s) — all reachable DRAM, no artificial cap\n",
 		poolBytes>>20, len(pool))
+	// De grootste regio's tonen: fragmentatie is hiermee in één oogopslag te
+	// zien op de console (Altra 14-07: 300GB totaal maar geen gat ≥ 96MB —
+	// dáár had deze regel de diagnose ter plekke gegeven).
+	top := append([]layout.Region(nil), pool...)
+	sort.Slice(top, func(i, j int) bool { return top[i].Size > top[j].Size })
+	if len(top) > 3 {
+		top = top[:3]
+	}
+	for _, r := range top {
+		fmt.Printf("uefi:   largest: %d MB @ %#x\n", r.Size>>20, r.Base)
+	}
 
 	layout.UsePlan(layout.Plan{
 		CtrlPA:        b + ctrlOff,
@@ -141,15 +153,19 @@ func init() {
 func usablePool() []layout.Region {
 	b := uint64(Base())
 	hopEnd := b + poolOff // HOP's kern-RAM + carve: verboden
-	var regs []layout.Region
+	// 1. Rauwe bruikbare spans verzamelen (geclipt op de voetafdruk en
+	//    vaLimit), nog ZONDER 2MB-uitlijnen: eerst coalescen. Een server-map
+	//    (Altra: duizenden Conventional/BSData/BSCode-descriptors om en om)
+	//    lijkt anders één grote fragmentatie — "pool full or fragmented" bij
+	//    300GB vrij (gemeten 14-07, 12 van 127 taken kregen een partitie) —
+	//    en elke descriptor-grens verliest tot 4MB aan trim.
+	var raw []layout.Region
 	add := func(start, end uint64) {
 		if end > vaLimit { // buiten het MMU-bereik (geen 48-bit VA nu)
 			end = vaLimit
 		}
-		start = (start + pool2M - 1) &^ uint64(pool2M-1) // base omhoog
-		end &^= uint64(pool2M - 1)                       // end omlaag
-		if end > start && end-start >= pool2M {
-			regs = append(regs, layout.Region{Base: start, Size: end - start})
+		if end > start {
+			raw = append(raw, layout.Region{Base: start, Size: end - start})
 		}
 	}
 	for _, d := range MemoryMap() {
@@ -170,6 +186,17 @@ func usablePool() []layout.Region {
 			if end > hopEnd {
 				add(hopEnd, end)
 			}
+		}
+	}
+	// 2. Aangrenzend/overlappend samensmelten (layout.Coalesce): descriptor-
+	//    grenzen zijn firmware-administratie, geen RAM-grenzen. 3. Dán pas
+	//    2MB-uitlijnen (stage-2-korrel) en te kleine stukken droppen.
+	var regs []layout.Region
+	for _, s := range layout.Coalesce(raw) {
+		start := (s.Base + pool2M - 1) &^ uint64(pool2M-1) // base omhoog
+		end := (s.Base + s.Size) &^ uint64(pool2M-1)       // end omlaag
+		if end > start && end-start >= pool2M {
+			regs = append(regs, layout.Region{Base: start, Size: end - start})
 		}
 	}
 	return regs

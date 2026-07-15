@@ -28,6 +28,7 @@ func resetNAT() {
 	flowsRev = map[rkey]*flow{}
 	masqNext = uint16(MasqBase)
 	flowsFull = false
+	arpLast = map[uint32]time.Time{}
 	inject = make(chan []byte, 256)
 }
 
@@ -526,5 +527,104 @@ func TestOutboundZonderNextHopDropt(t *testing.T) {
 	defer mu.Unlock()
 	if len(flowsFwd) != 0 {
 		t.Fatal("drop hoort geen flow achter te laten")
+	}
+}
+
+// First-contact naar een on-subnet host (Altra 14-07: de eerste loader-golf
+// dropte al z'n SYNs — de Mac-mini was nooit geleerd en niemand vroeg het
+// net): een onbekende on-subnet bestemming moet een ARP-request uitlokken,
+// de reply leert de neighbor, en de retransmit gaat dan wél de deur uit.
+func TestARPFirstContact(t *testing.T) {
+	resetNAT()
+	nic := setUplink(t)
+
+	slotIP := layout.SlotIP4(1)
+	syn := mkFrame(protoTCP, hostMAC, layout.SlotMAC(1), slotIP, lanIP, 5555, 8000, nil)
+	mu.Lock()
+	claimed := natOutbound(1, append([]byte(nil), syn...))
+	mu.Unlock()
+	if !claimed {
+		t.Fatal("eerste SYN niet geclaimd (drop+ARP hoort het pad te zijn)")
+	}
+	if len(nic.sent) != 1 {
+		t.Fatalf("verwacht 1 ARP-request op de uplink, kreeg %d frames", len(nic.sent))
+	}
+	arp := nic.sent[0]
+	if arp[12] != 0x08 || arp[13] != 0x06 || !bytes.Equal(arp[0:6], []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}) {
+		t.Fatalf("geen broadcast-ARP: %x", arp[:14])
+	}
+	a := arp[14:]
+	if binary.BigEndian.Uint16(a[6:]) != 1 || binary.BigEndian.Uint32(a[24:]) != lanIP {
+		t.Fatal("ARP-request vraagt niet naar de bestemming")
+	}
+	if binary.BigEndian.Uint32(a[14:]) != nodeIP || !bytes.Equal(a[8:14], nicMAC[:]) {
+		t.Fatal("ARP-request draagt niet ons eigen sender-paar")
+	}
+
+	// Rate-limit: een tweede SYN direct erna → géén tweede request.
+	mu.Lock()
+	natOutbound(1, append([]byte(nil), syn...))
+	mu.Unlock()
+	if len(nic.sent) != 1 {
+		t.Fatalf("ARP-storm: %d requests binnen de rate-limit", len(nic.sent))
+	}
+
+	// De reply (zoals Receive hem aan arpLearn geeft) leert de neighbor.
+	reply := make([]byte, 42)
+	copy(reply[0:6], nicMAC[:])
+	copy(reply[6:12], lanMAC0[:])
+	reply[12], reply[13] = 0x08, 0x06
+	r := reply[14:]
+	r[0], r[1], r[2], r[3], r[4], r[5] = 0, 1, 0x08, 0, 6, 4
+	r[7] = 2 // oper = reply
+	copy(r[8:14], lanMAC0[:])
+	binary.BigEndian.PutUint32(r[14:], lanIP)
+	copy(r[18:24], nicMAC[:])
+	binary.BigEndian.PutUint32(r[24:], nodeIP)
+	arpLearn(reply)
+
+	// Retransmit: nu wél verzonden, naar het geleerde MAC.
+	mu.Lock()
+	natOutbound(1, append([]byte(nil), syn...))
+	mu.Unlock()
+	if len(nic.sent) != 2 {
+		t.Fatalf("retransmit niet verzonden (frames: %d)", len(nic.sent))
+	}
+	if !bytes.Equal(nic.sent[1][0:6], lanMAC0[:]) {
+		t.Fatal("retransmit niet naar het geleerde MAC")
+	}
+}
+
+// ARP-probes (spa 0.0.0.0, RFC 5227) en DHCP-broadcasts van buren (IPv4-src
+// 0.0.0.0) mogen niets leren — zeker het gateway-MAC niet (kruimel #10:
+// elk DHCP'end apparaat op het LAN werd anders even "de gateway").
+func TestGeenPoisoningUitProbesEnDHCP(t *testing.T) {
+	resetNAT()
+	setUplink(t)
+	leerGateway(t)
+	rogue := [6]byte{0x02, 0xBA, 0xD0, 0x00, 0x00, 0x99}
+
+	// ARP-probe: spa 0 → arpLearn negeert 'm volledig.
+	probe := make([]byte, 42)
+	copy(probe[6:12], rogue[:])
+	probe[12], probe[13] = 0x08, 0x06
+	p := probe[14:]
+	p[0], p[1], p[2], p[3], p[4], p[5] = 0, 1, 0x08, 0, 6, 4
+	p[7] = 1
+	copy(p[8:14], rogue[:])
+	binary.BigEndian.PutUint32(p[24:], nodeIP)
+	arpLearn(probe)
+
+	// DHCP-discover van een buurman: src-IP 0.0.0.0 → natInbound leert niks.
+	dhcp := mkFrame(protoUDP, [6]byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, rogue, 0, 0xFFFFFFFF, 68, 67, []byte{0x01})
+	natInbound(dhcp)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if gwMAC != gwMAC0 {
+		t.Fatalf("gateway-MAC vergiftigd: %x", gwMAC)
+	}
+	if _, ok := neigh[0]; ok {
+		t.Fatal("IP 0.0.0.0 als neighbor geleerd")
 	}
 }

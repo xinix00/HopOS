@@ -236,6 +236,30 @@ copy:
 	CMP	R2, R0
 	BLT	copy
 
+	// Relocatie (mkkernel -reloc): één payload voor álle vensters. De
+	// u32-tabel (·uefiReloc: [0]=offset t.o.v. de payload-start, [1]=aantal)
+	// wijst elk 8-byte-woord met een absoluut adres aan; de kopie draait op
+	// L ≠ linkbasis T0, dus: woord += L − T0. Count 0 = klassieke
+	// multi-variant-PE: overslaan. Vóór het cache-onderhoud hieronder,
+	// zodat de gepatchte woorden mee de lijn af gaan.
+	MOVD	$·uefiReloc(SB), R0
+	MOVD	8(R0), R6		// aantal entries
+	CBZ	R6, relocdone
+	MOVD	(R0), R3		// tabel-offset t.o.v. payload-start
+	MOVD	runtime∕goos·RamStart(SB), R2	// T0 (B-kant, PC-relatief)
+	ADD	R22, R2, R1		// payload1B (B-kant payload-basis)
+	ADD	R1, R3			// &tabel (B-kant)
+	SUB	R2, R23, R5		// delta = L − T0
+relocnext:
+	MOVWU.P	4(R3), R1		// volgende u32-offset
+	ADD	R23, R1			// &woord in de kopie (L-kant)
+	MOVD	(R1), R2
+	ADD	R5, R2
+	MOVD	R2, (R1)
+	SUB	$1, R6
+	CBNZ	R6, relocnext
+relocdone:
+
 	// De variantkopie is maagdelijk: ImageHandle/SystemTable en de
 	// memory-map-vondst moeten alsnog naar de L-kant. delta (R5) vertaalt
 	// een B-kant-symbooladres (PC-relatief, payload 1) naar de gekozen

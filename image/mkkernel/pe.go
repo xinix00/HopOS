@@ -64,8 +64,9 @@ type peSection struct {
 // overige venster-varianten (zelfde build, ander linkadres): die komen als
 // read-only data ná variant 0, elk op stride bytes — de stub kopieert de
 // gekozen variant naar zijn linkadres, dus de loader hoeft ze alleen in het
-// geheugen te zetten.
-func wrapPE(img []byte, f *elf.File, load, entryOff uint64, extras [][]byte, stride uint32) []byte {
+// geheugen te zetten. tail (reloc-modus, wederzijds exclusief met extras) is
+// de u32-relocatietabel: één RO-sectie op tailOff ná de payload.
+func wrapPE(img []byte, f *elf.File, load, entryOff uint64, extras [][]byte, stride uint32, tail []byte, tailOff uint32) []byte {
 	round := func(v uint64) uint32 { return uint32((v + 0xfff) &^ 0xfff) }
 
 	// Elk PT_LOAD één sectie. De segmenten liggen gesorteerd en pagina-rond
@@ -112,6 +113,18 @@ func wrapPE(img []byte, f *elf.File, load, entryOff uint64, extras [][]byte, str
 		end = payRVA + uint32(len(extras))*stride
 	}
 
+	// De relocatietabel (mkkernel -reloc): één RO-sectie ná de payload, op
+	// het offset dat ook in ·uefiReloc gepatcht is (de stub rekent
+	// payload-basis + tailOff).
+	if len(tail) > 0 {
+		tabRVA := peHeaderSize + tailOff
+		if tabRVA < end {
+			panic("mkkernel: reloc-tabel overlapt de payload-secties")
+		}
+		secs = append(secs, peSection{".rtab", tabRVA, round(uint64(len(tail))), secInitD | secRead})
+		end = tabRVA + round(uint64(len(tail)))
+	}
+
 	// De lege .reloc als staart.
 	relocRVA := end
 	const relocSize = 12 // PageRVA(4) + BlockSize(4) + 2 ABSOLUTE-pad-entries
@@ -122,6 +135,9 @@ func wrapPE(img []byte, f *elf.File, load, entryOff uint64, extras [][]byte, str
 	copy(out[peHeaderSize:], img)
 	for i, e := range extras {
 		copy(out[peHeaderSize+stride+uint32(i)*stride:], e)
+	}
+	if len(tail) > 0 {
+		copy(out[peHeaderSize+tailOff:], tail)
 	}
 
 	// DOS-header: alleen de magic en de verwijzing naar de PE-header.

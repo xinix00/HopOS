@@ -18,11 +18,13 @@
 package main
 
 import (
+	"bytes"
 	"debug/elf"
 	"encoding/binary"
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -145,11 +147,16 @@ func main() {
 	loadAddr := flag.Uint64("load", 0x200000, "laadadres (kernel_address; arm64-default van de Pi-firmware; bij -pe genegeerd — dan uit de ELF afgeleid)")
 	raw := flag.Bool("raw", false, "geen arm64 Image-header: alleen de code0-branch, géén ARM\\x64-magic — de firmware behandelt het bestand dan als raw binary en springt blind naar kernel_address (het Circle-recept; boot-meting 2026-07-08: het Image-pad mét magic weigerde onze kernel zonder enig levensteken, het raw-pad is op de Pi 5 bewezen)")
 	pe := flag.Bool("pe", false, "verpak als AArch64 PE/COFF UEFI-applicatie (BOOTAA64.EFI) met venster-varianten — zie de package-doc")
+	reloc := flag.Bool("reloc", false, "met -pe: één payload + relocatietabel i.p.v. N volledige varianten — de varianten dienen alleen als diff-bewijs (vereist -ldflags -buildid= op elke variant; zie docs/pe-relocatie.md)")
 	flag.Parse()
 	if len(elfPaths) == 0 {
 		die("-elf is verplicht")
 	}
 
+	if *pe && *reloc {
+		writePEReloc(elfPaths, *outPath)
+		return
+	}
 	if *pe {
 		writePE(elfPaths, *outPath)
 		return
@@ -178,6 +185,115 @@ func main() {
 	}
 	fmt.Printf("%s: %d bytes (image_size %#x, entry %#x @ load %#x)\n",
 		*outPath, len(img), memEnd, p.f.Entry, p.load)
+}
+
+// writePEReloc bouwt de UEFI-applicatie uit ÉÉN payload + een relocatietabel
+// (docs/pe-relocatie.md): de varianten zijn dezelfde build op verschillende
+// linkadressen en verschillen dus uitsluitend in 8-byte-woorden die een
+// absoluut adres dragen — die verschillen exact de linkbasis-delta. De diff
+// levert de tabel én bewijst de aanname per build: één woord dat niet zuiver
+// +delta is (of een staart-/groottemismatch) is een gebroken toolchain-
+// aanname en faalt HARD — bouw dan zonder -reloc en onderzoek. De stub
+// (init.s) kopieert de payload naar het gekozen venster en telt bij elk
+// tabel-woord (venster − linkbasis) op. Winst: 6×12,3MB → 1×12,3MB + ~200KB,
+// en extra kandidaten zijn voortaan 8 bytes i.p.v. een hele variant.
+func writePEReloc(paths []string, outPath string) {
+	if len(paths) < 2 {
+		die("-reloc vergt minstens 2 varianten: één payload + minstens één schaduw voor het diff-bewijs")
+	}
+	var ps []payload
+	for _, path := range paths {
+		ps = append(ps, flatten(path, deriveLoad(path)))
+	}
+	for _, p := range ps[1:] {
+		if len(p.img) != len(ps[0].img) || p.entryOff != ps[0].entryOff {
+			die("varianten verschillen (grootte %d vs %d, entry %#x vs %#x) — zelfde build op ander -T vereist",
+				len(p.img), len(ps[0].img), p.entryOff, ps[0].entryOff)
+		}
+	}
+
+	// De diff over de MAAGDELIJKE images (vóór elke patch): elk afwijkend
+	// woord moet in élke variant exact de eigen linkbasis-delta dragen.
+	img0 := ps[0].img
+	n := len(img0) / 8
+	var relocs []uint32
+	for k := 0; k < n; k++ {
+		off := k * 8
+		w0 := binary.LittleEndian.Uint64(img0[off:])
+		same := true
+		for _, p := range ps[1:] {
+			if binary.LittleEndian.Uint64(p.img[off:]) != w0 {
+				same = false
+				break
+			}
+		}
+		if same {
+			continue
+		}
+		for _, p := range ps[1:] {
+			want := w0 + (p.load - ps[0].load) // uint64-wrap is de bedoeling
+			if got := binary.LittleEndian.Uint64(p.img[off:]); got != want {
+				die("reloc-diff @ %#x: %#x vs %#x is geen zuivere linkbasis-delta (%#x) — gebroken aanname (-buildid= vergeten? toolchain gewijzigd?); bouw zonder -reloc en onderzoek",
+					off, w0, got, p.load-ps[0].load)
+			}
+		}
+		relocs = append(relocs, uint32(off))
+	}
+	for _, p := range ps[1:] {
+		if !bytes.Equal(img0[n*8:], p.img[n*8:]) {
+			die("staartbytes (niet-woord-uitgelijnd) verschillen tussen varianten")
+		}
+	}
+
+	// RamStart: in de klassieke modus per variant het eigen linkadres; hier
+	// waarde T0 in de payload + een tabel-entry, zodat de stub-relocatie er
+	// vanzelf het gekozen venster van maakt. (Maagdelijk is hij 0 in élke
+	// variant en dus nooit al in de tabel.)
+	ps[0].patch64("runtime/goos.RamStart", ps[0].load)
+	rsOff, _ := ps[0].symbol("runtime/goos.RamStart")
+	if rsOff%8 != 0 {
+		die("RamStart-offset %#x niet 8-uitgelijnd", rsOff)
+	}
+	relocs = append(relocs, uint32(rsOff))
+	sort.Slice(relocs, func(i, j int) bool { return relocs[i] < relocs[j] })
+
+	// Kandidatentabel: stride 0 — de stub-bron (payload + k×stride) is dan
+	// voor élke kandidaat de ene payload. De bases blijven absoluut (ze
+	// beschrijven vensters, geen payload-woorden) en staan bewust NIET in de
+	// reloc-tabel.
+	if _, size := ps[0].symbol("hop-os/metal/board/uefi.uefiSlots"); size < uint64(2+len(ps))*8 {
+		die("uefiSlots te klein voor %d varianten", len(ps))
+	}
+	off, _ := ps[0].symbol("hop-os/metal/board/uefi.uefiSlots")
+	binary.LittleEndian.PutUint64(ps[0].img[off:], uint64(len(ps)))
+	binary.LittleEndian.PutUint64(ps[0].img[off+8:], 0) // stride 0 = reloc-modus
+	for i, p := range ps {
+		binary.LittleEndian.PutUint64(ps[0].img[off+16+uint64(i)*8:], p.load)
+	}
+
+	// De reloc-descriptor + de tabel zelf, pagina-rond ná de payload.
+	tabOff := (uint64(len(img0)) + 0xfff) &^ 0xfff
+	roff, rsize := ps[0].symbol("hop-os/metal/board/uefi.uefiReloc")
+	if rsize < 16 {
+		die("uefiReloc te klein (%d)", rsize)
+	}
+	binary.LittleEndian.PutUint64(ps[0].img[roff:], tabOff)
+	binary.LittleEndian.PutUint64(ps[0].img[roff+8:], uint64(len(relocs)))
+	tab := make([]byte, len(relocs)*4)
+	for i, r := range relocs {
+		binary.LittleEndian.PutUint32(tab[i*4:], r)
+	}
+
+	out := wrapPE(ps[0].img, ps[0].f, ps[0].load, ps[0].entryOff, nil, 0, tab, uint32(tabOff))
+	if err := os.WriteFile(outPath, out, 0o644); err != nil {
+		die("%v", err)
+	}
+	var loads []string
+	for _, p := range ps {
+		loads = append(loads, fmt.Sprintf("%#x", p.load))
+	}
+	fmt.Printf("%s: %d bytes PE/COFF (reloc: 1 payload, %d entries), %d venster-kandidaten: %s\n",
+		outPath, len(out), len(relocs), len(ps), strings.Join(loads, " "))
 }
 
 // writePE bouwt de UEFI-applicatie uit één of meer venster-varianten:
@@ -220,7 +336,7 @@ func writePE(paths []string, outPath string) {
 	for _, p := range ps[1:] {
 		extras = append(extras, p.img)
 	}
-	out := wrapPE(ps[0].img, ps[0].f, ps[0].load, ps[0].entryOff, extras, uint32(stride))
+	out := wrapPE(ps[0].img, ps[0].f, ps[0].load, ps[0].entryOff, extras, uint32(stride), nil, 0)
 	if err := os.WriteFile(outPath, out, 0o644); err != nil {
 		die("%v", err)
 	}

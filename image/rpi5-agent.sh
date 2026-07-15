@@ -21,14 +21,27 @@ cd "$DIR/metal"
 mkdir -p out
 
 # 1. De app-image voor jobs: canoniek gelinkt (slot-1-IPA), rpi5-hooks.
-#    Zonder -s: slots.Start patcht RamStart/RamSize via de symboltabel.
+#    Zonder -s: slots patcht RamStart/RamSize via de symboltabel.
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags "rpi5 linkcpuinit" -trimpath \
 	-ldflags "-w -T 0x50010000 -R 0x1000" -o out/app5.elf ./app/appspike
 
-# 2. De agent-kern: cmd/hopos met het rpi5-board (build-tag kiest board_rpi5.go).
+# 1b. De universele apploader (rpi5-hooks) op de go:embed-plek: de node bakt
+#     'm in (embedloader) en laadt 'm als fase 1 in élk slot — de app downloadt
+#     dan zijn eigen image op zijn eigen core+netstack. Zonder ingebakken
+#     loader start geen enkele job (de twee-fase-lading is de enige route).
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags "rpi5 linkcpuinit" -trimpath \
+	-ldflags "-w -T 0x50010000 -R 0x1000" -o kern/apploaderblob/apploader.elf ./app/apploader
+# Gecomprimeerd inbakken (gzip -9: 8,4→3,1MB): de blob zit 6× in de Altra-PE
+# en 1× per Pi-image; de node pakt 'm één keer lazy uit (kern/apploaderblob).
+# -n: geen naam/tijdstempel in de gzip-header → deterministische builds.
+gzip -9 -n -f kern/apploaderblob/apploader.elf
+
+# 2. De agent-kern: cmd/hopos met het rpi5-board (build-tag kiest board_rpi5.go)
+#    + de ingebakken apploader (embedloader).
+GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
+	"$TAMAGO" build -tags "rpi5 linkcpuinit embedloader" -trimpath \
 	-ldflags "-s -w -T 0x90000 -R 0x1000" -o out/agent5.elf ./cmd/hopos
 
 # 3. ELF → raw image (Circle-recept, mkkernel).

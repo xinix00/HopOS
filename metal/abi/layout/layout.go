@@ -16,7 +16,10 @@
 // image/qemu-run.sh en moet met de IPA-constanten in sync blijven.
 package layout
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+)
 
 const (
 	// Core 0 — de HOP-kern op QEMU -M virt (RAM begint daar op 0x40000000; op
@@ -120,6 +123,29 @@ const (
 	NetRXOff       = 0x100000
 	NetRingDataCap = 0xFF000 // datacapaciteit per richting (1MB - 4KB slack)
 )
+
+// Coalesce sorteert regio's op basis en smelt overlappende/aangrenzende
+// samen. Firmware-memory-maps (UEFI) beschrijven aaneengesloten RAM als
+// duizenden losse descriptors (Conventional/BSData/BSCode om en om) —
+// descriptor-grenzen zijn administratie, geen RAM-grenzen. Zonder mergen
+// raakt een pool "vol of gefragmenteerd" terwijl er honderden GB vrij is
+// (Altra, gemeten 14-07: 300GB pool, geen gat ≥ 96MB meer na 12 taken).
+// Aanroepen VÓÓR uitlijnen/trimmen: elke kunstmatige grens kost anders tot
+// 4MB en laat snippers < korrel sterven.
+func Coalesce(regs []Region) []Region {
+	sort.Slice(regs, func(i, j int) bool { return regs[i].Base < regs[j].Base })
+	out := regs[:0]
+	for _, r := range regs {
+		if n := len(out); n > 0 && r.Base <= out[n-1].Base+out[n-1].Size {
+			if end := r.Base + r.Size; end > out[n-1].Base+out[n-1].Size {
+				out[n-1].Size = end - out[n-1].Base
+			}
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
 
 // StageAddr is het staging-contract tussen HOP en de apploader: de image
 // landt 8-uitgelijnd tegen de bovenkant van het app-RAM. Beide kanten rekenen

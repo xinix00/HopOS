@@ -116,10 +116,10 @@ regel-tabel dáár en dit hoofdstuk horen samen te wijzigen):
 Alle artifacts van `image/*.sh` landen in `metal/out/` (gitignored als één
 dir). De enige uitzondering is go:embed — dat kan niet buiten de eigen
 package-dir reiken — dus deze twee plekken bevatten gebouwde elfs náást de
-code (gitignored via `*.elf`):
+code (gitignored via `*.elf`/`*.elf.gz`):
 
 - `cmd/hopos-embed/app*.elf` — de ingebakken app-images van de P1-variant;
-- `kern/apploaderblob/apploader.elf` — de universele loader in de node.
+- `kern/apploaderblob/apploader.elf.gz` — de universele loader in de node (gzip; lazy uitgepakt bij de eerste jobstart).
 
 ## Nieuw pakket? Beslislijst
 

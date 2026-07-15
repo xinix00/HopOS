@@ -44,34 +44,6 @@ func fail(what string, err error) {
 	}
 }
 
-// memWatch logt de Go-geheugenvoetafdruk van de node: bemonstert elke seconde,
-// print de steady state elke 10s én direct zodra Sys een nieuwe piek raakt (zo
-// mist een start-storm de top nooit). Sys = totaal dat de runtime uit RamSize
-// heeft geclaimd — dát getal is de ceiling die bepaalt hoe lean RamSize mag.
-// Alles in MB. Geen time.Now-afhankelijkheid (tick-teller), dus klok-vrij.
-func memWatch() {
-	var m runtime.MemStats
-	var peakSys, peakInuse uint64
-	mb := func(b uint64) uint64 { return b >> 20 }
-	for i := 0; ; i++ {
-		runtime.ReadMemStats(&m)
-		inuse := m.HeapInuse + m.StackInuse
-		newPeak := m.Sys > peakSys || inuse > peakInuse
-		if m.Sys > peakSys {
-			peakSys = m.Sys
-		}
-		if inuse > peakInuse {
-			peakInuse = inuse
-		}
-		if newPeak || i%10 == 0 {
-			fmt.Printf("mem: sys=%dMB heap(inuse=%dMB alloc=%dMB) stack=%dMB goroutines=%d gc=%d — peak sys=%dMB inuse=%dMB\n",
-				mb(m.Sys), mb(m.HeapInuse), mb(m.HeapAlloc), mb(m.StackInuse),
-				runtime.NumGoroutine(), m.NumGC, mb(peakSys), mb(peakInuse))
-		}
-		time.Sleep(time.Second)
-	}
-}
-
 // boardExtra: optioneel board-specifiek nawerk (gezet door board_*.go in
 // zijn init) — de Pi's starten er het klokbeleid mee.
 var boardExtra func()
@@ -237,11 +209,6 @@ func main() {
 		fmt.Printf("WARNING HOPOS_RAM_CHECK_SKIPPED: no valid DTB (MemTotal=0) — skipping the RAM sanity check against layout.RequiredRAM (%d MB); trusting the static layout, offering HOP a %d MB partition pool (allocated per job)\n",
 			layout.RequiredRAM()>>20, offer>>20)
 	}
-
-	// Mem-telemetrie: de node rapporteert zijn eigen Go-voetafdruk, zodat we de
-	// kern-RAM (RamSize) lean op MÉTING dimensioneren i.p.v. een gok. Draait in
-	// beide modi (agent én headless).
-	go memWatch()
 
 	// Zonder extern netwerk kan de agent/leader niet luisteren: net.SocketFunc is
 	// nil, dus agentboot.Run zou meteen falen en fail("agent") de node alsnog

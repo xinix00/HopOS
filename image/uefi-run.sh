@@ -77,8 +77,9 @@ TAGS="uefi linkcpuinit"
 
 # In agent-modus de app-image (die de apps zelf downloaden, via de http.server
 # geserveerd als HOP_IMAGE_URL) én de universele apploader. De apploader wordt
-# NIET geserveerd maar íngebakken in de node: hij landt op de go:embed-plek
-# (kern/apploaderblob/apploader.elf) zodat de node-build (embedloader) 'm meeneemt.
+# NIET geserveerd maar íngebakken in de node: hij landt gecomprimeerd op de
+# go:embed-plek (kern/apploaderblob/apploader.elf.gz) zodat de node-build
+# (embedloader) 'm meeneemt.
 # Canoniek gelinkt (slot-1-IPA; zonder -s: slots patcht RamStart/RamSize/slotHint).
 if [ "$MODE" = agent ]; then
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
@@ -87,9 +88,17 @@ if [ "$MODE" = agent ]; then
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "uefi linkcpuinit" -trimpath \
 		-ldflags "-w -T 0x50010000 -R 0x1000" -o kern/apploaderblob/apploader.elf ./app/apploader
+	# Gecomprimeerd inbakken (gzip -9: 8,4→3,1MB — de blob zit 6× in deze PE);
+	# de node pakt 'm één keer lazy uit (kern/apploaderblob). -n: geen naam/
+	# tijdstempel in de gzip-header → deterministische builds.
+	gzip -9 -n -f kern/apploaderblob/apploader.elf
 fi
 
-# 1. Eén ELF per venster-kandidaat (zelfde build, ander -T). Parallel linken:
+# 1. Eén ELF per venster-kandidaat (zelfde build, ander -T; -buildid= zodat
+#    de varianten byte-identiek zijn op de adressen na — de eis van de
+#    reloc-diff). mkkernel -reloc verpakt er straks ÉÉN als payload en
+#    gebruikt de rest alleen als diff-bewijs (docs/pe-relocatie.md).
+#    Parallel linken:
 #    zes onafhankelijke builds, wall-clock ≈ één i.p.v. zes. PID's verzamelen
 #    en per stuk waiten: een kaal `wait` returnt onder `set -e` ALTIJD 0, dus
 #    een gefaalde background-link zou stil doorglippen en mkkernel de STALE
@@ -102,7 +111,7 @@ for base in $SLOTS; do
 	out="hopos-uefi-$MODE-$base.elf"
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "$TAGS" -trimpath \
-		-ldflags "-w -T $text -R 0x1000" -o "out/$out" "$PKG" &
+		-ldflags "-buildid= -w -T $text -R 0x1000" -o "out/$out" "$PKG" &
 	PIDS="$PIDS $!"
 	ELFS="$ELFS -elf metal/out/$out"
 done
@@ -117,7 +126,7 @@ done
 cd "$DIR"
 mkdir -p "$ESP/EFI/BOOT"
 GO111MODULE=off go run "$DIR/image/mkkernel/main.go" "$DIR/image/mkkernel/pe.go" \
-	$ELFS -o "$ESP/EFI/BOOT/BOOTAA64.EFI" -pe
+	$ELFS -o "$ESP/EFI/BOOT/BOOTAA64.EFI" -pe -reloc
 
 # 3. Verse varstore (boot-entries verouderen bij een topologie-wijziging →
 #    EDK2 valt anders in de Shell i.p.v. onze BOOTAA64 te booten).

@@ -74,7 +74,17 @@ func ramStartAsm() uint64
 // [0]=aantal, [1]=stride in bytes tussen de payload-varianten in de geladen
 // PE, [2..]=linkadres per variant (volgorde = voorkeursvolgorde; index 0 is
 // de primaire variant, waarvan ook de PE-entry en de stub zelf draaien).
+// In reloc-modus (mkkernel -reloc) is stride 0: er is één payload voor álle
+// kandidaten en de stub herleidt de adressen zelf (zie uefiReloc).
 var uefiSlots [18]uint64
+
+// uefiReloc is de relocatie-descriptor van mkkernel -reloc: [0] = offset van
+// de u32-offsettabel t.o.v. de payload-start in de geladen PE, [1] = aantal
+// entries. Elke entry wijst een 8-byte-woord met een absoluut adres aan; de
+// stub telt er (gekozen venster − linkbasis) bij op ná de kopie. [1] == 0 =
+// klassieke multi-variant-PE, de stub slaat de lus dan over. Zo draagt één
+// payload álle venster-kandidaten (74MB → ~12,5MB; docs/pe-relocatie.md).
+var uefiReloc [2]uint64
 
 // Door de stub (init.s) NA de variantkopie op de gekozen L-kant geschreven —
 // zie de package-doc. Namen zijn deel van het asm-contract.

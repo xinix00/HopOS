@@ -519,10 +519,11 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 // gealloceerd — die de echte app in fase 2 hergebruikt. De loader is een gedeelde
 // ingebakken blob (geen fetch, geen per-start-kopie). Vereist -tags embedloader.
 func StartLoader(i int, memLimit uint64, env map[string]string) error {
-	if len(apploaderblob.Loader) == 0 {
-		return fmt.Errorf("apploader niet ingebakken (bouw de node met -tags embedloader)")
+	img := apploaderblob.Loader()
+	if len(img) == 0 {
+		return fmt.Errorf("apploader niet ingebakken of uitpakken faalde (bouw de node met -tags embedloader)")
 	}
-	return Start(i, apploaderblob.Loader, memLimit, 1, env, nil, nil)
+	return Start(i, img, memLimit, 1, env, nil, nil)
 }
 
 // appRAMSize is het deel van de partitie dat de app als RAM ziet: de bovenste
