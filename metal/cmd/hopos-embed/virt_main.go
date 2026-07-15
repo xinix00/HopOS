@@ -253,7 +253,9 @@ func main() {
 		s := slots.Get(a.slot)
 		fmt.Printf("slot %d: core=on=%v app=%d hb=%d ram=%dMB (limiet was %dMB)\n",
 			a.slot, s.CoreOn, s.App, s.Heartbeat, s.RAMSize>>20, a.limit>>20)
-		if !s.CoreOn || s.App != layout.StatusReady || s.Heartbeat == 0 || s.RAMSize != a.limit {
+		// De app declareert partitie − net-ringstaart als RAM (slots.appRAMSize):
+		// de bovenste NetRingStride is zijn net-ring, geen heap.
+		if !s.CoreOn || s.App != layout.StatusReady || s.Heartbeat == 0 || s.RAMSize != a.limit-layout.NetRingStride {
 			fail("status", fmt.Errorf("slot %d inconsistent", a.slot))
 		}
 	}
@@ -359,7 +361,7 @@ func main() {
 	s = slots.Get(2)
 	fmt.Printf("herstart slot 2: core-on=%v app=%d hb=%d ram=%dMB logs=%d vec=%d\n",
 		s.CoreOn, s.App, s.Heartbeat, s.RAMSize>>20, rekLogs, s.FaultVec)
-	if !s.CoreOn || s.App != layout.StatusReady || s.Heartbeat == 0 || s.RAMSize != 48<<20 || rekLogs == 0 {
+	if !s.CoreOn || s.App != layout.StatusReady || s.Heartbeat == 0 || s.RAMSize != 48<<20-layout.NetRingStride || rekLogs == 0 {
 		fail("rekill", fmt.Errorf("verse app kwam niet op na een hard-kill (geparkeerde core niet herbruikbaar?)"))
 	}
 	if s.FaultVec != layout.FaultNone {
@@ -534,7 +536,7 @@ func main() {
 	time.Sleep(600 * time.Millisecond) // ring-logs + heartbeats laten lopen
 	for slot := 2; slot <= 3; slot++ {
 		s := slots.Get(slot)
-		if !s.CoreOn || s.Heartbeat == 0 || s.RAMSize != 64<<20 {
+		if !s.CoreOn || s.Heartbeat == 0 || s.RAMSize != 64<<20-layout.NetRingStride {
 			fail("reloc-status", fmt.Errorf("slot %d: on=%v hb=%d ram=%dMB", slot, s.CoreOn, s.Heartbeat, s.RAMSize>>20))
 		}
 	}

@@ -60,6 +60,49 @@ This is an edge system: durable state lives in object storage, not on the node. 
 ### Framebuffer — logs, not graphics
 There is no GPU driver and no mode-setting. HopOS writes its log console into the linear framebuffer the firmware already switched on, discovered through the same two universal mechanisms Linux's `simplefb`/`efifb` use (device-tree simple-framebuffer, or UEFI GOP). Boot and app logs appear on HDMI, so you can see what a node is doing without a UART cable.
 
+## Writing an app — one build, every board
+
+You develop against **HopOS, not a board**. An app never touches MMIO; everything it can see is either CPU architecture (registers, the generic timer) or the slot ABI (its control page, its message rings, its own network stack). So a single `GOOS=tamago` build produces **one artifact that runs on every HopOS node** — an Ampere Altra server core, a Raspberry Pi, QEMU — bit-for-bit the same file. The stage-2 cage is the relocation: images are linked once at the canonical slot address, and the MMU places them wherever the node has room. HOP patches the app's RAM size and slot number at load time.
+
+A complete app:
+
+```go
+package main
+
+import (
+	"net/http"
+
+	"hop-os/metal/app/applib"
+	"hop-os/metal/app/applib/appnet"
+)
+
+func main() {
+	app := applib.Init()     // READY + heartbeat + kill-flag + memory telemetry
+	appnet.Up(app)           // the app's own TCP/IP stack, on its own NIC
+
+	app.Logf("hello from slot %d", app.Slot)
+	http.ListenAndServe(":"+app.Env("ER_PORT_WEB"), nil) // published by HOP (DNAT)
+}
+```
+
+One build, no board tags:
+
+```sh
+GOOS=tamago GOARCH=arm64 ~/tamago-go/bin/go build -trimpath \
+    -ldflags "-w -T 0x50010000 -R 0x1000" -o app.elf .
+```
+
+Ship `app.elf` anywhere (object storage, any HTTP server) and submit it — to any node, or a mixed fleet of them:
+
+```sh
+curl -X POST http://node:9080/v1/jobs -d '{
+  "name": "web", "driver": "hop",
+  "artifacts": [{"url": "https://cdn.example.com/app.elf"}],
+  "memory_limit": 100663296, "cpu_shares": 1024}'
+```
+
+The node loads its embedded loader into a free slot; the app then **downloads its own image** on its own core, own network stack, into its own memory partition — the kernel never carries app payloads, and a broken download only ever costs that one slot. This is the container promise without the container matrix: no base images, no glibc/kernel versions, no per-board builds — one static Go binary, hardware isolation, every board. Write once, cage anywhere.
+
 ## What it deliberately doesn't have
 
 No shell. No exec, no second binary, no users. No persistence. No VMs, WASM or containers. No heuristic schedulers or load-guessing DVFS governors — an idle core is parked in WFE or switched off, and clock policy follows a deterministic idle signal: sustained full idle clocks the node down, the first real work clocks it straight back up (~10 ms). No display driver. No Linux.

@@ -21,6 +21,7 @@ import (
 	"hop-os/metal/app/applib"
 	"hop-os/metal/app/applib/appnet"
 	"hop-os/metal/board/appboard"
+	"hop-os/metal/board/hopslot"
 )
 
 func main() {
@@ -403,9 +404,12 @@ func smpBench(app *applib.App) {
 	}
 
 	// 1) Parallellisme-bewijs: N CPU-drukke goroutines tegelijk; elk telt per
-	// iteratie op welke core hij draaide. Zien we werk op de secundaire core(s),
-	// dan verdeelt de runtime de goroutines écht over meerdere cores. Elke
-	// goroutine yield't af en toe (Gosched) zodat de scheduler kan spreiden.
+	// iteratie op welke core hij draaide. Zien we werk op meerdere cores, dan
+	// verdeelt de runtime de goroutines écht. De core-onderscheider is het
+	// rauwe MPIDR (hopslot.MPIDR): per fysieke core gegarandeerd verschillend
+	// op elk board — CoreID is hier onbruikbaar, want dat is de SLOT-identiteit
+	// (slotHint) en die is voor alle cores van één app gelijk. Elke goroutine
+	// yield't af en toe (Gosched) zodat de scheduler kan spreiden.
 	var ran [12]atomic.Uint64
 	var wg0 sync.WaitGroup
 	const workers = 8
@@ -414,7 +418,7 @@ func smpBench(app *applib.App) {
 		go func() {
 			defer wg0.Done()
 			for i := 0; i < 2000; i++ {
-				ran[appboard.Current().CoreID()%len(ran)].Add(1)
+				ran[hopslot.MPIDR()%uint64(len(ran))].Add(1)
 				for j := 0; j < 20000; j++ {
 				}
 				if i%50 == 0 {
@@ -425,10 +429,10 @@ func smpBench(app *applib.App) {
 	}
 	wg0.Wait()
 	spread := 0
-	for c := 1; c < len(ran); c++ {
+	for c := 0; c < len(ran); c++ {
 		if v := ran[c].Load(); v > 0 {
 			spread++
-			app.Logf("SMP: core %d draaide %d iteraties", c, v)
+			app.Logf("SMP: core-bucket %d draaide %d iteraties", c, v)
 		}
 	}
 	if spread < 2 {

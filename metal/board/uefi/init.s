@@ -31,7 +31,7 @@
 // (ctrl/ringen/stage-2/net-DMA), en REVOKE_OFF is waar cpuinit VBAR_EL2
 // van de HOP-core heen zet (RamStart + offset; layout.RevokeVecPA).
 #define CARVE_SIZE 0x02000000
-#define REVOKE_OFF 0x04900800
+#define REVOKE_OFF 0x08900800
 
 TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	// EL-discriminator: de firmware roept ons als UEFI-app op EL2 aan;

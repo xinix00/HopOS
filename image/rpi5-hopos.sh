@@ -21,10 +21,10 @@ cd "$DIR/metal"
 mkdir -p out
 
 # 1. De app-image: canoniek gelinkt (slot-1-IPA, zelfde -T als op QEMU) maar
-#    met de rpi5-runtime-hooks (-tags rpi5). Zonder -s: de symboltabel is
+#    met de hopslot-runtime-hooks (board-onafhankelijk). Zonder -s: de symboltabel is
 #    nodig zodat slots.Start RamStart/RamSize kan patchen (job.MemoryLimit).
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-	"$TAMAGO" build -tags "rpi5 linkcpuinit" -trimpath \
+	"$TAMAGO" build -tags linkcpuinit -trimpath \
 	-ldflags "-w -T 0x50010000 -R 0x1000" -o cmd/hopos-embed/app5.elf ./app/appspike
 
 # 2. De HOP-kern (embed app5.elf): gelinkt op de werkelijke load 0x80000

@@ -27,14 +27,14 @@ import (
 // gebruikt er min(cores,128) van. De net-ringen liggen hier níét (meer): die
 // leven in de staart van de eigen partitie van elk slot (zie kern/slots
 // appRAMSize) en schalen zo mee met wat er draait — daarmee kromp de carve
-// van 288MB naar 32MB. HOP-kern-RAM staat op 64MB — gemeten (14-07): idle
-// 5MB Sys, 7-slot-storm-piek 14MB Sys bovenop een ~17.5MB statische image
-// (code + de ingebakken apploader-blob). Sinds elke app zíjn eigen image
-// downloadt draagt de kern geen fetch-golf meer, dus de oude 256MB-headroom
-// verviel; 64MB is ~2× de gemeten piek en past ook op kleine devices.
-// Totale claim (venster): 64 + 32 = 96MB.
+// van 288MB naar 32MB. HOP-kern-RAM staat op 128MB: 64MB (de eerste lean-
+// maat, ~2× de 7-task-piek van 14-07) bleek op de Altra te krap voor 127
+// gelijktijdige twee-fase-starts — kern-panic in de plaatsingsgolf, heap-
+// adressen tegen het plafond (gemeten 15-07). 128MB is ×4 boven die piek
+// mét 127-concurrency-marge, en nog altijd de helft van de oude 256.
+// Totale claim (venster): 128 + 32 = 160MB.
 const (
-	carveOff  = 0x04000000 // = ramSize (Go-RAM 64MB)
+	carveOff  = 0x08000000 // = ramSize (Go-RAM 128MB)
 	carveSize = 0x02000000 // CARVE_SIZE in init.s (32MB, dekt t/m scratch)
 
 	ctrlOff    = carveOff + 0x000000  // (SlotCap+1)×4KB, 1MB gereserveerd
@@ -145,8 +145,10 @@ func init() {
 //     oude 8GB;
 //   - minus HOP's eigen voetafdruk [Base, Base+poolOff) (kern-RAM + carve; die
 //     staat als LoaderData in de map en zou anders als "vrij" meetellen);
-//   - geklemd op het MMU-bereik (vaLimit = 512GB; DRAM daarboven vergt 48-bit
-//     VA — backlog, bewust nu niet). 2MB-uitgelijnd voor de stage-2-blokken.
+//   - het hoge DRAM (boven de vlakke 512GB) wordt via MapHigh per 1GB-blok
+//     bereikbaar gemaakt (48-bit VA, zelfde luik als de hoge MMIO) en telt
+//     gewoon mee — de Altra draagt daar zijn ~300GB bulk (gemeten 15-07);
+//     absoluut plafond is pa48Limit. 2MB-uitgelijnd voor de stage-2-blokken.
 //
 // De partitie-allocator (metal/kern/slots/partmem) doet first-fit met coalescing
 // over meerdere regio's, dus losse stukken passen zó in het plan.
@@ -161,8 +163,8 @@ func usablePool() []layout.Region {
 	//    en elke descriptor-grens verliest tot 4MB aan trim.
 	var raw []layout.Region
 	add := func(start, end uint64) {
-		if end > vaLimit { // buiten het MMU-bereik (geen 48-bit VA nu)
-			end = vaLimit
+		if end > pa48Limit { // absolute plafond: 48-bit PA (MapHigh-bereik)
+			end = pa48Limit
 		}
 		if end > start {
 			raw = append(raw, layout.Region{Base: start, Size: end - start})
@@ -173,7 +175,7 @@ func usablePool() []layout.Region {
 			continue
 		}
 		start, end := d.Start, d.Start+d.Pages*4096
-		if start >= vaLimit {
+		if start >= pa48Limit {
 			continue
 		}
 		switch {
@@ -189,12 +191,27 @@ func usablePool() []layout.Region {
 		}
 	}
 	// 2. Aangrenzend/overlappend samensmelten (layout.Coalesce): descriptor-
-	//    grenzen zijn firmware-administratie, geen RAM-grenzen. 3. Dán pas
-	//    2MB-uitlijnen (stage-2-korrel) en te kleine stukken droppen.
+	//    grenzen zijn firmware-administratie, geen RAM-grenzen. 3. Het hoge
+	//    deel (boven de vlakke 512GB) daadwerkelijk mappen — MapHigh, hetzelfde
+	//    luik als de 16TB-UART, per 1GB-blok; de Altra draagt zijn ~300GB
+	//    bulk-DRAM boven de grens (gemeten 15-07: pool 1,62GB zonder dit).
+	//    Faalt het mappen (48-bit-plafond, highL1-pool op), dan wordt de span
+	//    op het vlakke deel geknipt — LUID, geen stille krimp. 4. Dán pas
+	//    2MB-uitlijnen (stage-2-korrel) en te kleine stukken droppen; de
+	//    stage-2-walker kan tot 1TB uitspugen (VTCR PS=40, el2.s).
 	var regs []layout.Region
 	for _, s := range layout.Coalesce(raw) {
+		end := s.Base + s.Size
+		if end > vaLimit && !MapHigh(s.Base, s.Size) {
+			fmt.Printf("WARNING HOPOS_HIGH_DRAM_UNMAPPED: [%#x, %#x) boven de 512GB-grens niet mapbaar (%s) — pool geknipt op het vlakke deel\n",
+				s.Base, end, MapFailReason(s.Base))
+			if s.Base >= vaLimit {
+				continue
+			}
+			end = vaLimit
+		}
 		start := (s.Base + pool2M - 1) &^ uint64(pool2M-1) // base omhoog
-		end := (s.Base + s.Size) &^ uint64(pool2M-1)       // end omlaag
+		end &^= uint64(pool2M - 1)                         // end omlaag
 		if end > start && end-start >= pool2M {
 			regs = append(regs, layout.Region{Base: start, Size: end - start})
 		}

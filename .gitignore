@@ -40,3 +40,4 @@ sd-*/*.bin
 sd-*/overlays/
 # Gecomprimeerde apploader-blob op de go:embed-plek (image/*-agent.sh bouwt hem)
 *.elf.gz
+!docs/pe-relocatie.md

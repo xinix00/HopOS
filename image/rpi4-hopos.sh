@@ -26,10 +26,11 @@ DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$DIR/metal"
 mkdir -p out
 
-# 1. De app-image: canoniek gelinkt (slot-1-IPA) met rpi4-runtime-hooks. Zonder
+# 1. De app-image: canoniek gelinkt (slot-1-IPA), hopslot-hooks (board-
+#    onafhankelijk). Zonder
 #    -s: de symboltabel is nodig voor de RamStart/RamSize-patch (job.MemoryLimit).
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-	"$TAMAGO" build -tags "rpi4 linkcpuinit" -trimpath \
+	"$TAMAGO" build -tags linkcpuinit -trimpath \
 	-ldflags "-w -T 0x50010000 -R 0x1000" -o cmd/hopos-embed/app4.elf ./app/appspike
 
 # 2. De HOP-kern (embed app4.elf): gelinkt op de werkelijke load 0x80000 (+0x10000).

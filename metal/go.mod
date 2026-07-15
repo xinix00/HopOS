@@ -3,6 +3,7 @@ module hop-os/metal
 go 1.26.4
 
 require (
+	github.com/soypat/lneto v0.1.1-0.20260609173350-82f946154800
 	github.com/usbarmory/go-net v0.0.0-20260626130943-dad9ef39fd9b
 	github.com/usbarmory/tamago v1.26.4
 )
@@ -10,7 +11,6 @@ require (
 require (
 	github.com/google/btree v1.1.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/soypat/lneto v0.1.1-0.20260609173350-82f946154800 // indirect
 	github.com/xinix00/hoplock v0.0.0-00010101000000-000000000000 // indirect
 	github.com/xinix00/hoplockserver v0.0.0-00010101000000-000000000000 // indirect
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20260709184058-243e02a382f8 // indirect

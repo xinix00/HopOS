@@ -30,7 +30,9 @@ const (
 var s2buf []byte
 
 func TestMain(m *testing.M) {
-	s2buf = make([]byte, (layout.MaxSlots+2)*layout.Stage2Stride)
+	// SlotCap-maat (niet MaxSlots): de slot-105-regressietest bouwt kooien
+	// tot in de hoogste slots.
+	s2buf = make([]byte, (layout.SlotCap+2)*layout.Stage2Stride)
 	base := (uintptr(unsafe.Pointer(&s2buf[0])) + 0x7FF) &^ 0x7FF // VBAR-uitlijning
 	layout.UsePlan(layout.Plan{
 		CtrlPA:        tCtrlPA,
@@ -82,10 +84,11 @@ func TestBuildSlot1(t *testing.T) {
 	if got := rd(base + l1Off + 2*8); got != base+l2DevOff|descTable {
 		t.Fatalf("L1[ctrl-GB] = %#x", got)
 	}
-	for _, idx := range []uint64{0, 3} {
-		if got := rd(base + l1Off + idx*8); got != 0 {
-			t.Fatalf("L1[%d] = %#x, hoort leeg", idx, got)
-		}
+	if got := rd(base + l1Off + 3*8); got != base+l2NetOff|descTable {
+		t.Fatalf("L1[net-GB] = %#x", got)
+	}
+	if got := rd(base + l1Off + 0*8); got != 0 {
+		t.Fatalf("L1[0] = %#x, hoort leeg", got)
 	}
 
 	// L2part: precies size/2MB blokken, IPA→partitie-PA, en verder leeg.
@@ -111,8 +114,6 @@ func TestBuildSlot1(t *testing.T) {
 			want = base + l3CtrlOff | descTable
 		case 392:
 			want = base + l3RingOff | descTable
-		case 408:
-			want = tNetPA(1) | blockRW
 		}
 		if got != want {
 			t.Fatalf("L2dev[%d] = %#x, verwacht %#x", idx, got, want)
@@ -185,8 +186,6 @@ func TestBuildSlot3DeeltGBMetDevices(t *testing.T) {
 			want = base + l3CtrlOff | descTable
 		case idx == 392:
 			want = base + l3RingOff | descTable
-		case idx == 408+3-1:
-			want = tNetPA(3) | blockRW
 		}
 		if got != want {
 			t.Fatalf("L2dev[%d] = %#x, verwacht %#x", idx, got, want)
@@ -195,6 +194,35 @@ func TestBuildSlot3DeeltGBMetDevices(t *testing.T) {
 	// De eigen ctrl-page: index = slotnummer.
 	if got := rd(base + l3CtrlOff + 3*8); got != uint64(layout.CtrlPagePA(3))|pageRW {
 		t.Fatalf("L3ctrl[3] = %#x", got)
+	}
+	if got := rd(base + l2NetOff + 2*8); got != tNetPA(3)|blockRW {
+		t.Fatalf("L2net[2] = %#x", got)
+	}
+}
+
+// De slot-105-regressie (Altra 15-07): met de oude NetRingBase (0xB3000000)
+// liep de ring-IPA van slot ≥105 over de 1GB-L2-grens — index 512 werd stil
+// in de buurtabel geschreven en de IPA bleef ongemapt (stage-2-fault op de
+// eerste ring-read, FAR 0xC0000010; precies 104 van 127 slots leefden). In
+// het eigen net-ring-GB past ook het hoogste slot, op zijn eigen index.
+func TestBuildSlot105NetRing(t *testing.T) {
+	old := layout.MaxSlots
+	layout.SetMaxSlots(127)
+	defer layout.SetMaxSlots(old)
+	if _, err := Build(105, layout.SlotBase(1), tPoolPA, 64<<20, tNetPA(105)); err != nil {
+		t.Fatal(err)
+	}
+	base := uint64(layout.Stage2TablePA(105))
+	if got := rd(base + l1Off + 3*8); got != base+l2NetOff|descTable {
+		t.Fatalf("L1[net-GB] = %#x", got)
+	}
+	if got := rd(base + l2NetOff + 104*8); got != tNetPA(105)|blockRW {
+		t.Fatalf("L2net[104] = %#x, verwacht %#x", got, tNetPA(105)|blockRW)
+	}
+	// De oude faal-index (l2Dev-overflow in de ctrl-GB) hoort leeg te blijven:
+	// niets van de netring mag nog in het device-GB of erachter lekken.
+	if got := rd(base + l3CtrlOff); got != tBootScratchPA|pageRO {
+		t.Fatalf("L3ctrl[0] overschreven: %#x (de oude overflow-plek)", got)
 	}
 }
 

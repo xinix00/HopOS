@@ -16,17 +16,18 @@ DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$DIR/metal"
 mkdir -p out
 
-# 1. De app-image voor jobs: canoniek gelinkt (slot-1-IPA), rpi4-hooks.
+# 1. De app-image voor jobs: canoniek gelinkt (slot-1-IPA), hopslot-hooks
+#    (board-onafhankelijk — zelfde binary als op de Pi 5/QEMU/Altra).
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-	"$TAMAGO" build -tags "rpi4 linkcpuinit" -trimpath \
+	"$TAMAGO" build -tags linkcpuinit -trimpath \
 	-ldflags "-w -T 0x50010000 -R 0x1000" -o out/app4.elf ./app/appspike
 
-# 1b. De universele apploader (rpi4-hooks) op de go:embed-plek: de node bakt
+# 1b. De universele apploader (hopslot-hooks) op de go:embed-plek: de node bakt
 #     'm in (embedloader) en laadt 'm als fase 1 in élk slot — de app downloadt
 #     dan zijn eigen image op zijn eigen core+netstack. Zonder ingebakken
 #     loader start geen enkele job (de twee-fase-lading is de enige route).
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-	"$TAMAGO" build -tags "rpi4 linkcpuinit" -trimpath \
+	"$TAMAGO" build -tags linkcpuinit -trimpath \
 	-ldflags "-w -T 0x50010000 -R 0x1000" -o kern/apploaderblob/apploader.elf ./app/apploader
 # Gecomprimeerd inbakken (gzip -9: 8,4→3,1MB): de blob zit 6× in de Altra-PE
 # en 1× per Pi-image; de node pakt 'm één keer lazy uit (kern/apploaderblob).

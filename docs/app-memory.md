@@ -32,7 +32,7 @@ met meerdere threads.
 
 0xB000_0000   control-page (4KB)   status/heartbeat/kill-flag/env  — eigen slot
 0xB100_0000   hop-ABI-ringen (64KB) outbox (app→HOP: logs+RPC) / inbox (HOP→app)
-0xB300_0000   net-ringen (2MB)     TX (app→switch) / RX (switch→app), rauwe frames
+0xC000_0000   net-ringen (2MB)     TX (app→switch) / RX (switch→app), rauwe frames
                                    — fysiek: de bovenste 2MB van de eigen partitie
 ```
 
@@ -42,7 +42,7 @@ RamStart blijft het canonieke linkadres (0x50000000), RamSize = de partitie
 mínus de bovenste 2MB — dat is de net-ring van het slot ("512MB → 510 Go +
 2 netbuffer", `appRAMSize`). De app-runtime alloceert heap/stack dus binnen
 precies zijn deel en declareert de ring-staart nooit als RAM: hij ziet die
-uitsluitend device-gemapt op het canonieke 0xB300_0000 — coherentie zonder
+uitsluitend device-gemapt op het canonieke 0xC000_0000 — coherentie zonder
 cache-onderhoud, zonder statische ring-reservering in het board-plan. De
 control-page/ringen op 0xB000_0000+ zijn per slot canoniek en door stage-2
 naar de fysieke per-slot pagina's gemapt — dit is de hele hop-ABI
@@ -59,8 +59,9 @@ het slot-1-bereik en draaien zo op elk slot — de MMU is de relocatie.
 De control-page, hop-ABI-ringen en stage-2-tabellen liggen buiten de
 partitie, op het board-PA-plan (`Plan.CtrlPA/RingPA/Stage2PA`), elk per slot
 op `base + slot*stride`. De **net-ringen** liggen dáár niet: die zijn de
-bovenste 2MB van de eigen partitie (`layout.SetNetRingPA`, geregistreerd bij
-Start, gewist bij release) — ring-geheugen schaalt zo mee met wat er écht
+bovenste 2MB van de eigen partitie (de `netPA`-parameter die `kern/slots` per
+lifecycle berekent en aan ring-init/`hopswitch.Attach`/`stage2.Build`
+meegeeft) — ring-geheugen schaalt zo mee met wat er écht
 draait i.p.v. een statische SlotCap-reservering. Alle vier liggen buiten
 élke RAM-declaratie → device-gemapt → coherent zonder cache-onderhoud (de
 partitie-staart: de app declareert hem niet als RAM, HOP raakt hem alleen

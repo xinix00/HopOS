@@ -115,6 +115,36 @@ func Header(lines ...string) {
 	x, y = 0, top
 }
 
+// HeaderStatus tekent één statusveld rechts op header-regel line (0-based),
+// right-aligned tegen de schermrand — de live meetregels naast de bunny
+// (Derek 15-07: mem/datum/tijd, dan toont het scherm échte info). Het veld is
+// vast breed zodat oudere, langere tekst altijd overschreven wordt. Schrijft
+// alléén in de vaste header (nooit door de log) en raakt andere pixels dan
+// Putc (log-rijen ≥ top) — lock-vrij naast de printk-hook, zoals alles hier.
+func HeaderStatus(line int, s string) {
+	if !active || line >= top {
+		return
+	}
+	const w = 26 // dekt "mem 100% (128/128MB)" ruim
+	if len(s) > w {
+		s = s[:w]
+	}
+	start := cols - w
+	if start < 0 {
+		start = 0
+	}
+	for j := 0; j < w && start+j < cols; j++ {
+		c := byte(' ')
+		if k := j - (w - len(s)); k >= 0 && k < len(s) { // right-align
+			c = s[k]
+		}
+		if c < 0x20 || c >= 0x80 {
+			c = '?'
+		}
+		glyph(start+j, line, int(c))
+	}
+}
+
 // Disable ontkoppelt de console (bv. als de buffer ongeldig wordt, of na een
 // zelftest); Putc is daarna weer een no-op.
 func Disable() { active = false }

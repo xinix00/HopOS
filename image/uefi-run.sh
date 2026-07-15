@@ -35,11 +35,11 @@ MODE="${1:-probe}"
 [ $# -gt 0 ] && shift # rest gaat door naar QEMU (zie "$@" aan het eind)
 
 # De venster-kandidaten: de stub kiest bij boot de eerste waar AllocatePages
-# slaagt (zie metal/board/uefi). Elke kandidaat heeft 96MB aaneengesloten
-# vrij RAM nodig vanaf zijn basis: Go-RAM 64MB (0x04000000, gemeten: piek
-# 14MB Sys + ~17.5MB image) + carve 32MB (0x02000000, de net-ringen verhuisden
-# naar de partitie-staart van elk slot) = 0x06000000. De slot-pool komt
-# daarná uit ál het resterende bruikbare DRAM (usablePool).
+# slaagt (zie metal/board/uefi). Elke kandidaat heeft 160MB aaneengesloten
+# vrij RAM nodig vanaf zijn basis: Go-RAM 128MB (0x08000000; 64MB bleek op
+# 15-07 te krap voor 127 gelijktijdige twee-fase-starts) + carve 32MB
+# (0x02000000, de net-ringen leven in de partitie-staart) = 0x0A000000. De
+# slot-pool komt daarná uit ál het resterende bruikbare DRAM (usablePool).
 #
 # Herijking (review golf-2 #5): AFGEROND door de krimp — de lijst werd ooit
 # voor een 128MB-claim gekozen en de claim is nu 96MB, dus elke kandidaat
@@ -83,10 +83,10 @@ TAGS="uefi linkcpuinit"
 # Canoniek gelinkt (slot-1-IPA; zonder -s: slots patcht RamStart/RamSize/slotHint).
 if [ "$MODE" = agent ]; then
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-		"$TAMAGO" build -tags "uefi linkcpuinit" -trimpath \
+		"$TAMAGO" build -tags linkcpuinit -trimpath \
 		-ldflags "-w -T 0x50010000 -R 0x1000" -o out/app-uefi.elf ./app/appspike
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-		"$TAMAGO" build -tags "uefi linkcpuinit" -trimpath \
+		"$TAMAGO" build -tags linkcpuinit -trimpath \
 		-ldflags "-w -T 0x50010000 -R 0x1000" -o kern/apploaderblob/apploader.elf ./app/apploader
 	# Gecomprimeerd inbakken (gzip -9: 8,4→3,1MB — de blob zit 6× in deze PE);
 	# de node pakt 'm één keer lazy uit (kern/apploaderblob). -n: geen naam/

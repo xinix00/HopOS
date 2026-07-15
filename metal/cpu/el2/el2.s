@@ -36,9 +36,21 @@ TEXT s2tramp(SB),NOSPLIT|NOFRAME,$0
 	MOVD	0xC8(R0), R7	// layout.CtrlMboxPA
 	WORD	$0xd51cd047	// msr tpidr_el2, x7
 
-	// VTCR_EL2: 4KB-granule, 32-bit IPA, PS=40-bit PA-output (de pool kan
-	// boven 4GB liggen — de hoge helft van een 8GB-Pi).
-	MOVD	$0x80023560, R4
+	// VTCR_EL2: 4KB-granule, 32-bit IPA, PS = min(PARange, 44-bit). De pool
+	// ligt op servers vér boven de oude 40-bit/1TB-aanname (Altra: het
+	// bulk-DRAM huist in dezelfde hoge regionen als de 16TB-UART — gemeten
+	// 15-07: met PS=40 stierf elke loader op een address-size-fault bij zijn
+	// eerste instructie uit een hoge partitie). Klemmen op het silicium is
+	// verplicht: PS bóven PARange is constrained unpredictable (Pi's
+	// A72/A76 melden 40-bit). 44-bit dekt 16TB — ruim boven elk DRAM-plan.
+	WORD	$0xd5380705	// mrs x5, id_aa64mmfr0_el1
+	AND	$0xF, R5
+	CMP	$4, R5
+	BLT	vtcrps		// PARange < 44-bit: het silicium-maximum
+	MOVD	$4, R5		// anders klemmen op 44-bit (16TB)
+vtcrps:
+	MOVD	$0x80003560, R4	// VTCR zonder PS-veld
+	ORR	R5<<16, R4, R4
 	WORD	$0xd51c2144	// msr vtcr_el2, x4
 
 	// VTTBR_EL2 = L1-tabel | VMID(slot)<<48; oude vertalingen vegen.

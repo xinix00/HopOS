@@ -44,6 +44,26 @@ func fail(what string, err error) {
 	}
 }
 
+// screenStatus ververst de meetregels rechts naast de bunny (fb.HeaderStatus,
+// de bovenste drie header-regels): kern-mem als percentage van de eigen
+// RAM-declaratie, datum en tijd mét seconden — elke seconde, dus een bevroren
+// klok verraadt een hangende kern meteen. ReadMemStats is een korte
+// stop-the-world; op 1Hz verwaarloosbaar (zelfde afweging als applib's watch).
+func screenStatus() {
+	start, end := runtime.MemRegion()
+	total := uint64(end - start)
+	var ms runtime.MemStats
+	for {
+		runtime.ReadMemStats(&ms)
+		fb.HeaderStatus(0, fmt.Sprintf("mem %d%% (%d/%dMB)",
+			ms.Sys*100/total, ms.Sys>>20, total>>20))
+		now := time.Now()
+		fb.HeaderStatus(1, now.Format("02-01-2006"))
+		fb.HeaderStatus(2, now.Format("15:04:05"))
+		time.Sleep(time.Second)
+	}
+}
+
 // boardExtra: optioneel board-specifiek nawerk (gezet door board_*.go in
 // zijn init) — de Pi's starten er het klokbeleid mee.
 var boardExtra func()
@@ -102,6 +122,10 @@ func main() {
 		fb.Header(bunny...) // vaste bunny bovenin, de logs scrollen eronder
 		fmt.Printf("console: framebuffer %dx%d @ %#x, %d bpp — mirroring log to display\n",
 			d.Width, d.Height, uint64(d.Base), d.BPP)
+		// Live meetregels rechts naast de bunny (Derek 15-07): kern-mem,
+		// datum, tijd — met seconden, elke seconde ververst: een bevroren
+		// klok = een hangende kern, in één oogopslag.
+		go screenStatus()
 	}
 
 	// Netwerk opbrengen. Geen harde eis (net als storage en SNTP hieronder):

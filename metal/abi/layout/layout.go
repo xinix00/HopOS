@@ -117,7 +117,13 @@ const (
 	// de eigen partitie van het slot (RamSize = partitie − NetRingStride, zie
 	// kern/slots) — ring-geheugen schaalt zo mee met wat er écht draait,
 	// geen statische SlotCap-reservering in het board-plan.
-	NetRingBase    = 0xB3000000
+	// NetRingBase heeft een EIGEN GB (niet de ctrl/ring-GB): 128 × 2MB = 256MB
+	// past nooit boven CtrlBase in het 0x80000000-GB — de oude basis
+	// (0xB3000000) liet slot ≥ 105 over de 1GB-L2-grens lopen: ring-IPA
+	// ongemapt → stage-2-fault op de eerste ring-read (FAR 0xC0000010,
+	// gemeten op de Altra 15-07: precies 104 slots leefden, 23 stierven).
+	// De kooi mapt dit GB met een eigen L2 (stage2 l2Net).
+	NetRingBase    = 0xC0000000
 	NetRingStride  = 0x200000 // 2MB per slot
 	NetTXOff       = 0x0
 	NetRXOff       = 0x100000

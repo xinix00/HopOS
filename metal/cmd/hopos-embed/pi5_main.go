@@ -108,7 +108,7 @@ func main() {
 	s := slots.Get(1)
 	fmt.Printf("slot 1: core-on=%v app=%d hb=%d ram=%dMB logs=%d\n",
 		s.CoreOn, s.App, s.Heartbeat, s.RAMSize>>20, logs1)
-	if !s.CoreOn || s.App != layout.StatusReady || s.Heartbeat == 0 || s.RAMSize != 64<<20 || logs1 == 0 {
+	if !s.CoreOn || s.App != layout.StatusReady || s.Heartbeat == 0 || s.RAMSize != 64<<20-layout.NetRingStride || logs1 == 0 {
 		fail("status", fmt.Errorf("slot 1 inconsistent"))
 	}
 	if err := slots.Stop(1, 3*time.Second); err != nil {

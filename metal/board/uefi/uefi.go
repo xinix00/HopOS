@@ -235,6 +235,11 @@ func usableRAM(t uint32) bool {
 // de echte fix (48-bit VA in tamago's InitMMU) staat op de backlog.
 const vaLimit = 1 << 39
 
+// pa48Limit is het absolute PA-plafond van de 48-bit-wereld die extendVA
+// opzet (T0SZ=16): tot hier kan MapHigh mappen — voor MMIO én, sinds 15-07,
+// voor het hoge DRAM van de slot-pool (Altra: ~300GB boven de vlakke 512GB).
+const pa48Limit = uint64(1) << 48
+
 // Reachable meldt of [base, base+size) binnen het MMU-bereik van de kern
 // valt: onder de vlakke 512GB, of in een via MapHigh gemapt hoog blok —
 // check vóór gebruik van elk adres dat de firmware aanlevert (SPCR-UART,

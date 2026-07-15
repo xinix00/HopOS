@@ -27,13 +27,16 @@ if [ ! -x "$TAMAGO" ]; then
 	echo "tamago-gate OVERGESLAGEN ($TAMAGO ontbreekt)" >&2
 	exit 0
 fi
+# App-images zijn board-onafhankelijk (board/hopslot via applib): één build
+# dekt alle boards. De apploader is de enige startroute (twee-fase-lading):
+# bouwt hij niet, dan start geen enkele job — dus hard in de gate. De
+# lnetonet-variant is de opt-in netstack-backend (appnet/up_lneto.go); die
+# moet blijven bouwen tot hij na NETDEMO+soak de default wordt.
+for tags in "linkcpuinit" "lnetonet linkcpuinit"; do
+	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
+		"$TAMAGO" build -tags "$tags" -o /dev/null ./app/appspike ./app/apploader
+done
 for tags in "linkcpuinit" "rpi4 linkcpuinit" "rpi5 linkcpuinit" "uefi linkcpuinit"; do
-	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-		"$TAMAGO" build -tags "$tags" -o /dev/null ./app/appspike
-	# De apploader is de enige startroute (twee-fase-lading): een board waarvoor
-	# hij niet bouwt kan geen enkele job starten — dus per board mee in de gate.
-	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-		"$TAMAGO" build -tags "$tags" -o /dev/null ./app/apploader
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "$tags" -o /dev/null ./cmd/hopos
 done

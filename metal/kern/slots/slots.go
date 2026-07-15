@@ -303,9 +303,13 @@ func (s *servicer) dispatchSMP() {
 const (
 	symRAMStart = "runtime/goos.RamStart"
 	symRAMSize  = "runtime/goos.RamSize"
-	// Slot-identiteit voor app-images op UEFI/ACPI-servers (zie de patch in
-	// Start; alleen gepatcht als het symbool bestaat).
-	symSlotHint = "hop-os/metal/board/uefi.slotHint"
+	// Slot-identiteit voor app-images (zie de patch in Start; alleen gepatcht
+	// als het symbool bestaat). Twee namen, één contract: hopslot is het
+	// generieke app-board (elke nieuwe app-image), uefi de oude per-board
+	// variant — die naam blijft tot er geen uefi-getagde app-images meer
+	// rondzwerven.
+	symSlotHint    = "hop-os/metal/board/uefi.slotHint"
+	symSlotHintGen = "hop-os/metal/board/hopslot.slotHint"
 )
 
 // ctrlRead/ctrlWrite: 64-bit velden op een control-page (device-gemapt).
@@ -480,6 +484,9 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 	if err != nil {
 		return err
 	}
+	// Eén regel per plaatsing: op een headless node is dít hoe je ziet wáár
+	// een slot fysiek landt (sinds 15-07 ook boven de 512GB-grens).
+	fmt.Printf("slot %d: partition %d MB @ %#x\n", i, size>>20, base)
 	var started bool
 	defer func() {
 		if !started {
@@ -628,11 +635,11 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 			}
 			dev.Write64(uintptr(s.Value+delta), v)
 			patched++
-		case symSlotHint:
-			// Optioneel slot-hint-symbool (uefi-app-images): op servers is
-			// MPIDR géén slotnummer (Altra: aff0 altijd 0), dus HOP vertelt de
-			// app bij Start zíjn slot. Additief: Pi/virt-images hebben het
-			// symbool niet en merken hier niets van.
+		case symSlotHint, symSlotHintGen:
+			// Optioneel slot-hint-symbool (hopslot- en uefi-app-images): op
+			// servers is MPIDR géén slotnummer (Altra: aff0 altijd 0), dus HOP
+			// vertelt de app bij Start zíjn slot. Additief: images zonder het
+			// symbool merken hier niets van.
 			if s.Value%8 == 0 && s.Value >= linkBase && s.Value <= linkBase+appRAM-8 {
 				dev.Write64(uintptr(s.Value+delta), uint64(i))
 			}

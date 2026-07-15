@@ -77,9 +77,22 @@ onder rpi4/rpi5 (met `raspi/vcfb` als gedeelde hop-helft voor de
 framebuffer-discovery) — dat is het precedent voor toekomstige SoC-packages
 (O6N/cixp1: onder board/, naast de boards die hem gebruiken).
 
-**`app/`** — alles wat ín een slot draait: `applib` (runtime + appnet),
-`appspike` (de referentie-app), `apploader` (downloadt het echte app-image
-in het slot). Binaries van de app-kant horen hier, niet in `cmd/`.
+Sinds 15-07 linkt een app-image zelfs geen boárd meer: **`hopslot`** is het
+generieke app-board — onder stage-2 raakt een app geen MMIO of firmware-tabel,
+dus alles wat hij nodig heeft (arch-timer, stille printk, MMIO-vrije RNG, de
+kale EL1-cpuinit, slot via de door HOP gepatchte slotHint) is
+board-onafhankelijk. De kooi ís het board: één app-binary draait ongewijzigd
+op QEMU, de Pi's en de Altra. `applib` importeert hopslot (applib/board.go);
+board-tags doen voor app-images niets meer en bestaan alleen nog voor
+HOP-binaries. De per-board basis-helften blijven voor de HOP-kern zelf (die
+boot via firmware en wél UART/DTB/ACPI raakt).
+
+**`app/`** — alles wat ín een slot draait: `applib` (runtime; kiest ook het
+board — altijd `board/hopslot` — zodat een app-dir alleen main.go bevat),
+`applib/appnet` (de per-slot netstack: default gVisor, `-tags lnetonet` de
+lichte lneto-backend), `appspike` (de referentie-app), `apploader` (downloadt
+het echte app-image in het slot). Binaries van de app-kant horen hier, niet
+in `cmd/`.
 
 **`cmd/`** — de HOP-kant binaries: `hopos` (de agent), `hopos-embed` (de
 fase-P1-kern met ingebakken app-image), `probe4/5/6`, `probeuefi`.

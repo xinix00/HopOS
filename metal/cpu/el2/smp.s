@@ -54,8 +54,16 @@ TEXT smpEL2Tramp(SB),NOSPLIT|NOFRAME,$0
 	MOVD	0x50(R1), R3	// layout.CtrlVecPA
 	WORD	$0xd51cc003	// msr vbar_el2, x3
 
-	// VTCR_EL2: 4KB-granule, 32-bit IPA, PS=40-bit (identiek aan el2.s).
-	MOVD	$0x80023560, R4
+	// VTCR_EL2: 4KB-granule, 32-bit IPA, PS = min(PARange, 44-bit) —
+	// identiek aan el2.s (zie dáár waarom: hoge partities + silicium-klem).
+	WORD	$0xd5380705	// mrs x5, id_aa64mmfr0_el1
+	AND	$0xF, R5
+	CMP	$4, R5
+	BLT	vtcrps2		// PARange < 44-bit: het silicium-maximum
+	MOVD	$4, R5		// anders klemmen op 44-bit (16TB)
+vtcrps2:
+	MOVD	$0x80003560, R4	// VTCR zonder PS-veld
+	ORR	R5<<16, R4, R4
 	WORD	$0xd51c2144	// msr vtcr_el2, x4
 
 	// VTTBR_EL2 = gedeelde L1 | VMID(primair)<<48 → deelt de partitie van de

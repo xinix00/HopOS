@@ -49,21 +49,29 @@ func align2M(n uint64) uint64 { return (n + part2M - 1) &^ (part2M - 1) }
 // het fysieke basisadres. Een eerdere reservering van i wordt eerst
 // vrijgegeven (defensief bij een re-Start). Fout als de pool geen
 // aaneengesloten gat van deze maat meer heeft.
+//
+// HOOG-EERST: de top van de hoogste passende regio (partFree is base-
+// gesorteerd, dus achteraan beginnen). Het lage DRAM is op servers schaars
+// en kostbaar — het draagt de venster-kandidaten en het onder-4GB-bereik
+// voor toekomstige DMA — terwijl de bulk (Altra: ~300GB boven de 512GB-
+// grens, via MapHigh bereikbaar) alleen partities draagt. Laag-eerst zou
+// het lage blok volproppen en de bulk nooit raken.
 func partAlloc(i int, size uint64) (uint64, error) {
 	partOnce.Do(poolInit)
 	size = align2M(size)
 	partMu.Lock()
 	defer partMu.Unlock()
 	releaseLocked(i)
-	for idx, r := range partFree {
+	for idx := len(partFree) - 1; idx >= 0; idx-- {
+		r := partFree[idx]
 		if r.size < size {
 			continue
 		}
-		base := r.base
+		base := r.base + r.size - size // de top van de regio
 		if r.size == size {
 			partFree = append(partFree[:idx], partFree[idx+1:]...)
 		} else {
-			partFree[idx] = region{r.base + size, r.size - size}
+			partFree[idx] = region{r.base, r.size - size}
 		}
 		partOf[i] = region{base, size}
 		return base, nil

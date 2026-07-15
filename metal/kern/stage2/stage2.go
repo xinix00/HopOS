@@ -13,10 +13,13 @@
 //
 // Vorm: 4KB-granule, 32-bit IPA (VTCR.T0SZ=32, startlevel 1):
 //
-//	L1[4]    1GB/entry: [ipa>>30]→L2part, [2]→L2dev (0x80000000-)
+//	L1[4]    1GB/entry: [ipa>>30]→L2part, [2]→L2dev (0x80000000-),
+//	         [3]→L2net (0xC0000000-: het net-ring-GB)
 //	L2part   2MB-blokken: canoniek IPA-bereik → eigen slot-partitie (PA)
-//	L2dev    [384]→L3ctrl (2MB rond CtrlBase), [392+..]→L3ring,
-//	         [408+i-1] = eigen 2MB net-ring-blok als blockRW (frame-ringen)
+//	L2dev    [384]→L3ctrl (2MB rond CtrlBase), [392+..]→L3ring
+//	L2net    [i-1] = eigen 2MB net-ring-blok als blockRW (frame-ringen; een
+//	         eigen GB — 128×2MB paste niet in het ctrl-GB: slot ≥105 liep
+//	         over de 1GB-grens, Altra 15-07)
 //	L3ctrl   scratch-page read-only (PSCI-conduitkeuze), eigen ctrl-page RW
 //	L3ring   de eigen 64KB ring-regio RW
 //
@@ -53,6 +56,9 @@ const (
 	l2DevOff  = 0x2000
 	l3CtrlOff = 0x3000
 	l3RingOff = 0x4000
+	l2NetOff  = 0x5000 // het net-ring-GB (NetRingBase heeft een eigen GB —
+	// 128×2MB past niet in het ctrl-GB; slot ≥105 liep daar over de
+	// 1GB-L2-grens: de Altra-vondst van 15-07)
 )
 
 // InitVectors schrijft de gedeelde EL2-vectoren op Stage2Base (2KB-aligned
@@ -272,6 +278,7 @@ func Build(i int, ipaBase, paBase, size, netRingPA uint64) (uint64, error) {
 	l2Dev := uint64(base + l2DevOff)
 	l3Ctrl := uint64(base + l3CtrlOff)
 	l3Ring := uint64(base + l3RingOff)
+	l2Net := uint64(base + l2NetOff)
 
 	// De tabel is de IPA→PA-vertaling: alle índexen hieronder komen uit het
 	// IPA-beeld (de universele layout-constanten die de app ziet), alle
@@ -302,11 +309,19 @@ func Build(i int, ipaBase, paBase, size, netRingPA uint64) (uint64, error) {
 	ringIPA := uint64(layout.RingOutbox(i)) &^ ((2 << 20) - 1)
 	dev.Write64(uintptr(l2Dev)+uintptr((ringIPA-devGB)>>21)*8, l3Ring|descTable)
 
-	// Het eigen 2MB net-ring-blok (frame-ringen app↔switch) als één blok RW —
-	// IPA-blok → fysiek plan-blok (2MB-aligned, bewaakt door UsePlan);
-	// andermans blokken staan nergens in deze map.
+	// Het eigen 2MB net-ring-blok (frame-ringen app↔switch) als één blok RW,
+	// in het eigen net-ring-GB (L2net): IPA-blok → partitie-staart (2MB-
+	// aligned, hierboven bewaakt); andermans blokken staan nergens in deze
+	// map. De index wordt begrensd: layout-drift hoort hier hard te vallen,
+	// niet stil in een buurtabel te schrijven (de slot-105-les van 15-07).
 	netIPA := uint64(layout.NetRingTX(i))
-	dev.Write64(uintptr(l2Dev)+uintptr((netIPA-devGB)>>21)*8, netRingPA|blockRW)
+	netGB := uint64(layout.NetRingBase) &^ ((1 << 30) - 1)
+	netIdx := (netIPA - netGB) >> 21
+	if netIdx > 511 {
+		return 0, fmt.Errorf("net-ring-IPA %#x buiten het net-ring-GB (index %d)", netIPA, netIdx)
+	}
+	dev.Write64(base+l1Off+uintptr(netGB>>30)*8, l2Net|descTable)
+	dev.Write64(uintptr(l2Net)+uintptr(netIdx)*8, netRingPA|blockRW)
 
 	// L3ctrl: boot-scratch read-only op zijn IPA (conduitkeuze), eigen
 	// ctrl-page RW — elk naar hun fysieke plek uit het plan.

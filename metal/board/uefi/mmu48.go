@@ -16,8 +16,9 @@
 // waarin de core oud+nieuw kan mengen. Met MMU uit is er geen vertaling om
 // te mengen — en de routine raakt in dat venster geen geheugen aan.
 //
-// Bewust NIET gedaan: het hoge DRAM (Altra: boven ~512GB) mappen — de kern
-// en de slots leven onder de grens; dat komt met de layout-opschaling.
+// Sinds 15-07 mapt usablePool via ditzelfde luik ook het hoge DRAM (Altra:
+// de ~300GB bulk boven 512GB) — de slot-pool is daarmee de volle machine;
+// alleen de kern zelf (Go-RAM + carve) blijft onder de grens leven.
 package uefi
 
 import (
