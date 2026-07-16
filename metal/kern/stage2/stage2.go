@@ -31,6 +31,7 @@ package stage2
 import (
 	"fmt"
 
+	"hop-os/metal/abi/a64"
 	"hop-os/metal/abi/layout"
 	"hop-os/metal/dev"
 )
@@ -235,23 +236,12 @@ func Revoke(i int) {
 	hvcRevoke()
 }
 
-// Minimale AArch64-encoders voor de vector-generator: één bron van waarheid
-// (de constanten) i.p.v. hand-gebakken instructiewoorden. Zie ARM ARM C6.2.
-//
-//	movz Xd, #imm16, lsl #shift   (shift ∈ {0,16,32,48})
-//	movk Xd, #imm16, lsl #shift
-//	str  Xt, [Xn, #off]           (off veelvoud van 8, 64-bit)
-func movz(rd, imm16, shift uint32) uint32 {
-	return 0xD2800000 | (shift/16)<<21 | (imm16&0xFFFF)<<5 | rd&0x1F
-}
-
-func movk(rd, imm16, shift uint32) uint32 {
-	return 0xF2800000 | (shift/16)<<21 | (imm16&0xFFFF)<<5 | rd&0x1F
-}
-
-func strX(rt, rn, off uint32) uint32 {
-	return 0xF9000000 | (off/8)<<10 | (rn&0x1F)<<5 | rt&0x1F
-}
+// De AArch64-encoders (movz/movk/strX) komen uit abi/a64 — gedeeld met de
+// zelfplaats-stub-generator (applib/selfplace.go); dunne aliassen zodat de
+// vector-generator hierboven leesbaar blijft.
+func movz(rd, imm16, shift uint32) uint32 { return a64.Movz(rd, imm16, shift) }
+func movk(rd, imm16, shift uint32) uint32 { return a64.Movk(rd, imm16, shift) }
+func strX(rt, rn, off uint32) uint32      { return a64.StrX(rt, rn, off) }
 
 // Build schrijft de stage-2-tabellen voor slot i en geeft het fysieke adres
 // van de L1-tabel terug (voor VTTBR_EL2, gezet door de EL2-trampoline).

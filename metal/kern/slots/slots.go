@@ -13,13 +13,13 @@
 package slots
 
 import (
-	"debug/elf"
 	"fmt"
 	"io"
 	"sync"
 	"time"
 
 	"hop-os/metal/abi/layout"
+	"hop-os/metal/abi/place"
 	"hop-os/metal/abi/ring"
 	"hop-os/metal/board"
 	"hop-os/metal/dev"
@@ -297,21 +297,6 @@ func (s *servicer) dispatchSMP() {
 	dev.MB()
 }
 
-// Namen van de runtime-symbolen die bij het laden gepatcht worden. Zo wordt
-// HOP's job.MemoryLimit letterlijk de RAM-declaratie van de app-runtime —
-// een harde fysieke grens, nul handhavingscode.
-const (
-	symRAMStart = "runtime/goos.RamStart"
-	symRAMSize  = "runtime/goos.RamSize"
-	// Slot-identiteit voor app-images (zie de patch in Start; alleen gepatcht
-	// als het symbool bestaat). Twee namen, één contract: hopslot is het
-	// generieke app-board (elke nieuwe app-image), uefi de oude per-board
-	// variant — die naam blijft tot er geen uefi-getagde app-images meer
-	// rondzwerven.
-	symSlotHint    = "hop-os/metal/board/uefi.slotHint"
-	symSlotHintGen = "hop-os/metal/board/hopslot.slotHint"
-)
-
 // ctrlRead/ctrlWrite: 64-bit velden op een control-page (device-gemapt).
 // HOP-kant: fysiek adres uit het board-plan (de app leest dezelfde page via
 // zijn IPA; de stage-2 verbindt de twee).
@@ -390,7 +375,6 @@ type Status struct {
 	Heartbeat uint64
 	RAMSize   uint64 // door de app gerapporteerde (gepatchte) RAM-maat
 	MemSys    uint64 // werkelijke draw: MemStats.Sys van de app (0 = nog niet gemeld)
-	Idle      uint64 // idle-governor-tikken (cpu/idle → CtrlIdle; 0 = nooit geïdled)
 
 	// Door de EL2-vectoren gerapporteerd bij een onvrijwillig einde:
 	// FaultVec = layout.FaultSync (stage-2-fault; ESR/FAR geldig) — zowel bij
@@ -568,90 +552,61 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 	if err != nil {
 		return err
 	}
-	netPA := base + appRAM
-	// Parsen vanuit de gestreamde device-kopie (geen kern-RAM-kopie).
-	f, err := elf.NewFile(devReaderAt{base: stageAddr, size: imgSize})
+	// Het plan (parse + álle validatie + patchwaarden) komt uit abi/place —
+	// dezelfde bron van waarheid als de zelfplaatsing (applib/selfplace.go).
+	// Gelezen vanuit de gestreamde device-kopie (geen kern-RAM-kopie); het
+	// linkvenster is het canonieke contract (slot-1-basis, de stage-2 is de
+	// relocatie) en het plafond de staging-onderkant: segmenten mogen hun
+	// eigen kopieerbron niet raken.
+	linkBase := uint64(layout.SlotBase(1))
+	plan, err := place.Build(devReaderAt{base: stageAddr, size: imgSize}, imgSize,
+		linkBase, appRAM, uint64(stageAddr)-base, i)
 	if err != nil {
-		return fmt.Errorf("elf parse: %w", err)
+		return err
 	}
-
-	// Het linkadres van de image bepaalt zijn IPA-bereik; de stage-2-map
-	// legt dat op de fysieke partitie van dít slot. Images zijn canoniek
-	// gelinkt (slot-1-bereik) en draaien zo op elk slot — de MMU is de
-	// relocatie.
-	if f.Entry < layout.SlotsBase || f.Entry >= layout.SlotsBase+uint64(layout.MaxSlots)*uint64(layout.SlotStride) {
-		return fmt.Errorf("entry %#x outside every slot range", f.Entry)
-	}
-	linked := int((f.Entry-layout.SlotsBase)/layout.SlotStride) + 1
-	linkBase := layout.SlotBase(linked)
 	if max := maxLimitFor(linkBase); memLimit > max {
 		return fmt.Errorf("memLimit %d MB > %d MB slot-cap (één GB-blok vanaf linkadres %#x, geklemd onder CtrlBase; groter vergt vensteruitbreiding — zie slots/partmem.go)", memLimit>>20, max>>20, linkBase)
 	}
 	delta := base - linkBase // PA = linkadres + delta (identiek slot: 0)
 
-	// Segmenten naar de partitie, device→device (dev.Move, kleine stack-buffer
-	// — geen kern-RAM voor de hele image). Headervelden zijn input:
-	// overflow-veilig begrenzen, én het segment mag de staging bovenin niet
-	// raken (anders overschrijven we de bron tijdens het kopiëren).
-	for _, p := range f.Progs {
-		if p.Type != elf.PT_LOAD {
-			continue
-		}
-		if p.Filesz > p.Memsz || p.Memsz > appRAM ||
-			p.Paddr < linkBase || p.Paddr > linkBase+appRAM-p.Memsz {
-			return fmt.Errorf("segment %#x+%#x (file %#x) outside link range of slot %d (%#x+%#x)",
-				p.Paddr, p.Memsz, p.Filesz, linked, linkBase, appRAM)
-		}
-		// p.Off is óók input (de image komt van het netwerk): de bron-read
-		// [stageAddr+Off, +Off+Filesz) moet binnen de gestreamde image blijven,
-		// anders leest dev.Move buiten de staging — een andere partitie, HOP-RAM
-		// of MMIO — de eigen (leesbare) partitie in. Overflow-veilig getoetst.
-		if p.Off > uint64(imgSize) || p.Filesz > uint64(imgSize)-p.Off {
-			return fmt.Errorf("segment file-offset %#x+%#x outside staged image (%d bytes) of slot %d",
-				p.Off, p.Filesz, imgSize, linked)
-		}
-		if p.Paddr+delta+p.Memsz > uint64(stageAddr) {
-			return fmt.Errorf("segment %#x+%#x botst met de image-staging (partitie te klein)", p.Paddr, p.Memsz)
-		}
-		dev.Move(uintptr(p.Paddr+delta), stageAddr+uintptr(p.Off), p.Filesz)
-		dev.Clear(uintptr(p.Paddr+delta)+uintptr(p.Filesz), p.Memsz-p.Filesz)
+	// Het plan uitvoeren, device→device (dev.Move, kleine stack-buffer — geen
+	// kern-RAM voor de hele image); RamStart blijft het línkadres (de app
+	// ziet IPA's, de stage-2 vertaalt), RamSize = app-RAM (partitie −
+	// net-ring — de staart is nooit heap/stack).
+	for _, s := range plan.Segs {
+		dev.Move(uintptr(s.Dst+delta), stageAddr+uintptr(s.Off), s.Filesz)
+		dev.Clear(uintptr(s.Dst+delta)+uintptr(s.Filesz), s.Memsz-s.Filesz)
+	}
+	for _, p := range plan.Patches {
+		dev.Write64(uintptr(p.Addr+delta), p.Val)
 	}
 
-	// job.MemoryLimit → RAM-declaratie van de app-runtime patchen. RamStart
-	// blijft het línkadres: dat is wat de app ziet (de stage-2 vertaalt).
-	// (Vereist een niet-gestripte symboltabel: app-images bouwen met -w,
-	// zonder -s.)
-	syms, err := f.Symbols()
+	return armSlot(i, base, size, plan.Entry, memLimit, cores, envBlob, mtab, ports)
+}
+
+// armSlot is de gedeelde slotstart-staart: servicer/switch-hygiëne, verse
+// control-page + ringen, stage-2-kooi, en de (her)dispatch van de core op
+// entry. Twee aanroepers: placeFromStaging (HOP plaatste de bytes zelf, entry
+// = de app-entry uit de ELF) en het zelfplaats-pad van StartStaged (de loader
+// plaatste voor, entry = het stubje dat op de eigen core de segmenten schuift
+// en dan de app inspringt — zie applib/selfplace.go).
+func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlob []byte, mtab [][2]string, ports map[string]int) error {
+	appRAM, err := appRAMSize(size)
 	if err != nil {
-		return fmt.Errorf("symbols (app-image met -s gebouwd?): %w", err)
+		return err
 	}
-	patched := 0
-	for _, s := range syms {
-		switch s.Name {
-		case symRAMStart, symRAMSize:
-			if s.Value%8 != 0 || s.Value < linkBase || s.Value > linkBase+appRAM-8 {
-				return fmt.Errorf("symbol %s (%#x) outside link range of slot %d", s.Name, s.Value, linked)
-			}
-			// RamSize = app-RAM (partitie − net-ring), niet de kale memLimit:
-			// de app mag de staart nooit als heap/stack declareren (appRAMSize).
-			v := linkBase
-			if s.Name == symRAMSize {
-				v = appRAM
-			}
-			dev.Write64(uintptr(s.Value+delta), v)
-			patched++
-		case symSlotHint, symSlotHintGen:
-			// Optioneel slot-hint-symbool (hopslot- en uefi-app-images): op
-			// servers is MPIDR géén slotnummer (Altra: aff0 altijd 0), dus HOP
-			// vertelt de app bij Start zíjn slot. Additief: images zonder het
-			// symbool merken hier niets van.
-			if s.Value%8 == 0 && s.Value >= linkBase && s.Value <= linkBase+appRAM-8 {
-				dev.Write64(uintptr(s.Value+delta), uint64(i))
-			}
-		}
+	netPA := base + appRAM
+	// Entry bepaalt het canonieke IPA-venster (zelfde afleiding als de
+	// ELF-route); voor het zelfplaats-pad is dit tevens de hygiëne-check op
+	// het onvertrouwde CtrlPlaceEntry — buiten de kooi wijzen kán niet (de
+	// stage-2 vertaalt alleen het eigen venster), maar gericht falen is netter.
+	if entry < layout.SlotsBase || entry >= layout.SlotsBase+uint64(layout.MaxSlots)*uint64(layout.SlotStride) {
+		return fmt.Errorf("entry %#x outside every slot range", entry)
 	}
-	if patched != 2 {
-		return fmt.Errorf("RAM symbols not found (%d/2 patched)", patched)
+	linked := int((entry-layout.SlotsBase)/layout.SlotStride) + 1
+	linkBase := layout.SlotBase(linked)
+	if max := maxLimitFor(linkBase); memLimit > max {
+		return fmt.Errorf("memLimit %d MB > %d MB slot-cap (één GB-blok vanaf linkadres %#x)", memLimit>>20, max>>20, linkBase)
 	}
 
 	// SPSC-hygiëne: geen oude servicer meer op deze ringen vóór her-init,
@@ -707,7 +662,7 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 	if err != nil {
 		return fmt.Errorf("stage-2 slot %d: %w", i, err)
 	}
-	ctrlWrite(i, layout.CtrlEntry, f.Entry)
+	ctrlWrite(i, layout.CtrlEntry, entry)
 	ctrlWrite(i, layout.CtrlS2Table, l1)
 	ctrlWrite(i, layout.CtrlVecPA, uint64(layout.VecBasePA()))
 	ctrlWrite(i, layout.CtrlSlot, uint64(i))
@@ -785,6 +740,13 @@ func StartStaged(i int, memLimit uint64, cores int, env map[string]string, mount
 	if imgSize <= 0 {
 		return fmt.Errorf("StartStaged: geen gestagede image in slot %d (CtrlStagedSize=%d)", i, imgSize)
 	}
+	// Zelfplaatsing: heeft de loader een plaatsings-stubje klaargezet
+	// (applib/selfplace.go), dan hoeft HOP geen byte te schuiven — alleen de
+	// kooi wapenen en de core op het stubje dispatchen; dat schuift op zijn
+	// eigen core de segmenten en springt de app in. 0 = legacy (HOP plaatst
+	// vanaf de staging). Vóór het venster gelezen: de ctrl-clear in armSlot
+	// veegt het veld zo meteen.
+	placeEntry := ctrlRead(i, layout.CtrlPlaceEntry)
 	defer lifecycleWindow()()
 	t0 := time.Now() // venster-tijd — wat de convoy serialiseert (zie Start)
 	vectorsOnce.Do(stage2.InitVectors)
@@ -804,6 +766,16 @@ func StartStaged(i int, memLimit uint64, cores int, env map[string]string, mount
 	appRAM, err := appRAMSize(size)
 	if err != nil {
 		return err
+	}
+	if placeEntry != 0 {
+		// Geen CleanInv en geen parse op core 0: het stubje veegt op zíjn
+		// core eerst heel app-RAM (DC CIVAC — dezelfde coherentie-stap, maar
+		// per-slot-parallel) en schuift dan de al-gevalideerde segmenten.
+		if err := armSlot(i, base, size, placeEntry, memLimit, cores, envBlob, mtab, ports); err != nil {
+			return err
+		}
+		fmt.Printf("slot %d: self-place dispatched in %s\n", i, time.Since(t0).Round(time.Millisecond))
+		return nil
 	}
 	addr, _, fits := layout.StageAddr(base, appRAM, imgSize)
 	if !fits {
@@ -837,23 +809,17 @@ func Stop(i int, timeout time.Duration) error {
 	if err := checkSlot(i); err != nil {
 		return err
 	}
-	// De kill-flag vroeg — vóór het geserialiseerde venster — zodat bij een
-	// stort-stop (delete-storm) álle apps alvast parallel richting hun park
-	// gaan terwijl eerdere Stops nog in het venster staan; anders krijgt app
-	// N+1 zijn flag pas als Stop N volledig klaar is en betaalt élke stop de
-	// volle wachttijd serieel (Altra-meting 15-07: 127 deletes ≈ tientallen
-	// minuten). Alleen op boards zonder DMA-stil venster: op de C1-familie
-	// (NetQuiescer) hoort ook het coöperatieve park bínnen het venster te
-	// vallen (kill+park naast lopende RX-DMA is daar dodelijk — 13-07).
-	if _, ok := board.Current().(board.NetQuiescer); !ok {
-		ctrlWrite(i, layout.CtrlKill, 1)
-		dev.MB()
-	}
 	// Eén lifecycle tegelijk, in een DMA-stil venster: ook de coöperatieve
 	// kill parkeert een core — gemeten (13-07, torture): kill+park naast
-	// lopende RX-DMA is dodelijk op C1.
+	// lopende RX-DMA is dodelijk op C1. De kill-flag hoort BINNEN het venster:
+	// een vroege write buiten het lock (probeersel 15-07) racete met een
+	// parallelle Start op hetzelfde slot en landde dan op de nét geveegde
+	// ctrl-page van de VOLGENDE huurder — die exitte braaf binnen 50ms
+	// ("apploader exited before staging", de ronde-10-cascade). Sinds de
+	// I$-fix gehoorzamen apps de kill in ~50ms, dus ook een delete-storm is
+	// binnen het venster snel: ~200ms per stop i.p.v. de oude 10s-timeouts.
 	defer lifecycleWindow()()
-	ctrlWrite(i, layout.CtrlKill, 1) // idempotent na het vroege pad
+	ctrlWrite(i, layout.CtrlKill, 1)
 	dev.MB()
 	// Coöperatieve kans voor de app (de kill-watcher parkeert zijn eigen core).
 	waitStopped(i, timeout)
@@ -914,7 +880,6 @@ func Get(i int) Status {
 		Heartbeat: ctrlRead(i, layout.CtrlHeartbeat),
 		RAMSize:   ctrlRead(i, layout.CtrlRAMSize),
 		MemSys:    ctrlRead(i, layout.CtrlMemSys),
-		Idle:      ctrlRead(i, layout.CtrlIdle),
 		FaultVec:  ctrlRead(i, layout.CtrlFaultVec),
 		FaultESR:  ctrlRead(i, layout.CtrlFaultESR),
 		FaultFAR:  ctrlRead(i, layout.CtrlFaultFAR),

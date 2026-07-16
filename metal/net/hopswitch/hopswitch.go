@@ -70,7 +70,11 @@ func Up() error {
 		return nil
 	}
 	ports = make([]*port, layout.MaxSlots+1) // MaxSlots staat vast na board-init
-	inject = make(chan []byte, 256)
+	// 1024 diep (was 256): dit is de buffer tussen de NIC-drain en de
+	// switch-pass; bij een 127-flow-storm was 256×~1,5KB het smalste stuk
+	// van de keten (NIC-ring 2MB → hier 384KB → slot-ring 1MB) en elke
+	// overloop is een TCP-verlies. ~1,5MB kern-heap op de piek — niks op 128MB.
+	inject = make(chan []byte, 1024)
 	go loop()
 	up = true
 	return nil

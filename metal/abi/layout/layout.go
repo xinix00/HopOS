@@ -498,6 +498,18 @@ const (
 	// gerapporteerd (de control-page wordt bij elke start geveegd).
 	CtrlMemSys = 0xE8
 
+	// Apploader → HOP (zelfplaatsing, 15-07): IPA van het door de loader
+	// gegenereerde plaatsings-stubje — een platte instructielijst net onder de
+	// staging die op de eigen core de segmenten op hun linkadressen schuift,
+	// BSS nult, RamStart/RamSize/slotHint patcht en de app-entry inspringt.
+	// HOP dispatcht de geparkeerde core hierheen i.p.v. zelf bytes te
+	// schuiven: het kopieerwerk wordt per-slot-parallel en core 0 houdt alleen
+	// kooi+dispatch over. 0 = geen zelfplaatsing → HOP plaatst legacy vanaf de
+	// staging (óók het vangnet voor een image die de loader niet kon parsen).
+	// Niet vertrouwd voor isolatie: het stubje draait ín de kooi — wijst het
+	// verkeerd, dan fault alleen dit slot (vec/ESR/FAR als elke overtreding).
+	CtrlPlaceEntry = 0xF0
+
 	// Env-blob: door HOP geschreven "key=val\n..."-bytes die de app-lib bij
 	// start inleest (de Docker-vorm: env meegegeven bij het starten). Vervangt
 	// het kernel-envp dat bare metal niet heeft.

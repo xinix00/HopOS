@@ -339,9 +339,20 @@ func (a *App) StageImage(r io.Reader, imgSize int64) error {
 	if got != imgSize {
 		return fmt.Errorf("StageImage: image incompleet: %d van %d bytes", got, imgSize)
 	}
-	// Onze cacheable writes naar de staging naar RAM duwen: HOP leest die regio
-	// ongecachet (device) bij het plaatsen — zonder deze flush ziet hij stale RAM.
+	// Onze cacheable writes naar de staging naar RAM duwen: HOP (legacy-pad)
+	// leest die regio ongecachet bij het plaatsen — zonder deze flush ziet hij
+	// stale RAM. Ook het zelfplaats-stubje leest de staging ongecachet.
 	dev.CleanInv(stageAddr, uintptr(staged))
+	// Zelfplaatsing (zie selfplace.go): parseer en valideer de image hier, op
+	// eigen core en cacheable, en genereer het plaatsings-stubje. Lukt dat
+	// niet (exotische image, symbolen zoek), dan blijft CtrlPlaceEntry 0 en
+	// plaatst HOP legacy vanaf de staging — met zijn eigen nette fout als de
+	// image echt kapot is.
+	if stub, err := a.selfPlace(stageAddr, imgSize); err == nil {
+		*a.ctrl(layout.CtrlPlaceEntry) = stub
+	} else {
+		a.Logf("apploader: self-place unavailable (%v) — HOP will place from staging", err)
+	}
 	// Seinen: eerst de maat, dan de status (HOP leest de maat pas ná StatusStaged).
 	*a.ctrl(layout.CtrlStagedSize) = uint64(imgSize)
 	dev.MB()

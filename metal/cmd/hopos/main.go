@@ -128,23 +128,6 @@ func main() {
 		go screenStatus()
 	}
 
-	// slotdbg (tijdelijk, zombie-jacht 15-07): elke 2s de rauwe ctrl-page-
-	// velden van slot 1-2 op de console — zichtbaar op het scherm zonder
-	// debug-kabel. Zo zien we per boot-fase welke velden bewegen: heartbeat
-	// (watch-lus), idle (governor), mem (telemetrie), status (levensloop).
-	// Alleen bezette lage slots; de solo-diagnosetests landen daar.
-	go func() {
-		for {
-			for i := 1; i <= 2; i++ {
-				s := slots.Get(i)
-				if s.CoreOn || s.App != 0 {
-					fmt.Printf("slotdbg %d: on=%v st=%d hb=%d idle=%d mem=%dKB vec=%d\n",
-						i, s.CoreOn, s.App, s.Heartbeat, s.Idle, s.MemSys>>10, s.FaultVec)
-				}
-			}
-			time.Sleep(2 * time.Second)
-		}
-	}()
 
 	// Netwerk opbrengen. Geen harde eis (net als storage en SNTP hieronder):
 	// een board dat geen link/DHCP krijgt (ProbeNIC faalt hard na zijn eigen

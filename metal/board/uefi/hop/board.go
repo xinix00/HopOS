@@ -170,6 +170,17 @@ func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
 	if err := nic.Init(layout.NetDMAPA(), layout.NetDMASize); err != nil {
 		return nil, nil, err
 	}
+	// Drop-wachter (netdoorvoer-jacht 15-07): de clear-on-read-tellers elke
+	// 10s peilen en alleen printen als er iets te melden is — structureel
+	// missed/nobuf onder last = de RX-drain is de fles, niet de lijn.
+	go func() {
+		for {
+			time.Sleep(10 * time.Second)
+			if m, nb := nic.Stats(); m|nb != 0 {
+				fmt.Printf("igb: dropped frames: missed=%d nobuf=%d (last 10s)\n", m, nb)
+			}
+		}
+	}()
 	l, err := dhcp.Acquire(nic, nic.MAC, 15*time.Second)
 	if err != nil {
 		return nil, nil, err
