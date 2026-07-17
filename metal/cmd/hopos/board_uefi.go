@@ -8,6 +8,7 @@
 package main
 
 import (
+	"strconv"
 	"time"
 	_ "unsafe" // go:linkname (RAM-declaratie)
 
@@ -33,4 +34,19 @@ func init() {
 
 	// Node-identiteit: het NIC-MAC volgt zodra hopnet up is; tot die tijd
 	// volstaat de main-default. (SMBIOS-serial: latere verfijning.)
+
+	// Node-config uit hopos.cfg op de stick (door de stub vóór
+	// ExitBootServices via de firmware-FAT gelezen — HopOS leest de
+	// platform-config, HOP-userspace kan er niet bij). Zelfde sleutels als de
+	// Pi-cmdline; beheer = het tekstbestandje bewerken, geen rebuild.
+	// hopos.cores niet gezet → default 1: geen verspilling bij weinig apps;
+	// opt-in hoger als de flow er druk genoeg voor is (N=2 op de Altra:
+	// netdoorvoer 1,63×, gemeten 17-07).
+	hopCores = func() int {
+		if n, err := strconv.Atoi(uefi.BootConfig("hopos.cores")); err == nil && n >= 1 {
+			return n
+		}
+		return 1
+	}
+	nodeName = func() string { return uefi.BootConfig("hopos.node") }
 }

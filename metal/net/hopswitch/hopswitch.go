@@ -7,8 +7,9 @@
 // HOP heeft géén eigen interne TCP-stack meer. Wat de apps van de gateway
 // nodig hebben is precies twee dingen, en die doet de switch zelf:
 //   - ARP voor de gateway (10.100.0.1) beantwoorden (arpReplyGateway);
-//   - uitgaand verkeer naar buiten masqueraden en de antwoorden terug
-//     injecteren (nat.go) — geen tunnel, alleen header-herschrijving.
+//   - uitgaand verkeer naar buiten masqueraden en de antwoorden rechtstreeks
+//     in de slot-ring terugleggen (nat.go/deliverLocked) — geen tunnel,
+//     alleen header-herschrijving.
 //
 // Adressering is deterministisch, geen tabellen die leren: het net-plan
 // (subnet, per-slot IP/MAC, gateway) leeft in metal/abi/layout, zodat de switch
@@ -54,12 +55,6 @@ var (
 	mu    sync.Mutex
 	ports []*port // [1..MaxSlots]; in Up() gedimensioneerd (MaxSlots is runtime)
 	up    bool
-
-	// inject draagt frames van de uplink-kant (DNAT-inbound en
-	// masquerade-antwoorden, nat.go) naar de switch-lus, die ze op hun
-	// dst-MAC bij het juiste slot aflevert. Ontkoppelt de uplink-RX-goroutine
-	// van de switch-lus (geen gedeeld slot, geen deadlock op mu).
-	inject chan []byte
 )
 
 // Up start de switch-lus; idempotent. Aanroepen vóór de eerste slots.Start.
@@ -70,11 +65,6 @@ func Up() error {
 		return nil
 	}
 	ports = make([]*port, layout.MaxSlots+1) // MaxSlots staat vast na board-init
-	// 1024 diep (was 256): dit is de buffer tussen de NIC-drain en de
-	// switch-pass; bij een 127-flow-storm was 256×~1,5KB het smalste stuk
-	// van de keten (NIC-ring 2MB → hier 384KB → slot-ring 1MB) en elke
-	// overloop is een TCP-verlies. ~1,5MB kern-heap op de piek — niks op 128MB.
-	inject = make(chan []byte, 1024)
 	go loop()
 	up = true
 	return nil
@@ -117,8 +107,9 @@ func Detach(i int) {
 	ports[i] = nil
 }
 
-// loop is dé switch: drain de inject-queue en alle poorten, bezorg per frame
-// op dst-MAC. Eén goroutine — daarmee is HOP vanzelf de enige producer per
+// loop is dé switch: drain alle poorten, bezorg per frame op dst-MAC. Ringen
+// worden uitsluitend onder mu beschreven (deze lus én het NAT-bezorgpad,
+// deliverLocked) — daarmee is de mu-houder vanzelf de enige producer per
 // RX-ring en de enige consumer per TX-ring (SPSC zonder verdere sloten).
 func loop() {
 	// Eén hergebruikte leesbuffer voor alle TX-ringen (de switch-lus is één
@@ -132,7 +123,10 @@ func loop() {
 	}
 }
 
-// switchPass draint de inject-queue en alle poorten één ronde onder mu.
+// switchPass draint alle poorten één ronde onder mu. (De uplink-inbound-kant
+// — DNAT en masquerade-antwoorden — loopt hier niet meer doorheen: natInbound
+// bezorgt onder ditzelfde mu rechtstreeks in de slot-ring, deliverLocked; de
+// oude inject-queue kostte een allocatie + kopie + wachtbeurt per frame.)
 // Diepteverdediging: een panic (een bug, of frame-inhoud die tot in nat
 // reikt) mag core 0 — en dus álle slots — niet vellen. De defer ontgrendelt
 // mu (ook bij een panic, anders deadlockt de volgende ronde) en recovert: het
@@ -145,16 +139,6 @@ func switchPass(buf []byte) (worked bool) {
 			fmt.Printf("HOPOS_SWITCH_PANIC: %v — frame gedropt, switch draait door\n", r)
 		}
 	}()
-	for range maxBurst {
-		select {
-		case p := <-inject:
-			forward(0, p)
-			worked = true
-		default:
-			goto slots
-		}
-	}
-slots:
 	for i := 1; i <= layout.MaxSlots; i++ {
 		pt := ports[i]
 		if pt == nil {
@@ -173,6 +157,21 @@ slots:
 		}
 	}
 	return worked
+}
+
+// deliverLocked legt een (door de NAT al herschreven) inbound frame
+// rechtstreeks in de RX-ring van slot i — zonder tussenstop: élke
+// RX-ring-write gebeurt onder mu (de switch-lus én dit pad), dus de
+// SPSC-invariant (één producer) staat al; de oude inject-queue voegde alleen
+// een allocatie, een kopie en een wachtbeurt op de switch-ronde toe (~2 van
+// de ~5 ongecachte passes per frame — netdoorvoer-analyse 17-07). Vol of
+// niet aangesloten = drop (zoals echt Ethernet; TCP herstelt). Aanroepen met
+// mu vast (vanuit natInbound).
+func deliverLocked(i int, p []byte) {
+	if i < 1 || i >= len(ports) || ports[i] == nil {
+		return
+	}
+	ports[i].rx.Write(ring.TypeFrame, p)
 }
 
 // forward bezorgt één frame op grond van de dst-MAC — meer switch is er

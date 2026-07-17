@@ -1,39 +1,23 @@
 //go:build rpi4
 
-// board_rpi4.go — de Raspberry Pi 4-kant van de agent-main: dezelfde
-// HOP-agent-bytes, met de rpi4-runtime-hooks en de RAM-declaratie van het
-// board (raw load op 0x80000, 128MB HOP-kern — zie pi4_main/mem_rpi4).
-// Netwerk = de geïntegreerde GENET v5 (metal/driver/nic/genet, P2 bewezen 2026-07-11).
+// board_rpi4.go — de Raspberry Pi 4-kant van de agent-main: alleen wat écht
+// rpi4-specifiek is. Het board-neutrale deel (RAM-declaratie, cmdline-config,
+// watchdog) staat in board_raspi.go; netwerk = de geïntegreerde GENET v5
+// (metal/driver/nic/genet, P2 bewezen 2026-07-11).
 package main
 
 import (
-	"time"
-	_ "unsafe"
-
 	"hop-os/metal/abi/layout"
 	"hop-os/metal/board/raspi"
 	"hop-os/metal/board/rpi4"
 	_ "hop-os/metal/board/rpi4/hop" // registreert het board (init); de basis levert de tamago-hooks
-	"hop-os/metal/dev"
 	"hop-os/metal/driver/dvfs"
 	"hop-os/metal/driver/vcmail"
 )
 
-//go:linkname ramStart runtime/goos.RamStart
-var ramStart uint = raspi.HopKernelStart
-
-//go:linkname ramSize runtime/goos.RamSize
-var ramSize uint = raspi.HopKernelSize
-
 // Klokbeleid (docs/plan-p2b-soak.md): identiek aan de Pi 5, alleen de
 // mailbox-basis verschilt. TickHz = CNTFRQ/65536 (event-stream-tempo).
 func init() {
-	// Hardware-watchdog, generiek via raspi (zelfde PM-registerfamilie als de
-	// Pi 5): vroeg gewapend zodat ook een hangende boot zichzelf reset-cyclet.
-	// Uitschakelbaar met hopos.wd=off in cmdline.txt.
-	if raspi.BootParam(uintptr(dev.Read64(rpi4.DTBPtr)), "hopos.wd") != "off" {
-		raspi.WatchdogStart(12 * time.Second)
-	}
 	boardExtra = func() {
 		dvfs.Start(dvfs.Config{
 			Mbox:    &vcmail.Mbox{Base: uintptr(rpi4.VCMailBase), Buf: uintptr(raspi.VCMailBuf)},
@@ -42,20 +26,5 @@ func init() {
 			Slots:   layout.MaxSlots,
 			Verbose: true, // flanken loggen (soak-diagnose)
 		})
-	}
-}
-
-// Node-identiteit (P2b/C5): eerst de boot-parameter hopos.node= uit
-// cmdline.txt (configureren zonder rebuild), anders het board-serial.
-func init() {
-	nodeName = func() string {
-		dtb := uintptr(dev.Read64(rpi4.DTBPtr))
-		if n := raspi.BootParam(dtb, "hopos.node"); n != "" {
-			return n
-		}
-		if s := raspi.SerialSuffix(dtb); s != "" {
-			return "hopos-" + s
-		}
-		return ""
 	}
 }

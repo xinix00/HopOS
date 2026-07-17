@@ -474,6 +474,18 @@ const (
 	// mailbox komt via dit aparte veld dat HOP vlak vóór de dispatch zet).
 	CtrlMboxPA  = 0xC8
 	CtrlSMPMbox = 0xD0
+	// CtrlSMPTcr/CtrlSMPMair/CtrlSMPVbar: de ÁCTIEVE TCR/MAIR/VBAR_EL1 van de
+	// dispatchende primaire — sámen met CtrlSMPTtbr0 het complete EL1-
+	// vertaalregime dat een secundaire core (app-SMP én node) 1-op-1 erft.
+	// Gelezen van de levende registers (smp.Configure/ConfigureNode), blind
+	// gezet door de EL1-stub — geen hardcoded kopieën of afleidingen meer.
+	// Voor apps zijn de waarden tamago's InitMMU-constanten; voor de node kan
+	// het mmu48's 48-bit-wereld zijn (extendVA — de Altra-UART en de SBSA-
+	// watchdog wonen op 16TB; de 39-bit-default kon die niet vertalen: fault
+	// → watchdog-reset, gemeten 17-07 via de debug-kabel).
+	CtrlSMPTcr  = 0xD8
+	CtrlSMPVbar = 0x78
+	CtrlSMPMair = 0xF8
 	// CtrlIdle (app → HOP): idle-tik-teller. De idle-governor (metal/cpu/idle)
 	// verhoogt hem één keer per idle-ronde (event-stream, ~1,2ms bij 54MHz);
 	// tikt de teller op vol tempo dan is de core idle, staat hij stil dan

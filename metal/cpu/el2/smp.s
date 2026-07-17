@@ -13,10 +13,10 @@
 //     goos.Task neergelegde M-context (en VMID/vectoren) van die page,
 //     activeert de gedeelde stage-2, en ERET't naar de EL1-stub.
 //   - smpEL1Stub draait op EL1 onder de gedeelde stage-2, uit het APP-image
-//     (IPA). Het zet de eigen stage-1 MMU aan met de GEDEELDE tabel van de
-//     primaire (cacheable inner-shareable → coherent met de primaire heap),
-//     en springt in mstart. Vóór MMU-aan leest het niets uit geheugen — alle
-//     context komt via registers x0..x4 door de ERET heen.
+//     (IPA). Het zet de eigen stage-1 MMU aan met het GEËRFDE vertaalregime
+//     van de primaire (cacheable inner-shareable → coherent met de primaire
+//     heap), en springt in mstart. Vóór MMU-aan leest het niets uit geheugen —
+//     alle context komt via registers x0..x7 door de ERET heen.
 //
 // EL2-sysregs via WORD-encodings (Go-assembler kent ze niet bij naam), exact
 // dezelfde encodings als el2.s.
@@ -54,6 +54,16 @@ TEXT smpEL2Tramp(SB),NOSPLIT|NOFRAME,$0
 	MOVD	0x50(R1), R3	// layout.CtrlVecPA
 	WORD	$0xd51cc003	// msr vbar_el2, x3
 
+	// Kooi-profiel gekozen op CtrlS2Table (R2) — dit is de gedeelde trampoline
+	// voor ZOWEL een app-SMP-core ALS een node-runtime-core (HOP zelf):
+	//   R2 == 0  → node-core: GÉÉN stage-2-kooi, HCR zonder VM/TSC (de node mag
+	//              SMC/HVC — PSCI, Revoke). Spiegelt bootKernel's HCR van core 0.
+	//   R2 != 0  → app-core: stage-2 aan (kooi), SMC getrapt (het bestaande pad).
+	// Zo bedient één trampoline beide profielen (Derek: "bijna hergebruiken = een
+	// gedeelde functie"); node vult CtrlS2Table=0 + revoke-vectoren in CtrlVecPA.
+	CMP	$0, R2
+	BEQ	s2none
+
 	// VTCR_EL2: 4KB-granule, 32-bit IPA, PS = min(PARange, 44-bit) —
 	// identiek aan el2.s (zie dáár waarom: hoge partities + silicium-klem).
 	WORD	$0xd5380705	// mrs x5, id_aa64mmfr0_el1
@@ -83,7 +93,24 @@ vtcrps2:
 	ORR	$1<<19, R4, R4
 	ORR	$1, R4, R4
 	WORD	$0xd51c1104	// msr hcr_el2, x4
+	B	s2done
 
+s2none:
+	// Node-core (geen kooi): HCR_EL2 = RW(31) alleen — VM=0 (stage-2 uit, IPA=PA)
+	// en SMC niet getrapt. Identiek aan wat bootKernel voor core 0 zet.
+	// VTTBR = 0: óók bij VM=0 tagt het silicium TLB-entries op VTTBR.VMID, en
+	// broadcast-TLBI's (mmu48 MapHigh/UnmapHigh op de primaire) matchen op die
+	// VMID — een random geërfde VMID zou deze core stale vertalingen laten
+	// houden na een map-wijziging van de node-runtime. 0 = de reset-waarde
+	// waar core 0 mee draait; daarna de eigen TLB schoon beginnen.
+	MOVD	$0, R4
+	WORD	$0xd51c2104	// msr vttbr_el2, x4
+	WORD	$0xd50c87df	// tlbi vmalls12e1
+	DSB	$15
+	MOVD	$1<<31, R4
+	WORD	$0xd51c1104	// msr hcr_el2, x4
+
+s2done:
 	// Timers vrij voor EL1.
 	WORD	$0xd53ce104	// mrs x4, cnthctl_el2
 	ORR	$0b11, R4, R4
@@ -114,7 +141,18 @@ vtcrps2:
 	ORR	$0b0101<<0, R4
 	WORD	$0xd51c4004	// msr spsr_el2, x4
 
-	// ELR_EL2 = EL1-stub (IPA). De context voor de stub in x0..x4 zetten; die
+	// Het geërfde EL1-vertaalregime voor de stub: de dispatchende primaire —
+	// app-runtime (goos.Task) óf node (ConfigureNode) — las zijn ÁCTIEVE
+	// MAIR/TCR/VBAR_EL1 en legde ze op de control-page; de stub zet ze blind.
+	// Eén mechanisme voor beide profielen, geen hardcoded kopieën: de node-
+	// primaire kan mmu48's 48-bit-wereld draaien (Altra: UART/watchdog op
+	// 16TB) en tamago-defaults zouden die onvertaalbaar laten. R1 is nog de
+	// control-page; R5/R6/R7 zijn na hun scratch/VMID/TPIDR-gebruik vrij.
+	MOVD	0xF8(R1), R5	// layout.CtrlSMPMair → x5
+	MOVD	0xD8(R1), R6	// layout.CtrlSMPTcr  → x6
+	MOVD	0x78(R1), R7	// layout.CtrlSMPVbar → x7
+
+	// ELR_EL2 = EL1-stub (IPA). De context voor de stub in x0..x7 zetten; die
 	// overleven de ERET (die verandert alleen PC/PSTATE).
 	WORD	$0xd51c402f	// msr elr_el2, x15
 	MOVD	R10, R0		// x0 = sp
@@ -125,22 +163,19 @@ vtcrps2:
 	ISB	$15
 	ERET
 
-// smpEL1Stub: draait op EL1 onder de gedeelde stage-2 (stage-1 nog uit). Zet de
-// eigen stage-1 MMU aan met de GEDEELDE tabel en springt in mstart. Leest niets
-// uit geheugen tot de MMU aan is — context komt uit x0..x4.
-//   x0 = sp, x1 = mp, x2 = g0, x3 = fn (mstart), x4 = ttbr0 (stage-1 L1, IPA)
+// smpEL1Stub: draait op EL1 (app: onder de gedeelde stage-2; node: zonder
+// kooi). Zet de eigen stage-1 MMU aan met het GEËRFDE vertaalregime van de
+// primaire en springt in mstart. Leest niets uit geheugen tot de MMU aan is —
+// alle context komt uit x0..x7.
+//   x0 = sp, x1 = mp, x2 = g0, x3 = fn (mstart), x4 = ttbr0 (stage-1 L1)
+//   x5 = mair, x6 = tcr, x7 = vbar (de ÁCTIEVE EL1-registers van de primaire)
 TEXT smpEL1Stub(SB),NOSPLIT|NOFRAME,$0
-	// MAIR_EL1: attr0 = Device (0x00), attr1 = Normal WB (0xFF) — exact zoals
-	// tamago's InitMMU. 0xFF00 past in één MOVZ (geen literal-pool → geen lees).
-	MOVD	$0xFF00, R5
+	// MAIR/TCR: het geërfde vertaalregime van de dispatchende primaire, door
+	// de trampoline in x5/x6 aangeleverd (van de levende registers gelezen —
+	// app: tamago's InitMMU-waarden; node: mmu48's 48-bit-wereld). Blind
+	// zetten, geen kopieën van constanten: de primaire ís de bron van waarheid.
 	MSR	R5, MAIR_EL1
-
-	// TCR_EL1 = 0x2_0000_3519 (IPS=40b, 4KB-granule, inner-shareable, WB
-	// inner/outer, T0SZ=25) — identiek aan tamago's tcr-constante. Opgebouwd uit
-	// een MOVZ (0x3519) + ORR met een enkel-bit-bitmask (bit 33) → geen lees.
-	MOVD	$0x3519, R5
-	ORR	$0x200000000, R5, R5
-	MSR	R5, TCR_EL1
+	MSR	R6, TCR_EL1
 
 	// TTBR0_EL1 = gedeelde stage-1 L1 (IPA). Onder de al-actieve stage-2 wordt
 	// dit IPA-adres naar de partitie van de primaire vertaald → dezelfde tabellen
@@ -161,13 +196,14 @@ TEXT smpEL1Stub(SB),NOSPLIT|NOFRAME,$0
 
 	// Per-core EL1-init die de primaire in arm64.Init doet maar deze secundaire
 	// core oversloeg (hij ging tramp→mstart, niet via rt0/hwinit):
-	//   - VBAR_EL1 = RamStart: de EL1-exceptievectoren die de primaire dáár
-	//     bouwde (arm64.initVectorTable legt ze op goos.RamStart; gedeelde
-	//     partitie → zelfde tabel). Zonder dit crasht élke EL1-exceptie naar 0x200.
+	//   - VBAR_EL1: geërfd (x7) — de exceptievectoren die de primaire bouwde
+	//     (arm64.initVectorTable op goos.RamStart; gedeelde map → zelfde
+	//     tabel). Expliciet meegegeven, niet afgeleid uit ttbr0: die afleiding
+	//     (ttbr0−0x4000) was een toevalligheid van tamago's indeling en klopt
+	//     al niet meer zodra de primaire mmu48's L0 draait. Zonder geldige
+	//     VBAR crasht élke EL1-exceptie naar 0x200.
 	//   - FP/SIMD aan (CPACR_EL1.FPEN): anders trapt de eerste float-instructie.
-	// R4 = ttbr0 = RamStart+0x4000, dus RamStart = R4 - 0x4000.
-	SUB	$0x4000, R4, R5
-	MSR	R5, VBAR_EL1
+	MSR	R7, VBAR_EL1
 	MRS	CPACR_EL1, R5
 	ORR	$(3<<20), R5
 	MSR	R5, CPACR_EL1

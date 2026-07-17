@@ -36,11 +36,41 @@ var (
 	primarySlot int    // slot (= core-index) van de primaire core
 	lastCore    int    // hoogste core-index van de app (primair + secundairen)
 	stubIPA     uint64 // app-IPA van de EL1-stub (ELR-doel na de trampoline)
-	ttbr0       uint64 // gedeelde stage-1 L1-tabel (RamStart+0x4000, IPA)
 
 	nextCore int    // volgende op te brengen secundaire core (onder bootLock)
 	bootLock uint32 // spinlock: één core-boot tegelijk (één handoff-venster)
 )
+
+// regime is het geërfde EL1-vertaalregime {ttbr0, tcr, mair, vbar} van de
+// dispatchende primaire — één keer gelezen van de levende registers
+// (Configure of ConfigureNode; per binary draait er precies één), door beide
+// handoff-schrijvers gedeeld. Van de bron gelezen, niet afgeleid: de node-
+// primaire kan mmu48's 48-bit-wereld draaien (Altra), de app-primaire draait
+// tamago's InitMMU-waarden — de secundaire erft wat er wérkelijk staat.
+var regime struct{ ttbr0, tcr, mair, vbar uint64 }
+
+func readRegime() {
+	regime.ttbr0 = readTTBR0()
+	regime.tcr = readTCR()
+	regime.mair = readMAIR()
+	regime.vbar = readVBAR()
+}
+
+// writeHandoff schrijft de M-context + het regime op een control-page — het
+// gedeelde deel van de handoff naar de EL2-trampoline/EL1-stub. cp is de basis
+// zoals de schrijver hem ziet (IPA voor een app, PA voor de node); stub is het
+// ELR-doel in de eigen adresruimte.
+func writeHandoff(cp uintptr, sp, mp, gp, fn unsafe.Pointer, stub uint64) {
+	dev.Write64(cp+layout.CtrlSMPSp, uint64(uintptr(sp)))
+	dev.Write64(cp+layout.CtrlSMPMp, uint64(uintptr(mp)))
+	dev.Write64(cp+layout.CtrlSMPG0, uint64(uintptr(gp)))
+	dev.Write64(cp+layout.CtrlSMPFn, uint64(uintptr(fn)))
+	dev.Write64(cp+layout.CtrlSMPStub, stub)
+	dev.Write64(cp+layout.CtrlSMPTtbr0, regime.ttbr0)
+	dev.Write64(cp+layout.CtrlSMPTcr, regime.tcr)
+	dev.Write64(cp+layout.CtrlSMPMair, regime.mair)
+	dev.Write64(cp+layout.CtrlSMPVbar, regime.vbar)
+}
 
 // Configure wired de goos.Task-hook en zet GOMAXPROCS op het aantal cores.
 // Aangeroepen door applib.Init op de primaire core, vóór er parallel werk is.
@@ -63,12 +93,11 @@ func Configure(prim, cores int) {
 	// gelinkt) — op elk board hetzelfde, dus rechtstreeks en zonder board-omweg.
 	stubIPA = el2.SMPStubPC()
 
-	// Gedeelde stage-1 L1 = de tabel die de primaire in InitMMU bouwde, op
-	// RamStart+0x4000 (IPA). De secundaire core zet zijn TTBR0_EL1 hierop → hij
-	// deelt exact de VA→IPA-map van de primaire (en de stage-2 legt de IPA op
-	// dezelfde partitie) = gedeelde heap.
-	start, _ := runtime.MemRegion()
-	ttbr0 = uint64(start) + 0x4000
+	// Het EL1-vertaalregime van de primaire, gelezen van de levende registers —
+	// de secundaire erft het 1-op-1 (de stub zet ze blind), dus hij deelt exact
+	// de VA→IPA-map van de primaire (en de stage-2 legt de IPA op dezelfde
+	// partitie) = gedeelde heap.
+	readRegime()
 
 	// goos.Idle laten we met rust: de primaire core zette 'm al op de
 	// WFE-governor (metal/cpu/idle, via hwinit1). Die parkeert een idle core met WFE
@@ -103,12 +132,7 @@ func task(sp, mp, gp, fn unsafe.Pointer) {
 	nextCore++
 
 	cp := layout.CtrlPage(primarySlot)
-	dev.Write64(cp+layout.CtrlSMPSp, uint64(uintptr(sp)))
-	dev.Write64(cp+layout.CtrlSMPMp, uint64(uintptr(mp)))
-	dev.Write64(cp+layout.CtrlSMPG0, uint64(uintptr(gp)))
-	dev.Write64(cp+layout.CtrlSMPFn, uint64(uintptr(fn)))
-	dev.Write64(cp+layout.CtrlSMPStub, stubIPA)
-	dev.Write64(cp+layout.CtrlSMPTtbr0, ttbr0)
+	writeHandoff(cp, sp, mp, gp, fn, stubIPA)
 	dev.MB() // handoff zichtbaar vóór het verzoek
 
 	// Verzoek: HOP's servicer ziet CtrlSMPReq, dispatcht de core (naar de

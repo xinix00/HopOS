@@ -1,8 +1,8 @@
 // Host-tests voor de NAT: checksums (RFC 1624 incrementeel vs. volledige
 // herberekening), frame-validatie, conntrack-lifecycle en de vier
 // herschrijfpaden. De switch-lus draait hier niet; paden die "mu vast"
-// eisen worden onder mu aangeroepen, geïnjecteerde frames landen op het
-// inject-kanaal.
+// eisen worden onder mu aangeroepen, bezorgde inbound frames landen via
+// deliverLocked in een heap-gebackte slot-ring (testSlotRing).
 package hopswitch
 
 import (
@@ -11,8 +11,10 @@ import (
 	"math/rand"
 	"testing"
 	"time"
+	"unsafe"
 
 	"hop-os/metal/abi/layout"
+	"hop-os/metal/abi/ring"
 )
 
 // resetNAT zet alle package-state terug (de tests delen één proces).
@@ -29,7 +31,33 @@ func resetNAT() {
 	masqNext = uint16(MasqBase)
 	flowsFull = false
 	arpLast = map[uint32]time.Time{}
-	inject = make(chan []byte, 256)
+	ports = nil // deliverLocked dropt dan (slot niet aangesloten)
+}
+
+// testSlotRing hangt een heap-gebackte RX-ring aan slot i — het bezorgdoel
+// van deliverLocked — en geeft een leesfunctie terug (nil = niets bezorgd).
+// De closure houdt buf levend zolang de test leest.
+func testSlotRing(t *testing.T, i int) func() []byte {
+	t.Helper()
+	buf := make([]byte, 64<<10)
+	base := uintptr(unsafe.Pointer(&buf[0]))
+	ring.Init(base, 32<<10)
+	mu.Lock()
+	if len(ports) == 0 {
+		ports = make([]*port, layout.MaxSlots+1)
+	}
+	ports[i] = &port{rx: ring.Open(base)}
+	mu.Unlock()
+	rd := ring.Open(base)
+	out := make([]byte, 32<<10)
+	return func() []byte {
+		_ = buf[0] // buf gevangen → ring-geheugen blijft leven
+		typ, n, ok := rd.ReadInto(out)
+		if !ok || typ != ring.TypeFrame {
+			return nil
+		}
+		return out[:n]
+	}
 }
 
 type fakeNIC struct{ sent [][]byte }
@@ -308,16 +336,16 @@ func TestMasqueradeUitEnTerug(t *testing.T) {
 		t.Fatalf("herhaald pakket kreeg poort %d i.p.v. %d", p, masqPort)
 	}
 
-	// Het antwoord: ext peer → node-IP:masqPort, moet geclaimd en terugvertaald.
+	// Het antwoord: ext peer → node-IP:masqPort, moet geclaimd en rechtstreeks
+	// in de RX-ring van slot 1 bezorgd (deliverLocked).
+	read := testSlotRing(t, 1)
 	reply := mkFrame(protoTCP, nicMAC, gwMAC0, extIP, nodeIP, 443, masqPort, []byte("HTTP/1.1 200 OK"))
 	if !natInbound(reply) {
 		t.Fatal("antwoord op lopende flow niet geclaimd")
 	}
-	var inj []byte
-	select {
-	case inj = <-inject:
-	default:
-		t.Fatal("antwoord niet geïnjecteerd")
+	inj := read()
+	if inj == nil {
+		t.Fatal("antwoord niet in de slot-ring bezorgd")
 	}
 	iip := inj[ethLen:]
 	if got := binary.BigEndian.Uint32(iip[16:]); got != slotIP {
@@ -341,11 +369,15 @@ func TestDNATInEnSlotAntwoordUit(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	read := testSlotRing(t, 1)
 	in := mkFrame(protoTCP, nicMAC, lanMAC0, lanIP, nodeIP, 1234, 8080, []byte("hallo"))
 	if !natInbound(in) {
 		t.Fatal("inbound op gepubliceerde poort niet geclaimd")
 	}
-	inj := <-inject
+	inj := read()
+	if inj == nil {
+		t.Fatal("DNAT-frame niet in de slot-ring bezorgd")
+	}
 	iip := inj[ethLen:]
 	if got := binary.BigEndian.Uint32(iip[16:]); got != layout.SlotIP4(1) {
 		t.Fatalf("DNAT dst-IP: %#x", got)

@@ -15,6 +15,7 @@ package slots
 import (
 	"fmt"
 	"io"
+	"runtime"
 	"sync"
 	"time"
 
@@ -73,6 +74,51 @@ func quiesce(off bool) {
 // (NIC→fabric→DRAM) landen vlak daarna nog. Twee milliseconden is ruim voor
 // elke pijpdiepte — generieke silicium-hygiëne, geen board-specifiek pad.
 func drain() { time.Sleep(2 * time.Millisecond) }
+
+// coopSched meldt of de node-runtime tijdens een plaatsing coöperatief mag
+// afgeven — grote geheugenops in brokken met een runtime.Gosched ertussen.
+// WAAR op boards zónder DMA-stil venster (Altra/QEMU): daar draait de hele node
+// op één core (GOMAXPROCS=1), dus een ononderbroken asm-veeg over de hele
+// partitie (96MB × 127 loaders ≈ 12s gemeten) verhongert de netstack, /health,
+// de switch en de heartbeat. Afgeven ís op één core de concurrency (het Go-idee).
+// ONWAAR op een NetQuiescer (Pi, C1-erratum): dat houdt zijn strikte,
+// ononderbroken venster — en doet ook geen 127-plaatsings-storm. Eén keer
+// bepaald; het board wisselt niet na boot.
+var (
+	coopSchedOnce sync.Once
+	coopSchedVal  bool
+)
+
+func coopSched() bool {
+	coopSchedOnce.Do(func() {
+		_, isQuiescer := board.Current().(board.NetQuiescer)
+		coopSchedVal = !isQuiescer
+	})
+	return coopSchedVal
+}
+
+// coopCleanInv veegt [addr,addr+size) net als dev.CleanInv, maar op coöperatieve
+// boards (coopSched) in brokken van 4MB met een yield ertussen: zo blijft core 0
+// tijdens een plaatsings-storm de netstack/health/switch bedienen i.p.v. één
+// ononderbroken veeg. Zelfde bytes, alleen coöperatief. Aanroepen wanneer het
+// slot niet aan de switch hangt (de partitie wordt zo meteen toch overschreven).
+func coopCleanInv(addr, size uintptr) {
+	if !coopSched() {
+		dev.CleanInv(addr, size)
+		return
+	}
+	const chunk = 4 << 20
+	for size > 0 {
+		n := size
+		if n > chunk {
+			n = chunk
+		}
+		dev.CleanInv(addr, n)
+		addr += n
+		size -= n
+		runtime.Gosched()
+	}
+}
 
 // pace wacht (onder lifecycleMu, mét RX aan) tot de board-adempauze sinds de
 // vorige lifecycle verstreken is, en stempelt het nieuwe beginmoment.
@@ -485,8 +531,11 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 	// Coherentie vóór de ongecachte writes: de vórige huurder draaide
 	// cacheable (hele heap); zijn dirty lines eerst wegschrijven+invalideren,
 	// anders clobberen ze straks onze verse image (QEMU verhult dit — geen
-	// caches; op de A76 echt, gemeten 2026-07-10). Hele partitie in één keer.
-	dev.CleanInv(uintptr(base), uintptr(size))
+	// caches; op de A76 echt, gemeten 2026-07-10). Coöperatief (coopCleanInv):
+	// dit is de zware core-0-op van de 127-loader-burst — in brokken vegen met
+	// een yield ertussen houdt de netstack/health/switch levend (het slot hangt
+	// hier niet aan de switch: bij hergebruik detachte releaseSlot, vers nooit).
+	coopCleanInv(uintptr(base), uintptr(size))
 
 	// De image bovenin het app-RAM plaatsen (staging, layout.StageAddr — het
 	// gedeelde contract met de apploader), zodat de laag geplaatste segmenten
@@ -795,6 +844,12 @@ func StartStaged(i int, memLimit uint64, cores int, env map[string]string, mount
 
 var vectorsOnce sync.Once
 
+// EnsureVectors zet de EL2-vectoren + parkeerlus + revoke-vectoren (idempotent
+// via vectorsOnce, gedeeld met Start). De node roept dit vóór smp.ConfigureNode
+// aan zodat opkomende node-cores hun VBAR_EL2 (= revoke-vectoren, net als core 0
+// uit bootKernel) geldig aantreffen. Later in Start is de vectorsOnce een no-op.
+func EnsureVectors() { vectorsOnce.Do(stage2.InitVectors) }
+
 // Stop beëindigt de app in slot i en wacht tot al zijn cores geparkeerd zijn.
 // Eén pad voor één core én voor een SMP-app: de kill-flag geeft de app een
 // coöperatieve kans (de kill-watcher exit't via HVC → de core parkeert netjes,
@@ -980,6 +1035,37 @@ func NumSlots() int {
 		}
 	})
 	return numSlots
+}
+
+// hopReserved is het aantal EXTRA cores (naast core 0, dat altijd HOP is) dat
+// de node-runtime voor zichzelf houdt: cores 1..hopReserved draaien HOP-Go-Ms
+// (GOMAXPROCS), niet apps. Default 0 (alleen core 0 = HOP, alle andere cores
+// zijn app-slots — het huidige gedrag). Gezet door de node uit de platform-
+// config (main.go SetHopCores); HopOS leest de config, HOP-userspace blijft
+// oblivious en krijgt via slotmgr simpelweg minder slots aangeboden.
+var hopReserved = 0
+
+// SetHopCores zet het aantal cores voor de HOP-runtime (≥1: core 0 telt mee).
+// n=1 → hopReserved=0 (geen reservering). Aanroepen vóór de eerste NumSlots.
+func SetHopCores(n int) {
+	if n < 1 {
+		n = 1
+	}
+	hopReserved = n - 1
+}
+
+// HopReserved is de core-offset tussen een HOP-slot (1-based, zoals HOP ze telt)
+// en de interne slot/core-index: intern = HOP-slot + HopReserved. slotmgr past
+// 'm toe zodat slots.* zelf onveranderd op slot=core=layout kan blijven werken.
+func HopReserved() int { return hopReserved }
+
+// AppSlotCount is het aantal slots dat HOP mag gebruiken: de ontdekte app-cores
+// minus de voor de HOP-runtime gereserveerde. Dit voedt slotmgr.NumSlots.
+func AppSlotCount() int {
+	if c := NumSlots() - hopReserved; c > 0 {
+		return c
+	}
+	return 0
 }
 
 // CoreClass geeft de cluster-klasse van slot i. De indeling is board-kennis

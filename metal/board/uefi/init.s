@@ -25,6 +25,7 @@
 
 // Moet gelijk zijn aan memmapCap in uefi.go (asm kent geen Go-constanten).
 #define MEMMAP_CAP 0x40000
+#define CFG_CAP 0x1000
 
 // Pariteit met board.go (Go-init checkt): de carve — het stuk tussen de
 // Go-RAM (RamSize) en het einde van de claim — draagt het layout-plan
@@ -65,7 +66,8 @@ fwentry:
 	// Werkruimte voor out-parameters op de (UEFI-)stack:
 	//   0(RSP)=AllocatePages-adres  8(RSP)=MapSize  16(RSP)=MapKey
 	//   24(RSP)=DescSize            32(RSP)=DescVer
-	SUB	$64, RSP
+	//   40..56(RSP)=GOP             64(RSP)=VarSize  72(RSP)=HopOSCores
+	SUB	$80, RSP
 
 	// Eerste levensteken op de firmware-console: ConOut->OutputString.
 	// Fouten negeren (headless firmware bestaat; de echte console volgt
@@ -112,6 +114,74 @@ fwentry:
 	ORR	R4, R2
 	MOVD	R2, 56(RSP)
 nogop:
+
+	// Node-config uit hopos.cfg op de ESP-root, NU — vóór ExitBootServices
+	// leest de FIRMWARE zijn eigen FAT (SimpleFileSystem, dezelfde weg
+	// waarlangs deze PE geladen is); wij nemen alleen de bytes over. Géén
+	// FS-driver in HopOS — zelfde model als cmdline.txt op de Pi: de firmware
+	// leest, HopOS parseert (uefi.BootConfig, zelfde sleutels als de Pi).
+	// Beheer = een tekstbestandje op de stick bewerken. Elke fout → 0 bytes →
+	// Go-defaults. root/file in callee-saved regs (R22/R24 — pas later in
+	// gebruik): de firmware-calls clobberen x9-x15. 72(RSP) = bytes gelezen.
+	MOVD	$0, R0
+	MOVD	R0, 72(RSP)
+	MOVD	R19, R0			// eigen ImageHandle
+	MOVD	$·liGUID(SB), R1	// EFI_LOADED_IMAGE_PROTOCOL
+	MOVD	RSP, R2			// &iface (slot 0, scratch)
+	MOVD	0x98(R21), R8		// HandleProtocol
+	WORD	$0xd63f0100		// blr x8
+	CBNZ	R0, nocfg
+	MOVD	(RSP), R0		// *LoadedImage
+	CBZ	R0, nocfg
+	MOVD	0x18(R0), R0		// ->DeviceHandle (de ESP)
+	CBZ	R0, nocfg
+	MOVD	$·sfsGUID(SB), R1	// EFI_SIMPLE_FILE_SYSTEM_PROTOCOL
+	MOVD	RSP, R2
+	MOVD	0x98(R21), R8		// HandleProtocol
+	WORD	$0xd63f0100		// blr x8
+	CBNZ	R0, nocfg
+	MOVD	(RSP), R0		// *SimpleFileSystem
+	CBZ	R0, nocfg
+	MOVD	RSP, R1			// &root
+	MOVD	0x08(R0), R8		// ->OpenVolume
+	WORD	$0xd63f0100		// blr x8
+	CBNZ	R0, nocfg
+	MOVD	(RSP), R22		// *root (EFI_FILE, callee-saved)
+	CBZ	R22, nocfg
+	MOVD	R22, R0
+	MOVD	RSP, R1			// &file
+	MOVD	$·cfgName(SB), R2	// L"hopos.cfg"
+	MOVD	$1, R3			// EFI_FILE_MODE_READ
+	MOVD	$0, R4
+	MOVD	0x08(R22), R8		// root->Open
+	WORD	$0xd63f0100		// blr x8
+	CBNZ	R0, cfgroot		// geen bestand: alleen root sluiten
+	MOVD	(RSP), R24		// *file (callee-saved)
+	CBZ	R24, cfgroot
+	MOVD	$CFG_CAP, R0
+	MOVD	R0, 72(RSP)		// size in: capaciteit
+	MOVD	R24, R0
+	MOVD	RSP, R1
+	ADD	$72, R1			// &size
+	MOVD	$·cfgBuf(SB), R2	// B-kant buffer; verhuist straks mee
+	MOVD	0x20(R24), R8		// file->Read
+	WORD	$0xd63f0100		// blr x8
+	CBZ	R0, cfgclose
+	MOVD	$0, R1			// leesfout: niets gelezen
+	MOVD	R1, 72(RSP)
+cfgclose:
+	MOVD	R24, R0
+	MOVD	0x10(R24), R8		// file->Close (fouten negeren)
+	WORD	$0xd63f0100		// blr x8
+cfgroot:
+	MOVD	R22, R0
+	MOVD	0x10(R22), R8		// root->Close
+	WORD	$0xd63f0100		// blr x8
+	B	cfgdone
+nocfg:
+	MOVD	$0, R0
+	MOVD	R0, 72(RSP)
+cfgdone:
 
 	// GEEN EFI_RNG_PROTOCOL-call meer: GetRNG bleek te kunnen blokkeren in
 	// een eeuwige entropie-poll (QEMU/EDK2 zonder werkende TRNG, gemeten
@@ -289,6 +359,9 @@ relocdone:
 	MOVD	$·gopInfo+16(SB), R0
 	MOVD	56(RSP), R1
 	MOVD	R1, (R0)(R5)
+	MOVD	$·cfgLen(SB), R0	// hopos.cfg: gelezen lengte (0 = geen bestand)
+	MOVD	72(RSP), R1
+	MOVD	R1, (R0)(R5)
 	// De memory-map zelf: GetMemoryMap schreef de B-kant-buffer van
 	// payload 1; de kopie bracht een lege mee. 8-byte-lus, lengte afgerond.
 	MOVD	$·memmapBuf(SB), R0	// bron (B-kant)
@@ -304,7 +377,22 @@ bufcopy:
 	MOVD.P	R3, 8(R1)
 	B	bufcopy
 bufdone:
-	ADD	$64, RSP
+	// hopos.cfg-bytes: zelfde verhaal als de memory-map — de stub las de
+	// B-kant-buffer, de kopie bracht een lege mee.
+	MOVD	$·cfgBuf(SB), R0	// bron (B-kant)
+	ADD	R5, R0, R1		// doel (L-kant)
+	MOVD	72(RSP), R2
+	ADD	$7, R2
+	BIC	$7, R2
+	ADD	R0, R2			// bronEinde
+cfgcopy:
+	CMP	R2, R0
+	BGE	cfgcdone
+	MOVD.P	8(R0), R3
+	MOVD.P	R3, 8(R1)
+	B	cfgcopy
+cfgcdone:
+	ADD	$80, RSP
 
 	// Cache-onderhoud: de kopie is met MMU/cache aan geschreven; straks
 	// leest de core met MMU uit (ongecached) en daarna cachet tamago weer.
@@ -501,6 +589,22 @@ TEXT ·uefiEL1(SB),NOSPLIT|NOFRAME,$0
 GLOBL	·gopGUID(SB),RODATA,$16
 DATA	·gopGUID+0(SB)/8,$0x4a3823dc9042a9de
 DATA	·gopGUID+8(SB)/8,$0x6a5180d0de7afb96
+
+// EFI_LOADED_IMAGE_PROTOCOL_GUID (5b1b31a1-9562-11d2-8e3f-00a0c969723b).
+GLOBL	·liGUID(SB),RODATA,$16
+DATA	·liGUID+0(SB)/8,$0x11d295625b1b31a1
+DATA	·liGUID+8(SB)/8,$0x3b7269c9a0003f8e
+
+// EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID (964e5b22-6459-11d2-8e39-00a0c969723b).
+GLOBL	·sfsGUID(SB),RODATA,$16
+DATA	·sfsGUID+0(SB)/8,$0x11d26459964e5b22
+DATA	·sfsGUID+8(SB)/8,$0x3b7269c9a000398e
+
+// L"hopos.cfg" (UCS-2, NUL-getermineerd, 8-byte-gepad).
+GLOBL	·cfgName(SB),RODATA,$24
+DATA	·cfgName+0(SB)/8,$0x006f0070006f0068
+DATA	·cfgName+8(SB)/8,$0x00660063002e0073
+DATA	·cfgName+16(SB)/8,$0x0000000000000067
 
 
 // Absolute linkadressen als data: het anker waarmee de stub zijn slide meet

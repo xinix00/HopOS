@@ -19,27 +19,37 @@ import (
 )
 
 // Manager implementeert hopos.SlotManager tegen metal/kern/slots.
+//
+// Slot-vertaling: HOP telt zijn slots 1-based en oblivious; als de node cores
+// voor zijn eigen runtime reserveert (slots.SetHopCores), liggen de app-cores
+// niet op 1..N maar op (1+HopReserved)..N. Deze adapter is dé (en enige) plek
+// die HOP-slot → interne slot vertaalt (intern = HOP-slot + HopReserved), zodat
+// slots.* zelf onveranderd op slot=core=layout kan blijven. Bij hopReserved=0
+// (default) is phys() de identiteit — geen gedragswijziging.
 type Manager struct{}
 
 func New() *Manager { return &Manager{} }
 
-func (Manager) NumSlots() int             { return slots.NumSlots() }
-func (Manager) CoreClass(slot int) string { return slots.CoreClass(slot) }
+// phys vertaalt een HOP-slot naar de interne slot/core-index.
+func phys(slot int) int { return slot + slots.HopReserved() }
+
+func (Manager) NumSlots() int             { return slots.AppSlotCount() }
+func (Manager) CoreClass(slot int) string { return slots.CoreClass(phys(slot)) }
 
 func (Manager) StartLoader(slot int, memLimit uint64, env map[string]string) error {
-	return slots.StartLoader(slot, memLimit, env)
+	return slots.StartLoader(phys(slot), memLimit, env)
 }
 
 func (Manager) StartStaged(slot int, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int) error {
-	return slots.StartStaged(slot, memLimit, cores, env, mounts, ports)
+	return slots.StartStaged(phys(slot), memLimit, cores, env, mounts, ports)
 }
 
 func (Manager) Stop(slot int, timeout time.Duration) error {
-	return slots.Stop(slot, timeout)
+	return slots.Stop(phys(slot), timeout)
 }
 
 func (Manager) Status(slot int) hopos.SlotStatus {
-	s := slots.Get(slot)
+	s := slots.Get(phys(slot))
 	return hopos.SlotStatus{
 		CoreOn:    s.CoreOn,
 		App:       s.App,
@@ -53,7 +63,7 @@ func (Manager) Status(slot int) hopos.SlotStatus {
 	}
 }
 
-func (Manager) Logs(slot int) <-chan string { return slots.Logs(slot) }
+func (Manager) Logs(slot int) <-chan string { return slots.Logs(phys(slot)) }
 
 // Contractbewijs: Manager MOET hopos.SlotManager zijn.
 var _ hopos.SlotManager = (*Manager)(nil)

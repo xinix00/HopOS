@@ -30,6 +30,7 @@ package uefi
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"strings"
 	"unsafe" // geheugenreads op firmware-adressen + go:linkname
 
 	"github.com/usbarmory/tamago/arm64"
@@ -117,6 +118,37 @@ var hexLine [40]uint16
 // [2] = PixelFormat<<32 | pixels-per-scanlijn. 32bpp gegarandeerd (de stub
 // filtert op PixelFormat 0/1: 0=RGB, 1=BGR). gopDesc() decodeert het.
 var gopInfo [3]uint64
+
+// cfgCap moet gelijk zijn aan CFG_CAP in init.s (asm kent geen Go-constanten).
+const cfgCap = 0x1000
+
+// cfgBuf/cfgLen: hopos.cfg van de ESP-root, door de stub vóór ExitBootServices
+// via het firmware-SimpleFileSystem gelezen (asm-contract, gopInfo-patroon:
+// verhuist met de image mee). Géén FS-driver in HopOS — de firmware leest zijn
+// eigen FAT (dezelfde weg waarlangs de PE geladen is), HopOS parseert alleen;
+// exact het cmdline.txt-model van de Pi. Beheer = het tekstbestandje op de
+// stick bewerken (elke computer mount FAT). cfgLen 0 = geen bestand → defaults.
+// Ditzelfde bestand draagt straks ook de overige node-config (API-key e.d.).
+var (
+	cfgBuf [cfgCap]byte
+	cfgLen uint64
+)
+
+// BootConfig geeft de waarde van key= uit hopos.cfg ("" = niet gezet). Tokens
+// zijn whitespace-gescheiden key=value — regels, spaties en tabs mogen door
+// elkaar; zelfde sleutelconventie als de Pi-cmdline (hopos.cores, hopos.node).
+func BootConfig(key string) string {
+	n := cfgLen
+	if n > uint64(len(cfgBuf)) {
+		n = uint64(len(cfgBuf)) // tegen een kapotte asm-lengte (contract-schending)
+	}
+	for _, tok := range strings.Fields(string(cfgBuf[:n])) {
+		if v, ok := strings.CutPrefix(tok, key+"="); ok {
+			return v
+		}
+	}
+	return ""
+}
 
 // GOPFramebuffer geeft het firmware-beeld dat de stub bewaarde — de
 // board.Board.Framebuffer-bron voor de hop-helft (hwinit1 deed fb.Init al

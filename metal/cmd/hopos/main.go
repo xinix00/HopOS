@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log"
 	"runtime"
+	"sync"
 	"time"
 
 	// TLS-wortels: tamago heeft geen OS en dus geen system-CA-store — zonder
@@ -28,6 +29,7 @@ import (
 
 	"hop-os/metal/abi/layout"
 	"hop-os/metal/board"
+	"hop-os/metal/cpu/smp"
 	"hop-os/metal/driver/fb"
 	"hop-os/metal/driver/nvme"
 	"hop-os/metal/kern/hopfs"
@@ -73,6 +75,15 @@ var boardExtra func()
 // zonder rebuild), anders "hopos-<serial>"; "" = generieke naam.
 var nodeName = func() string { return "" }
 
+// hopCores: hoeveel cores de HOP-node-runtime voor zichzelf houdt (core 0 telt
+// mee; de rest zijn app-slots). Board-hook — HopOS leest de platform-config
+// (HOP-userspace kan er niet bij): Pi via hopos.cores= in cmdline.txt, UEFI
+// (voorlopig) compile-time. Default 1: geen verspilling bij weinig apps — je
+// geeft de node pas meer cores als de flow er druk genoeg voor is. >1 zet
+// GOMAXPROCS op N en laat Go de node-goroutines (switch/leader/plaatsing) zelf
+// over de cores spreiden; slotmgr biedt HOP dan (totaal − N) slots.
+var hopCores = func() int { return 1 }
+
 // bunny: Dereks origineel (2026-07-11) — oren netjes boven het snuitje.
 // Bewust geen architectuur in de tagline: ARM64 is het heden, maar AMD64-
 // boardjes liggen al klaar (Derek).
@@ -82,6 +93,31 @@ var bunny = []string{
 	`   o_(")(")   --------------`,
 	`              the Go-only OS`,
 	``, // witregel: scheidt de vaste header zichtbaar van de scrollende log
+}
+
+// smpSink absorbeert het warm-up-werk zodat de compiler de lus niet
+// wegoptimaliseert (de write naar een package-var blijft staan).
+var smpSink uint64
+
+// nodeSMPWarmup forceert bij boot één niet-yieldende goroutine per core
+// tegelijk, zodat de extra node-Ms (en dus de cores, via nodeTask → PSCI) NU
+// deterministisch opkomen: een kapotte bring-up valt bij bóót — watchdog en
+// kabel zichtbaar — en niet pas onder de eerste productie-last. Geen
+// benchmark meer (die zei op een 20ms-burst weinig; de ramp is de meting).
+func nodeSMPWarmup(cores int) {
+	var wg sync.WaitGroup
+	for i := 0; i < cores; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var x uint64
+			for j := 0; j < 4_000_000; j++ {
+				x += uint64(j)*3 + 7
+			}
+			smpSink = x
+		}()
+	}
+	wg.Wait()
 }
 
 func main() {
@@ -182,6 +218,37 @@ func main() {
 	// heeft geen mailbox en laat de hook leeg. HOP zelf blijft oblivious.
 	if boardExtra != nil {
 		boardExtra()
+	}
+
+	// Hoeveel cores houdt de HOP-runtime voor zichzelf? HopOS leest het uit de
+	// platform-config (board-hook) en past het toe: SetHopCores reserveert de
+	// cores uit de slot-pool (slotmgr biedt HOP de rest), en bij N>1 brengt de
+	// node-SMP hieronder de extra cores als Go-Ms op (GOMAXPROCS=N; Go spreidt de
+	// node-goroutines zelf). N=1 (default) = geen reservering, geen extra cores.
+	nCores := hopCores()
+	slots.SetHopCores(nCores)
+	if nCores > 1 {
+		// Checkpoints op de console (serial+GOP): op een headless node zijn dit
+		// dé bakens die op de kabel tonen hoe ver de node-SMP-bring-up komt.
+		fmt.Printf("hop: node-SMP: reserving %d cores, installing vectors...\n", nCores)
+		// Vectoren klaar vóór de node-cores opkomen (ze zetten VBAR_EL2 op de
+		// revoke-vectoren, net als core 0 uit bootKernel); later in Start no-op.
+		slots.EnsureVectors()
+		// Geef de node-runtime nCores cores. Dezelfde multicore-machinerie als een
+		// app (goos.Task + GOMAXPROCS + de gedeelde EL2-trampoline), maar de node
+		// dispatcht zijn eigen cores direct via PSCI (hij ís HOP). Go spreidt de
+		// node-goroutines (switch/leader/plaatsing) daarna zelf over de cores.
+		smp.ConfigureNode(nCores, func(core int, entry, ctx uint64) {
+			board.Current().CPUOn(uint64(core), entry, ctx)
+		})
+		nodeSMPWarmup(nCores)
+		// Levensteken op de console: dispatched = door de runtime opgevraagde
+		// extra cores; PSCI-state 0 (On) = de core leeft in de node-runtime.
+		fmt.Printf("hop: node runtime on %d cores (GOMAXPROCS=%d, dispatched=%d) HOPOS_NODE_SMP\n",
+			nCores, runtime.GOMAXPROCS(0), smp.NodeStarted())
+		for c := 1; c < nCores; c++ {
+			fmt.Printf("hop: node-core %d PSCI-state=%d\n", c, board.Current().AffinityInfo(uint64(c)))
+		}
 	}
 
 	sm := slotmgr.New()

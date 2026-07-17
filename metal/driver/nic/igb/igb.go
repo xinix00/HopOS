@@ -49,12 +49,6 @@ const (
 	regRAL0   = 0x5400 // MAC-adres (NVM-autoload na reset)
 	regRAH0   = 0x5404
 
-	// Statistiek (clear-on-read, e1000-familie): hét bewijsmiddel of de NIC
-	// dropt omdat core 0 de RX-ring te traag drained (nobuf) of de MAC-fifo
-	// overliep (missed) — de vraag achter de 21Mbit/s-storm van 15-07.
-	regMPC  = 0x4010 // missed packets (geen vrije descriptors, MAC-fifo vol)
-	regRNBC = 0x40A0 // receive no buffers (geen descriptor op het moment van RX)
-
 	// CTRL.
 	ctrlSLU = 1 << 6  // set link up (verplicht vóór de MAC een link meldt)
 	ctrlRST = 1 << 26 // device-reset (zelfwissend)
@@ -119,19 +113,8 @@ const (
 	txTimeout = 100 * time.Millisecond
 
 	bufSize = 2048 // SRRCTL BSIZEPKT-eenheid; ruim boven 1522
-	// Ringmaten voor de node-rol: één NIC draagt ALLE flows van 127 slots.
-	// 64 RX-descriptors (96KB) liep bij de eerste volle storm al over op één
-	// scheduler-tik van core 0 (1Gbit × ~2,6ms WFE-tik ≈ 325KB backlog) →
-	// hardware-drops → TCP-retransmit-collapse: 127×8,1MB duurde ~6,5 min
-	// (~21Mbit/s, gemeten 15-07). 1024×2KB = 2MB buffer vangt ~16ms burst;
-	// de TX-kant idem (16 descriptors liet Transmit spinnen op ACK-bursts).
-	// Past ruim in NetDMASize (8MB): 1280×16B ring + 1280×2KB buffers ≈ 2,6MB.
-	nRx = 1024
-	nTx = 256
-
-	// rdtBatch: om de hoeveel ontvangen frames de herwapende descriptors via
-	// RDT aan de hardware terug worden gegeven (zie Receive).
-	rdtBatch = 32
+	nRx     = 64
+	nTx     = 16
 )
 
 // supported zijn de igb-familieleden die deze driver aankan: de I210/I211
@@ -159,7 +142,6 @@ type Net struct {
 	rxRing, txRing uintptr
 	rxBufs, txBufs uintptr
 	rxHead, txHead int
-	rxPending      int // herwapende descriptors die nog niet via RDT terug zijn
 }
 
 func (n *Net) rd(off uintptr) uint32    { return dev.Read32(n.Base + off) }
@@ -313,13 +295,6 @@ func (n *Net) Init(dmaBase, dmaSize uintptr) error {
 	return nil
 }
 
-// Stats leest de drop-tellers (clear-on-read): missed = MAC-fifo liep over
-// (descriptors op), nobuf = geen descriptor beschikbaar op RX-moment. Beide
-// structureel >0 onder last = de RX-ring/drain is de fles, niet de lijn.
-func (n *Net) Stats() (missed, nobuf uint32) {
-	return n.rd(regMPC), n.rd(regRNBC)
-}
-
 // armRx zet descriptor i terug in read-format met zijn eigen buffer.
 func (n *Net) armRx(i int) {
 	d := n.rxRing + uintptr(i)*16
@@ -331,21 +306,10 @@ func (n *Net) armRx(i int) {
 }
 
 // Receive haalt één frame op (0 = niets) — go-net NetworkDevice.
-//
-// RDT-batch (golf 2, 15-07): descriptors worden per frame herwapend maar pas
-// per rdtBatch via het RDT-register teruggegeven — één ongecachte MMIO-write
-// + barrier per 32 frames i.p.v. per frame (het Linux-igb-recept). Met nRx
-// descriptors totaal merkt de hardware niets van maximaal 31 achtergehouden;
-// op een stil moment (lege ring) worden restjes alsnog teruggegeven.
 func (n *Net) Receive(buf []byte) (int, error) {
 	d := n.rxRing + uintptr(n.rxHead)*16
 	status := dev.Read32(d + 8)
 	if status&rxDD == 0 {
-		if n.rxPending > 0 {
-			dev.MB()
-			n.wr(regRDT, uint32((n.rxHead+nRx-1)%nRx))
-			n.rxPending = 0
-		}
 		return 0, nil
 	}
 	dev.MB()
@@ -362,14 +326,10 @@ func (n *Net) Receive(buf []byte) (int, error) {
 		dev.CopyOut(buf[:length], n.rxBufs+uintptr(n.rxHead)*bufSize)
 	}
 
-	// Descriptor herwapenen; RDT volgt gebatcht (zie boven).
+	// Descriptor herwapenen en aan de hardware geven (RDT = laatst gevulde).
 	n.armRx(n.rxHead)
-	n.rxPending++
-	if n.rxPending >= rdtBatch {
-		dev.MB()
-		n.wr(regRDT, uint32(n.rxHead))
-		n.rxPending = 0
-	}
+	dev.MB()
+	n.wr(regRDT, uint32(n.rxHead))
 	n.rxHead = (n.rxHead + 1) % nRx
 	return length, nil
 }

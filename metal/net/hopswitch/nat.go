@@ -25,6 +25,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"runtime"
 	"sync"
 	"time"
 
@@ -57,6 +58,12 @@ const (
 	// maxNeigh begrenst de neighbor-cache (spoofbare srcIP als key): bij het
 	// plafond legen en herleren, net als de oude next-hop-tabel.
 	maxNeigh = 4096
+
+	// claimYield: elke zoveel achter elkaar door de NAT geclaimde frames geeft
+	// Receive de core even af (runtime.Gosched) — op tamago is er geen async-
+	// preëmptie, dus een sustained-line-rate-drain zou anders de andere
+	// node-goroutines (switch-lus, agent, watchdog-aai) verhongeren.
+	claimYield = 32
 )
 
 // pub is één gepubliceerde poort. HOP's conventie (ER_PORT_*): de app bindt
@@ -148,21 +155,39 @@ func WrapUplink(nic gnet.NetworkDevice, cidr string, mac net.HardwareAddr) (*Upl
 	return u, nil
 }
 
-// Receive haalt één frame van de NIC; frames voor gepubliceerde poorten of
-// lopende masquerade-flows worden geclaimd (→ interne switch) en bereiken de
-// HOP-stack nooit.
+// Receive levert het eerste frame dat NIET door de NAT geclaimd wordt terug
+// voor HOP's eigen stack; geclaimde frames (app-downloads, masquerade-antwoorden,
+// DNAT-inbound) gaan via de switch naar hun slot en tellen niet als "niks".
+//
+// NETDOORVOER (16-07): dit draait nu dóór tot de NIC-ring leeg is (n==0) of er
+// een frame voor HOP zelf ligt. Vóórheen meldde elke geclaimde frame (0, nil),
+// waarna de rxLoop (hopnet) 300µs sliep — dus ~1 slaap PER gedownloade frame:
+// ~3300 frames/s ≈ ~3,6MB/s dak op álle app-downloads (precies het gemeten dak).
+// De rxLoop-comment "onder last wordt er nooit geslapen" klopte daardoor niet;
+// dit herstelt de bedoeling: pas slapen als de NIC-ring écht leeg is. De node
+// draait op één core (GOMAXPROCS=1), dus geven we tussen batches af zodat de
+// switch-lus de inject-queue en de app zijn rx-ring bijbenen — coöperatief
+// afgeven ís hier de concurrency (het Go-idee).
 func (u *Uplink) Receive(buf []byte) (int, error) {
-	n, err := u.nic.Receive(buf)
-	if n == 0 || err != nil {
-		return n, err
+	for claimed := 0; ; claimed++ {
+		n, err := u.nic.Receive(buf)
+		if n == 0 || err != nil {
+			return n, err // NIC-ring leeg (of fout): pas hier mag de rxLoop slapen
+		}
+		// ARP eerst (niet claimen — gvisor wil replies óók zien voor de eigen
+		// node-stack): de reply op onze first-contact-request leert de neighbor.
+		arpLearn(buf[:n])
+		if !natInbound(buf[:n]) {
+			return n, err // frame voor HOP's eigen stack
+		}
+		// Geclaimd en al in de slot-ring bezorgd (deliverLocked kopieert het
+		// frame de ring in, dus buf mag meteen hergebruikt): direct de
+		// volgende halen, niet slapen. Af en toe afgeven zodat de andere
+		// node-goroutines kunnen bijbenen.
+		if claimed%claimYield == claimYield-1 {
+			runtime.Gosched()
+		}
 	}
-	// ARP eerst (niet claimen — gvisor wil replies óók zien voor de eigen
-	// node-stack): de reply op onze first-contact-request leert de neighbor.
-	arpLearn(buf[:n])
-	if natInbound(buf[:n]) {
-		return 0, nil
-	}
-	return n, err
 }
 
 // Transmit verstuurt één frame op de NIC (geserialiseerd).
@@ -375,7 +400,7 @@ func natInbound(f []byte) bool {
 }
 
 // replyInLocked vertaalt een inbound antwoord op een masquerade-flow terug en
-// injecteert het de switch in (mu vast); true = geclaimd.
+// legt het rechtstreeks in de slot-ring (deliverLocked, mu vast); true = geclaimd.
 func replyInLocked(f, ip, l4 []byte, proto byte) bool {
 	if binary.BigEndian.Uint32(ip[16:]) != uplink.ip {
 		return false
@@ -394,7 +419,7 @@ func replyInLocked(f, ip, l4 []byte, proto byte) bool {
 	mac := layout.SlotMAC(fl.slot)
 	copy(f[0:6], mac[:])
 	copy(f[6:12], hostMAC[:])
-	injectFrame(f)
+	deliverLocked(fl.slot, f)
 	return true
 }
 
@@ -422,19 +447,8 @@ func dnatInLocked(f, ip, l4 []byte, proto byte) bool {
 	mac := layout.SlotMAC(m.slot)
 	copy(f[0:6], mac[:])
 	copy(f[6:12], hostMAC[:])
-	injectFrame(f)
+	deliverLocked(m.slot, f)
 	return true
-}
-
-// injectFrame kopieert f (wijst naar de gedeelde leesbuffer) en zet het op de
-// inject-queue van de switch; vol = drop (TCP herstelt).
-func injectFrame(f []byte) {
-	p := make([]byte, len(f))
-	copy(p, f)
-	select {
-	case inject <- p:
-	default:
-	}
 }
 
 // natFromSlot (mu vast, vanuit de switch-lus): frame van slot src richting de
