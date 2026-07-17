@@ -184,6 +184,42 @@ func UnmapHigh(base, size uint64) {
 	tlbiAll()
 }
 
+// MapNormal hermapt [pa, pa+size) — 2MB-gealigneerd — van Device naar
+// Normal-WB inner-shareable (XN) in tamago's eigen stage-1: het bereik moet in
+// een GB liggen die al een L2-tabel heeft (de RAM-GB — daar wonen Go-RAM én
+// carve, dus ook de NIC-DMA-regio). Dít is hoe de igb-frame-buffers cache-snel
+// worden (netdoorvoer stap "cacheable", 17-07): de driver doet de expliciete
+// hygiëne (dev.CleanInv rond de DMA), deze remap maakt de bulk-reads gecached.
+// Alleen bestaande Device-BLOKKEN worden geflipt — RAM, tabellen of iets
+// onverwachts aanraken weigert (false: de aanroeper meldt en draait ongecached
+// door). Coherentie tussen de node-cores is hardware (inner-shareable); de
+// TLB's gaan om via tlbiAll (VMID 0 gedeeld met de node-SMP-cores, smp.s).
+func MapNormal(pa, size uintptr) bool {
+	const blk = 2 << 20
+	// Normal-WB inner-shareable 2MB-blok, execute-never: TTE_BLOCK | AF |
+	// INNER_SH | attr-index 1 (MAIR: Normal WB) | XN — tamago's memoryAttributes.
+	const normalBlk = 0x1<<0 | 1<<10 | 0x3<<8 | 1<<2 | 0x3<<53
+	if pa == 0 || size == 0 || pa&(blk-1) != 0 || size&(blk-1) != 0 {
+		return false
+	}
+	for a := pa; a < pa+size; a += blk {
+		l1e := *(*uint64)(unsafe.Pointer(Base() + tamagoL1 + uintptr((uint64(a)>>30)&0x1FF)*8))
+		if l1e&0b11 != 0b11 {
+			return false // geen L2 onder deze GB: buiten de RAM-GB gevraagd
+		}
+		l2 := uintptr(l1e & 0x0000FFFFFFFFF000)
+		ep := l2 + uintptr((uint64(a)>>21)&0x1FF)*8
+		e := *(*uint64)(unsafe.Pointer(ep))
+		if e&0b11 != 0b01 || (e>>2)&0x7 != 0 {
+			return false // alleen een Device-blok (attr-index 0) flippen
+		}
+		*(*uint64)(unsafe.Pointer(ep)) = uint64(a) | normalBlk
+	}
+	dev.MB()
+	tlbiAll()
+	return true
+}
+
 // VAStatus rapporteert de 48-bit-MMU-toestand voor diagnose op het scherm
 // (het hoge-map-pad wordt op QEMU nooit geraakt — alles ligt daar laag —
 // dus de Altra is de eerste echte test; zonder serieel is dit hoe we zien

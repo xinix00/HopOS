@@ -170,6 +170,15 @@ func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
 	if err := nic.Init(layout.NetDMAPA(), layout.NetDMASize); err != nil {
 		return nil, nil, err
 	}
+	// Frame-buffers Normal-WB mappen (descriptors blijven device): de dure
+	// ongecachte 1500B-reads — het gemeten netdoorvoer-dak (17-07) — worden
+	// cache-snelheid; de driver doet de DC-hygiëne rond de DMA (igb.go).
+	// Weigert MapNormal, dan draait alles gewoon ongecached door.
+	if base, size := nic.BufRegion(); uefi.MapNormal(base, size) {
+		fmt.Println("net: igb frame buffers write-back cached (descriptors stay uncached)")
+	} else {
+		fmt.Println("net: igb frame buffers remain uncached (MapNormal declined)")
+	}
 	l, err := dhcp.Acquire(nic, nic.MAC, 15*time.Second)
 	if err != nil {
 		return nil, nil, err

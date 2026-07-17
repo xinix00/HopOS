@@ -115,6 +115,17 @@ const (
 	bufSize = 2048 // SRRCTL BSIZEPKT-eenheid; ruim boven 1522
 	nRx     = 64
 	nTx     = 16
+
+	// bufOff: de frame-buffers beginnen in een eigen 2MB-blok, gescheiden van
+	// de descriptor-ringen in blok 0 — het klassieke coherent/streaming-
+	// onderscheid (Linux: dma_alloc_coherent vs streaming DMA). Zo kan het
+	// board de búffers Normal-WB mappen (uefi.MapNormal; de dure 1500B-reads
+	// worden dan cache-snelheid, met dev.CleanInv als expliciete hygiëne
+	// rond de DMA) terwijl de descriptors ongecached blijven: die zijn klein,
+	// delen cachelines en worden gepold — precies wat je device wilt houden.
+	// Zonder remap (ander board, of MapNormal weigert) is alles gewoon
+	// ongecached zoals voorheen: de CleanInv's zijn dan onschadelijk.
+	bufOff = 2 << 20
 )
 
 // supported zijn de igb-familieleden die deze driver aankan: de I210/I211
@@ -240,13 +251,18 @@ func (n *Net) LinkUp(timeout time.Duration) (speed int, fd bool, err error) {
 // coherent zonder cache-onderhoud, de HopOS-conventie) en zet RX/TX aan.
 // Reset moet al gedaan zijn (MAC bekend).
 func (n *Net) Init(dmaBase, dmaSize uintptr) error {
-	need := uintptr(nRx*16 + nTx*16 + (nRx+nTx)*bufSize)
+	need := uintptr(bufOff + (nRx+nTx)*bufSize)
 	if dmaSize < need {
 		return fmt.Errorf("igb: DMA region %#x < %#x", dmaSize, need)
 	}
+	if dmaBase&(bufOff-1) != 0 {
+		// De buffer-splitsing (bufOff) veronderstelt een 2MB-aligned basis:
+		// het board mapt dat blok als geheel om (2MB-MMU-korrel).
+		return fmt.Errorf("igb: DMA base %#x not 2MB-aligned", dmaBase)
+	}
 	n.rxRing = dmaBase
 	n.txRing = dmaBase + nRx*16
-	n.rxBufs = dmaBase + nRx*16 + nTx*16
+	n.rxBufs = dmaBase + bufOff // eigen 2MB-blok: kan Normal-WB gemapt worden
 	n.txBufs = n.rxBufs + nRx*bufSize
 
 	// RX-ring: advanced read-format = {pkt_addr, hdr_addr(0)} per descriptor.
@@ -295,6 +311,15 @@ func (n *Net) Init(dmaBase, dmaSize uintptr) error {
 	return nil
 }
 
+// BufRegion geeft het frame-bufferbereik (basis, grootte in hele 2MB-blokken)
+// ná Init — wat het board desgewenst Normal-WB mapt (uefi.MapNormal). De
+// descriptor-ringen vallen er bewust buiten (die blijven device).
+func (n *Net) BufRegion() (base, size uintptr) {
+	const blk = 2 << 20
+	total := uintptr((nRx + nTx) * bufSize)
+	return n.rxBufs, (total + blk - 1) &^ (blk - 1)
+}
+
 // armRx zet descriptor i terug in read-format met zijn eigen buffer.
 func (n *Net) armRx(i int) {
 	d := n.rxRing + uintptr(i)*16
@@ -323,7 +348,14 @@ func (n *Net) Receive(buf []byte) (int, error) {
 		length = len(buf)
 	}
 	if length > 0 {
-		dev.CopyOut(buf[:length], n.rxBufs+uintptr(n.rxHead)*bufSize)
+		src := n.rxBufs + uintptr(n.rxHead)*bufSize
+		// Cache-hygiëne vóór de lees: de NIC schreef DRAM buiten de caches om;
+		// gooi (eventueel speculatief geladen) stale lines weg zodat we vers
+		// lezen. Op een Normal-WB-gemapte buffer (uefi.MapNormal) maakt dít de
+		// 1500B-read cache-snel; op een device-mapping is het onschadelijk.
+		// Buffers zijn 2KB-aligned → geen line-sharing met de buurbuffer.
+		dev.CleanInv(src, uintptr(length))
+		dev.CopyOut(buf[:length], src)
 	}
 
 	// Descriptor herwapenen en aan de hardware geven (RDT = laatst gevulde).
@@ -364,8 +396,13 @@ func (n *Net) Transmit(buf []byte) error {
 		}
 	}
 
-	bus := uint64(n.txBufs+uintptr(n.txHead)*bufSize) + n.BusOff
-	dev.Copy(n.txBufs+uintptr(n.txHead)*bufSize, buf)
+	dst := n.txBufs + uintptr(n.txHead)*bufSize
+	bus := uint64(dst) + n.BusOff
+	dev.Copy(dst, buf)
+	// Cache-hygiëne ná de schrijf: dirty lines naar DRAM duwen vóór de NIC
+	// de buffer fetcht (descriptor-write hieronder is het startsein). Op een
+	// device-mapping onschadelijk.
+	dev.CleanInv(dst, uintptr(len(buf)))
 	dev.Write32(d+0, uint32(bus))
 	dev.Write32(d+4, uint32(bus>>32))
 	dev.Write32(d+12, uint32(len(buf))<<txPayShift)
