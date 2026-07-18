@@ -10,7 +10,6 @@
 package main
 
 import (
-	"strconv"
 	"time"
 	_ "unsafe" // go:linkname (RAM-declaratie)
 
@@ -26,11 +25,11 @@ var ramStart uint = raspi.HopKernelStart
 //go:linkname ramSize runtime/goos.RamSize
 var ramSize uint = raspi.HopKernelSize
 
-// init leest de node-config uit cmdline.txt — HopOS leest 'm (HOP-userspace kan
-// er niet bij) en zet de board-hooks. Eén DTB-lees, drie parameters; hetzelfde
-// patroon voor elke sleutel via raspi.BootParam. Draait vóór het board-specifieke
-// boardExtra (init-volgorde op bestandsnaam: board_raspi < board_rpi*), zodat de
-// watchdog — net als vroeger — zo vroeg mogelijk gewapend is.
+// init wired de platform-config uit cmdline.txt — HopOS leest 'm (HOP-
+// userspace kan er niet bij): één generieke bootParam-hook, de sleutels
+// (hopos.cores/node/cluster/apikey/s3.*) parseert de main. Draait vóór het
+// board-specifieke boardExtra (init-volgorde op bestandsnaam: board_raspi <
+// board_rpi*), zodat de watchdog — net als vroeger — zo vroeg mogelijk staat.
 func init() {
 	dtb := raspi.DTB()
 
@@ -41,26 +40,14 @@ func init() {
 		raspi.WatchdogStart(12 * time.Second)
 	}
 
-	// Node-identiteit (P2b/C5): hopos.node= uit cmdline, anders het board-serial;
-	// twee nodes op één LAN mogen nooit allebei "hopos-1" heten.
-	nodeName = func() string {
-		if n := raspi.BootParam(dtb, "hopos.node"); n != "" {
-			return n
-		}
+	bootParam = func(key string) string { return raspi.BootParam(dtb, key) }
+
+	// Node-identiteit-terugval (P2b/C5): het board-serial — twee nodes op één
+	// LAN mogen nooit allebei "hopos-1" heten.
+	nodeSerial = func() string {
 		if s := raspi.SerialSuffix(dtb); s != "" {
 			return "hopos-" + s
 		}
 		return ""
-	}
-
-	// HOP-runtime-cores: hopos.cores= uit cmdline. Default 1 — geen verspilling
-	// bij weinig apps; opt-in hoger als de flow er druk genoeg voor is.
-	hopCores = func() int {
-		if v := raspi.BootParam(dtb, "hopos.cores"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n >= 1 {
-				return n
-			}
-		}
-		return 1
 	}
 }

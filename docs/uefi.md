@@ -164,6 +164,36 @@ ARM_BOOT_ARCH@129: bit0=PSCI, bit1=HVC-conduit (0 = SMC).
    (voeg een venster uit de dump toe aan SLOTS en herbouw). Stilte op de
    sériële console na de discovery-regels = vroege panic → valkuil 4.
 
+## Node-config: hopos.cfg op de stick (sinds 17-07)
+
+Naast `EFI/BOOT/BOOTAA64.EFI` leest de node zijn platform-config uit een
+tekstbestandje **`hopos.cfg` op de ESP-root** — het cmdline.txt-model van de
+Pi: de stub vraagt het vóór ExitBootServices via het firmware-SimpleFileSystem
+op (géén FS-driver in HopOS; de firmware leest zijn eigen FAT, HopOS parseert
+alleen — `uefi.BootConfig`). Beheer = het bestandje op elke computer bewerken;
+geen rebuild, geen EFI-shell. Ontbreekt het bestand, dan draait alles op
+defaults (1 HOP-core, vluchtige standalone-staat, geen auth).
+
+Sleutels (whitespace/regel-gescheiden `key=value`, geen spaties in waarden;
+zelfde namen als de Pi-cmdline):
+
+```
+hopos.cores=2                # cores voor de HOP-runtime (default 1); rest = app-slots
+hopos.node=altra-1           # node-identiteit (default hopos-1)
+hopos.cluster=hopos          # clusternaam
+hopos.apikey=…               # HMAC-auth (X-Hop-Auth) op agent- én leader-API
+hopos.s3.endpoint=https://…  # S3-compatibele store; endpoint+bucket zetten
+hopos.s3.bucket=…            #   de S3-lease/staat-backend aan: de leader
+hopos.s3.region=…            #   commit zijn gewenste staat (state/<cluster>)
+hopos.s3.key=…               #   en laadt hem bij boot — jobs overleven een
+hopos.s3.secret=…            #   reboot. Object weghalen = schoon booten.
+hopos.s3.pathstyle=1         # optioneel: path-style S3-URL's
+```
+
+Kanttekening: de apikey/secret staan plaintext op de FAT-stick — hetzelfde
+vertrouwensmodel als cmdline.txt op de Pi-kaart (fysiek bezit = de node).
+De waarden komen nooit in logs of in de repo.
+
 ## De NIC: Intel I210 (igb-familie) — driver bewezen
 
 Derek bevestigde: de Altra Dev Kit heeft de Intel I210 (Linux: igb).

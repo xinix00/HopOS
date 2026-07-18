@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -70,19 +71,17 @@ func screenStatus() {
 // zijn init) — de Pi's starten er het klokbeleid mee.
 var boardExtra func()
 
-// nodeName: board-specifieke node-identiteit. Op de Pi's: eerst de
-// boot-parameter hopos.node= (cmdline.txt op de kaart — configureren
-// zonder rebuild), anders "hopos-<serial>"; "" = generieke naam.
-var nodeName = func() string { return "" }
+// bootParam leest één sleutel uit de platform-config — HopOS leest die, want
+// HOP-userspace kan er niet bij: op de Pi's is dat cmdline.txt (via de DTB),
+// op UEFI-boards hopos.cfg op de stick (door de stub via de firmware-FAT
+// gelezen). Dezelfde sleutels op beide platforms: hopos.cores, hopos.node,
+// hopos.cluster, hopos.apikey, hopos.s3.* — configureren = het tekstbestandje
+// bewerken, geen rebuild. "" = niet gezet → de default hieronder in main.
+var bootParam = func(key string) string { return "" }
 
-// hopCores: hoeveel cores de HOP-node-runtime voor zichzelf houdt (core 0 telt
-// mee; de rest zijn app-slots). Board-hook — HopOS leest de platform-config
-// (HOP-userspace kan er niet bij): Pi via hopos.cores= in cmdline.txt, UEFI
-// (voorlopig) compile-time. Default 1: geen verspilling bij weinig apps — je
-// geeft de node pas meer cores als de flow er druk genoeg voor is. >1 zet
-// GOMAXPROCS op N en laat Go de node-goroutines (switch/leader/plaatsing) zelf
-// over de cores spreiden; slotmgr biedt HOP dan (totaal − N) slots.
-var hopCores = func() int { return 1 }
+// nodeSerial: board-terugval voor de node-identiteit als hopos.node= niet
+// gezet is (Pi: "hopos-<serial>"). "" = geen terugval → de main-default.
+var nodeSerial = func() string { return "" }
 
 // bunny: Dereks origineel (2026-07-11) — oren netjes boven het snuitje.
 // Bewust geen architectuur in de tagline: ARM64 is het heden, maar AMD64-
@@ -225,7 +224,14 @@ func main() {
 	// cores uit de slot-pool (slotmgr biedt HOP de rest), en bij N>1 brengt de
 	// node-SMP hieronder de extra cores als Go-Ms op (GOMAXPROCS=N; Go spreidt de
 	// node-goroutines zelf). N=1 (default) = geen reservering, geen extra cores.
-	nCores := hopCores()
+	// Hoeveel cores voor de HOP-runtime (core 0 telt mee; de rest zijn
+	// app-slots). Default 1: geen verspilling bij weinig apps — opt-in hoger
+	// (hopos.cores=2) als de flow er druk genoeg voor is; >1 zet GOMAXPROCS en
+	// Go spreidt de node-goroutines zelf. Slotmgr biedt HOP (totaal − N) slots.
+	nCores := 1
+	if n, err := strconv.Atoi(bootParam("hopos.cores")); err == nil && n >= 1 {
+		nCores = n
+	}
 	slots.SetHopCores(nCores)
 	if nCores > 1 {
 		// Checkpoints op de console (serial+GOP): op een headless node zijn dit
@@ -255,15 +261,42 @@ func main() {
 
 	cfg := config.DefaultConfig()
 	cfg.Cluster.Name = "hopos"
+	if v := bootParam("hopos.cluster"); v != "" {
+		cfg.Cluster.Name = v
+	}
 	// Node-identiteit (P2b/C5): boot-parameter of board-serial — twee nodes
 	// op één LAN mogen nooit allebei "hopos-1" heten. QEMU heeft geen van
 	// beide en houdt de oude naam.
 	cfg.Node.ID = "hopos-1"
-	if n := nodeName(); n != "" {
+	if n := bootParam("hopos.node"); n != "" {
 		cfg.Node.ID = n
+	} else if s := nodeSerial(); s != "" {
+		cfg.Node.ID = s
 	}
 	cfg.Node.IP = board.Current().Net().IP
 	cfg.Node.Port = 8080 // leader-API = 9080
+
+	// Clusterconfig uit de platform-config: hiermee gaan HMAC-auth en de
+	// S3-gecommitte clusterstaat (agentboot: persister + LoadCommittedState)
+	// aan op ijzer — een reboot herplaatst dan de eigen jobs (declaratief).
+	// Zonder deze sleutels: het oude, vluchtige standalone-gedrag. De waarden
+	// zelf NOOIT loggen (de key/secret staan alleen op het boot-medium).
+	cfg.APIKey = bootParam("hopos.apikey")
+	if cfg.APIKey != "" {
+		fmt.Println("hop: API authentication enabled (X-Hop-Auth HMAC)")
+	}
+	s3 := &cfg.Cluster.Lock.S3
+	s3.Endpoint = bootParam("hopos.s3.endpoint")
+	s3.Bucket = bootParam("hopos.s3.bucket")
+	s3.Region = bootParam("hopos.s3.region")
+	s3.AccessKeyID = bootParam("hopos.s3.key")
+	s3.SecretAccessKey = bootParam("hopos.s3.secret")
+	s3.UsePathStyle = bootParam("hopos.s3.pathstyle") == "1"
+	if s3.Bucket != "" && s3.Endpoint != "" {
+		cfg.Cluster.Lock.Type = "s3"
+		fmt.Printf("hop: cluster %q: S3 committed state on %s/%s — jobs survive reboot\n",
+			cfg.Cluster.Name, s3.Endpoint, s3.Bucket)
+	}
 
 	// Geheugen. HOP kent per job de MemoryLimit en overspawnt nooit — dus het
 	// getal dat we aanbieden is de plaatsings-ceiling. Twee dingen bewaken:
