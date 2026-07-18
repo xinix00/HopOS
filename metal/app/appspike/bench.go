@@ -13,6 +13,7 @@
 package main
 
 import (
+	"runtime"
 	"time"
 
 	"hop-os/metal/app/applib"
@@ -59,6 +60,33 @@ func benchChase(p []uint64, hops int) float64 {
 	}
 	benchSink += idx
 	return time.Since(t0).Seconds() * 1e9 / float64(hops)
+}
+
+// cpuDuty is het ijkgewicht voor de per-app CPU-meting (kern/slotmgr
+// usage.go): DUTY=pct brandt pct% van elke 100ms en slaapt de rest — op
+// ijzer hoort /tasks dan cpu≈pct te tonen (100 → 100, 50 → ~50). In
+// QEMU-TCG is alleen de 100 betrouwbaar: WFE spint daar, dus elke slaap
+// leest als "vol idle" (klemt op 0) — de lineariteit is een ijzer-meting.
+// De Gosched per micro-burst houdt heartbeat/memwatch levend (coöperatief;
+// telt níét als idle — alleen de echte idle-lus tikt).
+func cpuDuty(app *applib.App, pct int) {
+	pct = min(max(pct, 1), 100)
+	const period = 100 * time.Millisecond
+	busy := period * time.Duration(pct) / 100
+	app.Logf("DUTY: %d%% duty-cycle (busy %v of every %v)", pct, busy, period)
+	x := uint64(88172645463325252)
+	for {
+		for t0 := time.Now(); time.Since(t0) < busy; {
+			for k := 0; k < 1<<14; k++ { // µs-burst, dan afgeven
+				x = x*6364136223846793005 + 1442695040888963407
+			}
+			runtime.Gosched()
+		}
+		benchSink += x
+		if rest := period - busy; rest > 0 {
+			time.Sleep(rest)
+		}
+	}
 }
 
 // cpuBench draait de vier kernels in een eeuwige lus (heartbeat/kill lopen

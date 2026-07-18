@@ -486,13 +486,14 @@ const (
 	CtrlSMPTcr  = 0xD8
 	CtrlSMPVbar = 0x78
 	CtrlSMPMair = 0xF8
-	// CtrlIdle (app → HOP): idle-tik-teller. De idle-governor (metal/cpu/idle)
-	// verhoogt hem één keer per idle-ronde (event-stream, ~1,2ms bij 54MHz);
-	// tikt de teller op vol tempo dan is de core idle, staat hij stil dan
-	// draait er code. De klokwachter (metal/driver/dvfs, OS-taak op de HOP-core)
-	// leest de delta's en klokt de node op/terug — HOP is oblivious. Bij
-	// SMP delen de cores van een slot deze teller: de wachter deelt het
-	// verwachte tempo door CtrlCores.
+	// CtrlIdle (app → HOP): idle-teller — geaccumuleerde idle-TIJD in
+	// generic-timer-ticks (de governor telt de counterstand rond elke WFE op,
+	// metal/cpu/idle; sinds 18-07 tijd i.p.v. rondes — rondes bleken op ijzer
+	// door SEV-ruis opgeblazen). Een vol idle core stijgt ~CNTFRQ per
+	// seconde, een rekenende core staat stil. Lezers: de klokwachter
+	// (metal/driver/dvfs, Pi) en de per-slot CPU-meting (kern/slotmgr) —
+	// HOP-beleid, de app is oblivious. Bij SMP delen de cores van een slot
+	// deze teller: lezers vermenigvuldigen het verwachte tempo met CtrlCores.
 	//
 	// Op 0x48 (het gat tussen CtrlWallOff en CtrlVecPA) — stond op 0xD8 en
 	// botste daar met CtrlSMPTcr (Dereks vondst 18-07): de ~1,2ms-teller van

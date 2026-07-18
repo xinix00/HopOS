@@ -2,10 +2,10 @@
 // orchestrator is volledig oblivious (zelfde principe als bij SMP). Het
 // beleid is met Derek vastgelegd in docs/plan-p2b-soak.md (2026-07-11):
 //
-//   - het signaal is de idle-tik-teller (metal/cpu/idle): een idle core tikt
-//     op event-stream-tempo (~1,2ms), een drukke core tikt niet — apps
-//     publiceren hem op hun control-page (CtrlIdle), de HOP-core telt
-//     intern (idle.Ticks);
+//   - het signaal is de idle-teller (metal/cpu/idle): idle-TIJD in
+//     generic-timer-ticks — een idle core accumuleert ~CNTFRQ per seconde,
+//     een drukke core staat stil. Apps publiceren hem op hun control-page
+//     (CtrlIdle), de HOP-core telt intern (idle.Ticks);
 //   - de wachter sampelt elke ~10ms: íéts onder tempo → klok DIRECT vol
 //     (~10ms schakeltijd); álles ~30s op vol tempo → klok laag;
 //   - de firmware-mailbox-call (metal/driver/vcmail) alleen op de flank;
@@ -27,12 +27,14 @@ import (
 	"hop-os/metal/driver/vcmail"
 )
 
-// Config is de board-invoer voor Start.
+// Config is de board-invoer voor Start. Het verwachte idle-tempo en het
+// aantal slots zijn GEEN velden: de teller telt idle-tijd, dus het tempo is
+// per definitie idle.CounterHz (CNTFRQ), en de control-pages zijn er
+// layout.MaxSlots — parameters met maar één juiste waarde zijn geen
+// parameters.
 type Config struct {
 	Mbox    *vcmail.Mbox // de firmware-mailbox van dit board
 	LowHz   uint32       // de "stil"-klok (bv. 600MHz)
-	TickHz  uint64       // verwacht tiktempo per idle core = CNTFRQ / 65536
-	Slots   int          // layout.MaxSlots (aantal te bewaken control-pages)
 	Verbose bool         // true: log elke flank (soak-diagnose)
 }
 
@@ -96,9 +98,10 @@ func watch(cfg Config, maxHz uint32) {
 	high := true
 	set(maxHz, "boot")
 
+	tickHz := idle.CounterHz()
 	for {
 		time.Sleep(sample)
-		expect := cfg.TickHz * uint64(sample) / uint64(time.Second) // per core, per sample
+		expect := tickHz * uint64(sample) / uint64(time.Second) // per core, per sample
 
 		busy := false
 		// Bron 0: de HOP-core zelf (agent-drukte klokt ook op).
@@ -111,7 +114,7 @@ func watch(cfg Config, maxHz uint32) {
 		// CtrlCores deelt het verwachte tempo bij SMP). Het eerste sample
 		// na een start ijkt alleen — daarna telt óók een teller die op 0
 		// blijft staan (een app die vanaf seconde één 100% brandt) als druk.
-		for i := 1; i <= cfg.Slots; i++ {
+		for i := 1; i <= layout.MaxSlots; i++ {
 			page := layout.CtrlPagePA(i)
 			cores := dev.Read64(page + layout.CtrlCores)
 			if cores == 0 || dev.Read64(page+layout.CtrlStatus) != layout.StatusReady {

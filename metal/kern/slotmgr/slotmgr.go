@@ -28,7 +28,10 @@ import (
 // (default) is phys() de identiteit — geen gedragswijziging.
 type Manager struct{}
 
-func New() *Manager { return &Manager{} }
+func New() *Manager {
+	usageOnce.Do(startUsage) // de per-slot CPU-meting (usage.go) loopt zolang de node leeft
+	return &Manager{}
+}
 
 // phys vertaalt een HOP-slot naar de interne slot/core-index.
 func phys(slot int) int { return slot + slots.HopReserved() }
@@ -57,6 +60,7 @@ func (Manager) Status(slot int) hopos.SlotStatus {
 		Heartbeat: s.Heartbeat,
 		RAMSize:   s.RAMSize,
 		MemSys:    s.MemSys,
+		CPUPct:    cpuPct(phys(slot)),
 		FaultVec:  s.FaultVec,
 		FaultESR:  s.FaultESR,
 		FaultFAR:  s.FaultFAR,

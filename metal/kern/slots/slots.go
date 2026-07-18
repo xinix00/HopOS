@@ -421,6 +421,8 @@ type Status struct {
 	Heartbeat uint64
 	RAMSize   uint64 // door de app gerapporteerde (gepatchte) RAM-maat
 	MemSys    uint64 // werkelijke draw: MemStats.Sys van de app (0 = nog niet gemeld)
+	IdleTicks uint64 // ruwe idle-tik-teller (CtrlIdle; bij SMP gedeeld door de cores)
+	Cores     uint64 // aantal cores van het slot (CtrlCores; 0 = geen SMP-veld gezet)
 
 	// Door de EL2-vectoren gerapporteerd bij een onvrijwillig einde:
 	// FaultVec = layout.FaultSync (stage-2-fault; ESR/FAR geldig) — zowel bij
@@ -935,6 +937,8 @@ func Get(i int) Status {
 		Heartbeat: ctrlRead(i, layout.CtrlHeartbeat),
 		RAMSize:   ctrlRead(i, layout.CtrlRAMSize),
 		MemSys:    ctrlRead(i, layout.CtrlMemSys),
+		IdleTicks: ctrlRead(i, layout.CtrlIdle),
+		Cores:     ctrlRead(i, layout.CtrlCores),
 		FaultVec:  ctrlRead(i, layout.CtrlFaultVec),
 		FaultESR:  ctrlRead(i, layout.CtrlFaultESR),
 		FaultFAR:  ctrlRead(i, layout.CtrlFaultFAR),

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -44,6 +45,13 @@ func main() {
 	// 1-core-prestatierol (bench.go): draait de app-core op volle N1-snelheid?
 	if app.Env("BENCH") != "" {
 		cpuBench(app)
+	}
+
+	// IJkgewicht voor de per-app CPU-meting (bench.go): DUTY=50 hoort op
+	// ijzer als cpu≈50 in /tasks te staan (bewezen 18-07: 0/24/50/74/100).
+	if v := app.Env("DUTY"); v != "" {
+		pct, _ := strconv.Atoi(v) // fout → 0, cpuDuty klemt naar 1..100
+		cpuDuty(app, pct)
 	}
 
 	// Soak-rol (P2b, docs/plan-p2b-soak.md): permanent CPU branden + heap

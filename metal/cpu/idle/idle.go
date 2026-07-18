@@ -24,26 +24,41 @@ import (
 	"hop-os/metal/dev"
 )
 
-// wfe/cntkctlSet: zie idle_arm64.s.
-func wfe()
+// wfeIdle/cntkctlSet/cntfrq: zie idle_arm64.s.
+func wfeIdle() uint64
 func cntkctlSet(v uint64)
+func cntfrq() uint64
 
-// De idle-tik-teller: één increment per governor-ronde. Omdat de
-// event-stream een idle core élke ~1,2ms wekt, is het tempo van deze teller
-// hét idle-signaal — vol tempo = idle, stilstand = er draait code. Apps
-// publiceren hem op hun control-page (Publish → layout.CtrlIdle) zodat de
-// klokwachter (metal/klok) op de HOP-core hem ziet; zonder Publish telt hij
-// alleen intern (Ticks — zo leest de HOP-core zijn eigen tempo).
+// De idle-teller: geaccumuleerde idle-TIJD in generic-timer-ticks (CNTFRQ-
+// eenheden) — de counterstand vóór en ná elke WFE, delta erbij. Een vol
+// idle core stijgt dus ~CounterHz per seconde, een rekenende core staat
+// stil; de verhouding ís de idle-fractie. Apps publiceren hem op hun
+// control-page (Publish → layout.CtrlIdle) zodat HOP hem ziet (dvfs-beleid,
+// per-slot CPU-meting); zonder Publish telt hij alleen intern (Ticks).
+//
+// Waarom tijd en niet rondes (de eerste vorm, herzien 18-07): WFE wekt óók
+// op SEV's van andere cores en spurious events — op de drukke Altra tikte
+// een slapende app daardoor ver bóven het event-stream-tempo en las elke
+// deels-idle app als "vol idle" (ijzer-meting: DUTY=25/50/75 → allemaal
+// cpu=0%, alleen 100 klopte). Tijd tellen is ruis-immuun: een valse wake
+// telt zijn echte (micro)duur mee in plaats van een volle tik, zonder
+// per-core-status.
 var (
 	ticks   atomic.Uint64
 	pubAddr atomic.Uintptr
 )
 
 // Enable zet de event-stream aan en hangt de WFE-governor in de runtime.
-// EVNTI=15: event bij elke 0→1-flank van tellerbit 15 → periode 2^16 ticks
-// (~1,2ms bij 54MHz op de Pi 5, ~1ms bij QEMU's 62,5MHz).
+// EVNTI kiest de counterbit waarvan de 0→1-flank het wek-event is; we pakken
+// de bit die het dichtst bij ~1ms periode blijft (2^(EVNTI+1)/CNTFRQ):
+// bit 15 op de Pi's 54MHz (1,2ms) en QEMU's 62,5MHz (1,05ms), bit 14 op de
+// Altra's 25MHz (1,3ms — een vaste 15 gaf daar 2,6ms wek-granulariteit).
 func Enable() {
-	cntkctlSet(1<<2 | 15<<4) // EVNTEN | EVNTI=15
+	i := uint64(15) // EVNTI is 4 bits: 15 is tegelijk het maximum én de start
+	for i > 4 && (uint64(1)<<(i+1))*2000 > cntfrq()*3 { // periode > 1,5ms → fijnere bit
+		i--
+	}
+	cntkctlSet(1<<2 | i<<4) // EVNTEN | EVNTI
 	goos.Idle = governor
 }
 
@@ -56,13 +71,36 @@ func Publish(addr uintptr) { pubAddr.Store(addr) }
 // Ticks geeft de interne tellerstand.
 func Ticks() uint64 { return ticks.Load() }
 
-// governor: één WFE per idle-ronde. Bewust ongevoelig voor pollUntil: de
-// event-stream begrenst de slaap, de scheduler doet de timer-administratie —
-// geen deadline-rekenwerk, geen WFI-zonder-wekker-risico. De tel + store
-// erna kosten ~ns op een rondetijd van ~1,2ms.
+// CounterHz is de eenheid van de teller: generic-timer-ticks per seconde
+// (CNTFRQ). Een vólledig idle core accumuleert ~CounterHz per seconde —
+// wie de teller leest (dvfs-beleid, per-slot CPU-meting in kern/slotmgr)
+// normeert tegen dít tempo. LET OP QEMU-TCG: WFE is daar een no-op, dus
+// idle-tijd meet er ~0 — idle-metingen zijn ijzer-metingen.
+func CounterHz() uint64 { return cntfrq() }
+
+// wfeMinSleep (counter-ticks, ~1-2,5µs op 25-64MHz): de grens tussen "de WFE
+// consumeerde alleen een verschaald event" en "de core heeft echt geslapen".
+const wfeMinSleep = 64
+
+// governor: WFE's tot er écht geslapen is, met de counterstand eromheen — de
+// geslapen tijd gaat de teller in. De lus is nodig omdat het event-register
+// vrijwel altijd vol zit als we hier komen: elke exclusive (LDXR/STXR — de
+// scheduler-transit én onze eigen atomics) zet op de N1 een wek-event, en de
+// eerste WFE keert daardoor per direct terug (GEMETEN 18-07 op de Altra:
+// 4,7M wakes/s, slaap 0,0µs — "idle" cores spinden op volle kracht en de
+// idle-teller was ruis). De herhaalde WFE slaapt wél: tussen de iteraties
+// staat geen enkele monitor-touch. Events wegslikken is veilig — tamago's
+// Ms pollen (geen SEV-wek-afhankelijkheid) en de event-stream begrenst elke
+// slaap op ~1,3ms; de cap dekt een externe event-storm (dan meten we eerlijk
+// "geen slaap" en draait de scheduler gewoon door). Bewust ongevoelig voor
+// pollUntil: de scheduler doet de timer-administratie, timers kunnen dus
+// ~1-2 event-periodes later vuren — irrelevant voor jobs.
 func governor(pollUntil int64) {
-	wfe()
-	n := ticks.Add(1)
+	var slept uint64
+	for i := 0; slept < wfeMinSleep && i < 4; i++ {
+		slept += wfeIdle()
+	}
+	n := ticks.Add(slept)
 	if a := pubAddr.Load(); a != 0 {
 		dev.Write64(a, n)
 	}
