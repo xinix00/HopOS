@@ -1,7 +1,7 @@
 #!/bin/sh
 # Bouw de fase-P1-multikernel voor de Raspberry Pi 4 (metal/cmd/hopos-embed):
 # HOP-kern + embedded canonieke app-image, als raw kernel8.img (raw op
-# 0x80000, TF-A bl31.bin als armstub); zie docs/rpi4.md.
+# 0x80000, TF-A bl31.bin als armstub); zie docs/archief/rpi4.md.
 #
 # TF-A bl31.bin is VERPLICHT als armstub (de stock armstub8 heeft geen PSCI):
 #   cd ~/arm-trusted-firmware
@@ -51,7 +51,7 @@ go run "$DIR/image/mkkernel/main.go" "$DIR/image/mkkernel/pe.go" -elf metal/out/
 #    (PSCI). Het getrackte config.txt is de agent-config; die overschrijven we
 #    niet, deze komt bij het flashen als config.txt op de kaart.
 cat > sd-rpi4/config-hopos.txt <<'EOF'
-# HopOS multikernel (fase P1) — Raspberry Pi 4 (zie docs/rpi4.md)
+# HopOS multikernel (fase P1) — Raspberry Pi 4 (zie docs/archief/rpi4.md)
 arm_64bit=1
 kernel=kernel8.img
 device_tree_address=0x0f000000

@@ -2,6 +2,8 @@
 
 **A bare-metal Go operating system for edge computing. No Linux — one static Go binary *is* the OS.**
 
+**Docs:** [flash & boot](docs/boot.md) · [configure](docs/config.md) · [write an app](docs/app.md) · [technical](docs/index.md) — site: [gethop.org](https://gethop.org)
+
 HopOS turns a multi-core ARM64 board into a small fleet of single-purpose computers. Core 0 runs **HOP**, the orchestrator-kernel: it hands out cores, memory partitions and network identities, and dispatches. Every app then does its own work on its own hardware — it downloads its image over its own network stack and places itself inside its own hardware-enforced memory partition, *natively on its own dedicated CPU core*. There is no shell, no libc, no userland, no processes — killing an app means switching its core off.
 
 ## Why
@@ -120,7 +122,7 @@ No shell. No exec, no second binary, no users. No persistence. No VMs, WASM or c
 
 The Pi 5 boot requirements are non-obvious and documented in [`sd-rpi5/`](sd-rpi5/): the EEPROM bootloader validates images as Linux kernels unless `os_check=0`, silently ignores `kernel_address`, and always loads raw images at `0x80000`.
 
-C1-stepping BCM2712 silicon has an interconnect erratum (fabric deadlock when sustained PCIe inbound DMA coincides with fabric-wide operations, fixed in D0) that HopOS works around in three layers — see [docs/bcm2712-c1-erratum.md](docs/bcm2712-c1-erratum.md).
+C1-stepping BCM2712 silicon has an interconnect erratum (fabric deadlock when sustained PCIe inbound DMA coincides with fabric-wide operations, fixed in D0) that HopOS works around in three layers — see [docs/archief/bcm2712-c1-erratum.md](docs/archief/bcm2712-c1-erratum.md).
 
 ## Repository layout
 
@@ -147,7 +149,7 @@ sd-rpi5/     SD-card payload + flashing notes (Dutch)
 
 The placement and import-direction rules (apps can never link against
 HOP internals — the app side sees only `abi/`) are documented in
-[docs/indeling.md](docs/indeling.md) (Dutch).
+[docs/archief/indeling.md](docs/archief/indeling.md) (Dutch).
 
 ## Building & running
 

@@ -52,7 +52,7 @@ go run "$DIR/image/mkkernel/main.go" "$DIR/image/mkkernel/pe.go" -elf metal/out/
 
 # 4. config.txt — zelfde poortwachters, kernel wijst naar de agent.
 cat > sd-rpi5/config.txt <<'EOF'
-# HopOS: de echte HOP-agent (fase P2) — Raspberry Pi 5 (zie docs/rpi5.md)
+# HopOS: de echte HOP-agent (fase P2) — Raspberry Pi 5 (zie docs/archief/rpi5.md)
 arm_64bit=1
 kernel=hop-agent5.img
 os_check=0

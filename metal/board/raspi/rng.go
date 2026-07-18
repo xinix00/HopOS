@@ -18,7 +18,7 @@ import (
 // zodra RNG_FIFO_COUNT[7:0] > 0. LET OP: dit is de iproc-rng200-variant (BCM2711/
 // 2712, DT "brcm,bcm2711-rng200") — de teller staat in FIFO_COUNT (0x24, bits
 // [7:0]) en de data in FIFO_DATA (0x20); dit is NIET het oudere bcm2835-rng-blok
-// (RNG_STATUS-count op 0x4). Zie docs/rpi5.md resp. docs/rpi4.md.
+// (RNG_STATUS-count op 0x4). Zie docs/archief/rpi5.md resp. docs/archief/rpi4.md.
 //
 // Het basisadres verschilt per board (Pi 4: 0xFE104000, Pi 5: 0x107d208000), dus
 // rng.go is board-agnostisch: elk board zet RNG200Base in zijn init(). Zolang

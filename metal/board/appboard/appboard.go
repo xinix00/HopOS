@@ -3,7 +3,7 @@
 // om op te draaien: zijn eigen core-identiteit en de klok-offset die HOP hem
 // meegeeft. Al het andere op board.Board (ProbeNIC, PCIe, PSCI-control,
 // framebuffer) is HOP-werk; via dít contract kan een app daar niet eens
-// tegenaan linken — de isolatie op source-niveau uit docs/indeling.md, nu ook
+// tegenaan linken — de isolatie op source-niveau uit docs/archief/indeling.md, nu ook
 // voor de board-laag. Bovendien scheelt het elke app-image de complete
 // driverstack van zijn board (NIC/PCIe/DHCP, ~2,5k regels die de linker via
 // interface-methods nooit kon elimineren).

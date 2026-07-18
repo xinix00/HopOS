@@ -2,7 +2,7 @@
 # Bouw de fase-P1-multikernel voor de Raspberry Pi 5 (metal/cmd/hopos-embed):
 # HOP-kern + embedded canonieke app-image, als raw kernel voor de EEPROM-
 # bootloader (os_check=0, raw op 0x80000, DTB op 0x0F000000); zie
-# docs/rpi5.md voor het dossier.
+# docs/archief/rpi5.md voor het dossier.
 #
 # Flashen (kaart-conventie: Linux-bestanden blijven staan). config-hopos.txt
 # komt AS config.txt op de kaart; het getrackte sd-rpi5/config.txt is de
@@ -42,7 +42,7 @@ go run "$DIR/image/mkkernel/main.go" "$DIR/image/mkkernel/pe.go" -elf metal/out/
 #    wijst naar ons. Het getrackte config.txt is de agent-config; deze komt bij
 #    het flashen als config.txt op de kaart.
 cat > sd-rpi5/config-hopos.txt <<'EOF'
-# HopOS multikernel (fase P1) — Raspberry Pi 5 (zie docs/rpi5.md)
+# HopOS multikernel (fase P1) — Raspberry Pi 5 (zie docs/archief/rpi5.md)
 arm_64bit=1
 kernel=hop-hopos5.img
 # Verplicht voor élke niet-Linux-kernel op de Pi 5 (gemeten 2026-07-08):

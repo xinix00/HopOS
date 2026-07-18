@@ -10,7 +10,7 @@
 // heeft GÉÉN PSCI — een SMC verdwijnt dan in een lege EL3-vector (hang).
 // Een zelfgebouwde upstream-TF-A bl31.bin als armstub (armstub=bl31.bin in
 // config.txt) is op dit board dus verplicht vanaf de eerste boot; die levert
-// ons op EL2 af met PSCI via SMC, precies als op de Pi 5. Zie docs/rpi4.md.
+// ons op EL2 af met PSCI via SMC, precies als op de Pi 5. Zie docs/archief/rpi4.md.
 //
 // Hier staat alleen het BCM2711-eigene: UART-adres (printk + cpuinit.s),
 // GIC-basis, MPIDR-nummering (A72: aff0) en de RNG; de rest komt uit

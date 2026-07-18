@@ -54,7 +54,7 @@ func main() {
 		cpuDuty(app, pct)
 	}
 
-	// Soak-rol (P2b, docs/plan-p2b-soak.md): permanent CPU branden + heap
+	// Soak-rol (P2b, docs/archief/plan-p2b-soak.md): permanent CPU branden + heap
 	// churnen op alle cores, met een telemetrieregel per minuut. De
 	// heartbeat loopt vanzelf (applib), kill werkt gewoon — dit is de
 	// "zware taak" voor de 24-uurs-soak; hij triggert continu de

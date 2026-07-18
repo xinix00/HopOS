@@ -1,6 +1,6 @@
 // EL2-capabele CPU-init voor de Pi 4 — vervangt tamago's cpuinit (bouw met
 // -tags linkcpuinit). Met TF-A als armstub (verplicht op dit board, zie
-// docs/rpi4.md) levert de firmware ons op EL2 af. Het instructiepad zélf is
+// docs/archief/rpi4.md) levert de firmware ons op EL2 af. Het instructiepad zélf is
 // gedeeld met de Pi 5 (board/raspi/cpuinit_body.h, ge#include'd hieronder);
 // hier staat alleen het BCM2711-eigene: de UART-basis en de bewuste weglating
 // van de A76-SMPEN-write.

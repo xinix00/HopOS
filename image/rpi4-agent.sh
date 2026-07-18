@@ -47,7 +47,7 @@ go run "$DIR/image/mkkernel/main.go" "$DIR/image/mkkernel/pe.go" -elf metal/out/
 
 # 4. config.txt — zelfde poortwachters als rpi4-hopos.sh.
 cat > sd-rpi4/config.txt <<'EOF'
-# HopOS: de echte HOP-agent (fase P2) — Raspberry Pi 4 (zie docs/rpi4.md)
+# HopOS: de echte HOP-agent (fase P2) — Raspberry Pi 4 (zie docs/archief/rpi4.md)
 arm_64bit=1
 kernel=kernel8.img
 device_tree_address=0x0f000000

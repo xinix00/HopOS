@@ -1,6 +1,6 @@
 // Package dvfs is HopOS' klokbeleid — een OS-taak, geen HOP-taak: de
 // orchestrator is volledig oblivious (zelfde principe als bij SMP). Het
-// beleid is met Derek vastgelegd in docs/plan-p2b-soak.md (2026-07-11):
+// beleid is met Derek vastgelegd in docs/archief/plan-p2b-soak.md (2026-07-11):
 //
 //   - het signaal is de idle-teller (metal/cpu/idle): idle-TIJD in
 //     generic-timer-ticks — een idle core accumuleert ~CNTFRQ per seconde,

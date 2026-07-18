@@ -97,7 +97,7 @@ fi
 # 1. Eén ELF per venster-kandidaat (zelfde build, ander -T; -buildid= zodat
 #    de varianten byte-identiek zijn op de adressen na — de eis van de
 #    reloc-diff). mkkernel -pe verpakt er straks ÉÉN als payload en
-#    gebruikt de rest alleen als diff-bewijs (docs/pe-relocatie.md).
+#    gebruikt de rest alleen als diff-bewijs (docs/archief/pe-relocatie.md).
 #    Parallel linken:
 #    zes onafhankelijke builds, wall-clock ≈ één i.p.v. zes. PID's verzamelen
 #    en per stuk waiten: een kaal `wait` returnt onder `set -e` ALTIJD 0, dus
@@ -134,6 +134,11 @@ dd if=/dev/zero of=metal/out/uefi-vars.fd bs=1m count=64 2>/dev/null
 
 echo "BOOTAA64.EFI ($(du -h "$ESP/EFI/BOOT/BOOTAA64.EFI" | cut -f1), mode=$MODE) klaar — EDK2 boot..." >&2
 [ "$MODE" = agent ] && echo "agent: curl http://127.0.0.1:8080/health · leader: curl http://127.0.0.1:9080/health" >&2
+
+# Build-only (tools/release.sh en stick-flashes): stoppen vóór de QEMU-boot —
+# zo is er precies ÉÉN UEFI-bouwrecept en kan release/flash er nooit van
+# afdrijven.
+[ -n "$BUILD_ONLY" ] && exit 0
 
 # USB-semantiek zoals op de Altra (xhci + usb-storage op de vvfat-boom) +
 # igb achter een root-port (de Altra's i210-opstelling). Geen virtio-rng: de

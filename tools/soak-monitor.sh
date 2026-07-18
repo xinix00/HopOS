@@ -1,5 +1,5 @@
 #!/bin/sh
-# Soak-monitor (P2b/D10, docs/plan-p2b-soak.md): pollt elke minuut de
+# Soak-monitor (P2b/D10, docs/archief/plan-p2b-soak.md): pollt elke minuut de
 # HOP-nodes en logt één regel per node — agent- en leader-health plus
 # latency. Een miss print ALARM (en blijft gewoon doorpollen: één hikje is
 # meetdata, de reeks is het oordeel). Draaien op de Mac:

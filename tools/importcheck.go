@@ -1,4 +1,4 @@
-// importcheck dwingt de importrichting van docs/indeling.md af — als
+// importcheck dwingt de importrichting van docs/archief/indeling.md af — als
 // buildfout, niet als reviewtaak (zelfde filosofie als de compile-time
 // contract-assertie in kern/slotmgr). tools/test.sh draait het vóór de tests:
 //
@@ -6,7 +6,7 @@
 //
 // Het leest ELKE .go-file (ook achter build-tags — juist die randen drijven
 // af) en toetst alle hop-os/metal-imports tegen de laag-regels. De regels
-// zijn hier datavorm; de uitleg en het waarom staan in docs/indeling.md —
+// zijn hier datavorm; de uitleg en het waarom staan in docs/archief/indeling.md —
 // wijzigt de indeling, pas dan BEIDE aan.
 package main
 
@@ -132,7 +132,7 @@ func main() {
 			imp := strings.TrimPrefix(p, module)
 			if !allowed(cat, imp) {
 				violations = append(violations,
-					fmt.Sprintf("%s: %s (%s) importeert %s — verboden per docs/indeling.md",
+					fmt.Sprintf("%s: %s (%s) importeert %s — verboden per docs/archief/indeling.md",
 						rel, pkg, cat, imp))
 			}
 		}
@@ -150,5 +150,5 @@ func main() {
 		fmt.Fprintf(os.Stderr, "importcheck: %d overtreding(en)\n", len(violations))
 		os.Exit(1)
 	}
-	fmt.Fprintln(os.Stderr, "importcheck: importrichting klopt met docs/indeling.md")
+	fmt.Fprintln(os.Stderr, "importcheck: importrichting klopt met docs/archief/indeling.md")
 }

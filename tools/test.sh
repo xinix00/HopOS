@@ -14,7 +14,7 @@
 set -e
 cd "$(dirname "$0")/../metal"
 
-# Importrichting van docs/indeling.md — een verkeerde import is een buildfout,
+# Importrichting van docs/archief/indeling.md — een verkeerde import is een buildfout,
 # geen reviewtaak (tools/importcheck.go leest ook code achter build-tags).
 go run ../tools/importcheck.go
 
@@ -34,7 +34,7 @@ fi
 # moet blijven bouwen tot hij na NETDEMO+soak de default wordt.
 for tags in "linkcpuinit" "lnetonet linkcpuinit"; do
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-		"$TAMAGO" build -tags "$tags" -o /dev/null ./app/appspike ./app/apploader
+		"$TAMAGO" build -tags "$tags" -o /dev/null ./app/appspike ./app/apploader ./app/hello
 done
 for tags in "linkcpuinit" "rpi4 linkcpuinit" "rpi5 linkcpuinit" "uefi linkcpuinit"; do
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \

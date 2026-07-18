@@ -12,7 +12,7 @@
 // Met -pe ontstaat een UEFI-applicatie (BOOTAA64.EFI, zie pe.go) en is -elf
 // HERHAALBAAR: elke ELF is dezelfde build gelinkt op een eigen
 // kandidaat-venster (load = TEXT − 0x10000, uit de ELF afgeleid). Verpakt
-// wordt één payload + relocatietabel (docs/pe-relocatie.md); de extra
+// wordt één payload + relocatietabel (docs/archief/pe-relocatie.md); de extra
 // varianten dienen als diff-bewijs. De stub (metal/board/uefi/init.s) kiest
 // bij boot de eerste kandidaat die volgens de firmware vrij is — zo boot één
 // bestand universeel, ongeacht welk RAM een bord al bezet heeft.
@@ -147,7 +147,7 @@ func main() {
 	outPath := flag.String("o", "kernel_2712.img", "uitvoerbestand")
 	loadAddr := flag.Uint64("load", 0x80000, "laadadres (de Pi-bootloader laadt raw images altijd op 0x80000; bij -pe genegeerd — dan uit de ELF afgeleid)")
 	raw := flag.Bool("raw", false, "geen arm64 Image-header: alleen de code0-branch, géén ARM\\x64-magic — de firmware behandelt het bestand dan als raw binary en springt blind naar kernel_address (het Circle-recept; boot-meting 2026-07-08: het Image-pad mét magic weigerde onze kernel zonder enig levensteken, het raw-pad is op de Pi 5 bewezen)")
-	pe := flag.Bool("pe", false, "verpak als AArch64 PE/COFF UEFI-applicatie (BOOTAA64.EFI): één payload + relocatietabel, de overige -elf-varianten als diff-bewijs (vereist -ldflags -buildid= op elke variant; zie docs/pe-relocatie.md)")
+	pe := flag.Bool("pe", false, "verpak als AArch64 PE/COFF UEFI-applicatie (BOOTAA64.EFI): één payload + relocatietabel, de overige -elf-varianten als diff-bewijs (vereist -ldflags -buildid= op elke variant; zie docs/archief/pe-relocatie.md)")
 	flag.Parse()
 	if len(elfPaths) == 0 {
 		die("-elf is verplicht")
@@ -184,12 +184,12 @@ func main() {
 }
 
 // writePEReloc bouwt de UEFI-applicatie uit ÉÉN payload + een relocatietabel
-// (docs/pe-relocatie.md): de varianten zijn dezelfde build op verschillende
+// (docs/archief/pe-relocatie.md): de varianten zijn dezelfde build op verschillende
 // linkadressen en verschillen dus uitsluitend in 8-byte-woorden die een
 // absoluut adres dragen — die verschillen exact de linkbasis-delta. De diff
 // levert de tabel én bewijst de aanname per build: één woord dat niet zuiver
 // +delta is (of een staart-/groottemismatch) is een gebroken toolchain-
-// aanname en faalt HARD — onderzoek dan (docs/pe-relocatie.md). De stub
+// aanname en faalt HARD — onderzoek dan (docs/archief/pe-relocatie.md). De stub
 // (init.s) kopieert de payload naar het gekozen venster en telt bij elk
 // tabel-woord (venster − linkbasis) op. Winst: 6×12,3MB → 1×12,3MB + ~200KB,
 // en extra kandidaten zijn voortaan 8 bytes i.p.v. een hele variant.
@@ -229,7 +229,7 @@ func writePEReloc(paths []string, outPath string) {
 		for _, p := range ps[1:] {
 			want := w0 + (p.load - ps[0].load) // uint64-wrap is de bedoeling
 			if got := binary.LittleEndian.Uint64(p.img[off:]); got != want {
-				die("reloc-diff @ %#x: %#x vs %#x is geen zuivere linkbasis-delta (%#x) — gebroken aanname (-buildid= vergeten? toolchain gewijzigd?); onderzoek (docs/pe-relocatie.md)",
+				die("reloc-diff @ %#x: %#x vs %#x is geen zuivere linkbasis-delta (%#x) — gebroken aanname (-buildid= vergeten? toolchain gewijzigd?); onderzoek (docs/archief/pe-relocatie.md)",
 					off, w0, got, p.load-ps[0].load)
 			}
 		}

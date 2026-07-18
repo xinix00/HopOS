@@ -38,7 +38,7 @@ func main() {
 	// EL2-invariant + PSCI/DRAM/slots-rapport (gedeeld, raspi_main.go).
 	preamble("PI5")
 
-	// Klokbeleid (P2b, docs/plan-p2b-soak.md) — vroeg gestart zodat de
+	// Klokbeleid (P2b, docs/archief/plan-p2b-soak.md) — vroeg gestart zodat de
 	// acceptatiesecties meteen de flanken bewijzen: de SMP-bench brandt echt
 	// (→ "druk"), de stiltes erna klokken terug. Verbose: elke flank op de UART.
 	raspihop.StartDVFS(uintptr(rpi5.VCMailBase))

@@ -83,7 +83,7 @@ var uefiSlots [18]uint64
 // entries. Elke entry wijst een 8-byte-woord met een absoluut adres aan; de
 // stub telt er (gekozen venster − linkbasis) bij op ná de kopie. [1] == 0 =
 // klassieke multi-variant-PE, de stub slaat de lus dan over. Zo draagt één
-// payload álle venster-kandidaten (74MB → ~12,5MB; docs/pe-relocatie.md).
+// payload álle venster-kandidaten (74MB → ~12,5MB; docs/archief/pe-relocatie.md).
 var uefiReloc [2]uint64
 
 // Door de stub (init.s) NA de variantkopie op de gekozen L-kant geschreven —

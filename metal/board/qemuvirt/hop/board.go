@@ -3,7 +3,7 @@
 // HOP-kant-binaries (cmd/) importeren deze helft; app-images importeren
 // uitsluitend de basis (board/qemuvirt: runtime-hooks + appboard-contract)
 // en linken zo nooit tegen de driverstack — de isolatie op source-niveau uit
-// docs/indeling.md, nu ook voor de board-laag.
+// docs/archief/indeling.md, nu ook voor de board-laag.
 package hop
 
 import (

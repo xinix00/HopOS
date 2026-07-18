@@ -11,7 +11,7 @@
 // (printk + cpuinit.s), GIC-basis, MPIDR-nummering (A76: aff1) en de RNG.
 // board.go registreert het geheel als board.Board.
 //
-// Geverifieerd vs. nog te meten op het board: zie docs/rpi5.md — de
+// Geverifieerd vs. nog te meten op het board: zie docs/archief/rpi5.md — de
 // probe-image (metal/cmd/probe5) rapporteert de aannames via de debug-UART.
 //
 // Alleen voor GOOS=tamago GOARCH=arm64.

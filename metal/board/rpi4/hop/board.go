@@ -11,7 +11,7 @@
 //
 // PSCI-eigenaardigheid van dít board: anders dan op de Pi 5 is TF-A hier geen
 // "mogelijk nodig" maar een harde eis — de stock armstub8 heeft helemaal geen
-// PSCI (spin-table) en een SMC hangt dan. Zie docs/rpi4.md en
+// PSCI (spin-table) en een SMC hangt dan. Zie docs/archief/rpi4.md en
 // sd-rpi4/LEESMIJ.txt.
 package hop
 

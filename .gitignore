@@ -6,14 +6,19 @@
 # nvme-scratchdisk, EDK2-varstore) landt in metal/out/.
 metal/out/
 
+# Release-assets (tools/release.sh bouwt, tekent en upload ze naar de
+# GitHub-release — ze horen niet in de historie).
+out-release/
+
 # Soak-/monitorlogs (tools/soak-*.sh schrijven ze in de repo-root).
 *.log
 *.md
 !README.md
-!docs/bcm2712-c1-erratum.md
-!docs/uefi.md
-!docs/app-memory.md
-!docs/indeling.md
+!docs/archief/bcm2712-c1-erratum.md
+!docs/archief/uefi.md
+!docs/archief/app-memory.md
+!docs/archief/indeling.md
+!docs/archief/pe-relocatie.md
 .claude/
 
 # UEFI-buildartifacts (image/uefi-run.sh): de ESP-bomen met BOOTAA64.EFI
@@ -40,4 +45,3 @@ sd-*/*.bin
 sd-*/overlays/
 # Gecomprimeerde apploader-blob op de go:embed-plek (image/*-agent.sh bouwt hem)
 *.elf.gz
-!docs/pe-relocatie.md

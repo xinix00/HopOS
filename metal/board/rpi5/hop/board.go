@@ -14,7 +14,7 @@
 // Pi-armstub zet secundaire cores mogelijk al "aan" (CPU_ON → ALREADY_ON) —
 // dan vervangen we hem door een zelfgebouwde upstream-TF-A bl31.bin
 // (armstub= in config.txt), die cores netjes geparkeerd houdt tot CPU_ON.
-// Zie docs/rpi5.md.
+// Zie docs/archief/rpi5.md.
 package hop
 
 import (
