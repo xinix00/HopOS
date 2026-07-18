@@ -285,6 +285,68 @@ func (t *Tables) Watchdog() (refresh, control uint64, found bool) {
 	return 0, 0, false
 }
 
+// PCCSubspace is één kanaal uit de PCCT (Platform Communications Channel):
+// gedeeld geheugen plus een doorbell-register waarmee het OS berichten
+// uitwisselt met de platform-processor (Altra: SMpro). De positie in de tabel
+// ís het kanaalnummer waar DSDT-properties ("pcc-channel") naar verwijzen.
+// Types 0/1/2 delen de veld-offsets die wij nodig hebben (het type-1/2-
+// interrupt-blok valt precies in de reserved-bytes van type 0); de extended
+// types (3+) zijn CPPC-constructies die we overslaan.
+type PCCSubspace struct {
+	Type      uint8
+	ShmemBase uint64 // gedeeld geheugen: 8-byte header + payload
+	ShmemLen  uint64
+	Doorbell  uint64 // doorbell-registeradres (uit de GAS)
+	DBWidth   uint8  // GAS-registerbreedte in bits (Altra: 32)
+	Preserve  uint64 // doorbell is read-modify-write: te bewaren bits...
+	Write     uint64 // ...en te zetten bits (drivers/mailbox/pcc.c-semantiek)
+	LatencyUS uint32 // nominale antwoordlatentie van het platform (µs)
+}
+
+// PCC geeft subspace idx uit de PCCT; ok=false als de tabel ontbreekt, de
+// index niet bestaat of het type buiten 0..2 valt. QEMU virt heeft geen
+// PCCT — daar is false de normale uitkomst.
+func (t *Tables) PCC(idx int) (PCCSubspace, bool) {
+	return pccFrom(t.table("PCCT"), idx)
+}
+
+// pccFrom loopt de subspaces (vanaf offset 48: SDT-header + flags + reserved)
+// en telt ordinaal — apart van PCC zodat de offset-rekenkunde host-testbaar
+// is zonder device-geheugen.
+func pccFrom(b []byte, idx int) (PCCSubspace, bool) {
+	if b == nil {
+		return PCCSubspace{}, false
+	}
+	n := 0
+	for off := 48; off+2 <= len(b); {
+		typ, l := b[off], int(b[off+1])
+		if l < 2 || off+l > len(b) {
+			return PCCSubspace{}, false // kapotte entry: niet verder gissen
+		}
+		if n == idx {
+			if typ > 2 || l < 62 {
+				return PCCSubspace{}, false
+			}
+			e := b[off:]
+			return PCCSubspace{
+				Type:      typ,
+				ShmemBase: u64(e[8:]),
+				ShmemLen:  u64(e[16:]),
+				// GAS op offset 24: space(1) bitWidth(1) bitOff(1)
+				// access(1) address(8) — zelfde vorm als de SPCR.
+				DBWidth:   e[25],
+				Doorbell:  u64(e[28:]),
+				Preserve:  u64(e[36:]),
+				Write:     u64(e[44:]),
+				LatencyUS: u32(e[52:]),
+			}, true
+		}
+		n++
+		off += l
+	}
+	return PCCSubspace{}, false
+}
+
 // PSCI geeft de FADT ARM-boot-flags: is er PSCI, en is de conduit HVC (anders
 // SMC). Zonder FADT of te korte FADT (pre-ACPI 5.1): geen PSCI-informatie.
 func (t *Tables) PSCI() (compliant, useHVC bool, err error) {

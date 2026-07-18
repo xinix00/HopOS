@@ -20,7 +20,7 @@ go run ../tools/importcheck.go
 
 go test "$@" \
 	./abi/ring ./net/hopswitch ./kern/stage2 ./abi/layout ./net/dhcp ./abi/hopabi ./abi/checksum \
-	./fw/fdt ./kern/hopfs ./driver/vcmail ./driver/nic/mdio ./kern/slots
+	./fw/fdt ./fw/acpi ./kern/hopfs ./driver/vcmail ./driver/nic/mdio ./kern/slots
 
 TAMAGO="${TAMAGO:-$HOME/tamago-go/bin/go}"
 if [ ! -x "$TAMAGO" ]; then

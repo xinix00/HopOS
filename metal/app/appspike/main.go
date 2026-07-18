@@ -41,6 +41,11 @@ func main() {
 		smpBench(app)
 	}
 
+	// 1-core-prestatierol (bench.go): draait de app-core op volle N1-snelheid?
+	if app.Env("BENCH") != "" {
+		cpuBench(app)
+	}
+
 	// Soak-rol (P2b, docs/plan-p2b-soak.md): permanent CPU branden + heap
 	// churnen op alle cores, met een telemetrieregel per minuut. De
 	// heartbeat loopt vanzelf (applib), kill werkt gewoon — dit is de

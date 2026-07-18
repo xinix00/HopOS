@@ -12,7 +12,7 @@ import (
 	_ "unsafe" // go:linkname (RAM-declaratie)
 
 	"hop-os/metal/board/uefi"
-	_ "hop-os/metal/board/uefi/hop" // registreert het board (init); de basis levert de tamago-hooks
+	uefihop "hop-os/metal/board/uefi/hop" // registreert het board (init); de basis levert de tamago-hooks
 )
 
 // RAM-declaratie: RamStart wordt door mkkernel -pe per venster-variant
@@ -38,4 +38,8 @@ func init() {
 	// (Node-identiteit zonder hopos.node=: de main-default; een SMBIOS-
 	// serial-terugval kan later via nodeSerial.)
 	bootParam = uefi.BootConfig
+
+	// Board-nawerk (het Pi-equivalent is StartDVFS): de temperatuur-
+	// telemetrie uit de SMpro — de klok zelf is op servers firmware-domein.
+	boardExtra = uefihop.StartTelemetry
 }
