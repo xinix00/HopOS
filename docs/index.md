@@ -1,6 +1,6 @@
 # HopOS documentation
 
-HopOS is the Go-only OS: a 13 MB signed image is the entire node, every app
+HopOS is the Go-only OS: a ~15 MB signed image is the entire node, every app
 runs on its own physical cores behind a hardware cage, and all state lives
 in S3 — not on the machine. Product page: [gethop.org/hopos](https://gethop.org/hopos/).
 

@@ -27,8 +27,10 @@ slots 1-6, 8-126: unaffected, still serving
 ```
 
 - **Small enough to audit.** The code that enforces all of this — cages,
-  slots, ABI — is ~2,850 lines; the whole OS is ~11,600. It fits in a
-  single AI context window: audit it in one sitting, human or machine.
+  slots, ABI — is ~2,850 lines; the whole OS is ~11,600. A Linux node doing
+  the same job trusts the kernel (~30,000,000 lines) *plus* systemd, libc
+  and a container runtime — HopOS is the whole node in ~11,600. It fits in
+  a single AI context window: audit it in one sitting, human or machine.
 
 Honest limits: shared last-level cache and DRAM channels exist on any
 hardware; the node itself is trusted (that's what the small TCB is for);
