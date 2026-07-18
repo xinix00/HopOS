@@ -1,7 +1,7 @@
 #!/bin/sh
 # Bouw de fase-P1-multikernel voor de Raspberry Pi 4 (metal/cmd/hopos-embed):
-# HOP-kern + embedded canonieke app-image, als raw kernel8.img. Zelfde
-# boot-recept als de probe (image/rpi4-probe.sh); zie docs/rpi4.md.
+# HOP-kern + embedded canonieke app-image, als raw kernel8.img (raw op
+# 0x80000, TF-A bl31.bin als armstub); zie docs/rpi4.md.
 #
 # TF-A bl31.bin is VERPLICHT als armstub (de stock armstub8 heeft geen PSCI):
 #   cd ~/arm-trusted-firmware

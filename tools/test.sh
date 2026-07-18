@@ -40,6 +40,23 @@ for tags in "linkcpuinit" "rpi4 linkcpuinit" "rpi5 linkcpuinit" "uefi linkcpuini
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "$tags" -o /dev/null ./cmd/hopos
 done
+# De demo/regressie-mains (cmd/hopos-embed) horen óók in de gate: ze
+# compileerden nergens en konden dus stilletjes breken bij elke refactor
+# (Derek, 18-07). go:embed eist de app-blobs — één canonieke appspike-build
+# (gitignored) dekt alle drie de varianten (images zijn board-onafhankelijk).
+GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
+	"$TAMAGO" build -tags linkcpuinit -trimpath \
+	-ldflags "-w -T 0x50010000 -R 0x1000" -o cmd/hopos-embed/app.elf ./app/appspike
+cp cmd/hopos-embed/app.elf cmd/hopos-embed/app4.elf
+cp cmd/hopos-embed/app.elf cmd/hopos-embed/app5.elf
+for tags in "qemuvirt linkcpuinit" "rpi4 linkcpuinit" "rpi5 linkcpuinit"; do
+	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
+		"$TAMAGO" build -tags "$tags" -o /dev/null ./cmd/hopos-embed
+done
+# probeuefi is de enige overgebleven probe: default-modus van uefi-run.sh en
+# het meetinstrument voor de O6N-bring-up die nog komt. probe4/5/6 zijn
+# gesloopt (opruimronde 18-07): hun functie is geproductiseerd (PSCI/CPU_ON in
+# de mains, PCIe→RP1→GEM→DHCP in hopnet.Up) — terughalen kan uit git history.
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags "uefi linkcpuinit" -o /dev/null ./cmd/probeuefi
-echo "OK: host-tests groen, tamago-gate (virt/rpi4/rpi5/uefi) gebouwd" >&2
+echo "OK: host-tests groen, tamago-gate (virt/rpi4/rpi5/uefi + embed-mains + probeuefi) gebouwd" >&2

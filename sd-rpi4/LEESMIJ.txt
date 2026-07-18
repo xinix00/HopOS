@@ -1,8 +1,14 @@
-HopOS probe4 op de Raspberry Pi 4 — flashen en meten
-====================================================
+HopOS op de Raspberry Pi 4 — flashen
+====================================
+
+Twee image-varianten (allebei kernel8.img, raw op 0x80000):
+  - image/rpi4-agent.sh  → kernel8.img + config.txt (getrackt): de échte
+    HOP-agent als LAN-node (fase P2) — de productie-variant.
+  - image/rpi4-hopos.sh  → kernel8.img + config-hopos.txt (gitignored; komt
+    AS config.txt op de kaart): de fase-P1-acceptatie-main.
 
 SD-kaart (FAT32, eerste partitie) — zet erop:
-  1. config.txt en kernel8.img (uit deze map);
+  1. de config + kernel8.img van de gekozen variant (uit deze map);
   2. start4.elf en fixup4.dat uit
      https://github.com/raspberrypi/firmware/tree/master/boot
      (de Pi 4 heeft die nodig — de Pi 5 niet);
@@ -18,24 +24,23 @@ SD-kaart (FAT32, eerste partitie) — zet erop:
 
 UART: PL011 op de 40-pins header — pin 8 (TXD), pin 10 (RXD), pin 6 (GND),
 3V3-niveau, 115200 8N1:
-  screen /dev/tty.usbserial-* 115200      # of tty.usbmodem-*
+  screen /dev/tty.usbserial-* 115200      # Pi 4 = usbserial (Pi 5 = usbmodem)
 
 Verwachte volgorde op de UART:
   1. bootloader-logs (uart_2ndstage);
   2. "P2" — ons vroegste levensteken: cpuinit draait, boot-EL = 2 (TF-A);
-  3. "Rp00000000000exxxx" — de PC-dump: bewijs dat de firmware ons écht op
-     0x80000 laadde (moet ~0xE-Fxxxx zijn; iets ánders = laadadres-probleem,
-     zie docs/handoff-pi5-mmu.md voor het Pi 5-verhaal);
-  4. de MMU-ladder "@$abc t MNCId hH eEZ" (two-stage: blokkenkaart → echte
-     kaart) en dan de probe-banner + metingen, afgesloten met
-     HOPOS_PI4_PROBE_OK        → alles klopt, P1 kan los;
-     HOPOS_PI4_PROBE_DEELS     → lees de regels erboven: meetdata.
+  3. de HopOS-banner, en dan per variant:
+     agent:  het DHCP-IP + HOPOS_AGENT_UP → test op het LAN:
+               curl http://<ip>:8080/health   (agent)
+               curl http://<ip>:9080/health   (leader)
+     hopos:  de acceptatiesecties 1-5, afgesloten met
+             HOPOS_PI4_MULTIKERNEL_OK.
   Een fault verschijnt als XE<esr>L<elr>F<far>R<lr>S<sp>+stack (EL1) of
   YE... (EL2) — decodeerbaar, geen stille hang.
 
-Blijft het stil ná de regel "PSCI: versie opvragen via SMC...": bl31.bin
-ontbreekt of wordt niet geladen (armstub-regel in config.txt) — de SMC
-verdwijnt dan in een lege EL3-vector.
+Blijft het stil bij de eerste PSCI-call: bl31.bin ontbreekt of wordt niet
+geladen (armstub-regel in config.txt) — de SMC verdwijnt dan in een lege
+EL3-vector.
 Komt er níks (ook geen bootloader-logs): check de kabel/poort; zet zo nodig
 BOOT_UART=1 in de EEPROM-config (rpi-eeprom-config -e op een Linux-Pi).
 Komt er wel bootloader-log maar geen "P2": stuur de laatste regels door —

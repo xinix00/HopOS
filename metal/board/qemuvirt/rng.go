@@ -1,28 +1,20 @@
 package qemuvirt
 
 import (
-	_ "unsafe"
+	_ "unsafe" // voor go:linkname
+
+	"hop-os/metal/cpu/drbg"
+	"hop-os/metal/cpu/trng"
 )
 
-// PLACEHOLDER-entropie voor QEMU-ontwikkeling: xorshift64* geseed met de
-// cycle counter. NIET cryptografisch — op echt ijzer (O6N) moet hier een
-// hardware-RNG of jitter-entropy DRBG komen vóór er TLS/keys op draaien.
-
-var rngState uint64
+// De gedeelde SHA-256-DRBG (metal/cpu/drbg), zelfde bronkeuze als hopslot:
+// trng.FillCPU (RNDR) waar de CPU FEAT_RNG heeft — QEMU-TCG heeft dat niet,
+// dus in de praktijk de timing-jitter-seed. Vervangt de oude
+// placeholder-xorshift (expliciet niet cryptografisch; deze wel, al blijft
+// jitter op TCG zwakker dan op silicium — op QEMU draait geen productie-TLS).
 
 //go:linkname initRNG runtime/goos.InitRNG
-func initRNG() {
-	rngState = ARM64.Counter() | 1
-}
+func initRNG() { drbg.Init(trng.FillCPU, ARM64.Counter) }
 
 //go:linkname getRandomData runtime/goos.GetRandomData
-func getRandomData(b []byte) {
-	x := rngState
-	for i := range b {
-		x ^= x >> 12
-		x ^= x << 25
-		x ^= x >> 27
-		b[i] = byte((x * 0x2545F4914F6CDD1D) >> 56)
-	}
-	rngState = x
-}
+func getRandomData(b []byte) { drbg.Read(b) }

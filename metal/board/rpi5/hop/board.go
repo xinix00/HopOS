@@ -4,9 +4,17 @@
 // app-images importeren uitsluitend de basis (board/rpi5: runtime-hooks +
 // appboard-contract) en linken zo nooit tegen de driverstack.
 //
-// Fase-P-status: boot/PSCI/console/timers zijn er; de rest is expliciet
-// afwezig tot de bijbehorende fase — een aanroep ervan is een bug, geen
-// stille fallback.
+// Het gedeelde Pi-deel (boot-EL, DTB-RAM, timers, PSCI-plumbing, stage-2,
+// lease/Net, framebuffer-discovery) woont in board/raspi/hop.Base; hier
+// staat alleen het rpi5-eigene: de A76-MPIDR-nummering (aff1), de
+// framebuffer-adressen, ProbeNIC en de C1-erratum-dempers
+// (NetQuiesce/LifecyclePace).
+//
+// PSCI-eigenaardigheid van dít board (meetpunt probe): de standaard
+// Pi-armstub zet secundaire cores mogelijk al "aan" (CPU_ON → ALREADY_ON) —
+// dan vervangen we hem door een zelfgebouwde upstream-TF-A bl31.bin
+// (armstub= in config.txt), die cores netjes geparkeerd houdt tot CPU_ON.
+// Zie docs/rpi5.md.
 package hop
 
 import (
@@ -19,76 +27,35 @@ import (
 	"hop-os/metal/abi/layout"
 	"hop-os/metal/board"
 	"hop-os/metal/board/raspi"
-	"hop-os/metal/board/raspi/vcfb"
+	raspihop "hop-os/metal/board/raspi/hop"
 	"hop-os/metal/board/rpi5"
-	"hop-os/metal/cpu/el2"
 	"hop-os/metal/driver/brcmpcie"
-	"hop-os/metal/driver/fb"
-	"hop-os/metal/driver/pcie"
 	"hop-os/metal/driver/nic/gem"
-	"hop-os/metal/fw/fdt"
 	"hop-os/metal/net/dhcp"
 )
 
-// machine is de board-implementatie voor de Raspberry Pi 5 (BCM2712).
-type machine struct{}
+// machine is de board-implementatie voor de Raspberry Pi 5 (BCM2712): de
+// gedeelde Pi-basis plus de rpi5-naden.
+type machine struct{ raspihop.Base }
+
+func base() machine {
+	return machine{raspihop.Base{
+		CoreIDFn:   rpi5.CoreID,
+		Target:     rpi5.Target,
+		DTBPtr:     rpi5.DTBPtr,
+		VCMailBase: uintptr(rpi5.VCMailBase),
+	}}
+}
 
 // init registreert dit board: elke HOP-binary voor de Pi 5 importeert deze
 // hop-helft (cmd/hopos/board_rpi5.go); de basis registreerde het app-contract
 // (appboard) al in háár init.
-func init() { board.Use(machine{}) }
+func init() { board.Use(base()) }
 
-func (machine) BootEL() int { return int(raspi.BootEL()) }
-func (machine) CoreID() int { return rpi5.CoreID() }
-
-// MemTotal leest de DTB die de firmware in x0 meegaf (cpuinit.s → DTBPtr) en
-// telt het /memory-node op. 0 = niet gevonden. DTBPtr is het scratch-woord
-// waarin cpuinit x0 legde, dus eerst dereferencen: het woord bevat het
-// DTB-adres. LET OP: op het board te verifiëren (levert de Pi-firmware de
-// DTB-pointer in x0 aan een raw kernel? zie docs/rpi5.md); de
-// VideoCore-mailbox is de tweede bron (P2b).
-func (machine) MemTotal() uint64 {
-	if n, ok := fdt.MemTotal(raspi.DTB()); ok {
-		return n
-	}
-	return 0
-}
-
-// CoreClass: de Pi 5 is homogeen (4× Cortex-A76) — per PLAN.md fase P zijn
-// alle slots big-class.
-func (machine) CoreClass(i int) string { return "big" }
-
-func (machine) TimerOffset() int64     { return raspi.ARM64.TimerOffset }
-func (machine) SetTimerOffset(o int64) { raspi.ARM64.TimerOffset = o }
-func (machine) SetWallTime(ns int64)   { raspi.ARM64.SetTime(ns) }
-
-// PSCI loopt via de gedeelde raspi-laag (TF-A/armstub op EL3, conduit SMC);
-// hier wordt alleen de core-index naar het A76-MPIDR-target vertaald (aff1,
-// rpi5.Target). LET OP (meetpunt probe): de standaard Pi-armstub zet
-// secundaire cores mogelijk al "aan" (CPU_ON → ALREADY_ON) — dan vervangen we
-// hem door een zelfgebouwde upstream-TF-A bl31.bin (armstub= in config.txt),
-// die cores netjes geparkeerd houdt tot CPU_ON. Zie docs/rpi5.md.
-func (machine) CPUOn(core, entry, ctx uint64) int64 {
-	return raspi.CPUOn(rpi5.Target(core), entry, ctx)
-}
-func (machine) CPUOff() int64 { return raspi.CPUOff() }
-func (machine) AffinityInfo(core uint64) board.PowerState {
-	return board.PowerState(raspi.AffinityInfo(rpi5.Target(core)))
-}
-func (machine) PSCIVersion() (major, minor uint16) { return raspi.PSCIVersion() }
-
-// Stage-2/SMP: de trampolines zijn board-neutraal en data-gedreven (gedeeld
-// metal/cpu/el2 — geen GIC, geen MPIDR, geen ingebakken adressen; de hard-kill
-// loopt via stage2.Revoke). Dit board levert het PA-plan (rpi5.go) en
-// VBAR_EL2 → REVOKE_VEC in cpuinit; de rest is hier één-op-één doorgeven.
-// Fase-P1-acceptatie = het isolatie/hard-kill/SMP-bewijs op het board zelf
-// (metal/pi5_main.go).
-func (machine) S2TrampPC() uint64    { return el2.S2TrampPC() }
-func (machine) S2SMPTrampPC() uint64 { return el2.S2SMPTrampPC() }
-
-// lease bewaart wat ProbeNIC via DHCP ophaalde; Net() leest hem. hopnet.Up
-// roept ProbeNIC vóór Net() aan (die volgorde is het contract).
-var lease dhcp.Lease
+// Conformiteit compile-time bewezen: zonder deze regel leunt het Board-
+// contract puur op board.Use() at runtime en wordt een gemiste methode pas
+// op het bord zichtbaar (Derek, 18-07).
+var _ board.Board = machine{}
 
 // theNIC is de door ProbeNIC gebouwde GEM (voor NetQuiesce); nil vóór P2-init.
 var theNIC *gem.Net
@@ -178,29 +145,6 @@ func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	lease = l
+	raspihop.Lease = l
 	return nic, net.HardwareAddr(nic.MAC[:]), nil
 }
-
-// Net geeft de DHCP-lease die ProbeNIC haalde, omgezet naar board.NetConfig
-// via de gedeelde omzetting in metal/board (identiek aan de Pi 4).
-func (machine) Net() board.NetConfig { return board.NetFromLease(lease) }
-
-// DHCPLease geeft de door ProbeNIC verkregen lease (board.LeaseHolder), zodat
-// hopnet er na de stack-bring-up dhcp.KeepAlive op start. false vóór een echte
-// ACK (dan is er niets te vernieuwen).
-func (machine) DHCPLease() (dhcp.Lease, bool) { return lease, lease.Acquired }
-
-// PCIe: fase P2 — de RP1 hangt aan de BCM2712-PCIe; het adresplan volgt bij
-// de RP1-bring-up.
-func (machine) PCIe() pcie.Window { return pcie.Window{} }
-
-// Framebuffer: DTB-simplefb met mailbox-terugval — de gedeelde Pi-discovery
-// (zie board/raspi/vcfb voor het meetverhaal); hier alleen de boardadressen.
-func (machine) Framebuffer() (fb.Desc, bool) {
-	return vcfb.FramebufferVC(rpi5.DTBPtr, uintptr(rpi5.VCMailBase))
-}
-
-// EnableTimestamps zet de per-regel-console-stempel aan (optionele interface,
-// door cmd/hopos ná de boot-banner aangeroepen). Zie board/raspi/console_ts.go.
-func (machine) EnableTimestamps() { raspi.LogTimestamps(true) }

@@ -137,7 +137,7 @@ metal/       the OS — one Go module, layered by trust and direction:
   fw/          hardware discovery: device tree (FDT) and ACPI parsing
   board/       per-board wiring: qemu-virt, rpi4, rpi5, generic UEFI
   app/         the app side: runtime library, reference app, loader
-  cmd/         the binaries: hopos (the agent), hopos-embed, probes
+  cmd/         the binaries: hopos (the agent), hopos-embed, probeuefi
   dev/         the MMIO primitive everything builds on
   out/         build output (gitignored)
 image/       build & run scripts (QEMU demo/agent, SD-card images, UEFI ESP)
@@ -158,11 +158,11 @@ Everything cross-compiles with the [tamago-go](https://github.com/usbarmory/tama
 TAMAGO=~/tamago-go/bin/go image/qemu-run.sh          # demo / regression markers
 TAMAGO=~/tamago-go/bin/go image/qemu-run.sh agent    # the real agent + leader API
 
-# SD-card probe image for a Raspberry Pi 5:
-TAMAGO=~/tamago-go/bin/go image/rpi5-probe.sh
+# SD-card acceptance image for a Raspberry Pi 5:
+TAMAGO=~/tamago-go/bin/go image/rpi5-hopos.sh
 ```
 
-The probes and the QEMU demo build from public modules only. `metal/cmd/hopos` — the full agent — additionally depends on the [HOP orchestrator](https://github.com/xinix00/hop), which is open source as well.
+The QEMU demo and the Pi acceptance images build from public modules only. `metal/cmd/hopos` — the full agent — additionally depends on the [HOP orchestrator](https://github.com/xinix00/hop), which is open source as well.
 
 ## Status
 

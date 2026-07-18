@@ -16,6 +16,7 @@ import (
 	"hop-os/metal/board"
 	"hop-os/metal/board/qemuvirt"
 	"hop-os/metal/cpu/el2"
+	"hop-os/metal/cpu/psci"
 	"hop-os/metal/driver/fb"
 	"hop-os/metal/driver/pcie"
 	"hop-os/metal/driver/nic/virtionet"
@@ -28,6 +29,11 @@ type machine struct{}
 // (cmd/hopos/board_virt.go), dus board.Current() is meteen geldig; de basis
 // registreerde het app-contract (appboard) al in háár init.
 func init() { board.Use(machine{}) }
+
+// Conformiteit compile-time bewezen: zonder deze regel leunt het Board-
+// contract puur op board.Use() at runtime en wordt een gemiste methode pas
+// op het bord zichtbaar (Derek, 18-07).
+var _ board.Board = machine{}
 
 func (machine) BootEL() int { return int(qemuvirt.BootEL()) }
 func (machine) CoreID() int { return qemuvirt.CoreID() }
@@ -50,12 +56,14 @@ func (machine) TimerOffset() int64     { return qemuvirt.ARM64.TimerOffset }
 func (machine) SetTimerOffset(o int64) { qemuvirt.ARM64.TimerOffset = o }
 func (machine) SetWallTime(ns int64)   { qemuvirt.ARM64.SetTime(ns) }
 
-func (machine) CPUOn(core, entry, ctx uint64) int64 { return qemuvirt.CPUOn(core, entry, ctx) }
-func (machine) CPUOff() int64                       { return qemuvirt.CPUOff() }
+// PSCI via de gedeelde wrappers (metal/cpu/psci); op virt is core N gewoon
+// MPIDR-target N — geen vertaling nodig.
+func (machine) CPUOn(core, entry, ctx uint64) int64 { return psci.On(core, entry, ctx) }
+func (machine) CPUOff() int64                       { return psci.Off() }
 func (machine) AffinityInfo(core uint64) board.PowerState {
-	return board.PowerState(qemuvirt.AffinityInfo(core))
+	return board.PowerState(psci.AffinityInfo(core))
 }
-func (machine) PSCIVersion() (major, minor uint16) { return qemuvirt.PSCIVersion() }
+func (machine) PSCIVersion() (major, minor uint16) { return psci.Version() }
 
 // De EL2-trampolines (stage-2-kooi + SMP) zijn board-neutraal en wonen in het
 // gedeelde metal/el2-pakket; dit board geeft alleen de symbooladressen door.

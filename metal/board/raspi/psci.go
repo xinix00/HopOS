@@ -1,49 +1,20 @@
 package raspi
 
 // PSCI (ARM DEN 0022), conduit altijd SMC: op beide Pi's draait TF-A (de
-// armstub, BL31) op EL3 en levert ons op EL2 af. cpuinit.s schrijft het
-// boot-EL op de scratch; de mains weigeren te draaien als daar geen ≥2 staat,
-// dus een onverwachte EL1-aflevering faalt zichtbaar vóór de eerste SMC. De
-// functie-ID's, return-codes en de SMC-stub wonen in metal/cpu/psci (gedeeld met
-// qemuvirt).
-//
-// De vertaling core-index → MPIDR-target is boardspecifiek (A72: aff0,
-// A76: aff1); alle calls hier nemen het al vertaalde target.
+// armstub, BL31) op EL3 en levert ons op EL2 af. De functie-ID's, return-codes,
+// SMC-stub én de call-wrappers (psci.Version/On/Off/AffinityInfo) wonen in
+// metal/cpu/psci; de vertaling core-index → MPIDR-target is boardspecifiek
+// (A72: aff0, A76: aff1) en zit in rpi4/rpi5.Target.
 
-import (
-	"unsafe"
-
-	"hop-os/metal/cpu/psci"
-)
+import "unsafe"
 
 // BootEL geeft het exception level waarop de firmware ons afleverde (door
-// cpuinit.s op de scratch geschreven; 0 ⇒ EL1-pad, dat niet schrijft).
+// cpuinit.s op de scratch geschreven; 0 ⇒ EL1-pad, dat niet schrijft). De
+// mains weigeren te draaien als hier geen ≥2 staat, dus een onverwachte
+// EL1-aflevering faalt zichtbaar vóór de eerste SMC.
 func BootEL() uint64 {
 	if el := *(*uint64)(unsafe.Pointer(uintptr(BootScratch))); el >= 2 {
 		return el
 	}
 	return 1
-}
-
-// PSCIVersion geeft (major, minor) van de PSCI-provider.
-func PSCIVersion() (major, minor uint16) {
-	v := psci.SMC(psci.VERSION, 0, 0, 0)
-	return uint16(v >> 16), uint16(v)
-}
-
-// CPUOn start een secundaire core: target is het MPIDR-target (al vertaald uit
-// de core-index door het board). De core begint op entry (fysiek adres, MMU
-// uit) met ctx in x0.
-func CPUOn(target, entry, ctx uint64) int64 {
-	return int64(psci.SMC(psci.CPU_ON, target, entry, ctx))
-}
-
-// CPUOff zet de AANROEPENDE core uit. Keert bij succes nooit terug.
-func CPUOff() int64 {
-	return int64(psci.SMC(psci.CPU_OFF, 0, 0, 0))
-}
-
-// AffinityInfo geeft de powertoestand van een core (MPIDR-target).
-func AffinityInfo(target uint64) int64 {
-	return int64(psci.SMC(psci.AFFINITY_INFO, target, 0, 0))
 }

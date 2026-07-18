@@ -35,6 +35,11 @@ type machine struct{}
 // plan.go, met de app-guard), het app-contract idem (appboard.go).
 func init() { board.Use(machine{}) }
 
+// Conformiteit compile-time bewezen: zonder deze regel leunt het Board-
+// contract puur op board.Use() at runtime en wordt een gemiste methode pas
+// op het bord zichtbaar (Derek, 18-07).
+var _ board.Board = machine{}
+
 // SelfPlannedPool meldt dat dit board zijn slot-pool al op de gemeten vrije
 // RAM heeft geplukt (basis-init, usablePool) — de main slaat dan de
 // RequiredRAM-check over (die op statische qemuvirt-adressen leunt; hier
@@ -58,34 +63,26 @@ func (machine) TimerOffset() int64     { return uefi.ARM64.TimerOffset }
 func (machine) SetTimerOffset(o int64) { uefi.ARM64.TimerOffset = o }
 func (machine) SetWallTime(ns int64)   { uefi.ARM64.SetTime(ns) }
 
-// PSCI: SMC-conduit (FADT bevestigt; HopOS-invariant). De core-index wordt
-// via de MADT naar het MPIDR-target vertaald.
-const (
-	psciVersion  = 0x8400_0000
-	psciCPUOff   = 0x8400_0002
-	psciCPUOnSMC = 0xC400_0003 // SMC64
-	psciAffInfo  = 0xC400_0004 // SMC64
-)
-
+// PSCI via de gedeelde wrappers (metal/cpu/psci; SMC-conduit, FADT bevestigt
+// — HopOS-invariant). De core-index wordt via de MADT naar het MPIDR-target
+// vertaald. Eerder stonden hier eigen functie-ID-constanten naast cpu/psci —
+// een derde PSCI-stijl; opgeruimd 18-07.
 func (machine) CPUOn(core, entry, ctx uint64) int64 {
 	cpus := uefi.MADTCPUs()
 	if int(core) >= len(cpus) {
-		return -2 // PSCI INVALID_PARAMS
+		return psci.INVALID_PARAMS
 	}
-	return int64(psci.SMC(psciCPUOnSMC, cpus[core].MPIDR, entry, ctx))
+	return psci.On(cpus[core].MPIDR, entry, ctx)
 }
-func (machine) CPUOff() int64 { return int64(psci.SMC(psciCPUOff, 0, 0, 0)) }
+func (machine) CPUOff() int64 { return psci.Off() }
 func (machine) AffinityInfo(core uint64) board.PowerState {
 	cpus := uefi.MADTCPUs()
 	if int(core) >= len(cpus) {
-		return board.PowerState(-2)
+		return board.PowerState(psci.INVALID_PARAMS)
 	}
-	return board.PowerState(psci.SMC(psciAffInfo, cpus[core].MPIDR, 0, 0))
+	return board.PowerState(psci.AffinityInfo(cpus[core].MPIDR))
 }
-func (machine) PSCIVersion() (major, minor uint16) {
-	v := psci.SMC(psciVersion, 0, 0, 0)
-	return uint16(v >> 16), uint16(v)
-}
+func (machine) PSCIVersion() (major, minor uint16) { return psci.Version() }
 
 // ExpectedAppCores (board.CoreCountHinter): MADT-cores minus de HOP-core.
 // Op de Altra 127 — slots begrenst zelf op MaxSlots/pool.

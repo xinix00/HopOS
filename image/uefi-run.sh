@@ -96,7 +96,7 @@ fi
 
 # 1. Eén ELF per venster-kandidaat (zelfde build, ander -T; -buildid= zodat
 #    de varianten byte-identiek zijn op de adressen na — de eis van de
-#    reloc-diff). mkkernel -reloc verpakt er straks ÉÉN als payload en
+#    reloc-diff). mkkernel -pe verpakt er straks ÉÉN als payload en
 #    gebruikt de rest alleen als diff-bewijs (docs/pe-relocatie.md).
 #    Parallel linken:
 #    zes onafhankelijke builds, wall-clock ≈ één i.p.v. zes. PID's verzamelen
@@ -126,7 +126,7 @@ done
 cd "$DIR"
 mkdir -p "$ESP/EFI/BOOT"
 GO111MODULE=off go run "$DIR/image/mkkernel/main.go" "$DIR/image/mkkernel/pe.go" \
-	$ELFS -o "$ESP/EFI/BOOT/BOOTAA64.EFI" -pe -reloc
+	$ELFS -o "$ESP/EFI/BOOT/BOOTAA64.EFI" -pe
 
 # 3. Verse varstore (boot-entries verouderen bij een topologie-wijziging →
 #    EDK2 valt anders in de Shell i.p.v. onze BOOTAA64 te booten).

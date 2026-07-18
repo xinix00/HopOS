@@ -493,7 +493,13 @@ const (
 	// leest de delta's en klokt de node op/terug — HOP is oblivious. Bij
 	// SMP delen de cores van een slot deze teller: de wachter deelt het
 	// verwachte tempo door CtrlCores.
-	CtrlIdle = 0xD8
+	//
+	// Op 0x48 (het gat tussen CtrlWallOff en CtrlVecPA) — stond op 0xD8 en
+	// botste daar met CtrlSMPTcr (Dereks vondst 18-07): de ~1,2ms-teller van
+	// de primaire kon het zojuist neergelegde vertaalregime van een lazy
+	// SMP-bring-up overschrijven — de secundaire erfde dan een tellerstand
+	// als TCR. De uniekheidstest (ctrl_offsets_test.go) bewaakt dit voortaan.
+	CtrlIdle = 0x48
 
 	// Apploader → HOP: de grootte van de image die de loader in de staging
 	// bovenin zijn eigen partitie heeft gedownload. HOP leest 'm bij StatusStaged

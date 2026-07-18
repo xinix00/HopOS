@@ -1,7 +1,8 @@
 // Package psci bevat de gedeelde PSCI/SMCCC-primitieven (ARM DEN 0022): de
-// functie-ID's, de return-codes en de conduit-stub (SMC #0). Eén bron van
-// waarheid voor die waarden — een verkeerde functie-ID of return-code hoort
-// maar op één plek te leven, niet per board hergedefinieerd.
+// functie-ID's, de return-codes, de conduit-stub (SMC #0) en de dunne
+// call-wrappers (Version/On/Off/AffinityInfo). Eén bron van waarheid — een
+// verkeerde functie-ID of return-code hoort maar op één plek te leven, niet
+// per board hergedefinieerd (dat stond hij, in drie stijlen; opgeruimd 18-07).
 //
 // De conduit is altijd SMC: HopOS eist een EL2-boot (stage-2-isolatie is een
 // invariant, geen optie), dus de PSCI-provider zit per definitie ónder ons
@@ -35,6 +36,29 @@ const (
 	DENIED         = -3
 	ALREADY_ON     = -4
 )
+
+// Version geeft (major, minor) van de PSCI-provider.
+func Version() (major, minor uint16) {
+	v := SMC(VERSION, 0, 0, 0)
+	return uint16(v >> 16), uint16(v)
+}
+
+// On start een secundaire core: target is het MPIDR-target (al vertaald uit
+// de core-index door het board — de nummering is boardspecifiek). De core
+// begint op entry (fysiek adres, MMU uit) met ctx in x0.
+func On(target, entry, ctx uint64) int64 {
+	return int64(SMC(CPU_ON, target, entry, ctx))
+}
+
+// Off zet de AANROEPENDE core uit (PSCI kent geen remote CPU_OFF). Keert bij
+// succes nooit terug.
+func Off() int64 { return int64(SMC(CPU_OFF, 0, 0, 0)) }
+
+// AffinityInfo geeft de powertoestand van een core (MPIDR-target;
+// AffinityOn/Off/OnPending).
+func AffinityInfo(target uint64) int64 {
+	return int64(SMC(AFFINITY_INFO, target, 0, 0))
+}
 
 // SMC doet een SMC #0 met vier argumenten (SMCCC: args in R0-R3, resultaat
 // in R0). Zie psci.s.

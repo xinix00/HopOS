@@ -63,17 +63,7 @@ func nvmeDemo() (*nvme.Controller, error) {
 	return ctrl, nil
 }
 
-// waitExit wacht tot de app in een slot netjes geëxit is en geeft de code.
-func waitExit(slot int, timeout time.Duration) (uint64, error) {
-	deadline := time.Now().Add(timeout)
-	for slots.Get(slot).App != layout.StatusExited {
-		if time.Now().After(deadline) {
-			return 0, fmt.Errorf("slot %d meldt geen exit", slot)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return slots.Get(slot).ExitCode, nil
-}
+// waitExit en drainLogs zijn gedeeld met de Pi-mains (helpers.go).
 
 // fbconsDemo bewijst de universele log-console (metal/driver/fb) op de échte
 // toolchain: QEMU -M virt heeft geen firmware-framebuffer, dus we richten er
@@ -136,19 +126,6 @@ func serveHello() error {
 		fmt.Fprintf(w, "HopOS leeft — bare-metal Go op %s, geen Linux aan boord.\n", board.Current().Net().IP)
 	}))
 	return nil
-}
-
-// drainLogs abonneert op het logkanaal van de actieve servicer van een slot
-// en multiplext de regels geprefixt naar de console — wat HOP's
-// LogBroadcaster (GetStdout) doet. Per Start opnieuw aanroepen: elke start
-// krijgt een verse servicer (en dus een vers kanaal).
-func drainLogs(slot int, count *int) {
-	for line := range slots.Logs(slot) {
-		fmt.Printf("[slot%d] %s\n", slot, line)
-		if count != nil {
-			*count++
-		}
-	}
 }
 
 // Eén canoniek gelinkte app-image (slot-1-bereik, zie image/qemu-run.sh):

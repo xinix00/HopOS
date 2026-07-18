@@ -28,13 +28,12 @@
 package uefi
 
 import (
-	"crypto/sha256"
-	"encoding/binary"
 	"strings"
 	"unsafe" // geheugenreads op firmware-adressen + go:linkname
 
 	"github.com/usbarmory/tamago/arm64"
 
+	"hop-os/metal/cpu/drbg"
 	"hop-os/metal/cpu/idle"
 	"hop-os/metal/cpu/trng"
 	"hop-os/metal/driver/fb"
@@ -445,95 +444,23 @@ func nanotime() int64 {
 	return ARM64.GetTime()
 }
 
-// Hash-DRBG op SHA-256: out_i = H(state ‖ ctr ‖ 0), state' = H(state ‖ ctr
-// ‖ 1). De seed komt bij voorkeur uit een hardware-TRNG (metal/cpu/trng: FEAT_RNG
-// op de O6N, SMCCC TRNG/DEN 0098 op de Altra); ontbreekt die, dan valt initRNG
-// terug op timing-jitter (jitterSeed). Jitter is op echt silicium een serieuze
-// bron (cache/branch/DRAM-variatie in de meetlussen, het jitterentropy-
-// principe); op QEMU/TCG is hij zwakker — dáár draait ook geen productie-TLS.
-// Is er een hardwarebron, dan herzaait de DRBG zich elke reseedInterval bytes
-// met een verse draw (voorwaartse onvoorspelbaarheid); jitter herzaait niet
-// (te duur, en de boot-seed volstaat). rngSource legt vast wat het werd.
+// De gedeelde SHA-256-DRBG (metal/cpu/drbg), hier geseed uit trng.Fill: de
+// volle bronkeuze — FEAT_RNG (RNDR) op de O6N, SMCCC TRNG/DEN 0098 op de
+// Altra — en anders de timing-jitter-terugval van het drbg-pakket.
 //
 // Bewust géén EFI_RNG_PROTOCOL: dat bleek eeuwig te kunnen blokkeren in
 // firmware zonder werkende TRNG (gemeten 13-07, review #5). SMCCC TRNG loopt
 // via een EL3-monitor en is met de EL3-check in metal/cpu/trng crash-veilig.
-const reseedInterval = 1 << 20 // bytes tussen twee TRNG-herzaaiingen
-
-var (
-	drbgState   [32]byte
-	drbgCtr     uint64
-	rngSource   = "jitter"
-	sinceReseed uint64
-)
 
 //go:linkname initRNG runtime/goos.InitRNG
-func initRNG() {
-	var seed [48]byte
-	if src, ok := trng.Fill(seed[:]); ok {
-		rngSource = src
-	} else {
-		jitterSeed(seed[:])
-	}
-	drbgState = sha256.Sum256(seed[:])
-}
-
-// jitterSeed vult dst uit timing-jitter: 512 hash-rondes waarvan de
-// individuele DUUR (CNTPCT-delta per ronde) de entropie levert; de teller
-// zelf gaat als monotone basis mee. De terugvaller als er geen hardware-TRNG
-// is (Neoverse-N1/Altra zonder DEN 0098, of QEMU virt).
-func jitterSeed(dst []byte) {
-	var pool [48]byte
-	var st [32]byte
-	for i := 0; i < 512; i++ {
-		binary.LittleEndian.PutUint64(pool[32:], ARM64.Counter())
-		binary.LittleEndian.PutUint64(pool[40:], uint64(i))
-		copy(pool[:32], st[:])
-		st = sha256.Sum256(pool[:])
-	}
-	for len(dst) > 0 {
-		dst = dst[copy(dst, st[:]):]
-		st = sha256.Sum256(st[:])
-	}
-}
-
-// reseed mengt een verse hardware-draw in de DRBG-state: state' =
-// H(state ‖ fresh). Faalt de bron even, dan blijft de oude state staan (nog
-// steeds veilig) en proberen we bij de volgende drempel opnieuw.
-func reseed() {
-	var fresh [24]byte
-	if _, ok := trng.Fill(fresh[:]); ok {
-		var in [56]byte
-		copy(in[:32], drbgState[:])
-		copy(in[32:], fresh[:])
-		drbgState = sha256.Sum256(in[:])
-	}
-	sinceReseed = 0
-}
+func initRNG() { drbg.Init(trng.Fill, ARM64.Counter) }
 
 // RNGSource geeft de gekozen entropiebron ("rndr", "smccc-trng" of "jitter")
 // terug — voor de discovery-print en de boot-log.
-func RNGSource() string { return rngSource }
+func RNGSource() string { return drbg.Source() }
 
 //go:linkname getRandomData runtime/goos.GetRandomData
-func getRandomData(b []byte) {
-	if rngSource != "jitter" && sinceReseed >= reseedInterval {
-		reseed()
-	}
-	var in [48]byte
-	for len(b) > 0 {
-		drbgCtr++
-		copy(in[:32], drbgState[:])
-		binary.LittleEndian.PutUint64(in[32:], drbgCtr)
-		in[40] = 0
-		out := sha256.Sum256(in[:])
-		in[40] = 1
-		drbgState = sha256.Sum256(in[:])
-		n := copy(b, out[:])
-		b = b[n:]
-		sinceReseed += uint64(n)
-	}
-}
+func getRandomData(b []byte) { drbg.Read(b) }
 
 // mpidr leest MPIDR_EL1 (cpu_arm64.s).
 func mpidr() uint64

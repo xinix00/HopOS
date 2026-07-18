@@ -40,8 +40,8 @@ const (
 )
 
 // Device is één PCIe-functie. Bus 0, fn 0 blijft de default (Bus/Fn = 0), zodat
-// de vlakke bus-0-Scan onveranderd werkt; de bus-walk (WalkBridges) vult Bus/Fn
-// voor endpoints achter root-poorten op de O6N.
+// de vlakke bus-0-Scan onveranderd werkt; ScanConfigured vult Bus/Fn voor
+// endpoints achter root-poorten (UEFI/ACPI-platforms zoals de Altra).
 type Device struct {
 	Bus      int
 	Dev      int
@@ -70,19 +70,11 @@ func (d *Device) cfg(off uintptr) uintptr {
 
 // Scan enumereert bus 0 (fn 0 per device) in het ECAM-venster van het board.
 // De ECAM-basis is board-specifiek (QEMU virt vs O6N/ACPI MCFG), dus komt via
-// de Window mee i.p.v. als package-constante. Dunne wrapper om ScanBus(0):
-// het bestaande vlakke pad (QEMU-virt NVMe via metal/driver/nvme) blijft ongewijzigd.
+// de Window mee i.p.v. als package-constante.
 func Scan(win Window) []*Device {
-	return ScanBus(win, 0)
-}
-
-// ScanBus enumereert één bus (32 devices, fn 0) in het ECAM-venster. Additief
-// naast Scan: dezelfde per-device-uitlezing, maar met een bus-parameter zodat de
-// bus-walk buiten bus 0 kan kijken. Leest ook het headertype (type-1 = bridge).
-func ScanBus(win Window, bus int) []*Device {
 	var found []*Device
 	for devno := 0; devno < 32; devno++ {
-		if d, _, ok := probeFn(win, bus, devno, 0); ok {
+		if d, _, ok := probeFn(win, 0, devno, 0); ok {
 			found = append(found, d)
 		}
 	}
@@ -107,53 +99,11 @@ func probeFn(win Window, bus, devno, fn int) (*Device, uint8, bool) {
 	return d, hdr, true
 }
 
-// setBridgeBuses schrijft de primary/secondary/subordinate-busnummers in het
-// type-1-header (offset 0x18); de secondary-latency-timer [31:24] blijft staan.
-func (d *Device) setBridgeBuses(primary, secondary, subordinate int) {
-	reg := d.cfg(cfgPriBus)
-	v := dev.Read32(reg) & 0xff000000
-	v |= uint32(primary&0xff) | uint32(secondary&0xff)<<8 | uint32(subordinate&0xff)<<16
-	dev.Write32(reg, v)
-	dev.MB()
-}
-
-// WalkBridges enumereert de hele PCIe-hiërarchie diepte-eerst vanaf bus 0 en
-// programmeert op elke aangetroffen type-1-bridge de secondary/subordinate-
-// busnummers (het klassieke enumeratie-recept: ken een bridge een secondary-bus
-// toe, open subordinate wijd, daal af, knijp subordinate daarna dicht op het
-// hoogst gebruikte busnummer). Geeft álle endpoints (type-0) over elke bus terug.
-//
-// Additief en NIET aangeroepen door bestaande code: de QEMU-virt/Pi-paden
-// gebruiken de vlakke Scan. Bedoeld voor de O6N, waar endpoints (RTL8126, NVMe)
-// achter root-poort-bridges hangen. STATUS: de busnummer-programmering is nog
-// niet op silicium geverifieerd (QEMU-virt en de Pi's hebben geen bridge op hun
-// pad) — additief en onbereikbaar vanuit het huidige pad, dus zonder regressie,
-// maar het bridge-programmeer-deel moet op de O6N nog worden bewezen.
-func WalkBridges(win Window) []*Device {
-	var endpoints []*Device
-	next := 1 // volgend vrij uit te delen busnummer
-	var walk func(bus int)
-	walk = func(bus int) {
-		for _, d := range ScanBus(win, bus) {
-			if !d.IsBridge() {
-				endpoints = append(endpoints, d)
-				continue
-			}
-			sec := next
-			next++
-			d.setBridgeBuses(bus, sec, 0xff) // subordinate wijd tijdens de afdaling
-			walk(sec)
-			d.setBridgeBuses(bus, sec, next-1) // dichtknijpen op het echt gebruikte bereik
-		}
-	}
-	walk(0)
-	return endpoints
-}
-
 // ScanConfigured enumereert een hiërarchie die de firmware al geconfigureerd
 // heeft (UEFI/ACPI-platforms zoals de Ampere Altra): puur read-only — de
-// secondary-busnummers komen uit de bridges zelf, in plaats van dat wij ze
-// uitdelen (dat doet WalkBridges, voor kale fabrics zonder firmware). Meldt
+// secondary-busnummers komen uit de bridges zelf. Een kale-fabric-bus-walk
+// die zélf busnummers programmeert bestaat bewust nog niet: die komt pas met
+// de O6N, mét silicium om hem op te bewijzen. Meldt
 // óók bridges (root-poorten) en álle functies van multifunctie-devices — een
 // dual-port-NIC is twee functies, en juist bij discovery wil je beide zien.
 func ScanConfigured(win Window, startBus int) []*Device {

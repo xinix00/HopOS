@@ -23,10 +23,8 @@ const (
 	RP1EthBase = RP1Base + 0x100000 // Cadence GEM registerblok
 	RP1EthCfg  = RP1Base + 0x104000 // clocks/control om de GEM heen
 
-	// eth_cfg-registers (datasheet §7.1).
-	EthCfgControl = RP1EthCfg + 0x00
-	EthCfgStatus  = RP1EthCfg + 0x04
-	EthCfgClkGen  = RP1EthCfg + 0x14 // CLKGEN: volgt standaard de MAC-snelheid
+	// eth_cfg-register (datasheet §7.1).
+	EthCfgClkGen = RP1EthCfg + 0x14 // CLKGEN: volgt standaard de MAC-snelheid
 	// CLKGEN-bits: 9 TXCLKDELEN, 8 DC50, 7 ENABLE (reset 1), 6 KILL,
 	// 5:4 SPEED_FROM_MAC (RO), 3 SPEED_OVERRIDE_EN, 1:0 SPEED_OVERRIDE
 	// (0=10M, 1=100M, 2=1000M). Zonder override volgt de klok de MAC.
@@ -43,10 +41,10 @@ const (
 	// (metal/driver/brcmpcie): RESCAL = het analoge kalibratieblok
 	// (brcm,bcm7216-pcie-sata-rescal), één keer per boot; PCIeSWInit = de
 	// brcm,brcmstb-reset SW_INIT-bank (bank = ID>>5, stride 0x18) met de
-	// bridge-reset-ID's 42/43/44 voor pcie0/1/2 (uit de BCM2712-DT).
+	// bridge-reset-ID's 42/43/44 voor pcie0/1/2 (uit de BCM2712-DT; pcie0
+	// heeft geen gebruiker — 42 hoort bij een controller die wij niet aanraken).
 	PCIeRescal  = 0x10_0011_9500
 	PCIeSWInit  = 0x10_0150_4318
-	PCIe0SWInit = 42
 	PCIe1SWInit = 43
 	PCIe2SWInit = 44
 

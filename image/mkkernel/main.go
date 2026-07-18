@@ -3,7 +3,7 @@
 // bytes op het laadadres, met de 64-byte arm64 Image-header vooraan en een
 // branch naar het ELF-entrypoint in het eerste instructiewoord.
 //
-// Gebruik: go run ./image/mkkernel -elf metal/probe5.elf -o kernel_2712.img -load 0x200000
+// Gebruik: go run ./image/mkkernel -elf metal/out/hopos5.elf -o kernel8.img -load 0x80000 -raw
 //
 // De ELF moet zó gelinkt zijn dat alle PT_LOAD-segmenten op of boven
 // load+64 liggen (de header-ruimte); voor HopOS-images geldt
@@ -11,10 +11,11 @@
 //
 // Met -pe ontstaat een UEFI-applicatie (BOOTAA64.EFI, zie pe.go) en is -elf
 // HERHAALBAAR: elke ELF is dezelfde build gelinkt op een eigen
-// kandidaat-venster (load = TEXT − 0x10000, uit de ELF afgeleid). De stub
-// (metal/board/uefi/init.s) kiest bij boot de eerste kandidaat die volgens
-// de firmware vrij is — zo boot één bestand universeel, ongeacht welk RAM
-// een bord al bezet heeft.
+// kandidaat-venster (load = TEXT − 0x10000, uit de ELF afgeleid). Verpakt
+// wordt één payload + relocatietabel (docs/pe-relocatie.md); de extra
+// varianten dienen als diff-bewijs. De stub (metal/board/uefi/init.s) kiest
+// bij boot de eerste kandidaat die volgens de firmware vrij is — zo boot één
+// bestand universeel, ongeacht welk RAM een bord al bezet heeft.
 package main
 
 import (
@@ -144,21 +145,16 @@ func main() {
 	var elfPaths multiFlag
 	flag.Var(&elfPaths, "elf", "invoer-ELF (tamago-image); met -pe herhaalbaar: elke ELF is een venster-variant")
 	outPath := flag.String("o", "kernel_2712.img", "uitvoerbestand")
-	loadAddr := flag.Uint64("load", 0x200000, "laadadres (kernel_address; arm64-default van de Pi-firmware; bij -pe genegeerd — dan uit de ELF afgeleid)")
+	loadAddr := flag.Uint64("load", 0x80000, "laadadres (de Pi-bootloader laadt raw images altijd op 0x80000; bij -pe genegeerd — dan uit de ELF afgeleid)")
 	raw := flag.Bool("raw", false, "geen arm64 Image-header: alleen de code0-branch, géén ARM\\x64-magic — de firmware behandelt het bestand dan als raw binary en springt blind naar kernel_address (het Circle-recept; boot-meting 2026-07-08: het Image-pad mét magic weigerde onze kernel zonder enig levensteken, het raw-pad is op de Pi 5 bewezen)")
-	pe := flag.Bool("pe", false, "verpak als AArch64 PE/COFF UEFI-applicatie (BOOTAA64.EFI) met venster-varianten — zie de package-doc")
-	reloc := flag.Bool("reloc", false, "met -pe: één payload + relocatietabel i.p.v. N volledige varianten — de varianten dienen alleen als diff-bewijs (vereist -ldflags -buildid= op elke variant; zie docs/pe-relocatie.md)")
+	pe := flag.Bool("pe", false, "verpak als AArch64 PE/COFF UEFI-applicatie (BOOTAA64.EFI): één payload + relocatietabel, de overige -elf-varianten als diff-bewijs (vereist -ldflags -buildid= op elke variant; zie docs/pe-relocatie.md)")
 	flag.Parse()
 	if len(elfPaths) == 0 {
 		die("-elf is verplicht")
 	}
 
-	if *pe && *reloc {
-		writePEReloc(elfPaths, *outPath)
-		return
-	}
 	if *pe {
-		writePE(elfPaths, *outPath)
+		writePEReloc(elfPaths, *outPath)
 		return
 	}
 	if len(elfPaths) > 1 {
@@ -193,13 +189,13 @@ func main() {
 // absoluut adres dragen — die verschillen exact de linkbasis-delta. De diff
 // levert de tabel én bewijst de aanname per build: één woord dat niet zuiver
 // +delta is (of een staart-/groottemismatch) is een gebroken toolchain-
-// aanname en faalt HARD — bouw dan zonder -reloc en onderzoek. De stub
+// aanname en faalt HARD — onderzoek dan (docs/pe-relocatie.md). De stub
 // (init.s) kopieert de payload naar het gekozen venster en telt bij elk
 // tabel-woord (venster − linkbasis) op. Winst: 6×12,3MB → 1×12,3MB + ~200KB,
 // en extra kandidaten zijn voortaan 8 bytes i.p.v. een hele variant.
 func writePEReloc(paths []string, outPath string) {
 	if len(paths) < 2 {
-		die("-reloc vergt minstens 2 varianten: één payload + minstens één schaduw voor het diff-bewijs")
+		die("-pe vergt minstens 2 varianten: één payload + minstens één schaduw voor het diff-bewijs")
 	}
 	var ps []payload
 	for _, path := range paths {
@@ -233,7 +229,7 @@ func writePEReloc(paths []string, outPath string) {
 		for _, p := range ps[1:] {
 			want := w0 + (p.load - ps[0].load) // uint64-wrap is de bedoeling
 			if got := binary.LittleEndian.Uint64(p.img[off:]); got != want {
-				die("reloc-diff @ %#x: %#x vs %#x is geen zuivere linkbasis-delta (%#x) — gebroken aanname (-buildid= vergeten? toolchain gewijzigd?); bouw zonder -reloc en onderzoek",
+				die("reloc-diff @ %#x: %#x vs %#x is geen zuivere linkbasis-delta (%#x) — gebroken aanname (-buildid= vergeten? toolchain gewijzigd?); onderzoek (docs/pe-relocatie.md)",
 					off, w0, got, p.load-ps[0].load)
 			}
 		}
@@ -284,7 +280,7 @@ func writePEReloc(paths []string, outPath string) {
 		binary.LittleEndian.PutUint32(tab[i*4:], r)
 	}
 
-	out := wrapPE(ps[0].img, ps[0].f, ps[0].load, ps[0].entryOff, nil, 0, tab, uint32(tabOff))
+	out := wrapPE(ps[0].img, ps[0].f, ps[0].load, ps[0].entryOff, tab, uint32(tabOff))
 	if err := os.WriteFile(outPath, out, 0o644); err != nil {
 		die("%v", err)
 	}
@@ -294,56 +290,4 @@ func writePEReloc(paths []string, outPath string) {
 	}
 	fmt.Printf("%s: %d bytes PE/COFF (reloc: 1 payload, %d entries), %d venster-kandidaten: %s\n",
 		outPath, len(out), len(relocs), len(ps), strings.Join(loads, " "))
-}
-
-// writePE bouwt de UEFI-applicatie uit één of meer venster-varianten:
-// laadadressen afleiden, RamStart per variant patchen, de kandidatentabel
-// (uefiSlots) in variant 0 vullen, en alles in één PE verpakken.
-func writePE(paths []string, outPath string) {
-	var ps []payload
-	for _, path := range paths {
-		ps = append(ps, flatten(path, deriveLoad(path)))
-	}
-
-	// De varianten zijn dezelfde build op een ander linkadres: gelijke
-	// groottes en entry-offsets zijn de sanity-check dat er niet per
-	// ongeluk verschillende programma's in één PE belanden.
-	for _, p := range ps[1:] {
-		if len(p.img) != len(ps[0].img) || p.entryOff != ps[0].entryOff {
-			die("varianten verschillen (grootte %d vs %d, entry %#x vs %#x) — zelfde build op ander -T vereist",
-				len(p.img), len(ps[0].img), p.entryOff, ps[0].entryOff)
-		}
-	}
-	stride := (uint64(len(ps[0].img)) + 0xfff) &^ 0xfff
-
-	// RamStart per variant = zijn eigen linkadres: de bron van waarheid
-	// voor de runtime ("waar draai ik") én voor de stub (variant 0 = L1).
-	for i := range ps {
-		ps[i].patch64("runtime/goos.RamStart", ps[i].load)
-	}
-	// De kandidatentabel in variant 0: aantal, stride, laadadressen.
-	if _, size := ps[0].symbol("hop-os/metal/board/uefi.uefiSlots"); size < uint64(2+len(ps))*8 {
-		die("uefiSlots te klein voor %d varianten", len(ps))
-	}
-	off, _ := ps[0].symbol("hop-os/metal/board/uefi.uefiSlots")
-	binary.LittleEndian.PutUint64(ps[0].img[off:], uint64(len(ps)))
-	binary.LittleEndian.PutUint64(ps[0].img[off+8:], stride)
-	for i, p := range ps {
-		binary.LittleEndian.PutUint64(ps[0].img[off+16+uint64(i)*8:], p.load)
-	}
-
-	var extras [][]byte
-	for _, p := range ps[1:] {
-		extras = append(extras, p.img)
-	}
-	out := wrapPE(ps[0].img, ps[0].f, ps[0].load, ps[0].entryOff, extras, uint32(stride), nil, 0)
-	if err := os.WriteFile(outPath, out, 0o644); err != nil {
-		die("%v", err)
-	}
-	var loads []string
-	for _, p := range ps {
-		loads = append(loads, fmt.Sprintf("%#x", p.load))
-	}
-	fmt.Printf("%s: %d bytes PE/COFF, %d venster-variant(en): %s (entry-RVA %#x)\n",
-		outPath, len(out), len(ps), strings.Join(loads, " "), peHeaderSize+ps[0].entryOff)
 }

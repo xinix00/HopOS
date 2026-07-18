@@ -36,9 +36,11 @@ een ABI-breuk met elk bestaand app-image** — additief uitbreiden of bewust
 breken, nooit stilletjes.
 
 **`cpu/`** — de ARM64-laag, geen devices: `el2` (EL2-entry + stage-2-switch),
-`psci` (SMCCC-calls), `smp` (core-bring-up), `idle` (WFE/event-stream),
-`trng` (RNDR/SMCCC-entropie). Hoort hier: CPU-instructies, exception levels,
-firmware-interfaces van de architectuur.
+`psci` (SMCCC-calls + de dunne wrappers Version/On/Off/AffinityInfo), `smp`
+(core-bring-up), `idle` (WFE/event-stream), `trng` (RNDR/SMCCC-entropie),
+`drbg` (de gedeelde SHA-256-DRBG achter GetRandomData; het board kiest de
+bron). Hoort hier: CPU-instructies, exception levels, firmware-interfaces
+van de architectuur.
 
 **`fw/`** — parsers van wat de firmware ons vertelt: `fdt` (device tree),
 `acpi` (MADT/MCFG/SPCR…). Géén drivers: fw/ leest tabellen en levert
@@ -73,9 +75,11 @@ core 0 als vertrouwde kern doet.
 Zo linkt een app-image nooit de driverstack van zijn board mee (gemeten: ~2,5k
 regels gem/brcmpcie/dhcp/vcmail per Pi-5-app-image, door de linker niet te
 elimineren omdat het interface-methods waren). `raspi` is de SoC-gedeelde laag
-onder rpi4/rpi5 (met `raspi/vcfb` als gedeelde hop-helft voor de
-framebuffer-discovery) — dat is het precedent voor toekomstige SoC-packages
-(O6N/cixp1: onder board/, naast de boards die hem gebruiken).
+onder rpi4/rpi5, mét een eigen gedeelde hop-helft: `raspi/hop` draagt `Base`
+(alles wat rpi4/hop en rpi5/hop identiek deden — PSCI/timers/lease/fb-
+discovery — plus StartDVFS) en `raspi/vcfb` de VideoCore-framebuffer-
+discovery. Dat is het precedent voor toekomstige SoC-packages (O6N/cixp1:
+onder board/, naast de boards die hem gebruiken).
 
 Sinds 15-07 linkt een app-image zelfs geen boárd meer: **`hopslot`** is het
 generieke app-board — onder stage-2 raakt een app geen MMIO of firmware-tabel,
@@ -95,7 +99,9 @@ het echte app-image in het slot). Binaries van de app-kant horen hier, niet
 in `cmd/`.
 
 **`cmd/`** — de HOP-kant binaries: `hopos` (de agent), `hopos-embed` (de
-fase-P1-kern met ingebakken app-image), `probe4/5/6`, `probeuefi`.
+fase-P1-kern met ingebakken app-image), `probeuefi` (UEFI/ACPI-discovery —
+het meetinstrument voor de O6N-bring-up; probe4/5/6 zijn gesloopt 18-07,
+functie geproductiseerd, terughalen kan uit git history).
 
 ## De importrichting
 

@@ -60,13 +60,9 @@ type peSection struct {
 
 // wrapPE bouwt het PE-bestand uit de platte image (img = bytes vanaf load,
 // incl. BSS-nullen) en de ELF-segmenten (voor de sectiegrenzen/permissies).
-// entryOff is de ELF-entry relatief aan het laadadres. extras zijn de
-// overige venster-varianten (zelfde build, ander linkadres): die komen als
-// read-only data ná variant 0, elk op stride bytes — de stub kopieert de
-// gekozen variant naar zijn linkadres, dus de loader hoeft ze alleen in het
-// geheugen te zetten. tail (reloc-modus, wederzijds exclusief met extras) is
-// de u32-relocatietabel: één RO-sectie op tailOff ná de payload.
-func wrapPE(img []byte, f *elf.File, load, entryOff uint64, extras [][]byte, stride uint32, tail []byte, tailOff uint32) []byte {
+// entryOff is de ELF-entry relatief aan het laadadres. tail is de
+// u32-relocatietabel: één RO-sectie op tailOff ná de payload.
+func wrapPE(img []byte, f *elf.File, load, entryOff uint64, tail []byte, tailOff uint32) []byte {
 	round := func(v uint64) uint32 { return uint32((v + 0xfff) &^ 0xfff) }
 
 	// Elk PT_LOAD één sectie. De segmenten liggen gesorteerd en pagina-rond
@@ -102,18 +98,7 @@ func wrapPE(img []byte, f *elf.File, load, entryOff uint64, extras [][]byte, str
 		end = e
 	}
 
-	// De venster-varianten: één RO-sectie, aaneengesloten op stride vanaf
-	// variant 0 (RVA peHeaderSize) — de stub rekent src = basis + k×stride.
-	if len(extras) > 0 {
-		payRVA := peHeaderSize + stride
-		if payRVA < end {
-			panic("mkkernel: stride overlapt de secties van variant 0")
-		}
-		secs = append(secs, peSection{".pay", payRVA, uint32(len(extras)) * stride, secInitD | secRead})
-		end = payRVA + uint32(len(extras))*stride
-	}
-
-	// De relocatietabel (mkkernel -reloc): één RO-sectie ná de payload, op
+	// De relocatietabel: één RO-sectie ná de payload, op
 	// het offset dat ook in ·uefiReloc gepatcht is (de stub rekent
 	// payload-basis + tailOff).
 	if len(tail) > 0 {
@@ -133,9 +118,6 @@ func wrapPE(img []byte, f *elf.File, load, entryOff uint64, extras [][]byte, str
 
 	out := make([]byte, imageSize)
 	copy(out[peHeaderSize:], img)
-	for i, e := range extras {
-		copy(out[peHeaderSize+stride+uint32(i)*stride:], e)
-	}
 	if len(tail) > 0 {
 		copy(out[peHeaderSize+tailOff:], tail)
 	}

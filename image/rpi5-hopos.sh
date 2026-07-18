@@ -1,8 +1,8 @@
 #!/bin/sh
 # Bouw de fase-P1-multikernel voor de Raspberry Pi 5 (metal/cmd/hopos-embed):
 # HOP-kern + embedded canonieke app-image, als raw kernel voor de EEPROM-
-# bootloader. Zelfde boot-recept als de probe (image/rpi5-probe.sh — os_check,
-# raw op 0x80000, DTB op 0x0F000000); zie docs/rpi5.md voor het dossier.
+# bootloader (os_check=0, raw op 0x80000, DTB op 0x0F000000); zie
+# docs/rpi5.md voor het dossier.
 #
 # Flashen (kaart-conventie: Linux-bestanden blijven staan). config-hopos.txt
 # komt AS config.txt op de kaart; het getrackte sd-rpi5/config.txt is de

@@ -37,7 +37,8 @@ de diff **100% zuivere +delta-woorden** → een klassieke relocatietabel.
    op een andere basis — beide met `-buildid=`. (Tijdens de inbouwfase: álle
    kandidaten blijven linken voor de verify hieronder; daarna volstaan 2.)
 
-**mkkernel (nieuwe modus, naast de bestaande `-pe`):**
+**mkkernel (`-pe` — sinds de opruimronde 2026-07-18 dé PE-modus; de oude
+multi-variant-verpakking is geschrapt en leeft alleen nog in git history):**
 2. Leg beide ELF's plat (PT_LOAD → flat image, zoals nu) en diff per
    8-byte-woord. Elk verschil móét exact +delta zijn → offset in de tabel.
    Eén afwijkend woord of grootte-verschil = **harde fout** (geen stille
@@ -74,8 +75,9 @@ Kandidatenlijst kan daarna ruim (10+): robuustere boot, gratis.
   er tóch iets achterblijft.
 - **Toekomstige toolchain breekt de aanname** (absolute immediates in code,
   4-byte-diffs): de diff/verify draait bij élke image-build en faalt dan
-  luid — nooit een stille kapotte stick. Terugval: de oude `-pe`-modus blijft
-  bestaan (probe gebruikt 'm sowieso).
+  luid — nooit een stille kapotte stick. Terugval: de oude multi-variant-
+  verpakking (elke kandidaat als volledige payload) is opgeruimd maar staat
+  in git history (mkkernel `writePE`, vóór 2026-07-18).
 - **Woord-toeval** (waarde die toevallig +delta verschilt maar geen pointer
   is): kan alleen bij waarden die tussen builds verschillen — en met gelijk
   build-ID verschilt er niets meer behalve adres-afgeleiden. De
