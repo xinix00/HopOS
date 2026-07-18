@@ -2,15 +2,20 @@
 
 HopOS is a **multikernel**: the machine is divided by core, not by time.
 
-```
-core 0 (+ hopos.cores-1)          core N … core 127
-┌──────────────────────┐          ┌─────────────────┐
-│ HOP — the node       │          │ app: own Go     │
-│ orchestrator agent   │  ctrl    │ runtime, own    │
-│ + leader + API       │◄───────► │ cores, own RAM  │
-│ drivers, net switch  │  page    │ own net stack   │
-└──────────────────────┘          └─────────────────┘
-        EL2 owns stage-2: every app runs inside a cage
+```mermaid
+flowchart LR
+  subgraph n0["node — core 0 (+ hopos.cores-1)"]
+    H["HOP: agent, leader & API<br/>drivers · net switch"]
+  end
+  subgraph s1["app — own core(s)"]
+    A["own Go runtime<br/>own RAM · own net stack"]
+  end
+  subgraph s2["app — own core(s)"]
+    B["own Go runtime<br/>own RAM · own net stack"]
+  end
+  H <-- "control page + rings" --> A
+  H <-- "control page + rings" --> B
+  E(["EL2 owns stage-2: every app runs inside a cage"]) ~~~ s1
 ```
 
 - **The node runtime is just an app too.** HOP runs on core 0 (plus

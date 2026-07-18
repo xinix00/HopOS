@@ -11,15 +11,15 @@ require (
 require (
 	github.com/google/btree v1.1.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/xinix00/hoplock v0.0.0-00010101000000-000000000000 // indirect
+	github.com/xinix00/hoplock v0.1.0 // indirect
 	github.com/xinix00/hoplockserver v0.0.0-00010101000000-000000000000 // indirect
-	golang.org/x/crypto/x509roots/fallback v0.0.0-20260709184058-243e02a382f8 // indirect
 	golang.org/x/sys v0.44.0 // indirect
 	golang.org/x/time v0.7.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
 require (
+	golang.org/x/crypto/x509roots/fallback v0.0.0-20260709184058-243e02a382f8
 	gvisor.dev/gvisor v0.0.0-20250911055229-61a46406f068
 	hop v0.0.0
 )
