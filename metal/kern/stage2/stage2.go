@@ -23,9 +23,12 @@
 //	L3ctrl   scratch-page read-only (PSCI-conduitkeuze), eigen ctrl-page RW
 //	L3ring   de eigen 64KB ring-regio RW
 //
-// Per slot leeft het blok op layout.Stage2Table(i); Stage2Base+0 draagt de
-// gedeelde EL2-parkeervectoren (stage-2-fault ⇒ core parkeert in WFE-lus;
-// heartbeat stopt ⇒ HOP's hang-detectie ziet het).
+// Per slot leeft het blok op layout.Stage2Table(i), met op +CtxOff het
+// switch-contextblok van de coöperatieve core-deling (cpu/el2/switch.s).
+// Stage2Base+0 draagt de gedeelde EL2-vectoren van de app-cores: dunne
+// thunks naar el2entry — een fault zet de bewoner op dead (rapport op zijn
+// ctrl-page) en de core draait door met zijn mede-bewoners, of parkeert als
+// er niemand meer is (heartbeat stopt ⇒ HOP's hang-detectie ziet het).
 package stage2
 
 import (
@@ -33,6 +36,7 @@ import (
 
 	"hop-os/metal/abi/a64"
 	"hop-os/metal/abi/layout"
+	"hop-os/metal/cpu/el2"
 	"hop-os/metal/dev"
 )
 
@@ -63,12 +67,26 @@ const (
 )
 
 // InitVectors schrijft de gedeelde EL2-vectoren op Stage2Base (2KB-aligned
-// per architectuur-eis; 16 entries met stride 0x80). Elke EL2-exception —
-// een stage-2-fault, of de app nu spontaan buiten zijn kooi greep óf HOP zijn
-// stage-2-map introk (de hard-kill, zie Revoke) — rapporteert eerst wáárom hij
-// viel op de eigen control-page (vectorindex+1, ESR_EL2, FAR_EL2) en zet dan de
-// core uit via PSCI CPU_OFF. HOP ziet "core off zonder StatusExited" mét
-// syndroom: hard gestopt, slot direct herbruikbaar.
+// per architectuur-eis; 16 entries met stride 0x80). Elke entry is een dunne
+// thunk: x2/x3 naar de per-core sched-scratch (via SP_EL2, door de
+// trampolines op mailbox+SchedScratch gezet), de vectorindex in x2, en spring
+// naar el2entry (cpu/el2/switch.s). Dáár wonen de drie paden, onderscheiden
+// op de HVC-immediate:
+//
+//   - yield-HVC (#1): de coöperatieve yield van de idle-governor op een
+//     gedeelde core — staat saven, één EL2-WFE (de idle-slaap van de core),
+//     volgende bewoner hervatten of cold-booten (rotatie over het sched-blok).
+//   - exit-HVC (#0): bewoner klaar (applib zette al StatusExited) — ctx-staat
+//     dead, roteren zonder rapport.
+//   - al het andere (stage-2-abort, getrapte SMC, ...): fault-rapport op de
+//     eigen ctrl-page (vectorindex+1, ESR_EL2, FAR_EL2) — zowel een spontane
+//     kooi-overtreding als HOP's hard-kill (stage-2-intrekking, zie Revoke) —
+//     dan dead en roteren.
+//
+// Draait er daarna niemand meer op de core, dan parkeert de rotatie hem op de
+// parkeerlus: HOP ziet "geparkeerd zonder StatusExited" mét syndroom — hard
+// gestopt, slot direct herbruikbaar. Eén bewoner op een core gedraagt zich
+// dus exact als vanouds, alleen loopt zijn idle-WFE nu via één EL2-rondje.
 //
 // Het slot komt uit VTTBR_EL2.VMID — door onze eigen trampoline op het
 // slotnummer gezet, door de app onaantastbaar, en board-neutraal (géén
@@ -81,73 +99,26 @@ const (
 // (op de HVC-offset) die TLBI ALLE1IS doet. HOP draait op EL1 en kan die
 // EL2-instructie niet direct uitvoeren; Revoke doet er een HVC voor. Zie Revoke.
 func InitVectors() {
-	// De fysieke ctrl-basis en het parkeeradres komen uit het board-plan en
-	// kunnen élk 48-bit-adres zijn: altijd movz+movk+movk (bits 32-47/16-31/
-	// 0-15). De 4KB-uitlijning van ctrl (bits 0-11 vrij voor slot<<12) bewaakt
-	// layout.UsePlan.
+	// De fysieke plan-adressen die de switch nodig heeft, gaan per core het
+	// sched-blok in (hieronder): switch.s is daardoor volledig SP/TPIDR-
+	// relatief. De 4KB-uitlijning van ctrl (bits 0-11 vrij voor slot<<12)
+	// bewaakt layout.UsePlan; switch.s rekent daarop bij het fault-rapport.
 	ctrlPA := uint64(layout.CtrlPagePA(0))
-	parkPA := uint64(layout.ParkCodePA())
+	s2PA := uint64(layout.VecBasePA())
+	entryPA := el2.EntryPC()
 
-	// parkTo(rd): laad parkPA in x<rd> en spring erheen (BR). HopOS bezit zijn
-	// cores — een gevelde/gestopte app-core gaat NIET terug naar de firmware
-	// (PSCI CPU_OFF is op de Pi 5-stock een one-way door) maar parkeert op EL2
-	// in de WFE-lus op ParkCodePA. HOP dispatcht 'm later via zijn mailbox.
-	parkTo := func(rd uint32) []uint32 {
-		return []uint32{
-			movz(rd, uint32(parkPA>>32), 32),
-			movk(rd, uint32(parkPA>>16), 16),
-			movk(rd, uint32(parkPA), 0),
-			0xD61F0000 | (rd&0x1F)<<5, // br  x<rd>
-		}
-	}
-	// report: schrijf vec/esr/far op de eigen control-page (slot = VTTBR.VMID),
-	// gevolgd door parkeren. Clobbert x0-x5.
-	report := func(v uint32) []uint32 {
-		ins := []uint32{
-			0xd53c2100,                      // mrs  x0, vttbr_el2
-			0xd370fc00,                      // lsr  x0, x0, #48          (slot = VMID)
-			movz(1, uint32(ctrlPA>>32), 32), // movz x1, #(ctrlPA>>32), lsl #32
-			movk(1, uint32(ctrlPA>>16), 16), // movk x1, #(ctrlPA>>16), lsl #16
-			movk(1, uint32(ctrlPA), 0),      // movk x1, #(ctrlPA&0xffff)
-			0x8b003021,                      // add  x1, x1, x0, lsl #12  (eigen ctrl-page)
-			movz(4, v+1, 0),                 // movz x4, #(v+1)
-			strX(4, 1, layout.CtrlFaultVec), // str  x4, [x1, #CtrlFaultVec]
-			0xd53c5202,                      // mrs  x2, esr_el2
-			strX(2, 1, layout.CtrlFaultESR), // str  x2, [x1, #CtrlFaultESR]
-			0xd53c6003,                      // mrs  x3, far_el2
-			strX(3, 1, layout.CtrlFaultFAR), // str  x3, [x1, #CtrlFaultFAR]
-			0xd5033fbf,                      // dmb  sy   (publiceer vóór parkeren)
-		}
-		return append(ins, parkTo(5)...)
-	}
-	handler := func(v uint32) []uint32 {
-		if v != 8 {
-			return report(v)
-		}
-		// Index 8 = synchrone exception vanuit EL1: óf een stage-2-fault
-		// (kooi-overtreding / Revoke's ingetrokken map — rapporteren) óf de
-		// coöperatieve exit-HVC van applib (EC=0x16 — de app zette al
-		// StatusExited, dus niet als fault rapporteren, meteen parkeren).
-		// De HVC-tak springt naar het parkTo-blok = de laatste 4 instructies
-		// van report(v). Vanaf de b.eq (index 3) is dat offset
-		// 4 + (len(rep)-4) - 3 = len(rep)-3 instructies vooruit.
-		rep := report(v)
-		off := uint32(len(rep) - 3)
-		head := []uint32{
-			0xd53c5202,                    // mrs  x2, esr_el2
-			0xD35AFC43,                    // lsr  x3, x2, #26          (EC)
-			0xF100587F,                    // cmp  x3, #0x16            (HVC64?)
-			0x54000000 | (off&0x7FFFF)<<5, // b.eq +off (EQ) → parkeren, geen report
-		}
-		return append(head, rep...)
-	}
-	// App-core-vectoren op VecBasePA: elke EL2-exception → rapporteer + parkeer.
-	// Geen aparte IRQ-vector: de hard-kill loopt via een stage-2-fault (Revoke
-	// trekt de map in), die net als een spontane kooi-overtreding op idx 8 landt.
+	// De 16 thunks. LET OP: [sp,#16/#24] is de scratch-indeling die switch.s
+	// verwacht (x2/x3; el2entry parkeert daar zelf x0/x1 op +0/+8).
 	vecs := layout.VecBasePA()
 	dev.Clear(vecs, 0x800)
 	for v := uintptr(0); v < 16; v++ {
-		for w, ins := range handler(uint32(v)) {
+		code := []uint32{
+			0xA9010FE2, // stp x2, x3, [sp, #16]
+			a64.Movz(2, uint32(v), 0),
+		}
+		code = a64.Mov64(code, 3, entryPA)
+		code = append(code, 0xD61F0060) // br x3
+		for w, ins := range code {
 			dev.Write32(vecs+v*0x80+uintptr(w)*4, ins)
 		}
 	}
@@ -175,9 +146,29 @@ func InitVectors() {
 	for w, ins := range park {
 		dev.Write32(pc+uintptr(w)*4, ins)
 	}
-	// Mailboxen schoon: verse DRAM is geen nul (Pi-meting) — word0=0 betekent
-	// "cold" (nooit geparkeerd → eerste bring-up via PSCI).
-	dev.Clear(pc+0x100, uint64(layout.MaxSlots+1)*layout.ParkMboxLen)
+	// Sched-blokken (mailbox + core-delingsstaat) schoon: verse DRAM is geen
+	// nul (Pi-meting) — word0=0 betekent "cold" (nooit geparkeerd → eerste
+	// bring-up via PSCI), en een lege bewonerslijst mag geen rommel dragen.
+	// Daarna de plan-PA's die switch.s per core nodig heeft: zo blijft de
+	// switch volledig SP/TPIDR-relatief, zonder #defines of Go-globals
+	// (die zouden cache-coherentie-zorg meebrengen — dit gebied is al
+	// ongecached van beide kanten).
+	// Sched-blokken zijn per CORE (mailbox + core-delingsstaat, ParkMboxPA(core)):
+	// tot NumAppCores, niet de kooi-cap. Verse DRAM is geen nul, en de plan-PA's
+	// (die switch.s per core nodig heeft) moeten er staan vóór de eerste dispatch.
+	nc := layout.NumAppCores()
+	dev.Clear(pc+0x100, uint64(nc+1)*layout.ParkMboxLen)
+	for c := 0; c <= nc; c++ {
+		mb := layout.ParkMboxPA(c)
+		dev.Write64(mb+layout.SchedS2PA, s2PA)
+		dev.Write64(mb+layout.SchedCtrlPA, ctrlPA)
+	}
+	// De ctx-staat van elke KOOI expliciet op Empty (per-slot, tot de kooi-cap):
+	// HOP leest dit woord (Get/waitCtxDead in kern/slots) al vóór de eerste
+	// Build van dat slot, en verse DRAM is geen nul.
+	for s := 1; s <= layout.MaxSlots; s++ {
+		dev.Write64(layout.Stage2TablePA(s)+layout.CtxOff+layout.CtxState, layout.CtxEmpty)
+	}
 
 	// De revoke-handler van de HOP-core: ingeplugd op offset 0x400 (synchrone
 	// exception vanuit een lager EL) van de vectortabel waar cpuinit VBAR_EL2
@@ -219,9 +210,16 @@ func InitVectors() {
 // een loop-buffer serveert zónder te hertranslateren is de enige twijfel; dat is
 // per silicium te meten (op QEMU dwingt de HANG=spin-test het af).
 func Revoke(i int) {
-	// De hele tabel-blok van het slot nullen: de L1-entries worden ongeldig, dus
-	// élke IPA in dit slot faultt. Volgorde is hier heilig — de walker van de
-	// app drááit nog en leest de tabellen cacheable:
+	// Alleen de TABELLEN van het slot nullen (tot CtxOff — het switch-
+	// contextblok erachter blijft staan): de L1-entries worden ongeldig, dus
+	// élke IPA in dit slot faultt. Het contextblok mag hier NIET mee: een
+	// bewoner van een gedeelde core kan op dit moment precies zijn staat aan
+	// het saven zijn (WFE-yield op zijn core) — een clear eroverheen zou een
+	// halve context achterlaten die de rotatie daarna als "saved" hervat. De
+	// intrekking bereikt hem toch: zijn eerstvolgende hervatting faultt op de
+	// genulde tabel en zet de ctx-staat op dead (switch.s, fault-pad).
+	// Volgorde is hier heilig — de walker van de app drááit nog en leest de
+	// tabellen cacheable:
 	//
 	//  1. eerst de zeros schrijven (DRAM is dan al ongeldig),
 	//  2. dan CleanInv: gooit de tabel-lines die de walker cachede weg (altijd
@@ -230,18 +228,11 @@ func Revoke(i int) {
 	//     tussen de veeg en de zeros de óúde tabel opnieuw cachen → de app zou
 	//     de kill overleven op echt silicium (QEMU verhult dit).
 	//  3. dan pas de TLBI (via de HVC): ook de al-vertaalde TLB-entries weg.
-	dev.Clear(layout.Stage2TablePA(i), layout.Stage2Stride)
-	dev.CleanInv(layout.Stage2TablePA(i), layout.Stage2Stride)
+	dev.Clear(layout.Stage2TablePA(i), layout.CtxOff)
+	dev.CleanInv(layout.Stage2TablePA(i), layout.CtxOff)
 	dev.MB()
 	hvcRevoke()
 }
-
-// De AArch64-encoders (movz/movk/strX) komen uit abi/a64 — gedeeld met de
-// zelfplaats-stub-generator (applib/selfplace.go); dunne aliassen zodat de
-// vector-generator hierboven leesbaar blijft.
-func movz(rd, imm16, shift uint32) uint32 { return a64.Movz(rd, imm16, shift) }
-func movk(rd, imm16, shift uint32) uint32 { return a64.Movk(rd, imm16, shift) }
-func strX(rt, rn, off uint32) uint32      { return a64.StrX(rt, rn, off) }
 
 // Build schrijft de stage-2-tabellen voor slot i en geeft het fysieke adres
 // van de L1-tabel terug (voor VTTBR_EL2, gezet door de EL2-trampoline).
@@ -260,6 +251,10 @@ func Build(i int, ipaBase, paBase, size, netRingPA uint64) (uint64, error) {
 	if netRingPA == 0 || netRingPA&(layout.NetRingStride-1) != 0 {
 		return 0, fmt.Errorf("net-ring-PA %#x ontbreekt of niet 2MB-aligned", netRingPA)
 	}
+	// Het hele blok schoon, inclusief het switch-contextblok op +CtxOff: een
+	// Start gebeurt per contract op een niet-draaiend slot, dus de ctx-staat
+	// mag (en moet) hier vers op Empty — de aanroeper zet 'm daarna op
+	// Running/BootPending bij de dispatch.
 	base := layout.Stage2TablePA(i)
 	dev.Clear(base, layout.Stage2Stride)
 

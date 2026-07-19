@@ -16,6 +16,9 @@ in S3 — not on the machine. Product page: [gethop.org/hopos](https://gethop.or
 - **[Isolation](technical/isolation.md)** — the hardware cage: stage-2, whole cores, zero syscalls.
 - **[Networking](technical/networking.md)** — a network stack per app, a switch in the node.
 - **[Stateless](technical/stateless.md)** — state on S3, not on metal.
+- **[GUI design](gui-ontwerp.md)** — the display roadmap: surfaces, planes,
+  scenes, and windows that fail over with their app (design dossier, Dutch;
+  agreed 2026-07-19, not built yet).
 
 ## Related
 

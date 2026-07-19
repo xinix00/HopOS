@@ -83,6 +83,12 @@ func Init() *App {
 	// van, net als bij SMP.
 	idle.Publish(layout.CtrlPage(a.Slot) + layout.CtrlIdle)
 
+	// Core-deling (fase 6): laat de governor het CtrlShared-woord volgen. Zet
+	// HOP het (dit slot deelt zijn core), dan yieldt de governor coöperatief
+	// via HVC i.p.v. WFE zodat de mede-bewoner draait. OS-laag-werk — de app
+	// merkt er niets van, net als bij SMP en de idle-teller.
+	idle.WatchShared(layout.CtrlPage(a.Slot) + layout.CtrlShared)
+
 	*a.ctrl(layout.CtrlStatus) = layout.StatusReady
 
 	go a.watch()

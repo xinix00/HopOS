@@ -87,11 +87,12 @@ const (
 	// dus puur fysiek, geen IPA: de basis is Plan.Stage2PA. De indeling ervan
 	// is wél universeel: +0x0 de gedeelde EL2-vectoren van de app-cores
 	// (2KB-aligned), en per slot i ≥ 1 een tabelblok op +i*Stage2Stride
-	// (L1 +0x0, L2 +0x1000/+0x2000, L3-ctrl +0x3000, L3-ring +0x4000).
-	// De revoke-vectoren van de HOP-core staan apart (Plan.RevokeVecPA):
-	// dat is de tabel waar cpuinit VBAR_EL2 van core 0 heen zette — een board
-	// mag daar zijn eigen boot-diagnostiek in hebben (rpi5: de faultdump-
-	// tabel); InitVectors plugt er alleen de HVC-handler in.
+	// (L1 +0x0, L2 +0x1000/+0x2000, L3-ctrl +0x3000, L3-ring +0x4000,
+	// net-ring-L2 +0x5000, en op +CtxOff het switch-contextblok van het slot —
+	// zie hieronder). De revoke-vectoren van de HOP-core staan apart
+	// (Plan.RevokeVecPA): dat is de tabel waar cpuinit VBAR_EL2 van core 0
+	// heen zette — een board mag daar zijn eigen boot-diagnostiek in hebben
+	// (rpi5: de faultdump-tabel); InitVectors plugt er alleen de HVC-handler in.
 	Stage2Stride = 0x10000
 
 	// Parkeer-machinerie (in het slot-0-blok, ná de vectoren; QEMU's
@@ -106,7 +107,51 @@ const (
 	// woord 1: doel-PC.
 	parkCodeOff = 0x1000
 	parkMboxOff = 0x1100
-	ParkMboxLen = 16 // bytes per core-mailbox (ctx + pc)
+	// Per core is de mailbox uitgegroeid tot een sched-blok van 256 bytes:
+	// de parkeer-mailbox (woord 0/1) plus de staat van de coöperatieve
+	// core-deling (cpu/el2/switch.s) — register-scratch voor de vector-thunks,
+	// de bewonerslijst (round-robin over slots die deze core delen) en de
+	// plan-PA's die de EL2-switch nodig heeft. TPIDR_EL2 van de core wijst
+	// naar dit blok; SP_EL2 naar +SchedScratch (door de trampolines gezet).
+	// (MaxSlots+1) blokken vanaf parkMboxOff: tot +0x9200, ruim binnen het
+	// slot-0-stride-blok — slot 0 draagt geen tabellen/context, dus de
+	// CtxOff-overlap met een "slot-0-context" bestaat niet.
+	// LET OP: de Sched*-offsets staan als literals in cpu/el2/switch.s en in
+	// de thunk-generator (kern/stage2) — bij verplaatsen beide aanpassen.
+	ParkMboxLen = 256
+
+	// Sched-blok-indeling (offsets binnen het 256B-blok van een core).
+	SchedScratch = 16  // 4×8B: x0..x3 van de getrapte app (thunk + switch.s)
+	SchedCursor  = 80  // laatst geplande lijst-index (u64)
+	SchedCount   = 88  // lijstlengte (u64, monotoon; 0-bytes zijn gaten)
+	SchedList    = 96  // SlotCap × 1 byte: slotnummers van de bewoners
+	SchedS2PA    = 224 // fysieke Plan.Stage2PA (switch.s: ctx/VTTBR/park afleiden)
+	SchedCtrlPA  = 232 // fysieke Plan.CtrlPA (switch.s: fault-rapport)
+
+	// Switch-contextblok per slot (op Stage2TablePA(i)+CtxOff): de EL1-staat
+	// van een geyielde bewoner van een gedeelde core, gesaved/gerestored door
+	// cpu/el2/switch.s. CtxState is tevens het slot-levensteken dat HOP leest
+	// (kern/slots): de vector-paden zetten 'm op dead bij een exit of fault.
+	// LET OP: alle offsets staan als literals in switch.s — samen wijzigen.
+	CtxOff     = 0x6000
+	CtxState   = 0   // CtxEmpty..CtxDead (zie onder)
+	CtxBootCtx = 8   // HOP → EL2: ctrl-page-PA voor een cold boot (tramp-x0)
+	CtxBootPC  = 16  // HOP → EL2: trampoline-PA voor een cold boot
+	CtxGPRs    = 24  // x0..x30 (31×8)
+	CtxSPEL0   = 272 // sp_el0, sp_el1
+	CtxELR     = 288 // hervat-PC (ELR_EL2 ná de HVC-yield), spsr_el2
+	CtxSysregs = 304 // 19×8 EL1-sysregs (volgorde: switch.s); einde blok: 456
+	// FP staat bewust NIET in dit blok: EL2 draait MMU-uit (Device-geheugen) en
+	// een SIMD-store naar Device faultt op ijzer. idle.hvcYield bewaart de
+	// callee-saved V8–V15/FPCR zelf op de EL1-stack (Normal). 456..0x6000 vrij.
+
+	// CtxState-waarden. HOP schrijft Empty/BootPending/Running (bij een
+	// mailbox-dispatch), de EL2-switch schrijft Running/Saved/Dead.
+	CtxEmpty       = 0 // geen bewoner (vers of vrijgegeven)
+	CtxBootPending = 1 // HOP zette BootCtx/PC klaar; EL2 cold-boot bij rotatie
+	CtxSaved       = 2 // context geldig — geyield, hervatbaar
+	CtxRunning     = 3 // draait nu op zijn core
+	CtxDead        = 4 // geëindigd (exit, fault of revoke) — EL2 slaat 'm over
 
 	// Frame-ringen per slot (IPA-ABI, per-slot netwerk): elke app draait een
 	// eigen netstack over rauwe Ethernet-frames; HOP is enkel een L2-switch
@@ -174,16 +219,41 @@ func IP4Str(v uint32) string {
 	return fmt.Sprintf("%d.%d.%d.%d", byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
 }
 
-// MaxSlots is het aantal app-slots dat deze node gebruikt — geen kunstmatige
-// limiet maar de FYSIEKE grens van het board: het aantal ontdekte app-cores
-// (127 op de Ampere Altra, 3 op de Pi, 11 op de O6N). Een board zet het bij
-// het laden met SetMaxSlots uit zijn discovery; default 3 voor boards die het
-// (nog) niet doen. De fysieke per-slot regio's worden voor SlotCap
-// gereserveerd, dus MaxSlots mag runtime variëren zonder de carve te raken.
-var MaxSlots = 3
+// MaxSlots is de KOOI-capaciteit: het hoogste slot-(=kooi-)nummer dat deze node
+// mag gebruiken. Sinds de coöperatieve core-deling is een kooi (eigen partitie/
+// stage-2/netstack) losgekoppeld van een fysieke core — meerdere kooien mogen
+// één core delen (sharegroup), dus er mogen MÉÉR kooien dan cores zijn. De
+// per-kooi fysieke regio's (ctrl/ringen/stage-2) zijn voor SlotCap gereserveerd
+// in de carve, dus dit mag tot SlotCap oplopen zonder de pool te raken. Default
+// = SlotCap (de carve reserveert het toch); een board hoeft dit niet te zetten.
+var MaxSlots = SlotCap
 
-// SetMaxSlots zet het gebruikte slot-aantal (geklemd op [1, SlotCap]).
+// numAppCores is de FYSIEKE grens: het aantal app-cores van dit board (127 op de
+// Ampere Altra, 3 op de Pi, 11 op de O6N). Waar MaxSlots de kooien telt, telt
+// dit de cores waarop HOPOS ze plaatst (dedicated of gedeeld via een pool). Een
+// board zet het met SetAppCores uit zijn discovery; default 3 (Pi/QEMU, die de
+// PSCI-probe in kern/slots het verder laat verfijnen). Nooit boven SlotCap.
+var numAppCores = 3
+
+// SetAppCores zet het aantal fysieke app-cores (geklemd op [1, SlotCap]).
 // Aanroepen vóór het eerste slot-gebruik (board-init, vóór UsePlan/NumSlots).
+func SetAppCores(n int) {
+	switch {
+	case n < 1:
+		n = 1
+	case n > SlotCap:
+		n = SlotCap
+	}
+	numAppCores = n
+}
+
+// NumAppCores is de fysieke core-grens (zie numAppCores). kern/slots gebruikt
+// dit voor de PSCI-probe, de SMP-core-ranges en de sched-blok-init (per core),
+// waar MaxSlots de kooi-grens is (checkSlot, ctx-blokken, de switch-ports).
+func NumAppCores() int { return numAppCores }
+
+// SetMaxSlots klemt de kooi-capaciteit (tot SlotCap). Zelden nodig — default is
+// al SlotCap; een test of een board dat de kooi-cap bewust wil verlagen zet 'm.
 func SetMaxSlots(n int) {
 	switch {
 	case n < 1:
@@ -529,10 +599,19 @@ const (
 	// verkeerd, dan fault alleen dit slot (vec/ESR/FAR als elke overtreding).
 	CtrlPlaceEntry = 0xF0
 
+	// CtrlShared (HOP → app): 1 als dit slot zijn fysieke core deelt met een
+	// ander slot (coöperatieve core-deling, fase 6). De idle-governor
+	// (metal/cpu/idle) leest dit: 0 = dedicated core → gewone WFE-slaap;
+	// 1 = gedeeld → expliciete HVC-yield naar de EL2-switch (cpu/el2/switch.s)
+	// zodat de mede-bewoner zijn beurt krijgt. HOP zet 'm dynamisch: 1 zodra er
+	// een tweede bewoner bij komt, terug naar 0 als er weer één overblijft
+	// (kern/slots refreshShared). App-code merkt er niets van — puur OS-laag.
+	CtrlShared = 0x100
+
 	// Env-blob: door HOP geschreven "key=val\n..."-bytes die de app-lib bij
 	// start inleest (de Docker-vorm: env meegegeven bij het starten). Vervangt
 	// het kernel-envp dat bare metal niet heeft.
-	CtrlEnvData = 0x100
+	CtrlEnvData = 0x108
 	CtrlEnvMax  = CtrlStride - CtrlEnvData
 )
 

@@ -24,8 +24,9 @@ import (
 	"hop-os/metal/dev"
 )
 
-// wfeIdle/cntkctlSet/cntfrq: zie idle_arm64.s.
+// wfeIdle/hvcYield/cntkctlSet/cntfrq: zie idle_arm64.s.
 func wfeIdle() uint64
+func hvcYield() uint64
 func cntkctlSet(v uint64)
 func cntfrq() uint64
 
@@ -44,8 +45,9 @@ func cntfrq() uint64
 // telt zijn echte (micro)duur mee in plaats van een volle tik, zonder
 // per-core-status.
 var (
-	ticks   atomic.Uint64
-	pubAddr atomic.Uintptr
+	ticks      atomic.Uint64
+	pubAddr    atomic.Uintptr
+	sharedAddr atomic.Uintptr // CtrlShared-woord van de eigen control-page (0 = niet gezet)
 )
 
 // Enable zet de event-stream aan en hangt de WFE-governor in de runtime.
@@ -67,6 +69,13 @@ func Enable() {
 // HOP fysiek leesbaar). Bij SMP delen de cores van het slot dit woord; de
 // wachter deelt het verwachte tempo door CtrlCores.
 func Publish(addr uintptr) { pubAddr.Store(addr) }
+
+// WatchShared laat de governor het CtrlShared-woord op addr lezen (de eigen
+// control-page): is het ≠ 0, dan deelt dit slot zijn core en yieldt de
+// governor expliciet via HVC i.p.v. te WFE'en. HOP zet/wist het woord
+// dynamisch (kern/slots), dus we lezen het élke idle-ronde vers — één
+// device-lees, verwaarloosbaar op een idle core. applib roept dit in Init.
+func WatchShared(addr uintptr) { sharedAddr.Store(addr) }
 
 // Ticks geeft de interne tellerstand.
 func Ticks() uint64 { return ticks.Load() }
@@ -97,8 +106,18 @@ const wfeMinSleep = 64
 // ~1-2 event-periodes later vuren — irrelevant voor jobs.
 func governor(pollUntil int64) {
 	var slept uint64
-	for i := 0; slept < wfeMinSleep && i < 4; i++ {
-		slept += wfeIdle()
+	if a := sharedAddr.Load(); a != 0 && dev.Read64(a) != 0 {
+		// Gedeelde core: expliciet yielden. De HVC trapt naar de EL2-switch,
+		// die onze staat opslaat, de core laat slapen, de mede-bewoner draait
+		// en ons hier hervat. Eén yield per idle-ronde: de switch doet zelf de
+		// WFE-slaap (power) en de rotatie. Testbaar op QEMU, waar een WFE-trap
+		// dat niet zou zijn.
+		slept = hvcYield()
+	} else {
+		// Dedicated core: WFE's tot er écht geslapen is (drain-lus, zie boven).
+		for i := 0; slept < wfeMinSleep && i < 4; i++ {
+			slept += wfeIdle()
+		}
 	}
 	n := ticks.Add(slept)
 	if a := pubAddr.Load(); a != 0 {

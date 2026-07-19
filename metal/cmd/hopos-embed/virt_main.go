@@ -570,15 +570,241 @@ func main() {
 		fail("smp", fmt.Errorf("exit=%d, err=%v", code, err))
 	}
 	// Teardown: alle cores van de SMP-app moeten afgaan (primair + secundair).
+	// CoreIdle toetst de CORE-mailbox (Get.CoreOn is sinds de core-deling de
+	// slot-staat, en "core 2" is hier een core, geen slot).
 	if err := slots.Stop(1, 5*time.Second); err != nil {
 		fail("smp-teardown", err)
 	}
 	for _, c := range []int{1, 2} {
-		if slots.Get(c).CoreOn {
+		if !slots.CoreIdle(c) {
 			fail("smp-teardown", fmt.Errorf("core %d nog aan na teardown", c))
 		}
 	}
 	fmt.Println("HOPOS_SMP_OK — één app op twee cores, gedeelde heap: rendezvous + GC bewezen, cores netjes afgebroken")
+
+	// Core-deling (fase 6): twee apps op ÉÉN fysieke core, elk met eigen
+	// kooi/partitie/netstack. De EL2-switch (cpu/el2/switch.s) wisselt op de
+	// WFE-yields van de idle-governor; er is geen timer en geen GIC. Slot 2
+	// en 3 delen core 2; core 3 blijft de hele test leeg — het bewijs dat de
+	// tweede app er niet stiekem heen lekt.
+	fmt.Println("share: slot 2 en 3 samen op core 2 (eigen kooi, gedeelde core)...")
+	if err := slots.Start(2, app, 64<<20, 1, map[string]string{"ROLE": "share-a"}, nil, nil); err != nil {
+		fail("share-a", err)
+	}
+	go drainLogs(2, nil)
+	if err := slots.WaitReady(2, 5*time.Second); err != nil {
+		fail("share-a-ready", err)
+	}
+	if err := slots.StartShared(2, 3, app, 64<<20, map[string]string{"ROLE": "share-b"}, nil, nil); err != nil {
+		fail("share-b", err)
+	}
+	go drainLogs(3, nil)
+	if err := slots.WaitReady(3, 5*time.Second); err != nil {
+		fail("share-b-ready", err)
+	}
+	if !slots.CoreIdle(3) {
+		fail("share-leak", fmt.Errorf("core 3 draait terwijl slot 3 op core 2 hoort te wonen"))
+	}
+	// Beide heartbeats moeten LOPEN (niet slechts bestaan): twee metingen.
+	hb2, hb3 := slots.Get(2).Heartbeat, slots.Get(3).Heartbeat
+	time.Sleep(1200 * time.Millisecond)
+	s2, s3 := slots.Get(2), slots.Get(3)
+	fmt.Printf("share: slot 2 hb %d→%d, slot 3 hb %d→%d — één core, twee kooien\n",
+		hb2, s2.Heartbeat, hb3, s3.Heartbeat)
+	if !s2.CoreOn || !s3.CoreOn || s2.Heartbeat <= hb2 || s3.Heartbeat <= hb3 {
+		fail("share-hb", fmt.Errorf("heartbeats lopen niet door op de gedeelde core (slot2 %d→%d, slot3 %d→%d)",
+			hb2, s2.Heartbeat, hb3, s3.Heartbeat))
+	}
+	// Kill één bewoner; de ander moet blijven kloppen (kill-per-context, geen
+	// CPU_OFF van de gedeelde core).
+	fmt.Println("share: stop slot 3 — slot 2 moet blijven draaien...")
+	if err := slots.Stop(3, 3*time.Second); err != nil {
+		fail("share-stop", err)
+	}
+	if slots.Get(3).CoreOn {
+		fail("share-stop", fmt.Errorf("slot 3 meldt zich nog levend na Stop"))
+	}
+	hb2 = slots.Get(2).Heartbeat
+	time.Sleep(800 * time.Millisecond)
+	if s := slots.Get(2); !s.CoreOn || s.Heartbeat <= hb2 {
+		fail("share-survivor", fmt.Errorf("slot 2 stierf mee met zijn buurman (hb %d→%d)", hb2, s.Heartbeat))
+	}
+	// En er past een verse bewoner naast (herbezetting van het gedeelde slot).
+	fmt.Println("share: verse app als nieuwe mede-bewoner op core 2...")
+	if err := slots.StartShared(2, 3, app, 48<<20, map[string]string{"ROLE": "share-c"}, nil, nil); err != nil {
+		fail("share-c", err)
+	}
+	go drainLogs(3, nil)
+	if err := slots.WaitReady(3, 5*time.Second); err != nil {
+		fail("share-c-ready", err)
+	}
+	// Teardown in twee stappen: eerst de mede-bewoner (gedeeld pad), dan de
+	// laatste (klassiek pad: de core parkeert).
+	if err := slots.Stop(3, 3*time.Second); err != nil {
+		fail("share-teardown", err)
+	}
+	if err := slots.Stop(2, 3*time.Second); err != nil {
+		fail("share-teardown", err)
+	}
+	if !slots.CoreIdle(2) {
+		fail("share-teardown", fmt.Errorf("core 2 parkeerde niet na het vertrek van de laatste bewoner"))
+	}
+	fmt.Println("HOPOS_SHARE_OK — twee kooien om één core: yield-switch, kill-één-houd-ander, herbezetting")
+
+	// Sharegroup-pool (fase 6): meerdere kooien op een POOL van hele cores. Vier
+	// apps in sharegroup "web", pool = 2 cores → 2 apps per core, elk een eigen
+	// kooi. Dit is precies wat slotmgr voor de agent doet (PlaceCage kiest de
+	// core, StartShared plaatst); hier direct met de embedded app zodat de demo
+	// self-contained blijft. Kooi 4 ligt bóven de 3 app-cores — bewijst kooi≠core.
+	fmt.Println("sharegroup: 4 apps in pool 'web' (2 hele cores), kooien 1-4...")
+	for slot := 1; slot <= 3; slot++ {
+		if slots.Get(slot).CoreOn {
+			if err := slots.Stop(slot, 3*time.Second); err != nil {
+				fail("sg-stop", err)
+			}
+		}
+	}
+	sgCages := []int{1, 2, 3, 4}
+	sgCores := map[int]bool{}
+	for _, cage := range sgCages {
+		core, err := slots.PlaceCage(cage, "web", 2)
+		if err != nil {
+			fail("sg-place", err)
+		}
+		sgCores[core] = true
+		if err := slots.StartShared(core, cage, app, 64<<20, map[string]string{"ROLE": "web"}, nil, nil); err != nil {
+			fail("sg-start", err)
+		}
+		go drainLogs(cage, nil)
+	}
+	for _, cage := range sgCages {
+		if err := slots.WaitReady(cage, 8*time.Second); err != nil {
+			fail("sg-ready", err)
+		}
+	}
+	if len(sgCores) != 2 {
+		fail("sg-cores", fmt.Errorf("pool 'web' gebruikte %d cores, wil 2", len(sgCores)))
+	}
+	hbs := map[int]uint64{}
+	for _, cage := range sgCages {
+		hbs[cage] = slots.Get(cage).Heartbeat
+	}
+	time.Sleep(1500 * time.Millisecond)
+	for _, cage := range sgCages {
+		s := slots.Get(cage)
+		if !s.CoreOn || s.Heartbeat <= hbs[cage] {
+			fail("sg-hb", fmt.Errorf("kooi %d loopt niet door (hb %d→%d)", cage, hbs[cage], s.Heartbeat))
+		}
+	}
+	fmt.Printf("sharegroup: 4 kooien op %d cores, alle heartbeats lopen door\n", len(sgCores))
+	for _, cage := range sgCages {
+		if err := slots.Stop(cage, 3*time.Second); err != nil {
+			fail("sg-teardown", err)
+		}
+		slots.ReleaseCage(cage)
+	}
+	fmt.Println("HOPOS_SHAREGROUP_OK — pool van hele cores: 4 kooien op 2 cores, elk eigen kooi, gebalanceerd")
+
+	// STRESS (Derek: "maak de server gek, ga helemaal los"): een ZWERM van 24
+	// kooien in één sharegroup op een pool van 3 hele cores, met een kill-storm
+	// ertussen. Bewijst de dichtheid — RAM is de muur, niet cores — en dat de
+	// rotatie/boot-pending een boot-storm op gedeelde cores aankan. Elke kooi is
+	// een eigen stage-2-kooi (48MB); 24 × 48 ≈ 1,15GB past in de QEMU-pool.
+	const swarmN = 24
+	fmt.Printf("swarm: %d kooien in pool 'swarm' op 3 cores stapelen...\n", swarmN)
+	for cage := 1; cage <= swarmN; cage++ {
+		if slots.Get(cage).CoreOn {
+			if err := slots.Stop(cage, 3*time.Second); err != nil {
+				fail("swarm-clear", err)
+			}
+			slots.ReleaseCage(cage)
+		}
+	}
+	swarmCores := map[int]bool{}
+	for cage := 1; cage <= swarmN; cage++ {
+		core, err := slots.PlaceCage(cage, "swarm", 3)
+		if err != nil {
+			fail("swarm-place", fmt.Errorf("kooi %d: %w", cage, err))
+		}
+		swarmCores[core] = true
+		if err := slots.StartShared(core, cage, app, 48<<20, map[string]string{"ROLE": "swarm"}, nil, nil); err != nil {
+			fail("swarm-start", fmt.Errorf("kooi %d: %w", cage, err))
+		}
+		go drainLogs(cage, nil)
+	}
+	for cage := 1; cage <= swarmN; cage++ {
+		if err := slots.WaitReady(cage, 20*time.Second); err != nil {
+			fail("swarm-ready", fmt.Errorf("kooi %d: %w", cage, err))
+		}
+	}
+	if len(swarmCores) != 3 {
+		fail("swarm-cores", fmt.Errorf("zwerm gebruikte %d cores, wil 3", len(swarmCores)))
+	}
+	fmt.Printf("swarm: %d kooien LEVEN op %d cores (elk een eigen stage-2-kooi)\n", swarmN, len(swarmCores))
+
+	// Alle heartbeats moeten doorlopen — ruim window, want 24 apps delen 3 cores.
+	hb := make([]uint64, swarmN+1)
+	for cage := 1; cage <= swarmN; cage++ {
+		hb[cage] = slots.Get(cage).Heartbeat
+	}
+	time.Sleep(3 * time.Second)
+	stuck := 0
+	for cage := 1; cage <= swarmN; cage++ {
+		if slots.Get(cage).Heartbeat <= hb[cage] {
+			stuck++
+		}
+	}
+	if stuck > 0 {
+		fail("swarm-hb", fmt.Errorf("%d/%d kooien met stilstaande heartbeat", stuck, swarmN))
+	}
+	fmt.Printf("swarm: alle %d heartbeats lopen door\n", swarmN)
+
+	// KILL-STORM: sloop de even kooien terwijl de oneven doordraaien.
+	fmt.Println("swarm: kill-storm — 12 even kooien weg, oneven moeten doordraaien...")
+	for cage := 2; cage <= swarmN; cage += 2 {
+		if err := slots.Stop(cage, 3*time.Second); err != nil {
+			fail("swarm-kill", fmt.Errorf("kooi %d: %w", cage, err))
+		}
+		slots.ReleaseCage(cage)
+	}
+	for cage := 1; cage <= swarmN; cage += 2 {
+		hb[cage] = slots.Get(cage).Heartbeat
+	}
+	time.Sleep(2 * time.Second)
+	for cage := 1; cage <= swarmN; cage += 2 {
+		s := slots.Get(cage)
+		if !s.CoreOn || s.Heartbeat <= hb[cage] {
+			fail("swarm-survive", fmt.Errorf("oneven kooi %d stierf mee met de storm (hb %d→%d)", cage, hb[cage], s.Heartbeat))
+		}
+	}
+	fmt.Println("swarm: 12 overlevenden draaien ongestoord door na de kill-storm")
+
+	// Herbevolk de pool: de 12 even kooien terug (joinen de bestaande pool).
+	for cage := 2; cage <= swarmN; cage += 2 {
+		core, err := slots.PlaceCage(cage, "swarm", 3)
+		if err != nil {
+			fail("swarm-replace", fmt.Errorf("kooi %d: %w", cage, err))
+		}
+		if err := slots.StartShared(core, cage, app, 48<<20, map[string]string{"ROLE": "swarm2"}, nil, nil); err != nil {
+			fail("swarm-replace", fmt.Errorf("kooi %d: %w", cage, err))
+		}
+		go drainLogs(cage, nil)
+	}
+	for cage := 2; cage <= swarmN; cage += 2 {
+		if err := slots.WaitReady(cage, 20*time.Second); err != nil {
+			fail("swarm-replace-ready", fmt.Errorf("kooi %d: %w", cage, err))
+		}
+	}
+	fmt.Printf("swarm: alle %d kooien terug na de churn\n", swarmN)
+
+	// Opruimen.
+	for cage := 1; cage <= swarmN; cage++ {
+		if err := slots.Stop(cage, 3*time.Second); err != nil {
+			fail("swarm-teardown", err)
+		}
+		slots.ReleaseCage(cage)
+	}
+	fmt.Printf("HOPOS_SWARM_OK — %d kooien op 3 cores + kill-storm: dichtheid bewezen, RAM is de muur\n", swarmN)
 
 	fmt.Println("HOPOS_SLOTS_OK — slots + MemoryLimit + hop-ABI-logring werken")
 

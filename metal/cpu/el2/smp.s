@@ -50,6 +50,13 @@ TEXT smpEL2Tramp(SB),NOSPLIT|NOFRAME,$0
 	MOVD	0xD0(R1), R7	// layout.CtrlSMPMbox
 	WORD	$0xd51cd047	// msr tpidr_el2, x7
 
+	// SP_EL2 = de sched-scratch van deze core (mailbox + layout.SchedScratch):
+	// ook een SMP-/node-core deelt de vector-thunks, en die parkeren daar
+	// registers vóór welke exception dan ook. Géén TWE hier: een secundaire
+	// SMP-core deelt zijn core met niemand, dus zijn WFE mag lokaal slapen.
+	ADD	$16, R7, R8
+	MOVD	R8, RSP
+
 	// EL2-vectoren (zelfde als de app-cores: een stage-2-fault parkeert/CPU_OFF't).
 	MOVD	0x50(R1), R3	// layout.CtrlVecPA
 	WORD	$0xd51cc003	// msr vbar_el2, x3

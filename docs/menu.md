@@ -11,3 +11,4 @@
 - [Isolation](technical/isolation.md)
 - [Networking](technical/networking.md)
 - [Stateless](technical/stateless.md)
+- [GUI design](gui-ontwerp.md)

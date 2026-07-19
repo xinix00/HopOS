@@ -106,6 +106,26 @@ Most plain-Go services port in minutes — it's a checklist, not a rewrite:
 - **Telemetry for free** — cpu%, memory and heartbeat show up in `hop`
   without agents or exporters.
 
+## Packing apps together — sharegroups
+
+By default each app owns whole cores. To run more apps than you have cores —
+a dozen small services on a 4-core Pi — tag apps you **trust** with a
+sharegroup: they cooperatively share a pool of whole cores, sized with
+`--cpu`. The node spreads them across the pool and switches on idle (no
+timer, no preemption).
+
+```sh
+hop apply --name web    --driver hop --artifact … --tag sharegroup=site --cpu 2048
+hop apply --name worker --driver hop --artifact … --tag sharegroup=site --cpu 2048
+```
+
+Both land in the `site` pool of 2 whole cores (`--cpu 2048` = 2 cores; the
+first job of a group sets the size). Each app keeps its **own memory cage
+and network stack** — only the cores are shared, and only among apps you
+named. The trade is timing isolation *inside* the group (see
+[Isolation](technical/isolation.md)); apps without a sharegroup keep a whole
+core to themselves. Safe by default, share when trusted.
+
 ## What it doesn't get
 
 No syscalls, no containers, no cgo, no other languages. Exit means the job

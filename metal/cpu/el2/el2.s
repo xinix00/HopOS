@@ -36,6 +36,12 @@ TEXT s2tramp(SB),NOSPLIT|NOFRAME,$0
 	MOVD	0xC8(R0), R7	// layout.CtrlMboxPA
 	WORD	$0xd51cd047	// msr tpidr_el2, x7
 
+	// SP_EL2 = de sched-scratch van deze core (mailbox + layout.SchedScratch):
+	// de vector-thunks en de EL2-switch (switch.s) parkeren daar registers
+	// vóórdat ze ook maar iets anders aanraken. Idempotent bij herdispatch.
+	ADD	$16, R7, R8
+	MOVD	R8, RSP
+
 	// VTCR_EL2: 4KB-granule, 32-bit IPA, PS = min(PARange, 44-bit). De pool
 	// ligt op servers vér boven de oude 40-bit/1TB-aanname (Altra: het
 	// bulk-DRAM huist in dezelfde hoge regionen als de 16TB-UART — gemeten
@@ -64,10 +70,14 @@ vtcrps:
 	// voor EL1&0). TSC maakt "een app praat nooit met de firmware" hard: er
 	// bestáát geen legitieme app-SMC (zelfs SMP-bring-up loopt via HOP,
 	// CtrlSMPReq; exit is een HVC) — een SMC uit de kooi is dus per definitie
-	// een ontsnappingspoging en landt als EC=0x17 op de EL2-vectoren
-	// (report + park), net als een stage-2-fault. Geen IMO(4): de hard-kill
-	// loopt niet via een IRQ maar via stage-2-intrekking (HOP nult de map +
-	// TLBI → deze core faultt synchroon naar de vectoren).
+	// een ontsnappingspoging en landt als EC=0x17 op de EL2-vectoren, net als
+	// een stage-2-fault. GEEN TWE: de coöperatieve core-deling (switch.s)
+	// wisselt op een EXPLICIETE HVC-yield van de idle-governor, niet op een
+	// getrapte WFE — dat laatste is op QEMU-TCG een no-op en dus onbewijsbaar,
+	// en een WFE-trap-heisenbug op ijzer. WFE blijft puur power (dedicated
+	// core slaapt lokaal). Geen IMO(4): de hard-kill loopt niet via een IRQ
+	// maar via stage-2-intrekking (HOP nult de map + TLBI → deze core faultt
+	// synchroon naar de vectoren).
 	MOVD	$1<<31, R4
 	ORR	$1<<19, R4, R4
 	ORR	$1, R4, R4

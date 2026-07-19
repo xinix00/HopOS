@@ -6,11 +6,19 @@ The cage is hardware, not policy.
   slot its own second-stage page table with its own VMID. The app can name
   exactly its own partition — the node, the neighbours and the devices are
   not unmapped, they are *unnameable*.
-- **Whole cores.** An app never shares a core with anyone — not even in
-  time. No context switches, no SMT siblings: the classic cross-domain
-  side channels (Meltdown/Spectre/MDS-style) lose their vector instead of
-  being mitigated. And there is no mitigations tax — apps run at the
-  silicon's spec clock.
+- **Whole cores, by default.** By default an app never shares a core with
+  anyone — not even in time. No context switches, no SMT siblings: the
+  classic cross-domain side channels (Meltdown/Spectre/MDS-style) lose their
+  vector instead of being mitigated, and there is no mitigations tax — apps
+  run at the silicon's spec clock. **Share when trusted:** a *sharegroup*
+  packs apps you name onto a shared pool of whole cores, cooperatively (they
+  yield on idle — no timer, no preemption). This never happens to you
+  involuntarily — an attacker can't land on your core, because the only apps
+  sharing it are ones you grouped together. Inside such a group the timing
+  side channels exist between cage-mates, as on any shared core, but they
+  already trust each other; the memory cage below never softens, and ungrouped
+  apps keep the full guarantee. Cores are the physical headroom; sharegroups
+  let you run more apps than cores when the isolation trade is yours to make.
 - **Zero syscalls, zero MMIO.** The entire ABI is a control page and two
   rings. Devices are programmed only by the node; an app cannot aim DMA.
   Firmware calls (SMC) from a cage trap at EL2 — there is no legitimate
@@ -36,4 +44,6 @@ slots 1-6, 8-126: unaffected, still serving
 Honest limits: shared last-level cache and DRAM channels exist on any
 hardware; the node itself is trusted (that's what the small TCB is for);
 the Go runtime is the app's kernel — a bug there stays inside that app's
-cage.
+cage; and apps in a sharegroup share their pool's cores in time (opt-in),
+so the timing side channels apply between cage-mates — the memory and
+network cage still holds, and a runaway member starves only its own group.

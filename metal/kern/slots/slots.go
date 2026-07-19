@@ -178,8 +178,12 @@ func prepStart(i int, memLimit uint64, cores int, env map[string]string, mounts 
 	if cores < 1 {
 		cores = 1
 	}
-	if i+cores-1 > layout.MaxSlots {
-		return nil, nil, 0, fmt.Errorf("SMP: %d cores vanaf slot %d overschrijden MaxSlots %d", cores, i, layout.MaxSlots)
+	// SMP-apps (cores>1) zijn dedicated: ze pakken cores i..i+cores-1, dus die
+	// moeten binnen de fysieke app-cores vallen. Een cores=1-app mag op elke
+	// kooi (die kan een gedeelde core zijn, ver boven NumAppCores) — checkSlot
+	// bewaakt daar de kooi-grens (MaxSlots).
+	if cores > 1 && i+cores-1 > layout.NumAppCores() {
+		return nil, nil, 0, fmt.Errorf("SMP: %d cores vanaf slot %d overschrijden de %d app-cores", cores, i, layout.NumAppCores())
 	}
 	// DNS-resolver van de node meegeven, zodat een app die naar buiten praat
 	// (cloudflared, servers) namen kan opzoeken — de query loopt als gewoon
@@ -270,9 +274,10 @@ func (s *servicer) run() {
 		s.dispatchSMP()
 		typ, n, ok := out.ReadInto(buf)
 		if !ok {
-			// Geen outbox-werk: stoppen zodra de core parkeerde (niet meer
-			// draait) of de ring corrupt is.
-			if out.Corrupt() || !coreRunning(s.slot) {
+			// Geen outbox-werk: stoppen zodra het SLOT niet meer leeft (op
+			// een gedeelde core zegt de core-mailbox niets over déze
+			// bewoner; de ctx-staat dekt beide werelden) of de ring corrupt is.
+			if out.Corrupt() || !ctxLive(ctxState(s.slot)) {
 				return
 			}
 			select {
@@ -322,11 +327,11 @@ func (s *servicer) dispatchSMP() {
 	if c == 0 {
 		return
 	}
-	// Vertrouwde core-telling uit HOP-geheugen (slotCores), NOOIT ctrlRead
+	// Vertrouwde core-telling uit HOP-geheugen (smpCores), NOOIT ctrlRead
 	// (CtrlCores) — die page is app-schrijfbaar; een opgehoogde CtrlCores zou
 	// anders een app buurcores in zijn kooi laten trekken. Zie smp.go.
 	cores := coreCount(s.slot)
-	if c <= s.slot || c > s.slot+cores-1 || c > layout.MaxSlots {
+	if c <= s.slot || c > s.slot+cores-1 || c > layout.NumAppCores() {
 		// Buiten het toegewezen core-bereik: weiger (de app hoort dit niet te
 		// vragen). Verzoek intrekken zodat de app niet eeuwig wacht.
 		fmt.Printf("HOPOS_SMP_REJECT slot %d: core %d outside [%d,%d]\n", s.slot, c, s.slot+1, s.slot+cores-1)
@@ -483,6 +488,13 @@ func (d devReaderAt) ReadAt(p []byte, off int64) (int, error) {
 // task ziet zijn eigen lege root plus de gemounte shared dirs. ports (HOP's
 // Task.Ports) worden na de start gepubliceerd (stateloze DNAT bij de switch).
 func Start(i int, image []byte, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int) error {
+	return startImage(i, image, memLimit, cores, env, mounts, ports, false)
+}
+
+// startImage is het gedeelde startpad van Start en StartShared (share.go).
+// shared verlegt één wacht: niet "de cores van het slot zijn geparkeerd/cold"
+// (de gedeelde core drááit meestal juist), maar "dít slot leeft nergens".
+func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int, shared bool) error {
 	imgSize := int64(len(image))
 	if imgSize <= 0 {
 		return fmt.Errorf("Start: lege image")
@@ -508,7 +520,11 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 	// De EL2-vectoren + parkeerlus + mailboxen moeten klaar zijn vóór de
 	// eerste dispatch (mailbox cold-detectie leest een geveegde mailbox).
 	vectorsOnce.Do(stage2.InitVectors)
-	if err := coresFree(i, cores, "not parked/cold"); err != nil {
+	if shared {
+		if st := ctxState(i); ctxLive(st) {
+			return fmt.Errorf("slot %d still live (ctx-state %d) — stop it before StartShared", i, st)
+		}
+	} else if err := coresFree(i, cores, "not parked/cold"); err != nil {
 		return err
 	}
 
@@ -571,6 +587,20 @@ func StartLoader(i int, memLimit uint64, env map[string]string) error {
 		return fmt.Errorf("apploader niet ingebakken of uitpakken faalde (bouw de node met -tags embedloader)")
 	}
 	return Start(i, img, memLimit, 1, env, nil, nil)
+}
+
+// StartLoaderOn is StartLoader op een door HOPOS gekozen core (coöperatieve
+// core-deling): de apploader draait als (mede)bewoner van `core` i.p.v. op
+// core=slot. slotmgr kiest de core met de pool-allocator (PlaceCage) en de kooi
+// erft hem via StartShared (hostCore), zodat fase 2 (StartStaged) en Stop
+// dezelfde core hergebruiken. Bij één bewoner op een verse core gedraagt dit
+// zich exact als StartLoader.
+func StartLoaderOn(core, i int, memLimit uint64, env map[string]string) error {
+	img := apploaderblob.Loader()
+	if len(img) == 0 {
+		return fmt.Errorf("apploader niet ingebakken of uitpakken faalde (bouw de node met -tags embedloader)")
+	}
+	return StartShared(core, i, img, memLimit, env, nil, nil)
 }
 
 // appRAMSize is het deel van de partitie dat de app als RAM ziet: de bovenste
@@ -713,18 +743,23 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	if err != nil {
 		return fmt.Errorf("stage-2 slot %d: %w", i, err)
 	}
+	// De fysieke core van dit slot: het klassieke model is slot = core, maar
+	// een StartShared-slot woont op de core die HOP koos (coreOf, share.go).
+	// De mailbox/het sched-blok is een CORE-ding: TPIDR_EL2 en de parkeerlus
+	// horen bij de core waar dit slot daadwerkelijk draait.
+	core := coreOf(i)
 	ctrlWrite(i, layout.CtrlEntry, entry)
 	ctrlWrite(i, layout.CtrlS2Table, l1)
 	ctrlWrite(i, layout.CtrlVecPA, uint64(layout.VecBasePA()))
 	ctrlWrite(i, layout.CtrlSlot, uint64(i))
-	ctrlWrite(i, layout.CtrlMboxPA, uint64(layout.ParkMboxPA(i))) // → TPIDR_EL2
+	ctrlWrite(i, layout.CtrlMboxPA, uint64(layout.ParkMboxPA(core))) // → TPIDR_EL2
 	// Het aantal cores op de control-page; de app-OS-laag leest 'm en vraagt bij
 	// cores > 1 de extra cores lazy op (CtrlSMPReq → HOP dispatcht). Altijd
 	// zetten (ook 1 = gewone app), zodat de app-kant niet hoeft te weten of dit
 	// SMP is. LET OP: dit is HOP → app-informatie; HOP vertrouwt de readback
 	// NOOIT (de app kan de page herschrijven). De vertrouwde bron voor HOP's
-	// eigen beslissingen is slotCores, hier uit het al-gevalideerde `cores` gezet.
-	slotCores[i] = cores
+	// eigen beslissingen is smpCores, hier uit het al-gevalideerde `cores` gezet.
+	smpCores[i] = cores
 	ctrlWrite(i, layout.CtrlCores, uint64(cores))
 	if cores > 1 {
 		// Fysiek adres van de EL2 SMP-trampoline publiceren (op ditzelfde slot
@@ -747,10 +782,23 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 		}
 	}
 
-	// Startschot: cold → PSCI CPU_ON (eerste bring-up), geparkeerd → mailbox +
-	// SEV. Ctx = de fysieke control-page; de trampoline leest er alles van.
-	if err := dispatchCore(i, board.Current().S2TrampPC(), uint64(layout.CtrlPagePA(i))); err != nil {
-		return err
+	// Startschot, drie routes. Ctx = de fysieke control-page; de trampoline
+	// leest er alles van, dus alle drie eindigen in exact dezelfde boot:
+	//   - core draait al (gedeelde core, bewoner erbij): boot-pending in het
+	//     ctx-blok — de EL2-rotatie boot hem bij de eerstvolgende yield;
+	//   - geparkeerd: bewonerslijst = [dit slot], mailbox + SEV;
+	//   - cold: idem, maar eenmalig via PSCI CPU_ON.
+	tramp := board.Current().S2TrampPC()
+	ctx := uint64(layout.CtrlPagePA(i))
+	if coreRunning(core) {
+		if err := bootPendingDispatch(core, i, tramp, ctx); err != nil {
+			return err
+		}
+	} else {
+		residentReset(core, i)
+		if err := dispatchCore(core, tramp, ctx); err != nil {
+			return err
+		}
 	}
 
 	go registerServicer(i, root, mtab).run()
@@ -878,15 +926,39 @@ func Stop(i int, timeout time.Duration) error {
 	defer lifecycleWindow()()
 	ctrlWrite(i, layout.CtrlKill, 1)
 	dev.MB()
-	// Coöperatieve kans voor de app (de kill-watcher parkeert zijn eigen core).
-	waitStopped(i, timeout)
+	// Gedeelde core (er leeft nog een andere bewoner op de core van dit
+	// slot): "core geparkeerd" bestaat daar niet — de buren draaien door. De
+	// ctx-staat van dít slot is de waarheid: de coöperatieve exit (HVC) of de
+	// fault na een Revoke zet hem op dead (switch.s), waarna de rotatie
+	// gewoon verdergaat met de rest.
+	if slotShares(i) {
+		var stopErr error
+		if !waitCtxDead(i, timeout) {
+			stage2.Revoke(i)
+			// De intrekking raakt een gesavede bewoner pas bij zijn
+			// eerstvolgende hervatting (≤ een paar yield-tikken): dan faultt
+			// hij op de genulde tabel en meldt de switch hem dood.
+			if !waitCtxDead(i, time.Second) {
+				stopErr = fmt.Errorf("slot %d: not dead after stage-2 revocation (shared core %d)", i, coreOf(i))
+			}
+		}
+		releaseSlot(i)
+		return stopErr
+	}
+	// Coöperatieve kans voor de app (de kill-watcher parkeert zijn eigen
+	// core). Ook een niet-delend slot kan op een vreemde core wonen
+	// (StartShared als eerste bewoner), dus alles hier is core-gebaseerd.
+	core := coreOf(i)
+	waitStopped(core, timeout)
 	// Draait er nog iets? Hoeveel cores de app heeft komt uit HOP's eigen
-	// slotCores (door Start gezet) — NIET uit de app-schrijfbare CtrlCores: een
+	// smpCores (door Start gezet) — NIET uit de app-schrijfbare CtrlCores: een
 	// verlaagde CtrlCores zou anders levende secundaire cores voor deze scan
 	// verbergen en releaseSlot een nog-draaiende partitie laten vrijgeven.
+	// (SMP-apps zijn altijd dedicated met slot = core; hun secundaire cores
+	// zijn dan core+1..core+n-1, exact het oude bereik.)
 	n := coreCount(i)
 	stillOn := false
-	for c := i; c < i+n; c++ {
+	for c := core; c < core+n; c++ {
 		if coreRunning(c) {
 			stillOn = true
 			break
@@ -896,7 +968,7 @@ func Stop(i int, timeout time.Duration) error {
 	if stillOn {
 		// Eén intrekking velt álle cores van het slot (gedeelde tabel/VMID).
 		stage2.Revoke(i)
-		for c := i; c < i+n; c++ {
+		for c := core; c < core+n; c++ {
 			if !coreRunning(c) {
 				continue
 			}
@@ -917,7 +989,16 @@ func releaseSlot(i int) {
 	hopswitch.UnpublishSlot(i)
 	partRelease(i)
 	if i >= 1 && i <= layout.MaxSlots {
-		slotCores[i] = 0 // vertrouwde core-telling wissen (zie smp.go)
+		// Bewoners-boekhouding van de core-deling: uit de lijst van zijn
+		// core, ctx-staat op Empty (het slot is écht weg — de rotatie slaat
+		// gaten en Empty over), en de slot→core-koppeling los.
+		residentRemove(coreOf(i), i)
+		dev.Write64(ctxPA(i)+layout.CtxState, layout.CtxEmpty)
+		dev.MB()
+		if hostCore != nil {
+			hostCore[i] = 0
+		}
+		smpCores[i] = 0 // vertrouwde core-telling wissen (zie smp.go)
 	}
 }
 
@@ -927,11 +1008,13 @@ func Get(i int) Status {
 		return Status{}
 	}
 	return Status{
-		// CoreOn = de app draait (mailbox word0 draagt de ctx). Een geparkeerde
-		// (gestopte) of cold core telt als niet-aan. Dit is nu de mailbox, niet
-		// PSCI AFFINITY_INFO: geparkeerde cores staan PSCI-gezien nog "on" (ze
-		// deden nooit CPU_OFF), maar draaien geen app meer.
-		CoreOn:    coreRunning(i),
+		// CoreOn = dít slot leeft, volgens zijn ctx-staat (het switch-
+		// contextblok): boot-pending, gesaved of draaiend. Op een gedeelde
+		// core zegt de core-mailbox niets over één bewoner; dedicated slots
+		// lopen via exact dezelfde boekhouding (residentReset zet Running
+		// vóór het startschot, de exit/fault-paden van switch.s zetten Dead,
+		// releaseSlot zet Empty). Wie een CORE wil toetsen: CoreIdle.
+		CoreOn:    ctxLive(ctxState(i)),
 		App:       ctrlRead(i, layout.CtrlStatus),
 		ExitCode:  ctrlRead(i, layout.CtrlExitCode),
 		Heartbeat: ctrlRead(i, layout.CtrlHeartbeat),
@@ -1003,7 +1086,7 @@ func NumSlots() int {
 		// halen), zodat de diagnose hieronder het verschil kan benoemen.
 		probed := 0
 		truncated := false
-		for i := 1; i <= layout.MaxSlots; i++ {
+		for i := 1; i <= layout.NumAppCores(); i++ {
 			switch board.Current().AffinityInfo(uint64(i)) {
 			case board.PowerOn, board.PowerOff, board.PowerOnPending:
 				probed = i // geldige core: schuif de grens op
@@ -1026,8 +1109,8 @@ func NumSlots() int {
 		}
 		switch {
 		case hint > 0 && probed < hint:
-			if hint > layout.MaxSlots {
-				hint = layout.MaxSlots // het layout reserveert niet meer dan dit
+			if hint > layout.NumAppCores() {
+				hint = layout.NumAppCores() // niet meer dan de fysieke app-cores
 			}
 			fmt.Printf("HOPOS_NUMSLOTS_HINT: PSCI telde %d app-core(s) (getrunceerd=%v), board declareert er %d — de board-hint is leidend\n",
 				probed, truncated, hint)
@@ -1063,10 +1146,16 @@ func SetHopCores(n int) {
 // 'm toe zodat slots.* zelf onveranderd op slot=core=layout kan blijven werken.
 func HopReserved() int { return hopReserved }
 
-// AppSlotCount is het aantal slots dat HOP mag gebruiken: de ontdekte app-cores
-// minus de voor de HOP-runtime gereserveerde. Dit voedt slotmgr.NumSlots.
+// AppSlotCount is het aantal KOOIEN dat HOP mag gebruiken. Sinds de core-deling
+// is een kooi (eigen partitie/stage-2/netstack) losgekoppeld van een core:
+// sharegroups stapelen meerdere kooien op één core, dus er mogen méér kooien
+// dan cores zijn. Daarom de kooi-cap (MaxSlots), niet de core-telling. De échte
+// muren zijn RAM (partmem — door HOP op geheugen bewaakt) en de vrije cores
+// (pool.go — door HOPOS bij plaatsing bewaakt); die falen luid als het op is.
+// De NumSlots()-aanroep triggert de eenmalige PSCI-probe + control-page-veeg.
 func AppSlotCount() int {
-	if c := NumSlots() - hopReserved; c > 0 {
+	NumSlots() // side-effect: PSCI-probe + verse-DRAM-veeg (numSlotsOnce)
+	if c := layout.MaxSlots - hopReserved; c > 0 {
 		return c
 	}
 	return 0

@@ -72,12 +72,14 @@ func init() {
 		return
 	}
 
-	// Slots volgen de ontdekte cores — geen kunstmatige limiet, de fysieke
-	// grens van dit ijzer (127 op de Altra, 3 op QEMU -smp 4). madtCPUs is
-	// door hwinit1 al gevuld (die draait vóór package-init). SetMaxSlots
-	// klemt op layout.SlotCap, waarvoor de carve fysiek is gereserveerd.
+	// De app-cores volgen het ijzer — geen kunstmatige limiet, de fysieke grens
+	// (127 op de Altra, 3 op QEMU -smp 4). madtCPUs is door hwinit1 al gevuld
+	// (die draait vóór package-init). SetAppCores klemt op layout.SlotCap,
+	// waarvoor de carve fysiek is gereserveerd. De kooi-cap (MaxSlots) blijft
+	// SlotCap: meerdere kooien mogen één core delen (sharegroup), dus er mogen
+	// méér kooien dan cores zijn.
 	if n := len(madtCPUs) - 1; n > 0 {
-		layout.SetMaxSlots(n)
+		layout.SetAppCores(n)
 	}
 	// De slot-pool ligt BUITEN de stub-claim: eerst tegen de UEFI-memory-map
 	// bewijzen wat er werkelijk vrij is (review #6 — het comment beloofde

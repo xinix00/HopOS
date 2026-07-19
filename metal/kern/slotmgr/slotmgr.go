@@ -39,8 +39,24 @@ func phys(slot int) int { return slot + slots.HopReserved() }
 func (Manager) NumSlots() int             { return slots.AppSlotCount() }
 func (Manager) CoreClass(slot int) string { return slots.CoreClass(phys(slot)) }
 
-func (Manager) StartLoader(slot int, memLimit uint64, env map[string]string) error {
-	return slots.StartLoader(phys(slot), memLimit, env)
+// StartLoader plaatst kooi + apploader. De sharegroup-plaatsing zit hier, in de
+// adapter: HOP geeft de sharegroup-naam (uit de job-tag) en de poolgrootte
+// (uit CPUShares) door — geen env-hack, het is een placement-directive net als
+// core-class. PlaceCage kiest de fysieke core (dedicated bij lege sharegroup,
+// anders de minst-belaste pool-core); de kooi erft die core via StartLoaderOn →
+// StartShared, zodat StartStaged en Stop 'm hergebruiken. Faalt de start, dan
+// geeft ReleaseCage de core meteen terug.
+func (Manager) StartLoader(slot int, memLimit uint64, sharegroup string, poolCores int, env map[string]string) error {
+	cage := phys(slot)
+	core, err := slots.PlaceCage(cage, sharegroup, poolCores)
+	if err != nil {
+		return err
+	}
+	if err := slots.StartLoaderOn(core, cage, memLimit, env); err != nil {
+		slots.ReleaseCage(cage)
+		return err
+	}
+	return nil
 }
 
 func (Manager) StartStaged(slot int, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int) error {
@@ -48,7 +64,17 @@ func (Manager) StartStaged(slot int, memLimit uint64, cores int, env map[string]
 }
 
 func (Manager) Stop(slot int, timeout time.Duration) error {
-	return slots.Stop(phys(slot), timeout)
+	if err := slots.Stop(phys(slot), timeout); err != nil {
+		// NIET releasen bij een Stop-fout ("not dead after revocation"): de kooi
+		// kan nog een zombie-bewoner in de rotatielijst hebben (na een revoke
+		// sterft die pas bij zijn eerstvolgende hervatting — en een compute-buur
+		// die nooit yieldt houdt dat venster open). De pool-core opnieuw uitdelen
+		// terwijl daar nog leven zit, is een isolatierisico. Fail closed: houd de
+		// core gereserveerd; reconcile (of een volgende geslaagde Stop) ruimt op.
+		return err
+	}
+	slots.ReleaseCage(phys(slot)) // pas na een schone Stop: core/pool-boekhouding vrij
+	return nil
 }
 
 func (Manager) Status(slot int) hopos.SlotStatus {

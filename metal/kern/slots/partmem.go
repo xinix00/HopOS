@@ -37,7 +37,8 @@ var (
 // de init-volgorde tussen dit pakket en het board-pakket is niet gegarandeerd.
 func poolInit() {
 	partOf = make([]region, layout.MaxSlots+1)
-	slotCores = make([]int, layout.MaxSlots+1)
+	smpCores = make([]int, layout.MaxSlots+1)
+	hostCore = make([]int, layout.MaxSlots+1) // slot→core (share.go)
 	for _, r := range layout.Pool() {
 		partFree = append(partFree, region{r.Base, r.Size})
 	}
@@ -83,7 +84,7 @@ func partAlloc(i int, size uint64) (uint64, error) {
 // No-op als slot i niets gealloceerd had (al vrij). partOnce.Do óók hier:
 // een Stop vóór de allereerste Start (defensieve cleanup/reconcile) bereikt
 // releaseLocked anders met partOf==nil → nil-deref-panic; en releaseSlot
-// schrijft ná deze aanroep slotCores[i], dat poolInit tegelijk alloceert.
+// schrijft ná deze aanroep smpCores[i], dat poolInit tegelijk alloceert.
 func partRelease(i int) {
 	partOnce.Do(poolInit)
 	partMu.Lock()
