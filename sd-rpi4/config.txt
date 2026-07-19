@@ -1,4 +1,4 @@
-# HopOS: de echte HOP-agent (fase P2) — Raspberry Pi 4 (zie docs/rpi4.md)
+# HopOS: de echte HOP-agent (fase P2) — Raspberry Pi 4 (zie docs/archief/rpi4.md)
 arm_64bit=1
 kernel=kernel8.img
 device_tree_address=0x0f000000

@@ -37,7 +37,7 @@ func init() {
 	// main parseert ze. Beheer = het tekstbestandje bewerken, geen rebuild.
 	// (Node-identiteit zonder hopos.node=: de main-default; een SMBIOS-
 	// serial-terugval kan later via nodeSerial.)
-	bootParam = uefi.BootConfig
+	bootParamAll = uefi.BootConfigAll
 
 	// Board-nawerk (het Pi-equivalent is StartDVFS): de temperatuur-
 	// telemetrie uit de SMpro — de klok zelf is op servers firmware-domein.

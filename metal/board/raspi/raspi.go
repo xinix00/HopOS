@@ -121,6 +121,24 @@ func BootParam(dtb uintptr, key string) string {
 	return ""
 }
 
+// BootParamAll geeft ALLE waarden van een herhaalde sleutel uit de cmdline, in
+// volgorde — voor lijst-config zoals het init-manifest (`hopos.init[]={...}`).
+// Zie BootParam voor de enkele; elke waarde is één token, dus geen spaties
+// (compacte JSON). cmdline.txt is één regel, dus alle entries erachter.
+func BootParamAll(dtb uintptr, key string) []string {
+	args, ok := fdt.Bootargs(dtb)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, tok := range strings.Fields(args) {
+		if v, found := strings.CutPrefix(tok, key+"="); found {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // SerialSuffix geeft de laatste 8 hexcijfers van het board-serial uit de
 // DTB (/serial-number) — de stabiele node-identiteit (node-ID, MAC). Leeg
 // bij een onleesbaar serial; de aanroeper kiest dan zijn terugval.

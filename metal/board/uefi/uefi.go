@@ -133,20 +133,25 @@ var (
 	cfgLen uint64
 )
 
-// BootConfig geeft de waarde van key= uit hopos.cfg ("" = niet gezet). Tokens
-// zijn whitespace-gescheiden key=value — regels, spaties en tabs mogen door
-// elkaar; zelfde sleutelconventie als de Pi-cmdline (hopos.cores, hopos.node).
-func BootConfig(key string) string {
+// BootConfigAll geeft ALLE key=-waarden uit hopos.cfg, in volgorde ("" = geen).
+// Tokens zijn whitespace-gescheiden key=value — regels, spaties en tabs mogen
+// door elkaar; zelfde sleutelconventie als de Pi-cmdline (hopos.cores,
+// hopos.node). Enkelvoudige config heeft één waarde, een herhaalde sleutel
+// (hopos.init[]={...}) meerdere. Elke waarde is één token, dus géén spaties
+// erin (de tokenizer splitst op whitespace): compacte JSON. cmd/hopos'
+// bootParam pakt de eerste voor enkelvoudige sleutels.
+func BootConfigAll(key string) []string {
 	n := cfgLen
 	if n > uint64(len(cfgBuf)) {
 		n = uint64(len(cfgBuf)) // tegen een kapotte asm-lengte (contract-schending)
 	}
+	var out []string
 	for _, tok := range strings.Fields(string(cfgBuf[:n])) {
 		if v, ok := strings.CutPrefix(tok, key+"="); ok {
-			return v
+			out = append(out, v)
 		}
 	}
-	return ""
+	return out
 }
 
 // GOPFramebuffer geeft het firmware-beeld dat de stub bewaarde — de

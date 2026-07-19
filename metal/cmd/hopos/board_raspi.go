@@ -40,7 +40,7 @@ func init() {
 		raspi.WatchdogStart(12 * time.Second)
 	}
 
-	bootParam = func(key string) string { return raspi.BootParam(dtb, key) }
+	bootParamAll = func(key string) []string { return raspi.BootParamAll(dtb, key) }
 
 	// Node-identiteit-terugval (P2b/C5): het board-serial — twee nodes op één
 	// LAN mogen nooit allebei "hopos-1" heten.

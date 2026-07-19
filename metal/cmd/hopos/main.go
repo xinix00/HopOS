@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"runtime"
@@ -71,13 +72,24 @@ func screenStatus() {
 // zijn init) — de Pi's starten er het klokbeleid mee.
 var boardExtra func()
 
-// bootParam leest één sleutel uit de platform-config — HopOS leest die, want
-// HOP-userspace kan er niet bij: op de Pi's is dat cmdline.txt (via de DTB),
-// op UEFI-boards hopos.cfg op de stick (door de stub via de firmware-FAT
-// gelezen). Dezelfde sleutels op beide platforms: hopos.cores, hopos.node,
-// hopos.cluster, hopos.apikey, hopos.s3.* — configureren = het tekstbestandje
-// bewerken, geen rebuild. "" = niet gezet → de default hieronder in main.
-var bootParam = func(key string) string { return "" }
+// bootParamAll leest de platform-config — HopOS leest die, want HOP-userspace
+// kan er niet bij: op de Pi's cmdline.txt (via de DTB), op UEFI-boards
+// hopos.cfg op de stick (door de stub via de firmware-FAT gelezen). Eén hook,
+// per board gezet (board_*.go); default leeg (QEMU-embed heeft geen
+// platform-config). Geeft ÁLLE waarden van een sleutel terug: enkelvoudige
+// config (hopos.cores, hopos.node, hopos.s3.*) heeft er één, een herhaalde
+// sleutel (hopos.init[]={...} per regel) meerdere. Configureren = het
+// tekstbestandje bewerken, geen rebuild.
+var bootParamAll = func(key string) []string { return nil }
+
+// bootParam is de enkele-waarde-variant: de eerste hit van bootParamAll ("" =
+// niet gezet → de default in main). De meeste sleutels zijn enkelvoudig.
+func bootParam(key string) string {
+	if v := bootParamAll(key); len(v) > 0 {
+		return v[0]
+	}
+	return ""
+}
 
 // nodeSerial: board-terugval voor de node-identiteit als hopos.node= niet
 // gezet is (Pi: "hopos-<serial>"). "" = geen terugval → de main-default.
@@ -296,6 +308,23 @@ func main() {
 		cfg.Cluster.Lock.Type = "s3"
 		fmt.Printf("hop: cluster %q: S3 committed state on %s/%s — jobs survive reboot\n",
 			cfg.Cluster.Name, s3.Endpoint, s3.Bucket)
+	}
+
+	// Init-manifest van het boot-medium: elke `hopos.init[]={...}` is één job
+	// als compacte JSON (kopieerbaar uit `hop apply`/de API). agentboot seedt ze
+	// op een clean boot — zo komt een standalone node ZONDER S3 altijd met zijn
+	// baseline op (Derek, 19-07). Ongeldige JSON overslaan met een luide regel;
+	// de schema-validatie (verplichte naam e.d.) doet agentboot via DecodeInitJobs.
+	for _, spec := range bootParamAll("hopos.init[]") {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(spec), &m); err != nil {
+			fmt.Printf("hop: hopos.init[] skipped — invalid JSON (%v): %s\n", err, spec)
+			continue
+		}
+		cfg.Cluster.InitJobs = append(cfg.Cluster.InitJobs, m)
+	}
+	if n := len(cfg.Cluster.InitJobs); n > 0 {
+		fmt.Printf("hop: %d init job(s) from boot config — seeded on a clean boot\n", n)
 	}
 
 	// Geheugen. HOP kent per job de MemoryLimit en overspawnt nooit — dus het
