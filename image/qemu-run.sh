@@ -38,11 +38,15 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 	"$TAMAGO" build -tags linkcpuinit -trimpath \
 	-ldflags "-w -T 0x50010000 -R 0x1000" -o "$APP" ./app/appspike
 
-# 2. De kern + het poort-plan van de gekozen modus.
+# 2. De kern + het poort-plan van de gekozen modus. Twee smaken: kaal
+#    (headless) en gui (metal/gui + fb-grant). Default gui; GUI=0 bouwt de
+#    kale smaak. (Zelfde knop in alle imagescripts.)
+GUITAG=""
+[ "${GUI:-1}" = 1 ] && GUITAG=" gui"
 case "$MODE" in
 demo)
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-		"$TAMAGO" build -tags "qemuvirt linkcpuinit" -trimpath \
+		"$TAMAGO" build -tags "qemuvirt linkcpuinit$GUITAG" -trimpath \
 		-ldflags "-s -w -T 0x40010000 -R 0x1000" -o out/hopos-virt.elf ./cmd/hopos-embed
 	KERNEL=out/hopos-virt.elf
 	FWD="hostfwd=tcp:127.0.0.1:${HOPPORT:-8080}-10.0.2.15:80,hostfwd=tcp:127.0.0.1:${PORTPUB:-18080}-10.0.2.15:8080"
@@ -50,8 +54,14 @@ demo)
 	echo "HOP-kern HTTP: curl http://127.0.0.1:${HOPPORT:-8080}/ · poort-publicatie: nc 127.0.0.1 ${PORTPUB:-18080}" >&2
 	;;
 agent)
+	# De apploader gecomprimeerd op de go:embed-plek (zelfde recept als
+	# uefi-run.sh): zonder embedloader start de agent geen enkele job.
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags linkcpuinit -trimpath \
+		-ldflags "-w -T 0x50010000 -R 0x1000" -o kern/apploaderblob/apploader.elf ./app/apploader
+	gzip -9 -n -f kern/apploaderblob/apploader.elf
+	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
+		"$TAMAGO" build -tags "linkcpuinit embedloader$GUITAG" -trimpath \
 		-ldflags "-s -w -T 0x40010000 -R 0x1000" -o out/hopos-agent.elf ./cmd/hopos
 	KERNEL=out/hopos-agent.elf
 	FWD="hostfwd=tcp:127.0.0.1:${AGENTPORT:-8080}-10.0.2.15:8080,hostfwd=tcp:127.0.0.1:${LEADERPORT:-9080}-10.0.2.15:9080,hostfwd=tcp:127.0.0.1:${PORTPUB:-18080}-10.0.2.15:18080"

@@ -51,6 +51,12 @@ func tcpBackoff() lneto.BackoffStrategy {
 // geeft het eigen IP terug. Zelfde contract als de gVisor-variant: alle
 // config komt uit het slotnummer via het gedeelde net-plan (layout).
 //
+// Nog zonder nette-dood-hook (de gVisor-variant abort bij de kill zijn
+// verbindingen zodat peers direct een RST zien): xnet.StackAsync heeft geen
+// close-all-API, alleen Reset. Peers van een lneto-app vallen dus terug op
+// hun eigen read-deadline (de SURF-display: 30s). Toevoegen zodra lneto het
+// kan — of zodra deze backend default wordt.
+//
 // De wiring spiegelt go-net's lneto.go, maar dan zonder go-net: stack
 // resetten, StackGo in net.SocketFunc hangen, en twee pomp-lussen over de
 // frame-ringen (RX ring→stack, TX stack→ring). De TX-lus pollt EgressEthernet

@@ -40,9 +40,13 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 gzip -9 -n -f kern/apploaderblob/apploader.elf
 
 # 2. De agent-kern: cmd/hopos met het rpi5-board (build-tag kiest board_rpi5.go)
-#    + de ingebakken apploader (embedloader).
+#    + de ingebakken apploader (embedloader). Twee smaken per board: kaal
+#    (headless) en gui (metal/gui: HVS-dumptool + :9091-debug + fb-grant).
+#    Default gui; GUI=0 bouwt de kale smaak. (Zelfde knop in alle imagescripts.)
+GUITAG=""
+[ "${GUI:-1}" = 1 ] && GUITAG=" gui"
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-	"$TAMAGO" build -tags "rpi5 linkcpuinit embedloader" -trimpath \
+	"$TAMAGO" build -tags "rpi5 linkcpuinit embedloader$GUITAG" -trimpath \
 	-ldflags "-s -w -T 0x90000 -R 0x1000" -o out/agent5.elf ./cmd/hopos
 
 # 3. ELF → raw image (Circle-recept, mkkernel).
@@ -66,6 +70,17 @@ arm_freq_min=800
 # NIET, arm_freq ís het max — gemeten 2026-07-11). dvfs volgt dit firmware-
 # max vanzelf via de mailbox: 2400MHz liep zonder fan binnen minuten naar 84°C.
 arm_freq=1500
+# 32-bpp framebuffer BEWUST UIT (19-07): alle drie de node-freezes van die
+# dag vielen op 32-bpp-boots, de lange stabiele sessie op 16-bpp — verdenking:
+# 2x zoveel NC-schrijfverkeer (console-mirror+fbblit) over de AXI wakkert de
+# C1-erratum-contentie aan (zie docs/archief/freeze-jacht). fbblit kan RGB565,
+# dus het glas werkt gewoon op de 16-bpp-default. Pas na een gerichte meting
+# weer aanzetten: framebuffer_depth=32 + framebuffer_ignore_alpha=1.
+# HOP-config als bestand (19-07): de firmware laadt hopos.cfg integraal in
+# RAM ("initramfs"-mechanisme, adres boven de DTB op 0x0f000000) en HOP leest
+# hem via /chosen/linux,initrd-*. Volle JSON-jobspecs per regel — het
+# 1024-byte-bootargs-plafond van cmdline.txt geldt hier niet.
+initramfs hopos.cfg 0x0f200000
 EOF
 
 echo "sd-rpi5/hop-agent5.img ($(du -h sd-rpi5/hop-agent5.img | cut -f1)) + config.txt klaar." >&2

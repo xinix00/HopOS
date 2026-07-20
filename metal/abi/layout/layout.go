@@ -74,6 +74,13 @@ const (
 	// metal/fw/fdt. HOP leest 'm fysiek via DTBPtrPA().
 	DTBPtr = BootScratch + 8
 
+	// FB-grant-venster (IPA-ABI, kern/slots/fbgrant.go): de firmware-
+	// framebuffer van de display-houder wordt híer gemapt — GB0 is vrij in
+	// het canonieke beeld, en de fysieke fb mag boven de 4GB liggen (32-bit
+	// IPA, VTCR.T0SZ=32) dus identity kan niet. De app krijgt het adres als
+	// FB_BASE-env (FbIPA + offset-in-blok); alleen de houder heeft dit GB.
+	FbIPA = 0x20000000
+
 	// hop-ABI ringen per slot (IPA-ABI): outbox (app → HOP: logs én
 	// RPC-requests) en inbox (HOP → app: RPC-responses). Fysiek op Plan.RingPA.
 	RingBase    = 0xB1000000

@@ -10,6 +10,8 @@
 package vcfb
 
 import (
+	"sync"
+
 	"hop-os/metal/board/raspi"
 	"hop-os/metal/dev"
 	"hop-os/metal/driver/fb"
@@ -44,7 +46,42 @@ func Framebuffer(dtbPtr uintptr) (fb.Desc, bool) {
 // 16bpp-bootsplash-config blijft draaien (stride 3840 = 1920×2). De pitch
 // beschrijft wat de scanout écht leest, dus dáár leiden we de pixeldiepte
 // uit af; metal/driver/fb rendert beide dieptes.
+//
+// ÉÉN KEER, daarna gecachet (19-07): elke AllocFB is een verse firmware-
+// allocatie, en de scanout blijft aan de bóót-buffer hangen — een tweede
+// alloc kan een ander (niet-gescand) adres teruggeven, en de gedeelde
+// property-buffer racet bovendien met andere mailbox-verkeer (gemeten:
+// een grant las "3x1500000000"). Beeld = de firmware-buffer van boot; de
+// eerste geslaagde discovery is dus de enige. Rommel (onzinnige maten)
+// wordt geweigerd én niet gecachet.
+var (
+	fbMu     sync.Mutex
+	fbCached fb.Desc
+	fbOK     bool
+)
+
 func FramebufferVC(dtbPtr, mboxBase uintptr) (fb.Desc, bool) {
+	fbMu.Lock()
+	defer fbMu.Unlock()
+	if fbOK {
+		return fbCached, true
+	}
+	d, ok := discoverVC(dtbPtr, mboxBase)
+	if !ok || !sane(d) {
+		return fb.Desc{}, false
+	}
+	fbCached, fbOK = d, true
+	return d, true
+}
+
+// sane weert onzin-descriptors (mailbox-ruis) uit de cache en de grants.
+func sane(d fb.Desc) bool {
+	return d.Base != 0 && d.Width >= 64 && d.Width <= 8192 &&
+		d.Height >= 64 && d.Height <= 8192 &&
+		d.Stride >= d.Width*d.BPP/8 && (d.BPP == 16 || d.BPP == 32)
+}
+
+func discoverVC(dtbPtr, mboxBase uintptr) (fb.Desc, bool) {
 	if d, ok := Framebuffer(dtbPtr); ok {
 		return d, true
 	}

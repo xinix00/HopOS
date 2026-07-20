@@ -177,6 +177,32 @@ func Bootargs(base uintptr) (string, bool) {
 	return nodeString(base, "chosen", "bootargs")
 }
 
+// InitrdRegion geeft [start, end) van het door de firmware geladen initramfs
+// (/chosen/linux,initrd-start en -end; 4- of 8-byte big-endian cellen). HopOS
+// gebruikt dat mechanisme bewust als config-kanaal: `initramfs hopos.cfg
+// <addr>` in config.txt laadt een tekstbestand van élke maat — het 1024-byte
+// bootargs-plafond (gemeten 19-07: elke cmdline verloor zijn staart) geldt
+// daar niet. ok=false zonder initramfs of bij een kromme regio.
+func InitrdRegion(base uintptr) (start, end uintptr, ok bool) {
+	cell := func(name string) (uint64, bool) {
+		b, ok := nodeBytes(base, "chosen", name)
+		if !ok || (len(b) != 4 && len(b) != 8) {
+			return 0, false
+		}
+		var v uint64
+		for _, c := range b {
+			v = v<<8 | uint64(c)
+		}
+		return v, true
+	}
+	s, ok1 := cell("linux,initrd-start")
+	e, ok2 := cell("linux,initrd-end")
+	if !ok1 || !ok2 || e <= s || e-s > maxBlob {
+		return 0, 0, false
+	}
+	return uintptr(s), uintptr(e), true
+}
+
 // RootString leest een string-property van de root-node (bv. "serial-number",
 // door de Pi-firmware gezet) — de stabiele bron voor een board-identiteit
 // zoals de MAC. ok=false bij een kromme blob of ontbrekende property.
@@ -188,14 +214,30 @@ func RootString(base uintptr, name string) (string, bool) {
 // directe kind met die naam (bv. "chosen"). ok=false bij een kromme blob of
 // ontbrekende property.
 func nodeString(base uintptr, node, name string) (string, bool) {
-	if base == 0 || be32(base) != magic {
+	b, ok := nodeBytes(base, node, name)
+	if !ok {
 		return "", false
+	}
+	// Null-getermineerde string; de terminator niet meenemen.
+	for i, c := range b {
+		if c == 0 {
+			return string(b[:i]), true
+		}
+	}
+	return string(b), true
+}
+
+// nodeBytes leest de ruwe bytes van een property (voor cellen zoals
+// linux,initrd-start; nodeString knipt op de NUL).
+func nodeBytes(base uintptr, node, name string) ([]byte, bool) {
+	if base == 0 || be32(base) != magic {
+		return nil, false
 	}
 	structOff := be32(base + 8)
 	stringsOff := be32(base + 12)
 	totalSize := be32(base + 4)
 	if totalSize > maxBlob || structOff >= totalSize || stringsOff >= totalSize {
-		return "", false
+		return nil, false
 	}
 
 	p := base + uintptr(structOff)
@@ -224,7 +266,7 @@ func nodeString(base uintptr, node, name string) (string, bool) {
 			depth--
 		case tokProp:
 			if p+8 > end {
-				return "", false
+				return nil, false
 			}
 			plen := be32(p)
 			nameOff := be32(p + 4)
@@ -232,7 +274,7 @@ func nodeString(base uintptr, node, name string) (string, bool) {
 			data := p
 			p = align4(p + uintptr(plen))
 			if p > end {
-				return "", false
+				return nil, false
 			}
 			wantDepth := 1
 			if node != "" {
@@ -240,25 +282,20 @@ func nodeString(base uintptr, node, name string) (string, bool) {
 			}
 			np := base + uintptr(stringsOff) + uintptr(nameOff)
 			if inNode && depth == wantDepth && uint64(stringsOff)+uint64(nameOff) < uint64(totalSize) && propIs(np, end, name) {
-				// Null-getermineerde string; de terminator niet meenemen.
 				b := make([]byte, 0, plen)
 				for i := uintptr(0); i < uintptr(plen); i++ {
-					c := dev.Read8(data + i)
-					if c == 0 {
-						break
-					}
-					b = append(b, c)
+					b = append(b, dev.Read8(data+i))
 				}
-				return string(b), true
+				return b, true
 			}
 		case tokNop:
 		case tokEndTree:
-			return "", false
+			return nil, false
 		default:
-			return "", false
+			return nil, false
 		}
 	}
-	return "", false
+	return nil, false
 }
 
 // MemReserve leest het /memreserve/-blok uit de DTB-header (off_mem_rsvmap,

@@ -134,6 +134,8 @@ func watch(cfg Config, maxHz uint32) {
 		switch {
 		case busy && !high:
 			high = true
+			quiet = time.Now() // anders valt de klok één stil sample later
+			// alweer terug ("idle 30s" één tel na "busy" — gemeten 19-07)
 			set(maxHz, "busy")
 		case busy:
 			quiet = time.Now()

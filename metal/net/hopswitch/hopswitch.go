@@ -198,9 +198,13 @@ func forward(src int, p []byte) {
 	dst := int(p[5])
 	if dst == 0 { // naar HOP toe (de gateway-MAC)
 		if src != 0 {
-			// Eerst het antwoord van een gepubliceerde poort (SNAT de externe
-			// NIC uit); anders uitgaand verkeer masqueraden. Wat geen van beide
-			// is (er is verder geen interne HOP-stack meer) valt weg.
+			// Volgorde: eerst de interne NIC (10.100.0.1 = "mijn node" —
+			// agent/leader; plus ARP-replies voor die NIC), dan het antwoord
+			// van een gepubliceerde poort (SNAT de externe NIC uit), anders
+			// uitgaand verkeer masqueraden.
+			if gatewayClaimLocked(p) {
+				return
+			}
 			if natFromSlot(src, p) {
 				return
 			}
@@ -209,6 +213,9 @@ func forward(src int, p []byte) {
 		return
 	}
 	if dst != src && dst <= layout.MaxSlots && ports[dst] != nil {
+		// Passief meelezen (TCP-seq's) zodat ResetPeers bij slot-dood een
+		// exact-verwachte RST naar de overlevende kant kan sturen (rst.go).
+		trackSlotTCP(src, dst, p)
 		ports[dst].rx.Write(ring.TypeFrame, p)
 	}
 }

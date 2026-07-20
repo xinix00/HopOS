@@ -29,8 +29,11 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 
 # 2. De HOP-kern (embed app5.elf): gelinkt op de werkelijke load 0x80000
 #    (+0x10000 voor text) — de Pi 5-EEPROM negeert kernel_address.
+#    Default gui; GUI=0 bouwt de kale (headless) smaak. (Zelfde knop overal.)
+GUITAG=""
+[ "${GUI:-1}" = 1 ] && GUITAG=" gui"
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-	"$TAMAGO" build -tags "rpi5 linkcpuinit" -trimpath \
+	"$TAMAGO" build -tags "rpi5 linkcpuinit$GUITAG" -trimpath \
 	-ldflags "-s -w -T 0x90000 -R 0x1000" -o out/hopos5.elf ./cmd/hopos-embed
 
 # 3. ELF → raw image (Circle-recept, incl. BSS-nullen t/m memEnd — mkkernel).

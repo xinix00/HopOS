@@ -34,8 +34,11 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 	-ldflags "-w -T 0x50010000 -R 0x1000" -o cmd/hopos-embed/app4.elf ./app/appspike
 
 # 2. De HOP-kern (embed app4.elf): gelinkt op de werkelijke load 0x80000 (+0x10000).
+#    Default gui; GUI=0 bouwt de kale (headless) smaak. (Zelfde knop overal.)
+GUITAG=""
+[ "${GUI:-1}" = 1 ] && GUITAG=" gui"
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-	"$TAMAGO" build -tags "rpi4 linkcpuinit" -trimpath \
+	"$TAMAGO" build -tags "rpi4 linkcpuinit$GUITAG" -trimpath \
 	-ldflags "-s -w -T 0x90000 -R 0x1000" -o out/hopos4.elf ./cmd/hopos-embed
 
 # 3. ELF → RAW kernel8.img (géén arm64-Image-header: die triggert het

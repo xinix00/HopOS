@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"runtime"
+	"runtime/goos"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +40,10 @@ type App struct {
 	out  *ring.Ring // hop-ABI outbox (app → HOP)
 	in   *ring.Ring // hop-ABI inbox (HOP → app)
 	rbuf []byte     // hergebruikte leesbuffer (onder mu, zoals seq)
+
+	exitMu    sync.Mutex // beschermt exitHooks; exitRan maakt Exit her-intredend
+	exitHooks []func()
+	exitRan   bool
 }
 
 func (a *App) ctrl(off uintptr) *uint64 {
@@ -61,6 +66,16 @@ func Init() *App {
 	a.in = ring.Open(layout.RingInbox(a.Slot))
 	a.rbuf = make([]byte, layout.RingDataCap)
 	a.env = a.readEnv()
+
+	// Fatale runtime-exits (panic, os.Exit) onderscheppen: tamago's default
+	// halt is DAIFSet+WFI — een lijk dat geen vertaalde toegang meer doet,
+	// dus zelfs de stage-2-revoke niet meer voelt (verbrande core, gemeten
+	// 19-07: browser-panic → dedicated core weg tot powercycle). Via de
+	// goos.Exit-hook parkeert de core in plaats daarvan netjes bij HopOS —
+	// kaal (exitRaw): na een fatalpanic draait de scheduler niet meer, dus
+	// géén hooks/goroutines hier. Peers horen de dood via de switch-RST bij
+	// de teardown.
+	goos.Exit = func(code int32) { a.exitRaw(uint64(uint32(code))) }
 
 	// Klok overnemen van HOP (die synct via SNTP): zonder dit begint elke
 	// app-runtime op 1970. De teller is gedeeld, de offset dus ook.
@@ -289,8 +304,55 @@ func (a *App) watch() {
 	}
 }
 
+// OnExit registreert een opruim-hook die vlak vóór de exit draait — bij de
+// kill-flag van HOP én bij een eigen Exit. Bedoeld voor de netlaag (appnet
+// sluit zijn verbindingen af zodat peers direct een RST zien i.p.v. een
+// stille dood — de display wachtte anders 30s op zijn ping-deadline,
+// gemeten 19-07). Hooks draaien in omgekeerde registratievolgorde
+// (defer-semantiek): app-lagen (SURF-CLOSE) vóór de netstack die ze nodig
+// hebben. Hooks moeten kort zijn; Exit begrenst ze samen op 250ms.
+func (a *App) OnExit(fn func()) {
+	a.exitMu.Lock()
+	a.exitHooks = append(a.exitHooks, fn)
+	a.exitMu.Unlock()
+}
+
+// runExitHooks draait de hooks eenmalig, samen begrensd op 250ms: netjes
+// afsluiten mag de kill nooit ophouden (HOP's Stop-timeout zou anders
+// escaleren naar een stage-2-revoke).
+func (a *App) runExitHooks() {
+	a.exitMu.Lock()
+	hooks := a.exitHooks
+	ran := a.exitRan
+	a.exitRan = true
+	a.exitMu.Unlock()
+	if ran || len(hooks) == 0 {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := len(hooks) - 1; i >= 0; i-- { // LIFO: laatst geregistreerd eerst
+			hooks[i]()
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+	}
+}
+
 // Exit meldt de exitcode en zet de eigen core uit. Keert nooit terug.
 func (a *App) Exit(code uint64) {
+	a.runExitHooks()
+	a.exitRaw(code)
+}
+
+// exitRaw is de kale exit: status melden en de core via HVC aan HopOS
+// teruggeven — zonder hooks, goroutines of timers. Het is daardoor ook
+// veilig vanuit goos.Exit (een fatale panic: de scheduler draait dan niet
+// meer, dus runExitHooks' waak-goroutine zou nooit lopen).
+func (a *App) exitRaw(code uint64) {
 	*a.ctrl(layout.CtrlExitCode) = code
 	*a.ctrl(layout.CtrlStatus) = layout.StatusExited
 	dev.MB() // status zichtbaar vóór we de core aan HopOS teruggeven

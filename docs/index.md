@@ -16,9 +16,12 @@ in S3 — not on the machine. Product page: [gethop.org/hopos](https://gethop.or
 - **[Isolation](technical/isolation.md)** — the hardware cage: stage-2, whole cores, zero syscalls.
 - **[Networking](technical/networking.md)** — a network stack per app, a switch in the node.
 - **[Stateless](technical/stateless.md)** — state on S3, not on metal.
-- **[GUI design](gui-ontwerp.md)** — the display roadmap: surfaces, planes,
-  scenes, and windows that fail over with their app (design dossier, Dutch;
-  agreed 2026-07-19, not built yet).
+- **[GUI — SURF](gui-ontwerp.md)** — network-transparent windows: an app
+  draws anywhere in the cluster, a display node composites it, and a window
+  fails over when HOP restarts its app elsewhere. The node-side display grant
+  ships in `metal/gui`; the windowing, compositor and browser-KVM stack is
+  built as plain HopOS apps in the companion `hop-os-surf` repo (P1–P2 working
+  in QEMU). Design dossier (Dutch): gui-ontwerp.md.
 
 ## Related
 

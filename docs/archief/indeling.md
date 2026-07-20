@@ -15,6 +15,7 @@ metal/
 ├── driver/    devices, één package per device (nic/ voor de NICs)
 ├── net/       het netwerkvlak van HOP
 ├── kern/      de orchestrator zelf
+├── gui/       het display-vlak, opt-in via `-tags gui` (20-07)
 ├── board/     per-board bedrading
 ├── app/       de app-kant
 ├── cmd/       de HOP-kant binaries
@@ -61,6 +62,21 @@ níét — die leeft in `app/applib` (gVisor over de abi-ringen).
 `stage2` (de kooi), `hopfs` (de schijflaag), `apploaderblob` (de universele
 loader als go:embed-bytes in de node-binary). Hoort hier: alles wat alleen
 core 0 als vertrouwde kern doet.
+
+**`gui/`** — het display-vlak (docs/gui-ontwerp.md), sinds 20-07 een eigen
+categorie omdat GUI los van de rest moet kunnen: `hvs` (de read-only
+BCM2712-HVS-dumptool), `debug` (het :9091-endpoint erover), `fbgrant` (het
+fb-weggeef-beleid: claim, FB_*-env, console van/terug op het glas). Alleen
+cmd/-binaries linken dit, en uitsluitend achter `-tags gui` — elke board-tag
+heeft zo twee smaken: kaal (headless) en gui — elk imagescript heeft de
+knop (default gui, `GUI=0` = kaal); beide smaken blijven groen via de
+tamago-gate. De grens: de firmware-framebuffer (`driver/fb`, de log-console)
+is géén gui — dat is de universele console; alles voorbij dat ene
+firmware-beeld (het glas weggeven, HVS, planes, straks de driver-driehoek)
+is wél gui. De mechaniek eronder (stage2.GrantWindow, layout.FbIPA en het
+registratiepunt kern/slots/grants.go) blijft basis: het generieke
+DeviceGrant-primitief — gui/fbgrant is de eerste provider die zich daar
+(via cmd's gui-smaak) op registreert.
 
 **`board/`** — de hardware-integrator, per board in TWEE helften:
 
@@ -125,6 +141,13 @@ regel-tabel dáár en dit hoofdstuk horen samen te wijzigen):
 4. `board/<x>/hop` integreert de hardware-kant (cpu, fw, driver, net/dhcp);
    `kern/` integreert de OS-kant (abi, net, driver/nvme via hopfs);
    `cmd/` knoopt board-hop + kern aan elkaar. Andersom nooit.
+   `gui/` zit als opt-in vlak bóven kern: het mag driver, het
+   board-contract én kern lezen (fbgrant: stage2.GrantWindow + de
+   slots-hooktypen), en alleen `cmd/` (achter `-tags gui`) importeert het
+   terug — kern/net/board raken gui nooit; kern kent gui alleen als
+   niet-geregistreerde grant-haak (kern/slots/grants.go). Het
+   Display-contract van gui/debug implementeert een board structureel
+   (gui-getagde methoden, board/rpi5/hop/gui.go), zonder import.
 5. `board/appboard` (het app-contract) importeert niets; het contract
    `board` alleen appboard + de typen die het draagt (driver/fb,
    driver/pcie, net/dhcp). `driver/` importeert board dus nóóit — types die
@@ -148,6 +171,8 @@ code (gitignored via `*.elf`/`*.elf.gz`):
 4. CPU-instructie, EL-niveau of architectuur-firmware? → `cpu/`.
 5. Alleen voor core 0 als vertrouwde kern? → `kern/`.
 6. HOP's netwerkvlak? → `net/`. Draait het in een slot? → `app/`.
+   Display-werk voorbij de firmware-framebuffer? → `gui/` (opt-in vlak,
+   alleen gelinkt met `-tags gui`).
 7. Bedrading van één board of SoC? → `board/<naam>`: runtime-hooks/boot in
    de basis, alles met drivers in `board/<naam>/hop`.
 8. Is het een binary? → HOP-kant `cmd/`, app-kant `app/`.

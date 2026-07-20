@@ -64,6 +64,14 @@ func allowed(cat, imp string) bool {
 		return imp == "dev" || imp == "board" ||
 			ifirst == "abi" || ifirst == "cpu" || ifirst == "fw" ||
 			ifirst == "driver" || ifirst == "net" || ifirst == "kern"
+	case "gui":
+		// Het display-vlak (docs/gui-ontwerp.md), opt-in via `-tags gui`:
+		// display-drivers, de debugtool erover en het grant-beleid (fbgrant
+		// gebruikt kern: stage2.GrantWindow + de slots-hooktypen). gui ligt
+		// dus bóven kern; alleen cmd/ importeert gui terug.
+		return imp == "dev" || imp == "board" ||
+			ifirst == "abi" || ifirst == "cpu" || ifirst == "fw" ||
+			ifirst == "driver" || ifirst == "kern" || ifirst == "gui"
 	case "appboard":
 		return false // het app-contract importeert niets
 	case "board-contract":
@@ -79,8 +87,9 @@ func allowed(cat, imp string) bool {
 			imp == "driver/pl011" || imp == "driver/fb" ||
 			ifirst == "abi" || ifirst == "cpu" || ifirst == "fw"
 	case "board-hop":
-		// De HOP-bedrading mag alles behalve kern/app/cmd.
-		return icat != "kern" && icat != "app" && icat != "cmd"
+		// De HOP-bedrading mag alles behalve kern/app/cmd/gui (het Display-
+		// contract match structureel — daar is geen import voor nodig).
+		return icat != "kern" && icat != "app" && icat != "cmd" && icat != "gui"
 	case "app":
 		// De app-kant kent HOP uitsluitend via abi/ (+ dev/cpu/appboard/
 		// board-basis om op te draaien) — indeling.md regel 2, hier hard.

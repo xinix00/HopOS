@@ -12,3 +12,14 @@ arm_freq_min=800
 # NIET, arm_freq ís het max — gemeten 2026-07-11). dvfs volgt dit firmware-
 # max vanzelf via de mailbox: 2400MHz liep zonder fan binnen minuten naar 84°C.
 arm_freq=1500
+# 32-bpp framebuffer BEWUST UIT (19-07): alle drie de node-freezes van die
+# dag vielen op 32-bpp-boots, de lange stabiele sessie op 16-bpp — verdenking:
+# 2x zoveel NC-schrijfverkeer (console-mirror+fbblit) over de AXI wakkert de
+# C1-erratum-contentie aan (zie docs/archief/freeze-jacht). fbblit kan RGB565,
+# dus het glas werkt gewoon op de 16-bpp-default. Pas na een gerichte meting
+# weer aanzetten: framebuffer_depth=32 + framebuffer_ignore_alpha=1.
+# HOP-config als bestand (19-07): de firmware laadt hopos.cfg integraal in
+# RAM ("initramfs"-mechanisme, adres boven de DTB op 0x0f000000) en HOP leest
+# hem via /chosen/linux,initrd-*. Volle JSON-jobspecs per regel — het
+# 1024-byte-bootargs-plafond van cmdline.txt geldt hier niet.
+initramfs hopos.cfg 0x0f200000

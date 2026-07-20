@@ -35,6 +35,12 @@ func Up(a *applib.App) (string, error) {
 	}
 	iface.Stack.EnableICMP()
 
+	// Bewust GEEN eigen RST's bij de exit (hier stond kort een OnExit-hook
+	// met Stack.Close): de switch stuurt ze al autoritair bij élke
+	// slot-teardown (hopswitch.ResetPeers) — óók na een panic, waar een
+	// app-hook toch niets meer kan. Eén mechanisme, van de kernel (Derek,
+	// 20-07).
+
 	// In Go's standaard net-package hangen: hierna werken net.Listen en
 	// net.Dial voor deze app. Interne IP's zijn deterministisch (geen DNS
 	// nodig); voor uitgaand verkeer krijgt de app de node-resolver via HOP_DNS

@@ -72,7 +72,10 @@ mkdir -p out
 
 # Tags: de node-image bakt in agent-modus de apploader ín (embedloader) — geen
 # externe URL, self-contained. De probe heeft 'm niet nodig.
+# Twee smaken: kaal (headless) en gui (metal/gui + fb-grant). Default gui;
+# GUI=0 bouwt de kale smaak. (Zelfde knop in alle imagescripts.)
 TAGS="uefi linkcpuinit"
+[ "${GUI:-1}" = 1 ] && TAGS="$TAGS gui"
 [ "$MODE" = agent ] && TAGS="$TAGS embedloader"
 
 # In agent-modus de app-image (die de apps zelf downloaden, via de http.server

@@ -185,6 +185,11 @@ func prepStart(i int, memLimit uint64, cores int, env map[string]string, mounts 
 	if cores > 1 && i+cores-1 > layout.NumAppCores() {
 		return nil, nil, 0, fmt.Errorf("SMP: %d cores vanaf slot %d overschrijden de %d app-cores", cores, i, layout.NumAppCores())
 	}
+	// DeviceGrant-haak (grants.go; gui/fbgrant is de eerste provider): een
+	// job met FB=1 krijgt — als het board een framebuffer heeft en niemand
+	// hem houdt — de FB_*-beschrijving in zijn env; de kooi-mapping volgt in
+	// armSlot (na stage2.Build).
+	env = grantEnv(i, env)
 	// DNS-resolver van de node meegeven, zodat een app die naar buiten praat
 	// (cloudflared, servers) namen kan opzoeken — de query loopt als gewoon
 	// UDP door de masquerade. HOP zet 'm als env (net als ER_PORT_*), tenzij
@@ -696,6 +701,7 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// nieuwe task publiceert de zijne ná deze Start).
 	evictServicer(i)
 	hopswitch.Detach(i)
+	hopswitch.ResetPeers(i) // peers van de vórige task zien de dood meteen (TCP-RST)
 	hopswitch.UnpublishSlot(i)
 
 	// Storage: verse (lege) eigen root — schone lei per start — en de
@@ -742,6 +748,11 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	l1, err := stage2.Build(i, linkBase, base, size, netPA)
 	if err != nil {
 		return fmt.Errorf("stage-2 slot %d: %w", i, err)
+	}
+	// DeviceGrant-haak: het venster van de houder de kooi in (no-op voor
+	// alle andere slots) — vóór de dispatch, zelfde walker-regime als Build.
+	if err := grantArm(i); err != nil {
+		return fmt.Errorf("grant slot %d: %w", i, err)
 	}
 	// De fysieke core van dit slot: het klassieke model is slot = core, maar
 	// een StartShared-slot woont op de core die HOP koos (coreOf, share.go).
@@ -849,10 +860,29 @@ func StartStaged(i int, memLimit uint64, cores int, env map[string]string, mount
 	defer lifecycleWindow()()
 	t0 := time.Now() // venster-tijd — wat de convoy serialiseert (zie Start)
 	vectorsOnce.Do(stage2.InitVectors)
-	// De apploader parkeerde na het seinen; zijn core (en de secundaire cores
-	// van een SMP-app) mogen niet meer draaien vóór we eroverheen plaatsen.
-	if err := coresFree(i, cores, "loader not parked?"); err != nil {
-		return err
+	// De apploader parkeerde ná het seinen — "staged" op de ctrl-page landt
+	// dus eerder dan zijn park/exit; kort wachten in plaats van meteen falen
+	// (gemeten Pi 5 19-07: de A76 verliest die race consequent). En op een
+	// gedeelde core parkeert de core nóóit zolang de buren leven — dáár is
+	// het juiste teken de ctx-staat van dít slot (de HVC-exit van de loader
+	// zet Dead), niet de core-mailbox. Zelfde onderscheid als Start (shared-
+	// tak boven zijn coresFree).
+	if coreOf(i) != i || slotShares(i) {
+		if !waitCtxDead(i, 2*time.Second) {
+			return fmt.Errorf("place staged slot %d: loader still live on shared core %d", i, coreOf(i))
+		}
+	} else {
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			err := coresFree(i, cores, "loader not parked?")
+			if err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				return err
+			}
+			time.Sleep(time.Millisecond)
+		}
 	}
 	// De partitie van fase 1 (de loader) hergebruiken — niet opnieuw alloceren.
 	base, size, ok := partitionOf(i)
@@ -986,7 +1016,9 @@ func Stop(i int, timeout time.Duration) error {
 // het geheugen meer — pas bij een volgende Start worden ze her-gedispatcht).
 func releaseSlot(i int) {
 	hopswitch.Detach(i)
+	hopswitch.ResetPeers(i) // peers zien de dood meteen (TCP-RST) i.p.v. via hun deadline
 	hopswitch.UnpublishSlot(i)
+	grantRelease(i) // grant terug (fb: HOP-console weer op het glas)
 	partRelease(i)
 	if i >= 1 && i <= layout.MaxSlots {
 		// Bewoners-boekhouding van de core-deling: uit de lijst van zijn

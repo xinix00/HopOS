@@ -17,6 +17,7 @@ import (
 	"log"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 
 	"hop/pkg/agentboot"
 	"hop/pkg/config"
+	"hop/pkg/hopos"
 
 	"hop-os/metal/abi/layout"
 	"hop-os/metal/board"
@@ -310,12 +312,20 @@ func main() {
 			cfg.Cluster.Name, s3.Endpoint, s3.Bucket)
 	}
 
+	// {{host}} in boot-config-jobspecs wordt het LAN-IP van deze node: dáár
+	// luisteren de agent-API (:8080) en gepubliceerde poorten (display :7878),
+	// en een app kan dat adres zelf nergens vandaan halen (het slot-net kent
+	// alleen 10.100.0.0/24). Zo is één configregel op elke node juist:
+	// SURF_ADDR={{host}}:7878, HOP_ADDR={{host}}:8080.
+	expand := func(s string) string { return strings.ReplaceAll(s, "{{host}}", cfg.Node.IP) }
+
 	// Init-manifest van het boot-medium: elke `hopos.init[]={...}` is één job
 	// als compacte JSON (kopieerbaar uit `hop apply`/de API). agentboot seedt ze
 	// op een clean boot — zo komt een standalone node ZONDER S3 altijd met zijn
 	// baseline op (Derek, 19-07). Ongeldige JSON overslaan met een luide regel;
 	// de schema-validatie (verplichte naam e.d.) doet agentboot via DecodeInitJobs.
 	for _, spec := range bootParamAll("hopos.init[]") {
+		spec = expand(spec)
 		var m map[string]any
 		if err := json.Unmarshal([]byte(spec), &m); err != nil {
 			fmt.Printf("hop: hopos.init[] skipped — invalid JSON (%v): %s\n", err, spec)
@@ -325,6 +335,31 @@ func main() {
 	}
 	if n := len(cfg.Cluster.InitJobs); n > 0 {
 		fmt.Printf("hop: %d init job(s) from boot config — seeded on a clean boot\n", n)
+	}
+
+	// App-catalogus (19-07, launcher): elke `hopos.apps[]={...}` is één
+	// beschikbare-maar-niet-gestarte jobspec, zelfde vorm als hopos.init[].
+	// HopOS geeft de bundel als HOPOS_APPS-env aan elk slot dat die sleutel
+	// (leeg) in zijn jobspec declareert — opt-in, want de env-blob is schaars
+	// (layout.CtrlEnvMax). De launcher toont ze en POST ze onaangeroerd naar
+	// de agent. Gewoon parameters die toevallig door een app gelezen worden;
+	// HopOS zelf doet er verder niets mee.
+	var apps []string
+	for _, spec := range bootParamAll("hopos.apps[]") {
+		spec = expand(spec)
+		if !json.Valid([]byte(spec)) {
+			fmt.Printf("hop: hopos.apps[] skipped — invalid JSON: %s\n", spec)
+			continue
+		}
+		apps = append(apps, spec)
+	}
+	if len(apps) > 0 {
+		fmt.Printf("hop: %d app(s) in the boot-config catalog (HOPOS_APPS)\n", len(apps))
+	}
+	slotEnv := envSlots{
+		SlotManager: sm,
+		always:      map[string]string{"HOPOS_HOST": cfg.Node.IP},
+		optin:       map[string]string{"HOPOS_APPS": "[" + strings.Join(apps, ",") + "]"},
 	}
 
 	// Geheugen. HOP kent per job de MemoryLimit en overspawnt nooit — dus het
@@ -380,12 +415,55 @@ func main() {
 	fmt.Printf("hop: agent starting — node %s, agent :%d, leader :%d — HOPOS_AGENT_UP\n",
 		cfg.Node.ID, cfg.Node.Port, cfg.Node.Port+1000)
 
+	// Metal-debug (read-only, :9091): nu er netwerk is kan het instrument
+	// bevraagd worden — zonder UART-kabel (de mobiele opstelling). Alleen in
+	// gui-builds (gui.go); de kale smaak is een no-op (gui_stub.go).
+	startDebug()
+
 	// PID-1-regel: Run blokkeert; keert hij terug, dan is dat een fout.
 	err := agentboot.Run(context.Background(), agentboot.Options{
 		Config:      cfg,
 		NodeID:      cfg.Node.ID,
-		Slots:       sm,
+		Slots:       slotEnv,
 		MemoryBytes: offer,
 	})
 	fail("agent", err)
+}
+
+// envSlots vult de slot-env aan bij elke start: `always` gaat er altijd in
+// (mits de jobspec de sleutel niet zelf zet — de spec wint), `optin` alleen
+// als de jobspec de sleutel leeg declareert ("HOPOS_APPS":"" → HopOS vult
+// hem). Zo krijgt elke app HOPOS_HOST gratis, maar betaalt alleen wie erom
+// vraagt de env-ruimte van de app-catalogus. Puur een schil om de slotmgr —
+// de rest van het SlotManager-contract gaat er onaangeroerd doorheen.
+type envSlots struct {
+	hopos.SlotManager
+	always map[string]string
+	optin  map[string]string
+}
+
+func (e envSlots) StartLoader(slot int, memLimit uint64, sharegroup string, poolCores int, env map[string]string) error {
+	return e.SlotManager.StartLoader(slot, memLimit, sharegroup, poolCores, e.merge(env))
+}
+
+func (e envSlots) StartStaged(slot int, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int) error {
+	return e.SlotManager.StartStaged(slot, memLimit, cores, e.merge(env), mounts, ports)
+}
+
+func (e envSlots) merge(env map[string]string) map[string]string {
+	out := make(map[string]string, len(env)+len(e.always))
+	for k, v := range env {
+		out[k] = v
+	}
+	for k, v := range e.always {
+		if _, ok := out[k]; !ok {
+			out[k] = v
+		}
+	}
+	for k, v := range e.optin {
+		if cur, ok := out[k]; ok && cur == "" {
+			out[k] = v
+		}
+	}
+	return out
 }

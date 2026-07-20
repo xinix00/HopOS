@@ -51,10 +51,13 @@ const (
 	attrRW      = 0x3 << 6 // S2AP: lezen+schrijven
 	attrRO      = 0x1 << 6 // S2AP: alleen lezen
 	attrNormal  = 0xF << 2 // MemAttr: normal, WB cacheable (stage-1 wint bij device)
+	attrNormNC  = 0x5 << 2 // MemAttr: normal non-cacheable (framebuffer-grant:
+	// de scanout leest mee, dus geen cache-contract met de app)
 
-	blockRW = descBlock | attrAF | attrSHInner | attrRW | attrNormal
-	pageRW  = descPage | attrAF | attrSHInner | attrRW | attrNormal
-	pageRO  = descPage | attrAF | attrSHInner | attrRO | attrNormal
+	blockRW   = descBlock | attrAF | attrSHInner | attrRW | attrNormal
+	blockRWNC = descBlock | attrAF | attrSHInner | attrRW | attrNormNC
+	pageRW    = descPage | attrAF | attrSHInner | attrRW | attrNormal
+	pageRO    = descPage | attrAF | attrSHInner | attrRO | attrNormal
 
 	l1Off     = 0x0000
 	l2PartOff = 0x1000
@@ -64,6 +67,9 @@ const (
 	l2NetOff  = 0x5000 // het net-ring-GB (NetRingBase heeft een eigen GB —
 	// 128×2MB past niet in het ctrl-GB; slot ≥105 liep daar over de
 	// 1GB-L2-grens: de Altra-vondst van 15-07)
+	// CtxOff (0x6000, abi/layout) is het switch-contextblok — NIET herbruiken.
+	l2FbOff = 0x7000 // FB-grant-L2 (GrantWindow): identity-venster op de
+	// firmware-framebuffer, alleen gevuld voor het slot dat de grant houdt
 )
 
 // InitVectors schrijft de gedeelde EL2-vectoren op Stage2Base (2KB-aligned
@@ -182,7 +188,16 @@ func InitVectors() {
 	rvecs := layout.RevokeVecPA()
 	revoke := []uint32{
 		0xd50c839f, // tlbi alle1is
-		0xd5033f9f, // dsb  sy
+		0xd5033f9f, // dsb  sy                    (invalidatie compleet vóór de wek)
+		0xd503209f, // sev — wek élke WFE-slaper: een core die in WFE hangt (een
+		//             gecrashte runtime in zijn halt-lus, een idle-governor)
+		//             doet geen vertaalde toegang en overleefde de intrekking
+		//             (verbrande core, gemeten 19-07: browser 100%-cpu-crash →
+		//             dedicated core voorgoed weg tot powercycle). Na de wek is
+		//             zijn eerstvolgende instructie-fetch een her-walk van de
+		//             genulde tabel → stage-2-fault → parkeren. Geparkeerde
+		//             cores en yield-wachters weken spurious, checken hun
+		//             mailbox en slapen door — daar zijn ze op gebouwd.
 		0xd5033fdf, // isb
 		0xd69f03e0, // eret
 	}
@@ -206,9 +221,13 @@ func InitVectors() {
 //
 // EERLIJKE GRENS: dit vangt elke core die geheugen aanraakt of instructies
 // fetcht met een verse vertaling — dat is alles wat vooruitgang boekt. Een
-// pathologische self-branch-lus (`for {}` → `b .`) die de front-end mogelijk uit
-// een loop-buffer serveert zónder te hertranslateren is de enige twijfel; dat is
-// per silicium te meten (op QEMU dwingt de HANG=spin-test het af).
+// WFE-slaper (gecrashte runtime in zijn halt-lus, idle-governor) doet geen
+// toegangen en overleefde de intrekking (verbrande core, 19-07); daarom
+// eindigt de revoke-handler sinds 20-07 met een SEV — de wek maakt van de
+// slaper weer een fetcher, en de fetch faultt. Resteert als enige twijfel de
+// pathologische self-branch-lus (`for {}` → `b .`) die de front-end mogelijk
+// uit een loop-buffer serveert zónder te hertranslateren; dat is per
+// silicium te meten (op QEMU dwingt de HANG=spin-test het af).
 func Revoke(i int) {
 	// Alleen de TABELLEN van het slot nullen (tot CtxOff — het switch-
 	// contextblok erachter blijft staan): de L1-entries worden ongeldig, dus
@@ -331,4 +350,53 @@ func Build(i int, ipaBase, paBase, size, netRingPA uint64) (uint64, error) {
 	dev.CleanInv(base, layout.Stage2Stride)
 	dev.MB()
 	return l1, nil
+}
+
+// GrantWindow mapt een fysiek venster als 2MB-blokken Normal-NC op het vaste
+// IPA-venster layout.FbIPA in de bestaande kooi van slot i — de FB-grant
+// (kern/slots/fbgrant.go): een lineaire pixelbuffer, geen registers/DMA.
+// Identity kan niet: de kooi-IPA-ruimte is 32-bit (VTCR.T0SZ=32) en een
+// firmware-framebuffer mag fysiek boven de 4GB liggen (QEMU-ramfb:
+// 0x1bc7a0000 — de vondst van 19-07). Aanroepen ná Build en vóór de dispatch
+// (zelfde walker-regime als Build zelf).
+//
+// Bewust begrensd: het venster moet binnen één GB liggen (een framebuffer is
+// ≤ tientallen MB) en het FbIPA-GB (GB0) is in het canonieke beeld van
+// niemand — een gevulde L1-entry daar is een plan-fout, geen bedrijfsgeval.
+func GrantWindow(i int, pa, size uint64) error {
+	if i < 1 || i > layout.MaxSlots {
+		return fmt.Errorf("slot %d buiten bereik", i)
+	}
+	if pa == 0 || size == 0 {
+		return fmt.Errorf("fb-grant: leeg venster (%#x, %d)", pa, size)
+	}
+	lo := pa &^ ((2 << 20) - 1)
+	hi := (pa + size + (2 << 20) - 1) &^ ((2 << 20) - 1)
+	if hi-lo > (1<<30)-uint64(layout.FbIPA)&((1<<30)-1) {
+		return fmt.Errorf("fb-grant: venster %#x..%#x past niet in het FbIPA-GB", lo, hi)
+	}
+
+	base := layout.Stage2TablePA(i)
+	l2fb := uint64(base + l2FbOff)
+	gb := uint64(layout.FbIPA) >> 30
+	l1e := base + l1Off + uintptr(gb)*8
+	switch cur := dev.Read64(l1e); cur {
+	case 0:
+		dev.Write64(l1e, l2fb|descTable)
+	case l2fb | descTable:
+		// idempotent (hergrant op hetzelfde slot)
+	default:
+		return fmt.Errorf("fb-grant: GB %d van de kooi is al gemapt (%#x) — venster botst met het IPA-beeld", gb, cur)
+	}
+	gbBase := gb << 30
+	for off := lo; off < hi; off += 2 << 20 {
+		ipa := uint64(layout.FbIPA) + (off - lo)
+		dev.Write64(uintptr(l2fb)+uintptr((ipa-gbBase)>>21)*8, off|blockRWNC)
+	}
+
+	// Zelfde coherentie-contract als Build: de walker leest cacheable.
+	dev.CleanInv(base+l1Off, 0x1000)
+	dev.CleanInv(uintptr(l2fb), 0x1000)
+	dev.MB()
+	return nil
 }

@@ -20,6 +20,13 @@ import (
 	"net"
 	"net/http"
 
+	// TLS-wortels: tamago heeft geen OS en dus geen system-CA-store — zonder
+	// deze fallback-bundel (de Mozilla-roots die Go meelevert) faalt élke
+	// https-artifact-URL op certificaatvalidatie. Sinds het downloaden van
+	// core 0 naar de apploader verhuisde moet de bundel dus híer zitten
+	// (gemeten 20-07: GitHub-release-assets → x509-fout in QEMU).
+	_ "golang.org/x/crypto/x509roots/fallback"
+
 	"hop-os/metal/app/applib"
 	"hop-os/metal/app/applib/appnet"
 )

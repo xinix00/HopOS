@@ -54,6 +54,16 @@ func main() {
 		cpuDuty(app, pct)
 	}
 
+	// Crash-rol (verbrande-core-test 20-07): een échte Go-panic. Zonder de
+	// goos.Exit-hook eindigde die in tamago's DAIFSet+WFI — een lijk dat
+	// zelfs de stage-2-revoke niet meer voelt; de core was weg tot de
+	// powercycle. Mét de hook parkeert hij netjes (exitcode 2) en moet een
+	// volgende plaatsing op dezelfde core gewoon slagen — dát is de proef.
+	if app.Env("PANIC") != "" {
+		time.Sleep(2 * time.Second) // eerst READY+logs laten landen
+		panic("appspike: PANIC-rol — bewuste crash voor de park-proef")
+	}
+
 	// Soak-rol (P2b, docs/archief/plan-p2b-soak.md): permanent CPU branden + heap
 	// churnen op alle cores, met een telemetrieregel per minuut. De
 	// heartbeat loopt vanzelf (applib), kill werkt gewoon — dit is de

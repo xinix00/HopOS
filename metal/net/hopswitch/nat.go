@@ -76,7 +76,10 @@ type pub struct {
 	slotPort uint16
 }
 
-// flow is één uitgaande masquerade-verbinding.
+// flow is één uitgaande masquerade-verbinding. slotSeq is het volgende
+// verwachte seq van de slot-kant (passief meegelezen in natOutbound) — het
+// exacte nummer dat een RST bij slot-dood nodig heeft (rst.go); de NAT
+// herschrijft seq's niet, dus het is op de draad geldig.
 type flow struct {
 	proto    byte
 	slot     int
@@ -86,6 +89,8 @@ type flow struct {
 	dstPort  uint16
 	nodePort uint16
 	seen     time.Time
+	slotSeq  uint32
+	seqKnown bool
 }
 
 // fkey/rkey: forward-lookup (slot → nieuw/bestaand flow) en reverse-lookup
@@ -516,6 +521,14 @@ func natOutbound(src int, f []byte) bool {
 		return true // pool vol: drop
 	}
 	fl.seen = time.Now()
+	if proto == protoTCP {
+		// Volgende verwachte seq van de slot-kant bijhouden voor de RST bij
+		// slot-dood (rst.go).
+		if next, _, ok := tcpSegNext(ip, l4, ihl); ok {
+			fl.slotSeq = next
+			fl.seqKnown = true
+		}
+	}
 	binary.BigEndian.PutUint32(ip[12:], uplink.ip)
 	fixCsum32(ip[10:], slotIP, uplink.ip)
 	rewriteL4(l4, proto, 0, slotIP, uplink.ip, sport, fl.nodePort)

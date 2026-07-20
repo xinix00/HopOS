@@ -35,6 +35,11 @@ uefi-esp-agent/
 sd-*/kernel*.img
 sd-*/hop-*.img
 
+# Node-configs met GEHEIMEN (hopos.apikey, hopos.s3.secret) — nooit in git;
+# het formaat staat in docs/config.md.
+sd-*/hopos.cfg
+hopos.cfg
+
 # Per-image config-varianten: config.txt is de getrackte agent/productie-config;
 # de probe/hopos-scripts schrijven hun eigen config-<variant>.txt (die bij het
 # flashen als config.txt op de kaart komt) i.p.v. het getrackte bestand te

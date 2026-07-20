@@ -11,7 +11,7 @@ func TestCoalesceGestreepteMap(t *testing.T) {
 	// het echt — hier allemaal al door het usableRAM-filter).
 	base := uint64(0x80000000)
 	for i := uint64(0); i < 1000; i++ {
-		regs = append(regs, Region{Base: base + i*(1 << 20), Size: 1 << 20})
+		regs = append(regs, Region{Base: base + i*(1<<20), Size: 1 << 20})
 	}
 	out := Coalesce(regs)
 	if len(out) != 1 {

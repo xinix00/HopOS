@@ -19,10 +19,13 @@ The cage is hardware, not policy.
   already trust each other; the memory cage below never softens, and ungrouped
   apps keep the full guarantee. Cores are the physical headroom; sharegroups
   let you run more apps than cores when the isolation trade is yours to make.
-- **Zero syscalls, zero MMIO.** The entire ABI is a control page and two
-  rings. Devices are programmed only by the node; an app cannot aim DMA.
-  Firmware calls (SMC) from a cage trap at EL2 — there is no legitimate
-  app SMC.
+- **Zero syscalls, no app-initiated MMIO.** The entire ABI is a control page
+  and two rings. By default a cage touches no device registers at all —
+  devices are programmed only by the node. One specific device window can be
+  handed to a single cage — the framebuffer, for a display app — as an
+  explicit, node-granted DeviceGrant (off unless you wire it): still
+  node-granted, never app-initiated, and an app can never aim DMA. Firmware
+  calls (SMC) from a cage trap at EL2 — there is no legitimate app SMC.
 - **Kill is revocation.** Stopping a stubborn app doesn't ask it nicely: the
   node revokes its stage-2 map and the core faults synchronously into the
   EL2 vectors, which park it. A cage violation prints the fault (ESR/FAR)
@@ -35,11 +38,12 @@ slots 1-6, 8-126: unaffected, still serving
 ```
 
 - **Small enough to audit.** The code that enforces all of this — cages,
-  slots, ABI — is ~2,850 lines; the whole OS is ~11,600. A Linux node doing
-  the same job trusts GRUB, the kernel (~30,000,000 lines), systemd, libc
-  *and* a container runtime — HopOS is the whole node, bootloader included,
-  in ~11,600. It fits in a single AI context window: audit it in one
-  sitting, human or machine.
+  slots, ABI — is ~2,100 lines; the whole OS is ~11,900 (lines of code,
+  excluding tests, comments and the optional GUI). A Linux node doing the
+  same job trusts GRUB, the kernel (~30,000,000 lines), systemd, libc *and*
+  a container runtime — HopOS is the whole node, bootloader included, in
+  ~11,900. It fits in a single AI context window: audit it in one sitting,
+  human or machine.
 
 Honest limits: shared last-level cache and DRAM channels exist on any
 hardware; the node itself is trusted (that's what the small TCB is for);

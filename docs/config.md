@@ -23,6 +23,13 @@ Editing the file **is** node management — no shell, no rebuild, no agent.
 | `hopos.s3.key` / `hopos.s3.secret` | credentials | — |
 | `hopos.s3.pathstyle` | `1` = path-style URLs (required for e.g. BunnyCDN) | virtual-host |
 | `hopos.init[]` | a job to seed on a clean boot — one compact-JSON job per entry, repeatable | none |
+| `hopos.apps[]` | an *available* (not auto-started) job for the launcher's catalog — same format as `hopos.init[]`, repeatable | none |
+
+In every `hopos.init[]`/`hopos.apps[]` entry the token `{{host}}` is replaced
+at boot with this node's LAN IP — the address where the agent API (`:8080`)
+and published ports live, which an app cannot discover on its own (its slot
+network only knows 10.100.0.0/24). Write `"SURF_ADDR":"{{host}}:7878"` once
+and the same line is correct on every node.
 
 ## Example
 
@@ -59,6 +66,30 @@ hopos.init[]={"name":"worker","driver":"hop","artifacts":[{"url":"http://10.0.0.
   (init jobs are a baseline, not a continuously enforced set).
 - Order sets priority; an init job whose name already exists is skipped (a seed
   never overwrites operator state). A malformed entry is logged and skipped.
+
+## App catalog — a desktop that starts itself
+
+`hopos.apps[]` entries are **not** started; they are the catalog the SURF
+launcher app shows. HopOS bundles them (as a JSON array) into the env var
+`HOPOS_APPS` of any slot whose jobspec declares that key *empty* — opt-in,
+because the per-slot env blob is small. Every slot also gets `HOPOS_HOST`
+(this node's LAN IP) for free.
+
+A self-starting desktop is then two init jobs — the display and the launcher
+— plus a catalog:
+
+```
+hopos.init[]={"name":"display","driver":"hop","artifacts":[{"url":"http://10.0.0.5/display.elf"}],"memory_limit":134217728,"ports":{"surf":7878,"http":80}}
+hopos.init[]={"name":"launcher","driver":"hop","artifacts":[{"url":"http://10.0.0.5/launcher.elf"}],"memory_limit":67108864,"env":{"SURF_ADDR":"{{host}}:7878","HOP_ADDR":"{{host}}:8080","HOPOS_APPS":""}}
+hopos.apps[]={"name":"clock","driver":"hop","artifacts":[{"url":"http://10.0.0.5/clock.elf"}],"memory_limit":67108864,"env":{"SURF_ADDR":"{{host}}:7878"}}
+hopos.apps[]={"name":"calc","driver":"hop","artifacts":[{"url":"http://10.0.0.5/calc.elf"}],"memory_limit":67108864,"env":{"SURF_ADDR":"{{host}}:7878"}}
+hopos.apps[]={"name":"browser","driver":"hop","artifacts":[{"url":"http://10.0.0.5/browser.elf"}],"memory_limit":134217728,"env":{"SURF_ADDR":"{{host}}:7878"}}
+hopos.apps[]={"name":"taskman","driver":"hop","artifacts":[{"url":"http://10.0.0.5/taskman.elf"}],"memory_limit":67108864,"env":{"SURF_ADDR":"{{host}}:7878","HOP_ADDR":"{{host}}:8080"}}
+```
+
+Boot the node and the display comes up with the launcher on it; every other
+app is one click. The launcher POSTs the catalog entry to the agent verbatim
+(`hopos.apikey` set → it must also get `"HOP_KEY":"<key>"` in its env).
 
 ## Trust model
 

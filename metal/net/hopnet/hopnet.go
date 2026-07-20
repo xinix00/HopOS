@@ -71,6 +71,14 @@ func Up() error {
 	}
 	iface.Stack.EnableICMP()
 
+	// De interne gateway-NIC: 10.100.0.1 = "mijn node" voor de apps — de
+	// agent/leader zijn dan van binnenuit bereikbaar zonder proxy of NAT
+	// (zie internal.go). Een fout is niet fataal: het externe net werkt dan
+	// gewoon, alleen de interne route ontbreekt.
+	if err := upInternal(gs); err != nil {
+		fmt.Printf("net: interne gateway-NIC niet op: %v\n", err)
+	}
+
 	// Netstack in Go's standaard net-package hangen: hierna werken
 	// net.Listen, net/http en DNS voor alle HOP-kern-code.
 	net.SetDefaultNS([]string{nc.DNS})

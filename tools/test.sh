@@ -20,7 +20,8 @@ go run ../tools/importcheck.go
 
 go test "$@" \
 	./abi/ring ./net/hopswitch ./kern/stage2 ./abi/layout ./net/dhcp ./abi/hopabi ./abi/checksum \
-	./fw/fdt ./fw/acpi ./kern/hopfs ./driver/vcmail ./driver/nic/mdio ./kern/slots
+	./fw/fdt ./fw/acpi ./kern/hopfs ./driver/vcmail ./driver/nic/mdio ./kern/slots \
+	./gui/hvs ./gui/fbgrant ./gui/debug
 
 TAMAGO="${TAMAGO:-$HOME/tamago-go/bin/go}"
 if [ ! -x "$TAMAGO" ]; then
@@ -36,7 +37,9 @@ for tags in "linkcpuinit" "lnetonet linkcpuinit"; do
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "$tags" -o /dev/null ./app/appspike ./app/apploader ./app/hello
 done
-for tags in "linkcpuinit" "rpi4 linkcpuinit" "rpi5 linkcpuinit" "uefi linkcpuinit"; do
+# Elke board-smaak kaal; plus de gui-smaak (metal/gui achter -tags gui) op
+# virt (bewijst de bedrading zonder Display-board) en rpi5 (mét).
+for tags in "linkcpuinit" "rpi4 linkcpuinit" "rpi5 linkcpuinit" "uefi linkcpuinit" "gui linkcpuinit" "rpi5 gui linkcpuinit"; do
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "$tags" -o /dev/null ./cmd/hopos
 done
@@ -49,7 +52,7 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 	-ldflags "-w -T 0x50010000 -R 0x1000" -o cmd/hopos-embed/app.elf ./app/appspike
 cp cmd/hopos-embed/app.elf cmd/hopos-embed/app4.elf
 cp cmd/hopos-embed/app.elf cmd/hopos-embed/app5.elf
-for tags in "qemuvirt linkcpuinit" "rpi4 linkcpuinit" "rpi5 linkcpuinit"; do
+for tags in "qemuvirt linkcpuinit" "rpi4 linkcpuinit" "rpi5 linkcpuinit" "rpi5 gui linkcpuinit"; do
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "$tags" -o /dev/null ./cmd/hopos-embed
 done
@@ -59,4 +62,4 @@ done
 # de mains, PCIe→RP1→GEM→DHCP in hopnet.Up) — terughalen kan uit git history.
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags "uefi linkcpuinit" -o /dev/null ./cmd/probeuefi
-echo "OK: host-tests groen, tamago-gate (virt/rpi4/rpi5/uefi + embed-mains + probeuefi) gebouwd" >&2
+echo "OK: host-tests groen, tamago-gate (virt/rpi4/rpi5/uefi kaal + gui-smaken + embed-mains + probeuefi) gebouwd" >&2

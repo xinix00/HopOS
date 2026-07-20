@@ -17,6 +17,7 @@
 package raspi
 
 import (
+	"sync"
 	"strings"
 
 	_ "unsafe"
@@ -126,17 +127,51 @@ func BootParam(dtb uintptr, key string) string {
 // Zie BootParam voor de enkele; elke waarde is één token, dus geen spaties
 // (compacte JSON). cmdline.txt is één regel, dus alle entries erachter.
 func BootParamAll(dtb uintptr, key string) []string {
-	args, ok := fdt.Bootargs(dtb)
-	if !ok {
-		return nil
-	}
 	var out []string
-	for _, tok := range strings.Fields(args) {
-		if v, found := strings.CutPrefix(tok, key+"="); found {
+	// Bron 1: het config-bestand dat de firmware als "initramfs" laadde
+	// (config.txt: `initramfs hopos.cfg <addr>`) — regels `key=waarde`,
+	// waarde mag spaties bevatten (volle JSON-jobspecs!), # = commentaar.
+	// Dit is het kanaal zónder het 1024-byte-bootargs-plafond.
+	for _, line := range strings.Split(configFile(dtb), "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if v, found := strings.CutPrefix(line, key+"="); found {
 			out = append(out, v)
 		}
 	}
+	// Bron 2: de klassieke cmdline.txt-tokens (kleine sleutels, overrides).
+	if args, ok := fdt.Bootargs(dtb); ok {
+		for _, tok := range strings.Fields(args) {
+			if v, found := strings.CutPrefix(tok, key+"="); found {
+				out = append(out, v)
+			}
+		}
+	}
 	return out
+}
+
+// cfgCache: het initramfs-config-bestand wordt één keer uit RAM gekopieerd
+// (de regio is firmware-eigendom; wij lezen hem vóór er iets overheen kan).
+var (
+	cfgOnce  sync.Once
+	cfgCache string
+)
+
+func configFile(dtb uintptr) string {
+	cfgOnce.Do(func() {
+		start, end, ok := fdt.InitrdRegion(dtb)
+		if !ok {
+			return
+		}
+		b := make([]byte, 0, end-start)
+		for p := start; p < end; p++ {
+			b = append(b, dev.Read8(p))
+		}
+		cfgCache = string(b)
+	})
+	return cfgCache
 }
 
 // SerialSuffix geeft de laatste 8 hexcijfers van het board-serial uit de
