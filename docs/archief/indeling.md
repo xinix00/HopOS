@@ -63,7 +63,7 @@ níét — die leeft in `app/applib` (gVisor over de abi-ringen).
 loader als go:embed-bytes in de node-binary). Hoort hier: alles wat alleen
 core 0 als vertrouwde kern doet.
 
-**`gui/`** — het display-vlak (docs/gui-ontwerp.md), sinds 20-07 een eigen
+**`gui/`** — het display-vlak (docs/archief/gui-ontwerp.md), sinds 20-07 een eigen
 categorie omdat GUI los van de rest moet kunnen: `hvs` (de read-only
 BCM2712-HVS-dumptool), `debug` (het :9091-endpoint erover), `fbgrant` (het
 fb-weggeef-beleid: claim, FB_*-env, console van/terug op het glas). Alleen

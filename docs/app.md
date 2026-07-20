@@ -83,6 +83,11 @@ hop apply --name hello --driver hop \
 hop logs hello
 ```
 
+**Prebuilt apps.** You don't have to build one to try HopOS — ready-made apps
+(the SURF display, a browser, a clock, a dashboard) are published on the
+[hop-os-surf releases page](https://github.com/xinix00/hop-os-surf/releases);
+point a job's `artifacts` URL straight at one.
+
 ## 5. Porting an existing Go service
 
 Most plain-Go services port in minutes — it's a checklist, not a rewrite:
