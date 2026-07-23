@@ -36,7 +36,20 @@ func New() *Manager {
 // phys vertaalt een HOP-slot naar de interne slot/core-index.
 func phys(slot int) int { return slot + slots.HopReserved() }
 
-func (Manager) NumSlots() int             { return slots.AppSlotCount() }
+// NumCores is de EERLIJKE app-core-capaciteit die HOP ziet: de PSCI-getelde
+// app-cores min de door de node-runtime gereserveerde cores (HopReserved).
+// agentboot rapporteert dit als CPUCores, dus een 4-core Pi (core 0 = HOP)
+// biedt er 3 aan. Het aantal KOOIEN dat de node kan dragen (AppSlotCount, tot
+// SlotCap — sharegroups stapelen méér kooien dan cores) zit BEWUST niet in het
+// contract: HOP kent alleen cores, probeert te plaatsen, en de node zegt ja of
+// nee. De echte muren (vrije cores in pool.go, RAM in partmem) bewaakt de node.
+func (Manager) NumCores() int {
+	if n := slots.NumSlots() - slots.HopReserved(); n > 0 {
+		return n
+	}
+	return 0
+}
+
 func (Manager) CoreClass(slot int) string { return slots.CoreClass(phys(slot)) }
 
 // StartLoader plaatst kooi + apploader. De sharegroup-plaatsing zit hier, in de
