@@ -10,6 +10,7 @@ package hopswitch
 
 import (
 	"encoding/binary"
+	"fmt"
 
 	"hop-os/metal/abi/layout"
 )
@@ -19,6 +20,21 @@ import (
 // te vallen". Het frame is alleen geldig tijdens de aanroep (de switch-lus
 // hergebruikt zijn buffer) — de ontvanger kopieert.
 var gatewayRx func(p []byte)
+
+// gwQueue is de wachtrij naar die NIC. De aflevering mag NOOIT onder mu
+// gebeuren: gvisor antwoordt SYNCHROON binnen InjectInbound (een SYN naar een
+// gesloten node-poort levert direct een RST), en dat antwoord komt via
+// internalTx.WriteNotify → FromGateway de switch weer in — op dezelfde
+// goroutine, die dan mu opnieuw wil pakken. sync.Mutex is niet reentrant, dus
+// dat is een self-deadlock met mu vast: de hele switch staat stil en élke app
+// kan het uitlokken met één pakketje. Daarom onder mu alleen kopiëren en
+// enqueuen (gwEnqueueLocked), en ná de unlock afleveren (drainGateway).
+var gwQueue [][]byte
+
+// gwQueueMax begrenst de wachtrij: dit pad is node-intern (agent/leader-
+// verkeer), dus een handvol frames volstaat. Vol = drop, zoals elke andere
+// volle ring hier — nooit ongebonden groeien op een app-gedreven pad.
+const gwQueueMax = 64
 
 // SetGatewayRx registreert de interne NIC-invoer (éénmalig bij hopnet-init).
 func SetGatewayRx(f func(p []byte)) {
@@ -31,13 +47,15 @@ func SetGatewayRx(f func(p []byte)) {
 // (de gateway): bezorgen op dst-MAC, broadcasts (ARP-requests van de interne
 // NIC naar slot-IP's) flooden naar alle slots. No-op zolang de switch niet
 // Up() is (zelfde contract als Attach).
+// Let op: dit kan (via de RST-teruglus) ónder een drainGateway lopen, dus de
+// mu-sectie is strikt begrensd en de eigen drain volgt ná de unlock.
 func FromGateway(p []byte) {
 	mu.Lock()
-	defer mu.Unlock()
-	if !up {
-		return
+	if up {
+		forward(0, p)
 	}
-	forward(0, p)
+	mu.Unlock()
+	drainGateway()
 }
 
 // gatewayClaimLocked (mu vast, vanuit forward): hoort dit gateway-frame bij
@@ -49,12 +67,49 @@ func gatewayClaimLocked(p []byte) bool {
 		return false
 	}
 	if len(p) < ethLen+20 || binary.BigEndian.Uint16(p[12:]) != etIPv4 {
-		gatewayRx(p) // ARP e.d.: alleen de interne NIC kan er iets mee
+		gwEnqueueLocked(p) // ARP e.d.: alleen de interne NIC kan er iets mee
 		return true
 	}
 	if binary.BigEndian.Uint32(p[ethLen+16:]) != layout.HostIP4() {
 		return false // IPv4 naar elders: NAT-terrein (masquerade)
 	}
-	gatewayRx(p)
+	gwEnqueueLocked(p)
 	return true
+}
+
+// gwEnqueueLocked zet een kopie van het frame in de wachtrij (mu vast). De
+// kopie is nodig omdat de switch-lus zijn leesbuffer hergebruikt en de
+// aflevering pas ná de unlock gebeurt.
+func gwEnqueueLocked(p []byte) {
+	if len(gwQueue) >= gwQueueMax {
+		return // vol: drop (TCP herstelt)
+	}
+	gwQueue = append(gwQueue, append([]byte(nil), p...))
+}
+
+// drainGateway levert de gewachte frames af aan de interne NIC — ZONDER mu.
+// Aanroepen direct na elke ronde die mu vasthield (switchPass, FromGateway).
+//
+// Eigen recover: gvisor krijgt hier app-gestuurde frame-inhoud te verwerken, en
+// dat mag core 0 — en dus álle slots — niet vellen. Het lijstje wordt onder mu
+// omgewisseld, zodat een aflevering die zélf weer frames aanlevert (de
+// RST-teruglus via FromGateway) niet in dezelfde slice knoeit.
+func drainGateway() {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("HOPOS_GWNIC_PANIC: %v — frame dropped, switch keeps running\n", r)
+		}
+	}()
+	for {
+		mu.Lock()
+		q, rx := gwQueue, gatewayRx
+		gwQueue = nil
+		mu.Unlock()
+		if len(q) == 0 || rx == nil {
+			return
+		}
+		for _, p := range q {
+			rx(p)
+		}
+	}
 }

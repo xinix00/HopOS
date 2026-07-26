@@ -87,8 +87,15 @@ func residentReset(core, i int) {
 func residentAdd(core, i int) {
 	b := layout.ParkMboxPA(core)
 	n := dev.Read64(b + layout.SchedCount)
-	if n > uint64(layout.SlotCap) {
-		n = uint64(layout.SlotCap) // defensief: rommel nooit als lijstlengte volgen
+	// >= , niet >: bij n == SlotCap is de lijst vól en zou de append hieronder
+	// op SchedList[SlotCap] schrijven — en dat is precies het woord SchedS2PA
+	// (layout: 96+128 = 224), de Stage2PA-pointer waarmee switch.s élk ctx-blok
+	// op deze core vindt. Vandaag onbereikbaar (er bestaan geen SlotCap+1
+	// kooien), maar een geklemde lengte mag nooit alsnog één byte over de rand
+	// schrijven — vol is vol.
+	if n >= uint64(layout.SlotCap) {
+		fmt.Printf("slot %d: resident list of core %d is full (%d) — not added\n", i, core, n)
+		return
 	}
 	// Al lid? (twee-fase-start: de loader stond al in de lijst, ctx nu Dead) —
 	// niet dubbel toevoegen; fase 2 flipt straks alleen de ctx-staat.

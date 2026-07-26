@@ -98,7 +98,18 @@ func Up() error {
 		if l, has := lh.DHCPLease(); has {
 			var m [6]byte
 			copy(m[:], hw)
-			go dhcp.KeepAlive(m, l)
+			// Eigen recover: KeepAlive verwerkt DHCP-antwoorden van het LAN
+			// (onvertrouwde inhoud) op een eigen goroutine — een panic daar zou
+			// de hele node vellen. Zonder lease-vernieuwing blijft de node
+			// werken tot de lease verloopt; dat is oneindig veel beter dan dood.
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						fmt.Printf("HOPOS_DHCP_PANIC: %v — lease renewal stopped, node keeps running\n", r)
+					}
+				}()
+				dhcp.KeepAlive(m, l)
+			}()
 		}
 	}
 
@@ -110,13 +121,31 @@ func Up() error {
 func rxLoop(nic gnet.NetworkDevice, iface *gnet.Interface) {
 	buf := make([]byte, gnet.MTU+gnet.EthernetMaximumSize)
 	for {
-		n, err := nic.Receive(buf)
-		if n == 0 || err != nil {
+		if !rxPass(nic, iface, buf) {
 			time.Sleep(300 * time.Microsecond)
-			continue
-		}
-		if err := iface.Stack.RecvInboundPacket(buf[:n]); err != nil && iface.HandleStackErr != nil {
-			iface.HandleStackErr(err, false)
 		}
 	}
+}
+
+// rxPass doet één ontvangst-ronde, mét recover — het spiegelbeeld van
+// hopswitch.switchPass. Dit is het meest blootgestelde pad van de node: ruwe
+// frames van de fysieke NIC, remote en zonder authenticatie, en ze lopen via
+// Uplink.Receive tot in de NAT (arpLearn, DNAT, checksum-herschrijving) en de
+// gvisor-stack. Een panic op frame-inhoud zou hier de RX-goroutine velen, en dat
+// is de hele node — álle slots. Frame gedropt, lus draait door; na een panic
+// slaapt de lus zijn normale tikje, zodat een panic-storm de core niet opeet.
+func rxPass(nic gnet.NetworkDevice, iface *gnet.Interface, buf []byte) (worked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("HOPOS_RX_PANIC: %v — frame dropped, RX keeps running\n", r)
+		}
+	}()
+	n, err := nic.Receive(buf)
+	if n == 0 || err != nil {
+		return false
+	}
+	if err := iface.Stack.RecvInboundPacket(buf[:n]); err != nil && iface.HandleStackErr != nil {
+		iface.HandleStackErr(err, false)
+	}
+	return true
 }

@@ -57,8 +57,12 @@ func syncOnce(server string) error {
 	// Transmit-timestamp (bytes 40-47): 32.32 fixed-point sinds 1900.
 	secs := uint64(resp[40])<<24 | uint64(resp[41])<<16 | uint64(resp[42])<<8 | uint64(resp[43])
 	frac := uint64(resp[44])<<24 | uint64(resp[45])<<16 | uint64(resp[46])<<8 | uint64(resp[47])
-	if secs == 0 {
-		return fmt.Errorf("sntp: lege timestamp van %s", server)
+	// Onder de NTP→Unix-epoch weigeren, niet alleen 0: `secs-ntpEpochOffset`
+	// underflowt anders op uint64 en zet de wandklok absurd ver weg. De klok is
+	// wat TLS-certificaten valideert (S3, artifact-downloads), dus een
+	// onzin-antwoord van een gespoofte of kapotte server moet hier stoppen.
+	if secs <= ntpEpochOffset {
+		return fmt.Errorf("sntp: onzin-timestamp %d van %s (vóór de Unix-epoch)", secs, server)
 	}
 	ns := int64(secs-ntpEpochOffset)*int64(time.Second) + int64(frac*1e9>>32)
 

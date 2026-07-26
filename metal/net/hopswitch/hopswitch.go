@@ -26,17 +26,14 @@ import (
 )
 
 const (
-	prefix = layout.NetPrefix
 
 	// maxBurst begrenst het aantal frames per poort per switch-ronde, zodat
 	// één drukke poort de rest niet verhongert.
 	maxBurst = 64
 )
 
-// HostIP is HOP's interne adres (de gateway), SlotIP dat van slot i — beide
 // uit het net-plan in layout, als string voor de mains (layout.IP4Str: de
 // string-vorm woont bij de bron van het plan).
-var HostIP = layout.IP4Str(layout.HostIP4())
 
 func SlotIP(i int) string { return layout.IP4Str(layout.SlotIP4(i)) }
 
@@ -131,7 +128,16 @@ func loop() {
 // reikt) mag core 0 — en dus álle slots — niet vellen. De defer ontgrendelt
 // mu (ook bij een panic, anders deadlockt de volgende ronde) en recovert: het
 // frame wordt gedropt en de switch draait door.
+// De aflevering aan HOP's interne NIC hangt bewust búiten het mu-venster
+// (drainGateway): gvisor antwoordt synchroon en dat antwoord komt via
+// FromGateway de switch weer in — onder mu zou dat een self-deadlock zijn.
 func switchPass(buf []byte) (worked bool) {
+	worked = switchPassLocked(buf)
+	drainGateway()
+	return worked
+}
+
+func switchPassLocked(buf []byte) (worked bool) {
 	mu.Lock()
 	defer func() {
 		mu.Unlock()
@@ -213,9 +219,6 @@ func forward(src int, p []byte) {
 		return
 	}
 	if dst != src && dst <= layout.MaxSlots && ports[dst] != nil {
-		// Passief meelezen (TCP-seq's) zodat ResetPeers bij slot-dood een
-		// exact-verwachte RST naar de overlevende kant kan sturen (rst.go).
-		trackSlotTCP(src, dst, p)
 		ports[dst].rx.Write(ring.TypeFrame, p)
 	}
 }

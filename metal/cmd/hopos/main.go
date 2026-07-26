@@ -43,11 +43,20 @@ import (
 	"hop-os/metal/net/hopswitch"
 )
 
-func fail(what string, err error) {
-	fmt.Printf("FAIL %s: %v\nHOPOS_AGENT_FAIL\n", what, err)
+// park houdt de node in leven zónder verder werk, en keert nooit terug: HopOS
+// heeft geen shell om op terug te vallen, dus een node die niet verder kán
+// blijft liever bestaan (een watchdog-reboot of een latere link herstelt) dan
+// verdwijnen. De reden gaat mee en wordt hier gelogd — een stille park is niet
+// te diagnosticeren op een headless node.
+func park(reden string) {
+	fmt.Println(reden)
 	for {
 		time.Sleep(time.Hour)
 	}
+}
+
+func fail(what string, err error) {
+	park(fmt.Sprintf("FAIL %s: %v\nHOPOS_AGENT_FAIL", what, err))
 }
 
 // screenStatus ververst de meetregels rechts naast de bunny (fb.HeaderStatus,
@@ -177,7 +186,6 @@ func main() {
 		go screenStatus()
 	}
 
-
 	// Netwerk opbrengen. Geen harde eis (net als storage en SNTP hieronder):
 	// een board dat geen link/DHCP krijgt (ProbeNIC faalt hard na zijn eigen
 	// time-outs) draait door als headless/compute-node i.p.v. permanent te
@@ -233,18 +241,29 @@ func main() {
 		boardExtra()
 	}
 
-	// Hoeveel cores houdt de HOP-runtime voor zichzelf? HopOS leest het uit de
-	// platform-config (board-hook) en past het toe: SetHopCores reserveert de
-	// cores uit de slot-pool (slotmgr biedt HOP de rest), en bij N>1 brengt de
-	// node-SMP hieronder de extra cores als Go-Ms op (GOMAXPROCS=N; Go spreidt de
-	// node-goroutines zelf). N=1 (default) = geen reservering, geen extra cores.
-	// Hoeveel cores voor de HOP-runtime (core 0 telt mee; de rest zijn
-	// app-slots). Default 1: geen verspilling bij weinig apps — opt-in hoger
-	// (hopos.cores=2) als de flow er druk genoeg voor is; >1 zet GOMAXPROCS en
-	// Go spreidt de node-goroutines zelf. Slotmgr biedt HOP (totaal − N) slots.
+	// Hoeveel cores houdt de HOP-runtime voor zichzelf (core 0 telt mee; de rest
+	// zijn app-slots)? HopOS leest het uit de platform-config (board-hook):
+	// SetHopCores reserveert ze uit de slot-pool — slotmgr biedt HOP de rest —
+	// en bij N>1 brengt de node-SMP hieronder de extra cores als Go-Ms op
+	// (GOMAXPROCS=N; Go spreidt de node-goroutines zelf). Default 1: geen
+	// verspilling bij weinig apps, opt-in hoger (hopos.cores=2) als de flow er
+	// druk genoeg voor is.
 	nCores := 1
 	if n, err := strconv.Atoi(bootParam("hopos.cores")); err == nil && n >= 1 {
 		nCores = n
+	}
+	// Bovengrens op de FYSIEKE cores. Dit is bewust géén grens op het aantal
+	// kooien/slots — die mogen de core-telling wél overschrijden (sharegroups
+	// stapelen kooien op één core). Maar de node-cores hier zijn echt ijzer:
+	// hopos.cores telt core 0 mee en HOP pakt daarnaast cores 1..n-1, dus er
+	// moeten n-1 app-cores bestáán. Een typefout op het bootmedium
+	// (hopos.cores=22 op een 4-core Pi) liet ConfigureNode anders cores
+	// dispatchen die er niet zijn en control-pages buiten het gereserveerde plan
+	// gebruiken. Klemmen + luid melden i.p.v. stil scheef booten.
+	if max := layout.NumAppCores() + 1; nCores > max {
+		fmt.Printf("hop: WARNING hopos.cores=%d exceeds this board's %d physical cores — clamping to %d\n",
+			nCores, max, max)
+		nCores = max
 	}
 	slots.SetHopCores(nCores)
 	if nCores > 1 {
@@ -299,6 +318,16 @@ func main() {
 	if cfg.APIKey != "" {
 		fmt.Println("hop: API authentication enabled (X-Hop-Auth HMAC)")
 	}
+	// Fail closed zonder sleutel. Een lege APIKey zet de HMAC-middleware
+	// volledig uit (httputil.RequireHMAC geeft de handler dan ongewijzigd
+	// terug), en de agent/leader luisteren op het LAN: dan kan ELKE host een
+	// job dispatchen (POST /v1/jobs, agent /run) op een vertrouwde node. Dat is
+	// geen "vluchtig standalone-gedrag" maar ongeauthenticeerde
+	// code-uitvoering, dus het moet een expliciete keuze zijn i.p.v. de
+	// stilzwijgende default. `hopos.insecure=1` is die keuze (bank/dev);
+	// zonder sleutel én zonder die vlag start de API niet en blijft de node
+	// gewoon leven — een node die niet luistert is beter dan een open node.
+	apiInsecure := bootParam("hopos.insecure") == "1"
 	s3 := &cfg.Cluster.Lock.S3
 	s3.Endpoint = bootParam("hopos.s3.endpoint")
 	s3.Bucket = bootParam("hopos.s3.bucket")
@@ -405,20 +434,26 @@ func main() {
 	// interne switch, klok, storage en dvfs draaien al; blijf headless leven
 	// (een reboot of latere link herstelt) i.p.v. de agent te starten en te faulten.
 	if netErr != nil {
-		fmt.Printf("hop: headless — no external network, agent/leader not started; node %s stays alive HOPOS_NODE_HEADLESS\n",
-			cfg.Node.ID)
-		for {
-			time.Sleep(time.Hour)
-		}
+		park(fmt.Sprintf("hop: headless — no external network, agent/leader not started; node %s stays alive HOPOS_NODE_HEADLESS",
+			cfg.Node.ID))
+	}
+
+	// De auth-poort (zie hopos.apikey hierboven): zonder sleutel en zonder
+	// expliciete opt-out gaat de API niet open. De node blijft leven — switch,
+	// klok, storage en dvfs draaien al — zodat dit een configuratiefout is die
+	// je op de console ziet, niet een node die stilletjes op het LAN staat te
+	// wachten op de eerste willekeurige POST /v1/jobs.
+	if cfg.APIKey == "" && !apiInsecure {
+		park(fmt.Sprintf("hop: REFUSING to start agent/leader — no hopos.apikey set, so the HTTP API would accept unauthenticated job dispatch from any host on the LAN.\n"+
+			"     Set hopos.apikey=<random-hex> on the boot medium, or hopos.insecure=1 to accept an open API on purpose.\n"+
+			"     Node %s stays alive without the API. HOPOS_API_NO_AUTH", cfg.Node.ID))
+	}
+	if apiInsecure && cfg.APIKey == "" {
+		fmt.Println("hop: WARNING — API authentication is OFF (hopos.insecure=1): any host that can reach this node can dispatch jobs. HOPOS_API_INSECURE")
 	}
 
 	fmt.Printf("hop: agent starting — node %s, agent :%d, leader :%d — HOPOS_AGENT_UP\n",
 		cfg.Node.ID, cfg.Node.Port, cfg.Node.Port+1000)
-
-	// Metal-debug (read-only, :9091): nu er netwerk is kan het instrument
-	// bevraagd worden — zonder UART-kabel (de mobiele opstelling). Alleen in
-	// gui-builds (gui.go); de kale smaak is een no-op (gui_stub.go).
-	startDebug()
 
 	// PID-1-regel: Run blokkeert; keert hij terug, dan is dat een fout.
 	err := agentboot.Run(context.Background(), agentboot.Options{

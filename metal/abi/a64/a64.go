@@ -14,11 +14,6 @@ func Movk(rd, imm16, shift uint32) uint32 {
 	return 0xF2800000 | (shift/16)<<21 | (imm16&0xFFFF)<<5 | rd&0x1F
 }
 
-// StrX codeert str Xt, [Xn, #off] (off veelvoud van 8, 64-bit).
-func StrX(rt, rn, off uint32) uint32 {
-	return 0xF9000000 | (off/8)<<10 | (rn&0x1F)<<5 | rt&0x1F
-}
-
 // Mov64 genereert movz+movk('s) die de volledige 64-bit constante v in
 // x<rd> laden; nulhelften worden overgeslagen.
 func Mov64(code []uint32, rd uint32, v uint64) []uint32 {

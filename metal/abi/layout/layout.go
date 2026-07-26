@@ -343,7 +343,6 @@ func CtrlPagePA(i int) uintptr { return pa(plan.CtrlPA + uint64(i)*CtrlStride) }
 
 // BootScratchPA/DTBPtrPA: de fysieke boot-scratch (cpuinit-vast).
 func BootScratchPA() uintptr { return pa(plan.BootScratchPA) }
-func DTBPtrPA() uintptr      { return pa(plan.BootScratchPA + 8) }
 
 // RingOutboxPA/RingInboxPA: de fysieke hop-ABI-ringen van slot i.
 func RingOutboxPA(i int) uintptr {

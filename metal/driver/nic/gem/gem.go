@@ -36,7 +36,6 @@ const (
 	regPBufRxCut = 0x044 // RX partial store&forward (uit = 0)
 	regSpAddr1B  = 0x088 // MAC-adres bottom
 	regSpAddr1T  = 0x08C // MAC-adres top
-	regModuleID  = 0x0FC // module/revisie-ID (leesbaar zonder init)
 	regDCFG1     = 0x280 // design config 1: DBWDEF [27:25] = AXI-busbreedte
 	// AMP (AXI Max Pipeline, macb.h GEM_AMP): outstanding-limieten van de
 	// GEM-AXI-master — AR2R [7:0] reads, AW2W [15:8] writes, AW2B_FILL bit 16
@@ -46,7 +45,6 @@ const (
 	ampAW2WMax8 = 8 << 8  // rp1.dtsi: cdns,aw2w-max-pipe = 8
 	ampAW2BFill = 1 << 16 // rp1.dtsi: cdns,use-aw2b-fill
 
-	regDCFG6 = 0x294 // design config 6: queue-mask [7:0], DAW64 bit 23
 	regTBQPH = 0x4C8 // TX queue base, hoge 32 bits (64-bit DMA)
 	regRBQPH = 0x4D4 // RX queue base, hoge 32 bits
 
@@ -120,18 +118,6 @@ type Net struct {
 
 func (n *Net) rd(off uintptr) uint32    { return dev.Read32(n.Base + off) }
 func (n *Net) wr(off uintptr, v uint32) { dev.Write32(n.Base+off, v) }
-
-// ModuleID geeft het GEM module/revisie-register — de eerste read-only
-// verificatie dat het registerblok echt antwoordt.
-func (n *Net) ModuleID() uint32 { return n.rd(regModuleID) }
-
-// DesignCfg geeft (DCFG1, DCFG6): de gesynthetiseerde AXI-busbreedte
-// (DBWDEF [27:25]), het queue-mask [7:0] en DAW64 (bit 23) — de
-// hardware-eigenschappen waar Init zich naar richt (diagnose/probe).
-func (n *Net) DesignCfg() (dcfg1, dcfg6 uint32) { return n.rd(regDCFG1), n.rd(regDCFG6) }
-
-// TxStatus geeft het rauwe TSR (bit 3 = TGO: zender actief; diagnose).
-func (n *Net) TxStatus() uint32 { return n.rd(regTxStatus) }
 
 // MDIORead leest een clause-22 PHY-register (wacht begrensd tot de bus vrij
 // is). Blijft de bus hangen — vóór of ná de transactie — dan zou het

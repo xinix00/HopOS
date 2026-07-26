@@ -83,5 +83,19 @@ arm_freq=1500
 initramfs hopos.cfg 0x0f200000
 EOF
 
-echo "sd-rpi5/hop-agent5.img ($(du -h sd-rpi5/hop-agent5.img | cut -f1)) + config.txt klaar." >&2
-echo "flash: cp sd-rpi5/hop-agent5.img sd-rpi5/config.txt /Volumes/bootfs/ && sync && diskutil eject" >&2
+# config.txt laadt hopos.cfg verplicht (`initramfs hopos.cfg`) en dát bestand
+# staat in .gitignore (het bevat de API-key en de S3-geheimen). Een verse clone
+# heeft hem dus niet — en zonder config boot de node zonder API-auth-sleutel en
+# zonder init-jobs. Luid falen mét het recept, i.p.v. een stick afleveren die
+# stil half werkt.
+if [ ! -f "$DIR/sd-rpi5/hopos.cfg" ]; then
+	echo "" >&2
+	echo "FOUT: sd-rpi5/hopos.cfg ontbreekt — config.txt laadt hem verplicht." >&2
+	echo "  cp sd-rpi5/hopos.cfg.example sd-rpi5/hopos.cfg" >&2
+	echo "  \$EDITOR sd-rpi5/hopos.cfg   # minimaal hopos.apikey zetten" >&2
+	echo "" >&2
+	exit 1
+fi
+
+echo "sd-rpi5/hop-agent5.img ($(du -h sd-rpi5/hop-agent5.img | cut -f1)) + config.txt + hopos.cfg klaar." >&2
+echo "flash: cp sd-rpi5/hop-agent5.img sd-rpi5/config.txt sd-rpi5/hopos.cfg /Volumes/bootfs/ && sync && diskutil eject" >&2

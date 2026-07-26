@@ -333,12 +333,6 @@ func (rc *RC) LinkStatus() (phy, dl bool) {
 // Status geeft het rauwe PCIE_STATUS-register (diagnose).
 func (rc *RC) Status() uint32 { return rc.rd(miscPCIeStatus) }
 
-// LinkSpeedWidth leest LNKSTA na de training: (gen, lanes).
-func (rc *RC) LinkSpeedWidth() (speed, width int) {
-	st := rc.rd(cfgLnkSta) >> 16
-	return int(st & 0xf), int(st >> 4 & 0x3f)
-}
-
 // CfgRead32/CfgWrite32 doen configruimte-toegang: bus 0 = de RC zelf (direct
 // op de basis), dieper via het EXT_CFG-indexvenster. LET OP: benader nooit
 // bus ≥ 1 zonder DL_ACTIVE — dat is een bus-abort.
@@ -420,67 +414,4 @@ func (rc *RC) BringUp(cfg BringConfig) error {
 	rc.CfgWrite32(1, 0, 0, cfgCommand, rc.CfgRead32(1, 0, 0, cfgCommand)|0x6)
 	dev.MB()
 	return nil
-}
-
-// AssignBARs meet en programmeert de memory-BAR's van één endpoint (bus/devno,
-// fn 0) achter deze root-complex: eerst alle groottes opmeten (de
-// all-ones-schrijftruc + teruglezen), dan BAR1 → PCIe 0x0 (de RP1-DMA-
-// loopback-eis) en de rest aaneengesloten daarachter, elk uitgelijnd op zijn
-// eigen grootte, met minstens 16MB tussen BAR1 en de rest. Geeft per BAR-index
-// het toegewezen PCIe-adres (^0 = afwezig), de gemeten grootte (0 = afwezig) en
-// of het een 64-bit BAR was (die neemt óók de volgende index in).
-//
-// Eén codepad voor twee aanroepers: de rpi5-board-bring-up (stil — de
-// terugwaardes worden genegeerd) en probe6 (die de meting uit de returns
-// print). LET OP: dit schrijft per BAR een 64-bit hi-word alleen als de BAR
-// zich als 64-bit meldt — zo blijft een aangrenzende 32-bit BAR (bv. RP1's
-// buren) ongemoeid, anders dan pcie.SetBAR64 dat altijd 64-bit schrijft.
-func (rc *RC) AssignBARs(bus, devno int) (addr, size [6]uint64, is64 [6]bool) {
-	for i := range addr {
-		addr[i] = ^uint64(0)
-	}
-	for i := 0; i < 6; i++ {
-		off := uintptr(0x10 + i*4)
-		rc.CfgWrite32(bus, devno, 0, off, 0xffffffff)
-		lo := rc.CfgRead32(bus, devno, 0, off)
-		if lo == 0 || lo == 0xffffffff {
-			continue
-		}
-		if lo&0x7 == 0x4 { // 64-bit memory-BAR: neemt ook slot i+1
-			rc.CfgWrite32(bus, devno, 0, off+4, 0xffffffff)
-			hi := rc.CfgRead32(bus, devno, 0, off+4)
-			size[i] = ^(uint64(hi)<<32 | uint64(lo&^0xf)) + 1
-			is64[i] = true
-		} else {
-			size[i] = uint64(^(lo &^ 0xf) + 1)
-		}
-		if is64[i] {
-			i++
-		}
-	}
-	// Toewijzen: BAR1 → 0x0 (DMA-loopback-eis), cursor voor de rest erachter.
-	cursor := size[1]
-	if cursor < 0x1000000 {
-		cursor = 0x1000000 // minstens 16MB vrijhouden na BAR1
-	}
-	for i := 0; i < 6; i++ {
-		if size[i] == 0 {
-			continue
-		}
-		a := uint64(0) // BAR1 blijft op 0x0
-		if i != 1 {
-			a = (cursor + size[i] - 1) &^ (size[i] - 1) // uitlijnen op eigen grootte
-			cursor = a + size[i]
-		}
-		addr[i] = a
-		off := uintptr(0x10 + i*4)
-		rc.CfgWrite32(bus, devno, 0, off, uint32(a))
-		if is64[i] {
-			rc.CfgWrite32(bus, devno, 0, off+4, uint32(a>>32))
-		}
-		if is64[i] {
-			i++ // 64-bit BAR nam ook slot i+1
-		}
-	}
-	return addr, size, is64
 }

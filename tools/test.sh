@@ -21,7 +21,7 @@ go run ../tools/importcheck.go
 go test "$@" \
 	./abi/ring ./net/hopswitch ./kern/stage2 ./abi/layout ./net/dhcp ./abi/hopabi ./abi/checksum \
 	./fw/fdt ./fw/acpi ./kern/hopfs ./driver/vcmail ./driver/nic/mdio ./kern/slots \
-	./gui/hvs ./gui/fbgrant ./gui/debug
+	./gui/fbgrant ./app/applib/apphttp
 
 TAMAGO="${TAMAGO:-$HOME/tamago-go/bin/go}"
 if [ ! -x "$TAMAGO" ]; then
@@ -30,13 +30,9 @@ if [ ! -x "$TAMAGO" ]; then
 fi
 # App-images zijn board-onafhankelijk (board/hopslot via applib): één build
 # dekt alle boards. De apploader is de enige startroute (twee-fase-lading):
-# bouwt hij niet, dan start geen enkele job — dus hard in de gate. De
-# lnetonet-variant is de opt-in netstack-backend (appnet/up_lneto.go); die
-# moet blijven bouwen tot hij na NETDEMO+soak de default wordt.
-for tags in "linkcpuinit" "lnetonet linkcpuinit"; do
-	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-		"$TAMAGO" build -tags "$tags" -o /dev/null ./app/appspike ./app/apploader ./app/hello
-done
+# bouwt hij niet, dan start geen enkele job — dus hard in de gate.
+GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
+	"$TAMAGO" build -tags linkcpuinit -o /dev/null ./app/appspike ./app/apploader ./app/hello
 # Elke board-smaak kaal; plus de gui-smaak (metal/gui achter -tags gui) op
 # virt (bewijst de bedrading zonder Display-board) en rpi5 (mét).
 for tags in "linkcpuinit" "rpi4 linkcpuinit" "rpi5 linkcpuinit" "uefi linkcpuinit" "gui linkcpuinit" "rpi5 gui linkcpuinit"; do

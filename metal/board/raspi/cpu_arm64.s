@@ -10,29 +10,3 @@ TEXT ·mpidr(SB),NOSPLIT,$0-8
 	WORD	$0xd53800a0	// mrs x0, mpidr_el1
 	MOVD	R0, ret+0(FP)
 	RET
-
-// CNTFRQ_EL0: de counterfrequentie zoals de firmware hem zette (54MHz op de
-// Pi). Lezen trapt nooit; 0 = firmware vergat hem → timer/Sleep dood.
-TEXT ·cntfrq(SB),NOSPLIT,$0-8
-	WORD	$0xd53be000	// mrs x0, cntfrq_el0
-	MOVD	R0, ret+0(FP)
-	RET
-
-// CNTPCT_EL0: de fysieke counter. LET OP: kán trappen op EL1 als de
-// hypervisor-laag EL1PCTEN niet zette — de aanroeper hoort zich eerst op
-// het scherm aan te kondigen (probe-patroon), dan wijst een bevriezing
-// deze read aan.
-TEXT ·cntpct(SB),NOSPLIT,$0-8
-	WORD	$0xd53be020	// mrs x0, cntpct_el0
-	MOVD	R0, ret+0(FP)
-	RET
-
-// spin draait n afhankelijke SUBS-iteraties (~1 cycle/iter op een A76 met
-// I-cache aan): tegen CNTPCT gezet meet dit de effectieve kloksnelheid —
-// de firmware-default vóór wij ooit aan clocking doen (P2b).
-TEXT ·spin(SB),NOSPLIT,$0-8
-	MOVD	n+0(FP), R0
-spinlus:
-	SUBS	$1, R0
-	BNE	spinlus
-	RET

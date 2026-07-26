@@ -40,6 +40,11 @@ const (
 	protoTCP = 6
 	protoUDP = 17
 
+	// TCP-vlagbits: natFromSlot onderscheidt een kale SYN (uitgaand dialen)
+	// van een antwoord op een gepubliceerde poort.
+	tcpFlagSYN = 0x02
+	tcpFlagACK = 0x10
+
 	// Masquerade-poortbereik (PAT) en conntrack-grenzen. MasqBase/MasqEnd is
 	// bewust disjunct van het efemere bereik van HOP's eigen externe stack
 	// (hopnet begrenst die op [16000, MasqBase)): anders zou een inbound
@@ -54,6 +59,16 @@ const (
 	maxFlows = 4096
 	tcpIdle  = 300 * time.Second
 	udpIdle  = 60 * time.Second
+
+	// maxFlowsPerSlot is het eerlijke deel per slot ónder het globale plafond.
+	// Zonder dit is de conntrack één gedeelde pot: één app die 4096 uitgaande
+	// verbindingen opent (of dat per ongeluk doet in een lus) laat élke buur
+	// geen nieuwe verbinding meer maken — geen crash, maar wel de buren de
+	// schuld van jouw gedrag. Met een quotum raakt de dader zijn eigen plafond
+	// en blijven de anderen ongemoeid. Ruim gekozen: een normale app-workload
+	// zit hier ver onder, en 128 slots × 512 overschrijdt het globale plafond
+	// bewust (het is een eerlijkheidsgrens, geen reservering).
+	maxFlowsPerSlot = 512
 
 	// maxNeigh begrenst de neighbor-cache (spoofbare srcIP als key): bij het
 	// plafond legen en herleren, net als de oude next-hop-tabel.
@@ -76,10 +91,7 @@ type pub struct {
 	slotPort uint16
 }
 
-// flow is één uitgaande masquerade-verbinding. slotSeq is het volgende
-// verwachte seq van de slot-kant (passief meegelezen in natOutbound) — het
-// exacte nummer dat een RST bij slot-dood nodig heeft (rst.go); de NAT
-// herschrijft seq's niet, dus het is op de draad geldig.
+// flow is één uitgaande masquerade-verbinding.
 type flow struct {
 	proto    byte
 	slot     int
@@ -89,8 +101,6 @@ type flow struct {
 	dstPort  uint16
 	nodePort uint16
 	seen     time.Time
-	slotSeq  uint32
-	seqKnown bool
 }
 
 // fkey/rkey: forward-lookup (slot → nieuw/bestaand flow) en reverse-lookup
@@ -478,6 +488,17 @@ func natFromSlot(src int, f []byte) bool {
 	if m == nil {
 		return false
 	}
+	// Een échte reply op een gepubliceerde poort begint nooit met een kale SYN:
+	// dit pad is stateloos en matcht alleen (proto, slot, poort), dus een app die
+	// zélf naar buiten dialt en daarbij toevallig zijn eigen listen-poort als
+	// BRONpoort krijgt, werd hier als "antwoord" geclaimd en stil naar nodePort
+	// ge-SNAT — een kapotte uitgaande verbinding zonder spoor. SYN-zonder-ACK
+	// hoort bij masquerade (natOutbound), dus die geven we door.
+	// (UDP kent geen handshake en blijft dus op de poort-match staan — daar is de
+	// publicatie de bedoelde bestemming; KISS, zoals de rest van deze DNAT.)
+	if proto == protoTCP && l4[13]&tcpFlagSYN != 0 && l4[13]&tcpFlagACK == 0 {
+		return false
+	}
 	nextHop, known := l2For(binary.BigEndian.Uint32(ip[16:]))
 	if !known {
 		return true // next-hop onbekend: drop, de retransmit leert 'm
@@ -521,14 +542,6 @@ func natOutbound(src int, f []byte) bool {
 		return true // pool vol: drop
 	}
 	fl.seen = time.Now()
-	if proto == protoTCP {
-		// Volgende verwachte seq van de slot-kant bijhouden voor de RST bij
-		// slot-dood (rst.go).
-		if next, _, ok := tcpSegNext(ip, l4, ihl); ok {
-			fl.slotSeq = next
-			fl.seqKnown = true
-		}
-	}
 	binary.BigEndian.PutUint32(ip[12:], uplink.ip)
 	fixCsum32(ip[10:], slotIP, uplink.ip)
 	rewriteL4(l4, proto, 0, slotIP, uplink.ip, sport, fl.nodePort)
@@ -556,6 +569,15 @@ func flowFor(proto byte, slot int, slotIP uint32, slotPort uint16, dstIP uint32,
 		}
 	}
 	flowsFull = false
+	// Eerlijk deel per slot (zie maxFlowsPerSlot): eerst vegen, dan pas de dader
+	// afwijzen — een slot dat alleen verlopen flows had, mag gewoon door.
+	if flowsForSlot(slot) >= maxFlowsPerSlot {
+		sweepExpired()
+		if n := flowsForSlot(slot); n >= maxFlowsPerSlot {
+			fmt.Printf("HOPOS_MASQ_SLOT_FULL: slot %d has %d flows (max %d) — new outbound flow dropped\n", slot, n, maxFlowsPerSlot)
+			return nil
+		}
+	}
 	np, ok := allocPort(proto, dstIP, dstPort)
 	if !ok {
 		return nil
@@ -565,6 +587,20 @@ func flowFor(proto byte, slot int, slotIP uint32, slotPort uint16, dstIP uint32,
 	flowsFwd[k] = fl
 	flowsRev[rkey{proto, np, dstIP, dstPort}] = fl
 	return fl
+}
+
+// flowsForSlot telt de lopende flows van één slot (mu vast). Een lineaire telling
+// over ≤ maxFlows entries, alleen op het pad "nieuwe flow" — geen aparte teller
+// die uit de pas kan lopen met flowsFwd (die twee synchroon houden over sweep,
+// UnpublishSlot en dood-detectie is precies waar zulke bugs zitten).
+func flowsForSlot(slot int) int {
+	n := 0
+	for _, fl := range flowsFwd {
+		if fl.slot == slot {
+			n++
+		}
+	}
+	return n
 }
 
 // allocPort kiest een vrij node-poortnummer voor een nieuwe flow: rollend door

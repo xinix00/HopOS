@@ -193,13 +193,6 @@ func (n *Net) Reset() error {
 	return nil
 }
 
-// MDICRead leest een PHY-register via het MDI-control-register (begrensd
-// pollen op READY — een dode MDI-bus mag de boot niet gijzelen).
-func (n *Net) MDICRead(reg int) (uint16, error) {
-	n.wr(regMDIC, uint32(reg&0x1F)<<16|phyAddr<<21|mdicReadOp)
-	return n.mdicWait()
-}
-
 // MDICWrite schrijft een PHY-register.
 func (n *Net) MDICWrite(reg int, val uint16) error {
 	n.wr(regMDIC, uint32(val)|uint32(reg&0x1F)<<16|phyAddr<<21|mdicWriteOp)

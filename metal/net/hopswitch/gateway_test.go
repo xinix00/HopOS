@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"testing"
+	"time"
 
 	"hop-os/metal/abi/layout"
 )
@@ -21,6 +22,16 @@ func captureGateway(t *testing.T) *[][]byte {
 	return &got
 }
 
+// forwardEnDrain doet één switch-ronde zoals switchPass dat doet: forward onder
+// mu (dáár wordt een gateway-frame alleen gequeued) en de aflevering aan de
+// interne NIC erna, búiten mu. Die scheiding ís het contract — zie gateway.go.
+func forwardEnDrain(src int, p []byte) {
+	mu.Lock()
+	forward(src, p)
+	mu.Unlock()
+	drainGateway()
+}
+
 func TestGatewayIPGaatInterneNICIn(t *testing.T) {
 	resetNAT()
 	nic := setUplink(t)
@@ -29,9 +40,7 @@ func TestGatewayIPGaatInterneNICIn(t *testing.T) {
 
 	// Slot 1 → 10.100.0.1:9080 (de leader): interne NIC, géén masquerade.
 	f := mkFrame(protoTCP, hostMAC, layout.SlotMAC(1), layout.SlotIP4(1), layout.HostIP4(), 5555, 9080, nil)
-	mu.Lock()
-	forward(1, f)
-	mu.Unlock()
+	forwardEnDrain(1, f)
 	if len(*got) != 1 {
 		t.Fatalf("interne NIC kreeg %d frames, wil 1", len(*got))
 	}
@@ -51,9 +60,7 @@ func TestExternBlijftMasquerade(t *testing.T) {
 	got := captureGateway(t)
 
 	f := mkFrame(protoTCP, hostMAC, layout.SlotMAC(1), layout.SlotIP4(1), extIP, 5555, 443, nil)
-	mu.Lock()
-	forward(1, f)
-	mu.Unlock()
+	forwardEnDrain(1, f)
 	if len(*got) != 0 {
 		t.Fatal("extern verkeer belandde op de interne NIC")
 	}
@@ -81,11 +88,57 @@ func TestArpReplyBereiktInterneNIC(t *testing.T) {
 	copy(a[18:24], hostMAC[:])
 	binary.BigEndian.PutUint32(a[24:], layout.HostIP4())
 
-	mu.Lock()
-	forward(3, f[:])
-	mu.Unlock()
+	forwardEnDrain(3, f[:])
 	if len(*got) != 1 {
 		t.Fatalf("ARP-reply bereikte de interne NIC niet (%d frames)", len(*got))
+	}
+}
+
+// De teruglus-regressie: gvisor antwoordt SYNCHROON binnen InjectInbound (een
+// SYN naar een gesloten node-poort levert direct een RST), en dat antwoord komt
+// via internalTx.WriteNotify → FromGateway de switch weer in — op dezelfde
+// goroutine. Werd gatewayRx onder mu aangeroepen, dan pakte FromGateway
+// diezelfde niet-reentrante mutex en stond de switch permanent stil: één SYN van
+// een willekeurige app naar een dichte poort velde het netwerk van de hele node.
+// Deze test bootst precies die teruglus na (de echte gvisor-stack past niet in
+// een host-test) en moet gewoon aflopen.
+func TestGatewayTeruglusDeadlocktNiet(t *testing.T) {
+	resetNAT()
+	setUplink(t)
+	leerGateway(t)
+	read := testSlotRing(t, 1)
+	mu.Lock()
+	up = true // FromGateway eist een draaiende switch
+	mu.Unlock()
+	t.Cleanup(func() { mu.Lock(); up = false; mu.Unlock() })
+
+	// De "stack": elk ontvangen frame lokt onmiddellijk een antwoord uit dat
+	// terug de switch in gaat — zoals een RST op een gesloten poort.
+	var beantwoord int
+	SetGatewayRx(func(p []byte) {
+		beantwoord++
+		rst := mkFrame(protoTCP, layout.SlotMAC(1), hostMAC, layout.HostIP4(), layout.SlotIP4(1), 9080, 5555, nil)
+		FromGateway(rst) // ← dit pakte vroeger mu terwijl switchPass hem vasthield
+	})
+	t.Cleanup(func() { SetGatewayRx(nil) })
+
+	// Slot 1 → 10.100.0.1:9080 (dichte poort): de switch-ronde moet aflopen.
+	f := mkFrame(protoTCP, hostMAC, layout.SlotMAC(1), layout.SlotIP4(1), layout.HostIP4(), 5555, 9080, nil)
+	klaar := make(chan struct{})
+	go func() {
+		defer close(klaar)
+		forwardEnDrain(1, f)
+	}()
+	select {
+	case <-klaar:
+	case <-time.After(5 * time.Second):
+		t.Fatal("switch-ronde liep vast op de gateway-teruglus (deadlock)")
+	}
+	if beantwoord != 1 {
+		t.Fatalf("interne NIC kreeg %d frames, wil 1", beantwoord)
+	}
+	if got := read(); got == nil {
+		t.Fatal("het antwoord van de interne NIC kwam niet in de ring van slot 1")
 	}
 }
 

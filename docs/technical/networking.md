@@ -112,17 +112,26 @@ anything off-subnet arrived via the gateway, so that is the gateway's MAC).
 For an on-subnet destination never seen before, HOP sends one rate-limited
 ARP request and the retransmit finds it.
 
-## Failure handling: an instant RST when a slot dies
+## Failure handling: noticing a dead peer is the app's job
 
-A hard-killed app never sends a FIN, so without help its peers would hang
-until their own read timeout (the GUI display once waited 30 s for a window
-to disappear). HOP closes that gap ([`rst.go`](../../metal/net/hopswitch/rst.go)):
-the switch passively tracks the next expected TCP sequence number for every
-connection (slot↔slot and slot→outside), and when a slot is torn down it
-sends each peer a **correctly-sequenced TCP RST** — so a dead connection
-becomes an ordinary connection error immediately. This needs **zero
-cooperation from the app**, so it also covers crashes and hangs. It is the
-kernel's job, done once, authoritatively — apps don't send their own.
+A hard-killed app never sends a FIN, so its peers see **silence** — not a
+connection error. They find out when their own heartbeat or read deadline
+expires.
+
+That is deliberate. A switch or a router can drop a live connection silently
+at any moment and there is no signal for it, so an app has to survive silence
+regardless. Once it does, a shortcut for one particular cause of silence buys
+nothing but code: HopOS already has two layers that cover this — the health
+check on the task, and the app's own ping. HOP briefly forged
+correctly-sequenced TCP RSTs on teardown to make slot death instant; that was
+a third layer for the same failure, and it cost per-frame TCP sequence
+tracking in the switch, so it was removed (26-07).
+
+**What this means for an app:** if you want to notice a dead peer quickly, set
+your read deadline to a small multiple of your ping interval. Shorter than the
+ping interval kills healthy connections. An app with neither a heartbeat nor a
+deadline will hang until TCP gives up retransmitting, which takes minutes —
+that is the same behaviour it would get from any real network.
 
 ## Isolation carries over to the network
 
@@ -144,13 +153,6 @@ agent/leader get ordinary `net.Listen` / `net/http`
 bridge) on the Raspberry Pi. **DHCP happens only at the edge** — the node
 acquires one lease for the uplink and renews it; the internal net is static.
 DNS comes from the node config and is passed to apps as `HOP_DNS`.
-
-## Two stacks, your choice
-
-The default app stack is gVisor's `go-net`. Building an app with
-`-tags lnetonet` swaps in the lighter [lneto](../../metal/app/applib/appnet/up_lneto.go)
-stack instead — a smaller image when you don't need gVisor's full feature
-set. The switch and wire protocol are identical either way.
 
 ## Honest limits
 

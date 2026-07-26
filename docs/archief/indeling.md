@@ -64,8 +64,7 @@ loader als go:embed-bytes in de node-binary). Hoort hier: alles wat alleen
 core 0 als vertrouwde kern doet.
 
 **`gui/`** — het display-vlak (docs/archief/gui-ontwerp.md), sinds 20-07 een eigen
-categorie omdat GUI los van de rest moet kunnen: `hvs` (de read-only
-BCM2712-HVS-dumptool), `debug` (het :9091-endpoint erover), `fbgrant` (het
+categorie omdat GUI los van de rest moet kunnen: `fbgrant` (het
 fb-weggeef-beleid: claim, FB_*-env, console van/terug op het glas). Alleen
 cmd/-binaries linken dit, en uitsluitend achter `-tags gui` — elke board-tag
 heeft zo twee smaken: kaal (headless) en gui — elk imagescript heeft de
@@ -109,8 +108,8 @@ boot via firmware en wél UART/DTB/ACPI raakt).
 
 **`app/`** — alles wat ín een slot draait: `applib` (runtime; kiest ook het
 board — altijd `board/hopslot` — zodat een app-dir alleen main.go bevat),
-`applib/appnet` (de per-slot netstack: default gVisor, `-tags lnetonet` de
-lichte lneto-backend), `appspike` (de referentie-app), `apploader` (downloadt
+`applib/appnet` (de per-slot netstack: gVisor via go-net), `appspike` (de
+referentie-app), `apploader` (downloadt
 het echte app-image in het slot). Binaries van de app-kant horen hier, niet
 in `cmd/`.
 
@@ -145,9 +144,7 @@ regel-tabel dáár en dit hoofdstuk horen samen te wijzigen):
    board-contract én kern lezen (fbgrant: stage2.GrantWindow + de
    slots-hooktypen), en alleen `cmd/` (achter `-tags gui`) importeert het
    terug — kern/net/board raken gui nooit; kern kent gui alleen als
-   niet-geregistreerde grant-haak (kern/slots/grants.go). Het
-   Display-contract van gui/debug implementeert een board structureel
-   (gui-getagde methoden, board/rpi5/hop/gui.go), zonder import.
+   niet-geregistreerde grant-haak (kern/slots/grants.go).
 5. `board/appboard` (het app-contract) importeert niets; het contract
    `board` alleen appboard + de typen die het draagt (driver/fb,
    driver/pcie, net/dhcp). `driver/` importeert board dus nóóit — types die

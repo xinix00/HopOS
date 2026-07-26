@@ -119,7 +119,7 @@ func nodeTask(sp, mp, gp, fn unsafe.Pointer) {
 	dev.Write64(cp+layout.CtrlVecPA, uint64(layout.RevokeVecPA())) // EL2-vectoren (revoke), als core 0
 	dev.Write64(cp+layout.CtrlSlot, 0)                             // VMID 0 = die van core 0 (TLBI-broadcast)
 	dev.Write64(cp+layout.CtrlSMPMbox, 0)                          // node-cores parkeren niet
-	dev.MB() // handoff zichtbaar vóór de dispatch
+	dev.MB()                                                       // handoff zichtbaar vóór de dispatch
 
 	nodeDispatch(c, nodeTramp, uint64(cp))
 	atomic.StoreUint32(&nodeBootLock, 0)

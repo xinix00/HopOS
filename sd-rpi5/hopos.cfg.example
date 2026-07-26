@@ -1,0 +1,55 @@
+# HopOS boot-config — VOORBEELD. Kopieer naar hopos.cfg en vul je eigen
+# waarden in:
+#
+#     cp sd-rpi5/hopos.cfg.example sd-rpi5/hopos.cfg
+#
+# hopos.cfg zelf staat in .gitignore: hij bevat geheimen (hopos.apikey,
+# hopos.s3.secret) en hoort nooit in git. Dit voorbeeld staat er wél in, zodat
+# een verse clone ziet wát er nodig is — config.txt laadt het bestand namelijk
+# verplicht (`initramfs hopos.cfg`), dus zonder hopos.cfg boot de node niet
+# zoals bedoeld.
+#
+# Formaat: één sleutel per regel. Volle jobspec-JSON mag hier (zelfde formaat
+# als de HOP-API) — dit bestand komt integraal in RAM, dus het
+# 1024-byte-bootargs-plafond van cmdline.txt geldt niet.
+
+# --- Node-identiteit ---------------------------------------------------------
+hopos.node=pi5
+hopos.cluster=hoplab
+
+# --- API-authenticatie (VERPLICHT op een netwerk-node) -----------------------
+# HMAC-sleutel voor de HTTP-API (agent :8080, leader :9080). Zonder deze
+# sleutel weigert de node zijn API te starten — een open API betekent dat
+# elke host op het LAN jobs kan dispatchen. Genereer er een verse:
+#
+#     openssl rand -hex 24
+#
+# Wil je bewust een open API (bank/dev), zet dan hopos.insecure=1 i.p.v. dit.
+hopos.apikey=<openssl rand -hex 24>
+
+# --- Optioneel: read-only metal-debug-endpoint op :9091 ----------------------
+# Alleen gui-builds, en zónder auth — dus standaard uit. Aanzetten op de
+# bring-up-bank, niet in productie.
+#hopos.debug=1
+
+# --- Optioneel: HOP-runtime over meerdere cores ------------------------------
+# Core 0 telt mee. Wordt geklemd op het aantal fysieke cores van het board.
+#hopos.cores=2
+
+# --- S3 (clusterstaat + artifacts) ------------------------------------------
+# Leeg laten = vluchtig standalone (geen gecommitte clusterstaat).
+hopos.s3.endpoint=https://<jouw-s3-endpoint>
+hopos.s3.bucket=<bucket>
+hopos.s3.region=<region>
+hopos.s3.key=<access-key-id>
+hopos.s3.secret=<secret-access-key>
+hopos.s3.pathstyle=1
+
+# --- Init: jobs die de node op een schone boot zelf plaatst ------------------
+# Eén JSON-jobspec per regel. Voorbeeld: een desktop (display + launcher).
+# Vervang de artifact-URL's door je eigen server.
+#hopos.init[]={"name":"display","driver":"hop","artifacts":[{"url":"http://<server>:8123/display.elf"}],"memory_limit":134217728,"ports":{"HTTP":18080,"SURF":7878},"env":{"FB":"1"},"affinity":{"node.id":"pi5"}}
+#hopos.init[]={"name":"launcher","driver":"hop","artifacts":[{"url":"http://<server>:8123/launcher.elf"}],"memory_limit":100663296,"env":{"SURF_ADDR":"10.100.0.2:7878","HOP_ADDR":"http://10.100.0.1:8080"},"tags":{"sharegroup":"gui"},"cpu_shares":1024,"affinity":{"node.id":"pi5"}}
+
+# --- Catalogus: apps die de launcher kan starten -----------------------------
+#hopos.apps[]={"name":"clock","driver":"hop","artifacts":[{"url":"http://<server>:8123/clock.elf"}],"memory_limit":67108864,"env":{"SURF_ADDR":"10.100.0.2:7878"},"tags":{"sharegroup":"gui"},"cpu_shares":1024,"affinity":{"node.id":"pi5"}}

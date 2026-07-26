@@ -76,6 +76,10 @@ func upInternal(gs *gnet.GVisorStack) error {
 		})
 		copy(pkt.LinkHeader().Push(gnet.EthernetMinimumSize), p[:gnet.EthernetMinimumSize])
 		link.InjectInbound(proto, pkt)
+		// gvisor-ownership: wij maakten de PacketBuffer, dus wij geven hem terug.
+		// Zonder DecRef gaat hij nooit naar de pool en lopen de release-callbacks
+		// niet — pure allocatie-/GC-druk op core 0 bij node-API-verkeer.
+		pkt.DecRef()
 	})
 
 	// Stack → switch: notificatie-gedreven drain (geen poll-lus — dit pad is
@@ -114,6 +118,10 @@ func (t internalTx) WriteNotify() {
 			}
 			n += copy(buf[n:], v)
 		}
+		// gvisor-ownership: link.Read() draagt de PacketBuffer aan ons over, dus
+		// hij moet terug — óók op het drop-pad. De inhoud staat al in buf, dus
+		// teruggeven kan vóór de aflevering aan de switch.
+		pkt.DecRef()
 		if ok {
 			hopswitch.FromGateway(buf[:n])
 		}

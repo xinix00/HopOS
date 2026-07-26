@@ -169,7 +169,15 @@ func gopDesc(mapHigh bool) (fb.Desc, bool) {
 		return fb.Desc{}, false
 	}
 	h := gopInfo[1] >> 32
+	w := uint64(uint32(gopInfo[1]))
 	scan := gopInfo[2] & 0xffffffff
+	// Firmware-input kruislings toetsen: het venster dat we straks beschrijven is
+	// stride×height, dus een breedte die daar niet in past (scan < w) laat de
+	// renderer per regel voorbij de bereikbare span schrijven. Ook 0-waarden
+	// weigeren — dan is er geen beeld om te beschrijven.
+	if w == 0 || h == 0 || scan < w {
+		return fb.Desc{}, false
+	}
 	span := scan * h * 4
 	ok := Reachable(base, span)
 	if mapHigh {
@@ -180,7 +188,7 @@ func gopDesc(mapHigh bool) (fb.Desc, bool) {
 	}
 	return fb.Desc{
 		Base:   uintptr(base),
-		Width:  int(uint32(gopInfo[1])),
+		Width:  int(w),
 		Height: int(h),
 		Stride: int(scan) * 4,
 		BPP:    32,
@@ -233,7 +241,6 @@ type MemDesc struct {
 	Type  uint32
 	Start uint64
 	Pages uint64 // 4KB-pagina's
-	Attr  uint64
 }
 
 // UEFI-memory-types (UEFI-spec 7.2). Ná ExitBootServices is niet alleen
@@ -302,7 +309,6 @@ func MemoryMap() []MemDesc {
 			Type:  uint32(read64(base)), // Type(u32)+pad — lage 32 bits
 			Start: read64(base + 8),
 			Pages: read64(base + 24),
-			Attr:  read64(base + 32),
 		})
 	}
 	return out

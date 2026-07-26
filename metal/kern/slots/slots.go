@@ -13,6 +13,7 @@
 package slots
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"runtime"
@@ -182,6 +183,18 @@ func prepStart(i int, memLimit uint64, cores int, env map[string]string, mounts 
 	// moeten binnen de fysieke app-cores vallen. Een cores=1-app mag op elke
 	// kooi (die kan een gedeelde core zijn, ver boven NumAppCores) — checkSlot
 	// bewaakt daar de kooi-grens (MaxSlots).
+	//
+	// De aanname "SMP ⇒ slot == core" staat elders in dit bestand als commentaar
+	// (Stop's kill-scan rekent op core..core+n-1) maar werd nergens afgedwongen.
+	// Voor een pool-geplaatste kooi (coreOf(i) != i) liep dat stil uit de pas:
+	// smp.Configure leidt de secundaire cores af van de ÉCHTE core (coreOf(i)),
+	// terwijl dispatchSMP ze tegen slot i toetste — dan wordt elke lazy
+	// SMP-aanvraag geweigerd en degradeert de app stilletjes naar één core.
+	// Liever hier hard falen: SMP hoort op zijn eigen core te wonen.
+	if cores > 1 && coreOf(i) != i {
+		return nil, nil, 0, fmt.Errorf("SMP: kooi %d woont op core %d (gedeelde/pool-plaatsing) — %d cores vraagt een eigen core (slot == core)",
+			i, coreOf(i), cores)
+	}
 	if cores > 1 && i+cores-1 > layout.NumAppCores() {
 		return nil, nil, 0, fmt.Errorf("SMP: %d cores vanaf slot %d overschrijden de %d app-cores", cores, i, layout.NumAppCores())
 	}
@@ -387,6 +400,14 @@ func coreRunning(core int) bool { return mboxWord0(core) >= 2 }
 // PSCI CPU_ON — de éénmalige bring-up per core. Anders (geparkeerd): schrijf
 // {ctx, entry} in de mailbox en wek de WFE-lus met SEV; die springt de
 // (idempotente) trampoline in. Zet word0 sowieso op ctx zodat coreRunning klopt.
+// errDispatch markeert dat het startschot zélf faalde. Dat is het enige
+// faalpad met een ONBEKENDE uitkomst: dispatchCore primet de core-mailbox
+// (word0=ctx, word1=PC) vóór de PSCI CPU_ON, dus bij een fout kán die core
+// alsnog aangaan en de trampoline inspringen. Daarom gaat de partitie op dit
+// pad fail-closed in quarantaine i.p.v. terug de pool in — zelfde afweging als
+// releaseSlot(_, false) bij een onbevestigde intrekking.
+var errDispatch = errors.New("dispatch failed")
+
 func dispatchCore(core int, entry, ctx uint64) error {
 	// Nooit een core dispatchen die al draait: dat zou een app (of een tweede
 	// Start) een core midden in de uitvoering laten kapen. Start's pad checkt dit
@@ -499,7 +520,7 @@ func Start(i int, image []byte, memLimit uint64, cores int, env map[string]strin
 // startImage is het gedeelde startpad van Start en StartShared (share.go).
 // shared verlegt één wacht: niet "de cores van het slot zijn geparkeerd/cold"
 // (de gedeelde core drááit meestal juist), maar "dít slot leeft nergens".
-func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int, shared bool) error {
+func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int, shared bool) (err error) {
 	imgSize := int64(len(image))
 	if imgSize <= 0 {
 		return fmt.Errorf("Start: lege image")
@@ -510,6 +531,16 @@ func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]
 	if err != nil {
 		return err
 	}
+	// prepStart is niet puur: grantEnv vergeeft de fb-grant (en zet daarmee de
+	// HOP-console uit) vóórdat de env-groottecheck, de allocatie en de plaatsing
+	// zijn geweest. Elk faalpad hierna moet het glas dus teruggeven, anders
+	// blijft de console weg voor een task die nooit gedraaid heeft.
+	var started bool
+	defer func() {
+		if !started {
+			grantRelease(i)
+		}
+	}()
 	size := align2M(memLimit)
 	appRAM, err := appRAMSize(size)
 	if err != nil {
@@ -544,11 +575,20 @@ func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]
 	// Eén regel per plaatsing: op een headless node is dít hoe je ziet wáár
 	// een slot fysiek landt (sinds 15-07 ook boven de 512GB-grens).
 	fmt.Printf("slot %d: partition %d MB @ %#x\n", i, size>>20, base)
-	var started bool
 	defer func() {
-		if !started {
-			partRelease(i)
+		if started {
+			return
 		}
+		// Faalde het startschot zélf, dan is onbekend of de core tóch aangaat
+		// (zie errDispatch): het geheugen gaat dan NIET terug de pool in, want
+		// first-fit zou het aan een volgende huurder uitdelen terwijl er nog
+		// leven in kan zitten. Alle andere faalpaden zijn eenduidig — daar is de
+		// partitie gewoon vrij.
+		if errors.Is(err, errDispatch) {
+			fmt.Printf("slot %d: partition quarantined — dispatch outcome unknown HOPOS_PART_QUARANTINE\n", i)
+			return
+		}
+		partRelease(i)
 	}()
 
 	// Coherentie vóór de ongecachte writes: de vórige huurder draaide
@@ -578,20 +618,6 @@ func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]
 	started = true // partitie blijft van deze task tot Stop
 	fmt.Printf("slot %d: image placed in %s\n", i, time.Since(t0).Round(time.Millisecond))
 	return nil
-}
-
-// StartLoader laadt de universele apploader (metal/app/apploader, ingebakken via
-// apploaderblob) in slot i op één core. Die downloadt op zíjn eigen core+netstack
-// de echte app-image (env HOP_IMAGE_URL) zijn eigen partitie in en seint
-// "staged"; HOP plaatst 'm dan met StartStaged. De partitie wordt op memLimit
-// gealloceerd — die de echte app in fase 2 hergebruikt. De loader is een gedeelde
-// ingebakken blob (geen fetch, geen per-start-kopie). Vereist -tags embedloader.
-func StartLoader(i int, memLimit uint64, env map[string]string) error {
-	img := apploaderblob.Loader()
-	if len(img) == 0 {
-		return fmt.Errorf("apploader niet ingebakken of uitpakken faalde (bouw de node met -tags embedloader)")
-	}
-	return Start(i, img, memLimit, 1, env, nil, nil)
 }
 
 // StartLoaderOn is StartLoader op een door HOPOS gekozen core (coöperatieve
@@ -676,21 +702,41 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 // = de app-entry uit de ELF) en het zelfplaats-pad van StartStaged (de loader
 // plaatste voor, entry = het stubje dat op de eigen core de segmenten schuift
 // en dan de app inspringt — zie applib/selfplace.go).
-func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlob []byte, mtab [][2]string, ports map[string]int) error {
+func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlob []byte, mtab [][2]string, ports map[string]int) (err error) {
 	appRAM, err := appRAMSize(size)
 	if err != nil {
 		return err
 	}
+	// Transactioneel: hieronder gaan switch-poort, poort-publicaties, fb-grant
+	// en control-page-status áán, en die horen bij DEZE task. Faalt er daarna
+	// nog iets — een poortcollisie, de stage-2-bouw, het startschot — dan moet
+	// alles weer uit. Anders blijft er een switch-poort achter met ringadressen
+	// in een partitie die de aanroeper zo terugsluist naar de pool: first-fit
+	// deelt die dan uit aan de volgende huurder, en de switch leest/schrijft
+	// diens geheugen onder de identiteit van dit slot. Alleen bij succes
+	// (armed) blijft de opbouw staan.
+	var armed bool
+	defer func() {
+		if armed {
+			return
+		}
+		hopswitch.Detach(i)
+		hopswitch.UnpublishSlot(i)
+		grantRelease(i)
+		ctrlWrite(i, layout.CtrlStatus, layout.StatusEmpty)
+		smpCores[i] = 0
+	}()
 	netPA := base + appRAM
-	// Entry bepaalt het canonieke IPA-venster (zelfde afleiding als de
-	// ELF-route); voor het zelfplaats-pad is dit tevens de hygiëne-check op
-	// het onvertrouwde CtrlPlaceEntry — buiten de kooi wijzen kán niet (de
-	// stage-2 vertaalt alleen het eigen venster), maar gericht falen is netter.
-	if entry < layout.SlotsBase || entry >= layout.SlotsBase+uint64(layout.MaxSlots)*uint64(layout.SlotStride) {
-		return fmt.Errorf("entry %#x outside every slot range", entry)
+	// Images zijn ALTIJD canoniek op slot 1 gelinkt (placeFromStaging pint
+	// linkBase op SlotBase(1) — de stage-2 ís de relocatie, één artifact voor
+	// elk slot). Het onvertrouwde CtrlPlaceEntry van het zelfplaats-pad mag dus
+	// uitsluitend in dát venster wijzen; de oude check liet het hele
+	// 128-slot-bereik toe en daarmee een linkBase boven CtrlBase.
+	linkBase := layout.SlotBase(1)
+	if entry < linkBase || entry >= linkBase+uint64(layout.SlotStride) {
+		return fmt.Errorf("entry %#x buiten het canonieke slot-1-venster %#x..%#x",
+			entry, linkBase, linkBase+uint64(layout.SlotStride))
 	}
-	linked := int((entry-layout.SlotsBase)/layout.SlotStride) + 1
-	linkBase := layout.SlotBase(linked)
 	if max := maxLimitFor(linkBase); memLimit > max {
 		return fmt.Errorf("memLimit %d MB > %d MB slot-cap (één GB-blok vanaf linkadres %#x)", memLimit>>20, max>>20, linkBase)
 	}
@@ -701,7 +747,6 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// nieuwe task publiceert de zijne ná deze Start).
 	evictServicer(i)
 	hopswitch.Detach(i)
-	hopswitch.ResetPeers(i) // peers van de vórige task zien de dood meteen (TCP-RST)
 	hopswitch.UnpublishSlot(i)
 
 	// Storage: verse (lege) eigen root — schone lei per start — en de
@@ -803,14 +848,16 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	ctx := uint64(layout.CtrlPagePA(i))
 	if coreRunning(core) {
 		if err := bootPendingDispatch(core, i, tramp, ctx); err != nil {
-			return err
+			return fmt.Errorf("%w: %v", errDispatch, err)
 		}
 	} else {
 		residentReset(core, i)
 		if err := dispatchCore(core, tramp, ctx); err != nil {
-			return err
+			return fmt.Errorf("%w: %v", errDispatch, err)
 		}
 	}
+	// Vanaf hier draait de app: de opbouw blijft staan (geen faalbare stap meer).
+	armed = true
 
 	go registerServicer(i, root, mtab).run()
 
@@ -838,12 +885,21 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 //
 // imgSize komt van de control-page (door de loader gezet) en is NIET vertrouwd:
 // een verkeerde maat faalt hooguit de ELF-parse/segment-validatie van dít slot.
-func StartStaged(i int, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int) error {
+func StartStaged(i int, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int) (err error) {
 	// Pure invoervalidatie vóór het venster — gedeeld met Start (prepStart).
 	mtab, envBlob, cores, err := prepStart(i, memLimit, cores, env, mounts, ports)
 	if err != nil {
 		return err
 	}
+	// Zelfde niet-pure prepStart als in startImage: de fb-grant terug op elk
+	// faalpad. De partitie NIET vrijgeven — die is van fase 1 (de apploader) en
+	// wordt hier alleen hergebruikt; opruimen is de taak van Stop.
+	var staged bool
+	defer func() {
+		if !staged {
+			grantRelease(i)
+		}
+	}()
 	// De grootte die de loader in de staging heeft gezet (control-page). Niet
 	// vertrouwd — een verkeerde maat faalt hooguit de ELF-parse van dit slot.
 	imgSize := int64(ctrlRead(i, layout.CtrlStagedSize))
@@ -903,6 +959,7 @@ func StartStaged(i int, memLimit uint64, cores int, env map[string]string, mount
 		if err := armSlot(i, base, size, placeEntry, memLimit, cores, envBlob, mtab, ports); err != nil {
 			return err
 		}
+		staged = true
 		fmt.Printf("slot %d: self-place dispatched in %s\n", i, time.Since(t0).Round(time.Millisecond))
 		return nil
 	}
@@ -918,6 +975,7 @@ func StartStaged(i int, memLimit uint64, cores int, env map[string]string, mount
 	if err := placeFromStaging(i, base, size, stageAddr, imgSize, memLimit, cores, envBlob, mtab, ports); err != nil {
 		return err
 	}
+	staged = true
 	fmt.Printf("slot %d: staged app placed in %s\n", i, time.Since(t0).Round(time.Millisecond))
 	return nil
 }
@@ -972,7 +1030,8 @@ func Stop(i int, timeout time.Duration) error {
 				stopErr = fmt.Errorf("slot %d: not dead after stage-2 revocation (shared core %d)", i, coreOf(i))
 			}
 		}
-		releaseSlot(i)
+		// Partitie alleen terug de pool in als dit slot aantoonbaar dood is.
+		releaseSlot(i, stopErr == nil)
 		return stopErr
 	}
 	// Coöperatieve kans voor de app (de kill-watcher parkeert zijn eigen
@@ -1007,19 +1066,32 @@ func Stop(i int, timeout time.Duration) error {
 			}
 		}
 	}
-	releaseSlot(i)
+	// Idem voor de dedicated tak: een core die na de intrekking niet parkeerde
+	// kan nog bij dit geheugen — dat gaat niet terug de pool in.
+	releaseSlot(i, stopErr == nil)
 	return stopErr
 }
 
 // releaseSlot maakt een gestopt slot vrij: van de switch af, poorten in, en
 // de partitie terug naar de pool (de cores zijn geparkeerd, dus niemand raakt
 // het geheugen meer — pas bij een volgende Start worden ze her-gedispatcht).
-func releaseSlot(i int) {
+//
+// freePartition=false is de fail-closed-variant: alles losmaken behálve het
+// geheugen. Dat is het geval waarin de intrekking niet bevestigd kon worden —
+// dan kán er nog een core met een levende vertaling naar deze partitie zijn, en
+// die partitie mag de pool niet in (first-fit deelt hem anders uit aan de
+// volgende huurder, die dan het geheugen met een vreemde deelt). Het geheugen
+// blijft dus in quarantaine bij die core; een volgende geslaagde Stop of een
+// reconcile ruimt op. Zelfde beleid als slotmgr.Stop voor de core-reservering.
+func releaseSlot(i int, freePartition bool) {
 	hopswitch.Detach(i)
-	hopswitch.ResetPeers(i) // peers zien de dood meteen (TCP-RST) i.p.v. via hun deadline
 	hopswitch.UnpublishSlot(i)
 	grantRelease(i) // grant terug (fb: HOP-console weer op het glas)
-	partRelease(i)
+	if freePartition {
+		partRelease(i)
+	} else {
+		fmt.Printf("slot %d: partition quarantined — revocation unconfirmed, memory NOT returned to the pool HOPOS_PART_QUARANTINE\n", i)
+	}
 	if i >= 1 && i <= layout.MaxSlots {
 		// Bewoners-boekhouding van de core-deling: uit de lijst van zijn
 		// core, ctx-staat op Empty (het slot is écht weg — de rotatie slaat
@@ -1177,21 +1249,6 @@ func SetHopCores(n int) {
 // en de interne slot/core-index: intern = HOP-slot + HopReserved. slotmgr past
 // 'm toe zodat slots.* zelf onveranderd op slot=core=layout kan blijven werken.
 func HopReserved() int { return hopReserved }
-
-// AppSlotCount is het aantal KOOIEN dat HOP mag gebruiken. Sinds de core-deling
-// is een kooi (eigen partitie/stage-2/netstack) losgekoppeld van een core:
-// sharegroups stapelen meerdere kooien op één core, dus er mogen méér kooien
-// dan cores zijn. Daarom de kooi-cap (MaxSlots), niet de core-telling. De échte
-// muren zijn RAM (partmem — door HOP op geheugen bewaakt) en de vrije cores
-// (pool.go — door HOPOS bij plaatsing bewaakt); die falen luid als het op is.
-// De NumSlots()-aanroep triggert de eenmalige PSCI-probe + control-page-veeg.
-func AppSlotCount() int {
-	NumSlots() // side-effect: PSCI-probe + verse-DRAM-veeg (numSlotsOnce)
-	if c := layout.MaxSlots - hopReserved; c > 0 {
-		return c
-	}
-	return 0
-}
 
 // CoreClass geeft de cluster-klasse van slot i. De indeling is board-kennis
 // (de O6N-tri-clustertopologie), dus komt van het actieve board — slots kent

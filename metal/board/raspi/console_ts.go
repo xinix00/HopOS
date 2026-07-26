@@ -10,7 +10,36 @@ package raspi
 // state is single-threaded — geen lock nodig. Alloc-vrij: de stempel wordt
 // cijfer voor cijfer naar de sink geschreven, geen tijd-formatteringsbuffer.
 
-import "time"
+import (
+	"time"
+
+	"hop-os/metal/driver/fb"
+	"hop-os/metal/driver/pl011"
+)
+
+// Printk is de console-byte van álle Pi-boards: de rpi4- en rpi5-hooks waren
+// byte-gelijk, alleen hun UART-basis verschilt. Naar de PL011 én — zodra die
+// er is — naar de fb-log-console: het beeld-kanaal voor een node zónder
+// debug-kabel.
+//
+// ALLEEN de HOP-core (MPIDR-affiniteit 0) bezit de UART/fb. Een app-core draait
+// onder stage-2 en heeft die MMIO niet in zijn kooi — een runtime-print (bv. een
+// throw) zou daar een cage-fault worden die de échte oorzaak maskeert. App-cores
+// laten hun runtime-output dus vallen; hun eigen logs lopen via de
+// hop-ABI-ring. Masker 0xFFFFFF dekt A72-aff0 én A76-aff1.
+//
+// Via ConsoleByte, zodat er (indien aan) één uniforme "dd-MM HH:mm"-prefix per
+// regel op UART én fb komt. Putc pollt begrensd — een dode/ongeklokte UART kost
+// hooguit de poll, nooit de boot (zie metal/driver/pl011).
+func Printk(uartBase uintptr, c byte) {
+	if MPIDR()&0xFFFFFF != 0 {
+		return // app-core: geen toegang tot de UART (kooi)
+	}
+	ConsoleByte(c, func(b byte) {
+		pl011.Putc(uartBase, b)
+		fb.Putc(b)
+	})
+}
 
 var (
 	logTS     bool // timestamps aan? (na de boot-banner aangezet)

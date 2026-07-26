@@ -17,8 +17,8 @@
 package raspi
 
 import (
-	"sync"
 	"strings"
+	"sync"
 
 	_ "unsafe"
 
@@ -36,10 +36,6 @@ import (
 // ligt dit gebied nog ruimer onder de load. Boven het TF-A/armstub-gebied
 // (< ~0x20000) blijven.
 const (
-	// ParkBase/ParkCount: park-code voor secundaire cores en hun
-	// levensteken-tellers (geplant door de probes, zie ParkCode).
-	ParkBase  = 0x70000
-	ParkCount = 0x78000
 
 	// VCMailBuf: de property-buffer voor de firmware-mailbox (metal/driver/vcmail).
 	// 16-byte-gealigneerd, laag DRAM (VC-bereik), buiten elke RAM-declaratie
@@ -256,22 +252,3 @@ func mpidr() uint64
 // MPIDR geeft het rauwe register; de nummering (aff0 op de A72, aff1 op de
 // A76) is boardspecifiek — zie CoreID in het board-pakket.
 func MPIDR() uint64 { return mpidr() }
-
-// cntfrq/cntpct lezen de generic-timer-registers (cpu_arm64.s).
-func cntfrq() uint64
-func cntpct() uint64
-
-// CNTFRQ geeft de counterfrequentie die de firmware zette (verwacht 54MHz op
-// de Pi; 0 = niet gezet → tamago's timers en time.Sleep zijn dan dood).
-func CNTFRQ() uint64 { return cntfrq() }
-
-// CNTPCT geeft de rauwe fysieke counter. Kan trappen als EL1PCTEN uit staat
-// (zie cpu_arm64.s) — kondig de read aan vóór je hem doet.
-func CNTPCT() uint64 { return cntpct() }
-
-// spin (cpu_arm64.s) draait n afhankelijke SUBS-iteraties.
-func spin(n uint64)
-
-// Spin brandt n CPU-cycli (±dual-issue-marge) — met CNTPCT eromheen is dat
-// de kloksnelheidsmeting van de probes.
-func Spin(n uint64) { spin(n) }

@@ -56,7 +56,7 @@ var (
 // bit 15 op de Pi's 54MHz (1,2ms) en QEMU's 62,5MHz (1,05ms), bit 14 op de
 // Altra's 25MHz (1,3ms — een vaste 15 gaf daar 2,6ms wek-granulariteit).
 func Enable() {
-	i := uint64(15) // EVNTI is 4 bits: 15 is tegelijk het maximum én de start
+	i := uint64(15)                                     // EVNTI is 4 bits: 15 is tegelijk het maximum én de start
 	for i > 4 && (uint64(1)<<(i+1))*2000 > cntfrq()*3 { // periode > 1,5ms → fijnere bit
 		i--
 	}

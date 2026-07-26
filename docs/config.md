@@ -15,8 +15,9 @@ Editing the file **is** node management — no shell, no rebuild, no agent.
 |---|---|---|
 | `hopos.node` | node name (shows up in `hop agents`) | generated |
 | `hopos.cluster` | cluster name — nodes with the same name form one cluster | — |
-| `hopos.cores` | cores reserved for the node runtime itself | `1` |
-| `hopos.apikey` | HMAC key for the HTTP API — requests must be signed with it | auth off |
+| `hopos.cores` | cores reserved for the node runtime itself (clamped to the board's physical cores) | `1` |
+| `hopos.apikey` | HMAC key for the HTTP API — requests must be signed with it. **Required:** without it the node refuses to start the API (see below) | — |
+| `hopos.insecure` | `1` = start the API with **no authentication** on purpose (bench/dev only) | off |
 | `hopos.s3.endpoint` | S3 endpoint for cluster state + leader election | state off |
 | `hopos.s3.bucket` | bucket name | — |
 | `hopos.s3.region` | region | — |
@@ -30,6 +31,40 @@ at boot with this node's LAN IP — the address where the agent API (`:8080`)
 and published ports live, which an app cannot discover on its own (its slot
 network only knows 10.100.0.0/24). Write `"SURF_ADDR":"{{host}}:7878"` once
 and the same line is correct on every node.
+
+## The API needs a key
+
+The agent (`:8080`) and leader (`:9080`) APIs accept job dispatch — that is
+remote code execution on a trusted node. They listen on the LAN, so without
+`hopos.apikey` **any host on that network could start jobs**. A node without a
+key therefore refuses to start its API: it stays alive (switch, clock, storage
+and dvfs all run) and prints `HOPOS_API_NO_AUTH` on the console, so a
+misconfiguration is visible instead of silently open.
+
+```
+openssl rand -hex 24     # generate a key; the same key for every node in a cluster
+```
+
+Set `hopos.insecure=1` if you deliberately want an open API — a bench node
+behind a trusted network. It logs `HOPOS_API_INSECURE` every boot. QEMU has no
+boot medium and is a dev target, so it carries this opt-out by default.
+
+### Why HMAC and not TLS
+
+This is a deliberate choice, not a shortcut. The HMAC signs method + path +
+body, so the key never travels over the wire and a tampered request is
+rejected — reading the traffic gets an attacker neither the key nor the
+ability to forge a *new* call. What remains is **replay**: someone who can
+already see your management traffic can repeat a request they captured.
+
+We accept that. Anyone sitting on the management VLAN is inside the perimeter
+already, and a second lock on the same door buys little. Full mTLS would mean
+issuing, distributing and rotating client certificates across the whole fleet
+— real operational weight, for a threat that starts with "the attacker is
+already on your management network". Protection has to stop somewhere.
+
+So: **the management network is the trust boundary.** Keep the API on a
+network you trust, the same way you'd treat the boot stick.
 
 ## Example
 

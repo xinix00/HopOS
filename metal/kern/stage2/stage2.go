@@ -58,6 +58,7 @@ const (
 	blockRWNC = descBlock | attrAF | attrSHInner | attrRW | attrNormNC
 	pageRW    = descPage | attrAF | attrSHInner | attrRW | attrNormal
 	pageRO    = descPage | attrAF | attrSHInner | attrRO | attrNormal
+	pageRWNC  = descPage | attrAF | attrSHInner | attrRW | attrNormNC
 
 	l1Off     = 0x0000
 	l2PartOff = 0x1000
@@ -70,6 +71,13 @@ const (
 	// CtxOff (0x6000, abi/layout) is het switch-contextblok — NIET herbruiken.
 	l2FbOff = 0x7000 // FB-grant-L2 (GrantWindow): identity-venster op de
 	// firmware-framebuffer, alleen gevuld voor het slot dat de grant houdt
+	// De twee rand-L3's van dat venster: een framebuffer is zelden 2MB-aligned,
+	// dus kop en staart worden pagina-precies gemapt i.p.v. een heel blok
+	// (anders krijgt de grant-houder tot ~4MB firmware-geheugen erbij). Meer dan
+	// twee zijn er nooit nodig: het middenstuk gaat als 2MB-blokken. 0x8000..
+	// 0xFFFF van het slotblok was vrij (zie de indeling in abi/layout).
+	l3FbHeadOff = 0x8000
+	l3FbTailOff = 0x9000
 )
 
 // InitVectors schrijft de gedeelde EL2-vectoren op Stage2Base (2KB-aligned
@@ -301,7 +309,22 @@ func Build(i int, ipaBase, paBase, size, netRingPA uint64) (uint64, error) {
 	dev.Write64(base+l1Off+uintptr(uint64(layout.CtrlBase)>>30)*8, l2Dev|descTable)
 
 	// Partitie als 2MB-blokken: IPA (linkadres) → PA (gealloceerde partitie).
+	// De index wordt begrensd, symmetrisch met het net-ring-blok hieronder: één
+	// L2-tabel dekt 512 × 2MB = precies één GB. Valt de partitie daarbuiten, dan
+	// schrijft de lus in de buurtabellen ván dit stage-2-blok (l2Dev/l3*) en bij
+	// genoeg overschot voorbij Stage2Stride in het blok van het VOLGENDE slot —
+	// stille kruisbesmetting van andermans kooi. De per-slot-cap (maxLimitFor)
+	// hoort dit al te voorkomen; deze guard is de vangnet-laag die niet van een
+	// juiste cap-berekening afhangt (layout-drift hoort hard te vallen, niet stil
+	// in een buurtabel te schrijven — de slot-105-les van 15-07).
 	gbBase := ipaBase &^ ((1 << 30) - 1)
+	if size == 0 {
+		return 0, fmt.Errorf("partitie-grootte 0 voor slot %d", i)
+	}
+	if last := (ipaBase + size - 1 - gbBase) >> 21; last > 511 {
+		return 0, fmt.Errorf("partitie %#x + %d MB buiten het GB-blok van het linkadres (L2-index %d > 511)",
+			ipaBase, size>>20, last)
+	}
 	for off := uint64(0); off < size; off += 2 << 20 {
 		idx := (ipaBase + off - gbBase) >> 21
 		dev.Write64(uintptr(partL2)+uintptr(idx)*8, (paBase+off)|blockRW)
@@ -352,13 +375,24 @@ func Build(i int, ipaBase, paBase, size, netRingPA uint64) (uint64, error) {
 	return l1, nil
 }
 
-// GrantWindow mapt een fysiek venster als 2MB-blokken Normal-NC op het vaste
-// IPA-venster layout.FbIPA in de bestaande kooi van slot i — de FB-grant
+// GrantWindow mapt een fysiek venster Normal-NC op het vaste IPA-venster
+// layout.FbIPA in de bestaande kooi van slot i — de FB-grant
 // (kern/slots/fbgrant.go): een lineaire pixelbuffer, geen registers/DMA.
 // Identity kan niet: de kooi-IPA-ruimte is 32-bit (VTCR.T0SZ=32) en een
 // firmware-framebuffer mag fysiek boven de 4GB liggen (QEMU-ramfb:
 // 0x1bc7a0000 — de vondst van 19-07). Aanroepen ná Build en vóór de dispatch
 // (zelfde walker-regime als Build zelf).
+//
+// PAGINA-PRECIES aan de randen. Een firmware-framebuffer is zelden 2MB-aligned
+// (QEMU-ramfb hierboven is dat niet), en met alleen 2MB-blokken kreeg de
+// grant-houder daardoor tot ~4MB fysiek geheugen RÓND de framebuffer erbij —
+// RW, en FB_BASE verbergt die bytes niet: de app kan elke gemapte IPA lezen én
+// schrijven. Wat daar naast ligt is firmware-terrein, dus dat is geen byte om
+// weg te geven. Daarom: het volledig gedekte middenstuk als 2MB-blokken (groot
+// en goedkoop) en de twee randen via één L3-tabel elk, waarin alleen de
+// pagina's staan die écht bij de buffer horen. Twee extra tabellen, ongeacht de
+// venstergrootte — de overmapping is nu maximaal de 4KB-afronding aan elke kant,
+// het minimum dat een pagineerde MMU toelaat.
 //
 // Bewust begrensd: het venster moet binnen één GB liggen (een framebuffer is
 // ≤ tientallen MB) en het FbIPA-GB (GB0) is in het canonieke beeld van
@@ -370,10 +404,18 @@ func GrantWindow(i int, pa, size uint64) error {
 	if pa == 0 || size == 0 {
 		return fmt.Errorf("fb-grant: leeg venster (%#x, %d)", pa, size)
 	}
+	if pa+size < pa {
+		return fmt.Errorf("fb-grant: venster %#x + %d overflowt", pa, size)
+	}
+	// lo is het IPA-anker en blijft 2MB-aligned: de app ziet de buffer op
+	// FbIPA + (pa-lo) — hetzelfde contract dat fbgrant.Env als FB_BASE afgeeft,
+	// dus hier niet aan rekenen zonder die kant mee te nemen.
 	lo := pa &^ ((2 << 20) - 1)
-	hi := (pa + size + (2 << 20) - 1) &^ ((2 << 20) - 1)
-	if hi-lo > (1<<30)-uint64(layout.FbIPA)&((1<<30)-1) {
-		return fmt.Errorf("fb-grant: venster %#x..%#x past niet in het FbIPA-GB", lo, hi)
+	// Wat we daadwerkelijk mappen: alleen de pagina's van de buffer zelf.
+	pgLo := pa &^ 0xFFF
+	pgHi := (pa + size + 0xFFF) &^ 0xFFF
+	if pgHi-lo > (1<<30)-uint64(layout.FbIPA)&((1<<30)-1) {
+		return fmt.Errorf("fb-grant: venster %#x..%#x past niet in het FbIPA-GB", lo, pgHi)
 	}
 
 	base := layout.Stage2TablePA(i)
@@ -388,15 +430,55 @@ func GrantWindow(i int, pa, size uint64) error {
 	default:
 		return fmt.Errorf("fb-grant: GB %d van de kooi is al gemapt (%#x) — venster botst met het IPA-beeld", gb, cur)
 	}
+	// Verse tabellen: een hergrant mag geen pagina's van een vorig venster
+	// laten staan (l2fb wordt hieronder per blok overschreven, maar de
+	// rand-L3's kunnen bij een kleiner venster gaten overhouden).
+	dev.Clear(uintptr(l2fb), 0x1000)
+	dev.Clear(base+l3FbHeadOff, 0x1000)
+	dev.Clear(base+l3FbTailOff, 0x1000)
+
 	gbBase := gb << 30
-	for off := lo; off < hi; off += 2 << 20 {
-		ipa := uint64(layout.FbIPA) + (off - lo)
-		dev.Write64(uintptr(l2fb)+uintptr((ipa-gbBase)>>21)*8, off|blockRWNC)
+	ipaOf := func(p uint64) uint64 { return uint64(layout.FbIPA) + (p - lo) }
+	// De 2MB-grenzen bínnen [pgLo,pgHi): alles daartussen is volledig van de
+	// buffer en gaat als blok.
+	bStart := (pgLo + (2 << 20) - 1) &^ ((2 << 20) - 1)
+	bEnd := pgHi &^ ((2 << 20) - 1)
+	for off := bStart; off < bEnd; off += 2 << 20 {
+		idx := (ipaOf(off) - gbBase) >> 21
+		dev.Write64(uintptr(l2fb)+uintptr(idx)*8, off|blockRWNC)
+	}
+	// mapEdge hangt één L3-tabel in het 2MB-blok van [from,to) en zet daarin
+	// uitsluitend die pagina's. Aanroepen met een [from,to) binnen één blok.
+	mapEdge := func(l3 uintptr, from, to uint64) {
+		if from >= to {
+			return
+		}
+		blk := ipaOf(from) &^ ((2 << 20) - 1)
+		dev.Write64(uintptr(l2fb)+uintptr((blk-gbBase)>>21)*8, uint64(l3)|descTable)
+		for p := from; p < to; p += 0x1000 {
+			dev.Write64(l3+uintptr((ipaOf(p)-blk)>>12)*8, p|pageRWNC)
+		}
+	}
+	if bStart > pgLo { // kop: [pgLo, min(bStart,pgHi))
+		end := bStart
+		if pgHi < end {
+			end = pgHi // het hele venster zit in één 2MB-blok
+		}
+		mapEdge(base+l3FbHeadOff, pgLo, end)
+	}
+	if bEnd >= bStart && bEnd < pgHi { // staart: [max(bEnd,pgLo), pgHi)
+		start := bEnd
+		if start < pgLo {
+			start = pgLo
+		}
+		mapEdge(base+l3FbTailOff, start, pgHi)
 	}
 
 	// Zelfde coherentie-contract als Build: de walker leest cacheable.
 	dev.CleanInv(base+l1Off, 0x1000)
 	dev.CleanInv(uintptr(l2fb), 0x1000)
+	dev.CleanInv(base+l3FbHeadOff, 0x1000)
+	dev.CleanInv(base+l3FbTailOff, 0x1000)
 	dev.MB()
 	return nil
 }

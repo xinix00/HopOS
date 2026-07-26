@@ -40,7 +40,6 @@ const (
 
 // Property-tags (firmware-wiki "Mailbox property interface").
 const (
-	tagGetMAC       = 0x00010003
 	tagGetClockRate = 0x00030002
 	tagGetMaxClock  = 0x00030004
 	tagGetTemp      = 0x00030006
@@ -237,7 +236,6 @@ type FB struct {
 	Base          uintptr
 	Size, Pitch   uint32
 	Width, Height uint32
-	Depth         uint32 // bpp zoals de firmware hem écht zette
 }
 
 // AllocFB vraagt de firmware om een w×h×32bpp-framebuffer (één transactie:
@@ -267,17 +265,5 @@ func (m *Mbox) AllocFB(w, h uint32) (FB, bool) {
 		Size:  alloc[1],
 		Pitch: pit[0],
 		Width: phys[0], Height: phys[1],
-		Depth: depth[0],
 	}, true
-}
-
-// MAC geeft het door de fabriek toegewezen board-MAC-adres.
-func (m *Mbox) MAC() (mac [6]byte, ok bool) {
-	w := []uint32{0, 0}
-	if !m.Call(tagGetMAC, w) {
-		return mac, false
-	}
-	mac[0], mac[1], mac[2], mac[3] = byte(w[0]), byte(w[0]>>8), byte(w[0]>>16), byte(w[0]>>24)
-	mac[4], mac[5] = byte(w[1]), byte(w[1]>>8)
-	return mac, true
 }

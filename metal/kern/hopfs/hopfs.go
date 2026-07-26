@@ -35,6 +35,21 @@ const holeBlock = ^uint32(0)
 // task mag HOP nooit vellen. ~1M nodes is ruim maar begrensd.
 const maxNodes = 1 << 20
 
+// maxIndexBlocks begrenst het TOTAAL aantal blok-indexen in de boom — de
+// tweede helft van dezelfde grens als maxNodes, en de reparatie van een gat
+// daarin: ook de blok-index van een bestand is metadata in HOP's RAM (4 byte
+// per 4KB-blok), en die groeit met de OFFSET waarop geschreven wordt, niet met
+// de payload. De schijfgrens in WriteAt dekt dat niet: één `write(off=schijf-1,
+// 1 byte)` van een willekeurige app vroeg ~0 schijf maar liet de index tot de
+// hele schijf groeien (op een 256GB-NVMe ~256MB) → kern-OOM → álle slots dood.
+//
+// 4M indexen = 16MB HOP-RAM = 16GB totaal geadresseerde bestandsruimte. Dat is
+// de eerlijke bovengrens van deze laag: hopfs indexeert op 4KB in HOP's heap,
+// dus de praktische grens is dít budget, niet de schijfmaat. Voor de ontworpen
+// rol (scratch/RAM-overloop; de bron is S3, niets is persistent) is dat ruim —
+// en vol = een directe fout i.p.v. een node die omvalt.
+const maxIndexBlocks = 1 << 22
+
 type node struct {
 	dir      bool
 	children map[string]*node // dir
@@ -51,6 +66,7 @@ type FS struct {
 	next  uint32   // bump-allocator
 	max   uint32   // totaal aantal blokken
 	nodes int      // aantal nodes in de boom (excl. root), tegen OOM
+	index int      // totaal aantal blok-indexen in de boom, tegen OOM
 }
 
 // New maakt een lege bestandslaag op de (als leeg beschouwde) schijf.
@@ -284,6 +300,15 @@ func (f *FS) WriteAt(path string, off uint64, p []byte) error {
 	// payload het hieronder raakt — sparse, dus een schrijf op een grote
 	// offset kost geen schijf-I/O voor het gat.
 	need := (end + BlockSize - 1) / BlockSize
+	// De index-groei tegen het budget (zie maxIndexBlocks): weigeren VÓÓR de
+	// groei-lus, want de lus zelf is de schade (allocatie onder f.mu).
+	if grow := int(need) - len(n.blocks); grow > 0 {
+		if f.index+grow > maxIndexBlocks {
+			return fmt.Errorf("hopfs: bestandsindex-budget vol (%d van %d blokken; offset %d vraagt %d bij)",
+				f.index, maxIndexBlocks, off, grow)
+		}
+		f.index += grow
+	}
 	for uint64(len(n.blocks)) < need {
 		n.blocks = append(n.blocks, holeBlock)
 	}
@@ -375,6 +400,7 @@ func (f *FS) release(n *node) {
 		}
 		return
 	}
+	f.index -= len(n.blocks) // index-budget terug (zie maxIndexBlocks)
 	for _, b := range n.blocks {
 		if b != holeBlock { // gaten zijn nooit gealloceerd
 			f.free = append(f.free, b)

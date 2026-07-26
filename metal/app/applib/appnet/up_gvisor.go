@@ -1,5 +1,3 @@
-//go:build !lnetonet
-
 package appnet
 
 import (
@@ -35,11 +33,15 @@ func Up(a *applib.App) (string, error) {
 	}
 	iface.Stack.EnableICMP()
 
-	// Bewust GEEN eigen RST's bij de exit (hier stond kort een OnExit-hook
-	// met Stack.Close): de switch stuurt ze al autoritair bij élke
-	// slot-teardown (hopswitch.ResetPeers) — óók na een panic, waar een
-	// app-hook toch niets meer kan. Eén mechanisme, van de kernel (Derek,
-	// 20-07).
+	// Een dode peer merken is APP-WERK, niet kernelwerk (Derek, 26-07). Er
+	// stond hier kort een OnExit-hook met Stack.Close, en daarna deed de switch
+	// het met gefabriceerde RST's (hopswitch/rst.go) — beide gesloopt. De reden:
+	// een switch of router kan een verbinding altijd stil doodmaken, dus een app
+	// moét tegen stilte kunnen. Dan is een snelkoppeling voor één van de
+	// oorzaken pure redundantie — HOP heeft al twee lagen die dit dekken (de
+	// health-check op de task en de app-eigen ping). Wie snel wil merken dat
+	// zijn peer weg is, zet zijn read-deadline op een paar keer zijn
+	// ping-interval; korter dan dat sloopt gezonde verbindingen.
 
 	// In Go's standaard net-package hangen: hierna werken net.Listen en
 	// net.Dial voor deze app. Interne IP's zijn deterministisch (geen DNS

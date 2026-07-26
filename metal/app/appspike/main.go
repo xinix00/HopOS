@@ -9,9 +9,7 @@ package main
 import (
 	"bufio"
 	"net"
-	"net/http"
 	"runtime"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,18 +40,6 @@ func main() {
 		smpBench(app)
 	}
 
-	// 1-core-prestatierol (bench.go): draait de app-core op volle N1-snelheid?
-	if app.Env("BENCH") != "" {
-		cpuBench(app)
-	}
-
-	// IJkgewicht voor de per-app CPU-meting (bench.go): DUTY=50 hoort op
-	// ijzer als cpu≈50 in /tasks te staan (bewezen 18-07: 0/24/50/74/100).
-	if v := app.Env("DUTY"); v != "" {
-		pct, _ := strconv.Atoi(v) // fout → 0, cpuDuty klemt naar 1..100
-		cpuDuty(app, pct)
-	}
-
 	// Crash-rol (verbrande-core-test 20-07): een échte Go-panic. Zonder de
 	// goos.Exit-hook eindigde die in tamago's DAIFSet+WFI — een lijk dat
 	// zelfs de stage-2-revoke niet meer voelt; de core was weg tot de
@@ -71,14 +57,6 @@ func main() {
 	// dvfs-druk-flank.
 	if app.Env("BURN") != "" {
 		burn(app)
-	}
-
-	// Downloader-rol (freeze-jacht 13-07, idee Derek): sustained RX-DMA door
-	// het VOLLE slot-pad (eigen netstack → switch → NAT-masquerade → GEM),
-	// zonder job-churn en zonder core-0-buffering — streamen en weggooien.
-	// Plain HTTP: test en passant of TLS-crypto een freeze-ingrediënt is.
-	if url := app.Env("DOWNLOAD"); url != "" {
-		download(app, url)
 	}
 
 	// Isolatietest: grijp bewust buiten de eigen kooi. Onder stage-2 hoort
@@ -375,56 +353,6 @@ func burn(app *applib.App) {
 			atomic.LoadUint64(&iters), ms.NumGC, ms.HeapAlloc>>10,
 			map[bool]string{true: "work", false: "rest"}[inWork],
 			time.Now().UTC().Format("15:04:05Z"))
-	}
-}
-
-// download is de sustained-RX-DMA-rol (freeze-jacht 13-07): eindeloos een
-// groot bestand streamen door de eigen netstack en de bytes weggooien — het
-// volle slot-pad (appnet → switch → NAT → GEM) onder continue inbound-druk,
-// zonder churn en zonder buffering. Plain HTTP houdt TLS buiten het
-// experiment. Body.Read blokkeert (yield), dus heartbeat/kill lopen gewoon.
-func download(app *applib.App, url string) {
-	ip, err := appnet.Up(app)
-	if err != nil {
-		app.Logf("DOWNLOAD: netstack: %v", err)
-		return
-	}
-	if d := app.Env("HOP_DNS"); d != "" {
-		net.SetDefaultNS([]string{d})
-	}
-	app.Logf("DOWNLOAD: stack up on %s — streaming %s to /dev/null", ip, url)
-	buf := make([]byte, 32<<10)
-	var total, last uint64
-	for round := 1; ; round++ {
-		resp, err := http.Get(url)
-		if err != nil {
-			app.Logf("DOWNLOAD: %v — retry in 5s", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-		if round == 1 || resp.StatusCode != 200 {
-			app.Logf("DOWNLOAD: HTTP %s, length %d", resp.Status, resp.ContentLength)
-		}
-		if resp.StatusCode != 200 {
-			resp.Body.Close()
-			time.Sleep(5 * time.Second)
-			continue
-		}
-		var n uint64
-		for {
-			k, err := resp.Body.Read(buf)
-			n += uint64(k)
-			total += uint64(k)
-			if total-last >= 100<<20 {
-				last = total
-				app.Logf("DOWNLOAD: %d MB total (round %d)", total>>20, round)
-			}
-			if err != nil {
-				break
-			}
-		}
-		resp.Body.Close()
-		app.Logf("DOWNLOAD: round %d done — %d MB this round, %d MB total", round, n>>20, total>>20)
 	}
 }
 

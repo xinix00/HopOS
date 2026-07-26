@@ -18,8 +18,8 @@ import (
 	"hop-os/metal/cpu/el2"
 	"hop-os/metal/cpu/psci"
 	"hop-os/metal/driver/fb"
-	"hop-os/metal/driver/pcie"
 	"hop-os/metal/driver/nic/virtionet"
+	"hop-os/metal/driver/pcie"
 )
 
 // machine is de board-implementatie voor de QEMU -M virt arm64-machine.

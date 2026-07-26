@@ -7,16 +7,16 @@
 // Bewust een apart pakket naast applib: alleen apps die netwerk willen linken
 // de netstack mee; wie het niet importeert houdt een kleine image.
 //
-// Er zijn twee backends achter dezelfde Up (build-tag, geen API-verschil):
-//
-//   - default: gVisor via go-net (up_gvisor.go) — bewezen, maar fors
-//     (~4,3MB per app-image);
-//   - -tags lnetonet: soypat/lneto via x/xnet (up_lneto.go) — ~2,7MB
-//     kleiner, maar jong; wordt pas default als hij NETDEMO + soak
-//     overleeft. Bewust rechtstreeks op x/xnet en niet op go-net's
-//     LnetoStack: go-net importeert gvisor, en package-inits worden altijd
-//     meegelinkt — via go-net blijft gVisor dus in de binary (gemeten
-//     15-07: 5,54MB i.p.v. 3,88MB).
+// Eén backend: gVisor via go-net (up_gvisor.go) — bewezen, maar fors (~4,3MB
+// per app-image). Er stond hier tot 26-07 een tweede, lichtere backend
+// (soypat/lneto via x/xnet, achter `-tags lnetonet`): ~2,7MB kleiner, maar elf
+// dagen opt-in zonder ooit default te worden. Twee netstacks naast elkaar was
+// de dure toestand — dubbele frame-constanten (lneto mócht go-net niet
+// importeren), een dependency op een niet-uitgebrachte commit, extra
+// gate-builds, en elke wijziging aan dit contract twee keer. De flip werd
+// bovendien tegengehouden door een echt gat: x/xnet had geen close-all, dus
+// peers van zo'n app vielen terug op hun eigen read-deadline (30s bij de
+// display) i.p.v. een directe RST. Terughalen kan uit git history.
 package appnet
 
 import (

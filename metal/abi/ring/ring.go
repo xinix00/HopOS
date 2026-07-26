@@ -84,6 +84,13 @@ func (r *Ring) Write(typ uint32, p []byte) bool {
 
 	// Past het record nog aaneengesloten tot het einde van de buffer?
 	if contig := r.size - head%r.size; need > contig {
+		// Een verzonnen head (de indexen leven in geheugen dat de andere kant
+		// kan beschrijven) laat contig-recHdr hieronder underflowen — dan zou de
+		// PAD-lengte bijna 2^64 worden en de header zelf voorbij de datarand
+		// staan.
+		if contig < recHdr {
+			return false
+		}
 		if r.size-(head-tail) < contig+need {
 			return false
 		}
@@ -126,6 +133,16 @@ func (r *Ring) ReadInto(buf []byte) (typ uint32, n int, ok bool) {
 		// head — en een reusachtige head boven louter PAD-records zou de
 		// skip-lus hieronder miljarden ronden gunnen (livelock op de HOP-core).
 		if head-tail > r.size {
+			r.corrupt = true
+			return 0, 0, false
+		}
+		// De 8-byte header moet zélf nog vóór de datarand liggen, en dát moet
+		// vóór de Read64 vaststaan: de indexen leven in geheugen dat de app kan
+		// beschrijven, dus een verzonnen tail (size-7 bijvoorbeeld) zou hieronder
+		// 1-7 bytes voorbij de databuffer lezen. Vandaag valt dat nog in de
+		// mapped slack van het slot-venster (RingDataCap < RingStride) — dus geluk,
+		// geen contract; wordt die slack ooit nul, dan is het een fault op core 0.
+		if tail%r.size > r.size-recHdr {
 			r.corrupt = true
 			return 0, 0, false
 		}

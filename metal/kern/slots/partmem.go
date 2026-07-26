@@ -154,6 +154,11 @@ func PoolBytes() uint64 {
 // de control-regio's (CtrlBase e.v.) omhoog schuiven zodat een groter GB-blok
 // past, óf een multi-GB stage-2-map (meer dan één L2-tabel per partitie). Beide
 // zijn asm-/layout-werk per board; tot dan is 768MB de harde per-slot-ceiling.
+//
+// linkBase is altijd het canonieke slot-1-adres: beide aanroepers pinnen 'm op
+// layout.SlotBase(1) (images zijn canoniek gelinkt — de stage-2 ís de
+// relocatie). De aftrekking hieronder kan dus niet underflowen; wie hier ooit
+// een variabele linkBase langs wil sturen, moet dát eerst afvangen.
 func maxLimitFor(linkBase uint64) uint64 {
 	gbEnd := (linkBase &^ (1<<30 - 1)) + (1 << 30)
 	if gbEnd > layout.CtrlBase {

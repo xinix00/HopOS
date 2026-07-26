@@ -73,6 +73,31 @@ type Tables struct {
 	Sigs []string // alle signatures in XSDT-volgorde (voor de dump)
 }
 
+// plausiblePA weegt een fysiek tabeladres uit de firmware vóór we het
+// dereferencen. De lengte-velden ín een tabel worden al begrensd, maar de
+// POINTERS uit de XSDT werden blind gevolgd: één corrupte entry (garbage met
+// hoge bits, of een handvol bytes) en de eerste signature-read is een
+// data abort op core 0 — een dode node bij boot i.p.v. een nette acpi-fout.
+//
+// Dit is expliciet een structurele plausibiliteitstoets, géén
+// memory-map-validatie: dit pakket kent de EFI-memmap niet, dus een pointer
+// naar plausibel-maar-ongemapt RAM kan nog steeds faulten. Het vangt wél de
+// realistische corruptie (nulpagina, niet-uitgelijnd, buiten de 48-bit
+// PA-ruimte die deze boards gebruiken, of een lengte die overloopt).
+func plausiblePA(pa uintptr, length int) bool {
+	const (
+		minPA = 0x1000  // de nulpagina is nooit een ACPI-tabel
+		maxPA = 1 << 48 // PA-ruimte van deze ARM64-boards (en van onze mappings)
+	)
+	if pa < minPA || pa >= maxPA {
+		return false
+	}
+	if pa%4 != 0 { // ACPI-tabelheaders liggen in de praktijk 4-byte-uitgelijnd
+		return false
+	}
+	return length > 0 && uint64(pa)+uint64(length) <= maxPA
+}
+
 // Parse leest de RSDP (fysiek adres, uit de EFI-configuratietabel) en walkt
 // de XSDT. Checksums worden gecontroleerd: een corrupte pointer hier betekent
 // dat al het vervolg giswerk is — dan liever meteen een fout.
@@ -95,8 +120,8 @@ func Parse(rsdp uintptr) (*Tables, error) {
 		return nil, fmt.Errorf("acpi: RSDP checksum failed (ACPI 2.0 part)")
 	}
 	xsdt := uintptr(u64(b[24:]))
-	if xsdt == 0 {
-		return nil, fmt.Errorf("acpi: XSDT address is 0")
+	if !plausiblePA(xsdt, 36) {
+		return nil, fmt.Errorf("acpi: implausible XSDT address %#x", xsdt)
 	}
 
 	h := mem(xsdt, 36)
@@ -120,8 +145,8 @@ func Parse(rsdp uintptr) (*Tables, error) {
 	}
 	for off := 36; off+8 <= length; off += 8 {
 		pa := uintptr(u64(full[off:]))
-		if pa == 0 {
-			continue
+		if !plausiblePA(pa, 36) {
+			continue // corrupte entry: overslaan i.p.v. erin lezen
 		}
 		sig := string(mem(pa, 4))
 		t.Sigs = append(t.Sigs, sig)
@@ -157,12 +182,15 @@ func (t *Tables) decode(sig string) []byte {
 	if !ok {
 		return nil
 	}
+	if !plausiblePA(pa, 36) {
+		return nil
+	}
 	length := int(u32(mem(pa, 8)[4:]))
 	// Length is firmware-input: te klein = geen geldige SDT, te groot =
 	// een corrupte waarde die make() in een boot-OOM laat lopen (review
 	// #11) — beide stil fout laten zijn ("liever meteen een fout" geldt
 	// voor Parse; hier is nil het contract voor "onbruikbaar").
-	if length < 36 || length > 1<<22 {
+	if length < 36 || length > 1<<22 || !plausiblePA(pa, length) {
 		return nil
 	}
 	b := mem(pa, length)
