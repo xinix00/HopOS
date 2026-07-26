@@ -5,10 +5,15 @@
 #   tools/release.sh v1.2.2        # bestaande release: assets uploaden
 #   tools/release.sh v1.3.0        # nieuwe tag: release + assets aanmaken
 #
-# Artefacten (drop-in):
-#   BOOTAA64.EFI      elke UEFI-arm64-machine — naar EFI/BOOT/ op een FAT-stick
-#   hopos-rpi5.zip    Pi 5 — uitpakken op de SD-bootfs (hop-agent5.img + config.txt)
-#   hopos-rpi4.zip    Pi 4 — idem (kernel8.img + config.txt)
+# Artefacten (drop-in), elk in twee smaken — gui (default) en headless
+# (GUI=0): headless is geen uitgezette gui maar een build waar geen enkele
+# regel gui-code in gelinkt zit.
+#   BOOTAA64.EFI / BOOTAA64-headless.EFI
+#                     elke UEFI-arm64-machine — naar EFI/BOOT/ op een
+#                     FAT-stick (de headless-variant daar hernoemen naar
+#                     BOOTAA64.EFI)
+#   hopos-rpi5[-headless].zip   Pi 5 — uitpakken op de SD-bootfs
+#   hopos-rpi4[-headless].zip   Pi 4 — idem
 #   SHA256SUMS(.sig)  ed25519-handtekening + verificatiesleutels
 #
 # Tekenen: `ssh-keygen -Y` (overal aanwezig, geen keyring-gedoe). Privésleutel
@@ -50,18 +55,28 @@ DIST="$DIR/out-release/$TAG"
 rm -rf "$DIST"
 mkdir -p "$DIST"
 
-# 2. UEFI-image via HET bouwrecept (image/uefi-run.sh agent; BUILD_ONLY stopt
-#    vóór QEMU). Alléén de PE wordt meegenomen — nooit iets anders uit de
-#    gitignorede uefi-esp-agent/, daar wonen node-configs met geheimen.
+# 2. UEFI-images via HET bouwrecept (image/uefi-run.sh agent; BUILD_ONLY stopt
+#    vóór QEMU), in beide smaken. Headless éérst en gui laatst, zodat de tree
+#    na afloop in de default-staat (gui) achterblijft. Alléén de PE wordt
+#    meegenomen — nooit iets anders uit de gitignorede uefi-esp-agent/, daar
+#    wonen node-configs met geheimen.
+echo ">> BOOTAA64-headless.EFI (uefi-run.sh agent, GUI=0, build-only)" >&2
+BUILD_ONLY=1 GUI=0 "$DIR/image/uefi-run.sh" agent >/dev/null
+cp "$DIR/uefi-esp-agent/EFI/BOOT/BOOTAA64.EFI" "$DIST/BOOTAA64-headless.EFI"
 echo ">> BOOTAA64.EFI (uefi-run.sh agent, build-only)" >&2
 BUILD_ONLY=1 "$DIR/image/uefi-run.sh" agent >/dev/null
 cp "$DIR/uefi-esp-agent/EFI/BOOT/BOOTAA64.EFI" "$DIST/"
 
 # 3. Pi-zips: drop-in op de SD-bootfs — precies de bestandsnamen die de
-#    firmware verwacht (config.txt wijst de kernel aan), niets hernoemen.
-echo ">> hopos-rpi5.zip + hopos-rpi4.zip" >&2
+#    firmware verwacht (config.txt wijst de kernel aan), niets hernoemen;
+#    alleen de zip-naam draagt de smaak. Zelfde volgorde: headless, dan gui.
+echo ">> hopos-rpi5[-headless].zip + hopos-rpi4[-headless].zip" >&2
+GUI=0 "$DIR/image/rpi5-agent.sh" >/dev/null
+(cd "$DIR/sd-rpi5" && zip -q -j "$DIST/hopos-rpi5-headless.zip" hop-agent5.img config.txt)
 "$DIR/image/rpi5-agent.sh" >/dev/null
 (cd "$DIR/sd-rpi5" && zip -q -j "$DIST/hopos-rpi5.zip" hop-agent5.img config.txt)
+GUI=0 "$DIR/image/rpi4-agent.sh" >/dev/null
+(cd "$DIR/sd-rpi4" && zip -q -j "$DIST/hopos-rpi4-headless.zip" kernel8.img config.txt)
 "$DIR/image/rpi4-agent.sh" >/dev/null
 (cd "$DIR/sd-rpi4" && zip -q -j "$DIST/hopos-rpi4.zip" kernel8.img config.txt)
 
@@ -83,6 +98,7 @@ NOTES="Prebuilt, signed boot images — https://gethop.org/hopos/ for the 5-minu
 - **BOOTAA64.EFI** — any UEFI arm64 box: copy to \`EFI/BOOT/\` on a FAT USB stick, add \`hopos.cfg\`
 - **hopos-rpi5.zip** — Raspberry Pi 5: unzip onto the SD bootfs
 - **hopos-rpi4.zip** — Raspberry Pi 4: unzip onto the SD bootfs
+- **\`*-headless\`** — the same images built with \`GUI=0\`: not a disabled GUI but **zero GUI code linked**. For UEFI, rename \`BOOTAA64-headless.EFI\` to \`BOOTAA64.EFI\` on the stick.
 
 Verify: \`ssh-keygen -Y verify -f allowed_signers -I $SIGNER -n gethop-release -s SHA256SUMS.sig < SHA256SUMS && shasum -a 256 -c SHA256SUMS\`"
 if gh release view "$TAG" >/dev/null 2>&1; then
