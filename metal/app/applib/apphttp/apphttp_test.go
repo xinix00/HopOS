@@ -4,6 +4,7 @@
 package apphttp
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // lees haalt de hele body op en sluit hem.
@@ -189,6 +191,126 @@ func TestTeVeelHeaderbytesWeigert(t *testing.T) {
 func TestGeenHostWeigert(t *testing.T) {
 	if _, err := Get("http:///app.elf"); err == nil || !strings.Contains(err.Error(), "no host") {
 		t.Fatalf("err = %v, wil een geen-host-fout", err)
+	}
+}
+
+// Do is de algemene weg: methode, headers, body — en een foutstatus is géén
+// transportfout, want de aanroeper wil de body ervan lezen.
+func TestDoPOST(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if r.Method != "POST" || string(body) != `{"n":1}` {
+			t.Errorf("kreeg %s met body %q", r.Method, body)
+		}
+		if got := r.Header.Get("X-Hop-Auth"); got != "abc" {
+			t.Errorf("X-Hop-Auth = %q", got)
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Errorf("Content-Type = %q", got)
+		}
+		if r.ContentLength != 7 {
+			t.Errorf("Content-Length = %d, wil 7", r.ContentLength)
+		}
+		http.Error(w, "job locked", http.StatusConflict)
+	}))
+	defer srv.Close()
+
+	resp, err := Do(Call{
+		Method: "POST", URL: srv.URL + "/v1/jobs",
+		Header: Header{"Content-Type": "application/json", "X-Hop-Auth": "abc"},
+		Body:   []byte(`{"n":1}`),
+	})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if resp.StatusCode != 409 {
+		t.Fatalf("StatusCode %d, wil 409 — een foutstatus is geen transportfout", resp.StatusCode)
+	}
+	if got := lees(t, resp); !strings.Contains(string(got), "job locked") {
+		t.Fatalf("de body van de fout hoort leesbaar te zijn: %q", got)
+	}
+}
+
+// De reden dat chunked erin zit: een Go-server die streamt kent zijn lengte
+// niet en chunkt dus altijd. Zonder dit is elke SSE-staart onleesbaar.
+func TestDoLeestChunked(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f := w.(http.Flusher)
+		for i := range 3 {
+			fmt.Fprintf(w, "data: regel %d\n", i)
+			f.Flush()
+		}
+	}))
+	defer srv.Close()
+
+	resp, err := Do(Call{URL: srv.URL})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if resp.Length != -1 {
+		t.Fatalf("Length %d, wil -1 (chunked kent geen lengte vooraf)", resp.Length)
+	}
+	want := "data: regel 0\ndata: regel 1\ndata: regel 2\n"
+	if got := lees(t, resp); string(got) != want {
+		t.Fatalf("body %q, wil %q", got, want)
+	}
+}
+
+// Een blijvende stream leest regel voor regel door en breekt af op Close —
+// niet op een timeout, want een logstaart hoort open te blijven.
+func TestDoStreamStoptOpClose(t *testing.T) {
+	los := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f := w.(http.Flusher)
+		io.WriteString(w, "eerste\n")
+		f.Flush()
+		<-r.Context().Done()
+		close(los)
+	}))
+	defer srv.Close()
+
+	resp, err := Do(Call{URL: srv.URL}) // Timeout 0: geen totaaltermijn
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	line, err := bufio.NewReader(resp.Body).ReadString('\n')
+	if err != nil || line != "eerste\n" {
+		t.Fatalf("regel %q (%v)", line, err)
+	}
+	resp.Body.Close()
+	select {
+	case <-los:
+	case <-time.After(5 * time.Second):
+		t.Fatal("de server merkte niet dat de client ophing")
+	}
+}
+
+func TestDoTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done() // antwoordt nooit
+	}))
+	defer srv.Close()
+
+	start := time.Now()
+	if _, err := Do(Call{URL: srv.URL, Timeout: 300 * time.Millisecond}); err == nil {
+		t.Fatal("een server die niet antwoordt hoort op de termijn te stuiten")
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("de termijn hield het pas na %v tegen", d)
+	}
+}
+
+// Headers die het pakket zelf zet mag een aanroeper niet stil overschrijven, en
+// een CRLF in een waarde zou een tweede verzoek smokkelen.
+func TestDoWeigertGesmokkeldeHeaders(t *testing.T) {
+	for naam, h := range map[string]Header{
+		"eigen Host":     {"Host": "elders"},
+		"eigen lengte":   {"Content-Length": "0"},
+		"CRLF in waarde": {"X-Iets": "a\r\nX-Gesmokkeld: b"},
+	} {
+		if _, err := Do(Call{URL: "http://127.0.0.1:1/", Header: h}); err == nil {
+			t.Errorf("%s: werd geaccepteerd", naam)
+		}
 	}
 }
 

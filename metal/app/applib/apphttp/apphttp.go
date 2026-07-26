@@ -1,6 +1,8 @@
-// Package apphttp is een minimale HTTP/1.1-GET-client voor apps die alleen
-// plain HTTP praten: een LAN-fileserver lezen, een buur-app op het interne net
-// (10.100.0.0/24), of de node-API op HOPOS_HOST:8080.
+// Package apphttp is HTTP/1.1 zonder TLS: een kleine client (Get, Do) én een
+// kleine server (Serve) voor apps die alleen plain http praten — een
+// LAN-fileserver lezen, een buur-app op het interne net (10.100.0.0/24), de
+// node-API op HOPOS_HOST:8080, of zélf een pagina serveren zoals de
+// SURF-display doet.
 //
 // Bewust een apart pakket naast applib en appnet, om dezelfde reden als appnet:
 // alleen wie het importeert betaalt ervoor. En hier is die rekening groot.
@@ -10,10 +12,19 @@
 //	applib alleen ............ 1,71 MB
 //	+ appnet (gVisor) ........ 4,70 MB
 //	+ net/http ............... 7,99 MB   ← meer dan de netstack zelf
+//	+ apphttp i.p.v. net/http  5,06 MB
 //
 // Van wat net/http toevoegt is ~54% TLS/PKI (crypto/tls + x/crypto + x509 +
 // math/big + asn1), geen HTTP. Een app die dit pakket i.p.v. net/http gebruikt
-// houdt dus ~2,8MB over — puur door niet te linken wat hij niet nodig heeft.
+// houdt dus ~2,9MB over — puur door niet te linken wat hij niet nodig heeft.
+// Gemeten op de SURF-apps (26-07, nul crypto/tls-symbolen in de symboltabel):
+//
+//	display  8,68 MB → 5,88 MB   (serveert :80 + de web-KVM)
+//	launcher 8,42 MB → 5,48 MB   (POST/DELETE naar de agent-API)
+//	taskman  8,45 MB → 5,54 MB   (idem + de SSE-logstaart)
+//
+// De browser blijft op net/http: die praat https met de buitenwereld en heeft
+// TLS écht nodig.
 //
 // NIET voor de apploader: die haalt artifacts óók van https-URL's (GitHub-
 // release-assets, `hop apply https://…/app.elf`) en heeft daarvoor de
@@ -24,27 +35,32 @@
 //
 //   - geen https. Een https-URL faalt LUID met een duidelijke melding — nooit
 //     stil, want dit pakket bestaat juist om geen TLS te linken.
-//   - geen chunked transfer. Content-Length is verplicht (StageImage en elke
-//     andere bekende afnemer eisen de lengte toch al vooraf).
-//   - geen keep-alive, geen connection pool: één GET per verbinding
-//     (Connection: close).
-//   - geen read-deadline op de body: een trage server mag een groot bestand
-//     langzaam leveren. Een hángende server is niet fataal — applib's kill-flag
-//     loopt op een eigen goroutine en blijft het vangnet.
+//   - geen keep-alive aan de clientkant, geen connection pool: één verzoek per
+//     verbinding (Connection: close). De serverkant hergebruikt wél (zie
+//     serve.go): een KVM-pagina die frames pollt hoort niet elke keer een
+//     TCP-handdruk te betalen.
+//   - geen HTTP/2, geen compressie (Accept-Encoding: identity), geen cookies.
 //
-// Redirects worden wél gevolgd (bounded): dat is het enige dat je anders t.o.v.
-// net/http zou inleveren, en het is vijftien regels.
+// Chunked transfer kan dit pakket wél lezen (Do) en schrijven (Flush) — dat is
+// niet optioneel zodra je een SSE-staart of een frame-stream wilt, en het is
+// veertig regels. Alleen [Get] weigert hem: die belooft zijn aanroeper een
+// vooraf bekende lengte (StageImage toetst hem) en een antwoord zonder
+// Content-Length kan dat niet waarmaken.
 //
-// De headerparser leest netwerkdata van een server die wij niet schreven, dus
-// hij is dubbel begrensd: per regel (readLine, via de bufio-buffer) én
-// cumulatief (maxHeaderBytes). De body erna staat vrij — die lengte kondigt
-// Content-Length aan en StageImage toetst hem.
+// Redirects worden gevolgd (bounded, alleen voor verzoeken zonder body).
 //
-// Vereist een opgebrachte netstack (appnet.Up): dit gaat via net.Dial.
+// De headerparser leest netwerkdata van een tegenpartij die wij niet schreven,
+// dus hij is dubbel begrensd: per regel (readLine, via de bufio-buffer) én
+// cumulatief (maxHeaderBytes). Aan de clientkant staat de body erna vrij — die
+// lengte kondigt Content-Length aan en de aanroeper toetst hem; aan de
+// serverkant is ook de body begrensd (maxBodyBytes).
+//
+// Vereist een opgebrachte netstack (appnet.Up): dit gaat via net.Dial/net.Listen.
 package apphttp
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"net"
@@ -56,7 +72,8 @@ import (
 
 const (
 	// dialTimeout begrenst het opzetten van de verbinding: een onbereikbare
-	// host mag geen job-start gijzelen. De download zelf staat bewust vrij.
+	// host mag geen job-start gijzelen. De download zelf staat bewust vrij
+	// (Call.Timeout is er voor wie wél een totaaltermijn wil).
 	dialTimeout = 10 * time.Second
 
 	// maxRedirects volgt hetzelfde plafond als net/http's default.
@@ -72,21 +89,121 @@ const (
 	maxHeaderBytes = 64 << 10
 )
 
-// Response is één geslaagde GET. Body is de ongelezen responsebody; sluit hem
-// (dat sluit de verbinding). Length is de aangekondigde Content-Length.
+// Statuscodes die dit pakket zelf noemt — genoeg om aanroepers leesbaar te
+// houden zonder net/http's volledige lijst over te schrijven.
+const (
+	StatusOK                    = 200
+	StatusCreated               = 201
+	StatusNoContent             = 204
+	StatusFound                 = 302
+	StatusBadRequest            = 400
+	StatusNotFound              = 404
+	StatusMethodNotAllowed      = 405
+	StatusLengthRequired        = 411
+	StatusRequestEntityTooLarge = 413
+	StatusInternalServerError   = 500
+)
+
+// Header is één verzameling headers. HTTP-headernamen zijn
+// hoofdletter-ongevoelig, dus Get/Set zijn dat ook; de opgeslagen schrijfwijze
+// is die van de zender (client) of van de draad (server).
+type Header map[string]string
+
+// Get geeft de waarde van key ("" als hij ontbreekt), ongeacht schrijfwijze.
+func (h Header) Get(key string) string {
+	if v, ok := h[key]; ok { // snelle weg: exact zoals opgeslagen
+		return v
+	}
+	for k, v := range h {
+		if strings.EqualFold(k, key) {
+			return v
+		}
+	}
+	return ""
+}
+
+// Set zet key op value en ruimt een afwijkend gespelde dubbel op.
+func (h Header) Set(key, value string) {
+	for k := range h {
+		if k != key && strings.EqualFold(k, key) {
+			delete(h, k)
+		}
+	}
+	h[key] = value
+}
+
+// add voegt toe: een herhaalde header wordt één komma-lijst (RFC 9110 §5.3),
+// zodat een tweede regel de eerste niet stil overschrijft.
+func (h Header) add(key, value string) {
+	if cur := h.Get(key); cur != "" {
+		value = cur + ", " + value
+	}
+	h.Set(key, value)
+}
+
+// Call is één uitgaand verzoek voor [Do]. Host, Content-Length, Connection en
+// Accept-Encoding zet Do zelf — die staan niet ter discussie.
+type Call struct {
+	Method  string        // "" = GET
+	URL     string        // moet http:// zijn
+	Header  Header        // extra verzoekheaders (mag nil zijn)
+	Body    []byte        // nil = geen body
+	Timeout time.Duration // totaaltermijn incl. body-lezen; 0 = geen (blijvende streams)
+}
+
+// Response is één antwoord. Body is de ongelezen responsebody; sluit hem (dat
+// sluit de verbinding). Length is de aangekondigde Content-Length, of -1 als
+// het antwoord chunked is of tot EOF loopt.
 type Response struct {
-	Body   io.ReadCloser
-	Length int64
+	StatusCode int
+	Status     string // code met reden, bv. "404 Not Found" (zoals net/http)
+	Header     Header
+	Body       io.ReadCloser
+	Length     int64
+
+	chunked bool // voor Get: het onderscheid tussen "chunked" en "geen lengte"
 }
 
 // Get doet één HTTP/1.1 GET en geeft de body als stream plus zijn lengte.
-// Volgt redirects (3xx met Location) tot maxRedirects.
+// Volgt redirects (tot maxRedirects) en eist een 200 mét Content-Length: wie
+// Get gebruikt wil een bestand van bekende omvang, geen half antwoord. Voor al
+// het andere is er [Do].
 func Get(raw string) (*Response, error) {
-	loc := raw
+	resp, err := Do(Call{URL: raw})
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case resp.StatusCode != StatusOK:
+		resp.Body.Close()
+		return nil, fmt.Errorf("apphttp: HTTP %s", resp.Status)
+	case resp.chunked:
+		// Een image zónder lengte kon de apploader nooit stagen (hij weigerde
+		// ContentLength <= 0): luid falen i.p.v. half werk.
+		resp.Body.Close()
+		return nil, fmt.Errorf("apphttp: chunked/encoded transfer is not supported here — serve the artifact with a Content-Length")
+	case resp.Length < 0:
+		resp.Body.Close()
+		return nil, fmt.Errorf("apphttp: no Content-Length in response")
+	}
+	return resp, nil
+}
+
+// Do voert één verzoek uit en geeft het antwoord — óók een 404 of een 500: een
+// foutstatus is geen transportfout, de aanroeper leest hem zelf (en zijn body,
+// die vaak zegt wat er mis is). Redirects worden gevolgd zolang het verzoek
+// geen body heeft; met body krijgt de aanroeper de 3xx zelf te zien, want een
+// POST opnieuw afvuren op een ander pad is niet aan dit pakket.
+func Do(c Call) (*Response, error) {
+	loc := c.URL
 	for range maxRedirects + 1 {
-		resp, next, err := get(loc)
+		resp, err := do(c, loc)
 		if err != nil {
 			return nil, err
+		}
+		next := ""
+		if c.Body == nil && resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			next = resp.Header.Get("Location")
 		}
 		if next == "" {
 			return resp, nil
@@ -105,33 +222,37 @@ func Get(raw string) (*Response, error) {
 		}
 		loc = base.ResolveReference(ref).String() // een relatieve Location mag
 	}
-	return nil, fmt.Errorf("apphttp: too many redirects (>%d) starting at %s", maxRedirects, raw)
+	return nil, fmt.Errorf("apphttp: too many redirects (>%d) starting at %s", maxRedirects, c.URL)
 }
 
-// get doet één ronde. De tweede returnwaarde is de Location van een 3xx (leeg
-// bij een gewoon antwoord): dán moet de aanroeper de body sluiten en doorgaan.
-func get(raw string) (_ *Response, location string, err error) {
+// do doet één ronde: verbinden, verzoek schrijven, antwoordkop lezen.
+func do(c Call, raw string) (_ *Response, err error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, "", fmt.Errorf("apphttp: bad URL %q: %w", raw, err)
+		return nil, fmt.Errorf("apphttp: bad URL %q: %w", raw, err)
 	}
 	// Luid, niet stil: dit pakket bestaat juist om TLS niet te linken, dus een
 	// https-URL is een configuratiefout die je op de console hoort te zien.
 	if u.Scheme != "http" {
-		return nil, "", fmt.Errorf("apphttp: only http:// is supported, got %q — "+
-			"this app links no TLS (use a plain-http artifact URL on the LAN, or build the app with net/http)", u.Scheme)
+		return nil, fmt.Errorf("apphttp: only http:// is supported, got %q — "+
+			"this app links no TLS (use a plain-http URL on the LAN, or build the app with net/http)", u.Scheme)
 	}
 	if u.Host == "" {
-		return nil, "", fmt.Errorf("apphttp: URL %q has no host", raw)
+		return nil, fmt.Errorf("apphttp: URL %q has no host", raw)
 	}
 	addr := u.Host
 	if u.Port() == "" {
 		addr = net.JoinHostPort(addr, "80")
 	}
 
+	req, err := requestBytes(c, u)
+	if err != nil {
+		return nil, err
+	}
+
 	conn, err := net.DialTimeout("tcp4", addr, dialTimeout)
 	if err != nil {
-		return nil, "", fmt.Errorf("apphttp: dial %s: %w", addr, err)
+		return nil, fmt.Errorf("apphttp: dial %s: %w", addr, err)
 	}
 	// Elk faalpad hierna sluit de verbinding; het succespad geeft hem als Body
 	// aan de aanroeper mee.
@@ -141,41 +262,49 @@ func get(raw string) (_ *Response, location string, err error) {
 			conn.Close()
 		}
 	}()
+	// De termijn dekt álles tot en met het lezen van de body — dat is wat een
+	// aanroeper met een timeout bedoelt. Geen timeout = een blijvende stream
+	// (een SSE-staart hoort niet af te lopen).
+	if c.Timeout > 0 {
+		conn.SetDeadline(time.Now().Add(c.Timeout))
+	}
 
-	// Accept-Encoding: identity — wij pakken niets uit, dus vraag het ook niet.
-	// Host zonder poort-default, net als net/http.
-	if _, err := fmt.Fprintf(conn,
-		"GET %s HTTP/1.1\r\nHost: %s\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
-		u.RequestURI(), u.Host); err != nil {
-		return nil, "", fmt.Errorf("apphttp: write request: %w", err)
+	if _, err := conn.Write(req); err != nil {
+		return nil, fmt.Errorf("apphttp: write request: %w", err)
+	}
+	if len(c.Body) > 0 {
+		if _, err := conn.Write(c.Body); err != nil {
+			return nil, fmt.Errorf("apphttp: write body: %w", err)
+		}
 	}
 
 	br := bufio.NewReaderSize(conn, bufSize)
 	budget := maxHeaderBytes
 
-	status, err := readLine(br, &budget)
+	line, err := readLine(br, &budget)
 	if err != nil {
-		return nil, "", fmt.Errorf("apphttp: read status line: %w", err)
+		return nil, fmt.Errorf("apphttp: read status line: %w", err)
 	}
-	code, err := statusCode(status)
+	code, err := statusCode(line)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
+	_, status, _ := strings.Cut(line, " ") // "HTTP/1.1 404 Not Found" → "404 Not Found"
 
+	hdr := Header{}
 	var length int64 = -1
-	var loc string
-	var encoded bool
+	var chunked bool
 	for {
 		line, err := readLine(br, &budget)
 		if err != nil {
-			return nil, "", fmt.Errorf("apphttp: read headers: %w", err)
+			return nil, fmt.Errorf("apphttp: read headers: %w", err)
 		}
 		if line == "" {
 			break // lege regel: einde headers
 		}
 		k, v, found := strings.Cut(line, ":")
 		if !found {
-			return nil, "", fmt.Errorf("apphttp: malformed header %q", line)
+			return nil, fmt.Errorf("apphttp: malformed header %q", line)
 		}
 		v = strings.TrimSpace(v)
 		switch {
@@ -183,38 +312,71 @@ func get(raw string) (_ *Response, location string, err error) {
 			// Een tweede, andere lengte is een smokkel-signaal, geen
 			// laatste-wint-geval: falen.
 			if length >= 0 {
-				return nil, "", fmt.Errorf("apphttp: duplicate Content-Length")
+				return nil, fmt.Errorf("apphttp: duplicate Content-Length")
 			}
 			if length, err = strconv.ParseInt(v, 10, 64); err != nil || length < 0 {
-				return nil, "", fmt.Errorf("apphttp: bad Content-Length %q", v)
+				return nil, fmt.Errorf("apphttp: bad Content-Length %q", v)
 			}
-		case strings.EqualFold(k, "Location"):
-			loc = v
 		case strings.EqualFold(k, "Transfer-Encoding"):
-			encoded = !strings.EqualFold(v, "identity")
+			chunked = !strings.EqualFold(v, "identity")
 		}
+		hdr.add(k, v)
 	}
 
-	if code >= 300 && code < 400 {
-		if loc == "" {
-			return nil, "", fmt.Errorf("apphttp: HTTP %d without Location", code)
-		}
-		handedOff = true // de aanroeper sluit deze body vóór de volgende ronde
-		return &Response{Body: body{br, conn}, Length: length}, loc, nil
+	// Chunked wint van Content-Length (RFC 9112 §6.1) — en een antwoord met
+	// beide is smokkel-verdacht, dus de lengte gaat overboord.
+	var rd io.Reader
+	switch {
+	case chunked:
+		rd, length = &chunkReader{br: br}, -1
+	case length >= 0:
+		rd = io.LimitReader(br, length)
+	default:
+		rd = br // geen lengte, geen chunks: de body loopt tot EOF
 	}
-	if code != 200 {
-		return nil, "", fmt.Errorf("apphttp: HTTP %s", status)
-	}
-	// Chunked kan dit pakket niet, en een image zónder lengte kon de apploader
-	// nooit stagen (hij weigerde ContentLength <= 0). Dus: luid falen.
-	if encoded {
-		return nil, "", fmt.Errorf("apphttp: chunked/encoded transfer is not supported — serve the artifact with a Content-Length")
-	}
-	if length < 0 {
-		return nil, "", fmt.Errorf("apphttp: no Content-Length in response")
-	}
+
 	handedOff = true
-	return &Response{Body: body{br, conn}, Length: length}, "", nil
+	return &Response{
+		StatusCode: code,
+		Status:     status,
+		Header:     hdr,
+		Body:       body{rd, conn},
+		Length:     length,
+		chunked:    chunked,
+	}, nil
+}
+
+// requestBytes bouwt de verzoekkop. Header-waarden mogen geen CR/LF bevatten:
+// dat zou een tweede verzoek in het eerste smokkelen.
+func requestBytes(c Call, u *url.URL) ([]byte, error) {
+	method := c.Method
+	if method == "" {
+		method = "GET"
+	}
+	var b bytes.Buffer
+	// Accept-Encoding: identity — wij pakken niets uit, dus vraag het ook niet.
+	// Host zonder poort-default, net als net/http.
+	fmt.Fprintf(&b, "%s %s HTTP/1.1\r\nHost: %s\r\nAccept-Encoding: identity\r\nConnection: close\r\n",
+		method, u.RequestURI(), u.Host)
+	if c.Body != nil {
+		fmt.Fprintf(&b, "Content-Length: %d\r\n", len(c.Body))
+	}
+	for k, v := range c.Header {
+		switch {
+		case strings.ContainsAny(k, "\r\n: ") || k == "":
+			return nil, fmt.Errorf("apphttp: illegal header name %q", k)
+		case strings.ContainsAny(v, "\r\n"):
+			return nil, fmt.Errorf("apphttp: illegal value for header %q", k)
+		// De vier hierboven zijn van ons; stil laten overschrijven zou het
+		// verzoek onbegrijpelijk maken.
+		case strings.EqualFold(k, "Host"), strings.EqualFold(k, "Content-Length"),
+			strings.EqualFold(k, "Connection"), strings.EqualFold(k, "Transfer-Encoding"):
+			return nil, fmt.Errorf("apphttp: header %q is set by the package, not by the caller", k)
+		}
+		fmt.Fprintf(&b, "%s: %s\r\n", k, v)
+	}
+	b.WriteString("\r\n")
+	return b.Bytes(), nil
 }
 
 // readLine leest één CRLF-regel en trekt hem van het budget af. ReadSlice
@@ -250,9 +412,11 @@ func statusCode(line string) (int, error) {
 	return code, nil
 }
 
-// body koppelt de gebufferde reader aan de verbinding, zodat Close beide
-// afsluit: de bufio kan al body-bytes vooruit gelezen hebben, dus de body moet
-// dóór die reader gelezen worden en niet rechtstreeks van de conn.
+// body koppelt de (eventueel ge-de-chunkte) lezer aan de verbinding, zodat
+// Close beide afsluit: de bufio kan al body-bytes vooruit gelezen hebben, dus
+// de body moet dóór die reader gelezen worden en niet rechtstreeks van de conn.
+// Close is tevens het afbreek-signaal van een blijvende stream: een lezer die
+// in Read hangt komt eruit zodra de fd dicht is.
 type body struct {
 	r io.Reader
 	c net.Conn
@@ -260,3 +424,80 @@ type body struct {
 
 func (b body) Read(p []byte) (int, error) { return b.r.Read(p) }
 func (b body) Close() error               { return b.c.Close() }
+
+// chunkReader ontleedt chunked transfer-encoding: per chunk een hex-lengte,
+// die bytes, CRLF; lengte 0 sluit af (gevolgd door optionele trailers). Nodig
+// zodra je een antwoord leest dat een Go-server streamt — die kent zijn lengte
+// niet vooraf en chunkt dus altijd (SSE, logstaarten).
+type chunkReader struct {
+	br   *bufio.Reader
+	n    int64 // resterende bytes in de huidige chunk
+	done bool
+}
+
+func (c *chunkReader) Read(p []byte) (int, error) {
+	if c.done {
+		return 0, io.EOF
+	}
+	if c.n == 0 {
+		if err := c.next(); err != nil {
+			return 0, err
+		}
+		if c.done {
+			return 0, io.EOF
+		}
+	}
+	if int64(len(p)) > c.n {
+		p = p[:c.n]
+	}
+	n, err := c.br.Read(p)
+	c.n -= int64(n)
+	if c.n == 0 && err == nil {
+		// Einde chunk: de afsluitende CRLF hoort niet bij de data.
+		crlf, err := c.line()
+		if err != nil {
+			return n, err
+		}
+		if crlf != "" {
+			return n, fmt.Errorf("apphttp: chunk not terminated by CRLF")
+		}
+	}
+	return n, err
+}
+
+// line leest één regel van de chunk-framing. Bewust géén cumulatief budget
+// zoals bij de headers: een blijvende stream (SSE-staart) heeft ónbeperkt veel
+// chunks, en elke kop is meteen weer weg. De per-regel-grens van readLine
+// (bufSize) is hier de bescherming die telt.
+func (c *chunkReader) line() (string, error) {
+	budget := bufSize
+	return readLine(c.br, &budget)
+}
+
+// next leest de eerstvolgende chunk-kop; done wordt gezet op de nul-chunk.
+func (c *chunkReader) next() error {
+	line, err := c.line()
+	if err != nil {
+		return err
+	}
+	// "1a3; ext=foo" — de extensie is voor ons betekenisloos.
+	size, _, _ := strings.Cut(line, ";")
+	n, err := strconv.ParseInt(strings.TrimSpace(size), 16, 64)
+	if err != nil || n < 0 {
+		return fmt.Errorf("apphttp: malformed chunk size %q", line)
+	}
+	if n == 0 {
+		c.done = true
+		// Trailers wegslikken tot de lege regel — die is er altijd; hier telt
+		// het cumulatieve budget wél, want dit blok is eindig en eenmalig.
+		budget := maxHeaderBytes
+		for {
+			t, err := readLine(c.br, &budget)
+			if err != nil || t == "" {
+				return nil
+			}
+		}
+	}
+	c.n = n
+	return nil
+}

@@ -57,6 +57,16 @@ own stack: `net`, `net/http`, TLS, websockets, gRPC — `Listen` and `Dial`
 like anywhere else. Ports you declare in the job spec are published on the
 node's IP and handed to the app as `ER_PORT_<NAME>`.
 
+**No https? Save ~2.9 MB.** `net/http` links `crypto/tls` unconditionally —
+in an app image that costs more than the whole netstack (measured 26-07 on
+this `hello`: 4.70 MB with `appnet`, 7.99 MB once `net/http` is in, of which
+~54% is TLS/PKI). `metal/app/applib/apphttp` is plain HTTP/1.1 without it:
+`Get`/`Do` as a client, `Serve` as a server, chunked and WebSocket-upgrade
+included, `+0.36 MB` over the netstack floor. The SURF display, launcher and
+taskman run on it and each lost ~2.9 MB; a client that needs https (like the
+browser, or this repo's apploader with its x509 root bundle) stays on
+`net/http`. See the package doc for the full trade-off.
+
 Today an app lives inside this repo's module (`metal/app/<name>`) so it can
 import `applib` — copy `hello` as your starting point.
 
