@@ -110,21 +110,38 @@ launcher app shows. HopOS bundles them (as a JSON array) into the env var
 because the per-slot env blob is small. Every slot also gets `HOPOS_HOST`
 (this node's LAN IP) for free.
 
-A self-starting desktop is then two init jobs — the display and the launcher
-— plus a catalog:
+The desktop is two init jobs — the **display** (the surface plus its web-KVM)
+and the **launcher** (the start-menu the taskbar's *hop* button toggles;
+without it that button has nothing to open) — plus the catalog of everything
+else in `hopos.apps[]`. All of it pulls straight from the SURF
+[rolling-release](https://github.com/xinix00/hop-os-surf/releases/tag/rolling-release)
+— the same URL on every node, no http server of your own.
+
+The display and launcher share **one** core via the `desktop` sharegroup:
+both are mostly-idle UI chrome, so packing them together leaves every other
+core free for real apps — on a 4-core Pi that is the difference between one
+app window and three. Each catalog app then takes a whole core of its own:
 
 ```
-hopos.init[]={"name":"display","driver":"hop","artifacts":[{"url":"http://10.0.0.5/display.elf"}],"memory_limit":134217728,"ports":{"surf":7878,"http":80}}
-hopos.init[]={"name":"launcher","driver":"hop","artifacts":[{"url":"http://10.0.0.5/launcher.elf"}],"memory_limit":67108864,"env":{"SURF_ADDR":"{{host}}:7878","HOP_ADDR":"{{host}}:8080","HOPOS_APPS":""}}
-hopos.apps[]={"name":"clock","driver":"hop","artifacts":[{"url":"http://10.0.0.5/clock.elf"}],"memory_limit":67108864,"env":{"SURF_ADDR":"{{host}}:7878"}}
-hopos.apps[]={"name":"calc","driver":"hop","artifacts":[{"url":"http://10.0.0.5/calc.elf"}],"memory_limit":67108864,"env":{"SURF_ADDR":"{{host}}:7878"}}
-hopos.apps[]={"name":"browser","driver":"hop","artifacts":[{"url":"http://10.0.0.5/browser.elf"}],"memory_limit":134217728,"env":{"SURF_ADDR":"{{host}}:7878"}}
-hopos.apps[]={"name":"taskman","driver":"hop","artifacts":[{"url":"http://10.0.0.5/taskman.elf"}],"memory_limit":67108864,"env":{"SURF_ADDR":"{{host}}:7878","HOP_ADDR":"{{host}}:8080"}}
+hopos.init[]={"name":"display","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/display.elf"}],"memory_limit":134217728,"ports":{"surf":7878,"http":80},"tags":{"sharegroup":"desktop"},"cpu_shares":1024}
+hopos.init[]={"name":"launcher","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/launcher.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"desktop"},"cpu_shares":1024,"env":{"SURF_ADDR":"{{host}}:7878","HOP_ADDR":"{{host}}:8080","HOPOS_APPS":""}}
+hopos.apps[]={"name":"clock","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/clock.elf"}],"memory_limit":67108864,"env":{"SURF_ADDR":"{{host}}:7878"}}
+hopos.apps[]={"name":"calc","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/calc.elf"}],"memory_limit":67108864,"env":{"SURF_ADDR":"{{host}}:7878"}}
+hopos.apps[]={"name":"browser","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/browser.elf"}],"memory_limit":134217728,"env":{"SURF_ADDR":"{{host}}:7878"}}
+hopos.apps[]={"name":"dash","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/dash.elf"}],"memory_limit":67108864,"env":{"SURF_ADDR":"{{host}}:7878"}}
+hopos.apps[]={"name":"taskman","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/taskman.elf"}],"memory_limit":67108864,"env":{"SURF_ADDR":"{{host}}:7878","HOP_ADDR":"{{host}}:8080"}}
 ```
 
-Boot the node and the display comes up with the launcher on it; every other
-app is one click. The launcher POSTs the catalog entry to the agent verbatim
-(`hopos.apikey` set → it must also get `"HOP_KEY":"<key>"` in its env).
+Boot the node and the display comes up with the launcher's *hop* button live;
+every catalog app is one click — click starts it, click again stops it. The
+launcher POSTs the catalog entry to the agent verbatim (`hopos.apikey` set →
+it must also get `"HOP_KEY":"<key>"` in its env).
+
+**Headful vs headless.** This whole block is what the **GUI (headful)** release
+images are built for — the URLs are live, so it works as-is. The `*-headless`
+images link *zero* GUI code: drop the `display`/`launcher` init and the
+`hopos.apps[]` catalog and just list the `hopos.init[]` jobs the node should
+run — no desktop, only apps.
 
 ## Trust model
 
