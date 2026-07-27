@@ -9,6 +9,12 @@
 //     bij zodat het antwoord terugvindt. TCP én UDP (DNS, QUIC). natOutbound
 //     (slot → extern) en de reply-tak in natInbound. Nooit TCP-terminatie op
 //     core 0 — HOP herschrijft alleen headers en schuift het frame door.
+//   - Hairpin (Dereks model 27-07: poorten publiceren áltijd naar buiten, DNS
+//     kiest de host, en is dat je eigen node dan is de switch de sluiproute):
+//     een app die het node-IP belt op een gepubliceerde poort wordt intern
+//     omgelegd — DNAT + masquerade in één (de twee tabellen hierboven, geen
+//     nieuwe state) en ring-in bezorgd; er gaat geen byte de NIC uit.
+//     hairpinOutLocked (heen) en hairpinBackLocked (reply).
 //
 // De L2-next-hop (dst-MAC de NIC op) komt uit een neighbor-cache die passief
 // leert uit inbound frames: srcIP→srcMAC, en een frame van búíten ons subnet
@@ -16,9 +22,10 @@
 // nog-niet-geziene bestemming). HOP's eigen boot-verkeer (SNTP off-subnet, DNS
 // on-subnet) vult beide vóór de eerste app draait.
 //
-// Bewust niet gedekt (KISS, pas bij behoefte): hairpin (interne client naar
-// het node-IP — gebruik het slot-IP) en een bestemming op HOP's eigen subnet
-// die HOP zelf nog nooit sprak (geen neighbor → drop, de retransmit leert 'm).
+// Bewust niet gedekt (KISS, pas bij behoefte): het node-IP van binnenuit voor
+// níet-gepubliceerde poorten (node-diensten als de agent wonen op 10.100.0.1)
+// en een bestemming op HOP's eigen subnet die HOP zelf nog nooit sprak (geen
+// neighbor → drop, de retransmit leert 'm).
 package hopswitch
 
 import (
@@ -499,6 +506,13 @@ func natFromSlot(src int, f []byte) bool {
 	if proto == protoTCP && l4[13]&tcpFlagSYN != 0 && l4[13]&tcpFlagACK == 0 {
 		return false
 	}
+	// Draagt de reply het node-IP als bestemming, dan was de client een
+	// búúrslot (hairpinOutLocked) — een externe client heeft dat IP nooit
+	// (masquerade-antwoorden komen via de uplink binnen, niet hierlangs).
+	// Terugvertalen via de conntrack en ring-in, niet de NIC uit.
+	if binary.BigEndian.Uint32(ip[16:]) == uplink.ip {
+		return hairpinBackLocked(f, ip, l4, proto, m)
+	}
 	nextHop, known := l2For(binary.BigEndian.Uint32(ip[16:]))
 	if !known {
 		return true // next-hop onbekend: drop, de retransmit leert 'm
@@ -528,6 +542,12 @@ func natOutbound(src int, f []byte) bool {
 	sport := binary.BigEndian.Uint16(l4[0:])
 	dport := binary.BigEndian.Uint16(l4[2:])
 
+	// Het node-IP zelf: hairpin (intern omleggen), nooit de NIC uit — vóór
+	// l2For, anders zou first-contact een ARP-request naar ons eigen IP sturen.
+	if dstIP == uplink.ip {
+		return hairpinOutLocked(src, f, ip, l4, proto, slotIP, sport, dport)
+	}
+
 	nextHop, known := l2For(dstIP)
 	if !known {
 		// First-contact (Altra 14-07): een on-subnet bestemming die ons nooit
@@ -548,6 +568,73 @@ func natOutbound(src int, f []byte) bool {
 	copy(f[0:6], nextHop[:])
 	copy(f[6:12], uplink.mac[:])
 	uplink.Transmit(f)
+	return true
+}
+
+// hairpinOutLocked (mu vast, vanuit natOutbound): een app belt het node-IP —
+// de gepubliceerde poort van een buurslot. DNAT en masquerade in één beweging:
+// dst node-IP:nodePort → slot-IP:slotPort (de publicatie) en src
+// slot-IP:poort → node-IP:masq-poort (de conntrack), dan ring-in bij de
+// dienst. Door de bron te masqueraden ziet de dienst een gewone externe
+// client en vindt zijn reply via hairpinBackLocked de weg terug — mét de
+// 4-tupel die de beller verwacht (hij belde het node-IP, dus het antwoord
+// moet dáárvandaan lijken te komen). Niets gepubliceerd op die poort = drop,
+// zoals een dichte poort (de dialer merkt een timeout; node-diensten zoals
+// de agent wonen binnen op 10.100.0.1, niet hier).
+func hairpinOutLocked(src int, f, ip, l4 []byte, proto byte, slotIP uint32, sport, dport uint16) bool {
+	var m *pub
+	for j := range pubs {
+		if pubs[j].proto == proto && pubs[j].nodePort == dport {
+			m = &pubs[j]
+			break
+		}
+	}
+	if m == nil {
+		return true
+	}
+	srvIP := layout.SlotIP4(m.slot)
+	fl := flowFor(proto, src, slotIP, sport, srvIP, m.slotPort)
+	if fl == nil {
+		return true // pool vol: drop
+	}
+	fl.seen = time.Now()
+	binary.BigEndian.PutUint32(ip[12:], uplink.ip)
+	fixCsum32(ip[10:], slotIP, uplink.ip)
+	rewriteL4(l4, proto, 0, slotIP, uplink.ip, sport, fl.nodePort)
+	binary.BigEndian.PutUint32(ip[16:], srvIP)
+	fixCsum32(ip[10:], uplink.ip, srvIP)
+	rewriteL4(l4, proto, 2, uplink.ip, srvIP, dport, m.slotPort)
+	mac := layout.SlotMAC(m.slot)
+	copy(f[0:6], mac[:])
+	copy(f[6:12], hostMAC[:])
+	deliverLocked(m.slot, f)
+	return true
+}
+
+// hairpinBackLocked (mu vast, vanuit natFromSlot): de reply van de dienst op
+// een hairpin-verbinding — bestemming node-IP:masq-poort. De conntrack wijst
+// de beller aan; beide kanten terugschrijven (dst → beller-slot, src →
+// node-IP:nodePort, het adres dat de beller belde) en ring-in bezorgen.
+// Geen flow (verlopen, of een dienst die spontaan het node-IP belt vanaf
+// zijn eigen publicatie-poort) = drop.
+func hairpinBackLocked(f, ip, l4 []byte, proto byte, m *pub) bool {
+	srvIP := layout.SlotIP4(m.slot)
+	np := binary.BigEndian.Uint16(l4[2:])
+	fl := flowsRev[rkey{proto, np, srvIP, m.slotPort}]
+	if fl == nil {
+		return true
+	}
+	fl.seen = time.Now()
+	binary.BigEndian.PutUint32(ip[16:], fl.slotIP)
+	fixCsum32(ip[10:], uplink.ip, fl.slotIP)
+	rewriteL4(l4, proto, 2, uplink.ip, fl.slotIP, np, fl.slotPort)
+	binary.BigEndian.PutUint32(ip[12:], uplink.ip)
+	fixCsum32(ip[10:], srvIP, uplink.ip)
+	rewriteL4(l4, proto, 0, srvIP, uplink.ip, m.slotPort, m.nodePort)
+	mac := layout.SlotMAC(fl.slot)
+	copy(f[0:6], mac[:])
+	copy(f[6:12], hostMAC[:])
+	deliverLocked(fl.slot, f)
 	return true
 }
 

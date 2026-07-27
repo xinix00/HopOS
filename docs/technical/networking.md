@@ -91,6 +91,14 @@ The app binds the same port number it is published on, handed to it as
 `ER_PORT_<NAME>`. This is how the outside world reaches a service running on
 an app core.
 
+The same address works from the *inside* too (**hairpin**): an app dialing
+its own node's LAN IP on a published port is rerouted internally — the DNAT
+rule picks the target slot, the masquerade table disguises the caller as the
+node so the reply finds its way back, and the frame goes ring-to-ring without
+ever touching the NIC (`hairpinOutLocked` / `hairpinBackLocked`). One port
+number per host, one address that is true everywhere: DNS gets you to the
+right host, the switch takes the shortcut when that host is you.
+
 ## Reaching out (outbound masquerade / PAT)
 
 When an app dials out — an HTTP client, a database driver, `cloudflared`, a
@@ -159,8 +167,8 @@ DNS comes from the node config and is passed to apps as `HOP_DNS`.
 Two things are deliberately not handled yet (KISS — they'll come when a real
 workload needs them):
 
-- **Hairpin NAT**: an internal client hitting the node's *external* IP.
-  Use the slot IP (or `10.100.0.1` for node services) instead.
+- **Node services on the LAN IP from the inside**: hairpin covers *published
+  job ports* only; the agent and leader live on `10.100.0.1` for apps.
 - **On-subnet first contact** to a host HOP itself has never spoken to
   resolves on the retransmit, not the first packet.
 

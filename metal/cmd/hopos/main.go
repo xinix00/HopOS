@@ -341,12 +341,10 @@ func main() {
 			cfg.Cluster.Name, s3.Endpoint, s3.Bucket)
 	}
 
-	// {{host}} in boot-config-jobspecs wordt het LAN-IP van deze node: dáár
-	// luisteren de agent-API (:8080) en gepubliceerde poorten (display :7878),
-	// en een app kan dat adres zelf nergens vandaan halen (het slot-net kent
-	// alleen 10.100.0.0/24). Zo is één configregel op elke node juist:
-	// SURF_ADDR={{host}}:7878, HOP_ADDR={{host}}:8080.
-	expand := func(s string) string { return strings.ReplaceAll(s, "{{host}}", cfg.Node.IP) }
+	// Bewust géén template-substitutie ({{host}} e.d.) in de jobspecs: adressen
+	// in de config zijn letterlijk. Binnen het slot-net is de node altijd
+	// 10.100.0.1 (gateway; Dereks besluit 20-07 — hopswitch/gateway.go) en
+	// namen zijn het domein van hopdns, niet van een config-macro.
 
 	// Init-manifest van het boot-medium: elke `hopos.init[]={...}` is één job
 	// als compacte JSON (kopieerbaar uit `hop apply`/de API). agentboot seedt ze
@@ -354,7 +352,6 @@ func main() {
 	// baseline op (Derek, 19-07). Ongeldige JSON overslaan met een luide regel;
 	// de schema-validatie (verplichte naam e.d.) doet agentboot via DecodeInitJobs.
 	for _, spec := range bootParamAll("hopos.init[]") {
-		spec = expand(spec)
 		var m map[string]any
 		if err := json.Unmarshal([]byte(spec), &m); err != nil {
 			fmt.Printf("hop: hopos.init[] skipped — invalid JSON (%v): %s\n", err, spec)
@@ -375,7 +372,6 @@ func main() {
 	// HopOS zelf doet er verder niets mee.
 	var apps []string
 	for _, spec := range bootParamAll("hopos.apps[]") {
-		spec = expand(spec)
 		if !json.Valid([]byte(spec)) {
 			fmt.Printf("hop: hopos.apps[] skipped — invalid JSON: %s\n", spec)
 			continue

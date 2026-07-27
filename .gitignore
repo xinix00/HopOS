@@ -55,3 +55,6 @@ sd-*/*.bin
 sd-*/overlays/
 # Gecomprimeerde apploader-blob op de go:embed-plek (image/*-agent.sh bouwt hem)
 *.elf.gz
+
+# Lokaal lab-/experimenteerwerk — nooit in git.
+lab/

@@ -56,7 +56,7 @@ nalopen wát er precies over HTTP gaat:
 |---|---|---|
 | display | `ports: surf:7878, http:80` | serveert → wacht op `apphttp.Serve` |
 | launcher | `HOP_ADDR` + serveert | POST't naar de agent → wacht op `Serve` + POST |
-| taskman | `HOP_ADDR` (agent-API op `{{host}}:8080`) | client op plain http → `apphttp` |
+| taskman | `HOP_ADDR` (agent-API op `10.100.0.1:8080`) | client op plain http → `apphttp` |
 | clock, calc | alleen `SURF_ADDR` | eerst checken of ze überhaupt HTTP doen |
 | browser | alleen `SURF_ADDR` | **checken:** doet deze https? dan `net/http` houden |
 

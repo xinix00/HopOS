@@ -26,11 +26,18 @@ Editing the file **is** node management — no shell, no rebuild, no agent.
 | `hopos.init[]` | a job to seed on a clean boot — one compact-JSON job per entry, repeatable | none |
 | `hopos.apps[]` | an *available* (not auto-started) job for the launcher's catalog — same format as `hopos.init[]`, repeatable | none |
 
-In every `hopos.init[]`/`hopos.apps[]` entry the token `{{host}}` is replaced
-at boot with this node's LAN IP — the address where the agent API (`:8080`)
-and published ports live, which an app cannot discover on its own (its slot
-network only knows 10.100.0.0/24). Write `"SURF_ADDR":"{{host}}:7878"` once
-and the same line is correct on every node.
+Addresses in a jobspec are literal — there is no template magic. The model is
+one port number per host: a job's `ports` are always published on the node's
+LAN address, DNS gets you to the right host, and when that host happens to be
+your own node the switch takes the shortcut (hairpin — the frame never leaves
+the machine). So a published service is reachable on the node address from
+everywhere, inside and out. Every slot gets its own node's address handed in
+as `HOPOS_HOST`; the node's own services (agent `:8080`, leader `:9080`) live
+on the fixed internal address **`10.100.0.1`**, the same on every node. For
+name-based discovery across nodes — `display.hop.local` instead of an IP —
+run [hopdns](https://github.com/xinix00/hopdns): every app gets the node's
+resolver (from the DHCP lease) handed in as `HOP_DNS`, and a jobspec can
+override `HOP_DNS` per job to point straight at a hopdns instance.
 
 ## The API needs a key
 
@@ -128,13 +135,19 @@ default splits it in two pools and lets each pool stack as deep as you like:
 
 ```
 hopos.init[]={"name":"display","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/display.elf"}],"memory_limit":134217728,"ports":{"surf":7878,"http":80},"tags":{"sharegroup":"desktop"},"cpu_shares":1024}
-hopos.init[]={"name":"launcher","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/launcher.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"desktop"},"cpu_shares":1024,"env":{"SURF_ADDR":"{{host}}:7878","HOP_ADDR":"{{host}}:8080","HOPOS_APPS":""}}
-hopos.apps[]={"name":"clock","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/clock.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"apps"},"cpu_shares":2048,"env":{"SURF_ADDR":"{{host}}:7878"}}
-hopos.apps[]={"name":"calc","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/calc.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"apps"},"cpu_shares":2048,"env":{"SURF_ADDR":"{{host}}:7878"}}
-hopos.apps[]={"name":"browser","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/browser.elf"}],"memory_limit":134217728,"tags":{"sharegroup":"apps"},"cpu_shares":2048,"env":{"SURF_ADDR":"{{host}}:7878"}}
-hopos.apps[]={"name":"dash","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/dash.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"apps"},"cpu_shares":2048,"env":{"SURF_ADDR":"{{host}}:7878"}}
-hopos.apps[]={"name":"taskman","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/taskman.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"apps"},"cpu_shares":2048,"env":{"SURF_ADDR":"{{host}}:7878","HOP_ADDR":"{{host}}:8080"}}
+hopos.init[]={"name":"launcher","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/launcher.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"desktop"},"cpu_shares":1024,"env":{"HOPOS_APPS":""}}
+hopos.apps[]={"name":"clock","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/clock.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"apps"},"cpu_shares":2048}
+hopos.apps[]={"name":"calc","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/calc.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"apps"},"cpu_shares":2048}
+hopos.apps[]={"name":"browser","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/browser.elf"}],"memory_limit":134217728,"tags":{"sharegroup":"apps"},"cpu_shares":2048}
+hopos.apps[]={"name":"dash","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/dash.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"apps"},"cpu_shares":2048}
+hopos.apps[]={"name":"taskman","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/taskman.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"apps"},"cpu_shares":2048}
 ```
+
+Note what is *not* there: no addresses. Every SURF app defaults to the display
+on its own node (`HOPOS_HOST:7878` — published port, hairpinned internally)
+and to the agent on `10.100.0.1:8080`. Set `SURF_ADDR`/`HOP_ADDR` only to
+point at *another* node — a hopdns name like `display.hop.local:7878`, or an
+explicit address.
 
 `cpu_shares` is the **pool size**, not a per-app quota: `2048` = the `apps` pool
 owns 2 whole cores, however many apps you open on it (the first job of a group

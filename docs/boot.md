@@ -37,6 +37,15 @@ git clone https://github.com/xinix00/HopOS && cd HopOS
 
 Forwards the agent to `localhost:8080` and the leader API to `localhost:9080`.
 
+> **QEMU runs hot — by design.** HopOS parks idle cores with WFE, which is a
+> real clock-gated sleep on silicon but a no-op under QEMU's TCG emulation, so
+> every powered core burns a full host core even when idle. We deliberately
+> don't carry interrupt plumbing just to cool an emulator: QEMU is the test
+> bench, and on every board HopOS actually targets an idle core costs
+> ~nothing. Hardware acceleration is no way out either — HVF (macOS) cannot
+> give the guest EL2, and HopOS requires an EL2 boot for the stage-2 cage.
+> Fewer cores = less heat: `SMP=2 image/qemu-run.sh agent`.
+
 ## What you should see
 
 ```

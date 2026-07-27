@@ -54,7 +54,7 @@ hopos.s3.pathstyle=1
 # LET OP: met hopos.apikey gezet moet de launcher óók "HOP_KEY":"<zelfde-key>"
 # in zijn env krijgen (hij POST de catalogus-job naar de agent).
 hopos.init[]={"name":"display","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/display.elf"}],"memory_limit":134217728,"ports":{"surf":7878,"http":80},"tags":{"sharegroup":"desktop"},"cpu_shares":1024}
-hopos.init[]={"name":"launcher","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/launcher.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"desktop"},"cpu_shares":1024,"env":{"SURF_ADDR":"10.100.0.2:7878","HOP_ADDR":"10.100.0.1:8080","HOPOS_APPS":""}}
+hopos.init[]={"name":"launcher","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/launcher.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"desktop"},"cpu_shares":1024,"env":{"HOPOS_APPS":""}}
 
 # --- Catalogus: apps die de launcher kan starten -----------------------------
 # Álle window-apps zitten in de "apps"-sharegroup: ze stapelen coöperatief op
@@ -63,7 +63,7 @@ hopos.init[]={"name":"launcher","driver":"hop","artifacts":[{"url":"https://gith
 # POOL-grootte, geen per-app quotum: 2048 = die pool bezit 2 hele cores (het
 # eerste lid van de groep zet de maat, de rest joint gratis). Pas 'm aan het
 # board aan; RAM blijft de eerlijke grens (geheugen wordt niet gepoold).
-hopos.apps[]={"name":"clock","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/clock.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"apps"},"cpu_shares":2048,"env":{"SURF_ADDR":"10.100.0.2:7878"}}
-hopos.apps[]={"name":"calc","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/calc.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"apps"},"cpu_shares":2048,"env":{"SURF_ADDR":"10.100.0.2:7878"}}
-hopos.apps[]={"name":"browser","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/browser.elf"}],"memory_limit":134217728,"tags":{"sharegroup":"apps"},"cpu_shares":2048,"env":{"SURF_ADDR":"10.100.0.2:7878"}}
-hopos.apps[]={"name":"taskman","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/taskman.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"apps"},"cpu_shares":2048,"env":{"SURF_ADDR":"10.100.0.2:7878","HOP_ADDR":"10.100.0.1:8080"}}
+hopos.apps[]={"name":"clock","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/clock.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"apps"},"cpu_shares":2048}
+hopos.apps[]={"name":"calc","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/calc.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"apps"},"cpu_shares":2048}
+hopos.apps[]={"name":"browser","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/browser.elf"}],"memory_limit":134217728,"tags":{"sharegroup":"apps"},"cpu_shares":2048}
+hopos.apps[]={"name":"taskman","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/taskman.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"apps"},"cpu_shares":2048}

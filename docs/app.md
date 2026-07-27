@@ -55,7 +55,10 @@ func main() {
 After `appnet.Up` the **full Go networking suite just works** on the app's
 own stack: `net`, `net/http`, TLS, websockets, gRPC — `Listen` and `Dial`
 like anywhere else. Ports you declare in the job spec are published on the
-node's IP and handed to the app as `ER_PORT_<NAME>`.
+node's IP and handed to the app as `ER_PORT_<NAME>` — and that address is
+true from the *inside* too: a neighbouring app dialing the node IP is
+hairpinned through the switch without the frame ever leaving the machine
+(see [networking](technical/networking.md)).
 
 **No https? Save ~2.9 MB.** `net/http` links `crypto/tls` unconditionally —
 in an app image that costs more than the whole netstack (measured 26-07 on
