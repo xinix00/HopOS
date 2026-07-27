@@ -395,3 +395,48 @@ func TestServeGeenResponseSplitting(t *testing.T) {
 		t.Fatalf("gesmokkelde header kwam door: %q", got)
 	}
 }
+
+// fakeListener levert eerst een tijdelijke fout, dan (nil, nil) — de twee
+// manieren waarop een accept-lus kan gaan rondtollen.
+type fakeListener struct {
+	calls   int
+	nilOnly bool
+}
+
+type tempErr struct{}
+
+func (tempErr) Error() string   { return "tijdelijk" }
+func (tempErr) Timeout() bool   { return true }
+func (tempErr) Temporary() bool { return true }
+
+func (l *fakeListener) Accept() (net.Conn, error) {
+	l.calls++
+	if !l.nilOnly && l.calls < 3 {
+		return nil, tempErr{}
+	}
+	return nil, nil // lege accept: geen verbinding, geen fout
+}
+func (l *fakeListener) Close() error   { return nil }
+func (l *fakeListener) Addr() net.Addr { return nil }
+
+// TestServeNeverSpins pint het vangnet in de accept-lus: een listener die
+// (nil, nil) teruggeeft moet de lus mét reden beëindigen, niet eindeloos
+// doortollen. Zonder dit stond de SURF-display op 100% CPU zonder ooit te
+// antwoorden of iets te loggen (gemeten 27-07 in QEMU).
+func TestServeNeverSpins(t *testing.T) {
+	l := &fakeListener{}
+	done := make(chan error, 1)
+	go func() { done <- Serve(l, func(ResponseWriter, *Request) {}) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Serve gaf nil terug; wil een fout die de app kan loggen")
+		}
+		if l.calls < 3 {
+			t.Fatalf("Accept %d× aangeroepen; de tijdelijke fouten hadden herprobeerd moeten worden", l.calls)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve keerde niet terug — de accept-lus tolt rond (de bug van 27-07)")
+	}
+}

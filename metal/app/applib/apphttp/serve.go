@@ -145,11 +145,39 @@ func (r *Request) Done() <-chan struct{} {
 // Serve draait de accept-lus tot de listener sluit; elke verbinding krijgt zijn
 // eigen goroutine.
 func Serve(l net.Listener, h Handler) error {
+	// De accept-lus mag nooit vrij kunnen rondtollen. Een listener die een
+	// tijdelijke fout of — zoals gemeten 27-07 op de app-netstack — een lege
+	// accept (nil, nil) teruggeeft, maakte hiervan een spin die de hele core
+	// opat: de app stond op 100% CPU en antwoordde nooit, zonder één logregel.
+	// net/http heeft datzelfde vangnet (oplopende pauze bij een tijdelijke
+	// fout); apphttp had het niet, en dat verschil was precies het verschil
+	// tussen een werkende en een dode display.
+	//
+	// Tijdelijk = even wachten en opnieuw. Een lege accept zónder fout is geen
+	// toestand waar we onszelf uit kunnen redden: dan stoppen we mét reden, zodat
+	// de app het logt en de node hem herstart (fail loudly — een display die
+	// stilletjes niets doet is erger dan een die opnieuw begint).
+	const maxDelay = 100 * time.Millisecond
+	var delay time.Duration
 	for {
 		nc, err := l.Accept()
-		if err != nil {
-			return err
+		switch {
+		case err != nil:
+			var ne net.Error
+			if !errors.As(err, &ne) || !ne.Timeout() {
+				return err
+			}
+			if delay == 0 {
+				delay = time.Millisecond
+			} else if delay *= 2; delay > maxDelay {
+				delay = maxDelay
+			}
+			time.Sleep(delay)
+			continue
+		case nc == nil:
+			return errors.New("apphttp: listener returned no connection and no error")
 		}
+		delay = 0
 		go serveConn(nc, h)
 	}
 }
