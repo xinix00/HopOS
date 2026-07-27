@@ -117,20 +117,33 @@ else in `hopos.apps[]`. All of it pulls straight from the SURF
 [rolling-release](https://github.com/xinix00/hop-os-surf/releases/tag/rolling-release)
 — the same URL on every node, no http server of your own.
 
-The display and launcher share **one** core via the `desktop` sharegroup:
-both are mostly-idle UI chrome, so packing them together leaves every other
-core free for real apps — on a 4-core Pi that is the difference between one
-app window and three. Each catalog app then takes a whole core of its own:
+**Two sharegroups is the whole trick.** A desktop is not compute — it is a pile
+of mostly-idle UI that must stay *clickable*, and a node has few cores. So the
+default splits it in two pools and lets each pool stack as deep as you like:
+
+- `desktop` — the display + launcher on **one** core. Always-on chrome.
+- `apps` — every window app on the **remaining** cores. Because they cooperate
+  on a shared pool, you can open more apps than the node has cores; the eighth
+  window is just another cage on the same pool, not a rejection.
 
 ```
 hopos.init[]={"name":"display","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/display.elf"}],"memory_limit":134217728,"ports":{"surf":7878,"http":80},"tags":{"sharegroup":"desktop"},"cpu_shares":1024}
 hopos.init[]={"name":"launcher","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/launcher.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"desktop"},"cpu_shares":1024,"env":{"SURF_ADDR":"{{host}}:7878","HOP_ADDR":"{{host}}:8080","HOPOS_APPS":""}}
-hopos.apps[]={"name":"clock","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/clock.elf"}],"memory_limit":67108864,"env":{"SURF_ADDR":"{{host}}:7878"}}
-hopos.apps[]={"name":"calc","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/calc.elf"}],"memory_limit":67108864,"env":{"SURF_ADDR":"{{host}}:7878"}}
-hopos.apps[]={"name":"browser","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/browser.elf"}],"memory_limit":134217728,"env":{"SURF_ADDR":"{{host}}:7878"}}
-hopos.apps[]={"name":"dash","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/dash.elf"}],"memory_limit":67108864,"env":{"SURF_ADDR":"{{host}}:7878"}}
-hopos.apps[]={"name":"taskman","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/taskman.elf"}],"memory_limit":67108864,"env":{"SURF_ADDR":"{{host}}:7878","HOP_ADDR":"{{host}}:8080"}}
+hopos.apps[]={"name":"clock","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/clock.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"apps"},"cpu_shares":2048,"env":{"SURF_ADDR":"{{host}}:7878"}}
+hopos.apps[]={"name":"calc","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/calc.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"apps"},"cpu_shares":2048,"env":{"SURF_ADDR":"{{host}}:7878"}}
+hopos.apps[]={"name":"browser","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/browser.elf"}],"memory_limit":134217728,"tags":{"sharegroup":"apps"},"cpu_shares":2048,"env":{"SURF_ADDR":"{{host}}:7878"}}
+hopos.apps[]={"name":"dash","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/dash.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"apps"},"cpu_shares":2048,"env":{"SURF_ADDR":"{{host}}:7878"}}
+hopos.apps[]={"name":"taskman","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/taskman.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"apps"},"cpu_shares":2048,"env":{"SURF_ADDR":"{{host}}:7878","HOP_ADDR":"{{host}}:8080"}}
 ```
+
+`cpu_shares` is the **pool size**, not a per-app quota: `2048` = the `apps` pool
+owns 2 whole cores, however many apps you open on it (the first job of a group
+sets the size; the rest join for free). Tune it to the board — a 4-core Pi
+leaves 2 app cores after HOP and the desktop; on a big server give the pool
+more, or drop the tag from a heavy app so it gets whole cores to itself.
+
+Memory is *not* pooled: every app still gets its own partition, so RAM stays
+the honest ceiling on how many windows fit.
 
 Boot the node and the display comes up with the launcher's *hop* button live;
 every catalog app is one click — click starts it, click again stops it. The

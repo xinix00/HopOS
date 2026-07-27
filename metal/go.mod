@@ -24,7 +24,9 @@ require (
 require (
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20260709184058-243e02a382f8
 	gvisor.dev/gvisor v0.0.0-20250911055229-61a46406f068
-	hop v0.0.0
+	// Het versienummer documenteert de pairing (deze hop-os bouwt tegen HOP
+	// v0.20.1, o.a. hopos.ErrNoCapacity); de replace hieronder blijft leidend.
+	hop v0.20.1
 )
 
 // De hoplock-modules komen van GitHub (echte versies, geen pad op deze Mac) —

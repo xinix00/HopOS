@@ -45,11 +45,25 @@ hopos.s3.key=<access-key-id>
 hopos.s3.secret=<secret-access-key>
 hopos.s3.pathstyle=1
 
-# --- Init: jobs die de node op een schone boot zelf plaatst ------------------
-# Eén JSON-jobspec per regel. Voorbeeld: een desktop (display + launcher).
-# Vervang de artifact-URL's door je eigen server.
-#hopos.init[]={"name":"display","driver":"hop","artifacts":[{"url":"http://<server>:8123/display.elf"}],"memory_limit":134217728,"ports":{"HTTP":18080,"SURF":7878},"env":{"FB":"1"},"affinity":{"node.id":"pi5"}}
-#hopos.init[]={"name":"launcher","driver":"hop","artifacts":[{"url":"http://<server>:8123/launcher.elf"}],"memory_limit":100663296,"env":{"SURF_ADDR":"10.100.0.2:7878","HOP_ADDR":"http://10.100.0.1:8080"},"tags":{"sharegroup":"gui"},"cpu_shares":1024,"affinity":{"node.id":"pi5"}}
+# --- Desktop: de standaard voor GUI/headful nodes ----------------------------
+# display + launcher ZIJN de desktop; ze delen ÉÉN core via de "desktop"-
+# sharegroup (meest-idle UI-chrome), zodat elke andere core vrij blijft voor
+# echte apps. De URL's zijn live (SURF rolling-release) — werkt as-is.
+# Een *-headless node heeft geen GUI: laat dit hele desktop-blok weg en zet
+# alleen de hopos.init[]-apps neer die de node moet draaien.
+# LET OP: met hopos.apikey gezet moet de launcher óók "HOP_KEY":"<zelfde-key>"
+# in zijn env krijgen (hij POST de catalogus-job naar de agent).
+hopos.init[]={"name":"display","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/display.elf"}],"memory_limit":134217728,"ports":{"surf":7878,"http":80},"tags":{"sharegroup":"desktop"},"cpu_shares":1024}
+hopos.init[]={"name":"launcher","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/launcher.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"desktop"},"cpu_shares":1024,"env":{"SURF_ADDR":"10.100.0.2:7878","HOP_ADDR":"10.100.0.1:8080","HOPOS_APPS":""}}
 
 # --- Catalogus: apps die de launcher kan starten -----------------------------
-#hopos.apps[]={"name":"clock","driver":"hop","artifacts":[{"url":"http://<server>:8123/clock.elf"}],"memory_limit":67108864,"env":{"SURF_ADDR":"10.100.0.2:7878"},"tags":{"sharegroup":"gui"},"cpu_shares":1024,"affinity":{"node.id":"pi5"}}
+# Álle window-apps zitten in de "apps"-sharegroup: ze stapelen coöperatief op
+# de OVERIGE cores, dus je kunt meer vensters openen dan de node cores heeft
+# (het 8e venster is gewoon nóg een kooi op dezelfde pool). cpu_shares is de
+# POOL-grootte, geen per-app quotum: 2048 = die pool bezit 2 hele cores (het
+# eerste lid van de groep zet de maat, de rest joint gratis). Pas 'm aan het
+# board aan; RAM blijft de eerlijke grens (geheugen wordt niet gepoold).
+hopos.apps[]={"name":"clock","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/clock.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"apps"},"cpu_shares":2048,"env":{"SURF_ADDR":"10.100.0.2:7878"}}
+hopos.apps[]={"name":"calc","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/calc.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"apps"},"cpu_shares":2048,"env":{"SURF_ADDR":"10.100.0.2:7878"}}
+hopos.apps[]={"name":"browser","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/browser.elf"}],"memory_limit":134217728,"tags":{"sharegroup":"apps"},"cpu_shares":2048,"env":{"SURF_ADDR":"10.100.0.2:7878"}}
+hopos.apps[]={"name":"taskman","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/taskman.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"apps"},"cpu_shares":2048,"env":{"SURF_ADDR":"10.100.0.2:7878","HOP_ADDR":"10.100.0.1:8080"}}
