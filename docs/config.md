@@ -134,7 +134,7 @@ default splits it in two pools and lets each pool stack as deep as you like:
   window is just another cage on the same pool, not a rejection.
 
 ```
-hopos.init[]={"name":"display","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/display.elf"}],"memory_limit":134217728,"ports":{"surf":7878,"http":80},"tags":{"sharegroup":"desktop"},"cpu_shares":1024}
+hopos.init[]={"name":"display","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/display.elf"}],"memory_limit":134217728,"ports":{"surf":7878,"http":80},"tags":{"sharegroup":"desktop"},"cpu_shares":1024,"env":{"FB":"1"}}
 hopos.init[]={"name":"launcher","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/launcher.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"desktop"},"cpu_shares":1024,"env":{"HOPOS_APPS":""}}
 hopos.apps[]={"name":"clock","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/clock.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"apps"},"cpu_shares":2048}
 hopos.apps[]={"name":"calc","driver":"hop","artifacts":[{"url":"https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/calc.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"apps"},"cpu_shares":2048}
@@ -147,7 +147,10 @@ Note what is *not* there: no addresses. Every SURF app defaults to the display
 on its own node (`HOPOS_HOST:7878` — published port, hairpinned internally)
 and to the agent on `10.100.0.1:8080`. Set `SURF_ADDR`/`HOP_ADDR` only to
 point at *another* node — a hopdns name like `display.hop.local:7878`, or an
-explicit address.
+explicit address. The display's `"FB":"1"` asks for the framebuffer grant
+(render to the real screen); without a framebuffer the desktop is still
+served over HTTP. This whole block ships as the default config in every GUI
+release asset ([`image/hopos-gui.cfg`](../image/hopos-gui.cfg)).
 
 `cpu_shares` is the **pool size**, not a per-app quota: `2048` = the `apps` pool
 owns 2 whole cores, however many apps you open on it (the first job of a group

@@ -59,7 +59,23 @@ armstub=bl31.bin
 uart_2ndstage=1
 # Houd de PL011 bij GPIO14/15 (anders claimt Bluetooth hem).
 dtoverlay=disable-bt
+# HOP-config als bestand (zelfde recept als de Pi 5): de firmware laadt
+# hopos.cfg integraal in RAM ("initramfs", adres boven de DTB op 0x0f000000)
+# en HOP leest hem via /chosen/linux,initrd-*. Volle JSON-jobspecs per regel.
+initramfs hopos.cfg 0x0f200000
 EOF
 
-echo "sd-rpi4/kernel8.img (HOP-agent, $(du -h sd-rpi4/kernel8.img | cut -f1)) + config.txt klaar." >&2
-echo "flash: cp sd-rpi4/kernel8.img sd-rpi4/config.txt '/Volumes/NO NAME/'" >&2
+# config.txt laadt hopos.cfg verplicht en dát bestand staat in .gitignore
+# (het bevat de API-key en de S3-geheimen). Luid falen mét het recept,
+# zelfde poortwachter als rpi5-agent.sh.
+if [ ! -f "$DIR/sd-rpi4/hopos.cfg" ]; then
+	echo "" >&2
+	echo "FOUT: sd-rpi4/hopos.cfg ontbreekt — config.txt laadt hem verplicht." >&2
+	echo "  cp image/hopos-gui.cfg sd-rpi4/hopos.cfg" >&2
+	echo "  \$EDITOR sd-rpi4/hopos.cfg   # minimaal hopos.apikey zetten" >&2
+	echo "" >&2
+	exit 1
+fi
+
+echo "sd-rpi4/kernel8.img (HOP-agent, $(du -h sd-rpi4/kernel8.img | cut -f1)) + config.txt + hopos.cfg klaar." >&2
+echo "flash: cp sd-rpi4/kernel8.img sd-rpi4/config.txt sd-rpi4/hopos.cfg '/Volumes/NO NAME/'" >&2

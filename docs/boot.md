@@ -10,7 +10,9 @@ Any UEFI arm64 machine with ACPI — from an Ampere Altra server on down.
 
 1. Format a USB stick as FAT32.
 2. Copy `BOOTAA64.EFI` from the release to `EFI/BOOT/BOOTAA64.EFI`.
-3. Create `hopos.cfg` in the stick's root — see [Configure](config.md).
+3. Copy the release's `hopos.cfg` to the stick's root and set `hopos.apikey`
+   — that default config boots a full desktop (display, launcher, app
+   catalog); see [Configure](config.md) to tune it.
 4. Boot from the stick. That's the install.
 
 Network needs an igb-family NIC (Intel i210/i211); without one the node
@@ -23,8 +25,10 @@ partition instead:
 
 1. Take an SD card with the standard Pi boot partition (`bootfs`).
 2. Unzip `hopos-rpi5.zip` (or `hopos-rpi4.zip`) onto it — this drops the
-   kernel and a `config.txt` pointing at it.
-3. Put the [config keys](config.md) in `cmdline.txt` (one line, space-separated).
+   kernel, a `config.txt` pointing at it, and the default `hopos.cfg`
+   (a full desktop: display, launcher, app catalog).
+3. Edit `hopos.cfg` on the card: set `hopos.apikey` — see
+   [Configure](config.md) for all keys.
 4. Insert, power on.
 
 ## QEMU (no hardware)

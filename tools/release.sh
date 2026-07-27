@@ -70,15 +70,31 @@ cp "$DIR/uefi-esp-agent/EFI/BOOT/BOOTAA64.EFI" "$DIST/"
 # 3. Pi-zips: drop-in op de SD-bootfs — precies de bestandsnamen die de
 #    firmware verwacht (config.txt wijst de kernel aan), niets hernoemen;
 #    alleen de zip-naam draagt de smaak. Zelfde volgorde: headless, dan gui.
+#    Elke smaak krijgt zijn standaardconfig mee als hopos.cfg (de TEMPLATES
+#    uit image/ — nooit sd-*/hopos.cfg: daar wonen de echte sleutels). Eén
+#    edit (hopos.apikey) en de node boot: gui = een desktop, headless = een
+#    kale node die op werk wacht (of hopos.init[]-regels in het template).
 echo ">> hopos-rpi5[-headless].zip + hopos-rpi4[-headless].zip" >&2
+CFGGUI="$DIST/.cfg-gui"
+CFGHL="$DIST/.cfg-headless"
+mkdir -p "$CFGGUI" "$CFGHL"
+cp "$DIR/image/hopos-gui.cfg" "$CFGGUI/hopos.cfg"
+cp "$DIR/image/hopos-headless.cfg" "$CFGHL/hopos.cfg"
 GUI=0 "$DIR/image/rpi5-agent.sh" >/dev/null
-(cd "$DIR/sd-rpi5" && zip -q -j "$DIST/hopos-rpi5-headless.zip" hop-agent5.img config.txt)
+(cd "$DIR/sd-rpi5" && zip -q -j "$DIST/hopos-rpi5-headless.zip" hop-agent5.img config.txt "$CFGHL/hopos.cfg")
 "$DIR/image/rpi5-agent.sh" >/dev/null
-(cd "$DIR/sd-rpi5" && zip -q -j "$DIST/hopos-rpi5.zip" hop-agent5.img config.txt)
+(cd "$DIR/sd-rpi5" && zip -q -j "$DIST/hopos-rpi5.zip" hop-agent5.img config.txt "$CFGGUI/hopos.cfg")
 GUI=0 "$DIR/image/rpi4-agent.sh" >/dev/null
-(cd "$DIR/sd-rpi4" && zip -q -j "$DIST/hopos-rpi4-headless.zip" kernel8.img config.txt)
+(cd "$DIR/sd-rpi4" && zip -q -j "$DIST/hopos-rpi4-headless.zip" kernel8.img config.txt "$CFGHL/hopos.cfg")
 "$DIR/image/rpi4-agent.sh" >/dev/null
-(cd "$DIR/sd-rpi4" && zip -q -j "$DIST/hopos-rpi4.zip" kernel8.img config.txt)
+(cd "$DIR/sd-rpi4" && zip -q -j "$DIST/hopos-rpi4.zip" kernel8.img config.txt "$CFGGUI/hopos.cfg")
+rm -rf "$CFGGUI" "$CFGHL"
+
+# 3b. De UEFI-sticks krijgen dezelfde templates als losse assets: naast
+#     EFI/BOOT/BOOTAA64.EFI in de stick-root zetten (headless-variant daar
+#     hernoemen naar hopos.cfg), apikey invullen, booten.
+cp "$DIR/image/hopos-gui.cfg" "$DIST/hopos.cfg"
+cp "$DIR/image/hopos-headless.cfg" "$DIST/hopos-headless.cfg"
 
 # 4. Checksums + handtekening (over de checksum-lijst: één .sig dekt alles),
 #    met zelf-verificatie vóór publicatie.
@@ -95,9 +111,11 @@ ssh-keygen -Y verify -q -f allowed_signers -I "$SIGNER" \
 cd "$DIR"
 NOTES="Prebuilt, signed boot images — https://gethop.org/hopos/ for the 5-minute quickstart.
 
-- **BOOTAA64.EFI** — any UEFI arm64 box: copy to \`EFI/BOOT/\` on a FAT USB stick, add \`hopos.cfg\`
+- **BOOTAA64.EFI** — any UEFI arm64 box: copy to \`EFI/BOOT/\` on a FAT USB stick, put \`hopos.cfg\` (below) in the stick root
 - **hopos-rpi5.zip** — Raspberry Pi 5: unzip onto the SD bootfs
 - **hopos-rpi4.zip** — Raspberry Pi 4: unzip onto the SD bootfs
+- **hopos.cfg** — the default GUI config (also inside the Pi zips): a full desktop — display, launcher and app catalog, no addresses to fill in. **One edit required:** set \`hopos.apikey\`.
+- **hopos-headless.cfg** — the headless default (inside the \`*-headless\` zips as \`hopos.cfg\`): same keys, no desktop — seed your own \`hopos.init[]\` jobs. For a UEFI stick, rename it to \`hopos.cfg\`.
 - **\`*-headless\`** — the same images built with \`GUI=0\`: not a disabled GUI but **zero GUI code linked**. For UEFI, rename \`BOOTAA64-headless.EFI\` to \`BOOTAA64.EFI\` on the stick.
 
 Verify: \`ssh-keygen -Y verify -f allowed_signers -I $SIGNER -n gethop-release -s SHA256SUMS.sig < SHA256SUMS && shasum -a 256 -c SHA256SUMS\`"

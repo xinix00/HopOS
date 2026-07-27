@@ -91,7 +91,7 @@ EOF
 if [ ! -f "$DIR/sd-rpi5/hopos.cfg" ]; then
 	echo "" >&2
 	echo "FOUT: sd-rpi5/hopos.cfg ontbreekt — config.txt laadt hem verplicht." >&2
-	echo "  cp sd-rpi5/hopos.cfg.example sd-rpi5/hopos.cfg" >&2
+	echo "  cp image/hopos-gui.cfg sd-rpi5/hopos.cfg" >&2
 	echo "  \$EDITOR sd-rpi5/hopos.cfg   # minimaal hopos.apikey zetten" >&2
 	echo "" >&2
 	exit 1
