@@ -12,6 +12,12 @@ set -e
 
 TAMAGO="${TAMAGO:-$HOME/tamago-go/bin/go}"
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+. "$DIR/image/lib.sh"
+
+# De ingebakken blobs zijn build-input, geen bronbestand: na deze build horen ze
+# weg te zijn (ook als hij halverwege faalt). Anders bouwt een volgende build
+# ongemerkt met de resten van deze mee.
+trap clean_embeds EXIT INT TERM
 
 cd "$DIR/metal"
 mkdir -p out
@@ -22,17 +28,8 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 	"$TAMAGO" build -tags linkcpuinit -trimpath \
 	-ldflags "-w -T 0x50010000 -R 0x1000" -o out/app4.elf ./app/appspike
 
-# 1b. De universele apploader (hopslot-hooks) op de go:embed-plek: de node bakt
-#     'm in (embedloader) en laadt 'm als fase 1 in élk slot — de app downloadt
-#     dan zijn eigen image op zijn eigen core+netstack. Zonder ingebakken
-#     loader start geen enkele job (de twee-fase-lading is de enige route).
-GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-	"$TAMAGO" build -tags linkcpuinit -trimpath \
-	-ldflags "-w -T 0x50010000 -R 0x1000" -o kern/apploaderblob/apploader.elf ./app/apploader
-# Gecomprimeerd inbakken (gzip -9: 8,4→3,1MB): de blob zit 6× in de Altra-PE
-# en 1× per Pi-image; de node pakt 'm één keer lazy uit (kern/apploaderblob).
-# -n: geen naam/tijdstempel in de gzip-header → deterministische builds.
-gzip -9 -n -f kern/apploaderblob/apploader.elf
+# 1b. De universele apploader op zijn go:embed-plek (recept in image/lib.sh).
+bake_apploader arm64 linkcpuinit 0x50010000
 
 # 2. De agent-kern: cmd/hopos met het rpi4-board (build-tag kiest board_rpi4.go)
 #    + de ingebakken apploader (embedloader). Default gui; GUI=0 bouwt de

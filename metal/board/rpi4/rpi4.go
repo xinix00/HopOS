@@ -52,8 +52,7 @@ func init() {
 	raspi.RNG200Base = RNG200Base
 	raspi.WatchdogBase = 0xFE100000 // PM-blok (bcm2711, zelfde registerfamilie)
 	p := layout.Plan{
-		CtrlPA:        0x10000000,
-		RingPA:        0x11000000,
+		NodeCtrlPA:    0x10000000,
 		Stage2PA:      0x12000000,
 		RevokeVecPA:   revokeVecAsm,
 		BootScratchPA: raspi.BootScratch, // 0x7F000, cpuinit-vast

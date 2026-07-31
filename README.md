@@ -4,12 +4,12 @@
 
 **Docs:** [flash & boot](docs/boot.md) · [configure](docs/config.md) · [write an app](docs/app.md) · [technical](docs/index.md) — site: [gethop.org](https://gethop.org)
 
-HopOS turns a multi-core ARM64 board into a small fleet of single-purpose computers. Core 0 runs **HOP**, the orchestrator-kernel: it hands out cores, memory partitions and network identities, and dispatches. Every app then does its own work on its own hardware — it downloads its image over its own network stack and places itself inside its own hardware-enforced memory partition, *natively on its own dedicated CPU core*. There is no shell, no libc, no userland, no processes — killing an app means switching its core off.
+HopOS turns a multi-core board — ARM64 or RISC-V — into a small fleet of single-purpose computers. Core 0 runs **HOP**, the orchestrator-kernel: it hands out cores, memory partitions and network identities, and dispatches. Every app then does its own work on its own hardware — it downloads its image over its own network stack and places itself inside its own hardware-enforced memory partition, *natively on its own dedicated CPU core*. There is no shell, no libc, no userland, no processes — killing an app means switching its core off.
 
 ## Why
 
 - **Supply chain security.** The machine runs Go and only Go. No package manager, no userland, no dynamic linker, no C of our own — the entire external dependency tree fits in one `go.sum`. Classic exploit chains (dropping a shell, executing a payload) have no foothold: there is no shell and no exec.
-- **Simplicity that doesn't cost performance.** Apps are plain Go, cross-compiled to native ARM64 bare-metal images ([TamaGo](https://github.com/usbarmory/tamago)). No VMs, no WASM, no interpreters, no containers: 0% overhead, full clock speed.
+- **Simplicity that doesn't cost performance.** Apps are plain Go, cross-compiled to native bare-metal images for ARM64 or RISC-V ([TamaGo](https://github.com/usbarmory/tamago)). No VMs, no WASM, no interpreters, no containers: 0% overhead, full clock speed.
 - **Software in the shape of the machine.** A modern SoC is a set of independent computers that happen to share a package. HopOS treats it that way: apps are placed on cores explicitly and declaratively — no heuristic scheduler, no time-slicing, no shared mutable memory between apps, ever.
 
 ## The model
@@ -65,9 +65,20 @@ This is an edge system: durable state lives in object storage, not on the node. 
 ### Framebuffer — logs, not graphics
 There is no GPU driver and no mode-setting. HopOS writes its log console into the linear framebuffer the firmware already switched on, discovered through the same two universal mechanisms Linux's `simplefb`/`efifb` use (device-tree simple-framebuffer, or UEFI GOP). Boot and app logs appear on HDMI, so you can see what a node is doing without a UART cable.
 
-## Writing an app — one build, every board
+## Writing an app — one source, one artifact per architecture, one manifest
 
-You develop against **HopOS, not a board**. An app never touches MMIO; everything it can see is either CPU architecture (registers, the generic timer) or the slot ABI (its control page, its message rings, its own network stack). So a single `GOOS=tamago` build produces **one artifact that runs on every HopOS node** — an Ampere Altra server core, a Raspberry Pi, QEMU — bit-for-bit the same file. The stage-2 cage is the relocation: images are linked once at the canonical slot address, and the MMU places them wherever the node has room. HOP patches the app's RAM size and slot number at load time.
+You develop against **HopOS, not a board**. An app never touches MMIO; everything it can see is either CPU architecture (registers, the timer) or the slot ABI (its control page, its message rings, its own network stack). So **one source tree and one ABI** produce **one artifact per architecture** — and a single job manifest covers a mixed fleet: you list an artifact per architecture with a `match` on `node.arch`, and each agent picks the one that fits the node it runs on.
+
+Within an architecture the artifact really is universal — bit-for-bit the same file on an Ampere Altra server core, a Raspberry Pi and QEMU. That is what the cage's relocation buys: images are linked once at the canonical slot address and the hardware places them wherever the node has room (a stage-2 table on ARM, a supervisor page table on RISC-V). HOP patches the app's RAM size and slot number at load time.
+
+```
+hopos.init[]={"name":"welcome","driver":"hop","artifacts":[
+  {"url":".../welcome-arm64-tamago.elf",  "match":{"node.arch":"arm64"}},
+  {"url":".../welcome-riscv64-tamago.elf","match":{"node.arch":"riscv64"}}],
+  "ports":{"http":80}}
+```
+
+One job, one configuration, two builds — see [docs/config.md](docs/config.md) for the full form.
 
 A complete app:
 
@@ -134,7 +145,7 @@ metal/       the OS — one Go module, layered by trust and direction:
                message rings, content checksums
   kern/        the orchestrator: slots, stage-2 isolation cage, file
                layer, embedded app loader
-  cpu/         the ARM64 layer: EL2, PSCI, SMP bring-up, idle, TRNG
+  cpu/         the CPU layer: ARM64 (EL2, PSCI, SMP) and RISC-V (machine mode, hart reset)
   net/         HOP's network plane: L2 frame switch + NAT, DHCP
   driver/      device drivers, one package per device
                (nic/: GEM, GENET v5, igb/I210, virtio-net, MDIO)
@@ -155,7 +166,7 @@ HOP internals — the app side sees only `abi/`) are documented in
 
 ## Building & running
 
-Everything cross-compiles with the [tamago-go](https://github.com/usbarmory/tamago-go) toolchain (`GOOS=tamago GOARCH=arm64`); no SDK, no cross-C-toolchain.
+Everything cross-compiles with the [tamago-go](https://github.com/usbarmory/tamago-go) toolchain (`GOOS=tamago` with `GOARCH=arm64` or `GOARCH=riscv64`); no SDK, no cross-C-toolchain.
 
 ```sh
 # Full system in QEMU (requires qemu-system-aarch64; always runs with EL2):

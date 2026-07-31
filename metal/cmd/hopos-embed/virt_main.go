@@ -231,8 +231,8 @@ func main() {
 		fmt.Printf("slot %d: core=on=%v app=%d hb=%d ram=%dMB (limiet was %dMB)\n",
 			a.slot, s.CoreOn, s.App, s.Heartbeat, s.RAMSize>>20, a.limit>>20)
 		// De app declareert partitie − net-ringstaart als RAM (slots.appRAMSize):
-		// de bovenste NetRingStride is zijn net-ring, geen heap.
-		if !s.CoreOn || s.App != layout.StatusReady || s.Heartbeat == 0 || s.RAMSize != a.limit-layout.NetRingStride {
+		// de bovenste AbiTail is zijn ABI-staart, geen heap.
+		if !s.CoreOn || s.App != layout.StatusReady || s.Heartbeat == 0 || s.RAMSize != a.limit-layout.AbiTail {
 			fail("status", fmt.Errorf("slot %d inconsistent", a.slot))
 		}
 	}
@@ -367,7 +367,7 @@ func main() {
 	s = slots.Get(2)
 	fmt.Printf("herstart slot 2: core-on=%v app=%d hb=%d ram=%dMB logs=%d vec=%d\n",
 		s.CoreOn, s.App, s.Heartbeat, s.RAMSize>>20, rekLogs, s.FaultVec)
-	if !s.CoreOn || s.App != layout.StatusReady || s.Heartbeat == 0 || s.RAMSize != 48<<20-layout.NetRingStride || rekLogs == 0 {
+	if !s.CoreOn || s.App != layout.StatusReady || s.Heartbeat == 0 || s.RAMSize != 48<<20-layout.AbiTail || rekLogs == 0 {
 		fail("rekill", fmt.Errorf("verse app kwam niet op na een hard-kill (geparkeerde core niet herbruikbaar?)"))
 	}
 	if s.FaultVec != layout.FaultNone {
@@ -436,12 +436,15 @@ func main() {
 	}
 	fmt.Println("HOPOS_VOLUMES_OK — volumes: gedeeld pad, eigen root, mount-grens afgedwongen")
 
-	// Fetch-demo: de app vraagt HOP een URL naar /data te downloaden (de
-	// bulk gaat buiten de ring om). Doelwit: HOP's eigen hello-server —
-	// zelfstandig en deterministisch (HOP mag als vertrouwde kern elk adres
-	// bereiken; zie fetchClient in slots/rpc.go).
-	fmt.Println("fetch: slot 1 laat HOP een URL naar /data/hello.txt halen...")
-	fetchEnv := map[string]string{"FSDEMO": "fetch", "FETCH_URL": "http://" + board.Current().Net().IP + "/"}
+	// Fetch-demo: de app downloadt ZELF, over zijn eigen netstack, en schrijft de
+	// bytes via de gewone write-weg het gemounte volume in. Dat was HOP's werk
+	// (een fetch-op in de hop-ABI) en dat is gesloopt: de kern hoefde er met zijn
+	// volle rechten een app-opgegeven URL voor te openen. Doelwit: de node zelf op
+	// het gateway-IP (10.100.0.1 = "mijn node" voor elke app — hopswitch/gateway.go),
+	// waar serveHello luistert. Zelfstandig en deterministisch, en het bewijst en
+	// passant de weg die élke echte job gebruikt.
+	fmt.Println("fetch: slot 1 haalt zelf een URL en schrijft hem naar /data/hello.txt...")
+	fetchEnv := map[string]string{"FSDEMO": "fetch", "FETCH_URL": "http://" + hopswitch.GatewayIP() + "/"}
 	if err := slots.Start(1, app, 64<<20, 1, fetchEnv, dataMount, nil); err != nil {
 		fail("fetch", err)
 	}
@@ -542,7 +545,7 @@ func main() {
 	time.Sleep(600 * time.Millisecond) // ring-logs + heartbeats laten lopen
 	for slot := 2; slot <= 3; slot++ {
 		s := slots.Get(slot)
-		if !s.CoreOn || s.Heartbeat == 0 || s.RAMSize != 64<<20-layout.NetRingStride {
+		if !s.CoreOn || s.Heartbeat == 0 || s.RAMSize != 64<<20-layout.AbiTail {
 			fail("reloc-status", fmt.Errorf("slot %d: on=%v hb=%d ram=%dMB", slot, s.CoreOn, s.Heartbeat, s.RAMSize>>20))
 		}
 	}

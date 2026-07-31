@@ -17,7 +17,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unsafe"
 
 	"hop-os/metal/abi/hopabi"
 	"hop-os/metal/abi/layout"
@@ -41,10 +40,38 @@ type App struct {
 	in   *ring.Ring // hop-ABI inbox (HOP → app)
 	rbuf []byte     // hergebruikte leesbuffer (onder mu, zoals seq)
 
+	// printk-regelbuffer (appboard.PrintkSink): runtime-output komt per byte
+	// binnen en gaat per regel de log-ring op. Vast formaat, want de schrijver
+	// zit mogelijk midden in een panic en mag dan niet alloceren.
+	pkBuf [224]byte
+	pkN   int
 }
 
-func (a *App) ctrl(off uintptr) *uint64 {
-	return (*uint64)(unsafe.Pointer(layout.CtrlPage(a.Slot) + off))
+// abiVersion is de slot-ABI waartegen dít image gelinkt is (abi/place.SymABI).
+// Geen variabele die iemand op runtime leest maar een stempel in het binary:
+// HOP leest 'm bij plaatsing uit de symboltabel en weigert een image met een
+// andere versie — zo kan een app nooit stil op het verkeerde adres zijn control
+// page of ringen zoeken. Een symbool dat nergens gelezen wordt veegt de linker
+// weg (gemeten: dan weigert HOP élk image), dus houdt Init het stempel met één
+// load in leven — goedkoper dan het op de control page echoën, waar niemand het
+// las.
+var abiVersion uint64 = layout.ABIVersion
+
+// ctrlGet/ctrlSet zijn de ABI-lees en -schrijf: met het cache-onderhoud dat de
+// architectuur nodig heeft (dev.Pull/Push — no-ops waar de control page
+// device-gemapt is, echt werk waar HOP en dit hart niet coherent zijn). Alle
+// ABI-verkeer van de app loopt hierlangs; een rauwe deref zou op zo'n board stil
+// in de eigen D-cache blijven staan en voor HOP niet bestaan.
+func (a *App) ctrlGet(off uintptr) uint64 {
+	p := layout.CtrlPageAt(a.RAMStart, a.RAMSize) + off
+	dev.Pull(p, 8)
+	return dev.Read64(p)
+}
+
+func (a *App) ctrlSet(off uintptr, v uint64) {
+	p := layout.CtrlPageAt(a.RAMStart, a.RAMSize) + off
+	dev.Write64(p, v)
+	dev.Push(p, 8)
 }
 
 // Init leidt de eigen slot-index af uit de core-identiteit (MPIDR: slot =
@@ -59,8 +86,8 @@ func Init() *App {
 		RAMSize:  uint64(end - start),
 	}
 
-	a.out = ring.Open(layout.RingOutbox(a.Slot))
-	a.in = ring.Open(layout.RingInbox(a.Slot))
+	a.out = ring.Open(layout.RingOutboxAt(a.RAMStart, a.RAMSize))
+	a.in = ring.Open(layout.RingInboxAt(a.RAMStart, a.RAMSize))
 	a.rbuf = make([]byte, layout.RingDataCap)
 	a.env = a.readEnv()
 
@@ -74,13 +101,19 @@ func Init() *App {
 	// de teardown.
 	goos.Exit = func(code int32) { a.Exit(uint64(uint32(code))) }
 
+	// Runtime-output (per byte, via het board) de log-ring op. Het enige dat
+	// daar nog langskomt is een panic — en juist die MOET het task-log halen:
+	// zonder deze haak is een panic een exit-code 2 zonder één regel reden
+	// (gemeten 31-07: de apploader-OOM stierf vijfmaal onzichtbaar).
+	appboard.PrintkSink = a.printk
+
 	// Klok overnemen van HOP (die synct via SNTP): zonder dit begint elke
 	// app-runtime op 1970. De teller is gedeeld, de offset dus ook.
-	if off := *a.ctrl(layout.CtrlWallOff); off != 0 {
+	if off := a.ctrlGet(layout.CtrlWallOff); off != 0 {
 		appboard.Current().SetTimerOffset(int64(off))
 	}
 
-	*a.ctrl(layout.CtrlRAMSize) = a.RAMSize
+	a.ctrlSet(layout.CtrlRAMSize, a.RAMSize)
 
 	// SMP (fase 5): de OS-laag brengt de door HOP toegewezen extra cores
 	// transparant op (goos.Task) en zet GOMAXPROCS=N. De app krijgt zo N cores
@@ -88,20 +121,26 @@ func Init() *App {
 	// er iets van merkt of aan hoeft te doen. Configure is een no-op bij één
 	// core, dus hier geen SMP-vertakking. Vóór READY, zodat wie op READY wacht
 	// meteen de volledige machine ziet.
-	smp.Configure(a.Slot, int(*a.ctrl(layout.CtrlCores)))
+	smp.Configure(a.Slot, int(a.ctrlGet(layout.CtrlCores)), layout.CtrlPageAt(a.RAMStart, a.RAMSize))
 
 	// Idle-tik-teller publiceren (metal/cpu/idle → CtrlIdle): het klok-signaal
 	// voor de wachter op de HOP-core. OS-laag-werk — de app merkt er niets
 	// van, net als bij SMP.
-	idle.Publish(layout.CtrlPage(a.Slot) + layout.CtrlIdle)
+	idle.Publish(layout.CtrlPageAt(a.RAMStart, a.RAMSize) + layout.CtrlIdle)
 
 	// Core-deling (fase 6): laat de governor het CtrlShared-woord volgen. Zet
 	// HOP het (dit slot deelt zijn core), dan yieldt de governor coöperatief
 	// via HVC i.p.v. WFE zodat de mede-bewoner draait. OS-laag-werk — de app
 	// merkt er niets van, net als bij SMP en de idle-teller.
-	idle.WatchShared(layout.CtrlPage(a.Slot) + layout.CtrlShared)
+	idle.WatchShared(layout.CtrlPageAt(a.RAMStart, a.RAMSize) + layout.CtrlShared)
 
-	*a.ctrl(layout.CtrlStatus) = layout.StatusReady
+	// Het ABI-stempel aanraken zodat het in het image blijft staan (zie
+	// abiVersion): HOP leest het bij plaatsing uit de symboltabel.
+	if abiVersion == 0 {
+		panic("applib: ABI stamp missing")
+	}
+
+	a.ctrlSet(layout.CtrlStatus, layout.StatusReady)
 
 	go a.watch()
 	return a
@@ -113,19 +152,52 @@ func (a *App) Env(key string) string { return a.env[key] }
 
 // readEnv leest de env-blob die HOP op de control-page schreef.
 func (a *App) readEnv() map[string]string {
-	n := *a.ctrl(layout.CtrlEnvLen)
+	n := a.ctrlGet(layout.CtrlEnvLen)
 	env := make(map[string]string)
 	if n == 0 || n > layout.CtrlEnvMax {
 		return env
 	}
 	blob := make([]byte, n)
-	dev.CopyOut(blob, layout.CtrlPage(a.Slot)+layout.CtrlEnvData)
+	env0 := layout.CtrlPageAt(a.RAMStart, a.RAMSize) + layout.CtrlEnvData
+	dev.Pull(env0, uintptr(n))
+	dev.CopyOut(blob, env0)
 	for _, line := range strings.Split(string(blob), "\n") {
 		if eq := strings.IndexByte(line, '='); eq > 0 {
 			env[line[:eq]] = line[eq+1:]
 		}
 	}
 	return env
+}
+
+// printk buffert runtime-output tot een regel en zet die op de log-ring. De
+// aanroeper zit mogelijk midden in een panic, dus de regels zijn hier strenger
+// dan bij Logf: geen allocatie (vaste buffer), geen blokkerende lock (TryLock —
+// de mutex kan van een gestorven goroutine zijn), en bij een volle ring meteen
+// droppen. Torn output bij gelijktijdige runtime-prints is geaccepteerd:
+// runtime-output ís de uitzondering, en een halve panic-regel is oneindig veel
+// meer dan de nul regels van hiervoor.
+func (a *App) printk(c byte) {
+	if c != '\n' {
+		if a.pkN < len(a.pkBuf) {
+			a.pkBuf[a.pkN] = c
+			a.pkN++
+			return
+		}
+		// Regel te lang: flushen wat er ligt, dan de byte alsnog bufferen.
+	}
+	n := a.pkN
+	a.pkN = 0
+	if n == 0 {
+		return
+	}
+	if a.mu.TryLock() {
+		a.out.Write(ring.TypeLog, a.pkBuf[:n])
+		a.mu.Unlock()
+	}
+	if c != '\n' {
+		a.pkBuf[0] = c
+		a.pkN = 1
+	}
 }
 
 // Logf stuurt een logregel naar HOP via de hop-ABI-outbox. Bij een volle ring
@@ -231,10 +303,17 @@ func (a *App) ReadFile(path string) ([]byte, error) {
 	return buf, nil
 }
 
-// WriteFile schrijft data naar path (gechunkt; maakt bestand + ouder-dirs).
+// WriteFile VERVANGT de inhoud van path door data (gechunkt; maakt bestand +
+// ouder-dirs).
+//
+// De truncate vooraf is de replace-semantiek, en die is er niet gratis: de
+// schrijf-op alleen kan een bestand niet korter maken, dus zonder dit bleef bij
+// kortere nieuwe inhoud de oude STAART staan en liet een lege write het oude
+// bestand volledig intact. Een lezer zag dan een bestand dat nooit geschreven is.
+// Eerst op nul zetten (O_TRUNC-gedrag) maakt van een halve schrijf een KORT
+// bestand in plaats van een gemengd bestand — en dat is de fout die je ziet.
 func (a *App) WriteFile(path string, data []byte) error {
-	if len(data) == 0 {
-		_, err := a.rpc(hopabi.Req{Op: hopabi.OpWrite, Path: path}, rpcTimeout)
+	if _, err := a.rpc(hopabi.Req{Op: hopabi.OpTruncate, Path: path, N: 0}, rpcTimeout); err != nil {
 		return err
 	}
 	for off := 0; off < len(data); off += hopabi.MaxChunk {
@@ -272,11 +351,11 @@ func (a *App) Remove(path string) error {
 	return err
 }
 
-// Fetch laat HOP url downloaden naar path (binnen het zicht van deze task)
-// en geeft het aantal bytes terug — de bulk gaat buiten de ring om.
-func (a *App) Fetch(url, path string) (uint64, error) {
-	resp, err := a.rpc(hopabi.Req{Op: hopabi.OpFetch, Path: url, Data: []byte(path)}, 60*time.Second)
-	return resp.Size, err
+// Truncate zet path op precies n bytes (maakt bestand + ouder-dirs). Krimpen
+// gooit de staart weg, groeien vult met nullen.
+func (a *App) Truncate(path string, n uint64) error {
+	_, err := a.rpc(hopabi.Req{Op: hopabi.OpTruncate, Path: path, N: n}, rpcTimeout)
+	return err
 }
 
 // watch verstuurt heartbeats, gehoorzaamt de kill-flag en rapporteert elke
@@ -284,18 +363,17 @@ func (a *App) Fetch(url, path string) (uint64, error) {
 // weet wat hij gebrúíkt naast wat hij mág. ReadMemStats is een korte
 // stop-the-world — op deze cadans verwaarloosbaar.
 func (a *App) watch() {
-	hb := a.ctrl(layout.CtrlHeartbeat)
-	kill := a.ctrl(layout.CtrlKill)
-	mem := a.ctrl(layout.CtrlMemSys)
 	var ms runtime.MemStats
+	var beat uint64
 	for tick := 0; ; tick++ {
-		*hb++
-		if *kill != 0 {
+		beat++
+		a.ctrlSet(layout.CtrlHeartbeat, beat)
+		if a.ctrlGet(layout.CtrlKill) != 0 {
 			a.Exit(0)
 		}
 		if tick%40 == 0 { // 40 × 50ms = 2s
 			runtime.ReadMemStats(&ms)
-			*mem = ms.Sys
+			a.ctrlSet(layout.CtrlMemSys, ms.Sys)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -313,13 +391,14 @@ func (a *App) watch() {
 // een verbinding op elk moment stil doodmaken, en daar is geen signaal voor.
 // Zie appnet/up_gvisor.go.
 func (a *App) Exit(code uint64) {
-	*a.ctrl(layout.CtrlExitCode) = code
-	*a.ctrl(layout.CtrlStatus) = layout.StatusExited
+	a.ctrlSet(layout.CtrlExitCode, code)
+	a.ctrlSet(layout.CtrlStatus, layout.StatusExited)
 	dev.MB() // status zichtbaar vóór we de core aan HopOS teruggeven
-	// Coöperatief stoppen via HVC → HopOS parkeert de core op EL2 (geen PSCI
-	// CPU_OFF: dat geeft de core aan de firmware terug en op de Pi 5-stock
-	// komt hij dan nooit terug). HopOS bezit zijn cores.
-	hvcExit()
+	// Coöperatief stoppen: de core aan HopOS teruggeven. Hoe dat gaat is
+	// arch-eigen (park_<arch>.s) — op ARM een HVC naar de EL2-parkeerlus, op
+	// RISC-V wachten tot HOP het hart reset. HopOS bezit zijn cores; ze gaan
+	// nooit terug naar de firmware.
+	parkExit()
 	for {
 	} // onbereikbaar
 }
@@ -377,22 +456,23 @@ func (a *App) StageImage(r io.Reader, imgSize int64) error {
 	// plaatst HOP legacy vanaf de staging — met zijn eigen nette fout als de
 	// image echt kapot is.
 	if stub, err := a.selfPlace(stageAddr, imgSize); err == nil {
-		*a.ctrl(layout.CtrlPlaceEntry) = stub
+		a.ctrlSet(layout.CtrlPlaceEntry, stub)
 	} else {
 		a.Logf("apploader: self-place unavailable (%v) — HOP will place from staging", err)
 	}
 	// Seinen: eerst de maat, dan de status (HOP leest de maat pas ná StatusStaged).
-	*a.ctrl(layout.CtrlStagedSize) = uint64(imgSize)
+	a.ctrlSet(layout.CtrlStagedSize, uint64(imgSize))
 	dev.MB()
-	*a.ctrl(layout.CtrlStatus) = layout.StatusStaged
+	a.ctrlSet(layout.CtrlStatus, layout.StatusStaged)
 	dev.MB()
 	// De core aan HopOS teruggeven (park, net als Exit) — maar met StatusStaged,
 	// dus HOP plaatst de echte app en her-dispatcht deze core i.p.v. het slot
 	// vrij te geven. Keert nooit terug.
-	hvcExit()
+	parkExit()
 	for {
 	} // onbereikbaar
 }
 
-// hvcExit trapt naar HopOS' EL2-parkeerpad (zie park_arm64.s).
-func hvcExit()
+// parkExit geeft de core aan HopOS terug; keert nooit terug. De vorm is
+// arch-eigen: zie park_arm64.s (HVC naar de EL2-parkeerlus) en
+// park_riscv64.go (wachten op de hart-reset).

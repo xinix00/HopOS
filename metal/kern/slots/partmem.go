@@ -16,6 +16,7 @@ package slots
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 
 	"hop-os/metal/abi/layout"
@@ -42,42 +43,97 @@ func poolInit() {
 	for _, r := range layout.Pool() {
 		partFree = append(partFree, region{r.Base, r.Size})
 	}
+	// Op ADRES sorteren — en alleen deze kopie, niet Plan.Pool: element 0 daarvan
+	// bepaalt het linkadres van élk app-image (cageLinkBase), dus die orde is
+	// functioneel en mag niet verschuiven.
+	//
+	// Waarom sorteren moet: releaseLocked voegt een vrijgegeven stuk gesorteerd in
+	// en smelt het met zijn twee BUREN. Op een ongesorteerde lijst wijst "de buur"
+	// naar een willekeurige regio, dus smelt hij niet — en dan heelt fragmentatie
+	// nooit meer. Het LicheeRV-plan zet de hoge regio bewust vooraan, dus dit is
+	// daar geen theorie.
+	sort.Slice(partFree, func(a, b int) bool { return partFree[a].base < partFree[b].base })
 }
 
 func align2M(n uint64) uint64 { return (n + part2M - 1) &^ (part2M - 1) }
 
-// partAlloc reserveert (2MB-opgerond) size voor slot i uit de pool en geeft
-// het fysieke basisadres. Een eerdere reservering van i wordt eerst
-// vrijgegeven (defensief bij een re-Start). Fout als de pool geen
-// aaneengesloten gat van deze maat meer heeft.
+// partAlloc reserveert size voor slot i uit de pool en geeft basis én de
+// WERKELIJKE maat terug — opgerond naar wat de kooi van dit board eist
+// (cageGrain: de 2MB-blokkorrel van de map).
 //
-// HOOG-EERST: de top van de hoogste passende regio (partFree is base-
-// gesorteerd, dus achteraan beginnen). Het lage DRAM is op servers schaars
-// en kostbaar — het draagt de venster-kandidaten en het onder-4GB-bereik
-// voor toekomstige DMA — terwijl de bulk (Altra: ~300GB boven de 512GB-
-// grens, via MapHigh bereikbaar) alleen partities draagt. Laag-eerst zou
-// het lage blok volproppen en de bulk nooit raken.
-func partAlloc(i int, size uint64) (uint64, error) {
+// Die tweede returnwaarde is er omdat het anders fout gaat, en dat is gemeten:
+// de allocator rondde de maat op en bewaarde die, maar de aanroeper hield zijn
+// eigen getal en gaf dát aan cagePrepare. Twee maten voor één partitie. Met een
+// memory_limit van 24MB kreeg de kooi 0x1800000 te zien terwijl de partitie
+// 32MB was (31-07: "maat 0x1800000 is geen macht van twee ≥ 8" — toen NAPOT nog
+// een macht van twee eiste). Sinds TOR is het goedaardig geworden en dus stiller:
+// de kooi zou simpelweg kleiner zijn dan de partitie. Eén bron van waarheid. Een eerdere reservering van i wordt eerst vrijgegeven
+// (defensief bij een re-Start). Fout als de pool geen aaneengesloten gat van deze
+// maat meer heeft.
+//
+// HOOG-EERST: de top van de hoogste passende regio (partFree is base-gesorteerd,
+// dus achteraan beginnen). Het lage DRAM is op servers schaars en kostbaar — het
+// draagt de venster-kandidaten en het onder-4GB-bereik voor toekomstige DMA —
+// terwijl de bulk (Altra: ~300GB boven de 512GB-grens, via MapHigh bereikbaar)
+// alleen partities draagt. Laag-eerst zou het lage blok volproppen en de bulk
+// nooit raken.
+func partAlloc(i int, size uint64) (base, grown uint64, err error) {
 	partOnce.Do(poolInit)
-	size = align2M(size)
+	size = cageGrain(align2M(size))
 	partMu.Lock()
 	defer partMu.Unlock()
 	releaseLocked(i)
+
+	// Best-fit: de KLEINSTE regio die deze partitie nog kan dragen. Hoog-eerst
+	// (wat hier stond) is goed voor de bulk-boven-de-4GB-vraag, maar het kiest
+	// niet tussen regio's die allebei passen — en dan snijdt een kleine job zijn
+	// partitie uit de énige regio die nog een grote kan dragen.
+	//
+	// GEMETEN 31-07: een 64MB-retry pakte 0x8be00000 uit de 127MB-regio terwijl
+	// de losse 64MB-regio vrij lag, en daarna paste 124MB nergens meer ("does not
+	// fit the pool" bij élke volgende poging). Geen lek, geen volle pool — een
+	// keuze. Best-fit laat een grote regio groot zolang een kleinere volstaat.
+	//
+	// Binnen de gekozen regio blijft het hoog-eerst (zie hieronder): dát deel van
+	// de oude vorm was wél om een reden zo.
+	best := -1
 	for idx := len(partFree) - 1; idx >= 0; idx-- {
 		r := partFree[idx]
 		if r.size < size {
 			continue
 		}
-		base := r.base + r.size - size // de top van de regio
-		if r.size == size {
-			partFree = append(partFree[:idx], partFree[idx+1:]...)
-		} else {
-			partFree[idx] = region{r.base, r.size - size}
+		// Draagt hij een bruikbare basis? Zo niet, dan is hij voor déze maat geen
+		// kandidaat — anders zou best-fit een regio kiezen die straks afketst.
+		if (r.base+r.size-size)&^(cageBaseAlign(size)-1) < r.base {
+			continue
 		}
-		partOf[i] = region{base, size}
-		return base, nil
+		if best < 0 || r.size < partFree[best].size {
+			best = idx
+		}
 	}
-	return 0, fmt.Errorf("partition %d MB does not fit the pool (full or fragmented)", size>>20)
+	if best < 0 {
+		return 0, 0, fmt.Errorf("partition %d MB does not fit the pool (full, fragmented, or no base the cage can describe)", size>>20)
+	}
+	r := partFree[best]
+	// Binnen de regio de HOOGSTE bruikbare basis. Dat is niet willekeurig: op een
+	// board waar de lage regio HOP's eigen structuren draagt en de bulk erboven
+	// ligt, houdt hoog-eerst het lage stuk vrij. De uitlijning komt van de kooi
+	// (cageBaseAlign) — 2MB sinds TOR elk bereik kan uitdrukken; onder NAPOT was
+	// dat de maat zelf, en koos de allocator anders adressen die de whitelist niet
+	// kón beschrijven (gemeten 31-07: "basis 0x8bf00000 niet gealigneerd op maat
+	// 0x4000000").
+	base = (r.base + r.size - size) &^ (cageBaseAlign(size) - 1)
+	// Voor- en achterstuk teruggeven; het middenstuk is van dit slot.
+	rest := partFree[:best:best]
+	if base > r.base {
+		rest = append(rest, region{r.base, base - r.base})
+	}
+	if end := base + size; end < r.base+r.size {
+		rest = append(rest, region{end, r.base + r.size - end})
+	}
+	partFree = append(rest, partFree[best+1:]...)
+	partOf[i] = region{base, size}
+	return base, size, nil
 }
 
 // partRelease geeft de reservering van slot i terug aan de pool (coalescing).

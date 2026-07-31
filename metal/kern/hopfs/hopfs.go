@@ -351,6 +351,68 @@ func (f *FS) WriteAt(path string, off uint64, p []byte) error {
 	return nil
 }
 
+// Truncate zet het bestand op precies size bytes en maakt het (met ouder-dirs)
+// aan als het nog niet bestond. Krimpen geeft de blokken voorbij de nieuwe
+// lengte terug; groeien voegt gaten toe (die lezen als nul, zoals bij WriteAt).
+//
+// Dit is de helft die "een bestand schrijven" nodig had en niet had: WriteAt
+// alleen kan een bestand niet KORTER maken, dus een kortere nieuwe inhoud liet
+// de oude staart staan en een lege inhoud liet het oude bestand volledig
+// intact. De aanroeper (de hop-ABI-WriteFile) zet daarom eerst op 0.
+func (f *FS) Truncate(path string, size uint64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if diskBytes := uint64(f.max) * BlockSize; size > diskBytes {
+		return fmt.Errorf("hopfs: truncate %d > schijf (%d)", size, diskBytes)
+	}
+	segs, err := split(path)
+	if err != nil {
+		return err
+	}
+	if len(segs) == 0 {
+		return fmt.Errorf("hopfs: leeg pad")
+	}
+	parent, err := f.walk(segs[:len(segs)-1], true)
+	if err != nil {
+		return err
+	}
+	name := segs[len(segs)-1]
+	n, ok := parent.children[name]
+	if !ok {
+		if f.nodes >= maxNodes {
+			return fmt.Errorf("hopfs: te veel bestanden/dirs (max %d)", maxNodes)
+		}
+		n = &node{}
+		parent.children[name] = n
+		f.nodes++
+	} else if n.dir {
+		return fmt.Errorf("hopfs: %q is a directory", path)
+	}
+
+	need := int((size + BlockSize - 1) / BlockSize)
+	if grow := need - len(n.blocks); grow > 0 {
+		if f.index+grow > maxIndexBlocks {
+			return fmt.Errorf("hopfs: bestandsindex-budget vol (%d van %d blokken; truncate %d vraagt %d bij)",
+				f.index, maxIndexBlocks, size, grow)
+		}
+		f.index += grow
+		for len(n.blocks) < need {
+			n.blocks = append(n.blocks, holeBlock)
+		}
+	} else {
+		for _, b := range n.blocks[need:] {
+			if b != holeBlock { // gaten zijn nooit gealloceerd
+				f.free = append(f.free, b)
+			}
+		}
+		f.index -= len(n.blocks) - need
+		n.blocks = n.blocks[:need]
+	}
+	n.size = size
+	return nil
+}
+
 // Remove verwijdert een bestand of lege dir en geeft blokken terug.
 func (f *FS) Remove(path string) error {
 	return f.remove(path, false)

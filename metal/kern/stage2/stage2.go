@@ -56,7 +56,6 @@ const (
 
 	blockRW   = descBlock | attrAF | attrSHInner | attrRW | attrNormal
 	blockRWNC = descBlock | attrAF | attrSHInner | attrRW | attrNormNC
-	pageRW    = descPage | attrAF | attrSHInner | attrRW | attrNormal
 	pageRO    = descPage | attrAF | attrSHInner | attrRO | attrNormal
 	pageRWNC  = descPage | attrAF | attrSHInner | attrRW | attrNormNC
 
@@ -64,10 +63,8 @@ const (
 	l2PartOff = 0x1000
 	l2DevOff  = 0x2000
 	l3CtrlOff = 0x3000
-	l3RingOff = 0x4000
-	l2NetOff  = 0x5000 // het net-ring-GB (NetRingBase heeft een eigen GB —
-	// 128×2MB past niet in het ctrl-GB; slot ≥105 liep daar over de
-	// 1GB-L2-grens: de Altra-vondst van 15-07)
+	// +0x5000 was het net-ring-GB; sinds de frame-ringen in de ABI-staart van de
+	// eigen partitie wonen valt dat onder l2PartOff en is de offset vrij.
 	// CtxOff (0x6000, abi/layout) is het switch-contextblok — NIET herbruiken.
 	l2FbOff = 0x7000 // FB-grant-L2 (GrantWindow): identity-venster op de
 	// firmware-framebuffer, alleen gevuld voor het slot dat de grant houdt
@@ -113,11 +110,11 @@ const (
 // (op de HVC-offset) die TLBI ALLE1IS doet. HOP draait op EL1 en kan die
 // EL2-instructie niet direct uitvoeren; Revoke doet er een HVC voor. Zie Revoke.
 func InitVectors() {
-	// De fysieke plan-adressen die de switch nodig heeft, gaan per core het
-	// sched-blok in (hieronder): switch.s is daardoor volledig SP/TPIDR-
-	// relatief. De 4KB-uitlijning van ctrl (bits 0-11 vrij voor slot<<12)
-	// bewaakt layout.UsePlan; switch.s rekent daarop bij het fault-rapport.
-	ctrlPA := uint64(layout.CtrlPagePA(0))
+	// Het fysieke plan-adres dat de switch nodig heeft gaat per core het
+	// sched-blok in (hieronder): switch.s is daardoor volledig SP/TPIDR-relatief.
+	// Eén adres is genoeg — de control-page van een bewoner komt uit zijn
+	// ctx-blok (CtxCtrlPA), want die woont in zijn partitie en is dus niet uit
+	// een plan-basis te berekenen.
 	s2PA := uint64(layout.VecBasePA())
 	entryPA := el2.EntryPC()
 
@@ -175,7 +172,6 @@ func InitVectors() {
 	for c := 0; c <= nc; c++ {
 		mb := layout.ParkMboxPA(c)
 		dev.Write64(mb+layout.SchedS2PA, s2PA)
-		dev.Write64(mb+layout.SchedCtrlPA, ctrlPA)
 	}
 	// De ctx-staat van elke KOOI expliciet op Empty (per-slot, tot de kooi-cap):
 	// HOP leest dit woord (Get/waitCtxDead in kern/slots) al vóór de eerste
@@ -267,16 +263,12 @@ func Revoke(i int) {
 // partitie die HOP voor deze task alloceerde (variabel per job). Het
 // IPA-bereik [ipaBase, ipaBase+size) wordt op [paBase, paBase+size) gelegd.
 // size ≤ één 1GB-blok vanaf ipaBase (aanroeper begrenst dit) → één L2-tabel.
-// netRingPA is de fysieke net-ring van dít slot (de partitie-staart,
-// base+appRAM — kern/slots berekent hem per lifecycle, er is geen register):
-// één 2MB-blok, dus 2MB-aligned (partAlloc's korrel garandeert dat; hier de
-// wacht, want een scheve basis wordt een scheve MMU-map).
-func Build(i int, ipaBase, paBase, size, netRingPA uint64) (uint64, error) {
+// De ABI-staart van het slot (control-page, hop-ABI-ringen, frame-ringen) heeft
+// hier geen eigen parameter en geen eigen venster meer: die ligt in de partitie
+// (layout, ABIVersion 2) en valt dus binnen dezelfde map.
+func Build(i int, ipaBase, paBase, size uint64) (uint64, error) {
 	if i < 1 || i > layout.MaxSlots {
 		return 0, fmt.Errorf("slot %d buiten bereik", i)
-	}
-	if netRingPA == 0 || netRingPA&(layout.NetRingStride-1) != 0 {
-		return 0, fmt.Errorf("net-ring-PA %#x ontbreekt of niet 2MB-aligned", netRingPA)
 	}
 	// Het hele blok schoon, inclusief het switch-contextblok op +CtxOff: een
 	// Start gebeurt per contract op een niet-draaiend slot, dus de ctx-staat
@@ -289,8 +281,6 @@ func Build(i int, ipaBase, paBase, size, netRingPA uint64) (uint64, error) {
 	l2Part := uint64(base + l2PartOff)
 	l2Dev := uint64(base + l2DevOff)
 	l3Ctrl := uint64(base + l3CtrlOff)
-	l3Ring := uint64(base + l3RingOff)
-	l2Net := uint64(base + l2NetOff)
 
 	// De tabel is de IPA→PA-vertaling: alle índexen hieronder komen uit het
 	// IPA-beeld (de universele layout-constanten die de app ziet), alle
@@ -333,37 +323,16 @@ func Build(i int, ipaBase, paBase, size, netRingPA uint64) (uint64, error) {
 	// L2dev → L3's voor de ctrl- en ring-regio (pagina-granulariteit).
 	devGB := uint64(layout.CtrlBase) &^ ((1 << 30) - 1)
 	dev.Write64(uintptr(l2Dev)+uintptr((uint64(layout.CtrlBase)-devGB)>>21)*8, l3Ctrl|descTable)
-	ringIPA := uint64(layout.RingOutbox(i)) &^ ((2 << 20) - 1)
-	dev.Write64(uintptr(l2Dev)+uintptr((ringIPA-devGB)>>21)*8, l3Ring|descTable)
 
-	// Het eigen 2MB net-ring-blok (frame-ringen app↔switch) als één blok RW,
-	// in het eigen net-ring-GB (L2net): IPA-blok → partitie-staart (2MB-
-	// aligned, hierboven bewaakt); andermans blokken staan nergens in deze
-	// map. De index wordt begrensd: layout-drift hoort hier hard te vallen,
-	// niet stil in een buurtabel te schrijven (de slot-105-les van 15-07).
-	netIPA := uint64(layout.NetRingTX(i))
-	netGB := uint64(layout.NetRingBase) &^ ((1 << 30) - 1)
-	netIdx := (netIPA - netGB) >> 21
-	if netIdx > 511 {
-		return 0, fmt.Errorf("net-ring-IPA %#x buiten het net-ring-GB (index %d)", netIPA, netIdx)
-	}
-	dev.Write64(base+l1Off+uintptr(netGB>>30)*8, l2Net|descTable)
-	dev.Write64(uintptr(l2Net)+uintptr(netIdx)*8, netRingPA|blockRW)
-
-	// L3ctrl: boot-scratch read-only op zijn IPA (conduitkeuze), eigen
-	// ctrl-page RW — elk naar hun fysieke plek uit het plan.
+	// L3ctrl: alleen de boot-scratch, read-only op zijn IPA (de conduitkeuze die
+	// cpuinit erop achterliet).
+	//
+	// Hier stonden ook de eigen control-page en de ring- en net-ring-regio's, elk
+	// met hun eigen IPA-venster en tabel. Die zijn weg: de slot-ABI woont sinds
+	// ABIVersion 2 in de staart van de partitie zelf (layout), en de partitie
+	// hierboven is al volledig gemapt — inclusief die staart. Eén map, één
+	// contract, en de app rekent alles uit RamStart/RamSize.
 	dev.Write64(uintptr(l3Ctrl)+0*8, uint64(layout.BootScratchPA())|pageRO)
-	ctrlIPA := uint64(layout.CtrlPage(i))
-	dev.Write64(uintptr(l3Ctrl)+uintptr((ctrlIPA-uint64(layout.CtrlBase))>>12)*8,
-		uint64(layout.CtrlPagePA(i))|pageRW)
-
-	// L3ring: de eigen 64KB ring-regio, pagina voor pagina IPA → plan-PA.
-	ring := uint64(layout.RingOutbox(i))
-	for off := uint64(0); off < layout.RingStride; off += 4 << 10 {
-		ipa := ring + off
-		dev.Write64(uintptr(l3Ring)+uintptr((ipa-ringIPA)>>12)*8,
-			(uint64(layout.RingOutboxPA(i))+off)|pageRW)
-	}
 
 	// Coherentie ná de tabel-writes: de page-table-walker van de app-core leest
 	// deze tabellen cacheable (VTCR IRGN/ORGN=WB), HOP schreef ze ongecached.

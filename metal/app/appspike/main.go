@@ -8,7 +8,11 @@ package main
 
 import (
 	"bufio"
+	"errors"
+	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -131,10 +135,22 @@ func main() {
 		exit(app, 0)
 
 	case "fetch":
-		// HOP downloadt voor ons; de bulk gaat buiten de ring om de storage in.
-		n, err := app.Fetch(app.Env("FETCH_URL"), "/data/hello.txt")
+		// Downloaden doet de APP, op zijn eigen core en met zijn eigen netstack —
+		// HOP deed dit vroeger via een fetch-op in de ABI, en dat betekende dat de
+		// vertrouwde kern op core 0 een door de app opgegeven URL opende. De bytes
+		// gaan hier via de gewone write-weg het volume in; dat is precies wat een
+		// echte job (de apploader!) ook doet.
+		if _, err := appnet.Up(app); err != nil {
+			app.Logf("FSDEMO fetch: %v", err)
+			exit(app, 1)
+		}
+		body, err := httpGet(app.Env("FETCH_URL"))
 		if err != nil {
 			app.Logf("FSDEMO fetch: %v", err)
+			exit(app, 1)
+		}
+		if err := app.WriteFile("/data/hello.txt", body); err != nil {
+			app.Logf("FSDEMO fetch: schrijven: %v", err)
 			exit(app, 1)
 		}
 		b, err := app.ReadFile("/data/hello.txt")
@@ -142,7 +158,7 @@ func main() {
 			app.Logf("FSDEMO fetch: teruglezen: %v", err)
 			exit(app, 1)
 		}
-		app.Logf("FSDEMO fetch: %d bytes: %q", n, string(b[:min(len(b), 40)]))
+		app.Logf("FSDEMO fetch: %d bytes: %q", len(b), string(b[:min(len(b), 40)]))
 		exit(app, 0)
 	}
 
@@ -292,6 +308,34 @@ func main() {
 func exit(app *applib.App, code uint64) {
 	time.Sleep(100 * time.Millisecond)
 	app.Exit(code)
+}
+
+// httpGet haalt één URL op over de EIGEN netstack van dit slot (appnet.Up moet
+// gelopen hebben) en geeft de body. Begrensd, want dit is scratch-opslag en geen
+// datalake — precies de grens die HOP's oude fetch-op ook had, nu op de plek waar
+// de bytes daadwerkelijk landen.
+func httpGet(url string) ([]byte, error) {
+	const maxBody = 8 << 20
+	if url == "" {
+		return nil, errors.New("geen FETCH_URL meegegeven")
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET %s: status %d", url, resp.StatusCode)
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxBody {
+		return nil, fmt.Errorf("GET %s: body > %dMB", url, maxBody>>20)
+	}
+	return b, nil
 }
 
 // smpSink houdt reken-resultaten levend zodat de compiler het werk niet weggooit.

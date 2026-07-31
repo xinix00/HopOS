@@ -24,6 +24,13 @@ set -e
 
 TAMAGO="${TAMAGO:-$HOME/tamago-go/bin/go}"
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+. "$DIR/image/lib.sh"
+
+# De ingebakken blobs zijn build-input, geen bronbestand: na deze run horen ze
+# weg te zijn (ook als hij halverwege faalt). Anders bouwt een volgende build
+# ongemerkt met de resten van deze mee.
+trap clean_embeds EXIT INT TERM
+
 QEMU_SHARE="${QEMU_SHARE:-/opt/homebrew/share/qemu}"
 SMP="${SMP:-4}"
 MEM="${MEM:-6G}"
@@ -88,13 +95,7 @@ if [ "$MODE" = agent ]; then
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags linkcpuinit -trimpath \
 		-ldflags "-w -T 0x50010000 -R 0x1000" -o out/app-uefi.elf ./app/appspike
-	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-		"$TAMAGO" build -tags linkcpuinit -trimpath \
-		-ldflags "-w -T 0x50010000 -R 0x1000" -o kern/apploaderblob/apploader.elf ./app/apploader
-	# Gecomprimeerd inbakken (gzip -9: 8,4→3,1MB — de blob zit 6× in deze PE);
-	# de node pakt 'm één keer lazy uit (kern/apploaderblob). -n: geen naam/
-	# tijdstempel in de gzip-header → deterministische builds.
-	gzip -9 -n -f kern/apploaderblob/apploader.elf
+	bake_apploader arm64 linkcpuinit 0x50010000 # recept in image/lib.sh
 fi
 
 # 1. Eén ELF per venster-kandidaat (zelfde build, ander -T; -buildid= zodat

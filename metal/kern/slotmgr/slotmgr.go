@@ -11,6 +11,7 @@
 package slotmgr
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -64,11 +65,18 @@ func (Manager) StartLoader(slot int, memLimit uint64, sharegroup string, poolCor
 	cage := phys(slot)
 	core, err := slots.PlaceCage(cage, sharegroup, poolCores)
 	if err != nil {
-		// PlaceCage faalt per contract alléén op capaciteit (geen vrije core /
-		// pool past niet). Als hopos.ErrNoCapacity gemarkeerd, zodat HOP het als
-		// "niet plaatsbaar → pending" behandelt i.p.v. als crash te herstarten —
-		// een restart-lus op een onplaatsbare job is een storm (elke poging
-		// downloadt de image opnieuw en faalt opnieuw).
+		if errors.Is(err, slots.ErrPoolSize) {
+			// GEEN capaciteitsfout: twee jobspecs in dezelfde sharegroup zijn het
+			// oneens over de poolgrootte. Wachten lost dat nooit op, dus dit mag geen
+			// "pending" worden — de spec moet veranderen, en dan hoort de operator de
+			// reden te zien.
+			return err
+		}
+		// Verder faalt PlaceCage alléén op capaciteit (geen vrije core / pool past
+		// niet). Als hopos.ErrNoCapacity gemarkeerd, zodat HOP het als "niet
+		// plaatsbaar → pending" behandelt i.p.v. als crash te herstarten — een
+		// restart-lus op een onplaatsbare job is een storm (elke poging downloadt de
+		// image opnieuw en faalt opnieuw).
 		return fmt.Errorf("%w: %v", hopos.ErrNoCapacity, err)
 	}
 	if err := slots.StartLoaderOn(core, cage, memLimit, env); err != nil {
@@ -109,6 +117,7 @@ func (Manager) Status(slot int) hopos.SlotStatus {
 		FaultVec:  s.FaultVec,
 		FaultESR:  s.FaultESR,
 		FaultFAR:  s.FaultFAR,
+		Cage:      s.Cage,
 	}
 }
 

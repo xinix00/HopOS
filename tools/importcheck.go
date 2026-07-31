@@ -81,10 +81,13 @@ func allowed(cat, imp string) bool {
 	case "board-basis":
 		// De basis-helft wordt in élk app-image gelinkt: geen contract, geen
 		// net/kern, en uit driver/ uitsluitend de console-uitzondering
-		// (pl011/fb — printk is een runtime-hook en kan niet init-geïnjecteerd
-		// worden zonder vroege bootdiagnose te verliezen).
+		// (pl011/fb/conlog — printk is een runtime-hook en kan niet
+		// init-geïnjecteerd worden zonder vroege bootdiagnose te verliezen).
+		// conlog hoort in díe uitzondering en niet ernaast: het is een derde
+		// console-bestemming naast de UART en het beeld — de enige die een node
+		// zónder kabel nog kan geven.
 		return imp == "dev" || imp == "board/appboard" || imp == "board/raspi" ||
-			imp == "driver/pl011" || imp == "driver/fb" ||
+			imp == "driver/pl011" || imp == "driver/fb" || imp == "driver/conlog" ||
 			ifirst == "abi" || ifirst == "cpu" || ifirst == "fw"
 	case "board-hop":
 		// De HOP-bedrading mag alles behalve kern/app/cmd/gui (het Display-

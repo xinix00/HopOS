@@ -27,9 +27,11 @@ func TestPoolDedicatedEigenCore(t *testing.T) {
 		}
 		seen[c] = true
 	}
-	// Vijfde dedicated app past niet: 4 cores op.
+	// Vijfde dedicated app past niet: 4 cores op. Géén stille terugval naar
+	// delen — delen is een keuze die de aanroeper maakt met een sharegroup, want
+	// het is een vertrouwensbeslissing (medebewoners zien elkaars timing).
 	if _, err := PlaceCage(5, "", 1); err == nil {
-		t.Fatal("5e dedicated kooi moet falen (geen vrije core)")
+		t.Fatal("5e dedicated kooi moet falen: delen vraagt een sharegroup")
 	}
 }
 
@@ -81,6 +83,30 @@ func TestPoolReleaseGeeftPoolTerug(t *testing.T) {
 	ReleaseCage(7)
 	if _, err := PlaceCage(11, "other", 4); err != nil {
 		t.Fatalf("na leegloop pool moeten alle 4 cores vrij zijn: %v", err)
+	}
+}
+
+// Twee jobs in dezelfde sharegroup die het over de poolgrootte oneens zijn is een
+// FOUT en geen detail: het werd stil "first wins", dus de tweede job kreeg minder
+// hart dan zijn spec zei zonder dat iemand het merkte.
+func TestPoolGrootteMismatchWordtGeweigerd(t *testing.T) {
+	setCores(t, 6)
+	if _, err := PlaceCage(4, "web", 2); err != nil {
+		t.Fatalf("eerste kooi: %v", err)
+	}
+	if _, err := PlaceCage(5, "web", 4); err == nil {
+		t.Fatal("een tweede spec met 4 cores in een pool van 2 moet falen, niet stil 2 krijgen")
+	}
+	// Dezelfde grootte blijft natuurlijk gewoon werken — en een default-loze
+	// aanvraag (0 → 1) tegen een pool van 1 óók.
+	if _, err := PlaceCage(6, "web", 2); err != nil {
+		t.Fatalf("gelijke poolgrootte moet gewoon slagen: %v", err)
+	}
+	if _, err := PlaceCage(7, "solo", 0); err != nil {
+		t.Fatalf("eerste kooi van 'solo': %v", err)
+	}
+	if _, err := PlaceCage(8, "solo", 1); err != nil {
+		t.Fatalf("poolCores 0 en 1 zijn hetzelfde (0 wordt 1): %v", err)
 	}
 }
 

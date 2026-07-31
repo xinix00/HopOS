@@ -27,6 +27,14 @@ import (
 	"hop-os/metal/driver/vcmail"
 )
 
+// SlotCtrl geeft de fysieke control page van app-slot i, of ok=false als dat
+// slot niets draait. Gezet door kern/slots (init): de control page van een slot
+// woont in de staart van zijn partitie (layout: de slot-ABI), dus er is geen
+// vast adres per slot meer en alleen de slotlaag weet waar hij ligt. Default
+// "geen slot" — dan meet de governor alleen de node-core, wat precies de
+// situatie is op een node zonder apps.
+var SlotCtrl = func(i int) (uintptr, bool) { return 0, false }
+
 // Config is de board-invoer voor Start. Het verwachte idle-tempo en het
 // aantal slots zijn GEEN velden: de teller telt idle-tijd, dus het tempo is
 // per definitie idle.CounterHz (CNTFRQ), en de control-pages zijn er
@@ -115,7 +123,11 @@ func watch(cfg Config, maxHz uint32) {
 		// na een start ijkt alleen — daarna telt óók een teller die op 0
 		// blijft staan (een app die vanaf seconde één 100% brandt) als druk.
 		for i := 1; i <= layout.MaxSlots; i++ {
-			page := layout.CtrlPagePA(i)
+			page, live := SlotCtrl(i)
+			if !live {
+				seen[i] = false
+				continue
+			}
 			cores := dev.Read64(page + layout.CtrlCores)
 			if cores == 0 || dev.Read64(page+layout.CtrlStatus) != layout.StatusReady {
 				seen[i] = false

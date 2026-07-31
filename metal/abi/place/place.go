@@ -17,6 +17,7 @@ package place
 
 import (
 	"debug/elf"
+	"encoding/binary"
 	"fmt"
 	"io"
 )
@@ -29,6 +30,13 @@ const (
 	SymRAMSize     = "runtime/goos.RamSize"
 	SymSlotHint    = "hop-os/metal/board/uefi.slotHint"
 	SymSlotHintGen = "hop-os/metal/board/hopslot.slotHint"
+
+	// SymABI draagt de versie van de slot-ABI: de indeling van de partitie-staart
+	// (control page, hop-ABI-ringen, frame-ringen) waar een app zijn adressen uit
+	// rekent. Build leest de wáárde uit het image en vergelijkt hem met de versie
+	// die de aanroeper meegeeft. Een app die op het verkeerde adres zijn control
+	// page zoekt is anders een stille misread, en die klasse fouten kost dagen.
+	SymABI = "hop-os/metal/app/applib.abiVersion"
 )
 
 // Seg is één te plaatsen PT_LOAD: Off in de image → Dst (IPA), Filesz
@@ -52,19 +60,22 @@ type Plan struct {
 // Build parseert en valideert een image tegen het linkvenster
 // [linkBase, linkBase+appRAM) — het canonieke contract: de aanroeper kent de
 // basis (de loader: zijn eigen gepatchte RAMStart; de kern: SlotBase(1)).
-// Segmenten moeten bovendien onder topOff blijven (offset vanaf linkBase):
-// de onderkant van de staging (kern) of het stub-venster (loader) — de
-// kopieerbron moet de kopie overleven. slot is de slotHint-patchwaarde. Elke
-// afwijking is een fout: een plan is compleet geldig of bestaat niet.
-// Bewust géén abi/layout-import (abi-pakketten zijn vlak): alles komt als
-// parameter binnen.
-func Build(r io.ReaderAt, imgSize int64, linkBase, appRAM, topOff uint64, slot int) (*Plan, error) {
+// Segmenten moeten bovendien tussen loOff en topOff blijven (offsets vanaf
+// linkBase): boven de ruimte die de architectuur vooraan reserveert (RISC-V zet
+// daar de kooi-stub die de app binnenlaat; op ARM is loOff nul), en onder de
+// onderkant van de staging (kern) of het stub-venster (loader) — de kopieerbron
+// moet de kopie overleven. slot is de slotHint-patchwaarde, abi de
+// slot-ABI-versie die deze HopOS spreekt (layout.ABIVersion) — het image moet
+// dezelfde melden. Elke afwijking is een fout: een plan is compleet geldig of
+// bestaat niet. Bewust géén abi/layout-import (abi-pakketten zijn vlak): alles
+// komt als parameter binnen.
+func Build(r io.ReaderAt, imgSize int64, linkBase, appRAM, loOff, topOff uint64, slot int, abi uint64) (*Plan, error) {
 	f, err := elf.NewFile(r)
 	if err != nil {
 		return nil, fmt.Errorf("elf parse: %w", err)
 	}
 
-	if f.Entry < linkBase || f.Entry >= linkBase+appRAM {
+	if f.Entry < linkBase+loOff || f.Entry >= linkBase+appRAM {
 		return nil, fmt.Errorf("entry %#x outside link window %#x+%#x", f.Entry, linkBase, appRAM)
 	}
 	p := &Plan{Entry: f.Entry}
@@ -77,7 +88,7 @@ func Build(r io.ReaderAt, imgSize int64, linkBase, appRAM, topOff uint64, slot i
 		// overflow-veilig begrenzen, binnen het linkvenster, binnen de image,
 		// en onder het plafond.
 		if ph.Filesz > ph.Memsz || ph.Memsz > appRAM ||
-			ph.Paddr < linkBase || ph.Paddr > linkBase+appRAM-ph.Memsz {
+			ph.Paddr < linkBase+loOff || ph.Paddr > linkBase+appRAM-ph.Memsz {
 			return nil, fmt.Errorf("segment %#x+%#x (file %#x) outside link range %#x+%#x",
 				ph.Paddr, ph.Memsz, ph.Filesz, linkBase, appRAM)
 		}
@@ -100,7 +111,15 @@ func Build(r io.ReaderAt, imgSize int64, linkBase, appRAM, topOff uint64, slot i
 		return nil, fmt.Errorf("symbols (image built with -s?): %w", err)
 	}
 	ramPatched := 0
+	imgABI, abiFound := uint64(0), false
 	for _, s := range syms {
+		if s.Name == SymABI {
+			v, err := readU64(r, f, s.Value)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", SymABI, err)
+			}
+			imgABI, abiFound = v, true
+		}
 		switch s.Name {
 		case SymRAMStart, SymRAMSize:
 			if s.Value%8 != 0 || s.Value < linkBase || s.Value > linkBase+appRAM-8 {
@@ -124,5 +143,28 @@ func Build(r io.ReaderAt, imgSize int64, linkBase, appRAM, topOff uint64, slot i
 	if ramPatched != 2 {
 		return nil, fmt.Errorf("RAM symbols not found (%d/2)", ramPatched)
 	}
+	if !abiFound {
+		return nil, fmt.Errorf("image predates the versioned slot ABI (no %s) — rebuild it against this HopOS (ABI %d)", SymABI, abi)
+	}
+	if imgABI != abi {
+		return nil, fmt.Errorf("image speaks slot ABI %d, this HopOS speaks %d — rebuild it", imgABI, abi)
+	}
 	return p, nil
+}
+
+// readU64 leest het 64-bit woord dat op adres va in het image staat: welk
+// PT_LOAD-segment het draagt, en waar dat in het bestand ligt. Nodig omdat een
+// symboltabel adréssen geeft, geen inhoud — en de ABI-versie is inhoud.
+func readU64(r io.ReaderAt, f *elf.File, va uint64) (uint64, error) {
+	for _, ph := range f.Progs {
+		if ph.Type != elf.PT_LOAD || va < ph.Paddr || va+8 > ph.Paddr+ph.Filesz {
+			continue
+		}
+		var b [8]byte
+		if _, err := r.ReadAt(b[:], int64(ph.Off+va-ph.Paddr)); err != nil {
+			return 0, err
+		}
+		return binary.LittleEndian.Uint64(b[:]), nil
+	}
+	return 0, fmt.Errorf("adres %#x valt in geen enkel geladen segment", va)
 }

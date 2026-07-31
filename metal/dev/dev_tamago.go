@@ -3,13 +3,15 @@
 package dev
 
 // MB is een volledige geheugenbarrière (DMB SY) — publiceer data vóór de
-// index-update, en andersom bij het lezen. Zie dev_arm64.s.
+// index-update, en andersom bij het lezen. Zie dev_<arch>.s
+// (arm64: DMB SY, riscv64: FENCE).
 func MB()
 
 // SEV genereert een event (WFE-wakeup) voor álle cores in het domein — HOP
 // gebruikt het om een geparkeerde app-core te dispatchen (mailbox schrijven,
 // dan SEV). Bevat een DSB SY zodat de mailbox-write zichtbaar is vóór de wake.
-// Zie dev_arm64.s.
+// Zie dev_<arch>.s. Op RISC-V bestaat SEV niet: daar is dit alleen de
+// barrière, en het wekken loopt via het reset-blok/IPI van het board.
 func SEV()
 
 // CleanInv veegt [addr, addr+size) uit alle caches: DC CIVAC per regel
@@ -24,5 +26,5 @@ func SEV()
 //     een oude tabel laten walken. Dus schrijven, dan vegen.
 //
 // QEMU/TCG modelleert geen caches (daar is dit een no-op); het bewijs is het
-// board. Zie dev_arm64.s.
+// board. Zie dev_<arch>.s.
 func CleanInv(addr, size uintptr)

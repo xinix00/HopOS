@@ -1,3 +1,5 @@
+//go:build arm64
+
 // Package hopslot is het generieke app-board: de board-basis voor images die
 // in een HOP-slot draaien — en dat is voor een app het hele universum. Onder
 // stage-2 raakt een app geen MMIO, geen firmware-tabel en geen UART; alles
@@ -68,12 +70,6 @@ func mpidr() uint64
 // hij per fysieke core VERSCHILT. Precies dat maakt hem bruikbaar als
 // core-onderscheider in SMP-diagnostiek (appspike smpBench).
 func MPIDR() uint64 { return mpidr() }
-
-// slotHint wordt door slots.Start in een app-image gepatcht (symbool
-// "hop-os/metal/board/hopslot.slotHint"): het slotnummer van deze start.
-// 0 = niet gepatcht (een image buiten slots om). Moet in dít pakket blijven
-// wonen — de symboolnaam is deel van het laad-contract.
-var slotHint uint64
 
 // CoreID geeft het eigen slotnummer. Primair uit de slotHint (board-neutraal:
 // op servers is MPIDR géén slotnummer — Altra: aff0 altijd 0, en de Pi 5

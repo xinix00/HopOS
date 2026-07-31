@@ -26,7 +26,6 @@ import (
 	"hop-os/metal/board"
 	"hop-os/metal/dev"
 	"hop-os/metal/kern/apploaderblob"
-	"hop-os/metal/kern/stage2"
 	"hop-os/metal/net/hopswitch"
 )
 
@@ -37,12 +36,15 @@ import (
 // kan bij een snelle Stop→Start een oude naast de nieuwe blijven lezen (twee
 // schrijvers op tail). Alles draait op de HOP-kern: Go-synchronisatie volstaat.
 type servicer struct {
-	slot   int
-	stop   chan struct{} // gesloten: servicer moet weg
-	done   chan struct{} // gesloten zodra de servicer weg is
-	logs   chan string   // logregels (drop bij trage lezer)
-	root   string        // eigen (lege) hopfs-root van deze task
-	mounts [][2]string   // {local, shared}, langste local eerst
+	slot int
+	stop chan struct{} // gesloten: servicer moet weg
+	done chan struct{} // gesloten zodra de servicer weg is
+
+	sawLive   bool        // ctx ooit levend gezien (dan is niet-levend = einde)
+	idleStart time.Time   // eerste lege pass zonder levende ctx (start-gratie)
+	logs      chan string // logregels (drop bij trage lezer)
+	root      string      // eigen (lege) hopfs-root van deze task
+	mounts    [][2]string // {local, shared}, langste local eerst
 }
 
 var (
@@ -273,8 +275,13 @@ func (s *servicer) run() {
 			fmt.Printf("HOPOS_SERVICER_PANIC slot %d: %v\n", s.slot, r)
 		}
 	}()
-	out := ring.Open(layout.RingOutboxPA(s.slot))
-	in := ring.Open(layout.RingInboxPA(s.slot))
+	ram, ramSize, ok := abiOf(s.slot)
+	if !ok {
+		fmt.Printf("HOPOS_SERVICER_NO_PARTITION slot %d\n", s.slot)
+		return
+	}
+	out := ring.Open(layout.RingOutboxAt(ram, ramSize))
+	in := ring.Open(layout.RingInboxAt(ram, ramSize))
 	// Eén hergebruikte leesbuffer i.p.v. een allocatie per record: de payload
 	// wordt synchroon verwerkt (log → string-kopie; RPC → handle retourneert
 	// vóór de volgende lees), dus hergebruik is veilig.
@@ -295,8 +302,28 @@ func (s *servicer) run() {
 			// Geen outbox-werk: stoppen zodra het SLOT niet meer leeft (op
 			// een gedeelde core zegt de core-mailbox niets over déze
 			// bewoner; de ctx-staat dekt beide werelden) of de ring corrupt is.
-			if out.Corrupt() || !ctxLive(ctxState(s.slot)) {
+			if out.Corrupt() {
 				return
+			}
+			// Niet-levende ctx = het slot is weg — máár bij de start is de ctx
+			// heel even nog Empty (registratie gebeurt vóór residentReset/de
+			// dispatch). Zonder gratie stierf de servicer van fase 2 hier
+			// meteen, en verdronk niemand meer de logs van de échte app
+			// (gemeten 30-07: welcome's stervensreden bleef in de ring staan).
+			if !ctxLive(ctxState(s.slot)) {
+				if s.sawLive {
+					return
+				}
+				if s.idleStart.IsZero() {
+					s.idleStart = time.Now()
+				} else if time.Since(s.idleStart) > 2*time.Second {
+					return
+				}
+			} else {
+				if !s.sawLive {
+					identOnce(s.slot) // eerste keer dat dit slot leeft
+				}
+				s.sawLive = true
 			}
 			select {
 			case <-s.stop:
@@ -308,9 +335,19 @@ func (s *servicer) run() {
 		p := buf[:n]
 		switch typ {
 		case ring.TypeLog:
+			// De app mag nooit blokkeren op zijn logs: past de regel niet in het
+			// kanaal, dan valt hij weg. Wat níet wegvalt is de láátste regel — die
+			// bewaart lastLog voor het post-mortem, en dát was het echte gat
+			// (30-07: de apploader meldde netjes waarom hij stopte en niemand kon
+			// het terugvinden). Onder diagMu, want de lifecycle leest en wist dit
+			// veld terwijl deze servicer erin schrijft.
+			line := string(p)
+			diagMu.Lock()
+			lastLog[s.slot] = line
+			diagMu.Unlock()
 			select {
-			case s.logs <- string(p):
-			default: // trage lezer: drop i.p.v. de app blokkeren
+			case s.logs <- line:
+			default:
 			}
 		case ring.TypeRPCReq:
 			resp := s.handle(p)
@@ -359,22 +396,74 @@ func (s *servicer) dispatchSMP() {
 	}
 	ctrlWrite(s.slot, layout.CtrlSMPMbox, uint64(layout.ParkMboxPA(c)))
 	dev.MB()
-	if err := dispatchCore(c, board.Current().S2SMPTrampPC(), uint64(layout.CtrlPagePA(s.slot))); err != nil {
+	cp, ok := CtrlPageOf(s.slot)
+	if !ok {
+		fmt.Printf("HOPOS_SMP_DISPATCH_FAIL slot %d core %d: slot heeft geen partitie\n", s.slot, c)
+		return
+	}
+	if err := dispatchCore(c, cageSMPEntryPC(), uint64(cp)); err != nil {
 		fmt.Printf("HOPOS_SMP_DISPATCH_FAIL slot %d core %d: %v\n", s.slot, c, err)
 	}
 	ctrlWrite(s.slot, layout.CtrlSMPReq, 0) // app-handshake: verzoek afgehandeld
 	dev.MB()
 }
 
-// ctrlRead/ctrlWrite: 64-bit velden op een control-page (device-gemapt).
-// HOP-kant: fysiek adres uit het board-plan (de app leest dezelfde page via
-// zijn IPA; de stage-2 verbindt de twee).
+// abiOf geeft de basis waarmee de ABI-adressen van slot i te berekenen zijn: de
+// partitiebasis en de app-RAM-maat (de staart erboven draagt control page,
+// hop-ABI-ringen en frame-ringen — zie layout, de slot-ABI).
+//
+// Er is dus geen vast plan-adres per slot meer, en dat is precies de bedoeling:
+// de ABI van een slot bestaat exact zolang zijn partitie bestaat. ok=false
+// betekent letterlijk "dit slot heeft nu geen ABI" — lezen zou vrij DRAM lezen,
+// schrijven zou het geheugen van de volgende huurder verminken.
+func abiOf(i int) (ram, ramSize uint64, ok bool) {
+	base, size, ok := partitionOf(i)
+	if !ok {
+		return 0, 0, false
+	}
+	appRAM, err := appRAMSize(size)
+	if err != nil {
+		return 0, 0, false
+	}
+	return base, appRAM, true
+}
+
+// CtrlPageOf geeft de fysieke control page van app-slot i. Geëxporteerd voor de
+// klok-governor (driver/dvfs leest er de idle-teller van): sinds de ABI in de
+// partitie woont, is de slotlaag de enige die weet waar die page ligt. De
+// bedrading staat in de main (cmd/hopos), niet hier — dit pakket is host-getest
+// en driver/dvfs sleept via cpu/idle tamago-only code mee.
+func CtrlPageOf(i int) (uintptr, bool) {
+	ram, ramSize, ok := abiOf(i)
+	if !ok {
+		return 0, false
+	}
+	return layout.CtrlPageAt(ram, ramSize), true
+}
+
+// ctrlRead/ctrlWrite: 64-bit velden op de control-page van een slot. HOP-kant,
+// dus fysieke adressen; de app leest dezelfde bytes via zijn eigen basis
+// (RamStart/RamSize) — op ARM legt de stage-2 die op deze partitie, op RISC-V is
+// het letterlijk hetzelfde adres.
+//
+// Een slot zonder partitie heeft geen control-page: lezen geeft 0 en schrijven
+// is een no-op. Dat is geen stille fout maar het contract — élke schrijver
+// hieronder draait op een slot dat een task draagt, en een lezer die 0 krijgt
+// ziet "geen app" (StatusEmpty is 0).
 func ctrlRead(slot int, off uintptr) uint64 {
-	return dev.Read64(layout.CtrlPagePA(slot) + off)
+	cp, ok := CtrlPageOf(slot)
+	if !ok {
+		return 0
+	}
+	dev.Pull(cp+off, 8)
+	return dev.Read64(cp + off)
 }
 
 func ctrlWrite(slot int, off uintptr, v uint64) {
-	dev.Write64(layout.CtrlPagePA(slot)+off, v)
+	if cp, ok := CtrlPageOf(slot); ok {
+		dev.Write64(cp+off, v)
+		dev.Push(cp+off, 8)
+	}
 }
 
 // Parkeer-model: HopOS bezit zijn cores. Een gestopte/gevelde app-core gaat
@@ -386,16 +475,7 @@ func ctrlWrite(slot int, off uintptr, v uint64) {
 //	word0 == 0  cold   — nooit geparkeerd; eerste bring-up gaat via PSCI CPU_ON
 //	word0 == 1  parked — gestopt en wachtend op dispatch
 //	word0 >= 2  running — word0 draagt de ctx (fysieke ctrl-page) die HOP zette
-const (
-	mboxCold   = 0
-	mboxParked = 1
-)
-
-func mboxWord0(core int) uint64 { return dev.Read64(layout.ParkMboxPA(core)) }
-
-// coreRunning is true zolang de app op deze core draait (nog niet geparkeerd).
-func coreRunning(core int) bool { return mboxWord0(core) >= 2 }
-
+//
 // dispatchCore start een core op entry met ctx in x0. Cold (nooit geparkeerd):
 // PSCI CPU_ON — de éénmalige bring-up per core. Anders (geparkeerd): schrijf
 // {ctx, entry} in de mailbox en wek de WFE-lus met SEV; die springt de
@@ -413,30 +493,43 @@ func dispatchCore(core int, entry, ctx uint64) error {
 	// Start) een core midden in de uitvoering laten kapen. Start's pad checkt dit
 	// al vóór de aanroep (coreRunning-lus), maar de lazy-SMP-weg (dispatchSMP,
 	// met een app-beïnvloed core-nummer uit CtrlSMPReq) komt hier ook langs — dus
-	// de guard hoort hier, op het gedeelde punt.
+	// de guard hoort hier, op het gedeelde punt. Het startschot zelf is
+	// arch-werk (cageDispatch): een parkeerlus wekken is iets anders dan een hart
+	// uit reset halen.
 	if coreRunning(core) {
-		return fmt.Errorf("core %d draait al (mailbox word0 >= 2) — dispatch geweigerd", core)
+		return fmt.Errorf("core %d draait al — dispatch geweigerd", core)
 	}
-	mbox := layout.ParkMboxPA(core)
-	cold := dev.Read64(mbox) == mboxCold
-	dev.Write64(mbox+8, entry) // word1 = doel-PC
-	dev.Write64(mbox+0, ctx)   // word0 = ctx (= "running")
-	dev.MB()
-	if cold {
-		if ret := board.Current().CPUOn(uint64(core), entry, ctx); ret != board.PSCISuccess {
-			return fmt.Errorf("PSCI CPU_ON core %d: %d", core, ret)
-		}
-		return nil
-	}
-	dev.SEV() // geparkeerde core: wek de WFE-lus
-	return nil
+	return cageDispatch(core, entry, ctx)
 }
 
-// waitStopped polt tot core geparkeerd is (mailbox word0 == mboxParked).
+// waitSlotQuiet wacht tot slot i géén werk meer doet — en dat is niet hetzelfde
+// als "de core staat stil". Op een architectuur waar de app zich dood MELDT (de
+// exit-trap naar HOP's switcher, cpu/mmode) blijft het hart daarna voor zijn
+// buren doorlopen; de ctx-staat is dan het teken, niet de core-toestand. Waar de
+// app zijn core parkeert (ARM) zegt de core-toestand het, en de ctx-staat volgt.
+//
+// Beide accepteren, want anders wacht de dedicated Stop-weg op RISC-V áltijd de
+// volle timeout vol: de bewoner is al dood terwijl het hart nog draait.
+func waitSlotQuiet(i, core int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if coreStopped(core) {
+			return true
+		}
+		if st := ctxState(i); st == layout.CtxDead || st == layout.CtxEmpty {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
+// waitStopped polt tot core echt stilstaat (geparkeerd of in reset — wat op deze
+// architectuur "gestopt" betekent, zie de kooi-naad).
 func waitStopped(core int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if mboxWord0(core) == mboxParked {
+		if coreStopped(core) {
 			return true
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -454,6 +547,7 @@ type Status struct {
 	MemSys    uint64 // werkelijke draw: MemStats.Sys van de app (0 = nog niet gemeld)
 	IdleTicks uint64 // ruwe idle-tik-teller (CtrlIdle; bij SMP gedeeld door de cores)
 	Cores     uint64 // aantal cores van het slot (CtrlCores; 0 = geen SMP-veld gezet)
+	Shared    bool   // deelt zijn core met een medebewoner (CtrlShared, door HOP gezet)
 
 	// Door de EL2-vectoren gerapporteerd bij een onvrijwillig einde:
 	// FaultVec = layout.FaultSync (stage-2-fault; ESR/FAR geldig) — zowel bij
@@ -462,6 +556,18 @@ type Status struct {
 	FaultVec uint64
 	FaultESR uint64
 	FaultFAR uint64
+
+	// Cage is de architectuur-eigen kooi-diagnose in één regel, of leeg als er
+	// niets te melden is. Bestaansreden is dezelfde als die van de Fault*-velden
+	// hierboven — een headless node vertelt anders niets — maar de UART bleek
+	// een slecht meetinstrument: op 115200 verliest die lijn bytes, en een
+	// gehavend hex-getal is erger dan geen (gemeten 31-07: misa kwam als
+	// "rv128 …0094112d" binnen, alleen te lezen doordat de extensieletters de
+	// hex bevestigden). Dit veld gaat over het netwerk mee naar HOP, waar het
+	// foutloos aankomt.
+	//
+	// Op ARM leeg: daar dekken de Fault*-velden het al.
+	Cage string
 }
 
 // checkSlot valideert een slot-index; elke publieke functie begint hiermee —
@@ -541,6 +647,9 @@ func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]
 			grantRelease(i)
 		}
 	}()
+	// size/appRAM worden hieronder OPNIEUW gezet uit wat partAlloc werkelijk
+	// reserveerde: de kooi van dit board kan een grotere korrel eisen dan 2MB, en
+	// dan is dít getal niet de partitie. Hier alleen om de invoer te valideren.
 	size := align2M(memLimit)
 	appRAM, err := appRAMSize(size)
 	if err != nil {
@@ -555,7 +664,7 @@ func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]
 	t0 := time.Now()
 	// De EL2-vectoren + parkeerlus + mailboxen moeten klaar zijn vóór de
 	// eerste dispatch (mailbox cold-detectie leest een geveegde mailbox).
-	vectorsOnce.Do(stage2.InitVectors)
+	vectorsOnce.Do(cageInit)
 	if shared {
 		if st := ctxState(i); ctxLive(st) {
 			return fmt.Errorf("slot %d still live (ctx-state %d) — stop it before StartShared", i, st)
@@ -568,8 +677,13 @@ func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]
 	// nodig, niet het linkadres): we kopiëren de image erin vóór we hem
 	// parsen. started markeert een geslaagde start: valt Start eerder
 	// uit, dan geeft de defer de gealloceerde partitie terug.
-	base, err := partAlloc(i, memLimit)
+	base, size, err := partAlloc(i, memLimit)
 	if err != nil {
+		return err
+	}
+	// De maat die de allocator ÉCHT gaf — één bron van waarheid voor de kooi, de
+	// ABI-staart, de ringen en de RAM-declaratie van de app. Zie partAlloc.
+	if appRAM, err = appRAMSize(size); err != nil {
 		return err
 	}
 	// Eén regel per plaatsing: op een headless node is dít hoe je ziet wáár
@@ -616,8 +730,31 @@ func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]
 		return err
 	}
 	started = true // partitie blijft van deze task tot Stop
-	fmt.Printf("slot %d: image placed in %s\n", i, time.Since(t0).Round(time.Millisecond))
+	fmt.Printf("slot %d: image placed in %s%s\n", i, time.Since(t0).Round(time.Millisecond), kernMemOnce())
 	return nil
+}
+
+// kernMemOnce meldt HOP's eigen geheugengebruik één keer: bij de eerste
+// geslaagde plaatsing. Dát is HOP's zwaarste moment (de imagecopy en het
+// cache-onderhoud over een hele partitie), dus dit is het getal waarop je
+// HopBase mag afrekenen — en één keer, want een regel per start is op een
+// 115200-console duurder dan hij waard is. KernMem wordt gezet door de main
+// (die kent de runtime-cijfers); zonder setter blijft de regel leeg.
+var (
+	kernMemFn   func() string
+	kernMemDone bool
+)
+
+// SetKernMem geeft slots de functie waarmee het HOP's eigen geheugenstand
+// opvraagt (cmd/hopos: hopUsage). Optioneel — zonder blijft de melding weg.
+func SetKernMem(f func() string) { kernMemFn = f }
+
+func kernMemOnce() string {
+	if kernMemDone || kernMemFn == nil {
+		return ""
+	}
+	kernMemDone = true
+	return " — HOP: " + kernMemFn()
 }
 
 // StartLoaderOn is StartLoader op een door HOPOS gekozen core (coöperatieve
@@ -635,18 +772,18 @@ func StartLoaderOn(core, i int, memLimit uint64, env map[string]string) error {
 }
 
 // appRAMSize is het deel van de partitie dat de app als RAM ziet: de bovenste
-// NetRingStride is zijn net-ring ("512MB → 510 Go + 2 netbuffer"). Zo komt het
+// AbiTail is zijn ABI-staart (control page, ringen, net-ringen) ("512MB → 510 Go + 2 netbuffer"). Zo komt het
 // ring-geheugen uit de eigen memLimit van de job — er draait geen statische
 // SlotCap-reservering meer in het board-plan — en blijft de coherentie gratis:
 // de app declareert de staart niet als RAM (zijn stage-1 mapt hem nooit
 // cacheable), HOP raakt hem alleen device-side, en de bestaande CleanInv over
 // de hele partitie veegt de dirty lines van de vórige huurder.
 func appRAMSize(size uint64) (uint64, error) {
-	if size < 2*layout.NetRingStride {
+	if size < 2*layout.AbiTail {
 		return 0, fmt.Errorf("memLimit te klein: partitie %d MB laat geen app-RAM over naast de %d MB net-ring",
-			size>>20, uint64(layout.NetRingStride)>>20)
+			size>>20, uint64(layout.AbiTail)>>20)
 	}
-	return size - layout.NetRingStride, nil
+	return size - layout.AbiTail, nil
 }
 
 // placeFromStaging is de tweede helft van een slot-start: de image staat al in
@@ -667,12 +804,14 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 	// Het plan (parse + álle validatie + patchwaarden) komt uit abi/place —
 	// dezelfde bron van waarheid als de zelfplaatsing (applib/selfplace.go).
 	// Gelezen vanuit de gestreamde device-kopie (geen kern-RAM-kopie); het
-	// linkvenster is het canonieke contract (slot-1-basis, de stage-2 is de
-	// relocatie) en het plafond de staging-onderkant: segmenten mogen hun
-	// eigen kopieerbron niet raken.
-	linkBase := uint64(layout.SlotBase(1))
+	// linkvenster is arch-bepaald (de kooi-naad): op ARM het canonieke
+	// slot-1-adres, want daar ís de stage-2 de relocatie en draait één artifact
+	// in elk slot; op een architectuur zonder tweede fase de partitie zelf, want
+	// daar draait een image op de adressen waarop het gelinkt is. Het plafond is
+	// de staging-onderkant: segmenten mogen hun eigen kopieerbron niet raken.
+	linkBase := cageLinkBase()
 	plan, err := place.Build(devReaderAt{base: stageAddr, size: imgSize}, imgSize,
-		linkBase, appRAM, uint64(stageAddr)-base, i)
+		linkBase, appRAM, cageFloor, uint64(stageAddr)-base, i, layout.ABIVersion)
 	if err != nil {
 		return err
 	}
@@ -726,16 +865,20 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 		ctrlWrite(i, layout.CtrlStatus, layout.StatusEmpty)
 		smpCores[i] = 0
 	}()
-	netPA := base + appRAM
-	// Images zijn ALTIJD canoniek op slot 1 gelinkt (placeFromStaging pint
-	// linkBase op SlotBase(1) — de stage-2 ís de relocatie, één artifact voor
-	// elk slot). Het onvertrouwde CtrlPlaceEntry van het zelfplaats-pad mag dus
-	// uitsluitend in dát venster wijzen; de oude check liet het hele
-	// 128-slot-bereik toe en daarmee een linkBase boven CtrlBase.
-	linkBase := layout.SlotBase(1)
-	if entry < linkBase || entry >= linkBase+uint64(layout.SlotStride) {
-		return fmt.Errorf("entry %#x buiten het canonieke slot-1-venster %#x..%#x",
-			entry, linkBase, linkBase+uint64(layout.SlotStride))
+	// De frame-ringen van dit slot: in de staart van zijn eigen partitie (layout:
+	// de slot-ABI), net als zijn control-page en hop-ABI-ringen.
+	netPA := uint64(layout.NetRingBaseAt(base, appRAM))
+	// De entry moet in het linkvenster van dit slot liggen. Dat venster is niet
+	// universeel: verplaatst de kooi adressen (stage-2), dan is het het canonieke
+	// slot-1-IPA en draait één artifact in elk slot; verplaatst hij niets, dan is
+	// het de partitie zelf. Deze check bewaakt vooral het ONVERTROUWDE
+	// CtrlPlaceEntry van het zelfplaats-pad — een app mag zijn core nergens
+	// anders laten binnenkomen dan in zijn eigen venster.
+	linkBase := cageLinkBase()
+	window := cageLinkWindow(size)
+	if entry < linkBase || entry >= linkBase+window {
+		return fmt.Errorf("entry %#x buiten het linkvenster van dit slot %#x..%#x",
+			entry, linkBase, linkBase+window)
 	}
 	if max := maxLimitFor(linkBase); memLimit > max {
 		return fmt.Errorf("memLimit %d MB > %d MB slot-cap (één GB-blok vanaf linkadres %#x)", memLimit>>20, max>>20, linkBase)
@@ -770,10 +913,12 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 
 	// Control-page vegen, env-blob schrijven, hop-ABI-ringen klaarzetten,
 	// BOOTING, core wekken — alles op de fysieke plekken uit het board-plan.
-	dev.Clear(layout.CtrlPagePA(i), layout.CtrlStride)
+	ctrlPA := layout.CtrlPageAt(base, appRAM)
+	dev.Clear(ctrlPA, layout.CtrlStride)
 	if len(envBlob) > 0 {
-		dev.Copy(layout.CtrlPagePA(i)+layout.CtrlEnvData, envBlob)
+		dev.Copy(ctrlPA+layout.CtrlEnvData, envBlob)
 	}
+	dev.Push(ctrlPA, layout.CtrlStride) // de hele verse page publiceren
 	ctrlWrite(i, layout.CtrlEnvLen, uint64(len(envBlob)))
 	// Klok doorgeven: de teller is gedeeld, dus HOP's offset geldt 1-op-1.
 	ctrlWrite(i, layout.CtrlWallOff, uint64(board.Current().TimerOffset()))
@@ -781,18 +926,17 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// op het interne net en leidt IP/gateway/MAC deterministisch af uit zijn
 	// slotnummer (layout-net-plan, gedeeld met de switch); de app initieert een
 	// stack pas als hij appnet.Up aanroept.
-	ring.Init(layout.RingOutboxPA(i), layout.RingDataCap)
-	ring.Init(layout.RingInboxPA(i), layout.RingDataCap)
-	ring.Init(uintptr(netPA)+layout.NetTXOff, layout.NetRingDataCap)
-	ring.Init(uintptr(netPA)+layout.NetRXOff, layout.NetRingDataCap)
+	ring.Init(layout.RingOutboxAt(base, appRAM), layout.RingDataCap)
+	ring.Init(layout.RingInboxAt(base, appRAM), layout.RingDataCap)
+	ring.Init(layout.NetRingTXAt(base, appRAM), layout.NetRingDataCap)
+	ring.Init(layout.NetRingRXAt(base, appRAM), layout.NetRingDataCap)
 
 	// De core krijgt stage-2-isolatie: de EL2-trampoline activeert de hier
 	// gebouwde tabel en dropt pas dan naar de app-entry (een canoniek IPA — de
 	// stage-2 vertaalt hem naar deze partitie). De app-image draait nooit op
 	// EL2. De trampoline is data-gedreven: alles staat op deze control-page.
-	l1, err := stage2.Build(i, linkBase, base, size, netPA)
-	if err != nil {
-		return fmt.Errorf("stage-2 slot %d: %w", i, err)
+	if err := cagePrepare(i, linkBase, base, size, entry); err != nil {
+		return err
 	}
 	// DeviceGrant-haak: het venster van de houder de kooi in (no-op voor
 	// alle andere slots) — vóór de dispatch, zelfde walker-regime als Build.
@@ -805,7 +949,6 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// horen bij de core waar dit slot daadwerkelijk draait.
 	core := coreOf(i)
 	ctrlWrite(i, layout.CtrlEntry, entry)
-	ctrlWrite(i, layout.CtrlS2Table, l1)
 	ctrlWrite(i, layout.CtrlVecPA, uint64(layout.VecBasePA()))
 	ctrlWrite(i, layout.CtrlSlot, uint64(i))
 	ctrlWrite(i, layout.CtrlMboxPA, uint64(layout.ParkMboxPA(core))) // → TPIDR_EL2
@@ -820,7 +963,7 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	if cores > 1 {
 		// Fysiek adres van de EL2 SMP-trampoline publiceren (op ditzelfde slot
 		// z'n partitie/stage-2 → gedeelde heap).
-		ctrlWrite(i, layout.CtrlSMPTramp, board.Current().S2SMPTrampPC())
+		ctrlWrite(i, layout.CtrlSMPTramp, cageSMPEntryPC())
 	}
 	ctrlWrite(i, layout.CtrlStatus, layout.StatusBooting)
 
@@ -844,8 +987,13 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	//     ctx-blok — de EL2-rotatie boot hem bij de eerstvolgende yield;
 	//   - geparkeerd: bewonerslijst = [dit slot], mailbox + SEV;
 	//   - cold: idem, maar eenmalig via PSCI CPU_ON.
-	tramp := board.Current().S2TrampPC()
-	ctx := uint64(layout.CtrlPagePA(i))
+	tramp := cageEntryPC(i)
+	ctx := uint64(ctrlPA)
+	// De control-page-PA in het ctx-blok: de EL2-trampoline krijgt hem als x0 en
+	// het fault-rapport van switch.s leest hem daar terug. Voor élk slot, niet
+	// alleen het gedeelde-core-pad — sinds de ABI in de partitie woont kan die
+	// asm het adres niet meer uitrekenen.
+	ctxWrite(i, layout.CtxCtrlPA, ctx)
 	if coreRunning(core) {
 		if err := bootPendingDispatch(core, i, tramp, ctx); err != nil {
 			return fmt.Errorf("%w: %v", errDispatch, err)
@@ -915,7 +1063,7 @@ func StartStaged(i int, memLimit uint64, cores int, env map[string]string, mount
 	placeEntry := ctrlRead(i, layout.CtrlPlaceEntry)
 	defer lifecycleWindow()()
 	t0 := time.Now() // venster-tijd — wat de convoy serialiseert (zie Start)
-	vectorsOnce.Do(stage2.InitVectors)
+	vectorsOnce.Do(cageInit)
 	// De apploader parkeerde ná het seinen — "staged" op de ctrl-page landt
 	// dus eerder dan zijn park/exit; kort wachten in plaats van meteen falen
 	// (gemeten Pi 5 19-07: de A76 verliest die race consequent). En op een
@@ -923,11 +1071,21 @@ func StartStaged(i int, memLimit uint64, cores int, env map[string]string, mount
 	// het juiste teken de ctx-staat van dít slot (de HVC-exit van de loader
 	// zet Dead), niet de core-mailbox. Zelfde onderscheid als Start (shared-
 	// tak boven zijn coresFree).
+	// De reset-vraag hangt af van wie er nog op dit hart woont — zie de takken.
 	if coreOf(i) != i || slotShares(i) {
+		// Gedeeld hart: NIET quiescen. Een quiesce is hier een hart-reset en die
+		// neemt de BUREN mee — precies waarop de tweede app stukliep (gemeten
+		// 31-07: "loader still live on shared core 1"). De loader meldt zich hier
+		// zelf dood: op ARM met hvc #0, op RISC-V met de exit-trap (cpu/idle
+		// ExitTrap → cpu/mmode), en de arch-switch zet CtxDead. Dáár wachten we op.
 		if !waitCtxDead(i, 2*time.Second) {
 			return fmt.Errorf("place staged slot %d: loader still live on shared core %d", i, coreOf(i))
 		}
 	} else {
+		// Eigen hart: hier mág de reset, en op een architectuur zonder parkeerlus
+		// is hij nodig — daar draait de exit-lus van de loader door tot HOP het
+		// hart ophaalt. Op ARM is dit een no-op (de app parkeert zichzelf op EL2).
+		cageQuiesce(coreOf(i))
 		deadline := time.Now().Add(2 * time.Second)
 		for {
 			err := coresFree(i, cores, "loader not parked?")
@@ -971,6 +1129,12 @@ func StartStaged(i int, memLimit uint64, cores int, env map[string]string, mount
 	// Coherentie: de loader draaide cacheable; zijn dirty lines wegschrijven+
 	// invalideren vóór we de echte app er ongecachet overheen plaatsen. De loader
 	// flushte de staging zelf al (StageImage); dit dekt de rest van de partitie.
+	// Dat dit vanaf de HOP-core kán, is ARM-eigen: cache-onderhoud is daar
+	// broadcast over de inner-shareable domain, dus deze veeg raakt óók de L1 van
+	// de loader-core. Op RISC-V is het hart-lokaal en dekt de reset uit
+	// cageQuiesce de dirty lines (het hart verliest zijn cache); daar kost deze
+	// call alleen HOP's eigen kopie — ~5ms per start, niet de moeite van een
+	// architectuur-vertakking waard.
 	dev.CleanInv(uintptr(base), uintptr(size))
 	if err := placeFromStaging(i, base, size, stageAddr, imgSize, memLimit, cores, envBlob, mtab, ports); err != nil {
 		return err
@@ -986,7 +1150,7 @@ var vectorsOnce sync.Once
 // via vectorsOnce, gedeeld met Start). De node roept dit vóór smp.ConfigureNode
 // aan zodat opkomende node-cores hun VBAR_EL2 (= revoke-vectoren, net als core 0
 // uit bootKernel) geldig aantreffen. Later in Start is de vectorsOnce een no-op.
-func EnsureVectors() { vectorsOnce.Do(stage2.InitVectors) }
+func EnsureVectors() { vectorsOnce.Do(cageInit) }
 
 // Stop beëindigt de app in slot i en wacht tot al zijn cores geparkeerd zijn.
 // Eén pad voor één core én voor een SMP-app: de kill-flag geeft de app een
@@ -1022,7 +1186,7 @@ func Stop(i int, timeout time.Duration) error {
 	if slotShares(i) {
 		var stopErr error
 		if !waitCtxDead(i, timeout) {
-			stage2.Revoke(i)
+			cageRevoke(i)
 			// De intrekking raakt een gesavede bewoner pas bij zijn
 			// eerstvolgende hervatting (≤ een paar yield-tikken): dan faultt
 			// hij op de genulde tabel en meldt de switch hem dood.
@@ -1038,7 +1202,7 @@ func Stop(i int, timeout time.Duration) error {
 	// core). Ook een niet-delend slot kan op een vreemde core wonen
 	// (StartShared als eerste bewoner), dus alles hier is core-gebaseerd.
 	core := coreOf(i)
-	waitStopped(core, timeout)
+	waitSlotQuiet(i, core, timeout)
 	// Draait er nog iets? Hoeveel cores de app heeft komt uit HOP's eigen
 	// smpCores (door Start gezet) — NIET uit de app-schrijfbare CtrlCores: een
 	// verlaagde CtrlCores zou anders levende secundaire cores voor deze scan
@@ -1056,7 +1220,7 @@ func Stop(i int, timeout time.Duration) error {
 	var stopErr error
 	if stillOn {
 		// Eén intrekking velt álle cores van het slot (gedeelde tabel/VMID).
-		stage2.Revoke(i)
+		cageRevoke(i)
 		for c := core; c < core+n; c++ {
 			if !coreRunning(c) {
 				continue
@@ -1084,6 +1248,54 @@ func Stop(i int, timeout time.Duration) error {
 // blijft dus in quarantaine bij die core; een volgende geslaagde Stop of een
 // reconcile ruimt op. Zelfde beleid als slotmgr.Stop voor de core-reservering.
 func releaseSlot(i int, freePartition bool) {
+	// Post-mortem eerst: de status en het fault-rapport van dit slot staan op zijn
+	// control-page, en die woont in de partitie die we hieronder teruggeven. Wie
+	// ná een Stop vraagt "waaróm viel hij" (de regressie, `hop logs`, een
+	// operator) moet dat antwoord nog krijgen — dus bewaart HOP de laatste woorden
+	// in zijn eigen geheugen. Strikt beter dan vroeger: toen bleef het rapport in
+	// een gedeelde regio staan tot de volgende start hem overschreef.
+	// De servicer eerst netjes weg (dan zijn wíj de enige consumer, SPSC) en de
+	// outbox leegdrinken: wat de app nog te zeggen had — zijn stervensreden —
+	// staat vaak nog ín de ring, omdat niemand hem meer las.
+	evictServicer(i)
+	drainLastWords(i)
+	snapshot(i)
+	// Eén korte regel met wat de app als laatste zei — maar alléén als er iets
+	// mís ging. Een app die netjes met 0 afsluit heeft geen post-mortem nodig en
+	// zijn logs staan al bij de task; op de blije weg zou dit één console-regel
+	// per slot-release zijn (24 in de swarm-golf), en op een board waar de UART
+	// bytes verliest is elke overbodige regel er één te veel.
+	if i >= 1 && i <= layout.MaxSlots {
+		// Kwam de app überhaupt aan de beurt? Op een board met een kooi-stub
+		// vertelt die het (cageWhy); waar dat niet speelt is het leeg.
+		why := cageWhy(i)
+		// Het post-mortem in één keer overnemen en de per-slot-staat meteen
+		// wissen: de ident-cache hoort bij een partitie en niet bij een
+		// slotnummer, dus een volgende huurder begint met een leeg blad.
+		diagMu.Lock()
+		st := lastWords[i]
+		lastMsg := lastLog[i]
+		lastLog[i] = ""
+		cageIdentCache[i] = ""
+		diagMu.Unlock()
+		// StatusEmpty = geen momentopname (nooit gestart, of al vrijgegeven):
+		// dan is er niets te melden, ook geen "onbekende" dood.
+		bad := st.App != layout.StatusEmpty && (st.App != layout.StatusExited || st.ExitCode != 0)
+		if bad || why != "" {
+			if why != "" {
+				why = " " + why
+			}
+			// Bij een switch-fault ook het spoor uit het ctx-blok: pc/ra/sp van
+			// het moment van sterven (cageFaultRegs; leeg waar de arch dat niet
+			// dumpt). Eén regel méér context, alleen op het pad waar al gejaagd
+			// wordt.
+			if st.FaultVec != 0 {
+				why += cageFaultRegs(i)
+			}
+			fmt.Printf("slot %d: exit code=%d status=%#x last=%q%s\n",
+				i, st.ExitCode, st.App, lastMsg, why)
+		}
+	}
 	hopswitch.Detach(i)
 	hopswitch.UnpublishSlot(i)
 	grantRelease(i) // grant terug (fb: HOP-console weer op het glas)
@@ -1097,7 +1309,7 @@ func releaseSlot(i int, freePartition bool) {
 		// core, ctx-staat op Empty (het slot is écht weg — de rotatie slaat
 		// gaten en Empty over), en de slot→core-koppeling los.
 		residentRemove(coreOf(i), i)
-		dev.Write64(ctxPA(i)+layout.CtxState, layout.CtxEmpty)
+		ctxWrite(i, layout.CtxState, layout.CtxEmpty)
 		dev.MB()
 		if hostCore != nil {
 			hostCore[i] = 0
@@ -1106,11 +1318,106 @@ func releaseSlot(i int, freePartition bool) {
 	}
 }
 
-// Get geeft de actuele status van slot i (nulwaarde bij ongeldige index).
+// diagMu beschermt HOP's diagnose-staat: het post-mortem (lastWords, lastLog),
+// de kooi-ident-cache en de eenmalige ident-melding. Die staat heeft ÉCHT
+// meerdere goroutines: de lifecycle schrijft hem (releaseSlot → snapshot,
+// drainLastWords), de status-kant leest hem uit elke /v1-request en elke
+// heartbeat-ronde (Get), en elke servicer kan als eerste een ident melden. Het
+// zijn strings en structs, dus zonder lock is dit geen "verouderde waarde" maar
+// een gescheurde lezing — een string-header met de pointer van de een en de
+// lengte van de ander leest buiten zijn backing array.
+//
+// Bewust een eigen, korte lock en niet lifecycleMu: Get mag nooit achter een
+// lopende Start/Stop staan te wachten, en niets onder deze lock blokkeert of
+// pakt een andere lock (device-reads en Sprintf). Print doen we er buiten.
+var diagMu sync.Mutex
+
+// lastWords bewaart per slot de status van vlak vóór het vrijgeven van zijn
+// partitie — HOP's post-mortem. Lazy gedimensioneerd (poolInit). Onder diagMu.
+var lastWords []Status
+
+// drainLastWords leest wat er nog in de outbox van slot i staat en bewaart de
+// laatste logregel. Alleen aanroepen ná evictServicer (SPSC: één consumer).
+func drainLastWords(i int) {
+	ram, ramSize, ok := abiOf(i)
+	if !ok {
+		return
+	}
+	out := ring.Open(layout.RingOutboxAt(ram, ramSize))
+	buf := make([]byte, layout.RingDataCap)
+	last := ""
+	for range 256 { // begrensd: een post-mortem mag nooit blijven hangen
+		typ, n, ok := out.ReadInto(buf)
+		if !ok {
+			break
+		}
+		if typ == ring.TypeLog && n > 0 {
+			last = string(buf[:n])
+		}
+	}
+	if last == "" {
+		return
+	}
+	diagMu.Lock()
+	lastLog[i] = last
+	diagMu.Unlock()
+}
+
+// lastLog is de laatste logregel die de app stuurde, per slot (onder diagMu). Hij
+// hoort bij het post-mortem: een app die zichzelf afsluit zégt waarom, en die
+// regel mag niet verdampen omdat niemand op dat moment meelas. Gemeten 30-07: de
+// apploader meldde netjes zijn reden en die was nergens terug te vinden — de ring
+// werd door HOP's runner naar de task-logs gedreneerd en de console zag niets.
+var lastLog [layout.SlotCap + 1]string
+
+// snapshot legt de huidige status van slot i vast. Aanroepen zolang de partitie
+// nog bestaat; daarna is de control-page weg.
+func snapshot(i int) {
+	if i < 1 || i > layout.MaxSlots {
+		return
+	}
+	// De momentopname bouwen we BUITEN diagMu: liveStatus gaat via cageState de
+	// ident-cache in, en die pakt de lock zelf — met hem vast zou dat een
+	// self-deadlock zijn (sync.Mutex is niet reentrant).
+	var st Status
+	_, _, live := abiOf(i) // niets te bewaren als de partitie al weg is
+	if live {
+		st = liveStatus(i)
+	}
+	diagMu.Lock()
+	defer diagMu.Unlock()
+	if lastWords == nil {
+		lastWords = make([]Status, layout.MaxSlots+1)
+	}
+	if live {
+		lastWords[i] = st
+	}
+}
+
+// Get geeft de actuele status van slot i (nulwaarde bij ongeldige index). Heeft
+// het slot geen partitie meer, dan is dit HOP's bewaarde post-mortem: precies de
+// laatste woorden van de app, inclusief het fault-rapport.
 func Get(i int) Status {
 	if checkSlot(i) != nil {
 		return Status{}
 	}
+	if _, _, ok := abiOf(i); !ok {
+		var st Status
+		diagMu.Lock()
+		if i < len(lastWords) {
+			st = lastWords[i]
+		}
+		diagMu.Unlock()
+		// CoreOn blijft wél live: het ctx-blok is HOP-privé en overleeft de
+		// partitie, dus "leeft dit slot nog" hoort geen bewaarde waarde te zijn.
+		st.CoreOn = ctxLive(ctxState(i))
+		return st
+	}
+	return liveStatus(i)
+}
+
+// liveStatus leest de control-page van een slot dat nog een partitie heeft.
+func liveStatus(i int) Status {
 	return Status{
 		// CoreOn = dít slot leeft, volgens zijn ctx-staat (het switch-
 		// contextblok): boot-pending, gesaved of draaiend. Op een gedeelde
@@ -1126,9 +1433,64 @@ func Get(i int) Status {
 		MemSys:    ctrlRead(i, layout.CtrlMemSys),
 		IdleTicks: ctrlRead(i, layout.CtrlIdle),
 		Cores:     ctrlRead(i, layout.CtrlCores),
+		Shared:    ctrlRead(i, layout.CtrlShared) != 0,
 		FaultVec:  ctrlRead(i, layout.CtrlFaultVec),
 		FaultESR:  ctrlRead(i, layout.CtrlFaultESR),
 		FaultFAR:  ctrlRead(i, layout.CtrlFaultFAR),
+		Cage:      cageState(i),
+	}
+}
+
+// cageState is de kooi-regel voor Status.Cage: waaróm de stub niet doorkwam als
+// er iets mis is, en anders wat voor hart eronder zit. Twee bronnen, één veld —
+// een lezer wil "vertel me over de kooi van dit slot", niet twee functies kennen.
+//
+// Get wordt gepolld (elke heartbeat-ronde van de runner), dus dit pad mag niet
+// per keer een string bouwen. Op de blije weg alloceert cageWhy niets (hij ziet
+// stubCageOK en geeft leeg terug) en komt de ident uit de cache: die verandert
+// niet, want het is de identiteit van het silicium.
+func cageState(i int) string {
+	if why := cageWhy(i); why != "" {
+		return why
+	}
+	if i < 1 || i >= len(cageIdentCache) {
+		return ""
+	}
+	diagMu.Lock()
+	defer diagMu.Unlock()
+	if cageIdentCache[i] == "" {
+		cageIdentCache[i] = cageIdent(i)
+	}
+	return cageIdentCache[i]
+}
+
+// cageIdentCache: de kooi-identiteit per slot (onder diagMu). Het is de
+// identiteit van het silicium, dus hij verandert niet — maar hij wordt gevuld
+// door wie er als eerste naar vraagt, en dat kan elke lezer zijn.
+var cageIdentCache [layout.SlotCap + 1]string
+
+// identOnce meldt één keer per boot wat voor hart er onder een slot zit
+// (cageIdent — leeg waar de architectuur niets achter de kooi-naad verstopt).
+// Aangeroepen door de servicer op het moment dat een slot voor het eerst leeft:
+// dan is de kooi-stub aantoonbaar gelopen en staat HOP er toch al, dus geen
+// eigen poll. Eén regel, want het antwoord verandert niet en elke console-regel
+// is er één te veel. WaitReady zou hier niet werken — dat gebruiken alleen de
+// demo-mains, niet het agent-pad.
+var identDone bool // onder diagMu
+
+func identOnce(i int) {
+	diagMu.Lock()
+	s := ""
+	if !identDone {
+		if s = cageIdent(i); s != "" {
+			identDone = true
+		}
+	}
+	diagMu.Unlock()
+	// Printen ná de unlock: op een board waar de console een 115200-UART is duurt
+	// één regel milliseconden, en die mag Get niet ophouden.
+	if s != "" {
+		fmt.Println(s)
 	}
 }
 
@@ -1177,12 +1539,12 @@ var (
 // keer (de topologie ligt vast na boot).
 func NumSlots() int {
 	numSlotsOnce.Do(func() {
-		// Verse DRAM is geen nul (QEMU verhulde dat — Pi-meting 2026-07-10):
-		// de control-page van een nooit-gestart slot zou anders garbage als
-		// status/fault rapporteren. Eén keer vegen, vóór de eerste Get/Start.
-		for i := 1; i <= layout.MaxSlots; i++ {
-			dev.Clear(layout.CtrlPagePA(i), layout.CtrlStride)
-		}
+		// Hier stond een veeg van álle control-pages: verse DRAM is geen nul
+		// (QEMU verhulde dat — Pi-meting 2026-07-10) en een nooit-gestart slot
+		// rapporteerde dan garbage als status. Dat kan niet meer: de
+		// control-page van een slot woont in zijn partitie, dus een slot zónder
+		// partitie heeft er geen (ctrlRead geeft 0 = StatusEmpty) en een slot
+		// mét partitie krijgt hem vers geveegd in armSlot.
 		// PSCI-telling: schuif de grens op zolang een core een écht power-woord
 		// meldt; stop bij het eerste antwoord buiten {On,Off,OnPending} — dat is
 		// een ontbrekende core (INVALID_PARAMS) óf een PSCI-fout/onimplementatie.
@@ -1191,10 +1553,9 @@ func NumSlots() int {
 		probed := 0
 		truncated := false
 		for i := 1; i <= layout.NumAppCores(); i++ {
-			switch board.Current().AffinityInfo(uint64(i)) {
-			case board.PowerOn, board.PowerOff, board.PowerOnPending:
+			if coreExists(i) {
 				probed = i // geldige core: schuif de grens op
-			default:
+			} else {
 				truncated = true // PSCI-fout/ontbrekende core: stop de telling
 			}
 			if truncated {

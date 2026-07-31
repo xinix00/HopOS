@@ -1,19 +1,22 @@
-// De hop-ABI-kant van de slot-manager: fs.* en fetch, bediend door de
-// servicer van elk slot. Paden van de app worden hier tegen de mount-tabel
-// van díé task geresolvet — de toegangsgrens op storage: zichtbaar is de
-// eigen (lege) root plus uitsluitend expliciet gemounte shared dirs. Alle
-// bytes staan in HOP's bestandslaag op de NVMe (metal/kern/hopfs); apps raken
-// nooit elkaars geheugen of ongemounte paden aan.
+// De hop-ABI-kant van de slot-manager: de fs-ops, bediend door de servicer van
+// elk slot. Paden van de app worden hier tegen de mount-tabel van díé task
+// geresolvet — de toegangsgrens op storage: zichtbaar is de eigen (lege) root
+// plus uitsluitend expliciet gemounte shared dirs. Alle bytes staan in HOP's
+// bestandslaag op de NVMe (metal/kern/hopfs); apps raken nooit elkaars geheugen
+// of ongemounte paden aan.
+//
+// Bewust ALLEEN bestandsoperaties: er zat hier ook een fetch-op (HOP haalt een
+// URL voor de app), en die is gesloopt. Elke app heeft zijn eigen netstack en
+// haalt zijn bytes dus zelf; HOP hoefde er met zijn volle netwerkrechten een
+// app-opgegeven URL voor te openen vanaf core 0. Zie hopabi voor het lege
+// op-nummer dat dat achterlaat.
 package slots
 
 import (
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"sort"
 	"strings"
-	"time"
 
 	"hop-os/metal/abi/hopabi"
 	"hop-os/metal/kern/hopfs"
@@ -27,9 +30,6 @@ var fsys *hopfs.FS
 
 // UseFS koppelt de bestandslaag (eenmalig bij boot, vóór de eerste Start).
 func UseFS(f *hopfs.FS) { fsys = f }
-
-// fetchMax begrenst één fetch (de schijf is scratch, geen datalake).
-const fetchMax = 8 << 20
 
 // cleanAbs normaliseert een app-pad naar "/a/b"-vorm; ".."/lege paden zijn
 // een fout (de app heeft buiten zijn zicht niets te zoeken).
@@ -190,27 +190,21 @@ func (s *servicer) handle(payload []byte) []byte {
 		}
 		return ok(req, 0, nil)
 
-	case hopabi.OpFetch:
-		// url in Path, bestemmingspad in Data; HOP downloadt met zijn eigen
-		// netstack rechtstreeks de storage in — geen bulk over de ring.
-		rp, err := s.resolve(string(req.Data))
+	case hopabi.OpTruncate:
+		// De replace-helft van schrijven: zonder deze op kan een app een bestand
+		// alleen maar overschrijven en nooit korter maken (oude staart bleef
+		// staan). N is de gewenste lengte.
+		rp, err := s.resolve(req.Path)
 		if err != nil {
 			return fail(req, err)
 		}
-		n, err := s.fetch(req.Path, rp)
-		if err != nil {
+		if err := fsys.Truncate(rp, req.N); err != nil {
 			return fail(req, err)
 		}
-		return ok(req, n, nil)
+		return ok(req, req.N, nil)
 	}
 	return fail(req, fmt.Errorf("onbekende op %d", req.Op))
 }
-
-// fetchClient is HOP's downloader. HOP is de vertrouwde orchestrator-kern (geen
-// onvertrouwde app), dus geen adres-allowlist: HOP mag elk IP bereiken — interne
-// artifact-server, gateway, S3, wat de task ook vraagt. De timeout voorkomt dat
-// een hangende download de servicer-goroutine van dat slot blokkeert.
-var fetchClient = &http.Client{Timeout: 30 * time.Second}
 
 // oversizeResp bouwt een korte foutrespons als een handler-respons nooit in de
 // inbox-ring past — het vangnet dat de servicer-write-lus niet eeuwig laat
@@ -223,39 +217,3 @@ func oversizeResp(reqPayload []byte) []byte {
 	})
 }
 
-// fetch downloadt rawurl naar hopfs-pad dst (max fetchMax bytes).
-func (s *servicer) fetch(rawurl, dst string) (uint64, error) {
-	resp, err := fetchClient.Get(rawurl)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("GET %s: status %d", rawurl, resp.StatusCode)
-	}
-	// Verse download: oude inhoud weg (een halve oude file onder een nieuwe
-	// download is erger dan even geen file).
-	if err := fsys.RemoveAll(dst); err != nil {
-		return 0, err
-	}
-	var off uint64
-	buf := make([]byte, hopabi.MaxChunk)
-	for {
-		n, err := resp.Body.Read(buf)
-		if n > 0 {
-			if off+uint64(n) > fetchMax {
-				return off, fmt.Errorf("fetch > %dMB (scratch-limiet)", fetchMax>>20)
-			}
-			if werr := fsys.WriteAt(dst, off, buf[:n]); werr != nil {
-				return off, werr
-			}
-			off += uint64(n)
-		}
-		if err == io.EOF {
-			return off, nil
-		}
-		if err != nil {
-			return off, err
-		}
-	}
-}

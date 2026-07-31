@@ -53,7 +53,7 @@ func grantMapped(t *testing.T, slot int, lo, p uint64) uint64 {
 // firmware-geheugen róndom de buffer erbij (RW, en FB_BASE verbergt dat niet).
 func TestGrantWindow(t *testing.T) {
 	const slot = 7
-	if _, err := Build(slot, layout.SlotBase(1), tPoolPA, 4<<20, tNetPA(slot)); err != nil {
+	if _, err := Build(slot, layout.SlotBase(1), tPoolPA, 4<<20); err != nil {
 		t.Fatal(err)
 	}
 	size := uint64(1920*4*1080) - 3 // ~8MB, expres geen mooi getal
@@ -107,7 +107,7 @@ func TestGrantWindow(t *testing.T) {
 
 	// De kooi van een ánder slot blijft leeg (isolatie: de grant is per slot).
 	const other = 8
-	if _, err := Build(other, layout.SlotBase(1), tPoolPA+(64<<20), 4<<20, tNetPA(other)); err != nil {
+	if _, err := Build(other, layout.SlotBase(1), tPoolPA+(64<<20), 4<<20); err != nil {
 		t.Fatal(err)
 	}
 	if e := rd(uint64(layout.Stage2TablePA(other)) + l1Off + fbGB*8); e != 0 {

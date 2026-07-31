@@ -14,6 +14,8 @@ import (
 	_ "unsafe" // go:linkname (RAM-declaratie)
 
 	"hop-os/metal/board/raspi"
+	"hop-os/metal/driver/dvfs"
+	"hop-os/metal/kern/slots"
 )
 
 // RAM-declaratie: raw load op 0x80000, 128MB HOP-kern (mem_rpi*). Gelijk op
@@ -41,6 +43,13 @@ func init() {
 	}
 
 	bootParamAll = func(key string) []string { return raspi.BootParamAll(dtb, key) }
+
+	// De klok-governor leest de idle-teller van elke app op zijn control-page, en
+	// die woont sinds ABIVersion 2 in de staart van de partitie van dat slot —
+	// dus vraagt dvfs het adres aan de slotlaag. Hier gewired en niet in
+	// kern/slots zelf: dat pakket is host-getest en driver/dvfs sleept via
+	// cpu/idle tamago-only code mee.
+	dvfs.SlotCtrl = slots.CtrlPageOf
 
 	// Node-identiteit-terugval (P2b/C5): het board-serial — twee nodes op één
 	// LAN mogen nooit allebei "hopos-1" heten.

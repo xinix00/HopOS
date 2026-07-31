@@ -4,8 +4,16 @@ One set of keys, every board. Only the file differs:
 
 | board | file | format |
 |---|---|---|
-| UEFI (USB stick) | `hopos.cfg` in the stick's root | `key=value`, whitespace-separated |
-| Raspberry Pi | `cmdline.txt` on the SD bootfs | same keys, on the single cmdline |
+| UEFI (USB stick) | `hopos.cfg` in the stick's root | one `key=value` per line, `#` comments |
+| Raspberry Pi | `hopos.cfg` on the SD bootfs | one `key=value` per line, `#` comments |
+| Raspberry Pi (alternative) | `cmdline.txt` on the SD bootfs | same keys as whitespace-separated tokens on the single cmdline |
+| LicheeRV Nano | baked into the image (`CFG=… image/licheerv-agent.sh`) | one `key=value` per line, `#` comments |
+
+Every board that reads a **file** reads it the same way: one key per line, a
+value may contain spaces, and a line starting with `#` is a comment — with or
+without a space after the `#`. The Pi's `cmdline.txt` is the one exception, and
+only because it is a kernel command line: there the whole config is one line of
+whitespace-separated tokens, so a value cannot contain a space.
 
 Editing the file **is** node management — no shell, no rebuild, no agent.
 
@@ -14,6 +22,7 @@ Editing the file **is** node management — no shell, no rebuild, no agent.
 | key | meaning | default |
 |---|---|---|
 | `hopos.node` | node name (shows up in `hop agents`) | generated |
+| `hopos.mac` | MAC address, `aa:bb:cc:dd:ee:ff`. Only needed on boards without one in hardware — the LicheeRV has no MAC fuse, so it derives one from `hopos.node` and this key overrides that. Two such boards on one LAN both need a distinct node name, or this. | derived from `hopos.node` |
 | `hopos.cluster` | cluster name — nodes with the same name form one cluster | — |
 | `hopos.cores` | cores reserved for the node runtime itself (clamped to the board's physical cores) | `1` |
 | `hopos.apikey` | HMAC key for the HTTP API — requests must be signed with it. **Required:** without it the node refuses to start the API (see below) | — |
@@ -98,8 +107,10 @@ hopos.init[]={"name":"dashboard","driver":"hop","artifacts":[{"url":"http://10.0
 hopos.init[]={"name":"worker","driver":"hop","artifacts":[{"url":"http://10.0.0.5/worker.elf"}],"memory_limit":67108864,"tags":{"sharegroup":"svc"},"cpu_shares":2048}
 ```
 
-- **No spaces inside the JSON** — the config is whitespace-tokenised, so each
-  entry must be one token. Keep it compact (no pretty-printing).
+- **One entry per line.** In a `hopos.cfg` the value is the rest of the line, so
+  spaces inside the JSON are fine (keep it on one line — no pretty-printing). On
+  the Pi's `cmdline.txt` the whole config is one whitespace-tokenised line, so
+  there the JSON must be compact.
 - **Standalone, without S3:** there is no committed state, so *every* boot is
   clean — the node always comes up with exactly these jobs. This is the way to
   ship a self-contained node.
@@ -171,6 +182,25 @@ images are built for — the URLs are live, so it works as-is. The `*-headless`
 images link *zero* GUI code: drop the `display`/`launcher` init and the
 `hopos.apps[]` catalog and just list the `hopos.init[]` jobs the node should
 run — no desktop, only apps.
+
+Their default config ships one such job, `welcome`: a page on port 80 that
+says the node is up and what it runs on — cores, RAM partition, architecture,
+uptime. Open `http://<node-ip>/` and that is your install check; delete the
+line and put your own workload there. It takes no key and no address, because
+every app is handed the node address itself.
+
+That one line covers both architectures. A job may list several artifacts, each
+with a `match` on node attributes, and the agent downloads the first one that
+fits — so the arm64 build goes to the Pi and UEFI boards and the riscv64 build
+to a RISC-V node, from the same config:
+
+```json
+"artifacts":[
+  {"url":"…/welcome-arm64-tamago.elf",  "match":{"node.arch":"arm64"}},
+  {"url":"…/welcome-riscv64-tamago.elf","match":{"node.arch":"riscv64"}}]
+```
+
+An artifact without `match` is the catch-all, so put it last if you add one.
 
 ## Trust model
 

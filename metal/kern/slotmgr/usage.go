@@ -7,9 +7,28 @@
 // 10ms voor de flank; hier middelt een 5s-venster het tot een rapportage-
 // cijfer. Geen app-ABI-wijziging: alleen een lezer erbij.
 //
-// De uitkomst is een percentage van de ÉÍGEN cores van het slot (0..100,
+// De uitkomst is een percentage van de cores waarop het slot draait (0..100,
 // SMP-genormaliseerd via CtrlCores) — precies de vorm die HOP's monitor als
 // cpu_percent doorgeeft, zoals docker dat voor containers doet.
+//
+// WAAROM DIT OOK VOOR GEDEELDE BEWONERS KLOPT (nagekeken 31-07, want het ziet
+// eruit als een gat en is het niet). Een app is op elk moment precies één van
+// twee dingen: hij draait zijn eigen code, of hij zit in de yield van zijn
+// idle-governor. En die yield MEET de hele periode waarin hij weg was: zowel
+// hvcYield (arm64) als ecallYield (riscv64) lezen de tellerstand vóór de trap en
+// erna, dus de tijd waarin de MEDEBEWONER draaide en de tijd waarin de core sliep
+// zitten allebei in de idle-tijd van deze app. Er geldt dus per slot
+//
+//	idle_i = T − eigen_runtijd_i        (T = wandkloktijd van het venster)
+//
+// en daarmee is (T − idle_i)/T exact de eigen runtijd van díé app als fractie van
+// het fysieke hart. Descheduled tijd wordt hier dus NIET als busy geteld — precies
+// de eis. Drie volledig bezige medebewoners lezen daardoor ~33% elk en niet 100%
+// elk: het cijfer telt op tot de core, wat een monitor-cijfer hoort te doen.
+//
+// Wat er WÉL niet gemeten kan worden staat hieronder bij accounts(): een
+// architectuur waar een dedicated core zijn idle-tijd niet bijhoudt. Daar geven we
+// -1 (onbekend) in plaats van een cijfer dat 100% zou zeggen.
 
 //go:build tamago
 
@@ -52,6 +71,14 @@ func cpuPct(i int) int {
 	return int(usagePct[i].Load())
 }
 
+// accounts meldt of de idle-teller van dít slot een cijfer waard is. Een
+// GEDEELDE bewoner meet altijd (de yield beslaat zijn hele descheduled-periode,
+// op beide architecturen); een DEDICATED slot hangt aan de idle-governor van zijn
+// arch, en die houdt op RISC-V niets bij — daar loopt een eigen hart bewust door,
+// want WFI zonder wekker is een hang (cpu/idle). Zonder deze check las élk
+// dedicated slot op dat board 100%, en dat is geen meting maar een meetgat.
+func accounts(s slots.Status) bool { return s.Shared || idle.AccountsDedicated() }
+
 // usageLoop is het dvfs-sample-patroon (last/seen/eerst-ijken): delta's van
 // de teller tegen het verwachte tempo. Draait als OS-taak op de HOP-core;
 // ≤127 device-reads per 5s is ruis.
@@ -73,7 +100,7 @@ func usageLoop() {
 		}
 		for i := slots.HopReserved() + 1; i <= layout.MaxSlots; i++ {
 			s := slots.Get(i)
-			if !s.CoreOn || s.Cores == 0 {
+			if !s.CoreOn || s.Cores == 0 || !accounts(s) {
 				seen[i] = false
 				usagePct[i].Store(-1)
 				continue

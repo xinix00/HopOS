@@ -38,8 +38,24 @@ func coreOf(i int) int {
 func ctxPA(i int) uintptr { return layout.Stage2TablePA(i) + layout.CtxOff }
 
 // ctxState leest het levensteken van slot i (layout.Ctx*-waarden; de
-// EL2-switch schrijft Running/Saved/Dead, HOP Empty/BootPending/Running).
-func ctxState(i int) uint64 { return dev.Read64(ctxPA(i) + layout.CtxState) }
+// arch-switch schrijft Running/Saved/Dead, HOP Empty/BootPending/Running).
+//
+// Met Pull/Push eromheen, want dit woord heeft twéé schrijvers op twee cores.
+// Op ARM is dat gratis (het blok is device-gemapt en dus coherent); op RISC-V
+// draait de switcher cachebaar in machine mode en is dit het verschil tussen
+// "HOP ziet de staatswissel" en "HOP polt eeuwig op een stale nul".
+func ctxState(i int) uint64 {
+	p := ctxPA(i) + layout.CtxState
+	dev.Pull(p, 8)
+	return dev.Read64(p)
+}
+
+// ctxWrite zet een veld in het ctx-blok van slot i en publiceert het.
+func ctxWrite(i int, off uintptr, v uint64) {
+	p := ctxPA(i) + off
+	dev.Write64(p, v)
+	dev.Push(p, 8)
+}
 
 // ctxLive: deze staat betekent "bezig" (boot-pending, gesaved of draaiend).
 func ctxLive(st uint64) bool {
@@ -68,41 +84,54 @@ func StartShared(core, i int, image []byte, memLimit uint64, env map[string]stri
 }
 
 // residentReset maakt slot i de enige bewoner van core en zet zijn staat op
-// Running — het startschot (mailbox/PSCI) volgt direct hierna. Alleen voor
-// een niet-draaiende core (geparkeerd of cold): er leest geen rotatie mee.
+// Running — het startschot (mailbox/PSCI/hart-reset) volgt direct hierna.
+// Alleen voor een niet-draaiende core (geparkeerd of cold): er leest geen
+// rotatie mee.
+//
+// Dit is ook de énige plek waar HOP de rotatie-staat zelf schrijft (Current en
+// Rotor liggen in de cacheline van de arch-switch, zie layout.Sched*). Dat mag
+// hier precies omdat de core stilstaat: zijn caches zijn leeg, dus er is geen
+// regel die onze bytes kan overschrijven. Zonder Current zou de eerste trap van
+// de eerste bewoner op RISC-V het ctx-blok van slot 0 aanwijzen.
 func residentReset(core, i int) {
 	b := layout.ParkMboxPA(core)
 	dev.Write64(b+layout.SchedCursor, 0)
+	dev.Write64(b+layout.SchedRotor, 0)
+	dev.Write64(b+layout.SchedCurrent, uint64(i))
 	dev.Clear(b+layout.SchedList, uint64(layout.SlotCap))
 	dev.Write8(b+layout.SchedList, uint8(i))
 	dev.Write64(b+layout.SchedCount, 1)
-	dev.Write64(ctxPA(i)+layout.CtxState, layout.CtxRunning)
 	dev.MB()
+	dev.Push(b, layout.ParkMboxLen)
+	ctxWrite(i, layout.CtxState, layout.CtxRunning)
 	refreshShared(core)
 }
 
 // residentAdd hangt slot i in de bewonerslijst van core: het eerste gat
-// (0-byte), anders append. Entry vóór count, met barrière — de EL2-rotatie
-// mag nooit een half geschreven staart zien.
-func residentAdd(core, i int) {
+// (0-byte), anders append. Entry vóór count, met barrière — de arch-rotatie mag
+// nooit een half geschreven staart zien.
+//
+// De ORDE is functioneel: eerst kijken of hij er al staat of dat er een gat is,
+// en pas dán "vol" verklaren. Andersom (de vorm die hier stond) weigert een
+// geldige herstart zodra de lijst ooit tot SlotCap gegroeid is, want de lengte is
+// monotoon en removals laten gaten achter — dus "vol" betekende "is ooit vol
+// geweest".
+func residentAdd(core, i int) error {
 	b := layout.ParkMboxPA(core)
+	// De lijst is van HOP alleen, maar hij ligt in geheugen dat de arch-switch
+	// leest — op RISC-V met zijn eigen cache. Publiceren dus, en de kant die
+	// leest invalideert (cpu/mmode doet dat bij elke rotatie).
+	defer dev.Push(b+layout.SchedCount, layout.ParkMboxLen-layout.SchedCount)
 	n := dev.Read64(b + layout.SchedCount)
-	// >= , niet >: bij n == SlotCap is de lijst vól en zou de append hieronder
-	// op SchedList[SlotCap] schrijven — en dat is precies het woord SchedS2PA
-	// (layout: 96+128 = 224), de Stage2PA-pointer waarmee switch.s élk ctx-blok
-	// op deze core vindt. Vandaag onbereikbaar (er bestaan geen SlotCap+1
-	// kooien), maar een geklemde lengte mag nooit alsnog één byte over de rand
-	// schrijven — vol is vol.
-	if n >= uint64(layout.SlotCap) {
-		fmt.Printf("slot %d: resident list of core %d is full (%d) — not added\n", i, core, n)
-		return
+	if n > uint64(layout.SlotCap) {
+		n = uint64(layout.SlotCap)
 	}
 	// Al lid? (twee-fase-start: de loader stond al in de lijst, ctx nu Dead) —
 	// niet dubbel toevoegen; fase 2 flipt straks alleen de ctx-staat.
 	for k := uint64(0); k < n; k++ {
 		if dev.Read8(b+layout.SchedList+uintptr(k)) == uint8(i) {
 			refreshShared(core)
-			return
+			return nil
 		}
 	}
 	for k := uint64(0); k < n; k++ {
@@ -110,14 +139,23 @@ func residentAdd(core, i int) {
 			dev.Write8(b+layout.SchedList+uintptr(k), uint8(i))
 			dev.MB()
 			refreshShared(core)
-			return
+			return nil
 		}
+	}
+	// Geen gat en geen ruimte om te groeien. >= en niet >: bij n == SlotCap zou de
+	// append hieronder op SchedList[SlotCap] schrijven, en dat is precies het woord
+	// SchedS2PA (96+128 = 224) waarmee de switch élk ctx-blok op deze core vindt.
+	// Vol is vol — en luid, want de aanroeper kan hier niets anders mee dan falen
+	// (stil doorgaan liet hem twee seconden op een boot wachten die nooit kwam).
+	if n >= uint64(layout.SlotCap) {
+		return fmt.Errorf("slot %d: resident list of core %d is full (%d) with no free gap", i, core, n)
 	}
 	dev.Write8(b+layout.SchedList+uintptr(n), uint8(i))
 	dev.MB()
 	dev.Write64(b+layout.SchedCount, n+1)
 	dev.MB()
 	refreshShared(core)
+	return nil
 }
 
 // residentRemove haalt slot i uit de lijst van core (gat achterlaten; de
@@ -134,6 +172,7 @@ func residentRemove(core, i int) {
 		}
 	}
 	dev.MB()
+	dev.Push(b+layout.SchedList, layout.SlotCap)
 	refreshShared(core)
 }
 
@@ -160,7 +199,7 @@ func refreshShared(core int) {
 		v = 1
 	}
 	for _, s := range live {
-		dev.Write64(layout.CtrlPagePA(s)+layout.CtrlShared, v)
+		ctrlWrite(s, layout.CtrlShared, v) // via ctrlWrite: die publiceert ook
 	}
 	dev.MB()
 }
@@ -196,23 +235,23 @@ func slotShares(i int) bool {
 // dan yieldt daar niets (compute-buur) en falen we luid met teruggedraaide
 // boekhouding.
 func bootPendingDispatch(core, i int, tramp, ctx uint64) error {
-	c := ctxPA(i)
-	dev.Write64(c+layout.CtxBootCtx, ctx)
-	dev.Write64(c+layout.CtxBootPC, tramp)
+	ctxWrite(i, layout.CtxCtrlPA, ctx)
+	ctxWrite(i, layout.CtxBootPC, tramp)
 	dev.MB()
-	dev.Write64(c+layout.CtxState, layout.CtxBootPending)
-	dev.MB()
-	residentAdd(core, i)
+	ctxWrite(i, layout.CtxState, layout.CtxBootPending)
+	if err := residentAdd(core, i); err != nil {
+		ctxWrite(i, layout.CtxState, layout.CtxEmpty)
+		return err
+	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if dev.Read64(c+layout.CtxState) != layout.CtxBootPending {
+		if ctxState(i) != layout.CtxBootPending {
 			return nil // opgepikt: de rotatie boot(te) hem
 		}
 		if !coreRunning(core) {
 			// Park-race: zelf dispatchen. Staat éérst op Running, anders zou
 			// de rotatie hem straks nógmaals cold-booten (dubbelboot).
-			dev.Write64(c+layout.CtxState, layout.CtxRunning)
-			dev.MB()
+			ctxWrite(i, layout.CtxState, layout.CtxRunning)
 			return dispatchCore(core, tramp, ctx)
 		}
 		time.Sleep(time.Millisecond)
@@ -221,12 +260,10 @@ func bootPendingDispatch(core, i int, tramp, ctx uint64) error {
 	// (staat al Running), dan hoort hij juist terug in de lijst.
 	residentRemove(core, i)
 	dev.MB()
-	if dev.Read64(c+layout.CtxState) != layout.CtxBootPending {
-		residentAdd(core, i)
-		return nil
+	if ctxState(i) != layout.CtxBootPending {
+		return residentAdd(core, i) // won de race tóch: terug in de lijst
 	}
-	dev.Write64(c+layout.CtxState, layout.CtxEmpty)
-	dev.MB()
+	ctxWrite(i, layout.CtxState, layout.CtxEmpty)
 	return fmt.Errorf("slot %d: core %d never yielded to boot its new resident (compute-bound neighbour?)", i, core)
 }
 

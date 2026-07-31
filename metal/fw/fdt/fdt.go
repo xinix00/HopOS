@@ -27,21 +27,89 @@ const (
 	tokEndTree = 9
 
 	maxBlob = 2 << 20 // een DTB > 2MB is onzin: begrenst al ons rekenwerk
+	hdrLen  = 40      // vaste headergrootte (Devicetree v0.4, tot en met size_dt_struct)
 )
 
+// hdr is de GEVALIDEERDE header: de enige plek waar deze firmware-input gewogen
+// wordt, zodat elke walker eronder alleen nog binnen gedeclareerde blokken
+// loopt. Dat was hier vier keer los uitgeschreven — en elke kopie toetste
+// alleen dat de offsets binnen totalSize vielen, waarna er tóch op totalSize
+// werd afgelopen. Eén helper, dus één definitie van "binnen de blob".
+type hdr struct {
+	base       uintptr
+	total      uint64  // gedeclareerde blobgrootte
+	structs    uintptr // structure-block: [structs, structEnd)
+	structEnd  uintptr
+	strings    uintptr // strings-block (property-namen): [strings, stringsEnd)
+	stringsEnd uintptr
+	rsv        uintptr // /memreserve/-array: [rsv, rsvEnd)
+	rsvEnd     uintptr
+}
+
+// header leest en weegt de DTB-header op base. Getoetst wordt: de pointer, het
+// magic, een blobgrootte tussen de header en maxBlob, en dat de drie
+// blok-offsets binnen die grootte vallen. Een header die deze test overleeft
+// draagt geen enkele offset meer die buiten de blob wijst.
+//
+// De blokGROOTTES (size_dt_struct/size_dt_strings, header-offsets 0x24/0x20)
+// worden gebruikt wanneer de firmware ze plausibel vult — dan lopen de walkers
+// tot het einde van hún blok in plaats van tot het einde van de blob. Vult hij
+// ze niet (0, of buiten de blob), dan valt de grens terug op de blobgrootte:
+// dat is precies wat er vóór deze helper stond, dus nooit slechter dan
+// voorheen, en de fijnere grens is winst waar hij te halen valt.
+func header(base uintptr) (hdr, bool) {
+	if base == 0 || be32(base) != magic {
+		return hdr{}, false
+	}
+	h := hdr{base: base, total: uint64(be32(base + 4))}
+	if h.total < hdrLen || h.total > maxBlob {
+		return hdr{}, false
+	}
+	structOff := uint64(be32(base + 8))
+	stringsOff := uint64(be32(base + 12))
+	rsvOff := uint64(be32(base + 16))
+	if structOff >= h.total || stringsOff >= h.total || rsvOff >= h.total {
+		return hdr{}, false
+	}
+	blockEnd := func(off, size uint64) uintptr {
+		if size > 0 && off+size <= h.total { // overflow kan niet: beide uint32
+			return base + uintptr(off+size)
+		}
+		return base + uintptr(h.total)
+	}
+	h.structs = base + uintptr(structOff)
+	h.structEnd = blockEnd(structOff, uint64(be32(base+36))) // size_dt_struct
+	h.strings = base + uintptr(stringsOff)
+	h.stringsEnd = blockEnd(stringsOff, uint64(be32(base+32))) // size_dt_strings
+	h.rsv = base + uintptr(rsvOff)
+	h.rsvEnd = base + uintptr(h.total)
+	return h, true
+}
+
+// propName geeft het adres van een property-naam in het strings-block, of
+// ok=false als de nameoff-cel buiten dat blok wijst (kromme blob).
+func (h hdr) propName(nameOff uint32) (uintptr, bool) {
+	p := h.strings + uintptr(nameOff)
+	if p < h.strings || p >= h.stringsEnd {
+		return 0, false
+	}
+	return p, true
+}
+
 // Valid meldt of op base een geldige DTB-blob staat: een niet-nul-pointer met
-// het FDT-magic (0xd00dfeed, big-endian) op offset 0 en een header-grootte
-// binnen maxBlob. Dé onderscheidende test voor "kreeg dit board een device-tree
+// het FDT-magic (0xd00dfeed, big-endian) op offset 0 en een header die zichzelf
+// kan dragen. Dé onderscheidende test voor "kreeg dit board een device-tree
 // mee?" — op UEFI/ACPI-firmware (de O6N) is er geen DTB en wijst de scratch-
 // pointer naar rommel, waar elke reader terecht (…,false) op teruggeeft; met
 // Valid kan de aanroeper dat expliciet vaststellen en er LUID op reageren
 // (waarschuwen + veilige terugval) i.p.v. stil te degraderen.
+//
+// Bewust dezelfde toets als de readers doen: een blob die Valid overleeft maar
+// waar MemTotal dan alsnog op afketst (of erger: 8 gedeclareerde bytes waar de
+// readers +8/+12/+16 uit lezen) is een val voor de aanroeper.
 func Valid(base uintptr) bool {
-	if base == 0 || be32(base) != magic {
-		return false
-	}
-	sz := be32(base + 4)
-	return sz >= 8 && sz <= maxBlob
+	_, ok := header(base)
+	return ok
 }
 
 // be32/be64 lezen een big-endian woord van een fysiek adres (device- of
@@ -79,18 +147,13 @@ func MemTotal(base uintptr) (uint64, bool) {
 // alleen 1 of 2 cellen (32/64-bit) ondersteund. Onvertrouwde firmware-input:
 // elke offset wordt begrensd — een kromme DTB levert (nil,false), geen panic.
 func MemRegions(base uintptr) ([]Region, bool) {
-	if base == 0 || be32(base) != magic {
-		return nil, false
-	}
-	structOff := be32(base + 8)
-	stringsOff := be32(base + 12)
-	totalSize := be32(base + 4)
-	if totalSize > maxBlob || structOff >= totalSize || stringsOff >= totalSize {
+	h, ok := header(base)
+	if !ok {
 		return nil, false
 	}
 
-	p := base + uintptr(structOff)
-	end := base + uintptr(totalSize)
+	p := h.structs
+	end := h.structEnd
 
 	depth := 0
 	inMemNode := false
@@ -125,20 +188,19 @@ func MemRegions(base uintptr) ([]Region, bool) {
 			if p > end {
 				return nil, false
 			}
-			nameAddr := uint64(stringsOff) + uint64(nameOff)
-			if nameAddr >= uint64(totalSize) {
+			np, ok := h.propName(nameOff)
+			if !ok {
 				continue
 			}
-			np := base + uintptr(nameAddr)
 			if depth == 1 && plen == 4 {
-				if propIs(np, end, "#address-cells") {
+				if propIs(np, h.stringsEnd, "#address-cells") {
 					addrCells = be32(data)
-				} else if propIs(np, end, "#size-cells") {
+				} else if propIs(np, h.stringsEnd, "#size-cells") {
 					sizeCells = be32(data)
 				}
 			}
 			// In /memory: reg = [ (addr,size) ... ] met root's cell-counts.
-			if inMemNode && propIs(np, end, "reg") {
+			if inMemNode && propIs(np, h.stringsEnd, "reg") {
 				if addrCells == 0 || addrCells > 2 || sizeCells == 0 || sizeCells > 2 {
 					return nil, false
 				}
@@ -230,18 +292,13 @@ func nodeString(base uintptr, node, name string) (string, bool) {
 // nodeBytes leest de ruwe bytes van een property (voor cellen zoals
 // linux,initrd-start; nodeString knipt op de NUL).
 func nodeBytes(base uintptr, node, name string) ([]byte, bool) {
-	if base == 0 || be32(base) != magic {
-		return nil, false
-	}
-	structOff := be32(base + 8)
-	stringsOff := be32(base + 12)
-	totalSize := be32(base + 4)
-	if totalSize > maxBlob || structOff >= totalSize || stringsOff >= totalSize {
+	h, ok := header(base)
+	if !ok {
 		return nil, false
 	}
 
-	p := base + uintptr(structOff)
-	end := base + uintptr(totalSize)
+	p := h.structs
+	end := h.structEnd
 	depth := 0
 	inNode := node == "" // root-props zitten op depth 1
 
@@ -280,8 +337,8 @@ func nodeBytes(base uintptr, node, name string) ([]byte, bool) {
 			if node != "" {
 				wantDepth = 2
 			}
-			np := base + uintptr(stringsOff) + uintptr(nameOff)
-			if inNode && depth == wantDepth && uint64(stringsOff)+uint64(nameOff) < uint64(totalSize) && propIs(np, end, name) {
+			np, nok := h.propName(nameOff)
+			if inNode && depth == wantDepth && nok && propIs(np, h.stringsEnd, name) {
 				b := make([]byte, 0, plen)
 				for i := uintptr(0); i < uintptr(plen); i++ {
 					b = append(b, dev.Read8(data+i))
@@ -303,17 +360,12 @@ func nodeBytes(base uintptr, node, name string) ([]byte, bool) {
 // regio's die de firmware/TF-A voor zichzelf houdt — nooit uitdelen als pool.
 // Leeg (of nil bij een kromme blob) is geldig: veel boards reserveren niets.
 func MemReserve(base uintptr) []Region {
-	if base == 0 || be32(base) != magic {
-		return nil
-	}
-	totalSize := be32(base + 4)
-	rsvOff := be32(base + 16)
-	if totalSize > maxBlob || rsvOff >= totalSize {
+	h, ok := header(base)
+	if !ok {
 		return nil
 	}
 	var regs []Region
-	p := base + uintptr(rsvOff)
-	end := base + uintptr(totalSize)
+	p, end := h.rsv, h.rsvEnd
 	for p+16 <= end {
 		a := be64(p)
 		s := be64(p + 8)
@@ -333,13 +385,11 @@ func MemReserve(base uintptr) []Region {
 // ongeldige blob. Voor de aanroeper die de DTB-regio zelf uit de pool wil
 // snijden (de firmware legde 'm ergens in RAM neer).
 func BlobSize(base uintptr) uint64 {
-	if base == 0 || be32(base) != magic {
+	h, ok := header(base)
+	if !ok {
 		return 0
 	}
-	if sz := be32(base + 4); sz <= maxBlob {
-		return uint64(sz)
-	}
-	return 0
+	return h.total
 }
 
 func align4(a uintptr) uintptr { return (a + 3) &^ 3 }
@@ -389,18 +439,13 @@ type FB struct {
 // (FB{}, false) — nooit een panic. reg wordt gelezen met de root-cellen
 // (chosen definieert er in de praktijk geen eigen).
 func Framebuffer(base uintptr) (FB, bool) {
-	if base == 0 || be32(base) != magic {
-		return FB{}, false
-	}
-	structOff := be32(base + 8)
-	stringsOff := be32(base + 12)
-	totalSize := be32(base + 4)
-	if totalSize > maxBlob || structOff >= totalSize || stringsOff >= totalSize {
+	h, ok := header(base)
+	if !ok {
 		return FB{}, false
 	}
 
-	p := base + uintptr(structOff)
-	end := base + uintptr(totalSize)
+	p := h.structs
+	end := h.structEnd
 
 	depth := 0
 	inChosen := false // depth 2: "chosen"
@@ -451,15 +496,15 @@ func Framebuffer(base uintptr) (FB, bool) {
 			if p > end {
 				return FB{}, false
 			}
-			nameAddr := uint64(stringsOff) + uint64(nameOff)
-			if nameAddr >= uint64(totalSize) {
+			np, nok := h.propName(nameOff)
+			if !nok {
 				continue
 			}
-			np := base + uintptr(nameAddr)
+			sEnd := h.stringsEnd
 			if depth == 1 && plen == 4 {
-				if propIs(np, end, "#address-cells") {
+				if propIs(np, sEnd, "#address-cells") {
 					addrCells = be32(data)
-				} else if propIs(np, end, "#size-cells") {
+				} else if propIs(np, sEnd, "#size-cells") {
 					sizeCells = be32(data)
 				}
 			}
@@ -467,7 +512,7 @@ func Framebuffer(base uintptr) (FB, bool) {
 				continue
 			}
 			switch {
-			case propIs(np, end, "reg"):
+			case propIs(np, sEnd, "reg"):
 				if addrCells == 0 || addrCells > 2 || sizeCells == 0 || sizeCells > 2 ||
 					uintptr(plen) < uintptr(addrCells+sizeCells)*4 {
 					continue
@@ -483,13 +528,13 @@ func Framebuffer(base uintptr) (FB, bool) {
 				} else {
 					fb.Size = be64(data + szOff)
 				}
-			case propIs(np, end, "width") && plen == 4:
+			case propIs(np, sEnd, "width") && plen == 4:
 				fb.Width = be32(data)
-			case propIs(np, end, "height") && plen == 4:
+			case propIs(np, sEnd, "height") && plen == 4:
 				fb.Height = be32(data)
-			case propIs(np, end, "stride") && plen == 4:
+			case propIs(np, sEnd, "stride") && plen == 4:
 				fb.Stride = be32(data)
-			case propIs(np, end, "format"):
+			case propIs(np, sEnd, "format"):
 				if plen >= 6 && dev.Read8(data) == 'r' && dev.Read8(data+1) == '5' {
 					fb.BPP = 16 // r5g6b5
 				}

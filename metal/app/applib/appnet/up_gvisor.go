@@ -24,8 +24,8 @@ func Up(a *applib.App) (string, error) {
 	mac := fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", m[0], m[1], m[2], m[3], m[4], m[5])
 
 	nd := &nic{
-		tx: ring.Open(layout.NetRingTX(a.Slot)),
-		rx: ring.Open(layout.NetRingRX(a.Slot)),
+		tx: ring.Open(layout.NetRingTXAt(a.RAMStart, a.RAMSize)),
+		rx: ring.Open(layout.NetRingRXAt(a.RAMStart, a.RAMSize)),
 	}
 	iface := &gnet.Interface{NetworkDevice: nd}
 	if err := iface.Init(cidr, mac, layout.IP4Str(layout.HostIP4())); err != nil {

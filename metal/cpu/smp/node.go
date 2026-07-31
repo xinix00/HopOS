@@ -110,10 +110,11 @@ func nodeTask(sp, mp, gp, fn unsafe.Pointer) {
 	nodeNextCore++
 	atomic.AddUint32(&nodeStarted, 1)
 
-	// Handoff-scratch: de control-page van gereserveerd slot c (apps komen daar
-	// nooit). Het gedeelde deel via writeHandoff (smp.go); daarbovenop de
-	// node-profiel-velden.
-	cp := layout.CtrlPagePA(c)
+	// Handoff-scratch: de node-control-page van core c. HOP's eigen cores hebben
+	// geen partitie en dus geen ABI-staart om dit in te leggen — vandaar de enige
+	// plan-regio die van de oude ctrl-regio over is (layout.NodeCtrlPA). Het
+	// gedeelde deel via writeHandoff (smp.go); daarbovenop de node-profielvelden.
+	cp := layout.NodeCtrlPA(c)
 	writeHandoff(cp, sp, mp, gp, fn, nodeStub)
 	dev.Write64(cp+layout.CtrlS2Table, 0)                          // node-profiel: geen stage-2-kooi
 	dev.Write64(cp+layout.CtrlVecPA, uint64(layout.RevokeVecPA())) // EL2-vectoren (revoke), als core 0

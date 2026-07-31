@@ -13,6 +13,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"runtime"
@@ -36,6 +37,7 @@ import (
 	"hop-os/metal/cpu/smp"
 	"hop-os/metal/driver/fb"
 	"hop-os/metal/driver/nvme"
+	"hop-os/metal/kern/conport"
 	"hop-os/metal/kern/hopfs"
 	"hop-os/metal/kern/slotmgr"
 	"hop-os/metal/kern/slots"
@@ -57,6 +59,23 @@ func park(reden string) {
 
 func fail(what string, err error) {
 	park(fmt.Sprintf("FAIL %s: %v\nHOPOS_AGENT_FAIL", what, err))
+}
+
+// hopBudget/hopUsage zijn HOP's eigen geheugengetallen: wat het board hem gaf
+// (de RAM-declaratie tussen HopBase en de eerste slot-partitie) en wat de
+// Go-runtime daar werkelijk van vasthoudt. Ze staan hier los omdat élke MB die
+// HOP niet nodig heeft naar de app-pool hoort — met deze twee regels is het
+// krimpen van HopBase een meting in plaats van een gok. Zelfde bron als
+// screenStatus.
+func hopBudget() string {
+	start, end := runtime.MemRegion()
+	return fmt.Sprintf("%d MB (%#x..%#x)", (end-start)>>20, start, end)
+}
+
+func hopUsage() string {
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	return fmt.Sprintf("Go runtime holds %d MB, heap %d MB in use", ms.Sys>>20, ms.HeapAlloc>>20)
 }
 
 // screenStatus ververst de meetregels rechts naast de bunny (fb.HeaderStatus,
@@ -93,6 +112,13 @@ var boardExtra func()
 // tekstbestandje bewerken, geen rebuild.
 var bootParamAll = func(key string) []string { return nil }
 
+// boardWarn is wat dít board over zichzelf moet bekennen vóór het werk begint —
+// gezet door de board-kant van deze main (board_<x>.go), nil als er niets te
+// melden is. Bewust een haak en geen board.Board-methode: het is een eigenschap
+// van de PORT, niet van het silicium, en hij verdwijnt zodra de reden weg is
+// (licheerv: geen hardware-TRNG, dus voorspelbare crypto).
+var boardWarn func()
+
 // bootParam is de enkele-waarde-variant: de eerste hit van bootParamAll ("" =
 // niet gezet → de default in main). De meeste sleutels zijn enkelvoudig.
 func bootParam(key string) string {
@@ -126,20 +152,30 @@ var smpSink uint64
 // deterministisch opkomen: een kapotte bring-up valt bij bóót — watchdog en
 // kabel zichtbaar — en niet pas onder de eerste productie-last. Geen
 // benchmark meer (die zei op een 20ms-burst weinig; de ramp is de meting).
+//
+// Elk warm-up-hart schrijft zijn resultaat op zijn EIGEN index en de som volgt ná
+// Wait. Rechtstreeks in smpSink schrijven deed precies wat deze functie wil
+// uitlokken — alle cores tegelijk op één woord — en dat is een echte data race
+// waar de race-detector op de host over valt; een absorberende sink hoeft geen
+// gedeeld woord te zijn.
 func nodeSMPWarmup(cores int) {
 	var wg sync.WaitGroup
+	sums := make([]uint64, cores)
 	for i := 0; i < cores; i++ {
 		wg.Add(1)
-		go func() {
+		go func(i int) {
 			defer wg.Done()
 			var x uint64
 			for j := 0; j < 4_000_000; j++ {
 				x += uint64(j)*3 + 7
 			}
-			smpSink = x
-		}()
+			sums[i] = x
+		}(i)
 	}
 	wg.Wait()
+	for _, s := range sums {
+		smpSink += s
+	}
 }
 
 func main() {
@@ -163,14 +199,14 @@ func main() {
 
 	fmt.Printf("runtime %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
 
-	// Vóór de eerste PSCI-call (SMC): HopOS eist een EL2-boot — de
-	// stage-2-kooi is een invariant, geen optie.
-	if el := board.Current().BootEL(); el < 2 {
-		fail("boot", fmt.Errorf("booted at EL%d: HopOS requires EL2 (QEMU: virtualization=on)", el))
+	// Vóór alles: het privilege-niveau waarin we booten. De kooi is een
+	// invariant, geen optie — kunnen we hem niet zetten, dan starten we niet.
+	// Wat "niet kunnen" betekent is arch-eigen (EL2 op ARM, M-mode op RISC-V):
+	// zie node_<arch>.go.
+	if why, refuse := bootRefusal(); refuse {
+		fail("boot", errors.New(why))
 	}
-
-	major, minor := board.Current().PSCIVersion()
-	fmt.Printf("psci: v%d.%d (boot EL%d, SMC conduit)\n", major, minor, board.Current().BootEL())
+	fmt.Println(firmwareLine())
 
 	// Log-console op de firmware-framebuffer als het board er een heeft — het
 	// beeld-kanaal voor een node zónder debug-kabel. Zo niet (QEMU -nographic,
@@ -277,16 +313,14 @@ func main() {
 		// app (goos.Task + GOMAXPROCS + de gedeelde EL2-trampoline), maar de node
 		// dispatcht zijn eigen cores direct via PSCI (hij ís HOP). Go spreidt de
 		// node-goroutines (switch/leader/plaatsing) daarna zelf over de cores.
-		smp.ConfigureNode(nCores, func(core int, entry, ctx uint64) {
-			board.Current().CPUOn(uint64(core), entry, ctx)
-		})
+		smp.ConfigureNode(nCores, nodeDispatch)
 		nodeSMPWarmup(nCores)
 		// Levensteken op de console: dispatched = door de runtime opgevraagde
 		// extra cores; PSCI-state 0 (On) = de core leeft in de node-runtime.
 		fmt.Printf("hop: node runtime on %d cores (GOMAXPROCS=%d, dispatched=%d) HOPOS_NODE_SMP\n",
 			nCores, runtime.GOMAXPROCS(0), smp.NodeStarted())
 		for c := 1; c < nCores; c++ {
-			fmt.Printf("hop: node-core %d PSCI-state=%d\n", c, board.Current().AffinityInfo(uint64(c)))
+			fmt.Printf("hop: node-core %d %s\n", c, nodeCoreState(c))
 		}
 	}
 
@@ -424,6 +458,15 @@ func main() {
 			layout.RequiredRAM()>>20, offer>>20)
 	}
 
+	// HOP's eigen budget náást de pool. Dit is het getal waarop de HopBase-keuze
+	// van een board wordt afgerekend: elke MB die HOP niet gebruikt hoort bij de
+	// apps. Zonder deze regel is "kan HOP met minder?" een gok — hiermee is het
+	// een meting. Let op: dit is de bóót-stand; de piek zit bij een
+	// job-plaatsing (imagecopy), en die staat in dezelfde vorm bij de eerste
+	// geslaagde start.
+	fmt.Printf("memory: HOP itself has %s — %s\n", hopBudget(), hopUsage())
+	slots.SetKernMem(hopUsage)
+
 	// Zonder extern netwerk kan de agent/leader niet luisteren: net.SocketFunc is
 	// nil, dus agentboot.Run zou meteen falen en fail("agent") de node alsnog
 	// permanent hangen — ná een misleidend HOPOS_AGENT_UP. Degradeer echt: de
@@ -432,6 +475,16 @@ func main() {
 	if netErr != nil {
 		park(fmt.Sprintf("hop: headless — no external network, agent/leader not started; node %s stays alive HOPOS_NODE_HEADLESS",
 			cfg.Node.ID))
+	}
+
+	// De console óók op een TCP-poort, als de config dat vraagt: `hopos.console=<poort>`.
+	// Standaard UIT — deze poort geeft élke lezer alles wat de node print, en dat
+	// is diagnose-gemak op een bank en een lek daarbuiten. Hier en niet eerder:
+	// hij leunt op de netstack die net omhoog kwam, en vóór de agent zodat een
+	// node die op de auth-poort blijft hangen (hieronder) alsnog te lezen is —
+	// juist dán wil je erbij.
+	if n, err := strconv.Atoi(bootParam("hopos.console")); err == nil && n > 0 {
+		conport.Serve(n)
 	}
 
 	// De auth-poort (zie hopos.apikey hierboven): zonder sleutel en zonder
@@ -446,6 +499,12 @@ func main() {
 	}
 	if apiInsecure && cfg.APIKey == "" {
 		fmt.Println("hop: WARNING — API authentication is OFF (hopos.insecure=1): any host that can reach this node can dispatch jobs. HOPOS_API_INSECURE")
+	}
+	// Wat dít board over zichzelf te bekennen heeft. Naast de auth-waarschuwing,
+	// want ze horen bij elkaar: een operator die hier zijn beslissing op baseert
+	// wil ze in één blik zien, en niet ergens in de boot-ruis erboven.
+	if boardWarn != nil {
+		boardWarn()
 	}
 
 	fmt.Printf("hop: agent starting — node %s, agent :%d, leader :%d — HOPOS_AGENT_UP\n",

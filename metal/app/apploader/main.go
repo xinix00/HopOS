@@ -17,8 +17,11 @@
 package main
 
 import (
+	"io"
 	"net"
 	"net/http"
+	"runtime/debug"
+	"time"
 
 	// TLS-wortels: tamago heeft geen OS en dus geen system-CA-store — zonder
 	// deze fallback-bundel (de Mozilla-roots die Go meelevert) faalt élke
@@ -33,6 +36,18 @@ import (
 
 func main() {
 	app := applib.Init()
+
+	// Heap-plafond, VÓÓR de netstack. De runtime kent de staging bovenin deze
+	// partitie niet: zijn arena groeit gewoon door tot RAMStart+RAMSize, en de
+	// gestreamde image landt daar dwars doorheen (dev.Copy, buiten de heap om).
+	// Op een 64MB-partitie kwam de heap nooit zo hoog; op 24MB wél — gemeten
+	// 31-07: vijfmaal exit-code 2 middenin "streaming ... into staging".
+	// Het plafond stuurt de GC zó dat de arena laag blijft; de helft is voor de
+	// handshake-fase (TLS + gVisor), hieronder wordt het aangescherpt zodra de
+	// image-maat bekend is. Een zácht plafond — Go kent geen harde arena-grens —
+	// dus geen garantie maar druk; wat er tóch misgaat is sinds de printk-haak
+	// (appboard.PrintkSink) tenminste zichtbaar als panic in het task-log.
+	debug.SetMemoryLimit(int64(app.RAMSize) / 2)
 
 	url := app.Env("HOP_IMAGE_URL")
 	if url == "" {
@@ -50,7 +65,14 @@ func main() {
 	}
 
 	app.Logf("apploader: %s up — fetching image on my own core+netstack from %s", ip, url)
-	resp, err := http.Get(url)
+	// Met een deadline, en dat is geen luxe: zonder timeout blijft een stilgevallen
+	// verbinding EEUWIG hangen (Go's default client heeft er geen). Gemeten 30-07 op
+	// de LicheeRV: de server zag een broken pipe, zijn FIN kwam nooit aan, en de
+	// loader wachtte oneindig op bytes — HOP zag een task die "draait" met een
+	// tikkende hartslag en kon dus niks herstarten. Liever luid falen: HOP's
+	// restart-beleid is precies de plek waar een mislukte download hoort te landen.
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Get(url)
 	if err != nil {
 		app.Logf("apploader: GET: %v", err)
 		app.Exit(1)
@@ -65,10 +87,38 @@ func main() {
 		app.Exit(1)
 	}
 
+	// Nu de maat bekend is: de heap alles geven wat de staging niet nodig heeft
+	// (of juist minder, op een kleine partitie). De 2MB marge dekt wat buiten de
+	// heap om leeft (stacks, runtime-metadata).
+	if lim := int64(app.RAMSize) - (resp.ContentLength+7)&^7 - (2 << 20); lim < int64(app.RAMSize)/2 {
+		if lim < 8<<20 {
+			app.Logf("apploader: %d MB partition minus %d MB image leaves the runtime %d MB — expect OOM",
+				app.RAMSize>>20, resp.ContentLength>>20, max(lim, 0)>>20)
+		}
+		debug.SetMemoryLimit(max(lim, 8<<20))
+	}
+
 	app.Logf("apploader: streaming %d bytes into my partition staging", resp.ContentLength)
+	// Meetellen, maar zwijgen: een stukgelopen overdracht moet kunnen zeggen
+	// HOEVEEL er binnen was ("unexpected EOF" ≠ "niets gekregen"), en dat staat
+	// hieronder in de foutregel. Tijdens het downloaden logt hij níet — elke
+	// console-regel op dit board kost meer buffering dan de NIC-ring heeft, dus
+	// een voortgangsbalk zou het probleem zijn dat hij meet.
+	var got progress
+	body := io.TeeReader(resp.Body, &got)
 	// StageImage seint HOP en parkeert de core; keert bij succes niet terug.
-	if err := app.StageImage(resp.Body, resp.ContentLength); err != nil {
-		app.Logf("apploader: stage: %v", err)
+	if err := app.StageImage(body, resp.ContentLength); err != nil {
+		app.Logf("apploader: stage na %d van %d bytes: %v", got.seen, resp.ContentLength, err)
 		app.Exit(1)
 	}
+}
+
+// progress telt de binnengekomen bytes: het antwoord op "hoe ver kwam hij" in
+// de foutregel van een mislukte overdracht, zonder er tijdens de overdracht
+// iets over te zeggen.
+type progress struct{ seen int64 }
+
+func (p *progress) Write(b []byte) (int, error) {
+	p.seen += int64(len(b))
+	return len(b), nil
 }

@@ -31,6 +31,30 @@ partition instead:
    [Configure](config.md) for all keys.
 4. Insert, power on.
 
+## LicheeRV Nano — RISC-V (SD card, build from source)
+
+The first non-ARM board: a Sophgo SG2002 (XuanTie C906, 256 MB) for about €10.
+No prebuilt image yet — build one from the tree (needs riscv64 binutils and
+the Sipeed donor fip for its first-stage loader and DRAM parameters):
+
+```sh
+image/licheerv-agent.sh                # → metal/out/hopos-licheerv.img
+diskutil unmountDisk /dev/diskN
+sudo dd if=metal/out/hopos-licheerv.img of=/dev/rdiskN bs=4m
+```
+
+That image is the whole card: partition table, FAT boot partition, `fip.bin`.
+Nothing else to copy. For quick iteration on a card that already has one,
+`image/licheerv-agent.sh /dev/diskN` replaces just `fip.bin`.
+
+Our kernel replaces OpenSBI in the SD card's `fip.bin`; the vendor's first-stage
+loader does clock and DRAM init and enters us in M-mode. What runs today is the
+slot lifecycle — a Go app in a verified cage on the second hart, with kill and
+restart — not the agent: this board's ethernet is not in service yet. The cage
+here is a **PMP whitelist** rather than an ARM stage-2 mapping, because
+the C906 has no hypervisor extension; see
+[isolation](technical/isolation.md) and `metal/kern/cage`.
+
 ## QEMU (no hardware)
 
 ```sh

@@ -28,7 +28,16 @@ const (
 	OpWrite  = 3 // write(path, off, data≤MaxChunk); maakt bestand + ouder-dirs
 	OpList   = 4 // list(path) → namen, "\n"-gescheiden ("naam/" = dir)
 	OpRemove = 5 // remove(path) (bestand of lege dir)
-	OpFetch  = 6 // fetch(url=path-veld, dst=data-veld): HOP downloadt → size
+
+	// 6 was OpFetch: HOP downloadde een URL naar het volume van de task. Dat is
+	// gesloopt — elke app heeft zijn eigen netstack, dus hij haalt zijn bytes op
+	// zijn eigen core. HOP hoefde daarvoor met zijn volle rechten een
+	// app-opgegeven URL te openen (redirects incluis) vanaf core 0, en dat is een
+	// SSRF-pad naar alles wat de node kan bereiken. Het nummer blijft LEEG: een
+	// app-image van vóór deze sloop krijgt zo een nette "onbekende op" in plaats
+	// van per ongeluk een ándere operatie.
+
+	OpTruncate = 7 // truncate(path, n=lengte); maakt bestand + ouder-dirs
 )
 
 // Status-codes (resp). Bij ≠ StatusOK bevat data de fouttekst.

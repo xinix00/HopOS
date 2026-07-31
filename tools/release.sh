@@ -96,6 +96,27 @@ rm -rf "$CFGGUI" "$CFGHL"
 cp "$DIR/image/hopos-gui.cfg" "$DIST/hopos.cfg"
 cp "$DIR/image/hopos-headless.cfg" "$DIST/hopos-headless.cfg"
 
+# 3c. RISC-V (LicheeRV Nano): een compleet SD-kaart-image, want dit board boot
+#     niet van een los bestand — ons image vervangt OpenSBI in het
+#     MONITOR-slot van fip.bin. Twee gevolgen voor de release: het asset is een
+#     dd-baar .img (gzip: de FAT-partitie is grotendeels leeg), en de config zit
+#     ÍNGEBAKKEN — HopOS heeft geen SD-driver, dus er is geen bestand om op de
+#     kaart te bewerken. Configureren = herbouwen met CFG=... Daarom gaat het
+#     template als los asset mee, zodat je ziet wát erin zit.
+#
+#     Alleen bouwen als de Sipeed-donor + fiptool aanwezig zijn (die wonen in
+#     het gitignorede lab/): zonder die twee slaat de release deze smaak
+#     LUIDRUCHTIG over i.p.v. te falen — de rest van de assets is compleet.
+if [ -f "${LICHEERV_DONOR:-$DIR/lab/licheerv/donor-fip.bin}" ]; then
+	echo ">> hopos-licheerv.img.gz (RISC-V, headless, config ingebakken)" >&2
+	CFG="$DIR/image/hopos-licheerv.cfg" "$DIR/image/licheerv-agent.sh" >/dev/null
+	gzip -9 -n -c "$DIR/metal/out/hopos-licheerv.img" > "$DIST/hopos-licheerv.img.gz"
+	cp "$DIR/image/hopos-licheerv.cfg" "$DIST/hopos-licheerv.cfg"
+else
+	echo ">> OVERGESLAGEN: hopos-licheerv.img.gz — donor-fip ontbreekt" >&2
+	echo "   (zet LICHEERV_DONOR, zie image/licheerv-agent.sh)" >&2
+fi
+
 # 4. Checksums + handtekening (over de checksum-lijst: één .sig dekt alles),
 #    met zelf-verificatie vóór publicatie.
 echo ">> tekenen + verifiëren" >&2
@@ -117,6 +138,7 @@ NOTES="Prebuilt, signed boot images — https://gethop.org/hopos/ for the 5-minu
 - **hopos.cfg** — the default GUI config (also inside the Pi zips): a full desktop — display, launcher and app catalog, no addresses to fill in. **One edit required:** set \`hopos.apikey\`.
 - **hopos-headless.cfg** — the headless default (inside the \`*-headless\` zips as \`hopos.cfg\`): same keys, no desktop — seed your own \`hopos.init[]\` jobs. For a UEFI stick, rename it to \`hopos.cfg\`.
 - **\`*-headless\`** — the same images built with \`GUI=0\`: not a disabled GUI but **zero GUI code linked**. For UEFI, rename \`BOOTAA64-headless.EFI\` to \`BOOTAA64.EFI\` on the stick.
+- **hopos-licheerv.img.gz** — LicheeRV Nano (RISC-V, headless): \`gunzip\` and \`dd\` the whole card. This board has no SD driver, so its config is **baked into the image** — \`hopos-licheerv.cfg\` is what went into this build; to change it, rebuild with \`CFG=~/my-node.cfg image/licheerv-agent.sh /dev/diskN\`.
 
 Verify: \`ssh-keygen -Y verify -f allowed_signers -I $SIGNER -n gethop-release -s SHA256SUMS.sig < SHA256SUMS && shasum -a 256 -c SHA256SUMS\`"
 if gh release view "$TAG" >/dev/null 2>&1; then

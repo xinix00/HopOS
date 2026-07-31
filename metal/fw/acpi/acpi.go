@@ -105,6 +105,15 @@ func Parse(rsdp uintptr) (*Tables, error) {
 	if rsdp == 0 {
 		return nil, fmt.Errorf("acpi: no RSDP")
 	}
+	// Het RSDP-adres komt uit de EFI-configuratietabel en is dus dezelfde soort
+	// firmware-input als de XSDT-pointers hieronder — het werd alleen niet zo
+	// behandeld: de allereerste mem(rsdp, 36) ging er blind in. Eén verdwaalde
+	// pointer (nulpagina, oneven, buiten de PA-ruimte) en dat is een data abort
+	// op core 0 bij boot in plaats van een nette acpi-fout waar de main op kan
+	// terugvallen. Zelfde weging, zelfde plek, één regel eerder.
+	if !plausiblePA(rsdp, 36) {
+		return nil, fmt.Errorf("acpi: implausible RSDP address %#x", rsdp)
+	}
 	b := mem(rsdp, 36)
 	if string(b[0:8]) != "RSD PTR " {
 		return nil, fmt.Errorf("acpi: RSDP signature missing at %#x", rsdp)

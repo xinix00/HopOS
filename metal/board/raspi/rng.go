@@ -1,6 +1,7 @@
 package raspi
 
 import (
+	"sync"
 	_ "unsafe" // voor go:linkname
 
 	"hop-os/metal/dev"
@@ -61,6 +62,15 @@ const (
 	rngWarmupLimit = 5_000_000
 )
 
+// rngMu serialiseert de hele trekking. Dit is één FIFO en één PRNG-state voor
+// álle aanroepers (TLS, sleutels, map-hashes — op verschillende cores): zonder
+// lock racen rngState en de eenmalige vlaggen, en twee gelijktijdige trekkingen
+// zouden de warm-up-sequence door elkaar heen kunnen draaien of dezelfde
+// PRNG-stand tweemaal uitdelen. Zelfde afweging als in cpu/drbg: de sectie moet
+// atomair zijn, niet per woord coherent. Vroeg in de boot (hashinit) is de lock
+// onbetwist en dus alleen een CAS.
+var rngMu sync.Mutex
+
 var (
 	rngState    uint64 // PRNG-fallback-state (xorshift64*)
 	rng200Ready bool   // RNG200 ingeschakeld + warm-up gedaan
@@ -74,11 +84,15 @@ func initRNG() {
 	// de runtime doet vóór board-init RNG200Base zet, en voor de begrensde-poll-
 	// terugval. De RNG200 zelf wordt lazy in getRandomData ingeschakeld zodra
 	// z'n basis bekend is (de init-volgorde runtime↔board-init ligt niet vast).
+	rngMu.Lock()
+	defer rngMu.Unlock()
 	rngState = ARM64.Counter() | 1
 }
 
 //go:linkname getRandomData runtime/goos.GetRandomData
 func getRandomData(b []byte) {
+	rngMu.Lock()
+	defer rngMu.Unlock()
 	base := RNG200Base
 	if base == 0 {
 		prngFill(b) // geen hardware-basis (board-init nog niet gedraaid): PRNG
@@ -148,6 +162,7 @@ func rng200Enable(base uintptr, on bool) {
 }
 
 // prngFill vult b met de xorshift64*-PRNG — de niet-cryptografische fallback.
+// Aanroepen met rngMu vast (hij muteert rngState).
 func prngFill(b []byte) {
 	x := rngState
 	for i := range b {

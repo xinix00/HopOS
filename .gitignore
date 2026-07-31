@@ -58,3 +58,20 @@ sd-*/overlays/
 
 # Lokaal lab-/experimenteerwerk — nooit in git.
 lab/
+
+# Slot-blob van het RISC-V-board: gegenereerd door image/licheerv-agent.sh
+# (kooi-stub + app-image), zoals cmd/hopos-embed/app*.elf.
+metal/cmd/hopos-lrv/slot.bin
+
+# Ingebakken platform-config op de go:embed-plek (image/licheerv-agent.sh zet
+# hem daar uit image/hopos-licheerv.cfg of uit CFG=...). Nooit in git: hier kan
+# een echte apikey in staan, net als in uefi-esp-agent/hopos.cfg.
+metal/cmd/hopos/cfgblob/hopos.cfg
+
+# Kooi-stub op de go:embed-plek (image/licheerv-agent.sh assembleert hem uit
+# image/licheerv/stub-slot/stub-slot.S).
+metal/kern/cagestub/stub-slot.bin
+
+# Losse `go build ./cmd/...`-output in metal/ (de scripts schrijven naar metal/out/).
+metal/hopos
+metal/hopos-lrv

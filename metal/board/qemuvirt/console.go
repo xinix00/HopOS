@@ -3,6 +3,7 @@ package qemuvirt
 import (
 	_ "unsafe" // voor go:linkname
 
+	"hop-os/metal/driver/conlog"
 	"hop-os/metal/driver/fb"
 	"hop-os/metal/driver/pl011"
 )
@@ -13,6 +14,7 @@ import (
 //
 //go:linkname printk runtime/goos.Printk
 func printk(c byte) {
+	conlog.Put(c) // ook over het netwerk op te vragen (driver/conlog)
 	pl011.Putc(UART0Base, c)
 	fb.Putc(c)
 }

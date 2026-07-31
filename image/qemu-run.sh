@@ -20,6 +20,13 @@ set -e
 
 TAMAGO="${TAMAGO:-$HOME/tamago-go/bin/go}"
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+. "$DIR/image/lib.sh"
+
+# De ingebakken blobs zijn build-input, geen bronbestand: na deze run horen ze
+# weg te zijn (ook als hij halverwege faalt). Anders bouwt een volgende build
+# ongemerkt met de resten van deze mee.
+trap clean_embeds EXIT INT TERM
+
 SMP="${SMP:-4}"
 MODE="${1:-demo}"
 [ $# -gt 0 ] && shift
@@ -54,12 +61,9 @@ demo)
 	echo "HOP-kern HTTP: curl http://127.0.0.1:${HOPPORT:-8080}/ · poort-publicatie: nc 127.0.0.1 ${PORTPUB:-18080}" >&2
 	;;
 agent)
-	# De apploader gecomprimeerd op de go:embed-plek (zelfde recept als
-	# uefi-run.sh): zonder embedloader start de agent geen enkele job.
-	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-		"$TAMAGO" build -tags linkcpuinit -trimpath \
-		-ldflags "-w -T 0x50010000 -R 0x1000" -o kern/apploaderblob/apploader.elf ./app/apploader
-	gzip -9 -n -f kern/apploaderblob/apploader.elf
+	# De apploader gecomprimeerd op de go:embed-plek (recept in image/lib.sh):
+	# zonder embedloader start de agent geen enkele job.
+	bake_apploader arm64 linkcpuinit 0x50010000
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "linkcpuinit embedloader$GUITAG" -trimpath \
 		-ldflags "-s -w -T 0x40010000 -R 0x1000" -o out/hopos-agent.elf ./cmd/hopos

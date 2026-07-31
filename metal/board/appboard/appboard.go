@@ -35,3 +35,27 @@ func Use(b Board) { active = b }
 
 // Current geeft het actieve board.
 func Current() Board { return active }
+
+// TimebaseHz is de frequentie van de vrijlopende tijdteller van dit board, of 0
+// als het board hem niet aanlevert. Alleen RISC-V heeft dit nodig: daar bestaat
+// geen register waaruit de frequentie volgt (waar ARM CNTFRQ_EL0 heeft), dus moet
+// iemand het getal zeggen — en dat is board-kennis.
+//
+// Waarom hier en niet in het generieke app-board zelf: dat pakket hoort op élke
+// architectuur hetzelfde te zijn, en een SG2002-frequentie als constante maakte
+// het stil board-specifiek. Board-basis-pakketten mogen elkaar niet importeren
+// (tools/importcheck), maar dít pakket mogen ze allebei — dus loopt de seam hier
+// langs. Zetten in het init() van de board-basis, lezen bij de eerste klok-lees.
+var TimebaseHz uint64
+
+// PrintkSink is waar runtime-output van een app heen mag (per byte). Nil —
+// de default — is stil: een gekooide core heeft geen UART, dus er is geen
+// vanzelfsprekende plek. applib hangt hier bij Init zijn log-ring in, en
+// daarmee wordt het éne dat runtime-output nog te melden heeft zichtbaar in
+// het task-log: de panic. Zonder deze haak is een panic een exit-code 2
+// zonder één regel reden (gemeten 31-07: de apploader stierf vijfmaal
+// "exited before staging" en het waaróm — out of memory — bestond nergens).
+//
+// De aanroeper (runtime/goos.Printk via het board) zit mogelijk mídden in die
+// panic: wat hier geregistreerd wordt mag niet alloceren en niet blokkeren.
+var PrintkSink func(byte)

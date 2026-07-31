@@ -37,6 +37,11 @@ const (
 
 func SlotIP(i int) string { return layout.IP4Str(layout.SlotIP4(i)) }
 
+// GatewayIP is "mijn node" zoals elke app hem ziet (10.100.0.1): het adres waar
+// de node-diensten binnen te bereiken zijn, op élke node hetzelfde. Zelfde
+// waarde als SlotIP(0), maar dít is de naam waaronder een aanroeper hem bedoelt.
+func GatewayIP() string { return SlotIP(0) }
+
 // hostMAC is HOP's MAC op het interne net (slot 0 → ..:00).
 var hostMAC = layout.SlotMAC(0)
 

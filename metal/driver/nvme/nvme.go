@@ -11,6 +11,7 @@ package nvme
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 
@@ -121,7 +122,12 @@ func (c *Controller) submit(q *queue, m cmd) error {
 	q.tail = (q.tail + 1) % qEntries
 	dev.Write32(c.doorbell(q, false), q.tail)
 
-	// Poll de completion (phase-bit wisselt per CQ-omloop).
+	// Poll de completion (phase-bit wisselt per CQ-omloop). Gosched per ronde:
+	// deze lus mag tot 5 seconden lopen en op een node met één app-core is dat
+	// anders 5 seconden zonder scheduler-punt — de heartbeat-goroutine, de
+	// servicers en de andere slots staan dan stil omdat één disk-command hangt.
+	// Een gezonde completion is er binnen microseconden, dus de yield kost niets
+	// op de blije weg.
 	cqe := q.cq + uintptr(q.head)*cqeSize
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -141,6 +147,7 @@ func (c *Controller) submit(q *queue, m cmd) error {
 		if time.Now().After(deadline) {
 			return fmt.Errorf("nvme: timeout on command %#x", m.opc)
 		}
+		runtime.Gosched()
 	}
 }
 
@@ -256,6 +263,13 @@ func (c *Controller) Init(dmaBase uintptr, dmaSize uint64) error {
 func (c *Controller) xfer(opc uint32, lba uint64, p []byte, write bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// Nul bytes expliciet weigeren. NLB is een 0-based veld (dw12 = nlb-1), dus
+	// een lege transfer maakt daar 0xffffffff van: een opdracht van 4Gi blokken
+	// op één DMA-pagina — de controller DMA't dan ver buiten onze buffer. Er is
+	// geen zinnige lege NVMe-transfer, dus dit is een fout van de aanroeper.
+	if len(p) == 0 {
+		return errors.New("nvme: zero-length transfer")
+	}
 	if uint64(len(p)) > 4096 || uint64(len(p))%c.BlockSize != 0 {
 		return fmt.Errorf("nvme: length %d not a block multiple (bs=%d, max 4096)", len(p), c.BlockSize)
 	}

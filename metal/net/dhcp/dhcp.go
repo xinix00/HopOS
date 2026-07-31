@@ -67,16 +67,27 @@ func (l Lease) CIDR() string {
 // een laat OFFER van een vorige ronde ons niet in de war brengt.
 func Acquire(nic NIC, mac [6]byte, timeout time.Duration) (Lease, error) {
 	deadline := time.Now().Add(timeout)
+	// rxErr is de laatste RX-fout van de NIC. Als er nooit een lease komt is dít
+	// het verschil tussen "geen DHCP-server op dit segment" en "deze NIC levert
+	// geen frames" — twee diagnoses die de operator naar twee andere plekken
+	// sturen, en de tweede zag hij tot nu toe nooit.
+	var rxErr error
 	for ronde := uint32(1); ; ronde++ {
 		if !time.Now().Before(deadline) {
-			return Lease{}, fmt.Errorf("dhcp: no lease within %v", timeout)
+			if rxErr != nil {
+				return Lease{}, fmt.Errorf("dhcp: no lease within %v; last NIC receive error: %w", timeout, rxErr)
+			}
+			return Lease{}, fmt.Errorf("dhcp: no lease within %v (no server answered)", timeout)
 		}
 		xid := 0x484F5000 | ronde // "HOP" + ronde
 
 		if err := nic.Transmit(packet(mac, xid, 1, nil)); err != nil { // DISCOVER
 			return Lease{}, fmt.Errorf("dhcp: TX: %w", err)
 		}
-		offer, ok := await(nic, mac, xid, 2, deadline) // OFFER
+		offer, ok, err := await(nic, mac, xid, 2, deadline) // OFFER
+		if err != nil {
+			rxErr = err
+		}
 		if !ok {
 			continue
 		}
@@ -89,7 +100,11 @@ func Acquire(nic NIC, mac [6]byte, timeout time.Duration) (Lease, error) {
 		if err := nic.Transmit(packet(mac, xid, 3, req)); err != nil {
 			return Lease{}, fmt.Errorf("dhcp: TX: %w", err)
 		}
-		if ack, ok := await(nic, mac, xid, 5, deadline); ok { // ACK
+		ack, ok, err := await(nic, mac, xid, 5, deadline) // ACK
+		if err != nil {
+			rxErr = err
+		}
+		if ok {
 			ack.Acquired = true
 			return ack, nil
 		}
@@ -215,23 +230,35 @@ func (l Lease) renewAfter() time.Duration {
 
 // await polt tot msgtype (2=OFFER, 5=ACK) voor onze xid binnenkomt, of tot
 // het ronde-window (3s, begrensd door de totale deadline) sluit.
-func await(nic NIC, mac [6]byte, xid uint32, msgtype byte, deadline time.Time) (Lease, bool) {
+//
+// De fout van Receive gaat MEE naar boven. Hij werd hier weggegooid, en dat maakte
+// van elke kapotte NIC een "geen DHCP-server": drie seconden stil pollen op een
+// driver die bij elk frame hetzelfde meldt, en dan een timeout-melding die de
+// operator naar zijn router stuurt in plaats van naar de kabel of de driver. Een
+// RX-fout is bovendien niet per definitie fataal (een enkel frame kan best
+// afketsen), dus de ronde loopt door en de LAATSTE fout gaat mee — de aanroeper
+// kiest of hij hem noemt.
+func await(nic NIC, mac [6]byte, xid uint32, msgtype byte, deadline time.Time) (Lease, bool, error) {
 	window := time.Now().Add(3 * time.Second)
 	if window.After(deadline) {
 		window = deadline
 	}
 	buf := make([]byte, 1536)
+	var lastErr error
 	for time.Now().Before(window) {
-		n, _ := nic.Receive(buf)
+		n, err := nic.Receive(buf)
+		if err != nil {
+			lastErr = err
+		}
 		if n == 0 {
 			time.Sleep(time.Millisecond)
 			continue
 		}
 		if l, ok := parse(buf[:n], mac, xid, msgtype); ok {
-			return l, true
+			return l, true, nil
 		}
 	}
-	return Lease{}, false
+	return Lease{}, false, lastErr
 }
 
 // packet bouwt één DHCP-frame: ethernet-broadcast, IPv4 0.0.0.0 →

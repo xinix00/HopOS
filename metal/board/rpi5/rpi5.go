@@ -63,8 +63,7 @@ func init() {
 	raspi.RNG200Base = RNG200Base
 	raspi.WatchdogBase = 0x10_7d20_0000 // PM-blok (bcm2712.dtsi watchdog@7d200000)
 	p := layout.Plan{
-		CtrlPA:        0x10000000,
-		RingPA:        0x11000000,
+		NodeCtrlPA:    0x10000000,
 		Stage2PA:      0x12000000,
 		RevokeVecPA:   revokeVecAsm,
 		BootScratchPA: raspi.BootScratch, // 0x7F000, cpuinit-vast

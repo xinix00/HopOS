@@ -40,6 +40,19 @@ func Scan(rw MDIO) (addr int, id1, id2 uint16, found bool) {
 // (her)start autoneg, pollt BMSR op AN-complete + link, en leidt de snelheid
 // af uit GBSR (1000FD) en anders ANLPAR.
 func AutoNeg(rw MDIO, phy int, timeout time.Duration) (speed int, fd bool, err error) {
+	return autoNeg(rw, phy, timeout, true)
+}
+
+// AutoNegFast is AutoNeg voor een PHY die géén gigabit kan — de interne ePHY
+// van de SG2002 (LicheeRV Nano) is er één. Verschil: geen 1000FD adverteren en
+// GBCR/GBSR (register 9/10) helemaal niet aanraken. Die registers bestaan op
+// zo'n PHY niet, en op bring-up-silicium schrijven we niets waarvan we de
+// betekenis niet kennen.
+func AutoNegFast(rw MDIO, phy int, timeout time.Duration) (speed int, fd bool, err error) {
+	return autoNeg(rw, phy, timeout, false)
+}
+
+func autoNeg(rw MDIO, phy int, timeout time.Duration, gigabit bool) (speed int, fd bool, err error) {
 	const (
 		bmcr = 0
 		bmsr = 1
@@ -48,9 +61,11 @@ func AutoNeg(rw MDIO, phy int, timeout time.Duration) (speed int, fd bool, err e
 		gctl = 9
 		gsta = 10
 	)
-	// Adverteer alles: 10/100 HD/FD + 1000FD, dan autoneg (her)starten.
-	rw.MDIOWrite(phy, adv, 0x01E1)  // 10/100 HD+FD, 802.3
-	rw.MDIOWrite(phy, gctl, 0x0200) // 1000BASE-T FD
+	// Adverteer alles wat deze PHY kan, dan autoneg (her)starten.
+	rw.MDIOWrite(phy, adv, 0x01E1) // 10/100 HD+FD, 802.3
+	if gigabit {
+		rw.MDIOWrite(phy, gctl, 0x0200) // 1000BASE-T FD
+	}
 	rw.MDIOWrite(phy, bmcr, 0x1200) // ANENABLE|ANRESTART
 	deadline := time.Now().Add(timeout)
 	for {
@@ -63,7 +78,7 @@ func AutoNeg(rw MDIO, phy int, timeout time.Duration) (speed int, fd bool, err e
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if rw.MDIORead(phy, gsta)&(1<<11) != 0 { // LP 1000FD
+	if gigabit && rw.MDIORead(phy, gsta)&(1<<11) != 0 { // LP 1000FD
 		return 1000, true, nil
 	}
 	l := rw.MDIORead(phy, lpa)

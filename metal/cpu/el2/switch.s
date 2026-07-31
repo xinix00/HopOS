@@ -84,12 +84,12 @@ yield:
 	// geen +4 zoals bij een getrapte WFE). SPSR ernaast.
 	WORD	$0xd53c4022	// mrs x2, elr_el2
 	WORD	$0xd53c4003	// mrs x3, spsr_el2
-	STP	(R2, R3), 288(R1)	// layout.CtxELR
+	STP	(R2, R3), 288(R1)	// layout.CtxResume
 	WORD	$0xd5384102	// mrs x2, sp_el0
 	WORD	$0xd53c4103	// mrs x3, sp_el1
-	STP	(R2, R3), 272(R1)	// layout.CtxSPEL0
+	STP	(R2, R3), 272(R1)	// layout.CtxSP
 
-	// EL1-sysregs (volgorde = layout.CtxSysregs, 304..448): het volledige
+	// EL1-sysregs (volgorde = layout.CtxRegime, 304..448): het volledige
 	// vertaal/context-regime dat de volgende bewoner NIET mag erven.
 	WORD	$0xd5381002	// mrs x2, sctlr_el1
 	WORD	$0xd5382043	// mrs x3, tcr_el1
@@ -158,19 +158,18 @@ fault:
 	// bewoner dood en draait de rest van de core gewoon door.
 	WORD	$0xd53c2100	// mrs x0, vttbr_el2
 	LSR	$48, R0, R0	// x0 = slot
-	MOVD	216(RSP), R1	// layout.SchedCtrlPA
-	ADD	R0<<12, R1, R1	// + slot*CtrlStride = eigen ctrl-page
-	ADD	$1, R2, R2
-	MOVD	R2, 0x68(R1)	// layout.CtrlFaultVec = vec+1
-	WORD	$0xd53c5202	// mrs x2, esr_el2
-	MOVD	R2, 0x58(R1)	// layout.CtrlFaultESR
-	WORD	$0xd53c6002	// mrs x2, far_el2
-	MOVD	R2, 0x60(R1)	// layout.CtrlFaultFAR
-	MOVD	208(RSP), R1	// staat → dead
+	MOVD	208(RSP), R1	// layout.SchedS2PA
 	ADD	R0<<16, R1, R1
-	ADD	$0x6000, R1, R1
+	ADD	$0x6000, R1, R1	// x1 = ctx-blok van de bewoner (layout.CtxOff)
+	MOVD	8(R1), R3	// layout.CtxCtrlPA = zijn control-page (door HOP gezet)
+	ADD	$1, R2, R2
+	MOVD	R2, 0x68(R3)	// layout.CtrlFaultVec = vec+1
+	WORD	$0xd53c5202	// mrs x2, esr_el2
+	MOVD	R2, 0x58(R3)	// layout.CtrlFaultESR
+	WORD	$0xd53c6002	// mrs x2, far_el2
+	MOVD	R2, 0x60(R3)	// layout.CtrlFaultFAR
 	MOVD	$4, R2
-	MOVD	R2, (R1)
+	MOVD	R2, (R1)	// ctx-staat → dead (layout.CtxDead)
 	DSB	$15
 	B	rotate
 
@@ -221,7 +220,7 @@ boot:
 	MOVD	$3, R9
 	MOVD	R9, (R1)
 	DSB	$15
-	MOVD	8(R1), R0	// layout.CtxBootCtx → x0 (zoals PSCI 'm zou geven)
+	MOVD	8(R1), R0	// layout.CtxCtrlPA → x0 (zoals PSCI 'm zou geven)
 	MOVD	16(R1), R2	// layout.CtxBootPC (s2tramp)
 	JMP	(R2)
 

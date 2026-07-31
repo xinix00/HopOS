@@ -21,9 +21,24 @@ package drbg
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"sync"
 )
 
 const reseedInterval = 1 << 20 // bytes tussen twee TRNG-herzaaiingen
+
+// mu beschermt de hele DRBG-staat. Dit is een gedeelde generator met véle
+// aanroepers — TLS-handshakes, sleutelgeneratie, map-hashes, elke goroutine die
+// crypto/rand aanraakt — en ze draaien op verschillende cores. Zonder lock
+// racen state/ctr en, erger dan een gescheurd woord: twee aanroepers die
+// dezelfde (state, ctr) zien krijgen dezelfde output. Een DRBG die zijn
+// keystream herhaalt is geen DRBG meer, dus dit is een correctheids-invariant en
+// geen prestatiedetail. De kritieke sectie is een handvol SHA-256-rondes.
+//
+// Bewust sync.Mutex en geen atomics: de sectie moet ATOMAIR zijn (lees state,
+// hash, schrijf state), niet alleen per woord coherent. De runtime roept ons ook
+// heel vroeg aan (hashinit, vóór er andere goroutines zijn) — daar is de lock
+// per definitie onbetwist en dus alleen een CAS.
+var mu sync.Mutex
 
 var (
 	state       [32]byte
@@ -38,6 +53,8 @@ var (
 // (CNTPCT, bv. ARM64.Counter) voor de jitter-terugval. Aanroepen vanuit de
 // runtime/goos.InitRNG-hook van het board.
 func Init(fillFn func([]byte) (string, bool), counter func() uint64) {
+	mu.Lock()
+	defer mu.Unlock()
 	fill = fillFn
 	var seed [48]byte
 	if src, ok := fill(seed[:]); ok {
@@ -50,10 +67,16 @@ func Init(fillFn func([]byte) (string, bool), counter func() uint64) {
 
 // Source geeft de gekozen entropiebron ("rndr", "smccc-trng" of "jitter")
 // terug — voor de discovery-print en de boot-log.
-func Source() string { return source }
+func Source() string {
+	mu.Lock()
+	defer mu.Unlock()
+	return source
+}
 
 // Read vult b uit de DRBG — het werk achter runtime/goos.GetRandomData.
 func Read(b []byte) {
+	mu.Lock()
+	defer mu.Unlock()
 	if source != "jitter" && sinceReseed >= reseedInterval {
 		reseed()
 	}
@@ -93,7 +116,8 @@ func jitterSeed(dst []byte, counter func() uint64) {
 
 // reseed mengt een verse hardware-draw in de DRBG-state: state' =
 // H(state ‖ fresh). Faalt de bron even, dan blijft de oude state staan (nog
-// steeds veilig) en proberen we bij de volgende drempel opnieuw.
+// steeds veilig) en proberen we bij de volgende drempel opnieuw. Aanroepen met
+// mu vast (alleen vanuit Read).
 func reseed() {
 	var fresh [24]byte
 	if _, ok := fill(fresh[:]); ok {

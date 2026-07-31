@@ -17,7 +17,6 @@
 package raspi
 
 import (
-	"strings"
 	"sync"
 
 	_ "unsafe"
@@ -27,6 +26,7 @@ import (
 	"hop-os/metal/abi/layout"
 	"hop-os/metal/cpu/idle"
 	"hop-os/metal/dev"
+	"hop-os/metal/fw/bootcfg"
 	"hop-os/metal/fw/fdt"
 )
 
@@ -84,8 +84,7 @@ func DTBPool(dtbPtr uintptr, p layout.Plan) []layout.Region {
 
 	holes := []layout.Region{
 		{Base: 0, Size: HopKernelEnd}, // HOP-kern + laag geheugen (TF-A/scratch/park)
-		{Base: p.CtrlPA, Size: uint64(layout.MaxSlots+1) * layout.CtrlStride},
-		{Base: p.RingPA, Size: uint64(layout.MaxSlots) * layout.RingStride},
+		{Base: p.NodeCtrlPA, Size: uint64(layout.MaxSlots+1) * layout.CtrlStride},
 		{Base: p.Stage2PA, Size: uint64(layout.MaxSlots+1) * layout.Stage2Stride},
 	}
 	if p.NetDMAPA != 0 {
@@ -110,40 +109,22 @@ func BootParam(dtb uintptr, key string) string {
 	if !ok {
 		return ""
 	}
-	for _, tok := range strings.Fields(args) {
-		if v, found := strings.CutPrefix(tok, key+"="); found {
-			return v
-		}
-	}
-	return ""
+	return bootcfg.First(bootcfg.Cmdline(args, key))
 }
 
-// BootParamAll geeft ALLE waarden van een herhaalde sleutel uit de cmdline, in
+// BootParamAll geeft ALLE waarden van een herhaalde sleutel uit de config, in
 // volgorde — voor lijst-config zoals het init-manifest (`hopos.init[]={...}`).
-// Zie BootParam voor de enkele; elke waarde is één token, dus geen spaties
-// (compacte JSON). cmdline.txt is één regel, dus alle entries erachter.
+// Twee kanalen, dezelfde sleutels; de lezing van elk staat in fw/bootcfg (die
+// parser bedient ook de UEFI-stub en het ingebakken blob van de LicheeRV).
 func BootParamAll(dtb uintptr, key string) []string {
-	var out []string
 	// Bron 1: het config-bestand dat de firmware als "initramfs" laadde
 	// (config.txt: `initramfs hopos.cfg <addr>`) — regels `key=waarde`,
 	// waarde mag spaties bevatten (volle JSON-jobspecs!), # = commentaar.
 	// Dit is het kanaal zónder het 1024-byte-bootargs-plafond.
-	for _, line := range strings.Split(configFile(dtb), "\n") {
-		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if v, found := strings.CutPrefix(line, key+"="); found {
-			out = append(out, v)
-		}
-	}
+	out := bootcfg.All(configFile(dtb), key)
 	// Bron 2: de klassieke cmdline.txt-tokens (kleine sleutels, overrides).
 	if args, ok := fdt.Bootargs(dtb); ok {
-		for _, tok := range strings.Fields(args) {
-			if v, found := strings.CutPrefix(tok, key+"="); found {
-				out = append(out, v)
-			}
-		}
+		out = append(out, bootcfg.Cmdline(args, key)...)
 	}
 	return out
 }

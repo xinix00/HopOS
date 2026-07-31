@@ -1,3 +1,5 @@
+//go:build tamago && arm64
+
 // Zelfplaatsing (15-07, idee Derek): de apploader plaatst de gedownloade app
 // zélf voor, in plaats van dat HOP op core 0 de bytes schuift. De kooi maakt
 // dat veilig — alles wat dit stubje binnen de eigen partitie doet (of fout
@@ -70,7 +72,7 @@ func (a *App) selfPlace(stageAddr uintptr, imgSize int64) (uint64, error) {
 	appRAM := a.RAMSize
 	stubBase := uint64(stageAddr) - stubWin
 	img := unsafe.Slice((*byte)(unsafe.Pointer(stageAddr)), imgSize)
-	plan, err := place.Build(bytes.NewReader(img), imgSize, linkBase, appRAM, stubBase-linkBase, a.Slot)
+	plan, err := place.Build(bytes.NewReader(img), imgSize, linkBase, appRAM, 0, stubBase-linkBase, a.Slot, abiVersion)
 	if err != nil {
 		return 0, err
 	}

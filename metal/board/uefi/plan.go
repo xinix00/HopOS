@@ -37,8 +37,11 @@ const (
 	carveOff  = 0x08000000 // = ramSize (Go-RAM 128MB)
 	carveSize = 0x02000000 // CARVE_SIZE in init.s (32MB, dekt t/m scratch)
 
-	ctrlOff    = carveOff + 0x000000  // (SlotCap+1)×4KB, 1MB gereserveerd
-	ringOff    = carveOff + 0x100000  // SlotCap×64KB = 8MB
+	ctrlOff = carveOff + 0x000000 // (SlotCap+1)×4KB, 1MB gereserveerd
+	// (hier lag de ring-regio: 8MB voor SlotCap×64KB hop-ABI-ringen. Die liggen
+	// sinds ABIVersion 2 in de partitie van het slot zelf, dus dit gat is vrij.
+	// De offsets hieronder blijven staan waar ze staan: REVOKE_OFF en CARVE_SIZE
+	// zijn literals in init.s.)
 	stage2Off  = carveOff + 0x900000  // (SlotCap+1)×64KB ≈ 8MB
 	revokeOff  = carveOff + 0x900800  // REVOKE_OFF in init.s (stage2 slot-0 +0x800)
 	netDMAOff  = carveOff + 0x1200000 // NetDMASize (8MB)
@@ -111,8 +114,7 @@ func init() {
 	}
 
 	layout.UsePlan(layout.Plan{
-		CtrlPA:        b + ctrlOff,
-		RingPA:        b + ringOff,
+		NodeCtrlPA:    b + ctrlOff,
 		Stage2PA:      b + stage2Off,
 		RevokeVecPA:   b + revokeOff,
 		NetDMAPA:      b + netDMAOff,

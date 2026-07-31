@@ -17,13 +17,27 @@ package slots
 //
 // App-cores zijn [HopReserved()+1, NumAppCores()]: core 0 (+ de eerste
 // HopReserved) draait de HOP-runtime, de rest draagt apps.
+//
+// Deze nummers zijn LOGISCH en aaneengesloten — dat is een afspraak van kern/slots
+// en geen uitspraak over het silicium. Op ARM valt hij samen met de PSCI-nummering;
+// op RISC-V levert een board een lijst hart-ID's die niet aaneengesloten hoeft te
+// zijn, en vertaalt de kooi-naad (hartOf in cage_riscv64.go). Buiten die naad komt
+// een fysiek hart-ID hier niet voor.
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
 	"hop-os/metal/abi/layout"
 )
+
+// ErrPoolSize markeert een sharegroup-spec die niet bij de bestaande groep past.
+// Bewust apart van de capaciteitsfouten van dit pakket, want het is een ándere
+// soort fout: op capaciteit kan een aanroeper wachten (een slot komt vrij), op
+// twee jobspecs die het oneens zijn nooit — dáár moet een spec veranderen. De
+// aanroeper (slotmgr) mag dit dus niet als "pending" behandelen.
+var ErrPoolSize = errors.New("sharegroup-poolgrootte wijkt af")
 
 var (
 	poolMu    sync.Mutex
@@ -67,6 +81,13 @@ func leastLoaded(cores []int) int {
 // core is — dan is de node vol op cores (RAM is de andere muur, die HOP
 // bewaakt). Idempotent per kooi: een tweede PlaceCage voor dezelfde kooi geeft
 // dezelfde core terug (fase 2 hoeft niet opnieuw te kiezen).
+//
+// Een ongetagde job die geen vrije core vindt FAALT, en gaat níet stil een hart
+// delen. Dat is de kern van het model en geen capaciteitsdetail: een hart delen
+// betekent timing-zijkanalen met je medebewoner (zie docs/technical/isolation.md),
+// dus wie deelt hoort dat gekozen te hebben — welke jobs, en met wie. De
+// sharegroup-tag ÍS die keuze. Een terugval "geen core vrij, dan maar delen"
+// neemt hem stil over, en dat mag deze laag niet doen.
 func PlaceCage(cage int, group string, poolCores int) (int, error) {
 	poolMu.Lock()
 	defer poolMu.Unlock()
@@ -81,7 +102,7 @@ func PlaceCage(cage int, group string, poolCores int) (int, error) {
 	if group == "" {
 		free := freeCores()
 		if len(free) == 0 {
-			return 0, fmt.Errorf("geen vrije app-core voor kooi %d (node vol op cores)", cage)
+			return 0, fmt.Errorf("geen vrije app-core voor kooi %d (node vol op cores; delen vraagt een sharegroup)", cage)
 		}
 		c := free[0]
 		coreApps[c]++
@@ -101,6 +122,17 @@ func PlaceCage(cage int, group string, poolCores int) (int, error) {
 		for _, c := range cores {
 			coreGroup[c] = group
 		}
+	} else if len(cores) != poolCores {
+		// De poolgrootte van een bestaande groep is NIET "first wins". Het was dat
+		// stil: een groep die met twee cores begon negeerde de vier die de volgende
+		// job vroeg, en die job kreeg dus de helft van zijn afgesproken hart-budget
+		// zonder dat iemand het zag. De grootte is een eigenschap van de GROEP (het
+		// zijn dezelfde cores), dus twee jobs die er iets anders over zeggen zijn
+		// niet allebei waar — één van de twee specs is fout, en dat hoort de
+		// aanroeper te horen in plaats van te raden waarom zijn app te weinig
+		// hart heeft.
+		return 0, fmt.Errorf("%w: sharegroup %q heeft een pool van %d core(s), maar kooi %d vraagt %d — één sharegroup, één poolgrootte",
+			ErrPoolSize, group, len(cores), cage, poolCores)
 	}
 	c := leastLoaded(cores)
 	coreApps[c]++

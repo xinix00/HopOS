@@ -1,3 +1,5 @@
+//go:build arm64
+
 // Package idle laat een core écht slapen als zijn Go-runtime niets te doen
 // heeft — het antwoord op "jobs die vooral staan te idlen" (Derek), zonder
 // DVFS-beleid: een core in WFE is clock-gated en verbruikt vrijwel niets,
@@ -15,6 +17,9 @@
 //
 // Elke core roept Enable aan in zijn eigen hwinit1 (ná arm64.Init, die de
 // default governor zet); CNTKCTL is per core.
+//
+// Dit is de ARM64-helft: WFE + de generic-timer-event-stream. Zie
+// idle_riscv64.go voor waarom die architectuur (voorlopig) niets doet.
 package idle
 
 import (
@@ -86,6 +91,13 @@ func Ticks() uint64 { return ticks.Load() }
 // normeert tegen dít tempo. LET OP QEMU-TCG: WFE is daar een no-op, dus
 // idle-tijd meet er ~0 — idle-metingen zijn ijzer-metingen.
 func CounterHz() uint64 { return cntfrq() }
+
+// AccountsDedicated meldt of de idle-teller óók op een DEDICATED core loopt.
+// Waar op ARM: de governor WFE't daar en meet de geslapen tijd. Op een gedeelde
+// core meten beide architecturen (de yield beslaat de hele descheduled-periode),
+// dus alleen dít geval verschilt — en wie een cpu-percentage rapporteert moet het
+// weten: een teller die stilstaat leest als "100% bezig". Zie idle_riscv64.go.
+func AccountsDedicated() bool { return true }
 
 // wfeMinSleep (counter-ticks, ~1-2,5µs op 25-64MHz): de grens tussen "de WFE
 // consumeerde alleen een verschaald event" en "de core heeft echt geslapen".

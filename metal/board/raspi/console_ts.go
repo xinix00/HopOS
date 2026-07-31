@@ -13,6 +13,7 @@ package raspi
 import (
 	"time"
 
+	"hop-os/metal/driver/conlog"
 	"hop-os/metal/driver/fb"
 	"hop-os/metal/driver/pl011"
 )
@@ -36,6 +37,9 @@ func Printk(uartBase uintptr, c byte) {
 		return // app-core: geen toegang tot de UART (kooi)
 	}
 	ConsoleByte(c, func(b byte) {
+		// Eerst de ring: een node zonder debug-kabel moet zijn eigen
+		// console alsnog over het netwerk kunnen geven (zie driver/conlog).
+		conlog.Put(b)
 		pl011.Putc(uartBase, b)
 		fb.Putc(b)
 	})

@@ -8,8 +8,9 @@
 // edit-ronde door elke "generieke" package.
 package board
 
+import "fmt"
+
 import (
-	"fmt"
 	"net"
 	"time"
 
@@ -20,32 +21,6 @@ import (
 	"hop-os/metal/driver/pcie"
 	"hop-os/metal/net/dhcp"
 )
-
-// PowerState is de powertoestand van een core (PSCI AFFINITY_INFO, ARM DEN 0022).
-type PowerState int
-
-const (
-	PowerOn        PowerState = 0
-	PowerOff       PowerState = 1
-	PowerOnPending PowerState = 2
-)
-
-// String maakt PowerState een fmt.Stringer, zodat %s de leesbare toestand
-// geeft (gedeeld door de probes i.p.v. een powstr-kopie per main).
-func (s PowerState) String() string {
-	switch s {
-	case PowerOn:
-		return "ON"
-	case PowerOff:
-		return "OFF"
-	case PowerOnPending:
-		return "ON_PENDING"
-	}
-	return fmt.Sprintf("?%d", int(s))
-}
-
-// PSCISuccess is de PSCI-return-code voor succes (SMCCC).
-const PSCISuccess int64 = 0
 
 // NetConfig is het IPv4-plan van het interne net van een node (op QEMU de
 // slirp-defaults; op echt ijzer straks uit DHCP/DT).
@@ -108,16 +83,16 @@ type LifecyclePacer interface {
 // niets van dit contract hoeft te importeren; het board levert alleen de
 // waarden via PCIe().
 
-// Board is één concreet board — het volledige HOP-contract, geïmplementeerd
-// door de hop-helft van elk board-pakket (board/<x>/hop). Het embedt het
-// app-contract (appboard.Board: CoreID, SetTimerOffset), dat de basis-helft
-// apart registreert voor app-images. Alle methodes draaien op de HOP-kern
-// (core 0), behalve CPUOff, dat de aanroepende core zelf uitzet.
-type Board interface {
+// Common is het arch-neutrale deel van het board-contract: alles wat de
+// generieke kern van élk board nodig heeft, ongeacht of dat een ARM-board met
+// EL2/PSCI is of een RISC-V-board met machine mode en een PMP-kooi. De arch-specifieke
+// helft (kooi-mechaniek en core-power) staat in board_arm64.go / board_riscv64.go,
+// die Common embedden tot het volledige Board-contract.
+//
+// Alle methodes draaien op de HOP-kern (core 0).
+type Common interface {
 	appboard.Board // CoreID + SetTimerOffset (de app-zichtbare kern)
 
-	// Boot & topologie.
-	BootEL() int               // ≥2 vereist (stage-2-kooi); 1 = EL1: mains weigeren
 	CoreClass(core int) string // clusterklasse ("small"/"mid"/"big")
 
 	// MemTotal is de door de firmware gerapporteerde DRAM-grootte in bytes
@@ -132,43 +107,23 @@ type Board interface {
 	TimerOffset() int64
 	SetWallTime(ns int64)
 
-	// PSCI power-control (return: PSCISuccess of een foutcode).
-	CPUOn(core, entry, ctx uint64) int64
-	CPUOff() int64
-	AffinityInfo(core uint64) PowerState
-	PSCIVersion() (major, minor uint16)
-
-	// S2TrampPC is het fysieke entrypoint van de EL2-trampoline voor app-cores
-	// onder stage-2-isolatie. De hard-kill vereist géén board-methode meer: die
-	// loopt board-neutraal via stage2.Revoke (stage-2-intrekking + HVC/TLBI),
-	// niet via de interrupt-controller.
-	S2TrampPC() uint64
-
-	// SMP (fase 5): één app over meerdere cores met een gedeelde heap. Een
-	// secundaire core komt op via CPU_ON naar S2SMPTrampPC (fysiek, in de
-	// HOP-image) en ERET't naar de EL1-stub in het app-image. HOP publiceert
-	// S2SMPTrampPC op de control-page; de app-OS-laag (metal/cpu/smp) haalt
-	// zijn eigen stub-adres rechtstreeks bij el2.SMPStubPC — dat is op elk
-	// board hetzelfde symbool, dus geen board-methode. De app blijft oblivious.
-	S2SMPTrampPC() uint64
-
 	// Netwerk. ProbeNIC construeert én initialiseert de NIC van dit board — de
-	// board kent de driver (virtio-net op QEMU, Cadence GEM op de Pi, RTL8126
-	// op de O6N) en geeft 'm als go-net-device terug plus zijn MAC (die zit op
-	// het concrete driver-type, niet op de NetworkDevice-interface). Zo blijft
-	// hopnet driver-agnostisch. Een nil device = geen NIC gevonden; een error =
-	// wel gevonden maar de init faalde.
+	// board kent de driver (virtio-net op QEMU, Cadence GEM op de Pi, DWMAC op
+	// de LicheeRV) en geeft 'm als go-net-device terug plus zijn MAC (die zit
+	// op het concrete driver-type, niet op de NetworkDevice-interface). Zo
+	// blijft hopnet driver-agnostisch. Een nil device = geen NIC gevonden; een
+	// error = wel gevonden maar de init faalde.
 	ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error)
 	Net() NetConfig
 
-	// PCIe-adresplan.
+	// PCIe-adresplan (leeg op boards zonder PCIe).
 	PCIe() pcie.Window
 
-	// Framebuffer geeft de firmware-framebuffer voor de log-console (metal/driver/fb),
-	// ontdekt via een universeel mechanisme — geen driver: UEFI GOP of de
-	// device-tree simple-framebuffer. ok=false als het board er (nog) geen
-	// heeft (QEMU -nographic, of een board vóór zijn beeld-fase). Discovery is
-	// board-kennis; het renderen erna is gedeeld.
+	// Framebuffer geeft de firmware-framebuffer voor de log-console
+	// (metal/driver/fb), ontdekt via een universeel mechanisme — geen driver:
+	// UEFI GOP of de device-tree simple-framebuffer. ok=false als het board er
+	// (nog) geen heeft (QEMU -nographic, of een board vóór zijn beeld-fase).
+	// Discovery is board-kennis; het renderen erna is gedeeld.
 	Framebuffer() (fb.Desc, bool)
 }
 
@@ -182,6 +137,32 @@ type Board interface {
 // blijft dan leidend; slots.NumSlots type-assert hier optioneel op.
 type CoreCountHinter interface {
 	ExpectedAppCores() int
+}
+
+// PowerState is de powertoestand van een core/hart. Eén definitie voor beide
+// architecturen, want het zijn dezelfde drie begrippen — alleen de BRON verschilt:
+// op ARM komt hij uit PSCI AFFINITY_INFO (ARM DEN 0022), op RISC-V uit het
+// SoC-reset-blok van het board.
+type PowerState int
+
+const (
+	PowerOn        PowerState = 0
+	PowerOff       PowerState = 1
+	PowerOnPending PowerState = 2
+)
+
+// String maakt PowerState een fmt.Stringer, zodat %s de leesbare toestand geeft
+// (gedeeld door de probes i.p.v. een powstr-kopie per main).
+func (s PowerState) String() string {
+	switch s {
+	case PowerOn:
+		return "ON"
+	case PowerOff:
+		return "OFF"
+	case PowerOnPending:
+		return "ON_PENDING"
+	}
+	return fmt.Sprintf("?%d", int(s))
 }
 
 // active is het geregistreerde board (nil tot Use — vóór elke board-call).

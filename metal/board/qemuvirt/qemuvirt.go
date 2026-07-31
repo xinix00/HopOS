@@ -40,8 +40,7 @@ const (
 // Vereist -m 3G (image/qemu-run.sh): RAM tot 0x100000000.
 func init() {
 	layout.UsePlan(layout.Plan{
-		CtrlPA:        0xC0000000,
-		RingPA:        0xC1000000,
+		NodeCtrlPA:    0xC0000000,
 		Stage2PA:      0xC2000000,
 		RevokeVecPA:   revokeVecAsm, // cpuinit zet VBAR_EL2 van core 0 hierheen
 		BootScratchPA: 0xB0000000,   // cpuinit-vast (BOOT_SCRATCH/DTB_PTR)

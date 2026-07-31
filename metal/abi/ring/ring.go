@@ -20,10 +20,20 @@ import (
 )
 
 const (
+	// Head en tail liggen elk in hun EIGEN cacheline, en dat is een harde eis, geen
+	// nette vormgeving: op een architectuur zonder coherente harten (RISC-V, zie
+	// dev.Push/Pull) schrijft de producer bij zijn cache-clean de hele line terug —
+	// inclusief zijn verouderde kopie van tail, en dus over de voortgang van de
+	// consument. Andersom idem. Gemeten 30-07 op de LicheeRV: kleine frames (DNS,
+	// TCP-handshake, HTTP-headers) kwamen door, maar zodra beide kanten tegelijk
+	// hameren (een download van 5MB) stond de ring binnen één segment stil.
+	//
+	// 64 bytes uit elkaar kost niets — de ringkop was toch al een aparte pagina —
+	// en op ARM verandert er niets: daar zijn deze regio's device-gemapt.
 	hdrHead = 0x00
-	hdrTail = 0x08
+	hdrTail = 0x40
 	hdrSize = 0x10
-	dataOff = 0x40
+	dataOff = 0x80
 
 	recHdr = 8
 
@@ -44,6 +54,12 @@ func align8(n uint64) uint64 { return (n + 7) &^ 7 }
 func Init(base uintptr, size uint64) {
 	dev.Clear(base, dataOff)
 	dev.Write64(base+hdrSize, size)
+	// De HELE kop publiceren, niet alleen het maatwoord: head en tail liggen sinds
+	// ABI 3 elk in hun eigen cacheline (zie hieronder), dus een Push van 8 bytes
+	// laat die twee ongepubliceerd. Op een board waar HOP en het app-hart niet
+	// coherent zijn zou de andere kant daar dan lezen wat er toevallig in DRAM
+	// stond in plaats van de nul die Clear net schreef.
+	dev.Push(base, dataOff)
 	dev.MB()
 }
 
@@ -54,20 +70,58 @@ type Ring struct {
 	corrupt bool // consumer zag een onmogelijke header; ring is dood
 }
 
-// Open koppelt aan een door Init klaargezette ring.
+// Open koppelt aan een door Init klaargezette ring. Pull vóór het lezen van de
+// capaciteit, net als bij de kop-accessors hieronder: Init schreef die van het
+// andere hart af. In de praktijk dekte de partitie-brede veeg vóór de dispatch
+// dit al, maar dat is een toevallige dekking en geen contract — hier staat het
+// expliciet, en het kost één op per ring.
 func Open(base uintptr) *Ring {
+	dev.Pull(base+hdrSize, 8)
 	return &Ring{base: base, size: dev.Read64(base + hdrSize)}
 }
 
-func (r *Ring) head() uint64     { return dev.Read64(r.base + hdrHead) }
-func (r *Ring) tail() uint64     { return dev.Read64(r.base + hdrTail) }
-func (r *Ring) setHead(v uint64) { dev.Write64(r.base+hdrHead, v) }
-func (r *Ring) setTail(v uint64) { dev.Write64(r.base+hdrTail, v) }
+// De vier kop-accessors doen het cache-onderhoud van de ABI: Pull vóór een lees,
+// Push ná een schrijf. Op ARM zijn dat no-ops (de ringen zijn device-gemapt en dus
+// coherent); op een architectuur zonder device-mapping is het precies wat een
+// SPSC-ring tussen twee niet-coherente harten nodig heeft. Hier en niet bij de
+// aanroepers, want dít zijn de enige plekken waar de kop van een ring gelezen of
+// geschreven wordt — één plek, geen discipline.
+func (r *Ring) head() uint64 {
+	dev.Pull(r.base+hdrHead, 8)
+	return dev.Read64(r.base + hdrHead)
+}
+
+func (r *Ring) tail() uint64 {
+	dev.Pull(r.base+hdrTail, 8)
+	return dev.Read64(r.base + hdrTail)
+}
+
+func (r *Ring) setHead(v uint64) {
+	dev.Write64(r.base+hdrHead, v)
+	dev.Push(r.base+hdrHead, 8)
+}
+
+func (r *Ring) setTail(v uint64) {
+	dev.Write64(r.base+hdrTail, v)
+	dev.Push(r.base+hdrTail, 8)
+}
+
+// putHdr schrijft één recordheader en publiceert hem meteen. ÉLKE header loopt
+// hierlangs — een echt record én een PAD — zodat de cache-stap niet meer van
+// discipline per call-site afhangt. Precies dat ging mis: de PAD-header had geen
+// Push, en dat is één plek vergeten in code die verder overal klopt. Zelfde
+// argument als bij de kop-accessors: één plek, geen discipline.
+func (r *Ring) putHdr(off, length uint64, typ uint32) {
+	addr := r.base + dataOff + uintptr(off%r.size)
+	dev.Write64(addr, length|uint64(typ)<<32)
+	dev.Push(addr, recHdr)
+}
 
 func (r *Ring) writeRec(off uint64, typ uint32, p []byte) {
+	r.putHdr(off, uint64(len(p)), typ)
 	addr := r.base + dataOff + uintptr(off%r.size)
-	dev.Write64(addr, uint64(len(p))|uint64(typ)<<32)
 	dev.Copy(addr+recHdr, p)
+	dev.Push(addr+recHdr, uintptr(align8(uint64(len(p)))))
 }
 
 // Write plaatst een record; false als de ring vol is (aanroeper beslist:
@@ -94,9 +148,19 @@ func (r *Ring) Write(typ uint32, p []byte) bool {
 		if r.size-(head-tail) < contig+need {
 			return false
 		}
-		// PAD-record over de staart, dan vooraan verder.
-		dev.Write64(r.base+dataOff+uintptr(head%r.size),
-			uint64(contig-recHdr)|uint64(TypePad)<<32)
+		// PAD-record over de staart, dan vooraan verder. De Push hoort er net zo
+		// hard bij als bij een echt record: zonder blijft deze header in de cache
+		// van de producer staan en leest de consument stále bytes op die plek —
+		// een verzonnen lengte, waarna zijn validatie de ring corrupt verklaart en
+		// de lus voorgoed stopt.
+		//
+		// Dit was de "download-flakiness" (gemeten 31-07 op de LicheeRV): een PAD
+		// wordt ALLEEN bij wraparound geschreven, dus alles onder één ringlengte
+		// werkte altijd — DHCP, HTTP-headers, een pagina van 16KB — en een
+		// download van 5MB stopte op 926360 van 5305899 bytes, 95% van de
+		// 978944-byte RX-ring. Precies de eerste wrap. Dat het soms tóch goed ging
+		// was de stale lengte die af en toe plausibel uitviel.
+		r.putHdr(head, contig-recHdr, TypePad)
 		head += contig
 	}
 	if r.size-(head-tail) < need {
@@ -149,6 +213,11 @@ func (r *Ring) ReadInto(buf []byte) (typ uint32, n int, ok bool) {
 		dev.MB() // index gezien → payload zichtbaar
 
 		addr := r.base + dataOff + uintptr(tail%r.size)
+		// Verversen vóór het lezen: de producer schreef dit record uit zíjn cache
+		// weg (Push), maar op een niet-coherente architectuur kan er nog een oude
+		// regel van ons in de weg staan. Eerst de header, dan (na de
+		// lengtevalidatie hieronder) de payload — nooit meer dan gepubliceerd is.
+		dev.Pull(addr, recHdr)
 		hdr := dev.Read64(addr)
 		length, rtyp := uint32(hdr), uint32(hdr>>32)
 		need := recHdr + align8(uint64(length))
@@ -163,6 +232,7 @@ func (r *Ring) ReadInto(buf []byte) (typ uint32, n int, ok bool) {
 			r.setTail(tail + need)
 			continue
 		}
+		dev.Pull(addr+recHdr, uintptr(length))
 		dev.CopyOut(buf[:length], addr+recHdr)
 		dev.MB() // payload gekopieerd vóór de ruimte vrijgeven
 		r.setTail(tail + need)

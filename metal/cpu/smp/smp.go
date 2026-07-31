@@ -33,9 +33,12 @@ import (
 )
 
 var (
-	primarySlot int    // slot (= core-index) van de primaire core
-	lastCore    int    // hoogste core-index van de app (primair + secundairen)
-	stubIPA     uint64 // app-IPA van de EL1-stub (ELR-doel na de trampoline)
+	primaryCtrl uintptr // control page van de primaire — de handoff-scratch. Komt
+	// van de aanroeper (applib) i.p.v. uit een slotnummer: de control page ligt in
+	// de staart van de eigen partitie (layout: de slot-ABI), en die basis kent
+	// alleen de app zelf (RamStart/RamSize).
+	lastCore int    // hoogste core-index van de app (primair + secundairen)
+	stubIPA  uint64 // app-IPA van de EL1-stub (ELR-doel na de trampoline)
 
 	nextCore int    // volgende op te brengen secundaire core (onder bootLock)
 	bootLock uint32 // spinlock: één core-boot tegelijk (één handoff-venster)
@@ -82,11 +85,11 @@ func writeHandoff(cp uintptr, sp, mp, gp, fn unsafe.Pointer, stub uint64) {
 //
 // De EL2-trampoline (fysiek, door HOP gepubliceerd) en de EL1-stub (eigen IPA)
 // haalt Configure zelf op — de app-kant blijft oblivious.
-func Configure(prim, cores int) {
+func Configure(prim, cores int, ctrl uintptr) {
 	if cores <= 1 {
 		return
 	}
-	primarySlot = prim
+	primaryCtrl = ctrl
 	lastCore = prim + cores - 1
 	nextCore = prim + 1
 	// De EL1-stub is ons eigen symbool (cpu/el2 smp.s, in élk app-image
@@ -131,7 +134,7 @@ func task(sp, mp, gp, fn unsafe.Pointer) {
 	sec := nextCore
 	nextCore++
 
-	cp := layout.CtrlPage(primarySlot)
+	cp := primaryCtrl
 	writeHandoff(cp, sp, mp, gp, fn, stubIPA)
 	dev.MB() // handoff zichtbaar vóór het verzoek
 

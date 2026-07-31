@@ -28,7 +28,6 @@
 package uefi
 
 import (
-	"strings"
 	"unsafe" // geheugenreads op firmware-adressen + go:linkname
 
 	"github.com/usbarmory/tamago/arm64"
@@ -36,9 +35,11 @@ import (
 	"hop-os/metal/cpu/drbg"
 	"hop-os/metal/cpu/idle"
 	"hop-os/metal/cpu/trng"
+	"hop-os/metal/driver/conlog"
 	"hop-os/metal/driver/fb"
 	"hop-os/metal/driver/pl011"
 	"hop-os/metal/fw/acpi"
+	"hop-os/metal/fw/bootcfg"
 )
 
 // KernelSize: de grootte van de RAM-partitie van de HOP-kern. Het
@@ -133,25 +134,21 @@ var (
 	cfgLen uint64
 )
 
-// BootConfigAll geeft ALLE key=-waarden uit hopos.cfg, in volgorde ("" = geen).
-// Tokens zijn whitespace-gescheiden key=value — regels, spaties en tabs mogen
-// door elkaar; zelfde sleutelconventie als de Pi-cmdline (hopos.cores,
-// hopos.node). Enkelvoudige config heeft één waarde, een herhaalde sleutel
-// (hopos.init[]={...}) meerdere. Elke waarde is één token, dus géén spaties
-// erin (de tokenizer splitst op whitespace): compacte JSON. cmd/hopos'
+// BootConfigAll geeft ALLE key=-waarden uit hopos.cfg, in volgorde (nil = geen).
+// Eén `key=value` per regel, #-regels zijn commentaar; enkelvoudige config heeft
+// één waarde, een herhaalde sleutel (hopos.init[]={...}) meerdere. cmd/hopos'
 // bootParam pakt de eerste voor enkelvoudige sleutels.
+//
+// De lezing zelf staat in fw/bootcfg — dezelfde parser die de Pi op zijn
+// hopos.cfg gebruikt en die het blob van de LicheeRV leest. Dat is de hele
+// reden dat hij daar staat: één bestand hoort op élk board hetzelfde te
+// betekenen.
 func BootConfigAll(key string) []string {
 	n := cfgLen
 	if n > uint64(len(cfgBuf)) {
 		n = uint64(len(cfgBuf)) // tegen een kapotte asm-lengte (contract-schending)
 	}
-	var out []string
-	for _, tok := range strings.Fields(string(cfgBuf[:n])) {
-		if v, ok := strings.CutPrefix(tok, key+"="); ok {
-			out = append(out, v)
-		}
-	}
-	return out
+	return bootcfg.All(string(cfgBuf[:n]), key)
 }
 
 // GOPFramebuffer geeft het firmware-beeld dat de stub bewaarde — de
@@ -444,6 +441,7 @@ func hwinit1() {
 
 //go:linkname printk runtime/goos.Printk
 func printk(c byte) {
+	conlog.Put(c) // ook over het netwerk op te vragen (driver/conlog)
 	if uartBase != 0 {
 		pl011.Putc(uartBase, c)
 	}
