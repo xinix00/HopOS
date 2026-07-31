@@ -22,14 +22,15 @@
 # Sipeed donor-image).
 #
 # Default is de ECHTE agent-main (cmd/hopos, -tags licheerv) — dezelfde binary-
-# vorm als op de Pi's en UEFI. Die komt op dit board headless op: de DWMAC is
-# nog niet in bedrijf (RJ45 ongesoldeerd), en zonder netwerk kan de apploader
-# geen image halen, dus jobs starten kan hij nog niet. DEMO=1 bouwt daarom
-# cmd/hopos-lrv: dezelfde kooi en dezelfde slot-lifecycle uit kern/slots, maar
-# met een ingebakken app — het bewijs op ijzer zolang het netwerk ontbreekt.
+# vorm als op de Pi's en UEFI, en hier ook een volwaardige node: de DWMAC met de
+# interne ePHY is in bedrijf (100Mbit, DHCP + NTP), dus de apploader haalt zijn
+# image gewoon over het netwerk. Alleen een framebuffer heeft dit board niet, dus
+# gui-code zit er nooit in. DEMO=1 bouwt cmd/hopos-lrv: dezelfde kooi en
+# slot-lifecycle uit kern/slots met een ÍNGEBAKKEN app — bring-up-gereedschap dat
+# de slotlaag los van netwerk en agent bewijst.
 #
-# Eerste keer een kaart: schrijf één keer het Sipeed donor-image (FSBL +
-# partitietabel + FAT-boot), daarna is elke iteratie alleen nog fip.bin
+# Eerste keer een kaart: één dd van het .img hierboven is genoeg (dat is óók het
+# release-asset hopos-licheerv.img.gz). Daarna is elke iteratie alleen nog fip.bin
 # vervangen. Zie lab/licheerv/README.md voor het draaiboek en de metingen.
 #
 # Nodig: de tamago-toolchain (TAMAGO), een riscv64 binutils (riscv64-elf-as/ld/

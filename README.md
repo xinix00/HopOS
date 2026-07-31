@@ -4,6 +4,8 @@
 
 **Docs:** [flash & boot](docs/boot.md) · [configure](docs/config.md) · [write an app](docs/app.md) · [technical](docs/index.md) — site: [gethop.org](https://gethop.org)
 
+**Download:** signed boot images for UEFI arm64, Raspberry Pi 4/5 and the RISC-V LicheeRV Nano are in the [newest release](https://github.com/xinix00/HopOS/releases/latest) — copy and boot, the default config runs as-is ([flash & boot](docs/boot.md) has the per-board steps and the signature check).
+
 HopOS turns a multi-core board — ARM64 or RISC-V — into a small fleet of single-purpose computers. Core 0 runs **HOP**, the orchestrator-kernel: it hands out cores, memory partitions and network identities, and dispatches. Every app then does its own work on its own hardware — it downloads its image over its own network stack and places itself inside its own hardware-enforced memory partition, *natively on its own dedicated CPU core*. There is no shell, no libc, no userland, no processes — killing an app means switching its core off.
 
 ## Why
@@ -35,8 +37,8 @@ firmware ──boot──▶ one Go image (EL2)
 - **Dedicated cores, one app each.** HOP builds the stage-2 cage, starts the core via PSCI and dispatches — milliseconds. Done or killed = core reset, slot free. By default a core is never time-sliced or shared between apps; apps you explicitly group may share a pool of cores cooperatively (*sharegroups*, below).
 - **Core 0 never does the apps' work.** The kernel core dispatches and supervises; it copies no images and terminates no TCP. An app downloads its own image through its own network stack and places it inside its own partition (self-placement — the cage makes that safe: anything the loader gets wrong stays confined to its own slot). Placement scales with the number of app cores — 127 parallel loaders on the Altra instead of one serialized kernel core — and HOP never even needs to read an app's image.
 - **1 to N cores per app**: an app can be given multiple dedicated cores, with Go's own runtime spreading its goroutines across them over a shared heap. Sharing within one app is one trust domain — app-to-app isolation is unaffected. Proven in QEMU and on Raspberry Pi 4 and 5 hardware.
-- **Isolation is hardware, not policy.** HopOS requires an EL2 boot: every slot runs inside a stage-2 MMU cage and can't even *address* HOP's memory or another slot's. This is an invariant, not an option — an EL1 boot is refused.
-- **One artifact for every slot.** App images are linked once at a canonical address; the stage-2 mapping *is* the relocation. No per-slot builds, no relocation shims.
+- **Isolation is hardware, not policy.** HopOS boots at the machine's highest privilege level — EL2 on ARM, machine mode on RISC-V — and every slot runs one level below it, inside a cage it can't even *address* HOP's memory or another slot's through. This is an invariant, not an option: an EL1 boot is refused, and so is a RISC-V hart without supervisor mode. The mechanism is per silicon (a stage-2 table on ARM; a PMP whitelist plus a per-slot Sv39 table on the C906, which has no hypervisor extension) — the app ABI is identical either way. See [docs/technical/isolation.md](docs/technical/isolation.md).
+- **One artifact for every slot.** App images are linked once at a canonical address and the hardware does the relocation — the stage-2 mapping on ARM, a per-slot Sv39 table on RISC-V. No per-slot builds, no relocation shims.
 - **Apps never share memory with each other.** Cooperation happens through messages (per-slot ring buffers to HOP, network between apps) and through shared *files* — never shared mutable state across app boundaries.
 
 ## What an app gets
@@ -131,6 +133,7 @@ No shell. No exec, no second binary, no users. No persistence. No VMs, WASM or c
 | Ampere Altra (128-core) | **Runs the full machine: all 127 application cores working jobs simultaneously** (384 GiB slot pool). Boots bare-metal through the generic UEFI + ACPI path: PE/COFF bootloader (`BOOTAA64.EFI`), ACPI discovery (cores, ECAM, UART, PSCI), own igb/I210 network driver, SMCCC TRNG. QEMU + EDK2 exercises the identical path |
 | Raspberry Pi 5 | **Runs the full multikernel on real silicon** — stage-2 isolation, hard-kill and multi-core apps (shared-heap SMP, cross-core GC) proven on the A76 cores. Native networking (own PCIe link training + GEM drivers, DHCP, NTP); runs the full HOP agent as a node on the LAN |
 | Raspberry Pi 4 | **Runs the full multikernel on real silicon** — same acceptance suite as the Pi 5, proven on the A72 cores. Native networking (own GENET v5 driver, DHCP, NTP); runs the full HOP agent as a node on the LAN |
+| LicheeRV Nano (Sophgo SG2002, 2× XuanTie C906, riscv64) | **The second ISA, same invariant** — a €15 board running the full node: PMP cage + per-slot Sv39 relocation, slot lifecycle with kill and restart, native networking (own DWMAC + internal-ePHY driver, DHCP, NTP), on-die temperature, hardware RNG, and two apps cooperatively sharing its one app hart. Signed SD image since v1.6.0 |
 | Radxa Orion O6N (12-core CIX P1) | Primary production target: 1 HOP core + 11 app slots across big/mid/small clusters |
 
 The Pi 5 boot requirements are non-obvious and documented in [`sd-rpi5/`](sd-rpi5/): the EEPROM bootloader validates images as Linux kernels unless `os_check=0`, silently ignores `kernel_address`, and always loads raw images at `0x80000`.
@@ -148,9 +151,9 @@ metal/       the OS — one Go module, layered by trust and direction:
   cpu/         the CPU layer: ARM64 (EL2, PSCI, SMP) and RISC-V (machine mode, hart reset)
   net/         HOP's network plane: L2 frame switch + NAT, DHCP
   driver/      device drivers, one package per device
-               (nic/: GEM, GENET v5, igb/I210, virtio-net, MDIO)
+               (nic/: GEM, GENET v5, igb/I210, virtio-net, DWMAC, MDIO)
   fw/          hardware discovery: device tree (FDT) and ACPI parsing
-  board/       per-board wiring: qemu-virt, rpi4, rpi5, generic UEFI
+  board/       per-board wiring: qemu-virt, rpi4, rpi5, licheerv, generic UEFI
   app/         the app side: runtime library, reference app, loader
   cmd/         the binaries: hopos (the agent), hopos-embed, probeuefi
   dev/         the MMIO primitive everything builds on
@@ -158,6 +161,7 @@ metal/       the OS — one Go module, layered by trust and direction:
 image/       build & run scripts (QEMU demo/agent, SD-card images, UEFI ESP)
 sd-rpi4/     SD-card payload + flashing notes (Dutch)
 sd-rpi5/     SD-card payload + flashing notes (Dutch)
+tools/       release tooling (signed assets), test + soak scripts
 ```
 
 The placement and import-direction rules (apps can never link against
@@ -175,13 +179,17 @@ TAMAGO=~/tamago-go/bin/go image/qemu-run.sh agent    # the real agent + leader A
 
 # SD-card acceptance image for a Raspberry Pi 5:
 TAMAGO=~/tamago-go/bin/go image/rpi5-hopos.sh
+
+# RISC-V: a complete SD-card image for the LicheeRV Nano (config baked in —
+# that board has no SD driver; needs riscv64 binutils + the Sipeed donor fip):
+CFG=~/my-node.cfg image/licheerv-agent.sh
 ```
 
 The QEMU demo and the Pi acceptance images build from public modules only. `metal/cmd/hopos` — the full agent — additionally depends on the [HOP orchestrator](https://github.com/xinix00/hop), which is open source as well.
 
 ## Status
 
-Working today: the full multikernel (slots, stage-2 isolation, dynamic memory partitions, hard-kill), multi-core apps (1 to N dedicated cores per app on a shared heap), self-placing apps (download + placement on the app's own core; core 0 only dispatches), per-app networking with full NAT, NVMe storage with shared volumes, and framebuffer + UART consoles — proven in QEMU, on Raspberry Pi 4 and 5, and on a 128-core Ampere Altra running all 127 application cores simultaneously. On the Pi 5 the network path is fully self-hosted: HopOS trains the PCIe link itself (the firmware doesn't) and drives the RP1 GEM NIC with its own drivers, then DHCP and NTP. On the roadmap: Orion O6N bring-up, NVMe on real hardware, and line-rate throughput.
+Working today: the full multikernel (slots, hardware-cage isolation, dynamic memory partitions, hard-kill), multi-core apps (1 to N dedicated cores per app on a shared heap), self-placing apps (download + placement on the app's own core; core 0 only dispatches), per-app networking with full NAT, NVMe storage with shared volumes, and framebuffer + UART consoles — proven in QEMU, on Raspberry Pi 4 and 5, and on a 128-core Ampere Altra running all 127 application cores simultaneously. On the Pi 5 the network path is fully self-hosted: HopOS trains the PCIe link itself (the firmware doesn't) and drives the RP1 GEM NIC with its own drivers, then DHCP and NTP. Since v1.6.0 the same node runs on **riscv64**: a €15 LicheeRV Nano boots a signed image, joins the LAN over its own DWMAC driver, and holds the same isolation contract as the Altra through a PMP cage instead of stage-2. On the roadmap: Orion O6N bring-up, NVMe on real hardware, and line-rate throughput.
 
 Built on [TamaGo](https://github.com/usbarmory/tamago) (bare-metal Go) and [gVisor's netstack](https://gvisor.dev) (pure-Go TCP/IP).
 

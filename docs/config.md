@@ -7,7 +7,7 @@ One set of keys, every board. Only the file differs:
 | UEFI (USB stick) | `hopos.cfg` in the stick's root | one `key=value` per line, `#` comments |
 | Raspberry Pi | `hopos.cfg` on the SD bootfs | one `key=value` per line, `#` comments |
 | Raspberry Pi (alternative) | `cmdline.txt` on the SD bootfs | same keys as whitespace-separated tokens on the single cmdline |
-| LicheeRV Nano | baked into the image (`CFG=… image/licheerv-agent.sh`) | one `key=value` per line, `#` comments |
+| LicheeRV Nano | baked into the image (`CFG=… image/licheerv-agent.sh`) — that board has no SD driver, so there is no file on the card to edit; the config in the released image is published as [`hopos-licheerv.cfg`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-licheerv.cfg) | one `key=value` per line, `#` comments |
 
 Every board that reads a **file** reads it the same way: one key per line, a
 value may contain spaces, and a line starting with `#` is a comment — with or
@@ -27,6 +27,8 @@ Editing the file **is** node management — no shell, no rebuild, no agent.
 | `hopos.cores` | cores reserved for the node runtime itself (clamped to the board's physical cores) | `1` |
 | `hopos.apikey` | HMAC key for the HTTP API — requests must be signed with it. **Required:** without it the node refuses to start the API (see below) | — |
 | `hopos.insecure` | `1` = start the API with **no authentication** on purpose (bench/dev only) | off |
+| `hopos.console` | TCP port that serves the node console — connect and you get the retained history, then live output (`nc <node-ip> 5555`). Every reader gets everything the node prints, jobs included, so this is a bench convenience and a leak anywhere else. The LicheeRV's default config sets it, because that board has no framebuffer and its UART needs a cable | off |
+| `hopos.wd` | `off` = don't arm the hardware watchdog (Raspberry Pi only). The watchdog reset-cycles a node until a boot succeeds; turn it off to keep a frozen node standing for a post-mortem | on |
 | `hopos.s3.endpoint` | S3 endpoint for cluster state + leader election | state off |
 | `hopos.s3.bucket` | bucket name | — |
 | `hopos.s3.region` | region | — |
@@ -161,7 +163,9 @@ point at *another* node — a hopdns name like `display.hop.local:7878`, or an
 explicit address. The display's `"FB":"1"` asks for the framebuffer grant
 (render to the real screen); without a framebuffer the desktop is still
 served over HTTP. This whole block ships as the default config in every GUI
-release asset ([`image/hopos-gui.cfg`](../image/hopos-gui.cfg)).
+release asset ([`image/hopos-gui.cfg`](../image/hopos-gui.cfg) in the tree,
+[`hopos.cfg`](https://github.com/xinix00/HopOS/releases/latest/download/hopos.cfg)
+in the newest release).
 
 `cpu_shares` is the **pool size**, not a per-app quota: `2048` = the `apps` pool
 owns 2 whole cores, however many apps you open on it (the first job of a group
@@ -183,11 +187,14 @@ images link *zero* GUI code: drop the `display`/`launcher` init and the
 `hopos.apps[]` catalog and just list the `hopos.init[]` jobs the node should
 run — no desktop, only apps.
 
-Their default config ships one such job, `welcome`: a page on port 80 that
-says the node is up and what it runs on — cores, RAM partition, architecture,
-uptime. Open `http://<node-ip>/` and that is your install check; delete the
-line and put your own workload there. It takes no key and no address, because
-every app is handed the node address itself.
+Their default config
+([`hopos-headless.cfg`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-headless.cfg))
+ships one such job, `welcome`: a page on port 80 that says the node is up and
+what it runs on — cores, RAM partition, architecture, uptime. Open
+`http://<node-ip>/` and that is your install check; delete the line and put
+your own workload there. It takes no key and no address, because every app is
+handed the node address itself. The RISC-V image is headless too and carries
+the same job.
 
 That one line covers both architectures. A job may list several artifacts, each
 with a `match` on node attributes, and the agent downloads the first one that

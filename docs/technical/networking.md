@@ -158,7 +158,8 @@ network stack and hooks it into Go's standard `net` package, so the
 agent/leader get ordinary `net.Listen` / `net/http`
 ([`hopnet.go`](../../metal/net/hopnet/hopnet.go)). The driver is the board's:
 `virtionet` on QEMU, `igb` on the Ampere Altra, GENET/GEM (over the RP1
-bridge) on the Raspberry Pi. **DHCP happens only at the edge** — the node
+bridge) on the Raspberry Pi, `dwmac` with the SoC's internal ePHY on the
+LicheeRV Nano. **DHCP happens only at the edge** — the node
 acquires one lease for the uplink and renews it; the internal net is static.
 DNS comes from the node config and is passed to apps as `HOP_DNS`.
 

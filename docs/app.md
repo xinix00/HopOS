@@ -75,14 +75,26 @@ import `applib` — copy `hello` as your starting point.
 
 ## 3. Build it
 
-One command, one canonical link address (the node relocates it per slot):
+One command per architecture, one canonical link address each (the node
+relocates it per slot, so the same ELF runs in any slot on any board of that
+architecture):
 
 ```sh
 cd HopOS/metal
+# arm64 — UEFI boxes, Raspberry Pi, QEMU
 GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
   ~/tamago-go/bin/go build -tags linkcpuinit -trimpath \
   -ldflags "-w -T 0x50010000 -R 0x1000" -o hello.elf ./app/hello
+
+# riscv64 — LicheeRV Nano
+GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=riscv64 \
+  ~/tamago-go/bin/go build -tags "linkramsize linkcpuinit" -trimpath \
+  -ldflags "-w -T 0x88010000 -R 0x1000" -o hello-riscv64.elf ./app/hello
 ```
+
+Same source, two artifacts — list both in one job with a `match` on
+`node.arch` and a mixed fleet needs no second job spec (see
+[Configure](config.md)).
 
 ## 4. Run it as a job
 

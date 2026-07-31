@@ -4,7 +4,7 @@ The cage is hardware, not policy.
 
 - **A hardware cage per app.** The level HOP owns — EL2 on ARM, machine mode
   on RISC-V — gives every slot a map of its own: a second-stage page table
-  with its own VMID, or a locked whitelist plus a supervisor page table. Either
+  with its own VMID, or a PMP whitelist plus a supervisor page table. Either
   way the app can name exactly its own partition, and the node, the neighbours
   and the devices are not unmapped but *unnameable*. See *One cage, two jobs*
   below for how one design covers both.
@@ -30,8 +30,9 @@ The cage is hardware, not policy.
   calls (SMC) from a cage trap at EL2 — there is no legitimate app SMC.
 - **Kill is revocation.** Stopping a stubborn app doesn't ask it nicely: the
   node revokes its stage-2 map and the core faults synchronously into the
-  EL2 vectors, which park it. A cage violation prints the fault (ESR/FAR)
-  on the console while every other slot keeps serving.
+  EL2 vectors, which park it (on RISC-V the node resets the hart, which hands
+  back a provably clean slot). A cage violation prints the fault (ESR/FAR, or
+  `mcause`/`mepc`/`mtval`) on the console while every other slot keeps serving.
 
 ```
 $ hop apply --name escape-probe    # deliberately reads outside its cage
@@ -39,13 +40,39 @@ slot 7: stage-2 fault — ESR 0x93c08007 FAR 0x9000f000 · core parked
 slots 1-6, 8-126: unaffected, still serving
 ```
 
-- **Small enough to audit.** The code that enforces all of this — cages,
-  slots, ABI — is ~2,100 lines; the whole OS is ~11,900 (lines of code,
-  excluding tests, comments and the optional GUI). A Linux node doing the
-  same job trusts GRUB, the kernel (~30,000,000 lines), systemd, libc *and*
-  a container runtime — HopOS is the whole node, bootloader included, in
-  ~11,900. It fits in a single AI context window: audit it in one sitting,
-  human or machine.
+- **Small enough to audit.** The code that enforces all of this — cages, slots,
+  ABI — is ~3,100 lines, and the whole node is what the table below adds up to.
+  The rung you have to *trust* is that first one; drivers and board support are
+  swappable outer layers, already outside every cage.
+
+### Small enough to actually read
+
+Lines of code, excluding tests, comments and blanks, rounded so the numbers
+stay true across builds — and counted **the way the compiler sees it**: a file
+that only builds for one instruction set counts only against that one.
+
+| layer | lines |
+|---|---|
+| **isolation core** — cages, slots, ABI | ~3,100 |
+| app runtime + node mains | ~3,450 |
+| drivers — NIC families, NVMe, sensors | ~1,450 |
+| network stack — switch, NAT, DHCP | ~1,250 |
+| firmware tables, boot config, display grant | ~1,250 |
+| **portable Go so far** | **~10,500** |
+| `arm64` — EL2 + stage-2, PSCI, UEFI/ACPI/DTB, igb·gem·genet | ~3,950 |
+| `riscv64` — machine mode + PMP, SG2002, dwmac | ~1,550 |
+
+The last two rows are an **either/or**: an arm64 node is ~14,450 lines, a
+RISC-V node ~12,100. You audit one tree, never both. Graphics are **74** of
+those lines — the grant that hands one app the framebuffer, and a headless
+image links none of it; windowing, compositing and the browser are ordinary
+caged apps in [their own repo](https://github.com/xinix00/hop-os-surf).
+
+A Linux node doing the same job trusts GRUB, the kernel (~30,000,000 lines),
+systemd, libc *and* a container runtime. **HopOS is the whole node —
+bootloader included — in ~14,450.** Both trees together are ~16,000 lines, but
+no node ever runs both: **the machine you actually booted fits in a single AI
+context window**, so you can audit it in one sitting, human or machine.
 
 ### One cage, two jobs
 
