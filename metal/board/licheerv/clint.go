@@ -81,18 +81,13 @@ func SetMsip(hart uint64, on bool) {
 // een wfi op een CLINT-wekker vertrouwen. ownTimecmp is de mtimecmp van het
 // hart waarop de probe draaide — HOP's eigen hart, en dus het adres dat MSleep
 // gebruikt.
-var (
-	clintOK bool // timerketen bewezen (mtimecmp houdt vast, vuurt, wfi keert terug)
-	msipOK  bool // IPI-kanaal bewezen — optioneel bovenop de timer (zie de probe)
-)
+// clintOK: timerketen bewezen (mtimecmp houdt vast, vuurt, wfi keert terug).
+// De msip-uitslag staat alleen in de console-regel — er hangt geen mechanisme
+// aan zolang niemand een IPI stuurt (de 2ms-cap draagt elke wek).
+var clintOK bool
 
 // CLINTUsable meldt of de timerketen bewezen is — de voorwaarde voor slaap.
 func CLINTUsable() bool { return clintOK }
-
-// MsipUsable meldt of het IPI-kanaal bewezen is. Zonder blijft slapen gewoon
-// aan; alleen een directe wek van HOP (die vandaag nog niemand stuurt) zou dan
-// op de 2ms-cap wachten.
-func MsipUsable() bool { return msipOK }
 
 // MSleep laat het EIGEN hart slapen tot timebase-tick wake (geklemd op
 // SleepCapTicks) en geeft terug hoe lang het sliep. Dit is de M-mode-helft van
@@ -191,7 +186,7 @@ func ProbeCLINT() string {
 		cleared := mipSettles(mipMSIP, false)
 		switch {
 		case fired && cleared:
-			msip, msipOK = "msip ok", true
+			msip = "msip ok"
 		case !fired:
 			msip = "no ipi (msip never pended)"
 		default:
