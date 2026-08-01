@@ -14,7 +14,9 @@ The cage is hardware, not policy.
   vector instead of being mitigated, and there is no mitigations tax — apps
   run at the silicon's spec clock. **Share when trusted:** a *sharegroup*
   packs apps you name onto a shared pool of whole cores, cooperatively (they
-  yield on idle — no timer, no preemption). This never happens to you
+  yield on idle — no preemption; a timer exists only to *wake* a core that
+  every cage-mate put to sleep, never to take one away from a running app).
+  This never happens to you
   involuntarily — an attacker can't land on your core, because the only apps
   sharing it are ones you grouped together. Inside such a group the timing
   side channels exist between cage-mates, as on any shared core, but they

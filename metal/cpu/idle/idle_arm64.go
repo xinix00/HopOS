@@ -18,22 +18,46 @@
 // Elke core roept Enable aan in zijn eigen hwinit1 (ná arm64.Init, die de
 // default governor zet); CNTKCTL is per core.
 //
-// Dit is de ARM64-helft: WFE + de generic-timer-event-stream. Zie
-// idle_riscv64.go voor waarom die architectuur (voorlopig) niets doet.
+// Dit is de ARM64-helft: WFE + de generic-timer-event-stream. De RISC-V-helft
+// (idle_riscv64.go) heeft geen WFE-equivalent en bereikt dezelfde slaap via de
+// M-mode-switcher (yield met wektijd) of, voor HOP zelf, direct (UseMSleep).
 package idle
 
 import (
 	"runtime/goos"
 	"sync/atomic"
+	_ "unsafe" // voor go:linkname naar runtime.nanotime
 
 	"hop-os/metal/dev"
 )
 
-// wfeIdle/hvcYield/cntkctlSet/cntfrq: zie idle_arm64.s.
+// wfeIdle/hvcYield/cntkctlSet/cntfrq/cntvct: zie idle_arm64.s.
 func wfeIdle() uint64
-func hvcYield() uint64
+func hvcYield(deadline uint64) uint64
+func cntvct() uint64
 func cntkctlSet(v uint64)
 func cntfrq() uint64
+
+// nanotime is de klok waarin de scheduler zijn pollUntil uitdrukt; wakeAt rekent
+// die om naar de tellerstand die de EL2-switch begrijpt. Tweeling van de
+// RISC-V-kant (idle_riscv64.go) met de tellers van deze architectuur.
+//
+//go:linkname nanotime runtime.nanotime
+func nanotime() int64
+
+// wakeAt: de CNTVCT-stand waarop deze bewoner op zijn vroegst terug wil; 0 = nu.
+// Alles wat geen bruikbare toekomst oplevert wordt 0 — dan gedraagt de rotatie
+// zich exact als vóór de wektijden, en dat is de bewezen kant om naar te falen.
+func wakeAt(pollUntil int64) uint64 {
+	if pollUntil <= 0 {
+		return 0
+	}
+	d := pollUntil - nanotime()
+	if d <= 0 {
+		return 0
+	}
+	return cntvct() + uint64(d)*cntfrq()/1_000_000_000
+}
 
 // De idle-teller: geaccumuleerde idle-TIJD in generic-timer-ticks (CNTFRQ-
 // eenheden) — de counterstand vóór en ná elke WFE, delta erbij. Een vol
@@ -113,18 +137,21 @@ const wfeMinSleep = 64
 // staat geen enkele monitor-touch. Events wegslikken is veilig — tamago's
 // Ms pollen (geen SEV-wek-afhankelijkheid) en de event-stream begrenst elke
 // slaap op ~1,3ms; de cap dekt een externe event-storm (dan meten we eerlijk
-// "geen slaap" en draait de scheduler gewoon door). Bewust ongevoelig voor
-// pollUntil: de scheduler doet de timer-administratie, timers kunnen dus
-// ~1-2 event-periodes later vuren — irrelevant voor jobs.
+// "geen slaap" en draait de scheduler gewoon door). De WFE-kant is bewust
+// ongevoelig voor pollUntil (de event stream begrenst elke slaap op ~1,3ms,
+// dus timers vuren hooguit ~1-2 periodes later — irrelevant voor jobs); de
+// yield-kant geeft pollUntil juist wél door, als wektijd waar de rotatie deze
+// bewoner tot die tijd mee overslaat.
 func governor(pollUntil int64) {
 	var slept uint64
 	if a := sharedAddr.Load(); a != 0 && dev.Read64(a) != 0 {
-		// Gedeelde core: expliciet yielden. De HVC trapt naar de EL2-switch,
-		// die onze staat opslaat, de core laat slapen, de mede-bewoner draait
-		// en ons hier hervat. Eén yield per idle-ronde: de switch doet zelf de
-		// WFE-slaap (power) en de rotatie. Testbaar op QEMU, waar een WFE-trap
-		// dat niet zou zijn.
-		slept = hvcYield()
+		// Gedeelde core: expliciet yielden, mét de wektijd. De HVC trapt naar
+		// de EL2-switch, die onze staat opslaat, de core laat slapen, de
+		// mede-bewoner draait en ons hier hervat — maar niet vóór de wektijd
+		// (CtxWake), dus twee wachtende buren pingpongen niet. Eén yield per
+		// idle-ronde: de switch doet zelf de WFE-slaap (power) en de rotatie.
+		// Testbaar op QEMU, waar een WFE-trap dat niet zou zijn.
+		slept = hvcYield(wakeAt(pollUntil))
 	} else {
 		// Dedicated core: WFE's tot er écht geslapen is (drain-lus, zie boven).
 		for i := 0; slept < wfeMinSleep && i < 4; i++ {
@@ -135,4 +162,5 @@ func governor(pollUntil int64) {
 	if a := pubAddr.Load(); a != 0 {
 		dev.Write64(a, n)
 	}
+	countWake()
 }

@@ -15,12 +15,23 @@ package slots
 // stage-2-partitieblokken 2MB zijn.
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
 
 	"hop-os/metal/abi/layout"
 )
+
+// ErrNoPartition markeert "de partitie past nu niet in de pool" — een
+// CAPACITEITSTOESTAND, geen defect: hij verdwijnt zodra een buurpartitie
+// vrijkomt of verhuist. De adapter (kern/slotmgr) vertaalt dit naar
+// hopos.ErrNoCapacity zodat HOP de taak teruggeeft aan de leader (hand-back)
+// in plaats van hem in een herstartlus te jagen. Zonder dit sentinel was een
+// gefragmenteerde pool een storm: elke poging downloadde de image opnieuw,
+// faalde opnieuw, en na vijf keer hield de taak zijn reservering vast "voor
+// de operator" — gemeten 01-08, cloudflared 124MB naast een verhuisde welcome.
+var ErrNoPartition = errors.New("no partition space")
 
 const part2M = 2 << 20
 
@@ -112,7 +123,7 @@ func partAlloc(i int, size uint64) (base, grown uint64, err error) {
 		}
 	}
 	if best < 0 {
-		return 0, 0, fmt.Errorf("partition %d MB does not fit the pool (full, fragmented, or no base the cage can describe)", size>>20)
+		return 0, 0, fmt.Errorf("%w: partition %d MB does not fit the pool (full, fragmented, or no base the cage can describe)", ErrNoPartition, size>>20)
 	}
 	r := partFree[best]
 	// Binnen de regio de HOOGSTE bruikbare basis. Dat is niet willekeurig: op een

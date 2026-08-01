@@ -172,6 +172,16 @@ const (
 	SchedList    = 96  // SlotCap × 1 byte: slotnummers van de bewoners
 	SchedS2PA    = 224 // fysieke Plan.Stage2PA (switch.s: ctx/VTTBR/park afleiden)
 
+	// De wekker van dit hart, voor de slaap-stand van de switcher (RISC-V).
+	// HOP vult ze pas ná zijn CLINT-probe (board/licheerv/clint.go): staat
+	// SchedClintPA op nul, dan slaapt de parkeerlus niet maar spint hij, precies
+	// zoals vóór de slaap-stand bestond. Fail-safe in die richting is de hele
+	// reden dat het twee losse velden zijn en geen vlag — een hart dat níet
+	// wakker wordt is een dode node, en dat mag nooit de standaard zijn.
+	SchedClintPA  = 232 // PA van mtimecmp van DIT hart (0 = geen wekker)
+	SchedSleepCap = 240 // maximale slaapduur in timebase-tikken
+	SchedMsipPA   = 248 // PA van msip van DIT hart (het wek-IPI van HOP)
+
 	// Switch-contextblok per slot (op Stage2TablePA(i)+CtxOff): de EL1-staat
 	// van een geyielde bewoner van een gedeelde core, gesaved/gerestored door
 	// cpu/el2/switch.s. CtxState is tevens het slot-levensteken dat HOP leest
@@ -204,6 +214,19 @@ const (
 	CtxSP     = 272
 	CtxResume = 288
 	CtxRegime = 304 // einde blok: ARM 456, RISC-V 400
+	// CtxWake: de wektijd die de bewoner bij zijn yield meegaf (ARM: x1 bij de
+	// hvc #1, RISC-V: a0 bij de ecall) — vóór deze tellerstand (CNTVCT/rdtime)
+	// hoeft de rotatie hem niet te hervatten. 0 = nu, en dat is ook wat een
+	// bewoner krijgt die niets meegeeft: het oude gedrag is de terugval. Winst:
+	// twee wachtende apps pingpongen niet meer tegen elkaar aan en het hart mag
+	// slapen zolang niemand due is (RISC-V: mtimecmp+wfi; ARM: de WFE-lus die
+	// er al stond). Preemptie is het NIET — de wekker haalt nooit een lopende
+	// app van zijn core, hij beëindigt alleen de slaap van het hart zelf.
+	//
+	// Ná het regime van beide architecturen (464 > 456), en één schrijver: de
+	// switcher. HOP leest noch schrijft dit woord — op het niet-coherente
+	// RISC-V-hartpaar mág dat ook niet zomaar (zie de sched-blok-regels).
+	CtxWake = 464
 	// FP staat bewust NIET in dit blok, op geen van beide architecturen: de laag
 	// die HOP bezit draait met zijn MMU uit (Device-geheugen) en een SIMD-store
 	// naar Device faultt op ijzer. De yielder bewaart zijn eigen callee-saved
@@ -772,11 +795,16 @@ const (
 	// (kern/slots refreshShared). App-code merkt er niets van — puur OS-laag.
 	CtrlShared = 0x100
 
+	// CtrlWakes (app → HOP): oplopend aantal idle-rondes van de scheduler van
+	// dit slot. De tweelingbroer van CtrlIdle: die zegt HOEVEEL tijd er niets
+	// gedaan is, deze zegt HOE VAAK er gekeken is. Pas samen zeggen ze iets over
+	// stroom — 64% van een hart is heel iets anders als het 3333 wekken per
+	// seconde zijn dan als het één rekenklus is (metal/cpu/idle/wakes.go).
+	CtrlWakes = 0x108
+
 	// Env-blob: door HOP geschreven "key=val\n..."-bytes die de app-lib bij
 	// start inleest (de Docker-vorm: env meegegeven bij het starten). Vervangt
-	// het kernel-envp dat bare metal niet heeft. 0x108 is vrij (was kort een
-	// runtime-echo van de ABI-versie; de wacht staat bij plaatsing, abi/place
-	// leest de versie uit het image, dus niemand hoefde die echo te lezen).
+	// het kernel-envp dat bare metal niet heeft.
 	CtrlEnvData = 0x110
 	CtrlEnvMax  = CtrlStride - CtrlEnvData
 )

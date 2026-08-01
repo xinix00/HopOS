@@ -23,6 +23,11 @@ TEXT ·wfeIdle(SB),NOSPLIT,$0-8
 // hervat ons hier. Anders dan WFE trapt HVC OOK op QEMU-TCG (waar WFE een
 // no-op is) — dus deze weg is op QEMU testbaar, precies wat de bring-up eist.
 //
+// De WEKTIJD gaat mee in x1 (→ layout.CtxWake): vóór die CNTVCT-stand hoeft de
+// rotatie ons niet te hervatten, dus twee wachtende buren pingpongen niet en de
+// core slaapt door zolang niemand due is. Dezelfde afspraak als de a0 van de
+// RISC-V-ecall (idle_riscv64.s); 0 = nu.
+//
 // FP bewaren we ZELF, hier op de EL1-stack (Normal cacheable), NIET in de
 // EL2-switch: EL2 draait met MMU uit → Device-geheugen → een SIMD/FP-store
 // naar Device faultt op ijzer (QEMU verhult dat). De yield is een gewone
@@ -30,7 +35,7 @@ TEXT ·wfeIdle(SB),NOSPLIT,$0-8
 // wissel overleven; de mede-bewoner die tussendoor draait klobbert ze. x0
 // (counterstand vóór de yield) overleeft via de GP-save in de switch; de
 // retourwaarde is de idle-wall-tijd (co-resident-runtijd + slaap) in ticks.
-TEXT ·hvcYield(SB),NOSPLIT,$144-8
+TEXT ·hvcYield(SB),NOSPLIT,$144-16
 	FMOVQ	F8, 0(RSP)
 	FMOVQ	F9, 16(RSP)
 	FMOVQ	F10, 32(RSP)
@@ -41,6 +46,7 @@ TEXT ·hvcYield(SB),NOSPLIT,$144-8
 	FMOVQ	F15, 112(RSP)
 	WORD	$0xd53b4401	// mrs x1, fpcr
 	MOVD	R1, 128(RSP)
+	MOVD	deadline+0(FP), R1	// x1 = wektijd; de switch leest hem uit de scratch-save
 	WORD	$0xd53be040	// mrs x0, cntvct_el0
 	WORD	$0xd4000022	// hvc #1
 	WORD	$0xd53be041	// mrs x1, cntvct_el0
@@ -55,7 +61,7 @@ TEXT ·hvcYield(SB),NOSPLIT,$144-8
 	FMOVQ	80(RSP), F13
 	FMOVQ	96(RSP), F14
 	FMOVQ	112(RSP), F15
-	MOVD	R0, ret+0(FP)
+	MOVD	R0, ret+8(FP)
 	RET
 
 TEXT ·cntkctlSet(SB),NOSPLIT,$0-8
@@ -66,5 +72,13 @@ TEXT ·cntkctlSet(SB),NOSPLIT,$0-8
 
 TEXT ·cntfrq(SB),NOSPLIT,$0-8
 	WORD	$0xd53be000	// mrs x0, cntfrq_el0
+	MOVD	R0, ret+0(FP)
+	RET
+
+// cntvct: de rauwe generic-timer-stand. De governor heeft hem nodig om het GAT
+// tussen twee idle-rondes te meten (zie gap.go) — de yield/WFE alleen is niet de
+// hele idle-tijd.
+TEXT ·cntvct(SB),NOSPLIT,$0-8
+	WORD	$0xd53be040	// mrs x0, cntvct_el0
 	MOVD	R0, ret+0(FP)
 	RET

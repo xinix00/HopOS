@@ -71,6 +71,30 @@ func cageInit() {
 	for c := 0; c <= nc; c++ {
 		mb := layout.ParkMboxPA(c)
 		dev.Write64(mb+layout.SchedS2PA, uint64(base))
+		// De wekker van dít hart, als het board er een hééft. Zonder deze drie
+		// woorden blijft de parkeerlus van de switcher spinnen zoals altijd —
+		// dat is de veilige stand en niet een ontbrekende feature.
+		//
+		// LET OP DE VOLGORDE: het board mag hier pas "ja" zeggen als zijn
+		// CLINT-probe gelopen heeft. Dat klopt vandaag (de probe zit in
+		// boardWarn, die vóór agentboot.Run draait en dus vóór de eerste
+		// slot-start die deze functie via vectorsOnce aanroept), en het is
+		// zelf-corrigerend als het ooit verschuift: een probe die te laat komt
+		// levert "geen wekker" en dus het oude gedrag.
+		//
+		// Alleen voor de APP-harts (c ≥ 1). Blok 0 hoort bij HOP's eigen hart,
+		// daar draait geen switcher, en hartOf(0) is 0 — dat zou HOP zijn eigen
+		// mtimecmp in een sched-blok schrijven en dat is precies het soort
+		// adres dat je niet per ongeluk wilt laten rondslingeren.
+		if c == 0 {
+			dev.Push(mb, layout.ParkMboxLen)
+			continue
+		}
+		if mtimecmp, msip, capTicks, ok := board.Current().HartWaker(hartOf(c)); ok {
+			dev.Write64(mb+layout.SchedClintPA, mtimecmp)
+			dev.Write64(mb+layout.SchedMsipPA, msip)
+			dev.Write64(mb+layout.SchedSleepCap, capTicks)
+		}
 		dev.Push(mb, layout.ParkMboxLen)
 	}
 }

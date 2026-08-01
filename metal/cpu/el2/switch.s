@@ -77,6 +77,10 @@ yield:
 	MOVD	R30, 264(R1)
 	LDP	(RSP), (R2, R3)	// originele x0/x1
 	STP	(R2, R3), 24(R1)
+	// x1 draagt de WEKTIJD (layout.CtxWake): vóór deze CNTVCT-stand hoeft de
+	// rotatie deze bewoner niet te hervatten. 0 = nu — een yield zonder
+	// wektijd gedraagt zich dus exact als vóór dit veld bestond.
+	MOVD	R3, 464(R1)
 	LDP	16(RSP), (R2, R3)	// originele x2/x3
 	STP	(R2, R3), 40(R1)
 
@@ -179,13 +183,22 @@ sleep:
 	// door, dus dit wekt ~elke ms; een al-gearriveerd event valt er meteen
 	// doorheen — geen verloren wekker, en het vermogen blijft dat van een
 	// dedicated idle core (er wordt exact één keer per tik geroteerd).
+	//
+	// Hier komt de rotatie ook terug als iedereen leeft maar niemand due is
+	// (CtxWake in de toekomst): de event stream is dan de wekker — ARM's
+	// mtimecmp, maar zonder armen en zonder probe, want hij staat al aan en is
+	// op dit silicium bewezen. Slaapt dus in tikken van ~1ms tot de vroegste
+	// wektijd; op QEMU-TCG is WFE een no-op en spint dit warm (by design, zie
+	// de QEMU-notitie) maar de heractivering blijft er correct.
 	WFE
 
 rotate:
 	// Round-robin over de bewonerslijst van deze core (SP-relatief; SP =
 	// sched-blok+16): vanaf cursor+1 de eerste bewoner met staat
-	// boot-pending (1) of saved (2). x0..x30 zijn hier vrij — de huidige
-	// bewoner is gesaved of dood.
+	// boot-pending (1) of saved (2) die ook aan de beurt ÍS (zijn wektijd is
+	// verstreken, layout.CtxWake). x0..x30 zijn hier vrij — de huidige
+	// bewoner is gesaved of dood — maar x11 moet de hele scan overleven.
+	MOVD	$0, R11		// nog geen levende-maar-niet-due bewoner gezien
 	MOVD	64(RSP), R4	// layout.SchedCursor
 	MOVD	72(RSP), R5	// layout.SchedCount
 	CBZ	R5, park	// geen bewoners: core naar de parkeerlus
@@ -203,14 +216,27 @@ scan:
 	ADD	R8<<16, R1, R1
 	ADD	$0x6000, R1, R1
 	MOVD	(R1), R9
-	CMP	$1, R9		// boot-pending?
+	CMP	$1, R9		// boot-pending? een verse start wacht nooit
 	BEQ	boot
 	CMP	$2, R9		// saved?
-	BEQ	resume
+	BNE	skip
+	// Saved — maar al aan de beurt? Vóór zijn wektijd hervatten is nooit fout
+	// (hij kijkt, vindt niets, yieldt opnieuw), erna laten liggen wél.
+	MOVD	464(R1), R9	// layout.CtxWake
+	CBZ	R9, resume	// 0 = nu
+	WORD	$0xd53be04a	// mrs x10, cntvct_el0
+	CMP	R9, R10
+	BHS	resume		// zijn tijd is gekomen
+	// De wektijd wordt VERTROUWD — wie onzin vraagt benadeelt alleen zichzelf.
+	// Wel een eis aan de applib: een yield van vóór de wektijd draagt residu
+	// in x1 (hier: de fpcr) en zo'n bewoner hoort niet op een gedeelde core —
+	// zie de RISC-V-switcher voor de gemeten les (01-08, dove welcome).
+	MOVD	$1, R11		// levend, alleen nog niet due
 skip:
 	SUBS	$1, R6, R6
 	BNE	next
-	B	park		// iedereen dood/leeg → parkeren
+	CBZ	R11, park	// iedereen dood/leeg → parkeren
+	B	sleep		// levend maar niemand due: slaap één tik en kijk opnieuw
 
 boot:
 	// Cold boot van een boot-pending bewoner: exact het mailbox-dispatchpad

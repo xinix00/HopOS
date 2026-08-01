@@ -127,6 +127,7 @@ func Init() *App {
 	// voor de wachter op de HOP-core. OS-laag-werk — de app merkt er niets
 	// van, net als bij SMP.
 	idle.Publish(layout.CtrlPageAt(a.RAMStart, a.RAMSize) + layout.CtrlIdle)
+	idle.PublishWakes(layout.CtrlPageAt(a.RAMStart, a.RAMSize) + layout.CtrlWakes)
 
 	// Core-deling (fase 6): laat de governor het CtrlShared-woord volgen. Zet
 	// HOP het (dit slot deelt zijn core), dan yieldt de governor coöperatief

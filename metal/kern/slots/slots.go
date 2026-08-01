@@ -546,6 +546,7 @@ type Status struct {
 	RAMSize   uint64 // door de app gerapporteerde (gepatchte) RAM-maat
 	MemSys    uint64 // werkelijke draw: MemStats.Sys van de app (0 = nog niet gemeld)
 	IdleTicks uint64 // ruwe idle-tik-teller (CtrlIdle; bij SMP gedeeld door de cores)
+	Wakes     uint64 // ruwe wek-teller (CtrlWakes): idle-rondes van de app-scheduler
 	Cores     uint64 // aantal cores van het slot (CtrlCores; 0 = geen SMP-veld gezet)
 	Shared    bool   // deelt zijn core met een medebewoner (CtrlShared, door HOP gezet)
 
@@ -1432,6 +1433,7 @@ func liveStatus(i int) Status {
 		RAMSize:   ctrlRead(i, layout.CtrlRAMSize),
 		MemSys:    ctrlRead(i, layout.CtrlMemSys),
 		IdleTicks: ctrlRead(i, layout.CtrlIdle),
+		Wakes:     ctrlRead(i, layout.CtrlWakes),
 		Cores:     ctrlRead(i, layout.CtrlCores),
 		Shared:    ctrlRead(i, layout.CtrlShared) != 0,
 		FaultVec:  ctrlRead(i, layout.CtrlFaultVec),

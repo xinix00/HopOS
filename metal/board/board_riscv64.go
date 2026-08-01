@@ -48,4 +48,16 @@ type Board interface {
 	// zijn eigen hart). Op RISC-V is er geen PSCI-telling om op terug te
 	// vallen: de topologie is board-kennis, punt.
 	AppHarts() []int
+
+	// HartWaker geeft de wekker van een hart: de PA van zijn mtimecmp, de PA van
+	// zijn msip, en hoe lang hij hoogstens achter elkaar mag slapen (in
+	// timebase-tikken). Alleen dán mag de switcher zijn parkeerlus vervangen door
+	// een echte wfi — zonder wekker blijft hij spinnen, want een hart dat niet
+	// meer wakker wordt is een dode node.
+	//
+	// ok=false is dus de veilige uitslag en hoort dat ook te zijn zolang een
+	// board het niet BEWEZEN heeft: op de SG2002 ontbreekt de helft van de
+	// SiFive-CLINT-layout (mtime is er niet), dus daar hangt dit antwoord aan een
+	// probe bij boot en niet aan een datasheet.
+	HartWaker(hart int) (mtimecmp, msip, capTicks uint64, ok bool)
 }

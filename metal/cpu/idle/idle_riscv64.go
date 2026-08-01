@@ -1,38 +1,44 @@
 //go:build riscv64
 
-// De RISC-V64-helft van de idle-governor. Eén van de twee paden bestaat hier
-// écht, en dat verschil is silicium en geen luiheid:
+// De RISC-V64-helft van de idle-governor. Eén governor, één principe (Derek,
+// 01-08): élke bewoner van een hart meldt "ik doe niets tot T" langs hetzelfde
+// pad, en HOP is daarin gewoon de eerste bewoner van zíjn hart. Wat per rol
+// verschilt is alleen de laatste stap — hoe je bij de M-mode-slaapcode komt:
 //
-//   - **Gedeeld hart: yielden.** Deelt dit slot zijn hart met een ander, dan is
-//     idle-tijd geen stroom maar een BEURT. De governor trapt dan met `ecall`
-//     naar HOP's M-mode-switcher (cpu/mmode), die onze staat bewaart, de
-//     mede-bewoner laat draaien en ons hier hervat. Exact het pad dat op ARM de
-//     HVC-yield is; het contract (bewaar, roteer, hervat) staat daar al.
-//   - **Eigen hart: doorlopen.** WFI is alleen veilig als er een interrupt-bron
-//     aan staat die hem wekt, en die interrupt-plumbing (CLINT/PLIC, timer-PPI,
-//     vector) heeft HopOS nergens anders nodig. Zonder wekker is WFI een hang.
-//     Dus loopt een dedicated hart hier door, en dat is bewust: op dit board is
-//     de energieknop niet idle maar de KLOK (gemeten 30-07: divider 1→2 halveert
-//     de benchmark, PLL onaangeroerd, tijdrekening blijft kloppen omdat rdtime
-//     aan de vaste osc hangt) — en voor een fanloze 24/7-node is dát de knop die
-//     telt. Een idle-hart kost hier dus stroom; gedocumenteerde keuze, geen
-//     omissie.
+//   - **Slot-app: yielden, altijd.** Gedeeld hart óf alleen — de governor trapt
+//     met `ecall` naar HOP's M-mode-switcher (cpu/mmode), mét de wektijd in a0.
+//     De switcher bewaart de staat, geeft een buur zijn beurt als die er is, en
+//     laat het hart anders slapen op de CLINT-wekker (park). Voor een app die
+//     alléén woont is de yield dus geen beurt-wissel maar de weg naar de slaap:
+//     een S-mode-bewoner kan niet zelf bij mtimecmp (de CLINT zit bewust buiten
+//     elke kooi — DoS-kanaal), dus de ecall is zijn enige route naar een wfi.
+//   - **HOP's eigen hart: dezelfde stap, zonder trap.** HOP draait al in
+//     machine mode, dus die roept de slaap-primitief direct aan (UseMSleep —
+//     het board levert hem ná zijn CLINT-probe, board/licheerv/clint.go). Een
+//     ecall is voor S-mode de manier om deze code te bereiken; HOP staat er al.
+//   - **Terugval: doorlopen.** Geen switcher boven je en geen waker van het
+//     board (probe gefaald, of een app buiten applib) → precies doen wat dit
+//     board zonder ons deed. Spinnen kost stroom maar kan niet hangen, en dat
+//     is de goede kant om naar te falen.
 //
-// Waarom de gedeelde kant geen wekker nodig heeft: de yield ÍS de wekker. Er
-// wordt niet gewacht op een gebeurtenis, er wordt afgegeven — en wie afgeeft
-// krijgt zijn beurt terug van de rotatie, niet van een timer.
+// De energieknop van dit board was eerst de KLOK (gemeten 30-07: divider 1→2
+// halveert de benchmark). Dat blijft waar, maar de klok is de Pi-knop (dvfs,
+// een serieuzer thermisch budget); hier is de knop de wekker: een hart in wfi
+// is clock-gated op élke kloksnelheid.
 package idle
 
 import (
 	"runtime/goos"
 	"sync/atomic"
+	_ "unsafe" // voor go:linkname naar runtime.nanotime
 
 	"hop-os/metal/dev"
 )
 
-// ecallYield/exitTrap: zie idle_riscv64.s.
-func ecallYield() uint64
+// ecallYield/exitTrap/rdtime: zie idle_riscv64.s.
+func ecallYield(deadline uint64) uint64
 func exitTrap()
+func rdtime() uint64
 
 // ExitTrap meldt HOP dat deze bewoner klaar is: de switcher (cpu/mmode) zet zijn
 // ctx-staat op dood en roteert weg, dus het hart draait door voor zijn buren.
@@ -42,9 +48,22 @@ func exitTrap()
 // en valt anders terug op wachten tot HOP het hart ophaalt.
 func ExitTrap() { exitTrap() }
 
-// prev is de governor die er stond vóór Enable (de runtime-default): het
-// dedicated-hart-pad. Eén schrijver, in Enable, vóór het eerste scheduler-punt.
+// prev is de governor die er stond vóór Enable (de runtime-default): de
+// terugval als er switcher noch waker is. Eén schrijver, in Enable, vóór het
+// eerste scheduler-punt.
 var prev func(int64)
+
+// mSleep is de slaap-primitief van het EIGEN hart, alleen gezet op HOP (het
+// board levert hem ná zijn CLINT-probe — UseMSleep). Apps krijgen hem nooit:
+// hun weg naar dezelfde slaap is de ecall-yield. Eén schrijver, vóór Enable.
+var mSleep func(wake uint64) uint64
+
+// UseMSleep geeft de governor de directe M-mode-slaap: "slaap tot timebase-tick
+// wake (of je cap), zeg hoe lang het was". Alleen voor de bewoner die al in
+// machine mode staat — HOP zelf. Aanroepen vóór Enable, en alleen met een
+// primitief dat het board op dít silicium bewezen heeft (de probe roept hem
+// zelf aan, dus "bewezen" is hier letterlijk).
+func UseMSleep(f func(wake uint64) uint64) { mSleep = f }
 
 var (
 	ticks      atomic.Uint64
@@ -53,13 +72,10 @@ var (
 )
 
 // Enable hangt de governor in de runtime, mét de governor die er al stond als
-// terugval. Geen event-stream te configureren zoals op ARM (CNTKCTL): het
-// wisselmoment is hier een expliciete trap, geen wekker.
-//
-// De vorige governor bewaren en aanroepen is geen netheid maar voorzichtigheid:
-// op een dedicated hart hoort het gedrag exact te blijven wat het was (de
-// runtime-default van tamago, die op dit silicium bewezen draait). Wij voegen
-// alléén het gedeelde-hart-pad toe.
+// terugval. Geen event-stream te configureren zoals op ARM (CNTKCTL): wat er te
+// configureren valt zit in de twee zetters hieronder (WatchShared voor een
+// slot-app, UseMSleep voor HOP), en zonder één van beide is de governor de
+// runtime-default met een omweg — bewust, want dat is de bewezen stand.
 func Enable() {
 	prev = goos.Idle
 	goos.Idle = governor
@@ -69,10 +85,13 @@ func Enable() {
 // eigen control-page, waar HOP hem leest (dvfs-beleid, per-slot CPU-meting).
 func Publish(addr uintptr) { pubAddr.Store(addr) }
 
-// WatchShared laat de governor het CtrlShared-woord op addr lezen: is het ≠ 0,
-// dan deelt dit slot zijn hart en yieldt de governor via ecall in plaats van door
-// te lopen. HOP zet en wist dat woord dynamisch (kern/slots refreshShared), dus
-// we lezen het élke idle-ronde vers. applib roept dit in Init.
+// WatchShared markeert dit slot als bewoner mét een switcher boven zich; addr
+// is het CtrlShared-woord van de eigen control-page. Sinds 01-08 is het ADRES
+// het signaal en niet meer de waarde: een slot-app yieldt áltijd (alleen wonen
+// betekent hier niet "geen switcher" maar "rotatie van één"), dus of het woord
+// 0 of 1 draagt verandert het pad niet meer. De naam en het argument blijven —
+// het is de ARM-API (waar de waarde wél het WFE/HVC-verschil kiest), en applib
+// roept dit op beide architecturen in Init aan.
 func WatchShared(addr uintptr) { sharedAddr.Store(addr) }
 
 // Ticks geeft de interne tellerstand: geaccumuleerde idle-tijd in
@@ -97,29 +116,68 @@ func UseCounterHz(hz uint64) {
 
 func CounterHz() uint64 { return counterHz }
 
-// AccountsDedicated is hier ONWAAR: een dedicated hart loopt door (geen WFI
-// zonder wekker, zie de pakket-doc), dus zijn idle-teller blijft nul. Wie daar
-// een cpu-percentage van maakt leest élk dedicated slot als 100% bezig — dat is
-// geen meting maar een meetgat, en een verkeerd cijfer is erger dan geen. Een
-// GEDEELD hart meet wél, net als op ARM: de ecall-yield beslaat de hele periode
-// waarin de buur draaide.
-func AccountsDedicated() bool { return false }
+// AccountsDedicated is sinds 01-08 WAAR: een slot-app yieldt óók als hij alleen
+// woont (zie de pakket-doc), en de ecall beslaat zijn hele weg-tijd — de meting
+// is dus identiek aan de gedeelde. Dit stond op onwaar toen een dedicated hart
+// bewust doorliep; die keuze is teruggedraaid (idlen overal, Derek 01-08).
+func AccountsDedicated() bool { return true }
 
-// governor: op een gedeeld hart één yield per scheduler-ronde, met de tellerstand
-// eromheen. De verstreken tijd is de wall-tijd waarin een buur draaide — precies
-// wat "wij deden niets" betekent op een gedeeld hart, en dezelfde meting als de
-// ARM-kant rond zijn HVC doet.
+// nanotime is de klok waarin de scheduler zijn pollUntil uitdrukt. Nodig omdat
+// de switcher in timebase-tikken rekent (rdtime) en de runtime in nanoseconden:
+// het verschil omrekenen kan alleen wie beide standen op hetzelfde moment leest.
+//
+//go:linkname nanotime runtime.nanotime
+func nanotime() int64
+
+// wakeAt vertaalt de pollUntil van de scheduler naar de wektijd die de switcher
+// begrijpt: de timebase-tick waarop deze bewoner op zijn vroegst terug wil.
+//
+// pollUntil is de eerstvolgende timer-deadline van dit slot, of 0 als er
+// helemaal geen timer loopt. Alles wat geen bruikbare toekomst oplevert wordt 0
+// = "nu meteen weer", en dat is precies het gedrag van vóór de wektijden — de
+// terugval is dus altijd de oude, bewezen kant.
+//
+// Verleidelijk maar NIET gedaan: "geen timer" als oneindig lezen. Dat klopt
+// theoretisch (zonder timer kan er zonder gebeurtenis van buiten niets
+// veranderen), maar zolang HOP nog geen wek-IPI stuurt is er dan ook niets dat
+// zo'n bewoner ooit nog terughaalt. Dat is geen zuinigheid maar een hang, en die
+// mag niet in de code staan wachten op de dag dat iemand hem aanzet.
+func wakeAt(pollUntil int64) uint64 {
+	if pollUntil <= 0 {
+		return 0
+	}
+	d := pollUntil - nanotime()
+	if d <= 0 {
+		return 0
+	}
+	return rdtime() + uint64(d)*counterHz/1_000_000_000
+}
+
+// governor: één melding per scheduler-ronde — "niets te doen tot T" — langs het
+// pad dat bij de rol van dit hart hoort (zie de pakket-doc). De verstreken tijd
+// is in alle gevallen de wall-tijd waarin dit slot niets deed: bij een yield de
+// tijd waarin een buur draaide óf het hart sliep, bij MSleep de slaap zelf.
 func governor(pollUntil int64) {
-	a := sharedAddr.Load()
-	if a == 0 || dev.Read64(a) == 0 {
-		// Eigen hart: precies doen wat dit board zonder ons zou doen.
-		if prev != nil {
-			prev(pollUntil)
+	if sharedAddr.Load() != 0 {
+		// Slot-app: yield naar de switcher, alleen wonend of niet.
+		n := ticks.Add(ecallYield(wakeAt(pollUntil)))
+		if p := pubAddr.Load(); p != 0 {
+			dev.Write64(p, n)
 		}
+		countWake()
 		return
 	}
-	n := ticks.Add(ecallYield())
-	if p := pubAddr.Load(); p != 0 {
-		dev.Write64(p, n)
+	if mSleep != nil {
+		// HOP's eigen hart. wakeAt geeft 0 als er niets te slapen valt
+		// (deadline verstreken, of geen timer — dat laatste komt op HOP niet
+		// voor: de RX-pompen alleen al leggen er elke 10-200µs één neer), en
+		// MSleep doet dan niets; de scheduler kijkt gewoon nog een ronde.
+		ticks.Add(mSleep(wakeAt(pollUntil)))
+		countWake()
+		return
+	}
+	// Geen switcher, geen waker: precies doen wat dit board zonder ons deed.
+	if prev != nil {
+		prev(pollUntil)
 	}
 }

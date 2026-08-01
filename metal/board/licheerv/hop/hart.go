@@ -38,6 +38,50 @@ const (
 // board-kennis.
 func (machine) AppHarts() []int { return []int{hartC906L} }
 
+// HartWaker geeft de CLINT-wekker van een hart — maar alleen als de probe bij
+// boot heeft aangetoond dat mtimecmp én msip op dit silicium écht bestaan en
+// dat een wfi op die wekker terugkeert (board/licheerv/clint.go). Zo niet, dan
+// blijft de switcher spinnen.
+//
+// Dat voorbehoud is niet theoretisch: van dezelfde CLINT is gemeten dat het
+// mtime-register er níet is. Een datasheet-layout is hier geen bewijs.
+// appHartSleepEnabled is de hoofdschakelaar van de app-hart-slaap, en hij
+// staat UIT op bewijs (01-08, boots 3-8):
+//
+//   - wekker AAN (boots 6/7): tweemaal een STILLE NODEDOOD — geen panic, geen
+//     fault, console dood, HOP's hart weg — na 70s resp. 40 min. Heisenbug-
+//     timing, dus een race of een silicium-conditie.
+//   - wekker UIT (boots 3/4): urenlang strak, alles servend.
+//   - de wek-keten zelf is op het hart bewezen (probe: mtimecmp vuurt, wfi
+//     keert terug) en de decode is core-lokaal (boot 8: HOP zag de 1'en van
+//     hart 1's parkeerlus nooit op zijn eigen comparator) — de twee nette
+//     verklaringen zijn daarmee GEMETEN afgevallen. Wat overblijft is
+//     SoC-onderzoek: klokdomein-gating door de C906L-wfi? een arbiter-kwestie
+//     in het c900-CLINT-blok bij gelijktijdig gebruik door beide cores? (Van
+//     datzelfde blok is al gemeten dat mtime-reads bus-fouten zijn.)
+//
+// Tot die jacht gelopen is: park spint, de bewezen stand. Niet aanzetten op
+// een redenering — alleen op een boot-soak zonder doden.
+const appHartSleepEnabled = false
+
+func (machine) HartWaker(hart int) (uint64, uint64, uint64, bool) {
+	// Alleen wat op het hart ZELF gemeten is telt (hartprobe.go). De les van
+	// 01-08: de boot-probe op hart 0 bewees dáár de hele keten, de wekker ging
+	// op dat bewijs óók naar hart 1 — en de eerste park-slaap op de C906L werd
+	// nooit gewekt ("core 1 never yielded", herstartstorm). Extrapolatie over
+	// een hart-grens is hier geen kortere weg maar een stille hang.
+	if !appHartSleepEnabled || !appWaker.ok {
+		return 0, 0, 0, false
+	}
+	// De ADRESSEN komen uit de probe, niet uit het hart-nummer: het
+	// reset-blok-nummer (het argument hier) en de mhartid van de core zijn
+	// twee verschillende nummerwerelden — de C906L is "hart 1" voor het
+	// reset-blok maar mhartid 0 op zijn eigen core-lokale CLINT (gemeten,
+	// boot 5). msip = 0: dat kanaal is core-lokaal en voor HOP onbereikbaar;
+	// de 2ms-cap draagt de wek.
+	return appWaker.mtimecmp, 0, licheerv.SleepCapTicks, true
+}
+
 // BootMode: HOP draait in M-mode (3). Minder kan niet — alleen M-mode
 // programmeert PMP en reset harts, en zonder dat is er geen kooi.
 func (machine) BootMode() int { return 3 }

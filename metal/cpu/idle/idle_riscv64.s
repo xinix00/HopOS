@@ -24,8 +24,10 @@
 
 #include "textflag.h"
 
-// func ecallYield() uint64 — retourneert de verstreken rdtime-ticks: de
-// wall-tijd waarin de buur draaide, oftewel de tijd waarin wíj niets deden.
+// func ecallYield(deadline uint64) uint64 — retourneert de verstreken
+// rdtime-ticks: de wall-tijd waarin de buur draaide, oftewel de tijd waarin wíj
+// niets deden. deadline is de timebase-tick waarop we op zijn vroegst terug
+// willen; de switcher slaat hem op in CtxWake en slaat ons tot dan over.
 //
 // LET OP DE +8 IN ELKE OFFSET. Een frame-declaratie ($112-8) laat de assembler
 // een proloog genereren die het RETOURADRES op 0(SP) legt:
@@ -43,7 +45,7 @@
 //
 // Dat het alléén op een gedeeld hart gebeurde is geen toeval en wees drie boots
 // lang de verkeerde kant op: zonder buurman wordt deze functie nooit aangeroepen.
-TEXT ·ecallYield(SB),NOSPLIT,$112-8
+TEXT ·ecallYield(SB),NOSPLIT,$112-16
 	MOVD	F8, 8(SP)		// fs0
 	MOVD	F9, 16(SP)		// fs1
 	MOVD	F18, 24(SP)		// fs2
@@ -60,6 +62,9 @@ TEXT ·ecallYield(SB),NOSPLIT,$112-8
 	MOV	T0, 104(SP)
 
 	WORD	$0xc0102373		// csrr t1, time
+	MOV	deadline+0(FP), A0	// a0 = wektijd: vóór deze timebase-tick hoeft de
+	// switcher ons niet te hervatten. 0 = "nu meteen weer" (en dat is ook wat een
+	// bewoner krijgt die niets meegeeft), ^0 = "ik heb geen eigen wektijd".
 	MOV	$0, X17			// a7 = 0: dit is een YIELD, geen exit. Expliciet
 	// nullen is niet netjesheid maar noodzaak — a7 is caller-saved, dus wat de
 	// aanroeper er liet staan zou anders de switcher een exit laten lezen en deze
@@ -82,7 +87,7 @@ TEXT ·ecallYield(SB),NOSPLIT,$112-8
 	MOVD	80(SP), F25
 	MOVD	88(SP), F26
 	MOVD	96(SP), F27
-	MOV	A0, ret+0(FP)
+	MOV	A0, ret+8(FP)
 	RET
 
 // func exitTrap() — "ik ben klaar". Zelfde trap, ander nummer in a7: de switcher
@@ -93,3 +98,10 @@ TEXT ·exitTrap(SB),NOSPLIT,$0
 	MOV	$1, X17			// a7 = 1: exit
 	WORD	$0x00000073		// ecall
 	RET				// onbereikbaar
+
+// func rdtime() uint64 — de TIME CSR. De governor heeft de rauwe stand nodig om
+// het GAT tussen twee idle-rondes te kunnen meten, niet alleen de yield zelf.
+TEXT ·rdtime(SB),NOSPLIT|NOFRAME,$0-8
+	WORD	$0xc0102573		// csrr a0, time
+	MOV	A0, ret+0(FP)
+	RET

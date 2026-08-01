@@ -81,6 +81,14 @@ func (Manager) StartLoader(slot int, memLimit uint64, sharegroup string, poolCor
 	}
 	if err := slots.StartLoaderOn(core, cage, memLimit, env); err != nil {
 		slots.ReleaseCage(cage)
+		if errors.Is(err, slots.ErrNoPartition) {
+			// Zelfde behandeling als een volle core-pool hierboven: geen
+			// partitie-ruimte is een capaciteitstoestand die vanzelf overgaat
+			// (een buurman verhuist of stopt), dus hand-back en pending — geen
+			// herstartstorm. Dít was het gat: PlaceCage-fouten droegen het
+			// sentinel al, de partitie-allocatie erná niet (gemeten 01-08).
+			return fmt.Errorf("%w: %v", hopos.ErrNoCapacity, err)
+		}
 		return err
 	}
 	return nil

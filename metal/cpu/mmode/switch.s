@@ -8,7 +8,7 @@
 //	VMID zegt wie draait       SchedCurrent zegt het
 //	ERET                       mret
 //	19 EL1-sysregs bewaren     satp/stvec/sscratch bewaren
-//	parkeerlus op EL2          wfi-lus hier
+//	parkeerlus op EL2          wfi op een CLINT-wekker (of spinnen zonder)
 //
 // Waarom dit in HÓP's image staat en niet in de kooi-stub: met twee bewoners op
 // één hart mag de code die tussen hen wisselt niet in het geheugen van één van
@@ -20,6 +20,16 @@
 // interrupt-controller. Een app die nooit yieldt starft zijn buren — dat is per
 // ontwerp (compute hoort op een eigen core, en HOP's liveness ziet de gestokte
 // heartbeat).
+//
+// Maar de yield draagt sinds 31-07 wél een WEKTIJD (a0): "hervat me niet vóór
+// deze tick". Zonder dat getal is "ik heb even niets te doen" niet te
+// onderscheiden van "geef me meteen mijn beurt terug", en dan pingpongen twee
+// wachtende apps op volle snelheid tegen elkaar aan — gemeten: allebei 36% van
+// het hart, en geen van beide deed iets. Met de wektijd slaat de rotatie ze
+// over en mag het hart in de tussentijd écht slapen (zie park). De timer is dus
+// geen preemptie-mechanisme geworden: hij WEKT alleen, en alleen als er niemand
+// te draaien is. Er staat nooit een mie-bit aan terwijl een app draait, dus een
+// wekker kan nooit als trap binnenkomen en een gezonde bewoner doodmelden.
 //
 // De kooi-stub geeft ons twee dingen mee vóór hij de app binnenlaat:
 //	mtvec    = mentry (dit bestand, adres via EntryPC)
@@ -187,6 +197,20 @@ TEXT mentry(SB),NOSPLIT|NOFRAME,$0
 	WORD	$0x3b7022f3		// csrr x5, pmpaddr7
 	MOV	X5, 392(X6)
 
+	// De WEKTIJD die de bewoner meegaf in a0 (layout.CtxWake): vóór deze
+	// timebase-tick hoeft hij niet hervat te worden. Zonder dit getal is
+	// "niets te doen" niet te onderscheiden van "nu meteen weer", en dan
+	// pingpongen twee lege apps op volle snelheid tegen elkaar aan — gemeten
+	// 31-07: allebei 36% van het hart, en geen van beide deed iets.
+	//
+	// Nul is "nu", en dat is ook wat een bewoner krijgt die niets meegeeft — het
+	// oude gedrag blijft dus de terugval, op elk pad waar dit getal onzin wordt.
+	//
+	// Eigen cacheline (blok-offset 464): alleen de switcher schrijft hier, HOP
+	// raakt hem nooit aan. Dat is geen netheid maar de non-coherentie-regel uit
+	// layout.go — twee schrijvers in één regel op dit silicium is dataverlies.
+	MOV	X10, 464(X6)		// a0
+
 	// Staat → saved (CtxSaved = 2), als LAATSTE write in deze cacheline en met
 	// een veeg erachter: HOP polt deze staat en moet hem in DRAM vinden. De
 	// veeg dekt regel 0 van het blok (staat + x1..x5); de rest van het blok is
@@ -273,9 +297,14 @@ teardown:
 	WORD	$0x01b0000b		// th.sync.is
 
 rotate:
+	MOV	ZERO, X12		// niet door een IPI gewekt: wektijden gelden
+rescan:
+	MOV	ZERO, X11		// vroegste wektijd van een nog-niet-due bewoner
 	// Round-robin over de bewonerslijst van dit hart, precies als op ARM: vanaf
-	// rotor+1 de eerste bewoner met staat boot-pending (1) of saved (2).
-	// Álle GPRs zijn hier vrij — de vorige bewoner is gesaved of dood.
+	// rotor+1 de eerste bewoner met staat boot-pending (1) of saved (2) die
+	// ook aan de beurt IS (zijn wektijd is verstreken).
+	// Álle GPRs zijn hier vrij — de vorige bewoner is gesaved of dood — behalve
+	// x11/x12, die deze twee regels net gezet hebben en de scan door moeten.
 	//
 	// Eerst de regels van HOP invalideren (64/128/192): lijst en lengte muteren
 	// terwijl wij draaien (residentAdd/Remove), dus een gecachete kopie is een
@@ -319,9 +348,27 @@ scan:
 	WORD	$0x01b0000b		// th.sync.is
 	MOV	0(X29), X30		// layout.CtxState
 	MOV	$1, X31
-	BEQ	X30, X31, boot		// boot-pending
+	BEQ	X30, X31, boot		// boot-pending: een verse start wacht nooit
 	MOV	$2, X31
-	BEQ	X30, X31, resume	// saved
+	BNE	X30, X31, skip		// leeg of dood
+
+	// Saved — maar is hij al aan de beurt? Zie CtxWake in het yield-pad.
+	BNEZ	X12, resume		// een IPI zegt "er is iets veranderd": nu kijken
+	MOV	464(X29), X30		// layout.CtxWake
+	BEQZ	X30, resume		// 0 = nu
+	WORD	$0xc0102ff3		// csrr x31, time
+	BGEU	X31, X30, resume	// zijn tijd is gekomen
+	// De wektijd wordt VERTROUWD — een bewoner die onzin vraagt benadeelt
+	// alleen zichzelf. Dat vertrouwen stelt wél een eis aan de applib: een
+	// yield van vóór de wektijd (a0 = residu) las als "wek me over 40 minuten"
+	// en dat wás een dove welcome (gemeten 01-08). Oude bewoners horen dus
+	// niet op een hart met deze switcher; alle vloot-artifacts zijn herbouwd.
+	// Nog niet aan de beurt. Onthouden wie het eerst weer moet — dát is de tijd
+	// waarop het hart hoogstens mag doorslapen (zie park).
+	BEQZ	X11, keepwake
+	BGEU	X30, X11, skip		// een ander wil er eerder uit
+keepwake:
+	MOV	X30, X11
 skip:
 	ADD	$-1, X7, X7
 	BNEZ	X7, next
@@ -458,22 +505,72 @@ resume:
 	WORD	$0x30200073		// mret
 
 park:
-	// Geen bewoner te draaien: iedereen dood of leeg. Op ARM parkeert de core dan
-	// in de EL2-lus tot HOP zijn mailbox schrijft en een SEV stuurt; hier bestaan
-	// beide niet — geen parkeerlus, geen SEV.
+	// Niemand draaibaar: iedereen dood, leeg, of nog niet aan de beurt. Op ARM
+	// parkeert de core in de EL2-lus tot HOP zijn mailbox schrijft en een SEV
+	// stuurt; hier is de wekker de CLINT.
 	//
-	// Dus komen we terug via de rotatie zelf: even pauzeren, dan opnieuw de lijst
-	// aflopen. Dat is functioneel en niet alleen netjes — HOP mag een nieuwe
-	// bewoner aan een hart hangen waarvan de vorige app net stierf
-	// (bootPendingDispatch ziet het hart als "draaiend" en wacht op de rotatie).
-	// Zou hier een wfi staan, dan wacht dat op een interrupt die niemand stuurt
-	// en verhongert die nieuwe bewoner tot de timeout.
-	//
-	// Géén wfi als pauze: die is op deze C906 niet gegarandeerd een hint die
-	// terugkomt, en één keer verkeerd gokken is een hart dat nooit meer opkijkt.
-	// Een teller is hier eerlijker — de kosten zijn de kosten van een hart zonder
-	// werk, en HOP haalt het op met een reset (cageQuiesce) zodra hij iets anders
-	// wil.
+	// TWEE STANDEN, en de veilige is de standaard. Vult HOP SchedClintPA niet in
+	// (board zonder wekker, of de CLINT-probe faalde — board/licheerv/clint.go),
+	// dan draait hier de pauzelus die er altijd stond: een teller, dan opnieuw de
+	// lijst aflopen. Dat kost stroom maar kan niet hangen, en dat is de goede
+	// kant om naar te falen — een hart dat niet meer wakker wordt is een dode
+	// node en geen foutmelding.
+	MOV	232(SP), X6		// layout.SchedClintPA
+	BEQZ	X6, spin
+
+	// Slapen tot de vroegste wektijd, maar nooit langer dan de cap. Die cap is
+	// geen zuinigheid maar het vangnet: gaat er ooit een wek-IPI verloren, dan
+	// kost dat latency en geen liveness.
+	WORD	$0xc0102ff3		// csrr x31, time
+	MOV	240(SP), X7		// layout.SchedSleepCap (tikken)
+	ADD	X31, X7, X7
+	BEQZ	X11, arm		// niemand met een eigen wektijd: de cap regeert
+	BGEU	X11, X7, arm		// die wektijd ligt voorbij de cap
+	MOV	X11, X7
+arm:
+	// mtimecmp is 64 bits, maar deze CLINT weigert 64-bit MMIO (zie
+	// board/licheerv): twee woorden, in de volgorde die de privileged spec
+	// voorschrijft — lo op alles-één, dan hi, dan lo. Zo staat er tijdens het
+	// schrijven nooit een halve waarde in het verleden die meteen vuurt.
+	MOV	$-1, X30
+	MOVW	X30, 0(X6)
+	SRL	$32, X7, X30
+	MOVW	X30, 4(X6)
+	MOVW	X7, 0(X6)
+
+	// mie aan, en ALLEEN hier. Zolang een bewoner draait staan MTIE/MSIE uit, dus
+	// kan een wekker nooit als trap binnenkomen — dat zou in de fault-tak landen
+	// en een gezonde app doodmelden (een M-interrupt wordt in S-mode altijd
+	// genomen als hij enabled is, ongeacht mstatus.MIE). wfi kijkt naar mip&mie
+	// en niet naar mstatus.MIE, dus dit is precies genoeg om te wekken zonder
+	// ooit een interrupt te NEMEN. En een signaal dat vlak vóór de wfi binnenkomt
+	// staat dan al pending en laat hem meteen terugkeren: geen gemiste wake.
+	MOV	$0x88, X30		// MTIE (bit 7) | MSIE (bit 3)
+	WORD	$0x304f2073		// csrs mie, x30
+	WORD	$0x10500073		// wfi
+	WORD	$0x304f3073		// csrc mie, x30
+
+	// Wat wekte ons? Een IPI betekent "HOP heeft iets veranderd voor iemand op
+	// dit hart", en dan mag de volgende ronde de wektijden negeren: de reden om
+	// te wachten kan net vervallen zijn. Te vroeg hervatten is altijd veilig —
+	// de bewoner kijkt, vindt niets, en yieldt opnieuw met een verse wektijd.
+	// Dit is waarom HOP geen wektijd hoeft te kunnen OVERSCHRIJVEN: dan zou dat
+	// woord twee schrijvers hebben, en dat is op dit silicium dataverlies.
+	WORD	$0x34402ff3		// csrr x31, mip
+	MOV	$0x8, X30
+	AND	X30, X31, X12
+
+	// Wekbronnen opruimen, anders keert de volgende wfi meteen terug op een
+	// signaal dat we al verwerkt hebben.
+	MOV	$-1, X30
+	MOVW	X30, 0(X6)
+	MOVW	X30, 4(X6)
+	MOV	248(SP), X30		// layout.SchedMsipPA
+	BEQZ	X30, rescan
+	MOVW	ZERO, 0(X30)
+	JMP	rescan
+
+spin:
 	MOV	$0x4000, X5
 pause:
 	ADD	$-1, X5, X5

@@ -39,7 +39,14 @@ import (
 func init() {
 	// Dit board heeft geen hardware-entropiebron, en sinds de agent over TLS
 	// artifacts haalt is dat een operator-beslissing in plaats van een voetnoot.
-	boardWarn = licheerv.Warn
+	// Daarachter de wekker-probe van het app-hart: die MOET op dat hart zelf
+	// draaien (hartprobe.go) en hoort dus bij wat dit board bij boot over
+	// zichzelf vaststelt — vóór het eerste slot-werk, dat via HartWaker op de
+	// uitslag leunt.
+	boardWarn = func() {
+		licheerv.Warn()
+		licheervhop.ProbeAppHart()
+	}
 
 	// De netwerk-identiteit uit de ingebakken config, vóórdat main de NIC
 	// opbrengt. Dit board heeft geen MAC in een fuse, dus zonder deze regel zou

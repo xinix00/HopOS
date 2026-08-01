@@ -73,10 +73,11 @@ func cpuPct(i int) int {
 
 // accounts meldt of de idle-teller van dít slot een cijfer waard is. Een
 // GEDEELDE bewoner meet altijd (de yield beslaat zijn hele descheduled-periode,
-// op beide architecturen); een DEDICATED slot hangt aan de idle-governor van zijn
-// arch, en die houdt op RISC-V niets bij — daar loopt een eigen hart bewust door,
-// want WFI zonder wekker is een hang (cpu/idle). Zonder deze check las élk
-// dedicated slot op dat board 100%, en dat is geen meting maar een meetgat.
+// op beide architecturen); een DEDICATED slot hangt aan de idle-governor van
+// zijn arch. Sinds 01-08 meten beide architecturen ook dáár (ARM WFE't, RISC-V
+// yieldt óók als hij alleen woont), dus vandaag is dit altijd waar — de check
+// blijft staan voor de arch waar dat ooit niet zo is, want zonder hem las een
+// niet-metend dedicated slot 100%, en dat is geen meting maar een meetgat.
 func accounts(s slots.Status) bool { return s.Shared || idle.AccountsDedicated() }
 
 // usageLoop is het dvfs-sample-patroon (last/seen/eerst-ijken): delta's van
@@ -120,6 +121,7 @@ func usageLoop() {
 			if d < full {
 				pct = int32((full - d) * 100 / full)
 			}
+			reportWakes(i, s.Wakes, full-min(d, full), tickHz)
 			// d ≥ full klemt op 0. QEMU-TCG heeft geen idle-model (WFE =
 			// no-op → idle-tijd ≈ 0 → alles leest daar hoog); cpu% is een
 			// ijzer-cijfer, net als alle cache/klok-metingen.
