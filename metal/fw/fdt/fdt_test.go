@@ -186,6 +186,39 @@ func TestFramebufferEnMemReserve(t *testing.T) {
 	}
 }
 
+// DE REGRESSIE (04-08, drie weken vermomd als "32-bpp-freeze"): de échte
+// Pi-firmware geeft /chosen een eigen #address-cells=1/#size-cells=1 en
+// schrijft de framebuffer-reg als <u32 base><u32 size>. De parser las met de
+// root-cellen (2) en plakte base en size aaneen tot 0x3f800000003f4800 —
+// waarna de eerste pixel-veeg een bus-fault-reset was (gemeten, FBDBG). De
+// pi()-testblob hierboven bouwde de node met root-cellen en bevestigde dus de
+// verkeerde aanname; deze blob bouwt hem zoals het ijzer hem geeft.
+func TestFramebufferMetChosenCellen(t *testing.T) {
+	b := &builder{}
+	b.begin("").
+		propU32("#address-cells", 2).
+		propU32("#size-cells", 2)
+	b.begin("chosen").
+		propU32("#address-cells", 1).
+		propU32("#size-cells", 1)
+	b.begin("framebuffer@3f800000").
+		prop("reg", app32(app32(nil, 0x3f800000), 0x3f4800)).
+		propU32("width", 1920).
+		propU32("height", 1080).
+		propU32("stride", 3840).
+		prop("format", []byte("r5g6b5\x00")).
+		end()
+	b.end() // chosen
+	b.end() // root
+	fb, ok := Framebuffer(at(b.blob()))
+	if !ok {
+		t.Fatal("Framebuffer niet gevonden")
+	}
+	if fb.Base != 0x3f800000 || fb.Stride != 3840 || fb.BPP != 16 {
+		t.Errorf("FB = %+v — base/stride/bpp moeten uit de CHOSEN-cellen komen", fb)
+	}
+}
+
 // DE REGRESSIE: Valid accepteerde een header die zichzelf niet kan dragen (een
 // gedeclareerde grootte vanaf 8 bytes), terwijl elke reader daarna +8/+12/+16
 // leest. Nu is Valid dezelfde toets als de readers doen.

@@ -483,7 +483,15 @@ func Framebuffer(base uintptr) (FB, bool) {
 				continue
 			}
 			sEnd := h.stringsEnd
-			if depth == 1 && plen == 4 && propIs(np, sEnd, "#address-cells") {
+			// De cellen van het DICHTSTBIJZIJNDE niveau winnen: de Pi-firmware
+			// schrijft /chosen mét een eigen #address-cells=1 en de framebuffer-
+			// reg als <u32 base><u32 size> — wie hier alleen de root-cellen (2)
+			// leest, plakt base en size aan elkaar tot een adres in de
+			// stratosfeer, en de eerste pixel-veeg is dan een bus-fault=reset.
+			// GEMETEN 04-08 (FBDBG, Pi 5): base=0x3f800000003f4800 — dít was de
+			// "32-bpp-freeze" van 19-07, drie weken vermomd als silicium.
+			if plen == 4 && (depth == 1 || (depth == 2 && inChosen)) &&
+				propIs(np, sEnd, "#address-cells") {
 				addrCells = be32(data)
 			}
 			if !inFB {
