@@ -8,6 +8,8 @@ github.com/usbarmory/go-net v0.0.0-20260626130943-dad9ef39fd9b h1:QOgzNwGI3ZFJzr
 github.com/usbarmory/go-net v0.0.0-20260626130943-dad9ef39fd9b/go.mod h1:buOhhKgCq3hxLvQ3QUMVHZy5XKcxFcx4zjOgGc2PEas=
 github.com/usbarmory/tamago v1.26.4 h1:laFvRANKgVYFHxLHjIlhqJCc3Xm+qMyab2SlUoNw6zY=
 github.com/usbarmory/tamago v1.26.4/go.mod h1:HZkb+ZkzFl8aCxAuF7exsKX+XaNM0mYG9Iv7ooX1WDY=
+github.com/xinix00/hop v0.20.11 h1:m5hxFe6hdzAhskt9yq1qVvy7W4Ekm6waVvo6yqlLKTw=
+github.com/xinix00/hop v0.20.11/go.mod h1:ywBmwghHa68nya2iSOoSmN730ZhBoZJmx0UBBivVXiM=
 github.com/xinix00/hoplock v0.3.0 h1:JRmWy78PEV7LYf9/21ZP5fZqbHREQigqEOaHMYMXUus=
 github.com/xinix00/hoplock v0.3.0/go.mod h1:cOs6dvSyw5Xvgv+x4J/ixXLFUmK6rFxkV+7OG5w5a5M=
 github.com/xinix00/hoplockserver v0.1.2 h1:5jbNUHEStXIWOByvW8d1kRl1NFQN2RJREviKVisAiJE=

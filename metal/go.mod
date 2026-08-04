@@ -25,18 +25,14 @@ require (
 require github.com/xinix00/hoplock v0.3.0
 
 require (
-	// Het versienummer documenteert de pairing (deze hop-os bouwt tegen HOP
-	// v0.20.11, o.a. hopos.ErrNoCapacity); wie zonder de lokale replace
-	// hieronder bouwt heeft een gepubliceerde tag met dit nummer nodig —
-	// en downstream (de -hopos satellieten) ziet de replace niet, dus dit
-	// nummer MOET een echte GitHub-tag zijn.
+	// De gepubliceerde HOP-tag waar deze boom tegen bouwt (o.a.
+	// hopos.ErrNoCapacity en StartStaged mét jobnaam). GEEN lokale replace
+	// meer (Derek, 04-08): een hop-wijziging bereikt hop-os alleen via
+	// commit+tag, dus wat hier bouwt bouwt overal — ook downstream (de
+	// -hopos-satellieten), die een replace nooit zouden zien.
 	github.com/xinix00/hop v0.20.11
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20260709184058-243e02a382f8
 	gvisor.dev/gvisor v0.0.0-20250911055229-61a46406f068
 )
 
 // De hoplock-modules komen van GitHub (echte versies, geen pad op deze Mac) —
-// Lokale ontwikkeling: hop-os en hop bewegen samen; de replace wijst naar de
-// zuster-checkout. Bouwen zonder deze checkout? Regel weghalen en de
-// gepubliceerde tag wordt gebruikt.
-replace github.com/xinix00/hop => /Users/derek/Git/easy/hop
