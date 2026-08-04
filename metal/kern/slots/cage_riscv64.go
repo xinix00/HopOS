@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"time"
 
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/board"
-	"hop-os/metal/cpu/mmode"
-	"hop-os/metal/dev"
-	"hop-os/metal/kern/cage"
-	"hop-os/metal/kern/cagestub"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/board"
+	"github.com/xinix00/HopOS/metal/cpu/mmode"
+	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/kern/cage"
+	"github.com/xinix00/HopOS/metal/kern/cagestub"
 )
 
 // De RISC-V64-helft van de kooi-naad (zie cage_arm64.go voor de andere).

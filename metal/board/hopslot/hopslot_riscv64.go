@@ -21,9 +21,9 @@ import (
 
 	"github.com/usbarmory/tamago/riscv64"
 
-	"hop-os/metal/board/appboard"
-	"hop-os/metal/cpu/idle"
-	_ "hop-os/metal/cpu/slotstart" // levert cpuinit (-tags linkcpuinit)
+	"github.com/xinix00/HopOS/metal/board/appboard"
+	"github.com/xinix00/HopOS/metal/cpu/idle"
+	_ "github.com/xinix00/HopOS/metal/cpu/slotstart" // levert cpuinit (-tags linkcpuinit)
 )
 
 // TimebaseHz is de frequentie van de TIME CSR (rdtime) — BOARD-kennis, niet

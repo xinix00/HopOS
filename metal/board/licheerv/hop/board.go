@@ -10,10 +10,10 @@
 package hop
 
 import (
-	"hop-os/metal/board"
-	"hop-os/metal/board/licheerv"
-	"hop-os/metal/driver/fb"
-	"hop-os/metal/driver/pcie"
+	"github.com/xinix00/HopOS/metal/board"
+	"github.com/xinix00/HopOS/metal/board/licheerv"
+	"github.com/xinix00/HopOS/metal/driver/fb"
+	"github.com/xinix00/HopOS/metal/driver/pcie"
 )
 
 // machine is de board-implementatie voor de Sipeed LicheeRV Nano (SG2002).

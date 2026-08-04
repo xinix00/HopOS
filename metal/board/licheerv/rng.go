@@ -5,8 +5,8 @@ import (
 	"time"
 	_ "unsafe"
 
-	"hop-os/metal/cpu/drbg"
-	"hop-os/metal/cpu/idle"
+	"github.com/xinix00/HopOS/metal/cpu/drbg"
+	"github.com/xinix00/HopOS/metal/cpu/idle"
 )
 
 // Dezelfde SHA-256-DRBG als op de andere boards (metal/cpu/drbg), zonder

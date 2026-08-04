@@ -20,7 +20,7 @@
 package rpi4
 
 import (
-	"hop-os/metal/board/raspi"
+	"github.com/xinix00/HopOS/metal/board/raspi"
 )
 
 // Het PA-plan van de Pi 4 (fase P1) — zelfde recept als de Pi 5, op adressen

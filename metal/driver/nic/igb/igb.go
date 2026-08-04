@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"time"
 
-	"hop-os/metal/dev"
+	"github.com/xinix00/HopOS/metal/dev"
 )
 
 // Registeroffsets (82575+-familie: 82576 = QEMU, I210/I211 = Altra; Linux

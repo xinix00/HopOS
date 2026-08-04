@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"time"
 
-	"hop-os/metal/dev"
-	"hop-os/metal/driver/nic/mdio"
+	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/driver/nic/mdio"
 )
 
 // Registeroffsets vanaf de GENET-basis (bcmgenet.h, GENET_V5-hw_params).

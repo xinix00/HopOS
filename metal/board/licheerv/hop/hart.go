@@ -15,8 +15,8 @@ package hop
 import (
 	"fmt"
 
-	"hop-os/metal/board"
-	"hop-os/metal/board/licheerv"
+	"github.com/xinix00/HopOS/metal/board"
+	"github.com/xinix00/HopOS/metal/board/licheerv"
 )
 
 const (

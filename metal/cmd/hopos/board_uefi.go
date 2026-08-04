@@ -11,8 +11,8 @@ import (
 	"time"
 	_ "unsafe" // go:linkname (RAM-declaratie)
 
-	"hop-os/metal/board/uefi"
-	uefihop "hop-os/metal/board/uefi/hop" // registreert het board (init); de basis levert de tamago-hooks
+	"github.com/xinix00/HopOS/metal/board/uefi"
+	uefihop "github.com/xinix00/HopOS/metal/board/uefi/hop" // registreert het board (init); de basis levert de tamago-hooks
 )
 
 // RAM-declaratie: RamStart wordt door mkkernel -pe per venster-variant

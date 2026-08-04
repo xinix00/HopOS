@@ -3,8 +3,8 @@ package hop
 import (
 	"github.com/usbarmory/tamago/dma"
 
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/dev"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/dev"
 )
 
 // QEMU virt plaatst 32 virtio-mmio-transports vanaf 0x0a000000 (stride 0x200,

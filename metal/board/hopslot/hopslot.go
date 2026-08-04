@@ -30,9 +30,9 @@ import (
 
 	"github.com/usbarmory/tamago/arm64"
 
-	"hop-os/metal/board/appboard"
-	"hop-os/metal/cpu/idle"
-	"hop-os/metal/dev"
+	"github.com/xinix00/HopOS/metal/board/appboard"
+	"github.com/xinix00/HopOS/metal/cpu/idle"
+	"github.com/xinix00/HopOS/metal/dev"
 )
 
 // ARM64 is tamago's generieke ARM64-driver — timers, cache en Now lopen

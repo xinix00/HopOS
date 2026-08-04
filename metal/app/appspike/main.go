@@ -19,13 +19,13 @@ import (
 	"time"
 	"unsafe"
 
-	"hop-os/metal/abi/checksum"
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/app/applib"
-	"hop-os/metal/app/applib/appnet"
-	"hop-os/metal/board/appboard"
-	"hop-os/metal/board/hopslot"
-	"hop-os/metal/cpu/psci"
+	"github.com/xinix00/HopOS/metal/abi/checksum"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/app/applib"
+	"github.com/xinix00/HopOS/metal/app/applib/appnet"
+	"github.com/xinix00/HopOS/metal/board/appboard"
+	"github.com/xinix00/HopOS/metal/board/hopslot"
+	"github.com/xinix00/HopOS/metal/cpu/psci"
 )
 
 func main() {

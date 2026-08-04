@@ -14,8 +14,8 @@ import (
 	"fmt"
 	"time"
 
-	"hop-os/metal/board/licheerv"
-	"hop-os/metal/dev"
+	"github.com/xinix00/HopOS/metal/board/licheerv"
+	"github.com/xinix00/HopOS/metal/dev"
 )
 
 func appHartProbePC() uintptr

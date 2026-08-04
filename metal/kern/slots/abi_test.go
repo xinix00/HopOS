@@ -3,7 +3,7 @@ package slots
 import (
 	"testing"
 
-	"hop-os/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/abi/layout"
 )
 
 // De ABI-staart moet alles dragen wat er in hoort: control page, hop-ABI-ringen

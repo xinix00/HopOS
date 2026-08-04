@@ -14,9 +14,9 @@ import (
 	"fmt"
 	"sort"
 
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/dev"
-	"hop-os/metal/fw/acpi"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/fw/acpi"
 )
 
 // Carve-offsets relatief aan Base() — pariteit met init.s (CARVE_SIZE,
@@ -266,7 +266,7 @@ func coreIDFromMADT() int {
 func MADTCPUs() []acpi.CPU { return madtCPUs }
 
 // slotHint wordt door slots.Start in een app-image gepatcht (symbool
-// "hop-os/metal/board/uefi.slotHint"): het slotnummer van deze start.
+// "github.com/xinix00/HopOS/metal/board/uefi.slotHint"): het slotnummer van deze start.
 // 0 = niet gepatcht (HOP-kern, of een image buiten slots om). Moet in dít
 // pakket blijven wonen — de symboolnaam is deel van het laad-contract.
 var slotHint uint64

@@ -25,7 +25,7 @@ package trng
 import (
 	"encoding/binary"
 
-	"hop-os/metal/cpu/psci"
+	"github.com/xinix00/HopOS/metal/cpu/psci"
 )
 
 // SMCCC TRNG (Arm DEN 0098), 64-bit conventie.

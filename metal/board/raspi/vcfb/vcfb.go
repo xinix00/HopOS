@@ -12,11 +12,11 @@ package vcfb
 import (
 	"sync"
 
-	"hop-os/metal/board/raspi"
-	"hop-os/metal/dev"
-	"hop-os/metal/driver/fb"
-	"hop-os/metal/driver/vcmail"
-	"hop-os/metal/fw/fdt"
+	"github.com/xinix00/HopOS/metal/board/raspi"
+	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/driver/fb"
+	"github.com/xinix00/HopOS/metal/driver/vcmail"
+	"github.com/xinix00/HopOS/metal/fw/fdt"
 )
 
 // Framebuffer leest de simple-framebuffer uit de DTB waarvan cpuinit de

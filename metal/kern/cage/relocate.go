@@ -3,7 +3,7 @@ package cage
 import (
 	"fmt"
 
-	"hop-os/metal/cpu/thead"
+	"github.com/xinix00/HopOS/metal/cpu/thead"
 )
 
 // De tweede helft van een kooi: verplaatsen.

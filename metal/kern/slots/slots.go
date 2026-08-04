@@ -21,13 +21,13 @@ import (
 	"sync"
 	"time"
 
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/abi/place"
-	"hop-os/metal/abi/ring"
-	"hop-os/metal/board"
-	"hop-os/metal/dev"
-	"hop-os/metal/kern/apploaderblob"
-	"hop-os/metal/net/hopswitch"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/abi/place"
+	"github.com/xinix00/HopOS/metal/abi/ring"
+	"github.com/xinix00/HopOS/metal/board"
+	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/kern/apploaderblob"
+	"github.com/xinix00/HopOS/metal/net/hopswitch"
 )
 
 // Eén servicer per slot: de outbox is SPSC, dus er mag nooit meer dan één

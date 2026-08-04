@@ -1,9 +1,9 @@
 package hop
 
 import (
-	"hop-os/metal/board/raspi"
-	"hop-os/metal/driver/dvfs"
-	"hop-os/metal/driver/vcmail"
+	"github.com/xinix00/HopOS/metal/board/raspi"
+	"github.com/xinix00/HopOS/metal/driver/dvfs"
+	"github.com/xinix00/HopOS/metal/driver/vcmail"
 )
 
 // StartDVFS start het Pi-klokbeleid (docs/archief/plan-p2b-soak.md): klok volgt idle

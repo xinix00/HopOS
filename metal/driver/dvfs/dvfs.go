@@ -21,10 +21,10 @@ import (
 	"fmt"
 	"time"
 
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/cpu/idle"
-	"hop-os/metal/dev"
-	"hop-os/metal/driver/vcmail"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/cpu/idle"
+	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/driver/vcmail"
 )
 
 // SlotCtrl geeft de fysieke control page van app-slot i, of ok=false als dat

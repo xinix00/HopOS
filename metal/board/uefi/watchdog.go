@@ -15,7 +15,7 @@ import (
 	"fmt"
 	"time"
 
-	"hop-os/metal/dev"
+	"github.com/xinix00/HopOS/metal/dev"
 )
 
 // WatchdogStart wapent de SBSA-watchdog met de gegeven timeout en start de

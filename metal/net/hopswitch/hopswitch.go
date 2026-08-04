@@ -21,8 +21,8 @@ import (
 	"sync"
 	"time"
 
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/abi/ring"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/abi/ring"
 )
 
 const (

@@ -12,7 +12,7 @@ import (
 
 	"github.com/xinix00/hoplock/s3"
 
-	"hop/pkg/config"
+	"github.com/xinix00/hop/pkg/config"
 )
 
 const (

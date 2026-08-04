@@ -16,8 +16,8 @@ import (
 	"fmt"
 	"runtime"
 
-	_ "hop-os/metal/board/rpi4/hop" // registreert het board (init) + basis-hooks
-	"hop-os/metal/cpu/memlimit"
+	_ "github.com/xinix00/HopOS/metal/board/rpi4/hop" // registreert het board (init) + basis-hooks
+	"github.com/xinix00/HopOS/metal/cpu/memlimit"
 )
 
 // Zelfde canonieke app als op QEMU/Pi 5 (slot-1-IPA), met rpi4-runtime-hooks

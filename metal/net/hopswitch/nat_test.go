@@ -13,8 +13,8 @@ import (
 	"time"
 	"unsafe"
 
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/abi/ring"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/abi/ring"
 )
 
 // resetNAT zet alle package-state terug (de tests delen één proces).

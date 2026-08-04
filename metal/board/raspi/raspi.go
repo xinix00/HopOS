@@ -23,11 +23,11 @@ import (
 
 	"github.com/usbarmory/tamago/arm64"
 
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/cpu/idle"
-	"hop-os/metal/dev"
-	"hop-os/metal/fw/bootcfg"
-	"hop-os/metal/fw/fdt"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/cpu/idle"
+	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/fw/bootcfg"
+	"github.com/xinix00/HopOS/metal/fw/fdt"
 )
 
 // Gedeeld geheugenplan ONDER 0x80000 — want (gemeten 2026-07-09): de Pi 5-

@@ -28,7 +28,7 @@ import (
 	"sync/atomic"
 	_ "unsafe" // voor go:linkname naar runtime.nanotime
 
-	"hop-os/metal/dev"
+	"github.com/xinix00/HopOS/metal/dev"
 )
 
 // wfeIdle/hvcYield/cntkctlSet/cntfrq/cntvct: zie idle_arm64.s.

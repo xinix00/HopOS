@@ -16,7 +16,7 @@ import (
 	"strings"
 	"testing"
 
-	"hop-os/metal/abi/hopabi"
+	"github.com/xinix00/HopOS/metal/abi/hopabi"
 )
 
 // memFS is een minimale storeFS: hele bestanden in een map.

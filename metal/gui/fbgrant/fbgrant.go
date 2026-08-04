@@ -22,10 +22,10 @@ import (
 	"fmt"
 	"sync"
 
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/board"
-	"hop-os/metal/driver/fb"
-	"hop-os/metal/kern/stage2"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/board"
+	"github.com/xinix00/HopOS/metal/driver/fb"
+	"github.com/xinix00/HopOS/metal/kern/stage2"
 )
 
 var (

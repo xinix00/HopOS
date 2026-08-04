@@ -3,7 +3,7 @@ package main
 import (
 	_ "unsafe"
 
-	"hop-os/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/abi/layout"
 )
 
 // Link-time defaults (slot 1): HopOS' slot-manager patcht RamStart en RamSize

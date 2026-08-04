@@ -37,9 +37,9 @@ import (
 	"fmt"
 	"unsafe"
 
-	"hop-os/metal/abi/a64"
-	"hop-os/metal/abi/place"
-	"hop-os/metal/dev"
+	"github.com/xinix00/HopOS/metal/abi/a64"
+	"github.com/xinix00/HopOS/metal/abi/place"
+	"github.com/xinix00/HopOS/metal/dev"
 )
 
 const (

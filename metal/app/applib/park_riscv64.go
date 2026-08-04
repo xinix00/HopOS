@@ -2,7 +2,7 @@
 
 package applib
 
-import "hop-os/metal/cpu/idle"
+import "github.com/xinix00/HopOS/metal/cpu/idle"
 
 // parkExit geeft het hart aan HOP terug. De status (Exited of Staged) staat al
 // op de control page; wat hier nog moet gebeuren is één ding: ophouden te

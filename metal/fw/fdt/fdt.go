@@ -15,7 +15,7 @@ package fdt
 import (
 	"math/bits"
 
-	"hop-os/metal/dev"
+	"github.com/xinix00/HopOS/metal/dev"
 )
 
 const (

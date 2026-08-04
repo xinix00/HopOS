@@ -16,10 +16,10 @@ import (
 
 	"github.com/usbarmory/tamago/arm64"
 
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/cpu/idle"
-	"hop-os/metal/dev"
-	"hop-os/metal/fw/fdt"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/cpu/idle"
+	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/fw/fdt"
 )
 
 // QEMU virt memory map (hw/arm/virt.c, stabiel gedocumenteerd).

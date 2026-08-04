@@ -19,7 +19,7 @@ import (
 	"time"
 	"unsafe"
 
-	"hop-os/metal/board/licheerv"
+	"github.com/xinix00/HopOS/metal/board/licheerv"
 )
 
 // De control page: velden 0-5 zijn van de stub (zie image/licheerv/stub-slot),

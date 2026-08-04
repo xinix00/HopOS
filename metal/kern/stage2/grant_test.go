@@ -3,7 +3,7 @@ package stage2
 import (
 	"testing"
 
-	"hop-os/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/abi/layout"
 )
 
 // tFbPA: een verzonnen framebuffer in de firmware-carve (GB 0, buiten het

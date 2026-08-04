@@ -27,7 +27,7 @@ import (
 	"net"
 	"time"
 
-	"hop-os/metal/driver/conlog"
+	"github.com/xinix00/HopOS/metal/driver/conlog"
 )
 
 // pollInterval is hoe vaak een verbonden lezer naar nieuwe bytes kijkt. Geen

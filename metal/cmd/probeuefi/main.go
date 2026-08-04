@@ -26,13 +26,13 @@ import (
 	"time"
 	_ "unsafe" // go:linkname (RAM-declaratie)
 
-	"hop-os/metal/board/uefi"
-	_ "hop-os/metal/board/uefi/hop" // board.Board-registratie (board.Current in de probe)
-	"hop-os/metal/cpu/psci"
-	"hop-os/metal/cpu/trng"
-	"hop-os/metal/driver/nic/igb"
-	"hop-os/metal/driver/pcie"
-	"hop-os/metal/net/dhcp"
+	"github.com/xinix00/HopOS/metal/board/uefi"
+	_ "github.com/xinix00/HopOS/metal/board/uefi/hop" // board.Board-registratie (board.Current in de probe)
+	"github.com/xinix00/HopOS/metal/cpu/psci"
+	"github.com/xinix00/HopOS/metal/cpu/trng"
+	"github.com/xinix00/HopOS/metal/driver/nic/igb"
+	"github.com/xinix00/HopOS/metal/driver/pcie"
+	"github.com/xinix00/HopOS/metal/net/dhcp"
 )
 
 // RAM-declaratie: RamStart wordt door mkkernel -pe per venster-variant

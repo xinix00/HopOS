@@ -12,7 +12,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"hop-os/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/abi/layout"
 )
 
 // gatewayRx is de invoer van HOP's interne NIC (gezet door hopnet/internal):

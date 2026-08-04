@@ -22,7 +22,7 @@ package appnet
 import (
 	"sync"
 
-	"hop-os/metal/abi/ring"
+	"github.com/xinix00/HopOS/metal/abi/ring"
 )
 
 // nic is het NetworkDevice over de eigen frame-ringen — gedeeld door beide

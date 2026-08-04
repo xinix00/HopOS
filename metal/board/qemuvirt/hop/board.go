@@ -12,14 +12,14 @@ import (
 
 	gnet "github.com/usbarmory/go-net"
 
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/board"
-	"hop-os/metal/board/qemuvirt"
-	"hop-os/metal/cpu/el2"
-	"hop-os/metal/cpu/psci"
-	"hop-os/metal/driver/fb"
-	"hop-os/metal/driver/nic/virtionet"
-	"hop-os/metal/driver/pcie"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/board"
+	"github.com/xinix00/HopOS/metal/board/qemuvirt"
+	"github.com/xinix00/HopOS/metal/cpu/el2"
+	"github.com/xinix00/HopOS/metal/cpu/psci"
+	"github.com/xinix00/HopOS/metal/driver/fb"
+	"github.com/xinix00/HopOS/metal/driver/nic/virtionet"
+	"github.com/xinix00/HopOS/metal/driver/pcie"
 )
 
 // machine is de board-implementatie voor de QEMU -M virt arm64-machine.

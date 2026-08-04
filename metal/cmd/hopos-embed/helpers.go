@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"time"
 
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/kern/slots"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/kern/slots"
 )
 
 // drainLogs abonneert op het logkanaal van de actieve servicer van een slot

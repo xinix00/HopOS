@@ -13,9 +13,9 @@ package raspi
 import (
 	"time"
 
-	"hop-os/metal/driver/conlog"
-	"hop-os/metal/driver/fb"
-	"hop-os/metal/driver/pl011"
+	"github.com/xinix00/HopOS/metal/driver/conlog"
+	"github.com/xinix00/HopOS/metal/driver/fb"
+	"github.com/xinix00/HopOS/metal/driver/pl011"
 )
 
 // Printk is de console-byte van álle Pi-boards: de rpi4- en rpi5-hooks waren

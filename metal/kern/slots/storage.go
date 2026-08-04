@@ -23,7 +23,7 @@ import (
 	"io"
 	"strings"
 
-	"hop-os/metal/abi/hopabi"
+	"github.com/xinix00/HopOS/metal/abi/hopabi"
 )
 
 // ObjectStore is wat de node-kant (cmd/hopos) aan slots geeft: de vier

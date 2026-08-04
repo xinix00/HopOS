@@ -44,7 +44,7 @@ import (
 	"runtime"
 	"time"
 
-	"hop-os/metal/app/applib"
+	"github.com/xinix00/HopOS/metal/app/applib"
 )
 
 // reportEvery is hoe vaak een bewoner van zich laat horen. Hoog genoeg dat de

@@ -5,7 +5,7 @@ package main
 import (
 	_ "unsafe"
 
-	"hop-os/metal/board/raspi"
+	"github.com/xinix00/HopOS/metal/board/raspi"
 )
 
 // Geheugendeclaratie van de HOP-kern op de Raspberry Pi 4 én 5: 128MB vanaf

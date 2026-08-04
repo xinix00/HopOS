@@ -21,7 +21,7 @@ package vcmail
 import (
 	"time"
 
-	"hop-os/metal/dev"
+	"github.com/xinix00/HopOS/metal/dev"
 )
 
 // Mailbox-registers (relatief aan Base) en statusbits.

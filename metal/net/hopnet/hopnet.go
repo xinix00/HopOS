@@ -13,9 +13,9 @@ import (
 	gnet "github.com/usbarmory/go-net"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 
-	"hop-os/metal/board"
-	"hop-os/metal/net/dhcp"
-	"hop-os/metal/net/hopswitch"
+	"github.com/xinix00/HopOS/metal/board"
+	"github.com/xinix00/HopOS/metal/net/dhcp"
+	"github.com/xinix00/HopOS/metal/net/hopswitch"
 )
 
 // Up initialiseert de NIC en de netstack en hangt ze in het net-package. Het

@@ -7,12 +7,12 @@ import (
 
 	gnet "github.com/usbarmory/go-net"
 
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/board"
-	"hop-os/metal/dev"
-	"hop-os/metal/driver/nic/dwmac"
-	"hop-os/metal/driver/nic/mdio"
-	"hop-os/metal/net/dhcp"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/board"
+	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/driver/nic/dwmac"
+	"github.com/xinix00/HopOS/metal/driver/nic/mdio"
+	"github.com/xinix00/HopOS/metal/net/dhcp"
 )
 
 // Het netwerk van dit board: de DWMAC1000 op 0x04070000 met de interne 100M-

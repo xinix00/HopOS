@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"hop-os/metal/dev"
+	"github.com/xinix00/HopOS/metal/dev"
 )
 
 // Hardware-watchdog van het BCM-PM-blok — dezelfde registerfamilie op de

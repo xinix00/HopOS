@@ -24,7 +24,7 @@ package uefi
 import (
 	"unsafe"
 
-	"hop-os/metal/dev"
+	"github.com/xinix00/HopOS/metal/dev"
 )
 
 const (

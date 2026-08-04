@@ -3,8 +3,8 @@ package qemuvirt
 import (
 	_ "unsafe" // voor go:linkname
 
-	"hop-os/metal/cpu/drbg"
-	"hop-os/metal/cpu/trng"
+	"github.com/xinix00/HopOS/metal/cpu/drbg"
+	"github.com/xinix00/HopOS/metal/cpu/trng"
 )
 
 // De gedeelde SHA-256-DRBG (metal/cpu/drbg), zelfde bronkeuze als hopslot:

@@ -5,7 +5,7 @@ package hopslot
 import (
 	_ "unsafe" // voor go:linkname
 
-	"hop-os/metal/cpu/drbg"
+	"github.com/xinix00/HopOS/metal/cpu/drbg"
 )
 
 // Dezelfde SHA-256-DRBG als op ARM (metal/cpu/drbg), maar zonder

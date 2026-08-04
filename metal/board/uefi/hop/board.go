@@ -17,15 +17,15 @@ import (
 
 	gnet "github.com/usbarmory/go-net"
 
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/board"
-	"hop-os/metal/board/uefi"
-	"hop-os/metal/cpu/el2"
-	"hop-os/metal/cpu/psci"
-	"hop-os/metal/driver/fb"
-	"hop-os/metal/driver/nic/igb"
-	"hop-os/metal/driver/pcie"
-	"hop-os/metal/net/dhcp"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/board"
+	"github.com/xinix00/HopOS/metal/board/uefi"
+	"github.com/xinix00/HopOS/metal/cpu/el2"
+	"github.com/xinix00/HopOS/metal/cpu/psci"
+	"github.com/xinix00/HopOS/metal/driver/fb"
+	"github.com/xinix00/HopOS/metal/driver/nic/igb"
+	"github.com/xinix00/HopOS/metal/driver/pcie"
+	"github.com/xinix00/HopOS/metal/net/dhcp"
 )
 
 // machine is de board-implementatie voor UEFI/ACPI-platforms.

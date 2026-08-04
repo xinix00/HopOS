@@ -5,10 +5,10 @@ package slots
 import (
 	"fmt"
 
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/board"
-	"hop-os/metal/dev"
-	"hop-os/metal/kern/stage2"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/board"
+	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/kern/stage2"
 )
 
 // De ARM64-helft van de kooi-naad (zie cage_riscv64.go voor de andere, en

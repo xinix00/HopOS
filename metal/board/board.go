@@ -15,10 +15,10 @@ import (
 
 	gnet "github.com/usbarmory/go-net"
 
-	"hop-os/metal/board/appboard"
-	"hop-os/metal/driver/fb"
-	"hop-os/metal/driver/pcie"
-	"hop-os/metal/net/dhcp"
+	"github.com/xinix00/HopOS/metal/board/appboard"
+	"github.com/xinix00/HopOS/metal/driver/fb"
+	"github.com/xinix00/HopOS/metal/driver/pcie"
+	"github.com/xinix00/HopOS/metal/net/dhcp"
 )
 
 // NetConfig is het IPv4-plan van het interne net van een node (op QEMU de

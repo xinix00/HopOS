@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"hop-os/metal/dev"
-	"hop-os/metal/driver/pcie"
+	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/driver/pcie"
 )
 
 // Controller-registers (NVMe 1.4, MMIO op BAR0).

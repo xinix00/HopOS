@@ -9,7 +9,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"hop-os/metal/dev"
+	"github.com/xinix00/HopOS/metal/dev"
 )
 
 // testBufs houdt de backing-slices levend voor de hele testrun: een Ring kent

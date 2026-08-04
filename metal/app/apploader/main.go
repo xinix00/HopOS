@@ -30,8 +30,8 @@ import (
 	// (gemeten 20-07: GitHub-release-assets → x509-fout in QEMU).
 	_ "golang.org/x/crypto/x509roots/fallback"
 
-	"hop-os/metal/app/applib"
-	"hop-os/metal/app/applib/appnet"
+	"github.com/xinix00/HopOS/metal/app/applib"
+	"github.com/xinix00/HopOS/metal/app/applib/appnet"
 )
 
 func main() {

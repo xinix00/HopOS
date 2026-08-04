@@ -37,8 +37,8 @@ import (
 	"fmt"
 	"time"
 
-	"hop-os/metal/dev"
-	"hop-os/metal/driver/nic/mdio"
+	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/driver/nic/mdio"
 )
 
 // DWMAC1000-registeroffsets (designware.h-conventie).

@@ -18,14 +18,14 @@ import (
 	"sync"
 	"time"
 
-	"hop-os/metal/abi/hopabi"
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/abi/ring"
-	"hop-os/metal/board/appboard"
-	"hop-os/metal/cpu/idle"
-	"hop-os/metal/cpu/memlimit"
-	"hop-os/metal/cpu/smp"
-	"hop-os/metal/dev"
+	"github.com/xinix00/HopOS/metal/abi/hopabi"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/abi/ring"
+	"github.com/xinix00/HopOS/metal/board/appboard"
+	"github.com/xinix00/HopOS/metal/cpu/idle"
+	"github.com/xinix00/HopOS/metal/cpu/memlimit"
+	"github.com/xinix00/HopOS/metal/cpu/smp"
+	"github.com/xinix00/HopOS/metal/dev"
 )
 
 // App is het handle dat Init teruggeeft.

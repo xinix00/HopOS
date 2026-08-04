@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"hop-os/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/abi/layout"
 )
 
 // captureGateway registreert een vangnet-gatewayRx en geeft de vangst terug.

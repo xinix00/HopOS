@@ -14,7 +14,7 @@ package acpi
 import (
 	"fmt"
 
-	"hop-os/metal/dev"
+	"github.com/xinix00/HopOS/metal/dev"
 )
 
 // mem kopieert length bytes op fysiek adres pa naar een eigen buffer. De

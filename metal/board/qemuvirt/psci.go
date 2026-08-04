@@ -8,7 +8,7 @@ package qemuvirt
 import (
 	"unsafe"
 
-	"hop-os/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/abi/layout"
 )
 
 // BootEL geeft het exception level waarop de firmware ons afleverde. Alleen

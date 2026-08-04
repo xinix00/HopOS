@@ -8,7 +8,7 @@
 // Alleen voor GOOS=tamago GOARCH=arm64 (device-MMIO via metal/dev).
 package pl011
 
-import "hop-os/metal/dev"
+import "github.com/xinix00/HopOS/metal/dev"
 
 const (
 	dr     = 0x00   // data register

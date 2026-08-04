@@ -22,13 +22,13 @@ import (
 
 	gnet "github.com/usbarmory/go-net"
 
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/board"
-	"hop-os/metal/board/raspi"
-	raspihop "hop-os/metal/board/raspi/hop"
-	"hop-os/metal/board/rpi4"
-	"hop-os/metal/driver/nic/genet"
-	"hop-os/metal/net/dhcp"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/board"
+	"github.com/xinix00/HopOS/metal/board/raspi"
+	raspihop "github.com/xinix00/HopOS/metal/board/raspi/hop"
+	"github.com/xinix00/HopOS/metal/board/rpi4"
+	"github.com/xinix00/HopOS/metal/driver/nic/genet"
+	"github.com/xinix00/HopOS/metal/net/dhcp"
 )
 
 // machine is de board-implementatie voor de Raspberry Pi 4 (BCM2711): de

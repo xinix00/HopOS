@@ -9,8 +9,8 @@
 package main
 
 import (
-	"hop-os/metal/gui/fbgrant"
-	"hop-os/metal/kern/slots"
+	"github.com/xinix00/HopOS/metal/gui/fbgrant"
+	"github.com/xinix00/HopOS/metal/kern/slots"
 )
 
 func init() {

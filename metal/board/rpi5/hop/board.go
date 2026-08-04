@@ -23,14 +23,14 @@ import (
 
 	gnet "github.com/usbarmory/go-net"
 
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/board"
-	"hop-os/metal/board/raspi"
-	raspihop "hop-os/metal/board/raspi/hop"
-	"hop-os/metal/board/rpi5"
-	"hop-os/metal/driver/brcmpcie"
-	"hop-os/metal/driver/nic/gem"
-	"hop-os/metal/net/dhcp"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/board"
+	"github.com/xinix00/HopOS/metal/board/raspi"
+	raspihop "github.com/xinix00/HopOS/metal/board/raspi/hop"
+	"github.com/xinix00/HopOS/metal/board/rpi5"
+	"github.com/xinix00/HopOS/metal/driver/brcmpcie"
+	"github.com/xinix00/HopOS/metal/driver/nic/gem"
+	"github.com/xinix00/HopOS/metal/net/dhcp"
 )
 
 // machine is de board-implementatie voor de Raspberry Pi 5 (BCM2712): de

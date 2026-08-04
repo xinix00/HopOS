@@ -34,10 +34,10 @@ package stage2
 import (
 	"fmt"
 
-	"hop-os/metal/abi/a64"
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/cpu/el2"
-	"hop-os/metal/dev"
+	"github.com/xinix00/HopOS/metal/abi/a64"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/cpu/el2"
+	"github.com/xinix00/HopOS/metal/dev"
 )
 
 // Descriptor-bits (stage-2): AF, SH=inner, S2AP en MemAttr per gebruik.

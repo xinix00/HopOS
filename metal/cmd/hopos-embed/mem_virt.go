@@ -5,7 +5,7 @@ package main
 import (
 	_ "unsafe"
 
-	"hop-os/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/abi/layout"
 )
 
 // Geheugendeclaratie van de HOP-kern (core 0): alleen de eigen partitie.

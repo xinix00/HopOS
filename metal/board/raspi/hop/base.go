@@ -12,15 +12,15 @@
 package hop
 
 import (
-	"hop-os/metal/board"
-	"hop-os/metal/board/raspi"
-	"hop-os/metal/board/raspi/vcfb"
-	"hop-os/metal/cpu/el2"
-	"hop-os/metal/cpu/psci"
-	"hop-os/metal/driver/fb"
-	"hop-os/metal/driver/pcie"
-	"hop-os/metal/fw/fdt"
-	"hop-os/metal/net/dhcp"
+	"github.com/xinix00/HopOS/metal/board"
+	"github.com/xinix00/HopOS/metal/board/raspi"
+	"github.com/xinix00/HopOS/metal/board/raspi/vcfb"
+	"github.com/xinix00/HopOS/metal/cpu/el2"
+	"github.com/xinix00/HopOS/metal/cpu/psci"
+	"github.com/xinix00/HopOS/metal/driver/fb"
+	"github.com/xinix00/HopOS/metal/driver/pcie"
+	"github.com/xinix00/HopOS/metal/fw/fdt"
+	"github.com/xinix00/HopOS/metal/net/dhcp"
 )
 
 // Base is de gedeelde board.Board-helft; rpi4/hop en rpi5/hop embedden hem in

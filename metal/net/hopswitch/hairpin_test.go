@@ -9,7 +9,7 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"hop-os/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/abi/layout"
 )
 
 // TestHairpinHeenEnTerug: slot 2 belt nodeIP:7878 (gepubliceerd door slot 1).

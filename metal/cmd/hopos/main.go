@@ -28,22 +28,22 @@ import (
 	// pad (P2b, gemeten 2026-07-11: lege x509-pool op de node).
 	_ "golang.org/x/crypto/x509roots/fallback"
 
-	"hop/pkg/agentboot"
-	"hop/pkg/config"
-	"hop/pkg/hopos"
+	"github.com/xinix00/hop/pkg/agentboot"
+	"github.com/xinix00/hop/pkg/config"
+	"github.com/xinix00/hop/pkg/hopos"
 
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/board"
-	"hop-os/metal/cpu/memlimit"
-	"hop-os/metal/cpu/smp"
-	"hop-os/metal/driver/fb"
-	"hop-os/metal/driver/nvme"
-	"hop-os/metal/kern/conport"
-	"hop-os/metal/kern/hopfs"
-	"hop-os/metal/kern/slotmgr"
-	"hop-os/metal/kern/slots"
-	"hop-os/metal/net/hopnet"
-	"hop-os/metal/net/hopswitch"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/board"
+	"github.com/xinix00/HopOS/metal/cpu/memlimit"
+	"github.com/xinix00/HopOS/metal/cpu/smp"
+	"github.com/xinix00/HopOS/metal/driver/fb"
+	"github.com/xinix00/HopOS/metal/driver/nvme"
+	"github.com/xinix00/HopOS/metal/kern/conport"
+	"github.com/xinix00/HopOS/metal/kern/hopfs"
+	"github.com/xinix00/HopOS/metal/kern/slotmgr"
+	"github.com/xinix00/HopOS/metal/kern/slots"
+	"github.com/xinix00/HopOS/metal/net/hopnet"
+	"github.com/xinix00/HopOS/metal/net/hopswitch"
 )
 
 // park houdt de node in leven zónder verder werk, en keert nooit terug: HopOS

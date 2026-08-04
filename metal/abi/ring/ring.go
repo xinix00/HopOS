@@ -16,7 +16,7 @@
 package ring
 
 import (
-	"hop-os/metal/dev"
+	"github.com/xinix00/HopOS/metal/dev"
 )
 
 const (

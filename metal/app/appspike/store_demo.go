@@ -10,7 +10,7 @@ package main
 import (
 	"bytes"
 
-	"hop-os/metal/app/applib"
+	"github.com/xinix00/HopOS/metal/app/applib"
 )
 
 func storeDemo(app *applib.App) {

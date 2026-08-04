@@ -25,7 +25,7 @@ package idle
 import (
 	"sync/atomic"
 
-	"hop-os/metal/dev"
+	"github.com/xinix00/HopOS/metal/dev"
 )
 
 var (

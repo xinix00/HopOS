@@ -7,9 +7,9 @@ import (
 
 	gnet "github.com/usbarmory/go-net"
 
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/abi/ring"
-	"hop-os/metal/app/applib"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/abi/ring"
+	"github.com/xinix00/HopOS/metal/app/applib"
 )
 
 // Up brengt de eigen netstack (gVisor) op en hangt hem in Go's net-package;

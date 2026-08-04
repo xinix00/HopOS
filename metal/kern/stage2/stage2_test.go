@@ -11,8 +11,8 @@ import (
 	"testing"
 	"unsafe"
 
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/dev"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/dev"
 )
 
 // Verzonnen PA's voor alles wat Build alleen als waarde encodeert.

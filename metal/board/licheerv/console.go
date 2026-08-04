@@ -5,7 +5,7 @@ package licheerv
 import (
 	_ "unsafe"
 
-	"hop-os/metal/driver/conlog"
+	"github.com/xinix00/HopOS/metal/driver/conlog"
 )
 
 // DW APB UART (16550-compatibel, reg-shift=2 → registers op 4-byte stride).

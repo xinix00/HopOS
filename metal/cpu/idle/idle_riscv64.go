@@ -32,7 +32,7 @@ import (
 	"sync/atomic"
 	_ "unsafe" // voor go:linkname naar runtime.nanotime
 
-	"hop-os/metal/dev"
+	"github.com/xinix00/HopOS/metal/dev"
 )
 
 // ecallYield/exitTrap/rdtime: zie idle_riscv64.s.

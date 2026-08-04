@@ -8,9 +8,9 @@
 package main
 
 import (
-	raspihop "hop-os/metal/board/raspi/hop"
-	"hop-os/metal/board/rpi4"
-	_ "hop-os/metal/board/rpi4/hop" // registreert het board (init); de basis levert de tamago-hooks
+	raspihop "github.com/xinix00/HopOS/metal/board/raspi/hop"
+	"github.com/xinix00/HopOS/metal/board/rpi4"
+	_ "github.com/xinix00/HopOS/metal/board/rpi4/hop" // registreert het board (init); de basis levert de tamago-hooks
 )
 
 func init() {

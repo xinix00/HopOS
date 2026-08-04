@@ -24,8 +24,8 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/net/hopswitch"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/net/hopswitch"
 )
 
 // internalNICID is de tweede NIC op de node-stack (1 = de externe uplink).

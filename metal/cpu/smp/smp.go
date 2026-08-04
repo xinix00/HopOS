@@ -27,9 +27,9 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/cpu/el2"
-	"hop-os/metal/dev"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/cpu/el2"
+	"github.com/xinix00/HopOS/metal/dev"
 )
 
 var (

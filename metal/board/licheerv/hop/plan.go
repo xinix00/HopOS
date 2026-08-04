@@ -3,9 +3,9 @@ package hop
 import (
 	"fmt"
 
-	"hop-os/metal/abi/layout"
-	"hop-os/metal/board/licheerv"
-	"hop-os/metal/driver/nic/dwmac"
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/board/licheerv"
+	"github.com/xinix00/HopOS/metal/driver/nic/dwmac"
 )
 
 // Het PA-plan van dit board: waar HOP's eigen structuren liggen en welk DRAM

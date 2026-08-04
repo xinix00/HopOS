@@ -20,7 +20,7 @@ import (
 	"sort"
 	"sync"
 
-	"hop-os/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/abi/layout"
 )
 
 // ErrNoPartition markeert "de partitie past nu niet in de pool" — een

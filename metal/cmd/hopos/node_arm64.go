@@ -5,7 +5,7 @@ package main
 import (
 	"fmt"
 
-	"hop-os/metal/board"
+	"github.com/xinix00/HopOS/metal/board"
 )
 
 // De ARM64-helft van wat de agent-main over zijn eigen ijzer moet weten. Drie

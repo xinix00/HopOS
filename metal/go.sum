@@ -10,8 +10,8 @@ github.com/usbarmory/tamago v1.26.4 h1:laFvRANKgVYFHxLHjIlhqJCc3Xm+qMyab2SlUoNw6
 github.com/usbarmory/tamago v1.26.4/go.mod h1:HZkb+ZkzFl8aCxAuF7exsKX+XaNM0mYG9Iv7ooX1WDY=
 github.com/xinix00/hoplock v0.3.0 h1:JRmWy78PEV7LYf9/21ZP5fZqbHREQigqEOaHMYMXUus=
 github.com/xinix00/hoplock v0.3.0/go.mod h1:cOs6dvSyw5Xvgv+x4J/ixXLFUmK6rFxkV+7OG5w5a5M=
-github.com/xinix00/hoplockserver v0.1.1 h1:RA3+ZueDLYmATaUyg8FpqLiAbNafQY0u1hPqODAQFQE=
-github.com/xinix00/hoplockserver v0.1.1/go.mod h1:ut1TtQ4m3KT6iCLsHWV9ziMGhTxK61GMWdtCbGGo2aA=
+github.com/xinix00/hoplockserver v0.1.2 h1:5jbNUHEStXIWOByvW8d1kRl1NFQN2RJREviKVisAiJE=
+github.com/xinix00/hoplockserver v0.1.2/go.mod h1:TCYG/Wb7E9GfZgnpCzLO6Ldu5OyHv4+2hHZVscbcVnY=
 golang.org/x/crypto/x509roots/fallback v0.0.0-20260709184058-243e02a382f8 h1:OZy0hsjD/gbnVKENxnVK6I3e4bdKwYy4R3dfdKosYyA=
 golang.org/x/crypto/x509roots/fallback v0.0.0-20260709184058-243e02a382f8/go.mod h1:+UoQFNBq2p2wO+Q6ddVtYc25GZ6VNdOMyyrd4nrqrKs=
 golang.org/x/sys v0.44.0 h1:ildZl3J4uzeKP07r2F++Op7E9B29JRUy+a27EibtBTQ=

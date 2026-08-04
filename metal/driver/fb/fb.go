@@ -17,7 +17,7 @@
 // Alleen voor GOOS=tamago GOARCH=arm64.
 package fb
 
-import "hop-os/metal/dev"
+import "github.com/xinix00/HopOS/metal/dev"
 
 // Desc beschrijft een firmware-framebuffer: het lineaire adres + geometrie.
 // board.Framebuffer() vult 'm uit GOP (UEFI) of de device-tree (simplefb).

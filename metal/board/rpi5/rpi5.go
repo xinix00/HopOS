@@ -18,7 +18,7 @@
 package rpi5
 
 import (
-	"hop-os/metal/board/raspi"
+	"github.com/xinix00/HopOS/metal/board/raspi"
 )
 
 // Het PA-plan van de Pi 5 (fase P1): wáár control-pages, ringen en
