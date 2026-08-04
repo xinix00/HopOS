@@ -13,6 +13,7 @@
 package slots
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -44,7 +45,14 @@ type servicer struct {
 	idleStart time.Time   // eerste lege pass zonder levende ctx (start-gratie)
 	logs      chan string // logregels (drop bij trage lezer)
 	root      string      // eigen (lege) hopfs-root van deze task
+	job       string      // job-naam = de store-naamruimte ("" = geen store)
 	mounts    [][2]string // {local, shared}, langste local eerst
+
+	// De levenslijn van de store-ops (storage.go): evict cancelt hem, zodat
+	// een servicer die minutenlang in een S3-transfer hangt een Stop→Start
+	// nooit ophoudt — de transfer breekt af en de run-lus ziet stop.
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 var (
@@ -234,6 +242,10 @@ func evictServicer(i int) {
 	delete(servicers, i)
 	svcMu.Unlock()
 	if old != nil {
+		// Eerst de levenslijn kappen: hangt de servicer in een store-op
+		// (S3-transfer), dan breekt die meteen af — anders wachtte <-old.done
+		// hier tot de volle transfer-timeout, mét lifecycleMu in de hand.
+		old.cancel()
 		close(old.stop)
 		<-old.done
 	}
@@ -244,14 +256,18 @@ func evictServicer(i int) {
 // hier niet meer: evictServicer draait altijd eerder op hetzelfde pad, onder
 // dezelfde lifecycleMu, en registratie gebeurt nérgens anders — er kán dus
 // geen oude servicer meer staan.
-func registerServicer(i int, root string, mounts [][2]string) *servicer {
+func registerServicer(i int, root, job string, mounts [][2]string) *servicer {
+	ctx, cancel := context.WithCancel(context.Background())
 	s := &servicer{
 		slot:   i,
 		stop:   make(chan struct{}),
 		done:   make(chan struct{}),
 		logs:   make(chan string, 64),
 		root:   root,
+		job:    job,
 		mounts: mounts,
+		ctx:    ctx,
+		cancel: cancel,
 	}
 	svcMu.Lock()
 	servicers[i] = s
@@ -264,6 +280,7 @@ func registerServicer(i int, root string, mounts [][2]string) *servicer {
 func (s *servicer) run() {
 	defer close(s.done)
 	defer close(s.logs)
+	defer s.cancel() // ook bij een natuurlijke dood (ring corrupt, ctx weg)
 	// Diepteverdediging: één servicer-panic (een bug in handle/fs/fetch, of een
 	// onverwachte record-inhoud) mag core 0 — en dus álle andere slots — niet
 	// vellen. Recover, log zichtbaar, en laat alléén deze goroutine sterven;
@@ -620,14 +637,19 @@ func (d devReaderAt) ReadAt(p []byte, off int64) (int, error) {
 // mounts is de volume-tabel (shared path → local path, HOP's Job.Volumes): de
 // task ziet zijn eigen lege root plus de gemounte shared dirs. ports (HOP's
 // Task.Ports) worden na de start gepubliceerd (stateloze DNAT bij de switch).
-func Start(i int, image []byte, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int) error {
-	return startImage(i, image, memLimit, cores, env, mounts, ports, false)
+//
+// job is de naam van de JOB (niet de task): de naamruimte van deze app in de
+// object-store (apps/<cluster>/<job>/ — storage.go). De jób, zodat een
+// herstart of failover elders dezelfde map ziet en replica's hem delen als
+// een shared volume. "" = geen store-toegang (embed-demo's, de apploader).
+func Start(i int, image []byte, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int, job string) error {
+	return startImage(i, image, memLimit, cores, env, mounts, ports, job, false)
 }
 
 // startImage is het gedeelde startpad van Start en StartShared (share.go).
 // shared verlegt één wacht: niet "de cores van het slot zijn geparkeerd/cold"
 // (de gedeelde core drááit meestal juist), maar "dít slot leeft nergens".
-func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int, shared bool) (err error) {
+func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int, job string, shared bool) (err error) {
 	imgSize := int64(len(image))
 	if imgSize <= 0 {
 		return fmt.Errorf("Start: lege image")
@@ -668,7 +690,30 @@ func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]
 	vectorsOnce.Do(cageInit)
 	if shared {
 		if st := ctxState(i); ctxLive(st) {
-			return fmt.Errorf("slot %d still live (ctx-state %d) — stop it before StartShared", i, st)
+			// De task-boekhouding is hier de autoriteit: wie plaatst, heeft
+			// het slot vrij bevonden — een "levende" ctx zonder eigenaar is
+			// dus een LIJK, geen bewoner. De klassieke bron is DRAM-residu:
+			// DDR overleeft een warme herstart (snelle herprik, watchdog),
+			// en gemeten 02-08 weigerde een verse boot zijn állereerste
+			// plaatsing op het Saved-lijk van de vorige run — beide jobs
+			// stormden tot give-up. Detecteren zonder opruimen is dan half
+			// werk (Derek): ruim het lijk en ga door.
+			//
+			// De scheidsrechter is de BEWONERSLIJST, niet het hart: die lijst
+			// is HOP-eigen RAM (vers bij elke boot, onder lock gemuteerd), en
+			// de rotatie hervat uitsluitend wat erin staat. Een ctx-lijk
+			// búiten de lijst kan dus nooit meer tot leven komen — draaiend
+			// hart of niet — en dat is precies het gat dat "alleen op een
+			// stilstaand hart" liet liggen: op één gedeeld hart start de
+			// eerste plaatsing het hart, waarna het lijk van de twééde slot
+			// onruimbaar werd (gemeten 02-08, cloudflared-storm na de
+			// welcome-evict). Stáát hij wél in de lijst, dan is de
+			// inconsistentie echt en faalt het luid.
+			if residentListed(coreOf(i), i) {
+				return fmt.Errorf("slot %d still live (ctx-state %d, scheduled on core %d) — stop it before StartShared", i, st, coreOf(i))
+			}
+			fmt.Printf("slot %d: unowned resident (ctx-state %d, in no rotation) — evicting the corpse, reusing the slot HOPOS_CTX_EVICT\n", i, st)
+			ctxWrite(i, layout.CtxState, layout.CtxEmpty)
 		}
 	} else if err := coresFree(i, cores, "not parked/cold"); err != nil {
 		return err
@@ -727,7 +772,7 @@ func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]
 	stageAddr := uintptr(addr)
 	dev.Copy(stageAddr, image)
 
-	if err := placeFromStaging(i, base, size, stageAddr, imgSize, memLimit, cores, envBlob, mtab, ports); err != nil {
+	if err := placeFromStaging(i, base, size, stageAddr, imgSize, memLimit, cores, envBlob, mtab, ports, job); err != nil {
 		return err
 	}
 	started = true // partitie blijft van deze task tot Stop
@@ -769,7 +814,9 @@ func StartLoaderOn(core, i int, memLimit uint64, env map[string]string) error {
 	if len(img) == 0 {
 		return fmt.Errorf("apploader niet ingebakken of uitpakken faalde (bouw de node met -tags embedloader)")
 	}
-	return StartShared(core, i, img, memLimit, env, nil, nil)
+	// job="": de loader is systeemwerk zonder store-toegang; de échte app
+	// krijgt zijn naamruimte in fase 2 (StartStaged).
+	return StartShared(core, i, img, memLimit, env, nil, nil, "")
 }
 
 // appRAMSize is het deel van de partitie dat de app als RAM ziet: de bovenste
@@ -793,7 +840,7 @@ func appRAMSize(size uint64) (uint64, error) {
 // hieraf is alles geprivilegieerd HOP-werk: ELF parsen, segmenten plaatsen,
 // RAM-symbolen patchen, stage-2 bouwen en de core (her)dispatchen. Eén bron van
 // waarheid voor beide startpaden.
-func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64, memLimit uint64, cores int, envBlob []byte, mtab [][2]string, ports map[string]int) error {
+func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64, memLimit uint64, cores int, envBlob []byte, mtab [][2]string, ports map[string]int, job string) error {
 	// De net-ring van dit slot: de partitie-staart. Puur een lokale berekening —
 	// de PA gaat als parameter naar ring-init, hopswitch.Attach en stage2.Build,
 	// dus er bestaat geen register dat stale kan worden (de PA leeft precies zo
@@ -833,7 +880,7 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 		dev.Write64(uintptr(p.Addr+delta), p.Val)
 	}
 
-	return armSlot(i, base, size, plan.Entry, memLimit, cores, envBlob, mtab, ports)
+	return armSlot(i, base, size, plan.Entry, memLimit, cores, envBlob, mtab, ports, job)
 }
 
 // armSlot is de gedeelde slotstart-staart: servicer/switch-hygiëne, verse
@@ -842,7 +889,7 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 // = de app-entry uit de ELF) en het zelfplaats-pad van StartStaged (de loader
 // plaatste voor, entry = het stubje dat op de eigen core de segmenten schuift
 // en dan de app inspringt — zie applib/selfplace.go).
-func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlob []byte, mtab [][2]string, ports map[string]int) (err error) {
+func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlob []byte, mtab [][2]string, ports map[string]int, job string) (err error) {
 	appRAM, err := appRAMSize(size)
 	if err != nil {
 		return err
@@ -1008,7 +1055,7 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// Vanaf hier draait de app: de opbouw blijft staan (geen faalbare stap meer).
 	armed = true
 
-	go registerServicer(i, root, mtab).run()
+	go registerServicer(i, root, job, mtab).run()
 
 	// Alleen op boards met een écht DMA-stil venster (NetQuiescer — de
 	// C1-erratum-familie) wachten we hier tot de app READY meldt: dáár hoort
@@ -1034,7 +1081,10 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 //
 // imgSize komt van de control-page (door de loader gezet) en is NIET vertrouwd:
 // een verkeerde maat faalt hooguit de ELF-parse/segment-validatie van dít slot.
-func StartStaged(i int, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int) (err error) {
+//
+// job is de store-naamruimte van de app (zie Start) — fase 2 is waar de échte
+// app hem krijgt; de apploader van fase 1 heeft er niets te zoeken.
+func StartStaged(i int, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int, job string) (err error) {
 	// Pure invoervalidatie vóór het venster — gedeeld met Start (prepStart).
 	mtab, envBlob, cores, err := prepStart(i, memLimit, cores, env, mounts, ports)
 	if err != nil {
@@ -1115,7 +1165,7 @@ func StartStaged(i int, memLimit uint64, cores int, env map[string]string, mount
 		// Geen CleanInv en geen parse op core 0: het stubje veegt op zíjn
 		// core eerst heel app-RAM (DC CIVAC — dezelfde coherentie-stap, maar
 		// per-slot-parallel) en schuift dan de al-gevalideerde segmenten.
-		if err := armSlot(i, base, size, placeEntry, memLimit, cores, envBlob, mtab, ports); err != nil {
+		if err := armSlot(i, base, size, placeEntry, memLimit, cores, envBlob, mtab, ports, job); err != nil {
 			return err
 		}
 		staged = true
@@ -1137,7 +1187,7 @@ func StartStaged(i int, memLimit uint64, cores int, env map[string]string, mount
 	// call alleen HOP's eigen kopie — ~5ms per start, niet de moeite van een
 	// architectuur-vertakking waard.
 	dev.CleanInv(uintptr(base), uintptr(size))
-	if err := placeFromStaging(i, base, size, stageAddr, imgSize, memLimit, cores, envBlob, mtab, ports); err != nil {
+	if err := placeFromStaging(i, base, size, stageAddr, imgSize, memLimit, cores, envBlob, mtab, ports, job); err != nil {
 		return err
 	}
 	staged = true

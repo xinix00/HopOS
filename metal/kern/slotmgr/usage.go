@@ -121,7 +121,6 @@ func usageLoop() {
 			if d < full {
 				pct = int32((full - d) * 100 / full)
 			}
-			reportWakes(i, s.Wakes, full-min(d, full), tickHz)
 			// d ≥ full klemt op 0. QEMU-TCG heeft geen idle-model (WFE =
 			// no-op → idle-tijd ≈ 0 → alles leest daar hoog); cpu% is een
 			// ijzer-cijfer, net als alle cache/klok-metingen.

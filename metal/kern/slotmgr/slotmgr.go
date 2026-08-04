@@ -94,8 +94,8 @@ func (Manager) StartLoader(slot int, memLimit uint64, sharegroup string, poolCor
 	return nil
 }
 
-func (Manager) StartStaged(slot int, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int) error {
-	return slots.StartStaged(phys(slot), memLimit, cores, env, mounts, ports)
+func (Manager) StartStaged(slot int, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int, job string) error {
+	return slots.StartStaged(phys(slot), memLimit, cores, env, mounts, ports, job)
 }
 
 func (Manager) Stop(slot int, timeout time.Duration) error {

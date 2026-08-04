@@ -168,10 +168,13 @@ func governor(pollUntil int64) {
 		return
 	}
 	if mSleep != nil {
-		// HOP's eigen hart. wakeAt geeft 0 als er niets te slapen valt
-		// (deadline verstreken, of geen timer — dat laatste komt op HOP niet
-		// voor: de RX-pompen alleen al leggen er elke 10-200µs één neer), en
-		// MSleep doet dan niets; de scheduler kijkt gewoon nog een ronde.
+		// HOP's eigen hart. Eerst de slaap-rem (hold.go): boot er ergens een
+		// slot — de apploader trekt dan zijn image over de NIC — dan géén wfi
+		// maar terug naar de scheduler voor nog een poll-ronde.
+		// wakeAt geeft 0 als er niets te slapen valt (deadline verstreken, of
+		// geen timer — dat laatste komt op HOP niet voor: de RX-pompen alleen
+		// al leggen er elke 10-200µs één neer), en MSleep doet dan niets; de
+		// scheduler kijkt gewoon nog een ronde.
 		ticks.Add(mSleep(wakeAt(pollUntil)))
 		countWake()
 		return

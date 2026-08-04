@@ -43,7 +43,7 @@ func acceptance(prefix, core string, app []byte) {
 	// ── 1. Levenscyclus: start, ring-logs, heartbeat, coöperatieve stop. ──
 	fmt.Println("start slot 1 (64MB)...")
 	var logs1 int
-	if err := slots.Start(1, app, 64<<20, 1, map[string]string{"ROLE": "pi-worker"}, nil, nil); err != nil {
+	if err := slots.Start(1, app, 64<<20, 1, map[string]string{"ROLE": "pi-worker"}, nil, nil, ""); err != nil {
 		fail(prefix, "start", err)
 	}
 	go drainLogs(1, &logs1)
@@ -66,7 +66,7 @@ func acceptance(prefix, core string, app []byte) {
 	// HOP-geheugen lezen (IPA 0x40000000 — nooit gemapt); de EL2-vector moet
 	// rapporteren en de core uitzetten, zónder nette exit.
 	fmt.Println("isolatietest: slot 1 start met PROBE=hop...")
-	if err := slots.Start(1, app, 32<<20, 1, map[string]string{"PROBE": "hop"}, nil, nil); err != nil {
+	if err := slots.Start(1, app, 32<<20, 1, map[string]string{"PROBE": "hop"}, nil, nil, ""); err != nil {
 		fail(prefix, "iso-start", err)
 	}
 	go drainLogs(1, nil)
@@ -98,7 +98,7 @@ func acceptance(prefix, core string, app []byte) {
 	// scherpste test: hertranslateert de front-end na de TLBI, dan faultt hij
 	// op de genulde tabel en zet zichzelf uit. Dít kon QEMU niet bewijzen.
 	fmt.Println("hard-kill: slot 1 start met HANG=spin...")
-	if err := slots.Start(1, app, 32<<20, 1, map[string]string{"HANG": "spin"}, nil, nil); err != nil {
+	if err := slots.Start(1, app, 32<<20, 1, map[string]string{"HANG": "spin"}, nil, nil, ""); err != nil {
 		fail(prefix, "hang-start", err)
 	}
 	go drainLogs(1, nil)
@@ -123,7 +123,7 @@ func acceptance(prefix, core string, app []byte) {
 	// en herstart op een zojuist gebruikte partitie (stale-line-test: zonder
 	// de CleanInv in het loadpad is dít waar het op echt silicium misgaat).
 	fmt.Println("relocatie: zelfde artifact op slot 2, daarna herstart op slot 1...")
-	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"ROLE": "reloc"}, nil, nil); err != nil {
+	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"ROLE": "reloc"}, nil, nil, ""); err != nil {
 		fail(prefix, "reloc-start", err)
 	}
 	go drainLogs(2, nil)
@@ -133,7 +133,7 @@ func acceptance(prefix, core string, app []byte) {
 	if err := slots.Stop(2, 3*time.Second); err != nil {
 		fail(prefix, "reloc-stop", err)
 	}
-	if err := slots.Start(1, app, 48<<20, 1, map[string]string{"ROLE": "hergebruik"}, nil, nil); err != nil {
+	if err := slots.Start(1, app, 48<<20, 1, map[string]string{"ROLE": "hergebruik"}, nil, nil, ""); err != nil {
 		fail(prefix, "reuse-start", err)
 	}
 	go drainLogs(1, nil)
@@ -147,7 +147,7 @@ func acceptance(prefix, core string, app []byte) {
 
 	// ── 5. SMP: één app op 2 cores, gedeelde heap, GC, nette teardown. ──
 	fmt.Println("smp: slot 1 als 2-core app (gedeelde heap), core 2 secundair...")
-	if err := slots.Start(1, app, 128<<20, 2, map[string]string{"SMP": "bench"}, nil, nil); err != nil {
+	if err := slots.Start(1, app, 128<<20, 2, map[string]string{"SMP": "bench"}, nil, nil, ""); err != nil {
 		fail(prefix, "smp-start", err)
 	}
 	go drainLogs(1, nil)

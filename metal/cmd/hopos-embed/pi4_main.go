@@ -17,6 +17,7 @@ import (
 	"runtime"
 
 	_ "hop-os/metal/board/rpi4/hop" // registreert het board (init) + basis-hooks
+	"hop-os/metal/cpu/memlimit"
 )
 
 // Zelfde canonieke app als op QEMU/Pi 5 (slot-1-IPA), met rpi4-runtime-hooks
@@ -27,6 +28,7 @@ import (
 var app []byte
 
 func main() {
+	memlimit.Arm() // geheugenplafond uit het RAM-raam — zie cpu/memlimit
 	fmt.Println("")
 	fmt.Println("HopOS (rpi4): bare-metal multikernel op de Pi 4 — geen Linux aan boord")
 	fmt.Printf("runtime %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)

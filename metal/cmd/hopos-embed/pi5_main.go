@@ -19,6 +19,7 @@ import (
 	raspihop "hop-os/metal/board/raspi/hop"
 	"hop-os/metal/board/rpi5"
 	_ "hop-os/metal/board/rpi5/hop" // registreert het board (init); de basis levert de tamago-hooks
+	"hop-os/metal/cpu/memlimit"
 	"hop-os/metal/kern/slots"
 	"hop-os/metal/net/hopnet"
 )
@@ -31,6 +32,7 @@ import (
 var app []byte
 
 func main() {
+	memlimit.Arm() // geheugenplafond uit het RAM-raam — zie cpu/memlimit
 	fmt.Println("")
 	fmt.Println("HopOS (rpi5): bare-metal multikernel op de Pi 5 — geen Linux aan boord")
 	fmt.Printf("runtime %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
@@ -70,7 +72,7 @@ func main() {
 	fmt.Println("dvfs-test: 35s stilte voor de laag-flank...")
 	time.Sleep(35 * time.Second)
 	fmt.Println("dvfs-test: rekenende app starten — verwacht een druk-flank...")
-	if err := slots.Start(1, app, 128<<20, 2, map[string]string{"SMP": "bench"}, nil, nil); err != nil {
+	if err := slots.Start(1, app, 128<<20, 2, map[string]string{"SMP": "bench"}, nil, nil, ""); err != nil {
 		fail("PI5", "dvfs-start", err)
 	}
 	go drainLogs(1, nil)

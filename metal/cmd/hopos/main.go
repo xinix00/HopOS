@@ -34,6 +34,7 @@ import (
 
 	"hop-os/metal/abi/layout"
 	"hop-os/metal/board"
+	"hop-os/metal/cpu/memlimit"
 	"hop-os/metal/cpu/smp"
 	"hop-os/metal/driver/fb"
 	"hop-os/metal/driver/nvme"
@@ -179,6 +180,11 @@ func nodeSMPWarmup(cores int) {
 }
 
 func main() {
+	// Eerst het geheugenplafond — automatisch uit het RAM-raam van dit board
+	// (cpu/memlimit): Go remt zichzelf af in plaats van door de muur te gaan
+	// (de stille OOM-dood van 02-08). Vóór alles, dus ook vóór de bunny.
+	memlimit.Arm()
+
 	// Dereks bunny — het origineel, door hemzelf aangeleverd (2026-07-11).
 	// Op de UART als banner; op het scherm als vaste header (fb.Header,
 	// verderop) die nooit mee-scrolt — zoals Linux zijn logo bovenin laat
@@ -373,6 +379,14 @@ func main() {
 		cfg.Cluster.Lock.Type = "s3"
 		fmt.Printf("hop: cluster %q: S3 committed state on %s/%s — jobs survive reboot\n",
 			cfg.Cluster.Name, s3.Endpoint, s3.Bucket)
+		// Dezelfde bucket + creds nog één keer: de app-storage. Elke job
+		// krijgt zijn eigen map apps/<cluster>/<job>/ (naast leases/<cluster>
+		// en state/<cluster>) via de store-ops van de hop-ABI — zie
+		// kern/slots/storage.go. De bytes lopen over HOP: de creds en de TLS
+		// wonen hier al, de app ziet alleen namen binnen zijn eigen map.
+		slots.UseStore(newS3Store(s3), "apps/"+cfg.Cluster.Name)
+		fmt.Printf("hop: app object store enabled — apps/%s/<job>/ in the same bucket\n",
+			cfg.Cluster.Name)
 	}
 
 	// Bewust géén template-substitutie ({{host}} e.d.) in de jobspecs: adressen
@@ -536,8 +550,8 @@ func (e envSlots) StartLoader(slot int, memLimit uint64, sharegroup string, pool
 	return e.SlotManager.StartLoader(slot, memLimit, sharegroup, poolCores, e.merge(env))
 }
 
-func (e envSlots) StartStaged(slot int, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int) error {
-	return e.SlotManager.StartStaged(slot, memLimit, cores, e.merge(env), mounts, ports)
+func (e envSlots) StartStaged(slot int, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int, job string) error {
+	return e.SlotManager.StartStaged(slot, memLimit, cores, e.merge(env), mounts, ports, job)
 }
 
 func (e envSlots) merge(env map[string]string) map[string]string {

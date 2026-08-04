@@ -27,6 +27,7 @@ import (
 	"hop-os/metal/board"
 	"hop-os/metal/board/licheerv"
 	_ "hop-os/metal/board/licheerv/hop" // registreert het board (init)
+	"hop-os/metal/cpu/memlimit"
 	"hop-os/metal/kern/cage"
 )
 
@@ -143,6 +144,7 @@ func place(b board.Board, hart int, addrs []uint64, cfg uint64) error {
 }
 
 func main() {
+	memlimit.Arm() // geheugenplafond uit het RAM-raam — zie cpu/memlimit
 	b := board.Current()
 	fmt.Printf("\r\n\r\nHopOS on %s — hart %d is HOP (%s), app slot on hart %v\r\n",
 		licheerv.Model(), b.CoreID(), b.CoreClass(0), b.AppHarts())

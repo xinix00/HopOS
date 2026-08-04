@@ -28,8 +28,17 @@ const (
 	probeFireLat  = 24 // vuur-latentie van mtimecmp in tikken
 	probeMip      = 32 // mip-snapshot bij een gestrande stap
 	probeMsip     = 40 // 1 = ok, 2 = never pended, 3 = stuck pending
-	probeLen      = 48
+	probeWdt      = 48 // 1 = WDT-blok bereikbaar+beschrijfbaar, 2 = houdt niet
+	// vast, 0 = de aanraking bus-faultte (blok in reset?) — dan blijft de
+	// watchdog uit; HOP zelf overleeft zo'n fout niet, dit hart parkeert 'm.
+	probeLen = 56
 )
+
+// WdtUsable meldt of de hart-1-probe het watchdog-blok bewezen heeft — de
+// voorwaarde waaronder de canary (board_licheerv.go) hem mag wapenen.
+func WdtUsable() bool { return wdtOK }
+
+var wdtOK bool
 
 // appWaker is de gemeten uitslag; HartWaker leest hem. Eén exemplaar en geen
 // per-hart-tabel: dit board heeft één app-hart, en de dag dat er meer komen
@@ -94,6 +103,7 @@ func probeHart(h int) {
 	fireUs := dev.Read64(mb+probeFireLat) / 25 // 25MHz → µs
 	mip := dev.Read64(mb + probeMip)
 	msip := dev.Read64(mb + probeMsip)
+	wdtOK = dev.Read64(mb+probeWdt) == 1
 
 	// DE DECODE-TEST. De parkeerlus van de probe schrijft nu continu 1 naar
 	// zíjn mtimecmp-adres — hetzelfde getal als het onze, want beide cores

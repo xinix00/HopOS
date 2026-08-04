@@ -214,6 +214,29 @@ msip_done:
 	MOV	$7, X13
 	MOV	X13, 0(X5)
 	FENCE
+
+	// Stap 8 (bonus, ná het oordeel van stap 7): is het DW-WDT-blok
+	// (0x03010000) bereikbaar? Van deze SoC is gemeten dat afwezige MMIO een
+	// bus-fout is (de CLINT-mtime-les), en HOP kan zo'n fout niet overleven —
+	// dít hart wel: een trap springt naar probepark (mtvec) en +48 blijft dan
+	// 0 = "niet bereikbaar". We schrijven niets dat de WDT wapent: alleen
+	// TORR (de timeout-range, inert zolang CR.enable uit staat) en lezen hem
+	// terug. 1 = leeft en houdt waarden vast; 2 = leeft maar readback wijkt af.
+	MOV	$0x03010000, X10
+	MOVWU	8(X10), X14		// WDT_CCVR — de aanraking die faalt, parkeert
+	MOV	$0xFF, X13
+	MOVW	X13, 4(X10)		// WDT_TORR = top/top_init 15 (inert: enable uit)
+	MOVWU	4(X10), X14
+	MOV	$0xFF, X13
+	BEQ	X14, X13, wdt_ok
+	MOV	$2, X13			// leeft, maar houdt de waarde niet vast
+	MOV	X13, 48(X5)
+	FENCE
+	JMP	probepark(SB)
+wdt_ok:
+	MOV	$1, X13			// bereikbaar én beschrijfbaar
+	MOV	X13, 48(X5)
+	FENCE
 	JMP	probepark(SB)
 
 // probepark: klaar (of gestrand). Niet stil — de lus schrijft continu de

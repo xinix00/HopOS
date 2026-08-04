@@ -23,6 +23,7 @@ import (
 	"hop-os/metal/abi/ring"
 	"hop-os/metal/board/appboard"
 	"hop-os/metal/cpu/idle"
+	"hop-os/metal/cpu/memlimit"
 	"hop-os/metal/cpu/smp"
 	"hop-os/metal/dev"
 )
@@ -79,6 +80,12 @@ func (a *App) ctrlSet(off uintptr, v uint64) {
 // RAM-declaratie: die is canoniek (zelfde linkadres voor elk slot; de
 // stage-2-vertaling legt de image in de echte partitie).
 func Init() *App {
+	// Eerst het geheugenplafond: de partitie is de hele wereld van deze app
+	// en Go's default GC-beleid kent geen muur (cpu/memlimit — de stille
+	// OOM-dood van 02-08). Vóór al het andere, zodat ook de init-allocaties
+	// hieronder al onder het plafond vallen.
+	memlimit.Arm()
+
 	start, end := runtime.MemRegion()
 	a := &App{
 		Slot:     appboard.Current().CoreID(),
@@ -356,6 +363,58 @@ func (a *App) Remove(path string) error {
 // gooit de staart weg, groeien vult met nullen.
 func (a *App) Truncate(path string, n uint64) error {
 	_, err := a.rpc(hopabi.Req{Op: hopabi.OpTruncate, Path: path, N: n}, rpcTimeout)
+	return err
+}
+
+// storeTimeout is de RPC-timeout van de store-ops: een pull/push duurt zo
+// lang als het object groot is (HOP streamt hem van/naar de bucket), dus
+// véél ruimer dan de fs-ops. Eén RPC in flight per app (mutex): een lange
+// transfer blokkeert dus ook de eigen Logf/fs-ops — de app koos zelf voor
+// een synchrone kopie.
+const storeTimeout = 15 * time.Minute
+
+// Pull haalt object <path> uit de eigen S3-map van deze job
+// (apps/<cluster>/<job>/, HOP bewaakt de grens) en VERVANGT er het lokale
+// bestand op hetzelfde pad mee (maakt bestand + ouder-dirs). Bestaat het
+// object niet, dan blijft het lokale bestand onaangeraakt en komt er een
+// fout terug. Geeft de objectgrootte in bytes terug.
+//
+// Persistentie is een daad: pull bij de start wat je vorige leven pushte —
+// de eigen root is bij elke start immers leeg.
+func (a *App) Pull(path string) (uint64, error) {
+	resp, err := a.rpc(hopabi.Req{Op: hopabi.OpStorePull, Path: path}, storeTimeout)
+	return resp.Size, err
+}
+
+// Push uploadt het lokale bestand <path> als object <path> naar de eigen
+// S3-map (vervangend). De inhoud is die van het moment van de call: schrijf
+// het bestand af vóór je pusht — een push terwijl je zelf nog schrijft is
+// een luide fout (hash-mismatch), nooit stil een corrupt object. Geeft de
+// verstuurde grootte in bytes terug.
+func (a *App) Push(path string) (uint64, error) {
+	resp, err := a.rpc(hopabi.Req{Op: hopabi.OpStorePush, Path: path}, storeTimeout)
+	return resp.Size, err
+}
+
+// StoreList geeft de objectnamen in de eigen S3-map onder prefix (""= alles),
+// relatief aan de map — een naam uit StoreList kan rechtstreeks naar Pull.
+// De match is de tekstuele prefix-match van een object-store (géén dir-boom):
+// "db" matcht ook "dbx.json"; sluit af met "/" voor map-gedrag.
+func (a *App) StoreList(prefix string) ([]string, error) {
+	resp, err := a.rpc(hopabi.Req{Op: hopabi.OpStoreList, Path: prefix}, storeTimeout)
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.Data) == 0 {
+		return nil, nil
+	}
+	return strings.Split(string(resp.Data), "\n"), nil
+}
+
+// StoreDrop verwijdert object <path> uit de eigen S3-map (idempotent: een
+// object dat er niet is, is geen fout).
+func (a *App) StoreDrop(path string) error {
+	_, err := a.rpc(hopabi.Req{Op: hopabi.OpStoreDrop, Path: path}, storeTimeout)
 	return err
 }
 

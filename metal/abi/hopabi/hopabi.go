@@ -38,6 +38,17 @@ const (
 	// van per ongeluk een ándere operatie.
 
 	OpTruncate = 7 // truncate(path, n=lengte); maakt bestand + ouder-dirs
+
+	// De store-ops: de persistente laag (S3) naast de vluchtige (hopfs).
+	// Expliciete kopieën tussen "mijn map in de bucket" (apps/<cluster>/<job>/,
+	// HOP dwingt de prefix af) en het eigen hopfs-zicht — nooit een sync-daemon
+	// met een onzichtbaar verlies-window. De bytes lopen over HOP (die heeft de
+	// creds en de TLS al); dit is bewust géén heropvoering van de gesloopte
+	// fetch-op: de app kiest hier geen URL, alleen een naam binnen zijn map.
+	OpStorePull = 8  // pull(path): object → eigen pad (vervangend) → size
+	OpStorePush = 9  // push(path): eigen pad → object (vervangend) → size
+	OpStoreList = 10 // list(path): keys onder eigen map + pad-prefix, "\n"-gescheiden
+	OpStoreDrop = 11 // drop(path): object weg (idempotent)
 )
 
 // Status-codes (resp). Bij ≠ StatusOK bevat data de fouttekst.

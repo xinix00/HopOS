@@ -84,6 +84,11 @@ func main() {
 		app.Logf("PROBE: firmware antwoordde %#x — GEEN SMC-kooi!", v)
 	}
 
+	// Object-store-demo (de persistente laag naast hopfs): zie store_demo.go.
+	if app.Env("STOREDEMO") == "roundtrip" {
+		storeDemo(app) // keert niet terug (exit)
+	}
+
 	// Volumes-demo (het storage-model van het plan): elke rol bewijst een
 	// stuk van de keten. Exitcodes dragen het resultaat naar HOP.
 	switch app.Env("FSDEMO") {

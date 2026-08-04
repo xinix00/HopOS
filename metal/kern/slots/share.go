@@ -67,7 +67,7 @@ func ctxLive(st uint64) bool {
 // andere core dan het slotnummer; draait hij al, dan komt het slot er via
 // het ctx-blok bij zonder de buren te storen. Eén core per slot (SMP-apps
 // delen niet); de image wordt geplaatst zoals bij Start.
-func StartShared(core, i int, image []byte, memLimit uint64, env map[string]string, mounts map[string]string, ports map[string]int) error {
+func StartShared(core, i int, image []byte, memLimit uint64, env map[string]string, mounts map[string]string, ports map[string]int, job string) error {
 	if err := checkSlot(i); err != nil {
 		return err
 	}
@@ -76,7 +76,7 @@ func StartShared(core, i int, image []byte, memLimit uint64, env map[string]stri
 	}
 	partOnce.Do(poolInit)
 	hostCore[i] = core
-	err := startImage(i, image, memLimit, 1, env, mounts, ports, true)
+	err := startImage(i, image, memLimit, 1, env, mounts, ports, job, true)
 	if err != nil {
 		hostCore[i] = 0
 	}
@@ -160,6 +160,23 @@ func residentAdd(core, i int) error {
 
 // residentRemove haalt slot i uit de lijst van core (gat achterlaten; de
 // rotatie slaat 0-bytes over, residentAdd hergebruikt ze).
+// residentListed: staat slot i in de bewonerslijst van core? De lijst is de
+// enige bron waaruit de rotatie hervat, dus dit ís de vraag "kan deze ctx ooit
+// nog tot leven komen" — de scheidsrechter van de lijk-eviction (slots.go).
+func residentListed(core, i int) bool {
+	b := layout.ParkMboxPA(core)
+	n := dev.Read64(b + layout.SchedCount)
+	if n > uint64(layout.SlotCap) {
+		n = uint64(layout.SlotCap)
+	}
+	for k := uint64(0); k < n; k++ {
+		if dev.Read8(b+layout.SchedList+uintptr(k)) == uint8(i) {
+			return true
+		}
+	}
+	return false
+}
+
 func residentRemove(core, i int) {
 	b := layout.ParkMboxPA(core)
 	n := dev.Read64(b + layout.SchedCount)

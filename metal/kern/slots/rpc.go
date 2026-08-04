@@ -5,11 +5,13 @@
 // bestandslaag op de NVMe (metal/kern/hopfs); apps raken nooit elkaars geheugen
 // of ongemounte paden aan.
 //
-// Bewust ALLEEN bestandsoperaties: er zat hier ook een fetch-op (HOP haalt een
-// URL voor de app), en die is gesloopt. Elke app heeft zijn eigen netstack en
-// haalt zijn bytes dus zelf; HOP hoefde er met zijn volle netwerkrechten een
-// app-opgegeven URL voor te openen vanaf core 0. Zie hopabi voor het lege
-// op-nummer dat dat achterlaat.
+// Bewust géén generieke fetch-op: die zat hier (HOP haalt een URL voor de
+// app) en is gesloopt. Elke app heeft zijn eigen netstack en haalt zijn bytes
+// dus zelf; HOP hoefde er met zijn volle netwerkrechten een app-opgegeven URL
+// voor te openen vanaf core 0. Zie hopabi voor het lege op-nummer dat dat
+// achterlaat. De store-ops (storage.go) zijn NIET de terugkeer daarvan: daar
+// kiest de app geen URL maar alleen een naam binnen zijn eigen bucket-map —
+// endpoint en creds zijn operator-config, de prefix is HOP's grens.
 package slots
 
 import (
@@ -102,8 +104,15 @@ func fail(req hopabi.Req, err error) []byte {
 	} else if errors.Is(err, errDenied) {
 		status = hopabi.StatusDenied
 	}
+	return failWith(req, status, err.Error())
+}
+
+// failWith is fail met een expliciete status — voor niet-hopfs-afwezigheid
+// (een object dat niet in de store ligt is óók een NoEnt, maar draagt de
+// hopfs-sentinel niet).
+func failWith(req hopabi.Req, status uint16, msg string) []byte {
 	return hopabi.EncodeResp(hopabi.Resp{
-		Op: req.Op, Status: status, Seq: req.Seq, Data: []byte(err.Error()),
+		Op: req.Op, Status: status, Seq: req.Seq, Data: []byte(msg),
 	})
 }
 
@@ -202,6 +211,19 @@ func (s *servicer) handle(payload []byte) []byte {
 			return fail(req, err)
 		}
 		return ok(req, req.N, nil)
+
+	// De store-ops (storage.go): expliciete kopieën tussen de eigen map in
+	// de object-store en het eigen hopfs-zicht. De servicer is er de volle
+	// duur van de S3-call mee bezig — dat blokkeert alléén dit slot; evict
+	// cancelt s.ctx, dus een Stop wacht er nooit minutenlang op.
+	case hopabi.OpStorePull:
+		return s.storePull(fsys, req)
+	case hopabi.OpStorePush:
+		return s.storePush(fsys, req)
+	case hopabi.OpStoreList:
+		return s.storeList(req)
+	case hopabi.OpStoreDrop:
+		return s.storeDrop(req)
 	}
 	return fail(req, fmt.Errorf("onbekende op %d", req.Op))
 }

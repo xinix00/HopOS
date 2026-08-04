@@ -24,6 +24,7 @@ import (
 	"hop-os/metal/abi/layout"
 	"hop-os/metal/board"
 	_ "hop-os/metal/board/qemuvirt/hop" // registreert het board (init) + basis-hooks
+	"hop-os/metal/cpu/memlimit"
 	"hop-os/metal/dev"
 	"hop-os/metal/driver/fb"
 	"hop-os/metal/driver/nvme"
@@ -142,6 +143,7 @@ func fail(what string, err error) {
 }
 
 func main() {
+	memlimit.Arm() // geheugenplafond uit het RAM-raam — zie cpu/memlimit
 	fmt.Println("")
 	fmt.Println("HopOS (virt): bare-metal Go op arm64 — geen Linux aan boord")
 	fmt.Printf("runtime %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
@@ -208,7 +210,7 @@ func main() {
 
 	logCounts := make([]int, len(apps)+2)
 	for _, a := range apps {
-		if err := slots.Start(a.slot, app, a.limit, 1, a.env, nil, nil); err != nil {
+		if err := slots.Start(a.slot, app, a.limit, 1, a.env, nil, nil, ""); err != nil {
 			fail("start", err)
 		}
 		go drainLogs(a.slot, &logCounts[a.slot])
@@ -246,7 +248,7 @@ func main() {
 	fmt.Printf("slot 2 gestopt: core-on=%v app=%d exit=%d\n", s.CoreOn, s.App, s.ExitCode)
 
 	fmt.Println("herstart slot 2 met 32MB...")
-	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"BUCKET": "hop-cache-v2"}, nil, nil); err != nil {
+	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"BUCKET": "hop-cache-v2"}, nil, nil, ""); err != nil {
 		fail("restart", err)
 	}
 	go drainLogs(2, nil)
@@ -265,7 +267,7 @@ func main() {
 	if err := slots.Stop(2, 3*time.Second); err != nil {
 		fail("iso-stop", err)
 	}
-	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"PROBE": "hop"}, nil, nil); err != nil {
+	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"PROBE": "hop"}, nil, nil, ""); err != nil {
 		fail("iso-start", err)
 	}
 	go drainLogs(2, nil)
@@ -297,7 +299,7 @@ func main() {
 	// bestaat geen legitieme app-SMC (SMP-bring-up loopt via HOP, exit is een
 	// HVC), dus het ESR hoort EC=0x17 (trapped SMC64) te dragen.
 	fmt.Println("isolatietest: slot 2 start met PROBE=smc...")
-	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"PROBE": "smc"}, nil, nil); err != nil {
+	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"PROBE": "smc"}, nil, nil, ""); err != nil {
 		fail("smc-start", err)
 	}
 	go drainLogs(2, nil)
@@ -328,7 +330,7 @@ func main() {
 	// HANG=spin is een `for {}` (self-branch, géén geheugentoegang): meteen het
 	// pathologische geval — vangt de intrekking dít, dan vangt hij alles.
 	fmt.Println("hard-kill: slot 2 start met HANG=spin...")
-	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"HANG": "spin"}, nil, nil); err != nil {
+	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"HANG": "spin"}, nil, nil, ""); err != nil {
 		fail("hang-start", err)
 	}
 	go drainLogs(2, nil)
@@ -356,7 +358,7 @@ func main() {
 	// wordt READY, logt en heeft een lopende heartbeat op precies die core.
 	fmt.Println("herstart-na-kill: verse app op de zojuist gevelde core (slot 2)...")
 	var rekLogs int
-	if err := slots.Start(2, app, 48<<20, 1, map[string]string{"ROLE": "na-kill"}, nil, nil); err != nil {
+	if err := slots.Start(2, app, 48<<20, 1, map[string]string{"ROLE": "na-kill"}, nil, nil, ""); err != nil {
 		fail("rekill-start", err)
 	}
 	go drainLogs(2, &rekLogs)
@@ -393,7 +395,7 @@ func main() {
 	}
 
 	fmt.Println("volumes: writer (slot 1, mount /data) schrijft de dataset...")
-	if err := slots.Start(1, app, 64<<20, 1, map[string]string{"FSDEMO": "writer"}, dataMount, nil); err != nil {
+	if err := slots.Start(1, app, 64<<20, 1, map[string]string{"FSDEMO": "writer"}, dataMount, nil, ""); err != nil {
 		fail("vol-writer", err)
 	}
 	go drainLogs(1, nil)
@@ -410,7 +412,7 @@ func main() {
 
 	fmt.Println("volumes: readers (slot 1+2, mount /data) lezen parallel...")
 	for slot := 1; slot <= 2; slot++ {
-		if err := slots.Start(slot, app, 64<<20, 1, map[string]string{"FSDEMO": "reader"}, dataMount, nil); err != nil {
+		if err := slots.Start(slot, app, 64<<20, 1, map[string]string{"FSDEMO": "reader"}, dataMount, nil, ""); err != nil {
 			fail("vol-reader", err)
 		}
 		go drainLogs(slot, nil)
@@ -427,7 +429,7 @@ func main() {
 	}
 
 	fmt.Println("volumes: app zonder mount (slot 2) hoort /data niet te zien...")
-	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"FSDEMO": "denied"}, nil, nil); err != nil {
+	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"FSDEMO": "denied"}, nil, nil, ""); err != nil {
 		fail("vol-denied", err)
 	}
 	go drainLogs(2, nil)
@@ -445,7 +447,7 @@ func main() {
 	// passant de weg die élke echte job gebruikt.
 	fmt.Println("fetch: slot 1 haalt zelf een URL en schrijft hem naar /data/hello.txt...")
 	fetchEnv := map[string]string{"FSDEMO": "fetch", "FETCH_URL": "http://" + hopswitch.GatewayIP() + "/"}
-	if err := slots.Start(1, app, 64<<20, 1, fetchEnv, dataMount, nil); err != nil {
+	if err := slots.Start(1, app, 64<<20, 1, fetchEnv, dataMount, nil, ""); err != nil {
 		fail("fetch", err)
 	}
 	go drainLogs(1, nil)
@@ -464,7 +466,7 @@ func main() {
 	// dat er een TCP-stack op core 0 aan te pas komt (HOP is enkel L2-switch +
 	// ARP-responder voor de gateway).
 	fmt.Println("netdemo: slot 1 luistert op het interne net...")
-	if err := slots.Start(1, app, 64<<20, 1, map[string]string{"NETDEMO": "listen"}, nil, nil); err != nil {
+	if err := slots.Start(1, app, 64<<20, 1, map[string]string{"NETDEMO": "listen"}, nil, nil, ""); err != nil {
 		fail("net-listen", err)
 	}
 	go drainLogs(1, nil)
@@ -477,7 +479,7 @@ func main() {
 	addr := hopswitch.SlotIP(1) + ":8080"
 	fmt.Println("netdemo: slot 2 dialt slot 1 — app↔app, HOP kopieert alleen frames...")
 	dialEnv := map[string]string{"NETDEMO": "dial", "NET_DIAL": addr}
-	if err := slots.Start(2, app, 64<<20, 1, dialEnv, nil, nil); err != nil {
+	if err := slots.Start(2, app, 64<<20, 1, dialEnv, nil, nil, ""); err != nil {
 		fail("net-dial", err)
 	}
 	go drainLogs(2, nil)
@@ -495,7 +497,7 @@ func main() {
 	// Dit is het pad voor cloudflared/servers. (De query verlaat QEMU via
 	// slirp; een antwoord bewijst de round-trip.)
 	fmt.Println("netdemo: slot 2 doet een uitgaande DNS-query — masquerade naar buiten...")
-	if err := slots.Start(2, app, 64<<20, 1, map[string]string{"NETDEMO": "out"}, nil, nil); err != nil {
+	if err := slots.Start(2, app, 64<<20, 1, map[string]string{"NETDEMO": "out"}, nil, nil, ""); err != nil {
 		fail("net-out", err)
 	}
 	go drainLogs(2, nil)
@@ -511,7 +513,7 @@ func main() {
 	// qemu-run.sh (host :18080 → 10.0.2.15:8080 → DNAT → slot 1).
 	// De listener blijft draaien; main slaapt hierna toch voor eeuwig.
 	portsEnv := map[string]string{"NETDEMO": "listen", "ER_PORT_HTTP": "8080"}
-	if err := slots.Start(1, app, 64<<20, 1, portsEnv, nil, map[string]int{"http": 8080}); err != nil {
+	if err := slots.Start(1, app, 64<<20, 1, portsEnv, nil, map[string]int{"http": 8080}, ""); err != nil {
 		fail("ports", err)
 	}
 	go drainLogs(1, nil)
@@ -532,7 +534,7 @@ func main() {
 		}
 	}
 	for slot := 2; slot <= 3; slot++ {
-		if err := slots.Start(slot, app, 64<<20, 1, map[string]string{"ROLE": "reloc"}, nil, nil); err != nil {
+		if err := slots.Start(slot, app, 64<<20, 1, map[string]string{"ROLE": "reloc"}, nil, nil, ""); err != nil {
 			fail("reloc", err)
 		}
 		go drainLogs(slot, nil)
@@ -564,7 +566,7 @@ func main() {
 			}
 		}
 	}
-	if err := slots.Start(1, app, 128<<20, 2, map[string]string{"SMP": "bench"}, nil, nil); err != nil {
+	if err := slots.Start(1, app, 128<<20, 2, map[string]string{"SMP": "bench"}, nil, nil, ""); err != nil {
 		fail("smp-start", err)
 	}
 	go drainLogs(1, nil)
@@ -591,14 +593,14 @@ func main() {
 	// en 3 delen core 2; core 3 blijft de hele test leeg — het bewijs dat de
 	// tweede app er niet stiekem heen lekt.
 	fmt.Println("share: slot 2 en 3 samen op core 2 (eigen kooi, gedeelde core)...")
-	if err := slots.Start(2, app, 64<<20, 1, map[string]string{"ROLE": "share-a"}, nil, nil); err != nil {
+	if err := slots.Start(2, app, 64<<20, 1, map[string]string{"ROLE": "share-a"}, nil, nil, ""); err != nil {
 		fail("share-a", err)
 	}
 	go drainLogs(2, nil)
 	if err := slots.WaitReady(2, 5*time.Second); err != nil {
 		fail("share-a-ready", err)
 	}
-	if err := slots.StartShared(2, 3, app, 64<<20, map[string]string{"ROLE": "share-b"}, nil, nil); err != nil {
+	if err := slots.StartShared(2, 3, app, 64<<20, map[string]string{"ROLE": "share-b"}, nil, nil, ""); err != nil {
 		fail("share-b", err)
 	}
 	go drainLogs(3, nil)
@@ -634,7 +636,7 @@ func main() {
 	}
 	// En er past een verse bewoner naast (herbezetting van het gedeelde slot).
 	fmt.Println("share: verse app als nieuwe mede-bewoner op core 2...")
-	if err := slots.StartShared(2, 3, app, 48<<20, map[string]string{"ROLE": "share-c"}, nil, nil); err != nil {
+	if err := slots.StartShared(2, 3, app, 48<<20, map[string]string{"ROLE": "share-c"}, nil, nil, ""); err != nil {
 		fail("share-c", err)
 	}
 	go drainLogs(3, nil)
@@ -675,7 +677,7 @@ func main() {
 			fail("sg-place", err)
 		}
 		sgCores[core] = true
-		if err := slots.StartShared(core, cage, app, 64<<20, map[string]string{"ROLE": "web"}, nil, nil); err != nil {
+		if err := slots.StartShared(core, cage, app, 64<<20, map[string]string{"ROLE": "web"}, nil, nil, ""); err != nil {
 			fail("sg-start", err)
 		}
 		go drainLogs(cage, nil)
@@ -730,7 +732,7 @@ func main() {
 			fail("swarm-place", fmt.Errorf("kooi %d: %w", cage, err))
 		}
 		swarmCores[core] = true
-		if err := slots.StartShared(core, cage, app, 48<<20, map[string]string{"ROLE": "swarm"}, nil, nil); err != nil {
+		if err := slots.StartShared(core, cage, app, 48<<20, map[string]string{"ROLE": "swarm"}, nil, nil, ""); err != nil {
 			fail("swarm-start", fmt.Errorf("kooi %d: %w", cage, err))
 		}
 		go drainLogs(cage, nil)
@@ -788,7 +790,7 @@ func main() {
 		if err != nil {
 			fail("swarm-replace", fmt.Errorf("kooi %d: %w", cage, err))
 		}
-		if err := slots.StartShared(core, cage, app, 48<<20, map[string]string{"ROLE": "swarm2"}, nil, nil); err != nil {
+		if err := slots.StartShared(core, cage, app, 48<<20, map[string]string{"ROLE": "swarm2"}, nil, nil, ""); err != nil {
 			fail("swarm-replace", fmt.Errorf("kooi %d: %w", cage, err))
 		}
 		go drainLogs(cage, nil)
