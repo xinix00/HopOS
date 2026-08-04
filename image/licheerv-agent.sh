@@ -29,12 +29,12 @@
 #
 # Eerste keer een kaart: één dd van het .img hierboven is genoeg (dat is óók het
 # release-asset hopos-licheerv.img.gz). Daarna is elke iteratie alleen nog fip.bin
-# vervangen. Zie lab/licheerv/README.md voor het draaiboek en de metingen.
+# vervangen. Zie docs/archief/licheerv-bringup.md voor het draaiboek en de metingen.
 #
 # Nodig: de tamago-toolchain (TAMAGO), een riscv64 binutils (riscv64-elf-as/ld/
 # objcopy, `brew install riscv-gnu-toolchain` of vergelijkbaar) en de
-# donor-fip + fiptool uit de Sipeed release (LICHEERV_DONOR / LICHEERV_FIPTOOL,
-# default: de lab-checkout).
+# donor-fip + fiptool uit de Sipeed release (LICHEERV_DONOR / LICHEERV_FIPTOOL —
+# default: image/licheerv/, vendor-bestanden, gitignored — vers uit een Sipeed-release te halen).
 
 TAMAGO="${TAMAGO:-$HOME/tamago-go/bin/go}"
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -48,8 +48,8 @@ DIR="$(cd "$(dirname "$0")/.." && pwd)"
 trap clean_embeds EXIT INT TERM
 
 OUT="$DIR/metal/out"
-DONOR="${LICHEERV_DONOR:-$DIR/lab/licheerv/donor-fip.bin}"
-FIPTOOL="${LICHEERV_FIPTOOL:-$DIR/lab/licheerv/vendor/LicheeRV-Nano-Build/fsbl/plat/cv181x/fiptool.py}"
+DONOR="${LICHEERV_DONOR:-$DIR/image/licheerv/donor-fip.bin}"
+FIPTOOL="${LICHEERV_FIPTOOL:-$DIR/image/licheerv/fiptool.py}"
 
 # LET OP — MONITOR_RUNADDR is NIET DRAM-start (GEMETEN 30-07): de FSBL laadt ná
 # ons image ook LOADER_2ND (U-Boot) en DECOMPRIMEERT dat naar 0x80200020

@@ -104,10 +104,11 @@ cp "$DIR/image/hopos-headless.cfg" "$DIST/hopos-headless.cfg"
 #     kaart te bewerken. Configureren = herbouwen met CFG=... Daarom gaat het
 #     template als los asset mee, zodat je ziet wát erin zit.
 #
-#     Alleen bouwen als de Sipeed-donor + fiptool aanwezig zijn (die wonen in
-#     het gitignorede lab/): zonder die twee slaat de release deze smaak
-#     LUIDRUCHTIG over i.p.v. te falen — de rest van de assets is compleet.
-if [ -f "${LICHEERV_DONOR:-$DIR/lab/licheerv/donor-fip.bin}" ]; then
+#     Alleen bouwen als de Sipeed-donor aanwezig is (vendor-bestand, gitignored
+#     in image/licheerv/ — zelfde default als licheerv-agent.sh): zonder slaat
+#     de release deze smaak LUIDRUCHTIG over i.p.v. te falen — de rest van de
+#     assets is compleet.
+if [ -f "${LICHEERV_DONOR:-$DIR/image/licheerv/donor-fip.bin}" ]; then
 	echo ">> hopos-licheerv.img.gz (RISC-V, headless, config ingebakken)" >&2
 	CFG="$DIR/image/hopos-licheerv.cfg" "$DIR/image/licheerv-agent.sh" >/dev/null
 	gzip -9 -n -c "$DIR/metal/out/hopos-licheerv.img" > "$DIST/hopos-licheerv.img.gz"

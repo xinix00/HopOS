@@ -18,11 +18,13 @@ import (
 
 // MMIO-registeroffsets (virtio-mmio, versie 2).
 const (
-	regMagic          = 0x000
-	regVersion        = 0x004
-	regDeviceID       = 0x008
-	regDeviceFeatures = 0x010
-	regDevFeaturesSel = 0x014
+	regMagic    = 0x000
+	regVersion  = 0x004
+	regDeviceID = 0x008
+	// Device-features (0x010/0x014) leest deze driver bewust niet: QEMU virt
+	// levert een vaste, bekende feature-set en wij onderhandelen alleen
+	// VERSION_1 (regDrvFeatures hieronder). Interrupts (ACK op 0x064) zijn er
+	// ook niet — de servicer pollt.
 	regDrvFeatures    = 0x020
 	regDrvFeaturesSel = 0x024
 	regQueueSel       = 0x030
@@ -30,7 +32,6 @@ const (
 	regQueueNum       = 0x038
 	regQueueReady     = 0x044
 	regQueueNotify    = 0x050
-	regInterruptACK   = 0x064
 	regStatus         = 0x070
 	regQueueDescLo    = 0x080
 	regQueueDescHi    = 0x084

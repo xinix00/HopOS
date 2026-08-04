@@ -52,13 +52,12 @@ const (
 )
 
 // Mbox is één mailbox-instantie. Buf: fysiek, 16-byte-gealigneerd, laag
-// DRAM, buiten elke RAM-declaratie (ongecachet) — raspi.VCMailBuf.
+// DRAM, buiten elke RAM-declaratie (ongecachet) — raspi.VCMailBuf. Het adres
+// gaat rauw fysiek de mailbox in: de oude 0xC0000000-bus-alias was een
+// speculatieve terugval die op de Pi 4 én 5 nooit nodig bleek (gesloopt 04-08).
 type Mbox struct {
 	Base uintptr
 	Buf  uintptr
-
-	aliasOr uint32 // 0xC0000000 als de firmware de oude bus-alias blijkt te eisen
-	probed  bool
 }
 
 // Tag is één property-tag in een (mogelijk multi-tag) transactie: words is
@@ -79,20 +78,6 @@ func (m *Mbox) Call(tag uint32, words []uint32) bool {
 // framebuffer-setup (de firmware finaliseert de configuratie per bericht,
 // dus set-size/depth/allocate moeten samen reizen).
 func (m *Mbox) CallN(tags []Tag) bool {
-	if !m.probed {
-		// Eerste call: rauw fysiek adres; faalt dat, één keer de oude
-		// 0xC0000000-alias proberen en de uitkomst onthouden.
-		m.probed = true
-		if m.do(tags) {
-			return true
-		}
-		m.aliasOr = 0xC0000000
-		if m.do(tags) {
-			return true
-		}
-		m.aliasOr = 0
-		return false
-	}
 	return m.do(tags)
 }
 
@@ -124,7 +109,7 @@ func (m *Mbox) do(tags []Tag) bool {
 	if !m.wait(mbox1Status, statusFull) {
 		return false
 	}
-	dev.Write32(m.Base+mbox1Write, uint32(m.Buf)|m.aliasOr|chProps)
+	dev.Write32(m.Base+mbox1Write, uint32(m.Buf)|chProps)
 
 	// Antwoord op óns kanaal afwachten (andere kanalen komen hier niet voor,
 	// maar overslaan is goedkoop en veilig).

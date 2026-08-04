@@ -41,9 +41,8 @@ var SlotCtrl = func(i int) (uintptr, bool) { return 0, false }
 // layout.MaxSlots — parameters met maar één juiste waarde zijn geen
 // parameters.
 type Config struct {
-	Mbox    *vcmail.Mbox // de firmware-mailbox van dit board
-	LowHz   uint32       // de "stil"-klok (bv. 600MHz)
-	Verbose bool         // true: log elke flank (soak-diagnose)
+	Mbox  *vcmail.Mbox // de firmware-mailbox van dit board
+	LowHz uint32       // de "stil"-klok (bv. 600MHz)
 }
 
 // Het "vol"-plafond is GEEN veld hier: dvfs volgt gewoon het firmware-maximum
@@ -89,11 +88,11 @@ func watch(cfg Config, maxHz uint32) {
 	quiet := time.Now()                       // sinds wanneer alles idle is
 	lastTele := time.Now()
 
+	// Elke flank logt (dat was een Verbose-knop die overal aanstond): flanken
+	// zijn zeldzaam en de regel is de soak-diagnose.
 	set := func(hz uint32, why string) {
 		if actual, ok := cfg.Mbox.SetClockRate(vcmail.ClockARM, hz); ok {
-			if cfg.Verbose {
-				fmt.Printf("dvfs: → %d MHz (%s)\n", actual/1_000_000, why)
-			}
+			fmt.Printf("dvfs: → %d MHz (%s)\n", actual/1_000_000, why)
 		} else {
 			fmt.Println("dvfs: SetClockRate failed — skipping this transition")
 		}

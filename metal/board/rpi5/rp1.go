@@ -19,38 +19,21 @@ import "hop-os/metal/dev"
 const (
 	// ARM-zicht op RP1: venster + peripherals (RP1-adres - 0x40000000).
 	RP1Base    = 0x1f_0000_0000
-	RP1SysInfo = RP1Base + 0x00000  // CHIP_ID (+0x0), PLATFORM (+0x4)
 	RP1EthBase = RP1Base + 0x100000 // Cadence GEM registerblok
-	RP1EthCfg  = RP1Base + 0x104000 // clocks/control om de GEM heen
-
-	// eth_cfg-register (datasheet §7.1).
-	EthCfgClkGen = RP1EthCfg + 0x14 // CLKGEN: volgt standaard de MAC-snelheid
-	// CLKGEN-bits: 9 TXCLKDELEN, 8 DC50, 7 ENABLE (reset 1), 6 KILL,
-	// 5:4 SPEED_FROM_MAC (RO), 3 SPEED_OVERRIDE_EN, 1:0 SPEED_OVERRIDE
-	// (0=10M, 1=100M, 2=1000M). Zonder override volgt de klok de MAC.
 
 	// BCM2712-kant: de PCIe-root-complex van de RP1-link (pcie2 in de
-	// Linux-DT). De MISC-registers (brcmstb-conventie, +0x4000) dragen de
-	// inbound-window-configuratie; de probe dumpt RC_BAR2_CONFIG_LO/HI om
-	// de DMA-offset te leren.
-	PCIe2Base      = 0x10_0012_0000
-	RCBar2ConfigLo = PCIe2Base + 0x4034
-	RCBar2ConfigHi = PCIe2Base + 0x4038
+	// Linux-DT).
+	PCIe2Base = 0x10_0012_0000
 
-	// De gedeelde reset-infrastructuur van alle drie de PCIe-controllers
+	// De gedeelde reset-infrastructuur van de PCIe-controllers
 	// (metal/driver/brcmpcie): RESCAL = het analoge kalibratieblok
 	// (brcm,bcm7216-pcie-sata-rescal), één keer per boot; PCIeSWInit = de
 	// brcm,brcmstb-reset SW_INIT-bank (bank = ID>>5, stride 0x18) met de
-	// bridge-reset-ID's 42/43/44 voor pcie0/1/2 (uit de BCM2712-DT; pcie0
-	// heeft geen gebruiker — 42 hoort bij een controller die wij niet aanraken).
+	// bridge-reset-ID's 42/43/44 voor pcie0/1/2 (uit de BCM2712-DT; wij
+	// gebruiken alleen 44 = pcie2, de RP1-link).
 	PCIeRescal  = 0x10_0011_9500
 	PCIeSWInit  = 0x10_0150_4318
-	PCIe1SWInit = 43
 	PCIe2SWInit = 44
-
-	// Outbound-CPU-vensters per controller (BCM2712-DT "ranges", 32-bit
-	// non-prefetch-venster → PCIe-adres 0x0): pcie1 = de FFC (M.2/NVMe).
-	PCIe1Window = 0x1b_0000_0000 // pcie2 (RP1) staat hierboven: RP1Base
 
 	// RP1-GPIO-blokken (datasheet §3; bank 0 = pin 0-27, 1 = 28-33,
 	// 2 = 34-53, bank-stride 0x4000). De ethernet-PHY-reset hangt aan

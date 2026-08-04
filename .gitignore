@@ -70,3 +70,9 @@ metal/kern/cagestub/stub-slot.bin
 
 # Losse `go build ./cmd/...`-output in metal/ (de scripts schrijven naar metal/out/).
 metal/hopos
+
+# Vendor-bestanden uit de Sipeed-release (geen eigen werk, geen licentiekop —
+# niet publiceren): nodig voor image/licheerv-agent.sh, vers te halen uit een
+# LicheeRV-Nano-Build-release als ze ontbreken.
+image/licheerv/donor-fip.bin
+image/licheerv/fiptool.py

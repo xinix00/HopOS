@@ -42,7 +42,7 @@ func main() {
 
 	// Klokbeleid (P2b, docs/archief/plan-p2b-soak.md) — vroeg gestart zodat de
 	// acceptatiesecties meteen de flanken bewijzen: de SMP-bench brandt echt
-	// (→ "druk"), de stiltes erna klokken terug. Verbose: elke flank op de UART.
+	// (→ "druk"), de stiltes erna klokken terug; elke flank logt op de UART.
 	raspihop.StartDVFS(uintptr(rpi5.VCMailBase))
 
 	// ── 1-5: het gedeelde acceptatiedraaiboek (raspi_main.go). ──
