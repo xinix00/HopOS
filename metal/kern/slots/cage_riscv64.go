@@ -152,7 +152,7 @@ func cagePrepare(i int, linkBase, base, size, entry uint64) error {
 	put(stubBSSHi, 0)
 	// Scratch in de ABI-staart van deze partitie: ná het locken van de kooi mag
 	// dit hart niets daarbuiten meer aanraken, en de control page is van de app.
-	put(stubScratch, uint64(layout.AbiTailAt(base, size-layout.AbiTail))+layout.AbiStubOff)
+	put(stubScratch, uint64(stubScratchAt(base, size)))
 	put(stubCageCfg, cfg)
 	for k := range stubCageMax {
 		var v uint64
@@ -295,6 +295,14 @@ const (
 	stubScratchLen = 128
 )
 
+// stubScratchAt geeft de scratch-PA van de kooi-stub voor een partitie: in de
+// ABI-staart, want ná het locken mag het hart niets daarbuiten aanraken (en de
+// control page is van de app). Eén formule voor de schrijver (cagePrepare) en
+// de twee lezers (cageIdent/cageWhy).
+func stubScratchAt(base, size uint64) uintptr {
+	return layout.AbiTailAt(base, size-layout.AbiTail) + layout.AbiStubOff
+}
+
 // cageIdent vertelt wat voor hart er onder slot i zit: misa/marchid/mimpid,
 // door de kooi-stub in zijn scratch gelegd (stap 1b). Per-hart-CSR's, dus HOP
 // op hart 0 kan ze niet zelf lezen — en het antwoord beslist of dit board ooit
@@ -307,7 +315,7 @@ func cageIdent(i int) string {
 	if !ok {
 		return ""
 	}
-	sc := layout.AbiTailAt(base, size-layout.AbiTail) + layout.AbiStubOff
+	sc := stubScratchAt(base, size)
 	dev.CleanInv(sc, stubScratchLen)
 	misa := dev.Read64(sc + 40)
 	if misa == 0 {
@@ -344,21 +352,21 @@ func cageWhy(i int) string {
 	if !ok {
 		return ""
 	}
-	sc := layout.AbiTailAt(base, size-layout.AbiTail) + layout.AbiStubOff
+	sc := stubScratchAt(base, size)
 	dev.CleanInv(sc, stubScratchLen)
+	mc, pc, tv := dev.Read64(sc+16), dev.Read64(sc+24), dev.Read64(sc+32)
 	switch st := dev.Read64(sc); st {
-	case stubCageOK:
-		// De sprong is gemaakt — maar dat is nog niet "verder is het het verhaal
-		// van de app". Met medeleg op nul komt ÉLKE trap van de app in M-mode uit,
-		// dus bij het trap-vector van deze stub, en die schrijft alleen de
-		// trap-woorden weg; het voortgangswoord blijft op stubCageOK staan.
-		// Zonder deze tak is zo'n trap onzichtbaar: het slot leest dan als "app
-		// gestart" en sterft stil (gemeten 31-07 op het bordje, bij de sprong naar
-		// S-mode: status Booting, geen logregel, geen reden).
-		mc, pc := dev.Read64(sc+16), dev.Read64(sc+24)
-		if mc != 0 || pc != 0 {
+	case stubCageOK, stubTrapped:
+		// stubCageOK betekent "de sprong is gemaakt" — maar dat is nog niet
+		// "verder is het het verhaal van de app". Met medeleg op nul komt ÉLKE
+		// trap van de app in M-mode uit, dus bij het trap-vector van deze stub,
+		// en die schrijft alleen de trap-woorden weg; het voortgangswoord blijft
+		// dan op stubCageOK staan. Zonder deze toets is zo'n trap onzichtbaar:
+		// het slot leest als "app gestart" en sterft stil (gemeten 31-07 op het
+		// bordje, bij de sprong naar S-mode: status Booting, geen logregel).
+		if st == stubTrapped || mc != 0 || pc != 0 {
 			return fmt.Sprintf("app trapped and was parked by the cage stub (mcause %#x mepc %#x mtval %#x)",
-				mc, pc, dev.Read64(sc+32))
+				mc, pc, tv)
 		}
 		return "" // écht niets te melden: gesprongen en geen trap gezien
 	case 0:
@@ -367,12 +375,9 @@ func cageWhy(i int) string {
 		return fmt.Sprintf("CAGEVERIFY FAILED (pmpcfg0 readback %#x) — app never started", dev.Read64(sc+8))
 	case stubNoSMode:
 		return "hart has no supervisor mode (misa.S) — without that level the cage does not bind it, app never started"
-	case stubTrapped:
-		return fmt.Sprintf("app trapped and was parked by the cage stub (mcause %#x mepc %#x mtval %#x)",
-			dev.Read64(sc+16), dev.Read64(sc+24), dev.Read64(sc+32))
 	default:
 		return fmt.Sprintf("cage stub stopped at %#x (trap mcause %#x mepc %#x mtval %#x)",
-			st, dev.Read64(sc+16), dev.Read64(sc+24), dev.Read64(sc+32))
+			st, mc, pc, tv)
 	}
 }
 
@@ -477,24 +482,12 @@ func coreExists(core int) bool { return hartOf(core) != 0 }
 // Het canonieke IPA-venster dat ARM gebruikt bestaat hier niet: er is geen
 // tweede translatiefase, dus het linkadres is een echt fysiek adres dat door de
 // map naar de partitie van dít slot wijst.
-// cageGrain/cageBaseAlign: wat de kooi van een partitie eist, en dat is sinds
-// TOR alleen nog de blokkorrel van de map. Een TOR-venster beschrijft een
-// WILLEKEURIG bereik met een eigen onder- en bovengrens, dus geen macht van twee
-// en geen natuurlijke uitlijning meer — die eis kwam van NAPOT, en die vorm is
-// eruit (kern/cage).
-//
-// Wat het oplevert: een job van 124MB krijgt 124MB in plaats van dat hij op een
-// niet-bestaande 128MB-partitie strandt. Wat overblijft is 2MB, want de
-// map-tabel beschrijft de partitie in 2MB-blokken (cage.Relocate) — en de
-// ABI-staart is óók 2MB, dus alles hierin blijft een veelvoud daarvan.
-func cageGrain(size uint64) uint64 {
-	if size < part2M {
-		return part2M
-	}
-	return (size + part2M - 1) &^ (part2M - 1)
-}
-
-func cageBaseAlign(uint64) uint64 { return part2M }
+// Wat de kooi van een partitie eist is sinds TOR alleen nog de 2MB-blokkorrel
+// van de map (partAlloc houdt die aan). Een TOR-venster beschrijft een
+// WILLEKEURIG bereik met een eigen onder- en bovengrens — de macht-van-twee-eis
+// kwam van NAPOT, en die vorm is eruit (kern/cage). Wat het oplevert: een job
+// van 124MB krijgt 124MB in plaats van dat hij op een niet-bestaande
+// 128MB-partitie strandt.
 
 // cageLinkWindow: precies de partitie. Er is hier geen canoniek venster dat
 // groter is dan wat de map beschrijft — de tabel legt exact deze partitie op het

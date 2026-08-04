@@ -359,13 +359,6 @@ func (a *App) Remove(path string) error {
 	return err
 }
 
-// Truncate zet path op precies n bytes (maakt bestand + ouder-dirs). Krimpen
-// gooit de staart weg, groeien vult met nullen.
-func (a *App) Truncate(path string, n uint64) error {
-	_, err := a.rpc(hopabi.Req{Op: hopabi.OpTruncate, Path: path, N: n}, rpcTimeout)
-	return err
-}
-
 // storeTimeout is de RPC-timeout van de store-ops: een pull/push duurt zo
 // lang als het object groot is (HOP streamt hem van/naar de bucket), dus
 // véél ruimer dan de fs-ops. Eén RPC in flight per app (mutex): een lange

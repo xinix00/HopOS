@@ -20,11 +20,7 @@
 package rpi4
 
 import (
-	"fmt"
-
-	"hop-os/metal/abi/layout"
 	"hop-os/metal/board/raspi"
-	"hop-os/metal/fw/fdt"
 )
 
 // Het PA-plan van de Pi 4 (fase P1) — zelfde recept als de Pi 5, op adressen
@@ -36,40 +32,10 @@ import (
 const revokeVecAsm = 0x8B000 // = faultdump2-tabel in cpuinit.s (VBAR_EL2 core 0)
 
 func init() {
-	// Alleen de HOP-core (MPIDR-aff 0) zet het plan — het leest de DTB fysiek,
-	// wat een app-core onder stage-2 niet kan (en niet nodig heeft: HOP bezit
-	// het plan). Zie de uitgebreide toelichting in board/rpi5/rpi5.go.
-	if raspi.MPIDR()&0xFFFFFF != 0 {
-		return
-	}
-	// RNG200-basis bekendmaken aan de gedeelde raspi-RNG (crypto/rand) — ACHTER
-	// de guard: appspike linkt dit board, dus een app draait deze init ook. Zou
-	// RNG200Base vóór de guard gezet worden, dan wees getRandomData in de app
-	// naar RNG200-MMIO dat in zijn stage-2-kooi niet gemapt is → fault bij de
-	// eerste crypto/rand (gvisor-seed). Achter de guard blijft de RNG200Base van
-	// een app 0, en dan valt getRandomData terug op de PRNG. Alleen HOP mapt en
-	// gebruikt dit MMIO — net als het plan hieronder.
-	raspi.RNG200Base = RNG200Base
-	raspi.WatchdogBase = 0xFE100000 // PM-blok (bcm2711, zelfde registerfamilie)
-	p := layout.Plan{
-		NodeCtrlPA:    0x10000000,
-		Stage2PA:      0x12000000,
-		RevokeVecPA:   revokeVecAsm,
-		BootScratchPA: raspi.BootScratch, // 0x7F000, cpuinit-vast
-		NetDMAPA:      0x14000000,        // NIC-DMA (GENET, fase P2 — zelfde plek als de Pi 5)
-	}
-	// Pool = het volledige DRAM (DTB /memory) minus de vaste regio's; terugval
-	// op een conservatieve 512MB (past in élke Pi 4-variant) als de DTB faalt.
-	// LUID: op een Pi met geldige DTB loopt dit pad nooit — loopt het wél
-	// (kromme/afwezige blob), dan geen stille degradatie.
-	dtb := raspi.DTB()
-	p.Pool = raspi.DTBPool(dtb, p)
-	if len(p.Pool) == 0 {
-		fmt.Printf("WAARSCHUWING HOPOS_POOL_FALLBACK: geen bruikbare DTB /memory (dtb=%#x, geldig=%v) — partitie-pool valt terug op de vaste 512MB [0x20000000,0x40000000); de RAM-sanity draait dan op het layout, niet op gemeten RAM\n",
-			dtb, fdt.Valid(dtb))
-		p.Pool = []layout.Region{{Base: 0x20000000, Size: 0x20000000}}
-	}
-	layout.UsePlan(p)
+	// Het PA-plan + RNG/watchdog-bases: gedeeld met de Pi 5 (raspi.SetupPlan —
+	// zelfde plan, zelfde MPIDR-guard, zelfde DTB-pool-terugval); dit board
+	// levert alleen zijn eigen MMIO-bases (bcm2711, PM-blok 0xFE100000).
+	raspi.SetupPlan(RNG200Base, 0xFE100000)
 }
 
 // BCM2711-adressen ("low peripheral mode", de default: MMIO onder 4GB).

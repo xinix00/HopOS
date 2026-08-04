@@ -6,17 +6,7 @@ import (
 	_ "hop-os/metal/cpu/slotstart" // levert cpuinit (-tags linkcpuinit)
 )
 
-// appBoard is het app-zichtbare deel van dit board (appboard.Board): precies
-// wat een app-image nodig heeft om op te draaien — core-identiteit en de
-// klok-offset. De HOP-bedrading (reset-blok, board.Board) leeft in
-// board/licheerv/hop en komt een app-image nooit in.
-type appBoard struct{}
-
-func (appBoard) CoreID() int            { return CoreID() }
-func (appBoard) SetTimerOffset(o int64) { RV64.TimerOffset = o }
-
 func init() {
-	appboard.Use(appBoard{})
 	// De tijdbasis is board-kennis: RISC-V heeft geen CNTFRQ-equivalent, dus moet
 	// dit bordje zijn eigen getal aanleveren aan de lagen die eronder liggen (het
 	// generieke app-board en de idle-teller). Zonder deze twee regels zouden die

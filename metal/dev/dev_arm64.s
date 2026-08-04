@@ -42,3 +42,11 @@ loop:
 	WORD	$0xd5033f9f	// dsb sy
 done:
 	RET
+
+// MPIDR: MPIDR_EL1-read — de eigen core-identiteit. Op EL1 leesbaar; de
+// EL2-vectoren gebruiken hetzelfde register (el2.s). Eén definitie voor alle
+// boards (stond per board gekopieerd in cpu_arm64.s).
+TEXT ·MPIDR(SB),NOSPLIT,$0-8
+	WORD	$0xd53800a0	// mrs x0, mpidr_el1
+	MOVD	R0, ret+0(FP)
+	RET

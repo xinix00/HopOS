@@ -234,7 +234,7 @@ const (
 // scherm was onze 32-bit render op een 16-bit scanout).
 type FB struct {
 	Base          uintptr
-	Size, Pitch   uint32
+	Pitch         uint32
 	Width, Height uint32
 }
 
@@ -262,7 +262,6 @@ func (m *Mbox) AllocFB(w, h uint32) (FB, bool) {
 	}
 	return FB{
 		Base:  uintptr(alloc[0] &^ 0xC0000000),
-		Size:  alloc[1],
 		Pitch: pit[0],
 		Width: phys[0], Height: phys[1],
 	}, true

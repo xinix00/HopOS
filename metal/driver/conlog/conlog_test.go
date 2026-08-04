@@ -18,26 +18,16 @@ func put(s string) {
 	}
 }
 
-func TestSnapshotGeeftAllesTerugZolangHetPast(t *testing.T) {
-	reset()
-	put("slot 1: image placed in 57ms\n")
-	if got, want := string(Snapshot()), "slot 1: image placed in 57ms\n"; got != want {
-		t.Fatalf("Snapshot = %q, want %q", got, want)
-	}
-	if d := Dropped(); d != 0 {
-		t.Fatalf("Dropped = %d, want 0 zolang de hele geschiedenis past", d)
-	}
-}
-
 func TestRingHoudtDeLAATSTEBytes(t *testing.T) {
 	reset()
 	// Eerst de ring helemaal vol met iets herkenbaars, dan één regel erover.
 	put(strings.Repeat("x", Size))
 	put("de laatste regel\n")
 
-	got := string(Snapshot())
+	d, _ := Since(0)
+	got := string(d)
 	if len(got) != Size {
-		t.Fatalf("snapshot is %d bytes, want %d (de ring hoort vol te blijven)", len(got), Size)
+		t.Fatalf("Since(0) gaf %d bytes, want %d (de ring hoort vol te blijven)", len(got), Size)
 	}
 	if !strings.HasSuffix(got, "de laatste regel\n") {
 		t.Fatal("de nieuwste bytes horen achteraan te staan")
@@ -48,16 +38,6 @@ func TestRingHoudtDeLAATSTEBytes(t *testing.T) {
 	// Precies zoveel gedropt als er te veel in ging.
 	if d, want := Dropped(), uint64(len("de laatste regel\n")); d != want {
 		t.Fatalf("Dropped = %d, want %d", d, want)
-	}
-}
-
-// Een lezer mag de ring niet leegmaken: twee keer opvragen geeft twee keer
-// hetzelfde. Anders zou de eerste die kijkt de reden voor de tweede weggooien.
-func TestSnapshotIsHerhaalbaar(t *testing.T) {
-	reset()
-	put("HOPOS_AGENT_UP\n")
-	if a, b := string(Snapshot()), string(Snapshot()); a != b {
-		t.Fatalf("twee snapshots verschillen: %q vs %q", a, b)
 	}
 }
 

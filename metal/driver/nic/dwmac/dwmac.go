@@ -68,7 +68,6 @@ const (
 	dmaTxList    = 0x1010
 	dmaStatus    = 0x1014
 	dmaOpMode    = 0x1018
-	dmaHWFeature = 0x1058
 	dmaCurTxDesc = 0x1048
 	dmaCurRxDesc = 0x104c
 
@@ -223,9 +222,6 @@ func (n *Net) wr(off uintptr, v uint32) { dev.Write32(n.Base+off, v) }
 
 // Version geeft het snps-versieregister (read-only; 0x1037 op dit silicium).
 func (n *Net) Version() uint32 { return n.rd(regVersion) }
-
-// HWFeature geeft het DMA-feature-register (read-only, diagnose).
-func (n *Net) HWFeature() uint32 { return n.rd(dmaHWFeature) }
 
 // --- MDIO ----------------------------------------------------------------
 

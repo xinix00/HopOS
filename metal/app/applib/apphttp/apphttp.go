@@ -99,7 +99,6 @@ const (
 	StatusBadRequest            = 400
 	StatusNotFound              = 404
 	StatusMethodNotAllowed      = 405
-	StatusLengthRequired        = 411
 	StatusRequestEntityTooLarge = 413
 	StatusInternalServerError   = 500
 )

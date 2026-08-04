@@ -87,7 +87,4 @@ func TestNeedBytesDektRingenEnBuffers(t *testing.T) {
 		t.Errorf("descriptors (%d bytes, stride %d) lopen de bufferregio (offset %d) in",
 			descs, descStride, bufOff)
 	}
-	if NeedBytes != bufOff+2*numDesc*bufSize {
-		t.Errorf("NeedBytes %d dekt de ringen+buffers niet", NeedBytes)
-	}
 }

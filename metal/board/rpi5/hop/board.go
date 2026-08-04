@@ -7,8 +7,7 @@
 // Het gedeelde Pi-deel (boot-EL, DTB-RAM, timers, PSCI-plumbing, stage-2,
 // lease/Net, framebuffer-discovery) woont in board/raspi/hop.Base; hier
 // staat alleen het rpi5-eigene: de A76-MPIDR-nummering (aff1), de
-// framebuffer-adressen, ProbeNIC en de C1-erratum-dempers
-// (NetQuiesce/LifecyclePace).
+// framebuffer-adressen en ProbeNIC.
 //
 // PSCI-eigenaardigheid van dít board (meetpunt probe): de standaard
 // Pi-armstub zet secundaire cores mogelijk al "aan" (CPU_ON → ALREADY_ON) —
@@ -56,21 +55,6 @@ func init() { board.Use(base()) }
 // contract puur op board.Use() at runtime en wordt een gemiste methode pas
 // op het bord zichtbaar (Derek, 18-07).
 var _ board.Board = machine{}
-
-// theNIC is de door ProbeNIC gebouwde GEM (voor NetQuiesce); nil vóór P2-init.
-var theNIC *gem.Net
-
-// NetQuiesce (board.NetQuiescer): RX-DMA tijdelijk stil rond de
-// slot-vensters — de C1-erratum-workaround. Vóór netwerk-init een no-op.
-func (machine) NetQuiesce(off bool) {
-	if theNIC != nil {
-		theNIC.Quiesce(off)
-	}
-}
-
-// LifecyclePace (board.LifecyclePacer): minimale adempauze tussen
-// slot-lifecycles op dit board — C1-erratum-demper naast NetQuiesce.
-func (machine) LifecyclePace() time.Duration { return 500 * time.Millisecond }
 
 // ProbeNIC brengt de hele netwerkketen op — elke stap boardvast bewezen met
 // probe6 (2026-07-10, runs 2/4/5): RESCAL → pcie2-RC (54MHz-PLL!) →
@@ -127,7 +111,6 @@ func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
 		BusOff: 0x10_0000_0000, // RP1-masters → PCIe → RC-inbound → DRAM 0
 		MAC:    raspi.MACFromSerial(raspi.DTB(), 0x05),
 	}
-	theNIC = nic // voor NetQuiesce (slots-Start-venster, freeze-jacht 13-07)
 	nic.MDIOEnable()
 	addr, _, _, found := nic.PHYScan()
 	if !found {

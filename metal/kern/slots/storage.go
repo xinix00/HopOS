@@ -247,13 +247,7 @@ func (s *servicer) storeList(req hopabi.Req) []byte {
 	for i, k := range keys {
 		names[i] = strings.TrimPrefix(k, own)
 	}
-	data := []byte(strings.Join(names, "\n"))
-	// Zelfde ring-grens als OpList: te groot → nette fout i.p.v. een
-	// servicer die eeuwig een te groot record probeert te schrijven.
-	if len(data) > hopabi.MaxChunk {
-		return fail(req, fmt.Errorf("list %q: %d bytes > max %d (too many objects)", req.Path, len(data), hopabi.MaxChunk))
-	}
-	return ok(req, uint64(len(names)), data)
+	return listResp(req, names)
 }
 
 // storeDrop verwijdert object <pad> uit de eigen map (idempotent, zoals de

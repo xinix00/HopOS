@@ -21,6 +21,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"runtime"
 	"time"
 	_ "unsafe" // go:linkname (RAM-declaratie)
@@ -247,20 +248,10 @@ func igbProbe(d *pcie.Device) {
 		say("igb: %v\n", err)
 		return
 	}
-	say("igb: LEASE %d.%d.%d.%d/%v gw %d.%d.%d.%d — driver path complete!\n",
-		lease.IP[0], lease.IP[1], lease.IP[2], lease.IP[3], mask(lease.Mask),
+	ones, _ := net.IPMask(lease.Mask[:]).Size()
+	say("igb: LEASE %d.%d.%d.%d/%d gw %d.%d.%d.%d — driver path complete!\n",
+		lease.IP[0], lease.IP[1], lease.IP[2], lease.IP[3], ones,
 		lease.GW[0], lease.GW[1], lease.GW[2], lease.GW[3])
-}
-
-// mask telt de prefixlengte van een dotted mask (alleen voor de print).
-func mask(m [4]byte) int {
-	n := 0
-	for _, b := range m {
-		for ; b&0x80 != 0; b <<= 1 {
-			n++
-		}
-	}
-	return n
 }
 
 // hang parkeert de probe na een fatale meting: de conclusie staat op de

@@ -45,6 +45,5 @@ clean_embeds() {
 	rm -f "$DIR/metal/kern/apploaderblob/apploader.elf" \
 		"$DIR/metal/kern/apploaderblob/apploader.elf.gz" \
 		"$DIR/metal/kern/cagestub/stub-slot.bin" \
-		"$DIR/metal/cmd/hopos/cfgblob/hopos.cfg" \
-		"$DIR/metal/cmd/hopos-lrv/slot.bin"
+		"$DIR/metal/cmd/hopos/cfgblob/hopos.cfg"
 }

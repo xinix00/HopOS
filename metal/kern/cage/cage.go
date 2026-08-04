@@ -68,9 +68,8 @@ import (
 )
 
 // Window is één toegestaan venster in de kooi: basis + maat, met rechten.
-// De maat moet een macht van twee zijn en ≥ 4KB (PMP-granulariteit op de
-// C906), en de basis moet op zijn eigen maat gealigneerd zijn — dat is wat
-// NAPOT kan coderen.
+// Basis en maat moeten op de PMP-korrel liggen (4KB op de C906, zie torOK) —
+// meer eist TOR niet, dat is precies waarom het NAPOT verving.
 type Window struct {
 	Base    uint64
 	Size    uint64

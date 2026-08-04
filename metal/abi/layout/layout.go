@@ -79,7 +79,7 @@ const (
 	BootScratch = CtrlBase
 	// DTBPtr (IPA): cpuinit legt op de scratch-page (offset +8) de DTB-pointer
 	// neer die de firmware in x0 meegaf; board.MemTotal parset 'm met
-	// metal/fw/fdt. HOP leest 'm fysiek via DTBPtrPA().
+	// metal/fw/fdt (de Pi-boards lezen hem via hun eigen DTBPtr-constante).
 	DTBPtr = BootScratch + 8
 
 	// FB-grant-venster (IPA-ABI, kern/slots/fbgrant.go): de firmware-
@@ -436,7 +436,7 @@ func pa(v uint64) uintptr {
 // (CtrlPageAt), en kern/slots is de enige die dát adres kent.
 func NodeCtrlPA(core int) uintptr { return pa(plan.NodeCtrlPA + uint64(core)*CtrlStride) }
 
-// BootScratchPA/DTBPtrPA: de fysieke boot-scratch (cpuinit-vast).
+// BootScratchPA: de fysieke boot-scratch (cpuinit-vast).
 func BootScratchPA() uintptr { return pa(plan.BootScratchPA) }
 
 // De fysieke net-ring-basis van een slot (in de ABI-staart van zijn
@@ -518,12 +518,10 @@ func CarvePool(banks, holes []Region, min uint64) []Region {
 func TopAddr() uint64 {
 	pa(plan.NodeCtrlPA) // guard
 	top := plan.NodeCtrlPA + uint64(MaxSlots+1)*CtrlStride
-	for _, c := range []uint64{
-		plan.Stage2PA + uint64(MaxSlots+1)*Stage2Stride,
-	} {
-		if c > top {
-			top = c
-		}
+	// De enige andere vaste plan-regio: de stage-2-tabellen (ctrl/ringen/
+	// net-ringen wonen sinds de slot-ABI in de partitie-staart zelf).
+	if c := plan.Stage2PA + uint64(MaxSlots+1)*Stage2Stride; c > top {
+		top = c
 	}
 	for _, r := range plan.Pool {
 		if end := r.Base + r.Size; end > top {

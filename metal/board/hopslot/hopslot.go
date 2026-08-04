@@ -32,6 +32,7 @@ import (
 
 	"hop-os/metal/board/appboard"
 	"hop-os/metal/cpu/idle"
+	"hop-os/metal/dev"
 )
 
 // ARM64 is tamago's generieke ARM64-driver — timers, cache en Now lopen
@@ -61,15 +62,12 @@ func nanotime() int64 {
 	return ARM64.GetTime()
 }
 
-// mpidr leest MPIDR_EL1 (cpu_arm64.s).
-func mpidr() uint64
-
 // MPIDR geeft het rauwe MPIDR_EL1 van de huidige core. Voor apps is dit géén
 // slotnummer (dat is CoreID via de slotHint) en de nummering is per board
 // anders (aff0 vs aff1) — het enige board-onafhankelijke aan de waarde is dat
 // hij per fysieke core VERSCHILT. Precies dat maakt hem bruikbaar als
 // core-onderscheider in SMP-diagnostiek (appspike smpBench).
-func MPIDR() uint64 { return mpidr() }
+func MPIDR() uint64 { return dev.MPIDR() }
 
 // CoreID geeft het eigen slotnummer. Primair uit de slotHint (board-neutraal:
 // op servers is MPIDR géén slotnummer — Altra: aff0 altijd 0, en de Pi 5
@@ -79,7 +77,7 @@ func CoreID() int {
 	if slotHint != 0 {
 		return int(slotHint)
 	}
-	return int(mpidr() & 0xFF)
+	return int(dev.MPIDR() & 0xFF)
 }
 
 // appBoard is het app-zichtbare board (appboard.Board): core-identiteit en

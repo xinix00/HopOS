@@ -92,7 +92,6 @@ func fbconsDemo() error {
 	}
 	// Een dichte glyph tekenen; de eerste 16x16-cel moet nu voorgrondpixels
 	// hebben, en de cel ernaast onaangeroerd (geen schrijven buiten de cel).
-	fb.SetColor(0xFFFFFFFF)
 	fb.Putc('#')
 	fgSeen := false
 	for gy := 0; gy < cellPx; gy++ {
@@ -144,6 +143,7 @@ func fail(what string, err error) {
 
 func main() {
 	memlimit.Arm() // geheugenplafond uit het RAM-raam — zie cpu/memlimit
+	failf, demoApp = fail, app
 	fmt.Println("")
 	fmt.Println("HopOS (virt): bare-metal Go op arm64 — geen Linux aan boord")
 	fmt.Printf("runtime %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
@@ -210,15 +210,10 @@ func main() {
 
 	logCounts := make([]int, len(apps)+2)
 	for _, a := range apps {
-		if err := slots.Start(a.slot, app, a.limit, 1, a.env, nil, nil, ""); err != nil {
-			fail("start", err)
-		}
-		go drainLogs(a.slot, &logCounts[a.slot])
+		mustStart("start", a.slot, a.limit, 1, a.env, nil, nil, &logCounts[a.slot])
 	}
 	for _, a := range apps {
-		if err := slots.WaitReady(a.slot, 5*time.Second); err != nil {
-			fail("ready", err)
-		}
+		mustReady("ready", a.slot, 5*time.Second)
 	}
 
 	// Heartbeats en ring-logs laten lopen, dan status tonen.
@@ -241,20 +236,13 @@ func main() {
 
 	// Kill + restart van slot 2 — de Runner.Stop/Run-cyclus.
 	fmt.Println("stop slot 2 (kill-flag)...")
-	if err := slots.Stop(2, 3*time.Second); err != nil {
-		fail("stop", err)
-	}
+	mustStop("stop", 2, 3*time.Second)
 	s := slots.Get(2)
 	fmt.Printf("slot 2 gestopt: core-on=%v app=%d exit=%d\n", s.CoreOn, s.App, s.ExitCode)
 
 	fmt.Println("herstart slot 2 met 32MB...")
-	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"BUCKET": "hop-cache-v2"}, nil, nil, ""); err != nil {
-		fail("restart", err)
-	}
-	go drainLogs(2, nil)
-	if err := slots.WaitReady(2, 5*time.Second); err != nil {
-		fail("restart-ready", err)
-	}
+	mustStart("restart", 2, 32<<20, 1, map[string]string{"BUCKET": "hop-cache-v2"}, nil, nil, nil)
+	mustReady("restart-ready", 2, 5*time.Second)
 	s = slots.Get(2)
 	fmt.Printf("slot 2 terug: core-on=%v app=%d ram=%dMB\n", s.CoreOn, s.App, s.RAMSize>>20)
 
@@ -264,27 +252,8 @@ func main() {
 	// door de MMU-grens gestopt — de EL2-vector zet de core uit zónder dat
 	// de app EXITED meldt.
 	fmt.Println("isolatietest: slot 2 herstart met PROBE=hop...")
-	if err := slots.Stop(2, 3*time.Second); err != nil {
-		fail("iso-stop", err)
-	}
-	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"PROBE": "hop"}, nil, nil, ""); err != nil {
-		fail("iso-start", err)
-	}
-	go drainLogs(2, nil)
-	if err := slots.WaitReady(2, 5*time.Second); err != nil {
-		fail("iso-ready", err)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for slots.Get(2).CoreOn {
-		if time.Now().After(deadline) {
-			fail("isolatie", fmt.Errorf("app leest HOP-geheugen zonder fault"))
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	s = slots.Get(2)
-	if s.App == layout.StatusExited {
-		fail("isolatie", fmt.Errorf("app exitte netjes (%d) — fault verwacht", s.ExitCode))
-	}
+	mustStop("iso-stop", 2, 3*time.Second)
+	s = mustFault("isolatie", 2, 32<<20, map[string]string{"PROBE": "hop"})
 	// Fault-rapportage: de EL2-vector hoort syndroom en adres van de
 	// gestrande greep op de ctrl-page te hebben gezet.
 	fmt.Printf("fault-rapport slot 2: vec=%d esr=%#x far=%#x\n", s.FaultVec, s.FaultESR, s.FaultFAR)
@@ -299,24 +268,7 @@ func main() {
 	// bestaat geen legitieme app-SMC (SMP-bring-up loopt via HOP, exit is een
 	// HVC), dus het ESR hoort EC=0x17 (trapped SMC64) te dragen.
 	fmt.Println("isolatietest: slot 2 start met PROBE=smc...")
-	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"PROBE": "smc"}, nil, nil, ""); err != nil {
-		fail("smc-start", err)
-	}
-	go drainLogs(2, nil)
-	if err := slots.WaitReady(2, 5*time.Second); err != nil {
-		fail("smc-ready", err)
-	}
-	deadline = time.Now().Add(5 * time.Second)
-	for slots.Get(2).CoreOn {
-		if time.Now().After(deadline) {
-			fail("smc-kooi", fmt.Errorf("app deed een SMC zonder fault"))
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	s = slots.Get(2)
-	if s.App == layout.StatusExited {
-		fail("smc-kooi", fmt.Errorf("app exitte netjes (%d) — fault verwacht", s.ExitCode))
-	}
+	s = mustFault("smc-kooi", 2, 32<<20, map[string]string{"PROBE": "smc"})
 	fmt.Printf("fault-rapport slot 2: vec=%d esr=%#x (EC=%#x)\n", s.FaultVec, s.FaultESR, (s.FaultESR>>26)&0x3F)
 	if s.FaultVec != layout.FaultSync || (s.FaultESR>>26)&0x3F != 0x17 {
 		fail("smc-faultinfo", fmt.Errorf("verwacht vec=%d EC=0x17, kreeg vec=%d EC=%#x", layout.FaultSync, s.FaultVec, (s.FaultESR>>26)&0x3F))
@@ -330,17 +282,10 @@ func main() {
 	// HANG=spin is een `for {}` (self-branch, géén geheugentoegang): meteen het
 	// pathologische geval — vangt de intrekking dít, dan vangt hij alles.
 	fmt.Println("hard-kill: slot 2 start met HANG=spin...")
-	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"HANG": "spin"}, nil, nil, ""); err != nil {
-		fail("hang-start", err)
-	}
-	go drainLogs(2, nil)
-	if err := slots.WaitReady(2, 5*time.Second); err != nil {
-		fail("hang-ready", err)
-	}
+	mustStart("hang-start", 2, 32<<20, 1, map[string]string{"HANG": "spin"}, nil, nil, nil)
+	mustReady("hang-ready", 2, 5*time.Second)
 	time.Sleep(300 * time.Millisecond) // laat hem echt hangen
-	if err := slots.Stop(2, time.Second); err != nil {
-		fail("hard-kill", err)
-	}
+	mustStop("hard-kill", 2, time.Second)
 	s = slots.Get(2)
 	fmt.Printf("hard-kill-rapport slot 2: vec=%d (verwacht %d=stage-2-fault)\n", s.FaultVec, layout.FaultSync)
 	if s.App == layout.StatusExited {
@@ -358,13 +303,8 @@ func main() {
 	// wordt READY, logt en heeft een lopende heartbeat op precies die core.
 	fmt.Println("herstart-na-kill: verse app op de zojuist gevelde core (slot 2)...")
 	var rekLogs int
-	if err := slots.Start(2, app, 48<<20, 1, map[string]string{"ROLE": "na-kill"}, nil, nil, ""); err != nil {
-		fail("rekill-start", err)
-	}
-	go drainLogs(2, &rekLogs)
-	if err := slots.WaitReady(2, 5*time.Second); err != nil {
-		fail("rekill-ready", err)
-	}
+	mustStart("rekill-start", 2, 48<<20, 1, map[string]string{"ROLE": "na-kill"}, nil, nil, &rekLogs)
+	mustReady("rekill-ready", 2, 5*time.Second)
 	time.Sleep(600 * time.Millisecond)
 	s = slots.Get(2)
 	fmt.Printf("herstart slot 2: core-on=%v app=%d hb=%d ram=%dMB logs=%d vec=%d\n",
@@ -375,9 +315,7 @@ func main() {
 	if s.FaultVec != layout.FaultNone {
 		fail("rekill", fmt.Errorf("verse app erfde een fault-rapport (vec=%d) — control-page niet vers", s.FaultVec))
 	}
-	if err := slots.Stop(2, 3*time.Second); err != nil {
-		fail("rekill-stop", err)
-	}
+	mustStop("rekill-stop", 2, 3*time.Second)
 	fmt.Println("HOPOS_REKILL_OK — geparkeerde core herbruikt: kill → verse app op dezelfde core, geen firmware-roundtrip")
 
 	// Volumes-demo (het storage-model, PLAN.md §3): een writer-app zet de
@@ -386,22 +324,11 @@ func main() {
 	// een app zónder mount ziet /data helemaal niet, en andermans eigen root
 	// en '..'-escapes zijn dicht. Nul gedeeld geheugen — alles via HOP.
 	dataMount := map[string]string{"/data": "/data"}
-	for slot := 1; slot <= 2; slot++ {
-		if slots.Get(slot).CoreOn {
-			if err := slots.Stop(slot, 3*time.Second); err != nil {
-				fail("vol-stop", err)
-			}
-		}
-	}
+	stopIfOn("vol-stop", 1, 2)
 
 	fmt.Println("volumes: writer (slot 1, mount /data) schrijft de dataset...")
-	if err := slots.Start(1, app, 64<<20, 1, map[string]string{"FSDEMO": "writer"}, dataMount, nil, ""); err != nil {
-		fail("vol-writer", err)
-	}
-	go drainLogs(1, nil)
-	if code, err := waitExit(1, 10*time.Second); err != nil || code != 0 {
-		fail("vol-writer", fmt.Errorf("exit=%d, err=%v", code, err))
-	}
+	mustStart("vol-writer", 1, 64<<20, 1, map[string]string{"FSDEMO": "writer"}, dataMount, nil, nil)
+	mustExit("vol-writer", 1, 10*time.Second, 0)
 
 	// HOP rekent zelf de som over hetzelfde bestand in de storage-laag.
 	dbBytes := make([]byte, 100<<10)
@@ -412,30 +339,16 @@ func main() {
 
 	fmt.Println("volumes: readers (slot 1+2, mount /data) lezen parallel...")
 	for slot := 1; slot <= 2; slot++ {
-		if err := slots.Start(slot, app, 64<<20, 1, map[string]string{"FSDEMO": "reader"}, dataMount, nil, ""); err != nil {
-			fail("vol-reader", err)
-		}
-		go drainLogs(slot, nil)
+		mustStart("vol-reader", slot, 64<<20, 1, map[string]string{"FSDEMO": "reader"}, dataMount, nil, nil)
 	}
 	for slot := 1; slot <= 2; slot++ {
-		code, err := waitExit(slot, 15*time.Second)
-		if err != nil {
-			fail("vol-reader", err)
-		}
-		if code != sum {
-			fail("vol-reader", fmt.Errorf("slot %d checksum %#x ≠ HOP-som %#x", slot, code, sum))
-		}
+		mustExit("vol-reader", slot, 15*time.Second, sum)
 		fmt.Printf("slot %d las /data/db.bin: checksum %#x = HOP-som\n", slot, sum)
 	}
 
 	fmt.Println("volumes: app zonder mount (slot 2) hoort /data niet te zien...")
-	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"FSDEMO": "denied"}, nil, nil, ""); err != nil {
-		fail("vol-denied", err)
-	}
-	go drainLogs(2, nil)
-	if code, err := waitExit(2, 10*time.Second); err != nil || code != 0 {
-		fail("vol-denied", fmt.Errorf("exit=%d, err=%v", code, err))
-	}
+	mustStart("vol-denied", 2, 32<<20, 1, map[string]string{"FSDEMO": "denied"}, nil, nil, nil)
+	mustExit("vol-denied", 2, 10*time.Second, 0)
 	fmt.Println("HOPOS_VOLUMES_OK — volumes: gedeeld pad, eigen root, mount-grens afgedwongen")
 
 	// Fetch-demo: de app downloadt ZELF, over zijn eigen netstack, en schrijft de
@@ -447,13 +360,8 @@ func main() {
 	// passant de weg die élke echte job gebruikt.
 	fmt.Println("fetch: slot 1 haalt zelf een URL en schrijft hem naar /data/hello.txt...")
 	fetchEnv := map[string]string{"FSDEMO": "fetch", "FETCH_URL": "http://" + hopswitch.GatewayIP() + "/"}
-	if err := slots.Start(1, app, 64<<20, 1, fetchEnv, dataMount, nil, ""); err != nil {
-		fail("fetch", err)
-	}
-	go drainLogs(1, nil)
-	if code, err := waitExit(1, 15*time.Second); err != nil || code != 0 {
-		fail("fetch", fmt.Errorf("exit=%d, err=%v", code, err))
-	}
+	mustStart("fetch", 1, 64<<20, 1, fetchEnv, dataMount, nil, nil)
+	mustExit("fetch", 1, 15*time.Second, 0)
 	hello := make([]byte, 256)
 	n, err := fsys.ReadAt("/data/hello.txt", 0, hello)
 	if err != nil || !bytes.Contains(hello[:n], []byte("HopOS leeft")) {
@@ -466,29 +374,17 @@ func main() {
 	// dat er een TCP-stack op core 0 aan te pas komt (HOP is enkel L2-switch +
 	// ARP-responder voor de gateway).
 	fmt.Println("netdemo: slot 1 luistert op het interne net...")
-	if err := slots.Start(1, app, 64<<20, 1, map[string]string{"NETDEMO": "listen"}, nil, nil, ""); err != nil {
-		fail("net-listen", err)
-	}
-	go drainLogs(1, nil)
-	if err := slots.WaitReady(1, 5*time.Second); err != nil {
-		fail("net-listen", err)
-	}
+	mustStart("net-listen", 1, 64<<20, 1, map[string]string{"NETDEMO": "listen"}, nil, nil, nil)
+	mustReady("net-listen", 1, 5*time.Second)
 
 	// App → app: slot 2 dialt slot 1 (via de gateway-ARP van de switch); exit
 	// 0 = pong geverifieerd.
 	addr := hopswitch.SlotIP(1) + ":8080"
 	fmt.Println("netdemo: slot 2 dialt slot 1 — app↔app, HOP kopieert alleen frames...")
 	dialEnv := map[string]string{"NETDEMO": "dial", "NET_DIAL": addr}
-	if err := slots.Start(2, app, 64<<20, 1, dialEnv, nil, nil, ""); err != nil {
-		fail("net-dial", err)
-	}
-	go drainLogs(2, nil)
-	if code, err := waitExit(2, 15*time.Second); err != nil || code != 0 {
-		fail("net-dial", fmt.Errorf("exit=%d, err=%v", code, err))
-	}
-	if err := slots.Stop(1, 3*time.Second); err != nil {
-		fail("net-stop", err)
-	}
+	mustStart("net-dial", 2, 64<<20, 1, dialEnv, nil, nil, nil)
+	mustExit("net-dial", 2, 15*time.Second, 0)
+	mustStop("net-stop", 1, 3*time.Second)
 	fmt.Println("HOPOS_NET_SLOT_OK — per-slot netstack + L2-switch: app↔app bewezen")
 
 	// Uitgaand (masquerade): een app dialt naar buiten — hier een DNS-query
@@ -497,13 +393,8 @@ func main() {
 	// Dit is het pad voor cloudflared/servers. (De query verlaat QEMU via
 	// slirp; een antwoord bewijst de round-trip.)
 	fmt.Println("netdemo: slot 2 doet een uitgaande DNS-query — masquerade naar buiten...")
-	if err := slots.Start(2, app, 64<<20, 1, map[string]string{"NETDEMO": "out"}, nil, nil, ""); err != nil {
-		fail("net-out", err)
-	}
-	go drainLogs(2, nil)
-	if code, err := waitExit(2, 15*time.Second); err != nil || code != 0 {
-		fail("net-out", fmt.Errorf("exit=%d, err=%v", code, err))
-	}
+	mustStart("net-out", 2, 64<<20, 1, map[string]string{"NETDEMO": "out"}, nil, nil, nil)
+	mustExit("net-out", 2, 15*time.Second, 0)
 	fmt.Println("HOPOS_OUTBOUND_OK — uitgaande masquerade: app → buiten → app, HOP herschrijft alleen headers")
 
 	// Poort-publicatie (stateloze DNAT): node-IP:8080 → slot 1, via de
@@ -513,13 +404,8 @@ func main() {
 	// qemu-run.sh (host :18080 → 10.0.2.15:8080 → DNAT → slot 1).
 	// De listener blijft draaien; main slaapt hierna toch voor eeuwig.
 	portsEnv := map[string]string{"NETDEMO": "listen", "ER_PORT_HTTP": "8080"}
-	if err := slots.Start(1, app, 64<<20, 1, portsEnv, nil, map[string]int{"http": 8080}, ""); err != nil {
-		fail("ports", err)
-	}
-	go drainLogs(1, nil)
-	if err := slots.WaitReady(1, 5*time.Second); err != nil {
-		fail("ports", err)
-	}
+	mustStart("ports", 1, 64<<20, 1, portsEnv, nil, map[string]int{"http": 8080}, nil)
+	mustReady("ports", 1, 5*time.Second)
 	fmt.Println("HOPOS_PORTS_READY — tcp/8080 doorgerouterd naar slot 1 (test extern: nc host:18080)")
 
 	// Self-relocating spike (PLAN §4.4): één artifact voor elk slot — de
@@ -528,21 +414,12 @@ func main() {
 	// op slot 2 én 3 tegelijk; beide loggen RAM @ 0x50000000 (hun virtuele
 	// beeld) terwijl ze fysiek in eigen partities leven.
 	fmt.Println("reloc: zelfde artifact (slot-1-gelinkt) naar slot 2 en 3...")
-	if slots.Get(3).CoreOn {
-		if err := slots.Stop(3, 3*time.Second); err != nil {
-			fail("reloc-stop", err)
-		}
+	stopIfOn("reloc-stop", 3)
+	for slot := 2; slot <= 3; slot++ {
+		mustStart("reloc", slot, 64<<20, 1, map[string]string{"ROLE": "reloc"}, nil, nil, nil)
 	}
 	for slot := 2; slot <= 3; slot++ {
-		if err := slots.Start(slot, app, 64<<20, 1, map[string]string{"ROLE": "reloc"}, nil, nil, ""); err != nil {
-			fail("reloc", err)
-		}
-		go drainLogs(slot, nil)
-	}
-	for slot := 2; slot <= 3; slot++ {
-		if err := slots.WaitReady(slot, 5*time.Second); err != nil {
-			fail("reloc-ready", err)
-		}
+		mustReady("reloc-ready", slot, 5*time.Second)
 	}
 	time.Sleep(600 * time.Millisecond) // ring-logs + heartbeats laten lopen
 	for slot := 2; slot <= 3; slot++ {
@@ -559,27 +436,13 @@ func main() {
 	// voor. cores=2 gebruikt slot 1 (primair) + core 2 (secundair), dus eerst
 	// 1-3 vrijmaken.
 	fmt.Println("smp: slot 1 als 2-core app (gedeelde heap), core 2 secundair...")
-	for slot := 1; slot <= 3; slot++ {
-		if slots.Get(slot).CoreOn {
-			if err := slots.Stop(slot, 3*time.Second); err != nil {
-				fail("smp-stop", err)
-			}
-		}
-	}
-	if err := slots.Start(1, app, 128<<20, 2, map[string]string{"SMP": "bench"}, nil, nil, ""); err != nil {
-		fail("smp-start", err)
-	}
-	go drainLogs(1, nil)
-	code, err := waitExit(1, 30*time.Second)
-	if err != nil || code != 0 {
-		fail("smp", fmt.Errorf("exit=%d, err=%v", code, err))
-	}
+	stopIfOn("smp-stop", 1, 2, 3)
+	mustStart("smp-start", 1, 128<<20, 2, map[string]string{"SMP": "bench"}, nil, nil, nil)
+	mustExit("smp", 1, 30*time.Second, 0)
 	// Teardown: alle cores van de SMP-app moeten afgaan (primair + secundair).
 	// CoreIdle toetst de CORE-mailbox (Get.CoreOn is sinds de core-deling de
 	// slot-staat, en "core 2" is hier een core, geen slot).
-	if err := slots.Stop(1, 5*time.Second); err != nil {
-		fail("smp-teardown", err)
-	}
+	mustStop("smp-teardown", 1, 5*time.Second)
 	for _, c := range []int{1, 2} {
 		if !slots.CoreIdle(c) {
 			fail("smp-teardown", fmt.Errorf("core %d nog aan na teardown", c))
@@ -593,20 +456,10 @@ func main() {
 	// en 3 delen core 2; core 3 blijft de hele test leeg — het bewijs dat de
 	// tweede app er niet stiekem heen lekt.
 	fmt.Println("share: slot 2 en 3 samen op core 2 (eigen kooi, gedeelde core)...")
-	if err := slots.Start(2, app, 64<<20, 1, map[string]string{"ROLE": "share-a"}, nil, nil, ""); err != nil {
-		fail("share-a", err)
-	}
-	go drainLogs(2, nil)
-	if err := slots.WaitReady(2, 5*time.Second); err != nil {
-		fail("share-a-ready", err)
-	}
-	if err := slots.StartShared(2, 3, app, 64<<20, map[string]string{"ROLE": "share-b"}, nil, nil, ""); err != nil {
-		fail("share-b", err)
-	}
-	go drainLogs(3, nil)
-	if err := slots.WaitReady(3, 5*time.Second); err != nil {
-		fail("share-b-ready", err)
-	}
+	mustStart("share-a", 2, 64<<20, 1, map[string]string{"ROLE": "share-a"}, nil, nil, nil)
+	mustReady("share-a-ready", 2, 5*time.Second)
+	mustStartShared("share-b", 2, 3, 64<<20, map[string]string{"ROLE": "share-b"})
+	mustReady("share-b-ready", 3, 5*time.Second)
 	if !slots.CoreIdle(3) {
 		fail("share-leak", fmt.Errorf("core 3 draait terwijl slot 3 op core 2 hoort te wonen"))
 	}
@@ -623,9 +476,7 @@ func main() {
 	// Kill één bewoner; de ander moet blijven kloppen (kill-per-context, geen
 	// CPU_OFF van de gedeelde core).
 	fmt.Println("share: stop slot 3 — slot 2 moet blijven draaien...")
-	if err := slots.Stop(3, 3*time.Second); err != nil {
-		fail("share-stop", err)
-	}
+	mustStop("share-stop", 3, 3*time.Second)
 	if slots.Get(3).CoreOn {
 		fail("share-stop", fmt.Errorf("slot 3 meldt zich nog levend na Stop"))
 	}
@@ -636,21 +487,12 @@ func main() {
 	}
 	// En er past een verse bewoner naast (herbezetting van het gedeelde slot).
 	fmt.Println("share: verse app als nieuwe mede-bewoner op core 2...")
-	if err := slots.StartShared(2, 3, app, 48<<20, map[string]string{"ROLE": "share-c"}, nil, nil, ""); err != nil {
-		fail("share-c", err)
-	}
-	go drainLogs(3, nil)
-	if err := slots.WaitReady(3, 5*time.Second); err != nil {
-		fail("share-c-ready", err)
-	}
+	mustStartShared("share-c", 2, 3, 48<<20, map[string]string{"ROLE": "share-c"})
+	mustReady("share-c-ready", 3, 5*time.Second)
 	// Teardown in twee stappen: eerst de mede-bewoner (gedeeld pad), dan de
 	// laatste (klassiek pad: de core parkeert).
-	if err := slots.Stop(3, 3*time.Second); err != nil {
-		fail("share-teardown", err)
-	}
-	if err := slots.Stop(2, 3*time.Second); err != nil {
-		fail("share-teardown", err)
-	}
+	mustStop("share-teardown", 3, 3*time.Second)
+	mustStop("share-teardown", 2, 3*time.Second)
 	if !slots.CoreIdle(2) {
 		fail("share-teardown", fmt.Errorf("core 2 parkeerde niet na het vertrek van de laatste bewoner"))
 	}
@@ -662,13 +504,7 @@ func main() {
 	// core, StartShared plaatst); hier direct met de embedded app zodat de demo
 	// self-contained blijft. Kooi 4 ligt bóven de 3 app-cores — bewijst kooi≠core.
 	fmt.Println("sharegroup: 4 apps in pool 'web' (2 hele cores), kooien 1-4...")
-	for slot := 1; slot <= 3; slot++ {
-		if slots.Get(slot).CoreOn {
-			if err := slots.Stop(slot, 3*time.Second); err != nil {
-				fail("sg-stop", err)
-			}
-		}
-	}
+	stopIfOn("sg-stop", 1, 2, 3)
 	sgCages := []int{1, 2, 3, 4}
 	sgCores := map[int]bool{}
 	for _, cage := range sgCages {
@@ -677,15 +513,10 @@ func main() {
 			fail("sg-place", err)
 		}
 		sgCores[core] = true
-		if err := slots.StartShared(core, cage, app, 64<<20, map[string]string{"ROLE": "web"}, nil, nil, ""); err != nil {
-			fail("sg-start", err)
-		}
-		go drainLogs(cage, nil)
+		mustStartShared("sg-start", core, cage, 64<<20, map[string]string{"ROLE": "web"})
 	}
 	for _, cage := range sgCages {
-		if err := slots.WaitReady(cage, 8*time.Second); err != nil {
-			fail("sg-ready", err)
-		}
+		mustReady("sg-ready", cage, 8*time.Second)
 	}
 	if len(sgCores) != 2 {
 		fail("sg-cores", fmt.Errorf("pool 'web' gebruikte %d cores, wil 2", len(sgCores)))
@@ -703,9 +534,7 @@ func main() {
 	}
 	fmt.Printf("sharegroup: 4 kooien op %d cores, alle heartbeats lopen door\n", len(sgCores))
 	for _, cage := range sgCages {
-		if err := slots.Stop(cage, 3*time.Second); err != nil {
-			fail("sg-teardown", err)
-		}
+		mustStop("sg-teardown", cage, 3*time.Second)
 		slots.ReleaseCage(cage)
 	}
 	fmt.Println("HOPOS_SHAREGROUP_OK — pool van hele cores: 4 kooien op 2 cores, elk eigen kooi, gebalanceerd")
@@ -719,9 +548,7 @@ func main() {
 	fmt.Printf("swarm: %d kooien in pool 'swarm' op 3 cores stapelen...\n", swarmN)
 	for cage := 1; cage <= swarmN; cage++ {
 		if slots.Get(cage).CoreOn {
-			if err := slots.Stop(cage, 3*time.Second); err != nil {
-				fail("swarm-clear", err)
-			}
+			mustStop("swarm-clear", cage, 3*time.Second)
 			slots.ReleaseCage(cage)
 		}
 	}
@@ -732,15 +559,10 @@ func main() {
 			fail("swarm-place", fmt.Errorf("kooi %d: %w", cage, err))
 		}
 		swarmCores[core] = true
-		if err := slots.StartShared(core, cage, app, 48<<20, map[string]string{"ROLE": "swarm"}, nil, nil, ""); err != nil {
-			fail("swarm-start", fmt.Errorf("kooi %d: %w", cage, err))
-		}
-		go drainLogs(cage, nil)
+		mustStartShared("swarm-start", core, cage, 48<<20, map[string]string{"ROLE": "swarm"})
 	}
 	for cage := 1; cage <= swarmN; cage++ {
-		if err := slots.WaitReady(cage, 20*time.Second); err != nil {
-			fail("swarm-ready", fmt.Errorf("kooi %d: %w", cage, err))
-		}
+		mustReady("swarm-ready", cage, 20*time.Second)
 	}
 	if len(swarmCores) != 3 {
 		fail("swarm-cores", fmt.Errorf("zwerm gebruikte %d cores, wil 3", len(swarmCores)))
@@ -767,9 +589,7 @@ func main() {
 	// KILL-STORM: sloop de even kooien terwijl de oneven doordraaien.
 	fmt.Println("swarm: kill-storm — 12 even kooien weg, oneven moeten doordraaien...")
 	for cage := 2; cage <= swarmN; cage += 2 {
-		if err := slots.Stop(cage, 3*time.Second); err != nil {
-			fail("swarm-kill", fmt.Errorf("kooi %d: %w", cage, err))
-		}
+		mustStop("swarm-kill", cage, 3*time.Second)
 		slots.ReleaseCage(cage)
 	}
 	for cage := 1; cage <= swarmN; cage += 2 {
@@ -790,23 +610,16 @@ func main() {
 		if err != nil {
 			fail("swarm-replace", fmt.Errorf("kooi %d: %w", cage, err))
 		}
-		if err := slots.StartShared(core, cage, app, 48<<20, map[string]string{"ROLE": "swarm2"}, nil, nil, ""); err != nil {
-			fail("swarm-replace", fmt.Errorf("kooi %d: %w", cage, err))
-		}
-		go drainLogs(cage, nil)
+		mustStartShared("swarm-replace", core, cage, 48<<20, map[string]string{"ROLE": "swarm2"})
 	}
 	for cage := 2; cage <= swarmN; cage += 2 {
-		if err := slots.WaitReady(cage, 20*time.Second); err != nil {
-			fail("swarm-replace-ready", fmt.Errorf("kooi %d: %w", cage, err))
-		}
+		mustReady("swarm-replace-ready", cage, 20*time.Second)
 	}
 	fmt.Printf("swarm: alle %d kooien terug na de churn\n", swarmN)
 
 	// Opruimen.
 	for cage := 1; cage <= swarmN; cage++ {
-		if err := slots.Stop(cage, 3*time.Second); err != nil {
-			fail("swarm-teardown", err)
-		}
+		mustStop("swarm-teardown", cage, 3*time.Second)
 		slots.ReleaseCage(cage)
 	}
 	fmt.Printf("HOPOS_SWARM_OK — %d kooien op 3 cores + kill-storm: dichtheid bewezen, RAM is de muur\n", swarmN)

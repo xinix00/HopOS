@@ -107,6 +107,19 @@ func residentReset(core, i int) {
 	refreshShared(core)
 }
 
+// residents geeft (mailbox-basis, aantal) van de bewonerslijst van core, met
+// het aantal geklemd op SlotCap. Die clamp is een isolatiegrens — één entry
+// te ver is het SchedS2PA-woord (zie residentAdd) — en hoort dus op precies
+// één plek te staan, niet bij elke lezer opnieuw.
+func residents(core int) (b uintptr, n uint64) {
+	b = layout.ParkMboxPA(core)
+	n = dev.Read64(b + layout.SchedCount)
+	if n > uint64(layout.SlotCap) {
+		n = uint64(layout.SlotCap)
+	}
+	return b, n
+}
+
 // residentAdd hangt slot i in de bewonerslijst van core: het eerste gat
 // (0-byte), anders append. Entry vóór count, met barrière — de arch-rotatie mag
 // nooit een half geschreven staart zien.
@@ -117,30 +130,32 @@ func residentReset(core, i int) {
 // monotoon en removals laten gaten achter — dus "vol" betekende "is ooit vol
 // geweest".
 func residentAdd(core, i int) error {
-	b := layout.ParkMboxPA(core)
+	b, n := residents(core)
 	// De lijst is van HOP alleen, maar hij ligt in geheugen dat de arch-switch
 	// leest — op RISC-V met zijn eigen cache. Publiceren dus, en de kant die
 	// leest invalideert (cpu/mmode doet dat bij elke rotatie).
 	defer dev.Push(b+layout.SchedCount, layout.ParkMboxLen-layout.SchedCount)
-	n := dev.Read64(b + layout.SchedCount)
-	if n > uint64(layout.SlotCap) {
-		n = uint64(layout.SlotCap)
-	}
 	// Al lid? (twee-fase-start: de loader stond al in de lijst, ctx nu Dead) —
-	// niet dubbel toevoegen; fase 2 flipt straks alleen de ctx-staat.
+	// niet dubbel toevoegen; fase 2 flipt straks alleen de ctx-staat. Het
+	// eerste gat onthouden we onderweg, maar er schrijven mag pas als de hele
+	// lijst bevestigt dat i er niet al in staat.
+	gap := -1
 	for k := uint64(0); k < n; k++ {
-		if dev.Read8(b+layout.SchedList+uintptr(k)) == uint8(i) {
+		switch dev.Read8(b + layout.SchedList + uintptr(k)) {
+		case uint8(i):
 			refreshShared(core)
 			return nil
+		case 0:
+			if gap < 0 {
+				gap = int(k)
+			}
 		}
 	}
-	for k := uint64(0); k < n; k++ {
-		if dev.Read8(b+layout.SchedList+uintptr(k)) == 0 {
-			dev.Write8(b+layout.SchedList+uintptr(k), uint8(i))
-			dev.MB()
-			refreshShared(core)
-			return nil
-		}
+	if gap >= 0 {
+		dev.Write8(b+layout.SchedList+uintptr(gap), uint8(i))
+		dev.MB()
+		refreshShared(core)
+		return nil
 	}
 	// Geen gat en geen ruimte om te groeien. >= en niet >: bij n == SlotCap zou de
 	// append hieronder op SchedList[SlotCap] schrijven, en dat is precies het woord
@@ -164,11 +179,7 @@ func residentAdd(core, i int) error {
 // enige bron waaruit de rotatie hervat, dus dit ís de vraag "kan deze ctx ooit
 // nog tot leven komen" — de scheidsrechter van de lijk-eviction (slots.go).
 func residentListed(core, i int) bool {
-	b := layout.ParkMboxPA(core)
-	n := dev.Read64(b + layout.SchedCount)
-	if n > uint64(layout.SlotCap) {
-		n = uint64(layout.SlotCap)
-	}
+	b, n := residents(core)
 	for k := uint64(0); k < n; k++ {
 		if dev.Read8(b+layout.SchedList+uintptr(k)) == uint8(i) {
 			return true
@@ -178,11 +189,7 @@ func residentListed(core, i int) bool {
 }
 
 func residentRemove(core, i int) {
-	b := layout.ParkMboxPA(core)
-	n := dev.Read64(b + layout.SchedCount)
-	if n > uint64(layout.SlotCap) {
-		n = uint64(layout.SlotCap)
-	}
+	b, n := residents(core)
 	for k := uint64(0); k < n; k++ {
 		if dev.Read8(b+layout.SchedList+uintptr(k)) == uint8(i) {
 			dev.Write8(b+layout.SchedList+uintptr(k), 0)
@@ -199,11 +206,7 @@ func residentRemove(core, i int) {
 // power). Aangeroepen na elke lijst-mutatie — HOP is de enige schrijver van
 // dit woord, de app leest het alleen.
 func refreshShared(core int) {
-	b := layout.ParkMboxPA(core)
-	n := dev.Read64(b + layout.SchedCount)
-	if n > uint64(layout.SlotCap) {
-		n = uint64(layout.SlotCap)
-	}
+	b, n := residents(core)
 	var live []int
 	for k := uint64(0); k < n; k++ {
 		s := int(dev.Read8(b + layout.SchedList + uintptr(k)))
@@ -225,11 +228,7 @@ func refreshShared(core int) {
 // Bepaalt het Stop-pad: gedeeld = op de ctx-staat wachten (de core parkeert
 // niet — de buren leven door), alleen = het klassieke parkeer-pad.
 func slotShares(i int) bool {
-	b := layout.ParkMboxPA(coreOf(i))
-	n := dev.Read64(b + layout.SchedCount)
-	if n > layout.SlotCap {
-		n = layout.SlotCap
-	}
+	b, n := residents(coreOf(i))
 	for k := uint64(0); k < n; k++ {
 		e := int(dev.Read8(b + layout.SchedList + uintptr(k)))
 		if e != 0 && e != i && e <= layout.MaxSlots && ctxLive(ctxState(e)) {
@@ -252,7 +251,8 @@ func slotShares(i int) bool {
 // dan yieldt daar niets (compute-buur) en falen we luid met teruggedraaide
 // boekhouding.
 func bootPendingDispatch(core, i int, tramp, ctx uint64) error {
-	ctxWrite(i, layout.CtxCtrlPA, ctx)
+	// CtxCtrlPA staat er al: armSlot schrijft hem voor élk slot, direct vóór
+	// deze call (slots.go).
 	ctxWrite(i, layout.CtxBootPC, tramp)
 	dev.MB()
 	ctxWrite(i, layout.CtxState, layout.CtxBootPending)
@@ -287,14 +287,10 @@ func bootPendingDispatch(core, i int, tramp, ctx uint64) error {
 // waitCtxDead polt tot de EL2-switch slot i dood heeft gemeld (exit, fault
 // of revoke) — het gedeelde-core-equivalent van waitStopped.
 func waitCtxDead(i int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if st := ctxState(i); st == layout.CtxDead || st == layout.CtxEmpty {
-			return true
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return false
+	return pollUntil(timeout, func() bool {
+		st := ctxState(i)
+		return st == layout.CtxDead || st == layout.CtxEmpty
+	})
 }
 
 // CoreIdle meldt of een fysieke core geen enkele app draait (geparkeerd of

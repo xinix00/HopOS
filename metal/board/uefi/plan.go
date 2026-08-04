@@ -15,6 +15,7 @@ import (
 	"sort"
 
 	"hop-os/metal/abi/layout"
+	"hop-os/metal/dev"
 	"hop-os/metal/fw/acpi"
 )
 
@@ -241,7 +242,7 @@ var madtCPUs []acpi.CPU
 // altijd 0). Vóór de ACPI-parse (vroege runtime) is alleen core 0 actief: 0
 // is dan het juiste antwoord. Zie CoreID (uefi.go).
 func coreIDFromMADT() int {
-	own := mpidr() & 0x00FFFFFF // aff0..aff2 (aff3 speelt hier niet)
+	own := dev.MPIDR() & 0x00FFFFFF // aff0..aff2 (aff3 speelt hier niet)
 	if len(madtCPUs) == 0 {
 		// App-image-context: geen ACPI, dus geen MADT om in te zoeken.
 		// HOP patcht daarom bij Start het slotnummer in de image

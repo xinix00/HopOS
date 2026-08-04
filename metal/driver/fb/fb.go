@@ -33,11 +33,9 @@ type Desc struct {
 // scale wordt bij Init uit de framebuffer-maat afgeleid (Derek, 2026-07-11:
 // 2× beviel op 1080p): volwaardige schermen krijgen 16×16-cellen (120×67 op
 // 1080p), kleine buffers (zelftests) rauwe 8×8-glyphs.
-var (
-	scale = 2
-	cellW = 8 * scale
-	cellH = 8 * scale
-)
+var scale, cellW, cellH int
+
+const fg uint32 = 0xFFFFFFFF
 
 var (
 	d          Desc
@@ -46,7 +44,6 @@ var (
 	cols, rows int    // tekencellen
 	x, y       int    // cursor (cel)
 	top        int    // eerste log-rij (0, of ónder de vaste Header-regels)
-	fg         uint32 = 0xFFFFFFFF
 	bg         uint32 = 0xFF101828 // donker blauwgrijs: "beeld doet het" ≠ zwart scherm
 	active     bool
 )
@@ -148,9 +145,6 @@ func HeaderStatus(line int, s string) {
 // Disable ontkoppelt de console (bv. als de buffer ongeldig wordt, of na een
 // zelftest); Putc is daarna weer een no-op.
 func Disable() { active = false }
-
-// SetColor zet de voorgrondkleur (0xAARRGGBB; groen is byte-order-neutraal).
-func SetColor(argb uint32) { fg = argb }
 
 // Putc tekent één byte. UTF-8-multibyte wordt gedegradeerd: vervolgbytes
 // vallen weg, de leadbyte wordt '?' — de UART/log houdt de volle tekst.

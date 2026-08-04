@@ -244,6 +244,52 @@ func (f *FS) ReadAt(path string, off uint64, p []byte) (int, error) {
 	return int(done), nil
 }
 
+// file zoekt (of maakt, mét ouder-dirs) het bestand op path — de gedeelde kop
+// van WriteAt en Truncate. Aanroepen onder f.mu.
+func (f *FS) file(path string) (*node, error) {
+	segs, err := split(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(segs) == 0 {
+		return nil, fmt.Errorf("hopfs: leeg pad")
+	}
+	parent, err := f.walk(segs[:len(segs)-1], true)
+	if err != nil {
+		return nil, err
+	}
+	name := segs[len(segs)-1]
+	n, ok := parent.children[name]
+	if !ok {
+		if f.nodes >= maxNodes {
+			return nil, fmt.Errorf("hopfs: te veel bestanden/dirs (max %d)", maxNodes)
+		}
+		n = &node{}
+		parent.children[name] = n
+		f.nodes++
+	} else if n.dir {
+		return nil, fmt.Errorf("hopfs: %q is a directory", path)
+	}
+	return n, nil
+}
+
+// growTo groeit de blokkenlijst van n met GATEN tot need blokken, tegen het
+// index-budget (zie maxIndexBlocks): weigeren VÓÓR de groei-lus, want de lus
+// zelf is de schade (allocatie onder f.mu). what benoemt de vrager in de fout.
+func (f *FS) growTo(n *node, need uint64, what string) error {
+	if grow := int(need) - len(n.blocks); grow > 0 {
+		if f.index+grow > maxIndexBlocks {
+			return fmt.Errorf("hopfs: bestandsindex-budget vol (%d van %d blokken; %s vraagt %d bij)",
+				f.index, maxIndexBlocks, what, grow)
+		}
+		f.index += grow
+	}
+	for uint64(len(n.blocks)) < need {
+		n.blocks = append(n.blocks, holeBlock)
+	}
+	return nil
+}
+
 // WriteAt schrijft p op off; maakt het bestand (en ouder-dirs) zo nodig aan
 // en groeit het bij schrijven voorbij het einde (gat = nulbytes).
 func (f *FS) WriteAt(path string, off uint64, p []byte) error {
@@ -265,28 +311,9 @@ func (f *FS) WriteAt(path string, off uint64, p []byte) error {
 		return fmt.Errorf("hopfs: offset %d + %d bytes > schijf (%d)", off, len(p), diskBytes)
 	}
 
-	segs, err := split(path)
+	n, err := f.file(path)
 	if err != nil {
 		return err
-	}
-	if len(segs) == 0 {
-		return fmt.Errorf("hopfs: leeg pad")
-	}
-	parent, err := f.walk(segs[:len(segs)-1], true)
-	if err != nil {
-		return err
-	}
-	name := segs[len(segs)-1]
-	n, ok := parent.children[name]
-	if !ok {
-		if f.nodes >= maxNodes {
-			return fmt.Errorf("hopfs: te veel bestanden/dirs (max %d)", maxNodes)
-		}
-		n = &node{}
-		parent.children[name] = n
-		f.nodes++
-	} else if n.dir {
-		return fmt.Errorf("hopfs: %q is a directory", path)
 	}
 
 	// Foutsemantiek is POSIX-achtig: een write die halverwege faalt (schijf
@@ -299,18 +326,8 @@ func (f *FS) WriteAt(path string, off uint64, p []byte) error {
 	// disk-write. Een gat leest als nul en wordt pas een echt blok als de
 	// payload het hieronder raakt — sparse, dus een schrijf op een grote
 	// offset kost geen schijf-I/O voor het gat.
-	need := (end + BlockSize - 1) / BlockSize
-	// De index-groei tegen het budget (zie maxIndexBlocks): weigeren VÓÓR de
-	// groei-lus, want de lus zelf is de schade (allocatie onder f.mu).
-	if grow := int(need) - len(n.blocks); grow > 0 {
-		if f.index+grow > maxIndexBlocks {
-			return fmt.Errorf("hopfs: bestandsindex-budget vol (%d van %d blokken; offset %d vraagt %d bij)",
-				f.index, maxIndexBlocks, off, grow)
-		}
-		f.index += grow
-	}
-	for uint64(len(n.blocks)) < need {
-		n.blocks = append(n.blocks, holeBlock)
+	if err := f.growTo(n, (end+BlockSize-1)/BlockSize, fmt.Sprintf("offset %d", off)); err != nil {
+		return err
 	}
 
 	var buf [BlockSize]byte
@@ -366,39 +383,15 @@ func (f *FS) Truncate(path string, size uint64) error {
 	if diskBytes := uint64(f.max) * BlockSize; size > diskBytes {
 		return fmt.Errorf("hopfs: truncate %d > schijf (%d)", size, diskBytes)
 	}
-	segs, err := split(path)
+	n, err := f.file(path)
 	if err != nil {
 		return err
-	}
-	if len(segs) == 0 {
-		return fmt.Errorf("hopfs: leeg pad")
-	}
-	parent, err := f.walk(segs[:len(segs)-1], true)
-	if err != nil {
-		return err
-	}
-	name := segs[len(segs)-1]
-	n, ok := parent.children[name]
-	if !ok {
-		if f.nodes >= maxNodes {
-			return fmt.Errorf("hopfs: te veel bestanden/dirs (max %d)", maxNodes)
-		}
-		n = &node{}
-		parent.children[name] = n
-		f.nodes++
-	} else if n.dir {
-		return fmt.Errorf("hopfs: %q is a directory", path)
 	}
 
 	need := int((size + BlockSize - 1) / BlockSize)
-	if grow := need - len(n.blocks); grow > 0 {
-		if f.index+grow > maxIndexBlocks {
-			return fmt.Errorf("hopfs: bestandsindex-budget vol (%d van %d blokken; truncate %d vraagt %d bij)",
-				f.index, maxIndexBlocks, size, grow)
-		}
-		f.index += grow
-		for len(n.blocks) < need {
-			n.blocks = append(n.blocks, holeBlock)
+	if need > len(n.blocks) {
+		if err := f.growTo(n, uint64(need), fmt.Sprintf("truncate %d", size)); err != nil {
+			return err
 		}
 	} else {
 		for _, b := range n.blocks[need:] {

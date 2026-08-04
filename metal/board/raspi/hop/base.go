@@ -62,7 +62,6 @@ func (b Base) SetWallTime(ns int64)   { raspi.ARM64.SetTime(ns) }
 func (b Base) CPUOn(core, entry, ctx uint64) int64 {
 	return psci.On(b.Target(core), entry, ctx)
 }
-func (b Base) CPUOff() int64 { return psci.Off() }
 func (b Base) AffinityInfo(core uint64) board.PowerState {
 	return board.PowerState(psci.AffinityInfo(b.Target(core)))
 }

@@ -20,6 +20,9 @@ const (
 	tempCfg    = tempBase + 0x00c
 	tempResult = tempBase + 0x020
 
+	// CV181x clock-blok: alleen de gate van de sensor-klok leeft hier nog
+	// (de terugklok-tooling die de rest van dit blok kende is 04-08 gesloopt).
+	clkBase    = 0x03002000
 	clkEn0Reg  = clkBase + 0x000
 	clkTempsen = 1 << 9
 )

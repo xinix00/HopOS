@@ -100,44 +100,35 @@ func main() {
 			data[i] = byte(i*13 + 7)
 		}
 		if err := app.WriteFile("/data/db.bin", data); err != nil {
-			app.Logf("FSDEMO writer: %v", err)
-			exit(app, 1)
+			exitf(app, 1, "FSDEMO writer: %v", err)
 		}
 		if err := app.WriteFile("/prive.txt", []byte("alleen van slot-eigenaar")); err != nil {
-			app.Logf("FSDEMO writer: prive: %v", err)
-			exit(app, 1)
+			exitf(app, 1, "FSDEMO writer: prive: %v", err)
 		}
-		app.Logf("FSDEMO writer: /data/db.bin (%d bytes) + eigen /prive.txt geschreven", len(data))
-		exit(app, 0)
+		exitf(app, 0, "FSDEMO writer: /data/db.bin (%d bytes) + eigen /prive.txt geschreven", len(data))
 
 	case "reader":
 		// Lees de gedeelde dataset en exit met de checksum; bewijs en passant
 		// dat andermans privé-bestand en een '..'-escape onzichtbaar zijn.
 		b, err := app.ReadFile("/data/db.bin")
 		if err != nil {
-			app.Logf("FSDEMO reader: %v", err)
-			exit(app, 1)
+			exitf(app, 1, "FSDEMO reader: %v", err)
 		}
 		if _, err := app.ReadFile("/prive.txt"); err == nil {
-			app.Logf("FSDEMO reader: LEK — andermans prive-bestand zichtbaar")
-			exit(app, 2)
+			exitf(app, 2, "FSDEMO reader: LEK — andermans prive-bestand zichtbaar")
 		}
 		if _, err := app.ReadFile("/../.tasks/slot1/prive.txt"); err == nil {
-			app.Logf("FSDEMO reader: LEK — '..'-escape werkt")
-			exit(app, 3)
+			exitf(app, 3, "FSDEMO reader: LEK — '..'-escape werkt")
 		}
 		sum := checksum.FNV64(b)
-		app.Logf("FSDEMO reader: %d bytes, checksum %#x", len(b), sum)
-		exit(app, sum)
+		exitf(app, sum, "FSDEMO reader: %d bytes, checksum %#x", len(b), sum)
 
 	case "denied":
 		// Zonder mount bestaat /data voor deze task simpelweg niet.
 		if _, err := app.ReadFile("/data/db.bin"); err == nil {
-			app.Logf("FSDEMO denied: LEK — /data zichtbaar zonder mount")
-			exit(app, 1)
+			exitf(app, 1, "FSDEMO denied: LEK — /data zichtbaar zonder mount")
 		}
-		app.Logf("FSDEMO denied: /data onzichtbaar zonder mount — goed")
-		exit(app, 0)
+		exitf(app, 0, "FSDEMO denied: /data onzichtbaar zonder mount — goed")
 
 	case "fetch":
 		// Downloaden doet de APP, op zijn eigen core en met zijn eigen netstack —
@@ -146,25 +137,20 @@ func main() {
 		// gaan hier via de gewone write-weg het volume in; dat is precies wat een
 		// echte job (de apploader!) ook doet.
 		if _, err := appnet.Up(app); err != nil {
-			app.Logf("FSDEMO fetch: %v", err)
-			exit(app, 1)
+			exitf(app, 1, "FSDEMO fetch: %v", err)
 		}
 		body, err := httpGet(app.Env("FETCH_URL"))
 		if err != nil {
-			app.Logf("FSDEMO fetch: %v", err)
-			exit(app, 1)
+			exitf(app, 1, "FSDEMO fetch: %v", err)
 		}
 		if err := app.WriteFile("/data/hello.txt", body); err != nil {
-			app.Logf("FSDEMO fetch: schrijven: %v", err)
-			exit(app, 1)
+			exitf(app, 1, "FSDEMO fetch: schrijven: %v", err)
 		}
 		b, err := app.ReadFile("/data/hello.txt")
 		if err != nil {
-			app.Logf("FSDEMO fetch: teruglezen: %v", err)
-			exit(app, 1)
+			exitf(app, 1, "FSDEMO fetch: teruglezen: %v", err)
 		}
-		app.Logf("FSDEMO fetch: %d bytes: %q", len(b), string(b[:min(len(b), 40)]))
-		exit(app, 0)
+		exitf(app, 0, "FSDEMO fetch: %d bytes: %q", len(b), string(b[:min(len(b), 40)]))
 	}
 
 	// Netdemo (per-slot netwerk): elke rol draait een eigen netstack over de
@@ -176,8 +162,7 @@ func main() {
 		// (zelfde nummer als de gepubliceerde node-poort), default 8080.
 		ip, err := appnet.Up(app)
 		if err != nil {
-			app.Logf("NETDEMO listen: %v", err)
-			exit(app, 1)
+			exitf(app, 1, "NETDEMO listen: %v", err)
 		}
 		port := app.Env("ER_PORT_HTTP")
 		if port == "" {
@@ -185,15 +170,13 @@ func main() {
 		}
 		l, err := net.Listen("tcp4", ":"+port)
 		if err != nil {
-			app.Logf("NETDEMO listen: %v", err)
-			exit(app, 1)
+			exitf(app, 1, "NETDEMO listen: %v", err)
 		}
 		app.Logf("NETDEMO listen: eigen stack op %s, poort :%s open", ip, port)
 		for {
 			conn, err := l.Accept()
 			if err != nil {
-				app.Logf("NETDEMO listen: accept: %v", err)
-				exit(app, 1)
+				exitf(app, 1, "NETDEMO listen: accept: %v", err)
 			}
 			go func(c net.Conn) {
 				defer c.Close()
@@ -210,26 +193,21 @@ func main() {
 		// Client: ping naar NET_DIAL (een andere app), verifieer de pong.
 		ip, err := appnet.Up(app)
 		if err != nil {
-			app.Logf("NETDEMO dial: %v", err)
-			exit(app, 1)
+			exitf(app, 1, "NETDEMO dial: %v", err)
 		}
 		conn, err := net.Dial("tcp4", app.Env("NET_DIAL"))
 		if err != nil {
-			app.Logf("NETDEMO dial: %v", err)
-			exit(app, 1)
+			exitf(app, 1, "NETDEMO dial: %v", err)
 		}
 		if _, err := conn.Write([]byte("ping van " + ip + "\n")); err != nil {
-			app.Logf("NETDEMO dial: write: %v", err)
-			exit(app, 1)
+			exitf(app, 1, "NETDEMO dial: write: %v", err)
 		}
 		resp, err := bufio.NewReader(conn).ReadString('\n')
 		conn.Close()
 		if err != nil || resp != "pong ping van "+ip+"\n" {
-			app.Logf("NETDEMO dial: onverwacht antwoord %q (%v)", resp, err)
-			exit(app, 1)
+			exitf(app, 1, "NETDEMO dial: onverwacht antwoord %q (%v)", resp, err)
 		}
-		app.Logf("NETDEMO dial: %s → %s: pong ontvangen — app↔app zonder HOP-TCP", ip, app.Env("NET_DIAL"))
-		exit(app, 0)
+		exitf(app, 0, "NETDEMO dial: %s → %s: pong ontvangen — app↔app zonder HOP-TCP", ip, app.Env("NET_DIAL"))
 
 	case "out":
 		// Uitgaand naar buiten: één DNS-query (UDP) naar de node-resolver die
@@ -238,18 +216,15 @@ func main() {
 		// respóns bewijst de hele round-trip, ongeacht wat erin staat. Dít is
 		// het pad dat straks cloudflared/servers naar buiten gebruiken.
 		if _, err := appnet.Up(app); err != nil {
-			app.Logf("NETDEMO out: %v", err)
-			exit(app, 1)
+			exitf(app, 1, "NETDEMO out: %v", err)
 		}
 		dns := app.Env("HOP_DNS")
 		if dns == "" {
-			app.Logf("NETDEMO out: geen HOP_DNS meegegeven")
-			exit(app, 1)
+			exitf(app, 1, "NETDEMO out: geen HOP_DNS meegegeven")
 		}
 		conn, err := net.Dial("udp4", dns)
 		if err != nil {
-			app.Logf("NETDEMO out: dial %s: %v", dns, err)
-			exit(app, 1)
+			exitf(app, 1, "NETDEMO out: dial %s: %v", dns, err)
 		}
 		defer conn.Close()
 		// Minimale DNS A-query voor "a.root-servers.net" (id 0x1234, RD).
@@ -259,18 +234,15 @@ func main() {
 			0x03, 'n', 'e', 't', 0x00, 0x00, 0x01, 0x00, 0x01,
 		}
 		if _, err := conn.Write(query); err != nil {
-			app.Logf("NETDEMO out: write: %v", err)
-			exit(app, 1)
+			exitf(app, 1, "NETDEMO out: write: %v", err)
 		}
 		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		resp := make([]byte, 512)
 		n, err := conn.Read(resp)
 		if err != nil || n < 12 || resp[0] != 0x12 || resp[1] != 0x34 {
-			app.Logf("NETDEMO out: geen bruikbaar DNS-antwoord (n=%d, %v)", n, err)
-			exit(app, 1)
+			exitf(app, 1, "NETDEMO out: geen bruikbaar DNS-antwoord (n=%d, %v)", n, err)
 		}
-		app.Logf("NETDEMO out: DNS-antwoord van %s (%d bytes) — uitgaande masquerade werkt", dns, n)
-		exit(app, 0)
+		exitf(app, 0, "NETDEMO out: DNS-antwoord van %s (%d bytes) — uitgaande masquerade werkt", dns, n)
 	}
 
 	// Hanger: een lege lus zonder preemptiepunt monopoliseert de core — de
@@ -313,6 +285,13 @@ func main() {
 func exit(app *applib.App, code uint64) {
 	time.Sleep(100 * time.Millisecond)
 	app.Exit(code)
+}
+
+// fatalf logt de fout en stopt met deze code — het vaste faalpaar van elke
+// demo-stap (stond ~40× uitgeschreven als Logf+exit).
+func exitf(app *applib.App, code uint64, format string, args ...any) {
+	app.Logf(format, args...)
+	exit(app, code)
 }
 
 // httpGet haalt één URL op over de EIGEN netstack van dit slot (appnet.Up moet
@@ -411,8 +390,7 @@ func smpBench(app *applib.App) {
 	n := runtime.GOMAXPROCS(0)
 	app.Logf("SMP: app ziet %d cores (GOMAXPROCS), RAM %dMB — app-code deed hier niets voor", n, app.RAMSize>>20)
 	if n < 2 {
-		app.Logf("SMP: minder dan 2 cores toegewezen — geen SMP")
-		exit(app, 1)
+		exitf(app, 1, "SMP: minder dan 2 cores toegewezen — geen SMP")
 	}
 
 	// 1) Parallellisme-bewijs: N CPU-drukke goroutines tegelijk; elk telt per
@@ -448,8 +426,7 @@ func smpBench(app *applib.App) {
 		}
 	}
 	if spread < 2 {
-		app.Logf("SMP: werk liep op %d core(s) — geen echt parallellisme", spread)
-		exit(app, 2)
+		exitf(app, 2, "SMP: werk liep op %d core(s) — geen echt parallellisme", spread)
 	}
 	app.Logf("SMP: goroutines liepen parallel op %d cores — echte multi-core", spread)
 
@@ -471,8 +448,7 @@ func smpBench(app *applib.App) {
 	var sum uint64
 	for i := 0; i < N; i++ {
 		if shared[i] != uint32(i) {
-			app.Logf("SMP: gedeelde slice corrupt @ %d (=%d)", i, shared[i])
-			exit(app, 3)
+			exitf(app, 3, "SMP: gedeelde slice corrupt @ %d (=%d)", i, shared[i])
 		}
 		sum += uint64(shared[i])
 	}

@@ -74,7 +74,6 @@ func (machine) CPUOn(core, entry, ctx uint64) int64 {
 	}
 	return psci.On(cpus[core].MPIDR, entry, ctx)
 }
-func (machine) CPUOff() int64 { return psci.Off() }
 func (machine) AffinityInfo(core uint64) board.PowerState {
 	cpus := uefi.MADTCPUs()
 	if int(core) >= len(cpus) {

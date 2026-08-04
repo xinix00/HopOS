@@ -33,12 +33,10 @@ import (
 
 // Peripheral base addresses
 const (
-	PLIC_BASE  = 0x70000000
 	CLINT_BASE = 0x74000000
 	UART0_BASE = 0x04140000
 
-	// timebase-frequency uit de dts (de vaste 25MHz-osc, ongevoelig voor
-	// terugklokken van de core — zie clock.go)
+	// timebase-frequency uit de dts (de vaste 25MHz-osc)
 	RTCCLK = 25000000
 
 	// De slot-geometrie van dít board: waar een app-partitie ligt en waar
@@ -63,11 +61,10 @@ const (
 	// ongeldig maken. Zo kost deze hersnit geen enkele relink.
 	HopBase = 0x84000000
 
-	SlotBase    = 0x88000000
-	SlotSize    = 0x04000000 // 64MB
-	SlotSizeMB  = SlotSize >> 20
-	CtrlPage    = 0x8FF10000 // control page: HOP ↔ app, 4KB
-	SlotScratch = 0x8FE00000 // DRAM buiten de kooi (kooi-tests)
+	SlotBase   = 0x88000000
+	SlotSize   = 0x04000000 // 64MB
+	SlotSizeMB = SlotSize >> 20
+	CtrlPage   = 0x8FF10000 // control page: HOP ↔ app, 4KB
 )
 
 // RV64 is de eigen kern (XuanTie C906) — het tamago-CPU-object dat de

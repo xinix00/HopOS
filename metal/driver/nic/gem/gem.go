@@ -113,7 +113,6 @@ type Net struct {
 	rxRing, txRing uintptr // descriptor-ringen (4 woorden per descriptor)
 	rxBufs, txBufs uintptr
 	rxHead, txHead int
-	rxOff          bool // Quiesce actief: RX-DMA uit (zie Quiesce)
 }
 
 func (n *Net) rd(off uintptr) uint32    { return dev.Read32(n.Base + off) }
@@ -272,25 +271,9 @@ func (n *Net) Init(dmaBase, dmaSize uintptr, speed int, fd bool) error {
 	return nil
 }
 
-// ctrlBits geeft de actuele NWCtrl-basisbits: RX alleen aan als er geen
-// quiesce actief is. Eén bron voor Init/Transmit/Quiesce.
+// ctrlBits geeft de NWCtrl-basisbits — één bron voor Init en Transmit.
 func (n *Net) ctrlBits() uint32 {
-	bits := uint32(ctrlMgmtEn | ctrlTxEn)
-	if !n.rxOff {
-		bits |= ctrlRxEn
-	}
-	return bits
-}
-
-// Quiesce zet de RX-DMA tijdelijk stil (freeze-jacht 13-07): het C1-erratum
-// (QoS-forwarding-search AXI→SDC) botst met de fabric-brede operaties van een
-// slot-Start (imagecopy, stage-2-CleanInv, heap-zeroing/TLBI van de bootende
-// core). Geen inbound DMA tijdens dat venster = geen botsing; gedropte frames
-// zijn gewoon Ethernet — TCP zendt opnieuw. TX blijft aan (uitgaand raakt de
-// race niet en zo blijven ACK's/heartbeats lopen).
-func (n *Net) Quiesce(off bool) {
-	n.rxOff = off
-	n.wr(regNWCtrl, n.ctrlBits())
+	return ctrlMgmtEn | ctrlTxEn | ctrlRxEn
 }
 
 // Receive haalt één frame op (0 = niets) — go-net NetworkDevice.

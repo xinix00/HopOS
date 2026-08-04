@@ -42,11 +42,3 @@ func dcacheCPA(start, end uintptr)
 
 //go:nosplit
 func dcacheCIPA(start, end uintptr)
-
-// Fence is een gewone RISC-V fence (rw,rw). Nodig bij élke write naar een
-// control page of mailbox die een ánder hart leest: de C906 heeft een write
-// buffer die niet draint als de core daarna niets meer met geheugen doet
-// (GEMETEN 30-07 — precies de laatste writes van een payload ontbraken dan).
-//
-//go:nosplit
-func Fence()

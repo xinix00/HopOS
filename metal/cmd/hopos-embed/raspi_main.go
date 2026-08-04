@@ -40,16 +40,16 @@ func fail(prefix, what string, err error) {
 // front-end-gedrag): levenscyclus, stage-2-isolatie, hard-kill via
 // stage-2-intrekking, relocatie + cache-discipline, en SMP met gedeelde heap.
 func acceptance(prefix, core string, app []byte) {
+	// De must*-helpers (helpers.go) falen hier met het board-prefix en
+	// draaien op dít app-blob.
+	failf = func(what string, err error) { fail(prefix, what, err) }
+	demoApp = app
+
 	// ── 1. Levenscyclus: start, ring-logs, heartbeat, coöperatieve stop. ──
 	fmt.Println("start slot 1 (64MB)...")
 	var logs1 int
-	if err := slots.Start(1, app, 64<<20, 1, map[string]string{"ROLE": "pi-worker"}, nil, nil, ""); err != nil {
-		fail(prefix, "start", err)
-	}
-	go drainLogs(1, &logs1)
-	if err := slots.WaitReady(1, 5*time.Second); err != nil {
-		fail(prefix, "ready", err)
-	}
+	mustStart("start", 1, 64<<20, 1, map[string]string{"ROLE": "pi-worker"}, nil, nil, &logs1)
+	mustReady("ready", 1, 5*time.Second)
 	time.Sleep(900 * time.Millisecond)
 	s := slots.Get(1)
 	fmt.Printf("slot 1: core-on=%v app=%d hb=%d ram=%dMB logs=%d\n",
@@ -57,40 +57,19 @@ func acceptance(prefix, core string, app []byte) {
 	if !s.CoreOn || s.App != layout.StatusReady || s.Heartbeat == 0 || s.RAMSize != 64<<20-layout.AbiTail || logs1 == 0 {
 		fail(prefix, "status", fmt.Errorf("slot 1 inconsistent"))
 	}
-	if err := slots.Stop(1, 3*time.Second); err != nil {
-		fail(prefix, "stop", err)
-	}
+	mustStop("stop", 1, 3*time.Second)
 	fmt.Printf("HOPOS_%s_SLOTS_OK — app gestart, ring-logs en heartbeat gezien, coöperatief gestopt\n", prefix)
 
 	// ── 2. Isolatie: de kooi op dit silicium. PROBE=hop laat de app ──
 	// HOP-geheugen lezen (IPA 0x40000000 — nooit gemapt); de EL2-vector moet
 	// rapporteren en de core uitzetten, zónder nette exit.
 	fmt.Println("isolatietest: slot 1 start met PROBE=hop...")
-	if err := slots.Start(1, app, 32<<20, 1, map[string]string{"PROBE": "hop"}, nil, nil, ""); err != nil {
-		fail(prefix, "iso-start", err)
-	}
-	go drainLogs(1, nil)
-	if err := slots.WaitReady(1, 5*time.Second); err != nil {
-		fail(prefix, "iso-ready", err)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for slots.Get(1).CoreOn {
-		if time.Now().After(deadline) {
-			fail(prefix, "isolatie", fmt.Errorf("app leest HOP-geheugen zonder fault"))
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	s = slots.Get(1)
+	s = mustFault("isolatie", 1, 32<<20, map[string]string{"PROBE": "hop"})
 	fmt.Printf("fault-rapport slot 1: vec=%d esr=%#x far=%#x\n", s.FaultVec, s.FaultESR, s.FaultFAR)
-	if s.App == layout.StatusExited {
-		fail(prefix, "isolatie", fmt.Errorf("app exitte netjes — fault verwacht"))
-	}
 	if s.FaultVec != layout.FaultSync || s.FaultFAR != layout.HopRAMStart {
 		fail(prefix, "faultinfo", fmt.Errorf("verwacht vec=%d far=%#x", layout.FaultSync, uint64(layout.HopRAMStart)))
 	}
-	if err := slots.Stop(1, time.Second); err != nil {
-		fail(prefix, "iso-teardown", err)
-	}
+	mustStop("iso-teardown", 1, time.Second)
 	fmt.Printf("HOPOS_%s_ISOLATIE_OK — stage-2-kooi hard bewezen op de %s\n", prefix, core)
 
 	// ── 3. Hard-kill: stage-2-intrekking op de echte front-end. ──
@@ -98,17 +77,10 @@ func acceptance(prefix, core string, app []byte) {
 	// scherpste test: hertranslateert de front-end na de TLBI, dan faultt hij
 	// op de genulde tabel en zet zichzelf uit. Dít kon QEMU niet bewijzen.
 	fmt.Println("hard-kill: slot 1 start met HANG=spin...")
-	if err := slots.Start(1, app, 32<<20, 1, map[string]string{"HANG": "spin"}, nil, nil, ""); err != nil {
-		fail(prefix, "hang-start", err)
-	}
-	go drainLogs(1, nil)
-	if err := slots.WaitReady(1, 5*time.Second); err != nil {
-		fail(prefix, "hang-ready", err)
-	}
+	mustStart("hang-start", 1, 32<<20, 1, map[string]string{"HANG": "spin"}, nil, nil, nil)
+	mustReady("hang-ready", 1, 5*time.Second)
 	time.Sleep(300 * time.Millisecond) // laat hem echt hangen
-	if err := slots.Stop(1, time.Second); err != nil {
-		fail(prefix, "hard-kill", err)
-	}
+	mustStop("hard-kill", 1, time.Second)
 	s = slots.Get(1)
 	fmt.Printf("hard-kill-rapport slot 1: vec=%d (verwacht %d=stage-2-fault)\n", s.FaultVec, layout.FaultSync)
 	if s.App == layout.StatusExited {
@@ -123,43 +95,24 @@ func acceptance(prefix, core string, app []byte) {
 	// en herstart op een zojuist gebruikte partitie (stale-line-test: zonder
 	// de CleanInv in het loadpad is dít waar het op echt silicium misgaat).
 	fmt.Println("relocatie: zelfde artifact op slot 2, daarna herstart op slot 1...")
-	if err := slots.Start(2, app, 32<<20, 1, map[string]string{"ROLE": "reloc"}, nil, nil, ""); err != nil {
-		fail(prefix, "reloc-start", err)
-	}
-	go drainLogs(2, nil)
-	if err := slots.WaitReady(2, 5*time.Second); err != nil {
-		fail(prefix, "reloc-ready", err)
-	}
-	if err := slots.Stop(2, 3*time.Second); err != nil {
-		fail(prefix, "reloc-stop", err)
-	}
-	if err := slots.Start(1, app, 48<<20, 1, map[string]string{"ROLE": "hergebruik"}, nil, nil, ""); err != nil {
-		fail(prefix, "reuse-start", err)
-	}
-	go drainLogs(1, nil)
-	if err := slots.WaitReady(1, 5*time.Second); err != nil {
-		fail(prefix, "reuse-ready", err)
-	}
-	if err := slots.Stop(1, 3*time.Second); err != nil {
-		fail(prefix, "reuse-stop", err)
-	}
+	mustStart("reloc-start", 2, 32<<20, 1, map[string]string{"ROLE": "reloc"}, nil, nil, nil)
+	mustReady("reloc-ready", 2, 5*time.Second)
+	mustStop("reloc-stop", 2, 3*time.Second)
+	mustStart("reuse-start", 1, 48<<20, 1, map[string]string{"ROLE": "hergebruik"}, nil, nil, nil)
+	mustReady("reuse-ready", 1, 5*time.Second)
+	mustStop("reuse-stop", 1, 3*time.Second)
 	fmt.Printf("HOPOS_%s_RELOC_OK — canoniek artifact op meerdere slots + herstart op gebruikte partitie\n", prefix)
 
 	// ── 5. SMP: één app op 2 cores, gedeelde heap, GC, nette teardown. ──
 	fmt.Println("smp: slot 1 als 2-core app (gedeelde heap), core 2 secundair...")
-	if err := slots.Start(1, app, 128<<20, 2, map[string]string{"SMP": "bench"}, nil, nil, ""); err != nil {
-		fail(prefix, "smp-start", err)
-	}
-	go drainLogs(1, nil)
-	code, err := waitExit(1, 30*time.Second)
-	if err != nil || code != 0 {
-		fail(prefix, "smp", fmt.Errorf("exit=%d, err=%v", code, err))
-	}
-	if err := slots.Stop(1, 5*time.Second); err != nil {
-		fail(prefix, "smp-teardown", err)
-	}
+	mustStart("smp-start", 1, 128<<20, 2, map[string]string{"SMP": "bench"}, nil, nil, nil)
+	mustExit("smp", 1, 30*time.Second, 0)
+	// Teardown: alle cores van de SMP-app moeten afgaan. CoreIdle toetst de
+	// CORE-mailbox (Get.CoreOn is sinds de core-deling de slot-staat, en
+	// "core 2" is hier een core, geen slot) — zelfde toets als virt_main.
+	mustStop("smp-teardown", 1, 5*time.Second)
 	for _, c := range []int{1, 2} {
-		if slots.Get(c).CoreOn {
+		if !slots.CoreIdle(c) {
 			fail(prefix, "smp-teardown", fmt.Errorf("core %d nog aan na teardown", c))
 		}
 	}

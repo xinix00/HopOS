@@ -10,8 +10,8 @@ import (
 // Hardware-watchdog van het BCM-PM-blok — dezelfde registerfamilie op de
 // BCM2711 (Pi 4) en BCM2712 (Pi 5, bcm2712.dtsi watchdog@7d200000; Linux
 // bcm2835-pm-wdt): een hardwareteller die het hele SoC reset als hij niet op
-// tijd geaaid wordt. Dít is het vangnet voor een totale fabric-freeze
-// (freeze-jacht 2026-07-13, C1-erratum): bevroren software kan niets meer,
+// tijd geaaid wordt. Dít is het vangnet voor een totale node-freeze, wat de
+// oorzaak ook is (HOP-leven = node-leven): bevroren software kan niets meer,
 // maar de PM-teller tikt onafhankelijk door en trekt de node er zelf uit —
 // geen stekker nodig. Board-agnostisch via WatchdogBase (RNG200Base-patroon):
 // elk board zet zijn PM-basis in init(); 0 = geen watchdog (bv. QEMU).

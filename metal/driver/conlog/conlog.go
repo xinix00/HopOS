@@ -43,22 +43,6 @@ func Put(c byte) {
 	pos++
 }
 
-// Snapshot geeft de bewaarde console-uitvoer in de juiste volgorde. Dit is de
-// enige kant die alloceert, en hij wordt alleen door een lezer aangeroepen (de
-// API-handler) — nooit uit printk.
-func Snapshot() []byte {
-	n := pos
-	if n > Size {
-		n = Size
-	}
-	out := make([]byte, n)
-	start := pos - n
-	for i := range n {
-		out[i] = buf[(start+i)&(Size-1)]
-	}
-	return out
-}
-
 // Dropped meldt hoeveel bytes er niet meer in de ring staan — nul zolang de
 // hele geschiedenis past. Zonder dit getal leest een afgekapte snapshot als een
 // complete: de eerste regel is dan stil een halve regel. Het is tegelijk de

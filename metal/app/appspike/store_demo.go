@@ -19,50 +19,40 @@ func storeDemo(app *applib.App) {
 
 	// 1. Verse map: een pull van iets dat er nooit was is een nette fout.
 	if _, err := app.Pull(f); err == nil {
-		app.Logf("STOREDEMO: pull of a never-pushed object succeeded?!")
-		exit(app, 1)
+		exitf(app, 1, "STOREDEMO: pull of a never-pushed object succeeded?!")
 	}
 	// 2. Schrijven en pushen — vanaf nu is het persistent.
 	if err := app.WriteFile(f, leven1); err != nil {
-		app.Logf("STOREDEMO: write: %v", err)
-		exit(app, 2)
+		exitf(app, 2, "STOREDEMO: write: %v", err)
 	}
 	n, err := app.Push(f)
 	if err != nil || n != uint64(len(leven1)) {
-		app.Logf("STOREDEMO: push: n=%d err=%v", n, err)
-		exit(app, 3)
+		exitf(app, 3, "STOREDEMO: push: n=%d err=%v", n, err)
 	}
 	// 3. Lokaal vervuilen (lánger dan het origineel, zodat een niet-
 	//    vervangende pull door de staart zou vallen) en terughalen: de
 	//    bucket wint.
 	if err := app.WriteFile(f, []byte("vervuild — en met opzet veel langer dan het origineel")); err != nil {
-		app.Logf("STOREDEMO: dirty local write: %v", err)
-		exit(app, 4)
+		exitf(app, 4, "STOREDEMO: dirty local write: %v", err)
 	}
 	if _, err := app.Pull(f); err != nil {
-		app.Logf("STOREDEMO: pull back: %v", err)
-		exit(app, 5)
+		exitf(app, 5, "STOREDEMO: pull back: %v", err)
 	}
 	b, err := app.ReadFile(f)
 	if err != nil || !bytes.Equal(b, leven1) {
-		app.Logf("STOREDEMO: after pull %d bytes (%q), want %q", len(b), b, leven1)
-		exit(app, 6)
+		exitf(app, 6, "STOREDEMO: after pull %d bytes (%q), want %q", len(b), b, leven1)
 	}
 	// 4. List is relatief aan de eigen map: direct voer voor Pull.
 	names, err := app.StoreList("")
 	if err != nil || len(names) != 1 || names[0] != f {
-		app.Logf("STOREDEMO: list = %v (err %v), want [%s]", names, err, f)
-		exit(app, 7)
+		exitf(app, 7, "STOREDEMO: list = %v (err %v), want [%s]", names, err, f)
 	}
 	// 5. Drop, en de map is weer leeg.
 	if err := app.StoreDrop(f); err != nil {
-		app.Logf("STOREDEMO: drop: %v", err)
-		exit(app, 8)
+		exitf(app, 8, "STOREDEMO: drop: %v", err)
 	}
 	if _, err := app.Pull(f); err == nil {
-		app.Logf("STOREDEMO: object still exists after drop")
-		exit(app, 9)
+		exitf(app, 9, "STOREDEMO: object still exists after drop")
 	}
-	app.Logf("STOREDEMO OK: push/pull/list/drop round-trip verified (%d bytes)", n)
-	exit(app, 0)
+	exitf(app, 0, "STOREDEMO OK: push/pull/list/drop round-trip verified (%d bytes)", n)
 }

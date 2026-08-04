@@ -20,8 +20,7 @@ import (
 type machine struct{}
 
 // init registreert dit board. Elke HOP-binary importeert deze hop-helft
-// (cmd/hopos-lrv), dus board.Current() is meteen geldig; de basis
-// registreerde het app-contract (appboard) al in háár init.
+// (cmd/hopos, -tags licheerv), dus board.Current() is meteen geldig.
 func init() { board.Use(machine{}) }
 
 // Conformiteit compile-time bewezen: zonder deze regel leunt het Board-

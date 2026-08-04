@@ -44,7 +44,6 @@ const (
 	cfgCommand     = 0x04 // standaard type-1-header
 	cfgPrimaryBus  = 0x18 // primary/secondary/subordinate
 	cfgMemBase     = 0x20 // bridge memory base/limit
-	cfgLnkSta      = 0xbc // PCIe-cap 0xac + 0x10: LNKCTL | LNKSTA<<16
 	cfgLnkCtl2     = 0xdc // PCIe-cap 0xac + 0x30: target link speed [3:0]
 	cfgVendorSpec1 = 0x0188
 	cfgIDVal3      = 0x043c // klassecode [23:0]
@@ -260,16 +259,9 @@ func (rc *RC) postSetup2712() bool {
 	v = v&^uint32(1<<7) | 1<<13 | 1<<12 | 1<<11
 	rc.wr(miscAXIIntfCtrl, v)
 	if rc.rd(miscAXIIntfCtrl)&(1<<12) == 0 {
-		// C1-silicium: de échte QoS-fixes (bits 11/12/13, "chicken bits for
-		// 2712D0") zijn hier Reserved-0 — de kapotte QoS-forwarding-search in
-		// het AXI→SDC-pad is op C1 alleen te DEMPEN door outstanding requests
-		// te knijpen (Linux: best-effort 15). Wij knijpen harder: 4 — de
-		// outstanding-sweep van de freeze-jacht (13-07, agent-ronde 3); elke
-		// stap omlaag verkleint het race-venster van het erratum.
-		rc.mod(miscAXIIntfCtrl, 0x3f, 4)
-		fmt.Printf("brcmpcie: C1 silicon detected (QoS fix bits reserved) — AXI outstanding throttled to 4\n")
-	} else {
-		fmt.Printf("brcmpcie: D0 silicon (QoS fix bits active)\n")
+		// Silicium zonder de QoS-bits (Reserved-0): AXI-outstanding op de
+		// Linux-referentiewaarde 15 (drivers/pci/controller/pcie-brcmstb.c).
+		rc.mod(miscAXIIntfCtrl, 0x3f, 15)
 	}
 	// VDM-QoS AAN — de Pi 5-DT eist dit voor de RP1-poort (bcm2712-rpi-5-b.dts:
 	// brcm,vdm-qos-map = 0xbbaa9888; brcm_pcie_set_tc_qos). De RP1 stúúrt

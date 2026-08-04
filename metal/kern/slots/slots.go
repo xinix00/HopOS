@@ -60,64 +60,24 @@ var (
 	servicers = map[int]*servicer{}
 )
 
-// De slot-lifecycle (Start/Stop) is GESERIALISEERD en draait in een
-// DMA-stil venster — generieke semantiek, geen board-paadje: een task start
-// liever een fractie trager maar schoon in zijn eigen huisje. De fabric-brede
-// operaties van een lifecycle (imagecopy, stage-2-CleanInv, heap-zeroing en
-// TLBI's van een bootende of parkerende core) lopen zo nooit gelijktijdig
-// met elkaar óf met inbound netwerk-DMA. Aanleiding: het BCM2712-C1-erratum
-// (gemeten 2026-07-13) — maar safe-by-default is het ontwerp; silicium dat
-// zelfs dít niet trekt kopen we niet. quiesce() werkt via board.NetQuiescer
-// (optioneel): boards zonder stilzetbare NIC hebben géén venster nodig.
-var (
-	lifecycleMu   sync.Mutex
-	lastLifecycle time.Time // voor de adempauze (board.LifecyclePacer)
-)
+// De slot-lifecycle (Start/Stop) is GESERIALISEERD: één lifecycle tegelijk,
+// op elk board. Dat is een ontwerpkeuze om over te kunnen redeneren — de
+// boekhouding (partities, servicers, rotatielijsten, switch-poorten) hoeft
+// geen gelijktijdige starts en stops te overleven. Hier stond tot 04-08 óók
+// een DMA-stil venster (NIC-quiesce + pacing + drain, de BCM2712-freeze-
+// mitigaties van juli); dat is gesloopt nadat de stille doden van 02-08
+// Go-OOM bleken — of het venster ooit nodig was wordt opnieuw gemeten
+// (cpu/memlimit dicht sindsdien de OOM-route).
+var lifecycleMu sync.Mutex
 
-func quiesce(off bool) {
-	if q, ok := board.Current().(board.NetQuiescer); ok {
-		q.NetQuiesce(off)
-	}
-}
-
-// drain laat na het sluiten van het venster de in-flight DMA landen: RX uit
-// stopt níeuwe transacties, maar posted writes die al in de pijp zitten
-// (NIC→fabric→DRAM) landen vlak daarna nog. Twee milliseconden is ruim voor
-// elke pijpdiepte — generieke silicium-hygiëne, geen board-specifiek pad.
-func drain() { time.Sleep(2 * time.Millisecond) }
-
-// coopSched meldt of de node-runtime tijdens een plaatsing coöperatief mag
-// afgeven — grote geheugenops in brokken met een runtime.Gosched ertussen.
-// WAAR op boards zónder DMA-stil venster (Altra/QEMU): daar draait de hele node
-// op één core (GOMAXPROCS=1), dus een ononderbroken asm-veeg over de hele
-// partitie (96MB × 127 loaders ≈ 12s gemeten) verhongert de netstack, /health,
-// de switch en de heartbeat. Afgeven ís op één core de concurrency (het Go-idee).
-// ONWAAR op een NetQuiescer (Pi, C1-erratum): dat houdt zijn strikte,
-// ononderbroken venster — en doet ook geen 127-plaatsings-storm. Eén keer
-// bepaald; het board wisselt niet na boot.
-var (
-	coopSchedOnce sync.Once
-	coopSchedVal  bool
-)
-
-func coopSched() bool {
-	coopSchedOnce.Do(func() {
-		_, isQuiescer := board.Current().(board.NetQuiescer)
-		coopSchedVal = !isQuiescer
-	})
-	return coopSchedVal
-}
-
-// coopCleanInv veegt [addr,addr+size) net als dev.CleanInv, maar op coöperatieve
-// boards (coopSched) in brokken van 4MB met een yield ertussen: zo blijft core 0
-// tijdens een plaatsings-storm de netstack/health/switch bedienen i.p.v. één
-// ononderbroken veeg. Zelfde bytes, alleen coöperatief. Aanroepen wanneer het
-// slot niet aan de switch hangt (de partitie wordt zo meteen toch overschreven).
+// coopCleanInv veegt [addr,addr+size) net als dev.CleanInv, maar in brokken
+// van 4MB met een yield ertussen: de hele node draait op één core
+// (GOMAXPROCS=1), dus een ononderbroken asm-veeg over een partitie (96MB ×
+// 127 loaders ≈ 12s gemeten) verhongert de netstack, /health, de switch en
+// de heartbeat. Afgeven ís op één core de concurrency (het Go-idee).
+// Aanroepen wanneer het slot niet aan de switch hangt (de partitie wordt zo
+// meteen toch overschreven).
 func coopCleanInv(addr, size uintptr) {
-	if !coopSched() {
-		dev.CleanInv(addr, size)
-		return
-	}
 	const chunk = 4 << 20
 	for size > 0 {
 		n := size
@@ -131,40 +91,19 @@ func coopCleanInv(addr, size uintptr) {
 	}
 }
 
-// pace wacht (onder lifecycleMu, mét RX aan) tot de board-adempauze sinds de
-// vorige lifecycle verstreken is, en stempelt het nieuwe beginmoment.
-func pace() {
-	if p, ok := board.Current().(board.LifecyclePacer); ok {
-		if d := p.LifecyclePace() - time.Since(lastLifecycle); d > 0 {
-			time.Sleep(d)
-		}
-	}
-	lastLifecycle = time.Now()
-}
-
-// lifecycleWindow opent het DMA-stille lifecycle-venster: geserialiseerd
-// (lifecycleMu), gepaced, NIC gequiesced en de in-flight DMA gedraineerd. De
-// teruggegeven closer heropent in omgekeerde volgorde — gebruik als
+// lifecycleWindow serialiseert een lifecycle (zie lifecycleMu). De vorm met
+// een closer is gebleven zodat de drie aanroepers (Start, StartStaged, Stop)
+// identiek blijven aan de venster-tijd — gebruik als
 //
 //	defer lifecycleWindow()()
-//
-// zodat het venster op élk pad (ook errors) weer opent. Eén definitie voor
-// Start, StartStaged en Stop: het trio lock+pace+quiesce+drain kan niet meer
-// per pad uit de pas lopen.
 func lifecycleWindow() func() {
 	lifecycleMu.Lock()
-	pace()
-	quiesce(true)
-	drain()
-	return func() {
-		quiesce(false)
-		lifecycleMu.Unlock()
-	}
+	return lifecycleMu.Unlock
 }
 
 // prepStart valideert de pure job-invoer van een slot-start — alles wat geen
-// lock of stille hardware nodig heeft — VÓÓR het lifecycle-venster: een
-// kapotte job opent het venster nooit, en het DMA-stille venster zelf blijft
+// lock nodig heeft — VÓÓR het lifecycle-venster: een kapotte job opent het
+// venster nooit, en het geserialiseerde venster zelf blijft
 // zo kort mogelijk. Eén definitie voor Start én StartStaged (het was ~45
 // regels letterlijke duplicatie op een ABI-kritisch pad). Geeft de
 // mount-tabel, de env-blob en het genormaliseerde core-aantal terug.
@@ -180,8 +119,11 @@ func prepStart(i int, memLimit uint64, cores int, env map[string]string, mounts 
 	if mtab, err = mountTable(mounts); err != nil {
 		return nil, nil, 0, err
 	}
-	if memLimit == 0 {
-		return nil, nil, 0, fmt.Errorf("memLimit 0 ongeldig")
+	// Minimum-maat hier, niet pas bij de allocatie: een partitie moet naast de
+	// ABI-staart app-RAM overhouden (dekt ook memLimit 0) — één toets voor
+	// Start én StartStaged.
+	if _, err := appRAMSize(align2M(memLimit)); err != nil {
+		return nil, nil, 0, err
 	}
 	// SMP (fase 5): cores ≥ 1. cores > 1 = één app over meerdere cores met
 	// een gedeelde heap op de partitie van dít slot; de OS-laag vraagt de
@@ -519,6 +461,19 @@ func dispatchCore(core int, entry, ctx uint64) error {
 	return cageDispatch(core, entry, ctx)
 }
 
+// pollUntil polt cond elke 10ms tot hij waar wordt, begrensd door timeout —
+// het vaste wachtpatroon van de slotlaag (stop/ready/ctx-dood).
+func pollUntil(timeout time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
 // waitSlotQuiet wacht tot slot i géén werk meer doet — en dat is niet hetzelfde
 // als "de core staat stil". Op een architectuur waar de app zich dood MELDT (de
 // exit-trap naar HOP's switcher, cpu/mmode) blijft het hart daarna voor zijn
@@ -528,30 +483,19 @@ func dispatchCore(core int, entry, ctx uint64) error {
 // Beide accepteren, want anders wacht de dedicated Stop-weg op RISC-V áltijd de
 // volle timeout vol: de bewoner is al dood terwijl het hart nog draait.
 func waitSlotQuiet(i, core int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	return pollUntil(timeout, func() bool {
 		if coreStopped(core) {
 			return true
 		}
-		if st := ctxState(i); st == layout.CtxDead || st == layout.CtxEmpty {
-			return true
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return false
+		st := ctxState(i)
+		return st == layout.CtxDead || st == layout.CtxEmpty
+	})
 }
 
 // waitStopped polt tot core echt stilstaat (geparkeerd of in reset — wat op deze
 // architectuur "gestopt" betekent, zie de kooi-naad).
 func waitStopped(core int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if coreStopped(core) {
-			return true
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return false
+	return pollUntil(timeout, func() bool { return coreStopped(core) })
 }
 
 // Status van een slot zoals HOP het ziet.
@@ -563,7 +507,6 @@ type Status struct {
 	RAMSize   uint64 // door de app gerapporteerde (gepatchte) RAM-maat
 	MemSys    uint64 // werkelijke draw: MemStats.Sys van de app (0 = nog niet gemeld)
 	IdleTicks uint64 // ruwe idle-tik-teller (CtrlIdle; bij SMP gedeeld door de cores)
-	Wakes     uint64 // ruwe wek-teller (CtrlWakes): idle-rondes van de app-scheduler
 	Cores     uint64 // aantal cores van het slot (CtrlCores; 0 = geen SMP-veld gezet)
 	Shared    bool   // deelt zijn core met een medebewoner (CtrlShared, door HOP gezet)
 
@@ -630,9 +573,9 @@ func (d devReaderAt) ReadAt(p []byte, off int64) (int, error) {
 // image is een in-memory slice — de ingebakken apploader (StartLoader) of een
 // Pi-demo-image — GÉÉN io.Reader/download-body meer: de app downloadt zijn eigen
 // image zelf (apploader → StartStaged). Zo leest core 0 hier nooit van het
-// netwerk terwijl de NIC gequiesced is (dat gaf een deadlock — finding #3) en
-// buffert de kern nooit 127 downloads tegelijk. De blob is gedeeld (ingebakken),
-// dus dev.Copy hieronder alloceert niets per start.
+// netwerk binnen het geserialiseerde venster en buffert de kern nooit 127
+// downloads tegelijk. De blob is gedeeld (ingebakken), dus dev.Copy hieronder
+// alloceert niets per start.
 //
 // mounts is de volume-tabel (shared path → local path, HOP's Job.Volumes): de
 // task ziet zijn eigen lege root plus de gemounte shared dirs. ports (HOP's
@@ -670,19 +613,9 @@ func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]
 			grantRelease(i)
 		}
 	}()
-	// size/appRAM worden hieronder OPNIEUW gezet uit wat partAlloc werkelijk
-	// reserveerde: de kooi van dit board kan een grotere korrel eisen dan 2MB, en
-	// dan is dít getal niet de partitie. Hier alleen om de invoer te valideren.
-	size := align2M(memLimit)
-	appRAM, err := appRAMSize(size)
-	if err != nil {
-		return err
-	}
-	// Eén lifecycle tegelijk, in een DMA-stil venster: de defer dekt álle
-	// paden — op quiescer-boards sluit het venster pas na de WaitReady
-	// onderaan placeFromStaging, zodat ook de app-boot (heap-zeroing)
-	// erbinnen valt. t0 meet de venster-tijd: dít is wat de convoy bij een
-	// storm serialiseert, dus dit hoort zichtbaar te zijn op een headless node.
+	// Eén lifecycle tegelijk: de defer dekt álle paden. t0 meet de
+	// venster-tijd: dít is wat de convoy bij een storm serialiseert, dus dit
+	// hoort zichtbaar te zijn op een headless node.
 	defer lifecycleWindow()()
 	t0 := time.Now()
 	// De EL2-vectoren + parkeerlus + mailboxen moeten klaar zijn vóór de
@@ -729,7 +662,8 @@ func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]
 	}
 	// De maat die de allocator ÉCHT gaf — één bron van waarheid voor de kooi, de
 	// ABI-staart, de ringen en de RAM-declaratie van de app. Zie partAlloc.
-	if appRAM, err = appRAMSize(size); err != nil {
+	appRAM, err := appRAMSize(size)
+	if err != nil {
 		return err
 	}
 	// Eén regel per plaatsing: op een headless node is dít hoe je ziet wáár
@@ -764,7 +698,7 @@ func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]
 	// gedeelde contract met de apploader), zodat de laag geplaatste segmenten
 	// er niet mee botsen; de net-ring dáárboven (de partitie-staart) blijft
 	// vrij. Eén dev.Copy van de gedeelde in-memory blob — geen
-	// per-start-allocatie, geen netwerk (finding #3).
+	// per-start-allocatie, geen netwerk.
 	addr, _, fits := layout.StageAddr(base, appRAM, imgSize)
 	if !fits {
 		return fmt.Errorf("image %d bytes past niet in partitie %d MB (app-RAM %d MB)", imgSize, size>>20, appRAM>>20)
@@ -863,9 +797,9 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 	if err != nil {
 		return err
 	}
-	if max := maxLimitFor(linkBase); memLimit > max {
-		return fmt.Errorf("memLimit %d MB > %d MB slot-cap (één GB-blok vanaf linkadres %#x, geklemd onder CtrlBase; groter vergt vensteruitbreiding — zie slots/partmem.go)", memLimit>>20, max>>20, linkBase)
-	}
+	// De slot-cap (maxLimitFor) toetst armSlot — die dekt óók het
+	// zelfplaats-pad; segmenten voor een te grote job schuiven dan één keer
+	// voor niets, maar het faalpad is identiek (de partitie komt terug).
 	delta := base - linkBase // PA = linkadres + delta (identiek slot: 0)
 
 	// Het plan uitvoeren, device→device (dev.Move, kleine stack-buffer — geen
@@ -929,7 +863,7 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 			entry, linkBase, linkBase+window)
 	}
 	if max := maxLimitFor(linkBase); memLimit > max {
-		return fmt.Errorf("memLimit %d MB > %d MB slot-cap (één GB-blok vanaf linkadres %#x)", memLimit>>20, max>>20, linkBase)
+		return fmt.Errorf("memLimit %d MB > %d MB slot-cap (één GB-blok vanaf linkadres %#x, geklemd onder CtrlBase; groter vergt vensteruitbreiding — zie slots/partmem.go)", memLimit>>20, max>>20, linkBase)
 	}
 
 	// SPSC-hygiëne: geen oude servicer meer op deze ringen vóór her-init,
@@ -1057,18 +991,10 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 
 	go registerServicer(i, root, job, mtab).run()
 
-	// Alleen op boards met een écht DMA-stil venster (NetQuiescer — de
-	// C1-erratum-familie) wachten we hier tot de app READY meldt: dáár hoort
-	// ook de app-boot (heap-zeroing, TLBI's) binnen het venster te vallen.
-	// Overal anders is quiesce een no-op en zou dit de geserialiseerde
-	// lifecycle tot 3s per start vasthouden — bij 127 slots een convoy van
-	// minuten (Altra-meting 15-07). Daar boot de app parallel verder; wie
-	// READY nodig heeft pollt WaitReady zelf. Best-effort deadline: een app
-	// die láng doet over z'n init houdt de lifecycle ook op de Pi niet eeuwig
-	// vast.
-	if _, ok := board.Current().(board.NetQuiescer); ok {
-		_ = WaitReady(i, 3*time.Second)
-	}
+	// De app boot vanaf hier parallel verder op zijn eigen core; wie READY
+	// nodig heeft pollt WaitReady zelf. In de lifecycle wachten zou bij een
+	// plaatsings-storm een convoy maken — bij 127 slots minuten
+	// (Altra-meting 15-07).
 	return nil
 }
 
@@ -1217,15 +1143,13 @@ func Stop(i int, timeout time.Duration) error {
 	if err := checkSlot(i); err != nil {
 		return err
 	}
-	// Eén lifecycle tegelijk, in een DMA-stil venster: ook de coöperatieve
-	// kill parkeert een core — gemeten (13-07, torture): kill+park naast
-	// lopende RX-DMA is dodelijk op C1. De kill-flag hoort BINNEN het venster:
-	// een vroege write buiten het lock (probeersel 15-07) racete met een
-	// parallelle Start op hetzelfde slot en landde dan op de nét geveegde
-	// ctrl-page van de VOLGENDE huurder — die exitte braaf binnen 50ms
-	// ("apploader exited before staging", de ronde-10-cascade). Sinds de
-	// I$-fix gehoorzamen apps de kill in ~50ms, dus ook een delete-storm is
-	// binnen het venster snel: ~200ms per stop i.p.v. de oude 10s-timeouts.
+	// De kill-flag hoort BINNEN het lifecycle-lock: een vroege write buiten
+	// het lock (probeersel 15-07) racete met een parallelle Start op
+	// hetzelfde slot en landde dan op de nét geveegde ctrl-page van de
+	// VOLGENDE huurder — die exitte braaf binnen 50ms ("apploader exited
+	// before staging", de ronde-10-cascade). Apps gehoorzamen de kill in
+	// ~50ms (sinds de I$-fix), dus ook een delete-storm blijft snel: ~200ms
+	// per stop i.p.v. de oude 10s-timeouts.
 	defer lifecycleWindow()()
 	ctrlWrite(i, layout.CtrlKill, 1)
 	dev.MB()
@@ -1384,8 +1308,9 @@ func releaseSlot(i int, freePartition bool) {
 var diagMu sync.Mutex
 
 // lastWords bewaart per slot de status van vlak vóór het vrijgeven van zijn
-// partitie — HOP's post-mortem. Lazy gedimensioneerd (poolInit). Onder diagMu.
-var lastWords []Status
+// partitie — HOP's post-mortem. Zelfde vaste vorm als lastLog en
+// cageIdentCache (SlotCap is de harde kooi-bovengrens). Onder diagMu.
+var lastWords [layout.SlotCap + 1]Status
 
 // drainLastWords leest wat er nog in de outbox van slot i staat en bewaart de
 // laatste logregel. Alleen aanroepen ná evictServicer (SPSC: één consumer).
@@ -1437,9 +1362,6 @@ func snapshot(i int) {
 	}
 	diagMu.Lock()
 	defer diagMu.Unlock()
-	if lastWords == nil {
-		lastWords = make([]Status, layout.MaxSlots+1)
-	}
 	if live {
 		lastWords[i] = st
 	}
@@ -1453,11 +1375,8 @@ func Get(i int) Status {
 		return Status{}
 	}
 	if _, _, ok := abiOf(i); !ok {
-		var st Status
 		diagMu.Lock()
-		if i < len(lastWords) {
-			st = lastWords[i]
-		}
+		st := lastWords[i] // checkSlot hierboven begrensde i al
 		diagMu.Unlock()
 		// CoreOn blijft wél live: het ctx-blok is HOP-privé en overleeft de
 		// partitie, dus "leeft dit slot nog" hoort geen bewaarde waarde te zijn.
@@ -1483,7 +1402,6 @@ func liveStatus(i int) Status {
 		RAMSize:   ctrlRead(i, layout.CtrlRAMSize),
 		MemSys:    ctrlRead(i, layout.CtrlMemSys),
 		IdleTicks: ctrlRead(i, layout.CtrlIdle),
-		Wakes:     ctrlRead(i, layout.CtrlWakes),
 		Cores:     ctrlRead(i, layout.CtrlCores),
 		Shared:    ctrlRead(i, layout.CtrlShared) != 0,
 		FaultVec:  ctrlRead(i, layout.CtrlFaultVec),
@@ -1551,14 +1469,10 @@ func WaitReady(i int, timeout time.Duration) error {
 	if err := checkSlot(i); err != nil {
 		return err
 	}
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if ctrlRead(i, layout.CtrlStatus) == layout.StatusReady {
-			return nil
-		}
-		time.Sleep(10 * time.Millisecond)
+	if !pollUntil(timeout, func() bool { return ctrlRead(i, layout.CtrlStatus) == layout.StatusReady }) {
+		return fmt.Errorf("slot %d not ready within %v", i, timeout)
 	}
-	return fmt.Errorf("slot %d not ready within %v", i, timeout)
+	return nil
 }
 
 // Logs geeft het logkanaal van de actieve servicer van slot i (gevuld uit de

@@ -92,8 +92,9 @@ slots:
 begin:
 	# Scratch-adres: HOP zet het per slot (layout.AbiStubOff, in de ABI-staart van
 	# de partitie), want ná stap 3 mag dit hart niets buiten zijn kooi meer
-	# aanraken — en de control page is van de app. Nul = de losse demo
-	# (cmd/hopos-lrv), die de vaste MBOX gebruikt.
+	# aanraken — en de control page is van de app. Nul → de vaste MBOX: het
+	# terugvalpad van de gesloopte pre-agent-demo (04-08), bewust intact gelaten
+	# als vangnet voor een lege tabel.
 	la	s10, slots
 	li	s9, MBOX
 	ld	t0, 96(s10)

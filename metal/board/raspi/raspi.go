@@ -227,9 +227,6 @@ func nanotime() int64 {
 	return ARM64.GetTime()
 }
 
-// mpidr leest MPIDR_EL1 (cpu_arm64.s).
-func mpidr() uint64
-
 // MPIDR geeft het rauwe register; de nummering (aff0 op de A72, aff1 op de
 // A76) is boardspecifiek — zie CoreID in het board-pakket.
-func MPIDR() uint64 { return mpidr() }
+func MPIDR() uint64 { return dev.MPIDR() }

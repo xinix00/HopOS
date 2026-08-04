@@ -573,7 +573,7 @@ func statusText(status int) string {
 		return "Not Found"
 	case StatusMethodNotAllowed:
 		return "Method Not Allowed"
-	case StatusLengthRequired:
+	case 411:
 		return "Length Required"
 	case StatusRequestEntityTooLarge:
 		return "Request Entity Too Large"

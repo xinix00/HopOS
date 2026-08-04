@@ -23,15 +23,11 @@ import (
 // directe slice geven een alignment fault (gemeten 2026-07-13, EL1 exception
 // in slicebytetostring). Dus: uitgelijnde 32-bit reads (4 bytes per read
 // i.p.v. 1), daarna parsen op de RAM-kopie. ACPI-tabellen zijn klein (KB's).
+// pa is altijd 4-uitgelijnd: élke aanroep zit achter plausiblePA, die
+// ongelijnde adressen weigert.
 func mem(pa uintptr, length int) []byte {
 	out := make([]byte, length)
 	i := 0
-	// Kop tot de eerste 4-byte-grens.
-	for i < length && (pa+uintptr(i))&3 != 0 {
-		p := pa + uintptr(i)
-		out[i] = byte(dev.Read32(p&^3) >> (8 * (p & 3)))
-		i++
-	}
 	// Volle woorden.
 	for ; i+4 <= length; i += 4 {
 		w := dev.Read32(pa + uintptr(i))

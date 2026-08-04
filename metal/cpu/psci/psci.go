@@ -1,6 +1,6 @@
 // Package psci bevat de gedeelde PSCI/SMCCC-primitieven (ARM DEN 0022): de
 // functie-ID's, de return-codes, de conduit-stub (SMC #0) en de dunne
-// call-wrappers (Version/On/Off/AffinityInfo). Eén bron van waarheid — een
+// call-wrappers (Version/On/AffinityInfo). Eén bron van waarheid — een
 // verkeerde functie-ID of return-code hoort maar op één plek te leven, niet
 // per board hergedefinieerd (dat stond hij, in drie stijlen; opgeruimd 18-07).
 //
@@ -15,27 +15,14 @@ package psci
 
 // SMCCC/PSCI function IDs (64-bit calling convention).
 const (
-	CPU_OFF       uint64 = 0x84000002
 	CPU_ON        uint64 = 0xC4000003
 	AFFINITY_INFO uint64 = 0xC4000004
 	VERSION       uint64 = 0x84000000
 )
 
-// AFFINITY_INFO-resultaten.
-const (
-	AffinityOn        = 0
-	AffinityOff       = 1
-	AffinityOnPending = 2
-)
-
-// PSCI return codes.
-const (
-	SUCCESS        = 0
-	NOT_SUPPORTED  = -1
-	INVALID_PARAMS = -2
-	DENIED         = -3
-	ALREADY_ON     = -4
-)
+// PSCI return codes (alleen wat we zelf teruggeven; succes = 0 leeft als
+// board.PSCISuccess bij zijn lezers).
+const INVALID_PARAMS = -2
 
 // Version geeft (major, minor) van de PSCI-provider.
 func Version() (major, minor uint16) {
@@ -50,12 +37,8 @@ func On(target, entry, ctx uint64) int64 {
 	return int64(SMC(CPU_ON, target, entry, ctx))
 }
 
-// Off zet de AANROEPENDE core uit (PSCI kent geen remote CPU_OFF). Keert bij
-// succes nooit terug.
-func Off() int64 { return int64(SMC(CPU_OFF, 0, 0, 0)) }
-
-// AffinityInfo geeft de powertoestand van een core (MPIDR-target;
-// AffinityOn/Off/OnPending).
+// AffinityInfo geeft de powertoestand van een core (MPIDR-target; de
+// betekenis van het resultaat leeft als board.PowerState).
 func AffinityInfo(target uint64) int64 {
 	return int64(SMC(AFFINITY_INFO, target, 0, 0))
 }

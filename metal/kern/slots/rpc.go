@@ -120,6 +120,18 @@ func ok(req hopabi.Req, size uint64, data []byte) []byte {
 	return hopabi.EncodeResp(hopabi.Resp{Op: req.Op, Seq: req.Seq, Size: size, Data: data})
 }
 
+// listResp bouwt de respons van een List-op (fs én store): namen gejoind met
+// "\n", begrensd op één ring-record — zonder cap wedget een grote dir de
+// servicer permanent (de write-lus herprobeert eeuwig). Geen paginatie in de
+// ABI, dus: te groot → nette fout i.p.v. hang.
+func listResp(req hopabi.Req, names []string) []byte {
+	data := []byte(strings.Join(names, "\n"))
+	if len(data) > hopabi.MaxChunk {
+		return fail(req, fmt.Errorf("list %q: %d bytes > max %d (too many entries)", req.Path, len(data), hopabi.MaxChunk))
+	}
+	return ok(req, uint64(len(names)), data)
+}
+
 // handle voert één hop-ABI-request uit (aangeroepen door de servicer-lus).
 func (s *servicer) handle(payload []byte) []byte {
 	req, err := hopabi.DecodeReq(payload)
@@ -180,14 +192,7 @@ func (s *servicer) handle(payload []byte) []byte {
 		if err != nil {
 			return fail(req, err)
 		}
-		data := []byte(strings.Join(names, "\n"))
-		// De respons moet in één ring-record passen; zonder cap wedget een grote
-		// dir de servicer permanent (de write-lus herprobeert eeuwig). Geen
-		// paginatie in de ABI, dus: te groot → nette fout i.p.v. hang.
-		if len(data) > hopabi.MaxChunk {
-			return fail(req, fmt.Errorf("list %q: %d bytes > max %d (te veel entries)", req.Path, len(data), hopabi.MaxChunk))
-		}
-		return ok(req, uint64(len(names)), data)
+		return listResp(req, names)
 
 	case hopabi.OpRemove:
 		rp, err := s.resolve(req.Path)
@@ -238,4 +243,3 @@ func oversizeResp(reqPayload []byte) []byte {
 		Data: []byte("respons te groot voor de ring"),
 	})
 }
-

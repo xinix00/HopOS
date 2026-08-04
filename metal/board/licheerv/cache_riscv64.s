@@ -25,8 +25,3 @@ cipa_loop:
 	BLT	A0, A1, cipa_loop
 	WORD	$0x01b0000b	// th.sync.is
 	RET
-
-// func Fence()
-TEXT ·Fence(SB),NOSPLIT|NOFRAME,$0
-	FENCE
-	RET

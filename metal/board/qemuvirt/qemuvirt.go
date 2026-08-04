@@ -103,14 +103,11 @@ func nanotime() int64 {
 	return ARM64.GetTime()
 }
 
-// mpidr leest MPIDR_EL1 (cpu_arm64.s).
-func mpidr() uint64
-
 // CoreID geeft de eigen core-index (MPIDR aff0; op virt 0..11). Voor een
 // app-core is dit tevens het slotnummer — de enige identiteitsbron die
 // onafhankelijk is van het linkadres (images zijn canoniek gelinkt en
 // draaien via de stage-2-vertaling op elk slot).
-func CoreID() int { return int(mpidr() & 0xFF) }
+func CoreID() int { return int(dev.MPIDR() & 0xFF) }
 
 // MemTotal geeft het bij boot (hwinit1) gedetecteerde DRAM (0 = onbekend) —
 // accessor voor de hop-helft (board.Board.MemTotal).

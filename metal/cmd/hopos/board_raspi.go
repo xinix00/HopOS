@@ -35,9 +35,9 @@ var ramSize uint = raspi.HopKernelSize
 func init() {
 	dtb := raspi.DTB()
 
-	// Hardware-watchdog vroeg (freeze-jacht 13-07): ook een hangende boot
-	// reset-cyclet zichzelf tot een boot slaagt. Uit met hopos.wd=off (géén
-	// rebuild): voor een JTAG-postmortem moet een bevroren node blijven stáán.
+	// Hardware-watchdog vroeg: ook een hangende boot reset-cyclet zichzelf
+	// tot een boot slaagt. Uit met hopos.wd=off (géén rebuild): voor een
+	// JTAG-postmortem moet een bevroren node blijven stáán.
 	if raspi.BootParam(dtb, "hopos.wd") != "off" {
 		raspi.WatchdogStart(12 * time.Second)
 	}

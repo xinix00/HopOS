@@ -17,7 +17,6 @@ type Board interface {
 
 	// PSCI power-control (return: PSCISuccess of een foutcode).
 	CPUOn(core, entry, ctx uint64) int64
-	CPUOff() int64
 	AffinityInfo(core uint64) PowerState
 	PSCIVersion() (major, minor uint16)
 

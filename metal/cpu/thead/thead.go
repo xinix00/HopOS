@@ -40,12 +40,6 @@ const (
 
 	// PABits is de fysieke adresbreedte die een deny-all moet dekken.
 	PABits = 40
-
-	// PMPGrain is de korrel die PMP aanhoudt. Bij een korrel > 4 bytes leest het
-	// silicium de onderste bits van pmpaddr als nul, dus een grens die daar niet
-	// op valt dekt stil een ánder bereik — precies de klasse fout die een kooi
-	// lek maakt. kern/cage eist hem daarom expliciet.
-	PMPGrain = 0x1000
 )
 
 // De uitgebreide PTE-attributen. Bit 61/62 bestaan NIET in de RISC-V-spec: het

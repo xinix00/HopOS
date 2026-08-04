@@ -471,9 +471,6 @@ func RNGSource() string { return drbg.Source() }
 //go:linkname getRandomData runtime/goos.GetRandomData
 func getRandomData(b []byte) { drbg.Read(b) }
 
-// mpidr leest MPIDR_EL1 (cpu_arm64.s).
-func mpidr() uint64
-
 // CoreID geeft de eigen core-index: de plek van het eigen MPIDR in de
 // MADT-volgorde (dé platform-nummering; de Altra nummert via aff1/aff2).
 // Vóór de ACPI-parse is alleen de boot-core actief → 0.

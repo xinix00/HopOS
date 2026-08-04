@@ -155,13 +155,6 @@ func cageLinkBase() uint64 { return uint64(layout.SlotBase(1)) }
 // adresruimte die de stage-2 voor dit slot beschrijft.
 func cageLinkWindow(size uint64) uint64 { return uint64(layout.SlotStride) }
 
-// cageGrain/cageBaseAlign: wat de kooi van een partitie eist. Een stage-2-tabel
-// beschrijft élk 2MB-uitgelijnd bereik, dus hier is er niets bovenop de korrel
-// die partAlloc al aanhoudt. De naad bestaat omdat dat op andere architecturen
-// niet zo is.
-func cageGrain(size uint64) uint64     { return size }
-func cageBaseAlign(size uint64) uint64 { return part2M }
-
 // cageIdent: op ARM is er niets te melden dat HOP niet al weet. De CPU-identiteit
 // staat hier niet achter de kooi-naad — HOP leest MIDR/MPIDR van elke core zelf
 // via de board-laag, en app-cores zijn dezelfde cores.

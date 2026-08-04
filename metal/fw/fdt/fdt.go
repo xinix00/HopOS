@@ -171,7 +171,7 @@ func MemRegions(base uintptr) ([]Region, bool) {
 			for p < end && dev.Read8(p) != 0 {
 				p++
 			}
-			inMemNode = depth == 2 && isMemory(name, p)
+			inMemNode = depth == 2 && nameIs(name, p, "memory", true)
 			p = align4(p + 1)
 		case tokEnd:
 			inMemNode = false
@@ -394,22 +394,6 @@ func BlobSize(base uintptr) uint64 {
 
 func align4(a uintptr) uintptr { return (a + 3) &^ 3 }
 
-// isMemory meldt of de node-naam in [start,end) "memory" of "memory@..." is.
-func isMemory(start, end uintptr) bool {
-	const want = "memory"
-	if end-start < uintptr(len(want)) {
-		return false
-	}
-	for i := 0; i < len(want); i++ {
-		if dev.Read8(start+uintptr(i)) != want[i] {
-			return false
-		}
-	}
-	// Exact "memory" of gevolgd door '@' (unit-address).
-	next := start + uintptr(len(want))
-	return next == end || dev.Read8(next) == '@'
-}
-
 // propIs vergelijkt een null-getermineerde string in de strings-block met s,
 // begrensd tot end: een string die tot buiten de blob zou reiken is geen
 // match (de end-check short-circuit vóór elke dev.Read8 → geen OOB-read).
@@ -428,7 +412,6 @@ func propIs(addr, end uintptr, s string) bool {
 // runtime meer die er via de mailbox één kan alloceren.
 type FB struct {
 	Base          uint64
-	Size          uint64
 	Width, Height uint32
 	Stride        uint32
 	BPP           int // 32 (a8r8g8b8/x8r8g8b8) of 16 (r5g6b5)
@@ -451,7 +434,6 @@ func Framebuffer(base uintptr) (FB, bool) {
 	inChosen := false // depth 2: "chosen"
 	inFB := false     // depth 3: "framebuffer@..." onder chosen
 	addrCells := uint32(2)
-	sizeCells := uint32(1)
 	var fb FB
 	fb.BPP = 32 // default; alleen r5g6b5 maakt er 16 van
 
@@ -501,32 +483,21 @@ func Framebuffer(base uintptr) (FB, bool) {
 				continue
 			}
 			sEnd := h.stringsEnd
-			if depth == 1 && plen == 4 {
-				if propIs(np, sEnd, "#address-cells") {
-					addrCells = be32(data)
-				} else if propIs(np, sEnd, "#size-cells") {
-					sizeCells = be32(data)
-				}
+			if depth == 1 && plen == 4 && propIs(np, sEnd, "#address-cells") {
+				addrCells = be32(data)
 			}
 			if !inFB {
 				continue
 			}
 			switch {
 			case propIs(np, sEnd, "reg"):
-				if addrCells == 0 || addrCells > 2 || sizeCells == 0 || sizeCells > 2 ||
-					uintptr(plen) < uintptr(addrCells+sizeCells)*4 {
+				if addrCells == 0 || addrCells > 2 || uintptr(plen) < uintptr(addrCells)*4 {
 					continue
 				}
 				if addrCells == 1 {
 					fb.Base = uint64(be32(data))
 				} else {
 					fb.Base = be64(data)
-				}
-				szOff := uintptr(addrCells) * 4
-				if sizeCells == 1 {
-					fb.Size = uint64(be32(data + szOff))
-				} else {
-					fb.Size = be64(data + szOff)
 				}
 			case propIs(np, sEnd, "width") && plen == 4:
 				fb.Width = be32(data)

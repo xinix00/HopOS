@@ -12,7 +12,6 @@ import "fmt"
 
 import (
 	"net"
-	"time"
 
 	gnet "github.com/usbarmory/go-net"
 
@@ -55,27 +54,6 @@ func NetFromLease(l dhcp.Lease) NetConfig {
 // false als er (nog) geen verkregen lease is.
 type LeaseHolder interface {
 	DHCPLease() (dhcp.Lease, bool)
-}
-
-// NetQuiescer wordt optioneel geïmplementeerd door boards waarvan de NIC-DMA
-// tijdelijk stilgezet moet kunnen worden rond fabric-gevoelige vensters
-// (metal/kern/slots: Start/Stop). Aanleiding: het BCM2712-C1-erratum (kapotte
-// QoS-forwarding-search in het AXI→SDC-pad, alleen in D0-silicium gefixt) —
-// inbound RX-DMA botst daar kansgedreven met de cache/TLBI-stormen van een
-// slot-levenscyclus, met een totale stille SoC-freeze als gevolg (gemeten
-// 2026-07-13). Gedropte frames tijdens het venster zijn gewoon Ethernet:
-// TCP zendt opnieuw. Boards zonder dit probleem implementeren het niet.
-type NetQuiescer interface {
-	NetQuiesce(off bool)
-}
-
-// LifecyclePacer wordt optioneel geïmplementeerd door boards die een
-// minimale adempauze tussen opeenvolgende slot-lifecycles (Start/Stop)
-// willen — dezelfde C1-familie als NetQuiescer: hoe verder de fabric-brede
-// operaties uit elkaar liggen, hoe kleiner de botskans van het erratum.
-// Boards zonder pauze-behoefte implementeren het niet (pace 0).
-type LifecyclePacer interface {
-	LifecyclePace() time.Duration
 }
 
 // Het ECAM/MMIO-adresplan van een board is pcie.Window: het type woont bij

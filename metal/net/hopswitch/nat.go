@@ -240,12 +240,21 @@ func Publish(proto string, nodePort uint16, slot int, slotPort uint16) error {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	for _, e := range pubs {
-		if e.proto == p && e.nodePort == nodePort {
-			return fmt.Errorf("publish: %s/%d al gepubliceerd (slot %d)", proto, nodePort, e.slot)
-		}
+	if e := pubByNodePortLocked(p, nodePort); e != nil {
+		return fmt.Errorf("publish: %s/%d al gepubliceerd (slot %d)", proto, nodePort, e.slot)
 	}
 	pubs = append(pubs, pub{proto: p, nodePort: nodePort, slot: slot, slotPort: slotPort})
+	return nil
+}
+
+// pubByNodePortLocked vindt de publicatie op (proto, nodePort), of nil (mu
+// vast) — dé lookup van elk pad dat een node-poort binnenkrijgt.
+func pubByNodePortLocked(proto byte, nodePort uint16) *pub {
+	for j := range pubs {
+		if pubs[j].proto == proto && pubs[j].nodePort == nodePort {
+			return &pubs[j]
+		}
+	}
 	return nil
 }
 
@@ -415,18 +424,51 @@ func natInbound(f []byte) bool {
 	if srcIP != 0 && f[6]&1 == 0 {
 		learnLocked(srcIP, f[6:12])
 	}
+	// Niet aan het node-IP gericht → niet van ons (de HOP-stack mag hem hebben).
+	// Eén keer hier, voor béíde takken.
+	if binary.BigEndian.Uint32(ip[16:]) != uplink.ip {
+		return false
+	}
 	if replyInLocked(f, ip, l4, proto) {
 		return true
 	}
 	return dnatInLocked(f, ip, l4, proto)
 }
 
+// dnatToSlotLocked is de gedeelde staart van élk NAT-pad richting een app
+// (reply-in, DNAT-in en de twee hairpin-helften): bestemming herschrijven naar
+// het slot — dst-IP, IP-checksum, L4-dst-poort (+checksum) — dan de MAC's en
+// bezorging in de ring van dat slot (mu vast).
+func dnatToSlotLocked(slot int, f, ip, l4 []byte, proto byte, oldIP, newIP uint32, oldPort, newPort uint16) {
+	binary.BigEndian.PutUint32(ip[16:], newIP)
+	fixCsum32(ip[10:], oldIP, newIP)
+	rewriteL4(l4, proto, 2, oldIP, newIP, oldPort, newPort)
+	mac := layout.SlotMAC(slot)
+	copy(f[0:6], mac[:])
+	copy(f[6:12], hostMAC[:])
+	deliverLocked(slot, f)
+}
+
+// snatSrcLocked herschrijft de bron van een frame naar het node-IP (SNAT):
+// src-IP, IP-checksum en L4-src-poort (+checksum) — de gedeelde eerste helft
+// van elk pad dat namens een slot naar buiten of naar een buur praat (mu vast).
+func snatSrcLocked(ip, l4 []byte, proto byte, oldIP uint32, oldPort, newPort uint16) {
+	binary.BigEndian.PutUint32(ip[12:], uplink.ip)
+	fixCsum32(ip[10:], oldIP, uplink.ip)
+	rewriteL4(l4, proto, 0, oldIP, uplink.ip, oldPort, newPort)
+}
+
+// txUplinkLocked zet de MAC's en stuurt het frame de externe NIC uit (mu vast).
+func txUplinkLocked(f []byte, nextHop [6]byte) {
+	copy(f[0:6], nextHop[:])
+	copy(f[6:12], uplink.mac[:])
+	uplink.Transmit(f)
+}
+
 // replyInLocked vertaalt een inbound antwoord op een masquerade-flow terug en
 // legt het rechtstreeks in de slot-ring (deliverLocked, mu vast); true = geclaimd.
+// Aanroeper (natInbound) toetste al dat het frame aan het node-IP gericht is.
 func replyInLocked(f, ip, l4 []byte, proto byte) bool {
-	if binary.BigEndian.Uint32(ip[16:]) != uplink.ip {
-		return false
-	}
 	peerIP := binary.BigEndian.Uint32(ip[12:])
 	peerPort := binary.BigEndian.Uint16(l4[0:])
 	nodePort := binary.BigEndian.Uint16(l4[2:])
@@ -435,41 +477,19 @@ func replyInLocked(f, ip, l4 []byte, proto byte) bool {
 		return false
 	}
 	fl.seen = time.Now()
-	binary.BigEndian.PutUint32(ip[16:], fl.slotIP)
-	fixCsum32(ip[10:], uplink.ip, fl.slotIP) // IP-header checksum
-	rewriteL4(l4, proto, 2, uplink.ip, fl.slotIP, nodePort, fl.slotPort)
-	mac := layout.SlotMAC(fl.slot)
-	copy(f[0:6], mac[:])
-	copy(f[6:12], hostMAC[:])
-	deliverLocked(fl.slot, f)
+	dnatToSlotLocked(fl.slot, f, ip, l4, proto, uplink.ip, fl.slotIP, nodePort, fl.slotPort)
 	return true
 }
 
-// dnatInLocked: DNAT van node-IP:nodePort → slot-IP:slotPort (mu vast).
+// dnatInLocked: DNAT van node-IP:nodePort → slot-IP:slotPort (mu vast;
+// zelfde node-IP-contract als replyInLocked).
 func dnatInLocked(f, ip, l4 []byte, proto byte) bool {
-	if binary.BigEndian.Uint32(ip[16:]) != uplink.ip {
-		return false
-	}
 	dport := binary.BigEndian.Uint16(l4[2:])
-	var m *pub
-	for j := range pubs {
-		if pubs[j].proto == proto && pubs[j].nodePort == dport {
-			m = &pubs[j]
-			break
-		}
-	}
+	m := pubByNodePortLocked(proto, dport)
 	if m == nil {
 		return false
 	}
-	oldIP := binary.BigEndian.Uint32(ip[16:])
-	newIP := layout.SlotIP4(m.slot)
-	binary.BigEndian.PutUint32(ip[16:], newIP)
-	fixCsum32(ip[10:], oldIP, newIP)
-	rewriteL4(l4, proto, 2, oldIP, newIP, dport, m.slotPort)
-	mac := layout.SlotMAC(m.slot)
-	copy(f[0:6], mac[:])
-	copy(f[6:12], hostMAC[:])
-	deliverLocked(m.slot, f)
+	dnatToSlotLocked(m.slot, f, ip, l4, proto, uplink.ip, layout.SlotIP4(m.slot), dport, m.slotPort)
 	return true
 }
 
@@ -517,13 +537,8 @@ func natFromSlot(src int, f []byte) bool {
 	if !known {
 		return true // next-hop onbekend: drop, de retransmit leert 'm
 	}
-	oldIP := binary.BigEndian.Uint32(ip[12:])
-	binary.BigEndian.PutUint32(ip[12:], uplink.ip)
-	fixCsum32(ip[10:], oldIP, uplink.ip)
-	rewriteL4(l4, proto, 0, oldIP, uplink.ip, sport, m.nodePort)
-	copy(f[0:6], nextHop[:])
-	copy(f[6:12], uplink.mac[:])
-	uplink.Transmit(f)
+	snatSrcLocked(ip, l4, proto, binary.BigEndian.Uint32(ip[12:]), sport, m.nodePort)
+	txUplinkLocked(f, nextHop)
 	return true
 }
 
@@ -562,12 +577,8 @@ func natOutbound(src int, f []byte) bool {
 		return true // pool vol: drop
 	}
 	fl.seen = time.Now()
-	binary.BigEndian.PutUint32(ip[12:], uplink.ip)
-	fixCsum32(ip[10:], slotIP, uplink.ip)
-	rewriteL4(l4, proto, 0, slotIP, uplink.ip, sport, fl.nodePort)
-	copy(f[0:6], nextHop[:])
-	copy(f[6:12], uplink.mac[:])
-	uplink.Transmit(f)
+	snatSrcLocked(ip, l4, proto, slotIP, sport, fl.nodePort)
+	txUplinkLocked(f, nextHop)
 	return true
 }
 
@@ -582,13 +593,7 @@ func natOutbound(src int, f []byte) bool {
 // zoals een dichte poort (de dialer merkt een timeout; node-diensten zoals
 // de agent wonen binnen op 10.100.0.1, niet hier).
 func hairpinOutLocked(src int, f, ip, l4 []byte, proto byte, slotIP uint32, sport, dport uint16) bool {
-	var m *pub
-	for j := range pubs {
-		if pubs[j].proto == proto && pubs[j].nodePort == dport {
-			m = &pubs[j]
-			break
-		}
-	}
+	m := pubByNodePortLocked(proto, dport)
 	if m == nil {
 		return true
 	}
@@ -598,16 +603,8 @@ func hairpinOutLocked(src int, f, ip, l4 []byte, proto byte, slotIP uint32, spor
 		return true // pool vol: drop
 	}
 	fl.seen = time.Now()
-	binary.BigEndian.PutUint32(ip[12:], uplink.ip)
-	fixCsum32(ip[10:], slotIP, uplink.ip)
-	rewriteL4(l4, proto, 0, slotIP, uplink.ip, sport, fl.nodePort)
-	binary.BigEndian.PutUint32(ip[16:], srvIP)
-	fixCsum32(ip[10:], uplink.ip, srvIP)
-	rewriteL4(l4, proto, 2, uplink.ip, srvIP, dport, m.slotPort)
-	mac := layout.SlotMAC(m.slot)
-	copy(f[0:6], mac[:])
-	copy(f[6:12], hostMAC[:])
-	deliverLocked(m.slot, f)
+	snatSrcLocked(ip, l4, proto, slotIP, sport, fl.nodePort)
+	dnatToSlotLocked(m.slot, f, ip, l4, proto, uplink.ip, srvIP, dport, m.slotPort)
 	return true
 }
 
@@ -625,16 +622,11 @@ func hairpinBackLocked(f, ip, l4 []byte, proto byte, m *pub) bool {
 		return true
 	}
 	fl.seen = time.Now()
-	binary.BigEndian.PutUint32(ip[16:], fl.slotIP)
-	fixCsum32(ip[10:], uplink.ip, fl.slotIP)
-	rewriteL4(l4, proto, 2, uplink.ip, fl.slotIP, np, fl.slotPort)
-	binary.BigEndian.PutUint32(ip[12:], uplink.ip)
-	fixCsum32(ip[10:], srvIP, uplink.ip)
-	rewriteL4(l4, proto, 0, srvIP, uplink.ip, m.slotPort, m.nodePort)
-	mac := layout.SlotMAC(fl.slot)
-	copy(f[0:6], mac[:])
-	copy(f[6:12], hostMAC[:])
-	deliverLocked(fl.slot, f)
+	// Eerst de src-helft, dan de dst-helft (die ook bezorgt): beide raken
+	// disjuncte velden en de checksum-fixes zijn incrementeel, dus de volgorde
+	// is vrij — deze laat de gedeelde staart het frame afleveren.
+	snatSrcLocked(ip, l4, proto, srvIP, m.slotPort, m.nodePort)
+	dnatToSlotLocked(fl.slot, f, ip, l4, proto, uplink.ip, fl.slotIP, np, fl.slotPort)
 	return true
 }
 
@@ -712,12 +704,7 @@ func allocPort(proto byte, dstIP uint32, dstPort uint16) (uint16, bool) {
 
 // publishedLocked meldt of node-poort p (proto) een gepubliceerde poort is.
 func publishedLocked(proto byte, p uint16) bool {
-	for _, e := range pubs {
-		if e.proto == proto && e.nodePort == p {
-			return true
-		}
-	}
-	return false
+	return pubByNodePortLocked(proto, p) != nil
 }
 
 // sweepExpired verwijdert flows die langer dan hun idle-timeout stil waren.

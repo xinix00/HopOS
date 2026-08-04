@@ -9,7 +9,6 @@
 #
 #   image/licheerv-agent.sh                 → out/hopos-licheerv.img (+ fip.bin)
 #   image/licheerv-agent.sh /dev/diskN      → idem + fip.bin op een bestaande kaart
-#   DEMO=1 image/licheerv-agent.sh [disk]   → cmd/hopos-lrv i.p.v. de agent
 #
 # Het .img is een compleet SD-kaart-image: MBR + FAT16-bootpartitie met fip.bin.
 # Één keer schrijven en booten — geen donor-image van 1,6GB, geen mount-gedoe:
@@ -21,13 +20,12 @@
 # fip.bin op een kaart die al partitie + FAT heeft (dus na één dd, of na het
 # Sipeed donor-image).
 #
-# Default is de ECHTE agent-main (cmd/hopos, -tags licheerv) — dezelfde binary-
+# Dit bouwt de ECHTE agent-main (cmd/hopos, -tags licheerv) — dezelfde binary-
 # vorm als op de Pi's en UEFI, en hier ook een volwaardige node: de DWMAC met de
 # interne ePHY is in bedrijf (100Mbit, DHCP + NTP), dus de apploader haalt zijn
 # image gewoon over het netwerk. Alleen een framebuffer heeft dit board niet, dus
-# gui-code zit er nooit in. DEMO=1 bouwt cmd/hopos-lrv: dezelfde kooi en
-# slot-lifecycle uit kern/slots met een ÍNGEBAKKEN app — bring-up-gereedschap dat
-# de slotlaag los van netwerk en agent bewijst.
+# gui-code zit er nooit in. (De pre-agent slot-demo cmd/hopos-lrv en zijn
+# DEMO=1-knop zijn 04-08 gesloopt: de agent legt dezelfde proef af op ijzer.)
 #
 # Eerste keer een kaart: één dd van het .img hierboven is genoeg (dat is óók het
 # release-asset hopos-licheerv.img.gz). Daarna is elke iteratie alleen nog fip.bin
@@ -79,22 +77,15 @@ rv() { # rv <tags> <ldflags> <out> <pkg>
 
 cd "$DIR/metal"
 
-# 1. Het app-image voor het slot: eigen RAM-plan (linkramsize → de
-#    app-partitie) en gelinkt ín die partitie.
-echo "== slotdemo bouwen (app-hart: RAM $SLOTBASE + 64MB) ==" >&2
-rv "linkramsize linkcpuinit" "-w -T $((SLOTBASE + 0x10000)) -R 0x1000" "$OUT/slotdemo.elf" ./app/slotdemo
-
-# 2. De kooi-stub van het slot + het app-image tot één flat blob op SlotBase.
-#    mkmonitor patcht entry en BSS-range in de slot-tabel; de kooi-waarden zet
-#    HOP er runtime in (kern/cage rekent ze uit).
-echo "== kooi-stub + slot-blob ==" >&2
+# 1. De kooi-stub van het slot: HOP zet hem vóór élke app op de partitie
+#    (kern/cagestub); de kooi-waarden zet HOP er runtime in (kern/cage rekent
+#    ze uit).
+echo "== kooi-stub ==" >&2
 riscv64-elf-as -march=rv64imac_zicsr -o "$OUT/stub-slot.o" "$DIR/image/licheerv/stub-slot/stub-slot.S"
 riscv64-elf-ld -Ttext=$SLOTBASE -o "$OUT/stub-slot.elf" "$OUT/stub-slot.o"
 riscv64-elf-objcopy -O binary "$OUT/stub-slot.elf" "$OUT/stub-slot.bin"
-go run "$DIR/image/licheerv/mkmonitor/main.go" -base $SLOTBASE \
-	"$OUT/slotdemo.elf" "$DIR/metal/cmd/hopos-lrv/slot.bin" "$OUT/stub-slot.bin"
 
-# 3. De apploader, gecomprimeerd op de go:embed-plek. Dit is de universele
+# 2. De apploader, gecomprimeerd op de go:embed-plek. Dit is de universele
 #    fase-1 van élke job: HOP zet hem in het slot, hij haalt op zijn eigen hart
 #    (en straks zijn eigen netstack) het echte image en seint "staged", waarna
 #    HOP de app plaatst. Zonder ingebakken loader start geen enkele job.
@@ -103,27 +94,22 @@ go run "$DIR/image/licheerv/mkmonitor/main.go" -base $SLOTBASE \
 echo "== apploader bouwen + inbakken ==" >&2
 bake_apploader riscv64 "linkramsize linkcpuinit" $((SLOTBASE + 0x10000))
 
-# 4. De HOP-kern zelf.
-if [ "${DEMO:-0}" = 1 ]; then
-	echo "== HOP-kern bouwen (slot-demo: cmd/hopos-lrv) ==" >&2
-	rv "" "-s -w -T $((RUNADDR + 0x10000)) -R 0x1000" "$OUT/hopos-lrv.elf" ./cmd/hopos-lrv
-else
-	# De platform-config gaat mee ín het image: dit board kan zijn eigen
-	# FAT-bootpartitie niet lezen (geen SDHCI/FAT-driver — de FSBL las de kaart,
-	# wij niet), dus is er geen hopos.cfg om naast fip.bin te zetten. Eigen
-	# config? CFG=~/mijn-node.cfg — die blijft buiten de repo, met zijn sleutels.
-	CFG="${CFG:-$DIR/image/hopos-licheerv.cfg}"
-	[ -f "$CFG" ] || { echo "config ontbreekt: $CFG" >&2; exit 1; }
-	cp "$CFG" "$DIR/metal/cmd/hopos/cfgblob/hopos.cfg"
-	# De kooi-stub gaat mee ín de kern: HOP zet hem vóór élke app op de
-	# partitie (kern/cagestub). Op ARM is dat de EL2-trampoline in HOP's eigen
-	# image; hier draait het op het app-hart, dus moet het meeliften.
-	cp "$OUT/stub-slot.bin" "$DIR/metal/kern/cagestub/stub-slot.bin"
-	echo "== HOP-kern bouwen (agent: cmd/hopos -tags licheerv,embedloader,embedcfg,embedcagestub; config $(basename "$CFG")) ==" >&2
-	rv "licheerv embedloader embedcfg embedcagestub" "-s -w -T $((RUNADDR + 0x10000)) -R 0x1000" "$OUT/hopos-lrv.elf" ./cmd/hopos
-fi
+# 3. De HOP-kern zelf.
+# De platform-config gaat mee ín het image: dit board kan zijn eigen
+# FAT-bootpartitie niet lezen (geen SDHCI/FAT-driver — de FSBL las de kaart,
+# wij niet), dus is er geen hopos.cfg om naast fip.bin te zetten. Eigen
+# config? CFG=~/mijn-node.cfg — die blijft buiten de repo, met zijn sleutels.
+CFG="${CFG:-$DIR/image/hopos-licheerv.cfg}"
+[ -f "$CFG" ] || { echo "config ontbreekt: $CFG" >&2; exit 1; }
+cp "$CFG" "$DIR/metal/cmd/hopos/cfgblob/hopos.cfg"
+# De kooi-stub gaat mee ín de kern: HOP zet hem vóór élke app op de
+# partitie (kern/cagestub). Op ARM is dat de EL2-trampoline in HOP's eigen
+# image; hier draait het op het app-hart, dus moet het meeliften.
+cp "$OUT/stub-slot.bin" "$DIR/metal/kern/cagestub/stub-slot.bin"
+echo "== HOP-kern bouwen (agent: cmd/hopos -tags licheerv,embedloader,embedcfg,embedcagestub; config $(basename "$CFG")) ==" >&2
+rv "licheerv embedloader embedcfg embedcagestub" "-s -w -T $((RUNADDR + 0x10000)) -R 0x1000" "$OUT/hopos-lrv.elf" ./cmd/hopos
 
-# 5. De trapstub voor HOP's eigen hart: T-Head-CPU-init (die erven we van de
+# 4. De trapstub voor HOP's eigen hart: T-Head-CPU-init (die erven we van de
 #    vendor-OpenSBI die we vervangen), BSS nullen, en een vroege trap-vector die
 #    mcause/mepc/mtval op de UART dumpt — het meetinstrument van de bring-up.
 echo "== trapstub + monitor-blob ==" >&2
@@ -133,7 +119,7 @@ riscv64-elf-objcopy -O binary "$OUT/trapstub.elf" "$OUT/trapstub.bin"
 go run "$DIR/image/licheerv/mkmonitor/main.go" -base $RUNADDR \
 	"$OUT/hopos-lrv.elf" "$OUT/monitor.bin" "$OUT/trapstub.bin"
 
-# 6. fip.bin: donor (FSBL + DDR-params) met ons monitor-slot.
+# 5. fip.bin: donor (FSBL + DDR-params) met ons monitor-slot.
 #    fiptool neemt MONITOR_RUNADDR uit de OLD_FIP en valt alleen terug op de
 #    CLI-vlag als dat veld NUL is (fiptool.py: "if not runaddr"). De donor zegt
 #    DRAM-start, dus nullen we het in een kopie — daarna pakt hij $RUNADDR.
@@ -163,7 +149,7 @@ python3 "$FIPTOOL" genfip "$OUT/fip-licheerv.bin" \
 
 echo "metal/out/fip-licheerv.bin ($(du -h "$OUT/fip-licheerv.bin" | cut -f1)) klaar." >&2
 
-# 7. Het complete kaart-image: MBR + FAT16 + fip.bin, dd-baar. Zelf gebouwd
+# 6. Het complete kaart-image: MBR + FAT16 + fip.bin, dd-baar. Zelf gebouwd
 #    (image/licheerv/mkcard) zodat het reproduceerbaar is en geen root of
 #    loop-device vraagt — de geometrie is die van het donor-image, want dat is
 #    wat de BROM van dit silicium aantoonbaar leest.
@@ -171,7 +157,7 @@ go run "$DIR/image/licheerv/mkcard/main.go" -o "$OUT/hopos-licheerv.img" \
 	-size 64 "$OUT/fip-licheerv.bin=fip.bin"
 echo "flash: diskutil unmountDisk /dev/diskN && sudo dd if=$OUT/hopos-licheerv.img of=/dev/rdiskN bs=4m" >&2
 
-# 8. Optioneel: op de kaart zetten. Standaard mounten en het echte mountpoint
+# 7. Optioneel: op de kaart zetten. Standaard mounten en het echte mountpoint
 #    bij diskutil opvragen — een eigen mountpoint meegeven rapporteert op macOS
 #    "mounted" terwijl er niets gekoppeld is, en dan landt de cp stil op de Mac
 #    (gemeten 30-07). Vandaar ook het teruglees-bewijs.

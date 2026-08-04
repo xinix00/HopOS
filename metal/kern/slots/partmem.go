@@ -69,8 +69,10 @@ func poolInit() {
 func align2M(n uint64) uint64 { return (n + part2M - 1) &^ (part2M - 1) }
 
 // partAlloc reserveert size voor slot i uit de pool en geeft basis én de
-// WERKELIJKE maat terug — opgerond naar wat de kooi van dit board eist
-// (cageGrain: de 2MB-blokkorrel van de map).
+// WERKELIJKE maat terug — opgerond naar de 2MB-blokkorrel van de map. Meer
+// eist geen enkele kooi meer sinds TOR (de cageGrain/cageBaseAlign-naad die
+// hier zat was op beide architecturen een no-op geworden en is 04-08
+// gesloopt; een toekomstige kooi met een grovere korrel brengt hem terug).
 //
 // Die tweede returnwaarde is er omdat het anders fout gaat, en dat is gemeten:
 // de allocator rondde de maat op en bewaarde die, maar de aanroeper hield zijn
@@ -90,7 +92,7 @@ func align2M(n uint64) uint64 { return (n + part2M - 1) &^ (part2M - 1) }
 // nooit raken.
 func partAlloc(i int, size uint64) (base, grown uint64, err error) {
 	partOnce.Do(poolInit)
-	size = cageGrain(align2M(size))
+	size = align2M(size)
 	partMu.Lock()
 	defer partMu.Unlock()
 	releaseLocked(i)
@@ -115,7 +117,7 @@ func partAlloc(i int, size uint64) (base, grown uint64, err error) {
 		}
 		// Draagt hij een bruikbare basis? Zo niet, dan is hij voor déze maat geen
 		// kandidaat — anders zou best-fit een regio kiezen die straks afketst.
-		if (r.base+r.size-size)&^(cageBaseAlign(size)-1) < r.base {
+		if (r.base+r.size-size)&^(part2M-1) < r.base {
 			continue
 		}
 		if best < 0 || r.size < partFree[best].size {
@@ -128,12 +130,11 @@ func partAlloc(i int, size uint64) (base, grown uint64, err error) {
 	r := partFree[best]
 	// Binnen de regio de HOOGSTE bruikbare basis. Dat is niet willekeurig: op een
 	// board waar de lage regio HOP's eigen structuren draagt en de bulk erboven
-	// ligt, houdt hoog-eerst het lage stuk vrij. De uitlijning komt van de kooi
-	// (cageBaseAlign) — 2MB sinds TOR elk bereik kan uitdrukken; onder NAPOT was
-	// dat de maat zelf, en koos de allocator anders adressen die de whitelist niet
-	// kón beschrijven (gemeten 31-07: "basis 0x8bf00000 niet gealigneerd op maat
-	// 0x4000000").
-	base = (r.base + r.size - size) &^ (cageBaseAlign(size) - 1)
+	// ligt, houdt hoog-eerst het lage stuk vrij. De uitlijning is 2MB — sinds
+	// TOR kan de kooi elk bereik uitdrukken; onder NAPOT was dat de maat zelf,
+	// en koos de allocator anders adressen die de whitelist niet kón beschrijven
+	// (gemeten 31-07: "basis 0x8bf00000 niet gealigneerd op maat 0x4000000").
+	base = (r.base + r.size - size) &^ (part2M - 1)
 	// Voor- en achterstuk teruggeven; het middenstuk is van dit slot.
 	rest := partFree[:best:best]
 	if base > r.base {

@@ -32,25 +32,24 @@ type Lease struct {
 	Server [4]byte // optie 54 (de lessor)
 
 	// Lease-timers uit de ACK (seconden). LeaseSecs = optie 51 (totale duur;
-	// 0xFFFFFFFF = oneindig). T1Secs/T2Secs = optie 58/59 (renew-/rebind-tijd);
-	// afwezig (0) → val terug op 0.5·LeaseSecs voor de vernieuwing (KeepAlive).
+	// 0xFFFFFFFF = oneindig). T1Secs = optie 58 (renew-tijd); afwezig (0) →
+	// val terug op 0.5·LeaseSecs voor de vernieuwing (KeepAlive).
 	LeaseSecs uint32
 	T1Secs    uint32
-	T2Secs    uint32
 
 	// Acquired markeert een echt uit een ACK verkregen lease (vs. de nulwaarde);
 	// KeepAlive draait alleen op een verkregen lease.
 	Acquired bool
 }
 
-// be32 leest een 4-byte big-endian veld (DHCP-optiewaarden 51/58/59).
+// be32 leest een 4-byte big-endian veld (DHCP-optiewaarden 51/58).
 func be32(d []byte) uint32 {
 	return uint32(d[0])<<24 | uint32(d[1])<<16 | uint32(d[2])<<8 | uint32(d[3])
 }
 
 func ipStr(a [4]byte) string { return fmt.Sprintf("%d.%d.%d.%d", a[0], a[1], a[2], a[3]) }
 
-// IPString/GWString/DNSString/ServerString geven de velden in tekstvorm
+// IPString/GWString/DNSString geven de velden in tekstvorm
 // (board.NetConfig, diagnose).
 func (l Lease) IPString() string  { return ipStr(l.IP) }
 func (l Lease) GWString() string  { return ipStr(l.GW) }
@@ -308,7 +307,7 @@ func bootp(mac [6]byte, xid uint32, msgtype byte, ciaddr [4]byte, bcast bool, ex
 	copy(bp[12:16], ciaddr[:]) // ciaddr: gezet bij RENEW (RFC 2131 §4.3.2)
 	copy(bp[28:34], mac[:])
 	copy(bp[236:240], []byte{99, 130, 83, 99}) // DHCP-magic
-	o := append([]byte{53, 1, msgtype, 55, 6, 1, 3, 6, 51, 58, 59}, extra...)
+	o := append([]byte{53, 1, msgtype, 55, 5, 1, 3, 6, 51, 58}, extra...)
 	copy(bp[240:], append(o, 255))
 	return bp
 }
@@ -402,10 +401,6 @@ func parseBootp(bp []byte, mac [6]byte, xid uint32, msgtype byte) (Lease, bool) 
 		case 58: // T1 (renew-tijd)
 			if ln >= 4 {
 				l.T1Secs = be32(d)
-			}
-		case 59: // T2 (rebind-tijd)
-			if ln >= 4 {
-				l.T2Secs = be32(d)
 			}
 		}
 		i += 2 + ln

@@ -59,7 +59,6 @@ func (machine) SetWallTime(ns int64)   { qemuvirt.ARM64.SetTime(ns) }
 // PSCI via de gedeelde wrappers (metal/cpu/psci); op virt is core N gewoon
 // MPIDR-target N — geen vertaling nodig.
 func (machine) CPUOn(core, entry, ctx uint64) int64 { return psci.On(core, entry, ctx) }
-func (machine) CPUOff() int64                       { return psci.Off() }
 func (machine) AffinityInfo(core uint64) board.PowerState {
 	return board.PowerState(psci.AffinityInfo(core))
 }

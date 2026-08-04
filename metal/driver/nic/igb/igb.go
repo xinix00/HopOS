@@ -62,7 +62,6 @@ const (
 	// (01=write, 10=read), READY bit 28, ERROR bit 30. De interne PHY van de
 	// igb-familie antwoordt op adres 1 (Linux hw->phy.addr).
 	mdicWriteOp = 0b01 << 26
-	mdicReadOp  = 0b10 << 26
 	mdicReady   = 1 << 28
 	mdicError   = 1 << 30
 	phyAddr     = 1
@@ -196,21 +195,20 @@ func (n *Net) Reset() error {
 // MDICWrite schrijft een PHY-register.
 func (n *Net) MDICWrite(reg int, val uint16) error {
 	n.wr(regMDIC, uint32(val)|uint32(reg&0x1F)<<16|phyAddr<<21|mdicWriteOp)
-	_, err := n.mdicWait()
-	return err
+	return n.mdicWait()
 }
 
-func (n *Net) mdicWait() (uint16, error) {
+func (n *Net) mdicWait() error {
 	for range 100_000 {
 		v := n.rd(regMDIC)
 		if v&mdicError != 0 {
-			return 0, fmt.Errorf("igb: MDI error (MDIC=%#x)", v)
+			return fmt.Errorf("igb: MDI error (MDIC=%#x)", v)
 		}
 		if v&mdicReady != 0 {
-			return uint16(v), nil
+			return nil
 		}
 	}
-	return 0, fmt.Errorf("igb: MDI stuck busy")
+	return fmt.Errorf("igb: MDI stuck busy")
 }
 
 // LinkUp zet CTRL.SLU, herstart PHY-autonegotiatie (het igb-recept na een
