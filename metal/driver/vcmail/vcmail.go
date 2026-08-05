@@ -19,6 +19,7 @@
 package vcmail
 
 import (
+	"sync"
 	"time"
 
 	"github.com/xinix00/HopOS/metal/dev"
@@ -81,7 +82,29 @@ func (m *Mbox) CallN(tags []Tag) bool {
 	return m.do(tags)
 }
 
+// mboxMu serialiseert élke transactie: één board heeft ÉÉN hardware-mailbox en
+// ÉÉN gedeelde property-buffer (raspi.VCMailBuf), dus twee gelijktijdige
+// aanroepers schrijven door elkaars verzoek en lezen elkaars antwoord.
+//
+// EERLIJK OVER DE STATUS: vandaag racet er niemand. De fb-discovery doet één
+// transactie vroeg in de boot en cachet daarna (19-07), en dvfs is één
+// goroutine. Dit lock is dus geen fix voor een lopende bug maar hygiëne op een
+// gedeelde hardware-resource — de afwezigheid ervan was de anomalie.
+//
+// Dat het geen theorie is, is wél gemeten: vóór die cache las een
+// framebuffer-grant "3x1500000000" terug (19-07, zie board/raspi/vcfb) — de
+// kloksnelheid van dvfs, in het antwoord van de fb. De cache maakte dat geval
+// onmogelijk door de tweede aanroeper weg te nemen; dit lock maakt het
+// onmogelijk voor de volgende aanroeper die iemand hier bijzet.
+//
+// Prijs: een trage call (SetClockRate tijdens HDMI-werk) laat een andere
+// wachten. Dat is de goede ruil — wachten kost tijd, door elkaar schrijven kost
+// een onverklaarbare bug.
+var mboxMu sync.Mutex
+
 func (m *Mbox) do(tags []Tag) bool {
+	mboxMu.Lock()
+	defer mboxMu.Unlock()
 	// Eerst de inbox leegvegen: een eerder getimeout antwoord dat blijft
 	// liggen zet anders álle volgende calls één respons achter (GEMETEN
 	// 2026-07-11: na een trage SetClockRate tijdens HDMI-werk las elke call
@@ -227,6 +250,11 @@ type FB struct {
 // sizes + depth + allocate + pitch — de firmware finaliseert per bericht)
 // en geeft terug wat er wérkelijk kwam. Het busadres kan 0xC0000000-
 // gealiast terugkomen; dat masker eraf is het ARM-fysieke adres.
+//
+// ÉÉN beeld, geen dubbele buffer: de Pi 5-firmware neemt een virtuele hoogte
+// van 2× wél aan, maar weigert daarna élk pan-verzoek (antwoordt y=0 zodra de
+// display-pijplijn live is — gemeten 05-08). Een page-flip vraagt op dit board
+// dus de HVS-registers, niet deze mailbox.
 func (m *Mbox) AllocFB(w, h uint32) (FB, bool) {
 	phys := []uint32{w, h}
 	virt := []uint32{w, h}

@@ -117,19 +117,16 @@ el2:
 	// MDSCR_EL1 = 0: geen achtergebleven debug-enable-bits (__cpu_setup).
 	WORD	$0xd510025f	// msr mdscr_el1, xzr
 
-#ifdef RPI5
-	// COHERENTIE vóór de MMU — de tamago-Broadcom-volgorde (soc/bcm2835:
-	// EnableSMP() vóór InitMMU/EnableCache; "must be ensured before caches
-	// and MMU are enabled or any TLB maintenance"). Op 32-bit is dat
-	// ACTLR.SMP; de A76-tegenhanger is CPUECTLR_EL1.SMPEN (bit 6),
-	// S3_0_C15_C1_4. LET OP: op DynamIQ-A76 mogelijk RES0/no-op (firmware
-	// doet de DSU) — dit is de laatste goedkope hefboom voor de multi-level-
-	// PTW-wedge; markers zeggen of het 'm was. Read-modify-write, één bit.
-	WORD	$0xd538f180	// mrs x0, S3_0_C15_C1_4 (CPUECTLR_EL1)
-	ORR	$1<<6, R0, R0	// SMPEN
-	WORD	$0xd518f180	// msr S3_0_C15_C1_4, x0
-	ISB	$15
-#endif
+// CPUECTLR_EL1 (S3_0_C15_C1_4, SMPEN) WORDT HIER NIET MEER AANGERAAKT.
+// Stond hier als "laatste goedkope hefboom" met de kanttekening dat het op
+// DynamIQ-A76 vermoedelijk een no-op is omdat de firmware de DSU doet — en
+// dat blijkt te kloppen én gevaarlijk: de EEPROM-bootloader van 2026-05
+// brengt een nieuwe BL31 mee (v2.6-240, Dec 2024) die EL2 geen toegang meer
+// geeft tot dit IMPDEF-register. De `mrs` trapt dan naar EL3 en komt nooit
+// terug, en omdat VBAR_EL2 verderop pas gezet wordt is dat een STILLE hang:
+// de boot stopte na 'P2' en er kwam geen enkele diagnose (gemeten 04-08 met
+// stapmarkers: P2abc en dan niets — 'd' stond precies achter dit blok).
+// Een register dat de firmware al beheert, hoort een OS niet af te pakken.
 
 	// De rest van het U-Boot/Circle-recept (armv8_switch_to_el1_m) — op
 	// Pi 5-silicium bewezen; bij EL2-entry zijn deze EL1-gezichten anders

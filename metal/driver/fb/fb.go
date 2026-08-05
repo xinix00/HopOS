@@ -17,7 +17,10 @@
 // Alleen voor GOOS=tamago GOARCH=arm64.
 package fb
 
-import "github.com/xinix00/HopOS/metal/dev"
+import (
+	"github.com/xinix00/HopOS/metal/cpu/memattr"
+	"github.com/xinix00/HopOS/metal/dev"
+)
 
 // Desc beschrijft een firmware-framebuffer: het lineaire adres + geometrie.
 // board.Framebuffer() vult 'm uit GOP (UEFI) of de device-tree (simplefb).
@@ -77,6 +80,11 @@ func Init(desc Desc) {
 	}
 	x, y, top = 0, 0, 0
 	active = true
+	// Het vlak is DRAM, geen registerblok: laat het fabric onze pixelstores
+	// gatheren i.p.v. ze als losse Device-nGnRnE-transacties te sturen (zie
+	// cpu/memattr). Mislukt het, dan tekenen we gewoon zoals voorheen; stil,
+	// want dit is een optimalisatie en geen voorwaarde.
+	_ = memattr.NormalNC(desc.Base, uintptr(desc.Stride)*uintptr(desc.Height))
 	for py := 0; py < d.Height; py++ {
 		for px := 0; px < d.Width; px++ {
 			putpx(px, py, bg)

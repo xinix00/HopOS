@@ -14,6 +14,7 @@ import (
 	"io"
 	"runtime"
 	"runtime/goos"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/xinix00/HopOS/metal/abi/ring"
 	"github.com/xinix00/HopOS/metal/board/appboard"
 	"github.com/xinix00/HopOS/metal/cpu/idle"
+	"github.com/xinix00/HopOS/metal/cpu/memattr"
 	"github.com/xinix00/HopOS/metal/cpu/memlimit"
 	"github.com/xinix00/HopOS/metal/cpu/smp"
 	"github.com/xinix00/HopOS/metal/dev"
@@ -97,6 +99,15 @@ func Init() *App {
 	a.in = ring.Open(layout.RingInboxAt(a.RAMStart, a.RAMSize))
 	a.rbuf = make([]byte, layout.RingDataCap)
 	a.env = a.readEnv()
+
+	// Kreeg deze app het glas (gui/fbgrant zette FB_*), dan is dat venster DRAM
+	// en hoort het als write-combine gemapt te worden. De stage-2 van de kooi
+	// zegt dat al (Normal-NC), maar bij ARM wint de STRENGSTE van de twee lagen
+	// en onze eigen stage-1 mapt alles buiten de partitie als Device-nGnRnE —
+	// dus zonder deze regel drukt de app-kant de grant plat naar device en gaat
+	// élk beeldje als miljoenen losse ongatherbare stores het fabric in.
+	// OS-laag-werk: de app merkt er niets van en hoeft er niets voor te doen.
+	a.mapGrantedFB()
 
 	// Fatale runtime-exits (panic, os.Exit) onderscheppen: tamago's default
 	// halt is DAIFSet+WFI — een lijk dat geen vertaalde toegang meer doet,
@@ -175,6 +186,26 @@ func (a *App) readEnv() map[string]string {
 		}
 	}
 	return env
+}
+
+// mapGrantedFB zet het geglaste venster (FB_BASE/FB_STRIDE/FB_HEIGHT uit
+// gui/fbgrant) op write-combine in de eigen stage-1-map — zie cpu/memattr voor
+// het waarom en wat er wel en niet bewezen is. Wél melden en niet stil: een
+// optimalisatie waarvan niemand weet of hij aanstaat, is precies de val waarin
+// de freeze-jacht van 04-08 twee keer liep.
+func (a *App) mapGrantedFB() {
+	base, err1 := strconv.ParseUint(a.env["FB_BASE"], 0, 64)
+	stride, err2 := strconv.Atoi(a.env["FB_STRIDE"])
+	height, err3 := strconv.Atoi(a.env["FB_HEIGHT"])
+	if err1 != nil || err2 != nil || err3 != nil || base == 0 || stride <= 0 || height <= 0 {
+		return // geen (complete) grant: headless is de normale situatie
+	}
+	span := uintptr(stride) * uintptr(height)
+	if err := memattr.NormalNC(uintptr(base), span); err != nil {
+		a.Logf("fb: window %#x stays device-mapped: %v", base, err)
+	} else {
+		a.Logf("fb: window %#x..%#x mapped write-combine", base, base+uint64(span))
+	}
 }
 
 // printk buffert runtime-output tot een regel en zet die op de log-ring. De
