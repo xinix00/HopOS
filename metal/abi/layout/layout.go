@@ -834,9 +834,28 @@ const (
 
 	// CtrlWakes (app → HOP): oplopend aantal idle-rondes van de scheduler van
 	// dit slot. De tweelingbroer van CtrlIdle: die zegt HOEVEEL tijd er niets
-	// gedaan is, deze zegt HOE VAAK er gekeken is. Pas samen zeggen ze iets over
-	// stroom — 64% van een hart is heel iets anders als het 3333 wekken per
-	// seconde zijn dan als het één rekenklus is (metal/cpu/idle/wakes.go).
+	// gedaan is, deze zegt HOE VAAK er gekeken is (metal/cpu/idle/wakes.go).
+	//
+	// BEWUST ONGELEZEN (besluit Derek 06-08). De app publiceert 'm, HOP leest
+	// 'm niet, en dat blijft zo tot er een aanleiding is.
+	//
+	// Hier stond dat je ze pas samen kon duiden. Dat was overdreven: het
+	// cpu-percentage in kern/slotmgr is gewoon "verwachte tikken min geslapen
+	// tikken, gedeeld door het totaal" — slaap ís geen load en wordt ook niet
+	// als load geteld. Dat is dezelfde vorm die elk ander OS gebruikt, en het
+	// getal klopt zonder deze teller.
+	//
+	// Waar hij wél voor is: één specifiek geval, namelijk een percentage dat
+	// onverklaarbaar hoog staat. Wakker worden kost cycli die geen werk zijn
+	// (yield, staat saven, EL2-rondje, terug) en die tellen als niet-slapend.
+	// Een app die duizenden keren per seconde wakker wordt kan zo op tientallen
+	// procenten staan zonder iets nuttigs te doen — en dát is te repareren
+	// (timers samenvoegen) in plaats van echt werk. Zie je zulke load, dan is
+	// dit veld één regel in liveStatus en één kolom in de usage-lus verderop.
+	//
+	// Gemeten op de Radxa 06-08, en de reden dat het niet nu al gebeurt: zes
+	// GUI-apps op drie gedeelde cores lazen 0/0/1/1/4/6% — nette load, niets
+	// om te verklaren.
 	CtrlWakes = 0x108
 
 	// Env-blob: door HOP geschreven "key=val\n..."-bytes die de app-lib bij

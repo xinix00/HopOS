@@ -31,26 +31,27 @@ import (
 // canary alleen als een NIEUWE verbinding naar de eigen agent-poort lukt —
 // dwars door dezelfde accept-laag waar de doofheid zat.
 //
-// ÉÉN VERSCHIL MET DE ANDERE BOARDS, EN DAT IS BEWUST: hier moet je hem
-// AANZETTEN (hopos.wd=on) terwijl hij daar aan staat tenzij je hem uitzet.
+// DE RESET-SCOPE IS GEMETEN (06-08) en dit board doet nu hetzelfde als de
+// andere: aan, tenzij je hem uitzet met hopos.wd=off.
 //
-// De reden is geen voorzichtigheid maar een gat in de kennis: of een
-// WDT-timeout op de RK3566 de HÉLE node reset is niet uit de Linux-bron te
-// bewijzen — mainline heeft geen Rockchip-glue voor dit blok, geen
-// reset-scope-bit, geen GRF-veld. En een gewapende watchdog die de node níét
-// reset is erger dan geen watchdog: dan denk je dat je een vangnet hebt. Op de
-// LicheeRV kostte precies die aanname een nacht (een kale DW-enable bleek daar
-// niet genoeg, de reset-routering in het RTC-domein moest er eerst bij).
+// Waarom die meting nodig was: of een WDT-timeout op de RK3566 de HÉLE node
+// reset is niet uit de Linux-bron te bewijzen — mainline heeft geen
+// Rockchip-glue voor dit blok, geen reset-scope-bit, geen GRF-veld. En een
+// gewapende watchdog die de node níét reset is erger dan geen watchdog: dan
+// denk je dat je een vangnet hebt. Op de LicheeRV kostte precies die aanname
+// een nacht (een kale DW-enable bleek daar niet genoeg, de reset-routering in
+// het RTC-domein moest er eerst bij).
 //
-// De meting die dit opheft is één boot: `hopos.wdtest=1` op de probe wapent de
-// kortste timeout en aait niet. Herstart het bord, dan is de scope bewezen en
-// mag deze knop standaard aan.
+// WAT ER GEMETEN IS, met de probe op `hopos.wdtest=1`: kortste timeout gewapend,
+// niet geaaid. Op de console volgde géén enkele "still alive"-regel maar direct
+// `DDR V1.18 ...` — de DDR-init uit de boot-ROM, gevolgd door SPL, ATF en
+// U-Boot. Dat is een volledige node-reset door de hele bootketen heen, niet een
+// subsysteem dat omvalt. Daarmee is de knop verdiend.
 func nodeCanary() {
 	switch rk3566.BootParam("hopos.wd") {
-	case "on":
-	default:
-		fmt.Println("watchdog: not armed — the reset scope of this SoC's WDT is unproven " +
-			"(run the probe with hopos.wdtest=1 once, then set hopos.wd=on). Node liveness is UNGUARDED.")
+	case "off":
+		fmt.Println("watchdog: not armed (hopos.wd=off) — node liveness is UNGUARDED, " +
+			"a frozen node stays up for a post-mortem instead of reset-cycling.")
 		return
 	}
 
