@@ -496,16 +496,12 @@ func (a *App) Exit(code uint64) {
 // De hele download draait op DEZE core, DEZE netstack, in DEZE partitie: één
 // node-netstack draagt nooit 127 verbindingen, en een te grote/kapotte image
 // raakt hooguit dit ene slot ("crasht hooguit daar").
-// MinStageHeap is de werkruimte die de runtime tijdens een download minstens
-// moet houden: een HTTPS-fetch draagt gVisor, TLS-records, de x509-keten en de
-// http-response. Onder deze grens is de partitie te klein voor dit image, en
-// dat is een nette startfout — geen OOM halverwege en zeker geen stille
-// corruptie.
-//
-// Geëxporteerd omdat de apploader hem óók als zijn handshake-plafond gebruikt.
-// Dat is dezelfde vraag van twee kanten: hoeveel heeft deze download minimaal
-// nodig, en hoeveel mag hij hooguit pakken voordat hij de staging opeet.
-const MinStageHeap = 8 << 20
+// minStageHeap is de werkruimte die de runtime tijdens een download minstens
+// moet houden. Niet gekozen maar gemeten: een HTTPS-fetch draagt TLS-records,
+// de x509-keten en de http-response, en dat is de piek van de hele apploader.
+// Onder deze grens is de partitie simpelweg te klein voor dit image, en dat is
+// een nette startfout — geen OOM halverwege en zeker geen stille corruptie.
+const minStageHeap = 8 << 20
 
 func (a *App) StageImage(r io.Reader, imgSize int64) error {
 	if imgSize <= 0 {
@@ -539,16 +535,14 @@ func (a *App) StageImage(r io.Reader, imgSize int64) error {
 		return fmt.Errorf("StageImage: image van %d MB laat de runtime niets over in een partitie van %d MB — "+
 			"verhoog memory_limit", imgSize>>20, a.RAMSize>>20)
 	}
-	// Krap, maar niet weigeren. De muur hierboven is de VEILIGHEID — de heap
-	// kan de staging nu niet meer bereiken, wat er ook gebeurt. MinStageHeap is
-	// een VOORSPELLING van wat een HTTPS-download nodig heeft, en een
-	// voorspelling hoort geen start te blokkeren die het misschien wel haalt.
-	// Loopt het toch vast, dan is dat een luide OOM in het task-log (de
-	// printk-haak) en niet de stille corruptie van hiervoor.
-	if limit < MinStageHeap {
+	// Krap is geen reden om te weigeren. De muur hierboven is de veiligheid;
+	// minStageHeap is een VOORSPELLING van wat een HTTPS-download nodig heeft,
+	// en een voorspelling hoort geen start te blokkeren die het misschien haalt.
+	// Dat het een weigering was, was mijn aanname en niet een meting — en hij
+	// kostte de launcher zijn start op een partitie waar hij het prima doet.
+	if limit < minStageHeap {
 		a.Logf("apploader: only %d MB of headroom under the staging area (want %d MB) — "+
-			"heavy GC ahead; raise memory_limit if this job dies here",
-			limit>>20, uint64(MinStageHeap)>>20)
+			"raise memory_limit if this job dies here", limit>>20, uint64(minStageHeap)>>20)
 	}
 	var buf [64 << 10]byte
 	var got int64

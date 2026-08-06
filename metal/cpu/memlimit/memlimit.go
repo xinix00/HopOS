@@ -58,6 +58,12 @@ var ramSize uint
 //go:linkname ramStackOffset runtime/goos.RamStackOffset
 var ramStackOffset uint
 
+// arenaSlack is de ondergrens van de marge onder de muur: genoeg om één
+// allocator-groeistap te dekken die de zachte limiet overschrijdt. Empirisch —
+// het is de waarde waarmee HopOS sinds 02-08 draait en waaronder de staging
+// aantoonbaar sneuvelt (zie ArmBelow).
+const arenaSlack = 4 << 20
+
 // anchor dwingt de meet-allocatie het echte heap in (escape-analyse mag hem
 // niet op een stack leggen — al ligt ook die op tamago binnen het raam).
 var anchor *byte
@@ -77,7 +83,7 @@ func Arm() {
 	// de al bevolkte heap — en dan is er geen bodem meer te vinden.
 	anchor = new(byte)
 	base = uintptr(unsafe.Pointer(anchor))
-	arm(uintptr(ramStart)+uintptr(ramSize)-uintptr(ramStackOffset), base, true, 4<<20)
+	arm(uintptr(ramStart)+uintptr(ramSize)-uintptr(ramStackOffset), base, true, arenaSlack)
 }
 
 // ArmBelow doet hetzelfde als Arm, maar met een LAGERE muur: de heap mag nooit
@@ -94,19 +100,31 @@ func Arm() {
 // te kleine partitie: een heap die mocht wat niet kon.
 //
 // Hier rekenen we met de ONTHOUDEN basis en tellen we m.Sys NIET mee: alle
-// runtime-geheugen leeft in [basis, muur), dus dat is het budget — punt. De
-// marge mag daarom klein: de 4MB-vloer in Arm dekt de onscherpte van een
-// vroeg anker, en die onscherpte is hier weg.
+// runtime-geheugen leeft in [basis, muur), dus dat is het budget — punt.
+//
+// De MARGE blijft groot, en dat is de les van 06-08. Ik had hem naar 1MB
+// gebracht met het argument "de basis is nu exact, dus de meetfout-marge mag
+// weg". Dat argument klopt en de conclusie niet: SetMemoryLimit is een ZACHTE
+// limiet (Go mag eroverheen als hij niet genoeg kan vrijmaken) en de allocator
+// groeit in stappen die pas ná de toets gezet worden. Onder een muur die een
+// ECHT adres is — hier de staging met de gedownloade image erin — moet de marge
+// dus minstens één zo'n stap dekken, anders springt één arena-groei eroverheen
+// en nult Go de verse span dwars door de image.
+//
+// GEMETEN in QEMU met per-256KB-hashes over de staging: met 1MB marge werden
+// elf van de blokken ná de download genuld; met arenaSlack geen enkel. De
+// apploader plaatste daarna een lege app, die core spinde op 100% zonder ooit
+// te yielden, en zijn buurman kon er niet meer bij — "core never yielded".
 //
 // Geeft het gezette plafond terug, en ok=false als er onder top niets te
 // verdelen valt (dan is er niets gezet en moet de aanroeper luid falen — een
 // verzonnen limiet is een nieuwe manier om stuk te gaan).
 func ArmBelow(top uintptr) (limit uint64, ok bool) {
 	if base != 0 {
-		return arm(top, base, false, 1<<20)
+		return arm(top, base, false, arenaSlack)
 	}
 	anchor = new(byte)
-	return arm(top, uintptr(unsafe.Pointer(anchor)), true, 4<<20)
+	return arm(top, uintptr(unsafe.Pointer(anchor)), true, arenaSlack)
 }
 
 // arm is de gedeelde rekensom. addSys hoort bij een VERS gemeten anker: dan is
