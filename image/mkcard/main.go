@@ -27,11 +27,13 @@
 // VFAT-LFN-entries — U-Boot en de Pi-firmware lezen die allebei (elke
 // standaard-kaart heeft ze). De LicheeRV blijft daar bewust buiten: fip.bin
 // pást in 8.3, dus dat image krijgt geen enkele LFN-entry en blijft
-// byte-identiek aan wat de BROM daar bewezen leest. Subdirectories kunnen één
-// niveau diep (extlinux/, overlays/) — dieper heeft geen bootpad nodig.
+// byte-identiek aan wat de BROM daar bewezen leest. Subdirectories nesten
+// gewoon ('/' in de naam): extlinux/ en overlays/ zijn één niveau,
+// EFI/BOOT/BOOTAA64.EFI (de UEFI-stick) twee.
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"flag"
 	"fmt"
@@ -92,6 +94,7 @@ func main() {
 	start := flag.Int("start", 1, "start-LBA van de partitie (donor-geometrie LicheeRV: 1)")
 	label := flag.String("label", "boot", "volumelabel (max 11 tekens)")
 	volEntry := flag.Bool("vollabel", false, "schrijf het label óók als root-entry (mooie mountnaam; NIET voor de LicheeRV — de BROM-parser is niet van ons)")
+	cfgWin := flag.Int("cfgwindow", 0, "maak van hopos.cfg een raw-patchbaar venster van N bytes (0 = uit; formaatcontract: image/hopcfg/main.go)")
 	var raws rawList
 	flag.Var(&raws, "raw", "blob raw op een vast byte-offset vóór de partitie: pad@offset (herhaalbaar)")
 	flag.Parse()
@@ -100,7 +103,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	img, err := build(*sizeMB, *start, *label, *volEntry, raws, flag.Args())
+	img, err := build(*sizeMB, *start, *label, *volEntry, *cfgWin, raws, flag.Args())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "mkcard:", err)
 		os.Exit(1)
@@ -114,7 +117,7 @@ func main() {
 }
 
 // build zet het hele image in geheugen: MBR, raw blobs, dan de FAT16-partitie.
-func build(sizeMB, startLBA int, label string, volEntry bool, raws rawList, args []string) ([]byte, error) {
+func build(sizeMB, startLBA int, label string, volEntry bool, cfgWin int, raws rawList, args []string) ([]byte, error) {
 	partSecs := sizeMB * 1024 * 1024 / sectorSize
 	total := (startLBA + partSecs) * sectorSize
 	img := make([]byte, total)
@@ -135,7 +138,7 @@ func build(sizeMB, startLBA int, label string, volEntry bool, raws rawList, args
 		copy(img[r.off:], data)
 	}
 	part := img[startLBA*sectorSize:]
-	if err := writeFAT16(part, startLBA, partSecs, label, volEntry, args); err != nil {
+	if err := writeFAT16(part, startLBA, partSecs, label, volEntry, cfgWin, args); err != nil {
 		return nil, err
 	}
 	return img, nil
@@ -172,7 +175,7 @@ type node struct {
 
 // writeFAT16 bouwt de bootsector, de FAT-kopieën, de rootdirectory, de
 // subdirectories en de clusterketens van de meegegeven bestanden.
-func writeFAT16(p []byte, startLBA, partSecs int, label string, volEntry bool, args []string) error {
+func writeFAT16(p []byte, startLBA, partSecs int, label string, volEntry bool, cfgWin int, args []string) error {
 	rootSecs := rootEntries * dirEntrySize / sectorSize
 
 	// sectoren per FAT: elke cluster kost 2 bytes in de tabel. Iteratief,
@@ -228,11 +231,13 @@ func writeFAT16(p []byte, startLBA, partSecs int, label string, volEntry bool, a
 	binary.LittleEndian.PutUint16(fat0[0:], 0xFF00|uint16(mediaByte))
 	binary.LittleEndian.PutUint16(fat0[2:], 0xFFFF)
 
-	// De boom uit de argumenten: bestand[=naam], met hooguit één '/' in de
-	// naam. In argument-volgorde, en een directory ontstaat waar hij het
-	// eerst nodig is — dat houdt de clustertoewijzing deterministisch.
+	// De boom uit de argumenten: bestand[=naam], met '/' als scheiding voor
+	// (geneste) subdirectories — extlinux/extlinux.conf één diep,
+	// EFI/BOOT/BOOTAA64.EFI twee. In argument-volgorde, en een directory
+	// ontstaat waar hij het eerst nodig is — dat houdt de clustertoewijzing
+	// deterministisch.
 	root := &node{}
-	dirs := map[string]*node{}
+	dirs := map[string]*node{} // sleutel: het volle pad ("EFI", "EFI/BOOT")
 	for _, arg := range args {
 		path, name := arg, ""
 		if k := strings.IndexByte(arg, '='); k >= 0 {
@@ -245,16 +250,34 @@ func writeFAT16(p []byte, startLBA, partSecs int, label string, volEntry bool, a
 		if err != nil {
 			return err
 		}
-		parent := root
-		if dir, base, found := strings.Cut(name, "/"); found {
-			if strings.ContainsRune(base, '/') {
-				return fmt.Errorf("%q: dieper dan één subdirectory heeft geen bootpad nodig", name)
+		// De node-config wordt op verzoek een raw-patchbaar venster: magic-
+		// kopregel + '#'-padding tot een vaste maat, zodat image/hopcfg hem
+		// vóór én na het flashen in-place kan herschrijven — zonder mount,
+		// zonder filesystem-kennis. Sequentiële clusters (alloc hieronder)
+		// maken het venster aaneengesloten; dat is de andere helft van het
+		// contract.
+		if cfgWin > 0 && name == "hopos.cfg" {
+			if data, err = cfgWindow(data, cfgWin); err != nil {
+				return err
 			}
-			if dirs[dir] == nil {
-				dirs[dir] = &node{name: dir}
-				root.children = append(root.children, dirs[dir])
+		}
+		parent, prefix := root, ""
+		for {
+			dir, rest, found := strings.Cut(name, "/")
+			if !found {
+				break
 			}
-			parent, name = dirs[dir], base
+			if dir == "" || rest == "" {
+				return fmt.Errorf("%q: lege padcomponent", name)
+			}
+			prefix += dir + "/"
+			d := dirs[prefix]
+			if d == nil {
+				d = &node{name: dir}
+				dirs[prefix] = d
+				parent.children = append(parent.children, d)
+			}
+			parent, name = d, rest
 		}
 		parent.children = append(parent.children, &node{name: name, data: data})
 	}
@@ -317,10 +340,10 @@ func writeFAT16(p []byte, startLBA, partSecs int, label string, volEntry bool, a
 	if err := writeDir(rootDir, &used, rootEntries, root.children); err != nil {
 		return fmt.Errorf("root: %v", err)
 	}
-	for _, d := range root.children {
-		if d.data != nil {
-			continue
-		}
+	// Subdirectory-tabellen, recursief: elke tabel begint met "." (eigen
+	// cluster) en ".." (cluster van de ouder; 0 = de root, per FAT-conventie).
+	var writeTables func(d *node, parent int) error
+	writeTables = func(d *node, parent int) error {
 		tbl := p[dataOff+(d.cluster-2)*clusterBytes : dataOff+(d.cluster-1)*clusterBytes]
 		dot := tbl[:dirEntrySize]
 		copy(dot[0:11], ".          ")
@@ -331,10 +354,25 @@ func writeFAT16(p []byte, startLBA, partSecs int, label string, volEntry bool, a
 		copy(dotdot[0:11], "..         ")
 		dotdot[11] = 0x10
 		stampTimes(dotdot)
-		// ".."-cluster 0 = de root, per FAT-conventie.
+		binary.LittleEndian.PutUint16(dotdot[26:], uint16(parent))
 		n := 2
 		if err := writeDir(tbl, &n, clusterBytes/dirEntrySize, d.children); err != nil {
 			return fmt.Errorf("%s/: %v", d.name, err)
+		}
+		for _, c := range d.children {
+			if c.data == nil {
+				if err := writeTables(c, d.cluster); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	for _, d := range root.children {
+		if d.data == nil {
+			if err := writeTables(d, 0); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -477,6 +515,52 @@ func writeLFN(tbl []byte, name []uint16, short [11]byte) {
 			binary.LittleEndian.PutUint16(e[off:], chunk[j])
 		}
 	}
+}
+
+// cfgWindow maakt van de config een raw-patchbaar venster van exact win
+// bytes: magic-kopregel, de config zelf, en '#'-commentaarregels als padding.
+// FORMAATCONTRACT met image/hopcfg/main.go (de lezer/herschrijver — uitleg en
+// het waarom staan dáár in de kop); wijzigt dit, wijzig dan beide. Idempotent:
+// een al-gepadde config wordt eerst gestript, dus CFG=<eerder gepatcht
+// bestand> is geen fout.
+func cfgWindow(content []byte, win int) ([]byte, error) {
+	const magic = "#HOPCFG1 window="
+	if win%sectorSize != 0 {
+		return nil, fmt.Errorf("-cfgwindow %d is geen %d-voud (raw devices eisen sector-uitgelijnde writes)", win, sectorSize)
+	}
+	// Strippen van een bestaand venster: kopregel parsen, content eruit.
+	if bytes.HasPrefix(content, []byte(magic)) {
+		rest := content[len(magic):]
+		if sp := bytes.IndexByte(rest, ' '); sp > 0 && bytes.HasPrefix(rest[sp:], []byte(" len=")) {
+			if d := rest[sp+5:]; len(d) > 10 && d[10] == '\n' {
+				if clen, err := strconv.Atoi(string(d[:10])); err == nil {
+					if h := len(magic) + sp + 5 + 11; h+clen <= len(content) {
+						content = content[h : h+clen]
+					}
+				}
+			}
+		}
+	}
+	if len(content) > 0 && content[len(content)-1] != '\n' {
+		content = append(append([]byte{}, content...), '\n')
+	}
+	header := fmt.Sprintf("%s%d len=%010d\n", magic, win, len(content))
+	if len(header)+len(content) > win {
+		return nil, fmt.Errorf("hopos.cfg van %d bytes past niet in een venster van %d (-cfgwindow groter kiezen)", len(content), win)
+	}
+	buf := make([]byte, 0, win)
+	buf = append(buf, header...)
+	buf = append(buf, content...)
+	for pad := win - len(buf); pad > 0; pad = win - len(buf) {
+		n := 65
+		if pad < n {
+			n = pad
+		}
+		line := bytes.Repeat([]byte{'#'}, n)
+		line[n-1] = '\n'
+		buf = append(buf, line...)
+	}
+	return buf, nil
 }
 
 // stampTimes zet de vaste tijdstempel: een image dat twee keer bouwen twee

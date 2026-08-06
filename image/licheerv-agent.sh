@@ -28,8 +28,11 @@
 # DEMO=1-knop zijn 04-08 gesloopt: de agent legt dezelfde proef af op ijzer.)
 #
 # Eerste keer een kaart: één dd van het .img hierboven is genoeg (dat is óók het
-# release-asset hopos-licheerv.img.gz). Daarna is elke iteratie alleen nog fip.bin
-# vervangen. Zie docs/archief/licheerv-bringup.md voor het draaiboek en de metingen.
+# release-asset hopos-licheerv-headless.img.gz — mét -headless in de naam, want
+# overal elders betekent een naam zónder dat suffix de gui-smaak, en die bestaat
+# hier niet: geen framebuffer op dit silicium). Daarna is elke iteratie alleen
+# nog fip.bin vervangen. Zie docs/archief/licheerv-bringup.md voor het draaiboek
+# en de metingen.
 #
 # Nodig: de tamago-toolchain (TAMAGO), een riscv64 binutils (riscv64-elf-as/ld/
 # objcopy, `brew install riscv-gnu-toolchain` of vergelijkbaar) en de
@@ -97,11 +100,22 @@ bake_apploader riscv64 "linkramsize linkcpuinit" $((SLOTBASE + 0x10000))
 # 3. De HOP-kern zelf.
 # De platform-config gaat mee ín het image: dit board kan zijn eigen
 # FAT-bootpartitie niet lezen (geen SDHCI/FAT-driver — de FSBL las de kaart,
-# wij niet), dus is er geen hopos.cfg om naast fip.bin te zetten. Eigen
-# config? CFG=~/mijn-node.cfg — die blijft buiten de repo, met zijn sleutels.
-CFG="${CFG:-$DIR/image/hopos-licheerv.cfg}"
+# wij niet), dus is er geen hopos.cfg om naast fip.bin te zetten. De default
+# is DEZELFDE headless-template als elk ander board — er zijn precies twee
+# default-configs in deze repo (gui en headless), en dit board is headless.
+# Zonder hopos.node valt de MAC-afleiding terug op het ingebouwde adres en
+# zegt de node dat LUID (HOPOS_MAC_FIXED) — eerlijker dan een ingebakken
+# naam die elk bordje stil hetzelfde adres geeft. Eigen config (node-naam,
+# sleutels)? CFG=~/mijn-node.cfg — die blijft buiten de repo.
+CFG="${CFG:-$DIR/image/hopos-headless.cfg}"
 [ -f "$CFG" ] || { echo "config ontbreekt: $CFG" >&2; exit 1; }
 cp "$CFG" "$DIR/metal/cmd/hopos/cfgblob/hopos.cfg"
+# De config wordt een raw-patchbaar venster (image/hopcfg), net als op de
+# FAT-boards — maar hier zit hij ín de kernel (go:embed, ongecomprimeerd) en
+# dus in de monitor-payload van de FIP; hopcfg werkt daar de FIP-checksums bij.
+# 64KiB en niet de 1MiB van de kaarten: dit venster woont permanent in het
+# krappe RAM van dit board, en 64KiB is al ~10x de config.
+go run "$DIR/image/hopcfg/main.go" pad -window 65536 "$DIR/metal/cmd/hopos/cfgblob/hopos.cfg" >&2
 # De kooi-stub gaat mee ín de kern: HOP zet hem vóór élke app op de
 # partitie (kern/cagestub). Op ARM is dat de EL2-trampoline in HOP's eigen
 # image; hier draait het op het app-hart, dus moet het meeliften.

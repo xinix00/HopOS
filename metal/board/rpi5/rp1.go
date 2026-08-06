@@ -21,6 +21,17 @@ const (
 	RP1Base    = 0x1f_0000_0000
 	RP1EthBase = RP1Base + 0x100000 // Cadence GEM registerblok
 
+	// De twee USB3-hostcontrollers van de RP1 (datasheet §5; in de Linux-DT
+	// xhci@200000 en xhci@300000, compatible "generic-xhci"). Generiek en niet
+	// DWC3-met-glue: de RP1 heeft zijn core al in hostmodus gezet vóórdat wij
+	// er zijn, dus hier is geen GCTL-init nodig — anders dan op de Radxa.
+	//
+	// Ze liggen achter dezelfde getrainde PCIe-link als de GEM. Is die link er
+	// niet (ProbeNIC faalde), dan leest hun venster 0xffffffff en zegt de
+	// xHCI-probe dat met zoveel woorden.
+	RP1USB0Base = RP1Base + 0x200000
+	RP1USB1Base = RP1Base + 0x300000
+
 	// BCM2712-kant: de PCIe-root-complex van de RP1-link (pcie2 in de
 	// Linux-DT).
 	PCIe2Base = 0x10_0012_0000

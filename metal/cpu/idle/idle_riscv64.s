@@ -99,9 +99,10 @@ TEXT ·exitTrap(SB),NOSPLIT,$0
 	WORD	$0x00000073		// ecall
 	RET				// onbereikbaar
 
-// func rdtime() uint64 — de TIME CSR. De governor heeft de rauwe stand nodig om
-// het GAT tussen twee idle-rondes te kunnen meten, niet alleen de yield zelf.
-TEXT ·rdtime(SB),NOSPLIT|NOFRAME,$0-8
+// func counterNow() uint64 — de TIME CSR. wakeAt (idle.go) rekent er de
+// pollUntil van de scheduler mee om naar de timebase-tick die de switcher als
+// wektijd begrijpt — zelfde naam en rol als de CNTVCT-lees op arm64.
+TEXT ·counterNow(SB),NOSPLIT|NOFRAME,$0-8
 	WORD	$0xc0102573		// csrr a0, time
 	MOV	A0, ret+0(FP)
 	RET

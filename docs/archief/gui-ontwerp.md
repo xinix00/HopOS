@@ -217,6 +217,48 @@ INPUT is al netwerk; de bron is inwisselbaar:
    tienduizenden aan volledige stack kwijt; die scope nemen we niet). De
    xhci zit op de Pi 5 in de RP1 en RP1's PCIe rijden we al voor de GEM.
 
+> **GEBOUWD 06-08, maar NIET als app — HOP bezit de controller.** De scope
+> klopte (≈1400 regels: `metal/gui/driver/usb/{xhci,dwc3,hid}` +
+> `metal/gui/usbin`, achter `-tags gui`), de eigenaar niet. Een xHCI is een
+> bus-master: hij leest en schrijft descriptors op adressen die hij aangereikt
+> krijgt. De stage-2 begrenst wat de CPU van een app mag zien, maar niet wat
+> een apparaat namens die app doet — daarvoor is een IOMMU nodig, en op dit
+> silicium staat die aantoonbaar uit (we zetten de VOP-IOMMU zélf uit om de
+> scanout aan de praat te krijgen). Een DeviceGrant op een DMA-capabel blok is
+> dus effectief het hele geheugen, en dat botst met "HOP is de vertrouwde
+> kern". P5 (DeviceGrant) blijft dus staan voor apparaten die NIET kunnen
+> DMA'en — precies categorie 1 van de driver-driehoek hieronder. USB valt in
+> categorie 2 (ring-driver), en daar bezit HOP de adressen.
+>
+> **De invoer reist mee met de fb-grant** (Derek, 06-08: *"we kunnen hem ook
+> meesturen met de grant van de GUI, want dat is TOCH wat nodig is voor
+> keyboard en muis"*). Het glas, het toetsenbord en de muis zijn één zitplaats,
+> dus één overdracht: naast `FB_BASE`/`FB_WIDTH`/… zet de grant `INPUT_ADDR` in
+> de env. De app belt dat adres en leest een stroom van exact dezelfde
+> JSON-events die `/input` al aanneemt — één vocabulaire, dezelfde
+> `inputMsg.event()`, dezelfde routering. Een echt toetsenbord is niet te
+> onderscheiden van een browser.
+>
+> Dat de APP belt en HOP luistert is niet omgekeerd-om-het-omgekeerde: het
+> schrapt de hele zoektocht. Toen HOP nog naar de app POST'te moest hij hem
+> eerst vinden — slot uit de grant, IP uit het netwerkvlak, poort uit de
+> job-env — en omdat `gui` het netwerkvlak niet mag lezen werd die knoop in
+> `cmd` gelegd. Nu weet de app waar HOP is, want HOP heeft het hem verteld.
+> Op accept controleert HOP nog wel dat de beller het slot ís dat het glas
+> vasthoudt.
+>
+> **Wat dat blootlegde** (06-08): HOP loste het slot-IP op via ARP, en die
+> requests flooden over de switch naar álle slots — het eerste antwoord won.
+> Een buur-app kon dus de display-IP claimen en meelezen met alles wat je
+> typt. Gerepareerd in twee helften: de interne buren staan nu statisch in de
+> stack (de nummering is deterministisch, dus er valt niets te vragen) en de
+> switch weigert een frame met andermans bron-MAC. Twee tests in
+> `net/hopswitch/gateway_test.go` leggen de aanval vast.
+>
+> Kosten, gemeten op de rk3566-agent: gui-smaak 14.301.602 bytes tegen
+> 14.118.806 kaal — 183 KB voor de héle gui-smaak (scanout + fb-grant + de
+> USB-stack). Een headless node linkt er geen regel van.
+
 ## 7. De driver-driehoek (drivers uit de core, langs de DMA-as)
 
 Vastgelegd als ontwerpprincipe, 2026-07-19. Dit **amendeert** de regel
@@ -253,6 +295,7 @@ cores, DMA-adresvalidatie, klokken, power, pinmux, firmware-mailbox
 | | **P4 stap 1 gedaan (19-07 avond)**: read-only dumptool gebouwd (metal/gui/hvs + debug-endpoint :9091/hvs op de node (sinds 20-07 het opt-in gui-vlak: alleen gelinkt met -tags gui) — zonder UART bevraagbaar) en de éérste dump gedraaid. VONDST: HVS gen6 leeft (VERSION 0x2453, HVS_EN aan) maar álle drie de kanalen staan uit en de dlist-SRAM is onbeschreven ("HVSR"-vulpatroon) — **de firmware-scanout loopt niet via de ARM-zichtbare HVS-displaylists** (vermoedelijk het moplet-blok @0x7c501000, bcm2712.dtsi). Er is dus geen firmware-lijst om te muteren; plan-bijstelling: mop/moplet dumpen → scanout-pointer vinden (double-buffering bijna gratis) óf zelf de eerste HVS-kanaal-configuratie doen (groter werk). | |
 | P5 | DeviceGrant + eerste kooi-driver (GPIO/I2C) | sensor-app tekent meetwaarden in een SURF-scene |
 | P6 | USB-HID input-app | toetsenbord/muis aan de display-node zelf |
+| | **P6 gebouwd 06-08, als HOP-driver i.p.v. app** (zie het kader in §6: xHCI is een DMA-master en er is geen IOMMU). Drie boards bedraad: Radxa (twee DWC3-cores, eerst in hostmodus), Pi 5 (twee xHCI's in de RP1, achter de PCIe-link die de GEM al traint) en Pi 4 (de VL805 achter een BCM2711-root-complex — `driver/brcmpcie` kreeg daarvoor een tweede silicium-variant). Nog NIET op ijzer: de gate bouwt alle drie, geen enkele heeft een toets afgeleverd. | |
 
 Plek van de code (besluit Derek 19-07, bij de bouw van P1): de GUI-stack is
 een **eigen repo — [xinix00/hop-os-surf](https://github.com/xinix00/hop-os-surf)**.

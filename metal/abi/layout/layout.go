@@ -44,6 +44,18 @@ const (
 	NVMeDMABase = DMABase + NetDMASize
 	NVMeDMASize = DMASize - NetDMASize
 
+	// USB-DMA (Plan.USBDMAPA): de xHCI-ringen, device-contexten en
+	// scratchpad-pagina's. Net als de NIC-regio buiten élke RAM-declaratie, dus
+	// device-gemapt en daarmee coherent met een controller die er zonder
+	// cache-onderhoud in leest — dat is de hele reden dat dit een plan-regio is
+	// en geen Go-buffer.
+	//
+	// 2MB is ruim: de vaste structuren zijn ~16KB, elk slot kost 20KB en de
+	// scratchpad is in de praktijk een handvol pagina's. De maat is 2MB omdat de
+	// pool op die korrel gesneden wordt — een kleinere regio zou alsnog 2MB
+	// kosten en alleen de rekensom verwarrend maken.
+	USBDMASize = 0x00200000
+
 	// App-slots (IPA-ABI): het canonieke adresbeeld van een app. Elke image is
 	// op het slot-1-bereik gelinkt; de stage-2 legt dat IPA-venster op de
 	// fysieke partitie die partAlloc uit de pool van het board sneed (precies
@@ -378,6 +390,14 @@ type Plan struct {
 	// (0 = board gebruikt een eigen constante of heeft geen NIC-DMA-plan):
 	// QEMU houdt de vaste NetDMABase binnen HOP's partitie, de Pi-boards
 	// leggen 'm hier vast en DTBPool snijdt 'm uit de pool.
+	USBDMAPA uint64 // xHCI-DMA-regio (USBDMASize; zelfde eis als NetDMAPA:
+	// buiten élke RAM-declaratie). Optioneel (0 = dit board bedient geen USB).
+	//
+	// Het board zet hem in BEIDE smaken, ook headless waar geen regel
+	// USB-code gelinkt is. Dat kost daar 2MB pool die niemand gebruikt, en dat
+	// is met opzet: één plan per board, niet een plan dat van vorm verandert
+	// met een build-tag. Een pool die per smaak anders is, is een pool waarvan
+	// je twee keer moet uitrekenen wat een app krijgt.
 	Pool []Region // vrij DRAM voor app-partities (2MB-korrel)
 
 	// RAMBase is waar het DRAM van dit board fysiek begint — het meetpunt van
@@ -421,6 +441,19 @@ func NetDMAPA() uintptr {
 	}
 	return pa(plan.NetDMAPA)
 }
+
+// USBDMAPA geeft de fysieke xHCI-DMA-regio van het plan (USBDMASize groot).
+// Alleen geldig op boards die 'm zetten (zie het Plan-veld).
+func USBDMAPA() uintptr {
+	if plan.USBDMAPA == 0 {
+		panic("layout: Plan.USBDMAPA niet gezet — dit board heeft geen USB-DMA-plan")
+	}
+	return pa(plan.USBDMAPA)
+}
+
+// HasUSBDMA meldt of dit board een USB-DMA-regio plande, zodat de gui-bedrading
+// een board zonder USB stil kan overslaan in plaats van te panieken.
+func HasUSBDMA() bool { return plan.USBDMAPA != 0 }
 
 // pa bewaakt dat niemand het PA-plan raakt vóór een board het zette.
 func pa(v uint64) uintptr {

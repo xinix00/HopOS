@@ -37,18 +37,13 @@ die geen TLS nodig heeft, betaalt hem nu wel. `metal/app/applib/apphttp` is er
 daarom: minimale HTTP/1.1-GET-client, geen TLS, 0 bytes `crypto/tls` in de
 binary, en maar 0,36MB boven de netstack-vloer.
 
-**Eerst in DEZE repo bijbouwen** — `apphttp` dekt vandaag alleen GET-als-client,
-en dat is te weinig voor de SURF-apps:
+**Het repo-deel is KLAAR** — `apphttp` dekt inmiddels beide kanten:
+`Serve`/`ListenAndServe` (één handler, Content-Length-antwoorden, keep-alive,
+Flush→chunked, Hijack voor de KVM-WebSocket — zie de package-doc van
+`serve.go`) en `Do` met methode + body, dus POST (`apphttp.go`, "de tweede
+helft").
 
-1. **`apphttp.Serve`** — de display (:80) en de launcher serveren HTTP; een
-   client-only pakket helpt ze niet. Request-line + headers parsen, één handler,
-   `Content-Length`-antwoorden. Schatting 80-120 regels mét tests. Zelfde
-   grenzen als de client (regel- én cumulatieve headerlimiet) — dit leest
-   netwerkdata.
-2. **POST** — de launcher POST't jobspecs naar de agent-API. GET → +POST met
-   body is ~25 regels.
-
-**Daarna per SURF-app** (eigen repo). Hieronder wat de env/poorten in
+**Wat rest is per SURF-app** (eigen repo). Hieronder wat de env/poorten in
 `docs/config.md` verraden — de apps zelf zitten hier niet, dus per app nog
 nalopen wát er precies over HTTP gaat:
 
@@ -75,3 +70,41 @@ melding) en geen chunked transfer (`Content-Length` verplicht). Redirects worden
 wél gevolgd.
 
 Zie de package-doc van `metal/app/applib/apphttp` voor de volledige afweging.
+
+## USB-HID op ijzer: drie boards wachten op één toetsaanslag
+
+Gebouwd 06-08, gate groen op alle drie de smaken, **nul boards geverifieerd**.
+De stack (`metal/gui/driver/usb/{xhci,dwc3,hid}` + `metal/gui/usbin`, alles
+achter `-tags gui`) is compleet tot en met de interrupt-endpoint. HOP serveert
+de events op `10.100.0.1:7879` en het adres reist mee in de fb-grant
+(`INPUT_ADDR`); de display belt en leest — zie `stack/surfserve/hopinput.go` in
+hop-os-surf.
+
+Wat de eerste boot per board moet uitwijzen:
+
+**Radxa (rk3566)** — de agent logt per DWC3-core één regel met GSNPSID/GCTL/
+GUSB2PHYCFG/GUSB3PIPECTL, en daarna per controller de rauwe PORTSC's. Drie
+uitkomsten, drie vervolgen:
+- `id=00000000` of `ffffffff` → de core is niet geklokt. Dan is de CRU-gate aan
+  de beurt, en die is **niet geverifieerd** — we hebben hem bewust niet gegokt
+  (de TSADC van deze week is precies wat dat kost). Referentie eerst:
+  `clk-rk3568.c` + `rk3568-cru.h`.
+- Cores komen op, maar op geen enkele poort staat CCS → de fysieke connector
+  van de Zero 3E hangt niet aan een DWC3 maar aan de losse EHCI/OHCI-companions
+  (0xFD800000/0xFD840000, 0xFD880000/0xFD8C0000). Dán pas is een tweede driver
+  te verantwoorden.
+- CCS staat aan → doorlopen tot de attach-regel.
+
+**Pi 5** — het goedkoopste pad: de PCIe-link naar de RP1 staat al voor de GEM.
+Openstaand: of de RP1 zijn USB-blokken zelf uit reset en op klok zet. Zo niet,
+dan is dat het RP1-CLOCKS/RESETS-blok en dus echt werk.
+
+**Pi 4** — `driver/brcmpcie` kreeg een BCM2711-variant (RGR1_SW_INIT_1 voor
+bridge+PERST, HARD_DEBUG op 0x4204, burst 128B, geen RESCAL/MDIO-PLL/UBUS-remap).
+Die is **geschreven tegen de Linux-referentie en nooit uitgevoerd**. Eerste
+meting: traint de link en meldt de VL805 zich als `1106:3483`?
+
+Eén ding is bewust niet vooruitgebouwd: het inbound-window van de BCM2711 is
+identiek gemapt (PCIe 0 → DRAM 0), dus `BusOff` is nul en de vraag "wat als een
+window verschuift" doet zich hier niet voor. Zodra hij dat wél doet is dat een
+meting, geen gok.

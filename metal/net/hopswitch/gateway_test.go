@@ -161,3 +161,53 @@ func TestFromGatewayBezorgtOpSlot(t *testing.T) {
 		t.Fatal("frame beschadigd onderweg")
 	}
 }
+
+// Een slot mag zich niet als een ánder slot voordoen. Dit is de regel die
+// ARP-vergiftiging tussen buren onmogelijk maakt: zonder hem kan slot 2 een
+// ARP-reply namens slot 1 sturen en daarna diens verkeer ontvangen — en sinds
+// HOP toetsaanslagen naar de display stuurt (gui/usbin) is dat meeluisteren
+// met wat de gebruiker typt.
+func TestSlotMagGeenVreemdeBronMACGebruiken(t *testing.T) {
+	resetNAT()
+	setUplink(t)
+	leerGateway(t)
+	got := captureGateway(t)
+
+	// Slot 2 stuurt een frame met de MAC én het IP van slot 1.
+	f := mkFrame(protoTCP, hostMAC, layout.SlotMAC(1), layout.SlotIP4(1), layout.HostIP4(), 5555, 9080, nil)
+	forwardEnDrain(2, f)
+	if len(*got) != 0 {
+		t.Fatalf("vervalst frame kwam tóch bij de interne NIC (%d)", len(*got))
+	}
+
+	// Hetzelfde frame vanaf zijn eigen slot gaat wél door — de regel mag geen
+	// gewoon verkeer breken.
+	eigen := mkFrame(protoTCP, hostMAC, layout.SlotMAC(1), layout.SlotIP4(1), layout.HostIP4(), 5555, 9080, nil)
+	forwardEnDrain(1, eigen)
+	if len(*got) != 1 {
+		t.Fatalf("eigen frame kwam niet aan (%d)", len(*got))
+	}
+}
+
+// Slot-naar-slot loopt langs dezelfde controle: een vervalst frame bereikt de
+// ring van het doelslot niet.
+func TestVervalstFrameBereiktBuurslotNiet(t *testing.T) {
+	resetNAT()
+	lees2 := testSlotRing(t, 2)
+
+	f := mkFrame(protoTCP, layout.SlotMAC(2), layout.SlotMAC(1), layout.SlotIP4(1), layout.SlotIP4(2), 1234, 80, nil)
+	mu.Lock()
+	forward(3, f) // slot 3 doet alsof hij slot 1 is
+	mu.Unlock()
+	if got := lees2(); got != nil {
+		t.Fatal("buurslot kreeg een vervalst frame")
+	}
+
+	// Vanaf slot 1 zelf komt hij wél aan.
+	mu.Lock()
+	forward(1, f)
+	mu.Unlock()
+	if got := lees2(); got == nil {
+		t.Fatal("echt frame kwam niet bij het buurslot aan")
+	}
+}

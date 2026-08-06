@@ -9,17 +9,19 @@
 # headless is geen uitgezette gui maar een build waar geen enkele regel
 # gui-code in gelinkt zit.
 #
-# dd-bare kaart-images (gunzip | dd, kaart boot — het hoofdpad):
+# dd-bare images (gunzip | dd, medium boot — het hoofdpad, élk board):
+#   hopos-uefi[-headless].img.gz         elke UEFI-arm64-machine (USB-stick)
 #   hopos-rpi5[-headless].img.gz         Pi 5
 #   hopos-rpi4[-headless].img.gz         Pi 4
 #   hopos-radxa-zero3[-headless].img.gz  Radxa Zero 3E (donor-U-Boot ingebakken)
-#   hopos-licheerv.img.gz                LicheeRV Nano (headless, cfg ingebakken)
+#   hopos-licheerv-headless.img.gz       LicheeRV Nano (alleen headless: geen
+#                                        framebuffer op dat silicium; cfg
+#                                        ingebakken)
 #
-# drop-in-updates voor een bestaande kaart + UEFI:
+# drop-in-updates voor een bestaand boot-medium:
 #   BOOTAA64.EFI / BOOTAA64-headless.EFI
-#                     elke UEFI-arm64-machine — naar EFI/BOOT/ op een
-#                     FAT-stick (de headless-variant daar hernoemen naar
-#                     BOOTAA64.EFI)
+#                     naar EFI/BOOT/ op een bestaande FAT-stick (de
+#                     headless-variant daar hernoemen naar BOOTAA64.EFI)
 #   hopos-rpi5[-headless].zip   Pi 5 — uitpakken op de SD-bootfs
 #   hopos-rpi4[-headless].zip   Pi 4 — idem
 #   hopos-radxa-zero3[-headless].zip     de drie bootpartitie-bestanden
@@ -64,17 +66,33 @@ DIST="$DIR/out-release/$TAG"
 rm -rf "$DIST"
 mkdir -p "$DIST"
 
-# 2. UEFI-images via HET bouwrecept (image/uefi-run.sh agent; BUILD_ONLY stopt
-#    vóór QEMU), in beide smaken. Headless éérst en gui laatst, zodat de tree
-#    na afloop in de default-staat (gui) achterblijft. Alléén de PE wordt
-#    meegenomen — nooit iets anders uit de gitignorede uefi-esp-agent/, daar
-#    wonen node-configs met geheimen.
-echo ">> BOOTAA64-headless.EFI (uefi-run.sh agent, GUI=0, build-only)" >&2
+# gzimg: het dd-bare kaart/stick-image van een board-script naar de release.
+# De imagescripts slaan het img LUID over als firmware/donor ontbreekt (en
+# ruimen dan een oud exemplaar op); dan hier ook overslaan i.p.v. falen —
+# de overige assets zijn compleet, zelfde regel als de licheerv-donor.
+gzimg() { # gzimg <bron.img> <asset-naam zonder .gz>
+	if [ -f "$1" ]; then
+		gzip -9 -n -c "$1" > "$DIST/$2.gz"
+	else
+		echo ">> OVERGESLAGEN: $2.gz — $1 is niet gebouwd (firmware/donor ontbreekt?)" >&2
+	fi
+}
+
+# 2. UEFI via HET bouwrecept (image/uefi-run.sh agent; BUILD_ONLY stopt vóór
+#    QEMU), in beide smaken: het dd-bare stick-image (hoofdpad) + de losse PE
+#    (update van een bestaande stick). Headless éérst en gui laatst, zodat de
+#    tree na afloop in de default-staat (gui) achterblijft. Alléén de PE en
+#    het vers gebouwde img worden meegenomen — nooit iets anders uit de
+#    gitignorede uefi-esp-agent/, daar wonen node-configs met geheimen (het
+#    img krijgt zijn config als template uit image/, zie uefi-run.sh).
+echo ">> hopos-uefi-headless.img.gz + BOOTAA64-headless.EFI (uefi-run.sh agent, GUI=0, build-only)" >&2
 BUILD_ONLY=1 GUI=0 "$DIR/image/uefi-run.sh" agent >/dev/null
 cp "$DIR/uefi-esp-agent/EFI/BOOT/BOOTAA64.EFI" "$DIST/BOOTAA64-headless.EFI"
-echo ">> BOOTAA64.EFI (uefi-run.sh agent, build-only)" >&2
+gzimg "$DIR/metal/out/hopos-uefi.img" hopos-uefi-headless.img
+echo ">> hopos-uefi.img.gz + BOOTAA64.EFI (uefi-run.sh agent, build-only)" >&2
 BUILD_ONLY=1 "$DIR/image/uefi-run.sh" agent >/dev/null
 cp "$DIR/uefi-esp-agent/EFI/BOOT/BOOTAA64.EFI" "$DIST/"
+gzimg "$DIR/metal/out/hopos-uefi.img" hopos-uefi.img
 
 # 3. Pi-zips: drop-in op de SD-bootfs — precies de bestandsnamen die de
 #    firmware verwacht (config.txt wijst de kernel aan), niets hernoemen;
@@ -89,17 +107,6 @@ CFGHL="$DIST/.cfg-headless"
 mkdir -p "$CFGGUI" "$CFGHL"
 cp "$DIR/image/hopos-gui.cfg" "$CFGGUI/hopos.cfg"
 cp "$DIR/image/hopos-headless.cfg" "$CFGHL/hopos.cfg"
-# gzimg: het dd-bare kaart-image van een board-script naar de release.
-# De imagescripts slaan het img LUID over als firmware/donor ontbreekt (en
-# ruimen dan een oud exemplaar op); dan hier ook overslaan i.p.v. falen —
-# de overige assets zijn compleet, zelfde regel als de licheerv-donor.
-gzimg() { # gzimg <bron.img> <asset-naam zonder .gz>
-	if [ -f "$1" ]; then
-		gzip -9 -n -c "$1" > "$DIST/$2.gz"
-	else
-		echo ">> OVERGESLAGEN: $2.gz — $1 is niet gebouwd (firmware/donor ontbreekt?)" >&2
-	fi
-}
 GUI=0 "$DIR/image/rpi5-agent.sh" >/dev/null
 (cd "$DIR/sd-rpi5" && zip -q -j "$DIST/hopos-rpi5-headless.zip" hop-agent5.img config.txt "$CFGHL/hopos.cfg")
 gzimg "$DIR/metal/out/hopos-rpi5.img" hopos-rpi5-headless.img
@@ -143,20 +150,23 @@ gzimg "$DIR/metal/out/hopos-radxa-zero3.img" hopos-radxa-zero3.img
 #     MONITOR-slot van fip.bin. Twee gevolgen voor de release: het asset is een
 #     dd-baar .img (gzip: de FAT-partitie is grotendeels leeg), en de config zit
 #     ÍNGEBAKKEN — HopOS heeft geen SD-driver, dus er is geen bestand om op de
-#     kaart te bewerken. Configureren = herbouwen met CFG=... Daarom gaat het
-#     template als los asset mee, zodat je ziet wát erin zit.
+#     kaart te bewerken. Wat erin zit is de headless-default (het
+#     hopos-headless.cfg-asset hierboven — er zijn precies TWEE default-configs,
+#     gui en headless, en géén board-specifieke derde); een eigen config is
+#     herbouwen met CFG=...
 #
 #     Alleen bouwen als de Sipeed-donor aanwezig is (vendor-bestand, gitignored
 #     in image/licheerv/ — zelfde default als licheerv-agent.sh): zonder slaat
 #     de release deze smaak LUIDRUCHTIG over i.p.v. te falen — de rest van de
 #     assets is compleet.
 if [ -f "${LICHEERV_DONOR:-$DIR/image/licheerv/donor-fip.bin}" ]; then
-	echo ">> hopos-licheerv.img.gz (RISC-V, headless, config ingebakken)" >&2
-	CFG="$DIR/image/hopos-licheerv.cfg" "$DIR/image/licheerv-agent.sh" >/dev/null
-	gzip -9 -n -c "$DIR/metal/out/hopos-licheerv.img" > "$DIST/hopos-licheerv.img.gz"
-	cp "$DIR/image/hopos-licheerv.cfg" "$DIST/hopos-licheerv.cfg"
+	# -headless in de assetnaam, óók al is er geen andere smaak: overal elders
+	# betekent een naam zónder -headless de gui-smaak, en dat is dit niet.
+	echo ">> hopos-licheerv-headless.img.gz (RISC-V, headless-config ingebakken)" >&2
+	"$DIR/image/licheerv-agent.sh" >/dev/null
+	gzip -9 -n -c "$DIR/metal/out/hopos-licheerv.img" > "$DIST/hopos-licheerv-headless.img.gz"
 else
-	echo ">> OVERGESLAGEN: hopos-licheerv.img.gz — donor-fip ontbreekt" >&2
+	echo ">> OVERGESLAGEN: hopos-licheerv-headless.img.gz — donor-fip ontbreekt" >&2
 	echo "   (zet LICHEERV_DONOR, zie image/licheerv-agent.sh)" >&2
 fi
 
@@ -175,21 +185,22 @@ ssh-keygen -Y verify -q -f allowed_signers -I "$SIGNER" \
 cd "$DIR"
 NOTES="Prebuilt, signed boot images — https://gethop.org/hopos/ for the 5-minute quickstart.
 
-**Card images — flash and boot.** \`gunzip\`, \`dd\` to an SD card, done: firmware/U-Boot is already on it. The boot partition is plain FAT, so it mounts on macOS/Windows/Linux afterwards — \`hopos.cfg\` stays editable and a kernel update is a file copy.
+**Images — flash and boot.** \`gunzip\`, \`dd\` to an SD card or USB stick, done: firmware/boot chain is already on it, nothing to rename or copy. The boot partition is plain FAT, so it mounts on macOS/Windows/Linux afterwards — \`hopos.cfg\` stays editable and a kernel update is a file copy.
 
+- **hopos-uefi.img.gz** — any UEFI arm64 box, dd to a USB stick
 - **hopos-rpi5.img.gz** — Raspberry Pi 5
 - **hopos-rpi4.img.gz** — Raspberry Pi 4
 - **hopos-radxa-zero3.img.gz** — Radxa Zero 3E (RK3566), vendor U-Boot chain included on its raw sectors
-- **hopos-licheerv.img.gz** — LicheeRV Nano (RISC-V, headless): this board has no SD driver, so its config is **baked into the image** — \`hopos-licheerv.cfg\` is what went into this build; to change it, rebuild with \`CFG=~/my-node.cfg image/licheerv-agent.sh /dev/diskN\`.
-- \`*-headless.img.gz\` — the same cards built with \`GUI=0\` (**zero GUI code linked**) and the headless config.
+- **hopos-licheerv-headless.img.gz** — LicheeRV Nano (RISC-V; headless is the only flavour — no framebuffer on that silicon): this board has no SD driver, so its config is **baked into the image** — the baked config IS the headless default (\`hopos-headless.cfg\` below); to change it, rebuild with \`CFG=~/my-node.cfg image/licheerv-agent.sh /dev/diskN\`.
+- \`*-headless.img.gz\` — the same images built with \`GUI=0\` (**zero GUI code linked**) and the headless config.
 
 macOS example: \`diskutil unmountDisk /dev/diskN && gunzip -c hopos-rpi5.img.gz | sudo dd of=/dev/rdiskN bs=4m\`
 
-**Updates & UEFI — files onto an existing boot partition:**
+**Updates — files onto an existing boot medium:**
 
 - **hopos-rpi5.zip / hopos-rpi4.zip** — unzip onto the SD bootfs
 - **hopos-radxa-zero3.zip** — the three boot-partition files (\`extlinux.conf\` points U-Boot at our image); the partition of a card written from our .img mounts everywhere
-- **BOOTAA64.EFI** — any UEFI arm64 box: copy to \`EFI/BOOT/\` on a FAT USB stick, put \`hopos.cfg\` (below) in the stick root. Headless: rename \`BOOTAA64-headless.EFI\` to \`BOOTAA64.EFI\`.
+- **BOOTAA64.EFI** — the bare UEFI PE, for refreshing an existing stick: copy to \`EFI/BOOT/\`, put \`hopos.cfg\` (below) in the stick root. Headless: rename \`BOOTAA64-headless.EFI\` to \`BOOTAA64.EFI\`.
 - **hopos.cfg** — the default GUI config (also inside the images and zips): a full desktop — display, launcher and app catalog, no addresses to fill in and **no edit required to boot**. The API ships open (\`hopos.insecure=1\`) so a written card is a working node; set \`hopos.apikey\` and drop that line before the node leaves a LAN you trust.
 - **hopos-headless.cfg** — the headless default (inside the \`*-headless\` images/zips as \`hopos.cfg\`): same keys, no desktop — seed your own \`hopos.init[]\` jobs. For a UEFI stick, rename it to \`hopos.cfg\`.
 

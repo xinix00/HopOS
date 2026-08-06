@@ -72,6 +72,25 @@ const (
 	// VideoCore-firmware-mailbox (brcm,bcm2835-mbox, klassieke basis) —
 	// metal/driver/vcmail: temperatuur, ARM-klok, board-MAC.
 	VCMailBase = 0xFE00B880
+
+	// PCIe-root-complex (brcm,bcm2711-pcie, DT pcie@7d500000 in de
+	// 0x7e000000-view → 0xFD500000 in low-peripheral-mode). Er hangt precies
+	// één ding aan: de VL805, en dat is de héle USB van dit bord. Vandaar dat
+	// board.PCIe() nog steeds een leeg ECAM-venster geeft — hier valt niets te
+	// enumereren, alleen één bekende endpoint op te brengen.
+	PCIeBase = 0xFD500000
+
+	// Het outbound-venster van die root-complex, uit de Pi 4-DT: CPU
+	// 0x6_0000_0000 (64MB) ziet PCIe 0xF8000000. De VL805 krijgt zijn BAR0
+	// daar, dus zijn xHCI-registers verschijnen op VL805Base.
+	PCIeCPUWin  = 0x6_0000_0000
+	PCIeBusWin  = 0xF800_0000
+	PCIeWinSize = 0x0400_0000
+	VL805Base   = PCIeCPUWin
+
+	// VIA VL805: vendor 0x1106, device 0x3483. De configread geeft
+	// device<<16|vendor, dus dít is de waarde om tegen te vergelijken.
+	VL805ID = 0x3483_1106
 )
 
 // CoreID geeft de eigen core-index. De Cortex-A72 nummert cores in

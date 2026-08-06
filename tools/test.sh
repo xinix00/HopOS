@@ -25,7 +25,7 @@ go run ../tools/importcheck.go
 go test -tags gui "$@" \
 	./abi/ring ./net/hopswitch ./kern/stage2 ./abi/layout ./net/dhcp ./abi/hopabi ./abi/checksum \
 	./fw/fdt ./fw/acpi ./fw/bootcfg ./kern/hopfs ./driver/vcmail ./driver/nic/mdio ./kern/slots \
-	./gui/fbgrant ./app/applib/apphttp ./kern/cage ./driver/nic/dwmac ./driver/nic/dwmac4 ./cmd/hopos/cfgblob ./driver/conlog \
+	./gui/fbgrant ./gui/driver/usb/hid ./app/applib/apphttp ./kern/cage ./driver/nic/dwmac ./driver/nic/dwmac4 ./cmd/hopos/cfgblob ./driver/conlog \
 	./kern/cagestub ./net/nodemac
 
 TAMAGO="${TAMAGO:-$HOME/tamago-go/bin/go}"
@@ -71,11 +71,13 @@ trap gate_clean EXIT INT TERM
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags linkcpuinit -o /dev/null ./app/appspike ./app/apploader ./app/hello
 # Elke board-smaak kaal; plus de gui-smaak (metal/gui achter -tags gui) op
-# virt (bewijst de bedrading zonder Display-board) en rpi5 (mét). En één smaak
-# mét embedloader: dát is wat élk echt board-image bouwt, en die tag was nergens
-# gedekt omdat de blob alleen bestond als iemand net een image gebouwd had.
+# virt (bewijst de bedrading zonder Display-board), rpi5 (mét) en rpi4 (de
+# VL805-USB achter de BCM2711-root-complex — de enige plek waar dat pad
+# compileert). En één smaak mét embedloader: dát is wat élk echt board-image
+# bouwt, en die tag was nergens gedekt omdat de blob alleen bestond als iemand
+# net een image gebouwd had.
 gate_stub kern/apploaderblob/apploader.elf.gz
-for tags in "linkcpuinit" "rpi4 linkcpuinit" "rpi5 linkcpuinit" "uefi linkcpuinit" "gui linkcpuinit" "rpi5 gui linkcpuinit" "rpi5 linkcpuinit embedloader"; do
+for tags in "linkcpuinit" "rpi4 linkcpuinit" "rpi5 linkcpuinit" "uefi linkcpuinit" "gui linkcpuinit" "rpi4 gui linkcpuinit" "rpi5 gui linkcpuinit" "rpi5 linkcpuinit embedloader"; do
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "$tags" -o /dev/null ./cmd/hopos
 done

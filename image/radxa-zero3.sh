@@ -171,7 +171,7 @@ if [ "${PROBE:-0}" = 1 ] || [ "${EMBED:-0}" = 1 ]; then
 	CARD="metal/out/$NAME-card.img"
 fi
 go run "$DIR/image/mkcard/main.go" -o "$CARD" -size 64 -start 32768 \
-	-label hopos -vollabel -raw "$DONOR@32768" \
+	-label hopos -vollabel -cfgwindow 1048576 -raw "$DONOR@32768" \
 	"metal/out/$NAME.img" metal/out/hopos.cfg \
 	metal/out/extlinux.conf=extlinux/extlinux.conf >&2
 

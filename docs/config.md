@@ -7,7 +7,8 @@ One set of keys, every board. Only the file differs:
 | UEFI (USB stick) | `hopos.cfg` in the stick's root | one `key=value` per line, `#` comments |
 | Raspberry Pi | `hopos.cfg` on the SD bootfs | one `key=value` per line, `#` comments |
 | Raspberry Pi (alternative) | `cmdline.txt` on the SD bootfs | same keys as whitespace-separated tokens on the single cmdline |
-| LicheeRV Nano | baked into the image (`CFG=… image/licheerv-agent.sh`) — that board has no SD driver, so there is no file on the card to edit; the config in the released image is published as [`hopos-licheerv.cfg`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-licheerv.cfg) | one `key=value` per line, `#` comments |
+| Radxa Zero 3E | `hopos.cfg` on the boot partition (U-Boot hands it to HopOS via the extlinux `initrd` line) | one `key=value` per line, `#` comments |
+| LicheeRV Nano | baked into the image (`CFG=… image/licheerv-agent.sh`) — that board has no SD driver, so there is no file on the card to edit; the released image bakes the headless default ([`hopos-headless.cfg`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-headless.cfg)) | one `key=value` per line, `#` comments |
 
 Every board that reads a **file** reads it the same way: one key per line, a
 value may contain spaces, and a line starting with `#` is a comment — with or
@@ -16,6 +17,27 @@ only because it is a kernel command line: there the whole config is one line of
 whitespace-separated tokens, so a value cannot contain a space.
 
 Editing the file **is** node management — no shell, no rebuild, no agent.
+
+## hopcfg — edit the config without a mount
+
+Every card image carries `hopos.cfg` as a fixed-size **config window**: a
+magic first line (`#HOPCFG1 window=… len=…`), the config itself, and
+`#`-comment padding (1 MiB on the cards, 64 KiB inside the LicheeRV kernel).
+To every parser it is just a config file — but it makes the bytes patchable
+**in place**, so one tool edits it anywhere, before or after flashing,
+without mounting anything and regardless of whether the OS can mount the
+partition at all:
+
+    go run image/hopcfg/main.go show     hopos-radxa-zero3.img
+    go run image/hopcfg/main.go replace  hopos-radxa-zero3.img my-node.cfg
+    sudo go run image/hopcfg/main.go replace /dev/rdisk4 my-node.cfg
+
+This covers every board — including the LicheeRV, where the config is baked
+into the kernel: hopcfg finds the window inside the Sophgo FIP and updates
+the checksums that guard it (`MONITOR_CKSUM`, `PARAM2_CKSUM`), so the FSBL
+keeps accepting the image. On boards whose partition does mount (Pi, UEFI
+stick) editing the file directly keeps working exactly as before — the
+window is only comments.
 
 ## The keys
 
@@ -170,7 +192,9 @@ and to the agent on `10.100.0.1:8080`. Set `SURF_ADDR`/`HOP_ADDR` only to
 point at *another* node — a hopdns name like `display.hop.local:7878`, or an
 explicit address. The display's `"FB":"1"` asks for the framebuffer grant
 (render to the real screen); without a framebuffer the desktop is still
-served over HTTP. This whole block ships as the default config in every GUI
+served over HTTP. A USB keyboard and mouse plugged into the node arrive with
+that same grant — screen and input are one seat, so there is nothing extra to
+configure. This whole block ships as the default config in every GUI
 release asset ([`image/hopos-gui.cfg`](../image/hopos-gui.cfg) in the tree,
 [`hopos.cfg`](https://github.com/xinix00/HopOS/releases/latest/download/hopos.cfg)
 in the newest release).

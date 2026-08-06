@@ -75,10 +75,10 @@ TEXT ·cntfrq(SB),NOSPLIT,$0-8
 	MOVD	R0, ret+0(FP)
 	RET
 
-// cntvct: de rauwe generic-timer-stand. De governor heeft hem nodig om het GAT
-// tussen twee idle-rondes te meten (zie gap.go) — de yield/WFE alleen is niet de
-// hele idle-tijd.
-TEXT ·cntvct(SB),NOSPLIT,$0-8
+// counterNow: de rauwe generic-timer-stand. wakeAt (idle.go) rekent er de
+// pollUntil van de scheduler mee om naar de CNTVCT-stand die de EL2-switch
+// als wektijd begrijpt — zelfde naam en rol als de TIME-CSR-lees op riscv64.
+TEXT ·counterNow(SB),NOSPLIT,$0-8
 	WORD	$0xd53be040	// mrs x0, cntvct_el0
 	MOVD	R0, ret+0(FP)
 	RET

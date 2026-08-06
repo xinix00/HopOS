@@ -113,6 +113,7 @@ if [ -z "$FW_MISSING" ]; then
 	DEFCFG="$DIR/image/hopos-headless.cfg"
 	[ "${GUI:-1}" = 1 ] && DEFCFG="$DIR/image/hopos-gui.cfg"
 	go run "$DIR/image/mkcard/main.go" -o metal/out/hopos-rpi5.img -size 64 \
+		-cfgwindow 1048576 \
 		-start 8192 -label bootfs -vollabel \
 		sd-rpi5/hop-agent5.img sd-rpi5/config.txt "${CFG:-$DEFCFG}=hopos.cfg" \
 		sd-rpi5/bcm2712-rpi-5-b.dtb \

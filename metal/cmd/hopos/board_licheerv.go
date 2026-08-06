@@ -32,9 +32,10 @@ import (
 // dan hoort te zien: hij parkeert zijn API luid (HOPOS_API_NO_AUTH) en de node
 // blijft leven. Een `-tags licheerv`-build ZONDER embedcfg synthetiseerde hier
 // eerder hopos.insecure=1, en dat holde die fail-closed-controle uit: een build
-// waarvan de bouwer niets gezegd had zette de auth-poort open. De voorbeeldconfig
-// (image/hopos-licheerv.cfg) kiest die opt-out expliciet — dat is waar zo'n
-// beslissing hoort te staan, in tekst die een operator leest.
+// waarvan de bouwer niets gezegd had zette de auth-poort open. De ingebakken
+// default (image/hopos-headless.cfg — de headless-template van álle boards)
+// kiest die opt-out expliciet — dat is waar zo'n beslissing hoort te staan, in
+// tekst die een operator leest.
 //
 // Zodra de FAT wél gelezen kan worden hoort dié de voorkeur te krijgen (een kaart
 // in een laptop aanpassen is makkelijker dan een image bouwen) en blijft de

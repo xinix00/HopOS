@@ -96,6 +96,78 @@ func (h hdr) propName(nameOff uint32) (uintptr, bool) {
 	return p, true
 }
 
+// walk loopt het structure-block af en ontleedt de tokens één keer — de drie
+// lezers (MemRegions, nodeBytes, Framebuffer) deden dit elk met een eigen
+// kopie van dezelfde lus, en drie kopieën van bounds-checks op onvertrouwde
+// firmware-input zijn drie kansen op één vergeten check. De lezer-specifieke
+// staat reist als closure mee in de callbacks:
+//
+//   - begin: ná FDT_BEGIN_NODE, met de diepte van de nieuwe node (root = 1) en
+//     zijn naam als [name,end)-venster (niet gekopieerd — nameIs leest ter
+//     plekke).
+//   - endNode: bij FDT_END_NODE, met de diepte van de node die sluit; true
+//     stopt de wandeling (Framebuffer is klaar zodra zijn node sluit).
+//   - prop: per property mét geldige naam in het strings-block (een kromme
+//     nameoff wordt overgeslagen, zoals alle lezers al deden), met de diepte
+//     van de omvattende node; true stopt de wandeling.
+//
+// Retour false bij een kromme blob — een afgekapte property of een onbekend
+// token. Vroeg stoppen en het einde van het blok bereiken zijn allebei true;
+// wat dat betékent (gevonden of niet) weet alleen de aanroeper, via zijn
+// eigen closure-staat.
+func (h hdr) walk(
+	begin func(depth int, name, end uintptr),
+	endNode func(depth int) bool,
+	prop func(depth int, name, data uintptr, plen uint32) bool,
+) bool {
+	p, end := h.structs, h.structEnd
+	depth := 0
+	for p+4 <= end {
+		tok := be32(p)
+		p += 4
+		switch tok {
+		case tokBegin:
+			depth++
+			name := p
+			for p < end && dev.Read8(p) != 0 {
+				p++
+			}
+			begin(depth, name, p)
+			p = align4(p + 1)
+		case tokEnd:
+			if endNode(depth) {
+				return true
+			}
+			depth--
+		case tokProp:
+			if p+8 > end {
+				return false
+			}
+			plen := be32(p)
+			nameOff := be32(p + 4)
+			p += 8
+			data := p
+			p = align4(p + uintptr(plen))
+			if p > end {
+				return false
+			}
+			np, ok := h.propName(nameOff)
+			if !ok {
+				continue
+			}
+			if prop(depth, np, data, plen) {
+				return true
+			}
+		case tokNop:
+		case tokEndTree:
+			return true
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // Valid meldt of op base een geldige DTB-blob staat: een niet-nul-pointer met
 // het FDT-magic (0xd00dfeed, big-endian) op offset 0 en een header die zichzelf
 // kan dragen. Dé onderscheidende test voor "kreeg dit board een device-tree
@@ -152,46 +224,18 @@ func MemRegions(base uintptr) ([]Region, bool) {
 		return nil, false
 	}
 
-	p := h.structs
-	end := h.structEnd
-
-	depth := 0
 	inMemNode := false
 	addrCells := uint32(2)
 	sizeCells := uint32(1)
+	badCells := false
 	var regs []Region
 
-	for p+4 <= end {
-		tok := be32(p)
-		p += 4
-		switch tok {
-		case tokBegin:
-			depth++
-			name := p
-			for p < end && dev.Read8(p) != 0 {
-				p++
-			}
-			inMemNode = depth == 2 && nameIs(name, p, "memory", true)
-			p = align4(p + 1)
-		case tokEnd:
-			inMemNode = false
-			depth--
-		case tokProp:
-			if p+8 > end {
-				return nil, false
-			}
-			plen := be32(p)
-			nameOff := be32(p + 4)
-			p += 8
-			data := p
-			p = align4(p + uintptr(plen))
-			if p > end {
-				return nil, false
-			}
-			np, ok := h.propName(nameOff)
-			if !ok {
-				continue
-			}
+	ok = h.walk(
+		func(depth int, name, end uintptr) {
+			inMemNode = depth == 2 && nameIs(name, end, "memory", true)
+		},
+		func(int) bool { inMemNode = false; return false },
+		func(depth int, np, data uintptr, plen uint32) bool {
 			if depth == 1 && plen == 4 {
 				if propIs(np, h.stringsEnd, "#address-cells") {
 					addrCells = be32(data)
@@ -202,7 +246,8 @@ func MemRegions(base uintptr) ([]Region, bool) {
 			// In /memory: reg = [ (addr,size) ... ] met root's cell-counts.
 			if inMemNode && propIs(np, h.stringsEnd, "reg") {
 				if addrCells == 0 || addrCells > 2 || sizeCells == 0 || sizeCells > 2 {
-					return nil, false
+					badCells = true
+					return true
 				}
 				stride := uintptr(addrCells+sizeCells) * 4
 				szOff := uintptr(addrCells) * 4
@@ -221,12 +266,10 @@ func MemRegions(base uintptr) ([]Region, bool) {
 					regs = append(regs, Region{Addr: a, Size: s})
 				}
 			}
-		case tokNop:
-		case tokEndTree:
-			return regs, len(regs) > 0
-		default:
-			return nil, false
-		}
+			return false
+		})
+	if !ok || badCells {
+		return nil, false
 	}
 	return regs, len(regs) > 0
 }
@@ -297,62 +340,39 @@ func nodeBytes(base uintptr, node, name string) ([]byte, bool) {
 		return nil, false
 	}
 
-	p := h.structs
-	end := h.structEnd
-	depth := 0
 	inNode := node == "" // root-props zitten op depth 1
+	wantDepth := 1
+	if node != "" {
+		wantDepth = 2
+	}
+	var b []byte
 
-	for p+4 <= end {
-		tok := be32(p)
-		p += 4
-		switch tok {
-		case tokBegin:
-			depth++
-			nameStart := p
-			for p < end && dev.Read8(p) != 0 {
-				p++
-			}
+	ok = h.walk(
+		func(depth int, nameStart, end uintptr) {
 			if node != "" {
-				inNode = depth == 2 && nameIs(nameStart, p, node, false)
+				inNode = depth == 2 && nameIs(nameStart, end, node, false)
 			}
-			p = align4(p + 1)
-		case tokEnd:
+		},
+		func(depth int) bool {
 			if node != "" && depth == 2 {
 				inNode = false
 			}
-			depth--
-		case tokProp:
-			if p+8 > end {
-				return nil, false
+			return false
+		},
+		func(depth int, np, data uintptr, plen uint32) bool {
+			if !inNode || depth != wantDepth || !propIs(np, h.stringsEnd, name) {
+				return false
 			}
-			plen := be32(p)
-			nameOff := be32(p + 4)
-			p += 8
-			data := p
-			p = align4(p + uintptr(plen))
-			if p > end {
-				return nil, false
+			b = make([]byte, 0, plen)
+			for i := uintptr(0); i < uintptr(plen); i++ {
+				b = append(b, dev.Read8(data+i))
 			}
-			wantDepth := 1
-			if node != "" {
-				wantDepth = 2
-			}
-			np, nok := h.propName(nameOff)
-			if inNode && depth == wantDepth && nok && propIs(np, h.stringsEnd, name) {
-				b := make([]byte, 0, plen)
-				for i := uintptr(0); i < uintptr(plen); i++ {
-					b = append(b, dev.Read8(data+i))
-				}
-				return b, true
-			}
-		case tokNop:
-		case tokEndTree:
-			return nil, false
-		default:
-			return nil, false
-		}
+			return true
+		})
+	if !ok || b == nil {
+		return nil, false
 	}
-	return nil, false
+	return b, true
 }
 
 // MemReserve leest het /memreserve/-blok uit de DTB-header (off_mem_rsvmap,
@@ -427,61 +447,37 @@ func Framebuffer(base uintptr) (FB, bool) {
 		return FB{}, false
 	}
 
-	p := h.structs
-	end := h.structEnd
-
-	depth := 0
 	inChosen := false // depth 2: "chosen"
 	inFB := false     // depth 3: "framebuffer@..." onder chosen
 	addrCells := uint32(2)
+	found := false
 	var fb FB
 	fb.BPP = 32 // default; alleen r5g6b5 maakt er 16 van
 
-	for p+4 <= end {
-		tok := be32(p)
-		p += 4
-		switch tok {
-		case tokBegin:
-			depth++
-			name := p
-			for p < end && dev.Read8(p) != 0 {
-				p++
-			}
+	ok = h.walk(
+		func(depth int, name, end uintptr) {
 			switch depth {
 			case 2:
-				inChosen = nameIs(name, p, "chosen", false)
+				inChosen = nameIs(name, end, "chosen", false)
 			case 3:
-				inFB = inChosen && nameIs(name, p, "framebuffer", true)
+				inFB = inChosen && nameIs(name, end, "framebuffer", true)
 			}
-			p = align4(p + 1)
-		case tokEnd:
+		},
+		func(depth int) bool {
 			if inFB && depth == 3 {
 				// Node compleet: geldig als de kern-velden er waren.
 				if fb.Base != 0 && fb.Width != 0 && fb.Height != 0 && fb.Stride != 0 {
-					return fb, true
+					found = true
+					return true
 				}
 				inFB = false
 			}
 			if depth == 2 {
 				inChosen = false
 			}
-			depth--
-		case tokProp:
-			if p+8 > end {
-				return FB{}, false
-			}
-			plen := be32(p)
-			nameOff := be32(p + 4)
-			p += 8
-			data := p
-			p = align4(p + uintptr(plen))
-			if p > end {
-				return FB{}, false
-			}
-			np, nok := h.propName(nameOff)
-			if !nok {
-				continue
-			}
+			return false
+		},
+		func(depth int, np, data uintptr, plen uint32) bool {
 			sEnd := h.stringsEnd
 			// De cellen van het DICHTSTBIJZIJNDE niveau winnen: de Pi-firmware
 			// schrijft /chosen mét een eigen #address-cells=1 en de framebuffer-
@@ -495,12 +491,12 @@ func Framebuffer(base uintptr) (FB, bool) {
 				addrCells = be32(data)
 			}
 			if !inFB {
-				continue
+				return false
 			}
 			switch {
 			case propIs(np, sEnd, "reg"):
 				if addrCells == 0 || addrCells > 2 || uintptr(plen) < uintptr(addrCells)*4 {
-					continue
+					return false
 				}
 				if addrCells == 1 {
 					fb.Base = uint64(be32(data))
@@ -518,14 +514,12 @@ func Framebuffer(base uintptr) (FB, bool) {
 					fb.BPP = 16 // r5g6b5
 				}
 			}
-		case tokNop:
-		case tokEndTree:
-			return FB{}, false
-		default:
-			return FB{}, false
-		}
+			return false
+		})
+	if !ok || !found {
+		return FB{}, false
 	}
-	return FB{}, false
+	return fb, true
 }
 
 // nameIs meldt of de node-naam in [start,end) exact s is, of (met unit=true)

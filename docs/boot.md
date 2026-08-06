@@ -5,10 +5,11 @@ Five ways to a running node. Every download link on this page resolves to the
 ([all releases](https://github.com/xinix00/HopOS/releases)); verification at
 the bottom.
 
-The SD-card boards ship as **complete card images**: `gunzip`, `dd`, boot —
-firmware and boot chain are already on them. The boot partition is plain FAT,
-so after flashing it mounts on macOS/Windows/Linux and `hopos.cfg` stays a
-text file you can edit; a kernel update is a file copy.
+Every board ships as a **complete dd-able image** — SD card or USB stick:
+`gunzip`, `dd`, boot. Firmware and boot chain are already on it, and there is
+nothing to format, rename or copy. The boot partition is plain FAT, so after
+flashing it mounts on macOS/Windows/Linux and `hopos.cfg` stays a text file
+you can edit; a kernel update is a file copy.
 
 Every arm64 asset comes in two flavours. **GUI** boots a desktop (display,
 launcher, app catalog); **headless** is not a switched-off GUI but the same
@@ -18,19 +19,31 @@ RISC-V board is headless only: no framebuffer on that silicon.
 
 ## UEFI arm64 box (USB stick)
 
-Any UEFI arm64 machine with ACPI — from an Ampere Altra server on down.
+Any UEFI arm64 machine with ACPI — from an Ampere Altra server on down. One
+stick image, nothing to format or rename:
 
-1. Format a USB stick as FAT32.
-2. Copy [`BOOTAA64.EFI`](https://github.com/xinix00/HopOS/releases/latest/download/BOOTAA64.EFI)
-   to `EFI/BOOT/BOOTAA64.EFI` on the stick. Headless:
-   [`BOOTAA64-headless.EFI`](https://github.com/xinix00/HopOS/releases/latest/download/BOOTAA64-headless.EFI),
-   renamed to `BOOTAA64.EFI` — the firmware looks for that exact name.
-3. Copy [`hopos.cfg`](https://github.com/xinix00/HopOS/releases/latest/download/hopos.cfg)
-   (headless:
-   [`hopos-headless.cfg`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-headless.cfg),
-   renamed to `hopos.cfg`) to the stick's root and set `hopos.apikey` — that
-   default config boots as-is; see [Configure](config.md) to tune it.
-4. Boot from the stick. That's the install.
+```sh
+diskutil unmountDisk /dev/diskN
+gunzip -c hopos-uefi.img.gz | sudo dd of=/dev/rdiskN bs=4m
+```
+
+Grab
+[`hopos-uefi.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-uefi.img.gz)
+(headless:
+[`hopos-uefi-headless.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-uefi-headless.img.gz))
+— it carries `EFI/BOOT/BOOTAA64.EFI` and the flavour's default `hopos.cfg`.
+Boot from the stick; that's the install. Set `hopos.apikey` in `hopos.cfg` on
+the stick before the node leaves a LAN you trust — see [Configure](config.md).
+
+Updating a stick you already have: copy
+[`BOOTAA64.EFI`](https://github.com/xinix00/HopOS/releases/latest/download/BOOTAA64.EFI)
+to `EFI/BOOT/BOOTAA64.EFI` (headless:
+[`BOOTAA64-headless.EFI`](https://github.com/xinix00/HopOS/releases/latest/download/BOOTAA64-headless.EFI),
+renamed to `BOOTAA64.EFI` — the firmware looks for that exact name) and put
+[`hopos.cfg`](https://github.com/xinix00/HopOS/releases/latest/download/hopos.cfg)
+(headless:
+[`hopos-headless.cfg`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-headless.cfg),
+renamed to `hopos.cfg`) in the stick's root.
 
 Network needs an igb-family NIC (Intel i210/i211); without one the node
 boots without external networking.
@@ -92,25 +105,26 @@ The first non-ARM board: a Sophgo SG2002 (two XuanTie C906 harts, 256 MB) for
 about €15. Signed image since v1.6.0 — one hart for HOP, one for apps:
 
 ```sh
-gunzip hopos-licheerv.img.gz
 diskutil unmountDisk /dev/diskN
-sudo dd if=hopos-licheerv.img of=/dev/rdiskN bs=4m
+gunzip -c hopos-licheerv-headless.img.gz | sudo dd of=/dev/rdiskN bs=4m
 ```
 
 That
-[`hopos-licheerv.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-licheerv.img.gz)
+[`hopos-licheerv-headless.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-licheerv-headless.img.gz)
+(headless is the only flavour here — no framebuffer on this silicon)
 is the **whole card**: partition table, FAT boot partition, `fip.bin`. Nothing
 to copy onto it afterwards — and nothing to edit either. This board has no SD
 driver of its own (the vendor's first-stage loader reads the card, HopOS never
-does), so its config is **baked into the image**. What went into the release
-build is published next to it as
-[`hopos-licheerv.cfg`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-licheerv.cfg)
-so you can see exactly what you are booting: a bench node that seeds the
-`welcome` job, streams its console over TCP port 5555 (`nc <node-ip> 5555` —
-there is no framebuffer here and the UART needs a cable), and — because that
-image carries no key — runs its **API deliberately open** (`hopos.insecure=1`).
-Fine on a trusted LAN, not anywhere else: for your own key, or any other
-change, rebuild.
+does), so its config is **baked into the image**. What is baked in is the same
+headless default every other board gets
+([`hopos-headless.cfg`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-headless.cfg)):
+a node that seeds the `welcome` job, streams its console over TCP port 5555
+(`nc <node-ip> 5555` — there is no framebuffer here and the UART needs a
+cable), and — because that image carries no key — runs its **API deliberately
+open** (`hopos.insecure=1`). Fine on a trusted LAN, not anywhere else: for
+your own key, a node name (two default-image boards on one LAN share a MAC
+until you set one — the boot log warns about it), or any other change,
+rebuild.
 
 Rebuilding it (from a clone of this repo) needs riscv64 binutils and the Sipeed
 donor fip — that board's first-stage loader and DRAM parameters:

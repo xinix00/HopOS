@@ -40,6 +40,7 @@ func SetupPlan(rng200, watchdog uintptr) {
 		RevokeVecPA:   revokeVecAsm,
 		BootScratchPA: BootScratch, // 0x7F000, cpuinit-vast
 		NetDMAPA:      0x14000000,  // NIC-DMA-ringen/buffers (buiten RAM-decl → ongecachet)
+		USBDMAPA:      0x14800000,  // xHCI-ringen/contexten, direct boven de NIC-regio (idem)
 	}
 	// De pool = het volledige DRAM (DTB /memory, ook boven 4GB) minus de vaste
 	// regio's. Faalt de DTB-lezing, val terug op een conservatieve vaste pool

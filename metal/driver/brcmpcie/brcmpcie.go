@@ -78,7 +78,15 @@ const (
 	miscAXIIntfCtrl  = 0x416c
 	miscAXIRdErrData = 0x4170
 
-	hardDebug = 0x4304 // BCM2712/7712 (oudere chips: 0x4204!)
+	hardDebug     = 0x4304 // BCM2712/7712
+	hardDebug2711 = 0x4204 // BCM2711 (Pi 4) — zelfde bits, ander adres
+
+	// BCM2711 heeft geen externe SW_INIT-resetcontroller: bridge-reset én
+	// PERST# zitten in één register ín de controller (pcie_offsets[
+	// RGR1_SW_INIT_1]). Bit 0 = PERST# (1 = geasserteerd), bit 1 = bridge.
+	rgr1SWInit    = 0x9210
+	rgr1PERST     = 1 << 0
+	rgr1BridgeRst = 1 << 1
 
 	extCfgData  = 0x8000 // 4KB-configvenster van de geselecteerde functie
 	extCfgIndex = 0x9000 // ECAM-index: bus<<20 | dev<<15 | fn<<12
@@ -124,10 +132,22 @@ type InWin struct{ PCIe, CPU, Size uint64 }
 // OutWin is het outbound-window: CPU-adres → PCIe-adres (MB-granulariteit).
 type OutWin struct{ CPU, PCIe, Size uint64 }
 
+// SoC kiest welk silicium er onder deze controller zit. De MISC-registerkaart
+// is grotendeels gedeeld, maar drie dingen niet: waar HARD_DEBUG ligt, hoe je
+// de bridge en PERST# bedient, en welke uitbreidingen bestaan (UBUS-remap,
+// VDM-QoS en de refclk-PLL zijn BCM2712-only).
+type SoC int
+
+const (
+	BCM2712 SoC = iota // Pi 5 — de BCM7712-codepaden; de default
+	BCM2711            // Pi 4 — oudere kaart, geen RESCAL, geen MDIO-PLL
+)
+
 // RC is één root-complex-instantie. SWInit* wijst naar de gedeelde
 // brcm,brcmstb-reset-controller (BCM2712: 0x10_01504318; ID 42/43/44 voor
-// pcie0/1/2).
+// pcie0/1/2) en blijft nul op de BCM2711, die zijn reset intern heeft.
 type RC struct {
+	SoC      SoC
 	Base     uintptr
 	SWInit   uintptr
 	SWInitID uint
@@ -136,18 +156,57 @@ type RC struct {
 	In       []InWin // RC-BAR 1..n (max 10 op de BCM2712)
 }
 
+// hardDebugOff geeft het HARD_DEBUG-adres van dit silicium. De bits zijn
+// gelijk, alleen het offset verschoof — en een SerDes die je op het verkeerde
+// adres uit IDDQ probeert te halen blijft stil zonder één foutmelding.
+func (rc *RC) hardDebugOff() uintptr {
+	if rc.SoC == BCM2711 {
+		return hardDebug2711
+	}
+	return hardDebug
+}
+
 func (rc *RC) rd(off uintptr) uint32           { return dev.Read32(rc.Base + off) }
 func (rc *RC) wr(off uintptr, v uint32)        { dev.Write32(rc.Base+off, v) }
 func (rc *RC) mod(off uintptr, mask, v uint32) { rc.wr(off, rc.rd(off)&^mask|v) }
 
 // bridgeReset bedient de SW_INIT-resetcontroller: bank = ID>>5 (stride 0x18),
-// SET op +0, CLEAR op +4, bit = ID&31.
+// SET op +0, CLEAR op +4, bit = ID&31. Op de BCM2711 is er geen externe
+// controller en is het één bit in RGR1_SW_INIT_1.
 func (rc *RC) bridgeReset(assert bool) {
+	if rc.SoC == BCM2711 {
+		rc.setRGR1(rgr1BridgeRst, assert)
+		return
+	}
 	off := uintptr(rc.SWInitID>>5) * 0x18
 	if !assert {
 		off += 4
 	}
 	dev.Write32(rc.SWInit+off, 1<<(rc.SWInitID&31))
+	dev.MB()
+}
+
+// perst bedient PERST# (de reset-lijn naar de endpoint). Op de BCM2712 is dat
+// PERSTB in PCIE_CTRL (invers: 1 = lossen), op de BCM2711 een bit in
+// RGR1_SW_INIT_1 (1 = geasserteerd).
+func (rc *RC) perst(assert bool) {
+	if rc.SoC == BCM2711 {
+		rc.setRGR1(rgr1PERST, assert)
+		return
+	}
+	v := uint32(0)
+	if !assert {
+		v = 1 << 2
+	}
+	rc.mod(miscPCIeCtrl, 1<<2, v)
+}
+
+func (rc *RC) setRGR1(bit uint32, set bool) {
+	v := rc.rd(rgr1SWInit) &^ bit
+	if set {
+		v |= bit
+	}
+	rc.wr(rgr1SWInit, v)
 	dev.MB()
 }
 
@@ -170,15 +229,21 @@ func inSizeEnc(size uint64) uint32 {
 // rcMode=false betekent dat de controller niet als root-complex strapt
 // (fataal); mdioOK=false dat de PLL-writes niet bevestigd werden.
 func (rc *RC) Setup() (rcMode, mdioOK bool) {
-	// Bridge-resetcyclus. Na de reset staat PERSTB=0, dus PERST# is
-	// geasserteerd — precies wat we willen tot StartLink.
+	// Bridge-resetcyclus. Op de BCM2712 staat PERSTB na de reset op 0 en is
+	// PERST# dus vanzelf geasserteerd. Op de BCM2711 niet: dáár heeft de
+	// firmware hem mogelijk al gelost (Linux zet 'm om precies die reden
+	// expliciet terug — "some bootloaders may deassert it"), en een endpoint
+	// die tijdens de bridge-setup uit reset staat traint half.
 	rc.bridgeReset(true)
+	if rc.SoC == BCM2711 {
+		rc.perst(true)
+	}
 	time.Sleep(200 * time.Microsecond)
 	rc.bridgeReset(false)
 	time.Sleep(200 * time.Microsecond)
 
 	// SerDes uit IDDQ (power-down) halen en laten stabiliseren.
-	rc.mod(hardDebug, hdSerdesIDDQ, 0)
+	rc.mod(rc.hardDebugOff(), hdSerdesIDDQ, 0)
 	time.Sleep(200 * time.Microsecond)
 
 	// MISC_CTRL: SCB_ACCESS_EN | CFG_READ_UR_MODE (config-reads naar niets
@@ -191,11 +256,17 @@ func (rc *RC) Setup() (rcMode, mdioOK bool) {
 	// (freeze-jacht 2026-07-13, referentie-agent ronde 2).
 	v := rc.rd(miscCtrl)
 	v |= 0x1000 | 0x2000 | 0x400 | 0x80
-	v = v&^uint32(0x300000) | 0x100000
+	burst := uint32(0x100000) // 0x1 = 128B (BCM2712)
+	if rc.SoC == BCM2711 {
+		burst = 0 // 0x0 = 128B op dít silicium — de originele 2711-quirk
+	}
+	v = v&^uint32(0x300000) | burst
 	rc.wr(miscCtrl, v)
 
-	// Inbound-windows (RC-BAR's, 1-genummerd) — élk met zijn UBUS-remap
-	// (ACCESS_EN), anders komt er stroomopwaarts niets door.
+	// Inbound-windows (RC-BAR's, 1-genummerd) — op de BCM2712 élk met zijn
+	// UBUS-remap (ACCESS_EN), anders komt er stroomopwaarts niets door. De
+	// BCM2711 kent die registers niet: daar is het RC-BAR zelf de hele
+	// vertaling, en schrijven op 0x40ac zou een reserved-adres raken.
 	for i, w := range rc.In {
 		n := i + 1
 		bar, ubus := miscRCBar1Lo+uintptr(n-1)*8, miscUBUSBar1Rmp+uintptr(n-1)*8
@@ -204,6 +275,9 @@ func (rc *RC) Setup() (rcMode, mdioOK bool) {
 		}
 		rc.wr(bar, uint32(w.PCIe)|inSizeEnc(w.Size))
 		rc.wr(bar+4, uint32(w.PCIe>>32))
+		if rc.SoC == BCM2711 {
+			continue
+		}
 		rc.wr(ubus, uint32(w.CPU)&^uint32(0xfff)|1)
 		rc.wr(ubus+4, uint32(w.CPU>>32))
 	}
@@ -229,6 +303,12 @@ func (rc *RC) Setup() (rcMode, mdioOK bool) {
 	// Little-endian op BAR2 (default, expliciet zoals Linux).
 	rc.mod(cfgVendorSpec1, 0xc, 0)
 
+	if rc.SoC == BCM2711 {
+		// Geen MDIO-PLL (dit silicium heeft zijn 100MHz-refclk gewoon), geen
+		// UBUS/AXI-blok, geen VDM-QoS. mdioOK is hier dus niet "mislukt" maar
+		// "niet van toepassing" — vandaar true.
+		return true, true
+	}
 	return true, rc.postSetup2712()
 }
 
@@ -301,9 +381,9 @@ func (rc *RC) StartLink() (phy, dl bool) {
 		rc.mod(cfgLinkCap, 0xf, uint32(rc.Gen))
 	}
 	// CLKREQ/refclk-override/L1SS allemaal uit vóór de training.
-	rc.mod(hardDebug, hdClkreqDebug|hdRefclkOvrdEn|hdRefclkOvrdOut|hdL1SSEnable, 0)
+	rc.mod(rc.hardDebugOff(), hdClkreqDebug|hdRefclkOvrdEn|hdRefclkOvrdOut|hdL1SSEnable, 0)
 
-	rc.mod(miscPCIeCtrl, 0, 1<<2) // PERSTB=1 → PERST# lossen
+	rc.perst(false)
 	time.Sleep(100 * time.Millisecond)
 
 	for range 40 { // ≤200ms (Linux: 100ms — ruime marge, dit is een meting)

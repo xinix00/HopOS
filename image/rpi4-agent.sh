@@ -93,7 +93,7 @@ if [ -z "$FW_MISSING" ]; then
 	DEFCFG="$DIR/image/hopos-headless.cfg"
 	[ "${GUI:-1}" = 1 ] && DEFCFG="$DIR/image/hopos-gui.cfg"
 	go run "$DIR/image/mkcard/main.go" -o metal/out/hopos-rpi4.img -size 64 \
-		-start 8192 -label bootfs -vollabel \
+		-start 8192 -label bootfs -vollabel -cfgwindow 1048576 \
 		sd-rpi4/kernel8.img sd-rpi4/config.txt "${CFG:-$DEFCFG}=hopos.cfg" \
 		sd-rpi4/start4.elf sd-rpi4/fixup4.dat sd-rpi4/bcm2711-rpi-4-b.dtb \
 		sd-rpi4/bl31.bin >&2

@@ -1,6 +1,7 @@
 //go:build riscv64
 
-// De RISC-V64-helft van de idle-governor. Eén governor, één principe (Derek,
+// De RISC-V64-helft van de idle-governor; de gedeelde helft — tellers,
+// publicatie, wakeAt — staat in idle.go. Eén governor, één principe (Derek,
 // 01-08): élke bewoner van een hart meldt "ik doe niets tot T" langs hetzelfde
 // pad, en HOP is daarin gewoon de eerste bewoner van zíjn hart. Wat per rol
 // verschilt is alleen de laatste stap — hoe je bij de M-mode-slaapcode komt:
@@ -29,16 +30,13 @@ package idle
 
 import (
 	"runtime/goos"
-	"sync/atomic"
-	_ "unsafe" // voor go:linkname naar runtime.nanotime
 
 	"github.com/xinix00/HopOS/metal/dev"
 )
 
-// ecallYield/exitTrap/rdtime: zie idle_riscv64.s.
+// ecallYield/exitTrap/counterNow: zie idle_riscv64.s.
 func ecallYield(deadline uint64) uint64
 func exitTrap()
-func rdtime() uint64
 
 // ExitTrap meldt HOP dat deze bewoner klaar is: de switcher (cpu/mmode) zet zijn
 // ctx-staat op dood en roteert weg, dus het hart draait door voor zijn buren.
@@ -65,12 +63,6 @@ var mSleep func(wake uint64) uint64
 // zelf aan, dus "bewezen" is hier letterlijk).
 func UseMSleep(f func(wake uint64) uint64) { mSleep = f }
 
-var (
-	ticks      atomic.Uint64
-	pubAddr    atomic.Uintptr
-	sharedAddr atomic.Uintptr // CtrlShared-woord van de eigen control-page
-)
-
 // Enable hangt de governor in de runtime, mét de governor die er al stond als
 // terugval. Geen event-stream te configureren zoals op ARM (CNTKCTL): wat er te
 // configureren valt zit in de twee zetters hieronder (WatchShared voor een
@@ -80,24 +72,6 @@ func Enable() {
 	prev = goos.Idle
 	goos.Idle = governor
 }
-
-// Publish laat de teller vanaf nu óók op addr landen — het CtrlIdle-woord van de
-// eigen control-page, waar HOP hem leest (dvfs-beleid, per-slot CPU-meting).
-func Publish(addr uintptr) { pubAddr.Store(addr) }
-
-// WatchShared markeert dit slot als bewoner mét een switcher boven zich; addr
-// is het CtrlShared-woord van de eigen control-page. Sinds 01-08 is het ADRES
-// het signaal en niet meer de waarde: een slot-app yieldt áltijd (alleen wonen
-// betekent hier niet "geen switcher" maar "rotatie van één"), dus of het woord
-// 0 of 1 draagt verandert het pad niet meer. De naam en het argument blijven —
-// het is de ARM-API (waar de waarde wél het WFE/HVC-verschil kiest), en applib
-// roept dit op beide architecturen in Init aan.
-func WatchShared(addr uintptr) { sharedAddr.Store(addr) }
-
-// Ticks geeft de interne tellerstand: geaccumuleerde idle-tijd in
-// rdtime-eenheden. Op een dedicated hart blijft die nul — eerlijk, want daar
-// wordt niet geslapen (zie de pakket-doc).
-func Ticks() uint64 { return ticks.Load() }
 
 // CounterHz is de eenheid van de teller: de timebase van dit board. RISC-V heeft
 // geen register waaruit die volgt (waar ARM CNTFRQ_EL0 heeft), en cpu ligt ónder
@@ -122,37 +96,6 @@ func CounterHz() uint64 { return counterHz }
 // bewust doorliep; die keuze is teruggedraaid (idlen overal, Derek 01-08).
 func AccountsDedicated() bool { return true }
 
-// nanotime is de klok waarin de scheduler zijn pollUntil uitdrukt. Nodig omdat
-// de switcher in timebase-tikken rekent (rdtime) en de runtime in nanoseconden:
-// het verschil omrekenen kan alleen wie beide standen op hetzelfde moment leest.
-//
-//go:linkname nanotime runtime.nanotime
-func nanotime() int64
-
-// wakeAt vertaalt de pollUntil van de scheduler naar de wektijd die de switcher
-// begrijpt: de timebase-tick waarop deze bewoner op zijn vroegst terug wil.
-//
-// pollUntil is de eerstvolgende timer-deadline van dit slot, of 0 als er
-// helemaal geen timer loopt. Alles wat geen bruikbare toekomst oplevert wordt 0
-// = "nu meteen weer", en dat is precies het gedrag van vóór de wektijden — de
-// terugval is dus altijd de oude, bewezen kant.
-//
-// Verleidelijk maar NIET gedaan: "geen timer" als oneindig lezen. Dat klopt
-// theoretisch (zonder timer kan er zonder gebeurtenis van buiten niets
-// veranderen), maar zolang HOP nog geen wek-IPI stuurt is er dan ook niets dat
-// zo'n bewoner ooit nog terughaalt. Dat is geen zuinigheid maar een hang, en die
-// mag niet in de code staan wachten op de dag dat iemand hem aanzet.
-func wakeAt(pollUntil int64) uint64 {
-	if pollUntil <= 0 {
-		return 0
-	}
-	d := pollUntil - nanotime()
-	if d <= 0 {
-		return 0
-	}
-	return rdtime() + uint64(d)*counterHz/1_000_000_000
-}
-
 // governor: één melding per scheduler-ronde — "niets te doen tot T" — langs het
 // pad dat bij de rol van dit hart hoort (zie de pakket-doc). De verstreken tijd
 // is in alle gevallen de wall-tijd waarin dit slot niets deed: bij een yield de
@@ -168,9 +111,10 @@ func governor(pollUntil int64) {
 		return
 	}
 	if mSleep != nil {
-		// HOP's eigen hart. Eerst de slaap-rem (hold.go): boot er ergens een
-		// slot — de apploader trekt dan zijn image over de NIC — dan géén wfi
-		// maar terug naar de scheduler voor nog een poll-ronde.
+		// HOP's eigen hart: de slaap-primitief van het board. De rem op de
+		// slaap zit in die primitief zelf (board/licheerv/clint.go: MSleep
+		// klemt élke slaap op SleepCapTicks, dus niets wacht ooit langer dan
+		// die cap op HOP).
 		// wakeAt geeft 0 als er niets te slapen valt (deadline verstreken, of
 		// geen timer — dat laatste komt op HOP niet voor: de RX-pompen alleen
 		// al leggen er elke 10-200µs één neer), en MSleep doet dan niets; de

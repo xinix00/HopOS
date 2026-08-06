@@ -136,6 +136,26 @@ GO111MODULE=off go run "$DIR/image/mkkernel/main.go" "$DIR/image/mkkernel/pe.go"
 #    EDK2 valt anders in de Shell i.p.v. onze BOOTAA64 te booten).
 dd if=/dev/zero of=metal/out/uefi-vars.fd bs=1m count=64 2>/dev/null
 
+# 3b. Het complete, dd-bare stick-image (image/mkcard — zelfde vorm als de
+#     SD-kaarten): MBR + FAT16 met EFI/BOOT/BOOTAA64.EFI en de template-config
+#     als hopos.cfg (mét het raw-patchbare hopcfg-venster). gunzip | dd naar
+#     een stick en booten — geen FAT formatteren, geen bestanden hernoemen:
+#     het hernoem-recept ("BOOTAA64-headless.EFI → BOOTAA64.EFI, de firmware
+#     zoekt exact die naam") was precies het soort stap waar een stick stil op
+#     stukloopt. De config is ALTIJD een template (of CFG=...): nooit de
+#     hopos.cfg uit de ESP-boom, daar wonen de echte sleutels. UEFI-firmware
+#     leest FAT12/16/32 van removable media, dus FAT16 is binnen de spec.
+if [ "$MODE" = agent ]; then
+	DEFCFG="$DIR/image/hopos-headless.cfg"
+	[ "${GUI:-1}" = 1 ] && DEFCFG="$DIR/image/hopos-gui.cfg"
+	go run "$DIR/image/mkcard/main.go" -o metal/out/hopos-uefi.img -size 64 \
+		-start 8192 -label hopos -vollabel -cfgwindow 1048576 \
+		"$ESP/EFI/BOOT/BOOTAA64.EFI=EFI/BOOT/BOOTAA64.EFI" \
+		"${CFG:-$DEFCFG}=hopos.cfg" >&2
+	echo "metal/out/hopos-uefi.img (dd-baar, config = $(basename "${CFG:-$DEFCFG}"))" >&2
+	echo "flash: diskutil unmountDisk /dev/diskN && sudo dd if=metal/out/hopos-uefi.img of=/dev/rdiskN bs=4m" >&2
+fi
+
 echo "BOOTAA64.EFI ($(du -h "$ESP/EFI/BOOT/BOOTAA64.EFI" | cut -f1), mode=$MODE) klaar — EDK2 boot..." >&2
 [ "$MODE" = agent ] && echo "agent: curl http://127.0.0.1:8080/health · leader: curl http://127.0.0.1:9080/health" >&2
 

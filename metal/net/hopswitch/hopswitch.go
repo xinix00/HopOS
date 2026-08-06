@@ -192,6 +192,21 @@ func forward(src int, p []byte) {
 	if len(p) < 14 {
 		return
 	}
+	// Bron-MAC-controle: een slot mag alleen zijn ÉIGEN MAC gebruiken. De
+	// switch weet uit welke ring hij dit frame las (src) en de nummering is
+	// deterministisch (layout.SlotMAC), dus dit is een gratis feit — geen
+	// leertabel die te vergiftigen valt.
+	//
+	// Zonder deze regel kan een slot zich als een ander slot voordoen op laag
+	// 2: frames sturen met andermans bron-MAC, en daarmee ARP-antwoorden geven
+	// namens een adres dat niet van hem is. Dat is precies de aanval die je
+	// niet wilt op een node waar HOP toetsaanslagen rondstuurt — dan is
+	// meeluisteren met wat de gebruiker typt een kwestie van sneller
+	// antwoorden dan de buurman. src 0 is HOP zelf (de gateway) en valt buiten
+	// deze grens: dat is de vertrouwde kant.
+	if src >= 1 && (p[6] != 0x02 || p[7]|p[8]|p[9]|p[10] != 0 || int(p[11]) != src) {
+		return
+	}
 	if p[0]&1 != 0 { // broadcast/multicast (ARP): iedereen behalve de bron
 		if arpReplyGateway(src, p) { // who-has de gateway? HOP antwoordt zelf
 			return

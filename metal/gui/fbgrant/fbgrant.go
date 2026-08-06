@@ -33,7 +33,30 @@ var (
 	holder int    // slot met de grant (0 = niemand)
 	base   uint64 // venster zoals gemapt (voor Arm/GrantWindow)
 	size   uint64
+	inAddr string // waar HOP toetsenbord/muis uitserveert (zie UseInput)
 )
+
+// Holder geeft het slot dat het glas vasthoudt (0 = niemand). Dat is per
+// definitie de display-server, en dus ook de enige die het toetsenbord mag
+// lezen — metal/gui/usbin gebruikt dit om een beller te herkennen.
+func Holder() int {
+	mu.Lock()
+	defer mu.Unlock()
+	return holder
+}
+
+// UseInput vertelt de grant waar HOP zijn invoerstroom serveert. Leeg (de
+// default) = dit board heeft geen werkende USB, en dan staat INPUT_ADDR ook
+// niet in de env: de app hoeft nergens op te bellen.
+//
+// Waarom hier en niet in een eigen contract: het glas, het toetsenbord en de
+// muis zijn één zitplaats. Wie het scherm krijgt, krijgt de invoer erbij —
+// dat is wat een grant is (Derek, 06-08).
+func UseInput(addr string) {
+	mu.Lock()
+	inAddr = addr
+	mu.Unlock()
+}
 
 // Env is de prepStart-hook (slots.GrantHooks.Env): kent bij env["FB"]=="1"
 // de framebuffer exclusief aan slot i toe en geeft een env-kopie met de
@@ -73,6 +96,13 @@ func Env(i int, env map[string]string) map[string]string {
 	out["FB_BPP"] = fmt.Sprintf("%d", d.BPP)
 	if d.SwapRB {
 		out["FB_SWAP"] = "1"
+	}
+	// Toetsenbord en muis horen bij het glas: waar HOP ze uitserveert reist
+	// mee met de grant. De app belt dit adres en leest een stroom van dezelfde
+	// JSON-events die zijn eigen /input al aanneemt. Leeg = geen werkende USB
+	// op dit board, en dan is er ook niets om te bellen.
+	if inAddr != "" {
+		out["INPUT_ADDR"] = inAddr
 	}
 
 	// Het glas is nu van de app: HOP's log-console eraf (Putc wordt no-op).

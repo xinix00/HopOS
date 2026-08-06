@@ -23,6 +23,7 @@ import (
 //	                    buiten het venster, en dat is gemeten: binnenin bleef een
 //	                    gewekte core stil (zie park.go)
 //	0x06400000     8MB  NIC-DMA (NetDMAPA) — idem ongecachet, voor de GMAC
+//	0x06C00000     2MB  USB-DMA (USBDMAPA) — xHCI-ringen/contexten, idem
 //	0x07000000     8MB  framebuffer (fbPA) — een RAM-buffer, geen scanout: dit
 //	                    bord heeft geen firmware-buffer, dus het beeld gaat over
 //	                    het netwerk de deur uit (zie hop/board.go)
@@ -41,6 +42,11 @@ const (
 	revokeVecPA = structBase + 0xF0000 // EL2-vectortabel van core 0 (cpuinit-vast!)
 
 	netDMAPA = 0x06400000 // NIC-DMA-ringen/buffers (NetDMASize)
+
+	// USB-DMA (USBDMASize = 2MB) in het gat tussen de NIC-regio en de
+	// framebuffer. Hij ligt ónder poolBase, dus het bestaande pool-gat
+	// ({Base: 0, Size: poolBase}) sluit hem al uit — net als fbPA.
+	usbDMAPA = 0x06C00000
 
 	// De framebuffer. Dit bord heeft geen firmware-buffer (gemeten: U-Boot
 	// patcht geen simple-framebuffer, en zijn video is niet eens meegecompileerd
@@ -89,6 +95,7 @@ func SetupPlan() {
 		RevokeVecPA:   revokeVecPA,
 		BootScratchPA: BootScratch,
 		NetDMAPA:      netDMAPA,
+		USBDMAPA:      usbDMAPA,
 		RAMBase:       0x200000, // gemeten: waar het DRAM van dit bord begint
 	}
 	// De pool uit de gemeten banken, met onze eigen regio's eruit gesneden. De

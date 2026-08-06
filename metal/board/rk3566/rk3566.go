@@ -53,6 +53,23 @@ const (
 	GRFBase   = 0xFDC60000
 	CRUBase   = 0xFDD20000
 
+	// USB 3.0: twee Synopsys DWC3-cores. Beide dragen hun xHCI-registers
+	// onderin hun venster en hun globale registers op +0xC100 — de core in
+	// hostmodus zetten gaat via die tweede wereld (gui/driver/usb/dwc3).
+	//
+	// Welke van de twee de fysieke poort van de Zero 3E is, weten we NIET uit
+	// een datasheet — daarom brengen we ze allebei op en zegt de log welke een
+	// poort met iets eraan meldt. Twee probes kosten niets; één gok kost een
+	// bootcyclus.
+	//
+	// Wat XHCI hier niet ziet: dit bordje heeft ook nog losse EHCI/OHCI-
+	// companions (0xFD800000/0xFD840000 en 0xFD880000/0xFD8C0000) voor de
+	// USB2-only PHY-poorten. Hangt er een toetsenbord dat op geen van beide
+	// DWC3-poorten verschijnt, dán is dat de volgende stap — en dat is een
+	// meting, geen raadsel.
+	USBDRD30Base  = 0xFCC00000 // usbdrd30: de OTG-core
+	USBHost30Base = 0xFD000000 // usbhost30: de hostcore
+
 	// HOP-venster. GEMETEN 05-08: U-Boot's memory-node is
 	// 0x200000..0x80000000 (2046MB) — DRAM begint dus NIET op 0, de eerste 2MB
 	// is TF-A, en /memreserve/ bevat verder niets (geen OP-TEE; TF-A meldt zelf

@@ -90,6 +90,9 @@ func DTBPool(dtbPtr uintptr, p layout.Plan) []layout.Region {
 	if p.NetDMAPA != 0 {
 		holes = append(holes, layout.Region{Base: p.NetDMAPA, Size: layout.NetDMASize})
 	}
+	if p.USBDMAPA != 0 {
+		holes = append(holes, layout.Region{Base: p.USBDMAPA, Size: layout.USBDMASize})
+	}
 	if sz := fdt.BlobSize(dtbPtr); sz > 0 {
 		holes = append(holes, layout.Region{Base: uint64(dtbPtr), Size: sz})
 	}

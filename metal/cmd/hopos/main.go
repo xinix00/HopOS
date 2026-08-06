@@ -243,6 +243,11 @@ func main() {
 		fail("switch", err)
 	}
 
+	// USB-invoer (alleen de gui-smaak): toetsenbord en muis op het ijzer. Hier
+	// en niet eerder, want de gebeurtenissen gaan over de interne switch naar
+	// de display-app — dezelfde POST /input die de browser-KVM gebruikt.
+	startUSBInput()
+
 	// Klok via SNTP. Geen harde eis: HOP's HMAC-auth is klok-vrij, dus een
 	// node zonder bereikbare NTP-server draait door — alleen TLS faalt dan.
 	if err := hopnet.SyncTime("pool.ntp.org:123"); err != nil {

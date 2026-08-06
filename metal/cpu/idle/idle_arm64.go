@@ -1,83 +1,33 @@
 //go:build arm64
 
-// Package idle laat een core écht slapen als zijn Go-runtime niets te doen
-// heeft — het antwoord op "jobs die vooral staan te idlen" (Derek), zonder
-// DVFS-beleid: een core in WFE is clock-gated en verbruikt vrijwel niets,
-// op elke kloksnelheid.
-//
-// tamago's scheduler roept goos.Idle aan bij een lege runqueue, maar de
-// default governor slaapt alleen als er *helemaal geen* timer meer loopt —
-// elke idle job heeft timers (heartbeat, polls), dus in de praktijk spint
-// hij. Deze governor doet in plaats daarvan één WFE per scheduler-ronde en
-// leunt op de ARM event-stream: de generic-timer-teller genereert elke
-// ~1ms een wakeup-event (CNTKCTL_EL1.EVNTEN, geen GIC of interrupt-plumbing
-// nodig), dus de scheduler kijkt hooguit ~1ms later weer naar zijn timers.
-// Timers kunnen daardoor tot ~1ms later vuren — irrelevant voor jobs, en
-// een SEV/interrupt wekt de core direct.
+// De ARM64-helft van de idle-governor: WFE + de generic-timer-event-stream.
+// Eén WFE per scheduler-ronde, en de event-stream begrenst elke slaap: de
+// generic-timer-teller genereert elke ~1ms een wakeup-event
+// (CNTKCTL_EL1.EVNTEN, geen GIC of interrupt-plumbing nodig), dus de
+// scheduler kijkt hooguit ~1ms later weer naar zijn timers. Timers kunnen
+// daardoor tot ~1ms later vuren — irrelevant voor jobs, en een SEV/interrupt
+// wekt de core direct.
 //
 // Elke core roept Enable aan in zijn eigen hwinit1 (ná arm64.Init, die de
-// default governor zet); CNTKCTL is per core.
-//
-// Dit is de ARM64-helft: WFE + de generic-timer-event-stream. De RISC-V-helft
-// (idle_riscv64.go) heeft geen WFE-equivalent en bereikt dezelfde slaap via de
-// M-mode-switcher (yield met wektijd) of, voor HOP zelf, direct (UseMSleep).
+// default governor zet); CNTKCTL is per core. De RISC-V-helft
+// (idle_riscv64.go) heeft geen WFE-equivalent en bereikt dezelfde slaap via
+// de M-mode-switcher (yield met wektijd) of, voor HOP zelf, direct
+// (UseMSleep). De gedeelde helft — tellers, publicatie, wakeAt — staat in
+// idle.go.
+
 package idle
 
 import (
 	"runtime/goos"
-	"sync/atomic"
-	_ "unsafe" // voor go:linkname naar runtime.nanotime
 
 	"github.com/xinix00/HopOS/metal/dev"
 )
 
-// wfeIdle/hvcYield/cntkctlSet/cntfrq/cntvct: zie idle_arm64.s.
+// wfeIdle/hvcYield/cntkctlSet/cntfrq/counterNow: zie idle_arm64.s.
 func wfeIdle() uint64
 func hvcYield(deadline uint64) uint64
-func cntvct() uint64
 func cntkctlSet(v uint64)
 func cntfrq() uint64
-
-// nanotime is de klok waarin de scheduler zijn pollUntil uitdrukt; wakeAt rekent
-// die om naar de tellerstand die de EL2-switch begrijpt. Tweeling van de
-// RISC-V-kant (idle_riscv64.go) met de tellers van deze architectuur.
-//
-//go:linkname nanotime runtime.nanotime
-func nanotime() int64
-
-// wakeAt: de CNTVCT-stand waarop deze bewoner op zijn vroegst terug wil; 0 = nu.
-// Alles wat geen bruikbare toekomst oplevert wordt 0 — dan gedraagt de rotatie
-// zich exact als vóór de wektijden, en dat is de bewezen kant om naar te falen.
-func wakeAt(pollUntil int64) uint64 {
-	if pollUntil <= 0 {
-		return 0
-	}
-	d := pollUntil - nanotime()
-	if d <= 0 {
-		return 0
-	}
-	return cntvct() + uint64(d)*cntfrq()/1_000_000_000
-}
-
-// De idle-teller: geaccumuleerde idle-TIJD in generic-timer-ticks (CNTFRQ-
-// eenheden) — de counterstand vóór en ná elke WFE, delta erbij. Een vol
-// idle core stijgt dus ~CounterHz per seconde, een rekenende core staat
-// stil; de verhouding ís de idle-fractie. Apps publiceren hem op hun
-// control-page (Publish → layout.CtrlIdle) zodat HOP hem ziet (dvfs-beleid,
-// per-slot CPU-meting); zonder Publish telt hij alleen intern (Ticks).
-//
-// Waarom tijd en niet rondes (de eerste vorm, herzien 18-07): WFE wekt óók
-// op SEV's van andere cores en spurious events — op de drukke Altra tikte
-// een slapende app daardoor ver bóven het event-stream-tempo en las elke
-// deels-idle app als "vol idle" (ijzer-meting: DUTY=25/50/75 → allemaal
-// cpu=0%, alleen 100 klopte). Tijd tellen is ruis-immuun: een valse wake
-// telt zijn echte (micro)duur mee in plaats van een volle tik, zonder
-// per-core-status.
-var (
-	ticks      atomic.Uint64
-	pubAddr    atomic.Uintptr
-	sharedAddr atomic.Uintptr // CtrlShared-woord van de eigen control-page (0 = niet gezet)
-)
 
 // Enable zet de event-stream aan en hangt de WFE-governor in de runtime.
 // EVNTI kiest de counterbit waarvan de 0→1-flank het wek-event is; we pakken
@@ -92,22 +42,6 @@ func Enable() {
 	cntkctlSet(1<<2 | i<<4) // EVNTEN | EVNTI
 	goos.Idle = governor
 }
-
-// Publish laat de teller vanaf nu óók op addr landen — het CtrlIdle-woord
-// van de eigen control-page (device-gemapt: gealigneerde 64-bit store, door
-// HOP fysiek leesbaar). Bij SMP delen de cores van het slot dit woord; de
-// wachter deelt het verwachte tempo door CtrlCores.
-func Publish(addr uintptr) { pubAddr.Store(addr) }
-
-// WatchShared laat de governor het CtrlShared-woord op addr lezen (de eigen
-// control-page): is het ≠ 0, dan deelt dit slot zijn core en yieldt de
-// governor expliciet via HVC i.p.v. te WFE'en. HOP zet/wist het woord
-// dynamisch (kern/slots), dus we lezen het élke idle-ronde vers — één
-// device-lees, verwaarloosbaar op een idle core. applib roept dit in Init.
-func WatchShared(addr uintptr) { sharedAddr.Store(addr) }
-
-// Ticks geeft de interne tellerstand.
-func Ticks() uint64 { return ticks.Load() }
 
 // CounterHz is de eenheid van de teller: generic-timer-ticks per seconde
 // (CNTFRQ). Een vólledig idle core accumuleert ~CounterHz per seconde —
