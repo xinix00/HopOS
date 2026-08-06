@@ -76,3 +76,8 @@ metal/hopos
 # LicheeRV-Nano-Build-release als ze ontbreken.
 image/licheerv/donor-fip.bin
 image/licheerv/fiptool.py
+
+# Donor-boot van de Radxa Zero 3E (idbloader + u-boot.itb uit het officiële
+# Radxa-image, LBA 64..32767): vendor-bytes, image/radxa-zero3.sh downloadt en
+# hash-checkt ze zelf (gepind op release b6).
+image/radxa/

@@ -1,9 +1,14 @@
 # Flash & boot
 
-Four ways to a running node. Every download link on this page resolves to the
+Five ways to a running node. Every download link on this page resolves to the
 **newest release** — GitHub resolves `latest`, so nothing here goes stale
 ([all releases](https://github.com/xinix00/HopOS/releases)); verification at
 the bottom.
+
+The SD-card boards ship as **complete card images**: `gunzip`, `dd`, boot —
+firmware and boot chain are already on them. The boot partition is plain FAT,
+so after flashing it mounts on macOS/Windows/Linux and `hopos.cfg` stays a
+text file you can edit; a kernel update is a file copy.
 
 Every arm64 asset comes in two flavours. **GUI** boots a desktop (display,
 launcher, app catalog); **headless** is not a switched-off GUI but the same
@@ -32,22 +37,54 @@ boots without external networking.
 
 ## Raspberry Pi 4 / 5 (SD card)
 
-The Pi boots from its firmware, not UEFI — so it's the SD card's boot
-partition instead:
+The Pi boots from its firmware, not UEFI — the card image carries that
+firmware plus the kernel, `config.txt` and the flavour's default `hopos.cfg`:
 
-1. Take an SD card with the standard Pi boot partition (`bootfs`).
-2. Unzip
-   [`hopos-rpi5.zip`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi5.zip)
-   (or
-   [`hopos-rpi4.zip`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi4.zip);
-   headless:
-   [`hopos-rpi5-headless.zip`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi5-headless.zip),
-   [`hopos-rpi4-headless.zip`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi4-headless.zip))
-   onto it — this drops the kernel, a `config.txt` pointing at it, and the
-   flavour's default `hopos.cfg`.
-3. Edit `hopos.cfg` on the card: set `hopos.apikey` — see
-   [Configure](config.md) for all keys.
-4. Insert, power on.
+```sh
+diskutil unmountDisk /dev/diskN
+gunzip -c hopos-rpi5.img.gz | sudo dd of=/dev/rdiskN bs=4m
+```
+
+Grab
+[`hopos-rpi5.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi5.img.gz)
+or
+[`hopos-rpi4.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi4.img.gz)
+(headless:
+[`hopos-rpi5-headless.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi5-headless.img.gz),
+[`hopos-rpi4-headless.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi4-headless.img.gz)).
+The GUI flavour boots as-is; set `hopos.apikey` on the card before the node
+leaves a LAN you trust — see [Configure](config.md) for all keys.
+
+Already have a card with a Pi boot partition (`bootfs`)? Then unzip
+[`hopos-rpi5.zip`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi5.zip)
+(or
+[`hopos-rpi4.zip`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi4.zip);
+headless:
+[`hopos-rpi5-headless.zip`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi5-headless.zip),
+[`hopos-rpi4-headless.zip`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi4-headless.zip))
+onto it instead — the same kernel, `config.txt` and `hopos.cfg`, no reflash.
+
+## Radxa Zero 3E — RK3566 (SD card)
+
+Same shape:
+[`hopos-radxa-zero3.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-radxa-zero3.img.gz)
+(headless:
+[`hopos-radxa-zero3-headless.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-radxa-zero3-headless.img.gz))
+is the whole card. The vendor boot chain (TPL/SPL + TF-A + U-Boot, taken from
+the official Radxa image) sits on the raw sectors where the RK3566 boot ROM
+reads it; our kernel, `extlinux.conf` and `hopos.cfg` live on the FAT
+partition that U-Boot's distro-boot finds:
+
+```sh
+diskutil unmountDisk /dev/diskN
+gunzip -c hopos-radxa-zero3.img.gz | sudo dd of=/dev/rdiskN bs=4m
+```
+
+HDMI, gigabit ethernet and the hardware watchdog are all driven by HopOS
+itself on this board. Updating a card that already runs HopOS: unzip
+[`hopos-radxa-zero3.zip`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-radxa-zero3.zip)
+onto its boot partition (it mounts anywhere) — kernel, `extlinux.conf`,
+`hopos.cfg`.
 
 ## LicheeRV Nano — RISC-V (SD card)
 

@@ -4,7 +4,7 @@
 
 **Docs:** [flash & boot](docs/boot.md) · [configure](docs/config.md) · [write an app](docs/app.md) · [technical](docs/index.md) — site: [gethop.org](https://gethop.org)
 
-**Download:** signed boot images for UEFI arm64, Raspberry Pi 4/5 and the RISC-V LicheeRV Nano are in the [newest release](https://github.com/xinix00/HopOS/releases/latest) — copy and boot, the default config runs as-is ([flash & boot](docs/boot.md) has the per-board steps and the signature check).
+**Download:** signed boot images for UEFI arm64, Raspberry Pi 4/5, the Radxa Zero 3E and the RISC-V LicheeRV Nano are in the [newest release](https://github.com/xinix00/HopOS/releases/latest) — the SD-card boards are complete card images (`gunzip | dd`, boot), the default config runs as-is ([flash & boot](docs/boot.md) has the per-board steps and the signature check).
 
 HopOS turns a multi-core board — ARM64 or RISC-V — into a small fleet of single-purpose computers. Core 0 runs **HOP**, the orchestrator-kernel: it hands out cores, memory partitions and network identities, and dispatches. Every app then does its own work on its own hardware — it downloads its image over its own network stack and places itself inside its own hardware-enforced memory partition, *natively on its own dedicated CPU core*. There is no shell, no libc, no userland, no processes — killing an app means switching its core off.
 

@@ -19,9 +19,3 @@ package memattr
 // hier een echte implementatie, niet eerder: ongebruikte MMU-code die nooit op
 // silicium liep is een belofte, geen fundament.
 func NormalNC(va, size uintptr) error { return nil }
-
-// NormalRO idem voor het leesvenster van een surface-grant. Op RISC-V komt het
-// niet voor: de PMP-kooi kan geen venster in een draaiend hart bijmappen, dus
-// kern/slots weigert de grant daar al (surfgrant_riscv64.go) en de GUI valt
-// terug op pixels over de socket.
-func NormalRO(va, size uintptr) error { return nil }

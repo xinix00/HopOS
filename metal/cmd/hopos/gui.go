@@ -16,5 +16,5 @@ import (
 )
 
 func init() {
-	slots.RegisterGrant(slots.GrantHooks{Env: fbgrant.Env, Arm: fbgrant.Arm, Release: fbgrant.Release, Holder: fbgrant.Holder})
+	slots.RegisterGrant(slots.GrantHooks{Env: fbgrant.Env, Arm: fbgrant.Arm, Release: fbgrant.Release})
 }

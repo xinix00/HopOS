@@ -19,16 +19,11 @@ import "fmt"
 //     naderhand niets meer bij doen (locked entries zijn definitief tot de
 //     hart-reset). Providers die alleen ARM ondersteunen laten dit nil.
 //   - Release (releaseSlot): geeft de grant terug bij het vrijkomen.
-//   - Holder (optioneel): welk slot de grant nú houdt (0 = niemand). Nodig voor
-//     de surface-grant: een GUI-app vraagt "laat de display in mijn buffer
-//     kijken" zonder te weten wíé dat is, en kern/slots mag dat niet zelf weten
-//     — de houderadministratie is beleid en woont bij de provider.
 type GrantHooks struct {
 	Env     func(i int, env map[string]string) map[string]string
 	Arm     func(i int) error
 	Window  func(i int) (base, size uint64, ok bool)
 	Release func(i int)
-	Holder  func() int
 }
 
 var grant GrantHooks
@@ -68,14 +63,4 @@ func grantRelease(i int) {
 	if grant.Release != nil {
 		grant.Release(i)
 	}
-}
-
-// grantHolder geeft het slot dat de device-grant houdt (0 = niemand, of geen
-// provider gelinkt). Op een kale build is dat altijd 0, en dan weigert de
-// surface-grant netjes in plaats van te doen alsof.
-func grantHolder() int {
-	if grant.Holder == nil {
-		return 0
-	}
-	return grant.Holder()
 }

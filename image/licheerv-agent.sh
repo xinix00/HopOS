@@ -150,10 +150,12 @@ python3 "$FIPTOOL" genfip "$OUT/fip-licheerv.bin" \
 echo "metal/out/fip-licheerv.bin ($(du -h "$OUT/fip-licheerv.bin" | cut -f1)) klaar." >&2
 
 # 6. Het complete kaart-image: MBR + FAT16 + fip.bin, dd-baar. Zelf gebouwd
-#    (image/licheerv/mkcard) zodat het reproduceerbaar is en geen root of
-#    loop-device vraagt — de geometrie is die van het donor-image, want dat is
-#    wat de BROM van dit silicium aantoonbaar leest.
-go run "$DIR/image/licheerv/mkcard/main.go" -o "$OUT/hopos-licheerv.img" \
+#    (image/mkcard, gedeeld met de Radxa en de Pi's) zodat het reproduceerbaar
+#    is en geen root of loop-device vraagt — de geometrie is die van het
+#    donor-image, want dat is wat de BROM van dit silicium aantoonbaar leest.
+#    GEEN -vollabel hier: de BROM-parser is niet van ons, en dit image is
+#    bewezen zoals het is.
+go run "$DIR/image/mkcard/main.go" -o "$OUT/hopos-licheerv.img" \
 	-size 64 "$OUT/fip-licheerv.bin=fip.bin"
 echo "flash: diskutil unmountDisk /dev/diskN && sudo dd if=$OUT/hopos-licheerv.img of=/dev/rdiskN bs=4m" >&2
 

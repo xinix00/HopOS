@@ -76,3 +76,29 @@ fi
 
 echo "sd-rpi4/kernel8.img (HOP-agent, $(du -h sd-rpi4/kernel8.img | cut -f1)) + config.txt + hopos.cfg klaar." >&2
 echo "flash: cp sd-rpi4/kernel8.img sd-rpi4/config.txt sd-rpi4/hopos.cfg '/Volumes/NO NAME/'" >&2
+
+# 5. Het complete, dd-bare kaart-image (image/mkcard — zelfde vorm als de
+#    LicheeRV en de Radxa): MBR + FAT16 met de firmware er al op, dus gunzip|dd
+#    en de kaart boot — geen bestaande bootfs meer nodig. De firmware komt uit
+#    sd-rpi4/ (gitignored; herkomst + bl31-bouwrecept in sd-rpi4/LEESMIJ.txt);
+#    ontbreekt er iets, dan slaan we dit LUID over en is de cp-flow hierboven
+#    gewoon compleet. De config in het image is ALTIJD een template (of
+#    CFG=...): nooit sd-rpi4/hopos.cfg, daar wonen de echte sleutels.
+rm -f metal/out/hopos-rpi4.img
+FW_MISSING=""
+for f in start4.elf fixup4.dat bcm2711-rpi-4-b.dtb bl31.bin; do
+	[ -f "sd-rpi4/$f" ] || FW_MISSING="$FW_MISSING $f"
+done
+if [ -z "$FW_MISSING" ]; then
+	DEFCFG="$DIR/image/hopos-headless.cfg"
+	[ "${GUI:-1}" = 1 ] && DEFCFG="$DIR/image/hopos-gui.cfg"
+	go run "$DIR/image/mkcard/main.go" -o metal/out/hopos-rpi4.img -size 64 \
+		-start 8192 -label bootfs -vollabel \
+		sd-rpi4/kernel8.img sd-rpi4/config.txt "${CFG:-$DEFCFG}=hopos.cfg" \
+		sd-rpi4/start4.elf sd-rpi4/fixup4.dat sd-rpi4/bcm2711-rpi-4-b.dtb \
+		sd-rpi4/bl31.bin >&2
+	echo "metal/out/hopos-rpi4.img (dd-baar, config = $(basename "${CFG:-$DEFCFG}"))" >&2
+	echo "flash: diskutil unmountDisk /dev/diskN && sudo dd if=metal/out/hopos-rpi4.img of=/dev/rdiskN bs=4m" >&2
+else
+	echo "GEEN dd-baar image gebouwd — mist in sd-rpi4/:$FW_MISSING (zie sd-rpi4/LEESMIJ.txt)" >&2
+fi

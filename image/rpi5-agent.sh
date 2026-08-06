@@ -95,3 +95,30 @@ fi
 
 echo "sd-rpi5/hop-agent5.img ($(du -h sd-rpi5/hop-agent5.img | cut -f1)) + config.txt + hopos.cfg klaar." >&2
 echo "flash: cp sd-rpi5/hop-agent5.img sd-rpi5/config.txt sd-rpi5/hopos.cfg /Volumes/bootfs/ && sync && diskutil eject" >&2
+
+# 5. Het complete, dd-bare kaart-image (image/mkcard — zelfde vorm als de
+#    LicheeRV en de Radxa): MBR + FAT16 met de firmware er al op, dus gunzip|dd
+#    en de kaart boot — geen bestaande bootfs meer nodig. De Pi 5 heeft geen
+#    start*.elf (firmware in de EEPROM) maar weigert zonder passende DTB; die
+#    komt uit sd-rpi5/ (gitignored; herkomst in sd-rpi5/LEESMIJ.txt).
+#    Ontbreekt er iets, dan slaan we dit LUID over en is de cp-flow hierboven
+#    gewoon compleet. De config in het image is ALTIJD een template (of
+#    CFG=...): nooit sd-rpi5/hopos.cfg, daar wonen de echte sleutels.
+rm -f metal/out/hopos-rpi5.img
+FW_MISSING=""
+for f in bcm2712-rpi-5-b.dtb overlays/bcm2712d0.dtbo; do
+	[ -f "sd-rpi5/$f" ] || FW_MISSING="$FW_MISSING $f"
+done
+if [ -z "$FW_MISSING" ]; then
+	DEFCFG="$DIR/image/hopos-headless.cfg"
+	[ "${GUI:-1}" = 1 ] && DEFCFG="$DIR/image/hopos-gui.cfg"
+	go run "$DIR/image/mkcard/main.go" -o metal/out/hopos-rpi5.img -size 64 \
+		-start 8192 -label bootfs -vollabel \
+		sd-rpi5/hop-agent5.img sd-rpi5/config.txt "${CFG:-$DEFCFG}=hopos.cfg" \
+		sd-rpi5/bcm2712-rpi-5-b.dtb \
+		sd-rpi5/overlays/bcm2712d0.dtbo=overlays/bcm2712d0.dtbo >&2
+	echo "metal/out/hopos-rpi5.img (dd-baar, config = $(basename "${CFG:-$DEFCFG}"))" >&2
+	echo "flash: diskutil unmountDisk /dev/diskN && sudo dd if=metal/out/hopos-rpi5.img of=/dev/rdiskN bs=4m" >&2
+else
+	echo "GEEN dd-baar image gebouwd — mist in sd-rpi5/:$FW_MISSING (zie sd-rpi5/LEESMIJ.txt)" >&2
+fi

@@ -89,45 +89,6 @@ const (
 	// FB_BASE-env (FbIPA + offset-in-blok); alleen de houder heeft dit GB.
 	FbIPA = 0x20000000
 
-	// Surface-grant-venster (IPA-ABI, kern/slots/surfgrant.go): het laatste
-	// vrije GB van de kooi-IPA. Het canonieke beeld gebruikt GB0 (fb-grant),
-	// GB1 (de partitie — linkbase 0x50000000) en GB2 (CtrlBase/boot-scratch);
-	// GB3 was nergens voor vergeven en is precies groot genoeg voor waar het
-	// voor bedoeld is.
-	//
-	// WAAROM DIT BESTAAT. Een GUI-app tekent zijn venster in zijn eigen RAM en
-	// stuurde die pixels daarna over TCP naar de display, die ze in een eigen
-	// back/front-buffer overnam. Elke pixel stond dus twee keer in DRAM en ging
-	// er een keer doorheen. Gemeten op de Radxa 06-08 met zes vensters: de
-	// display zat op 78 MB van zijn 96 en viel om — en dat schaalt met het
-	// aantal vensters, niet met de schermgrootte. Met een grant leest de
-	// display de buffer van de app rechtstreeks: één kopie, en het geheugen van
-	// de display wordt constant in het aantal vensters. Dat is fase P3 uit
-	// docs/archief/gui-ontwerp.md.
-	//
-	// READ-ONLY, en dat is het hele punt: de display mág de pixels van een app
-	// zien (dat deed hij hiervoor ook, ze kwamen over de socket), maar hij mag
-	// er niet in schrijven. De omgekeerde richting bestaat niet — een app ziet
-	// nooit het venster van een ander.
-	SurfIPA = 0xC0000000
-
-	// Granulariteit van een grant: hele 2MB-blokken. Dat is geen zuinigheid
-	// maar een isolatie-eis. Een pagina-precieze grant (zoals de fb-grant, die
-	// een niet-uitgelijnde firmware-buffer moet dekken) kost twee rand-L3's per
-	// venster; met tientallen surfaces zijn dat tientallen tabellen in een
-	// stage-2-blok dat er acht vrij heeft. Door de app te laten alloceren op
-	// 2MB gaat élke grant als zuivere blokken de gedeelde L2 in: geen
-	// rand-tabellen, geen overmapping, en de rekensom in de review is één regel.
-	// De prijs is afronding binnen het RAM van de app zélf (1920x1080x32 =
-	// 8,29 MB → 10 MB), en dat is zijn eigen partitie, niet die van een ander.
-	SurfBlock = 2 << 20
-
-	// Het GB verdeeld in blokken. Niet per slot vast ingedeeld: SlotCap is 128
-	// en 512/128 = 4 blokken = 8 MB, te weinig voor één 1080p-venster. Dus een
-	// vrije-blokken-bitmap (kern/slots/surfgrant.go) — wie een venster opent
-	// krijgt wat hij nodig heeft, en wie stopt geeft het terug.
-	SurfBlocks = (1 << 30) / SurfBlock
-
 	// hop-ABI-ringen per slot: outbox (app → HOP: logs én RPC-verzoeken) en
 	// inbox (HOP → app: antwoorden). Ze liggen in de ABI-staart van de partitie
 	// (AbiRingOff); dit zijn de offsets binnen die 64KB.

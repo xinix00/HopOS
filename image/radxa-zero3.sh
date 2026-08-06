@@ -17,17 +17,22 @@
 # docs/archief/radxa-zero3.md.
 #
 # Boot-route (het verschil met de Pi's): dit bord boot via U-Boot, en die
-# hebben we niet in deze repo — hij staat al op elke Radxa/Armbian-kaart.
-# Eén keer een officieel Radxa-image naar SD schrijven levert de hele keten
-# (TPL/SPL + TF-A + U-Boot); daarna is HopOS-flashen alleen nog bestanden
-# vervangen op de bootpartitie:
+# schrijven we niet zelf — de BROM leest hem raw van vaste LBA's, vóór de
+# eerste partitie. Dit script bouwt daarom een compleet, dd-baar kaart-image
+# (zelfde vorm als de LicheeRV): onze eigen MBR + FAT16-bootpartitie, met de
+# U-Boot-keten (TPL/SPL + TF-A + U-Boot) als donor-bytes uit het officiële
+# Radxa-image — eenmalig gedownload en gitignored gecachet, zie hieronder.
 #
-#   1. dd een Radxa Zero 3 image naar de kaart (eenmalig, levert U-Boot)
-#   2. mount de bootpartitie en zet daar:
-#        proberk3566.img              (dit script bouwt hem)
-#        extlinux/extlinux.conf       (dit script schrijft een voorbeeld)
-#   3. seriële console: USB-UART op de 40-pins header (pin 8=TX, 10=RX, 6=GND),
-#      1500000 8N1 — de Rockchip-default die U-Boot laat staan.
+#   diskutil unmountDisk /dev/diskN
+#   sudo dd if=metal/out/hopos-radxa-zero3.img of=/dev/rdiskN bs=4m
+#
+# Waarom een heel image en geen "zet drie bestanden op de bootpartitie van een
+# Radxa-kaart" (de oude route): part2 van zo'n donor-kaart is als EFI-partitie
+# getypeerd, dus macOS mount hem niet en niemand kán die bestanden er zonder
+# raw-dd op zetten (gemeten 05-08). Onze eigen partitie is type 0x0C — die
+# mount ná het flashen wél gewoon, dus hopos.cfg blijft bewerkbaar en een
+# nieuwe kernel is een cp. Seriële console: USB-UART op de 40-pins header
+# (pin 8=TX, 10=RX, 6=GND), 1500000 8N1 — de Rockchip-default.
 #
 # U-Boot's distro-boot vindt extlinux.conf, laadt het Image en `booti` springt
 # op EL2 met x0=DTB — daarna is alles meetbaar op de UART.
@@ -114,9 +119,64 @@ DEFCFG="$DIR/image/hopos-headless.cfg"
 [ "${GUI:-1}" = 1 ] && [ "${PROBE:-0}" != 1 ] && DEFCFG="$DIR/image/hopos-gui.cfg"
 cp "${CFG:-$DEFCFG}" metal/out/hopos.cfg
 
+# Donor-boot: de bytes LBA 64..32767 van het officiële Radxa Zero 3-image —
+# idbloader (RKNS-blok, LBA 64) + u-boot.itb (LBA 16384), sámen de keten
+# TPL/SPL + TF-A + U-Boot die de BROM raw leest, plus het (lege) U-Boot-
+# env-gebied ertussen. Vendor-bytes, dus gitignored en eenmalig gedownload;
+# de download pakt alléén de eerste 16MiB van het 2,5GB-image uit en breekt
+# dan af. Gepind op release b6 mét hash: dit zijn exact de bytes waarmee alle
+# metingen van 05/06-08 gedaan zijn (docs/archief/radxa-zero3.md).
+DONOR="${RADXA_DONOR:-$DIR/image/radxa/donor-boot.bin}"
+DONOR_URL="https://github.com/radxa-build/radxa-zero3/releases/download/b6/radxa-zero3_debian_bullseye_cli_b6.img.xz"
+DONOR_SHA="9a582a0c6fcd8b41d5627284aa9b831a46a08e7606c6fc31901f48725354a7b9"
+if [ ! -f "$DONOR" ]; then
+	echo "== donor-boot ophalen (eenmalig, ~10MB van de stream): $DONOR_URL ==" >&2
+	mkdir -p "$(dirname "$DONOR")"
+	python3 - "$DONOR_URL" "$DONOR.part" <<'PYEOF'
+# Stream-download + xz-decompressie van precies de eerste 16MiB, dan de MBR/GPT
+# van de donor (LBA 0..63) eraf: die tabel is van óns (mkcard). python3-lzma
+# i.p.v. curl|xz zodat er geen xz-binary nodig is.
+import lzma, sys, urllib.request
+WANT, SKIP = 16 << 20, 64 * 512
+dec = lzma.LZMADecompressor()
+buf = bytearray()
+with urllib.request.urlopen(sys.argv[1]) as r:
+    while len(buf) < WANT:
+        chunk = r.read(1 << 20)
+        if not chunk:
+            sys.exit(f"stream ended at {len(buf)} bytes — expected {WANT}")
+        buf += dec.decompress(chunk)
+open(sys.argv[2], "wb").write(bytes(buf[SKIP:WANT]))
+PYEOF
+	mv "$DONOR.part" "$DONOR"
+fi
+# Hash-check bij ELKE build (16MB, verwaarloosbaar): vangt een truncated
+# download én een per ongeluk vervangen cache — de les van deze bring-up is
+# dat een payload die niet klopt een boot-cyclus kost.
+GOT=$(shasum -a 256 "$DONOR" | cut -d' ' -f1)
+if [ "$GOT" != "$DONOR_SHA" ]; then
+	echo "FOUT: $DONOR heeft hash $GOT, verwacht $DONOR_SHA" >&2
+	echo "  (verwijder het bestand en draai opnieuw voor een verse download," >&2
+	echo "   of zet RADXA_DONOR naar een eigen donor-boot-blok)" >&2
+	exit 1
+fi
+
+# Het complete, dd-bare kaart-image: onze MBR (één FAT16-partitie, type 0x0C,
+# vanaf LBA 32768 = 16MiB), de donor-bytes raw op hun gemeten plek, en onze
+# drie bestanden in de FAT. Alles onder de partitie is exact de donor-kaart;
+# de partitie zelf is de verse-FAT-les van 05-08 (data altijd vooraan,
+# deterministisch, verifieerbaar).
+CARD="metal/out/hopos-radxa-zero3.img"
+if [ "${PROBE:-0}" = 1 ] || [ "${EMBED:-0}" = 1 ]; then
+	CARD="metal/out/$NAME-card.img"
+fi
+go run "$DIR/image/mkcard/main.go" -o "$CARD" -size 64 -start 32768 \
+	-label hopos -vollabel -raw "$DONOR@32768" \
+	"metal/out/$NAME.img" metal/out/hopos.cfg \
+	metal/out/extlinux.conf=extlinux/extlinux.conf >&2
+
 echo "" >&2
-echo "metal/out/$NAME.img ($(du -h "metal/out/$NAME.img" | cut -f1)) + extlinux.conf + hopos.cfg klaar." >&2
-echo "op de bootpartitie van een Radxa/Armbian-kaart:" >&2
-echo "  cp metal/out/$NAME.img metal/out/hopos.cfg <boot>/" >&2
-echo "  mkdir -p <boot>/extlinux && cp metal/out/extlinux.conf <boot>/extlinux/" >&2
+echo "$CARD ($(du -h "$CARD" | cut -f1), dd-baar) klaar — kernel $NAME.img + extlinux.conf + hopos.cfg." >&2
+echo "flash: diskutil unmountDisk /dev/diskN && sudo dd if=$CARD of=/dev/rdiskN bs=4m" >&2
+echo "daarna: de partitie 'hopos' mount gewoon — hopos.cfg bewerken of een nieuwe kernel erop is een cp." >&2
 echo "console: 1500000 8N1 op de 40-pins header (pin 8/10/6)" >&2

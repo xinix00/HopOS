@@ -1273,13 +1273,6 @@ func releaseSlot(i int, freePartition bool) {
 	}
 	hopswitch.Detach(i)
 	hopswitch.UnpublishSlot(i)
-	// Surface-grants weg vóór de partitie terug de pool in gaat. Dit is de
-	// volgorde die ertoe doet: laten we een grant staan, dan kijkt de display
-	// straks in het geheugen van de vólgende job die deze partitie krijgt.
-	// Beide kanten, want dit slot kan de verlener zijn (zijn venster) of de
-	// ontvanger (de display zelf — dan is de hele administratie betekenisloos).
-	SurfaceRevoke(i)
-	SurfaceHolderGone(i)
 	grantRelease(i) // grant terug (fb: HOP-console weer op het glas)
 	if freePartition {
 		partRelease(i)
