@@ -81,6 +81,16 @@ func Env(i int, env map[string]string) map[string]string {
 	return out
 }
 
+// Holder is de slots.GrantHooks.Holder-hook: welk slot de framebuffer nú heeft
+// (0 = niemand). De surface-grant heeft dit nodig — een GUI-app vraagt "laat de
+// display in mijn buffer kijken" en weet zelf niet wie dat is; kern/slots mag
+// het niet weten, want wie de display is, is beleid en dat woont hier.
+func Holder() int {
+	mu.Lock()
+	defer mu.Unlock()
+	return holder
+}
+
 // Arm is de armSlot-hook (slots.GrantHooks.Arm): mapt (ná stage2.Build) het
 // venster in de kooi van de houder. Voor andere slots een no-op.
 func Arm(i int) error {

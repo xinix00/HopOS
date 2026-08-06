@@ -162,8 +162,21 @@ func Init() *App {
 	a.ctrlSet(layout.CtrlStatus, layout.StatusReady)
 
 	go a.watch()
+	self = a
 	return a
 }
+
+// self is de App van dit proces. Er is er per definitie precies één — een app
+// ís een slot — maar tot nu toe droeg elke aanroeper zijn eigen verwijzing.
+// Voor de surface-grant werkt dat niet: die zit diep in een GUI-bibliotheek
+// (hop-os-surf, stack/window) die geen App-parameter heeft en er ook geen
+// hoort te krijgen alleen hiervoor.
+var self *App
+
+// Self geeft de App van dit proces, of nil vóór Init. Voor bibliotheken die
+// een HopOS-dienst willen gebruiken zonder hem door hun hele API te rijgen;
+// app-code gebruikt gewoon de App die Init teruggaf.
+func Self() *App { return self }
 
 // Env geeft een door HOP meegegeven omgevingsvariabele (leeg = afwezig).
 // De ER_PORT_*/ER_ATTR_*-conventie van HOP werkt hier ongewijzigd.

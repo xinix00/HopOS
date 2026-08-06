@@ -64,18 +64,27 @@ loader als go:embed-bytes in de node-binary). Hoort hier: alles wat alleen
 core 0 als vertrouwde kern doet.
 
 **`gui/`** — het display-vlak (docs/archief/gui-ontwerp.md), sinds 20-07 een eigen
-categorie omdat GUI los van de rest moet kunnen: `fbgrant` (het
-fb-weggeef-beleid: claim, FB_*-env, console van/terug op het glas). Alleen
-cmd/-binaries linken dit, en uitsluitend achter `-tags gui` — elke board-tag
-heeft zo twee smaken: kaal (headless) en gui — elk imagescript heeft de
-knop (default gui, `GUI=0` = kaal); beide smaken blijven groen via de
-tamago-gate. De grens: de firmware-framebuffer (`driver/fb`, de log-console)
-is géén gui — dat is de universele console; alles voorbij dat ene
-firmware-beeld (het glas weggeven, HVS, planes, straks de driver-driehoek)
-is wél gui. De mechaniek eronder (stage2.GrantWindow, layout.FbIPA en het
-registratiepunt kern/slots/grants.go) blijft basis: het generieke
-DeviceGrant-primitief — gui/fbgrant is de eerste provider die zich daar
-(via cmd's gui-smaak) op registreert.
+categorie omdat GUI los van de rest moet kunnen, en sinds 06-08 óók de
+driver-bende voor beeld: `fbgrant` (het fb-weggeef-beleid: claim, FB_*-env,
+console van/terug op het glas) en `rkscan` (de RK3566-beeldketen PD_VO →
+VOP2 → DW-HDMI — de eerste echte display-driver in de boom; elke volgende
+SoC met beeld krijgt hier zijn eigen map). Alleen cmd/-binaries linken dit,
+en uitsluitend achter `-tags gui` — elke board-tag heeft zo twee smaken:
+kaal (headless) en gui — elk imagescript heeft de knop (default gui,
+`GUI=0` = kaal); beide smaken blijven groen via de tamago-gate. De grens: de
+firmware-framebuffer (`driver/fb`, de log-console) is géén gui — dat is de
+universele console; alles voorbij dat ene firmware-beeld (het glas weggeven,
+een scanout opbrengen, planes, straks de driver-driehoek) is wél gui. De
+mechaniek eronder (stage2.GrantWindow, layout.FbIPA en het registratiepunt
+kern/slots/grants.go) blijft basis: het generieke DeviceGrant-primitief —
+gui/fbgrant is de eerste provider die zich daar (via cmd's gui-smaak) op
+registreert. Twee stukken gui-werk wonen om een goede reden NIET in gui/
+maar achter dezelfde tag op hun eigen plek: de surface-grant
+(kern/slots/surfgrant.go + kern/stage2/surface.go — isolatie-invarianten
+zijn kern-beleid, kaal linkt een stub die OpSurfGrant met een fout
+beantwoordt) en de scanout-bedrading (cmd/hopos/gui_rk3566.go — board mag
+gui niet importeren, dus cmd knoopt rkscan via hop.UseScanout aan het
+board).
 
 **`board/`** — de hardware-integrator, per board in TWEE helften:
 

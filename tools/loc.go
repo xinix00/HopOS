@@ -35,21 +35,24 @@ const module = "github.com/xinix00/HopOS/metal"
 
 // flavour is één release-smaak: de node-build plus de apploader die erin
 // gebakken wordt (fase 1 van elke job), elk met hun eigen tags — precies de
-// twee `go build`s van het image-script. GUI-smaak waar die bestaat
-// (superset: headless is dezelfde build minus gui-files).
+// twee `go build`s van het image-script. De KALE (headless) smaak is de basis
+// van alle emmers hieronder; wat `-tags gui` erbij linkt (gui/, de
+// surface-grant, de scanout-bedrading) staat apart in de gui-sectie — zo is
+// "een headless node = X regels" een gemeten getal en geen voetnoot.
 type flavour struct {
 	name       string
 	arch       string // GOARCH
-	nodeTags   string // cmd/hopos
+	nodeTags   string // cmd/hopos, kaal
 	loaderTags string // app/apploader
+	gui        bool   // heeft dit board een gui-smaak (dezelfde tags + gui)?
 }
 
 var flavours = []flavour{
-	{"uefi", "arm64", "uefi linkcpuinit gui embedloader", "linkcpuinit"},
-	{"rpi5", "arm64", "rpi5 linkcpuinit gui embedloader", "linkcpuinit"},
-	{"rpi4", "arm64", "rpi4 linkcpuinit gui embedloader", "linkcpuinit"},
-	{"rk3566", "arm64", "rk3566 linkcpuinit gui embedloader", "linkcpuinit"},
-	{"licheerv", "riscv64", "licheerv embedloader embedcfg embedcagestub", "linkramsize linkcpuinit"},
+	{"uefi", "arm64", "uefi linkcpuinit embedloader", "linkcpuinit", true},
+	{"rpi5", "arm64", "rpi5 linkcpuinit embedloader", "linkcpuinit", true},
+	{"rpi4", "arm64", "rpi4 linkcpuinit embedloader", "linkcpuinit", true},
+	{"rk3566", "arm64", "rk3566 linkcpuinit embedloader", "linkcpuinit", true},
+	{"licheerv", "riscv64", "licheerv embedloader embedcfg embedcagestub", "linkramsize linkcpuinit", false},
 }
 
 // qemuvirt is een dev-target, geen release-smaak: hij telt niet mee in de
@@ -74,7 +77,7 @@ func layer(rel string) string {
 	case "net":
 		return "network stack"
 	case "fw", "gui", "board": // board/*.go op de wortel = het board-contract
-		return "firmware, boot config, display grant"
+		return "firmware & boot config"
 	}
 	return "overig (" + first + ")"
 }
@@ -219,6 +222,29 @@ func main() {
 		}
 	}
 
+	// De gui-smaak, apart: per board het verschil tussen `-tags gui` en kaal.
+	// Deze files tellen in GEEN enkele emmer hierboven mee — de kale node is de
+	// basis, dit is de opt-in laag erbovenop.
+	guiSets := map[string]map[string]bool{}
+	guiAll := map[string]bool{}
+	var guiBoards []string
+	for _, fl := range flavours {
+		if !fl.gui {
+			continue
+		}
+		guiBoards = append(guiBoards, fl.name)
+		diff := map[string]bool{}
+		for f := range filesOf(tamago, fl.arch, fl.nodeTags+" gui", "./cmd/hopos") {
+			if !sets[fl.name][f] {
+				diff[f] = true
+			}
+		}
+		guiSets[fl.name] = diff
+		for f := range diff {
+			guiAll[f] = true
+		}
+	}
+
 	var arm64Boards []string
 	for _, fl := range flavours {
 		if fl.arch == "arm64" {
@@ -280,7 +306,7 @@ func main() {
 
 	p("== portable — telt voor élke node ==")
 	total := 0
-	for _, l := range []string{"isolation core", "app runtime + node mains", "drivers", "network stack", "firmware, boot config, display grant"} {
+	for _, l := range []string{"isolation core", "app runtime + node mains", "drivers", "network stack", "firmware & boot config"} {
 		p("  %-40s %6d", l, portable[l])
 		total += portable[l]
 	}
@@ -306,13 +332,49 @@ func main() {
 		p("  %-40s %6d", s, board[s])
 	}
 
+	// De gui-laag: wat `-tags gui` bovenop de kale node linkt. Gemeenschappelijk
+	// (fbgrant, surface-grant, de stage-2-surface-kant) versus board-eigen
+	// (gui/driver/rkscan + de scanout-bedrading is er alleen op de rk3566).
+	guiTotal := map[string]int{}
+	guiBuckets := map[string]int{}
+	for f := range guiAll {
+		n := count(f)
+		var in []string
+		for _, b := range guiBoards {
+			if guiSets[b][f] {
+				in = append(in, b)
+				guiTotal[b] += n
+			}
+		}
+		sig := strings.Join(in, "+")
+		if len(in) == len(guiBoards) {
+			sig = "alle gui-boards"
+		}
+		guiBuckets[sig] += n
+		add(files, "gui · "+sig, f, n)
+	}
+	p("\n== gui — de opt-in smaak (-tags gui), telt in geen kale node mee ==")
+	sigs = sigs[:0]
+	for s := range guiBuckets {
+		sigs = append(sigs, s)
+	}
+	sort.Strings(sigs)
+	for _, s := range sigs {
+		p("  %-40s %6d", s, guiBuckets[s])
+	}
+
 	// De ladder-view: een node = portable + zijn ISA-laag + zijn board-laag.
 	// De board-laag hier is de rest van wat déze machine linkt — inclusief
-	// zijn NIC/PHY/display-drivers en wat hij met een buurbord deelt.
-	p("\n== een node = portable + ISA-laag + board-laag ==")
+	// zijn NIC/PHY/display-drivers en wat hij met een buurbord deelt. De
+	// gui-kolom is de aparte vermelding: kaal is het getal, gui de optie.
+	p("\n== een node = portable + ISA-laag + board-laag (gui apart) ==")
 	for _, fl := range flavours {
 		bs := nodeTotal[fl.name] - total - archCommon[fl.arch]
-		p("  %-16s %6d + %4d (%s) + %4d (board) = %6d", fl.name, total, archCommon[fl.arch], fl.arch, bs, nodeTotal[fl.name])
+		g := ""
+		if fl.gui {
+			g = fmt.Sprintf("   (+%d met gui)", guiTotal[fl.name])
+		}
+		p("  %-16s %6d + %4d (%s) + %4d (board) = %6d%s", fl.name, total, archCommon[fl.arch], fl.arch, bs, nodeTotal[fl.name], g)
 	}
 
 	if verbose {

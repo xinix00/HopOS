@@ -1,4 +1,4 @@
-package rk3566
+package rkscan
 
 import (
 	"time"
@@ -227,7 +227,7 @@ const (
 // iahb lezen álle registers 0x00 of 0xFF — en dat is precies waarom HDMIIDs
 // vóór elke schrijfactie hoort te lopen.
 func HDMIClockOn() {
-	dev.Write32(CRUBase+cruCLKGATE21,
+	dev.Write32(cruBase+cruCLKGATE21,
 		hiword(0, 1, gatePCLKHDMIHost)|hiword(0, 1, gateCLKHDMISFR))
 	dev.MB()
 }

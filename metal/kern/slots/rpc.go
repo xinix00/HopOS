@@ -138,6 +138,23 @@ func (s *servicer) handle(payload []byte) []byte {
 	if err != nil {
 		return hopabi.EncodeResp(hopabi.Resp{Status: hopabi.StatusError, Data: []byte(err.Error())})
 	}
+
+	// De surface-ops gaan vóór de storage-check: ze raken de opslag niet, en een
+	// board zonder storage-laag (de Radxa heeft geen ECAM en dus geen volumes)
+	// hoort wél een desktop te kunnen draaien.
+	switch req.Op {
+	case hopabi.OpSurfGrant:
+		ipa, err := SurfaceGrant(s.slot, req.Off, req.N)
+		if err != nil {
+			return fail(req, err)
+		}
+		return ok(req, ipa, nil)
+
+	case hopabi.OpSurfRevoke:
+		SurfaceRevoke(s.slot)
+		return ok(req, 0, nil)
+	}
+
 	if fsys == nil {
 		return fail(req, fmt.Errorf("no storage layer on board"))
 	}

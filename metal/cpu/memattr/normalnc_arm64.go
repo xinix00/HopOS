@@ -33,6 +33,21 @@ const (
 	// EL1-RW, attribuut-index 2 (Normal-NC) en niet-uitvoerbaar. Een
 	// framebuffer hoort nooit code te zijn.
 	ncBlock = descBlock | 1<<10 | 0x3<<8 | 0x0<<6 | ncIndex<<2 | 0x3<<53
+
+	// Idem, maar CACHEABLE en READ-ONLY: de surface-grant (Normal, index 1 —
+	// die vult tamago zelf met Normal WB). AP[7:6] = 0b10 is EL1 read-only.
+	//
+	// Cacheable en niet NC, omdat de lezer hier een CPU-core is en geen scanout:
+	// de schrijvende app en de lezende display zitten allebei inner-shareable in
+	// hetzelfde coherentie-domein, dus de hardware houdt ze gelijk. NC zou van
+	// elk frame een ongecachete lezing van megabytes maken.
+	//
+	// Read-only omdat de stage-2 van de kooi dat óók zegt (kern/stage2:
+	// surface.go). Twee lagen die hetzelfde zeggen is hier geen dubbelop maar de
+	// bedoeling: een schrijf-poging valt dan in de eigen kooi om, met een adres
+	// dat naar de app wijst, in plaats van als kale stage-2-abort.
+	roIndex = 1
+	roBlock = descBlock | 1<<10 | 0x3<<8 | 0x2<<6 | roIndex<<2 | 0x3<<53
 )
 
 var (
@@ -79,6 +94,43 @@ func NormalNC(va, size uintptr) error {
 	gbBase := (lo >> 30) << 30
 	for a := lo; a < hi; a += block2M {
 		l2[(a-gbBase)>>21] = uint64(a) | ncBlock
+	}
+	flushTLB()
+	return nil
+}
+
+// NormalRO zet [va, va+size) in de eigen stage-1-map op Normal cacheable,
+// read-only — het venster waarin de display de surface van een andere app
+// leest (kern/slots: surfgrant.go).
+//
+// Zonder deze stap zou dat venster Device-nGnRnE zijn, want dat is wat tamago
+// met alles buiten de eigen RAM-declaratie doet. Dan leest de compositor een
+// heel frame als losse ongatherbare transacties uit DRAM: dezelfde val die de
+// framebuffer had (zie de pakket-doc), maar dan aan de leeskant en per venster.
+//
+// Afronding op 2MB is hier geen compromis maar precies goed: een surface-grant
+// gaat per definitie per 2MB-blok (layout.SurfBlock), dus het venster valt
+// altijd exact op de blokgrenzen en er komt nooit vreemd geheugen in mee.
+func NormalRO(va, size uintptr) error {
+	if size == 0 {
+		return nil
+	}
+	lo := va &^ (block2M - 1)
+	hi := (va + size + block2M - 1) &^ (block2M - 1)
+	if lo>>30 != (hi-1)>>30 {
+		return fmt.Errorf("memattr: venster %#x..%#x kruist een GB-grens", va, va+size)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	l2, err := l2ForGB(lo >> 30)
+	if err != nil {
+		return err
+	}
+	gbBase := (lo >> 30) << 30
+	for a := lo; a < hi; a += block2M {
+		l2[(a-gbBase)>>21] = uint64(a) | roBlock
 	}
 	flushTLB()
 	return nil

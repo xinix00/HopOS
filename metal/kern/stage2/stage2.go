@@ -59,6 +59,18 @@ const (
 	pageRO    = descPage | attrAF | attrSHInner | attrRO | attrNormal
 	pageRWNC  = descPage | attrAF | attrSHInner | attrRW | attrNormNC
 
+	// Surface-grant (surface.go): Normal CACHEABLE, inner-shareable, read-only.
+	//
+	// Cacheable en niet NC zoals de fb — het verschil is wie er meeleest. De
+	// framebuffer wordt door de scanout-hardware gelezen, die niet in het
+	// cache-domein zit, dus daar is NC de enige veilige keuze. Een surface
+	// wordt door een andere CPU-core gelezen, en die zit wél inner-shareable in
+	// hetzelfde domein: de app schrijft cacheable in zijn eigen RAM, de display
+	// leest cacheable, en de hardware houdt ze coherent. NC zou hier een
+	// niet-cachende lezer van 8 MB per frame maken — precies de kopie die we
+	// aan het wegnemen zijn, dan in trager.
+	blockRO = descBlock | attrAF | attrSHInner | attrRO | attrNormal
+
 	l1Off     = 0x0000
 	l2PartOff = 0x1000
 	l2DevOff  = 0x2000
@@ -75,6 +87,11 @@ const (
 	// 0xFFFF van het slotblok was vrij (zie de indeling in abi/layout).
 	l3FbHeadOff = 0x8000
 	l3FbTailOff = 0x9000
+	// Surface-grant-L2 (surface.go): dekt het hele SurfIPA-GB met 2MB-blokken.
+	// Eén tabel voor álle surfaces samen — daarom moet een grant op 2MB liggen:
+	// pagina-precieze randen zouden per venster twee L3's kosten en er zijn er
+	// nog maar vijf vrij in dit blok (0xB000..0xFFFF).
+	l2SurfOff = 0xA000
 )
 
 // InitVectors schrijft de gedeelde EL2-vectoren op Stage2Base (2KB-aligned

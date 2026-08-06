@@ -49,6 +49,21 @@ const (
 	OpStorePush = 9  // push(path): eigen pad → object (vervangend) → size
 	OpStoreList = 10 // list(path): keys onder eigen map + pad-prefix, "\n"-gescheiden
 	OpStoreDrop = 11 // drop(path): object weg (idempotent)
+
+	// De surface-grant (gui-ontwerp P3): een GUI-app laat de display-houder in
+	// zijn vensterbuffer KIJKEN, in plaats van elke frame de pixels over een
+	// socket te sturen die de display dan nog eens opslaat.
+	//
+	// Off/N zijn een venster in het eigen RAM (offset vanaf RamStart, lengte),
+	// allebei 2MB-uitgelijnd — de app alloceert daarvoor met applib.SurfaceBuf.
+	// Resp.Size is het IPA waarop de display het venster ziet; dat getal stuurt
+	// de app daarna zelf over zijn eigen protocol door. HOP zit dus niet in het
+	// GUI-protocol: hij verleent alleen het zicht en zegt waar het uitkomt.
+	//
+	// Er is bewust géén op om de buffer van een ánder op te vragen. Verlenen kan
+	// alleen over je eigen RAM, en alleen aan wie de framebuffer houdt.
+	OpSurfGrant  = 12 // grant(off, n) → display-IPA
+	OpSurfRevoke = 13 // revoke(): de eigen grant weer intrekken
 )
 
 // Status-codes (resp). Bij ≠ StatusOK bevat data de fouttekst.

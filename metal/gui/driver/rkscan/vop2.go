@@ -1,4 +1,4 @@
-package rk3566
+package rkscan
 
 import (
 	"time"
@@ -6,9 +6,9 @@ import (
 	"github.com/xinix00/HopOS/metal/dev"
 )
 
-// De VOP2 display-controller van de RK3566: leest de framebuffer uit het
-// PA-plan (fbPA) en scant hem uit naar Video Port 0, die op dit bord aan de
-// HDMI-transmitter hangt.
+// De VOP2 display-controller van de RK3566: leest de framebuffer die het board
+// aanwijst (rk3566.FB(), via de VOPScanout-argumenten) en scant hem uit naar
+// Video Port 0, die op dit bord aan de HDMI-transmitter hangt.
 //
 // WAAROM DIT BESTAAT, want elders in de boom staat het omgekeerde: op de Pi
 // bouwen we géén HVS-driver, omdat beeld daar een firmware-buffer is. Dit bord
@@ -204,7 +204,7 @@ func VOPClockOn() {
 		gateACLKVOPPre, gateACLKVOP, gateHCLKVOP, gateDCLKVOP0} {
 		g |= hiword(0, 1, b)
 	}
-	dev.Write32(CRUBase+cruCLKGATE20, g)
+	dev.Write32(cruBase+cruCLKGATE20, g)
 	dev.MB()
 }
 
@@ -245,7 +245,7 @@ func VOPPixelClock() error {
 	// 4. Terug naar NORM, en dan de deler van de VP.
 	dev.Write32(pmuModeCon0, hiword(pllModeNorm, 0x3, hpllModeShift))
 	dev.MB()
-	dev.Write32(CRUBase+cruCLKSEL39,
+	dev.Write32(cruBase+cruCLKSEL39,
 		hiword(dclkMuxHPLL, 0x3, dclkMuxShift)|
 			hiword(dclkDivFor1080p60-1, 0xFF, dclkDivShift))
 	// En de HDMI-referentie op hpll (niet op hpll_ph0): dezelfde PLL, want de
@@ -309,8 +309,10 @@ const (
 	layerSelRegDoneIMD = 1 << 28
 )
 
-// VOPScanout brengt de VOP2 op en start de scanout van de framebuffer uit het
-// PA-plan naar VP0. Aanroepen ná PowerOnVO.
+// VOPScanout brengt de VOP2 op en start de scanout van de framebuffer naar
+// VP0. Aanroepen ná PowerOnVO. De buffer (base/w/h/stride) is board-kennis —
+// hij ligt in het PA-plan — en komt daarom als argument binnen (rk3566.FB()
+// past exact op deze signatuur).
 //
 // ER IS BEWUST GEEN STOP-PAD. Dat is geen omissie maar een keuze: niets in HopOS
 // zet het beeld ooit uit — de buffer blijft van de node, de fb-grant wisselt
@@ -324,7 +326,7 @@ const (
 // er is geen EDID-lezer (dat zit in de HDMI-kant) en de framebuffer in het plan
 // heeft die maat. Een monitor die 1080p60 niet kan is buiten bereik van deze
 // eerste versie.
-func VOPScanout() error {
+func VOPScanout(base uintptr, w, h, stride int) error {
 	if err := VOPPixelClock(); err != nil {
 		return err
 	}
@@ -380,7 +382,6 @@ func VOPScanout() error {
 	// 5. Het window zelf. Formaat 0 = ARGB8888 (VOP2_FMT_ARGB8888), en dat is
 	//    ook wat XRGB8888 oplevert — de alfabits negeert de hardware bij een
 	//    bodemlaag zonder mixer.
-	base, w, h, stride := FB()
 	dev.Write32(vopBase+smCtrl0, 0)
 	dev.Write32(vopBase+smCtrl1, 0)
 	dev.Write32(vopBase+smRegion0MST, uint32(base))
@@ -508,11 +509,11 @@ const (
 // VOPClockOn zodat het meetinstrument het verschil kan tonen: eerst met alleen
 // de gates, dan met de hele boom.
 func VOPClockTree() {
-	dev.Write32(CRUBase+cruCLKSEL37,
+	dev.Write32(cruBase+cruCLKSEL37,
 		hiword(aclkVOMuxGPLL300, 0x3, 0)|
 			hiword(hclkVODivField, 0xF, 8)|
 			hiword(pclkVODivField, 0xF, 12))
-	dev.Write32(CRUBase+cruCLKSEL38,
+	dev.Write32(cruBase+cruCLKSEL38,
 		hiword(aclkVOPPreMuxGPLL, 0x3, 6)|
 			hiword(aclkVOPPreDivField, 0x1F, 0))
 	dev.MB()
@@ -522,10 +523,10 @@ func VOPClockTree() {
 // twee laatste scheiden "alles nul" (blok niet geklokt) van "alles één" (dode
 // bus) van iets ertussenin.
 func VOPClockInfo() (gate20, sel37, sel38, sel39, raw0, raw4 uint32) {
-	return dev.Read32(CRUBase + cruCLKGATE20),
-		dev.Read32(CRUBase + cruCLKSEL37),
-		dev.Read32(CRUBase + cruCLKSEL38),
-		dev.Read32(CRUBase + cruCLKSEL39),
+	return dev.Read32(cruBase + cruCLKGATE20),
+		dev.Read32(cruBase + cruCLKSEL37),
+		dev.Read32(cruBase + cruCLKSEL38),
+		dev.Read32(cruBase + cruCLKSEL39),
 		dev.Read32(vopBase + 0x000),
 		dev.Read32(vopBase + 0x004) // VERSION_INFO — Linux leest hem nooit, wij wel
 }

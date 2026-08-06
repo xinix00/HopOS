@@ -18,7 +18,11 @@ cd "$(dirname "$0")/../metal"
 # geen reviewtaak (tools/importcheck.go leest ook code achter build-tags).
 go run ../tools/importcheck.go
 
-go test "$@" \
+# -tags gui: de surface-grant (kern/slots, kern/stage2) is gui-werk en zijn
+# tests dus ook; zonder de tag zouden die stil overgeslagen worden. De kale
+# stub-kant is een compilegate, geen logica — die dekken de tamago-builds
+# hieronder (elke smaak zonder gui).
+go test -tags gui "$@" \
 	./abi/ring ./net/hopswitch ./kern/stage2 ./abi/layout ./net/dhcp ./abi/hopabi ./abi/checksum \
 	./fw/fdt ./fw/acpi ./fw/bootcfg ./kern/hopfs ./driver/vcmail ./driver/nic/mdio ./kern/slots \
 	./gui/fbgrant ./app/applib/apphttp ./kern/cage ./driver/nic/dwmac ./driver/nic/dwmac4 ./cmd/hopos/cfgblob ./driver/conlog \

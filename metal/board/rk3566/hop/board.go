@@ -12,7 +12,6 @@
 package hop
 
 import (
-	"fmt"
 	"sync"
 
 	"github.com/xinix00/HopOS/metal/board"
@@ -89,10 +88,20 @@ func (machine) PCIe() pcie.Window { return pcie.Window{} }
 //	        connector — GEMETEN WERKEND 06-08, 1920x1080p60 in DVI-mode.
 //
 // Eén buffer, twee lezers. Daarom was stap 1 geen omweg maar de helft van het
-// werk: het adres en de geometrie hieronder zijn precies wat de VOP2-layer als
-// bron krijgt.
+// werk: het adres en de geometrie zijn precies wat de VOP2-layer als bron
+// krijgt.
 //
-// De keten die hieraan hangt:
+// DE KETEN ZELF (PD_VO → VOP2 → HDMI-TX) IS GUI-WERK en woont in gui/driver/rkscan;
+// dit board mag gui niet importeren (indeling.md: alleen cmd importeert gui
+// terug), dus cmd/hopos/gui_rk3566.go registreert hem hier via UseScanout. In
+// de kale smaak registreert niemand iets en zegt Framebuffer() dus false: geen
+// display-code gelinkt, geen fb-logconsole die in een buffer tekent die
+// niemand uitleest — "geen dood gewicht" (Derek, 06-08). De 8MB fb-regio in
+// het PA-plan blijft in béíde smaken bestaan: één plan is goedkoper dan twee.
+// De console van een kale node is de UART plus hopos.console (poort 5555 in de
+// meegeleverde headless-config).
+//
+// De keten die er in de gui-smaak aan hangt:
 //
 //   - de logconsole spiegelt erop (cmd/hopos/main.go), dus een node zonder
 //     debug-kabel heeft alsnog een beeldkanaal;
@@ -108,7 +117,10 @@ func (machine) PCIe() pcie.Window { return pcie.Window{} }
 // Consequentie om te weten: zonder netwerk ziet niemand deze buffer. Dat is geen
 // regressie — zonder netwerk was er op dit board helemaal geen beeld.
 func (machine) Framebuffer() (fb.Desc, bool) {
-	scanoutOnce.Do(startScanout)
+	if scanout == nil {
+		return fb.Desc{}, false
+	}
+	scanoutOnce.Do(scanout)
 	base, w, h, stride := rk3566.FB()
 	// SwapRB blijft UIT: GEMETEN 06-08 met een testpatroon van vier balken —
 	// rood, groen, blauw, wit stonden in díe volgorde op het scherm, dus de
@@ -117,37 +129,16 @@ func (machine) Framebuffer() (fb.Desc, bool) {
 	return fb.Desc{Base: base, Width: w, Height: h, Stride: stride, BPP: 32}, true
 }
 
-// scanoutOnce: Framebuffer() wordt méér dan eens aangeroepen (main voor de
-// logconsole, gui/fbgrant bij elke grant en release), en de scanout opbrengen is
-// zwaar werk met een PLL erin. Eén keer is genoeg — en twee keer zou de PLL
-// onder een lopende scanout verzetten.
-var scanoutOnce sync.Once
+// scanout is de beeldketen-opbrenger, gezet door de gui-smaak (UseScanout) en
+// nil in de kale. scanoutOnce: Framebuffer() wordt méér dan eens aangeroepen
+// (main voor de logconsole, gui/fbgrant bij elke grant en release), en de
+// scanout opbrengen is zwaar werk met een PLL erin. Eén keer is genoeg — en
+// twee keer zou de PLL onder een lopende scanout verzetten.
+var (
+	scanout     func()
+	scanoutOnce sync.Once
+)
 
-// startScanout brengt de beeldketen op: power-domein, VOP2, HDMI. Faalt er iets,
-// dan zegt de melding welke laag en gaat de boot gewoon door — de buffer blijft
-// bruikbaar over het netwerk (/kvm), en dát is de reden dat dit géén fout is die
-// de node tegenhoudt.
-//
-// De volgorde is niet vrij: eerst VOP2 (die levert pixels en de dclk), dan pas
-// de HDMI-TX. Andersom staat de frame composer geprogrammeerd tegen een
-// stilstaande klok — dezelfde ordening die DRM aanhoudt (eerst alle CRTC's, dan
-// de bridges).
-func startScanout() {
-	if err := rk3566.PowerOnVO(); err != nil {
-		fmt.Printf("display: %v — framebuffer stays network-only (/kvm)\n", err)
-		return
-	}
-	if !rk3566.VOPAlive() {
-		fmt.Println("display: VOP2 does not answer — framebuffer stays network-only (/kvm)")
-		return
-	}
-	if err := rk3566.VOPScanout(); err != nil {
-		fmt.Printf("display: %v — framebuffer stays network-only (/kvm)\n", err)
-		return
-	}
-	if err := rk3566.HDMIEnable(); err != nil {
-		fmt.Printf("display: VOP2 scans but %v — framebuffer stays network-only (/kvm)\n", err)
-		return
-	}
-	fmt.Printf("display: 1920x1080p60 on HDMI (sink attached: %v)\n", rk3566.HDMIHotplug())
-}
+// UseScanout registreert de beeldketen — één keer, uit een init vóór het
+// eerste Framebuffer()-gebruik (cmd/hopos/gui_rk3566.go).
+func UseScanout(f func()) { scanout = f }

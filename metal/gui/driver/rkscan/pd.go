@@ -1,4 +1,4 @@
-package rk3566
+package rkscan
 
 import (
 	"time"
@@ -94,8 +94,9 @@ func (e *pmuError) Error() string {
 		" = " + hex(e.got) + ", masked " + hex(e.got&e.mask) + ", want " + hex(e.want) + ")"
 }
 
-// hex zonder fmt: dit pakket wordt ook door de app-kant gelinkt en fmt sleept
-// daar meer mee dan een foutmelding waard is.
+// hex zonder fmt: een foutmelding is geen reden om fmt dit pakket in te
+// slepen (geërfd uit board/rk3566, waar de app-kant meelinkte; de gewoonte
+// blijft goedkoop).
 func hex(v uint32) string {
 	const d = "0123456789abcdef"
 	b := []byte("0x00000000")

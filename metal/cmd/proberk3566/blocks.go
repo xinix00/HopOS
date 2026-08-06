@@ -6,6 +6,7 @@ import (
 	"github.com/xinix00/HopOS/metal/board/rk3566"
 	"github.com/xinix00/HopOS/metal/cpu/memattr"
 	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/gui/driver/rkscan"
 )
 
 // probeBlocks meet de drie kleine randblokken die de agent-fase nodig heeft:
@@ -39,6 +40,34 @@ func probeBlocks() {
 		// fout. Wat dan wel? De volgende verdachte is de parent zelf: gpll_100m
 		// hoeft niet te lopen. xin24m loopt gegarandeerd — die voedt de
 		// bootketen — dus dat is de goedkoopste tweede meting in dezelfde boot.
+		// EERST de reset-volgorde, want dat is de enige stap in dit blok die
+		// wij zelf gekozen hebben. De hele registerconfiguratie is 06-08
+		// regel voor regel tegen de bron gelegd — gates, veldposities in
+		// CLKSEL_CON(51) (clk-rk3568.c), delerwaarden, de drie reset-ids
+		// (rk3568-cru.h: 385/386/471), de GRF-bits, de init-volgorde en de
+		// AUTO_CON-bits — en alles klopt. Wat de bron NIET zegt is wie er
+		// eerst uit reset moet: Linux gebruikt een reset-array en laat dat aan
+		// het framework. Wij kozen digitaal-eerst, PHY-laatst.
+		//
+		// Op dít silicium hebben we die les al betaald: bij de GMAC kwam de
+		// MAC-softreset niet door zolang de PHY nog in reset stond. Een analoge
+		// voorkant die nog vastgehouden wordt terwijl de digitale kant al
+		// converteert, geeft precies wat we zien — een permanente 0 met alles
+		// verder correct.
+		fmt.Printf("tsadc: every register checked out against the reference, so the fault is in the " +
+			"one step we chose ourselves. Retrying with the PHY out of reset FIRST (the GMAC lesson)\n")
+		rk3566.TempInitOrder(true)
+		cpuRaw, gpuRaw, autoCon = rk3566.TempRaw()
+		if mC, ok := rk3566.Temp(0); ok {
+			gpu, _ := rk3566.Temp(1)
+			fmt.Printf("tsadc: PHY-FIRST WORKS — cpu %d.%d°C gpu %d.%d°C (the analog front-end was still "+
+				"held in reset while the digital side started converting)\n",
+				mC/1000, abs(mC%1000)/100, gpu/1000, abs(gpu%1000)/100)
+			return
+		}
+		fmt.Printf("tsadc: PHY-first changes nothing either (raw cpu %d gpu %d auto-con %#08x)\n",
+			cpuRaw, gpuRaw, autoCon)
+
 		fmt.Printf("tsadc: dividers and GRF bits landed, so the derived values are not the fault. " +
 			"Retrying with the tsen clock on xin24m (the only parent that is guaranteed to run)\n")
 		rk3566.TempSetTsenParent(0)
@@ -156,41 +185,41 @@ func tempLine() string {
 // overneemt. Of er licht uit de connector komt is de vraag daarná.
 func probeVOP2() {
 	fmt.Printf("\nvop2: powering up the video domain (PD_VO)\n")
-	if err := rk3566.PowerOnVO(); err != nil {
-		st, ack, idle := rk3566.PowerVOInfo()
+	if err := rkscan.PowerOnVO(); err != nil {
+		st, ack, idle := rkscan.PowerVOInfo()
 		fmt.Printf("vop2: %v (pmu status %#08x ack %#08x idle %#08x)\n", err, st, ack, idle)
 		return
 	}
-	st, ack, idle := rk3566.PowerVOInfo()
+	st, ack, idle := rkscan.PowerVOInfo()
 	fmt.Printf("vop2: PD_VO on (pmu status %#08x ack %#08x idle %#08x — bit7/bit4 should be 0)\n", st, ack, idle)
 
 	// De liveness-test vóór de scanout, want zonder dit onderscheid is elke
 	// verdere meting waardeloos: een blok waarvan de klok dicht staat leest
 	// nullen, en dat lijkt op een register dat we verkeerd programmeren.
-	rk3566.VOPClockTree()
-	g20, s37, s38, s39, raw0, raw4 := rk3566.VOPClockInfo()
+	rkscan.VOPClockTree()
+	g20, s37, s38, s39, raw0, raw4 := rkscan.VOPClockInfo()
 	fmt.Printf("vop2: clkgate20 %#08x clksel37 %#08x clksel38 %#08x clksel39 %#08x | cfg_done %#08x VERSION_INFO %#08x\n",
 		g20, s37, s38, s39, raw0, raw4)
-	if !rk3566.VOPAlive() {
+	if !rkscan.VOPAlive() {
 		fmt.Printf("vop2: VERSION_INFO is %#08x — all-zero means not clocked, all-ones a dead bus. "+
 			"PD_VO is provably on, so look at the clock tree.\n", raw4)
 		return
 	}
 	// De oude schrijf-lees-test staat er nog als DIAGNOSE, niet als poort: hij
 	// gaf een vals negatief en brak daarmee de hele scanout af (zie
-	// board/rk3566/vop2.go). Nu is hij één regel in de log.
+	// gui/driver/rkscan/vop2.go). Nu is hij één regel in de log.
 	fmt.Printf("vop2: alive (VERSION_INFO %#08x) — vp-register write/read-back: %v\n",
-		raw4, rk3566.VOPWriteReadBack())
+		raw4, rkscan.VOPWriteReadBack())
 
-	if err := rk3566.VOPScanout(); err != nil {
+	if err := rkscan.VOPScanout(rk3566.FB()); err != nil {
 		fmt.Printf("vop2: %v\n", err)
 		return
 	}
 	// cfg_done self-clears zodra de VP de configuratie bij frame-start latcht.
 	// Blijft hij staan, dan scant de VP niet — en dan is de pixelklok of de
 	// timing de verdachte, niet het window.
-	taken := rk3566.VOPCfgDoneTaken()
-	dsp, cfg, ifEn, ifPol, win, mst, ints := rk3566.VOPInfo()
+	taken := rkscan.VOPCfgDoneTaken()
+	dsp, cfg, ifEn, ifPol, win, mst, ints := rkscan.VOPInfo()
 	fmt.Printf("vop2: dsp_ctrl %#08x cfg_done %#08x if_en %#08x if_pol %#08x | win_ctrl %#08x mst %#08x | vp_int %#08x\n",
 		dsp, cfg, ifEn, ifPol, win, mst, ints)
 	if taken {
@@ -212,8 +241,8 @@ func probeVOP2() {
 // power-domein. Leest dat niet goed, dan heeft configureren geen zin en weten we
 // dat vóórdat we één bit hebben aangeraakt.
 func probeHDMI() {
-	rk3566.HDMIClockOn()
-	design, rev, p0, p1, cfg2, ok := rk3566.HDMIIDs()
+	rkscan.HDMIClockOn()
+	design, rev, p0, p1, cfg2, ok := rkscan.HDMIIDs()
 	fmt.Printf("\nhdmi: design %#02x rev %#02x product %#02x/%#02x config2 %#02x → version v%x.%03x\n",
 		design, rev, p0, p1, cfg2, (design<<8|rev)>>12, (design<<8|rev)&0xFFF)
 	if !ok {
@@ -223,10 +252,10 @@ func probeHDMI() {
 		return
 	}
 	fmt.Printf("hdmi: controller ok, hdcp %v, phy type %#02x (svsret %v), hotplug %v\n",
-		p1&0xC0 != 0, cfg2, rk3566.HDMIPhyHasSVSRET(), rk3566.HDMIHotplug())
+		p1&0xC0 != 0, cfg2, rkscan.HDMIPhyHasSVSRET(), rkscan.HDMIHotplug())
 
-	if err := rk3566.HDMIEnable(); err != nil {
-		st, conf, clkdis, invid, vpc := rk3566.HDMIInfo()
+	if err := rkscan.HDMIEnable(); err != nil {
+		st, conf, clkdis, invid, vpc := rkscan.HDMIInfo()
 		fmt.Printf("hdmi: %v\n", err)
 		fmt.Printf("hdmi: phy_stat %#02x phy_conf0 %#02x mc_clkdis %#02x fc_invidconf %#02x vp_conf %#02x\n",
 			st, conf, clkdis, invid, vpc)
@@ -234,7 +263,7 @@ func probeHDMI() {
 			"the svsret bit, or the phy-i2c path (PHY_I2CM_INT must be 0x08 or every write times out)\n")
 		return
 	}
-	st, conf, clkdis, invid, vpc := rk3566.HDMIInfo()
+	st, conf, clkdis, invid, vpc := rkscan.HDMIInfo()
 	fmt.Printf("hdmi: TMDS ON — phy_stat %#02x (lock %v hpd %v) phy_conf0 %#02x mc_clkdis %#02x fc_invidconf %#02x vp_conf %#02x\n",
 		st, st&0x01 != 0, st&0x02 != 0, conf, clkdis, invid, vpc)
 	fmt.Printf("hdmi: 1920x1080p60 DVI-mode should now be on the connector — LOOK AT THE SCREEN, " +

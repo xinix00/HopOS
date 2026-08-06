@@ -108,7 +108,27 @@ func TempSetTsenParent(mux uint32) {
 // TempClockOn opent de drie klokgates, zet de delers en pulst de drie resets.
 // De reset zet ÁLLE TSADC-registers terug, dus dit hoort vóór TempInit en niet
 // erna.
-func TempClockOn() {
+func TempClockOn() { TempClockOnOrder(false) }
+
+// TempClockOnOrder is TempClockOn met de DEASSERT-VOLGORDE als knop.
+//
+// Waarom dat een knop verdient. Dit blok heeft drie resets (rk356x-base.dtsi:
+// SRST_P_TSADC, SRST_TSADC, SRST_TSADCPHY — ids 385/386/471, dus bank 24 bit
+// 1/2 en bank 29 bit 7, geverifieerd tegen rk3568-cru.h). De Linux-driver
+// gebruikt reset_control_ARRAY en laat de volgorde daarmee aan het framework;
+// de bron zégt dus nergens wie er eerst uit reset moet. Wij kozen: eerst de
+// digitale kant, dan de PHY.
+//
+// En precies die keuze is verdacht, want op DIT silicium hebben we de
+// omgekeerde les al een keer betaald: bij de GMAC kwam de MAC-softreset niet
+// door zolang de PHY nog in reset stond — de referentieklok van de MAC kómt uit
+// die PHY. Een analoge voorkant die nog in reset zit terwijl de digitale kant
+// al begint te converteren, verklaart precies wat we meten: een stabiele,
+// permanente 0 op beide kanalen, met alle registers en delers correct.
+//
+// phyFirst=true haalt de PHY er als eerste uit. Nog niet de default: eerst
+// meten (cmd/proberk3566 probeert beide standen in één boot).
+func TempClockOnOrder(phyFirst bool) {
 	dev.Write32(CRUBase+cruCLKGATE26,
 		hiword(0, 1, gatePCLKTSADC)|hiword(0, 1, gateTSADCTsen)|hiword(0, 1, gateTSADC))
 	dev.Write32(CRUBase+cruCLKSEL51,
@@ -121,6 +141,16 @@ func TempClockOn() {
 	dev.Write32(CRUBase+cruSOFTRST29, hiword(1, 1, srstTSADCPHY))
 	dev.MB()
 	time.Sleep(20 * time.Microsecond)
+	if phyFirst {
+		dev.Write32(CRUBase+cruSOFTRST29, hiword(0, 1, srstTSADCPHY))
+		dev.MB()
+		// Even laten aanslaan vóór de digitale kant erop gaat kijken —
+		// dezelfde marge die de GMAC-PHY nodig had.
+		time.Sleep(20 * time.Microsecond)
+		dev.Write32(CRUBase+cruSOFTRST24, hiword(0, 1, srstPTSADC)|hiword(0, 1, srstTSADC))
+		dev.MB()
+		return
+	}
 	dev.Write32(CRUBase+cruSOFTRST24, hiword(0, 1, srstPTSADC)|hiword(0, 1, srstTSADC))
 	dev.Write32(CRUBase+cruSOFTRST29, hiword(0, 1, srstTSADCPHY))
 	dev.MB()
@@ -139,8 +169,12 @@ func TempClockOn() {
 // chip resetten, maar dan zou een sensor die verkeerd gekalibreerd blijkt de
 // node onherstelbaar cyclen — en we hebben nog geen enkele meting van dit
 // silicium. Eerst meten, dan pas een noodrem inbouwen.
-func TempInit() {
-	TempClockOn()
+func TempInit() { TempInitOrder(false) }
+
+// TempInitOrder is TempInit met de reset-deassert-volgorde als knop; zie
+// TempClockOnOrder voor waarom die knop bestaat.
+func TempInitOrder(phyFirst bool) {
+	TempClockOnOrder(phyFirst)
 
 	dev.Write32(tsUserCon, tsUserConV5)
 	dev.Write32(tsAutoPeriod, tsAutoPeriodVal)
