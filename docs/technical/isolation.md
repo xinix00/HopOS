@@ -43,38 +43,50 @@ slots 1-6, 8-126: unaffected, still serving
 ```
 
 - **Small enough to audit.** The code that enforces all of this — cages, slots,
-  ABI — is ~3,100 lines, and the whole node is what the table below adds up to.
-  The rung you have to *trust* is that first one; drivers and board support are
-  swappable outer layers, already outside every cage.
+  ABI — is ~3,500 lines, and the whole node is what the table below adds up to.
+  The rung you have to *trust* is that first one; the board layer — its NIC,
+  PHY and display drivers included — is a swappable outer shell, already
+  outside every cage.
 
 ### Small enough to actually read
 
-Lines of code, excluding tests, comments and blanks, rounded so the numbers
-stay true across builds — and counted **the way the compiler sees it**: a file
-that only builds for one instruction set counts only against that one.
+Lines of code, excluding tests, comments and blanks — counted **the way the
+compiler sees it** by [`tools/loc.go`](../../tools/loc.go), which runs
+`go list -deps` per release image. A file that only links for one instruction
+set or one board counts only there; example apps, probes and dev targets
+don't ride along. If it isn't in the image you boot, it isn't in the number.
 
 | layer | lines |
 |---|---|
-| **isolation core** — cages, slots, ABI | ~3,100 |
-| app runtime + node mains | ~3,450 |
-| drivers — NIC families, NVMe, sensors | ~1,450 |
-| network stack — switch, NAT, DHCP | ~1,250 |
-| firmware tables, boot config, display grant | ~1,250 |
-| **portable Go so far** | **~10,500** |
-| `arm64` — EL2 + stage-2, PSCI, UEFI/ACPI/DTB, igb·gem·genet | ~3,950 |
-| `riscv64` — machine mode + PMP, SG2002, dwmac | ~1,550 |
+| **isolation core** — cages, slots, ABI, object store | ~3,500 |
+| app runtime + node mains | ~975 |
+| network stack — switch, NAT, DHCP | ~1,400 |
+| portable drivers — console, NVMe, PCIe | ~875 |
+| boot config + the board contract | ~150 |
+| **portable Go — in every node** | **~6,950** |
+| `arm64` — EL2 + stage-2, PSCI, SMP, display grant | ~1,725 |
+| `riscv64` — machine mode + PMP cage, slot stub | ~1,300 |
+| board: Ampere Altra / any UEFI box — ACPI, MMU, igb, SMpro | ~2,125 |
+| board: Raspberry Pi 5 — RP1, gem, PCIe, mailbox | ~2,275 |
+| board: Raspberry Pi 4 — genet, mailbox | ~1,875 |
+| board: Radxa Zero 3E — dwmac4 + PHY, VOP2 + HDMI, TSADC | ~3,025 |
+| board: LicheeRV Nano — dwmac, ePHY, CLINT | ~1,700 |
 
-The last two rows are an **either/or**: an arm64 node is ~14,450 lines, a
-RISC-V node ~12,100. You audit one tree, never both. Graphics are **74** of
-those lines — the grant that hands one app the framebuffer, and a headless
+A node is **portable + one ISA + one board**, never two of either: an Altra
+stick is ~10,800 lines, a Pi 5 ~10,950, a Pi 4 ~10,550, a Radxa ~11,700 and
+the LicheeRV ~9,950. You audit one tree, never the union. Graphics are **~95**
+of those lines — the grant that hands one app the framebuffer, and a headless
 image links none of it; windowing, compositing and the browser are ordinary
-caged apps in [their own repo](https://github.com/xinix00/hop-os-surf).
+caged apps in [their own repo](https://github.com/xinix00/hop-os-surf). The
+board rung is where new hardware lands: the Radxa port carries its own
+VOP2 + HDMI scanout and GMAC glue at ~3,000 lines of board code, while the
+portable core moved ~50 lines.
 
 A Linux node doing the same job trusts GRUB, the kernel (~30,000,000 lines),
 systemd, libc *and* a container runtime. **HopOS is the whole node —
-bootloader included — in ~14,450.** Both trees together are ~16,000 lines, but
-no node ever runs both: **the machine you actually booted fits in a single AI
-context window**, so you can audit it in one sitting, human or machine.
+bootloader included — in ~10,800.** **The machine you actually booted fits in
+a single AI context window**, so you can audit it in one sitting, human or
+machine.
 
 ### One cage, two jobs
 
