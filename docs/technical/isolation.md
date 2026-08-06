@@ -43,7 +43,7 @@ slots 1-6, 8-126: unaffected, still serving
 ```
 
 - **Small enough to audit.** The code that enforces all of this — cages, slots,
-  ABI — is ~3,550 lines, and the whole node is what the table below adds up to.
+  ABI — is ~3,500 lines, and the whole node is what the table below adds up to.
   The rung you have to *trust* is that first one; the board layer — its NIC
   and PHY drivers included — is a swappable outer shell, already outside
   every cage.
@@ -60,38 +60,37 @@ listed last.
 
 | layer | lines |
 |---|---|
-| **isolation core** — cages, slots, ABI, object store | ~3,550 |
-| app runtime + node mains | ~1,050 |
+| **isolation core** — cages, slots, ABI, object store | ~3,500 |
+| app runtime + node mains | ~975 |
 | network stack — switch, NAT, DHCP | ~1,400 |
 | portable drivers — console, NVMe, PCIe | ~875 |
 | boot config + the board contract | ~150 |
-| **portable Go — in every node** | **~7,050** |
-| `arm64` — EL2 + stage-2, PSCI, SMP | ~1,650 |
+| **portable Go — in every node** | **~6,950** |
+| `arm64` — EL2 + stage-2, PSCI, SMP | ~1,625 |
 | `riscv64` — machine mode + PMP cage, slot stub | ~1,300 |
 | board: Ampere Altra / any UEFI box — ACPI, MMU, igb, SMpro | ~2,125 |
 | board: Raspberry Pi 5 — RP1, gem, PCIe, mailbox | ~2,275 |
 | board: Raspberry Pi 4 — genet, mailbox | ~1,875 |
 | board: Radxa Zero 3E — dwmac4 + PHY, TSADC, TRNG | ~2,250 |
 | board: LicheeRV Nano — dwmac, ePHY, CLINT | ~1,700 |
-| gui, opt-in (`-tags gui`) — framebuffer + surface grants | ~365 |
+| gui, opt-in (`-tags gui`) — the framebuffer grant | ~95 |
 | gui on the Radxa — its own VOP2 + HDMI scanout | ~800 |
 
 A node is **portable + one ISA + one board**, never two of either: an Altra
-stick is ~10,850 lines, a Pi 5 ~11,000, a Pi 4 ~10,600, a Radxa ~11,000 and
-the LicheeRV ~10,100. You audit one tree, never the union. **A headless image
-links zero graphics.** The gui flavour adds ~365 lines of grants — the
-framebuffer grant that hands one app the screen, and the surface grant that
-lets the display *look into* an app's own buffer — plus, only on the Radxa,
-~800 lines of its own scanout, because that board's firmware doesn't light
-the connector. Windowing, compositing and the browser are ordinary caged apps
-in [their own repo](https://github.com/xinix00/hop-os-surf). The board rung is
+stick is ~10,700 lines, a Pi 5 ~10,850, a Pi 4 ~10,450, a Radxa ~10,850 and
+the LicheeRV ~9,950. You audit one tree, never the union. **A headless image
+links zero graphics.** The gui flavour adds the ~95-line grant that hands one
+app the framebuffer — plus, only on the Radxa, ~800 lines of its own scanout,
+because that board's firmware doesn't light the connector. Windowing,
+compositing and the browser are ordinary caged apps in
+[their own repo](https://github.com/xinix00/hop-os-surf). The board rung is
 where new hardware lands: the Radxa port put its GMAC glue in a ~2,250 board
 rung and its scanout behind the gui tag, while the portable core moved ~50
 lines.
 
 A Linux node doing the same job trusts GRUB, the kernel (~30,000,000 lines),
 systemd, libc *and* a container runtime. **HopOS is the whole node —
-bootloader included — in ~10,850.** **The machine you actually booted fits in
+bootloader included — in ~10,700.** **The machine you actually booted fits in
 a single AI context window**, so you can audit it in one sitting, human or
 machine.
 
