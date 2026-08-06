@@ -146,6 +146,7 @@ func main() {
 	flag.Var(&elfPaths, "elf", "invoer-ELF (tamago-image); met -pe herhaalbaar: elke ELF is een venster-variant")
 	outPath := flag.String("o", "kernel_2712.img", "uitvoerbestand")
 	loadAddr := flag.Uint64("load", 0x80000, "laadadres (de Pi-bootloader laadt raw images altijd op 0x80000; bij -pe genegeerd — dan uit de ELF afgeleid)")
+	dramStart := flag.Uint64("dram", 0, "DRAM-start zoals U-Boot hem rapporteert (bi_dram[0].start): text_offset wordt load-dram. GEMETEN 05-08 op de Radxa Zero 3E: 0x200000 — booti legt een niet-relocatable Image op dram+text_offset, dus met de default 0 landt hij daar 2MB te hoog en zwijgt hij")
 	raw := flag.Bool("raw", false, "geen arm64 Image-header: alleen de code0-branch, géén ARM\\x64-magic — de firmware behandelt het bestand dan als raw binary en springt blind naar kernel_address (het Circle-recept; boot-meting 2026-07-08: het Image-pad mét magic weigerde onze kernel zonder enig levensteken, het raw-pad is op de Pi 5 bewezen)")
 	pe := flag.Bool("pe", false, "verpak als AArch64 PE/COFF UEFI-applicatie (BOOTAA64.EFI): één payload + relocatietabel, de overige -elf-varianten als diff-bewijs (vereist -ldflags -buildid= op elke variant; zie docs/archief/pe-relocatie.md)")
 	flag.Parse()
@@ -169,11 +170,26 @@ func main() {
 	if !*raw {
 		// arm64 Image-header (Linux Documentation/arch/arm64/booting.rst):
 		// magic "ARM\x64", 4K-pages, LE. Zonder -raw; zie de -raw-flag.
-		binary.LittleEndian.PutUint32(img[4:], 0)           // code1
-		binary.LittleEndian.PutUint64(img[8:], 0)           // text_offset
-		binary.LittleEndian.PutUint64(img[16:], memEnd)     // image_size (incl. BSS)
-		binary.LittleEndian.PutUint64(img[24:], 0b010)      // flags: LE, 4K
-		binary.LittleEndian.PutUint32(img[56:], 0x644d5241) // magic "ARM\x64"
+		//
+		// text_offset = load - dram, en dat is geen detail: onze images zijn op
+		// een vást adres gelinkt (niet positie-onafhankelijk), en U-Boot's booti
+		// VERPLAATST een Image met relocatable-bit 0 naar bi_dram[0].start +
+		// text_offset — ongeacht waar het bestand geladen werd.
+		//
+		// GEMETEN 05-08 (Radxa Zero 3E): met text_offset = load en -dram 0 zei
+		// U-Boot "Moving Image from 0x2080000 to 0x2280000" en daarna niets
+		// meer — dit bord rapporteert DRAM-start 0x200000 (de eerste 2MB is
+		// firmware), dus landde het image 2MB te hoog en klopte elke absolute
+		// referentie niet. Vandaar de -dram-som: elk bord geeft zijn eigen
+		// DRAM-start op, en het Image landt deterministisch op zijn linkadres.
+		if *loadAddr < *dramStart {
+			die("-load %#x ligt onder -dram %#x: text_offset zou negatief zijn", *loadAddr, *dramStart)
+		}
+		binary.LittleEndian.PutUint32(img[4:], 0)                    // code1
+		binary.LittleEndian.PutUint64(img[8:], *loadAddr-*dramStart) // text_offset (t.o.v. DRAM-start)
+		binary.LittleEndian.PutUint64(img[16:], memEnd)              // image_size (incl. BSS)
+		binary.LittleEndian.PutUint64(img[24:], 0b010)               // flags: LE, 4K, relocatable=0
+		binary.LittleEndian.PutUint32(img[56:], 0x644d5241)          // magic "ARM\x64"
 	}
 
 	if err := os.WriteFile(*outPath, img, 0o644); err != nil {

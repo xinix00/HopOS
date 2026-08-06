@@ -4,7 +4,6 @@ import (
 	_ "unsafe" // voor go:linkname
 
 	"github.com/xinix00/HopOS/metal/driver/conlog"
-	"github.com/xinix00/HopOS/metal/driver/fb"
 	"github.com/xinix00/HopOS/metal/driver/pl011"
 )
 
@@ -14,7 +13,5 @@ import (
 //
 //go:linkname printk runtime/goos.Printk
 func printk(c byte) {
-	conlog.Put(c) // ook over het netwerk op te vragen (driver/conlog)
-	pl011.Putc(UART0Base, c)
-	fb.Putc(c)
+	conlog.Route(c, func(b byte) { pl011.Putc(UART0Base, b) })
 }

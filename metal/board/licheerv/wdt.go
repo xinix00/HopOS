@@ -51,9 +51,9 @@ const (
 // vermoedelijk te kort om de chip-reset te latchen). Alles hieronder is een
 // enable, geen trigger: de reset komt pas als de teller ooit afloopt.
 func WatchdogArm() {
-	dev.Write32(0x050260E0, 0x0001) // rtc_core: watchdog reset enable
-	dev.Write32(0x050260C8, 0x0001) // rtc_core: power cycle enable
-	time.Sleep(100 * time.Microsecond) // de FSBL wacht hier ook (rtc-domein is traag)
+	dev.Write32(0x050260E0, 0x0001)     // rtc_core: watchdog reset enable
+	dev.Write32(0x050260C8, 0x0001)     // rtc_core: power cycle enable
+	time.Sleep(100 * time.Microsecond)  // de FSBL wacht hier ook (rtc-domein is traag)
 	dev.Write32(0x050250AC, 0x00000000) // rtcsys_rstn_src_sel: WDT → hele rtcsys
 	dev.Write32(0x05025004, 0x0000AB18) // RTC_CTRL0 unlock
 	dev.Write32(0x05025008, 0x00400040) // rtc_ctrl: watchdog reset enable

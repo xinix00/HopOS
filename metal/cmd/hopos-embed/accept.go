@@ -1,13 +1,19 @@
-//go:build rpi4 || rpi5
+//go:build rpi4 || rpi5 || rk3566
 
 package main
 
-// Het gedeelde fase-P1-acceptatiedraaiboek van de Pi 4- en Pi 5-main
-// (pi4_main.go / pi5_main.go). De secties 1-5 waren byte-identiek tussen
-// beide boards op de markerprefix (HOPOS_PI4_/HOPOS_PI5_) en de core-naam
-// (A72/A76) na — dat zijn nu de parameters. De main() zelf blijft per board
-// (eigen banner/preamble, en de Pi 5 draait extra P2/P2b-secties — net/dvfs —
-// die de Pi 4 niet heeft).
+// Het gedeelde fase-P1-acceptatiedraaiboek van de board-mains (pi4_main.go /
+// pi5_main.go / rk3566_main.go). De secties 1-5 waren byte-identiek tussen de
+// Pi's op de markerprefix (HOPOS_PI4_/HOPOS_PI5_) en de core-naam (A72/A76)
+// na — dat zijn de parameters. De main() zelf blijft per board (eigen banner,
+// en de Pi 5 draait extra P2/P2b-secties — net/dvfs — die de andere niet
+// hebben).
+//
+// Heette tot 05-08 raspi_main.go. De inhoud was toen al board-neutraal (alles
+// via board.Current(), kern/slots en abi/layout), en met de Radxa Zero 3E
+// (RK3566) erbij zou die naam gaan liegen: dit is het gedeelde draaiboek, niet
+// de Pi-main. Dát het ongewijzigd op een derde silicium draait ís het bewijs
+// dat de board-naad houdt.
 
 import (
 	"fmt"

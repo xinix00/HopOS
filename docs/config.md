@@ -25,8 +25,8 @@ Editing the file **is** node management — no shell, no rebuild, no agent.
 | `hopos.mac` | MAC address, `aa:bb:cc:dd:ee:ff`. Only needed on boards without one in hardware — the LicheeRV has no MAC fuse, so it derives one from `hopos.node` and this key overrides that. Two such boards on one LAN both need a distinct node name, or this. | derived from `hopos.node` |
 | `hopos.cluster` | cluster name — nodes with the same name form one cluster | — |
 | `hopos.cores` | cores reserved for the node runtime itself (clamped to the board's physical cores) | `1` |
-| `hopos.apikey` | HMAC key for the HTTP API — requests must be signed with it. **Required:** without it the node refuses to start the API (see below) | — |
-| `hopos.insecure` | `1` = start the API with **no authentication** on purpose (bench/dev only) | off |
+| `hopos.apikey` | HMAC key for the HTTP API — requests must be signed with it. Set this before the node leaves a LAN you trust; it and `hopos.insecure` are mutually exclusive, and with neither one set the node refuses to start the API (see below) | — |
+| `hopos.insecure` | `1` = start the API with **no authentication** on purpose. **The shipped configs set this**, so a freshly written card boots into a usable node; the node warns on every boot until you swap it for a key | set in the shipped configs |
 | `hopos.console` | TCP port that serves the node console — connect and you get the retained history, then live output (`nc <node-ip> 5555`). Every reader gets everything the node prints, jobs included, so this is a bench convenience and a leak anywhere else. The LicheeRV's default config sets it, because that board has no framebuffer and its UART needs a cable | off |
 | `hopos.wd` | `off` = don't arm the hardware watchdog (Raspberry Pi only). The watchdog reset-cycles a node until a boot succeeds; turn it off to keep a frozen node standing for a post-mortem | on |
 | `hopos.s3.endpoint` | S3 endpoint for cluster state + leader election | state off |
@@ -50,22 +50,30 @@ run [hopdns](https://github.com/xinix00/hopdns): every app gets the node's
 resolver (from the DHCP lease) handed in as `HOP_DNS`, and a jobspec can
 override `HOP_DNS` per job to point straight at a hopdns instance.
 
-## The API needs a key
+## The API and its key
 
 The agent (`:8080`) and leader (`:9080`) APIs accept job dispatch — that is
 remote code execution on a trusted node. They listen on the LAN, so without
-`hopos.apikey` **any host on that network could start jobs**. A node without a
-key therefore refuses to start its API: it stays alive (switch, clock, storage
-and dvfs all run) and prints `HOPOS_API_NO_AUTH` on the console, so a
-misconfiguration is visible instead of silently open.
+`hopos.apikey` **any host on that network can start jobs**.
+
+**The shipped configs boot with the API open** (`hopos.insecure=1`), and the
+node logs `HOPOS_API_INSECURE` every single boot. That is on purpose: the API
+is how you talk to a node, so a key you have not set yet is a node you cannot
+use — on a headless board, a node you cannot reach at all. A first boot that
+works and complains beats one that refuses and explains.
+
+Set a key before the node leaves a network you trust:
 
 ```
 openssl rand -hex 24     # generate a key; the same key for every node in a cluster
 ```
 
-Set `hopos.insecure=1` if you deliberately want an open API — a bench node
-behind a trusted network. It logs `HOPOS_API_INSECURE` every boot. QEMU has no
-boot medium and is a dev target, so it carries this opt-out by default.
+Put it in `hopos.apikey` and remove the `hopos.insecure` line. The two are
+mutually exclusive, and with **neither** set the node refuses to start its API:
+it stays alive (switch, clock, storage and dvfs all run) and prints
+`HOPOS_API_NO_AUTH`. That case is someone who deleted the insecure line meaning
+to close the door — so the door closes, rather than staying open on a config
+that no longer says it should be.
 
 ### Why HMAC and not TLS
 

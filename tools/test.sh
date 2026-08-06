@@ -21,8 +21,8 @@ go run ../tools/importcheck.go
 go test "$@" \
 	./abi/ring ./net/hopswitch ./kern/stage2 ./abi/layout ./net/dhcp ./abi/hopabi ./abi/checksum \
 	./fw/fdt ./fw/acpi ./fw/bootcfg ./kern/hopfs ./driver/vcmail ./driver/nic/mdio ./kern/slots \
-	./gui/fbgrant ./app/applib/apphttp ./kern/cage ./driver/nic/dwmac ./cmd/hopos/cfgblob ./driver/conlog \
-	./kern/cagestub
+	./gui/fbgrant ./app/applib/apphttp ./kern/cage ./driver/nic/dwmac ./driver/nic/dwmac4 ./cmd/hopos/cfgblob ./driver/conlog \
+	./kern/cagestub ./net/nodemac
 
 TAMAGO="${TAMAGO:-$HOME/tamago-go/bin/go}"
 if [ ! -x "$TAMAGO" ]; then
@@ -85,7 +85,7 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 cp cmd/hopos-embed/app.elf cmd/hopos-embed/app4.elf
 cp cmd/hopos-embed/app.elf cmd/hopos-embed/app5.elf
 GATE_MADE="$GATE_MADE cmd/hopos-embed/app.elf cmd/hopos-embed/app4.elf cmd/hopos-embed/app5.elf"
-for tags in "qemuvirt linkcpuinit" "rpi4 linkcpuinit" "rpi5 linkcpuinit" "rpi5 gui linkcpuinit"; do
+for tags in "qemuvirt linkcpuinit" "rpi4 linkcpuinit" "rpi5 linkcpuinit" "rpi5 gui linkcpuinit" "rk3566 linkcpuinit"; do
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "$tags" -o /dev/null ./cmd/hopos-embed
 done
@@ -127,4 +127,14 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 # de mains, PCIe→RP1→GEM→DHCP in hopnet.Up) — terughalen kan uit git history.
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags "uefi linkcpuinit" -o /dev/null ./cmd/probeuefi
-echo "OK: host-tests groen, tamago-gate (arm64: virt/rpi4/rpi5/uefi kaal + gui-smaken + embedloader + embed-mains + probeuefi; riscv64: cmd/hopos kaal én embedcfg/embedcagestub + slot-demo + slot-app + switchtest) gebouwd" >&2
+# Radxa Zero 3E (RK3566): de agent én het meetinstrument van zijn bring-up
+# (docs/archief/radxa-zero3.md). De probe blijft in de gate omdat hij een andere
+# vraag beantwoordt dan de agent — hij meet het silicium zonder van netwerk of
+# plan af te hangen.
+GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
+	"$TAMAGO" build -tags linkcpuinit -o /dev/null ./cmd/proberk3566
+for tags in "rk3566 linkcpuinit" "rk3566 gui linkcpuinit"; do
+	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
+		"$TAMAGO" build -tags "$tags" -o /dev/null ./cmd/hopos
+done
+echo "OK: host-tests groen, tamago-gate (arm64: virt/rpi4/rpi5/uefi kaal + gui-smaken + embedloader + embed-mains incl. rk3566 + probeuefi + proberk3566 + rk3566-agent kaal én gui; riscv64: cmd/hopos kaal én embedcfg/embedcagestub + slot-demo + slot-app + switchtest) gebouwd" >&2

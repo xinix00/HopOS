@@ -96,6 +96,18 @@ rm -rf "$CFGGUI" "$CFGHL"
 cp "$DIR/image/hopos-gui.cfg" "$DIST/hopos.cfg"
 cp "$DIR/image/hopos-headless.cfg" "$DIST/hopos-headless.cfg"
 
+# 3b2. Radxa Zero 3E (RK3566): geen kernel-op-de-bootfs zoals de Pi's maar
+#      extlinux — de U-Boot van een Radxa/Armbian-kaart leest extlinux.conf en
+#      laadt ons image. De zip is dus drie bestanden voor de bootpartitie, en
+#      het script kiest zélf de goede config per smaak (gui = desktop met
+#      catalogus, kaal = welcome). Headless eerst, gui laatst — zelfde reden als
+#      hierboven: de tree blijft in de default-staat achter.
+echo ">> hopos-radxa-zero3[-headless].zip" >&2
+GUI=0 "$DIR/image/radxa-zero3.sh" >/dev/null
+(cd "$DIR/metal/out" && zip -q -j "$DIST/hopos-radxa-zero3-headless.zip" hopos-radxa.img extlinux.conf hopos.cfg)
+"$DIR/image/radxa-zero3.sh" >/dev/null
+(cd "$DIR/metal/out" && zip -q -j "$DIST/hopos-radxa-zero3.zip" hopos-radxa.img extlinux.conf hopos.cfg)
+
 # 3c. RISC-V (LicheeRV Nano): een compleet SD-kaart-image, want dit board boot
 #     niet van een los bestand — ons image vervangt OpenSBI in het
 #     MONITOR-slot van fip.bin. Twee gevolgen voor de release: het asset is een
@@ -136,7 +148,8 @@ NOTES="Prebuilt, signed boot images — https://gethop.org/hopos/ for the 5-minu
 - **BOOTAA64.EFI** — any UEFI arm64 box: copy to \`EFI/BOOT/\` on a FAT USB stick, put \`hopos.cfg\` (below) in the stick root
 - **hopos-rpi5.zip** — Raspberry Pi 5: unzip onto the SD bootfs
 - **hopos-rpi4.zip** — Raspberry Pi 4: unzip onto the SD bootfs
-- **hopos.cfg** — the default GUI config (also inside the Pi zips): a full desktop — display, launcher and app catalog, no addresses to fill in. **One edit required:** set \`hopos.apikey\`.
+- **hopos-radxa-zero3.zip** — Radxa Zero 3E (RK3566): write any Radxa/Armbian image once for its U-Boot, then unzip these three files onto the boot partition (\`extlinux.conf\` points U-Boot at our image)
+- **hopos.cfg** — the default GUI config (also inside the Pi zips): a full desktop — display, launcher and app catalog, no addresses to fill in and **no edit required to boot**. The API ships open (\`hopos.insecure=1\`) so a written card is a working node; set \`hopos.apikey\` and drop that line before the node leaves a LAN you trust.
 - **hopos-headless.cfg** — the headless default (inside the \`*-headless\` zips as \`hopos.cfg\`): same keys, no desktop — seed your own \`hopos.init[]\` jobs. For a UEFI stick, rename it to \`hopos.cfg\`.
 - **\`*-headless\`** — the same images built with \`GUI=0\`: not a disabled GUI but **zero GUI code linked**. For UEFI, rename \`BOOTAA64-headless.EFI\` to \`BOOTAA64.EFI\` on the stick.
 - **hopos-licheerv.img.gz** — LicheeRV Nano (RISC-V, headless): \`gunzip\` and \`dd\` the whole card. This board has no SD driver, so its config is **baked into the image** — \`hopos-licheerv.cfg\` is what went into this build; to change it, rebuild with \`CFG=~/my-node.cfg image/licheerv-agent.sh /dev/diskN\`.

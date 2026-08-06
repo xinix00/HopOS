@@ -1,4 +1,4 @@
-//go:build qemuvirt || rpi4 || rpi5
+//go:build qemuvirt || rpi4 || rpi5 || rk3566
 
 package main
 

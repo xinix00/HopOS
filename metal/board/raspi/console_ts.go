@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/xinix00/HopOS/metal/driver/conlog"
-	"github.com/xinix00/HopOS/metal/driver/fb"
 	"github.com/xinix00/HopOS/metal/driver/pl011"
 )
 
@@ -36,12 +35,11 @@ func Printk(uartBase uintptr, c byte) {
 	if MPIDR()&0xFFFFFF != 0 {
 		return // app-core: geen toegang tot de UART (kooi)
 	}
+	// De bestemmingen (ring → lijn → glas) staan in conlog.Route, één keer voor
+	// álle boards; ConsoleByte eromheen is wat de Pi's extra doen — de
+	// "dd-MM HH:mm"-prefix per regel.
 	ConsoleByte(c, func(b byte) {
-		// Eerst de ring: een node zonder debug-kabel moet zijn eigen
-		// console alsnog over het netwerk kunnen geven (zie driver/conlog).
-		conlog.Put(b)
-		pl011.Putc(uartBase, b)
-		fb.Putc(b)
+		conlog.Route(b, func(x byte) { pl011.Putc(uartBase, x) })
 	})
 }
 
