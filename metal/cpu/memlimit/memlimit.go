@@ -68,11 +68,31 @@ var anchor *byte
 // niets: geen limiet is de oude, bekende toestand — een verzonnen limiet is
 // een nieuwe manier om stuk te gaan.
 func Arm() {
-	wall := uintptr(ramStart) + uintptr(ramSize) - uintptr(ramStackOffset)
+	ArmBelow(uintptr(ramStart) + uintptr(ramSize) - uintptr(ramStackOffset))
+}
+
+// ArmBelow doet hetzelfde als Arm, maar met een LAGERE muur: de heap mag nooit
+// voorbij top groeien. Nodig zodra er iets ánders dan de runtime in het raam
+// woont, en dat is precies één geval — de apploader die een image tegen de
+// bovenkant van zijn partitie stageert (applib.StageImage).
+//
+// WAAROM DIT MOET BESTAAN (gemeten Pi 5, 06-08). Zonder dit rekent Arm zijn
+// muur op RamStart+RamSize−RamStackOffset, en RamStackOffset is 0x100: dus
+// letterlijk de bovenkant. De loader kreeg daarmee een plafond van ~19MB in een
+// raam van 30MB waarvan de bovenste 5,5MB al bezet was, groeide er tijdens de
+// HTTPS-download doorheen, en Go NULT een verse span — HOP las daarna
+// `bad magic number '[0 0 0 0]'` op de ELF-header. Geen kapotte download, geen
+// te kleine partitie: een heap die mocht wat niet kon.
+//
+// Geeft het gezette plafond terug, en ok=false als er onder top niets te
+// verdelen valt (dan is er niets gezet en moet de aanroeper luid falen — een
+// verzonnen limiet is een nieuwe manier om stuk te gaan).
+func ArmBelow(top uintptr) (limit uint64, ok bool) {
+	wall := top
 	anchor = new(byte)
 	heap0 := uintptr(unsafe.Pointer(anchor))
 	if ramSize == 0 || heap0 <= uintptr(ramStart) || heap0 >= wall {
-		return
+		return 0, false
 	}
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
@@ -82,13 +102,14 @@ func Arm() {
 		slack = 4 << 20
 	}
 	if slack >= budget {
-		return
+		return 0, false
 	}
-	limit := budget - slack
+	limit = budget - slack
 	debug.SetMemoryLimit(int64(limit))
 	// Eén regel zelfconfiguratie in de console-historie, net als de
 	// netwerk-identiteit: als een node ooit tóch tegen zijn plafond aan
 	// GC-stormt, is dít het getal dat de operator wil kennen.
 	fmt.Printf("mem: Go memory limit %dMB (window %dMB, image+bss %dMB)\n",
 		limit>>20, uintptr(ramSize)>>20, (heap0-uintptr(ramStart))>>20)
+	return limit, true
 }

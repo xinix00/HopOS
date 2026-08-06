@@ -42,11 +42,11 @@ const fg uint32 = 0xFFFFFFFF
 
 var (
 	d          Desc
-	bpx        int    // bytes per pixel (2 of 4)
-	swapRB     bool   // zie Desc.SwapRB
-	cols, rows int    // tekencellen
-	x, y       int    // cursor (cel)
-	top        int    // eerste log-rij (0, of ónder de vaste Header-regels)
+	bpx        int                 // bytes per pixel (2 of 4)
+	swapRB     bool                // zie Desc.SwapRB
+	cols, rows int                 // tekencellen
+	x, y       int                 // cursor (cel)
+	top        int                 // eerste log-rij (0, of ónder de vaste Header-regels)
 	bg         uint32 = 0xFF101828 // donker blauwgrijs: "beeld doet het" ≠ zwart scherm
 	active     bool
 )

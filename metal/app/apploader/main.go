@@ -43,10 +43,17 @@ func main() {
 	// Op een 64MB-partitie kwam de heap nooit zo hoog; op 24MB wél — gemeten
 	// 31-07: vijfmaal exit-code 2 middenin "streaming ... into staging".
 	// Het plafond stuurt de GC zó dat de arena laag blijft; de helft is voor de
-	// handshake-fase (TLS + gVisor), hieronder wordt het aangescherpt zodra de
-	// image-maat bekend is. Een zácht plafond — Go kent geen harde arena-grens —
-	// dus geen garantie maar druk; wat er tóch misgaat is sinds de printk-haak
+	// handshake-fase (TLS + gVisor), en StageImage scherpt het aan zodra de
+	// image-maat — en daarmee de stagingbodem — bekend is (memlimit.ArmBelow).
+	// Een zácht plafond — Go kent geen harde arena-grens — dus geen garantie
+	// maar druk; wat er tóch misgaat is sinds de printk-haak
 	// (appboard.PrintkSink) tenminste zichtbaar als panic in het task-log.
+	//
+	// DIT GETAL BEPAALT DE BOVENGRENS van wat er in een kleine partitie past:
+	// wat de handshake hier aan arena mag pakken, kan de image niet meer
+	// gebruiken. Verlagen is de knop als een image net niet past — maar niet
+	// blind: 8MB is de ondergrens waar de TLS-keten het nog doet (minStageHeap
+	// in applib), en dit pad is de enige startroute van élke job.
 	debug.SetMemoryLimit(int64(app.RAMSize) / 2)
 
 	url := app.Env("HOP_IMAGE_URL")
@@ -87,16 +94,22 @@ func main() {
 		app.Exit(1)
 	}
 
-	// Nu de maat bekend is: de heap alles geven wat de staging niet nodig heeft
-	// (of juist minder, op een kleine partitie). De 2MB marge dekt wat buiten de
-	// heap om leeft (stacks, runtime-metadata).
-	if lim := int64(app.RAMSize) - (resp.ContentLength+7)&^7 - (2 << 20); lim < int64(app.RAMSize)/2 {
-		if lim < 8<<20 {
-			app.Logf("apploader: %d MB partition minus %d MB image leaves the runtime %d MB — expect OOM",
-				app.RAMSize>>20, resp.ContentLength>>20, max(lim, 0)>>20)
-		}
-		debug.SetMemoryLimit(max(lim, 8<<20))
-	}
+	// Het geheugenplafond zetten we hier NIET meer zelf. Dat stond hier wel, en
+	// het deed twee dingen fout — samen precies de "bad magic number
+	// '[0 0 0 0]'" die op 06-08 de launcher op een Pi 5 sloopte:
+	//
+	//  1. het gold alleen als de nieuwe limiet ónder de helft van het raam lag.
+	//     Bij 30MB app-RAM en een image van 5,5MB was de limiet 22,5MB en de
+	//     drempel 15MB — dus hij werd juist NIET gezet, in exact het geval
+	//     waarvoor hij bedoeld was;
+	//  2. hij rekende vanaf adres 0, terwijl SetMemoryLimit runtime-geheugen
+	//     telt vanaf het heapfundament. Dat is ~9MB image+bss te veel, dus zelfs
+	//     als hij wél had gegolden was de heap nog steeds tot in de staging
+	//     gekomen.
+	//
+	// De enige plek die de stagingbodem écht kent is StageImage, en die zet het
+	// plafond nu daar (memlimit.ArmBelow) — met de rekensom die memlimit al
+	// heeft, in de eenheid die de runtime gebruikt.
 
 	app.Logf("apploader: streaming %d bytes into my partition staging", resp.ContentLength)
 	// Meetellen, maar zwijgen: een stukgelopen overdracht moet kunnen zeggen

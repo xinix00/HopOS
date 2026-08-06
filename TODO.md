@@ -108,3 +108,54 @@ Eén ding is bewust niet vooruitgebouwd: het inbound-window van de BCM2711 is
 identiek gemapt (PCIe 0 → DRAM 0), dus `BusOff` is nul en de vraag "wat als een
 window verschuift" doet zich hier niet voor. Zodra hij dat wél doet is dat een
 meting, geen gok.
+
+## De staging-botsing: twee allocators in één raam
+
+**Symptoom** (Pi 5, 06-08, en al eerder op de Radxa): een app van ~5,8 MB in een
+partitie van 32 MB weigert te plaatsen met `elf parse: bad magic number
+'[0 0 0 0]'`, terwijl dezelfde app in 128 MB probleemloos start. Gemeten
+drempel: 5,38 MB ✓, 5,77 MB ✗.
+
+**Wat vaststaat.** `layout.StageAddr` legt de image tegen de BOVENKANT van het
+app-RAM, en niemand vertelt de runtime dat die bovenkant bezet is:
+`cpu/memlimit` rekent zijn muur op `RamStart + RamSize − RamStackOffset`, en
+`ramStackOffset` is `0x100` — letterlijk de bovenkant. Daar bovenop stonden in
+de apploader twee rekenfouten die precies het interessante geval oversloegen:
+
+1. de aanscherping gold alleen `if lim < RAMSize/2`. Bij 30 MB app-RAM en een
+   image van 5,5 MB was `lim` 22,5 MB en de drempel 15 MB — dus hij werd
+   **niet** gezet, in exact het geval waarvoor hij bedoeld was;
+2. `lim` rekende vanaf adres 0, terwijl `SetMemoryLimit` runtime-geheugen telt
+   vanaf het heapfundament. Dat is de ~9 MB image+bss van de loader te veel.
+
+Wat er dus overbleef was het voorlopige plafond `RAMSize/2` = 15 MB. Met een
+heapfundament op ~9,4 MB mag `bloc` daarmee tot ~24,4 MB komen — en de
+stagingbodem ligt op `30 − imgSize`. Botsing zodra `imgSize > 5,6 MB`, en de
+gemeten drempel ligt tussen 5,38 en 5,77. Dat klopt tot op ~200 KB.
+
+**Gerepareerd 06-08.** `memlimit.ArmBelow(top)` zet hetzelfde plafond met een
+EXPLICIETE muur, en `applib.StageImage` roept hem aan met de stagingbodem —
+de enige plek die dat adres kent. Te weinig ruimte over faalt daar nu luid
+("image van N MB laat de runtime M MB over") in plaats van stil te corrumperen.
+De twee foute regels in de apploader zijn weg.
+
+**Wat NIET vaststaat, en nu gemeten wordt.** Dát het de heap is die eroverheen
+loopt, is afgeleid en niet waargenomen. `StageImage` kijkt daarom na het
+downloaden de ELF-magic terug: staat hij er niet meer, dan is de download níet
+de dader (wij schreven hem net) en meldt de loader het mét zijn `MemStats`. Eén
+boot zegt dan of `Sys` inderdaad tegen de stagingbodem aan staat.
+
+**De knop voor grotere images in kleine partities** is het voorlopige plafond
+`debug.SetMemoryLimit(RAMSize/2)` in `app/apploader/main.go`: wat de
+TLS-handshake daar aan arena mag pakken, kan de image niet meer gebruiken.
+Verlagen kan, maar niet blind — 8 MB is de ondergrens waar de keten het nog
+doet (`minStageHeap`), en dit pad is de enige startroute van élke job.
+
+**Wat twee stages NIET oplost** (Dereks vraag, 06-08): de loader en de image
+moeten hoe dan ook tegelijk in de partitie staan, dus het plafond blijft
+`partitie ≥ image + loader + werkruimte`. "De app over de loader heen gooien"
+gebeurt trouwens al — `placeFromStaging` schrijft de segmenten op hun
+linkadressen, dwars over waar de loader stond. Wil je een image van 20 MB in
+32 MB, dan moet de loader de partitie uít (bijvoorbeeld een gedeelde
+scratch-partitie voor fase 1, waarna HOP de segmenten naar de echte partitie
+schrijft) — dat is een andere, grotere verbouwing.

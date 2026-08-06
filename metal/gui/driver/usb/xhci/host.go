@@ -66,12 +66,13 @@ func (a *arena) alloc(n, align uintptr) (uintptr, error) {
 // slotRes is de vaste set structuren van één device-slot. Vooraf aangelegd,
 // hergebruikt bij herplug.
 type slotRes struct {
-	devCtx uintptr // door de controller beschreven device context
-	inCtx  uintptr // input context: wat wij de controller vertellen
-	ctrl   *ring   // EP0, control transfers
-	intr   *ring   // de interrupt-IN-endpoint van het HID-apparaat
-	buf    uintptr // 4KB werkgeheugen (zie bufCtrl/bufIntr)
-	inUse  bool
+	devCtx uintptr             // door de controller beschreven device context
+	inCtx  uintptr             // input context: wat wij de controller vertellen
+	ctrl   *ring               // EP0, control transfers
+	intr   [maxHIDIfaces]*ring // één per boot-interface (toetsenbord én muis
+	// kunnen op ÉÉN apparaat zitten — een draadloze combo op één dongle)
+	buf   uintptr // 4KB werkgeheugen (zie bufCtrl/bufIntr)
+	inUse bool
 }
 
 // Verdeling van de 4KB werkbuffer per slot. Control-data en het HID-rapport
@@ -81,7 +82,7 @@ type slotRes struct {
 const (
 	bufCtrl     = 0    // descriptors e.d.
 	bufCtrlSize = 1024 // een config-descriptor van een HID-apparaat is < 100 bytes
-	bufIntr     = 2048
+	bufIntr     = 2048 // eerste interface; de volgende op +bufIntrSize
 	bufIntrSize = 64
 )
 
@@ -250,15 +251,17 @@ func (h *HC) setupSlots() error {
 		if err != nil {
 			return err
 		}
-		ir, err := h.arena.alloc(h.page, h.page)
-		if err != nil {
-			return err
+		r.ctrl = newRing(cr, uint64(cr)+h.BusOff, int(h.page))
+		for k := range r.intr {
+			ir, err := h.arena.alloc(h.page, h.page)
+			if err != nil {
+				return err
+			}
+			r.intr[k] = newRing(ir, uint64(ir)+h.BusOff, int(h.page))
 		}
 		if r.buf, err = h.arena.alloc(4096, h.page); err != nil {
 			return err
 		}
-		r.ctrl = newRing(cr, uint64(cr)+h.BusOff, int(h.page))
-		r.intr = newRing(ir, uint64(ir)+h.BusOff, int(h.page))
 		h.res[i] = r
 	}
 	return nil

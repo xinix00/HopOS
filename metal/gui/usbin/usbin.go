@@ -17,9 +17,10 @@
 // Daarom: HOP leest de rapporten en stuurt de gebeurtenissen door. DeviceGrant
 // blijft bestaan voor apparaten die niet kunnen DMA'en.
 //
-// De weg naar de display loopt over het NETWERK — dezelfde POST /input die de
-// browser-KVM al gebruikt (zie metal/gui/usbin/deliver.go). Eén invoerweg, of
-// de toets nu van een browser of van echt ijzer komt.
+// De weg naar de display loopt over het NETWERK, en het adres reist mee in de
+// framebuffer-grant (zie deliver.go): dezelfde JSON-events die de browser-KVM
+// al post, over één verbinding. Eén invoerweg, of de toets nu van een browser
+// of van echt ijzer komt.
 package usbin
 
 import (
@@ -44,6 +45,12 @@ const pollInterval = 4 * time.Millisecond
 // wachten op een toetsenbord dat je net insteekt is niet merkbaar, en het houdt
 // de poortregisters uit de hete lus.
 const scanInterval = 500 * time.Millisecond
+
+// maxPerPoll begrenst hoeveel rapporten we per beurt van één apparaat
+// ophalen. Eén apparaat kan twee endpoints hebben (een combo-dongle levert
+// toetsenbord én muis), dus één per beurt zou de muis halveren; ongebrensd zou
+// een ratelend apparaat de andere poorten kunnen uithongeren.
+const maxPerPoll = 4
 
 // port is één bezette roothub-poort met zijn apparaat en decoder.
 type port struct {
@@ -176,18 +183,24 @@ func (m *Manager) Poll() {
 	defer m.mu.Unlock()
 	for _, known := range m.ports {
 		for _, p := range known {
-			n, ok := p.dev.Report(p.buf)
-			if !ok {
-				continue
+			// Meerdere keren per beurt: één apparaat kan twee endpoints hebben
+			// (toetsenbord én muis op één dongle) en Report levert er één per
+			// aanroep. Begrensd op maxPerPoll zodat een druk apparaat de
+			// andere poorten niet uithongert.
+			for k := 0; k < maxPerPoll; k++ {
+				n, proto, ok := p.dev.Report(p.buf)
+				if !ok {
+					break
+				}
+				r := p.buf[:n]
+				m.evs = m.evs[:0]
+				if proto == xhci.ProtoMouse {
+					m.evs = p.ms.Decode(r, m.evs)
+				} else {
+					m.evs = p.kb.Decode(r, m.evs)
+				}
+				m.emit()
 			}
-			r := p.buf[:n]
-			m.evs = m.evs[:0]
-			if p.dev.Proto == xhci.ProtoMouse {
-				m.evs = p.ms.Decode(r, m.evs)
-			} else {
-				m.evs = p.kb.Decode(r, m.evs)
-			}
-			m.emit()
 		}
 	}
 }

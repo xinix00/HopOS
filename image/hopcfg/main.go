@@ -61,11 +61,13 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"strconv"
+	"syscall"
 )
 
 const (
@@ -323,7 +325,7 @@ func replace(path, cfgPath string) error {
 	if err := fipFix(f, off, win); err != nil {
 		return err
 	}
-	if err := f.Sync(); err != nil {
+	if err := syncTolerant(f); err != nil {
 		return err
 	}
 	fmt.Printf("hopcfg: %s — venster op %#x herschreven met %s (%d bytes config, %d venster)\n",
@@ -413,6 +415,26 @@ func fipFix(f *os.File, winOff int64, winLen int) error {
 	}
 	fmt.Fprintf(os.Stderr, "hopcfg: fip-monitor op %#x (%d bytes) — MONITOR_CKSUM en PARAM2_CKSUM bijgewerkt\n", monOff, monSize)
 	return nil
+}
+
+// syncTolerant dwingt de bytes naar het medium en tolereert dat een rauw
+// device dat niet kan: /dev/rdiskN is een character device en fsync geeft daar
+// ENOTTY ("inappropriate ioctl for device") — gemeten 06-08 ná een geslaagde
+// flash. Schrijven naar het raw device gaat ongebufferd, dus is er niets te
+// forceren; die fout melden zou een geslaagde patch als mislukt tonen.
+func syncTolerant(f *os.File) error {
+	err := f.Sync()
+	if err == nil {
+		return nil
+	}
+	var e syscall.Errno
+	if errors.As(err, &e) {
+		switch e {
+		case syscall.ENOTTY, syscall.EINVAL, syscall.ENODEV, syscall.ENOTSUP:
+			return nil
+		}
+	}
+	return err
 }
 
 func le32(b []byte) uint32 {

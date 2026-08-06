@@ -54,7 +54,30 @@ const (
 	epTypeIntrIn  = 7
 )
 
-// Device is één geadresseerd USB-apparaat met een boot-HID-interface.
+// hidIface is één boot-HID-interface van een apparaat, met de interrupt-IN
+// endpoint die erbij hoort.
+type hidIface struct {
+	num      int // bInterfaceNumber (nodig voor SET_PROTOCOL/SET_IDLE)
+	proto    int // ProtoKeyboard of ProtoMouse
+	dci      int
+	mps      int
+	interval int
+	ring     *ring
+	bufOff   uintptr // waar in slotRes.buf zijn rapporten landen
+	armed    bool
+	armTRB   uint64
+}
+
+// Device is één geadresseerd USB-apparaat met één of meer boot-HID-interfaces.
+//
+// MEER DAN ÉÉN, EN DAT IS DE NORMAAL. Een draadloze combo hangt aan één dongle
+// die zich als ÉÉN apparaat meldt met twee boot-interfaces: nummer 0 het
+// toetsenbord, nummer 1 de muis. Deze driver bond eerst alleen de eerste, en
+// dat leek verdedigbaar tot er op 06-08 een Logi Bolt (046d:c548) in een Pi 5
+// ging: toetsenbord gevonden, muis stil. De regel is dus niet "één interface
+// per apparaat" maar "één endpoint per rol" — en het scheelt in de praktijk
+// niets, want beide endpoints hangen aan hetzelfde slot en dezelfde
+// Configure-Endpoint-opdracht.
 type Device struct {
 	hc    *HC
 	Slot  int
@@ -64,19 +87,26 @@ type Device struct {
 	VendorID  uint16
 	ProductID uint16
 
-	// Iface/Proto beschrijven de boot-interface die we gekozen hebben.
-	Iface int
-	Proto int // ProtoKeyboard of ProtoMouse
+	mps0    int
+	confVal int
+	ifaces  []hidIface
+	res     *slotRes
+	lastErr error
+}
 
-	mps0       int
-	confVal    int
-	epDCI      int
-	epMPS      int
-	epInterval int
-	res        *slotRes
-	armed      bool
-	armTRB     uint64
-	lastErr    error
+// maxHIDIfaces is hoeveel boot-interfaces we van één apparaat bedienen: één
+// toetsenbord en één muis. Meer bestaat niet in het boot-protocol — dat kent
+// precies die twee rollen — dus dit is de vorm van het probleem en geen
+// willekeurige grens.
+const maxHIDIfaces = 2
+
+// Protos geeft de rollen die dit apparaat levert.
+func (d *Device) Protos() []int {
+	out := make([]int, 0, len(d.ifaces))
+	for _, f := range d.ifaces {
+		out = append(out, f.proto)
+	}
+	return out
 }
 
 // resetRing zet een ring terug op zijn beginstand. Nodig bij hergebruik van een
@@ -170,7 +200,7 @@ func (h *HC) Attach(port int) (*Device, error) {
 		h.releaseSlot(slot)
 		return nil, err
 	}
-	if d.Proto == ProtoNone {
+	if len(d.ifaces) == 0 {
 		h.releaseSlot(slot)
 		return nil, nil
 	}
@@ -359,18 +389,20 @@ func (d *Device) readDescriptors() error {
 	return nil
 }
 
-// parseConfig loopt de descriptorketen af en onthoudt de EERSTE boot-HID-
-// interface met een interrupt-IN-endpoint. Eén interface per apparaat is genoeg:
-// een combo-toetsenbord met muis meldt twee interfaces, en die zien wij als twee
-// keer hetzelfde apparaat aanbieden — daarvan pakken we de eerste. Het
-// toetsenbord staat altijd vooraan omdat de boot-interface de laagste
-// interfacenummers krijgt.
+// parseConfig loopt de descriptorketen af en verzamelt ELKE boot-HID-interface
+// met een interrupt-IN-endpoint — hooguit één per rol.
+//
+// De keten is plat: een interface-descriptor gevolgd door zijn endpoints, dan
+// de volgende interface. We onthouden dus welke interface we net zagen (cur) en
+// hangen de eerste bruikbare endpoint daaraan. Een interface die ons niet
+// interesseert zet cur op -1, zodat zíjn endpoints niet per ongeluk bij de
+// vorige belanden — dat is de val in deze parse.
 func (d *Device) parseConfig(b []byte) {
 	d.confVal = 0
 	if len(b) >= 6 {
 		d.confVal = int(b[5])
 	}
-	iface, proto := -1, ProtoNone
+	cur, curProto := -1, ProtoNone
 	for i := 0; i+2 <= len(b); {
 		l := int(b[i])
 		if l < 2 || i+l > len(b) {
@@ -378,30 +410,37 @@ func (d *Device) parseConfig(b []byte) {
 		}
 		switch b[i+1] {
 		case descInterface:
+			cur, curProto = -1, ProtoNone
 			if l >= 9 && b[i+5] == classHID && b[i+6] == subClassBoot &&
-				(b[i+7] == ProtoKeyboard || b[i+7] == ProtoMouse) {
-				if proto == ProtoNone {
-					iface, proto = int(b[i+2]), int(b[i+7])
-				}
-			} else if proto == ProtoNone {
-				iface = -1 // een andere interface: de endpoints erna zijn niet van ons
+				(b[i+7] == ProtoKeyboard || b[i+7] == ProtoMouse) &&
+				!d.hasProto(int(b[i+7])) && len(d.ifaces) < maxHIDIfaces {
+				cur, curProto = int(b[i+2]), int(b[i+7])
 			}
 		case descEndpoint:
 			// bmAttributes[1:0] == 3 = interrupt, bEndpointAddress bit 7 = IN.
-			if l >= 7 && iface >= 0 && proto != ProtoNone && d.epDCI == 0 &&
-				b[i+3]&0x3 == 3 && b[i+2]&0x80 != 0 {
+			if l >= 7 && cur >= 0 && b[i+3]&0x3 == 3 && b[i+2]&0x80 != 0 {
 				ep := int(b[i+2] & 0xF)
-				d.Iface, d.Proto = iface, proto
-				d.epDCI = 2*ep + 1 // IN-endpoint: DCI = 2N+1
-				d.epMPS = (int(b[i+4]) | int(b[i+5])<<8) & 0x7FF
-				d.epInterval = int(b[i+6])
+				d.ifaces = append(d.ifaces, hidIface{
+					num:      cur,
+					proto:    curProto,
+					dci:      2*ep + 1, // IN-endpoint: DCI = 2N+1
+					mps:      (int(b[i+4]) | int(b[i+5])<<8) & 0x7FF,
+					interval: int(b[i+6]),
+				})
+				cur = -1 // deze rol is vervuld; verdere endpoints negeren
 			}
 		}
 		i += l
 	}
-	if d.epDCI == 0 {
-		d.Proto = ProtoNone // wel een HID-interface, maar geen interrupt-IN
+}
+
+func (d *Device) hasProto(p int) bool {
+	for _, f := range d.ifaces {
+		if f.proto == p {
+			return true
+		}
 	}
+	return false
 }
 
 // intervalExponent zet bInterval om naar het exponentveld van het endpoint
@@ -435,24 +474,41 @@ func intervalExponent(sp Speed, bInterval int) uint32 {
 	return uint32(e)
 }
 
-// configure zet de interrupt-endpoint aan, kiest de configuratie en schakelt
-// het apparaat naar het boot-protocol. Daarna staat de endpoint gearmeerd.
+// configure zet álle gevonden interrupt-endpoints aan, kiest de configuratie en
+// schakelt elke interface naar het boot-protocol. Daarna staan ze gearmeerd.
+//
+// Eén Configure Endpoint voor allemaal: het input context draagt zoveel
+// endpoint-contexten als je wilt, en de add-flags zeggen welke meedoen. Twee
+// losse commando's zouden de tweede het werk van de eerste laten overschrijven,
+// want elk commando vervangt de héle endpoint-configuratie van het slot.
 func (d *Device) configure() error {
 	h := d.hc
-	d.res.intr.resetRing()
 
+	add, maxDCI := uint32(addSlot), 0
+	for i := range d.ifaces {
+		f := &d.ifaces[i]
+		f.ring = d.res.intr[i]
+		f.bufOff = bufIntr + uintptr(i)*bufIntrSize
+		f.ring.resetRing()
+		add |= 1 << uint(f.dci)
+		if f.dci > maxDCI {
+			maxDCI = f.dci
+		}
+	}
 	// A1 blijft UIT: een Configure Endpoint mag de default control endpoint niet
 	// aanraken (xHCI 4.6.6) — die is al geregeld door Address Device.
-	d.buildInput(d.epDCI, addSlot|1<<uint(d.epDCI))
+	d.buildInput(maxDCI, add)
 	in := d.res.inCtx
-	deq := d.res.intr.deqPtr()
-	dev.Write32(h.ctxDW(in, d.epDCI+1, 0), intervalExponent(d.Speed, d.epInterval)<<16)
-	dev.Write32(h.ctxDW(in, d.epDCI+1, 1), 3<<1|uint32(epTypeIntrIn)<<3|uint32(d.epMPS)<<16)
-	dev.Write32(h.ctxDW(in, d.epDCI+1, 2), uint32(deq))
-	dev.Write32(h.ctxDW(in, d.epDCI+1, 3), uint32(deq>>32))
-	// Average TRB length en Max ESIT Payload: bij een interrupt-endpoint zonder
-	// burst is dat allebei gewoon de pakketgrootte.
-	dev.Write32(h.ctxDW(in, d.epDCI+1, 4), uint32(d.epMPS)|uint32(d.epMPS)<<16)
+	for _, f := range d.ifaces {
+		deq := f.ring.deqPtr()
+		dev.Write32(h.ctxDW(in, f.dci+1, 0), intervalExponent(d.Speed, f.interval)<<16)
+		dev.Write32(h.ctxDW(in, f.dci+1, 1), 3<<1|uint32(epTypeIntrIn)<<3|uint32(f.mps)<<16)
+		dev.Write32(h.ctxDW(in, f.dci+1, 2), uint32(deq))
+		dev.Write32(h.ctxDW(in, f.dci+1, 3), uint32(deq>>32))
+		// Average TRB length en Max ESIT Payload: bij een interrupt-endpoint
+		// zonder burst is dat allebei gewoon de pakketgrootte.
+		dev.Write32(h.ctxDW(in, f.dci+1, 4), uint32(f.mps)|uint32(f.mps)<<16)
+	}
 	dev.MB()
 
 	if _, err := h.command(uint32(uint64(in)+h.BusOff), uint32((uint64(in)+h.BusOff)>>32), 0,
@@ -462,97 +518,111 @@ func (d *Device) configure() error {
 	if _, err := d.control(0x00, reqSetConfig, uint16(d.confVal), 0, 0); err != nil {
 		return fmt.Errorf("set configuration: %w", err)
 	}
-	// SET_PROTOCOL(0) = boot-protocol. Sommige apparaten stallen hem als ze maar
-	// één protocol kennen; dat is geen fout, dan spreken ze al boot.
-	if _, err := d.control(0x21, hidSetProtocol, 0, uint16(d.Iface), 0); err != nil {
-		fmt.Printf("usb: %s slot %d: SET_PROTOCOL(boot) refused (%v) — assuming boot protocol\n",
-			h.Name, d.Slot, err)
+	for i := range d.ifaces {
+		f := &d.ifaces[i]
+		// SET_PROTOCOL(0) = boot-protocol, PER INTERFACE. Sommige apparaten
+		// stallen hem als ze maar één protocol kennen; dat is geen fout, dan
+		// spreken ze al boot.
+		if _, err := d.control(0x21, hidSetProtocol, 0, uint16(f.num), 0); err != nil {
+			fmt.Printf("usb: %s slot %d iface %d: SET_PROTOCOL(boot) refused (%v) — assuming boot protocol\n",
+				h.Name, d.Slot, f.num, err)
+		}
+		// SET_IDLE(0) = alleen rapporteren bij verandering. Ook optioneel.
+		_, _ = d.control(0x21, hidSetIdle, 0, uint16(f.num), 0)
+		d.arm(f)
 	}
-	// SET_IDLE(0) = alleen rapporteren bij verandering. Ook optioneel.
-	_, _ = d.control(0x21, hidSetIdle, 0, uint16(d.Iface), 0)
-
-	return d.arm()
-}
-
-// arm zet één Normal-TRB op de interrupt-ring en belt aan. De controller vult
-// de buffer zodra het apparaat iets te melden heeft; tot die tijd kost het
-// niets.
-func (d *Device) arm() error {
-	h := d.hc
-	n := d.epMPS
-	if n > bufIntrSize {
-		n = bufIntrSize
-	}
-	bus := uint64(d.res.buf+bufIntr) + h.BusOff
-	d.armTRB = d.res.intr.push(uint32(bus), uint32(bus>>32), uint32(n),
-		trbISP|trbIOC|uint32(trbNormal)<<trbTypeShift)
-	h.doorbell(d.Slot, d.epDCI)
-	d.armed = true
 	return nil
 }
 
-// Report haalt een binnengekomen HID-rapport op en armeert de endpoint opnieuw.
-// Geeft (0, false) als er niets klaarstaat — dit is het pollpad en het hoort
-// meestal niets te doen.
-func (d *Device) Report(buf []byte) (int, bool) {
-	h := d.hc
-	if !d.armed {
-		return 0, false
-	}
-	h.pump()
-	ev, ok := h.take(func(e event) bool {
-		return e.kind == trbTransferEvt && e.ptr == d.armTRB
-	})
-	if !ok {
-		return 0, false
-	}
-	d.armed = false
+// arm zet één Normal-TRB op de interrupt-ring van deze interface en belt aan.
+// De controller vult de buffer zodra het apparaat iets te melden heeft; tot die
+// tijd kost het niets.
+func (d *Device) arm(f *hidIface) {
+	bus := uint64(d.res.buf+f.bufOff) + d.hc.BusOff
+	f.armTRB = f.ring.push(uint32(bus), uint32(bus>>32), uint32(reportLen(f.mps)),
+		trbISP|trbIOC|uint32(trbNormal)<<trbTypeShift)
+	d.hc.doorbell(d.Slot, f.dci)
+	f.armed = true
+}
 
+// reportLen is hoeveel we per beurt vragen: de pakketgrootte, begrensd door de
+// ruimte die dit slot per interface heeft.
+func reportLen(mps int) int {
+	if mps > bufIntrSize {
+		return bufIntrSize
+	}
+	return mps
+}
+
+// Report haalt één binnengekomen HID-rapport op en armeert die endpoint
+// opnieuw. proto zegt van welke rol het kwam — een combo-dongle levert
+// toetsenbord én muis op hetzelfde slot, dus de aanroeper moet weten welke
+// decoder erbij hoort. Geeft ok=false als er niets klaarstaat; dit is het
+// pollpad en het hoort meestal niets te doen.
+func (d *Device) Report(buf []byte) (n, proto int, ok bool) {
+	h := d.hc
+	h.pump()
+	for i := range d.ifaces {
+		f := &d.ifaces[i]
+		if !f.armed {
+			continue
+		}
+		ev, got := h.take(func(e event) bool {
+			return e.kind == trbTransferEvt && e.ptr == f.armTRB
+		})
+		if !got {
+			continue
+		}
+		f.armed = false
+		return d.handle(f, ev, buf)
+	}
+	return 0, 0, false
+}
+
+func (d *Device) handle(f *hidIface, ev event, buf []byte) (int, int, bool) {
+	h := d.hc
 	switch ev.comp {
 	case ccSuccess, ccShortPacket:
-		n := d.epMPS
-		if n > bufIntrSize {
-			n = bufIntrSize
-		}
-		n -= int(ev.rem)
+		n := reportLen(f.mps) - int(ev.rem)
 		if n > len(buf) {
 			n = len(buf)
 		}
 		if n > 0 {
-			dev.CopyOut(buf[:n], d.res.buf+bufIntr)
+			dev.CopyOut(buf[:n], d.res.buf+f.bufOff)
 		}
-		_ = d.arm()
-		return n, n > 0
+		d.arm(f)
+		return n, f.proto, n > 0
 	case ccStall:
 		// Een gestalde interrupt-endpoint komt niet vanzelf terug: hij moet
 		// gereset worden én zijn dequeue-pointer moet opnieuw gezet, anders
 		// wijst de controller nog naar het TRB dat de stall veroorzaakte.
-		if err := d.recover(); err != nil {
+		if err := d.recover(f); err != nil {
 			d.lastErr = err
-			fmt.Printf("usb: %s slot %d: endpoint recovery failed: %v\n", h.Name, d.Slot, err)
-			return 0, false
+			fmt.Printf("usb: %s slot %d iface %d: endpoint recovery failed: %v\n",
+				h.Name, d.Slot, f.num, err)
+			return 0, 0, false
 		}
-		_ = d.arm()
-		return 0, false
+		d.arm(f)
+		return 0, 0, false
 	default:
 		// Een losgetrokken apparaat geeft transaction errors tot de poort het
 		// meldt. Niet opnieuw armeren: de scan ruimt hem op.
 		d.lastErr = fmt.Errorf("%s (%d)", compName(ev.comp), ev.comp)
-		return 0, false
+		return 0, 0, false
 	}
 }
 
 // recover haalt een gestalde endpoint uit halted en zet zijn ring terug op nul.
-func (d *Device) recover() error {
+func (d *Device) recover(f *hidIface) error {
 	h := d.hc
 	if _, err := h.command(0, 0, 0,
-		uint32(trbResetEP)<<trbTypeShift|uint32(d.epDCI)<<16|uint32(d.Slot)<<24, "reset endpoint"); err != nil {
+		uint32(trbResetEP)<<trbTypeShift|uint32(f.dci)<<16|uint32(d.Slot)<<24, "reset endpoint"); err != nil {
 		return err
 	}
-	d.res.intr.resetRing()
-	deq := d.res.intr.deqPtr()
+	f.ring.resetRing()
+	deq := f.ring.deqPtr()
 	_, err := h.command(uint32(deq), uint32(deq>>32), 0,
-		uint32(trbSetTRDeq)<<trbTypeShift|uint32(d.epDCI)<<16|uint32(d.Slot)<<24, "set TR dequeue pointer")
+		uint32(trbSetTRDeq)<<trbTypeShift|uint32(f.dci)<<16|uint32(d.Slot)<<24, "set TR dequeue pointer")
 	return err
 }
 
@@ -565,7 +635,9 @@ func (d *Device) Detach() {
 		return
 	}
 	d.hc.releaseSlot(d.Slot)
-	d.armed = false
+	for i := range d.ifaces {
+		d.ifaces[i].armed = false
+	}
 	d.res = nil
 }
 
@@ -584,12 +656,22 @@ func (h *HC) releaseSlot(slot int) {
 }
 
 func (d *Device) String() string {
-	what := "HID device"
-	switch d.Proto {
-	case ProtoKeyboard:
-		what = "keyboard"
-	case ProtoMouse:
-		what = "mouse"
+	what := ""
+	for _, f := range d.ifaces {
+		if what != "" {
+			what += "+"
+		}
+		switch f.proto {
+		case ProtoKeyboard:
+			what += "keyboard"
+		case ProtoMouse:
+			what += "mouse"
+		default:
+			what += "HID"
+		}
+	}
+	if what == "" {
+		what = "HID device"
 	}
 	return fmt.Sprintf("%s %04x:%04x on port %d (%s, slot %d)",
 		what, d.VendorID, d.ProductID, d.Port, d.Speed, d.Slot)

@@ -496,6 +496,13 @@ func (a *App) Exit(code uint64) {
 // De hele download draait op DEZE core, DEZE netstack, in DEZE partitie: één
 // node-netstack draagt nooit 127 verbindingen, en een te grote/kapotte image
 // raakt hooguit dit ene slot ("crasht hooguit daar").
+// minStageHeap is de werkruimte die de runtime tijdens een download minstens
+// moet houden. Niet gekozen maar gemeten: een HTTPS-fetch draagt TLS-records,
+// de x509-keten en de http-response, en dat is de piek van de hele apploader.
+// Onder deze grens is de partitie simpelweg te klein voor dit image, en dat is
+// een nette startfout — geen OOM halverwege en zeker geen stille corruptie.
+const minStageHeap = 8 << 20
+
 func (a *App) StageImage(r io.Reader, imgSize int64) error {
 	if imgSize <= 0 {
 		return fmt.Errorf("StageImage: onbekende image-grootte (Content-Length vereist)")
@@ -509,6 +516,26 @@ func (a *App) StageImage(r io.Reader, imgSize int64) error {
 		return fmt.Errorf("StageImage: image %d bytes past niet in partitie %d MB", imgSize, a.RAMSize>>20)
 	}
 	stageAddr := uintptr(addr)
+
+	// DE HEAP MAG HIER NOOIT KOMEN. Vanaf nu deelt deze runtime zijn raam met de
+	// image, en de enige die dat weet is deze functie: memlimit.Arm() rekende
+	// zijn muur op de bovenkant van het RAM (RamStackOffset is 0x100), dus zonder
+	// deze regel mag de heap dwars door de staging groeien. Dat is geen theorie —
+	// het is wat er op de Pi 5 gebeurde (06-08): de loader groeide erdoorheen, Go
+	// nulde de verse span, en HOP las `bad magic number '[0 0 0 0]'`. Een
+	// genulde ELF-header ziet er precies zo uit als een kapotte download, en dat
+	// kostte twee bordjes aan verdenkingen.
+	//
+	// De grens is dus de stagingbodem, niet de bovenkant van het raam. Wat er
+	// daarna nog over is voor de runtime IS de vraag of dit image in deze
+	// partitie past — vandaar dat te weinig ruimte hier luid faalt en niet
+	// stilletjes doorgaat.
+	limit, ok := memlimit.ArmBelow(stageAddr)
+	if !ok || limit < minStageHeap {
+		return fmt.Errorf("StageImage: image van %d MB laat de runtime %d MB over in een partitie van %d MB — "+
+			"minstens %d MB nodig voor de download; verhoog memory_limit",
+			imgSize>>20, limit>>20, a.RAMSize>>20, uint64(minStageHeap)>>20)
+	}
 	var buf [64 << 10]byte
 	var got int64
 	for got < imgSize {
@@ -529,6 +556,24 @@ func (a *App) StageImage(r io.Reader, imgSize int64) error {
 	}
 	if got != imgSize {
 		return fmt.Errorf("StageImage: image incompleet: %d van %d bytes", got, imgSize)
+	}
+	// De ELF-magic terugkijken. Vier bytes, en ze beantwoorden een vraag die ons
+	// twee bordjes aan verdenkingen kostte: HOP las hier `bad magic number
+	// '[0 0 0 0]'` en dat ziet er identiek uit voor een kapotte download en voor
+	// een genulde span die er overheen groeide. Wij weten dat we hem net
+	// geschreven hebben — dus als hij nu weg is, is de download NIET de dader en
+	// heeft iets in ons eigen raam eroverheen gelopen.
+	//
+	// De MemStats erbij maken van de volgende boot een meting in plaats van een
+	// vermoeden: staat Sys tegen de stagingbodem aan, dan is het de heap.
+	var magic [4]byte
+	dev.CopyOut(magic[:], stageAddr)
+	if magic != [4]byte{0x7F, 'E', 'L', 'F'} {
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		return fmt.Errorf("StageImage: ELF-magic weg ná %d bytes schrijven (las %v op %#x) — "+
+			"iets in dit raam liep eroverheen; runtime Sys %d KB, heap %d KB, raam %#x..%#x",
+			got, magic, stageAddr, m.Sys>>10, m.HeapSys>>10, a.RAMStart, a.RAMStart+a.RAMSize)
 	}
 	// Onze cacheable writes naar de staging naar RAM duwen: HOP (legacy-pad)
 	// leest die regio ongecachet bij het plaatsen — zonder deze flush ziet hij
