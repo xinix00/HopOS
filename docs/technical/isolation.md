@@ -43,10 +43,10 @@ slots 1-6, 8-126: unaffected, still serving
 ```
 
 - **Small enough to audit.** The code that enforces all of this — cages, slots,
-  ABI — is ~3,500 lines, and the whole node is what the table below adds up to.
-  The rung you have to *trust* is that first one; the board layer — its NIC,
-  PHY and display drivers included — is a swappable outer shell, already
-  outside every cage.
+  ABI — is ~3,550 lines, and the whole node is what the table below adds up to.
+  The rung you have to *trust* is that first one; the board layer — its NIC
+  and PHY drivers included — is a swappable outer shell, already outside
+  every cage.
 
 ### Small enough to actually read
 
@@ -55,36 +55,43 @@ compiler sees it** by [`tools/loc.go`](../../tools/loc.go), which runs
 `go list -deps` per release image. A file that only links for one instruction
 set or one board counts only there; example apps, probes and dev targets
 don't ride along. If it isn't in the image you boot, it isn't in the number.
+The numbers are the **headless** image; the gui flavour is the opt-in it is,
+listed last.
 
 | layer | lines |
 |---|---|
-| **isolation core** — cages, slots, ABI, object store | ~3,500 |
-| app runtime + node mains | ~975 |
+| **isolation core** — cages, slots, ABI, object store | ~3,550 |
+| app runtime + node mains | ~1,050 |
 | network stack — switch, NAT, DHCP | ~1,400 |
 | portable drivers — console, NVMe, PCIe | ~875 |
 | boot config + the board contract | ~150 |
-| **portable Go — in every node** | **~6,950** |
-| `arm64` — EL2 + stage-2, PSCI, SMP, display grant | ~1,725 |
+| **portable Go — in every node** | **~7,050** |
+| `arm64` — EL2 + stage-2, PSCI, SMP | ~1,650 |
 | `riscv64` — machine mode + PMP cage, slot stub | ~1,300 |
 | board: Ampere Altra / any UEFI box — ACPI, MMU, igb, SMpro | ~2,125 |
 | board: Raspberry Pi 5 — RP1, gem, PCIe, mailbox | ~2,275 |
 | board: Raspberry Pi 4 — genet, mailbox | ~1,875 |
-| board: Radxa Zero 3E — dwmac4 + PHY, VOP2 + HDMI, TSADC | ~3,025 |
+| board: Radxa Zero 3E — dwmac4 + PHY, TSADC, TRNG | ~2,250 |
 | board: LicheeRV Nano — dwmac, ePHY, CLINT | ~1,700 |
+| gui, opt-in (`-tags gui`) — framebuffer + surface grants | ~365 |
+| gui on the Radxa — its own VOP2 + HDMI scanout | ~800 |
 
 A node is **portable + one ISA + one board**, never two of either: an Altra
-stick is ~10,800 lines, a Pi 5 ~10,950, a Pi 4 ~10,550, a Radxa ~11,700 and
-the LicheeRV ~9,950. You audit one tree, never the union. Graphics are **~95**
-of those lines — the grant that hands one app the framebuffer, and a headless
-image links none of it; windowing, compositing and the browser are ordinary
-caged apps in [their own repo](https://github.com/xinix00/hop-os-surf). The
-board rung is where new hardware lands: the Radxa port carries its own
-VOP2 + HDMI scanout and GMAC glue at ~3,000 lines of board code, while the
-portable core moved ~50 lines.
+stick is ~10,850 lines, a Pi 5 ~11,000, a Pi 4 ~10,600, a Radxa ~11,000 and
+the LicheeRV ~10,100. You audit one tree, never the union. **A headless image
+links zero graphics.** The gui flavour adds ~365 lines of grants — the
+framebuffer grant that hands one app the screen, and the surface grant that
+lets the display *look into* an app's own buffer — plus, only on the Radxa,
+~800 lines of its own scanout, because that board's firmware doesn't light
+the connector. Windowing, compositing and the browser are ordinary caged apps
+in [their own repo](https://github.com/xinix00/hop-os-surf). The board rung is
+where new hardware lands: the Radxa port put its GMAC glue in a ~2,250 board
+rung and its scanout behind the gui tag, while the portable core moved ~50
+lines.
 
 A Linux node doing the same job trusts GRUB, the kernel (~30,000,000 lines),
 systemd, libc *and* a container runtime. **HopOS is the whole node —
-bootloader included — in ~10,800.** **The machine you actually booted fits in
+bootloader included — in ~10,850.** **The machine you actually booted fits in
 a single AI context window**, so you can audit it in one sitting, human or
 machine.
 
