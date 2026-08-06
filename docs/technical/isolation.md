@@ -80,8 +80,8 @@ A node is **portable + one ISA + one board**, never two of either: an Altra
 stick is ~10,800 lines, a Pi 5 ~10,950, a Pi 4 ~10,500, a Radxa ~10,900 and
 the LicheeRV ~10,050. You audit one tree, never the union. **A headless image
 links zero graphics — and zero USB.** The gui flavour adds the grant that
-hands one app the framebuffer and, since v1.10, the input chain (xHCI, the
-DWC3 core in host mode, the HID boot protocol) — owned by HOP, not granted to
+hands one app the framebuffer and the input chain (xHCI, the DWC3 core in
+host mode, the HID boot protocol) — owned by HOP, not granted to
 apps, because a bus-master doing DMA cannot be caged without an IOMMU; apps
 receive input *events*, never registers. On the Radxa the gui flavour also
 carries its own scanout, because that board's firmware doesn't light the
