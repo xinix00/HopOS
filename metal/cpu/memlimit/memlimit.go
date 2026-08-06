@@ -62,13 +62,22 @@ var ramStackOffset uint
 // niet op een stack leggen — al ligt ook die op tamago binnen het raam).
 var anchor *byte
 
+// base is de heapbodem, bij de eerste Arm vastgelegd. Nul zolang Arm niet liep.
+var base uintptr
+
 // Arm zet het plafond. Zo vroeg mogelijk aanroepen — de agent-main en
 // applib.Init doen dat al; een nieuwe main hoort dit als eerste te doen.
 // Faalt de berekening (raam onbekend of absurd klein), dan doet Arm bewust
 // niets: geen limiet is de oude, bekende toestand — een verzonnen limiet is
 // een nieuwe manier om stuk te gaan.
 func Arm() {
-	ArmBelow(uintptr(ramStart) + uintptr(ramSize) - uintptr(ramStackOffset))
+	// Het anker bij de EERSTE meting ís de heapbasis: de sbrk-allocator groeit
+	// alleen omhoog vanaf einde image+BSS, dus wie vroeg meet meet de bodem.
+	// Die onthouden we, want een LATERE meting geeft een willekeurige plek in
+	// de al bevolkte heap — en dan is er geen bodem meer te vinden.
+	anchor = new(byte)
+	base = uintptr(unsafe.Pointer(anchor))
+	arm(uintptr(ramStart)+uintptr(ramSize)-uintptr(ramStackOffset), base, true, 4<<20)
 }
 
 // ArmBelow doet hetzelfde als Arm, maar met een LAGERE muur: de heap mag nooit
@@ -78,28 +87,45 @@ func Arm() {
 //
 // WAAROM DIT MOET BESTAAN (gemeten Pi 5, 06-08). Zonder dit rekent Arm zijn
 // muur op RamStart+RamSize−RamStackOffset, en RamStackOffset is 0x100: dus
-// letterlijk de bovenkant. De loader kreeg daarmee een plafond van ~19MB in een
-// raam van 30MB waarvan de bovenste 5,5MB al bezet was, groeide er tijdens de
+// letterlijk de bovenkant. De loader kreeg daarmee een plafond in een raam
+// waarvan de bovenste megabytes al bezet waren, groeide er tijdens de
 // HTTPS-download doorheen, en Go NULT een verse span — HOP las daarna
 // `bad magic number '[0 0 0 0]'` op de ELF-header. Geen kapotte download, geen
 // te kleine partitie: een heap die mocht wat niet kon.
+//
+// Hier rekenen we met de ONTHOUDEN basis en tellen we m.Sys NIET mee: alle
+// runtime-geheugen leeft in [basis, muur), dus dat is het budget — punt. De
+// marge mag daarom klein: de 4MB-vloer in Arm dekt de onscherpte van een
+// vroeg anker, en die onscherpte is hier weg.
 //
 // Geeft het gezette plafond terug, en ok=false als er onder top niets te
 // verdelen valt (dan is er niets gezet en moet de aanroeper luid falen — een
 // verzonnen limiet is een nieuwe manier om stuk te gaan).
 func ArmBelow(top uintptr) (limit uint64, ok bool) {
-	wall := top
+	if base != 0 {
+		return arm(top, base, false, 1<<20)
+	}
 	anchor = new(byte)
-	heap0 := uintptr(unsafe.Pointer(anchor))
+	return arm(top, uintptr(unsafe.Pointer(anchor)), true, 4<<20)
+}
+
+// arm is de gedeelde rekensom. addSys hoort bij een VERS gemeten anker: dan is
+// heap0 de huidige uitdeelplek en telt "al gepakt" (m.Sys) mee naast "nog te
+// pakken" (wall−heap0). Met de onthouden basis is [heap0, wall) al het hele
+// verhaal en zou m.Sys dubbeltellen.
+func arm(wall, heap0 uintptr, addSys bool, minSlack uint64) (limit uint64, ok bool) {
 	if ramSize == 0 || heap0 <= uintptr(ramStart) || heap0 >= wall {
 		return 0, false
 	}
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	budget := uint64(wall-heap0) + m.Sys
+	budget := uint64(wall - heap0)
+	if addSys {
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		budget += m.Sys
+	}
 	slack := budget / 16
-	if slack < 4<<20 {
-		slack = 4 << 20
+	if slack < minSlack {
+		slack = minSlack
 	}
 	if slack >= budget {
 		return 0, false

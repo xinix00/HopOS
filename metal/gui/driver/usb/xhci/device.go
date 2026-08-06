@@ -135,7 +135,12 @@ func (h *HC) ResetPort(n int) error {
 	h.ClearChanges(n)
 	h.portAction(n, pscPR)
 
-	deadline := time.Now().Add(750 * time.Millisecond)
+	// GEMETEN op een Pi 5 (06-08): 750ms was net niet genoeg voor een Logi
+	// Bolt-ontvanger — PORTSC 0x6f1, dus PR nog hoog en PLS op Polling. De scan
+	// probeerde het een halve seconde later opnieuw en toen lukte het wél, dus
+	// het was een trage poort en geen kapotte. USB2 wil ~50ms; wie meer nodig
+	// heeft is een hub of een dongle die zich eerst zelf moet aanmelden.
+	deadline := time.Now().Add(2 * time.Second)
 	for {
 		v := dev.Read32(h.portReg(n))
 		if v&pscPRC != 0 {

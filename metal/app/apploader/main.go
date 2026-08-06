@@ -49,12 +49,25 @@ func main() {
 	// maar druk; wat er tóch misgaat is sinds de printk-haak
 	// (appboard.PrintkSink) tenminste zichtbaar als panic in het task-log.
 	//
-	// DIT GETAL BEPAALT DE BOVENGRENS van wat er in een kleine partitie past:
-	// wat de handshake hier aan arena mag pakken, kan de image niet meer
-	// gebruiken. Verlagen is de knop als een image net niet past — maar niet
-	// blind: 8MB is de ondergrens waar de TLS-keten het nog doet (minStageHeap
-	// in applib), en dit pad is de enige startroute van élke job.
-	debug.SetMemoryLimit(int64(app.RAMSize) / 2)
+	// HET GETAL IS DE BOVENGRENS van wat er in een kleine partitie past: wat de
+	// handshake hier aan arena mag pakken, kan de image niet meer gebruiken. En
+	// Go pákt wat het mag — een geheugenlimiet is voor de pacer een doel, geen
+	// noodrem. GEMETEN op een Pi 5 (06-08, launcher in 32MB): met RAMSize/2 =
+	// 15MB stond de arena al op ~19,5MB vóór de eerste byte van de download, en
+	// de stagingbodem lag op 24,5MB — vijf MB verderop.
+	//
+	// Daarom een VAST plafond en geen fractie van de partitie: wat de handshake
+	// nodig heeft (gVisor + TLS + de x509-keten) hangt niet af van hoe groot de
+	// partitie is. Meeschalen betekende alleen dat een ruime partitie zijn
+	// ruimte aan de loader gaf in plaats van aan de app. applib.MinStageHeap is
+	// dezelfde grens die StageImage hanteert — dat is geen toeval maar de twee
+	// kanten van één vraag: hoeveel heeft deze download minimaal nodig.
+	//
+	// Lager kan niet zonder te meten, en dit pad is de enige startroute van élke
+	// job. Op een partitie die zó klein is dat de helft al minder is, wint de
+	// helft — daar valt toch niets meer te downloaden en zegt StageImage dat
+	// luid.
+	debug.SetMemoryLimit(min(int64(app.RAMSize)/2, applib.MinStageHeap))
 
 	url := app.Env("HOP_IMAGE_URL")
 	if url == "" {
