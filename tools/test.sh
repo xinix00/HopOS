@@ -66,18 +66,14 @@ gate_clean() {
 }
 trap gate_clean EXIT INT TERM
 # App-images zijn board-onafhankelijk (board/hopslot via applib): één build
-# dekt alle boards. De apploader is de enige startroute (twee-fase-lading):
-# bouwt hij niet, dan start geen enkele job — dus hard in de gate.
+# dekt alle boards.
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-	"$TAMAGO" build -tags linkcpuinit -o /dev/null ./app/appspike ./app/apploader ./app/hello
+	"$TAMAGO" build -tags linkcpuinit -o /dev/null ./app/appspike ./app/hello
 # Elke board-smaak kaal; plus de gui-smaak (metal/gui achter -tags gui) op
 # virt (bewijst de bedrading zonder Display-board), rpi5 (mét) en rpi4 (de
 # VL805-USB achter de BCM2711-root-complex — de enige plek waar dat pad
-# compileert). En één smaak mét embedloader: dát is wat élk echt board-image
-# bouwt, en die tag was nergens gedekt omdat de blob alleen bestond als iemand
-# net een image gebouwd had.
-gate_stub kern/apploaderblob/apploader.elf.gz
-for tags in "linkcpuinit" "rpi4 linkcpuinit" "rpi5 linkcpuinit" "uefi linkcpuinit" "gui linkcpuinit" "rpi4 gui linkcpuinit" "rpi5 gui linkcpuinit" "rpi5 linkcpuinit embedloader"; do
+# compileert).
+for tags in "linkcpuinit" "rpi4 linkcpuinit" "rpi5 linkcpuinit" "uefi linkcpuinit" "gui linkcpuinit" "rpi4 gui linkcpuinit" "rpi5 gui linkcpuinit"; do
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "$tags" -o /dev/null ./cmd/hopos
 done
@@ -100,11 +96,11 @@ done
 # hier locked-PMP (kern/cage) i.p.v. stage-2, dus dit dekt een ánder pad door de
 # board-laag: board.Board's riscv64-helft, de dev-primitieven en de app-kant met
 # zijn eigen RAM-plan.
-# De app-kant voor riscv64: de apploader (fase 1 van élke job) en de
-# slot-demo. Dit dekt board/hopslot's riscv64-helft, applib's park/self-place
-# en de app-kant van SMP — het spiegelbeeld van de HOP-kant hierboven.
+# De app-kant voor riscv64: de slot-demo en de switchtest. Dit dekt
+# board/hopslot's riscv64-helft, applib's park en de app-kant van SMP — het
+# spiegelbeeld van de HOP-kant hierboven.
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=riscv64 \
-	"$TAMAGO" build -tags "linkramsize linkcpuinit" -o /dev/null ./app/slotdemo ./app/apploader ./app/switchtest
+	"$TAMAGO" build -tags "linkramsize linkcpuinit" -o /dev/null ./app/slotdemo ./app/switchtest
 # En de twee bestanden die ALLEEN achter linkcpuinit staan, expliciet: de
 # S-mode-entry (cpu/slotstart/cpuinit_riscv64.s) en de app-kant van Push/Pull
 # (dev/share_riscv64_app.go). Ze zitten in de app-builds hierboven, maar een
@@ -143,4 +139,4 @@ for tags in "rk3566 linkcpuinit" "rk3566 gui linkcpuinit"; do
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "$tags" -o /dev/null ./cmd/hopos
 done
-echo "OK: host-tests groen, tamago-gate (arm64: virt/rpi4/rpi5/uefi kaal + gui-smaken + embedloader + embed-mains incl. rk3566 + probeuefi + proberk3566 + rk3566-agent kaal én gui; riscv64: cmd/hopos kaal én embedcfg/embedcagestub + slot-demo + slot-app + switchtest) gebouwd" >&2
+echo "OK: host-tests groen, tamago-gate (arm64: virt/rpi4/rpi5/uefi kaal + gui-smaken + embed-mains incl. rk3566 + probeuefi + proberk3566 + rk3566-agent kaal én gui; riscv64: cmd/hopos kaal én embedcfg/embedcagestub + slot-demo + slot-app + switchtest) gebouwd" >&2

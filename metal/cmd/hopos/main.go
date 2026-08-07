@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"runtime"
 	"strconv"
@@ -535,6 +536,9 @@ func main() {
 		NodeID:      cfg.Node.ID,
 		Slots:       slotEnv,
 		MemoryBytes: offer,
+		// De die-temperatuur op elke heartbeat (board.Thermometer; 0 = geen
+		// sensor) — zichtbaar in `hop agents`.
+		Temp: board.TempMilliC,
 	})
 	fail("agent", err)
 }
@@ -551,12 +555,9 @@ type envSlots struct {
 	optin  map[string]string
 }
 
-func (e envSlots) StartLoader(slot int, memLimit uint64, sharegroup string, poolCores int, env map[string]string) error {
-	return e.SlotManager.StartLoader(slot, memLimit, sharegroup, poolCores, e.merge(env))
-}
-
-func (e envSlots) StartStaged(slot int, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int, job string) error {
-	return e.SlotManager.StartStaged(slot, memLimit, cores, e.merge(env), mounts, ports, job)
+func (e envSlots) StartStream(slot int, image io.Reader, size int64, spec hopos.StartSpec) error {
+	spec.Env = e.merge(spec.Env)
+	return e.SlotManager.StartStream(slot, image, size, spec)
 }
 
 func (e envSlots) merge(env map[string]string) map[string]string {

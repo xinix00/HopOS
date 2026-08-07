@@ -13,6 +13,7 @@ package slotmgr
 import (
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/xinix00/hop/pkg/hopos"
@@ -54,48 +55,38 @@ func (Manager) NumCores() int {
 
 func (Manager) CoreClass(slot int) string { return slots.CoreClass(phys(slot)) }
 
-// StartLoader plaatst kooi + apploader. De sharegroup-plaatsing zit hier, in de
-// adapter: HOP geeft de sharegroup-naam (uit de job-tag) en de poolgrootte
-// (uit CPUShares) door — geen env-hack, het is een placement-directive net als
-// core-class. PlaceCage kiest de fysieke core (dedicated bij lege sharegroup,
-// anders de minst-belaste pool-core); de kooi erft die core via StartLoaderOn →
-// StartShared, zodat StartStaged en Stop 'm hergebruiken. Faalt de start, dan
-// geeft ReleaseCage de core meteen terug.
-func (Manager) StartLoader(slot int, memLimit uint64, sharegroup string, poolCores int, env map[string]string) error {
+// StartStream is HET startpad: kooi plaatsen (PlaceCage dekt dedicated én
+// sharegroup — een placement-directive net als core-class, geen env-hack) en
+// dan de image streamend de partitie in (slots.StartStreamOn).
+// Capaciteitstoestanden dragen hopos.ErrNoCapacity zodat HOP ze als pending
+// behandelt en niet herstart-stormt — een restart-lus op een onplaatsbare job
+// is een storm: elke poging downloadt de image opnieuw en faalt opnieuw. Op
+// élk faalpad is de kooi hier al teruggegeven (ReleaseCage) — de aanroeper
+// ruimt alleen zijn eigen boekhouding op.
+func (Manager) StartStream(slot int, image io.Reader, size int64, spec hopos.StartSpec) error {
 	cage := phys(slot)
-	core, err := slots.PlaceCage(cage, sharegroup, poolCores)
+	core, err := slots.PlaceCage(cage, spec.Sharegroup, spec.PoolCores)
 	if err != nil {
 		if errors.Is(err, slots.ErrPoolSize) {
-			// GEEN capaciteitsfout: twee jobspecs in dezelfde sharegroup zijn het
-			// oneens over de poolgrootte. Wachten lost dat nooit op, dus dit mag geen
-			// "pending" worden — de spec moet veranderen, en dan hoort de operator de
-			// reden te zien.
+			// Geen capaciteitsfout: twee jobspecs in dezelfde sharegroup zijn
+			// het oneens over de poolgrootte. Wachten lost dat nooit op, dus
+			// dit mag geen "pending" worden — de spec moet veranderen, en dan
+			// hoort de operator de reden te zien.
 			return err
 		}
-		// Verder faalt PlaceCage alléén op capaciteit (geen vrije core / pool past
-		// niet). Als hopos.ErrNoCapacity gemarkeerd, zodat HOP het als "niet
-		// plaatsbaar → pending" behandelt i.p.v. als crash te herstarten — een
-		// restart-lus op een onplaatsbare job is een storm (elke poging downloadt de
-		// image opnieuw en faalt opnieuw).
 		return fmt.Errorf("%w: %v", hopos.ErrNoCapacity, err)
 	}
-	if err := slots.StartLoaderOn(core, cage, memLimit, env); err != nil {
+	if err := slots.StartStreamOn(core, cage, image, size, spec.MemLimit, spec.Cores,
+		spec.Env, spec.Mounts, spec.Ports, spec.Job); err != nil {
 		slots.ReleaseCage(cage)
 		if errors.Is(err, slots.ErrNoPartition) {
-			// Zelfde behandeling als een volle core-pool hierboven: geen
-			// partitie-ruimte is een capaciteitstoestand die vanzelf overgaat
-			// (een buurman verhuist of stopt), dus hand-back en pending — geen
-			// herstartstorm. Dít was het gat: PlaceCage-fouten droegen het
-			// sentinel al, de partitie-allocatie erná niet (gemeten 01-08).
+			// Geen partitie-ruimte is een capaciteitstoestand die vanzelf
+			// overgaat (een buurman verhuist of stopt): hand-back en pending.
 			return fmt.Errorf("%w: %v", hopos.ErrNoCapacity, err)
 		}
 		return err
 	}
 	return nil
-}
-
-func (Manager) StartStaged(slot int, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int, job string) error {
-	return slots.StartStaged(phys(slot), memLimit, cores, env, mounts, ports, job)
 }
 
 func (Manager) Stop(slot int, timeout time.Duration) error {

@@ -26,7 +26,6 @@ import (
 	"github.com/xinix00/HopOS/metal/abi/ring"
 	"github.com/xinix00/HopOS/metal/board"
 	"github.com/xinix00/HopOS/metal/dev"
-	"github.com/xinix00/HopOS/metal/kern/apploaderblob"
 	"github.com/xinix00/HopOS/metal/net/hopswitch"
 )
 
@@ -570,12 +569,9 @@ func (d devReaderAt) ReadAt(p []byte, off int64) (int, error) {
 // SlotBase(1)+0x10000): de stage-2-map legt het canonieke bereik op de partitie
 // van dít slot, dus één artifact draait op elk slot.
 //
-// image is een in-memory slice — de ingebakken apploader (StartLoader) of een
-// Pi-demo-image — GÉÉN io.Reader/download-body meer: de app downloadt zijn eigen
-// image zelf (apploader → StartStaged). Zo leest core 0 hier nooit van het
-// netwerk binnen het geserialiseerde venster en buffert de kern nooit 127
-// downloads tegelijk. De blob is gedeeld (ingebakken), dus dev.Copy hieronder
-// alloceert niets per start.
+// image is een in-memory slice — een ingebakken blob (embed-demo's, de
+// cagestub-keten). Jobs van HOP komen hier niet: die stromen via StartStreamOn
+// rechtstreeks hun partitie in (stream.go), buiten het geserialiseerde venster.
 //
 // mounts is de volume-tabel (shared path → local path, HOP's Job.Volumes): de
 // task ziet zijn eigen lege root plus de gemounte shared dirs. ports (HOP's
@@ -584,7 +580,7 @@ func (d devReaderAt) ReadAt(p []byte, off int64) (int, error) {
 // job is de naam van de JOB (niet de task): de naamruimte van deze app in de
 // object-store (apps/<cluster>/<job>/ — storage.go). De jób, zodat een
 // herstart of failover elders dezelfde map ziet en replica's hem delen als
-// een shared volume. "" = geen store-toegang (embed-demo's, de apploader).
+// een shared volume. "" = geen store-toegang (embed-demo's).
 func Start(i int, image []byte, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int, job string) error {
 	return startImage(i, image, memLimit, cores, env, mounts, ports, job, false)
 }
@@ -621,34 +617,7 @@ func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]
 	// De EL2-vectoren + parkeerlus + mailboxen moeten klaar zijn vóór de
 	// eerste dispatch (mailbox cold-detectie leest een geveegde mailbox).
 	vectorsOnce.Do(cageInit)
-	if shared {
-		if st := ctxState(i); ctxLive(st) {
-			// De task-boekhouding is hier de autoriteit: wie plaatst, heeft
-			// het slot vrij bevonden — een "levende" ctx zonder eigenaar is
-			// dus een LIJK, geen bewoner. De klassieke bron is DRAM-residu:
-			// DDR overleeft een warme herstart (snelle herprik, watchdog),
-			// en gemeten 02-08 weigerde een verse boot zijn állereerste
-			// plaatsing op het Saved-lijk van de vorige run — beide jobs
-			// stormden tot give-up. Detecteren zonder opruimen is dan half
-			// werk (Derek): ruim het lijk en ga door.
-			//
-			// De scheidsrechter is de BEWONERSLIJST, niet het hart: die lijst
-			// is HOP-eigen RAM (vers bij elke boot, onder lock gemuteerd), en
-			// de rotatie hervat uitsluitend wat erin staat. Een ctx-lijk
-			// búiten de lijst kan dus nooit meer tot leven komen — draaiend
-			// hart of niet — en dat is precies het gat dat "alleen op een
-			// stilstaand hart" liet liggen: op één gedeeld hart start de
-			// eerste plaatsing het hart, waarna het lijk van de twééde slot
-			// onruimbaar werd (gemeten 02-08, cloudflared-storm na de
-			// welcome-evict). Stáát hij wél in de lijst, dan is de
-			// inconsistentie echt en faalt het luid.
-			if residentListed(coreOf(i), i) {
-				return fmt.Errorf("slot %d still live (ctx-state %d, scheduled on core %d) — stop it before StartShared", i, st, coreOf(i))
-			}
-			fmt.Printf("slot %d: unowned resident (ctx-state %d, in no rotation) — evicting the corpse, reusing the slot HOPOS_CTX_EVICT\n", i, st)
-			ctxWrite(i, layout.CtxState, layout.CtxEmpty)
-		}
-	} else if err := coresFree(i, cores, "not parked/cold"); err != nil {
+	if err := claimSlot(i, cores, shared); err != nil {
 		return err
 	}
 
@@ -737,22 +706,6 @@ func kernMemOnce() string {
 	return " — HOP: " + kernMemFn()
 }
 
-// StartLoaderOn is StartLoader op een door HOPOS gekozen core (coöperatieve
-// core-deling): de apploader draait als (mede)bewoner van `core` i.p.v. op
-// core=slot. slotmgr kiest de core met de pool-allocator (PlaceCage) en de kooi
-// erft hem via StartShared (hostCore), zodat fase 2 (StartStaged) en Stop
-// dezelfde core hergebruiken. Bij één bewoner op een verse core gedraagt dit
-// zich exact als StartLoader.
-func StartLoaderOn(core, i int, memLimit uint64, env map[string]string) error {
-	img := apploaderblob.Loader()
-	if len(img) == 0 {
-		return fmt.Errorf("apploader niet ingebakken of uitpakken faalde (bouw de node met -tags embedloader)")
-	}
-	// job="": de loader is systeemwerk zonder store-toegang; de échte app
-	// krijgt zijn naamruimte in fase 2 (StartStaged).
-	return StartShared(core, i, img, memLimit, env, nil, nil, "")
-}
-
 // appRAMSize is het deel van de partitie dat de app als RAM ziet: de bovenste
 // AbiTail is zijn ABI-staart (control page, ringen, net-ringen) ("512MB → 510 Go + 2 netbuffer"). Zo komt het
 // ring-geheugen uit de eigen memLimit van de job — er draait geen statische
@@ -768,12 +721,10 @@ func appRAMSize(size uint64) (uint64, error) {
 	return size - layout.AbiTail, nil
 }
 
-// placeFromStaging is de tweede helft van een slot-start: de image staat al in
-// de staging bovenin de partitie — óf door Start (een ingebakken blob, zoals de
-// apploader), óf door de apploader vanaf zíjn eigen download (StartStaged). Van
-// hieraf is alles geprivilegieerd HOP-werk: ELF parsen, segmenten plaatsen,
-// RAM-symbolen patchen, stage-2 bouwen en de core (her)dispatchen. Eén bron van
-// waarheid voor beide startpaden.
+// placeFromStaging is de tweede helft van een blob-start (Start/StartShared):
+// de image staat in de staging bovenin de partitie. Van hieraf is alles
+// geprivilegieerd HOP-werk: ELF parsen, segmenten plaatsen, RAM-symbolen
+// patchen, stage-2 bouwen en de core (her)dispatchen.
 func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64, memLimit uint64, cores int, envBlob []byte, mtab [][2]string, ports map[string]int, job string) error {
 	// De net-ring van dit slot: de partitie-staart. Puur een lokale berekening —
 	// de PA gaat als parameter naar ring-init, hopswitch.Attach en stage2.Build,
@@ -784,7 +735,7 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 		return err
 	}
 	// Het plan (parse + álle validatie + patchwaarden) komt uit abi/place —
-	// dezelfde bron van waarheid als de zelfplaatsing (applib/selfplace.go).
+	// dezelfde bron van waarheid als het streamende pad (stream.go).
 	// Gelezen vanuit de gestreamde device-kopie (geen kern-RAM-kopie); het
 	// linkvenster is arch-bepaald (de kooi-naad): op ARM het canonieke
 	// slot-1-adres, want daar ís de stage-2 de relocatie en draait één artifact
@@ -819,10 +770,9 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 
 // armSlot is de gedeelde slotstart-staart: servicer/switch-hygiëne, verse
 // control-page + ringen, stage-2-kooi, en de (her)dispatch van de core op
-// entry. Twee aanroepers: placeFromStaging (HOP plaatste de bytes zelf, entry
-// = de app-entry uit de ELF) en het zelfplaats-pad van StartStaged (de loader
-// plaatste voor, entry = het stubje dat op de eigen core de segmenten schuift
-// en dan de app inspringt — zie applib/selfplace.go).
+// entry. Twee aanroepers: placeFromStaging (blob-start) en startStream — in
+// beide is entry de app-entry uit de ELF (abi/place valideerde hem al; de
+// venstercheck hieronder blijft als vangrail staan).
 func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlob []byte, mtab [][2]string, ports map[string]int, job string) (err error) {
 	appRAM, err := appRAMSize(size)
 	if err != nil {
@@ -853,9 +803,8 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// De entry moet in het linkvenster van dit slot liggen. Dat venster is niet
 	// universeel: verplaatst de kooi adressen (stage-2), dan is het het canonieke
 	// slot-1-IPA en draait één artifact in elk slot; verplaatst hij niets, dan is
-	// het de partitie zelf. Deze check bewaakt vooral het ONVERTROUWDE
-	// CtrlPlaceEntry van het zelfplaats-pad — een app mag zijn core nergens
-	// anders laten binnenkomen dan in zijn eigen venster.
+	// het de partitie zelf. Een core mag nergens anders binnenkomen dan in
+	// het venster van zijn eigen slot.
 	linkBase := cageLinkBase()
 	window := cageLinkWindow(size)
 	if entry < linkBase || entry >= linkBase+window {
@@ -995,129 +944,6 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// nodig heeft pollt WaitReady zelf. In de lifecycle wachten zou bij een
 	// plaatsings-storm een convoy maken — bij 127 slots minuten
 	// (Altra-meting 15-07).
-	return nil
-}
-
-// StartStaged plaatst de échte app vanaf de image die de apploader al in de
-// staging bovenin de partitie heeft gedownload (control-page StatusStaged). De
-// partitie is al gealloceerd (fase 1: de runner startte de apploader via
-// StartLoader), dus we hergebruiken 'm, plaatsen de app eroverheen en
-// her-dispatchen de geparkeerde core. Zo verhuist het downloaden naar de app
-// (eigen core+netstack), terwijl het geprivilegieerde plaatsen bij HOP blijft.
-//
-// imgSize komt van de control-page (door de loader gezet) en is NIET vertrouwd:
-// een verkeerde maat faalt hooguit de ELF-parse/segment-validatie van dít slot.
-//
-// job is de store-naamruimte van de app (zie Start) — fase 2 is waar de échte
-// app hem krijgt; de apploader van fase 1 heeft er niets te zoeken.
-func StartStaged(i int, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int, job string) (err error) {
-	// Pure invoervalidatie vóór het venster — gedeeld met Start (prepStart).
-	mtab, envBlob, cores, err := prepStart(i, memLimit, cores, env, mounts, ports)
-	if err != nil {
-		return err
-	}
-	// Zelfde niet-pure prepStart als in startImage: de fb-grant terug op elk
-	// faalpad. De partitie NIET vrijgeven — die is van fase 1 (de apploader) en
-	// wordt hier alleen hergebruikt; opruimen is de taak van Stop.
-	var staged bool
-	defer func() {
-		if !staged {
-			grantRelease(i)
-		}
-	}()
-	// De grootte die de loader in de staging heeft gezet (control-page). Niet
-	// vertrouwd — een verkeerde maat faalt hooguit de ELF-parse van dit slot.
-	imgSize := int64(ctrlRead(i, layout.CtrlStagedSize))
-	if imgSize <= 0 {
-		return fmt.Errorf("StartStaged: geen gestagede image in slot %d (CtrlStagedSize=%d)", i, imgSize)
-	}
-	// Zelfplaatsing: heeft de loader een plaatsings-stubje klaargezet
-	// (applib/selfplace.go), dan hoeft HOP geen byte te schuiven — alleen de
-	// kooi wapenen en de core op het stubje dispatchen; dat schuift op zijn
-	// eigen core de segmenten en springt de app in. 0 = legacy (HOP plaatst
-	// vanaf de staging). Vóór het venster gelezen: de ctrl-clear in armSlot
-	// veegt het veld zo meteen.
-	placeEntry := ctrlRead(i, layout.CtrlPlaceEntry)
-	defer lifecycleWindow()()
-	t0 := time.Now() // venster-tijd — wat de convoy serialiseert (zie Start)
-	vectorsOnce.Do(cageInit)
-	// De apploader parkeerde ná het seinen — "staged" op de ctrl-page landt
-	// dus eerder dan zijn park/exit; kort wachten in plaats van meteen falen
-	// (gemeten Pi 5 19-07: de A76 verliest die race consequent). En op een
-	// gedeelde core parkeert de core nóóit zolang de buren leven — dáár is
-	// het juiste teken de ctx-staat van dít slot (de HVC-exit van de loader
-	// zet Dead), niet de core-mailbox. Zelfde onderscheid als Start (shared-
-	// tak boven zijn coresFree).
-	// De reset-vraag hangt af van wie er nog op dit hart woont — zie de takken.
-	if coreOf(i) != i || slotShares(i) {
-		// Gedeeld hart: NIET quiescen. Een quiesce is hier een hart-reset en die
-		// neemt de BUREN mee — precies waarop de tweede app stukliep (gemeten
-		// 31-07: "loader still live on shared core 1"). De loader meldt zich hier
-		// zelf dood: op ARM met hvc #0, op RISC-V met de exit-trap (cpu/idle
-		// ExitTrap → cpu/mmode), en de arch-switch zet CtxDead. Dáár wachten we op.
-		if !waitCtxDead(i, 2*time.Second) {
-			return fmt.Errorf("place staged slot %d: loader still live on shared core %d", i, coreOf(i))
-		}
-	} else {
-		// Eigen hart: hier mág de reset, en op een architectuur zonder parkeerlus
-		// is hij nodig — daar draait de exit-lus van de loader door tot HOP het
-		// hart ophaalt. Op ARM is dit een no-op (de app parkeert zichzelf op EL2).
-		cageQuiesce(coreOf(i))
-		deadline := time.Now().Add(2 * time.Second)
-		for {
-			err := coresFree(i, cores, "loader not parked?")
-			if err == nil {
-				break
-			}
-			if time.Now().After(deadline) {
-				return err
-			}
-			time.Sleep(time.Millisecond)
-		}
-	}
-	// De partitie van fase 1 (de loader) hergebruiken — niet opnieuw alloceren.
-	base, size, ok := partitionOf(i)
-	if !ok {
-		return fmt.Errorf("StartStaged: slot %d heeft geen partitie (loader niet gestart?)", i)
-	}
-	// De loader stagede via layout.StageAddr met zíjn gepatchte RamSize =
-	// appRAM — zelfde functie hier, dus de compiler bewaakt dat we op dezelfde
-	// plek lezen als waar hij schreef.
-	appRAM, err := appRAMSize(size)
-	if err != nil {
-		return err
-	}
-	if placeEntry != 0 {
-		// Geen CleanInv en geen parse op core 0: het stubje veegt op zíjn
-		// core eerst heel app-RAM (DC CIVAC — dezelfde coherentie-stap, maar
-		// per-slot-parallel) en schuift dan de al-gevalideerde segmenten.
-		if err := armSlot(i, base, size, placeEntry, memLimit, cores, envBlob, mtab, ports, job); err != nil {
-			return err
-		}
-		staged = true
-		fmt.Printf("slot %d: self-place dispatched in %s\n", i, time.Since(t0).Round(time.Millisecond))
-		return nil
-	}
-	addr, _, fits := layout.StageAddr(base, appRAM, imgSize)
-	if !fits {
-		return fmt.Errorf("staged image %d bytes past niet in partitie %d MB (app-RAM %d MB)", imgSize, size>>20, appRAM>>20)
-	}
-	stageAddr := uintptr(addr)
-	// Coherentie: de loader draaide cacheable; zijn dirty lines wegschrijven+
-	// invalideren vóór we de echte app er ongecachet overheen plaatsen. De loader
-	// flushte de staging zelf al (StageImage); dit dekt de rest van de partitie.
-	// Dat dit vanaf de HOP-core kán, is ARM-eigen: cache-onderhoud is daar
-	// broadcast over de inner-shareable domain, dus deze veeg raakt óók de L1 van
-	// de loader-core. Op RISC-V is het hart-lokaal en dekt de reset uit
-	// cageQuiesce de dirty lines (het hart verliest zijn cache); daar kost deze
-	// call alleen HOP's eigen kopie — ~5ms per start, niet de moeite van een
-	// architectuur-vertakking waard.
-	dev.CleanInv(uintptr(base), uintptr(size))
-	if err := placeFromStaging(i, base, size, stageAddr, imgSize, memLimit, cores, envBlob, mtab, ports, job); err != nil {
-		return err
-	}
-	staged = true
-	fmt.Printf("slot %d: staged app placed in %s\n", i, time.Since(t0).Round(time.Millisecond))
 	return nil
 }
 

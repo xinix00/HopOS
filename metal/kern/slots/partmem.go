@@ -189,8 +189,7 @@ func releaseLocked(i int) {
 }
 
 // partitionOf geeft de actieve reservering van slot i terug (base, size). ok=
-// false als slot i niets gealloceerd heeft. Gebruikt door StartStaged om de
-// partitie van fase 1 (de apploader) te hergebruiken voor de echte app.
+// false als slot i niets gealloceerd heeft.
 func partitionOf(i int) (base, size uint64, ok bool) {
 	partOnce.Do(poolInit)
 	partMu.Lock()

@@ -61,13 +61,7 @@ else
 	# hier geen QEMU-vinkje maar beeld op een monitor.
 	GUITAG=""
 	[ "${GUI:-1}" = 1 ] && GUITAG=" gui"
-	TARGET=./cmd/hopos; NAME=hopos-radxa; TAGS="rk3566 linkcpuinit embedloader$GUITAG"
-	# De universele apploader op zijn go:embed-plek. Dit is FASE 1 van élke job:
-	# de node laadt hem in elk slot, waarna de app zijn echte image op zijn eigen
-	# core en netstack ophaalt. Zonder deze stap start geen enkele job — GEMETEN
-	# 06-08, toen de agent op dit bord voor het eerst een job kreeg en meldde
-	# "apploader niet ingebakken of uitpakken faalde".
-	bake_apploader arm64 linkcpuinit 0x50010000
+	TARGET=./cmd/hopos; NAME=hopos-radxa; TAGS="rk3566 linkcpuinit$GUITAG"
 fi
 
 # Linkadres 0x02210000 in het venster vanaf 0x02200000 (rk3566.RamBase):

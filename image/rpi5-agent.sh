@@ -33,17 +33,14 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 	"$TAMAGO" build -tags linkcpuinit -trimpath \
 	-ldflags "-w -T 0x50010000 -R 0x1000" -o out/app5.elf ./app/appspike
 
-# 1b. De universele apploader op zijn go:embed-plek (recept in image/lib.sh).
-bake_apploader arm64 linkcpuinit 0x50010000
-
 # 2. De agent-kern: cmd/hopos met het rpi5-board (build-tag kiest board_rpi5.go)
-#    + de ingebakken apploader (embedloader). Twee smaken per board: kaal
+#    Twee smaken per board: kaal
 #    (headless) en gui (metal/gui: HVS-dumptool + :9091-debug + fb-grant).
 #    Default gui; GUI=0 bouwt de kale smaak. (Zelfde knop in alle imagescripts.)
 GUITAG=""
 [ "${GUI:-1}" = 1 ] && GUITAG=" gui"
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-	"$TAMAGO" build -tags "rpi5 linkcpuinit embedloader$GUITAG" -trimpath \
+	"$TAMAGO" build -tags "rpi5 linkcpuinit$GUITAG" -trimpath \
 	-ldflags "-s -w -T 0x90000 -R 0x1000" -o out/agent5.elf ./cmd/hopos
 
 # 3. ELF → raw image (Circle-recept, mkkernel).

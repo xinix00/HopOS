@@ -19,6 +19,7 @@ import (
 	"github.com/xinix00/HopOS/metal/cpu/psci"
 	"github.com/xinix00/HopOS/metal/driver/fb"
 	"github.com/xinix00/HopOS/metal/driver/pcie"
+	"github.com/xinix00/HopOS/metal/driver/vcmail"
 	"github.com/xinix00/HopOS/metal/fw/fdt"
 	"github.com/xinix00/HopOS/metal/net/dhcp"
 )
@@ -34,6 +35,18 @@ type Base struct {
 
 func (b Base) BootEL() int { return int(raspi.BootEL()) }
 func (b Base) CoreID() int { return b.CoreIDFn() }
+
+// TempMilliC (board.Thermometer): de SoC-temperatuur via de firmware-mailbox —
+// dezelfde route als DVFS. De VideoCore meet de die zelf; één sensor, dus
+// meteen ook de heetste. 0 bij een mailbox-fout (= onbekend, geen nep-nul:
+// een echte 0.000°C bestaat op een draaiende Pi niet).
+func (b Base) TempMilliC() int {
+	m := vcmail.Mbox{Base: b.VCMailBase, Buf: uintptr(raspi.VCMailBuf)}
+	if mc, ok := m.Temp(); ok {
+		return mc
+	}
+	return 0
+}
 
 // MemTotal leest de DTB die de firmware in x0 meegaf (cpuinit.s → DTBPtr) en
 // telt het /memory-node op. 0 = niet gevonden. DTBPtr is het scratch-woord

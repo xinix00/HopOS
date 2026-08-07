@@ -4,7 +4,6 @@ package slots
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/board"
@@ -501,30 +500,4 @@ func cageLinkBase() uint64 {
 		return 0
 	}
 	return pool[0].Base
-}
-
-// cageQuiesce zet het hart in reset en wacht tot het silicium dat bevestigt.
-// Nodig omdat een app hier zijn eigen hart niet kan parkeren: er is geen laag
-// onder hem om naartoe te trappen, dus zijn exit-lus draait tot HOP ingrijpt
-// (applib/park_riscv64.go). Dezelfde handeling als cageRevoke, andere bedoeling:
-// geen kill maar een geplande wisseling van de wacht — de loader is klaar, de
-// echte app mag het hart hebben.
-//
-// Gemeten 30-07: zonder dit weigerde armSlot fase 2 terecht met "core 1 still
-// running" en bleef een gestagede app liggen.
-func cageQuiesce(core int) {
-	if coreStopped(core) {
-		return
-	}
-	if err := board.Current().HartOff(hartOf(core)); err != nil {
-		fmt.Printf("HOPOS_CAGE_QUIESCE_FAILED: core %d: %v\n", core, err)
-		return
-	}
-	for range 100 { // ~100ms; een reset is meteen klaar — dit is de wacht ertegen
-		if coreStopped(core) {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	fmt.Printf("HOPOS_CAGE_QUIESCE_SLOW: core %d blijft draaien na reset\n", core)
 }

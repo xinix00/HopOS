@@ -129,11 +129,6 @@ func cageRevoke(i int) { stage2.Revoke(i) }
 // vertrouwde code is de EL2-trampoline, en die woont in HOP's eigen image.
 const cageFloor = 0
 
-// cageQuiesce: niets te doen. Een app die klaar is parkeert zijn eigen core op
-// EL2 (applib.Exit → HVC) en meldt dat in zijn mailbox, dus fase 2 van een
-// twee-fase-start vindt die core vrij.
-func cageQuiesce(core int) {}
-
 // cageFaultRegs: de EL2-switch dumpt hier (nog) geen registers bij een fault —
 // het rapport is ESR/FAR op de control-page, en dat was op deze architectuur
 // altijd al genoeg om te jagen. Zie de RISC-V-helft voor wat er meer kan.

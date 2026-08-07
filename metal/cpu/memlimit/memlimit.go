@@ -1,7 +1,7 @@
 //go:build tamago
 
-// Package memlimit geeft élke Go-wereld op HopOS — HOP zelf, de apploader,
-// elke app — automatisch een geheugenplafond dat past bij het raam waarin hij
+// Package memlimit geeft élke Go-wereld op HopOS — HOP zelf, elke app —
+// automatisch een geheugenplafond dat past bij het raam waarin hij
 // draait. Niemand hoort hierover na te denken (Derek, 02-08): geen getal per
 // board, geen getal per job, en een nieuw board of een kleinere partitie is
 // vanzelf goed.
@@ -59,17 +59,17 @@ var ramSize uint
 var ramStackOffset uint
 
 // arenaSlack is de ondergrens van de marge onder de muur: genoeg om één
-// allocator-groeistap te dekken die de zachte limiet overschrijdt. Empirisch —
-// het is de waarde waarmee HopOS sinds 02-08 draait en waaronder de staging
-// aantoonbaar sneuvelt (zie ArmBelow).
+// allocator-groeistap te dekken die de zachte limiet overschrijdt.
+// SetMemoryLimit is ZACHT (Go mag eroverheen als hij niet genoeg kan
+// vrijmaken) en de allocator groeit in stappen die pas ná de toets gezet
+// worden — een kleinere marge liet de heap aantoonbaar door een echte muur
+// springen (gemeten 06-08, per-256KB-hashes: 1MB marge = elf genulde blokken;
+// deze waarde = nul). Empirisch de waarde waarmee HopOS sinds 02-08 draait.
 const arenaSlack = 4 << 20
 
 // anchor dwingt de meet-allocatie het echte heap in (escape-analyse mag hem
 // niet op een stack leggen — al ligt ook die op tamago binnen het raam).
 var anchor *byte
-
-// base is de heapbodem, bij de eerste Arm vastgelegd. Nul zolang Arm niet liep.
-var base uintptr
 
 // Arm zet het plafond. Zo vroeg mogelijk aanroepen — de agent-main en
 // applib.Init doen dat al; een nieuwe main hoort dit als eerste te doen.
@@ -77,70 +77,23 @@ var base uintptr
 // niets: geen limiet is de oude, bekende toestand — een verzonnen limiet is
 // een nieuwe manier om stuk te gaan.
 func Arm() {
-	// Het anker bij de EERSTE meting ís de heapbasis: de sbrk-allocator groeit
-	// alleen omhoog vanaf einde image+BSS, dus wie vroeg meet meet de bodem.
-	// Die onthouden we, want een LATERE meting geeft een willekeurige plek in
-	// de al bevolkte heap — en dan is er geen bodem meer te vinden.
+	// Het anker bij een vroege meting ís de heapbasis: de sbrk-allocator
+	// groeit alleen omhoog vanaf einde image+BSS.
 	anchor = new(byte)
-	base = uintptr(unsafe.Pointer(anchor))
-	arm(uintptr(ramStart)+uintptr(ramSize)-uintptr(ramStackOffset), base, true, arenaSlack)
+	base := uintptr(unsafe.Pointer(anchor))
+	arm(uintptr(ramStart)+uintptr(ramSize)-uintptr(ramStackOffset), base, arenaSlack)
 }
 
-// ArmBelow doet hetzelfde als Arm, maar met een LAGERE muur: de heap mag nooit
-// voorbij top groeien. Nodig zodra er iets ánders dan de runtime in het raam
-// woont, en dat is precies één geval — de apploader die een image tegen de
-// bovenkant van zijn partitie stageert (applib.StageImage).
-//
-// WAAROM DIT MOET BESTAAN (gemeten Pi 5, 06-08). Zonder dit rekent Arm zijn
-// muur op RamStart+RamSize−RamStackOffset, en RamStackOffset is 0x100: dus
-// letterlijk de bovenkant. De loader kreeg daarmee een plafond in een raam
-// waarvan de bovenste megabytes al bezet waren, groeide er tijdens de
-// HTTPS-download doorheen, en Go NULT een verse span — HOP las daarna
-// `bad magic number '[0 0 0 0]'` op de ELF-header. Geen kapotte download, geen
-// te kleine partitie: een heap die mocht wat niet kon.
-//
-// Hier rekenen we met de ONTHOUDEN basis en tellen we m.Sys NIET mee: alle
-// runtime-geheugen leeft in [basis, muur), dus dat is het budget — punt.
-//
-// De MARGE blijft groot, en dat is de les van 06-08. Ik had hem naar 1MB
-// gebracht met het argument "de basis is nu exact, dus de meetfout-marge mag
-// weg". Dat argument klopt en de conclusie niet: SetMemoryLimit is een ZACHTE
-// limiet (Go mag eroverheen als hij niet genoeg kan vrijmaken) en de allocator
-// groeit in stappen die pas ná de toets gezet worden. Onder een muur die een
-// ECHT adres is — hier de staging met de gedownloade image erin — moet de marge
-// dus minstens één zo'n stap dekken, anders springt één arena-groei eroverheen
-// en nult Go de verse span dwars door de image.
-//
-// GEMETEN in QEMU met per-256KB-hashes over de staging: met 1MB marge werden
-// elf van de blokken ná de download genuld; met arenaSlack geen enkel. De
-// apploader plaatste daarna een lege app, die core spinde op 100% zonder ooit
-// te yielden, en zijn buurman kon er niet meer bij — "core never yielded".
-//
-// Geeft het gezette plafond terug, en ok=false als er onder top niets te
-// verdelen valt (dan is er niets gezet en moet de aanroeper luid falen — een
-// verzonnen limiet is een nieuwe manier om stuk te gaan).
-func ArmBelow(top uintptr) (limit uint64, ok bool) {
-	if base != 0 {
-		return arm(top, base, false, arenaSlack)
-	}
-	anchor = new(byte)
-	return arm(top, uintptr(unsafe.Pointer(anchor)), true, arenaSlack)
-}
-
-// arm is de gedeelde rekensom. addSys hoort bij een VERS gemeten anker: dan is
-// heap0 de huidige uitdeelplek en telt "al gepakt" (m.Sys) mee naast "nog te
-// pakken" (wall−heap0). Met de onthouden basis is [heap0, wall) al het hele
-// verhaal en zou m.Sys dubbeltellen.
-func arm(wall, heap0 uintptr, addSys bool, minSlack uint64) (limit uint64, ok bool) {
+// arm is de rekensom: heap0 is de zojuist gemeten uitdeelplek, dus "al
+// gepakt" (m.Sys) telt mee naast "nog te pakken" (wall−heap0).
+func arm(wall, heap0 uintptr, minSlack uint64) (limit uint64, ok bool) {
 	if ramSize == 0 || heap0 <= uintptr(ramStart) || heap0 >= wall {
 		return 0, false
 	}
 	budget := uint64(wall - heap0)
-	if addSys {
-		var m runtime.MemStats
-		runtime.ReadMemStats(&m)
-		budget += m.Sys
-	}
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	budget += m.Sys
 	slack := budget / 16
 	if slack < minSlack {
 		slack = minSlack

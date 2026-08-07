@@ -44,7 +44,7 @@
 // Chunked transfer kan dit pakket wél lezen (Do) en schrijven (Flush) — dat is
 // niet optioneel zodra je een SSE-staart of een frame-stream wilt, en het is
 // veertig regels. Alleen [Get] weigert hem: die belooft zijn aanroeper een
-// vooraf bekende lengte (StageImage toetst hem) en een antwoord zonder
+// vooraf bekende lengte (de plaatser toetst hem) en een antwoord zonder
 // Content-Length kan dat niet waarmaken.
 //
 // Redirects worden gevolgd (bounded, alleen voor verzoeken zonder body).

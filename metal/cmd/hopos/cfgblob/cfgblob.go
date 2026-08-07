@@ -7,7 +7,7 @@
 // mee, en de FAT-bootpartitie waar fip.bin op staat kunnen we zelf niet lezen
 // (dat vraagt een SDHCI- plus FAT-driver; de FSBL las de kaart, wij niet).
 //
-// Dus bakken we hem in, precies zoals kern/apploaderblob de apploader inbakt:
+// Dus bakken we hem in, net als de andere build-input-blobs (kern/cagestub):
 // image/licheerv-agent.sh zet de gekozen config op de embed-plek (gitignored,
 // want daar kan een echte apikey in staan) en bouwt met -tags embedcfg. De
 // config is daarmee deel van het ondertekende image — hetzelfde

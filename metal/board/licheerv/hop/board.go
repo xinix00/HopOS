@@ -30,6 +30,10 @@ var _ board.Board = machine{}
 
 func (machine) CoreID() int { return licheerv.CoreID() }
 
+// TempMilliC (board.Thermometer): de on-die TEMPSEN — rng.go zet hem bij boot
+// aan (TempInit) voor zijn eigen minuut-thermometer, dus hier alleen lezen.
+func (machine) TempMilliC() int { return licheerv.TempMilliC() }
+
 // MemTotal: de SG2002 op dit bordje heeft 256MB DDR3, door de FSBL
 // geïnitialiseerd (zijn log meldt "DDR3-2G-QFN"). Er is geen device-tree om te
 // bevragen — de FSBL is de firmware en die geeft ons niks mee — dus dit is

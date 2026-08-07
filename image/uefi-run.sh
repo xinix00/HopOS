@@ -77,25 +77,18 @@ esac
 cd "$DIR/metal"
 mkdir -p out
 
-# Tags: de node-image bakt in agent-modus de apploader ín (embedloader) — geen
-# externe URL, self-contained. De probe heeft 'm niet nodig.
 # Twee smaken: kaal (headless) en gui (metal/gui + fb-grant). Default gui;
 # GUI=0 bouwt de kale smaak. (Zelfde knop in alle imagescripts.)
 TAGS="uefi linkcpuinit"
 [ "${GUI:-1}" = 1 ] && TAGS="$TAGS gui"
-[ "$MODE" = agent ] && TAGS="$TAGS embedloader"
 
-# In agent-modus de app-image (die de apps zelf downloaden, via de http.server
-# geserveerd als HOP_IMAGE_URL) én de universele apploader. De apploader wordt
-# NIET geserveerd maar íngebakken in de node: hij landt gecomprimeerd op de
-# go:embed-plek (kern/apploaderblob/apploader.elf.gz) zodat de node-build
-# (embedloader) 'm meeneemt.
-# Canoniek gelinkt (slot-1-IPA; zonder -s: slots patcht RamStart/RamSize/slotHint).
+# In agent-modus de app-image (door de node streamend geplaatst vanaf de
+# http.server-URL in de jobspec). Canoniek gelinkt (slot-1-IPA; zonder -s:
+# de plaatser patcht RamStart/RamSize/slotHint).
 if [ "$MODE" = agent ]; then
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags linkcpuinit -trimpath \
 		-ldflags "-w -T 0x50010000 -R 0x1000" -o out/app-uefi.elf ./app/appspike
-	bake_apploader arm64 linkcpuinit 0x50010000 # recept in image/lib.sh
 fi
 
 # 1. Eén ELF per venster-kandidaat (zelfde build, ander -T; -buildid= zodat

@@ -143,6 +143,27 @@ func (s PowerState) String() string {
 	return fmt.Sprintf("?%d", int(s))
 }
 
+// Thermometer is het optionele stukje board-contract voor een die-sensor.
+// Optioneel en geen Board-methode: de meeste boards hebben er een, QEMU en
+// menig UEFI-doos niet, en "geen sensor" hoort géén stub-implementatie per
+// board te kosten. Wie hem heeft, implementeert dit naast Board.
+type Thermometer interface {
+	// TempMilliC is de CPU/die-temperatuur in milligraden Celsius; 0 = geen
+	// (geldige) meting. Eén getal: heeft een board meer sensoren, dan de
+	// heetste — dát is het getal waarop je ingrijpt.
+	TempMilliC() int
+}
+
+// TempMilliC geeft de die-temperatuur van het actieve board, of 0 als het
+// board geen sensor (geregistreerd) heeft. Dit is wat de node op zijn
+// heartbeat naar HOP meestuurt.
+func TempMilliC() int {
+	if t, ok := active.(Thermometer); ok {
+		return t.TempMilliC()
+	}
+	return 0
+}
+
 // active is het geregistreerde board (nil tot Use — vóór elke board-call).
 var active Board
 

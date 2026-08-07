@@ -61,16 +61,13 @@ demo)
 	echo "HOP-kern HTTP: curl http://127.0.0.1:${HOPPORT:-8080}/ · poort-publicatie: nc 127.0.0.1 ${PORTPUB:-18080}" >&2
 	;;
 agent)
-	# De apploader gecomprimeerd op de go:embed-plek (recept in image/lib.sh):
-	# zonder embedloader start de agent geen enkele job.
-	bake_apploader arm64 linkcpuinit 0x50010000
 	# Werkbank-config (optioneel): HOPCFG="hopos.s3.endpoint=http://10.0.2.2:9000 ..."
 	# gaat als -X de kern in (board_virt.go extraCfg) — QEMU heeft geen
 	# bootmedium, dit is de regressie-knop voor config-gedreven paden.
 	XCFG=""
 	[ -n "${HOPCFG:-}" ] && XCFG=" -X 'main.extraCfg=$HOPCFG'"
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-		"$TAMAGO" build -tags "linkcpuinit embedloader$GUITAG" -trimpath \
+		"$TAMAGO" build -tags "linkcpuinit$GUITAG" -trimpath \
 		-ldflags "-s -w -T 0x40010000 -R 0x1000$XCFG" -o out/hopos-agent.elf ./cmd/hopos
 	KERNEL=out/hopos-agent.elf
 	FWD="hostfwd=tcp:127.0.0.1:${AGENTPORT:-8080}-10.0.2.15:8080,hostfwd=tcp:127.0.0.1:${LEADERPORT:-9080}-10.0.2.15:9080,hostfwd=tcp:127.0.0.1:${PORTPUB:-18080}-10.0.2.15:18080"

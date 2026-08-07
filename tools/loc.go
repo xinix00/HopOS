@@ -48,11 +48,11 @@ type flavour struct {
 }
 
 var flavours = []flavour{
-	{"uefi", "arm64", "uefi linkcpuinit embedloader", "linkcpuinit", true},
-	{"rpi5", "arm64", "rpi5 linkcpuinit embedloader", "linkcpuinit", true},
-	{"rpi4", "arm64", "rpi4 linkcpuinit embedloader", "linkcpuinit", true},
-	{"rk3566", "arm64", "rk3566 linkcpuinit embedloader", "linkcpuinit", true},
-	{"licheerv", "riscv64", "licheerv embedloader embedcfg embedcagestub", "linkramsize linkcpuinit", false},
+	{"uefi", "arm64", "uefi linkcpuinit", "linkcpuinit", true},
+	{"rpi5", "arm64", "rpi5 linkcpuinit", "linkcpuinit", true},
+	{"rpi4", "arm64", "rpi4 linkcpuinit", "linkcpuinit", true},
+	{"rk3566", "arm64", "rk3566 linkcpuinit", "linkcpuinit", true},
+	{"licheerv", "riscv64", "licheerv embedcfg embedcagestub", "linkramsize linkcpuinit", false},
 }
 
 // qemuvirt is een dev-target, geen release-smaak: hij telt niet mee in de
