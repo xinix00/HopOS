@@ -17,6 +17,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -72,19 +73,24 @@ func main() {
 	}
 
 	app.Logf("apploader: %s up — fetching image on my own core+netstack from %s", ip, url)
-	// Met een deadline, en dat is geen luxe: zonder timeout blijft een stilgevallen
-	// verbinding EEUWIG hangen (Go's default client heeft er geen). Gemeten 30-07 op
-	// de LicheeRV: de server zag een broken pipe, zijn FIN kwam nooit aan, en de
-	// loader wachtte oneindig op bytes — HOP zag een task die "draait" met een
-	// tikkende hartslag en kon dus niks herstarten. Liever luid falen: HOP's
-	// restart-beleid is precies de plek waar een mislukte download hoort te landen.
-	client := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := client.Get(url)
+	// Een timeout op de STILTE, niet op de duur. Zonder deadline blijft een
+	// stilgevallen verbinding eeuwig hangen (30-07: de server zag een broken pipe,
+	// zijn FIN kwam nooit aan, HOP zag een task die "draait"). Maar hier stond
+	// http.Client.Timeout, en die kapt ook een overdracht af die gewoon vordert:
+	// 07-08 haalde de LicheeRV cloudflared (30MB) niet binnen vijf minuten — 7,
+	// 15, 24MB binnen, elke keer stuk op de klok. Traag is gezond; stil is stuk.
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ResponseHeaderTimeout = stallTimeout // dekt de fase vóór de eerste byte
+	resp, err := (&http.Client{Transport: tr}).Get(url)
 	if err != nil {
 		app.Logf("apploader: GET: %v", err)
 		app.Exit(1)
 	}
 	defer resp.Body.Close()
+	// En de bodyfase: elke binnengekomen byte windt de timer opnieuw op; loopt hij
+	// af, dan sluit hij de body en valt de lopende Read om.
+	stall := time.AfterFunc(stallTimeout, func() { resp.Body.Close() })
+	got := progress{tick: func() { stall.Reset(stallTimeout) }}
 	if resp.StatusCode != 200 {
 		app.Logf("apploader: HTTP %s", resp.Status)
 		app.Exit(1)
@@ -117,21 +123,38 @@ func main() {
 	// hieronder in de foutregel. Tijdens het downloaden logt hij níet — elke
 	// console-regel op dit board kost meer buffering dan de NIC-ring heeft, dus
 	// een voortgangsbalk zou het probleem zijn dat hij meet.
-	var got progress
 	body := io.TeeReader(resp.Body, &got)
 	// StageImage seint HOP en parkeert de core; keert bij succes niet terug.
 	if err := app.StageImage(body, resp.ContentLength); err != nil {
-		app.Logf("apploader: stage na %d van %d bytes: %v", got.seen, resp.ContentLength, err)
+		// Stop() is false als de timer al gelopen heeft: dan is de body door de
+		// stilte gesloten en niet door een netwerkfout, en dat hoort er anders te
+		// staan dan "read on closed response body".
+		if !stall.Stop() {
+			err = fmt.Errorf("no data for %s", stallTimeout)
+		}
+		app.Logf("apploader: staging failed after %d of %d bytes: %v", got.seen, resp.ContentLength, err)
 		app.Exit(1)
 	}
 }
 
+// stallTimeout is hoe lang de overdracht STIL mag zijn. Niet hoe lang hij mag
+// duren: een node die 30MB over een gedeeld hart binnenhaalt heeft alle tijd
+// nodig die hij nodig heeft, en zolang er bytes komen is er niets mis.
+const stallTimeout = 60 * time.Second
+
 // progress telt de binnengekomen bytes: het antwoord op "hoe ver kwam hij" in
 // de foutregel van een mislukte overdracht, zonder er tijdens de overdracht
-// iets over te zeggen.
-type progress struct{ seen int64 }
+// iets over te zeggen. tick is de stilte-timer die bij elke byte opnieuw
+// opgewonden wordt.
+type progress struct {
+	seen int64
+	tick func()
+}
 
 func (p *progress) Write(b []byte) (int, error) {
 	p.seen += int64(len(b))
+	if p.tick != nil {
+		p.tick()
+	}
 	return len(b), nil
 }
