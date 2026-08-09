@@ -53,16 +53,18 @@ const (
 	tcpFlagACK = 0x10
 
 	// Masquerade-poortbereik (PAT) en conntrack-grenzen. MasqBase/MasqEnd is
-	// bewust disjunct van het efemere bereik van HOP's eigen externe stack
-	// (hopnet begrenst die op [16000, MasqBase)): anders zou een inbound
-	// antwoord op HOP's eigen DNS/S3-poort per ongeluk een masquerade-flow naar
-	// dezelfde peer kunnen matchen. Het plafond maxFlows is de anti-DoS-grens
-	// (zoals bij de neighbor-cache): een app kan HOP's heap op core 0 nooit
-	// laten vollopen. Idle-timeouts ruimen dode flows op — geen TCP-toestand
-	// (FIN/RST) volgen, alleen inactiviteit; keepalives van een langlopende
-	// tunnel (cloudflared ~30-90s) blijven ruim binnen tcpIdle.
+	// bewust disjunct van het efemere bereik van HOP's eigen externe stack —
+	// lneto deelt zijn efemere poorten sequentieel uit in [49152, 65535]
+	// (xnet stack-go), dus de masq stopt op 49152. Anders zou een inbound
+	// antwoord op HOP's eigen DNS/S3-poort
+	// per ongeluk een masquerade-flow naar dezelfde peer kunnen matchen.
+	// 29k poorten blijft ruim boven maxFlows. Het plafond maxFlows is de
+	// anti-DoS-grens (zoals bij de neighbor-cache): een app kan HOP's heap op
+	// core 0 nooit laten vollopen. Idle-timeouts ruimen dode flows op — geen
+	// TCP-toestand (FIN/RST) volgen, alleen inactiviteit; keepalives van een
+	// langlopende tunnel (cloudflared ~30-90s) blijven ruim binnen tcpIdle.
 	MasqBase = 20000
-	MasqEnd  = 60000
+	MasqEnd  = 49152
 	maxFlows = 4096
 	tcpIdle  = 300 * time.Second
 	udpIdle  = 60 * time.Second
@@ -142,8 +144,8 @@ var (
 )
 
 // Uplink omhult de externe NIC: inkomende frames voor gepubliceerde poorten of
-// masquerade-antwoorden worden vóór de gvisor-stack afgevangen (→ interne
-// switch); de zendkant krijgt een mutex omdat gvisor én de NAT er allebei op
+// masquerade-antwoorden worden vóór de node-stack afgevangen (→ interne
+// switch); de zendkant krijgt een mutex omdat de stack én de NAT er allebei op
 // zenden (de NIC-Transmit is zelf niet goroutine-veilig).
 type Uplink struct {
 	nic  gnet.NetworkDevice
@@ -152,7 +154,7 @@ type Uplink struct {
 	mac  [6]byte
 }
 
-// uplinkTxMu serialiseert de zendkant: gvisor (hopnet) én de NAT zenden
+// uplinkTxMu serialiseert de zendkant: de node-stack (hopnet) én de NAT zenden
 // allebei op de externe NIC, en NIC-Transmit is niet goroutine-veilig.
 var uplinkTxMu sync.Mutex
 
@@ -196,7 +198,7 @@ func (u *Uplink) Receive(buf []byte) (int, error) {
 		if n == 0 || err != nil {
 			return n, err // NIC-ring leeg (of fout): pas hier mag de rxLoop slapen
 		}
-		// ARP eerst (niet claimen — gvisor wil replies óók zien voor de eigen
+		// ARP eerst (niet claimen — de stack wil replies óók zien voor de eigen
 		// node-stack): de reply op onze first-contact-request leert de neighbor.
 		arpLearn(buf[:n])
 		if !natInbound(buf[:n]) {

@@ -21,11 +21,11 @@ import (
 // hergebruikt zijn buffer) — de ontvanger kopieert.
 var gatewayRx func(p []byte)
 
-// gwQueue is de wachtrij naar die NIC. De aflevering mag NOOIT onder mu
-// gebeuren: gvisor antwoordt SYNCHROON binnen InjectInbound (een SYN naar een
-// gesloten node-poort levert direct een RST), en dat antwoord komt via
-// internalTx.WriteNotify → FromGateway de switch weer in — op dezelfde
-// goroutine, die dan mu opnieuw wil pakken. sync.Mutex is niet reentrant, dus
+// gwQueue is de wachtrij naar die naad. De aflevering mag NOOIT onder mu
+// gebeuren: een netstack kan SYNCHROON binnen zijn ontvangst antwoorden (een
+// SYN naar een gesloten node-poort levert direct een RST), en dat antwoord
+// komt via de gateway-naad de switch weer in — op dezelfde goroutine, die dan
+// mu opnieuw wil pakken. sync.Mutex is niet reentrant, dus
 // dat is een self-deadlock met mu vast: de hele switch staat stil en élke app
 // kan het uitlokken met één pakketje. Daarom onder mu alleen kopiëren en
 // enqueuen (gwEnqueueLocked), en ná de unlock afleveren (drainGateway).
@@ -90,7 +90,7 @@ func gwEnqueueLocked(p []byte) {
 // drainGateway levert de gewachte frames af aan de interne NIC — ZONDER mu.
 // Aanroepen direct na elke ronde die mu vasthield (switchPass, FromGateway).
 //
-// Eigen recover: gvisor krijgt hier app-gestuurde frame-inhoud te verwerken, en
+// Eigen recover: de netstack krijgt hier app-gestuurde frame-inhoud te verwerken, en
 // dat mag core 0 — en dus álle slots — niet vellen. Het lijstje wordt onder mu
 // omgewisseld, zodat een aflevering die zélf weer frames aanlevert (de
 // RST-teruglus via FromGateway) niet in dezelfde slice knoeit.

@@ -75,7 +75,7 @@ command -v riscv64-elf-as >/dev/null || { echo "riscv64-elf-as ontbreekt (riscv6
 
 rv() { # rv <tags> <ldflags> <out> <pkg>
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=riscv64 \
-		"$TAMAGO" build -tags "$1" -trimpath -ldflags "$2" -o "$3" "$4"
+		"$TAMAGO" build -tags "$1 nodefaultstack" -trimpath -ldflags "$2" -o "$3" "$4"
 }
 
 cd "$DIR/metal"

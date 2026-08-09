@@ -7,7 +7,7 @@ require (
 	github.com/usbarmory/tamago v1.26.4
 )
 
-require github.com/xinix00/lean v0.1.0 // indirect
+require github.com/xinix00/lean v0.1.0
 
 require (
 	github.com/google/btree v1.1.2 // indirect
@@ -15,7 +15,7 @@ require (
 	// Niet meer door ons geïmporteerd (de lneto-backend is 26-07 gesloopt),
 	// maar go-net importeert hem zelf (zijn lneto.go) — dus blijft hij als
 	// indirecte dependency in de graaf staan.
-	github.com/soypat/lneto v0.1.1-0.20260609173350-82f946154800 // indirect
+	github.com/soypat/lneto v0.2.0 // indirect
 	github.com/xinix00/hoplockserver v0.1.2 // indirect
 	golang.org/x/sys v0.44.0 // indirect
 	golang.org/x/time v0.7.0 // indirect
@@ -34,7 +34,15 @@ require (
 	// -hopos-satellieten), die een replace nooit zouden zien.
 	github.com/xinix00/hop v0.20.13
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20260709184058-243e02a382f8
-	gvisor.dev/gvisor v0.0.0-20250911055229-61a46406f068
+	gvisor.dev/gvisor v0.0.0-20250911055229-61a46406f068 // indirect
 )
 
 // De hoplock-modules komen van GitHub (echte versies, geen pad op deze Mac) —
+
+// BEWUSTE uitzondering op die regel (09-08): de netstack-bronnen lokaal, want
+// we dichten zelf de gaten in lneto/go-net (wscale, gvisor-koppeling) en
+// bouwen daar meteen op verder. Weg zodra de fixes een echte upstream-versie
+// (of eigen fork-tag) hebben — tot die tijd bouwt dit alleen op deze Mac.
+replace github.com/usbarmory/go-net => /Users/derek/Git/go-net
+
+replace github.com/soypat/lneto => /Users/derek/Git/lneto

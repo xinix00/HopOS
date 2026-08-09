@@ -68,7 +68,7 @@ func init() {
 	// gevestigde flows en álle HOP-lussen kerngezond) was voor een
 	// onvoorwaardelijke aaier à la de Pi onzichtbaar geweest — dus aait deze
 	// canary alleen als de node zijn levensteken haalt: een nieuwe verbinding
-	// naar de eigen agent-poort, dwars door dezelfde gvisor-accept-laag waar
+	// naar de eigen agent-poort, dwars door dezelfde accept-laag waar
 	// de doofheid zat. Stopt dat, dan stopt het aaien en reset de DW-WDT de
 	// hele SoC (~86s later); de ctx-veeg maakt van die reset een schone start.
 	go nodeCanary()

@@ -46,14 +46,14 @@ mkdir -p out
 
 # Wat bouwen we: de agent (default) of de probe (PROBE=1)?
 if [ "${PROBE:-0}" = 1 ]; then
-	TARGET=./cmd/proberk3566; NAME=proberk3566; TAGS="linkcpuinit"
+	TARGET=./cmd/proberk3566; NAME=proberk3566; TAGS="linkcpuinit nodefaultstack"
 elif [ "${EMBED:-0}" = 1 ]; then
-	TARGET=./cmd/hopos-embed; NAME=hopos-radxa-embed; TAGS="rk3566 linkcpuinit"
+	TARGET=./cmd/hopos-embed; NAME=hopos-radxa-embed; TAGS="rk3566 linkcpuinit nodefaultstack"
 	# De app-image die de main via go:embed meedraagt. Board-onafhankelijk (de
 	# stage-2 ís de relocatie), dus één build dekt elk slot; het linkadres is de
 	# slot-1-IPA. Blijft in de boom liggen als build-output — hij is gitignored.
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-		"$TAMAGO" build -tags linkcpuinit -trimpath \
+		"$TAMAGO" build -tags "linkcpuinit nodefaultstack" -trimpath \
 		-ldflags "-w -T 0x50010000 -R 0x1000" -o cmd/hopos-embed/app.elf ./app/appspike
 else
 	# Default GUI, GUI=0 bouwt de kale (headless) smaak — zelfde knop als op de
@@ -61,14 +61,14 @@ else
 	# hier geen QEMU-vinkje maar beeld op een monitor.
 	GUITAG=""
 	[ "${GUI:-1}" = 1 ] && GUITAG=" gui"
-	TARGET=./cmd/hopos; NAME=hopos-radxa; TAGS="rk3566 linkcpuinit$GUITAG"
+	TARGET=./cmd/hopos; NAME=hopos-radxa; TAGS="rk3566 linkcpuinit$GUITAG nodefaultstack"
 fi
 
 # Linkadres 0x02210000 in het venster vanaf 0x02200000 (rk3566.RamBase):
 # dezelfde +0x10000-vorm als de Pi (tekst boven tamago's paginatabellen). De
 # basis is 2MB-uitgelijnd omdat een arm64-Image dat hoort te zijn.
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-	"$TAMAGO" build -tags "$TAGS" -trimpath \
+	"$TAMAGO" build -tags "$TAGS nodefaultstack" -trimpath \
 	-ldflags "-T 0x02210000 -R 0x1000" -o "out/$NAME.elf" "$TARGET"
 
 # ELF → arm64 Image (mkkernel ZONDER -raw: booti wil de ARM\x64-header).

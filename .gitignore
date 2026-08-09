@@ -81,3 +81,6 @@ image/licheerv/fiptool.py
 # Radxa-image, LBA 64..32767): vendor-bytes, image/radxa-zero3.sh downloadt en
 # hash-checkt ze zelf (gepind op release b6).
 image/radxa/
+
+# Losse `go build ./cmd/netmeter`-output (de scripts schrijven naar metal/out/).
+metal/netmeter

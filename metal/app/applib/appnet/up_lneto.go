@@ -3,6 +3,7 @@ package appnet
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"time"
 
 	gnet "github.com/usbarmory/go-net"
@@ -12,11 +13,16 @@ import (
 	"github.com/xinix00/HopOS/metal/app/applib"
 )
 
-// Up brengt de eigen netstack (gVisor) op en hangt hem in Go's net-package;
-// geeft het eigen IP terug. Alle config is afgeleid uit het slotnummer via het
-// gedeelde net-plan (layout) — HOP hoeft niets per slot door te geven; de
-// switch en de app-stack leiden hetzelfde IP/gateway/MAC af (layout.IP4Str
-// incluis), dus ze lopen nooit uiteen.
+// Up brengt de eigen netstack (lneto via go-net) op en hangt hem in Go's
+// net-package; geeft het eigen IP terug. Alle config is afgeleid uit het
+// slotnummer via het gedeelde net-plan (layout) — HOP hoeft niets per slot
+// door te geven; de switch en de app-stack leiden hetzelfde IP/gateway/MAC af
+// (layout.IP4Str incluis), dus ze lopen nooit uiteen.
+//
+// Tot 09-08 stond hier gVisor: ~2,7MB van elk app-image en 340k allocaties
+// per 64MiB op het RX-pad. De flip is gemeten op de netmeter-bank (metal/
+// cmd/netmeter); bouw apps mét -tags nodefaultstack, anders linkt go-net's
+// Interface-fallback gvisor alsnog mee.
 func Up(a *applib.App) (string, error) {
 	ip := layout.IP4Str(layout.SlotIP4(a.Slot))
 	cidr := fmt.Sprintf("%s/%d", ip, layout.NetPrefix)
@@ -27,9 +33,34 @@ func Up(a *applib.App) (string, error) {
 		tx: ring.Open(layout.NetRingTXAt(a.RAMStart, a.RAMSize)),
 		rx: ring.Open(layout.NetRingRXAt(a.RAMStart, a.RAMSize)),
 	}
-	iface := &gnet.Interface{NetworkDevice: nd}
+
+	// App-maten: het interne net is LAN-graad (microseconden-RTT), dus 32KiB
+	// buffers volstaan ruim (venster past dan zonder scaling); uitgaand
+	// WAN-verkeer (cloudflared) is bescheiden van tempo. Élke net.Listen
+	// alloceert MaxListenerConns×2×buffer vooraf — apps delen een partitie
+	// van tientallen MB, dus dit blijft bewust klein.
+	cfg := gnet.DefaultLnetoStackConfig()
+	cfg.Hostname = "hopapp" // alleen DHCP gebruikt dit, en apps doen geen DHCP
+	cfg.TCPBufferSize = 32 << 10
+	cfg.TCPQueueSize = 16
+	cfg.MaxActiveTCPPorts = 32
+	cfg.MaxListenerConns = 8
+	// Het interne net is deterministisch (layout nummert IP's én MAC's per
+	// slot), dus er wordt NIETS geresolved: de gateway-MAC statisch in de
+	// config (geen ARP-goroutine) en 10.100.0.1 als vaste buur geseed — dan
+	// hebben dials naar de node en listener-antwoorden nul ARP nodig. Dat is
+	// hetzelfde principe als de statische buren van het oude interne-NIC-
+	// ontwerp: een geflood who-has gelooft wie het eerst antwoordt.
+	cfg.GatewayHardwareAddr = layout.SlotMAC(0)
+
+	st := gnet.NewLnetoStack(cfg)
+	iface := &gnet.Interface{NetworkDevice: nd, Stack: st}
 	if err := iface.Init(cidr, mac, layout.IP4Str(layout.HostIP4())); err != nil {
 		return "", fmt.Errorf("netstack init: %w", err)
+	}
+	gwIP, _ := netip.AddrFromSlice([]byte{byte(layout.HostIP4() >> 24), byte(layout.HostIP4() >> 16), byte(layout.HostIP4() >> 8), byte(layout.HostIP4())})
+	if err := st.SeedNeighbor(gwIP, layout.SlotMAC(0)); err != nil {
+		return "", fmt.Errorf("seed gateway neighbor: %w", err)
 	}
 	iface.Stack.EnableICMP()
 

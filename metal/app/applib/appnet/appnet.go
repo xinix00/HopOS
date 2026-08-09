@@ -7,16 +7,16 @@
 // Bewust een apart pakket naast applib: alleen apps die netwerk willen linken
 // de netstack mee; wie het niet importeert houdt een kleine image.
 //
-// Eén backend: gVisor via go-net (up_gvisor.go) — bewezen, maar fors (~4,3MB
-// per app-image). Er stond hier tot 26-07 een tweede, lichtere backend
-// (soypat/lneto via x/xnet, achter `-tags lnetonet`): ~2,7MB kleiner, maar elf
-// dagen opt-in zonder ooit default te worden. Twee netstacks naast elkaar was
-// de dure toestand — dubbele frame-constanten (lneto mócht go-net niet
-// importeren), een dependency op een niet-uitgebrachte commit, extra
-// gate-builds, en elke wijziging aan dit contract twee keer. De flip werd
-// bovendien tegengehouden door een echt gat: x/xnet had geen close-all, dus
-// peers van zo'n app vielen terug op hun eigen read-deadline (30s bij de
-// display) i.p.v. een directe RST. Terughalen kan uit git history.
+// Eén backend: lneto via go-net (up_lneto.go) — sinds de flip van 09-08.
+// De geschiedenis in het kort: gVisor was de bewezen maar forse backend
+// (~2,7MB van elk app-image, 340k allocaties per 64MiB op het RX-pad); een
+// eerdere lneto-poging (26-07) sneuvelde omdat twee stacks náást elkaar de
+// dure toestand was én x/xnet echte gaten had. Die gaten zijn 09-08 gedicht
+// in de bron zelf (window scaling, deadline-gedreven dials, sequentiële
+// poorten — zie ~/Git/lneto branch hopos) en de flip is gemeten op de
+// netmeter-bank: RX 26→61MB/s met 0 GC-druk. Eén backend, geen tags —
+// behalve `nodefaultstack` bij het BOUWEN, anders linkt go-net's
+// Interface-fallback gvisor alsnog mee.
 package appnet
 
 import (

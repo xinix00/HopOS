@@ -209,6 +209,28 @@ func main() {
 		}
 		exitf(app, 0, "NETDEMO dial: %s → %s: pong ontvangen — app↔app zonder HOP-TCP", ip, app.Env("NET_DIAL"))
 
+	case "node":
+		// "Mijn node": de agent-API op het vaste interne adres (10.100.0.1 —
+		// hetzelfde op élke node, Dereks besluit 20-07). Sinds de netstack-flip
+		// (09-08) is dat adres geen tweede kern-NIC meer maar een statische
+		// 1:1-vertaling op de gateway-naad (hopswitch.GwToHost/GwFromHost);
+		// deze GET bewijst dat pad end-to-end: app-stack → switch → vertaling
+		// → kern-stack → agent → en het antwoord helemaal terug.
+		if _, err := appnet.Up(app); err != nil {
+			exitf(app, 1, "NETDEMO node: %v", err)
+		}
+		body, err := httpGet("http://" + layout.IP4Str(layout.HostIP4()) + ":8080/health")
+		if err != nil {
+			exitf(app, 1, "NETDEMO node: %v", err)
+		}
+		// Succes = blijven staan (een job is een service): de taak blijft
+		// "running" en dát is het leesbare bewijs; een exit zou als crash
+		// tellen en herstarts triggeren.
+		app.Logf("NETDEMO node: agent answered %q via the internal gateway address", string(body[:min(len(body), 40)]))
+		for {
+			time.Sleep(time.Hour)
+		}
+
 	case "out":
 		// Uitgaand naar buiten: één DNS-query (UDP) naar de node-resolver die
 		// HOP als HOP_DNS meegaf. HOP masquerade't de query (slot-IP:poort →

@@ -42,7 +42,7 @@ mkdir -p out
 APP=out/app.elf
 [ "$MODE" = demo ] && APP=cmd/hopos-embed/app.elf
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-	"$TAMAGO" build -tags linkcpuinit -trimpath \
+	"$TAMAGO" build -tags "linkcpuinit nodefaultstack" -trimpath \
 	-ldflags "-w -T 0x50010000 -R 0x1000" -o "$APP" ./app/appspike
 
 # 2. De kern + het poort-plan van de gekozen modus. Twee smaken: kaal
@@ -53,7 +53,7 @@ GUITAG=""
 case "$MODE" in
 demo)
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-		"$TAMAGO" build -tags "qemuvirt linkcpuinit$GUITAG" -trimpath \
+		"$TAMAGO" build -tags "qemuvirt linkcpuinit$GUITAG nodefaultstack" -trimpath \
 		-ldflags "-s -w -T 0x40010000 -R 0x1000" -o out/hopos-virt.elf ./cmd/hopos-embed
 	KERNEL=out/hopos-virt.elf
 	FWD="hostfwd=tcp:127.0.0.1:${HOPPORT:-8080}-10.0.2.15:80,hostfwd=tcp:127.0.0.1:${PORTPUB:-18080}-10.0.2.15:8080"
@@ -67,7 +67,7 @@ agent)
 	XCFG=""
 	[ -n "${HOPCFG:-}" ] && XCFG=" -X 'main.extraCfg=$HOPCFG'"
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-		"$TAMAGO" build -tags "linkcpuinit$GUITAG" -trimpath \
+		"$TAMAGO" build -tags "linkcpuinit$GUITAG nodefaultstack" -trimpath \
 		-ldflags "-s -w -T 0x40010000 -R 0x1000$XCFG" -o out/hopos-agent.elf ./cmd/hopos
 	KERNEL=out/hopos-agent.elf
 	FWD="hostfwd=tcp:127.0.0.1:${AGENTPORT:-8080}-10.0.2.15:8080,hostfwd=tcp:127.0.0.1:${LEADERPORT:-9080}-10.0.2.15:9080,hostfwd=tcp:127.0.0.1:${PORTPUB:-18080}-10.0.2.15:18080"

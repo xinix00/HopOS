@@ -1,17 +1,24 @@
-// Package hopnet brengt het netwerk van de HOP-kern op (QEMU virt): onze
-// eigen virtio-net-driver (metal/driver/nic/virtionet, bare-metal Go) onder de
-// gVisor-netstack (go-net), gehookt in Go's standaard net-package. Daarna
-// werken net.Listen, net.Dial en net/http gewoon — precies wat de HOP-agent
-// nodig heeft. Dit is "geen video, wel een poort".
+// Package hopnet brengt het netwerk van de HOP-kern op: de NIC-driver van
+// het board onder de lneto-netstack (go-net's LnetoStack), gehookt in Go's
+// standaard net-package. Daarna werken net.Listen, net.Dial en net/http
+// gewoon — precies wat de HOP-agent nodig heeft. Dit is "geen video, wel
+// een poort".
+//
+// Tot 09-08 stond hier gVisor (~90k gelinkte regels, PacketBuffer-machinerie
+// en een goroutine-handoff per segment); de flip naar lneto is gemeten op de
+// netmeter-bank: RX 26→61MB/s, 66 mallocs i.p.v. 340k voor 64MiB, 0 GC-druk
+// op het pakket-pad. Wat gVisor aan features droeg is verhuisd: HandleLocal
+// en de tweede interne NIC zitten nu op de device-naad (locnet.go +
+// internal.go), window scaling zit in lneto zelf (RFC 7323, 09-08).
 package hopnet
 
 import (
+	"encoding/binary"
 	"fmt"
 	"net"
 	"time"
 
 	gnet "github.com/usbarmory/go-net"
-	"gvisor.dev/gvisor/pkg/tcpip/stack"
 
 	"github.com/xinix00/HopOS/metal/board"
 	"github.com/xinix00/HopOS/metal/net/hopswitch"
@@ -45,39 +52,47 @@ func Up() error {
 		return err
 	}
 
-	// HandleLocal: verbindingen naar het eigen IP worden intern afgeleverd
-	// (agent ↔ leader op dezelfde node); zonder dit verdwijnen die frames
-	// richting slirp, die niet hairpint.
-	opts := gnet.DefaultStackOptions
-	opts.HandleLocal = true
-	gs := gnet.NewGVisorStack(1)
-	gs.Stack = stack.New(opts)
+	// Het lokale-verkeer-schilletje om de uplink (locnet.go): self-dial op
+	// het eigen IP (agent ↔ leader op dezelfde node — gvisor's HandleLocal,
+	// nu op de device-naad), ARP naar het eigen adres, en de 1:1-vertaling
+	// van het interne subnet. Het IP als getal is de sleutel van die naad.
+	ip4 := net.ParseIP(nc.IP).To4()
+	if ip4 == nil {
+		return fmt.Errorf("node IP %q is not IPv4", nc.IP)
+	}
+	loc := &locdev{nic: uplink, ip: binary.BigEndian.Uint32(ip4)}
+	copy(loc.mac[:], hw)
+
+	// De stack-maten. De buffers bepalen via window scaling (RFC 7323) het
+	// TCP-venster: 128KiB = shift 2 — de downloads (het kern-geldpad) halen
+	// daarmee ~venster/RTT zonder dat de listener-pools de kern leegeten
+	// (élke net.Listen alloceert MaxListenerConns×2×buffer vooraf).
+	cfg := gnet.DefaultLnetoStackConfig()
+	cfg.Hostname = "hopos"
+	cfg.TCPBufferSize = 128 << 10
+	cfg.TCPQueueSize = 32
+	cfg.MaxActiveTCPPorts = 64 // poorttabel: downloads (4) + API + S3 + marge
+	cfg.MaxListenerConns = 8   // per listener (agent/leader/console)
 
 	iface := &gnet.Interface{
-		NetworkDevice: uplink,
-		Stack:         gs,
+		NetworkDevice: loc,
+		Stack:         gnet.NewLnetoStack(cfg),
 	}
 	if err := iface.Init(nc.CIDR, mac, nc.GW); err != nil {
 		return fmt.Errorf("netstack init: %w", err)
 	}
-	// HOP's eigen efemere bronpoorten onder het masquerade-bereik houden: de
-	// NAT deelt node-poorten uit vanaf hopswitch.MasqBase, dus een inbound
-	// antwoord op HOP's eigen poort kan nooit per ongeluk een app-flow matchen.
-	if e := gs.Stack.SetPortRange(16000, hopswitch.MasqBase-1); e != nil {
-		return fmt.Errorf("poortbereik: %v", e)
-	}
+	// Geen SetPortRange meer (dat was gvisor): lneto deelt zijn efemere
+	// poorten sequentieel uit in [49152, 65535], en de masquerade stopt op
+	// hopswitch.MasqEnd = 49152 — de bereiken zijn per constructie disjunct.
 	iface.HandleStackErr = func(err error, tx bool) {
 		fmt.Printf("netstack (tx=%v): %v\n", tx, err)
 	}
 	iface.Stack.EnableICMP()
 
-	// De interne gateway-NIC: 10.100.0.1 = "mijn node" voor de apps — de
-	// agent/leader zijn dan van binnenuit bereikbaar zonder proxy of NAT
-	// (zie internal.go). Een fout is niet fataal: het externe net werkt dan
-	// gewoon, alleen de interne route ontbreekt.
-	if err := upInternal(gs); err != nil {
-		fmt.Printf("net: interne gateway-NIC niet op: %v\n", err)
-	}
+	// De interne gateway-naad: 10.100.0.1 = "mijn node" voor de apps — de
+	// agent/leader zijn dan van binnenuit bereikbaar zonder proxy (zie
+	// internal.go).
+	upInternal(loc)
 
 	// Netstack in Go's standaard net-package hangen: hierna werken
 	// net.Listen, net/http en DNS voor alle HOP-kern-code.
@@ -87,7 +102,8 @@ func Up() error {
 	// RX-lus: pollen mét microslaap i.p.v. gnet's Gosched-spin, zodat de
 	// idle-governor (metal/cpu/idle) de core echt kan laten slapen als het stil
 	// is; onder last wordt er nooit geslapen (ring leeg = pas dan slapen).
-	go rxLoop(uplink, iface)
+	// Over de locdev, zodat loopback- en gateway-frames vóór de NIC gaan.
+	go rxLoop(loc, iface)
 
 	// DHCP-lease levend houden: heeft dit board een verkregen lease (de Pi's),
 	// dan vernieuwt KeepAlive hem op T1 via de netstack (UDP-RENEW) — dat kan
