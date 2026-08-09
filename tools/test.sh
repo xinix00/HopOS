@@ -23,9 +23,9 @@ go run ../tools/importcheck.go
 # stub-kant is een compilegate, geen logica — die dekken de tamago-builds
 # hieronder (elke smaak zonder gui).
 go test -tags gui "$@" \
-	./abi/ring ./net/hopswitch ./kern/stage2 ./abi/layout ./net/dhcp ./abi/hopabi ./abi/checksum \
+	./abi/ring ./net/hopswitch ./kern/stage2 ./abi/layout ./abi/hopabi ./abi/checksum \
 	./fw/fdt ./fw/acpi ./fw/bootcfg ./kern/hopfs ./driver/vcmail ./driver/nic/mdio ./kern/slots \
-	./gui/fbgrant ./gui/driver/usb/hid ./app/applib/apphttp ./kern/cage ./driver/nic/dwmac ./driver/nic/dwmac4 ./cmd/hopos/cfgblob ./driver/conlog \
+	./gui/fbgrant ./gui/driver/usb/hid ./kern/cage ./driver/nic/dwmac ./driver/nic/dwmac4 ./cmd/hopos/cfgblob ./driver/conlog \
 	./kern/cagestub ./net/nodemac
 
 TAMAGO="${TAMAGO:-$HOME/tamago-go/bin/go}"

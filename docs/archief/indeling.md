@@ -143,10 +143,8 @@ regel-tabel dáár en dit hoofdstuk horen samen te wijzigen):
    (`pl011`/`fb`; printk is een runtime-hook en kan niet init-geïnjecteerd
    worden zonder vroege bootdiagnose te verliezen) en nooit `net/` of het
    board-contract.
-3. **Niets importeert `app/`** (behalve app/ zelf en de app-binaries). De
-   loader komt de node-binary in als bytes (`kern/apploaderblob`), niet als
-   import.
-4. `board/<x>/hop` integreert de hardware-kant (cpu, fw, driver, net/dhcp);
+3. **Niets importeert `app/`** (behalve app/ zelf en de app-binaries).
+4. `board/<x>/hop` integreert de hardware-kant (cpu, fw, driver, leandhcp);
    `kern/` integreert de OS-kant (abi, net, driver/nvme via hopfs);
    `cmd/` knoopt board-hop + kern aan elkaar. Andersom nooit.
    `gui/` zit als opt-in vlak bóven kern: het mag driver, het
@@ -156,8 +154,10 @@ regel-tabel dáár en dit hoofdstuk horen samen te wijzigen):
    niet-geregistreerde grant-haak (kern/slots/grants.go).
 5. `board/appboard` (het app-contract) importeert niets; het contract
    `board` alleen appboard + de typen die het draagt (driver/fb,
-   driver/pcie, net/dhcp). `driver/` importeert board dus nóóit — types die
-   drivers aannemen (pcie.Window, fb.Desc) wonen bij de driver zelf.
+   driver/pcie, en leandhcp.Lease uit github.com/xinix00/lean — generieke
+   bouwstenen wonen dáár, niet hier). `driver/` importeert board dus
+   nóóit — types die drivers aannemen (pcie.Window, fb.Desc) wonen bij de
+   driver zelf.
 
 ## Buildoutput
 

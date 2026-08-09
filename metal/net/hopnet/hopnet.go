@@ -14,8 +14,8 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 
 	"github.com/xinix00/HopOS/metal/board"
-	"github.com/xinix00/HopOS/metal/net/dhcp"
 	"github.com/xinix00/HopOS/metal/net/hopswitch"
+	"github.com/xinix00/lean/leandhcp"
 )
 
 // Up initialiseert de NIC en de netstack en hangt ze in het net-package. Het
@@ -108,7 +108,7 @@ func Up() error {
 						fmt.Printf("HOPOS_DHCP_PANIC: %v — lease renewal stopped, node keeps running\n", r)
 					}
 				}()
-				dhcp.KeepAlive(m, l)
+				leandhcp.KeepAlive(m, l)
 			}()
 		}
 	}

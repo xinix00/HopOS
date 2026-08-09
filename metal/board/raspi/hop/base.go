@@ -21,7 +21,7 @@ import (
 	"github.com/xinix00/HopOS/metal/driver/pcie"
 	"github.com/xinix00/HopOS/metal/driver/vcmail"
 	"github.com/xinix00/HopOS/metal/fw/fdt"
-	"github.com/xinix00/HopOS/metal/net/dhcp"
+	"github.com/xinix00/lean/leandhcp"
 )
 
 // Base is de gedeelde board.Board-helft; rpi4/hop en rpi5/hop embedden hem in
@@ -90,16 +90,16 @@ func (b Base) S2SMPTrampPC() uint64 { return el2.S2SMPTrampPC() }
 // Lease bewaart wat het board-ProbeNIC via DHCP ophaalde; Net/DHCPLease lezen
 // hem. hopnet.Up roept ProbeNIC vóór Net() aan (die volgorde is het
 // contract). Package-var is veilig: er linkt precies één Pi-board per binary.
-var Lease dhcp.Lease
+var Lease leandhcp.Lease
 
 // Net geeft de DHCP-lease omgezet naar board.NetConfig (gedeelde omzetting
 // in metal/board).
 func (b Base) Net() board.NetConfig { return board.NetFromLease(Lease) }
 
 // DHCPLease geeft de door ProbeNIC verkregen lease (board.LeaseHolder), zodat
-// hopnet er na de stack-bring-up dhcp.KeepAlive op start. false vóór een
+// hopnet er na de stack-bring-up leandhcp.KeepAlive op start. false vóór een
 // echte ACK (dan is er niets te vernieuwen).
-func (b Base) DHCPLease() (dhcp.Lease, bool) { return Lease, Lease.Acquired }
+func (b Base) DHCPLease() (leandhcp.Lease, bool) { return Lease, Lease.Acquired }
 
 // PCIe: geen toewijsbaar venster op de Pi's — de Pi 4-lane zit vast aan de
 // VL805-USB, de Pi 5-RP1 wordt volledig door ProbeNIC/brcmpcie gebracht.

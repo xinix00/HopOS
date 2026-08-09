@@ -12,8 +12,8 @@ import (
 	"github.com/xinix00/HopOS/metal/board/rk3566"
 	"github.com/xinix00/HopOS/metal/driver/nic/dwmac4"
 	"github.com/xinix00/HopOS/metal/driver/nic/mdio"
-	"github.com/xinix00/HopOS/metal/net/dhcp"
 	"github.com/xinix00/HopOS/metal/net/nodemac"
+	"github.com/xinix00/lean/leandhcp"
 )
 
 // Het netwerk van de Radxa Zero 3E: het GMAC1-blok (DWMAC4, snpsver 5.10 —
@@ -59,7 +59,7 @@ func init() {
 }
 
 // lease bewaart wat ProbeNIC via DHCP ophaalde; Net en DHCPLease lezen hem.
-var lease dhcp.Lease
+var lease leandhcp.Lease
 
 // ProbeNIC brengt de ethernet-keten op. Elke stap die kan mislukken meldt
 // zichzelf mét het gemeten getal erbij: een boot-cyclus op dit bordje kost een
@@ -173,7 +173,7 @@ func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
 	// 9. Een lease halen is tegelijk het bewijs dat DMA in beide richtingen
 	//    werkt: DISCOVER de deur uit, OFFER binnen. Mislukt hij, dan zegt de
 	//    driver-diagnose wat er wél gebeurde (TX weg? RX leeg? ring vast?).
-	l, err := dhcp.Acquire(nic, nic.MAC, 15*time.Second)
+	l, err := leandhcp.Acquire(nic, nic.MAC, 15*time.Second)
 	if err != nil {
 		return nil, nil, fmt.Errorf("dhcp: %w — link %dMbit fd=%v, %s", err, speed, fd, nic.Diag())
 	}
@@ -193,4 +193,4 @@ func (machine) Net() board.NetConfig {
 
 // DHCPLease vult board.LeaseHolder: hopnet start hiermee de renewal, zodat de
 // lease niet verloopt op een node die weken aan staat.
-func (machine) DHCPLease() (dhcp.Lease, bool) { return lease, lease.Acquired }
+func (machine) DHCPLease() (leandhcp.Lease, bool) { return lease, lease.Acquired }

@@ -18,7 +18,7 @@ import (
 	"github.com/xinix00/HopOS/metal/board/appboard"
 	"github.com/xinix00/HopOS/metal/driver/fb"
 	"github.com/xinix00/HopOS/metal/driver/pcie"
-	"github.com/xinix00/HopOS/metal/net/dhcp"
+	"github.com/xinix00/lean/leandhcp"
 )
 
 // NetConfig is het IPv4-plan van het interne net van een node (op QEMU de
@@ -34,7 +34,7 @@ type NetConfig struct {
 // Geen resolver in de lease → de gateway als DNS (thuisrouters resolven
 // vrijwel altijd zelf); poort 53. Gedeeld door elk DHCP-board (Pi's, uefi)
 // zodat de omzetting één plek heeft.
-func NetFromLease(l dhcp.Lease) NetConfig {
+func NetFromLease(l leandhcp.Lease) NetConfig {
 	dns := l.DNSString()
 	if dns == "0.0.0.0" {
 		dns = l.GWString()
@@ -49,11 +49,11 @@ func NetFromLease(l dhcp.Lease) NetConfig {
 
 // LeaseHolder wordt optioneel geïmplementeerd door boards die hun IP via DHCP
 // kregen (de Pi's): hopnet vraagt na de stack-bring-up de lease op en start
-// dhcp.KeepAlive zodat hij niet verloopt. Boards met een statische config
+// leandhcp.KeepAlive zodat hij niet verloopt. Boards met een statische config
 // (qemuvirt) implementeren het niet — dan draait er geen renewal. De bool is
 // false als er (nog) geen verkregen lease is.
 type LeaseHolder interface {
-	DHCPLease() (dhcp.Lease, bool)
+	DHCPLease() (leandhcp.Lease, bool)
 }
 
 // Het ECAM/MMIO-adresplan van een board is pcie.Window: het type woont bij

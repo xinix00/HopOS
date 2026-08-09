@@ -7,6 +7,8 @@ require (
 	github.com/usbarmory/tamago v1.26.4
 )
 
+require github.com/xinix00/lean v0.1.0 // indirect
+
 require (
 	github.com/google/btree v1.1.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect

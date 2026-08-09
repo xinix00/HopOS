@@ -30,7 +30,7 @@ import (
 	"github.com/xinix00/HopOS/metal/board/rpi5"
 	"github.com/xinix00/HopOS/metal/driver/brcmpcie"
 	"github.com/xinix00/HopOS/metal/driver/nic/gem"
-	"github.com/xinix00/HopOS/metal/net/dhcp"
+	"github.com/xinix00/lean/leandhcp"
 )
 
 // machine is de board-implementatie voor de Raspberry Pi 5 (BCM2712): de
@@ -124,7 +124,7 @@ func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
 		return nil, nil, err
 	}
 
-	l, err := dhcp.Acquire(nic, nic.MAC, 15*time.Second)
+	l, err := leandhcp.Acquire(nic, nic.MAC, 15*time.Second)
 	if err != nil {
 		return nil, nil, err
 	}

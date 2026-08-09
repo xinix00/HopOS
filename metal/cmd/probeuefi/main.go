@@ -32,7 +32,7 @@ import (
 	"github.com/xinix00/HopOS/metal/cpu/trng"
 	"github.com/xinix00/HopOS/metal/driver/nic/igb"
 	"github.com/xinix00/HopOS/metal/driver/pcie"
-	"github.com/xinix00/HopOS/metal/net/dhcp"
+	"github.com/xinix00/lean/leandhcp"
 )
 
 // RAM-declaratie: RamStart wordt door mkkernel -pe per venster-variant
@@ -243,7 +243,7 @@ func igbProbe(d *pcie.Device) {
 	}
 
 	say("igb: DHCP (proves TX+RX+DMA in one)...\n")
-	lease, err := dhcp.Acquire(nic, nic.MAC, 15*time.Second)
+	lease, err := leandhcp.Acquire(nic, nic.MAC, 15*time.Second)
 	if err != nil {
 		say("igb: %v\n", err)
 		return

@@ -63,7 +63,7 @@ hairpinned through the switch without the frame ever leaving the machine
 **No https? Save ~2.9 MB.** `net/http` links `crypto/tls` unconditionally —
 in an app image that costs more than the whole netstack (measured 26-07 on
 this `hello`: 4.70 MB with `appnet`, 7.99 MB once `net/http` is in, of which
-~54% is TLS/PKI). `metal/app/applib/apphttp` is plain HTTP/1.1 without it:
+~54% is TLS/PKI). [`leanhttp`](https://github.com/xinix00/lean) is plain HTTP/1.1 without it:
 `Get`/`Do` as a client, `Serve` as a server, chunked and WebSocket-upgrade
 included, `+0.36 MB` over the netstack floor. The SURF display, launcher and
 taskman run on it and each lost ~2.9 MB; a client that needs https (like the

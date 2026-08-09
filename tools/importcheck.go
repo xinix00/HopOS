@@ -77,7 +77,7 @@ func allowed(cat, imp string) bool {
 	case "board-contract":
 		// Alleen de typen die het contract draagt (fb.Desc, pcie.Window,
 		// dhcp.Lease) plus het ge-embedde app-contract.
-		return imp == "board/appboard" || imp == "driver/fb" || imp == "driver/pcie" || imp == "net/dhcp"
+		return imp == "board/appboard" || imp == "driver/fb" || imp == "driver/pcie"
 	case "board-basis":
 		// De basis-helft wordt in élk app-image gelinkt: geen contract, geen
 		// net/kern, en uit driver/ uitsluitend de console-uitzondering

@@ -7,7 +7,7 @@
 //
 // Alleen HOP-kant-binaries (cmd/) importeren deze helft; app-images
 // importeren uitsluitend de basis (board/uefi: runtime-hooks, PA-plan met
-// app-guard, appboard-contract) en linken zo nooit tegen igb/pcie/dhcp.
+// app-guard, appboard-contract) en linken zo nooit tegen igb/pcie/leandhcp.
 package hop
 
 import (
@@ -25,7 +25,7 @@ import (
 	"github.com/xinix00/HopOS/metal/driver/fb"
 	"github.com/xinix00/HopOS/metal/driver/nic/igb"
 	"github.com/xinix00/HopOS/metal/driver/pcie"
-	"github.com/xinix00/HopOS/metal/net/dhcp"
+	"github.com/xinix00/lean/leandhcp"
 )
 
 // machine is de board-implementatie voor UEFI/ACPI-platforms.
@@ -97,7 +97,7 @@ func (machine) S2TrampPC() uint64    { return el2.S2TrampPC() }
 func (machine) S2SMPTrampPC() uint64 { return el2.S2SMPTrampPC() }
 
 // lease bewaart wat ProbeNIC via DHCP ophaalde (board.LeaseHolder-contract).
-var lease dhcp.Lease
+var lease leandhcp.Lease
 
 // eachECAM roept fn aan voor elk bereikbaar (via MapHigh) MCFG-segment tot
 // fn true geeft; meldt of er een treffer was. Eén plek voor de MCFG→ECAM-
@@ -175,7 +175,7 @@ func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
 	} else {
 		fmt.Println("net: igb frame buffers remain uncached (MapNormal declined)")
 	}
-	l, err := dhcp.Acquire(nic, nic.MAC, 15*time.Second)
+	l, err := leandhcp.Acquire(nic, nic.MAC, 15*time.Second)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -187,7 +187,7 @@ func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
 func (machine) Net() board.NetConfig { return board.NetFromLease(lease) }
 
 // DHCPLease (board.LeaseHolder): hopnet start er de renewal op.
-func (machine) DHCPLease() (dhcp.Lease, bool) { return lease, lease.Acquired }
+func (machine) DHCPLease() (leandhcp.Lease, bool) { return lease, lease.Acquired }
 
 // PCIe: het eerste bereikbare MCFG-segment als ECAM-venster (NVMe-fase;
 // MMIOBase blijft 0 — BAR's zijn op UEFI-platforms al door de firmware
