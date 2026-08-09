@@ -73,14 +73,31 @@ restore() {
 }
 trap restore EXIT INT TERM
 
-# hop-os: hop uit de werkboom (die loopt vóór op zijn laatste tag). lneto stond
-# er al in; die laten we staan zoals hij is.
+# hop-os: hop uit de werkboom (die loopt vóór op zijn laatste tag). De overige
+# replaces (lneto, go-net) stonden er al; die laten we staan zoals ze zijn.
 ( cd "$DIR/metal" && go mod edit -replace "github.com/xinix00/hop=$HOP_DIR" )
-# surf: metal én lneto uit de werkbomen. Zonder de lneto-replace zou surf
-# upstream pakken — precies de stille splitsing uit de kop.
-( cd "$SURF_DIR" && go mod edit \
-	-replace "github.com/xinix00/HopOS/metal=$DIR/metal" \
-	-replace "github.com/soypat/lneto=$LNETO_DIR" )
+
+# surf: metal uit de werkboom, PLUS élke replace die metal zelf heeft. Dat
+# laatste is de hele reden dat dit script bestaat: een replace geldt alleen in
+# de hoofdmodule, dus zonder deze doorgifte bouwt surf tegen de UPSTREAM-versies
+# van lneto en go-net terwijl de node de gepatchte draait. Dat kostte de eerste
+# poging een compilefout op SeedNeighbor — en zonder compilefout was het een
+# stille splitsing geweest, wat erger is.
+#
+# Bewust geen lijstje modulenamen hier: dan moet iemand eraan denken als er een
+# fork bijkomt. We lezen ze uit metal/go.mod, dus het klopt vanzelf.
+REPLACES="$(cd "$DIR/metal" && go mod edit -json | python3 -c '
+import json,sys
+for r in json.load(sys.stdin).get("Replace") or []:
+    new = r["New"]["Path"]
+    if new.startswith("/"):            # alleen pad-replaces; versie-replaces zijn geen forks
+        print(r["Old"]["Path"] + "=" + new)
+')"
+[ -n "$REPLACES" ] && echo "   doorgeven aan surf: $(echo "$REPLACES" | tr '\n' ' ')" >&2
+( cd "$SURF_DIR" && go mod edit -replace "github.com/xinix00/HopOS/metal=$DIR/metal" )
+for r in $REPLACES; do
+	( cd "$SURF_DIR" && go mod edit -replace "$r" )
+done
 ( cd "$DIR/metal" && GOWORK=off go mod tidy >/dev/null 2>&1 || true )
 ( cd "$SURF_DIR" && GOWORK=off go mod tidy >/dev/null 2>&1 || true )
 
