@@ -111,15 +111,18 @@ The netstack fixes (TCP window scaling, ARP resolving all pending entries, seque
 
 Apps for this chain: https://github.com/xinix00/hop-os-surf/releases/tag/$SURF_TAG"
 
-if ! gh release view "$HOPOS_VER" --repo xinix00/HopOS >/dev/null 2>&1; then
-	git -C "$DIR" tag -a "$HOPOS_VER" -m "HopOS $HOPOS_VER (chain beta $N)" 2>/dev/null || true
-	git -C "$DIR" tag "metal/$HOPOS_VER" 2>/dev/null || true
-	git -C "$DIR" push -q origin "$HOPOS_VER" "metal/$HOPOS_VER"
-	gh release create "$HOPOS_VER" --repo xinix00/HopOS --prerelease \
-		--title "HopOS $HOPOS_VER — chain beta $N" --notes "$NOTES" >/dev/null
-fi
-echo ">> hop-os images bouwen + tekenen" >&2
-( cd "$DIR" && RELEASE_ALLOW_DIRTY=1 sh tools/release.sh "$HOPOS_VER" >/dev/null )
+git -C "$DIR" tag -a "$HOPOS_VER" -m "HopOS $HOPOS_VER (chain beta $N)" 2>/dev/null || true
+git -C "$DIR" tag "metal/$HOPOS_VER" 2>/dev/null || true
+git -C "$DIR" push -q origin "$HOPOS_VER" "metal/$HOPOS_VER" 2>/dev/null || true
+# Eén release-route: release.sh doet het bouwen, tekenen én publiceren, met
+# PRERELEASE=1 als enige verschil (dan blijft `latest` op de stabiele versie).
+# RELEASE_ALLOW_DIRTY: de dirt is de replace die dit script er zelf in zette.
+echo ">> hop-os images bouwen + tekenen (pre-release)" >&2
+( cd "$DIR" && PRERELEASE=1 RELEASE_ALLOW_DIRTY=1 sh tools/release.sh "$HOPOS_VER" >/dev/null )
+# De keten-notes eroverheen: release.sh schrijft zijn standaard-assetlijst, hier
+# komen de vier SHA's bij die deze beta identificeren.
+gh release edit "$HOPOS_VER" --repo xinix00/HopOS \
+	--title "HopOS $HOPOS_VER — chain beta $N" --notes "$NOTES" >/dev/null
 
 # 4. surf: dezelfde elfs naar een rollende `beta` en een vastgepinde `beta.N`.
 #    De boot-configs van deze hop-os-beta wijzen naar de ROLLENDE tag, zodat de

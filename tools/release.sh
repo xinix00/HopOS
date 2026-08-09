@@ -205,11 +205,18 @@ macOS example: \`diskutil unmountDisk /dev/diskN && gunzip -c hopos-rpi5.img.gz 
 - **hopos-headless.cfg** — the headless default (inside the \`*-headless\` images/zips as \`hopos.cfg\`): same keys, no desktop — seed your own \`hopos.init[]\` jobs. For a UEFI stick, rename it to \`hopos.cfg\`.
 
 Verify: \`ssh-keygen -Y verify -f allowed_signers -I $SIGNER -n gethop-release -s SHA256SUMS.sig < SHA256SUMS && shasum -a 256 -c SHA256SUMS\`"
+# PRERELEASE=1 markeert de release als pre-release (chain-beta.sh takt hierop
+# af): GitHub houdt `latest` dan op de nieuwste STABIELE versie, en dat is waar
+# de README en de docs naar linken. Eén release-route dus, met een vlag voor de
+# beta-variant — niet een tweede script dat dit nabouwt.
+PRE=""
+[ -n "${PRERELEASE:-}" ] && PRE="--prerelease"
 if gh release view "$TAG" >/dev/null 2>&1; then
 	echo ">> assets uploaden naar bestaande release $TAG" >&2
 	gh release upload "$TAG" --clobber "$DIST"/*
 else
-	echo ">> nieuwe release $TAG" >&2
-	gh release create "$TAG" --title "HopOS $TAG" --notes "$NOTES" "$DIST"/*
+	echo ">> nieuwe release $TAG${PRE:+ (pre-release)}" >&2
+	# shellcheck disable=SC2086 — $PRE is een losse vlag of leeg
+	gh release create "$TAG" $PRE --title "HopOS $TAG" --notes "$NOTES" "$DIST"/*
 fi
 echo "KLAAR: https://github.com/xinix00/HopOS/releases/tag/$TAG" >&2
