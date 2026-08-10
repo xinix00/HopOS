@@ -184,7 +184,7 @@ Built from:
 | lneto (patched) | \`$LNETO_SHA\` |
 | go-net (patched) | \`$GONET_SHA\` |
 
-The netstack fixes (TCP window scaling, deadline-driven waits, sequential ephemeral ports, ARP/neighbor resolution and listener-pool maintenance) are not upstream yet, so this build uses a patched lneto and go-net for **both** the node and the apps. That is why it is built with path replacements and cannot be reproduced from module versions alone — pin the commits above instead. A stable release will require published versions again.
+The netstack fixes (TCP window scaling, reassembly and loss recovery, deadline-driven waits, sequential ephemeral ports, ARP/neighbor resolution, listener-pool maintenance) are not upstream yet, so node and apps both build against our fork of lneto and go-net. Those are published modules with a tag, not path replacements, so the stack itself is reproducible: a clone of surf or of an app module gets the patched stack with no go.mod surgery. What still comes from working trees is hop into hop-os, and metal into surf and the app modules — those three move together during a rebuild, so pin the versions above. A stable release will require published versions for all of them, and the fork requires come out once the PRs land.
 
 **Every app in this chain was rebuilt too**, against the same metal and the same patched netstack — the node's own default job included. HOP's app modules pin metal versions that lag (welcome and cloudflared sat on v1.8.3, still the gVisor era), so without that a beta node would have run lneto while its own \`welcome\` brought an old stack along. The boot configs in these images therefore point at the beta artifacts, not at the stable rolling URLs:
 
