@@ -136,7 +136,11 @@ echo ">> hop + app-elfs publiceren (release.sh testing)" >&2
 HOP_TAG="$(gh release list --repo xinix00/hop --limit 20 --json tagName,isPrerelease \
 	--jq '[.[]|select(.tagName|test("-testing\\."))][0].tagName')"
 [ -n "$HOP_TAG" ] || { echo "FOUT: geen testing-tag van hop gevonden" >&2; exit 1; }
-echo "   hop-apps op $HOP_TAG" >&2
+# hop's release.sh zet de prerelease-vlag niet, waardoor een testing-build even
+# hop's `latest` werd (gemeten bij beta.3). Hier rechtzetten: `latest` hoort
+# altijd de laatste STABIELE hop te zijn — daar wijzen andermans jobspecs naar.
+gh release edit "$HOP_TAG" --repo xinix00/hop --prerelease >/dev/null 2>&1 || true
+echo "   hop-apps op $HOP_TAG (prerelease)" >&2
 
 # 1d. De configs van DEZE beta naar de beta-artifacts laten wijzen. Anders trekt
 #     een beta-node zijn welcome/vitals uit rolling-release — de stabiele build,
