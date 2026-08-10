@@ -1,5 +1,46 @@
 # TODO
 
+## Upstream-PR's netstack: in de gaten houden tot merge
+
+Ingediend 09-08 (details en exit-checklist: `docs/netstack-upstream.md`):
+
+- [ ] [soypat/lneto#178](https://github.com/soypat/lneto/pull/178) — deadline-gedreven waits
+- [ ] [soypat/lneto#179](https://github.com/soypat/lneto/pull/179) — window scaling (RFC 7323)
+- [ ] [soypat/lneto#180](https://github.com/soypat/lneto/pull/180) — sequentiële efemere poorten
+- [ ] [usbarmory/go-net#5](https://github.com/usbarmory/go-net/pull/5) — `nodefaultstack`-tag
+
+Snel checken: `gh pr status --repo soypat/lneto` (en idem voor go-net).
+Reviewvragen kunnen komen; de onderbouwing per PR staat in
+`~/Git/netstack-prs.md`.
+
+**Nog te PR'en — ronde 2** (klaar om te vuren, afgemaakt 09-08 avond; wacht
+op de reacties op ronde 1; concept-teksten in `~/Git/netstack-prs.md`, elk
+standalone groen vanaf upstream-main met een rood-bewezen test):
+
+- [ ] lneto `arp-resolve-all-pending` — ARP-reply lost álle wachtende
+      cache-entries op
+- [ ] lneto `listener-pool-maintenance` — CheckTimeouts aangedreven uit de
+      accept-lus (half-open-flood maakte een listener voorgoed doof)
+- [ ] lneto `seed-neighbor` — SeedNeighbor: statische buren, nul ARP
+- [ ] go-net `listener-pool-size` — pools op MaxListenerConns (16MB/listener-bug)
+- [ ] go-net `passive-peers` — PassivePeers aan (listener-replies naar peer-MAC)
+- [ ] go-net statische gw-MAC + SeedNeighbor-passthrough — **GEBLOKKEERD**
+      tot lneto SeedNeighbor gemerged én getagd heeft (compileert eerder niet;
+      code staat klaar als hopos-commit f191782)
+
+**Als alles upstream geland is — de replaces ERUIT, overal:**
+
+- [ ] `metal/go.mod`: de twee `replace`-regels (lneto, go-net) verwijderen en
+      de requires op echte upstream-versies pinnen
+- [ ] nálopen dat er nergens anders een pad-replace achterblijft (surf en hop
+      horen er geen te hebben; chain-beta zet ze alleen tijdelijk en draait ze
+      zelf terug — controleer met `grep -rn "=> /Users" */go.mod`)
+- [ ] daarna: gate + QEMU-smoke, en de eerstvolgende release is weer een
+      STABIELE (reproduceerbaar uit module-versies, geen chain-beta)
+
+Volledige exit-checklist: `docs/netstack-upstream.md`. Tot die tijd: clones op
+branch `hopos` laten staan — de replace volgt de werkboom.
+
 ## Display-app: read-deadline bijstellen
 
 De switch stuurt bij slot-dood geen TCP-RST meer namens de dode app

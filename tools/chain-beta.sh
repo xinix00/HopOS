@@ -31,13 +31,14 @@ DIR="$(cd "$(dirname "$0")/.." && pwd)"
 HOP_DIR="${HOP_DIR:-$HOME/Git/easy/hop}"
 SURF_DIR="${SURF_DIR:-$HOME/Git/hop-os-surf}"
 LNETO_DIR="${LNETO_DIR:-$HOME/Git/lneto}"
+GONET_DIR="${GONET_DIR:-$HOME/Git/go-net}"
 
 HOPOS_VER="${HOPOS_VER:-v1.12.0-beta.$N}"
 SURF_TAG="${SURF_TAG:-beta}"        # rollend, net als surf's rolling-release
 SURF_PIN="${SURF_PIN:-beta.$N}"     # vastgepind op deze iteratie
 
 # 0. Preflight. Liever nu luid stoppen dan halverwege een keten publiceren.
-for d in "$DIR" "$HOP_DIR" "$SURF_DIR" "$LNETO_DIR"; do
+for d in "$DIR" "$HOP_DIR" "$SURF_DIR" "$LNETO_DIR" "$GONET_DIR"; do
 	[ -d "$d/.git" ] || { echo "FOUT: $d is geen git-repo (zet HOP_DIR/SURF_DIR/LNETO_DIR)" >&2; exit 1; }
 done
 # hop-os en surf moeten schoon zijn: het script zet zelf replaces in hun go.mod
@@ -52,24 +53,30 @@ command -v gh >/dev/null || { echo "FOUT: gh ontbreekt" >&2; exit 1; }
 
 sha() { git -C "$1" describe --tags --always --dirty 2>/dev/null || git -C "$1" rev-parse --short HEAD; }
 HOP_SHA="$(sha "$HOP_DIR")"; HOPOS_SHA="$(sha "$DIR")"
-SURF_SHA="$(sha "$SURF_DIR")"; LNETO_SHA="$(sha "$LNETO_DIR")"
+SURF_SHA="$(sha "$SURF_DIR")"; LNETO_SHA="$(sha "$LNETO_DIR")"; GONET_SHA="$(sha "$GONET_DIR")"
 
 echo "== keten-beta $HOPOS_VER ==" >&2
 echo "   hop    $HOP_SHA" >&2
 echo "   hop-os $HOPOS_SHA" >&2
 echo "   surf   $SURF_SHA" >&2
 echo "   lneto  $LNETO_SHA" >&2
+echo "   go-net $GONET_SHA" >&2
 
 # 1. De replaces erin, met een trap die ze er ALTIJD weer uit haalt — ook bij
 #    een gefaalde gate of Ctrl-C. Een achtergebleven pad-replace in main is
 #    precies de bus-factor die v1.8.4 wegwerkte.
 cp "$DIR/metal/go.mod" "$DIR/metal/go.mod.chainbak"
 cp "$SURF_DIR/go.mod" "$SURF_DIR/go.mod.chainbak"
+HOP_APP_MODS=""; CFG_BAKS=""
 restore() {
 	mv -f "$DIR/metal/go.mod.chainbak" "$DIR/metal/go.mod" 2>/dev/null || true
 	mv -f "$SURF_DIR/go.mod.chainbak" "$SURF_DIR/go.mod" 2>/dev/null || true
 	git -C "$DIR" checkout -q -- metal/go.sum 2>/dev/null || true
 	git -C "$SURF_DIR" checkout -q -- go.sum 2>/dev/null || true
+	# hop's app-modules en de config-templates die we omleidden (1b/1d).
+	for f in $HOP_APP_MODS; do mv -f "$f.chainbak" "$f" 2>/dev/null || true; done
+	for f in $CFG_BAKS; do mv -f "$f.chainbak" "$f" 2>/dev/null || true; done
+	git -C "$HOP_DIR" checkout -q -- . 2>/dev/null || true
 }
 trap restore EXIT INT TERM
 
@@ -101,6 +108,48 @@ done
 ( cd "$DIR/metal" && GOWORK=off go mod tidy >/dev/null 2>&1 || true )
 ( cd "$SURF_DIR" && GOWORK=off go mod tidy >/dev/null 2>&1 || true )
 
+# 1b. HOP's eigen HopOS-apps (welcome, vitals, cloudflared) zijn aparte modules
+#     die élk een metal-versie pinnen — en die pins lopen achter (welcome en
+#     cloudflared op v1.8.3, dus nog het gVisor-tijdperk). Zonder deze stap
+#     draait de beta-node op lneto terwijl zijn EIGEN standaard-job (welcome)
+#     een oude metal met gVisor meebrengt: precies de stille splitsing die dit
+#     script voor surf al voorkomt, maar dan via de andere kant.
+for m in $(cd "$HOP_DIR" && ls -d apps/*/ 2>/dev/null); do
+	gm="$HOP_DIR/$m/go.mod"
+	grep -q "xinix00/HopOS/metal" "$gm" 2>/dev/null || continue
+	cp "$gm" "$gm.chainbak"
+	HOP_APP_MODS="$HOP_APP_MODS $gm"
+	( cd "$HOP_DIR/$m" && go mod edit -replace "github.com/xinix00/HopOS/metal=$DIR/metal" )
+	for r in $REPLACES; do ( cd "$HOP_DIR/$m" && go mod edit -replace "$r" ); done
+	( cd "$HOP_DIR/$m" && GOWORK=off go mod tidy >/dev/null 2>&1 || true )
+done
+[ -n "$HOP_APP_MODS" ] && echo "   hop-apps op lokale metal: $(echo $HOP_APP_MODS | tr ' ' '\n' | wc -l | tr -d ' ') modules" >&2
+
+# 1c. hop + zijn app-elfs publiceren via HOP's eigen release.sh in zijn
+#     beta-kanaal (`testing`). Dat script gate't zelf en laat de stabiele
+#     rolling-release bewust ongemoeid voor testing-builds, dus dit kan geen
+#     stabiele app-URL overschrijven. De tag die eruit komt hebben we hierna
+#     nodig: de configs van deze beta moeten ernaar wijzen i.p.v. naar rolling.
+echo ">> hop + app-elfs publiceren (release.sh testing)" >&2
+( cd "$HOP_DIR/.." && ./release.sh testing ) >"$DIR/metal/out/chain-hop.log" 2>&1 || {
+	echo "FOUT: hop release.sh faalde — zie metal/out/chain-hop.log" >&2; exit 1; }
+HOP_TAG="$(gh release list --repo xinix00/hop --limit 20 --json tagName,isPrerelease \
+	--jq '[.[]|select(.tagName|test("-testing\\."))][0].tagName')"
+[ -n "$HOP_TAG" ] || { echo "FOUT: geen testing-tag van hop gevonden" >&2; exit 1; }
+echo "   hop-apps op $HOP_TAG" >&2
+
+# 1d. De configs van DEZE beta naar de beta-artifacts laten wijzen. Anders trekt
+#     een beta-node zijn welcome/vitals uit rolling-release — de stabiele build,
+#     tegen een oude metal. Zelfde reden voor surf.
+for cfg in "$DIR"/image/hopos-*.cfg; do
+	cp "$cfg" "$cfg.chainbak"
+	CFG_BAKS="$CFG_BAKS $cfg"
+	sed -i '' \
+		-e "s|xinix00/hop/releases/download/rolling-release|xinix00/hop/releases/download/$HOP_TAG|g" \
+		-e "s|xinix00/hop-os-surf/releases/download/rolling-release|xinix00/hop-os-surf/releases/download/$SURF_TAG|g" \
+		"$cfg"
+done
+
 # 2. Gates. Niets wordt gepubliceerd voordat beide bomen groen zijn — dat is het
 #    enige verschil tussen een beta en een willekeurige build.
 echo ">> gate hop-os" >&2
@@ -123,10 +172,14 @@ Built from:
 | hop-os | \`$HOPOS_SHA\` |
 | hop-os-surf | \`$SURF_SHA\` |
 | lneto (patched) | \`$LNETO_SHA\` |
+| go-net (patched) | \`$GONET_SHA\` |
 
-The netstack fixes (TCP window scaling, ARP resolving all pending entries, sequential ephemeral ports, deadline-driven waits) are not upstream yet, so this build uses a patched lneto for **both** the node and the apps. That is why it is built with path replacements and cannot be reproduced from module versions alone — pin the commits above instead. A stable release will require published versions again.
+The netstack fixes (TCP window scaling, deadline-driven waits, sequential ephemeral ports, ARP/neighbor resolution and listener-pool maintenance) are not upstream yet, so this build uses a patched lneto and go-net for **both** the node and the apps. That is why it is built with path replacements and cannot be reproduced from module versions alone — pin the commits above instead. A stable release will require published versions again.
 
-Apps for this chain: https://github.com/xinix00/hop-os-surf/releases/tag/$SURF_TAG"
+**Every app in this chain was rebuilt too**, against the same metal and the same patched netstack — the node's own default job included. HOP's app modules pin metal versions that lag (welcome and cloudflared sat on v1.8.3, still the gVisor era), so without that a beta node would have run lneto while its own \`welcome\` brought an old stack along. The boot configs in these images therefore point at the beta artifacts, not at the stable rolling URLs:
+
+- HOP apps (welcome, vitals, cloudflared): https://github.com/xinix00/hop/releases/tag/$HOP_TAG
+- SURF apps (display, launcher, taskman, …): https://github.com/xinix00/hop-os-surf/releases/tag/$SURF_TAG"
 
 git -C "$DIR" tag -a "$HOPOS_VER" -m "HopOS $HOPOS_VER (chain beta $N)" 2>/dev/null || true
 git -C "$DIR" tag "metal/$HOPOS_VER" 2>/dev/null || true
