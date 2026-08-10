@@ -53,7 +53,7 @@ import (
 	// system-CA-store) — zelfde regel als in cmd/hopos.
 	_ "golang.org/x/crypto/x509roots/fallback"
 
-	gnet "github.com/usbarmory/go-net"
+	gnet "github.com/xinix00/go-net"
 
 	"github.com/xinix00/HopOS/metal/board"
 	"github.com/xinix00/HopOS/metal/cpu/memlimit"

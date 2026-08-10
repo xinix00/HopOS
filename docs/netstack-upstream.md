@@ -1,10 +1,33 @@
 # Netstack-upstream: openstaande PR's en wat wij ervan afhangen
 
 HopOS draait sinds 09-08 op lneto (via go-net); de gaten die we daarvoor
-dichtten zijn als PR's naar upstream gestuurd. Tot ze geland zijn bouwt de
-boom tegen lokale clones (`metal/go.mod` heeft `replace` naar
-`~/Git/lneto` en `~/Git/go-net`, beide branch `hopos`) — **dit bestand is de
-checklist om die replaces weer kwijt te raken.**
+dichtten zijn als PR's naar upstream gestuurd.
+
+**10-08: de pad-replaces zijn weg.** Ze zaten er zolang we rechtstreeks op de
+clones werkten, maar een `replace` geldt alleen in de hoofdmodule — dus alles
+wat metal importeert (hop-os-surf, de vitals/welcome-apps) loste `soypat/lneto`
+op naar UPSTREAM terwijl de node de gepatchte versie draaide. Stil, want het
+compileert. Nu zijn het echte forks met een eigen module-pad:
+
+| | fork | tag |
+|---|---|---|
+| lneto | `github.com/xinix00/lneto` | `v0.4.0-hopos.1` |
+| go-net | `github.com/xinix00/go-net` | `v0.1.0-hopos.1` |
+
+Elke clone heeft twee branches: **`hopos`** met het UPSTREAM module-pad (daar
+leven de fixes, en hiervandaan maken we PR-branches — upstream kan een diff met
+een gewijzigd module-pad niet gebruiken) en **`fork`** = hopos plus één
+mechanische pad-commit. `tools/refork-netstack.sh` regenereert `fork` uit
+`hopos` en reproduceert de getagde bomen byte-identiek; taggen blijft handwerk
+omdat een versie kiezen een beslissing is. **De tag moet HOGER zijn dan élke
+upstream-tag**, anders pakt `@latest` upstream-code met het verkeerde
+module-pad (meegemaakt: upstream stond al op v0.3.2 toen onze eerste poging
+v0.2.1-hopos.1 heette).
+
+Zodra een fix upstream landt kan hij uit onze fork: `hopos` rebasen op de
+nieuwe upstream, reforken, tag bumpen. Zijn ze állemaal geland, dan kan de fork
+zelf weg en requiren we upstream direct — dat is nog steeds het doel, alleen
+niet langer een blokkade.
 
 Snel de stand opvragen:
 

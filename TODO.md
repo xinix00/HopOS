@@ -52,10 +52,32 @@ werkende HopOS-code te schrappen.
       upstreamen (redirects, chunked response, deadlines en body lifecycle);
       groot/optioneel en geen reden om `leanhttp` uit SURF/Easy te halen
 
-**Als alles upstream geland is — de replaces ERUIT, overal:**
+**10-08: de pad-replaces zijn ERUIT — netstack is nu een eigen fork.**
 
-- [ ] `metal/go.mod`: de twee `replace`-regels (lneto, go-net) verwijderen en
-      de requires op echte upstream-versies pinnen
+Een `replace` geldt alleen in de hoofdmodule, dus surf en de vitals/welcome-apps
+losten `soypat/lneto` op naar UPSTREAM terwijl de node de gepatchte versie
+draaide. Stil, want het compileert. Daarom nu echte forks met eigen module-pad:
+
+| | fork | tag |
+|---|---|---|
+| lneto | `github.com/xinix00/lneto` | `v0.4.0-hopos.1` |
+| go-net | `github.com/xinix00/go-net` | `v0.1.0-hopos.1` |
+
+Per clone twee branches: `hopos` (upstream-pad, basis voor de PR's) en `fork`
+(+ één mechanische pad-commit, hier taggen we). `tools/refork-netstack.sh`
+regenereert `fork` uit `hopos`, byte-identiek aan de tags. Nieuwe tag moet
+HOGER zijn dan élke upstream-tag.
+
+- [ ] **satellieten bumpen zodra er een nieuwe metal-tag is** — dan komt de
+      fork automatisch mee (zij importeren lneto/go-net niet direct, dus alleen
+      `go get …/metal@vX && go mod tidy`): hop-os-surf (nu v1.9.2), vitals
+      (v1.11.1), welcome, cloudflared, hoplb, hopdns, hopprom (v1.8.3)
+
+**Als alles upstream geland is — de fork ERUIT:**
+
+- [x] `metal/go.mod`: pad-replaces eruit (10-08, nu fork-tags)
+- [ ] als de PR's geland zijn: de fork-requires terug naar `soypat/lneto` en
+      `usbarmory/go-net` met echte upstream-versies, en de fork opheffen
 - [ ] nálopen dat er nergens anders een pad-replace achterblijft (surf en hop
       horen er geen te hebben; chain-beta zet ze alleen tijdelijk en draait ze
       zelf terug — controleer met `grep -rn "=> /Users" */go.mod`)

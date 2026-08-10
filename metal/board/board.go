@@ -13,7 +13,7 @@ import "fmt"
 import (
 	"net"
 
-	gnet "github.com/usbarmory/go-net"
+	gnet "github.com/xinix00/go-net"
 
 	"github.com/xinix00/HopOS/metal/board/appboard"
 	"github.com/xinix00/HopOS/metal/driver/fb"

@@ -6,7 +6,7 @@ import (
 	"net/netip"
 	"time"
 
-	gnet "github.com/usbarmory/go-net"
+	gnet "github.com/xinix00/go-net"
 
 	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/abi/ring"

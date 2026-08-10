@@ -7,12 +7,17 @@
 #
 # WAAROM DIT BESTAAT. Een gewone release bouwt hop-os tegen gepubliceerde tags:
 # wat hier bouwt, bouwt overal (v1.8.4). Een keten-beta wil het omgekeerde —
-# alles uit de bomen zoals ze nu zijn, ook wat nog nergens getagd staat. Vandaag
-# is dat geen luxe maar noodzaak: de lneto-fixes (window scaling, ARP, ports,
-# deadlines) staan in ~/Git/lneto en moeten nog upstream. Zonder replaces zou de
-# NODE die fixes hebben en de APPS niet — go-mod-replaces gelden namelijk alleen
-# in de hoofdmodule, dus hop-os-surf lost soypat/lneto op naar upstream. Dat is
-# geen compilefout maar iets ergers: twee netstacks in één vloot, stil.
+# alles uit de bomen zoals ze nu zijn, ook wat nog nergens getagd staat: hop en
+# hop-os-surf leunen op elkaar en op metal, en die drie lopen tijdens een
+# verbouwing niet in stap.
+#
+# De NETSTACK zat hier ook in, en dat is 10-08 opgelost bij de bron: lneto en
+# go-net zijn nu échte forks met een eigen module-pad (xinix00/lneto,
+# xinix00/go-net) en een tag, dus metal requiret ze normaal. Dat moest, want een
+# replace geldt alleen in de hoofdmodule — surf loste soypat/lneto dus op naar
+# upstream terwijl de node de gepatchte draaide. Twee netstacks in één vloot,
+# stil, en dat is erger dan een compilefout. De doorgifte hieronder blijft staan
+# als vangnet voor een volgende pad-replace, maar staat vandaag leeg.
 #
 # Daarom zet dit script de replaces TIJDELIJK in de go.mod's, bouwt de hele
 # keten daarmee, en draait ze daarna terug (ook bij een fout of Ctrl-C — zie de
@@ -81,15 +86,16 @@ restore() {
 trap restore EXIT INT TERM
 
 # hop-os: hop uit de werkboom (die loopt vóór op zijn laatste tag). De overige
-# replaces (lneto, go-net) stonden er al; die laten we staan zoals ze zijn.
+# metal heeft sinds 10-08 geen pad-replaces meer (netstack = fork met tag).
 ( cd "$DIR/metal" && go mod edit -replace "github.com/xinix00/hop=$HOP_DIR" )
 
-# surf: metal uit de werkboom, PLUS élke replace die metal zelf heeft. Dat
-# laatste is de hele reden dat dit script bestaat: een replace geldt alleen in
-# de hoofdmodule, dus zonder deze doorgifte bouwt surf tegen de UPSTREAM-versies
-# van lneto en go-net terwijl de node de gepatchte draait. Dat kostte de eerste
-# poging een compilefout op SeedNeighbor — en zonder compilefout was het een
-# stille splitsing geweest, wat erger is.
+# surf: metal uit de werkboom, PLUS élke pad-replace die metal zelf heeft. Die
+# doorgifte was de hele reden dat dit script bestond zolang de netstack een
+# pad-replace was; nu de forks getagd zijn is de lijst leeg en is dit een
+# vangnet. Het blijft staan omdat de volgende pad-replace anders precies
+# dezelfde stille splitsing oplevert (surf op upstream, node op de patch) —
+# dat kostte de eerste poging een compilefout op SeedNeighbor, en zonder
+# compilefout was het onzichtbaar geweest.
 #
 # Bewust geen lijstje modulenamen hier: dan moet iemand eraan denken als er een
 # fork bijkomt. We lezen ze uit metal/go.mod, dus het klopt vanzelf.
