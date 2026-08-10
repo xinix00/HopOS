@@ -166,7 +166,7 @@ echo ">> gate surf (bouwt meteen out/*.elf)" >&2
 #    dit script er zelf in zette, en die is de bedoeling.
 NOTES="**Chain beta $N — every part built from its working tree, not from published tags.**
 
-This is the first beta on the new network stack (lneto instead of gVisor for apps). Expect a considerably smaller footprint; the sizes are listed below.
+Node and apps run the same network stack (lneto, not gVisor) from the same patched sources — see the commit table. App sizes are listed at the bottom.
 
 Built from:
 
