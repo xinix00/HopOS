@@ -8,6 +8,9 @@ Ingediend 09-08 (details en exit-checklist: `docs/netstack-upstream.md`):
 - [ ] [soypat/lneto#179](https://github.com/soypat/lneto/pull/179) — window scaling (RFC 7323)
 - [ ] [soypat/lneto#180](https://github.com/soypat/lneto/pull/180) — sequentiële efemere poorten
 - [ ] [usbarmory/go-net#5](https://github.com/usbarmory/go-net/pull/5) — `nodefaultstack`-tag
+- [ ] [soypat/lneto#181](https://github.com/soypat/lneto/pull/181) — ring-schrijfpositie (stille corruptie)
+- [ ] [soypat/lneto#182](https://github.com/soypat/lneto/pull/182) — retransmissie na lokale close
+- [ ] [soypat/lneto#183](https://github.com/soypat/lneto/pull/183) — retransmissie-timer aansluiten
 
 Snel checken: `gh pr status --repo soypat/lneto` (en idem voor go-net).
 Reviewvragen kunnen komen; de onderbouwing per PR staat in
@@ -28,6 +31,27 @@ standalone groen vanaf upstream-main met een rood-bewezen test):
       tot lneto SeedNeighbor gemerged én getagd heeft (compileert eerder niet;
       code staat klaar als hopos-commit f191782)
 
+**Mogelijke bijdragen later — geen migratieblokkers.** Dit zijn functies die
+HopOS zelf al heeft en voor zijn concrete boot-/hardwarepad nodig heeft. Onze
+implementatie blijft de default zolang lneto niet aantoonbaar minstens dezelfde
+werking biedt op onze boards; upstreamen is hier een bijdrage, geen reden om
+werkende HopOS-code te schrappen.
+
+- [ ] lneto DHCPv4 renewal/rebinding — `StateRenewing` en `StateRebinding`
+      bestaan, maar de client doorloopt alleen INIT→SELECTING→REQUESTING→BOUND;
+      onze `leandhcp.Renew`/`KeepAlive` blijft dus leidend
+- [ ] lneto DHCPv4 broadcast-flag — configureerbare BOOTP broadcast-bit voor
+      DORA vóór een unicastfilter/IP-stack betrouwbaar actief is, met een test
+      op het uitgezonden frame; onze raw-NIC bootclient zet deze expliciet
+- [ ] lneto PHY 1000BASE-T autonegotiation — GBCR/GBSR meenemen in advertise
+      en negotiated-link-selectie; HopOS gebruikt dit al voor zijn gigabit-PHY's
+- [ ] lneto PHY RTL8211F RGMII-delayhelper — alleen voorstellen als upstream
+      vendorhelpers wil dragen; onze gemeten `rgmii-id`-configuratie blijft in
+      `metal/driver/nic/mdio` totdat een upstreamvariant op Radxa bewezen is
+- [ ] lneto HTTP-clientfaçade — eventueel de clienthelft van `leanhttp`
+      upstreamen (redirects, chunked response, deadlines en body lifecycle);
+      groot/optioneel en geen reden om `leanhttp` uit SURF/Easy te halen
+
 **Als alles upstream geland is — de replaces ERUIT, overal:**
 
 - [ ] `metal/go.mod`: de twee `replace`-regels (lneto, go-net) verwijderen en
@@ -40,6 +64,74 @@ standalone groen vanaf upstream-main met een rood-bewezen test):
 
 Volledige exit-checklist: `docs/netstack-upstream.md`. Tot die tijd: clones op
 branch `hopos` laten staan — de replace volgt de werkboom.
+
+## LicheeRV: RX-jacht AFGEROND (10-08) — corruptie weg, doorvoer verdubbeld
+
+**Eindstand op ijzer** (netmeter-image, Mac-sharing-net 192.168.99.2):
+
+| | begin van de dag | eind |
+|---|---|---|
+| RX 16MiB | 4,22 MB/s en **sha FOUT** | **8,84 MB/s, sha correct** (5 runs: 1805-1818ms) |
+| TX 8MiB | 9,45 MB/s bit-perfect | 9,48 MB/s bit-perfect |
+| HTTPS 6,25MB | `tls: bad record MAC` | geslaagd, **byte-exact gelijk aan de GitHub-asset** |
+| gedropte frames | 3-41 per download | **0** (RU-bit in DMA-status blijft nu weg) |
+| allocaties per 16MiB | 641-910 mallocs, 0 GC | 67 mallocs, 0 GC |
+
+RX zit nu op 93% van TX; de asymmetrie waarmee de jacht begon is praktisch weg.
+
+**Er waren drie oorzaken, en ze lagen in drie verschillende lagen.**
+
+1. **Stille corruptie (lneto, [#181](https://github.com/soypat/lneto/pull/181)).**
+   `internal.Ring.onReadEnd` deed `Reset()` zodra de laatste leesbare byte weg
+   was: schrijfpositie terug naar 0. Maar out-of-order TCP-segmenten worden met
+   `PeekWrite` *achter* die positie gestaged, relatief eraan — `reassembly.go`
+   bewaart bewust geen offset ("the ring write pointer advances in lockstep with
+   rcv.NXT"). Leest de app de ring leeg terwijl er een gat open staat, dan
+   commit `reassemble` willekeurige oude bufferinhoud: volle lengte, verkeerde
+   bytes.
+2. **Verlies was niet herstelbaar (lneto, [#182](https://github.com/soypat/lneto/pull/182)
+   + [#183](https://github.com/soypat/lneto/pull/183)).** FIN-WAIT-1 weigerde
+   élk datasegment (dus write-then-close kon zijn laatste segment nooit
+   herstellen), en géén enkele verbinding in `x/xnet` had een
+   retransmissie-timer. 512KiB-verliesstroomtest: 2/10 → 8/10 complete runs.
+3. **De ring was te ondiep (ONS, `driver/nic/dwmac`).** 64 descriptors = ~8ms
+   buffering, tegen een Go-scheduler-quantum van ~10ms. **Niet** omdat de lus te
+   traag is: die doet 47µs/frame (9 driver + 38 stack) waar de draad 120µs per
+   frame kost. Maar op één hart deelt de RX-lus de core met de goroutine die de
+   download verwerkt (io.Copy + SHA256), en in één quantum komen er 83 frames
+   binnen. Nu 128 descriptors (~15ms) en netDMASize 256→448KB — het maximum dat
+   nog in de 1MB OS-staart past.
+
+**Wat de weg wees, in deze volgorde:** de sha-vergelijking (corruptie), de
+missed-frame-teller uit register 0x1020 (drops kwantificeren — de RU-bit in
+DMA_STATUS is sticky en zegt alleen "ooit gebeurd"), en het tijdbudget per frame
+(dat mijn eigen "de lus is te langzaam"-hypothese weerlegde). De poll-slaap is
+gemeten en uitgesloten: 0/50/300µs geven binnen de ruis hetzelfde.
+
+**Het instrument** (blijft staan, ook voor de Radxa — geen framebuffer, geen
+UART-dongle nodig):
+
+    PAYLOAD=netmeter image/licheerv-agent.sh   # -> out/hopos-licheerv-netmeter.img
+    BLOB_MB=16 python3 metal/cmd/netmeter/hostsrv.py   # host-helft, :8099
+
+| | |
+|---|---|
+| `/report` | alle meetregels + NIC-stand en tijdbudget per fase |
+| `/diag` | ringen, DMA-status, missed-frame-tellers, memstats, die-temp |
+| `/blob` | de TX-kant, van buitenaf te klokken |
+| `/pull` | herhaal de 16MiB-download — een variant meten kost geen boot meer |
+| `/set?rxsleep=N` · `/reset` | parameter verstellen · tellers nullen |
+
+**Nog open in deze hoek:**
+
+- [ ] de resterende 22% naar lijnsnelheid is CPU: 47µs/frame × ~8300 frames/s is
+      al ~39% van één hart alleen voor de RX-lus. De 38µs stack-tijd is de
+      grootste post — pas aan te pakken met een profiel per laag, niet met een
+      gok
+- [ ] `storm-conn` alloceert 206MB over 400 verse verbindingen (~516KB per
+      verbinding) met 11 GC-cycli; werkt, maar op 64MB is dat het soort ding dat
+      je wil weten
+- [ ] agent-image (niet alleen netmeter) op ijzer met de diepere ring
 
 ## Display-app: read-deadline bijstellen
 

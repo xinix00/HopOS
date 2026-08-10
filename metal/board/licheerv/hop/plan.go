@@ -60,9 +60,15 @@ const (
 	slotBlockPA = osBase + 0x20000
 
 	// netDMAPA is Plan.NetDMAPA: de ringen en frame-buffers van de DWMAC.
-	// 256KB i.p.v. layout.NetDMASize (8MB): die 8MB hoort bij gigabit-MAC's met
+	// 448KB i.p.v. layout.NetDMASize (8MB): die 8MB hoort bij gigabit-MAC's met
 	// grote ringen, en op een board met 256MB DRAM geef je niet 3% weg voor een
-	// 100Mbit-poort die met 132KB toe kan (driver/nic/dwmac.NeedBytes).
+	// 100Mbit-poort die met 432KB toe kan (driver/nic/dwmac.NeedBytes).
+	//
+	// Was 256KB toen de ring 64 diep was; 10-08 mee omhoog met de verdieping naar
+	// 128 descriptors (dwmac legt uit waarom: de ring moet een scheduler-quantum
+	// overleven, niet een trage lus). Dit is het maximum dat nog in de 1MB-staart
+	// past: de regio begint op +0x80000 en de staart eindigt op +0x100000, dus
+	// dieper vraagt eerst een grotere osSize — en die komt uit de app-pool.
 	//
 	// LET OP: op de ARM-boards is deze regio ongecachet omdat hij buiten élke
 	// RAM-declaratie valt. Hier valt hij dat ook, maar dat maakt hem niet
@@ -74,7 +80,7 @@ const (
 	// init() zag dat niet — die nam het MAXIMUM van de eindes en een overlap heeft
 	// geen groter einde. Nu loopt de reeks strak op orde en checkt init elke grens.
 	netDMAPA   = osBase + 0x80000
-	netDMASize = 0x40000
+	netDMASize = 0x70000 // 448KB — tot het einde van de staart (+0xF0000 < 1MB)
 )
 
 func init() {

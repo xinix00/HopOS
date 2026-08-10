@@ -66,6 +66,20 @@ FIPTOOL="${LICHEERV_FIPTOOL:-$DIR/image/licheerv/fiptool.py}"
 RUNADDR=0x84000000
 SLOTBASE=0x88000000	# board/licheerv: SlotBase (de app-partitie)
 
+# PAYLOAD kiest wat er in het monitor-slot van de FIP komt: de agent (default,
+# de echte node) of de netmeter-meetbank (cmd/netmeter — het instrument van de
+# RX-jacht; de host-helft is metal/cmd/netmeter/hostsrv.py). De bank krijgt
+# geen config-venster en geen kooi-stub: er draaien geen apps, de node ÍS de
+# meting. Output krijgt -netmeter in de naam zodat beide images naast elkaar
+# blijven bestaan. HOSTSRV=http://ip:8099 bakt een vast host-adres in voor als
+# de gateway niet de meet-Mac is (default meet de bank tegen zijn gateway).
+PAYLOAD="${PAYLOAD:-agent}"
+case "$PAYLOAD" in
+agent) SUF="" ;;
+netmeter) SUF="-netmeter" ;;
+*) echo "PAYLOAD moet agent of netmeter zijn, niet '$PAYLOAD'" >&2; exit 1 ;;
+esac
+
 mkdir -p "$OUT"
 
 [ -x "$TAMAGO" ] || { echo "tamago-go niet gevonden op $TAMAGO (zet TAMAGO)" >&2; exit 1; }
@@ -79,6 +93,20 @@ rv() { # rv <tags> <ldflags> <out> <pkg>
 }
 
 cd "$DIR/metal"
+
+# 0. De payload-splitsing: de meetbank slaat stap 1 en 2 over (geen apps, dus
+#    geen kooi-stub; geen config-venster, want de bank leest zijn plan uit
+#    DHCP en zijn host uit de gateway of HOSTSRV).
+ELF="$OUT/hopos-lrv.elf"
+if [ "$PAYLOAD" = netmeter ]; then
+	echo "== netmeter bouwen (cmd/netmeter -tags licheerv; host: ${HOSTSRV:-gateway}) ==" >&2
+	NMLD="-s -w -T $((RUNADDR + 0x10000)) -R 0x1000"
+	[ -n "$HOSTSRV" ] && NMLD="$NMLD -X main.hostOverride=$HOSTSRV"
+	rv "licheerv" "$NMLD" "$OUT/netmeter-lrv.elf" ./cmd/netmeter
+	ELF="$OUT/netmeter-lrv.elf"
+fi
+
+if [ "$PAYLOAD" = agent ]; then
 
 # 1. De kooi-stub van het slot: HOP zet hem vóór élke app op de partitie
 #    (kern/cagestub); de kooi-waarden zet HOP er runtime in (kern/cage rekent
@@ -114,6 +142,8 @@ cp "$OUT/stub-slot.bin" "$DIR/metal/kern/cagestub/stub-slot.bin"
 echo "== HOP-kern bouwen (agent: cmd/hopos -tags licheerv,embedcfg,embedcagestub; config $(basename "$CFG")) ==" >&2
 rv "licheerv embedcfg embedcagestub" "-s -w -T $((RUNADDR + 0x10000)) -R 0x1000" "$OUT/hopos-lrv.elf" ./cmd/hopos
 
+fi # PAYLOAD=agent
+
 # 3. De trapstub voor HOP's eigen hart: T-Head-CPU-init (die erven we van de
 #    vendor-OpenSBI die we vervangen), BSS nullen, en een vroege trap-vector die
 #    mcause/mepc/mtval op de UART dumpt — het meetinstrument van de bring-up.
@@ -122,7 +152,7 @@ riscv64-elf-as -march=rv64imac_zicsr -o "$OUT/trapstub.o" "$DIR/image/licheerv/t
 riscv64-elf-ld -Ttext=$RUNADDR -o "$OUT/trapstub.elf" "$OUT/trapstub.o"
 riscv64-elf-objcopy -O binary "$OUT/trapstub.elf" "$OUT/trapstub.bin"
 go run "$DIR/image/licheerv/mkmonitor/main.go" -base $RUNADDR \
-	"$OUT/hopos-lrv.elf" "$OUT/monitor.bin" "$OUT/trapstub.bin"
+	"$ELF" "$OUT/monitor$SUF.bin" "$OUT/trapstub.bin"
 
 # 4. fip.bin: donor (FSBL + DDR-params) met ons monitor-slot.
 #    fiptool neemt MONITOR_RUNADDR uit de OLD_FIP en valt alleen terug op de
@@ -147,12 +177,12 @@ if len(hits) != 1:
 struct.pack_into("<I", d, hits[0] + 60, 0)
 open(sys.argv[2], "wb").write(bytes(d))
 PYEOF
-python3 "$FIPTOOL" genfip "$OUT/fip-licheerv.bin" \
+python3 "$FIPTOOL" genfip "$OUT/fip-licheerv$SUF.bin" \
 	--OLD_FIP "$OUT/donor-runaddr0.bin" \
-	--MONITOR "$OUT/monitor.bin" \
+	--MONITOR "$OUT/monitor$SUF.bin" \
 	--MONITOR_RUNADDR "$RUNADDR" 2>/dev/null
 
-echo "metal/out/fip-licheerv.bin ($(du -h "$OUT/fip-licheerv.bin" | cut -f1)) klaar." >&2
+echo "metal/out/fip-licheerv$SUF.bin ($(du -h "$OUT/fip-licheerv$SUF.bin" | cut -f1)) klaar." >&2
 
 # 5. Het complete kaart-image: MBR + FAT16 + fip.bin, dd-baar. Zelf gebouwd
 #    (image/mkcard, gedeeld met de Radxa en de Pi's) zodat het reproduceerbaar
@@ -160,9 +190,9 @@ echo "metal/out/fip-licheerv.bin ($(du -h "$OUT/fip-licheerv.bin" | cut -f1)) kl
 #    donor-image, want dat is wat de BROM van dit silicium aantoonbaar leest.
 #    GEEN -vollabel hier: de BROM-parser is niet van ons, en dit image is
 #    bewezen zoals het is.
-go run "$DIR/image/mkcard/main.go" -o "$OUT/hopos-licheerv.img" \
-	-size 64 "$OUT/fip-licheerv.bin=fip.bin"
-echo "flash: diskutil unmountDisk /dev/diskN && sudo dd if=$OUT/hopos-licheerv.img of=/dev/rdiskN bs=4m" >&2
+go run "$DIR/image/mkcard/main.go" -o "$OUT/hopos-licheerv$SUF.img" \
+	-size 64 "$OUT/fip-licheerv$SUF.bin=fip.bin"
+echo "flash: diskutil unmountDisk /dev/diskN && sudo dd if=$OUT/hopos-licheerv$SUF.img of=/dev/rdiskN bs=4m" >&2
 
 # 6. Optioneel: op de kaart zetten. Standaard mounten en het echte mountpoint
 #    bij diskutil opvragen — een eigen mountpoint meegeven rapporteert op macOS
@@ -184,7 +214,7 @@ MNT=$(diskutil info "${DISK}s1" | sed -n 's/.*Mount Point: *//p')
 # bestand groter is dan de helft van de vrije ruimte).
 rm -f "$MNT/fip.bin"
 sync
-NEED=$(stat -f %z "$OUT/fip-licheerv.bin")
+NEED=$(stat -f %z "$OUT/fip-licheerv$SUF.bin")
 FREE=$(df -k "$MNT" | awk 'NR==2 {print $4 * 1024}')
 if [ "$NEED" -gt "$FREE" ] && [ -f "$MNT/boot.sd" ]; then
 	echo "boot.sd ($(du -h "$MNT/boot.sd" | cut -f1), vendor-Linux-kernel) weghalen — HopOS boot hem niet" >&2
@@ -195,9 +225,9 @@ fi
 [ "$NEED" -le "$FREE" ] || {
 	echo "WEIGER: fip is $NEED bytes, maar er is $FREE vrij op ${DISK}s1" >&2
 	diskutil unmount "${DISK}s1" >/dev/null; exit 1; }
-cp "$OUT/fip-licheerv.bin" "$MNT/fip.bin"
+cp "$OUT/fip-licheerv$SUF.bin" "$MNT/fip.bin"
 sync
-WANT=$(stat -f %z "$OUT/fip-licheerv.bin"); GOT=$(stat -f %z "$MNT/fip.bin")
+WANT=$(stat -f %z "$OUT/fip-licheerv$SUF.bin"); GOT=$(stat -f %z "$MNT/fip.bin")
 [ "$WANT" = "$GOT" ] || { echo "FOUT: teruglezen faalt ($GOT != $WANT bytes)" >&2; exit 1; }
 diskutil unmount "${DISK}s1" >/dev/null
 echo "fip.bin op ${DISK}s1 ($WANT bytes, geverifieerd) — kaart kan in de LicheeRV." >&2

@@ -21,6 +21,32 @@ Snel de stand opvragen:
 | [soypat/lneto#180](https://github.com/soypat/lneto/pull/180) | Efemere poorten sequentieel (birthday-hergebruik van 4-tuples → 30s dode dials) | open |
 | [usbarmory/go-net#5](https://github.com/usbarmory/go-net/pull/5) | `nodefaultstack`-build-tag: gvisor uit lneto-only binaries (−21%) | open |
 
+## Ronde 1b — ingediend 10-08, gevonden mét de LicheeRV-meetbank
+
+Deze drie komen uit de RX-jacht op ijzer, en het zijn correctheidsfouten (geen
+performance): zonder ze corrumpeert een download stil, en herstelt een
+verbinding niet van één verloren pakket.
+
+| PR | Wat | Status |
+|---|---|---|
+| [soypat/lneto#181](https://github.com/soypat/lneto/pull/181) | Ring spoelde zijn schrijfpositie terug bij leeglezen → gestaagde out-of-order segmenten kwamen van de verkeerde offset (volle lengte, verkeerde bytes) | open |
+| [soypat/lneto#182](https://github.com/soypat/lneto/pull/182) | Onbevestigde data bleef liggen na een lokale close (FIN-WAIT-1 weigerde élk datasegment) — raakt write-then-close, dus elke response | open |
+| [soypat/lneto#183](https://github.com/soypat/lneto/pull/183) | Geen enkele verbinding had een retransmissie-timer, terwijl `NanoTime` dat wél documenteert; leunt op #182 | open |
+
+Bewijs op ijzer: TX was bit-perfect (3× 8MiB, 9,45 MB/s) terwijl RX 16MiB met
+een ándere sha afleverde en TLS `bad record MAC` gaf. Na #181 haalde dezelfde
+node 6,25MB over HTTPS binnen, byte-exact gelijk aan de GitHub-asset — TLS
+controleert elke byte, dus dat is het bewijs. Verliesherstel: 512KiB-stroomtest
+ging van 2/10 naar 8/10 complete runs.
+
+**Belangrijk voor de review:** alle drie zijn ook zónder onze hardware te
+reproduceren. Elke PR draagt een test die op onaangetast upstream-main rood is
+en met de fix groen — `go test` op een gewone machine, geen board nodig. De
+LicheeRV was alleen de vinder: zijn te ondiepe RX-ring (ons probleem, apart
+gefixt met 64→128 descriptors) liet 3-41 frames per download vallen, en dát is
+de toestand waarin deze drie fouten zichtbaar worden. Op QEMU met slirp valt
+nooit een frame, dus daar blijven ze onzichtbaar.
+
 Bij reviewvragen: de volledige onderbouwing (metingen, reproducties, de
 afwegingen per PR) staat in `~/Git/netstack-prs.md` op de werk-Mac; de
 regressietests in de PR's zelf zijn elk rood-bewezen op oude code.

@@ -68,6 +68,7 @@ const (
 	dmaTxList    = 0x1010
 	dmaStatus    = 0x1014
 	dmaOpMode    = 0x1018
+	dmaMissed    = 0x1020 // Missed Frame and Buffer Overflow Counter — leest én wist
 	dmaCurTxDesc = 0x1048
 	dmaCurRxDesc = 0x104c
 
@@ -128,16 +129,28 @@ const (
 	ringEnd       = 1 << 25 // RER/TER: laatste descriptor van de ring
 	cntlSize1Mask = 0x7ff   // RBS1/TBS1 — ELF bits, zie maxFrame
 
-	// Ringdiepte: 64 descriptors, en dat is een tijdsbudget, niet een smaak. Bij
-	// 100Mbit is 16 × 1600B = 25KB precies 2 MILLISECONDEN buffering — minder dan
-	// één logregel over een 115200-UART kost (~9ms voor 80 tekens). HOP hoeft dus
-	// maar één keer te printen terwijl er data binnenkomt en de ring loopt over;
-	// daarna zit TCP in een retransmit-put en komt een download van 5MB nooit af.
-	// Gemeten 30-07: stagen lukte één keer in ~50s en daarna vijf minuten niets —
-	// puur timing. Met 64 descriptors is het budget ~8ms, en past de hele set nog
-	// steeds in de 256KB-plan-regio (bufSize omlaag naar 1664).
-	numDesc = 64
-	bufSize = 1664 // 26 × 64B, net boven maxFrame — 2 × 64 × 1664 = 208KB
+	// Ringdiepte: een tijdsbudget, niet een smaak. Bij 100Mbit duurt één frame
+	// van 1500B 120µs op de draad, dus numDesc frames zijn numDesc × 120µs
+	// buffering: hoe lang deze driver niet aan de beurt hoeft te komen zonder
+	// dat de MAC frames weggooit.
+	//
+	// 64 gaf ~8ms, en dat bleek 10-08 op ijzer te krap — om een andere reden dan
+	// waarvoor het gekozen was. GEMETEN met de netmeter-bank: het ophalen én
+	// verwerken van een frame kost samen 47µs (9µs driver, 38µs stack), dus deze
+	// lus is twee keer sneller dan de draad en kan per definitie niet achterlopen.
+	// Wat hem wél wegjaagt is de Go-scheduler: op één hart deelt de RX-lus de
+	// core met de goroutine die de download verwerkt (io.Copy + SHA256), en het
+	// preemptie-quantum is ~10ms. In 10ms komen er 83 frames binnen — meer dan
+	// 64. Meetbaar gevolg: 3 tot 41 verloren frames per 16MB-download (teller
+	// missed-ring in Diag), en omdat elk verlies ~28ms herstel kost zakte de
+	// doorvoer daarmee van 5,8 naar 4,2 MB/s, bimodaal per run.
+	//
+	// 128 geeft ~15ms en dekt dus een heel quantum. De hele set is dan 432KB en
+	// past nog in de OS-staart van dit board (zie board/licheerv/hop:netDMASize).
+	// Dieper kan pas als die staart meegroeit, en dat is pas te verantwoorden als
+	// een meting zegt dat 15ms nog niet genoeg is.
+	numDesc = 128
+	bufSize = 1664 // 26 × 64B, net boven maxFrame — 2 × 128 × 1664 = 416KB
 
 	// maxFrame is wat we de MAC als buffergrootte MELDEN, en dat is niet
 	// hetzelfde als bufSize. Het RBS1-veld is 11 bits (cntlSize1Mask), dus
@@ -181,6 +194,31 @@ type Net struct {
 	rxErrors  uint64
 	rxLastErr uint32 // rauwe RDES0 van het laatst afgekeurde frame
 	txFrames  uint64
+
+	// Frames die de MAC weggooide zónder ze ooit aan ons aan te bieden — en
+	// dus onzichtbaar in rxFrames/rxErrors. Twee oorzaken, apart geteld door de
+	// hardware: geen vrije descriptor (de ring liep leeg omdat wij te langzaam
+	// waren) en een volle RX-FIFO. Dit is het getal dat een RX-jacht nodig heeft:
+	// de RU-bit in DMA_STATUS is sticky en zegt alleen "ooit gebeurd".
+	// De hardwareteller wist zichzelf bij lezen, dus accumuleren we hier.
+	rxMissedRing uint64
+	rxMissedFIFO uint64
+	rxMissedOvf  uint64 // hoe vaak een 16-bits hardwareteller zelf overliep
+}
+
+// sampleMissed leest de Missed Frame and Buffer Overflow Counter en telt hem op
+// bij onze eigen totalen. Het register is read-and-clear, dus élke lezing is
+// "sinds de vorige lezing" en niemand anders mag hem lezen.
+func (n *Net) sampleMissed() {
+	v := n.rd(dmaMissed)
+	n.rxMissedRing += uint64(v & 0xFFFF)
+	if v&(1<<16) != 0 {
+		n.rxMissedOvf++
+	}
+	n.rxMissedFIFO += uint64(v >> 17 & 0x7FF)
+	if v&(1<<28) != 0 {
+		n.rxMissedOvf++
+	}
 }
 
 // rxCntl is het RDES1-woord van een RX-descriptor: de buffergrootte die we de
@@ -431,9 +469,12 @@ func (n *Net) Diag() string {
 	dev.CleanInv(rx, descSize)
 	dev.CleanInv(tx, descSize)
 	dev.MB()
+	n.sampleMissed()
 	return fmt.Sprintf("dma-status %#08x op-mode %#08x rx=%d/%d(err) last-err %#08x tx=%d "+
+		"missed-ring=%d missed-fifo=%d ctr-ovf=%d "+
 		"rxdesc[%d] %#08x hw-rx %#08x txdesc[%d] %#08x hw-tx %#08x",
 		n.rd(dmaStatus), n.rd(dmaOpMode), n.rxFrames, n.rxErrors, n.rxLastErr, n.txFrames,
+		n.rxMissedRing, n.rxMissedFIFO, n.rxMissedOvf,
 		n.rxCur, dev.Read32(rx+descStatus), n.rd(dmaCurRxDesc),
 		n.txCur, dev.Read32(tx+descStatus), n.rd(dmaCurTxDesc))
 }
