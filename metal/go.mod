@@ -4,7 +4,7 @@ go 1.26.4
 
 require (
 	github.com/usbarmory/tamago v1.26.4
-	github.com/xinix00/go-net v0.1.0-hopos.1
+	github.com/xinix00/go-net v0.1.1-hopos.1
 )
 
 require github.com/xinix00/lean v0.1.0

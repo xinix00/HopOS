@@ -45,6 +45,12 @@ func Up(a *applib.App) (string, error) {
 	cfg.TCPQueueSize = 16
 	cfg.MaxActiveTCPPorts = 32
 	cfg.MaxListenerConns = 8
+	// UDP-slots, om dezelfde reden als in de kern (hopnet): nul slots laat élke
+	// UDP-socket falen met "resource exhausted". Voor een app is dat DNS, en
+	// voor cloudflared bovendien QUIC naar de Cloudflare-edge — die tunnel is
+	// UDP-transport. 8 en niet 4: één app mag meerdere QUIC-verbindingen naast
+	// zijn resolver hebben, en een poort kost ~64 byte.
+	cfg.MaxActiveUDPPorts = 8
 	// Het interne net is deterministisch (layout nummert IP's én MAC's per
 	// slot), dus er wordt NIETS geresolved: de gateway-MAC statisch in de
 	// config (geen ARP-goroutine) en 10.100.0.1 als vaste buur geseed — dan

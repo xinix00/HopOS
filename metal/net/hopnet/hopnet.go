@@ -73,6 +73,13 @@ func Up() error {
 	cfg.TCPQueueSize = 32
 	cfg.MaxActiveTCPPorts = 64 // poorttabel: downloads (4) + API + S3 + marge
 	cfg.MaxListenerConns = 8   // per listener (agent/leader/console)
+	// UDP is geen bijzaak: zónder slots faalt élke UDP-socket met "resource
+	// exhausted", en dat neemt SNTP mee. Een node zonder klok kan geen enkel
+	// certificaat verifiëren, dus dan mislukt de héle artifact-keten met
+	// "certificate is not yet valid" — gemeten 11-08 op QEMU, en de oorzaak lag
+	// vier lagen verderop (go-net zette het aantal op nul). 4 volstaat: de
+	// resolver en een SNTP-vraag naast elkaar, ~64 byte per poort.
+	cfg.MaxActiveUDPPorts = 4
 
 	iface := &gnet.Interface{
 		NetworkDevice: loc,
@@ -84,9 +91,12 @@ func Up() error {
 	// Geen SetPortRange meer (dat was gvisor): lneto deelt zijn efemere
 	// poorten sequentieel uit in [49152, 65535], en de masquerade stopt op
 	// hopswitch.MasqEnd = 49152 — de bereiken zijn per constructie disjunct.
-	iface.HandleStackErr = func(err error, tx bool) {
-		fmt.Printf("netstack (tx=%v): %v\n", tx, err)
-	}
+	// BEWUST GEEN HandleStackErr: wat daar langskomt is de broadcast van een
+	// echt LAN (mDNS, SSDP, router advertisements) die niet voor ons is, en de
+	// console is een busy-wait per byte — ~3,5ms per regel. Elke geprinte regel
+	// is dus tijd die de RX-lus niet heeft, waarna de ring overloopt en er nóg
+	// meer te melden valt. GEMETEN 11-08: LicheeRV dood na ~250s, die-temp 10°C
+	// te hoog. Meten doen we met netmeter/vitals, niet in het datapad.
 	iface.Stack.EnableICMP()
 
 	// De interne gateway-naad: 10.100.0.1 = "mijn node" voor de apps — de

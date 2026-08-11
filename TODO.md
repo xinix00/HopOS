@@ -16,6 +16,20 @@ Snel checken: `gh pr status --repo soypat/lneto` (en idem voor go-net).
 Reviewvragen kunnen komen; de onderbouwing per PR staat in
 `~/Git/netstack-prs.md`.
 
+**Nog te PR'en — go-net, de UDP-fix (NIEUW 11-08, en de zwaarste van de drie
+go-net-punten):**
+
+- [ ] go-net `MaxActiveUDPPorts` configureerbaar + default 4 — stond hardcoded
+      op 0 met "Unsupported as of yet", terwijl lneto UDP al lang kan
+      (`x/xnet`'s Socket doet udp/udp4/udp6, `StackAsync.DialUDP`,
+      `RegisterListenerUDP`). Met nul slots faalt élke UDP-socket met
+      `ErrExhausted`, dus geen DNS en geen SNTP — en een node zonder klok
+      verifieert geen enkel certificaat. Het zichtbare symptoom is dus
+      `x509: certificate is not yet valid` op élke https-download, vier lagen
+      van de oorzaak vandaan. Code klaar als hopos-commit **d3827f8**
+      (fork-tag `v0.1.1-hopos.1`), bewezen: SNTP zet de klok, artifact van
+      GitHub gestreamd, app HTTP 200
+
 **Nog te PR'en — ronde 2** (klaar om te vuren, afgemaakt 09-08 avond; wacht
 op de reacties op ronde 1; concept-teksten in `~/Git/netstack-prs.md`, elk
 standalone groen vanaf upstream-main met een rood-bewezen test):
@@ -86,6 +100,118 @@ HOGER zijn dan élke upstream-tag.
 
 Volledige exit-checklist: `docs/netstack-upstream.md`. Tot die tijd: clones op
 branch `hopos` laten staan — de replace volgt de werkboom.
+
+## LicheeRV liep vast na ~250s: hij verdronk in zijn eigen logging (11-08 GEFIXT)
+
+**Symptoom** (Derek, op een druk LAN): eindeloze regels `netstack (tx=false):
+packet dropped`, en na 250-252s reageerde de node niet meer. Consistente timing.
+
+**De keten, en die is zelfversterkend:**
+
+1. een echt LAN is vol broadcast (mDNS, SSDP, IPv6 router advertisements, ARP);
+   die frames zijn niet voor ons, dus dropt de stack ze — correct gedrag, en
+   lneto logt het zelf op *debug*-niveau ("routine noise on a shared LAN")
+2. `hopnet` printte élke melding onvoorwaardelijk
+3. de console is een **blokkerende** busy-wait per byte
+   (`board/licheerv/console.go`: `for LSR&THRE == 0 {}`) — op 115200 baud is dat
+   87µs/byte, dus **3,5ms per logregel van 40 tekens**
+4. bij ~300 regels/s is dat 104% van de tijd van het HOP-hart: er is geen tijd
+   meer over
+5. dus komt de RX-lus niet aan de beurt → de DWMAC-ring loopt over → **nog meer**
+   drops → nog meer logregels → terug naar 3
+
+Bevestiging uit Dereks eigen log: `board: die temp 48.9C`, waar hetzelfde bordje
+tijdens de netmeter-metingen op 37-39°C zat. Tien graden erbij is precies een
+hart dat staat te busy-waiten.
+
+**Waarom we dit niet eerder zagen:** QEMU's slirp levert geen broadcast. Gemeten
+in dezelfde soak: **0 drops** in QEMU tegenover honderden per seconde op ijzer.
+
+**Fix: de handler is weg.** Eerst bouwde ik een rate-limiter met vensters en
+tellers — 60 regels om ruis te *dempen* die we niet willen zien. Dat is de
+verkeerde afslag (Derek, 11-08): `HandleStackErr` is optioneel, dus niet zetten
+geeft geen ruis, geen busy-wait en geen code. Fouten meten doen we met
+gereedschap dat daarvoor is (netmeter's `/diag` met de driver-tellers, vitals),
+niet met een print in het datapad.
+
+- [ ] **op ijzer verifiëren** met de volgende release: de drop-regels moeten
+      wegvallen, de node moet voorbij de 250s blijven leven, en de die-temp hoort
+      terug naar ~38°C
+- [ ] overwegen: de console asynchroon maken (ring + flush-goroutine) i.p.v. een
+      busy-wait per byte. Dan kost een logregel geen hart-tijd meer. Grotere
+      verbouwing, en met de throttle niet meer urgent — maar de huidige console
+      is wél een plek waar élke print rechtstreeks tijd van het OS afsnoept
+- [ ] `appnet` en `netmeter` nalopen op dezelfde vraag: netmeter print zijn
+      netstack-meldingen óók naar de console (naast de ring die `/report` leest),
+      en dat is busy-wait tijdens een doorvoermeting — dus het vervuilt zijn
+      eigen cijfers
+
+## UDP stond op nul — klok, DNS en dus élke HTTPS lagen plat (11-08 GEFIXT)
+
+**Symptoom** (gemeten op QEMU): geen enkel https-artifact kwam binnen.
+
+    tls: failed to verify certificate: x509: certificate has expired or is not
+    yet valid: current time 1970-01-01T00:17:12Z is before 2026-07-03
+
+**Keten:** go-net zette `MaxActiveUDPPorts: 0` ("Unsupported as of yet") → élke
+UDP-socket faalt met `resource exhausted` → SNTP faalt → de klok blijft op epoch
+→ geen certificaat valideert → geen artifact-download, geen cloudflared. Vier
+lagen tussen oorzaak en symptoom, en niets ervan luid: HOP's eigen auth is
+HMAC-gebaseerd (klok-vrij) en de QEMU-tests haalden artifacts van `http://`.
+
+**Waarom dit kon blijven zitten:** lneto ondersteunt UDP al lang —
+`x/xnet`'s Socket doet `"udp"/"udp4"/"udp6"` met `udp.Conn`/`udp.PacketConn`, en
+`StackAsync` heeft `DialUDP`/`RegisterListenerUDP`. Alleen go-net gaf het aantal
+poorten niet door.
+
+**Fix** (één regel plus een config-veld, go-net commit d3827f8 → tag
+`v0.1.1-hopos.1`): `MaxActiveUDPPorts` is nu configureerbaar met default 4.
+Expliciet gezet in `hopnet` (4: resolver + SNTP) en `appnet` (8: apps doen DNS,
+en cloudflared praat QUIC — dat ís UDP). Een poort kost ~64 byte.
+
+**Bewezen na de fix:** `clock: 2026-08-11T04:01:03Z (SNTP)`, daarna een
+https-artifact van GitHub gestreamd (3 MB) en de app antwoordt met HTTP 200.
+
+- [ ] **PR naar go-net** — dit is upstream-waardig en staat los van onze fork:
+      het veld + default, met de keten in de tekst (commit d3827f8 op `hopos`)
+- [ ] **alle app-images herbouwen**: de builds in de rolling-releases dragen de
+      oude appnet (0 UDP-poorten), dus zij kunnen zelf geen DNS. welcome merkt
+      dat niet (serveert alleen), maar **vitals' rx-test en cloudflared kunnen
+      niet werken** tot ze opnieuw gebouwd zijn
+- [ ] daarna cloudflared functioneel meten (tunnel opzetten); nu niet mogelijk
+
+## RAM-eis per app — gemeten 11-08 (QEMU virt, arm64)
+
+**De regels van het geheugenmodel**, want daarmee is elk getal na te rekenen:
+
+- `memory_limit` in de job-spec ís de partitiegrootte; HOP lijnt hem uit op 2 MB
+  (5 MB → 6 MB) en de pool is de harde grens
+- de app ziet **partitie − 2 MB**: `AbiTail` is de slot-ABI (control page,
+  mailboxen, net-ringen). Gemeten bevestiging: 96 MB → vitals meldt `ram_mb 94`
+- tijdens het **streamen** moeten het geplaatste beeld én de nog-niet-geplaatste
+  staart samen passen — een grotere eis dan het beeld alleen
+- daarbinnen zet `memlimit.Arm` de GC-limiet op
+  `(venster − beeld) + Sys − max(budget/16, 4 MB)`
+
+| app | beeld (gelinkt) | past vanaf | **werkt vanaf** | eigen gebruik |
+|---|---|---|---|---|
+| welcome | 3,31 MB | 6 MB | **18 MB** | — |
+| vitals | 3,47 MB | 6 MB | **20 MB** | `sys 4 MB`, heap 0,9 MB, 0 GC |
+| cloudflared | 31,32 MB | **38 MB** | nog onbekend | — |
+
+Huidige job-specs staan royaal: cloudflared krijgt 190 MB, de voorbeelden 96 MB,
+chain-beta 64 MB. Er is dus ruimte om te zakken, maar niet tot "past vanaf": het
+verschil tussen 6 en 18 MB is de werkruimte die de Go-runtime nodig heeft.
+
+**Wat opviel bij de ondergrens:** onder zijn minimum stopt een app met
+`exit code=0` en `last=""` — een nette exit zonder één logregel. Het
+post-mortem-veld dat juist hiervoor bestaat blijft leeg, dus de operator ziet
+"gestopt" en niet "te weinig geheugen". Dat is een diagnose-gat.
+
+**netmeter** is geen slot-app maar de monitor-payload (hij vervangt de agent), dus
+hij heeft geen `memory_limit`: hij krijgt het hele HOP-venster. Op de LicheeRV is
+dat 64 MB en hij meldde `sys 46 MB` — met 256 KiB TCP-buffers en een 8 MiB
+serve-blob.
 
 ## LicheeRV: RX-jacht AFGEROND (10-08) — corruptie weg, doorvoer verdubbeld
 
