@@ -100,7 +100,13 @@ say "   bomen schoon, geen pad-replaces, sleutel aanwezig"
 # ------------------------------------------------------- 1. hop: nog actueel?
 # metal requiret een hop-TAG. Loopt hop's code daarop vóór, dan moet hop eerst
 # uitgebracht worden — anders draagt deze release een orchestrator die nergens
-# staat. apps/ negeren we: dat zijn eigen modules, die komen in fase 3.
+# staat.
+#
+# "Code" is hier exact *.go + go.mod + go.sum, en dat is geen luiheid: hop
+# embedt niets (geen enkele go:embed in de repo), dus alleen die drie kunnen de
+# binary veranderen. De eerste versie vergeleek de hele boom en wilde vijf
+# repo's taggen + notariseren omdat er één regel uit .gitignore was — gemeten in
+# de repetitie van 11-08.
 say ""
 say ">> 1. hop tegenover metal's require"
 HOP_REQ="$(cd "$DIR/metal" && go mod edit -json | sed -n 's/.*"Path": "github.com\/xinix00\/hop",[^}]*"Version": "\([^"]*\)".*/\1/p' | head -1)"
@@ -110,11 +116,11 @@ say "   metal requiret hop $HOP_REQ"
 # fase 3. Alleen hop's EIGEN code kan een hop-release nodig maken.
 if ! git -C "$HOP_DIR" rev-parse -q --verify "$HOP_REQ" >/dev/null; then
 	say "   LET OP: tag $HOP_REQ staat niet in $HOP_DIR — kan niet vergelijken, hop overgeslagen"
-elif git -C "$HOP_DIR" diff --quiet "$HOP_REQ" HEAD -- . ':(exclude)apps'; then
+elif git -C "$HOP_DIR" diff --quiet "$HOP_REQ" HEAD -- '*.go' go.mod go.sum; then
 	say "   hop-code identiek aan $HOP_REQ — geen hop-release nodig"
 else
 	say "   hop's code loopt vóór op $HOP_REQ — hop gaat eerst"
-	git -C "$HOP_DIR" diff --stat "$HOP_REQ" HEAD -- . ':(exclude)apps' | tail -3 >&2
+	git -C "$HOP_DIR" diff --stat "$HOP_REQ" HEAD -- '*.go' go.mod go.sum | tail -3 >&2
 	# Dit kan onvoorwaardelijk vóór metal: hop hangt niet aan metal, dus zijn
 	# release kan nooit op deze metal wachten. Sinds 11-08 bouwt hop's
 	# release.sh alleen de gewone wereld (linux/darwin, amd64/arm64) — de
