@@ -53,8 +53,19 @@ run() { # run <beschrijving> <commando...> — in DRYRUN alleen melden
 # De modulepaden uit de lijst (~ -> $HOME), plus surf: dat zijn alle consumers
 # van metal. Één lijst, want twee lijsten die uit elkaar lopen is exact hoe de
 # satellieten vier metal-versies achterop raakten.
-mods() {
-	sed 's/#.*//' "$LIST" | grep . | cut -d: -f2 | sed -e "s|^~|$HOME|" -e "s|^\./|$DIR/|"
+mods() { # alle consumers van metal
+	mods_in; mods_ext
+}
+# In deze repo: apps/{welcome,vitals,cloudflared}. Hun require is cosmetisch (de
+# replace naar ../../metal bepaalt waartegen ze bouwen), maar hij moet kloppen —
+# en dus BINNEN de tag vallen. Daarom bumpen we die vóór het taggen.
+mods_in() {
+	sed 's/#.*//' "$LIST" | grep . | cut -d: -f2 | grep '^\./' | sed "s|^\./|$DIR/|"
+}
+# Buiten deze repo: de satellieten en surf. Die kunnen pas ná de tag, want zij
+# requiren een gepubliceerde versie.
+mods_ext() {
+	sed 's/#.*//' "$LIST" | grep . | cut -d: -f2 | grep '^~' | sed "s|^~|$HOME|"
 	echo "$SURF_DIR"
 }
 
@@ -70,7 +81,9 @@ for d in "$DIR" "$SURF_DIR" "$HOP_DIR" $(mods); do
 done
 # Élke boom die we committen moet schoon zijn: anders weet niemand achteraf wat
 # er in de release zat.
-for d in "$DIR" "$SURF_DIR" "$HOP_DIR" "$EASY/hopdns" "$EASY/hoplb" "$EASY/hopprom"; do
+# hop staat hier NIET bij: sinds de apps-verhuizing committen we daar niets
+# meer. Loopt hop's code vóór, dan checkt fase 1 zijn boom alsnog.
+for d in "$DIR" "$SURF_DIR" "$EASY/hopdns" "$EASY/hoplb" "$EASY/hopprom"; do
 	[ -z "$(git -C "$d" status --porcelain)" ] || {
 		say "FOUT: $(basename "$d") niet schoon — eerst committen"; exit 1; }
 done
@@ -121,10 +134,24 @@ fi
 
 # --------------------------------------------------------- 2. metal: gate + tag
 say ""
-say ">> 2. gate hop-os"
+say ">> 2. de app-modules in deze repo op $VER"
+for m in $(mods_in); do
+	old="$(grep -oE 'HopOS/metal v[0-9][^ ]*' "$m/go.mod" | head -1 | awk '{print $2}')"
+	printf '   %-24s %s -> %s\n' "apps/$(basename "$m")" "${old:-?}" "$VER" >&2
+	( cd "$m" && GOWORK=off go mod edit -require "github.com/xinix00/HopOS/metal@$VER" )
+done
+if [ -n "$(git -C "$DIR" status --porcelain)" ]; then
+	run "commit apps-pins" sh -c "
+		git -C '$DIR' add -A apps &&
+		git -C '$DIR' commit -q -m 'apps: metal $VER' &&
+		git -C '$DIR' push -q"
+	[ -n "$DRY" ] && git -C "$DIR" checkout -q -- apps
+fi
+
+say ">> 2b. gate hop-os"
 ( cd "$DIR" && sh tools/test.sh >/dev/null )
 say "   groen"
-say ">> 2b. taggen $VER + metal/$VER"
+say ">> 2c. taggen $VER + metal/$VER"
 run "git tag -a $VER + metal/$VER, push" sh -c "
 	git -C '$DIR' tag -a '$VER' -m 'HopOS $VER' &&
 	git -C '$DIR' tag 'metal/$VER' &&
@@ -154,7 +181,7 @@ restore_dry() {
 	done
 }
 [ -n "$DRY" ] && trap restore_dry EXIT INT TERM
-for m in $(mods); do
+for m in $(mods_ext); do
 	old="$(grep -oE 'HopOS/metal v[0-9][^ ]*' "$m/go.mod" | head -1 | awk '{print $2}')"
 	printf '   %-46s %s -> %s\n' "$(basename "$(dirname "$m")")/$(basename "$m")" "${old:-?}" "$VER" >&2
 	if [ -n "$DRY" ]; then
@@ -173,7 +200,7 @@ say "   groen"
 
 # De app-modules committen we per repo: hop draagt er drie in één commit.
 say ">> 3c. bumps committen"
-for d in "$EASY/hopdns" "$EASY/hoplb" "$EASY/hopprom" "$HOP_DIR" "$SURF_DIR"; do
+for d in "$EASY/hopdns" "$EASY/hoplb" "$EASY/hopprom" "$SURF_DIR"; do
 	[ -n "$(git -C "$d" status --porcelain)" ] || { say "   $(basename "$d") — niets te committen"; continue; }
 	run "commit+push in $(basename "$d")" sh -c "
 		git -C '$d' add -A &&
