@@ -100,7 +100,15 @@ func nodeCanary() {
 		c.Close()
 		return true
 	}
-	for !probe(2 * time.Second) {
+	// Wachten op het eerste levensteken — en dat luid zeggen. Deze lus was stil,
+	// en daardoor kon een node uren draaien met een NIET-gewapende watchdog
+	// terwijl de console vol andere meldingen stond (11-08: op een LicheeRV ontbrak
+	// "hardware reset armed" over twee hele boots, en niemand kon het weten).
+	// Stilte is de verkeerde default voor een liveness-mechanisme.
+	for n := 0; !probe(2 * time.Second); n++ {
+		if n == 2 || n%60 == 59 { // na ~15s, daarna elke ~5min
+			fmt.Printf("watchdog: no liveness sign from %s yet (%d attempts) — NOT armed, this node will not self-reboot\n", target, n+1)
+		}
 		time.Sleep(5 * time.Second)
 	}
 	if !licheervhop.WdtUsable() {
