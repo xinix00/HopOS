@@ -70,13 +70,52 @@ gefixt met 64→128 descriptors) liet 3-41 frames per download vallen, en dát i
 de toestand waarin deze drie fouten zichtbaar worden. Op QEMU met slirp valt
 nooit een frame, dus daar blijven ze onzichtbaar.
 
+## Review 11-08: positief, met werk
+
+soypat heeft alle zes gelezen ("Really exciting to see so many interesting PRs
+to lneto!") en is voorlopig OOO, dus mergen kan duren. Vijf opmerkingen, waarvan
+drie over hetzelfde: **ons commentaar is te lang.** De huisstijl van beide
+upstreams staat nu in `upstream-pr-stijl.md`.
+
+| PR | Ask | Verwerkt |
+|---|---|---|
+| #178 | lus-levensduur in de `for`-header, niet via een return uit de body | ja — en de diff werd er 25 regels kleiner van |
+| #179 | geen; hij kijkt volgende week grondig | commentaar gesnoeid |
+| #180 | test op `internal/ltesto`'s `Sched`, niets mag slapen of blokkeren (issue #140) | churn-test verwijderd, zie hieronder |
+| #181 | `strconv.Itoa`, en commentaar korter (code én test) | ja |
+| #182 | doc van `txQueuedDataOpen` gaat over `TxDataOpen` i.p.v. over zichzelf | herschreven + unexported |
+| #183 | wacht op #182 | gerebased op de nieuwe #182 |
+
+**#180 kon niet zoals gevraagd.** De churn-test draaide drie goroutines (dialer,
+accept-lus, pakket-pomp) op de echte klok, mét sleeps en een 3-strikes-retry —
+flaky by construction, precies waar issue #140 over gaat. Een getrouwe port kán
+niet: `Sched.Goro()` paniekt op de tweede goroutine ("only one goroutine
+supported for now"). Dus de test is eruit en `TestEphemeralPortSequence` blijft
+over, die de eigenschap zélf pint (geen poort hergebruikt binnen 16384
+allocaties) zonder klok, sleep of goroutine. Aangeboden om hem te porten zodra
+`Sched` meerdere goroutines kan. **Dezelfde vraag komt bij #183**, wiens test een
+echte RTO uitzit; dat melden we daar alvast.
+
 Bij reviewvragen: de volledige onderbouwing (metingen, reproducties, de
 afwegingen per PR) staat in `~/Git/netstack-prs.md` op de werk-Mac; de
 regressietests in de PR's zelf zijn elk rood-bewezen op oude code.
 #178 en #180 raken dezelfde test-file-staart — wie het laatst landt rebaset
 (staat ook in de PR-tekst van #180).
 
-## Ronde 2 — KLAAR OM TE VUREN (wacht op de reacties op ronde 1)
+## Ronde 2 — AANGEKONDIGD, wacht op zijn keuze
+
+11-08 gevraagd in [discussion #184](https://github.com/soypat/lneto/discussions/184)
+("Some more fixes (Hi there!)") in plaats van drie losse PR's erbij te gooien:
+de drie lneto-vondsten op een rij met de vraag of hij er PR's van wil, en of ze
+los mogen of gecombineerd. DHCPv4-renewal staat erbij als heads-up, niet als
+aanbod — onze renewal is `leandhcp.KeepAlive`, een eigen client, dus het ding dat
+we zouden aanbieden bestaat nog niet. De broadcast-flag is weggelaten: geen
+apparaat dat het nodig heeft, dus niet aan te tonen.
+
+**Vóór het vuren nog werk aan de takken zelf:** ze zijn groen (één commit, test
+rood op main) maar niet schoon volgens de stijl die uit de review van 11-08 kwam
+— 7 em-dashes in de code, 7 in de commit-berichten, en `SeedNeighbor` heeft een
+doc-comment van zeven regels.
 
 Afgemaakt 09-08 avond: PR-branches standalone groen vanaf upstream-main,
 elke fix met een rood-bewezen test; concept-teksten in `~/Git/netstack-prs.md`.

@@ -94,3 +94,7 @@ metal/netmeter
 # losse buildoutput.
 apps/cloudflared/build/
 apps/*/out/
+
+# Interne werkgids voor PR's naar lneto/go-net (huisstijl van ándere repo's,
+# plus letterlijke review-citaten) — hoort niet in een publieke boom.
+docs/upstream-pr-stijl.md

@@ -29,16 +29,25 @@
 //	         KB te hoog, en die fout maakt het plafond alleen maar LAGER.
 //	         (runtime.bloc zelf is sinds go1.23 geen geldig linkname-doel.)
 //	budget = (muur − heap0) + MemStats.Sys         (nog te pakken + al gepakt)
-//	limiet = budget − slack (1/16 van het budget, minimaal 4MB). De vloer is
-//	         geen smaak maar de meetfout: het anker kan tot één arena-chunk
-//	         (4MB) onder de werkelijke claim-top liggen, en de slack moet
-//	         die onscherpte áltijd dekken. Daarboven 6%: Go's eigen
-//	         richtlijn voor memory-limit-headroom is 5-10%, en "conservatief
-//	         is niet hetzelfde als wat er kán" (Derek, 02-08).
+//	limiet = budget − slack, slack = max(10% van budget, 4MB)
 //
-// Op de LicheeRV rolt hier ~44MB uit (raam 64MB, image ~13MB) — precies de
-// waarde die het cycle-protocol op 02-08 als stabiel bewees (arm H: nul doden
-// waar élke eerdere arm er ~50% had).
+// 10% is Go's eigen richtlijn voor headroom onder een memory limit (5-10%), en
+// "conservatief is niet hetzelfde als wat er kán" (Derek, 02-08). De vloer van
+// 4MB is geen smaak maar de meetfout: het anker kan tot één arena-chunk onder de
+// werkelijke claim-top liggen, en de slack moet die onscherpte áltijd dekken.
+//
+// **Eén regel voor élke wereld, kern én app** — de marge hoort bij het raam, niet
+// bij wie erin woont. Was de fractie 1/16 (≈6%), dan gaf dat op de LicheeRV een
+// limiet van 47MB op 47MB bruikbare ruimte: nul marge, en dood.
+//
+// Naast de marge staat het TEMPO (zie arm()): in een smal raam is Go's
+// verdubbel-regel de echte oorzaak, en die is met GOGC te sturen. Dat is
+// belangrijk, want het alternatief was allocaties kleiner maken en dat kost
+// doorvoer op élk board — ook op de boards die geheugen genóeg hebben.
+//
+// Let op: deze doc noemde ~44MB bij een image van ~13MB, maar de bank meet nu
+// image+bss = 17MB — het image is met de netstack-flip ~4MB gegroeid en dat komt
+// rechtstreeks van de heap af.
 package memlimit
 
 import (
@@ -67,6 +76,15 @@ var ramStackOffset uint
 // deze waarde = nul). Empirisch de waarde waarmee HopOS sinds 02-08 draait.
 const arenaSlack = 4 << 20
 
+// tightWindow is de grens waaronder Go's verdubbel-regel niet meer past, en
+// tightGCPercent het tempo dat daar wél werkt. Zie de toelichting in arm(): 128MB
+// omdat élk board dat HopOS draait daaronder een HOP-raam van 64MB of minder
+// heeft (LicheeRV, en de app-partities), en daarboven verdubbelen efficiënt is.
+const (
+	tightWindow    = 128 << 20
+	tightGCPercent = 25
+)
+
 // anchor dwingt de meet-allocatie het echte heap in (escape-analyse mag hem
 // niet op een stack leggen — al ligt ook die op tamago binnen het raam).
 var anchor *byte
@@ -94,7 +112,13 @@ func arm(wall, heap0 uintptr, minSlack uint64) (limit uint64, ok bool) {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	budget += m.Sys
-	slack := budget / 16
+	// 10% is Go's eigen richtlijn voor headroom onder een memory limit; de vloer
+	// eronder dekt wat niet meeschaalt (één arena-groeistap plus de meetfout van
+	// het anker). Eén regel voor élke Go-wereld op HopOS, kern én app: de marge
+	// hoort bij het RAAM, niet bij wie erin woont (Derek, 11-08). Heeft een
+	// wereld méér marge nodig, dan alloceert hij te grof — dat hoort daar
+	// gefixt te worden en niet hier.
+	slack := budget / 10
 	if slack < minSlack {
 		slack = minSlack
 	}
@@ -103,10 +127,38 @@ func arm(wall, heap0 uintptr, minSlack uint64) (limit uint64, ok bool) {
 	}
 	limit = budget - slack
 	debug.SetMemoryLimit(int64(limit))
+
+	// En dan het tempo, want een limiet alleen is niet genoeg. Go's default is
+	// "ruim op als de heap VERDUBBELT" — een relatieve regel, terwijl ons plafond
+	// absoluut en dichtbij is. Bij een live set van 20MB wacht hij dus tot 40MB,
+	// en dat duurt bij echte last ruim een minuut: de GC zit niet lui te wezen,
+	// hij volgt zijn regel (Derek, 11-08). In een smal raam is die regel gewoon
+	// verkeerd: verdubbelen past er niet in.
+	//
+	// GEMETEN op de QEMU-bank, HOP's LicheeRV-raam met 128KiB TCP-buffers en de
+	// last die een board doodde: GOGC 100 → piek 41,6MB en OOM na 151s (3 GC's);
+	// GOGC 50 → piek 36,3MB, overleeft maar met bijna geen lucht; GOGC 25 → piek
+	// 30,6MB, Sys 32,4MB, 15MB over.
+	//
+	// En die extra rondes kosten hier niets: 22 GC's in 215s met 3,7ms
+	// stop-the-world totaal, dus 168µs per ronde (0,002% van de tijd). Dat komt
+	// doordat GC-werk met levende POINTERS schaalt en niet met bytes — deze heap
+	// is vooral []byte-buffers, en die staan pointer-vrij in noscan-spans. Draait
+	// er ooit een wereld met veel kleine pointer-rijke objecten, dan gaat die
+	// vlieger niet op en is dit getal opnieuw een meting waard.
+	//
+	// Alleen bij een smal raam, want daarboven is verdubbelen efficiënt en is de
+	// extra GC-tijd weggegooid. De grens leest het venster zelf uit — geen getal
+	// per board, geen getal per job.
+	gogc := 100
+	if limit < tightWindow {
+		gogc = tightGCPercent
+		debug.SetGCPercent(gogc)
+	}
 	// Eén regel zelfconfiguratie in de console-historie, net als de
 	// netwerk-identiteit: als een node ooit tóch tegen zijn plafond aan
-	// GC-stormt, is dít het getal dat de operator wil kennen.
-	fmt.Printf("mem: Go memory limit %dMB (window %dMB, image+bss %dMB)\n",
-		limit>>20, uintptr(ramSize)>>20, (heap0-uintptr(ramStart))>>20)
+	// GC-stormt, zijn dít de twee getallen die de operator wil kennen.
+	fmt.Printf("mem: Go memory limit %dMB, GOGC %d (window %dMB, image+bss %dMB)\n",
+		limit>>20, gogc, uintptr(ramSize)>>20, (heap0-uintptr(ramStart))>>20)
 	return limit, true
 }
