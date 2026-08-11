@@ -103,9 +103,9 @@ slot's partition), then submit through [HOP](https://gethop.org/hop/docs/):
 
 ```sh
 python3 -m http.server 8000 &
-hop apply --name hello --driver hop \
+run apply --name hello --driver hop \
     --artifact http://<your-ip>:8000/hello.elf --memory 96M
-hop logs hello
+run logs hello
 ```
 
 **Prebuilt apps.** You don't have to build one to try HopOS — ready-made apps
@@ -121,7 +121,7 @@ Most plain-Go services port in minutes — it's a checklist, not a rewrite:
 |---|---|
 | `func main()` starts working right away | first `app := applib.Init()`, then `appnet.Up(app)` |
 | `os.Getenv("PORT")` / flags | `app.Env("ER_PORT_<NAME>")` and job-spec `env` |
-| `log.Printf` / stdout | `app.Logf` — lands in `hop logs`, multiplexed per slot |
+| `log.Printf` / stdout | `app.Logf` — lands in `run logs`, multiplexed per slot |
 | reads/writes local files | private root + shared `/data` mounts: `app.ReadFile` / `app.WriteFile` / `app.Fetch` |
 | `http.ListenAndServe`, `net.Dial`, TLS, … | unchanged — full Go net suite on your own stack |
 | `os/exec`, cgo, C dependencies | won't port — there is no OS to exec into; keep it pure Go |
@@ -133,7 +133,7 @@ Most plain-Go services port in minutes — it's a checklist, not a rewrite:
   just sees `GOMAXPROCS`.
 - **Isolation by silicon** — its own memory cage; see
   [Isolation](technical/isolation.md).
-- **Telemetry for free** — cpu%, memory and heartbeat show up in `hop`
+- **Telemetry for free** — cpu%, memory and heartbeat show up in HOP
   without agents or exporters.
 
 ## Packing apps together — sharegroups
@@ -145,8 +145,8 @@ sharegroup: they cooperatively share a pool of whole cores, sized with
 timer, no preemption).
 
 ```sh
-hop apply --name web    --driver hop --artifact … --tag sharegroup=site --cpu 2048
-hop apply --name worker --driver hop --artifact … --tag sharegroup=site --cpu 2048
+run apply --name web    --driver hop --artifact … --tag sharegroup=site --cpu 2048
+run apply --name worker --driver hop --artifact … --tag sharegroup=site --cpu 2048
 ```
 
 Both land in the `site` pool of 2 whole cores (`--cpu 2048` = 2 cores; the

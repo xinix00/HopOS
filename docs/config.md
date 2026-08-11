@@ -49,7 +49,7 @@ window is only comments.
 
 | key | meaning | default |
 |---|---|---|
-| `hopos.node` | node name (shows up in `hop agents`) | generated |
+| `hopos.node` | node name (shows up in `run agents`) | generated |
 | `hopos.mac` | MAC address, `aa:bb:cc:dd:ee:ff`. Only needed on boards without one in hardware — the LicheeRV has no MAC fuse, so it derives one from `hopos.node` and this key overrides that. Two such boards on one LAN both need a distinct node name, or this. | derived from `hopos.node` |
 | `hopos.cluster` | cluster name — nodes with the same name form one cluster | — |
 | `hopos.cores` | cores reserved for the node runtime itself (clamped to the board's physical cores) | `1` |
@@ -137,7 +137,7 @@ its own jobs after any reboot or power cut** — see
 
 `hopos.init[]` seeds jobs on a **clean boot** so a node comes out of the box
 already running something. Each entry is one job as **compact JSON** (same
-schema as `POST /v1/jobs` / `hop apply`, so it's copy-pastable) — repeat the
+schema as `POST /v1/jobs` / `run apply`, so it's copy-pastable) — repeat the
 key for more jobs:
 
 ```

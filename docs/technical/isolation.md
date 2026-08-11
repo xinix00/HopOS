@@ -37,7 +37,7 @@ The cage is hardware, not policy.
   `mcause`/`mepc`/`mtval`) on the console while every other slot keeps serving.
 
 ```
-$ hop apply --name escape-probe    # deliberately reads outside its cage
+$ run apply --name escape-probe    # deliberately reads outside its cage
 slot 7: stage-2 fault — ESR 0x93c08007 FAR 0x9000f000 · core parked
 slots 1-6, 8-126: unaffected, still serving
 ```
