@@ -153,10 +153,16 @@ MAC onto the LAN, or reach the uplink directly.
 
 ## The node's own uplink
 
-HOP brings up the real NIC under the [gVisor](https://gvisor.dev) pure-Go
-network stack and hooks it into Go's standard `net` package, so the
+HOP brings up the real NIC under a pure-Go TCP/IP stack — `lneto`, reached
+through `go-net`, which hooks it into Go's standard `net` package, so the
 agent/leader get ordinary `net.Listen` / `net/http`
-([`hopnet.go`](../../metal/net/hopnet/hopnet.go)). The driver is the board's:
+([`hopnet.go`](../../metal/net/hopnet/hopnet.go)). Both come from our own forks
+([xinix00/lneto](https://github.com/xinix00/lneto),
+[xinix00/go-net](https://github.com/xinix00/go-net)) because bringing this up on
+metal turned up correctness bugs we had to fix; those fixes are open upstream
+PRs, and the fork disappears when they land
+([netstack-upstream.md](../netstack-upstream.md), Dutch). The driver is the
+board's:
 `virtionet` on QEMU, `igb` on the Ampere Altra, GENET/GEM (over the RP1
 bridge) on the Raspberry Pi, `dwmac` with the SoC's internal ePHY on the
 LicheeRV Nano. **DHCP happens only at the edge** — the node
@@ -173,13 +179,10 @@ workload needs them):
 - **On-subnet first contact** to a host HOP itself has never spoken to
   resolves on the retransmit, not the first packet.
 
-## Measured
-
-On a 128-core Ampere Altra with a 1 GbE `igb` NIC: 126 apps downloading
-their images simultaneously sustain ~33 MB/s aggregate through the switch,
-while a single flow takes essentially the whole line. The datapath is
-cache-tuned — descriptors uncached, frame buffers write-back with explicit
-maintenance (the Linux coherent/streaming split).
+The datapath is cache-tuned — descriptors uncached, frame buffers write-back
+with explicit maintenance (the Linux coherent/streaming split). Throughput
+numbers are being re-measured on the current stack; the ones that used to
+stand here were taken on the old per-app loader path, which no longer exists.
 
 ---
 

@@ -1,15 +1,16 @@
 # Flash & boot
 
-Five ways to a running node. Every download link on this page resolves to the
-**newest release** — GitHub resolves `latest`, so nothing here goes stale
-([all releases](https://github.com/xinix00/HopOS/releases)); verification at
-the bottom.
+Two roads to a running node: **the imager** — one window, no terminal — or the
+image files by hand. Every download link on this page resolves to the **newest
+release**, so nothing here goes stale
+([all releases](https://github.com/xinix00/HopOS/releases)); the signature
+check is at the bottom.
 
-Every board ships as a **complete dd-able image** — SD card or USB stick:
-`gunzip`, `dd`, boot. Firmware and boot chain are already on it, and there is
-nothing to format, rename or copy. The boot partition is plain FAT, so after
-flashing it mounts on macOS/Windows/Linux and `hopos.cfg` stays a text file
-you can edit; a kernel update is a file copy.
+Every board ships as a **complete dd-able image** — SD card or USB stick.
+Firmware and boot chain are already on it, and there is nothing to format,
+rename or copy. The boot partition is plain FAT, so after writing it mounts on
+macOS/Windows/Linux and `hopos.cfg` stays a text file you can edit; a kernel
+update is a file copy.
 
 Every arm64 asset comes in two flavours. **GUI** boots a desktop (display,
 launcher, app catalog); **headless** is not a switched-off GUI but the same
@@ -17,117 +18,115 @@ image built with *zero* lines of GUI code linked, and its default config runs
 one job — a `welcome` page on port 80 that tells you the node is up. The
 RISC-V board is headless only: no framebuffer on that silicon.
 
-## UEFI arm64 box (USB stick)
+## The imager — burn, configure, find
 
-Any UEFI arm64 machine with ACPI — from an Ampere Altra server on down. One
-stick image, nothing to format or rename:
+[hop-imager](https://github.com/xinix00/hop-imager) is the desktop tool for
+HopOS nodes: it picks the release, writes the card and reads it back, edits a
+node's config afterwards, and finds the nodes you already have.
 
-```sh
-diskutil unmountDisk /dev/diskN
-gunzip -c hopos-uefi.img.gz | sudo dd of=/dev/rdiskN bs=4m
-```
+| macOS | Linux | Windows |
+|---|---|---|
+| [`hop-imager-macos-universal.zip`](https://github.com/xinix00/hop-imager/releases/download/rolling-release/hop-imager-macos-universal.zip) | [`hop-imager-linux-amd64.tar.gz`](https://github.com/xinix00/hop-imager/releases/download/rolling-release/hop-imager-linux-amd64.tar.gz) | [`hop-imager-windows-amd64.zip`](https://github.com/xinix00/hop-imager/releases/download/rolling-release/hop-imager-windows-amd64.zip) |
 
-Grab
-[`hopos-uefi.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-uefi.img.gz)
-(headless:
-[`hopos-uefi-headless.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-uefi-headless.img.gz))
-— it carries `EFI/BOOT/BOOTAA64.EFI` and the flavour's default `hopos.cfg`.
-Boot from the stick; that's the install. Set `hopos.apikey` in `hopos.cfg` on
-the stick before the node leaves a LAN you trust — see [Configure](config.md).
+A new node is three steps:
 
-Updating a stick you already have: copy
-[`BOOTAA64.EFI`](https://github.com/xinix00/HopOS/releases/latest/download/BOOTAA64.EFI)
-to `EFI/BOOT/BOOTAA64.EFI` (headless:
-[`BOOTAA64-headless.EFI`](https://github.com/xinix00/HopOS/releases/latest/download/BOOTAA64-headless.EFI),
-renamed to `BOOTAA64.EFI` — the firmware looks for that exact name) and put
-[`hopos.cfg`](https://github.com/xinix00/HopOS/releases/latest/download/hopos.cfg)
-(headless:
-[`hopos-headless.cfg`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-headless.cfg),
-renamed to `hopos.cfg`) in the stick's root.
+1. **RELEASE** — the channel and the version. HopOS ships betas now and then,
+   so "the latest release" is a choice rather than a given; the tool opens on
+   the newest stable, and every release that carries card images is in the list
+   if you need to match the version your other nodes run.
+2. **Type and board** — *Desktop* or *Headless*, then your board. The three
+   together select the image, which is downloaded once and cached. A board
+   without that flavour stays visible but disabled (the LicheeRV Nano has no
+   desktop image — that is the silicon, not a missing file).
+3. **WRITE + VERIFY** — a card or stick shows up in TARGET by itself. One
+   button writes it and reads it back, comparing byte for byte on the same open
+   device, *before anything can mount it*. That is the only moment the answer
+   means something: verify a minute later and you are comparing against bytes
+   the operating system wrote itself when it mounted your fresh card.
 
-Network needs an igb-family NIC (Intel i210/i211); without one the node
-boots without external networking.
+**Updating a node keeps its config.** *Keep this card's config* is on by
+default, because that is what an update should do: new code, same node. Before
+a byte is written the tool reads the config off the card, saves a copy on your
+machine (mode `0600` — it holds your keys), and puts it back into the fresh
+image *after* the comparison. Name, API key, S3 credentials and jobs survive,
+**verbatim** — it never merges your config with a newer default, but it does
+tell you which keys that default sets and yours lacks.
 
-## Raspberry Pi 4 / 5 (SD card)
+**CONFIGURE** changes the config of a card you already wrote — no mount, no
+rebuild, see [Configure](config.md). **FIND** scans your network: every node
+serves its console on `tcp/5555` and hands over its retained boot log the
+moment you connect, so a single TCP connect identifies a node *and* tells you
+its name, architecture, type and state. No mDNS, no broadcast, no extra code
+on the node.
 
-The Pi boots from its firmware, not UEFI — the card image carries that
-firmware plus the kernel, `config.txt` and the flavour's default `hopos.cfg`:
+Each platform reaches its devices the way that OS demands. On **macOS** run the
+app bundle — since Sequoia an app needs an identity to hold local-network
+permission, and a loose binary makes FIND see an empty network. On **Linux**,
+`sudo` or the `disk` group. On **Windows**, administrator (it offers to restart
+elevated).
+
+The imager verifies the *write*; it does not check the release signature for
+you. If you want that too, see [Verify a download](#verify-a-download) below.
+
+## By hand — one image per board
+
+The manual road is the same image, `gunzip`ped straight onto the medium:
 
 ```sh
 diskutil unmountDisk /dev/diskN
 gunzip -c hopos-rpi5.img.gz | sudo dd of=/dev/rdiskN bs=4m
 ```
 
-Grab
-[`hopos-rpi5.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi5.img.gz)
-or
-[`hopos-rpi4.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi4.img.gz)
-(headless:
-[`hopos-rpi5-headless.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi5-headless.img.gz),
-[`hopos-rpi4-headless.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi4-headless.img.gz)).
-The GUI flavour boots as-is; set `hopos.apikey` on the card before the node
-leaves a LAN you trust — see [Configure](config.md) for all keys.
+| board | GUI | headless | what is on the medium |
+|---|---|---|---|
+| UEFI arm64 box (USB stick) | [`hopos-uefi.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-uefi.img.gz) | [`hopos-uefi-headless.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-uefi-headless.img.gz) | `EFI/BOOT/BOOTAA64.EFI` + the flavour's default `hopos.cfg`. Boot from the stick; that's the install |
+| Raspberry Pi 5 | [`hopos-rpi5.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi5.img.gz) | [`hopos-rpi5-headless.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi5-headless.img.gz) | the Pi firmware (it boots from that, not UEFI), the kernel, `config.txt`, `hopos.cfg` |
+| Raspberry Pi 4 | [`hopos-rpi4.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi4.img.gz) | [`hopos-rpi4-headless.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi4-headless.img.gz) | same as the Pi 5 |
+| Radxa Zero 3E (RK3566) | [`hopos-radxa-zero3.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-radxa-zero3.img.gz) | [`hopos-radxa-zero3-headless.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-radxa-zero3-headless.img.gz) | the vendor boot chain (TPL/SPL + TF-A + U-Boot, from the official Radxa image) on the raw sectors where the boot ROM reads it; our kernel, `extlinux.conf` and `hopos.cfg` on the FAT partition U-Boot's distro-boot finds |
+| LicheeRV Nano (RISC-V) | — | [`hopos-licheerv-headless.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-licheerv-headless.img.gz) | the whole card: partition table, FAT partition, `fip.bin` with our kernel in it — and the config **baked in** |
 
-Already have a card with a Pi boot partition (`bootfs`)? Then unzip
-[`hopos-rpi5.zip`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi5.zip)
-(or
-[`hopos-rpi4.zip`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi4.zip);
-headless:
-[`hopos-rpi5-headless.zip`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi5-headless.zip),
-[`hopos-rpi4-headless.zip`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi4-headless.zip))
-onto it instead — the same kernel, `config.txt` and `hopos.cfg`, no reflash.
+A fresh card is a working node: the GUI flavour boots a desktop, headless runs
+`welcome` on port 80. Set `hopos.apikey` before the node leaves a LAN you trust
+— in the imager's CONFIGURE, or by editing the file — see
+[Configure](config.md).
 
-## Radxa Zero 3E — RK3566 (SD card)
+Notes per board, all of them consequences of the hardware:
 
-Same shape:
-[`hopos-radxa-zero3.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-radxa-zero3.img.gz)
-(headless:
-[`hopos-radxa-zero3-headless.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-radxa-zero3-headless.img.gz))
-is the whole card. The vendor boot chain (TPL/SPL + TF-A + U-Boot, taken from
-the official Radxa image) sits on the raw sectors where the RK3566 boot ROM
-reads it; our kernel, `extlinux.conf` and `hopos.cfg` live on the FAT
-partition that U-Boot's distro-boot finds:
+- **UEFI** — network needs an igb-family NIC (Intel i210/i211); without one the
+  node boots without external networking.
+- **Radxa Zero 3E** — HDMI, gigabit ethernet and the hardware watchdog are all
+  driven by HopOS itself on this board.
+- **LicheeRV Nano** — a Sophgo SG2002 (two XuanTie C906 harts, 256 MB) for about
+  €15; signed image since v1.6.0, one hart for HOP and one for apps. It has no SD
+  driver of its own — the vendor's first-stage loader reads the card, HopOS never
+  does — so there is no file on it to edit and its config lives *inside* the
+  kernel. The imager still configures it (it patches the window in the FIP and
+  fixes the checksums that guard it); by hand you rebuild, see below. What is
+  baked in is the same headless default every other board gets: `welcome`, the
+  console on TCP port 5555 (`nc <node-ip> 5555` — there is no framebuffer here
+  and the UART needs a cable), and, because that image carries no key, an API
+  that is **deliberately open** (`hopos.insecure=1`). Fine on a trusted LAN, not
+  anywhere else. Two default-image boards on one LAN share a MAC until you give
+  them node names — the boot log warns about it.
 
-```sh
-diskutil unmountDisk /dev/diskN
-gunzip -c hopos-radxa-zero3.img.gz | sudo dd of=/dev/rdiskN bs=4m
-```
+### Updating a card you already have
 
-HDMI, gigabit ethernet and the hardware watchdog are all driven by HopOS
-itself on this board. Updating a card that already runs HopOS: unzip
+Not a reflash: the imager writes a new release onto the card and keeps its
+config. By hand, unzip the board's `.zip` onto the mounted boot partition —
+kernel, boot config and `hopos.cfg`, no reflash:
+[`hopos-rpi5.zip`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi5.zip),
+[`hopos-rpi4.zip`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-rpi4.zip),
 [`hopos-radxa-zero3.zip`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-radxa-zero3.zip)
-onto its boot partition (it mounts anywhere) — kernel, `extlinux.conf`,
-`hopos.cfg`.
+(each also as `-headless`). On a UEFI stick, copy
+[`BOOTAA64.EFI`](https://github.com/xinix00/HopOS/releases/latest/download/BOOTAA64.EFI)
+to `EFI/BOOT/BOOTAA64.EFI` — the headless build is published as
+[`BOOTAA64-headless.EFI`](https://github.com/xinix00/HopOS/releases/latest/download/BOOTAA64-headless.EFI)
+and has to be renamed to that exact name, because the firmware looks for it.
 
-## LicheeRV Nano — RISC-V (SD card)
+### Rebuilding the LicheeRV image
 
-The first non-ARM board: a Sophgo SG2002 (two XuanTie C906 harts, 256 MB) for
-about €15. Signed image since v1.6.0 — one hart for HOP, one for apps:
-
-```sh
-diskutil unmountDisk /dev/diskN
-gunzip -c hopos-licheerv-headless.img.gz | sudo dd of=/dev/rdiskN bs=4m
-```
-
-That
-[`hopos-licheerv-headless.img.gz`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-licheerv-headless.img.gz)
-(headless is the only flavour here — no framebuffer on this silicon)
-is the **whole card**: partition table, FAT boot partition, `fip.bin`. Nothing
-to copy onto it afterwards — and nothing to edit either. This board has no SD
-driver of its own (the vendor's first-stage loader reads the card, HopOS never
-does), so its config is **baked into the image**. What is baked in is the same
-headless default every other board gets
-([`hopos-headless.cfg`](https://github.com/xinix00/HopOS/releases/latest/download/hopos-headless.cfg)):
-a node that seeds the `welcome` job, streams its console over TCP port 5555
-(`nc <node-ip> 5555` — there is no framebuffer here and the UART needs a
-cable), and — because that image carries no key — runs its **API deliberately
-open** (`hopos.insecure=1`). Fine on a trusted LAN, not anywhere else: for
-your own key, a node name (two default-image boards on one LAN share a MAC
-until you set one — the boot log warns about it), or any other change,
-rebuild.
-
-Rebuilding it (from a clone of this repo) needs riscv64 binutils and the Sipeed
-donor fip — that board's first-stage loader and DRAM parameters:
+From a clone of this repo; needs riscv64 binutils and the Sipeed donor fip —
+that board's first-stage loader and DRAM parameters:
 
 ```sh
 CFG=~/my-node.cfg image/licheerv-agent.sh   # → metal/out/hopos-licheerv.img
@@ -135,19 +134,19 @@ image/licheerv-agent.sh /dev/diskN          # fast iteration: replaces just fip.
 ```
 
 Your `CFG` file is the node's config: set `hopos.apikey`, drop
-`hopos.insecure`, and put your own `hopos.init[]` jobs in it. Keep it outside
-the repo — it holds keys.
+`hopos.insecure`, put your own `hopos.init[]` jobs in it. Keep it outside the
+repo — it holds keys.
 
-Our kernel replaces OpenSBI in the SD card's `fip.bin`; the vendor's
-first-stage loader does clock and DRAM init and enters us in machine mode —
-U-Boot and Linux never get a turn. What runs on it is the full node, not a
-subset: the agent and leader on the LAN over our own DWMAC + internal-ePHY
-driver (100 Mb, DHCP, NTP), the slot lifecycle with kill and restart, on-die
-temperature, the hardware RNG, and **two apps sharing the one app hart** —
-measured with a web server and a Cloudflare tunnel side by side at ~37 % of
-the hart each. The cage here is a **PMP whitelist** plus a supervisor page
-table rather than an ARM stage-2 mapping, because the C906 has no hypervisor
-extension; the app ABI is identical, only the mechanism under it differs. See
+Our kernel replaces OpenSBI in the card's `fip.bin`; the vendor's first-stage
+loader does clock and DRAM init and enters us in machine mode — U-Boot and
+Linux never get a turn. What runs on it is the full node, not a subset: agent
+and leader on the LAN over our own DWMAC + internal-ePHY driver (100 Mb, DHCP,
+NTP), the slot lifecycle with kill and restart, on-die temperature, the
+hardware RNG, and **two apps sharing the one app hart** — measured with a web
+server and a Cloudflare tunnel side by side at ~37 % of the hart each. The cage
+here is a **PMP whitelist** plus a supervisor page table rather than an ARM
+stage-2 mapping, because the C906 has no hypervisor extension; the app ABI is
+identical, only the mechanism under it differs. See
 [isolation](technical/isolation.md) and `metal/kern/cage`.
 
 ## QEMU (no hardware)
@@ -182,9 +181,10 @@ hop: agent starting — node <name> · HOPOS_AGENT_UP
 
 On UEFI machines the console is the screen (GOP) and the SPCR serial port; on
 the Pi it's HDMI and the UART pins; on the LicheeRV it's the UART pins, or the
-network (`hopos.console`, see [Configure](config.md)). Once the node is up,
-`http://<node-ip>/` is the install check — the default config runs a page
-there that reports cores, RAM partition, architecture and uptime.
+network (`hopos.console`, see [Configure](config.md)) — which is also where the
+imager's FIND reads the boot log. Once the node is up, `http://<node-ip>/` is
+the install check: the default config runs a page there that reports cores, RAM
+partition, architecture and uptime.
 
 ## Verify a download
 

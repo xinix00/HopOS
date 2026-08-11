@@ -1,14 +1,14 @@
 # HopOS documentation
 
-HopOS is the Go-only OS: a ~15 MB signed image is the entire node, every app
+HopOS is the Go-only OS: a ~9 MB signed image is the entire node, every app
 runs on its own physical cores behind a hardware cage, and all state lives
 in S3 — not on the machine. Two architectures, arm64 and riscv64, under one
 app ABI. Product page: [gethop.org/hopos](https://gethop.org/hopos/).
 
 ## Quick start
 
-1. **[Flash & boot](boot.md)** — get a node running: UEFI stick, Raspberry Pi SD card, RISC-V SD image, or QEMU in 5 minutes. Signed images: [newest release](https://github.com/xinix00/HopOS/releases/latest).
-2. **[Configure](config.md)** — the six lines that define a node; same keys on every board.
+1. **[Flash & boot](boot.md)** — the [imager](https://github.com/xinix00/hop-imager) writes a card, verifies it and finds your nodes, in one window without a terminal; or take the image files by hand (UEFI stick, Raspberry Pi or Radxa SD card, RISC-V SD image, QEMU). Signed images: [newest release](https://github.com/xinix00/HopOS/releases/latest).
+2. **[Configure](config.md)** — the six lines that define a node; same keys on every board, editable before or after writing the card.
 3. **[Write an app](app.md)** — compile a Go program for HopOS and run it as a job.
 
 ## Technical

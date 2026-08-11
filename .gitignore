@@ -84,3 +84,13 @@ image/radxa/
 
 # Losse `go build ./cmd/netmeter`-output (de scripts schrijven naar metal/out/).
 metal/netmeter
+
+# De app-README's (apps/*/): dit zijn producten met een eigen uitleg, en die
+# horen in de repo — de *.md-regel hierboven is voor het interne plan.
+!apps/*/README.md
+
+# Regenereerbaar in de app-modules: de gepatchte cloudflared-kopie die
+# apps/cloudflared/tools/prepare-cloudflared.sh maakt (63MB vendor-bytes) en
+# losse buildoutput.
+apps/cloudflared/build/
+apps/*/out/

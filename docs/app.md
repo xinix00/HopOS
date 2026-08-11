@@ -66,9 +66,9 @@ this `hello`: 4.70 MB with `appnet`, 7.99 MB once `net/http` is in, of which
 ~54% is TLS/PKI). [`leanhttp`](https://github.com/xinix00/lean) is plain HTTP/1.1 without it:
 `Get`/`Do` as a client, `Serve` as a server, chunked and WebSocket-upgrade
 included, `+0.36 MB` over the netstack floor. The SURF display, launcher and
-taskman run on it and each lost ~2.9 MB; a client that needs https (like the
-browser, or this repo's apploader with its x509 root bundle) stays on
-`net/http`. See the package doc for the full trade-off.
+taskman run on it and each lost ~2.9 MB; an app that needs https — a client
+dialing an S3 endpoint, the SURF browser — stays on `net/http` with its x509
+root bundle. See the package doc for the full trade-off.
 
 Today an app lives inside this repo's module (`metal/app/<name>`) so it can
 import `applib` — copy `hello` as your starting point.
@@ -98,8 +98,8 @@ Same source, two artifacts — list both in one job with a `match` on
 
 ## 4. Run it as a job
 
-Serve the ELF over HTTP (the app downloads its own image, on its own core),
-then submit through [HOP](https://gethop.org/hop/docs/):
+Serve the ELF over HTTP (the node streams it from there straight into the
+slot's partition), then submit through [HOP](https://gethop.org/hop/docs/):
 
 ```sh
 python3 -m http.server 8000 &

@@ -28,10 +28,14 @@ flowchart LR
   [isolation](isolation.md)). There is no shared kernel to call into: the
   app↔node ABI is a control page (status, heartbeat, kill, telemetry) and
   two message rings.
-- **Two-phase loading.** The node starts a tiny baked-in *apploader* on the
-  target core; it downloads the real image **on its own core and its own
-  network stack**, straight into its own partition, then the app places
-  itself and boots. A storm of 127 job starts never funnels through core 0.
+- **One-phase start.** The node streams a job's image **straight into the
+  slot's partition** — every byte lands at the address it will run at — and
+  then the core comes out of reset on the cage stub, which checks its cage
+  and jumps in. No apploader and no staged copy, so a partition carries the
+  app plus its heap and nothing else (`cloudflared`: a 30 MB image used to
+  need a 124 MB partition). The download runs on HOP's own network stack and
+  buffers only its read block; how many run at once is the orchestrator's
+  call.
 - **No interrupts.** Everything polls; idle ARM cores sleep on the event
   stream (~1 ms granularity) and are woken by work, and a spare RISC-V hart
   pauses on a counter instead (no `wfi` — on the C906 that is not a
