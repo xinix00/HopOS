@@ -206,6 +206,96 @@ https-artifact van GitHub gestreamd (3 MB) en de app antwoordt met HTTP 200.
       niet werken** tot ze opnieuw gebouwd zijn
 - [ ] daarna cloudflared functioneel meten (tunnel opzetten); nu niet mogelijk
 
+## Netstack-buffers: opbouwen i.p.v. vooraf claimen (idee 11-08, Derek)
+
+**Waar het vandaan komt.** HOP ging OOM omdat `hopnet` één `TCPBufferSize` van
+128KiB zet en `x/xnet` die **per verbinding, vooraf en vast** alloceert. Twee
+plekken:
+
+- `NewTCPPool`: élke `net.Listen` claimt `MaxListenerConns × 2 × TCPBufferSize`
+  vooraf, dus 8 × 2 × 128KiB = **2MB per listener** die permanent vast staat,
+  ook als er nul verbindingen zijn. HOP heeft drie listeners.
+- `x/xnet/stack-go.go` (regels 125/151/180): élke uitgaande dial alloceert een
+  verse `TxBuf`+`RxBuf` uit dezelfde config, dus **256KB per dial**, vrijgegeven
+  pas door de GC.
+
+Het geheugen schaalt daarmee met **geconfigureerde capaciteit** in plaats van met
+**actief gebruik**. Op een raam van 46MB is dat het verschil tussen werken en
+omvallen, en het dwong ons vandaag in een keuze die geen van beide kanten goed
+is: buffers klein (kost doorvoer op élk board, ook die met geheugen genoeg) of
+een ruimere GC-marge (kost heap). We kozen GOGC 25 als pleister.
+
+### Hoe gVisor het doet — afgekeken 11-08, dit is de referentie
+
+Bron: `gvisor.dev/gvisor/pkg/tcpip/transport/tcp` (staat nog in de module-cache).
+Het architecturale verschil in één zin: **daar is de config een PLAFOND, hier is
+hij een ALLOCATIE.** gVisor kent per protocol een range `{Min, Default, Max}` —
+`MinBufferSize = 4KiB`, `Default = 1MiB`, `MaxBufferSize = 4MiB` — en een
+endpoint start op Default en groeit naar Max. Niets wordt vooraf per slot geclaimd.
+
+**Sendbuffer** (`endpoint.go`, `computeTCPSendBufferSize`): de buffer volgt het
+congestievenster, want dat is precies wat er in flight kan zijn.
+
+    numSeg     = max(InitialCwnd /* 10 */, SndCwnd)
+    newSndBufSz = numSeg * MSS * 2          // factor 2 = pakket-overhead
+    if newSndBufSz < curSndBufSz { houd de huidige }   // groeit alleen
+    clamp op ss.Max
+
+Start dus op ~10 × 1460 × 2 ≈ 29KB en groeit mee met cwnd. Auto-tuning gaat uit
+zodra de gebruiker zelf `SO_SNDBUF` zet — een expliciete keuze wint.
+
+**Receivebuffer** (`endpoint.go` ~1310): tuneert op wat de **applicatie**
+daadwerkelijk uitleest in de laatste RTT, niet op wat er aankomt.
+
+    alleen groeien als deze RTT méér gekopieerd is dan de vorige
+    rcvWnd = prevRTTCopied*2 + 16*amss      // 2x voor verlies, 16 segmenten slack
+    grow   = rcvWnd * (prevRTTCopied - prevCopied) / prevCopied
+    rcvWnd += grow * 2                      // sender verdubbelt cwnd per RTT
+    vloer  = amss * InitialCwnd * 2          // altijd 2x het initiële venster
+    plafond = maxReceiveBufferSize()
+    NOOIT krimpen — een kleiner venster zou data in flight afwijzen
+
+De RTT meet de ontvanger zelf (`rcv.go`, `updateRTT`, minimum-observatie) als er
+geen SRTT uit timestamps beschikbaar is. Dus: geen klok van buiten nodig, en geen
+configuratie per verbinding.
+
+**Wat we hiervan overnemen voor lneto:** de drie eigenschappen die het werk doen
+zijn (1) config = range i.p.v. allocatie, (2) grow-only met een vloer en een
+plafond, en (3) het signaal is *gebruik* — cwnd voor de send-kant, door de app
+gekopieerde bytes voor de receive-kant. Punt 3 is de crux: op precies dezelfde
+128KiB-config zou een health-check op zijn vloer blijven staan en een download
+naar het plafond klimmen.
+
+**Twee ontwerpen die de keuze weghalen** (niet exclusief, de tweede is de
+goedkopere tussenstap):
+
+1. **Rampen / auto-tunen.** Klein beginnen en het venster laten groeien zodra de
+   peer het echt vult — een download krijgt zijn 128KiB, een health-check of een
+   agent→leader-proxy blijft op een paar KB staan. Dit is wat gVisor deed, en het
+   is exact de reden dat we dit vóór de flip nooit hebben gezien: daar was de
+   buffer een gevolg van het gebruik, nu is hij een gevolg van de config.
+2. **Één pool voor alles i.p.v. per verbinding.** Grote buffers uitgeven op
+   aanvraag en teruggeven bij close. Dan kost N gelijktijdige bulk-transfers
+   N × 128KiB, in plaats van (elke listener-slot + elke dial) × 128KiB. Past bij
+   lneto's stijl, die al pools kent.
+
+**Waarom dit de juiste plek is en niet nóg een knop.** Een tweede globale
+instelling (inkomend/uitgaand, of "kern versus app") splitst op de verkeerde as:
+bulk en control bestaan beide in beide richtingen, en per rol sizen zou
+netstack-config in vreemde pakketten smokkelen. De as die telt is per socket, en
+die kent alleen de socket zelf — dus hoort de beslissing daar, niet in een
+config-getal. Dat maakt het ook het antwoord dat voor élke lneto-gebruiker
+werkt, niet alleen voor ons.
+
+**Wat het ons oplevert als het er is:** `hopnet` mag zijn 128KiB houden voor
+downloads zonder dat listeners en proxy-dials meebetalen, de GOGC-25-pleiser in
+`cpu/memlimit` mag terug naar Go's richtlijn van ~10%, en de vaste voet van HOP
+(nu ~6MB alleen aan voorgeclaimde listener-pools) zakt mee.
+
+- [ ] kandidaat-PR upstream, mét de QEMU-reproductie erbij (raam op 64MB +
+      SSE-last op `/v1/events`): eerst de smalle bug (dial-buffers los van de
+      listener-pool-config), daarna pooling of auto-tuning als het echte antwoord
+
 ## RAM-eis per app — gemeten 11-08 (QEMU virt, arm64)
 
 **De regels van het geheugenmodel**, want daarmee is elk getal na te rekenen:
