@@ -116,11 +116,11 @@ say "   metal requiret hop $HOP_REQ"
 # fase 3. Alleen hop's EIGEN code kan een hop-release nodig maken.
 if ! git -C "$HOP_DIR" rev-parse -q --verify "$HOP_REQ" >/dev/null; then
 	say "   LET OP: tag $HOP_REQ staat niet in $HOP_DIR — kan niet vergelijken, hop overgeslagen"
-elif git -C "$HOP_DIR" diff --quiet "$HOP_REQ" HEAD -- '*.go' go.mod go.sum; then
+elif git -C "$HOP_DIR" diff --quiet "$HOP_REQ" HEAD -- '*.go' go.mod go.sum ':(exclude)apps'; then
 	say "   hop-code identiek aan $HOP_REQ — geen hop-release nodig"
 else
 	say "   hop's code loopt vóór op $HOP_REQ — hop gaat eerst"
-	git -C "$HOP_DIR" diff --stat "$HOP_REQ" HEAD -- '*.go' go.mod go.sum | tail -3 >&2
+	git -C "$HOP_DIR" diff --stat "$HOP_REQ" HEAD -- '*.go' go.mod go.sum ':(exclude)apps' | tail -3 >&2
 	# Dit kan onvoorwaardelijk vóór metal: hop hangt niet aan metal, dus zijn
 	# release kan nooit op deze metal wachten. Sinds 11-08 bouwt hop's
 	# release.sh alleen de gewone wereld (linux/darwin, amd64/arm64) — de
