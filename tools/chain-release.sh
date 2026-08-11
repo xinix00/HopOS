@@ -5,6 +5,13 @@
 #
 #   tools/chain-release.sh v1.12.0            # de echte release
 #   DRYRUN=1 tools/chain-release.sh v1.12.0   # alles bouwen, niets publiceren
+#   FROM=4 tools/chain-release.sh v1.12.0     # hervatten vanaf fase 4
+#
+# HERVATTEN. De keten raakt zes repo's en een half gepubliceerde release is
+# geen toestand om met de hand uit te poetsen. Faalt er iets halverwege (11-08:
+# surf's push viel om op een credential-helper die alleen in hop-os stond), los
+# dat op en start met FROM=<fase>. Alle fasen zijn idempotent: pins die al goed
+# staan leveren geen commit op, en assets worden geclobberd.
 #
 # VERSCHIL MET chain-beta.sh. De beta bouwt uit de werkbomen met tijdelijke
 # pad-replaces en draait die terug: niets buiten deze Mac verandert. Deze bouwt
@@ -44,7 +51,9 @@ case "$VER" in
 *-*) echo "FOUT: '$VER' heeft een suffix — pre-releases doet chain-beta.sh" >&2; exit 1 ;;
 esac
 
+FROM="${FROM:-1}"
 say() { echo "$@" >&2; }
+want() { [ "$FROM" -le "$1" ]; }   # draaien we deze fase nog?
 run() { # run <beschrijving> <commando...> — in DRYRUN alleen melden
 	d="$1"; shift
 	if [ -n "$DRY" ]; then say "   [dry] $d"; else "$@"; fi
@@ -93,9 +102,21 @@ for gm in "$DIR/metal/go.mod" "$SURF_DIR/go.mod"; do
 	! grep -qE '=> +/' "$gm" || { say "FOUT: pad-replace in $gm"; exit 1; }
 done
 command -v gh >/dev/null || { say "FOUT: gh ontbreekt"; exit 1; }
+# WIE ZIJN WE. gh én git (via de credential-helper) gebruiken het ACTIEVE
+# token, en dat is een globale toestand die buiten dit script omgaat. Met het
+# verkeerde account halveert een release: metal stond 11-08 al getagd en drie
+# satellieten waren gepusht toen surf op 403 stuk liep, omdat het actieve
+# account daar geen schrijfrechten heeft. Liever nu luid stoppen.
+WHO="$(gh api user --jq .login 2>/dev/null || true)"
+[ "$WHO" = "xinix00" ] || {
+	echo "FOUT: WRONG USER — gh draait als '${WHO:-onbekend}', niet xinix00." >&2
+	echo "      herstel: gh auth switch --user xinix00" >&2; exit 1; }
+
 [ -f "$HOME/.hopos/release_key" ] || { say "FOUT: ondertekensleutel ontbreekt"; exit 1; }
-git -C "$DIR" tag -l "$VER" | grep -q . && { say "FOUT: tag $VER bestaat al"; exit 1; }
-say "   bomen schoon, geen pad-replaces, sleutel aanwezig"
+if want 2; then
+	git -C "$DIR" tag -l "$VER" | grep -q . && { say "FOUT: tag $VER bestaat al"; exit 1; }
+fi
+say "   bomen schoon, geen pad-replaces, sleutel aanwezig, gh = $WHO"
 
 # ------------------------------------------------------- 1. hop: nog actueel?
 # metal requiret een hop-TAG. Loopt hop's code daarop vóór, dan moet hop eerst
@@ -108,6 +129,7 @@ say "   bomen schoon, geen pad-replaces, sleutel aanwezig"
 # repo's taggen + notariseren omdat er één regel uit .gitignore was — gemeten in
 # de repetitie van 11-08.
 say ""
+if want 1; then
 say ">> 1. hop tegenover metal's require"
 HOP_REQ="$(cd "$DIR/metal" && go mod edit -json | sed -n 's/.*"Path": "github.com\/xinix00\/hop",[^}]*"Version": "\([^"]*\)".*/\1/p' | head -1)"
 [ -n "$HOP_REQ" ] || HOP_REQ="$(grep -oE 'github.com/xinix00/hop v[0-9][^ ]*' "$DIR/metal/go.mod" | head -1 | awk '{print $2}')"
@@ -138,8 +160,11 @@ else
 	fi
 fi
 
+fi
+
 # --------------------------------------------------------- 2. metal: gate + tag
 say ""
+if want 2; then
 say ">> 2. de app-modules in deze repo op $VER"
 for m in $(mods_in); do
 	old="$(grep -oE 'HopOS/metal v[0-9][^ ]*' "$m/go.mod" | head -1 | awk '{print $2}')"
@@ -174,10 +199,13 @@ if [ -z "$DRY" ]; then
 	say "   metal@$VER opvraagbaar"
 fi
 
+fi
+
 # ------------------------------------------------- 3. consumers op de nieuwe pin
 # In DRYRUN bestaat de tag niet, dus daar zetten we een pad-replace (en draaien
 # die terug) — anders is er niets te bouwen en zegt de repetitie niets.
 say ""
+if want 3; then
 say ">> 3. metal-pin bijwerken bij alle consumers"
 BAKS=""
 restore_dry() {
@@ -215,9 +243,12 @@ for d in "$EASY/hopdns" "$EASY/hoplb" "$EASY/hopprom" "$SURF_DIR"; do
 	[ -n "$DRY" ] || say "   $(basename "$d") ✓"
 done
 
+fi
+
 # ----------------------------------------------------------- 4. de app-images
 # Eerst de apps, dan de images: de images dragen alleen URL's.
 say ""
+if want 4; then
 say ">> 4. app-images bouwen en publiceren"
 if [ -n "$DRY" ]; then
 	PUBLISH=0 sh "$DIR/tools/apps-release.sh"
@@ -227,13 +258,18 @@ fi
 say ">> 4b. surf-apps publiceren"
 run "surf publish-apps.sh" sh -c "cd '$SURF_DIR' && sh tools/publish-apps.sh >/dev/null"
 
+fi
+
 # --------------------------------------------------- 5. de images zelf, laatst
 say ""
+if want 5; then
 say ">> 5. images bouwen, ondertekenen, publiceren"
 if [ -n "$DRY" ]; then
 	say "   [dry] tools/release.sh $VER"
 else
 	( cd "$DIR" && sh tools/release.sh "$VER" >/dev/null )
+fi
+
 fi
 
 # ------------------------------------------------------------- 6. natrekken
