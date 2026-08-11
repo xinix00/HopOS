@@ -1,5 +1,31 @@
 # TODO
 
+## Die-temp stond stil: `auto_cycle` ontbrak (11-08 GEFIXT, ongecommit)
+
+**Symptoom** (Dereks observatie): `board: die temp 40.5C`, tien keer achter elkaar
+exact hetzelfde terwijl de node downloadde. Per boot wél een andere waarde
+(52,1 / 48,9 / 40,5), binnen een boot nooit beweging. Eén LSB is 0,35°C, dus
+stilstand op die schaal is geen ruisonderdrukking maar een bevroren register.
+
+**Oorzaak:** `metal/board/licheerv/temp.go` schreef `reg_tempsen_auto_cycle`
+(0x030E0064, bits [23:0]) niet. Zonder periode doet de CV181x-TEMPSEN één
+conversie bij `enable` en staat het resultaatregister daarna stil.
+
+**Referentie-eerst nagekeken** tegen `linux_5.10/drivers/thermal/cv181x_thermal.c`
+uit `sipeed/LicheeRV-Nano-Build` (de vendor-tree van precies dit bordje). Al het
+andere klopte al: chopsel 3, accsel 2, cyc_clkdiv 0x31, `sel=0x1`, `en=1` en de
+formule `result*1000*716/2048-273000` zijn identiek. Alleen die ene schrijving
+ontbrak.
+
+**Fix:** `write32(tempAuto, read32(tempAuto)&^0xffffff|0x100000)` vóór de enable,
+prediv ongemoeid zoals de vendor. Op de 0,5MHz cycle-clock (T=2µs) is dat een
+nieuwe meting per ~2s. Bouwt riscv64 + gate groen.
+
+- [ ] **op ijzer verifiëren**: de waarde moet nu bewegen tussen twee prints, en
+      onder last omhoog kruipen. Dat is ook de reden dat dit telt: de
+      thermiek-metingen van gisteren (37-39°C tijdens netmeter, 48,9°C tijdens de
+      log-storm) waren dus allemaal één meting per boot, niet een verloop.
+
 ## Upstream-PR's netstack: in de gaten houden tot merge
 
 Ingediend 09-08 (details en exit-checklist: `docs/netstack-upstream.md`):
