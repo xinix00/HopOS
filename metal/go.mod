@@ -4,7 +4,7 @@ go 1.26.4
 
 require github.com/usbarmory/tamago v1.26.4
 
-require github.com/xinix00/lean v0.2.0
+require github.com/xinix00/lean v0.3.0
 
 require (
 	github.com/google/uuid v1.6.0 // indirect

@@ -70,8 +70,35 @@ nooit vooraf claimen per listener/dial.
       LicheeRV-referentie) + de OOM-reproductie (ramSize=64MB + SSE) die op
       leannet moet overleven. Daarna: kan de GOGC-25-pleister in cpu/memlimit
       terug naar Go's ~10%-richtlijn?
-- [ ] **op ijzer**: LicheeRV + Radxa. QEMU kan het niet beantwoorden (slirp
-      termineert TCP op de host, RTT altijd microseconden)
+- [x] **op ijzer LicheeRV 12-08 — de node-test is GROEN**: app-wissel
+      welcome→vitals→welcome via GitHub-TLS in ~9s (DNS+TLS+masquerade door
+      leannet), image-stream 1,8s, vitals-storm 375 conn/s (p99 30ms),
+      **SSE-soak 7 min = 0 gefaalde polls** (oude stack: dood na 151-250s),
+      die-temp beweegt (46→55°C onder last — auto_cycle bewezen), 0 panics.
+      App-pad RX 4,79 MB/s (app→ringen→switch→masq; níét de node-pad-referentie)
+- [ ] **op ijzer, rest**: netmeter-kaart voor het kale node-pad (vs 8,84 MB/s)
+      + Radxa
+- [x] **watchdog-beleid ÉÉN keer voor alle boards (12-08, Dereks vraag
+      "waarom is dit niet gelijk bij elk board?!")**: cmd/hopos/watchdog.go
+      draagt HET beleid, per board resten twee hardware-regels (Arm/Pet +
+      cadans). Er waren vier uiteengegroeide kopieën, met twee filosofieën:
+      Pi/UEFI wapenden vroeg maar aaiden BLIND (doofheid onzichtbaar),
+      LicheeRV/Radxa aaiden op bewijs maar wapenden laat. Het ene beleid
+      combineert beide: boot-guard (vroeg wapenen, blind aaien tot het eerste
+      levensteken — bevroren boot reset, netloze bring-up blijft staan),
+      daarna alleen aaien op bewezen leven (02-08-les, nu óók op de Pi's).
+      hopos.wd=off overal dezelfde knop. Alle 5 boards bouwen, gate groen,
+      QEMU toont de eerlijke nil-regel ("wires no hardware watchdog")
+- [x] **watchdog-canary GEFIXT 12-08** (was: twee boots stil NIET gewapend):
+      de probe dialt nu het EIGEN externe IP:8080 i.p.v. 10.100.0.1 — dat
+      adres is vanuit de kern onbezorgbaar (GwFromHost is per ontwerp slot≥1).
+      De voor de hand liggende hairpin-fix is bewust afgewezen: die routeert
+      via de gáteway, en een watchdog aan de gateway = reboot-loop bij een
+      dode router op een kerngezonde node. Het eigen-IP-pad is exact de route
+      waarmee de leader vanochtend jobs dispatchte (09:17, zelfde poort), dus
+      op ijzer al bewezen. Beide boards (licheerv + rk3566); de Radxa-wachtlus
+      kreeg ook de luide "NOT armed"-melding die de LicheeRV al had.
+      VERIFICATIE volgende boot: "watchdog: ... armed" op de console
 - [ ] v1-beperking bewust: géén congestion control — waarom en waar cwnd later
       inhaakt staat in `~/Git/lean/leannet/DESIGN.md`
 - [ ] lean taggen (v0.2.0) → dev-replace uit metal/go.mod, require bumpen.
@@ -154,6 +181,76 @@ Bonus-regressies zonder lneto-nummer: budget-hygiëne na close (echo-test),
 pot-leeg = luide RST, PassivePeers-equivalent (server nul ARP-queries),
 deadline = échte net.Error-timeout, ICMP-echo, 5555-klasse op QEMU (8
 vastgehouden verbindingen + verse = 200).
+
+## leantls gemeten (12-08): 0,40 MB in ketenmodus — maar net/http kost 3,2 MB
+
+Dereks vraag: wat levert leantls ons op? Gemeten met ÉÉN main per variant,
+riscv64, licheerv-board als vloer, `-w -T 0x84010000` (scratchpad
+`tlsmeasure/`). Alle getallen uit onze eigen boom:
+
+| variant | MB | wat |
+|---|---|---|
+| v0 | 2,091 | vloer: board + fmt + `net.Dial` |
+| v8 | **2,384** | leanhttp (client+server) + ed25519-signatuur, GEEN TLS |
+| v4 | 2,475 | leantls GEPIND + handgeschreven HTTP |
+| v3 | 3,635 | leantls + x509verify + CA-bundel (ketenmodus) |
+| v2 | 4,298 | crypto/tls + handgeschreven HTTP |
+| v5 | 5,367 | net/http-server + leantls-keten-client |
+| v7 | 5,619 | net/http + plain http + ed25519 (dus zónder https!) |
+| v6 | **5,768** | wat de kern VANDAAG doet: net/http + crypto/tls + roots |
+
+**De vergelijking die telt is v6 → v3: 2,13 MB** (Dereks punt, en hij is juist).
+v3 kan functioneel álles wat de kern vandaag doet — https naar github.com met
+echte certificaatvalidatie — en is 2,13 MB lichter. Mijn eerste conclusie
+("0,40 MB") mat v6 → v5, waarin ik net/http liet staan; dat was een aanname,
+geen eis.
+
+Die 2,13 MB valt in twee stukken, en dat is de eigenlijke keuze:
+
+| stap | winst | risico |
+|---|---|---|
+| net/http → leanhttp (crypto/tls houden) = v6→v2 | **1,47 MB** | geen eigen crypto; stdlib-TLS blijft |
+| daarna crypto/tls → leantls-keten = v2→v3 | **0,66 MB** | eigen TLS-implementatie in het artifact-pad |
+
+**Waarom net/http zo zwaar is: het linkt crypto/tls onvoorwaardelijk.** v7 laat
+dat zien — gooi https er helemaal uit en verifieer alleen een ed25519-signatuur,
+en de binary zakt maar 0,15 MB (5,768 → 5,619). Zolang de agent-API op net/http
+staat is TLS gratis aanwezig en kan geen enkele TLS-keuze iets opleveren. Dat is
+ook waarom de leanhttp-stap eerst moet: hij maakt de TLS-keuze pas betekenisvol.
+
+**En v8 (2,384, signed HTTP zonder TLS) is NIET haalbaar met GitHub als bron.**
+Gemeten 12-08: `http://github.com/...` geeft 301 naar https, en de
+release-asset-URL erachter draagt `spr=https` in zijn eigen signature. Plain
+HTTP kan dus alleen vanaf een bron die wij zelf serveren. Daarmee is v3 de
+laagst haalbare configuratie voor de huidige artifact-bron.
+
+**Haalbaarheid van de leanhttp-stap** (nagekeken 12-08 in hop
+v0.20.13-testing.4): `internal/api` + `pkg/httputil` gebruiken `http.Request` en
+`http.ResponseWriter` (±20×), `http.NewServeMux`, `http.Server`,
+`http.HandlerFunc` en `http.Flusher` voor de SSE-stroom. leanhttp's
+ResponseWriter heeft `Flush` én `Hijack` IN het contract (geen optionele
+type-assertie), en `Request.Done()` voor streamende handlers — dat past strakker
+dan wat er nu staat. Wat ontbreekt is de mux: leanhttp routeert niet, dat doet de
+handler op `r.Path`. Mechanisch werk, maar het raakt de vitale agent/leader-API.
+
+**Waar leantls dan wél voor is:** gepind kost TLS 0,38 MB (v0→v4) waar
+crypto/tls 2,2 MB kost (v0→v2) — factor 5,8. In een wereld zonder net/http is
+dat de enige manier om versleuteld met je eigen leader te praten zonder een
+kwart van je vrije heap op een 64MB-node op te geven. Dus: bewaren, niet nu
+inzetten, en pas inzetten wanneer er een eigen-server-pad is
+(hoplockserver-over-netwerk, federatie agent↔leader over WAN).
+
+- [ ] besluit: net/http → leanhttp in hop's API-laag (1,47 MB, geen eigen
+      crypto). Vergt de mux zelf + ±20 handler-signaturen in de hop-module;
+      raakt de vitale agent/leader-API, dus stap voor stap met de QEMU-gate en
+      een ijzer-verificatie erachter
+- [ ] daarna: crypto/tls → leantls-ketenmodus in het artifact-pad (+0,66 MB).
+      Alleen zinvol ná de leanhttp-stap — vóór die stap levert het 0,40 MB
+- [ ] artifact-signatuur op de node verifiëren: de release-keten ondertekent al
+      (`ssh-keygen -Y sign` over SHA256SUMS, `tools/release_key.pub` in git),
+      maar geen enkele regel in `metal/` controleert dat. Dat is een
+      veiligheidswinst los van de bytes: je vertrouwt dan de bytes i.p.v. de
+      pijp, en een gecompromitteerde CA of CDN kan je geen image meer opdringen
 
 ## Upstream-PR's netstack: in de gaten houden tot merge
 

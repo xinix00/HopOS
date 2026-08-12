@@ -18,23 +18,24 @@ import (
 	"github.com/xinix00/HopOS/metal/dev"
 )
 
-// WatchdogStart wapent de SBSA-watchdog met de gegeven timeout en start de
-// aai-goroutine (elke timeout/3). Geen GTDT-watchdog → melding + no-op:
-// de aanroeper (board_uefi.go) hoeft niet per platform te kiezen.
-func WatchdogStart(timeout time.Duration) {
+// wdRefresh onthoudt het refresh-frame zodat WatchdogPet de teller herstart.
+var wdRefresh uintptr
+
+// WatchdogArm wapent de SBSA-watchdog met de gegeven timeout. Alleen de
+// hardware — het beleid (wanneer aaien, wanneer niet) woont in
+// cmd/hopos/watchdog.go, één keer voor alle boards. Geen GTDT-watchdog →
+// ok=false met de reden in desc.
+func WatchdogArm(timeout time.Duration) (desc string, ok bool) {
 	t := Tables()
 	if t == nil {
-		fmt.Printf("watchdog: no ACPI tables — disabled\n")
-		return
+		return "no ACPI tables", false
 	}
 	refresh, control, found := t.Watchdog()
 	if !found {
-		fmt.Printf("watchdog: no SBSA watchdog in GTDT — disabled (QEMU?)\n")
-		return
+		return "no SBSA watchdog in GTDT (QEMU?)", false
 	}
 	if !MapHigh(refresh, 0x1000) || !MapHigh(control, 0x1000) {
-		fmt.Printf("watchdog: frames unreachable (refresh %#x, control %#x) — disabled\n", refresh, control)
-		return
+		return fmt.Sprintf("SBSA frames unreachable (refresh %#x, control %#x)", refresh, control), false
 	}
 
 	// SBSA is tweetraps: na WOR ticks komt de WS0-interrupt (die niemand
@@ -54,15 +55,12 @@ func WatchdogStart(timeout time.Duration) {
 	dev.Write32(uintptr(refresh), 1)                 // WRR: teller vers
 	dev.Write32(uintptr(control), 1)                 // WCS: enable
 	dev.MB()
-	fmt.Printf("watchdog: SBSA armed, %v (refresh %#x, control %#x)\n", timeout, refresh, control)
-
-	go func() {
-		for {
-			time.Sleep(timeout / 3)
-			dev.Write32(uintptr(refresh), 1)
-		}
-	}()
+	wdRefresh = uintptr(refresh)
+	return fmt.Sprintf("SBSA watchdog, %v (refresh %#x, control %#x)", timeout, refresh, control), true
 }
+
+// WatchdogPet herstart de SBSA-teller.
+func WatchdogPet() { dev.Write32(wdRefresh, 1) }
 
 // cntfrq leest CNTFRQ_EL0 (cpu_arm64.s) — de tikfrequentie van de
 // system counter, door de firmware gezet.

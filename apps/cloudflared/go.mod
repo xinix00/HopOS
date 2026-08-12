@@ -30,24 +30,20 @@ require (
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/go-task/slim-sprig/v3 v3.0.0 // indirect
 	github.com/goccy/go-json v0.10.6 // indirect
-	github.com/google/btree v1.1.2 // indirect
 	github.com/google/pprof v0.0.0-20250418163039-24c5476c6587 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/onsi/ginkgo/v2 v2.23.4 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
-	github.com/soypat/lneto v0.1.1-0.20260609173350-82f946154800 // indirect
 	github.com/tklauser/go-sysconf v0.3.16 // indirect
 	github.com/tklauser/numcpus v0.11.0 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
-	github.com/usbarmory/go-net v0.0.0-20260626130943-dad9ef39fd9b // indirect
+	github.com/xinix00/lean v0.3.0 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.uber.org/automaxprocs v1.6.0 // indirect
 	go.uber.org/mock v0.5.1 // indirect
 	golang.org/x/mod v0.37.0 // indirect
-	golang.org/x/time v0.7.0 // indirect
 	golang.org/x/tools v0.47.0 // indirect
-	gvisor.dev/gvisor v0.0.0-20250911055229-61a46406f068 // indirect
 )
 
 require (

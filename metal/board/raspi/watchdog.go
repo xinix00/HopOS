@@ -34,27 +34,29 @@ const (
 	pmTicksPerSecond = 65536
 )
 
-// WatchdogStart wapent de hardware-watchdog met de gegeven timeout (max ~15s)
-// en start een aai-goroutine op een derde van de timeout. Bevriest de node
-// volledig — inclusief een hangende bóót, mits vroeg gewapend — dan blijft de
-// aai uit en reset het PM-blok het SoC; de reboot is de melding. No-op als
-// het board geen WatchdogBase zette.
-func WatchdogStart(timeout time.Duration) {
+// wdTicks onthoudt de gewapende timeout zodat WatchdogPet de teller op
+// dezelfde waarde herlaadt.
+var wdTicks uint32
+
+// WatchdogArm wapent de hardware-watchdog met de gegeven timeout (max ~15s).
+// Alleen de hardware — het beleid (wanneer aaien, wanneer niet) woont in
+// cmd/hopos/watchdog.go, één keer voor alle boards. ok=false als het board
+// geen WatchdogBase zette (QEMU).
+func WatchdogArm(timeout time.Duration) (desc string, ok bool) {
 	base := WatchdogBase
 	if base == 0 {
-		return
+		return "no PM watchdog base on this board", false
 	}
 	if timeout > 15*time.Second {
 		timeout = 15 * time.Second
 	}
-	ticks := uint32(timeout.Seconds()*pmTicksPerSecond) & pmWDOGTicksMask
-	dev.Write32(base+pmWDOG, pmPassword|ticks)
+	wdTicks = uint32(timeout.Seconds()*pmTicksPerSecond) & pmWDOGTicksMask
+	dev.Write32(base+pmWDOG, pmPassword|wdTicks)
 	dev.Write32(base+pmRSTC, pmPassword|dev.Read32(base+pmRSTC)&^uint32(pmRSTCWrCfgMask)|pmRSTCFullReset)
-	fmt.Printf("watchdog: hardware reset armed (%.0fs) — a full freeze now self-reboots\n", timeout.Seconds())
-	go func() {
-		for {
-			time.Sleep(timeout / 3)
-			dev.Write32(base+pmWDOG, pmPassword|ticks) // aaien: teller terug op vol
-		}
-	}()
+	return fmt.Sprintf("BCM PM block, %.0fs", timeout.Seconds()), true
+}
+
+// WatchdogPet laadt de teller terug op vol.
+func WatchdogPet() {
+	dev.Write32(WatchdogBase+pmWDOG, pmPassword|wdTicks)
 }

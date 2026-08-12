@@ -35,11 +35,13 @@ var ramSize uint = raspi.HopKernelSize
 func init() {
 	dtb := raspi.DTB()
 
-	// Hardware-watchdog vroeg: ook een hangende boot reset-cyclet zichzelf
-	// tot een boot slaagt. Uit met hopos.wd=off (géén rebuild): voor een
-	// JTAG-postmortem moet een bevroren node blijven stáán.
-	if raspi.BootParam(dtb, "hopos.wd") != "off" {
-		raspi.WatchdogStart(12 * time.Second)
+	// De hardware-helft van de node-watchdog; het beleid (boot-guard, daarna
+	// aaien op bewezen leven, hopos.wd=off) woont in watchdog.go — één keer
+	// voor alle boards. PetEvery 4s bij de 12s-timeout van het PM-blok.
+	nodeWDT = &wdHardware{
+		Arm:      func() (string, bool) { return raspi.WatchdogArm(12 * time.Second) },
+		Pet:      raspi.WatchdogPet,
+		PetEvery: 4 * time.Second,
 	}
 
 	bootParamAll = func(key string) []string { return raspi.BootParamAll(dtb, key) }

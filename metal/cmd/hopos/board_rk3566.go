@@ -11,7 +11,6 @@ package main
 
 import (
 	"fmt"
-	"net"
 	"time"
 	_ "unsafe"
 
@@ -23,75 +22,23 @@ import (
 // (board/rk3566/plan.go). 64MB is ruim — HOP zelf zit op ~20MB van zijn
 // venster — en het laat de rest van de 2GB aan de partitie-pool.
 //
-// nodeCanary bewaakt het levensteken en voedt de hardware-watchdog. Zelfde
-// mechaniek als op de LicheeRV (cmd/hopos/board_licheerv.go) en om dezelfde
-// reden: HOP-leven = node-leven, en het levensteken is de les van 02-08. Een
-// onvoorwaardelijke aaier had de gemeten doofheid van die dag niet gezien
-// (nieuwe verbindingen en ICMP dood, álle HOP-lussen kerngezond), dus aait deze
-// canary alleen als een NIEUWE verbinding naar de eigen agent-poort lukt —
-// dwars door dezelfde accept-laag waar de doofheid zat.
+// De node-watchdog: beleid in cmd/hopos/watchdog.go (één keer voor alle
+// boards), hier alleen de hardware-helft — zie de init onderaan.
 //
-// DE RESET-SCOPE IS GEMETEN (06-08) en dit board doet nu hetzelfde als de
-// andere: aan, tenzij je hem uitzet met hopos.wd=off.
-//
-// Waarom die meting nodig was: of een WDT-timeout op de RK3566 de HÉLE node
-// reset is niet uit de Linux-bron te bewijzen — mainline heeft geen
-// Rockchip-glue voor dit blok, geen reset-scope-bit, geen GRF-veld. En een
-// gewapende watchdog die de node níét reset is erger dan geen watchdog: dan
-// denk je dat je een vangnet hebt. Op de LicheeRV kostte precies die aanname
-// een nacht (een kale DW-enable bleek daar niet genoeg, de reset-routering in
-// het RTC-domein moest er eerst bij).
+// DE RESET-SCOPE IS GEMETEN (06-08) en dat is de toelatingseis voor de
+// nodeWDT-bedrading: of een WDT-timeout op de RK3566 de HÉLE node reset is
+// niet uit de Linux-bron te bewijzen — mainline heeft geen Rockchip-glue voor
+// dit blok, geen reset-scope-bit, geen GRF-veld. En een gewapende watchdog die
+// de node níét reset is erger dan geen watchdog: dan denk je dat je een
+// vangnet hebt. Op de LicheeRV kostte precies die aanname een nacht (een kale
+// DW-enable bleek daar niet genoeg, de reset-routering in het RTC-domein moest
+// er eerst bij).
 //
 // WAT ER GEMETEN IS, met de probe op `hopos.wdtest=1`: kortste timeout gewapend,
 // niet geaaid. Op de console volgde géén enkele "still alive"-regel maar direct
 // `DDR V1.18 ...` — de DDR-init uit de boot-ROM, gevolgd door SPL, ATF en
 // U-Boot. Dat is een volledige node-reset door de hele bootketen heen, niet een
-// subsysteem dat omvalt. Daarmee is de knop verdiend.
-func nodeCanary() {
-	switch rk3566.BootParam("hopos.wd") {
-	case "off":
-		fmt.Println("watchdog: not armed (hopos.wd=off) — node liveness is UNGUARDED, " +
-			"a frozen node stays up for a post-mortem instead of reset-cycling.")
-		return
-	}
-
-	// Het doeladres is het vaste gateway-adres van de interne switch met de
-	// agent-poort: DHCP-onafhankelijk, en de agent luistert wildcard dus lokaal
-	// bezorgbaar. Beperking, eerlijk genoteerd (zelfde als op de LicheeRV): deze
-	// self-dial loopt niet door de NIC-inbound-demux, dus een doofheid die
-	// uitsluitend dáár huist mist hij.
-	const target = "10.100.0.1:8080"
-	probe := func(timeout time.Duration) bool {
-		c, err := net.DialTimeout("tcp", target, timeout)
-		if err != nil {
-			return false
-		}
-		c.Close()
-		return true
-	}
-
-	// Wapenen pas ná het EERSTE geslaagde levensteken: een kapotte bring-up
-	// blijft staan voor de operator in plaats van eeuwig te cyclen.
-	for !probe(2 * time.Second) {
-		time.Sleep(5 * time.Second)
-	}
-	secs, fixed := rk3566.WatchdogArm()
-	fmt.Printf("watchdog: armed at a MEASURED %.1fs (fixed-top bit %v) — a node that stops proving liveness now self-reboots\n",
-		secs, fixed)
-
-	misses := 0
-	for {
-		time.Sleep(20 * time.Second)
-		if probe(3 * time.Second) {
-			rk3566.WatchdogPet()
-			misses = 0
-			continue
-		}
-		misses++
-		fmt.Printf("watchdog: liveness probe failed (%d in a row) — withholding the pet; "+
-			"hardware reset follows unless the node recovers HOPOS_CANARY_MISS\n", misses)
-	}
-}
+// subsysteem dat omvalt. Daarmee is de bedrading verdiend.
 
 //go:linkname ramStart runtime/goos.RamStart
 var ramStart uint = rk3566.RamBase
@@ -119,9 +66,17 @@ func init() {
 		rk3566.BootParam("hopos.mac"),
 		rk3566.BootParam("hopos.node"))
 
-	// De node-watchdog. Zie nodeCanary voor waarom hij hier UIT staat tenzij je
-	// hem aanzet — dat is precies omgekeerd aan de LicheeRV, en met reden.
-	go nodeCanary()
+	// De hardware-helft van de node-watchdog; beleid in watchdog.go. De
+	// gemeten timeout komt in de "armed"-regel (zie het meetverhaal boven);
+	// PetEvery 20s past daar ruim onder.
+	nodeWDT = &wdHardware{
+		Arm: func() (string, bool) {
+			secs, fixed := rk3566.WatchdogArm()
+			return fmt.Sprintf("DW-WDT, measured %.1fs, fixed-top %v", secs, fixed), true
+		},
+		Pet:      rk3566.WatchdogPet,
+		PetEvery: 20 * time.Second,
+	}
 
 	// De DRBG van de jitter-seed naar het hardware-TRNG tillen.
 	//

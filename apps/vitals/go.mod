@@ -15,7 +15,7 @@ go 1.26.4
 // Sibling-dev (go.work) bouwt gewoon tegen de werkboom.
 require github.com/xinix00/HopOS/metal v1.12.4
 
-require github.com/xinix00/lean v0.2.0
+require github.com/xinix00/lean v0.3.0
 
 require github.com/usbarmory/tamago v1.26.4 // indirect
 

@@ -16,8 +16,8 @@ const page = `<!DOCTYPE html>
 <style>
 :root{--bg:#0b0f14;--panel:#10161d;--line:#1d2733;--text:#cdd6e0;--muted:#7f8b9b;--copper:#e09a63;--leaf:#56c88b;--phosphor:#46d979;--fault:#e0654f;--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;--sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);font:15.5px/1.55 var(--sans)}
-.wrap{max-width:1100px;margin:0 auto;padding:0 20px 60px}
+body{margin:0;padding-bottom:60px;background:var(--bg);color:var(--text);font:15.5px/1.55 var(--sans)}
+.wrap{max-width:1100px;margin:0 auto;padding:0 20px}
 .bar{position:sticky;top:0;z-index:5;background:rgba(11,15,20,.9);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
 .bar-in{display:flex;align-items:center;gap:14px;height:52px;font-family:var(--mono);font-size:13px}
 .brand{font-weight:700;letter-spacing:.04em}.brand span{color:var(--copper)}
@@ -50,11 +50,11 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:4px;padding:
 </style>
 </head>
 <body>
-<div class="bar"><div class="wrap bar-in">
+<header class="bar"><div class="wrap bar-in">
   <div class="brand">&#x1FA7A; HopOS <span>vitals</span></div>
   <div id="chips">connecting&hellip;</div>
   <div class="live" id="livedot">live</div>
-</div></div>
+</div></header>
 <div class="wrap">
   <h2>Node</h2>
   <div class="tiles" id="tiles"></div>

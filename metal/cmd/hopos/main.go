@@ -527,6 +527,11 @@ func main() {
 		boardWarn()
 	}
 
+	// De node-watchdog: één beleid voor elk board (watchdog.go), ná boardWarn
+	// zodat een board dat zijn WDT-blok eerst moet bewijzen (de hart-probe op
+	// de LicheeRV) die uitslag heeft.
+	go nodeCanary()
+
 	fmt.Printf("hop: agent starting — node %s, agent :%d, leader :%d — HOPOS_AGENT_UP\n",
 		cfg.Node.ID, cfg.Node.Port, cfg.Node.Port+1000)
 

@@ -29,7 +29,13 @@ func init() {
 	// SBSA-watchdog uit de ACPI GTDT — een hang cyclet zichzelf naar een
 	// verse boot. QEMU virt heeft er geen; dan meldt Start dat en draait
 	// de node zonder vangnet (de Altra heeft hem wél).
-	uefi.WatchdogStart(12 * time.Second)
+	// De hardware-helft van de node-watchdog; beleid in watchdog.go.
+	// PetEvery 4s bij de 12s-timeout van de SBSA-watchdog.
+	nodeWDT = &wdHardware{
+		Arm:      func() (string, bool) { return uefi.WatchdogArm(12 * time.Second) },
+		Pet:      uefi.WatchdogPet,
+		PetEvery: 4 * time.Second,
+	}
 
 	// Platform-config uit hopos.cfg op de stick (door de stub vóór
 	// ExitBootServices via de firmware-FAT gelezen — HopOS leest de config,
