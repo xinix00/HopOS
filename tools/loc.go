@@ -33,6 +33,16 @@ import (
 
 const module = "github.com/xinix00/HopOS/metal"
 
+// lean is de zelfgeschreven stdlib (netstack, http, elf) — eigen module,
+// linkt in élke node. Hij telt mee, maar als eigen groep: zo blijft de
+// metal-ladder over de versies vergelijkbaar én verstopt de telling geen
+// eigen code die wél in het image zit. Files heten hier "lean/...".
+const leanModule = "github.com/xinix00/lean"
+
+// absPath: waar een lean/-file werkelijk woont (de module-cache) — de
+// metal-files zijn relatief aan cwd en staan hier niet in.
+var absPath = map[string]string{}
+
 // flavour is één release-smaak: de node-build plus de apploader die erin
 // gebakken wordt (fase 1 van elke job), elk met hun eigen tags — precies de
 // twee `go build`s van het image-script. De KALE (headless) smaak is de basis
@@ -40,19 +50,18 @@ const module = "github.com/xinix00/HopOS/metal"
 // surface-grant, de scanout-bedrading) staat apart in de gui-sectie — zo is
 // "een headless node = X regels" een gemeten getal en geen voetnoot.
 type flavour struct {
-	name       string
-	arch       string // GOARCH
-	nodeTags   string // cmd/hopos, kaal
-	loaderTags string // app/apploader
-	gui        bool   // heeft dit board een gui-smaak (dezelfde tags + gui)?
+	name     string
+	arch     string // GOARCH
+	nodeTags string // cmd/hopos, kaal
+	gui      bool   // heeft dit board een gui-smaak (dezelfde tags + gui)?
 }
 
 var flavours = []flavour{
-	{"uefi", "arm64", "uefi linkcpuinit", "linkcpuinit", true},
-	{"rpi5", "arm64", "rpi5 linkcpuinit", "linkcpuinit", true},
-	{"rpi4", "arm64", "rpi4 linkcpuinit", "linkcpuinit", true},
-	{"rk3566", "arm64", "rk3566 linkcpuinit", "linkcpuinit", true},
-	{"licheerv", "riscv64", "licheerv embedcfg embedcagestub", "linkramsize linkcpuinit", false},
+	{"uefi", "arm64", "uefi linkcpuinit", true},
+	{"rpi5", "arm64", "rpi5 linkcpuinit", true},
+	{"rpi4", "arm64", "rpi4 linkcpuinit", true},
+	{"rk3566", "arm64", "rk3566 linkcpuinit", true},
+	{"licheerv", "riscv64", "licheerv embedcfg embedcagestub", false},
 }
 
 // qemuvirt is een dev-target, geen release-smaak: hij telt niet mee in de
@@ -115,10 +124,18 @@ func filesOf(tamago, arch, tags, root string) map[string]bool {
 			fmt.Fprintln(os.Stderr, "json:", err)
 			os.Exit(1)
 		}
-		if p.ImportPath != module && !strings.HasPrefix(p.ImportPath, module+"/") {
+		isMetal := p.ImportPath == module || strings.HasPrefix(p.ImportPath, module+"/")
+		isLean := p.ImportPath == leanModule || strings.HasPrefix(p.ImportPath, leanModule+"/")
+		if !isMetal && !isLean {
 			continue
 		}
 		for _, f := range append(append([]string{}, p.GoFiles...), p.SFiles...) {
+			if isLean {
+				key := "lean" + strings.TrimPrefix(p.ImportPath, leanModule) + "/" + f
+				absPath[key] = filepath.Join(p.Dir, f)
+				set[key] = true
+				continue
+			}
 			rel, err := filepath.Rel(cwd, filepath.Join(p.Dir, f))
 			if err != nil || strings.HasPrefix(rel, "..") {
 				continue // embed-blob of gegenereerd pad buiten de boom
@@ -186,6 +203,9 @@ func countAsm(src []byte, hashComments bool) int {
 }
 
 func count(rel string) int {
+	if a, ok := absPath[rel]; ok {
+		rel = a
+	}
 	src, err := os.ReadFile(rel)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -210,9 +230,6 @@ func main() {
 	all := map[string]bool{}
 	for _, fl := range flavours {
 		set := filesOf(tamago, fl.arch, fl.nodeTags, "./cmd/hopos")
-		for f := range filesOf(tamago, fl.arch, fl.loaderTags, "./app/apploader") {
-			set[f] = true
-		}
 		for _, f := range extra[fl.name] {
 			set[f] = true
 		}
@@ -262,8 +279,14 @@ func main() {
 	for f := range all {
 		lineCount[f] = count(f)
 	}
+	leanTotal := map[string]int{}  // smaak → lean-regels in die node
+	leanBucket := map[string]int{} // handtekening → lean-regels
 	for _, fl := range flavours {
 		for f := range sets[fl.name] {
+			if strings.HasPrefix(f, "lean/") {
+				leanTotal[fl.name] += lineCount[f]
+				continue
+			}
 			nodeTotal[fl.name] += lineCount[f]
 		}
 	}
@@ -282,6 +305,15 @@ func main() {
 			}
 		}
 		n := lineCount[f]
+		if strings.HasPrefix(f, "lean/") {
+			sig := "alle smaken"
+			if len(in) != len(flavours) {
+				sig = strings.Join(in, "+")
+			}
+			leanBucket[sig] += n
+			add(files, "lean · "+sig, f, n)
+			continue
+		}
 		switch {
 		case len(in) == len(flavours):
 			portable[layer(f)] += n
@@ -353,6 +385,18 @@ func main() {
 		guiBuckets[sig] += n
 		add(files, "gui · "+sig, f, n)
 	}
+	p("\n== lean — de zelfgeschreven stdlib (eigen module, linkt in elke node) ==")
+	{
+		var sigs []string
+		for s := range leanBucket {
+			sigs = append(sigs, s)
+		}
+		sort.Strings(sigs)
+		for _, s := range sigs {
+			p("  %-40s %6d", s, leanBucket[s])
+		}
+	}
+
 	p("\n== gui — de opt-in smaak (-tags gui), telt in geen kale node mee ==")
 	sigs = sigs[:0]
 	for s := range guiBuckets {
@@ -374,7 +418,7 @@ func main() {
 		if fl.gui {
 			g = fmt.Sprintf("   (+%d met gui)", guiTotal[fl.name])
 		}
-		p("  %-16s %6d + %4d (%s) + %4d (board) = %6d%s", fl.name, total, archCommon[fl.arch], fl.arch, bs, nodeTotal[fl.name], g)
+		p("  %-16s %6d + %4d (%s) + %4d (board) = %6d metal + %4d lean%s", fl.name, total, archCommon[fl.arch], fl.arch, bs, nodeTotal[fl.name], leanTotal[fl.name], g)
 	}
 
 	if verbose {
