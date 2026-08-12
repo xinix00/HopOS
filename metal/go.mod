@@ -22,7 +22,7 @@ require (
 	// meer (Derek, 04-08): een hop-wijziging bereikt hop-os alleen via
 	// commit+tag, dus wat hier bouwt bouwt overal — ook downstream (de
 	// -hopos-satellieten), die een replace nooit zouden zien.
-	github.com/xinix00/hop v0.20.13-testing.4
+	github.com/xinix00/hop v0.20.14
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20260709184058-243e02a382f8
 )
 
