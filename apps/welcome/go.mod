@@ -11,7 +11,7 @@ go 1.26.4
 // hop-os/metal is een echte GitHub-dep (metal/vX.Y.Z-tag in de HopOS-
 // repo), dus geen lokale replaces meer nodig; sibling-dev loopt via
 // go.work.
-require github.com/xinix00/HopOS/metal v1.12.3
+require github.com/xinix00/HopOS/metal v1.12.4
 
 require github.com/xinix00/lean v0.2.0
 
