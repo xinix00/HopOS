@@ -4,7 +4,7 @@ go 1.26.4
 
 require github.com/usbarmory/tamago v1.26.4
 
-require github.com/xinix00/lean v0.3.0
+require github.com/xinix00/lean v0.4.0
 
 require (
 	github.com/google/uuid v1.6.0 // indirect
@@ -22,7 +22,7 @@ require (
 	// meer (Derek, 04-08): een hop-wijziging bereikt hop-os alleen via
 	// commit+tag, dus wat hier bouwt bouwt overal — ook downstream (de
 	// -hopos-satellieten), die een replace nooit zouden zien.
-	github.com/xinix00/hop v0.20.14
+	github.com/xinix00/hop v0.20.15
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20260709184058-243e02a382f8
 )
 

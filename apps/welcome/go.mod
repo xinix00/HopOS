@@ -13,7 +13,7 @@ go 1.26.4
 // go.work.
 require github.com/xinix00/HopOS/metal v1.12.5
 
-require github.com/xinix00/lean v0.3.0
+require github.com/xinix00/lean v0.4.0
 
 require github.com/usbarmory/tamago v1.26.4 // indirect
 
