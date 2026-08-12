@@ -16,10 +16,11 @@
 package place
 
 import (
-	"debug/elf"
 	"encoding/binary"
 	"fmt"
 	"io"
+
+	"github.com/xinix00/lean/leanelf"
 )
 
 // De gepatchte symbolen — het contract met tamago's runtime (RamStart/
@@ -70,7 +71,7 @@ type Plan struct {
 // bestaat niet. Bewust géén abi/layout-import (abi-pakketten zijn vlak): alles
 // komt als parameter binnen.
 func Build(r io.ReaderAt, imgSize int64, linkBase, appRAM, loOff, topOff uint64, slot int, abi uint64) (*Plan, error) {
-	f, err := elf.NewFile(r)
+	f, err := leanelf.Open(r, imgSize)
 	if err != nil {
 		return nil, fmt.Errorf("elf parse: %w", err)
 	}
@@ -80,8 +81,8 @@ func Build(r io.ReaderAt, imgSize int64, linkBase, appRAM, loOff, topOff uint64,
 	}
 	p := &Plan{Entry: f.Entry}
 
-	for _, ph := range f.Progs {
-		if ph.Type != elf.PT_LOAD {
+	for _, ph := range f.Segments {
+		if ph.Type != leanelf.PTLoad {
 			continue
 		}
 		// Headervelden zijn input (de image komt van het netwerk):
@@ -106,45 +107,43 @@ func Build(r io.ReaderAt, imgSize int64, linkBase, appRAM, loOff, topOff uint64,
 		return nil, fmt.Errorf("no PT_LOAD segments")
 	}
 
-	syms, err := f.Symbols()
+	// Vijf namen zoeken, niet de hele tabel bouwen: een app-image draagt
+	// tienduizenden symbolen, en dit loopt op de kern.
+	syms, err := f.Lookup(SymRAMStart, SymRAMSize, SymABI, SymSlotHint, SymSlotHintGen)
 	if err != nil {
 		return nil, fmt.Errorf("symbols (image built with -s?): %w", err)
 	}
-	ramPatched := 0
-	imgABI, abiFound := uint64(0), false
-	for _, s := range syms {
-		if s.Name == SymABI {
-			v, err := readU64(r, f, s.Value)
-			if err != nil {
-				return nil, fmt.Errorf("%s: %w", SymABI, err)
-			}
-			imgABI, abiFound = v, true
+	for _, naam := range []string{SymRAMStart, SymRAMSize} {
+		s, ok := syms[naam]
+		if !ok {
+			return nil, fmt.Errorf("RAM symbol %s not found", naam)
 		}
-		switch s.Name {
-		case SymRAMStart, SymRAMSize:
-			if s.Value%8 != 0 || s.Value < linkBase || s.Value > linkBase+appRAM-8 {
-				return nil, fmt.Errorf("symbol %s (%#x) outside link range", s.Name, s.Value)
-			}
-			v := linkBase
-			if s.Name == SymRAMSize {
-				v = appRAM
-			}
-			p.Patches = append(p.Patches, Patch{Addr: s.Value, Val: v})
-			ramPatched++
-		case SymSlotHint, SymSlotHintGen:
-			// Optioneel en additief: images zonder het symbool merken er
-			// niets van; een vreemde waarde wordt stil overgeslagen (zelfde
-			// semantiek als altijd).
-			if s.Value%8 == 0 && s.Value >= linkBase && s.Value <= linkBase+appRAM-8 {
-				p.Patches = append(p.Patches, Patch{Addr: s.Value, Val: uint64(slot)})
-			}
+		if s.Value%8 != 0 || s.Value < linkBase || s.Value > linkBase+appRAM-8 {
+			return nil, fmt.Errorf("symbol %s (%#x) outside link range", naam, s.Value)
+		}
+		v := linkBase
+		if naam == SymRAMSize {
+			v = appRAM
+		}
+		p.Patches = append(p.Patches, Patch{Addr: s.Value, Val: v})
+	}
+	// De slot-hint is optioneel en additief: images zonder het symbool merken
+	// er niets van, en een vreemde waarde wordt stil overgeslagen (zelfde
+	// semantiek als altijd).
+	for _, naam := range []string{SymSlotHint, SymSlotHintGen} {
+		s, ok := syms[naam]
+		if ok && s.Value%8 == 0 && s.Value >= linkBase && s.Value <= linkBase+appRAM-8 {
+			p.Patches = append(p.Patches, Patch{Addr: s.Value, Val: uint64(slot)})
 		}
 	}
-	if ramPatched != 2 {
-		return nil, fmt.Errorf("RAM symbols not found (%d/2)", ramPatched)
-	}
-	if !abiFound {
+
+	s, ok := syms[SymABI]
+	if !ok {
 		return nil, fmt.Errorf("image predates the versioned slot ABI (no %s) — rebuild it against this HopOS (ABI %d)", SymABI, abi)
+	}
+	imgABI, err := readU64(f, s.Value)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", SymABI, err)
 	}
 	if imgABI != abi {
 		return nil, fmt.Errorf("image speaks slot ABI %d, this HopOS speaks %d — rebuild it", imgABI, abi)
@@ -152,19 +151,14 @@ func Build(r io.ReaderAt, imgSize int64, linkBase, appRAM, loOff, topOff uint64,
 	return p, nil
 }
 
-// readU64 leest het 64-bit woord dat op adres va in het image staat: welk
-// PT_LOAD-segment het draagt, en waar dat in het bestand ligt. Nodig omdat een
-// symboltabel adréssen geeft, geen inhoud — en de ABI-versie is inhoud.
-func readU64(r io.ReaderAt, f *elf.File, va uint64) (uint64, error) {
-	for _, ph := range f.Progs {
-		if ph.Type != elf.PT_LOAD || va < ph.Paddr || va+8 > ph.Paddr+ph.Filesz {
-			continue
-		}
-		var b [8]byte
-		if _, err := r.ReadAt(b[:], int64(ph.Off+va-ph.Paddr)); err != nil {
-			return 0, err
-		}
-		return binary.LittleEndian.Uint64(b[:]), nil
+// readU64 leest het 64-bit woord dat op adres addr in het image staat. Nodig
+// omdat een symboltabel adréssen geeft, geen inhoud — en de ABI-versie is
+// inhoud. Welk PT_LOAD dat adres draagt en waar dat in het bestand ligt, weet
+// leanelf.
+func readU64(f *leanelf.File, addr uint64) (uint64, error) {
+	var b [8]byte
+	if err := f.ReadAtPaddr(b[:], addr); err != nil {
+		return 0, err
 	}
-	return 0, fmt.Errorf("adres %#x valt in geen enkel geladen segment", va)
+	return binary.LittleEndian.Uint64(b[:]), nil
 }
