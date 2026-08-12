@@ -118,7 +118,7 @@ done
 
 # 2. Bouwen. Canonieke app-link (docs/app.md): één artifact draait in élk slot,
 #    dus arm64 linkt op SlotBase(1)+0x10000 en riscv64 op de fysieke partitie
-#    (daar is geen tweede translatiefase). nodefaultstack houdt gVisor uit het
+#    (daar is geen tweede translatiefase). houdt gVisor uit het
 #    image — op de nieuwe netstack 0 gvisor-symbolen i.p.v. 3649.
 ELFS=""
 for entry in $APPS; do
@@ -127,8 +127,8 @@ for entry in $APPS; do
 	cmd="${rest%%:*}"; arches="$(echo "${rest#*:}" | tr ',' ' ')"
 	for arch in $arches; do
 		case "$arch" in
-		arm64)   tags="linkcpuinit nodefaultstack";             ld="-w -T 0x50010000 -R 0x1000" ;;
-		riscv64) tags="linkramsize linkcpuinit nodefaultstack"; ld="-w -T 0x88010000 -R 0x1000" ;;
+		arm64)   tags="linkcpuinit";             ld="-w -T 0x50010000 -R 0x1000" ;;
+		riscv64) tags="linkramsize linkcpuinit"; ld="-w -T 0x88010000 -R 0x1000" ;;
 		*) echo "FOUT: onbekende arch $arch bij $name" >&2; exit 1 ;;
 		esac
 		elf="$OUT/$name-$arch-tamago.elf"

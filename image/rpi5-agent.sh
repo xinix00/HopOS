@@ -30,7 +30,7 @@ mkdir -p out
 #    (board-onafhankelijk — zelfde binary als op de Pi 4/QEMU/Altra).
 #    Zonder -s: slots patcht RamStart/RamSize via de symboltabel.
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-	"$TAMAGO" build -tags "linkcpuinit nodefaultstack" -trimpath \
+	"$TAMAGO" build -tags "linkcpuinit" -trimpath \
 	-ldflags "-w -T 0x50010000 -R 0x1000" -o out/app5.elf ./app/appspike
 
 # 2. De agent-kern: cmd/hopos met het rpi5-board (build-tag kiest board_rpi5.go)
@@ -40,7 +40,7 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 GUITAG=""
 [ "${GUI:-1}" = 1 ] && GUITAG=" gui"
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-	"$TAMAGO" build -tags "rpi5 linkcpuinit$GUITAG nodefaultstack" -trimpath \
+	"$TAMAGO" build -tags "rpi5 linkcpuinit$GUITAG" -trimpath \
 	-ldflags "-s -w -T 0x90000 -R 0x1000" -o out/agent5.elf ./cmd/hopos
 
 # 3. ELF → raw image (Circle-recept, mkkernel).

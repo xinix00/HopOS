@@ -1,0 +1,106 @@
+package appnet
+
+// up.go — de netstack van een app: leannet (xinix00/lean), sinds 12-08. Eén
+// budget uit de slot-partitie dat de stack zelf indeelt — groeien bij gebruik,
+// floor per verbinding, luid weigeren als de pot leeg is; geen buffer-maten
+// per job meer.
+//
+// Up() is de hele app-API: de zes callsites (welcome, vitals, cloudflared,
+// hello, appspike) zien nooit welke stack eronder zit. Dat is wat de wissels
+// van 09-08 (gVisor → lneto) en 12-08 (→ leannet) goedkoop maakte.
+
+import (
+	"fmt"
+	"net"
+	"time"
+
+	"github.com/xinix00/lean/leannet"
+
+	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/abi/ring"
+	"github.com/xinix00/HopOS/metal/app/applib"
+)
+
+// Up brengt de eigen netstack op en hangt hem in Go's net-package; geeft het
+// eigen IP terug. Alle config is afgeleid uit het slotnummer via het gedeelde
+// net-plan (layout) — HOP hoeft niets per slot door te geven.
+func Up(a *applib.App) (string, error) {
+	ip := layout.SlotIP4(a.Slot)
+	host := layout.HostIP4()
+
+	nd := &nic{
+		tx: ring.Open(layout.NetRingTXAt(a.RAMStart, a.RAMSize)),
+		rx: ring.Open(layout.NetRingRXAt(a.RAMStart, a.RAMSize)),
+	}
+
+	// Het budget: 1/8 van de partitie, geklemd. Een welcome-app van 16MB
+	// buffert dan tot 2MB, een dikke server-partitie tot 16MB — zonder dat
+	// iemand een getal per job kiest. De floor per verbinding is ~4KiB, dus
+	// een idle app kost vrijwel niets meer (de oude preallocatie was
+	// MaxListenerConns×2×32KiB = 512KB per listener, óók bij nul verkeer).
+	budget := int(a.RAMSize) / 8
+	if budget < 1<<20 {
+		budget = 1 << 20
+	}
+	if budget > 16<<20 {
+		budget = 16 << 20
+	}
+
+	cfg := leannet.Config{
+		IP:     ip4bytes(ip),
+		Prefix: layout.NetPrefix,
+		MAC:    layout.SlotMAC(a.Slot),
+		GW:     ip4bytes(host),
+		Budget: budget,
+	}
+	cfg.AdvWS = wsShiftFor(budget / 4)
+
+	st := leannet.NewStack(nd, cfg, uint32(time.Now().UnixNano())^uint32(a.Slot)<<16)
+
+	// Het interne net is deterministisch (layout nummert IP's én MAC's per
+	// slot), dus er wordt NIETS geresolved: de gateway (10.100.0.1 = de node)
+	// als statische buur — dials naar de node en listener-antwoorden hebben
+	// nul ARP nodig. ICMP-echo zit standaard in de stack.
+	if err := st.SeedNeighbor(ip4bytes(host), layout.SlotMAC(0)); err != nil {
+		return "", fmt.Errorf("seed gateway neighbor: %w", err)
+	}
+
+	// In Go's standaard net-package hangen: hierna werken net.Listen en
+	// net.Dial voor deze app. Interne IP's zijn deterministisch (geen DNS
+	// nodig); voor uitgaand verkeer krijgt de app de node-resolver via HOP_DNS
+	// mee (queries lopen als UDP door HOP's masquerade).
+	net.SocketFunc = st.Socket
+	if dns := a.Env("HOP_DNS"); dns != "" {
+		net.SetDefaultNS([]string{dns})
+	}
+
+	// RX-lus met microslaap i.p.v. een Gosched-spin: een idle job laat zo
+	// zijn hele core slapen (zie metal/cpu/idle).
+	go func() {
+		buf := make([]byte, leannet.MTU+leannet.EthernetMaximumSize)
+		for {
+			n, err := nd.Receive(buf)
+			if n == 0 || err != nil {
+				time.Sleep(300 * time.Microsecond)
+				continue
+			}
+			st.RecvInboundPacket(buf[:n])
+		}
+	}()
+	return layout.IP4Str(ip), nil
+}
+
+// ip4bytes zet layout's uint32-adres om naar de [4]byte-vorm van leannet.
+func ip4bytes(ip uint32) [4]byte {
+	return [4]byte{byte(ip >> 24), byte(ip >> 16), byte(ip >> 8), byte(ip)}
+}
+
+// wsShiftFor geeft de kleinste window-scale-shift waarmee een venster van
+// maxBuf bytes te adverteren is (RFC 7323, plafond shift 14).
+func wsShiftFor(maxBuf int) uint8 {
+	var shift uint8
+	for shift < 14 && 0xffff<<shift < maxBuf {
+		shift++
+	}
+	return shift
+}

@@ -1,7 +1,7 @@
-// locnet: het lokale-verkeer-schilletje om de uplink. De node-stack (lneto,
-// één NIC) heeft drie soorten frames die de draad nooit op mogen, en die
-// vangen we allemaal op déze naad — het NetworkDevice tussen stack en
-// uplink — zodat de stack zelf nergens van hoeft te weten:
+// locnet: het lokale-verkeer-schilletje om de uplink. De node-stack heeft één
+// NIC en drie soorten frames die de draad nooit op mogen; die vangen we
+// allemaal op déze naad — het netdev.Device tussen stack en uplink — zodat de
+// stack zelf nergens van hoeft te weten:
 //
 //  1. self-dial: dst-MAC == onze eigen MAC → terug de RX-wachtrij in. De
 //     agent belt de leader op het eigen externe IP (de S3-lock adverteert
@@ -22,7 +22,7 @@ import (
 	"encoding/binary"
 	"sync"
 
-	gnet "github.com/xinix00/go-net"
+	"github.com/xinix00/HopOS/metal/net/netdev"
 
 	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/net/hopswitch"
@@ -34,7 +34,7 @@ import (
 const locQueueMax = 64
 
 type locdev struct {
-	nic gnet.NetworkDevice
+	nic netdev.Device
 	mac [6]byte
 	ip  uint32 // het externe stack-IP, als getal (layout-conventie)
 
@@ -52,7 +52,7 @@ func (d *locdev) enqueue(p []byte) {
 	d.mu.Unlock()
 }
 
-// Receive (gnet.NetworkDevice): eerst de lokale wachtrij, dan de NIC.
+// Receive (netdev.Device): eerst de lokale wachtrij, dan de NIC.
 func (d *locdev) Receive(buf []byte) (int, error) {
 	d.mu.Lock()
 	if len(d.q) > 0 {
@@ -65,7 +65,7 @@ func (d *locdev) Receive(buf []byte) (int, error) {
 	return d.nic.Receive(buf)
 }
 
-// Transmit (gnet.NetworkDevice): de drie lokale gevallen, anders de draad op.
+// Transmit (netdev.Device): de drie lokale gevallen, anders de draad op.
 func (d *locdev) Transmit(p []byte) error {
 	if len(p) >= 14 {
 		if [6]byte(p[0:6]) == d.mac {

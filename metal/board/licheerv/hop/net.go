@@ -5,7 +5,7 @@ import (
 	"net"
 	"time"
 
-	gnet "github.com/xinix00/go-net"
+	"github.com/xinix00/HopOS/metal/net/netdev"
 
 	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/board"
@@ -41,7 +41,7 @@ var lease leandhcp.Lease
 // zichzelf mét het gemeten getal erbij: op dit board is een boot-cyclus duur
 // (kaart eruit, in de Mac, terug), dus één mislukte boot moet genoeg zijn om te
 // weten waar het stukliep — niet "geen netwerk".
-func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
+func (machine) ProbeNIC() (netdev.Device, net.HardwareAddr, error) {
 	// 1. Klokken. Na de FSBL staan ze open (gemeten 30-07); dit is de
 	//    zekerheid voor het geval een andere first-stage ze dicht laat.
 	if !ethClocksOn() {

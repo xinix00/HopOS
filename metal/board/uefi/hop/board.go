@@ -15,7 +15,7 @@ import (
 	"net"
 	"time"
 
-	gnet "github.com/xinix00/go-net"
+	"github.com/xinix00/HopOS/metal/net/netdev"
 
 	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/board"
@@ -132,7 +132,7 @@ func eachECAM(fn func(win pcie.Window, startBus int) bool) bool {
 // ProbeNIC: MCFG → hiërarchie-scan → eerste igb-familielid → reset/link →
 // ringen in het NetDMA-plan → DHCP. Hoge ECAM's/BAR's gaan door MapHigh
 // (Altra: boven de vlakke 512GB, gemeten 13-07).
-func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
+func (machine) ProbeNIC() (netdev.Device, net.HardwareAddr, error) {
 	var d *pcie.Device
 	eachECAM(func(win pcie.Window, startBus int) bool {
 		for _, c := range pcie.ScanConfigured(win, startBus) {

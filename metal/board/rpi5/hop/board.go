@@ -21,7 +21,7 @@ import (
 	"net"
 	"time"
 
-	gnet "github.com/xinix00/go-net"
+	"github.com/xinix00/HopOS/metal/net/netdev"
 
 	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/board"
@@ -62,7 +62,7 @@ var _ board.Board = machine{}
 // 0x0, de DMA-loopback-eis) → PHY-reset via RP1-GPIO32 → autonegotiatie →
 // GEM-init (DBW uit DCFG1) → DHCP-lease. De firmware doet hier niets van;
 // vanaf de EEPROM-handoff is dit pad volledig van HOP.
-func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
+func (machine) ProbeNIC() (netdev.Device, net.HardwareAddr, error) {
 	// Het RP1-specifieke adresplan: de RC-basis/reset, het link-plafond en de
 	// in/out-windows. De generieke bring-up-sequence (Rescal→Setup→StartLink→
 	// OpenBridge→endpoint-check→BAR's→enable) woont nu in brcmpcie.RC.BringUp;

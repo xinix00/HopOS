@@ -20,7 +20,7 @@ import (
 	"net"
 	"time"
 
-	gnet "github.com/xinix00/go-net"
+	"github.com/xinix00/HopOS/metal/net/netdev"
 
 	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/board"
@@ -59,7 +59,7 @@ var _ board.Board = machine{}
 // (BCM54213PE op adres 1, géén reset-GPIO hier) → autonegotiatie →
 // ring-16-DMA in de plan-regio → DHCP-lease. Geen PCIe zoals de Pi 5: de
 // GENET is direct memory-mapped en de firmware laat hem gewoon met rust.
-func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
+func (machine) ProbeNIC() (netdev.Device, net.HardwareAddr, error) {
 	nic := &genet.Net{
 		Base: uintptr(rpi4.GENETBase),
 		MAC:  raspi.MACFromSerial(raspi.DTB(), 0x04),

@@ -26,6 +26,135 @@ nieuwe meting per ~2s. Bouwt riscv64 + gate groen.
       thermiek-metingen van gisteren (37-39°C tijdens netmeter, 48,9°C tijdens de
       log-storm) waren dus allemaal één meting per boot, niet een verloop.
 
+## BESLUIT 11-08: eigen netstack in lean — de lneto-fix-marathon is gestopt
+
+Aanleiding: de review hieronder (29 punten) plus de optelsom. Wij gebruiken
+~13k regels lneto+go-net via twee forks, terwijl het moeilijke deel (TCP
+sluiten, retransmit, de pool) daar na jaren nog niet af is en onze fixes er
+alleen via PR-diplomatie of de refork-dans in komen. Besluit (Derek): stoppen
+met repareren, zelf bouwen in `xinix00/lean` ("leannet"), met gVisor én lneto
+als playbook. Eisen: mag performen (128-core Altra moet hard kunnen
+downloaden), en het geheugenmodel is één knop — "hier heb je 2MB (klein board)
+of 40MB (server), deel het zelf in" — dus budget-gestuurd, groeien bij gebruik,
+nooit vooraf claimen per listener/dial.
+
+- [x] ontwerp-dossier + testplan (docs/leannet-ontwerp.md; de 29 hieronder
+      zíjn het testplan)
+- [x] **leannet GEBOUWD 11-08** (~4,3k regels in lean/leannet, ongecommit):
+      frames, budget-pot, groeiende rings, TCP-machine (FIN-familie als tests,
+      WS, zero-window-probe), ARP (dedup=map-sleutel, poisoning-regel, passief
+      leren zonder MAC-wissel), ICMP-echo, UDP, stack-laag (TX-pomp slaapt tot
+      vroegste deadline, geen tick), socket-laag (SocketFunc, echte deadlines,
+      efemeer ≥49152). Suite groen incl. -race; tamago riscv64+arm64
+- [x] **A/B-naad GEBOUWD 11-08** (hop-os, ongecommit): `-tags leannet` in
+      hopnet (stack_lneto.go/stack_leannet.go), appnet (up_leannet.go) en
+      netmeter; budget = raam/8 (kern) resp. partitie/8 (app), niemand kiest
+      nog buffer-getallen. Gate groen, beide kanten bouwen op beide bogen
+- [x] **QEMU-smoke 11-08 GROEN op leannet**: agent+leader 200, SNTP zet de
+      klok, 200× churn schoon, **8 vastgehouden verbindingen + verse = 200**
+      (de 5555-dood kan niet meer bestaan), demo-keten álle 20 markers OK
+      (slots/isolatie/swarm/outbound/poorten), kern 7,3MB (−0,5MB)
+- [x] **restant 29-scenario's afgerond 11-08 laat**: alle 29 verantwoord (tabel
+      hieronder), plus een coverage-ronde 84,2% → 91,0% met de
+      gVisor-klassiekers (sequence-wraparound, RFC 5961 blind-RST en
+      mid-connection SYN, venster-krimp, tiny-MSS) en een rommeltest per laag.
+      Die ronde vond twee echte bugs: een verbinding gaf nooit op (SYN-flood
+      hield zijn floor eeuwig) en een backlog-weigering stuurde stil geen RST
+- [x] **lneto ERUIT 12-08** (Derek): geen build-tags meer, leannet is de enige
+      stack. `metal/net/netdev` is het nieuwe device-contract (twee methodes,
+      importeert niets) zodat boards/drivers/switch aan geen enkele stack
+      hangen; `nodefaultstack` uit alle 11 buildscripts; go-net, lneto, gvisor
+      en 3 transitieve deps uit go.mod; indeling.md + importcheck bijgewerkt.
+      Gate groen, QEMU-smoke groen (agent+leader 200, SNTP, 100× churn)
+- [ ] **netmeter-A/B**: doorvoercijfers naast de lneto-getallen (lat: 8,84 MB/s
+      LicheeRV-referentie) + de OOM-reproductie (ramSize=64MB + SSE) die op
+      leannet moet overleven. Daarna: kan de GOGC-25-pleister in cpu/memlimit
+      terug naar Go's ~10%-richtlijn?
+- [ ] **op ijzer**: LicheeRV + Radxa. QEMU kan het niet beantwoorden (slirp
+      termineert TCP op de host, RTT altijd microseconden)
+- [ ] v1-beperking bewust: géén congestion control — waarom en waar cwnd later
+      inhaakt staat in `~/Git/lean/leannet/DESIGN.md`
+- [ ] lean taggen (v0.2.0) → dev-replace uit metal/go.mod, require bumpen.
+      NIET committen zolang die replace er staat
+- [ ] PR's #178-#183 + go-net#5/#6 blijven open als bijdrage aan upstream —
+      geen onderhoudsplicht meer; tools/refork-netstack.sh heeft die status
+      als notitie bovenaan. Ronde 2 geparkeerd
+
+De 29 bevindingen blijven hieronder staan als **testplan voor leannet**: elk
+punt wordt daar een regressietest vanaf dag één. Volledig rapport met
+faalscenario's: `~/Git/lneto/BEVINDINGEN.md`.
+
+**Dekkingsstand in leannet, 11-08 laat — alle 29 verantwoord.** Drie
+categorieën: TEST = regressietest in lean/leannet, CONSTRUCTIE = de
+faalvorm kan in dit ontwerp niet bestaan (met de reden), N.V.T. = het
+mechanisme bestaat niet in leannet.
+
+🔴 Hoog:
+
+- [x] 1 verloren kale FIN — TEST `TestTCPLostBareFIN` (SYN/FIN zitten in de
+      sequence-boekhouding; retransmit = her-lezing)
+- [x] 2 valse FIN-WAIT-2 — TEST `TestTCPRTOInFinWait1KeepsFIN` +
+      `TestTCPPartialAckHoldsFinWait1` (overgang alleen op ack == finSeq+1)
+- [x] 3 LAST-ACK op élke ACK — TEST `TestTCPLastAckIgnoresStaleACK`
+- [x] 4 fout als verbinding — TEST `TestStackSocketShapes` (mislukte dial =
+      (nil, err); getypeerde returns tot aan de rand)
+- [x] 5 t.Logf na testeinde — CONSTRUCTIE: geen enkele testgoroutine logt;
+      resultaat loopt via kanalen (srvDone-patroon)
+
+🟠 Midden:
+
+- [x] 6 reaping alleen bij idle listener — TEST `TestTCPHalfOpenGivesUp` +
+      `TestTCPDeadPeerGivesUp` + `TestTCPZeroWindowPeerStaysAlive`: de
+      opgeef-grens zit ín de machine (retries, reset door élke geldige ACK),
+      dus hij werkt onafhankelijk van Accept-gedrag; geen aparte reaper
+- [x] 7 tweede Reset panict — N.V.T.: geen Reset-API, geen vaste
+      passive-regio (ARP-tabel is een map)
+- [x] 8 ARP-poisoning — TEST (arp_test.go): reply alleen aan ons gericht
+      lost op; gratuitous ververst hoogstens; passief leren wijzigt nooit
+      een MAC
+- [x] 9 RTO op wandklok — CONSTRUCTIE: stack-klok = time.Since(t0)
+      (monotoon); machine krijgt now geïnjecteerd, alle tests draaien erop
+- [x] 10 dial-pad dupliceert config — CONSTRUCTIE: één newConnLocked voor
+      dial én accept, dezelfde pot/maxBuf/klok
+- [x] 11 CacheRemove zonder mutex — CONSTRUCTIE: één stack-mutex over alle
+      machine-staat, -race-run groen
+- [x] 12 dubbele ARP-entries — TEST (arp_test.go dedup): map-sleutel ís de
+      dedup; NDP bestaat niet (geen IPv6)
+- [x] 13 data voorbij eigen FIN — TEST `TestTCPWriteAfterClose` (finSeq
+      klinkt vast bij close, write erna = ErrClosed)
+- [x] 14 poortbotsing zonder re-pick — TEST `TestStackEphemeralSkipsOccupied`
+      (sequentieel + levende poorten overslaan)
+
+🟡 Laag:
+
+- [x] 15 fast retransmit dood in sluitstaten — TEST
+      `TestTCPFastRetransmitInFinWait1` (dup-ACK-telling kent geen staat-gate)
+- [x] 16 DHCP-lease weggegooid — N.V.T. voor leannet (DHCP = leandhcp,
+      buiten de stack); klasse-les blijft voor leandhcp staan
+- [x] 17 accept spint pool-scan — TEST `TestStackIdleCostsNothing`: Accept
+      blokkeert op een kanaal, pomp slaapt zonder deadline bij een idle stack
+- [x] 18 stale WS na RST in SYN-RCVD — TEST `TestTCPRSTKillsEmbryo`: RST
+      sloopt het embryo, een nieuwe SYN krijgt een verse machine
+- [x] 19 WS-optie valt weg — CONSTRUCTIE: SYN-opties hebben altijd hun 8
+      bytes (SYN draagt nooit payload); wsOn alleen bij wederzijds aanbod
+- [x] 20 callback-vlag nooit gewist — CONSTRUCTIE: poll-model, er bestaan
+      geen callbacks (gedocumenteerd in arp.go)
+- [x] 21 seed buiten subnet werkt half — TEST `TestStackSeedNeighborSubnetRule`
+      (luid geweigerd)
+- [x] 22 selfdial-log-na-einde — CONSTRUCTIE: zie 5
+- [x] 23 handgerolde itoa — N.V.T.: bestaat hier niet
+- [x] 24 teststeiger 4× — CONSTRUCTIE: één tcpWire (machine) + één
+      newStackPair (integratie), mangle via drop-functies
+- [x] 25 dubbele ring-rekenkunde — CONSTRUCTIE: één ring-implementatie,
+      leeg-detectie op één plek, uitputtend getest (TestRingExhaustive)
+- [x] 26/27/28/29 dode code — N.V.T.: de betreffende constructies bestaan
+      niet in leannet
+
+Bonus-regressies zonder lneto-nummer: budget-hygiëne na close (echo-test),
+pot-leeg = luide RST, PassivePeers-equivalent (server nul ARP-queries),
+deadline = échte net.Error-timeout, ICMP-echo, 5555-klasse op QEMU (8
+vastgehouden verbindingen + verse = 200).
+
 ## Upstream-PR's netstack: in de gaten houden tot merge
 
 Ingediend 09-08 (details en exit-checklist: `docs/netstack-upstream.md`):

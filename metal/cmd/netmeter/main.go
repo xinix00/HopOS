@@ -1,9 +1,10 @@
-// netmeter is de meetbank voor de netstack van de kern (QEMU virt). Tot de
-// flip van 09-08 was dit een A/B-bank (gVisor vs lneto, twee builds); de
-// A/B-cijfers die de flip onderbouwden staan in het geheugen en de
-// gvisor-kant staat in git history. Wat blijft is de bank zelf: RX/TX-
-// plafonds, allocaties per fase, en de storm-workloads — ook bruikbaar op
-// ijzer (de LicheeRV-RX-jacht).
+// netmeter is de meetbank voor de netstack van de kern (QEMU virt). Hij was
+// twee keer een A/B-bank — gVisor vs lneto (09-08), lneto vs leannet (12-08) —
+// en dat is ook zijn rol bij een volgende wissel: splits stack.go achter een
+// build-tag en laat de nieuwe kant het verdienen. De cijfers van de vorige
+// kanten staan in git history en in TODO.md. Wat blijft is de bank zelf:
+// RX/TX-plafonds, allocaties per fase, en de storm-workloads — ook bruikbaar
+// op ijzer (de LicheeRV-RX-jacht).
 //
 // Wat QEMU hier wél zuiver meet: het pakket-pad (CPU-plafond, allocaties,
 // GC-druk) en de correctheid (SHA256 van elke transfer). Wat QEMU NIET kan
@@ -14,7 +15,7 @@
 //
 // Bouwen (handmatig, buiten de gate):
 //
-//	QEMU virt:  -tags "linkcpuinit nodefaultstack"  (GOARCH=arm64)
+//	QEMU virt:  -tags linkcpuinit  (GOARCH=arm64)
 //	LicheeRV:   PAYLOAD=netmeter image/licheerv-agent.sh — de bank wordt dan
 //	            zélf de monitor-payload in de FIP: de hele node is het
 //	            meetinstrument, er draait geen agent ertussen.
@@ -53,7 +54,7 @@ import (
 	// system-CA-store) — zelfde regel als in cmd/hopos.
 	_ "golang.org/x/crypto/x509roots/fallback"
 
-	gnet "github.com/xinix00/go-net"
+	"github.com/xinix00/HopOS/metal/net/netdev"
 
 	"github.com/xinix00/HopOS/metal/board"
 	"github.com/xinix00/HopOS/metal/cpu/memlimit"
@@ -169,20 +170,9 @@ func rxProfile() string {
 		float64(drv)/float64(frames)/1000, float64(stk)/float64(frames)/1000, perFrame/1000)
 }
 
-// newStack: de stack-maten van de bank — groot venster (wscale) zoals de
-// kern zelf (net/hopnet).
-func newStack() gnet.Stack {
-	cfg := gnet.DefaultLnetoStackConfig()
-	cfg.TCPBufferSize = 256 << 10
-	cfg.TCPQueueSize = 64
-	cfg.MaxActiveTCPPorts = 64
-	cfg.MaxListenerConns = 16
-	return gnet.NewLnetoStack(cfg)
-}
-
 func main() {
 	memlimit.Arm()
-	logf("NETMETER lneto %s %s/%s", runtime.Version(), runtime.GOOS, runtime.GOARCH)
+	logf("NETMETER %s %s %s/%s", stackName, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 	boardWarn()
 
 	nic, hw, err := board.Current().ProbeNIC()
@@ -193,17 +183,15 @@ func main() {
 	}
 	nc := board.Current().Net()
 
-	iface := &gnet.Interface{NetworkDevice: nic, Stack: newStack()}
-	if err := iface.Init(nc.CIDR, hw.String(), nc.GW); err != nil {
+	// De stack (stack.go): die hangt ook net.SocketFunc; wat terugkomt is de
+	// RX-voeding.
+	recv, err := benchStackUp(nic, nc, hw.String())
+	if err != nil {
 		logf("NETMETER_FAIL netstack init: %v", err)
 		park()
 	}
-	iface.HandleStackErr = func(err error, tx bool) {
-		logf("netstack (tx=%v): %v", tx, err)
-	}
 
 	net.SetDefaultNS([]string{nc.DNS})
-	net.SocketFunc = iface.Stack.Socket
 
 	rxSleepUs.Store(300) // de hopnet-default; /set?rxsleep=N verstelt hem live
 
@@ -214,7 +202,7 @@ func main() {
 	// verdachten: het ophalen (driver: cache-onderhoud + kopie uit DMA-geheugen)
 	// en het verwerken (stack: checksums, sequence-ruimte, ringbuffer).
 	go func() {
-		buf := make([]byte, gnet.MTU+gnet.EthernetMaximumSize)
+		buf := make([]byte, netdev.MTU+netdev.EthernetMaximumSize)
 		for {
 			t0 := time.Now()
 			n, err := nic.Receive(buf)
@@ -228,14 +216,11 @@ func main() {
 				}
 				continue
 			}
-			serr := iface.Stack.RecvInboundPacket(buf[:n])
+			recv(buf[:n]) // drops zijn tellers op de stack, geen fout per frame
 			rxDriverNs.Add(t1.Sub(t0).Nanoseconds())
 			rxStackNs.Add(time.Since(t1).Nanoseconds())
 			rxBytes.Add(int64(n))
 			rxCount.Add(1)
-			if serr != nil && iface.HandleStackErr != nil {
-				iface.HandleStackErr(serr, false)
-			}
 		}
 	}()
 	hostBase = "http://" + nc.GW + ":8099"
@@ -408,7 +393,7 @@ func storm(n int, keepalive bool) (int64, string, error) {
 //	         plus runtime-cijfers. Bij een RX-jacht is dit het instrument:
 //	         rx=frames/errors en de afstand tussen onze ring-index en de
 //	         hardware-pointer vertellen of er gedropt wordt.
-func serveUp(nic gnet.NetworkDevice) {
+func serveUp(nic netdev.Device) {
 	buf := make([]byte, serveSize)
 	x := uint64(0x48504f53) // "HPOS" — vaste seed: elke build serveert dezelfde bytes
 	for i := range buf {

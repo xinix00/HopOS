@@ -24,7 +24,9 @@ package conport
 
 import (
 	"fmt"
+	"io"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/xinix00/HopOS/metal/driver/conlog"
@@ -35,6 +37,15 @@ import (
 // panic-pad) en mag niets doen dat kan blokkeren of alloceren. 100ms is voor
 // meelezen met een boot niet te merken.
 const pollInterval = 100 * time.Millisecond
+
+// maxReaders begrenst het aantal gelijktijdige lezers. De listener-pool van de
+// netstack is eindig (MaxListenerConns, nu 8 per listener), en die is GEDEELD
+// met niets: raakt hij leeg, dan is deze poort dood — juist het kanaal dat je
+// dan nodig hebt. Een dubbele marge houden we vrij zodat één stuk gelopen
+// client nooit de laatste plek kan pakken.
+const maxReaders = 4
+
+var readers atomic.Int32
 
 // Serve start de console-poort en keert meteen terug; de listener draait in een
 // eigen goroutine. port 0 = uit (en dat is de default: zonder config-sleutel
@@ -61,7 +72,19 @@ func Serve(port int) {
 				fmt.Printf("console: accept on tcp/%d failed (%v) — port closed\n", port, err)
 				return
 			}
-			go stream(c)
+			if n := readers.Add(1); int(n) > maxReaders {
+				// Vol: dat zeggen en sluiten, in plaats van de verbinding stil
+				// vasthouden. Een lezer die dit ziet weet dat hij moet wachten,
+				// en de pool houdt plek over voor de rest van de node.
+				fmt.Fprintf(c, "console: %d readers already attached, try again later\n", maxReaders)
+				c.Close()
+				readers.Add(-1)
+				continue
+			}
+			go func() {
+				defer readers.Add(-1)
+				stream(c)
+			}()
 		}
 	}()
 }
@@ -72,6 +95,20 @@ func Serve(port int) {
 // bij de seriële lijn: twee cat-processen op dezelfde tty splitsten de bytes).
 func stream(c net.Conn) {
 	defer c.Close()
+
+	// LEZEN, ook al stuurt een console-lezer niets: zonder read-kant merken we
+	// een weggelopen client alléén als er iets te schrijven is. Bij een stille
+	// console (die-temp is één regel per minuut) blijft zo'n verbinding dus
+	// eeuwig hangen mét zijn slot in de listener-pool — en na 8 daarvan is de
+	// poort voorgoed dood. GEMETEN 11-08 (Derek): negen browsertabs op
+	// http://node:5555 legden de console om. Een browser stuurt hier een
+	// HTTP-request, snapt het rauwe antwoord niet en breekt af; die FIN kwam
+	// nooit aan omdat niemand las. io.Discard, want wat een client stuurt is
+	// per definitie niet voor ons — het enige dat telt is het EINDE ervan.
+	go func() {
+		io.Copy(io.Discard, c)
+		c.Close() // EOF of fout = client weg; de Write hieronder faalt nu meteen
+	}()
 
 	// Beginnen bij het oudste dat nog bewaard is, niet bij nul: dan krijgt een
 	// lezer die na de boot verbindt alsnog de hele geschiedenis die er ís.

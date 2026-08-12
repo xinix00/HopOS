@@ -24,7 +24,7 @@ mkdir -p out
 #    met de hopslot-runtime-hooks (board-onafhankelijk). Zonder -s: de symboltabel is
 #    nodig zodat slots.Start RamStart/RamSize kan patchen (job.MemoryLimit).
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-	"$TAMAGO" build -tags "linkcpuinit nodefaultstack" -trimpath \
+	"$TAMAGO" build -tags "linkcpuinit" -trimpath \
 	-ldflags "-w -T 0x50010000 -R 0x1000" -o cmd/hopos-embed/app5.elf ./app/appspike
 
 # 2. De HOP-kern (embed app5.elf): gelinkt op de werkelijke load 0x80000
@@ -33,7 +33,7 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 GUITAG=""
 [ "${GUI:-1}" = 1 ] && GUITAG=" gui"
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-	"$TAMAGO" build -tags "rpi5 linkcpuinit$GUITAG nodefaultstack" -trimpath \
+	"$TAMAGO" build -tags "rpi5 linkcpuinit$GUITAG" -trimpath \
 	-ldflags "-s -w -T 0x90000 -R 0x1000" -o out/hopos5.elf ./cmd/hopos-embed
 
 # 3. ELF → raw image (Circle-recept, incl. BSS-nullen t/m memEnd — mkkernel).

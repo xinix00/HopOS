@@ -36,7 +36,7 @@ import (
 	"sync"
 	"time"
 
-	gnet "github.com/xinix00/go-net"
+	"github.com/xinix00/HopOS/metal/net/netdev"
 
 	"github.com/xinix00/HopOS/metal/abi/layout"
 )
@@ -148,7 +148,7 @@ var (
 // switch); de zendkant krijgt een mutex omdat de stack én de NAT er allebei op
 // zenden (de NIC-Transmit is zelf niet goroutine-veilig).
 type Uplink struct {
-	nic  gnet.NetworkDevice
+	nic  netdev.Device
 	ip   uint32
 	mask uint32
 	mac  [6]byte
@@ -161,7 +161,7 @@ var uplinkTxMu sync.Mutex
 // WrapUplink registreert de externe NIC bij de NAT en geeft de wrapper terug
 // die hopnet in zijn go-net-Interface hangt. cidr is het externe node-adres
 // mét prefix (bv. "10.0.2.15/24") — het masker bepaalt wat "off-subnet" is.
-func WrapUplink(nic gnet.NetworkDevice, cidr string, mac net.HardwareAddr) (*Uplink, error) {
+func WrapUplink(nic netdev.Device, cidr string, mac net.HardwareAddr) (*Uplink, error) {
 	ip, ipnet, err := net.ParseCIDR(cidr)
 	ip4 := ip.To4()
 	if err != nil || ip4 == nil || len(mac) != 6 {

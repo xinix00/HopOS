@@ -87,9 +87,11 @@ command -v riscv64-elf-as >/dev/null || { echo "riscv64-elf-as ontbreekt (riscv6
 [ -f "$DONOR" ] || { echo "donor-fip ontbreekt: $DONOR (zet LICHEERV_DONOR)" >&2; exit 1; }
 [ -f "$FIPTOOL" ] || { echo "fiptool ontbreekt: $FIPTOOL (zet LICHEERV_FIPTOOL)" >&2; exit 1; }
 
+# EXTRATAGS: extra build-tags voor een experiment naast het productiepad (een
+# tweede netstack-backend, een debug-vlag). Leeg = wat de gate bouwt.
 rv() { # rv <tags> <ldflags> <out> <pkg>
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=riscv64 \
-		"$TAMAGO" build -tags "$1 nodefaultstack" -trimpath -ldflags "$2" -o "$3" "$4"
+		"$TAMAGO" build -tags "$1${EXTRATAGS:+ $EXTRATAGS}" -trimpath -ldflags "$2" -o "$3" "$4"
 }
 
 cd "$DIR/metal"

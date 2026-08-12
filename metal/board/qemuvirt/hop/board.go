@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"net"
 
-	gnet "github.com/xinix00/go-net"
+	"github.com/xinix00/HopOS/metal/net/netdev"
 
 	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/board"
@@ -74,7 +74,7 @@ func (machine) S2SMPTrampPC() uint64 { return el2.S2SMPTrampPC() }
 // ProbeNIC vindt het virtio-net-mmio-slot, construeert de driver en zet 'm
 // klaar in de net-DMA-subregio. Zo blijft de driverkeuze board-kennis en is
 // hopnet NIC-agnostisch.
-func (machine) ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error) {
+func (machine) ProbeNIC() (netdev.Device, net.HardwareAddr, error) {
 	base, _ := probeVirtioNet()
 	if base == 0 {
 		return nil, nil, nil // geen (moderne) virtio-net gevonden

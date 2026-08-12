@@ -1,15 +1,18 @@
 // Package hopnet brengt het netwerk van de HOP-kern op: de NIC-driver van
-// het board onder de lneto-netstack (go-net's LnetoStack), gehookt in Go's
-// standaard net-package. Daarna werken net.Listen, net.Dial en net/http
-// gewoon — precies wat de HOP-agent nodig heeft. Dit is "geen video, wel
-// een poort".
+// het board onder de netstack, gehookt in Go's standaard net-package. Daarna
+// werken net.Listen, net.Dial en net/http gewoon — precies wat de HOP-agent
+// nodig heeft. Dit is "geen video, wel een poort".
 //
-// Tot 09-08 stond hier gVisor (~90k gelinkte regels, PacketBuffer-machinerie
-// en een goroutine-handoff per segment); de flip naar lneto is gemeten op de
-// netmeter-bank: RX 26→61MB/s, 66 mallocs i.p.v. 340k voor 64MiB, 0 GC-druk
-// op het pakket-pad. Wat gVisor aan features droeg is verhuisd: HandleLocal
-// en de tweede interne NIC zitten nu op de device-naad (locnet.go +
-// internal.go), window scaling zit in lneto zelf (RFC 7323, 09-08).
+// De stack is leannet (xinix00/lean, sinds 12-08); de opbouw staat in
+// stack.go, het device-contract in metal/net/netdev, en de afwegingen in
+// lean/leannet/DESIGN.md.
+//
+// Historie van dit bestand, want het verklaart de vorm: tot 09-08 stond hier
+// gVisor (~90k gelinkte regels), daarna lneto via go-net, en sinds 12-08 onze
+// eigen stack. Elke wissel raakte precies twee bestanden (stack.go en de
+// stack-import) omdat álles eromheen aan het twee-methode-device hangt:
+// HandleLocal en de tweede interne NIC zitten op de device-naad (locnet.go +
+// internal.go), niet in de stack.
 package hopnet
 
 import (
@@ -18,7 +21,7 @@ import (
 	"net"
 	"time"
 
-	gnet "github.com/xinix00/go-net"
+	"github.com/xinix00/HopOS/metal/net/netdev"
 
 	"github.com/xinix00/HopOS/metal/board"
 	"github.com/xinix00/HopOS/metal/net/hopswitch"
@@ -29,7 +32,7 @@ import (
 // IP-plan en de NIC-probe komen van het actieve board (op QEMU de slirp-
 // defaults; op echt ijzer straks een board met DHCP/DT).
 func Up() error {
-	// De board levert een kant-en-klaar go-net-device (driver + init zijn
+	// Het board levert een kant-en-klaar netdev.Device (driver + init zijn
 	// board-kennis); hopnet weet niet welke NIC dit is. ProbeNIC vóór Net():
 	// op echt ijzer (Pi 5) haalt de probe zelf de DHCP-lease die Net() daarna
 	// rapporteert — die volgorde is het contract.
@@ -63,57 +66,25 @@ func Up() error {
 	loc := &locdev{nic: uplink, ip: binary.BigEndian.Uint32(ip4)}
 	copy(loc.mac[:], hw)
 
-	// De stack-maten. De buffers bepalen via window scaling (RFC 7323) het
-	// TCP-venster: 128KiB = shift 2 — de downloads (het kern-geldpad) halen
-	// daarmee ~venster/RTT zonder dat de listener-pools de kern leegeten
-	// (élke net.Listen alloceert MaxListenerConns×2×buffer vooraf).
-	cfg := gnet.DefaultLnetoStackConfig()
-	cfg.Hostname = "hopos"
-	cfg.TCPBufferSize = 128 << 10
-	cfg.TCPQueueSize = 32
-	cfg.MaxActiveTCPPorts = 64 // poorttabel: downloads (4) + API + S3 + marge
-	cfg.MaxListenerConns = 8   // per listener (agent/leader/console)
-	// UDP is geen bijzaak: zónder slots faalt élke UDP-socket met "resource
-	// exhausted", en dat neemt SNTP mee. Een node zonder klok kan geen enkel
-	// certificaat verifiëren, dus dan mislukt de héle artifact-keten met
-	// "certificate is not yet valid" — gemeten 11-08 op QEMU, en de oorzaak lag
-	// vier lagen verderop (go-net zette het aantal op nul). 4 volstaat: de
-	// resolver en een SNTP-vraag naast elkaar, ~64 byte per poort.
-	cfg.MaxActiveUDPPorts = 4
-
-	iface := &gnet.Interface{
-		NetworkDevice: loc,
-		Stack:         gnet.NewLnetoStack(cfg),
+	// De stack zelf (stack.go): die hangt ook net.SocketFunc; wat terugkomt
+	// is de RX-voeding voor rxLoop.
+	recv, err := stackUp(loc, nc, mac)
+	if err != nil {
+		return err
 	}
-	if err := iface.Init(nc.CIDR, mac, nc.GW); err != nil {
-		return fmt.Errorf("netstack init: %w", err)
-	}
-	// Geen SetPortRange meer (dat was gvisor): lneto deelt zijn efemere
-	// poorten sequentieel uit in [49152, 65535], en de masquerade stopt op
-	// hopswitch.MasqEnd = 49152 — de bereiken zijn per constructie disjunct.
-	// BEWUST GEEN HandleStackErr: wat daar langskomt is de broadcast van een
-	// echt LAN (mDNS, SSDP, router advertisements) die niet voor ons is, en de
-	// console is een busy-wait per byte — ~3,5ms per regel. Elke geprinte regel
-	// is dus tijd die de RX-lus niet heeft, waarna de ring overloopt en er nóg
-	// meer te melden valt. GEMETEN 11-08: LicheeRV dood na ~250s, die-temp 10°C
-	// te hoog. Meten doen we met netmeter/vitals, niet in het datapad.
-	iface.Stack.EnableICMP()
 
 	// De interne gateway-naad: 10.100.0.1 = "mijn node" voor de apps — de
 	// agent/leader zijn dan van binnenuit bereikbaar zonder proxy (zie
 	// internal.go).
 	upInternal(loc)
 
-	// Netstack in Go's standaard net-package hangen: hierna werken
-	// net.Listen, net/http en DNS voor alle HOP-kern-code.
 	net.SetDefaultNS([]string{nc.DNS})
-	net.SocketFunc = iface.Stack.Socket
 
-	// RX-lus: pollen mét microslaap i.p.v. gnet's Gosched-spin, zodat de
+	// RX-lus: pollen mét microslaap i.p.v. een Gosched-spin, zodat de
 	// idle-governor (metal/cpu/idle) de core echt kan laten slapen als het stil
 	// is; onder last wordt er nooit geslapen (ring leeg = pas dan slapen).
 	// Over de locdev, zodat loopback- en gateway-frames vóór de NIC gaan.
-	go rxLoop(loc, iface)
+	go rxLoop(loc, recv)
 
 	// DHCP-lease levend houden: heeft dit board een verkregen lease (de Pi's),
 	// dan vernieuwt KeepAlive hem op T1 via de netstack (UDP-RENEW) — dat kan
@@ -143,11 +114,12 @@ func Up() error {
 	return nil
 }
 
-// rxLoop is de de-spun variant van gnet's Interface.Start.
-func rxLoop(nic gnet.NetworkDevice, iface *gnet.Interface) {
-	buf := make([]byte, gnet.MTU+gnet.EthernetMaximumSize)
+// rxLoop pompt frames van het device naar de stack; recv is de
+// ingress-voeding die stack.go teruggaf.
+func rxLoop(nic netdev.Device, recv func([]byte) error) {
+	buf := make([]byte, netdev.MTU+netdev.EthernetMaximumSize)
 	for {
-		if !rxPass(nic, iface, buf) {
+		if !rxPass(nic, recv, buf) {
 			time.Sleep(300 * time.Microsecond)
 		}
 	}
@@ -157,10 +129,14 @@ func rxLoop(nic gnet.NetworkDevice, iface *gnet.Interface) {
 // hopswitch.switchPass. Dit is het meest blootgestelde pad van de node: ruwe
 // frames van de fysieke NIC, remote en zonder authenticatie, en ze lopen via
 // Uplink.Receive tot in de NAT (arpLearn, DNAT, checksum-herschrijving) en de
-// gvisor-stack. Een panic op frame-inhoud zou hier de RX-goroutine velen, en dat
+// netstack. Een panic op frame-inhoud zou hier de RX-goroutine velen, en dat
 // is de hele node — álle slots. Frame gedropt, lus draait door; na een panic
 // slaapt de lus zijn normale tikje, zodat een panic-storm de core niet opeet.
-func rxPass(nic gnet.NetworkDevice, iface *gnet.Interface, buf []byte) (worked bool) {
+// Stack-fouten worden bewust niet geprint: dit is de broadcast-ruis van een
+// echt LAN (mDNS, SSDP, router advertisements) en de console is een busy-wait
+// per byte — GEMETEN 11-08: een LicheeRV ging er na ~250s aan dood. Meten doen
+// we met netmeter/vitals, niet in het datapad.
+func rxPass(nic netdev.Device, recv func([]byte) error, buf []byte) (worked bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Printf("HOPOS_RX_PANIC: %v — frame dropped, RX keeps running\n", r)
@@ -170,8 +146,6 @@ func rxPass(nic gnet.NetworkDevice, iface *gnet.Interface, buf []byte) (worked b
 	if n == 0 || err != nil {
 		return false
 	}
-	if err := iface.Stack.RecvInboundPacket(buf[:n]); err != nil && iface.HandleStackErr != nil {
-		iface.HandleStackErr(err, false)
-	}
+	_ = recv(buf[:n])
 	return true
 }

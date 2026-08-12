@@ -76,8 +76,12 @@ func allowed(cat, imp string) bool {
 		return false // het app-contract importeert niets
 	case "board-contract":
 		// Alleen de typen die het contract draagt (fb.Desc, pcie.Window,
-		// dhcp.Lease) plus het ge-embedde app-contract.
-		return imp == "board/appboard" || imp == "driver/fb" || imp == "driver/pcie"
+		// netdev.Device, dhcp.Lease) plus het ge-embedde app-contract.
+		// net/netdev is de vierde van die soort en géén laagbreuk: het is een
+		// puur interface dat zelf niets importeert (ProbeNIC geeft het terug),
+		// niet de netstack — die woont buiten deze module.
+		return imp == "board/appboard" || imp == "driver/fb" || imp == "driver/pcie" ||
+			imp == "net/netdev"
 	case "board-basis":
 		// De basis-helft wordt in élk app-image gelinkt: geen contract, geen
 		// net/kern, en uit driver/ uitsluitend de console-uitzondering

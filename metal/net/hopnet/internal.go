@@ -5,7 +5,7 @@
 // (Dereks besluit 20-07: één vast intern adres i.p.v. {{host}}-hairpin).
 //
 // Tot de netstack-flip (09-08) was dit een twééde NIC op de gvisor-stack met
-// statische buren (zie git history). De lneto-stack heeft één NIC, dus het
+// statische buren (zie git history). Onze stack heeft één NIC, dus het
 // interne adres is nu een statische 1:1-IP-vertaling op de gateway-naad:
 // app→node-frames worden hier naar het echte stack-adres herschreven en
 // komen als gewone RX de stack in; node→app-frames vertaalt locdev terug

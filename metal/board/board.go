@@ -13,7 +13,7 @@ import "fmt"
 import (
 	"net"
 
-	gnet "github.com/xinix00/go-net"
+	"github.com/xinix00/HopOS/metal/net/netdev"
 
 	"github.com/xinix00/HopOS/metal/board/appboard"
 	"github.com/xinix00/HopOS/metal/driver/fb"
@@ -91,7 +91,7 @@ type Common interface {
 	// op het concrete driver-type, niet op de NetworkDevice-interface). Zo
 	// blijft hopnet driver-agnostisch. Een nil device = geen NIC gevonden; een
 	// error = wel gevonden maar de init faalde.
-	ProbeNIC() (gnet.NetworkDevice, net.HardwareAddr, error)
+	ProbeNIC() (netdev.Device, net.HardwareAddr, error)
 	Net() NetConfig
 
 	// PCIe-adresplan (leeg op boards zonder PCIe).

@@ -30,7 +30,7 @@ mkdir -p out
 #    onafhankelijk). Zonder
 #    -s: de symboltabel is nodig voor de RamStart/RamSize-patch (job.MemoryLimit).
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-	"$TAMAGO" build -tags "linkcpuinit nodefaultstack" -trimpath \
+	"$TAMAGO" build -tags "linkcpuinit" -trimpath \
 	-ldflags "-w -T 0x50010000 -R 0x1000" -o cmd/hopos-embed/app4.elf ./app/appspike
 
 # 2. De HOP-kern (embed app4.elf): gelinkt op de werkelijke load 0x80000 (+0x10000).
@@ -38,7 +38,7 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 GUITAG=""
 [ "${GUI:-1}" = 1 ] && GUITAG=" gui"
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-	"$TAMAGO" build -tags "rpi4 linkcpuinit$GUITAG nodefaultstack" -trimpath \
+	"$TAMAGO" build -tags "rpi4 linkcpuinit$GUITAG" -trimpath \
 	-ldflags "-s -w -T 0x90000 -R 0x1000" -o out/hopos4.elf ./cmd/hopos-embed
 
 # 3. ELF → RAW kernel8.img (géén arm64-Image-header: die triggert het

@@ -57,11 +57,11 @@ los:
 
 ```sh
 GOWORK=off GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-  ~/tamago-go/bin/go build -tags "linkcpuinit nodefaultstack" -trimpath \
+  ~/tamago-go/bin/go build -tags "linkcpuinit" -trimpath \
   -ldflags "-w -T 0x50010000 -R 0x1000" -o vitals-arm64-tamago.elf ./cmd/vitals
 ```
 
-(riscv64: `-tags "linkramsize linkcpuinit nodefaultstack"`, `-T 0x88010000`.)
+(riscv64: `-tags "linkramsize linkcpuinit"`, `-T 0x88010000`.)
 
 Het pakket `internal/vitals` is host-buildbaar (geen metal-imports; de
 control-page-woorden komen als functie uit de tamago-main): `go test ./...`

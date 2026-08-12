@@ -2,6 +2,12 @@
 # refork-netstack.sh — regenereert de fork-branches van lneto en go-net uit de
 # hopos-branches, en vertelt wat er daarna nog met de hand moet.
 #
+# STATUS 12-08: hop-os gebruikt lneto/go-net NIET meer — de netstack is
+# xinix00/lean/leannet (docs/leannet-ontwerp.md, lean/leannet/DESIGN.md). Dit
+# script blijft staan voor de open PR's bij soypat/lneto en usbarmory/go-net
+# (#178-#183, go-net#5/#6): die zijn een bijdrage, geen onderhoudsplicht. Voor
+# HopOS zelf is hier niets meer nodig.
+#
 # WAAROM TWEE BRANCHES PER CLONE
 #
 #   hopos  het UPSTREAM module-pad (github.com/soypat/lneto,

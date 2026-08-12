@@ -79,7 +79,7 @@ mkdir -p out
 
 # Twee smaken: kaal (headless) en gui (metal/gui + fb-grant). Default gui;
 # GUI=0 bouwt de kale smaak. (Zelfde knop in alle imagescripts.)
-TAGS="uefi linkcpuinit nodefaultstack"
+TAGS="uefi linkcpuinit"
 [ "${GUI:-1}" = 1 ] && TAGS="$TAGS gui"
 
 # In agent-modus de app-image (door de node streamend geplaatst vanaf de
@@ -87,7 +87,7 @@ TAGS="uefi linkcpuinit nodefaultstack"
 # de plaatser patcht RamStart/RamSize/slotHint).
 if [ "$MODE" = agent ]; then
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-		"$TAMAGO" build -tags "linkcpuinit nodefaultstack" -trimpath \
+		"$TAMAGO" build -tags "linkcpuinit" -trimpath \
 		-ldflags "-w -T 0x50010000 -R 0x1000" -o out/app-uefi.elf ./app/appspike
 fi
 
@@ -107,7 +107,7 @@ for base in $SLOTS; do
 	text=$(printf '0x%X' $((base + 0x10000)))
 	out="hopos-uefi-$MODE-$base.elf"
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-		"$TAMAGO" build -tags "$TAGS nodefaultstack" -trimpath \
+		"$TAMAGO" build -tags "$TAGS" -trimpath \
 		-ldflags "-buildid= -w -T $text -R 0x1000" -o "out/$out" "$PKG" &
 	PIDS="$PIDS $!"
 	ELFS="$ELFS -elf metal/out/$out"

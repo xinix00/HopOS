@@ -7,16 +7,15 @@
 // Bewust een apart pakket naast applib: alleen apps die netwerk willen linken
 // de netstack mee; wie het niet importeert houdt een kleine image.
 //
-// Eén backend: lneto via go-net (up_lneto.go) — sinds de flip van 09-08.
-// De geschiedenis in het kort: gVisor was de bewezen maar forse backend
-// (~2,7MB van elk app-image, 340k allocaties per 64MiB op het RX-pad); een
-// eerdere lneto-poging (26-07) sneuvelde omdat twee stacks náást elkaar de
-// dure toestand was én x/xnet echte gaten had. Die gaten zijn 09-08 gedicht
-// in de bron zelf (window scaling, deadline-gedreven dials, sequentiële
-// poorten — zie ~/Git/lneto branch hopos) en de flip is gemeten op de
-// netmeter-bank: RX 26→61MB/s met 0 GC-druk. Eén backend, geen tags —
-// behalve `nodefaultstack` bij het BOUWEN, anders linkt go-net's
-// Interface-fallback gvisor alsnog mee.
+// De stack is leannet (xinix00/lean), sinds 12-08; de opbouw staat in up.go
+// en de afwegingen in lean/leannet/DESIGN.md. Geen build-tags, geen backends.
+//
+// De geschiedenis in het kort, want die verklaart waarom dit pakket zo dun is:
+// gVisor was de bewezen maar forse backend (~2,7MB van elk app-image, 340k
+// allocaties per 64MiB op het RX-pad); lneto (09-08) haalde dat weg maar bleek
+// bugs te dragen die wij niet konden repareren zonder fork-onderhoud (29
+// bevindingen, 11-08). Elke wissel raakte alleen up.go, want alles eromheen
+// hangt aan het twee-methode-device (metal/net/netdev).
 package appnet
 
 import (
@@ -25,8 +24,7 @@ import (
 	"github.com/xinix00/HopOS/metal/abi/ring"
 )
 
-// nic is het NetworkDevice over de eigen frame-ringen — gedeeld door beide
-// backends.
+// nic is het netdev.Device over de eigen frame-ringen.
 type nic struct {
 	mu sync.Mutex // Transmit kan uit meerdere goroutines komen; ring is SPSC
 	tx *ring.Ring // app → switch (wij producer)
