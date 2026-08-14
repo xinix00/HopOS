@@ -4,13 +4,13 @@ go 1.26.4
 
 require github.com/usbarmory/tamago v1.26.4
 
-require github.com/xinix00/lean v0.5.1
+require github.com/xinix00/lean v0.7.0
 
-require github.com/xinix00/hoplockserver v0.2.0 // indirect
+require github.com/xinix00/hoplockserver v0.2.1 // indirect
 
 // Directe dep sinds de app-object-store (cmd/hopos/store.go gebruikt de
 // streaming object-API + ListObjects van v0.3.0).
-require github.com/xinix00/hoplock v0.4.0
+require github.com/xinix00/hoplock v0.4.1
 
 require (
 	// De gepubliceerde HOP-tag waar deze boom tegen bouwt (o.a.
@@ -18,7 +18,7 @@ require (
 	// meer (Derek, 04-08): een hop-wijziging bereikt hop-os alleen via
 	// commit+tag, dus wat hier bouwt bouwt overal — ook downstream (de
 	// -hopos-satellieten), die een replace nooit zouden zien.
-	github.com/xinix00/hop v0.20.19
+	github.com/xinix00/hop v0.20.20
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20260709184058-243e02a382f8
 )
 
