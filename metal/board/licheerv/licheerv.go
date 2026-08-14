@@ -39,32 +39,46 @@ const (
 	// timebase-frequency uit de dts (de vaste 25MHz-osc)
 	RTCCLK = 25000000
 
-	// De slot-geometrie van dít board: waar een app-partitie ligt en waar
-	// zijn control page. Beide kanten kennen deze getallen — HOP plaatst het
-	// slot-blob op SlotBase en geeft precies die partitie in de kooi vrij
-	// (kern/cage), en de app-kant maakt er zijn RAM-plan van (mem_slot.go,
-	// -tags linkramsize). Onder SlotBase hoort HOP; daarboven de app.
+	// De slot-geometrie van dít board. Beide kanten kennen deze getallen —
+	// HOP plaatst het slot-blob op SlotBase en geeft precies die partitie in
+	// de kooi vrij (kern/cage), en de app-kant maakt er zijn RAM-plan van
+	// (mem_slot.go, -tags linkramsize). De control page woont in de staart
+	// van elke partitie (layout.CtrlPageAt, slot-ABI v2).
 	// HopBase is waar ons image draait — NIET DRAM-start: de FSBL
 	// decomprimeert U-Boot naar 0x80200020 nádat hij ons geladen heeft, dus
 	// alles daaronder is vuil gebied (gemeten 30-07, zie
 	// image/licheerv-agent.sh).
-	//
-	// 64MB voor HOP, niet 80: het image is 12,5MB en de rest is Go-heap. Gemeten
-	// (QEMU-bench 31-07, de regel bij "image placed"): HOP houdt 5MB vast bij
-	// boot en 17MB op zijn zwaarste moment — een plaatsing, met de imagecopy en
-	// het cache-onderhoud over een hele partitie. 64MB laat daar ruim marge op
-	// voor een node met véél kooien.
-	//
-	// Wat vrijkomt gaat naar de apps, en het gaat naar de regio ONDER SlotBase
-	// (pool B wordt 48→64MB) juist omdat SlotBase het línkadres van elk
-	// riscv64-app-image is: dat verschuiven zou élk gepubliceerd artifact
-	// ongeldig maken. Zo kost deze hersnit geen enkele relink.
 	HopBase = 0x84000000
+
+	// HopSize is HOP's venster (image + Go-heap). 32MB sinds 14-08, gemeten
+	// (QEMU, agent kaal, mét een echte plaatsing en SSE-load): het image is
+	// 4,9MB, de runtime houdt er 5MB van vast, en de vloer ligt tussen 16 en
+	// 20MB — daaronder past de eerste 4MiB-heaparena niet meer naast het
+	// image. 32 is het midden tussen die vloer en de oude 64: dubbele marge,
+	// en de netstack-pot (ramSize/8) blijft met 4MB ruim voor de
+	// 100Mbit-poort. De 17MB-piek uit de oude meting (31-07) was mét
+	// imagecopy; een plaatsing streamt sindsdien en piekte in de meting op
+	// 2MB heap-in-use.
+	//
+	// Wat vrijkomt (HopBase+HopSize..SlotBase, 32MB) wordt een eigen
+	// pool-regio in het plan — en NIET een verschuiving van SlotBase, want
+	// dat is het línkadres van elk riscv64-app-image: verschuiven zou élk
+	// gepubliceerd artifact ongeldig maken. Zo kost de hersnit geen enkele
+	// relink (zelfde afweging als de vorige hersnit hier).
+	HopSize = 0x02000000
 
 	SlotBase   = 0x88000000
 	SlotSize   = 0x04000000 // 64MB
 	SlotSizeMB = SlotSize >> 20
-	CtrlPage   = 0x8FF10000 // control page: HOP ↔ app, 4KB
+
+	// StubMbox is het VANGNET-scratch van de kooi-stub (lege slot-tabel = de
+	// pre-agent-demo; productie krijgt zijn scratch via de slot-tabel in de
+	// partitie-staart, layout.AbiStubOff) plus de demo-velden van slotdemo.
+	// In de vrije top van de 2MB-staart, buiten élke plan-regio; heette
+	// CtrlPage en stond op 0x8FF10000 — dood als control page (die woont in
+	// de partitie-staart) en sinds de staart-hersnit (14-08) midden in
+	// slot-blok 15. Zelfde waarde als MBOX in stub-slot.S.
+	StubMbox = 0x8FFF0000
 )
 
 // RV64 is de eigen kern (XuanTie C906) — het tamago-CPU-object dat de

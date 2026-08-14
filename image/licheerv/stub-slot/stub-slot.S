@@ -52,7 +52,11 @@
 #	    die HOP zelf niet kan lezen
 #	+64 mxstatus zoals teruggelezen (welke bits het silicium accepteerde)
 
-	.equ	MBOX,	0x8FF10000	# board/licheerv.CtrlPage
+	# Het vangnet-scratch (lege slot-tabel = de pre-agent-demo): in de VRIJE
+	# top van de 2MB-staart, buiten élke plan-regio. Het oude 0x8FF10000 ligt
+	# sinds de staart-hersnit (14-08) midden in slot-blok 15 — een vangnet dat
+	# HOP's boekhouding beschrijft is erger dan geen vangnet.
+	.equ	MBOX,	0x8FFF0000	# board/licheerv.StubMbox
 
 	# mb: control-page-write die het ándere hart écht ziet. Caches staan na
 	# stap 1 AAN, dus een fence is niet genoeg: de regel staat write-back in

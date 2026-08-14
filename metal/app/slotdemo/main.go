@@ -36,7 +36,7 @@ const (
 // cache-onderhoud rond elke gedeelde regel, want de clusters zijn niet
 // coherent.
 func put(field int, v uint64) {
-	addr := uintptr(licheerv.CtrlPage + uint64(field*8))
+	addr := uintptr(licheerv.StubMbox + uint64(field*8))
 	*(*uint64)(unsafe.Pointer(addr)) = v
 	licheerv.CacheClean(addr, 8)
 }

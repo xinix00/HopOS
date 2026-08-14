@@ -9,7 +9,7 @@
 // Contract met hartprobe.go (de HOP-kant):
 //   - entry via HartOn(hart, appHartProbePC()) — reset-boot, geen argumenten,
 //     geen stack; alles komt uit immediates en mhartid.
-//   - resultaten landen in de boot-scratch-page (0x8FF00000, zie plan.go —
+//   - resultaten landen in de boot-scratch-page (0x8FE00000, zie plan.go —
 //     een init-check houdt beide in de pas):
 //       +0   voortgang: nummer van de laatst GESLAAGDE stap (zie onder)
 //       +8   mhartid (bevestigt op welk hart we echt draaien)
@@ -52,7 +52,7 @@ TEXT hartprobe(SB),NOSPLIT|NOFRAME,$0
 	MOV	$probepark(SB), X6
 	WORD	$0x30531073		// csrw mtvec, x6
 
-	MOV	$0x8FF00000, X5		// mailbox = boot-scratch (plan.go)
+	MOV	$0x8FE00000, X5		// mailbox = boot-scratch (plan.go)
 
 	// Stap 1: levend, en op wélk hart.
 	WORD	$0xf1402373		// csrr x6, mhartid

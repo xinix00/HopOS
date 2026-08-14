@@ -64,7 +64,7 @@ func fail(what string, err error) {
 }
 
 // hopBudget/hopUsage zijn HOP's eigen geheugengetallen: wat het board hem gaf
-// (de RAM-declaratie tussen HopBase en de eerste slot-partitie) en wat de
+// (de RAM-declaratie van HopSize op HopBase) en wat de
 // Go-runtime daar werkelijk van vasthoudt. Ze staan hier los omdat élke MB die
 // HOP niet nodig heeft naar de app-pool hoort — met deze twee regels is het
 // krimpen van HopBase een meting in plaats van een gok. Zelfde bron als

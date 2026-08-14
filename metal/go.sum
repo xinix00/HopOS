@@ -1,7 +1,7 @@
 github.com/usbarmory/tamago v1.26.4 h1:laFvRANKgVYFHxLHjIlhqJCc3Xm+qMyab2SlUoNw6zY=
 github.com/usbarmory/tamago v1.26.4/go.mod h1:HZkb+ZkzFl8aCxAuF7exsKX+XaNM0mYG9Iv7ooX1WDY=
-github.com/xinix00/hop v0.20.20 h1:WOcbmaDUGCS75CmVM9amQOy9oAAB3ZUnfohtb7491kA=
-github.com/xinix00/hop v0.20.20/go.mod h1:AZqgSp/w1OtJMqjEQh+mNQFzcazdnAtU312u1qvh8b8=
+github.com/xinix00/hop v0.20.21 h1:DAlSbfrM1AQRz9Ep1ISk9f2HvcxGICKqbMvV2Ze0nOg=
+github.com/xinix00/hop v0.20.21/go.mod h1:AZqgSp/w1OtJMqjEQh+mNQFzcazdnAtU312u1qvh8b8=
 github.com/xinix00/hoplock v0.4.1 h1:y33/9g8f26S85OuwRudjgNgstuy+N+7ocL1FqtdKJI4=
 github.com/xinix00/hoplock v0.4.1/go.mod h1:0duoz1FtShLgwVffM11uWKUF4D3r7R7FdAWkMzjwSiw=
 github.com/xinix00/hoplockserver v0.2.1 h1:vLgv+iuuExaKgb90uwxMLavRMrlXRqLerihgFCv9pzY=

@@ -60,7 +60,7 @@ var appWaker struct {
 
 func init() {
 	// De asm draagt het mailbox-adres als immediate; dit houdt beide in de pas.
-	if bootScratchPA != 0x8FF00000 {
+	if bootScratchPA != 0x8FE00000 {
 		panic("hartprobe_riscv64.s: mailbox-adres loopt uit de pas met plan.go")
 	}
 }

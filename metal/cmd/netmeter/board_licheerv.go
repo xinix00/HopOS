@@ -24,7 +24,7 @@ func init() { boardWarn = licheerv.Warn }
 var ramStart uint = licheerv.HopBase
 
 //go:linkname ramSize runtime/goos.RamSize
-var ramSize uint = licheerv.SlotBase - licheerv.HopBase
+var ramSize uint = licheerv.HopSize
 
 // serveSize: het HOP-venster is hier 64MB totaal — een blob van 8MiB laat de
 // runtime en de stack-buffers ruim ademen, en is zat om TX van buitenaf te

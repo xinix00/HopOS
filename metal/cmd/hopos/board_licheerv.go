@@ -85,4 +85,4 @@ func init() {
 var ramStart uint = licheerv.HopBase
 
 //go:linkname ramSize runtime/goos.RamSize
-var ramSize uint = licheerv.SlotBase - licheerv.HopBase
+var ramSize uint = licheerv.HopSize

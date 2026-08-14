@@ -12,7 +12,8 @@ import (
 //	0x80000000  HOP: kern + heap, 128MB          (mem.go)
 //	0x88000000  app-partitie, 64MB               ← dit bestand
 //	0x8C000000  vrij
-//	0x8FF10000  control page / mailbox (granted MMIO-achtig venster)
+//	0x8FFF0000  vangnet-scratch van de stub (licheerv.StubMbox; de echte
+//	            control page woont in de partitie-staart, slot-ABI v2)
 //
 // De kooi (slot/stub-slot.S) geeft precies deze partitie + de control page
 // + UART0 vrij en verzegelt de rest — inclusief HOP's eigen 128MB.
