@@ -6,7 +6,7 @@ github.com/xinix00/hoplock v0.4.1 h1:y33/9g8f26S85OuwRudjgNgstuy+N+7ocL1FqtdKJI4
 github.com/xinix00/hoplock v0.4.1/go.mod h1:0duoz1FtShLgwVffM11uWKUF4D3r7R7FdAWkMzjwSiw=
 github.com/xinix00/hoplockserver v0.2.1 h1:vLgv+iuuExaKgb90uwxMLavRMrlXRqLerihgFCv9pzY=
 github.com/xinix00/hoplockserver v0.2.1/go.mod h1:HPVrFPGljcbxqIV8sIsa1W67hLI5vC7yG+z8W1k0nLg=
-github.com/xinix00/lean v0.7.0 h1:E8V/MFpPy521/1L9iGjyBoYLuvhXGzwADOL4A/IgZcM=
-github.com/xinix00/lean v0.7.0/go.mod h1:gRIa2nL/SIEsi1L/eq9EUqrKQ+jnjxUGb3IAsuVQX7U=
+github.com/xinix00/lean v0.7.1 h1:iGeEp/UIqZ79NWfryqv3V/213ybbde75/P/uxb5xvpA=
+github.com/xinix00/lean v0.7.1/go.mod h1:gRIa2nL/SIEsi1L/eq9EUqrKQ+jnjxUGb3IAsuVQX7U=
 golang.org/x/crypto/x509roots/fallback v0.0.0-20260709184058-243e02a382f8 h1:OZy0hsjD/gbnVKENxnVK6I3e4bdKwYy4R3dfdKosYyA=
 golang.org/x/crypto/x509roots/fallback v0.0.0-20260709184058-243e02a382f8/go.mod h1:+UoQFNBq2p2wO+Q6ddVtYc25GZ6VNdOMyyrd4nrqrKs=
