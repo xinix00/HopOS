@@ -273,15 +273,75 @@ func bootPendingDispatch(core, i int, tramp, ctx uint64) error {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	// Niet opgepikt: boekhouding terugdraaien. Won hij de race tóch nog
-	// (staat al Running), dan hoort hij juist terug in de lijst.
+	// Niet opgepikt binnen de termijn. Wachten heeft geen tweede kans: het
+	// wisselmoment is op deze machine een VRIJWILLIGE yield (cpu/mmode en
+	// cpu/el2 — geen timer, per ontwerp), dus een bewoner die niet yieldt
+	// blokkeert de core tot iemand ingrijpt. Dat is by-design een APP-fout
+	// (compute hoort op een eigen core) — maar een node die zijn core
+	// permanent kwijt is, is erger dan een dader die herstart: GEMETEN
+	// 14/15-08 (LicheeRV, een GC-thrashende bewoner): uren gijzeling en élke
+	// plaatsing dood in quarantaine-lussen. Eén escalatie dus: de vasthouder
+	// offeren (arch-eigen: ARM trekt chirurgisch zijn kooi in en de rotatie
+	// leeft door; RISC-V reset de hart en de nasleep-boekhouding maakt de
+	// medebewoners eerlijk dood — hun taken herstarten via de monitors,
+	// HOP-leven-filosofie), en dan nog één boot-ronde.
+	hog := coreHog(core)
+	fmt.Printf("HOPOS_CORE_RECLAIM: core %d never yielded for slot %d — sacrificing resident slot %d to reclaim the core\n", core, i, hog)
+	cageForceYield(core, hog)
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if ctxState(i) != layout.CtxBootPending {
+			return nil // opgepikt: de (herleefde) rotatie boot(te) hem
+		}
+		if !coreRunning(core) {
+			ctxWrite(i, layout.CtxState, layout.CtxRunning)
+			return dispatchCore(core, tramp, ctx)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Ook ná de escalatie niet opgepikt: boekhouding terugdraaien. Won hij de
+	// race tóch nog (staat al Running), dan hoort hij juist terug in de lijst.
 	residentRemove(core, i)
 	dev.MB()
 	if ctxState(i) != layout.CtxBootPending {
 		return residentAdd(core, i) // won de race tóch: terug in de lijst
 	}
 	ctxWrite(i, layout.CtxState, layout.CtxEmpty)
-	return fmt.Errorf("slot %d: core %d never yielded to boot its new resident (compute-bound neighbour?)", i, core)
+	return fmt.Errorf("slot %d: core %d never yielded to boot its new resident, even after reclaiming it from slot %d", i, core, hog)
+}
+
+// coreHog leest wie de hart op dit moment vasthoudt (SchedCurrent, door de
+// arch-switch bijgehouden). 0 = onbekend — dan is er niets te attribueren
+// maar nog steeds iets terug te winnen.
+func coreHog(core int) int {
+	b, _ := residents(core)
+	dev.Pull(b+layout.SchedCurrent, 8)
+	return int(dev.Read64(b + layout.SchedCurrent))
+}
+
+// coreOrphansDead is de nasleep van een hart-reset op een gedeelde core: de
+// switcher is dood en kan de bewoners niet meer doodmelden, en een verse boot
+// zou hun stale ctx-staten HERVATTEN (mret in een spookcontext — gemeten
+// 14/15-08 als "dispatch outcome unknown"-quarantaines op élke herplaatsing).
+// Dus schrijft HOP wat het dode silicium niet meer kan schrijven: élke
+// bewoner die op het silicium LEEFDE (Saved/Running) CtxDead. BootPending
+// blijft expliciet staan: die bewoner heeft nog nooit gedraaid, heeft geen
+// staat te verliezen, en hoort na de reset gewoon vers geboot te worden —
+// hem wees maken zou een plaatsing "gelukt" melden die nooit start. De
+// rotatie slaat Dead over, waitCtxDead ziet de waarheid meteen, en de
+// taak-monitors herstarten de onschuldigen.
+func coreOrphansDead(core int) {
+	b, n := residents(core)
+	for k := uint64(0); k < n; k++ {
+		e := int(dev.Read8(b + layout.SchedList + uintptr(k)))
+		if e != 0 && e <= layout.MaxSlots {
+			if st := ctxState(e); st == layout.CtxSaved || st == layout.CtxRunning {
+				ctxWrite(e, layout.CtxState, layout.CtxDead)
+			}
+		}
+	}
+	dev.MB()
 }
 
 // waitCtxDead polt tot de EL2-switch slot i dood heeft gemeld (exit, fault

@@ -87,7 +87,40 @@ func Up(a *applib.App) (string, error) {
 			st.RecvInboundPacket(buf[:n])
 		}
 	}()
+	// De stack bewaren voor WatchStats: één per app, en de tellers zijn
+	// precies wat een veld-jacht nodig heeft (zie de spin/stilte-jacht 15-08).
+	current = st
+
 	return layout.IP4Str(ip), nil
+}
+
+// current is de stack van deze app (één per slot); gezet door Up.
+var current *leannet.Stack
+
+// WatchStats logt de netstack-tellers periodiek via logf — het meetinstrument
+// voor "Manage zwijgt maar de task leeft": een leeggelopen pot
+// (RefusedNoBudget), een poorteloos-drop-lek (DropNoPort) of een
+// reply-wachtrij die volstroomt (DropReplyFull) is anders van buiten
+// onzichtbaar. Bewust via de log-ring (het task-log haalt hem op), en alleen
+// als er iets veranderd is: een stille node blijft stil.
+func WatchStats(logf func(string, ...any), every time.Duration) {
+	st := current
+	if st == nil || logf == nil {
+		return
+	}
+	go func() {
+		var last leannet.Stats
+		for {
+			time.Sleep(every)
+			now := st.Stats()
+			if now != last {
+				logf("netstats: refusedNoBudget=%d dropNoPort=%d dropBadFrame=%d dropReplyFull=%d arp{gaveUp=%d learnDrop=%d fullDrop=%d}",
+					now.RefusedNoBudget, now.DropNoPort, now.DropBadFrame, now.DropReplyFull,
+					now.ARP.GaveUp, now.ARP.LearnDrop, now.ARP.FullDrop)
+				last = now
+			}
+		}
+	}()
 }
 
 // ip4bytes zet layout's uint32-adres om naar de [4]byte-vorm van leannet.

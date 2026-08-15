@@ -434,10 +434,33 @@ func cageColdStart(core int, entry, ctx uint64) error {
 
 // cageRevoke: hart in reset. Dat stopt hem waar hij ook is (ook uit een tight
 // loop) én wist zijn PMP-locks — de hard-kill en het schone slot in één.
+//
+// Op een GEDEELDE core is de reset een moker, geen scalpel: hij velt ook de
+// switcher en élke medebewoner. Zonder nasleep loog de boekhouding daarna
+// (gemeten 14/15-08): de dode switcher kon CtxDead niet meer melden — de
+// kill eindigde in "not dead after revocation"-quarantaine — en de stale
+// ctx-staten lieten elke verse boot van de core spoken hervatten. De nasleep
+// (coreOrphansDead) schrijft die waarheid zelf; de taak-monitors herstarten
+// de onschuldige buren (HOP-leven-filosofie: apps zijn herstartbaar).
 func cageRevoke(i int) {
-	if err := board.Current().HartOff(hartOf(coreOf(i))); err != nil {
+	core := coreOf(i)
+	if err := board.Current().HartOff(hartOf(core)); err != nil {
 		fmt.Printf("HOPOS_CAGE_REVOKE_FAILED: slot %d: %v\n", i, err)
+		return
 	}
+	coreOrphansDead(core)
+}
+
+// cageForceYield wint een core terug van een bewoner die nooit yieldt. Op
+// RISC-V is er geen chirurgische vorm: geen preëmptie, en de rotatie zit
+// achter dezelfde yield klem — de hart-reset (met nasleep) is de enige knop.
+func cageForceYield(core, hog int) {
+	if err := board.Current().HartOff(hartOf(core)); err != nil {
+		fmt.Printf("HOPOS_CORE_RECLAIM_FAILED: core %d: %v\n", core, err)
+		return
+	}
+	coreOrphansDead(core)
+	_ = hog // attributie zit in de log van de aanroeper
 }
 
 // cageSMPEntryPC: geen SMP op dit board. Er is één app-hart, dus een slot heeft

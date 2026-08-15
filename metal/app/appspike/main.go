@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"runtime"
+	"runtime/debug"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -269,6 +270,15 @@ func main() {
 		}
 	}
 
+	// GC-doodspiraal-rol (15-08): live heap tegen het memlimit-plafond pinnen
+	// en dan churnen. Dít is de last die op ijzer een gedeelde hart gijzelde
+	// (een TLS-app in een 20MB-venster); de memlimit-wachter hoort hem binnen
+	// twee vensters LUID te maken (HOPOS_GC_THRASH) in plaats van stil te
+	// laten malen. Keert nooit terug: het einde hoort die panic te zijn.
+	if app.Env("THRASH") != "" {
+		thrash(app)
+	}
+
 	// Standaard-rol: een long-running service — de werklast voor de brede
 	// SMP-test (N taken → N slots → N cores, elk hier). Elke ronde een korte
 	// rekenburst gevolgd door een korte pauze: de pauze is het yield-punt
@@ -294,6 +304,78 @@ func main() {
 		time.Sleep(250 * time.Millisecond)
 	}
 }
+
+// ball is de bouwsteen van thrash' live set: klein en met een pointer, zodat
+// de GC-markering per cyclus de héle keten moet lopen — zoals de geparste
+// x509-roots die op het ijzer de dader waren. Bytes-buffers zijn hier
+// waardeloos: die liggen noscan en maken de GC juist goedkoop.
+type ball struct {
+	next *ball
+	pad  [40]byte
+}
+
+// thrash pint een pointer-rijke live heap onder het memlimit-plafond en
+// churnt dan door: de GC draait vanaf dat moment rug-aan-rug zonder ooit iets
+// terug te winnen — 100% compute, nul voortgang, nul yields. Bewust op 3/5
+// van de limiet en niet erop: dichterbij wint de sbrk-OOM het van het malen
+// (gemeten 15-08, tweemaal: op 3/4 duwde de churn "in use" plus één
+// 4MB-chunkverzoek door de arena-muur — floating garbage en fragmentatie
+// eten de marge). Die OOM-dood is al luid; het stille malen erónder is wat
+// de memlimit-wachter luid moet maken.
+func thrash(app *applib.App) {
+	limit := debug.SetMemoryLimit(-1) // -1 = alleen uitlezen, niets zetten
+	app.Logf("THRASH: pinning a pointer-rich live heap against the %d MB memory limit, then churning", limit>>20)
+	time.Sleep(100 * time.Millisecond) // logregel eerst de ring uit
+	var head *ball
+	var m runtime.MemStats
+	for {
+		runtime.ReadMemStats(&m)
+		if int64(m.HeapAlloc) >= limit/2 {
+			break
+		}
+		for i := 0; i < 4096; i++ {
+			head = &ball{next: head}
+		}
+	}
+	// De spiraal-stand: bijna geen headroom per cyclus terwijl élke cyclus
+	// de hele pointer-keten markeert. Op het ijzer ontstond die vanzelf
+	// (live tegen de limiet drukt de headroom naar nul); de rol zet de knop
+	// expliciet — zelfde toestand, zonder de sbrk-muur te schampen. De
+	// garbage moet KLEIN blijven: 64KB-blokken zijn large objects en hun
+	// verse 4MB-chunks liepen tweemaal de arena-muur in (de OOM hierboven).
+	debug.SetGCPercent(5)
+	runtime.ReadMemStats(&m)
+	app.Logf("THRASH: pinned, live %d MB, sys %d MB, gc %d — churning", m.HeapAlloc>>20, m.Sys>>20, m.NumGC)
+	last := time.Now()
+	for {
+		// Kleine batch: het zwerfvuil tussen twee GC-afrondingen (die op
+		// single-P alleen op het Gosched-punt landen) moet ruim onder het
+		// niet-heap-gat naar de sbrk-muur blijven — 4096/batch liet op TCG
+		// ~10MB zwerfvuil ophopen en OOM'de vóór de wachter kon vonnissen.
+		for i := 0; i < 512; i++ {
+			ballSink = &ball{next: head}
+		}
+		// Zonder schedulingspunt maakt de GC op een single-P tamago nooit
+		// een cyclus af (gemeten 15-08: een kale alloc-lus at in <2s 8MB
+		// naar de sbrk-muur, nul voltooide GC's — de vul-lus hierboven
+		// werkte alleen doordat ReadMemStats per batch de wereld stopte).
+		// Het echte werk dat op ijzer thrashte (x509-parse) zit vol
+		// natuurlijke schedulingspunten; deze Gosched speelt die rol.
+		runtime.Gosched()
+		// Meetregel per ~2s: draait de GC (NumGC), en waar groeit het
+		// geheugen heen — zonder dit was de churn-OOM blind.
+		if time.Since(last) >= 2*time.Second {
+			runtime.ReadMemStats(&m)
+			app.Logf("THRASH: live %d MB, sys %d MB, gc %d, next %d MB, gcfrac %.3f",
+				m.HeapAlloc>>20, m.Sys>>20, m.NumGC, m.NextGC>>20, m.GCCPUFraction)
+			last = time.Now()
+		}
+	}
+}
+
+// ballSink houdt de churn-allocatie heap-echt (een lokale &ball{} blijft op
+// de stack en alloceert dan niets).
+var ballSink *ball
 
 // exit geeft de laatste logregel de tijd om de ring uit te komen en stopt dan.
 func exit(app *applib.App, code uint64) {

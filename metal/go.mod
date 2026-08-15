@@ -4,7 +4,7 @@ go 1.26.4
 
 require github.com/usbarmory/tamago v1.26.4
 
-require github.com/xinix00/lean v0.7.0
+require github.com/xinix00/lean v0.7.1
 
 require github.com/xinix00/hoplockserver v0.2.1 // indirect
 

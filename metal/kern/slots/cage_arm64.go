@@ -125,6 +125,19 @@ func coreExists(core int) bool {
 // faultt en dáár parkeert. De cores gaan nóóit terug naar de firmware.
 func cageRevoke(i int) { stage2.Revoke(i) }
 
+// cageForceYield wint een core terug van een bewoner die nooit yieldt — op
+// ARM chirurgisch: de kooi van de vasthouder intrekken laat hem bij zijn
+// eerstvolgende geheugentoegang in EL2 faulten, de switch meldt hem dood en
+// de rotatie leeft gewoon door (en pikt de boot-pending bewoner op). De
+// medebewoners merken niets.
+func cageForceYield(core, hog int) {
+	if hog >= 1 && hog <= layout.MaxSlots {
+		stage2.Revoke(hog)
+		return
+	}
+	fmt.Printf("HOPOS_CORE_RECLAIM_FAILED: core %d holds no attributable resident\n", core)
+}
+
 // cageFloor is nul: HOP zet niets vóór de app in de partitie. Het stukje
 // vertrouwde code is de EL2-trampoline, en die woont in HOP's eigen image.
 const cageFloor = 0

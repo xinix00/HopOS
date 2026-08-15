@@ -22,14 +22,23 @@
 //
 //	muur   = RamStart + RamSize − RamStackOffset   (runtime/goos — per board
 //	         gelinkt, per app door HOP gepatcht: de RAM-declaratie)
-//	heap0  ≈ het adres van een vroege heap-allocatie. tamago's allocator is
-//	         een sbrk die alleen omhoog groeit vanaf einde image+BSS
-//	         (runtime/mem_sbrk.go: initBloc → firstmoduledata.end), dus elk
-//	         vroeg heap-adres markeert die basis — hooguit een paar honderd
-//	         KB te hoog, en die fout maakt het plafond alleen maar LAGER.
-//	         (runtime.bloc zelf is sinds go1.23 geen geldig linkname-doel.)
-//	budget = (muur − heap0) + MemStats.Sys         (nog te pakken + al gepakt)
+//	basis  = einde image+BSS: runtime.DataRegion() (firstmoduledata.enoptrbss)
+//	         — exact waar tamago's sbrk-allocator begint (mem_sbrk.go:
+//	         initBloc → firstmoduledata.end, luttele bytes hoger). Gemeten,
+//	         niet geschat, en zonder één allocatie.
+//	budget = muur − basis                          (de hele arena)
 //	limiet = budget − slack, slack = max(10% van budget, 4MB)
+//
+// Dit verving op 15-08 een meting via een anker-allocatie. Die was twee keer
+// fout: een klein anker landt in een bestaande span tot megabytes onder de
+// sbrk-top en de som (muur−anker)+Sys telde dat stuk dubbel — limiet 34MB op
+// een arena van ~30MB, drie sbrk-OOM's ondanks limiet (de GC joeg op een
+// doel dat fysiek niet bestaat). En de verbeterde vorm (een 4MB-probe, één
+// groeichunk, meet de top wél exact) was zelf de moord op kleine vensters:
+// virtual@20MB heeft na image+BSS maar ~8MB arena, en 4MB probe bovenop 4MB
+// init-heap = "cannot allocate 4194304-byte block (4030464 in use)" — en dat
+// vóór de exit-haak, dus als stille gijzeling van de gedeelde hart (QEMU-
+// gereproduceerd). DataRegion heeft geen van beide problemen.
 //
 // 10% is Go's eigen richtlijn voor headroom onder een memory limit (5-10%), en
 // "conservatief is niet hetzelfde als wat er kán" (Derek, 02-08). De vloer van
@@ -54,7 +63,8 @@ import (
 	"fmt"
 	"runtime"
 	"runtime/debug"
-	"unsafe"
+	"runtime/metrics"
+	"time"
 	_ "unsafe" // go:linkname naar de goos-ramen hieronder
 )
 
@@ -85,36 +95,31 @@ const (
 	tightGCPercent = 25
 )
 
-// anchor dwingt de meet-allocatie het echte heap in (escape-analyse mag hem
-// niet op een stack leggen — al ligt ook die op tamago binnen het raam).
-var anchor *byte
-
 // Arm zet het plafond. Zo vroeg mogelijk aanroepen — de agent-main en
 // applib.Init doen dat al; een nieuwe main hoort dit als eerste te doen.
 // Faalt de berekening (raam onbekend of absurd klein), dan doet Arm bewust
 // niets: geen limiet is de oude, bekende toestand — een verzonnen limiet is
 // een nieuwe manier om stuk te gaan.
 func Arm() {
-	// Het anker bij een vroege meting ís de heapbasis: de sbrk-allocator
-	// groeit alleen omhoog vanaf einde image+BSS.
-	anchor = new(byte)
-	base := uintptr(unsafe.Pointer(anchor))
-	arm(uintptr(ramStart)+uintptr(ramSize)-uintptr(ramStackOffset), base, arenaSlack)
+	// De sbrk-basis komt uit de runtime zelf: einde image+BSS. Niets meten
+	// met allocaties — zie de pakketdoc voor de twee manieren waarop dat
+	// op 15-08 fout bleek (dubbeltelling én een 4MB-probe die kleine
+	// vensters zelf om zeep hielp).
+	_, dataEnd := runtime.DataRegion()
+	arm(uintptr(ramStart)+uintptr(ramSize)-uintptr(ramStackOffset), uintptr(dataEnd), arenaSlack)
 }
 
-// arm is de rekensom: heap0 is de zojuist gemeten uitdeelplek, dus "al
-// gepakt" (m.Sys) telt mee naast "nog te pakken" (wall−heap0).
-func arm(wall, heap0 uintptr, minSlack uint64) (limit uint64, ok bool) {
-	if ramSize == 0 || heap0 <= uintptr(ramStart) || heap0 >= wall {
+// arm is de rekensom: basis = einde image+BSS (de sbrk-start), dus
+// muur − basis ís de hele arena — niets erbij op te tellen.
+func arm(wall, base uintptr, minSlack uint64) (limit uint64, ok bool) {
+	if ramSize == 0 || base <= uintptr(ramStart) || base >= wall {
 		return 0, false
 	}
-	budget := uint64(wall - heap0)
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	budget += m.Sys
+	budget := uint64(wall - base)
 	// 10% is Go's eigen richtlijn voor headroom onder een memory limit; de vloer
-	// eronder dekt wat niet meeschaalt (één arena-groeistap plus de meetfout van
-	// het anker). Eén regel voor élke Go-wereld op HopOS, kern én app: de marge
+	// eronder dekt wat niet meeschaalt (één arena-groeistap, plus de luttele
+	// bytes tussen enoptrbss en de echte sbrk-start). Eén regel voor élke
+	// Go-wereld op HopOS, kern én app: de marge
 	// hoort bij het RAAM, niet bij wie erin woont (Derek, 11-08). Heeft een
 	// wereld méér marge nodig, dan alloceert hij te grof — dat hoort daar
 	// gefixt te worden en niet hier.
@@ -159,6 +164,71 @@ func arm(wall, heap0 uintptr, minSlack uint64) (limit uint64, ok bool) {
 	// netwerk-identiteit: als een node ooit tóch tegen zijn plafond aan
 	// GC-stormt, zijn dít de twee getallen die de operator wil kennen.
 	fmt.Printf("mem: Go memory limit %dMB, GOGC %d (window %dMB, image+bss %dMB)\n",
-		limit>>20, gogc, uintptr(ramSize)>>20, (heap0-uintptr(ramStart))>>20)
+		limit>>20, gogc, uintptr(ramSize)>>20, (base-uintptr(ramStart))>>20)
+	go watch(limit)
 	return limit, true
+}
+
+// Het venster en de twee-slagen-regel van de thrash-wachter. Vijf seconden is
+// ruim boven élke gezonde GC-cadans (gemeten 11-08: 22 GC's in 215s onder
+// echte last), en twee opeenvolgende hete vensters filteren een eenmalige
+// piek eruit: pas tien seconden aaneengesloten kap-raken is een vonnis.
+const (
+	thrashWindow  = 5 * time.Second
+	thrashStrikes = 2
+)
+
+// watch maakt een GC-doodspiraal LUID. Zit de live heap tegen het plafond,
+// dan GC't de runtime continu zonder ooit iets terug te winnen: 100% compute,
+// nul voortgang, nul logs — en op een coöperatief gedeelde core ook nul
+// yields, dus de buren verhongeren mee (gemeten 14/15-08, LicheeRV: een
+// 20MB-venster met een TLS-lading gijzelde zo een hele hart, urenlang). De
+// runtime kent geen "geef op": de limiet is zacht en hij blijft proberen.
+//
+// De diagnose komt van de runtime zélf: de GC-CPU-limiter slaat aan zodra de
+// GC boven de helft van de CPU uitkomt — precies de spiraal-conditie, en
+// onhaalbaar voor gezonde churn (kleine live set = goedkope cycli, hoe hard
+// er ook gealloceerd wordt). Slaat hij thrashStrikes vensters op rij aan,
+// dan is doorgaan zinloos en is een luide dood de dienst aan de operator:
+// de panic haalt de console/het task-log, de monitor herstart de taak, en
+// een verkeerd gedimensioneerde job wordt een leesbare crash-loop in plaats
+// van een stille gijzeling. Voor HOP zelf geldt hetzelfde vonnis bewust:
+// HOP-leven = node-leven, de watchdog maakt de herstart af.
+func watch(limit uint64) {
+	samples := []metrics.Sample{
+		{Name: "/gc/limiter/last-enabled:gc-cycle"},
+		{Name: "/gc/cycles/total:gc-cycles"},
+	}
+	hot := 0
+	var prevCycles uint64
+	for {
+		time.Sleep(thrashWindow)
+		metrics.Read(samples)
+		limiterLast := samples[0].Value.Uint64()
+		cycles := samples[1].Value.Uint64()
+		// Limiter aan in een cyclus van DIT venster = de GC zat boven zijn
+		// CPU-kap terwijl wij sliepen. (Eerste venster: prevCycles=0, dus
+		// een limiter-melding uit de boot telt meteen mee — dat is goed,
+		// want de spiraal begint daar het vaakst.)
+		if limiterLast > 0 && limiterLast > prevCycles {
+			hot++
+		} else {
+			hot = 0
+		}
+		prevCycles = cycles
+		if hot >= thrashStrikes {
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			msg := fmt.Sprintf("HOPOS_GC_THRASH: GC ate >50%% CPU for %s straight — live heap %dMB against a %dMB memory limit (%d GC cycles); this window is too small for this workload",
+				time.Duration(thrashStrikes)*thrashWindow, m.HeapAlloc>>20, limit>>20, cycles)
+			// Zonder dump panicen: een volle goroutine-dump is groter dan
+			// de log-ring en drukt de kop — de diagnose — eruit (gemeten
+			// 15-08: de operator hield alleen "mgc.go:1695" over). De
+			// stack is hier toch betekenisloos (dit is de wachter, niet de
+			// dader); de regel mét getallen is het hele verhaal.
+			fmt.Printf("%s\n", msg)
+			debug.SetTraceback("none")
+			panic(msg)
+		}
+	}
 }

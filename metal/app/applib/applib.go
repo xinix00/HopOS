@@ -11,6 +11,7 @@ package applib
 
 import (
 	"fmt"
+	"io/fs"
 	"runtime"
 	"runtime/goos"
 	"strconv"
@@ -81,12 +82,6 @@ func (a *App) ctrlSet(off uintptr, v uint64) {
 // RAM-declaratie: die is canoniek (zelfde linkadres voor elk slot; de
 // stage-2-vertaling legt de image in de echte partitie).
 func Init() *App {
-	// Eerst het geheugenplafond: de partitie is de hele wereld van deze app
-	// en Go's default GC-beleid kent geen muur (cpu/memlimit — de stille
-	// OOM-dood van 02-08). Vóór al het andere, zodat ook de init-allocaties
-	// hieronder al onder het plafond vallen.
-	memlimit.Arm()
-
 	start, end := runtime.MemRegion()
 	a := &App{
 		Slot:     appboard.Current().CoreID(),
@@ -123,6 +118,15 @@ func Init() *App {
 	// zonder deze haak is een panic een exit-code 2 zonder één regel reden
 	// (gemeten 31-07: de apploader-OOM stierf vijfmaal onzichtbaar).
 	appboard.PrintkSink = a.printk
+
+	// Dan pas het geheugenplafond (cpu/memlimit — de stille OOM-dood van
+	// 02-08). NA de twee haken hierboven, nooit ervoor: elke dood in Arm is
+	// anders een fatal zonder exit-haak — tamago's default halt, een lijk op
+	// 100% dat een gedeelde hart gijzelt en nul regels achterlaat (gemeten
+	// 15-08, de 4MB-probe op een 20MB-venster; QEMU-gereproduceerd). De paar
+	// honderd KB die Init tot hier alloceert vallen buiten de limiet-toets —
+	// dat dekt de slack ruimschoots.
+	memlimit.Arm()
 
 	// Klok overnemen van HOP (die synct via SNTP): zonder dit begint elke
 	// app-runtime op 1970. De teller is gedeeld, de offset dus ook.
@@ -297,6 +301,14 @@ func (a *App) rpc(req hopabi.Req, timeout time.Duration) (hopabi.Resp, error) {
 		// de mutex (en dus de volgende ReadInto) overleeft.
 		resp.Data = append([]byte(nil), resp.Data...)
 		if resp.Status != hopabi.StatusOK {
+			// StatusNoEnt draagt fs.ErrNotExist: de kern gaf "bestaat niet"
+			// juist een éigen status (kern/slots/rpc.go) zodat deze kant hem
+			// kon mappen — zonder die wrap zag errors.Is(err, fs.ErrNotExist)
+			// bij élke afnemer niets, en behandelde stulp een eerste run op
+			// een node MET volume als fatale leesfout (gemeten 15-08, QEMU).
+			if resp.Status == hopabi.StatusNoEnt {
+				return resp, fmt.Errorf("hop-ABI op %d: %w: %s", req.Op, fs.ErrNotExist, resp.Data)
+			}
 			return resp, fmt.Errorf("hop-ABI op %d: status %d: %s", req.Op, resp.Status, resp.Data)
 		}
 		return resp, nil
