@@ -64,6 +64,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"runtime/metrics"
+	"sync"
 	"time"
 	_ "unsafe" // go:linkname naar de goos-ramen hieronder
 )
@@ -95,8 +96,20 @@ const (
 	tightGCPercent = 25
 )
 
+// De limiet moet er al staan vóórdat de pakket-inits van de app draaien:
+// die lopen anders op GOGC 100 zonder plafond, en op een klein venster is
+// die ongebreidelde init-heap het verschil tussen booten en een stille
+// pre-main-dood (gemeten 15-08: een 6MB-image stierf vóór main op een
+// 18MB-venster — geen haak kan daar ooit bij). Go draait inits in
+// afhankelijkheidsvolgorde en memlimit heeft er bijna geen, dus deze init
+// komt vóór de zware. De RAM-declaratie is dan al geldig: HOP patcht de
+// goos-symbolen vóór de boot.
+func init() { Arm() }
+
 // Arm zet het plafond. Zo vroeg mogelijk aanroepen — de agent-main en
-// applib.Init doen dat al; een nieuwe main hoort dit als eerste te doen.
+// applib.Init doen dat al (die tweede keer rekent hetzelfde uit en is er
+// voor de console-regel, die pas ná de log-ring zichtbaar kan zijn); een
+// nieuwe main hoort dit als eerste te doen.
 // Faalt de berekening (raam onbekend of absurd klein), dan doet Arm bewust
 // niets: geen limiet is de oude, bekende toestand — een verzonnen limiet is
 // een nieuwe manier om stuk te gaan.
@@ -132,6 +145,7 @@ func arm(wall, base uintptr, minSlack uint64) (limit uint64, ok bool) {
 	}
 	limit = budget - slack
 	debug.SetMemoryLimit(int64(limit))
+	watchOnce.Do(func() { go watch(limit) })
 
 	// En dan het tempo, want een limiet alleen is niet genoeg. Go's default is
 	// "ruim op als de heap VERDUBBELT" — een relatieve regel, terwijl ons plafond
@@ -165,7 +179,6 @@ func arm(wall, base uintptr, minSlack uint64) (limit uint64, ok bool) {
 	// GC-stormt, zijn dít de twee getallen die de operator wil kennen.
 	fmt.Printf("mem: Go memory limit %dMB, GOGC %d (window %dMB, image+bss %dMB)\n",
 		limit>>20, gogc, uintptr(ramSize)>>20, (base-uintptr(ramStart))>>20)
-	go watch(limit)
 	return limit, true
 }
 
@@ -177,6 +190,10 @@ const (
 	thrashWindow  = 5 * time.Second
 	thrashStrikes = 2
 )
+
+// watchOnce: Arm draait twee keer (pakket-init en applib.Init/main), de
+// wachter hoort maar één keer te lopen.
+var watchOnce sync.Once
 
 // watch maakt een GC-doodspiraal LUID. Zit de live heap tegen het plafond,
 // dan GC't de runtime continu zonder ooit iets terug te winnen: 100% compute,

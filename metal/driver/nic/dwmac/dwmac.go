@@ -46,6 +46,7 @@ const (
 	// MAC
 	regConf     = 0x0000
 	regFilter   = 0x0004
+	filterPM    = 1 << 4 // pass all multicast (DWMAC1000 frame filter, PM-bit)
 	regGMIIAddr = 0x0010
 	regGMIIData = 0x0014
 	regVersion  = 0x0020
@@ -321,9 +322,12 @@ func (n *Net) Init(dmaPA, dmaSize uintptr, speed int, fd bool) error {
 	// even met een 00:00:00:00:00:00-filter draaien.
 	n.wr(regAddr0Hi, uint32(n.MAC[5])<<8|uint32(n.MAC[4]))
 	n.wr(regAddr0Lo, uint32(n.MAC[3])<<24|uint32(n.MAC[2])<<16|uint32(n.MAC[1])<<8|uint32(n.MAC[0]))
-	// Filter op nul = perfect match + broadcast (DBF=0). Geen promiscuous:
-	// wat wij niet moeten hebben hoort de ring niet te vullen.
-	n.wr(regFilter, 0)
+	// Perfect match + broadcast (DBF=0) + álle multicast (PM, bit 4). Geen
+	// promiscuous: unicast voor anderen hoort de ring niet te vullen. PM wél:
+	// mDNS/matter leeft op 224.0.0.251 en de hash-filter per groep is op deze
+	// MAC meer administratie dan de paar ruis-frames waard — leannet/hopswitch
+	// filteren op groepslidmaatschap.
+	n.wr(regFilter, filterPM)
 
 	n.wr(dmaBusMode, busFixedBurst|busPBL8|busDSL64)
 	n.wr(dmaRxList, uint32(n.rxDesc))

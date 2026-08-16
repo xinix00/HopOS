@@ -4,7 +4,7 @@ go 1.26.4
 
 require github.com/usbarmory/tamago v1.26.4
 
-require github.com/xinix00/lean v0.7.1
+require github.com/xinix00/lean v0.8.0
 
 require github.com/xinix00/hoplockserver v0.2.1 // indirect
 
@@ -28,3 +28,4 @@ require (
 // alles wat metal importeert (hop-os-surf, de vitals/welcome-apps) bouwde
 // eerder tegen ongepatchte upstream-lneto terwijl metal zelf de fixes had.
 // Onze eigen code in onze eigen module heeft dat probleem niet.
+replace github.com/xinix00/lean => /Users/derek/Git/lean

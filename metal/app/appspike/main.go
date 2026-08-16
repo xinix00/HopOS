@@ -260,6 +260,50 @@ func main() {
 		exitf(app, 0, "NETDEMO out: DNS-antwoord van %s (%d bytes) — uitgaande masquerade werkt", dns, n)
 	}
 
+	// Multicast-demo (het matter/mDNS-pad, 15-08): listen joint de mDNS-groep
+	// en logt elk datagram; send stuurt er elke seconde één naar de groep.
+	// Samen bewijzen ze leannet-multicast + hopswitch-flood van slot naar
+	// slot — precies wat matter-discovery op de node nodig heeft.
+	switch app.Env("MCAST") {
+	case "listen":
+		if _, err := appnet.Up(app); err != nil {
+			exitf(app, 1, "MCAST listen: %v", err)
+		}
+		if err := appnet.JoinMulticast(net.IPv4(224, 0, 0, 251)); err != nil {
+			exitf(app, 1, "MCAST listen: join: %v", err)
+		}
+		conn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: 5353})
+		if err != nil {
+			exitf(app, 1, "MCAST listen: %v", err)
+		}
+		app.Logf("MCAST listen: joined 224.0.0.251, port 5353 open")
+		buf := make([]byte, 512)
+		for {
+			n, src, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				exitf(app, 1, "MCAST listen: read: %v", err)
+			}
+			app.Logf("MCAST listen: %q from %s", buf[:n], src)
+		}
+	case "send":
+		if _, err := appnet.Up(app); err != nil {
+			exitf(app, 1, "MCAST send: %v", err)
+		}
+		conn, err := net.ListenUDP("udp4", &net.UDPAddr{})
+		if err != nil {
+			exitf(app, 1, "MCAST send: %v", err)
+		}
+		dst := &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353}
+		for i := 0; ; i++ {
+			if _, err := conn.WriteToUDP(fmt.Appendf(nil, "mdns-probe %d", i), dst); err != nil {
+				app.Logf("MCAST send: %v", err)
+			} else if i%5 == 0 {
+				app.Logf("MCAST send: probe %d sent to 224.0.0.251:5353", i)
+			}
+			time.Sleep(time.Second)
+		}
+	}
+
 	// Hanger: een lege lus zonder preemptiepunt monopoliseert de core — de
 	// heartbeat-goroutine komt nooit meer aan bod en de kill-flag wordt
 	// genegeerd. Precies de hang waarvoor HOP's hard-kill-SGI bestaat.

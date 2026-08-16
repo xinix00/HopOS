@@ -10,6 +10,7 @@ package appnet
 // van 09-08 (gVisor → lneto) en 12-08 (→ leannet) goedkoop maakte.
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -121,6 +122,25 @@ func WatchStats(logf func(string, ...any), every time.Duration) {
 			}
 		}
 	}()
+}
+
+// JoinMulticast abonneert de app-stack op een link-local multicast-groep
+// (mDNS, matter-discovery), voor de rest van het app-leven — er is bewust
+// geen Leave (geKAMd 15-08: de enige gebruiker leaved nooit, en een
+// refcount die niemand gebruikt is alleen maar reviewvlak). De socket-API
+// kent geen groepen — tamago heeft geen syscalls om x/net's
+// ipv4/ipv6-besturing op te bouwen — dus dit is de expliciete knop naast
+// net.ListenUDP. Alleen 224.0.0.0/24; idempotent.
+func JoinMulticast(ip net.IP) error {
+	st := current
+	if st == nil {
+		return errors.New("appnet: netstack is not up")
+	}
+	v4 := ip.To4()
+	if v4 == nil {
+		return errors.New("appnet: multicast join needs an IPv4 group")
+	}
+	return st.JoinGroup([4]byte(v4))
 }
 
 // ip4bytes zet layout's uint32-adres om naar de [4]byte-vorm van leannet.

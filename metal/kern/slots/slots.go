@@ -907,8 +907,16 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// ná de dispatch volgt meteen started=true, zonder faalbare stap ertussen.
 	hopswitch.Attach(i, uintptr(netPA))
 	for name, p := range ports {
+		// Eén gepubliceerde poort is open voor béíde protocollen: de jobspec
+		// hoeft geen proto te kennen, en een app die er maar één bedient laat
+		// de ander onbeantwoord (DropNoPort in de app-stack, geen lek).
+		// Matter bracht de behoefte: UDP :5540 op het node-IP (15-08); de
+		// NAT kon het al (nat.go Publish tcp/udp), alleen dit pad niet.
 		if err := hopswitch.Publish("tcp", uint16(p), i, uint16(p)); err != nil {
 			return fmt.Errorf("poort %q: %w", name, err)
+		}
+		if err := hopswitch.Publish("udp", uint16(p), i, uint16(p)); err != nil {
+			return fmt.Errorf("poort %q (udp): %w", name, err)
 		}
 	}
 
