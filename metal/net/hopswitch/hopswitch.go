@@ -216,6 +216,13 @@ func forward(src int, p []byte) {
 				ports[i].rx.Write(ring.TypeFrame, p)
 			}
 		}
+		// IPv4-multicast (mDNS, matter) gaat óók het LAN op — de scope is de
+		// hele link, niet alleen deze node. Alleen 01:00:5e: broadcast en
+		// het interne ARP-verkeer blijven binnen (dat is node-privé; het op
+		// het LAN zetten lekt de 10.100-namen en verwart niemand ten goede).
+		if p[0] == 0x01 && p[1] == 0x00 && p[2] == 0x5e {
+			uplinkMulticastTx(p)
+		}
 		return
 	}
 	if p[0] != 0x02 || p[1]|p[2]|p[3]|p[4] != 0 {

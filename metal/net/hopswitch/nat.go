@@ -198,6 +198,17 @@ func (u *Uplink) Receive(buf []byte) (int, error) {
 		if n == 0 || err != nil {
 			return n, err // NIC-ring leeg (of fout): pas hier mag de rxLoop slapen
 		}
+		// IPv4-multicast van het LAN (mDNS, matter): flood naar álle slots en
+		// claim — HOP's eigen stack joint geen groepen en zou hem toch stil
+		// negeren. De slot-stacks filteren zelf op lidmaatschap (leannet),
+		// dus dit is een kopie per aangesloten slot en verder niets.
+		if n >= 14 && buf[0] == 0x01 && buf[1] == 0x00 && buf[2] == 0x5e {
+			multicastInbound(buf[:n])
+			if claimed%claimYield == claimYield-1 {
+				runtime.Gosched()
+			}
+			continue
+		}
 		// ARP eerst (niet claimen — de stack wil replies óók zien voor de eigen
 		// node-stack): de reply op onze first-contact-request leert de neighbor.
 		arpLearn(buf[:n])
@@ -212,6 +223,29 @@ func (u *Uplink) Receive(buf []byte) (int, error) {
 			runtime.Gosched()
 		}
 	}
+}
+
+// multicastInbound floodt één IPv4-multicast-frame van het LAN naar alle
+// aangesloten slots (onder mu, zoals élke RX-ring-write). Geen aflevering
+// terug de NIC op: ingress floodt alleen naar binnen.
+func multicastInbound(p []byte) {
+	mu.Lock()
+	defer mu.Unlock()
+	for i := 1; i <= layout.MaxSlots; i++ {
+		deliverLocked(i, p)
+	}
+}
+
+// uplinkMulticastTx zet één slot-multicast-frame op de externe NIC (aanroepen
+// met mu vast, vanuit forward — dezelfde volgorde als het NAT-zendpad; de
+// omgekeerde lock-volgorde bestaat niet, dus mu→uplinkTxMu is veilig).
+func uplinkMulticastTx(p []byte) {
+	if uplink == nil {
+		return
+	}
+	uplinkTxMu.Lock()
+	defer uplinkTxMu.Unlock()
+	uplink.nic.Transmit(p)
 }
 
 // Transmit verstuurt één frame op de NIC (geserialiseerd).
