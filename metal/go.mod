@@ -28,4 +28,3 @@ require (
 // alles wat metal importeert (hop-os-surf, de vitals/welcome-apps) bouwde
 // eerder tegen ongepatchte upstream-lneto terwijl metal zelf de fixes had.
 // Onze eigen code in onze eigen module heeft dat probleem niet.
-replace github.com/xinix00/lean => /Users/derek/Git/lean
