@@ -53,15 +53,19 @@ mkdir -p "$OUT"
 [ -x "$TAMAGO" ] || { echo "FOUT: tamago ontbreekt op $TAMAGO (zet TAMAGO)" >&2; exit 1; }
 command -v gh >/dev/null || [ "$PUBLISH" != "1" ] || { echo "FOUT: gh ontbreekt" >&2; exit 1; }
 if [ "$PUBLISH" = "1" ]; then
-# WIE ZIJN WE. gh én git (via de credential-helper) gebruiken het ACTIEVE
-# token, en dat is een globale toestand die buiten dit script omgaat. Met het
-# verkeerde account halveert een release: metal stond 11-08 al getagd en drie
-# satellieten waren gepusht toen surf op 403 stuk liep, omdat het actieve
-# account daar geen schrijfrechten heeft. Liever nu luid stoppen.
-	WHO="$(gh api user --jq .login 2>/dev/null || true)"
-	[ "$WHO" = "xinix00" ] || {
-		echo "FOUT: WRONG USER — gh draait als '${WHO:-onbekend}', niet xinix00." >&2
-		echo "      herstel: gh auth switch --user xinix00" >&2; exit 1; }
+# MAG DIT TOKEN HIER SCHRIJVEN. Niet "hoe heet het account" maar de vraag die
+# telt, en die is per repo te stellen. Eerder las dit `gh api user`: precies de
+# endpoint die tijdens de GitHub-storing van 17-08 als enige 503 bleef geven
+# terwijl repos en releases allang antwoordden — dan valt een publicatie om met
+# een account-melding terwijl het account goed staat. Met het verkeerde account
+# is push hier false (gemeten 11-08), dus de dekking blijft.
+if [ "$PUBLISH" = "1" ]; then
+	for r in xinix00/HopOS xinix00/hop; do
+		perm="$(gh api "repos/$r" --jq .permissions.push 2>/dev/null || true)"
+		[ "$perm" = "true" ] || {
+			echo "FOUT: WRONG USER — dit gh-token mag niet schrijven in $r (push=${perm:-onbekend})." >&2
+			echo "      herstel: gh auth switch --user xinix00" >&2; exit 1; }
+	done
 fi
 
 
