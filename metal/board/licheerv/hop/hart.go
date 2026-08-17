@@ -10,6 +10,17 @@
 //	0x020B0004 bit13 hoog   → boot-vector-override aan (SEC_SYS +0x04)
 //	0x020B0020/24           → boot-vector lo/hi
 //	0x03003024 bit6 hoog    → deassert = hart start op de vector
+//
+// DAT RECEPT DEKT ÉÉN CORE, en dat is de hele reden dat dit bestand twee soorten
+// harts kent. 0x03003024 is SOFT_CPU_RSTN uit de SG200X-TRM: bit 0..3 zijn
+// CPUCORE0..3, bit 4..6 zijn CPUSYS0..2, en bit 6 (die van de vendor) is dus het
+// subsysteem van de C906L. Er ís een resetbit voor de grote core — het
+// vendor-FPGA-script triggert hem met 0x31 — maar er is nergens een
+// boot-vector-override voor gedocumenteerd, en zonder die override start hij op
+// zijn resetvector in de BROM: dat is de hele bootketen opnieuw, inclusief
+// DDR-init, en dus het geheugen van een draaiende node. Daarom raakt HopOS die
+// bit niet aan en is de grote core een core die parkeert in plaats van resetten
+// (zie hop.go en kern/slots coreParks).
 package hop
 
 import (
@@ -17,35 +28,99 @@ import (
 
 	"github.com/xinix00/HopOS/metal/board"
 	"github.com/xinix00/HopOS/metal/board/licheerv"
+	"github.com/xinix00/HopOS/metal/dev"
 )
 
 const (
-	c906lReset  = 0x03003024 // SoC-reset-blok, bit 6 = het C906L-hart
+	c906lReset  = 0x03003024 // SOFT_CPU_RSTN, bit 6 = het subsysteem van de C906L
 	secSysCtrl  = 0x020B0004 // SEC_SYS: bit 13 = boot-vector-override
 	secSysVecLo = 0x020B0020
 	secSysVecHi = 0x020B0024
 
-	// hartC906L is het app-hart van dit board: de 700MHz "little" core. De
-	// FSBL start óns image op de big core, dus dat is HOP's hart en deze is
-	// het slot. (README-aanbeveling van de bring-up: rollen zo houden, want
-	// dan is het proven vendor-reset-recept letterlijk ons mechanisme.)
+	// De twee harts van dit board, genummerd zoals het RESET-BLOK ze noemt —
+	// niet zoals ze zichzelf zien. Dat onderscheid is gemeten (boot 5, 01-08):
+	// beide cores lezen mhartid 0 op hun eigen core-lokale CLINT, dus het
+	// hart-ID hier is puur een naam voor "welke knop in het reset-blok".
+	//
+	// Wie welke rol heeft volgt uit één getal (het globale principe,
+	// board/hopcore.go): HOP woont op HopHart, elk ander hart is van de
+	// apps. Geen rol-verhaal — de namen hieronder zijn silicium-kennis
+	// (welke knop in het reset-blok), niet rollen.
 	hartC906L = 1
+	hartC906B = 0
 	resetBit  = 1 << 6
+
+	// killTickTicks: de periode van de kill-tick op een app-core zonder
+	// reset-recept — 10ms op de vaste 25MHz-timebase. De afweging is
+	// eenzijdig: de tick zelf is een handvol instructies, dus dit kost een
+	// app niets meetbaars en begrenst hoe lang een intrekking onderweg is.
+	killTickTicks = 10 * licheerv.RTCCLK / 1000
 )
 
-// AppHarts geeft de harts die als app-slot te gebruiken zijn — op dit board
-// precies één. Geen PSCI-telling om op terug te vallen: topologie is
-// board-kennis.
-func (machine) AppHarts() []int { return []int{hartC906L} }
+// AppHarts is het globale principe in één lus: álle harts behalve waar HOP
+// woont. Geen PSCI-telling om op terug te vallen: de hart-lijst is
+// board-kennis, de rolverdeling is er geen — die volgt uit HopHart.
+func (machine) AppHarts() []int {
+	var apps []int
+	for _, h := range []int{hartC906B, hartC906L} {
+		if h != licheerv.HopHart {
+			apps = append(apps, h)
+		}
+	}
+	return apps
+}
 
-// HartWaker geeft de CLINT-wekker van een hart — maar alleen als de probe bij
-// boot heeft aangetoond dat mtimecmp én msip op dit silicium écht bestaan en
-// dat een wfi op die wekker terugkeert (board/licheerv/clint.go). Zo niet, dan
-// blijft de switcher spinnen.
+// HartResettable: alleen de C906L heeft een reset-recept mét boot-vector (zie de
+// kop van dit bestand). Voor de grote core is het antwoord nee, en daar hangt in
+// kern/slots de hele levenscyclus aan: starten via een boot-pending die de
+// rotatie oppikt, beëindigen via de kill-tick, en HOP blijft uit regel 0 van het
+// sched-blok.
 //
-// Dat voorbehoud is niet theoretisch: van dezelfde CLINT is gemeten dat het
-// mtime-register er níet is. Een datasheet-layout is hier geen bewijs.
-// appHartSleepEnabled is de hoofdschakelaar van de app-hart-slaap, en hij
+// Zolang de apps op de C906L wonen stelt dit niets voor; woont HOP daar
+// (HopHart = 1), dan is dít de reden dat de app-core anders werkt dan op elk
+// ander hart van HopOS: starten via boot-pending, beëindigen via kill-tick.
+func (machine) HartResettable(hart int) bool { return hart == hartC906L }
+
+// HartTimer geeft wat machine mode op dít hart met zijn comparator mag doen. De
+// drie antwoorden staan los omdat ze los bewezen zijn.
+func (machine) HartTimer(hart int) board.HartTimer {
+	if !appWaker.ok {
+		// De probe is niet rond gekomen, of de CLINT-decode bleek gedeeld. Dan
+		// niets: geen tick, geen slaap. kern/slots meldt luid als dat betekent
+		// dat een app-core niet meer te beëindigen is.
+		return board.HartTimer{}
+	}
+	switch hart {
+	case hartC906B:
+		// Als de apps hier wonen (HopHart = C906L): dit hart kent geen reset,
+		// dus de kill-tick is het mes. Zijn comparator is bewezen door de CLINT-probe
+		// bij boot (board/licheerv/clint.go) — die liep op déze core, dus dat is
+		// een meting op het hart zelf en geen extrapolatie.
+		//
+		// MsipPA blijft 0: HOP zit nu op de andere core en de CLINT is
+		// core-lokaal, dus er is geen IPI-kanaal naartoe. Een startschot komt bij
+		// de eerstvolgende ronde van de parkeerlus aan.
+		//
+		// SleepCap blijft 0: tikken mag, slapen niet. Zie appHartSleepEnabled.
+		t := board.HartTimer{MtimecmpPA: licheerv.MtimecmpAddr(0), Tick: killTickTicks}
+		if appHartSleepEnabled {
+			t.SleepCap = licheerv.SleepCapTicks
+		}
+		return t
+	case hartC906L:
+		// Als de apps hier wonen (HopHart = C906B, de stand van vandaag): hier is de
+		// reset het mes, dus een kill-tick voegt niets toe en blijft uit; de
+		// adressen komen uit de probe en niet uit het hart-nummer, want die twee
+		// zijn verschillende nummerwerelden (zie hartprobe.go).
+		if !appHartSleepEnabled {
+			return board.HartTimer{}
+		}
+		return board.HartTimer{MtimecmpPA: appWaker.mtimecmp, SleepCap: licheerv.SleepCapTicks}
+	}
+	return board.HartTimer{}
+}
+
+// appHartSleepEnabled is de hoofdschakelaar van de SLAAP van een app-hart, en hij
 // staat UIT op bewijs (01-08, boots 3-8):
 //
 //   - wekker AAN (boots 6/7): tweemaal een STILLE NODEDOOD — geen panic, geen
@@ -62,25 +137,12 @@ func (machine) AppHarts() []int { return []int{hartC906L} }
 //
 // Tot die jacht gelopen is: park spint, de bewezen stand. Niet aanzetten op
 // een redenering — alleen op een boot-soak zonder doden.
+//
+// LET OP dat dit de slaap gaat en NIET de kill-tick. Die twee zijn sinds de hop
+// uit elkaar getrokken omdat ze los bewezen zijn: de tick schrijft alleen de
+// comparator en keert meteen terug, en op dat pad is nooit iets stils gebeurd —
+// wat stierf was een wfi. Zie board.HartTimer.
 const appHartSleepEnabled = false
-
-func (machine) HartWaker(hart int) (uint64, uint64, uint64, bool) {
-	// Alleen wat op het hart ZELF gemeten is telt (hartprobe.go). De les van
-	// 01-08: de boot-probe op hart 0 bewees dáár de hele keten, de wekker ging
-	// op dat bewijs óók naar hart 1 — en de eerste park-slaap op de C906L werd
-	// nooit gewekt ("core 1 never yielded", herstartstorm). Extrapolatie over
-	// een hart-grens is hier geen kortere weg maar een stille hang.
-	if !appHartSleepEnabled || !appWaker.ok {
-		return 0, 0, 0, false
-	}
-	// De ADRESSEN komen uit de probe, niet uit het hart-nummer: het
-	// reset-blok-nummer (het argument hier) en de mhartid van de core zijn
-	// twee verschillende nummerwerelden — de C906L is "hart 1" voor het
-	// reset-blok maar mhartid 0 op zijn eigen core-lokale CLINT (gemeten,
-	// boot 5). msip = 0: dat kanaal is core-lokaal en voor HOP onbereikbaar;
-	// de 2ms-cap draagt de wek.
-	return appWaker.mtimecmp, 0, licheerv.SleepCapTicks, true
-}
 
 // BootMode: HOP draait in M-mode (3). Minder kan niet — alleen M-mode
 // programmeert PMP en reset harts, en zonder dat is er geen kooi.
@@ -91,13 +153,39 @@ func (machine) BootMode() int { return 3 }
 // PMP-locks — precies wat een slot-restart nodig heeft.
 func (machine) HartOn(hart int, entry uint64) error {
 	if hart != hartC906L {
-		return fmt.Errorf("licheerv: hart %d bestaat niet (alleen %d)", hart, hartC906L)
+		// Geen reset-recept: dit hart staat sinds de loterij geparkeerd op
+		// het adoptie-woord (licheerv/lottery_riscv64.s). Starten = adoptie.
+		return adoptParked(entry)
 	}
-	licheerv.Write32(c906lReset, licheerv.Read32(c906lReset)&^resetBit)
-	licheerv.Write32(secSysCtrl, licheerv.Read32(secSysCtrl)|1<<13)
-	licheerv.Write32(secSysVecLo, uint32(entry))
-	licheerv.Write32(secSysVecHi, uint32(entry>>32))
-	licheerv.Write32(c906lReset, licheerv.Read32(c906lReset)|resetBit)
+	startLittle(entry)
+	return nil
+}
+
+// LotteryRescued: heeft de boot-core zichzelf gered omdat HopHart nooit
+// opkwam (voortgang 2 in het loterij-blok)? De node draait dan als vanouds
+// op de firmware-core, maar de rol-boekhouding verwacht de wissel — elke
+// plaatsing faalt luid via adoptParked. Deze vraag is er voor de boardWarn.
+func LotteryRescued() bool {
+	if licheerv.HopHart == 0 {
+		return false
+	}
+	b := uintptr(bootScratchPA)
+	dev.Pull(b+licheerv.LotteryProgress, 8)
+	return dev.Read64(b+licheerv.LotteryProgress) == 2
+}
+
+// adoptParked geeft de geparkeerde boot-core zijn eerste werk: de entry in
+// het adoptie-woord, en de parkeerlus springt erheen. Cache-discipline als
+// bij de hartprobe: de parkeerlus leest ongecachet, dus HOP pusht.
+func adoptParked(entry uint64) error {
+	b := uintptr(bootScratchPA) // zelfde page als de hartprobe (init-check daar)
+	dev.Pull(b+licheerv.LotteryProgress, 24)
+	if dev.Read64(b+licheerv.LotteryProgress) != 1 {
+		return fmt.Errorf("licheerv: no parked hart to adopt (lottery progress %d, echo %d) — was the lottery run?",
+			dev.Read64(b+licheerv.LotteryProgress), dev.Read64(b+licheerv.LotteryHartEcho))
+	}
+	dev.Write64(b+licheerv.LotteryAdoptPC, entry)
+	dev.Push(b+licheerv.LotteryAdoptPC, 8)
 	return nil
 }
 
@@ -105,17 +193,41 @@ func (machine) HartOn(hart int, entry uint64) error {
 // en zijn locks zijn weg).
 func (machine) HartOff(hart int) error {
 	if hart != hartC906L {
-		return fmt.Errorf("licheerv: hart %d bestaat niet (alleen %d)", hart, hartC906L)
+		return fmt.Errorf("licheerv: hart %d cannot be reset — revoke goes through the kill tick (see hop.go)", hart)
 	}
-	licheerv.Write32(c906lReset, licheerv.Read32(c906lReset)&^resetBit)
+	holdLittle()
 	return nil
 }
 
 // HartState leest de powertoestand uit het reset-blok. Geen ON_PENDING op dit
 // board: de deassert is meteen effectief.
+//
+// De grote core staat altijd aan — hij is nooit in reset geweest en HopOS zet
+// hem er ook nooit in. Voor hem is dit antwoord dan ook niet de waarheid over
+// "draait daar een bewoner"; die staat in SchedCurrent (kern/slots coreRunning,
+// via HartResettable).
 func (machine) HartState(hart int) board.PowerState {
+	if hart == hartC906B {
+		return board.PowerOn
+	}
 	if hart != hartC906L || licheerv.Read32(c906lReset)&resetBit == 0 {
 		return board.PowerOff
 	}
 	return board.PowerOn
+}
+
+// startLittle en holdLittle zijn het vendor-recept zelf. Apart van HartOn/HartOff
+// omdat de hop ze óók gebruikt, en die gaat niet over een app-slot: hij start de
+// C906L om er HOP op te zetten. Eén plek waar de registers staan, twee
+// aanroepers met een heel verschillende bedoeling.
+func startLittle(entry uint64) {
+	licheerv.Write32(c906lReset, licheerv.Read32(c906lReset)&^resetBit)
+	licheerv.Write32(secSysCtrl, licheerv.Read32(secSysCtrl)|1<<13)
+	licheerv.Write32(secSysVecLo, uint32(entry))
+	licheerv.Write32(secSysVecHi, uint32(entry>>32))
+	licheerv.Write32(c906lReset, licheerv.Read32(c906lReset)|resetBit)
+}
+
+func holdLittle() {
+	licheerv.Write32(c906lReset, licheerv.Read32(c906lReset)&^resetBit)
 }

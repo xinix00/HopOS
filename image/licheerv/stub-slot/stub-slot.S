@@ -278,8 +278,37 @@ begin:
 	csrw	mepc, t0
 	mret
 
+	# park — we starten de app NIET (kooi niet te verifiëren, geen S-mode, of
+	# een trap vóór de sprong). Tot 11-08 bleef dit hart hier gewoon staan, en
+	# dat kon: HOP zette hem met een SoC-reset weer aan het werk.
+	#
+	# Dat gaat niet meer op. Ná de hop is de app-core de core die HOP verlaten
+	# heeft (board/licheerv/hop/hop.go), en die heeft geen reset-recept — hier
+	# blijven staan zou de enige app-core van de node permanent kosten, met als
+	# enige uitweg een reboot. Dus geven we hem terug aan de switcher: mscratch
+	# en mtvec zoals bij een gewone sprong naar de app, en dan expres een
+	# illegale instructie.
+	#
+	# Die trap is het punt. HOP's switcher heeft één pad dat precies dit doet
+	# wat hier moet gebeuren — het fault-pad: mcause/mepc/mtval op de
+	# control-page van dit slot, de bewoner op dood, en roteren. Zo leest HOP
+	# een mislukte stub als "gestart en meteen gestorven" in plaats van als een
+	# hart dat nooit meer iets zei, en de core is meteen weer bruikbaar. Het
+	# waarom staat er los van: het voortgangswoord in de scratch hierboven
+	# (0xFA11 / 0x5107 / 0xDEAD) is wat cageWhy leest.
+	#
+	# Zonder die twee waarden (een board zonder switcher) blijft het oude
+	# gedrag staan: stilstaan en wachten op de reset.
 park:
-	j	park
+	ld	t1, 120(s10)		# mscratch = sched-blok van dit hart
+	beqz	t1, parkhang
+	csrw	mscratch, t1
+	ld	t1, 112(s10)		# mtvec = HOP's switcher
+	beqz	t1, parkhang
+	csrw	mtvec, t1
+	unimp				# → het fault-pad van cpu/mmode
+parkhang:
+	j	parkhang
 
 	.align	2
 trap:

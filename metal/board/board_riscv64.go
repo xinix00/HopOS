@@ -49,15 +49,32 @@ type Board interface {
 	// vallen: de topologie is board-kennis, punt.
 	AppHarts() []int
 
-	// HartWaker geeft de wekker van een hart: de PA van zijn mtimecmp, de PA van
-	// zijn msip, en hoe lang hij hoogstens achter elkaar mag slapen (in
-	// timebase-tikken). Alleen dán mag de switcher zijn parkeerlus vervangen door
-	// een echte wfi — zonder wekker blijft hij spinnen, want een hart dat niet
-	// meer wakker wordt is een dode node.
+	// HartTimer geeft wat machine mode op dít hart met de comparator van dat hart
+	// mag doen. De nulwaarde is "niets", en dat hoort de veilige uitslag te zijn
+	// zolang een board het niet BEWEZEN heeft: op de SG2002 ontbreekt de helft
+	// van de SiFive-CLINT-layout (mtime is er niet), dus daar hangt dit antwoord
+	// aan een probe bij boot en niet aan een datasheet.
+	HartTimer(hart int) HartTimer
+
+	// HartResettable meldt of HOP dit hart in reset kan zetten. Vals betekent:
+	// dit hart komt nooit uit reset, want er draait onze eigen switcher op
+	// (cpu/mmode) — starten gaat dan via een boot-pending in het ctx-blok en
+	// beëindigen via de kill-tick, niet via het reset-blok.
 	//
-	// ok=false is dus de veilige uitslag en hoort dat ook te zijn zolang een
-	// board het niet BEWEZEN heeft: op de SG2002 ontbreekt de helft van de
-	// SiFive-CLINT-layout (mtime is er niet), dus daar hangt dit antwoord aan een
-	// probe bij boot en niet aan een datasheet.
-	HartWaker(hart int) (mtimecmp, msip, capTicks uint64, ok bool)
+	// Dat onderscheid is silicium en geen smaak. Het vendor-reset-recept van de
+	// SG2002 dekt precies één van de twee cores, en sinds HOP naar de kleine core
+	// hopt is de app-core juist de andere (board/licheerv/hop/hop.go).
+	HartResettable(hart int) bool
+}
+
+// HartTimer beschrijft de comparator van één hart. De drie dingen staan los van
+// elkaar omdat ze los BEWEZEN worden — op de SG2002 is gemeten dat een
+// comparator kan bestaan en vuren terwijl een wfi erop de node stil velt
+// (01-08, boots 6/7), dus "tikken mag" en "slapen mag" zijn niet hetzelfde
+// antwoord.
+type HartTimer struct {
+	MtimecmpPA uint64 // PA van mtimecmp; 0 = geen comparator (geen tick, geen slaap)
+	MsipPA     uint64 // PA van msip; 0 = HOP kan dit hart niet wekken (core-lokale CLINT)
+	SleepCap   uint64 // max slaapduur in tikken; 0 = niet slapen (de parkeerlus spint)
+	Tick       uint64 // periode van de kill-tick in tikken; 0 = geen tick
 }

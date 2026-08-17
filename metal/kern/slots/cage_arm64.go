@@ -67,6 +67,16 @@ func mboxWord0(core int) uint64 { return dev.Read64(layout.ParkMboxPA(core)) }
 // coreRunning: de app op deze core draait nog (niet geparkeerd).
 func coreRunning(core int) bool { return mboxWord0(core) >= 2 }
 
+// coreParks: op ARM parkeert ELKE app-core in de EL2-lus — PSCI CPU_OFF is op de
+// Pi 5-stockfirmware een one-way door (gemeten 2026-07-10), dus HopOS bezit zijn
+// cores en zet ze nooit uit. Toch is dit hier vals, want het predicaat vraagt
+// niet "parkeert hij?" maar "moet de RISC-V-uitwijk gebruikt worden?": start via
+// boot-pending, intrekken via de kill-tick, en HOP blijft uit regel 0 van het
+// sched-blok. Op ARM is niets daarvan nodig — de mailbox is device-gemapt (dus
+// coherent), de parkeerlus wacht op een SEV, en intrekken is het nullen van de
+// stage-2-tabel. Dat pad is over vier boards bewezen en blijft ongemoeid.
+func coreParks(int) bool { return false }
+
 // coreStopped: de core staat geparkeerd in zijn WFE-lus.
 func coreStopped(core int) bool { return mboxWord0(core) == mboxParked }
 

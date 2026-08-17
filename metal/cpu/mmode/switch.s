@@ -16,20 +16,37 @@
 // omdat de PMP-entries niet meer gelockt zijn (kern/cage): gelockt bindt PMP óók
 // M-mode, en dan zou deze code buiten de partitie niet eens uitvoerbaar zijn.
 //
-// Het wisselmoment is een EXPLICIETE yield, net als op ARM: geen timer, geen
+// Het WISSELmoment is een EXPLICIETE yield, net als op ARM: geen timer, geen
 // interrupt-controller. Een app die nooit yieldt starft zijn buren — dat is per
 // ontwerp (compute hoort op een eigen core, en HOP's liveness ziet de gestokte
-// heartbeat).
+// heartbeat). Dat blijft zo, en de kill-tick hieronder verandert het niet: die
+// hervat altijd dezelfde bewoner en roteert nooit.
+//
+// DE KILL-TICK. Er is één ding dat een coöperatieve rotatie niet kan, en het is
+// geen scheduling maar een isolatie-invariant: HOP moet een bewoner kunnen
+// BEËINDIGEN die niet meewerkt. Op een hart dat in reset te zetten is doet het
+// SoC-resetblok dat (kern/slots cageRevoke, gemeten 30-07). Maar sinds HOP naar
+// de kleine core hopt (board/licheerv/hop/hop.go) is de core waar hij vandaan
+// komt precies zo'n hart NIET: hij komt nooit uit reset, want daar draait deze
+// switcher. Voor die core armt machine mode daarom zijn eigen comparator vóór
+// elke mret naar een bewoner (SchedTickTicks). Bij elke tick kijkt hij naar één
+// woord — CtxRevoke — en gaat bij niet-nul rechtstreeks naar teardown.
+//
+// GEVOLG voor dit bestand: er staat nu WÉL een mie-bit aan terwijl een app
+// draait, en een machine-timer-interrupt in supervisor-modus wordt dan altijd
+// genomen (ongeacht mstatus.MIE). De trap-entry moet de interruptbit van mcause
+// dus als EERSTE uitsorteren — anders leest een tick als een fault en meldt hij
+// een kerngezonde bewoner dood. Op een hart zonder tick (SchedTickTicks = 0)
+// blijft alles exact zoals het was: geen mie, geen tick, reset is het mes.
 //
 // Maar de yield draagt sinds 31-07 wél een WEKTIJD (a0): "hervat me niet vóór
 // deze tick". Zonder dat getal is "ik heb even niets te doen" niet te
 // onderscheiden van "geef me meteen mijn beurt terug", en dan pingpongen twee
 // wachtende apps op volle snelheid tegen elkaar aan — gemeten: allebei 36% van
 // het hart, en geen van beide deed iets. Met de wektijd slaat de rotatie ze
-// over en mag het hart in de tussentijd écht slapen (zie park). De timer is dus
-// geen preemptie-mechanisme geworden: hij WEKT alleen, en alleen als er niemand
-// te draaien is. Er staat nooit een mie-bit aan terwijl een app draait, dus een
-// wekker kan nooit als trap binnenkomen en een gezonde bewoner doodmelden.
+// over en mag het hart in de tussentijd écht slapen (zie park). Ook die timer is
+// geen preemptie-mechanisme: hij WEKT alleen, en alleen als er niemand te
+// draaien is.
 //
 // De kooi-stub geeft ons twee dingen mee vóór hij de app binnenlaat:
 //	mtvec    = mentry (dit bestand, adres via EntryPC)
@@ -77,6 +94,35 @@
 
 #include "textflag.h"
 
+// ARMTICK zet de comparator van DIT hart op de volgende kill-tick en doet MTIE
+// aan — vlak vóór elke overgang naar een bewoner (resume, cold boot, en de
+// terugkeer van een tick zelf). Clobbert x5/x6/x7, dus hij staat overal waar die
+// drie meteen daarna tóch overschreven worden.
+//
+// Zonder comparator (SchedClintPA = 0) of zonder periode (SchedTickTicks = 0)
+// doet hij niets en blijft mie leeg: dat is de stand op elk hart dat HOP gewoon
+// in reset kan zetten, en daarmee blijft dit bestand daar bit-voor-bit het
+// bewezen gedrag van vóór de tick houden.
+//
+// De schrijfvolgorde van mtimecmp is die van de privileged spec (lo=alles-één,
+// hi, lo): deze CLINT weigert 64-bit MMIO, en zonder die volgorde staat er
+// tijdens het schrijven even een waarde in het verleden die meteen vuurt.
+#define ARMTICK(done)			\
+	MOV	232(SP), X6;		\
+	BEQZ	X6, done;		\
+	MOV	64(SP), X7;		\
+	BEQZ	X7, done;		\
+	WORD	$0xc01022f3;		\
+	ADD	X5, X7, X7;		\
+	MOV	$-1, X5;		\
+	MOVW	X5, 0(X6);		\
+	SRL	$32, X7, X5;		\
+	MOVW	X5, 4(X6);		\
+	MOVW	X7, 0(X6);		\
+	MOV	$0x80, X5;		\
+	WORD	$0x3042a073;		\
+	done:
+
 // Werkregisters: x5/x6/x7 (spill op SchedScratch+0/8/16 = 16/24/32).
 // x6 is overal de pointer naar het ctx-blok van het slot in behandeling.
 TEXT mentry(SB),NOSPLIT|NOFRAME,$0
@@ -88,13 +134,30 @@ TEXT mentry(SB),NOSPLIT|NOFRAME,$0
 	MOV	X6, 24(SP)
 	MOV	X7, 32(SP)
 
-	// Waarom trappen we? mcause 9 = ecall uit supervisor-modus, en dat is het
-	// énige coöperatieve pad. Al het andere is per definitie een fault-rapport:
-	// een kooi-overtreding, een illegale instructie, een verboden CSR.
+	// Waarom trappen we?
 	WORD	$0x342022f3		// csrr x5, mcause
-	MOV	$9, X6
-	BNE	X5, X6, fault
 
+	// EERST de interruptbit (63), vóór élke andere vergelijking. Sinds de
+	// kill-tick staat MTIE aan terwijl een bewoner draait, en een
+	// machine-timer-interrupt in supervisor-modus wordt altijd genomen —
+	// ongeacht mstatus.MIE. Zonder deze twee regels valt zo'n tick in de
+	// fault-tak en meldt hij een kerngezonde bewoner dood.
+	SRL	$63, X5, X6
+	BNEZ	X6, tick
+
+	// mcause 9 = ecall uit supervisor-modus: het coöperatieve pad van een
+	// bewoner. mcause 11 = ecall uit MACHINE mode, en dat kán geen bewoner zijn
+	// (die draait per definitie in supervisor-modus) — dat is de core die HOP
+	// verlaat en zich hier komt melden (mhop). Al het andere is een
+	// fault-rapport: een kooi-overtreding, een illegale instructie, een
+	// verboden CSR.
+	MOV	$9, X6
+	BEQ	X5, X6, yield
+	MOV	$11, X6
+	BEQ	X5, X6, mhop
+	JMP	fault
+
+yield:
 	// Yield of exit? ARM heeft daar twee HVC-immediates voor (hvc #1 = yield,
 	// hvc #0 = klaar, zie applib/park_arm64.s), maar mcause draagt geen
 	// immediate — dus staat het nummer in a7: 0 = yield, ≠0 = exit.
@@ -227,6 +290,70 @@ exit:
 	// er is niets te rapporteren. Rechtstreeks naar de teardown, die het
 	// ctx-blok zelf opzoekt.
 	JMP	teardown
+
+tick:
+	// DE KILL-TICK (zie de kop). Eén vraag: wil HOP deze bewoner dood hebben?
+	// Alles wat we hier aanraken is x5/x6/x7 en die staan al in de spill, dus
+	// de bewoner merkt hier niets van behalve de tijd die het kost.
+	MOV	48(SP), X5		// layout.SchedCurrent
+	BEQZ	X5, tickret		// niemand draait: niets in te trekken
+	MOV	224(SP), X6		// layout.SchedS2PA
+	SLL	$16, X5, X7		// slot × Stage2Stride
+	ADD	X7, X6, X6
+	MOV	$0x6000, X7		// layout.CtxOff
+	ADD	X7, X6, X6		// x6 = ctx-blok van de draaiende bewoner
+	MOV	$512, X7		// layout.CtxRevoke
+	ADD	X7, X6, X7
+
+	// Vers lezen, élke tick. HOP schrijft dit woord vanaf zijn eigen hart en wij
+	// zijn niet coherent met hem: een gecachete kopie betekent "de intrekking
+	// komt nooit aan", en dat is precies het geval waarvoor deze tick bestaat.
+	// Eén schrijver en een eigen cacheline — layout.go legt uit waarom dat hier
+	// geen netheid is maar een voorwaarde.
+	WORD	$0x02b3800b		// th.dcache.cipa x7
+	WORD	$0x01b0000b		// th.sync.is
+	MOV	0(X7), X7
+	BNEZ	X7, teardown		// ingetrokken: dood, zonder hervatting
+
+tickret:
+	// Niets aan de hand: opnieuw armen en terug de bewoner in alsof er niets
+	// gebeurd is. GEEN rotatie — dit is nadrukkelijk geen preemptie — en GEEN
+	// +4 op mepc: bij een interrupt wijst mepc al naar de instructie die nog
+	// moet gebeuren, en optellen zou er stilletjes één overslaan.
+	ARMTICK(tickarmed)
+	MOV	16(SP), X5
+	MOV	24(SP), X6
+	MOV	32(SP), X7
+	WORD	$0x34011173		// csrrw sp, mscratch, sp — sp terug naar de bewoner
+	WORD	$0x30200073		// mret
+
+mhop:
+	// De core die HOP achterlaat meldt zich hier, en dit is de enige plek waar
+	// een ecall uit machine mode vandaan kan komen: board/licheerv/hop zet
+	// mtvec op mentry en mscratch op het sched-blok van deze core, en doet dan
+	// één ecall. Vanaf dat moment is dit een gewone app-core — er is geen
+	// bewoner, dus de rotatie vindt niets en parkeert, en de eerste
+	// boot-pending die HOP erbij zet wordt opgepikt zoals bij elke gedeelde
+	// core.
+	//
+	// Current en Rotor hier nullen mag, en alleen hier: dit is regel 0 van het
+	// sched-blok en die is van de arch-laag op de core zelf — en wij ZIJN die
+	// core. HOP mag op een parkerende core nooit in deze regel schrijven (zie de
+	// schrijversgrens in layout.go, en residentReset dat daarom niet op zo'n
+	// core mag lopen).
+	MOV	ZERO, X5
+	MOV	X5, 48(SP)		// layout.SchedCurrent = niemand
+	MOV	X5, 56(SP)		// layout.SchedRotor
+
+	// mscratch wijst nu naar de stack die de hop-assembly achterliet, en die
+	// stack is van HOP — op de ándere core, in gebruik. Zou hier ooit een trap
+	// binnenkomen vóór de eerste bewoner (de kooi-stub zet mscratch pas bij zijn
+	// sprong), dan ruilt de entry hierboven díe pointer naar sp en spillt er
+	// registers in: schrijven in de levende Go-stack van een andere core. Het
+	// sched-blok terugzetten maakt die ruil onschadelijk — sp en mscratch wijzen
+	// dan allebei hierheen, wat precies de toestand is die de parkeerlus aankan.
+	WORD	$0x34011073		// csrw mscratch, sp
+	JMP	rotate
 
 fault:
 	// Fault-rapport op de control-page van de bewoner (mcause/mtval/vec) —
@@ -388,7 +515,19 @@ boot:
 	FENCE
 	WORD	$0x02be800b		// th.dcache.cipa x29
 	WORD	$0x01b0000b		// th.sync.is
+	// SchedCurrent hierboven publiceren: op een core die HOP niet kan resetten
+	// is dat woord zijn enige zicht op "draait daar iets?" (zie park). Clean en
+	// geen cipa — invalideren zou onze eigen spill weggooien.
+	FENCE
+	WORD	$0x0291000b		// th.dcache.cpa x2
+	WORD	$0x01b0000b		// th.sync.is
 	MOV	16(X29), X30		// layout.CtxBootPC = partitiebasis (de stub)
+
+	// De kill-tick armen vóór de sprong naar de stub. Dat die stub nog in
+	// machine mode draait maakt niet uit: daar is mstatus.MIE nul, dus een tick
+	// die tijdens de stub afgaat blijft pending en wordt pas genomen zodra de
+	// stub met mret de app in supervisor-modus zet. Precies waar hij hoort.
+	ARMTICK(bootarmed)
 
 	// De hele D-cache terugschrijven vóór we de stub inspringen. Dit is geen
 	// voorzorg maar een noodzaak: de eerste stap van die stub is `csrw mcor` met
@@ -414,6 +553,9 @@ resume:
 	MOV	X5, 0(X29)		// layout.CtxRunning — HOP's boot-poll leest dit
 	FENCE
 	WORD	$0x02be800b		// th.dcache.cipa x29
+	WORD	$0x01b0000b		// th.sync.is
+	FENCE
+	WORD	$0x0291000b		// th.dcache.cpa x2 — SchedCurrent publiceren
 	WORD	$0x01b0000b		// th.sync.is
 
 
@@ -469,6 +611,11 @@ resume:
 	// herstellen van x2 (sp) gebeuren, want sp ís nu nog dat blok.
 	WORD	$0x34011073		// csrw mscratch, sp
 
+	// De kill-tick armen. Hier, want hierna is sp niet meer het sched-blok en
+	// zijn x5/x6/x7 van de bewoner — en ze worden hieronder toch uit zijn
+	// ctx-blok teruggeladen, dus clobberen is gratis.
+	ARMTICK(resumearmed)
+
 	// GPRs als allerlaatste: x2 vlak vóór het einde, x29 (de pointer zelf)
 	// helemaal aan het eind.
 	MOV	24(X29), X1
@@ -515,14 +662,31 @@ park:
 	// lijst aflopen. Dat kost stroom maar kan niet hangen, en dat is de goede
 	// kant om naar te falen — een hart dat niet meer wakker wordt is een dode
 	// node en geen foutmelding.
+	// "Ik draai niemand" — en dat is meteen het antwoord waar HOP op polt
+	// (kern/slots coreRunning). Op een hart dat in reset gaat is het reset-blok
+	// die waarheid; op een core die nooit meer uit reset komt omdat HOP er zelf
+	// vandaan gehopt is, is dit woord het enige eerlijke antwoord.
+	//
+	// Clean en geen cipa: regel 0 is van ons alleen, en invalideren zou onze
+	// eigen spill weggooien.
+	MOV	ZERO, X5
+	MOV	X5, 48(SP)		// layout.SchedCurrent = niemand
+	FENCE
+	WORD	$0x0291000b		// th.dcache.cpa x2
+	WORD	$0x01b0000b		// th.sync.is
+
 	MOV	232(SP), X6		// layout.SchedClintPA
 	BEQZ	X6, spin
+	// SchedSleepCap = 0 is de derde stand: de comparator is bruikbaar (de
+	// kill-tick draait erop) maar slapen mag niet. Dat onderscheid is gemeten en
+	// geen voorzichtigheid — zie layout.go bij SchedSleepCap.
+	MOV	240(SP), X7		// layout.SchedSleepCap (tikken)
+	BEQZ	X7, spin
 
 	// Slapen tot de vroegste wektijd, maar nooit langer dan de cap. Die cap is
 	// geen zuinigheid maar het vangnet: gaat er ooit een wek-IPI verloren, dan
 	// kost dat latency en geen liveness.
 	WORD	$0xc0102ff3		// csrr x31, time
-	MOV	240(SP), X7		// layout.SchedSleepCap (tikken)
 	ADD	X31, X7, X7
 	BEQZ	X11, arm		// niemand met een eigen wektijd: de cap regeert
 	BGEU	X11, X7, arm		// die wektijd ligt voorbij de cap

@@ -265,7 +265,14 @@ func bootPendingDispatch(core, i int, tramp, ctx uint64) error {
 		if ctxState(i) != layout.CtxBootPending {
 			return nil // opgepikt: de rotatie boot(te) hem
 		}
-		if !coreRunning(core) {
+		// coreParks eerst, en dat is geen optimalisatie maar het verschil tussen
+		// werken en nooit starten. Op zo'n core is "geparkeerd" de NORMALE
+		// toestand tussen twee bewoners door — er draait onze eigen switcher, en
+		// die pikt de boot-pending zelf op bij zijn eerstvolgende ronde. Er ís
+		// geen tweede startschot om te geven: dispatchCore zou daar een
+		// hart-reset proberen die dat silicium niet heeft, en dan faalde élke
+		// start op de app-core meteen bij de eerste lus-ronde.
+		if !coreParks(core) && !coreRunning(core) {
 			// Park-race: zelf dispatchen. Staat éérst op Running, anders zou
 			// de rotatie hem straks nógmaals cold-booten (dubbelboot).
 			ctxWrite(i, layout.CtxState, layout.CtxRunning)

@@ -121,6 +121,19 @@ var bootParamAll = func(key string) []string { return nil }
 // (licheerv: geen hardware-TRNG, dus voorspelbare crypto).
 var boardWarn func()
 
+// boardHop laat een board HOP naar een andere core verhuizen vóór de agent
+// begint. Precies één board doet dit (licheerv: HopOS naar de 700MHz-core, de
+// 1GHz-core naar de apps), en het moet hier gebeuren en nergens anders — ná de
+// hele boot, dus alles wat traag is loopt nog op de snelle core, en vóór de
+// agent, dus er is geen leader-sessie, geen job en geen slot dat halverwege
+// van core wisselt.
+//
+// Net als boardWarn een haak en geen board.Board-methode: het is een eigenschap
+// van dít silicium (twee ongelijke cores, één reset-recept) en niet iets waar de
+// andere boards een antwoord op horen te hebben. Een fout hier is geen
+// boot-fout: het board zegt zelf wat er misging en draait door zoals het was.
+var boardHop func()
+
 // bootParam is de enkele-waarde-variant: de eerste hit van bootParamAll ("" =
 // niet gezet → de default in main). De meeste sleutels zijn enkelvoudig.
 func bootParam(key string) string {

@@ -162,27 +162,49 @@ const (
 	//	regel 1..3 (64..)   ALLEEN HOP (lijst, lengte, plan-PA)
 	//
 	// De park-mailbox (woord 0/1) hoort formeel bij HOP, maar bestaat alleen op
-	// ARM — en daar is dit blok device-gemapt en dus coherent. Op RISC-V is er
-	// geen parkeerlus (een hart draait of staat in reset), dus schrijft HOP daar
-	// niets in regel 0. Behalve bij residentReset: dan staat het hart stil en is
-	// zijn cache per definitie leeg.
+	// ARM — en daar is dit blok device-gemapt en dus coherent. Op RISC-V schrijft
+	// HOP niets in regel 0. Behalve bij residentReset: dan staat het hart stil en
+	// is zijn cache per definitie leeg — en dáárom mag dat pad nooit op een core
+	// lopen die in de switcher parkeert (zie SchedParkState).
+	//
 	SchedScratch = 16 // 4×8B: werkregisters van de getrapte app (ARM: x0..x3 in
 	// de vector-thunks; RISC-V: x5..x7 bij de trap-entry, één woord blijft vrij)
 	// SchedCurrent/SchedRotor: de staat van de rotatie zoals de switcher hem
 	// bijhoudt. Alleen RISC-V (cpu/mmode) gebruikt ze:
 	//
-	//   - Current = welk slot er NU draait. Op ARM staat dat antwoord in het VMID
-	//     van VTTBR, dus leest de EL2-switch het uit het silicium; RISC-V kent
-	//     geen VMID en moet het getal onthouden.
+	//   - Current = welk slot er NU draait, en 0 = geen. Op ARM staat dat antwoord
+	//     in het VMID van VTTBR, dus leest de EL2-switch het uit het silicium;
+	//     RISC-V kent geen VMID en moet het getal onthouden.
+	//
+	//     Sinds de hop is dit woord ook HOP's antwoord op "is die core vrij?"
+	//     voor een core die nooit meer uit reset komt (kern/slots coreRunning).
+	//     Op elk ander hart is het reset-blok die waarheid en leest HOP dit niet;
+	//     hier is er geen reset-blok-antwoord, want de core staat altijd aan —
+	//     onze eigen switcher draait erop. De parkeerlus schrijft daarom 0 en
+	//     publiceert regel 0 (clean, geen invalidatie: de regel is van de core
+	//     zelf, HOP leest alleen).
 	//   - Rotor = de laatst gedispatchte lijst-index, de RISC-V-tegenhanger van
 	//     SchedCursor. Een eigen veld en niet SchedCursor hergebruiken, want dat
 	//     woord ligt in HOP's regel — zie de cacheline-verdeling hierboven.
 	SchedCurrent = 48
 	SchedRotor   = 56
-	SchedCursor  = 80  // ARM: laatst geplande lijst-index (u64)
-	SchedCount   = 88  // lijstlengte (u64, monotoon; 0-bytes zijn gaten)
-	SchedList    = 96  // SlotCap × 1 byte: slotnummers van de bewoners
-	SchedS2PA    = 224 // fysieke Plan.Stage2PA (switch.s: ctx/VTTBR/park afleiden)
+
+	// SchedTickTicks is de periode van de KILL-TICK in timebase-tikken: hoe vaak
+	// machine mode een lopende bewoner even onderbreekt om te kijken of HOP hem
+	// dood wil hebben (CtxRevoke). 0 = geen tick, en dat is de stand op elk hart
+	// dat HOP gewoon kan resetten — daar ís de resetknop het mes.
+	//
+	// Dit is nadrukkelijk GEEN preemptieve scheduler: de rotatie blijft
+	// coöperatief (een tick hervat dezelfde bewoner en roteert niet), precies
+	// zoals de kop van cpu/mmode/switch.s beschrijft. Het enige dat de tick koopt
+	// is dat HOP een compute-bound bewoner kán beëindigen op een core die niet in
+	// reset te zetten is — de core waar HOP zelf vandaan gehopt is.
+	SchedTickTicks = 64
+
+	SchedCursor = 80  // ARM: laatst geplande lijst-index (u64)
+	SchedCount  = 88  // lijstlengte (u64, monotoon; 0-bytes zijn gaten)
+	SchedList   = 96  // SlotCap × 1 byte: slotnummers van de bewoners
+	SchedS2PA   = 224 // fysieke Plan.Stage2PA (switch.s: ctx/VTTBR/park afleiden)
 
 	// De wekker van dit hart, voor de slaap-stand van de switcher (RISC-V).
 	// HOP vult ze pas ná zijn CLINT-probe (board/licheerv/clint.go): staat
@@ -190,8 +212,15 @@ const (
 	// zoals vóór de slaap-stand bestond. Fail-safe in die richting is de hele
 	// reden dat het twee losse velden zijn en geen vlag — een hart dat níet
 	// wakker wordt is een dode node, en dat mag nooit de standaard zijn.
-	SchedClintPA  = 232 // PA van mtimecmp van DIT hart (0 = geen wekker)
-	SchedSleepCap = 240 // maximale slaapduur in timebase-tikken
+	// SchedSleepCap = 0 is een DERDE stand, en hij bestaat omdat de twee dingen
+	// die de comparator kan doen los van elkaar bewezen zijn: "mtimecmp is
+	// bruikbaar" (de kill-tick heeft genoeg aan dat) en "een wfi op die comparator
+	// wordt betrouwbaar gewekt" (dat eist de slaap). Op de SG2002 is precies dat
+	// verschil gemeten: de wek-keten van de C906L is bewezen (hartprobe stap 7) en
+	// tóch stierf de node stil zodra hij er echt op ging slapen (01-08, boots 6/7).
+	// Dus: adres ingevuld + cap 0 = tikken mag, slapen niet — de parkeerlus spint.
+	SchedClintPA  = 232 // PA van mtimecmp van DIT hart (0 = geen comparator)
+	SchedSleepCap = 240 // max slaapduur in tikken (0 = niet slapen, wel tikken)
 	SchedMsipPA   = 248 // PA van msip van DIT hart (het wek-IPI van HOP)
 
 	// Switch-contextblok per slot (op Stage2TablePA(i)+CtxOff): de EL1-staat
@@ -239,6 +268,23 @@ const (
 	// switcher. HOP leest noch schrijft dit woord — op het niet-coherente
 	// RISC-V-hartpaar mág dat ook niet zomaar (zie de sched-blok-regels).
 	CtxWake = 464
+	// CtxRevoke: HOP's intrekking van dít slot. Niet-nul betekent "beëindig deze
+	// bewoner bij de eerste gelegenheid" — de kill-tick van cpu/mmode leest hem en
+	// gaat rechtstreeks naar teardown (CtxDead), zonder de app iets terug te geven.
+	//
+	// Waarom een eigen veld en niet gewoon CtxState op Dead zetten: CtxState heeft
+	// al twee schrijvers en ligt in regel 0 van dit blok, waar de switcher tijdens
+	// een yield zijn eigen staat en de eerste GPR's in schrijft. Een intrekking
+	// komt per definitie terwijl de bewoner LÉÉFT, dus precies dan zouden beide
+	// harten in dezelfde niet-coherente regel schrijven — en dan wint wie het
+	// laatst terugschrijft. Dit woord heeft daarom één schrijver (HOP) en zijn
+	// eigen regel (512, ná CtxWake's regel), en de switcher leest hem alleen.
+	//
+	// Op ARM bestaat dit niet: daar is intrekken het nullen van de stage-2-tabel,
+	// wat het silicium zelf laat falen (cage_arm64.go). RISC-V heeft geen tweede
+	// vertaalfase om weg te halen — de kooi is een PMP-whitelist in de CSR's van
+	// het hart zelf, en daar komt alleen machine mode ÓP dat hart bij.
+	CtxRevoke = 512
 	// FP staat bewust NIET in dit blok, op geen van beide architecturen: de laag
 	// die HOP bezit draait met zijn MMU uit (Device-geheugen) en een SIMD-store
 	// naar Device faultt op ijzer. De yielder bewaart zijn eigen callee-saved

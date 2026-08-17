@@ -9,6 +9,7 @@
 package main
 
 import (
+	"fmt"
 	"time"
 	_ "unsafe"
 
@@ -41,14 +42,25 @@ import (
 func init() {
 	// Dit board heeft geen hardware-entropiebron, en sinds de agent over TLS
 	// artifacts haalt is dat een operator-beslissing in plaats van een voetnoot.
-	// Daarachter de wekker-probe van het app-hart: die MOET op dat hart zelf
-	// draaien (hartprobe.go) en hoort dus bij wat dit board bij boot over
-	// zichzelf vaststelt — vóór het eerste slot-werk, dat via HartWaker op de
-	// uitslag leunt.
+	// Daarachter de probe van de kleine core: die MOET op dat hart zelf draaien
+	// (hartprobe.go) en hoort dus bij wat dit board bij boot over zichzelf
+	// vaststelt — vóór het eerste slot-werk, dat via HartTimer op de uitslag
+	// leunt, en vóór de hop hieronder, die er zijn go/no-go uit haalt.
 	boardWarn = func() {
+		if licheervhop.LotteryRescued() {
+			fmt.Println("lottery: WARNING — HopCore never came up; running on the firmware core with swapped bookkeeping, placements WILL fail. HOPOS_LOTTERY_RESCUED")
+		}
 		licheerv.Warn()
-		licheervhop.ProbeAppHart()
+		licheervhop.ProbeSmallCore()
 	}
+
+	// De rolwissel (HOP op de kleine core) loopt sinds het loterij-voorstel
+	// niet meer via een teleport maar via de boot-hart-loterij
+	// (board/licheerv/hop/lottery.go): de wissel is dan al gebeurd vóór de
+	// eerste Go-instructie. NOG TE BEDRADEN (integratiekaart, ledger r.48):
+	// hartLottery in het cpuinit-pad + de adoptie van de geparkeerde grote
+	// core (slots.HopHandoff(1) → switcher-entry in het adoptie-woord).
+	// Tot die naad af is staat HopHart op 0 en is dit een no-op.
 
 	// De netwerk-identiteit uit de ingebakken config, vóórdat main de NIC
 	// opbrengt. Dit board heeft geen MAC in een fuse, dus zonder deze regel zou

@@ -129,6 +129,12 @@ func nanotime() int64 {
 //
 //go:linkname Init runtime/goos.Hwinit1
 func Init() {
+	// Allereerst de boot-hart-loterij (lottery.go): woont HOP volgens
+	// board.HopCore op een ander hart, dan start dat hart hier het image
+	// opnieuw en parkeert déze core tot zijn adoptie als app-hart. Vóór
+	// al het andere: wat hieronder staat hoort maar op één core te draaien.
+	hartLottery()
+
 	RV64.Init()
 }
 

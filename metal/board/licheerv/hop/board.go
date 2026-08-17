@@ -40,15 +40,19 @@ func (machine) TempMilliC() int { return licheerv.TempMilliC() }
 // board-kennis. Het RAM-plan zelf staat in board/licheerv/mem.go.
 func (machine) MemTotal() uint64 { return 256 << 20 }
 
-// CoreClass: twee ongelijke kernen. HOP draait op de 1GHz C906 ("big", waar de
-// FSBL ons image start), het app-slot is de 700MHz C906L ("small"). Voor de
-// affinity-attributen van de agent (node.cores.small = 1) is dat precies het
-// onderscheid dat de leader nodig heeft.
+// CoreClass: twee ongelijke kernen — een C906 op 1GHz ("big") en een C906L op
+// 700MHz ("small"). Welke van de twee HOP heeft en welke de app krijgt, hangt
+// CoreClass volgt het globale principe: HOP woont op HopHart, en de klasse
+// van een logische core is dus een sommetje, geen rol-verhaal. Voor de
+// affinity-attributen van de agent (node.cores.big = 1) is dit precies het
+// onderscheid dat de leader nodig heeft — en meteen het antwoord op "wat
+// koopt de wissel ons": een app-core die 43% sneller klokt.
 func (machine) CoreClass(core int) string {
-	if core == 0 {
-		return "big"
+	onSmall := licheerv.HopHart == hartC906L // woont HOP op de kleine, dan zijn de apps groot
+	if (core == 0) == onSmall {              // logische core 0 = HOP zelf
+		return "small"
 	}
-	return "small"
+	return "big"
 }
 
 // Tijd: de generieke-timer-offset leeft in de basis-helft (die de runtime-hook

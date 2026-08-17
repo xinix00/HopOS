@@ -36,7 +36,7 @@ func TestSchedOffsets(t *testing.T) {
 	hopOwned := map[string]bool{
 		"SchedCursor": true, "SchedCount": true, "SchedList": true,
 		"SchedS2PA": true, "SchedClintPA": true, "SchedSleepCap": true,
-		"SchedMsipPA": true,
+		"SchedMsipPA": true, "SchedTickTicks": true,
 	}
 	const line = 64
 

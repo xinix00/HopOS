@@ -933,7 +933,13 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// alleen het gedeelde-core-pad — sinds de ABI in de partitie woont kan die
 	// asm het adres niet meer uitrekenen.
 	ctxWrite(i, layout.CtxCtrlPA, ctx)
-	if coreRunning(core) {
+	// coreParks erbij: een core die niet resetbaar is heeft ALTIJD de
+	// boot-pending-route nodig, ook als er nu niets op draait. Twee redenen, en
+	// ze zijn allebei fataal als je ze negeert — de tak hieronder reset het hart
+	// (dat kan daar niet) en residentReset schrijft in regel 0 van het
+	// sched-blok, waar de switcher van die core op dat moment zelf in staat te
+	// schrijven (layout.go: schrijversgrens op een niet-coherent hartpaar).
+	if coreRunning(core) || coreParks(core) {
 		if err := bootPendingDispatch(core, i, tramp, ctx); err != nil {
 			return fmt.Errorf("%w: %v", errDispatch, err)
 		}
@@ -992,7 +998,13 @@ func Stop(i int, timeout time.Duration) error {
 	// ctx-staat van dít slot is de waarheid: de coöperatieve exit (HVC) of de
 	// fault na een Revoke zet hem op dead (switch.s), waarna de rotatie
 	// gewoon verdergaat met de rest.
-	if slotShares(i) {
+	//
+	// Op een core die HOP niet kan resetten geldt dat óók zonder buren, en om
+	// dezelfde reden: daar bestaat "core gestopt" gewoon niet als eindtoestand
+	// (er draait onze switcher op, die parkeert en blijft leven). De ctx-staat is
+	// er dus altijd de waarheid — zonder deze tak wachtte een release daar op een
+	// core-uit die nooit komt, en zou hij een levende partitie vrijgeven.
+	if slotShares(i) || coreParks(coreOf(i)) {
 		var stopErr error
 		if !waitCtxDead(i, timeout) {
 			cageRevoke(i)
