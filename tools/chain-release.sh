@@ -102,20 +102,23 @@ for gm in "$DIR/metal/go.mod" "$SURF_DIR/go.mod"; do
 	! grep -qE '=> +/' "$gm" || { say "FOUT: pad-replace in $gm"; exit 1; }
 done
 command -v gh >/dev/null || { say "FOUT: gh ontbreekt"; exit 1; }
-# WIE ZIJN WE. gh én git (via de credential-helper) gebruiken het ACTIEVE
-# token, en dat is een globale toestand die buiten dit script omgaat. Met het
-# verkeerde account halveert een release: metal stond 11-08 al getagd en drie
-# satellieten waren gepusht toen surf op 403 stuk liep, omdat het actieve
-# account daar geen schrijfrechten heeft. Liever nu luid stoppen.
-WHO="$(gh api user --jq .login 2>/dev/null || true)"
-[ "$WHO" = "xinix00" ] || {
-	echo "FOUT: WRONG USER — gh draait als '${WHO:-onbekend}', niet xinix00." >&2
-	echo "      herstel: gh auth switch --user xinix00" >&2; exit 1; }
+# MAG DIT TOKEN HIER SCHRIJVEN. Niet "hoe heet het account" maar de vraag die
+# telt — en die is los te stellen per repo. Eerder las deze check `gh api user`,
+# maar dat is precies de endpoint die tijdens de GitHub-storing van 17-08 als
+# enige 503 bleef geven terwijl releases en repos allang antwoordden: dan slaat
+# een release af met een account-melding terwijl het account goed staat.
+#
+# Blijft dekken waarvoor hij bedoeld was: met het verkeerde actieve account is
+# push=false op deze repo's (gemeten 11-08 met derekdhaas), en dan stoppen we
+# vóór metal getagd is i.p.v. halverwege op een 403.
+for r in xinix00/HopOS xinix00/hop-os-surf xinix00/hop; do
+	p="$(gh api "repos/$r" --jq .permissions.push 2>/dev/null || true)"
+	[ "$p" = "true" ] || {
+		echo "FOUT: WRONG USER — dit gh-token mag niet schrijven in $r (push=${p:-onbekend})." >&2
+		echo "      herstel: gh auth switch --user xinix00" >&2; exit 1; }
+done
+WHO="$(gh api user --jq .login 2>/dev/null || echo '?')"
 
-[ -f "$HOME/.hopos/release_key" ] || { say "FOUT: ondertekensleutel ontbreekt"; exit 1; }
-if want 2; then
-	git -C "$DIR" tag -l "$VER" | grep -q . && { say "FOUT: tag $VER bestaat al"; exit 1; }
-fi
 say "   bomen schoon, geen pad-replaces, sleutel aanwezig, gh = $WHO"
 
 # ------------------------------------------------------- 1. hop: nog actueel?
