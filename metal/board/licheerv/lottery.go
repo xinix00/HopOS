@@ -1,6 +1,6 @@
 // De boot-hart-loterij: "HopOS woont op HopHart" als boekhouding op het
-// enige moment dat er niets te verplaatsen valt — vóór alles, in Init
-// (= tamago's Hwinit1). Het volledige verhaal en het parkeer/adoptie-
+// enige moment dat er niets te verplaatsen valt — vóór alles, in de kernel-cpuinit
+// (hop/cpuinit_riscv64.s, -tags linkcpuinit). Het volledige verhaal en het parkeer/adoptie-
 // contract: zie de asm (lottery_riscv64.s) en abi/layout/hopcore.go (het
 // globale principe). De FSBL start dit image op de grote core; is HopHart
 // een ander hart, dan start de loterij dát hart op onze eigen entry en
@@ -30,12 +30,3 @@ const (
 	// geen baksteen.
 	LotteryHopAlive uintptr = 88
 )
-
-// hopCoreMirror is layout.HopCore als DATA-woord: de asm kan geen Go-const
-// lezen maar wél een geïnitialiseerde var — en zo bestaat er precies één
-// bron voor de knop, geen kopie die uit de pas kan lopen.
-var hopCoreMirror uint64 = layout.HopCore
-
-// hartLottery is de asm-kant; aangeroepen als éérste in Init, op élk hart
-// dat dit image binnenkomt.
-func hartLottery()

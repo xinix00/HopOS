@@ -11,7 +11,7 @@ import (
 )
 
 func TestLotterijSpiegels(t *testing.T) {
-	asm, err := os.ReadFile("../../board/licheerv/lottery_riscv64.s")
+	asm, err := os.ReadFile("../../board/licheerv/hop/cpuinit_riscv64.s")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -112,7 +112,7 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 # (kern/slots cage_<arch>.go) en de node-naad (cmd/hopos node_<arch>.go) houden —
 # één main voor élk board, ARM of RISC-V.
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=riscv64 \
-	"$TAMAGO" build -tags "licheerv" -o /dev/null ./cmd/hopos
+	"$TAMAGO" build -tags "licheerv linkcpuinit" -o /dev/null ./cmd/hopos
 # Mét ingebakken config én kooi-stub (dit board kan zijn eigen bootmedium niet
 # lezen, dus dít is de smaak die er écht op gaat). De blobs maakt de gate zelf
 # (gate_stub), zodat deze builds altijd meelopen en niet alleen op een machine
@@ -121,7 +121,7 @@ gate_stub cmd/hopos/cfgblob/hopos.cfg 'hopos.node=gate
 '
 gate_stub kern/cagestub/stub-slot.bin
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=riscv64 \
-	"$TAMAGO" build -tags "licheerv embedcfg embedcagestub" -o /dev/null ./cmd/hopos
+	"$TAMAGO" build -tags "licheerv linkcpuinit embedcfg embedcagestub" -o /dev/null ./cmd/hopos
 
 # probeuefi is de enige overgebleven probe: default-modus van uefi-run.sh en
 # het meetinstrument voor de O6N-bring-up die nog komt. probe4/5/6 zijn

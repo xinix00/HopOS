@@ -17,6 +17,9 @@ package layout
 
 // HopCore: zie boven. Const en geen var: de wissel gebeurt vóór de
 // runtime, dus runtime-verstelbaar zou een leugen zijn.
-// 1 sinds 16-08: op de LicheeRV woont HOP op de C906L (700MHz) en krijgen
-// de apps de 1GHz-core — de eerste ijzer-test van de loterij.
+// 1 (16-08, poging 2): de loterij woont nu in de kernel-cpuinit — caches
+// uit, vers uit reset, vóór álles — precies het contract van de asm. De
+// stranding van poging 1 (Init/Hwinit1, caches aan, cores niet coherent)
+// staat in ledger r.53; de zelfredding is nu ook écht schoon, want op dat
+// moment is er nog niets aangeraakt.
 const HopCore = 1

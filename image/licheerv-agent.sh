@@ -104,7 +104,7 @@ if [ "$PAYLOAD" = netmeter ]; then
 	echo "== netmeter bouwen (cmd/netmeter -tags licheerv; host: ${HOSTSRV:-gateway}) ==" >&2
 	NMLD="-s -w -T $((RUNADDR + 0x10000)) -R 0x1000"
 	[ -n "$HOSTSRV" ] && NMLD="$NMLD -X main.hostOverride=$HOSTSRV"
-	rv "licheerv" "$NMLD" "$OUT/netmeter-lrv.elf" ./cmd/netmeter
+	rv "licheerv linkcpuinit" "$NMLD" "$OUT/netmeter-lrv.elf" ./cmd/netmeter
 	ELF="$OUT/netmeter-lrv.elf"
 fi
 

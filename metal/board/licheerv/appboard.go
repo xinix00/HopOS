@@ -3,7 +3,6 @@ package licheerv
 import (
 	"github.com/xinix00/HopOS/metal/board/appboard"
 	"github.com/xinix00/HopOS/metal/cpu/idle"
-	_ "github.com/xinix00/HopOS/metal/cpu/slotstart" // levert cpuinit (-tags linkcpuinit)
 )
 
 func init() {
