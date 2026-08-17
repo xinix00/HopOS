@@ -52,7 +52,6 @@ OUT="$DIR/metal/out/apps"
 mkdir -p "$OUT"
 [ -x "$TAMAGO" ] || { echo "FOUT: tamago ontbreekt op $TAMAGO (zet TAMAGO)" >&2; exit 1; }
 command -v gh >/dev/null || [ "$PUBLISH" != "1" ] || { echo "FOUT: gh ontbreekt" >&2; exit 1; }
-if [ "$PUBLISH" = "1" ]; then
 # MAG DIT TOKEN HIER SCHRIJVEN. Niet "hoe heet het account" maar de vraag die
 # telt, en die is per repo te stellen. Eerder las dit `gh api user`: precies de
 # endpoint die tijdens de GitHub-storing van 17-08 als enige 503 bleef geven
