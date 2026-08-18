@@ -46,6 +46,7 @@ const (
 	// MAC
 	regConf     = 0x0000
 	regFilter   = 0x0004
+	filterPR    = 1 << 0 // promiscuous (DWMAC1000 frame filter, PR-bit)
 	filterPM    = 1 << 4 // pass all multicast (DWMAC1000 frame filter, PM-bit)
 	regGMIIAddr = 0x0010
 	regGMIIData = 0x0014
@@ -322,12 +323,15 @@ func (n *Net) Init(dmaPA, dmaSize uintptr, speed int, fd bool) error {
 	// even met een 00:00:00:00:00:00-filter draaien.
 	n.wr(regAddr0Hi, uint32(n.MAC[5])<<8|uint32(n.MAC[4]))
 	n.wr(regAddr0Lo, uint32(n.MAC[3])<<24|uint32(n.MAC[2])<<16|uint32(n.MAC[1])<<8|uint32(n.MAC[0]))
-	// Perfect match + broadcast (DBF=0) + álle multicast (PM, bit 4). Geen
-	// promiscuous: unicast voor anderen hoort de ring niet te vullen. PM wél:
-	// mDNS/matter leeft op 224.0.0.251 en de hash-filter per groep is op deze
-	// MAC meer administratie dan de paar ruis-frames waard — leannet/hopswitch
-	// filteren op groepslidmaatschap.
-	n.wr(regFilter, filterPM)
+	// Álle multicast (PM) + promiscuous (PR). PM: mDNS/matter leeft op
+	// 224.0.0.251 en 33:33-groepen, en de hash-filter per groep is meer
+	// administratie dan de paar ruis-frames waard. PR: de slots zijn met hun
+	// éigen MAC's (02:00:00:00:00:XX) L2-burgers op het LAN geworden voor
+	// IPv6 (matter praat unicast terug op de MAC die NDP adverteerde), en de
+	// perfect-filter kent maar één adres. Ruis is dit op een geswitcht LAN
+	// niet: vreemde unicast bereikt onze poort überhaupt niet — de switch
+	// leert. leannet/hopswitch filteren op lidmaatschap en bestemming.
+	n.wr(regFilter, filterPM|filterPR)
 
 	n.wr(dmaBusMode, busFixedBurst|busPBL8|busDSL64)
 	n.wr(dmaRxList, uint32(n.rxDesc))

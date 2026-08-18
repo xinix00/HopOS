@@ -198,12 +198,28 @@ func (u *Uplink) Receive(buf []byte) (int, error) {
 		if n == 0 || err != nil {
 			return n, err // NIC-ring leeg (of fout): pas hier mag de rxLoop slapen
 		}
-		// IPv4-multicast van het LAN (mDNS, matter): flood naar álle slots en
-		// claim — HOP's eigen stack joint geen groepen en zou hem toch stil
-		// negeren. De slot-stacks filteren zelf op lidmaatschap (leannet),
-		// dus dit is een kopie per aangesloten slot en verder niets.
-		if n >= 14 && buf[0] == 0x01 && buf[1] == 0x00 && buf[2] == 0x5e {
+		// IP-multicast van het LAN (mDNS, matter, NDP): flood naar álle slots
+		// en claim — HOP's eigen stack joint geen groepen en zou hem toch stil
+		// negeren. 01:00:5e (IPv4) en 33:33 (IPv6); de slot-stacks filteren
+		// zelf op lidmaatschap (leannet), dus dit is een kopie per aangesloten
+		// slot en verder niets.
+		if n >= 14 && ((buf[0] == 0x01 && buf[1] == 0x00 && buf[2] == 0x5e) ||
+			(buf[0] == 0x33 && buf[1] == 0x33)) {
 			multicastInbound(buf[:n])
+			if claimed%claimYield == claimYield-1 {
+				runtime.Gosched()
+			}
+			continue
+		}
+		// Unicast op een slot-MAC (02:00:00:00:00:XX): de terugweg van het
+		// IPv6-L2-pad — een matter-apparaat of border router antwoordt de
+		// slot rechtstreeks op de MAC die NDP adverteerde. Bezorgen en
+		// claimen; de NIC staat hiervoor promiscuous (zie de driver).
+		if n >= 14 && buf[0] == 0x02 && buf[1]|buf[2]|buf[3]|buf[4] == 0 &&
+			int(buf[5]) >= 1 && int(buf[5]) <= layout.MaxSlots {
+			mu.Lock()
+			deliverLocked(int(buf[5]), buf[:n])
+			mu.Unlock()
 			if claimed%claimYield == claimYield-1 {
 				runtime.Gosched()
 			}

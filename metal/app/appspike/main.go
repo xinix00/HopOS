@@ -304,6 +304,68 @@ func main() {
 		}
 	}
 
+	// IPv6-demo (het matter-pad, 18-08): listen opent een udp6-poort en
+	// echoot; send leidt de link-local van een buurslot af uit diens
+	// vaste MAC (fe80:: + EUI-64 van 02:00:00:00:00:0N) en stuurt er elke
+	// seconde één datagram heen. Samen bewijzen ze de hele leanipv6-baan
+	// op echte ringen: NDP over de 33:33-flood van de switch, unicast v6
+	// slot↔slot, en UDP6 in beide richtingen — zonder join, want unicast.
+	switch app.Env("V6") {
+	case "listen":
+		if _, err := appnet.Up(app); err != nil {
+			exitf(app, 1, "V6 listen: %v", err)
+		}
+		conn, err := net.ListenUDP("udp6", &net.UDPAddr{Port: 7776})
+		if err != nil {
+			exitf(app, 1, "V6 listen: %v", err)
+		}
+		app.Logf("V6 listen: udp6 port 7776 open")
+		buf := make([]byte, 512)
+		for {
+			n, src, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				exitf(app, 1, "V6 listen: read: %v", err)
+			}
+			app.Logf("V6 listen: %q from %s", buf[:n], src)
+			if _, err := conn.WriteToUDP(append([]byte("echo:"), buf[:n]...), src); err != nil {
+				app.Logf("V6 listen: echo: %v", err)
+			}
+		}
+	case "send":
+		if _, err := appnet.Up(app); err != nil {
+			exitf(app, 1, "V6 send: %v", err)
+		}
+		slot := 0
+		fmt.Sscanf(app.Env("V6PEER"), "%d", &slot)
+		if slot < 1 {
+			exitf(app, 1, "V6 send: set V6PEER to the listener's slot number")
+		}
+		peer := &net.UDPAddr{IP: net.IP{0xfe, 0x80, 0, 0, 0, 0, 0, 0,
+			0, 0, 0, 0xff, 0xfe, 0, 0, byte(slot)}, Port: 7776}
+		conn, err := net.DialUDP("udp6", nil, peer)
+		if err != nil {
+			exitf(app, 1, "V6 send: dial: %v", err)
+		}
+		go func() {
+			buf := make([]byte, 512)
+			for {
+				n, err := conn.Read(buf)
+				if err != nil {
+					return
+				}
+				app.Logf("V6 send: reply %q", buf[:n])
+			}
+		}()
+		for i := 0; ; i++ {
+			if _, err := conn.Write(fmt.Appendf(nil, "v6-probe %d", i)); err != nil {
+				app.Logf("V6 send: %v", err)
+			} else if i%5 == 0 {
+				app.Logf("V6 send: probe %d sent to [%s]:7776", i, peer.IP)
+			}
+			time.Sleep(time.Second)
+		}
+	}
+
 	// Hanger: een lege lus zonder preemptiepunt monopoliseert de core — de
 	// heartbeat-goroutine komt nooit meer aan bod en de kill-flag wordt
 	// genegeerd. Precies de hang waarvoor HOP's hard-kill-SGI bestaat.

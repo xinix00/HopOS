@@ -227,17 +227,27 @@ func forward(src int, p []byte) {
 				ports[i].rx.Write(ring.TypeFrame, p)
 			}
 		}
-		// IPv4-multicast (mDNS, matter) gaat óók het LAN op — de scope is de
-		// hele link, niet alleen deze node. Alleen 01:00:5e: broadcast en
-		// het interne ARP-verkeer blijven binnen (dat is node-privé; het op
-		// het LAN zetten lekt de 10.100-namen en verwart niemand ten goede).
-		if p[0] == 0x01 && p[1] == 0x00 && p[2] == 0x5e {
+		// IP-multicast (mDNS, matter, NDP) gaat óók het LAN op — de scope is
+		// de hele link, niet alleen deze node. 01:00:5e (IPv4) en 33:33
+		// (IPv6); broadcast en het interne ARP-verkeer blijven binnen (dat
+		// is node-privé; het op het LAN zetten lekt de 10.100-namen en
+		// verwart niemand ten goede).
+		if (p[0] == 0x01 && p[1] == 0x00 && p[2] == 0x5e) ||
+			(p[0] == 0x33 && p[1] == 0x33) {
 			uplinkMulticastTx(p)
 		}
 		return
 	}
 	if p[0] != 0x02 || p[1]|p[2]|p[3]|p[4] != 0 {
-		return // geen switch-MAC
+		// Geen switch-MAC. IPv6-unicast van een slot naar een LAN-buur (een
+		// matter-apparaat, de border router) gaat als écht L2-frame de NIC
+		// op, mét de slot-MAC als bron — v6 kent geen NAT-pad en hoort dat
+		// ook niet te krijgen: NDP heeft de slot al als buur geadverteerd.
+		// De terugweg staat in Uplink.Receive (unicast op een slot-MAC).
+		if p[12] == 0x86 && p[13] == 0xdd {
+			uplinkMulticastTx(p)
+		}
+		return // v4-unicast kent alleen de switch-MAC's (NAT is de uitweg)
 	}
 	dst := int(p[5])
 	if dst == 0 { // naar HOP toe (de gateway-MAC)
