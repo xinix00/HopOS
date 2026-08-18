@@ -51,6 +51,13 @@ var hostMAC = layout.SlotMAC(0)
 type port struct {
 	tx *ring.Ring // app → switch
 	rx *ring.Ring // switch → app
+
+	// txWarned: de corrupt-verklaring van de TX-ring is al gemeld. Eén regel
+	// per leven van de poort — de vlag zelf is permanent (ring.Corrupt), dus
+	// elke ronde melden zou de console verzuipen. De melding bestaat omdat een
+	// corrupte TX-ring van buiten identiek oogt aan een lege (boot 9, 17-08:
+	// slot-net dood na ~30s, app gezond, en niets op de console).
+	txWarned bool
 }
 
 var (
@@ -165,6 +172,10 @@ func switchPassLocked(buf []byte) (worked bool) {
 			}
 			forward(i, buf[:n])
 			worked = true
+		}
+		if !pt.txWarned && pt.tx.Corrupt() {
+			pt.txWarned = true
+			fmt.Printf("HOPOS_NETRING_TX_CORRUPT: slot %d: %s\n", i, pt.tx.CorruptWhy())
 		}
 	}
 	return worked

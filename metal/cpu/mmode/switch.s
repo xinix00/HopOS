@@ -26,7 +26,7 @@
 // geen scheduling maar een isolatie-invariant: HOP moet een bewoner kunnen
 // BEËINDIGEN die niet meewerkt. Op een hart dat in reset te zetten is doet het
 // SoC-resetblok dat (kern/slots cageRevoke, gemeten 30-07). Maar sinds HOP naar
-// de kleine core hopt (board/licheerv/hop/hop.go) is de core waar hij vandaan
+// de kleine core verhuisde (de loterij, board/licheerv/hop/cpuinit_riscv64.s) is de core waar hij vandaan
 // komt precies zo'n hart NIET: hij komt nooit uit reset, want daar draait deze
 // switcher. Voor die core armt machine mode daarom zijn eigen comparator vóór
 // elke mret naar een bewoner (SchedTickTicks). Bij elke tick kijkt hij naar één
@@ -146,15 +146,13 @@ TEXT mentry(SB),NOSPLIT|NOFRAME,$0
 	BNEZ	X6, tick
 
 	// mcause 9 = ecall uit supervisor-modus: het coöperatieve pad van een
-	// bewoner. mcause 11 = ecall uit MACHINE mode, en dat kán geen bewoner zijn
-	// (die draait per definitie in supervisor-modus) — dat is de core die HOP
-	// verlaat en zich hier komt melden (mhop). Al het andere is een
-	// fault-rapport: een kooi-overtreding, een illegale instructie, een
-	// verboden CSR.
+	// bewoner. Al het andere is een fault-rapport: een kooi-overtreding, een
+	// illegale instructie, een verboden CSR — óók een ecall uit machine mode,
+	// want een bewoner draait per definitie in supervisor-modus. (Tot 17-08
+	// was M-mode-ecall de melding van de teleport-hop; die is geKAMd — een
+	// core komt hier nu binnen via de loterij-adoptie, als verse boot.)
 	MOV	$9, X6
 	BEQ	X5, X6, yield
-	MOV	$11, X6
-	BEQ	X5, X6, mhop
 	JMP	fault
 
 yield:
@@ -283,7 +281,7 @@ yield:
 	FENCE
 	WORD	$0x02b3000b		// th.dcache.cipa x6
 	WORD	$0x01b0000b		// th.sync.is
-	JMP	rotate
+	JMP	mrotate(SB)
 
 exit:
 	// De bewoner is klaar (applib.parkExit): status stond al op de control-page,
@@ -326,34 +324,6 @@ tickret:
 	MOV	32(SP), X7
 	WORD	$0x34011173		// csrrw sp, mscratch, sp — sp terug naar de bewoner
 	WORD	$0x30200073		// mret
-
-mhop:
-	// De core die HOP achterlaat meldt zich hier, en dit is de enige plek waar
-	// een ecall uit machine mode vandaan kan komen: board/licheerv/hop zet
-	// mtvec op mentry en mscratch op het sched-blok van deze core, en doet dan
-	// één ecall. Vanaf dat moment is dit een gewone app-core — er is geen
-	// bewoner, dus de rotatie vindt niets en parkeert, en de eerste
-	// boot-pending die HOP erbij zet wordt opgepikt zoals bij elke gedeelde
-	// core.
-	//
-	// Current en Rotor hier nullen mag, en alleen hier: dit is regel 0 van het
-	// sched-blok en die is van de arch-laag op de core zelf — en wij ZIJN die
-	// core. HOP mag op een parkerende core nooit in deze regel schrijven (zie de
-	// schrijversgrens in layout.go, en residentReset dat daarom niet op zo'n
-	// core mag lopen).
-	MOV	ZERO, X5
-	MOV	X5, 48(SP)		// layout.SchedCurrent = niemand
-	MOV	X5, 56(SP)		// layout.SchedRotor
-
-	// mscratch wijst nu naar de stack die de hop-assembly achterliet, en die
-	// stack is van HOP — op de ándere core, in gebruik. Zou hier ooit een trap
-	// binnenkomen vóór de eerste bewoner (de kooi-stub zet mscratch pas bij zijn
-	// sprong), dan ruilt de entry hierboven díe pointer naar sp en spillt er
-	// registers in: schrijven in de levende Go-stack van een andere core. Het
-	// sched-blok terugzetten maakt die ruil onschadelijk — sp en mscratch wijzen
-	// dan allebei hierheen, wat precies de toestand is die de parkeerlus aankan.
-	WORD	$0x34011073		// csrw mscratch, sp
-	JMP	rotate
 
 fault:
 	// Fault-rapport op de control-page van de bewoner (mcause/mtval/vec) —
@@ -422,7 +392,15 @@ teardown:
 	FENCE
 	WORD	$0x02b3000b		// th.dcache.cipa x6
 	WORD	$0x01b0000b		// th.sync.is
+	JMP	mrotate(SB)
 
+// mrotate: de rotatie + parkeerlus, als EIGEN symbool en niet als label in
+// mentry — Go-asm-labels zijn functie-lokaal, en er zijn twee binnenkomers
+// van buiten: elk pad van mentry hierboven (yield/teardown), én parkenter
+// hieronder (de boot-intrek van een parkerende core). Invariant bij
+// binnenkomst: SP = het sched-blok van dit hart, mtvec = mentry; alle GPRs
+// vrij.
+TEXT mrotate(SB),NOSPLIT|NOFRAME,$0
 rotate:
 	MOV	ZERO, X12		// niet door een IPI gewekt: wektijden gelden
 rescan:
@@ -739,7 +717,48 @@ spin:
 pause:
 	ADD	$-1, X5, X5
 	BNEZ	X5, pause
-	JMP	rotate
+	JMP	rotate			// lokaal label: een symbool-JMP naar onszelf
+	// leest de nosplit-checker van de linker als oneindige recursie
+
+// parkenter: de boot-intrek van een PARKERENDE core — geen bewoner maar de
+// switcher zelf. De loterij-adoptie springt hierheen (kern/slots cageInit →
+// HartOn → adoptParked) met X11 = het sched-blok van deze core (het
+// adoptie-arg-woord, zie board/licheerv/lottery.go). Vanaf hier draait de
+// rotatie op dit hart vanaf de boot: een boot-pending wordt gewoon opgepikt,
+// er bestaat geen koud pad meer, en de tick/slaap-knoppen van de park gelden
+// meteen. Dit verving de tweede parkeerwereld (loterij-park + coreSwitcherUp +
+// een liegende HartState + residentReset-uitzonderingen) — de faalmodi van
+// boot 7/8 (17-08) kunnen hierdoor niet meer bestaan.
+//
+// De sprong komt cache-uit binnen (reset-staat van de loterij-park): D-cache
+// aan, geen interrupt-erfenis van de FSBL, en de trap-entry wijzen — daarna is
+// dit hart een doodnormale switcher-core.
+TEXT parkenter(SB),NOSPLIT|NOFRAME,$0
+	MOV	$(1<<1), X5
+	WORD	$0x7c12a073		// csrrs x0, mhcr, t0 — D-cache aan
+	WORD	$0x30401073		// csrw mie, x0 — geen FSBL-erfenis
+	// Deze core is nooit in reset geweest, dus élke M-mode-CSR die we niet
+	// zelf zetten is FSBL-erfenis — een reset-vers hart heeft deze twee
+	// gegarandeerd op nul, wij moeten dat afdwingen:
+	//  - mscratch: mentry begint met csrrw sp,mscratch,sp; trapt er iets
+	//    vóór de eerste bewoner (die zet hem pas via stub/resume), dan werd
+	//    sp die erfenis en spilden drie registers in willekeurig DRAM.
+	//  - mstatus.MIE: park zet MTIE|MSIE rond de wfi en rekent erop dat de
+	//    interrupt nooit GENOMEN wordt; een geërfde MIE=1 zou hem nemen —
+	//    zelfde trap, zelfde garbage-sp.
+	MOV	X11, X2			// SP = het sched-blok (adoptie-arg)
+	WORD	$0x34011073		// csrw mscratch, sp — sane spill-grond
+	WORD	$0x30047073		// csrci mstatus, 8 — MIE uit
+	MOV	$mentry(SB), X5
+	WORD	$0x30529073		// csrw mtvec, x5
+	JMP	mrotate(SB)
+
+// ParkEnterPC geeft het fysieke adres van parkenter — zelfde argument als
+// EntryPC: identity-geladen image, symbooladres = fysiek adres.
+TEXT ·ParkEnterPC(SB),NOSPLIT,$0-8
+	MOV	$parkenter(SB), X5
+	MOV	X5, ret+0(FP)
+	RET
 
 // EntryPC geeft het fysieke adres van mentry. HOP's image is identity-geladen,
 // dus het symbooladres ís het fysieke adres — hetzelfde argument als bij

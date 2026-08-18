@@ -285,6 +285,11 @@ const (
 	// vertaalfase om weg te halen — de kooi is een PMP-whitelist in de CSR's van
 	// het hart zelf, en daar komt alleen machine mode ÓP dat hart bij.
 	CtxRevoke = 512
+
+	// CtxLen is hoeveel een verse init van het ctx-blok moet nullen: het hele
+	// blok tot en met de cacheline van CtxRevoke (512..575) plus slack tot een
+	// ronde macht van twee — er ligt niets van de ABI voorbij dit punt.
+	CtxLen = 1024
 	// FP staat bewust NIET in dit blok, op geen van beide architecturen: de laag
 	// die HOP bezit draait met zijn MMU uit (Device-geheugen) en een SIMD-store
 	// naar Device faultt op ijzer. De yielder bewaart zijn eigen callee-saved

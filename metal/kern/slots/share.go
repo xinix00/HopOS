@@ -273,9 +273,15 @@ func bootPendingDispatch(core, i int, tramp, ctx uint64) error {
 		// hart-reset proberen die dat silicium niet heeft, en dan faalde élke
 		// start op de app-core meteen bij de eerste lus-ronde.
 		if !coreParks(core) && !coreRunning(core) {
-			// Park-race: zelf dispatchen. Staat éérst op Running, anders zou
-			// de rotatie hem straks nógmaals cold-booten (dubbelboot).
-			ctxWrite(i, layout.CtxState, layout.CtxRunning)
+			// Park-race: zelf dispatchen — en dan is dit een kóude start, dus
+			// mét residentReset (die zet ook de staat op Running, zodat de
+			// rotatie hem straks niet nógmaals cold-boot). Alleen de staat
+			// flippen was de latente vorm van de slot-0-begrafenis: op RISC-V
+			// leest de eerste yield SchedCurrent, en die staat hier nog op
+			// wat de gestorven switcher achterliet. Veilig om te schrijven:
+			// !coreRunning betekent op een resetbaar hart "in reset" — er
+			// draait geen switcher die in regel 0 meeschrijft.
+			residentReset(core, i)
 			return dispatchCore(core, tramp, ctx)
 		}
 		time.Sleep(time.Millisecond)
@@ -300,8 +306,18 @@ func bootPendingDispatch(core, i int, tramp, ctx uint64) error {
 		if ctxState(i) != layout.CtxBootPending {
 			return nil // opgepikt: de (herleefde) rotatie boot(te) hem
 		}
-		if !coreRunning(core) {
-			ctxWrite(i, layout.CtxState, layout.CtxRunning)
+		// Dezelfde coreParks-guard als in de eerste lus, en hier woog hij
+		// zwaarder: ná de kill-tick parkeert de switcher (SchedCurrent = 0) en
+		// zonder guard dispatchte dit pad de parkerende core — een adoptie die
+		// ná de eerste al niet meer bestaat, en die het sched-blok bovendien
+		// ongeprimed liet (gemeten boot 7, 17-08: de bewoner startte, yieldde
+		// in het ctx-blok van slot 0 en was doof). De herleefde rotatie pikt de
+		// boot-pending zelf op; dat ziet de check hierboven.
+		if !coreParks(core) && !coreRunning(core) {
+			// Zelfde koude start als de park-race hierboven, om dezelfde
+			// reden mét residentReset: ná de HartOff van de escalatie staat
+			// SchedCurrent in DRAM op wat de gevelde switcher had.
+			residentReset(core, i)
 			return dispatchCore(core, tramp, ctx)
 		}
 		time.Sleep(time.Millisecond)

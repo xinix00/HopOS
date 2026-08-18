@@ -1,6 +1,6 @@
 package layout
 
-// De loterij-spiegels: lottery_riscv64.s kan geen Go-consts lezen en draagt
+// De loterij-spiegels: hop/cpuinit_riscv64.s kan geen Go-consts lezen en draagt
 // dus letterlijke waarden. Dit klinkt beide kanten aan elkaar vast — tekst op
 // tekst, want het licheerv-pakket zelf bouwt alleen onder tamago.
 
@@ -24,10 +24,11 @@ func TestLotterijSpiegels(t *testing.T) {
 		{"voortgang", "64(X10)", "LotteryProgress uintptr = 64"},
 		{"adoptie-PC", "72(X10)", "LotteryAdoptPC  uintptr = 72"},
 		{"levensteken", "88(X10)", "LotteryHopAlive uintptr = 88"},
+		{"adoptie-arg", "96(X10)", "LotteryParkArg uintptr = 96"},
 		{"scratch", "SCRATCH   0x8FE00000", "0x8FE00000"},
 	} {
 		if !strings.Contains(a, w.inAsm) {
-			t.Errorf("spiegel %s: %q niet in lottery_riscv64.s", w.naam, w.inAsm)
+			t.Errorf("spiegel %s: %q niet in hop/cpuinit_riscv64.s", w.naam, w.inAsm)
 		}
 		if w.naam != "scratch" && !strings.Contains(g, w.inGo) {
 			t.Errorf("spiegel %s: %q niet in lottery.go", w.naam, w.inGo)

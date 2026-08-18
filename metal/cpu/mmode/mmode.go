@@ -27,3 +27,9 @@ package mmode
 // schrijft — zo landt élke trap van een app in HOP's eigen code in plaats van in
 // een stukje assembly binnen de partitie van die app.
 func EntryPC() uint64
+
+// ParkEnterPC geeft het fysieke adres van parkenter (switch.s): de
+// boot-intrek van een parkerende core. kern/slots' cageInit adopteert de
+// loterij-geparkeerde core hiermee (HartOn), zodat de switcher er vanaf de
+// boot draait en een plaatsing daar altijd de gewone rotatie-route heeft.
+func ParkEnterPC() uint64

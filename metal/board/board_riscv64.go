@@ -36,7 +36,11 @@ type Board interface {
 	// (stopt hem ook uit een tight loop), boot-vector zetten, deasserten.
 	// Opnieuw aanroepen op een lopend hart = kill + verse start; de PMP-locks
 	// van het oude slot zijn daarna weg.
-	HartOn(hart int, entry uint64) error
+	//
+	// arg reist mee naar de entry: een parkerende core geeft hem bij de
+	// adoptie door als X11 (het sched-blok voor cpu/mmode parkenter — de
+	// aanroeper, kern/slots, bezit die mapping); een reset-start negeert hem.
+	HartOn(hart int, entry, arg uint64) error
 
 	// HartOff houdt hart `hart` in reset (kill zonder herstart).
 	HartOff(hart int) error
@@ -63,7 +67,8 @@ type Board interface {
 	//
 	// Dat onderscheid is silicium en geen smaak. Het vendor-reset-recept van de
 	// SG2002 dekt precies één van de twee cores, en sinds HOP naar de kleine core
-	// hopt is de app-core juist de andere (board/licheerv/hop/hop.go).
+	// verhuisde (de boot-hart-loterij, board/licheerv/hop/cpuinit_riscv64.s) is
+	// de app-core juist de andere.
 	HartResettable(hart int) bool
 }
 

@@ -6,9 +6,11 @@
 //
 // HopCore is de core waar HOP zelf leeft. 0 = de core waar de firmware ons
 // startte (de default op élk board; elke loterij is dan een no-op). Anders
-// verhuist de boot via de arch-loterij vóór vrijwel alles — riscv64:
-// board/licheerv/lottery_riscv64.s (vendor-reset-vector, gehaakt in Init),
-// arm64: board/hoplottery_arm64.s (PSCI, voorbereid voor de 12-corer).
+// verhuist de boot via de arch-loterij vóór de eerste Go-instructie — riscv64:
+// board/licheerv/hop/cpuinit_riscv64.s (kernel-cpuinit, -tags linkcpuinit).
+// arm64 bouwt zijn variant bij de 12-corer: PSCI kán elke core op elk adres
+// starten, dus daar is het CPU_ON naar _rt0 plus een parkenter-intrek — geen
+// parkeer-asm nodig (de voorbereide hoplottery is 18-08 geKAMd).
 //
 // Waarom een getal en geen rol-vlag: "HOP woont op core N" dekt méér dan
 // snelle-vs-zuinige cores — ook een DEFECTE core is dan configuratie.

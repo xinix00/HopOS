@@ -101,13 +101,14 @@ done
 # spiegelbeeld van de HOP-kant hierboven.
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=riscv64 \
 	"$TAMAGO" build -tags "linkramsize linkcpuinit" -o /dev/null ./app/slotdemo ./app/switchtest
-# En de twee bestanden die ALLEEN achter linkcpuinit staan, expliciet: de
-# S-mode-entry (cpu/slotstart/cpuinit_riscv64.s) en de app-kant van Push/Pull
-# (dev/share_riscv64_app.go). Ze zitten in de app-builds hierboven, maar een
-# import die wegvalt zou dat stil maken — dus ook rechtstreeks, zodat een fout in
-# die assembly de gate breekt en niet pas een boot-cyclus.
+# En de app-selectie expliciet: de S-mode-entry (cpu/slotstart, achter
+# linkcpuinit) en de app-kant van Push/Pull (dev/share_riscv64_app.go, achter
+# linkramsize — NIET linkcpuinit: die tag draagt de kern sinds de loterij óók,
+# en precies die drift maakte de no-ops ooit stil kern-breed, 17-08). Ze zitten
+# in de app-builds hierboven, maar een import die wegvalt zou dat stil maken —
+# dus ook rechtstreeks, zodat een fout de gate breekt en niet pas een boot-cyclus.
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=riscv64 \
-	"$TAMAGO" build -tags "linkcpuinit" -o /dev/null ./cpu/slotstart ./dev
+	"$TAMAGO" build -tags "linkramsize linkcpuinit" -o /dev/null ./cpu/slotstart ./dev
 # DE echte agent-main voor riscv64: dit is het bewijs dat de kooi-naad
 # (kern/slots cage_<arch>.go) en de node-naad (cmd/hopos node_<arch>.go) houden —
 # één main voor élk board, ARM of RISC-V.

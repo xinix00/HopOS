@@ -282,8 +282,9 @@ begin:
 	# een trap vóór de sprong). Tot 11-08 bleef dit hart hier gewoon staan, en
 	# dat kon: HOP zette hem met een SoC-reset weer aan het werk.
 	#
-	# Dat gaat niet meer op. Ná de hop is de app-core de core die HOP verlaten
-	# heeft (board/licheerv/hop/hop.go), en die heeft geen reset-recept — hier
+	# Dat gaat niet meer op. Ná de hop is de app-core de core die HOP via de
+	# loterij verlaten heeft (board/licheerv/hop/cpuinit_riscv64.s), en die
+	# heeft geen reset-recept — hier
 	# blijven staan zou de enige app-core van de node permanent kosten, met als
 	# enige uitweg een reboot. Dus geven we hem terug aan de switcher: mscratch
 	# en mtvec zoals bij een gewone sprong naar de app, en dan expres een

@@ -51,16 +51,14 @@ func init() {
 			fmt.Println("lottery: WARNING — HopCore never came up; running on the firmware core with swapped bookkeeping, placements WILL fail. HOPOS_LOTTERY_RESCUED")
 		}
 		licheerv.Warn()
-		licheervhop.ProbeSmallCore()
+		licheervhop.ProbeAppHarts()
 	}
 
-	// De rolwissel (HOP op de kleine core) loopt sinds het loterij-voorstel
-	// niet meer via een teleport maar via de boot-hart-loterij
-	// (board/licheerv/hop/lottery.go): de wissel is dan al gebeurd vóór de
-	// eerste Go-instructie. NOG TE BEDRADEN (integratiekaart, ledger r.48):
-	// hartLottery in het cpuinit-pad + de adoptie van de geparkeerde grote
-	// core (slots.HopHandoff(1) → switcher-entry in het adoptie-woord).
-	// Tot die naad af is staat HopHart op 0 en is dit een no-op.
+	// De rolwissel (waar woont HOP) is geen main-zaak meer: de boot-hart-
+	// loterij (hop/cpuinit_riscv64.s) doet hem vóór de eerste Go-instructie,
+	// en layout.HopCore is de enige knop. De geparkeerde core wordt bij de
+	// slot-init de switcher ingetrokken (kern/slots cageInit → parkenter),
+	// dus tegen de eerste plaatsing draait daar gewoon de rotatie.
 
 	// De netwerk-identiteit uit de ingebakken config, vóórdat main de NIC
 	// opbrengt. Dit board heeft geen MAC in een fuse, dus zonder deze regel zou

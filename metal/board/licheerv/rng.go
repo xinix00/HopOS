@@ -48,6 +48,16 @@ func Warn() {
 	// De plek (na de probe, vóór agentboot.Run) en niet board-Init zoals op de
 	// ARM-boards: dáár is WFE onvoorwaardelijk veilig, hier is de wekker een
 	// probe-uitslag.
+	//
+	// Op élk HopHart — er heeft hier één dag een HopHart==0-gate gestaan op
+	// gezag van de 01-08-meting ("beide comparators tegelijk = hart dood"),
+	// maar die hypothese bleek nooit zuiver getest: boots 7-12 (17-08)
+	// draaiden de beide-comparators-configuratie per ongeluk gewoon, en al
+	// hun doden zijn herleid tot de I-cache/crawl-klasse (cpuinit alsHOP).
+	// Sindsdien is de comparator-keten van beide cores los bewezen (de
+	// CLINT-probe hierboven meet HOP's eigen hart; de park-slaap en kill-tick
+	// draaien op de ander). Keert de 01-08-klasse ooit terug, dan is dat nu
+	// een WDT-reboot met een tijdstip in de soak-monitor — geen raadsel meer.
 	if CLINTUsable() {
 		idle.UseMSleep(MSleep)
 		idle.Enable()

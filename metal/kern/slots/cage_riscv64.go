@@ -4,7 +4,6 @@ package slots
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/board"
@@ -29,7 +28,7 @@ import (
 //     nodig heeft.
 //
 //     BEHALVE op een core die HOP niet kan resetten. Sinds HOP naar de kleine
-//     core hopt (board/licheerv/hop/hop.go) is de app-core precies de core die
+//     core verhuisde (de loterij, board/licheerv/hop/cpuinit_riscv64.s) is de app-core precies de core die
 //     HOP verlaten heeft, en daar draait onze switcher permanent: hij komt nooit
 //     uit reset, want hij is er nooit in geweest. Voor zo'n core lijkt deze
 //     helft op de ARM-helft — starten is een boot-pending die de rotatie oppikt,
@@ -78,17 +77,17 @@ func cageInit() {
 	nc := layout.NumAppCores()
 	for c := 0; c <= nc; c++ {
 		mb := layout.ParkMboxPA(c)
-		// Nullen mag alleen zo ver als de schrijversgrens toestaat. Op een core
-		// die parkeert draait onze switcher AL — die heeft regel 0 in zijn eigen
-		// (niet-coherente) cache staan, dus een Clear van HOP daarin is precies
-		// het dataverlies waar layout.go voor waarschuwt: zijn volgende
-		// terugschrijving zou onze nullen weer overschrijven, of andersom. Die
-		// regel initialiseert de core zélf, bij binnenkomst (cpu/mmode: mhop).
-		if coreParks(c) {
-			dev.Clear(mb+64, layout.ParkMboxLen-64)
-		} else {
-			dev.Clear(mb, layout.ParkMboxLen)
-		}
+		// De héle mailbox nullen, óók op een parkerende core. Dat mag hier
+		// precies omdat er op dit moment geen switcher draait: sinds de
+		// boot-hart-loterij (16-08) hangt zo'n core in zijn cpuinit-lus —
+		// caches uit, en hij leest alleen de boot-scratch, nooit deze
+		// mailbox. De switcher komt er pas ná de adoptie (adoptParked), en
+		// die gebeurt ná deze init (vectorsOnce loopt vóór de eerste
+		// dispatch). Zonder deze clear las coreRunning DRAM-vuil als
+		// SchedCurrent en koos élke plaatsing het rotatie-pad naar een
+		// rotatie die niet bestond — gemeten 17-08, eerste loterij-boot:
+		// "sacrificing resident slot -4554780200217279403" en quarantaine.
+		dev.Clear(mb, layout.ParkMboxLen)
 		dev.Write64(mb+layout.SchedS2PA, uint64(base))
 		// De wekker van dít hart, als het board er een hééft. Zonder deze drie
 		// woorden blijft de parkeerlus van de switcher spinnen zoals altijd —
@@ -122,46 +121,36 @@ func cageInit() {
 		}
 		dev.Push(mb, layout.ParkMboxLen)
 	}
-}
+	// De ctx-blokken van álle slots vers nullen, om dezelfde reden als de
+	// mailbox hierboven: een verse boot moet zijn waarheid in DRAM zelf
+	// vestigen. Reboots laten restanten achter — gemeten 17-08 (boot 3):
+	// slot 1 droeg CtxRunning uit een vórige boot en élke plaatsing weigerde
+	// met "still live". De reset-wereld wiste dit impliciet; de loterij niet.
+	for i := 1; i <= layout.MaxSlots; i++ {
+		dev.Clear(layout.Stage2TablePA(i)+layout.CtxOff, layout.CtxLen)
+		dev.Push(layout.Stage2TablePA(i)+layout.CtxOff, layout.CtxLen)
+	}
 
-// HopHandoff geeft wat een board nodig heeft om HOP naar een andere core te
-// verhuizen: het sched-blok van de core die achterblijft, en de trap-entry van
-// de switcher die daar gaat draaien. Beide horen bij deze laag — een board weet
-// niets van sched-blokken — en het board hoeft er niets mee te doen behalve ze
-// doorgeven aan zijn hop-assembly.
-//
-// core is het LOGISCHE app-corenummer dat de achterblijver gaat dragen (1 op een
-// board met één app-core).
-//
-// HET BLOK GAAT HIER OP NUL, en dat is geen netheid maar een voorwaarde. De
-// switcher begint met roteren zodra die core binnenkomt, en de rotatie leest
-// SchedCount en SchedS2PA — in vers DRAM staat daar wat de vorige boot of de
-// FSBL er liet staan. Een niet-nul lengte betekent dan: een bewonerslijst van
-// rommel, ctx-blokken uitgerekend vanaf een rommel-basis, en schrijfacties op
-// willekeurige adressen. Met alles op nul vindt hij niemand, parkeert hij, en
-// wacht hij op de eerste boot-pending.
-//
-// Dat HOP hier in regel 0 mag schrijven — wat op een parkerende core juist
-// verboden is — komt doordat dit de core is die het straks zelf gaat gebruiken:
-// wij ZIJN die core op dit moment. Ná de hop is deze regel voor HOP gesloten.
-//
-// De rest (SchedS2PA en de timer-velden) blijft aan cageInit bij de eerste
-// slot-start. Dat moet ook: pas dán weet het board dat de hop geslaagd is en
-// levert HartTimer de comparator van de júiste core.
-func HopHandoff(core int) (uintptr, uint64) {
-	mb := layout.ParkMboxPA(core)
-	dev.Clear(mb, layout.ParkMboxLen)
-	dev.MB()
-	dev.Push(mb, layout.ParkMboxLen)
-	return mb, mmode.EntryPC()
-}
-
-// WaitCoreParked wacht tot een core in de parkeerlus van de switcher staat: het
-// bewijs dat hij de overdracht heeft afgemaakt en klaar is om bewoners te
-// dragen. Zonder deze bevestiging weet HOP na een hop alleen dát hij zelf
-// verhuisd is, niet dat de core die hij achterliet ergens aankwam.
-func WaitCoreParked(core int, timeout time.Duration) bool {
-	return pollUntil(timeout, func() bool { return coreStopped(core) })
+	// De parkerende cores meteen intrekken: de switcher zelf als eerste
+	// binnenkomer (cpu/mmode parkenter), nu het sched-blok net geprimed is.
+	// Dan draait de rotatie daar vanaf de boot en is er nog maar ÉÉN
+	// parkeerwereld: een plaatsing is altijd de boot-pending-route, het koude
+	// pad bestaat voor zo'n core niet meer, en de tick/slaap-knoppen van de
+	// park gelden meteen. De tweede wereld (loterij-park tot de eerste
+	// plaatsing) kostte precies de uitzonderingen die boot 7/8 (17-08) de das
+	// omdeden: een ongeprimed SchedCurrent en een dispatch-guard die de
+	// verkeerde vraag stelde (Derek-review 18-08).
+	for c := 1; c <= nc; c++ {
+		if !coreParks(c) {
+			continue
+		}
+		if err := board.Current().HartOn(hartOf(c), mmode.ParkEnterPC(), uint64(layout.ParkMboxPA(c))); err != nil {
+			// Zelfredding (de loterij kwam nooit tot parkeren) of een dubbele
+			// init: luid melden; plaatsingen op deze core falen daarna met
+			// hun eigen foutmelding.
+			fmt.Printf("HOPOS_PARK_ADOPT_FAILED: core %d: %v\n", c, err)
+		}
+	}
 }
 
 // cagePrepare rekent de kooi van slot i uit en schrijft haar in de slot-tabel
@@ -337,8 +326,8 @@ func cageEntryPC(i int) uint64 {
 }
 
 // coreParks: deze core komt nooit uit reset, want er draait onze eigen switcher
-// op. Dat is de core die HOP verlaten heeft toen hij naar de kleine core hopte
-// (board/licheerv/hop/hop.go) — voor hem bestaat het reset-blok-antwoord niet.
+// op. Dat is de core die HOP verlaten heeft via de boot-hart-loterij
+// (board/licheerv/hop/cpuinit_riscv64.s) — voor hem bestaat het reset-blok-antwoord niet.
 //
 // Eén predicaat en niet drie losse checks, want er hangen drie beslissingen aan
 // en die moeten dezelfde kant op kiezen: hoe een slot start (boot-pending in
@@ -525,6 +514,13 @@ func cageFaultRegs(i int) string {
 		dev.Read64(c+layout.CtxGPRs+8), satp, whose)
 }
 
+// De kern moet de ÉCHTE cache-ops hebben. Deze package linkt nooit in een
+// app-image, dus als dev hier de app-no-ops levert (RealCacheOps = 0) is dat
+// de buildtag-drift van 17-08 — vijf boot-cycli jacht omdat élke Push/Pull
+// stil een no-op werd. Dan onderstaande constante negatief en weigert de
+// compiler: de bug bestaat niet meer als artefact, alleen nog als bouwfout.
+const _ uint = dev.RealCacheOps - 1
+
 // mapRoot onthoudt de map-wortel die HOP per slot schreef — alleen om een
 // fault-rapport te kunnen toeschrijven (zie cageFaultRegs). Geen vertrouwde
 // bron voor iets anders: de app kan zijn eigen satp herschrijven, en dat mag
@@ -543,7 +539,7 @@ func cageColdStart(core int, entry, ctx uint64) error {
 	if hart < 0 {
 		return fmt.Errorf("cage: no hart for logical core %d", core)
 	}
-	return board.Current().HartOn(hart, entry)
+	return board.Current().HartOn(hart, entry, 0) // een reset-start kent geen arg
 }
 
 // cageRevoke: hart in reset. Dat stopt hem waar hij ook is (ook uit een tight

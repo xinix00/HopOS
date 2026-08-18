@@ -454,6 +454,14 @@ func dispatchCore(core int, entry, ctx uint64) error {
 	// de guard hoort hier, op het gedeelde punt. Het startschot zelf is
 	// arch-werk (cageDispatch): een parkeerlus wekken is iets anders dan een hart
 	// uit reset halen.
+	// Een parkerende core is nooit te dispatchen: zijn switcher woont er
+	// vanaf de boot (cageInit → parkenter) en de adoptie is eenmalig — élke
+	// start loopt daar via de rotatie (boot-pending). Deze guard verving de
+	// coreRunning-vraag die daar de verkeerde was (boot 8, 17-08: residentReset
+	// primede SchedCurrent en dispatchCore las dat als "draait al").
+	if coreParks(core) {
+		return fmt.Errorf("core %d parks — the switcher owns it from boot; starts go through the rotation", core)
+	}
 	if coreRunning(core) {
 		return fmt.Errorf("core %d draait al — dispatch geweigerd", core)
 	}
@@ -934,11 +942,15 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// asm het adres niet meer uitrekenen.
 	ctxWrite(i, layout.CtxCtrlPA, ctx)
 	// coreParks erbij: een core die niet resetbaar is heeft ALTIJD de
-	// boot-pending-route nodig, ook als er nu niets op draait. Twee redenen, en
-	// ze zijn allebei fataal als je ze negeert — de tak hieronder reset het hart
-	// (dat kan daar niet) en residentReset schrijft in regel 0 van het
-	// sched-blok, waar de switcher van die core op dat moment zelf in staat te
-	// schrijven (layout.go: schrijversgrens op een niet-coherent hartpaar).
+	// boot-pending-route — zijn switcher draait er vanaf de boot (cageInit
+	// trekt hem in via parkenter), dus de rotatie pikt élke boot-pending op.
+	// Twee redenen om hier nooit het koude pad te kiezen, allebei fataal —
+	// de tak hieronder zou het hart resetten (dat kan daar niet) en
+	// residentReset schrijft in regel 0 van het sched-blok, waar de switcher
+	// van die core zelf in staat te schrijven (layout.go: schrijversgrens op
+	// een niet-coherent hartpaar). De eendaagse uitzondering hierop — een
+	// koud pad tot de eerste adoptie — is 18-08 gesloopt: de switcher-intrek
+	// bij boot maakte hem overbodig (en de bugklasse van boot 7/8 onmogelijk).
 	if coreRunning(core) || coreParks(core) {
 		if err := bootPendingDispatch(core, i, tramp, ctx); err != nil {
 			return fmt.Errorf("%w: %v", errDispatch, err)

@@ -104,7 +104,11 @@ if [ "$PAYLOAD" = netmeter ]; then
 	echo "== netmeter bouwen (cmd/netmeter -tags licheerv; host: ${HOSTSRV:-gateway}) ==" >&2
 	NMLD="-s -w -T $((RUNADDR + 0x10000)) -R 0x1000"
 	[ -n "$HOSTSRV" ] && NMLD="$NMLD -X main.hostOverride=$HOSTSRV"
-	rv "licheerv linkcpuinit" "$NMLD" "$OUT/netmeter-lrv.elf" ./cmd/netmeter
+	# GEEN linkcpuinit: de meetbank hoort NIET mee te hoppen. Met de loterij
+	# erin zou hij op de 700MHz-core meten met een cache-uit spinnende buur op
+	# dezelfde DRAM-controller — alle referentiecijfers (RX 8,84 MB/s) zijn op
+	# de 1GHz-core zonder buur gemeten, en dat moet hij blijven meten.
+	rv "licheerv" "$NMLD" "$OUT/netmeter-lrv.elf" ./cmd/netmeter
 	ELF="$OUT/netmeter-lrv.elf"
 fi
 
@@ -142,7 +146,7 @@ go run "$DIR/image/hopcfg/main.go" pad -window 65536 "$DIR/metal/cmd/hopos/cfgbl
 # image; hier draait het op het app-hart, dus moet het meeliften.
 cp "$OUT/stub-slot.bin" "$DIR/metal/kern/cagestub/stub-slot.bin"
 echo "== HOP-kern bouwen (agent: cmd/hopos -tags licheerv,embedcfg,embedcagestub; config $(basename "$CFG")) ==" >&2
-rv "licheerv embedcfg embedcagestub" "-s -w -T $((RUNADDR + 0x10000)) -R 0x1000" "$OUT/hopos-lrv.elf" ./cmd/hopos
+rv "licheerv linkcpuinit embedcfg embedcagestub" "-s -w -T $((RUNADDR + 0x10000)) -R 0x1000" "$OUT/hopos-lrv.elf" ./cmd/hopos
 
 fi # PAYLOAD=agent
 

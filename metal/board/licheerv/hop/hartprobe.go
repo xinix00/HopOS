@@ -34,8 +34,10 @@ const (
 	probeLen = 56
 )
 
-// WdtUsable meldt of de hart-1-probe het watchdog-blok bewezen heeft — de
-// voorwaarde waaronder de canary (board_licheerv.go) hem mag wapenen.
+// WdtUsable meldt of het watchdog-blok bewezen is — door de probe op een
+// resetbaar app-hart (stap 8), of sinds de loterij door HOP's eigen aanraking
+// in ProbeAppHarts. De voorwaarde waaronder de canary (board_licheerv.go) hem
+// mag wapenen.
 func WdtUsable() bool { return wdtOK }
 
 var wdtOK bool
@@ -65,35 +67,51 @@ func init() {
 	}
 }
 
-// ProbeSmallCore meet de wek-keten op de C906L, vóór het eerste slot-werk en
-// vóór de hop. Aangeroepen vanuit boardWarn (cmd/hopos/board_licheerv.go), ná de
-// CLINT-probe van hart 0.
+// ProbeAppHarts bewijst de wekker-keten van elk app-hart — op eigenschap, niet
+// op naam. Een RESETBAAR app-hart krijgt de self-probe (HartOn ernaartoe en
+// terug, het enige eerlijke bewijs; met HopCore = 1 bestaat zo'n hart niet en
+// draait dit dus nooit — de probe-asm is dan het instrument voor HopCore = 0).
+// Een PARKEREND app-hart valt niet te proben (de switcher woont er vanaf de
+// boot) en hoeft het ook niet: zijn kill-tick leunt niet op appWaker, en de
+// comparator is er productie-bewezen (HOP woonde er 30-07→16-08 op UseMSleep).
 //
-// Het hart staat hier met NAAM en niet via AppHarts(), en dat is sinds de hop
-// een inhoudelijk verschil: deze probe start een hart met een reset, en na de
-// hop is het app-hart juist de core die dat níet verdraagt. Wat hij meet geldt
-// dan ook voor twee dingen tegelijk —
-//
-//   - vóór de hop: is het app-hart (de C906L) bruikbaar en wekbaar?
-//   - voor de hop zélf: leeft de core waar HOP straks naartoe verhuist, en is de
-//     CLINT-decode CORE-LOKAAL? Dat laatste is de voorwaarde onder de kill-tick
-//     op de achterblijvende core: bij een gedeelde comparator zouden die tick en
-//     HOP's eigen slaap elkaars wekker overschrijven.
-//
-// Zonder een ronde probe hopt HOP niet en blijft de oude, bewezen rolverdeling
-// staan (hop.go).
-func ProbeSmallCore() {
-	// Onder de loterij (HopHart = C906L) is dit HOP's ÉIGEN hart: de probe
-	// zou ons resetten, en de geparkeerde C906B mag hij evenmin aanraken —
-	// die wacht op zijn adoptie (lottery.go). De keten van de C906B heeft
-	// geen probe nodig: zijn mtimecmp/wfi is productie-bewezen (HOP woonde
-	// er van 30-07 tot 16-08, wekenlang op UseMSleep). Dus: alleen de
-	// tick-toestemming zetten en klaar.
-	if licheerv.HopHart == hartC906L {
-		appWaker.ok = true
+// Aangeroepen vanuit boardWarn (cmd/hopos/board_licheerv.go), ná de
+// CLINT-probe van HOP's eigen hart. Wat de self-probe meet is tweeledig: is
+// het hart wekbaar (mtimecmp vuurt, wfi keert terug), en is de CLINT-decode
+// core-lokaal (bij een gedeelde comparator zouden twee slapers elkaars wekker
+// overschrijven).
+func ProbeAppHarts() {
+	m := machine{}
+	probed := false
+	for _, h := range m.AppHarts() {
+		if m.HartResettable(h) {
+			probeHart(h)
+			probed = true
+		}
+		// Een parkerend hart valt niet te proben (het wacht op zijn adoptie)
+		// en hoeft ook niet: zijn kill-tick leunt niet op appWaker (zie
+		// HartTimer — de gate geldt alleen de wekker van een resetbaar hart).
+	}
+	if probed {
 		return
 	}
-	probeHart(hartC906L)
+	// Geen resetbaar app-hart om de WDT-aanraking (stap 8) te dragen — sinds de
+	// loterij is het enige resetbare hart HOP's eigen huis. Dan raakt HOP het
+	// blok zelf aan, en de afweging staat hier omdat hij niet gratis is: als
+	// het blok dood is, is een bus-fout op HOP's hart een dode node. Daarom
+	// éérst de melding (een dode console wijst dan de dader aan), en daarom is
+	// het verantwoord: ditzelfde blok gaf wekenlang probeWdt=1 vanaf de andere
+	// core, en dit hart bedient dezelfde peripheral-fabric al de hele boot
+	// (UART, dwmac, het reset-blok, de temperatuursensor). De CLINT-les —
+	// core-lokale decode — gaat hier niet op: de DW-WDT hangt achter de
+	// APB-brug, niet in het core-complex.
+	fmt.Println("wdt: probing the DW-WDT block from the HOP hart (no expendable hart to carry the probe)")
+	wdtOK = licheerv.WatchdogProbe()
+	if wdtOK {
+		fmt.Println("wdt: block alive and TORR holds — watchdog usable")
+	} else {
+		fmt.Println("wdt: TORR readback mismatch — watchdog stays off")
+	}
 }
 
 func probeHart(h int) {
@@ -103,8 +121,8 @@ func probeHart(h int) {
 	dev.Push(mb, probeLen)
 
 	t0 := licheerv.Rdtime()
-	if err := m.HartOn(h, uint64(appHartProbePC())); err != nil {
-		fmt.Printf("board: small core %d probe: cannot start the core (%v) — no hop, HopOS stays on the big core\n", h, err)
+	if err := m.HartOn(h, uint64(appHartProbePC()), 0); err != nil {
+		fmt.Printf("board: app hart %d probe: cannot start the core (%v) — hart sleep stays off\n", h, err)
 		return
 	}
 	// De probe zelf is in enkele ms klaar; de deadline is ruim omdat een
@@ -166,7 +184,7 @@ func probeHart(h int) {
 			5: "msip test never finished",
 			6: "wfi never returned despite pending timer",
 		}[step]
-		fmt.Printf("board: small core %d probe: stalled at step %d/7 (%s; mip=%#x, time skew %d ticks) — no hop, HopOS stays on the big core\n",
+		fmt.Printf("board: app hart %d probe: stalled at step %d/7 (%s; mip=%#x, time skew %d ticks) — hart sleep stays off\n",
 			h, step, why, mip, skew)
 		return
 	}
@@ -176,7 +194,7 @@ func probeHart(h int) {
 		// wek verliest slaapt voor eeuwig. Geen wekker dus — de park spint,
 		// zoals in de bewezen stand, tot dit hart een écht eigen comparator
 		// heeft (SoC-onderzoek: is er een tweede CLINT-basis voor de C906L?).
-		fmt.Printf("board: small core %d probe: chain ok BUT the CLINT decode is SHARED with hart 0 — two sleepers, one comparator; no hop, HopOS stays on the big core\n", h)
+		fmt.Printf("board: app hart %d probe: chain ok BUT the CLINT decode is SHARED with hart 0 — two sleepers, one comparator; hart sleep stays off\n", h)
 		return
 	}
 	appWaker.ok = true
@@ -191,6 +209,6 @@ func probeHart(h int) {
 	// uit tot de stille-dood-jacht gelopen is.
 	appWaker.mtimecmp = licheerv.MtimecmpAddr(hart)
 	msipTxt := map[uint64]string{1: "msip ok (core-local)", 2: "no msip", 3: "msip stuck"}[msip]
-	fmt.Printf("board: small core %d probe: chain ok as mhartid %d (core-local CLINT) — mtimecmp fired in %dus, %s, wfi wakes; ready to host HopOS, app-core sleep gated off pending soak\n",
+	fmt.Printf("board: app hart %d probe: chain ok as mhartid %d (core-local CLINT) — mtimecmp fired in %dus, %s, wfi wakes; sleep still gated off pending soak\n",
 		h, hart, fireUs, msipTxt)
 }

@@ -1,12 +1,12 @@
 github.com/usbarmory/tamago v1.26.4 h1:laFvRANKgVYFHxLHjIlhqJCc3Xm+qMyab2SlUoNw6zY=
 github.com/usbarmory/tamago v1.26.4/go.mod h1:HZkb+ZkzFl8aCxAuF7exsKX+XaNM0mYG9Iv7ooX1WDY=
-github.com/xinix00/hop v0.20.21 h1:DAlSbfrM1AQRz9Ep1ISk9f2HvcxGICKqbMvV2Ze0nOg=
-github.com/xinix00/hop v0.20.21/go.mod h1:AZqgSp/w1OtJMqjEQh+mNQFzcazdnAtU312u1qvh8b8=
+github.com/xinix00/hop v0.20.22 h1:rP/GtLsBv80IbySwUkIRJXt+Y1C4aK5PanKmdKAT2aI=
+github.com/xinix00/hop v0.20.22/go.mod h1:AZqgSp/w1OtJMqjEQh+mNQFzcazdnAtU312u1qvh8b8=
 github.com/xinix00/hoplock v0.4.1 h1:y33/9g8f26S85OuwRudjgNgstuy+N+7ocL1FqtdKJI4=
 github.com/xinix00/hoplock v0.4.1/go.mod h1:0duoz1FtShLgwVffM11uWKUF4D3r7R7FdAWkMzjwSiw=
 github.com/xinix00/hoplockserver v0.2.1 h1:vLgv+iuuExaKgb90uwxMLavRMrlXRqLerihgFCv9pzY=
 github.com/xinix00/hoplockserver v0.2.1/go.mod h1:HPVrFPGljcbxqIV8sIsa1W67hLI5vC7yG+z8W1k0nLg=
-github.com/xinix00/lean v0.8.0 h1:DkcZ8+LovddZf5O9exkvelLeE8Qrt0Q5jx0WQRCK880=
-github.com/xinix00/lean v0.8.0/go.mod h1:gRIa2nL/SIEsi1L/eq9EUqrKQ+jnjxUGb3IAsuVQX7U=
+github.com/xinix00/lean v0.8.1 h1:ezDm7b7d0nyekEyaByM6RYBdW7u8uXgimSnYbZYeJiQ=
+github.com/xinix00/lean v0.8.1/go.mod h1:gRIa2nL/SIEsi1L/eq9EUqrKQ+jnjxUGb3IAsuVQX7U=
 golang.org/x/crypto/x509roots/fallback v0.0.0-20260709184058-243e02a382f8 h1:OZy0hsjD/gbnVKENxnVK6I3e4bdKwYy4R3dfdKosYyA=
 golang.org/x/crypto/x509roots/fallback v0.0.0-20260709184058-243e02a382f8/go.mod h1:+UoQFNBq2p2wO+Q6ddVtYc25GZ6VNdOMyyrd4nrqrKs=

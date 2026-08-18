@@ -16,6 +16,8 @@
 package ring
 
 import (
+	"fmt"
+
 	"github.com/xinix00/HopOS/metal/dev"
 )
 
@@ -67,8 +69,24 @@ func Init(base uintptr, size uint64) {
 type Ring struct {
 	base    uintptr
 	size    uint64
-	corrupt bool // consumer zag een onmogelijke header; ring is dood
+	corrupt bool   // consumer zag een onmogelijke header; ring is dood
+	why     string // de meting van dát moment (CorruptWhy) — anders is een
+	// corrupt-verklaring van buiten niet te onderscheiden van een lege ring,
+	// en dat onderscheid was precies de jacht van 17-08 (boot 9: slot-TX
+	// leest eeuwig leeg terwijl de app schrijft).
 }
+
+// markCorrupt zet de vlag met de reden; de eerste reden wint (de vervolgstaat
+// van een corrupte ring is geen nieuwe informatie).
+func (r *Ring) markCorrupt(why string) {
+	if !r.corrupt {
+		r.corrupt = true
+		r.why = why
+	}
+}
+
+// CorruptWhy geeft de reden van de corrupt-verklaring ("" = niet corrupt).
+func (r *Ring) CorruptWhy() string { return r.why }
 
 // Open koppelt aan een door Init klaargezette ring. Pull vóór het lezen van de
 // capaciteit, net als bij de kop-accessors hieronder: Init schreef die van het
@@ -197,7 +215,7 @@ func (r *Ring) ReadInto(buf []byte) (typ uint32, n int, ok bool) {
 		// head — en een reusachtige head boven louter PAD-records zou de
 		// skip-lus hieronder miljarden ronden gunnen (livelock op de HOP-core).
 		if head-tail > r.size {
-			r.corrupt = true
+			r.markCorrupt(fmt.Sprintf("head-tail>size (head=%#x tail=%#x size=%#x)", head, tail, r.size))
 			return 0, 0, false
 		}
 		// De 8-byte header moet zélf nog vóór de datarand liggen, en dát moet
@@ -207,7 +225,7 @@ func (r *Ring) ReadInto(buf []byte) (typ uint32, n int, ok bool) {
 		// mapped slack van het slot-venster (RingDataCap < RingStride) — dus geluk,
 		// geen contract; wordt die slack ooit nul, dan is het een fault op core 0.
 		if tail%r.size > r.size-recHdr {
-			r.corrupt = true
+			r.markCorrupt(fmt.Sprintf("header past de datarand niet (tail=%#x size=%#x)", tail, r.size))
 			return 0, 0, false
 		}
 		dev.MB() // index gezien → payload zichtbaar
@@ -223,7 +241,8 @@ func (r *Ring) ReadInto(buf []byte) (typ uint32, n int, ok bool) {
 		need := recHdr + align8(uint64(length))
 
 		if need > head-tail || need > r.size-tail%r.size || uint64(length) > uint64(len(buf)) {
-			r.corrupt = true
+			r.markCorrupt(fmt.Sprintf("onmogelijke header (hdr=%#x len=%d typ=%d head=%#x tail=%#x size=%#x buf=%d)",
+				hdr, length, rtyp, head, tail, r.size, len(buf)))
 			return 0, 0, false
 		}
 

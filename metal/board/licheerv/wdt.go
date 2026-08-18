@@ -65,6 +65,20 @@ func WatchdogArm() {
 	fmt.Println("watchdog: hardware reset armed (~86s, FSBL reset routing) — a node that stops proving liveness now self-reboots")
 }
 
+// WatchdogProbe is stap 8 van de hart-probe (hartprobe_riscv64.s), maar dan
+// vanaf het aanroepende hart zelf: CCVR aanraken (de lees die bus-fault als
+// het blok dood is), TORR schrijven en teruglezen. TORR is inert zolang
+// CR.enable uit staat, en de geschreven waarde is exact wat WatchdogArm er
+// straks tóch in zet. Vanaf HOP's eigen hart is dit een gok die de node kan
+// kosten (HOP overleeft een bus-fout niet, de probe-les) — de aanroeper hoort
+// dat af te wegen én vooraf luid te melden, zodat een dode console de dader
+// aanwijst (hop/hartprobe.go doet beide).
+func WatchdogProbe() bool {
+	_ = dev.Read32(wdtBase + 0x08) // WDT_CCVR — de aanraking
+	dev.Write32(wdtTORR, wdtTop|wdtTop<<4)
+	return dev.Read32(wdtTORR) == wdtTop|wdtTop<<4
+}
+
 // WatchdogPet zet de teller terug op vol. Aanroepen zolang — en alléén
 // zolang — de node zijn levensteken haalt.
 func WatchdogPet() { dev.Write32(wdtCRR, wdtKick) }

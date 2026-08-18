@@ -257,6 +257,22 @@ func main() {
 		return s
 	}
 
+	// clock-bench: de kostprijs van de klok zélf. time.Now() ís nanotime ís
+	// rdtime (riscv64), en Go klokt élke scheduling-beslissing — een dure
+	// time-CSR vertraagt dus alles. De verdenking (18-08, LicheeRV): de
+	// C906L-profielen meten driver=788µs/frame waar 2 profiler-klok-reads +
+	// 1,4× het big-werk exact op uitkomen als één rdtime ~390µs kost — het
+	// zieke c900-CLINT-blok (mtime-MMIO was al een bus-fout) zou dan ook de
+	// time-CSR traag voeden. Zelf-meting is hier geldig: rdtime is traag,
+	// niet fout, dus de fase-duur klopt op de wandklok. Verwacht: big ~2ms,
+	// little ~8s als de hypothese klopt.
+	phase("clock-bench", func() (int64, string, error) {
+		const n = 20_000
+		for i := 0; i < n; i++ {
+			_ = time.Now()
+		}
+		return n, "clock-calls", nil
+	})
 	phase("pull-local", func() (int64, string, error) { return pull(hostBase+"/blob64", 180*time.Second) })
 	phase("storm-keep", func() (int64, string, error) { return storm(300, true) })
 	phase("storm-conn", func() (int64, string, error) { return storm(400, false) })

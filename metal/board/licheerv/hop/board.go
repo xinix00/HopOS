@@ -41,8 +41,7 @@ func (machine) TempMilliC() int { return licheerv.TempMilliC() }
 func (machine) MemTotal() uint64 { return 256 << 20 }
 
 // CoreClass: twee ongelijke kernen — een C906 op 1GHz ("big") en een C906L op
-// 700MHz ("small"). Welke van de twee HOP heeft en welke de app krijgt, hangt
-// CoreClass volgt het globale principe: HOP woont op HopHart, en de klasse
+// 700MHz ("small"). CoreClass volgt het globale principe: HOP woont op HopHart, en de klasse
 // van een logische core is dus een sommetje, geen rol-verhaal. Voor de
 // affinity-attributen van de agent (node.cores.big = 1) is dit precies het
 // onderscheid dat de leader nodig heeft — en meteen het antwoord op "wat
