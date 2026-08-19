@@ -11,7 +11,6 @@ import (
 	"math/rand"
 	"testing"
 	"time"
-	"unsafe"
 
 	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/abi/ring"
@@ -34,24 +33,31 @@ func resetNAT() {
 	ports = nil // deliverLocked dropt dan (slot niet aangesloten)
 }
 
-// testSlotRing hangt een heap-gebackte RX-ring aan slot i — het bezorgdoel
-// van deliverLocked — en geeft een leesfunctie terug (nil = niets bezorgd).
-// De closure houdt buf levend zolang de test leest.
+// testSlotRing hangt een host-mmap als RX-ring aan slot i — het bezorgdoel van
+// deliverLocked — en geeft een leesfunctie terug (nil = niets bezorgd). De mmap
+// modelleert device-geheugen en wordt na het loskoppelen automatisch opgeruimd.
 func testSlotRing(t *testing.T, i int) func() []byte {
 	t.Helper()
-	buf := make([]byte, 64<<10)
-	base := uintptr(unsafe.Pointer(&buf[0]))
+	buf := testDeviceMemory(t, 64<<10)
+	base := testDeviceAddress(buf)
 	ring.Init(base, 32<<10)
 	mu.Lock()
 	if len(ports) == 0 {
 		ports = make([]*port, layout.MaxSlots+1)
 	}
-	ports[i] = &port{rx: ring.Open(base)}
+	pt := &port{rx: ring.Open(base)}
+	ports[i] = pt
 	mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		if i < len(ports) && ports[i] == pt {
+			ports[i] = nil
+		}
+		mu.Unlock()
+	})
 	rd := ring.Open(base)
 	out := make([]byte, 32<<10)
 	return func() []byte {
-		_ = buf[0] // buf gevangen → ring-geheugen blijft leven
 		typ, n, ok := rd.ReadInto(out)
 		if !ok || typ != ring.TypeFrame {
 			return nil

@@ -124,23 +124,26 @@ func WatchStats(logf func(string, ...any), every time.Duration) {
 	}()
 }
 
-// JoinMulticast abonneert de app-stack op een link-local multicast-groep
+// JoinMulticast abonneert de app-stack op een link-local IPv4- of IPv6-groep
 // (mDNS, matter-discovery), voor de rest van het app-leven — er is bewust
 // geen Leave (geKAMd 15-08: de enige gebruiker leaved nooit, en een
 // refcount die niemand gebruikt is alleen maar reviewvlak). De socket-API
 // kent geen groepen — tamago heeft geen syscalls om x/net's
 // ipv4/ipv6-besturing op te bouwen — dus dit is de expliciete knop naast
-// net.ListenUDP. Alleen 224.0.0.0/24; idempotent.
+// net.ListenUDP. Alleen 224.0.0.0/24 en ff02::/16; idempotent.
 func JoinMulticast(ip net.IP) error {
 	st := current
 	if st == nil {
 		return errors.New("appnet: netstack is not up")
 	}
-	v4 := ip.To4()
-	if v4 == nil {
-		return errors.New("appnet: multicast join needs an IPv4 group")
+	if v4 := ip.To4(); v4 != nil {
+		return st.JoinGroup([4]byte(v4))
 	}
-	return st.JoinGroup([4]byte(v4))
+	v6 := ip.To16()
+	if v6 == nil {
+		return errors.New("appnet: multicast join needs an IP group")
+	}
+	return st.JoinGroup6([16]byte(v6))
 }
 
 // ip4bytes zet layout's uint32-adres om naar de [4]byte-vorm van leannet.

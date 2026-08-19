@@ -161,6 +161,11 @@ var uplinkTxMu sync.Mutex
 // WrapUplink registreert de externe NIC bij de NAT en geeft de wrapper terug
 // die hopnet in zijn go-net-Interface hangt. cidr is het externe node-adres
 // mét prefix (bv. "10.0.2.15/24") — het masker bepaalt wat "off-subnet" is.
+// Native app-IPv6 over deze uplink eist daarnaast dat de NIC alle 33:33-
+// multicast en unicast voor de per-slot-MAC's 02:00:00:00:00:XX ontvangt.
+// Alleen de LicheeRV/DWMAC1000 configureert dat filtercontract nu; op de andere
+// boards blijft extern app-IPv6 buiten scope tot hun NIC-filter hetzelfde
+// contract expliciet draagt en de hardwaregate slaagt.
 func WrapUplink(nic netdev.Device, cidr string, mac net.HardwareAddr) (*Uplink, error) {
 	ip, ipnet, err := net.ParseCIDR(cidr)
 	ip4 := ip.To4()
@@ -215,7 +220,8 @@ func (u *Uplink) Receive(buf []byte) (int, error) {
 		// IPv6-L2-pad — een matter-apparaat of border router antwoordt de
 		// slot rechtstreeks op de MAC die NDP adverteerde. Bezorgen en
 		// claimen; de NIC staat hiervoor promiscuous (zie de driver).
-		if n >= 14 && buf[0] == 0x02 && buf[1]|buf[2]|buf[3]|buf[4] == 0 &&
+		if n >= 14 && buf[12] == 0x86 && buf[13] == 0xdd &&
+			buf[0] == 0x02 && buf[1]|buf[2]|buf[3]|buf[4] == 0 &&
 			int(buf[5]) >= 1 && int(buf[5]) <= layout.MaxSlots {
 			mu.Lock()
 			deliverLocked(int(buf[5]), buf[:n])

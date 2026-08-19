@@ -16,7 +16,6 @@ import (
 	"net"
 	"testing"
 	"time"
-	"unsafe"
 
 	"github.com/xinix00/lean/leannet"
 
@@ -49,13 +48,13 @@ func (n *slotNIC) Receive(buf []byte) (int, error) {
 	return got, nil
 }
 
-// attachTestSlot hangt slot i aan de switch met verse ringen en geeft de
-// app-kant terug. De ringen worden door een gevangen slice in leven gehouden
-// (de switch bewaart alleen de PA), net als in de andere ring-tests hier.
+// attachTestSlot hangt slot i aan de switch met verse ringen in host-mmap en
+// geeft de app-kant terug. De switch bewaart net als op het board alleen het
+// fysieke adres; de test-cleanup koppelt eerst de poort los en ruimt dan op.
 func attachTestSlot(t *testing.T, i int) *slotNIC {
 	t.Helper()
-	buf := make([]byte, 2*(slotRingCap+dataOffTest))
-	txBase := uintptr(unsafe.Pointer(&buf[0]))
+	buf := testDeviceMemory(t, 2*(slotRingCap+dataOffTest))
+	txBase := testDeviceAddress(buf)
 	rxBase := txBase + uintptr(slotRingCap+dataOffTest)
 	ring.Init(txBase, slotRingCap)
 	ring.Init(rxBase, slotRingCap)
@@ -70,7 +69,6 @@ func attachTestSlot(t *testing.T, i int) *slotNIC {
 		mu.Lock()
 		ports[i] = nil
 		mu.Unlock()
-		_ = buf[0] // buf gevangen: het ring-geheugen blijft leven tot hier
 	})
 	// De app leest/schrijft dezelfde ringen vanaf de andere kant.
 	return &slotNIC{tx: ring.Open(txBase), rx: ring.Open(rxBase)}
@@ -122,9 +120,17 @@ func appStack(t *testing.T, i int) *leannet.Stack {
 	if err := st.SeedNeighbor(ip4(layout.HostIP4()), layout.SlotMAC(0)); err != nil {
 		t.Fatalf("seed gateway: %v", err)
 	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		buf := make([]byte, leannet.MTU+leannet.EthernetMaximumSize)
 		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
 			n, err := nic.Receive(buf)
 			if err != nil {
 				return
@@ -136,6 +142,10 @@ func appStack(t *testing.T, i int) *leannet.Stack {
 			st.RecvInboundPacket(buf[:n])
 		}
 	}()
+	t.Cleanup(func() {
+		close(stop)
+		<-done
+	})
 	return st
 }
 

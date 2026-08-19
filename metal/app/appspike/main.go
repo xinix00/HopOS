@@ -315,6 +315,16 @@ func main() {
 		if _, err := appnet.Up(app); err != nil {
 			exitf(app, 1, "V6 listen: %v", err)
 		}
+		// Addr-probe (18-08, unifi-jacht): wat rapporteert een wildcard-listener
+		// als zijn eigen adres? Hoort het slot-IP met de echte poort te zijn —
+		// ":0" betekent dat de shim het gevraagde adres teruggeeft i.p.v. het
+		// gebonden adres, en dan is elke URL die een app eruit bouwt dood.
+		if l, err := net.Listen("tcp", ":0"); err == nil {
+			app.Logf("V6 ADDRPROBE tcp: %s", l.Addr())
+			l.Close()
+		} else {
+			app.Logf("V6 ADDRPROBE tcp: %v", err)
+		}
 		conn, err := net.ListenUDP("udp6", &net.UDPAddr{Port: 7776})
 		if err != nil {
 			exitf(app, 1, "V6 listen: %v", err)
