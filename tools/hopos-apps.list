@@ -26,3 +26,7 @@ hopprom:~/Git/easy/hopprom:hopprom-hopos:arm64
 welcome:./apps/welcome:welcome:arm64,riscv64
 vitals:./apps/vitals:vitals:arm64,riscv64
 cloudflared:./apps/cloudflared:cloudflared-hopos:arm64,riscv64
+# cloudflared-lean praat het tunnelprotocol zelf op lean (leanh2), i.p.v.
+# cloudflared's eigen CLI in een slot: 4,44MB tegen 29,87MB. Beide blijven
+# staan -- die CLI dekt features die dit programma bewust niet heeft.
+cloudflared-lean:./apps/cloudflared-lean:cloudflared-lean:arm64,riscv64

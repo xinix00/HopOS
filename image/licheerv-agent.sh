@@ -60,10 +60,21 @@ FIPTOOL="${LICHEERV_FIPTOOL:-$DIR/image/licheerv/fiptool.py}"
 # — de Go-runtime valt dan over een kapotte pointer in .data. LOADER_2ND
 # weglaten kan niet (de FSBL panict na zijn retries), dus we leggen ons image
 # erbóven. Alles onder RUNADDR is vuil gebied.
-# 0x84000000 en niet 0x83000000: HOP heeft 64MB (was 80), en de 16MB die
-# vrijkomt hangt ONDER dit adres — daar groeit pool B naar 64MB. SlotBase
-# (0x88000000) blijft staan, want dat is het linkadres van elk app-image.
-RUNADDR=0x84000000
+# 0x80400000 sinds 19-08, en dat is ZO LAAG als het vuile gebied toelaat: U-Boot
+# beslaat 0x80200020 + ~600KB (tot ruwweg 0x8029a000), dus 4MB laat 1,4MB lucht
+# voor een dikkere vendor-U-Boot en houdt het adres 2MB-uitgelijnd.
+#
+# WAAROM ZO LAAG: HOP stond op 0x84000000, midden in het DRAM, en knipte de
+# app-pool in drie stukken (126 + 64 + 32MB). Dan kan 60MB vrij zijn terwijl er
+# nergens 36MB aan één stuk ligt — de toelating rekent met de som, laat zo'n job
+# toe, de plaatser moet hem weigeren, en die hand-back-lus velde de node drie
+# keer op één dag via gemiste watchdog-pets. Onderaan is de pool ÉÉN regio van
+# 218MB en bestaat die klasse fouten niet meer.
+#
+# SlotBase (0x88000000) blijft staan — het linkadres van elk app-image, dus geen
+# enkel gepubliceerd artifact wordt ongeldig. Hij ligt nu binnen de pool-regio en
+# dat mag: de kooi verplaatst (kern/cage/relocate.go).
+RUNADDR=0x80400000
 SLOTBASE=0x88000000	# board/licheerv: SlotBase (de app-partitie)
 
 # PAYLOAD kiest wat er in het monitor-slot van de FIP komt: de agent (default,

@@ -17,6 +17,7 @@ app ABI. Product page: [gethop.org/hopos](https://gethop.org/hopos/).
 - **[Isolation](technical/isolation.md)** — the hardware cage: stage-2, whole cores, zero syscalls.
 - **[Networking](technical/networking.md)** — a network stack per app, a switch in the node.
 - **[Stateless](technical/stateless.md)** — state on S3, not on metal.
+- **[Geheugen](geheugen-ontwerp.md)** (NL, intern) — de keten van DRAM tot app-heap: wat HOP zelf houdt, hoe een partitie uitgedeeld en teruggegeven wordt, welke plafonds er zijn, en de vallen met datum.
 - **GUI — SURF** — network-transparent windows: an app draws anywhere in the
   cluster, a display node composites it, and a window fails over when HOP
   restarts its app elsewhere. The node-side display grant ships in `metal/gui`;

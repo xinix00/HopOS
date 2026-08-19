@@ -55,6 +55,16 @@ func (Manager) NumCores() int {
 
 func (Manager) CoreClass(slot int) string { return slots.CoreClass(phys(slot)) }
 
+// PoolLargest vult hopos.PoolReporter: de grootste partitie die er NU nog in
+// past, zodat HOP's toelating een job kan weigeren die nergens meer past in
+// plaats van hem toe te laten, te reserveren, en de plaatsing te laten falen.
+//
+// Waarom dit naast NumCores staat en niet erin: cores zijn een vast getal en
+// dit is een momentopname. HOP hoeft er niets van te weten om te werken (de
+// interface is optioneel) — het scheelt alleen de vijf-seconden-lus waarin de
+// node zichzelf intermitterend vol noemt (gemeten 19-08, LicheeRV).
+func (Manager) PoolLargest() uint64 { return slots.PoolLargest() }
+
 // StartStream is HET startpad: kooi plaatsen (PlaceCage dekt dedicated én
 // sharegroup — een placement-directive net als core-class, geen env-hack) en
 // dan de image streamend de partitie in (slots.StartStreamOn).

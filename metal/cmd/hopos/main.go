@@ -478,6 +478,19 @@ func main() {
 			layout.RequiredRAM()>>20, offer>>20)
 	}
 
+	// De VORM van de pool, niet alleen zijn som. Een pool van drie regio's kan
+	// 60MB vrij hebben zonder ergens 36MB aan één stuk, en dan laat de toelating
+	// een job toe die de plaatser moet weigeren — die hand-back-lus velde deze
+	// node drie keer op 19-08. Eén regel bij de boot maakt dat zichtbaar vóór er
+	// iets geplaatst is, en hij is het meetinstrument voor elke HopBase-hersnit:
+	// staat er één regio, dan is de fragmentatie weg.
+	pool := layout.Pool()
+	fmt.Printf("memory: pool is %d region(s), largest placeable %d MB —", len(pool), slots.PoolLargest()>>20)
+	for _, r := range pool {
+		fmt.Printf(" [%#x+%dMB]", r.Base, r.Size>>20)
+	}
+	fmt.Println()
+
 	// HOP's eigen budget náást de pool. Dit is het getal waarop de HopBase-keuze
 	// van een board wordt afgerekend: elke MB die HOP niet gebruikt hoort bij de
 	// apps. Zonder deze regel is "kan HOP met minder?" een gok — hiermee is het
@@ -558,6 +571,17 @@ type envSlots struct {
 	hopos.SlotManager
 	always map[string]string
 	optin  map[string]string
+}
+
+// PoolLargest reist niet mee via de ingebedde interface — hopos.PoolReporter
+// staat bewust NAAST SlotManager — dus geeft de schil hem expliciet door. Zonder
+// dit ziet HOP's toelating de optionele interface niet en valt hij terug op de
+// som, wat precies het gedrag is dat we wilden weghalen.
+func (e envSlots) PoolLargest() uint64 {
+	if pr, ok := e.SlotManager.(hopos.PoolReporter); ok {
+		return pr.PoolLargest()
+	}
+	return 0
 }
 
 func (e envSlots) StartStream(slot int, image io.Reader, size int64, spec hopos.StartSpec) error {

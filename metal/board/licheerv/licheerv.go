@@ -45,10 +45,31 @@ const (
 	// (mem_slot.go, -tags linkramsize). De control page woont in de staart
 	// van elke partitie (layout.CtrlPageAt, slot-ABI v2).
 	// HopBase is waar ons image draait — NIET DRAM-start: de FSBL
-	// decomprimeert U-Boot naar 0x80200020 nádat hij ons geladen heeft, dus
-	// alles daaronder is vuil gebied (gemeten 30-07, zie
+	// decomprimeert U-Boot naar 0x80200020 (~600KB) nádat hij ons geladen
+	// heeft, dus alles daaronder is vuil gebied (gemeten 30-07, zie
 	// image/licheerv-agent.sh).
-	HopBase = 0x84000000
+	//
+	// ZO LAAG ALS DAT TOELAAT, en dat is de hele reden dat dit getal 19-08
+	// veranderde van 0x84000000. HOP stond mídden in het DRAM, en dat knipte de
+	// app-pool in drie stukken: 126MB boven SlotBase, 64MB eronder, en de 32MB
+	// die de HopSize-hersnit ertussen vrijgaf. Drie regio's betekent dat 60MB
+	// vrij kan zijn terwijl er nergens 36MB aan één stuk ligt — en dan laat HOP
+	// een job toe die de plaatser moet weigeren, elke vijf seconden opnieuw
+	// (19-08: die lus velde de node drie keer via gemiste watchdog-pets).
+	//
+	// Onderaan tegen het vuile gebied aan is de pool ÉÉN stuk van 218MB. De
+	// prijs is de 4MB onder dit adres, die vroeger als pool B aan apps ging
+	// zodra U-Boot klaar was: 222MB in drie stukken wordt 218MB in één stuk.
+	// SlotBase verschuift NIET (0x88000000 blijft het linkadres van elk
+	// app-image, dus geen enkel gepubliceerd artifact wordt ongeldig); hij ligt
+	// nu binnen de regio, en dat mag omdat de kooi verplaatst — zie
+	// kern/cage/relocate.go, en bewezen op ijzer (stulp draaide op 0x81c00000,
+	// stulp-weather op 0x86a00000).
+	//
+	// 4MB en niet krapper: U-Boot beslaat 0x80200020 + ~600KB, dus tot ruwweg
+	// 0x8029a000. Dat laat 1,4MB lucht voor een dikkere U-Boot van de vendor,
+	// en het adres blijft 2MB-uitgelijnd zoals de partitie-korrel.
+	HopBase = 0x80400000
 
 	// HopSize is HOP's venster (image + Go-heap). 32MB sinds 14-08, gemeten
 	// (QEMU, agent kaal, mét een echte plaatsing en SSE-load): het image is

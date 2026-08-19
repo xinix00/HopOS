@@ -90,11 +90,40 @@ func align2M(n uint64) uint64 { return (n + part2M - 1) &^ (part2M - 1) }
 // terwijl de bulk (Altra: ~300GB boven de 512GB-grens, via MapHigh bereikbaar)
 // alleen partities draagt. Laag-eerst zou het lage blok volproppen en de bulk
 // nooit raken.
+// De hele keten (DRAM → plan → pool → partitie → app-RAM), waaróm elke regel
+// hieronder zo is, en de vallen waar we in gelopen zijn met datum: zie
+// docs/geheugen-ontwerp.md. Dit bestand is de waarheid; dat dossier legt uit.
 func partAlloc(i int, size uint64) (base, grown uint64, err error) {
 	partOnce.Do(poolInit)
 	size = align2M(size)
 	partMu.Lock()
 	defer partMu.Unlock()
+
+	// De vorige reservering van dit slot pas teruggeven als de nieuwe past.
+	//
+	// Hier stond releaseLocked(i) vooraan, "defensief bij een re-Start". Dat is
+	// het juist niet: faalt de zoektocht hieronder, dan keert deze functie terug
+	// met een fout terwijl de partitie van slot i al vrij in de pool ligt — en
+	// dan geeft de VOLGENDE plaatsing dat geheugen aan iemand anders terwijl de
+	// bewoner er nog in draait. Stille corruptie, en precies op het pad dat een
+	// onplaatsbare job elke vijf seconden opnieuw raakt (Derek, 19-08).
+	//
+	// Teruggeven MOET wel vóór de zoektocht, want een re-Start van hetzelfde
+	// slot heeft juist zijn eigen regio nodig om weer te passen. Dus: eerst een
+	// momentopname, dan vrijgeven en zoeken, en bij een misser alles terugzetten
+	// zoals het was. De vrije lijst is een handvol regio's — die kopie is
+	// goedkoper dan één verkeerd uitgedeelde partitie.
+	hadFree := append([]region(nil), partFree...)
+	hadOf := region{}
+	if i >= 0 && i <= layout.MaxSlots {
+		hadOf = partOf[i]
+	}
+	restore := func() {
+		partFree = hadFree
+		if i >= 0 && i <= layout.MaxSlots {
+			partOf[i] = hadOf
+		}
+	}
 	releaseLocked(i)
 
 	// Best-fit: de KLEINSTE regio die deze partitie nog kan dragen. Hoog-eerst
@@ -125,6 +154,7 @@ func partAlloc(i int, size uint64) (base, grown uint64, err error) {
 		}
 	}
 	if best < 0 {
+		restore()
 		return 0, 0, fmt.Errorf("%w: partition %d MB does not fit the pool (full, fragmented, or no base the cage can describe)", ErrNoPartition, size>>20)
 	}
 	r := partFree[best]
@@ -208,6 +238,39 @@ func PoolBytes() uint64 {
 		n += r.Size
 	}
 	return n
+}
+
+// PoolLargest is de grootste partitie die op dít moment nog te plaatsen is: het
+// grootste vrije gat, met dezelfde eisen als partAlloc (2MB-uitlijning en een
+// basis die de kooi kan beschrijven).
+//
+// Het bestaat omdat de SOM een verkeerd antwoord geeft. HOP laat een job toe op
+// PoolBytes minus het gereserveerde, en een pool van drie regio's kan 60MB vrij
+// hebben terwijl er nergens 36MB áán één stuk ligt. Dan reserveert de agent
+// eerst, faalt de plaatsing, en geeft hij de task terug — elke vijf seconden
+// opnieuw. GEMETEN 19-08 op de LicheeRV: de gerapporteerde capaciteit flapperde
+// tussen 162 en 198MB van 222, en in dat venster weigerde de node een ándere
+// job van 28MB die er wél in paste.
+//
+// Met dit getal kan de toelating in één keer nee zeggen, zonder te reserveren.
+func PoolLargest() uint64 {
+	partOnce.Do(poolInit)
+	partMu.Lock()
+	defer partMu.Unlock()
+	var best uint64
+	for _, r := range partFree {
+		// Zoek de grootste maat die in deze regio past: aflopend per 2MB-korrel
+		// is niet nodig — het is de regiomaat, afgerond naar beneden op de
+		// korrel, mits de basis daarvoor te beschrijven is.
+		size := r.size &^ (part2M - 1)
+		for size > 0 && (r.base+r.size-size)&^(part2M-1) < r.base {
+			size -= part2M
+		}
+		if size > best {
+			best = size
+		}
+	}
+	return best
 }
 
 // maxLimitFor begrenst een partitie: hij moet binnen één 1GB-blok vanaf
