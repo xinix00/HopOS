@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xinix00/HopOS/apps/cloudflared-lean/internal/edgeproto"
 	"github.com/xinix00/lean/leanh2"
 	"github.com/xinix00/lean/leanhttp"
 )
@@ -161,24 +162,21 @@ func Proxy(service string, req *leanh2.Request, res *leanh2.Response) error {
 	}
 	defer resp.Body.Close()
 
-	out := map[string][]string{}
+	// De koppen van de oorsprong gaan NIET plat als HTTP/2-koppen mee: de edge
+	// negeert wat hij niet kent en de bezoeker zag onze HTML dan als platte tekst
+	// (gemeten 19-08). Ze horen in de bundel van edgeproto.
+	user := map[string][]string{}
 	for name, value := range resp.Header {
 		lower := strings.ToLower(name)
 		if hopByHop[lower] {
 			continue
 		}
-		// content-length weglaten: wij hercoderen de body als frames, en het
-		// stream-einde zegt waar hij ophoudt. Een verkeerde lengte is erger dan
-		// geen lengte.
-		if lower == "content-length" {
-			continue
-		}
-		out[lower] = []string{value}
+		user[lower] = []string{value}
 	}
 	for _, c := range resp.SetCookie {
-		out["set-cookie"] = append(out["set-cookie"], c)
+		user["set-cookie"] = append(user["set-cookie"], c)
 	}
-	if err := res.WriteHeader(resp.StatusCode, out); err != nil {
+	if err := res.WriteHeader(resp.StatusCode, edgeproto.Headers(user, edgeproto.FromOrigin)); err != nil {
 		return err
 	}
 	_, err = io.Copy(res, resp.Body)

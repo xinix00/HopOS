@@ -12,36 +12,35 @@ import (
 // vrij is voor app-partities. De 256MB DDR3 van de SG2002 ligt op
 // 0x80000000..0x90000000 en er blijft niets ongebruikt:
 //
-//	0x80000000   4MB  vuil gebied: hier decomprimeert de FSBL U-Boot naar
-//	                  0x80200020 (~600KB) vóórdat hij ons aanspringt. Ons image
-//	                  mag er dus niet staan. Vroeger ging dit stuk ná de boot als
-//	                  pool B alsnog naar apps; sinds HOP hier direct bovenop
-//	                  woont is die 4MB de prijs van één aaneengesloten pool.
-//	0x80400000  32MB  HOP: image + Go-heap (licheerv.HopBase/HopSize; 64→32 op
+//	0x80000000  64MB  pool B — hier decomprimeert de FSBL U-Boot naar
+//	                  0x80200020 (~600KB) vóórdat hij ons aanspringt. Daarna
+//	                  raakt niemand het meer aan, dus het is gewoon vrij DRAM:
+//	                  alleen ons IMAGE mag er niet staan (dat zou de FSBL
+//	                  overschrijven), een app-partitie wel.
+//	0x84000000  32MB  HOP: image + Go-heap (licheerv.HopBase/HopSize; 64→32 op
 //	                  14-08, gemeten — zie het HopSize-comment in licheerv.go)
-//	0x82400000 218MB  DE POOL — één regio, alle app-partities. SlotBase
-//	                  (0x88000000, het link-adres van elk app-image) ligt hier
-//	                  MIDDEN in en is geen grens meer: de kooi verplaatst elk
-//	                  image naar de partitie die het slot kreeg.
+//	0x86000000  32MB  pool C — de hersnit-winst, als éigen regio zodat
+//	                  SlotBase (het link-adres van elk app-image) blijft staan
+//	0x88000000 126MB  pool A — de partities van de slots. Slot 1 landt op de
+//	                  basis van deze regio, en die is licheerv.SlotBase.
 //	0x8FE00000   2MB  HOP's eigen structuren: boot-scratch, de control-pages van
 //	                  HOP's node-cores, de per-slot blokken (ctx-levensteken +
 //	                  park-mailboxen) en de NIC-DMA-regio. De ABI van een slot
 //	                  (control page, ringen, frame-ringen) staat hier NIET: die
 //	                  woont in de staart van zijn eigen partitie.
 //
-// WAAROM HOP ONDERAAN STAAT (19-08): hij stond op 0x84000000, midden in het
-// DRAM, en knipte de pool daarmee in drie stukken van 126, 64 en 32MB. Drie
-// regio's betekent dat 60MB vrij kan zijn terwijl er nergens 36MB aan één stuk
-// ligt; de toelating rekent met de som en laat zo'n job toe, de plaatser moet
-// hem weigeren, en die hand-back-lus verstikte de agent tot de node door
-// gemiste watchdog-pets omviel — drie keer op één dag. Onderaan tegen het vuile
-// gebied is de pool één stuk en bestaat die klasse fouten niet meer.
+// DRIE REGIO'S, EN WAAROM DAT ZO BLIJFT (19-08): HOP staat tussen het lage en
+// het hoge DRAM, dus de pool valt in stukken. Eén regio van 218MB zou dat
+// oplossen — HOP onderaan, op 0x80400000 — maar dat is geprobeerd en HET BOARD
+// BOOT DAAR NIET. De FSBL doet onder RUNADDR meer dan zijn U-Boot-decompressie;
+// wat precies is niet gemeten. Zie licheerv.HopBase voor de terugweg en de
+// voorwaarde (UART eraan).
 //
-// Wat het NIET verandert: SlotBase. Dat blijft 0x88000000, dus geen enkel
-// gepubliceerd artifact wordt ongeldig. Dat een app buiten zijn linkbasis kan
-// draaien is geen aanname maar gemeten: stulp liep op 0x81c00000 en
-// stulp-weather op 0x86a00000 (ijzer, 19-08 en 18-08), en het mechanisme staat
-// in kern/cage/relocate.go — de PMP-whitelist begrenst, die tabel verplaatst.
+// Wat de fragmentatie NIET meer kan: de node vellen. De toelating vraagt sinds
+// 19-08 het grootste GAT (slots.PoolLargest) in plaats van de som en weigert een
+// onplaatsbare job meteen, zonder te reserveren — dat was de hand-back-lus die
+// de agent verstikte. De boot-regel "pool is N region(s), largest placeable X MB"
+// laat de vorm zien vóór er iets geplaatst is.
 //
 // Wat hier ontbreekt t.o.v. de ARM-boards is precies wat deze architectuur niet
 // heeft: Stage2PA en RevokeVecPA (geen stage-2-tabellen, geen EL2-vectortabel —
@@ -161,24 +160,33 @@ func init() {
 		BootScratchPA: bootScratchPA,
 		Stage2PA:      slotBlockPA,
 		NetDMAPA:      netDMAPA,
-		// ÉÉN regio, sinds HOP 19-08 naar de onderkant van het DRAM ging: van
-		// net boven HOP's venster tot aan de 2MB-staart, 218MB aan één stuk.
+		// DRIE regio's, omdat HOP tussen het lage en het hoge DRAM in staat.
 		//
-		// Hier stonden drie regio's (126 boven SlotBase, 64 eronder, 32 ertussen)
-		// omdat HOP in het midden lag. Dat is de fragmentatie die 19-08 de node
-		// drie keer velde: 60MB vrij, nergens 36MB aaneen, dus liet de toelating
-		// een job toe die de plaatser moest weigeren — en die hand-back-lus
-		// verstikte de agent. Eén regio maakt dat probleem niet kleiner maar
-		// onmogelijk: vrij is vrij.
+		// Dat is niet mooi — één regio zou de klasse "vrij maar niet plaatsbaar"
+		// onmogelijk maken — en 19-08 is geprobeerd HOP naar 0x80400000 te
+		// verhuizen om precies dat te bereiken (218MB aan één stuk). Het BOARD
+		// BOOT DAAR NIET: de vendor-FSBL gebruikt onder RUNADDR meer dan alleen
+		// zijn U-Boot-decompressie. Zie het comment bij licheerv.HopBase; de
+		// volgende poging hoort met de UART eraan.
 		//
-		// SlotBase (0x88000000) ligt nu MIDDEN in deze regio en dat is geen
-		// probleem: de kooi verplaatst elk image naar de partitie die het slot
-		// kreeg (kern/cage/relocate.go). De oude opmerking hier — "zonder tweede
-		// translatiefase draait een app op zijn link-adres, dus staat de regio op
-		// SlotBase vooraan" — was achterhaald: op ijzer draaide stulp op
-		// 0x81c00000 en stulp-weather op 0x86a00000, allebei buiten hun linkbasis.
+		// Wat de drie regio's kosten en wat je ertegen beschermt: een pool in
+		// stukken kan 60MB vrij hebben zonder ergens 36MB aaneen, en dan liet de
+		// toelating vroeger een job toe die de plaatser moest weigeren — elke vijf
+		// seconden opnieuw, tot de node door gemiste watchdog-pets omviel. Sinds
+		// 19-08 vraagt de toelating het GAT (slots.PoolLargest via
+		// hopos.PoolReporter) en weigert hij meteen, zonder te reserveren. De
+		// fragmentatie blijft, de storing is weg.
+		//
+		// Pool A staat vooraan omdat element 0 het linkadres van elk app-image
+		// bepaalt (cageLinkBase): slot 1 landt op licheerv.SlotBase. Dat een app
+		// óók buiten zijn linkbasis kan draaien is gemeten (stulp op 0x81c00000,
+		// stulp-weather op 0x86a00000) — de kooi verplaatst, zie
+		// kern/cage/relocate.go — maar de orde hier blijft functioneel.
 		Pool: []layout.Region{
-			{Base: licheerv.HopBase + licheerv.HopSize, Size: osBase - (licheerv.HopBase + licheerv.HopSize)},
+			{Base: licheerv.SlotBase, Size: osBase - licheerv.SlotBase}, // 126MB
+			{Base: dramBase, Size: licheerv.HopBase - dramBase},         // 64MB
+			// Pool C: wat de HopSize-hersnit (64→32MB, 14-08) vrijgaf.
+			{Base: licheerv.HopBase + licheerv.HopSize, Size: licheerv.SlotBase - licheerv.HopBase - licheerv.HopSize},
 		},
 	})
 }

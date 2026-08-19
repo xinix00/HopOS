@@ -49,8 +49,33 @@ const (
 	// heeft, dus alles daaronder is vuil gebied (gemeten 30-07, zie
 	// image/licheerv-agent.sh).
 	//
-	// ZO LAAG ALS DAT TOELAAT, en dat is de hele reden dat dit getal 19-08
-	// veranderde van 0x84000000. HOP stond mídden in het DRAM, en dat knipte de
+	// TERUG OP 0x84000000 (19-08, poging naar beneden mislukt): met
+	// RUNADDR=0x80400000 BOOT HET BOARD NIET, ook al komt U-Boot maar tot
+	// ~0x8029a000.
+	//
+	// De verklaring, en die wijst de volgende poging de ANDERE kant op: het is
+	// niet het laadadres dat misging. MONITOR_LOADADDR in de FIP is een OFFSET
+	// IN HET BESTAND (fiptool.pack_monitor: `len(fip_bin)`), niet een
+	// DRAM-adres, en MONITOR_RUNADDR is wél het DRAM-adres waar de FSBL ons
+	// neerzet én binnenspringt. Dat werkt dus. Wat er overblijft: de FSBL zelf
+	// woont in het LAGE DRAM en draait daar nog — hij moet ná ons image ook
+	// LOADER_2ND laden. Ons image van ~5,4MB op 0x80400000 schrijft dan dwars
+	// door de code die het aan het laden is. Dát is waarom "alles onder RUNADDR
+	// vuil" is: daar leeft de FSBL, niet alleen zijn U-Boot-decompressie.
+	//
+	// Dus: als de pool ooit één regio moet worden, moet HOP OMHOOG en niet naar
+	// beneden — naar net onder de 2MB-staart (HopBase = osBase - HopSize), zodat
+	// het lage DRAM volledig van de FSBL blijft en de pool 0x80000000..HopBase
+	// wordt: 222MB aan één stuk, méér dan de 218 die de poging naar beneden zou
+	// geven. Dat is één regel hier plus RUNADDR in image/licheerv-agent.sh, plus
+	// het pool-plan. Voorwaarde: de UART eraan, want die overleeft een mislukte
+	// boot en de netwerk-console niet.
+	//
+	// Wat de verhuizing zou opleveren staat hieronder beschreven en blijft waar;
+	// alleen het adres is teruggedraaid. Eén regel hier plus RUNADDR in
+	// image/licheerv-agent.sh, en de pool is weer één stuk.
+	//
+	// WAT DE BEDOELING WAS, en waarom het nog steeds de moeite is: HOP stond mídden in het DRAM, en dat knipte de
 	// app-pool in drie stukken: 126MB boven SlotBase, 64MB eronder, en de 32MB
 	// die de HopSize-hersnit ertussen vrijgaf. Drie regio's betekent dat 60MB
 	// vrij kan zijn terwijl er nergens 36MB aan één stuk ligt — en dan laat HOP
@@ -69,7 +94,7 @@ const (
 	// 4MB en niet krapper: U-Boot beslaat 0x80200020 + ~600KB, dus tot ruwweg
 	// 0x8029a000. Dat laat 1,4MB lucht voor een dikkere U-Boot van de vendor,
 	// en het adres blijft 2MB-uitgelijnd zoals de partitie-korrel.
-	HopBase = 0x80400000
+	HopBase = 0x84000000
 
 	// HopSize is HOP's venster (image + Go-heap). 32MB sinds 14-08, gemeten
 	// (QEMU, agent kaal, mét een echte plaatsing en SSE-load): het image is

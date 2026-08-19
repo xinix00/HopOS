@@ -60,7 +60,16 @@ FIPTOOL="${LICHEERV_FIPTOOL:-$DIR/image/licheerv/fiptool.py}"
 # — de Go-runtime valt dan over een kapotte pointer in .data. LOADER_2ND
 # weglaten kan niet (de FSBL panict na zijn retries), dus we leggen ons image
 # erbóven. Alles onder RUNADDR is vuil gebied.
-# 0x80400000 sinds 19-08, en dat is ZO LAAG als het vuile gebied toelaat: U-Boot
+# LET OP (19-08): 0x80400000 is GEPROBEERD en het board BOOT DAAR NIET. Niet het
+# laadadres was het probleem — MONITOR_LOADADDR is een offset in het FIP-bestand
+# en MONITOR_RUNADDR is het echte DRAM-adres, dus dat werkt — maar de FSBL zelf
+# woont in het lage DRAM en draait daar nog (hij laadt ná ons image ook
+# LOADER_2ND). Een image van 5,4MB op 0x80400000 schrijft door zijn eigen code.
+# Wil je de pool ooit één regio maken, ga dan OMHOOG (net onder de 2MB-staart),
+# niet naar beneden — en met de UART eraan.
+#
+# De oorspronkelijke overweging, die nog steeds geldt: zo laag als het vuile
+# gebied toelaat zou de pool één stuk maken. U-Boot
 # beslaat 0x80200020 + ~600KB (tot ruwweg 0x8029a000), dus 4MB laat 1,4MB lucht
 # voor een dikkere vendor-U-Boot en houdt het adres 2MB-uitgelijnd.
 #
@@ -74,7 +83,7 @@ FIPTOOL="${LICHEERV_FIPTOOL:-$DIR/image/licheerv/fiptool.py}"
 # SlotBase (0x88000000) blijft staan — het linkadres van elk app-image, dus geen
 # enkel gepubliceerd artifact wordt ongeldig. Hij ligt nu binnen de pool-regio en
 # dat mag: de kooi verplaatst (kern/cage/relocate.go).
-RUNADDR=0x80400000
+RUNADDR=0x84000000
 SLOTBASE=0x88000000	# board/licheerv: SlotBase (de app-partitie)
 
 # PAYLOAD kiest wat er in het monitor-slot van de FIP komt: de agent (default,

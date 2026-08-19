@@ -12,6 +12,7 @@ go 1.26.4
 require (
 	github.com/xinix00/HopOS/metal v1.22.0
 	github.com/xinix00/lean v0.10.0
+	golang.org/x/net v0.58.0
 )
 
 require github.com/usbarmory/tamago v1.26.4 // indirect

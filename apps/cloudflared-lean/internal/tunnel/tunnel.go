@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xinix00/HopOS/apps/cloudflared-lean/internal/edgeproto"
 	"github.com/xinix00/HopOS/apps/cloudflared-lean/internal/ingress"
 	"github.com/xinix00/lean/leanh2"
 )
@@ -336,8 +337,13 @@ func (t *Tunnel) serveProxy(req *leanh2.Request, res *leanh2.Response) {
 	}
 }
 
+// reply is een antwoord dat de TUNNEL maakt en niet de oorsprong — een 404
+// omdat geen regel past, een 502 omdat de dienst niet opnam. De meta-kop zegt
+// dat ook eerlijk (`cloudflared` i.p.v. `origin`), want de edge onderscheidt het
+// in zijn eigen foutpagina's en statistiek.
 func (t *Tunnel) reply(res *leanh2.Response, code int, msg string) {
-	_ = res.WriteHeader(code, map[string][]string{"content-type": {"text/plain; charset=utf-8"}})
+	_ = res.WriteHeader(code, edgeproto.Headers(
+		map[string][]string{"content-type": {"text/plain; charset=utf-8"}}, edgeproto.FromTunnel))
 	if msg != "" {
 		_, _ = res.Write([]byte(msg + "\n"))
 	}

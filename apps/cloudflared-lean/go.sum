@@ -2,3 +2,5 @@ github.com/usbarmory/tamago v1.26.4 h1:laFvRANKgVYFHxLHjIlhqJCc3Xm+qMyab2SlUoNw6
 github.com/usbarmory/tamago v1.26.4/go.mod h1:HZkb+ZkzFl8aCxAuF7exsKX+XaNM0mYG9Iv7ooX1WDY=
 github.com/xinix00/lean v0.10.0 h1:WNmdDkm5fhIyGAXLnLy4YHwdxWcjlUeqzgxCN9xeXpg=
 github.com/xinix00/lean v0.10.0/go.mod h1:gRIa2nL/SIEsi1L/eq9EUqrKQ+jnjxUGb3IAsuVQX7U=
+golang.org/x/net v0.58.0 h1:ynWG7rqYi4ccpTEuPZ2QGWHktVEM9DMCj9yzDE0Q7To=
+golang.org/x/net v0.58.0/go.mod h1:YwCddHnFlT7eLQqVprV19OnhLGtc5xOKgE0RyqgfWAU=
