@@ -149,3 +149,118 @@ func readFrame(t *testing.T, c net.Conn) (typ, flags byte, stream uint32, body [
 	}
 	return head[3], head[4], binary.BigEndian.Uint32(head[5:]) & 0x7fffffff, body
 }
+
+// Een PUT met een piepklein lichaam moet gewoon werken tegen een oorsprong die
+// GEEN "Expect: 100-continue" ondersteunt — en leanhttp's server (die stulp
+// draait) weigert élke Expect met 417, bewust.
+//
+// Dit was de bug van 19-08: de proxy koos de streamende weg zodra er een
+// content-length stond, niet pas als het lichaam groot was. leanhttp's client
+// zet bij een stroom altijd Expect (een niet-herhaalbare body vraagt eerst een
+// verdict), dus kreeg Dereks PUT van vijftien bytes een 417 — en zijn
+// backup-restore net zo.
+func TestProxyPutSmallBodyToOriginWithoutExpect(t *testing.T) {
+	var gotMethod, gotBody, gotExpect string
+	ol, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ol.Close()
+	go http.Serve(ol, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Zoals leanhttp's server: elke Expect is een 417 en de body wordt niet
+		// gelezen. Go's net/http zou 100-continue anders zélf afhandelen, en dan
+		// bewijst deze test niets.
+		if e := r.Header.Get("Expect"); e != "" {
+			gotExpect = e
+			w.WriteHeader(417)
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		gotMethod, gotBody = r.Method, string(b)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	service := "http://" + ol.Addr().String()
+
+	sl, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sl.Close()
+	go func() {
+		c, err := sl.Accept()
+		if err != nil {
+			return
+		}
+		leanh2.NewConn(c, func(req *leanh2.Request, res *leanh2.Response) {
+			if err := Proxy(service, req, res); err != nil {
+				t.Errorf("Proxy: %v", err)
+			}
+		}, nil).Serve()
+	}()
+
+	conn, err := net.Dial("tcp", sl.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	conn.Write([]byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"))
+	writeFrame(t, conn, 0x4, 0, 0, nil)
+
+	const body = `{"value":true}` // precies zo klein als Dereks capability-PUT
+	var block []byte
+	enc := hpack.NewEncoder(&byteSink{&block})
+	for _, f := range []hpack.HeaderField{
+		{Name: ":method", Value: "PUT"}, {Name: ":scheme", Value: "http"},
+		{Name: ":path", Value: "/api/manager/devices/device/x/capability/onoff"},
+		{Name: ":authority", Value: "demo.test"},
+		{Name: "content-type", Value: "application/json"},
+		{Name: "content-length", Value: itoa(len(body))},
+	} {
+		enc.WriteField(f)
+	}
+	writeFrame(t, conn, 0x1, 0x4, 1, block)        // HEADERS, END_HEADERS
+	writeFrame(t, conn, 0x0, 0x1, 1, []byte(body)) // DATA, END_STREAM
+
+	got := map[string]string{}
+	for i := 0; i < 12; i++ {
+		typ, _, _, payload := readFrame(t, conn)
+		if typ != 0x1 {
+			continue
+		}
+		dec := hpack.NewDecoder(4096, func(f hpack.HeaderField) { got[f.Name] = f.Value })
+		if _, err := dec.Write(payload); err != nil {
+			t.Fatalf("antwoordkoppen: %v", err)
+		}
+		break
+	}
+	if gotExpect != "" {
+		t.Errorf("de oorsprong zag Expect %q — de proxy stuurde alsnog een stroom", gotExpect)
+	}
+	if got[":status"] != "200" {
+		t.Fatalf("status = %q, wil 200 (koppen: %v)", got[":status"], got)
+	}
+	if gotMethod != "PUT" || gotBody != body {
+		t.Errorf("oorsprong zag %s met body %q, wil PUT met %q", gotMethod, gotBody, body)
+	}
+	user, err := edgeproto.Deserialize(got[edgeproto.HeaderUserHeaders])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(user["content-type"]) == 0 || user["content-type"][0] != "application/json" {
+		t.Errorf("content-type in de bundel = %v, wil application/json", user["content-type"])
+	}
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b []byte
+	for n > 0 {
+		b = append([]byte{byte('0' + n%10)}, b...)
+		n /= 10
+	}
+	return string(b)
+}

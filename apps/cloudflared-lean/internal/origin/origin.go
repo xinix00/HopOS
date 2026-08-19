@@ -23,11 +23,26 @@ import (
 	"github.com/xinix00/lean/leanhttp"
 )
 
-// maxBufferedBody is het plafond voor een verzoek-body zonder content-length.
-// leanhttp chunkt geen uploads (BodyReader eist BodyLen), dus zo'n body moet
-// eerst compleet zijn. Een node heeft 32MB, dus dit is bewust bescheiden: wie
-// grote bestanden door de tunnel duwt, hoort een lengte mee te sturen.
-const maxBufferedBody = 8 << 20
+// maxBufferedBody is het plafond voor een verzoek-body. Élke body wordt eerst
+// gelezen en dan als geheel verstuurd — nooit streamend.
+//
+// Dat is geen luiheid maar een naad tussen twee lean-helften, en hij kostte een
+// 417 (gemeten 19-08, Dereks PUT op een capability en zijn backup-restore):
+// leanhttp's CLIENT stuurt bij BodyReader ALTIJD "Expect: 100-continue" (een
+// niet-herhaalbare stroom vraagt eerst een verdict, RFC 9110 §10.1.1), en
+// leanhttp's SERVER — die stulp draait — weigert élke Expect met 417, bewust en
+// zonder 100-Continue-toestand. Streamend uploaden naar zo'n oorsprong kan dus
+// niet; bufferen wél, want dan schrijft de client een gewone Content-Length.
+//
+// 4MB en niet meer: dit draait in een slot van 32MB waarvan de tunnel er ~10
+// gebruikt. Een body die er niet in past krijgt een luide 413 in plaats van een
+// halve upload — en de enige echte grote body die dit huis kent (een
+// backup-restore) is 20KB.
+const maxBufferedBody = 4 << 20
+
+// ErrBodyTooLarge is een body boven maxBufferedBody. De tunnel maakt er een 413
+// van in plaats van een 502: het is geen storing van de oorsprong.
+var ErrBodyTooLarge = errors.New("origin: request body above the buffer limit")
 
 // originHeaderTimeout begrenst het wachten op de ANTWOORDKOPPEN van de lokale
 // dienst, niet de overdracht daarna: een dode dienst mag geen stream vasthouden,
@@ -205,6 +220,9 @@ func attachBody(call *leanhttp.Call, req *leanh2.Request) error {
 	if req.Method == "GET" || req.Method == "HEAD" {
 		return nil
 	}
+	// Een aangekondigde lengte boven het plafond weigeren vóórdat er ook maar
+	// één byte gelezen is: dat scheelt de bezoeker een lange upload naar een
+	// antwoord dat toch 413 wordt.
 	if cl := req.Get("content-length"); cl != "" {
 		n, err := parseLen(cl)
 		if err != nil {
@@ -213,16 +231,16 @@ func attachBody(call *leanhttp.Call, req *leanh2.Request) error {
 		if n == 0 {
 			return nil
 		}
-		call.BodyReader = req.Body
-		call.BodyLen = n
-		return nil
+		if n > maxBufferedBody {
+			return fmt.Errorf("%w: %d bytes announced, limit is %d", ErrBodyTooLarge, n, maxBufferedBody)
+		}
 	}
 	buf, err := io.ReadAll(io.LimitReader(req.Body, maxBufferedBody+1))
 	if err != nil {
 		return fmt.Errorf("reading the request body: %w", err)
 	}
 	if len(buf) > maxBufferedBody {
-		return fmt.Errorf("request body without content-length above the %d byte limit", maxBufferedBody)
+		return fmt.Errorf("%w: limit is %d", ErrBodyTooLarge, maxBufferedBody)
 	}
 	if len(buf) > 0 {
 		call.Body = buf

@@ -11,6 +11,7 @@ import (
 
 	"github.com/xinix00/HopOS/apps/cloudflared-lean/internal/edgeproto"
 	"github.com/xinix00/HopOS/apps/cloudflared-lean/internal/ingress"
+	"github.com/xinix00/HopOS/apps/cloudflared-lean/internal/origin"
 	"github.com/xinix00/lean/leanh2"
 )
 
@@ -333,6 +334,10 @@ func (t *Tunnel) serveProxy(req *leanh2.Request, res *leanh2.Response) {
 	}
 	if err := t.opt.Proxy(service, req, res); err != nil {
 		t.opt.Logf("cloudflared-lean: stream %d to %s: %v", req.StreamID, service, err)
+		if errors.Is(err, origin.ErrBodyTooLarge) {
+			t.reply(res, 413, "this tunnel buffers request bodies; this one is too large")
+			return
+		}
 		t.reply(res, 502, "the local service did not answer")
 	}
 }
