@@ -87,7 +87,7 @@ require (
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/shirou/gopsutil/v4 v4.26.3 // indirect
 	github.com/usbarmory/tamago v1.26.4 // indirect
-	github.com/xinix00/HopOS/metal v1.21.0
+	github.com/xinix00/HopOS/metal v1.21.1
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/propagators v0.22.0 // indirect
 	go.opentelemetry.io/otel v1.43.0 // indirect
