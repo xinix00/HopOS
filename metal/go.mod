@@ -12,12 +12,19 @@ require github.com/xinix00/hoplockserver v0.2.1 // indirect
 // streaming object-API + ListObjects van v0.3.0).
 require github.com/xinix00/hoplock v0.4.1
 
+// De gepubliceerde HOP-tag waar deze boom tegen bouwt (o.a.
+// hopos.ErrNoCapacity en StartStaged mét jobnaam). GEEN lokale replace meer
+// (Derek, 04-08): een hop-wijziging bereikt hop-os alleen via commit+tag, dus
+// wat hier bouwt bouwt overal — ook downstream (de -hopos-satellieten), die een
+// replace nooit zouden zien.
+//
+// LOSSE comment-blokken, NIET in het require-blok: een comment binnen (of
+// vastgeplakt aan) een require-blok maakt dat blok niet-canoniek voor cmd/go's
+// go.mod-herschrijver, en die verbouwt dan élke build de structuur — een pad
+// waarin de tamago-toolchain panict op x/mod modfile ("index out of range").
+// Gemeten 19-08 in deze boom; surf's go.mod draagt dezelfde waarschuwing.
+
 require (
-	// De gepubliceerde HOP-tag waar deze boom tegen bouwt (o.a.
-	// hopos.ErrNoCapacity en StartStaged mét jobnaam). GEEN lokale replace
-	// meer (Derek, 04-08): een hop-wijziging bereikt hop-os alleen via
-	// commit+tag, dus wat hier bouwt bouwt overal — ook downstream (de
-	// -hopos-satellieten), die een replace nooit zouden zien.
 	github.com/xinix00/hop v0.20.23
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20260709184058-243e02a382f8
 )

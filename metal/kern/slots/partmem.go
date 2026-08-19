@@ -10,9 +10,13 @@ package slots
 // volledige 8GB minus HOP en firmware-carveouts, geen artificiële limiet):
 // fysiek RAM dat de stage-2-kooi per slot op het canonieke IPA-adres van de
 // app legt (de map ontkoppelt IPA van PA, dus variabele fysieke partities —
-// desnoods in meerdere losse DRAM-regio's — passen er zó in). First-fit met
-// coalescing bij vrijgave houdt fragmentatie klein; 2MB-uitlijning omdat de
-// stage-2-partitieblokken 2MB zijn.
+// desnoods in meerdere losse DRAM-regio's — passen er zó in). Best-fit (de
+// kleinste passende regio, 31-07) met coalescing bij vrijgave houdt fragmentatie
+// klein; 2MB-uitlijning omdat de stage-2-partitieblokken 2MB zijn.
+//
+// De keten eromheen — wat HOP zelf houdt, hoe een partitie teruggegeven wordt,
+// welke plafonds er zijn en welke vallen er met datum in zitten — staat in
+// docs/geheugen-ontwerp.md.
 
 import (
 	"errors"
@@ -80,9 +84,12 @@ func align2M(n uint64) uint64 { return (n + part2M - 1) &^ (part2M - 1) }
 // memory_limit van 24MB kreeg de kooi 0x1800000 te zien terwijl de partitie
 // 32MB was (31-07: "maat 0x1800000 is geen macht van twee ≥ 8" — toen NAPOT nog
 // een macht van twee eiste). Sinds TOR is het goedaardig geworden en dus stiller:
-// de kooi zou simpelweg kleiner zijn dan de partitie. Eén bron van waarheid. Een eerdere reservering van i wordt eerst vrijgegeven
-// (defensief bij een re-Start). Fout als de pool geen aaneengesloten gat van deze
-// maat meer heeft.
+// de kooi zou simpelweg kleiner zijn dan de partitie. Eén bron van waarheid.
+//
+// Een eerdere reservering van dit slot wordt hergebruikt (een re-Start moet zijn
+// eigen regio terug kunnen krijgen), maar alleen als de nieuwe maat past — zie
+// het blok in de functie. Fout als de pool geen aaneengesloten gat van deze maat
+// meer heeft.
 //
 // HOOG-EERST: de top van de hoogste passende regio (partFree is base-gesorteerd,
 // dus achteraan beginnen). Het lage DRAM is op servers schaars en kostbaar — het
@@ -90,9 +97,6 @@ func align2M(n uint64) uint64 { return (n + part2M - 1) &^ (part2M - 1) }
 // terwijl de bulk (Altra: ~300GB boven de 512GB-grens, via MapHigh bereikbaar)
 // alleen partities draagt. Laag-eerst zou het lage blok volproppen en de bulk
 // nooit raken.
-// De hele keten (DRAM → plan → pool → partitie → app-RAM), waaróm elke regel
-// hieronder zo is, en de vallen waar we in gelopen zijn met datum: zie
-// docs/geheugen-ontwerp.md. Dit bestand is de waarheid; dat dossier legt uit.
 func partAlloc(i int, size uint64) (base, grown uint64, err error) {
 	partOnce.Do(poolInit)
 	size = align2M(size)
