@@ -18,9 +18,10 @@
 //
 // De L2-next-hop (dst-MAC de NIC op) komt uit een neighbor-cache die passief
 // leert uit inbound frames: srcIP→srcMAC, en een frame van búíten ons subnet
-// is via de gateway gerelayed → dat is de gateway-MAC (de fallback voor een
-// nog-niet-geziene bestemming). HOP's eigen boot-verkeer (SNTP off-subnet, DNS
-// on-subnet) vult beide vóór de eerste app draait.
+// is via de gateway gerelayed → dat is de gateway-MAC (de fallback voor
+// off-subnet bestemmingen; een on-subnet host die nog nooit sprak wordt
+// actief ge-ARP't — zie l2For en arpForLocked). HOP's eigen boot-verkeer
+// (SNTP off-subnet, DNS on-subnet) vult beide vóór de eerste app draait.
 //
 // Bewust niet gedekt (KISS, pas bij behoefte): het node-IP van binnenuit voor
 // níet-gepubliceerde poorten (node-diensten als de agent wonen op 10.100.0.1)
@@ -447,13 +448,19 @@ func arpLearn(f []byte) {
 	mu.Unlock()
 }
 
-// l2For geeft de dst-MAC om dstIP te bereiken (mu vast): de geleerde neighbor,
-// of de gateway voor een off-subnet/onbekende bestemming.
+// l2For geeft de dst-MAC om dstIP te bereiken (mu vast): on-subnet alleen een
+// écht geleerde neighbor, off-subnet de gateway. Een on-subnet host die we nog
+// nooit zagen is bewust NIET known — dan neemt natOutbound het
+// first-contact-pad (ARP + drop, de retransmit vindt 'm). Vóór 20-08 viel die
+// ook op het gateway-MAC terug, en dat was een stille blackhole: de router
+// stuurt een frame voor zijn MAC maar een LAN-IP niet terug het LAN op, dus
+// een stille host (wifi-printer in powersave, die nooit broadcast) bleef
+// permanent onbereikbaar zodra de gateway eenmaal bekend was — en dat is hij
+// seconden na boot, waardoor TestARPFirstContact het gat nooit zag.
 func l2For(dstIP uint32) ([6]byte, bool) {
 	if onSubnet(dstIP) {
-		if m, ok := neigh[dstIP]; ok {
-			return m, true
-		}
+		m, ok := neigh[dstIP]
+		return m, ok
 	}
 	return gwMAC, gwKnown
 }

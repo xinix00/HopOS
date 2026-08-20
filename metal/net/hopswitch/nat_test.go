@@ -526,8 +526,9 @@ func TestNeighborCacheEnPlafond(t *testing.T) {
 	if m, ok := l2For(extIP); !ok || m != gwMAC0 {
 		t.Fatal("off-subnet bestemming hoort via de gateway te gaan")
 	}
-	if m, ok := l2For(nodeIP&^0xFF | 0x42); !ok || m != gwMAC0 {
-		t.Fatal("onbekende on-subnet neighbor hoort op de gateway terug te vallen")
+	if _, ok := l2For(nodeIP&^0xFF | 0x42); ok {
+		t.Fatal("onbekende on-subnet neighbor hoort NIET known te zijn: de gateway " +
+			"stuurt een LAN-frame niet terug het LAN op — first-contact moet ARP'en")
 	}
 	// Plafond: de cache loopt vol en wordt geleegd. De vuller-IP's zijn
 	// off-subnet en schuiven dus (terecht) ook de gateway-MAC door; de
@@ -575,6 +576,14 @@ func TestOutboundZonderNextHopDropt(t *testing.T) {
 func TestARPFirstContact(t *testing.T) {
 	resetNAT()
 	nic := setUplink(t)
+
+	// De gateway is al bekend — zoals seconden na élke echte boot. Vóór 20-08
+	// maakte precies dat het ARP-pad onbereikbaar: l2For viel voor een
+	// onbekende on-subnet host op het gateway-MAC terug (known=true) en de
+	// SYN verdween stil bij de router. De wifi-Brother-jacht van die dag.
+	mu.Lock()
+	learnLocked(extIP, gwMAC0[:])
+	mu.Unlock()
 
 	slotIP := layout.SlotIP4(1)
 	syn := mkFrame(protoTCP, hostMAC, layout.SlotMAC(1), slotIP, lanIP, 5555, 8000, nil)
