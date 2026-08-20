@@ -451,12 +451,11 @@ func arpLearn(f []byte) {
 // l2For geeft de dst-MAC om dstIP te bereiken (mu vast): on-subnet alleen een
 // écht geleerde neighbor, off-subnet de gateway. Een on-subnet host die we nog
 // nooit zagen is bewust NIET known — dan neemt natOutbound het
-// first-contact-pad (ARP + drop, de retransmit vindt 'm). Vóór 20-08 viel die
-// ook op het gateway-MAC terug, en dat was een stille blackhole: de router
-// stuurt een frame voor zijn MAC maar een LAN-IP niet terug het LAN op, dus
-// een stille host (wifi-printer in powersave, die nooit broadcast) bleef
-// permanent onbereikbaar zodra de gateway eenmaal bekend was — en dat is hij
-// seconden na boot, waardoor TestARPFirstContact het gat nooit zag.
+// first-contact-pad: ARP-request én het frame alvast via de gateway (die
+// combinatie dekt zowel hosts die netjes ARP beantwoorden als ARP-dove
+// wifi/mesh-gevallen; zie natOutbound). Vóór 20-08 gaf l2For hier stil het
+// gateway-MAC als known terug, waardoor er nooit ge-ARP't werd en een stille
+// host het van router-hairpin alleen moest hebben — de wifi-Brother-jacht.
 func l2For(dstIP uint32) ([6]byte, bool) {
 	if onSubnet(dstIP) {
 		m, ok := neigh[dstIP]
@@ -635,7 +634,18 @@ func natOutbound(src int, f []byte) bool {
 		// het net (ARP-request, rate-limited); de reply leert de neighbor
 		// (arpLearn) en de TCP-retransmit van de app vindt 'm daarna.
 		arpForLocked(dstIP)
-		return true // next-hop (nog) niet geleerd: drop, retransmit volgt
+		if !gwKnown {
+			return true // geen enkel spoor: drop, retransmit volgt
+		}
+		// En stuur het frame alvast via de gateway mee (Brother-jacht 20-08):
+		// er bestaan hosts die broadcast-ARP niet (betrouwbaar) beantwoorden —
+		// wifi-powersave, mesh-punten die MAC's herschrijven. Relayt de router
+		// het frame, dan antwoordt de host óns rechtstreeks (zelfde subnet) en
+		// draagt dat antwoord zijn echte MAC: één pakket via de omweg en de
+		// neighbor is alsnog geleerd. Relayt de router niet, dan is dit
+		// hetzelfde als de drop van hierboven — de retransmit probeert het
+		// opnieuw, tot ARP of router er één doorlaat.
+		nextHop = gwMAC
 	}
 	fl := flowFor(proto, src, slotIP, sport, dstIP, dport)
 	if fl == nil {

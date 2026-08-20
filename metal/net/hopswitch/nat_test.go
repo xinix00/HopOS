@@ -591,10 +591,12 @@ func TestARPFirstContact(t *testing.T) {
 	claimed := natOutbound(1, append([]byte(nil), syn...))
 	mu.Unlock()
 	if !claimed {
-		t.Fatal("eerste SYN niet geclaimd (drop+ARP hoort het pad te zijn)")
+		t.Fatal("eerste SYN niet geclaimd (ARP + via-gateway hoort het pad te zijn)")
 	}
-	if len(nic.sent) != 1 {
-		t.Fatalf("verwacht 1 ARP-request op de uplink, kreeg %d frames", len(nic.sent))
+	// Twee frames: het ARP-request én de SYN alvast via de gateway — de
+	// fallback voor hosts die broadcast-ARP niet beantwoorden (Brother 20-08).
+	if len(nic.sent) != 2 {
+		t.Fatalf("verwacht ARP-request + SYN-via-gateway, kreeg %d frames", len(nic.sent))
 	}
 	arp := nic.sent[0]
 	if arp[12] != 0x08 || arp[13] != 0x06 || !bytes.Equal(arp[0:6], []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}) {
@@ -607,13 +609,17 @@ func TestARPFirstContact(t *testing.T) {
 	if binary.BigEndian.Uint32(a[14:]) != nodeIP || !bytes.Equal(a[8:14], nicMAC[:]) {
 		t.Fatal("ARP-request draagt niet ons eigen sender-paar")
 	}
+	if !bytes.Equal(nic.sent[1][0:6], gwMAC0[:]) {
+		t.Fatal("de meegestuurde SYN hoort via het gateway-MAC te gaan")
+	}
 
-	// Rate-limit: een tweede SYN direct erna → géén tweede request.
+	// Rate-limit: een tweede SYN direct erna → géén tweede ARP-request, wel
+	// opnieuw de SYN via de gateway (retransmits blijven het proberen).
 	mu.Lock()
 	natOutbound(1, append([]byte(nil), syn...))
 	mu.Unlock()
-	if len(nic.sent) != 1 {
-		t.Fatalf("ARP-storm: %d requests binnen de rate-limit", len(nic.sent))
+	if len(nic.sent) != 3 || nic.sent[2][12] == 0x08 && nic.sent[2][13] == 0x06 {
+		t.Fatalf("verwacht 1 extra SYN-via-gateway zonder ARP-storm (frames: %d)", len(nic.sent))
 	}
 
 	// De reply (zoals Receive hem aan arpLearn geeft) leert de neighbor.
@@ -630,14 +636,15 @@ func TestARPFirstContact(t *testing.T) {
 	binary.BigEndian.PutUint32(r[24:], nodeIP)
 	arpLearn(reply)
 
-	// Retransmit: nu wél verzonden, naar het geleerde MAC.
+	// Retransmit: nu rechtstreeks naar het geleerde MAC, niet meer via de
+	// gateway.
 	mu.Lock()
 	natOutbound(1, append([]byte(nil), syn...))
 	mu.Unlock()
-	if len(nic.sent) != 2 {
+	if len(nic.sent) != 4 {
 		t.Fatalf("retransmit niet verzonden (frames: %d)", len(nic.sent))
 	}
-	if !bytes.Equal(nic.sent[1][0:6], lanMAC0[:]) {
+	if !bytes.Equal(nic.sent[3][0:6], lanMAC0[:]) {
 		t.Fatal("retransmit niet naar het geleerde MAC")
 	}
 }
