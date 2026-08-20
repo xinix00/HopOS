@@ -22,7 +22,7 @@ func resetNAT() {
 	defer mu.Unlock()
 	pubs = nil
 	uplink = nil
-	neigh = map[uint32][6]byte{}
+	neigh = map[uint32]neighbor{}
 	gwMAC = [6]byte{}
 	gwKnown = false
 	flowsFwd = map[fkey]*flow{}
@@ -680,5 +680,62 @@ func TestGeenPoisoningUitProbesEnDHCP(t *testing.T) {
 	}
 	if _, ok := neigh[0]; ok {
 		t.Fatal("IP 0.0.0.0 als neighbor geleerd")
+	}
+}
+
+// Een geleerde neighbor is geen eeuwige waarheid: een wifi-host die slaapt of
+// naar een ander mesh-punt zwerft wisselt van L2-pad, en zonder veroudering
+// bleef het oude MAC voor altijd "known" — dials stierven stil terwijl elke
+// andere machine (met normale ARP-veroudering) de host gewoon zag. De Brother
+// op .201, 20-08: pas printer-uit-aan (gratuitous ARP) heelde het. Na neighTTL
+// zonder levensteken hoort first-contact het opnieuw te vragen; élk inbound
+// frame ververst.
+func TestNeighborExpiresAndRelearns(t *testing.T) {
+	resetNAT()
+	nic := setUplink(t)
+	mu.Lock()
+	learnLocked(extIP, gwMAC0[:]) // gateway bekend, zoals op elke echte node
+	learnLocked(lanIP, lanMAC0[:])
+	mu.Unlock()
+
+	// Vers: rechtstreeks naar het geleerde MAC.
+	slotIP := layout.SlotIP4(1)
+	syn := mkFrame(protoTCP, hostMAC, layout.SlotMAC(1), slotIP, lanIP, 5555, 631, nil)
+	mu.Lock()
+	natOutbound(1, append([]byte(nil), syn...))
+	mu.Unlock()
+	if len(nic.sent) != 1 || !bytes.Equal(nic.sent[0][0:6], lanMAC0[:]) {
+		t.Fatalf("verse neighbor hoort rechtstreeks te gaan (frames: %d)", len(nic.sent))
+	}
+
+	// De printer zwijgt langer dan neighTTL (slaapt, zwerft): de entry is
+	// verlopen en de volgende dial hoort first-contact te nemen — ARP-request
+	// plus de SYN alvast via de gateway, niet meer het oude MAC.
+	mu.Lock()
+	entry := neigh[lanIP]
+	entry.seen = time.Now().Add(-neighTTL - time.Second)
+	neigh[lanIP] = entry
+	natOutbound(1, append([]byte(nil), syn...))
+	mu.Unlock()
+	if len(nic.sent) != 3 {
+		t.Fatalf("verlopen neighbor hoort ARP + via-gateway te geven, kreeg %d extra frame(s)", len(nic.sent)-1)
+	}
+	arp := nic.sent[1]
+	if arp[12] != 0x08 || arp[13] != 0x06 || !bytes.Equal(arp[0:6], []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}) {
+		t.Fatal("geen broadcast-ARP voor de verlopen neighbor")
+	}
+	if !bytes.Equal(nic.sent[2][0:6], gwMAC0[:]) {
+		t.Fatal("de meegestuurde SYN hoort via het gateway-MAC te gaan")
+	}
+
+	// Elk levensteken ververst: een inbound frame van de host (zijn nieuwe
+	// MAC) en de volgende dial gaat weer rechtstreeks — naar het NIEUWE pad.
+	newMAC := [6]byte{0x66, 0x77, 0x88, 0x99, 0xAA, 0xCC}
+	mu.Lock()
+	learnLocked(lanIP, newMAC[:])
+	natOutbound(1, append([]byte(nil), syn...))
+	mu.Unlock()
+	if last := nic.sent[len(nic.sent)-1]; !bytes.Equal(last[0:6], newMAC[:]) {
+		t.Fatalf("na her-leren hoort het verkeer naar het nieuwe MAC te gaan, ging naar %x", last[0:6])
 	}
 }

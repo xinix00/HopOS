@@ -134,8 +134,8 @@ var (
 	pubs   []pub
 	uplink *Uplink
 
-	neigh   = map[uint32][6]byte{} // IP → L2-next-hop (passief geleerd)
-	gwMAC   [6]byte                // gateway-MAC (van off-subnet inbound)
+	neigh   = map[uint32]neighbor{} // IP → L2-next-hop (passief geleerd, verloopt)
+	gwMAC   [6]byte                 // gateway-MAC (van off-subnet inbound)
 	gwKnown bool
 
 	flowsFwd  = map[fkey]*flow{}
@@ -374,13 +374,36 @@ func ipv4L4(f []byte) (ihl int, proto byte, ok bool) {
 // de echte host; anders is het verkeer via de gateway gerelayed).
 func onSubnet(ip uint32) bool { return uplink != nil && ip&uplink.mask == uplink.ip&uplink.mask }
 
+// neighbor is één passief geleerde L2-next-hop. seen is de laatste keer dat de
+// host het zélf bewees (een inbound frame); uitgaand gebruik telt bewust niet —
+// naar een MAC zenden bewijst niet dat er iemand luistert.
+type neighbor struct {
+	mac  [6]byte
+	seen time.Time
+}
+
+// neighTTL: hoe lang een geleerde neighbor geldt zonder nieuw levensteken.
+// Dezelfde 120s als leannets eigen neighbor-tabel, om dezelfde reden: een
+// wifi-host die slaapt of naar een ander mesh-punt zwerft wisselt van L2-pad,
+// en een cache zonder veroudering maakt hem dan PERMANENT onbereikbaar voor
+// uitgaand verkeer — gemeten 20-08 met de Brother op .201: dials stierven stil
+// (SYN naar het oude pad) terwijl de Mac, met normale ARP-veroudering, hem
+// gewoon kon pingen; printer uit-aan (gratuitous ARP) heelde het — precies de
+// vingerafdruk van een verweesd MAC. Verlopen is niet erg: first-contact
+// (ARP + alvast via de gateway) leert hem in één klap terug, en élk inbound
+// frame ververst gratis via learnLocked.
+const neighTTL = 120 * time.Second
+
 // learnLocked leert de L2-next-hop uit een inbound frame (mu vast): srcIP →
-// srcMAC, en een off-subnet bron betekent dat srcMAC de gateway is.
+// srcMAC, en een off-subnet bron betekent dat srcMAC de gateway is. Het
+// gateway-paar veroudert bewust niet: élk pakket van buiten ververst het, en
+// een router die stil van MAC wisselt zonder ooit nog iets door te geven is
+// geen toestand die een TTL kan redden.
 func learnLocked(srcIP uint32, mac []byte) {
 	if _, known := neigh[srcIP]; !known && len(neigh) >= maxNeigh {
-		neigh = map[uint32][6]byte{} // plafond: legen en herleren
+		neigh = map[uint32]neighbor{} // plafond: legen en herleren
 	}
-	neigh[srcIP] = [6]byte(mac)
+	neigh[srcIP] = neighbor{mac: [6]byte(mac), seen: time.Now()}
 	if !onSubnet(srcIP) {
 		gwMAC, gwKnown = [6]byte(mac), true
 	}
@@ -449,17 +472,21 @@ func arpLearn(f []byte) {
 }
 
 // l2For geeft de dst-MAC om dstIP te bereiken (mu vast): on-subnet alleen een
-// écht geleerde neighbor, off-subnet de gateway. Een on-subnet host die we nog
-// nooit zagen is bewust NIET known — dan neemt natOutbound het
-// first-contact-pad: ARP-request én het frame alvast via de gateway (die
-// combinatie dekt zowel hosts die netjes ARP beantwoorden als ARP-dove
-// wifi/mesh-gevallen; zie natOutbound). Vóór 20-08 gaf l2For hier stil het
-// gateway-MAC als known terug, waardoor er nooit ge-ARP't werd en een stille
-// host het van router-hairpin alleen moest hebben — de wifi-Brother-jacht.
+// écht geleerde, nog vérse neighbor, off-subnet de gateway. Een host die we
+// nooit zagen — of langer dan neighTTL niets van hoorden — is bewust NIET
+// known: dan neemt natOutbound het first-contact-pad, ARP-request én het frame
+// alvast via de gateway (die combinatie dekt zowel hosts die netjes ARP
+// beantwoorden als ARP-dove wifi/mesh-gevallen). Vóór 20-08 gaf l2For hier
+// stil het gateway-MAC als known terug, waardoor er nooit ge-ARP't werd — de
+// wifi-Brother-jacht; de TTL is deel twee van diezelfde jacht (zie neighTTL).
 func l2For(dstIP uint32) ([6]byte, bool) {
 	if onSubnet(dstIP) {
 		m, ok := neigh[dstIP]
-		return m, ok
+		if ok && time.Since(m.seen) > neighTTL {
+			delete(neigh, dstIP) // verlopen: eruit, first-contact leert opnieuw
+			return [6]byte{}, false
+		}
+		return m.mac, ok
 	}
 	return gwMAC, gwKnown
 }
