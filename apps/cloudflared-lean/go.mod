@@ -10,7 +10,7 @@ module github.com/xinix00/HopOS/apps/cloudflared-lean
 go 1.26.4
 
 require (
-	github.com/xinix00/HopOS/metal v1.22.5
+	github.com/xinix00/HopOS/metal v1.99.0
 	github.com/xinix00/lean v0.99.0
 	golang.org/x/net v0.58.0
 )
