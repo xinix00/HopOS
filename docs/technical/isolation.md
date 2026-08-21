@@ -43,7 +43,7 @@ slots 1-6, 8-126: unaffected, still serving
 ```
 
 - **Small enough to audit.** The code that enforces all of this — cages, slots,
-  ABI — is ~3,775 lines, and the whole node is what the table below adds up to.
+  ABI — is ~4,025 lines, and the whole node is what the table below adds up to.
   The rung you have to *trust* is that first one; the board layer — its NIC
   and PHY drivers included — is a swappable outer shell, already outside
   every cage.
@@ -60,20 +60,20 @@ listed last.
 
 | layer | lines |
 |---|---|
-| **isolation core** — cages, slots, ABI, object store | ~3,775 |
-| app runtime + node mains | ~500 |
-| network stack — switch, NAT, DHCP | ~1,250 |
+| **isolation core** — cages, slots, ABI, object store | ~4,025 |
+| app runtime + node mains | ~525 |
+| network stack — switch, NAT, DHCP, IPv6 | ~1,475 |
 | portable drivers — console, NVMe, PCIe | ~875 |
 | boot config + the board contract | ~150 |
-| **portable Go — in every node** | **~6,550** |
+| **portable Go — in every node** | **~7,050** |
 | `arm64` — EL2 + stage-2, PSCI, SMP | ~1,250 |
-| `riscv64` — machine mode + PMP cage, slot stub | ~1,200 |
+| `riscv64` — machine mode + PMP cage, slot stub | ~1,350 |
 | board: Ampere Altra / any UEFI box — ACPI, MMU, igb, SMpro | ~2,325 |
 | board: Raspberry Pi 5 — RP1, gem, PCIe, mailbox | ~2,325 |
-| board: Raspberry Pi 4 — genet, mailbox | ~1,875 |
+| board: Raspberry Pi 4 — genet, mailbox | ~1,900 |
 | board: Radxa Zero 3E — dwmac4 + PHY, TSADC, TRNG | ~2,400 |
-| board: LicheeRV Nano — dwmac, ePHY, CLINT | ~1,725 |
-| **lean** — the node's own standard library, a separate module, identical in every node: TCP/IP (leannet), TLS, HTTP(S), DHCP, S3, ELF | ~6,875 |
+| board: LicheeRV Nano — dwmac, ePHY, CLINT | ~1,850 |
+| **lean** — the node's own standard library, a separate module, identical in every node: TCP/IP with IPv6, TLS, HTTP/1 and 2, DHCP, S3, ELF | ~10,700 |
 | gui, opt-in (`-tags gui`) — framebuffer grant + USB input (xHCI, DWC3, HID) | ~2,000 |
 | gui, board wiring on top — Radxa scanout ~950 · Pi 4 ~400 · Pi 5 ~15 | |
 
@@ -82,12 +82,12 @@ gone: the node streams a job's image straight into its partition, so there is
 no second Go runtime to link (see [architecture](architecture.md)).
 
 A node is **portable + one ISA + one board, plus lean**, never two of
-either: an Altra stick is ~10,150 lines of metal, a Pi 5 ~10,100, a Pi 4
-~9,675, a Radxa ~10,200 and the LicheeRV ~9,475 — plus the same ~6,875 of
-lean everywhere, so the whole node is ~17,000 lines of our own code. What is
-*not* ours in the image has shrunk to the tamago runtime and a CA-roots
-bundle: the TCP/IP stack, TLS, HTTP, DHCP, the S3 client and the ELF loader
-are lean, written here — no gVisor, no forks. You audit one tree, never the union. **A headless image
+either: an Altra stick is ~10,650 lines of metal, a Pi 5 ~10,625, a Pi 4
+~10,200, a Radxa ~10,725 and the LicheeRV ~10,250. All dependencies together
+are the same ~10,700 of lean everywhere — shown, not hidden. What is *not*
+ours in the image is the tamago runtime and a CA-roots bundle: the TCP/IP
+stack (IPv6 included), TLS, HTTP/1 and 2, DHCP, the S3 client and the ELF
+loader are lean, written here — no gVisor, no forks. You audit one tree, never the union. **A headless image
 links zero graphics — and zero USB.** The gui flavour adds the grant that
 hands one app the framebuffer and the input chain (xHCI, the DWC3 core in
 host mode, the HID boot protocol) — owned by HOP, not granted to
@@ -96,13 +96,14 @@ receive input *events*, never registers. On the Radxa the gui flavour also
 carries its own scanout, because that board's firmware doesn't light the
 connector. Windowing, compositing and the browser are ordinary caged apps in
 [their own repo](https://github.com/xinix00/hop-os-surf). The board rung is
-where new hardware lands: the Radxa port put its GMAC glue in a ~2,450 board
+where new hardware lands: the Radxa port put its GMAC glue in a ~2,400 board
 rung and its scanout behind the gui tag, while the portable core moved ~50
 lines.
 
 A Linux node doing the same job trusts GRUB, the kernel (~30,000,000 lines),
 systemd, libc *and* a container runtime. **HopOS is the whole node —
-bootloader, TCP/IP stack, TLS and HTTP included — in ~17,000.** **The machine you actually booted fits in
+bootloader included — in ~10,500 lines**, and even its dependencies are
+readable. **The machine you actually booted fits in
 a single AI context window**, so you can audit it in one sitting, human or
 machine.
 
