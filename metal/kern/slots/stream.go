@@ -71,11 +71,10 @@ func StartStreamOn(core, i int, r io.Reader, imgSize int64, memLimit uint64, cor
 		return fmt.Errorf("shared core %d out of range 1..%d", core, layout.NumAppCores())
 	}
 	partOnce.Do(poolInit)
+	previousCore := hostCore[i]
 	hostCore[i] = core
 	err := startStream(i, r, imgSize, memLimit, cores, env, mounts, ports, job)
-	if err != nil {
-		hostCore[i] = 0
-	}
+	rollbackHostCore(i, previousCore, err)
 	return err
 }
 
@@ -90,23 +89,16 @@ func startStream(i int, r io.Reader, imgSize int64, memLimit uint64, cores int, 
 	if imgSize <= 0 {
 		return fmt.Errorf("StartStream: onbekende image-grootte (Content-Length vereist)")
 	}
-	mtab, envBlob, cores, err := prepStart(i, memLimit, cores, env, mounts, ports)
+	mtab, preparedEnv, cores, err := prepStart(i, memLimit, cores, env, mounts, ports)
 	if err != nil {
 		return err
 	}
-	// Zelfde niet-pure prepStart als in startImage: de fb-grant op elk faalpad
-	// terug, anders blijft de console weg voor een task die nooit draaide.
 	var started bool
-	defer func() {
-		if !started {
-			grantRelease(i)
-		}
-	}()
 
 	// Venster 1 (kort): het slot claimen en de partitie alloceren.
 	unlock := lifecycleWindow()
 	vectorsOnce.Do(cageInit)
-	if err = claimSlot(i, cores, true); err != nil {
+	if err = claimStart(i, cores, true); err != nil {
 		unlock()
 		return err
 	}
@@ -115,12 +107,29 @@ func startStream(i int, r io.Reader, imgSize int64, memLimit uint64, cores int, 
 		unlock()
 		return err
 	}
-	unlock()
 	appRAM, err := appRAMSize(size)
 	if err != nil {
 		partRelease(i)
+		unlock()
 		return err
 	}
+	// De grant hoort bij het venster (grants.go muteert): aanvragen ná claimSlot,
+	// en het venster gaat daarna dicht — de stroom zelf loopt erbuiten.
+	var attemptGrant startGrant
+	envBlob, err := attemptGrant.prepare(i, preparedEnv)
+	if err != nil {
+		partRelease(i)
+		unlock()
+		return err
+	}
+	// Ook hier pas ná de acquisitie wapenen; een mislukte claim raakt dus nooit
+	// het grant-token van de al draaiende task.
+	defer func() {
+		if !started {
+			attemptGrant.rollback(i, err)
+		}
+	}()
+	unlock()
 	fmt.Printf("slot %d: partition %d MB @ %#x — streaming %d MB image\n", i, size>>20, base, imgSize>>20)
 	defer func() {
 		if started {
@@ -128,7 +137,7 @@ func startStream(i int, r io.Reader, imgSize int64, memLimit uint64, cores int, 
 		}
 		// Zelfde uitzondering als startImage: faalde het startschot zélf, dan
 		// is onbekend of de core tóch aangaat — partitie in quarantaine.
-		if errors.Is(err, errDispatch) {
+		if errors.Is(err, ErrDispatch) {
 			fmt.Printf("slot %d: partition quarantined — dispatch outcome unknown HOPOS_PART_QUARANTINE\n", i)
 			return
 		}

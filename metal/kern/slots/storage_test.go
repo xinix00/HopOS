@@ -74,6 +74,7 @@ func (m *memFS) Truncate(path string, size uint64) error {
 type memStore struct {
 	objects  map[string][]byte
 	pushHash map[string]string
+	pushes   int
 }
 
 func newMemStore() *memStore {
@@ -90,6 +91,7 @@ func (s *memStore) Pull(_ context.Context, key string, w io.Writer) (int64, bool
 }
 
 func (s *memStore) Push(_ context.Context, key string, size int64, sha256Hex string, r io.Reader) error {
+	s.pushes++
 	b, err := io.ReadAll(r)
 	if err != nil {
 		return err
@@ -311,11 +313,51 @@ func TestHashFileMatchesContent(t *testing.T) {
 	content := []byte("hello hop")
 	fs.files["/f"] = content
 	sum := sha256.Sum256(content)
-	got, err := hashFile(fs, "/f", uint64(len(content)))
+	got, err := hashFile(context.Background(), fs, "/f", uint64(len(content)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got != hex.EncodeToString(sum[:]) {
 		t.Fatalf("hash %s dekt de inhoud niet", got)
+	}
+}
+
+type cancelAfterReadFS struct {
+	*memFS
+	cancel context.CancelFunc
+	reads  int
+}
+
+func (f *cancelAfterReadFS) ReadAt(path string, off uint64, p []byte) (int, error) {
+	n, err := f.memFS.ReadAt(path, off, p)
+	f.reads++
+	if f.reads == 1 {
+		f.cancel()
+	}
+	return n, err
+}
+
+// Stop/evict cancelt s.ctx. Ook als dat midden in de lokale hashpass gebeurt,
+// mag StorePush niet de rest van het bestand lezen en de upload niet beginnen.
+func TestStorePushCancellationStopsHashBeforeUpload(t *testing.T) {
+	st := newMemStore()
+	s := storeEnv(t, st)
+	base := newMemFS()
+	content := bytes.Repeat([]byte("x"), 3*(64<<10))
+	base.files["/.tasks/slot1/big"] = content
+	fs := &cancelAfterReadFS{memFS: base, cancel: s.cancel}
+
+	resp := decodeResp(t, s.storePush(fs, hopabi.Req{Op: hopabi.OpStorePush, Path: "/big"}))
+	if resp.Status == hopabi.StatusOK {
+		t.Fatal("geannuleerde hashpass rapporteerde succes")
+	}
+	if !strings.Contains(string(resp.Data), context.Canceled.Error()) {
+		t.Fatalf("fout = %q, wil context cancellation", resp.Data)
+	}
+	if fs.reads != 1 {
+		t.Fatalf("na cancellation nog doorgelezen: %d reads, wil 1", fs.reads)
+	}
+	if st.pushes != 0 {
+		t.Fatalf("upload begon ondanks geannuleerde hashpass: %d Push-calls", st.pushes)
 	}
 }

@@ -159,18 +159,37 @@ func (f *FS) Stat(path string) (uint64, bool, error) {
 func (f *FS) List(path string) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	names, _, err := f.list(path, -1)
+	return names, err
+}
+
+// ListN is List met een bovengrens op het aantal namen. truncated betekent dat
+// de directory meer entries draagt; in dat geval wordt geen gedeeltelijke lijst
+// gebouwd. De aanroeper bepaalt zelf hoe namen worden geserialiseerd en hoeveel
+// bytes daarbij passen.
+func (f *FS) ListN(path string, maxEntries int) (names []string, truncated bool, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.list(path, maxEntries)
+}
+
+// list voert de listing uit onder f.mu. maxEntries < 0 betekent onbegrensd.
+func (f *FS) list(path string, maxEntries int) ([]string, bool, error) {
 	segs, err := split(path)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	n, err := f.walk(segs, false)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if !n.dir {
-		return nil, fmt.Errorf("hopfs: %q is not a directory", path)
+		return nil, false, fmt.Errorf("hopfs: %q is not a directory", path)
 	}
-	var names []string
+	if maxEntries >= 0 && len(n.children) > maxEntries {
+		return nil, true, nil
+	}
+	names := make([]string, 0, len(n.children))
 	for name, c := range n.children {
 		if c.dir {
 			name += "/"
@@ -178,7 +197,7 @@ func (f *FS) List(path string) ([]string, error) {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	return names, nil
+	return names, false, nil
 }
 
 // MkdirAll maakt een dir (incl. ouders).

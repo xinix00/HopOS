@@ -112,12 +112,22 @@ func TestGwICMP(t *testing.T) {
 // TestGwFragmentRefused: fragmenten kunnen hun L4-checksum niet dragen; het
 // pad moet ze weigeren in plaats van half herschrijven.
 func TestGwFragmentRefused(t *testing.T) {
-	f := mkFrame(protoTCP, hostMAC, layout.SlotMAC(3), layout.SlotIP4(3), layout.HostIP4(), 40000, 8080, nil)
-	ip := f[ethLen:]
-	binary.BigEndian.PutUint16(ip[6:], 0x00B9) // fragment-offset ≠ 0
-	binary.BigEndian.PutUint16(ip[10:], 0)
-	binary.BigEndian.PutUint16(ip[10:], ^fold16(sumWords(ip[:20])))
-	if GwToHost(f, gwTestHostIP) {
-		t.Fatal("fragment werd vertaald")
+	for _, tc := range []struct {
+		name  string
+		field uint16
+	}{
+		{"offset", 0x00B9},
+		{"eerste fragment met MF", 0x2000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := mkFrame(protoTCP, hostMAC, layout.SlotMAC(3), layout.SlotIP4(3), layout.HostIP4(), 40000, 8080, nil)
+			ip := f[ethLen:]
+			binary.BigEndian.PutUint16(ip[6:], tc.field)
+			binary.BigEndian.PutUint16(ip[10:], 0)
+			binary.BigEndian.PutUint16(ip[10:], ^fold16(sumWords(ip[:20])))
+			if GwToHost(f, gwTestHostIP) {
+				t.Fatal("fragment werd vertaald")
+			}
+		})
 	}
 }

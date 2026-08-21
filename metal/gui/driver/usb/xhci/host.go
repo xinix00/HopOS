@@ -71,8 +71,9 @@ type slotRes struct {
 	ctrl   *ring               // EP0, control transfers
 	intr   [maxHIDIfaces]*ring // één per boot-interface (toetsenbord én muis
 	// kunnen op ÉÉN apparaat zitten — een draadloze combo op één dongle)
-	buf   uintptr // 4KB werkgeheugen (zie bufCtrl/bufIntr)
-	inUse bool
+	buf         uintptr // 4KB werkgeheugen (zie bufCtrl/bufIntr)
+	inUse       bool    // Enable Slot bevestigd, Disable Slot nog niet bevestigd
+	quarantined bool    // Disable Slot faalde: ownership onbekend, reset vereist
 }
 
 // Verdeling van de 4KB werkbuffer per slot. Control-data en het HID-rapport
@@ -98,6 +99,16 @@ func (h *HC) Start(dmaBase, dmaSize uintptr) error {
 	if h.op == 0 {
 		return fmt.Errorf("xhci %s: Start vóór Probe", h.Name)
 	}
+	if h.poisoned != nil {
+		return fmt.Errorf("xhci %s: Start vereist eerst een geslaagde controllerreset: %w", h.Name, h.poisoned)
+	}
+	if dmaSize == 0 {
+		return fmt.Errorf("xhci %s: lege DMA-regio", h.Name)
+	}
+	// Het board-venster is vast voor de levensduur van de node. Na een poisoned
+	// Disable Slot doet Recover HCRST en bouwt exact in dit venster alle tabellen
+	// opnieuw op; oude pointers worden pas overschreven nadat hardware gereset is.
+	h.dmaBase, h.dmaSize = dmaBase, dmaSize
 	h.arena = arena{cur: dmaBase, end: dmaBase + dmaSize}
 
 	// Paginagrootte van de controller: bit n → 2^(n+12). Vrijwel altijd 4KB,
@@ -196,6 +207,45 @@ func (h *HC) Start(dmaBase, dmaSize uintptr) error {
 		return err
 	}
 	h.running = true
+	return nil
+}
+
+// RecoveryNeeded geeft de ownership-fout die een volledige controllerreset
+// vereist, of nil als Attach veilig verder mag. usbin controleert dit vóór elke
+// scanronde; zo is quarantine een bereikbaar herstelpad en geen reboot-slot.
+func (h *HC) RecoveryNeeded() error { return h.poisoned }
+
+// Recover wist alle hardware-slotstate met HCRST, bouwt command/event/device-
+// tabellen opnieuw in het bij Start bewaarde DMA-venster en zet de poorten weer
+// aan. De manager moet vóór deze call zijn oude Device-handles vergeten: HCRST
+// maakt die per definitie ongeldig.
+func (h *HC) Recover() error {
+	return h.recoverWith(h.Reset, h.Start, h.PowerOn)
+}
+
+// recoverWith is de host-testbare toestand rond de drie hardwarestappen.
+func (h *HC) recoverWith(reset func() error, start func(uintptr, uintptr) error, power func()) error {
+	if h.poisoned == nil {
+		return nil
+	}
+	if h.dmaSize == 0 {
+		return fmt.Errorf("xhci %s: recovery heeft geen bewaard DMA-venster", h.Name)
+	}
+	if err := reset(); err != nil {
+		h.poisoned = fmt.Errorf("recovery reset: %w", err)
+		return fmt.Errorf("xhci %s: %w", h.Name, h.poisoned)
+	}
+	// Reset heeft de oude poison na bevestigde HCRST gewist; een Start-fout
+	// moet hem opnieuw zetten, anders zou de volgende scan een half opgebouwde
+	// controller als gezond behandelen.
+	h.poisoned = nil
+	if err := start(h.dmaBase, h.dmaSize); err != nil {
+		h.running = false
+		h.poisoned = fmt.Errorf("recovery start: %w", err)
+		return fmt.Errorf("xhci %s: %w", h.Name, h.poisoned)
+	}
+	power()
+	h.poisoned = nil
 	return nil
 }
 

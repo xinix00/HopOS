@@ -10,6 +10,13 @@
 //
 // Restart = Stop + Start: de image wordt altijd vers geladen, dus elke start
 // is een schone lei — consistent met "niets is persistent".
+//
+// LEES VOORDAT JE HIER LIFECYCLE-MACHINERIE BIJBOUWT: docs/
+// slot-lifecycle-grenzen.md. HOP's runner serialiseert de opdrachten al
+// (stop-intentie, wachten op een lopende stream, weten of er iets gearmd is),
+// en dit ontwerp reconcilieert geen in-memory staat — het faalt luid en de
+// watchdog reset de node. Een lease/reconcile-protocol hier dekt dus meestal
+// iets wat elders al vaststaat, en knijpt de lijk-opruiming in claimSlot af.
 package slots
 
 import (
@@ -104,9 +111,10 @@ func lifecycleWindow() func() {
 // lock nodig heeft — VÓÓR het lifecycle-venster: een kapotte job opent het
 // venster nooit, en het geserialiseerde venster zelf blijft
 // zo kort mogelijk. Eén definitie voor Start én StartStaged (het was ~45
-// regels letterlijke duplicatie op een ABI-kritisch pad). Geeft de
-// mount-tabel, de env-blob en het genormaliseerde core-aantal terug.
-func prepStart(i int, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int) (mtab [][2]string, envBlob []byte, coresOut int, err error) {
+// regels letterlijke duplicatie op een ABI-kritisch pad). Geeft de mount-tabel,
+// de met DNS aangevulde env (nog géén grant) en het genormaliseerde core-aantal
+// terug.
+func prepStart(i int, memLimit uint64, cores int, env map[string]string, mounts map[string]string, ports map[string]int) (mtab [][2]string, preparedEnv map[string]string, coresOut int, err error) {
 	if err := checkSlot(i); err != nil {
 		return nil, nil, 0, err
 	}
@@ -141,28 +149,107 @@ func prepStart(i int, memLimit uint64, cores int, env map[string]string, mounts 
 	// smp.Configure leidt de secundaire cores af van de ÉCHTE core (coreOf(i)),
 	// terwijl dispatchSMP ze tegen slot i toetste — dan wordt elke lazy
 	// SMP-aanvraag geweigerd en degradeert de app stilletjes naar één core.
-	// Liever hier hard falen: SMP hoort op zijn eigen core te wonen.
-	if cores > 1 && coreOf(i) != i {
-		return nil, nil, 0, fmt.Errorf("SMP: kooi %d woont op core %d (gedeelde/pool-plaatsing) — %d cores vraagt een eigen core (slot == core)",
-			i, coreOf(i), cores)
-	}
+	// Liever hard falen: SMP hoort op zijn eigen core te wonen. Die toets staat
+	// NIET hier maar in validateSMPPlacement, want coreOf(i) leest hostCore en
+	// dat wordt door StartShared/StartStreamOn pas ná prepStart gezet — hier las
+	// hij dus de VORIGE plaatsing (gevonden 20-08).
 	if cores > 1 && i+cores-1 > layout.NumAppCores() {
 		return nil, nil, 0, fmt.Errorf("SMP: %d cores vanaf slot %d overschrijden de %d app-cores", cores, i, layout.NumAppCores())
 	}
-	// DeviceGrant-haak (grants.go; gui/fbgrant is de eerste provider): een
-	// job met FB=1 krijgt — als het board een framebuffer heeft en niemand
-	// hem houdt — de FB_*-beschrijving in zijn env; de kooi-mapping volgt in
-	// armSlot (na stage2.Build).
-	env = grantEnv(i, env)
 	// DNS-resolver van de node meegeven, zodat een app die naar buiten praat
 	// (cloudflared, servers) namen kan opzoeken — de query loopt als gewoon
 	// UDP door de masquerade. HOP zet 'm als env (net als ER_PORT_*), tenzij
 	// de job 'm al expliciet koos. Leeg (Pi vóór P2) = geen HOP_DNS.
-	envBlob = encodeEnv(withDNS(env, board.Current().Net().DNS))
-	if len(envBlob) > layout.CtrlEnvMax {
-		return nil, nil, 0, fmt.Errorf("env te groot: %d > %d bytes", len(envBlob), layout.CtrlEnvMax)
+	//
+	// De DeviceGrant-haak staat hier NIET meer: die muteert (grants.go) en mocht
+	// dus niet vóór claimSlot lopen — een tweede Start op een levend slot pakte
+	// zo de fb-grant van de dráaiende app af (HOP-console zwart) en gaf hem op
+	// zijn faalpad ook nog vrij. Nu: prepareGrantedEnv, binnen het venster.
+	preparedEnv, err = prepareBaseEnv(env, board.Current().Net().DNS)
+	if err != nil {
+		return nil, nil, 0, err
 	}
-	return mtab, envBlob, cores, nil
+	return mtab, preparedEnv, cores, nil
+}
+
+// prepareBaseEnv is de PURE helft van de env: DNS erbij en de groottecheck,
+// zonder ook maar iets te muteren buiten de kopie. Eigen naam omdat precies
+// deze grens het verschil maakt tussen wel en niet aan de grant zitten.
+func prepareBaseEnv(env map[string]string, dns string) (map[string]string, error) {
+	prepared := withDNS(env, dns)
+	if _, err := encodeStartEnv(prepared); err != nil {
+		return nil, err
+	}
+	return prepared, nil
+}
+
+// encodeStartEnv is de ene wire-sizegrens voor de pure én granted env. Zo kan
+// de provider na prepareBaseEnv nog velden toevoegen zonder dat de twee
+// startpaden of de twee validatiefasen een andere limiet/fouttekst krijgen.
+func encodeStartEnv(env map[string]string) ([]byte, error) {
+	blob := encodeEnv(env)
+	if len(blob) > layout.CtrlEnvMax {
+		return nil, fmt.Errorf("env te groot: %d > %d bytes", len(blob), layout.CtrlEnvMax)
+	}
+	return blob, nil
+}
+
+// prepareGrantedEnv vraagt de DeviceGrant aan en levert de env-blob. Aanroepen
+// ná claimSlot, binnen het lifecycle-venster: vanaf hier is deze poging eigenaar
+// van de grant tot hij faalt (dan geeft hij hem hier terug) of slaagt.
+func prepareGrantedEnv(i int, env map[string]string) ([]byte, error) {
+	blob, err := encodeStartEnv(grantEnv(i, env))
+	if err != nil {
+		grantRelease(i)
+		return nil, err
+	}
+	return blob, nil
+}
+
+// startGrant is het ownership-token van één startpoging. Een mislukte claim
+// heeft nog geen token en mag dus nooit de grant van de levende eigenaar
+// vrijgeven. ErrDispatch houdt het token juist vast: de core kan ondanks de
+// fout gestart zijn en blijft samen met partitie en plaatsing in quarantaine.
+type startGrant struct{ acquired bool }
+
+func (g *startGrant) prepare(i int, env map[string]string) ([]byte, error) {
+	blob, err := prepareGrantedEnv(i, env)
+	if err == nil {
+		g.acquired = true
+	}
+	return blob, err
+}
+
+func (g *startGrant) rollback(i int, err error) {
+	if !g.acquired || errors.Is(err, ErrDispatch) {
+		return
+	}
+	grantRelease(i)
+	g.acquired = false
+}
+
+// validateSMPPlacement toetst dat een SMP-app op zijn eigen core woont. Apart
+// van prepStart omdat hij hostCore leest: aanroepen ná de plaatsing.
+func validateSMPPlacement(i, cores int) error {
+	if cores > 1 && coreOf(i) != i {
+		return fmt.Errorf("SMP: kooi %d woont op core %d (gedeelde/pool-plaatsing) — %d cores vraagt een eigen core (slot == core)",
+			i, coreOf(i), cores)
+	}
+	return nil
+}
+
+// claimStart centraliseert de muterende claimgrens voor blob- en streamstart:
+// eerst de core-aware SMP-toets, dan de echte slotclaim, en pas na succes de
+// stale grant van een aantoonbaar dode vorige eigenaar vrijgeven.
+func claimStart(i, cores int, shared bool) error {
+	if err := validateSMPPlacement(i, cores); err != nil {
+		return err
+	}
+	if err := claimSlot(i, cores, shared); err != nil {
+		return err
+	}
+	grantRelease(i)
+	return nil
 }
 
 // coresFree bewaakt (ín het venster) dat de cores van het slot niet draaien —
@@ -438,13 +525,28 @@ func ctrlWrite(slot int, off uintptr, v uint64) {
 // PSCI CPU_ON — de éénmalige bring-up per core. Anders (geparkeerd): schrijf
 // {ctx, entry} in de mailbox en wek de WFE-lus met SEV; die springt de
 // (idempotente) trampoline in. Zet word0 sowieso op ctx zodat coreRunning klopt.
-// errDispatch markeert dat het startschot zélf faalde. Dat is het enige
+// ErrDispatch markeert dat het startschot zélf faalde. Dat is het enige
 // faalpad met een ONBEKENDE uitkomst: dispatchCore primet de core-mailbox
 // (word0=ctx, word1=PC) vóór de PSCI CPU_ON, dus bij een fout kán die core
 // alsnog aangaan en de trampoline inspringen. Daarom gaat de partitie op dit
 // pad fail-closed in quarantaine i.p.v. terug de pool in — zelfde afweging als
 // releaseSlot(_, false) bij een onbevestigde intrekking.
-var errDispatch = errors.New("dispatch failed")
+// Geëxporteerd omdat slotmgr op dít pad de core-placement moet VASTHOUDEN:
+// de partitie ging al in quarantaine, maar de kooi werd tot 20-08 op élk
+// faalpad teruggegeven — en dan kan een mogelijk levende core aan de volgende
+// job worden uitgedeeld. Zie docs/slot-lifecycle-grenzen.md.
+var ErrDispatch = errors.New("dispatch failed")
+
+// rollbackHostCore herstelt op een eenduidig mislukte geplaatste start de
+// voorafgaande mapping. Dat kan een levende eigenaar zijn: de wrapper
+// publiceert de nieuwe core vóór claimSlot en mag een duplicate dus niet naar
+// 0 terugrollen. Bij ErrDispatch blijft de nieuwe mapping staan, omdat de
+// dispatch-uitkomst onbekend is en de manager om dezelfde reden de kooi houdt.
+func rollbackHostCore(i, previous int, err error) {
+	if err != nil && !errors.Is(err, ErrDispatch) {
+		hostCore[i] = previous
+	}
+}
 
 func dispatchCore(core int, entry, ctx uint64) error {
 	// Nooit een core dispatchen die al draait: dat zou een app (of een tweede
@@ -603,20 +705,11 @@ func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]
 	}
 	// Pure invoervalidatie vóór het venster (prepStart); size/appRAM zijn ook
 	// puur rekenwerk.
-	mtab, envBlob, cores, err := prepStart(i, memLimit, cores, env, mounts, ports)
+	mtab, preparedEnv, cores, err := prepStart(i, memLimit, cores, env, mounts, ports)
 	if err != nil {
 		return err
 	}
-	// prepStart is niet puur: grantEnv vergeeft de fb-grant (en zet daarmee de
-	// HOP-console uit) vóórdat de env-groottecheck, de allocatie en de plaatsing
-	// zijn geweest. Elk faalpad hierna moet het glas dus teruggeven, anders
-	// blijft de console weg voor een task die nooit gedraaid heeft.
 	var started bool
-	defer func() {
-		if !started {
-			grantRelease(i)
-		}
-	}()
 	// Eén lifecycle tegelijk: de defer dekt álle paden. t0 meet de
 	// venster-tijd: dít is wat de convoy bij een storm serialiseert, dus dit
 	// hoort zichtbaar te zijn op een headless node.
@@ -625,7 +718,7 @@ func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]
 	// De EL2-vectoren + parkeerlus + mailboxen moeten klaar zijn vóór de
 	// eerste dispatch (mailbox cold-detectie leest een geveegde mailbox).
 	vectorsOnce.Do(cageInit)
-	if err := claimSlot(i, cores, shared); err != nil {
+	if err := claimStart(i, cores, shared); err != nil {
 		return err
 	}
 
@@ -643,6 +736,18 @@ func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]
 	if err != nil {
 		return err
 	}
+	var attemptGrant startGrant
+	envBlob, err := attemptGrant.prepare(i, preparedEnv)
+	if err != nil {
+		return err
+	}
+	// Pas na een werkelijk verkregen grant wapenen: claim-/allocatiefouten
+	// mogen de grant van een bestaande levende eigenaar nooit teruggeven.
+	defer func() {
+		if !started {
+			attemptGrant.rollback(i, err)
+		}
+	}()
 	// Eén regel per plaatsing: op een headless node is dít hoe je ziet wáár
 	// een slot fysiek landt (sinds 15-07 ook boven de 512GB-grens).
 	fmt.Printf("slot %d: partition %d MB @ %#x\n", i, size>>20, base)
@@ -651,11 +756,11 @@ func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]
 			return
 		}
 		// Faalde het startschot zélf, dan is onbekend of de core tóch aangaat
-		// (zie errDispatch): het geheugen gaat dan NIET terug de pool in, want
+		// (zie ErrDispatch): het geheugen gaat dan NIET terug de pool in, want
 		// first-fit zou het aan een volgende huurder uitdelen terwijl er nog
 		// leven in kan zitten. Alle andere faalpaden zijn eenduidig — daar is de
 		// partitie gewoon vrij.
-		if errors.Is(err, errDispatch) {
+		if errors.Is(err, ErrDispatch) {
 			fmt.Printf("slot %d: partition quarantined — dispatch outcome unknown HOPOS_PART_QUARANTINE\n", i)
 			return
 		}
@@ -953,12 +1058,12 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// bij boot maakte hem overbodig (en de bugklasse van boot 7/8 onmogelijk).
 	if coreRunning(core) || coreParks(core) {
 		if err := bootPendingDispatch(core, i, tramp, ctx); err != nil {
-			return fmt.Errorf("%w: %v", errDispatch, err)
+			return fmt.Errorf("%w: %v", ErrDispatch, err)
 		}
 	} else {
 		residentReset(core, i)
 		if err := dispatchCore(core, tramp, ctx); err != nil {
-			return fmt.Errorf("%w: %v", errDispatch, err)
+			return fmt.Errorf("%w: %v", ErrDispatch, err)
 		}
 	}
 	// Vanaf hier draait de app: de opbouw blijft staan (geen faalbare stap meer).

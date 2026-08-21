@@ -50,8 +50,7 @@ func gwParse(f []byte) (ihl int, proto byte, ok bool) {
 	}
 	ip := f[ethLen:]
 	ihl = int(ip[0]&0xf) * 4
-	if ip[0]>>4 != 4 || ihl < 20 || ip[9] != protoICMP ||
-		binary.BigEndian.Uint16(ip[6:])&0x1fff != 0 {
+	if ip[0]>>4 != 4 || ihl < 20 || ip[9] != protoICMP || ipv4Fragmented(ip) {
 		return 0, 0, false
 	}
 	return ihl, protoICMP, true

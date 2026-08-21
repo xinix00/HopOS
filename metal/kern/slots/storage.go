@@ -142,16 +142,30 @@ func (r *fsReader) Read(p []byte) (int, error) {
 // hashFile is de eerste pass van een push: de sha256 over precies size
 // bytes. De bron is lokale NVMe, dus twee keer lezen is goedkoop — en de
 // signer MOET de payload-hash vooraf kennen (bewust geen streaming-signing).
-func hashFile(f storeFS, path string, size uint64) (string, error) {
+//
+// De context wordt vóór en ná elke chunk gecontroleerd. ReadAt zelf is een
+// synchrone NVMe-op en kan een reeds lopend device-command niet afbreken, maar
+// een Stop hoeft daardoor nooit de rest van een groot bestand af te wachten:
+// zodra de huidige chunk terugkomt eindigt de hashpass en kan de servicer weg.
+func hashFile(ctx context.Context, f storeFS, path string, size uint64) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	h := sha256.New()
 	buf := make([]byte, 64<<10)
 	for off := uint64(0); off < size; {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		want := buf
 		if rem := size - off; rem < uint64(len(buf)) {
 			want = buf[:rem]
 		}
 		n, err := f.ReadAt(path, off, want)
 		if err != nil {
+			return "", err
+		}
+		if err := ctx.Err(); err != nil {
 			return "", err
 		}
 		if n == 0 {
@@ -212,7 +226,7 @@ func (s *servicer) storePush(f storeFS, req hopabi.Req) []byte {
 	if isDir {
 		return fail(req, fmt.Errorf("%q is a directory", req.Path))
 	}
-	sum, err := hashFile(f, rp, size)
+	sum, err := hashFile(s.ctx, f, rp, size)
 	if err != nil {
 		return fail(req, err)
 	}

@@ -4,7 +4,7 @@ go 1.26.4
 
 require github.com/usbarmory/tamago v1.26.4
 
-require github.com/xinix00/lean v0.10.0
+require github.com/xinix00/lean v0.99.0
 
 require github.com/xinix00/hoplockserver v0.2.1 // indirect
 
@@ -25,7 +25,7 @@ require github.com/xinix00/hoplock v0.4.1
 // Gemeten 19-08 in deze boom; surf's go.mod draagt dezelfde waarschuwing.
 
 require (
-	github.com/xinix00/hop v0.20.23
+	github.com/xinix00/hop v0.99.0
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20260709184058-243e02a382f8
 )
 

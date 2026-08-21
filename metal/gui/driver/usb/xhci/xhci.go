@@ -191,6 +191,8 @@ type HC struct {
 
 	// Gevuld door Start (zie host.go).
 	arena   arena
+	dmaBase uintptr // vast board-venster; bewaard voor recovery na HCRST
+	dmaSize uintptr
 	page    uintptr // paginagrootte van de controller (PAGESIZE-register)
 	nSlots  int     // hoeveel slots we daadwerkelijk in CONFIG aanzetten
 	ctxSize uintptr // 32 of 64
@@ -202,6 +204,13 @@ type HC struct {
 	pending []event
 	dropped int
 	running bool
+
+	// poisoned betekent dat hardware- en software-ownership niet meer bewezen
+	// gelijk lopen (bv. Disable Slot zonder bevestiging). Nieuwe Enable Slot-
+	// opdrachten zijn dan verboden: alleen een geslaagde controllerreset maakt
+	// alle hardware-slots aantoonbaar vrij en wist deze toestand. usbin ziet dit
+	// via RecoveryNeeded en herbouwt de controller met hetzelfde DMA-venster.
+	poisoned error
 }
 
 // Probe leest de capability-registers en vult de afgeleide adressen in. Raakt
@@ -273,7 +282,12 @@ func (h *HC) Reset() error {
 	if err := h.wait(opUSBCmd, cmdHCRST, 0, 500*time.Millisecond, "HCRST clear"); err != nil {
 		return err
 	}
-	return h.wait(opUSBSts, stsCNR, 0, 500*time.Millisecond, "controller ready")
+	if err := h.wait(opUSBSts, stsCNR, 0, 500*time.Millisecond, "controller ready"); err != nil {
+		return err
+	}
+	h.poisoned = nil
+	h.running = false
+	return nil
 }
 
 // Port is de stand van één poort.

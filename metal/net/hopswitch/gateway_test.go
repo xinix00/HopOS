@@ -53,6 +53,56 @@ func TestGatewayIPGaatInterneNICIn(t *testing.T) {
 	}
 }
 
+// De framegrens staat vóór elke forward-tak: een slot kan dus noch een
+// buurring met een record groter dan diens MTU-buffer vergiftigen, noch zo'n
+// record door de heap-backed gateway-wachtrij laten kopiëren.
+func TestIngressFramegrensVoorForwardEnGatewayKopie(t *testing.T) {
+	resetNAT()
+	victim := attachTestSlot(t, 2)
+	gotGateway := captureGateway(t)
+	srcMAC, dstMAC := layout.SlotMAC(1), layout.SlotMAC(2)
+
+	exact := make([]byte, maxFrameLen)
+	copy(exact[0:6], dstMAC[:])
+	copy(exact[6:12], srcMAC[:])
+	mu.Lock()
+	forward(1, exact)
+	mu.Unlock()
+	buf := make([]byte, maxFrameLen)
+	if n, err := victim.Receive(buf); err != nil || n != maxFrameLen {
+		t.Fatalf("frame op de grens: n=%d err=%v, wil %d", n, err, maxFrameLen)
+	}
+
+	oversized := append(append([]byte(nil), exact...), 0)
+	mu.Lock()
+	forward(1, oversized)
+	mu.Unlock()
+	if n, err := victim.Receive(buf); err != nil || n != 0 {
+		t.Fatalf("oversized frame bereikte buurring: n=%d err=%v", n, err)
+	}
+	if victim.rx.Corrupt() {
+		t.Fatalf("oversized frame maakte buurring corrupt: %s", victim.rx.CorruptWhy())
+	}
+
+	// Dezelfde grens moet vóór gwEnqueueLocked's heap-kopie staan.
+	toGateway := mkFrame(protoTCP, hostMAC, srcMAC, layout.SlotIP4(1), layout.HostIP4(), 5555, 9080, nil)
+	toGateway = append(toGateway, make([]byte, maxFrameLen+1-len(toGateway))...)
+	forwardEnDrain(1, toGateway)
+	if len(*gotGateway) != 0 {
+		t.Fatal("oversized frame werd naar de heap-backed gateway-queue gekopieerd")
+	}
+
+	// Een reject mag de ring niet vergiftigen: het eerstvolgende gewone frame
+	// moet nog steeds door dezelfde poort kunnen.
+	small := exact[:ethLen]
+	mu.Lock()
+	forward(1, small)
+	mu.Unlock()
+	if n, err := victim.Receive(buf); err != nil || n != len(small) {
+		t.Fatalf("ring werkte niet meer na reject: n=%d err=%v", n, err)
+	}
+}
+
 func TestExternBlijftMasquerade(t *testing.T) {
 	resetNAT()
 	nic := setUplink(t)

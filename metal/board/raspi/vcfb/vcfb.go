@@ -12,7 +12,6 @@ package vcfb
 import (
 	"sync"
 
-	"github.com/xinix00/HopOS/metal/board/raspi"
 	"github.com/xinix00/HopOS/metal/dev"
 	"github.com/xinix00/HopOS/metal/driver/fb"
 	"github.com/xinix00/HopOS/metal/driver/vcmail"
@@ -52,26 +51,48 @@ func Framebuffer(dtbPtr uintptr) (fb.Desc, bool) {
 // alloc kan een ander (niet-gescand) adres teruggeven, en de gedeelde
 // property-buffer racet bovendien met andere mailbox-verkeer (gemeten:
 // een grant las "3x1500000000"). Beeld = de firmware-buffer van boot; de
-// eerste geslaagde discovery is dus de enige. Rommel (onzinnige maten)
-// wordt geweigerd én niet gecachet.
+// eerste discovery is dus de enige. Ook een timeout of een onzinnige respons
+// wordt als definitieve mislukking gecachet: de allocate-tag kan al geslaagd
+// zijn terwijl een latere pitch/depth-tag rommel bevat, en opnieuw proberen
+// zou dan bij elke Framebuffer()-vraag een verse, niet meer vrij te geven
+// firmware-buffer stapelen. Een Pi waarop deze ene boot-probe faalt draait
+// daarom veilig headless tot de volgende boot.
 var (
-	fbMu     sync.Mutex
-	fbCached fb.Desc
-	fbOK     bool
+	fbMu    sync.Mutex
+	fbState discoveryState
 )
 
-func FramebufferVC(dtbPtr, mboxBase uintptr) (fb.Desc, bool) {
-	fbMu.Lock()
-	defer fbMu.Unlock()
-	if fbOK {
-		return fbCached, true
+type discoveryState struct {
+	done bool
+	desc fb.Desc
+	ok   bool
+}
+
+// get voert find hooguit één keer uit en cachet óók een fout/onsane respons.
+// De aanroeper serialiseert dit met fbMu; de losse state maakt precies de
+// fail-once-eigenschap host-testbaar zonder een echte VideoCore-mailbox.
+func (s *discoveryState) get(find func() (fb.Desc, bool)) (fb.Desc, bool) {
+	if s.done {
+		return s.desc, s.ok
 	}
-	d, ok := discoverVC(dtbPtr, mboxBase)
+	s.done = true
+	d, ok := find()
 	if !ok || !sane(d) {
 		return fb.Desc{}, false
 	}
-	fbCached, fbOK = d, true
-	return d, true
+	s.desc, s.ok = d, true
+	return s.desc, true
+}
+
+// FramebufferVC probeert de Pi-framebuffer precies één keer te ontdekken.
+// mboxBuf is het lage, ongecachete property-bufferadres van de boardlaag
+// (raspi.VCMailBuf); als parameter blijft deze discoverylaag host-testbaar.
+func FramebufferVC(dtbPtr, mboxBase, mboxBuf uintptr) (fb.Desc, bool) {
+	fbMu.Lock()
+	defer fbMu.Unlock()
+	return fbState.get(func() (fb.Desc, bool) {
+		return discoverVC(dtbPtr, mboxBase, mboxBuf)
+	})
 }
 
 // sane weert onzin-descriptors (mailbox-ruis) uit de cache en de grants.
@@ -81,11 +102,11 @@ func sane(d fb.Desc) bool {
 		d.Stride >= d.Width*d.BPP/8 && (d.BPP == 16 || d.BPP == 32)
 }
 
-func discoverVC(dtbPtr, mboxBase uintptr) (fb.Desc, bool) {
+func discoverVC(dtbPtr, mboxBase, mboxBuf uintptr) (fb.Desc, bool) {
 	if d, ok := Framebuffer(dtbPtr); ok {
 		return d, true
 	}
-	m := &vcmail.Mbox{Base: mboxBase, Buf: uintptr(raspi.VCMailBuf)}
+	m := &vcmail.Mbox{Base: mboxBase, Buf: mboxBuf}
 	f, ok := m.AllocFB(1920, 1080)
 	if !ok || f.Width == 0 {
 		return fb.Desc{}, false

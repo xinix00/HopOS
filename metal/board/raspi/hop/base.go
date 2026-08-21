@@ -108,7 +108,7 @@ func (b Base) PCIe() pcie.Window { return pcie.Window{} }
 // Framebuffer: DTB-simplefb met mailbox-terugval — de gedeelde Pi-discovery
 // (zie board/raspi/vcfb voor het meetverhaal); het board levert de adressen.
 func (b Base) Framebuffer() (fb.Desc, bool) {
-	return vcfb.FramebufferVC(b.DTBPtr, b.VCMailBase)
+	return vcfb.FramebufferVC(b.DTBPtr, b.VCMailBase, uintptr(raspi.VCMailBuf))
 }
 
 // EnableTimestamps zet de per-regel-console-stempel aan (optionele interface,

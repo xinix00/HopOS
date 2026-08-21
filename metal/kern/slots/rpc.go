@@ -125,9 +125,26 @@ func ok(req hopabi.Req, size uint64, data []byte) []byte {
 // servicer permanent (de write-lus herprobeert eeuwig). Geen paginatie in de
 // ABI, dus: te groot → nette fout i.p.v. hang.
 func listResp(req hopabi.Req, names []string) []byte {
-	data := []byte(strings.Join(names, "\n"))
-	if len(data) > hopabi.MaxChunk {
-		return fail(req, fmt.Errorf("list %q: %d bytes > max %d (too many entries)", req.Path, len(data), hopabi.MaxChunk))
+	// Eerst begrenzen, dan pas alloceren. Namen zijn al opslagstate; een te
+	// grote directory mag daar niet nog een even grote tijdelijke Join-buffer
+	// naast zetten om vervolgens alleen een fout terug te sturen.
+	total := 0
+	for i, name := range names {
+		separator := 0
+		if i > 0 {
+			separator = 1
+		}
+		if len(name) > hopabi.MaxChunk-total-separator {
+			return fail(req, fmt.Errorf("list %q: more than max %d bytes (too many entries)", req.Path, hopabi.MaxChunk))
+		}
+		total += separator + len(name)
+	}
+	data := make([]byte, 0, total)
+	for i, name := range names {
+		if i > 0 {
+			data = append(data, '\n')
+		}
+		data = append(data, name...)
 	}
 	return ok(req, uint64(len(names)), data)
 }
@@ -189,9 +206,16 @@ func (s *servicer) handle(payload []byte) []byte {
 		if err != nil {
 			return fail(req, err)
 		}
-		names, err := fsys.List(rp)
+		// Een naam bevat minstens één byte; met de scheidende newlines passen
+		// daarom nooit meer dan (MaxChunk+1)/2 namen. Begrens de hopfs-lijst op
+		// dat aantal; listResp hieronder blijft de enige byte-/serialisatiegrens.
+		const maxListNames = (hopabi.MaxChunk + 1) / 2
+		names, truncated, err := fsys.ListN(rp, maxListNames)
 		if err != nil {
 			return fail(req, err)
+		}
+		if truncated {
+			return fail(req, fmt.Errorf("list %q: too many entries for one response", req.Path))
 		}
 		return listResp(req, names)
 

@@ -75,11 +75,10 @@ func StartShared(core, i int, image []byte, memLimit uint64, env map[string]stri
 		return fmt.Errorf("shared core %d out of range 1..%d", core, layout.NumAppCores())
 	}
 	partOnce.Do(poolInit)
+	previousCore := hostCore[i]
 	hostCore[i] = core
 	err := startImage(i, image, memLimit, 1, env, mounts, ports, job, true)
-	if err != nil {
-		hostCore[i] = 0
-	}
+	rollbackHostCore(i, previousCore, err)
 	return err
 }
 

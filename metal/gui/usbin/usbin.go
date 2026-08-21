@@ -135,6 +135,19 @@ func (m *Manager) Scan() {
 	defer m.mu.Unlock()
 	for _, hc := range m.hcs {
 		known := m.ports[hc]
+		if cause := hc.RecoveryNeeded(); cause != nil {
+			// HCRST maakt elk bestaand Device-handle ongeldig, ook als maar
+			// één slot de oorspronkelijke fout gaf. Vergeet ze daarom zonder
+			// Disable Slot te sturen, maar laat eerst alle lokaal onthouden
+			// toetsen en muisknoppen los. Na Recover ziet de normale scan
+			// aangesloten apparaten in dezelfde ronde opnieuw.
+			m.forgetController(known)
+			if err := hc.Recover(); err != nil {
+				fmt.Printf("usb: %s: controllerherstel na %v mislukt: %v\n", hc.Name, cause, err)
+				continue
+			}
+			fmt.Printf("usb: %s: controller hersteld na %v; poorten worden opnieuw gescand\n", hc.Name, cause)
+		}
 		for _, p := range hc.Ports() {
 			cur, have := known[p.Num]
 			switch {
@@ -171,17 +184,43 @@ func (m *Manager) Scan() {
 // ingedrukt was, moet bij de display worden losgelaten — anders blijft hij daar
 // voor altijd staan.
 func (m *Manager) release(p *port) {
-	m.evs = p.kb.Reset(m.evs[:0])
-	m.evs = p.ms.Reset(m.evs)
+	m.evs = m.evs[:0]
+	m.appendReset(p)
 	m.emit()
-	p.dev.Detach()
+	if err := p.dev.Detach(); err != nil {
+		fmt.Printf("usb: detach kon controller-slot niet bevestigen: %v\n", err)
+	}
+}
+
+// forgetController laat decoderstate los en vergeet alle handles na een
+// ownership-fout. Het roept bewust geen Detach aan: de daaropvolgende HCRST is
+// juist de hardware-operatie die alle slots atomair vrijmaakt, en oude Device-
+// handles zijn daarna niet meer geldig.
+func (m *Manager) forgetController(known map[int]*port) {
+	m.evs = m.evs[:0]
+	for _, p := range known {
+		m.appendReset(p)
+	}
+	m.emit()
+	clear(known)
+}
+
+func (m *Manager) appendReset(p *port) {
+	m.evs = p.kb.Reset(m.evs)
+	m.evs = p.ms.Reset(m.evs)
 }
 
 // Poll haalt één ronde rapporten op.
 func (m *Manager) Poll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, known := range m.ports {
+	for hc, known := range m.ports {
+		// Een Disable Slot zonder completion maakt ook de command/event-state
+		// verdacht. Poll daarom geen enkel oud Device-handle meer tussen die
+		// fout en de controllerreset in de volgende scanronde.
+		if hc.RecoveryNeeded() != nil {
+			continue
+		}
 		for _, p := range known {
 			// Meerdere keren per beurt: één apparaat kan twee endpoints hebben
 			// (toetsenbord én muis op één dongle) en Report levert er één per
@@ -206,11 +245,10 @@ func (m *Manager) Poll() {
 }
 
 func (m *Manager) emit() {
-	if m.sink == nil {
-		return
-	}
-	for _, e := range m.evs {
-		m.sink(e)
+	if m.sink != nil {
+		for _, e := range m.evs {
+			m.sink(e)
+		}
 	}
 	m.evs = m.evs[:0]
 }

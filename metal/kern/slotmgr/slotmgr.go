@@ -70,9 +70,13 @@ func (Manager) PoolLargest() uint64 { return slots.PoolLargest() }
 // dan de image streamend de partitie in (slots.StartStreamOn).
 // Capaciteitstoestanden dragen hopos.ErrNoCapacity zodat HOP ze als pending
 // behandelt en niet herstart-stormt — een restart-lus op een onplaatsbare job
-// is een storm: elke poging downloadt de image opnieuw en faalt opnieuw. Op
-// élk faalpad is de kooi hier al teruggegeven (ReleaseCage) — de aanroeper
-// ruimt alleen zijn eigen boekhouding op.
+// is een storm: elke poging downloadt de image opnieuw en faalt opnieuw.
+//
+// De kooi gaat op élk EENDUIDIG faalpad terug (ReleaseCage) — behalve bij
+// ErrDispatch: daar is het startschot gegeven en is onbekend of de core tóch
+// aangaat. De partitie stond op dat pad al in quarantaine; de kooi hoort er dan
+// bij te blijven, anders krijgt de volgende job een core waarop nog leven kan
+// zitten (20-08). Zie docs/slot-lifecycle-grenzen.md.
 func (Manager) StartStream(slot int, image io.Reader, size int64, spec hopos.StartSpec) error {
 	cage := phys(slot)
 	core, err := slots.PlaceCage(cage, spec.Sharegroup, spec.PoolCores)
@@ -88,7 +92,9 @@ func (Manager) StartStream(slot int, image io.Reader, size int64, spec hopos.Sta
 	}
 	if err := slots.StartStreamOn(core, cage, image, size, spec.MemLimit, spec.Cores,
 		spec.Env, spec.Mounts, spec.Ports, spec.Job); err != nil {
-		slots.ReleaseCage(cage)
+		if !errors.Is(err, slots.ErrDispatch) {
+			slots.ReleaseCage(cage)
+		}
 		if errors.Is(err, slots.ErrNoPartition) {
 			// Geen partitie-ruimte is een capaciteitstoestand die vanzelf
 			// overgaat (een buurman verhuist of stopt): hand-back en pending.

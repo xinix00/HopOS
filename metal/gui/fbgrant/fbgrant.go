@@ -58,11 +58,11 @@ func UseInput(addr string) {
 	mu.Unlock()
 }
 
-// Env is de prepStart-hook (slots.GrantHooks.Env): kent bij env["FB"]=="1"
-// de framebuffer exclusief aan slot i toe en geeft een env-kopie met de
-// FB_*-beschrijving terug (het contract van cmd/display's fbblit.go in
-// hop-os-surf). Zonder framebuffer of bij een andere houder blijft de env
-// onaangeroerd — de app draait dan headless, dat is geen fout.
+// Env is de grant-hook na een geslaagde slotclaim (slots.GrantHooks.Env): kent
+// bij env["FB"]=="1" de framebuffer exclusief aan slot i toe en geeft een
+// env-kopie met de FB_*-beschrijving terug (het contract van cmd/display's
+// fbblit.go in hop-os-surf). Zonder framebuffer of bij een andere houder blijft
+// de env onaangeroerd — de app draait dan headless, dat is geen fout.
 func Env(i int, env map[string]string) map[string]string {
 	if env["FB"] != "1" {
 		return env

@@ -47,7 +47,15 @@ var ErrBodyTooLarge = errors.New("origin: request body above the buffer limit")
 // originHeaderTimeout begrenst het wachten op de ANTWOORDKOPPEN van de lokale
 // dienst, niet de overdracht daarna: een dode dienst mag geen stream vasthouden,
 // een groot bestand mag zo lang duren als het duurt.
-const originHeaderTimeout = 30 * time.Second
+//
+// 95 seconden, niet 30: een verzoek mag zelf traag wérk zijn — Matter-
+// commissioneren via stulp wacht tot een minuut op de mDNS-advertentie van het
+// apparaat, en de 30s hier maakte daar een 502 van terwijl de oorsprong gewoon
+// bezig was (gemeten 20-08). De echte bovengrens is toch de edge: Cloudflare
+// kapt een origin-antwoord rond de 100 seconden zelf af (hun 524), dus alles
+// boven ~95s is theater. Een dode dienst blijft binnen één verbinding hangen —
+// leanhttp dialt per verzoek en de dial-timeout vangt een dichte poort snel.
+const originHeaderTimeout = 95 * time.Second
 
 // hopByHop zijn de koppen die bij ONZE verbinding met de edge horen en niet bij
 // het verzoek aan de oorsprong (RFC 9110 §7.6.1, plus cloudflared's eigen

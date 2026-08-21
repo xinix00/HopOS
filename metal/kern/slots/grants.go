@@ -9,8 +9,8 @@ package slots
 import "fmt"
 
 // GrantHooks zijn de drie lifecycle-haakjes van één grant-provider:
-//   - Env (prepStart): mag de slot-env aanvullen (bv. FB_* voor de houder);
-//     geeft de (eventueel gekopieerde) env terug.
+//   - Env (startGrant.prepare, ná claimSlot): mag de slot-env aanvullen (bv.
+//     FB_* voor de houder); geeft de (eventueel gekopieerde) env terug.
 //   - Arm (armSlot, ná de kooi-bouw en vóór de dispatch): mapt het venster
 //     in de kooi van de houder; no-op voor andere slots.
 //   - Window (optioneel): geeft het venster van de houder terug. Nodig voor

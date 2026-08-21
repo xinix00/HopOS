@@ -23,13 +23,21 @@ import (
 
 	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/abi/ring"
+	"github.com/xinix00/HopOS/metal/net/netdev"
 )
 
 const (
-
 	// maxBurst begrenst het aantal frames per poort per switch-ronde, zodat
 	// één drukke poort de rest niet verhongert.
 	maxBurst = 64
+
+	// maxFrameLen is het grootste frame dat de stacks aan beide kanten
+	// aanbieden. De ABI-ring kan technisch bijna een halve megabyte per record
+	// dragen, maar TypeFrame is Ethernet: een groter record vóór elke flood,
+	// gateway-kopie of NAT-route weigeren. Anders kan één slot de MTU-buffer
+	// van een buurslot permanent corrupt verklaren of de heap-backed gateway-
+	// queues met reuzenkopieën vullen.
+	maxFrameLen = netdev.MTU + netdev.EthernetMaximumSize
 )
 
 // uit het net-plan in layout, als string voor de mains (layout.IP4Str: de
@@ -75,6 +83,7 @@ func Up() error {
 	}
 	ports = make([]*port, layout.MaxSlots+1) // MaxSlots staat vast na board-init
 	go loop()
+	go flowExpiryLoop()
 	up = true
 	return nil
 }
@@ -190,7 +199,7 @@ func switchPassLocked(buf []byte) (worked bool) {
 // niet aangesloten = drop (zoals echt Ethernet; TCP herstelt). Aanroepen met
 // mu vast (vanuit natInbound).
 func deliverLocked(i int, p []byte) {
-	if i < 1 || i >= len(ports) || ports[i] == nil {
+	if len(p) > maxFrameLen || i < 1 || i >= len(ports) || ports[i] == nil {
 		return
 	}
 	ports[i].rx.Write(ring.TypeFrame, p)
@@ -200,7 +209,7 @@ func deliverLocked(i int, p []byte) {
 // niet. Onbekende bestemming of volle ring = drop (zoals echt Ethernet).
 // Aanroepen met mu vast (vanuit switchPass).
 func forward(src int, p []byte) {
-	if len(p) < 14 {
+	if len(p) < 14 || len(p) > maxFrameLen {
 		return
 	}
 	// Bron-MAC-controle: een slot mag alleen zijn ÉIGEN MAC gebruiken. De

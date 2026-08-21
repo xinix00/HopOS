@@ -28,7 +28,11 @@ func resetNAT() {
 	flowsFwd = map[fkey]*flow{}
 	flowsRev = map[rkey]*flow{}
 	masqNext = uint16(MasqBase)
-	flowsFull = false
+	flowCountBySlot = [layout.SlotCap + 1]int{}
+	flowMapHighWater = 0
+	nextFlowSweep = time.Time{}
+	nextFlowsFullLog = time.Time{}
+	nextSlotFullLog = [layout.SlotCap + 1]time.Time{}
 	arpLast = map[uint32]time.Time{}
 	ports = nil // deliverLocked dropt dan (slot niet aangesloten)
 }
@@ -172,6 +176,19 @@ func mkFrame(proto byte, dstMAC, srcMAC [6]byte, srcIP, dstIP uint32, sport, dpo
 	return f
 }
 
+// setTCPFlags wijzigt de vlaggen van een testframe en herberekent daarna de
+// volledige TCP-checksum. mkFrame maakt standaard een vlagloos TCP-segment.
+func setTCPFlags(f []byte, flags byte) {
+	ip := f[ethLen:]
+	ihl := int(ip[0]&0x0f) * 4
+	total := int(binary.BigEndian.Uint16(ip[2:]))
+	l4 := ip[ihl:total]
+	l4[13] = flags
+	binary.BigEndian.PutUint16(l4[16:], 0)
+	sum := sumWords(ip[12:20]) + uint32(protoTCP) + uint32(len(l4)) + sumWords(l4)
+	binary.BigEndian.PutUint16(l4[16:], ^fold16(sum))
+}
+
 func checkFrame(t *testing.T, f []byte, wat string) {
 	t.Helper()
 	ip := f[ethLen:]
@@ -245,6 +262,7 @@ func TestIpv4L4Validatie(t *testing.T) {
 		{"IPv6-versie", func(f []byte) []byte { f[ethLen] = 0x65; return f }, false},
 		{"ihl te klein", func(f []byte) []byte { f[ethLen] = 0x44; return f }, false},
 		{"fragment", func(f []byte) []byte { binary.BigEndian.PutUint16(f[ethLen+6:], 0x00B9); return f }, false},
+		{"eerste fragment met MF", func(f []byte) []byte { binary.BigEndian.PutUint16(f[ethLen+6:], 0x2000); return f }, false},
 		{"ICMP", func(f []byte) []byte { f[ethLen+9] = 1; return f }, false},
 		{"TCP-header afgekapt", func(f []byte) []byte { return f[:ethLen+20+12] }, false},
 	}
@@ -471,20 +489,271 @@ func TestSweepExpired(t *testing.T) {
 	setUplink(t)
 	mu.Lock()
 	defer mu.Unlock()
+	now := time.Now()
 	mk := func(proto byte, sport uint16, leeftijd time.Duration) {
-		fl := flowFor(proto, 1, layout.SlotIP4(1), sport, extIP, 443)
-		fl.seen = time.Now().Add(-leeftijd)
+		fl := flowFor(proto, 1, layout.SlotIP4(1), sport, extIP, 443, now)
+		fl.seen = now.Add(-leeftijd)
 	}
 	mk(protoTCP, 1001, tcpIdle+time.Second) // verlopen
 	mk(protoTCP, 1002, tcpIdle-time.Second) // vers genoeg
 	mk(protoUDP, 1003, udpIdle+time.Second) // verlopen (kortere timeout)
 	mk(protoUDP, 1004, tcpIdle-time.Second) // ouder dan udpIdle → verlopen
-	sweepExpired()
+	sweepExpiredAt(now)
 	if len(flowsFwd) != 1 || len(flowsRev) != 1 {
 		t.Fatalf("na sweep: %d fwd / %d rev, verwacht 1/1", len(flowsFwd), len(flowsRev))
 	}
 	if flowsFwd[fkey{protoTCP, layout.SlotIP4(1), extIP, 1002, 443}] == nil {
 		t.Fatal("de verse TCP-flow is weggeveegd")
+	}
+}
+
+func TestSweepCompacteertMapNaVerkeerspiek(t *testing.T) {
+	resetNAT()
+	setUplink(t)
+	mu.Lock()
+	defer mu.Unlock()
+
+	now := time.Now()
+	var keep *flow
+	for i := 0; i < 128; i++ {
+		fl := flowFor(protoTCP, 1, layout.SlotIP4(1), uint16(1000+i), extIP, 443, now)
+		if i == 127 {
+			fl.seen = now
+			keep = fl
+		} else {
+			fl.seen = now.Add(-tcpIdle - time.Second)
+		}
+	}
+	if flowMapHighWater != 128 {
+		t.Fatalf("high-water vóór sweep=%d, wil 128", flowMapHighWater)
+	}
+	sweepExpiredAt(now)
+	if len(flowsFwd) != 1 || len(flowsRev) != 1 || flowMapHighWater != 1 || flowCountBySlot[1] != 1 {
+		t.Fatalf("na compactie: fwd=%d rev=%d high=%d count=%d, wil 1/1/1/1",
+			len(flowsFwd), len(flowsRev), flowMapHighWater, flowCountBySlot[1])
+	}
+	if flowsRev[rkey{keep.proto, keep.nodePort, keep.dstIP, keep.dstPort}] != keep {
+		t.Fatal("reverse mapping van de overlevende flow ging bij compactie verloren")
+	}
+}
+
+func TestFlowLookupVervangtVerlopenEntry(t *testing.T) {
+	resetNAT()
+	setUplink(t)
+	mu.Lock()
+	defer mu.Unlock()
+	now := time.Now()
+
+	old := flowFor(protoUDP, 1, layout.SlotIP4(1), 1001, extIP, 443, now)
+	if old == nil {
+		t.Fatal("eerste flow niet aangemaakt")
+	}
+	oldPort := old.nodePort
+	old.seen = now.Add(-udpIdle - time.Second)
+
+	replacement := flowFor(protoUDP, 1, layout.SlotIP4(1), 1001, extIP, 443, now)
+	if replacement == nil || replacement == old {
+		t.Fatal("exacte lookup gaf een verlopen flow terug")
+	}
+	if replacement.nodePort == oldPort {
+		t.Fatal("vervangende flow hergebruikte onverwacht dezelfde allocatie")
+	}
+	if flowsRev[rkey{protoUDP, oldPort, extIP, 443}] != nil {
+		t.Fatal("reverse mapping van de verlopen flow bleef staan")
+	}
+	if len(flowsFwd) != 1 || len(flowsRev) != 1 || flowCountBySlot[1] != 1 {
+		t.Fatalf("na vervanging: fwd=%d rev=%d count=%d, wil 1/1/1",
+			len(flowsFwd), len(flowsRev), flowCountBySlot[1])
+	}
+}
+
+// Een verlopen reverse match mag de node-poort niet blijven kapen. Nadat de
+// stale conntrack is verwijderd moet hetzelfde pakket nog DNAT kunnen matchen.
+func TestReverseLookupVerwijdertExpiredEnValtTerugOpDNAT(t *testing.T) {
+	resetNAT()
+	setUplink(t)
+	mu.Lock()
+	now := time.Now()
+	fl := flowFor(protoTCP, 1, layout.SlotIP4(1), 1001, extIP, 443, now)
+	fl.seen = now.Add(-tcpIdle - time.Second)
+	nodePort := fl.nodePort
+	mu.Unlock()
+
+	if err := Publish("tcp", nodePort, 2, 8080); err != nil {
+		t.Fatalf("Publish op oude masq-poort: %v", err)
+	}
+	read := testSlotRing(t, 2)
+	in := mkFrame(protoTCP, nicMAC, gwMAC0, extIP, nodeIP, 443, nodePort, []byte("nieuw"))
+	if !natInbound(in) {
+		t.Fatal("pakket viel na stale reverse lookup niet terug op DNAT")
+	}
+	got := read()
+	if got == nil {
+		t.Fatal("DNAT-pakket niet bij het gepubliceerde slot bezorgd")
+	}
+	ip := got[ethLen:]
+	if binary.BigEndian.Uint32(ip[16:]) != layout.SlotIP4(2) || binary.BigEndian.Uint16(ip[22:]) != 8080 {
+		t.Fatalf("verkeerde DNAT-bestemming: %08x:%d",
+			binary.BigEndian.Uint32(ip[16:]), binary.BigEndian.Uint16(ip[22:]))
+	}
+	checkFrame(t, got, "DNAT na stale reverse lookup")
+	mu.Lock()
+	defer mu.Unlock()
+	if len(flowsFwd) != 0 || len(flowsRev) != 0 || flowCountBySlot[1] != 0 {
+		t.Fatalf("stale flow niet volledig verwijderd: fwd=%d rev=%d count=%d",
+			len(flowsFwd), len(flowsRev), flowCountBySlot[1])
+	}
+}
+
+func TestTCPFINVerkortTimeoutPasNaBeideRichtingen(t *testing.T) {
+	resetNAT()
+	setUplink(t)
+	mu.Lock()
+	defer mu.Unlock()
+
+	base := time.Unix(1_000, 0)
+	fl := flowFor(protoTCP, 1, layout.SlotIP4(1), 1001, extIP, 443, base)
+	l4 := make([]byte, 20)
+	l4[13] = tcpFlagFIN
+	noteTCPFlags(fl, l4, false)
+	sweepExpiredAt(base.Add(tcpClosingIdle + time.Nanosecond))
+	if len(flowsFwd) != 1 {
+		t.Fatal("eenzijdige FIN ruimde een legitieme TCP-half-close op")
+	}
+
+	noteTCPFlags(fl, l4, true)
+	sweepExpiredAt(base.Add(tcpClosingIdle + time.Nanosecond))
+	if len(flowsFwd) != 0 || len(flowsRev) != 0 || flowCountBySlot[1] != 0 {
+		t.Fatal("flow met FIN in beide richtingen overleefde de closing-timeout")
+	}
+}
+
+func TestTCPRSTBezorgingEnVeiligeReclaim(t *testing.T) {
+	t.Run("outbound zonder flow", func(t *testing.T) {
+		resetNAT()
+		nic := setUplink(t)
+		leerGateway(t)
+		before := masqNext
+		rst := mkFrame(protoTCP, hostMAC, layout.SlotMAC(1), layout.SlotIP4(1), extIP, 5555, 443, nil)
+		setTCPFlags(rst, tcpFlagRST|tcpFlagACK)
+		mu.Lock()
+		claimed := natOutbound(1, rst)
+		mu.Unlock()
+		if !claimed {
+			t.Fatal("flow-loze outbound RST niet als NAT-verkeer afgehandeld")
+		}
+		if len(nic.sent) != 0 {
+			t.Fatal("flow-loze RST kreeg zonder bekend node-poortnummer toch een vertaling")
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if len(flowsFwd) != 0 || len(flowsRev) != 0 || flowMapHighWater != 0 || masqNext != before {
+			t.Fatalf("flow-loze RST veroorzaakte allocatiechurn: fwd=%d rev=%d high=%d masq=%d→%d",
+				len(flowsFwd), len(flowsRev), flowMapHighWater, before, masqNext)
+		}
+	})
+
+	t.Run("inbound", func(t *testing.T) {
+		resetNAT()
+		nic := setUplink(t)
+		leerGateway(t)
+		slotIP := layout.SlotIP4(1)
+		out := mkFrame(protoTCP, hostMAC, layout.SlotMAC(1), slotIP, extIP, 5555, 443, nil)
+		mu.Lock()
+		natOutbound(1, out)
+		fl := flowsFwd[fkey{protoTCP, slotIP, extIP, 5555, 443}]
+		mu.Unlock()
+		if fl == nil || len(nic.sent) != 1 {
+			t.Fatal("voorbereidende TCP-flow ontbreekt")
+		}
+
+		read := testSlotRing(t, 1)
+		rst := mkFrame(protoTCP, nicMAC, gwMAC0, extIP, nodeIP, 443, fl.nodePort, nil)
+		setTCPFlags(rst, tcpFlagRST|tcpFlagACK)
+		if !natInbound(rst) {
+			t.Fatal("inbound RST niet geclaimd")
+		}
+		got := read()
+		if got == nil || got[ethLen+20+13]&tcpFlagRST == 0 {
+			t.Fatal("RST werd vóór aflevering weggegooid")
+		}
+		checkFrame(t, got, "inbound RST")
+		mu.Lock()
+		defer mu.Unlock()
+		if len(flowsFwd) != 1 || len(flowsRev) != 1 || flowCountBySlot[1] != 1 {
+			t.Fatal("inbound RST ruimde zonder TCP-sequencevalidatie onveilig vroeg op")
+		}
+	})
+
+	t.Run("outbound", func(t *testing.T) {
+		resetNAT()
+		nic := setUplink(t)
+		leerGateway(t)
+		slotIP := layout.SlotIP4(1)
+		first := mkFrame(protoTCP, hostMAC, layout.SlotMAC(1), slotIP, extIP, 5555, 443, nil)
+		mu.Lock()
+		natOutbound(1, first)
+		mu.Unlock()
+		rst := mkFrame(protoTCP, hostMAC, layout.SlotMAC(1), slotIP, extIP, 5555, 443, nil)
+		setTCPFlags(rst, tcpFlagRST|tcpFlagACK)
+		mu.Lock()
+		natOutbound(1, rst)
+		mu.Unlock()
+		if len(nic.sent) != 2 || nic.sent[1][ethLen+20+13]&tcpFlagRST == 0 {
+			t.Fatal("outbound RST werd niet verzonden")
+		}
+		checkFrame(t, nic.sent[1], "outbound RST")
+		mu.Lock()
+		defer mu.Unlock()
+		if len(flowsFwd) != 0 || len(flowsRev) != 0 || flowCountBySlot[1] != 0 {
+			t.Fatal("outbound RST gaf de conntrack-lease niet vrij")
+		}
+	})
+}
+
+func TestVolSlotRejectpadIsRateLimited(t *testing.T) {
+	resetNAT()
+	setUplink(t)
+	mu.Lock()
+	defer mu.Unlock()
+	now := time.Now()
+
+	var oldest *flow
+	for i := 0; i < maxFlowsPerSlot; i++ {
+		fl := flowFor(protoUDP, 1, layout.SlotIP4(1), uint16(1000+i), extIP, 443, now)
+		if fl == nil {
+			t.Fatalf("flow %d vóór het slotquotum geweigerd", i)
+		}
+		if i == 0 {
+			oldest = fl
+		}
+	}
+	if flowFor(protoUDP, 1, layout.SlotIP4(1), 60000, extIP, 443, now) != nil {
+		t.Fatal("flow boven het slotquotum geaccepteerd")
+	}
+	firstSweep, firstLog := nextFlowSweep, nextSlotFullLog[1]
+	if firstSweep.IsZero() || firstLog.IsZero() {
+		t.Fatal("eerste reject zette sweep/log-cadans niet")
+	}
+
+	oldest.seen = now.Add(-udpIdle - time.Second)
+	if flowFor(protoUDP, 1, layout.SlotIP4(1), 60001, extIP, 443, now) != nil {
+		t.Fatal("tweede flow boven het slotquotum geaccepteerd")
+	}
+	if flowsFwd[fkey{protoUDP, layout.SlotIP4(1), extIP, 1000, 443}] == nil {
+		t.Fatal("tweede reject scande opnieuw vóór de cadence")
+	}
+	if nextFlowSweep != firstSweep || nextSlotFullLog[1] != firstLog {
+		t.Fatal("herhaalde reject schoof sweep- of logdeadline opnieuw door")
+	}
+
+	nextFlowSweep = time.Time{} // simuleer de volgende goedkope cadence
+	if flowFor(protoUDP, 1, layout.SlotIP4(1), 60002, extIP, 443, now) == nil {
+		t.Fatal("cadence-sweep maakte geen plek voor een nieuwe flow")
+	}
+	if len(flowsFwd) != maxFlowsPerSlot || len(flowsRev) != maxFlowsPerSlot || flowCountBySlot[1] != maxFlowsPerSlot {
+		t.Fatalf("cardinaliteit na sweep/refill: fwd=%d rev=%d count=%d",
+			len(flowsFwd), len(flowsRev), flowCountBySlot[1])
 	}
 }
 
@@ -494,8 +763,10 @@ func TestUnpublishSlotRuimtOp(t *testing.T) {
 	Publish("tcp", 8080, 1, 8080)
 	Publish("tcp", 8081, 2, 8081)
 	mu.Lock()
-	flowFor(protoTCP, 1, layout.SlotIP4(1), 1001, extIP, 443)
-	flowFor(protoTCP, 2, layout.SlotIP4(2), 1002, extIP, 443)
+	now := time.Now()
+	flowFor(protoTCP, 1, layout.SlotIP4(1), 1001, extIP, 443, now)
+	flowFor(protoTCP, 2, layout.SlotIP4(2), 1002, extIP, 443, now)
+	flowFor(protoTCP, 2, layout.SlotIP4(2), 1003, layout.SlotIP4(1), 8080, now) // hairpin naar slot 1
 	mu.Unlock()
 	UnpublishSlot(1)
 	mu.Lock()
@@ -507,9 +778,36 @@ func TestUnpublishSlotRuimtOp(t *testing.T) {
 		t.Fatalf("flows na unpublish: %d fwd / %d rev", len(flowsFwd), len(flowsRev))
 	}
 	for _, fl := range flowsFwd {
-		if fl.slot != 2 {
-			t.Fatalf("flow van slot %d overleefde", fl.slot)
+		if fl.slot != 2 || fl.dstIP == layout.SlotIP4(1) {
+			t.Fatalf("verkeerde flow overleefde: slot=%d dst=%08x", fl.slot, fl.dstIP)
 		}
+	}
+	if flowCountBySlot[1] != 0 || flowCountBySlot[2] != 1 {
+		t.Fatalf("flowtellers na unpublish: slot1=%d slot2=%d", flowCountBySlot[1], flowCountBySlot[2])
+	}
+}
+
+func TestUnpublishSlotCompacteertPublicatiepiek(t *testing.T) {
+	resetNAT()
+	for p := uint16(1000); p < 1128; p++ {
+		if err := Publish("tcp", p, 1, p); err != nil {
+			t.Fatalf("Publish tcp/%d: %v", p, err)
+		}
+	}
+	if err := Publish("tcp", 9000, 2, 9000); err != nil {
+		t.Fatalf("Publish overlever: %v", err)
+	}
+	if cap(pubs) < 64 {
+		t.Fatalf("test bouwde geen publicatiepiek: cap=%d", cap(pubs))
+	}
+	UnpublishSlot(1)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(pubs) != 1 || pubs[0].slot != 2 {
+		t.Fatalf("verkeerde publicaties over: %+v", pubs)
+	}
+	if cap(pubs) > 4 {
+		t.Fatalf("backing-array van publicatiepiek bleef hangen: len=%d cap=%d", len(pubs), cap(pubs))
 	}
 }
 
@@ -518,15 +816,16 @@ func TestNeighborCacheEnPlafond(t *testing.T) {
 	setUplink(t)
 	mu.Lock()
 	defer mu.Unlock()
-	learnLocked(lanIP, lanMAC0[:])
-	if m, ok := l2For(lanIP); !ok || m != lanMAC0 {
+	now := time.Now()
+	learnLocked(lanIP, lanMAC0[:], now)
+	if m, ok := l2For(lanIP, now); !ok || m != lanMAC0 {
 		t.Fatal("on-subnet neighbor niet geleerd")
 	}
-	learnLocked(extIP, gwMAC0[:]) // off-subnet ⇒ dit is de gateway
-	if m, ok := l2For(extIP); !ok || m != gwMAC0 {
+	learnLocked(extIP, gwMAC0[:], now) // off-subnet ⇒ dit is de gateway
+	if m, ok := l2For(extIP, now); !ok || m != gwMAC0 {
 		t.Fatal("off-subnet bestemming hoort via de gateway te gaan")
 	}
-	if _, ok := l2For(nodeIP&^0xFF | 0x42); ok {
+	if _, ok := l2For(nodeIP&^0xFF|0x42, now); ok {
 		t.Fatal("onbekende on-subnet neighbor hoort NIET known te zijn: de gateway " +
 			"stuurt een LAN-frame niet terug het LAN op — first-contact moet ARP'en")
 	}
@@ -536,13 +835,13 @@ func TestNeighborCacheEnPlafond(t *testing.T) {
 	// blijft werken, met de laatst geleerde off-subnet-MAC.
 	gw2 := [6]byte{0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x02}
 	for i := uint32(0); len(neigh) < maxNeigh; i++ {
-		learnLocked(0x0A000300+i, lanMAC0[:])
+		learnLocked(0x0A000300+i, lanMAC0[:], now)
 	}
-	learnLocked(0x0B000001, gw2[:]) // onbekend IP op het plafond → leging
+	learnLocked(0x0B000001, gw2[:], now) // onbekend IP op het plafond → leging
 	if len(neigh) != 1 {
 		t.Fatalf("cache na plafond: %d entries, verwacht 1", len(neigh))
 	}
-	if m, ok := l2For(extIP); !ok || m != gw2 {
+	if m, ok := l2For(extIP, now); !ok || m != gw2 {
 		t.Fatal("gateway-fallback werkt niet meer na de cache-leging")
 	}
 }
@@ -582,7 +881,7 @@ func TestARPFirstContact(t *testing.T) {
 	// onbekende on-subnet host op het gateway-MAC terug (known=true) en de
 	// SYN verdween stil bij de router. De wifi-Brother-jacht van die dag.
 	mu.Lock()
-	learnLocked(extIP, gwMAC0[:])
+	learnLocked(extIP, gwMAC0[:], time.Now())
 	mu.Unlock()
 
 	slotIP := layout.SlotIP4(1)
@@ -694,8 +993,9 @@ func TestNeighborExpiresAndRelearns(t *testing.T) {
 	resetNAT()
 	nic := setUplink(t)
 	mu.Lock()
-	learnLocked(extIP, gwMAC0[:]) // gateway bekend, zoals op elke echte node
-	learnLocked(lanIP, lanMAC0[:])
+	now := time.Now()
+	learnLocked(extIP, gwMAC0[:], now) // gateway bekend, zoals op elke echte node
+	learnLocked(lanIP, lanMAC0[:], now)
 	mu.Unlock()
 
 	// Vers: rechtstreeks naar het geleerde MAC.
@@ -732,10 +1032,47 @@ func TestNeighborExpiresAndRelearns(t *testing.T) {
 	// MAC) en de volgende dial gaat weer rechtstreeks — naar het NIEUWE pad.
 	newMAC := [6]byte{0x66, 0x77, 0x88, 0x99, 0xAA, 0xCC}
 	mu.Lock()
-	learnLocked(lanIP, newMAC[:])
+	learnLocked(lanIP, newMAC[:], time.Now())
 	natOutbound(1, append([]byte(nil), syn...))
 	mu.Unlock()
 	if last := nic.sent[len(nic.sent)-1]; !bytes.Equal(last[0:6], newMAC[:]) {
 		t.Fatalf("na her-leren hoort het verkeer naar het nieuwe MAC te gaan, ging naar %x", last[0:6])
+	}
+}
+
+func BenchmarkVolSlotRejectpad(b *testing.B) {
+	resetNAT()
+	now := time.Unix(1_000, 0)
+	mu.Lock()
+	defer mu.Unlock()
+	for i := 0; i < maxFlowsPerSlot; i++ {
+		if flowFor(protoUDP, 1, layout.SlotIP4(1), uint16(1000+i), extIP, 443, now) == nil {
+			b.Fatal("setup raakte vóór het slotquotum vol")
+		}
+	}
+	// Meet alleen de O(1)-reject; sweep en log hebben hun eigen cadence.
+	nextFlowSweep = now.Add(time.Hour)
+	nextSlotFullLog[1] = now.Add(time.Hour)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if flowFor(protoUDP, 1, layout.SlotIP4(1), 60000, extIP, 443, now) != nil {
+			b.Fatal("flow boven quotum geaccepteerd")
+		}
+	}
+}
+
+func BenchmarkKorteFlowReclaim(b *testing.B) {
+	resetNAT()
+	now := time.Unix(1_000, 0)
+	mu.Lock()
+	defer mu.Unlock()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		fl := flowFor(protoTCP, 1, layout.SlotIP4(1), 5555, extIP, 443, now)
+		if fl == nil || !removeFlowLocked(fl, true) {
+			b.Fatal("korte flow kon niet worden gemaakt/opgeruimd")
+		}
 	}
 }

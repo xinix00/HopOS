@@ -175,12 +175,83 @@ func defaultMPS0(s Speed) int {
 	return 8
 }
 
+// disableSlotFn is de kleine testnaad rond het hardwarecommando. De ownership-
+// transities eromheen zijn gewone Go-logica en moeten op de host te bewijzen
+// zijn zonder MMIO-ringen na te bouwen.
+type disableSlotFn func(slot int) error
+type clearSlotFn func(slot int)
+
+func (h *HC) disableSlot(slot int) error {
+	if slot < 1 || slot > 255 { // Slot ID is het hoge byte van het command-TRB.
+		return fmt.Errorf("slot-id %d kan niet in Disable Slot", slot)
+	}
+	_, err := h.command(0, 0, 0,
+		uint32(trbDisableSlot)<<trbTypeShift|uint32(slot)<<24, "disable slot")
+	return err
+}
+
+func (h *HC) clearSlot(slot int) {
+	dev.Write64(h.dcbaa+uintptr(slot)*8, 0)
+	dev.MB()
+}
+
+// quarantine legt vast dat software niet meer kan bewijzen welke slots de
+// controller bezit. Vanaf dit moment mag geen nieuwe Enable Slot meer volgen:
+// alleen HCRST maakt alle hardware-state aantoonbaar leeg (Reset wist dit pas
+// nadat HCRST én CNR succesvol zijn afgerond).
+func (h *HC) quarantine(err error) error {
+	if h.poisoned == nil {
+		h.poisoned = err
+	}
+	return fmt.Errorf("xhci %s: slot-ownership onbekend; controllerreset vereist: %w", h.Name, h.poisoned)
+}
+
+// claimEnabledSlot boekt een bevestigd Enable Slot-resultaat in. Geeft de
+// controller een slot buiten ons CONFIG-bereik terug, dan proberen we precies
+// dát gerapporteerde hardware-slot meteen te disablen. Alleen een bevestigde
+// disable laat de controller bruikbaar; slot 0, een softwarecollisie of een
+// mislukte cleanup quarantaint de hele controller.
+func (h *HC) claimEnabledSlot(slot int, disable disableSlotFn) error {
+	if slot >= 1 && slot <= h.nSlots {
+		if slot >= len(h.res) || h.res[slot] == nil {
+			return h.quarantine(fmt.Errorf("Enable Slot gaf slot %d, maar software heeft er geen resources voor", slot))
+		}
+		r := h.res[slot]
+		if r.inUse || r.quarantined {
+			return h.quarantine(fmt.Errorf("Enable Slot gaf reeds bezet/quarantined slot %d", slot))
+		}
+		// Vanaf het bevestigde Enable-resultaat bestaat de hardwarelease, dus nú
+		// boeken — niet pas na de descriptor/configuratiefase.
+		r.inUse = true
+		return nil
+	}
+
+	bad := fmt.Errorf("controller gaf na Enable Slot slot %d (CONFIG staat op %d)", slot, h.nSlots)
+	if slot < 1 || slot > 255 {
+		return h.quarantine(fmt.Errorf("%w; gerapporteerd slot kan niet veilig worden gedisabled", bad))
+	}
+	if err := disable(slot); err != nil {
+		return h.quarantine(fmt.Errorf("%w; cleanup met Disable Slot faalde: %v", bad, err))
+	}
+	return fmt.Errorf("xhci %s: %w; afwijkend slot is bevestigd gedisabled", h.Name, bad)
+}
+
+func (h *HC) abortAttach(slot int, cause error) error {
+	if err := h.releaseSlot(slot); err != nil {
+		return fmt.Errorf("%v; cleanup na mislukte enumeratie: %w", cause, err)
+	}
+	return cause
+}
+
 // Attach doorloopt de volledige enumeratie van de poort tot een gearmeerde
 // interrupt-endpoint. Geeft nil,nil als er wel een apparaat hangt maar het geen
 // boot-HID is — een USB-stick in de poort is geen fout, alleen niets voor ons.
 func (h *HC) Attach(port int) (*Device, error) {
 	if !h.running {
 		return nil, fmt.Errorf("xhci %s: Attach vóór Start", h.Name)
+	}
+	if h.poisoned != nil {
+		return nil, fmt.Errorf("xhci %s: geen nieuwe apparaten vóór controllerreset: %w", h.Name, h.poisoned)
 	}
 	if err := h.ResetPort(port); err != nil {
 		return nil, err
@@ -192,28 +263,26 @@ func (h *HC) Attach(port int) (*Device, error) {
 		return nil, err
 	}
 	slot := ev.slot
-	if slot <= 0 || slot > h.nSlots {
-		return nil, fmt.Errorf("xhci %s: controller gaf slot %d (we hebben er %d)", h.Name, slot, h.nSlots)
+	if err := h.claimEnabledSlot(slot, h.disableSlot); err != nil {
+		return nil, err
 	}
 
 	d := &Device{hc: h, Slot: slot, Port: port, Speed: sp, res: h.res[slot], mps0: defaultMPS0(sp)}
 	if err := d.address(); err != nil {
-		h.releaseSlot(slot)
-		return nil, err
+		return nil, h.abortAttach(slot, err)
 	}
 	if err := d.readDescriptors(); err != nil {
-		h.releaseSlot(slot)
-		return nil, err
+		return nil, h.abortAttach(slot, err)
 	}
 	if len(d.ifaces) == 0 {
-		h.releaseSlot(slot)
+		if err := h.releaseSlot(slot); err != nil {
+			return nil, err
+		}
 		return nil, nil
 	}
 	if err := d.configure(); err != nil {
-		h.releaseSlot(slot)
-		return nil, err
+		return nil, h.abortAttach(slot, err)
 	}
-	h.res[slot].inUse = true
 	return d, nil
 }
 
@@ -634,30 +703,49 @@ func (d *Device) recover(f *hidIface) error {
 // Err geeft de laatste transferfout van dit apparaat (nil zolang alles loopt).
 func (d *Device) Err() error { return d.lastErr }
 
-// Detach geeft het slot terug aan de controller. Idempotent.
-func (d *Device) Detach() {
+// Detach geeft het slot terug aan de controller. Idempotent. Een fout betekent
+// dat de hardware-disable niet bevestigd is; d en zijn slotRes blijven dan
+// bewust eigenaar/quarantined en de HC weigert nieuwe allocations tot Reset.
+func (d *Device) Detach() error {
 	if d.res == nil || !d.res.inUse {
-		return
+		return nil
 	}
-	d.hc.releaseSlot(d.Slot)
+	if err := d.hc.releaseSlot(d.Slot); err != nil {
+		d.lastErr = err
+		return err
+	}
 	for i := range d.ifaces {
 		d.ifaces[i].armed = false
 	}
 	d.res = nil
+	return nil
 }
 
-// releaseSlot doet Disable Slot en haalt het device context uit de DCBAA. De
-// structuren zelf blijven staan voor het volgende apparaat in dit slot.
-func (h *HC) releaseSlot(slot int) {
-	if _, err := h.command(0, 0, 0,
-		uint32(trbDisableSlot)<<trbTypeShift|uint32(slot)<<24, "disable slot"); err != nil {
-		fmt.Printf("usb: %s: disable slot %d: %v\n", h.Name, slot, err)
+// releaseSlot doet Disable Slot en haalt pas ná de bevestigde completion het
+// device context uit de DCBAA. Bij timeout/afwijzing blijft de softwarelease
+// staan en gaat het slot in quarantaine; anders zouden volgende Enable Slot-
+// retries ongemerkt de eindige hardware-slots kunnen opstapelen.
+func (h *HC) releaseSlot(slot int) error {
+	return h.releaseSlotWith(slot, h.disableSlot, h.clearSlot)
+}
+
+func (h *HC) releaseSlotWith(slot int, disable disableSlotFn, clear clearSlotFn) error {
+	if slot < 1 || slot > h.nSlots || slot >= len(h.res) || h.res[slot] == nil {
+		return h.quarantine(fmt.Errorf("software probeerde onbekend slot %d vrij te geven", slot))
 	}
-	dev.Write64(h.dcbaa+uintptr(slot)*8, 0)
-	dev.MB()
-	if slot >= 1 && slot < len(h.res) {
-		h.res[slot].inUse = false
+	r := h.res[slot]
+	if !r.inUse && !r.quarantined {
+		return nil
 	}
+	if err := disable(slot); err != nil {
+		r.inUse = true
+		r.quarantined = true
+		return h.quarantine(fmt.Errorf("Disable Slot %d niet bevestigd: %v", slot, err))
+	}
+	clear(slot)
+	r.inUse = false
+	r.quarantined = false
+	return nil
 }
 
 func (d *Device) String() string {

@@ -50,7 +50,9 @@ const (
 
 	// TCP-vlagbits: natFromSlot onderscheidt een kale SYN (uitgaand dialen)
 	// van een antwoord op een gepubliceerde poort.
+	tcpFlagFIN = 0x01
 	tcpFlagSYN = 0x02
+	tcpFlagRST = 0x04
 	tcpFlagACK = 0x10
 
 	// Masquerade-poortbereik (PAT) en conntrack-grenzen. MasqBase/MasqEnd is
@@ -61,14 +63,26 @@ const (
 	// per ongeluk een masquerade-flow naar dezelfde peer kunnen matchen.
 	// 29k poorten blijft ruim boven maxFlows. Het plafond maxFlows is de
 	// anti-DoS-grens (zoals bij de neighbor-cache): een app kan HOP's heap op
-	// core 0 nooit laten vollopen. Idle-timeouts ruimen dode flows op — geen
-	// TCP-toestand (FIN/RST) volgen, alleen inactiviteit; keepalives van een
-	// langlopende tunnel (cloudflared ~30-90s) blijven ruim binnen tcpIdle.
+	// core 0 nooit laten vollopen. Idle-timeouts ruimen dode flows op; RST geeft
+	// meteen vrij en FIN in beide richtingen verkort alleen de sluitstaart.
+	// Keepalives van een langlopende tunnel (~30-90s) blijven ruim binnen
+	// tcpIdle.
 	MasqBase = 20000
 	MasqEnd  = 49152
 	maxFlows = 4096
 	tcpIdle  = 300 * time.Second
 	udpIdle  = 60 * time.Second
+
+	// Na een FIN in beide richtingen is alleen de afsluitende ACK/retransmit nog
+	// onderweg. Houd daarvoor een conservatieve minuut aan; een eenzijdige FIN
+	// kan een legitieme half-close zijn en houdt daarom gewoon tcpIdle.
+	tcpClosingIdle = 60 * time.Second
+
+	// flowSweepEvery geeft echte wall-clock-expiry zonder een scan per pakket.
+	// De kortste TTL is een minuut; twee sweeps per TTL houden reclaim tijdig
+	// zonder core 0 iedere seconde door maximaal 4096 entries te laten lopen.
+	flowSweepEvery = 30 * time.Second
+	flowLogEvery   = 30 * time.Second
 
 	// maxFlowsPerSlot is het eerlijke deel per slot ónder het globale plafond.
 	// Zonder dit is de conntrack één gedeelde pot: één app die 4096 uitgaande
@@ -111,6 +125,8 @@ type flow struct {
 	dstPort  uint16
 	nodePort uint16
 	seen     time.Time
+	finFwd   bool // client/slot -> peer zag FIN
+	finRev   bool // peer/service -> client zag FIN
 }
 
 // fkey/rkey: forward-lookup (slot → nieuw/bestaand flow) en reverse-lookup
@@ -138,10 +154,18 @@ var (
 	gwMAC   [6]byte                 // gateway-MAC (van off-subnet inbound)
 	gwKnown bool
 
-	flowsFwd  = map[fkey]*flow{}
-	flowsRev  = map[rkey]*flow{}
-	masqNext  = uint16(MasqBase)
-	flowsFull bool // eenmalig loggen bij een volle pool
+	flowsFwd = map[fkey]*flow{}
+	flowsRev = map[rkey]*flow{}
+	masqNext = uint16(MasqBase)
+
+	// O(1)-quota-administratie. Alle productie-insert/delete loopt door flowFor
+	// en removeFlowLocked; zo hoeft een vol slot niet per verworpen pakket de
+	// volledige conntrack meermaals te scannen.
+	flowCountBySlot  [layout.SlotCap + 1]int
+	flowMapHighWater int
+	nextFlowSweep    time.Time
+	nextFlowsFullLog time.Time
+	nextSlotFullLog  [layout.SlotCap + 1]time.Time
 )
 
 // Uplink omhult de externe NIC: inkomende frames voor gepubliceerde poorten of
@@ -328,12 +352,26 @@ func UnpublishSlot(i int) {
 			keep = append(keep, e)
 		}
 	}
-	pubs = keep
-	for k, fl := range flowsFwd {
-		if fl.slot == i {
-			delete(flowsRev, rkey{fl.proto, fl.nodePort, fl.dstIP, fl.dstPort})
-			delete(flowsFwd, k)
+	// Unpublish is een zeldzaam lifecycle-pad: één compacte kopie is eenvoudiger
+	// en laat de oude backing-array altijd los, ook als een ander slot één poort
+	// gepubliceerd houdt.
+	pubs = append([]pub(nil), keep...)
+	targetIP := uint32(0)
+	if i >= 1 && i <= layout.MaxSlots {
+		targetIP = layout.SlotIP4(i)
+	}
+	removedFlow := false
+	for _, fl := range flowsFwd {
+		// Een hairpin-flow staat op naam van de CLIENT (fl.slot), maar hoort
+		// net zo hard bij de dienst in fl.dstIP. Stoppen van óf client óf
+		// dienst trekt de mapping daarom in; anders erft een nieuwe huurder
+		// van het serviceslot een stale reverse route.
+		if fl.slot == i || targetIP != 0 && fl.dstIP == targetIP {
+			removedFlow = removeFlowLocked(fl, false) || removedFlow
 		}
+	}
+	if removedFlow {
+		maybeCompactFlowMapsLocked()
 	}
 }
 
@@ -349,7 +387,7 @@ func ipv4L4(f []byte) (ihl int, proto byte, ok bool) {
 	}
 	ihl = int(ip[0]&0xf) * 4
 	proto = ip[9]
-	if ihl < 20 || binary.BigEndian.Uint16(ip[6:])&0x1fff != 0 {
+	if ihl < 20 || ipv4Fragmented(ip) {
 		return 0, 0, false
 	}
 	// rewriteL4 raakt bij TCP l4[16:18] (volledige 20-byte header) en bij UDP
@@ -368,6 +406,13 @@ func ipv4L4(f []byte) (ihl int, proto byte, ok bool) {
 		return 0, 0, false
 	}
 	return ihl, proto, true
+}
+
+// ipv4Fragmented is de gedeelde NAT/GwNAT-regel: zowel een niet-nul offset als
+// MF betekent dat niet de volledige L4-datagram beschikbaar is. DF valt buiten
+// het masker en blijft geldig.
+func ipv4Fragmented(ip []byte) bool {
+	return binary.BigEndian.Uint16(ip[6:])&0x3fff != 0
 }
 
 // onSubnet meldt of ip op HOP's externe subnet ligt (dan is de neighbor-MAC
@@ -399,11 +444,11 @@ const neighTTL = 120 * time.Second
 // gateway-paar veroudert bewust niet: élk pakket van buiten ververst het, en
 // een router die stil van MAC wisselt zonder ooit nog iets door te geven is
 // geen toestand die een TTL kan redden.
-func learnLocked(srcIP uint32, mac []byte) {
+func learnLocked(srcIP uint32, mac []byte, now time.Time) {
 	if _, known := neigh[srcIP]; !known && len(neigh) >= maxNeigh {
 		neigh = map[uint32]neighbor{} // plafond: legen en herleren
 	}
-	neigh[srcIP] = neighbor{mac: [6]byte(mac), seen: time.Now()}
+	neigh[srcIP] = neighbor{mac: [6]byte(mac), seen: now}
 	if !onSubnet(srcIP) {
 		gwMAC, gwKnown = [6]byte(mac), true
 	}
@@ -418,17 +463,17 @@ var arpLast = map[uint32]time.Time{}
 // vast). Off-subnet gaat via de gateway en die leert passief (elk inbound
 // pakket van buiten draagt zijn MAC); on-subnet first-contact niet — daar is
 // dit de enige weg.
-func arpForLocked(dstIP uint32) {
+func arpForLocked(dstIP uint32, now time.Time) {
 	if uplink == nil || !onSubnet(dstIP) {
 		return
 	}
-	if t, ok := arpLast[dstIP]; ok && time.Since(t) < time.Second {
+	if t, ok := arpLast[dstIP]; ok && now.Sub(t) < time.Second {
 		return
 	}
 	if len(arpLast) >= maxNeigh {
 		arpLast = map[uint32]time.Time{}
 	}
-	arpLast[dstIP] = time.Now()
+	arpLast[dstIP] = now
 	var f [42]byte
 	for i := range 6 {
 		f[i] = 0xFF // broadcast
@@ -466,7 +511,7 @@ func arpLearn(f []byte) {
 	}
 	mu.Lock()
 	if onSubnet(spa) {
-		learnLocked(spa, a[8:14])
+		learnLocked(spa, a[8:14], time.Now())
 	}
 	mu.Unlock()
 }
@@ -479,10 +524,10 @@ func arpLearn(f []byte) {
 // beantwoorden als ARP-dove wifi/mesh-gevallen). Vóór 20-08 gaf l2For hier
 // stil het gateway-MAC als known terug, waardoor er nooit ge-ARP't werd — de
 // wifi-Brother-jacht; de TTL is deel twee van diezelfde jacht (zie neighTTL).
-func l2For(dstIP uint32) ([6]byte, bool) {
+func l2For(dstIP uint32, now time.Time) ([6]byte, bool) {
 	if onSubnet(dstIP) {
 		m, ok := neigh[dstIP]
-		if ok && time.Since(m.seen) > neighTTL {
+		if ok && now.Sub(m.seen) > neighTTL {
 			delete(neigh, dstIP) // verlopen: eruit, first-contact leert opnieuw
 			return [6]byte{}, false
 		}
@@ -508,19 +553,20 @@ func natInbound(f []byte) bool {
 	if uplink == nil {
 		return false
 	}
+	now := time.Now()
 	// srcIP 0.0.0.0 (DHCP-discover/request van een buurman, broadcast) of een
 	// multicast-bron-MAC niet leren: 0.0.0.0 is off-subnet en zou via
 	// learnLocked het gateway-MAC vergiftigen — elk apparaat op het LAN dat
 	// DHCP't werd dan even "de gateway" (review-kruimel #10).
 	if srcIP != 0 && f[6]&1 == 0 {
-		learnLocked(srcIP, f[6:12])
+		learnLocked(srcIP, f[6:12], now)
 	}
 	// Niet aan het node-IP gericht → niet van ons (de HOP-stack mag hem hebben).
 	// Eén keer hier, voor béíde takken.
 	if binary.BigEndian.Uint32(ip[16:]) != uplink.ip {
 		return false
 	}
-	if replyInLocked(f, ip, l4, proto) {
+	if replyInLocked(f, ip, l4, proto, now) {
 		return true
 	}
 	return dnatInLocked(f, ip, l4, proto)
@@ -559,7 +605,7 @@ func txUplinkLocked(f []byte, nextHop [6]byte) {
 // replyInLocked vertaalt een inbound antwoord op een masquerade-flow terug en
 // legt het rechtstreeks in de slot-ring (deliverLocked, mu vast); true = geclaimd.
 // Aanroeper (natInbound) toetste al dat het frame aan het node-IP gericht is.
-func replyInLocked(f, ip, l4 []byte, proto byte) bool {
+func replyInLocked(f, ip, l4 []byte, proto byte, now time.Time) bool {
 	peerIP := binary.BigEndian.Uint32(ip[12:])
 	peerPort := binary.BigEndian.Uint16(l4[0:])
 	nodePort := binary.BigEndian.Uint16(l4[2:])
@@ -567,7 +613,12 @@ func replyInLocked(f, ip, l4 []byte, proto byte) bool {
 	if fl == nil {
 		return false
 	}
-	fl.seen = time.Now()
+	if flowExpiredAt(fl, now) {
+		removeFlowLocked(fl, true)
+		return false // eventueel dezelfde node-poort als publicatie: laat DNAT proberen
+	}
+	fl.seen = now
+	noteTCPFlags(fl, l4, true)
 	dnatToSlotLocked(fl.slot, f, ip, l4, proto, uplink.ip, fl.slotIP, nodePort, fl.slotPort)
 	return true
 }
@@ -617,14 +668,15 @@ func natFromSlot(src int, f []byte) bool {
 	if proto == protoTCP && l4[13]&tcpFlagSYN != 0 && l4[13]&tcpFlagACK == 0 {
 		return false
 	}
+	now := time.Now()
 	// Draagt de reply het node-IP als bestemming, dan was de client een
 	// búúrslot (hairpinOutLocked) — een externe client heeft dat IP nooit
 	// (masquerade-antwoorden komen via de uplink binnen, niet hierlangs).
 	// Terugvertalen via de conntrack en ring-in, niet de NIC uit.
 	if binary.BigEndian.Uint32(ip[16:]) == uplink.ip {
-		return hairpinBackLocked(f, ip, l4, proto, m)
+		return hairpinBackLocked(f, ip, l4, proto, m, now)
 	}
-	nextHop, known := l2For(binary.BigEndian.Uint32(ip[16:]))
+	nextHop, known := l2For(binary.BigEndian.Uint32(ip[16:]), now)
 	if !known {
 		return true // next-hop onbekend: drop, de retransmit leert 'm
 	}
@@ -647,20 +699,21 @@ func natOutbound(src int, f []byte) bool {
 	slotIP := layout.SlotIP4(src)
 	sport := binary.BigEndian.Uint16(l4[0:])
 	dport := binary.BigEndian.Uint16(l4[2:])
+	now := time.Now()
 
 	// Het node-IP zelf: hairpin (intern omleggen), nooit de NIC uit — vóór
 	// l2For, anders zou first-contact een ARP-request naar ons eigen IP sturen.
 	if dstIP == uplink.ip {
-		return hairpinOutLocked(src, f, ip, l4, proto, slotIP, sport, dport)
+		return hairpinOutLocked(src, f, ip, l4, proto, slotIP, sport, dport, now)
 	}
 
-	nextHop, known := l2For(dstIP)
+	nextHop, known := l2For(dstIP, now)
 	if !known {
 		// First-contact (Altra 14-07): een on-subnet bestemming die ons nooit
 		// eerder iets stuurde is onbekend — passief leren komt dan nooit. Vraag
 		// het net (ARP-request, rate-limited); de reply leert de neighbor
 		// (arpLearn) en de TCP-retransmit van de app vindt 'm daarna.
-		arpForLocked(dstIP)
+		arpForLocked(dstIP, now)
 		if !gwKnown {
 			return true // geen enkel spoor: drop, retransmit volgt
 		}
@@ -674,13 +727,16 @@ func natOutbound(src int, f []byte) bool {
 		// opnieuw, tot ARP of router er één doorlaat.
 		nextHop = gwMAC
 	}
-	fl := flowFor(proto, src, slotIP, sport, dstIP, dport)
+	fl := flowForPacket(proto, src, slotIP, sport, dstIP, dport, l4, now)
 	if fl == nil {
 		return true // pool vol: drop
 	}
-	fl.seen = time.Now()
+	reap := noteTCPFlags(fl, l4, false)
 	snatSrcLocked(ip, l4, proto, slotIP, sport, fl.nodePort)
 	txUplinkLocked(f, nextHop)
+	if reap {
+		removeFlowLocked(fl, true)
+	}
 	return true
 }
 
@@ -694,19 +750,22 @@ func natOutbound(src int, f []byte) bool {
 // moet dáárvandaan lijken te komen). Niets gepubliceerd op die poort = drop,
 // zoals een dichte poort (de dialer merkt een timeout; node-diensten zoals
 // de agent wonen binnen op 10.100.0.1, niet hier).
-func hairpinOutLocked(src int, f, ip, l4 []byte, proto byte, slotIP uint32, sport, dport uint16) bool {
+func hairpinOutLocked(src int, f, ip, l4 []byte, proto byte, slotIP uint32, sport, dport uint16, now time.Time) bool {
 	m := pubByNodePortLocked(proto, dport)
 	if m == nil {
 		return true
 	}
 	srvIP := layout.SlotIP4(m.slot)
-	fl := flowFor(proto, src, slotIP, sport, srvIP, m.slotPort)
+	fl := flowForPacket(proto, src, slotIP, sport, srvIP, m.slotPort, l4, now)
 	if fl == nil {
 		return true // pool vol: drop
 	}
-	fl.seen = time.Now()
+	reap := noteTCPFlags(fl, l4, false)
 	snatSrcLocked(ip, l4, proto, slotIP, sport, fl.nodePort)
 	dnatToSlotLocked(m.slot, f, ip, l4, proto, uplink.ip, srvIP, dport, m.slotPort)
+	if reap {
+		removeFlowLocked(fl, true)
+	}
 	return true
 }
 
@@ -716,14 +775,19 @@ func hairpinOutLocked(src int, f, ip, l4 []byte, proto byte, slotIP uint32, spor
 // node-IP:nodePort, het adres dat de beller belde) en ring-in bezorgen.
 // Geen flow (verlopen, of een dienst die spontaan het node-IP belt vanaf
 // zijn eigen publicatie-poort) = drop.
-func hairpinBackLocked(f, ip, l4 []byte, proto byte, m *pub) bool {
+func hairpinBackLocked(f, ip, l4 []byte, proto byte, m *pub, now time.Time) bool {
 	srvIP := layout.SlotIP4(m.slot)
 	np := binary.BigEndian.Uint16(l4[2:])
 	fl := flowsRev[rkey{proto, np, srvIP, m.slotPort}]
 	if fl == nil {
 		return true
 	}
-	fl.seen = time.Now()
+	if flowExpiredAt(fl, now) {
+		removeFlowLocked(fl, true)
+		return true
+	}
+	fl.seen = now
+	noteTCPFlags(fl, l4, true)
 	// Eerst de src-helft, dan de dst-helft (die ook bezorgt): beide raken
 	// disjuncte velden en de checksum-fixes zijn incrementeel, dus de volgorde
 	// is vrij — deze laat de gedeelde staart het frame afleveren.
@@ -732,56 +796,133 @@ func hairpinBackLocked(f, ip, l4 []byte, proto byte, m *pub) bool {
 	return true
 }
 
-// flowFor vindt of maakt de conntrack-entry voor een uitgaande flow (mu vast);
-// nil als de pool vol is (na een sweep van verlopen flows).
-func flowFor(proto byte, slot int, slotIP uint32, slotPort uint16, dstIP uint32, dstPort uint16) *flow {
+// flowForPacket maakt voor gewone uitgaande pakketten zo nodig een mapping.
+// Een RST mag alleen een bestaande mapping sluiten: zonder mapping ontbreekt
+// het node-poortnummer dat de peer kent, dus alloceren-en-direct-verwijderen is
+// zowel zinloos als onnodige churn.
+func flowForPacket(proto byte, slot int, slotIP uint32, slotPort uint16, dstIP uint32, dstPort uint16, l4 []byte, now time.Time) *flow {
 	k := fkey{proto, slotIP, dstIP, slotPort, dstPort}
-	if fl := flowsFwd[k]; fl != nil {
+	if proto == protoTCP && l4[13]&tcpFlagRST != 0 {
+		return lookupFlowLocked(k, now)
+	}
+	return flowFor(proto, slot, slotIP, slotPort, dstIP, dstPort, now)
+}
+
+// flowFor vindt of maakt de conntrack-entry voor een uitgaande flow (mu vast);
+// nil als de pool vol is. Exacte lookups toetsen altijd de timeout; een volle
+// pool mag hooguit eenmaal per flowSweepEvery globaal vegen en eenmaal per
+// flowLogEvery loggen, zodat een dader niet via het rejectpad core 0 kan
+// gijzelen.
+func flowFor(proto byte, slot int, slotIP uint32, slotPort uint16, dstIP uint32, dstPort uint16, now time.Time) *flow {
+	k := fkey{proto, slotIP, dstIP, slotPort, dstPort}
+	if fl := lookupFlowLocked(k, now); fl != nil {
 		return fl
 	}
-	if len(flowsFwd) >= maxFlows {
-		sweepExpired()
-		if len(flowsFwd) >= maxFlows {
-			if !flowsFull {
-				flowsFull = true
-				fmt.Printf("HOPOS_MASQ_FULL: conntrack vol (%d) — nieuwe uitgaande flows gedropt\n", maxFlows)
-			}
-			return nil
-		}
+	if slot < 1 || slot > layout.SlotCap {
+		return nil
 	}
-	flowsFull = false
-	// Eerlijk deel per slot (zie maxFlowsPerSlot): eerst vegen, dan pas de dader
-	// afwijzen — een slot dat alleen verlopen flows had, mag gewoon door.
-	if flowsForSlot(slot) >= maxFlowsPerSlot {
-		sweepExpired()
-		if n := flowsForSlot(slot); n >= maxFlowsPerSlot {
-			fmt.Printf("HOPOS_MASQ_SLOT_FULL: slot %d has %d flows (max %d) — new outbound flow dropped\n", slot, n, maxFlowsPerSlot)
-			return nil
+	if len(flowsFwd) >= maxFlows || flowCountBySlot[slot] >= maxFlowsPerSlot {
+		maybeSweepExpiredLocked(now)
+	}
+	if len(flowsFwd) >= maxFlows {
+		if !now.Before(nextFlowsFullLog) {
+			fmt.Printf("HOPOS_MASQ_FULL: conntrack vol (%d) — nieuwe uitgaande flows gedropt\n", maxFlows)
+			nextFlowsFullLog = now.Add(flowLogEvery)
 		}
+		return nil
+	}
+	if n := flowCountBySlot[slot]; n >= maxFlowsPerSlot {
+		if !now.Before(nextSlotFullLog[slot]) {
+			fmt.Printf("HOPOS_MASQ_SLOT_FULL: slot %d has %d flows (max %d) — new outbound flow dropped\n", slot, n, maxFlowsPerSlot)
+			nextSlotFullLog[slot] = now.Add(flowLogEvery)
+		}
+		return nil
 	}
 	np, ok := allocPort(proto, dstIP, dstPort)
 	if !ok {
 		return nil
 	}
 	fl := &flow{proto: proto, slot: slot, slotIP: slotIP, slotPort: slotPort,
-		dstIP: dstIP, dstPort: dstPort, nodePort: np}
+		dstIP: dstIP, dstPort: dstPort, nodePort: np, seen: now}
 	flowsFwd[k] = fl
 	flowsRev[rkey{proto, np, dstIP, dstPort}] = fl
+	flowCountBySlot[slot]++
+	if len(flowsFwd) > flowMapHighWater {
+		flowMapHighWater = len(flowsFwd)
+	}
 	return fl
 }
 
-// flowsForSlot telt de lopende flows van één slot (mu vast). Een lineaire telling
-// over ≤ maxFlows entries, alleen op het pad "nieuwe flow" — geen aparte teller
-// die uit de pas kan lopen met flowsFwd (die twee synchroon houden over sweep,
-// UnpublishSlot en dood-detectie is precies waar zulke bugs zitten).
-func flowsForSlot(slot int) int {
-	n := 0
-	for _, fl := range flowsFwd {
-		if fl.slot == slot {
-			n++
-		}
+// lookupFlowLocked vindt een verse mapping, werkt zijn idle-klok bij en ruimt
+// een verlopen mapping op. now komt van het pakketpad: geen tweede kloklezing.
+func lookupFlowLocked(k fkey, now time.Time) *flow {
+	fl := flowsFwd[k]
+	if fl == nil {
+		return nil
 	}
-	return n
+	if flowExpiredAt(fl, now) {
+		removeFlowLocked(fl, true)
+		return nil
+	}
+	fl.seen = now
+	return fl
+}
+
+// removeFlowLocked is het enige delete-pad voor conntrack (mu vast). compact
+// is false tijdens een map-range; de aanroeper compacteert dan één keer erna.
+// De pointertoets beschermt een nieuwere mapping met dezelfde sleutel.
+func removeFlowLocked(fl *flow, compact bool) bool {
+	if fl == nil {
+		return false
+	}
+	fk := fkey{fl.proto, fl.slotIP, fl.dstIP, fl.slotPort, fl.dstPort}
+	if flowsFwd[fk] != fl {
+		return false
+	}
+	rk := rkey{fl.proto, fl.nodePort, fl.dstIP, fl.dstPort}
+	if flowsRev[rk] == fl {
+		delete(flowsRev, rk)
+	}
+	delete(flowsFwd, fk)
+	if fl.slot >= 1 && fl.slot < len(flowCountBySlot) && flowCountBySlot[fl.slot] > 0 {
+		flowCountBySlot[fl.slot]--
+	}
+	if compact {
+		maybeCompactFlowMapsLocked()
+	}
+	return true
+}
+
+// maybeCompactFlowMapsLocked geeft de backing-tabellen na een verkeerspiek terug
+// aan de GC. Go-maps krimpen niet vanzelf: één langlevende tunnel zou anders
+// de buckets van een oude 4096-flowpiek voor altijd vasthouden. Rebuild pas na
+// minstens 64 entries high-water en een krimp tot een kwart, zodat churn geen
+// kopie per delete veroorzaakt. Niet vanuit een map-range aanroepen.
+func maybeCompactFlowMapsLocked() {
+	n := len(flowsFwd)
+	if flowMapHighWater < 64 {
+		if n == 0 {
+			// Een handvol buckets mag blijven voor hergebruik; voorkom twee nieuwe
+			// maps bij iedere korte connect/RST-cyclus.
+			flowMapHighWater = 0
+			flowCountBySlot = [layout.SlotCap + 1]int{}
+		}
+		return
+	}
+	if n*4 > flowMapHighWater {
+		return
+	}
+	newFwd := make(map[fkey]*flow, n)
+	newRev := make(map[rkey]*flow, n)
+	for k, fl := range flowsFwd {
+		newFwd[k] = fl
+		newRev[rkey{fl.proto, fl.nodePort, fl.dstIP, fl.dstPort}] = fl
+	}
+	flowsFwd, flowsRev = newFwd, newRev
+	flowMapHighWater = n
+	if n == 0 {
+		flowCountBySlot = [layout.SlotCap + 1]int{}
+	}
 }
 
 // allocPort kiest een vrij node-poortnummer voor een nieuwe flow: rollend door
@@ -809,18 +950,79 @@ func publishedLocked(proto byte, p uint16) bool {
 	return pubByNodePortLocked(proto, p) != nil
 }
 
-// sweepExpired verwijdert flows die langer dan hun idle-timeout stil waren.
-func sweepExpired() {
-	now := time.Now()
-	for k, fl := range flowsFwd {
-		idle := udpIdle
-		if fl.proto == protoTCP {
-			idle = tcpIdle
+// noteTCPFlags verwerkt alleen terminale hints waarvoor geen volledige
+// TCP-state-machine nodig is. Een RST van de slot/client-kant mag na forwarding
+// meteen weg: die eigenaar kan hooguit zijn eigen mapping sluiten. Een inbound
+// RST ruimen we niet vroeg op, want zonder sequence tracking kan NAT niet weten
+// of de ontvangende TCP-stack hem accepteert. FIN wordt per richting onthouden;
+// pas als beide kanten FIN stuurden geldt de kortere closing-timeout, zodat een
+// legitieme half-close tcpIdle houdt.
+func noteTCPFlags(fl *flow, l4 []byte, reverse bool) (reapAfterForward bool) {
+	if fl.proto != protoTCP {
+		return false
+	}
+	flags := l4[13]
+	if flags&tcpFlagRST != 0 {
+		return !reverse
+	}
+	if flags&tcpFlagFIN != 0 {
+		if reverse {
+			fl.finRev = true
+		} else {
+			fl.finFwd = true
 		}
-		if now.Sub(fl.seen) > idle {
-			delete(flowsRev, rkey{fl.proto, fl.nodePort, fl.dstIP, fl.dstPort})
-			delete(flowsFwd, k)
+	}
+	return false
+}
+
+func flowIdleFor(fl *flow) time.Duration {
+	if fl.proto != protoTCP {
+		return udpIdle
+	}
+	if fl.finFwd && fl.finRev {
+		return tcpClosingIdle
+	}
+	return tcpIdle
+}
+
+func flowExpiredAt(fl *flow, now time.Time) bool {
+	return now.Sub(fl.seen) > flowIdleFor(fl)
+}
+
+// sweepExpiredAt verwijdert alle wall-clock-verlopen flows (mu vast).
+func sweepExpiredAt(now time.Time) {
+	removed := false
+	for _, fl := range flowsFwd {
+		if flowExpiredAt(fl, now) {
+			removed = removeFlowLocked(fl, false) || removed
 		}
+	}
+	if removed {
+		maybeCompactFlowMapsLocked()
+	}
+}
+
+// maybeSweepExpiredLocked rate-limit een drukgedreven sweep. Een vol slot kan
+// daardoor niet elk verworpen pakket in een O(maxFlows)-scan veranderen.
+func maybeSweepExpiredLocked(now time.Time) {
+	if !nextFlowSweep.IsZero() && now.Before(nextFlowSweep) {
+		return
+	}
+	sweepExpiredAt(now)
+	nextFlowSweep = now.Add(flowSweepEvery)
+}
+
+// flowExpiryLoop leeft net als de switch-lus tot reboot en maakt de idle-
+// timeouts echt: ook onder de quota en zonder een nieuwe allocatie komt state
+// terug. Up is idempotent, dus hiervan draait precies één exemplaar.
+func flowExpiryLoop() {
+	for {
+		time.Sleep(flowSweepEvery)
+		mu.Lock()
+		now := time.Now()
+		sweepExpiredAt(now)
+		nextFlowSweep = now.Add(flowSweepEvery)
+		mu.Unlock()
 	}
 }
 
