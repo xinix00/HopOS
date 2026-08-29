@@ -200,7 +200,7 @@ fi
 #     i.p.v. te falen — precies zoals bij de Sipeed-donor hierboven.
 if [ -d "${TAMAGO_FORK:-$DIR/../tamago}" ]; then
 	echo ">> hopos-m4-headless.img.gz (Apple M4, raw bootobject, cfg ingebakken)" >&2
-	AGENT=1 CFG="$DIR/image/hopos-headless.cfg" "$DIR/image/apple-m4.sh" >/dev/null
+	AGENT=1 CFG=image/hopos-headless.cfg "$DIR/image/apple-m4.sh" >/dev/null
 	gzimg "$DIR/metal/out/hopos-apple.img" hopos-m4-headless.img
 else
 	echo ">> OVERGESLAGEN: hopos-m4-headless.img.gz — tamago-fork ontbreekt" >&2

@@ -41,9 +41,14 @@ mkdir -p out
 if [ "${AGENT:-0}" = 1 ]; then
 	TARGET=./cmd/hopos; NAME=hopos-apple; TAGS="apple linkcpuinit highram"
 	if [ -n "${CFG:-}" ]; then
-		cp "$DIR/$CFG" "$DIR/metal/cmd/hopos/cfgblob/hopos.cfg" 2>/dev/null || cp "$CFG" "$DIR/metal/cmd/hopos/cfgblob/hopos.cfg"
+		# Pad vanaf de repo-wortel, en luid struikelen als het er niet is: de
+		# bestemming is gedeelde build-staat (licheerv-agent.sh en de gate
+		# schrijven er ook in), dus stil de verkeerde config inbakken is een
+		# reëel risico — en dan boot een node onder een naam die je niet koos.
+		[ -f "$DIR/$CFG" ] || { echo "CFG=$CFG bestaat niet (pad vanaf de repo-wortel)" >&2; exit 1; }
+		cp "$DIR/$CFG" "$DIR/metal/cmd/hopos/cfgblob/hopos.cfg"
 		TAGS="$TAGS embedcfg"
-		echo "config ingebakken: $CFG" >&2
+		echo "config ingebakken: $CFG ($(wc -c <"$DIR/$CFG" | tr -d ' ') bytes)" >&2
 	fi
 elif [ "${EMBED:-0}" = 1 ]; then
 	TARGET=./cmd/hopos-embed; NAME=hopos-apple-embed; TAGS="apple linkcpuinit highram"
