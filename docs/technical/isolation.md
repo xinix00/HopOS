@@ -73,7 +73,7 @@ listed last.
 | board: Raspberry Pi 4 — genet, mailbox | ~1,900 |
 | board: Radxa Zero 3E — dwmac4 + PHY, TSADC, TRNG | ~2,400 |
 | board: LicheeRV Nano — dwmac, ePHY, CLINT | ~1,850 |
-| **lean** — the node's own standard library, a separate module, identical in every node: TCP/IP with IPv6, TLS, HTTP/1 and 2, DHCP, S3, ELF | ~10,700 |
+| **lean** — the node's own standard library, a separate module, identical in every node: TCP/IP, TLS, HTTP, DHCP, S3, ELF | ~10,700 |
 | gui, opt-in (`-tags gui`) — framebuffer grant + USB input (xHCI, DWC3, HID) | ~2,000 |
 | gui, board wiring on top — Radxa scanout ~950 · Pi 4 ~400 · Pi 5 ~15 | |
 
@@ -86,8 +86,10 @@ either: an Altra stick is ~10,650 lines of metal, a Pi 5 ~10,625, a Pi 4
 ~10,200, a Radxa ~10,725 and the LicheeRV ~10,250. All dependencies together
 are the same ~10,700 of lean everywhere — shown, not hidden. What is *not*
 ours in the image is the tamago runtime and a CA-roots bundle: the TCP/IP
-stack (IPv6 included), TLS, HTTP/1 and 2, DHCP, the S3 client and the ELF
-loader are lean, written here — no gVisor, no forks. You audit one tree, never the union. **A headless image
+stack, TLS, HTTP, DHCP, the S3 client and the ELF loader are lean, written
+here — no gVisor, no forks. (What lean *offers* beyond that — HTTP/2 for
+cloudflared-lean, opt-in IPv6 — only counts where a program actually links
+it.) You audit one tree, never the union. **A headless image
 links zero graphics — and zero USB.** The gui flavour adds the grant that
 hands one app the framebuffer and the input chain (xHCI, the DWC3 core in
 host mode, the HID boot protocol) — owned by HOP, not granted to

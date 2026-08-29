@@ -1,4 +1,4 @@
-//go:build !rpi5 && !rpi4 && !uefi && !licheerv && !rk3566
+//go:build !rpi5 && !rpi4 && !uefi && !licheerv && !rk3566 && !apple
 
 // board_virt.go — de QEMU-virt-kant van de agent-main: board-registratie en
 // de RAM-declaratie van de HOP-kern (het enige dat per board verschilt; de

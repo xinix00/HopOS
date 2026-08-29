@@ -18,6 +18,7 @@
 //go:build tamago && arm64
 
 #include "textflag.h"
+#include "sysreg.h"
 
 TEXT s2tramp(SB),NOSPLIT|NOFRAME,$0
 	// x0 = fysieke control-page van dit slot (PSCI ctx, door HOP gezet).
@@ -85,7 +86,7 @@ vtcrps:
 
 	// Timers vrij voor EL1 (zelfde als cpuinit-EL2-pad).
 	WORD	$0xd53ce104	// mrs x4, cnthctl_el2
-	ORR	$0b11, R4, R4
+	ORR	$CNTHCTL_EL1_BITS, R4, R4
 	WORD	$0xd51ce104	// msr cnthctl_el2, x4
 	MOVD	$0, R4
 	WORD	$0xd51ce064	// msr cntvoff_el2, x4
@@ -99,8 +100,8 @@ vtcrps:
 	// SCTLR_EL1 = 0x30d00800 (RES1-bits; M/C/I/A/WXN uit) en CPTR_EL2 =
 	// 0x33FF (TFP=0 — anders trapt tamago's eerste FP-instructie naar EL2).
 	MOVD	$0x30d00800, R4
-	MSR	R4, SCTLR_EL1
-	MOVD	$0x33FF, R4
+	MSR_SCTLR_EL1(4)
+	MOVD	$CPTR_EL2_NOTRAP, R4
 	WORD	$0xd51c1144	// msr cptr_el2, x4
 
 	// I-cache van déze core leeg vóór de drop. Elke app linkt op hetzelfde

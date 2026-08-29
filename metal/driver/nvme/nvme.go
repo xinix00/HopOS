@@ -17,6 +17,7 @@ import (
 
 	"github.com/xinix00/HopOS/metal/dev"
 	"github.com/xinix00/HopOS/metal/driver/pcie"
+	"github.com/xinix00/HopOS/metal/driver/rtkit"
 )
 
 // Controller-registers (NVMe 1.4, MMIO op BAR0).
@@ -38,7 +39,9 @@ const (
 
 // Opcodes.
 const (
+	admDeleteSQ = 0x00
 	admCreateSQ = 0x01
+	admDeleteCQ = 0x04
 	admCreateCQ = 0x05
 	admIdentify = 0x06
 	ioWrite     = 0x01
@@ -55,9 +58,10 @@ const (
 // queue is één SQ/CQ-paar met poll-state.
 type queue struct {
 	sq, cq uintptr
-	tail   uint32 // SQ-tail (producer, wij)
-	head   uint32 // CQ-head (consumer, wij)
-	phase  uint32 // verwachte phase-bit in de CQ
+	tcb    uintptr // ANS: de NVMMU-tabel bij deze queue (0 = gewone NVMe)
+	tail   uint32  // SQ-tail (producer, wij)
+	head   uint32  // CQ-head (consumer, wij)
+	phase  uint32  // verwachte phase-bit in de CQ
 	id     uint32
 }
 
@@ -69,11 +73,16 @@ type Controller struct {
 	Blocks    uint64 // namespace-grootte in blokken
 	Model     string
 
-	mu    sync.Mutex // serialiseert I/O (één in-flight command, één DMA-buf)
-	dstrd uint64
-	admin queue
-	io    queue
-	buf   uintptr // één pagina DMA voor identify en de blok-API
+	mu         sync.Mutex // serialiseert I/O (één in-flight command, één DMA-buf)
+	dstrd      uint64
+	totalBytes uint64     // TNVMCAP uit de controller-identify
+	nvmmu      uintptr    // ANS: de NVMMU naast het registerblok (0 = gewone NVMe)
+	rt         *rtkit.Dev // ANS: de coprocessor die vóór de controller staat
+	rtErr      error      // eerste fout uit zijn mailbox (een crash meldt zich daar)
+	idDump     string     // de eerste woorden van de identify-buffer (meetbank)
+	admin      queue
+	io         queue
+	buf        uintptr // één pagina DMA voor identify en de blok-API
 }
 
 func (c *Controller) doorbell(q *queue, cq bool) uintptr {
@@ -109,7 +118,20 @@ type cmd struct {
 // completion binnen is. Geeft de statuscode (0 = succes) terug.
 func (c *Controller) submit(q *queue, m cmd) error {
 	cid := q.tail // uniek genoeg: één command in flight per queue
-	sqe := q.sq + uintptr(q.tail)*sqeSize
+	if c.nvmmu != 0 {
+		// De ANS: altijd slot 0. De lineaire submissiemodus wijst het slot aan
+		// in plaats van de tail, en de afstand tussen entries in de queue komt
+		// uit CC.IOSQES — een waarde die iBoot zet en die niet met onze
+		// struct-maat hoeft te kloppen. Op slot 0 doet die afstand niet mee.
+		cid = 0
+	}
+	// LET OP: het slot, niet de tail. Op het ANS-pad staat de opdracht altijd op
+	// slot 0 en wijst de deurbel dat slot aan; de opdracht ergens anders
+	// neerzetten laat de firmware een oude opdracht lezen bij een verse TCB, en
+	// dat meldt hij als NVME_PERM_ERR — met een crash erachteraan die de hele
+	// coprocessor tot de volgende power-reset onbruikbaar maakt (gekost: vier
+	// boots, 29-08).
+	sqe := q.sq + uintptr(cid)*sqeSize
 	dev.Clear(sqe, sqeSize)
 	dev.Write32(sqe+0, m.opc|cid<<16)
 	dev.Write32(sqe+4, m.nsid)
@@ -119,8 +141,22 @@ func (c *Controller) submit(q *queue, m cmd) error {
 	dev.Write32(sqe+48, m.dw12)
 	dev.MB()
 
-	q.tail = (q.tail + 1) % qEntries
-	dev.Write32(c.doorbell(q, false), q.tail)
+	// Aanbieden. Op de ANS gaat dat anders: eerst het NVMMU-slot vullen, dan de
+	// mailbox leegtrekken (een wachtende coprocessor doet geen DMA), en dan de
+	// lineaire doorbel — die krijgt het SLOT, niet de nieuwe tail.
+	if c.nvmmu != 0 {
+		c.writeTCB(q, cid, m)
+		c.serviceCoprocessor()
+		db := uintptr(regDBLinearIOSQ)
+		if q.id == 0 {
+			db = regDBLinearASQ
+		}
+		dev.Write32(c.Base+db, cid)
+	}
+	if c.nvmmu == 0 {
+		q.tail = (q.tail + 1) % qEntries
+		dev.Write32(c.doorbell(q, false), q.tail)
+	}
 
 	// Poll de completion (phase-bit wisselt per CQ-omloop). Gosched per ronde:
 	// deze lus mag tot 5 seconden lopen en op een node met één app-core is dat
@@ -134,6 +170,15 @@ func (c *Controller) submit(q *queue, m cmd) error {
 		status := dev.Read32(cqe + 12)
 		if (status>>16)&1 == q.phase {
 			dev.MB()
+			// De NVMMU houdt het slot vast tot je het ongeldig verklaart; doe
+			// je dat niet, dan is de tabel na 64 opdrachten vol en hangt de
+			// volgende. TCB_STAT meldt of de invalidatie aankwam.
+			if c.nvmmu != 0 {
+				dev.Write32(c.nvmmu+regNVMMUTCBInval, cid)
+				if st := dev.Read32(c.nvmmu + regNVMMUTCBStat); st != 0 {
+					return fmt.Errorf("nvme: NVMMU invalidation for slot %d failed (%#x)", cid, st)
+				}
+			}
 			q.head = (q.head + 1) % qEntries
 			if q.head == 0 {
 				q.phase ^= 1
@@ -147,6 +192,7 @@ func (c *Controller) submit(q *queue, m cmd) error {
 		if time.Now().After(deadline) {
 			return fmt.Errorf("nvme: timeout on command %#x", m.opc)
 		}
+		c.serviceCoprocessor()
 		runtime.Gosched()
 	}
 }
@@ -226,15 +272,37 @@ func (c *Controller) Init(dmaBase uintptr, dmaSize uint64) error {
 		return err
 	}
 
-	// Identify controller (CNS=1): modelnaam voor de log.
+	if err := c.identify(); err != nil {
+		return err
+	}
+	return c.createIOQueues()
+}
+
+// identify leest modelnaam, namespace-grootte en blokmaat. Los van Init omdat
+// het ANS-pad (apple.go) dezelfde stappen in een andere volgorde doet.
+func (c *Controller) identify() error {
+	if err := c.identifyCtrl(); err != nil {
+		return err
+	}
+	return c.identifyNS()
+}
+
+// identifyCtrl leest de controller zelf (CNS=1): modelnaam voor de log, en
+// TNVMCAP — de totale capaciteit in bytes, die het ANS-pad gebruikt omdat het
+// de namespace niet mag bevragen.
+func (c *Controller) identifyCtrl() error {
 	if err := c.submit(&c.admin, cmd{opc: admIdentify, prp1: uint64(c.buf), dw10: 1}); err != nil {
 		return err
 	}
 	model := make([]byte, 40)
 	dev.CopyOut(model, c.buf+24)
 	c.Model = trim(model)
+	c.totalBytes = dev.Read64(c.buf + 280) // TNVMCAP, lage helft van 128 bits
+	return nil
+}
 
-	// Identify namespace 1 (CNS=0): grootte + blokmaat (LBAF/FLBAS).
+// identifyNS leest namespace 1 (CNS=0): grootte + blokmaat (LBAF/FLBAS).
+func (c *Controller) identifyNS() error {
 	if err := c.submit(&c.admin, cmd{opc: admIdentify, nsid: nsid, prp1: uint64(c.buf), dw10: 0}); err != nil {
 		return err
 	}
@@ -245,8 +313,11 @@ func (c *Controller) Init(dmaBase uintptr, dmaSize uint64) error {
 	if c.Blocks == 0 || c.BlockSize == 0 || c.BlockSize > 4096 {
 		return fmt.Errorf("nvme: namespace onbruikbaar (blocks=%d bs=%d)", c.Blocks, c.BlockSize)
 	}
+	return nil
+}
 
-	// I/O-queue-paar (CQ eerst; PC=1, geen interrupts).
+// createIOQueues meldt het I/O-queue-paar aan (CQ eerst; PC=1, geen interrupts).
+func (c *Controller) createIOQueues() error {
 	if err := c.submit(&c.admin, cmd{opc: admCreateCQ, prp1: uint64(c.io.cq),
 		dw10: (qEntries-1)<<16 | c.io.id, dw11: 1}); err != nil {
 		return err

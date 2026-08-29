@@ -1,4 +1,4 @@
-//go:build rpi4 || rpi5 || rk3566
+//go:build rpi4 || rpi5 || rk3566 || apple
 
 package main
 

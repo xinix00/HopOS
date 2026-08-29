@@ -1,5 +1,69 @@
 # TODO
 
+## tamago-PR: RAM boven 512GB (Apple silicon) — fork in gebruik, upstream indienen
+
+**Waarom:** Apple legt DRAM op 1TiB (0x100_0000_0000). tamago's arm64 `InitMMU`
+bouwt een vlakke 39-bit-wereld (één L1-tabel = 512GB, T0SZ=25, IPS 40-bit) —
+daarbuiten kan de runtime de MMU niet eens aanzetten. Gepatcht in de fork
+`~/Git/tamago`, branch `hopos-highram` (commit 8f88bdb, ~80 regels): ligt
+RamStart boven 512GB, dan een L0-root (+0xA000) met een lage-MMIO-L1 (+0x9000,
+inclusief de nullpointer-val) en de bestaande L1 (+0x4000) voor de 512GB-regio
+met het RAM; TCR naar 48-bit VA, IPS uit `ID_AA64MMFR0.PARange`. Het vlakke pad
+is byte-gelijk (rk3566-agent bouwt er ongewijzigd tegen).
+
+**Nu:** alleen `image/apple-m4.sh` bouwt ertegen, via `image/apple/go.work`
+(replace naar `../../../tamago`); alle andere builds blijven GOWORK=off op de
+upstream-tag in `metal/go.mod`. Besluit Derek 28-08: fork is prima, PR volgt.
+
+- [ ] PR indienen bij usbarmory/tamago (stijl: docs/upstream-pr-stijl.md — kort,
+      geen em-dashes; het commitbericht in de fork is al Engels en to the point)
+- [ ] na merge/tag: `metal/go.mod` bumpen en `image/apple/go.work` weghalen;
+      wordt hij afgewezen: xinix00/tamago-fork mét tag (geen pad-replace), zoals
+      de netstack destijds
+- [ ] tegelijk meenemen in de PR-overweging: `TCR_EPD1` (upstream master zet hem
+      al) zodat een verdwaald hoog adres een nette translation fault geeft
+- [ ] `tools/test.sh`: de apple-smaak in de gate — kan pas zonder go.work zodra
+      de fork een tag heeft (nu bouwt alleen `image/apple-m4.sh` ertegen)
+
+## Apple M4 — volgende treden (stand 29-08, zie docs/archief/apple-m4.md)
+
+Doel CPU → idling → netwerk is gehaald: de node boot HopOS, krijgt DHCP, zet
+zijn klok via SNTP, haalt de welcome-app over HTTPS van GitHub en draait hem in
+de kooi (slot 1, 64MB partitie). Gate groen, niets gecommit.
+
+- [x] agent booten, NumSlots=9, stage-2 met VM=1 op ijzer bewezen
+- [x] idling: 3.277.000 → 954 wekmomenten/s bij 100% slaap (`idle.UseTimerSleep`)
+- [x] NIC-pad: PERST-GPIO + LTSSM, bridge-venster, BAR's, DART-bypass, RID2SID
+- [x] `driver/nic/tg3`: reset, MAC uit de ADT, MDIO/PHY, 1000 Mb/s, ringen, DMA
+      beide richtingen, `ProbeNIC` + DHCP-lease in `board/apple/hop/net.go`
+- [x] **NVMe lezen.** `driver/rtkit` (de coprocessor-mailbox) + `driver/nvme/apple.go`
+      (het ANS-pad in dezelfde controller). Leest de GPT van de interne SSD en
+      geeft de coprocessor daarna netjes terug.
+- [ ] **NVMe: `pmgr_reset`.** Valt de coprocessor om of gaat de node hard uit,
+      dan blijft de ANS dicht tot iets zijn power-domein reset. Nu is de enige
+      weg terug een m1n1-sessie (`nvme_init` + `nvme_shutdown`). Referentie:
+      m1n1 src/pmgr.c.
+- [ ] **NVMe schrijven.** De interne SSD is geen gewone PCIe-NVMe maar ANS2
+      achter RTKit: `storage: nvme: no device on bus 0` is de juiste uitkomst,
+      geen fout. Referentie is m1n1 (`src/nvme.c` 588, `rtkit.c` 725, `dart.c`
+      765, `sart.c` 325, `asc.c` 131 regels C) — en die kan alleen LEZEN;
+      schrijven is dezelfde submit-weg met de NVMe-write-opdracht. Eerst de
+      vraag beantwoorden wáár we mogen schrijven — en die is inmiddels gemeten:
+      de schijf zit vol (iBootSystemContainer 500MB + APFS 471GB + RecoveryOS
+      5GB, nul vrij). Er moet dus eerst vanuit macOS ruimte gemaakt worden
+      (`diskutil apfs resizeContainer`); pas dan is er een LBA-bereik van ons.
+- [ ] platform-config in het param-blok (hopos.node/cluster/apikey), serial uit
+      de ADT; watchdog (0x3882b0000, reset-scope meten vóór wapenen)
+- [ ] productie-boot zonder laptop: relocatie-stub + image als payload achter
+      m1n1.bin (kmutil); tot die tijd is de loader de "U-Boot"
+- [ ] console-flakiness: Chrome (WebUSB) houdt het Debug-USB-device vast → geen
+      kis-poorten; Chrome sluiten of WebUSB-toestemming intrekken
+- [ ] raadsel: een EL1-stage-1-fault landde op EL2 (EC 0x24, VM=0) — begrijpen
+      vóór apps in kooien draaien (raakt de fault-routing van de switch)
+- [ ] inkomend TCP nog niet getoetst: de laptop zit op Wi-Fi en de mini aan de
+      draad, en pakketten van de laptop bereiken de chip niet eens
+      (`rx ucast=0`). Toetsen vanaf een bedrade host op hetzelfde segment.
+
 ## Die-temp stond stil: `auto_cycle` ontbrak (11-08 GEFIXT, ongecommit)
 
 **Symptoom** (Dereks observatie): `board: die temp 40.5C`, tien keer achter elkaar

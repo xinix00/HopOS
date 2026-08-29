@@ -385,7 +385,7 @@ func main() {
 		guiBuckets[sig] += n
 		add(files, "gui · "+sig, f, n)
 	}
-	p("\n== lean — de zelfgeschreven stdlib (eigen module, linkt in elke node) ==")
+	p("\n== lean — de zelfgeschreven stdlib (eigen module): wat de node includet ==")
 	{
 		var sigs []string
 		for s := range leanBucket {
@@ -394,6 +394,23 @@ func main() {
 		sort.Strings(sigs)
 		for _, s := range sigs {
 			p("  %-40s %6d", s, leanBucket[s])
+		}
+		// Per package: het antwoord op "is X eigenlijk wel een dependency
+		// van de node, of bestaat hij alleen in de module (voor apps)?"
+		pkg := map[string]int{}
+		for f := range absPath {
+			parts := strings.SplitN(f, "/", 3)
+			if len(parts) >= 2 {
+				pkg["lean/"+parts[1]] += lineCount[f]
+			}
+		}
+		var names []string
+		for n := range pkg {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			p("    %-38s %6d", n, pkg[n])
 		}
 	}
 

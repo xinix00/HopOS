@@ -30,6 +30,7 @@
 //go:build tamago && arm64
 
 #include "textflag.h"
+#include "sysreg.h"
 
 TEXT el2entry(SB),NOSPLIT|NOFRAME,$0
 	// x0/x1 óók naar de scratch; daarna zijn x0..x3 werkregisters. De
@@ -95,34 +96,34 @@ yield:
 
 	// EL1-sysregs (volgorde = layout.CtxRegime, 304..448): het volledige
 	// vertaal/context-regime dat de volgende bewoner NIET mag erven.
-	WORD	$0xd5381002	// mrs x2, sctlr_el1
-	WORD	$0xd5382043	// mrs x3, tcr_el1
+	MRS_SCTLR_EL1(2)
+	MRS_TCR_EL1(3)
 	STP	(R2, R3), 304(R1)
-	WORD	$0xd5382002	// mrs x2, ttbr0_el1
-	WORD	$0xd5382023	// mrs x3, ttbr1_el1
+	MRS_TTBR0_EL1(2)
+	MRS_TTBR1_EL1(3)
 	STP	(R2, R3), 320(R1)
-	WORD	$0xd538a202	// mrs x2, mair_el1
-	WORD	$0xd538a303	// mrs x3, amair_el1
+	MRS_MAIR_EL1(2)
+	MRS_AMAIR_EL1(3)
 	STP	(R2, R3), 336(R1)
-	WORD	$0xd538c002	// mrs x2, vbar_el1
+	MRS_VBAR_EL1(2)
 	WORD	$0xd53bd043	// mrs x3, tpidr_el0
 	STP	(R2, R3), 352(R1)
 	WORD	$0xd53bd062	// mrs x2, tpidrro_el0
 	WORD	$0xd538d083	// mrs x3, tpidr_el1
 	STP	(R2, R3), 368(R1)
-	WORD	$0xd538d022	// mrs x2, contextidr_el1
-	WORD	$0xd5381043	// mrs x3, cpacr_el1
+	MRS_CONTEXTIDR_EL1(2)
+	MRS_CPACR_EL1(3)
 	STP	(R2, R3), 384(R1)
-	WORD	$0xd538e102	// mrs x2, cntkctl_el1
+	MRS_CNTKCTL_EL1(2)
 	WORD	$0xd53a0003	// mrs x3, csselr_el1 (op0=3,op1=2,C0,C0,0)
 	STP	(R2, R3), 400(R1)
 	WORD	$0xd5387402	// mrs x2, par_el1
-	WORD	$0xd5384023	// mrs x3, elr_el1
+	MRS_ELR_EL1(3)
 	STP	(R2, R3), 416(R1)
-	WORD	$0xd5384002	// mrs x2, spsr_el1
-	WORD	$0xd5385203	// mrs x3, esr_el1
+	MRS_SPSR_EL1(2)
+	MRS_ESR_EL1(3)
 	STP	(R2, R3), 432(R1)
-	WORD	$0xd5386002	// mrs x2, far_el1
+	MRS_FAR_EL1(2)
 	MOVD	R2, 448(R1)
 
 	// GEEN FP in de EL2-switch. EL2 draait met MMU uit (SCTLR_EL2.M=0,
@@ -267,34 +268,34 @@ resume:
 	// EL1-sysregs terug (spiegel van de save; volgorde vrij — de ERET is
 	// het synchronisatiepunt).
 	LDP	304(R1), (R2, R3)
-	WORD	$0xd5181002	// msr sctlr_el1, x2
-	WORD	$0xd5182043	// msr tcr_el1, x3
+	MSR_SCTLR_EL1(2)
+	MSR_TCR_EL1(3)
 	LDP	320(R1), (R2, R3)
-	WORD	$0xd5182002	// msr ttbr0_el1, x2
-	WORD	$0xd5182023	// msr ttbr1_el1, x3
+	MSR_TTBR0_EL1(2)
+	MSR_TTBR1_EL1(3)
 	LDP	336(R1), (R2, R3)
-	WORD	$0xd518a202	// msr mair_el1, x2
-	WORD	$0xd518a303	// msr amair_el1, x3
+	MSR_MAIR_EL1(2)
+	MSR_AMAIR_EL1(3)
 	LDP	352(R1), (R2, R3)
-	WORD	$0xd518c002	// msr vbar_el1, x2
+	MSR_VBAR_EL1(2)
 	WORD	$0xd51bd043	// msr tpidr_el0, x3
 	LDP	368(R1), (R2, R3)
 	WORD	$0xd51bd062	// msr tpidrro_el0, x2
 	WORD	$0xd518d083	// msr tpidr_el1, x3
 	LDP	384(R1), (R2, R3)
-	WORD	$0xd518d022	// msr contextidr_el1, x2
-	WORD	$0xd5181043	// msr cpacr_el1, x3
+	MSR_CONTEXTIDR_EL1(2)
+	MSR_CPACR_EL1(3)
 	LDP	400(R1), (R2, R3)
-	WORD	$0xd518e102	// msr cntkctl_el1, x2
+	MSR_CNTKCTL_EL1(2)
 	WORD	$0xd51a0003	// msr csselr_el1, x3 (op0=3,op1=2,C0,C0,0)
 	LDP	416(R1), (R2, R3)
 	WORD	$0xd5187402	// msr par_el1, x2
-	WORD	$0xd5184023	// msr elr_el1, x3
+	MSR_ELR_EL1(3)
 	LDP	432(R1), (R2, R3)
-	WORD	$0xd5184002	// msr spsr_el1, x2
-	WORD	$0xd5185203	// msr esr_el1, x3
+	MSR_SPSR_EL1(2)
+	MSR_ESR_EL1(3)
 	MOVD	448(R1), R2
-	WORD	$0xd5186002	// msr far_el1, x2
+	MSR_FAR_EL1(2)
 	LDP	272(R1), (R2, R3)
 	WORD	$0xd5184102	// msr sp_el0, x2
 	WORD	$0xd51c4103	// msr sp_el1, x3

@@ -24,6 +24,7 @@
 //go:build tamago && arm64
 
 #include "textflag.h"
+#include "sysreg.h"
 
 // smpEL2Tramp: entry voor een secundaire SMP-core (EL2, MMU uit). x0 = het
 // FYSIEKE adres van de control-page van de primaire — de app geeft die PA mee
@@ -120,7 +121,7 @@ s2none:
 s2done:
 	// Timers vrij voor EL1.
 	WORD	$0xd53ce104	// mrs x4, cnthctl_el2
-	ORR	$0b11, R4, R4
+	ORR	$CNTHCTL_EL1_BITS, R4, R4
 	WORD	$0xd51ce104	// msr cnthctl_el2, x4
 	MOVD	$0, R4
 	WORD	$0xd51ce064	// msr cntvoff_el2, x4
@@ -131,8 +132,8 @@ s2done:
 	// (de stub zet 'm daarna zelf op met de gedeelde tabel) en CPTR_EL2
 	// zonder FP-traps (mstart begint met FP).
 	MOVD	$0x30d00800, R4
-	MSR	R4, SCTLR_EL1
-	MOVD	$0x33FF, R4
+	MSR_SCTLR_EL1(4)
+	MOVD	$CPTR_EL2_NOTRAP, R4
 	WORD	$0xd51c1144	// msr cptr_el2, x4
 
 	// I-cache leeg vóór de drop — zelfde warme-herdispatch-hygiëne als
