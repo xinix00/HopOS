@@ -52,6 +52,14 @@ de kooi (slot 1, 64MB partitie). Gate groen, niets gecommit.
       de schijf zit vol (iBootSystemContainer 500MB + APFS 471GB + RecoveryOS
       5GB, nul vrij). Er moet dus eerst vanuit macOS ruimte gemaakt worden
       (`diskutil apfs resizeContainer`); pas dan is er een LBA-bereik van ons.
+- [x] **Geheugen 19,7 → 23,7 GB**: pool gesneden op iBoot's eigen contract
+      (`phys_base`/`mem_size`/`top_of_kernel_data` via param-blok v3), twee
+      regio's, app aantoonbaar in het lage stuk geplaatst.
+- [ ] **De hop op arm64**: HopOS woont hier op een P-core (BootCPU 6, cluster 1)
+      en apps krijgen 3 P + 6 E. Omgekeerd is beter. Op riscv64 doet de loterij
+      in de kernel-cpuinit dit vóór de eerste Go-instructie; op arm64 is de
+      variant nooit gebouwd. Op Apple kan het met m1n1's spin-table: de boot-core
+      laat een E-core los op onze entry en parkeert zichzelf tot `AdoptParked`.
 - [ ] platform-config in het param-blok (hopos.node/cluster/apikey), serial uit
       de ADT; watchdog (0x3882b0000, reset-scope meten vóór wapenen)
 - [ ] productie-boot zonder laptop: relocatie-stub + image als payload achter
