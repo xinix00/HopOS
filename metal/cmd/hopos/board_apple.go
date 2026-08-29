@@ -17,6 +17,7 @@ import (
 
 	"github.com/xinix00/HopOS/metal/board/apple"
 	_ "github.com/xinix00/HopOS/metal/board/apple/hop" // registreert het board (init)
+	"github.com/xinix00/HopOS/metal/cmd/hopos/cfgblob"
 )
 
 // De RAM-declaratie van de HOP-kern: 256MB vanaf apple.RamBase (1TiB + 4GB).
@@ -30,31 +31,40 @@ var ramStart uint = apple.RamBase
 var ramSize uint = apple.HopRAMSize
 
 func init() {
-	// Eerst het DRAM bereikbaar maken: op dit silicium faultt een 1GB-blok met
-	// een adres boven 2^40 (gemeten 28-08), dus élke GB buiten het HOP-venster
-	// — de pool, m1n1's spin-table, de NIC-DMA — moet via 2MB-blokken. Vóór
-	// het plan, want kern/slots raakt de pool meteen bij zijn init.
-	if p, ok := apple.Params(); ok {
-		n := apple.MapDRAM(p.DRAMBase, p.DRAMSize)
-		fmt.Printf("mmu: %d GB of DRAM remapped to 2MB blocks (Apple: no 1GB blocks above 2^40)\n", n)
-	} else {
-		fmt.Printf("WARNING HOPOS_NO_PARAMS: no loader param block at %#x — DRAM outside the HOP window stays unreachable\n", apple.ParamBase)
-	}
-
 	// Het PA-plan moet vóór alles staan (slots/stage2 lezen het bij hun eerste
 	// gebruik).
 	apple.SetupPlan()
+	if s := apple.HopStatus(); s != "" {
+		fmt.Println(s)
+	}
 
-	// De platform-config (hopos.node/cluster/apikey/...) komt als tekst van de
-	// loader (CFG=pad image/apple/load-probe.py → apple.CfgBase): dezelfde
-	// `key=waarde`-regels als hopos.cfg op de Pi's, gelezen door fw/bootcfg.
-	// Geen bootargs, geen initrd op dit board.
-	bootParamAll = apple.BootParamAll
+	// De platform-config (hopos.node/cluster/apikey/...): van de loader
+	// (CFG=pad image/apple/load-probe.py → apple.CfgBase), of ingebakken als
+	// die er niet is. Dezelfde `key=waarde`-regels als hopos.cfg op de Pi's,
+	// gelezen door fw/bootcfg. Geen bootargs, geen initrd op dit board.
+	//
+	// Zodra wíj het bootobject zijn is er geen loader meer om die tekst neer te
+	// leggen, en dit board kan zijn bootmedium (nog) niet zelf lezen — dus dan
+	// reist de config mee ín het image, precies zoals op de LicheeRV
+	// (cmd/hopos/cfgblob, -tags embedcfg). De loader wint als hij er is: een
+	// kaart of een kabel wijzigen is makkelijker dan een image bouwen.
+	bootParamAll = func(key string) []string {
+		if v := apple.BootParamAll(key); len(v) > 0 {
+			return v
+		}
+		return cfgblob.All(key)
+	}
 
-	// Node-identiteit-terugval: het serial dat de loader uit de ADT meegaf
-	// (hopos.serial). Twee nodes op één LAN mogen nooit allebei "hopos-1" heten.
+	// Node-identiteit-terugval: het serienummer van de machine. Twee nodes op
+	// één LAN mogen nooit allebei "hopos-1" heten. Bij voorkeur uit de boom
+	// zelf — dat is de bron, en het werkt ook zonder loader; hopos.serial uit
+	// de config blijft als terugval staan.
 	nodeSerial = func() string {
-		if s := apple.BootParam("hopos.serial"); len(s) >= 8 {
+		s := apple.Serial()
+		if len(s) < 8 {
+			s = apple.BootParam("hopos.serial")
+		}
+		if len(s) >= 8 {
 			return "hopos-" + s[len(s)-8:]
 		}
 		return ""

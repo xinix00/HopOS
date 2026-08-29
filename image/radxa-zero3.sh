@@ -76,7 +76,7 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 # booti legt een niet-relocatable Image op dram+text_offset. Zonder deze som
 # landde de kernel 2MB te hoog en zweeg hij na "Starting kernel".
 cd "$DIR"
-go run "$DIR/image/mkkernel/main.go" "$DIR/image/mkkernel/pe.go" \
+go run "$DIR"/image/mkkernel/*.go \
 	-elf "metal/out/$NAME.elf" -o "metal/out/$NAME.img" -load 0x02200000 -dram 0x200000
 
 # extlinux-voorbeeld: distro-boot pakt de eerste entry. Het DTB komt uit

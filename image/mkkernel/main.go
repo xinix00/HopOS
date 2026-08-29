@@ -148,6 +148,7 @@ func main() {
 	loadAddr := flag.Uint64("load", 0x80000, "laadadres (de Pi-bootloader laadt raw images altijd op 0x80000; bij -pe genegeerd — dan uit de ELF afgeleid)")
 	dramStart := flag.Uint64("dram", 0, "DRAM-start zoals U-Boot hem rapporteert (bi_dram[0].start): text_offset wordt load-dram. GEMETEN 05-08 op de Radxa Zero 3E: 0x200000 — booti legt een niet-relocatable Image op dram+text_offset, dus met de default 0 landt hij daar 2MB te hoog en zwijgt hij")
 	raw := flag.Bool("raw", false, "geen arm64 Image-header: alleen de code0-branch, géén ARM\\x64-magic — de firmware behandelt het bestand dan als raw binary en springt blind naar kernel_address (het Circle-recept; boot-meting 2026-07-08: het Image-pad mét magic weigerde onze kernel zonder enig levensteken, het raw-pad is op de Pi 5 bewezen)")
+	apple := flag.Bool("apple", false, "Apple-bootobject: geen Linux-Image-header, maar de twee stubs uit board/apple vooraan in het image (offset 0 = waar een core uit reset landt, 0x800 = waar iBoot de boot-core aflevert) plus hun parameterblok op 0x100 — zie appleStub")
 	pe := flag.Bool("pe", false, "verpak als AArch64 PE/COFF UEFI-applicatie (BOOTAA64.EFI): één payload + relocatietabel, de overige -elf-varianten als diff-bewijs (vereist -ldflags -buildid= op elke variant; zie docs/archief/pe-relocatie.md)")
 	flag.Parse()
 	if len(elfPaths) == 0 {
@@ -163,6 +164,12 @@ func main() {
 	}
 
 	p := flatten(elfPaths[0], *loadAddr)
+
+	if *apple {
+		writeAppleBoot(&p, *outPath)
+		return
+	}
+
 	img, memEnd := p.img, uint64(len(p.img))
 
 	// code0: branch naar de entry — in beide modi het eerste instructiewoord.

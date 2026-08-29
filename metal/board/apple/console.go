@@ -68,10 +68,11 @@ func uartPut(c byte) {
 }
 
 func putBoth(c byte) {
+	// Vaste adressen, en dat is een keuze. De ADT weet ze ook, maar die
+	// uitlezen is een wandeling door een boom die zelf pas werkt als het DRAM
+	// gemapt is — en dat mag niet aan de eerste byte console-uitvoer hangen.
+	// Juist de eerste bytes zijn wat je wilt zien als er iets misgaat.
 	dock, uart := uintptr(DockChannelBase), uintptr(UART0Base)
-	if p, ok := Params(); ok {
-		dock, uart = uintptr(p.Dock), uintptr(p.UART0)
-	}
 	if dock != 0 {
 		dockStalled = !put(dock+dockTXFree, func(v uint32) bool { return v != 0 }, dock+dockTX, c, dockStalled)
 	}

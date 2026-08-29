@@ -30,15 +30,15 @@ const (
 // op 4KB uitgelijnd zijn. false = geen SART bekend, verkeerde variant, scheve
 // grenzen, of alle zestien vensters zijn al van de firmware.
 func AllowDMA(paddr, size uint64) bool {
-	p, ok := Params()
-	if !ok || p.ANS.SART == 0 || p.ANS.SARTVer != sartVersion {
+	_, _, _, sart := ANSAddrs()
+	if sart == 0 || SARTVersion() != sartVersion {
 		return false
 	}
 	const mask = 1<<sartShift - 1
 	if paddr&mask != 0 || size&mask != 0 || size == 0 {
 		return false
 	}
-	base := uintptr(p.ANS.SART)
+	base := uintptr(sart)
 	for i := uintptr(0); i < sartEntries; i++ {
 		if dev.Read32(base+sartConfig+i*4) != 0 {
 			continue // van de firmware
@@ -55,11 +55,11 @@ func AllowDMA(paddr, size uint64) bool {
 // SARTWindows geeft de vensters die nu openstaan — voor diagnose: staat onze
 // DMA-regio er niet in, dan komt er geen byte van de coprocessor aan.
 func SARTWindows() (n int, first, firstSize uint64) {
-	p, ok := Params()
-	if !ok || p.ANS.SART == 0 {
+	_, _, _, sart := ANSAddrs()
+	if sart == 0 {
 		return 0, 0, 0
 	}
-	base := uintptr(p.ANS.SART)
+	base := uintptr(sart)
 	for i := uintptr(0); i < sartEntries; i++ {
 		if dev.Read32(base+sartConfig+i*4) == 0 {
 			continue

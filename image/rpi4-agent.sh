@@ -40,7 +40,7 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 # 3. ELF → raw kernel8.img.
 cd "$DIR"
 mkdir -p sd-rpi4
-go run "$DIR/image/mkkernel/main.go" "$DIR/image/mkkernel/pe.go" -elf metal/out/agent4.elf -o sd-rpi4/kernel8.img -load 0x80000 -raw
+go run "$DIR"/image/mkkernel/*.go -elf metal/out/agent4.elf -o sd-rpi4/kernel8.img -load 0x80000 -raw
 
 # 4. config.txt — zelfde poortwachters als rpi4-hopos.sh.
 cat > sd-rpi4/config.txt <<'EOF'

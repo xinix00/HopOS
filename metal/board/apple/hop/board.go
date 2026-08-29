@@ -50,14 +50,14 @@ var _ board.CoreCountHinter = machine{}
 // cpuOf vertaalt een logische HopOS-core (1..N) naar m1n1's cpu-index; -1 als
 // hij niet bestaat. Core 0 is de boot-cpu.
 func cpuOf(core int) int {
-	p, ok := apple.Params()
-	if !ok || core < 0 || core >= p.NCPU {
+	self := apple.SelfCPU()
+	if self < 0 || core < 0 || core >= apple.NumCPUs() {
 		return -1
 	}
 	if core == 0 {
-		return p.BootCPU
+		return self
 	}
-	if core-1 < p.BootCPU {
+	if core-1 < self {
 		return core - 1
 	}
 	return core
@@ -69,23 +69,22 @@ func (machine) MemTotal() uint64 { return apple.MemTotal() }
 
 // ExpectedAppCores: alles behalve de boot-cpu (M4: 9).
 func (machine) ExpectedAppCores() int {
-	p, ok := apple.Params()
-	if !ok {
-		return 0
+	if n := apple.NumCPUs(); n > 0 {
+		return n - 1
 	}
-	return p.NCPU - 1
+	return 0
 }
 
 // CoreClass: de E-cores ("sawtooth", cluster 0) zijn "small", de P-cores
 // ("everest", cluster 1) "big". De clustergrens zit in apple.CoreID's tabel;
 // hier via het MPIDR dat m1n1 per cpu rapporteerde (aff1 = cluster).
 func (machine) CoreClass(core int) string {
-	p, ok := apple.Params()
 	cpu := cpuOf(core)
-	if !ok || cpu < 0 {
+	cpus := apple.CPUs()
+	if cpu < 0 || cpu >= len(cpus) {
 		return "big"
 	}
-	if p.MPIDR[cpu]>>8&0xFF == 0 {
+	if cpus[cpu].Cluster == 0 {
 		return "small"
 	}
 	return "big"
@@ -107,7 +106,7 @@ func (machine) CPUOn(core, entry, ctx uint64) int64 {
 	if apple.Released(cpu) {
 		return -4
 	}
-	if !apple.Release(cpu, entry, ctx) {
+	if !apple.Start(cpu, entry, ctx) {
 		return -2
 	}
 	return board.PSCISuccess

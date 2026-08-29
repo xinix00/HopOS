@@ -122,7 +122,7 @@ done
 #    module-gezeur, ongeacht de shell-omgeving.
 cd "$DIR"
 mkdir -p "$ESP/EFI/BOOT"
-GO111MODULE=off go run "$DIR/image/mkkernel/main.go" "$DIR/image/mkkernel/pe.go" \
+GO111MODULE=off go run "$DIR"/image/mkkernel/*.go \
 	$ELFS -o "$ESP/EFI/BOOT/BOOTAA64.EFI" -pe
 
 # 3. Verse varstore (boot-entries verouderen bij een topologie-wijziging →

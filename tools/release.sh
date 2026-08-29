@@ -18,10 +18,11 @@
 #                                        framebuffer op dat silicium; cfg
 #                                        ingebakken)
 #
-# payload voor een loader (geen boot-medium — dit board boot van de kabel):
-#   hopos-m4-headless.img.gz             Mac mini M4, via m1n1 (image/apple/
-#                                        boot-cycle.sh); ook hier is headless de
-#                                        enige smaak — geen framebuffer onder m1n1
+# raw bootobject (geen boot-medium: iBoot laadt het bestand zelf):
+#   hopos-m4-headless.img.gz             Mac mini M4 — installeren met kmutil
+#                                        configure-boot (--raw --entry-point
+#                                        2048); cfg ingebakken, en headless is
+#                                        de enige smaak (nog geen framebuffer)
 #
 # drop-in-updates voor een bestaand boot-medium:
 #   BOOTAA64.EFI / BOOTAA64-headless.EFI
@@ -175,26 +176,31 @@ else
 	echo "   (zet LICHEERV_DONOR, zie image/licheerv-agent.sh)" >&2
 fi
 
-# 3d. Apple silicon (Mac mini M4): geen dd-baar medium — dit board boot niet van
-#     een kaart maar van de kabel (iBoot → m1n1 → de proxy schrijft het image op
-#     zijn linkadres en springt). Het asset is dus de PAYLOAD, geen boot-medium,
-#     en de config reist met de loader mee (CFG=... image/apple/load-probe.py)
-#     in plaats van in het image te zitten: er is geen bestandssysteem om hem
-#     later te bewerken.
+# 3d. Apple silicon (Mac mini M4): geen dd-baar medium, want dit board laadt geen
+#     kaart maar een BESTAND — iBoot legt het raw bootobject ergens in DRAM neer
+#     (het adres verschilt per boot) en springt naar offset 0x800. Vandaar de
+#     twee stubs vooraan (board/apple/bootstub.s): 0x0 is waar een core uit reset
+#     landt, 0x800 waar de firmware de boot-core aflevert, en samen verplaatsen
+#     ze het image naar zijn linkadres. Installeren doet de eigenaar zelf, uit
+#     1TR, met kmutil configure-boot.
+#
+#     De config gaat MEE IN het image (CFG=, -tags embedcfg), om exact dezelfde
+#     reden als bij de LicheeRV: er is geen bestandssysteem dat wij kunnen lezen,
+#     dus er is achteraf niets te bewerken. Wat erin zit is de headless-default —
+#     hetzelfde hopos-headless.cfg-asset als hierboven, géén board-eigen derde.
 #
 #     -headless is hier de enige smaak, en dat is geen keuze maar het silicium:
-#     de display-firmware (DCP) komt onder m1n1 op M4 niet op, dus er is geen
-#     framebuffer om een desktop op te zetten (board/apple/apple.go). Zelfde
-#     naamgeving als de LicheeRV: de smaak staat in de naam, ook al is er maar
-#     één.
+#     de display-firmware (DCP) komt op M4 niet op, dus er is geen framebuffer om
+#     een desktop op te zetten (board/apple/apple.go). Zelfde naamgeving als de
+#     LicheeRV: de smaak staat in de naam, ook al is er maar één.
 #
 #     Alleen bouwen met de tamago-fork ernaast (branch hopos-highram — RAM op
 #     1TiB valt buiten tamago's vlakke 39-bit-map; image/apple/go.work wijst
 #     ernaar). Ontbreekt die, dan slaat de release deze smaak LUIDRUCHTIG over
 #     i.p.v. te falen — precies zoals bij de Sipeed-donor hierboven.
 if [ -d "${TAMAGO_FORK:-$DIR/../tamago}" ]; then
-	echo ">> hopos-m4-headless.img.gz (Apple M4, m1n1-payload)" >&2
-	AGENT=1 "$DIR/image/apple-m4.sh" >/dev/null
+	echo ">> hopos-m4-headless.img.gz (Apple M4, raw bootobject, cfg ingebakken)" >&2
+	AGENT=1 CFG="$DIR/image/hopos-headless.cfg" "$DIR/image/apple-m4.sh" >/dev/null
 	gzimg "$DIR/metal/out/hopos-apple.img" hopos-m4-headless.img
 else
 	echo ">> OVERGESLAGEN: hopos-m4-headless.img.gz — tamago-fork ontbreekt" >&2
@@ -223,7 +229,7 @@ NOTES="Prebuilt, signed boot images — https://gethop.org/hopos/ for the 5-minu
 - **hopos-rpi4.img.gz** — Raspberry Pi 4
 - **hopos-radxa-zero3.img.gz** — Radxa Zero 3E (RK3566), vendor U-Boot chain included on its raw sectors
 - **hopos-licheerv-headless.img.gz** — LicheeRV Nano (RISC-V; headless is the only flavour — no framebuffer on that silicon): this board has no SD driver, so its config is **baked into the image** — the baked config IS the headless default (\`hopos-headless.cfg\` below); to change it, rebuild with \`CFG=~/my-node.cfg image/licheerv-agent.sh /dev/diskN\`.
-- **hopos-m4-headless.img.gz** — Mac mini M4 (Apple silicon). Not a boot medium: this board boots off the cable, so the image is an **m1n1 payload** — load it with \`image/apple/boot-cycle.sh\`, which needs [m1n1](https://github.com/AsahiLinux/m1n1) on the machine and passes your config along (\`CFG=~/my-node.cfg\`). Headless is the only flavour here too — the display firmware does not come up under m1n1 on M4, so there is no framebuffer.
+- **hopos-m4-headless.img.gz** — Mac mini M4 (Apple silicon). Not a card image: iBoot loads this **file** as the machine's boot object, wherever it lands in DRAM, so the image carries its own relocation stub. Install it from 1TR on a machine set to Permissive Security: \`kmutil configure-boot -c hopos-m4.img --raw --entry-point 2048 --lowest-virtual-address 0 -v "/Volumes/Macintosh HD"\`. Like the LicheeRV it has **no readable boot filesystem**, so its config is baked in — the baked config IS the headless default (\`hopos-headless.cfg\` below); to change it, rebuild with \`AGENT=1 CFG=~/my-node.cfg image/apple-m4.sh\`. Headless is the only flavour here too: the display firmware does not come up on M4, so there is no framebuffer.
 - \`*-headless.img.gz\` — the same images built with \`GUI=0\` (**zero GUI code linked**) and the headless config.
 
 macOS example: \`diskutil unmountDisk /dev/diskN && gunzip -c hopos-rpi5.img.gz | sudo dd of=/dev/rdiskN bs=4m\`

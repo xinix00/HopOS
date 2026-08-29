@@ -62,10 +62,30 @@ const (
 	// (+0x4000..+0x9000, plus de L0/L1-laag van de fork op +0x9000..+0xB000)
 	// en de tekst op +0x10000. Pariteit met cpuinit.s.
 	BootScratch    = RamBase + 0xE000   // CurrentEL bij binnenkomst (2 verwacht)
-	DTBPtr         = BootScratch + 0x08 // x0 van de loader (m1n1: FDT of 0)
 	HCRScratch     = BootScratch + 0x10 // HCR_EL2 zoals hij ná onze write leest
 	CNTHCTLScratch = BootScratch + 0x18 // CNTHCTL_EL2 idem
-	MPIDRScratch   = BootScratch + 0x20 // MPIDR van de boot-core
+	// De hop-woorden, naast de andere scratch. Ze moeten HIER staan en niet in
+	// de struct-regio verderop: die is nog niet van ons zolang m1n1 leeft, en
+	// een schrijf erheen levert een SError met L2C_ERR op — gemeten 29-08 met
+	// m1n1's eigen exception-handler, FAR 0x1011a01000. Dit stuk heeft m1n1's
+	// proxy zelf al beschreven (het image, het param-blok), dus het is bereikbaar.
+	//
+	// Twee werelden lezen ze: een core met de MMU uit (rechtstreeks geheugen) en
+	// een met de MMU aan (gecachet). Wie hier schrijft veegt zijn cacheregel dus
+	// mee — in assembly met dc civac, in Go met dev.CleanInv.
+	MPIDRScratch = BootScratch + 0x20 // MPIDR van de boot-core
+	HopAlive     = BootScratch + 0x28 // de zuinige core: "ik leef, parkeer door"
+	HopParkPC    = BootScratch + 0x30 // adoptie-entry voor de geparkeerde core
+	HopParkArg   = BootScratch + 0x38 // x0 voor die adoptie
+	HopParkFor   = BootScratch + 0x40 // MPIDR van wie die adoptie bedoeld is
+
+	// Wat de bootstub achterliet (bootstub.s). StubSrc is het adres waar de
+	// firmware het image neerzette — en dus de waarde die RVBAR draagt, waarmee
+	// de vraag "zijn de cores van ons" beantwoord is. StubX0 is de x0 waarmee
+	// we binnenkwamen: iBoot's boot_args-blok, de enige ingang die dit board
+	// van de firmware krijgt (firmware.go).
+	StubSrc = BootScratch + 0x48
+	StubX0  = BootScratch + 0x50
 
 	// ParamBase: het param-blok van de loader (params.go voor de layout).
 	ParamBase = RamBase + 0xE100
@@ -92,8 +112,9 @@ const (
 	RevokeVec  = StructBase + 0x00F0000
 	Stage2PA   = StructBase + 0x0100000
 	WakeBase   = StructBase + 0x0A00000
-	NetDMAPA   = StructBase + 0x1000000
-	PoolBase   = StructBase + 0x2000000
+
+	NetDMAPA = StructBase + 0x1000000
+	PoolBase = StructBase + 0x2000000
 
 	// StorageDMA is waar de queues en TCB-tabellen van de ANS liggen. Buiten
 	// élke RAM-declaratie, dus device-gemapt en ongecachet — de coprocessor
@@ -141,7 +162,15 @@ func hwinit1() {
 	// keert WFE ín de scheduler-lus meteen terug (3,3M idle-rondes/s) terwijl
 	// WFI met een timer-deadline exact slaapt — beide gemeten met cmd/probeapple
 	// op 29-08, zie docs/archief/apple-m4.md. Ná Enable: die zet de cap.
-	idle.UseTimerSleep()
+	//
+	// Maar alleen als de timer-FIQ deze core ook echt bereikt. Op t8132 is dat
+	// niet vanzelfsprekend: op een core die de firmware niet zelf configureerde
+	// gáát de timer wel af (ISTATUS wordt 1) maar wekt hij niet, en het register
+	// dat die poort opent is vergrendeld. WFI is dan een eeuwige slaap. Meten,
+	// niet aannemen — TimerWakes doet dat zonder ooit te kunnen hangen.
+	if TimerWakes() {
+		idle.UseTimerSleep()
+	}
 }
 
 //go:linkname nanotime runtime/goos.Nanotime
@@ -177,13 +206,3 @@ func EffectiveHCR() uint64 { return dev.Read64(HCRScratch) }
 
 // EffectiveCNTHCTL geeft CNTHCTL_EL2 zoals teruggelezen.
 func EffectiveCNTHCTL() uint64 { return dev.Read64(CNTHCTLScratch) }
-
-// MemTotal geeft het DRAM in bytes zoals de loader het uit de ADT las
-// (/chosen dram-size), 0 als er geen param-blok is.
-func MemTotal() uint64 {
-	p, ok := Params()
-	if !ok {
-		return 0
-	}
-	return p.DRAMSize
-}

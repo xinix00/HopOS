@@ -32,8 +32,19 @@ mkdir -p out
 # ("base outside usable address space", gemeten 28-08, de eerste boot).
 # VHE (asmflags): Apple's EL2 heeft E2H vast op 1; cpu/el2/sysreg.h kiest dan
 # de _EL12-encoderingen voor de EL1-registers van een app.
+# CFG=<pad>: de platform-config MEE IN HET IMAGE (cmd/hopos/cfgblob). Nodig
+# zodra wij het bootobject zijn — dan is er geen loader meer die hem in het
+# geheugen legt, en dit board kan zijn eigen bootmedium nog niet lezen. Zelfde
+# mechaniek als de LicheeRV; de bestemming is gitignored, want er kan een echte
+# apikey in staan. Zonder CFG blijft het beeld zoals het was: config van de
+# loader, en zonder loader boot de node headless.
 if [ "${AGENT:-0}" = 1 ]; then
 	TARGET=./cmd/hopos; NAME=hopos-apple; TAGS="apple linkcpuinit highram"
+	if [ -n "${CFG:-}" ]; then
+		cp "$DIR/$CFG" "$DIR/metal/cmd/hopos/cfgblob/hopos.cfg" 2>/dev/null || cp "$CFG" "$DIR/metal/cmd/hopos/cfgblob/hopos.cfg"
+		TAGS="$TAGS embedcfg"
+		echo "config ingebakken: $CFG" >&2
+	fi
 elif [ "${EMBED:-0}" = 1 ]; then
 	TARGET=./cmd/hopos-embed; NAME=hopos-apple-embed; TAGS="apple linkcpuinit highram"
 	# De app-image die de main via go:embed meedraagt: board-onafhankelijk (de
@@ -54,8 +65,12 @@ GOWORK="$DIR/image/apple/go.work" GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.c
 	"$TAMAGO" build -tags "$TAGS" -trimpath -asmflags "$ASMFLAGS" \
 	-ldflags "-T 0x10100010000 -R 0x1000" -o "out/$NAME.elf" "$TARGET"
 
-# ELF → platte image mét arm64-Image-header (m1n1's payload-pad herkent die
-# straks aan het ARM\x64-magic); text_offset = 4GB t.o.v. de DRAM-basis.
+# ELF → Apple-bootobject: geen arm64-Image-header (die is van Linux en zegt
+# iBoot niets), maar de twee stubs uit board/apple vooraan. Offset 0 is waar een
+# core uit reset landt, 0x800 waar de firmware de boot-core aflevert, en samen
+# verplaatsen ze het image naar zijn linkadres. Dat maakt dit bestand tegelijk
+# het bootobject voor `kmutil configure-boot --raw --entry-point 2048` én de
+# payload die de loader over de kabel stuurt.
 cd "$DIR"
-go run "$DIR/image/mkkernel/main.go" "$DIR/image/mkkernel/pe.go" \
-	-elf "metal/out/$NAME.elf" -o "metal/out/$NAME.img" -load 0x10100000000 -dram 0x10000000000
+go run "$DIR"/image/mkkernel/*.go \
+	-elf "metal/out/$NAME.elf" -o "metal/out/$NAME.img" -load 0x10100000000 -apple

@@ -97,6 +97,12 @@ func gpioSet(pin int, v int) {
 // volgorde is die van Linux' apple_pcie_setup_port; de tijden komen uit de ADT
 // (t-refclk-to-perst en perst-to-config, beide 100ms).
 func LinkUp(timeout time.Duration) error {
+	// De controller moet eerst bestaan. Onder een bootloader die het al deed is
+	// dit een no-op; zijn wíj het bootobject, dan is dit het hele verschil
+	// tussen een poort en een dood adres (apcie.go).
+	if err := InitPCIe(); err != nil {
+		return err
+	}
 	b := uintptr(ethPortBase)
 	if dev.Read32(b+portLINKSTS)&1 != 0 {
 		return nil // al up (herhaalde aanroep)

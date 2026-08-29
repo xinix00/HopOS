@@ -46,7 +46,7 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 # 3. ELF → raw image (Circle-recept, mkkernel).
 cd "$DIR"
 mkdir -p sd-rpi5
-go run "$DIR/image/mkkernel/main.go" "$DIR/image/mkkernel/pe.go" -elf metal/out/agent5.elf -o sd-rpi5/hop-agent5.img -load 0x80000 -raw
+go run "$DIR"/image/mkkernel/*.go -elf metal/out/agent5.elf -o sd-rpi5/hop-agent5.img -load 0x80000 -raw
 
 # 4. config.txt — zelfde poortwachters, kernel wijst naar de agent.
 cat > sd-rpi5/config.txt <<'EOF'

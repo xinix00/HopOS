@@ -26,12 +26,16 @@
 #include "textflag.h"
 
 #define BOOT_SCRATCH    0x1010000E000	// = apple.BootScratch (pariteit: apple.go)
-#define DTB_PTR         0x1010000E008	// = apple.DTBPtr
 #define HCR_SCRATCH     0x1010000E010	// = apple.HCRScratch
 #define CNTHCTL_SCRATCH 0x1010000E018	// = apple.CNTHCTLScratch
 #define MPIDR_SCRATCH   0x1010000E020	// = apple.MPIDRScratch
-#define PARAM_DOCK      0x1010000E110	// = apple.ParamBase + paramDock
+#define PARAM_HOPMPIDR  0x1010000E120	// = apple.ParamBase + paramHopMPIDR
+#define PARAM_HOPREL    0x1010000E128	// = apple.ParamBase + paramHopRelease
+#define HOP_ALIVE       0x1010000E028	// = apple.HopAlive
+#define HOP_PARKPC      0x1010000E030	// = apple.HopParkPC
+#define HOP_PARKARG     0x1010000E038	// = apple.HopParkArg
 #define EL2_VECTORS     0x101100F0000	// = apple.EL2Vectors = apple.RevokeVec (pariteit: SetupPlan)
+#define DOCK_FALLBACK   0x388128000	// = apple.DockChannelBase
 
 TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	MOVD	R0, R9		// x0 van m1n1 (FDT of 0); bewaren vóór clobber
@@ -39,13 +43,134 @@ TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	LSR	$2, R0, R0
 	AND	$0b11, R0, R0
 
+	MRS	MPIDR_EL1, R2
+
+	// ── De hop ──────────────────────────────────────────────────────────────
+	// HopOS hoort op een zuinige core te wonen; de firmware levert ons af op de
+	// core waar iBoot begon, en dat is er een uit het snelle cluster. Het
+	// param-blok wijst de zuinige core aan — de loader koos hem uit m1n1's
+	// spin-table — en zijn wij die niet, dan starten we hem hier op DEZE entry
+	// en parkeren wij ons voor adoptie als app-core.
+	//
+	// Dit staat vóór élke geheugenschrijf, en dat is geen stijl maar noodzaak:
+	// m1n1 ROEPT een vrijgegeven core AAN als functie, met zijn eigen MMU nog
+	// levend — anders dan de boot-core, die hij vlak vóór de sprong afbreekt.
+	// Alles wat die core met caches aan schrijft blijft in zijn cache hangen,
+	// onzichtbaar voor de ander die met MMU uit meeleest. Dus: eerst de MMU van
+	// deze core uit, dan pas schrijven.
+	//
+	// Het RELEASE-adres is de bewaker, niet het MPIDR: cpu0's MPIDR is op dit
+	// silicium letterlijk 0.
+	MOVD	$PARAM_HOPREL, R1
+	MOVD	(R1), R6
+	CBZ	R6, nohop
+	MOVD	$PARAM_HOPMPIDR, R1
+	MOVD	(R1), R3
+	AND	$0xFFFFFF, R2, R4
+	AND	$0xFFFFFF, R3, R3
+	CMP	R3, R4
+	BNE	dohop
+
+	// Wij ZIJN de zuinige core. Levensteken zetten, mét die ene cacheregel naar
+	// geheugen: onze MMU staat nog aan (m1n1 riep ons als functie aan), de
+	// wachtende core leest met de MMU uit. Géén cache-onderhoud op set/way —
+	// dat raakt gedeelde niveaus terwijl de andere core nog loopt.
+	MOVD	$HOP_ALIVE, R1
+	MOVD	$1, R5
+	MOVD	R5, (R1)
+	WORD	$0xd50b7c21		// dc civac, x1
+	WORD	$0xd5033f9f		// dsb sy
+	WORD	$0xd503209f		// sev
+
+	// En dan de MMU van deze core uit, zodat de rest van cpuinit in dezelfde
+	// wereld draait als op de boot-core: geen vertaling, geen caches.
+	WORD	$0xd53c1005		// mrs x5, sctlr_el2
+	BIC	$1<<0, R5		// M — vertaling
+	BIC	$1<<2, R5		// C — data-cache
+	BIC	$1<<12, R5		// I — instructie-cache
+	WORD	$0xd51c1005		// msr sctlr_el2, x5
+	ISB	$15
+	B	nohop
+
+dohop:
+	// m1n1's spin-table: args[0..3] op target+8, het target-woord op target+0.
+	// Volgorde is de zijne: args, dsb, target, sev (pariteit: params.go Release).
+	MOVD	R9, 8(R6)		// x0 doorgeven zoals wij hem kregen
+	MOVD	ZR, 16(R6)
+	MOVD	ZR, 24(R6)
+	MOVD	ZR, 32(R6)
+	WORD	$0xd5033f9f		// dsb sy
+	MOVD	$cpuinit(SB), R5
+	MOVD	R5, (R6)
+	WORD	$0xd5033f9f		// dsb sy
+	WORD	$0xd503209f		// sev
+
+	// Wachten op zijn levensteken. Komt het niet, dan redden we onszelf en
+	// booten we door als HOP op deze core: een mislukte wissel hoort een regel
+	// op de console te zijn, geen baksteen.
+	MOVD	$HOP_ALIVE, R1
+	MOVD	$0x4000000, R7
+waitalive:
+	MOVD	(R1), R5
+	CBNZ	R5, park
+	SUB	$1, R7
+	CBNZ	R7, waitalive
+	B	nohop			// zelfredding
+
+park:
+	// Geparkeerd tot HOP ons adopteert. Hij schrijft eerst het argument, dan de
+	// entry, veegt de regel naar geheugen en stuurt een event. Wij komen daar
+	// aan zoals élke door m1n1 vrijgegeven core: EL2, x0 = het argument.
+	MOVD	$HOP_PARKPC, R1
+parkloop:
+	WFE
+	MOVD	(R1), R5
+	CBZ	R5, parkloop
+	MOVD	$HOP_PARKARG, R2
+	MOVD	(R2), R0
+	JMP	(R5)
+
+nohop:
+	// Schone lei voor de vertaling. De boot-core krijgt die gratis — m1n1 doet
+	// vlak voor de sprong een volledige mmu_shutdown — maar een core die wij
+	// uit zijn spin-table adopteren niet: die draaide zojuist nog MET m1n1's
+	// MMU en houdt zijn vertalingen in de TLB. tamago zet daarna onze tabellen
+	// aan en gaat uit van een lege TLB, dus dan wint m1n1's oude 1GB-blok voor
+	// het lage DRAM en geeft élke lees daar een "address size fault, level 0" —
+	// terwijl tabellen, TTBR0, TCR en SCTLR aantoonbaar goed staan (GEMETEN
+	// 29-08 op de gehopte core, met een softwarewandeling ernaast).
+	//
+	// Hier, en niet alleen in de hop-tak: het kost niets op een core die al
+	// schoon is, en elke manier waarop een core hier binnenkomt heeft hetzelfde
+	// nodig.
+	WORD	$0xd508871f	// tlbi vmalle1 — m1n1's EL1&0-vertalingen
+	WORD	$0xd50c871f	// tlbi alle2   — en zijn eigen
+	WORD	$0xd508751f	// ic iallu
+	WORD	$0xd5033f9f	// dsb sy
+	WORD	$0xd5033fdf	// isb
+
 	MOVD	$BOOT_SCRATCH, R1
 	MOVD	R0, (R1)
-	MOVD	$DTB_PTR, R1
-	MOVD	R9, (R1)
-	MRS	MPIDR_EL1, R2
 	MOVD	$MPIDR_SCRATCH, R1
+	MRS	MPIDR_EL1, R2
 	MOVD	R2, (R1)
+
+	// Eerste licht: één regel op de UART vóór de sprong naar EL1 en dus vóór
+	// élke regel Go. Op nieuw silicium is dit het verschil tussen "hij deed
+	// niets" en "hij kwam tot hier, met dít in x0" — en dat verschil kost
+	// anders een bootcyclus om te achterhalen. Het param-blok mag ontbreken:
+	// zodra wij het bootobject zijn is dat de normale toestand.
+	MOVD	$DOCK_FALLBACK, R10
+	MOVD	$·msgBoot(SB), R11
+	MOVD	$9, R15
+	BL	puts(SB)
+	MOVD	R9, R0
+	BL	puthex(SB)
+	MOVD	$·msgNL(SB), R11
+	MOVD	$2, R15
+	BL	puts(SB)
+	MOVD	$BOOT_SCRATCH, R1
+	MOVD	(R1), R0	// CurrentEL terug: puts/puthex clobberen R0
 
 	CMP	$2, R0
 	BEQ	el2
@@ -98,6 +223,15 @@ build:
 	MOVD	$0, R0
 	WORD	$0xd51ce060	// msr cntvoff_el2, x0
 
+	// NIET PROBEREN: Apple's poort voor de timer-FIQ
+	// (s3_5_c15_c1_3, m1n1's SYS_IMP_APL_VM_TMR_FIQ_ENA_EL2) is op t8132
+	// VERGRENDELD — een enkele mrs geeft `!!EL2 ESR=0000000002000000`
+	// (undefined), gemeten 29-08. m1n1 wist het al: features_m4 mist
+	// apple_sysregs_unlocked, met een XXX erboven. Gevolg: op een core die de
+	// firmware niet zelf configureerde bereikt de timer-FIQ de core niet, en
+	// WFI slaapt daar voor eeuwig terwijl de timer wél afgaat. Het board meet
+	// dat nu (apple.TimerWakes) in plaats van het aan te nemen.
+
 	// SPSR_EL2: EL1h, DAIF gemaskeerd.
 	MOVD	$0, R0
 	ORR	$0b1111<<6, R0
@@ -135,9 +269,10 @@ TEXT ·cpuinitEL1(SB),NOSPLIT|NOFRAME,$0
 // Registerafspraak van de helpers hieronder: R10 = UART-basis, R11 = string,
 // R15 = lengte, R12 = byte, R0 = getal; R20/R21 bewaren LR over de nesting.
 TEXT el2fault(SB),NOSPLIT|NOFRAME,$0
-	MOVD	$PARAM_DOCK, R10
-	MOVD	(R10), R10
-	CBZ	R10, hang
+	// De dockchannel-basis als constante: dit blok draait vóór élke lezer, en
+	// een foutmelder die van een param-blok afhangt zwijgt juist wanneer het
+	// misgaat.
+	MOVD	$DOCK_FALLBACK, R10
 	MOVD	$·msgESR(SB), R11
 	MOVD	$12, R15
 	BL	puts(SB)
@@ -162,6 +297,12 @@ TEXT el2fault(SB),NOSPLIT|NOFRAME,$0
 	MOVD	$6, R15
 	BL	puts(SB)
 	WORD	$0xd53c4000	// mrs x0, spsr_el2 — M[3:0] zegt vanaf welk EL
+	BL	puthex(SB)
+	MOVD	$·msgHCR(SB), R11
+	MOVD	$5, R15
+	BL	puts(SB)
+	WORD	$0xd53c1100	// mrs x0, hcr_el2 — bit 0 (VM) zegt of stage 2 leeft,
+				// en dus of een EL1-abort hier HOORT te landen
 	BL	puthex(SB)
 	MOVD	$·msgNL(SB), R11
 	MOVD	$2, R15
@@ -230,5 +371,11 @@ DATA	·msgHPF+0(SB)/7, $" HPFAR="
 GLOBL	·msgHPF(SB), RODATA|NOPTR, $7
 DATA	·msgSPSR+0(SB)/6, $" SPSR="
 GLOBL	·msgSPSR(SB), RODATA|NOPTR, $6
+DATA	·msgHCR+0(SB)/5, $" HCR="
+GLOBL	·msgHCR(SB), RODATA|NOPTR, $5
 DATA	·msgNL+0(SB)/2, $"\r\n"
 GLOBL	·msgNL(SB), RODATA|NOPTR, $2
+DATA	·msgBoot+0(SB)/8, $"\r\nhopos "
+DATA	·msgBoot+8(SB)/1, $"x"
+GLOBL	·msgBoot(SB), RODATA|NOPTR, $9
+

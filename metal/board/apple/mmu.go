@@ -22,13 +22,10 @@ import (
 // DRAM (alles boven 2^40) via L2-tabellen. Dat staat hier en niet in de
 // tamago-fork: daar zijn 1GB-blokken architectonisch correct en is dit een
 // Apple-eigenaardigheid. MapDRAM doet het voor het hele DRAM bij boot uit een
-// statische arena (hwinit-tijd: niet alloceren); RemapGBToL2 was het
-// experiment dat het bewees en blijft als bouwsteen.
+// statische arena (hwinit-tijd: niet alloceren).
 const (
-	tableL0Off    = 0xA000
-	tableL1Off    = 0x4000
-	tableL2Spare  = 0xB000 // vrije pagina's: +0xB000..+0xE000 (scratch begint op +0xE000)
-	tableL2Spares = 3
+	tableL0Off = 0xA000
+	tableL1Off = 0x4000
 
 	descTable = 0b11
 	descBlock = 0b01
@@ -36,8 +33,6 @@ const (
 	// deviceAttributes | TTE_BLOCK | TTE_EXECUTE_NEVER (arm64/mmu.go).
 	deviceBlock2M = descBlock | 1<<10 | 0b10<<8 | 0<<2 | 0b11<<53
 )
-
-var spareUsed int
 
 // De tabel-arena voor MapDRAM: één L2-pagina per GB DRAM, statisch (BSS) omdat
 // dit vóór of buiten de heap moet kunnen draaien; één pagina extra voor de
@@ -68,13 +63,48 @@ func MapDRAM(base, size uint64) int {
 		for i := uintptr(0); i < 512; i++ {
 			*(*uint64)(unsafe.Pointer(l2 + i*8)) = (gb + uint64(i)<<21) | deviceBlock2M
 		}
+		// De verse tabel naar geheugen vegen vóór hij in gebruik komt. De
+		// tabelwandelaar leest zijn descriptors niet noodzakelijk uit ónze
+		// cache: op een core die net van "MMU en caches uit" naar "aan" is
+		// gegaan — precies wat er met de zuinige core gebeurt bij de hop —
+		// zag hij de oude 1GB-blokdescriptor in DRAM staan en niet de nieuwe
+		// tabel in de cache. Gevolg: de eerste lees in dat GB gaf een
+		// "address size fault, level 0", alsof de remap nooit gebeurd was
+		// (GEMETEN 29-08, alleen op de gehopte core).
+		dev.CleanInv(l2, 4096)
 		dev.MB()
 		*(*uint64)(unsafe.Pointer(l1e)) = uint64(l2) | descTable
+		dev.CleanInv(l1e&^63, 64)
 		n++
 	}
 	dev.MB()
 	tlbiAll()
 	return n
+}
+
+// Walk loopt de tabellen af zoals de hardware dat zou doen en geeft de vier
+// descriptors terug (0 = niet bereikt). Het antwoord op "wat gebruikt de
+// wandelaar hier eigenlijk" — een vraag die anders alleen als abort terugkomt.
+func Walk(pa uintptr) (l0, l1, l2, l3 uint64) {
+	ramStart, _ := runtime.MemRegion()
+	a := uint64(pa)
+	l0 = *(*uint64)(unsafe.Pointer(uintptr(ramStart) + tableL0Off + uintptr(a>>39&0x1FF)*8))
+	if l0&0b11 != descTable {
+		return
+	}
+	t1 := uintptr(l0 &^ 0xFFF)
+	l1 = *(*uint64)(unsafe.Pointer(t1 + uintptr(a>>30&0x1FF)*8))
+	if l1&0b11 != descTable {
+		return
+	}
+	t2 := uintptr(l1 &^ 0xFFF)
+	l2 = *(*uint64)(unsafe.Pointer(t2 + uintptr(a>>21&0x1FF)*8))
+	if l2&0b11 != descTable {
+		return
+	}
+	t3 := uintptr(l2 &^ 0xFFF)
+	l3 = *(*uint64)(unsafe.Pointer(t3 + uintptr(a>>12&0x1FF)*8))
+	return
 }
 
 // L1Entry geeft de L1-descriptor van de 512GB-regio met het RAM voor de GB
@@ -91,32 +121,4 @@ func L0Entry(i int) uint64 {
 	return *(*uint64)(unsafe.Pointer(uintptr(ramStart) + tableL0Off + uintptr(i)*8))
 }
 
-// RemapGBToL2 vervangt het 1GB-blok voor de GB die pa bevat door een L2-tabel
-// met 512 device-2MB-blokken op dezelfde adressen — zelfde attributen, andere
-// tabeldiepte. false = geen vrije tabelpagina meer, of de ingang was al een
-// tabel (dan is er niets te doen).
-func RemapGBToL2(pa uintptr) bool {
-	ramStart, _ := runtime.MemRegion()
-	idx := (uint64(pa) >> 30) & 0x1FF
-	l1e := uintptr(ramStart) + tableL1Off + uintptr(idx)*8
-	if cur := *(*uint64)(unsafe.Pointer(l1e)); cur&0b11 == descTable {
-		return true
-	}
-	if spareUsed >= tableL2Spares {
-		return false
-	}
-	l2 := uintptr(ramStart) + tableL2Spare + uintptr(spareUsed)*4096
-	spareUsed++
-	gb := uint64(pa) &^ (1<<30 - 1)
-	for i := uintptr(0); i < 512; i++ {
-		*(*uint64)(unsafe.Pointer(l2 + i*8)) = (gb + uint64(i)<<21) | deviceBlock2M
-	}
-	dev.MB()
-	*(*uint64)(unsafe.Pointer(l1e)) = uint64(l2) | descTable
-	dev.MB()
-	tlbiAll()
-	return true
-}
-
-// In regs_arm64.s.
 func tlbiAll()

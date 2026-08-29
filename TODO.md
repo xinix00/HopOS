@@ -55,13 +55,72 @@ de kooi (slot 1, 64MB partitie). Gate groen, niets gecommit.
 - [x] **Geheugen 19,7 → 23,7 GB**: pool gesneden op iBoot's eigen contract
       (`phys_base`/`mem_size`/`top_of_kernel_data` via param-blok v3), twee
       regio's, app aantoonbaar in het lage stuk geplaatst.
-- [ ] **De hop op arm64**: HopOS woont hier op een P-core (BootCPU 6, cluster 1)
-      en apps krijgen 3 P + 6 E. Omgekeerd is beter. Op riscv64 doet de loterij
-      in de kernel-cpuinit dit vóór de eerste Go-instructie; op arm64 is de
-      variant nooit gebouwd. Op Apple kan het met m1n1's spin-table: de boot-core
-      laat een E-core los op onze entry en parkeert zichzelf tot `AdoptParked`.
+- [~] **De hop op arm64**: GEBOUWD en de wissel is bewezen (HOP draait dan op
+      MPIDR 0x80000000, cluster 0; klok en slaap werken daar), maar **standaard
+      UIT** — `HOP=1` zet hem aan. Ná de wissel hangt de netwerk-opbouw van de
+      agent en hangt de SMP-test van de probe (die skipt de boot-cpu, niet
+      zichzelf — dat laatste is een echte fout in de probe). Instrument om
+      verder te zoeken: m1n1's `p.smp_call` op een geparkeerde core terwijl m1n1
+      nog leeft; dan blijft de console staan en vangt zijn exception-handler het.
+      Zie docs/archief/apple-m4.md voor de drie lessen die het al kostte.
 - [ ] platform-config in het param-blok (hopos.node/cluster/apikey), serial uit
       de ADT; watchdog (0x3882b0000, reset-scope meten vóór wapenen)
+- [ ] **De hop naar de zuinige core** — half gefikst 29-08, blijft opt-in
+      (`HOP=1`). GEFIKST: de eerste `time.Sleep` kwam nooit terug omdat WFI daar
+      niet gewekt wordt (de timer gaat af, ISR_EL1 0x40 = FIQ pending, maar de
+      WFI-wek staat dicht en Apple's CYC_OVRD is vergrendeld op t8132). Het
+      board kiest zijn slaapstand nu per core (`apple.TimerWakes`), en dan
+      draait HOP op cluster 0 — HOPOS_HOP_DONE. OPEN: op die geadopteerde core
+      faultt élke lees in het lage DRAM ("address size fault, level 0"), ook na
+      een geslaagde MapDRAM. Uitgesloten: tabellen, TTBR0, TCR, SCTLR, stage 2
+      (HCR VM=0), cache-zichtbaarheid, stale TLB — zie het dossier voor de
+      meettabel. Opnieuw proberen ná de installatie, als die core uit ONZE
+      stubReset komt en m1n1 hem nooit aanraakte.
+- [ ] **Zelf het bootobject zijn (i.p.v. m1n1).** De reden is hard, niet
+      cosmetisch: op de M4 is **RVBAR vergrendeld** (m1n1's `features_m4` mist
+      `apple_sysregs_unlocked`), dus een core uit reset landt altijd bij het
+      bootobject. Zolang m1n1 dat is, komt élke core die wij starten in zíjn
+      vectoren met zíjn MMU aan — daar komt alle hop-ellende vandaan. Het
+      silicium-deel is klein: 3 schrijfacties per core, `init` is NULL voor beide
+      M4-core-typen (geen chicken bits), en het image gaat al raw naar binnen.
+      Het werk zit in de ADT-lezer en in het vervangen van m1n1's proxy als
+      ontwikkellus.
+      - [x] **ADT-lezer** (`metal/fw/adt`): host-getest én op ijzer gelijk aan
+            wat de Python-loader eruit haalt, inclusief de ranges-vertaling.
+      - [x] **boot_args-lezer** (`metal/fw/xnuboot`): idem; het ADT-adres dat
+            hij uitrekent is exact dat van de loader.
+      - [x] **Cores starten** (`board/apple/cpustart.go`): 3 PMGR-schrijfacties,
+            geen chicken bits op deze generatie. `apple.OwnCores()` meldt zelf
+            waarom het nog niet mag: RVBAR vergrendeld op m1n1.
+      - [x] **Relocatie-stub** (`board/apple/bootstub.s` + `mkkernel -apple`):
+            stubReset op offset 0 (RVBAR), stubEntry op 0x800 (`--entry-point
+            2048`), parameters op 0x100. BEWEZEN 29-08 met `AT=0x10080000000`:
+            image 2GB lager neergezet, stub verplaatst het naar zijn linkadres
+            en de hele probe draait identiek.
+      - [x] **Zichzelf beschrijven** (`board/apple/selfdesc.go`): geen
+            param-blok? Dan het blok zelf vullen uit x0 (boot_args) en de ADT.
+            BEWEZEN 29-08 met `CHAIN=1` (m1n1 geeft het stokje door zoals iBoot:
+            P_VECTOR met x0 = echte boot_args, blok en config op nul).
+      - [x] **PCIe-controller zelf opbrengen** (`board/apple/apcie.go` +
+            `pmgr.go` + `tunables.go`): power-domeinen, tunables uit de boom,
+            PHY-klokken, root complex, poorten. BEWEZEN 29-08 in een chain-boot:
+            263 tunables, 2 van 3 poorten, endpoint 02:00.0 14e4:1682, tg3 LINK
+            UP, DHCP + SNTP. t8132 heeft geen fuse-programmering — dat scheelde
+            de enige tabel die niet uit de boom te lezen was.
+      - [x] **Config zonder loader**: `-tags embedcfg` via
+            `AGENT=1 CFG=... image/apple-m4.sh` (cmd/hopos/cfgblob, zoals de
+            LicheeRV); node-identiteit uit `apple.Serial()`.
+      - [ ] **App-cores zonder spin-table**: `apple.Start` heeft nu een
+            PMGR+brievenbus-tak, maar die loopt pas als RVBAR naar ons image
+            wijst — dus pas na de installatie. Tot dan `PSCI CPU_ON core 1: -2`
+            in een chain-boot, en dat is de eerlijke uitkomst.
+      - [ ] **Installeren** (fysiek, 1TR): `kmutil configure-boot -c <image>
+            --raw --entry-point 2048 --lowest-virtual-address 0 -v "/Volumes/Macintosh HD"`.
+            Pas daarna wijst RVBAR naar stubReset en zijn de cores van ons.
+      - [ ] **Mini-proxy in ons image**, anders kost elke iteratie een 1TR-bezoek.
+      - [ ] raadsel: 1 van de 4 chain-boots las `boot_args.devtree` als 0 (board
+            viel luid terug op de constanten). De probe dumpt het blok nu woord
+            voor woord als de ADT 0 is; bij herhaling ligt de meting er.
 - [ ] productie-boot zonder laptop: relocatie-stub + image als payload achter
       m1n1.bin (kmutil); tot die tijd is de loader de "U-Boot"
 - [ ] console-flakiness: Chrome (WebUSB) houdt het Debug-USB-device vast → geen

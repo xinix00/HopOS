@@ -20,11 +20,11 @@ import (
 //	                        RAM-einde dat m1n1 rapporteert (daarboven iBoot's
 //	                        carveouts en de dummy-framebuffer)
 //
-// De pool komt uit het param-blok (DRAM-basis/-grootte en het bruikbare einde
-// uit m1n1's boot-args) en niet uit een constante: de mini bestaat in 16/24/32GB.
-// Geen 1GB-blokken voor dat DRAM (mmu.go): MapDRAM hoort vóór het eerste
-// gebruik van de pool te draaien — cmd/hopos/board_apple.go doet dat samen met
-// SetupPlan.
+// De pool komt uit iBoot's boot_args (firmware.go) en niet uit een constante:
+// de mini bestaat in 16/24/32GB.
+// Geen 1GB-blokken voor dat DRAM (mmu.go): MapDRAM moet vóór het eerste gebruik
+// van de pool draaien, en dat gebeurt vanzelf — Boot() heeft het nodig om
+// boot_args te kunnen lezen en doet het als eerste.
 
 // SetupPlan registreert het plan. Alleen op de boot-core: een app-core die dit
 // pakket linkt heeft er niets te zoeken.
@@ -32,6 +32,11 @@ func SetupPlan() {
 	if dev.MPIDR()&0xFFFFFF != BootMPIDR()&0xFFFFFF {
 		return
 	}
+	// Wie zijn we geworden? Dit is het eerste board-werk van de boot en het
+	// draait op de HOP-core, dus dit is de plek om het vast te leggen — daarna
+	// mag iedereen het vragen.
+	SelfCPU()
+
 	p := layout.Plan{
 		NodeCtrlPA:    NodeCtrlPA,
 		Stage2PA:      Stage2PA,
@@ -40,15 +45,14 @@ func SetupPlan() {
 		NetDMAPA:      NetDMAPA,
 		RAMBase:       DRAMBase,
 	}
-	if pr, ok := Params(); ok {
-		// Alle app-cores: elke cpu behalve de boot-cpu (M4: 9). Vóór UsePlan,
-		// want de sched-blokken en de core-telling rekenen ermee.
-		layout.SetAppCores(pr.NCPU - 1)
-
-		p.Pool = carvePool(pr)
+	// Alle app-cores: elke core behalve die van HOP (M4: 9). Vóór UsePlan,
+	// want de sched-blokken en de core-telling rekenen ermee.
+	if n := NumCPUs(); n > 1 {
+		layout.SetAppCores(n - 1)
 	}
+	p.Pool = carvePool()
 	if len(p.Pool) == 0 {
-		fmt.Printf("WARNING HOPOS_POOL_FALLBACK: no param block from the loader — partition pool falls back to a fixed 4GB\n")
+		fmt.Printf("WARNING HOPOS_POOL_FALLBACK: no boot_args from the firmware — partition pool falls back to a fixed 4GB\n")
 		p.Pool = []layout.Region{{Base: PoolBase, Size: 0x1_0000_0000}}
 	}
 	layout.UsePlan(p)
@@ -80,25 +84,17 @@ func SetupPlan() {
 // terug. Wat de firmware nog wél nodig heeft (de ADT waar het param-blok naar
 // wijst, de trust cache) ligt onder `top_of_kernel_data` en valt dus in het gat.
 //
-// Zonder die getallen (een loader van vóór param-versie 3) valt alles onder
-// PoolBase weg: veilig, en 4GB duurder.
-func carvePool(pr P) []layout.Region {
-	end := pr.UsableEnd
-	if end == 0 || end > pr.DRAMBase+pr.DRAMSize {
-		end = pr.DRAMBase + pr.DRAMSize
+// Ontbreekt boot_args, dan is er geen pool: liever geen partities dan partities
+// op geraden geheugen.
+func carvePool() []layout.Region {
+	ba, ok := Boot()
+	if !ok || ba.PhysBase == 0 || ba.MemSize == 0 || ba.TopOfKernelData <= ba.PhysBase {
+		return nil
 	}
-	if pr.FW.Base == 0 || pr.FW.Size == 0 || pr.FW.Placed <= pr.FW.Base {
-		bank := []layout.Region{{Base: pr.DRAMBase, Size: pr.DRAMSize}}
-		holes := []layout.Region{
-			{Base: pr.DRAMBase, Size: PoolBase - pr.DRAMBase},
-			{Base: end, Size: pr.DRAMBase + pr.DRAMSize - end},
-		}
-		return layout.CarvePool(bank, holes, 2<<20)
-	}
-	bank := []layout.Region{{Base: pr.FW.Base, Size: pr.FW.Size}}
+	bank := []layout.Region{{Base: ba.PhysBase, Size: ba.MemSize}}
 	holes := []layout.Region{
-		{Base: pr.FW.Base, Size: pr.FW.Placed - pr.FW.Base}, // van de firmware
-		{Base: RamBase, Size: PoolBase - RamBase},           // HOP + zijn structuren
+		{Base: ba.PhysBase, Size: ba.TopOfKernelData - ba.PhysBase}, // van de firmware
+		{Base: RamBase, Size: PoolBase - RamBase},                   // HOP + zijn structuren
 	}
 	return layout.CarvePool(bank, holes, 2<<20)
 }

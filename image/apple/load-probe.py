@@ -18,9 +18,19 @@ from m1n1.setup import *  # noqa: E402
 
 # Pariteit met board/apple/apple.go en params.go.
 RAM_BASE   = 0x101_0000_0000
-PARAM_BASE = RAM_BASE + 0xE100
+
+# AT: waar het image NEERGEZET wordt. Standaard meteen op zijn linkadres, maar
+# het hoeft niet meer — sinds het image een bootstub vooraan draagt (offset 0
+# secundaire cores, 0x800 de boot-core) verplaatst het zichzelf. AT= is dus de
+# proef op die stub zónder installatie: zet hem 2GB lager neer en kijk of HopOS
+# alsnog op 0x101_0000_0000 wakker wordt.
+#
+#   AT=0x10080000000 image/apple/boot-cycle.sh metal/out/probeapple.img
+LOAD_AT    = int(os.environ.get("AT", hex(RAM_BASE)), 0)
+STUB_ENTRY = 0x800  # pariteit: bootstub.s, en de --entry-point van kmutil
+PARAM_BASE = LOAD_AT + 0xE100
 PARAM_MAGIC = 0x454C505041504F48  # "HOPAPPLE"
-PARAM_VERSION = 3
+PARAM_VERSION = 5
 MAX_CPUS = 16
 SPIN_TABLE_ENTRY = 64  # sizeof(struct spin_table): mpidr, flag, target, args[4], retval
 SPIN_TARGET_OFF = 16
@@ -35,11 +45,29 @@ img = img_path.read_bytes()
 # (image + param-blok) staat er nog.
 PHASE = os.environ.get("PHASE", "all")
 
+# BARE=1: booten alsof er geen loader is — géén param-blok en géén config in
+# het geheugen, dus het board moet alles uit boot_args en de device tree halen.
+# Precies wat er na een `kmutil configure-boot` gebeurt. Doe dit over de
+# dockchannel (MODE=split in boot-cycle.sh): m1n1's USB-gadget verdwijnt met
+# hem mee, de dockchannel blijft.
+BARE = os.environ.get("BARE") == "1"
+
 def boot_and_console():
     u.msr(DAIF, 0x3C0)
-    print("Booting at %#x ..." % RAM_BASE)
+    print("Booting at %#x (stub entry, image at %#x), x0 = boot_args %#x ..." % (
+        LOAD_AT + STUB_ENTRY, LOAD_AT, u.ba_addr))
     try:
-        p.kboot_boot(RAM_BASE)
+        # P_VECTOR en niet kboot_boot: m1n1 geeft het stokje dan door zoals
+        # iBoot dat doet — x0 = het échte boot_args-blok — in plaats van als
+        # bootloader met zijn eigen FDT. Sinds HopOS de PCIe-controller zelf
+        # opbrengt (board/apple/apcie.go) is er niets meer dat kboot_boot voor
+        # ons deed, en dan is één bootroute beter dan twee: deze is dezelfde
+        # die na de installatie geldt.
+        #
+        # Rechtstreeks en niet via p.reload: die wacht daarna op een
+        # proxy-handshake die nooit komt (wij zijn geen m1n1) en LEEST
+        # ondertussen de lijn leeg — precies de bytes die wij willen zien.
+        p.request(p.P_VECTOR, LOAD_AT + STUB_ENTRY, u.ba_addr, 0, 0, 0, no_reply=True)
     except Exception as e:
         # De proxy sluit zijn USB-gadget vóór de sprong; een afgebroken antwoord
         # hier is normaal.
@@ -69,22 +97,21 @@ if PHASE == "boot":
     boot_and_console()
     sys.exit(0)
 
-def adt_reg(path, fallback):
-    try:
-        addr, size = u.adt[path].get_reg(0)
-        return addr
-    except Exception as e:
-        print("ADT %s: %s → fallback %#x" % (path, e, fallback))
-        return fallback
-
-dock  = adt_reg("/arm-io/dockchannel-uart", 0x3_8812_8000)
-uart0 = adt_reg("/arm-io/uart0", 0x3_ad20_0000)
-
-adt_phys = (u.ba.devtree - u.ba.virt_base + u.ba.phys_base) & 0xFFFFFFFFFFFFFFFF
-adt_size = u.ba.devtree_size
-chosen = u.adt["/chosen"]
-dram_base, dram_size = chosen.dram_base, chosen.dram_size
-fb = u.ba.video
+# Het param-blok. Sinds 29-08 draagt het alleen nog wat de loader ÁLS ENIGE
+# weet; al het andere (UART-bases, DRAM, framebuffer, opslag, cores) leest het
+# board zelf uit iBoot's boot_args en de device tree. Zie board/apple/params.go.
+p.smp_start_secondaries()
+# Zijn wachtstand op WFE zetten. m1n1's secundaire cores slapen standaard in
+# WFI en willen een IPI; onze Release() stuurt een SEV, zoals Linux'
+# cpu-release-addr voorschrijft. kboot_boot zette dit vroeger voor ons om, maar
+# die weg gebruiken we niet meer (zie boot_and_console) — dus doen we het hier,
+# waar de rest van de m1n1-kennis ook staat.
+p.smp_set_wfe_mode(True)
+ncpus = len(list(u.adt["/cpus"]))
+my_mpidr = u.mrs(MPIDR_EL1) & 0xFFFFFF
+release = [0] * MAX_CPUS
+mpidr = [0] * MAX_CPUS
+boot_cpu = 0xFFFF
 
 # m1n1's spin-table: het symbool uit de ELF van precies deze m1n1-build,
 # gerelokeerd naar waar m1n1 nu draait (u.base). Een verkeerde offset zou een
@@ -99,14 +126,8 @@ def spin_table_addr():
     base = [l for l in out.splitlines() if l.endswith(" _base")]
     return u.base + int(sym[0].split()[0], 16) - int(base[0].split()[0], 16)
 
-p.smp_start_secondaries()
-ncpus = len(list(u.adt["/cpus"]))
-my_mpidr = u.mrs(MPIDR_EL1) & 0xFFFFFF
-release = [0] * MAX_CPUS
-mpidr = [0] * MAX_CPUS
-boot_cpu = -1
-# De spin-table is optioneel: lukt de lookup niet, dan boot de probe zonder
-# core-test (release-adressen 0) — eerste licht gaat vóór de cores.
+# De spin-table is optioneel: lukt de lookup niet, dan boot HopOS zonder
+# app-cores — eerste licht gaat vóór de cores.
 try:
     spin = spin_table_addr()
     print("u.base %#x, spin_table %#x, my mpidr %#x" % (u.base, spin, my_mpidr))
@@ -114,79 +135,41 @@ try:
         ent = spin + cpu * SPIN_TABLE_ENTRY
         m, flag = p.read64(ent), p.read64(ent + 8)
         mpidr[cpu] = m
-        print("  cpu%d: mpidr %#x flag %d" % (cpu, m, flag))
         if m == my_mpidr:
             boot_cpu = cpu
         elif flag:
             release[cpu] = ent + SPIN_TARGET_OFF
-    if boot_cpu < 0:
+    if boot_cpu == 0xFFFF:
         raise RuntimeError("boot cpu not in spin table (symbol offset wrong?)")
     print("spin table: boot cpu %d, alive %r" % (boot_cpu, [c for c in range(ncpus) if release[c]]))
 except Exception as e:
-    print("spin table unavailable (%s) — probe will skip the core test" % e)
+    print("spin table unavailable (%s) — no app cores" % e)
     release = [0] * MAX_CPUS
-    mpidr = [0] * MAX_CPUS
     boot_cpu = 0xFFFF
 
-# Bruikbaar RAM-einde: wat m1n1 in de FDT als memory-node zou zetten
-# (phys_base + mem_size); daarboven wonen iBoot's carveouts en de framebuffer.
-usable_end = u.ba.phys_base + u.ba.mem_size
+# De hop: HopOS hoort op een zuinige core te wonen, niet op een dure. m1n1 levert
+# ons af waar iBoot ons startte — op deze mini cpu 6, MPIDR 0x10100, cluster 1
+# (everest, een P-core). Wij wijzen de eerste geparkeerde core uit cluster 0
+# (sawtooth) aan; de kernel-cpuinit verhuist daarheen vóór de eerste
+# Go-instructie en parkeert de dure core voor adoptie als app-core.
+# HOP=1 zet de wissel aan; standaard UIT (zie docs/archief/apple-m4.md).
+# LET OP: cpu0's MPIDR is letterlijk 0, dus die kan de "is er een hop"-vraag
+# niet beantwoorden. Het release-adres wel.
+hop_cpu, hop_mpidr, hop_rel = 0xFFFF, 0, 0
+for cpu in range(min(ncpus, MAX_CPUS)) if os.environ.get("HOP") == "1" else []:
+    if release[cpu] and ((mpidr[cpu] >> 8) & 0xFF) == 0:  # & bindt losser dan ==
+        hop_cpu, hop_mpidr, hop_rel = cpu, mpidr[cpu], release[cpu]
+        break
+if hop_rel:
+    print("hop: HopOS naar cpu %d (mpidr %#x), boot-cpu %d wordt app-core" % (
+        hop_cpu, hop_mpidr, boot_cpu))
+elif os.environ.get("HOP") == "1":
+    print("hop: geen zuinige core in de spin-table — HOP blijft op de boot-cpu")
 
-# Het MAC-adres van de ingebouwde NIC staat in de ADT (local-mac-address) —
-# dezelfde bron die m1n1 voor Linux in de device tree patcht. Na een PERST staat
-# in MAC_ADDR_0 alleen nog Broadcom's default (00:10:18:00:00:00), dus dit is de
-# enige plek waar het échte adres vandaan komt.
-mac = 0
-try:
-    b = bytes(u.adt["/arm-io/apcie/pci-bridge2/lan-1gb"].local_mac_address)[:6]
-    mac = int.from_bytes(b, "big")
-    print("nic mac: %s" % ":".join("%02x" % c for c in b))
-except Exception as e:
-    print("ADT local-mac-address: %s" % e)
-# De opslag: ANS (Apple NVMe Storage) is geen PCIe-NVMe maar een co-processor
-# achter een RTKit-mailbox, met een SART als adresfilter in plaats van een DART.
-# Op M4 (nvme-secure-bar aanwezig) zitten de NVMMU-registers in reg[3] en de
-# NVMe-registers in reg[9]; op M1-M3 is dat allebei reg[3]. m1n1 src/nvme.c.
-def adt_reg_n(path, n):
-    try:
-        addr, _ = u.adt[path].get_reg(n)
-        return addr
-    except Exception as e:
-        print("ADT %s reg[%d]: %s" % (path, n, e))
-        return 0
-
-ans_base = adt_reg_n("/arm-io/ans", 0)
-nvmmu_base = adt_reg_n("/arm-io/ans", 3)
-nvme_base = adt_reg_n("/arm-io/ans", 9)
-sart_base = adt_reg_n("/arm-io/sart-ans", 0)
-try:
-    sart_version = int(u.adt["/arm-io/sart-ans"].sart_version)
-except Exception as e:
-    print("ADT sart-version: %s" % e)
-    sart_version = 0
-print("ans %#x nvmmu %#x nvme %#x sart %#x (v%d)" % (
-    ans_base, nvmmu_base, nvme_base, sart_base, sart_version))
-
-params = struct.pack("<16Q",
-    PARAM_MAGIC, PARAM_VERSION, dock, uart0, adt_phys, adt_size,
-    dram_base, dram_size, fb.base, fb.stride, fb.width, fb.height,
-    ncpus, boot_cpu, usable_end, mac)
-params = params.ljust(0x80, b"\0") + struct.pack("<16Q", *release) + struct.pack("<16Q", *mpidr)
-assert len(params) == 0x180
-# Het RAM-contract van iBoot, zoals een Linux-kernel het ook krijgt:
-# [phys_base, phys_base+mem_size) is van ons, en alles wat de firmware er zelf
-# al in legde (kernel-image, ADT, trust cache) eindigt op top_of_kernel_data.
-# HopOS snijdt zijn partitie-pool daarop; zonder deze drie getallen valt het
-# terug op een veilige-maar-royale marge van 4GB onderin.
-fw_base = u.ba.phys_base
-fw_size = u.ba.mem_size
-fw_placed = u.ba.top_of_kernel_data
-print("firmware ram: %#x+%dMB, firmware zelf tot %#x (+%.0f MB)" % (
-    fw_base, fw_size >> 20, fw_placed, (fw_placed - dram_base) / 2**20))
-
-params += struct.pack("<8Q", ans_base, nvmmu_base, nvme_base, sart_base, sart_version,
-    fw_base, fw_size, fw_placed)
-assert len(params) == 0x1C0
+params = struct.pack("<6Q", PARAM_MAGIC, PARAM_VERSION, boot_cpu,
+                     hop_cpu, hop_mpidr, hop_rel)
+params += struct.pack("<16Q", *release)
+assert len(params) == 0xB0
 
 # De dockchannel (debugusb-mode) is een WOORD-kanaal: een write waarvan de
 # lengte geen veelvoud van 8 is, verliest zijn staart tot er meer bytes komen
@@ -240,40 +223,41 @@ def robust_writemem(addr, data, chunk=int(os.environ.get("CHUNK", "8192"))):
     print("\n%d bytes in %.1fs (%.0f KB/s), %d retries" % (len(data), dt, len(data) / dt / 1024, retries))
 
 payload = gzip.compress(img, compresslevel=6)
-print("Loading %d bytes (gz %d) to %#x..%#x" % (len(img), len(payload), RAM_BASE, RAM_BASE + len(img)))
+print("Loading %d bytes (gz %d) to %#x..%#x%s" % (len(img), len(payload), LOAD_AT, LOAD_AT + len(img),
+    "" if LOAD_AT == RAM_BASE else " (the stub relocates to %#x)" % RAM_BASE))
 gz_addr = u.malloc(len(payload) + 8)
 robust_writemem(gz_addr, payload)
 tmo = iface.dev.timeout
 iface.dev.timeout = None
-n = p.gzdec(gz_addr, len(payload), RAM_BASE, len(img))
+n = p.gzdec(gz_addr, len(payload), LOAD_AT, len(img))
 iface.dev.timeout = tmo
 if n != len(img):
     raise SystemExit("gzdec: %d != %d — image corrupt on target" % (n, len(img)))
-print("gzdec OK: %d bytes at %#x" % (n, RAM_BASE))
-robust_writemem(PARAM_BASE, params)
+print("gzdec OK: %d bytes at %#x" % (n, LOAD_AT))
+if not BARE:
+    robust_writemem(PARAM_BASE, params)
 
 # Platform-config als tekst op CFG_BASE (apple.CfgBase): het hopos.cfg-bestand
 # uit CFG=pad, plus het serial uit de ADT als hopos.serial (node-identiteit).
-CFG_BASE, CFG_SIZE = RAM_BASE + 0xF000, 0x1000
+CFG_BASE, CFG_SIZE = LOAD_AT + 0xF000, 0x1000
 cfg = ""
 if os.environ.get("CFG"):
     cfg = pathlib.Path(os.environ["CFG"]).read_text()
-try:
-    sn = u.adt.serial_number  # de wortel is u.adt zelf; u.adt["/"] geeft "Child node '' not found"
-    serial_no = sn if isinstance(sn, str) else bytes(sn).split(b"\0")[0].decode()
-    cfg += "\nhopos.serial=%s\n" % serial_no
-except Exception as e:
-    print("ADT serial-number: %s" % e)
 cfgb = cfg.encode()
 if len(cfgb) >= CFG_SIZE:
     raise SystemExit("config too large: %d >= %d" % (len(cfgb), CFG_SIZE))
-robust_writemem(CFG_BASE, cfgb.ljust(CFG_SIZE, b"\0"))
-print("config: %d bytes%s" % (len(cfgb), " from " + os.environ["CFG"] if os.environ.get("CFG") else ""))
-p.dc_cvau(RAM_BASE, len(img) + 0x10000)
-p.ic_ivau(RAM_BASE, len(img) + 0x10000)
+if BARE:
+    # Geen loader, geen config: het gebied moet leeg zijn, anders leest HopOS de
+    # resten van een vorige boot voor waarheid aan.
+    robust_writemem(CFG_BASE, b"\0" * CFG_SIZE)
+    robust_writemem(PARAM_BASE, b"\0" * 0xB0)
+    print("bare: no param block, no config — the board reads the firmware itself")
+else:
+    robust_writemem(CFG_BASE, cfgb.ljust(CFG_SIZE, b"\0"))
+    print("config: %d bytes%s" % (len(cfgb), " from " + os.environ["CFG"] if os.environ.get("CFG") else ""))
+p.dc_cvau(LOAD_AT, len(img) + 0x10000)
+p.ic_ivau(LOAD_AT, len(img) + 0x10000)
 
-print("dockchannel %#x uart0 %#x ADT %#x+%#x DRAM %#x+%dMB fb %#x %dx%d" % (
-    dock, uart0, adt_phys, adt_size, dram_base, dram_size >> 20, fb.base, fb.width, fb.height))
 
 if PHASE == "load":
     print("Loaded; not booting (PHASE=load). Switch the port and run PHASE=boot.")

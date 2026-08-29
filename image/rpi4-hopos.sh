@@ -48,7 +48,7 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 #    zoals de Pi 5. Incl. BSS-nullen t/m memEnd.).
 cd "$DIR"
 mkdir -p sd-rpi4
-go run "$DIR/image/mkkernel/main.go" "$DIR/image/mkkernel/pe.go" -elf metal/out/hopos4.elf -o sd-rpi4/kernel8.img -load 0x80000 -raw
+go run "$DIR"/image/mkkernel/*.go -elf metal/out/hopos4.elf -o sd-rpi4/kernel8.img -load 0x80000 -raw
 
 # 4. config-hopos.txt (gitignored) — kernel wijst naar ons; bl31.bin als armstub
 #    (PSCI). Het getrackte config.txt is de agent-config; die overschrijven we

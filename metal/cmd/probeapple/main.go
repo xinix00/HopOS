@@ -31,6 +31,8 @@ import (
 	"time"
 	_ "unsafe" // voor go:linkname
 
+	"github.com/usbarmory/tamago/arm64"
+
 	"github.com/xinix00/HopOS/metal/board/apple"
 	applehop "github.com/xinix00/HopOS/metal/board/apple/hop"
 	"github.com/xinix00/HopOS/metal/cpu/idle"
@@ -39,7 +41,7 @@ import (
 	"github.com/xinix00/HopOS/metal/driver/nvme"
 	"github.com/xinix00/HopOS/metal/driver/pcie"
 	"github.com/xinix00/HopOS/metal/driver/rtkit"
-	"github.com/xinix00/HopOS/metal/fw/fdt"
+	"github.com/xinix00/HopOS/metal/fw/adt"
 )
 
 // PCIe op de M4 (ADT /arm-io/apcie, 29-08): ECAM op 0x1cb0000000 (256MB, bus
@@ -66,7 +68,22 @@ func pcieCfg(bus, devno, fn int, off uintptr) uintptr {
 // daarachter kijken; de NIC met BAR-inhoud en command-register melden. Alleen
 // busnummers worden geschreven — geen BARs, geen enable.
 func probePCIe() {
-	say("\npcie: scanning ECAM %#x bus 0 (root ports)\n", uintptr(pcieECAM))
+	// De controller zelf opbrengen als niemand dat deed. Onder m1n1 is dit een
+	// no-op en zegt de melding dat ook; zonder m1n1 is het de hele bring-up.
+	// Een exceptie hier is de normale uitkomst van bring-up op ongedocumenteerd
+	// silicium. Zonder ESR/FAR is hij "hij viel om"; mét is hij een adres en een
+	// reden, en dat scheelt per stuk een bootcyclus.
+	arm64.SystemExceptionHandler = func(pc uintptr) {
+		say("\n!!EL1 ESR=%#016x FAR=%#016x PC=%#x\n", apple.ReadESR(), apple.ReadFAR(), pc)
+		arm64.DefaultExceptionHandler(pc)
+	}
+	apple.PCIeLog = func(s string) { say("%s\n", s) }
+	if err := apple.InitPCIe(); err != nil {
+		say("\n%v\n", err)
+	} else {
+		say("\n%s\n", apple.PCIeUp())
+	}
+	say("pcie: scanning ECAM %#x bus 0 (root ports)\n", uintptr(pcieECAM))
 	roots := pcie.Scan(pcie.Window{ECAMBase: uintptr(pcieECAM)})
 	if len(roots) == 0 {
 		say("pcie: nothing on bus 0 — ECAM unreachable or ports not initialized by m1n1\n")
@@ -233,17 +250,13 @@ func probePCIe() {
 		}
 	}
 
-	// De controller zelf: wat zegt het silicium over de link? De config-space
-	// van de brug spreekt PCIe (LNKSTA), maar Apple's poort heeft zijn eigen
-	// status- en resetregisters (m1n1 src/pcie.c). port_base komt uit de ADT:
-	// 7 gedeelde regs, daarna 8 per poort → poort N = reg[7+8N].
 	// De opslag: ANS, Apple's NVMe-coprocessor. Geen PCIe-device maar een
 	// RTKit-mailbox (ASC) met een SART als adresfilter. Deze eerste meting stelt
 	// één vraag: leeft het blok, en in welke staat liet iBoot het achter? Het
 	// CPU_CONTROL-bit zegt of de coprocessor draait, BOOT_STATUS of zijn
 	// firmware klaar is, en de mailbox-controls of er berichten klaarstaan.
 	// Registerkaart: m1n1 src/asc.c en src/nvme.c.
-	if p, ok := apple.Params(); ok && p.ANS.Base != 0 {
+	if ansBase, ansNVMMU, ansNVMe, ansSART := apple.ANSAddrs(); ansBase != 0 {
 		const (
 			cpuControl = 0x44
 			cpuRunning = 0x10
@@ -251,17 +264,17 @@ func probePCIe() {
 			mboxI2A    = 0x8000 + 0x114
 			bootStatus = 0x1300 // NVME_BOOT_STATUS
 		)
-		a := uintptr(p.ANS.Base)
+		a := uintptr(ansBase)
 		say("ans: base %#x nvmmu %#x nvme %#x sart %#x (v%d)\n",
-			p.ANS.Base, p.ANS.NVMMU, p.ANS.NVMe, p.ANS.SART, p.ANS.SARTVer)
+			ansBase, ansNVMMU, ansNVMe, ansSART, apple.SARTVersion())
 		say("ans: CPU_CONTROL %#x (running=%d) mbox a2i %#x i2a %#x\n",
 			dev.Read32(a+cpuControl), dev.Read32(a+cpuControl)>>4&1,
 			dev.Read32(a+mboxA2I), dev.Read32(a+mboxI2A))
-		if p.ANS.NVMe != 0 {
+		if ansNVMe != 0 {
 			say("ans: NVMe BOOT_STATUS %#x CSTS %#x CC %#x\n",
-				dev.Read32(uintptr(p.ANS.NVMe)+bootStatus),
-				dev.Read32(uintptr(p.ANS.NVMe)+0x1c),
-				dev.Read32(uintptr(p.ANS.NVMe)+0x14))
+				dev.Read32(uintptr(ansNVMe)+bootStatus),
+				dev.Read32(uintptr(ansNVMe)+0x1c),
+				dev.Read32(uintptr(ansNVMe)+0x14))
 
 			// De SART moet ons DMA-gebied doorlaten, anders komt de
 			// coprocessor er niet bij — zonder foutmelding, want een filter
@@ -275,11 +288,11 @@ func probePCIe() {
 
 			disk := &nvme.Controller{}
 			cfg := nvme.AppleConfig{
-				NVMe:  uintptr(p.ANS.NVMe),
-				NVMMU: uintptr(p.ANS.NVMMU),
+				NVMe:  uintptr(ansNVMe),
+				NVMMU: uintptr(ansNVMMU),
 				RTKit: &rtkit.Dev{
 					Name:  "ans",
-					Base:  uintptr(p.ANS.Base),
+					Base:  uintptr(ansBase),
 					Alloc: apple.StorageBuf,
 					// Allow is nil: de hele opslag-regio staat er al in.
 				},
@@ -329,6 +342,10 @@ func probePCIe() {
 		}
 	}
 
+	// De controller zelf: wat zegt het silicium over de link? De config-space
+	// van de brug spreekt PCIe (LNKSTA), maar Apple's poort heeft zijn eigen
+	// status- en resetregisters (m1n1 src/pcie.c). port_base komt uit de ADT:
+	// 7 gedeelde regs, daarna 8 per poort → poort N = reg[7+8N].
 	for _, p := range []struct {
 		port int
 		base uintptr
@@ -351,6 +368,97 @@ func probePCIe() {
 
 // pcieLinkStatus loopt de capability-lijst af naar de PCIe-capability (id 0x10)
 // en geeft LNKSTA (offset +0x12) terug.
+
+// probeFirmware: wat de FIRMWARE achterliet — waar dit image geladen is,
+// wat er in boot_args staat en wat de device tree zegt. Staat los van de
+// PCIe-meting: juist als die niets vindt wil je deze regels zien.
+func probeFirmware() {
+	// Het bootobject: waar de firmware dit image neerzette en of de stub het
+	// naar zijn linkadres verplaatst heeft. Met AT= in de loader is dit de hele
+	// proef — het image stond ergens anders en draait tóch hier.
+	if src := apple.StubSource(); src == 0 {
+		say("stub: niet gedraaid (image zonder bootstub, of rechtstreeks naar de kern gesprongen)\n")
+	} else if src == apple.RamBase {
+		say("stub: geladen op %#x = het linkadres, niets te verplaatsen; x0 %#x\n", src, apple.FirmwareX0())
+	} else {
+		say("stub: geladen op %#x, VERPLAATST naar %#x (%d MB verderop); x0 %#x\n",
+			src, uint64(apple.RamBase), (uint64(apple.RamBase)-src)>>20, apple.FirmwareX0())
+	}
+	if _, ok := apple.Params(); !ok {
+		say("stub: geen loader — alles uit boot_args en de device tree\n")
+	}
+
+	// iBoot's boot_args, door onze eigen lezer. Zijn wíj straks het bootobject,
+	// dan komt dit blok in x0 binnen en is het param-blok overbodig — dus toetsen
+	// we hem nu, tegen echte firmware, zolang m1n1 het adres nog kan doorgeven.
+	if x0 := apple.FirmwareX0(); x0 != 0 {
+		// Via apple.Boot(): die maakt het lage DRAM eerst bereikbaar (op dit
+		// silicium faultt een 1GB-blok boven 2^40) en onthoudt het antwoord.
+		// Rechtstreeks xnuboot.Read op x0 doen faultt vóór die stap.
+		if ba, ok := apple.Boot(); ok {
+			say("xnuboot: rev %d.%d  RAM %#x+%dMB (fysiek %dMB)  firmware tot %#x\n",
+				ba.Revision, ba.Version, ba.PhysBase, ba.MemSize>>20,
+				ba.MemSizeActual>>20, ba.TopOfKernelData)
+			say("xnuboot: ADT %#x+%#x (devtree %#x, virt_base %#x)  framebuffer %#x %dx%d stride %d\n",
+				ba.ADT, ba.ADTSize, ba.DevTree, ba.VirtBase, ba.FB.Base, ba.FB.W, ba.FB.H, ba.FB.Stride)
+			if ba.ADT == 0 {
+				say("xnuboot: blok op %#x woord voor woord:\n", x0)
+				for off := uintptr(0); off < 0x80; off += 8 {
+					say("xnuboot:   +%#03x %#018x\n", off,
+						uint64(dev.Read32(uintptr(x0)+off))|uint64(dev.Read32(uintptr(x0)+off+4))<<32)
+				}
+			}
+		} else {
+			say("xnuboot: blok op %#x niet leesbaar\n", x0)
+		}
+	}
+
+	// De ADT, door onze eigen lezer. Alles wat de loader nu in Python uit de
+	// boom haalt en in het param-blok legt, moeten we straks zelf kunnen —
+	// zonder m1n1 is er geen loader meer. Dit is de toets: dezelfde getallen
+	// uit dezelfde boom, maar dan van deze kant.
+	if ba, ok := apple.Boot(); ok {
+		if t, ok := adt.Open(uintptr(ba.ADT), ba.ADTSize); ok {
+			root, _ := t.Name(0)
+			say("adt: wortel %q, %d bytes\n", root, ba.ADTSize)
+			for _, e := range []struct {
+				path string
+				idx  int
+			}{
+				{"/arm-io/dockchannel-uart", 0}, {"/arm-io/uart0", 0},
+				{"/arm-io/ans", 0}, {"/arm-io/ans", 3}, {"/arm-io/ans", 9},
+				{"/arm-io/sart-ans", 0}, {"/arm-io/pmgr", 0},
+			} {
+				base, size, ok := t.RegOf(e.path, e.idx)
+				say("adt: %-26s reg[%d] %#x+%#x (%v)\n", e.path, e.idx, base, size, ok)
+			}
+			asc, nvmmu, nvme, sart := apple.ANSAddrs()
+			say("adt: ANS asc %#x nvmmu %#x nvme %#x sart %#x, pmgr-cpustart %#x\n",
+				asc, nvmmu, nvme, sart, apple.PMGRCPUStart())
+			for _, c := range apple.CPUs() {
+				rv, locked, _ := apple.RVBAR(c)
+				say("adt: core %d cluster %d die %d impl %#x → rvbar %#x lock=%v\n",
+					c.Core, c.Cluster, c.Die, c.Impl, rv, locked)
+			}
+			if ok, why := apple.OwnCores(); ok {
+				say("cores: van ons — RVBAR wijst in ons image, m1n1's spin-table is overbodig\n")
+			} else {
+				say("cores: NIET van ons — %s\n", why)
+			}
+			if n, ok := t.Path("/arm-io/apcie/pci-bridge2/lan-1gb"); ok {
+				if a, sz, ok := t.Prop(n, "local-mac-address"); ok && sz >= 6 {
+					say("adt: NIC MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
+						dev.Read8(a), dev.Read8(a+1), dev.Read8(a+2),
+						dev.Read8(a+3), dev.Read8(a+4), dev.Read8(a+5))
+				}
+			}
+		} else {
+			say("adt: onze lezer weigert de boom op %#x\n", ba.ADT)
+		}
+	}
+
+}
+
 func pcieLinkStatus(bus, devno, fn int) (uint32, bool) {
 	status := dev.Read32(pcieCfg(bus, devno, fn, 4)) >> 16
 	if status&0x10 == 0 { // capabilities list
@@ -426,24 +534,9 @@ func main() {
 	if !ok {
 		say("params: no block at %#x (loader did not write one) — UARTs from constants\n", apple.ParamBase)
 	} else {
-		say("params: dockchannel %#x uart0 %#x\n", p.Dock, p.UART0)
-		say("params: ADT at %#x (%d bytes)\n", p.ADT, p.ADTSize)
-		say("params: DRAM %#x + %d MB\n", p.DRAMBase, p.DRAMSize>>20)
-		say("params: framebuffer %#x stride %d %dx%d\n", p.FB.Base, p.FB.Stride, p.FB.W, p.FB.H)
-		say("params: %d cpus, boot cpu %d\n", p.NCPU, p.BootCPU)
-		for i := 0; i < p.NCPU; i++ {
-			say("params: cpu%d release %#x mpidr %#x\n", i, p.Release[i], p.MPIDR[i])
-		}
-	}
-
-	// 5. FDT via x0.
-	dtb := uintptr(dev.Read64(apple.DTBPtr))
-	if dtb == 0 || !fdt.Valid(dtb) {
-		say("fdt: no valid FDT via x0 (ptr %#x) — expected without kboot_prepare_dt\n", dtb)
-	} else {
-		say("fdt: FDT at %#x (%d bytes)\n", dtb, fdt.BlobSize(dtb))
-		if n, ok := fdt.MemTotal(dtb); ok {
-			say("fdt: %d MB DRAM\n", n>>20)
+		say("params: boot cpu %d, hop cpu %d (release %#x)\n", p.BootCPU, p.Hop.CPU, p.Hop.Release)
+		for i, c := range apple.CPUs() {
+			say("params: cpu%d cluster %d core %d release %#x\n", i, c.Cluster, c.Core, p.Release[i])
 		}
 	}
 
@@ -456,6 +549,18 @@ func main() {
 
 	// 7. de klok.
 	say("clock: CNTFRQ %d Hz\n", apple.CNTFRQ())
+	// Loopt de teller op DEZE core? Na de hop woont HOP op een zuinige core, en
+	// een teller die daar stilstaat laat élke time.Sleep eeuwig duren — dus dit
+	// meten we vóór we er een aanroepen.
+	c0 := apple.CNTPCT()
+	for i := 0; i < 20_000_000; i++ {
+		runtime.Gosched()
+		break
+	}
+	for i := 0; i < 5_000_000; i++ {
+	}
+	say("clock: CNTPCT %d → %d (delta %d)\n", c0, apple.CNTPCT(), apple.CNTPCT()-c0)
+
 	t0 := time.Now()
 	time.Sleep(100 * time.Millisecond)
 	say("clock: time.Sleep(100ms) took %s\n", time.Since(t0).Round(time.Millisecond))
@@ -465,16 +570,16 @@ func main() {
 	//     ("address size fault, level 0", FAR = het release-adres). De RAM-GB
 	//     (via een L2-tabel) en de lage MMIO (1GB-blokken onder 2^39) werken;
 	//     de verdachte is het 1GB-blok met een uitvoeradres boven 2^40.
-	say("mmu: L0[0] %#x L0[2] %#x\n", apple.L0Entry(0), apple.L0Entry(2))
+	say("mmu: TTBR0_EL1 %#x, L0[0] %#x L0[2] %#x\n", apple.ReadTTBR0(), apple.L0Entry(0), apple.L0Entry(2))
 	say("mmu: L1[m1n1 GB] %#x  L1[our GB] %#x\n", apple.L1Entry(uintptr(apple.DRAMBase)), apple.L1Entry(uintptr(ramStart)))
 	say("mmu: SPRR_CONFIG_EL1 %#x (bit0 = Apple permission remap on)\n", apple.ReadSPRRConfig())
-	if ok && p.NCPU > 0 && p.Release[0] != 0 {
+	if ok && p.Release[0] != 0 {
 		a := uintptr(p.Release[0]) - 16 // spin_table[0].mpidr
 		// Boot 5 bewees: het 1GB-blok faultt, een L2-tabel met 2MB-blokken
-		// werkt. Dit is nu de fix voor het hele DRAM (MapDRAM); de leestest
-		// erna bewaakt dat hij blijft werken.
-		say("mmu: MapDRAM(%#x, %d MB) → %d GBs remapped to 2MB blocks, L1[m1n1 GB] now %#x\n",
-			p.DRAMBase, p.DRAMSize>>20, apple.MapDRAM(p.DRAMBase, p.DRAMSize), apple.L1Entry(a))
+		// werkt. MapDRAM deed dat al bij het lezen van boot_args; hier alleen
+		// de leestest die bewaakt dat het blijft werken.
+		l0, l1, l2, l3 := apple.Walk(a)
+		say("mmu: walk %#x → L0 %#x L1 %#x L2 %#x L3 %#x\n", a, l0, l1, l2, l3)
 		say("mem: reading m1n1's spin table at %#x (if this dies, the mapping is the problem) ...\n", a)
 		say("mem: spin_table[0].mpidr = %#x flag = %#x\n", dev.Read64(a), dev.Read64(a+8))
 	}
@@ -484,7 +589,8 @@ func main() {
 		entry := apple.ParkEntryPC()
 		say("\nsmp: park loop at %#x; releasing m1n1's parked cores\n", entry)
 		up := 0
-		for cpu := 0; cpu < p.NCPU; cpu++ {
+		cpus := apple.CPUs()
+		for cpu := range cpus {
 			if cpu == p.BootCPU {
 				continue
 			}
@@ -502,17 +608,19 @@ func main() {
 				say("smp: cpu%d released but stayed silent\n", cpu)
 				continue
 			}
-			match := "matches m1n1"
-			if got&0xFFFFFF != p.MPIDR[cpu]&0xFFFFFF {
-				match = fmt.Sprintf("DIFFERS from m1n1's %#x", p.MPIDR[cpu])
+			want := uint64(cpus[cpu].Cluster)<<8 | uint64(cpus[cpu].Core)
+			match := "matches the device tree"
+			if got&0xFFFF != want {
+				match = fmt.Sprintf("DIFFERS from the tree's cluster:core %#x", want)
 			}
 			say("smp: cpu%d UP — MPIDR %#x (aff0 %d aff1 %d), %s\n", cpu, got, got&0xFF, got>>8&0xFF, match)
 			up++
 		}
-		say("smp: %d of %d secondary cores answered\n", up, p.NCPU-1)
+		say("smp: %d of %d secondary cores answered\n", up, len(cpus)-1)
 	}
 
 	// 8b. PCIe/DART: de topologie vóór de NIC-driver (meten eerst).
+	probeFirmware()
 	probePCIe()
 
 	// 8c. Idle-mechanica: slaapt WFE hier eigenlijk wel? De governor meldde

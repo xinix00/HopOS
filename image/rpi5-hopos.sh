@@ -39,7 +39,7 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 # 3. ELF → raw image (Circle-recept, incl. BSS-nullen t/m memEnd — mkkernel).
 cd "$DIR"
 mkdir -p sd-rpi5
-go run "$DIR/image/mkkernel/main.go" "$DIR/image/mkkernel/pe.go" -elf metal/out/hopos5.elf -o sd-rpi5/hop-hopos5.img -load 0x80000 -raw
+go run "$DIR"/image/mkkernel/*.go -elf metal/out/hopos5.elf -o sd-rpi5/hop-hopos5.img -load 0x80000 -raw
 
 # 4. config-hopos.txt (gitignored) — zelfde poortwachters als de probe, kernel
 #    wijst naar ons. Het getrackte config.txt is de agent-config; deze komt bij

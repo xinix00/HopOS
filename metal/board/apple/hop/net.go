@@ -105,6 +105,12 @@ func (machine) ProbeNIC() (netdev.Device, net.HardwareAddr, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	// Eén regel over waar de PCIe-controller vandaan komt: door de bootloader
+	// opgebracht, of door onszelf (board/apple/apcie.go). Dat is het verschil
+	// tussen "we hangen nog aan m1n1" en "dit board is van ons".
+	if s := apple.PCIeUp(); s != "" {
+		fmt.Println(s)
+	}
 	nic := NIC(d)
 
 	if err := nic.Reset(); err != nil {
