@@ -73,7 +73,7 @@ listed last.
 | board: Raspberry Pi 4 — genet, mailbox | ~1,900 |
 | board: Radxa Zero 3E — dwmac4 + PHY, TSADC, TRNG | ~2,400 |
 | board: LicheeRV Nano — dwmac, ePHY, CLINT | ~1,850 |
-| board: Mac mini M4 — m1n1 params, spin-table, tg3, dual console | ~2,100 |
+| board: Mac mini M4 — iBoot handoff, spin-table, tg3, dual console | ~2,100 |
 | **lean** — the node's own standard library, a separate module, identical in every node: TCP/IP, TLS, HTTP, DHCP, S3, ELF | ~10,700 |
 | gui, opt-in (`-tags gui`) — framebuffer grant + USB input (xHCI, DWC3, HID) | ~2,000 |
 | gui, board wiring on top — Radxa scanout ~950 · Pi 4 ~400 · Pi 5 ~15 | |
