@@ -63,16 +63,17 @@ listed last.
 | **isolation core** — cages, slots, ABI, object store | ~4,025 |
 | app runtime + node mains | ~525 |
 | network stack — switch, NAT, DHCP, IPv6 | ~1,475 |
-| portable drivers — console, NVMe, PCIe | ~875 |
+| portable drivers — console, NVMe, PCIe | ~1,475 |
 | boot config + the board contract | ~150 |
-| **portable Go — in every node** | **~7,050** |
-| `arm64` — EL2 + stage-2, PSCI, SMP | ~1,250 |
+| **portable Go — in every node** | **~7,650** |
+| `arm64` — EL2 + stage-2, PSCI, SMP | ~1,325 |
 | `riscv64` — machine mode + PMP cage, slot stub | ~1,350 |
 | board: Ampere Altra / any UEFI box — ACPI, MMU, igb, SMpro | ~2,325 |
 | board: Raspberry Pi 5 — RP1, gem, PCIe, mailbox | ~2,325 |
 | board: Raspberry Pi 4 — genet, mailbox | ~1,900 |
 | board: Radxa Zero 3E — dwmac4 + PHY, TSADC, TRNG | ~2,400 |
 | board: LicheeRV Nano — dwmac, ePHY, CLINT | ~1,850 |
+| board: Mac mini M4 — m1n1 params, spin-table, tg3, dual console | ~2,100 |
 | **lean** — the node's own standard library, a separate module, identical in every node: TCP/IP, TLS, HTTP, DHCP, S3, ELF | ~10,700 |
 | gui, opt-in (`-tags gui`) — framebuffer grant + USB input (xHCI, DWC3, HID) | ~2,000 |
 | gui, board wiring on top — Radxa scanout ~950 · Pi 4 ~400 · Pi 5 ~15 | |
@@ -82,8 +83,8 @@ gone: the node streams a job's image straight into its partition, so there is
 no second Go runtime to link (see [architecture](architecture.md)).
 
 A node is **portable + one ISA + one board, plus lean**, never two of
-either: an Altra stick is ~10,650 lines of metal, a Pi 5 ~10,625, a Pi 4
-~10,200, a Radxa ~10,725 and the LicheeRV ~10,250. All dependencies together
+either: an Altra stick is ~11,300 lines of metal, a Pi 5 ~11,300, a Pi 4
+~10,875, a Radxa ~11,375, the LicheeRV ~10,850 and the Mac mini M4 ~11,075. All dependencies together
 are the same ~10,700 of lean everywhere — shown, not hidden. What is *not*
 ours in the image is the tamago runtime and a CA-roots bundle: the TCP/IP
 stack, TLS, HTTP, DHCP, the S3 client and the ELF loader are lean, written
@@ -104,7 +105,7 @@ lines.
 
 A Linux node doing the same job trusts GRUB, the kernel (~30,000,000 lines),
 systemd, libc *and* a container runtime. **HopOS is the whole node —
-bootloader included — in ~10,500 lines**, and even its dependencies are
+bootloader included — in ~11,300 lines**, and even its dependencies are
 readable. **The machine you actually booted fits in
 a single AI context window**, so you can audit it in one sitting, human or
 machine.

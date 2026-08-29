@@ -62,6 +62,9 @@ var flavours = []flavour{
 	{"rpi4", "arm64", "rpi4 linkcpuinit", true},
 	{"rk3566", "arm64", "rk3566 linkcpuinit", true},
 	{"licheerv", "riscv64", "licheerv embedcfg embedcagestub", false},
+	// Apple silicon: headless-only (geen display-firmware onder m1n1); highram
+	// is een build-eis van de tamago-fork, go list leest er gewoon overheen.
+	{"apple", "arm64", "apple linkcpuinit highram", false},
 }
 
 // qemuvirt is een dev-target, geen release-smaak: hij telt niet mee in de
