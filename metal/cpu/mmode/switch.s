@@ -468,6 +468,32 @@ scan:
 	// yield van vóór de wektijd (a0 = residu) las als "wek me over 40 minuten"
 	// en dat wás een dove welcome (gemeten 01-08). Oude bewoners horen dus
 	// niet op een hart met deze switcher; alle vloot-artifacts zijn herbouwd.
+	//
+	// Niet due — maar de DOORBELL dan? (Zelfde peek als op ARM, zie el2 en
+	// idle/rxdoor.go; alleen het cache-onderhoud is hier extra.) De drempel
+	// (CtrlRXDoor) schrijft de bewoner op dít hart — cipa is dan clean+
+	// invalidate, dus ook een nog-vuile eigen regel leest correct; het
+	// head-woord schrijft HOP vanaf zíjn hart en het RingHeadPA-woord ligt in
+	// HOP's ctx-regel (512): allebei vers lezen of de bel is doof.
+	MOV	8(X29), X13		// layout.CtxCtrlPA
+	MOV	$0x110, X14		// layout.CtrlRXDoor
+	ADD	X14, X13, X13
+	MOV	$512, X14		// de HOP-regel van het ctx-blok (CtxRingHeadPA)
+	ADD	X29, X14, X14
+	WORD	$0x02b6800b		// th.dcache.cipa x13
+	WORD	$0x02b7000b		// th.dcache.cipa x14
+	WORD	$0x01b0000b		// th.sync.is
+	MOV	0(X13), X13		// de drempel (bit 63 = gewapend)
+	BGEZ	X13, nobell		// niet gewapend: de wektijd regeert
+	MOV	520(X29), X14		// layout.CtxRingHeadPA (0 = geen ring)
+	BEQZ	X14, nobell
+	WORD	$0x02b7000b		// th.dcache.cipa x14
+	WORD	$0x01b0000b		// th.sync.is
+	MOV	0(X14), X14		// live head (producer: hopswitch)
+	SLL	$1, X13, X13		// het gewapend-teken eruit
+	SRL	$1, X13, X13
+	BNE	X13, X14, resume	// de ring groeide voorbij de drempel: due
+nobell:
 	// Nog niet aan de beurt. Onthouden wie het eerst weer moet — dát is de tijd
 	// waarop het hart hoogstens mag doorslapen (zie park).
 	BEQZ	X11, keepwake

@@ -49,6 +49,11 @@ const (
 	TypeFrame   = 5 // frame-ringen: één rauw Ethernet-frame (metal/net/hopswitch)
 )
 
+// HeadOff is de byte-offset van het head-woord binnen de ringkop — voor wie
+// het adres van de producer-index nodig heeft zonder de ring te openen
+// (kern/slots legt hem als CtxRingHeadPA in het ctx-blok, de doorbell-peek).
+const HeadOff = hdrHead
+
 func align8(n uint64) uint64 { return (n + 7) &^ 7 }
 
 // Init maakt een lege ring met de gegeven datacapaciteit klaar op base
@@ -74,6 +79,14 @@ type Ring struct {
 	// corrupt-verklaring van buiten niet te onderscheiden van een lege ring,
 	// en dat onderscheid was precies de jacht van 17-08 (boot 9: slot-TX
 	// leest eeuwig leeg terwijl de app schrijft).
+}
+
+// HeadPending geeft de producer-index en of er ongelezen records liggen — de
+// twee ingrediënten van de doorbell (metal/cpu/idle): head wordt de
+// wek-drempel op de control-page, pending het wek-besluit van de governor.
+func (r *Ring) HeadPending() (uint64, bool) {
+	h := r.head()
+	return h, h != r.tail()
 }
 
 // markCorrupt zet de vlag met de reden; de eerste reden wint (de vervolgstaat

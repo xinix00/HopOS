@@ -13,6 +13,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"runtime"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/xinix00/lean/leannet"
@@ -20,6 +23,7 @@ import (
 	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/abi/ring"
 	"github.com/xinix00/HopOS/metal/app/applib"
+	"github.com/xinix00/HopOS/metal/cpu/idle"
 )
 
 // Up brengt de eigen netstack op en hangt hem in Go's net-package; geeft het
@@ -76,15 +80,38 @@ func Up(a *applib.App) (string, error) {
 	}
 
 	// RX-lus met microslaap i.p.v. een Gosched-spin: een idle job laat zo
-	// zijn hele core slapen (zie metal/cpu/idle).
+	// zijn hele core slapen (zie metal/cpu/idle). Hoe lang die slaap is,
+	// bepaalt rxPoll (default = de vaste 300µs die hier altijd stond) — maar
+	// de slaap is sinds de doorbell een BODEM, geen latency meer: de
+	// idle-governor wapent een wek-drempel op de control-page en wekt deze
+	// goroutine (runtime.Wake) zodra de switcher of een eigen idle-ronde
+	// verkeer ziet (idle/rxdoor.go). De cap mag dus groot.
+	idle.WatchRXRing(
+		layout.CtrlPageAt(a.RAMStart, a.RAMSize)+layout.CtrlRXDoor,
+		nd.rx.HeadPending)
+	lo, hi, hold := rxPoll(a.Env("RXPOLL"))
 	go func() {
+		gp, _ := runtime.GetG()
+		idle.RXPumpG(gp) // dit is de goroutine die de bel wekt
 		buf := make([]byte, leannet.MTU+leannet.EthernetMaximumSize)
+		d, empty := lo, 0
 		for {
 			n, err := nd.Receive(buf)
 			if n == 0 || err != nil {
-				time.Sleep(300 * time.Microsecond)
+				time.Sleep(d)
+				// Niets gevonden. De eerste `hold` lege rondes blijven op lo —
+				// dát is het venster waarin het antwoord van een lopend gesprek
+				// hoort te komen — en pas daarna zakken we terug naar hi. Bij
+				// lo == hi is dit de vaste slaap van vroeger.
+				if empty++; empty > hold {
+					d *= 2
+					if d > hi {
+						d = hi
+					}
+				}
 				continue
 			}
+			d, empty = lo, 0 // verkeer: meteen weer scherp staan
 			st.RecvInboundPacket(buf[:n])
 		}
 	}()
@@ -93,6 +120,46 @@ func Up(a *applib.App) (string, error) {
 	current = st
 
 	return layout.IP4Str(ip), nil
+}
+
+// rxPoll leest de RX-slaapstand uit de job-env: hoe lang de RX-lus wacht als
+// er niets binnenkwam. Twee vormen, en de eerste is de stand van vóór dit
+// knopje:
+//
+//	""                 de default: "300us:1s:4"
+//	"300us"            vaste slaap (lo == hi) — het gedrag van vóór 29-08
+//	"300us:5ms"        NAPI-achtig: verdubbelen tot hi zolang het stil is,
+//	                   terug naar lo zodra er een frame binnenkomt
+//	"300us:5ms:8"      idem, maar de eerste 8 lege rondes blijven op lo
+//
+// De default is GEMETEN (schedbench, 29-08): de doorbell draagt de latency
+// (koud p50 0,8ms bij een cap van 10 SECONDEN), dus de cap is alleen nog het
+// vangnet voor een gedoofde bel. Waarom dan 1s en niet groter: de heartbeat
+// wekt elke app toch al ~1×/s, dus een grotere cap levert nul minder wekken
+// op — 1s hangt gratis onder die vloer en begrenst een bel-storing op 1s.
+// De vaste 300µs van vroeger (3.333 rondes/s, op een gedeelde core elk een
+// context-wissel) is de "300us"-stand: de ontsnappingsklep, geen default meer.
+func rxPoll(s string) (lo, hi time.Duration, hold int) {
+	lo, hi, hold = 300*time.Microsecond, time.Second, 4
+	if s == "" {
+		return lo, hi, hold
+	}
+	hi, hold = lo, 0
+	f := strings.Split(s, ":")
+	if d, err := time.ParseDuration(f[0]); err == nil && d > 0 {
+		lo, hi = d, d
+	}
+	if len(f) > 1 {
+		if d, err := time.ParseDuration(f[1]); err == nil && d >= lo {
+			hi = d
+		}
+	}
+	if len(f) > 2 {
+		if n, err := strconv.Atoi(f[2]); err == nil && n > 0 {
+			hold = n
+		}
+	}
+	return lo, hi, hold
 }
 
 // current is de stack van deze app (één per slot); gezet door Up.

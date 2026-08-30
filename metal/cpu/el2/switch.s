@@ -232,6 +232,23 @@ scan:
 	// Wel een eis aan de applib: een yield van vóór de wektijd draagt residu
 	// in x1 (hier: de fpcr) en zo'n bewoner hoort niet op een gedeelde core —
 	// zie de RISC-V-switcher voor de gemeten les (01-08, dove welcome).
+	//
+	// Niet due — maar de DOORBELL dan? De bewoner wapent hem vlak vóór zijn
+	// slaap (idle/rxdoor.go: CtrlRXDoor = gezien-head | bit 63); is het live
+	// head-woord van zijn RX-ring (CtxRingHeadPA) daar inmiddels voorbij, dan
+	// kwam er verkeer en is de wektijd irrelevant. Ongewapend (bit 63 = 0:
+	// pomp wakker, of een app zonder netstack) peekt hier niets — dat houdt
+	// een kooi die zijn ring nooit leest uit de resume-lus (ARP-floods!).
+	MOVD	8(R1), R12	// layout.CtxCtrlPA
+	MOVD	0x110(R12), R12	// layout.CtrlRXDoor
+	TBZ	$63, R12, notdue	// niet gewapend: de wektijd regeert
+	MOVD	520(R1), R13	// layout.CtxRingHeadPA (0 = geen ring)
+	CBZ	R13, notdue
+	MOVD	(R13), R13	// live head (producer: hopswitch)
+	AND	$0x7FFFFFFFFFFFFFFF, R12, R12	// drempel zonder het gewapend-teken
+	CMP	R12, R13
+	BNE	resume		// de ring groeide voorbij de drempel: due
+notdue:
 	MOVD	$1, R11		// levend, alleen nog niet due
 skip:
 	SUBS	$1, R6, R6

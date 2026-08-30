@@ -114,9 +114,11 @@ de kooi (slot 1, 64MB partitie). Gate groen, niets gecommit.
             PMGR+brievenbus-tak, maar die loopt pas als RVBAR naar ons image
             wijst — dus pas na de installatie. Tot dan `PSCI CPU_ON core 1: -2`
             in een chain-boot, en dat is de eerlijke uitkomst.
-      - [ ] **Installeren** (fysiek, 1TR): `kmutil configure-boot -c <image>
-            --raw --entry-point 2048 --lowest-virtual-address 0 -v "/Volumes/Macintosh HD"`.
-            Pas daarna wijst RVBAR naar stubReset en zijn de cores van ons.
+      - [ ] **Installeren** (fysiek, 1TR) — draaiboek staat in
+            docs/archief/apple-m4.md: stick met probeapple.img + hopos-apple.img,
+            kmutil-regel, en de twee regels console-uitvoer die het bewijzen.
+            De probe test het eigen-cores-pad nu ZELF (apple.Start kiest de
+            weg), dus installatie → herstart → meten, zonder nieuw image.
       - [ ] **Mini-proxy in ons image**, anders kost elke iteratie een 1TR-bezoek.
       - [ ] raadsel: 1 van de 4 chain-boots las `boot_args.devtree` als 0 (board
             viel luid terug op de constanten). De probe dumpt het blok nu woord

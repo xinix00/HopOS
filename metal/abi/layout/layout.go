@@ -285,6 +285,16 @@ const (
 	// vertaalfase om weg te halen — de kooi is een PMP-whitelist in de CSR's van
 	// het hart zelf, en daar komt alleen machine mode ÓP dat hart bij.
 	CtxRevoke = 512
+	// CtxRingHeadPA: fysiek adres van het head-woord van de RX-frame-ring van
+	// dit slot — de producer-index die hopswitch ophoogt. De rotatie leest hem
+	// voor de doorbell-peek (zie CtrlRXDoor): een bewoner wiens wektijd nog
+	// niet om is maar wiens ring voorbij zijn wek-drempel gegroeid is, heeft
+	// verkeer en is dus tóch aan de beurt. Door HOP gezet bij de slot-start
+	// (zelfde moment als CtxCtrlPA); 0 = geen peek. In de cacheline van
+	// CtxRevoke, en dat mag precies dáárom: beide woorden hebben HOP als enige
+	// schrijver, en de switcher leest deze regel al vers (cipa) op elk pad dat
+	// hem nodig heeft.
+	CtxRingHeadPA = 520
 
 	// CtxLen is hoeveel een verse init van het ctx-blok moet nullen: het hele
 	// blok tot en met de cacheline van CtxRevoke (512..575) plus slack tot een
@@ -704,7 +714,14 @@ const (
 	// AbiMapOff (31-07) verhoogt de versie NIET: die regio raakt de app-kant niet
 	// (hij rekent er geen adres uit en leest er nooit), hij vult alleen slack die
 	// al gereserveerd was.
-	ABIVersion = 3
+	//
+	// 4 (30-08): CtrlRXDoor (de doorbell) schoof de env-regio één woord op
+	// (CtrlEnvData 0x110 -> 0x118). Dát raakt de app-kant wél: applib leest zijn
+	// env op precies dat adres, dus een image van vóór deze stap zou de env acht
+	// bytes te vroeg lezen — een stille misread, en die hoort een luide weigering
+	// te zijn. Kern en apps hertalen samen; de release-keten bouwt de app-images
+	// tegen dezelfde metal-tag, dus dat gebeurt vanzelf in één ronde.
+	ABIVersion = 4
 )
 
 // AbiTailAt geeft de basis van de ABI-staart van een slot: net boven zijn
@@ -903,10 +920,31 @@ const (
 	// om te verklaren.
 	CtrlWakes = 0x108
 
+	// CtrlRXDoor (app → switcher): de wek-drempel van de doorbell — het
+	// EVENT_IDX-idee van virtio, in één woord. De idle-governor van de app
+	// wapent hem vlak vóór de slaap: "ik heb alles tot head H gezien; wordt
+	// de ring groter, wek me" (waarde = H | bit 63; bit 63 is het
+	// gewapend-teken, een byte-index haalt dat bit nooit). De rotatie
+	// (cpu/el2 en cpu/mmode) vergelijkt hem bij een niet-due bewoner met het
+	// live head-woord (CtxRingHeadPA) en hervat bij verschil — de wektijd is
+	// dan irrelevant, er ligt werk.
+	//
+	// ONGEWAPEND (bit 63 = 0) doet de peek niets, en dat is een grens en geen
+	// optimalisatie: een app zonder netstack leest zijn ring nooit leeg, dus
+	// elke ARP-flood zou hem anders permanent "due" maken — een
+	// resume/yield-pingpong die de gedeelde core opeet. Alleen wie de ring
+	// draint mag de bel aanzetten. Geen cacheline-zorg nodig: de app mapt de
+	// control-page als device (slotMap), dus de drempel staat per store in
+	// DRAM; de switcher leest hem vers (cipa aan zíjn kant). De page was vol
+	// (0x00-0x108 aaneengesloten, daarna env): dit woord duwde de env-regio
+	// één plek op — kern en apps lezen beide déze constante, dus dat is een
+	// hertaal-samen-moment (zoals elke ABI-stap), geen migratiepad.
+	CtrlRXDoor = 0x110
+
 	// Env-blob: door HOP geschreven "key=val\n..."-bytes die de app-lib bij
 	// start inleest (de Docker-vorm: env meegegeven bij het starten). Vervangt
 	// het kernel-envp dat bare metal niet heeft.
-	CtrlEnvData = 0x110
+	CtrlEnvData = 0x118
 	CtrlEnvMax  = CtrlStride - CtrlEnvData
 )
 

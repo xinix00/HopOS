@@ -159,6 +159,13 @@ var wfeMinSleep uint64 = 64
 // yield-kant geeft pollUntil juist wél door, als wektijd waar de rotatie deze
 // bewoner tot die tijd mee overslaat.
 func governor(pollUntil int64) {
+	// De doorbell eerst: ligt er RX, dan is de pomp nu gewekt en is slapen
+	// precies verkeerd; ligt er niets, dan is de drempel nu gewapend en
+	// bewaakt de rotatie-peek de rest van deze slaap (zie rxdoor.go).
+	if rxDoor() {
+		countWake()
+		return
+	}
 	var slept uint64
 	if a := sharedAddr.Load(); a != 0 && dev.Read64(a) != 0 {
 		// Gedeelde core: expliciet yielden, mét de wektijd. De HVC trapt naar

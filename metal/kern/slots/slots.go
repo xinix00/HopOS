@@ -616,6 +616,7 @@ type Status struct {
 	RAMSize   uint64 // door de app gerapporteerde (gepatchte) RAM-maat
 	MemSys    uint64 // werkelijke draw: MemStats.Sys van de app (0 = nog niet gemeld)
 	IdleTicks uint64 // ruwe idle-tik-teller (CtrlIdle; bij SMP gedeeld door de cores)
+	Wakes     uint64 // ruwe wek-teller (CtrlWakes): scheduler-idle-rondes van dit slot
 	Cores     uint64 // aantal cores van het slot (CtrlCores; 0 = geen SMP-veld gezet)
 	Shared    bool   // deelt zijn core met een medebewoner (CtrlShared, door HOP gezet)
 
@@ -1046,6 +1047,10 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// alleen het gedeelde-core-pad — sinds de ABI in de partitie woont kan die
 	// asm het adres niet meer uitrekenen.
 	ctxWrite(i, layout.CtxCtrlPA, ctx)
+	// Het head-woord van de RX-frame-ring erbij: het live-eind van de
+	// doorbell-peek (layout.CtxRingHeadPA; de wek-drempel schrijft de app
+	// zelf op CtrlRXDoor). Zelfde publicatiepad als CtxCtrlPA.
+	ctxWrite(i, layout.CtxRingHeadPA, uint64(netPA)+uint64(layout.NetRXOff)+ring.HeadOff)
 	// coreParks erbij: een core die niet resetbaar is heeft ALTIJD de
 	// boot-pending-route — zijn switcher draait er vanaf de boot (cageInit
 	// trekt hem in via parkenter), dus de rotatie pikt élke boot-pending op.
@@ -1365,6 +1370,7 @@ func liveStatus(i int) Status {
 		RAMSize:   ctrlRead(i, layout.CtrlRAMSize),
 		MemSys:    ctrlRead(i, layout.CtrlMemSys),
 		IdleTicks: ctrlRead(i, layout.CtrlIdle),
+		Wakes:     ctrlRead(i, layout.CtrlWakes),
 		Cores:     ctrlRead(i, layout.CtrlCores),
 		Shared:    ctrlRead(i, layout.CtrlShared) != 0,
 		FaultVec:  ctrlRead(i, layout.CtrlFaultVec),

@@ -101,6 +101,11 @@ func AccountsDedicated() bool { return true }
 // is in alle gevallen de wall-tijd waarin dit slot niets deed: bij een yield de
 // tijd waarin een buur draaide óf het hart sliep, bij MSleep de slaap zelf.
 func governor(pollUntil int64) {
+	// De doorbell eerst — zelfde twee redenen als op ARM (zie rxdoor.go).
+	if rxDoor() {
+		countWake()
+		return
+	}
 	if sharedAddr.Load() != 0 {
 		// Slot-app: yield naar de switcher, alleen wonend of niet.
 		n := ticks.Add(ecallYield(wakeAt(pollUntil)))

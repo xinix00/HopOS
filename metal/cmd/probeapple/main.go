@@ -585,18 +585,27 @@ func main() {
 	}
 
 	// 8. de cores: spin-table-release naar de parkeerlus.
-	if ok {
+	if self := apple.SelfCPU(); self >= 0 {
 		entry := apple.ParkEntryPC()
-		say("\nsmp: park loop at %#x; releasing m1n1's parked cores\n", entry)
+		mech := "m1n1's spin table"
+		if own, _ := apple.OwnCores(); own {
+			mech = "PMGR + stubReset mailbox (cores are OURS)"
+		}
+		say("\nsmp: park loop at %#x; starting cores via %s\n", entry, mech)
 		up := 0
 		cpus := apple.CPUs()
 		for cpu := range cpus {
-			if cpu == p.BootCPU {
+			if cpu == self {
 				continue
 			}
 			apple.ClearWake(cpu)
-			if !apple.Release(cpu, entry, uint64(apple.WakeSlot(cpu))) {
-				say("smp: cpu%d not started by m1n1 (no release address)\n", cpu)
+			// apple.Start kiest zelf de weg: m1n1's spin-table zolang die
+			// bestaat, en anders — pas als RVBAR naar óns image wijst — de
+			// PMGR-start met de brievenbus waar stubReset op wacht. Dit is
+			// dus dezelfde regel die ná de installatie het eigen-cores-pad
+			// bewijst, zonder dat er een ander probe-image nodig is.
+			if !apple.Start(cpu, entry, uint64(apple.WakeSlot(cpu))) {
+				say("smp: cpu%d has no start path (no spin table, cores not ours)\n", cpu)
 				continue
 			}
 			var got uint64

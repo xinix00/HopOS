@@ -18,6 +18,7 @@ app ABI. Product page: [gethop.org/hopos](https://gethop.org/hopos/).
 - **[Networking](technical/networking.md)** — a network stack per app, a switch in the node.
 - **[Stateless](technical/stateless.md)** — state on S3, not on metal.
 - **[Slot-lifecycle](slot-lifecycle-grenzen.md)** (NL, intern) — wie garandeert wat in de start/stop-keten: wat HOP's runner al afdekt, waarom `slots` dun blijft, en welke lifecycle-machinerie bewust ontbreekt.
+- **[Core-deling & de stille core](coredeling-ontwerp.md)** (NL, intern) — wektijd + doorbell + round-robin: hoe meerdere apps één core delen en een idle app (bijna) niets kost; de schedbench-metingen en wat er bewust is weggelaten.
 - **[Geheugen](geheugen-ontwerp.md)** (NL, intern) — de keten van DRAM tot app-heap: wat HOP zelf houdt, hoe een partitie uitgedeeld en teruggegeven wordt, welke plafonds er zijn, en de vallen met datum.
 - **GUI — SURF** — network-transparent windows: an app draws anywhere in the
   cluster, a display node composites it, and a window fails over when HOP

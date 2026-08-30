@@ -176,6 +176,12 @@ func main() {
 		fail("http", err)
 	}
 
+	// Meetbank i.p.v. demo (image/qemu-run.sh bench): alles wat de bank nodig
+	// heeft — slots, switch, per-slot netstacks — staat nu. Keert niet terug.
+	if benchMode != "" {
+		schedBench()
+	}
+
 	// Klok via SNTP — zonder RTC begint alles op 1970; TLS eist echte tijd.
 	if err := hopnet.SyncTime("pool.ntp.org:123"); err != nil {
 		fail("sntp", err)

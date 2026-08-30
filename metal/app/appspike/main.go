@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -144,6 +145,108 @@ func main() {
 			exitf(app, 1, "FSDEMO fetch: teruglezen: %v", err)
 		}
 		exitf(app, 0, "FSDEMO fetch: %d bytes: %q", len(b), string(b[:min(len(b), 40)]))
+	}
+
+	// Meetbank voor de core-deling (BENCH, aangestuurd door schedbench.go in
+	// de kern). Twee rollen die samen meten wat een hop tussen twee bewoners
+	// van één core kost: "echo" antwoordt, "ping" klokt de round-trips. Beide
+	// apps wonen op dezelfde fysieke core, dus elke round-trip is minstens
+	// twee wissels — precies het getal dat we willen zien als de RX-slaapstand
+	// verandert.
+	switch app.Env("BENCH") {
+	case "echo":
+		// Stille echo-server: regel in, regel terug. Bewust GEEN log per regel
+		// (dat is zelf een ring-write per round-trip en zou de meting zijn).
+		if _, err := appnet.Up(app); err != nil {
+			exitf(app, 1, "BENCH echo: %v", err)
+		}
+		l, err := net.Listen("tcp4", ":9000")
+		if err != nil {
+			exitf(app, 1, "BENCH echo: %v", err)
+		}
+		app.Logf("BENCH echo: ready on :9000")
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				exitf(app, 1, "BENCH echo: accept: %v", err)
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				r := bufio.NewReader(c)
+				for {
+					line, err := r.ReadString('\n')
+					if err != nil {
+						return
+					}
+					if _, err := c.Write([]byte(line)); err != nil {
+						return
+					}
+				}
+			}(conn)
+		}
+
+	case "ping":
+		// Klok N round-trips over ÉÉN open verbinding (dus zonder handshake in
+		// de meting) en rapporteer de verdeling. Daarna stil blijven: HOP meet
+		// hierna het idle-tempo van dit paar.
+		if _, err := appnet.Up(app); err != nil {
+			exitf(app, 1, "BENCH ping: %v", err)
+		}
+		var conn net.Conn
+		var err error
+		for i := 0; i < 50; i++ { // de buurman mag nog opkomen
+			conn, err = net.Dial("tcp4", app.Env("BENCH_PEER"))
+			if err == nil {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if err != nil {
+			exitf(app, 1, "BENCH ping: dial %s: %v", app.Env("BENCH_PEER"), err)
+		}
+		n := 200
+		rtt := make([]time.Duration, 0, n)
+		r := bufio.NewReader(conn)
+		for i := 0; i < n; i++ {
+			t0 := time.Now()
+			if _, err := conn.Write([]byte("ping\n")); err != nil {
+				exitf(app, 1, "BENCH ping: write: %v", err)
+			}
+			if _, err := r.ReadString('\n'); err != nil {
+				exitf(app, 1, "BENCH ping: read: %v", err)
+			}
+			rtt = append(rtt, time.Since(t0))
+		}
+		sort.Slice(rtt, func(i, j int) bool { return rtt[i] < rtt[j] })
+		app.Logf("BENCH_RTT rxpoll=%q n=%d min=%dus p50=%dus p90=%dus p99=%dus max=%dus",
+			app.Env("RXPOLL"), n, rtt[0].Microseconds(), rtt[n/2].Microseconds(),
+			rtt[n*9/10].Microseconds(), rtt[n*99/100].Microseconds(), rtt[n-1].Microseconds())
+
+		// De tegenmeting: het EERSTE pakket ná stilte. Een adaptieve RX-slaap
+		// koopt zijn wekken terug met precies dit getal — een seconde niets
+		// doen, dan één round-trip over de al open verbinding (dus zonder
+		// handshake: puur de wek-kosten van de buurman).
+		cold := make([]time.Duration, 0, 15)
+		for i := 0; i < cap(cold); i++ {
+			time.Sleep(time.Second)
+			t0 := time.Now()
+			if _, err := conn.Write([]byte("cold\n")); err != nil {
+				exitf(app, 1, "BENCH cold: write: %v", err)
+			}
+			if _, err := r.ReadString('\n'); err != nil {
+				exitf(app, 1, "BENCH cold: read: %v", err)
+			}
+			cold = append(cold, time.Since(t0))
+		}
+		conn.Close()
+		sort.Slice(cold, func(i, j int) bool { return cold[i] < cold[j] })
+		m := len(cold)
+		app.Logf("BENCH_COLD rxpoll=%q n=%d min=%dus p50=%dus p90=%dus max=%dus",
+			app.Env("RXPOLL"), m, cold[0].Microseconds(), cold[m/2].Microseconds(),
+			cold[m*9/10].Microseconds(), cold[m-1].Microseconds())
+		for {
+			time.Sleep(time.Hour) // stil blijven: nu meet HOP het idle-tempo
+		}
 	}
 
 	// Netdemo (per-slot netwerk): elke rol draait een eigen netstack over de

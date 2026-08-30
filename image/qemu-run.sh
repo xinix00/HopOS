@@ -4,6 +4,7 @@
 # PSCI via SMC, GICv3, tot 12 cores — zelfde bouwstenen als de O6N.
 #
 #   image/qemu-run.sh          demo/regressie: cmd/hopos-embed (HOPOS_*-markers)
+#   image/qemu-run.sh bench    meetbank core-deling (cmd/hopos-embed/schedbench.go)
 #   image/qemu-run.sh agent    de echte HOP-agent + leader (cmd/hopos)
 #
 # Job submitten vanaf de Mac (agent-modus, poorten via hostfwd):
@@ -40,7 +41,7 @@ mkdir -p out
 #    Demo-modus bakt hem ín de kern (go:embed) — dan moet hij op de embed-plek
 #    naast de main landen; agent-modus serveert hem los via http.server.
 APP=out/app.elf
-[ "$MODE" = demo ] && APP=cmd/hopos-embed/app.elf
+case "$MODE" in demo | bench) APP=cmd/hopos-embed/app.elf ;; esac
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags "linkcpuinit" -trimpath \
 	-ldflags "-w -T 0x50010000 -R 0x1000" -o "$APP" ./app/appspike
@@ -51,10 +52,14 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 GUITAG=""
 [ "${GUI:-1}" = 1 ] && GUITAG=" gui"
 case "$MODE" in
-demo)
+demo|bench)
+	# bench = dezelfde kern, maar de meetbank i.p.v. de demo
+	# (cmd/hopos-embed/schedbench.go): core-deling meten in plaats van bewijzen.
+	BENCHX=""
+	[ "$MODE" = bench ] && BENCHX=" -X main.benchMode=1"
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "qemuvirt linkcpuinit$GUITAG" -trimpath \
-		-ldflags "-s -w -T 0x40010000 -R 0x1000" -o out/hopos-virt.elf ./cmd/hopos-embed
+		-ldflags "-s -w -T 0x40010000 -R 0x1000$BENCHX" -o out/hopos-virt.elf ./cmd/hopos-embed
 	KERNEL=out/hopos-virt.elf
 	FWD="hostfwd=tcp:127.0.0.1:${HOPPORT:-8080}-10.0.2.15:80,hostfwd=tcp:127.0.0.1:${PORTPUB:-18080}-10.0.2.15:8080"
 	echo "hopos-virt.elf ($(du -h out/hopos-virt.elf | cut -f1), incl. app.elf) gebouwd — QEMU -smp $SMP start..." >&2
@@ -76,7 +81,7 @@ agent)
 	echo "leader: curl http://127.0.0.1:${LEADERPORT:-9080}/health" >&2
 	;;
 *)
-	echo "gebruik: $0 [demo|agent]" >&2
+	echo "gebruik: $0 [demo|bench|agent]" >&2
 	exit 64
 	;;
 esac
