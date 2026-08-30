@@ -119,16 +119,20 @@ job-env is de ontsnappingsklep (`"300us"` = het oude gedrag).
 ## ABI-stap (herbouw-regel!)
 
 De control-page was vol: `CtrlRXDoor` kreeg 0x110 en **CtrlEnvData schoof
-0x110 → 0x118**. Kern en alle app-artifacts horen samen herbouwd — een oude
-app onder een nieuwe kern leest zijn env-blob één woord verkeerd (zelfde
-klasse als de UDP-klok-les van 11-08: app-builds van vóór de stap zijn stuk
-op een subtiele manier).
+0x110 → 0x118**. Een oude app onder een nieuwe kern zou zijn env-blob één
+woord verkeerd lezen (zelfde klasse als de UDP-klok-les van 11-08) — daarom
+is dit géén herbouw-discipline maar een versie-stap: **ABIVersion 3 → 4**,
+en HOP weigert bij plaatsing elk image van een andere versie. Stuk-op-een-
+subtiele-manier is daarmee onmogelijk; het faalt luid, vóór de start.
 
 ## Status & open
 
 - **29-08**: gebouwd op beide architecturen, QEMU-bewezen (bench + demo 13/13
-  markers + volledige gate). Ongecommit tot de ijzer-ronde.
-- **Open**: één LicheeRV-boot (de mmode-peek met zijn cipa's is
-  compile-bewezen, het oordeel over cache-gedrag valt op ijzer), daarna
-  vloot-herbouw wegens de ABI-stap. Op ijzer wordt de koude tik ~1-2ms
-  (de wek-tik van de core) i.p.v. QEMU's spin-getal.
+  markers + volledige gate).
+- **30-08 — IJZER-BEWEZEN op de LicheeRV**: de mmode-peek (incl. de cipa's op
+  het niet-coherente T-Head-paar) doet zijn werk, en de apps die op dit hart
+  altijd 36% "busy" lazen — de eerlijke meting van hun verspilde wekken —
+  spinnen nu naar **0%**. De cpu-meting was al die tijd correct; wat er
+  veranderde is de werkelijkheid die hij mat.
+- **30-08 — uit**: gecommit (1b44df7) en released als **v1.999.0**, mét de
+  ABI-hoging naar 4 — oude artifacts worden geweigerd, niet stil gebroken.
