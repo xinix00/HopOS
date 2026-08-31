@@ -38,3 +38,21 @@ func StubSource() uint64 { return dev.Read64(StubSrc) }
 // boot_args-blok als wij het bootobject zijn, m1n1's FDT als de proxy ons
 // startte. Nul = de stub draaide niet.
 func FirmwareX0() uint64 { return dev.Read64(StubX0) }
+
+// SelfImage geeft waar dít image draait en hoe groot het is, gelezen uit het
+// parameterblok dat mkkernel vooraan legde (magic HOPSTUB1 op offset 0x100:
+// doel, grootte, entry).
+//
+// Netboot heeft dit nodig om zichzelf te herkennen. Haalt een node het image op
+// dat hij al ís, dan mag hij er niet in springen — dat is een bootlus die je
+// alleen met een stekker doorbreekt. Vergelijken op inhoud en niet op een
+// vlaggetje in DRAM: DRAM overleeft een warme herstart, dus een vlag die
+// blijft staan zou netboot juist permanent uitzetten.
+func SelfImage() (base, size uint64, ok bool) {
+	const magic = 0x3142_5554_5350_4F48 // "HOPSTUB1" als little-endian woord
+	p := uintptr(RamBase) + 0x100
+	if dev.Read64(p) != magic {
+		return 0, 0, false
+	}
+	return dev.Read64(p + 0x08), dev.Read64(p + 0x10), true
+}

@@ -87,9 +87,15 @@ type Dev struct {
 	// board het hele DMA-gebied al in één keer heeft opengezet.
 	Allow func(paddr, size uint64) bool
 
+	// App krijgt elk bericht op een APPLICATIE-endpoint (0x20 en hoger). Dat
+	// is het domein van een driver — de SMC praat op 0x20 — en dit pakket weet
+	// van die protocollen niets. nil = zulke berichten vallen weg.
+	App func(msg uint64, ep uint32)
+
 	iopPower uint64
 	apPower  uint64
 	bufs     [epOSLog + 1]uint64 // per systeem-endpoint het afgegeven adres
+	appEP    map[uint32]bool     // applicatie-endpoints die "aan" gemeld hebben
 }
 
 func (d *Dev) mb() uintptr { return d.Base + mboxOff }
@@ -176,6 +182,18 @@ func (d *Dev) handle(msg uint64, ep uint32) error {
 			// Onbekend maar moet bevestigd worden (m1n1 doet hetzelfde).
 			return d.send(msg, ep)
 		}
+	default:
+		// Alles boven de systeem-endpoints is van een DRIVER: de SMC praat op
+		// 0x20, de NVMe-kant heeft er zelf geen. Zonder haak vielen die
+		// berichten stil op de grond — en een coprocessor die op antwoord
+		// wacht, houdt op met werken.
+		if d.appEP == nil {
+			d.appEP = map[uint32]bool{}
+		}
+		d.appEP[ep] = true
+		if d.App != nil {
+			d.App(msg, ep)
+		}
 	}
 	return nil
 }
@@ -227,6 +245,33 @@ func (d *Dev) Poll() error {
 		if err := d.handle(msg, ep); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// Send zet één bericht op een endpoint. Voor drivers die zelf een
+// applicatie-endpoint bedienen (zie App); de systeem-endpoints doet dit pakket.
+func (d *Dev) Send(msg uint64, ep uint32) error { return d.send(msg, ep) }
+
+// StartEP vraagt de coprocessor een applicatie-endpoint te openen en wacht tot
+// hij dat bevestigt. Nodig vóór het eerste bericht erop: een endpoint dat niet
+// gestart is, slikt alles zonder te antwoorden.
+func (d *Dev) StartEP(ep uint32) error {
+	if d.appEP == nil {
+		d.appEP = map[uint32]bool{}
+	}
+	if err := d.send(typed(msgStartEP)|uint64(ep)<<32|1<<1, epMgmt); err != nil {
+		return err
+	}
+	// De coprocessor bevestigt niet apart dat een applicatie-endpoint openging;
+	// wat je krijgt is zijn EERSTE bericht erop. Dus: even pollen zodat een
+	// vroeg bericht niet verloren gaat, en dan doorgaan — de aanroeper wacht
+	// toch op zijn eigen antwoord.
+	for i := 0; i < 20 && !d.appEP[ep]; i++ {
+		if err := d.Poll(); err != nil {
+			return err
+		}
+		time.Sleep(time.Millisecond)
 	}
 	return nil
 }

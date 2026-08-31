@@ -19,6 +19,7 @@
 package apple
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/xinix00/HopOS/metal/dev"
@@ -41,8 +42,14 @@ const (
 	pmgrOffAddr    = 10 // u8, << 3
 	pmgrOffPSIdx   = 11 // u8 — index in ps-regs
 	pmgrOffID      = 26 // u16
+	pmgrOffName    = 32 // char[16], NUL-gevuld
 
 	pmgrPollTimeout = 10 * time.Millisecond
+
+	// Reset-bits van één device (m1n1 src/pmgr.c pmgr_reset_device).
+	pmgrDevDisable = 1 << 10
+	pmgrReset      = 1 << 31
+	pmgrPSActual   = 0xF << 4
 )
 
 // pmgrTable is de uitgepakte tabel. Alle velden wijzen in de ADT zelf: dit is
@@ -197,4 +204,123 @@ func PowerEnable(path string) int {
 		}
 	}
 	return done
+}
+
+// ResetNamed zet de genoemde devices door een echte reset heen: uitzetten,
+// reset aan, even wachten, en in omgekeerde volgorde terug. Geeft het aantal
+// devices dat gereset is.
+//
+// OP NAAM, en niet via de ADT-boom — dat is geen stijlkeuze maar een meting.
+// De eerste versie hiervan liep over de `clock-gates` van een ADT-blok, zoals
+// PowerEnable dat doet, en vond niets: `/arm-io/ans` HEEFT die eigenschap niet
+// (gemeten 30-08 op ijzer: "no power domain found to reset"). m1n1 doet het
+// daarom ook op naam (`pmgr_reset(die, "ANS")`), uit de devicetabel van de
+// pmgr zelf. De naam staat op offset 32 van elk record, 16 bytes, NUL-gevuld.
+//
+// WAAROM DIT ER MOET ZIJN. Zolang m1n1 vóór ons draaide, deed híj dit: bij zijn
+// eigen start trof hij iBoot's ANS "left powered" aan, praatte hem in slaap en
+// resette dan zijn power-domein (nvme.c: nvme_ensure_shutdown). Onze
+// NVMe-driver kreeg dus altijd een VERSE coprocessor aangereikt zonder dat wij
+// dat wisten. Sinds wij zelf het bootobject zijn viel die stap weg en kwam
+// CSTS.RDY nooit meer op 1 — ook niet na een echte power-cycle, want het is de
+// staat die iBoot achterlaat en niet een restant van ons.
+//
+// Een device dat niet actief is slaan we over: resetten wat uit staat is
+// zinloos, en m1n1 weigert het ook.
+func ResetNamed(names ...string) int {
+	p, ok := pmgrOpen()
+	if !ok {
+		return 0
+	}
+	done := 0
+	for i := uint32(0); i < p.nDevs; i++ {
+		r := p.rec(i)
+		if !p.nameIn(r, names) {
+			continue
+		}
+		// Een virtueel device is een alias zonder eigen register (zie
+		// setMode): resetten heeft daar geen betekenis.
+		if dev.Read8(r+pmgrOffFlags)&pmgrFlagVirtual != 0 {
+			continue
+		}
+		a := p.addr(0, r)
+		if a == 0 || dev.Read32(a)&pmgrPSActual != pmgrPSActive<<4 {
+			continue
+		}
+		dev.Write32(a, dev.Read32(a)|pmgrDevDisable)
+		dev.Write32(a, dev.Read32(a)|pmgrReset)
+		time.Sleep(10 * time.Microsecond)
+		dev.Write32(a, dev.Read32(a)&^uint32(pmgrReset))
+		dev.Write32(a, dev.Read32(a)&^uint32(pmgrDevDisable))
+		done++
+	}
+	return done
+}
+
+// nameIn zegt of de naam van dit record in de lijst staat. Vergelijken doen we
+// byte voor byte uit de ADT: het veld is NUL-gevuld en er valt niets te
+// alloceren op dit pad.
+func (p pmgrTable) nameIn(r uintptr, names []string) bool {
+	for _, want := range names {
+		if len(want) > 15 {
+			continue
+		}
+		ok := true
+		for i := 0; i < len(want); i++ {
+			if dev.Read8(r+pmgrOffName+uintptr(i)) != want[i] {
+				ok = false
+				break
+			}
+		}
+		if ok && dev.Read8(r+pmgrOffName+uintptr(len(want))) == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// ResetANS reset de opslag-coprocessor. Drie namen, want ze verschillen per
+// generatie: m1n1 probeert "ANS" en "ANS2" ("Some machines call this ANS, some
+// ANS2...", src/nvme.c), maar op de M4 heet het tweede domein **ANS-V** —
+// gemeten 30-08 met PMGRDump("ANS"), dat precies twee regels gaf:
+//
+//	ANS   ps=0x380700538 val=0xf0020ff
+//	ANS-V ps=0x380700000 val=0x1f0
+//
+// Zoeken op de m1n1-namen alleen raakte er dus één, en dat verklaart waarom
+// BOOT_STATUS na die "geslaagde" reset gewoon op OK bleef staan.
+func ResetANS() int { return ResetNamed("ANS", "ANS2", "ANS-V") }
+
+// PMGRDump geeft één regel per device waarvan de naam met prefix begint:
+// naam, het ps-reg-adres en de waarde die er nu in staat. Puur voor de
+// meetbank — "1 power domain(s) reset" zegt niets zolang je niet weet WELK
+// domein dat was, en op de M4 bleef BOOT_STATUS na die ene reset gewoon staan
+// (gemeten 30-08), wat betekent dat we de coprocessor-core niet raakten.
+func PMGRDump(prefix string) []string {
+	p, ok := pmgrOpen()
+	if !ok {
+		return nil
+	}
+	var out []string
+	for i := uint32(0); i < p.nDevs; i++ {
+		r := p.rec(i)
+		name := make([]byte, 0, 16)
+		for j := uintptr(0); j < 16; j++ {
+			c := dev.Read8(r + pmgrOffName + j)
+			if c == 0 {
+				break
+			}
+			name = append(name, c)
+		}
+		if len(name) < len(prefix) || string(name[:len(prefix)]) != prefix {
+			continue
+		}
+		a := p.addr(0, r)
+		v := uint32(0)
+		if a != 0 {
+			v = dev.Read32(a)
+		}
+		out = append(out, fmt.Sprintf("%s ps=%#x val=%#x", name, uint64(a), v))
+	}
+	return out
 }

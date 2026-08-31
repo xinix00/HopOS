@@ -37,10 +37,12 @@ import (
 	"github.com/xinix00/HopOS/metal/board"
 	"github.com/xinix00/HopOS/metal/cpu/memlimit"
 	"github.com/xinix00/HopOS/metal/cpu/smp"
+	"github.com/xinix00/HopOS/metal/dev"
 	"github.com/xinix00/HopOS/metal/driver/fb"
 	"github.com/xinix00/HopOS/metal/driver/nvme"
 	"github.com/xinix00/HopOS/metal/kern/conport"
 	"github.com/xinix00/HopOS/metal/kern/hopfs"
+	"github.com/xinix00/HopOS/metal/kern/netboot"
 	"github.com/xinix00/HopOS/metal/kern/slotmgr"
 	"github.com/xinix00/HopOS/metal/kern/slots"
 	"github.com/xinix00/HopOS/metal/net/hopnet"
@@ -238,6 +240,21 @@ func main() {
 	if netErr != nil {
 		fmt.Printf("net: %v — continuing headless/compute-only (no external network)\n", netErr)
 	}
+	// NETBOOT. Staat er een hopos.netboot= in de config, dan is de kern die nu
+	// draait niet per se de kern die moet draaien: haal hem van het net,
+	// controleer de handtekening, en spring erin. Alles van het net — apps doen
+	// dat allang, en op een board waar wij zelf het bootobject zijn is dit het
+	// verschil tussen "een reis naar de machine" en "een bestand vervangen".
+	//
+	// Hier en niet eerder: het netwerk moet omhoog zijn. En bewust ná de
+	// netErr-tak hierboven, want een node zonder netwerk hoort gewoon door te
+	// booten op wat er staat — netboot is een upgrade-pad, geen voorwaarde.
+	if netErr == nil {
+		if url := bootParam("hopos.netboot"); url != "" {
+			netbootNow(url)
+		}
+	}
+
 	// De interne L2-switch (per-slot netwerk): elke task krijgt een adres op
 	// het interne net en kan met appnet een eigen stack opbrengen.
 	if err := hopswitch.Up(); err != nil {
@@ -272,7 +289,21 @@ func main() {
 	// draait de node door, maar jobs met volumes weigeren dan bij Start.
 	// Een board zonder ECAM-plan (Pi 5: NVMe loopt daar straks via de
 	// brcmstb-RC, metal/driver/brcmpcie) slaat de probe over.
-	if win := board.Current().PCIe(); win.ECAMBase == 0 {
+	// Een board dat zijn eigen opslag kent, levert hem zelf — inclusief het
+	// VENSTER waarin wij mogen schrijven. Dat is geen luxe: op een machine die
+	// we met het OS van de eigenaar delen (Mac mini: macOS op dezelfde SSD) is
+	// "de hele schijf" precies het verkeerde antwoord.
+	if bd, ok := board.Current().(interface {
+		Disk() (*nvme.Controller, uint64, uint64, error)
+	}); ok {
+		if disk, first, count, err := bd.Disk(); err != nil {
+			fmt.Printf("storage: %v — running without volumes\n", err)
+		} else {
+			slots.UseFS(hopfs.NewRange(disk, first, count))
+			fmt.Printf("storage: nvme %q — %d MB of our own, LBA %d..%d — volumes available\n",
+				disk.Model, count*disk.BlockSize>>20, first, first+count-1)
+		}
+	} else if win := board.Current().PCIe(); win.ECAMBase == 0 {
 		fmt.Println("storage: no ECAM window on this board — running without volumes (NVMe pending)")
 	} else if disk, err := nvme.Probe(win, layout.NVMeDMABase, layout.NVMeDMASize); err != nil {
 		fmt.Printf("storage: %v — running without volumes\n", err)
@@ -605,4 +636,71 @@ func (e envSlots) merge(env map[string]string) map[string]string {
 		}
 	}
 	return out
+}
+
+// netbootNow haalt de kern van url, controleert hem en springt erin. Keert
+// terug (en laat deze boot gewoon doorgaan) als er iets niet klopt: een
+// mislukte upgrade mag nooit een werkende node kosten.
+//
+// De handtekening is niet optioneel. Een kern van het net is code met alle
+// rechten op deze machine; zonder sleutel in de config weigert netboot.Fetch
+// en dat is de bedoeling.
+func netbootNow(url string) {
+	cfg := netboot.Config{
+		URL:    url,
+		PubKey: bootParam("hopos.netboot.key"),
+		SigURL: bootParam("hopos.netboot.sig"),
+	}
+	fmt.Printf("netboot: fetching %s\n", url)
+	img, err := netboot.Fetch(cfg)
+	if err != nil {
+		fmt.Printf("netboot: %v — staying on the image that is installed\n", err)
+		return
+	}
+	if len(img) == 0 {
+		return
+	}
+	dst, ok := board.Current().(interface {
+		Chainload(addr, n uint64)
+		ChainScratch() uint64
+	})
+	if !ok {
+		fmt.Printf("netboot: this board cannot chainload — ignoring %s\n", url)
+		return
+	}
+	// Zijn wij dit al? Een node die zijn eigen image aangeboden krijgt, mag er
+	// niet in springen: dat is een bootlus die alleen met een stekker te
+	// doorbreken is. Vergelijken op INHOUD en niet op een vlag in DRAM — DRAM
+	// overleeft een warme herstart, dus een vlag die blijft staan zou netboot
+	// juist permanent uitzetten.
+	if self, ok := board.Current().(interface {
+		SelfImage() (uint64, uint64, bool)
+	}); ok {
+		if base, size, have := self.SelfImage(); have && size > 0 && uint64(len(img)) >= size {
+			same := true
+			var mine [4096]byte
+			for off := uint64(0); off < size && same; off += uint64(len(mine)) {
+				n := uint64(len(mine))
+				if size-off < n {
+					n = size - off
+				}
+				dev.CopyOut(mine[:n], uintptr(base+off))
+				for i := uint64(0); i < n; i++ {
+					if mine[i] != img[off+i] {
+						same = false
+						break
+					}
+				}
+			}
+			if same {
+				fmt.Printf("netboot: %s is the image already running — staying put\n", url)
+				return
+			}
+		}
+	}
+
+	at := dst.ChainScratch()
+	dev.Copy(uintptr(at), img)
+	fmt.Printf("netboot: %d bytes verified, jumping into it at %#x\n", len(img), at)
+	dst.Chainload(at, uint64(len(img)))
 }

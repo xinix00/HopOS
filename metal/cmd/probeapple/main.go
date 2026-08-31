@@ -26,6 +26,7 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"github.com/xinix00/HopOS/metal/driver/smc"
 	"runtime"
 	"strings"
 	"time"
@@ -250,6 +251,53 @@ func probePCIe() {
 		}
 	}
 
+	// Het beeld: wat de firmware achterliet. Geen driver, geen modeset — iBoot
+	// zet het scherm zelf op (hij tekent er zijn appel op) en geeft adres, maat
+	// en stride mee in boot_args. De enige vraag die geen register beantwoordt
+	// is of die buffer ook echt naar buiten gescand wordt, dus tekenen we er
+	// balken in: één blik op de monitor is het antwoord.
+	if d, ok := apple.FB(); ok {
+		// Eerst bewijzen dat schrijven LANDT, en pas daarna het glas aan de
+		// console hangen: fb.Init veegt de buffer, dus een readback erna zegt
+		// niets meer. Deze ene pixel is het verschil tussen "niemand scant
+		// deze buffer" en "onze stores komen er niet eens in".
+		mid := d.Base + uintptr(d.Height/2*d.Stride) + uintptr(d.Width/2*4)
+		dev.Write32(mid, 0x00FFFF00)
+		back := dev.Read32(mid)
+
+		// Verder gaat de probe niet: de console spiegelen naar een buffer die
+		// niemand uitscant is werk zonder kijker, en fb.Init veegt bovendien
+		// firmware-geheugen schoon dat we niet nodig hebben. De pixelproef
+		// hierboven is wat er te weten valt.
+		say("fb: %dx%d stride %d bpp %d at %#x — buffer exists\n",
+			d.Width, d.Height, d.Stride, d.BPP, uint64(d.Base))
+		say("fb: pixel readback %#x (want 0xffff00) — writes land; nothing scans this out (measured 30-08)\n", back)
+	} else {
+		say("fb: the firmware left no framebuffer in boot_args\n")
+	}
+
+	// De thermometer: Apple's SMC, dezelfde RTKit-bus als de opslag. Welke
+	// sleutel de die-temperatuur draagt staat nergens gedocumenteerd en
+	// verschilt per machine, dus dumpen we wat er ís in plaats van te gokken.
+	say("\n-- temperature (Apple SMC) --\n")
+	if base := apple.ADTReg("/arm-io/smc", 0); base == 0 {
+		say("smc: not in the device tree\n")
+	} else if d, err := smc.Open(uintptr(base), apple.StorageBuf); err != nil {
+		say("smc: %v\n", err)
+	} else {
+		sensors := smc.Sensors(d)
+		for _, s := range sensors {
+			say("smc: %s = %.1f C\n", smc.KeyString(s.Key), s.C)
+		}
+		if len(sensors) == 0 {
+			say("smc: no temperature keys found\n")
+		} else if hot, key := smc.Hottest(d); key != 0 {
+			say("smc: hottest is %s at %.1f C — that is what the board would report\n",
+				smc.KeyString(key), hot)
+		}
+	}
+	say("\n")
+
 	// De opslag: ANS, Apple's NVMe-coprocessor. Geen PCIe-device maar een
 	// RTKit-mailbox (ASC) met een SART als adresfilter. Deze eerste meting stelt
 	// één vraag: leeft het blok, en in welke staat liet iBoot het achter? Het
@@ -286,6 +334,14 @@ func probePCIe() {
 					uint64(apple.StorageDMAPA))
 			}
 
+			// Welke power-domeinen heten hier ANS-iets? Dat is de vraag die
+			// "1 power domain(s) reset" openliet: na die ene reset stond
+			// BOOT_STATUS gewoon nog op OK (gemeten 30-08), en dan hebben we
+			// de coprocessor-core dus niet geraakt. m1n1 reset er twee.
+			for _, l := range apple.PMGRDump("ANS") {
+				say("pmgr: %s\n", l)
+			}
+
 			disk := &nvme.Controller{}
 			cfg := nvme.AppleConfig{
 				NVMe:  uintptr(ansNVMe),
@@ -298,6 +354,48 @@ func probePCIe() {
 				},
 			}
 			err := disk.InitApple(cfg, apple.StorageDMAPA, apple.StorageDMASize)
+			if err != nil {
+				// Pas NU de stap die m1n1 stil voor ons deed: hij trof iBoot's
+				// ANS "left powered" aan en resette zijn power-domein
+				// (nvme.c: nvme_ensure_shutdown). Wij doen dat bewust niet
+				// vooraf — een reset op een coprocessor die het prima doet,
+				// maakt hem juist stuk (gemeten 30-08: geen HELLO meer). Dus
+				// eerst proberen, en alleen bij een weigering escaleren.
+				say("nvme: %v — escalating: resetting the coprocessor and retrying\n", err)
+				// EERST netjes in slaap, DAN pas resetten. Dat is m1n1's
+				// volgorde (nvme.c: rtkit_boot → rtkit_sleep → pmgr_reset) en
+				// hij is geen beleefdheid: het domein wegtrekken onder een
+				// coprocessor die nog staat te praten levert een blok op dat
+				// daarna geen HELLO meer stuurt — gemeten 30-08, twee keer.
+				// De handshake is op dit punt al gelukt (rtkit meldt geen
+				// fout), dus deze kant kán hem nog bereiken.
+				if rt := cfg.RTKit; rt != nil {
+					if serr := rt.Sleep(); serr != nil {
+						say("ans: sleep before reset failed: %v (resetting anyway)\n", serr)
+					} else {
+						say("ans: coprocessor asleep — now the reset means something\n")
+					}
+				}
+				if n := apple.ResetANS(); n > 0 {
+					say("ans: %d power domain(s) reset\n", n)
+					// Wat de reset ECHT deed: dezelfde regels als hierboven,
+					// nu erna. Blijft de ps-waarde staan, dan landde onze
+					// schrijfactie niet op het domein dat we dachten — en dat
+					// is precies wat "BOOT_STATUS nog steeds OK" suggereert.
+					for _, l := range apple.PMGRDump("ANS") {
+						say("pmgr: %s (na reset)\n", l)
+					}
+					time.Sleep(100 * time.Millisecond)
+					say("ans: after reset CPU_CONTROL %#x BOOT_STATUS %#x CSTS %#x\n",
+						dev.Read32(a+cpuControl), dev.Read32(uintptr(ansNVMe)+bootStatus),
+						dev.Read32(uintptr(ansNVMe)+0x1c))
+					disk = &nvme.Controller{}
+					cfg.RTKit = &rtkit.Dev{Name: "ans", Base: uintptr(ansBase), Alloc: apple.StorageBuf}
+					err = disk.InitApple(cfg, apple.StorageDMAPA, apple.StorageDMASize)
+				} else {
+					say("ans: no ANS/ANS2 device in the pmgr table to reset\n")
+				}
+			}
 			if disk.Blocks != 0 {
 				say("nvme: %q — %d blokken van %d bytes (%d GB)\n", disk.Model,
 					disk.Blocks, disk.BlockSize, disk.Blocks*disk.BlockSize/1e9)
@@ -432,6 +530,36 @@ func probeFirmware() {
 				base, size, ok := t.RegOf(e.path, e.idx)
 				say("adt: %-26s reg[%d] %#x+%#x (%v)\n", e.path, e.idx, base, size, ok)
 			}
+			// BEELD-INVENTARIS. Voordat iemand aan een display-driver begint
+			// hoort deze lijst er te liggen: welke van Apple's beeld-blokken
+			// bestaan op DIT silicium, en waar. m1n1 kiest zijn display-config
+			// op machinenaam en valt voor onbekende machines terug op de
+			// M1-indeling (/arm-io/dcp, dart-dcp, DISP0_CPU0) — vandaar zijn
+			// "failed to initialize disp0" hier: dat kan simpelweg de verkeerde
+			// naam zijn. Meten kost niets; gokken kost een driver.
+			say("\n-- display inventory (which blocks does this chip have) --\n")
+			for _, path := range []string{
+				"/arm-io/dcp", "/arm-io/dcpext", "/arm-io/dcpext0",
+				"/arm-io/dart-dcp", "/arm-io/dart-dcpext", "/arm-io/dart-dcpext0",
+				"/arm-io/disp0", "/arm-io/dispext0", "/arm-io/dispext4",
+				"/arm-io/dart-disp0", "/arm-io/dart-dispext0",
+				"/arm-io/dptx-phy", "/arm-io/dp2hdmi-gpio", "/arm-io/dpaudio0",
+				"/vram", "/chosen",
+			} {
+				if base, size, ok := t.RegOf(path, 0); ok {
+					say("adt: %-24s reg[0] %#x+%#x\n", path, base, size)
+				} else if _, ok := t.Path(path); ok {
+					say("adt: %-24s bestaat (geen reg)\n", path)
+				}
+			}
+			for _, n := range apple.PMGRDump("DISP") {
+				say("pmgr: %s\n", n)
+			}
+			for _, n := range apple.PMGRDump("DCP") {
+				say("pmgr: %s\n", n)
+			}
+			say("\n")
+
 			asc, nvmmu, nvme, sart := apple.ANSAddrs()
 			say("adt: ANS asc %#x nvmmu %#x nvme %#x sart %#x, pmgr-cpustart %#x\n",
 				asc, nvmmu, nvme, sart, apple.PMGRCPUStart())
@@ -501,6 +629,28 @@ func main() {
 	// het rapport mag niet in dat gat vallen. Komt er na de banner niets
 	// meer, dan is de klok (time.Sleep) het eerste verdachte.
 	fmt.Printf("\nprobeapple: alive on Apple silicon — full report in 3s\n")
+
+	// DE PROXY EERST, en dat is de belangrijkste regel in deze main.
+	//
+	// Hij stond tot 30-08 onderaan, in de hartslag, ná al het meetwerk — en
+	// dat betekende: valt er iets in dat meetwerk om (die dag: onze eigen
+	// fb.Init, die buiten een pagetabel las), dan is er geen weg meer naar
+	// binnen en moet er iemand fysiek naar de machine met een USB-stick. Een
+	// bring-up-probe die alleen te vervangen is door hem te vervangen, is een
+	// slecht instrument. Dus: de deur open vóór we ergens aan zitten, precies
+	// zoals m1n1 zijn proxy als eerste opzet.
+	//
+	// Vijf milliseconden per ronde: ProxyPoll neemt per beurt hooguit één
+	// bufferlengte en keert meteen terug, dus dit is meteen de kloksnelheid
+	// van een overdracht (board/apple/proxy.go).
+	go func() {
+		for {
+			apple.ProxyPoll()
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+	fmt.Printf("proxy: listening on the dockchannel before anything else runs — image/apple/proxy.py\n")
+
 	time.Sleep(3 * time.Second)
 	say("\nprobeapple — Apple silicon bring-up probe (%s)\n\n", runtime.Version())
 
@@ -665,6 +815,8 @@ func main() {
 	start := time.Now()
 	lastWakes, lastTicks := dev.Read64(wakesWord), idle.Ticks()
 	for i := 1; ; i++ {
+		// De proxy pollt in zijn eigen goroutine, vanaf het begin van main —
+		// niet hier. Zie daar waarom.
 		time.Sleep(time.Second)
 		w, t := dev.Read64(wakesWord), idle.Ticks()
 		fmt.Printf("tick %d — uptime %s — idle: %d wakes/s, slept %.1f%%\n", i, time.Since(start).Round(time.Millisecond),

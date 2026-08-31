@@ -18,6 +18,7 @@
 package apple
 
 import (
+	"github.com/xinix00/HopOS/metal/driver/fb"
 	"github.com/xinix00/HopOS/metal/fw/xnuboot"
 )
 
@@ -61,4 +62,33 @@ func MemTotal() uint64 {
 		return 0
 	}
 	return ba.MemSizeActual
+}
+
+// FB geeft de framebuffer die de firmware achterliet (boot_args video): adres,
+// maat, stride en bits per pixel. ok=false als er geen boot_args zijn of als de
+// firmware geen buffer meldt.
+//
+// Alleen doorgeven wat er staat — geen aannames. Een diepte die we niet kennen
+// (alles behalve 32 en 16) melden we als "geen buffer": liever niets tekenen
+// dan ruis op een scherm dat iemand nodig heeft.
+func FB() (fb.Desc, bool) {
+	b, ok := Boot()
+	if !ok || b.FB.Base == 0 || b.FB.W == 0 || b.FB.H == 0 || b.FB.Stride == 0 {
+		return fb.Desc{}, false
+	}
+	// De diepte draagt VLAGGEN in de hoge bits; alleen de onderste byte is het
+	// aantal bits per pixel. Gemeten 30-08 op de M4: 0x10020 — dat is 32 bpp
+	// met bit 16 gezet, en een gelijkheidstest op 32 zag daar "geen
+	// framebuffer" in terwijl hij er gewoon stond.
+	bpp := int(b.FB.Depth & 0xFF)
+	if bpp != 32 && bpp != 16 {
+		return fb.Desc{}, false
+	}
+	return fb.Desc{
+		Base:   uintptr(b.FB.Base),
+		Width:  int(b.FB.W),
+		Height: int(b.FB.H),
+		Stride: int(b.FB.Stride),
+		BPP:    bpp,
+	}, true
 }
