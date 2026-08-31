@@ -43,6 +43,11 @@ func SetupPlan() {
 	// en tot die tijd tikt die van de firmware door.
 	fmt.Printf("watchdog: %s\n", WDTQuiet())
 
+	// Dan de klok. iBoot laat beide clusters op p-state 1 achter (0,9 GHz) en
+	// natief is er niemand meer die dat rechtzet — zie pstate.go. Vroeg in de
+	// boot: alles daarna (image-kopieën, netwerk-bring-up) profiteert meteen.
+	PStateTune()
+
 	// Wie zijn we geworden? Dit is het eerste board-werk van de boot en het
 	// draait op de HOP-core, dus dit is de plek om het vast te leggen — daarna
 	// mag iedereen het vragen.
