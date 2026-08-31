@@ -140,4 +140,25 @@ for tags in "rk3566 linkcpuinit" "rk3566 gui linkcpuinit"; do
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "$tags" -o /dev/null ./cmd/hopos
 done
-echo "OK: host-tests groen, tamago-gate (arm64: virt/rpi4/rpi5/uefi kaal + gui-smaken + embed-mains incl. rk3566 + probeuefi + proberk3566 + rk3566-agent kaal én gui; riscv64: cmd/hopos kaal én embedcfg/embedcagestub + slot-demo + slot-app + switchtest) gebouwd" >&2
+# Apple silicon (Mac mini M4, t8132): de derde boot-route in de boom — geen
+# kaart en geen U-Boot, wij zijn zelf het bootobject van iBoot. board/apple
+# hangt aan cpu/memattr, driver/rtkit, driver/nvme en driver/smc — packages die
+# elders gewijzigd worden — dus deze smaak hoort in de gate. Hij bouwt alleen
+# tegen de tamago-fork met de L0-tabel voor RAM boven 512GB
+# (image/apple/go.work → ../../tamago, branch hopos-highram), en waar die fork
+# niet staat slaat de gate hem over i.p.v. rood te worden.
+APPLE_GATE=""
+if [ -f ../image/apple/go.work ] && [ -d ../../tamago ]; then
+	# tags/target per smaak; VHE omdat Apple's EL2 E2H vast op 1 heeft en het
+	# linkadres omdat dit board zijn venster op 1TiB+4GB heeft (apple.RamBase).
+	for spec in "linkcpuinit highram:./cmd/probeapple" "apple linkcpuinit highram:./cmd/hopos" "apple linkcpuinit highram:./cmd/hopos-embed"; do
+		GOWORK="$PWD/../image/apple/go.work" GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
+			"$TAMAGO" build -tags "${spec%%:*}" -asmflags "all=-D=VHE" \
+			-ldflags "-T 0x10100010000 -R 0x1000" -o /dev/null "${spec#*:}"
+	done
+	APPLE_GATE=" + apple probe/agent/embed"
+else
+	echo "gate: apple-smaak overgeslagen (tamago-fork ../../tamago ontbreekt)" >&2
+fi
+
+echo "OK: host-tests groen, tamago-gate (arm64: virt/rpi4/rpi5/uefi kaal + gui-smaken + embed-mains incl. rk3566 + probeuefi + proberk3566 + rk3566-agent kaal én gui${APPLE_GATE}; riscv64: cmd/hopos kaal én embedcfg/embedcagestub + slot-demo + slot-app + switchtest) gebouwd" >&2
