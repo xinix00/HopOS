@@ -57,22 +57,41 @@ func Open(base uintptr, alloc func(uint64) uintptr) (*Dev, error) {
 	if err := d.rt.Boot(); err != nil {
 		return nil, err
 	}
-	if err := d.rt.StartEP(endpoint); err != nil {
+	// Vanaf hier LOOPT de coprocessor, en elke uitgang moet hem weer in slaap
+	// praten. Dat is geen netheid maar noodzaak, en het is dezelfde les die de
+	// ANS ons al leerde: een half opgestarte RTKit-coprocessor die niemand meer
+	// pollt loopt vol — zijn syslog wil elke regel bevestigd zien, en zonder
+	// bevestiging houdt hij op met werken (zie driver/rtkit, epSyslog).
+	//
+	// Bij de ANS kostte dat een dode opslag tot de volgende power-reset. Hier is
+	// het erger: dit IS de System Management Controller. Hem laten vastlopen is
+	// niet "geen thermometer", het is een machine die na ongeveer twee minuten
+	// ophoudt — GEMETEN 31-08: node up, uptime 1m48s, en dan stil.
+	//
+	// Die ene meting is niet zuiver gebleken (de firmware-watchdog tikte toen
+	// nog door en resette deze node óók zonder SMC, rond 1:43). De REGEL blijft
+	// staan, want die komt van de ANS en is daar wél zuiver: een RTKit-
+	// coprocessor die je half achterlaat, laat je niet half achter.
+	fail := func(err error) (*Dev, error) {
+		_ = d.rt.Sleep() // beste inspanning; de fout hieronder is het verhaal
 		return nil, err
+	}
+	if err := d.rt.StartEP(endpoint); err != nil {
+		return fail(err)
 	}
 	// INITIALIZE, en dan wachten op zijn eerste bericht: dát bericht ís het
 	// adres van het gedeelde geheugen. Zonder die stap is elke sleutel die
 	// meer dan vier bytes teruggeeft onleesbaar.
 	if err := d.send(cmdInitialize, 0, 0); err != nil {
-		return nil, err
+		return fail(err)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for d.shmem == 0 {
 		if err := d.rt.Poll(); err != nil {
-			return nil, err
+			return fail(err)
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("smc: no shared-memory address within 2s")
+			return fail(fmt.Errorf("smc: no shared-memory address within 2s"))
 		}
 		time.Sleep(time.Millisecond)
 	}
