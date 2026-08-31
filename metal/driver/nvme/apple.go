@@ -89,6 +89,19 @@ func (c *Controller) serviceCoprocessor() {
 // meetbank: een opdracht die niet terugkomt is hier of een slapende
 // coprocessor, of een NVMMU-slot dat blijft hangen.
 func (c *Controller) AppleDiag() string {
+	// Een diagnose mag nooit zelf omvallen. Faalt de bring-up al vóór de
+	// queues (bijvoorbeeld op de RTKit-handshake), dan staan Base, nvmmu en de
+	// admin-queue nog op nul, en dan leest dit register-voor-register op adres
+	// 0 — een data-abort in de functie die had moeten vertellen wát er misging
+	// (gemeten 30-08: ESR 0x96000007, FAR 0x0, precies op het escalatiepad).
+	if c.Base == 0 {
+		return "controller never reached its registers (bring-up failed before that)"
+	}
+	if c.admin.cq == 0 || c.nvmmu == 0 {
+		return fmt.Sprintf("boot=%#x csts=%#x cc=%#x — no queues yet, rtkit=%v",
+			dev.Read32(c.Base+regBootStatus), dev.Read32(c.Base+regCSTS),
+			dev.Read32(c.Base+regCC), c.rtErr)
+	}
 	adm := c.admin.cq + uintptr(c.admin.head)*cqeSize
 	return fmt.Sprintf("boot=%#x csts=%#x cc=%#x tcb_stat=%#x adm_cqe[%d]=%08x/%08x/%08x/%08x rtkit=%v",
 		dev.Read32(c.Base+regBootStatus), dev.Read32(c.Base+regCSTS), dev.Read32(c.Base+regCC),

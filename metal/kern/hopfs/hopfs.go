@@ -59,8 +59,10 @@ type node struct {
 
 // FS is één bestandslaag op één NVMe-namespace.
 type FS struct {
-	mu    sync.Mutex
-	disk  *nvme.Controller
+	mu   sync.Mutex
+	disk *nvme.Controller
+	// base is de eerste LBA van ons venster (zie NewRange); 0 = de hele schijf.
+	base  uint64
 	root  *node
 	free  []uint32 // teruggegeven blokken
 	next  uint32   // bump-allocator
@@ -71,10 +73,31 @@ type FS struct {
 
 // New maakt een lege bestandslaag op de (als leeg beschouwde) schijf.
 func New(disk *nvme.Controller) *FS {
+	return NewRange(disk, 0, disk.Blocks)
+}
+
+// NewRange legt hopfs op een VENSTER van de schijf: vanaf firstLBA, blocks
+// LBA's lang. Blok 0 van dit bestandssysteem is dan firstLBA op het ijzer, en
+// verder weet hopfs van niets — hij kan per constructie niet buiten zijn venster
+// schrijven.
+//
+// Waarom dat moet bestaan: op elk bord tot nu toe was de NVMe van ons alleen, en
+// dan is "de hele schijf" de juiste aanname. Op een Mac mini niet: daar staat
+// macOS op dezelfde SSD, plus een Recovery-partitie, en is er alleen een gat
+// dat de eigenaar zelf heeft vrijgemaakt (30-08: 414GB tussen de APFS-container
+// en RecoveryOS). Zonder venster zou de eerste download van een app dwars door
+// het bestandssysteem van de gebruiker heen schrijven — en dat is geen bug die
+// je met een foutmelding oplost.
+func NewRange(disk *nvme.Controller, firstLBA, blocks uint64) *FS {
+	perBlock := BlockSize / disk.BlockSize
+	if perBlock == 0 {
+		perBlock = 1 // schijf met blokken > 4KB: één LBA per hopfs-blok
+	}
 	return &FS{
 		disk: disk,
+		base: firstLBA,
 		root: &node{dir: true, children: map[string]*node{}},
-		max:  uint32(disk.Blocks * disk.BlockSize / BlockSize),
+		max:  uint32(blocks / perBlock),
 	}
 }
 
@@ -137,7 +160,7 @@ func (f *FS) alloc() (uint32, error) {
 }
 
 func (f *FS) lba(block uint32) uint64 {
-	return uint64(block) * (BlockSize / f.disk.BlockSize)
+	return f.base + uint64(block)*(BlockSize/f.disk.BlockSize)
 }
 
 // Stat geeft (size, isDir).
