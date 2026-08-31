@@ -32,6 +32,17 @@ func SetupPlan() {
 	if dev.MPIDR()&0xFFFFFF != BootMPIDR()&0xFFFFFF {
 		return
 	}
+	// ALLEREERST de watchdogs van de firmware stilzetten. iBoot laat er meer
+	// dan één gewapend achter, en niemand aait ze — natief reset de node dan
+	// midden in een gezonde boot (31-08: exact 1:43, elke keer). Onder m1n1 is
+	// dat onzichtbaar omdat hij ze bij zijn opstart uitzet, dus dit is precies
+	// het soort ding dat je pas ziet als de loader weg is.
+	//
+	// Hier en niet later: het beleid in cmd/hopos/watchdog.go wapent er straks
+	// één van ons met een aai-lus, maar dat gebeurt pas als de agent draait —
+	// en tot die tijd tikt die van de firmware door.
+	fmt.Printf("watchdog: %s\n", WDTQuiet())
+
 	// Wie zijn we geworden? Dit is het eerste board-werk van de boot en het
 	// draait op de HOP-core, dus dit is de plek om het vast te leggen — daarna
 	// mag iedereen het vragen.

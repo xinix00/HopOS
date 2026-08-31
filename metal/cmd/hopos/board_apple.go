@@ -70,6 +70,20 @@ func init() {
 		return ""
 	}
 
-	// Geen node-watchdog nog: m1n1 zet de Apple-WDT (0x3882b0000) uit en de
-	// reset-scope is niet gemeten. Beleid in watchdog.go; nodeWDT blijft nil.
+	// De node-watchdog. iBoot laat hem GEWAPEND achter en m1n1 zette hem stil
+	// bij zijn eigen opstart (src/main.c, wdt_disable) — dus zolang de loader
+	// ertussen zat merkten we niets. Zodra HopOS zelf het bootobject werd aaide
+	// niemand hem nog en resette hij de node na ~2 minuten: volledig geboot,
+	// netwerk op, app draaiend, en dan weg. Onder m1n1 niet te reproduceren,
+	// precies omdat m1n1 hem uitzet (GEMETEN 31-08).
+	//
+	// Dus nemen we hem over in plaats van hem uit te zetten: HOP-leven =
+	// node-leven, en dit board heeft nu hetzelfde vangnet als de Pi's. Het
+	// beleid (boot-guard, dan aaien op bewezen leven) staat in watchdog.go;
+	// hopos.wd=off blijft de uitweg voor een postmortem.
+	nodeWDT = &wdHardware{
+		Arm:      apple.WDTArm,
+		Pet:      apple.WDTPet,
+		PetEvery: apple.WDTPetEvery(),
+	}
 }
