@@ -75,8 +75,13 @@ func Start(cpu int, entry, ctx uint64) bool {
 	if adopted {
 		return false
 	}
+	cpus := CPUs()
+	if cpu >= len(cpus) {
+		return false
+	}
 	adopted = true
 	released[cpu] = true
+	parkArm()
 	dev.Write64(HopParkArg, ctx)
 	dev.Write64(HopParkPC, entry)
 	// De regel naar geheugen: wij schrijven met de MMU aan (en dit stuk valt
@@ -85,6 +90,11 @@ func Start(cpu int, entry, ctx uint64) bool {
 	// eeuwig.
 	dev.CleanInv(HopParkArg, 8)
 	dev.CleanInv(HopParkPC, 8)
+	dev.MB()
+	// En als laatste het adreswoord: dát is het startsein, en het zegt de
+	// wachtende core dat deze entry van hém is (park.go).
+	dev.Write64(HopParkFor, parkAddr(cpus[cpu]))
+	dev.CleanInv(HopParkFor, 8)
 	dev.SEV()
 	return true
 }
@@ -105,10 +115,16 @@ func startOwn(cpu int, entry, ctx uint64) bool {
 	if cpu < 0 || cpu >= len(cpus) || entry == 0 {
 		return false
 	}
-	// Loopt er nog een overdracht, dan is de brievenbus bezet. Wachten is niet
-	// aan ons: de aanroeper mag het later opnieuw proberen.
-	dev.CleanInv(HopParkFor, 8) // de core nulde hem met de MMU uit: uit ONZE cache
-	if dev.Read64(HopParkFor) != 0 {
+	parkArm()
+	// Loopt er nog een overdracht, dan is de brievenbus bezet — en dán wachten
+	// we, want de vorige core bevestigt pas nadat PMGR hem aanzette en de reset
+	// losliet. Meteen opgeven (wat hier stond) was precies de fout: een app die
+	// twee cores vraagt krijgt zijn Start-oproepen vlak achter elkaar, de tweede
+	// zag de bus nog bezet, en de app kreeg te horen dat hij twee harten had
+	// terwijl er één kwam opdagen — hij viel om in de eerste goroutine die op
+	// dat tweede hart hoorde te landen (GEMETEN 31-08: 1024 shares = één core =
+	// stabiel, 2048 = twee cores = crashlus).
+	if !parkWait() {
 		return false
 	}
 	c := cpus[cpu]
@@ -117,7 +133,7 @@ func startOwn(cpu int, entry, ctx uint64) bool {
 	dev.CleanInv(HopParkArg, 8)
 	dev.CleanInv(HopParkPC, 8)
 	dev.MB()
-	dev.Write64(HopParkFor, uint64(c.Cluster)<<8|uint64(c.Core))
+	dev.Write64(HopParkFor, parkAddr(c))
 	dev.CleanInv(HopParkFor, 8)
 	dev.SEV()
 

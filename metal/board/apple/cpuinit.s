@@ -34,6 +34,7 @@
 #define HOP_ALIVE       0x1010000E028	// = apple.HopAlive
 #define HOP_PARKPC      0x1010000E030	// = apple.HopParkPC
 #define HOP_PARKARG     0x1010000E038	// = apple.HopParkArg
+#define HOP_PARKFOR     0x1010000E040	// = apple.HopParkFor
 #define EL2_VECTORS     0x101100F0000	// = apple.EL2Vectors = apple.RevokeVec (pariteit: SetupPlan)
 #define DOCK_FALLBACK   0x388128000	// = apple.DockChannelBase
 
@@ -119,16 +120,32 @@ waitalive:
 
 park:
 	// Geparkeerd tot HOP ons adopteert. Hij schrijft eerst het argument, dan de
-	// entry, veegt de regel naar geheugen en stuurt een event. Wij komen daar
-	// aan zoals élke door m1n1 vrijgegeven core: EL2, x0 = het argument.
+	// entry, en als laatste vóór wie het bedoeld is. Wij komen daar aan zoals
+	// élke door m1n1 vrijgegeven core: EL2, x0 = het argument.
+	//
+	// Het adreswoord is niet optioneel. Wie hier alleen op de entry wacht
+	// vertrekt met het werk van de éérste core die HOP daarna start, wie die
+	// ook is — en dan draaien er twee cores op dezelfde app-entry. Zelfde
+	// protocol als stubReset in bootstub.s, inclusief het ontvangstbewijs.
+	MRS	MPIDR_EL1, R3
+	AND	$0xFFFF, R3, R3		// aff1:aff0 — ons adres in de brievenbus
+	MOVD	$HOP_PARKFOR, R4
 	MOVD	$HOP_PARKPC, R1
 parkloop:
 	WFE
-	MOVD	(R1), R5
-	CBZ	R5, parkloop
+	MOVD	(R4), R5
+	CMP	R3, R5
+	BNE	parkloop
+	MOVD	(R1), R6
+	CBZ	R6, parkloop
 	MOVD	$HOP_PARKARG, R2
 	MOVD	(R2), R0
-	JMP	(R5)
+	// De entry staat veilig in R6 vóór we bevestigen: zodra het bewijs er ligt
+	// mag HOP de bus opnieuw vullen voor de volgende core.
+	MOVD	$-1, R5
+	MOVD	R5, (R4)
+	WORD	$0xd5033f9f		// dsb sy
+	JMP	(R6)
 
 nohop:
 	// Schone lei voor de vertaling. De boot-core krijgt die gratis — m1n1 doet

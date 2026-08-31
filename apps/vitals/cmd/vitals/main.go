@@ -72,6 +72,18 @@ func main() {
 		return dev.Read64(a)
 	}
 
+	// VITALS_NOCTRL=1: de control-page NIET lezen. Nodig op een board waar die
+	// lees faultt — op de Mac mini M4 sloeg `dev.Pull`+`Read64` op de
+	// control-page de app om bij het opstarten (31-08, exit 2 in idle.go),
+	// waardoor ÉLKE andere test onbereikbaar werd. De idle-cijfers vallen dan
+	// weg (die komen nergens anders vandaan), maar cpu/membw/memlat/burn/gc/
+	// timer/rx/tx zijn dan wél te meten. Een dokter die niet binnenkomt omdat
+	// één instrument stuk is, is een slechte dokter.
+	if app.Env("VITALS_NOCTRL") == "1" {
+		ctrlRead = nil
+		app.Logf("vitals: control page disabled (VITALS_NOCTRL=1) — no idle figures")
+	}
+
 	srv := vitals.NewServer(vitals.Config{
 		Version: version,
 		Arch:    runtime.GOARCH,

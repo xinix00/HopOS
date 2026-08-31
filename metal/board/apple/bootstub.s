@@ -85,7 +85,10 @@ resetwait:
 
 resetgo:
 	MOVD	PARK_ARG(R11), R0
-	MOVD	ZR, PARK_FOR(R11)	// ontvangstbewijs: HOP mag de volgende roepen
+	// Ontvangstbewijs: HOP mag de volgende roepen. De waarde is -1 en niet nul,
+	// want nul is een gewoon adres (E-cluster core 0, aff 0x0000) — zie park.go.
+	MOVD	$-1, R14
+	MOVD	R14, PARK_FOR(R11)
 	WORD	$0xd5033f9f		// dsb sy
 	JMP	(R15)
 
