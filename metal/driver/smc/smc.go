@@ -63,15 +63,12 @@ func Open(base uintptr, alloc func(uint64) uintptr) (*Dev, error) {
 	// pollt loopt vol — zijn syslog wil elke regel bevestigd zien, en zonder
 	// bevestiging houdt hij op met werken (zie driver/rtkit, epSyslog).
 	//
-	// Bij de ANS kostte dat een dode opslag tot de volgende power-reset. Hier is
-	// het erger: dit IS de System Management Controller. Hem laten vastlopen is
-	// niet "geen thermometer", het is een machine die na ongeveer twee minuten
-	// ophoudt — GEMETEN 31-08: node up, uptime 1m48s, en dan stil.
-	//
-	// Die ene meting is niet zuiver gebleken (de firmware-watchdog tikte toen
-	// nog door en resette deze node óók zonder SMC, rond 1:43). De REGEL blijft
-	// staan, want die komt van de ANS en is daar wél zuiver: een RTKit-
-	// coprocessor die je half achterlaat, laat je niet half achter.
+	// Bij de ANS is dat gemeten en kostte het de opslag tot de volgende
+	// power-reset. Wat het bij DIT blok kost weten we niet, en dat is precies
+	// de reden om het niet uit te proberen: dit is de System Management
+	// Controller. (We dachten 31-08 dat we het wisten — een node die na ~2
+	// minuten ophield — maar dat was de watchdog van de firmware, die toen élke
+	// boot omlegde rond 1:43, met of zonder SMC.)
 	fail := func(err error) (*Dev, error) {
 		_ = d.rt.Sleep() // beste inspanning; de fout hieronder is het verhaal
 		return nil, err

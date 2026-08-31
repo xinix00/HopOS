@@ -243,28 +243,23 @@ var (
 
 func (machine) TempMilliC() int {
 	smcOnce.Do(func() {
-		// UIT, tenzij hopos.smc=1. Niet omdat de driver fout is, maar omdat
-		// hem AANRAKEN op deze machine de node omlegt en we nog niet weten
-		// waarom (GEMETEN 31-08):
+		// UIT, tenzij hopos.smc=1 — en NIET omdat dit blok gevaarlijk is.
 		//
-		//   - proberen en dan weglopen: de coprocessor loopt vol (niemand
-		//     pollt zijn syslog nog) en de machine staat na ~1m48s stil;
-		//   - proberen en dan netjes in slaap praten: `rt.Sleep()` zet zijn
-		//     CPU stil, en dat is bij dít blok geen "slapen" maar de
-		//     energiehuishouding uitschakelen — de machine herstart rond 2m20s.
+		// Dat dachten we 31-08 wel: twee pogingen eindigden met een node die na
+		// ~2 minuten ophield (1m48s stil, of een herstart rond 2m20s), en dat
+		// leek een SMC die je niet half moet achterlaten. Het was de watchdog van
+		// de firmware, die in diezelfde periode élke boot omlegde rond 1:43, met
+		// of zonder SMC (board/apple/wdt.go). Met de watchdog stil haalde de
+		// agent MÉT hopos.smc=1 onder m1n1 gewoon 220s: dit blok zet de machine
+		// niet vast.
 		//
-		// NUANCE die pas ná de watchdog-vondst zichtbaar werd: 1m48s en 2m20s
-		// liggen verdacht dicht bij de 1:43 waarop deze node destijds ook
-		// ZONDER SMC resette — de watchdog van de firmware tikte toen nog door
-		// (board/apple/wdt.go). De attributie is dus niet hard. Nu die stil
-		// staat is dit experiment goedkoop over te doen, en dát is de manier
-		// om het uit te zoeken; niet door de code nog eens te lezen.
-		//
-		// Beide uitkomsten zijn erger dan geen thermometer. Tot we het gesprek
-		// wél afkrijgen (het `INITIALIZE`-antwoord met het shmem-adres komt
-		// nooit) laten we het blok exact zoals iBoot het achterliet. Zet
-		// hopos.smc=1 in de config om ermee te experimenteren — bij voorkeur
-		// onder m1n1, waar een mislukking geen 1TR-bezoek kost.
+		// Wat wel waar blijft: het gesprek komt niet af. Het INITIALIZE-antwoord
+		// met het shmem-adres komt nooit, dus er is ook geen temperatuur te
+		// lezen. Default uit is daarom geen veiligheidsmaatregel maar
+		// bring-up-hygiëne: één wijziging per installatie, zodat een natieve boot
+		// die stukgaat maar één verdachte heeft. Experimenteren doe je met
+		// hopos.smc=1, bij voorkeur onder m1n1 — daar kost een mislukking geen
+		// reis naar 1TR.
 		if apple.BootParam("hopos.smc") != "1" {
 			fmt.Printf("smc: not started (set hopos.smc=1 to try) — no die temperature on this node\n")
 			return
