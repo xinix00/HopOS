@@ -886,6 +886,7 @@ func TestARPFirstContact(t *testing.T) {
 
 	slotIP := layout.SlotIP4(1)
 	syn := mkFrame(protoTCP, hostMAC, layout.SlotMAC(1), slotIP, lanIP, 5555, 8000, nil)
+	setTCPFlags(syn, tcpFlagSYN)
 	mu.Lock()
 	claimed := natOutbound(1, append([]byte(nil), syn...))
 	mu.Unlock()
@@ -945,6 +946,57 @@ func TestARPFirstContact(t *testing.T) {
 	}
 	if !bytes.Equal(nic.sent[3][0:6], lanMAC0[:]) {
 		t.Fatal("retransmit niet naar het geleerde MAC")
+	}
+}
+
+// Een verse maar verweesde neighbor-entry mag een dial niet tot neighTTL
+// (120s) stilhouden. De eerste SYN is al de unicast-probe; ziet NAT dezelfde
+// kale SYN nogmaals op dezelfde flow, dan heeft TCP zelf na zijn RTO de retry
+// geleverd en voegen wij alleen broadcast-ARP toe. Geen tweede timer of
+// volledige Linux-NUD-machine nodig.
+func TestKnownNeighborSynRetryProbesARP(t *testing.T) {
+	resetNAT()
+	nic := setUplink(t)
+	mu.Lock()
+	learnLocked(lanIP, lanMAC0[:], time.Now())
+	mu.Unlock()
+
+	slotIP := layout.SlotIP4(1)
+	syn := mkFrame(protoTCP, hostMAC, layout.SlotMAC(1), slotIP, lanIP, 5555, 631, nil)
+	setTCPFlags(syn, tcpFlagSYN)
+
+	// Eerste poging: de verse cache-entry gebruiken, nog geen extra werk.
+	mu.Lock()
+	natOutbound(1, append([]byte(nil), syn...))
+	mu.Unlock()
+	if len(nic.sent) != 1 || !bytes.Equal(nic.sent[0][0:6], lanMAC0[:]) {
+		t.Fatalf("eerste SYN hoort alleen rechtstreeks te gaan (frames: %d)", len(nic.sent))
+	}
+
+	// Dezelfde SYN/5-tupel opnieuw: ARP parallel aan de gewone TCP-retry.
+	mu.Lock()
+	natOutbound(1, append([]byte(nil), syn...))
+	mu.Unlock()
+	if len(nic.sent) != 3 {
+		t.Fatalf("retry hoort ARP + SYN te sturen, kreeg %d extra frame(s)", len(nic.sent)-1)
+	}
+	arp := nic.sent[1]
+	if arp[12] != 0x08 || arp[13] != 0x06 ||
+		!bytes.Equal(arp[0:6], []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}) ||
+		binary.BigEndian.Uint32(arp[38:]) != lanIP {
+		t.Fatal("retry stuurde geen broadcast-ARP voor de neighbor")
+	}
+	if !bytes.Equal(nic.sent[2][0:6], lanMAC0[:]) {
+		t.Fatal("TCP-retry zelf hoort de nog bekende next-hop te blijven proberen")
+	}
+
+	// Nog een onmiddellijke retry: de bestaande ARP-rate-limit voorkomt een
+	// storm; TCP zelf blijft wel retransmitten.
+	mu.Lock()
+	natOutbound(1, append([]byte(nil), syn...))
+	mu.Unlock()
+	if len(nic.sent) != 4 || nic.sent[3][12] != 0x08 || nic.sent[3][13] != 0x00 {
+		t.Fatalf("ARP-rate-limit liet onverwachte frames door: %d", len(nic.sent))
 	}
 }
 

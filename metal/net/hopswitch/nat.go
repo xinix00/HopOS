@@ -727,9 +727,22 @@ func natOutbound(src int, f []byte) bool {
 		// opnieuw, tot ARP of router er één doorlaat.
 		nextHop = gwMAC
 	}
+	// Bewaar alleen of deze 5-tupel al een flow had. Een tweede kale TCP-SYN
+	// op dezelfde nog levende flow is de retransmit van de TCP-stack: die
+	// heeft de eerste SYN al als gratis unicast-probe verstuurd en nog geen
+	// verbinding kunnen opbouwen. Vraag dan óók broadcast-ARP, zonder een
+	// eigen NUD-state-machine of timer toe te voegen. De TCP-stack plant die
+	// retry zelf; arpForLocked begrenst hem bovendien op één request/s. De SYN
+	// blijft intussen naar de bekende MAC gaan — een verloren serverantwoord
+	// is immers niet automatisch bewijs dat de neighbor fout is.
+	previous := flowsFwd[fkey{proto, slotIP, dstIP, sport, dport}]
 	fl := flowForPacket(proto, src, slotIP, sport, dstIP, dport, l4, now)
 	if fl == nil {
 		return true // pool vol: drop
+	}
+	if known && fl == previous && proto == protoTCP &&
+		l4[13]&tcpFlagSYN != 0 && l4[13]&tcpFlagACK == 0 {
+		arpForLocked(dstIP, now)
 	}
 	reap := noteTCPFlags(fl, l4, false)
 	snatSrcLocked(ip, l4, proto, slotIP, sport, fl.nodePort)
