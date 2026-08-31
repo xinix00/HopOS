@@ -85,11 +85,28 @@ func Read(p uintptr) (Args, bool) {
 	// De device tree staat er als VIRTUEEL adres in; het fysieke volgt uit het
 	// verschil dat de firmware zelf meegeeft. Wie dat vergeet leest de boom op
 	// een adres dat alleen voor de firmware bestond.
-	dt := read64(p + offDevTree)
-	b.DevTree = dt
+	b.DevTree = read64(p + offDevTree)
 	b.ADTSize = dev.Read32(p + offDevTreeSize)
-	if dt >= b.VirtBase {
-		b.ADT = dt - b.VirtBase + b.PhysBase
+	//
+	// Rekenen doen we MODULO 2^64 en zonder volgorde-aanname. Hier stond
+	// `if dt >= b.VirtBase`, en dat leek redelijk: een virtueel adres ligt
+	// boven zijn basis. Maar iBoot geeft virt_base niet altijd in dezelfde
+	// vorm — gemeten 30-08 op de M4, twee boots van hetzelfde image:
+	//
+	//	virt_base 0x5374000          devtree 0x6388000   → ADT 0x10002388000
+	//	virt_base 0xffffffffff374000 devtree 0x1614000   → guard faalt, ADT 0
+	//
+	// Dezelfde lage bits, de tweede keer mét de hoge kernelbits erin. Het
+	// verschil is in beide gevallen goed zodra je het gewoon laat wrappen;
+	// alleen de vergelijking was fout. Dat kostte een boot waarin álles
+	// wegviel wat aan de boom hangt (PCIe, dus ook netwerk en NVMe) — het
+	// "1 van de 4 chain-boots"-raadsel uit de TODO.
+	//
+	// De controle die ervoor in de plaats komt zegt wél iets: het resultaat
+	// moet in het DRAM liggen dat de firmware zelf beschrijft.
+	dt := read64(p + offDevTree)
+	if adt := dt - b.VirtBase + b.PhysBase; adt >= b.PhysBase && adt-b.PhysBase < b.MemSize {
+		b.ADT = adt
 	}
 
 	// Achter het cmdline-veld staan de vlaggen en de échte RAM-grootte; de

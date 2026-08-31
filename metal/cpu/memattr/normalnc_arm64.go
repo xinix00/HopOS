@@ -59,6 +59,22 @@ func NormalNC(va, size uintptr) error {
 		return fmt.Errorf("memattr: venster %#x..%#x kruist een GB-grens", va, va+size)
 	}
 
+	// AFRONDING MAG NIET BUITEN HET VENSTER VALLEN. De MMU kan hier niet
+	// fijner dan 2MB, dus een venster dat niet op die grens ligt, zou de buren
+	// meenemen — en die zijn niet altijd van ons.
+	//
+	// Dat is geen theorie gebleven. De framebuffer die iBoot achterlaat op de
+	// Mac mini begint op 0x105e5304000: ruim een megabyte ná een 2MB-grens.
+	// Hem hier doorlaten betekende ruim een megabyte FIRMWARE-geheugen van
+	// Device naar Normal-NC zetten terwijl die firmware het gebruikte, en de
+	// machine herstartte daarna om de paar minuten — zonder paniek, zonder
+	// spoor (gemeten 30-08). Een attribuutwissel op geheugen van iemand anders
+	// is geen optimalisatie maar een bug; liever een tragere buffer.
+	if lo != va || hi != va+size {
+		return fmt.Errorf("memattr: venster %#x+%#x ligt niet op 2MB-grenzen (%#x..%#x) — de buren zijn niet van ons",
+			va, size, lo, hi)
+	}
+
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -90,10 +106,11 @@ func NormalNC(va, size uintptr) error {
 // 2MB-blokken die exact dezelfde attributen dragen als het blok dat we
 // vervangen, zodat het splitsen zélf niets verandert.
 func l2ForGB(gb uintptr) (*[512]uint64, error) {
-	ramStart, _ := runtime.MemRegion()
-	l1 := (*[512]uint64)(unsafe.Pointer(uintptr(ramStart) + l1TableOffset))
-
-	cur := l1[gb]
+	l1, err := l1For(gb)
+	if err != nil {
+		return nil, err
+	}
+	cur := l1[gb&0x1FF]
 	switch cur & 0x3 {
 	case descTable:
 		return (*[512]uint64)(unsafe.Pointer(uintptr(cur & addrMask))), nil
@@ -106,10 +123,40 @@ func l2ForGB(gb uintptr) (*[512]uint64, error) {
 		}
 		// De walker leest deze tabel cacheable en wij schreven hem cacheable
 		// (Go-heap), dus een DSB volstaat — dat doet flushTLB.
-		l1[gb] = uint64(pa) | descTable
+		l1[gb&0x1FF] = uint64(pa) | descTable
 		return tbl, nil
 	}
 	return nil, fmt.Errorf("memattr: GB %d is niet gemapt (%#x)", gb, cur)
+}
+
+// l1For geeft de L1-tabel die dit GB beschrijft — en dat is niet altijd DE
+// L1-tabel.
+//
+// tamago's vlakke map heeft er precies één, op ramStart+0x4000, en die dekt
+// 512GB: `l1[gb]` mag dan met gb tot 511. Op silicium met RAM boven die grens
+// (Apple: DRAM op 1TiB) bouwt de fork een L0 erboven, en dan is gb tot 1023 of
+// hoger. Hier stond geen bereikcontrole, en dat is niet theoretisch gebleven:
+// een framebuffer op 0x105e5304000 geeft gb = 1047, las 535 entries voorbij de
+// tabel en nam de node mee (gemeten 30-08 op de M4 — de crash zat in fb.Init,
+// dus in de agent net zo goed als in de probe).
+//
+// De weg omhoog is de TTBR0-wortel zelf: staat T0SZ op 16, dan is dat een
+// L0-tabel en wijst entry gb>>9 naar de L1 die we zoeken.
+func l1For(gb uintptr) (*[512]uint64, error) {
+	if t0sz := readTCR() & 0x3F; t0sz > 24 {
+		// Vlakke 39-bit-map: één L1, en alles daarbuiten bestaat niet.
+		if gb > 511 {
+			return nil, fmt.Errorf("memattr: GB %d ligt buiten de vlakke 512GB-map", gb)
+		}
+		ramStart, _ := runtime.MemRegion()
+		return (*[512]uint64)(unsafe.Pointer(uintptr(ramStart) + l1TableOffset)), nil
+	}
+	l0 := (*[512]uint64)(unsafe.Pointer(readTTBR0() & addrMask))
+	e := l0[(gb>>9)&0x1FF]
+	if e&0x3 != descTable {
+		return nil, fmt.Errorf("memattr: L0-entry %d is geen tabel (%#x)", (gb>>9)&0x1FF, e)
+	}
+	return (*[512]uint64)(unsafe.Pointer(uintptr(e & addrMask))), nil
 }
 
 // newTable levert een 4KB-gealigneerde L2-tabel uit de Go-heap. Identity-map,
@@ -123,6 +170,11 @@ func newTable() (uintptr, *[512]uint64) {
 
 func readMAIR() uint64
 func writeMAIR(v uint64)
+
+// readTCR/readTTBR0: de vorm van de eigen map. Met VHE (E2H=1) lezen deze op
+// EL2 vanzelf de _EL2-registers — dezelfde map, andere naam.
+func readTCR() uint64
+func readTTBR0() uintptr
 
 // flushTLB publiceert de tabelwijzigingen en gooit de oude vertalingen weg.
 func flushTLB()

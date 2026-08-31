@@ -27,3 +27,15 @@ TEXT ·flushTLB(SB),NOSPLIT,$0
 	WORD	$0xd5033b9f	// dsb ish
 	WORD	$0xd5033fdf	// isb
 	RET
+
+// func readTCR() uint64 — TCR_EL1 (met VHE op EL2: TCR_EL2).
+TEXT ·readTCR(SB),NOSPLIT,$0-8
+	MRS	TCR_EL1, R0
+	MOVD	R0, ret+0(FP)
+	RET
+
+// func readTTBR0() uintptr — de wortel van de eigen vertaling.
+TEXT ·readTTBR0(SB),NOSPLIT,$0-8
+	MRS	TTBR0_EL1, R0
+	MOVD	R0, ret+0(FP)
+	RET

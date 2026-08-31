@@ -47,7 +47,20 @@ func writeAppleBoot(p *payload, out string) {
 	// De grootte die de stub kopieert, op 64 afgerond: zijn kopieerlus doet 16
 	// bytes per slag en heeft dan geen staartgeval nodig.
 	size := (uint64(len(p.img)) + 63) &^ 63
-	img := make([]byte, size)
+
+	// Het BESTAND daarentegen loopt door tot een veelvoud van 16KB — de
+	// paginamaat van dit silicium. iBoot mapt een raw bootobject zelf (kmutil
+	// --raw --lowest-virtual-address 0), en een lengte die geen heel aantal
+	// pagina's is, is precies het soort ding waar zo'n mapper op assert.
+	// Gemeten 30-08: de eerste installatie van probeapple.img (2.426.048 bytes
+	// = 1216 over een paginagrens) gaf een iBoot Panic in stage 2 vóór onze
+	// eerste instructie — géén regel van ons kwam langs. m1n1.bin, het enige
+	// bootobject waarvan we weten dát het werkt, is exact 68 pagina's groot,
+	// en zijn linkerscript lijnt élke sectie op 0x4000. Dus doen wij dat ook.
+	// De stub kopieert nog steeds alleen `size`: de staart is nul en hoort bij
+	// het bestand, niet bij het image.
+	file := (size + 0x3FFF) &^ 0x3FFF
+	img := make([]byte, file)
 	copy(img, p.img)
 
 	reset := p.stub(img, "stubReset", appleResetOff, appleParamsOff-appleResetOff)
@@ -61,8 +74,8 @@ func writeAppleBoot(p *payload, out string) {
 	if err := os.WriteFile(out, img, 0o644); err != nil {
 		die("%v", err)
 	}
-	fmt.Printf("%s: %d bytes (apple boot object; stubs %d+%d bytes, target %#x, entry %#x)\n",
-		out, len(img), reset, entry, p.load, p.f.Entry)
+	fmt.Printf("%s: %d bytes (apple boot object; %d pages, image %d, stubs %d+%d bytes, target %#x, entry %#x)\n",
+		out, len(img), file/0x4000, size, reset, entry, p.load, p.f.Entry)
 }
 
 // stub kopieert een assembly-symbool naar zijn offset in het image en geeft
