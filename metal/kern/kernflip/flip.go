@@ -138,20 +138,23 @@ func Flip(bundle []byte) error {
 	if err != nil {
 		return fmt.Errorf("kernflip: %w", err)
 	}
-	// Ook een GEPARKEERDE core is een bewoner van de switch-code: hij staat in
-	// de parkeerlus van de plan-regio en wordt daar straks door de nieuwe kern
-	// gewekt. Verschillen de bytes, dan wekt die hem op een verkeerde PC en is
-	// elke plaatsing op die core dood tot een reboot (gemeten 02-09, M4).
-	parked := slots.ParkedCores()
-	if len(residents) > 0 || parked > 0 {
+	// Geparkeerde cores tellen NIET mee: die staan in de parkeerlus, en die
+	// genereert kern/stage2 zelf, met dezelfde bytes in elke kern — een
+	// ABI, net als de mailbox waar de lus op wacht. De volgende kern schrijft
+	// hem identiek terug en dispatcht met een vers doel-PC, dus zo'n core
+	// merkt de wissel niet. Alleen wie ín de switch-code staat (geyield of
+	// draaiend) bindt de bytes. (Er stond hier een dag een guard op
+	// geparkeerde cores plus een reset-poging; de reset bleek op de M4 niets
+	// te stoppen en de guard blokkeerde élke switch-code-wijziging, 02-09.)
+	if len(residents) > 0 {
 		mine := switchCodeHash()
 		theirs, err := bundleSwitchHash(f)
 		if err != nil {
-			return fmt.Errorf("kernflip: %d resident(s) and %d parked core(s) live in the switch code, but the new kernel's cannot be verified: %w", len(residents), parked, err)
+			return fmt.Errorf("kernflip: %d resident(s) alive but the new kernel's switch code cannot be verified: %w", len(residents), err)
 		}
 		if mine == 0 || mine != theirs {
-			return fmt.Errorf("kernflip: the new kernel's switch code differs (%#x vs %#x) — cannot flip with %d live resident(s) and %d parked core(s); use a reboot update",
-				theirs, mine, len(residents), parked)
+			return fmt.Errorf("kernflip: the new kernel's switch code differs (%#x vs %#x) — cannot flip with %d live resident(s); stop them or use a reboot update",
+				theirs, mine, len(residents))
 		}
 	}
 

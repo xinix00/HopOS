@@ -37,6 +37,13 @@ TEXT el2entry(SB),NOSPLIT|NOFRAME,$0
 	// scratch-indeling (SP-relatief): +0 x0, +8 x1, +16 x2, +24 x3.
 	STP	(R0, R1), (RSP)
 
+#ifdef VHE
+	// Idx 10 (FIQ vanuit EL1): op Apple is dat HOP's kick — de fast IPI
+	// waarmee de wekker een app-core wekt die op EL1 draait (yieldSleep). Acken
+	// en terug; de app ziet alleen zijn WFI terugkeren.
+	CMP	$10, R2
+	BEQ	fiq
+#endif
 	// Alleen idx 8 (synchroon vanuit EL1) draagt een bruikbare ESR; elke
 	// andere vector is per definitie een fault-rapport.
 	CMP	$8, R2
@@ -191,7 +198,24 @@ sleep:
 	// op dit silicium bewezen. Slaapt dus in tikken van ~1ms tot de vroegste
 	// wektijd; op QEMU-TCG is WFE een no-op en spint dit warm (by design, zie
 	// de QEMU-notitie) maar de heractivering blijft er correct.
+	// Tellen op de bewoner in x1 (layout.CtxSleeps): de meetlat van deze
+	// slaap — tientallen per seconde is slaap, miljoenen is een spin.
+	MOVD	472(R1), R0
+	ADD	$1, R0, R0
+	MOVD	R0, 472(R1)
+#ifdef VHE
+	// Apple: WFE slaapt hier niet (CYC_OVRD, buiten bereik op de M4) en de
+	// event stream wekt dus niets. m1n1's recept op dit silicium: wfi, en een
+	// fast IPI die hem wekt — HOP's wekker stuurt die zodra een bewoner due
+	// is of RX heeft (kern/slots waker.go, board.Cores.Kick). Pending IPI
+	// wissen ná de wek (IPI_SR_EL1), anders keert de volgende WFI meteen.
+	WFI
+	WORD	$0xd53df120	// mrs x0, s3_5_c15_c1_1 (IPI_SR_EL1)
+	CBZ	R0, rotate
+	WORD	$0xd51df120	// msr s3_5_c15_c1_1, x0 (ack)
+#else
 	WFE
+#endif
 
 rotate:
 	// Round-robin over de bewonerslijst van deze core (SP-relatief; SP =
@@ -350,6 +374,20 @@ park:
 	MOVD	208(RSP), R2
 	ADD	$0x1000, R2, R2
 	JMP	(R2)
+
+#ifdef VHE
+fiq:
+	// Apple's fast IPI (m1n1 smp.c, Linux irq-apple-aic.c): pending in
+	// IPI_SR_EL1 bit 0, wissen door 1 terug te schrijven. Geen IPI pending
+	// = een FIQ die we niet kennen → fault-rapport (x2 = 10 staat nog).
+	WORD	$0xd53df120	// mrs x0, s3_5_c15_c1_1 (IPI_SR_EL1)
+	CBZ	R0, fault
+	WORD	$0xd51df120	// msr s3_5_c15_c1_1, x0 (ack)
+	LDP	(RSP), (R0, R1)
+	LDP	16(RSP), (R2, R3)
+	ISB	$15
+	ERET
+#endif
 
 // el2entryEnd markeert het einde van el2entry: de blob [el2entry, el2entryEnd)
 // wordt door kern/stage2 naar de plan-regio gekopieerd (docs/kern-flip.md) —

@@ -94,10 +94,10 @@ func AccountsDedicated() bool { return true }
 // is in alle gevallen de wall-tijd waarin dit slot niets deed: bij een yield de
 // tijd waarin een buur draaide óf het hart sliep, bij MSleep de slaap zelf.
 func governor(pollUntil int64) {
-	// Eerst het quirk-masker van het board (CtrlCorePrep; op deze architectuur
-	// zonder bits — maar het is dezelfde ronde als op ARM), dan de doorbell —
+	// Eerst de idle-modus van het board (CtrlIdleMode; op deze architectuur
+	// nog zonder waarden, maar dezelfde ronde als op ARM), dan de doorbell —
 	// zelfde twee redenen als op ARM (zie rxdoor.go).
-	corePrep()
+	idleMode()
 	if rxDoor() {
 		countWake()
 		return
@@ -130,7 +130,7 @@ func governor(pollUntil int64) {
 	}
 }
 
-// applyPrep: geen quirk-bits op deze architectuur (nog). Het masker komt wél
+// applyIdleMode: nog geen modi op deze architectuur. Het woord komt wél
 // langs — dezelfde ronde, hetzelfde woord — zodat een RISC-V-board dat ooit
-// een eigenaardigheid heeft alleen hier een bit hoeft te leren.
-func applyPrep(mask uint64) {}
+// een eigen idle heeft alleen hier een waarde hoeft te leren.
+func applyIdleMode(mode uint64) {}

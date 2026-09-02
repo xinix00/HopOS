@@ -59,3 +59,9 @@ loop:
 	WORD	$0x01b0000b	// th.sync.is
 done:
 	RET
+
+// func Counter() uint64 — de TIME-CSR (rdtime).
+TEXT ·Counter(SB),NOSPLIT,$0-8
+	WORD	$0xc0102573	// rdtime a0
+	MOV	A0, ret+0(FP)
+	RET

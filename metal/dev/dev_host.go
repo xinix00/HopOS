@@ -13,3 +13,5 @@ func MB() {}
 func SEV() {}
 
 func CleanInv(addr, size uintptr) {}
+
+func Counter() uint64 { return 0 }

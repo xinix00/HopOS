@@ -22,7 +22,7 @@ package slots
 //	hoe HOP een slot stopt stage-2 intrekken → core parkeert   Cores.Reset, of de kill-tick
 //
 // Wat het board levert staat in board.Cores (metal/board): starten, resetten,
-// toestand, quirks. Een poot die het silicium niet heeft is daar nil, en de
+// toestand, idle-modus, wekken. Een poot die het silicium niet heeft is daar nil, en de
 // helft hier weet wat dat betekent — op ARM is er geen Reset en parkeert een
 // ingetrokken core zichzelf; op RISC-V is een hart zonder reset-recept een
 // core waar onze switcher vanaf de boot op draait (coreParks).

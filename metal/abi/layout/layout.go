@@ -312,6 +312,13 @@ const (
 	// switcher. HOP leest noch schrijft dit woord — op het niet-coherente
 	// RISC-V-hartpaar mág dat ook niet zomaar (zie de sched-blok-regels).
 	CtxWake = 464
+	// CtxSleeps (ARM): hoe vaak de switcher met déze bewoner als laatste
+	// ging slapen (switch.s sleep:, één tel per WFI/WFE) — in de regel van
+	// CtxWake, want die is van de switcher. De meetlat achter "slaapt de
+	// core op EL2 écht, of spint hij daar": HOP telt ze per seconde op over
+	// alle slots (hopos.idlestat). Tientallen per seconde = slaap,
+	// miljoenen = spin.
+	CtxSleeps = 472
 	// CtxRevoke: HOP's intrekking van dít slot. Niet-nul betekent "beëindig deze
 	// bewoner bij de eerste gelegenheid" — de kill-tick van cpu/mmode leest hem en
 	// gaat rechtstreeks naar teardown (CtxDead), zonder de app iets terug te geven.
@@ -815,7 +822,7 @@ const (
 	// te zijn. Kern en apps hertalen samen; de release-keten bouwt de app-images
 	// tegen dezelfde metal-tag, dus dat gebeurt vanzelf in één ronde.
 	//
-	// CtrlCorePrep (02-09) verhoogt de versie NIET: het woord staat in de staart
+	// CtrlIdleMode (02-09) verhoogt de versie NIET: het woord staat in de staart
 	// van de page (boven de env), dus een ouder image leest zijn env ongewijzigd
 	// en een nieuwer image op een oudere kern leest een 0 — zie "DE STAART".
 	ABIVersion = 4
@@ -1042,7 +1049,7 @@ const (
 	// start inleest (de Docker-vorm: env meegegeven bij het starten). Vervangt
 	// het kernel-envp dat bare metal niet heeft. Loopt tot de staart-woorden.
 	CtrlEnvData = 0x118
-	CtrlEnvMax  = CtrlCorePrep - CtrlEnvData
+	CtrlEnvMax  = CtrlIdleMode - CtrlEnvData
 
 	// DE STAART: HOP → app-woorden die ná de env-regio zijn bijgekomen staan
 	// bovenaan de page en groeien naar beneden. Zo blijft de page compatibel in
@@ -1052,28 +1059,25 @@ const (
 	// is geveegd — en doet dan wat het altijd deed. De doorbell (30-08) schoof
 	// de env nog op en kostte een hertaalronde van álle apps; dat hoeft dus niet.
 	//
-	// CtrlCorePrep (HOP → app): het quirk-masker van het board voor de core(s)
-	// van dit slot — silicium-eigenaardigheden die de app zélf moet rechtzetten,
-	// omdat alleen zijn niveau bij het register kan (board.Cores.Prep). De
-	// idle-governor (cpu/idle) leest het woord elke ronde en voert de bits uit;
-	// idempotent, dus ook een SMP-core die later idle wordt doet het. 0 = niets,
-	// en dat is elk board zonder eigenaardigheden. De bits zijn Prep* hieronder.
-	//
-	// Waarom via de control-page en niet in de app-runtime zelf: een app-image
-	// is board-loos (board/hopslot — de kooi ís het board), dus de kennis wélke
-	// core wat nodig heeft kan alleen van HOP komen.
-	CtrlCorePrep = 0xFF8
+	// CtrlIdleMode (HOP → app): hoe de core(s) van dit slot horen te idlen,
+	// gekozen door het board (board.Cores.IdleMode). Een app-image is
+	// board-loos (board/hopslot — de kooi ís het board), dus wélke idle bij
+	// dit silicium hoort kan alleen HOP hem zeggen. De governor (cpu/idle)
+	// leest het woord elke ronde; 0 = wat de architectuur zelf doet (arm64:
+	// WFE op de event-stream), de waarden staan hieronder.
+	CtrlIdleMode = 0xFF8
 )
 
-// De bits van CtrlCorePrep.
+// De idle-modi van CtrlIdleMode.
 const (
-	// PrepDeepWFE: op dit silicium slaapt WFE niet tot een IMP-DEF-register het
-	// toestaat — Apple's CYC_OVRD.WFI_MODE=2, dat alleen vanaf EL1 op een door
-	// HopOS gestarte core schrijfbaar is (vanaf EL2 undefined, op de boot-cpu
-	// evenmin; beide gemeten). GEMETEN 02-09 op de M4: zonder 1,3M
-	// governor-rondes/s en 74% cpu op een lege app, met 956 wekken/s en 0%.
-	// Alleen de arm64-governor kent dit bit.
-	PrepDeepWFE = 1 << 0
+	// IdleYield: idle is een yield naar EL2 (HVC #1), ook als de app zijn core
+	// alleen heeft. De switcher slaapt dan op EL2 en HOP's wekker kickt hem
+	// (board.Cores.Kick) zodra de wektijd (CtxWake) verstreken is of er RX
+	// ligt. Dit is hoe Apple silicon idlet: op de M4 slaapt een app-core op
+	// EL1 niet (WFE keert terug, geen FIQ wekt een WFI — gemeten 02-09) en
+	// parkeert m1n1 zijn cores op EL2 met wfi + fast IPI. HOP zet de modus
+	// niet op een SMP-slot: de wekker kent één core per slot.
+	IdleYield = 1
 )
 
 // Status-waarden.

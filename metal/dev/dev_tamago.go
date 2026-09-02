@@ -28,3 +28,9 @@ func SEV()
 // QEMU/TCG modelleert geen caches (daar is dit een no-op); het bewijs is het
 // board. Zie dev_<arch>.s.
 func CleanInv(addr, size uintptr)
+
+// Counter is de rauwe stand van de vrijlopende teller van de architectuur
+// (arm64: CNTVCT_EL0, riscv64: de TIME-CSR) — dezelfde teller waarin apps
+// hun wektijd uitdrukken (CtrlWakeAt, CtxWake), zodat HOP's wekker ermee kan
+// vergelijken. Zie dev_<arch>.s. Geen frequentie hier: die is board-kennis.
+func Counter() uint64

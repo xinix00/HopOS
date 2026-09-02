@@ -74,3 +74,19 @@ func wfiTimer(ticks uint64) uint64
 // WFEBurst/WFITimer zijn de geëxporteerde meetfuncties voor de probe.
 func WFEBurst(n uint64) uint64 { return wfeBurst(n) }
 func WFITimer(t uint64) uint64 { return wfiTimer(t) }
+
+// hvcKick: zie regs_arm64.s.
+func hvcKick(target uint64)
+
+// Kick wekt cpu met een fast IPI — m1n1's wek op precies dit silicium
+// (smp.c: deep_wfi + IPI_RR_GLOBAL + IPI_SR-ack). De IPI komt op die core
+// binnen als FIQ; de app-core heeft HCR.FMO en cpu/el2/switch.s ackt hem op
+// EL2 en keert terug, zodat de app alleen zijn WFI ziet terugkeren. Dit is
+// board.Cores.Kick; wie slaapt en wanneer beslist HOP's wekker.
+func Kick(cpu int) {
+	cpus := CPUs()
+	if cpu < 0 || cpu >= len(cpus) {
+		return
+	}
+	hvcKick(uint64(cpus[cpu].Core) | uint64(cpus[cpu].Cluster)<<16)
+}

@@ -7,6 +7,7 @@ import (
 	"github.com/xinix00/HopOS/metal/board"
 	"github.com/xinix00/HopOS/metal/cpu/idle"
 	"github.com/xinix00/HopOS/metal/cpu/irq"
+	"github.com/xinix00/HopOS/metal/kern/slots"
 	"github.com/xinix00/HopOS/metal/net/hopnet"
 )
 
@@ -52,12 +53,18 @@ func nodeCoreState(core int) string {
 func idleStat() {
 	hz := float64(idle.CounterHz())
 	w0, t0, i0, r0, at := idle.Wakes(), idle.Ticks(), irq.Fired(), hopnet.RXIdleRounds(), time.Now()
+	wr0, wa0, wk0 := slots.WakerStats()
+	s0 := slots.EL2Sleeps()
 	for {
 		time.Sleep(10 * time.Second)
 		w1, t1, i1, r1, now := idle.Wakes(), idle.Ticks(), irq.Fired(), hopnet.RXIdleRounds(), time.Now()
+		wr1, wa1, wk1 := slots.WakerStats()
+		s1 := slots.EL2Sleeps()
 		dt := now.Sub(at).Seconds()
-		fmt.Printf("idle: %.0f wakes/s, %.1f%% idle, %.0f irq/s, %.0f empty rx rounds/s HOPOS_IDLESTAT\n",
-			float64(w1-w0)/dt, 100*float64(t1-t0)/hz/dt, float64(i1-i0)/dt, float64(r1-r0)/dt)
+		fmt.Printf("idle: %.0f wakes/s, %.1f%% idle, %.0f irq/s, %.0f empty rx rounds/s; waker %.0f rounds/s, asleep %.0f/s, kicks %.0f/s; app cores %.0f el2 sleeps/s HOPOS_IDLESTAT\n",
+			float64(w1-w0)/dt, 100*float64(t1-t0)/hz/dt, float64(i1-i0)/dt, float64(r1-r0)/dt,
+			float64(wr1-wr0)/dt, float64(wa1-wa0)/dt, float64(wk1-wk0)/dt, float64(s1-s0)/dt)
 		w0, t0, i0, r0, at = w1, t1, i1, r1, now
+		wr0, wa0, wk0, s0 = wr1, wa1, wk1, s1
 	}
 }

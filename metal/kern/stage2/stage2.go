@@ -146,10 +146,14 @@ func InitVectors() {
 	// het net-ingetrokken slot walkt zijn genulde tabel → stage-2-fault →
 	// CPU_OFF.
 	// De handler kiest op de HVC-immediate (ESR.ISS): #0 = revoke (TLBI),
-	// al het andere = chainload — de kern-flip (docs/kern-flip.md). Encodings
-	// geverifieerd met clang/objdump (31-08). Het revoke-pad klobbert alleen
-	// x16 (caller-saved; hvcRevoke is een gewone Go-call); het chain-pad
-	// klobbert vrij — het keert nooit terug.
+	// #3 = kick (een fast IPI naar x0 — board.Cores.Kick op Apple, de wek van
+	// een app-core die met WFI slaapt; de encodering is Apple's, maar het
+	// pad wordt alleen gelopen door een board dat Kick zo invult), al het
+	// andere = chainload — de kern-flip (docs/kern-flip.md). Encodings
+	// geverifieerd met clang/objdump (31-08; kick 02-09 uit m1n1 smp.c). Het
+	// revoke-pad klobbert alleen x16 (caller-saved; hvcRevoke is een gewone
+	// Go-call), het kick-pad niets; het chain-pad klobbert vrij — het keert
+	// nooit terug.
 	rvecs := layout.TrapVecPA()
 	if rvecs == 0 {
 		panic("stage2: Plan.TrapVecPA ontbreekt — de HOP-core heeft geen EL2-vectortabel om de revoke-handler in te pluggen")
@@ -157,7 +161,13 @@ func InitVectors() {
 	revoke := []uint32{
 		0xd53c5210, // mrs  x16, esr_el2
 		0x92403e10, // and  x16, x16, #0xffff     (HVC-immediate)
-		0xb50000d0, // cbnz x16, chain (+6)
+		0xb40000d0, // cbz  x16, revoke (+6)
+		0xf1000e1f, // cmp  x16, #3
+		0x54000121, // b.ne chain (+9)
+		0xd51df020, // msr  s3_5_c15_c0_1, x0     (IPI_RR_GLOBAL_EL1 ← aff0 | aff1<<16)
+		0xd5033fdf, // isb
+		0xd69f03e0, // eret
+		// revoke:
 		0xd50c839f, // tlbi alle1is
 		0xd5033f9f, // dsb  sy                    (invalidatie compleet vóór de wek)
 		0xd503209f, // sev — wek élke WFE-slaper: een core die in WFE hangt (een

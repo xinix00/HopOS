@@ -14,7 +14,7 @@
 // (idle_riscv64.go) heeft geen WFE-equivalent en bereikt dezelfde slaap via
 // de M-mode-switcher (yield met wektijd) of, voor HOP zelf, direct (de
 // CLINT-Sleeper van het board). De gedeelde helft — Sleeper, tellers,
-// publicatie, wakeAt, het quirk-masker — staat in idle.go.
+// publicatie, wakeAt, de idle-modus van het board — staat in idle.go.
 
 package idle
 
@@ -25,15 +25,13 @@ import (
 	"github.com/xinix00/HopOS/metal/dev"
 )
 
-// wfeIdle/hvcYield/cntkctlSet/cntfrq/counterNow/mmfr0/wfiUntil: zie idle_arm64.s;
-// cycOvrdWFIUp: prep_arm64.s.
+// wfeIdle/hvcYield/cntkctlSet/cntfrq/counterNow/mmfr0/wfiUntil: zie idle_arm64.s.
 func wfeIdle() uint64
 func wfiUntil(ticks uint64) uint64
 func hvcYield(deadline uint64) uint64
 func cntkctlSet(v uint64)
 func cntfrq() uint64
 func mmfr0() uint64
-func cycOvrdWFIUp()
 
 // Enable zet de event-stream aan en hangt de governor in de runtime, met
 // WFESleep als slaap zolang het board niets anders koos (Use).
@@ -131,6 +129,15 @@ func WFISleep(wake uint64) uint64 {
 	return slept
 }
 
+// yieldSleep is de Sleeper voor silicium waar een app-core op EL1 niet kan
+// slapen (de M4, gemeten 02-09: WFE keert direct terug en geen FIQ wekt een
+// WFI — timer noch IPI). De slaap gebeurt dan waar hij wél werkt: op EL2,
+// in de switcher (cpu/el2/switch.s), dezelfde weg als een gedeelde core —
+// alleen woont deze app er alleen. De switcher slaapt daar met WFI en HOP's
+// wekker kickt hem met een IPI als de wektijd (CtxWake) verstreken is of er
+// RX ligt: m1n1's park-recept op ditzelfde silicium, met de wekker in HOP.
+func yieldSleep(wake uint64) uint64 { return hvcYield(wake) }
+
 // sleepUntil slaapt tot de wektijd (absolute counterstand; 0 = geen deadline),
 // begrensd op timerCap, en geeft de werkelijk verstreken ticks terug.
 func sleepUntil(wake uint64) uint64 {
@@ -179,9 +186,9 @@ var wfeMinSleep uint64 = 64
 // wektijd zodat twee wachtende buren niet pingpongen), óf slapen met de
 // Sleeper van dit board. De geslapen tijd gaat de teller in.
 func governor(pollUntil int64) {
-	// Eerst wat het board over deze core zei (CtrlCorePrep): zonder dat slaapt
-	// een WFE op sommig silicium helemaal niet, en dan is de rest zinloos.
-	corePrep()
+	// Eerst de idle-modus van het board (CtrlIdleMode): op Apple is dat de
+	// yield, en dan is alles hieronder de weg náár EL2.
+	idleMode()
 	// De doorbell: ligt er RX, dan is de pomp nu gewekt en is slapen precies
 	// verkeerd; ligt er niets, dan is de drempel nu gewapend en bewaakt de
 	// rotatie-peek de rest van deze slaap (zie rxdoor.go).
@@ -208,9 +215,9 @@ func governor(pollUntil int64) {
 	countWake()
 }
 
-// applyPrep voert het quirk-masker van het board uit (layout.Prep*).
-func applyPrep(mask uint64) {
-	if mask&layout.PrepDeepWFE != 0 {
-		cycOvrdWFIUp()
+// applyIdleMode neemt de idle-modus van het board over (layout.Idle*).
+func applyIdleMode(mode uint64) {
+	if mode&layout.IdleYield != 0 {
+		sleeper = yieldSleep // idempotent: elke ronde dezelfde toewijzing
 	}
 }

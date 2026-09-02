@@ -271,6 +271,10 @@ func main() {
 	}
 	hopnet.ForcePoll = bootParam("hopos.rxpoll") == "1"
 	netErr := hopnet.Up()
+	// De wekker voor app-cores die op EL2 slapen (IdleYield, Cores.Kick):
+	// alleen op een board dat kan kicken, en ná de vectoren — de kick is een
+	// HVC naar HOP's eigen EL2-handler.
+	slots.StartWaker()
 	if netErr != nil {
 		fmt.Printf("net: %v — continuing headless/compute-only (no external network)\n", netErr)
 	}

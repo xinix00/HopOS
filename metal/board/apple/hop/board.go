@@ -25,6 +25,7 @@ package hop
 
 import (
 	"fmt"
+	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/board"
 	"github.com/xinix00/HopOS/metal/board/apple"
 	"github.com/xinix00/HopOS/metal/driver/fb"
@@ -84,30 +85,28 @@ func (machine) Firmware() string {
 // PMGR-blok kán het (cpustart.go), maar het is niet bewezen en de EL2-parkeerlus
 // is het.
 //
-// Prep: (nog) NIETS — en dat is een meting, geen vergeten poot.
+// IdleMode en Kick: zo idlet Apple silicon.
 //
-// Elke core die wíj uit reset halen komt op met WFI_MODE=0 in CYC_OVRD,
-// waardoor WFE meteen terugkeert en een lege app op 74% cpu spint (1,3M
-// governor-rondes/s). De voor de hand liggende fix — WFI_MODE=2 schrijven
-// zoals m1n1 op M1-M3 doet — is op de M4 in geen enkele vorm betrouwbaar
-// gebleken (02-09, vier ijzer-uren, 20+ runs met ESR-rapport):
+// Een app-core idlet hier op EL2, niet op EL1: de app yieldt (IdleYield, de
+// weg die een gedeelde core al had), de switcher slaapt op EL2 met WFI
+// (cpu/el2/switch.s, VHE) en HOP wekt hem met een fast IPI — Kick, via HVC
+// #3 naar HOP's eigen EL2-handler, waar IPI_RR_GLOBAL_EL1 woont. HOP's
+// wekker (kern/slots waker.go) kickt de core wiens bewoner due is (CtxWake)
+// of RX heeft. Komt de IPI aan terwijl de app op EL1 draait, dan ackt de
+// FIQ-vector hem op EL2 en keert terug; de app ziet niets. Dit is m1n1's
+// eigen park-recept op ditzelfde silicium (smp.c: wfi + fast IPI), en Linux'
+// AIC-driver bevestigt de vorm (fast IPI = FIQ, ack via IPI_SR_EL1).
 //
-//   - vanaf EL2 (trampoline): undefined instruction (EC=0);
-//   - vanaf EL1 in de governor, in een goroutine, na 3s, na 200ms rekenen,
-//     als constante, als read-modify-write, op E- én P-cores: undefined
-//     instruction, 9 van 9 — het app-image sterft (exit 2);
-//   - hetzelfde instructiewoord in een ouder app-image (vitals8) faultt NIET,
-//     had één keer 's ochtends en één keer 's middags effect (955 wekken/s,
-//     0%), en daarna op dezelfde core niet meer (1 op 3). Leest altijd 0.
+// GEMETEN 02-09 (kern G, na reboot): vitals op een E- én een P-core 0% cpu,
+// 47 wekken/s, idle 100%; de switcher telt ~85 EL2-slaapjes/s, gelijk aan
+// het kick-tempo — echte slaap, geen spin. Was: 74% en 1,3M rondes/s.
 //
-// Een register dat op dezelfde core, dezelfde kern en dezelfde bytes soms
-// undefined is en soms een stille no-op, is niet te programmeren zonder de
-// referentie: m1n1 slaat het op de M4 zelf over (features_m4 zonder
-// apple_sysregs_unlocked, "figure out what features are actually available
-// on M4"), en Linux schrijft het als VHE-host op EL2. Dus: geen bit tot
-// die referentie er is — een app die crasht is erger dan een app op 74%.
-// Het mechanisme (CtrlCorePrep, PrepDeepWFE, prep_arm64.s) blijft staan en
-// is op QEMU en ijzer bewezen als KANAAL; alleen de inhoud wacht.
+// Waarom niet op EL1, voor wie het nog eens probeert: een core die wij uit
+// reset halen komt op met WFI_MODE=0 in CYC_OVRD, en dat register is op de
+// M4 vanaf EL1 én EL2 undefined (20+ runs met ESR-rapport); m1n1 slaat het
+// op de M4 over en Linux (t8103..t6034, nooit t8132) schrijft het alleen
+// als VHE-host. Ook wekt op zo'n core geen enkele FIQ een WFI op EL1
+// (timer én IPI gemeten). Op EL2 werkt het allemaal wél — dus daar.
 func (machine) Cores() board.Cores {
 	self := apple.SelfCPU
 	return board.Cores{
@@ -141,6 +140,13 @@ func (machine) Cores() board.Cores {
 			}
 			return board.PowerOff
 		},
+		// Geen Reset: het PMGR-stopbit (cpustart.go StopCore) zet een core
+		// NIET stil — GEMETEN 02-09: "gereset" cores parkeerden zich binnen
+		// de flip opnieuw. Tot er een bewezen core-down-recept is (m1n1 kent
+		// er geen; deep-WFI zonder retentie is het vermoedelijke pad) is dit
+		// een board zonder reset, en parkeert een ingetrokken core zichzelf.
+		IdleMode: func(cpu int) uint64 { return layout.IdleYield },
+		Kick:     apple.Kick,
 	}
 }
 

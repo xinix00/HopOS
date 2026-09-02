@@ -50,3 +50,9 @@ TEXT ·MPIDR(SB),NOSPLIT,$0-8
 	WORD	$0xd53800a0	// mrs x0, mpidr_el1
 	MOVD	R0, ret+0(FP)
 	RET
+
+// func Counter() uint64 — CNTVCT_EL0.
+TEXT ·Counter(SB),NOSPLIT,$0-8
+	WORD	$0xd53be040	// mrs x0, cntvct_el0
+	MOVD	R0, ret+0(FP)
+	RET

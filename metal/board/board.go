@@ -65,8 +65,8 @@ type LeaseHolder interface {
 // heeft, en het bestaat één keer — er is geen ARM-helft en geen RISC-V-helft
 // meer. Wat per architectuur anders ís (de kooi-mechaniek) woont achter de
 // kooi-naad in kern/slots (cage.go); wat per BOARD anders is — hoe een core
-// start, of hij te resetten is, welke quirks zijn silicium heeft — zit in
-// Cores(), als poten die nil zijn waar het board ze niet heeft.
+// start, of hij te resetten is, hoe zijn cores idlen en gewekt worden — zit
+// in Cores(), als poten die nil zijn waar het board ze niet heeft.
 //
 // Alle methodes draaien op de HOP-kern.
 type Board interface {
@@ -154,10 +154,19 @@ type Cores struct {
 	// boekhouding. Buiten {On, Off, OnPending} = geen core met dit nummer.
 	State func(core int) PowerState
 
-	// Prep is het quirk-masker dat HOP een app-core meegeeft op zijn
-	// control-page (layout.CtrlCorePrep): silicium-eigenaardigheden die de app
-	// zelf moet rechtzetten omdat alleen zíjn niveau erbij kan. nil = 0.
-	Prep func(core int) uint64
+	// IdleMode is hoe de app-cores van dit board idlen (layout.Idle*), door
+	// HOP aan de app meegegeven op zijn control-page (layout.CtrlIdleMode).
+	// Een app-image is board-loos, dus dit is de enige weg waarlangs een
+	// board zijn eigen idle bij een app-core krijgt. nil = 0: wat de
+	// architectuur zelf doet (arm64: WFE op de event-stream).
+	IdleMode func(core int) uint64
+
+	// Kick wekt een core die slaapt: de tegenhanger van IdleMode. Wat het
+	// is, is board-kennis — een fast IPI op Apple, een SGI op een GIC, msip
+	// op een CLINT. HOP's wekker roept hem voor elke app-core die met
+	// IdleYield slaapt en due is (kern/slots waker.go). nil = dit board
+	// heeft het niet nodig: zijn app-cores wekken zichzelf (de event-stream).
+	Kick func(core int)
 }
 
 // Phys vertaalt een logische app-core (1..N) naar zijn fysieke nummer; ok=false
@@ -184,12 +193,12 @@ func (k Cores) CanReset(core int) bool {
 	return k.Resettable(core)
 }
 
-// PrepMask: het quirk-masker voor een core (0 zonder Prep).
-func (k Cores) PrepMask(core int) uint64 {
-	if k.Prep == nil {
+// IdleModeOf: de idle-modus voor een core (0 zonder IdleMode).
+func (k Cores) IdleModeOf(core int) uint64 {
+	if k.IdleMode == nil {
 		return 0
 	}
-	return k.Prep(core)
+	return k.IdleMode(core)
 }
 
 // ProbeCores is de PSCI-vorm van Cores.App: cores 1..max aflopen zolang state

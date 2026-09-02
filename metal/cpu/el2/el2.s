@@ -80,8 +80,16 @@ vtcrps:
 	// core slaapt lokaal). Geen IMO(4): de hard-kill loopt niet via een IRQ
 	// maar via stage-2-intrekking (HOP nult de map + TLBI → deze core faultt
 	// synchroon naar de vectoren).
+	// FMO(3): een FIQ op deze core landt op EL2, nooit in de app. Dat is
+	// isolatie (een app krijgt geen interrupts) én het wek-mechanisme op
+	// silicium waar HOP een slapende app-core kickt met een IPI (Apple: de
+	// fast IPI is een FIQ; switch.s ackt hem op EL2 en keert terug, de app
+	// ziet alleen zijn WFI terugkeren). Op boards zonder IPI komt er nooit
+	// een FIQ — en komt er tóch een, dan is het een fault-rapport, niet iets
+	// wat een app ziet.
 	MOVD	$1<<31, R4
 	ORR	$1<<19, R4, R4
+	ORR	$1<<3, R4, R4
 	ORR	$1, R4, R4
 	WORD	$0xd51c1104	// msr hcr_el2, x4
 

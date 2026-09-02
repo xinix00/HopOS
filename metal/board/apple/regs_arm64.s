@@ -153,3 +153,12 @@ TEXT ·ReadTTBR0(SB),NOSPLIT,$0-8
 	WORD	$0xd5382000	// mrs x0, ttbr0_el1
 	MOVD	R0, ret+0(FP)
 	RET
+
+// func hvcKick(target uint64) — HVC #3 naar HOP's eigen EL2-handler
+// (stage2.InitVectors): stuur een fast IPI naar target (aff0 | aff1<<16, de
+// vorm van IPI_RR_GLOBAL_EL1 — m1n1 smp.c / Linux irq-apple-aic.c). Het
+// register is een EL2-register; HOP's Go draait op EL1, vandaar de HVC.
+TEXT ·hvcKick(SB),NOSPLIT,$0-8
+	MOVD	target+0(FP), R0
+	WORD	$0xd4000062	// hvc #3
+	RET

@@ -45,25 +45,23 @@ func Use(s Sleeper) {
 	}
 }
 
-// prepAddr is het CtrlCorePrep-woord van de eigen control-page: het
-// quirk-masker dat HOP deze core meegaf (layout.Prep*). 0 = niet gezet.
-var prepAddr atomic.Uintptr
+// idleModeAddr is het CtrlIdleMode-woord van de eigen control-page: de
+// idle-modus die het board via HOP voor deze core koos (layout.Idle*). 0 =
+// niet gezet, of de default van de architectuur.
+var idleModeAddr atomic.Uintptr
 
-// WatchPrep geeft de governor het CtrlCorePrep-woord in handen; applib roept
-// dit in Init aan. Vanaf dan voert élke idle-ronde het masker uit — het is
-// idempotent en één lees, dus dat kost niets, en zo krijgt ook een SMP-core
-// die pas later idle wordt zijn silicium recht.
-func WatchPrep(addr uintptr) { prepAddr.Store(addr) }
+// WatchIdleMode geeft de governor het CtrlIdleMode-woord in handen; applib
+// roept dit in Init aan. Elke ronde één lees — idempotent, dus ook een
+// SMP-core die later idle wordt neemt de modus over.
+func WatchIdleMode(addr uintptr) { idleModeAddr.Store(addr) }
 
-// corePrep is de eerste stap van élke governor-ronde: wat het board over deze
-// core zei, uitvoeren. Laat, vanaf het eigen niveau, in gewone Go-context —
-// de enige plaatsing die op de M4 bewezen werkt (de trampoline op EL2 en
-// hwinit1 faalden beide, 02-09). Wat een bit betekent staat in applyPrep van
-// de architectuur.
-func corePrep() {
-	if a := prepAddr.Load(); a != 0 {
+// idleMode is de eerste stap van élke governor-ronde: de modus van het board
+// overnemen. Wat een waarde betekent staat in applyIdleMode van de
+// architectuur.
+func idleMode() {
+	if a := idleModeAddr.Load(); a != 0 {
 		if m := dev.Read64(a); m != 0 {
-			applyPrep(m)
+			applyIdleMode(m)
 		}
 	}
 }

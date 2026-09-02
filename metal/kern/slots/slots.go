@@ -612,10 +612,10 @@ func physCore(core int) int {
 // topologie is board-kennis (Cores().App) — er is niets te proben.
 func coreExists(core int) bool { return physCore(core) >= 0 }
 
-// corePrep is het quirk-masker dat HOP een app-core meegeeft op zijn
-// control-page (layout.CtrlCorePrep): board-kennis over silicium dat de app
-// zelf recht moet zetten, omdat alleen zíjn niveau bij het register kan.
-func corePrep(core int) uint64 { return cores().PrepMask(physCore(core)) }
+// idleModeOf is de idle-modus die het board voor deze core kiest
+// (board.Cores.IdleMode); HOP geeft hem de app mee op zijn control-page
+// (layout.CtrlIdleMode).
+func idleModeOf(core int) uint64 { return cores().IdleModeOf(physCore(core)) }
 
 func dispatchCore(core int, entry, ctx uint64) error {
 	// Nooit een core dispatchen die al draait: dat zou een app (of een tweede
@@ -668,27 +668,6 @@ func waitSlotQuiet(i, core int, timeout time.Duration) bool {
 		st := ctxState(i)
 		return st == layout.CtxDead || st == layout.CtxEmpty
 	})
-}
-
-// ParkedCores telt de app-cores die op dit moment in de switch-code van de
-// plan-regio staan te draaien of te wachten: geparkeerd in de EL2-lus (ARM,
-// coreStopped) of met de M-mode-switcher erop vanaf de boot (RISC-V,
-// coreParks). Koude cores (nog nooit gedispatcht) tellen niet mee.
-//
-// Voor de kern-flip zijn dit bewoners van díe code, precies zoals een
-// geyielde app dat is: de bytes waar zo'n core in staat mogen onder hem niet
-// veranderen. GEMETEN 02-09 op de M4: een core die parkeerde onder een kern
-// met ándere switch-code werd door elke latere kern (zelfde plan-regio, andere
-// bytes) op een verkeerde PC gewekt — EC=0 op EL2, élke verse plaatsing op
-// die core dood, tot een reboot. De flip weigert nu ook op geparkeerde cores.
-func ParkedCores() int {
-	n := 0
-	for c := 1; c <= layout.NumAppCores(); c++ {
-		if coreParks(c) || coreStopped(c) {
-			n++
-		}
-	}
-	return n
 }
 
 // waitStopped polt tot core echt stilstaat (geparkeerd of in reset — wat op deze
@@ -1095,10 +1074,14 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// eigen beslissingen is smpCores, hier uit het al-gevalideerde `cores` gezet.
 	smpCores[i] = cores
 	ctrlWrite(i, layout.CtrlCores, uint64(cores))
-	// Het quirk-masker van het board voor deze core (layout.CtrlCorePrep): wat
-	// de app in zijn eerste idle-ronde aan zijn eigen silicium rechtzet. Nul op
-	// elk board zonder eigenaardigheden — dan gebeurt er aan de app-kant niets.
-	ctrlWrite(i, layout.CtrlCorePrep, corePrep(core))
+	// De idle-modus van het board voor deze core (layout.CtrlIdleMode): hoe
+	// de app hoort te idlen. Nul = de default van de architectuur. Een
+	// SMP-slot krijgt geen yield-idle: de wekker kent één core per slot.
+	mode := idleModeOf(core)
+	if cores > 1 {
+		mode &^= layout.IdleYield
+	}
+	ctrlWrite(i, layout.CtrlIdleMode, mode)
 	if cores > 1 {
 		// Fysiek adres van de EL2 SMP-trampoline publiceren (op ditzelfde slot
 		// z'n partitie/stage-2 → gedeelde heap).
