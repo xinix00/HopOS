@@ -43,7 +43,7 @@ func init() {
 		NodeCtrlPA:    0xC0000000,
 		CagePA:        0xC2000000,
 		TrapVecPA:     revokeVecAsm, // cpuinit zet VBAR_EL2 van core 0 hierheen
-		BootScratchPA: 0xB0000000,   // cpuinit-vast (BOOT_SCRATCH/DTB_PTR)
+		BootScratchPA: 0xB0000000,   // cpuinit-vast (BOOT_SCRATCH; +8 = DTB)
 		Pool: []layout.Region{
 			{Base: 0x50000000, Size: 0x60000000}, // 1,5GB — het klassieke venster
 			{Base: 0xB1000000, Size: 0x0F000000}, // 240MB — bewijst multi-regio

@@ -20,6 +20,7 @@
 #include "textflag.h"
 #include "hygiene.h"
 #include "sysreg.h"
+#include "drop.h"
 
 TEXT s2tramp(SB),NOSPLIT|NOFRAME,$0
 	// x0 = fysieke control-page van dit slot (PSCI ctx, door HOP gezet).
@@ -93,26 +94,6 @@ vtcrps:
 	ORR	$1, R4, R4
 	WORD	$0xd51c1104	// msr hcr_el2, x4
 
-	// Timers vrij voor EL1 (zelfde als cpuinit-EL2-pad).
-	WORD	$0xd53ce104	// mrs x4, cnthctl_el2
-	ORR	$CNTHCTL_EL1_BITS, R4, R4
-	WORD	$0xd51ce104	// msr cnthctl_el2, x4
-	MOVD	$0, R4
-	WORD	$0xd51ce064	// msr cntvoff_el2, x4
-
-	// EL1-staat NIET erven — de silicium-les (Pi 5, 2026-07-10): bij een
-	// warme CPU_ON (core was eerder van een ándere app en deed CPU_OFF)
-	// initieert TF-A alleen EL2; EL1 is dan wat de vorige huurder achterliet
-	// — MMU áán, oude TTBR/VBAR — en de allereerste EL1-fetch na de ERET zou
-	// door stale tabellen vertalen. QEMU verhulde dit (volledige vCPU-reset
-	// bij CPU_ON). Dus expliciet, zoals cpuinit dat voor de primary doet:
-	// SCTLR_EL1 = 0x30d00800 (RES1-bits; M/C/I/A/WXN uit) en CPTR_EL2 =
-	// 0x33FF (TFP=0 — anders trapt tamago's eerste FP-instructie naar EL2).
-	MOVD	$0x30d00800, R4
-	MSR_SCTLR_EL1(4)
-	MOVD	$CPTR_EL2_NOTRAP, R4
-	WORD	$0xd51c1144	// msr cptr_el2, x4
-
 	// I-cache van déze core leeg vóór de drop. Elke app linkt op hetzelfde
 	// canonieke adres, dus bij een WARME herdispatch (park → mailbox → hier)
 	// houdt de PIPT-I$ nog de INSTRUCTIES VAN DE VORIGE HUURDER voor exact
@@ -124,14 +105,10 @@ vtcrps:
 	// dus lokaal (IALLU) is compleet.
 	I_HYGIENE	// ic iallu + dsb + isb (hygiene.h — één blok voor elke spring-ingang)
 
-	// Drop naar EL1 op de app-entry (EL1h, DAIF gemaskeerd).
-	MOVD	$0, R4
-	ORR	$0b1111<<6, R4
-	ORR	$0b0101<<0, R4
-	WORD	$0xd51c4004	// msr spsr_el2, x4
-	WORD	$0xd51c4023	// msr elr_el2, x3
-	ISB	$15
-	ERET
+	// De drop zelf (drop.h): timers vrij, SCTLR_EL1 en CPTR_EL2 schoon — de
+	// warme-CPU_ON-les van de Pi 5 woont dáár —, EL1h met DAIF gemaskeerd,
+	// ERET naar de app-entry in x3. Eén reeks voor élke ingang naar EL1.
+	DROP_TO_EL1(3)
 
 // s2trampEnd markeert het einde van s2tramp — zie el2entryEnd in switch.s:
 // de blob [s2tramp, s2trampEnd) verhuist als kopie naar de plan-regio.

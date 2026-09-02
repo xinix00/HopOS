@@ -1,31 +1,47 @@
-// EL2-capabele CPU-init voor Apple silicon onder m1n1 — kloon van
-// board/rk3566/cpuinit.s (zie daar voor het volledige verhaal), met drie
-// verschillen die dit platform afdwingt:
+// CPU-init voor Apple silicon: de generieke boot (cpu/el2/boot.h) met de drie
+// haken die dit platform afdwingt. Alles wat hier staat is wat iBoot en m1n1
+// écht anders maken; de vijftien instructies ertussen zijn die van elk board.
 //
-//   - m1n1 levert af op EL2 met MMU uit en x0 = FDT of nul (kboot_boot). Er is
-//     geen EL3-pad en geen PSCI; wat we hier van EL2 nodig hebben is precies
-//     wat elk ander board nodig heeft: HCR/CNTHCTL zetten en naar EL1 zakken.
-//   - Apple's EL2 draait (vermoedelijk) met E2H=1 (VHE) en zónder FEAT_E2H0,
-//     dan is E2H RES1 en blijft hij staan. Wij schrijven HCR_EL2 zoals overal
-//     (alleen RW) en leggen de TERUGGELEZEN waarde op de scratch: de probe
-//     meet zo of we nVHE of VHE draaien. CNTHCTL_EL2 krijgt de EL1-teller-
-//     bits in BEIDE lay-outs, want die verschillen tussen E2H=0 en E2H=1.
-//   - Een EL2-vectortabel die élke exceptie op de dockchannel meldt (ESR,
-//     ELR, FAR) en parkeert. Op nieuw silicium is een stille hang de duurste
-//     uitkomst, en tamago's EL1-vectoren dekken EL2 niet. De tabel wordt in
-//     RAM gebouwd (apple.RevokeVec, 16 × {ldr x16,#8; br x16; .quad handler}),
-//     want een 2KB-uitgelijnd symbool is in Go-asm geen zekerheid. Het adres is
-//     tegelijk HOP's TrapVecPA: stage2.InitVectors plugt er later alleen de
-//     HVC-revoke-handler in en laat deze foutmelders staan.
+//   - BOARD_EARLY (earlyApple): de hop en het parkeerprotocol. HopOS hoort op
+//     een zuinige core; de firmware levert af op een snelle. Het param-blok
+//     wijst de zuinige aan, en zijn wij die niet, dan starten we hem op deze
+//     entry en parkeren wij ons voor adoptie als app-core. Daarna de schone
+//     lei (TLBI/IC: een geadopteerde core draaide net nog met m1n1's MMU),
+//     MPIDR op de scratch, de EL2-vectortabel die élke EL2-exceptie op de
+//     dockchannel meldt (ESR/ELR/FAR) en parkeert — tamago's EL1-vectoren
+//     dekken EL2 niet — en één regel banner vóór welke regel Go dan ook.
+//   - BOARD_EL2 (el2Apple): HCR_EL2 en CNTHCTL_EL2 TERUGGELEZEN op de scratch.
+//     Apple's EL2 heeft E2H vast op 1 (geen FEAT_E2H0), en de probe meet dat
+//     hier in plaats van het aan te nemen.
+//   - BOARD_EL1 (el1Apple): een kale EL1-dumper op VBAR_EL1 vóór tamago zijn
+//     eigen vectoren zet — na een kern-flip wees VBAR_EL1 nog naar de vorige
+//     kern en viel een vroege fault diens lijk in (GEMETEN 01/02-09).
 //
-// TGE blijft 0 (met TGE=1 bestaat EL1 niet), IMO/FMO/AMO blijven 0: fysieke
+// De EL2-vectortabel wordt in RAM gebouwd (apple.RevokeVec, 16 × {ldr x16,#8;
+// br x16; .quad handler}), want een 2KB-uitgelijnd symbool is in Go-asm geen
+// zekerheid. Het adres is tegelijk HOP's TrapVecPA: stage2.InitVectors plugt
+// er later alleen de HVC-revoke-handler in en laat de foutmelders staan.
+//
+// TGE blijft 0 (met TGE=1 bestaat EL1 niet), IMO/AMO blijven 0: fysieke
 // interrupts richten zich op EL1, waar DAIF ze maskeert — HopOS pollt.
+//
+// VHE is hier geen keuze maar een feit: de drop (drop.h) schrijft SCTLR_EL1
+// onder E2H=1 als sctlr_el12, en dat kiest sysreg.h bij het BOUWEN
+// (-asmflags all=-D=VHE, in apple-m4.sh, flip-bundle.sh en de gate). Zonder
+// die define zou dezelfde encodering SCTLR_EL2 raken — dus faalt de build
+// hieronder met opzet, met de naam van het ontbrekende als foutmelding.
 
 //go:build linkcpuinit
 
 #include "textflag.h"
+#include "../../cpu/el2/sysreg.h"
+#include "../../cpu/el2/drop.h"
 
-#define BOOT_SCRATCH    0x1010000E000	// = apple.BootScratch (pariteit: apple.go)
+#ifndef VHE
+APPLE_CPUINIT_NEEDS_ASMFLAGS_D_VHE
+#endif
+
+#define BOOT_SCRATCH    0x1010000E000	// = apple.BootScratch (pariteit: apple.go); +8 = x0
 #define HCR_SCRATCH     0x1010000E010	// = apple.HCRScratch
 #define CNTHCTL_SCRATCH 0x1010000E018	// = apple.CNTHCTLScratch
 #define MPIDR_SCRATCH   0x1010000E020	// = apple.MPIDRScratch
@@ -39,21 +55,19 @@
 #define EL1_VECTORS     0x101100F0800	// el1fault-tabel, direct achter de EL2-tabel (2KB; vrij t/m FlipScratch 0xF8000)
 #define DOCK_FALLBACK   0x388128000	// = apple.DockChannelBase
 
-TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
-	MOVD	R0, R9		// x0 van m1n1 (FDT of 0); bewaren vóór clobber
-	MRS	CurrentEL, R0
-	LSR	$2, R0, R0
-	AND	$0b11, R0, R0
+#define TRAP_VEC        EL2_VECTORS	// boot.h zet VBAR_EL2 hierheen — ná earlyApple, die de tabel bouwt
+#define BOARD_EARLY     BL ·earlyApple(SB)
+#define BOARD_EL2       BL ·el2Apple(SB)
+#define BOARD_EL1       BL ·el1Apple(SB)
+#include "../../cpu/el2/boot.h"
 
+// earlyApple: vóór alles, op het boot-EL, MMU uit. x9 = x0 bij binnenkomst
+// (boot.h), x30 = de terugweg; de banner BL't, dus LR in x22.
+TEXT ·earlyApple(SB),NOSPLIT|NOFRAME,$0
+	MOVD	R30, R22
 	MRS	MPIDR_EL1, R2
 
 	// ── De hop ──────────────────────────────────────────────────────────────
-	// HopOS hoort op een zuinige core te wonen; de firmware levert ons af op de
-	// core waar iBoot begon, en dat is er een uit het snelle cluster. Het
-	// param-blok wijst de zuinige core aan — de loader koos hem uit m1n1's
-	// spin-table — en zijn wij die niet, dan starten we hem hier op DEZE entry
-	// en parkeren wij ons voor adoptie als app-core.
-	//
 	// Dit staat vóór élke geheugenschrijf, en dat is geen stijl maar noodzaak:
 	// m1n1 ROEPT een vrijgegeven core AAN als functie, met zijn eigen MMU nog
 	// levend — anders dan de boot-core, die hij vlak vóór de sprong afbreekt.
@@ -167,40 +181,15 @@ nohop:
 	WORD	$0xd5033f9f	// dsb sy
 	WORD	$0xd5033fdf	// isb
 
-	MOVD	$BOOT_SCRATCH, R1
-	MOVD	R0, (R1)
 	MOVD	$MPIDR_SCRATCH, R1
 	MRS	MPIDR_EL1, R2
 	MOVD	R2, (R1)
 
-	// Eerste licht: één regel op de UART vóór de sprong naar EL1 en dus vóór
-	// élke regel Go. Op nieuw silicium is dit het verschil tussen "hij deed
-	// niets" en "hij kwam tot hier, met dít in x0" — en dat verschil kost
-	// anders een bootcyclus om te achterhalen. Het param-blok mag ontbreken:
-	// zodra wij het bootobject zijn is dat de normale toestand.
-	MOVD	$DOCK_FALLBACK, R10
-	MOVD	$·msgBoot(SB), R11
-	MOVD	$9, R15
-	BL	puts(SB)
-	MOVD	R9, R0
-	BL	puthex(SB)
-	MOVD	$·msgNL(SB), R11
-	MOVD	$2, R15
-	BL	puts(SB)
-	MOVD	$BOOT_SCRATCH, R1
-	MOVD	(R1), R0	// CurrentEL terug: puts/puthex clobberen R0
-
-	CMP	$2, R0
-	BEQ	el2
-	// EL1 (bv. als gast onder m1n1's hypervisor): geen EL2-werk mogelijk, de
-	// probe meldt BootEL=1 en meet verder wat hij kan.
-	B	·cpuinitEL1(SB)
-
-el2:
 	// EL2-vectortabel bouwen: 16 ingangen van 0x80 bytes, elk
 	//   ldr x16, #8      (0x58000050)
 	//   br  x16          (0xd61f0200)
 	//   .quad el2fault
+	// Vóór boot.h VBAR_EL2 erheen zet (TRAP_VEC), dus hier en niet in el2Apple.
 	MOVD	$EL2_VECTORS, R1
 	MOVD	$el2fault(SB), R2
 	MOVD	$16, R3
@@ -216,13 +205,38 @@ build:
 	WORD	$0xd5033f9f	// dsb sy
 	WORD	$0xd508751f	// ic iallu — de tabel is code, net geschreven
 	WORD	$0xd5033fdf	// isb
-	MOVD	$EL2_VECTORS, R0
-	WORD	$0xd51cc000	// msr vbar_el2, x0
 
-	// HCR_EL2: RW(31)=1 — EL1 draait AArch64. Stage-2 (VM) uit; E2H mee op 0
-	// gezet — blijft hij 1, dan meldt de teruglezing dat (FEAT_E2H0 ontbreekt).
-	MOVD	$1<<31, R0
-	WORD	$0xd51c1100	// msr hcr_el2, x0
+	// Eerste licht: één regel op de UART vóór de sprong naar EL1 en dus vóór
+	// élke regel Go. Op nieuw silicium is dit het verschil tussen "hij deed
+	// niets" en "hij kwam tot hier, met dít in x0" — en dat verschil kost
+	// anders een bootcyclus om te achterhalen. Het param-blok mag ontbreken:
+	// zodra wij het bootobject zijn is dat de normale toestand.
+	MOVD	$DOCK_FALLBACK, R10
+	MOVD	$·msgBoot(SB), R11
+	MOVD	$9, R15
+	BL	puts(SB)
+	MOVD	R9, R0
+	BL	puthex(SB)
+	MOVD	$·msgNL(SB), R11
+	MOVD	$2, R15
+	BL	puts(SB)
+
+	MOVD	R22, R30
+	RET
+
+// el2Apple: op EL2, ná boot.h's HCR = RW. De teruggelezen waarden gaan op de
+// scratch: de probe meet zo of we nVHE of VHE draaien (E2H blijft 1 zonder
+// FEAT_E2H0), en of de EL1-tellerbits in beide lay-outs aankwamen. De drop
+// zet CNTHCTL daarna nog eens — idempotent, en de meting is dan al gedaan.
+//
+// NIET PROBEREN: Apple's poort voor de timer-FIQ (s3_5_c15_c1_3, m1n1's
+// SYS_IMP_APL_VM_TMR_FIQ_ENA_EL2) is op t8132 VERGRENDELD — een enkele mrs
+// geeft `!!EL2 ESR=0000000002000000` (undefined), gemeten 29-08. m1n1 wist het
+// al: features_m4 mist apple_sysregs_unlocked, met een XXX erboven. Gevolg: op
+// een core die de firmware niet zelf configureerde bereikt de timer-FIQ de
+// core niet, en WFI slaapt daar voor eeuwig terwijl de timer wél afgaat. Het
+// board meet dat (apple.TimerWakes) in plaats van het aan te nemen.
+TEXT ·el2Apple(SB),NOSPLIT|NOFRAME,$0
 	ISB	$15
 	WORD	$0xd53c1100	// mrs x0, hcr_el2
 	MOVD	$HCR_SCRATCH, R1
@@ -238,65 +252,17 @@ build:
 	WORD	$0xd53ce100	// mrs x0, cnthctl_el2
 	MOVD	$CNTHCTL_SCRATCH, R1
 	MOVD	R0, (R1)
-	MOVD	$0, R0
-	WORD	$0xd51ce060	// msr cntvoff_el2, x0
+	RET
 
-	// NIET PROBEREN: Apple's poort voor de timer-FIQ
-	// (s3_5_c15_c1_3, m1n1's SYS_IMP_APL_VM_TMR_FIQ_ENA_EL2) is op t8132
-	// VERGRENDELD — een enkele mrs geeft `!!EL2 ESR=0000000002000000`
-	// (undefined), gemeten 29-08. m1n1 wist het al: features_m4 mist
-	// apple_sysregs_unlocked, met een XXX erboven. Gevolg: op een core die de
-	// firmware niet zelf configureerde bereikt de timer-FIQ de core niet, en
-	// WFI slaapt daar voor eeuwig terwijl de timer wél afgaat. Het board meet
-	// dat nu (apple.TimerWakes) in plaats van het aan te nemen.
-
-	// SCTLR van EL1 op een BEKENDE waarde vóór de drop (RES1-bits; M/C/I/A/WXN
-	// uit) — en niet erven wat er toevallig stond.
-	//
-	// Na een firmware-boot staat EL1's MMU uit en viel dit niet op. Na een
-	// KERN-FLIP wel: dan draaide er net een hele kern op EL1 met zijn eigen
-	// vertaaltabellen, en die mappen het geleende venster van de nieuwe kern
-	// niet. De ERET hieronder landde dus op een adres dat EL1 niet kende —
-	// instructie-fetch-fault op de eerste instructie, en die vectort naar
-	// VBAR_EL1, een register dat de sprong overleeft en nog naar de tamago-
-	// handlers van de VÓRIGE kern wees. Resultaat: een trace uit een dode
-	// kern, met goroutines van 17 minuten oud (GEMETEN 02-09, flip 8 —
-	// dockchannel).
-	//
-	// Onder E2H=1 (VHE) is de sctlr_el1-encodering op EL2 de redirect naar
-	// SCTLR_EL2; de échte EL1-versie heet dan SCTLR_EL12. R0 draagt hier nog
-	// de teruggelezen HCR, dus de keuze is gratis.
-	MOVD	$HCR_SCRATCH, R1
-	MOVD	(R1), R2
-	MOVD	$0x30d00800, R3
-	TBZ	$34, R2, sctlrel1	// E2H=0: gewone encodering
-	WORD	$0xd51d1003		// msr sctlr_el12, x3
-	B	sctlrdone
-sctlrel1:
-	WORD	$0xd5181003		// msr sctlr_el1, x3
-sctlrdone:
-	ISB	$15
-
-	// SPSR_EL2: EL1h, DAIF gemaskeerd.
-	MOVD	$0, R0
-	ORR	$0b1111<<6, R0
-	ORR	$0b0101<<0, R0
-	WORD	$0xd51c4000	// msr spsr_el2, x0
-
-	MOVD	$·cpuinitEL1(SB), R0
-	WORD	$0xd51c4020	// msr elr_el2, x0
-	ISB	$15
-	ERET
-
-TEXT ·cpuinitEL1(SB),NOSPLIT|NOFRAME,$0
-	// EERST de EL1-vectoren op onze eigen kale dumper. Vóór deze regel wijst
-	// VBAR_EL1 naar wat de vórige bewoner van deze core achterliet — na een
-	// kern-flip zijn dat de tamago-vectoren van de OUDE kern, en een vroege
-	// fault viel daardoor diens lijk in: een hybride trace met oude
-	// g-nummers die de echte ESR/ELR/FAR opat (GEMETEN 01/02-09, flips 6-8).
-	// De tabel hergebruikt el1fault op elke 0x80; tamago zet er bij zijn
-	// runtime-init zijn eigen vectoren overheen — dit dekt precies het gat
-	// daarvóór, op élke boot-route (iBoot, m1n1 én flip).
+// el1Apple: op EL1, vóór SCTLR en de stack. EERST de EL1-vectoren op onze
+// eigen kale dumper: vóór deze regel wijst VBAR_EL1 naar wat de vórige
+// bewoner van deze core achterliet — na een kern-flip de tamago-vectoren van
+// de OUDE kern, en een vroege fault viel daardoor diens lijk in: een hybride
+// trace met oude g-nummers die de echte ESR/ELR/FAR opat (GEMETEN 01/02-09,
+// flips 6-8). De tabel hergebruikt el1fault op elke 0x80; tamago zet er bij
+// zijn runtime-init zijn eigen vectoren overheen — dit dekt precies het gat
+// daarvóór, op élke boot-route (iBoot, m1n1 én flip).
+TEXT ·el1Apple(SB),NOSPLIT|NOFRAME,$0
 	MOVD	$EL1_VECTORS, R1
 	MOVD	$el1fault(SB), R2
 	MOVD	$16, R3
@@ -314,23 +280,7 @@ buildel1:
 	WORD	$0xd5033fdf	// isb
 	MOVD	$EL1_VECTORS, R0
 	WORD	$0xd518c000	// msr vbar_el1, x0
-
-	// SCTLR_EL1: alignment-check en MMU uit (tamago zet ze zelf weer aan).
-	MRS	SCTLR_EL1, R0
-	BIC	$1<<1, R0
-	BIC	$1<<0, R0
-	MSR	R0, SCTLR_EL1
-	ISB	$15
-
-	// Stack aan het einde van de eigen RAM-declaratie.
-	MOVD	runtime∕goos·RamStart(SB), R1
-	MOVD	R1, RSP
-	MOVD	runtime∕goos·RamSize(SB), R1
-	MOVD	runtime∕goos·RamStackOffset(SB), R2
-	ADD	R1, RSP
-	SUB	R2, RSP
-
-	B	_rt0_tamago_start(SB)
+	RET
 
 // el1fault: de EL1-tegenhanger van el2fault — zelfde vorm, EL1-registers.
 // Bestaansreden: het venster tussen de drop naar EL1 en tamago's eigen

@@ -26,6 +26,7 @@
 #include "textflag.h"
 #include "hygiene.h"
 #include "sysreg.h"
+#include "drop.h"
 
 // smpEL2Tramp: entry voor een secundaire SMP-core (EL2, MMU uit). x0 = het
 // FYSIEKE adres van de control-page van de primaire — de app geeft die PA mee
@@ -120,33 +121,10 @@ s2none:
 	WORD	$0xd51c1104	// msr hcr_el2, x4
 
 s2done:
-	// Timers vrij voor EL1.
-	WORD	$0xd53ce104	// mrs x4, cnthctl_el2
-	ORR	$CNTHCTL_EL1_BITS, R4, R4
-	WORD	$0xd51ce104	// msr cnthctl_el2, x4
-	MOVD	$0, R4
-	WORD	$0xd51ce064	// msr cntvoff_el2, x4
-
-	// EL1-staat NIET erven (zelfde silicium-les als el2.s): een warme CPU_ON
-	// erft de EL1-staat van de vorige huurder — met MMU aan zou zelfs de
-	// fetch van de EL1-stub door stale tabellen vertalen. SCTLR_EL1 schoon
-	// (de stub zet 'm daarna zelf op met de gedeelde tabel) en CPTR_EL2
-	// zonder FP-traps (mstart begint met FP).
-	MOVD	$0x30d00800, R4
-	MSR_SCTLR_EL1(4)
-	MOVD	$CPTR_EL2_NOTRAP, R4
-	WORD	$0xd51c1144	// msr cptr_el2, x4
-
 	// I-cache leeg vóór de drop — zelfde warme-herdispatch-hygiëne als
 	// el2.s (zie dáár): een secundaire core kan als eerdere huurder stale
 	// instructies voor deze canonieke adressen vasthouden.
 	I_HYGIENE	// ic iallu + dsb + isb (hygiene.h — één blok voor elke spring-ingang)
-
-	// SPSR_EL2: EL1h, DAIF gemaskeerd.
-	MOVD	$0, R4
-	ORR	$0b1111<<6, R4
-	ORR	$0b0101<<0, R4
-	WORD	$0xd51c4004	// msr spsr_el2, x4
 
 	// Het geërfde EL1-vertaalregime voor de stub: de dispatchende primaire —
 	// app-runtime (goos.Task) óf node (ConfigureNode) — las zijn ÁCTIEVE
@@ -159,16 +137,19 @@ s2done:
 	MOVD	0xD8(R1), R6	// layout.CtrlSMPTcr  → x6
 	MOVD	0x78(R1), R7	// layout.CtrlSMPVbar → x7
 
-	// ELR_EL2 = EL1-stub (IPA). De context voor de stub in x0..x7 zetten; die
-	// overleven de ERET (die verandert alleen PC/PSTATE).
-	WORD	$0xd51c402f	// msr elr_el2, x15
+	// De rest van de context voor de stub in x0..x4 — ná x5..x7, want x1
+	// (de control-page) gaat hier onder de mp door. x0..x7 overleven de drop
+	// (drop.h raakt ze niet) én de ERET (die verandert alleen PC/PSTATE).
 	MOVD	R10, R0		// x0 = sp
 	MOVD	R11, R1		// x1 = mp
 	MOVD	R12, R2		// x2 = g0
 	MOVD	R13, R3		// x3 = fn (mstart)
 	MOVD	R14, R4		// x4 = ttbr0
-	ISB	$15
-	ERET
+
+	// De drop zelf (drop.h): timers vrij, SCTLR_EL1 schoon (de stub zet 'm
+	// daarna zelf op met de gedeelde tabel), CPTR_EL2 zonder FP-trap (mstart
+	// begint met FP), EL1h met DAIF gemaskeerd, ERET naar de EL1-stub in x15.
+	DROP_TO_EL1(15)
 
 // smpEL2TrampEnd markeert het einde van smpEL2Tramp — zie el2entryEnd in
 // switch.s: de blob [smpEL2Tramp, smpEL2TrampEnd) verhuist als kopie naar de

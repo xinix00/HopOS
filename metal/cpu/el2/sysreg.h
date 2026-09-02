@@ -18,17 +18,16 @@
 // Niet omgeleid (dus geen macro nodig): TPIDR_EL0/EL1, TPIDRRO_EL0, PAR_EL1,
 // CSSELR_EL1, SP_EL0, SP_EL1 (die is al een EL2-encodering) en alle *_EL2.
 //
-// Twee lay-outverschillen die géén encodering zijn maar een bitpatroon:
-// CNTHCTL_EL2 (E2H=0: bits 0/1 = EL1PCTEN/EL1PCEN; E2H=1: bits 10/11) en
-// CPTR_EL2 (E2H=0: 0x33FF = RES1 zonder TFP; E2H=1: CPACR-vorm, FPEN=0b11).
+// Eén lay-outverschil dat géén encodering is maar een bitpatroon: CPTR_EL2
+// (E2H=0: 0x33FF = RES1 zonder TFP; E2H=1: CPACR-vorm, FPEN=0b11).
+// CNTHCTL_EL2 verschilt óók (E2H=0: bits 0/1; E2H=1: bits 10/11), maar de
+// drop (drop.h) zet beide lay-outs tegelijk en heeft er geen schakelaar voor.
 
 #ifdef VHE
 #define EL1OP1 0x50000
-#define CNTHCTL_EL1_BITS 0xC03    /* EL1PCTEN|EL1PTEN (VHE) + EL0PCTEN|EL0VCTEN */
 #define CPTR_EL2_NOTRAP 0x300000  /* CPACR-vorm: FPEN=0b11, verder RES0 */
 #else
 #define EL1OP1 0
-#define CNTHCTL_EL1_BITS 0x3      /* EL1PCTEN|EL1PCEN */
 #define CPTR_EL2_NOTRAP 0x33FF    /* RES1-bits, TFP=0 */
 #endif
 

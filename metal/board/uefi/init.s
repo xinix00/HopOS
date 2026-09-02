@@ -55,7 +55,7 @@ TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	MOVD	·bootKernelVA(SB), R3	// absoluut: linkadres
 	CMP	R2, R3
 	BNE	el1hang
-	B	·uefiEL1(SB)
+	B	·cpuinitEL1(SB)
 el1hang:
 	WFE
 	B	el1hang
@@ -511,28 +511,26 @@ hexsto:
 	BGE	hexdig
 	RET
 
-// bootKernel draait op het LINKADRES met MMU uit — vanaf hier is dit het
-// qemuvirt-cpuinit-recept: EL vaststellen, EL2 configureren, drop naar EL1,
-// tamago-runtime. (Stage-2/VBAR_EL2 volgt in de slots-fase, zoals op de Pi.)
-TEXT ·bootKernel(SB),NOSPLIT|NOFRAME,$0
-	MRS	CurrentEL, R0
-	LSR	$2, R0, R0
-	AND	$0b11, R0, R0
-	MOVD	R0, ·bootELVal(SB)	// MMU uit; ongecached, coherent na civac
+// bootKernel draait op het LINKADRES met MMU uit — vanaf hier is dit de
+// generieke boot (cpu/el2/boot.h), met bootKernel als BOOT_ENTRY (cpuinit is
+// hier de UEFI-ingang: de loader hierboven). Geen BOOT_SCRATCH: het boot-EL
+// gaat naar een Go-global (bootELVal). Geen TRAP_VEC als constante: de
+// trap-vectoren liggen op RamStart+REVOKE_OFF, dus rekent el2UEFI ze uit. De
+// WERKELIJKE waarden gaan naar Go-globals zodat plan.go de asm/Go-pariteit
+// écht kan checken (review #9: de oude check was een tautologie). MMU is uit
+// en de lijnen zijn ge-civac'd — deze stores zijn coherent.
+#include "../../cpu/el2/sysreg.h"
+#include "../../cpu/el2/drop.h"
 
-	CMP	$2, R0
-	BEQ	el2
-	// EL1-boot: doorstarten zodat de probe het kan MELDEN (BootEL()<2);
-	// de echte kern weigert op deze waarde.
-	B	·uefiEL1(SB)
+#define BOOT_ENTRY  ·bootKernel
+#define BOARD_EL2   BL ·el2UEFI(SB)
+#define BOARD_EL1   BL ·el1UEFI(SB)
+#include "../../cpu/el2/boot.h"
 
-el2:
-	// VBAR_EL2 van de HOP-core → de revoke-vectoren (RamStart+REVOKE_OFF =
-	// layout.TrapVecPA). stage2.InitVectors vult ze na boot; de
-	// hard-kill-HVC uit stage2.Revoke landt daar. De WERKELIJKE waarden
-	// gaan naar Go-globals zodat board.go-init de asm/Go-pariteit écht kan
-	// checken (review #9: de oude check was een tautologie). MMU is uit en
-	// de lijnen zijn ge-civac'd — deze stores zijn coherent, als bootELVal.
+// el2UEFI: VBAR_EL2 van de HOP-core → de revoke-vectoren (RamStart+REVOKE_OFF
+// = layout.TrapVecPA). stage2.InitVectors vult ze na boot; de hard-kill-HVC
+// uit stage2.Revoke landt daar. Plus de pariteitswaarden voor plan.go.
+TEXT ·el2UEFI(SB),NOSPLIT|NOFRAME,$0
 	MOVD	runtime∕goos·RamStart(SB), R0
 	MOVD	$REVOKE_OFF, R1
 	ADD	R1, R0
@@ -542,47 +540,13 @@ el2:
 	MOVD	R1, ·carveSizeAsm(SB)
 	MOVD	$MEMMAP_CAP, R1
 	MOVD	R1, ·memmapCapAsm(SB)
+	RET
 
-	// HCR_EL2: RW(31)=1 — EL1 draait AArch64 (wist ook E2H, mocht de
-	// firmware VHE aan hebben gehad).
-	MOVD	$1<<31, R0
-	WORD	$0xd51c1100		// msr hcr_el2, x0
-
-	// CNTHCTL_EL2: EL1PCTEN|EL1PCEN — timer/counter vrij voor EL1.
-	WORD	$0xd53ce100		// mrs x0, cnthctl_el2
-	ORR	$0b11, R0, R0
-	WORD	$0xd51ce100		// msr cnthctl_el2, x0
-	MOVD	$0, R0
-	WORD	$0xd51ce060		// msr cntvoff_el2, x0
-
-	// SPSR_EL2: EL1h, DAIF gemaskeerd.
-	MOVD	$0, R0
-	ORR	$0b1111<<6, R0
-	ORR	$0b0101<<0, R0
-	WORD	$0xd51c4000		// msr spsr_el2, x0
-
-	MOVD	$·uefiEL1(SB), R0
-	WORD	$0xd51c4020		// msr elr_el2, x0
-	ISB	$15
-	ERET
-
-TEXT ·uefiEL1(SB),NOSPLIT|NOFRAME,$0
-	// SCTLR_EL1: alignment-check en MMU uit (tamago zet ze zelf weer aan).
-	MRS	SCTLR_EL1, R0
-	BIC	$1<<1, R0
-	BIC	$1<<0, R0
-	MSR	R0, SCTLR_EL1
-	ISB	$15
-
-	// Stack aan het einde van de eigen RAM-declaratie.
-	MOVD	runtime∕goos·RamStart(SB), R1
-	MOVD	R1, RSP
-	MOVD	runtime∕goos·RamSize(SB), R1
-	MOVD	runtime∕goos·RamStackOffset(SB), R2
-	ADD	R1, RSP
-	SUB	R2, RSP
-
-	B	_rt0_tamago_start(SB)
+// el1UEFI: het boot-EL (x10, boot.h) naar de Go-global — op élke route, ook
+// een EL1-boot: de probe MELDT dan BootEL()<2, de echte kern weigert erop.
+TEXT ·el1UEFI(SB),NOSPLIT|NOFRAME,$0
+	MOVD	R10, ·bootELVal(SB)
+	RET
 
 // EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID (9042a9de-23dc-4a38-96fb-7aded080516a)
 // zoals hij in geheugen ligt, als twee LE-woorden.
