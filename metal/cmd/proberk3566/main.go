@@ -139,9 +139,8 @@ func main() {
 		// de A55's in aff0 (0,1,2,3) of in aff1 (0x100, 0x200, 0x300)?
 		for _, target := range []uint64{uint64(core) << 8, uint64(core)} {
 			rk3566.ClearWake(core)
-			ret := psci.On(target, entry, uint64(rk3566.WakeSlot(core)))
-			if ret != 0 {
-				fmt.Printf("psci: CPU_ON target %#x → %d (afgewezen)\n", target, ret)
+			if err := psci.On(target, entry, uint64(rk3566.WakeSlot(core))); err != nil {
+				fmt.Printf("psci: %v (afgewezen)\n", err)
 				continue
 			}
 			// Even wachten tot hij zijn MPIDR neerlegt; komt er niets, dan

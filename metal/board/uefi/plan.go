@@ -116,8 +116,8 @@ func init() {
 
 	layout.UsePlan(layout.Plan{
 		NodeCtrlPA:    b + ctrlOff,
-		Stage2PA:      b + stage2Off,
-		RevokeVecPA:   b + revokeOff,
+		CagePA:        b + stage2Off,
+		TrapVecPA:     b + revokeOff,
 		NetDMAPA:      b + netDMAOff,
 		BootScratchPA: b + scratchOff,
 		Pool:          pool,

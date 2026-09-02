@@ -1,37 +1,43 @@
 //go:build arm64
 
-// De ARM64-helft van de idle-governor: WFE + de generic-timer-event-stream.
-// Eén WFE per scheduler-ronde, en de event-stream begrenst elke slaap: de
-// generic-timer-teller genereert elke ~1ms een wakeup-event
-// (CNTKCTL_EL1.EVNTEN, geen GIC of interrupt-plumbing nodig), dus de
-// scheduler kijkt hooguit ~1ms later weer naar zijn timers. Timers kunnen
-// daardoor tot ~1ms later vuren — irrelevant voor jobs, en een SEV/interrupt
-// wekt de core direct.
+// De ARM64-helft van de idle-governor: WFE + de generic-timer-event-stream als
+// default slaap, WFI op de fysieke timer als bewezen alternatief, en de
+// HVC-yield voor een gedeelde core. Eén WFE per scheduler-ronde, en de
+// event-stream begrenst elke slaap: de generic-timer-teller genereert elke
+// ~1ms een wakeup-event (CNTKCTL_EL1.EVNTEN, geen GIC of interrupt-plumbing
+// nodig), dus de scheduler kijkt hooguit ~1ms later weer naar zijn timers.
+// Timers kunnen daardoor tot ~1ms later vuren — irrelevant voor jobs, en een
+// SEV/interrupt wekt de core direct.
 //
 // Elke core roept Enable aan in zijn eigen hwinit1 (ná arm64.Init, die de
 // default governor zet); CNTKCTL is per core. De RISC-V-helft
 // (idle_riscv64.go) heeft geen WFE-equivalent en bereikt dezelfde slaap via
-// de M-mode-switcher (yield met wektijd) of, voor HOP zelf, direct
-// (UseMSleep). De gedeelde helft — tellers, publicatie, wakeAt — staat in
-// idle.go.
+// de M-mode-switcher (yield met wektijd) of, voor HOP zelf, direct (de
+// CLINT-Sleeper van het board). De gedeelde helft — Sleeper, tellers,
+// publicatie, wakeAt, het quirk-masker — staat in idle.go.
 
 package idle
 
 import (
 	"runtime/goos"
 
+	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/dev"
 )
 
-// wfeIdle/hvcYield/cntkctlSet/cntfrq/counterNow/mmfr0/wfiUntil: zie idle_arm64.s.
+// wfeIdle/hvcYield/cntkctlSet/cntfrq/counterNow/mmfr0/wfiUntil: zie idle_arm64.s;
+// cycOvrdWFIUp: prep_arm64.s.
 func wfeIdle() uint64
 func wfiUntil(ticks uint64) uint64
 func hvcYield(deadline uint64) uint64
 func cntkctlSet(v uint64)
 func cntfrq() uint64
 func mmfr0() uint64
+func cycOvrdWFIUp()
 
-// Enable zet de event-stream aan en hangt de WFE-governor in de runtime.
+// Enable zet de event-stream aan en hangt de governor in de runtime, met
+// WFESleep als slaap zolang het board niets anders koos (Use).
+//
 // EVNTI kiest de counterbit waarvan de 0→1-flank het wek-event is; we pakken
 // de bit die het dichtst bij ~1ms periode blijft (2^(EVNTI+1)/CNTFRQ):
 // bit 15 op de Pi's 54MHz (1,2ms) en QEMU's 62,5MHz (1,05ms), bit 14 op de
@@ -44,7 +50,8 @@ func mmfr0() uint64
 // schuift de gekozen bit 8 posities op (×256) — en die zetten we zodra zelfs
 // bit 15 onder een halve milliseconde uitkomt. Op elk board met een teller
 // onder ~131MHz (Pi, QEMU, Altra, RK3566) verandert er niets: daar blijft de
-// oude keuze staan en wordt EVNTIS niet gezet.
+// oude keuze staan en wordt EVNTIS niet gezet. (Op de M4 komt dit uit op
+// EVNTI 11: 2^20 ticks = 1,048ms = 954 wekken/s — precies wat er gemeten is.)
 func Enable() {
 	hz := cntfrq()
 	shift := uint64(0)
@@ -69,12 +76,43 @@ func Enable() {
 		wfeMinSleep = t
 	}
 	timerCap = hz / 1000 // 1ms, de bovengrens van één deadline-slaap
+	if sleeper == nil {
+		sleeper = WFESleep
+	}
 	goos.Idle = governor
 }
 
-// timerSleep: mag deze core, als de WFE-drain niets opleverde, alsnog op de
-// FYSIEKE TIMER slapen (WFI met CNTP_TVAL als deadline)? Uit op elk board dat
-// het niet aanzet — de WFE-governor blijft daar exact wat hij was.
+// timerCap is de bovengrens van één deadline-slaap (WFISleep), in ticks.
+var timerCap uint64
+
+// WFESleep is de default-Sleeper: WFE's tot er écht geslapen is, met de
+// counterstand eromheen. De lus is nodig omdat het event-register vrijwel
+// altijd vol zit als we hier komen: elke exclusive (LDXR/STXR — de
+// scheduler-transit én onze eigen atomics) zet op de N1 een wek-event, en de
+// eerste WFE keert daardoor per direct terug (GEMETEN 18-07 op de Altra:
+// 4,7M wakes/s, slaap 0,0µs — "idle" cores spinden op volle kracht en de
+// idle-teller was ruis). De herhaalde WFE slaapt wél: tussen de iteraties
+// staat geen enkele monitor-touch. Events wegslikken is veilig — tamago's
+// Ms pollen (geen SEV-wek-afhankelijkheid) en de event-stream begrenst elke
+// slaap op ~1,3ms; de cap dekt een externe event-storm (dan meten we eerlijk
+// "geen slaap" en draait de scheduler gewoon door). Bewust ongevoelig voor
+// wake: de event-stream begrenst elke slaap op ~1-2ms, dus timers vuren
+// hooguit ~1-2 periodes later — irrelevant voor jobs.
+func WFESleep(wake uint64) uint64 {
+	var slept uint64
+	for i := 0; slept < wfeMinSleep && i < 4; i++ {
+		slept += wfeIdle()
+	}
+	return slept
+}
+
+// WFISleep is de Sleeper voor silicium waar WFE ín de scheduler-lus niet
+// slaapt: eerst de WFE-drain, en leverde die niets op, dan de FYSIEKE TIMER
+// als deadline (WFI met CNTP_TVAL). Alleen kiezen (Use) waar het board dit
+// gemeten heeft — WFI raakt de interrupt-wereld van het board (een pending
+// interrupt die niemand afhandelt maakt hem een no-op, een timer-FIQ die de
+// core niet bereikt maakt hem een eeuwige slaap) en QEMU-TCG modelleert hem
+// anders dan ijzer.
 //
 // WAAROM DIT BESTAAT (gemeten 29-08, Mac mini M4). Een kale burst van 1000
 // WFE's sliep daar keurig 1,046ms per stuk: de event-stream doet zijn werk.
@@ -85,20 +123,13 @@ func Enable() {
 // verliest die race. WFI kent dat probleem niet — die wacht op een echte
 // interrupt-gebeurtenis, en de fysieke timer levert er precies één: gemeten
 // 1.000163 ticks voor een deadline van 1ms, en 5.000133 voor 5ms.
-//
-// Waarom een board-schakelaar en geen default: WFI raakt de interrupt-wereld
-// van het board (een pending interrupt die niemand afhandelt maakt hem een
-// no-op) en QEMU-TCG modelleert hem anders dan ijzer. Dit is dus dezelfde
-// afspraak als UseMSleep op RISC-V: alleen aan waar het board het gemeten
-// heeft (board/apple — zie docs/archief/apple-m4.md).
-var (
-	timerSleep bool
-	timerCap   uint64
-)
-
-// UseTimerSleep zet de deadline-slaap aan voor deze core. Aanroepen ná Enable
-// (die zet timerCap), door een board dat WFI+CNTP op dít silicium bewezen heeft.
-func UseTimerSleep() { timerSleep = true }
+func WFISleep(wake uint64) uint64 {
+	slept := WFESleep(wake)
+	if slept < wfeMinSleep {
+		slept += sleepUntil(wake)
+	}
+	return slept
+}
 
 // sleepUntil slaapt tot de wektijd (absolute counterstand; 0 = geen deadline),
 // begrensd op timerCap, en geeft de werkelijk verstreken ticks terug.
@@ -127,7 +158,7 @@ func sleepUntil(wake uint64) uint64 {
 func CounterHz() uint64 { return cntfrq() }
 
 // AccountsDedicated meldt of de idle-teller óók op een DEDICATED core loopt.
-// Waar op ARM: de governor WFE't daar en meet de geslapen tijd. Op een gedeelde
+// Waar op ARM: de governor slaapt daar en meet de geslapen tijd. Op een gedeelde
 // core meten beide architecturen (de yield beslaat de hele descheduled-periode),
 // dus alleen dít geval verschilt — en wie een cpu-percentage rapporteert moet het
 // weten: een teller die stilstaat leest als "100% bezig". Zie idle_riscv64.go.
@@ -143,25 +174,17 @@ func AccountsDedicated() bool { return true }
 // de bodem, zodat elk bestaand board precies houdt wat het had.
 var wfeMinSleep uint64 = 64
 
-// governor: WFE's tot er écht geslapen is, met de counterstand eromheen — de
-// geslapen tijd gaat de teller in. De lus is nodig omdat het event-register
-// vrijwel altijd vol zit als we hier komen: elke exclusive (LDXR/STXR — de
-// scheduler-transit én onze eigen atomics) zet op de N1 een wek-event, en de
-// eerste WFE keert daardoor per direct terug (GEMETEN 18-07 op de Altra:
-// 4,7M wakes/s, slaap 0,0µs — "idle" cores spinden op volle kracht en de
-// idle-teller was ruis). De herhaalde WFE slaapt wél: tussen de iteraties
-// staat geen enkele monitor-touch. Events wegslikken is veilig — tamago's
-// Ms pollen (geen SEV-wek-afhankelijkheid) en de event-stream begrenst elke
-// slaap op ~1,3ms; de cap dekt een externe event-storm (dan meten we eerlijk
-// "geen slaap" en draait de scheduler gewoon door). De WFE-kant is bewust
-// ongevoelig voor pollUntil (de event stream begrenst elke slaap op ~1,3ms,
-// dus timers vuren hooguit ~1-2 periodes later — irrelevant voor jobs); de
-// yield-kant geeft pollUntil juist wél door, als wektijd waar de rotatie deze
-// bewoner tot die tijd mee overslaat.
+// governor: één melding per scheduler-ronde — "niets te doen tot T" — en dan
+// óf de beurt afgeven (gedeelde core: HVC-yield naar de EL2-switch, mét de
+// wektijd zodat twee wachtende buren niet pingpongen), óf slapen met de
+// Sleeper van dit board. De geslapen tijd gaat de teller in.
 func governor(pollUntil int64) {
-	// De doorbell eerst: ligt er RX, dan is de pomp nu gewekt en is slapen
-	// precies verkeerd; ligt er niets, dan is de drempel nu gewapend en
-	// bewaakt de rotatie-peek de rest van deze slaap (zie rxdoor.go).
+	// Eerst wat het board over deze core zei (CtrlCorePrep): zonder dat slaapt
+	// een WFE op sommig silicium helemaal niet, en dan is de rest zinloos.
+	corePrep()
+	// De doorbell: ligt er RX, dan is de pomp nu gewekt en is slapen precies
+	// verkeerd; ligt er niets, dan is de drempel nu gewapend en bewaakt de
+	// rotatie-peek de rest van deze slaap (zie rxdoor.go).
 	if rxDoor() {
 		countWake()
 		return
@@ -171,26 +194,23 @@ func governor(pollUntil int64) {
 		// Gedeelde core: expliciet yielden, mét de wektijd. De HVC trapt naar
 		// de EL2-switch, die onze staat opslaat, de core laat slapen, de
 		// mede-bewoner draait en ons hier hervat — maar niet vóór de wektijd
-		// (CtxWake), dus twee wachtende buren pingpongen niet. Eén yield per
-		// idle-ronde: de switch doet zelf de WFE-slaap (power) en de rotatie.
-		// Testbaar op QEMU, waar een WFE-trap dat niet zou zijn.
+		// (CtxWake). Eén yield per idle-ronde: de switch doet zelf de
+		// WFE-slaap (power) en de rotatie. Testbaar op QEMU, waar een WFE-trap
+		// dat niet zou zijn.
 		slept = hvcYield(wakeAt(pollUntil))
 	} else {
-		// Dedicated core: WFE's tot er écht geslapen is (drain-lus, zie boven).
-		for i := 0; slept < wfeMinSleep && i < 4; i++ {
-			slept += wfeIdle()
-		}
-		// Bleef het bij het opeten van klaarstaande events, dan is er op dit
-		// board nog één route naar echte slaap: de fysieke timer als deadline
-		// (zie timerSleep). Boards die hem niet aanzetten draaien exact het
-		// oude pad.
-		if slept < wfeMinSleep && timerSleep {
-			slept += sleepUntil(wakeAt(pollUntil))
-		}
+		slept = sleeper(wakeAt(pollUntil))
 	}
 	n := ticks.Add(slept)
 	if a := pubAddr.Load(); a != 0 {
 		dev.Write64(a, n)
 	}
 	countWake()
+}
+
+// applyPrep voert het quirk-masker van het board uit (layout.Prep*).
+func applyPrep(mask uint64) {
+	if mask&layout.PrepDeepWFE != 0 {
+		cycOvrdWFIUp()
+	}
 }

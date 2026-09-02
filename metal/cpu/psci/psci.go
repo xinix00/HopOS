@@ -13,6 +13,8 @@
 // Alleen voor GOOS=tamago GOARCH=arm64.
 package psci
 
+import "fmt"
+
 // SMCCC/PSCI function IDs (64-bit calling convention).
 const (
 	CPU_ON        uint64 = 0xC4000003
@@ -32,9 +34,20 @@ func Version() (major, minor uint16) {
 
 // On start een secundaire core: target is het MPIDR-target (al vertaald uit
 // de core-index door het board — de nummering is boardspecifiek). De core
-// begint op entry (fysiek adres, MMU uit) met ctx in x0.
-func On(target, entry, ctx uint64) int64 {
-	return int64(SMC(CPU_ON, target, entry, ctx))
+// begint op entry (fysiek adres, MMU uit) met ctx in x0. Elke PSCI-code
+// behalve 0 is een fout, met de code erin — dat is board.Cores.Start.
+func On(target, entry, ctx uint64) error {
+	if ret := int64(SMC(CPU_ON, target, entry, ctx)); ret != 0 {
+		return fmt.Errorf("PSCI CPU_ON target %#x: %d", target, ret)
+	}
+	return nil
+}
+
+// Line is de firmware-consoleregel van een PSCI-board (board.Board.Firmware):
+// versie van de provider en het boot-EL.
+func Line(el int) string {
+	major, minor := Version()
+	return fmt.Sprintf("psci: v%d.%d (boot EL%d, SMC conduit)", major, minor, el)
 }
 
 // AffinityInfo geeft de powertoestand van een core (MPIDR-target; de

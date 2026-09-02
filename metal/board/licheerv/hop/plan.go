@@ -43,7 +43,7 @@ import (
 // laat de vorm zien vóór er iets geplaatst is.
 //
 // Wat hier ontbreekt t.o.v. de ARM-boards is precies wat deze architectuur niet
-// heeft: Stage2PA en RevokeVecPA (geen stage-2-tabellen, geen EL2-vectortabel —
+// heeft: CagePA en TrapVecPA (geen stage-2-tabellen, geen EL2-vectortabel —
 // de kooi is een PMP-whitelist en die zit in registers per hart). NetDMAPA blijft 0
 // tot de DWMAC in bedrijf is.
 const (
@@ -65,13 +65,13 @@ const (
 	bootScratchPA = osBase
 	nodeCtrlPA    = osBase + 0x1000
 
-	// slotBlockPA is Plan.Stage2PA. De naam komt van ARM (daar staan er ook
+	// slotBlockPA is Plan.CagePA. De naam komt van ARM (daar staan er ook
 	// stage-2-tabellen en EL2-vectoren in), maar op deze architectuur draagt de
 	// regio alleen HOP's eigen per-slot boekhouding: het ctx-levensteken dat
 	// slots.Get leest, de sched-blokken die de switcher gebruikt (cpu/mmode) en
 	// de park-mailboxen. Zonder plek leest dat vanaf nul.
 	//
-	// (MaxSlots+1) × Stage2Stride: met zestien kooien is dat 17 × 64KB =
+	// (MaxSlots+1) × CageStride: met zestien kooien is dat 17 × 64KB =
 	// 0x110000, dus tot osBase+0x130000 — daar begint de NIC-DMA.
 	slotBlockPA = osBase + 0x20000
 
@@ -116,10 +116,10 @@ func init() {
 	// toevallig in 1MB paste: een papieren plafond, geen fysieke grens.
 	// Eén logische app-core per app-hart. Uit de lijst zelf en niet als literaal,
 	// want dít is de plek waar de twee tellingen moeten kloppen: kern/slots rekent
-	// met aaneengesloten logische nummers 1..N en vertaalt ze via hartOf naar de
-	// hart-ID's uit AppHarts. Een board dat er twee zegt en één levert (of andersom)
+	// met aaneengesloten logische nummers 1..N en vertaalt ze via physCore naar de
+	// hart-ID's uit Cores().App. Een board dat er twee zegt en één levert (of andersom)
 	// adverteert slots die nergens kunnen draaien.
-	layout.SetAppCores(len(machine{}.AppHarts()))
+	layout.SetAppCores(len(appHarts()))
 	layout.SetMaxSlots(16)
 
 	// Past alles in de staart (osSize)? De reeks is strak op orde: elke regio moet
@@ -134,7 +134,7 @@ func init() {
 	}{
 		{"boot-scratch", bootScratchPA, 0x1000},
 		{"node-ctrl", nodeCtrlPA, uint64(layout.MaxSlots+1) * layout.CtrlStride},
-		{"slot-blokken", slotBlockPA, uint64(layout.MaxSlots+1) * layout.Stage2Stride},
+		{"slot-blokken", slotBlockPA, uint64(layout.MaxSlots+1) * layout.CageStride},
 		{"nic-dma", netDMAPA, netDMASize},
 	}
 	if netDMASize < dwmac.NeedBytes {
@@ -158,7 +158,7 @@ func init() {
 		RAMBase:       dramBase,
 		NodeCtrlPA:    nodeCtrlPA,
 		BootScratchPA: bootScratchPA,
-		Stage2PA:      slotBlockPA,
+		CagePA:        slotBlockPA,
 		NetDMAPA:      netDMAPA,
 		// DRIE regio's, omdat HOP tussen het lage en het hoge DRAM in staat.
 		//

@@ -101,12 +101,12 @@ const (
 	// de stage-2-blokken gaan tot de kooi-cap van 128 slots = 8MB).
 	//
 	//	+0x0000000   64KB  control-pages van HOP's eigen cores (NodeCtrlPA)
-	//	+0x00F0000    2KB  EL2-vectortabel van de boot-core (RevokeVecPA — cpuinit-vast!)
+	//	+0x00F0000    2KB  EL2-vectortabel van de boot-core (TrapVecPA — cpuinit-vast!)
 	//	+0x00F8000    8B   kern-flip-vluchtrecorder (FlipScratch) — MOET buiten
 	//	                   het image liggen: iBoot legt het bootobject bij élke
 	//	                   boot terug over RamBase+0..imageSize, dus een spoor
 	//	                   op de boot-scratch wist zichzelf (gemeten 01-09)
-	//	+0x0100000  8.1MB  app-core-vectoren + stage-2-tabelblokken (Stage2PA)
+	//	+0x0100000  8.1MB  app-core-vectoren + stage-2-tabelblokken (CagePA)
 	//	+0x0A00000   4KB   levenstekenwoorden van de probe (WakeBase)
 	//	+0x1000000   8MB   NIC-DMA (NetDMAPA) — de tg3
 	//	+0x1800000   8MB   opslag-DMA (StorageDMAPA) — de queues van de ANS
@@ -115,7 +115,7 @@ const (
 	NodeCtrlPA  = StructBase + 0x0000000
 	RevokeVec   = StructBase + 0x00F0000
 	FlipScratch = StructBase + 0x00F8000
-	Stage2PA    = StructBase + 0x0100000
+	CagePA      = StructBase + 0x0100000
 	WakeBase    = StructBase + 0x0A00000
 
 	NetDMAPA = StructBase + 0x1000000
@@ -174,7 +174,7 @@ func hwinit1() {
 	// dat die poort opent is vergrendeld. WFI is dan een eeuwige slaap. Meten,
 	// niet aannemen — TimerWakes doet dat zonder ooit te kunnen hangen.
 	if TimerWakes() {
-		idle.UseTimerSleep()
+		idle.Use(idle.WFISleep)
 	}
 }
 

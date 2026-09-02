@@ -36,8 +36,8 @@ func SetupPlan(rng200, watchdog uintptr) {
 	WatchdogBase = watchdog
 	p := layout.Plan{
 		NodeCtrlPA:    0x10000000,
-		Stage2PA:      0x12000000,
-		RevokeVecPA:   revokeVecAsm,
+		CagePA:        0x12000000,
+		TrapVecPA:     revokeVecAsm,
 		BootScratchPA: BootScratch, // 0x7F000, cpuinit-vast
 		NetDMAPA:      0x14000000,  // NIC-DMA-ringen/buffers (buiten RAM-decl → ongecachet)
 		USBDMAPA:      0x14800000,  // xHCI-ringen/contexten, direct boven de NIC-regio (idem)

@@ -28,6 +28,9 @@ func init() { board.Use(machine{}) }
 // het bord zichtbaar.
 var _ board.Board = machine{}
 
+// En de M-mode-switcher-kant: de comparator-afspraak per hart (hart.go).
+var _ board.HartTimerer = machine{}
+
 func (machine) CoreID() int { return licheerv.CoreID() }
 
 // TempMilliC (board.Thermometer): de on-die TEMPSEN — rng.go zet hem bij boot

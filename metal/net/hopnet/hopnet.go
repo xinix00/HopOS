@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/xinix00/HopOS/metal/net/netdev"
@@ -27,6 +28,20 @@ import (
 	"github.com/xinix00/HopOS/metal/net/hopswitch"
 	"github.com/xinix00/lean/leandhcp"
 )
+
+// rxIdle telt de lege rondes van de RX-lus: hoe vaak HOP keek en niets vond.
+// Gepold is dat ~3.333/s bij stilte, op de interrupt ~100/s (de vangrail).
+// Dit is de meetlat van de RX-lus die óók op QEMU klopt — de governor-wekken
+// (idle.Wakes) zijn daar ruis, want WFE is op TCG een no-op.
+var rxIdle atomic.Uint64
+
+// RXIdleRounds geeft de teller (hopos.idlestat in cmd/hopos leest hem).
+func RXIdleRounds() uint64 { return rxIdle.Load() }
+
+// ForcePoll dwingt de RX-lus in de poll-stand, ook op een board met een
+// NIC-interrupt (hopos.rxpoll=1): de A/B-knop voor de meting én de veiligheids-
+// klep als een interrupt-bedrading op een board niet deugt. Zetten vóór Up.
+var ForcePoll bool
 
 // Up initialiseert de NIC en de netstack en hangt ze in het net-package. Het
 // IP-plan en de NIC-probe komen van het actieve board (op QEMU de slirp-
@@ -80,11 +95,22 @@ func Up() error {
 
 	net.SetDefaultNS([]string{nc.DNS})
 
-	// RX-lus: pollen mét microslaap i.p.v. een Gosched-spin, zodat de
-	// idle-governor (metal/cpu/idle) de core echt kan laten slapen als het stil
-	// is; onder last wordt er nooit geslapen (ring leeg = pas dan slapen).
-	// Over de locdev, zodat loopback- en gateway-frames vóór de NIC gaan.
-	go rxLoop(loc, recv)
+	// RX-lus: op de NIC-interrupt waar het board die heeft (board.NICInterrupter
+	// — de doorbell voor HOP's eigen core), anders pollen mét microslaap i.p.v.
+	// een Gosched-spin, zodat de idle-governor (metal/cpu/idle) de core echt
+	// kan laten slapen als het stil is; onder last wordt er nooit geslapen
+	// (ring leeg = pas dan slapen). Over de locdev, zodat loopback- en
+	// gateway-frames vóór de NIC gaan.
+	waiter, _ := board.Current().(board.NICInterrupter)
+	if ForcePoll {
+		waiter = nil
+	}
+	if waiter != nil {
+		fmt.Println("net: RX wakes on the NIC interrupt")
+	} else {
+		fmt.Println("net: RX polled every 300µs (no NIC interrupt on this board, or hopos.rxpoll=1)")
+	}
+	go rxLoop(loc, recv, waiter)
 
 	// DHCP-lease levend houden: heeft dit board een verkregen lease (de Pi's),
 	// dan vernieuwt KeepAlive hem op T1 via de netstack (UDP-RENEW) — dat kan
@@ -116,12 +142,23 @@ func Up() error {
 
 // rxLoop pompt frames van het device naar de stack; recv is de
 // ingress-voeding die stack.go teruggaf.
-func rxLoop(nic netdev.Device, recv func([]byte) error) {
+//
+// Met een waiter is de lus: ring leegpompen, wachten op de interrupt. De
+// vangrail van 10ms is er omdat een verloren flank nooit een hang mag worden
+// (cpu/irq) — hij kost bij stilte 100 wekmomenten per seconde in plaats van
+// 3.333, en onder verkeer wordt hij nooit geraakt.
+func rxLoop(nic netdev.Device, recv func([]byte) error, waiter board.NICInterrupter) {
 	buf := make([]byte, netdev.MTU+netdev.EthernetMaximumSize)
 	for {
-		if !rxPass(nic, recv, buf) {
-			time.Sleep(300 * time.Microsecond)
+		if rxPass(nic, recv, buf) {
+			continue
 		}
+		rxIdle.Add(1)
+		if waiter != nil {
+			waiter.WaitNIC(10 * time.Millisecond)
+			continue
+		}
+		time.Sleep(300 * time.Microsecond)
 	}
 }
 

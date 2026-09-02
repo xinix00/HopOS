@@ -12,7 +12,7 @@
 //     precies board.CPUOn, net als een app-core.
 //   - De node draait zonder kooi (EL1, stage-2 uit): de handoff zet
 //     CtrlS2Table=0, waarop de gedeelde trampoline het node-profiel kiest (HCR
-//     zonder VM/TSC), en CtrlVecPA=RevokeVecPA (dezelfde EL2-vectoren als core 0
+//     zonder VM/TSC), en CtrlVecPA=TrapVecPA (dezelfde EL2-vectoren als core 0
 //     uit bootKernel). De gereserveerde slots (1..cores-1) lenen hun control-page
 //     als handoff-scratch; apps komen daar nooit (slotmgr schuift ze weg).
 //
@@ -116,11 +116,11 @@ func nodeTask(sp, mp, gp, fn unsafe.Pointer) {
 	// gedeelde deel via writeHandoff (smp.go); daarbovenop de node-profielvelden.
 	cp := layout.NodeCtrlPA(c)
 	writeHandoff(cp, sp, mp, gp, fn, nodeStub)
-	dev.Write64(cp+layout.CtrlS2Table, 0)                          // node-profiel: geen stage-2-kooi
-	dev.Write64(cp+layout.CtrlVecPA, uint64(layout.RevokeVecPA())) // EL2-vectoren (revoke), als core 0
-	dev.Write64(cp+layout.CtrlSlot, 0)                             // VMID 0 = die van core 0 (TLBI-broadcast)
-	dev.Write64(cp+layout.CtrlSMPMbox, 0)                          // node-cores parkeren niet
-	dev.MB()                                                       // handoff zichtbaar vóór de dispatch
+	dev.Write64(cp+layout.CtrlS2Table, 0)                        // node-profiel: geen stage-2-kooi
+	dev.Write64(cp+layout.CtrlVecPA, uint64(layout.TrapVecPA())) // EL2-vectoren (revoke), als core 0
+	dev.Write64(cp+layout.CtrlSlot, 0)                           // VMID 0 = die van core 0 (TLBI-broadcast)
+	dev.Write64(cp+layout.CtrlSMPMbox, 0)                        // node-cores parkeren niet
+	dev.MB()                                                     // handoff zichtbaar vóór de dispatch
 
 	nodeDispatch(c, nodeTramp, uint64(cp))
 	atomic.StoreUint32(&nodeBootLock, 0)

@@ -17,7 +17,7 @@ const tFbPA = 0x3E10_8000
 // de walker: L2 → blok, of L2 → L3 → pagina (de randen van het venster).
 func grantMapped(t *testing.T, slot int, lo, p uint64) uint64 {
 	t.Helper()
-	base := uint64(layout.Stage2TablePA(slot))
+	base := uint64(layout.CageTablePA(slot))
 	gbBase := (uint64(layout.FbIPA) >> 30) << 30
 	ipa := uint64(layout.FbIPA) + (p - lo)
 	e := rd(base + l2FbOff + ((ipa-gbBase)>>21)*8)
@@ -61,7 +61,7 @@ func TestGrantWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	base := uint64(layout.Stage2TablePA(slot))
+	base := uint64(layout.CageTablePA(slot))
 	lo := uint64(tFbPA) &^ ((2 << 20) - 1)
 	fbGB := uint64(layout.FbIPA) >> 30
 
@@ -110,7 +110,7 @@ func TestGrantWindow(t *testing.T) {
 	if _, err := Build(other, layout.SlotBase(1), tPoolPA+(64<<20), 4<<20); err != nil {
 		t.Fatal(err)
 	}
-	if e := rd(uint64(layout.Stage2TablePA(other)) + l1Off + fbGB*8); e != 0 {
+	if e := rd(uint64(layout.CageTablePA(other)) + l1Off + fbGB*8); e != 0 {
 		t.Fatalf("slot %d kreeg óók een fb-GB: %#x", other, e)
 	}
 }

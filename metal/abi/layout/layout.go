@@ -140,16 +140,16 @@ const (
 
 	// Stage-2-gebied: door HOP geschreven, door de EL2-trampoline/walker
 	// gelezen, voor app-cores onzichtbaar (staat in geen enkele stage-2-map) —
-	// dus puur fysiek, geen IPA: de basis is Plan.Stage2PA. De indeling ervan
+	// dus puur fysiek, geen IPA: de basis is Plan.CagePA. De indeling ervan
 	// is wél universeel: +0x0 de gedeelde EL2-vectoren van de app-cores
-	// (2KB-aligned), en per slot i ≥ 1 een tabelblok op +i*Stage2Stride
+	// (2KB-aligned), en per slot i ≥ 1 een tabelblok op +i*CageStride
 	// (L1 +0x0, L2 +0x1000/+0x2000, L3-ctrl +0x3000, L3-ring +0x4000,
 	// net-ring-L2 +0x5000, en op +CtxOff het switch-contextblok van het slot —
 	// zie hieronder). De revoke-vectoren van de HOP-core staan apart
-	// (Plan.RevokeVecPA): dat is de tabel waar cpuinit VBAR_EL2 van core 0
+	// (Plan.TrapVecPA): dat is de tabel waar cpuinit VBAR_EL2 van core 0
 	// heen zette — een board mag daar zijn eigen boot-diagnostiek in hebben
 	// (rpi5: de faultdump-tabel); InitVectors plugt er alleen de HVC-handler in.
-	Stage2Stride = 0x10000
+	CageStride = 0x10000
 
 	// Parkeer-machinerie (in het slot-0-blok, ná de vectoren; QEMU's
 	// revoke-tabel zit op +0x800..+0x1000): HopOS bezit zijn cores — een
@@ -189,7 +189,7 @@ const (
 	// SwitchCodeMax is de harde bovengrens (descriptor + blobs samen): de rest
 	// van het slot-0-stride-blok. De install panikeert erboven — liever hard
 	// bij boot dan stil in het tabelblok van slot 1 schrijven.
-	SwitchCodeMax = Stage2Stride - switchCodeOff
+	SwitchCodeMax = CageStride - switchCodeOff
 
 	// Sched-blok-indeling (offsets binnen het 256B-blok van een core).
 	//
@@ -248,7 +248,7 @@ const (
 	SchedCursor = 80  // ARM: laatst geplande lijst-index (u64)
 	SchedCount  = 88  // lijstlengte (u64, monotoon; 0-bytes zijn gaten)
 	SchedList   = 96  // SlotCap × 1 byte: slotnummers van de bewoners
-	SchedS2PA   = 224 // fysieke Plan.Stage2PA (switch.s: ctx/VTTBR/park afleiden)
+	SchedS2PA   = 224 // fysieke Plan.CagePA (switch.s: ctx/VTTBR/park afleiden)
 
 	// De wekker van dit hart, voor de slaap-stand van de switcher (RISC-V).
 	// HOP vult ze pas ná zijn CLINT-probe (board/licheerv/clint.go): staat
@@ -267,7 +267,7 @@ const (
 	SchedSleepCap = 240 // max slaapduur in tikken (0 = niet slapen, wel tikken)
 	SchedMsipPA   = 248 // PA van msip van DIT hart (het wek-IPI van HOP)
 
-	// Switch-contextblok per slot (op Stage2TablePA(i)+CtxOff): de EL1-staat
+	// Switch-contextblok per slot (op CageTablePA(i)+CtxOff): de EL1-staat
 	// van een geyielde bewoner van een gedeelde core, gesaved/gerestored door
 	// cpu/el2/switch.s. CtxState is tevens het slot-levensteken dat HOP leest
 	// (kern/slots): de vector-paden zetten 'm op dead bij een exit of fault.
@@ -484,17 +484,24 @@ type Plan struct {
 	// hebben geen partitie en dus geen ABI-staart om hun handoff in te leggen.
 	// MaxSlots+1 pagina's, 4KB-aligned. App-slots staan hier NIET in — die
 	// dragen hun control page in hun eigen partitie (de slot-ABI hierboven).
-	Stage2PA uint64 // app-core-vectoren + tabelblokken: (MaxSlots+1) × Stage2Stride (2KB-aligned)
+	// CagePA is de kooi-regio: (MaxSlots+1) blokken van CageStride. Op ARM
+	// de EL2-vectoren van de app-cores plus per slot zijn stage-2-tabellen;
+	// op RISC-V per slot zijn ctx-blok en per core de park-mailbox van de
+	// M-mode-switcher. Eén naam voor beide, want kern/slots (de kooi-naad)
+	// rekent er op beide architecturen mee. 2KB-aligned.
+	CagePA uint64
 	// FlipScratchPA: één woord voor de kern-flip-vluchtrecorder, buiten het
 	// kernel-image en buiten alles wat de firmware of cpuinit bij een verse
 	// boot beschrijft — het moet een WATCHDOG-REBOOT overleven. 0 = dit board
 	// heeft er (nog) geen plek voor en de recorder is een no-op.
 	FlipScratchPA uint64
 
-	RevokeVecPA uint64 // EL2-vectortabel van de HOP-core (2KB-aligned): waar
-	// cpuinit VBAR_EL2 van core 0 heen zette. InitVectors plugt er alleen de
-	// HVC-revoke-handler in (offset 0x400) en laat de rest staan — een board
-	// mag daar zijn boot-diagnostiek hebben (rpi5: de faultdump-tabel).
+	// TrapVecPA is de vectortabel van de HOP-core zelf (ARM: EL2, 2KB-
+	// aligned) — waar cpuinit VBAR_EL2 van core 0 heen zette. InitVectors
+	// plugt er alleen de HVC-revoke-handler in (offset 0x400) en laat de rest
+	// staan — een board mag daar zijn boot-diagnostiek hebben (rpi5: de
+	// faultdump-tabel). Op RISC-V leeg: HOP's mtvec is van de runtime.
+	TrapVecPA     uint64
 	BootScratchPA uint64 // boot-EL-scratch + DTB-pointer (cpuinit-vast, board-asm)
 	NetDMAPA      uint64 // NIC-DMA-regio (NetDMASize; buiten élke RAM-declaratie
 	// → device-gemapt → coherent met de NIC zonder cache-onderhoud). Optioneel
@@ -536,11 +543,20 @@ func UsePlan(p Plan) {
 		panic("layout: Plan.BootScratchPA ontbreekt")
 	case len(p.Pool) == 0:
 		panic("layout: Plan.Pool is leeg — geen partitie-geheugen")
+	// De kooi-regio is er op élke architectuur: op ARM de stage-2-tabellen
+	// en de EL2-vectoren, op RISC-V de ctx-blokken en de park-mailboxen van
+	// de switcher (kern/slots cage_riscv64.go). 2KB-uitlijning is de eis van
+	// het strengste gebruik (VBAR_EL2). Zonder plek leest slots.Get vanaf
+	// adres nul — GEMETEN 30-07: load access fault in een achtergrond-
+	// goroutine — dus liever hier hard falen met een reden.
+	case p.CagePA == 0 || p.CagePA&0x7FF != 0:
+		panic("layout: Plan.CagePA ontbreekt of niet 2KB-aligned (kooi-regio: tabellen/vectoren, ctx-blokken, mailboxen)")
+	// De trap-vectoren van de HOP-core zijn alleen een ARM-ding (VBAR_EL2 van
+	// core 0; stage2.InitVectors eist ze bij gebruik). Een RISC-V-plan laat
+	// het veld leeg — dat is geen fout, wel een aligned adres als het er is.
+	case p.TrapVecPA&0x7FF != 0:
+		panic("layout: Plan.TrapVecPA niet 2KB-aligned (VBAR-eis)")
 	}
-	// Wat de kooi-mechaniek van dit board nog eist, checkt de arch-helft:
-	// stage-2-tabellen en EL2-vectoren bestaan alleen op ARM (plan_arm64.go),
-	// een PMP-kooi heeft ze niet (plan_riscv64.go).
-	validatePlanArch(p)
 	plan = p
 }
 
@@ -613,28 +629,28 @@ func FlipStagePA() uintptr {
 // stage2.Build — er is geen register dat stale kan worden.
 
 // VecBasePA is de fysieke basis van de gedeelde EL2-vectoren (app-cores);
-// RevokeVecPA die van de vectortabel van de HOP-core (cpuinit-asm moet
+// TrapVecPA die van de vectortabel van de HOP-core (cpuinit-asm moet
 // hiermee overeenkomen — het board checkt dat in zijn init).
-func VecBasePA() uintptr   { return pa(plan.Stage2PA) }
-func RevokeVecPA() uintptr { return pa(plan.RevokeVecPA) }
+func VecBasePA() uintptr { return pa(plan.CagePA) }
+func TrapVecPA() uintptr { return pa(plan.TrapVecPA) }
 
-// Stage2TablePA geeft de fysieke basis van het stage-2-tabelblok van slot i.
-func Stage2TablePA(i int) uintptr {
-	return pa(plan.Stage2PA + uint64(i)*Stage2Stride)
+// CageTablePA geeft de fysieke basis van het stage-2-tabelblok van slot i.
+func CageTablePA(i int) uintptr {
+	return pa(plan.CagePA + uint64(i)*CageStride)
 }
 
 // ParkCodePA is de fysieke plek van de EL2-parkeerlus (door InitVectors
 // gegenereerd; de vectoren springen erheen i.p.v. PSCI CPU_OFF te doen).
-func ParkCodePA() uintptr { return pa(plan.Stage2PA + parkCodeOff) }
+func ParkCodePA() uintptr { return pa(plan.CagePA + parkCodeOff) }
 
 // ParkMboxPA geeft de parkeer-mailbox van een core (16 bytes: ctx + doel-PC).
 func ParkMboxPA(core int) uintptr {
-	return pa(plan.Stage2PA + parkMboxOff + uint64(core)*ParkMboxLen)
+	return pa(plan.CagePA + parkMboxOff + uint64(core)*ParkMboxLen)
 }
 
 // SwitchCodePA is de plan-plek van de switch-code-kopie (descriptor + blobs,
 // max SwitchCodeMax) — zie de constante hierboven en docs/kern-flip.md.
-func SwitchCodePA() uintptr { return pa(plan.Stage2PA + switchCodeOff) }
+func SwitchCodePA() uintptr { return pa(plan.CagePA + switchCodeOff) }
 
 // Pool geeft de partitie-pool van het board (voor slots/partmem).
 func Pool() []Region {
@@ -691,7 +707,7 @@ func TopAddr() uint64 {
 	top := plan.NodeCtrlPA + uint64(MaxSlots+1)*CtrlStride
 	// De enige andere vaste plan-regio: de stage-2-tabellen (ctrl/ringen/
 	// net-ringen wonen sinds de slot-ABI in de partitie-staart zelf).
-	if c := plan.Stage2PA + uint64(MaxSlots+1)*Stage2Stride; c > top {
+	if c := plan.CagePA + uint64(MaxSlots+1)*CageStride; c > top {
 		top = c
 	}
 	for _, r := range plan.Pool {
@@ -798,6 +814,10 @@ const (
 	// bytes te vroeg lezen — een stille misread, en die hoort een luide weigering
 	// te zijn. Kern en apps hertalen samen; de release-keten bouwt de app-images
 	// tegen dezelfde metal-tag, dus dat gebeurt vanzelf in één ronde.
+	//
+	// CtrlCorePrep (02-09) verhoogt de versie NIET: het woord staat in de staart
+	// van de page (boven de env), dus een ouder image leest zijn env ongewijzigd
+	// en een nieuwer image op een oudere kern leest een 0 — zie "DE STAART".
 	ABIVersion = 4
 )
 
@@ -1020,9 +1040,40 @@ const (
 
 	// Env-blob: door HOP geschreven "key=val\n..."-bytes die de app-lib bij
 	// start inleest (de Docker-vorm: env meegegeven bij het starten). Vervangt
-	// het kernel-envp dat bare metal niet heeft.
+	// het kernel-envp dat bare metal niet heeft. Loopt tot de staart-woorden.
 	CtrlEnvData = 0x118
-	CtrlEnvMax  = CtrlStride - CtrlEnvData
+	CtrlEnvMax  = CtrlCorePrep - CtrlEnvData
+
+	// DE STAART: HOP → app-woorden die ná de env-regio zijn bijgekomen staan
+	// bovenaan de page en groeien naar beneden. Zo blijft de page compatibel in
+	// béíde richtingen zonder ABI-stap: een ouder app-image leest zijn env op
+	// dezelfde plek (en HOP weigerde een env die de staart zou raken al bij de
+	// start), een nieuwer image op een oudere kern leest hier een 0 — de page
+	// is geveegd — en doet dan wat het altijd deed. De doorbell (30-08) schoof
+	// de env nog op en kostte een hertaalronde van álle apps; dat hoeft dus niet.
+	//
+	// CtrlCorePrep (HOP → app): het quirk-masker van het board voor de core(s)
+	// van dit slot — silicium-eigenaardigheden die de app zélf moet rechtzetten,
+	// omdat alleen zijn niveau bij het register kan (board.Cores.Prep). De
+	// idle-governor (cpu/idle) leest het woord elke ronde en voert de bits uit;
+	// idempotent, dus ook een SMP-core die later idle wordt doet het. 0 = niets,
+	// en dat is elk board zonder eigenaardigheden. De bits zijn Prep* hieronder.
+	//
+	// Waarom via de control-page en niet in de app-runtime zelf: een app-image
+	// is board-loos (board/hopslot — de kooi ís het board), dus de kennis wélke
+	// core wat nodig heeft kan alleen van HOP komen.
+	CtrlCorePrep = 0xFF8
+)
+
+// De bits van CtrlCorePrep.
+const (
+	// PrepDeepWFE: op dit silicium slaapt WFE niet tot een IMP-DEF-register het
+	// toestaat — Apple's CYC_OVRD.WFI_MODE=2, dat alleen vanaf EL1 op een door
+	// HopOS gestarte core schrijfbaar is (vanaf EL2 undefined, op de boot-cpu
+	// evenmin; beide gemeten). GEMETEN 02-09 op de M4: zonder 1,3M
+	// governor-rondes/s en 74% cpu op een lege app, met 956 wekken/s en 0%.
+	// Alleen de arm64-governor kent dit bit.
+	PrepDeepWFE = 1 << 0
 )
 
 // Status-waarden.

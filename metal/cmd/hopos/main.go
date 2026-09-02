@@ -13,7 +13,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -209,12 +208,11 @@ func main() {
 
 	// Vóór alles: het privilege-niveau waarin we booten. De kooi is een
 	// invariant, geen optie — kunnen we hem niet zetten, dan starten we niet.
-	// Wat "niet kunnen" betekent is arch-eigen (EL2 op ARM, M-mode op RISC-V):
-	// zie node_<arch>.go.
-	if why, refuse := bootRefusal(); refuse {
-		fail("boot", errors.New(why))
+	// Wat "niet kunnen" betekent zegt het board (EL2 op ARM, M-mode op RISC-V).
+	if err := board.Current().Privilege(); err != nil {
+		fail("boot", err)
 	}
-	fmt.Println(firmwareLine())
+	fmt.Println(board.Current().Firmware())
 
 	// KERN-FLIP (docs/kern-flip.md): kwamen we hier doordat de vórige HopOS
 	// onder zichzelf vandaan sprong? Dan draaien zijn apps nog — in hun eigen
@@ -265,6 +263,13 @@ func main() {
 	// time-outs) draait door als headless/compute-node i.p.v. permanent te
 	// hangen. Extern verkeer (leader-API, image-download) is dan weg, maar de
 	// node blijft leven en kan later herstellen — degradeer, niet fail().
+	// De idle-meetlat van HOP's eigen core (node.go idleStat), opt-in — en de
+	// knop die de RX-lus terug in de poll-stand zet (hopnet.ForcePoll), vóór
+	// Up, want die kiest.
+	if bootParam("hopos.idlestat") == "1" {
+		go idleStat()
+	}
+	hopnet.ForcePoll = bootParam("hopos.rxpoll") == "1"
 	netErr := hopnet.Up()
 	if netErr != nil {
 		fmt.Printf("net: %v — continuing headless/compute-only (no external network)\n", netErr)
@@ -370,6 +375,7 @@ func main() {
 	// (GOMAXPROCS=N; Go spreidt de node-goroutines zelf). Default 1: geen
 	// verspilling bij weinig apps, opt-in hoger (hopos.cores=2) als de flow er
 	// druk genoeg voor is.
+
 	nCores := 1
 	if n, err := strconv.Atoi(bootParam("hopos.cores")); err == nil && n >= 1 {
 		nCores = n

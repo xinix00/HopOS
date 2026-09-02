@@ -174,8 +174,8 @@ yield:
 	// is HOP's regel maar wordt één keer bij de plan-init geschreven en daarna
 	// nooit meer — de rotate-invalidatie hieronder dekt hem.
 	MOV	48(SP), X5		// slot
-	MOV	224(SP), X6		// Plan.Stage2PA
-	SLL	$16, X5, X7		// slot × Stage2Stride
+	MOV	224(SP), X6		// Plan.CagePA
+	SLL	$16, X5, X7		// slot × CageStride
 	ADD	X7, X6, X6
 	MOV	$0x6000, X7		// layout.CtxOff
 	ADD	X7, X6, X6		// x6 = ctx-blok van de yielder
@@ -296,7 +296,7 @@ tick:
 	MOV	48(SP), X5		// layout.SchedCurrent
 	BEQZ	X5, tickret		// niemand draait: niets in te trekken
 	MOV	224(SP), X6		// layout.SchedS2PA
-	SLL	$16, X5, X7		// slot × Stage2Stride
+	SLL	$16, X5, X7		// slot × CageStride
 	ADD	X7, X6, X6
 	MOV	$0x6000, X7		// layout.CtxOff
 	ADD	X7, X6, X6		// x6 = ctx-blok van de draaiende bewoner

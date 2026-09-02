@@ -30,7 +30,7 @@
 // Pariteit met board.go (Go-init checkt): de carve — het stuk tussen de
 // Go-RAM (RamSize) en het einde van de claim — draagt het layout-plan
 // (ctrl/ringen/stage-2/net-DMA), en REVOKE_OFF is waar cpuinit VBAR_EL2
-// van de HOP-core heen zet (RamStart + offset; layout.RevokeVecPA).
+// van de HOP-core heen zet (RamStart + offset; layout.TrapVecPA).
 #define CARVE_SIZE 0x02000000
 #define REVOKE_OFF 0x08900800
 
@@ -528,7 +528,7 @@ TEXT ·bootKernel(SB),NOSPLIT|NOFRAME,$0
 
 el2:
 	// VBAR_EL2 van de HOP-core → de revoke-vectoren (RamStart+REVOKE_OFF =
-	// layout.RevokeVecPA). stage2.InitVectors vult ze na boot; de
+	// layout.TrapVecPA). stage2.InitVectors vult ze na boot; de
 	// hard-kill-HVC uit stage2.Revoke landt daar. De WERKELIJKE waarden
 	// gaan naar Go-globals zodat board.go-init de asm/Go-pariteit écht kan
 	// checken (review #9: de oude check was een tautologie). MMU is uit en

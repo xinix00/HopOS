@@ -61,6 +61,11 @@ func FlipFromURL(url, sha string) error {
 // weigert deze functie vóór er iets geleend of geschreven is — node-SMP,
 // SMP-apps, gemounte volumes, en een nieuwe kern met andere switch-code (zie
 // docs/kern-flip.md voor het waarom van elk).
+// kernHeader is de ruimte onder het linkadres die een kern-image vrij houdt
+// (de boot-header van mkkernel): de vloer voor place.Build, zoals cageFloor dat
+// voor een app is.
+const kernHeader = 64
+
 func Flip(bundle []byte) error {
 	// Het lifecycle-venster over de HELE flip, en dat is geen voorzorg maar
 	// een correctheidseis: tussen de inventarisatie van de bewoners en de
@@ -94,6 +99,11 @@ func Flip(bundle []byte) error {
 		return fmt.Errorf("kernflip: %d extra node core(s) active — a flip needs hopos.cores=1 (v1)", n)
 	}
 
+	// Het plaatsingsplan komt uit abi/place — dezelfde parser, dezelfde grenzen
+	// en dezelfde RAM-symbolen als een app-plaatsing (kern/slots
+	// placeFromStaging): de nieuwe kern is dezelfde soort bewoner als een app,
+	// alleen zonder slot-ABI-stempel (abi 0) en met de header-ruimte als vloer.
+	// Alles wat hier faalt, faalt vóór de lening.
 	f, err := leanelf.Open(bytes.NewReader(bun.ELF), int64(len(bun.ELF)))
 	if err != nil {
 		return fmt.Errorf("kernflip: elf parse: %w", err)
@@ -101,16 +111,17 @@ func Flip(bundle []byte) error {
 	if f.Entry != bun.Entry {
 		return fmt.Errorf("kernflip: ELF-entry %#x ≠ staart-entry %#x", f.Entry, bun.Entry)
 	}
-	// De patch-symbolen éérst opzoeken: falen moet vóór de lening, niet erna.
+	plan, err := place.Build(bytes.NewReader(bun.ELF), int64(len(bun.ELF)),
+		bun.LinkLoad, bun.FlatSize, kernHeader, bun.FlatSize, 0, 0)
+	if err != nil {
+		return fmt.Errorf("kernflip: %w", err)
+	}
+	// De patchwaarden zijn hier anders dan bij een app (het venster, niet het
+	// linkadres), dus alleen de adressen komen uit het plan; place heeft ze al
+	// gevalideerd (uitgelijnd, binnen de payload).
 	syms, err := f.Lookup(place.SymRAMStart, place.SymRAMSize)
 	if err != nil {
 		return fmt.Errorf("kernflip: symbolen (bundel met -s gebouwd?): %w", err)
-	}
-	for _, naam := range []string{place.SymRAMStart, place.SymRAMSize} {
-		s, ok := syms[naam]
-		if !ok || s.Value%8 != 0 || s.Value < bun.LinkLoad || s.Value > bun.LinkLoad+bun.FlatSize-8 {
-			return fmt.Errorf("kernflip: RAM-symbool %s ontbreekt of ligt buiten de payload", naam)
-		}
 	}
 
 	// De bewoners, en of ze deze flip kunnen overleven. Twee eisen, allebei
@@ -127,15 +138,20 @@ func Flip(bundle []byte) error {
 	if err != nil {
 		return fmt.Errorf("kernflip: %w", err)
 	}
-	if len(residents) > 0 {
+	// Ook een GEPARKEERDE core is een bewoner van de switch-code: hij staat in
+	// de parkeerlus van de plan-regio en wordt daar straks door de nieuwe kern
+	// gewekt. Verschillen de bytes, dan wekt die hem op een verkeerde PC en is
+	// elke plaatsing op die core dood tot een reboot (gemeten 02-09, M4).
+	parked := slots.ParkedCores()
+	if len(residents) > 0 || parked > 0 {
 		mine := switchCodeHash()
 		theirs, err := bundleSwitchHash(f)
 		if err != nil {
-			return fmt.Errorf("kernflip: %d resident(s) alive but the new kernel's switch code cannot be verified: %w", len(residents), err)
+			return fmt.Errorf("kernflip: %d resident(s) and %d parked core(s) live in the switch code, but the new kernel's cannot be verified: %w", len(residents), parked, err)
 		}
 		if mine == 0 || mine != theirs {
-			return fmt.Errorf("kernflip: the new kernel's switch code differs (%#x vs %#x) — cannot flip with %d live resident(s); stop them or use a reboot update",
-				theirs, mine, len(residents))
+			return fmt.Errorf("kernflip: the new kernel's switch code differs (%#x vs %#x) — cannot flip with %d live resident(s) and %d parked core(s); use a reboot update",
+				theirs, mine, len(residents), parked)
 		}
 	}
 
@@ -181,30 +197,22 @@ func Flip(bundle []byte) error {
 	stage(stScrubbed)
 	fmt.Printf("kernflip: window scrubbed in %v, placing segments\n", time.Since(t0).Round(time.Millisecond))
 
-	// Segmenten plaatsen: venster + (Paddr − linkbasis) — de rekensom van
-	// abi/place, met de kern-eigen grenzen (header-ruimte onder load+64).
-	for _, ph := range f.Segments {
-		if ph.Type != leanelf.PTLoad {
-			continue
-		}
-		if ph.Filesz > ph.Memsz || ph.Paddr < bun.LinkLoad+64 ||
-			ph.Paddr-bun.LinkLoad > bun.FlatSize || ph.Memsz > bun.FlatSize-(ph.Paddr-bun.LinkLoad) {
-			return fail(fmt.Errorf("kernflip: segment %#x+%#x buiten het platte beeld", ph.Paddr, ph.Memsz))
-		}
-		if ph.Off > uint64(len(bun.ELF)) || ph.Filesz > uint64(len(bun.ELF))-ph.Off {
-			return fail(fmt.Errorf("kernflip: segment-offset %#x+%#x buiten de ELF", ph.Off, ph.Filesz))
-		}
-		dst := uintptr(win + (ph.Paddr - bun.LinkLoad))
-		copyRange(dst, bun.ELF[ph.Off:ph.Off+ph.Filesz])
-		if ph.Memsz > ph.Filesz {
-			dev.Clear(dst+uintptr(ph.Filesz), ph.Memsz-ph.Filesz)
+	// Segmenten plaatsen: venster + (linkadres − linkbasis), per segment uit
+	// het plan (al gevalideerd). Het kopiëren zelf is het enige verschil met
+	// een app-plaatsing: die schuift device→device vanuit de staging, dit is
+	// een Go-slice — in brokken met een yield (copyRange).
+	delta := win - bun.LinkLoad
+	for _, sg := range plan.Segs {
+		dst := uintptr(sg.Dst + delta)
+		copyRange(dst, bun.ELF[sg.Off:sg.Off+sg.Filesz])
+		if sg.Memsz > sg.Filesz {
+			dev.Clear(dst+uintptr(sg.Filesz), sg.Memsz-sg.Filesz)
 		}
 	}
 
 	stage(stPlaced)
 	// De reloc-pass: elk tabelwoord draagt een absoluut adres op de linkbasis;
 	// delta erbij en het wijst het venster in. (Offsets zijn al gevalideerd.)
-	delta := win - bun.LinkLoad
 	for i := 0; i < bun.RelocCount(); i++ {
 		a := uintptr(win) + uintptr(uint32(bun.Relocs[i*4])|uint32(bun.Relocs[i*4+1])<<8|
 			uint32(bun.Relocs[i*4+2])<<16|uint32(bun.Relocs[i*4+3])<<24)

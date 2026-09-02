@@ -21,10 +21,10 @@ func chainload(entry, x0arg, ramStart, ramEnd, vbar uint64)
 // een core in verse code te laten springen, één pakket, één hygiëne-blok.
 func Chainload(entry, x0arg uint64) {
 	s, e := runtime.MemRegion()
-	// De vectoren alvast op de kale el2fault-dumper (de tabel op RevokeVecPA):
+	// De vectoren alvast op de kale el2fault-dumper (de tabel op TrapVecPA):
 	// een vroege fault in de LANDING vectort anders door de nog levende
 	// tamago-vectoren van DEZE kern — recht het lijk in, dat de echte
 	// ESR/ELR/FAR opeet en een onzin-trace print (GEMETEN 01-09, zevende
 	// ijzer-flip: "EL1 exception" met oude g-nummers en oude adressen).
-	chainload(entry, x0arg, uint64(s), uint64(e), uint64(layout.RevokeVecPA()))
+	chainload(entry, x0arg, uint64(s), uint64(e), uint64(layout.TrapVecPA()))
 }

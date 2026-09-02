@@ -15,7 +15,6 @@ import (
 	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/board"
 	"github.com/xinix00/HopOS/metal/board/qemuvirt"
-	"github.com/xinix00/HopOS/metal/cpu/el2"
 	"github.com/xinix00/HopOS/metal/cpu/psci"
 	"github.com/xinix00/HopOS/metal/driver/fb"
 	"github.com/xinix00/HopOS/metal/driver/nic/virtionet"
@@ -35,8 +34,15 @@ func init() { board.Use(machine{}) }
 // op het bord zichtbaar (Derek, 18-07).
 var _ board.Board = machine{}
 
-func (machine) BootEL() int { return int(qemuvirt.BootEL()) }
+// En de NIC-interrupt (net.go): hopnet wacht erop in plaats van te pollen.
+var _ board.NICInterrupter = machine{}
+
 func (machine) CoreID() int { return qemuvirt.CoreID() }
+
+// Privilege/Firmware: een EL2-boot is de eis (QEMU: virtualization=on); de
+// firmware is QEMU's eigen PSCI.
+func (machine) Privilege() error { return board.RequireEL2(int(qemuvirt.BootEL())) }
+func (machine) Firmware() string { return psci.Line(int(qemuvirt.BootEL())) }
 
 // MemTotal geeft het bij boot (hwinit1) gedetecteerde DRAM; 0 = niet
 // gevonden → de aanroeper valt terug op het statische slot-plan.
@@ -56,26 +62,23 @@ func (machine) TimerOffset() int64     { return qemuvirt.ARM64.TimerOffset }
 func (machine) SetTimerOffset(o int64) { qemuvirt.ARM64.TimerOffset = o }
 func (machine) SetWallTime(ns int64)   { qemuvirt.ARM64.SetTime(ns) }
 
-// PSCI via de gedeelde wrappers (metal/cpu/psci); op virt is core N gewoon
-// MPIDR-target N — geen vertaling nodig.
-func (machine) CPUOn(core, entry, ctx uint64) int64 { return psci.On(core, entry, ctx) }
-func (machine) AffinityInfo(core uint64) board.PowerState {
-	return board.PowerState(psci.AffinityInfo(core))
+// Cores: PSCI via de gedeelde wrappers (metal/cpu/psci); op virt is core N
+// gewoon MPIDR-target N — geen vertaling nodig. Geen Reset: een ingetrokken
+// core parkeert zichzelf in de EL2-lus (kern/slots cage_arm64.go).
+func (machine) Cores() board.Cores {
+	state := func(c int) board.PowerState { return board.PowerState(psci.AffinityInfo(uint64(c))) }
+	return board.Cores{
+		App:   func() []int { return board.ProbeCores(state, layout.NumAppCores()) },
+		Start: func(c int, entry, arg uint64) error { return psci.On(uint64(c), entry, arg) },
+		State: state,
+	}
 }
-func (machine) PSCIVersion() (major, minor uint16) { return psci.Version() }
-
-// De EL2-trampolines (stage-2-kooi + SMP) zijn board-neutraal en wonen in het
-// gedeelde metal/el2-pakket; dit board geeft alleen de symbooladressen door.
-// De EL1-SMP-stub heeft geen board-methode meer: de app-OS-laag (metal/cpu/smp)
-// leest zijn eigen el2.SMPStubPC rechtstreeks.
-func (machine) S2TrampPC() uint64    { return el2.S2TrampPC() }
-func (machine) S2SMPTrampPC() uint64 { return el2.S2SMPTrampPC() }
 
 // ProbeNIC vindt het virtio-net-mmio-slot, construeert de driver en zet 'm
 // klaar in de net-DMA-subregio. Zo blijft de driverkeuze board-kennis en is
 // hopnet NIC-agnostisch.
 func (machine) ProbeNIC() (netdev.Device, net.HardwareAddr, error) {
-	base, _ := probeVirtioNet()
+	base, spi := probeVirtioNet()
 	if base == 0 {
 		return nil, nil, nil // geen (moderne) virtio-net gevonden
 	}
@@ -83,6 +86,8 @@ func (machine) ProbeNIC() (netdev.Device, net.HardwareAddr, error) {
 	if err := nic.Init(layout.NetDMABase, layout.NetDMASize); err != nil {
 		return nil, nil, fmt.Errorf("virtio-net init: %w", err)
 	}
+	// De RX-interrupt erbij (net.go): de doorbell voor HOP's eigen core.
+	wireNICIRQ(spi, nic.AckIRQ)
 	return nic, net.HardwareAddr(nic.MAC[:]), nil
 }
 

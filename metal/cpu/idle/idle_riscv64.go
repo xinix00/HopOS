@@ -14,9 +14,10 @@
 //     een S-mode-bewoner kan niet zelf bij mtimecmp (de CLINT zit bewust buiten
 //     elke kooi — DoS-kanaal), dus de ecall is zijn enige route naar een wfi.
 //   - **HOP's eigen hart: dezelfde stap, zonder trap.** HOP draait al in
-//     machine mode, dus die roept de slaap-primitief direct aan (UseMSleep —
-//     het board levert hem ná zijn CLINT-probe, board/licheerv/clint.go). Een
-//     ecall is voor S-mode de manier om deze code te bereiken; HOP staat er al.
+//     machine mode, dus die roept de slaap-primitief direct aan (de Sleeper —
+//     het board levert hem ná zijn CLINT-probe met idle.Use,
+//     board/licheerv/clint.go). Een ecall is voor S-mode de manier om deze
+//     code te bereiken; HOP staat er al.
 //   - **Terugval: doorlopen.** Geen switcher boven je en geen waker van het
 //     board (probe gefaald, of een app buiten applib) → precies doen wat dit
 //     board zonder ons deed. Spinnen kost stroom maar kan niet hangen, en dat
@@ -51,23 +52,15 @@ func ExitTrap() { exitTrap() }
 // eerste scheduler-punt.
 var prev func(int64)
 
-// mSleep is de slaap-primitief van het EIGEN hart, alleen gezet op HOP (het
-// board levert hem ná zijn CLINT-probe — UseMSleep). Apps krijgen hem nooit:
-// hun weg naar dezelfde slaap is de ecall-yield. Eén schrijver, vóór Enable.
-var mSleep func(wake uint64) uint64
-
-// UseMSleep geeft de governor de directe M-mode-slaap: "slaap tot timebase-tick
-// wake (of je cap), zeg hoe lang het was". Alleen voor de bewoner die al in
-// machine mode staat — HOP zelf. Aanroepen vóór Enable, en alleen met een
-// primitief dat het board op dít silicium bewezen heeft (de probe roept hem
-// zelf aan, dus "bewezen" is hier letterlijk).
-func UseMSleep(f func(wake uint64) uint64) { mSleep = f }
+// De Sleeper (idle.go Use) is hier de directe M-mode-slaap van het EIGEN hart,
+// alleen gezet op HOP (het board levert hem ná zijn CLINT-probe). Apps krijgen
+// hem nooit: hun weg naar dezelfde slaap is de ecall-yield.
 
 // Enable hangt de governor in de runtime, mét de governor die er al stond als
 // terugval. Geen event-stream te configureren zoals op ARM (CNTKCTL): wat er te
-// configureren valt zit in de twee zetters hieronder (WatchShared voor een
-// slot-app, UseMSleep voor HOP), en zonder één van beide is de governor de
-// runtime-default met een omweg — bewust, want dat is de bewezen stand.
+// configureren valt zit in de twee zetters (WatchShared voor een slot-app, Use
+// voor HOP), en zonder één van beide is de governor de runtime-default met een
+// omweg — bewust, want dat is de bewezen stand.
 func Enable() {
 	prev = goos.Idle
 	goos.Idle = governor
@@ -101,7 +94,10 @@ func AccountsDedicated() bool { return true }
 // is in alle gevallen de wall-tijd waarin dit slot niets deed: bij een yield de
 // tijd waarin een buur draaide óf het hart sliep, bij MSleep de slaap zelf.
 func governor(pollUntil int64) {
-	// De doorbell eerst — zelfde twee redenen als op ARM (zie rxdoor.go).
+	// Eerst het quirk-masker van het board (CtrlCorePrep; op deze architectuur
+	// zonder bits — maar het is dezelfde ronde als op ARM), dan de doorbell —
+	// zelfde twee redenen als op ARM (zie rxdoor.go).
+	corePrep()
 	if rxDoor() {
 		countWake()
 		return
@@ -115,7 +111,7 @@ func governor(pollUntil int64) {
 		countWake()
 		return
 	}
-	if mSleep != nil {
+	if sleeper != nil {
 		// HOP's eigen hart: de slaap-primitief van het board. De rem op de
 		// slaap zit in die primitief zelf (board/licheerv/clint.go: MSleep
 		// klemt élke slaap op SleepCapTicks, dus niets wacht ooit langer dan
@@ -124,7 +120,7 @@ func governor(pollUntil int64) {
 		// geen timer — dat laatste komt op HOP niet voor: de RX-pompen alleen
 		// al leggen er elke 10-200µs één neer), en MSleep doet dan niets; de
 		// scheduler kijkt gewoon nog een ronde.
-		ticks.Add(mSleep(wakeAt(pollUntil)))
+		ticks.Add(sleeper(wakeAt(pollUntil)))
 		countWake()
 		return
 	}
@@ -133,3 +129,8 @@ func governor(pollUntil int64) {
 		prev(pollUntil)
 	}
 }
+
+// applyPrep: geen quirk-bits op deze architectuur (nog). Het masker komt wél
+// langs — dezelfde ronde, hetzelfde woord — zodat een RISC-V-board dat ooit
+// een eigenaardigheid heeft alleen hier een bit hoeft te leren.
+func applyPrep(mask uint64) {}

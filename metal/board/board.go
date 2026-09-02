@@ -8,10 +8,10 @@
 // edit-ronde door elke "generieke" package.
 package board
 
-import "fmt"
-
 import (
+	"fmt"
 	"net"
+	"time"
 
 	"github.com/xinix00/HopOS/metal/net/netdev"
 
@@ -61,14 +61,15 @@ type LeaseHolder interface {
 // niets van dit contract hoeft te importeren; het board levert alleen de
 // waarden via PCIe().
 
-// Common is het arch-neutrale deel van het board-contract: alles wat de
-// generieke kern van élk board nodig heeft, ongeacht of dat een ARM-board met
-// EL2/PSCI is of een RISC-V-board met machine mode en een PMP-kooi. De arch-specifieke
-// helft (kooi-mechaniek en core-power) staat in board_arm64.go / board_riscv64.go,
-// die Common embedden tot het volledige Board-contract.
+// Board is het board-contract: alles wat de generieke kern van élk board nodig
+// heeft, en het bestaat één keer — er is geen ARM-helft en geen RISC-V-helft
+// meer. Wat per architectuur anders ís (de kooi-mechaniek) woont achter de
+// kooi-naad in kern/slots (cage.go); wat per BOARD anders is — hoe een core
+// start, of hij te resetten is, welke quirks zijn silicium heeft — zit in
+// Cores(), als poten die nil zijn waar het board ze niet heeft.
 //
-// Alle methodes draaien op de HOP-kern (core 0).
-type Common interface {
+// Alle methodes draaien op de HOP-kern.
+type Board interface {
 	appboard.Board // CoreID + SetTimerOffset (de app-zichtbare kern)
 
 	CoreClass(core int) string // clusterklasse ("small"/"mid"/"big")
@@ -103,18 +104,159 @@ type Common interface {
 	// (nog) geen heeft (QEMU -nographic, of een board vóór zijn beeld-fase).
 	// Discovery is board-kennis; het renderen erna is gedeeld.
 	Framebuffer() (fb.Desc, bool)
+
+	// Privilege meldt of HopOS op het niveau draait dat een kooi kan dragen —
+	// EL2 op ARM, machine mode op RISC-V. nil = ja. Anders zegt de fout wat er
+	// ontbreekt, en dát is de weigering die de main print vóór hij iets anders
+	// doet: de kooi is een invariant, geen optie. RequireEL2/RequireMMode
+	// hieronder zijn de twee zinnen die er zijn.
+	Privilege() error
+
+	// Firmware is één consoleregel over wie ons bootte en wat die kan:
+	// "psci: v1.1 (boot EL2, SMC conduit)", "iBoot, no PSCI (boot EL2)",
+	// "boot: M-mode monitor (no SBI), app harts [1]". Diagnose, geen contract.
+	Firmware() string
+
+	// Cores is het core-contract van dit board (zie het type).
+	Cores() Cores
 }
 
-// CoreCountHinter is een OPTIONEEL contract naast Board: een board dat zijn
-// app-core-aantal kent mag het declareren, zodat slots.NumSlots een
-// onbetrouwbare PSCI AFFINITY_INFO kan overbruggen — op sommige silicium meldt
-// AFFINITY_INFO INVALID_PARAMS voor bestaande cores, waardoor de core-telling
-// stil op 0 (of te laag) uitkomt en HOP nul slots adverteert. ExpectedAppCores
-// geeft het aantal app-cores (cores 1..N, dus exclusief HOP's core 0). Boards
-// met werkende AFFINITY_INFO (QEMU, Pi) implementeren dit NIET — de PSCI-telling
-// blijft dan leidend; slots.NumSlots type-assert hier optioneel op.
-type CoreCountHinter interface {
-	ExpectedAppCores() int
+// Cores is het core-contract: één struct, dezelfde poten op elke architectuur,
+// en een poot die het silicium niet heeft is nil. De kern stuurt élke core
+// hetzelfde aan — starten, stoppen, toestand — en vult per poot in wat het
+// board levert. Nummers zijn FYSIEK (wat het board zelf zijn cores noemt: de
+// PSCI-index, m1n1's cpu-index, het hart-ID in het reset-blok); de logische
+// 1..N van kern/slots komt hier alleen binnen via Phys.
+type Cores struct {
+	// App geeft de fysieke nummers van de app-cores, in logische volgorde
+	// (logische core i = App()[i-1]) — dus zonder HOP's eigen core. Op ARM is
+	// dat meestal de PSCI-telling (ProbeCores); op RISC-V en Apple een lijst
+	// uit board-kennis.
+	App func() []int
+
+	// Start brengt een core die bij de firmware of het SoC stilstaat op entry
+	// met arg: PSCI CPU_ON, Apple's spin-release of PMGR, reset-deassert.
+	// Een core die HopOS zelf parkeerde start NIET hierlangs (mailbox/SEV,
+	// boot-pending) — dat is kooi-werk. Verplicht.
+	Start func(core int, entry, arg uint64) error
+
+	// Reset houdt een core in reset: de hard-kill die ook een tight loop
+	// stopt en de kooi-registers wist. nil = dit board kan dat niet; stoppen
+	// is dan de kooi intrekken, waarna de core zichzelf parkeert (ARM), of
+	// de kill-tick van de switcher (een RISC-V-hart zonder reset-recept).
+	Reset func(core int) error
+
+	// Resettable zegt per core of Reset erop werkt. nil = op elke core, als
+	// Reset er is. De LicheeRV heeft een recept voor één van zijn twee harts.
+	Resettable func(core int) bool
+
+	// State is de powertoestand van een core, uit het silicium of de eigen
+	// boekhouding. Buiten {On, Off, OnPending} = geen core met dit nummer.
+	State func(core int) PowerState
+
+	// Prep is het quirk-masker dat HOP een app-core meegeeft op zijn
+	// control-page (layout.CtrlCorePrep): silicium-eigenaardigheden die de app
+	// zelf moet rechtzetten omdat alleen zíjn niveau erbij kan. nil = 0.
+	Prep func(core int) uint64
+}
+
+// Phys vertaalt een logische app-core (1..N) naar zijn fysieke nummer; ok=false
+// als er geen core met dat nummer is.
+func (k Cores) Phys(core int) (int, bool) {
+	if k.App == nil {
+		return 0, false
+	}
+	app := k.App()
+	if core < 1 || core > len(app) {
+		return 0, false
+	}
+	return app[core-1], true
+}
+
+// CanReset: heeft dit board een reset voor déze core?
+func (k Cores) CanReset(core int) bool {
+	if k.Reset == nil {
+		return false
+	}
+	if k.Resettable == nil {
+		return true
+	}
+	return k.Resettable(core)
+}
+
+// PrepMask: het quirk-masker voor een core (0 zonder Prep).
+func (k Cores) PrepMask(core int) uint64 {
+	if k.Prep == nil {
+		return 0
+	}
+	return k.Prep(core)
+}
+
+// ProbeCores is de PSCI-vorm van Cores.App: cores 1..max aflopen zolang state
+// een echt power-woord geeft, en stoppen bij het eerste antwoord daarbuiten —
+// een ontbrekende core (INVALID_PARAMS) óf een PSCI-fout; beide betekenen "hier
+// stopt de topologie". Aaneengesloten per definitie: PSCI nummert vanaf nul.
+func ProbeCores(state func(core int) PowerState, max int) []int {
+	var cores []int
+	for c := 1; c <= max; c++ {
+		switch state(c) {
+		case PowerOn, PowerOff, PowerOnPending:
+			cores = append(cores, c)
+		default:
+			return cores
+		}
+	}
+	return cores
+}
+
+// RequireEL2 is de ARM-zin van Privilege: HopOS eist een EL2-boot — de
+// stage-2-kooi is een invariant, geen optie.
+func RequireEL2(el int) error {
+	if el < 2 {
+		return fmt.Errorf("booted at EL%d: HopOS requires EL2 (QEMU: virtualization=on)", el)
+	}
+	return nil
+}
+
+// RequireMMode is de RISC-V-zin: alleen machine mode programmeert PMP en
+// reset harts, en zonder dat is er geen kooi.
+func RequireMMode(mode int) error {
+	if mode != 3 {
+		return fmt.Errorf("booted in mode %d: HopOS requires M-mode (3) for the PMP cage", mode)
+	}
+	return nil
+}
+
+// HartTimer beschrijft de comparator van één hart (RISC-V). De drie dingen
+// staan los van elkaar omdat ze los BEWEZEN worden — op de SG2002 is gemeten
+// dat een comparator kan bestaan en vuren terwijl een wfi erop de node stil
+// velt (01-08, boots 6/7), dus "tikken mag" en "slapen mag" zijn niet hetzelfde
+// antwoord.
+type HartTimer struct {
+	MtimecmpPA uint64 // PA van mtimecmp; 0 = geen comparator (geen tick, geen slaap)
+	MsipPA     uint64 // PA van msip; 0 = HOP kan dit hart niet wekken (core-lokale CLINT)
+	SleepCap   uint64 // max slaapduur in tikken; 0 = niet slapen (de parkeerlus spint)
+	Tick       uint64 // periode van de kill-tick in tikken; 0 = geen tick
+}
+
+// HartTimerer is het OPTIONELE stuk contract van een board met een M-mode-
+// switcher (RISC-V): wat machine mode op hart `hart` met diens comparator mag
+// doen. De nulwaarde is "niets", en dat hoort de veilige uitslag te zijn zolang
+// een board het niet BEWEZEN heeft — op de SG2002 ontbreekt de helft van de
+// SiFive-CLINT-layout (mtime is er niet), dus daar hangt dit antwoord aan een
+// probe bij boot en niet aan een datasheet. ARM-boards implementeren dit niet.
+type HartTimerer interface {
+	HartTimer(hart int) HartTimer
+}
+
+// NICInterrupter is het OPTIONELE stuk contract van een board waarvan de NIC
+// een interruptlijn heeft die HOP's core bereikt. WaitNIC blokkeert de
+// aanroeper tot de NIC gemeld heeft dat er iets ligt, of tot max verstreken is
+// (true = gemeld). Een board zonder dit contract wordt gepold; hopnet kiest.
+// Interrupts zijn uitsluitend HOP-werk: een app-core wordt nooit een target
+// en houdt zijn maskers dicht — dat is de isolatie-invariant.
+type NICInterrupter interface {
+	WaitNIC(max time.Duration) bool
 }
 
 // PowerState is de powertoestand van een core/hart. Eén definitie voor beide

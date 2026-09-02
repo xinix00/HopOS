@@ -14,9 +14,9 @@ package hop
 import (
 	"sync"
 
+	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/board"
 	"github.com/xinix00/HopOS/metal/board/rk3566"
-	"github.com/xinix00/HopOS/metal/cpu/el2"
 	"github.com/xinix00/HopOS/metal/cpu/psci"
 	"github.com/xinix00/HopOS/metal/driver/fb"
 	"github.com/xinix00/HopOS/metal/driver/pcie"
@@ -35,8 +35,12 @@ func init() { board.Use(machine{}) }
 var _ board.Board = machine{}
 
 func (machine) CoreID() int      { return rk3566.CoreID() }
-func (machine) BootEL() int      { return rk3566.BootEL() }
 func (machine) MemTotal() uint64 { return rk3566.MemTotal() }
+
+// Privilege/Firmware: EL2-boot vereist; TF-A bl31 op EL3 is de PSCI-provider
+// (conduit SMC — gemeten v1.1).
+func (machine) Privilege() error { return board.RequireEL2(rk3566.BootEL()) }
+func (machine) Firmware() string { return psci.Line(rk3566.BootEL()) }
 
 // CoreClass: vier identieke Cortex-A55 in één DynamIQ-cluster, dus homogeen.
 // "big" betekent hier "de beste klasse die dít board heeft" — een A55 is
@@ -48,24 +52,20 @@ func (machine) TimerOffset() int64       { return rk3566.ARM64.TimerOffset }
 func (machine) SetTimerOffset(off int64) { rk3566.ARM64.TimerOffset = off }
 func (machine) SetWallTime(ns int64)     { rk3566.ARM64.SetTime(ns) }
 
-// PSCI via de gedeelde wrappers (TF-A bl31 op EL3, conduit SMC — gemeten
-// v1.1). De core-index → MPIDR-vertaling is board-kennis: GEMETEN 05-08 dat dit
-// silicium in aff1 nummert (targets 0x100/0x200/0x300 werken, aff0-targets
-// geven INVALID_PARAMS).
-func (machine) CPUOn(core, entry, ctx uint64) int64 {
-	return psci.On(rk3566.Target(core), entry, ctx)
+// Cores: PSCI via de gedeelde wrappers. De core-index → MPIDR-vertaling is
+// board-kennis: GEMETEN 05-08 dat dit silicium in aff1 nummert (targets
+// 0x100/0x200/0x300 werken, aff0-targets geven INVALID_PARAMS). Geen Reset:
+// een ingetrokken core parkeert zichzelf in de EL2-lus.
+func (machine) Cores() board.Cores {
+	state := func(c int) board.PowerState {
+		return board.PowerState(psci.AffinityInfo(rk3566.Target(uint64(c))))
+	}
+	return board.Cores{
+		App:   func() []int { return board.ProbeCores(state, layout.NumAppCores()) },
+		Start: func(c int, entry, arg uint64) error { return psci.On(rk3566.Target(uint64(c)), entry, arg) },
+		State: state,
+	}
 }
-
-func (machine) AffinityInfo(core uint64) board.PowerState {
-	return board.PowerState(psci.AffinityInfo(rk3566.Target(core)))
-}
-
-func (machine) PSCIVersion() (major, minor uint16) { return psci.Version() }
-
-// Stage-2/SMP: de trampolines zijn board-neutraal en data-gedreven (gedeeld
-// metal/cpu/el2); het board levert alleen het PA-plan (rk3566/plan.go).
-func (machine) S2TrampPC() uint64    { return el2.S2TrampPC() }
-func (machine) S2SMPTrampPC() uint64 { return el2.S2SMPTrampPC() }
 
 // PCIe: de RK3566 heeft een PCIe2-controller, maar op dít bordje hangt er niets
 // aan (geen M.2, geen RP1-achtige southbridge) — leeg venster.

@@ -67,8 +67,8 @@ type Plan struct {
 // onderkant van de staging (kern) of het stub-venster (loader) — de kopieerbron
 // moet de kopie overleven. slot is de slotHint-patchwaarde, abi de
 // slot-ABI-versie die deze HopOS spreekt (layout.ABIVersion) — het image moet
-// dezelfde melden. Elke afwijking is een fout: een plan is compleet geldig of
-// bestaat niet. Bewust géén abi/layout-import (abi-pakketten zijn vlak): alles
+// dezelfde melden; 0 = geen stempel toetsen (een kern-image, zie onder). Elke
+// afwijking is een fout: een plan is compleet geldig of bestaat niet. Bewust géén abi/layout-import (abi-pakketten zijn vlak): alles
 // komt als parameter binnen.
 func Build(r io.ReaderAt, imgSize int64, linkBase, appRAM, loOff, topOff uint64, slot int, abi uint64) (*Plan, error) {
 	f, err := leanelf.Open(r, imgSize)
@@ -137,6 +137,12 @@ func Build(r io.ReaderAt, imgSize int64, linkBase, appRAM, loOff, topOff uint64,
 		}
 	}
 
+	// abi == 0: geen slot-ABI te toetsen. Dat is een KERN-image (kern/kernflip):
+	// dezelfde ELF-vorm, dezelfde grenzen, dezelfde RAM-symbolen — alleen geen
+	// applib erin, dus ook geen stempel. Een app-image toetst altijd.
+	if abi == 0 {
+		return p, nil
+	}
 	s, ok := syms[SymABI]
 	if !ok {
 		return nil, fmt.Errorf("image predates the versioned slot ABI (no %s) — rebuild it against this HopOS (ABI %d)", SymABI, abi)

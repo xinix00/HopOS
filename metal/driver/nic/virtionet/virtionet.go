@@ -23,8 +23,7 @@ const (
 	regDeviceID = 0x008
 	// Device-features (0x010/0x014) leest deze driver bewust niet: QEMU virt
 	// levert een vaste, bekende feature-set en wij onderhandelen alleen
-	// VERSION_1 (regDrvFeatures hieronder). Interrupts (ACK op 0x064) zijn er
-	// ook niet — de servicer pollt.
+	// VERSION_1 (regDrvFeatures hieronder).
 	regDrvFeatures    = 0x020
 	regDrvFeaturesSel = 0x024
 	regQueueSel       = 0x030
@@ -32,6 +31,8 @@ const (
 	regQueueNum       = 0x038
 	regQueueReady     = 0x044
 	regQueueNotify    = 0x050
+	regIntStatus      = 0x060 // bit 0 = used-ring bijgewerkt, bit 1 = config
+	regIntACK         = 0x064 // dezelfde bits terugschrijven = lijn los
 	regStatus         = 0x070
 	regQueueDescLo    = 0x080
 	regQueueDescHi    = 0x084
@@ -216,6 +217,17 @@ func (n *Net) setAvail(q *vq, slot int, descIdx uint16) {
 }
 
 func (n *Net) notify(queue uint32) { n.wr8(regQueueNotify, queue) }
+
+// AckIRQ bevestigt de interrupt van het device: wat er in InterruptStatus
+// staat gaat terug naar InterruptACK, waarop het device zijn (level-)lijn
+// loslaat. Dit is Line.Ack in cpu/irq: de controller-kant (EOI) zit daar,
+// de device-kant hier. Zonder deze write vuurt de lijn bij het her-inschakelen
+// meteen weer, hoe leeg de ring ook is.
+func (n *Net) AckIRQ() {
+	if st := n.rd8(regIntStatus); st != 0 {
+		n.wr8(regIntACK, st)
+	}
+}
 
 // Receive haalt één ethernet-frame op (non-blocking: n=0 als er niets is).
 // Voldoet aan go-net's NetworkDevice.

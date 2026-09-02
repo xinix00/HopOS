@@ -138,7 +138,7 @@ func InitVectors() {
 
 	// De revoke-handler van de HOP-core: ingeplugd op offset 0x400 (synchrone
 	// exception vanuit een lager EL) van de vectortabel waar cpuinit VBAR_EL2
-	// van core 0 op zette (Plan.RevokeVecPA). Alleen dát slot — de rest van de
+	// van core 0 op zette (Plan.TrapVecPA). Alleen dát slot — de rest van de
 	// tabel blijft van het board (rpi5: de faultdump-bootdiagnostiek; QEMU:
 	// leeg). Daar landt de HVC uit Revoke; de handler doet TLBI ALLE1IS
 	// (invalideert álle EL1&0 stage-1+2-vertalingen inner-shareable) en keert
@@ -150,7 +150,10 @@ func InitVectors() {
 	// geverifieerd met clang/objdump (31-08). Het revoke-pad klobbert alleen
 	// x16 (caller-saved; hvcRevoke is een gewone Go-call); het chain-pad
 	// klobbert vrij — het keert nooit terug.
-	rvecs := layout.RevokeVecPA()
+	rvecs := layout.TrapVecPA()
+	if rvecs == 0 {
+		panic("stage2: Plan.TrapVecPA ontbreekt — de HOP-core heeft geen EL2-vectortabel om de revoke-handler in te pluggen")
+	}
 	revoke := []uint32{
 		0xd53c5210, // mrs  x16, esr_el2
 		0x92403e10, // and  x16, x16, #0xffff     (HVC-immediate)
@@ -258,7 +261,7 @@ func initAppCoreRegion(s2PA, entryPA uint64) {
 	// HOP leest dit woord (Get/waitCtxDead in kern/slots) al vóór de eerste
 	// Build van dat slot, en verse DRAM is geen nul.
 	for s := 1; s <= layout.MaxSlots; s++ {
-		dev.Write64(layout.Stage2TablePA(s)+layout.CtxOff+layout.CtxState, layout.CtxEmpty)
+		dev.Write64(layout.CageTablePA(s)+layout.CtxOff+layout.CtxState, layout.CtxEmpty)
 	}
 	dev.CleanInv(vecs, 0x800)
 	dev.MB()
@@ -299,8 +302,8 @@ func Revoke(i int) {
 	//     tussen de veeg en de zeros de óúde tabel opnieuw cachen → de app zou
 	//     de kill overleven op echt silicium (QEMU verhult dit).
 	//  3. dan pas de TLBI (via de HVC): ook de al-vertaalde TLB-entries weg.
-	dev.Clear(layout.Stage2TablePA(i), layout.CtxOff)
-	dev.CleanInv(layout.Stage2TablePA(i), layout.CtxOff)
+	dev.Clear(layout.CageTablePA(i), layout.CtxOff)
+	dev.CleanInv(layout.CageTablePA(i), layout.CtxOff)
 	dev.MB()
 	hvcRevoke()
 }
@@ -322,8 +325,8 @@ func Build(i int, ipaBase, paBase, size uint64) (uint64, error) {
 	// Start gebeurt per contract op een niet-draaiend slot, dus de ctx-staat
 	// mag (en moet) hier vers op Empty — de aanroeper zet 'm daarna op
 	// Running/BootPending bij de dispatch.
-	base := layout.Stage2TablePA(i)
-	dev.Clear(base, layout.Stage2Stride)
+	base := layout.CageTablePA(i)
+	dev.Clear(base, layout.CageStride)
 
 	l1 := uint64(base + l1Off)
 	l2Part := uint64(base + l2PartOff)
@@ -350,7 +353,7 @@ func Build(i int, ipaBase, paBase, size uint64) (uint64, error) {
 	// De index wordt begrensd, symmetrisch met het net-ring-blok hieronder: één
 	// L2-tabel dekt 512 × 2MB = precies één GB. Valt de partitie daarbuiten, dan
 	// schrijft de lus in de buurtabellen ván dit stage-2-blok (l2Dev/l3*) en bij
-	// genoeg overschot voorbij Stage2Stride in het blok van het VOLGENDE slot —
+	// genoeg overschot voorbij CageStride in het blok van het VOLGENDE slot —
 	// stille kruisbesmetting van andermans kooi. De per-slot-cap (maxLimitFor)
 	// hoort dit al te voorkomen; deze guard is de vangnet-laag die niet van een
 	// juiste cap-berekening afhangt (layout-drift hoort hard te vallen, niet stil
@@ -387,7 +390,7 @@ func Build(i int, ipaBase, paBase, size uint64) (uint64, error) {
 	// Een stale (clean) line van een eerdere huurder van dit tabelblok zou de
 	// walker een oude tabel laten walken. Vegen vóór CPU_ON; er draait nu geen
 	// walker op dit blok, dus niets kan tussen de veeg en de start hercachen.
-	dev.CleanInv(base, layout.Stage2Stride)
+	dev.CleanInv(base, layout.CageStride)
 	dev.MB()
 	return l1, nil
 }
@@ -435,7 +438,7 @@ func GrantWindow(i int, pa, size uint64) error {
 		return fmt.Errorf("fb-grant: venster %#x..%#x past niet in het FbIPA-GB", lo, pgHi)
 	}
 
-	base := layout.Stage2TablePA(i)
+	base := layout.CageTablePA(i)
 	l2fb := uint64(base + l2FbOff)
 	gb := uint64(layout.FbIPA) >> 30
 	l1e := base + l1Off + uintptr(gb)*8

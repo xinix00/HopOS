@@ -41,15 +41,15 @@ const (
 func init() {
 	layout.UsePlan(layout.Plan{
 		NodeCtrlPA:    0xC0000000,
-		Stage2PA:      0xC2000000,
-		RevokeVecPA:   revokeVecAsm, // cpuinit zet VBAR_EL2 van core 0 hierheen
+		CagePA:        0xC2000000,
+		TrapVecPA:     revokeVecAsm, // cpuinit zet VBAR_EL2 van core 0 hierheen
 		BootScratchPA: 0xB0000000,   // cpuinit-vast (BOOT_SCRATCH/DTB_PTR)
 		Pool: []layout.Region{
 			{Base: 0x50000000, Size: 0x60000000}, // 1,5GB — het klassieke venster
 			{Base: 0xB1000000, Size: 0x0F000000}, // 240MB — bewijst multi-regio
 		},
 	})
-	if uint64(layout.RevokeVecPA()) != revokeVecAsm {
+	if uint64(layout.TrapVecPA()) != revokeVecAsm {
 		panic("qemuvirt: REVOKE_VEC in cpuinit.s wijkt af van het PA-plan")
 	}
 }

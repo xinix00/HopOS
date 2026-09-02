@@ -1,19 +1,32 @@
 package hop
 
 import (
+	"fmt"
+	"time"
+
+	"github.com/usbarmory/tamago/arm64"
 	"github.com/usbarmory/tamago/dma"
 
 	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/cpu/irq"
 	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/driver/gicv3"
 )
 
 // QEMU virt plaatst 32 virtio-mmio-transports vanaf 0x0a000000 (stride 0x200,
 // SPI-interrupt 16+n). Welk slot een -device krijgt is een QEMU-detail, dus
 // we scannen op DeviceID.
+//
+// De GICv3 van virt (hw/arm/virt.c memmap): distributor op 0x08000000, de
+// redistributor-frames vanaf 0x080a0000, 128KB per core — HOP is core 0.
 const (
 	virtioMMIOBase   = 0x0a000000
 	virtioMMIOStride = 0x200
 	virtioMMIOSlots  = 32
+
+	gicdBase = 0x08000000
+	gicrBase = 0x080a0000
+	firstSPI = 32 // INTID van SPI 0
 
 	regMagic    = 0x000 // "virt" = 0x74726976
 	regVersion  = 0x004 // 2 = modern
@@ -52,4 +65,36 @@ func probeVirtioNet() (base uint64, irq int) {
 		}
 	}
 	return 0, 0
+}
+
+// nicLine is de interruptlijn van de virtio-net, gezet door ProbeNIC zodra de
+// GIC staat; ID 0 = geen (dan pollt hopnet).
+var nicLine irq.Line
+
+// wireNICIRQ zet de GIC op, registreert de RX-lijn van de virtio-net en hangt
+// tamago's servicer eraan (board.NICInterrupter → irq.Wait). Elke stap die
+// faalt laat de node gewoon pollen: interrupts zijn een verbetering, geen
+// voorwaarde.
+func wireNICIRQ(spi int, ack func()) {
+	if spi <= 0 {
+		return
+	}
+	ctrl := gicv3.New(gicdBase, gicrBase)
+	irq.Use(ctrl, arm64.ServiceInterrupts)
+	l := irq.Line{ID: firstSPI + spi, Ack: ack}
+	if err := irq.Enable(l); err != nil {
+		fmt.Printf("net: virtio-net IRQ not enabled (%v) — RX stays polled\n", err)
+		return
+	}
+	nicLine = l
+	fmt.Printf("net: virtio-net RX on interrupt (SPI %d, INTID %d, GICv3 @ %#x)\n", spi, l.ID, gicdBase)
+}
+
+// WaitNIC (board.NICInterrupter): wacht op de RX-interrupt van de NIC, of max.
+func (machine) WaitNIC(max time.Duration) bool {
+	if nicLine.ID == 0 {
+		time.Sleep(max)
+		return false
+	}
+	return irq.Wait(nicLine, max)
 }

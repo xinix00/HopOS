@@ -37,6 +37,10 @@ var (
 // eigen control-page. applib roept dit naast Publish.
 func PublishWakes(addr uintptr) { wakeAddr.Store(addr) }
 
+// Wakes geeft de interne wek-teller — voor HOP's eigen core, die geen
+// control-page heeft om op te publiceren (hopos.idlestat in cmd/hopos).
+func Wakes() uint64 { return wakes.Load() }
+
 // countWake telt de ronde en publiceert hem. Aangeroepen door beide governors,
 // op precies de plek waar ze de idle-teller al wegschrijven.
 func countWake() {

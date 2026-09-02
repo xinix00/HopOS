@@ -91,8 +91,8 @@ func SetupPlan() {
 	}
 	p := layout.Plan{
 		NodeCtrlPA:    nodeCtrlPA,
-		Stage2PA:      stage2PA,
-		RevokeVecPA:   revokeVecPA,
+		CagePA:        stage2PA,
+		TrapVecPA:     revokeVecPA,
 		BootScratchPA: BootScratch,
 		NetDMAPA:      netDMAPA,
 		USBDMAPA:      usbDMAPA,
@@ -142,7 +142,7 @@ func SetupPlan() {
 	// wie het plan verzet zonder cpuinit.s mee te nemen: dan zet core 0 zijn
 	// VBAR_EL2 op een ánder adres dan waar InitVectors de revoke-handler plugt,
 	// en verdwijnt de hard-kill stil.
-	if uint64(layout.RevokeVecPA()) != revokeVecPA {
+	if uint64(layout.TrapVecPA()) != revokeVecPA {
 		panic("rk3566: REVOKE_VEC in cpuinit.s wijkt af van het PA-plan")
 	}
 }

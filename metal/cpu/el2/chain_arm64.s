@@ -43,7 +43,7 @@ TEXT ·chainload(SB),NOSPLIT,$0-40
 	TBZ	$34, R3, hvc	// EL2 zonder E2H: de sctlr_el1-redirect klopt dan niet
 	WORD	$0xd5034fdf	// msr daifset, #0xf
 	// Vectoren van déze core naar de kale fault-dumper (el2fault-tabel op
-	// RevokeVecPA, zelfde bytes in oude én nieuwe kern): een vroege fault in
+	// TrapVecPA, zelfde bytes in oude én nieuwe kern): een vroege fault in
 	// de landing meldt dan ESR/ELR/FAR in plaats van door de oude
 	// tamago-vectoren het lijk van deze kern in te vallen. Onder E2H=1 is de
 	// vbar_el1-encodering de redirect naar VBAR_EL2.

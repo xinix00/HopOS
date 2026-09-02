@@ -157,12 +157,10 @@ func main() {
 
 	// Vóór de eerste PSCI-call (SMC): HopOS eist een EL2-boot — de
 	// stage-2-kooi is een invariant, geen optie.
-	if el := board.Current().BootEL(); el < 2 {
-		fail("boot", fmt.Errorf("EL%d-boot: HopOS vereist EL2 (QEMU: virtualization=on)", el))
+	if err := board.Current().Privilege(); err != nil {
+		fail("boot", err)
 	}
-
-	major, minor := board.Current().PSCIVersion()
-	fmt.Printf("PSCI versie %d.%d (boot-EL%d, conduit SMC)\n", major, minor, board.Current().BootEL())
+	fmt.Println(board.Current().Firmware())
 
 	// Universele log-console (metal/driver/fb) — vroeg, vóór er goroutines loggen.
 	// QEMU heeft geen firmware-framebuffer, dus we bewijzen de renderer op een

@@ -85,7 +85,7 @@ func DTBPool(dtbPtr uintptr, p layout.Plan) []layout.Region {
 	holes := []layout.Region{
 		{Base: 0, Size: HopKernelEnd}, // HOP-kern + laag geheugen (TF-A/scratch/park)
 		{Base: p.NodeCtrlPA, Size: uint64(layout.MaxSlots+1) * layout.CtrlStride},
-		{Base: p.Stage2PA, Size: uint64(layout.MaxSlots+1) * layout.Stage2Stride},
+		{Base: p.CagePA, Size: uint64(layout.MaxSlots+1) * layout.CageStride},
 	}
 	if p.NetDMAPA != 0 {
 		holes = append(holes, layout.Region{Base: p.NetDMAPA, Size: layout.NetDMASize})

@@ -12,10 +12,10 @@
 package hop
 
 import (
+	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/board"
 	"github.com/xinix00/HopOS/metal/board/raspi"
 	"github.com/xinix00/HopOS/metal/board/raspi/vcfb"
-	"github.com/xinix00/HopOS/metal/cpu/el2"
 	"github.com/xinix00/HopOS/metal/cpu/psci"
 	"github.com/xinix00/HopOS/metal/driver/fb"
 	"github.com/xinix00/HopOS/metal/driver/pcie"
@@ -33,8 +33,12 @@ type Base struct {
 	VCMailBase uintptr                  // VideoCore-mailbox (vcfb-terugval)
 }
 
-func (b Base) BootEL() int { return int(raspi.BootEL()) }
 func (b Base) CoreID() int { return b.CoreIDFn() }
+
+// Privilege/Firmware: EL2-boot vereist (TF-A/armstub op EL3 is de
+// PSCI-provider, conduit SMC).
+func (b Base) Privilege() error { return board.RequireEL2(int(raspi.BootEL())) }
+func (b Base) Firmware() string { return psci.Line(int(raspi.BootEL())) }
 
 // TempMilliC (board.Thermometer): de SoC-temperatuur via de firmware-mailbox —
 // dezelfde route als DVFS. De VideoCore meet de die zelf; één sensor, dus
@@ -68,24 +72,22 @@ func (b Base) TimerOffset() int64     { return raspi.ARM64.TimerOffset }
 func (b Base) SetTimerOffset(o int64) { raspi.ARM64.TimerOffset = o }
 func (b Base) SetWallTime(ns int64)   { raspi.ARM64.SetTime(ns) }
 
-// PSCI via de gedeelde wrappers (metal/cpu/psci; TF-A/armstub op EL3,
-// conduit SMC) — hier wordt alleen de core-index naar het MPIDR-target
-// vertaald (b.Target). Board-eigenaardigheden (stock-armstub zonder PSCI op
-// de Pi 4, ALREADY_ON-gedrag op de Pi 5) staan bij de boards zelf.
-func (b Base) CPUOn(core, entry, ctx uint64) int64 {
-	return psci.On(b.Target(core), entry, ctx)
+// Cores: PSCI via de gedeelde wrappers (metal/cpu/psci) — hier wordt alleen de
+// core-index naar het MPIDR-target vertaald (b.Target). Board-eigenaardigheden
+// (stock-armstub zonder PSCI op de Pi 4, ALREADY_ON-gedrag op de Pi 5) staan
+// bij de boards zelf. Geen Reset: PSCI CPU_OFF is op de Pi 5-stockfirmware een
+// one-way door (gemeten 2026-07-10), dus een ingetrokken core parkeert zichzelf
+// in HopOS' eigen EL2-lus.
+func (b Base) Cores() board.Cores {
+	state := func(c int) board.PowerState {
+		return board.PowerState(psci.AffinityInfo(b.Target(uint64(c))))
+	}
+	return board.Cores{
+		App:   func() []int { return board.ProbeCores(state, layout.NumAppCores()) },
+		Start: func(c int, entry, arg uint64) error { return psci.On(b.Target(uint64(c)), entry, arg) },
+		State: state,
+	}
 }
-func (b Base) AffinityInfo(core uint64) board.PowerState {
-	return board.PowerState(psci.AffinityInfo(b.Target(core)))
-}
-func (b Base) PSCIVersion() (major, minor uint16) { return psci.Version() }
-
-// Stage-2/SMP: de trampolines zijn board-neutraal en data-gedreven (gedeeld
-// metal/cpu/el2 — geen GIC, geen MPIDR, geen ingebakken adressen; de
-// hard-kill loopt via stage2.Revoke). Het board levert het PA-plan
-// (rpi4.go/rpi5.go); hier is het één-op-één doorgeven.
-func (b Base) S2TrampPC() uint64    { return el2.S2TrampPC() }
-func (b Base) S2SMPTrampPC() uint64 { return el2.S2SMPTrampPC() }
 
 // Lease bewaart wat het board-ProbeNIC via DHCP ophaalde; Net/DHCPLease lezen
 // hem. hopnet.Up roept ProbeNIC vóór Net() aan (die volgorde is het

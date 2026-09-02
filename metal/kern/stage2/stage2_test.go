@@ -30,12 +30,12 @@ var s2buf []byte
 func TestMain(m *testing.M) {
 	// SlotCap-maat (niet MaxSlots): de slot-105-regressietest bouwt kooien
 	// tot in de hoogste slots.
-	s2buf = make([]byte, (layout.SlotCap+2)*layout.Stage2Stride)
+	s2buf = make([]byte, (layout.SlotCap+2)*layout.CageStride)
 	base := (uintptr(unsafe.Pointer(&s2buf[0])) + 0x7FF) &^ 0x7FF // VBAR-uitlijning
 	layout.UsePlan(layout.Plan{
 		NodeCtrlPA:    tCtrlPA,
-		Stage2PA:      uint64(base),
-		RevokeVecPA:   tRevokeVecPA,
+		CagePA:        uint64(base),
+		TrapVecPA:     tRevokeVecPA,
 		BootScratchPA: tBootScratchPA,
 		Pool:          []layout.Region{{Base: tPoolPA, Size: 1 << 30}},
 	})
@@ -64,7 +64,7 @@ func TestBuildSlot1(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	base := uint64(layout.Stage2TablePA(1))
+	base := uint64(layout.CageTablePA(1))
 	if l1 != base+l1Off {
 		t.Fatalf("VTTBR-adres %#x, verwacht %#x", l1, base+l1Off)
 	}
@@ -136,7 +136,7 @@ func TestBuildSlot3DeeltGBMetDevices(t *testing.T) {
 	if _, err := Build(3, ipa, tPoolPA, size); err != nil {
 		t.Fatal(err)
 	}
-	base := uint64(layout.Stage2TablePA(3))
+	base := uint64(layout.CageTablePA(3))
 
 	// Beide L1-entries wijzen naar dezelfde L2 (dev), L2part blijft leeg.
 	if got := rd(base + l1Off + 2*8); got != base+l2DevOff|descTable {
@@ -190,7 +190,7 @@ func TestBuildHoogsteSlotHeeftGeenEigenIPAVenster(t *testing.T) {
 	if _, err := Build(105, layout.SlotBase(1), tPoolPA, 64<<20); err != nil {
 		t.Fatal(err)
 	}
-	base := uint64(layout.Stage2TablePA(105))
+	base := uint64(layout.CageTablePA(105))
 	if got := rd(base + l1Off + 3*8); got != 0 {
 		t.Fatalf("L1[3] = %#x, hoort leeg — het net-ring-GB bestaat niet meer (de ringen liggen in de partitie)", got)
 	}
@@ -236,7 +236,7 @@ func walk(t *testing.T, i int) []leaf {
 			}
 		}
 	}
-	walkTbl(uint64(layout.Stage2TablePA(i))+l1Off, 1)
+	walkTbl(uint64(layout.CageTablePA(i))+l1Off, 1)
 	return out
 }
 
@@ -262,7 +262,7 @@ func TestIsolatieTussenSlots(t *testing.T) {
 		// frame-ringen liggen in zijn staart) — precies de winst van ABIVersion 2:
 		// één regio om af te schermen i.p.v. vier.
 		{"partitie + ABI-staart", pa2, size},
-		{"stage-2-tabellen", uint64(layout.Stage2TablePA(0)), uint64(layout.MaxSlots+1) * layout.Stage2Stride},
+		{"stage-2-tabellen", uint64(layout.CageTablePA(0)), uint64(layout.MaxSlots+1) * layout.CageStride},
 	}
 	roGezien := 0
 	for _, l := range walk(t, 1) {

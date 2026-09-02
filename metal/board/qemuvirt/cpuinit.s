@@ -23,7 +23,7 @@
 
 #define BOOT_SCRATCH 0xB0000000
 #define DTB_PTR      0xB0000008
-#define REVOKE_VEC   0xC2000800	// = layout.RevokeVecPA() van het qemuvirt-plan
+#define REVOKE_VEC   0xC2000800	// = layout.TrapVecPA() van het qemuvirt-plan
 				// (pariteit gecheckt in qemuvirt.go init)
 
 TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0

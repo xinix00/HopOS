@@ -19,7 +19,7 @@
 //	al het overige = live app-staat
 //
 // Alle adressen zijn TPIDR/SP-relatief of komen uit het sched-blok van de
-// core (layout.Sched*: Stage2PA en CtrlPA, door InitVectors neergelegd) —
+// core (layout.Sched*: CagePA en CtrlPA, door InitVectors neergelegd) —
 // geen #defines, board-neutraal onder elk PA-plan. De layout.Sched*/Ctx*-
 // offsets staan hier als literals; layout.go benoemt die koppeling.
 //
@@ -52,8 +52,8 @@ TEXT el2entry(SB),NOSPLIT|NOFRAME,$0
 	CBZ	R3, exited
 
 yield:
-	// Idle-yield (HVC #1): bewoner = VMID; zijn contextblok = Stage2PA + slot<<16 + CtxOff.
-	// Stage2PA komt uit het sched-blok (SP = scratch = blok+16, dus
+	// Idle-yield (HVC #1): bewoner = VMID; zijn contextblok = CagePA + slot<<16 + CtxOff.
+	// CagePA komt uit het sched-blok (SP = scratch = blok+16, dus
 	// veld-offset − 16: SchedS2PA(224) → 208).
 	WORD	$0xd53c2100	// mrs x0, vttbr_el2
 	LSR	$48, R0, R0	// x0 = slot
@@ -274,7 +274,7 @@ resume:
 	MOVD	R9, (R1)
 	DSB	$15
 
-	// VTTBR omzetten naar dít slot: L1 = Stage2PA + slot<<16 (l1Off = 0),
+	// VTTBR omzetten naar dít slot: L1 = CagePA + slot<<16 (l1Off = 0),
 	// VMID = slot. GEEN TLBI: entries zijn VMID-getagd, de vertalingen van
 	// beide bewoners bestaan naast elkaar — dát maakt de wissel goedkoop.
 	MOVD	208(RSP), R2
@@ -344,7 +344,7 @@ resume:
 	ERET
 
 park:
-	// Geen bewoner meer te draaien: core naar de parkeerlus (Stage2PA +
+	// Geen bewoner meer te draaien: core naar de parkeerlus (CagePA +
 	// 0x1000). TPIDR_EL2 (het sched-blok) staat nog — de lus meldt zich
 	// daar als geparkeerd en wacht op een mailbox-dispatch van HOP.
 	MOVD	208(RSP), R2

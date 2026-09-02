@@ -1,0 +1,63 @@
+package main
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/xinix00/HopOS/metal/board"
+	"github.com/xinix00/HopOS/metal/cpu/idle"
+	"github.com/xinix00/HopOS/metal/cpu/irq"
+	"github.com/xinix00/HopOS/metal/net/hopnet"
+)
+
+// Wat de agent-main over zijn eigen cores moet weten, arch-neutraal: hoe HOP
+// een éigen extra core opbrengt en hoe die op de console heet. Hier stonden
+// twee helften (node_arm64.go / node_riscv64.go) met elk hun eigen vocabulaire
+// — CPUOn/AffinityInfo tegenover HartOn/HartState; sinds board.Cores is het
+// één contract en dus één bestand. De boot-weigering (Privilege) en de
+// firmware-regel (Firmware) vraagt de main rechtstreeks aan het board.
+
+// nodeDispatch is hoe HOP een éigen extra core opbrengt: rechtstreeks via de
+// Start-poot van het board (hij ís HOP — er is geen HOP-boven-HOP die op
+// CtrlSMPReq luistert), naar de gedeelde EL2-trampoline die smp.ConfigureNode
+// meegeeft. Dezelfde poot als een app-core krijgt in kern/slots.
+func nodeDispatch(core int, entry, ctx uint64) {
+	k := board.Current().Cores()
+	phys, ok := k.Phys(core)
+	if !ok {
+		fmt.Printf("hop: node-core %d: no such core on this board\n", core)
+		return
+	}
+	if err := k.Start(phys, entry, ctx); err != nil {
+		fmt.Printf("hop: node-core %d: %v\n", core, err)
+	}
+}
+
+// nodeCoreState is de console-weergave van een opgekomen node-core.
+func nodeCoreState(core int) string {
+	k := board.Current().Cores()
+	phys, ok := k.Phys(core)
+	if !ok {
+		return "no such core"
+	}
+	return fmt.Sprintf("state=%s", k.State(phys))
+}
+
+// idleStat is de meetlat van HOP's eigen core: hoe vaak zijn scheduler per
+// seconde wakker wordt en welk deel van de tijd hij slaapt — hetzelfde paar
+// dat een app op zijn control-page publiceert (CtrlWakes/CtrlIdle), maar HOP
+// heeft geen control-page. Aan met hopos.idlestat=1; één regel per 10s.
+// Dít is het getal waarop de NIC-interrupt (cpu/irq) afgerekend wordt:
+// gepold ~3.300 wekken/s bij stilte, op de interrupt ~100 (de vangrail).
+func idleStat() {
+	hz := float64(idle.CounterHz())
+	w0, t0, i0, r0, at := idle.Wakes(), idle.Ticks(), irq.Fired(), hopnet.RXIdleRounds(), time.Now()
+	for {
+		time.Sleep(10 * time.Second)
+		w1, t1, i1, r1, now := idle.Wakes(), idle.Ticks(), irq.Fired(), hopnet.RXIdleRounds(), time.Now()
+		dt := now.Sub(at).Seconds()
+		fmt.Printf("idle: %.0f wakes/s, %.1f%% idle, %.0f irq/s, %.0f empty rx rounds/s HOPOS_IDLESTAT\n",
+			float64(w1-w0)/dt, 100*float64(t1-t0)/hz/dt, float64(i1-i0)/dt, float64(r1-r0)/dt)
+		w0, t0, i0, r0, at = w1, t1, i1, r1, now
+	}
+}

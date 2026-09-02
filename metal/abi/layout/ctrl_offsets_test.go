@@ -66,8 +66,12 @@ func TestCtrlOffsetsUniek(t *testing.T) {
 				if v%8 != 0 {
 					t.Errorf("%s = %#x: niet 8-byte-gealigneerd", name.Name, v)
 				}
-				if name.Name != "CtrlEnvData" && v+8 > CtrlEnvData {
-					t.Errorf("%s = %#x: overlapt de env-regio (CtrlEnvData = %#x)", name.Name, v, uint64(CtrlEnvData))
+				// Vóór de env, of in de staart erboven — nooit erin.
+				if name.Name != "CtrlEnvData" && v+8 > CtrlEnvData && v < CtrlEnvData+CtrlEnvMax {
+					t.Errorf("%s = %#x: overlapt de env-regio (%#x..%#x)", name.Name, v, uint64(CtrlEnvData), uint64(CtrlEnvData+CtrlEnvMax))
+				}
+				if v+8 > CtrlStride {
+					t.Errorf("%s = %#x: buiten de page", name.Name, v)
 				}
 			}
 		}

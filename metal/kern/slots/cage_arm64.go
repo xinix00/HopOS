@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/board"
+	"github.com/xinix00/HopOS/metal/cpu/el2"
 	"github.com/xinix00/HopOS/metal/dev"
 	"github.com/xinix00/HopOS/metal/kern/stage2"
 )
@@ -17,9 +17,7 @@ import (
 // EL2-trampoline activeert haar en ERET't pas dán naar de app-entry. De app
 // draait in EL1 en heeft nooit EL2 gezien.
 //
-// Dit bestand is een pure verplaatsing van wat in slots.go stond: de zes
-// aanknooppunten die niet arch-neutraal zijn, nu achter vier namen. Gedrag
-// ongewijzigd — dat is precies wat de ARM-gate bewijst.
+// Het contract staat in cage.go; dit is de ARM-helft.
 
 // cageInit zet de EL2-vectoren, de parkeerlus en de revoke-vectoren klaar.
 // Moet vóór de eerste dispatch gebeuren (de mailbox-cold-detectie leest een
@@ -47,8 +45,10 @@ func cagePrepare(i int, linkBase, base, size, entry uint64) error {
 // in exact dezelfde boot. Eén adres voor élk slot — de stage-2 legt de partitie
 // onder een canoniek IPA, dus de trampoline hoeft niet te weten wélk slot hij
 // start; het slot-argument is er voor de kant waar dat níet zo is (RISC-V start
-// in de kooi-stub van de partitie zelf).
-func cageEntryPC(int) uint64 { return board.Current().S2TrampPC() }
+// in de kooi-stub van de partitie zelf). Board-neutraal: de trampoline woont
+// in cpu/el2 (met de plan-regio-omschakeling van de kern-flip), niet bij een
+// board — vijf boards gaven hier hetzelfde adres door.
+func cageEntryPC(int) uint64 { return el2.S2TrampPC() }
 
 // De parkeer-mailbox is HET ARM-mechanisme voor de core-levenscyclus: HopOS
 // bezit zijn cores, dus een gestopte app-core gaat niet terug naar de firmware
@@ -96,38 +96,21 @@ func cageDispatch(core int, entry, ctx uint64) error {
 	return nil
 }
 
-// cageColdStart brengt een koude core op via de firmware (PSCI CPU_ON). Alleen
-// de eerste keer per core; daarna leeft hij in HopOS' eigen parkeerlus en gaat
-// dispatch via mailbox + cageWake.
+// cageColdStart brengt een koude core op via de Start-poot van het board (PSCI
+// CPU_ON, Apple's spin-release/PMGR). Alleen de eerste keer per core; daarna
+// leeft hij in HopOS' eigen parkeerlus en gaat dispatch via mailbox + SEV.
 func cageColdStart(core int, entry, ctx uint64) error {
-	if ret := board.Current().CPUOn(uint64(core), entry, ctx); ret != board.PSCISuccess {
-		return fmt.Errorf("PSCI CPU_ON core %d: %d", core, ret)
+	phys := physCore(core)
+	if phys < 0 {
+		return fmt.Errorf("core %d: no such core on this board", core)
 	}
-	return nil
+	return cores().Start(phys, entry, ctx)
 }
 
 // cageSMPEntryPC is het fysieke adres van de EL2 SMP-trampoline: waar een
 // secundaire core van een SMP-app binnenkomt (zelfde partitie en stage-2, dus
 // gedeelde heap).
-func cageSMPEntryPC() uint64 { return board.Current().S2SMPTrampPC() }
-
-// coreExists meldt of core een écht power-woord teruggeeft.
-//
-// Logisch nummer == fysiek nummer op deze architectuur, en dat is een EIGENSCHAP
-// en geen toeval: PSCI nummert cores aaneengesloten vanaf nul, dus de
-// aaneengesloten 1..N waarmee kern/slots rekent valt samen met het silicium. Waar
-// dat níet zo is (RISC-V levert een lijst hart-ID's) vertaalt de andere helft van
-// de naad — zie hartOf in cage_riscv64.go.
-//
-// Op ARM is dit de PSCI-telling: alles buiten {On,Off,OnPending} is een ontbrekende core
-// (INVALID_PARAMS) óf een PSCI-fout — beide betekenen "hier stopt de topologie".
-func coreExists(core int) bool {
-	switch board.Current().AffinityInfo(uint64(core)) {
-	case board.PowerOn, board.PowerOff, board.PowerOnPending:
-		return true
-	}
-	return false
-}
+func cageSMPEntryPC() uint64 { return el2.S2SMPTrampPC() }
 
 // cageRevoke trekt de kooi van slot i in — de hard-kill. Het nult de
 // stage-2-map en doet één HVC→TLBI, waarna élke core van het slot (ze delen

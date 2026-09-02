@@ -15,7 +15,7 @@
 //     uitkomst, en tamago's EL1-vectoren dekken EL2 niet. De tabel wordt in
 //     RAM gebouwd (apple.RevokeVec, 16 × {ldr x16,#8; br x16; .quad handler}),
 //     want een 2KB-uitgelijnd symbool is in Go-asm geen zekerheid. Het adres is
-//     tegelijk HOP's RevokeVecPA: stage2.InitVectors plugt er later alleen de
+//     tegelijk HOP's TrapVecPA: stage2.InitVectors plugt er later alleen de
 //     HVC-revoke-handler in en laat deze foutmelders staan.
 //
 // TGE blijft 0 (met TGE=1 bestaat EL1 niet), IMO/FMO/AMO blijven 0: fysieke

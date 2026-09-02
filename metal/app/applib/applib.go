@@ -156,6 +156,12 @@ func Init() *App {
 	// merkt er niets van, net als bij SMP en de idle-teller.
 	idle.WatchShared(layout.CtrlPageAt(a.RAMStart, a.RAMSize) + layout.CtrlShared)
 
+	// Het quirk-masker van het board (CtrlCorePrep): wat deze core aan zijn
+	// eigen silicium moet rechtzetten voordat slapen werkt. De governor voert
+	// het uit in zijn eerste ronde — laat, vanaf EL1/S-mode, in gewone
+	// Go-context, de enige plaatsing die op de M4 bewezen is. OS-laag-werk.
+	idle.WatchPrep(layout.CtrlPageAt(a.RAMStart, a.RAMSize) + layout.CtrlCorePrep)
+
 	// Het ABI-stempel aanraken zodat het in het image blijft staan (zie
 	// abiVersion): HOP leest het bij plaatsing uit de symboltabel.
 	if abiVersion == 0 {

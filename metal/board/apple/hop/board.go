@@ -4,12 +4,12 @@
 // (board/hopslot) en linken zo nooit tegen boardcode — dezelfde bronsplitsing
 // als bij de Pi's, de Radxa en de LicheeRV.
 //
-// Wat hier anders is dan op elk ander ARM-board: er is geen PSCI. m1n1 heeft
-// de secundaire cores gestart en in zijn spin-table geparkeerd; apple.Release
-// laat ze daar los (het cpu-release-addr-protocol) en dát is CPUOn. Een core
-// die eenmaal van ons is komt nooit meer bij m1n1 terug — HopOS parkeert zijn
-// cores toch al zelf (kern/slots: de EL2-parkeerlus), dus AffinityInfo is hier
-// onze eigen boekhouding: Off tot de eerste Release, daarna On.
+// Wat hier anders is dan op elk ander ARM-board: er is geen PSCI. Natief zijn
+// de cores van ons (RVBAR → stubReset, PMGR-start); onder m1n1 laat
+// apple.Release ze los uit zijn spin-table — dat is Cores().Start. Een core
+// die eenmaal van ons is komt nooit meer bij de firmware terug — HopOS
+// parkeert zijn cores zelf (kern/slots: de EL2-parkeerlus), dus State is hier
+// onze eigen boekhouding: Off tot de eerste Start, daarna On.
 //
 // Core-nummering. HopOS rekent met core 0 = de HOP-core en 1..N = app-cores,
 // aaneengesloten. m1n1 boot op cpu 6 (een P-core) en nummert 0..9; de
@@ -27,7 +27,6 @@ import (
 	"fmt"
 	"github.com/xinix00/HopOS/metal/board"
 	"github.com/xinix00/HopOS/metal/board/apple"
-	"github.com/xinix00/HopOS/metal/cpu/el2"
 	"github.com/xinix00/HopOS/metal/driver/fb"
 	"github.com/xinix00/HopOS/metal/driver/nvme"
 	"github.com/xinix00/HopOS/metal/driver/pcie"
@@ -49,13 +48,10 @@ func init() { board.Use(machine{}) }
 // Board-contract puur op board.Use() at runtime.
 var _ board.Board = machine{}
 
-// Optioneel: het aantal app-cores declareren — AffinityInfo is hier geen PSCI
-// maar onze eigen boekhouding, en de kern mag daar niet op hoeven te vertrouwen
-// voor zijn telling.
-var _ board.CoreCountHinter = machine{}
-
-// cpuOf vertaalt een logische HopOS-core (1..N) naar m1n1's cpu-index; -1 als
-// hij niet bestaat. Core 0 is de boot-cpu.
+// cpuOf vertaalt een logische HopOS-core (1..N) naar de cpu-index van de
+// boom; -1 als hij niet bestaat. Core 0 is HOP's eigen cpu. Dezelfde volgorde
+// als Cores().App(), en alleen nog nodig voor CoreClass — de kern spreekt
+// Cores in fysieke nummers.
 func cpuOf(core int) int {
 	self := apple.SelfCPU()
 	if self < 0 || core < 0 || core >= apple.NumCPUs() {
@@ -71,15 +67,81 @@ func cpuOf(core int) int {
 }
 
 func (machine) CoreID() int      { return apple.CoreID() }
-func (machine) BootEL() int      { return apple.BootEL() }
 func (machine) MemTotal() uint64 { return apple.MemTotal() }
 
-// ExpectedAppCores: alles behalve de boot-cpu (M4: 9).
-func (machine) ExpectedAppCores() int {
-	if n := apple.NumCPUs(); n > 0 {
-		return n - 1
+// Privilege/Firmware: EL2-boot vereist. Er ís geen PSCI — iBoot zette ons
+// neer en de cores zijn van ons (RVBAR → stubReset), of van m1n1's spin-table.
+func (machine) Privilege() error { return board.RequireEL2(apple.BootEL()) }
+func (machine) Firmware() string {
+	return fmt.Sprintf("iBoot, no PSCI (boot EL%d, %d cpus, self cpu%d)", apple.BootEL(), apple.NumCPUs(), apple.SelfCPU())
+}
+
+// Cores: alle cpus behalve de eigen (M4: 9), in cpu-volgorde. Start is de
+// spin-table-release of, met eigen cores, PMGR + de brievenbus (apple.Start,
+// bewezen op alle negen, 28-08/31-08). State is eigen boekhouding: Off tot de
+// eerste Start, daarna On — een core die eenmaal van ons is komt nooit meer
+// bij de firmware terug, HopOS parkeert hem zelf. Geen Reset (nog): het
+// PMGR-blok kán het (cpustart.go), maar het is niet bewezen en de EL2-parkeerlus
+// is het.
+//
+// Prep: (nog) NIETS — en dat is een meting, geen vergeten poot.
+//
+// Elke core die wíj uit reset halen komt op met WFI_MODE=0 in CYC_OVRD,
+// waardoor WFE meteen terugkeert en een lege app op 74% cpu spint (1,3M
+// governor-rondes/s). De voor de hand liggende fix — WFI_MODE=2 schrijven
+// zoals m1n1 op M1-M3 doet — is op de M4 in geen enkele vorm betrouwbaar
+// gebleken (02-09, vier ijzer-uren, 20+ runs met ESR-rapport):
+//
+//   - vanaf EL2 (trampoline): undefined instruction (EC=0);
+//   - vanaf EL1 in de governor, in een goroutine, na 3s, na 200ms rekenen,
+//     als constante, als read-modify-write, op E- én P-cores: undefined
+//     instruction, 9 van 9 — het app-image sterft (exit 2);
+//   - hetzelfde instructiewoord in een ouder app-image (vitals8) faultt NIET,
+//     had één keer 's ochtends en één keer 's middags effect (955 wekken/s,
+//     0%), en daarna op dezelfde core niet meer (1 op 3). Leest altijd 0.
+//
+// Een register dat op dezelfde core, dezelfde kern en dezelfde bytes soms
+// undefined is en soms een stille no-op, is niet te programmeren zonder de
+// referentie: m1n1 slaat het op de M4 zelf over (features_m4 zonder
+// apple_sysregs_unlocked, "figure out what features are actually available
+// on M4"), en Linux schrijft het als VHE-host op EL2. Dus: geen bit tot
+// die referentie er is — een app die crasht is erger dan een app op 74%.
+// Het mechanisme (CtrlCorePrep, PrepDeepWFE, prep_arm64.s) blijft staan en
+// is op QEMU en ijzer bewezen als KANAAL; alleen de inhoud wacht.
+func (machine) Cores() board.Cores {
+	self := apple.SelfCPU
+	return board.Cores{
+		App: func() []int {
+			var app []int
+			for cpu := range apple.NumCPUs() {
+				if cpu != self() {
+					app = append(app, cpu)
+				}
+			}
+			return app
+		},
+		Start: func(cpu int, entry, arg uint64) error {
+			if cpu < 0 || cpu >= apple.NumCPUs() || cpu == self() {
+				return fmt.Errorf("apple: no app core cpu%d", cpu)
+			}
+			if apple.Released(cpu) {
+				return fmt.Errorf("apple: cpu%d already released — a second release would hijack a running core", cpu)
+			}
+			if !apple.Start(cpu, entry, arg) {
+				return fmt.Errorf("apple: cpu%d did not start", cpu)
+			}
+			return nil
+		},
+		State: func(cpu int) board.PowerState {
+			switch {
+			case cpu < 0 || cpu >= apple.NumCPUs():
+				return board.PowerState(-2)
+			case cpu == self() || apple.Released(cpu):
+				return board.PowerOn
+			}
+			return board.PowerOff
+		},
 	}
-	return 0
 }
 
 // CoreClass: de E-cores ("sawtooth", cluster 0) zijn "small", de P-cores
@@ -100,46 +162,6 @@ func (machine) CoreClass(core int) string {
 func (machine) TimerOffset() int64       { return apple.ARM64.TimerOffset }
 func (machine) SetTimerOffset(off int64) { apple.ARM64.TimerOffset = off }
 func (machine) SetWallTime(ns int64)     { apple.ARM64.SetTime(ns) }
-
-// CPUOn = de spin-table-release (bewezen op alle negen cores, 28-08). De
-// return-codes volgen PSCI zodat de kern één pad houdt: 0 = ok,
-// -2 (INVALID_PARAMS) = geen zo'n core, -4 (ALREADY_ON) = al losgelaten —
-// een tweede Release zou een draaiende core midden in zijn werk kapen.
-func (machine) CPUOn(core, entry, ctx uint64) int64 {
-	cpu := cpuOf(int(core))
-	if cpu < 0 || int(core) == 0 {
-		return -2
-	}
-	if apple.Released(cpu) {
-		return -4
-	}
-	if !apple.Start(cpu, entry, ctx) {
-		return -2
-	}
-	return board.PSCISuccess
-}
-
-// AffinityInfo: eigen boekhouding (zie de pakketdoc). Buiten 0..N-1 een
-// waarde buiten {On,Off,OnPending}, zodat kern/slots daar zijn topologie
-// laat stoppen.
-func (machine) AffinityInfo(core uint64) board.PowerState {
-	cpu := cpuOf(int(core))
-	switch {
-	case cpu < 0:
-		return board.PowerState(-2)
-	case core == 0 || apple.Released(cpu):
-		return board.PowerOn
-	}
-	return board.PowerOff
-}
-
-// PSCIVersion: er ís geen PSCI; 0.0 zegt dat eerlijk in de firmware-regel.
-func (machine) PSCIVersion() (major, minor uint16) { return 0, 0 }
-
-// Stage-2/SMP: de trampolines zijn board-neutraal (metal/cpu/el2), gebouwd
-// met -D VHE voor dit board (E2H staat vast op 1 — zie cpu/el2/sysreg.h).
-func (machine) S2TrampPC() uint64    { return el2.S2TrampPC() }
-func (machine) S2SMPTrampPC() uint64 { return el2.S2SMPTrampPC() }
 
 // ProbeNIC, Net en DHCPLease staan in net.go — dat is de keten van PCIe-link
 // tot DHCP-lease.

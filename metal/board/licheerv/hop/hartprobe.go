@@ -81,10 +81,9 @@ func init() {
 // core-lokaal (bij een gedeelde comparator zouden twee slapers elkaars wekker
 // overschrijven).
 func ProbeAppHarts() {
-	m := machine{}
 	probed := false
-	for _, h := range m.AppHarts() {
-		if m.HartResettable(h) {
+	for _, h := range appHarts() {
+		if hartResettable(h) {
 			probeHart(h)
 			probed = true
 		}
@@ -115,13 +114,12 @@ func ProbeAppHarts() {
 }
 
 func probeHart(h int) {
-	m := machine{}
 	mb := uintptr(bootScratchPA)
 	dev.Clear(mb, probeLen)
 	dev.Push(mb, probeLen)
 
 	t0 := licheerv.Rdtime()
-	if err := m.HartOn(h, uint64(appHartProbePC()), 0); err != nil {
+	if err := hartOn(h, uint64(appHartProbePC()), 0); err != nil {
 		fmt.Printf("board: app hart %d probe: cannot start the core (%v) — hart sleep stays off\n", h, err)
 		return
 	}
@@ -165,7 +163,7 @@ func probeHart(h int) {
 			}
 		}
 	}
-	_ = m.HartOff(h) // altijd terug in reset — het slot-pad boot hem vers
+	_ = hartOff(h) // altijd terug in reset — het slot-pad boot hem vers
 	// Ontsmetten kan alleen ons EIGEN comparator (de decode is core-lokaal:
 	// die van hart 1 is voor ons per constructie onbereikbaar — daar staat na
 	// de decode-lus een 1 in, wat hooguit een pending MTIP zonder MTIE is; de

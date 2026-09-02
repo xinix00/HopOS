@@ -50,7 +50,7 @@ func TestCtxRevokeOwnLine(t *testing.T) {
 	}
 	// Het ctx-blok zit op CtxOff binnen het stride-blok van een slot en mag daar
 	// niet uit groeien.
-	if CtxOff+CtxRevoke+8 > Stage2Stride {
+	if CtxOff+CtxRevoke+8 > CageStride {
 		t.Errorf("CtxRevoke (%d) valt buiten het stride-blok van een slot", CtxRevoke)
 	}
 }

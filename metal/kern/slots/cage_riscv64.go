@@ -186,7 +186,7 @@ func cageInit() {
 	if mmodeAdopting {
 		return
 	}
-	base := layout.Stage2TablePA(0) // = Plan.Stage2PA; slot 0 draagt geen tabellen
+	base := layout.CageTablePA(0) // = Plan.CagePA; slot 0 draagt geen tabellen
 	nc := layout.NumAppCores()
 	for c := 0; c <= nc; c++ {
 		mb := layout.ParkMboxPA(c)
@@ -221,7 +221,7 @@ func cageInit() {
 			dev.Push(mb, layout.ParkMboxLen)
 			continue
 		}
-		t := board.Current().HartTimer(hartOf(c))
+		t := hartTimer(physCore(c))
 		dev.Write64(mb+layout.SchedClintPA, t.MtimecmpPA)
 		dev.Write64(mb+layout.SchedMsipPA, t.MsipPA)
 		dev.Write64(mb+layout.SchedSleepCap, t.SleepCap)
@@ -240,8 +240,8 @@ func cageInit() {
 	// slot 1 droeg CtxRunning uit een vórige boot en élke plaatsing weigerde
 	// met "still live". De reset-wereld wiste dit impliciet; de loterij niet.
 	for i := 1; i <= layout.MaxSlots; i++ {
-		dev.Clear(layout.Stage2TablePA(i)+layout.CtxOff, layout.CtxLen)
-		dev.Push(layout.Stage2TablePA(i)+layout.CtxOff, layout.CtxLen)
+		dev.Clear(layout.CageTablePA(i)+layout.CtxOff, layout.CtxLen)
+		dev.Push(layout.CageTablePA(i)+layout.CtxOff, layout.CtxLen)
 	}
 
 	// De parkerende cores meteen intrekken: de switcher zelf als eerste
@@ -257,7 +257,7 @@ func cageInit() {
 		if !coreParks(c) {
 			continue
 		}
-		if err := board.Current().HartOn(hartOf(c), mmode.ParkEnterPC(), uint64(layout.ParkMboxPA(c))); err != nil {
+		if err := cores().Start(physCore(c), mmode.ParkEnterPC(), uint64(layout.ParkMboxPA(c))); err != nil {
 			// Zelfredding (de loterij kwam nooit tot parkeren) of een dubbele
 			// init: luid melden; plaatsingen op deze core falen daarna met
 			// hun eigen foutmelding.
@@ -447,8 +447,8 @@ func cageEntryPC(i int) uint64 {
 // plaats van een hart-reset), hoe hij dood gaat (kill-tick in plaats van
 // HartOff), en of HOP in regel 0 van het sched-blok mag schrijven (nooit).
 func coreParks(core int) bool {
-	h := hartOf(core)
-	return h >= 0 && !board.Current().HartResettable(h)
+	h := physCore(core)
+	return h >= 0 && !cores().CanReset(h)
 }
 
 // De core-levenscyclus is hier normaal gesproken het reset-blok, niet een
@@ -467,14 +467,14 @@ func coreRunning(core int) bool {
 	if coreParks(core) {
 		return schedCurrent(core) != 0
 	}
-	return board.Current().HartState(hartOf(core)) == board.PowerOn
+	return cores().State(physCore(core)) == board.PowerOn
 }
 
 func coreStopped(core int) bool {
 	if coreParks(core) {
 		return schedCurrent(core) == 0
 	}
-	return board.Current().HartState(hartOf(core)) == board.PowerOff
+	return cores().State(physCore(core)) == board.PowerOff
 }
 
 // schedCurrent leest welk slot er op deze core draait (0 = geen). De switcher
@@ -648,11 +648,11 @@ func cageColdStart(core int, entry, ctx uint64) error {
 	if entry == 0 {
 		return fmt.Errorf("cage: core %d has no prepared partition", core)
 	}
-	hart := hartOf(core)
+	hart := physCore(core)
 	if hart < 0 {
 		return fmt.Errorf("cage: no hart for logical core %d", core)
 	}
-	return board.Current().HartOn(hart, entry, 0) // een reset-start kent geen arg
+	return cores().Start(hart, entry, 0) // een reset-start kent geen arg
 }
 
 // cageRevoke: hart in reset. Dat stopt hem waar hij ook is (ook uit een tight
@@ -682,7 +682,7 @@ func cageRevoke(i int) {
 		ctxWrite(i, layout.CtxRevoke, 1)
 		return
 	}
-	if err := board.Current().HartOff(hartOf(core)); err != nil {
+	if err := coreReset(core); err != nil {
 		fmt.Printf("HOPOS_CAGE_REVOKE_FAILED: slot %d: %v\n", i, err)
 		return
 	}
@@ -701,7 +701,7 @@ func cageForceYield(core, hog int) {
 		fmt.Printf("HOPOS_CORE_RECLAIM_FAILED: core %d holds no attributable resident\n", core)
 		return
 	}
-	if err := board.Current().HartOff(hartOf(core)); err != nil {
+	if err := coreReset(core); err != nil {
 		fmt.Printf("HOPOS_CORE_RECLAIM_FAILED: core %d: %v\n", core, err)
 		return
 	}
@@ -709,45 +709,36 @@ func cageForceYield(core, hog int) {
 	_ = hog // attributie zit in de log van de aanroeper
 }
 
+// coreReset is de Reset-poot van het board voor een logische core — de
+// hard-kill op een resetbaar hart. Een board zonder die poot, of een hart
+// zonder recept, meldt dat als fout (de aanroeper koos dan al het kill-tick-
+// pad via coreParks; dit is de vangrail, niet de route).
+func coreReset(core int) error {
+	k := cores()
+	h := physCore(core)
+	if h < 0 || !k.CanReset(h) {
+		return fmt.Errorf("core %d cannot be reset on this board — revocation goes through the kill tick", core)
+	}
+	return k.Reset(h)
+}
+
+// hartTimer is de comparator-afspraak van het board voor een hart
+// (board.HartTimerer, optioneel): zonder blijft het "niets" — de parkeerlus
+// spint en er is geen kill-tick, en dat is de veilige stand.
+func hartTimer(hart int) board.HartTimer {
+	if t, ok := board.Current().(board.HartTimerer); ok {
+		return t.HartTimer(hart)
+	}
+	return board.HartTimer{}
+}
+
 // cageSMPEntryPC: geen SMP op dit board. Er is één app-hart, dus een slot heeft
 // nooit een tweede core om binnen te laten komen. HOP publiceert 0 en de
 // app-OS-laag vraagt er niets bij (CtrlCores blijft 1).
 func cageSMPEntryPC() uint64 { return 0 }
 
-// hartOf vertaalt een LOGISCH HopOS-corenummer (1..N, aaneengesloten) naar het
-// FYSIEKE hart-ID van dit board. 0 = er is geen hart voor dit nummer.
-//
-// Waarom die vertaling bestaat: kern/slots rekent overal met aaneengesloten cores
-// 1..N — NumSlots telt zo, de pool-allocator loopt zo, sharegroups verdelen zo.
-// Op ARM klopt dat met het silicium, want PSCI nummert cores aaneengesloten vanaf
-// nul. Een RISC-V-board levert echter een LIJST hart-ID's (AppHarts) en die hoeft
-// niet aaneengesloten te zijn en niet bij 1 te beginnen.
-//
-// Zonder deze laag werkte dat alleen bij toeval. De LicheeRV heeft één app-hart met
-// ID 1, dus logisch 1 == fysiek 1 en alles klopte; een board met harts [2,4] zou
-// nul slots opleveren, omdat de telling bij logisch 1 begint en daar geen hart
-// vindt. Dat is geen theoretisch geval — het is de eerstvolgende SoC.
-//
-// De regel is nu: buiten dit bestand bestaan alléén logische nummers, en élke
-// board-call gaat hierlangs.
-// De sentinel is -1 en niet 0: hart 0 is sinds de hop een GELDIG app-hart. Op
-// de SG2002 is de app-core na de hop de core waar de FSBL ons startte, en die
-// heet in het reset-blok CPUCORE0. Met 0 als "bestaat niet" adverteerde dit
-// board dan nul slots — of erger, cageColdStart weigerde precies het hart dat
-// het wél moest starten.
-func hartOf(core int) int {
-	harts := board.Current().AppHarts()
-	if core < 1 || core > len(harts) {
-		return -1
-	}
-	return harts[core-1]
-}
-
-// coreExists: bestaat er een hart voor dit logische nummer? De topologie is
-// board-kennis, niet iets om te proben — er is geen PSCI-telling die kan liegen,
-// AppHarts() ís het antwoord. Aaneengesloten per definitie: N harts geven de
-// logische cores 1..N, wélke ID's ze ook hebben.
-func coreExists(core int) bool { return hartOf(core) >= 0 }
+// De vertaling logisch → fysiek hart (hartOf) is generiek geworden: physCore
+// in slots.go, uit Cores().App van het board. Zie het contract in cage.go.
 
 // cageLinkBase: waar een verplaatst slot verschijnt. De eerste poolregio van het
 // board — dáár is elk app-image op gelinkt (board/licheerv/hop/plan.go zet die

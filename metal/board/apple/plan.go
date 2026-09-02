@@ -55,8 +55,8 @@ func SetupPlan() {
 
 	p := layout.Plan{
 		NodeCtrlPA:    NodeCtrlPA,
-		Stage2PA:      Stage2PA,
-		RevokeVecPA:   RevokeVec,
+		CagePA:        CagePA,
+		TrapVecPA:     RevokeVec,
 		FlipScratchPA: FlipScratch,
 		BootScratchPA: BootScratch,
 		NetDMAPA:      NetDMAPA,
@@ -85,9 +85,9 @@ func SetupPlan() {
 
 	// Pariteit ná UsePlan (ervoor weigert layout elke accessor): cpuinit.s
 	// bouwt de EL2-vectortabel op EL2_VECTORS en zet VBAR_EL2 erop; HOP's
-	// InitVectors plugt de revoke-handler in RevokeVecPA. Wijken die af, dan
+	// InitVectors plugt de revoke-handler in TrapVecPA. Wijken die af, dan
 	// verdwijnt de hard-kill stil.
-	if uint64(layout.RevokeVecPA()) != EL2Vectors {
+	if uint64(layout.TrapVecPA()) != EL2Vectors {
 		panic("apple: EL2_VECTORS in cpuinit.s wijkt af van het PA-plan")
 	}
 }

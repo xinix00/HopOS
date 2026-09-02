@@ -584,6 +584,39 @@ func rollbackHostCore(i, previous int, err error) {
 	}
 }
 
+// cores is het core-contract van het board (board.Cores): de poten waarmee de
+// kooi-naad een core start, reset en bevraagt.
+func cores() board.Cores { return board.Current().Cores() }
+
+// physCore vertaalt een LOGISCH HopOS-corenummer (1..N, aaneengesloten) naar
+// het FYSIEKE nummer van het board; -1 als er geen core met dat nummer is.
+//
+// Waarom die vertaling bestaat: kern/slots rekent overal met aaneengesloten
+// cores 1..N — NumSlots telt zo, de pool-allocator loopt zo, sharegroups
+// verdelen zo. Op ARM klopt dat meestal met het silicium (PSCI nummert
+// aaneengesloten vanaf nul), maar niet altijd: Apple's HOP-core zit midden in
+// de cpu-lijst. Een RISC-V-board levert een LIJST hart-ID's die niet
+// aaneengesloten hoeft te zijn en niet bij 1 hoeft te beginnen. Buiten deze
+// functie bestaan alléén logische nummers, en élke board-call gaat hierlangs.
+//
+// De sentinel is -1 en niet 0: hart 0 is sinds de hop een GELDIG app-hart.
+func physCore(core int) int {
+	p, ok := cores().Phys(core)
+	if !ok {
+		return -1
+	}
+	return p
+}
+
+// coreExists: bestaat er een fysieke core voor dit logische nummer? De
+// topologie is board-kennis (Cores().App) — er is niets te proben.
+func coreExists(core int) bool { return physCore(core) >= 0 }
+
+// corePrep is het quirk-masker dat HOP een app-core meegeeft op zijn
+// control-page (layout.CtrlCorePrep): board-kennis over silicium dat de app
+// zelf recht moet zetten, omdat alleen zíjn niveau bij het register kan.
+func corePrep(core int) uint64 { return cores().PrepMask(physCore(core)) }
+
 func dispatchCore(core int, entry, ctx uint64) error {
 	// Nooit een core dispatchen die al draait: dat zou een app (of een tweede
 	// Start) een core midden in de uitvoering laten kapen. Start's pad checkt dit
@@ -635,6 +668,27 @@ func waitSlotQuiet(i, core int, timeout time.Duration) bool {
 		st := ctxState(i)
 		return st == layout.CtxDead || st == layout.CtxEmpty
 	})
+}
+
+// ParkedCores telt de app-cores die op dit moment in de switch-code van de
+// plan-regio staan te draaien of te wachten: geparkeerd in de EL2-lus (ARM,
+// coreStopped) of met de M-mode-switcher erop vanaf de boot (RISC-V,
+// coreParks). Koude cores (nog nooit gedispatcht) tellen niet mee.
+//
+// Voor de kern-flip zijn dit bewoners van díe code, precies zoals een
+// geyielde app dat is: de bytes waar zo'n core in staat mogen onder hem niet
+// veranderen. GEMETEN 02-09 op de M4: een core die parkeerde onder een kern
+// met ándere switch-code werd door elke latere kern (zelfde plan-regio, andere
+// bytes) op een verkeerde PC gewekt — EC=0 op EL2, élke verse plaatsing op
+// die core dood, tot een reboot. De flip weigert nu ook op geparkeerde cores.
+func ParkedCores() int {
+	n := 0
+	for c := 1; c <= layout.NumAppCores(); c++ {
+		if coreParks(c) || coreStopped(c) {
+			n++
+		}
+	}
+	return n
 }
 
 // waitStopped polt tot core echt stilstaat (geparkeerd of in reset — wat op deze
@@ -1041,6 +1095,10 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// eigen beslissingen is smpCores, hier uit het al-gevalideerde `cores` gezet.
 	smpCores[i] = cores
 	ctrlWrite(i, layout.CtrlCores, uint64(cores))
+	// Het quirk-masker van het board voor deze core (layout.CtrlCorePrep): wat
+	// de app in zijn eerste idle-ronde aan zijn eigen silicium rechtzet. Nul op
+	// elk board zonder eigenaardigheden — dan gebeurt er aan de app-kant niets.
+	ctrlWrite(i, layout.CtrlCorePrep, corePrep(core))
 	if cores > 1 {
 		// Fysiek adres van de EL2 SMP-trampoline publiceren (op ditzelfde slot
 		// z'n partitie/stage-2 → gedeelde heap).
@@ -1504,9 +1562,8 @@ var (
 // NumSlots is het aantal bruikbare app-slots: cores 1..MaxSlots die PSCI
 // herkent. Het layout reserveert MaxSlots plekken, maar een node kan minder
 // cores hebben (QEMU -smp < MaxSlots+1, of een kleiner board). Zonder deze
-// probe adverteert HOP slots zonder core: allocateSlot kiest er een, Start
-// doet AFFINITY_INFO → PSCI INVALID_PARAMS → "core niet uit" → de job is
-// permanent onplaatsbaar. We tellen de aaneengesloten bestaande cores, één
+// telling adverteert HOP slots zonder core: allocateSlot kiest er een, Start
+// vraagt de core op → "no such core" → de job is permanent onplaatsbaar. Eén
 // keer (de topologie ligt vast na boot).
 func NumSlots() int {
 	numSlotsOnce.Do(func() {
@@ -1516,45 +1573,21 @@ func NumSlots() int {
 		// control-page van een slot woont in zijn partitie, dus een slot zónder
 		// partitie heeft er geen (ctrlRead geeft 0 = StatusEmpty) en een slot
 		// mét partitie krijgt hem vers geveegd in armSlot.
-		// PSCI-telling: schuif de grens op zolang een core een écht power-woord
-		// meldt; stop bij het eerste antwoord buiten {On,Off,OnPending} — dat is
-		// een ontbrekende core (INVALID_PARAMS) óf een PSCI-fout/onimplementatie.
-		// We onthouden of we op zo'n fout stopten (i.p.v. netjes MaxSlots te
-		// halen), zodat de diagnose hieronder het verschil kan benoemen.
-		probed := 0
-		truncated := false
-		for i := 1; i <= layout.NumAppCores(); i++ {
-			if coreExists(i) {
-				probed = i // geldige core: schuif de grens op
-			} else {
-				truncated = true // PSCI-fout/ontbrekende core: stop de telling
-			}
-			if truncated {
-				break
-			}
+		//
+		// De telling is de app-lijst van het board (Cores().App): op een
+		// PSCI-board de AFFINITY_INFO-probe (board.ProbeCores), elders
+		// board-kennis — MADT, ADT, het reset-blok. Hier stond een PSCI-lus
+		// met een board-hint eroverheen voor silicium waar de probe liegt; die
+		// keuze is nu van het board zelf, waar hij hoort.
+		n := len(cores().App())
+		if max := layout.NumAppCores(); n > max {
+			n = max // niet meer dan de fysieke app-cores van het plan
 		}
-		numSlots = probed
-
-		// Board-hint: een board dat weet hoeveel app-cores het heeft (PSCI
-		// AFFINITY_INFO onbetrouwbaar op sommige silicium) mag dat declareren via
-		// board.CoreCountHinter. Boards met werkende AFFINITY_INFO (QEMU, Pi)
-		// doen dat niet — dan blijft de PSCI-telling leidend.
-		hint := 0
-		if h, ok := board.Current().(board.CoreCountHinter); ok {
-			hint = h.ExpectedAppCores()
-		}
-		switch {
-		case hint > 0 && probed < hint:
-			if hint > layout.NumAppCores() {
-				hint = layout.NumAppCores() // niet meer dan de fysieke app-cores
-			}
-			fmt.Printf("HOPOS_NUMSLOTS_HINT: PSCI telde %d app-core(s) (getrunceerd=%v), board declareert er %d — de board-hint is leidend\n",
-				probed, truncated, hint)
-			numSlots = hint
-		case probed == 0:
-			// Geen enkele app-core én geen board-hint: HOP zou nul slots
-			// adverteren en elke job permanent onplaatsbaar maken. Luid, niet stil.
-			fmt.Println("HOPOS_NUMSLOTS_ZERO: geen enkele app-core via PSCI AFFINITY_INFO (core 1 gaf al een fout/INVALID_PARAMS) — HOP adverteert 0 slots; is AFFINITY_INFO op dit board geïmplementeerd? Een board.CoreCountHinter kan dit overbruggen")
+		numSlots = n
+		if n == 0 {
+			// Geen enkele app-core: HOP zou nul slots adverteren en elke job
+			// permanent onplaatsbaar maken. Luid, niet stil.
+			fmt.Println("HOPOS_NUMSLOTS_ZERO: the board reports no app cores (Cores().App is empty) — HOP advertises 0 slots")
 		}
 	})
 	return numSlots

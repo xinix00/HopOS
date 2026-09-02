@@ -20,7 +20,6 @@ import (
 	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/board"
 	"github.com/xinix00/HopOS/metal/board/uefi"
-	"github.com/xinix00/HopOS/metal/cpu/el2"
 	"github.com/xinix00/HopOS/metal/cpu/psci"
 	"github.com/xinix00/HopOS/metal/driver/fb"
 	"github.com/xinix00/HopOS/metal/driver/nic/igb"
@@ -46,7 +45,10 @@ var _ board.Board = machine{}
 // zinloos).
 func (machine) SelfPlannedPool() bool { return true }
 
-func (machine) BootEL() int { return uefi.BootEL() }
+// Privilege/Firmware: EL2-boot vereist; de PSCI-provider zit onder ons (FADT
+// bevestigt de SMC-conduit — de HopOS-invariant).
+func (machine) Privilege() error { return board.RequireEL2(uefi.BootEL()) }
+func (machine) Firmware() string { return psci.Line(uefi.BootEL()) }
 
 // CoreID: eigen MPIDR opzoeken in de MADT-volgorde — dé core-nummering van
 // dit platform (zie uefi.CoreID/coreIDFromMADT in de basis).
@@ -63,38 +65,37 @@ func (machine) TimerOffset() int64     { return uefi.ARM64.TimerOffset }
 func (machine) SetTimerOffset(o int64) { uefi.ARM64.TimerOffset = o }
 func (machine) SetWallTime(ns int64)   { uefi.ARM64.SetTime(ns) }
 
-// PSCI via de gedeelde wrappers (metal/cpu/psci; SMC-conduit, FADT bevestigt
-// — HopOS-invariant). De core-index wordt via de MADT naar het MPIDR-target
-// vertaald. Eerder stonden hier eigen functie-ID-constanten naast cpu/psci —
-// een derde PSCI-stijl; opgeruimd 18-07.
-func (machine) CPUOn(core, entry, ctx uint64) int64 {
-	cpus := uefi.MADTCPUs()
-	if int(core) >= len(cpus) {
-		return psci.INVALID_PARAMS
+// Cores: PSCI via de gedeelde wrappers (metal/cpu/psci). De core-index wordt
+// via de MADT naar het MPIDR-target vertaald. De app-lijst komt uit de MADT
+// zelf en niet uit een PSCI-probe: op sommige silicium meldt AFFINITY_INFO
+// INVALID_PARAMS voor bestaande cores, en dan adverteerde HOP nul slots. Op de
+// Altra 127 — slots begrenst zelf op MaxSlots/pool. Geen Reset: een
+// ingetrokken core parkeert zichzelf in de EL2-lus.
+func (machine) Cores() board.Cores {
+	return board.Cores{
+		App: func() []int {
+			var app []int
+			for c := 1; c < len(uefi.MADTCPUs()); c++ {
+				app = append(app, c)
+			}
+			return app
+		},
+		Start: func(c int, entry, arg uint64) error {
+			cpus := uefi.MADTCPUs()
+			if c < 0 || c >= len(cpus) {
+				return fmt.Errorf("uefi: no core %d in the MADT", c)
+			}
+			return psci.On(cpus[c].MPIDR, entry, arg)
+		},
+		State: func(c int) board.PowerState {
+			cpus := uefi.MADTCPUs()
+			if c < 0 || c >= len(cpus) {
+				return board.PowerState(psci.INVALID_PARAMS)
+			}
+			return board.PowerState(psci.AffinityInfo(cpus[c].MPIDR))
+		},
 	}
-	return psci.On(cpus[core].MPIDR, entry, ctx)
 }
-func (machine) AffinityInfo(core uint64) board.PowerState {
-	cpus := uefi.MADTCPUs()
-	if int(core) >= len(cpus) {
-		return board.PowerState(psci.INVALID_PARAMS)
-	}
-	return board.PowerState(psci.AffinityInfo(cpus[core].MPIDR))
-}
-func (machine) PSCIVersion() (major, minor uint16) { return psci.Version() }
-
-// ExpectedAppCores (board.CoreCountHinter): MADT-cores minus de HOP-core.
-// Op de Altra 127 — slots begrenst zelf op MaxSlots/pool.
-func (machine) ExpectedAppCores() int {
-	if n := len(uefi.MADTCPUs()); n > 0 {
-		return n - 1
-	}
-	return 0
-}
-
-// Stage-2/SMP: board-neutraal (metal/cpu/el2), identiek aan qemuvirt.
-func (machine) S2TrampPC() uint64    { return el2.S2TrampPC() }
-func (machine) S2SMPTrampPC() uint64 { return el2.S2SMPTrampPC() }
 
 // lease bewaart wat ProbeNIC via DHCP ophaalde (board.LeaseHolder-contract).
 var lease leandhcp.Lease

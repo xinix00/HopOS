@@ -35,7 +35,7 @@ func coreOf(i int) int {
 }
 
 // ctxPA is het switch-contextblok van slot i (in zijn stage-2-tabelblok).
-func ctxPA(i int) uintptr { return layout.Stage2TablePA(i) + layout.CtxOff }
+func ctxPA(i int) uintptr { return layout.CageTablePA(i) + layout.CtxOff }
 
 // ctxState leest het levensteken van slot i (layout.Ctx*-waarden; de
 // arch-switch schrijft Running/Saved/Dead, HOP Empty/BootPending/Running).

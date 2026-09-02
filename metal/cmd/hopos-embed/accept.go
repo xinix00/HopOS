@@ -31,8 +31,10 @@ func fail(prefix, what string, err error) {
 	fmt.Printf("FAIL %s: %v\n", what, err)
 	for i := 1; i <= slots.NumSlots(); i++ {
 		s := slots.Get(i)
+		k := board.Current().Cores()
+		phys, _ := k.Phys(i)
 		fmt.Printf("  slot %d: core=%s app=%d hb=%d vec=%d esr=%#x far=%#x\n",
-			i, board.Current().AffinityInfo(uint64(i)), s.App, s.Heartbeat,
+			i, k.State(phys), s.App, s.Heartbeat,
 			s.FaultVec, s.FaultESR, s.FaultFAR)
 	}
 	fmt.Printf("HOPOS_%s_MULTIKERNEL_FAIL\n", prefix)
@@ -128,11 +130,10 @@ func acceptance(prefix, core string, app []byte) {
 // preamble is de gedeelde boot-rapportage vóór de acceptatie: EL2-invariant
 // (zonder EL2 geen stage-2-kooi), PSCI-versie, DRAM-meting en slot-telling.
 func preamble(prefix string) {
-	if el := board.Current().BootEL(); el < 2 {
-		fail(prefix, "boot", fmt.Errorf("EL%d-boot: HopOS vereist EL2 (TF-A/armstub op EL3)", el))
+	if err := board.Current().Privilege(); err != nil {
+		fail(prefix, "boot", err)
 	}
-	major, minor := board.Current().PSCIVersion()
-	fmt.Printf("PSCI versie %d.%d (boot-EL%d, conduit SMC)\n", major, minor, board.Current().BootEL())
+	fmt.Println(board.Current().Firmware())
 
 	// Meetpunt voor de pool-uitbreiding naar het volle DRAM (vervolgstap): het
 	// door de firmware gerapporteerde totaal. De bring-up-pool is bewust

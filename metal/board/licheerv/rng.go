@@ -59,7 +59,7 @@ func Warn() {
 	// draaien op de ander). Keert de 01-08-klasse ooit terug, dan is dat nu
 	// een WDT-reboot met een tijdstip in de soak-monitor — geen raadsel meer.
 	if CLINTUsable() {
-		idle.UseMSleep(MSleep)
+		idle.Use(MSleep)
 		idle.Enable()
 	}
 

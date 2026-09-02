@@ -55,6 +55,8 @@ func hwinit1() {
 	ARM64.EnableCache()
 	ARM64.InitGenericTimers(0, 0)
 	idle.Enable() // ná Init (die zet de default governor)
+	// Ná Init (die de vectoren zet): het syndroom mee in het exception-rapport.
+	arm64.SystemExceptionHandler = reportException
 }
 
 //go:linkname nanotime runtime/goos.Nanotime

@@ -23,5 +23,4 @@ func BlobBytes() []byte      { return nil }
 // springen. Bewust een no-op die terugkeert — een host-test die hier komt is
 // zelf fout, en dat toont hij dan.
 
-
 func Adopting() bool { return false }

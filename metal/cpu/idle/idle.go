@@ -16,7 +16,57 @@ package idle
 import (
 	"sync/atomic"
 	_ "unsafe" // voor go:linkname naar runtime.nanotime
+
+	"github.com/xinix00/HopOS/metal/dev"
 )
+
+// Sleeper is HET slaap-primitief van een core, op beide architecturen en voor
+// elke rol: slaap tot tellerstand wake (0 = geen deadline: tot je eigen cap),
+// en meld hoeveel ticks het werkelijk was (0 = niet geslapen). WFE met de
+// event-stream, WFI op de fysieke timer, de CLINT-slaap van machine mode — het
+// zijn allemaal invullingen van deze ene functie. Het board kiest er één met
+// Use, ná zijn bewijs op dít silicium; zonder keuze geldt de default van de
+// architectuur (arm64: WFESleep; riscv64: doorlopen, wat het board zonder ons
+// deed). De yield naar een switcher op een gedeelde core is bewust géén
+// Sleeper: dat is geen slaap maar een beurt afgeven, en de governor kiest
+// ertussen op CtrlShared.
+type Sleeper func(wake uint64) uint64
+
+// sleeper is de gekozen slaap van deze core. Eén schrijver (Use/Enable), vóór
+// het eerste scheduler-punt.
+var sleeper Sleeper
+
+// Use kiest de slaap van dit board. Aanroepen in hwinit1, alleen met een
+// primitief dat op dít silicium bewezen is — een slaap die niet wekt is een
+// hang, en die hoort niet uit een redenering te komen.
+func Use(s Sleeper) {
+	if s != nil {
+		sleeper = s
+	}
+}
+
+// prepAddr is het CtrlCorePrep-woord van de eigen control-page: het
+// quirk-masker dat HOP deze core meegaf (layout.Prep*). 0 = niet gezet.
+var prepAddr atomic.Uintptr
+
+// WatchPrep geeft de governor het CtrlCorePrep-woord in handen; applib roept
+// dit in Init aan. Vanaf dan voert élke idle-ronde het masker uit — het is
+// idempotent en één lees, dus dat kost niets, en zo krijgt ook een SMP-core
+// die pas later idle wordt zijn silicium recht.
+func WatchPrep(addr uintptr) { prepAddr.Store(addr) }
+
+// corePrep is de eerste stap van élke governor-ronde: wat het board over deze
+// core zei, uitvoeren. Laat, vanaf het eigen niveau, in gewone Go-context —
+// de enige plaatsing die op de M4 bewezen werkt (de trampoline op EL2 en
+// hwinit1 faalden beide, 02-09). Wat een bit betekent staat in applyPrep van
+// de architectuur.
+func corePrep() {
+	if a := prepAddr.Load(); a != 0 {
+		if m := dev.Read64(a); m != 0 {
+			applyPrep(m)
+		}
+	}
+}
 
 // De idle-teller: geaccumuleerde idle-TIJD in counter-ticks (CounterHz-
 // eenheden) — de counterstand vóór en ná elke slaap, delta erbij. Een vol
