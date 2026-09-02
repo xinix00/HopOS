@@ -86,4 +86,11 @@ func init() {
 		Pet:      apple.WDTPet,
 		PetEvery: apple.WDTPetEvery(),
 	}
+
+	// De klokwachter: meldt alleen wanneer een cluster van p-state verandert.
+	// Dat is het antwoord op "klokt hij zelf op en neer?" — een vraag die je
+	// niet met een aanname mag beantwoorden, ook niet als je de
+	// hardware-governor zelf hebt aangezet (Derek, 01-09). Zwijgt volledig op
+	// een node die op zijn plafond blijft staan.
+	boardExtra = func() { go apple.PStateWatch() }
 }

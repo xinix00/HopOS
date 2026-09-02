@@ -1,12 +1,18 @@
 // pstate.go — de kloksnelheid van de clusters.
 //
-// iBoot levert de SoC af op p-state 1: 0,9 GHz, de bodem van de tabel. Daar
-// blijft hij ook staan, want anders dan op de Pi (waar de VideoCore-firmware
-// na de boot blijft draaien en de ARM-klok regelt) is er op Apple na de boot
-// niemand meer die dat doet — m1n1 heeft voor t8132 niet eens een tabel, dus
-// ook onder de loader stond alles op de bodem. GEMETEN 31-08: de LCG-benchmark
-// gaf op een E-core en een P-core exact hetzelfde getal (300 Msteps/s, 1,00×),
-// en 300M × 3 cycles/MADD = 0,9 GHz = precies p-state 1 van beide tabellen.
+// iBoot laat de clusters laag achter en daar blijven ze ook: anders dan op de
+// Pi (waar de VideoCore-firmware na de boot blijft draaien en de ARM-klok
+// regelt) is er op Apple na de boot niemand meer die dat doet — m1n1 heeft
+// voor t8132 niet eens een clustertabel, dus ook onder de loader gebeurde er
+// niets.
+//
+// GEMETEN 01-09 op de M4, en anders dan gedacht: het E-cluster stond op
+// p-state 1 (900 MHz), het P-cluster op 4 (1800 MHz). Wat een dag eerder als
+// "beide op de bodem" gelezen werd, was iets anders — élke core die WIJ uit
+// reset halen begint laag, ook in het snelle cluster, en dáárom maten een
+// E-core en een P-core exact hetzelfde (300 Msteps/s, 1,00×). Na dit bestand:
+// 723,8 Msteps/s op een E-core, precies de 2172/900 = 2,41× die de tabel
+// belooft.
 //
 // Het recept is m1n1's cpufreq_init_cluster voor de naaste familie (t8122/
 // t6030, de M3's — t8132 zit er niet in), per cluster:
@@ -41,6 +47,7 @@ package apple
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/xinix00/HopOS/metal/dev"
 )
@@ -241,5 +248,49 @@ func PStateTune() {
 		}
 		fmt.Printf("cpufreq: cluster %d (%s): pstate %d (%d MHz) -> %d/%d (%d MHz), apsc=%v%s\n",
 			cl, names[cl], cur, curMHz, after, len(raws[cl]), afterMHz, apsc, status)
+	}
+}
+
+// PStateWatch meldt kloksprongen, en beantwoordt daarmee de enige vraag die
+// PStateTune openliet: klokt dit ding uit zichzelf terug als er niets te doen
+// is, en weer omhoog onder belasting?
+//
+// Dat wij APSC aanzetten (de hardware-governor) betekent nog niet dat hij ook
+// beweegt — dat is een aanname tot je hem meet, en Apple's p-state-register is
+// het enige dat het echt weet. Deze wachter leest het elke twee seconden en
+// zegt alleen iets als het VERANDERT: op een node die stil op zijn plafond
+// blijft staan kost hij dus geen enkele consoleregel, en op een node die
+// ademt zie je precies wanneer en waarheen.
+//
+// Read-only: hij schrijft nooit een p-state. Het plafond blijft van
+// PStateTune.
+func PStateWatch() {
+	raws := [2][]uint32{pstateRaws(0), pstateRaws(1)}
+	base := [2]uintptr{clusterBase(0), clusterBase(1)}
+	last := [2]int{-1, -1}
+	names := [2]string{"E", "P"}
+	for {
+		for cl := 0; cl < 2; cl++ {
+			if base[cl] == 0 || len(raws[cl]) == 0 {
+				continue
+			}
+			v := dev.Read64(base[cl] + clPState)
+			if v == ^uint64(0) {
+				continue
+			}
+			ps := int(v & psDesired1)
+			if ps == last[cl] {
+				continue
+			}
+			mhz := uint32(0)
+			if ps >= 1 && ps <= len(raws[cl]) {
+				mhz = psMHz(raws[cl][ps-1])
+			}
+			if last[cl] >= 0 {
+				fmt.Printf("cpufreq: cluster %d (%s) %d -> %d (%d MHz)\n", cl, names[cl], last[cl], ps, mhz)
+			}
+			last[cl] = ps
+		}
+		time.Sleep(2 * time.Second)
 	}
 }

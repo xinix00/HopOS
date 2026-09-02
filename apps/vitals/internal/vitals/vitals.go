@@ -89,6 +89,7 @@ func (r *Result) linef(format string, args ...any) {
 // tests is de vaste volgorde: zo staan ze op de pagina en zo loopt "all".
 var tests = []struct{ Name, Desc string }{
 	{"cpu", "single-core throughput"},
+	{"ramp", "clock ramp-up under sudden load"},
 	{"smp", "multi-core scaling"},
 	{"burn", "sustained load + thermal"},
 	{"membw", "memory bandwidth"},
@@ -183,6 +184,8 @@ func (s *Server) run(name string, q url.Values) *Result {
 	switch name {
 	case "cpu":
 		s.runCPU(res, q)
+	case "ramp":
+		s.runRamp(res, q)
 	case "smp":
 		s.runSMP(res, q)
 	case "burn":

@@ -8,7 +8,9 @@ package vitals
 // telemetrie lopen terwijl we branden.
 
 import (
+	"fmt"
 	"net/url"
+	"sort"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -197,4 +199,92 @@ func avg(v []float64) float64 {
 		t += x
 	}
 	return t / float64(len(v))
+}
+
+// lcgBurstN: als lcgBurst, maar met een instelbaar aantal stappen — de
+// ramp-meting wil bursts die klein genoeg zijn om binnen een 5ms-venster
+// meerdere metingen te doen.
+//
+//go:noinline
+func lcgBurstN(acc uint64, n int) uint64 {
+	for k := 0; k < n; k++ {
+		acc = acc*6364136223846793005 + uint64(k)
+	}
+	return acc
+}
+
+// runRamp meet hoe snel de kloksnelheid OPSCHAALT onder plotselinge last, in
+// MHz over de tijd. Eerst bewust stil zijn (de hardware-governor — APSC op
+// Apple — mag terugklokken), dan vol aan en de doorvoer per 5ms-venster
+// vastleggen.
+//
+// De vertaling van doorvoer naar klok is geen aanname maar een ijking: de
+// LCG-stap is een afhankelijke MADD-keten van exact 3,0 cycles op deze cores —
+// GEMETEN 01-09 op de M4: 300,0 Msteps/s op 900 MHz én 723,8 op 2172 MHz,
+// allebei binnen een half procent van klok/3. Dus MHz = Msteps/s × 3.
+//
+// Parameters: ?idle=ms (stilte vooraf, default 2000) en ?secs=n (meetduur).
+// De uitkomst: startklok, eindklok, en de tijd tot 90% van de eindklok — dát
+// getal is "hoe snel schaalt hij op".
+func (s *Server) runRamp(res *Result, q url.Values) {
+	idleMS := qInt(q, "idle", 2000, 0, 30000)
+	secs := qInt(q, "secs", 2, 1, 10)
+	time.Sleep(time.Duration(idleMS) * time.Millisecond)
+
+	const win = 5 * time.Millisecond
+	const chunk = 1 << 16 // ~90µs op volle klok: ≥50 metingen per venster
+	var acc uint64
+	var rates []float64 // Msteps/s per venster, in volgorde
+	t0 := time.Now()
+	deadline := t0.Add(time.Duration(secs) * time.Second)
+	winStart, winSteps := t0, 0
+	for time.Now().Before(deadline) {
+		acc = lcgBurstN(acc, chunk)
+		winSteps += chunk
+		if now := time.Now(); now.Sub(winStart) >= win {
+			rates = append(rates, float64(winSteps)/now.Sub(winStart).Seconds()/1e6)
+			winStart, winSteps = now, 0
+			runtime.Gosched() // compute geeft af (app-isolatie-principe)
+		}
+	}
+	sink = acc
+	if len(rates) < 4 {
+		res.linef("too few samples (%d) — node too busy?", len(rates))
+		return
+	}
+
+	// De eindklok: de mediaan van de tweede helft (dan staat hij er zeker).
+	tail := append([]float64(nil), rates[len(rates)/2:]...)
+	sort.Float64s(tail)
+	top := tail[len(tail)/2]
+	// De tijd tot 90% daarvan, en de klok waarmee we begonnen.
+	rampMS := -1.0
+	for i, r := range rates {
+		if r >= 0.9*top {
+			rampMS = float64(i) * win.Seconds() * 1000
+			break
+		}
+	}
+	const cyclesPerStep = 3.0
+	res.add("mhz_start", rates[0]*cyclesPerStep, "MHz")
+	res.add("mhz_top", top*cyclesPerStep, "MHz")
+	res.add("ramp_ms", rampMS, "ms")
+	res.linef("idle %dms, then full load: %.0f -> %.0f MHz, >=90%% after %.0f ms",
+		idleMS, rates[0]*cyclesPerStep, top*cyclesPerStep, rampMS)
+	// De eerste 20 vensters als tijdlijn — dáár zit het verhaal.
+	n := len(rates)
+	if n > 20 {
+		n = 20
+	}
+	for i := 0; i < n; i += 4 {
+		end := i + 4
+		if end > n {
+			end = n
+		}
+		line := ""
+		for j := i; j < end; j++ {
+			line += fmt.Sprintf("  t+%3dms %5.0f MHz", j*5, rates[j]*cyclesPerStep)
+		}
+		res.linef("%s", line)
+	}
 }
