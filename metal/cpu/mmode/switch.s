@@ -779,17 +779,32 @@ TEXT parkenter(SB),NOSPLIT|NOFRAME,$0
 	WORD	$0x30529073		// csrw mtvec, x5
 	JMP	mrotate(SB)
 
-// ParkEnterPC geeft het fysieke adres van parkenter — zelfde argument als
-// EntryPC: identity-geladen image, symbooladres = fysiek adres.
-TEXT ·ParkEnterPC(SB),NOSPLIT,$0-8
+// mmodeEnd markeert het einde van de blob [mentry, mmodeEnd): álles wat een
+// APP-HART van dit bestand uitvoert (mentry, mrotate, park, parkenter). Die
+// blob verhuist bij de boot als kopie naar de plan-regio, zodat een kern-flip
+// zijn eigen venster kan verlaten terwijl een hart hier middenin staat
+// (docs/kern-flip.md). Dat mag omdat deze code volledig positie-onafhankelijk
+// is: interne verwijzingen gaan via AUIPC/JAL (gemeten 01-09 met objdump —
+// parkenter laadt mentry als AUIPC+ADDI, niet als absoluut adres).
+//
+// Direct ná parkenter houden; de install-guard toetst de maat.
+TEXT mmodeEnd(SB),NOSPLIT|NOFRAME,$0
+	RET
+
+// De IMAGE-adressen van de blob (identity-geladen image, dus symbooladres =
+// fysiek adres). De publieke accessors (EntryPC/ParkEnterPC in mmode.go) geven
+// de plan-kopie zodra die geïnstalleerd is.
+TEXT ·parkEnterImagePC(SB),NOSPLIT,$0-8
 	MOV	$parkenter(SB), X5
 	MOV	X5, ret+0(FP)
 	RET
 
-// EntryPC geeft het fysieke adres van mentry. HOP's image is identity-geladen,
-// dus het symbooladres ís het fysieke adres — hetzelfde argument als bij
-// cpu/el2.EntryPC.
-TEXT ·EntryPC(SB),NOSPLIT,$0-8
+TEXT ·entryImagePC(SB),NOSPLIT,$0-8
 	MOV	$mentry(SB), X5
+	MOV	X5, ret+0(FP)
+	RET
+
+TEXT ·blobEndPC(SB),NOSPLIT,$0-8
+	MOV	$mmodeEnd(SB), X5
 	MOV	X5, ret+0(FP)
 	RET

@@ -24,6 +24,7 @@
 //go:build tamago && arm64
 
 #include "textflag.h"
+#include "hygiene.h"
 #include "sysreg.h"
 
 // smpEL2Tramp: entry voor een secundaire SMP-core (EL2, MMU uit). x0 = het
@@ -139,9 +140,7 @@ s2done:
 	// I-cache leeg vóór de drop — zelfde warme-herdispatch-hygiëne als
 	// el2.s (zie dáár): een secundaire core kan als eerdere huurder stale
 	// instructies voor deze canonieke adressen vasthouden.
-	WORD	$0xd508751f	// ic iallu
-	DSB	$15
-	ISB	$15
+	I_HYGIENE	// ic iallu + dsb + isb (hygiene.h — één blok voor elke spring-ingang)
 
 	// SPSR_EL2: EL1h, DAIF gemaskeerd.
 	MOVD	$0, R4
@@ -170,6 +169,13 @@ s2done:
 	MOVD	R14, R4		// x4 = ttbr0
 	ISB	$15
 	ERET
+
+// smpEL2TrampEnd markeert het einde van smpEL2Tramp — zie el2entryEnd in
+// switch.s: de blob [smpEL2Tramp, smpEL2TrampEnd) verhuist als kopie naar de
+// plan-regio. Vóór smpEL1Stub houden (die hoort er niet bij: hij draait uit
+// het APP-image op EL1).
+TEXT smpEL2TrampEnd(SB),NOSPLIT|NOFRAME,$0
+	RET
 
 // smpEL1Stub: draait op EL1 (app: onder de gedeelde stage-2; node: zonder
 // kooi). Zet de eigen stage-1 MMU aan met het GEËRFDE vertaalregime van de
@@ -231,11 +237,16 @@ TEXT smpEL1Stub(SB),NOSPLIT|NOFRAME,$0
 	MOVD	R0, RSP
 	JMP	(R3)
 
-// S2SMPTrampPC geeft het adres van de EL2 SMP-trampoline. In de HOP-image
-// (identity) is dat het fysieke CPU_ON-entrypoint dat HOP op de control-page
-// publiceert; in een app-image de IPA (ongebruikt daar).
-TEXT ·S2SMPTrampPC(SB),NOSPLIT,$0-8
+// smpTrampPC/smpTrampEndPC geven de IMAGE-adressen van de EL2 SMP-trampoline-
+// blob; de publieke accessor (S2SMPTrampPC, pc.go) geeft de plan-kopie zodra
+// die geïnstalleerd is. In een app-image is dit de IPA (ongebruikt daar).
+TEXT ·smpTrampPC(SB),NOSPLIT,$0-8
 	MOVD	$smpEL2Tramp(SB), R0
+	MOVD	R0, ret+0(FP)
+	RET
+
+TEXT ·smpTrampEndPC(SB),NOSPLIT,$0-8
+	MOVD	$smpEL2TrampEnd(SB), R0
 	MOVD	R0, ret+0(FP)
 	RET
 

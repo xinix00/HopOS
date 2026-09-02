@@ -19,7 +19,6 @@
 package main
 
 import (
-	"bytes"
 	"debug/elf"
 	"encoding/binary"
 	"flag"
@@ -150,11 +149,17 @@ func main() {
 	raw := flag.Bool("raw", false, "geen arm64 Image-header: alleen de code0-branch, géén ARM\\x64-magic — de firmware behandelt het bestand dan als raw binary en springt blind naar kernel_address (het Circle-recept; boot-meting 2026-07-08: het Image-pad mét magic weigerde onze kernel zonder enig levensteken, het raw-pad is op de Pi 5 bewezen)")
 	apple := flag.Bool("apple", false, "Apple-bootobject: geen Linux-Image-header, maar de twee stubs uit board/apple vooraan in het image (offset 0 = waar een core uit reset landt, 0x800 = waar iBoot de boot-core aflevert) plus hun parameterblok op 0x100 — zie appleStub")
 	pe := flag.Bool("pe", false, "verpak als AArch64 PE/COFF UEFI-applicatie (BOOTAA64.EFI): één payload + relocatietabel, de overige -elf-varianten als diff-bewijs (vereist -ldflags -buildid= op elke variant; zie docs/archief/pe-relocatie.md)")
+	elfreloc := flag.Bool("elfreloc", false, "verpak als kern-flip-bundel (docs/kern-flip.md): de eerste -elf onaangeroerd + HOPRELO1-relocatiestaart; de overige -elf-varianten als diff-bewijs (zelfde eisen als -pe)")
+	flipABI := flag.Uint("flipabi", 1, "flip-ABI-versie in de HOPRELO1-staart (kern/kernflip.ABI; alleen met -elfreloc)")
 	flag.Parse()
 	if len(elfPaths) == 0 {
 		die("-elf is verplicht")
 	}
 
+	if *elfreloc {
+		writeELFReloc(elfPaths, *outPath, uint32(*flipABI))
+		return
+	}
 	if *pe {
 		writePEReloc(elfPaths, *outPath)
 		return
@@ -231,38 +236,10 @@ func writePEReloc(paths []string, outPath string) {
 		}
 	}
 
-	// De diff over de MAAGDELIJKE images (vóór elke patch): elk afwijkend
-	// woord moet in élke variant exact de eigen linkbasis-delta dragen.
-	img0 := ps[0].img
-	n := len(img0) / 8
-	var relocs []uint32
-	for k := 0; k < n; k++ {
-		off := k * 8
-		w0 := binary.LittleEndian.Uint64(img0[off:])
-		same := true
-		for _, p := range ps[1:] {
-			if binary.LittleEndian.Uint64(p.img[off:]) != w0 {
-				same = false
-				break
-			}
-		}
-		if same {
-			continue
-		}
-		for _, p := range ps[1:] {
-			want := w0 + (p.load - ps[0].load) // uint64-wrap is de bedoeling
-			if got := binary.LittleEndian.Uint64(p.img[off:]); got != want {
-				die("reloc-diff @ %#x: %#x vs %#x is geen zuivere linkbasis-delta (%#x) — gebroken aanname (-buildid= vergeten? toolchain gewijzigd?); onderzoek (docs/archief/pe-relocatie.md)",
-					off, w0, got, p.load-ps[0].load)
-			}
-		}
-		relocs = append(relocs, uint32(off))
-	}
-	for _, p := range ps[1:] {
-		if !bytes.Equal(img0[n*8:], p.img[n*8:]) {
-			die("staartbytes (niet-woord-uitgelijnd) verschillen tussen varianten")
-		}
-	}
+	// De diff over de MAAGDELIJKE images (vóór elke patch) — gedeeld met
+	// -elfreloc (elfreloc.go): elk afwijkend woord moet in élke variant exact
+	// de eigen linkbasis-delta dragen.
+	relocs := diffRelocs(ps)
 
 	// RamStart: in de klassieke modus per variant het eigen linkadres; hier
 	// waarde T0 in de payload + een tabel-entry, zodat de stub-relocatie er
@@ -291,7 +268,7 @@ func writePEReloc(paths []string, outPath string) {
 	}
 
 	// De reloc-descriptor + de tabel zelf, pagina-rond ná de payload.
-	tabOff := (uint64(len(img0)) + 0xfff) &^ 0xfff
+	tabOff := (uint64(len(ps[0].img)) + 0xfff) &^ 0xfff
 	roff, rsize := ps[0].symbol("github.com/xinix00/HopOS/metal/board/uefi.uefiReloc")
 	if rsize < 16 {
 		die("uefiReloc te klein (%d)", rsize)

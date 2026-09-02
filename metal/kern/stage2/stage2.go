@@ -110,6 +110,12 @@ const (
 // (op de HVC-offset) die TLBI ALLE1IS doet. HOP draait op EL1 en kan die
 // EL2-instructie niet direct uitvoeren; Revoke doet er een HVC voor. Zie Revoke.
 func InitVectors() {
+	// Eerst de switch-code-kopie de plan-regio in (docs/kern-flip.md): daarná
+	// geven de el2-accessors de kopie-adressen, zodat de thunks hieronder én
+	// elke dispatch (CtxBootPC/CtrlSMPTramp via de board-accessors) buiten het
+	// kern-image wijzen. Op de host een no-op.
+	installSwitchCode()
+
 	// Het fysieke plan-adres dat de switch nodig heeft gaat per core het
 	// sched-blok in (hieronder): switch.s is daardoor volledig SP/TPIDR-relatief.
 	// Eén adres is genoeg — de control-page van een bewoner komt uit zijn
@@ -118,6 +124,81 @@ func InitVectors() {
 	s2PA := uint64(layout.VecBasePA())
 	entryPA := el2.EntryPC()
 
+	// ADOPTIE (kern-flip, docs/kern-flip.md): draaien er al bewoners in deze
+	// plan-regio, dan staat alles wat initAppCoreRegion schrijft er al — met
+	// exact dezelfde bytes, want installSwitchCode verifieerde de som. Wat dan
+	// overblijft is pure schade: de Clears maken vensters waarin een core die
+	// net trapt in nullen springt, en het CtxState-Empty zou élke levende
+	// bewoner uit de rotatie schrijven. De revoke-vectoren hieronder gaan wél
+	// altijd vers: die zijn HOP-core-privé (geen app-core kijkt ernaar) en ze
+	// dragen de chainload-handler van DEZE kern.
+	if !adoptingNow() {
+		initAppCoreRegion(s2PA, entryPA)
+	}
+
+	// De revoke-handler van de HOP-core: ingeplugd op offset 0x400 (synchrone
+	// exception vanuit een lager EL) van de vectortabel waar cpuinit VBAR_EL2
+	// van core 0 op zette (Plan.RevokeVecPA). Alleen dát slot — de rest van de
+	// tabel blijft van het board (rpi5: de faultdump-bootdiagnostiek; QEMU:
+	// leeg). Daar landt de HVC uit Revoke; de handler doet TLBI ALLE1IS
+	// (invalideert álle EL1&0 stage-1+2-vertalingen inner-shareable) en keert
+	// terug. De andere apps her-walken meteen hun geldige tabel (nanoseconden);
+	// het net-ingetrokken slot walkt zijn genulde tabel → stage-2-fault →
+	// CPU_OFF.
+	// De handler kiest op de HVC-immediate (ESR.ISS): #0 = revoke (TLBI),
+	// al het andere = chainload — de kern-flip (docs/kern-flip.md). Encodings
+	// geverifieerd met clang/objdump (31-08). Het revoke-pad klobbert alleen
+	// x16 (caller-saved; hvcRevoke is een gewone Go-call); het chain-pad
+	// klobbert vrij — het keert nooit terug.
+	rvecs := layout.RevokeVecPA()
+	revoke := []uint32{
+		0xd53c5210, // mrs  x16, esr_el2
+		0x92403e10, // and  x16, x16, #0xffff     (HVC-immediate)
+		0xb50000d0, // cbnz x16, chain (+6)
+		0xd50c839f, // tlbi alle1is
+		0xd5033f9f, // dsb  sy                    (invalidatie compleet vóór de wek)
+		0xd503209f, // sev — wek élke WFE-slaper: een core die in WFE hangt (een
+		//             gecrashte runtime in zijn halt-lus, een idle-governor)
+		//             doet geen vertaalde toegang en overleefde de intrekking
+		//             (verbrande core, gemeten 19-07: browser 100%-cpu-crash →
+		//             dedicated core voorgoed weg tot powercycle). Na de wek is
+		//             zijn eerstvolgende instructie-fetch een her-walk van de
+		//             genulde tabel → stage-2-fault → parkeren. Geparkeerde
+		//             cores en yield-wachters weken spurious, checken hun
+		//             mailbox en slapen door — daar zijn ze op gebouwd.
+		0xd5033fdf, // isb
+		0xd69f03e0, // eret
+		// chain: de kern-flip-sprong (ChainloadEL2: x0 = nieuwe entry,
+		// x1 = firmware-x0 voor de nieuwe kern). EL1's MMU/caches uit vóór de
+		// sprong — de nieuwe kern ligt buiten de RAM-declaratie van de oude,
+		// dus élke EL1-fetch erheen zou anders door stale/device-mappings
+		// vertalen. 0x30d00800 = SCTLR_EL1 RES1-bits, M/C/I/A/WXN uit — exact
+		// de waarde die s2tramp (el2.s) een verse app-core geeft. De nieuwe
+		// kern komt op EL2 binnen (dit ís EL2) en doorloopt zijn volle
+		// cpuinit → main-pad, net als bij een firmware-boot.
+		0xd2810011, // movz x17, #0x0800
+		0xf2a61a11, // movk x17, #0x30d0, lsl #16
+		0xd5181011, // msr  sctlr_el1, x17
+		0xd5033fdf, // isb
+		0xaa0003f0, // mov  x16, x0               (entry)
+		0xaa0103e0, // mov  x0, x1                (firmware-x0: DTB of 0)
+		0xd61f0200, // br   x16
+	}
+	for w, ins := range revoke {
+		dev.Write32(rvecs+0x400+uintptr(w)*4, ins)
+	}
+	// Vectoren worden als instructies gefetcht (EL2); ongecached geschreven,
+	// dus vegen zodat ook een cacheable fetch (SCTLR_EL2.I-staat is
+	// firmware-afhankelijk) ze vers uit DRAM haalt. Eénmalig bij boot.
+	dev.CleanInv(rvecs, 0x800)
+	dev.MB()
+}
+
+// initAppCoreRegion vult wat een APP-CORE aanraakt: de vector-thunks, de
+// parkeerlus, de sched-blokken en de ctx-staten. Bij een gewone boot is dit
+// verse grond; bij een geadopteerde kern-flip draaien er cores in — dan slaat
+// InitVectors deze functie over (zie daar).
+func initAppCoreRegion(s2PA, entryPA uint64) {
 	// De 16 thunks. LET OP: [sp,#16/#24] is de scratch-indeling die switch.s
 	// verwacht (x2/x3; el2entry parkeert daar zelf x0/x1 op +0/+8).
 	vecs := layout.VecBasePA()
@@ -179,40 +260,7 @@ func InitVectors() {
 	for s := 1; s <= layout.MaxSlots; s++ {
 		dev.Write64(layout.Stage2TablePA(s)+layout.CtxOff+layout.CtxState, layout.CtxEmpty)
 	}
-
-	// De revoke-handler van de HOP-core: ingeplugd op offset 0x400 (synchrone
-	// exception vanuit een lager EL) van de vectortabel waar cpuinit VBAR_EL2
-	// van core 0 op zette (Plan.RevokeVecPA). Alleen dát slot — de rest van de
-	// tabel blijft van het board (rpi5: de faultdump-bootdiagnostiek; QEMU:
-	// leeg). Daar landt de HVC uit Revoke; de handler doet TLBI ALLE1IS
-	// (invalideert álle EL1&0 stage-1+2-vertalingen inner-shareable) en keert
-	// terug. De andere apps her-walken meteen hun geldige tabel (nanoseconden);
-	// het net-ingetrokken slot walkt zijn genulde tabel → stage-2-fault →
-	// CPU_OFF.
-	rvecs := layout.RevokeVecPA()
-	revoke := []uint32{
-		0xd50c839f, // tlbi alle1is
-		0xd5033f9f, // dsb  sy                    (invalidatie compleet vóór de wek)
-		0xd503209f, // sev — wek élke WFE-slaper: een core die in WFE hangt (een
-		//             gecrashte runtime in zijn halt-lus, een idle-governor)
-		//             doet geen vertaalde toegang en overleefde de intrekking
-		//             (verbrande core, gemeten 19-07: browser 100%-cpu-crash →
-		//             dedicated core voorgoed weg tot powercycle). Na de wek is
-		//             zijn eerstvolgende instructie-fetch een her-walk van de
-		//             genulde tabel → stage-2-fault → parkeren. Geparkeerde
-		//             cores en yield-wachters weken spurious, checken hun
-		//             mailbox en slapen door — daar zijn ze op gebouwd.
-		0xd5033fdf, // isb
-		0xd69f03e0, // eret
-	}
-	for w, ins := range revoke {
-		dev.Write32(rvecs+0x400+uintptr(w)*4, ins)
-	}
-	// Vectoren worden als instructies gefetcht (EL2); ongecached geschreven,
-	// dus vegen zodat ook een cacheable fetch (SCTLR_EL2.I-staat is
-	// firmware-afhankelijk) ze vers uit DRAM haalt. Eénmalig bij boot.
 	dev.CleanInv(vecs, 0x800)
-	dev.CleanInv(rvecs, 0x800)
 	dev.MB()
 }
 

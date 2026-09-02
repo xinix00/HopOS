@@ -18,6 +18,7 @@
 //go:build tamago && arm64
 
 #include "textflag.h"
+#include "hygiene.h"
 #include "sysreg.h"
 
 TEXT s2tramp(SB),NOSPLIT|NOFRAME,$0
@@ -113,9 +114,7 @@ vtcrps:
 	// de oude (Altra-vondst 15-07: eerste huurder leeft, élke herdispatch
 	// dood bij boot; QEMU-TCG verhult dit — geen I$-model). Slot = core,
 	// dus lokaal (IALLU) is compleet.
-	WORD	$0xd508751f	// ic iallu
-	DSB	$15
-	ISB	$15
+	I_HYGIENE	// ic iallu + dsb + isb (hygiene.h — één blok voor elke spring-ingang)
 
 	// Drop naar EL1 op de app-entry (EL1h, DAIF gemaskeerd).
 	MOVD	$0, R4
@@ -126,9 +125,19 @@ vtcrps:
 	ISB	$15
 	ERET
 
-// S2TrampPC geeft het fysieke adres van de trampoline (HOP-image is
-// identity-geladen: symbooladres = fysiek adres) voor PSCI CPU_ON.
-TEXT ·S2TrampPC(SB),NOSPLIT,$0-8
+// s2trampEnd markeert het einde van s2tramp — zie el2entryEnd in switch.s:
+// de blob [s2tramp, s2trampEnd) verhuist als kopie naar de plan-regio.
+TEXT s2trampEnd(SB),NOSPLIT|NOFRAME,$0
+	RET
+
+// s2trampPC/s2trampEndPC geven de IMAGE-adressen van de blob; de publieke
+// accessor (S2TrampPC, pc.go) geeft de plan-kopie zodra die geïnstalleerd is.
+TEXT ·s2trampPC(SB),NOSPLIT,$0-8
 	MOVD	$s2tramp(SB), R0
+	MOVD	R0, ret+0(FP)
+	RET
+
+TEXT ·s2trampEndPC(SB),NOSPLIT,$0-8
+	MOVD	$s2trampEnd(SB), R0
 	MOVD	R0, ret+0(FP)
 	RET

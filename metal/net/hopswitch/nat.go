@@ -1077,3 +1077,21 @@ func fixCsum32(b []byte, old, new uint32) {
 	fixCsum16(b, uint16(old>>16), uint16(new>>16))
 	fixCsum16(b, uint16(old), uint16(new))
 }
+
+// PublishedPorts geeft de node-poorten die voor slot i gepubliceerd staan
+// (elke poort één keer, ook al draagt hij tcp én udp). De kern-flip leest ze
+// om ze na een adoptie opnieuw te publiceren — de NAT-tabel is kern-staat en
+// verhuist niet mee (docs/kern-flip.md).
+func PublishedPorts(i int) []uint16 {
+	mu.Lock()
+	defer mu.Unlock()
+	var out []uint16
+	seen := map[uint16]bool{}
+	for _, e := range pubs {
+		if e.slot == i && !seen[e.nodePort] {
+			seen[e.nodePort] = true
+			out = append(out, e.nodePort)
+		}
+	}
+	return out
+}

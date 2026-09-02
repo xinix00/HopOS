@@ -36,6 +36,7 @@
 #define HOP_PARKARG     0x1010000E038	// = apple.HopParkArg
 #define HOP_PARKFOR     0x1010000E040	// = apple.HopParkFor
 #define EL2_VECTORS     0x101100F0000	// = apple.EL2Vectors = apple.RevokeVec (pariteit: SetupPlan)
+#define EL1_VECTORS     0x101100F0800	// el1fault-tabel, direct achter de EL2-tabel (2KB; vrij t/m FlipScratch 0xF8000)
 #define DOCK_FALLBACK   0x388128000	// = apple.DockChannelBase
 
 TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
@@ -249,6 +250,33 @@ build:
 	// WFI slaapt daar voor eeuwig terwijl de timer wél afgaat. Het board meet
 	// dat nu (apple.TimerWakes) in plaats van het aan te nemen.
 
+	// SCTLR van EL1 op een BEKENDE waarde vóór de drop (RES1-bits; M/C/I/A/WXN
+	// uit) — en niet erven wat er toevallig stond.
+	//
+	// Na een firmware-boot staat EL1's MMU uit en viel dit niet op. Na een
+	// KERN-FLIP wel: dan draaide er net een hele kern op EL1 met zijn eigen
+	// vertaaltabellen, en die mappen het geleende venster van de nieuwe kern
+	// niet. De ERET hieronder landde dus op een adres dat EL1 niet kende —
+	// instructie-fetch-fault op de eerste instructie, en die vectort naar
+	// VBAR_EL1, een register dat de sprong overleeft en nog naar de tamago-
+	// handlers van de VÓRIGE kern wees. Resultaat: een trace uit een dode
+	// kern, met goroutines van 17 minuten oud (GEMETEN 02-09, flip 8 —
+	// dockchannel).
+	//
+	// Onder E2H=1 (VHE) is de sctlr_el1-encodering op EL2 de redirect naar
+	// SCTLR_EL2; de échte EL1-versie heet dan SCTLR_EL12. R0 draagt hier nog
+	// de teruggelezen HCR, dus de keuze is gratis.
+	MOVD	$HCR_SCRATCH, R1
+	MOVD	(R1), R2
+	MOVD	$0x30d00800, R3
+	TBZ	$34, R2, sctlrel1	// E2H=0: gewone encodering
+	WORD	$0xd51d1003		// msr sctlr_el12, x3
+	B	sctlrdone
+sctlrel1:
+	WORD	$0xd5181003		// msr sctlr_el1, x3
+sctlrdone:
+	ISB	$15
+
 	// SPSR_EL2: EL1h, DAIF gemaskeerd.
 	MOVD	$0, R0
 	ORR	$0b1111<<6, R0
@@ -261,6 +289,32 @@ build:
 	ERET
 
 TEXT ·cpuinitEL1(SB),NOSPLIT|NOFRAME,$0
+	// EERST de EL1-vectoren op onze eigen kale dumper. Vóór deze regel wijst
+	// VBAR_EL1 naar wat de vórige bewoner van deze core achterliet — na een
+	// kern-flip zijn dat de tamago-vectoren van de OUDE kern, en een vroege
+	// fault viel daardoor diens lijk in: een hybride trace met oude
+	// g-nummers die de echte ESR/ELR/FAR opat (GEMETEN 01/02-09, flips 6-8).
+	// De tabel hergebruikt el1fault op elke 0x80; tamago zet er bij zijn
+	// runtime-init zijn eigen vectoren overheen — dit dekt precies het gat
+	// daarvóór, op élke boot-route (iBoot, m1n1 én flip).
+	MOVD	$EL1_VECTORS, R1
+	MOVD	$el1fault(SB), R2
+	MOVD	$16, R3
+	MOVD	$0x58000050, R4
+	MOVD	$0xd61f0200, R5
+buildel1:
+	MOVW	R4, (R1)
+	MOVW	R5, 4(R1)
+	MOVD	R2, 8(R1)
+	ADD	$0x80, R1
+	SUB	$1, R3
+	CBNZ	R3, buildel1
+	WORD	$0xd5033f9f	// dsb sy
+	WORD	$0xd508751f	// ic iallu — de tabel is code
+	WORD	$0xd5033fdf	// isb
+	MOVD	$EL1_VECTORS, R0
+	WORD	$0xd518c000	// msr vbar_el1, x0
+
 	// SCTLR_EL1: alignment-check en MMU uit (tamago zet ze zelf weer aan).
 	MRS	SCTLR_EL1, R0
 	BIC	$1<<1, R0
@@ -277,6 +331,33 @@ TEXT ·cpuinitEL1(SB),NOSPLIT|NOFRAME,$0
 	SUB	R2, RSP
 
 	B	_rt0_tamago_start(SB)
+
+// el1fault: de EL1-tegenhanger van el2fault — zelfde vorm, EL1-registers.
+// Bestaansreden: het venster tussen de drop naar EL1 en tamago's eigen
+// vectorinstallatie. Meldt en parkeert; el2fault's helpers doen het werk.
+TEXT el1fault(SB),NOSPLIT|NOFRAME,$0
+	MOVD	$DOCK_FALLBACK, R10
+	MOVD	$·msgESR(SB), R11
+	MOVD	$12, R15
+	BL	puts(SB)
+	WORD	$0xd5385200	// mrs x0, esr_el1
+	BL	puthex(SB)
+	MOVD	$·msgELR(SB), R11
+	MOVD	$5, R15
+	BL	puts(SB)
+	WORD	$0xd5384020	// mrs x0, elr_el1
+	BL	puthex(SB)
+	MOVD	$·msgFAR(SB), R11
+	MOVD	$5, R15
+	BL	puts(SB)
+	WORD	$0xd5386000	// mrs x0, far_el1
+	BL	puthex(SB)
+	MOVD	$·msgNL(SB), R11
+	MOVD	$2, R15
+	BL	puts(SB)
+el1park:
+	WFE
+	B	el1park
 
 // el2fault: de landingsplaats van élke EL2-exceptie — er horen er geen te
 // komen. Meldt ESR/ELR/FAR op de dockchannel, rechtstreeks (geen runtime, geen

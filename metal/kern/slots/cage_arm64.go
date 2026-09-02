@@ -177,3 +177,14 @@ func cageLinkWindow(size uint64) uint64 { return uint64(layout.SlotStride) }
 // staat hier niet achter de kooi-naad — HOP leest MIDR/MPIDR van elke core zelf
 // via de board-laag, en app-cores zijn dezelfde cores.
 func cageIdent(i int) string { return "" }
+
+// cageSetFlipCapable geeft door of deze node zichzelf later mag vervangen. Op
+// ARM beslist kern/stage2 daarop of de EL2-blobs naar de plan-regio verhuizen.
+func cageSetFlipCapable(v bool) { stage2.SetFlipCapable(v) }
+
+// cageAdoptable: mag de slot-laag de bewoners van de vórige kern overnemen
+// (kern-flip, docs/kern-flip.md)? Op ARM houdt kern/stage2 dat antwoord vast:
+// hij kreeg de adoptie-stand van kernflip en trekt hem in als de switch-code
+// die in de plan-regio staat niet byte-voor-byte de zijne blijkt — dan heeft
+// hij die regio vers neergezet en bestaan de bewoners niet meer.
+func cageAdoptable() bool { return stage2.Adopting() }

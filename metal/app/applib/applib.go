@@ -332,6 +332,26 @@ func (a *App) ReadAt(path string, off uint64, n int) ([]byte, error) {
 	return resp.Data, nil
 }
 
+// WriteAt writes one chunk at off without truncating the file. It is the
+// random-access primitive needed by embedded databases and is deliberately
+// bounded to the same ABI chunk size as ReadAt.
+func (a *App) WriteAt(path string, off uint64, data []byte) (int, error) {
+	if len(data) > hopabi.MaxChunk {
+		return 0, fmt.Errorf("hop-ABI: write chunk %d exceeds %d", len(data), hopabi.MaxChunk)
+	}
+	_, err := a.rpc(hopabi.Req{Op: hopabi.OpWrite, Path: path, Off: off, Data: data}, rpcTimeout)
+	if err != nil {
+		return 0, err
+	}
+	return len(data), nil
+}
+
+// Truncate changes a file's logical size without rewriting its contents.
+func (a *App) Truncate(path string, size uint64) error {
+	_, err := a.rpc(hopabi.Req{Op: hopabi.OpTruncate, Path: path, N: size}, rpcTimeout)
+	return err
+}
+
 // ReadFile leest een heel bestand (gechunkt over de ring).
 func (a *App) ReadFile(path string) ([]byte, error) {
 	size, err := a.Stat(path)

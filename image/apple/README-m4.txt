@@ -65,10 +65,31 @@ so this way back always exists — hold the power button and you are there.
 
 Updating HopOS
 --------------
-Same as installing: write a newer image to the drive, run install.sh go again. A full image
-every time, on purpose. Nodes do not update themselves from the network: one
-wrong image should never be able to take out more than the machine in front of
-you.
+Two ways, and which one you use depends on whether the node has to keep
+running.
+
+The safe one, always available: write a newer image to this drive and run
+install.sh go again. A full image, a reboot, nothing clever.
+
+The live one, for a node you would rather not interrupt: HopOS can replace its
+own kernel while the apps on it keep running. Build a bundle on your
+workstation and ask the node for it over its API:
+
+    image/flip-bundle.sh apple            # prints the bundle's sha256
+    # put metal/out/hopos-apple.flip on a webserver the node can reach
+    curl -X POST http://<node>:8080/flip \
+      -d '{"url":"http://<host>/hopos-apple.flip","sha256":"<64 hex>"}'
+
+The node fetches it, checks the sum against the one you gave, and jumps into
+the new kernel; tasks, their network connections and the agent's own state
+survive the swap. Watch it happen on the console (port 5555).
+
+That request goes through the agent API and is signed like any other -- asking
+for a kernel needs the same key as dispatching a job, because a kernel from the
+network is code with every right on this machine. Nothing is ever fetched on a
+schedule or on someone else's say-so: a node only replaces itself when you ask
+it to, and if the new kernel does not come up the watchdog reboots the machine
+straight back into the image on the internal disk.
 
 What is on this drive
 ---------------------

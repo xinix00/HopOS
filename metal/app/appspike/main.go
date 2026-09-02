@@ -361,6 +361,71 @@ func main() {
 			exitf(app, 1, "NETDEMO out: geen bruikbaar DNS-antwoord (n=%d, %v)", n, err)
 		}
 		exitf(app, 0, "NETDEMO out: DNS-antwoord van %s (%d bytes) — uitgaande masquerade werkt", dns, n)
+
+	case "outkeep":
+		// Dezelfde uitgaande masquerade, maar dan als LANGLEVENDE sessie: één
+		// socket, elke paar seconden een query, en de app blijft leven. Dat is
+		// het instrument voor de kern-flip (docs/kern-flip.md): de conntrack-
+		// mapping van deze ene socket moet een kernwissel overleven, anders
+		// vindt het antwoord de weg terug niet meer en valt deze app om. Precies
+		// het gedrag van een cloudflared-tunnel, in tien regels.
+		if _, err := appnet.Up(app); err != nil {
+			exitf(app, 1, "NETDEMO outkeep: %v", err)
+		}
+		dns := app.Env("HOP_DNS")
+		if dns == "" {
+			exitf(app, 1, "NETDEMO outkeep: geen HOP_DNS meegegeven")
+		}
+		conn, err := net.Dial("udp4", dns)
+		if err != nil {
+			exitf(app, 1, "NETDEMO outkeep: dial %s: %v", dns, err)
+		}
+		defer conn.Close()
+		query := []byte{
+			0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x01, 'a', 0x0c, 'r', 'o', 'o', 't', '-', 's', 'e', 'r', 'v', 'e', 'r', 's',
+			0x03, 'n', 'e', 't', 0x00, 0x00, 0x01, 0x00, 0x01,
+		}
+		resp := make([]byte, 512)
+		// Een enkele verloren query is geen storing: de allereerste uitgaande
+		// frames van een node kunnen sneuvelen terwijl hij zijn gateway-MAC nog
+		// leert (ARP), en UDP mag sowieso pakketten verliezen. Pas een REEKS
+		// stiltes betekent dat de weg terug echt weg is — dat is precies het
+		// verschil dat de flip-regressie moet kunnen zien, en het is ook hoe een
+		// echte tunnel zich hoort te gedragen.
+		misses := 0
+		for round := 1; ; round++ {
+			if _, err := conn.Write(query); err != nil {
+				exitf(app, 1, "NETDEMO outkeep: write in ronde %d: %v", round, err)
+			}
+			conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			n, err := conn.Read(resp)
+			if err != nil || n < 12 || resp[0] != 0x12 || resp[1] != 0x34 {
+				if misses++; misses >= 4 {
+					exitf(app, 1, "NETDEMO outkeep: %d rondes op rij zonder antwoord (laatste: n=%d, %v) — NAT-mapping weg?", misses, n, err)
+				}
+				app.Logf("NETDEMO outkeep: ronde %d zonder antwoord (%d op rij) — opnieuw", round, misses)
+				continue
+			}
+			misses = 0
+			// Optioneel: bewijs in dezelfde ronde dat het gemounte volume
+			// bruikbaar is. Voor de kern-flip is dát de vraag — niet of de oude
+			// inhoud er nog staat (hopfs is bewust vluchtig, ook over een
+			// reboot), maar of de app na de wissel nog ergens KAN schrijven.
+			// Ontbreekt het mount-punt, dan faalt de write en zegt deze app het.
+			if path := app.Env("MOUNTCHECK"); path != "" {
+				want := fmt.Sprintf("ronde %d", round)
+				if err := app.WriteFile(path, []byte(want)); err != nil {
+					exitf(app, 1, "MOUNTCHECK: schrijven naar %s in ronde %d: %v — mount weg?", path, round, err)
+				}
+				got, err := app.ReadFile(path)
+				if err != nil || string(got) != want {
+					exitf(app, 1, "MOUNTCHECK: %s las %q (%v), wil %q", path, got, err, want)
+				}
+			}
+			app.Logf("NETDEMO outkeep: ronde %d, %d bytes terug — de mapping leeft", round, n)
+			time.Sleep(2 * time.Second)
+		}
 	}
 
 	// Multicast-demo (het matter/mDNS-pad, 15-08): listen joint de mDNS-groep

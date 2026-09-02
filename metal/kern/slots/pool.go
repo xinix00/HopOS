@@ -177,6 +177,35 @@ func ReleaseCage(cage int) {
 	}
 }
 
+// adoptCage neemt een kooi over die al op zijn core draait — de kern-flip
+// (docs/kern-flip.md). Zonder dit begint de nieuwe kern met een lege
+// allocator en ziet hij élke core als vrij, terwijl er bewoners op draaien:
+// de eerstvolgende plaatsing zou dan ongevraagd naast een geadopteerde app
+// landen. Dat is geen capaciteitsfout maar een isolatie-keuze die stil
+// genomen wordt, en juist die mag deze laag nooit maken.
+//
+// De SHAREGROUP komt bewust niet mee. De groepslijst is niet af te leiden uit
+// de bewoners (een pool van drie cores met één app ziet er hetzelfde uit als
+// een pool van één), en een half herstelde groep zou de volgende job van die
+// groep hard weigeren met ErrPoolSize. Zo blijft de core bezet — wat de
+// invariant is die telt — en stelt de eerste nieuwe job van een sharegroup
+// zijn pool gewoon opnieuw samen. Kosten: mogelijk een andere core-set dan
+// vóór de flip. Dat is een plaatsingsdetail, geen correctheidsfout.
+//
+// TERUGGEVEN gaat via de gewone weg (ReleaseCage), en dat klopt: dit vult
+// precies de boekhouding die de plaatser zou hebben gehad als híj de app had
+// neergezet, dus zijn Stop ruimt hem net zo op als bij elke andere kooi.
+func adoptCage(cage, core int) {
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	if _, ok := cageCore[cage]; ok {
+		return
+	}
+	cageCore[cage] = core
+	cageGroup[cage] = ""
+	coreApps[core]++
+}
+
 // resetPools wist alle allocator-staat (alleen voor host-tests tussen cases).
 func resetPools() {
 	poolMu.Lock()

@@ -76,19 +76,32 @@ var (
 // (cpu/memlimit dicht sindsdien de OOM-route).
 var lifecycleMu sync.Mutex
 
-// coopCleanInv veegt [addr,addr+size) net als dev.CleanInv, maar in brokken
-// van 4MB met een yield ertussen: de hele node draait op één core
-// (GOMAXPROCS=1), dus een ononderbroken asm-veeg over een partitie (96MB ×
-// 127 loaders ≈ 12s gemeten) verhongert de netstack, /health, de switch en
-// de heartbeat. Afgeven ís op één core de concurrency (het Go-idee).
-// Aanroepen wanneer het slot niet aan de switch hangt (de partitie wordt zo
-// meteen toch overschreven).
-func coopCleanInv(addr, size uintptr) {
+// Scrub veegt [addr,addr+size) net als dev.CleanInv, maar in brokken van 4MB
+// met een yield ertussen: de hele node draait op één core (GOMAXPROCS=1), dus
+// een ononderbroken asm-veeg over een partitie (96MB × 127 loaders ≈ 12s
+// gemeten) verhongert de netstack, /health, de switch en de heartbeat.
+// Afgeven ís op één core de concurrency (het Go-idee). Aanroepen wanneer het
+// gebied niet aan de switch hangt (het wordt zo meteen toch overschreven).
+//
+// Dit is de ENIGE veeg-lus in de boom, en dat is met opzet. De kern-flip had
+// er een eigen kopie van (kernflip.cleanRange) — regel voor regel dezelfde —
+// en toen de flip op ijzer precies hier bleef hangen terwijl een app-start
+// dezelfde lus wél doorstond, was "wat is er anders?" niet te beantwoorden.
+// Twee kopieën van hetzelfde maken zo'n vraag onbeantwoordbaar (Derek, 01-09).
+//
+// progress mag nil zijn. Is hij gezet, dan wordt hij vóór elke brok geroepen
+// met (klaar, totaal) — voor een aanroeper die moet kunnen zien hóé ver een
+// veeg kwam als hij nooit terugkeert.
+func Scrub(addr, size uintptr, progress func(done, total uintptr)) {
 	const chunk = 4 << 20
+	total := size
 	for size > 0 {
 		n := size
 		if n > chunk {
 			n = chunk
+		}
+		if progress != nil {
+			progress(total-size, total)
 		}
 		dev.CleanInv(addr, n)
 		addr += n
@@ -96,6 +109,9 @@ func coopCleanInv(addr, size uintptr) {
 		runtime.Gosched()
 	}
 }
+
+// coopCleanInv is de naam waaronder de slot-lifecycle hem gebruikt: stil.
+func coopCleanInv(addr, size uintptr) { Scrub(addr, size, nil) }
 
 // lifecycleWindow serialiseert een lifecycle (zie lifecycleMu). De vorm met
 // een closer is gebleven zodat de drie aanroepers (Start, StartStaged, Stop)
@@ -106,6 +122,16 @@ func lifecycleWindow() func() {
 	lifecycleMu.Lock()
 	return lifecycleMu.Unlock
 }
+
+// LifecycleWindow is hetzelfde venster voor één aanroeper búiten dit pakket:
+// de kern-flip (kern/kernflip). Die moet de bewoners inventariseren en pas
+// honderden milliseconden later springen — het plaatsen van een kern is 13MB
+// kopiëren en 242MB vegen, allebei met yields erin — en in dat gat mag de
+// agent geen slot starten of stoppen. Zo'n slot zou niet in de overdracht
+// staan terwijl zijn core wél doordraait, en de volgende kern zou zijn
+// partitie als vrije pool zien: exact de dubbeluitgifte van 31-08, dan via een
+// race. Gebruiken als `defer slots.LifecycleWindow()()`.
+func LifecycleWindow() func() { return lifecycleWindow() }
 
 // prepStart valideert de pure job-invoer van een slot-start — alles wat geen
 // lock nodig heeft — VÓÓR het lifecycle-venster: een kapotte job opent het
@@ -448,6 +474,16 @@ func (s *servicer) dispatchSMP() {
 	}
 	if err := dispatchCore(c, cageSMPEntryPC(), uint64(cp)); err != nil {
 		fmt.Printf("HOPOS_SMP_DISPATCH_FAIL slot %d core %d: %v\n", s.slot, c, err)
+	} else {
+		// Ook het SLAGEN melden. Dat lijkt ruis (het gebeurt één keer per extra
+		// core, bij het opkomen van een SMP-app) maar het is het enige verschil
+		// tussen twee heel andere diagnoses: valt een SMP-app om terwijl deze
+		// regel er stond, dan kwam zijn core op en zit de fout in de app; staat
+		// hij er niet, dan heeft de app zijn tweede core nooit gevraagd en is
+		// het core-start-pad onschuldig. GEMETEN 01-09 op de M4: een app met
+		// twee cores crasht, en er stond GEEN van de foutregels hierboven —
+		// waardoor precies die vraag open bleef.
+		fmt.Printf("slot %d: SMP core %d dispatched HOPOS_SMP_DISPATCH_OK\n", s.slot, c)
 	}
 	ctrlWrite(s.slot, layout.CtrlSMPReq, 0) // app-handshake: verzoek afgehandeld
 	dev.MB()

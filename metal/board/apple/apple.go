@@ -102,16 +102,21 @@ const (
 	//
 	//	+0x0000000   64KB  control-pages van HOP's eigen cores (NodeCtrlPA)
 	//	+0x00F0000    2KB  EL2-vectortabel van de boot-core (RevokeVecPA — cpuinit-vast!)
+	//	+0x00F8000    8B   kern-flip-vluchtrecorder (FlipScratch) — MOET buiten
+	//	                   het image liggen: iBoot legt het bootobject bij élke
+	//	                   boot terug over RamBase+0..imageSize, dus een spoor
+	//	                   op de boot-scratch wist zichzelf (gemeten 01-09)
 	//	+0x0100000  8.1MB  app-core-vectoren + stage-2-tabelblokken (Stage2PA)
 	//	+0x0A00000   4KB   levenstekenwoorden van de probe (WakeBase)
 	//	+0x1000000   8MB   NIC-DMA (NetDMAPA) — de tg3
 	//	+0x1800000   8MB   opslag-DMA (StorageDMAPA) — de queues van de ANS
 	//	+0x2000000         vanaf hier de partitie-pool (PoolBase)
-	StructBase = RamBase + HopRAMSize
-	NodeCtrlPA = StructBase + 0x0000000
-	RevokeVec  = StructBase + 0x00F0000
-	Stage2PA   = StructBase + 0x0100000
-	WakeBase   = StructBase + 0x0A00000
+	StructBase  = RamBase + HopRAMSize
+	NodeCtrlPA  = StructBase + 0x0000000
+	RevokeVec   = StructBase + 0x00F0000
+	FlipScratch = StructBase + 0x00F8000
+	Stage2PA    = StructBase + 0x0100000
+	WakeBase    = StructBase + 0x0A00000
 
 	NetDMAPA = StructBase + 0x1000000
 	PoolBase = StructBase + 0x2000000

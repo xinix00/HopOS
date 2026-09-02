@@ -5,6 +5,7 @@ package slots
 import (
 	"fmt"
 
+	"github.com/xinix00/HopOS/metal/abi/checksum"
 	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/board"
 	"github.com/xinix00/HopOS/metal/cpu/mmode"
@@ -72,7 +73,119 @@ const (
 // (cpu/mmode) vindt élk ctx-blok via SchedS2PA — staat dat op nul, dan rekent
 // hij bij de eerste trap een adres uit vanaf nul. Op ARM doet stage2.InitVectors
 // precies dit stuk; hier is het het enige dat er te initialiseren valt.
+// switchMagic/descriptor-indeling: identiek aan de ARM-kant (kern/stage2), en
+// met opzet — het is dezelfde vraag ("draait er code van een vórige kern in
+// deze plan-regio, en is het de mijne?"), dus hetzelfde antwoord in dezelfde
+// bytes. Alleen het aantal blobs verschilt: hier één (mentry..mmodeEnd).
+const (
+	switchMagic = 0x3143545753504F48 // "HOPSWTC1"
+	swLen       = 8
+	swHash      = 16
+	swEntry     = 24
+	swPark      = 32
+	swHead      = 0x40
+)
+
+// mmodeAdopting is de adoptie-stand van de kern-flip (docs/kern-flip.md): er
+// draait al een switcher in de plan-regio, dus cageInit moet alles wat een
+// app-hart aanraakt met rust laten. Gezet door kern/kernflip vóór de eerste
+// EnsureVectors; ingetrokken als de zittende kopie niet de onze blijkt.
+var mmodeAdopting bool
+
+// flipCapable: zie stage2 op ARM — zonder dit blijft de M-mode-switcher in het
+// kern-image en is het gedrag identiek aan vóór de kern-flip.
+var flipCapable bool
+
+// SetAdopting/SwitchCodeHash: dezelfde naad als stage2 op ARM — kern/kernflip
+// leest ze om te weten of een flip met levende bewoners mag.
+func SetAdopting(v bool) { mmodeAdopting = v }
+
+// SwitchCodeHash geeft de som die in de descriptor van de geïnstalleerde kopie
+// staat (0 = geen geldige kopie in de plan-regio).
+func SwitchCodeHash() uint64 {
+	base := layout.SwitchCodePA()
+	if dev.Read64(base) != switchMagic {
+		return 0
+	}
+	return dev.Read64(base + swHash)
+}
+
+// cageSetFlipCapable: zie de ARM-helft. Hier beslist het of de M-mode-switcher
+// naar de plan-regio verhuist.
+func cageSetFlipCapable(v bool) { flipCapable = v }
+
+// cageAdoptable: mag de slot-laag de bewoners van de vórige kern overnemen?
+func cageAdoptable() bool { return mmodeAdopting }
+
+// installSwitchCode kopieert de M-mode-blob (mentry..mmodeEnd — de trap-entry,
+// de rotatie, de parkeerlus) uit het kern-image naar de plan-regio en schakelt
+// de mmode-accessors om. Vanaf hier draait een app-hart nooit meer in
+// kern-image-bytes, en kan een kern-flip dus zijn eigen venster verlaten
+// terwijl dat hart in de switcher staat.
+//
+// De blob is positie-onafhankelijk (AUIPC/JAL, gemeten 01-09), dus de kopie
+// kost geen enkele patch. Cache-contract: HOP schrijft via dev.Copy en veegt
+// met CleanInv, zodat de bytes in DRAM staan; het app-hart komt uit reset (lege
+// I-cache) en fetcht ze daar. Bij een ADOPTIE wordt er niets gekopieerd — dan
+// staat het hart er middenin.
+func installSwitchCode() {
+	if !flipCapable && !mmodeAdopting {
+		return // niet flip-baar: de switcher blijft in het image (oud gedrag)
+	}
+	start, end := mmode.ImageBlob()
+	if end <= start || end-start > mmode.MaxBlobSize {
+		panic(fmt.Sprintf("cage: M-mode-blob heeft onmogelijke maat %#x..%#x — eindmarker verschoven?", start, end))
+	}
+	base := layout.SwitchCodePA()
+	blob := make([]byte, end-start)
+	dev.CopyOut(blob, uintptr(start))
+	sum := checksum.FNV64(blob)
+
+	if mmodeAdopting {
+		if dev.Read64(base) != switchMagic || dev.Read64(base+swHash) != sum {
+			// Zelfde afweging als op ARM (kern/stage2): we zijn al gesprongen en
+			// een kern zonder werkende switcher kan niets, dus installeren we
+			// alsnog vers en geven we de bewoners op — kern/slots ziet dat via
+			// cageAdoptable en laat hun partities los.
+			fmt.Printf("HOPOS_FLIP_SWITCHCODE_MISMATCH: resident M-mode code (%#x) is not ours (%#x) — refusing to adopt residents\n",
+				dev.Read64(base+swHash), sum)
+			mmodeAdopting = false
+		} else {
+			b := uint64(base)
+			mmode.SetRelocated(b+dev.Read64(base+swEntry), b+dev.Read64(base+swPark))
+			return
+		}
+	}
+
+	if uint64(swHead)+uint64(len(blob)) > uint64(layout.SwitchCodeMax) {
+		panic(fmt.Sprintf("cage: M-mode-kopie past niet (%#x > %#x) — blok vol", swHead+len(blob), layout.SwitchCodeMax))
+	}
+	dev.Copy(base+swHead, blob)
+	dev.Write64(base+swLen, uint64(swHead+len(blob)))
+	dev.Write64(base+swHash, sum)
+	dev.Write64(base+swEntry, uint64(swHead))
+	// parkenter ligt op zijn eigen offset binnen de blob; die verschuift mee.
+	dev.Write64(base+swPark, uint64(swHead)+(parkEnterImage()-start))
+	dev.Write64(base+0, switchMagic) // magic als laatste: half is nooit geldig
+	dev.Push(base, uintptr(swHead+len(blob)))
+	mmode.SetRelocated(uint64(base)+uint64(swHead), uint64(base)+dev.Read64(base+swPark))
+}
+
+// parkEnterImage is het image-adres van parkenter — de offset binnen de blob
+// die de kopie moet meenemen.
+func parkEnterImage() uint64 { return mmode.ParkEnterPC() }
+
 func cageInit() {
+	// Eerst de switcher de plan-regio in (docs/kern-flip.md): daarna geven de
+	// mmode-accessors de kopie-adressen, zodat élke stub-tabel (stubTrapPC) en
+	// élke park-adoptie (HartOn) buiten het kern-image wijzen.
+	installSwitchCode()
+	// Draait er al een switcher met bewoners (geadopteerde flip), dan is alles
+	// hieronder al gevuld — en zou het wissen ervan precies de levende rotatie
+	// slopen die we juist willen sparen.
+	if mmodeAdopting {
+		return
+	}
 	base := layout.Stage2TablePA(0) // = Plan.Stage2PA; slot 0 draagt geen tabellen
 	nc := layout.NumAppCores()
 	for c := 0; c <= nc; c++ {

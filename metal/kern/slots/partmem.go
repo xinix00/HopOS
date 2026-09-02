@@ -58,6 +58,15 @@ func poolInit() {
 	for _, r := range layout.Pool() {
 		partFree = append(partFree, region{r.Base, r.Size})
 	}
+	// Het EIGEN venster uit de pool knippen (kern-flip, docs/kern-flip.md): na
+	// een flip woont deze kern in een regio die het board-plan als pool
+	// declareert — die mag nooit aan een app worden uitgedeeld. Op een gewone
+	// boot is het venster al een plan-hole en is dit een no-op; de bron is de
+	// éigen RAM-declaratie (ownRegion), dus dit dekt élke flip-positie zonder
+	// board-kennis. Host: (0,0) — tests zien exact het oude gedrag.
+	if s, e := ownRegion(); e > s {
+		takeRange(s, e)
+	}
 	// Op ADRES sorteren — en alleen deze kopie, niet Plan.Pool: element 0 daarvan
 	// bepaalt het linkadres van élk app-image (cageLinkBase), dus die orde is
 	// functioneel en mag niet verschuiven.
@@ -203,8 +212,75 @@ func releaseLocked(i int) {
 		return
 	}
 	partOf[i] = region{}
+	insertFree(r)
+}
 
-	// Gesorteerd (op base) invoegen, dan met beide buren samensmelten.
+// takeRange haalt alles wat vrij is in [base,end) uit de vrije lijst en geeft
+// terug hoeveel bytes dat waren. De tegenhanger van insertFree, en net als
+// daar geldt: dít is de plek waar de dubbeluitgifte-invariant woont, dus élke
+// claim op de pool loopt hierlangs — de ownRegion-trim van poolInit, de
+// adoptie van een bestaande partitie (partAdopt) en de kern-flip-lening
+// (BorrowKernWindow). Drie eigen split-lussen was drie kansen om het subtiel
+// anders te doen; de duurste bug van de flip-changeset zat precies daar
+// (31-08, twee slots op één partitie).
+//
+// Partiële overlap is geen fout maar het normale geval: een venster kan over
+// een pool-grens heen liggen, en dan hoort alleen het pool-deel geclaimd te
+// worden. Wie zeker moet weten dat het HELE bereik vrij was, vraagt dat vooraf
+// met freeSpan. Aanroepen onder partMu.
+func takeRange(base, end uint64) uint64 {
+	if end <= base {
+		return 0
+	}
+	var took uint64
+	// Een VERSE slice, geen partFree[:0]: een claim middenin een regio splitst
+	// hem in twee, dus deze lus kan méér elementen schrijven dan hij leest — en
+	// in-place zou dat de eerstvolgende, nog ongelezen regio overschrijven.
+	// GEMETEN 01-09: het eigen kern-venster viel middenin de grote QEMU-regio,
+	// waarmee de tweede pool-regio verdween en de adoptie zijn partitie "niet
+	// vrij" vond. (Het filter-idioom werkt alleen als de uitvoer nooit groeit.)
+	var next []region
+	for _, r := range partFree {
+		rEnd := r.base + r.size
+		if end <= r.base || base >= rEnd { // geen overlap
+			next = append(next, r)
+			continue
+		}
+		if base > r.base {
+			next = append(next, region{r.base, base - r.base})
+		}
+		if end < rEnd {
+			next = append(next, region{end, rEnd - end})
+		}
+		lo, hi := base, end
+		if lo < r.base {
+			lo = r.base
+		}
+		if hi > rEnd {
+			hi = rEnd
+		}
+		took += hi - lo
+	}
+	partFree = next
+	return took
+}
+
+// freeSpan meldt of [base,end) in zijn geheel binnen één vrije regio ligt —
+// de vraag die vóór een claim gesteld moet worden als een deel-claim geen
+// geldig antwoord is (partAdopt: een blob dat een bezette partitie beschrijft
+// hoort geweigerd te worden, niet half ingewilligd). Aanroepen onder partMu.
+func freeSpan(base, end uint64) bool {
+	for _, r := range partFree {
+		if base >= r.base && end <= r.base+r.size {
+			return true
+		}
+	}
+	return false
+}
+
+// insertFree geeft een regio terug aan de vrije lijst: gesorteerd (op base)
+// invoegen, dan met beide buren samensmelten. Aanroepen onder partMu.
+func insertFree(r region) {
 	pos := 0
 	for pos < len(partFree) && partFree[pos].base < r.base {
 		pos++
@@ -221,6 +297,58 @@ func releaseLocked(i int) {
 		partFree = append(partFree[:pos], partFree[pos+1:]...)
 	}
 }
+
+// BorrowKernWindow leent een venster uit de pool voor de kern-flip
+// (docs/kern-flip.md): de nieuwe kern wordt hier geplaatst en draait er tot
+// een vólgende flip. Zelfde keuzeregels als partAlloc (best-fit, hoog-eerst,
+// 2MB-korrel), maar niet aan een slot gebonden. Geeft basis én werkelijke
+// maat terug. Hooguit één lening tegelijk: een tweede aanvraag terwijl de
+// eerste loopt is een programmeerfout van de flip-laag en faalt.
+func BorrowKernWindow(size uint64) (base, grown uint64, err error) {
+	partOnce.Do(poolInit)
+	size = align2M(size)
+	partMu.Lock()
+	defer partMu.Unlock()
+	if kernWindow.size != 0 {
+		return 0, 0, fmt.Errorf("kern-flip: er staat al een geleend venster (%#x+%d MB)", kernWindow.base, kernWindow.size>>20)
+	}
+	best := -1
+	for idx := len(partFree) - 1; idx >= 0; idx-- {
+		r := partFree[idx]
+		if r.size < size {
+			continue
+		}
+		if (r.base+r.size-size)&^(part2M-1) < r.base {
+			continue
+		}
+		if best < 0 || r.size < partFree[best].size {
+			best = idx
+		}
+	}
+	if best < 0 {
+		return 0, 0, fmt.Errorf("%w: kern-venster van %d MB past niet in de pool", ErrNoPartition, size>>20)
+	}
+	r := partFree[best]
+	base = (r.base + r.size - size) &^ (part2M - 1)
+	takeRange(base, base+size)
+	kernWindow = region{base, size}
+	return base, size, nil
+}
+
+// ReturnKernWindow geeft de flip-lening terug (mislukte flip — een geslaagde
+// keert niet terug). No-op zonder lening.
+func ReturnKernWindow() {
+	partMu.Lock()
+	defer partMu.Unlock()
+	if kernWindow.size == 0 {
+		return
+	}
+	insertFree(kernWindow)
+	kernWindow = region{}
+}
+
+// kernWindow is de actieve flip-lening (size 0 = geen).
+var kernWindow region
 
 // partitionOf geeft de actieve reservering van slot i terug (base, size). ok=
 // false als slot i niets gealloceerd heeft.

@@ -147,19 +147,6 @@ func (machine) S2SMPTrampPC() uint64 { return el2.S2SMPTrampPC() }
 // PCIe: de ECAM en het MMIO-venster van Apple's rootpoort (ADT apcie).
 func (machine) PCIe() pcie.Window { return Window() }
 
-// Chainload/ChainScratch: de netboot-haak. Optioneel deel van het
-// board-contract (cmd/hopos vraagt er met een type-assertie naar), want dit kan
-// niet elk board: het vraagt een image dat zichzelf naar zijn linkadres
-// verplaatst en een firmware-overdracht die wij kunnen nabootsen. Op Apple is
-// dat precies wat de bootstub al doet, dus hier is het één regel doorgeven.
-func (machine) Chainload(addr, n uint64) { apple.Chainload(addr, n) }
-func (machine) ChainScratch() uint64     { return apple.ChainScratch() }
-
-// SelfImage: waar dit image draait en hoe groot het is. Netboot gebruikt het om
-// zichzelf te herkennen — zonder die vergelijking haalt een node die zijn eigen
-// image aanbiedt zichzelf eeuwig opnieuw op.
-func (machine) SelfImage() (uint64, uint64, bool) { return apple.SelfImage() }
-
 // Disk brengt de opslag van dit board op en geeft het VENSTER waarin HopOS mag
 // schrijven: de coprocessor-SSD, en daarvan alleen het stuk dat niemand anders
 // heeft. Optioneel deel van het board-contract (cmd/hopos vraagt er met een

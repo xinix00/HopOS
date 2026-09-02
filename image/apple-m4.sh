@@ -79,3 +79,4 @@ GOWORK="$DIR/image/apple/go.work" GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.c
 cd "$DIR"
 go run "$DIR"/image/mkkernel/*.go \
 	-elf "metal/out/$NAME.elf" -o "metal/out/$NAME.img" -load 0x10100000000 -apple
+

@@ -287,11 +287,13 @@ func proxyLoad(addr, length uint64) {
 // de n bytes die er staan, en dan de machine teruggeven zoals de firmware hem
 // aflevert — MMU uit, x0 = boot_args, binnenkomst op de stub-entry.
 //
-// Eén implementatie voor twee wegen. De proxy gebruikt hem (image over de
-// kabel) en netboot ook (image van het net); dat moet dezelfde code zijn, want
-// dit is het gevaarlijkste pad dat we hebben — hierna bestaat het huidige image
-// niet meer. Wie hier een tweede variant naast zet, heeft er één die zelden
-// draait, en dat is de variant die stuk is.
+// Dit is het bring-up-pad: een image dat over de m1n1-proxykabel binnenkwam.
+// Het is iets ANDERS dan de kern-flip (docs/kern-flip.md), en dat is geen
+// dubbeling maar een ander soort sprong: hier gaat een compleet .img met de
+// apple-bootstub vooraan naar zijn eigen linkadres, terwijl de flip een al
+// geplaatste ELF in een geleend venster inspringt en zijn bewoners meeneemt.
+// De eerste is gereedschap voor een bord dat nog niets kan, de tweede is hoe
+// een draaiende node zichzelf vervangt.
 //
 // Keert nooit terug.
 func Chainload(addr, n uint64) {
@@ -300,7 +302,3 @@ func Chainload(addr, n uint64) {
 	dev.CleanInv(uintptr(addr), uintptr(n))
 	proxyBoot(addr+proxyEntry, FirmwareX0())
 }
-
-// ChainScratch is waar een op te halen image mag landen als de aanroeper geen
-// eigen plek heeft: dezelfde pool-regio die de proxy gebruikt.
-func ChainScratch() uint64 { return ProxyScratch }

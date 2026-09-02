@@ -144,6 +144,13 @@ func fail(what string, err error) {
 func main() {
 	memlimit.Arm() // geheugenplafond uit het RAM-raam — zie cpu/memlimit
 	failf, demoApp = fail, app
+	// De kern-flip-adoptie moet vóór alles (docs/kern-flip.md): hij consumeert
+	// het handoff-blob en zet de adoptie-stand, en op die stand beslist
+	// stage2.InitVectors straks of hij de plan-regio van levende bewoners vers
+	// neerzet of met rust laat. No-op op een gewone boot.
+	if flipMode != "" {
+		flipAdopt()
+	}
 	fmt.Println("")
 	fmt.Println("HopOS (virt): bare-metal Go op arm64 — geen Linux aan boord")
 	fmt.Printf("runtime %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
@@ -201,6 +208,20 @@ func main() {
 	// tasks volumes mounten en via de hop-ABI bij hun bestanden.
 	fsys := hopfs.New(disk)
 	slots.UseFS(fsys)
+
+	// Kern-flip-regressie (image/qemu-run.sh flip): kern A springt hier in de
+	// bundel (keert niet terug); de geflipte kern B meldt HOPOS_FLIP_BOOT en
+	// draait gewoon door — de volle demo hieronder is dan het bewijs.
+	//
+	// De plek is niet willekeurig, en beide redenen zijn een meting waard:
+	// de SNTP-ronde hierboven is het eerste externe verkeer van deze node (en
+	// dus het moment waarop de NAT zijn gateway-MAC leert — daarvóór sneuvelt
+	// de eerste uitgaande query van de bewoner nog terwijl er geARP't wordt),
+	// en de storage-laag moet er zijn omdat de bewoner een volume mount. Dat
+	// is dezelfde volgorde als in de echte agent-main.
+	if flipMode != "" {
+		flipDemo()
+	}
 
 	// Drie apps, drie cores — met verschillende MemoryLimits uit het
 	// "manifest": bewijs dat HOP de RAM-declaratie per start bepaalt.

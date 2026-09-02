@@ -41,7 +41,7 @@ mkdir -p out
 #    Demo-modus bakt hem ín de kern (go:embed) — dan moet hij op de embed-plek
 #    naast de main landen; agent-modus serveert hem los via http.server.
 APP=out/app.elf
-case "$MODE" in demo | bench) APP=cmd/hopos-embed/app.elf ;; esac
+case "$MODE" in demo | bench | flip) APP=cmd/hopos-embed/app.elf ;; esac
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags "linkcpuinit" -trimpath \
 	-ldflags "-w -T 0x50010000 -R 0x1000" -o "$APP" ./app/appspike
@@ -80,8 +80,33 @@ agent)
 	echo "agent:  curl http://127.0.0.1:${AGENTPORT:-8080}/health" >&2
 	echo "leader: curl http://127.0.0.1:${LEADERPORT:-9080}/health" >&2
 	;;
+flip)
+	# Kern-flip-regressie (docs/kern-flip.md): dezelfde demo-kern, maar mét de
+	# flip-stap — kern A haalt de bundel van de host en springt erin; de
+	# geflipte kern B (zelfde build, herbaseerd naar een geleend pool-venster)
+	# meldt HOPOS_FLIP_BOOT en draait de volle demo af. De bundel is deze
+	# build op het canonieke linkadres + één schaduw-variant op een ander -T
+	# als diff-bewijs (mkkernel -elfreloc). Eisen aan de varianten: -w zónder
+	# -s (kernflip patcht RamStart/RamSize via de symboltabel) en -buildid=
+	# (anders is de diff geen zuivere linkbasis-delta).
+	FLIPX=" -X main.flipMode=1 -X main.flipURL=http://10.0.2.2:8071/flip.img"
+	for VAR in "0x40010000:out/hopos-flipA.elf" "0x70010000:out/hopos-flipB.elf"; do
+		GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
+			"$TAMAGO" build -tags "qemuvirt linkcpuinit$GUITAG" -trimpath \
+			-ldflags "-w -buildid= -T ${VAR%%:*} -R 0x1000$FLIPX" -o "${VAR#*:}" ./cmd/hopos-embed
+	done
+	GO111MODULE=off go run "$DIR"/image/mkkernel/*.go -elfreloc -o out/flip.img \
+		-elf out/hopos-flipA.elf -elf out/hopos-flipB.elf
+	KERNEL=out/hopos-flipA.elf
+	FWD="hostfwd=tcp:127.0.0.1:${HOPPORT:-8080}-10.0.2.15:80,hostfwd=tcp:127.0.0.1:${PORTPUB:-18080}-10.0.2.15:8080"
+	# Bundel-server voor de gast (slirp: 10.0.2.2 = host-loopback).
+	python3 -m http.server 8071 --directory out --bind 127.0.0.1 >/dev/null 2>&1 &
+	FLIPHTTP=$!
+	trap 'kill $FLIPHTTP 2>/dev/null; clean_embeds' EXIT INT TERM
+	echo "hopos-flipA.elf ($(du -h out/hopos-flipA.elf | cut -f1)) + flip.img gebouwd — QEMU -smp $SMP start (flip-regressie)..." >&2
+	;;
 *)
-	echo "gebruik: $0 [demo|bench|agent]" >&2
+	echo "gebruik: $0 [demo|bench|agent|flip]" >&2
 	exit 64
 	;;
 esac

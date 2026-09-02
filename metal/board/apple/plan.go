@@ -57,6 +57,7 @@ func SetupPlan() {
 		NodeCtrlPA:    NodeCtrlPA,
 		Stage2PA:      Stage2PA,
 		RevokeVecPA:   RevokeVec,
+		FlipScratchPA: FlipScratch,
 		BootScratchPA: BootScratch,
 		NetDMAPA:      NetDMAPA,
 		RAMBase:       DRAMBase,
@@ -66,6 +67,15 @@ func SetupPlan() {
 	if n := NumCPUs(); n > 1 {
 		layout.SetAppCores(n - 1)
 	}
+	// De firmware-x0 op de UNIVERSELE plek (BootScratch+8, layout.DTBPtr):
+	// dat woord is wat kern/kernflip de vólgende kern in x0 meegeeft. Op virt
+	// vult de boot het vanzelf; hier bewaarde de stub hem op StubX0, en werd
+	// +8 nooit geschreven — waardoor élke geflipte kern x0=0 kreeg, zonder
+	// boot_args bootte, MapDRAM oversloeg en op zijn eerste ADT-lees stierf
+	// (GEVONDEN 01-09 via de dockchannel: "hopos x0000000000000000" gevolgd
+	// door de EL1-exception — zes ijzer-flips lang onzichtbaar).
+	dev.Write64(BootScratch+8, FirmwareX0())
+
 	p.Pool = carvePool()
 	if len(p.Pool) == 0 {
 		fmt.Printf("WARNING HOPOS_POOL_FALLBACK: no boot_args from the firmware — partition pool falls back to a fixed 4GB\n")

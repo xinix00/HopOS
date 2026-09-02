@@ -94,6 +94,35 @@ const (
 	// metal/fw/fdt (de Pi-boards lezen hem via hun eigen DTBPtr-constante).
 	DTBPtr = BootScratch + 8
 
+	// HandoffPtrOff (kern-flip, docs/kern-flip.md): het woordpaar +0x80/+0x88 op
+	// de scratch-page draagt de fysieke pointer naar het handoff-blob dat de
+	// vertrekkende kern achterliet, plus zijn magic (allebei 0 = geen flip). De
+	// boot-scratch is de enige plek die beide kernen zonder afspraak kennen:
+	// een board-constante, buiten elke RAM-declaratie. De nieuwe kern
+	// CONSUMEERT het paar (nult het vóór hij het blob vertrouwt), zodat een
+	// watchdog-reboot nooit een stale blob adopteert. Apps zien de page
+	// read-only; er staat alleen een adreswaarde, geen inhoud.
+	//
+	// WAAROM 0x80 en niet ergens laag. Hier stond 0x10, en dat was "cpuinit
+	// raakt alleen +0/+8" — waar op één board na. Apple's cpuinit legt daar
+	// zijn HCR_EL2 en CNTHCTL_EL2 neer (board/apple: HCRScratch = +0x10,
+	// CNTHCTLScratch = +0x18), dus de nieuwe kern las systeemregisters als
+	// handoff-pointer. GEMETEN 01-09 op de M4, de eerste flip op ijzer: de
+	// sprong lukte, maar de nieuwe kern zag `stray handoff pointer
+	// (0x480000000/0xc03)` — precies die twee registers — verwierp de
+	// overdracht terecht, liep dáárdoor het koude-boot-pad en wiste de
+	// app-core-regio onder twee lévende bewoners; de node viel om en de
+	// watchdog bracht hem terug op het geïnstalleerde image.
+	//
+	// 0x80 lost twee dingen tegelijk op. Het ligt boven alles wat welk board
+	// dan ook op deze pagina gebruikt (Apple is de dichtste bezetter en komt
+	// tot +0x50) en onder het parameterblok (+0x100). En het ligt in een EIGEN
+	// 64-byte cachelijn: de lijn 0x40-0x7F draagt juist de woorden die de
+	// stubs met de MMU uit beschrijven (park-brievenbus, StubSrc/StubX0), en
+	// een cachelijn delen met een schrijver die de cache omzeilt is precies
+	// hoe je stil de ene write de andere laat terugdraaien.
+	HandoffPtrOff = 0x80
+
 	// FB-grant-venster (IPA-ABI, kern/slots/fbgrant.go): de firmware-
 	// framebuffer van de display-houder wordt híer gemapt — GB0 is vrij in
 	// het canonieke beeld, en de fysieke fb mag boven de 4GB liggen (32-bit
@@ -146,6 +175,21 @@ const (
 	// LET OP: de Sched*-offsets staan als literals in cpu/el2/switch.s en in
 	// de thunk-generator (kern/stage2) — bij verplaatsen beide aanpassen.
 	ParkMboxLen = 256
+
+	// De switch-code-kopie (docs/kern-flip.md): de EL2-blobs die een app-core
+	// uitvoert (el2entry, s2tramp, smpEL2Tramp — op RISC-V straks mentry/
+	// parkenter) verhuizen bij InitVectors als kopie hierheen, in de vrije
+	// ruimte van het slot-0-blok ná de sched-blokken (die eindigen op
+	// parkMboxOff + (SlotCap+1)×ParkMboxLen = 0x9200). Vanaf dan voert een
+	// app-core nooit meer kern-image-bytes uit — de randvoorwaarde om bij een
+	// kern-flip het oude kern-venster te kunnen verlaten. Vooraan een
+	// 64-byte-descriptor (magic/lengte/hash) waarmee een adopterende kern
+	// toetst dat de zittende kopie de zijne is.
+	switchCodeOff = 0xA000
+	// SwitchCodeMax is de harde bovengrens (descriptor + blobs samen): de rest
+	// van het slot-0-stride-blok. De install panikeert erboven — liever hard
+	// bij boot dan stil in het tabelblok van slot 1 schrijven.
+	SwitchCodeMax = Stage2Stride - switchCodeOff
 
 	// Sched-blok-indeling (offsets binnen het 256B-blok van een core).
 	//
@@ -440,7 +484,13 @@ type Plan struct {
 	// hebben geen partitie en dus geen ABI-staart om hun handoff in te leggen.
 	// MaxSlots+1 pagina's, 4KB-aligned. App-slots staan hier NIET in — die
 	// dragen hun control page in hun eigen partitie (de slot-ABI hierboven).
-	Stage2PA    uint64 // app-core-vectoren + tabelblokken: (MaxSlots+1) × Stage2Stride (2KB-aligned)
+	Stage2PA uint64 // app-core-vectoren + tabelblokken: (MaxSlots+1) × Stage2Stride (2KB-aligned)
+	// FlipScratchPA: één woord voor de kern-flip-vluchtrecorder, buiten het
+	// kernel-image en buiten alles wat de firmware of cpuinit bij een verse
+	// boot beschrijft — het moet een WATCHDOG-REBOOT overleven. 0 = dit board
+	// heeft er (nog) geen plek voor en de recorder is een no-op.
+	FlipScratchPA uint64
+
 	RevokeVecPA uint64 // EL2-vectortabel van de HOP-core (2KB-aligned): waar
 	// cpuinit VBAR_EL2 van core 0 heen zette. InitVectors plugt er alleen de
 	// HVC-revoke-handler in (offset 0x400) en laat de rest staan — een board
@@ -533,6 +583,29 @@ func NodeCtrlPA(core int) uintptr { return pa(plan.NodeCtrlPA + uint64(core)*Ctr
 // BootScratchPA: de fysieke boot-scratch (cpuinit-vast).
 func BootScratchPA() uintptr { return pa(plan.BootScratchPA) }
 
+// HandoffPtrPA: het fysieke handoff-pointer-woord van de kern-flip (zie
+// HandoffPtrOff).
+func HandoffPtrPA() uintptr { return pa(plan.BootScratchPA + HandoffPtrOff) }
+
+// FlipStagePA: het vluchtrecorder-woord van de kern-flip (kernflip/stage.go),
+// of 0 als dit board er geen plek voor heeft aangewezen. Eén woord dat zegt
+// hoe ver een flip kwam, voor de boot ná een mislukte sprong.
+//
+// Dit is een PLAN-veld en bewust geen vaste boot-scratch-offset. Daar stond
+// hij eerst (+0x90), en dat spoor overleefde precies de reboot die het moest
+// verklaren niet: de scratch ligt op élk board ergens waar de firmware bij een
+// verse boot overheen schrijft — op de M4 legt iBoot het complete bootobject
+// terug over RamBase+0xE000 (GEMETEN 01-09: recorder leeg na een gecrashte
+// flip, fetch aantoonbaar wél gebeurd). De plek moet dus buiten het image én
+// buiten alles wat vóór ReportLastFlip schrijft liggen, en dat weet alleen het
+// board.
+func FlipStagePA() uintptr {
+	if plan.FlipScratchPA == 0 {
+		return 0
+	}
+	return pa(plan.FlipScratchPA)
+}
+
 // De fysieke net-ring-basis van een slot (in de ABI-staart van zijn
 // partitie) is bewust GEEN accessor hier: partities leven per job, dus die PA
 // bestaat alleen tijdens een lifecycle. kern/slots berekent hem (base+appRAM)
@@ -558,6 +631,10 @@ func ParkCodePA() uintptr { return pa(plan.Stage2PA + parkCodeOff) }
 func ParkMboxPA(core int) uintptr {
 	return pa(plan.Stage2PA + parkMboxOff + uint64(core)*ParkMboxLen)
 }
+
+// SwitchCodePA is de plan-plek van de switch-code-kopie (descriptor + blobs,
+// max SwitchCodeMax) — zie de constante hierboven en docs/kern-flip.md.
+func SwitchCodePA() uintptr { return pa(plan.Stage2PA + switchCodeOff) }
 
 // Pool geeft de partitie-pool van het board (voor slots/partmem).
 func Pool() []Region {

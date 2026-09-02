@@ -351,10 +351,22 @@ park:
 	ADD	$0x1000, R2, R2
 	JMP	(R2)
 
-// EntryPC geeft het fysieke adres van el2entry (HOP-image is identity-
-// geladen: symbooladres = fysiek adres) — het sprongdoel van de door
-// kern/stage2 gegenereerde vector-thunks.
-TEXT ·EntryPC(SB),NOSPLIT,$0-8
+// el2entryEnd markeert het einde van el2entry: de blob [el2entry, el2entryEnd)
+// wordt door kern/stage2 naar de plan-regio gekopieerd (docs/kern-flip.md) —
+// de code hierboven is volledig SP/TPIDR-relatief en draait daar ongewijzigd.
+// Direct ná el2entry in dít bestand houden; de install-guard toetst de maat.
+TEXT el2entryEnd(SB),NOSPLIT|NOFRAME,$0
+	RET
+
+// entryPC/entryEndPC geven de IMAGE-adressen van de blob (HOP-image is
+// identity-geladen: symbooladres = fysiek adres). De publieke accessor
+// (EntryPC, pc.go) geeft de plan-kopie zodra die geïnstalleerd is.
+TEXT ·entryPC(SB),NOSPLIT,$0-8
 	MOVD	$el2entry(SB), R0
+	MOVD	R0, ret+0(FP)
+	RET
+
+TEXT ·entryEndPC(SB),NOSPLIT,$0-8
+	MOVD	$el2entryEnd(SB), R0
 	MOVD	R0, ret+0(FP)
 	RET
