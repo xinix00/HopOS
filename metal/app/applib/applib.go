@@ -489,6 +489,14 @@ func (a *App) watch() {
 		beat++
 		a.ctrlSet(layout.CtrlHeartbeat, beat)
 		if a.ctrlGet(layout.CtrlKill) != 0 {
+			// HOP_DUMP_ON_KILL=1: alle goroutines naar de log vóór de exit —
+			// het enige venster op een app die nog leeft maar niets meer
+			// doet (de SMP-jacht van 03-09: HTTP dood, cores op 100%).
+			if a.Env("HOP_DUMP_ON_KILL") == "1" {
+				buf := make([]byte, 512<<10)
+				n := runtime.Stack(buf, true)
+				print("goroutine dump on kill:\n", string(buf[:n]), "\n")
+			}
 			a.Exit(0)
 		}
 		if tick%40 == 0 { // 40 × 50ms = 2s

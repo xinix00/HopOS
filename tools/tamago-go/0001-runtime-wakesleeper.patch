@@ -1,19 +1,52 @@
-# runtime.WakeSleeper — de SMP-veilige bel voor de RX-pomp (metal/cpu/idle/rxdoor.go).
-# Toepassen in de tamago-go-fork: cd ~/tamago-go && git apply <dit bestand>
-# De runtime wordt per build uit $GOROOT/src gecompileerd, de toolchain hoeft niet opnieuw.
+# runtime: WakeSleeper (nieuw bestand) — de SMP-veilige bel voor de RX-pomp
+# (metal/cpu/idle/rxdoor.go), en preemptM op de goos.Wake-haak — de
+# reschedule-IPI waarmee een stop-the-world een core bereikt die op EL2
+# slaapt (metal/cpu/smp). Toepassen: tools/tamago-go/apply.sh (of: cd
+# ~/tamago-go && git apply <dit bestand>). De runtime wordt per build uit
+# $GOROOT/src gecompileerd, de toolchain hoeft niet opnieuw.
+diff --git a/src/runtime/os_tamago.go b/src/runtime/os_tamago.go
+index ed6b67f7..450006b8 100644
+--- a/src/runtime/os_tamago.go
++++ b/src/runtime/os_tamago.go
+@@ -265,9 +265,19 @@ func semawakeup(mp *m) {
+ 	}
+ }
+ 
+-const preemptMSupported = false
+-
+-func preemptM(mp *m) {}
++// preemptM is supported in the sense that matters on bare metal: it wakes
++// the target M's core (goos.Wake, the same hook semawakeup uses), so an M that
++// went idle in goos.Idle comes back to the scheduler and reaches the
++// cooperative safepoint the preemption asks for — a stop-the-world must not
++// wait forever on a core that sleeps. There is no async preemption: nothing
++// interrupts a running M mid-instruction, exactly as before.
++const preemptMSupported = true
++
++func preemptM(mp *m) {
++	if goos.Wake != nil {
++		goos.Wake(mp.procid)
++	}
++}
+ 
+ func minit() {
+ 	if goos.ProcID == nil {
 diff --git a/src/runtime/wakesleeper_tamago.go b/src/runtime/wakesleeper_tamago.go
 new file mode 100644
-index 00000000..535fa18d
+index 00000000..cd0da275
 --- /dev/null
 +++ b/src/runtime/wakesleeper_tamago.go
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,61 @@
 +// Copyright 2026 HopOS. Same license as the Go runtime.
 +
 +//go:build tamago
 +
 +package runtime
 +
-+import "unsafe"
++import (
++	"runtime/goos"
++	"unsafe"
++)
 +
 +// WakeSleeper makes gp's pending time.Sleep expire now. It is the lock-correct
 +// form of WakeG: the same effect (the goroutine's cached sleep timer fires at
@@ -45,12 +78,23 @@ index 00000000..535fa18d
 +	// lower the heap's minWhenModified so adjust re-sorts and run fires it.
 +	t.when = 1
 +	t.state |= timerModified
-+	if min := t.ts.minWhenModified.Load(); min == 0 || min > 1 {
++	ts := t.ts
++	if min := ts.minWhenModified.Load(); min == 0 || min > 1 {
 +		// Force timerModified out to t.astate before updating
 +		// minWhenModified, to synchronize with ts.adjust (see modify).
 +		t.astate.Store(t.state)
-+		t.ts.updateMinWhenModified(1)
++		ts.updateMinWhenModified(1)
 +	}
 +	t.unlock()
++	// The heap belongs to a P; if that P's M is idle on another core it has
++	// to come back to run the timer — the same wake the scheduler gives a
++	// parked M (semawakeup → goos.Wake). A fake (synctest) timer has no P.
++	if !t.isFake && goos.Wake != nil {
++		var pp *p
++		pp = (*p)(unsafe.Pointer(uintptr(unsafe.Pointer(ts)) - unsafe.Offsetof(pp.timers)))
++		if mp := pp.m.ptr(); mp != nil {
++			goos.Wake(mp.procid)
++		}
++	}
 +	return true
 +}

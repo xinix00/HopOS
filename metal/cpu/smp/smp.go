@@ -29,7 +29,6 @@ import (
 
 	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/cpu/el2"
-	"github.com/xinix00/HopOS/metal/cpu/idle"
 	"github.com/xinix00/HopOS/metal/dev"
 )
 
@@ -118,13 +117,41 @@ func Configure(prim, cores int, ctrl uintptr) {
 	// geen interrupt (dus geen botsing met de EL2-kill-route). De secundaire core
 	// sloeg hwinit over, dus zijn per-core event-stream zet de SMP-stub aan
 	// (CNTKCTL_EL1); daarmee wekt zijn WFE net zo goed.
+	// De reschedule-IPI (Linux' smp_send_reschedule, in HopOS-vorm). Een core
+	// die idlet slaapt op EL2 en is daar voor de runtime onbereikbaar; alles
+	// wat de scheduler naar een andere M stuurt — semawakeup (wakep, notes,
+	// netpoll-break), preemptM (stop-the-world) en een timer op diens heap
+	// (WakeSleeper) — loopt door goos.Wake, en dat wordt hier HVC #4 naar de
+	// switcher (cpu/el2 switch.s wake:), die de sibling wekt. Elke M kent zijn
+	// core via goos.ProcID (minit): het MPIDR-affiniteitswoord + 1, want 0 is
+	// de M die er al was vóór deze haak bestond — de primaire. VÓÓR
+	// GOMAXPROCS: die start via wakep meteen de eerste secundaire, en diens
+	// minit moet de haak dan al zien (gemeten: procid 0, dus nooit gewekt).
+	primaryAff = dev.MPIDR() & 0xFFFFFF
+	goos.ProcID = func() uint64 { return dev.MPIDR()&0xFFFFFF + 1 }
+	goos.Wake = wake
 	goos.Task = task
 	runtime.GOMAXPROCS(cores)
-	// De idle-governor mag een core nu hoogstens één ms laten slapen: op EL2
-	// is hij voor de runtime onbereikbaar, en met een tweede core is er
-	// iemand die op hem wacht (idle.wakeAt).
-	idle.MultiCore(true)
 }
+
+// primaryAff: de affiniteit van de primaire core (procid 0).
+var primaryAff uint64
+
+// wake wekt de M met dit procid (zie Configure). Zichzelf wekken is niets:
+// wie dit aanroept draait al.
+func wake(procid uint64) {
+	aff := primaryAff
+	if procid != 0 {
+		aff = procid - 1
+	}
+	if aff == dev.MPIDR()&0xFFFFFF {
+		return
+	}
+	hvcWake(aff)
+}
+
+// hvcWake: HVC #4, x0 = MPIDR-affiniteit van de te wekken sibling (regs_arm64.s).
+func hvcWake(aff uint64)
 
 // task is de goos.Task-hook: de runtime roept 'm aan (vanuit newosproc) als hij
 // een extra OS-thread wil. De app mág geen cores opbrengen — de parkeer-

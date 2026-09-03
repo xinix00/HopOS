@@ -479,6 +479,7 @@ func (s *servicer) dispatchSMP() {
 	// elke andere (yield naar EL2, kick van HOP) in plaats van te spinnen.
 	ctxWrite(c, layout.CtxCtrlPA, uint64(cp))
 	ctxWrite(c, layout.CtxRingHeadPA, ctxRead(s.slot, layout.CtxRingHeadPA))
+	ctxWrite(c, layout.CtxUnitSlot, uint64(s.slot)) // tabel + VMID van de primaire
 	// En dezelfde registratie als armSlot voor een eerste core: de secundaire
 	// is bewoner "slot c" van core c (ctx-blok c). Zonder dat is hij voor de
 	// rotatie en de wekker niemand — hij yieldt dan naar EL2 en wordt nooit
@@ -636,7 +637,19 @@ func coreExists(core int) bool { return physCore(core) >= 0 }
 // idleModeOf is de idle-modus die het board voor deze core kiest
 // (board.Cores.IdleMode); HOP geeft hem de app mee op zijn control-page
 // (layout.CtrlIdleMode).
-func idleModeOf(core int) uint64 { return cores().IdleModeOf(physCore(core)) }
+func idleModeOf(core int) uint64 {
+	mode := cores().IdleModeOf(physCore(core))
+	if ForceIdleYield {
+		mode |= layout.IdleYield
+	}
+	return mode
+}
+
+// ForceIdleYield (hopos.idleyield=1): yield-idle voor elke app, ook op een
+// board dat er zelf niet om vraagt — de QEMU-proef van het SMP-wekpad: daar
+// spint de rotatie op een WFE die niet slaapt, dus het CtxWake=0-pad van
+// HVC #4 is er zonder IPI te bewijzen.
+var ForceIdleYield bool
 
 func dispatchCore(core int, entry, ctx uint64) error {
 	// Nooit een core dispatchen die al draait: dat zou een app (of een tweede
@@ -1096,21 +1109,13 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	smpCores[i] = cores
 	ctrlWrite(i, layout.CtrlCores, uint64(cores))
 	// De idle-modus van het board voor deze core (layout.CtrlIdleMode): hoe
-	// de app hoort te idlen. Nul = de default van de architectuur. Een
-	// SMP-app krijgt GEEN yield-idle: een core die op EL2 slaapt is voor de
-	// Go-runtime onbereikbaar (geen stop-the-world, preemptie of wakep komt
-	// daar aan), en met een tweede core wacht die dan op hem. Gemeten M4
-	// 03-09: met yield hing een 2-core-app (eerste core op EL2 met een
-	// wektijd van minuten, tweede op 100% in de STW-wacht); met een 1ms-cap
-	// op de wektijd (idle.MultiCore) hing hij nog steeds, beide cores op
-	// 100% in de governor met RX pending. Open: waarom de pomp dan niet
-	// draint. Tot dat begrepen is idlet een SMP-app met de Sleeper van het
-	// board (op Apple: de WFE-spin, ~70% per core — stabiel, wel duur).
-	mode := idleModeOf(core)
-	if cores > 1 {
-		mode &^= layout.IdleYield
-	}
-	ctrlWrite(i, layout.CtrlIdleMode, mode)
+	// de app hoort te idlen. Nul = de default van de architectuur. Ook een
+	// SMP-app: zijn cores yielden elk voor zich, de wekker kijkt per core
+	// (waker.go), en de runtime wekt een slapende sibling zelf via HVC #4
+	// (cpu/smp goos.Wake → switch.s wake:) — zonder dat wachtte een core op
+	// EL2 met een wektijd van minuten terwijl de ander in de STW-wacht stond
+	// (M4, 03-09).
+	ctrlWrite(i, layout.CtrlIdleMode, idleModeOf(core))
 	if cores > 1 {
 		// Fysiek adres van de EL2 SMP-trampoline publiceren (op ditzelfde slot
 		// z'n partitie/stage-2 → gedeelde heap).
@@ -1153,6 +1158,7 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// alleen het gedeelde-core-pad — sinds de ABI in de partitie woont kan die
 	// asm het adres niet meer uitrekenen.
 	ctxWrite(i, layout.CtxCtrlPA, ctx)
+	ctxWrite(i, layout.CtxUnitSlot, uint64(i)) // de eenheid = dit slot zelf
 	// Het head-woord van de RX-frame-ring erbij: het live-eind van de
 	// doorbell-peek (layout.CtxRingHeadPA; de wek-drempel schrijft de app
 	// zelf op CtrlRXDoor). Zelfde publicatiepad als CtxCtrlPA.
@@ -1270,6 +1276,21 @@ func Stop(i int, timeout time.Duration) error {
 	if stillOn {
 		// Eén intrekking velt álle cores van het slot (gedeelde tabel/VMID).
 		cageRevoke(i)
+		// Een core die op EL2 slaapt (geyield, CtxSaved) voelt de intrekking
+		// niet: hij voert geen vertaalde instructie uit tot zijn wektijd. Dus
+		// wektijd op "nu" en kicken — de rotatie hervat hem in de ingetrokken
+		// kooi, zijn eerste fetch faultt, en hij parkeert zoals elke andere
+		// (QEMU 03-09: "core 2 did not park" bij een 2-core-app die yieldt).
+		for c := core; c < core+n; c++ {
+			if coreRunning(c) && ctxState(c) == layout.CtxSaved {
+				ctxWrite(c, layout.CtxWake, 0)
+				if k := cores().Kick; k != nil {
+					if phys := physCore(c); phys >= 0 {
+						k(phys)
+					}
+				}
+			}
+		}
 		for c := core; c < core+n; c++ {
 			if !coreRunning(c) {
 				continue

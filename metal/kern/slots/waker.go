@@ -81,8 +81,14 @@ func waker() {
 // wakeDue: is de geyielde bewoner van slot i due — op tijd (CtxWake, 0 =
 // meteen), of op RX?
 func wakeDue(i int, now uint64) bool {
-	if t := ctxRead(i, layout.CtxWake); t == 0 || now >= t {
+	t := ctxRead(i, layout.CtxWake)
+	nopeek := t&layout.CtxWakeNoPeek != 0
+	t &^= layout.CtxWakeNoPeek
+	if t == 0 || now >= t {
 		return true
+	}
+	if nopeek {
+		return false // een wachter zonder P: alleen zijn wektijd of een kick (HVC #4)
 	}
 	// De control-page via het ctx-blok, niet via de partitie van slot i: een
 	// secundaire core van een SMP-app heeft geen eigen partitie maar wel een
@@ -126,11 +132,21 @@ func CoreDump() string {
 	now := dev.Counter()
 	for i := 1; i <= NumSlots(); i++ {
 		core := coreOf(i)
+		_, res := residents(core)
 		if !coreRunning(core) {
+			if st := ctxState(i); st != layout.CtxEmpty || res != 0 {
+				out += fmt.Sprintf(" [core %d: parked mbox=%#x res=%d state=%d]", core, dev.Read64(layout.ParkMboxPA(core)), res, st)
+			}
 			continue
 		}
-		out += fmt.Sprintf(" [core %d: state=%d sleeps=%d wake=%+d cp=%#x]", core,
-			ctxState(i), ctxRead(i, layout.CtxSleeps), int64(ctxRead(i, layout.CtxWake))-int64(now), ctxRead(i, layout.CtxCtrlPA))
+		w := ctxRead(i, layout.CtxWake)
+		flag := ""
+		if w&layout.CtxWakeNoPeek != 0 {
+			flag = " wait"
+		}
+		out += fmt.Sprintf(" [core %d: res=%d state=%d sleeps=%d wakes=%d wake=%+d%s kick=%#x unit=%d cp=%#x]", core, res,
+			ctxState(i), ctxRead(i, layout.CtxSleeps), ctxRead(i, layout.CtxWakes), int64(w&^layout.CtxWakeNoPeek)-int64(now), flag,
+			ctxRead(i, layout.CtxKickTarget), ctxRead(i, layout.CtxUnitSlot), ctxRead(i, layout.CtxCtrlPA))
 	}
 	return out
 }

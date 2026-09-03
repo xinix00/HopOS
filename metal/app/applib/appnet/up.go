@@ -95,9 +95,19 @@ func Up(a *applib.App) (string, error) {
 		idle.RXPumpG(gp) // dit is de goroutine die de bel wekt
 		buf := make([]byte, leannet.MTU+leannet.EthernetMaximumSize)
 		d, empty := lo, 0
+		corruptLogged := false
 		for {
 			n, err := nd.Receive(buf)
 			if n == 0 || err != nil {
+				// Een dode ring is stil: ReadInto geeft niets meer, HeadPending
+				// blijft "ja". Eén regel met de reden, anders is dat een
+				// app die "gewoon niet reageert" (SMP-jacht 03-09).
+				if !corruptLogged {
+					if why := nd.rx.CorruptWhy(); why != "" {
+						a.Logf("appnet: RX ring corrupt — %s", why)
+						corruptLogged = true
+					}
+				}
 				time.Sleep(d)
 				// Niets gevonden. De eerste `hold` lege rondes blijven op lo —
 				// dát is het venster waarin het antwoord van een lopend gesprek

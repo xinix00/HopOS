@@ -312,6 +312,13 @@ const (
 	// switcher. HOP leest noch schrijft dit woord — op het niet-coherente
 	// RISC-V-hartpaar mág dat ook niet zomaar (zie de sched-blok-regels).
 	CtxWake = 464
+	// CtxWakeNoPeek: bit 63 in CtxWake — "wek me alleen op de wektijd of een
+	// kick, niet op de doorbell". Voor een M zonder P die op een semafoor
+	// wacht (idle.waitSleep): die kan met RX niets, en met de doorbell-peek
+	// keerde zijn slaap meteen terug zolang er RX lag die niemand draineerde
+	// — een livelock met de M die de mutex net losliet (QEMU 03-09). De
+	// rotatie (switch.s) en HOP's wekker (waker.go) maskeren het bit.
+	CtxWakeNoPeek = 1 << 63
 	// CtxSleeps (ARM): hoe vaak de switcher met déze bewoner als laatste
 	// ging slapen (switch.s sleep:, één tel per WFI/WFE) — in de regel van
 	// CtxWake, want die is van de switcher. De meetlat achter "slaapt de
@@ -319,6 +326,29 @@ const (
 	// alle slots (hopos.idlestat). Tientallen per seconde = slaap,
 	// miljoenen = spin.
 	CtxSleeps = 472
+	// CtxKickTarget (ARM): het MPIDR-affiniteitswoord (aff0|aff1<<8|aff2<<16)
+	// van de core die met déze bewoner als laatste yieldde — door de switcher
+	// zelf geschreven bij elke yield, in de regel van CtxWake. Het adres
+	// waarop een sibling hem wekt: HVC #4 (switch.s wake:) zoekt in de
+	// ctx-blokken van dezelfde app (zelfde CtxCtrlPA) naar dit woord, zet
+	// diens CtxWake op "nu" en stuurt op Apple de fast IPI. Zo bereikt de
+	// Go-runtime een core die op EL2 slaapt — semawakeup, preemptM en een
+	// timer op diens heap — het bare-metal-equivalent van Linux'
+	// reschedule-IPI. Eén schrijver: de switcher.
+	CtxKickTarget = 480
+	// CtxWakes (ARM): hoe vaak een sibling déze bewoner via HVC #4 wekte —
+	// de meetlat van het wekpad, naast CtxSleeps. Schrijver: de switcher van
+	// de wekkende core (in de regel van CtxWake; het wekken zelf schrijft
+	// CtxWake ook al van een andere core, dus dit is niets nieuws).
+	CtxWakes = 488
+	// CtxUnitSlot: het slot van de EENHEID waar deze bewoner bij hoort — zijn
+	// eigen slot, of voor een secundaire core van een SMP-app dat van de
+	// primaire. De switcher zet er bij resume VTTBR mee (tabel én VMID van de
+	// eenheid) en begint er de sibling-scan van HVC #4. Door HOP geschreven
+	// vóór de dispatch (armSlot/dispatchSMP), net als CtxCtrlPA; daarna
+	// alleen gelezen — in de plan-regio, buiten elke kooi, dus niet te
+	// vervalsen (de control-page zou dat wél zijn).
+	CtxUnitSlot = 496
 	// CtxRevoke: HOP's intrekking van dít slot. Niet-nul betekent "beëindig deze
 	// bewoner bij de eerste gelegenheid" — de kill-tick van cpu/mmode leest hem en
 	// gaat rechtstreeks naar teardown (CtxDead), zonder de app iets terug te geven.

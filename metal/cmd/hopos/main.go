@@ -275,6 +275,7 @@ func main() {
 		go idleStat()
 	}
 	hopnet.ForcePoll = bootParam("hopos.rxpoll") == "1"
+	slots.ForceIdleYield = bootParam("hopos.idleyield") == "1"
 	netErr := hopnet.Up()
 	// De wekker voor app-cores die op EL2 slapen (IdleYield, Cores.Kick):
 	// alleen op een board dat kan kicken, en ná de vectoren — de kick is een

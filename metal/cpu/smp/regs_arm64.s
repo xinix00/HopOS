@@ -30,3 +30,11 @@ TEXT ·readVBAR(SB),NOSPLIT,$0-8
 	WORD	$0xd538c000	// mrs x0, vbar_el1
 	MOVD	R0, ret+0(FP)
 	RET
+
+// hvcWake: HVC #4 naar de EL2-switcher van deze core — wek de sibling met
+// deze MPIDR-affiniteit (switch.s wake:). x0 = aff; de switcher geeft x0..x3
+// ongewijzigd terug.
+TEXT ·hvcWake(SB),NOSPLIT,$0-8
+	MOVD	aff+0(FP), R0
+	WORD	$0xd4000082	// hvc #4
+	RET

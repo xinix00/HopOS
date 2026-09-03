@@ -189,6 +189,8 @@ func arm(wall, base uintptr, minSlack uint64) (limit uint64, ok bool) {
 const (
 	thrashWindow  = 5 * time.Second
 	thrashStrikes = 2
+	// thrashMinCycles: zoveel GC-rondes per venster minstens, anders is het geen thrash.
+	thrashMinCycles = 20
 )
 
 // watchOnce: Arm draait twee keer (pakket-init en applib.Init/main), de
@@ -227,7 +229,13 @@ func watch(limit uint64) {
 		// CPU-kap terwijl wij sliepen. (Eerste venster: prevCycles=0, dus
 		// een limiter-melding uit de boot telt meteen mee — dat is goed,
 		// want de spiraal begint daar het vaakst.)
-		if limiterLast > 0 && limiterLast > prevCycles {
+		// Een strike = de limiter stond aan in dit venster ÉN de GC draaide
+		// er ook echt rondjes. Alleen de limiter is niet genoeg: op een
+		// SMP-app die vrijwel altijd idle is, is de niet-idle capaciteit zo
+		// klein dat een paar GC-rondes al "meer dan 50%" zijn — 5 rondes in
+		// 10 s, 1 MB live heap, en de app werd afgeschoten (QEMU 03-09).
+		// Thrash is honderden rondes per seconde, geen vijf per tien.
+		if limiterLast > 0 && limiterLast > prevCycles && cycles-prevCycles >= thrashMinCycles {
 			hot++
 		} else {
 			hot = 0

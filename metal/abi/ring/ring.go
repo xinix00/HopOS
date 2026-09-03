@@ -283,3 +283,17 @@ func (r *Ring) Corrupt() bool { return r.corrupt }
 func (r *Ring) Fits(n int) bool {
 	return recHdr+align8(uint64(n)) <= r.size/2
 }
+
+// Debug is de stand van de ring in één regel: kop, staart, maat, het
+// headerwoord op de staart en de corrupt-reden — voor een consument die
+// "pending" ziet maar niets kan lezen.
+func (r *Ring) Debug() string {
+	head, tail := r.head(), r.tail()
+	var hdr uint64
+	if head != tail && tail%r.size <= r.size-recHdr {
+		addr := r.base + dataOff + uintptr(tail%r.size)
+		dev.Pull(addr, recHdr)
+		hdr = dev.Read64(addr)
+	}
+	return fmt.Sprintf("head=%#x tail=%#x size=%#x hdr@tail=%#x corrupt=%q", head, tail, r.size, hdr, r.why)
+}

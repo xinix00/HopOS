@@ -11,6 +11,7 @@ only does your work.
 ```sh
 git clone https://github.com/usbarmory/tamago-go ~/tamago-go
 (cd ~/tamago-go/src && ./make.bash)
+tools/tamago-go/apply.sh          # onze patches op de toolchain (tools/tamago-go/README.md)
 ```
 
 ## 2. A realistic app — with networking

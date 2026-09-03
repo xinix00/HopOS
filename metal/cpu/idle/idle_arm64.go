@@ -19,6 +19,8 @@
 package idle
 
 import (
+	"runtime"
+	"sync/atomic"
 	"runtime/goos"
 
 	"github.com/xinix00/HopOS/metal/abi/layout"
@@ -189,6 +191,26 @@ func governor(pollUntil int64) {
 	// Eerst de idle-modus van het board (CtrlIdleMode): op Apple is dat de
 	// yield, en dan is alles hieronder de weg náár EL2.
 	idleMode()
+	// Een M zonder P is geen idle-core maar een wachter (runtime semasleep:
+	// een mutex-wachter, een M in stopm tijdens een stop-the-world) — dat
+	// komt alleen op een SMP-app voor. Voor hem alleen de slaap: geen
+	// doorbell, geen WakeSleeper, niets dat een P nodig heeft (zie waitSleep).
+	if _, pp := runtime.GetG(); pp == 0 {
+		waitSleep(pollUntil)
+		return
+	}
+	// Re-entrantie: de governor kan zichzelf aanroepen — WakeSleeper neemt de
+	// timer-lock, en is die bezet (de andere core), dan slaapt lock2 via
+	// semasleep → goos.Idle → hier. Dan alleen slapen; de unlocker kickt ons
+	// (semawakeup → goos.Wake). Anders: governor → WakeSleeper → lock2 →
+	// semasleep → governor → … tot de stack op is, terwijl de andere core
+	// 200 miljoen keer per twee minuten kickt (QEMU 03-09, gdb-stackwalk).
+	c := coreIndex()
+	if nested[c].Swap(true) {
+		waitSleep(pollUntil)
+		return
+	}
+	defer nested[c].Store(false)
 	// De doorbell: ligt er RX, dan is de pomp nu gewekt en is slapen precies
 	// verkeerd; ligt er niets, dan is de drempel nu gewapend en bewaakt de
 	// rotatie-peek de rest van deze slaap (zie rxdoor.go).
@@ -206,7 +228,11 @@ func governor(pollUntil int64) {
 		// dat niet zou zijn.
 		slept = hvcYield(wakeAt(pollUntil))
 	} else {
-		slept = sleeper(wakeAt(pollUntil))
+		if yieldMode.Load() {
+			slept = yieldSleep(wakeAt(pollUntil))
+		} else {
+			slept = sleeper(wakeAt(pollUntil))
+		}
 	}
 	n := ticks.Add(slept)
 	if a := pubAddr.Load(); a != 0 {
@@ -215,9 +241,37 @@ func governor(pollUntil int64) {
 	countWake()
 }
 
+// yieldMode: het board vraagt om yield-idle (layout.IdleYield). Een vlag en
+// géén func-waarde in `sleeper`: de governor draait óók op een M zonder P
+// (semasleep tijdens een stop-the-world, alleen op een SMP-app), en een
+// pointer-store draagt daar een write barrier die p.wbBuf van een nil P
+// leest — de stage-2-fault op de tweede core (QEMU 03-09: gcWriteBarrier,
+// FAR 0x2550). Een uint32 heeft geen barrier.
+var yieldMode atomic.Bool
+
 // applyIdleMode neemt de idle-modus van het board over (layout.Idle*).
-func applyIdleMode(mode uint64) {
-	if mode&layout.IdleYield != 0 {
-		sleeper = yieldSleep // idempotent: elke ronde dezelfde toewijzing
+func applyIdleMode(mode uint64) { yieldMode.Store(mode&layout.IdleYield != 0) }
+
+// waitSleep is de slaap van een M zonder P (runtime semasleep: een
+// mutex-wachter, een M in stopm tijdens een stop-the-world). Niets van de
+// governor: geen doorbell, geen WakeSleeper, geen pointer-store (een write
+// barrier leest daar p.wbBuf van een nil P — de stage-2-fault van 03-09).
+// Alleen slapen tot de wektijd of tot een sibling hem via goos.Wake kickt
+// (semawakeup) — dat is wat zo'n wachter nodig heeft. Zonder yield: de Sleeper.
+func waitSleep(deadline int64) {
+	if yieldMode.Load() {
+		hvcYield(wakeAt(deadline) | layout.CtxWakeNoPeek)
+	} else {
+		sleeper(wakeAt(deadline))
 	}
+}
+
+// nested: per core "de governor loopt al" (zie governor). Geïndexeerd op de
+// affiniteit uit MPIDR: aff0 (core in cluster) en twee bits van aff1 (het
+// cluster), zodat een app die over clusters heen spant geen slot deelt.
+var nested [64]atomic.Bool
+
+func coreIndex() int {
+	m := dev.MPIDR()
+	return int(m&0xF) | int((m>>8)&0x3)<<4
 }

@@ -33,6 +33,9 @@ func TestCtxRevokeOwnLine(t *testing.T) {
 		{"CtxResume", CtxResume, 16},
 		{"CtxRegime", CtxRegime, 19 * 8}, // ARM heeft er de meeste
 		{"CtxWake", CtxWake, 8},
+		{"CtxSleeps", CtxSleeps, 8},
+		{"CtxKickTarget", CtxKickTarget, 8},
+		{"CtxWakes", CtxWakes, 8},
 	}
 
 	rl := CtxRevoke / line

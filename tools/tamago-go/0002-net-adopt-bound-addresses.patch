@@ -1,0 +1,35 @@
+# net: een luisteraar of verbinding meldt het adres dat de implementatie
+# (net.SocketFunc, HopOS: leannet) écht koos. Een wildcard-bind (":0") krijgt
+# zijn IP en poort pas in SocketFunc; zonder deze regels rapporteert Addr/
+# LocalAddr ":0" en wijst elke URL die daaruit gebouwd wordt naar niets.
+# Toepassen: tools/tamago-go/apply.sh (of: cd ~/tamago-go && git apply <dit bestand>).
+diff --git a/src/net/net_tamago.go b/src/net/net_tamago.go
+index 8acf2d98..68a2995e 100644
+--- a/src/net/net_tamago.go
++++ b/src/net/net_tamago.go
+@@ -77,6 +77,25 @@ func socket(ctx context.Context, net string, family, sotype, proto int, _ bool,
+ 		return nil, syscall.EINVAL
+ 	}
+ 
++	// Adopt the implementation's addresses. A wildcard bind (":0") resolves to
++	// a real IP and port only inside SocketFunc; Addr and LocalAddr must report
++	// that outcome, not the request — POSIX sockets do the same via
++	// getsockname after bind. Without this, a listener on ":0" reports ":0"
++	// and every URL built from it dials nothing.
++	switch c := fd.c.(type) {
++	case Listener:
++		if a := c.Addr(); a != nil {
++			fd.laddr = a
++		}
++	case Conn:
++		if a := c.LocalAddr(); a != nil {
++			fd.laddr = a
++		}
++		if a := c.RemoteAddr(); a != nil {
++			fd.raddr = a
++		}
++	}
++
+ 	return
+ }
+ 

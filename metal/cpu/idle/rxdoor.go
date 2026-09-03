@@ -81,8 +81,20 @@ func rxDoor() bool {
 		return false
 	}
 	dev.Write64(door, 0) // ontwapenen: er wordt aan gewerkt
-	if gp := rxPumpG.Load(); gp != 0 && runtime.WakeSleeper(uint(gp)) {
+	gp := rxPumpG.Load()
+	if gp == 0 {
+		DoorNoPump.Add(1)
+		return false
+	}
+	if runtime.WakeSleeper(uint(gp)) {
+		DoorWoken.Add(1)
 		return true
 	}
+	DoorWakeFailed.Add(1)
 	return false
 }
+
+// DoorNoPump/DoorWoken/DoorWakeFailed: de meetlat van de bel — rondes zonder
+// geregistreerde pomp, gelukte en mislukte wekpogingen (WakeSleeper: mislukt =
+// de pomp sliep net niet). Een app kan ze tonen (vitals).
+var DoorNoPump, DoorWoken, DoorWakeFailed atomic.Uint64

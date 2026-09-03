@@ -55,15 +55,23 @@ TEXT el2entry(SB),NOSPLIT|NOFRAME,$0
 	// HVC-immediate (ESR.ISS, laagste 16 bits) kiest de bedoeling:
 	//   #0 = coöperatieve exit (applib zette StatusExited al)
 	//   #1 = idle-yield van de governor op een gedeelde core
+	//   #4 = wek een sibling-core van dezelfde app (zie wake:)
 	AND	$0xFFFF, R0, R3
 	CBZ	R3, exited
+	CMP	$4, R3
+	BEQ	wake
 
 yield:
-	// Idle-yield (HVC #1): bewoner = VMID; zijn contextblok = CagePA + slot<<16 + CtxOff.
+	// Idle-yield (HVC #1): de bewoner van DEZE core staat in het sched-blok
+	// (layout.SchedCurrent; HOP zet hem bij de eerste dispatch, resume/boot
+	// houden hem bij). NIET de VMID uit VTTBR: een secundaire core van een
+	// SMP-app deelt de VMID van zijn primaire, en schreef zo zijn staat in
+	// het ctx-blok van de primaire — waarna zijn eigen blok op "running"
+	// bleef staan, zijn rotatie geen levende bewoner zag en de core parkeerde
+	// (QEMU + M4, 03-09). Zijn contextblok = CagePA + slot<<16 + CtxOff;
 	// CagePA komt uit het sched-blok (SP = scratch = blok+16, dus
-	// veld-offset − 16: SchedS2PA(224) → 208).
-	WORD	$0xd53c2100	// mrs x0, vttbr_el2
-	LSR	$48, R0, R0	// x0 = slot
+	// veld-offset − 16: SchedS2PA(224) → 208, SchedCurrent(48) → 32).
+	MOVD	32(RSP), R0	// layout.SchedCurrent = slot van de bewoner
 	MOVD	208(RSP), R1	// layout.SchedS2PA
 	ADD	R0<<16, R1, R1
 	ADD	$0x6000, R1, R1	// x1 = ctx (layout.CtxOff)
@@ -91,6 +99,11 @@ yield:
 	MOVD	R3, 464(R1)
 	LDP	16(RSP), (R2, R3)	// originele x2/x3
 	STP	(R2, R3), 40(R1)
+	// Wie hier slaapt (layout.CtxKickTarget): het MPIDR-affiniteitswoord van
+	// deze core, zodat een sibling hem via HVC #4 kan aanwijzen.
+	WORD	$0xd53800a2	// mrs x2, mpidr_el1
+	AND	$0xFFFFFF, R2, R2
+	MOVD	R2, 480(R1)
 
 	// Hervat-PC = ELR_EL2 (bij een HVC wijst die al ná de hvc-instructie —
 	// geen +4 zoals bij een getrapte WFE). SPSR ernaast.
@@ -153,8 +166,7 @@ yield:
 exited:
 	// Coöperatieve exit: staat → dead (4) en meteen roteren (geen slaap —
 	// er is net een slot vrijgekomen, een boot-pending buur mag direct).
-	WORD	$0xd53c2100	// mrs x0, vttbr_el2
-	LSR	$48, R0, R0
+	MOVD	32(RSP), R0	// layout.SchedCurrent (zie yield: niet de VMID)
 	MOVD	208(RSP), R1	// layout.SchedS2PA
 	ADD	R0<<16, R1, R1
 	ADD	$0x6000, R1, R1
@@ -168,8 +180,7 @@ fault:
 	// vector-encodings inline deden, nu hier met ruimte. x2 = vectorindex.
 	// Zowel een kooi-overtreding als HOP's revoke landen hier; daarna is de
 	// bewoner dood en draait de rest van de core gewoon door.
-	WORD	$0xd53c2100	// mrs x0, vttbr_el2
-	LSR	$48, R0, R0	// x0 = slot
+	MOVD	32(RSP), R0	// layout.SchedCurrent (zie yield: niet de VMID)
 	MOVD	208(RSP), R1	// layout.SchedS2PA
 	ADD	R0<<16, R1, R1
 	ADD	$0x6000, R1, R1	// x1 = ctx-blok van de bewoner (layout.CtxOff)
@@ -249,6 +260,16 @@ scan:
 	// (hij kijkt, vindt niets, yieldt opnieuw), erna laten liggen wél.
 	MOVD	464(R1), R9	// layout.CtxWake
 	CBZ	R9, resume	// 0 = nu
+	// Bit 63 (layout.CtxWakeNoPeek): een wachter zonder P — alleen zijn
+	// wektijd telt, de doorbell hieronder niet (idle.waitSleep).
+	TBZ	$63, R9, timed
+	AND	$0x7FFFFFFFFFFFFFFF, R9, R9
+	CBZ	R9, resume
+	WORD	$0xd53be04a	// mrs x10, cntvct_el0
+	CMP	R9, R10
+	BHS	resume
+	B	notdue
+timed:
 	WORD	$0xd53be04a	// mrs x10, cntvct_el0
 	CMP	R9, R10
 	BHS	resume		// zijn tijd is gekomen
@@ -285,6 +306,7 @@ boot:
 	// (x0 = ctrl-page, spring de trampoline in), maar dan EL2→EL2 vanaf de
 	// rotatie. Staat → running vóór de sprong (HOP's bootPending-poll leest 'm).
 	MOVD	R4, 64(RSP)	// cursor bijwerken
+	MOVD	R8, 32(RSP)	// layout.SchedCurrent = deze bewoner
 	MOVD	$3, R9
 	MOVD	R9, (R1)
 	DSB	$15
@@ -294,16 +316,21 @@ boot:
 
 resume:
 	MOVD	R4, 64(RSP)	// cursor bijwerken
+	MOVD	R8, 32(RSP)	// layout.SchedCurrent = deze bewoner
 	MOVD	$3, R9		// staat → running
 	MOVD	R9, (R1)
 	DSB	$15
 
-	// VTTBR omzetten naar dít slot: L1 = CagePA + slot<<16 (l1Off = 0),
-	// VMID = slot. GEEN TLBI: entries zijn VMID-getagd, de vertalingen van
-	// beide bewoners bestaan naast elkaar — dát maakt de wissel goedkoop.
+	// VTTBR omzetten naar de EENHEID van deze bewoner (layout.CtxUnitSlot,
+	// door HOP gezet): L1 = CagePA + unit<<16 (l1Off = 0), VMID = unit. Voor
+	// een gewone bewoner is dat zijn eigen slot; een secundaire core van een
+	// SMP-app deelt tabel én VMID van zijn primaire. GEEN TLBI: entries zijn
+	// VMID-getagd, de vertalingen van beide bewoners bestaan naast elkaar —
+	// dát maakt de wissel goedkoop.
+	MOVD	496(R1), R9	// layout.CtxUnitSlot
 	MOVD	208(RSP), R2
-	ADD	R8<<16, R2, R2
-	ORR	R8<<48, R2, R2
+	ADD	R9<<16, R2, R2
+	ORR	R9<<48, R2, R2
 	WORD	$0xd51c2102	// msr vttbr_el2, x2
 
 	// EL1-sysregs terug (spiegel van de save; volgorde vrij — de ERET is
@@ -388,6 +415,70 @@ fiq:
 	ISB	$15
 	ERET
 #endif
+
+// wake: HVC #4 — de app wekt een sibling-core van zichzelf (x0 = diens
+// MPIDR-affiniteit, zoals de app hem op EL1 ziet: de trampoline zet VMPIDR
+// gelijk aan MPIDR). Dit is de reschedule-IPI van Linux in HopOS-vorm: de
+// Go-runtime (semawakeup, preemptM, een timer op andermans heap) roept
+// goos.Wake, cpu/smp maakt er deze HVC van, en hier gebeurt het wekken:
+//   - zoek in de ctx-blokken van dezelfde app (zelfde CtxCtrlPA — de
+//     eenheid, niet iets wat de app zelf kan opgeven) de core met dit
+//     affiniteitswoord (CtxKickTarget, door zijn switcher bij zijn yield
+//     geschreven);
+//   - zet diens CtxWake op "nu": de rotatie op die core hervat hem bij zijn
+//     eerstvolgende ronde (QEMU: de WFE-lus spint, dus meteen; HOP's wekker
+//     kickt hem hoe dan ook binnen een ms);
+//   - op Apple (VHE) ook meteen de fast IPI, m1n1's recept: core | cluster<<16
+//     uit aff0 | aff1<<8 — de WFI in sleep: keert dan direct terug.
+// Alleen x0..x3 zijn hier klad (scratch); x4/x5 gaan even in het GPR-vak van
+// de eigen ctx — de bewoner draait, dat vak is dood tot zijn volgende yield.
+// Geen match (de core draait al, of hoort niet bij deze app): niets doen.
+wake:
+	MOVD	32(RSP), R1	// layout.SchedCurrent (zie yield: niet de VMID)
+	MOVD	208(RSP), R2	// layout.SchedS2PA
+	ADD	R1<<16, R2, R2
+	ADD	$0x6000, R2, R2	// x2 = eigen ctx (layout.CtxOff)
+	STP	(R4, R5), 56(R2)	// x4/x5 kladden
+	MOVD	(RSP), R0	// x0 = doel (originele x0)
+	MOVD	8(R2), R1	// x1 = eigen CtxCtrlPA = de eenheid
+	// De eenheid begint bij de primaire (layout.CtxUnitSlot, door HOP
+	// gezet), niet bij de eigen slot: een secundaire moet de primaire
+	// kunnen wekken.
+	MOVD	496(R2), R4	// layout.CtxUnitSlot
+	MOVD	208(RSP), R5	// layout.SchedS2PA
+	ADD	R4<<16, R5, R4
+	ADD	$0x6000, R4, R4	// x4 = ctx_k, vanaf de primaire
+	MOVD	$8, R3		// hoogstens 8 cores per app
+wakescan:
+	MOVD	8(R4), R5
+	CMP	R1, R5		// zelfde control-page?
+	BNE	wakenext
+	MOVD	480(R4), R5	// layout.CtxKickTarget
+	CMP	R0, R5		// die core?
+	BNE	wakenext
+	MOVD	ZR, 464(R4)	// layout.CtxWake = nu
+	MOVD	488(R4), R5	// layout.CtxWakes: geteld, voor de meetlat
+	ADD	$1, R5, R5
+	MOVD	R5, 488(R4)
+	DSB	$15
+#ifdef VHE
+	AND	$0xFF, R0, R5	// core = aff0
+	LSR	$8, R0, R4
+	AND	$0xFF, R4, R4	// cluster = aff1
+	ORR	R4<<16, R5, R5
+	WORD	$0xd51df025	// msr s3_5_c15_c0_1, x5 (IPI_RR_GLOBAL_EL1)
+#endif
+	B	wakedone
+wakenext:
+	ADD	$0x10000, R4, R4	// volgende slot (layout.CageStride)
+	SUBS	$1, R3, R3
+	BNE	wakescan
+wakedone:
+	LDP	56(R2), (R4, R5)
+	LDP	(RSP), (R0, R1)
+	LDP	16(RSP), (R2, R3)
+	ISB	$15
+	ERET
 
 // el2entryEnd markeert het einde van el2entry: de blob [el2entry, el2entryEnd)
 // wordt door kern/stage2 naar de plan-regio gekopieerd (docs/kern-flip.md) —
