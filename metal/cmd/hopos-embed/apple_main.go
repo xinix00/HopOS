@@ -22,8 +22,8 @@ import (
 	"fmt"
 	"runtime"
 
-	_ "github.com/xinix00/HopOS/metal/board/apple/hop" // registreert het board (init)
-	"github.com/xinix00/HopOS/metal/cpu/memlimit"
+	_ "github.com/xinix00/HopOS/metal/v2/board/apple/hop" // registreert het board (init)
+	"github.com/xinix00/HopOS/metal/v2/cpu/memlimit"
 )
 
 // Dezelfde canonieke app als op QEMU, de Pi's en de Radxa (slot-1-IPA

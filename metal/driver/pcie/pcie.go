@@ -9,7 +9,7 @@ package pcie
 import (
 	"fmt"
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // Window is het ECAM- en MMIO-adresplan waarin gescand en toegewezen wordt.

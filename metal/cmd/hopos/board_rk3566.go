@@ -14,8 +14,8 @@ import (
 	"time"
 	_ "unsafe"
 
-	"github.com/xinix00/HopOS/metal/board/rk3566"
-	rk3566hop "github.com/xinix00/HopOS/metal/board/rk3566/hop" // registreert het board (init)
+	"github.com/xinix00/HopOS/metal/v2/board/rk3566"
+	rk3566hop "github.com/xinix00/HopOS/metal/v2/board/rk3566/hop" // registreert het board (init)
 )
 
 // De RAM-declaratie van de HOP-kern: het venster uit het PA-plan

@@ -15,9 +15,9 @@ package main
 import (
 	"fmt"
 
-	"github.com/xinix00/HopOS/metal/board/rk3566"
-	"github.com/xinix00/HopOS/metal/gui/driver/usb/dwc3"
-	"github.com/xinix00/HopOS/metal/gui/usbin"
+	"github.com/xinix00/HopOS/metal/v2/board/rk3566"
+	"github.com/xinix00/HopOS/metal/v2/gui/driver/usb/dwc3"
+	"github.com/xinix00/HopOS/metal/v2/gui/usbin"
 )
 
 func init() {

@@ -7,7 +7,7 @@ import (
 	"math/bits"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // Dit bestand is de weg van "er hangt iets aan poort 3" naar "dit is een

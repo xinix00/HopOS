@@ -48,10 +48,10 @@ import (
 	"time"
 	_ "unsafe" // voor go:linkname
 
-	"github.com/xinix00/HopOS/metal/board/rk3566"
-	"github.com/xinix00/HopOS/metal/cpu/psci"
-	"github.com/xinix00/HopOS/metal/dev"
-	"github.com/xinix00/HopOS/metal/fw/fdt"
+	"github.com/xinix00/HopOS/metal/v2/board/rk3566"
+	"github.com/xinix00/HopOS/metal/v2/cpu/psci"
+	"github.com/xinix00/HopOS/metal/v2/dev"
+	"github.com/xinix00/HopOS/metal/v2/fw/fdt"
 )
 
 // GICD van de GIC-600 (rk3566.dtsi) — alleen voor de TYPER-read hieronder;

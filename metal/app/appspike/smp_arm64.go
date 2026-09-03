@@ -14,9 +14,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/app/applib"
-	"github.com/xinix00/HopOS/metal/board/hopslot"
-	"github.com/xinix00/HopOS/metal/cpu/psci"
+	"github.com/xinix00/HopOS/metal/v2/app/applib"
+	"github.com/xinix00/HopOS/metal/v2/board/hopslot"
+	"github.com/xinix00/HopOS/metal/v2/cpu/psci"
 )
 
 // firmwareProbe is isolatietest 2: praat bewust met de firmware. Een app heeft

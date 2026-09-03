@@ -3,7 +3,7 @@ package rk3566
 import (
 	"time"
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // De temperatuursensor (TSADC) van de RK3566. Twee kanalen: 0 = CPU, 1 = GPU.

@@ -3,7 +3,7 @@ package hop
 import (
 	"time"
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // De SoC-glue van het ethernet: klokgates en de interne 100M-ePHY. Dit is

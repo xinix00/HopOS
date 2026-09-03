@@ -24,8 +24,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/abi/ring"
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/abi/ring"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 const txBackpressure = 10 * time.Millisecond

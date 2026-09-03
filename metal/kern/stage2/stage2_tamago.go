@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"unsafe"
 
-	"github.com/xinix00/HopOS/metal/abi/checksum"
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/cpu/el2"
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/abi/checksum"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/cpu/el2"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // hvcRevoke doet HVC #0 vanuit EL1 → de revoke-vector op EL2 (TLBI ALLE1IS).

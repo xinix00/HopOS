@@ -45,7 +45,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/board"
+	"github.com/xinix00/HopOS/metal/v2/board"
 )
 
 // wdHardware is de hardware-helft die een board in zijn init() aanlevert.

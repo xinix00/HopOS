@@ -27,10 +27,10 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/kern/kernflip"
-	"github.com/xinix00/HopOS/metal/kern/slots"
-	"github.com/xinix00/HopOS/metal/net/hopswitch"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/kern/kernflip"
+	"github.com/xinix00/HopOS/metal/v2/kern/slots"
+	"github.com/xinix00/HopOS/metal/v2/net/hopswitch"
 )
 
 // flipMode/flipURL komen als -X binnen (image/qemu-run.sh flip); leeg = deze

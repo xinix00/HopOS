@@ -18,7 +18,7 @@ import (
 	"sync/atomic"
 	_ "unsafe" // voor go:linkname naar runtime.nanotime
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // Sleeper is HET slaap-primitief van een core, op beide architecturen en voor

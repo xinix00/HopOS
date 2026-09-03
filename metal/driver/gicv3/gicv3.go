@@ -17,8 +17,8 @@ package gicv3
 import (
 	"github.com/usbarmory/tamago/arm64/gic"
 
-	"github.com/xinix00/HopOS/metal/cpu/irq"
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/cpu/irq"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 const (

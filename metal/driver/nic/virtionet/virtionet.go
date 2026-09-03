@@ -13,7 +13,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // MMIO-registeroffsets (virtio-mmio, versie 2).

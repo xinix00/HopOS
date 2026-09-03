@@ -10,15 +10,15 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/xinix00/HopOS/metal/net/netdev"
+	"github.com/xinix00/HopOS/metal/v2/net/netdev"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/board"
-	"github.com/xinix00/HopOS/metal/board/qemuvirt"
-	"github.com/xinix00/HopOS/metal/cpu/psci"
-	"github.com/xinix00/HopOS/metal/driver/fb"
-	"github.com/xinix00/HopOS/metal/driver/nic/virtionet"
-	"github.com/xinix00/HopOS/metal/driver/pcie"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/board"
+	"github.com/xinix00/HopOS/metal/v2/board/qemuvirt"
+	"github.com/xinix00/HopOS/metal/v2/cpu/psci"
+	"github.com/xinix00/HopOS/metal/v2/driver/fb"
+	"github.com/xinix00/HopOS/metal/v2/driver/nic/virtionet"
+	"github.com/xinix00/HopOS/metal/v2/driver/pcie"
 )
 
 // machine is de board-implementatie voor de QEMU -M virt arm64-machine.

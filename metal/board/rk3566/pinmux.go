@@ -1,6 +1,6 @@
 package rk3566
 
-import "github.com/xinix00/HopOS/metal/dev"
+import "github.com/xinix00/HopOS/metal/v2/dev"
 
 // Pinmux voor het GMAC1. U-Boot laat dit liggen (hij meldt zelf "No ethernet
 // found", dus zijn ethernet-driver komt nooit aan de pinnen), dus moeten wij de

@@ -18,8 +18,8 @@
 package fb
 
 import (
-	"github.com/xinix00/HopOS/metal/cpu/memattr"
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/cpu/memattr"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // Desc beschrijft een firmware-framebuffer: het lineaire adres + geometrie.

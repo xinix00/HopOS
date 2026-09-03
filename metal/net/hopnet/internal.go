@@ -18,7 +18,7 @@ package hopnet
 import (
 	"fmt"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 )
 
 // upInternal registreert de gateway-naad op de switch. Aanroepen ná

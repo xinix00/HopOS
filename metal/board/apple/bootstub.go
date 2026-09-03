@@ -2,7 +2,7 @@
 
 package apple
 
-import "github.com/xinix00/HopOS/metal/dev"
+import "github.com/xinix00/HopOS/metal/v2/dev"
 
 // De indeling van de eerste bladzijde van het platte image staat in bootstub.s
 // (waar de stubs hem gebruiken) en in image/mkkernel/apple.go (waar hij gelegd

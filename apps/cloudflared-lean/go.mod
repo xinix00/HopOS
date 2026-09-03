@@ -10,14 +10,14 @@ module github.com/xinix00/HopOS/apps/cloudflared-lean
 go 1.26.4
 
 require (
-	github.com/xinix00/HopOS/metal v2.0.0
+	github.com/xinix00/HopOS/metal/v2 v2.0.0
 	github.com/xinix00/lean v0.99.0
 	golang.org/x/net v0.58.0
 )
 
 require github.com/usbarmory/tamago v1.26.4 // indirect
 
-replace github.com/xinix00/HopOS/metal => ../../metal
+replace github.com/xinix00/HopOS/metal/v2 => ../../metal
 
 // Tot lean's volgende release: leanh2 is hier vandaan verhuisd (h2 + HPACK,
 // één pakket volgens lean's derde regel).

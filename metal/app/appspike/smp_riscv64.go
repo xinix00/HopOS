@@ -18,7 +18,7 @@ package main
 //   - smpBench: één app op meerdere harts loopt op deze boards niet (er is één
 //     app-hart), en zonder een core-onderscheider is er niets te bewijzen.
 
-import "github.com/xinix00/HopOS/metal/app/applib"
+import "github.com/xinix00/HopOS/metal/v2/app/applib"
 
 func firmwareProbe(app *applib.App) {
 	exitf(app, 1, "PROBE=smc: not applicable on riscv64 -- a cage runs in M-mode here, "+

@@ -3,7 +3,7 @@ package hopslot
 import (
 	_ "unsafe" // voor go:linkname
 
-	"github.com/xinix00/HopOS/metal/board/appboard"
+	"github.com/xinix00/HopOS/metal/v2/board/appboard"
 )
 
 // printk: een gekooide core heeft geen UART-MMIO in zijn kooi (een poke zou

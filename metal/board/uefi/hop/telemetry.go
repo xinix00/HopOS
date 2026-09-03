@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/board/uefi"
-	"github.com/xinix00/HopOS/metal/driver/smpro"
+	"github.com/xinix00/HopOS/metal/v2/board/uefi"
+	"github.com/xinix00/HopOS/metal/v2/driver/smpro"
 )
 
 // telemetr is het log-interval — zelfde cadans als de dvfs-telemetrie op de

@@ -10,8 +10,8 @@
 package main
 
 import (
-	"github.com/xinix00/HopOS/metal/gui/fbgrant"
-	"github.com/xinix00/HopOS/metal/kern/slots"
+	"github.com/xinix00/HopOS/metal/v2/gui/fbgrant"
+	"github.com/xinix00/HopOS/metal/v2/kern/slots"
 )
 
 func init() {

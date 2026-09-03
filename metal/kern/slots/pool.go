@@ -29,7 +29,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 )
 
 // ErrPoolSize markeert een sharegroup-spec die niet bij de bestaande groep past.

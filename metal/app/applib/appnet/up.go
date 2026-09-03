@@ -20,10 +20,10 @@ import (
 
 	"github.com/xinix00/lean/leannet"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/abi/ring"
-	"github.com/xinix00/HopOS/metal/app/applib"
-	"github.com/xinix00/HopOS/metal/cpu/idle"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/abi/ring"
+	"github.com/xinix00/HopOS/metal/v2/app/applib"
+	"github.com/xinix00/HopOS/metal/v2/cpu/idle"
 )
 
 // Up brengt de eigen netstack op en hangt hem in Go's net-package; geeft het

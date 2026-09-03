@@ -1,4 +1,4 @@
-module github.com/xinix00/HopOS/metal
+module github.com/xinix00/HopOS/metal/v2
 
 go 1.26.4
 

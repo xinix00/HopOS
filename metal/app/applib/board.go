@@ -7,4 +7,4 @@ package applib
 // meer te linken, dus een app-binary draait ongewijzigd op QEMU, de Pi's en
 // de Altra. Build-tags (rpi4/rpi5/uefi) doen voor app-images niets meer; ze
 // bestaan alleen nog voor HOP-binaries (die linken drivers).
-import _ "github.com/xinix00/HopOS/metal/board/hopslot"
+import _ "github.com/xinix00/HopOS/metal/v2/board/hopslot"

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // De PCIe-kant van dit board: wat m1n1 op t8132 niet doet, en wat op elk ander

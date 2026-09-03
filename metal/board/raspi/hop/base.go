@@ -12,15 +12,15 @@
 package hop
 
 import (
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/board"
-	"github.com/xinix00/HopOS/metal/board/raspi"
-	"github.com/xinix00/HopOS/metal/board/raspi/vcfb"
-	"github.com/xinix00/HopOS/metal/cpu/psci"
-	"github.com/xinix00/HopOS/metal/driver/fb"
-	"github.com/xinix00/HopOS/metal/driver/pcie"
-	"github.com/xinix00/HopOS/metal/driver/vcmail"
-	"github.com/xinix00/HopOS/metal/fw/fdt"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/board"
+	"github.com/xinix00/HopOS/metal/v2/board/raspi"
+	"github.com/xinix00/HopOS/metal/v2/board/raspi/vcfb"
+	"github.com/xinix00/HopOS/metal/v2/cpu/psci"
+	"github.com/xinix00/HopOS/metal/v2/driver/fb"
+	"github.com/xinix00/HopOS/metal/v2/driver/pcie"
+	"github.com/xinix00/HopOS/metal/v2/driver/vcmail"
+	"github.com/xinix00/HopOS/metal/v2/fw/fdt"
 	"github.com/xinix00/lean/leandhcp"
 )
 

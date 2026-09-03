@@ -26,12 +26,12 @@ import (
 	"time"
 	_ "unsafe" // go:linkname (RAM-declaratie)
 
-	"github.com/xinix00/HopOS/metal/board/uefi"
-	_ "github.com/xinix00/HopOS/metal/board/uefi/hop" // board.Board-registratie (board.Current in de probe)
-	"github.com/xinix00/HopOS/metal/cpu/psci"
-	"github.com/xinix00/HopOS/metal/cpu/trng"
-	"github.com/xinix00/HopOS/metal/driver/nic/igb"
-	"github.com/xinix00/HopOS/metal/driver/pcie"
+	"github.com/xinix00/HopOS/metal/v2/board/uefi"
+	_ "github.com/xinix00/HopOS/metal/v2/board/uefi/hop" // board.Board-registratie (board.Current in de probe)
+	"github.com/xinix00/HopOS/metal/v2/cpu/psci"
+	"github.com/xinix00/HopOS/metal/v2/cpu/trng"
+	"github.com/xinix00/HopOS/metal/v2/driver/nic/igb"
+	"github.com/xinix00/HopOS/metal/v2/driver/pcie"
 	"github.com/xinix00/lean/leandhcp"
 )
 

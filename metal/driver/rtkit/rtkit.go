@@ -23,7 +23,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // De mailbox (m1n1 src/asc.c), relatief aan de ASC-basis; het CPU-controlwoord

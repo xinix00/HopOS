@@ -5,7 +5,7 @@ package usbin
 import (
 	"testing"
 
-	"github.com/xinix00/HopOS/metal/gui/driver/usb/hid"
+	"github.com/xinix00/HopOS/metal/v2/gui/driver/usb/hid"
 )
 
 func TestForgetControllerReleasesInputAndInvalidatesAllHandles(t *testing.T) {

@@ -21,15 +21,15 @@ import (
 	"net"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/net/netdev"
+	"github.com/xinix00/HopOS/metal/v2/net/netdev"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/board"
-	"github.com/xinix00/HopOS/metal/board/raspi"
-	raspihop "github.com/xinix00/HopOS/metal/board/raspi/hop"
-	"github.com/xinix00/HopOS/metal/board/rpi5"
-	"github.com/xinix00/HopOS/metal/driver/brcmpcie"
-	"github.com/xinix00/HopOS/metal/driver/nic/gem"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/board"
+	"github.com/xinix00/HopOS/metal/v2/board/raspi"
+	raspihop "github.com/xinix00/HopOS/metal/v2/board/raspi/hop"
+	"github.com/xinix00/HopOS/metal/v2/board/rpi5"
+	"github.com/xinix00/HopOS/metal/v2/driver/brcmpcie"
+	"github.com/xinix00/HopOS/metal/v2/driver/nic/gem"
 	"github.com/xinix00/lean/leandhcp"
 )
 

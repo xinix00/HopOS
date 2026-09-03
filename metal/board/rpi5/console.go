@@ -3,7 +3,7 @@ package rpi5
 import (
 	_ "unsafe" // voor go:linkname
 
-	"github.com/xinix00/HopOS/metal/board/raspi"
+	"github.com/xinix00/HopOS/metal/v2/board/raspi"
 )
 
 // printk stuurt één byte naar de debug-PL011 (de 3-pins JST-SH-connector;

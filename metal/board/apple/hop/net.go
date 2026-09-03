@@ -14,11 +14,11 @@ import (
 	"net"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/board"
-	"github.com/xinix00/HopOS/metal/board/apple"
-	"github.com/xinix00/HopOS/metal/driver/nic/tg3"
-	"github.com/xinix00/HopOS/metal/driver/pcie"
-	"github.com/xinix00/HopOS/metal/net/netdev"
+	"github.com/xinix00/HopOS/metal/v2/board"
+	"github.com/xinix00/HopOS/metal/v2/board/apple"
+	"github.com/xinix00/HopOS/metal/v2/driver/nic/tg3"
+	"github.com/xinix00/HopOS/metal/v2/driver/pcie"
+	"github.com/xinix00/HopOS/metal/v2/net/netdev"
 	"github.com/xinix00/lean/leandhcp"
 )
 

@@ -15,8 +15,8 @@ package kernflip
 import (
 	"fmt"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // stageTag ("FLIP" in de bovenste 32 bits) scheidt een echte stap van rommel.

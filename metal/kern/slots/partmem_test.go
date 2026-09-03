@@ -3,7 +3,7 @@ package slots
 import (
 	"testing"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 )
 
 // Best-fit, en waarom het een test verdient: hoog-eerst koos niet tussen twee

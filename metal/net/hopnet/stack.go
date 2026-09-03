@@ -20,7 +20,7 @@ import (
 
 	"github.com/xinix00/lean/leannet"
 
-	"github.com/xinix00/HopOS/metal/board"
+	"github.com/xinix00/HopOS/metal/v2/board"
 )
 
 //go:linkname ramSize runtime/goos.RamSize

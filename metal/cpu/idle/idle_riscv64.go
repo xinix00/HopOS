@@ -33,7 +33,7 @@ import (
 	"runtime/goos"
 	"sync/atomic"
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // ecallYield/exitTrap/counterNow: zie idle_riscv64.s.

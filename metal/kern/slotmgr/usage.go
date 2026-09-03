@@ -39,9 +39,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/cpu/idle"
-	"github.com/xinix00/HopOS/metal/kern/slots"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/cpu/idle"
+	"github.com/xinix00/HopOS/metal/v2/kern/slots"
 )
 
 const usageSample = 5 * time.Second

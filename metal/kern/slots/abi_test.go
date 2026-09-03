@@ -3,7 +3,7 @@ package slots
 import (
 	"testing"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 )
 
 // Het control-blok uit de systeempot draagt control page, bootstrap-ringen,

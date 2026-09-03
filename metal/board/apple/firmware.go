@@ -18,8 +18,8 @@
 package apple
 
 import (
-	"github.com/xinix00/HopOS/metal/driver/fb"
-	"github.com/xinix00/HopOS/metal/fw/xnuboot"
+	"github.com/xinix00/HopOS/metal/v2/driver/fb"
+	"github.com/xinix00/HopOS/metal/v2/fw/xnuboot"
 )
 
 var (

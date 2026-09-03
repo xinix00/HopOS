@@ -4,8 +4,8 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"github.com/xinix00/HopOS/metal/kern/slots"
-	"github.com/xinix00/HopOS/metal/net/hopswitch"
+	"github.com/xinix00/HopOS/metal/v2/kern/slots"
+	"github.com/xinix00/HopOS/metal/v2/net/hopswitch"
 )
 
 // Het handoff-blob is het enige dat een kern-flip van de vorige kern erft

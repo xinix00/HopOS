@@ -13,11 +13,11 @@ import (
 	"net"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/net/netdev"
+	"github.com/xinix00/HopOS/metal/v2/net/netdev"
 
-	"github.com/xinix00/HopOS/metal/board/appboard"
-	"github.com/xinix00/HopOS/metal/driver/fb"
-	"github.com/xinix00/HopOS/metal/driver/pcie"
+	"github.com/xinix00/HopOS/metal/v2/board/appboard"
+	"github.com/xinix00/HopOS/metal/v2/driver/fb"
+	"github.com/xinix00/HopOS/metal/v2/driver/pcie"
 	"github.com/xinix00/lean/leandhcp"
 )
 

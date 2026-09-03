@@ -5,8 +5,8 @@ package hopslot
 import (
 	_ "unsafe" // voor go:linkname
 
-	"github.com/xinix00/HopOS/metal/cpu/drbg"
-	"github.com/xinix00/HopOS/metal/cpu/trng"
+	"github.com/xinix00/HopOS/metal/v2/cpu/drbg"
+	"github.com/xinix00/HopOS/metal/v2/cpu/trng"
 )
 
 // De gedeelde SHA-256-DRBG (metal/cpu/drbg), MMIO-vrij en dus

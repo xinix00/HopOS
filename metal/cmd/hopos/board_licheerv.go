@@ -13,10 +13,10 @@ import (
 	"time"
 	_ "unsafe"
 
-	"github.com/xinix00/HopOS/metal/board/licheerv"
-	licheervhop "github.com/xinix00/HopOS/metal/board/licheerv/hop" // registreert het board (init) + basis-hooks
-	"github.com/xinix00/HopOS/metal/cmd/hopos/cfgblob"
-	"github.com/xinix00/HopOS/metal/fw/bootcfg"
+	"github.com/xinix00/HopOS/metal/v2/board/licheerv"
+	licheervhop "github.com/xinix00/HopOS/metal/v2/board/licheerv/hop" // registreert het board (init) + basis-hooks
+	"github.com/xinix00/HopOS/metal/v2/cmd/hopos/cfgblob"
+	"github.com/xinix00/HopOS/metal/v2/fw/bootcfg"
 )
 
 // De platform-config komt op dit board uit het image zelf. Elders komt hij van

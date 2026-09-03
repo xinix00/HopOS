@@ -5,7 +5,7 @@ package main
 import (
 	_ "unsafe"
 
-	"github.com/xinix00/HopOS/metal/board/apple"
+	"github.com/xinix00/HopOS/metal/v2/board/apple"
 )
 
 // De RAM-declaratie van de HOP-kern op Apple: hetzelfde venster als de agent

@@ -22,10 +22,10 @@ import (
 	"encoding/binary"
 	"sync"
 
-	"github.com/xinix00/HopOS/metal/net/netdev"
+	"github.com/xinix00/HopOS/metal/v2/net/netdev"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/net/hopswitch"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/net/hopswitch"
 )
 
 // locQueueMax begrenst de lokale wachtrij: dit is node-intern verkeer

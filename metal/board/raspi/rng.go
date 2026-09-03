@@ -4,7 +4,7 @@ import (
 	"sync"
 	_ "unsafe" // voor go:linkname
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // Hardware-entropie voor de Pi 4/5: de Broadcom RNG200 (iproc-rng200), het

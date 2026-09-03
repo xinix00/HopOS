@@ -7,7 +7,7 @@ import (
 
 	"github.com/xinix00/lean/leannet"
 
-	"github.com/xinix00/HopOS/metal/abi/ring"
+	"github.com/xinix00/HopOS/metal/v2/abi/ring"
 )
 
 type discardDevice struct{}

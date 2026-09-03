@@ -17,8 +17,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // hostCore koppelt een slot aan zijn fysieke core (0 = eigen core: slot i

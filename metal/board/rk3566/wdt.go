@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // De hardware-watchdog van de RK3566: een standaard Synopsys DesignWare WDT.

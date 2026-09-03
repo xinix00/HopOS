@@ -14,7 +14,7 @@
 // meldt (`sart-version = 3`, node sart-ans@85C50000).
 package apple
 
-import "github.com/xinix00/HopOS/metal/dev"
+import "github.com/xinix00/HopOS/metal/v2/dev"
 
 const (
 	sartConfig  = 0x00 // + 4*index: vlaggen (0 = leeg)

@@ -15,7 +15,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // wdRefresh onthoudt het refresh-frame zodat WatchdogPet de teller herstart.

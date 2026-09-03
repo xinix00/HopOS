@@ -10,9 +10,9 @@ import (
 	"net/netip"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/net/netdev"
+	"github.com/xinix00/HopOS/metal/v2/net/netdev"
 
-	"github.com/xinix00/HopOS/metal/board"
+	"github.com/xinix00/HopOS/metal/v2/board"
 	"github.com/xinix00/lean/leannet"
 )
 

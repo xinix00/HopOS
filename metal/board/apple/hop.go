@@ -12,7 +12,7 @@
 // in plaats van PSCI.
 package apple
 
-import "github.com/xinix00/HopOS/metal/dev"
+import "github.com/xinix00/HopOS/metal/v2/dev"
 
 var (
 	selfCPU = -2 // -2 = nog niet bepaald, -1 = onbekend

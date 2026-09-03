@@ -22,8 +22,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/dev"
-	"github.com/xinix00/HopOS/metal/fw/adt"
+	"github.com/xinix00/HopOS/metal/v2/dev"
+	"github.com/xinix00/HopOS/metal/v2/fw/adt"
 )
 
 const (

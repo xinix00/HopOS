@@ -13,8 +13,8 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/xinix00/HopOS/metal/kern/slots"
-	"github.com/xinix00/HopOS/metal/net/hopswitch"
+	"github.com/xinix00/HopOS/metal/v2/kern/slots"
+	"github.com/xinix00/HopOS/metal/v2/net/hopswitch"
 )
 
 // handMagic spelt "HOPHAND1" (little-endian).

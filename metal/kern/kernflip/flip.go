@@ -10,12 +10,12 @@ import (
 
 	"github.com/xinix00/lean/leanelf"
 
-	"github.com/xinix00/HopOS/metal/abi/checksum"
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/abi/place"
-	"github.com/xinix00/HopOS/metal/dev"
-	"github.com/xinix00/HopOS/metal/kern/slots"
-	"github.com/xinix00/HopOS/metal/net/hopswitch"
+	"github.com/xinix00/HopOS/metal/v2/abi/checksum"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/abi/place"
+	"github.com/xinix00/HopOS/metal/v2/dev"
+	"github.com/xinix00/HopOS/metal/v2/kern/slots"
+	"github.com/xinix00/HopOS/metal/v2/net/hopswitch"
 )
 
 // FlipFromURL haalt een flip-bundel op, controleert zijn SHA-256 tegen wat de

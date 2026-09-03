@@ -11,7 +11,7 @@
 // de échte RAM-grootte. Deze mini meldt revisie 3.
 package xnuboot
 
-import "github.com/xinix00/HopOS/metal/dev"
+import "github.com/xinix00/HopOS/metal/v2/dev"
 
 // Vaste offsets in het blok (natuurlijke uitlijning, arm64).
 const (

@@ -3,7 +3,7 @@ package slots
 import (
 	"testing"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 )
 
 // partAdopt claimt een BESTAANDE partitie voor een geadopteerd slot (de

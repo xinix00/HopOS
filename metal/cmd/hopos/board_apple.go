@@ -15,9 +15,9 @@ import (
 	"fmt"
 	_ "unsafe"
 
-	"github.com/xinix00/HopOS/metal/board/apple"
-	_ "github.com/xinix00/HopOS/metal/board/apple/hop" // registreert het board (init)
-	"github.com/xinix00/HopOS/metal/cmd/hopos/cfgblob"
+	"github.com/xinix00/HopOS/metal/v2/board/apple"
+	_ "github.com/xinix00/HopOS/metal/v2/board/apple/hop" // registreert het board (init)
+	"github.com/xinix00/HopOS/metal/v2/cmd/hopos/cfgblob"
 )
 
 // De RAM-declaratie van de HOP-kern: 256MB vanaf apple.RamBase (1TiB + 4GB).

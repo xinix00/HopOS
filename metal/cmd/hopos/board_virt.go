@@ -8,9 +8,9 @@ package main
 import (
 	_ "unsafe"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	_ "github.com/xinix00/HopOS/metal/board/qemuvirt/hop" // registreert het board (init) + basis-hooks
-	"github.com/xinix00/HopOS/metal/fw/bootcfg"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	_ "github.com/xinix00/HopOS/metal/v2/board/qemuvirt/hop" // registreert het board (init) + basis-hooks
+	"github.com/xinix00/HopOS/metal/v2/fw/bootcfg"
 )
 
 // QEMU-virt heeft geen bootmedium en dus geen platform-config: bootParamAll

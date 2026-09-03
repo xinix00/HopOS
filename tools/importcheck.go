@@ -21,7 +21,7 @@ import (
 	"strings"
 )
 
-const module = "github.com/xinix00/HopOS/metal/"
+const module = "github.com/xinix00/HopOS/metal/v2/"
 
 // category bepaalt de regelgroep van een package-pad (relatief aan metal/).
 func category(pkg string) string {

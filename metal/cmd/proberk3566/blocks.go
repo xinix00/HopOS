@@ -3,10 +3,10 @@ package main
 import (
 	"fmt"
 
-	"github.com/xinix00/HopOS/metal/board/rk3566"
-	"github.com/xinix00/HopOS/metal/cpu/memattr"
-	"github.com/xinix00/HopOS/metal/dev"
-	"github.com/xinix00/HopOS/metal/gui/driver/rkscan"
+	"github.com/xinix00/HopOS/metal/v2/board/rk3566"
+	"github.com/xinix00/HopOS/metal/v2/cpu/memattr"
+	"github.com/xinix00/HopOS/metal/v2/dev"
+	"github.com/xinix00/HopOS/metal/v2/gui/driver/rkscan"
 )
 
 // probeBlocks meet de drie kleine randblokken die de agent-fase nodig heeft:

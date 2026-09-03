@@ -3,8 +3,8 @@ package qemuvirt
 import (
 	_ "unsafe" // voor go:linkname
 
-	"github.com/xinix00/HopOS/metal/driver/conlog"
-	"github.com/xinix00/HopOS/metal/driver/pl011"
+	"github.com/xinix00/HopOS/metal/v2/driver/conlog"
+	"github.com/xinix00/HopOS/metal/v2/driver/pl011"
 )
 
 // printk stuurt één byte naar de PL011 en spiegelt naar de fb-log-console als

@@ -22,7 +22,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // Mailbox-registers (relatief aan Base) en statusbits.

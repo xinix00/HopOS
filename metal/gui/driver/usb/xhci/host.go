@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // Dit bestand brengt de controller van "gereset" naar "draaiend": de

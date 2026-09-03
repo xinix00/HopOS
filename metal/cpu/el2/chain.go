@@ -5,7 +5,7 @@ package el2
 import (
 	"runtime"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 )
 
 // chainload is de sprong zelf (chain_arm64.s): DAIF dicht, MMU/caches uit

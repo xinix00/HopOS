@@ -20,8 +20,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/xinix00/HopOS/metal/abi/hopabi"
-	"github.com/xinix00/HopOS/metal/kern/hopfs"
+	"github.com/xinix00/HopOS/metal/v2/abi/hopabi"
+	"github.com/xinix00/HopOS/metal/v2/kern/hopfs"
 )
 
 // errDenied markeert een pad buiten het zicht van de task.

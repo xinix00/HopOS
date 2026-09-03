@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 )
 
 // withFakeGrant hangt een provider op die alleen telt, en zet de echte terug.

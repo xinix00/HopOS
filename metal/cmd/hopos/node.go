@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/board"
-	"github.com/xinix00/HopOS/metal/cpu/idle"
-	"github.com/xinix00/HopOS/metal/cpu/irq"
-	"github.com/xinix00/HopOS/metal/kern/slots"
-	"github.com/xinix00/HopOS/metal/net/hopnet"
+	"github.com/xinix00/HopOS/metal/v2/board"
+	"github.com/xinix00/HopOS/metal/v2/cpu/idle"
+	"github.com/xinix00/HopOS/metal/v2/cpu/irq"
+	"github.com/xinix00/HopOS/metal/v2/kern/slots"
+	"github.com/xinix00/HopOS/metal/v2/net/hopnet"
 )
 
 // Wat de agent-main over zijn eigen cores moet weten, arch-neutraal: hoe HOP

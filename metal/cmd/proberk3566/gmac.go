@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/board/rk3566"
-	"github.com/xinix00/HopOS/metal/driver/nic/dwmac4"
+	"github.com/xinix00/HopOS/metal/v2/board/rk3566"
+	"github.com/xinix00/HopOS/metal/v2/driver/nic/dwmac4"
 )
 
 // probeGMAC is trede 3a van de bring-up: alles onder de MAC bewijzen in ÉÉN

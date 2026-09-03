@@ -13,9 +13,9 @@ import (
 	"time"
 	_ "unsafe" // go:linkname (RAM-declaratie)
 
-	"github.com/xinix00/HopOS/metal/board/raspi"
-	"github.com/xinix00/HopOS/metal/driver/dvfs"
-	"github.com/xinix00/HopOS/metal/kern/slots"
+	"github.com/xinix00/HopOS/metal/v2/board/raspi"
+	"github.com/xinix00/HopOS/metal/v2/driver/dvfs"
+	"github.com/xinix00/HopOS/metal/v2/kern/slots"
 )
 
 // RAM-declaratie: raw load op 0x80000, 128MB HOP-kern (mem_rpi*). Gelijk op

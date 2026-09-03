@@ -3,8 +3,8 @@ package rk3566
 import (
 	_ "unsafe" // voor go:linkname
 
-	"github.com/xinix00/HopOS/metal/dev"
-	"github.com/xinix00/HopOS/metal/driver/conlog"
+	"github.com/xinix00/HopOS/metal/v2/dev"
+	"github.com/xinix00/HopOS/metal/v2/driver/conlog"
 )
 
 // DW APB UART (16550-compatibel, reg-shift=2 → registers op 4-byte stride) —

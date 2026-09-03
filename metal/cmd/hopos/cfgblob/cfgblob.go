@@ -19,7 +19,7 @@
 // blijft dit de terugval.
 package cfgblob
 
-import "github.com/xinix00/HopOS/metal/fw/bootcfg"
+import "github.com/xinix00/HopOS/metal/v2/fw/bootcfg"
 
 // Text is de ingebakken config in het gewone hopos.cfg-formaat (key=value per
 // regel, #-regels zijn commentaar). Leeg = geen ingebakken config.

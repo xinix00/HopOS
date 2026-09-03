@@ -11,8 +11,8 @@ package main
 import (
 	_ "unsafe"
 
-	"github.com/xinix00/HopOS/metal/board/licheerv"
-	_ "github.com/xinix00/HopOS/metal/board/licheerv/hop" // registreert het board (init) + basis-hooks
+	"github.com/xinix00/HopOS/metal/v2/board/licheerv"
+	_ "github.com/xinix00/HopOS/metal/v2/board/licheerv/hop" // registreert het board (init) + basis-hooks
 )
 
 // Warn vertelt wat dit board niet kan verzwijgen: jitter-DRBG i.p.v. TRNG

@@ -18,7 +18,7 @@ import (
 
 	"github.com/xinix00/hop/pkg/hopos"
 
-	"github.com/xinix00/HopOS/metal/kern/slots"
+	"github.com/xinix00/HopOS/metal/v2/kern/slots"
 )
 
 // Manager implementeert hopos.SlotManager tegen metal/kern/slots.

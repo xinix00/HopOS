@@ -6,9 +6,9 @@ import (
 	"io"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/abi/place"
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/abi/place"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // Dit bestand is het one-phase startpad: de image stroomt van r rechtstreeks

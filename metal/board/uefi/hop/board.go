@@ -15,15 +15,15 @@ import (
 	"net"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/net/netdev"
+	"github.com/xinix00/HopOS/metal/v2/net/netdev"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/board"
-	"github.com/xinix00/HopOS/metal/board/uefi"
-	"github.com/xinix00/HopOS/metal/cpu/psci"
-	"github.com/xinix00/HopOS/metal/driver/fb"
-	"github.com/xinix00/HopOS/metal/driver/nic/igb"
-	"github.com/xinix00/HopOS/metal/driver/pcie"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/board"
+	"github.com/xinix00/HopOS/metal/v2/board/uefi"
+	"github.com/xinix00/HopOS/metal/v2/cpu/psci"
+	"github.com/xinix00/HopOS/metal/v2/driver/fb"
+	"github.com/xinix00/HopOS/metal/v2/driver/nic/igb"
+	"github.com/xinix00/HopOS/metal/v2/driver/pcie"
 	"github.com/xinix00/lean/leandhcp"
 )
 

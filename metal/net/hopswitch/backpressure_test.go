@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/abi/ring"
+	"github.com/xinix00/HopOS/metal/v2/abi/ring"
 )
 
 func TestRXWachtKortOpLokaleConsumer(t *testing.T) {

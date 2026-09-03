@@ -23,7 +23,7 @@
 //	          value [size]byte, uitgevuld tot een viervoud
 package adt
 
-import "github.com/xinix00/HopOS/metal/dev"
+import "github.com/xinix00/HopOS/metal/v2/dev"
 
 const (
 	propNameLen = 32

@@ -11,8 +11,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/abi/systemapi"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/abi/systemapi"
 )
 
 // maxSystemConns begrenst de open system-callverbindingen per app-lifecycle.

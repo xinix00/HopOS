@@ -34,7 +34,7 @@ import (
 	"math/bits"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // Registeroffsets vanaf de controller-basis (pcie_offsets_bcm7712 +

@@ -29,12 +29,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/abi/place"
-	"github.com/xinix00/HopOS/metal/abi/ring"
-	"github.com/xinix00/HopOS/metal/board"
-	"github.com/xinix00/HopOS/metal/dev"
-	"github.com/xinix00/HopOS/metal/net/hopswitch"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/abi/place"
+	"github.com/xinix00/HopOS/metal/v2/abi/ring"
+	"github.com/xinix00/HopOS/metal/v2/board"
+	"github.com/xinix00/HopOS/metal/v2/dev"
+	"github.com/xinix00/HopOS/metal/v2/net/hopswitch"
 )
 
 // Eén servicer per slot: hij bezit de app-identiteit, storagegrenzen en de

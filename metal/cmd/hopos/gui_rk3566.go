@@ -10,9 +10,9 @@
 package main
 
 import (
-	"github.com/xinix00/HopOS/metal/board/rk3566"
-	rk3566hop "github.com/xinix00/HopOS/metal/board/rk3566/hop"
-	"github.com/xinix00/HopOS/metal/gui/driver/rkscan"
+	"github.com/xinix00/HopOS/metal/v2/board/rk3566"
+	rk3566hop "github.com/xinix00/HopOS/metal/v2/board/rk3566/hop"
+	"github.com/xinix00/HopOS/metal/v2/gui/driver/rkscan"
 )
 
 func init() {

@@ -19,8 +19,8 @@ import (
 
 	"github.com/xinix00/lean/leannet"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/abi/ring"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/abi/ring"
 )
 
 // slotRingCap is de datacapaciteit per richting in deze test: ruim voor een

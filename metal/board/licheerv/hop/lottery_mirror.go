@@ -1,6 +1,6 @@
 package hop
 
-import "github.com/xinix00/HopOS/metal/board/licheerv"
+import "github.com/xinix00/HopOS/metal/v2/board/licheerv"
 
 // hopCoreMirror is licheerv.HopHart (= layout.HopCore) als DATA-woord: de
 // cpuinit-asm kan geen Go-const lezen maar wél een geïnitialiseerde var —

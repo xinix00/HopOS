@@ -3,9 +3,9 @@ package rk3566
 import (
 	"sync"
 
-	"github.com/xinix00/HopOS/metal/dev"
-	"github.com/xinix00/HopOS/metal/fw/bootcfg"
-	"github.com/xinix00/HopOS/metal/fw/fdt"
+	"github.com/xinix00/HopOS/metal/v2/dev"
+	"github.com/xinix00/HopOS/metal/v2/fw/bootcfg"
+	"github.com/xinix00/HopOS/metal/v2/fw/fdt"
 )
 
 // De platform-config van dit board komt uit twee kanalen die BEIDE gemeten zijn

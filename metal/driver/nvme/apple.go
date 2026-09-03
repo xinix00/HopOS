@@ -28,8 +28,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/dev"
-	"github.com/xinix00/HopOS/metal/driver/rtkit"
+	"github.com/xinix00/HopOS/metal/v2/dev"
+	"github.com/xinix00/HopOS/metal/v2/driver/rtkit"
 )
 
 // Apple-registers bovenop de gewone NVMe-kaart (m1n1 src/nvme.c).

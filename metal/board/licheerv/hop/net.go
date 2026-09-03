@@ -5,14 +5,14 @@ import (
 	"net"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/net/netdev"
+	"github.com/xinix00/HopOS/metal/v2/net/netdev"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/board"
-	"github.com/xinix00/HopOS/metal/dev"
-	"github.com/xinix00/HopOS/metal/driver/nic/dwmac"
-	"github.com/xinix00/HopOS/metal/driver/nic/mdio"
-	"github.com/xinix00/HopOS/metal/net/nodemac"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/board"
+	"github.com/xinix00/HopOS/metal/v2/dev"
+	"github.com/xinix00/HopOS/metal/v2/driver/nic/dwmac"
+	"github.com/xinix00/HopOS/metal/v2/driver/nic/mdio"
+	"github.com/xinix00/HopOS/metal/v2/net/nodemac"
 	"github.com/xinix00/lean/leandhcp"
 )
 

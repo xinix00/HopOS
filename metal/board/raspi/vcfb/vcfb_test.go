@@ -3,7 +3,7 @@ package vcfb
 import (
 	"testing"
 
-	"github.com/xinix00/HopOS/metal/driver/fb"
+	"github.com/xinix00/HopOS/metal/v2/driver/fb"
 )
 
 func validDesc() fb.Desc {

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xinix00/HopOS/metal/abi/hopabi"
+	"github.com/xinix00/HopOS/metal/v2/abi/hopabi"
 )
 
 func TestListRespWireLimit(t *testing.T) {

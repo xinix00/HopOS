@@ -23,8 +23,8 @@ import (
 	"runtime/goos"
 	"sync/atomic"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // wfeIdle/hvcYield/cntkctlSet/cntfrq/counterNow/mmfr0/wfiUntil: zie idle_arm64.s.

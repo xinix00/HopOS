@@ -16,14 +16,14 @@ import (
 	"runtime"
 	"time"
 
-	raspihop "github.com/xinix00/HopOS/metal/board/raspi/hop"
-	"github.com/xinix00/HopOS/metal/board/rpi5"
-	_ "github.com/xinix00/HopOS/metal/board/rpi5/hop" // registreert het board (init); de basis levert de tamago-hooks
-	"github.com/xinix00/HopOS/metal/cpu/idle"
-	"github.com/xinix00/HopOS/metal/cpu/memlimit"
-	"github.com/xinix00/HopOS/metal/kern/slots"
-	"github.com/xinix00/HopOS/metal/net/hopnet"
-	"github.com/xinix00/HopOS/metal/net/hopswitch"
+	raspihop "github.com/xinix00/HopOS/metal/v2/board/raspi/hop"
+	"github.com/xinix00/HopOS/metal/v2/board/rpi5"
+	_ "github.com/xinix00/HopOS/metal/v2/board/rpi5/hop" // registreert het board (init); de basis levert de tamago-hooks
+	"github.com/xinix00/HopOS/metal/v2/cpu/idle"
+	"github.com/xinix00/HopOS/metal/v2/cpu/memlimit"
+	"github.com/xinix00/HopOS/metal/v2/kern/slots"
+	"github.com/xinix00/HopOS/metal/v2/net/hopnet"
+	"github.com/xinix00/HopOS/metal/v2/net/hopswitch"
 )
 
 // Zelfde canonieke app als op QEMU (slot-1-IPA), alleen met rpi5-runtime-hooks

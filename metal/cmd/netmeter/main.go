@@ -54,10 +54,10 @@ import (
 	// system-CA-store) — zelfde regel als in cmd/hopos.
 	_ "golang.org/x/crypto/x509roots/fallback"
 
-	"github.com/xinix00/HopOS/metal/net/netdev"
+	"github.com/xinix00/HopOS/metal/v2/net/netdev"
 
-	"github.com/xinix00/HopOS/metal/board"
-	"github.com/xinix00/HopOS/metal/cpu/memlimit"
+	"github.com/xinix00/HopOS/metal/v2/board"
+	"github.com/xinix00/HopOS/metal/v2/cpu/memlimit"
 )
 
 const githubURL = "https://github.com/xinix00/hop-os-surf/releases/download/rolling-release/display.elf"

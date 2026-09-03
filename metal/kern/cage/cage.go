@@ -64,7 +64,7 @@ package cage
 import (
 	"fmt"
 
-	"github.com/xinix00/HopOS/metal/cpu/thead"
+	"github.com/xinix00/HopOS/metal/v2/cpu/thead"
 )
 
 // Window is één toegestaan venster in de kooi: basis + maat, met rechten.

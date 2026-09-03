@@ -20,19 +20,19 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/xinix00/HopOS/metal/abi/checksum"
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/board"
-	_ "github.com/xinix00/HopOS/metal/board/qemuvirt/hop" // registreert het board (init) + basis-hooks
-	"github.com/xinix00/HopOS/metal/cpu/idle"
-	"github.com/xinix00/HopOS/metal/cpu/memlimit"
-	"github.com/xinix00/HopOS/metal/dev"
-	"github.com/xinix00/HopOS/metal/driver/fb"
-	"github.com/xinix00/HopOS/metal/driver/nvme"
-	"github.com/xinix00/HopOS/metal/kern/hopfs"
-	"github.com/xinix00/HopOS/metal/kern/slots"
-	"github.com/xinix00/HopOS/metal/net/hopnet"
-	"github.com/xinix00/HopOS/metal/net/hopswitch"
+	"github.com/xinix00/HopOS/metal/v2/abi/checksum"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/board"
+	_ "github.com/xinix00/HopOS/metal/v2/board/qemuvirt/hop" // registreert het board (init) + basis-hooks
+	"github.com/xinix00/HopOS/metal/v2/cpu/idle"
+	"github.com/xinix00/HopOS/metal/v2/cpu/memlimit"
+	"github.com/xinix00/HopOS/metal/v2/dev"
+	"github.com/xinix00/HopOS/metal/v2/driver/fb"
+	"github.com/xinix00/HopOS/metal/v2/driver/nvme"
+	"github.com/xinix00/HopOS/metal/v2/kern/hopfs"
+	"github.com/xinix00/HopOS/metal/v2/kern/slots"
+	"github.com/xinix00/HopOS/metal/v2/net/hopnet"
+	"github.com/xinix00/HopOS/metal/v2/net/hopswitch"
 )
 
 // nvmeDemo bewijst PCIe-ECAM + de eigen NVMe-driver (fase-3-voorwerk):

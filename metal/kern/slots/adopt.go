@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/net/hopswitch"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/net/hopswitch"
 )
 
 // De grenzen van wat het handoff-blob per slot draagt. Ze staan hier zodat

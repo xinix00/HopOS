@@ -3,7 +3,7 @@ package rk3566
 import (
 	"time"
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // De Rockchip-glue rond het GMAC: welke PHY-interface, welke klokdelays, en de

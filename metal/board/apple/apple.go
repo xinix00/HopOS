@@ -36,8 +36,8 @@ import (
 
 	"github.com/usbarmory/tamago/arm64"
 
-	"github.com/xinix00/HopOS/metal/cpu/idle"
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/cpu/idle"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 const (

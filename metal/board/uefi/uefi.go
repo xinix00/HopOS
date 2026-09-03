@@ -32,14 +32,14 @@ import (
 
 	"github.com/usbarmory/tamago/arm64"
 
-	"github.com/xinix00/HopOS/metal/cpu/drbg"
-	"github.com/xinix00/HopOS/metal/cpu/idle"
-	"github.com/xinix00/HopOS/metal/cpu/trng"
-	"github.com/xinix00/HopOS/metal/driver/conlog"
-	"github.com/xinix00/HopOS/metal/driver/fb"
-	"github.com/xinix00/HopOS/metal/driver/pl011"
-	"github.com/xinix00/HopOS/metal/fw/acpi"
-	"github.com/xinix00/HopOS/metal/fw/bootcfg"
+	"github.com/xinix00/HopOS/metal/v2/cpu/drbg"
+	"github.com/xinix00/HopOS/metal/v2/cpu/idle"
+	"github.com/xinix00/HopOS/metal/v2/cpu/trng"
+	"github.com/xinix00/HopOS/metal/v2/driver/conlog"
+	"github.com/xinix00/HopOS/metal/v2/driver/fb"
+	"github.com/xinix00/HopOS/metal/v2/driver/pl011"
+	"github.com/xinix00/HopOS/metal/v2/fw/acpi"
+	"github.com/xinix00/HopOS/metal/v2/fw/bootcfg"
 )
 
 // KernelSize: de grootte van de RAM-partitie van de HOP-kern. Het

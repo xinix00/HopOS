@@ -11,7 +11,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/board"
+	"github.com/xinix00/HopOS/metal/v2/board"
 )
 
 // ntpEpochOffset: seconden tussen 1900-01-01 (NTP) en 1970-01-01 (Unix).

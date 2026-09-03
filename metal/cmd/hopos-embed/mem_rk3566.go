@@ -5,7 +5,7 @@ package main
 import (
 	_ "unsafe"
 
-	"github.com/xinix00/HopOS/metal/board/rk3566"
+	"github.com/xinix00/HopOS/metal/v2/board/rk3566"
 )
 
 // Geheugendeclaratie van de HOP-kern op de Radxa Zero 3E: hetzelfde venster als

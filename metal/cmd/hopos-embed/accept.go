@@ -19,9 +19,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/board"
-	"github.com/xinix00/HopOS/metal/kern/slots"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/board"
+	"github.com/xinix00/HopOS/metal/v2/kern/slots"
 )
 
 // fail rapporteert een gefaalde acceptatiestap mét het slot-dumprapport

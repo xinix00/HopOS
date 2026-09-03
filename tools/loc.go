@@ -31,7 +31,7 @@ import (
 	"strings"
 )
 
-const module = "github.com/xinix00/HopOS/metal"
+const module = "github.com/xinix00/HopOS/metal/v2"
 
 // lean is de zelfgeschreven stdlib (netstack, http, elf) — eigen module,
 // linkt in élke node. Hij telt mee, maar als eigen groep: zo blijft de

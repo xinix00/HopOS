@@ -13,7 +13,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/xinix00/HopOS/metal/driver/nvme"
+	"github.com/xinix00/HopOS/metal/v2/driver/nvme"
 )
 
 // BlockSize is de logische blokmaat (8 NVMe-LBA's van 512B).

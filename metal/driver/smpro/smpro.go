@@ -11,8 +11,8 @@ package smpro
 import (
 	"time"
 
-	"github.com/xinix00/HopOS/metal/dev"
-	"github.com/xinix00/HopOS/metal/fw/acpi"
+	"github.com/xinix00/HopOS/metal/v2/dev"
+	"github.com/xinix00/HopOS/metal/v2/fw/acpi"
 )
 
 // HwmonChannel is het PCC-kanaal van de hardware-monitor op socket 0 — vast

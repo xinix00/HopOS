@@ -3,8 +3,8 @@ package raspi
 import (
 	"fmt"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/fw/fdt"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/fw/fdt"
 )
 
 // revokeVecAsm = de EL2-vectortabel (faultdump2, 0x8B000) die cpuinit.s

@@ -28,8 +28,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/gui/driver/usb/hid"
-	"github.com/xinix00/HopOS/metal/gui/driver/usb/xhci"
+	"github.com/xinix00/HopOS/metal/v2/gui/driver/usb/hid"
+	"github.com/xinix00/HopOS/metal/v2/gui/driver/usb/xhci"
 )
 
 // Sink krijgt elke gebeurtenis. Mag blokkeren noch panieken: hij draait op de

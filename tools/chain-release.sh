@@ -172,7 +172,7 @@ say ">> 2. de app-modules in deze repo op $VER"
 for m in $(mods_in); do
 	old="$(grep -oE 'HopOS/metal v[0-9][^ ]*' "$m/go.mod" | head -1 | awk '{print $2}')"
 	printf '   %-24s %s -> %s\n' "apps/$(basename "$m")" "${old:-?}" "$VER" >&2
-	( cd "$m" && GOWORK=off go mod edit -require "github.com/xinix00/HopOS/metal@$VER" )
+	( cd "$m" && GOWORK=off go mod edit -require "github.com/xinix00/HopOS/metal/v2@$VER" )
 done
 if [ -n "$(git -C "$DIR" status --porcelain)" ]; then
 	run "commit apps-pins" sh -c "
@@ -195,7 +195,7 @@ run "git tag -a $VER + metal/$VER, push" sh -c "
 if [ -z "$DRY" ]; then
 	say "   wachten tot de proxy metal@$VER serveert"
 	i=0
-	until (cd /tmp && GOFLAGS=-mod=mod go list -m "github.com/xinix00/HopOS/metal@$VER" >/dev/null 2>&1); do
+	until (cd /tmp && GOFLAGS=-mod=mod go list -m "github.com/xinix00/HopOS/metal/v2@$VER" >/dev/null 2>&1); do
 		i=$((i + 1)); [ "$i" -lt 30 ] || { say "FOUT: proxy serveert metal@$VER niet"; exit 1; }
 		sleep 10
 	done
@@ -224,9 +224,9 @@ for m in $(mods_ext); do
 	if [ -n "$DRY" ]; then
 		cp "$m/go.mod" "$m/go.mod.relbak"; [ -f "$m/go.sum" ] && cp "$m/go.sum" "$m/go.sum.relbak"
 		BAKS="$BAKS $m"
-		( cd "$m" && GOWORK=off go mod edit -replace "github.com/xinix00/HopOS/metal=$DIR/metal" )
+		( cd "$m" && GOWORK=off go mod edit -replace "github.com/xinix00/HopOS/metal/v2=$DIR/metal" )
 	else
-		( cd "$m" && GOWORK=off go mod edit -require "github.com/xinix00/HopOS/metal@$VER" )
+		( cd "$m" && GOWORK=off go mod edit -require "github.com/xinix00/HopOS/metal/v2@$VER" )
 	fi
 	( cd "$m" && GOWORK=off GOFLAGS=-mod=mod GOTOOLCHAIN=local go mod tidy >/dev/null 2>&1 || true )
 done

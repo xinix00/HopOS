@@ -1,6 +1,6 @@
 package rpi5
 
-import "github.com/xinix00/HopOS/metal/dev"
+import "github.com/xinix00/HopOS/metal/v2/dev"
 
 // RP1-southbridge (RP1-peripherals-datasheet, RP-008370-DS): de BCM2712 ziet
 // het RP1-peripheralvenster via PCIe op 0x1f_0000_0000 → RP1-adres

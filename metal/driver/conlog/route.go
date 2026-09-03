@@ -1,6 +1,6 @@
 package conlog
 
-import "github.com/xinix00/HopOS/metal/driver/fb"
+import "github.com/xinix00/HopOS/metal/v2/driver/fb"
 
 // Route is de bestemmingenlijst van één console-byte, op één plek.
 //

@@ -5,8 +5,8 @@ package kernflip
 import (
 	"runtime"
 
-	"github.com/xinix00/HopOS/metal/cpu/mmode"
-	"github.com/xinix00/HopOS/metal/kern/slots"
+	"github.com/xinix00/HopOS/metal/v2/cpu/mmode"
+	"github.com/xinix00/HopOS/metal/v2/kern/slots"
 )
 
 // De RISC-V-helft van de flip-naad (docs/kern-flip.md) — zie arch_arm64.go

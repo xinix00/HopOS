@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"unsafe"
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 const (

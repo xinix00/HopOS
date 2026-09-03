@@ -29,7 +29,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/driver/conlog"
+	"github.com/xinix00/HopOS/metal/v2/driver/conlog"
 )
 
 // pollInterval is hoe vaak een verbonden lezer naar nieuwe bytes kijkt. Geen

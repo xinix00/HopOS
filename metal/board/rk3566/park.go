@@ -2,7 +2,7 @@
 
 package rk3566
 
-import "github.com/xinix00/HopOS/metal/dev"
+import "github.com/xinix00/HopOS/metal/v2/dev"
 
 // ParkEntryPC is het fysieke startadres van de parkeerlus (park_arm64.s) dat
 // als `entry` naar PSCI CPU_ON gaat.

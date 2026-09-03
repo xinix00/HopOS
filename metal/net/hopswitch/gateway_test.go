@@ -6,8 +6,8 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/abi/ring"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/abi/ring"
 )
 
 func testHostPort(t *testing.T) *hostDevice {

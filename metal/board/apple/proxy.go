@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // proxy.go — de mini-proxy: een nieuw image over de dockchannel binnenhalen en

@@ -3,7 +3,7 @@ package rpi4
 import (
 	_ "unsafe" // voor go:linkname
 
-	"github.com/xinix00/HopOS/metal/board/raspi"
+	"github.com/xinix00/HopOS/metal/v2/board/raspi"
 )
 
 // printk stuurt één byte naar de PL011 op GPIO14/15 (de bootloader

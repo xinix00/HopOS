@@ -5,13 +5,13 @@ package slots
 import (
 	"fmt"
 
-	"github.com/xinix00/HopOS/metal/abi/checksum"
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/board"
-	"github.com/xinix00/HopOS/metal/cpu/mmode"
-	"github.com/xinix00/HopOS/metal/dev"
-	"github.com/xinix00/HopOS/metal/kern/cage"
-	"github.com/xinix00/HopOS/metal/kern/cagestub"
+	"github.com/xinix00/HopOS/metal/v2/abi/checksum"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/board"
+	"github.com/xinix00/HopOS/metal/v2/cpu/mmode"
+	"github.com/xinix00/HopOS/metal/v2/dev"
+	"github.com/xinix00/HopOS/metal/v2/kern/cage"
+	"github.com/xinix00/HopOS/metal/v2/kern/cagestub"
 )
 
 // De RISC-V64-helft van de kooi-naad (zie cage_arm64.go voor de andere).

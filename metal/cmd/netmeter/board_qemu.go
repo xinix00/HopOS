@@ -8,8 +8,8 @@ package main
 import (
 	_ "unsafe"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	_ "github.com/xinix00/HopOS/metal/board/qemuvirt/hop" // registreert het board (init) + runtime-hooks
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	_ "github.com/xinix00/HopOS/metal/v2/board/qemuvirt/hop" // registreert het board (init) + runtime-hooks
 )
 
 //go:linkname ramStart runtime/goos.RamStart

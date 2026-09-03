@@ -3,7 +3,7 @@ package rk3566
 import (
 	"time"
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // Het hardware-TRNG van de RK3566: een los blok (géén crypto-engine — de

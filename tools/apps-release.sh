@@ -109,9 +109,9 @@ for entry in $APPS; do
 	[ -f "$mod/go.sum" ] && cp "$mod/go.sum" "$mod/go.sum.appsbak"
 	MODS="$MODS $mod"
 	if [ -n "${METAL:-}" ]; then
-		( cd "$mod" && GOWORK=off go mod edit -require "github.com/xinix00/HopOS/metal@$METAL" )
+		( cd "$mod" && GOWORK=off go mod edit -require "github.com/xinix00/HopOS/metal/v2@$METAL" )
 	else
-		( cd "$mod" && GOWORK=off go mod edit -replace "github.com/xinix00/HopOS/metal=$DIR/metal" )
+		( cd "$mod" && GOWORK=off go mod edit -replace "github.com/xinix00/HopOS/metal/v2=$DIR/metal" )
 	fi
 	# NIET stilzwijgend: een gefaalde tidy laat go.sum incompleet achter en dat
 	# komt pas als een linkfout naar boven, drie apps later.

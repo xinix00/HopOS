@@ -1,8 +1,8 @@
 package licheerv
 
 import (
-	"github.com/xinix00/HopOS/metal/board/appboard"
-	"github.com/xinix00/HopOS/metal/cpu/idle"
+	"github.com/xinix00/HopOS/metal/v2/board/appboard"
+	"github.com/xinix00/HopOS/metal/v2/cpu/idle"
 )
 
 func init() {

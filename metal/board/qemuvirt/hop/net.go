@@ -7,10 +7,10 @@ import (
 	"github.com/usbarmory/tamago/arm64"
 	"github.com/usbarmory/tamago/dma"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/cpu/irq"
-	"github.com/xinix00/HopOS/metal/dev"
-	"github.com/xinix00/HopOS/metal/driver/gicv3"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/cpu/irq"
+	"github.com/xinix00/HopOS/metal/v2/dev"
+	"github.com/xinix00/HopOS/metal/v2/driver/gicv3"
 )
 
 // QEMU virt plaatst 32 virtio-mmio-transports vanaf 0x0a000000 (stride 0x200,

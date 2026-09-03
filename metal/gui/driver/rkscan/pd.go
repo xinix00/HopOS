@@ -3,7 +3,7 @@ package rkscan
 import (
 	"time"
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // Power domains van de RK3566. Nodig voor het beeld: PD_VO draagt de VOP2 en de

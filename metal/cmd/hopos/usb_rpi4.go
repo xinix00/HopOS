@@ -16,9 +16,9 @@ package main
 import (
 	"fmt"
 
-	"github.com/xinix00/HopOS/metal/board/rpi4"
-	"github.com/xinix00/HopOS/metal/driver/brcmpcie"
-	"github.com/xinix00/HopOS/metal/gui/usbin"
+	"github.com/xinix00/HopOS/metal/v2/board/rpi4"
+	"github.com/xinix00/HopOS/metal/v2/driver/brcmpcie"
+	"github.com/xinix00/HopOS/metal/v2/gui/usbin"
 )
 
 func init() {

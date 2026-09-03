@@ -3,7 +3,7 @@ package rkscan
 import (
 	"time"
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // De VOP2 display-controller van de RK3566: leest de framebuffer die het board

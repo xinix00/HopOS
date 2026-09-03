@@ -3,8 +3,8 @@ package apple
 import (
 	_ "unsafe" // voor go:linkname
 
-	"github.com/xinix00/HopOS/metal/dev"
-	"github.com/xinix00/HopOS/metal/driver/conlog"
+	"github.com/xinix00/HopOS/metal/v2/dev"
+	"github.com/xinix00/HopOS/metal/v2/driver/conlog"
 )
 
 // Twee UARTs, allebei door m1n1 al geïnitialiseerd (klok, baud, pinnen), wij

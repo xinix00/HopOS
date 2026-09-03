@@ -3,7 +3,7 @@ package rk3566
 import (
 	"time"
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // De CRU-kant van het GMAC1: klokgates, de bronkeuze en — het stukje dat pas na

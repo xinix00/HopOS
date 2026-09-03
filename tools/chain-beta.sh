@@ -107,7 +107,7 @@ for r in json.load(sys.stdin).get("Replace") or []:
         print(r["Old"]["Path"] + "=" + new)
 ')"
 [ -n "$REPLACES" ] && echo "   doorgeven aan surf: $(echo "$REPLACES" | tr '\n' ' ')" >&2
-( cd "$SURF_DIR" && go mod edit -replace "github.com/xinix00/HopOS/metal=$DIR/metal" )
+( cd "$SURF_DIR" && go mod edit -replace "github.com/xinix00/HopOS/metal/v2=$DIR/metal" )
 for r in $REPLACES; do
 	( cd "$SURF_DIR" && go mod edit -replace "$r" )
 done

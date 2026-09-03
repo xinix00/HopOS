@@ -38,7 +38,7 @@ import (
 	"runtime"
 	"sync/atomic"
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // rxArmed is het gewapend-teken in het CtrlRXDoor-woord. Head is een

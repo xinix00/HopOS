@@ -7,8 +7,8 @@
 package main
 
 import (
-	"github.com/xinix00/HopOS/metal/board/rpi5"
-	"github.com/xinix00/HopOS/metal/gui/usbin"
+	"github.com/xinix00/HopOS/metal/v2/board/rpi5"
+	"github.com/xinix00/HopOS/metal/v2/gui/usbin"
 )
 
 func init() {

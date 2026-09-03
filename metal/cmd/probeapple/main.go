@@ -26,7 +26,7 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
-	"github.com/xinix00/HopOS/metal/driver/smc"
+	"github.com/xinix00/HopOS/metal/v2/driver/smc"
 	"runtime"
 	"strings"
 	"time"
@@ -34,15 +34,15 @@ import (
 
 	"github.com/usbarmory/tamago/arm64"
 
-	"github.com/xinix00/HopOS/metal/board/apple"
-	applehop "github.com/xinix00/HopOS/metal/board/apple/hop"
-	"github.com/xinix00/HopOS/metal/cpu/idle"
-	"github.com/xinix00/HopOS/metal/dev"
-	"github.com/xinix00/HopOS/metal/driver/nic/tg3"
-	"github.com/xinix00/HopOS/metal/driver/nvme"
-	"github.com/xinix00/HopOS/metal/driver/pcie"
-	"github.com/xinix00/HopOS/metal/driver/rtkit"
-	"github.com/xinix00/HopOS/metal/fw/adt"
+	"github.com/xinix00/HopOS/metal/v2/board/apple"
+	applehop "github.com/xinix00/HopOS/metal/v2/board/apple/hop"
+	"github.com/xinix00/HopOS/metal/v2/cpu/idle"
+	"github.com/xinix00/HopOS/metal/v2/dev"
+	"github.com/xinix00/HopOS/metal/v2/driver/nic/tg3"
+	"github.com/xinix00/HopOS/metal/v2/driver/nvme"
+	"github.com/xinix00/HopOS/metal/v2/driver/pcie"
+	"github.com/xinix00/HopOS/metal/v2/driver/rtkit"
+	"github.com/xinix00/HopOS/metal/v2/fw/adt"
 )
 
 // PCIe op de M4 (ADT /arm-io/apcie, 29-08): ECAM op 0x1cb0000000 (256MB, bus

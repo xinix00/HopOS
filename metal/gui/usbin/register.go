@@ -5,9 +5,9 @@ package usbin
 import (
 	"fmt"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/gui/driver/usb/xhci"
-	"github.com/xinix00/HopOS/metal/gui/fbgrant"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/gui/driver/usb/xhci"
+	"github.com/xinix00/HopOS/metal/v2/gui/fbgrant"
 )
 
 // Dit bestand is de naad tussen board en dienst. De boards zélf importeren

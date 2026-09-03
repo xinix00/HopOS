@@ -393,27 +393,26 @@ const (
 	CtxRunning     = 3 // draait nu op zijn core
 	CtxDead        = 4 // geëindigd (exit, fault of revoke) — EL2 slaat 'm over
 
-	// Frame-ringen per slot (IPA-ABI, per-slot netwerk): elke app draait een
+	// Framequeues per slot (IPA-ABI, per-slot netwerk): elke app draait een
 	// eigen TCP-stack over rauwe Ethernet-frames; HOP is enkel de L2-switch.
-	// Fysiek komen TX en RX uit één HOP-brede, begrensde netwerkpot. Logisch
-	// krijgt elk slot een ruim vast venster; hoeveel pagina's daar werkelijk
-	// achter liggen staat in de ringkop en mag per boot verschillen. TCP doet
-	// de flow-control — de ring is alleen de smalle virtuele NIC-poort.
+	// TX en RX zijn elk één pagina met descriptors naar buffers in de EIGEN
+	// app-partitie. Payload woont nooit in deze vensters. HOP valideert iedere
+	// offset tegen de kooi voordat hij bytes leest/schrijft; frames die HOP
+	// tijdelijk moet vasthouden komen uit één gezamenlijke fysieke chunkpool.
 	//
 	// Vier MiB IPA per slot × SlotCap = 512MiB, geheel binnen dit eigen GB.
-	// TX en RX beginnen elk op een 2MiB-grens, zodat beide architecturen exact
-	// dezelfde adressen zien terwijl hun mapper er een willekeurig aantal
-	// fysieke 4KiB-pagina's onder kan leggen.
+	// De oude 2MiB-apertures blijven als adresscheiding bestaan; alleen de eerste
+	// pagina is gemapt. Daardoor blijft de map op beide architecturen eenvoudig
+	// en kan geen app payload van een buur benoemen.
 	NetRingBase       = 0xC0000000
 	NetRingStride     = 0x400000
 	NetRingWindowHalf = NetRingStride / 2
 	NetTXOff          = 0x0
 	NetRXOff          = NetRingWindowHalf
-	NetRingHeader     = 0x1000
+	NetRingHeader     = 0x1000 // legacy naam: één framequeue-page
 
-	// De standaardpot van 50MiB over SlotCap levert na het control-blok 136KiB
-	// per richting. Alleen de hostpoort/tests gebruiken deze historische vaste
-	// maat; app-ringen lezen hun werkelijke capaciteit uit hun ringkop.
+	// Alleen HOP's lokale poort/tests gebruiken nog de gewone bytering. App-
+	// poorten gebruiken frameq en hebben dus geen statische payloadcapaciteit.
 	NetRingDataCap = 0x31000
 
 	// Control-venster per slot. Fysiek staat dit vóór TX/RX in dezelfde
@@ -828,8 +827,8 @@ const (
 	// het verkeerde adres leest is anders een stille misread, en dat is precies
 	// de klasse fouten die dagen kost.
 	//
-	// NIET verhogen voor de fysieke arena, poolgrootte, verdeling of werkelijke
-	// ringcapaciteit: die zijn sinds v8 HOP-privé en de ringkop draagt de maat.
+	// NIET verhogen voor de fysieke arena, poolgrootte of chunkverdeling: die
+	// zijn vanaf v9 HOP-privé; de queues dragen alleen app-bufferdescriptors.
 	// Alleen een wijziging aan het vaste app-contract zelf breekt de ABI.
 	//
 	// 3 (30-07): head en tail van elke ring liggen elk in hun eigen cacheline
@@ -876,7 +875,10 @@ const (
 	// 8 (03-09): ook het laatste control-blok verhuisde uit de app-partitie naar
 	// dezelfde HOP-brede systeempot. RamSize is nu de hele partitie; control en
 	// bootstrap-ringen hebben per slot vaste IPA's.
-	ABIVersion = 8
+	// 9 (03-09): framepayload verhuisde uit statische TX/RX-byteringen. De twee
+	// vaste IPA's wijzen nu elk naar een frameq-descriptorpagina; buffers komen
+	// uit de app-partitie en HOP houdt tijdelijke frames in één chunkpool.
+	ABIVersion = 9
 )
 
 // SlotControl geeft de vaste IPA-basis van het control-blok van slot i.

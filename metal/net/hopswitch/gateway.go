@@ -10,7 +10,7 @@ package hopswitch
 import (
 	"encoding/binary"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 )
 
 // gatewayClaimLocked (mu vast, vanuit forward): hoort dit gateway-frame bij

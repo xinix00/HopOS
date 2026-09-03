@@ -18,7 +18,7 @@
 // zijn de cores van ons. Wat hier staat is de helft die nu al klopt.
 package apple
 
-import "github.com/xinix00/HopOS/metal/dev"
+import "github.com/xinix00/HopOS/metal/v2/dev"
 
 // Het PMGR-startblok (m1n1 src/smp.c). Per die een eigen kopie; de M4-mini
 // heeft er één.

@@ -2,7 +2,7 @@
 
 package xhci
 
-import "github.com/xinix00/HopOS/metal/dev"
+import "github.com/xinix00/HopOS/metal/v2/dev"
 
 // Dit bestand is de datastructuur waar xHCI helemaal op draait: de ring van
 // 16-byte TRB's (Transfer Request Blocks) met één eigendomsbit. Software en

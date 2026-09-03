@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"runtime"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/cpu/el2"
-	"github.com/xinix00/HopOS/metal/cpu/smp"
-	"github.com/xinix00/HopOS/metal/dev"
-	"github.com/xinix00/HopOS/metal/kern/stage2"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/cpu/el2"
+	"github.com/xinix00/HopOS/metal/v2/cpu/smp"
+	"github.com/xinix00/HopOS/metal/v2/dev"
+	"github.com/xinix00/HopOS/metal/v2/kern/stage2"
 )
 
 // De ARM-helft van de flip-naad (docs/kern-flip.md). Alles wat hier staat is

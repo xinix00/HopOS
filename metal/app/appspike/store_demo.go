@@ -10,7 +10,7 @@ package main
 import (
 	"bytes"
 
-	"github.com/xinix00/HopOS/metal/app/applib"
+	"github.com/xinix00/HopOS/metal/v2/app/applib"
 )
 
 func storeDemo(app *applib.App) {

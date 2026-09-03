@@ -3,7 +3,7 @@ package slots
 import (
 	"testing"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 )
 
 // setCores stelt de fysieke app-core-grens in en veegt de allocator schoon.

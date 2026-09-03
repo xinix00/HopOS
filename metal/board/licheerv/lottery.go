@@ -8,7 +8,7 @@
 // (AdoptParked, aangeroepen door hop.HartOn).
 package licheerv
 
-import "github.com/xinix00/HopOS/metal/abi/layout"
+import "github.com/xinix00/HopOS/metal/v2/abi/layout"
 
 // HopHart is layout.HopCore vertaald naar dit silicium: 0 = C906B (1GHz,
 // de firmware-core), 1 = C906L (700MHz). Eén globale knop; dit board

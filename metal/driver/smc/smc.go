@@ -20,8 +20,8 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/xinix00/HopOS/metal/dev"
-	"github.com/xinix00/HopOS/metal/driver/rtkit"
+	"github.com/xinix00/HopOS/metal/v2/dev"
+	"github.com/xinix00/HopOS/metal/v2/driver/rtkit"
 )
 
 // Het protocol (m1n1 src/smc.c).

@@ -26,7 +26,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 )
 
 // ErrNoPartition markeert "de partitie past nu niet in de pool" — een

@@ -3,8 +3,8 @@ package apple
 import (
 	"sync"
 
-	"github.com/xinix00/HopOS/metal/dev"
-	"github.com/xinix00/HopOS/metal/fw/bootcfg"
+	"github.com/xinix00/HopOS/metal/v2/dev"
+	"github.com/xinix00/HopOS/metal/v2/fw/bootcfg"
 )
 
 // Het param-blok: wat de LOADER weet en de firmware niet vertelt.

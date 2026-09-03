@@ -20,7 +20,7 @@
 //     goroutine die op het ontbrekende hart landt.
 package apple
 
-import "github.com/xinix00/HopOS/metal/dev"
+import "github.com/xinix00/HopOS/metal/v2/dev"
 
 // parkFree is "de bus is vrij". Geen enkele core heeft dit als aff1:aff0, en
 // het is niet de waarde die een vers image in de scratch achterlaat — parkArm

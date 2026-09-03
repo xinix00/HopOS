@@ -24,7 +24,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // Registers (Linux tg3.h). De eerste 0x100 bytes van BAR0 spiegelen de

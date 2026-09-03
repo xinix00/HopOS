@@ -2,7 +2,7 @@
 
 package apple
 
-import "github.com/xinix00/HopOS/metal/dev"
+import "github.com/xinix00/HopOS/metal/v2/dev"
 
 // ParkEntryPC is het fysieke startadres van de parkeerlus (park_arm64.s) dat
 // als entry naar Release gaat — zelfde vorm als rk3566.ParkEntryPC.

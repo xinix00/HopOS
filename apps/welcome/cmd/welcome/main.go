@@ -26,10 +26,10 @@ package main
 import (
 	"runtime"
 
-	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/app/applib"
-	"github.com/xinix00/HopOS/metal/app/applib/appnet"
-	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/app/applib"
+	"github.com/xinix00/HopOS/metal/v2/app/applib/appnet"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 	"github.com/xinix00/lean/leanhttp"
 
 	"github.com/xinix00/HopOS/apps/welcome/internal/welcome"
