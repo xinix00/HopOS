@@ -852,10 +852,26 @@ const (
 	// te zijn. Kern en apps hertalen samen; de release-keten bouwt de app-images
 	// tegen dezelfde metal-tag, dus dat gebeurt vanzelf in één ronde.
 	//
-	// CtrlIdleMode (02-09) verhoogt de versie NIET: het woord staat in de staart
-	// van de page (boven de env), dus een ouder image leest zijn env ongewijzigd
-	// en een nieuwer image op een oudere kern leest een 0 — zie "DE STAART".
-	ABIVersion = 4
+	// 5 (03-09): het staartwoord op 0xFF8 veranderde van BETEKENIS. Tot v1.999.1
+	// heette het CtrlCorePrep en was bit 0 "PrepDeepWFE" — schrijf CYC_OVRD
+	// vanaf EL1; sindsdien heet het CtrlIdleMode en betekent waarde 1
+	// "IdleYield" — idle via een yield naar EL2. Zelfde adres, zelfde waarde,
+	// ander bevel.
+	//
+	// Toen CtrlIdleMode erbij kwam stond hier dat dat de versie NIET verhoogde,
+	// met als redenering dat de staart de env niet opschuift. Dat klopt voor de
+	// env en mist de andere kant: een app van vóór 03-09 die op een kern van ná
+	// die datum wordt geplaatst, leest die 1 als PrepDeepWFE en voert elke
+	// idle-ronde een IMP-DEF-write uit die op dit silicium undefined is. Geen
+	// misread maar een dode app, en place() liet hem toe omdat beide kernen
+	// versie 4 droegen. Vandaar alsnog de bump — een woord hergebruiken kost
+	// een versie, ook als het adres blijft staan.
+	//
+	// In dezelfde ronde bijgekomen (en op zichzelf géén bump waard: het
+	// ctx-blok is kern-staat in de plan-regio, waar geen app bij kan):
+	// CtxKickTarget, CtxWakes en CtxUnitSlot, plus CtxWakeNoPeek als bit 63
+	// in CtxWake.
+	ABIVersion = 5
 )
 
 // AbiTailAt geeft de basis van de ABI-staart van een slot: net boven zijn
