@@ -1,7 +1,7 @@
 // Package hopswitch is HOP's interne L2-frame-switch (per-slot netwerk):
 // elke app-core draait een eigen netstack (applib/appnet) over rauwe
-// Ethernet-frames door de per-slot frame-ringen; HOP kopieert die frames
-// uitsluitend ring-naar-ring op de dst-MAC — app↔app-verkeer raakt nooit
+// Ethernet-frames door twee per-slot descriptorqueues; de payload blijft in
+// app-RAM en HOP kopieert op de dst-MAC — app↔app-verkeer raakt nooit
 // een TCP-stack op core 0. "Apps rekenen, HOP sjouwt data."
 //
 // HOP is poort 0 op hetzelfde LAN. Het system-callcontract bereikt daar HOP's
@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xinix00/HopOS/metal/v2/abi/frameq"
 	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 	"github.com/xinix00/HopOS/metal/v2/abi/ring"
 	"github.com/xinix00/HopOS/metal/v2/dev"
@@ -60,12 +61,20 @@ func GatewayIP() string { return SlotIP(0) }
 // hostMAC is HOP's MAC op het interne net (slot 0 → ..:00).
 var hostMAC = layout.SlotMAC(0)
 
-// port is één switch-poort: de frame-ringen van een actief slot. De switch
-// is per richting de enige tegenhanger van de app (SPSC): consumer op TX,
+// port is één switch-poort. Productie-apps delen alleen twee kleine
+// descriptorpagina's; tx/rx bestaan nog voor HOP's lokale poort en hosttests.
+// De switch is per richting de enige tegenhanger (SPSC): consumer op TX,
 // producer op RX.
 type port struct {
-	tx *ring.Ring // app → switch
-	rx *ring.Ring // switch → app
+	tx           *ring.Ring // app → switch
+	rx           *ring.Ring // switch → app
+	txq          *frameq.Queue
+	rxq          *frameq.Queue
+	partBase     uint64
+	partSize     uint64
+	pendingHead  uint32
+	pendingTail  uint32
+	pendingCount uint32
 
 	// Na één begrensde wacht op een volle lokale RX-ring droppen volgende
 	// frames meteen tot de consumer aantoonbaar ruimte heeft gemaakt. Zo kan
@@ -87,6 +96,7 @@ var (
 	rxWake   func(slot int)
 	hostWake func()
 	pumpHook func(status func() bool, wake func())
+	pool     framePool // one dynamic payload pool for every app port
 	up       bool
 )
 
@@ -170,6 +180,11 @@ func Up() error {
 		return nil
 	}
 	ports = make([]*port, layout.MaxSlots+1) // MaxSlots staat vast na board-init
+	if pool.base == 0 {
+		if err := pool.configureLocal(4 << 20); err != nil {
+			return err
+		}
+	}
 	host = &hostDevice{tx: ring.New(layout.NetRingDataCap), rx: ring.New(layout.NetRingDataCap)}
 	ports[0] = &port{tx: host.tx, rx: host.rx}
 	go loop()
@@ -178,16 +193,15 @@ func Up() error {
 	return nil
 }
 
-// Attach koppelt slot i aan de switch (door slots.Start, ná de ring-init).
-// txPA/rxPA zijn de twee fysieke stukken van dít slot uit HOP's netwerkpot;
-// de app ziet ze op zijn vaste layout.NetRingTX/RX-IPA's. Expliciet twee
-// adressen, want ze liggen fysiek compact terwijl hun IPA-vensters 2MiB uit
-// elkaar staan.
+// Attach koppelt slot i aan de switch (door slots.Start, ná queue-init).
+// txPA/rxPA zijn de twee fysieke descriptorpagina's van dit slot. De app ziet
+// ze op vaste IPA's; framepayload wordt met gevalideerde offsets in de eigen
+// partitie benoemd en is dus nooit onderdeel van deze mapping.
 // No-op zolang de switch niet Up() is: ports is dan nog nil (lazy op de
 // runtime-MaxSlots gedimensioneerd), en een board dat geen switch draait
 // (de Pi-mains starten slots zonder hopswitch.Up) mag hier niet crashen —
 // vóór de array→slice-wissel was dit een onschuldige no-op.
-func Attach(i int, txPA, rxPA uintptr) {
+func Attach(i int, txPA, rxPA uintptr, partBase, partSize uint64) {
 	if i < 1 || i > layout.MaxSlots {
 		return
 	}
@@ -197,8 +211,10 @@ func Attach(i int, txPA, rxPA uintptr) {
 		return
 	}
 	ports[i] = &port{
-		tx: ring.Open(txPA),
-		rx: ring.Open(rxPA),
+		txq:      frameq.Open(txPA),
+		rxq:      frameq.Open(rxPA),
+		partBase: partBase,
+		partSize: partSize,
 	}
 }
 
@@ -212,6 +228,9 @@ func Detach(i int) {
 	defer mu.Unlock()
 	if !up {
 		return
+	}
+	if pt := ports[i]; pt != nil {
+		freePendingLocked(pt)
 	}
 	ports[i] = nil
 }
@@ -266,8 +285,16 @@ func switchPending() bool {
 	defer mu.Unlock()
 	for _, pt := range ports {
 		if pt != nil {
-			_, pending := pt.tx.HeadPending()
-			if pending {
+			if pt.tx != nil {
+				_, pending := pt.tx.HeadPending()
+				if pending {
+					return true
+				}
+			}
+			if pt.txq != nil && pt.txq.SubmitPending() {
+				return true
+			}
+			if pt.pendingHead != 0 && pt.rxq != nil && pt.rxq.SubmitPending() {
 				return true
 			}
 		}
@@ -312,23 +339,79 @@ func switchPassLocked(buf []byte) (worked bool) {
 		if pt == nil {
 			continue
 		}
+		if pt.rxq != nil && flushPendingLocked(i, pt) {
+			worked = true
+		}
 		for range maxBurst {
-			typ, n, ok := pt.tx.ReadInto(buf)
+			var n int
+			var ok bool
+			if pt.tx != nil {
+				var typ uint32
+				typ, n, ok = pt.tx.ReadInto(buf)
+				if ok && typ != ring.TypeFrame {
+					continue
+				}
+			} else {
+				n, ok = readAppTXLocked(pt, buf)
+			}
 			if !ok {
 				break
-			}
-			if typ != ring.TypeFrame {
-				continue
 			}
 			forward(i, buf[:n])
 			worked = true
 		}
-		if !pt.txWarned && pt.tx.Corrupt() {
+		if pt.tx != nil && !pt.txWarned && pt.tx.Corrupt() {
 			pt.txWarned = true
 			fmt.Printf("HOPOS_NETRING_TX_CORRUPT: slot %d: %s\n", i, pt.tx.CorruptWhy())
 		}
+		if pt.txq != nil && !pt.txWarned && pt.txq.CorruptWhy() != "" {
+			pt.txWarned = true
+			fmt.Printf("HOPOS_FRAMEQ_TX_CORRUPT: slot %d: %s\n", i, pt.txq.CorruptWhy())
+		}
 	}
 	return worked
+}
+
+func descriptorPA(pt *port, d frameq.Desc, need uint32) (uintptr, uint32) {
+	if d.Length < need {
+		return 0, frameq.StatusTooSmall
+	}
+	if d.Offset > pt.partSize || uint64(d.Length) > pt.partSize-d.Offset {
+		return 0, frameq.StatusBounds
+	}
+	return uintptr(pt.partBase + d.Offset), frameq.StatusOK
+}
+
+func readAppTXLocked(pt *port, dst []byte) (int, bool) {
+	if pt.txq == nil {
+		return 0, false
+	}
+	// Een kapotte descriptor is één mislukt frame, niet het einde van deze
+	// switchronde. Consumeer en complete maximaal één hele queue voordat we de
+	// volgende poort laten lopen; zo kan een kwaad slot geen globale spin maken.
+	for range frameq.Entries {
+		d, ok := pt.txq.Take()
+		if !ok {
+			return 0, false
+		}
+		status := uint32(frameq.StatusOK)
+		if d.Length > maxFrameLen || d.Length < 14 {
+			status = frameq.StatusTooSmall
+		}
+		pa, bounds := descriptorPA(pt, d, d.Length)
+		if bounds != frameq.StatusOK {
+			status = bounds
+		}
+		if status == frameq.StatusOK {
+			dev.Pull(pa, uintptr(d.Length))
+			dev.CopyOut(dst[:d.Length], pa)
+		}
+		pt.txq.Complete(d.Token, d.Length, status)
+		if status == frameq.StatusOK {
+			return int(d.Length), true
+		}
+	}
+	return 0, false
 }
 
 // deliverLocked legt een (door de NAT al herschreven) inbound frame
@@ -346,27 +429,38 @@ func deliverLocked(i int, p []byte) {
 	writeRXLocked(i, p)
 }
 
-// writeRXLocked is de enige producergrens voor LAN-RX. Omdat beide uiteinden
-// lokaal zijn, mag een korte burst hier wachten tot de consumer ruimte maakt;
-// anders gooit één snelle HOP-response tientallen opeenvolgende TCP-segmenten
-// weg voordat de app-core één keer gepland is. Daarna blijft het gewone
-// Ethernetgedrag gelden: timeout = drop, TCP herstelt.
+// writeRXLocked is the only producer boundary for LAN RX. App ports first use
+// an offered app-owned buffer. If none is available the frame borrows one
+// chunk from the global pool; no per-app payload capacity is reserved.
 func writeRXLocked(i int, p []byte) {
 	if i < 0 || i >= len(ports) || ports[i] == nil {
 		return
 	}
+	pt := ports[i]
+	if pt.rxq != nil {
+		// Preserve wire order: once a port has backlog, append new frames behind
+		// it even if a fresh offer appeared in the meantime.
+		if pt.pendingHead == 0 && deliverBytesLocked(i, pt, p) {
+			return
+		}
+		enqueuePendingLocked(pt, p)
+		notifySwitch()
+		return
+	}
+
+	// HOP's own port and legacy host tests still use a local byte ring.
 	deadline := time.Now().Add(txBackpressure)
 	woken := false
 	for {
-		ok, notify := ports[i].rx.WriteNotify(ring.TypeFrame, p)
+		ok, notify := pt.rx.WriteNotify(ring.TypeFrame, p)
 		if ok {
-			ports[i].rxBlocked = false
+			pt.rxBlocked = false
 			if notify {
 				wakeRXLocked(i)
 			}
 			return
 		}
-		if ports[i].rxBlocked {
+		if pt.rxBlocked {
 			return
 		}
 		// Vol impliceert niet dat de consumer nú runnable is. Eén extra kick
@@ -376,11 +470,131 @@ func writeRXLocked(i int, p []byte) {
 			woken = true
 		}
 		if time.Now().After(deadline) {
-			ports[i].rxBlocked = true
+			pt.rxBlocked = true
 			return
 		}
 		runtime.Gosched()
 	}
+}
+
+func takeRXBufferLocked(i int, pt *port, need uint32) (frameq.Desc, uintptr, bool) {
+	for range frameq.Entries {
+		d, ok := pt.rxq.Take()
+		if !ok {
+			return frameq.Desc{}, 0, false
+		}
+		pa, status := descriptorPA(pt, d, need)
+		if status == frameq.StatusOK {
+			return d, pa, true
+		}
+		pt.rxq.Complete(d.Token, 0, status)
+		wakeRXLocked(i)
+	}
+	return frameq.Desc{}, 0, false
+}
+
+func deliverBytesLocked(i int, pt *port, p []byte) bool {
+	d, pa, ok := takeRXBufferLocked(i, pt, uint32(len(p)))
+	if !ok {
+		return false
+	}
+	dev.Copy(pa, p)
+	dev.Push(pa, uintptr(len(p)))
+	pt.rxq.Complete(d.Token, uint32(len(p)), frameq.StatusOK)
+	wakeRXLocked(i)
+	return true
+}
+
+func enqueuePendingLocked(pt *port, p []byte) bool {
+	if !mayBorrowLocked(pt) {
+		return false
+	}
+	id := pool.alloc(p)
+	if id == 0 {
+		return false
+	}
+	if pt.pendingTail == 0 {
+		pt.pendingHead = id
+	} else {
+		pool.chunks[pt.pendingTail].next = id
+	}
+	pt.pendingTail = id
+	pt.pendingCount++
+	return true
+}
+
+// mayBorrowLocked houdt een kleine bodem beschikbaar voor iedere andere
+// aangesloten app, zonder ook maar één chunk vooraf aan een slot toe te wijzen.
+// Met één ontvanger mag die de hele pool gebruiken; bij meerdere ontvangers
+// leent iedereen uit hetzelfde vrije deel en groeit de werkelijke verdeling met
+// de vraag. Zodra alle bodems in gebruik zijn is ook de rest weer vrij voor
+// wie hem het eerst nodig heeft. Vol = Ethernet-drop; TCP regelt herstel.
+func mayBorrowLocked(want *port) bool {
+	if pool.freeCount == 0 {
+		return false
+	}
+	var attached uint32
+	for i, pt := range ports {
+		if i > 0 && pt != nil && pt.rxq != nil {
+			attached++
+		}
+	}
+	if attached <= 1 {
+		return true
+	}
+	total := uint32(len(pool.chunks) - 1)
+	reserveEach := total / (2 * attached)
+	if reserveEach > frameq.Entries {
+		reserveEach = frameq.Entries
+	}
+	var reserved uint32
+	for i, pt := range ports {
+		if i == 0 || pt == nil || pt == want || pt.rxq == nil || pt.pendingCount >= reserveEach {
+			continue
+		}
+		reserved += reserveEach - pt.pendingCount
+	}
+	return pool.freeCount > reserved
+}
+
+func flushPendingLocked(i int, pt *port) (worked bool) {
+	for pt.pendingHead != 0 {
+		id := pt.pendingHead
+		need := uint32(pool.chunks[id].length)
+		d, pa, ok := takeRXBufferLocked(i, pt, need)
+		if !ok {
+			return worked
+		}
+		next := pool.chunks[id].next
+		n, valid := pool.copyTo(id, pa)
+		status := uint32(frameq.StatusOK)
+		if !valid {
+			status = frameq.StatusBounds
+			n = 0
+		} else {
+			dev.Push(pa, uintptr(n))
+		}
+		pt.rxq.Complete(d.Token, uint32(n), status)
+		pool.release(id)
+		pt.pendingHead = next
+		pt.pendingCount--
+		if next == 0 {
+			pt.pendingTail = 0
+		}
+		wakeRXLocked(i)
+		worked = true
+	}
+	return worked
+}
+
+func freePendingLocked(pt *port) {
+	for pt.pendingHead != 0 {
+		id := pt.pendingHead
+		pt.pendingHead = pool.chunks[id].next
+		pool.release(id)
+		pt.pendingCount--
+	}
+	pt.pendingTail = 0
 }
 
 func wakeRXLocked(i int) {

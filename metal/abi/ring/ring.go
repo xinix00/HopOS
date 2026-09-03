@@ -50,7 +50,7 @@ const (
 	// gebruikt systemapi over het LAN voor alle gewone calls.
 	TypeRPCReq  = 3
 	TypeRPCResp = 4
-	TypeFrame   = 5 // frame-ringen: één rauw Ethernet-frame (metal/net/hopswitch)
+	TypeFrame   = 5 // HOP's lokale byte-ring: één Ethernet-frame (app-poorten gebruiken frameq)
 )
 
 // HeadOff is de byte-offset van het head-woord binnen de ringkop — voor wie

@@ -323,12 +323,13 @@ func Revoke(i int) {
 // Build schrijft de stage-2-tabellen voor slot i en geeft het fysieke adres
 // van de L1-tabel terug (voor VTTBR_EL2, gezet door de EL2-trampoline).
 // ipaBase is het linkadres-bereik van de image; paBase/size is de fysieke
-// partitie die HOP voor deze task alloceerde (variabel per job). ctrlPA/netHalf
-// beschrijven zijn control+TX+RX-slice uit HOP's systeempot. Het
+// partitie die HOP voor deze task alloceerde (variabel per job). ctrlPA en
+// queueSize beschrijven control plus twee descriptorpagina's; payload staat
+// in de app-partitie of tijdelijk in HOP's gezamenlijke framepool. Het
 // IPA-bereik [ipaBase, ipaBase+size) wordt op [paBase, paBase+size) gelegd.
 // size ≤ één 1GB-blok vanaf ipaBase (aanroeper begrenst dit) → één L2-tabel.
 // De partitie zelf bevat uitsluitend app-RAM.
-func Build(i int, ipaBase, paBase, size, ctrlPA, netHalf uint64) (uint64, error) {
+func Build(i int, ipaBase, paBase, size, ctrlPA, queueSize uint64) (uint64, error) {
 	if i < 1 || i > layout.MaxSlots {
 		return 0, fmt.Errorf("slot %d buiten bereik", i)
 	}
@@ -364,8 +365,8 @@ func Build(i int, ipaBase, paBase, size, ctrlPA, netHalf uint64) (uint64, error)
 	dev.Write64(base+l1Off+uintptr(ipaBase>>30)*8, partL2|descTable)
 	dev.Write64(base+l1Off+uintptr(uint64(layout.CtrlBase)>>30)*8, l2Dev|descTable)
 
-	if ctrlPA&0xFFF != 0 || netHalf&0xFFF != 0 || netHalf <= layout.NetRingHeader || netHalf > layout.NetRingWindowHalf {
-		return 0, fmt.Errorf("slot-buffer %#x half=%#x past niet op de paginafijne vensters", ctrlPA, netHalf)
+	if ctrlPA&0xFFF != 0 || queueSize != layout.NetQueueSize {
+		return 0, fmt.Errorf("slot-buffer %#x queue=%#x past niet op de paginafijne vensters", ctrlPA, queueSize)
 	}
 	netPA := ctrlPA + uint64(layout.SlotControlStride)
 
@@ -408,27 +409,26 @@ func Build(i int, ipaBase, paBase, size, ctrlPA, netHalf uint64) (uint64, error)
 		dev.Write64(uintptr(l3SlotCtrl)+uintptr(ctrlPage+off>>12)*8, (ctrlPA+off)|pageRWNC)
 	}
 
-	// Alleen de twee logische ringen van dit slot in het net-GB. De virtuele
-	// vensters zijn elk 2MiB groot, maar we mappen uitsluitend netHalf bytes;
-	// de rest faultt. Zo kan HOP één totale pot over alle slots verdelen zonder
-	// dat een app een buurpagina kan benoemen.
+	// Alleen de twee descriptorpagina's van dit slot in het net-GB. De virtuele
+	// vensters blijven elk 2MiB groot, maar slechts één pagina is gemapt; de rest
+	// faultt. Payloadbuffers liggen in de al begrensde app-partitie.
 	netGB := uint64(layout.NetRingBase) &^ ((1 << 30) - 1)
 	dev.Write64(base+l1Off+uintptr(netGB>>30)*8, l2Net|descTable)
 	mapNet := func(link, phys, l3 uint64) error {
 		idx := (link - netGB) >> 21
 		if idx > 511 || link&(uint64(layout.NetRingWindowHalf)-1) != 0 {
-			return fmt.Errorf("net-ring-IPA %#x past niet in het net-GB", link)
+			return fmt.Errorf("net-queue-IPA %#x past niet in het net-GB", link)
 		}
 		dev.Write64(uintptr(l2Net)+uintptr(idx)*8, l3|descTable)
-		for off := uint64(0); off < netHalf; off += 4 << 10 {
+		for off := uint64(0); off < queueSize; off += 4 << 10 {
 			dev.Write64(uintptr(l3)+uintptr(off>>12)*8, (phys+off)|pageRWNC)
 		}
 		return nil
 	}
-	if err := mapNet(uint64(layout.NetRingTX(i)), netPA, l3NetTX); err != nil {
+	if err := mapNet(uint64(layout.NetQueueTX(i)), netPA, l3NetTX); err != nil {
 		return 0, err
 	}
-	if err := mapNet(uint64(layout.NetRingRX(i)), netPA+netHalf, l3NetRX); err != nil {
+	if err := mapNet(uint64(layout.NetQueueRX(i)), netPA+queueSize, l3NetRX); err != nil {
 		return 0, err
 	}
 

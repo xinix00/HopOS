@@ -61,7 +61,6 @@ func poolReset(t *testing.T, regs []layout.Region) {
 	}
 	partOf = make([]region, layout.SlotCap+1)
 	bufferArena = region{}
-	netHalf = 0
 }
 
 // De maat die partAlloc teruggeeft ÍS de partitie, ook als de aanvraag geen
@@ -262,37 +261,39 @@ func TestLicheeRVOneRegionPlacesWhatThreeCouldNot(t *testing.T) {
 	})
 }
 
-func TestBufferGeometryDeeltOokControlUitDePot(t *testing.T) {
+func TestBufferGeometryHoudtPayloadInEenGezamenlijkePool(t *testing.T) {
 	old := layout.MaxSlots
 	defer layout.SetMaxSlots(old)
 
 	layout.SetMaxSlots(128)
-	used, half, err := networkGeometry(50 << 20)
+	reserved, metadata, payload, err := networkGeometry(50 << 20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if used != 50<<20 || half != 136<<10 {
-		t.Fatalf("128 slots: used=%d MiB half=%d KiB, wil 50 MiB/136 KiB", used>>20, half>>10)
+	if reserved != 50<<20 || metadata != 17<<20 || payload != 33<<20 {
+		t.Fatalf("128 slots: reserved=%d MiB metadata=%d MiB payload=%d MiB",
+			reserved>>20, metadata>>20, payload>>20)
 	}
-	if _, _, err := networkGeometry(31 << 20); err == nil {
-		t.Fatal("31 MiB geaccepteerd; control + minimale TX/RX vraagt 32 MiB")
+	if _, _, _, err := networkGeometry(16 << 20); err == nil {
+		t.Fatal("16 MiB geaccepteerd; descriptor-metadata alleen vraagt al 17 MiB")
 	}
 
 	layout.SetMaxSlots(16)
-	used, half, err = networkGeometry(4 << 20)
+	reserved, metadata, payload, err = networkGeometry(4 << 20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if used != 4<<20 || half != 64<<10 {
-		t.Fatalf("16 slots compact: used=%d MiB half=%d KiB, wil 4 MiB/64 KiB", used>>20, half>>10)
+	if reserved != 4<<20 || metadata != 2176<<10 || payload != 1920<<10 {
+		t.Fatalf("16 slots compact: reserved=%d KiB metadata=%d KiB payload=%d KiB",
+			reserved>>10, metadata>>10, payload>>10)
 	}
 
-	used, half, err = networkGeometry(50 << 20)
+	reserved, metadata, payload, err = networkGeometry(50 << 20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if used != 50<<20 || half != 1536<<10 {
-		t.Fatalf("16 slots: used=%d MiB half=%d KiB, wil 50 MiB/1536 KiB", used>>20, half>>10)
+	if reserved != 50<<20 || payload != reserved-metadata {
+		t.Fatalf("16 slots: reserved=%d metadata=%d payload=%d", reserved, metadata, payload)
 	}
 }
 
@@ -304,21 +305,18 @@ func TestSlotBuffersZijnCompactEnGescheiden(t *testing.T) {
 	if err := ConfigureNetworkBuffer(50 << 20); err != nil {
 		t.Fatal(err)
 	}
-	c1, tx1, rx1, cap1, err := slotBuffers(1)
+	c1, tx1, rx1, err := slotBuffers(1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c2, tx2, rx2, cap2, err := slotBuffers(2)
+	c2, tx2, rx2, err := slotBuffers(2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tx1-c1 != uintptr(layout.SlotControlStride) || rx1-tx1 != 136<<10 {
+	if tx1-c1 != uintptr(layout.SlotControlStride) || rx1-tx1 != 4<<10 {
 		t.Fatalf("slot 1: ctrl=%#x tx=%#x rx=%#x", c1, tx1, rx1)
 	}
-	if c2-rx1 != 136<<10 || tx2-c2 != uintptr(layout.SlotControlStride) || rx2-tx2 != 136<<10 {
+	if c2-rx1 != 4<<10 || tx2-c2 != uintptr(layout.SlotControlStride) || rx2-tx2 != 4<<10 {
 		t.Fatalf("slot 2 sluit niet compact aan: ctrl=%#x tx=%#x rx=%#x", c2, tx2, rx2)
-	}
-	if cap1 != 132<<10 || cap2 != cap1 {
-		t.Fatalf("ringdata %d/%d KiB, wil 132", cap1>>10, cap2>>10)
 	}
 }

@@ -365,7 +365,7 @@ const (
 	// vertaalfase om weg te halen — de kooi is een PMP-whitelist in de CSR's van
 	// het hart zelf, en daar komt alleen machine mode ÓP dat hart bij.
 	CtxRevoke = 512
-	// CtxRingHeadPA: fysiek adres van het head-woord van de RX-frame-ring van
+	// CtxRingHeadPA: fysiek adres van het completion-headwoord van de RX-queue van
 	// dit slot — de producer-index die hopswitch ophoogt. De rotatie leest hem
 	// voor de doorbell-peek (zie CtrlRXDoor): een bewoner wiens wektijd nog
 	// niet om is maar wiens ring voorbij zijn wek-drempel gegroeid is, heeft
@@ -409,7 +409,7 @@ const (
 	NetRingWindowHalf = NetRingStride / 2
 	NetTXOff          = 0x0
 	NetRXOff          = NetRingWindowHalf
-	NetRingHeader     = 0x1000 // legacy naam: één framequeue-page
+	NetQueueSize      = 0x1000 // one complete frameq descriptor page
 
 	// Alleen HOP's lokale poort/tests gebruiken nog de gewone bytering. App-
 	// poorten gebruiken frameq en hebben dus geen statische payloadcapaciteit.
@@ -895,16 +895,21 @@ func RingInbox(i int) uintptr {
 	return SlotControl(i) + AbiRingOff + InboxOff
 }
 
-// NetRingTX/NetRingRX geven de vaste IPA's van de virtuele NIC van slot i.
-// HOP mapt alleen de pagina's van dít slot op zijn fysieke deel van de
-// systeempot; het ruime venster is dus adresruimte, geen reservering.
-func NetRingTX(i int) uintptr {
+// NetQueueTX/NetQueueRX geven de vaste IPA's van de virtuele NIC van slot i.
+// HOP mapt alleen de descriptorpagina's van dít slot; het ruime venster is
+// adresruimte, geen payloadreservering.
+func NetQueueTX(i int) uintptr {
 	return uintptr(NetRingBase + uint64(i-1)*NetRingStride + NetTXOff)
 }
 
-func NetRingRX(i int) uintptr {
+func NetQueueRX(i int) uintptr {
 	return uintptr(NetRingBase + uint64(i-1)*NetRingStride + NetRXOff)
 }
+
+// Legacy namen voor code die alleen de vaste IPA nodig heeft. Nieuwe code
+// noemt de werkelijkheid: dit zijn descriptorqueues, geen byteringen.
+func NetRingTX(i int) uintptr { return NetQueueTX(i) }
+func NetRingRX(i int) uintptr { return NetQueueRX(i) }
 
 // SlotBase geeft de canonieke IPA-basis van slot i (1-based, = core-index) —
 // het linkadres-bereik; de fysieke partitie komt uit de pool (partAlloc).
@@ -1091,7 +1096,7 @@ const (
 	// start inleest (de Docker-vorm: env meegegeven bij het starten). Vervangt
 	// het kernel-envp dat bare metal niet heeft. Loopt tot de staart-woorden.
 	CtrlEnvData = 0x118
-	CtrlEnvMax  = CtrlIdleMode - CtrlEnvData
+	CtrlEnvMax  = CtrlPhysBase - CtrlEnvData
 
 	// DE STAART: HOP → app-woorden die ná de env-regio zijn bijgekomen staan
 	// bovenaan de page en groeien naar beneden. Zo blijft de page compatibel in
@@ -1107,6 +1112,10 @@ const (
 	// dit silicium hoort kan alleen HOP hem zeggen. De governor (cpu/idle)
 	// leest het woord elke ronde; 0 = wat de architectuur zelf doet (arm64:
 	// WFE op de event-stream), de waarden staan hieronder.
+	// CtrlPhysBase lets the app-side queue cache seam translate a buffer offset
+	// to a physical address on non-coherent RISC-V. ARM uses the virtual address
+	// for DC CIVAC; code above the seam passes both and stays architecture-free.
+	CtrlPhysBase = 0xFF0
 	CtrlIdleMode = 0xFF8
 )
 

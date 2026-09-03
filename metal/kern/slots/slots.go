@@ -29,6 +29,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/xinix00/HopOS/metal/v2/abi/frameq"
 	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 	"github.com/xinix00/HopOS/metal/v2/abi/place"
 	"github.com/xinix00/HopOS/metal/v2/abi/ring"
@@ -494,7 +495,7 @@ func CtrlPageOf(i int) (uintptr, bool) {
 	if _, _, ok := partitionOf(i); !ok {
 		return 0, false
 	}
-	ctrl, _, _, _, err := slotBuffers(i)
+	ctrl, _, _, err := slotBuffers(i)
 	return ctrl, err == nil
 }
 
@@ -938,7 +939,7 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 // beide is entry de app-entry uit de ELF (abi/place valideerde hem al; de
 // venstercheck hieronder blijft als vangrail staan).
 func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlob []byte, mtab [][2]string, ports map[string]int, job string) (err error) {
-	ctrlPA, txPA, rxPA, netCap, err := slotBuffers(i)
+	ctrlPA, txPA, rxPA, err := slotBuffers(i)
 	if err != nil {
 		return err
 	}
@@ -977,7 +978,7 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	}
 
 	// SPSC-hygiëne: geen oude servicer meer op deze ringen vóór her-init,
-	// en de switch van de frame-ringen af vóór díé opnieuw geïnitieerd
+	// en de switch van de framequeues af vóór díé opnieuw geïnitieerd
 	// worden. Poort-publicaties horen bij de vorige task: intrekken (de
 	// nieuwe task publiceert de zijne ná deze Start).
 	evictServicer(i)
@@ -1019,14 +1020,14 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// stack pas als hij appnet.Up aanroept.
 	ring.Init(ctrlPA+layout.AbiRingOff+layout.OutboxOff, layout.RingDataCap)
 	ring.Init(ctrlPA+layout.AbiRingOff+layout.InboxOff, layout.RingDataCap)
-	ring.Init(txPA, netCap)
-	ring.Init(rxPA, netCap)
+	frameq.Init(txPA)
+	frameq.Init(rxPA)
 
 	// De core krijgt stage-2-isolatie: de EL2-trampoline activeert de hier
 	// gebouwde tabel en dropt pas dan naar de app-entry (een canoniek IPA — de
 	// stage-2 vertaalt hem naar deze partitie). De app-image draait nooit op
 	// EL2. De trampoline is data-gedreven: alles staat op deze control-page.
-	if err := cagePrepare(i, linkBase, base, size, entry, uint64(ctrlPA), netCap+layout.NetRingHeader); err != nil {
+	if err := cagePrepare(i, linkBase, base, size, entry, uint64(ctrlPA), frameq.PageSize); err != nil {
 		return err
 	}
 	// DeviceGrant-haak: het venster van de houder de kooi in (no-op voor
@@ -1042,6 +1043,7 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	ctrlWrite(i, layout.CtrlEntry, entry)
 	ctrlWrite(i, layout.CtrlVecPA, uint64(layout.VecBasePA()))
 	ctrlWrite(i, layout.CtrlSlot, uint64(i))
+	ctrlWrite(i, layout.CtrlPhysBase, base)
 	ctrlWrite(i, layout.CtrlMboxPA, uint64(layout.ParkMboxPA(core))) // → TPIDR_EL2
 	// Het aantal cores op de control-page; de app-OS-laag leest 'm en vraagt bij
 	// cores > 1 de extra cores lazy op (CtrlSMPReq → HOP dispatcht). Altijd
@@ -1073,7 +1075,7 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// heruitdelen aan een ander slot: isolatiebreuk. Attach/Publish zetten alleen
 	// switch/NAT-state en hebben de draaiende core niet nodig, dus dit mag ervóór;
 	// ná de dispatch volgt meteen started=true, zonder faalbare stap ertussen.
-	hopswitch.Attach(i, txPA, rxPA)
+	hopswitch.Attach(i, txPA, rxPA, base, size)
 	for name, p := range ports {
 		// Eén gepubliceerde poort is open voor béíde protocollen: de jobspec
 		// hoeft geen proto te kennen, en een app die er maar één bedient laat
@@ -1102,10 +1104,10 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// asm het adres niet meer uitrekenen.
 	ctxWrite(i, layout.CtxCtrlPA, ctx)
 	ctxWrite(i, layout.CtxUnitSlot, uint64(i)) // de eenheid = dit slot zelf
-	// Het head-woord van de RX-frame-ring erbij: het live-eind van de
+	// Het completion-headwoord van de RX-framequeue erbij: het live-eind van de
 	// doorbell-peek (layout.CtxRingHeadPA; de wek-drempel schrijft de app
 	// zelf op CtrlRXDoor). Zelfde publicatiepad als CtxCtrlPA.
-	ctxWrite(i, layout.CtxRingHeadPA, uint64(rxPA)+ring.HeadOff)
+	ctxWrite(i, layout.CtxRingHeadPA, uint64(rxPA)+frameq.CompletionHeadOff)
 	// coreParks erbij: een core die niet resetbaar is heeft ALTIJD de
 	// boot-pending-route — zijn switcher draait er vanaf de boot (cageInit
 	// trekt hem in via parkenter), dus de rotatie pikt élke boot-pending op.

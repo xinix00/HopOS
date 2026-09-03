@@ -16,7 +16,7 @@ func TestHandoffRoundTrip(t *testing.T) {
 		OldBase: 0x40000000, OldSize: 0x0F000000,
 		Window: 0xA0E00000, Total: 0x0F200000,
 		Gen:         2,
-		BufferArena: slots.BufferArenaState{Base: 0xA8000000, Size: 50 << 20, RingHalf: 136 << 10},
+		BufferArena: slots.BufferArenaState{Base: 0xA8000000, Size: 50 << 20},
 		Slots: []slots.SlotState{
 			{Slot: 1, PartBase: 0xBC000000, PartSize: 64 << 20, Core: 1, Cores: 1,
 				Job: "welcome", Ports: []uint16{8080, 443},

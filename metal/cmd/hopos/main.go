@@ -250,8 +250,8 @@ func main() {
 		fmt.Printf("flip: adopted kernel generation %d — %s, %d resident(s) handed over, previous kernel had %#x+%dMB HOPOS_FLIP_BOOT\n",
 			flipped.Gen, hopBudget(), len(flipped.Slots), flipped.OldBase, flipped.OldSize>>20)
 	}
-	// Eén HOP-brede systeempot, buiten alle app-partities. Control, bootstrap en
-	// de vaste NIC-vensters worden hieruit gevoed; Lean/TCP doet flow-control.
+	// Eén HOP-brede systeempot, buiten alle app-partities. Control en de vaste
+	// descriptorpagina's komen eerst; alle rest is één dynamische framepool.
 	// Een kern-flip neemt exact dezelfde fysieke pot over.
 	var netBufferErr error
 	if isFlip {
@@ -267,8 +267,9 @@ func main() {
 		fail("network buffer", netBufferErr)
 	}
 	if arena, err := slots.BufferArena(); err == nil {
-		fmt.Printf("buffers: %d MiB shared arena @ %#x — %d KiB control + %d KiB per TX/RX ring, TCP provides flow control HOPOS_NET_BUFFER\n",
-			arena.Size>>20, arena.Base, uint64(layout.SlotControlStride)>>10, arena.RingHalf>>10)
+		meta := uint64(layout.MaxSlots) * (uint64(layout.SlotControlStride) + 2*layout.NetQueueSize)
+		fmt.Printf("buffers: %d MiB shared arena @ %#x — %d MiB dynamic framepool after fixed metadata; TCP provides flow control HOPOS_NET_BUFFER\n",
+			arena.Size>>20, arena.Base, (arena.Size-meta)>>20)
 	}
 	// hopos.reboot=1: dit image is een herstart-verzoek (watchdog.go
 	// rebootNow) — ná het flip-rapport, zodat de console zegt wat er gebeurde.

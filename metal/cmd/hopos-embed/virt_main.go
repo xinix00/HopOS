@@ -403,7 +403,7 @@ func main() {
 	}
 	fmt.Println("HOPOS_FETCH_OK — fetch via HOP: download landde in het volume")
 
-	// Per-slot netwerk: elke app een eigen netstack over de frame-ringen,
+	// Per-slot netwerk: elke app een eigen netstack over de framequeues,
 	// HOP schuift alleen frames (metal/net/hopswitch). Bewijs: app → app zonder
 	// dat er een TCP-stack op core 0 aan te pas komt (HOP is enkel L2-switch +
 	// ARP-responder voor de gateway).

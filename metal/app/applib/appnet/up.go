@@ -21,7 +21,6 @@ import (
 	"github.com/xinix00/lean/leannet"
 
 	"github.com/xinix00/HopOS/metal/v2/abi/layout"
-	"github.com/xinix00/HopOS/metal/v2/abi/ring"
 	"github.com/xinix00/HopOS/metal/v2/app/applib"
 	"github.com/xinix00/HopOS/metal/v2/cpu/idle"
 )
@@ -33,9 +32,9 @@ func Up(a *applib.App) (string, error) {
 	ip := layout.SlotIP4(a.Slot)
 	host := layout.HostIP4()
 
-	nd := &nic{
-		tx: ring.Open(layout.NetRingTX(a.Slot)),
-		rx: ring.Open(layout.NetRingRX(a.Slot)),
+	nd, err := newNIC(a)
+	if err != nil {
+		return "", err
 	}
 
 	// Het budget: 1/8 van de partitie, geklemd. Een welcome-app van 16MB
@@ -88,7 +87,7 @@ func Up(a *applib.App) (string, error) {
 	// verkeer ziet (idle/rxdoor.go). De cap mag dus groot.
 	idle.WatchRXRing(
 		layout.SlotControl(a.Slot)+layout.CtrlRXDoor,
-		nd.rx.HeadPending)
+		nd.rx.CompletionPending)
 	lo, hi, hold := rxPoll(a.Env("RXPOLL"))
 	go func() {
 		gp, _ := runtime.GetG()

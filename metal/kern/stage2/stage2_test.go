@@ -22,7 +22,7 @@ const (
 	tRevokeVecPA   = 0x1_4000_0000
 	tPoolPA        = 0x2_0000_0000
 	tBufferPA      = 0x3_0000_0000
-	tNetHalf       = 200 << 10
+	tNetHalf       = layout.NetQueueSize
 )
 
 // s2buf draagt de echte tabellen; package-var zodat de GC hem nooit opruimt

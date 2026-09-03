@@ -36,6 +36,7 @@ import (
 type App struct {
 	Slot     int    // slot-index (= core-index)
 	RAMStart uint64 // eigen partitiebasis
+	RAMPhys  uint64 // fysieke basis, uitsluitend voor de queue-cache-naad
 	RAMSize  uint64 // eigen (door HOP gepatchte) RAM-declaratie
 
 	env map[string]string // door HOP meegegeven bij start
@@ -96,6 +97,7 @@ func Init() *App {
 
 	a.out = ring.Open(layout.RingOutbox(a.Slot))
 	a.env = a.readEnv()
+	a.RAMPhys = a.ctrlGet(layout.CtrlPhysBase)
 
 	// Kreeg deze app het glas (gui/fbgrant zette FB_*), dan is dat venster DRAM
 	// en hoort het als write-combine gemapt te worden. De stage-2 van de kooi

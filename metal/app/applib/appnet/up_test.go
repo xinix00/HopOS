@@ -4,10 +4,11 @@ import (
 	"net"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/xinix00/lean/leannet"
 
-	"github.com/xinix00/HopOS/metal/v2/abi/ring"
+	"github.com/xinix00/HopOS/metal/v2/abi/frameq"
 )
 
 type discardDevice struct{}
@@ -38,36 +39,28 @@ func TestJoinMulticastDispatchesByIPFamily(t *testing.T) {
 	}
 }
 
-func TestTransmitWachtKortOpRuimteInPlaatsVanDrop(t *testing.T) {
-	tx := ring.New(4096)
+func TestTransmitWachtKortOpVrijeDescriptorInPlaatsVanDrop(t *testing.T) {
+	mem := make([]uint64, frameq.PageSize/8)
+	base := uintptr(unsafe.Pointer(&mem[0]))
+	frameq.Init(base)
+	tx := frameq.Open(base)
 	frame := make([]byte, 1000)
-	filled := 0
-	for tx.Write(ring.TypeFrame, frame) {
-		filled++
-	}
-	if filled < 2 {
-		t.Fatalf("testring vulde al na %d frames", filled)
-	}
 
 	drained := make(chan struct{})
 	go func() {
 		time.Sleep(time.Millisecond)
-		buf := make([]byte, len(frame))
-		for {
-			_, _, ok := tx.ReadInto(buf)
-			if !ok {
-				break
-			}
-		}
+		tx.Complete(0, 0, frameq.StatusOK)
 		close(drained)
 	}()
 
 	n := &nic{tx: tx}
+	// Alle tokens bezet; completion 0 maakt er na 1ms precies één vrij.
 	if err := n.Transmit(frame); err != nil {
 		t.Fatalf("Transmit gaf de lokale burst op: %v", err)
 	}
 	<-drained
-	if _, got, ok := tx.ReadInto(make([]byte, len(frame))); !ok || got != len(frame) {
-		t.Fatalf("frame na backpressure: ok=%v bytes=%d", ok, got)
+	d, ok := tx.Take()
+	if !ok || d.Length != uint32(len(frame)) || d.Token != 0 {
+		t.Fatalf("descriptor na backpressure: %#v ok=%v", d, ok)
 	}
 }

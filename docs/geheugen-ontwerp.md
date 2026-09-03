@@ -32,11 +32,12 @@ DRAM  →  board-plan  →  pool  →  systeempot + partities  →  app-RAM
    afgerond op 2MB. Dit is wat de kooi vrijgeeft en waarbuiten de app niets kan
    raken.
 5. **Systeempot + app-RAM** — bij boot reserveert HOP standaard 50MB uit de
-   pool voor alle vaste control-/netwerkvensters; de kleine LicheeRV gebruikt
-   standaard 4MB. `hopos.net.buffer` kan dit per node overrulen. Elke
-   jobpartitie die daarna wordt uitgedeeld is volledig app-RAM; er zit geen
-   verborgen staart meer in. De ringkop draagt de werkelijke capaciteit, dus
-   een andere potgrootte is geen app-ABI-wijziging.
+   pool; de kleine LicheeRV gebruikt standaard 4MB. `hopos.net.buffer` kan dit
+   per node overrulen. Per mogelijk slot kosten alleen control en twee
+   descriptorpagina's een vaste plak. Alle bytes daarachter zijn één HOP-brede
+   pool van 2KiB-chunks die pas bij RX-backlog worden geleend en onmiddellijk
+   terugkomen. Elke jobpartitie die daarna wordt uitgedeeld is volledig app-RAM;
+   framepayload blijft daar tijdens normaal verkeer gewoon in app-buffers.
 
 ## Wat HOP voor zichzelf houdt, per board
 
@@ -121,9 +122,11 @@ bereikt nooit iets buiten de kooi en schaadt alleen de app zelf.
 - **`MaxSlots`** per board (LicheeRV: 16 kooien op één app-hart — kooien zijn
   goedkoop, 68KB elk; de échte grens is app-RAM bij plaatsing).
 - **De systeempot**: standaard 50MB totaal (`hopos.net.buffer=50M`), behalve
-  4MB op de LicheeRV met zijn 16 slots. De pot wordt over alle mogelijke slots
-  verdeeld in 128KB control plus TX/RX. TCP doet flow-control; de lokale
-  ringnaad wacht alleen kort op een ingehaalde consumer.
+  4MB op de LicheeRV met zijn 16 slots. Vast zijn alleen 128KB control plus twee
+  queuepagina's per mogelijk slot; de rest is één dynamische framepool zonder
+  per-slot payloadquotum. Een kleine toelatingsreserve beschermt andere
+  aangesloten apps tegen een vastgelopen ontvanger. Als de pool echt vol is
+  dropt Ethernet en verzorgt TCP de flow-control en retransmit.
 
 ## Fragmentatie: wanneer het bijt en wat je beschermt
 

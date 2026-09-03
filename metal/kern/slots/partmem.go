@@ -26,7 +26,9 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/xinix00/HopOS/metal/v2/abi/frameq"
 	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/net/hopswitch"
 )
 
 // ErrNoPartition markeert "de partitie past nu niet in de pool" — een
@@ -43,9 +45,9 @@ const part2M = 2 << 20
 
 const (
 	defaultNetworkBuffer = 50 << 20
-	netPage              = 4 << 10
-	minNetRingHalf       = 64 << 10
 	controlPerSlot       = uint64(layout.SlotControlStride)
+	sharedPerSlot        = controlPerSlot + 2*frameq.PageSize
+	minFramePool         = 64 << 10
 )
 
 type region struct{ base, size uint64 }
@@ -61,49 +63,40 @@ var (
 	// bereik wordt vóór de eerste plaatsing uit partFree gesneden, zodat geen
 	// app-partitie ooit dezelfde pagina's kan krijgen.
 	bufferArena region
-	netHalf     uint64
 	// op layout.MaxSlots+1 gedimensioneerd (het board zet MaxSlots vóór gebruik)
 )
 
 // BufferArenaState is de minimale fysieke staat die een kern-flip meeneemt.
-// Control- en ringadressen volgen uit Base en RingHalf; geen per-slot tabel.
+// Control-, queue- en pooladressen volgen uit Base; geen per-slot tabel.
 type BufferArenaState struct {
-	Base, Size, RingHalf uint64
+	Base, Size uint64
 }
 
-// networkGeometry verdeelt één totale pot over alle mogelijke kooien. Elke
-// slice begint met het vaste control-blok; de rest gaat gelijk naar TX/RX.
-// TCP doet de werkelijke flow-control. Alles is paginafijn voor beide mappers.
-func networkGeometry(total uint64) (used, half uint64, err error) {
+// networkGeometry snijdt alleen de vaste metadata uit de voorkant. Payload
+// wordt nadrukkelijk NIET over MaxSlots verdeeld: alles achter de kleine
+// control- en descriptorrecords is één gezamenlijke chunkpool.
+func networkGeometry(total uint64) (reserved, metadata, payload uint64, err error) {
 	if layout.MaxSlots < 1 {
-		return 0, 0, fmt.Errorf("network buffer: geen slots")
+		return 0, 0, 0, fmt.Errorf("network buffer: geen slots")
 	}
-	perSlot := total / uint64(layout.MaxSlots)
-	if perSlot <= controlPerSlot {
-		return 0, 0, fmt.Errorf("network buffer %d MiB te klein voor %d control-blokken",
-			total>>20, layout.MaxSlots)
-	}
-	half = (perSlot - controlPerSlot) / 2
-	half &^= netPage - 1
-	if half < minNetRingHalf {
-		need := uint64(layout.MaxSlots) * (controlPerSlot + 2*minNetRingHalf)
-		return 0, 0, fmt.Errorf("network buffer %d MiB te klein voor %d slots; minimaal %d MiB",
+	reserved = align2M(total)
+	metadata = sharedPerSlot * uint64(layout.MaxSlots)
+	if reserved < metadata+minFramePool {
+		need := metadata + minFramePool
+		return 0, 0, 0, fmt.Errorf("network buffer %d MiB te klein voor %d descriptorqueues; minimaal %d MiB",
 			total>>20, layout.MaxSlots, (need+(1<<20)-1)>>20)
 	}
-	if half > layout.NetRingWindowHalf {
-		half = layout.NetRingWindowHalf
-	}
-	return (controlPerSlot + 2*half) * uint64(layout.MaxSlots), half, nil
+	return reserved, metadata, reserved - metadata, nil
 }
 
-// ConfigureNetworkBuffer reserveert de HOP-brede systeempot. total is een
-// bovengrens; boven wat in de vaste IPA-vensters past blijft gewoon pool-RAM.
-// De default is 50MiB: bij 128 slots 128KiB control + 136KiB per richting.
+// ConfigureNetworkBuffer reserveert de HOP-brede systeempot. Alleen control
+// plus twee descriptorpagina's per mogelijk slot ligt vast; alle resterende
+// bytes vormen de dynamische framepool voor de Sessions die werkelijk druk zijn.
 func ConfigureNetworkBuffer(total uint64) error {
 	if total == 0 {
 		total = defaultNetworkBuffer
 	}
-	used, half, err := networkGeometry(total)
+	reserved, metadata, payload, err := networkGeometry(total)
 	if err != nil {
 		return err
 	}
@@ -111,13 +104,12 @@ func ConfigureNetworkBuffer(total uint64) error {
 	partMu.Lock()
 	defer partMu.Unlock()
 	if bufferArena.size != 0 {
-		if netHalf == half {
+		if bufferArena.size == reserved {
 			return nil
 		}
-		return fmt.Errorf("network buffer staat al op %d KiB per richting", netHalf>>10)
+		return fmt.Errorf("network buffer staat al op %d MiB", bufferArena.size>>20)
 	}
 
-	reserved := align2M(used)
 	best := -1
 	for idx := len(partFree) - 1; idx >= 0; idx-- {
 		r := partFree[idx]
@@ -139,7 +131,11 @@ func ConfigureNetworkBuffer(total uint64) error {
 	}
 	takeRange(base, base+reserved)
 	bufferArena = region{base: base, size: reserved}
-	netHalf = half
+	if err := hopswitch.ConfigureFramePool(uintptr(base+metadata), payload); err != nil {
+		insertFree(bufferArena)
+		bufferArena = region{}
+		return err
+	}
 	return nil
 }
 
@@ -193,22 +189,20 @@ func BufferArena() (BufferArenaState, error) {
 	}
 	partMu.Lock()
 	defer partMu.Unlock()
-	return BufferArenaState{Base: bufferArena.base, Size: bufferArena.size, RingHalf: netHalf}, nil
+	return BufferArenaState{Base: bufferArena.base, Size: bufferArena.size}, nil
 }
 
 // AdoptBufferArena neemt bij een kern-flip exact dezelfde fysieke pot over.
 func AdoptBufferArena(st BufferArenaState) error {
-	if st.Base == 0 || st.Size == 0 || st.RingHalf < minNetRingHalf ||
-		st.Base%part2M != 0 || st.Size%part2M != 0 || st.RingHalf%netPage != 0 ||
-		st.RingHalf > layout.NetRingWindowHalf ||
-		(controlPerSlot+st.RingHalf*2)*uint64(layout.MaxSlots) > st.Size {
-		return fmt.Errorf("network buffer handoff is ongeldig: %#x+%#x half=%#x", st.Base, st.Size, st.RingHalf)
+	reserved, metadata, payload, err := networkGeometry(st.Size)
+	if err != nil || st.Base == 0 || st.Base%part2M != 0 || reserved != st.Size {
+		return fmt.Errorf("network buffer handoff is ongeldig: %#x+%#x", st.Base, st.Size)
 	}
 	partOnce.Do(poolInit)
 	partMu.Lock()
 	defer partMu.Unlock()
 	if bufferArena.size != 0 {
-		if bufferArena.base == st.Base && bufferArena.size == st.Size && netHalf == st.RingHalf {
+		if bufferArena.base == st.Base && bufferArena.size == st.Size {
 			return nil
 		}
 		return fmt.Errorf("network buffer was al anders gereserveerd")
@@ -218,30 +212,33 @@ func AdoptBufferArena(st BufferArenaState) error {
 	}
 	takeRange(st.Base, st.Base+st.Size)
 	bufferArena = region{base: st.Base, size: st.Size}
-	netHalf = st.RingHalf
+	if err := hopswitch.ConfigureFramePool(uintptr(st.Base+metadata), payload); err != nil {
+		insertFree(bufferArena)
+		bufferArena = region{}
+		return err
+	}
 	return nil
 }
 
-// slotBuffers geeft het fysieke control-blok, TX/RX en de ringcapaciteit.
-// Logisch staan ze op vaste IPA's; alleen deze PA-kant komt uit de pot.
-func slotBuffers(i int) (ctrl, tx, rx uintptr, dataCap uint64, err error) {
+// slotBuffers geeft het fysieke control-blok en de twee descriptorpagina's.
+// Payloadcapaciteit ontbreekt expres: die hoort bij de gezamenlijke pool.
+func slotBuffers(i int) (ctrl, tx, rx uintptr, err error) {
 	if i < 1 || i > layout.MaxSlots {
-		return 0, 0, 0, 0, fmt.Errorf("slot buffers: slot %d buiten bereik", i)
+		return 0, 0, 0, fmt.Errorf("slot buffers: slot %d buiten bereik", i)
 	}
 	if err = ensureNetworkBuffer(); err != nil {
-		return 0, 0, 0, 0, err
+		return 0, 0, 0, err
 	}
 	partMu.Lock()
 	defer partMu.Unlock()
-	span := controlPerSlot + 2*netHalf
-	off := uint64(i-1) * span
-	if off+span > bufferArena.size {
-		return 0, 0, 0, 0, fmt.Errorf("slot buffers: slot %d valt buiten de pot", i)
+	off := uint64(i-1) * sharedPerSlot
+	if off+sharedPerSlot > bufferArena.size {
+		return 0, 0, 0, fmt.Errorf("slot buffers: slot %d valt buiten de pot", i)
 	}
 	ctrl = uintptr(bufferArena.base + off)
 	tx = ctrl + uintptr(controlPerSlot)
-	rx = tx + uintptr(netHalf)
-	return ctrl, tx, rx, netHalf - layout.NetRingHeader, nil
+	rx = tx + frameq.PageSize
+	return ctrl, tx, rx, nil
 }
 
 // poolInit laadt de pool van het board-plan — lazy (eerste allocatie), want

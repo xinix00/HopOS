@@ -39,7 +39,7 @@ const maxAgentState = 128 << 10
 //
 //	kop (128B): magic | versie | oudVenster.base | oudVenster.size |
 //	            nieuwVenster.base | nieuwVenster.total | slotCount | generatie |
-//	            bundelsom | bufferArena.base | bufferArena.size | netRingHalf |
+//	            bundelsom | bufferArena.base | bufferArena.size | reserved |
 //	            (rest gereserveerd)
 //	per slot:  slot | partBase | partSize | core | nPorts | jobLen |
 //	           cores | nMounts | nPorts×u64 (poort) | job-bytes |
@@ -47,7 +47,7 @@ const maxAgentState = 128 << 10
 //	NAT-blok:  masqNext | gwMAC+gwKnown | flowCount | flowCount×24B
 //	agent:     lengte | JSON-bytes (8-uitgelijnd) — de state van HOP zelf
 const (
-	handVersion = 7
+	handVersion = 8
 	handHead    = 128
 	slotHead    = 64
 )
@@ -100,7 +100,7 @@ func encodeHandoff(h Handoff, max int) ([]byte, error) {
 	binary.LittleEndian.PutUint64(b[64:], h.BundleSum)
 	binary.LittleEndian.PutUint64(b[72:], h.BufferArena.Base)
 	binary.LittleEndian.PutUint64(b[80:], h.BufferArena.Size)
-	binary.LittleEndian.PutUint64(b[88:], h.BufferArena.RingHalf)
+	binary.LittleEndian.PutUint64(b[88:], 0)
 
 	for _, s := range h.Slots {
 		var rec [slotHead]byte
@@ -182,7 +182,7 @@ func decodeHandoff(b []byte) (Handoff, error) {
 	h.BundleSum = binary.LittleEndian.Uint64(b[64:])
 	h.BufferArena.Base = binary.LittleEndian.Uint64(b[72:])
 	h.BufferArena.Size = binary.LittleEndian.Uint64(b[80:])
-	h.BufferArena.RingHalf = binary.LittleEndian.Uint64(b[88:])
+	_ = binary.LittleEndian.Uint64(b[88:]) // v7 legacy netRingHalf
 	if n > 1024 {
 		return h, fmt.Errorf("slot-telling %d is onzin", n)
 	}

@@ -36,6 +36,10 @@ const (
 	Magic = 0x3151454d41524648 // "HFRAMEQ1" little endian
 )
 
+// CompletionHeadOff is the physical word the slot scheduler peeks while an
+// app is asleep. It is exported as part of the queue/doorbell contract.
+const CompletionHeadOff = doneHeadOff
+
 const (
 	StatusOK       = 0
 	StatusBounds   = 1

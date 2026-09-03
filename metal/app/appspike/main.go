@@ -264,7 +264,7 @@ func main() {
 	}
 
 	// Netdemo (per-slot netwerk): elke rol draait een eigen netstack over de
-	// frame-ringen; de switch bij HOP schuift alleen Ethernet-frames.
+	// framequeues; de switch bij HOP schuift alleen Ethernet-frames.
 	switch app.Env("NETDEMO") {
 	case "listen":
 		// Echo-server: beantwoord elke regel met "pong <regel>". Serveert

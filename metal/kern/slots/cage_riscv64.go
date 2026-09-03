@@ -278,7 +278,7 @@ func cageInit() {
 // De rekenkunde staat in kern/cage (host-getest tegen de op ijzer gemeten
 // waarden); hier gaat hij alleen het geheugen in. De stub neemt geen enkele
 // beslissing: hij schrijft weg wat hier staat en verifieert het.
-func cagePrepare(i int, linkBase, base, size, entry, ctrlPA, netHalf uint64) error {
+func cagePrepare(i int, linkBase, base, size, entry, ctrlPA, queueSize uint64) error {
 	// Een intrekking van de VORIGE bewoner van dit slot hoort niet aan de
 	// volgende te blijven plakken. Dit woord overleeft een slot-wissel (het staat
 	// in het ctx-blok, niet in de partitie), en de kill-tick leest het bij élke
@@ -302,7 +302,7 @@ func cagePrepare(i int, linkBase, base, size, entry, ctrlPA, netHalf uint64) err
 
 	plan := cage.Plan{Allow: []cage.Window{
 		{Base: base, Size: size, R: true, W: true, X: true},
-		{Base: ctrlPA, Size: uint64(layout.SlotControlStride) + 2*netHalf, R: true, W: true},
+		{Base: ctrlPA, Size: uint64(layout.SlotControlStride) + 2*queueSize, R: true, W: true},
 	}}
 	if gb, gs, ok := grantWindow(i); ok {
 		plan.Allow = append(plan.Allow, cage.Window{Base: gb, Size: gs, R: true, W: true})
@@ -343,7 +343,7 @@ func cagePrepare(i int, linkBase, base, size, entry, ctrlPA, netHalf uint64) err
 	// echte partitie. Zonder deze tabel draait een app op het fysieke adres
 	// waarop hij gelinkt is, en dan bestaat er maar één slot dat zo'n image kan
 	// hebben — mét de tabel ziet élk slot zichzelf op linkBase.
-	root, err := slotMap(i, linkBase, base, size, ctrlPA, netHalf)
+	root, err := slotMap(i, linkBase, base, size, ctrlPA, queueSize)
 	if err != nil {
 		return fmt.Errorf("cage slot %d: %w", i, err)
 	}
@@ -369,7 +369,7 @@ func cagePrepare(i int, linkBase, base, size, entry, ctrlPA, netHalf uint64) err
 	// dezelfde klasse als de write-buffer-les van 30-07, maar nu andersom.
 	// Eén call over de hele partitie plus zijn kleine buffer-slice.
 	dev.CleanInv(uintptr(base), uintptr(size))
-	dev.CleanInv(uintptr(ctrlPA), uintptr(layout.SlotControlStride+2*netHalf))
+	dev.CleanInv(uintptr(ctrlPA), uintptr(layout.SlotControlStride+2*queueSize))
 	dev.MB()
 	return nil
 }
@@ -385,15 +385,15 @@ func cagePrepare(i int, linkBase, base, size, entry, ctrlPA, netHalf uint64) err
 // De stub heeft zelf géén venster nodig: satp vertaalt alleen supervisor- en
 // user-mode, en hij draait in machine mode — dus fetcht hij ongetranslateerd, ook
 // ná zijn eigen csrw satp.
-func slotMap(i int, linkBase, base, size, ctrlPA, netHalf uint64) (uint64, error) {
+func slotMap(i int, linkBase, base, size, ctrlPA, queueSize uint64) (uint64, error) {
 	netPA := ctrlPA + uint64(layout.SlotControlStride)
 	windows := []cage.MapWindow{
 		{Link: linkBase, Phys: base, Size: size, R: true, W: true, X: true},
 		{Link: uint64(layout.SlotControl(i)), Phys: ctrlPA, Size: layout.SlotControlStride,
 			R: true, W: true, Device: true},
-		{Link: uint64(layout.NetRingTX(i)), Phys: netPA, Size: netHalf,
+		{Link: uint64(layout.NetQueueTX(i)), Phys: netPA, Size: queueSize,
 			R: true, W: true, Device: true},
-		{Link: uint64(layout.NetRingRX(i)), Phys: netPA + netHalf, Size: netHalf,
+		{Link: uint64(layout.NetQueueRX(i)), Phys: netPA + queueSize, Size: queueSize,
 			R: true, W: true, Device: true},
 	}
 	// Gegrante MMIO moet óók gemapt zijn, anders ziet de app een venster dat de
@@ -519,7 +519,7 @@ const (
 // stubScratchAt geeft de fysieke scratch uit de systeempot. De partitiecheck
 // houdt een vrij slot weg van de gedeelde slice.
 func stubScratchAt(i int) uintptr {
-	ctrl, _, _, _, err := slotBuffers(i)
+	ctrl, _, _, err := slotBuffers(i)
 	if err != nil {
 		return 0
 	}
