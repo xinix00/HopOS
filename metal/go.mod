@@ -25,7 +25,7 @@ require github.com/xinix00/hoplock v0.4.1
 // Gemeten 19-08 in deze boom; surf's go.mod draagt dezelfde waarschuwing.
 
 require (
-	github.com/xinix00/hop v0.99.3
+	github.com/xinix00/hop v1.0.0
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20260709184058-243e02a382f8
 )
 

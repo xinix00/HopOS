@@ -58,6 +58,10 @@ const (
 	tcbOffLen     = 4
 	tcbOffPRP1    = 24
 	tcbOffPRP2    = 32
+
+	appleDataOff = 0x18000
+	applePRPOff  = appleDataOff + maxTransferSize
+	appleDMANeed = applePRPOff + prpListSize
 )
 
 // AppleConfig zijn de adressen die de ADT levert (via het param-blok van het
@@ -126,7 +130,7 @@ func (c *Controller) writeTCB(q *queue, tag uint32, m cmd) {
 	dev.Write8(tcb+tcbOffSlot, uint8(tag))
 	dev.Write32(tcb+tcbOffLen, m.dw12)
 	dev.Write64(tcb+tcbOffPRP1, m.prp1)
-	dev.Write64(tcb+tcbOffPRP2, 0)
+	dev.Write64(tcb+tcbOffPRP2, m.prp2)
 	dev.MB()
 }
 
@@ -167,7 +171,9 @@ func (c *Controller) InitApple(cfg AppleConfig, dmaBase uintptr, dmaSize uint64)
 	// opdrachten zelf, en de completions. Allemaal 16KB-uitgelijnd.
 	c.admin = queue{tcb: dmaBase, sq: dmaBase + 0x4000, cq: dmaBase + 0x8000, phase: 1, id: 0}
 	c.io = queue{tcb: dmaBase + 0xC000, sq: dmaBase + 0x10000, cq: dmaBase + 0x14000, phase: 1, id: 1}
-	c.buf = dmaBase + 0x18000
+	c.buf = dmaBase + appleDataOff
+	c.prpList = dmaBase + applePRPOff
+	c.MaxTransfer = maxTransferSize
 	dev.Clear(dmaBase, appleDMANeed)
 
 	// DSTRD is 0 op dit silicium; CAP uitlezen doet m1n1 hier niet en de
@@ -255,10 +261,6 @@ func (c *Controller) capacityFromGPT() error {
 	c.Blocks = last + 1
 	return nil
 }
-
-// appleDMANeed is wat InitApple aan aaneengesloten, uitgelijnd geheugen vraagt:
-// twee queue-paren van drie tabellen plus één databuffer.
-const appleDMANeed = 0x19000
 
 // write64LoHi schrijft een 64-bit registerpaar in twee helften. Deze registers
 // nemen geen enkele 64-bit toegang aan; m1n1 heeft er een eigen helper voor.

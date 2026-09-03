@@ -32,8 +32,8 @@ const (
 	SymSlotHint    = "github.com/xinix00/HopOS/metal/board/uefi.slotHint"
 	SymSlotHintGen = "github.com/xinix00/HopOS/metal/board/hopslot.slotHint"
 
-	// SymABI draagt de versie van de slot-ABI: de indeling van de partitie-staart
-	// (control page, hop-ABI-ringen, frame-ringen) waar een app zijn adressen uit
+	// SymABI draagt de versie van de slot-ABI: de vaste control- en ringvensters
+	// waar een app zijn adressen uit
 	// rekent. Build leest de wáárde uit het image en vergelijkt hem met de versie
 	// die de aanroeper meegeeft. Een app die op het verkeerde adres zijn control
 	// page zoekt is anders een stille misread, en die klasse fouten kost dagen.

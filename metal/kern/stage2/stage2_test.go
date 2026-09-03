@@ -21,6 +21,8 @@ const (
 	tBootScratchPA = 0x1_3000_0000
 	tRevokeVecPA   = 0x1_4000_0000
 	tPoolPA        = 0x2_0000_0000
+	tBufferPA      = 0x3_0000_0000
+	tNetHalf       = 200 << 10
 )
 
 // s2buf draagt de echte tabellen; package-var zodat de GC hem nooit opruimt
@@ -47,11 +49,19 @@ func rd(pa uint64) uint64 { return dev.Read64(uintptr(pa)) }
 // paOf haalt het uitgangsadres uit een descriptor (OA-bits [47:12]).
 func paOf(d uint64) uint64 { return d & 0x0000_FFFF_FFFF_F000 }
 
+func buildTest(i int, ipaBase, paBase, size uint64) (uint64, error) {
+	buf := uint64(tBufferPA)
+	if i > 0 {
+		buf += uint64(i-1) * (layout.SlotControlStride + 2*tNetHalf)
+	}
+	return Build(i, ipaBase, paBase, size, buf, tNetHalf)
+}
+
 func TestBuildBereik(t *testing.T) {
-	if _, err := Build(0, layout.SlotBase(1), tPoolPA, 2<<20); err == nil {
+	if _, err := buildTest(0, layout.SlotBase(1), tPoolPA, 2<<20); err == nil {
 		t.Error("slot 0 geaccepteerd")
 	}
-	if _, err := Build(layout.MaxSlots+1, layout.SlotBase(1), tPoolPA, 2<<20); err == nil {
+	if _, err := buildTest(layout.MaxSlots+1, layout.SlotBase(1), tPoolPA, 2<<20); err == nil {
 		t.Error("slot buiten MaxSlots geaccepteerd")
 	}
 }
@@ -60,7 +70,7 @@ func TestBuildBereik(t *testing.T) {
 func TestBuildSlot1(t *testing.T) {
 	const size = 64 << 20 // 64MB-partitie
 	ipa := layout.SlotBase(1)
-	l1, err := Build(1, ipa, tPoolPA, size)
+	l1, err := buildTest(1, ipa, tPoolPA, size)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,15 +79,15 @@ func TestBuildSlot1(t *testing.T) {
 		t.Fatalf("VTTBR-adres %#x, verwacht %#x", l1, base+l1Off)
 	}
 
-	// L1: het slot-GB → L2part, het ctrl-GB → L2dev, verder niets.
+	// L1: apppartitie, devicepagina en het vaste virtuele NIC-GB.
 	if got := rd(base + l1Off + (ipa>>30)*8); got != base+l2PartOff|descTable {
 		t.Fatalf("L1[slot-GB] = %#x", got)
 	}
 	if got := rd(base + l1Off + 2*8); got != base+l2DevOff|descTable {
 		t.Fatalf("L1[ctrl-GB] = %#x", got)
 	}
-	if got := rd(base + l1Off + 3*8); got != 0 {
-		t.Fatalf("L1[3] = %#x, hoort leeg — het net-ring-GB bestaat niet meer (de ringen liggen in de partitie)", got)
+	if got := rd(base + l1Off + 3*8); got != base+l2NetOff|descTable {
+		t.Fatalf("L1[3] = %#x, verwacht eigen net-L2", got)
 	}
 	if got := rd(base + l1Off + 0*8); got != 0 {
 		t.Fatalf("L1[0] = %#x, hoort leeg", got)
@@ -97,28 +107,74 @@ func TestBuildSlot1(t *testing.T) {
 		}
 	}
 
-	// L2dev: alleen de ctrl-L3 op 384 (die draagt nu enkel de boot-scratch).
+	// L2dev: boot-scratch en precies het control-blok van dit slot.
+	devGB := uint64(layout.CtrlBase) &^ ((1 << 30) - 1)
+	slotCtrlIdx := (uint64(layout.SlotControl(1)) - devGB) >> 21
 	for idx := uint64(0); idx < 512; idx++ {
 		got := rd(base + l2DevOff + idx*8)
 		var want uint64
 		if idx == 384 {
 			want = base + l3CtrlOff | descTable
+		} else if idx == slotCtrlIdx {
+			want = base + l3SlotCtrlOff | descTable
 		}
 		if got != want {
 			t.Fatalf("L2dev[%d] = %#x, verwacht %#x", idx, got, want)
 		}
 	}
 
-	// L3ctrl: alléén de boot-scratch, read-only op page 0. De eigen control-page
-	// hoort hier niet meer te staan — die woont sinds ABIVersion 2 in de staart
-	// van de partitie en valt dus onder L2part hierboven. Elke andere entry zou
-	// betekenen dat er nog een gedeelde ctrl-regio in de kooi hangt.
+	// L3ctrl: alléén de boot-scratch, read-only op page 0.
 	if got := rd(base + l3CtrlOff); got != tBootScratchPA|pageRO {
 		t.Fatalf("L3ctrl[0] = %#x (boot-scratch hoort RO)", got)
+	}
+	ctrlPage := (uint64(layout.SlotControl(1)) & ((2 << 20) - 1)) >> 12
+	for page := uint64(0); page < 512; page++ {
+		got := rd(base + l3SlotCtrlOff + page*8)
+		var want uint64
+		if page >= ctrlPage && page < ctrlPage+layout.SlotControlStride>>12 {
+			want = tBufferPA + (page-ctrlPage)*(4<<10) | pageRWNC
+		}
+		if got != want {
+			t.Fatalf("L3slotctrl[%d] = %#x, verwacht %#x", page, got, want)
+		}
 	}
 	for idx := uint64(1); idx < 512; idx++ {
 		if got := rd(base + l3CtrlOff + idx*8); got != 0 {
 			t.Fatalf("L3ctrl[%d] = %#x, hoort leeg (een ctrl-page in de kooi?)", idx, got)
+		}
+	}
+
+	// L2net wijst alleen TX en RX van dit slot naar elk een paginafijne L3.
+	netGB := uint64(layout.NetRingBase) &^ ((1 << 30) - 1)
+	txIdx := (uint64(layout.NetRingTX(1)) - netGB) >> 21
+	rxIdx := (uint64(layout.NetRingRX(1)) - netGB) >> 21
+	for idx := uint64(0); idx < 512; idx++ {
+		got := rd(base + l2NetOff + idx*8)
+		var want uint64
+		switch idx {
+		case txIdx:
+			want = base + l3NetTXOff | descTable
+		case rxIdx:
+			want = base + l3NetRXOff | descTable
+		}
+		if got != want {
+			t.Fatalf("L2net[%d] = %#x, verwacht %#x", idx, got, want)
+		}
+	}
+	for page := uint64(0); page < 512; page++ {
+		for _, side := range []struct {
+			name string
+			tbl  uint64
+			pa   uint64
+		}{{"TX", base + l3NetTXOff, tBufferPA + layout.SlotControlStride}, {"RX", base + l3NetRXOff, tBufferPA + layout.SlotControlStride + tNetHalf}} {
+			got := rd(side.tbl + page*8)
+			var want uint64
+			if page < tNetHalf>>12 {
+				want = side.pa + page*(4<<10) | pageRWNC
+			}
+			if got != want {
+				t.Fatalf("L3net%s[%d] = %#x, verwacht %#x", side.name, page, got, want)
+			}
 		}
 	}
 }
@@ -130,10 +186,11 @@ func TestBuildSlot1(t *testing.T) {
 func TestBuildSlot3DeeltGBMetDevices(t *testing.T) {
 	const size = 512 << 20
 	ipa := layout.SlotBase(3)
+	devGB := uint64(layout.CtrlBase) &^ ((1 << 30) - 1)
 	if ipa>>30 != layout.CtrlBase>>30 {
 		t.Fatalf("testaanname stuk: SlotBase(3)=%#x ligt niet in het ctrl-GB", ipa)
 	}
-	if _, err := Build(3, ipa, tPoolPA, size); err != nil {
+	if _, err := buildTest(3, ipa, tPoolPA, size); err != nil {
 		t.Fatal(err)
 	}
 	base := uint64(layout.CageTablePA(3))
@@ -161,12 +218,14 @@ func TestBuildSlot3DeeltGBMetDevices(t *testing.T) {
 			want = tPoolPA + (idx-first)<<21 | blockRW
 		case idx == 384:
 			want = base + l3CtrlOff | descTable
+		case idx == (uint64(layout.SlotControl(3))-devGB)>>21:
+			want = base + l3SlotCtrlOff | descTable
 		}
 		if got != want {
 			t.Fatalf("L2dev[%d] = %#x, verwacht %#x", idx, got, want)
 		}
 	}
-	// En verder niets in het device-GB: geen ctrl-page, geen ringen.
+	// De boot-scratch-L3 bevat verder niets; slot-control heeft een eigen L3.
 	for idx := uint64(1); idx < 512; idx++ {
 		if got := rd(base + l3CtrlOff + idx*8); got != 0 {
 			t.Fatalf("L3ctrl[%d] = %#x, hoort leeg", idx, got)
@@ -179,20 +238,20 @@ func TestBuildSlot3DeeltGBMetDevices(t *testing.T) {
 // stil in de buurtabel geschreven en de IPA bleef ongemapt (stage-2-fault op de
 // eerste ring-read, FAR 0xC0000010; precies 104 van 127 slots leefden).
 //
-// Die hele klasse bestaat niet meer sinds de slot-ABI in de partitie-staart
-// woont: er is geen per-slot IPA-venster meer dat met het slotnummer kan
-// opschuiven. Deze test houdt dat vast — ook het hoogste slot mapt precies zijn
-// partitie plus de boot-scratch, en niets in het device-GB.
-func TestBuildHoogsteSlotHeeftGeenEigenIPAVenster(t *testing.T) {
+// Het nieuwe venster gebruikt 4MiB per slot en blijft dus zelfs voor slot 128
+// binnen hetzelfde 512MiB-deel van het net-GB. Deze regressie houdt vast dat
+// een hoog slot een geldige eigen L2 krijgt in plaats van over de tabelrand te
+// schrijven.
+func TestBuildHoogsteSlotBlijftBinnenNetGB(t *testing.T) {
 	old := layout.MaxSlots
 	layout.SetMaxSlots(127)
 	defer layout.SetMaxSlots(old)
-	if _, err := Build(105, layout.SlotBase(1), tPoolPA, 64<<20); err != nil {
+	if _, err := buildTest(105, layout.SlotBase(1), tPoolPA, 64<<20); err != nil {
 		t.Fatal(err)
 	}
 	base := uint64(layout.CageTablePA(105))
-	if got := rd(base + l1Off + 3*8); got != 0 {
-		t.Fatalf("L1[3] = %#x, hoort leeg — het net-ring-GB bestaat niet meer (de ringen liggen in de partitie)", got)
+	if got := rd(base + l1Off + 3*8); got != base+l2NetOff|descTable {
+		t.Fatalf("L1[3] = %#x, verwacht eigen net-L2", got)
 	}
 	if got := rd(base + l3CtrlOff); got != tBootScratchPA|pageRO {
 		t.Fatalf("L3ctrl[0] = %#x (boot-scratch hoort RO)", got)
@@ -247,10 +306,10 @@ func walk(t *testing.T, i int) []leaf {
 func TestIsolatieTussenSlots(t *testing.T) {
 	const size = 64 << 20
 	pa1, pa2 := uint64(tPoolPA), uint64(tPoolPA+size)
-	if _, err := Build(1, layout.SlotBase(1), pa1, size); err != nil {
+	if _, err := buildTest(1, layout.SlotBase(1), pa1, size); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Build(2, layout.SlotBase(2), pa2, size); err != nil {
+	if _, err := buildTest(2, layout.SlotBase(2), pa2, size); err != nil {
 		t.Fatal(err)
 	}
 
@@ -258,10 +317,9 @@ func TestIsolatieTussenSlots(t *testing.T) {
 		naam       string
 		base, size uint64
 	}{
-		// De partitie dekt nu óók de ABI van slot 2 (control-page, hop-ABI-ringen,
-		// frame-ringen liggen in zijn staart) — precies de winst van ABIVersion 2:
-		// één regio om af te schermen i.p.v. vier.
-		{"partitie + ABI-staart", pa2, size},
+		{"partitie", pa2, size},
+		{"control + net-ringen", tBufferPA + layout.SlotControlStride + 2*tNetHalf,
+			layout.SlotControlStride + 2*tNetHalf},
 		{"stage-2-tabellen", uint64(layout.CageTablePA(0)), uint64(layout.MaxSlots+1) * layout.CageStride},
 	}
 	roGezien := 0
@@ -289,10 +347,10 @@ func TestIsolatieTussenSlots(t *testing.T) {
 // laten staan (Build hoort eerst te vegen).
 func TestRebuildVeegtOudeMap(t *testing.T) {
 	ipa := layout.SlotBase(1)
-	if _, err := Build(1, ipa, tPoolPA, 64<<20); err != nil {
+	if _, err := buildTest(1, ipa, tPoolPA, 64<<20); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Build(1, ipa, tPoolPA, 8<<20); err != nil {
+	if _, err := buildTest(1, ipa, tPoolPA, 8<<20); err != nil {
 		t.Fatal(err)
 	}
 	blokken := 0

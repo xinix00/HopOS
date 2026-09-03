@@ -66,6 +66,20 @@ if [ -n "${CFG:-}" ]; then
 	TAGS="$TAGS embedcfg"
 	echo "config ingebakken: $CFG ($(wc -c <"$DIR/$CFG" | tr -d ' ') bytes)" >&2
 fi
+# Zonder CFG boot de geflipte kern zonder naam, API-key en console-knop en
+# parkeert hij vóór de agent op HOPOS_API_NO_AUTH: ping doet het, de
+# system-poort staat open, en verder is er niets te lezen — 03-09 twee keer een
+# "hang" gejaagd die precies dit was. Voor een board dat zijn config uit het
+# image leest is dat nooit de bedoeling; wie het écht wil, zegt NOCFG=1.
+case "$BOARD" in
+apple)
+	if [ -z "${CFG:-}" ] && [ "${NOCFG:-}" != 1 ]; then
+		echo "$BOARD: geen CFG= opgegeven — de geflipte kern zou zonder config booten en parkeren (HOPOS_API_NO_AUTH)." >&2
+		echo "    geef CFG=image/apple/hopos-m4.cfg (dezelfde config als het geïnstalleerde image), of NOCFG=1 als dat bewust is." >&2
+		exit 1
+	fi
+	;;
+esac
 
 for V in "1:$T1" "2:$T2"; do
 	GOWORK="${WORK:-off}" GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH="$ARCH" \

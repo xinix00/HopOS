@@ -19,11 +19,18 @@
 package appnet
 
 import (
+	"errors"
+	"runtime"
 	"sync"
+	"time"
 
 	"github.com/xinix00/HopOS/metal/abi/ring"
 	"github.com/xinix00/HopOS/metal/dev"
 )
+
+const txBackpressure = 10 * time.Millisecond
+
+var errTXRingFull = errors.New("appnet: TX ring bleef vol")
 
 // nic is het netdev.Device over de eigen frame-ringen.
 type nic struct {
@@ -44,13 +51,29 @@ func (n *nic) Receive(buf []byte) (int, error) {
 	return m, nil
 }
 
-// Transmit zet één frame in de TX-ring; vol = drop (TCP herstelt).
+// Transmit zet één frame in de TX-ring. Een korte lokale burst krijgt
+// backpressure in plaats van stil pakketverlies: de netstack kan in één drain
+// ruim een MiB produceren, terwijl de frame-ring bewust kleiner is. Meteen
+// droppen kost dan een volledige TCP-retransmissietimer. De bovengrens houdt
+// een verdwenen switch wel een gewone device-fout in plaats van een deadlock.
 func (n *nic) Transmit(buf []byte) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	_, notify := n.tx.WriteNotify(ring.TypeFrame, buf)
-	if notify {
+	deadline := time.Now().Add(txBackpressure)
+	for {
+		ok, notify := n.tx.WriteNotify(ring.TypeFrame, buf)
+		if ok {
+			if notify {
+				dev.Notify()
+			}
+			return nil
+		}
+		// De ring is niet leeg, dus normaal is de consument al gebeld. Nog een
+		// event maakt de vol→ruimte-race level-triggered zonder architectuurkennis.
 		dev.Notify()
+		if time.Now().After(deadline) {
+			return errTXRingFull
+		}
+		runtime.Gosched()
 	}
-	return nil
 }

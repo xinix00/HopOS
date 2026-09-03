@@ -34,8 +34,8 @@ func Up(a *applib.App) (string, error) {
 	host := layout.HostIP4()
 
 	nd := &nic{
-		tx: ring.Open(layout.NetRingTXAt(a.RAMStart, a.RAMSize)),
-		rx: ring.Open(layout.NetRingRXAt(a.RAMStart, a.RAMSize)),
+		tx: ring.Open(layout.NetRingTX(a.Slot)),
+		rx: ring.Open(layout.NetRingRX(a.Slot)),
 	}
 
 	// Het budget: 1/8 van de partitie, geklemd. Een welcome-app van 16MB
@@ -87,7 +87,7 @@ func Up(a *applib.App) (string, error) {
 	// goroutine (runtime.WakeSleeper) zodra de switcher of een eigen idle-ronde
 	// verkeer ziet (idle/rxdoor.go). De cap mag dus groot.
 	idle.WatchRXRing(
-		layout.CtrlPageAt(a.RAMStart, a.RAMSize)+layout.CtrlRXDoor,
+		layout.SlotControl(a.Slot)+layout.CtrlRXDoor,
 		nd.rx.HeadPending)
 	lo, hi, hold := rxPoll(a.Env("RXPOLL"))
 	go func() {

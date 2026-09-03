@@ -53,6 +53,13 @@ const (
 	sqeSize  = 64
 	cqeSize  = 16
 	nsid     = 1
+
+	dmaPageSize     = 4096
+	maxTransferSize = 1 << 20 // één volledig system/storage-frame
+	prpListSize     = dmaPageSize
+	genericDataOff  = 4 * dmaPageSize
+	genericPRPOff   = genericDataOff + maxTransferSize
+	genericDMANeed  = genericPRPOff + prpListSize
 )
 
 // queue is één SQ/CQ-paar met poll-state.
@@ -69,9 +76,10 @@ type queue struct {
 type Controller struct {
 	Base uintptr // BAR0
 
-	BlockSize uint64
-	Blocks    uint64 // namespace-grootte in blokken
-	Model     string
+	BlockSize   uint64
+	Blocks      uint64 // namespace-grootte in blokken
+	MaxTransfer uint64 // grootste Read/Write in bytes
+	Model       string
 
 	mu         sync.Mutex // serialiseert I/O (één in-flight command, één DMA-buf)
 	dstrd      uint64
@@ -82,7 +90,8 @@ type Controller struct {
 	idDump     string     // de eerste woorden van de identify-buffer (meetbank)
 	admin      queue
 	io         queue
-	buf        uintptr // één pagina DMA voor identify en de blok-API
+	buf        uintptr // aaneengesloten DMA-data voor identify en de blok-API
+	prpList    uintptr // pagina met DMA-adressen voor transfers van > 2 pagina's
 }
 
 func (c *Controller) doorbell(q *queue, cq bool) uintptr {
@@ -109,7 +118,7 @@ func (c *Controller) waitCSTS(rdy uint32, timeout time.Duration) error {
 type cmd struct {
 	opc        uint32
 	nsid       uint32
-	prp1       uint64
+	prp1, prp2 uint64
 	dw10, dw11 uint32
 	dw12       uint32
 }
@@ -136,6 +145,7 @@ func (c *Controller) submit(q *queue, m cmd) error {
 	dev.Write32(sqe+0, m.opc|cid<<16)
 	dev.Write32(sqe+4, m.nsid)
 	dev.Write64(sqe+24, m.prp1)
+	dev.Write64(sqe+32, m.prp2)
 	dev.Write32(sqe+40, m.dw10)
 	dev.Write32(sqe+44, m.dw11)
 	dev.Write32(sqe+48, m.dw12)
@@ -241,8 +251,8 @@ func Probe(win pcie.Window, dmaBase uintptr, dmaSize uint64) (*Controller, error
 // Init reset de controller, zet admin- en I/O-queues op en identificeert de
 // namespace. dmaBase/dmaSize is de (device-gemapte, niet-gecachte) DMA-regio.
 func (c *Controller) Init(dmaBase uintptr, dmaSize uint64) error {
-	if dmaSize < 5*4096 {
-		return errors.New("nvme: DMA-regio te klein")
+	if dmaSize < genericDMANeed {
+		return fmt.Errorf("nvme: DMA-regio %d bytes, minimaal %d", dmaSize, genericDMANeed)
 	}
 	cap := dev.Read64(c.Base + regCAP)
 	c.dstrd = (cap >> 32) & 0xf
@@ -250,13 +260,14 @@ func (c *Controller) Init(dmaBase uintptr, dmaSize uint64) error {
 		return fmt.Errorf("nvme: MQES %d < %d", mqes+1, qEntries)
 	}
 
-	// DMA-indeling: vier queue-pagina's + één databuffer-pagina.
+	// DMA-indeling: vier queue-pagina's, één MiB aaneengesloten data en één
+	// PRP-lijstpagina. Eén system/storage-frame kan zo één NVMe-opdracht zijn.
 	c.admin = queue{sq: dmaBase, cq: dmaBase + 4096, phase: 1, id: 0}
 	c.io = queue{sq: dmaBase + 2*4096, cq: dmaBase + 3*4096, phase: 1, id: 1}
-	c.buf = dmaBase + 4*4096
-	for i := uintptr(0); i < 5; i++ {
-		dev.Clear(dmaBase+i*4096, 4096)
-	}
+	c.buf = dmaBase + genericDataOff
+	c.prpList = dmaBase + genericPRPOff
+	c.MaxTransfer = maxTransferSize
+	dev.Clear(dmaBase, genericDMANeed)
 
 	// Reset → admin-queues registreren → enable.
 	dev.Write32(c.Base+regCC, 0)
@@ -298,6 +309,14 @@ func (c *Controller) identifyCtrl() error {
 	dev.CopyOut(model, c.buf+24)
 	c.Model = trim(model)
 	c.totalBytes = dev.Read64(c.buf + 280) // TNVMCAP, lage helft van 128 bits
+	// MDTS=0 betekent "geen gemelde limiet". Anders is het maximum 2^MDTS
+	// maal de 4KB-controllerpagina. Onze eigen één-MiB-DMA-regio blijft altijd
+	// de harde bovengrens.
+	if mdts := dev.Read8(c.buf + 77); mdts != 0 && mdts < 52 {
+		if limit := uint64(dmaPageSize) << mdts; limit < c.MaxTransfer {
+			c.MaxTransfer = limit
+		}
+	}
 	return nil
 }
 
@@ -329,7 +348,27 @@ func (c *Controller) createIOQueues() error {
 	return nil
 }
 
-// xfer leest of schrijft len(p) bytes vanaf blok lba via de ene DMA-pagina.
+// dataPRPs maakt de standaard-NVMe-paginawijzers voor n bytes in c.buf. PRP1
+// wijst naar de eerste pagina. PRP2 wijst voor twee pagina's direct naar de
+// tweede, en bij grotere transfers naar een lijst met alle vervolgpagina's.
+// Eén lijstpagina bevat 512 adressen; onze één-MiB-buffer vraagt er 255.
+func (c *Controller) dataPRPs(n uint64) (prp1, prp2 uint64) {
+	prp1 = uint64(c.buf)
+	if n <= dmaPageSize {
+		return prp1, 0
+	}
+	if n <= 2*dmaPageSize {
+		return prp1, uint64(c.buf + dmaPageSize)
+	}
+	dev.Clear(c.prpList, prpListSize)
+	pages := (n + dmaPageSize - 1) / dmaPageSize
+	for page := uint64(1); page < pages; page++ {
+		dev.Write64(c.prpList+uintptr((page-1)*8), uint64(c.buf)+page*dmaPageSize)
+	}
+	return prp1, uint64(c.prpList)
+}
+
+// xfer leest of schrijft len(p) bytes vanaf blok lba via het DMA-datavenster.
 // Meerdere slot-servicers delen de controller: mutex over de hele transfer.
 func (c *Controller) xfer(opc uint32, lba uint64, p []byte, write bool) error {
 	c.mu.Lock()
@@ -341,8 +380,9 @@ func (c *Controller) xfer(opc uint32, lba uint64, p []byte, write bool) error {
 	if len(p) == 0 {
 		return errors.New("nvme: zero-length transfer")
 	}
-	if uint64(len(p)) > 4096 || uint64(len(p))%c.BlockSize != 0 {
-		return fmt.Errorf("nvme: length %d not a block multiple (bs=%d, max 4096)", len(p), c.BlockSize)
+	if uint64(len(p)) > c.MaxTransfer || uint64(len(p))%c.BlockSize != 0 {
+		return fmt.Errorf("nvme: length %d not a block multiple (bs=%d, max %d)",
+			len(p), c.BlockSize, c.MaxTransfer)
 	}
 	nlb := uint64(len(p)) / c.BlockSize
 	if lba+nlb > c.Blocks {
@@ -351,7 +391,8 @@ func (c *Controller) xfer(opc uint32, lba uint64, p []byte, write bool) error {
 	if write {
 		dev.Copy(c.buf, p)
 	}
-	err := c.submit(&c.io, cmd{opc: opc, nsid: nsid, prp1: uint64(c.buf),
+	prp1, prp2 := c.dataPRPs(uint64(len(p)))
+	err := c.submit(&c.io, cmd{opc: opc, nsid: nsid, prp1: prp1, prp2: prp2,
 		dw10: uint32(lba), dw11: uint32(lba >> 32), dw12: uint32(nlb - 1)})
 	if err == nil && !write {
 		dev.CopyOut(p, c.buf)
@@ -359,12 +400,12 @@ func (c *Controller) xfer(opc uint32, lba uint64, p []byte, write bool) error {
 	return err
 }
 
-// Write schrijft p (blokveelvoud, ≤ 4KB) naar blok lba.
+// Write schrijft p (blokveelvoud, ≤ MaxTransfer) naar blok lba.
 func (c *Controller) Write(lba uint64, p []byte) error {
 	return c.xfer(ioWrite, lba, p, true)
 }
 
-// Read leest len(p) bytes (blokveelvoud, ≤ 4KB) vanaf blok lba.
+// Read leest len(p) bytes (blokveelvoud, ≤ MaxTransfer) vanaf blok lba.
 func (c *Controller) Read(lba uint64, p []byte) error {
 	return c.xfer(ioRead, lba, p, false)
 }

@@ -43,7 +43,7 @@ const (
 	// HOP plaatst het slot-blob op SlotBase en geeft precies die partitie in
 	// de kooi vrij (kern/cage), en de app-kant maakt er zijn RAM-plan van
 	// (mem_slot.go, -tags linkramsize). De control page woont in de staart
-	// van elke partitie (layout.CtrlPageAt, slot-ABI v2).
+	// uit de HOP-brede systeempot (layout.SlotControl, slot-ABI v8).
 	// HopBase is waar ons image draait — NIET DRAM-start: de FSBL
 	// decomprimeert U-Boot naar 0x80200020 (~600KB) nádat hij ons geladen
 	// heeft, dus alles daaronder is vuil gebied (gemeten 30-07, zie
@@ -118,11 +118,11 @@ const (
 	SlotSizeMB = SlotSize >> 20
 
 	// StubMbox is het VANGNET-scratch van de kooi-stub (lege slot-tabel = de
-	// pre-agent-demo; productie krijgt zijn scratch via de slot-tabel in de
-	// partitie-staart, layout.AbiStubOff) plus de demo-velden van slotdemo.
+	// pre-agent-demo; productie krijgt zijn scratch via het control-blok in de
+	// systeempot, layout.AbiStubOff) plus de demo-velden van slotdemo.
 	// In de vrije top van de 2MB-staart, buiten élke plan-regio; heette
 	// CtrlPage en stond op 0x8FF10000 — dood als control page (die woont in
-	// de partitie-staart) en sinds de staart-hersnit (14-08) midden in
+	// de systeempot) en sinds de oude staart-hersnit (14-08) midden in
 	// slot-blok 15. Zelfde waarde als MBOX in stub-slot.S.
 	StubMbox = 0x8FFF0000
 )

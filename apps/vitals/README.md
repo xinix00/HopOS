@@ -15,6 +15,8 @@ board.
 | memlat | pointer-chase over oplopende working-sets | cache-hiërarchie, DRAM-latentie |
 | rx | download van een externe bron (plain http) | doorvoer app-stack → gwnat → NIC → internet |
 | tx | client-gedreven: `curl -o /dev/null http://node:8090/blob?mb=64` | zendkant van hetzelfde pad |
+| up | client-gedreven: reeks PUTs van 1 MiB naar `/sink` (`perf.sh`) | ontvangkant van hetzelfde pad |
+| disk | schrijven/lezen via het system-callpad (1 MiB per call), 4 KiB-writes, kale Stat-calls | LAN-pad vs. hopfs/NVMe: alles boven de Stat-vloer is schijf |
 | storm | veel korte verbindingen naar de eigen gepubliceerde poort (hairpin) | verbindingsopbouw onder druk |
 | rtt | kale TCP-handshakes naar de gateway | vloer van het interne pad |
 | gc | allocatietempo, GC-cycli, langste pauze | GC-gezondheid binnen de partitie |
@@ -22,7 +24,20 @@ board.
 
 Alles is ook zonder browser te bedienen: `GET /api/state` (alle cijfers als
 JSON), `GET /api/run?test=<naam>` (of `test=all`), en de losse endpoints
-`/ping` en `/blob?mb=N`. Eén test tegelijk; een tweede start geeft 409.
+`/ping`, `/blob?mb=N` en `/sink` (PUT/POST, bodies tot 1 MiB — leanhttp's
+grens). Eén test tegelijk; een tweede start geeft 409.
+
+De drie doorvoermetingen in één keer, vanaf een client met curl en python3:
+
+```
+apps/vitals/perf.sh <node[:8090]> [mb]     # download (/blob), upload (/sink), disk
+```
+
+De disk-test geeft naast MB/s ook de **Stat-vloer** (p50 van een system call
+die geen schijfblok raakt): dat is het pad app-stack → slot-LAN → HOP zelf.
+Zit de rem in het LAN, dan ligt de vloer hoog en de 1 MiB-calls dicht erop;
+zit hij in hopfs/NVMe, dan is de vloer laag en de rest niet. `?kb=` kiest een
+kleinere chunk, `?path=/data/…` een mount in plaats van de eigen root.
 
 **Kanttekening:** onder QEMU-TCG is WFE een no-op — idle-cijfers zijn
 ijzer-cijfers. En de storm-test stormt door zijn eigen slot heen (client én

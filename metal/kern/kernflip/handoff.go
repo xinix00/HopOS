@@ -39,14 +39,15 @@ const maxAgentState = 128 << 10
 //
 //	kop (128B): magic | versie | oudVenster.base | oudVenster.size |
 //	            nieuwVenster.base | nieuwVenster.total | slotCount | generatie |
-//	            bundelsom | (rest gereserveerd)
+//	            bundelsom | bufferArena.base | bufferArena.size | netRingHalf |
+//	            (rest gereserveerd)
 //	per slot:  slot | partBase | partSize | core | nPorts | jobLen |
 //	           cores | nMounts | nPorts×u64 (poort) | job-bytes |
 //	           per mount: localLen | sharedLen | bytes (alles 8-uitgelijnd)
 //	NAT-blok:  masqNext | gwMAC+gwKnown | flowCount | flowCount×24B
 //	agent:     lengte | JSON-bytes (8-uitgelijnd) — de state van HOP zelf
 const (
-	handVersion = 5
+	handVersion = 7
 	handHead    = 128
 	slotHead    = 64
 )
@@ -78,8 +79,9 @@ type Handoff struct {
 	// bestaat om precies één reden: een boot-config die zegt "flip naar deze
 	// URL" mag geen eeuwige lus worden. De volgende kern haalt de bundel op,
 	// rekent dezelfde som, en springt alleen als hij verschilt.
-	BundleSum uint64
-	Slots     []slots.SlotState
+	BundleSum   uint64
+	BufferArena slots.BufferArenaState
+	Slots       []slots.SlotState
 }
 
 // encodeHandoff bouwt het blob. max is de ruimte in de staart; past het niet,
@@ -96,6 +98,9 @@ func encodeHandoff(h Handoff, max int) ([]byte, error) {
 	binary.LittleEndian.PutUint64(b[48:], uint64(len(h.Slots)))
 	binary.LittleEndian.PutUint64(b[56:], h.Gen)
 	binary.LittleEndian.PutUint64(b[64:], h.BundleSum)
+	binary.LittleEndian.PutUint64(b[72:], h.BufferArena.Base)
+	binary.LittleEndian.PutUint64(b[80:], h.BufferArena.Size)
+	binary.LittleEndian.PutUint64(b[88:], h.BufferArena.RingHalf)
 
 	for _, s := range h.Slots {
 		var rec [slotHead]byte
@@ -175,6 +180,9 @@ func decodeHandoff(b []byte) (Handoff, error) {
 	n := binary.LittleEndian.Uint64(b[48:])
 	h.Gen = binary.LittleEndian.Uint64(b[56:])
 	h.BundleSum = binary.LittleEndian.Uint64(b[64:])
+	h.BufferArena.Base = binary.LittleEndian.Uint64(b[72:])
+	h.BufferArena.Size = binary.LittleEndian.Uint64(b[80:])
+	h.BufferArena.RingHalf = binary.LittleEndian.Uint64(b[88:])
 	if n > 1024 {
 		return h, fmt.Errorf("slot-telling %d is onzin", n)
 	}

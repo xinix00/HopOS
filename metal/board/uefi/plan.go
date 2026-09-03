@@ -25,9 +25,8 @@ import (
 // De carve draagt de per-slot fysieke regio's, gedimensioneerd voor
 // layout.SlotCap (128) — niet voor de runtime-MaxSlots — zodat de
 // stub-claim (init.s CARVE_SIZE, compile-time) hem altijd dekt; de node
-// gebruikt er min(cores,128) van. De net-ringen liggen hier níét (meer): die
-// leven in de staart van de eigen partitie van elk slot (zie kern/slots
-// appRAMSize) en schalen zo mee met wat er draait — daarmee kromp de carve
+// gebruikt er min(cores,128) van. Control en net-ringen liggen hier niet: HOP
+// reserveert daarvoor bij boot één systeempot uit de partitie-pool — daarmee kromp de carve
 // van 288MB naar 32MB. HOP-kern-RAM staat op 128MB: 64MB (de eerste lean-
 // maat, ~2× de 7-task-piek van 14-07) bleek op de Altra te krap voor 127
 // gelijktijdige twee-fase-starts — kern-panic in de plaatsingsgolf, heap-
@@ -39,8 +38,8 @@ const (
 	carveSize = 0x02000000 // CARVE_SIZE in init.s (32MB, dekt t/m scratch)
 
 	ctrlOff = carveOff + 0x000000 // (SlotCap+1)×4KB, 1MB gereserveerd
-	// (hier lag de ring-regio: 8MB voor SlotCap×64KB hop-ABI-ringen. Die liggen
-	// sinds ABIVersion 2 in de partitie van het slot zelf, dus dit gat is vrij.
+	// (hier lag de ring-regio: 8MB voor SlotCap×64KB hop-ABI-ringen. Die komen
+	// nu uit de runtime systeempot, dus dit gat is vrij.
 	// De offsets hieronder blijven staan waar ze staan: REVOKE_OFF en CARVE_SIZE
 	// zijn literals in init.s.)
 	stage2Off  = carveOff + 0x900000  // (SlotCap+1)×64KB ≈ 8MB

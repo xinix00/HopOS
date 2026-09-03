@@ -150,7 +150,9 @@ func main() {
 	apple := flag.Bool("apple", false, "Apple-bootobject: geen Linux-Image-header, maar de twee stubs uit board/apple vooraan in het image (offset 0 = waar een core uit reset landt, 0x800 = waar iBoot de boot-core aflevert) plus hun parameterblok op 0x100 — zie appleStub")
 	pe := flag.Bool("pe", false, "verpak als AArch64 PE/COFF UEFI-applicatie (BOOTAA64.EFI): één payload + relocatietabel, de overige -elf-varianten als diff-bewijs (vereist -ldflags -buildid= op elke variant; zie docs/archief/pe-relocatie.md)")
 	elfreloc := flag.Bool("elfreloc", false, "verpak als kern-flip-bundel (docs/kern-flip.md): de eerste -elf onaangeroerd + HOPRELO1-relocatiestaart; de overige -elf-varianten als diff-bewijs (zelfde eisen als -pe)")
-	flipABI := flag.Uint("flipabi", 1, "flip-ABI-versie in de HOPRELO1-staart (kern/kernflip.ABI; alleen met -elfreloc)")
+	// Houd gelijk aan metal/kern/kernflip.ABI. Dit tooltje is bewust los van
+	// het Tamago-module bouwbaar, dus de release-/QEMU-test is de koppeling.
+	flipABI := flag.Uint("flipabi", 2, "flip-ABI-versie in de HOPRELO1-staart (kern/kernflip.ABI; alleen met -elfreloc)")
 	flag.Parse()
 	if len(elfPaths) == 0 {
 		die("-elf is verplicht")

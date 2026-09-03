@@ -14,12 +14,11 @@
 // Vorm: 4KB-granule, 32-bit IPA (VTCR.T0SZ=32, startlevel 1):
 //
 //	L1[4]    1GB/entry: [ipa>>30]→L2part, [2]→L2dev (0x80000000-),
-//	         [3]→L2net (0xC0000000-: het net-ring-GB)
+//	         [3]→L2net (0xC0000000-: de vaste virtuele NIC-vensters)
 //	L2part   2MB-blokken: canoniek IPA-bereik → eigen slot-partitie (PA)
 //	L2dev    [384]→L3ctrl (2MB rond CtrlBase), [392+..]→L3ring
-//	L2net    [i-1] = eigen 2MB net-ring-blok als blockRW (frame-ringen; een
-//	         eigen GB — 128×2MB paste niet in het ctrl-GB: slot ≥105 liep
-//	         over de 1GB-grens, Altra 15-07)
+//	L2net    twee L3's voor alleen TX en RX van dit slot; de fysieke pagina's
+//	         komen uit HOP's gezamenlijke netwerkpot
 //	L3ctrl   scratch-page read-only (PSCI-conduitkeuze), eigen ctrl-page RW
 //	L3ring   de eigen 64KB ring-regio RW
 //
@@ -59,14 +58,15 @@ const (
 	pageRO    = descPage | attrAF | attrSHInner | attrRO | attrNormal
 	pageRWNC  = descPage | attrAF | attrSHInner | attrRW | attrNormNC
 
-	l1Off     = 0x0000
-	l2PartOff = 0x1000
-	l2DevOff  = 0x2000
-	l3CtrlOff = 0x3000
-	// +0x5000 was het net-ring-GB; sinds de frame-ringen in de ABI-staart van de
-	// eigen partitie wonen valt dat onder l2PartOff en is de offset vrij.
-	// CtxOff (0x6000, abi/layout) is het switch-contextblok — NIET herbruiken.
-	l2FbOff = 0x7000 // FB-grant-L2 (GrantWindow): identity-venster op de
+	l1Off         = 0x0000
+	l2PartOff     = 0x1000
+	l2DevOff      = 0x2000
+	l3CtrlOff     = 0x3000
+	l3SlotCtrlOff = 0x4000
+	// De netwerk-L2 staat op 0x5000; CtxOff (0x6000,
+	// abi/layout) is het switch-contextblok en mag nooit als tabel dienen.
+	l2NetOff = 0x5000
+	l2FbOff  = 0x7000 // FB-grant-L2 (GrantWindow): identity-venster op de
 	// firmware-framebuffer, alleen gevuld voor het slot dat de grant houdt
 	// De twee rand-L3's van dat venster: een framebuffer is zelden 2MB-aligned,
 	// dus kop en staart worden pagina-precies gemapt i.p.v. een heel blok
@@ -75,6 +75,8 @@ const (
 	// 0xFFFF van het slotblok was vrij (zie de indeling in abi/layout).
 	l3FbHeadOff = 0x8000
 	l3FbTailOff = 0x9000
+	l3NetTXOff  = 0xA000
+	l3NetRXOff  = 0xB000
 )
 
 // InitVectors schrijft de gedeelde EL2-vectoren op Stage2Base (2KB-aligned
@@ -321,13 +323,12 @@ func Revoke(i int) {
 // Build schrijft de stage-2-tabellen voor slot i en geeft het fysieke adres
 // van de L1-tabel terug (voor VTTBR_EL2, gezet door de EL2-trampoline).
 // ipaBase is het linkadres-bereik van de image; paBase/size is de fysieke
-// partitie die HOP voor deze task alloceerde (variabel per job). Het
+// partitie die HOP voor deze task alloceerde (variabel per job). ctrlPA/netHalf
+// beschrijven zijn control+TX+RX-slice uit HOP's systeempot. Het
 // IPA-bereik [ipaBase, ipaBase+size) wordt op [paBase, paBase+size) gelegd.
 // size ≤ één 1GB-blok vanaf ipaBase (aanroeper begrenst dit) → één L2-tabel.
-// De ABI-staart van het slot (control-page, hop-ABI-ringen, frame-ringen) heeft
-// hier geen eigen parameter en geen eigen venster meer: die ligt in de partitie
-// (layout, ABIVersion 2) en valt dus binnen dezelfde map.
-func Build(i int, ipaBase, paBase, size uint64) (uint64, error) {
+// De partitie zelf bevat uitsluitend app-RAM.
+func Build(i int, ipaBase, paBase, size, ctrlPA, netHalf uint64) (uint64, error) {
 	if i < 1 || i > layout.MaxSlots {
 		return 0, fmt.Errorf("slot %d buiten bereik", i)
 	}
@@ -342,6 +343,10 @@ func Build(i int, ipaBase, paBase, size uint64) (uint64, error) {
 	l2Part := uint64(base + l2PartOff)
 	l2Dev := uint64(base + l2DevOff)
 	l3Ctrl := uint64(base + l3CtrlOff)
+	l3SlotCtrl := uint64(base + l3SlotCtrlOff)
+	l2Net := uint64(base + l2NetOff)
+	l3NetTX := uint64(base + l3NetTXOff)
+	l3NetRX := uint64(base + l3NetRXOff)
 
 	// De tabel is de IPA→PA-vertaling: alle índexen hieronder komen uit het
 	// IPA-beeld (de universele layout-constanten die de app ziet), alle
@@ -358,6 +363,11 @@ func Build(i int, ipaBase, paBase, size uint64) (uint64, error) {
 	}
 	dev.Write64(base+l1Off+uintptr(ipaBase>>30)*8, partL2|descTable)
 	dev.Write64(base+l1Off+uintptr(uint64(layout.CtrlBase)>>30)*8, l2Dev|descTable)
+
+	if ctrlPA&0xFFF != 0 || netHalf&0xFFF != 0 || netHalf <= layout.NetRingHeader || netHalf > layout.NetRingWindowHalf {
+		return 0, fmt.Errorf("slot-buffer %#x half=%#x past niet op de paginafijne vensters", ctrlPA, netHalf)
+	}
+	netPA := ctrlPA + uint64(layout.SlotControlStride)
 
 	// Partitie als 2MB-blokken: IPA (linkadres) → PA (gealloceerde partitie).
 	// De index wordt begrensd, symmetrisch met het net-ring-blok hieronder: één
@@ -385,15 +395,42 @@ func Build(i int, ipaBase, paBase, size uint64) (uint64, error) {
 	devGB := uint64(layout.CtrlBase) &^ ((1 << 30) - 1)
 	dev.Write64(uintptr(l2Dev)+uintptr((uint64(layout.CtrlBase)-devGB)>>21)*8, l3Ctrl|descTable)
 
-	// L3ctrl: alleen de boot-scratch, read-only op zijn IPA (de conduitkeuze die
-	// cpuinit erop achterliet).
-	//
-	// Hier stonden ook de eigen control-page en de ring- en net-ring-regio's, elk
-	// met hun eigen IPA-venster en tabel. Die zijn weg: de slot-ABI woont sinds
-	// ABIVersion 2 in de staart van de partitie zelf (layout), en de partitie
-	// hierboven is al volledig gemapt — inclusief die staart. Eén map, één
-	// contract, en de app rekent alles uit RamStart/RamSize.
+	// L3ctrl: alleen de boot-scratch, read-only op zijn IPA.
 	dev.Write64(uintptr(l3Ctrl)+0*8, uint64(layout.BootScratchPA())|pageRO)
+
+	// Precies het control-blok van dit slot. SlotControlStride deelt 2MiB, dus
+	// het blok kruist nooit een L2-grens en één L3-tabel volstaat.
+	ctrlLink := uint64(layout.SlotControl(i))
+	ctrlL2 := (ctrlLink - devGB) >> 21
+	ctrlPage := (ctrlLink & ((2 << 20) - 1)) >> 12
+	dev.Write64(uintptr(l2Dev)+uintptr(ctrlL2)*8, l3SlotCtrl|descTable)
+	for off := uint64(0); off < layout.SlotControlStride; off += 4 << 10 {
+		dev.Write64(uintptr(l3SlotCtrl)+uintptr(ctrlPage+off>>12)*8, (ctrlPA+off)|pageRWNC)
+	}
+
+	// Alleen de twee logische ringen van dit slot in het net-GB. De virtuele
+	// vensters zijn elk 2MiB groot, maar we mappen uitsluitend netHalf bytes;
+	// de rest faultt. Zo kan HOP één totale pot over alle slots verdelen zonder
+	// dat een app een buurpagina kan benoemen.
+	netGB := uint64(layout.NetRingBase) &^ ((1 << 30) - 1)
+	dev.Write64(base+l1Off+uintptr(netGB>>30)*8, l2Net|descTable)
+	mapNet := func(link, phys, l3 uint64) error {
+		idx := (link - netGB) >> 21
+		if idx > 511 || link&(uint64(layout.NetRingWindowHalf)-1) != 0 {
+			return fmt.Errorf("net-ring-IPA %#x past niet in het net-GB", link)
+		}
+		dev.Write64(uintptr(l2Net)+uintptr(idx)*8, l3|descTable)
+		for off := uint64(0); off < netHalf; off += 4 << 10 {
+			dev.Write64(uintptr(l3)+uintptr(off>>12)*8, (phys+off)|pageRWNC)
+		}
+		return nil
+	}
+	if err := mapNet(uint64(layout.NetRingTX(i)), netPA, l3NetTX); err != nil {
+		return 0, err
+	}
+	if err := mapNet(uint64(layout.NetRingRX(i)), netPA+netHalf, l3NetRX); err != nil {
+		return 0, err
+	}
 
 	// Coherentie ná de tabel-writes: de page-table-walker van de app-core leest
 	// deze tabellen cacheable (VTCR IRGN/ORGN=WB), HOP schreef ze ongecached.

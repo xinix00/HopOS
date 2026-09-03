@@ -31,8 +31,8 @@ func cageInit() { stage2.InitVectors() }
 //
 // cageFloor is nul: HOP zet hier niets vóór de app in de partitie (het stukje
 // vertrouwde code is de EL2-trampoline, en die woont in HOP's eigen image).
-func cagePrepare(i int, linkBase, base, size, entry uint64) error {
-	l1, err := stage2.Build(i, linkBase, base, size)
+func cagePrepare(i int, linkBase, base, size, entry, ctrlPA, netHalf uint64) error {
+	l1, err := stage2.Build(i, linkBase, base, size, ctrlPA, netHalf)
 	if err != nil {
 		return fmt.Errorf("stage-2 slot %d: %w", i, err)
 	}

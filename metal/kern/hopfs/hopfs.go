@@ -57,18 +57,28 @@ type node struct {
 	size     uint64           // file: lengte in bytes
 }
 
+// blockDevice is precies de grens die hopfs nodig heeft. De productie gebruikt
+// nvme.Controller; de kleine interface maakt run-batching ook zonder MMIO
+// testbaar.
+type blockDevice interface {
+	Read(lba uint64, p []byte) error
+	Write(lba uint64, p []byte) error
+}
+
 // FS is één bestandslaag op één NVMe-namespace.
 type FS struct {
 	mu   sync.Mutex
-	disk *nvme.Controller
+	disk blockDevice
 	// base is de eerste LBA van ons venster (zie NewRange); 0 = de hele schijf.
-	base  uint64
-	root  *node
-	free  []uint32 // teruggegeven blokken
-	next  uint32   // bump-allocator
-	max   uint32   // totaal aantal blokken
-	nodes int      // aantal nodes in de boom (excl. root), tegen OOM
-	index int      // totaal aantal blok-indexen in de boom, tegen OOM
+	base         uint64
+	lbasPerBlock uint64 // fysieke LBA's per logisch hopfs-blok
+	maxIOBlocks  uint64 // hopfs-blokken per diskcommand
+	root         *node
+	free         []uint32 // teruggegeven blokken
+	next         uint32   // bump-allocator
+	max          uint32   // totaal aantal blokken
+	nodes        int      // aantal nodes in de boom (excl. root), tegen OOM
+	index        int      // totaal aantal blok-indexen in de boom, tegen OOM
 }
 
 // New maakt een lege bestandslaag op de (als leeg beschouwde) schijf.
@@ -89,15 +99,25 @@ func New(disk *nvme.Controller) *FS {
 // het bestandssysteem van de gebruiker heen schrijven — en dat is geen bug die
 // je met een foutmelding oplost.
 func NewRange(disk *nvme.Controller, firstLBA, blocks uint64) *FS {
-	perBlock := BlockSize / disk.BlockSize
+	return newRange(disk, firstLBA, blocks, disk.BlockSize, disk.MaxTransfer)
+}
+
+func newRange(disk blockDevice, firstLBA, blocks, diskBlockSize, maxTransfer uint64) *FS {
+	perBlock := uint64(BlockSize) / diskBlockSize
 	if perBlock == 0 {
 		perBlock = 1 // schijf met blokken > 4KB: één LBA per hopfs-blok
 	}
+	ioBlocks := maxTransfer / BlockSize
+	if ioBlocks == 0 {
+		ioBlocks = 1
+	}
 	return &FS{
-		disk: disk,
-		base: firstLBA,
-		root: &node{dir: true, children: map[string]*node{}},
-		max:  uint32(blocks / perBlock),
+		disk:         disk,
+		base:         firstLBA,
+		lbasPerBlock: perBlock,
+		maxIOBlocks:  ioBlocks,
+		root:         &node{dir: true, children: map[string]*node{}},
+		max:          uint32(blocks / perBlock),
 	}
 }
 
@@ -160,7 +180,25 @@ func (f *FS) alloc() (uint32, error) {
 }
 
 func (f *FS) lba(block uint32) uint64 {
-	return f.base + uint64(block)*(BlockSize/f.disk.BlockSize)
+	return f.base + uint64(block)*f.lbasPerBlock
+}
+
+// contiguousRun telt vanaf start maximaal limit fysiek opeenvolgende blokken.
+// Gaten stoppen de run. Alleen zulke runs mogen als één NVMe-transfer worden
+// aangeboden; de bestandsindex kan door hergebruik immers gefragmenteerd zijn.
+func contiguousRun(blocks []uint32, start, limit uint64) uint64 {
+	if start >= uint64(len(blocks)) || limit == 0 || blocks[start] == holeBlock {
+		return 0
+	}
+	first := uint64(blocks[start])
+	run := uint64(1)
+	for run < limit && start+run < uint64(len(blocks)) {
+		if blocks[start+run] == holeBlock || uint64(blocks[start+run]) != first+run {
+			break
+		}
+		run++
+	}
+	return run
 }
 
 // Stat geeft (size, isDir).
@@ -272,6 +310,21 @@ func (f *FS) ReadAt(path string, off uint64, p []byte) (int, error) {
 		if chunk > want-done {
 			chunk = want - done
 		}
+		// Volledige, fysiek opeenvolgende hopfs-blokken gaan in één diskcommand.
+		// Een partiële kop/staart blijft hieronder de behoudende read-modify-copy.
+		if bo == 0 && chunk == BlockSize && n.blocks[bi] != holeBlock {
+			limit := (want - done) / BlockSize
+			if limit > f.maxIOBlocks {
+				limit = f.maxIOBlocks
+			}
+			run := contiguousRun(n.blocks, bi, limit)
+			bytes := run * BlockSize
+			if err := f.disk.Read(f.lba(n.blocks[bi]), p[done:done+bytes]); err != nil {
+				return int(done), err
+			}
+			done += bytes
+			continue
+		}
 		if n.blocks[bi] == holeBlock { // gat: leest als nul
 			clear(p[done : done+chunk])
 			done += chunk
@@ -380,6 +433,41 @@ func (f *FS) WriteAt(path string, off uint64, p []byte) error {
 		chunk := BlockSize - bo
 		if chunk > uint64(len(p))-done {
 			chunk = uint64(len(p)) - done
+		}
+		// Een reeks volledige blokken eerst alloceren en daarna als één transfer
+		// schrijven zolang hun fysieke bloknummers oplopen. De bump-allocator
+		// levert voor nieuwe bestanden normaal de hele MiB als één run; na
+		// Remove/hergebruik kan fragmentatie ontstaan en knippen we vanzelf.
+		if bo == 0 && chunk == BlockSize {
+			limit := (uint64(len(p)) - done) / BlockSize
+			if limit > f.maxIOBlocks {
+				limit = f.maxIOBlocks
+			}
+			var first uint32
+			run := uint64(0)
+			for run < limit {
+				idx := bi + run
+				if n.blocks[idx] == holeBlock {
+					b, err := f.alloc()
+					if err != nil {
+						return err
+					}
+					n.blocks[idx] = b
+				}
+				b := n.blocks[idx]
+				if run == 0 {
+					first = b
+				} else if uint64(b) != uint64(first)+run {
+					break
+				}
+				run++
+			}
+			bytes := run * BlockSize
+			if err := f.disk.Write(f.lba(first), p[done:done+bytes]); err != nil {
+				return err
+			}
+			done += bytes
+			continue
 		}
 		// Raakt de payload een gat, dan nú pas een echt blok alloceren.
 		fresh := n.blocks[bi] == holeBlock

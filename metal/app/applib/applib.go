@@ -71,13 +71,13 @@ var abiVersion uint64 = layout.ABIVersion
 // ABI-verkeer van de app loopt hierlangs; een rauwe deref zou op zo'n board stil
 // in de eigen D-cache blijven staan en voor HOP niet bestaan.
 func (a *App) ctrlGet(off uintptr) uint64 {
-	p := layout.CtrlPageAt(a.RAMStart, a.RAMSize) + off
+	p := layout.SlotControl(a.Slot) + off
 	dev.Pull(p, 8)
 	return dev.Read64(p)
 }
 
 func (a *App) ctrlSet(off uintptr, v uint64) {
-	p := layout.CtrlPageAt(a.RAMStart, a.RAMSize) + off
+	p := layout.SlotControl(a.Slot) + off
 	dev.Write64(p, v)
 	dev.Push(p, 8)
 }
@@ -94,7 +94,7 @@ func Init() *App {
 		RAMSize:  uint64(end - start),
 	}
 
-	a.out = ring.Open(layout.RingOutboxAt(a.RAMStart, a.RAMSize))
+	a.out = ring.Open(layout.RingOutbox(a.Slot))
 	a.env = a.readEnv()
 
 	// Kreeg deze app het glas (gui/fbgrant zette FB_*), dan is dat venster DRAM
@@ -145,24 +145,24 @@ func Init() *App {
 	// er iets van merkt of aan hoeft te doen. Configure is een no-op bij één
 	// core, dus hier geen SMP-vertakking. Vóór READY, zodat wie op READY wacht
 	// meteen de volledige machine ziet.
-	smp.Configure(a.Slot, int(a.ctrlGet(layout.CtrlCores)), layout.CtrlPageAt(a.RAMStart, a.RAMSize))
+	smp.Configure(a.Slot, int(a.ctrlGet(layout.CtrlCores)), layout.SlotControl(a.Slot))
 
 	// Idle-tik-teller publiceren (metal/cpu/idle → CtrlIdle): het klok-signaal
 	// voor de wachter op de HOP-core. OS-laag-werk — de app merkt er niets
 	// van, net als bij SMP.
-	idle.Publish(layout.CtrlPageAt(a.RAMStart, a.RAMSize) + layout.CtrlIdle)
-	idle.PublishWakes(layout.CtrlPageAt(a.RAMStart, a.RAMSize) + layout.CtrlWakes)
+	idle.Publish(layout.SlotControl(a.Slot) + layout.CtrlIdle)
+	idle.PublishWakes(layout.SlotControl(a.Slot) + layout.CtrlWakes)
 
 	// Core-deling (fase 6): laat de governor het CtrlShared-woord volgen. Zet
 	// HOP het (dit slot deelt zijn core), dan yieldt de governor coöperatief
 	// via HVC i.p.v. WFE zodat de mede-bewoner draait. OS-laag-werk — de app
 	// merkt er niets van, net als bij SMP en de idle-teller.
-	idle.WatchShared(layout.CtrlPageAt(a.RAMStart, a.RAMSize) + layout.CtrlShared)
+	idle.WatchShared(layout.SlotControl(a.Slot) + layout.CtrlShared)
 
 	// De idle-modus van het board (CtrlIdleMode): hoe deze core hoort te
 	// idlen — op Apple een yield naar EL2, elders de default. De governor
 	// neemt hem in zijn eerste ronde over. OS-laag-werk, de app merkt niets.
-	idle.WatchIdleMode(layout.CtrlPageAt(a.RAMStart, a.RAMSize) + layout.CtrlIdleMode)
+	idle.WatchIdleMode(layout.SlotControl(a.Slot) + layout.CtrlIdleMode)
 
 	// Het ABI-stempel aanraken zodat het in het image blijft staan (zie
 	// abiVersion): HOP leest het bij plaatsing uit de symboltabel.
@@ -196,7 +196,7 @@ func (a *App) readEnv() map[string]string {
 		return env
 	}
 	blob := make([]byte, n)
-	env0 := layout.CtrlPageAt(a.RAMStart, a.RAMSize) + layout.CtrlEnvData
+	env0 := layout.SlotControl(a.Slot) + layout.CtrlEnvData
 	dev.Pull(env0, uintptr(n))
 	dev.CopyOut(blob, env0)
 	for _, line := range strings.Split(string(blob), "\n") {

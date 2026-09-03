@@ -18,6 +18,7 @@ package hopswitch
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 
@@ -39,6 +40,11 @@ const (
 	// van een buurslot permanent corrupt verklaren of de LAN-ringen met
 	// reuzenrecords vullen.
 	maxFrameLen = netdev.MTU + netdev.EthernetMaximumSize
+
+	// Een lokale producer mag een korte TCP-burst groter dan zijn ring maken.
+	// Wacht dan op de switch in plaats van de staart stil te droppen en pas na
+	// een retransmissietimer terug te zien. De timeout bewaakt isolatie.
+	txBackpressure = 10 * time.Millisecond
 )
 
 // uit het net-plan in layout, als string voor de mains (layout.IP4Str: de
@@ -60,6 +66,11 @@ var hostMAC = layout.SlotMAC(0)
 type port struct {
 	tx *ring.Ring // app → switch
 	rx *ring.Ring // switch → app
+
+	// Na één begrensde wacht op een volle lokale RX-ring droppen volgende
+	// frames meteen tot de consumer aantoonbaar ruimte heeft gemaakt. Zo kan
+	// een niet-lezende app de hele switch nooit 10ms per frame ophouden.
+	rxBlocked bool
 
 	// txWarned: de corrupt-verklaring van de TX-ring is al gemeld. Eén regel
 	// per leven van de poort — de vlag zelf is permanent (ring.Corrupt), dus
@@ -97,14 +108,24 @@ func (d *hostDevice) Receive(buf []byte) (int, error) {
 
 func (d *hostDevice) Transmit(buf []byte) error {
 	d.txMu.Lock()
-	_, notify := d.tx.WriteNotify(ring.TypeFrame, buf)
-	d.txMu.Unlock()
-	if notify {
-		// Deze producer draait al op HOP; maak de switchlus zonder polling
-		// runnable. De app-kant gebruikt voor dezelfde semantiek dev.Notify.
+	defer d.txMu.Unlock()
+	deadline := time.Now().Add(txBackpressure)
+	for {
+		ok, notify := d.tx.WriteNotify(ring.TypeFrame, buf)
+		if ok {
+			if notify {
+				// Deze producer draait al op HOP; maak de switchlus zonder polling
+				// runnable. De app-kant gebruikt dezelfde semantiek via dev.Notify.
+				notifySwitch()
+			}
+			return nil
+		}
 		notifySwitch()
+		if time.Now().After(deadline) {
+			return fmt.Errorf("hopswitch: host TX ring bleef vol")
+		}
+		runtime.Gosched()
 	}
-	return nil
 }
 
 // HostDevice geeft HOP's poort 0. Up moet eerst zijn aangeroepen.
@@ -158,14 +179,15 @@ func Up() error {
 }
 
 // Attach koppelt slot i aan de switch (door slots.Start, ná de ring-init).
-// netPA is de fysieke net-ring-basis van dít slot — de partitie-staart, door
-// kern/slots per lifecycle berekend en als parameter meegegeven (er is geen
-// register dat stale kan worden); de TX/RX-offsets komen uit het layout-plan.
+// txPA/rxPA zijn de twee fysieke stukken van dít slot uit HOP's netwerkpot;
+// de app ziet ze op zijn vaste layout.NetRingTX/RX-IPA's. Expliciet twee
+// adressen, want ze liggen fysiek compact terwijl hun IPA-vensters 2MiB uit
+// elkaar staan.
 // No-op zolang de switch niet Up() is: ports is dan nog nil (lazy op de
 // runtime-MaxSlots gedimensioneerd), en een board dat geen switch draait
 // (de Pi-mains starten slots zonder hopswitch.Up) mag hier niet crashen —
 // vóór de array→slice-wissel was dit een onschuldige no-op.
-func Attach(i int, netPA uintptr) {
+func Attach(i int, txPA, rxPA uintptr) {
 	if i < 1 || i > layout.MaxSlots {
 		return
 	}
@@ -175,8 +197,8 @@ func Attach(i int, netPA uintptr) {
 		return
 	}
 	ports[i] = &port{
-		tx: ring.Open(netPA + layout.NetTXOff),
-		rx: ring.Open(netPA + layout.NetRXOff),
+		tx: ring.Open(txPA),
+		rx: ring.Open(rxPA),
 	}
 }
 
@@ -202,7 +224,7 @@ func loop() {
 	// Eén hergebruikte leesbuffer voor alle TX-ringen (de switch-lus is één
 	// goroutine): geen allocatie per frame op de netwerk-hot-path. forward
 	// kopieert het frame synchroon in de dst-ring(en) of via nat de uplink.
-	buf := make([]byte, layout.NetRingDataCap)
+	buf := make([]byte, maxFrameLen)
 	if pumpHook != nil {
 		pumpHook(switchPending, notifySwitch)
 	}
@@ -218,6 +240,11 @@ func loop() {
 	t := time.NewTimer(failsafe)
 	for {
 		if switchPass(buf) {
+			// Maximaal maxBurst frames zijn nu naar een RX-ring gekopieerd. Laat
+			// vooral HOP's eigen RX-pomp ze consumeren vóór de volgende burst;
+			// anders kan de switch op dezelfde core de volledige ring vullen en
+			// de staart van een 1MiB-system-frame alsnog droppen.
+			runtime.Gosched()
 			continue
 		}
 		t.Reset(failsafe)
@@ -319,17 +346,44 @@ func deliverLocked(i int, p []byte) {
 	writeRXLocked(i, p)
 }
 
-// writeRXLocked is de enige producergrens voor LAN-RX. Een overgang van leeg
-// naar niet-leeg triggert precies één doelgerichte wake; zolang er nog frames
-// liggen volgen geen extra kicks.
+// writeRXLocked is de enige producergrens voor LAN-RX. Omdat beide uiteinden
+// lokaal zijn, mag een korte burst hier wachten tot de consumer ruimte maakt;
+// anders gooit één snelle HOP-response tientallen opeenvolgende TCP-segmenten
+// weg voordat de app-core één keer gepland is. Daarna blijft het gewone
+// Ethernetgedrag gelden: timeout = drop, TCP herstelt.
 func writeRXLocked(i int, p []byte) {
 	if i < 0 || i >= len(ports) || ports[i] == nil {
 		return
 	}
-	ok, notify := ports[i].rx.WriteNotify(ring.TypeFrame, p)
-	if !ok || !notify {
-		return
+	deadline := time.Now().Add(txBackpressure)
+	woken := false
+	for {
+		ok, notify := ports[i].rx.WriteNotify(ring.TypeFrame, p)
+		if ok {
+			ports[i].rxBlocked = false
+			if notify {
+				wakeRXLocked(i)
+			}
+			return
+		}
+		if ports[i].rxBlocked {
+			return
+		}
+		// Vol impliceert niet dat de consumer nú runnable is. Eén extra kick
+		// maakt de full→space-race level-triggered zonder 10ms lang te hameren.
+		if !woken {
+			wakeRXLocked(i)
+			woken = true
+		}
+		if time.Now().After(deadline) {
+			ports[i].rxBlocked = true
+			return
+		}
+		runtime.Gosched()
 	}
+}
+
+func wakeRXLocked(i int) {
 	// Dedicated ARM-apps kunnen zelf in WFE staan; hetzelfde generieke event
 	// wekt hen zonder dat de switch hun architectuur hoeft te kennen. Een app
 	// die naar EL2/M-mode yieldde krijgt hieronder bovendien de doelkick.

@@ -115,12 +115,12 @@ func TestRelocateWeigertKrommePlannen(t *testing.T) {
 		{"leeg plan", MapPlan{TableBase: 0x8BFF0000}},
 		{"lengte nul", MapPlan{TableBase: 0x8BFF0000,
 			Windows: []MapWindow{{Link: 0x88000000, Phys: 0x88000000, R: true}}}},
-		{"link niet op blokgrens", MapPlan{TableBase: 0x8BFF0000,
-			Windows: []MapWindow{{Link: 0x88001000, Phys: 0x88000000, Size: BlockSize, R: true}}}},
-		{"phys niet op blokgrens", MapPlan{TableBase: 0x8BFF0000,
-			Windows: []MapWindow{{Link: 0x88000000, Phys: 0x88001000, Size: BlockSize, R: true}}}},
-		{"lengte niet op blokgrens", MapPlan{TableBase: 0x8BFF0000,
-			Windows: []MapWindow{{Link: 0x88000000, Phys: 0x88000000, Size: PageSize, R: true}}}},
+		{"link niet op paginagrens", MapPlan{TableBase: 0x8BFF0000,
+			Windows: []MapWindow{{Link: 0x88000001, Phys: 0x88000000, Size: BlockSize, R: true}}}},
+		{"phys niet op paginagrens", MapPlan{TableBase: 0x8BFF0000,
+			Windows: []MapWindow{{Link: 0x88000000, Phys: 0x88000001, Size: BlockSize, R: true}}}},
+		{"lengte niet op paginagrens", MapPlan{TableBase: 0x8BFF0000,
+			Windows: []MapWindow{{Link: 0x88000000, Phys: 0x88000000, Size: PageSize - 1, R: true}}}},
 		{"geen rechten", MapPlan{TableBase: 0x8BFF0000,
 			Windows: []MapWindow{{Link: 0x88000000, Phys: 0x88000000, Size: BlockSize}}}},
 		{"schrijven zonder lezen", MapPlan{TableBase: 0x8BFF0000,
@@ -130,6 +130,65 @@ func TestRelocateWeigertKrommePlannen(t *testing.T) {
 	for _, c := range cases {
 		if _, err := Relocate(c.plan); err == nil {
 			t.Errorf("%s: Relocate accepteerde een krom plan", c.naam)
+		}
+	}
+}
+
+// Volle appblokken blijven goedkoop, maar het control-blok en twee fysiek
+// compacte net-ringen mogen op pagina's eindigen. Dit is het RISC-V-equivalent
+// van ARM's stage-2-map: dezelfde zichtbare vensters, ander silicium eronder.
+func TestRelocateMengtBlokkenEnPaginas(t *testing.T) {
+	const (
+		table   = 0x8BFF0000
+		link    = 0x88000000
+		phys    = 0x8A000000
+		netLink = 0xC0000000
+		netPhys = 0x8C040000
+		half    = 200 << 10
+	)
+	r, err := Relocate(MapPlan{TableBase: table, Windows: []MapWindow{
+		{Link: link, Phys: phys, Size: 4 << 20, R: true, W: true, X: true},
+		{Link: link + 4<<20, Phys: phys + 4<<20, Size: 128 << 10, R: true, W: true, Device: true},
+		{Link: netLink, Phys: netPhys, Size: half, R: true, W: true, Device: true},
+		{Link: netLink + 2<<20, Phys: netPhys + half, Size: half, R: true, W: true, Device: true},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Bytes) != 6*PageSize { // root + app-mid + tail-leaf + net-mid + twee net-leaves
+		t.Fatalf("tabel is %d pagina's, verwacht 6", len(r.Bytes)/PageSize)
+	}
+
+	// Het eerste appblok is een 2MiB-leaf; de kleine staart gaat via een L3.
+	appMid := entryAt(r.Bytes, 0, int((link>>30)&511))
+	appMidPage := int((paOf(appMid) - table) / PageSize)
+	block := entryAt(r.Bytes, appMidPage, int((link>>21)&511))
+	if got := paOf(block); got != phys || block&(entRead|entWrite|entExec) != entRead|entWrite|entExec {
+		t.Fatalf("appblok = %#x → %#x", block, got)
+	}
+	ctrlLink := link + 4<<20
+	ctrlPtr := entryAt(r.Bytes, appMidPage, int((ctrlLink>>21)&511))
+	if ctrlPtr&(entRead|entWrite|entExec) != 0 {
+		t.Fatalf("control-L3-pointer draagt rechten: %#x", ctrlPtr)
+	}
+	ctrlPage := int((paOf(ctrlPtr) - table) / PageSize)
+	ctrl := entryAt(r.Bytes, ctrlPage, int((ctrlLink>>12)&511))
+	if ctrl&(entRead|entWrite) != entRead|entWrite || ctrl&(entBuf|entCache) != 0 {
+		t.Fatalf("control-blok is niet RW/device: %#x", ctrl)
+	}
+
+	// Beide nethelften wijzen naar opeenvolgend fysiek poolgeheugen, ondanks
+	// hun 2MiB uit elkaar liggende vaste IPA's.
+	netMid := entryAt(r.Bytes, 0, int((netLink>>30)&511))
+	netMidPage := int((paOf(netMid) - table) / PageSize)
+	for _, tc := range []struct{ link, phys uint64 }{
+		{netLink, netPhys}, {netLink + 2<<20, netPhys + half},
+	} {
+		ptr := entryAt(r.Bytes, netMidPage, int((tc.link>>21)&511))
+		leafPage := int((paOf(ptr) - table) / PageSize)
+		e := entryAt(r.Bytes, leafPage, int((tc.link>>12)&511))
+		if got := paOf(e); got != tc.phys || e&(entBuf|entCache) != 0 {
+			t.Fatalf("net %#x → %#x (%#x), verwacht device %#x", tc.link, got, e, tc.phys)
 		}
 	}
 }

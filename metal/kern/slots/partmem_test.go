@@ -60,6 +60,8 @@ func poolReset(t *testing.T, regs []layout.Region) {
 		partFree = append(partFree, region{r.Base, r.Size})
 	}
 	partOf = make([]region, layout.SlotCap+1)
+	bufferArena = region{}
+	netHalf = 0
 }
 
 // De maat die partAlloc teruggeeft ÍS de partitie, ook als de aanvraag geen
@@ -258,4 +260,65 @@ func TestLicheeRVOneRegionPlacesWhatThreeCouldNot(t *testing.T) {
 				got>>20, vrij>>20)
 		}
 	})
+}
+
+func TestBufferGeometryDeeltOokControlUitDePot(t *testing.T) {
+	old := layout.MaxSlots
+	defer layout.SetMaxSlots(old)
+
+	layout.SetMaxSlots(128)
+	used, half, err := networkGeometry(50 << 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if used != 50<<20 || half != 136<<10 {
+		t.Fatalf("128 slots: used=%d MiB half=%d KiB, wil 50 MiB/136 KiB", used>>20, half>>10)
+	}
+	if _, _, err := networkGeometry(31 << 20); err == nil {
+		t.Fatal("31 MiB geaccepteerd; control + minimale TX/RX vraagt 32 MiB")
+	}
+
+	layout.SetMaxSlots(16)
+	used, half, err = networkGeometry(4 << 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if used != 4<<20 || half != 64<<10 {
+		t.Fatalf("16 slots compact: used=%d MiB half=%d KiB, wil 4 MiB/64 KiB", used>>20, half>>10)
+	}
+
+	used, half, err = networkGeometry(50 << 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if used != 50<<20 || half != 1536<<10 {
+		t.Fatalf("16 slots: used=%d MiB half=%d KiB, wil 50 MiB/1536 KiB", used>>20, half>>10)
+	}
+}
+
+func TestSlotBuffersZijnCompactEnGescheiden(t *testing.T) {
+	old := layout.MaxSlots
+	layout.SetMaxSlots(128)
+	defer layout.SetMaxSlots(old)
+	poolReset(t, []layout.Region{{Base: 0x80000000, Size: 128 << 20}})
+	if err := ConfigureNetworkBuffer(50 << 20); err != nil {
+		t.Fatal(err)
+	}
+	c1, tx1, rx1, cap1, err := slotBuffers(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2, tx2, rx2, cap2, err := slotBuffers(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tx1-c1 != uintptr(layout.SlotControlStride) || rx1-tx1 != 136<<10 {
+		t.Fatalf("slot 1: ctrl=%#x tx=%#x rx=%#x", c1, tx1, rx1)
+	}
+	if c2-rx1 != 136<<10 || tx2-c2 != uintptr(layout.SlotControlStride) || rx2-tx2 != 136<<10 {
+		t.Fatalf("slot 2 sluit niet compact aan: ctrl=%#x tx=%#x rx=%#x", c2, tx2, rx2)
+	}
+	if cap1 != 132<<10 || cap2 != cap1 {
+		t.Fatalf("ringdata %d/%d KiB, wil 132", cap1>>10, cap2>>10)
+	}
 }

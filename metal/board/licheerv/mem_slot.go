@@ -12,10 +12,10 @@ import (
 //	0x80000000  HOP: kern + heap, 128MB          (mem.go)
 //	0x88000000  app-partitie, 64MB               ← dit bestand
 //	0x8C000000  vrij
-//	0x8FFF0000  vangnet-scratch van de stub (licheerv.StubMbox; de echte
-//	            control page woont in de partitie-staart, slot-ABI v2)
+//	0x8FFF0000  vangnet-scratch van de losse stub-demo (licheerv.StubMbox;
+//	            productie krijgt control uit HOP's systeempot, slot-ABI v8)
 //
-// De kooi (slot/stub-slot.S) geeft precies deze partitie + de control page
+// De kooi (slot/stub-slot.S) geeft precies deze partitie + zijn bufferslice
 // + UART0 vrij en verzegelt de rest — inclusief HOP's eigen 128MB.
 // SlotBase/SlotSize staan in c906l.go: HOP kent ze óók (hij plaatst het
 // blob en geeft de partitie in de kooi vrij).

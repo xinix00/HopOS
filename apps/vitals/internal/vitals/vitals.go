@@ -52,6 +52,7 @@ type Config struct {
 	HopAddr string // agent-API (temperatuur); default 10.100.0.1:8080
 	HopKey  string // "" = geen agent-API, temperatuur blijft n/a
 	RxURL   string // bron van de download-test; default een plain-http CDN
+	FS      FS     // bestandslaag voor de disk-test (applib.App); nil = test slaat over
 }
 
 // defaultRxURL is een publiek 100MB-bestand over plain http (leanhttp linkt
@@ -95,6 +96,7 @@ var tests = []struct{ Name, Desc string }{
 	{"membw", "memory bandwidth"},
 	{"memlat", "memory latency"},
 	{"rx", "download throughput"},
+	{"disk", "NVMe through the system-call path"},
 	{"storm", "connection storm (via published port)"},
 	{"rtt", "TCP round-trips to the gateway"},
 	{"gc", "allocation rate + GC pauses"},
@@ -111,6 +113,7 @@ type Server struct {
 	running string // "" = niets bezig; anders de testnaam (of "all")
 	note    string // voortgangsregel van de lopende test
 
+	up   upBurst // lopende upload-reeks van /sink (zie disk.go)
 	idle idleSampler
 	temp tempCache
 }
@@ -196,6 +199,8 @@ func (s *Server) run(name string, q url.Values) *Result {
 		s.runMemLat(res, q)
 	case "rx":
 		s.runRx(res, q)
+	case "disk":
+		s.runDisk(res, q)
 	case "storm":
 		s.runStorm(res, q)
 	case "rtt":
@@ -262,6 +267,8 @@ func (s *Server) Handle(w leanhttp.ResponseWriter, r *leanhttp.Request) {
 		io.WriteString(w, "pong\n")
 	case "/blob":
 		s.serveBlob(w, r)
+	case "/sink":
+		s.serveSink(w, r)
 	default:
 		leanhttp.Error(w, "not found", leanhttp.StatusNotFound)
 	}

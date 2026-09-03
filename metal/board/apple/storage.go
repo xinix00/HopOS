@@ -6,10 +6,11 @@
 // met één venster in de SART in plaats van tien.
 package apple
 
-// storageNext is de bump-wijzer voor de coprocessor-buffers. De eerste 128KB
-// laten we vrij voor de queues van de driver, die er zijn eigen indeling in
-// maakt; wat daarna komt is voor de ANS zelf.
-var storageNext = uintptr(StorageDMAPA) + 0x20000
+// storageNext is de bump-wijzer voor de coprocessor-buffers. De eerste 1152KB
+// laten we vrij voor de queues, de één-MiB-databuffer en de PRP-lijst van de
+// NVMe-driver. Dit is 16KB naar boven afgerond ten opzichte van appleDMANeed;
+// wat daarna komt is voor de ANS zelf.
+var storageNext = uintptr(StorageDMAPA) + 0x120000
 
 // StorageBuf snijdt een 16KB-uitgelijnd stuk uit de opslag-regio. 0 = op. Geen
 // vrijgave: de coprocessor houdt deze buffers vast zolang de node leeft, en een

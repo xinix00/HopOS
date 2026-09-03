@@ -271,16 +271,14 @@ func cageInit() {
 // — zijn eigen partitie — plus eventueel de granted MMIO; de deny-all die
 // cage.Encode erachter zet dekt al het andere, inclusief HOP.
 //
-// Dat het één venster is, is de winst van de slot-ABI in de partitie-staart:
-// control-page en ringen liggen ín de partitie, dus er is geen tweede venster
-// meer en er bestaat helemaal geen gedeelde ctrl-regio die een app zou kunnen
-// benoemen. Een slot kan de control-page van een ander slot dus niet eens
-// adresseren.
+// De whitelist bevat zijn app-partitie en precies zijn eigen aaneengesloten
+// buffer-slice. Vaste IPA's maken de app-kant uniform; de PMP bindt de fysieke
+// kant zodat een slot geen control- of ringpagina van een buur kan benoemen.
 //
 // De rekenkunde staat in kern/cage (host-getest tegen de op ijzer gemeten
 // waarden); hier gaat hij alleen het geheugen in. De stub neemt geen enkele
 // beslissing: hij schrijft weg wat hier staat en verifieert het.
-func cagePrepare(i int, linkBase, base, size, entry uint64) error {
+func cagePrepare(i int, linkBase, base, size, entry, ctrlPA, netHalf uint64) error {
 	// Een intrekking van de VORIGE bewoner van dit slot hoort niet aan de
 	// volgende te blijven plakken. Dit woord overleeft een slot-wissel (het staat
 	// in het ctx-blok, niet in de partitie), en de kill-tick leest het bij élke
@@ -304,6 +302,7 @@ func cagePrepare(i int, linkBase, base, size, entry uint64) error {
 
 	plan := cage.Plan{Allow: []cage.Window{
 		{Base: base, Size: size, R: true, W: true, X: true},
+		{Base: ctrlPA, Size: uint64(layout.SlotControlStride) + 2*netHalf, R: true, W: true},
 	}}
 	if gb, gs, ok := grantWindow(i); ok {
 		plan.Allow = append(plan.Allow, cage.Window{Base: gb, Size: gs, R: true, W: true})
@@ -328,9 +327,9 @@ func cagePrepare(i int, linkBase, base, size, entry uint64) error {
 	// bestaan voor het demo-pad, waar de build hem wél vult.
 	put(stubBSSLo, 0)
 	put(stubBSSHi, 0)
-	// Scratch in de ABI-staart van deze partitie: ná het locken van de kooi mag
-	// dit hart niets daarbuiten meer aanraken, en de control page is van de app.
-	put(stubScratch, uint64(stubScratchAt(base, size)))
+	// Scratch in het eigen control-blok uit de systeempot: ná het locken van de
+	// kooi staat precies deze slice naast de app-partitie op de whitelist.
+	put(stubScratch, ctrlPA+layout.AbiStubOff)
 	put(stubCageCfg, cfg)
 	for k := range stubCageMax {
 		var v uint64
@@ -344,7 +343,7 @@ func cagePrepare(i int, linkBase, base, size, entry uint64) error {
 	// echte partitie. Zonder deze tabel draait een app op het fysieke adres
 	// waarop hij gelinkt is, en dan bestaat er maar één slot dat zo'n image kan
 	// hebben — mét de tabel ziet élk slot zichzelf op linkBase.
-	root, err := slotMap(i, linkBase, base, size)
+	root, err := slotMap(i, linkBase, base, size, ctrlPA, netHalf)
 	if err != nil {
 		return fmt.Errorf("cage slot %d: %w", i, err)
 	}
@@ -368,30 +367,33 @@ func cagePrepare(i int, linkBase, base, size, entry uint64) error {
 	// komt vers uit reset met caches ÚIT en leest dus rechtstreeks DRAM. Zonder
 	// deze veeg start het op wat er in DRAM stond, niet op wat wij schreven —
 	// dezelfde klasse als de write-buffer-les van 30-07, maar nu andersom.
-	// Eén call over de hele partitie: 64MB × 64B-regels kost ~ms bij een start,
-	// en het dekt image, stub, tabel en de ABI-staart in één keer.
+	// Eén call over de hele partitie plus zijn kleine buffer-slice.
 	dev.CleanInv(uintptr(base), uintptr(size))
+	dev.CleanInv(uintptr(ctrlPA), uintptr(layout.SlotControlStride+2*netHalf))
 	dev.MB()
 	return nil
 }
 
-// slotMap zet de map-helft van de kooi in de ABI-staart van de partitie en geeft
-// de wortel terug die de stub in zijn map-register schrijft. Twee vensters:
+// slotMap zet de map-helft in het control-blok uit de systeempot en geeft de
+// wortel terug die de stub in zijn map-register schrijft. Drie vensters:
 //
 //   - **app-RAM, cachebaar** — het canonieke linkadres → de echte partitie. Dit
 //     is waar verplaatsen voor bestaat: élk slot ziet zichzelf op hetzelfde adres.
-//   - **de ABI-staart, device** — control page en ringen, alles wat de app mét HOP
-//     deelt, ongecachet. Dan hoeft de app daar geen cache-onderhoud te doen,
-//     precies zoals op ARM (waar dev.Push/Pull daarom no-ops zijn).
+//   - **control, device** — control page, bootstrap-ringen en kooi-metadata;
+//   - **TX/RX, device** — de virtuele NIC uit dezelfde fysieke slice.
 //
 // De stub heeft zelf géén venster nodig: satp vertaalt alleen supervisor- en
 // user-mode, en hij draait in machine mode — dus fetcht hij ongetranslateerd, ook
 // ná zijn eigen csrw satp.
-func slotMap(i int, linkBase, base, size uint64) (uint64, error) {
-	appRAM := size - layout.AbiTail
+func slotMap(i int, linkBase, base, size, ctrlPA, netHalf uint64) (uint64, error) {
+	netPA := ctrlPA + uint64(layout.SlotControlStride)
 	windows := []cage.MapWindow{
-		{Link: linkBase, Phys: base, Size: appRAM, R: true, W: true, X: true},
-		{Link: linkBase + appRAM, Phys: base + appRAM, Size: layout.AbiTail,
+		{Link: linkBase, Phys: base, Size: size, R: true, W: true, X: true},
+		{Link: uint64(layout.SlotControl(i)), Phys: ctrlPA, Size: layout.SlotControlStride,
+			R: true, W: true, Device: true},
+		{Link: uint64(layout.NetRingTX(i)), Phys: netPA, Size: netHalf,
+			R: true, W: true, Device: true},
+		{Link: uint64(layout.NetRingRX(i)), Phys: netPA + netHalf, Size: netHalf,
 			R: true, W: true, Device: true},
 	}
 	// Gegrante MMIO moet óók gemapt zijn, anders ziet de app een venster dat de
@@ -407,10 +409,14 @@ func slotMap(i int, linkBase, base, size uint64) (uint64, error) {
 		})
 	}
 
-	tbl := layout.AbiTailAt(base, appRAM) + layout.AbiMapOff
+	tbl := uintptr(ctrlPA + layout.AbiMapOff)
 	m, err := cage.Relocate(cage.MapPlan{TableBase: uint64(tbl), Windows: windows})
 	if err != nil {
 		return 0, err
+	}
+	if len(m.Bytes) > layout.SlotControlStride-layout.AbiMapOff {
+		return 0, fmt.Errorf("kooi-map vraagt %d KiB, control-blok heeft vanaf AbiMapOff %d KiB",
+			len(m.Bytes)>>10, (layout.SlotControlStride-layout.AbiMapOff)>>10)
 	}
 	if i >= 0 && i < len(mapRoot) {
 		mapRoot[i] = m.Root // voor het post-mortem: wiens map keek er?
@@ -510,12 +516,14 @@ const (
 	stubScratchLen = 128
 )
 
-// stubScratchAt geeft de scratch-PA van de kooi-stub voor een partitie: in de
-// ABI-staart, want ná het locken mag het hart niets daarbuiten aanraken (en de
-// control page is van de app). Eén formule voor de schrijver (cagePrepare) en
-// de twee lezers (cageIdent/cageWhy).
-func stubScratchAt(base, size uint64) uintptr {
-	return layout.AbiTailAt(base, size-layout.AbiTail) + layout.AbiStubOff
+// stubScratchAt geeft de fysieke scratch uit de systeempot. De partitiecheck
+// houdt een vrij slot weg van de gedeelde slice.
+func stubScratchAt(i int) uintptr {
+	ctrl, _, _, _, err := slotBuffers(i)
+	if err != nil {
+		return 0
+	}
+	return ctrl + layout.AbiStubOff
 }
 
 // cageIdent vertelt wat voor hart er onder slot i zit: misa/marchid/mimpid,
@@ -526,11 +534,11 @@ func stubScratchAt(base, size uint64) uintptr {
 //
 // De extensieletters komen uit de onderste 26 bits van misa (bit 0 = 'a').
 func cageIdent(i int) string {
-	base, size, ok := partitionOf(i)
+	_, _, ok := partitionOf(i)
 	if !ok {
 		return ""
 	}
-	sc := stubScratchAt(base, size)
+	sc := stubScratchAt(i)
 	dev.CleanInv(sc, stubScratchLen)
 	misa := dev.Read64(sc + 40)
 	if misa == 0 {
@@ -563,11 +571,11 @@ func cageIdent(i int) string {
 // start is elke console-regel er één te veel: bij 100Mbit kost één regel meer
 // buffering dan de hele NIC-ring heeft (zie driver/nic/dwmac).
 func cageWhy(i int) string {
-	base, size, ok := partitionOf(i)
+	_, _, ok := partitionOf(i)
 	if !ok {
 		return ""
 	}
-	sc := stubScratchAt(base, size)
+	sc := stubScratchAt(i)
 	dev.CleanInv(sc, stubScratchLen)
 	mc, pc, tv := dev.Read64(sc+16), dev.Read64(sc+24), dev.Read64(sc+32)
 	switch st := dev.Read64(sc); st {

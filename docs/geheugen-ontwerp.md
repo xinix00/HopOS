@@ -17,7 +17,7 @@ app die te weinig heeft gaat niet trager maar dood.
 ## De keten in vijf stappen
 
 ```
-DRAM  →  board-plan  →  pool  →  partitie  →  app-RAM
+DRAM  →  board-plan  →  pool  →  systeempot + partities  →  app-RAM
 ```
 
 1. **DRAM** — wat er fysiek is. Gemeten via de DTB waar dat kan; faalt dat, dan
@@ -31,8 +31,12 @@ DRAM  →  board-plan  →  pool  →  partitie  →  app-RAM
 4. **Partitie** (`kern/slots/partmem.go`) — één aaneengesloten stuk per slot,
    afgerond op 2MB. Dit is wat de kooi vrijgeeft en waarbuiten de app niets kan
    raken.
-5. **App-RAM** — de partitie minus de ABI-staart (`layout.AbiTail`, 2MB: control
-   page, ringen, frame-ringen). Wat de app's Go-runtime als heap-plafond ziet.
+5. **Systeempot + app-RAM** — bij boot reserveert HOP standaard 50MB uit de
+   pool voor alle vaste control-/netwerkvensters; de kleine LicheeRV gebruikt
+   standaard 4MB. `hopos.net.buffer` kan dit per node overrulen. Elke
+   jobpartitie die daarna wordt uitgedeeld is volledig app-RAM; er zit geen
+   verborgen staart meer in. De ringkop draagt de werkelijke capaciteit, dus
+   een andere potgrootte is geen app-ABI-wijziging.
 
 ## Wat HOP voor zichzelf houdt, per board
 
@@ -79,10 +83,10 @@ samensmelten**. Dat coalescen is het enige dat fragmentatie ongedaan maakt.
 
 De volgorde bij een stop is niet willekeurig (`releaseSlot`, `kern/slots/slots.go`):
 eerst de servicer wegzetten, dan de outbox leegdrinken, dan het post-mortem
-kopiëren — en **daarna** de partitie vrijgeven. De reden: het status- en
-fault-rapport van de app staat op zijn control page, en die woont in de partitie
-die we teruggeven. Wie ná een stop vraagt "waarom viel hij" moet dat antwoord nog
-krijgen.
+kopiëren — en **daarna** de partitie vrijgeven. De control page staat inmiddels
+in de systeempot, maar de volgorde blijft de lifecyclegrens: wie ná een stop
+vraagt "waarom viel hij" moet het laatste antwoord krijgen vóór dezelfde
+slot-slice opnieuw wordt geïnitialiseerd.
 
 Eén uitzondering, met opzet: faalde het **startschot zelf** (`errDispatch`), dan
 is onbekend of de core tóch aangaat en gaat de partitie in **quarantaine** in
@@ -116,7 +120,10 @@ bereikt nooit iets buiten de kooi en schaadt alleen de app zelf.
 - **2MB-korrel**, dus tot 2MB verlies per app.
 - **`MaxSlots`** per board (LicheeRV: 16 kooien op één app-hart — kooien zijn
   goedkoop, 68KB elk; de échte grens is app-RAM bij plaatsing).
-- **De ABI-staart**: 2MB van elke partitie is niet voor de app.
+- **De systeempot**: standaard 50MB totaal (`hopos.net.buffer=50M`), behalve
+  4MB op de LicheeRV met zijn 16 slots. De pot wordt over alle mogelijke slots
+  verdeeld in 128KB control plus TX/RX. TCP doet flow-control; de lokale
+  ringnaad wacht alleen kort op een ingehaalde consumer.
 
 ## Fragmentatie: wanneer het bijt en wat je beschermt
 
@@ -134,7 +141,8 @@ Wat het **niet** oplost: een app die middenin stopt splitst het vrije deel
 alsnog. Op ARM zou de stage-2 die stukken aan elkaar kunnen plakken (scatter —
 `L2part` mapt al per 2MB-blok, dus het is dezelfde tabel met andere entries). Op
 de C906 kan dat niet: elke losse span kost twee PMP-entries en het budget is
-acht, met de huidige drie vensters plus deny-all al vol.
+acht, met de huidige app- en bufferslice plus een eventuele grant en deny-all
+begrensd.
 
 En de bescherming die er sinds 19-08 wél is: **de toelating vraagt het gat, niet
 de som.** `slots.PoolLargest()` geeft het grootste plaatsbare stuk; HOP's agent
@@ -201,9 +209,9 @@ Met datum, want het zijn allemaal metingen en geen meningen.
 | wat | bestand |
 |---|---|
 | HOP's venster en de vuile zone per board | `metal/board/*/…` (`HopBase`, `HopSize`) |
-| pool-regio's, staart, DMA-adressen | `metal/board/*/plan.go` |
-| korrel, best-fit, hoog-eerst, coalescen, `PoolLargest` | `metal/kern/slots/partmem.go` |
-| ABI-staart en de per-slot ceiling | `metal/abi/layout/layout.go` (`AbiTail`), `maxLimitFor` |
+| pool-regio's en DMA-adressen | `metal/board/*/plan.go` |
+| korrel, systeempot, best-fit, hoog-eerst, coalescen, `PoolLargest` | `metal/kern/slots/partmem.go` |
+| vaste appvensters en de per-slot ceiling | `metal/abi/layout/layout.go`, `maxLimitFor` |
 | begrenzen en verplaatsen | `metal/kern/cage/` (`cage.go`, `relocate.go`), `metal/kern/stage2/` |
 | app-plafond en GC-tempo | `metal/cpu/memlimit/memlimit.go` |
 | toelating op het gat | `hop/internal/agent/handlers.go`, `hop/pkg/hopos` (`PoolReporter`) |

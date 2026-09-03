@@ -153,9 +153,8 @@ func prepStart(i int, memLimit uint64, cores int, env map[string]string, mounts 
 	if mtab, err = mountTable(mounts); err != nil {
 		return nil, nil, 0, err
 	}
-	// Minimum-maat hier, niet pas bij de allocatie: een partitie moet naast de
-	// ABI-staart app-RAM overhouden (dekt ook memLimit 0) — één toets voor
-	// Start én StartStaged.
+	// Minimum-maat hier, niet pas bij de allocatie (dekt ook memLimit 0) — één
+	// toets voor Start én StartStaged.
 	if _, err := appRAMSize(align2M(memLimit)); err != nil {
 		return nil, nil, 0, err
 	}
@@ -347,12 +346,12 @@ func (s *servicer) run() {
 			fmt.Printf("HOPOS_SERVICER_PANIC slot %d: %v\n", s.slot, r)
 		}
 	}()
-	ram, ramSize, ok := abiOf(s.slot)
+	ctrl, ok := CtrlPageOf(s.slot)
 	if !ok {
 		fmt.Printf("HOPOS_SERVICER_NO_PARTITION slot %d\n", s.slot)
 		return
 	}
-	out := ring.Open(layout.RingOutboxAt(ram, ramSize))
+	out := ring.Open(ctrl + layout.AbiRingOff + layout.OutboxOff)
 	// Eén hergebruikte leesbuffer i.p.v. een allocatie per record: de payload
 	// wordt synchroon verwerkt (log → string-kopie; RPC → handle retourneert
 	// vóór de volgende lees), dus hergebruik is veilig.
@@ -488,43 +487,20 @@ func (s *servicer) dispatchSMP() {
 	dev.MB()
 }
 
-// abiOf geeft de basis waarmee de ABI-adressen van slot i te berekenen zijn: de
-// partitiebasis en de app-RAM-maat (de staart erboven draagt control page,
-// hop-ABI-ringen en frame-ringen — zie layout, de slot-ABI).
-//
-// Er is dus geen vast plan-adres per slot meer, en dat is precies de bedoeling:
-// de ABI van een slot bestaat exact zolang zijn partitie bestaat. ok=false
-// betekent letterlijk "dit slot heeft nu geen ABI" — lezen zou vrij DRAM lezen,
-// schrijven zou het geheugen van de volgende huurder verminken.
-func abiOf(i int) (ram, ramSize uint64, ok bool) {
-	base, size, ok := partitionOf(i)
-	if !ok {
-		return 0, 0, false
-	}
-	appRAM, err := appRAMSize(size)
-	if err != nil {
-		return 0, 0, false
-	}
-	return base, appRAM, true
-}
-
 // CtrlPageOf geeft de fysieke control page van app-slot i. Geëxporteerd voor de
-// klok-governor (driver/dvfs leest er de idle-teller van): sinds de ABI in de
-// partitie woont, is de slotlaag de enige die weet waar die page ligt. De
-// bedrading staat in de main (cmd/hopos), niet hier — dit pakket is host-getest
-// en driver/dvfs sleept via cpu/idle tamago-only code mee.
+// klok-governor. Het slot moet actief zijn; de fysieke page komt uit de
+// systeempot en is alleen via deze laag zichtbaar.
 func CtrlPageOf(i int) (uintptr, bool) {
-	ram, ramSize, ok := abiOf(i)
-	if !ok {
+	if _, _, ok := partitionOf(i); !ok {
 		return 0, false
 	}
-	return layout.CtrlPageAt(ram, ramSize), true
+	ctrl, _, _, _, err := slotBuffers(i)
+	return ctrl, err == nil
 }
 
 // ctrlRead/ctrlWrite: 64-bit velden op de control-page van een slot. HOP-kant,
 // dus fysieke adressen; de app leest dezelfde bytes via zijn eigen basis
-// (RamStart/RamSize) — op ARM legt de stage-2 die op deze partitie, op RISC-V is
-// het letterlijk hetzelfde adres.
+// op een vast IPA — beide architecturen mappen die naar deze fysieke page.
 //
 // Een slot zonder partitie heeft geen control-page: lezen geeft 0 en schrijven
 // is een no-op. Dat is geen stille fout maar het contract — élke schrijver
@@ -802,6 +778,12 @@ func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]
 	if err := claimStart(i, cores, shared); err != nil {
 		return err
 	}
+	// Control en virtuele NIC komen uit HOP's gezamenlijke systeempot, niet uit
+	// deze app-partitie. Reserveer die pot vóór partAlloc, zodat de app-allocator
+	// nooit eerst precies het enige passende gat kan innemen.
+	if err := ensureNetworkBuffer(); err != nil {
+		return err
+	}
 
 	// De fysieke partitie éérst alloceren (partAlloc heeft alleen i+memLimit
 	// nodig, niet het linkadres): we kopiëren de image erin vóór we hem
@@ -811,8 +793,8 @@ func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]
 	if err != nil {
 		return err
 	}
-	// De maat die de allocator ÉCHT gaf — één bron van waarheid voor de kooi, de
-	// ABI-staart, de ringen en de RAM-declaratie van de app. Zie partAlloc.
+	// De maat die de allocator ÉCHT gaf — één bron van waarheid voor de kooi en
+	// de volledige RAM-declaratie van de app. Zie partAlloc.
 	appRAM, err := appRAMSize(size)
 	if err != nil {
 		return err
@@ -859,8 +841,7 @@ func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]
 
 	// De image bovenin het app-RAM plaatsen (staging, layout.StageAddr — het
 	// gedeelde contract met de apploader), zodat de laag geplaatste segmenten
-	// er niet mee botsen; de net-ring dáárboven (de partitie-staart) blijft
-	// vrij. Eén dev.Copy van de gedeelde in-memory blob — geen
+	// er niet mee botsen. Eén dev.Copy van de gedeelde in-memory blob — geen
 	// per-start-allocatie, geen netwerk.
 	addr, _, fits := layout.StageAddr(base, appRAM, imgSize)
 	if !fits {
@@ -900,19 +881,13 @@ func kernMemOnce() string {
 	return " — HOP: " + kernMemFn()
 }
 
-// appRAMSize is het deel van de partitie dat de app als RAM ziet: de bovenste
-// AbiTail is zijn ABI-staart (control page, ringen, net-ringen) ("512MB → 510 Go + 2 netbuffer"). Zo komt het
-// ring-geheugen uit de eigen memLimit van de job — er draait geen statische
-// SlotCap-reservering meer in het board-plan — en blijft de coherentie gratis:
-// de app declareert de staart niet als RAM (zijn stage-1 mapt hem nooit
-// cacheable), HOP raakt hem alleen device-side, en de bestaande CleanInv over
-// de hele partitie veegt de dirty lines van de vórige huurder.
+// appRAMSize is bewust een identiteit: een job die 512MiB vraagt krijgt ook
+// 512MiB app-RAM. Control en netwerk komen volledig uit de systeempot.
 func appRAMSize(size uint64) (uint64, error) {
-	if size < 2*layout.AbiTail {
-		return 0, fmt.Errorf("memLimit te klein: partitie %d MB laat geen app-RAM over naast de %d MB net-ring",
-			size>>20, uint64(layout.AbiTail)>>20)
+	if size < part2M {
+		return 0, fmt.Errorf("memLimit te klein: partitie %d KiB", size>>10)
 	}
-	return size - layout.AbiTail, nil
+	return size, nil
 }
 
 // placeFromStaging is de tweede helft van een blob-start (Start/StartShared):
@@ -920,10 +895,6 @@ func appRAMSize(size uint64) (uint64, error) {
 // geprivilegieerd HOP-werk: ELF parsen, segmenten plaatsen, RAM-symbolen
 // patchen, stage-2 bouwen en de core (her)dispatchen.
 func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64, memLimit uint64, cores int, envBlob []byte, mtab [][2]string, ports map[string]int, job string) error {
-	// De net-ring van dit slot: de partitie-staart. Puur een lokale berekening —
-	// de PA gaat als parameter naar ring-init, hopswitch.Attach en stage2.Build,
-	// dus er bestaat geen register dat stale kan worden (de PA leeft precies zo
-	// lang als de partitie).
 	appRAM, err := appRAMSize(size)
 	if err != nil {
 		return err
@@ -949,8 +920,7 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 
 	// Het plan uitvoeren, device→device (dev.Move, kleine stack-buffer — geen
 	// kern-RAM voor de hele image); RamStart blijft het línkadres (de app
-	// ziet IPA's, de stage-2 vertaalt), RamSize = app-RAM (partitie −
-	// net-ring — de staart is nooit heap/stack).
+	// ziet IPA's, de stage-2 vertaalt), RamSize = de volledige partitie.
 	for _, s := range plan.Segs {
 		dev.Move(uintptr(s.Dst+delta), stageAddr+uintptr(s.Off), s.Filesz)
 		dev.Clear(uintptr(s.Dst+delta)+uintptr(s.Filesz), s.Memsz-s.Filesz)
@@ -968,7 +938,7 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 // beide is entry de app-entry uit de ELF (abi/place valideerde hem al; de
 // venstercheck hieronder blijft als vangrail staan).
 func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlob []byte, mtab [][2]string, ports map[string]int, job string) (err error) {
-	appRAM, err := appRAMSize(size)
+	ctrlPA, txPA, rxPA, netCap, err := slotBuffers(i)
 	if err != nil {
 		return err
 	}
@@ -991,9 +961,6 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 		ctrlWrite(i, layout.CtrlStatus, layout.StatusEmpty)
 		smpCores[i] = 0
 	}()
-	// De frame-ringen van dit slot: in de staart van zijn eigen partitie (layout:
-	// de slot-ABI), net als zijn control-page en hop-ABI-ringen.
-	netPA := uint64(layout.NetRingBaseAt(base, appRAM))
 	// De entry moet in het linkvenster van dit slot liggen. Dat venster is niet
 	// universeel: verplaatst de kooi adressen (stage-2), dan is het het canonieke
 	// slot-1-IPA en draait één artifact in elk slot; verplaatst hij niets, dan is
@@ -1038,7 +1005,6 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 
 	// Control-page vegen, env-blob schrijven, hop-ABI-ringen klaarzetten,
 	// BOOTING, core wekken — alles op de fysieke plekken uit het board-plan.
-	ctrlPA := layout.CtrlPageAt(base, appRAM)
 	dev.Clear(ctrlPA, layout.CtrlStride)
 	if len(envBlob) > 0 {
 		dev.Copy(ctrlPA+layout.CtrlEnvData, envBlob)
@@ -1051,16 +1017,16 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// op het interne net en leidt IP/gateway/MAC deterministisch af uit zijn
 	// slotnummer (layout-net-plan, gedeeld met de switch); de app initieert een
 	// stack pas als hij appnet.Up aanroept.
-	ring.Init(layout.RingOutboxAt(base, appRAM), layout.RingDataCap)
-	ring.Init(layout.RingInboxAt(base, appRAM), layout.RingDataCap)
-	ring.Init(layout.NetRingTXAt(base, appRAM), layout.NetRingDataCap)
-	ring.Init(layout.NetRingRXAt(base, appRAM), layout.NetRingDataCap)
+	ring.Init(ctrlPA+layout.AbiRingOff+layout.OutboxOff, layout.RingDataCap)
+	ring.Init(ctrlPA+layout.AbiRingOff+layout.InboxOff, layout.RingDataCap)
+	ring.Init(txPA, netCap)
+	ring.Init(rxPA, netCap)
 
 	// De core krijgt stage-2-isolatie: de EL2-trampoline activeert de hier
 	// gebouwde tabel en dropt pas dan naar de app-entry (een canoniek IPA — de
 	// stage-2 vertaalt hem naar deze partitie). De app-image draait nooit op
 	// EL2. De trampoline is data-gedreven: alles staat op deze control-page.
-	if err := cagePrepare(i, linkBase, base, size, entry); err != nil {
+	if err := cagePrepare(i, linkBase, base, size, entry, uint64(ctrlPA), netCap+layout.NetRingHeader); err != nil {
 		return err
 	}
 	// DeviceGrant-haak: het venster van de houder de kooi in (no-op voor
@@ -1107,7 +1073,7 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// heruitdelen aan een ander slot: isolatiebreuk. Attach/Publish zetten alleen
 	// switch/NAT-state en hebben de draaiende core niet nodig, dus dit mag ervóór;
 	// ná de dispatch volgt meteen started=true, zonder faalbare stap ertussen.
-	hopswitch.Attach(i, uintptr(netPA))
+	hopswitch.Attach(i, txPA, rxPA)
 	for name, p := range ports {
 		// Eén gepubliceerde poort is open voor béíde protocollen: de jobspec
 		// hoeft geen proto te kennen, en een app die er maar één bedient laat
@@ -1139,7 +1105,7 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// Het head-woord van de RX-frame-ring erbij: het live-eind van de
 	// doorbell-peek (layout.CtxRingHeadPA; de wek-drempel schrijft de app
 	// zelf op CtrlRXDoor). Zelfde publicatiepad als CtxCtrlPA.
-	ctxWrite(i, layout.CtxRingHeadPA, uint64(netPA)+uint64(layout.NetRXOff)+ring.HeadOff)
+	ctxWrite(i, layout.CtxRingHeadPA, uint64(rxPA)+ring.HeadOff)
 	// coreParks erbij: een core die niet resetbaar is heeft ALTIJD de
 	// boot-pending-route — zijn switcher draait er vanaf de boot (cageInit
 	// trekt hem in via parkenter), dus de rotatie pikt élke boot-pending op.
@@ -1387,11 +1353,11 @@ var lastWords [layout.SlotCap + 1]Status
 // drainLastWords leest wat er nog in de outbox van slot i staat en bewaart de
 // laatste logregel. Alleen aanroepen ná evictServicer (SPSC: één consumer).
 func drainLastWords(i int) {
-	ram, ramSize, ok := abiOf(i)
+	ctrl, ok := CtrlPageOf(i)
 	if !ok {
 		return
 	}
-	out := ring.Open(layout.RingOutboxAt(ram, ramSize))
+	out := ring.Open(ctrl + layout.AbiRingOff + layout.OutboxOff)
 	buf := make([]byte, layout.RingDataCap)
 	last := ""
 	for range 256 { // begrensd: een post-mortem mag nooit blijven hangen
@@ -1428,7 +1394,7 @@ func snapshot(i int) {
 	// ident-cache in, en die pakt de lock zelf — met hem vast zou dat een
 	// self-deadlock zijn (sync.Mutex is niet reentrant).
 	var st Status
-	_, _, live := abiOf(i) // niets te bewaren als de partitie al weg is
+	_, _, live := partitionOf(i) // niets te bewaren als de partitie al weg is
 	if live {
 		st = liveStatus(i)
 	}
@@ -1446,7 +1412,7 @@ func Get(i int) Status {
 	if checkSlot(i) != nil {
 		return Status{}
 	}
-	if _, _, ok := abiOf(i); !ok {
+	if _, _, ok := partitionOf(i); !ok {
 		diagMu.Lock()
 		st := lastWords[i] // checkSlot hierboven begrensde i al
 		diagMu.Unlock()

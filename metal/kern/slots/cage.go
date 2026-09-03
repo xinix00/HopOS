@@ -54,7 +54,7 @@ type cageContract struct {
 	setFlipCapable func(v bool)
 	adoptable      func() bool
 	// bound + relocate
-	prepare    func(i int, linkBase, base, size, entry uint64) error
+	prepare    func(i int, linkBase, base, size, entry, ctrlPA, netHalf uint64) error
 	linkBase   func() uint64
 	linkWindow func(size uint64) uint64
 	// spin

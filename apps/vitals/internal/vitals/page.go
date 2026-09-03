@@ -89,6 +89,7 @@ async function run(name) {
   let p = '';
   if (name === 'burn') p = '&secs=' + document.getElementById('burnsecs').value;
   if (name === 'rx') p = '&mb=' + document.getElementById('rxmb').value;
+  if (name === 'disk') p = '&mb=' + document.getElementById('diskmb').value;
   const r = await fetch('/api/run?test=' + name + p);
   if (!r.ok) alert(await r.text());
   poll();
@@ -105,7 +106,7 @@ function render() {
     ' | slot ' + n.slot + ' | ' + n.ram_mb + ' MB | ' + (n.host || n.ip) + ':' + n.port +
     ' | ' + n.version;
   document.getElementById('txhint').textContent =
-    'curl -o /dev/null http://' + (n.host || n.ip) + ':' + n.port + '/blob?mb=64';
+    'curl -o /dev/null http://' + (n.host || n.ip) + ':' + n.port + '/blob?mb=64  |  all three: apps/vitals/perf.sh ' + (n.host || n.ip) + ':' + n.port;
 
   const idle = s.idle || {};
   let t = '';
@@ -120,7 +121,7 @@ function render() {
   const busy = s.running !== '';
   // De grid wordt elke poll opnieuw gezet; bewaar de select-keuzes.
   const keep = {};
-  for (const id of ['burnsecs', 'rxmb']) {
+  for (const id of ['burnsecs', 'rxmb', 'diskmb']) {
     const el = document.getElementById(id);
     if (el) keep[id] = el.value;
   }
@@ -129,6 +130,7 @@ function render() {
     let extra = '';
     if (test.name === 'burn') extra = '<select id="burnsecs"><option>60</option><option selected>120</option><option>300</option><option>600</option></select>';
     if (test.name === 'rx') extra = '<select id="rxmb"><option>8</option><option selected>32</option><option>64</option></select>';
+    if (test.name === 'disk') extra = '<select id="diskmb"><option>16</option><option selected>64</option><option>256</option></select>';
     h += '<div class="test"><span class="n">' + test.name + '</span><span class="d">' + test.desc + '</span>' + extra +
       '<button onclick="run(\'' + test.name + '\')"' + (busy ? ' disabled' : '') + '>Run</button></div>';
   }
@@ -141,7 +143,7 @@ function render() {
   document.getElementById('note').textContent = busy ? ('running ' + s.running + ' - ' + s.note) : '';
   document.getElementById('livedot').textContent = busy ? 'testing' : 'live';
 
-  const order = s.tests.map(t => t.name).concat(['tx']);
+  const order = s.tests.map(t => t.name).concat(['tx', 'up']);
   let r = '';
   for (const name of order) {
     const res = s.results[name];
@@ -169,7 +171,7 @@ function copyReport() {
     ' | cost/wake: ' + fmt(idle.wake_cost_us) + 'us\n';
   if (s.temp_milli_c > 0) out += 'temperature: ' + fmt(s.temp_milli_c / 1000) + 'C\n';
   out += '\n| test | metrics |\n|---|---|\n';
-  for (const name of s.tests.map(t => t.name).concat(['tx'])) {
+  for (const name of s.tests.map(t => t.name).concat(['tx', 'up'])) {
     const res = s.results[name];
     if (!res) continue;
     out += '| ' + name + ' | ' + (res.error ? 'ERROR: ' + res.error :

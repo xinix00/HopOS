@@ -102,6 +102,10 @@ func startStream(i int, r io.Reader, imgSize int64, memLimit uint64, cores int, 
 		unlock()
 		return err
 	}
+	if err = ensureNetworkBuffer(); err != nil {
+		unlock()
+		return err
+	}
 	base, size, err := partAlloc(i, memLimit)
 	if err != nil {
 		unlock()
