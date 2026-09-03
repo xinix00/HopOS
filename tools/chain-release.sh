@@ -170,7 +170,7 @@ say ""
 if want 2; then
 say ">> 2. de app-modules in deze repo op $VER"
 for m in $(mods_in); do
-	old="$(grep -oE 'HopOS/metal v[0-9][^ ]*' "$m/go.mod" | head -1 | awk '{print $2}')"
+	old="$(grep -oE 'HopOS/metal/v2 v[0-9][^ ]*' "$m/go.mod" | head -1 | awk '{print $2}')"
 	printf '   %-24s %s -> %s\n' "apps/$(basename "$m")" "${old:-?}" "$VER" >&2
 	( cd "$m" && GOWORK=off go mod edit -require "github.com/xinix00/HopOS/metal/v2@$VER" )
 done
@@ -219,7 +219,7 @@ restore_dry() {
 }
 [ -n "$DRY" ] && trap restore_dry EXIT INT TERM
 for m in $(mods_ext); do
-	old="$(grep -oE 'HopOS/metal v[0-9][^ ]*' "$m/go.mod" | head -1 | awk '{print $2}')"
+	old="$(grep -oE 'HopOS/metal/v2 v[0-9][^ ]*' "$m/go.mod" | head -1 | awk '{print $2}')"
 	printf '   %-46s %s -> %s\n' "$(basename "$(dirname "$m")")/$(basename "$m")" "${old:-?}" "$VER" >&2
 	if [ -n "$DRY" ]; then
 		cp "$m/go.mod" "$m/go.mod.relbak"; [ -f "$m/go.sum" ] && cp "$m/go.sum" "$m/go.sum.relbak"
@@ -292,7 +292,7 @@ fi
 L="$(gh api repos/xinix00/HopOS/releases/latest --jq .tag_name)"
 [ "$L" = "$VER" ] || say "LET OP: HopOS latest = $L (verwacht $VER)"
 for m in $(mods); do
-	p="$(grep -oE 'HopOS/metal v[0-9][^ ]*' "$m/go.mod" | head -1 | awk '{print $2}')"
+	p="$(grep -oE 'HopOS/metal/v2 v[0-9][^ ]*' "$m/go.mod" | head -1 | awk '{print $2}')"
 	[ "$p" = "$VER" ] || say "LET OP: $(basename "$m") pint $p"
 done
 say "   HopOS latest = $L, alle consumers op $VER"
