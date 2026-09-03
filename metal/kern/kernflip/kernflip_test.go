@@ -15,8 +15,7 @@ func TestHandoffRoundTrip(t *testing.T) {
 	in := Handoff{
 		OldBase: 0x40000000, OldSize: 0x0F000000,
 		Window: 0xA0E00000, Total: 0x0F200000,
-		Gen:         2,
-		BufferArena: slots.BufferArenaState{Base: 0xA8000000, Size: 50 << 20},
+		Gen: 2,
 		Slots: []slots.SlotState{
 			{Slot: 1, PartBase: 0xBC000000, PartSize: 64 << 20, Core: 1, Cores: 1,
 				Job: "welcome", Ports: []uint16{8080, 443},
@@ -33,8 +32,7 @@ func TestHandoffRoundTrip(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	if out.OldBase != in.OldBase || out.OldSize != in.OldSize ||
-		out.Window != in.Window || out.Total != in.Total || out.Gen != in.Gen ||
-		out.BufferArena != in.BufferArena {
+		out.Window != in.Window || out.Total != in.Total || out.Gen != in.Gen {
 		t.Fatalf("kop verschilt: %+v vs %+v", out, in)
 	}
 	if len(out.Slots) != len(in.Slots) {

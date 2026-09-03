@@ -3,10 +3,10 @@ package slots
 // Slot-adoptie voor de kern-flip (docs/kern-flip.md): een nieuwe kern neemt de
 // bewoners over die de vorige achterliet, zónder ze aan te raken.
 //
-// Dat kan omdat een app-wereld in blijvend fysiek geheugen woont: control page
-// en bootstrap-ringen in de overgenomen systeempot, de framequeue-pagina's
-// daarnaast, en kooi-tabellen/ctx/sched in de plan-regio. Geen daarvan
-// verhuist bij een flip. Wat wél verdwijnt is de BOEKHOUDING van de
+// Dat kan omdat een app-wereld volledig in zijn eigen partitie woont: control
+// page, hop-ABI-ringen, frame-ringen en ring-koppen liggen in de ABI-staart,
+// en zijn kooi-tabellen, ctx-blok en sched-blok in de plan-regio. Geen van
+// beide verhuist bij een flip. Wat wél verdwijnt is de BOEKHOUDING van de
 // vertrokken kern (welke partitie van wie is, welk slot op welke core woont,
 // wie zijn logs draint, welke poorten gepubliceerd zijn) — en dat is precies
 // wat hier terugkomt.
@@ -186,10 +186,11 @@ func AdoptSlots(states []SlotState) int {
 			continue
 		}
 
-		// De ringen blijven zoals ze zijn: hun koppen staan in de overgenomen
-		// systeempot en de app kan er middenin bezig zijn. Alleen de LEZERS komen
-		// terug — de servicer (ring.Open, geen Init) en de switch-poort.
-		if _, err := appRAMSize(st.PartSize); err != nil {
+		// De ringen blijven zoals ze zijn: hun koppen staan in de partitie en de
+		// app is er middenin bezig. Alleen de LEZERS komen terug — de servicer
+		// (ring.Open, geen Init) en de switch-poort.
+		appRAM, err := appRAMSize(st.PartSize)
+		if err != nil {
 			fmt.Printf("HOPOS_FLIP_ADOPT_FAIL slot %d: %v\n", i, err)
 			releaseSlot(i, true)
 			continue
@@ -213,13 +214,7 @@ func AdoptSlots(states []SlotState) int {
 			fmt.Printf("slot %d: %d mount(s) handed over but this kernel has no storage layer — the app will get errors\n", i, len(st.Mounts))
 		}
 
-		_, txPA, rxPA, err := slotBuffers(i)
-		if err != nil {
-			fmt.Printf("HOPOS_FLIP_ADOPT_FAIL slot %d: %v\n", i, err)
-			releaseSlot(i, true)
-			continue
-		}
-		hopswitch.Attach(i, txPA, rxPA, st.PartBase, st.PartSize)
+		hopswitch.Attach(i, layout.NetRingBaseAt(st.PartBase, appRAM))
 		for _, p := range st.Ports {
 			// Zelfde paar als Start publiceert; een fout hier kost de poort,
 			// niet de app.
@@ -290,7 +285,7 @@ func partAdopt(i int, base, size uint64) error {
 // venster van de vorige kern zit dus al vrij in die pool — nog een keer
 // invoegen levert twee overlappende regio's op, en dan krijgen twee slots
 // dezelfde partitie. GEMETEN 31-08 op de dubbele-flip-regressie: slot 6 en 7
-// lazen elkaars oude frame-ringen (head=0x205090402020201, een stuk Ethernet-frame
+// lazen elkaars frame-ringen (head=0x205090402020201, een stuk Ethernet-frame
 // waar een ringkop hoorde te staan) en de swarm viel om.
 //
 // Teruggeven ís dus impliciet: elke kern claimt bij boot precies zijn eigen

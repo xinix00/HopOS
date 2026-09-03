@@ -33,16 +33,17 @@ import (
 // onderworpen is: hertekenen bereikt nooit iets buiten de kooi, en schaadt dus
 // alleen de app zelf.
 //
-// Gevolg daarvan: de tabel mag in het eigen control-blok uit de systeempot
-// staan, waar de app hem kan overschrijven. Dat blok staat op de PMP-whitelist;
-// een tabel daarbuiten zou de walk laten faulten.
+// Gevolg daarvan: de tabel mág ín de partitie staan, waar de app hem kan
+// overschrijven. Dat moet zelfs — een tabel buiten de kooi zou de walk laten
+// faulten.
 
 const (
-	// PageSize/BlockSize zijn de twee korrels die deze tabel gebruikt. Volle
-	// 2MiB-stukken blijven één block-leaf; alleen randen en de fysiek compacte
-	// netwerkpot krijgen 4KiB-leaves. Zo kost een apppartitie nog altijd vrijwel
-	// niets aan tabellen, terwijl zijn control-blok geen lege 2MiB hoeft
-	// te dragen.
+	// PageSize/BlockSize zijn de twee korrels die deze tabel gebruikt. Een blok
+	// van 2MB per entry houdt de tabel op twee pagina's in plaats van
+	// duizenden; een partitie is tientallen MB's, dus fijner mappen levert niets
+	// en kost alleen tabel. Daarom moet een partitie op BlockSize uitgelijnd
+	// zijn — Relocate weigert het anders in plaats van stil een halve pagina te
+	// mappen.
 	PageSize  = 4096
 	BlockSize = 2 << 20
 
@@ -61,7 +62,7 @@ const (
 	// een satp-wissel mag laten staan. Elk slot mapt exact het tegendeel —
 	// hetzelfde linkadres naar een ándere partitie — dus is G op een slot-PTE
 	// volgens de privileged spec een softwarefout. Er is geen venster dat hem
-	// verdient: app-RAM, control/netwerk en granted MMIO zijn alle drie per slot.
+	// verdient: app-RAM, ABI-staart en granted MMIO zijn alle drie per slot.
 	entSeen  = 1 << 6 // "accessed"
 	entDirty = 1 << 7
 
@@ -127,32 +128,17 @@ func Relocate(p MapPlan) (*Reloc, error) {
 		return nil, fmt.Errorf("cage: leeg map-plan — een slot zonder mapping kan niet draaien")
 	}
 
-	// pages[0] is de wortel. De rest ontstaat in aanmaakvolgorde; een pointer
-	// kan daardoor meteen naar TableBase+index*PageSize wijzen. midAt indexeert
-	// per gigabyte, leafAt per 2MiB-blok binnen dat gigabyte.
-	pages := [][]uint64{make([]uint64, mapEntries)}
-	midAt := map[uint64]int{}
-	type leafKey struct{ gi, bi uint64 }
-	leafAt := map[leafKey]int{}
-	ensureMid := func(gi uint64) int {
-		if pos, ok := midAt[gi]; ok {
-			return pos
-		}
-		pos := len(pages)
-		pages = append(pages, make([]uint64, mapEntries))
-		midAt[gi] = pos
-		next := p.TableBase + uint64(pos)*PageSize
-		pages[0][gi] = (next>>12)<<10 | entValid
-		return pos
-	}
+	root := make([]uint64, mapEntries)
+	var mid [][]uint64     // de niveaus onder de wortel, in aanmaakvolgorde
+	at := map[uint64]int{} // giga-index → positie in mid
 
 	for i, w := range p.Windows {
 		if w.Size == 0 {
 			return nil, fmt.Errorf("cage: map window %d has zero length", i)
 		}
-		if w.Link%PageSize != 0 || w.Phys%PageSize != 0 || w.Size%PageSize != 0 {
-			return nil, fmt.Errorf("cage: map window %d (link %#x phys %#x len %#x) not %dKiB aligned",
-				i, w.Link, w.Phys, w.Size, PageSize>>10)
+		if w.Link%BlockSize != 0 || w.Phys%BlockSize != 0 || w.Size%BlockSize != 0 {
+			return nil, fmt.Errorf("cage: map window %d (link %#x phys %#x len %#x) not %dMB aligned",
+				i, w.Link, w.Phys, w.Size, BlockSize>>20)
 		}
 		if !w.R && !w.W && !w.X {
 			return nil, fmt.Errorf("cage: map window %d has no permissions", i)
@@ -178,7 +164,7 @@ func Relocate(p MapPlan) (*Reloc, error) {
 			flags |= entExec
 		}
 
-		for off := uint64(0); off < w.Size; {
+		for off := uint64(0); off < w.Size; off += BlockSize {
 			link, phys := w.Link+off, w.Phys+off
 			if link>>mapBits != 0 {
 				return nil, fmt.Errorf("cage: link address %#x is outside the %d address bits of this mode",
@@ -187,44 +173,26 @@ func Relocate(p MapPlan) (*Reloc, error) {
 			gi := (link >> 30) & (mapEntries - 1)
 			bi := (link >> 21) & (mapEntries - 1)
 
-			midPos := ensureMid(gi)
-			mid := pages[midPos]
-
-			// Alleen als beide kanten én het resterende bereik blok-aligned zijn.
-			// Een fysiek compacte ringslice begint meestal midden in een 2MiB-
-			// arena-blok en valt daardoor vanzelf op het pagina-pad.
-			if link%BlockSize == 0 && phys%BlockSize == 0 && w.Size-off >= BlockSize {
-				if mid[bi] != 0 {
-					return nil, fmt.Errorf("cage: link address %#x is already mapped — overlapping windows", link)
-				}
-				mid[bi] = (phys>>12)<<10 | flags
-				off += BlockSize
-				continue
-			}
-
-			key := leafKey{gi, bi}
-			leafPos, ok := leafAt[key]
+			pos, ok := at[gi]
 			if !ok {
-				if mid[bi] != 0 {
-					return nil, fmt.Errorf("cage: link address %#x overlaps an existing block", link)
-				}
-				leafPos = len(pages)
-				pages = append(pages, make([]uint64, mapEntries))
-				leafAt[key] = leafPos
-				next := p.TableBase + uint64(leafPos)*PageSize
-				mid[bi] = (next>>12)<<10 | entValid
+				mid = append(mid, make([]uint64, mapEntries))
+				pos = len(mid) - 1
+				at[gi] = pos
+				// Een verwijzende entry heeft ALLEEN Valid: geen R/W/X, want dat
+				// zou hem juist tot blad maken.
+				next := p.TableBase + uint64(1+pos)*PageSize
+				root[gi] = (next>>12)<<10 | entValid
 			}
-			pi := (link >> 12) & (mapEntries - 1)
-			if pages[leafPos][pi] != 0 {
+			if mid[pos][bi] != 0 {
 				return nil, fmt.Errorf("cage: link address %#x is already mapped — overlapping windows", link)
 			}
-			pages[leafPos][pi] = (phys>>12)<<10 | flags
-			off += PageSize
+			mid[pos][bi] = (phys>>12)<<10 | flags
 		}
 	}
 
-	// Uitschrijven in precies de aanmaakvolgorde waar de pointers naar wijzen.
-	out := make([]byte, len(pages)*PageSize)
+	// Uitschrijven: wortel eerst, dan de niveaus in aanmaakvolgorde — precies de
+	// volgorde die de verwijzende entries hierboven aannemen.
+	out := make([]byte, (1+len(mid))*PageSize)
 	put := func(page int, t []uint64) {
 		for i, v := range t {
 			o := page*PageSize + i*8
@@ -233,8 +201,9 @@ func Relocate(p MapPlan) (*Reloc, error) {
 			}
 		}
 	}
-	for i, t := range pages {
-		put(i, t)
+	put(0, root)
+	for i, t := range mid {
+		put(1+i, t)
 	}
 
 	return &Reloc{Bytes: out, Root: mapMode | (p.TableBase >> 12)}, nil

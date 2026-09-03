@@ -25,8 +25,8 @@ flowchart LR
     S --- N
     S --- G
   end
-  A <-- "descriptors + app buffers" --> S
-  B <-- "descriptors + app buffers" --> S
+  A <-- "frame ring" --> S
+  B <-- "frame ring" --> S
   N <-- "uplink NIC" --> L(("LAN / internet"))
 ```
 
@@ -48,27 +48,14 @@ deterministic, apps talk to each other by IP with **no DNS and no service
 discovery** on the internal net. The whole plan is invisible to your LAN —
 only the node's uplink address is real out there.
 
-## The substrate: descriptors, not fixed payload rings
+## The substrate: per-slot frame rings
 
-Each app gets two fixed one-page single-producer/single-consumer queues: TX
-(app → switch) and RX (switch → app). Their descriptors contain only an offset,
-length and token. The actual bytes remain in ordinary buffers inside that app's
-already caged RAM partition. Before touching a frame HOP validates the complete
-offset range against that partition; another app's memory is therefore not
-addressable through this contract.
-
-RX is offer-based. The app normally keeps a small number of empty buffers in
-its RX queue. If a burst arrives while there is no offer, HOP borrows 2 KiB
-chunks on demand from one node-wide frame pool. The chunks have no permanent
-owner: delivery, detach or drop returns them immediately. A slow receiver thus
-uses more of the pool while it is slow, without every possible slot reserving
-the same payload capacity forever. A small admission reserve prevents one
-stalled app from emptying the pool for every other attached app; exhaustion is
-an Ethernet drop and TCP performs the recovery.
-
-Only the two descriptor pages are mapped into an app at the fixed network IPA.
-The global frame pool is HOP-only and never appears in an app's cage. ARM and
-RISC-V use this same queue contract; only their cache-maintenance seam differs.
+Each app's memory partition ends in two single-producer/single-consumer
+rings — TX (app → switch) and RX (switch → app) — carrying raw Ethernet
+frames, 1 MB of capacity per direction
+([layout](../../metal/abi/layout/layout.go): `NetTXOff` / `NetRXOff`). The
+app runs its stack on top; the switch is the sole counterpart on the other
+end. This is the isolation boundary made physical (see below).
 
 ## The switch: three destinations
 
@@ -77,9 +64,9 @@ destination MAC ([`hopswitch.go`](../../metal/net/hopswitch/hopswitch.go)).
 There are exactly three things a frame can be:
 
 1. **App → app (internal).** Destination is another slot's MAC. The switch
-   copies the frame straight into an offered RX buffer — or briefly into the
-   shared pool when none is offered — on core 0, never through any TCP stack.
-   Two apps on the same node talk at memory-copy speed.
+   copies the frame straight into that slot's RX ring — ring to ring, on
+   core 0, never through any TCP stack. Two apps on the same node talk at
+   memory-copy speed.
 2. **App → the node itself.** Destination is `10.100.0.1`. HOP hangs on its
    own switch as "port 0": a second internal NIC on the node's stack
    ([`gateway.go`](../../metal/net/hopswitch/gateway.go),
@@ -99,7 +86,7 @@ A job's `ports` become **stateless DNAT rules**: `node-IP:port` →
 `slot-IP:port`. Every inbound packet just gets its headers rewritten
 (destination address + port, checksums patched incrementally per RFC 1624 —
 no per-connection state, no connection table) and is dropped into the target
-slot's RX path ([`nat.go`](../../metal/net/hopswitch/nat.go), `dnatInLocked`).
+slot's ring ([`nat.go`](../../metal/net/hopswitch/nat.go), `dnatInLocked`).
 The app binds the same port number it is published on, handed to it as
 `ER_PORT_<NAME>`. This is how the outside world reaches a service running on
 an app core.
@@ -107,8 +94,8 @@ an app core.
 The same address works from the *inside* too (**hairpin**): an app dialing
 its own node's LAN IP on a published port is rerouted internally — the DNAT
 rule picks the target slot, the masquerade table disguises the caller as the
-node so the reply finds its way back, and the frame goes buffer-to-buffer
-without ever touching the NIC (`hairpinOutLocked` / `hairpinBackLocked`). One port
+node so the reply finds its way back, and the frame goes ring-to-ring without
+ever touching the NIC (`hairpinOutLocked` / `hairpinBackLocked`). One port
 number per host, one address that is true everywhere: DNS gets you to the
 right host, the switch takes the shortcut when that host is you.
 

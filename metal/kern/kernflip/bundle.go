@@ -18,7 +18,7 @@ import (
 // ABI is de versie van het flip-contract: de staart-vorm, het handoff-blob en
 // de chainload-entryconditie samen. De bundel draagt hem (mkkernel -flipabi);
 // een mismatch is een geweigerde flip — dan is de gewone reboot-update de weg.
-const ABI = 2
+const ABI = 1
 
 // relocMagic spelt "HOPRELO1" (little-endian) — zelfde woord als mkkernel.
 const relocMagic = 0x314F4C4552504F48

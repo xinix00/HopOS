@@ -55,7 +55,7 @@ Drie lessen in één tabel:
 Afgekeken van het juiste wiel: niet Linux' scheduler (CFS/EEVDF lost "verkeerd
 kiezen" op, ons probleem was "te vaak wisselen") maar **virtio's
 event-suppression**: de consument zegt waar hij gebleven is, en wordt alleen
-gewekt als er iets nieuws is. Alle app-communicatie loopt door de framequeues
+gewekt als er iets nieuws is. Alle app-communicatie loopt door de frame-ringen
 — netwerk, en dus ook SURF/gui — dus één bel-punt dekt alles.
 
 De keten, per stuk met zijn maat:
@@ -65,7 +65,7 @@ De keten, per stuk met zijn maat:
    control-page en slaapt gewoon — de RX-pomp mag een cap van seconden hebben.
 2. **Peeken** (el2/switch.s **10 instructies**, mmode/switch.s **19** incl.
    cache-onderhoud): de rotatie vergelijkt bij een niet-due bewoner de drempel
-   met het live completion-headwoord van zijn RX-queue (CtxRingHeadPA, door HOP bij de
+   met het live head-woord van zijn RX-ring (CtxRingHeadPA, door HOP bij de
    start gezet). Gegroeid = er kwam verkeer = due, wektijd irrelevant.
 3. **Wekken** (rxdoor.go): de governor ziet bij de hervatting dat er iets ligt
    en wekt de pomp-goroutine met `runtime.Wake` — het primitief dat tamago

@@ -82,10 +82,7 @@ func main() {
 // HOP → app. Met dev.Pull erbij, want op een board waar HOP en dit hart niet
 // coherent zijn staat de verse waarde anders alleen in HOP's cache.
 func coreState(app *applib.App) func() welcome.CoreState {
-	// Vast IPA sinds slot-ABI 8: het control-blok woont niet meer in de
-	// partitie van de app maar in HOP's systeempot, op een adres dat per slot
-	// vastligt (layout.SlotControl) — RAMStart/RAMSize zeggen er niets meer over.
-	addr := layout.SlotControl(app.Slot) + layout.CtrlShared
+	addr := layout.CtrlPageAt(app.RAMStart, app.RAMSize) + layout.CtrlShared
 	return func() welcome.CoreState {
 		dev.Pull(addr, 8)
 		if dev.Read64(addr) == 1 {

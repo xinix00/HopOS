@@ -122,12 +122,6 @@ var bootParamAll = func(key string) []string { return nil }
 // (licheerv: geen hardware-TRNG, dus voorspelbare crypto).
 var boardWarn func()
 
-// boardNetworkBufferDefault is de board-eigen terugval voor de HOP-brede
-// control-/netwerkpot. Grote boards delen standaard 50MiB; een klein board kan
-// dit in zijn build-tagbestand verlagen zonder een boardnaam-special-case in
-// deze gemeenschappelijke main. Een expliciete hopos.net.buffer wint altijd.
-var boardNetworkBufferDefault = "50M"
-
 // bootParam is de enkele-waarde-variant: de eerste hit van bootParamAll ("" =
 // niet gezet → de default in main). De meeste sleutels zijn enkelvoudig.
 func bootParam(key string) string {
@@ -250,27 +244,6 @@ func main() {
 		fmt.Printf("flip: adopted kernel generation %d — %s, %d resident(s) handed over, previous kernel had %#x+%dMB HOPOS_FLIP_BOOT\n",
 			flipped.Gen, hopBudget(), len(flipped.Slots), flipped.OldBase, flipped.OldSize>>20)
 	}
-	// Eén HOP-brede systeempot, buiten alle app-partities. Control en de vaste
-	// descriptorpagina's komen eerst; alle rest is één dynamische framepool.
-	// Een kern-flip neemt exact dezelfde fysieke pot over.
-	var netBufferErr error
-	if isFlip {
-		netBufferErr = slots.AdoptBufferArena(flipped.BufferArena)
-	} else {
-		netBufferSpec := bootParam("hopos.net.buffer")
-		if netBufferSpec == "" {
-			netBufferSpec = boardNetworkBufferDefault
-		}
-		netBufferErr = slots.ConfigureNetworkBufferSpec(netBufferSpec)
-	}
-	if netBufferErr != nil {
-		fail("network buffer", netBufferErr)
-	}
-	if arena, err := slots.BufferArena(); err == nil {
-		meta := uint64(layout.MaxSlots) * (uint64(layout.SlotControlStride) + 2*layout.NetQueueSize)
-		fmt.Printf("buffers: %d MiB shared arena @ %#x — %d MiB dynamic framepool after fixed metadata; TCP provides flow control HOPOS_NET_BUFFER\n",
-			arena.Size>>20, arena.Base, (arena.Size-meta)>>20)
-	}
 	// hopos.reboot=1: dit image is een herstart-verzoek (watchdog.go
 	// rebootNow) — ná het flip-rapport, zodat de console zegt wat er gebeurde.
 	if bootParam("hopos.reboot") == "1" {
@@ -320,13 +293,9 @@ func main() {
 	if netErr != nil {
 		fmt.Printf("net: %v — continuing headless/compute-only (no external network)\n", netErr)
 	}
-	// De console óók op een TCP-poort, zodra het netwerk er is: `hopos.console=
-	// <poort>`. Standaard UIT — deze poort geeft élke lezer alles wat de node
-	// print, en dat is diagnose-gemak op een bank en een lek daarbuiten. Hier,
-	// vóór opslag, klok en agent: de ring replayt, dus alles wat de boot hierna
-	// nog zegt — of waar hij in blijft steken — is van buiten leesbaar. Op 03-09
-	// bleef een geflipte kern op de M4 tussen het netwerk en de agent hangen met
-	// de console nog dicht: ping werkte, niets te lezen.
+	// Open de optionele TCP-console zodra het netwerk er is, vóór storage,
+	// klok en agent. De ring replayt, dus ook een latere boothang blijft van
+	// buiten zichtbaar. Standaard uit: de console kan gevoelige logs bevatten.
 	if n, err := strconv.Atoi(bootParam("hopos.console")); err == nil && n > 0 {
 		conport.Serve(n)
 	}

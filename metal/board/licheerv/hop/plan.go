@@ -26,7 +26,7 @@ import (
 //	0x8FE00000   2MB  HOP's eigen structuren: boot-scratch, de control-pages van
 //	                  HOP's node-cores, de per-slot blokken (ctx-levensteken +
 //	                  park-mailboxen) en de NIC-DMA-regio. De ABI van een slot
-//	                  (control page, ringen, framequeues) staat hier NIET: die
+//	                  (control page, ringen, frame-ringen) staat hier NIET: die
 //	                  woont in de staart van zijn eigen partitie.
 //
 // DRIE REGIO'S, EN WAAROM DAT ZO BLIJFT (19-08): HOP staat tussen het lage en

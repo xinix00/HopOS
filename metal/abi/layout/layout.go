@@ -1,11 +1,10 @@
 // Package layout is het geheugenplan van HopOS, in twee lagen:
 //
-//   - De slot-ABI: wat een app ziet. Zijn eigen partitie is volledig RAM
-//     (RamStart/RamSize, door HOP in élk image gepatcht). Control, bootstrap-
-//     ringen en Ethernet-ringen wonen samen in HOP's systeempool en verschijnen
-//     per slot op vaste IPA-vensters. Een app kent dus uitsluitend zijn
-//     slotnummer en de vaste adressen uit dit pakket; fysieke adressen en de
-//     grootte van de pool blijven HOP-privé.
+//   - De slot-ABI: wat een app ziet. Dat is één regio — zijn eigen partitie.
+//     Onderin zijn RAM (RamStart/RamSize, door HOP in élk image gepatcht),
+//     bovenin een staart van AbiTail bytes met zijn control page, zijn
+//     hop-ABI-ringen en zijn frame-ringen. Een app rekent dus alles uit twee
+//     waarden die al in zijn image staan en kent geen enkel absoluut adres.
 //     Deze indeling wijzigen = de app-ABI breken; daarom staat er een versie op
 //     (ABIVersion) en weigert HOP bij plaatsing een image van een andere versie.
 //   - Het PA-plan (Plan, per board via UsePlan): waar HOP's éigen structuren
@@ -69,8 +68,8 @@ const (
 	SlotStride = 0x20000000 // 512MB IPA-venster per slot
 
 	// SlotCap is de compile-time bovengrens op het aantal slots: de fysieke
-	// per-slot stage-2-regio's worden hiervoor gereserveerd in de carve; control
-	// en ringen komen uit de systeempot. Een board
+	// per-slot regio's (control/ringen/net-ringen/stage-2) worden hiervoor
+	// gereserveerd in de carve, en de stub-claim (init.s) dekt hem. Een board
 	// gebruikt er runtime MaxSlots van (= zijn ontdekte app-cores). 128 dekt
 	// de Ampere Altra (127 app-cores); de Pi's/QEMU zetten MaxSlots lager en
 	// laten de rest ongebruikt.
@@ -82,9 +81,11 @@ const (
 	// het boot-EL; de EL2-eis van de mains (BootEL ≥ 2, anders weigeren) leest 'm.
 	// Fysiek: Plan.BootScratchPA (cpuinit draait vóór alles).
 	//
-	// Dit is het read-only bootvenster buiten de partitie. De per-slot
-	// controlvensters liggen verderop in hetzelfde GB en worden uit de
-	// systeempot gemapt; Plan.NodeCtrlPA blijft voor HOP's eigen cores.
+	// Dit is het énige IPA-venster buiten de partitie dat een slot nog ziet, en
+	// het is read-only. De control-pages van app-slots woonden hier ook — die
+	// liggen sinds ABIVersion 2 in de partitie-staart (de slot-ABI hierboven);
+	// wat er nog van deze regio over is, is Plan.NodeCtrlPA voor HOP's eigen
+	// cores.
 	CtrlBase    = 0xB0000000
 	CtrlStride  = 0x1000
 	BootScratch = CtrlBase
@@ -129,9 +130,9 @@ const (
 	// FB_BASE-env (FbIPA + offset-in-blok); alleen de houder heeft dit GB.
 	FbIPA = 0x20000000
 
-	// hop-ABI-ringen per slot: outbox (app → HOP: logs en bootstrap) en
-	// inbox (HOP → app: antwoorden). Ze liggen in het vaste control-venster
-	// van het slot; dit zijn de offsets binnen het 64KiB ringdeel.
+	// hop-ABI-ringen per slot: outbox (app → HOP: logs én RPC-verzoeken) en
+	// inbox (HOP → app: antwoorden). Ze liggen in de ABI-staart van de partitie
+	// (AbiRingOff); dit zijn de offsets binnen die 64KB.
 	RingStride  = 0x10000 // 64KB per slot: twee ringen van 32KB
 	OutboxOff   = 0x0
 	InboxOff    = 0x8000
@@ -365,7 +366,7 @@ const (
 	// vertaalfase om weg te halen — de kooi is een PMP-whitelist in de CSR's van
 	// het hart zelf, en daar komt alleen machine mode ÓP dat hart bij.
 	CtxRevoke = 512
-	// CtxRingHeadPA: fysiek adres van het completion-headwoord van de RX-queue van
+	// CtxRingHeadPA: fysiek adres van het head-woord van de RX-frame-ring van
 	// dit slot — de producer-index die hopswitch ophoogt. De rotatie leest hem
 	// voor de doorbell-peek (zie CtrlRXDoor): een bewoner wiens wektijd nog
 	// niet om is maar wiens ring voorbij zijn wek-drempel gegroeid is, heeft
@@ -393,40 +394,23 @@ const (
 	CtxRunning     = 3 // draait nu op zijn core
 	CtxDead        = 4 // geëindigd (exit, fault of revoke) — EL2 slaat 'm over
 
-	// Framequeues per slot (IPA-ABI, per-slot netwerk): elke app draait een
-	// eigen TCP-stack over rauwe Ethernet-frames; HOP is enkel de L2-switch.
-	// TX en RX zijn elk één pagina met descriptors naar buffers in de EIGEN
-	// app-partitie. Payload woont nooit in deze vensters. HOP valideert iedere
-	// offset tegen de kooi voordat hij bytes leest/schrijft; frames die HOP
-	// tijdelijk moet vasthouden komen uit één gezamenlijke fysieke chunkpool.
-	//
-	// Vier MiB IPA per slot × SlotCap = 512MiB, geheel binnen dit eigen GB.
-	// De oude 2MiB-apertures blijven als adresscheiding bestaan; alleen de eerste
-	// pagina is gemapt. Daardoor blijft de map op beide architecturen eenvoudig
-	// en kan geen app payload van een buur benoemen.
-	NetRingBase       = 0xC0000000
-	NetRingStride     = 0x400000
-	NetRingWindowHalf = NetRingStride / 2
-	NetTXOff          = 0x0
-	NetRXOff          = NetRingWindowHalf
-	NetQueueSize      = 0x1000 // one complete frameq descriptor page
-
-	// Alleen HOP's lokale poort/tests gebruiken nog de gewone bytering. App-
-	// poorten gebruiken frameq en hebben dus geen statische payloadcapaciteit.
-	NetRingDataCap = 0x31000
-
-	// Control-venster per slot. Fysiek staat dit vóór TX/RX in dezelfde
-	// HOP-brede systeempot; logisch krijgt ieder slot 128KiB op een vast adres.
-	// 128 slots × 128KiB = 16MiB IPA, ruim binnen het vrije deel van CtrlBase's
-	// GB. SlotControlStride deelt 2MiB exact, zodat één L3-tabel per kooi
-	// volstaat op ARM en dezelfde pagina's op RISC-V gemapt worden.
-	SlotControlBase   = CtrlBase + 0x01000000
-	SlotControlStride = 0x20000
-
-	AbiCtrlOff = 0x0     // control page (CtrlStride groot)
-	AbiRingOff = 0x1000  // outbox + inbox (RingStride groot)
-	AbiStubOff = 0x11000 // scratch van de RISC-V-kooi-stub
-	AbiMapOff  = 0x12000 // RISC-V Sv39-maptabellen
+	// Frame-ringen per slot (IPA-ABI, per-slot netwerk): elke app draait een
+	// eigen netstack over rauwe Ethernet-frames; HOP is enkel een L2-switch
+	// die frames ring-naar-ring kopieert (metal/net/hopswitch). Per slot één
+	// 2MB-blok — TX (app → switch) onderin, RX (switch → app) bovenin —
+	// zodat de stage-2-kooi het als één blockRW mapt. Device-gemapt, buiten
+	// alle RAM-declaraties → coherent. Fysiek: in de ABI-staart van de eigen
+	// partitie van het slot (RamSize = partitie − AbiTail, zie kern/slots) —
+	// ring-geheugen schaalt zo mee met wat er écht draait, geen statische
+	// SlotCap-reservering in het board-plan.
+	// Frame-ringen: wat er in de staart ná de mailbox-regio (AbiNetOff) overblijft,
+	// eerlijk in twee richtingen — TX onderin, RX erboven. Afgeleid en niet met de
+	// hand uitgerekend: dan is "past het?" een eigenschap van de indeling en geen
+	// hoop. Wijzigt AbiTail of AbiNetOff, dan schuiven deze mee.
+	NetRingHalf    = (AbiTail - AbiNetOff) / 2 // 960KB per richting
+	NetTXOff       = 0x0
+	NetRXOff       = NetRingHalf
+	NetRingDataCap = NetRingHalf - 0x1000 // minus de ringkop
 )
 
 // Coalesce sorteert regio's op basis en smelt overlappende/aangrenzende
@@ -522,15 +506,15 @@ func SetMaxSlots(n int) {
 type Region struct{ Base, Size uint64 }
 
 // Plan is de fysieke (PA-)kant van het geheugenplan: wáár op dít board de
-// node-control-pages, stage-2-tabellen en de partitie-pool echt liggen.
+// control-pages, ringen, stage-2-tabellen en de partitie-pool echt liggen.
 // Het board zet zijn plan bij het laden met UsePlan; HOP-code leest het via
 // de *PA-accessors. Apps zien hier niets van — hun IPA-beeld (de constanten
 // hierboven) is op elk board gelijk en de stage-2 vertaalt.
 type Plan struct {
 	NodeCtrlPA uint64 // control-pages van HOP's ÉIGEN cores (node-SMP): die
-	// hebben geen app-slot in de HOP-brede systeempool voor hun handoff.
-	// MaxSlots+1 pagina's, 4KB-aligned. App-slot-control staat hier NIET in;
-	// slots reserveert die dynamisch uit de HOP-brede systeempool.
+	// hebben geen partitie en dus geen ABI-staart om hun handoff in te leggen.
+	// MaxSlots+1 pagina's, 4KB-aligned. App-slots staan hier NIET in — die
+	// dragen hun control page in hun eigen partitie (de slot-ABI hierboven).
 	// CagePA is de kooi-regio: (MaxSlots+1) blokken van CageStride. Op ARM
 	// de EL2-vectoren van de app-cores plus per slot zijn stage-2-tabellen;
 	// op RISC-V per slot zijn ctx-blok en per core de park-mailbox van de
@@ -639,8 +623,8 @@ func pa(v uint64) uintptr {
 
 // NodeCtrlPA geeft de control-page van HOP's eigen core (node-SMP): de
 // handoff-scratch waar de EL2-trampoline de M-context van de nieuwe core leest.
-// Alléén voor node-cores — een app-slot krijgt zijn fysieke control page uit
-// de systeempot, en kern/slots is de enige die dat adres kent.
+// Alléén voor node-cores — een app-slot vindt zijn control page in zijn partitie
+// (CtrlPageAt), en kern/slots is de enige die dát adres kent.
 func NodeCtrlPA(core int) uintptr { return pa(plan.NodeCtrlPA + uint64(core)*CtrlStride) }
 
 // BootScratchPA: de fysieke boot-scratch (cpuinit-vast).
@@ -669,9 +653,11 @@ func FlipStagePA() uintptr {
 	return pa(plan.FlipScratchPA)
 }
 
-// De fysieke control-/ringbasis is bewust GEEN accessor hier: die komt uit de
-// runtime systeempot. kern/slots deelt de slice uit en geeft hem aan ring-init,
-// hopswitch en de kooi; apps kennen uitsluitend de vaste IPA's.
+// De fysieke net-ring-basis van een slot (in de ABI-staart van zijn
+// partitie) is bewust GEEN accessor hier: partities leven per job, dus die PA
+// bestaat alleen tijdens een lifecycle. kern/slots berekent hem (base+appRAM)
+// en geeft hem als parameter door aan ring-init, hopswitch.Attach en
+// stage2.Build — er is geen register dat stale kan worden.
 
 // VecBasePA is de fysieke basis van de gedeelde EL2-vectoren (app-cores);
 // TrapVecPA die van de vectortabel van de HOP-core (cpuinit-asm moet
@@ -750,8 +736,8 @@ func CarvePool(banks, holes []Region, min uint64) []Region {
 func TopAddr() uint64 {
 	pa(plan.NodeCtrlPA) // guard
 	top := plan.NodeCtrlPA + uint64(MaxSlots+1)*CtrlStride
-	// De enige andere vaste plan-regio: de stage-2-tabellen. Control en ringen
-	// worden runtime uit de partitie-pool gereserveerd.
+	// De enige andere vaste plan-regio: de stage-2-tabellen (ctrl/ringen/
+	// net-ringen wonen sinds de slot-ABI in de partitie-staart zelf).
 	if c := plan.CagePA + uint64(MaxSlots+1)*CageStride; c > top {
 		top = c
 	}
@@ -777,22 +763,42 @@ func RAMBase() uint64 {
 	return HopRAMStart
 }
 
-// --- De slot-ABI: vaste vensters uit HOP's systeempool --------------------
+// --- De slot-ABI: de staart van de eigen partitie -------------------------
 //
-// De app-partitie bevat uitsluitend image, heap en stacks. Alles wat tussen
-// HOP en een app gedeeld wordt staat buiten die partitie in een per-slot slice
-// van de HOP-brede systeempool: control, bootstrap-/crashlog-ringen en op
-// RISC-V de kooi-scratch en Sv39-tabellen, gevolgd door TX/RX.
+// Een slot heeft één regio die het moet kennen: zijn eigen partitie. Onderin
+// zit de app (RamSize bytes: image, heap, stack), bovenin AbiTail bytes die de
+// ABI met HOP dragen — control page, hop-ABI-ringen, frame-ringen. De app hoeft
+// dus geen enkel absoluut adres te kennen: RamStart en RamSize staan al in zijn
+// image (HOP patcht ze bij plaatsing) en al het andere volgt daaruit.
 //
-// Waarom dit coherent is zonder cache-onderhoud op ARM: de vaste vensters
-// vallen buiten de RAM-declaratie van de app en worden als device gemapt. HOP
-// schrijft dezelfde bytes via zijn eigen ongecachete mapping. Op RISC-V bepaalt
-// de sysmap de attributen en doen de accessors waar nodig cache-onderhoud.
+// Beide kanten rekenen met dezelfde functies, alleen met hun eigen basis:
+//   - de app geeft wat er in RamStart/RamSize staat: op BEIDE architecturen het
+//     canonieke linkadres. ARM legt de partitie daar met zijn stage-2; RISC-V met
+//     een aparte map-tabel onder satp (Sv39), die de kooi-stub aanzet vóór hij de
+//     app binnenlaat. (Dit stond hier als "op RISC-V is adres = adres, er is geen
+//     tweede fase" — dat was waar tot de verplaatsing er kwam.);
+//   - HOP geeft de fysieke partitiebasis met dezelfde app-RAM-maat.
+//
+// Waarom dit coherent is zonder cache-onderhoud op ARM: de staart valt buiten
+// de RAM-declaratie van de app, en tamago's stage-1 mapt alles daarbuiten als
+// device — precies de reden dat de frame-ringen hier al woonden. HOP schrijft
+// dezelfde bytes via zijn eigen ongecachete mapping. Op RISC-V bepaalt de
+// sysmap de attributen (DRAM is er altijd cachebaar), dus doen de accessors daar
+// cache-onderhoud; dat is een eigenschap van die architectuur, niet van deze
+// indeling.
 //
 // HOP's ÉIGEN cores (node-SMP) hebben geen partitie en houden hun control page
 // daarom in de plan-regio (NodeCtrlPA): gereserveerde slots waar nooit een app
 // komt.
 const (
+	AbiTail = 0x200000 // 2MB staart per slot, uit RamSize gesneden
+
+	AbiCtrlOff = 0x0     // control page (CtrlStride groot)
+	AbiRingOff = 0x1000  // hop-ABI-ringen: outbox + inbox (RingStride groot)
+	AbiStubOff = 0x11000 // scratch van de kooi-stub (zie hieronder)
+	AbiMapOff  = 0x12000 // map-tabel van de kooi (zie hieronder)
+	AbiNetOff  = 0x20000 // frame-ringen: TX + RX (2 × NetRingDataCap)
+
 	// AbiStubOff is voor architecturen waar HOP een kooi-stub vóór de app zet
 	// (RISC-V: die programmeert de PMP-kooi en verifieert hem). Die stub moet
 	// zijn voortgang ergens kwijt kunnen — en dat kan niet de control page zijn,
@@ -816,20 +822,15 @@ const (
 	// buiten zijn eigen partitie mee, dus hertekenen schaadt alleen hemzelf. De
 	// invariant is de whitelist, niet deze tabel.
 	//
-	// De slack tot SlotControlStride (56KiB) draagt veertien pagina's. Dat is ruim voor
-	// wortel, middenniveaus en de paginafijne randen van app, control, netvenster
-	// en één grant; slotMap weigert luid als een toekomstig plan daar overheen
-	// groeit.
+	// Twee pagina's is genoeg zolang een partitie binnen één gigabyte valt
+	// (wortel + één niveau); de slack tot AbiNetOff (56KB) draagt er veertien.
 
-	// ABIVersion bewaakt uitsluitend wat de app werkelijk ziet: vaste IPA's,
-	// control-page-offsets en wire-format. HOP weigert bij plaatsing een
+	// ABIVersion is de versie van álles hierboven: de indeling van de staart, de
+	// control-page-offsets en de ringgeometrie. HOP weigert bij plaatsing een
 	// image dat tegen een andere versie gelinkt is (abi/place) — een app die op
 	// het verkeerde adres leest is anders een stille misread, en dat is precies
-	// de klasse fouten die dagen kost.
-	//
-	// NIET verhogen voor de fysieke arena, poolgrootte of chunkverdeling: die
-	// zijn vanaf v9 HOP-privé; de queues dragen alleen app-bufferdescriptors.
-	// Alleen een wijziging aan het vaste app-contract zelf breekt de ABI.
+	// de klasse fouten die dagen kost. Verhogen bij élke wijziging hierboven die
+	// de app-kant raakt.
 	//
 	// 3 (30-07): head en tail van elke ring liggen elk in hun eigen cacheline
 	// (abi/ring) — nodig zodra HOP en de app niet-coherent zijn.
@@ -868,48 +869,44 @@ const (
 	// ene system-callcontract over het slot-LAN. De outbox is voortaan alleen
 	// bootstrap-/crashlog. Een oud image zou anders tien seconden op een RPC-
 	// response wachten die bewust nooit meer komt; hard weigeren is eerlijker.
-	// 7 (03-09): de frame-ringen verhuisden uit elke app-partitie naar één
-	// HOP-brede netwerkpot. De app ziet per slot vaste TX/RX-IPA's; de ringkop
-	// draagt de werkelijke capaciteit. De control-staart kromp daardoor van
-	// 2MiB naar 128KiB. Oude en nieuwe beelden mogen deze adressen niet mengen.
-	// 8 (03-09): ook het laatste control-blok verhuisde uit de app-partitie naar
-	// dezelfde HOP-brede systeempot. RamSize is nu de hele partitie; control en
-	// bootstrap-ringen hebben per slot vaste IPA's.
-	// 9 (03-09): framepayload verhuisde uit statische TX/RX-byteringen. De twee
-	// vaste IPA's wijzen nu elk naar een frameq-descriptorpagina; buffers komen
-	// uit de app-partitie en HOP houdt tijdelijke frames in één chunkpool.
-	ABIVersion = 9
+	ABIVersion = 6
 )
 
-// SlotControl geeft de vaste IPA-basis van het control-blok van slot i.
-func SlotControl(i int) uintptr {
-	return uintptr(SlotControlBase + uint64(i-1)*SlotControlStride)
+// AbiTailAt geeft de basis van de ABI-staart van een slot: net boven zijn
+// app-RAM. ram/ramSize zijn RamStart/RamSize (app-kant) of partitiebasis/app-RAM
+// (HOP-kant) — dezelfde rekensom, andere basis.
+func AbiTailAt(ram, ramSize uint64) uintptr { return uintptr(ram + ramSize) }
+
+// CtrlPageAt geeft de control page van het slot dat op ram leeft.
+func CtrlPageAt(ram, ramSize uint64) uintptr {
+	return AbiTailAt(ram, ramSize) + AbiCtrlOff
 }
 
-// RingOutbox/RingInbox geven de vaste IPA's van de bootstrap-ringen.
-func RingOutbox(i int) uintptr {
-	return SlotControl(i) + AbiRingOff + OutboxOff
+// RingOutboxAt/RingInboxAt geven de hop-ABI-ringen: app → HOP (logs en
+// RPC-verzoeken) en HOP → app (antwoorden).
+func RingOutboxAt(ram, ramSize uint64) uintptr {
+	return AbiTailAt(ram, ramSize) + AbiRingOff + OutboxOff
 }
 
-func RingInbox(i int) uintptr {
-	return SlotControl(i) + AbiRingOff + InboxOff
+func RingInboxAt(ram, ramSize uint64) uintptr {
+	return AbiTailAt(ram, ramSize) + AbiRingOff + InboxOff
 }
 
-// NetQueueTX/NetQueueRX geven de vaste IPA's van de virtuele NIC van slot i.
-// HOP mapt alleen de descriptorpagina's van dít slot; het ruime venster is
-// adresruimte, geen payloadreservering.
-func NetQueueTX(i int) uintptr {
-	return uintptr(NetRingBase + uint64(i-1)*NetRingStride + NetTXOff)
+// NetRingBaseAt geeft de basis van de net-regio in de staart: de switch krijgt
+// dít adres en telt zelf NetTXOff/NetRXOff erbij (hopswitch.Attach), net als de
+// app-kant doet met de twee accessors hieronder.
+func NetRingBaseAt(ram, ramSize uint64) uintptr {
+	return AbiTailAt(ram, ramSize) + AbiNetOff
 }
 
-func NetQueueRX(i int) uintptr {
-	return uintptr(NetRingBase + uint64(i-1)*NetRingStride + NetRXOff)
+// NetRingTXAt/NetRingRXAt geven de frame-ringen (app ↔ hopswitch).
+func NetRingTXAt(ram, ramSize uint64) uintptr {
+	return AbiTailAt(ram, ramSize) + AbiNetOff + NetTXOff
 }
 
-// Legacy namen voor code die alleen de vaste IPA nodig heeft. Nieuwe code
-// noemt de werkelijkheid: dit zijn descriptorqueues, geen byteringen.
-func NetRingTX(i int) uintptr { return NetQueueTX(i) }
-func NetRingRX(i int) uintptr { return NetQueueRX(i) }
+func NetRingRXAt(ram, ramSize uint64) uintptr {
+	return AbiTailAt(ram, ramSize) + AbiNetOff + NetRXOff
+}
 
 // SlotBase geeft de canonieke IPA-basis van slot i (1-based, = core-index) —
 // het linkadres-bereik; de fysieke partitie komt uit de pool (partAlloc).
@@ -1096,7 +1093,7 @@ const (
 	// start inleest (de Docker-vorm: env meegegeven bij het starten). Vervangt
 	// het kernel-envp dat bare metal niet heeft. Loopt tot de staart-woorden.
 	CtrlEnvData = 0x118
-	CtrlEnvMax  = CtrlPhysBase - CtrlEnvData
+	CtrlEnvMax  = CtrlIdleMode - CtrlEnvData
 
 	// DE STAART: HOP → app-woorden die ná de env-regio zijn bijgekomen staan
 	// bovenaan de page en groeien naar beneden. Zo blijft de page compatibel in
@@ -1112,10 +1109,6 @@ const (
 	// dit silicium hoort kan alleen HOP hem zeggen. De governor (cpu/idle)
 	// leest het woord elke ronde; 0 = wat de architectuur zelf doet (arm64:
 	// WFE op de event-stream), de waarden staan hieronder.
-	// CtrlPhysBase lets the app-side queue cache seam translate a buffer offset
-	// to a physical address on non-coherent RISC-V. ARM uses the virtual address
-	// for DC CIVAC; code above the seam passes both and stays architecture-free.
-	CtrlPhysBase = 0xFF0
 	CtrlIdleMode = 0xFF8
 )
 

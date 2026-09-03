@@ -262,8 +262,9 @@ func main() {
 		s := slots.Get(a.slot)
 		fmt.Printf("slot %d: core=on=%v app=%d hb=%d ram=%dMB (limiet was %dMB)\n",
 			a.slot, s.CoreOn, s.App, s.Heartbeat, s.RAMSize>>20, a.limit>>20)
-		// Control en netwerk komen uit de systeempot; de hele partitie is app-RAM.
-		if !s.CoreOn || s.App != layout.StatusReady || s.Heartbeat == 0 || s.RAMSize != a.limit {
+		// De app declareert partitie − net-ringstaart als RAM (slots.appRAMSize):
+		// de bovenste AbiTail is zijn ABI-staart, geen heap.
+		if !s.CoreOn || s.App != layout.StatusReady || s.Heartbeat == 0 || s.RAMSize != a.limit-layout.AbiTail {
 			fail("status", fmt.Errorf("slot %d inconsistent", a.slot))
 		}
 	}
@@ -343,7 +344,7 @@ func main() {
 	s = slots.Get(2)
 	fmt.Printf("herstart slot 2: core-on=%v app=%d hb=%d ram=%dMB logs=%d vec=%d\n",
 		s.CoreOn, s.App, s.Heartbeat, s.RAMSize>>20, rekLogs, s.FaultVec)
-	if !s.CoreOn || s.App != layout.StatusReady || s.Heartbeat == 0 || s.RAMSize != 48<<20 || rekLogs == 0 {
+	if !s.CoreOn || s.App != layout.StatusReady || s.Heartbeat == 0 || s.RAMSize != 48<<20-layout.AbiTail || rekLogs == 0 {
 		fail("rekill", fmt.Errorf("verse app kwam niet op na een hard-kill (geparkeerde core niet herbruikbaar?)"))
 	}
 	if s.FaultVec != layout.FaultNone {
@@ -403,7 +404,7 @@ func main() {
 	}
 	fmt.Println("HOPOS_FETCH_OK — fetch via HOP: download landde in het volume")
 
-	// Per-slot netwerk: elke app een eigen netstack over de framequeues,
+	// Per-slot netwerk: elke app een eigen netstack over de frame-ringen,
 	// HOP schuift alleen frames (metal/net/hopswitch). Bewijs: app → app zonder
 	// dat er een TCP-stack op core 0 aan te pas komt (HOP is enkel L2-switch +
 	// ARP-responder voor de gateway).
@@ -458,7 +459,7 @@ func main() {
 	time.Sleep(600 * time.Millisecond) // ring-logs + heartbeats laten lopen
 	for slot := 2; slot <= 3; slot++ {
 		s := slots.Get(slot)
-		if !s.CoreOn || s.Heartbeat == 0 || s.RAMSize != 64<<20 {
+		if !s.CoreOn || s.Heartbeat == 0 || s.RAMSize != 64<<20-layout.AbiTail {
 			fail("reloc-status", fmt.Errorf("slot %d: on=%v hb=%d ram=%dMB", slot, s.CoreOn, s.Heartbeat, s.RAMSize>>20))
 		}
 	}

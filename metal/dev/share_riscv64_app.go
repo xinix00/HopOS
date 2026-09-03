@@ -15,18 +15,17 @@ package dev
 // (tools/apps-release.sh, de slot-apps in de gate) en nooit een kern-build —
 // dát is de eigenschap die hier scheidt.
 //
-// Waarom dat mag: de gedeelde control page, mailboxringen en framequeue-
-// descriptorpagina's mapt de kooi als DEVICE (kern/slots slotMap). Ongecachet
-// en niet-herordend, dus Push/Pull hebben voor díé metadata niets te doen.
-// Framepayload is anders: die blijft in gewoon gecachet app-RAM. frameq gebruikt
-// daarvoor zijn expliciete PublishPayload/AcquirePayload-naad met de door HOP
-// verstrekte fysieke partitie-basis; die roept CleanInv rechtstreeks aan.
+// Waarom dat mag: alles wat een app met HOP deelt — control page, mailbox-ringen,
+// frame-ringen — mapt de kooi als DEVICE (kern/slots slotMap). Ongecachet en
+// niet-herordend, dus er valt niets te onderhouden: wat de app schrijft staat er,
+// en wat HOP schrijft ziet hij.
 //
 // En waarom het móet: de cache-ops van dit silicium werken op FYSIEKE adressen
 // (dev_riscv64.s), terwijl een app linkadressen heeft — de kooi verplaatst hem.
-// Zou generieke Push/Pull op een linkadres toch een cache-op afvuren, dan raakte
-// die de cacheline van een ánder slot. Daarom blijven deze functies no-op en
-// vertaalt alleen de frameq-payloadnaad eerst naar het juiste fysieke adres.
+// Zou hij hier toch een op afvuren, dan raakte die de cacheline van een ánder
+// slot. Met één bewoner is dat een bug, met meerdere is het het weggooien van
+// iemand anders zijn data. Dus doet de app hier niets, en is dat afgedwongen door
+// het bouwpad in plaats van door discipline.
 // RealCacheOps: 0 — zie share_riscv64.go. Linkt dit bestand ooit toch in de
 // kern, dan breekt kern/slots' compile-time check de build.
 const RealCacheOps = 0

@@ -65,7 +65,7 @@ func main() {
 	// biedt er geen accessor voor — HOP leest CtrlWakes bewust niet, dus déze
 	// app is de afnemer). Met dev.Pull erbij: op een board waar HOP en dit
 	// hart niet coherent zijn staat de verse waarde anders alleen in een cache.
-	ctrl := layout.SlotControl(app.Slot)
+	ctrl := layout.CtrlPageAt(app.RAMStart, app.RAMSize)
 	ctrlRead := func(off uint64) uint64 {
 		a := ctrl + uintptr(off)
 		dev.Pull(a, 8)

@@ -6,9 +6,11 @@ import (
 	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 )
 
-// Het control-blok uit de systeempot draagt control page, bootstrap-ringen,
-// kooi-scratch en maptabellen zonder overlap.
-func TestControlBlockIndelingPastEnOverlaptNiet(t *testing.T) {
+// De ABI-staart moet alles dragen wat er in hoort: control page, hop-ABI-ringen
+// en beide frame-ringen, zonder overlap en zonder over de rand te lopen. Dat is
+// puur rekenwerk op constanten — het soort fout dat je op een bordje pas ziet
+// als een ring stil in andermans buffer schrijft.
+func TestAbiTailIndelingPastEnOverlaptNiet(t *testing.T) {
 	type span struct {
 		naam       string
 		start, end uint64
@@ -16,12 +18,12 @@ func TestControlBlockIndelingPastEnOverlaptNiet(t *testing.T) {
 	spans := []span{
 		{"control page", layout.AbiCtrlOff, layout.AbiCtrlOff + layout.CtrlStride},
 		{"hop-ABI-ringen", layout.AbiRingOff, layout.AbiRingOff + layout.RingStride},
-		{"kooi-stub", layout.AbiStubOff, layout.AbiStubOff + 0x1000},
-		{"kooi-map", layout.AbiMapOff, layout.SlotControlStride},
+		{"net TX", layout.AbiNetOff + layout.NetTXOff, layout.AbiNetOff + layout.NetTXOff + layout.NetRingDataCap + 0x1000},
+		{"net RX", layout.AbiNetOff + layout.NetRXOff, layout.AbiNetOff + layout.NetRXOff + layout.NetRingDataCap + 0x1000},
 	}
 	for i, s := range spans {
-		if s.end > layout.SlotControlStride {
-			t.Errorf("%s loopt tot %#x, voorbij control-blok %#x", s.naam, s.end, uint64(layout.SlotControlStride))
+		if s.end > layout.AbiTail {
+			t.Errorf("%s loopt tot %#x, voorbij de staart (%#x)", s.naam, s.end, uint64(layout.AbiTail))
 		}
 		for _, o := range spans[i+1:] {
 			if s.start < o.end && o.start < s.end {
@@ -31,72 +33,56 @@ func TestControlBlockIndelingPastEnOverlaptNiet(t *testing.T) {
 	}
 }
 
-// Alle control- en NIC-vensters blijven in hun eigen GB en overlappen niet.
-func TestVasteBufferVenstersBlijvenBinnenHunGB(t *testing.T) {
-	ctrlGBEnd := uint64(layout.CtrlBase) + 1<<30
-	netGBEnd := uint64(layout.NetRingBase) + 1<<30
-	for i := 1; i <= layout.SlotCap; i++ {
-		ctrl := uint64(layout.SlotControl(i))
-		tx, rx := uint64(layout.NetRingTX(i)), uint64(layout.NetRingRX(i))
-		if ctrl < layout.CtrlBase || ctrl+layout.SlotControlStride > ctrlGBEnd {
-			t.Fatalf("slot %d: controlvenster [%#x,%#x) buiten ctrl-GB", i, ctrl, ctrl+layout.SlotControlStride)
-		}
-		if rx-tx != layout.NetRingWindowHalf {
-			t.Fatalf("slot %d: TX/RX-afstand %#x", i, rx-tx)
-		}
-		if tx < layout.NetRingBase || rx+layout.NetRingWindowHalf > netGBEnd {
-			t.Fatalf("slot %d: netvenster [%#x,%#x) buiten net-GB", i, tx, rx+layout.NetRingWindowHalf)
-		}
-		if i < layout.SlotCap {
-			if ctrl+layout.SlotControlStride > uint64(layout.SlotControl(i+1)) {
-				t.Fatalf("control slot %d overlapt slot %d", i, i+1)
-			}
-			if rx+layout.NetRingWindowHalf > uint64(layout.NetRingTX(i+1)) {
-				t.Fatalf("net slot %d overlapt slot %d", i, i+1)
-			}
+// Beide kanten rekenen met dezelfde functies: HOP met de fysieke partitiebasis,
+// de app met wat HOP in RamStart/RamSize patchte. Bij gelijke basis moeten er
+// dus identieke adressen uitkomen — anders schrijft de een waar de ander niet
+// leest.
+func TestAbiAdressenZijnEenBronVanWaarheid(t *testing.T) {
+	const base, appRAM = 0x8800_0000, 62 << 20
+	tail := uint64(layout.AbiTailAt(base, appRAM))
+	if tail != base+appRAM {
+		t.Fatalf("staart op %#x, verwacht %#x", tail, uint64(base+appRAM))
+	}
+	for _, c := range []struct {
+		naam string
+		got  uintptr
+		want uint64
+	}{
+		{"control page", layout.CtrlPageAt(base, appRAM), tail + layout.AbiCtrlOff},
+		{"outbox", layout.RingOutboxAt(base, appRAM), tail + layout.AbiRingOff + layout.OutboxOff},
+		{"inbox", layout.RingInboxAt(base, appRAM), tail + layout.AbiRingOff + layout.InboxOff},
+		{"net TX", layout.NetRingTXAt(base, appRAM), tail + layout.AbiNetOff + layout.NetTXOff},
+		{"net RX", layout.NetRingRXAt(base, appRAM), tail + layout.AbiNetOff + layout.NetRXOff},
+	} {
+		if uint64(c.got) != c.want {
+			t.Errorf("%s = %#x, verwacht %#x", c.naam, c.got, c.want)
 		}
 	}
 }
 
-func TestBufferAdressenZijnEenBronVanWaarheid(t *testing.T) {
-	const slot = 7
-	ctrl := uint64(layout.SlotControl(slot))
-	if want := uint64(layout.SlotControlBase + (slot-1)*layout.SlotControlStride); ctrl != want {
-		t.Errorf("slot 7 control = %#x, verwacht %#x", ctrl, want)
-	}
-	if got, want := uint64(layout.RingOutbox(slot)), ctrl+layout.AbiRingOff+layout.OutboxOff; got != want {
-		t.Errorf("slot 7 outbox = %#x, verwacht %#x", got, want)
-	}
-	if got, want := uint64(layout.RingInbox(slot)), ctrl+layout.AbiRingOff+layout.InboxOff; got != want {
-		t.Errorf("slot 7 inbox = %#x, verwacht %#x", got, want)
-	}
-	if got, want := uint64(layout.NetRingTX(slot)), uint64(layout.NetRingBase+(slot-1)*layout.NetRingStride); got != want {
-		t.Errorf("slot 7 net TX = %#x, verwacht %#x", got, want)
-	}
-	if got, want := uint64(layout.NetRingRX(slot)), uint64(layout.NetRingBase+(slot-1)*layout.NetRingStride+layout.NetRXOff); got != want {
-		t.Errorf("slot 7 net RX = %#x, verwacht %#x", got, want)
-	}
-}
-
-func TestControlBlockHeeftRuimteVoorStubEnMap(t *testing.T) {
+// De twee regio's in de ABI-staart die HOP zelf gebruikt en de app nooit: de
+// scratch van de kooi-stub en de map-tabel. Ze staan in de slack tussen de
+// hop-ABI-ringen en de frame-ringen, en dat is precies het soort plek dat je
+// stil kwijtraakt als de indeling schuift — de stub schrijft er zijn
+// voortgangswoord, en de hardware-walker leest de tabel.
+func TestAbiStaartHeeftRuimteVoorStubEnMap(t *testing.T) {
+	// Orde en niet-overlap: ringen → stub-scratch → map → frame-ringen.
 	if !(layout.AbiRingOff+layout.RingStride <= layout.AbiStubOff) {
-		t.Errorf("stub-scratch (%#x) overlapt de hop-ABI-ringen", layout.AbiStubOff)
+		t.Errorf("stub-scratch (%#x) overlapt de hop-ABI-ringen (%#x + %#x)",
+			layout.AbiStubOff, layout.AbiRingOff, layout.RingStride)
 	}
 	if layout.AbiMapOff <= layout.AbiStubOff {
-		t.Errorf("map (%#x) ligt niet na scratch (%#x)", layout.AbiMapOff, layout.AbiStubOff)
+		t.Errorf("map (%#x) ligt niet ná de stub-scratch (%#x)", layout.AbiMapOff, layout.AbiStubOff)
 	}
-	if got := layout.SlotControlStride - layout.AbiMapOff; got < 6*0x1000 {
-		t.Errorf("map heeft %#x, wil minstens zes pagina's", got)
+	if layout.AbiMapOff >= layout.AbiNetOff {
+		t.Errorf("map (%#x) loopt de frame-ringen in (%#x)", layout.AbiMapOff, layout.AbiNetOff)
 	}
-}
-
-func TestAppRAMIsVolledigePartitie(t *testing.T) {
-	const size = 512 << 20
-	got, err := appRAMSize(size)
-	if err != nil {
-		t.Fatal(err)
+	// De stub leest zijn scratch als twee cachelines (stubScratchLen); de map
+	// vraagt minstens twee pagina's (wortel + één niveau).
+	if got := layout.AbiMapOff - layout.AbiStubOff; got < 0x1000 {
+		t.Errorf("stub-scratch heeft %#x, wil minstens één pagina", got)
 	}
-	if got != size {
-		t.Fatalf("app-RAM %#x, partitie %#x", got, uint64(size))
+	if got := layout.AbiNetOff - layout.AbiMapOff; got < 2*0x1000 {
+		t.Errorf("map heeft %#x, wil minstens twee pagina's", got)
 	}
 }

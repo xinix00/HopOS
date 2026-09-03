@@ -40,11 +40,6 @@ import (
 // in een laptop aanpassen is makkelijker dan een image bouwen) en blijft de
 // ingebakken config de terugval.
 func init() {
-	// De 256MiB LicheeRV houdt de systeempot bewust klein. Met 16 slots is 4MiB
-	// exact 128KiB control + 64KiB TX + 64KiB RX per slot. TCP vangt de kleinere
-	// transportvensters op; een expliciete hopos.net.buffer blijft leidend.
-	boardNetworkBufferDefault = "4M"
-
 	// Dit board heeft geen hardware-entropiebron, en sinds de agent over TLS
 	// artifacts haalt is dat een operator-beslissing in plaats van een voetnoot.
 	// Daarachter de probe van de kleine core: die MOET op dat hart zelf draaien

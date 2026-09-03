@@ -62,12 +62,8 @@ het oude venster aan de pool terug. Het artifact is **gewoon de kern-ELF**
 
 De architectuur heeft het zware werk al gedaan:
 
-- **Alle blijvende app-staat woont buiten de kern**: de volledige app-partitie
-  plus control-, bootstrap- en framequeuepagina's uit de HOP-brede systeempot.
-  De flip-handoff reserveert exact dezelfde arena opnieuw, dus die overleven de
-  kern-wissel. Tijdelijke frames in de dynamische chunkpool zijn bewust geen
-  handoff-staat: de nieuwe kern bouwt de vrije lijst opnieuw op en TCP herstelt
-  wat tijdens het korte flipgat verloren ging.
+- **Alle app-staat woont in de partitie** (ABI-staart: control page, ringen,
+  koppen) — die overleeft een kern-wissel per definitie.
 - **Apps draaien door zonder HOP**: yields/parks worden op de app-core zelf
   afgehandeld, de heartbeat is app-zijdig, system calls (sinds slot-ABI 6 over
   het slot-LAN naar `10.100.0.1:10100`) hebben een timeout.
