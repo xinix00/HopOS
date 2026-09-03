@@ -34,9 +34,10 @@ import (
 const locQueueMax = 64
 
 type locdev struct {
-	nic netdev.Device
-	mac [6]byte
-	ip  uint32 // het externe stack-IP, als getal (layout-conventie)
+	nic      netdev.Device
+	internal netdev.Device // HOP's poort 0 op dezelfde LAN-switch
+	mac      [6]byte
+	ip       uint32 // het externe stack-IP, als getal (layout-conventie)
 
 	mu sync.Mutex
 	q  [][]byte
@@ -52,17 +53,53 @@ func (d *locdev) enqueue(p []byte) {
 	d.mu.Unlock()
 }
 
-// Receive (netdev.Device): eerst de lokale wachtrij, dan de NIC.
+// Receive (netdev.Device): eerst self-dial, dan HOP's LAN-poort, dan de NIC.
 func (d *locdev) Receive(buf []byte) (int, error) {
-	d.mu.Lock()
-	if len(d.q) > 0 {
-		p := d.q[0]
-		d.q = d.q[1:]
+	for {
+		d.mu.Lock()
+		if len(d.q) > 0 {
+			p := d.q[0]
+			d.q = d.q[1:]
+			d.mu.Unlock()
+			return copy(buf, p), nil
+		}
 		d.mu.Unlock()
-		return copy(buf, p), nil
+		if d.internal != nil {
+			n, err := d.internal.Receive(buf)
+			if err != nil {
+				return 0, err
+			}
+			if n > 0 {
+				// Op de LAN-ring is HOP 10.100.0.1/MAC slot 0; de bestaande
+				// node-stack houdt zijn echte interfaceadres. Vertaal alleen op
+				// deze device-naad, zonder heap-queue of extra kopie.
+				if hopswitch.GwToHost(buf[:n], d.ip) {
+					copy(buf[0:6], d.mac[:])
+					return n, nil
+				}
+				continue // vreemd intern frame: drop en drain verder
+			}
+		}
+		n, err := d.nic.Receive(buf)
+		if err != nil || n == 0 {
+			return n, err
+		}
+		// Het system-service-IP is een capability die uitsluitend uit een
+		// slotring mag komen. Een fysiek LAN-frame met zo'n bronadres is spoof,
+		// ook als een buur raw Ethernet kan sturen.
+		if externalSpoofsInternal(buf[:n]) {
+			continue
+		}
+		return n, nil
 	}
-	d.mu.Unlock()
-	return d.nic.Receive(buf)
+}
+
+func externalSpoofsInternal(p []byte) bool {
+	if len(p) < 14+20 || binary.BigEndian.Uint16(p[12:]) != 0x0800 {
+		return false
+	}
+	src := binary.BigEndian.Uint32(p[14+12:])
+	return src>>8 == layout.HostIP4()>>8
 }
 
 // Transmit (netdev.Device): de drie lokale gevallen, anders de draad op.
@@ -82,7 +119,9 @@ func (d *locdev) Transmit(p []byte) error {
 				// vertaling weigert (fragment, vreemd slot) gaat niet de draad
 				// op; dat zou het interne adresplan naar buiten lekken.
 				if hopswitch.GwFromHost(p, d.ip) {
-					hopswitch.FromGateway(p)
+					if d.internal != nil {
+						return d.internal.Transmit(p)
+					}
 				}
 				return nil
 			}

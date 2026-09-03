@@ -19,22 +19,12 @@ import (
 	"fmt"
 
 	"github.com/xinix00/HopOS/metal/abi/layout"
-	"github.com/xinix00/HopOS/metal/net/hopswitch"
 )
 
 // upInternal registreert de gateway-naad op de switch. Aanroepen ná
 // iface.Init (de stack moet zijn adres kennen). Frames die geen vertaalbaar
 // IPv4-frame voor het gateway-adres zijn (ARP-restjes, fragmenten) vervallen
 // hier — de switch heeft de ARP's dan al beantwoord.
-func upInternal(d *locdev) {
-	hopswitch.SetGatewayRx(func(p []byte) {
-		if hopswitch.GwToHost(p, d.ip) {
-			// De app adresseerde de gateway-MAC (SlotMAC(0)); de stack-
-			// ethernetlaag accepteert alleen de eigen MAC — dus die ook
-			// omzetten, net als het IP.
-			copy(p[0:6], d.mac[:])
-			d.enqueue(p)
-		}
-	})
-	fmt.Printf("net: internal gateway address %s via 1:1 rewrite (HOPOS_GWNIC_UP)\n", layout.IP4Str(layout.HostIP4()))
+func upInternal(_ *locdev) {
+	fmt.Printf("net: internal gateway address %s on LAN port 0 (HOPOS_GWNIC_UP)\n", layout.IP4Str(layout.HostIP4()))
 }

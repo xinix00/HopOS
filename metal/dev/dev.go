@@ -10,6 +10,13 @@ import (
 	"unsafe"
 )
 
+// Notify is het ene producer→consumer-doorbellcontract voor iedere
+// architectuur. De producer roept het aan na een succesvolle leeg→niet-leeg
+// overgang van een gedeelde ring. De implementatie mag per machine verschillen
+// (ARM64: DSB+SEV; RISC-V: fence plus board-kick/failsafe), maar code boven dev
+// kent en test uitsluitend deze betekenis — niet de instructie eronder.
+func Notify() { SEV() }
+
 // Read64/Write64: gealigneerde 64-bit toegang op fysiek adres.
 func Read64(addr uintptr) uint64 {
 	return *(*uint64)(unsafe.Pointer(addr))

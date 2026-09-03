@@ -123,10 +123,20 @@ Most plain-Go services port in minutes — it's a checklist, not a rewrite:
 | `func main()` starts working right away | first `app := applib.Init()`, then `appnet.Up(app)` |
 | `os.Getenv("PORT")` / flags | `app.Env("ER_PORT_<NAME>")` and job-spec `env` |
 | `log.Printf` / stdout | `app.Logf` — lands in `run logs`, multiplexed per slot |
-| reads/writes local files | private root + shared `/data` mounts: `app.ReadFile` / `app.WriteFile` / `app.Fetch` |
+| reads/writes local files | private root + shared `/data` mounts: `app.ReadFile` / `app.WriteFile` / `app.Fetch` — after `appnet.Up`, see below |
 | `http.ListenAndServe`, `net.Dial`, TLS, … | unchanged — full Go net suite on your own stack |
 | `os/exec`, cgo, C dependencies | won't port — there is no OS to exec into; keep it pure Go |
 | graceful shutdown on SIGTERM | not needed: the kill flag parks the core; just don't exit `main` |
+
+**System calls.** Files, mounts, `Fetch` and logs go over your own stack to
+the node's system service at `10.100.0.1:10100` (slot ABI 6): one persistent
+connection per app, calls up to 1 MiB each, so a large file streams instead of
+crawling. That is why the file layer needs `appnet.Up` first — before it, and
+for crash logs, the mailbox in your partition still carries `Logf`. Both sides
+run on the same ring transport as your traffic, woken by the ring itself rather
+than polled. The node refuses an image built against another slot ABI
+(`image speaks slot ABI 5, this HopOS speaks 6 — rebuild it`): rebuild your
+apps whenever the kernel's ABI moves.
 
 ## What your app gets
 

@@ -128,6 +128,7 @@ func Up(a *applib.App) (string, error) {
 	// De stack bewaren voor WatchStats: één per app, en de tellers zijn
 	// precies wat een veld-jacht nodig heeft (zie de spin/stilte-jacht 15-08).
 	current = st
+	a.NetworkReady()
 
 	return layout.IP4Str(ip), nil
 }

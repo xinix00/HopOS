@@ -26,6 +26,7 @@ import (
 
 	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/dev"
+	"github.com/xinix00/HopOS/metal/net/hopswitch"
 )
 
 // rxArmed is het gewapend-teken van de doorbell (cpu/idle/rxdoor.go, bit 63).
@@ -38,6 +39,7 @@ func StartWaker() {
 		return
 	}
 	vectorsOnce.Do(cageInit)
+	hopswitch.SetRXWake(wakeRX)
 	go waker()
 	fmt.Println("idle: waker on — HOP kicks app cores that sleep on WFI HOPOS_WAKER_UP")
 }
@@ -45,11 +47,25 @@ func StartWaker() {
 // De tellers van de wekker (hopos.idlestat leest ze): rondes, slapende
 // bewoners gezien, en kicks. Zonder deze drie is "de app slaapt en wordt
 // nooit gewekt" niet te onderscheiden van "de app spint" — beide zijn 100%.
-var wakerRounds, wakerArmed, wakerKicks atomic.Uint64
+var wakerRounds, wakerArmed, wakerKicks, directRXKicks atomic.Uint64
 
 // WakerStats geeft (rondes, slapend gezien, kicks) — cumulatief.
 func WakerStats() (rounds, armed, kicks uint64) {
 	return wakerRounds.Load(), wakerArmed.Load(), wakerKicks.Load()
+}
+
+// DirectRXKicks telt de doelgerichte leeg→niet-leeg-kicks van de switch.
+func DirectRXKicks() uint64 { return directRXKicks.Load() }
+
+func wakeRX(i int) {
+	core := coreOf(i)
+	if slotShares(i) || !coreRunning(core) || ctxState(i) != layout.CtxSaved || !rxDue(i) {
+		return
+	}
+	if phys := physCore(core); phys >= 0 {
+		cores().Kick(phys)
+		directRXKicks.Add(1)
+	}
 }
 
 func waker() {
@@ -90,6 +106,10 @@ func wakeDue(i int, now uint64) bool {
 	if nopeek {
 		return false // een wachter zonder P: alleen zijn wektijd of een kick (HVC #4)
 	}
+	return rxDue(i)
+}
+
+func rxDue(i int) bool {
 	// De control-page via het ctx-blok, niet via de partitie van slot i: een
 	// secundaire core van een SMP-app heeft geen eigen partitie maar wel een
 	// ctx-blok, en daar staat de gedeelde page (dispatchSMP).

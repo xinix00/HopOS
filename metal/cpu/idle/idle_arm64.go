@@ -20,8 +20,8 @@ package idle
 
 import (
 	"runtime"
-	"sync/atomic"
 	"runtime/goos"
+	"sync/atomic"
 
 	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/dev"
@@ -214,7 +214,7 @@ func governor(pollUntil int64) {
 	// De doorbell: ligt er RX, dan is de pomp nu gewekt en is slapen precies
 	// verkeerd; ligt er niets, dan is de drempel nu gewapend en bewaakt de
 	// rotatie-peek de rest van deze slaap (zie rxdoor.go).
-	if rxDoor() {
+	if rxDoor() || workDoor() {
 		countWake()
 		return
 	}

@@ -1,9 +1,11 @@
 # runtime: WakeSleeper (nieuw bestand) — de SMP-veilige bel voor de RX-pomp
-# (metal/cpu/idle/rxdoor.go), en preemptM op de goos.Wake-haak — de
-# reschedule-IPI waarmee een stop-the-world een core bereikt die op EL2
-# slaapt (metal/cpu/smp). Toepassen: tools/tamago-go/apply.sh (of: cd
-# ~/tamago-go && git apply <dit bestand>). De runtime wordt per build uit
-# $GOROOT/src gecompileerd, de toolchain hoeft niet opnieuw.
+# (metal/cpu/idle/rxdoor.go), IdleMayReady — mag de idle-hook goroutines
+# runnable maken (alleen in de scheduler-idle, niet vanuit semasleep) — en
+# preemptM op de goos.Wake-haak — de reschedule-IPI waarmee een stop-the-world
+# een core bereikt die op EL2 slaapt (metal/cpu/smp). Toepassen:
+# tools/tamago-go/apply.sh (of: cd ~/tamago-go && git apply <dit bestand>).
+# De runtime wordt per build uit $GOROOT/src gecompileerd, de toolchain hoeft
+# niet opnieuw.
 diff --git a/src/runtime/os_tamago.go b/src/runtime/os_tamago.go
 index ed6b67f7..450006b8 100644
 --- a/src/runtime/os_tamago.go
@@ -33,10 +35,10 @@ index ed6b67f7..450006b8 100644
  	if goos.ProcID == nil {
 diff --git a/src/runtime/wakesleeper_tamago.go b/src/runtime/wakesleeper_tamago.go
 new file mode 100644
-index 00000000..cd0da275
+index 00000000..e722a8d5
 --- /dev/null
 +++ b/src/runtime/wakesleeper_tamago.go
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,73 @@
 +// Copyright 2026 HopOS. Same license as the Go runtime.
 +
 +//go:build tamago
@@ -97,4 +99,16 @@ index 00000000..cd0da275
 +		}
 +	}
 +	return true
++}
++
++// IdleMayReady reports whether the goos.Idle hook is running in the
++// scheduler's own idle path (findRunnable -> beforeIdle): this M holds a P and
++// is not inside lock2. Only there may the hook make goroutines runnable — a
++// channel send, a mutex unlock with waiters, goready. The hook is also called
++// from semasleep: an M parked without a P, or a mutex waiter with m.locks > 0.
++// There ready/wakep would corrupt the scheduler itself — runqput on a nil P,
++// or a second sleep on the same m.mWaitList node (lock_spinbit.go).
++func IdleMayReady() bool {
++	gp := getg()
++	return gp.m.p != 0 && gp.m.locks == 0
 +}

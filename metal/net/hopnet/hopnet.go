@@ -78,7 +78,11 @@ func Up() error {
 	if ip4 == nil {
 		return fmt.Errorf("node IP %q is not IPv4", nc.IP)
 	}
-	loc := &locdev{nic: uplink, ip: binary.BigEndian.Uint32(ip4)}
+	internal, err := hopswitch.HostDevice()
+	if err != nil {
+		return err
+	}
+	loc := &locdev{nic: uplink, internal: internal, ip: binary.BigEndian.Uint32(ip4)}
 	copy(loc.mac[:], hw)
 
 	// De stack zelf (stack.go): die hangt ook net.SocketFunc; wat terugkomt
@@ -110,7 +114,15 @@ func Up() error {
 	} else {
 		fmt.Println("net: RX polled every 300µs (no NIC interrupt on this board, or hopos.rxpoll=1)")
 	}
-	go rxLoop(loc, recv, waiter)
+	events := make(chan struct{}, 1)
+	signal := func() {
+		select {
+		case events <- struct{}{}:
+		default:
+		}
+	}
+	hopswitch.SetHostWake(signal)
+	go rxLoop(loc, recv, waiter, events, signal)
 
 	// DHCP-lease levend houden: heeft dit board een verkregen lease (de Pi's),
 	// dan vernieuwt KeepAlive hem op T1 via de netstack (UDP-RENEW) — dat kan
@@ -147,18 +159,39 @@ func Up() error {
 // vangrail van 10ms is er omdat een verloren flank nooit een hang mag worden
 // (cpu/irq) — hij kost bij stilte 100 wekmomenten per seconde in plaats van
 // 3.333, en onder verkeer wordt hij nooit geraakt.
-func rxLoop(nic netdev.Device, recv func([]byte) error, waiter board.NICInterrupter) {
+func rxLoop(nic netdev.Device, recv func([]byte) error, waiter board.NICInterrupter, events <-chan struct{}, signal func()) {
 	buf := make([]byte, netdev.MTU+netdev.EthernetMaximumSize)
+	if waiter != nil {
+		go func() {
+			for {
+				waiter.WaitNIC(10 * time.Millisecond)
+				signal()
+			}
+		}()
+	}
+	// Zonder interrupt (waiter == nil; Apple tot AIC/MSI er is) blijft de NIC
+	// zelf gepold, in de praktijk op de klok van de idle-governor (~1ms event
+	// stream); het events-kanaal wekt eerder voor LAN-poort 0. Eén hergebruikte
+	// timer: time.After alloceerde er ~3.000 per seconde op de M4.
+	const nicPoll = 300 * time.Microsecond
+	var poll *time.Timer
+	if waiter == nil {
+		poll = time.NewTimer(nicPoll)
+	}
 	for {
 		if rxPass(nic, recv, buf) {
 			continue
 		}
 		rxIdle.Add(1)
 		if waiter != nil {
-			waiter.WaitNIC(10 * time.Millisecond)
+			<-events
 			continue
 		}
-		time.Sleep(300 * time.Microsecond)
+		poll.Reset(nicPoll)
+		select {
+		case <-events:
+		case <-poll.C:
+		}
 	}
 }
 

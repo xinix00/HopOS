@@ -101,3 +101,10 @@ docs/upstream-pr-stijl.md
 
 # Python-bytecode van de loader-scripts (image/apple/): build-output.
 __pycache__/
+
+# Jobspecs die tijdens een deploy-ronde in de wortel belanden. Ze horen hier
+# niet thuis (ze zijn van een node, niet van de boom) en job-cloudflared.json
+# draagt een echte TUNNEL_TOKEN — één `git add -A` op een onbewaakt moment en
+# die staat publiek. Genegeerd i.p.v. verplaatst: ze blijven bruikbaar waar ze
+# liggen, en de release-preflight (schone boom) struikelt er niet meer over.
+/job-*.json

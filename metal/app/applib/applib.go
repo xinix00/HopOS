@@ -4,14 +4,15 @@
 //   - meldt de app zich READY op zijn control-page;
 //   - loopt er automatisch een heartbeat (hang-detectie door HOP);
 //   - wordt de kill-flag van HOP gehoorzaamd: status EXITED + PSCI CPU_OFF;
-//   - is de hop-ABI beschikbaar: Logf en de fs-laag (Stat/ReadFile/
-//     WriteFile/List/Remove/Fetch) over de eigen mailbox-ringen. De app ziet
+//   - blijft de mailbox beschikbaar voor bootstrap-/crashlogs; gewone calls
+//     lopen na appnet.Up over het system-contract op 10.100.0.1. De app ziet
 //     een eigen lege root plus de volumes die HOP bij de start mountte.
 package applib
 
 import (
 	"fmt"
 	"io/fs"
+	"net"
 	"runtime"
 	"runtime/goos"
 	"strconv"
@@ -22,6 +23,7 @@ import (
 	"github.com/xinix00/HopOS/metal/abi/hopabi"
 	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/abi/ring"
+	"github.com/xinix00/HopOS/metal/abi/systemapi"
 	"github.com/xinix00/HopOS/metal/board/appboard"
 	"github.com/xinix00/HopOS/metal/cpu/idle"
 	"github.com/xinix00/HopOS/metal/cpu/memattr"
@@ -36,12 +38,15 @@ type App struct {
 	RAMStart uint64 // eigen partitiebasis
 	RAMSize  uint64 // eigen (door HOP gepatchte) RAM-declaratie
 
-	env  map[string]string // door HOP meegegeven bij start
-	mu   sync.Mutex        // outbox is SPSC: één producer tegelijk (logs + RPC)
-	seq  uint32
-	out  *ring.Ring // hop-ABI outbox (app → HOP)
-	in   *ring.Ring // hop-ABI inbox (HOP → app)
-	rbuf []byte     // hergebruikte leesbuffer (onder mu, zoals seq)
+	env map[string]string // door HOP meegegeven bij start
+	mu  sync.Mutex        // outbox is SPSC: één producer tegelijk (logs + RPC)
+	seq uint32
+	out *ring.Ring // bootstrap-/crashlog (app → HOP); géén data-RPC
+
+	// Na appnet.Up lopen gewone calls en logs over één blijvende verbinding
+	// naar 10.100.0.1. De mailbox blijft alleen bootstrap/crash-fallback.
+	sysReady bool
+	sysConn  net.Conn
 
 	// printk-regelbuffer (appboard.PrintkSink): runtime-output komt per byte
 	// binnen en gaat per regel de log-ring op. Vast formaat, want de schrijver
@@ -90,8 +95,6 @@ func Init() *App {
 	}
 
 	a.out = ring.Open(layout.RingOutboxAt(a.RAMStart, a.RAMSize))
-	a.in = ring.Open(layout.RingInboxAt(a.RAMStart, a.RAMSize))
-	a.rbuf = make([]byte, layout.RingDataCap)
 	a.env = a.readEnv()
 
 	// Kreeg deze app het glas (gui/fbgrant zette FB_*), dan is dat venster DRAM
@@ -177,6 +180,14 @@ func Init() *App {
 // De ER_PORT_*/ER_ATTR_*-conventie van HOP werkt hier ongewijzigd.
 func (a *App) Env(key string) string { return a.env[key] }
 
+// NetworkReady schakelt het generieke system-calltransport in. Appnet roept
+// dit precies eenmaal aan nadat de eigen stack en RX-pomp actief zijn.
+func (a *App) NetworkReady() {
+	a.mu.Lock()
+	a.sysReady = true
+	a.mu.Unlock()
+}
+
 // readEnv leest de env-blob die HOP op de control-page schreef.
 func (a *App) readEnv() map[string]string {
 	n := a.ctrlGet(layout.CtrlEnvLen)
@@ -253,6 +264,14 @@ func (a *App) Logf(format string, args ...any) {
 	msg := []byte(fmt.Sprintf(format, args...))
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.sysReady && a.sysConn != nil {
+		_ = a.sysConn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+		if err := systemapi.WriteFrame(a.sysConn, systemapi.KindLog, msg); err == nil {
+			_ = a.sysConn.SetWriteDeadline(time.Time{})
+			return
+		}
+		a.closeSystemLocked()
+	}
 	for range 100 {
 		if a.out.Write(ring.TypeLog, msg) {
 			return
@@ -261,66 +280,82 @@ func (a *App) Logf(format string, args ...any) {
 	}
 }
 
-// rpc doet één hop-ABI-call: request de outbox op, response van de inbox.
-// Eén in flight tegelijk (mutex); responses met een vreemde seq — van een
-// eerdere, verlopen call — worden overgeslagen.
+// rpc doet één system call over het interne LAN. Data gebruikt nooit meer de
+// mailboxringen; zonder appnet is er eenvoudigweg nog geen calltransport.
 func (a *App) rpc(req hopabi.Req, timeout time.Duration) (hopabi.Resp, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.seq++
 	req.Seq = a.seq
-	payload := hopabi.EncodeReq(req)
-	// Spiegel van de servicer-kant (slots.go): een request die nóóit in de
-	// outbox past zou de Write-lus hieronder de volle timeout laten spinnen en
-	// dan misleidend "outbox blijft vol" geven. Meteen een grootte-fout.
-	if !a.out.Fits(len(payload)) {
-		return hopabi.Resp{}, fmt.Errorf("hop-ABI: request %d bytes past niet in de outbox", len(payload))
+	if !a.sysReady {
+		return hopabi.Resp{}, fmt.Errorf("system call: network is not ready; call appnet.Up first")
 	}
-	deadline := time.Now().Add(timeout)
-	for !a.out.Write(ring.TypeRPCReq, payload) {
-		if time.Now().After(deadline) {
-			return hopabi.Resp{}, fmt.Errorf("hop-ABI: outbox blijft vol")
-		}
-		time.Sleep(time.Millisecond)
+	return a.systemRPCLocked(req, timeout)
+}
+
+func (a *App) systemConnLocked() (net.Conn, error) {
+	if a.sysConn != nil {
+		return a.sysConn, nil
 	}
-	for {
-		typ, n, ok := a.in.ReadInto(a.rbuf)
-		if !ok {
-			if time.Now().After(deadline) {
-				return hopabi.Resp{}, fmt.Errorf("hop-ABI: geen antwoord op op %d", req.Op)
-			}
-			time.Sleep(500 * time.Microsecond)
-			continue
-		}
-		if typ != ring.TypeRPCResp {
-			continue
-		}
-		resp, err := hopabi.DecodeResp(a.rbuf[:n])
-		if err != nil {
-			return hopabi.Resp{}, err
-		}
-		if resp.Seq != req.Seq {
-			continue
-		}
-		// resp.Data wijst in de hergebruikte leesbuffer: kopiëren vóór hij
-		// de mutex (en dus de volgende ReadInto) overleeft.
-		resp.Data = append([]byte(nil), resp.Data...)
-		if resp.Status != hopabi.StatusOK {
-			// StatusNoEnt draagt fs.ErrNotExist: de kern gaf "bestaat niet"
-			// juist een éigen status (kern/slots/rpc.go) zodat deze kant hem
-			// kon mappen — zonder die wrap zag errors.Is(err, fs.ErrNotExist)
-			// bij élke afnemer niets, en behandelde stulp een eerste run op
-			// een node MET volume als fatale leesfout (gemeten 15-08, QEMU).
-			if resp.Status == hopabi.StatusNoEnt {
-				return resp, fmt.Errorf("hop-ABI op %d: %w: %s", req.Op, fs.ErrNotExist, resp.Data)
-			}
-			return resp, fmt.Errorf("hop-ABI op %d: status %d: %s", req.Op, resp.Status, resp.Data)
-		}
-		return resp, nil
+	c, err := net.Dial("tcp", systemapi.Address)
+	if err != nil {
+		return nil, fmt.Errorf("system call connect %s: %w", systemapi.Address, err)
+	}
+	a.sysConn = c
+	return c, nil
+}
+
+func (a *App) closeSystemLocked() {
+	if a.sysConn != nil {
+		_ = a.sysConn.Close()
+		a.sysConn = nil
 	}
 }
 
+func (a *App) systemRPCLocked(req hopabi.Req, timeout time.Duration) (hopabi.Resp, error) {
+	c, err := a.systemConnLocked()
+	if err != nil {
+		return hopabi.Resp{}, err
+	}
+	_ = c.SetDeadline(time.Now().Add(timeout))
+	payload := hopabi.EncodeReq(req)
+	if err := systemapi.WriteFrame(c, systemapi.KindCall, payload); err != nil {
+		a.closeSystemLocked()
+		return hopabi.Resp{}, fmt.Errorf("system call write: %w", err)
+	}
+	kind, payload, err := systemapi.ReadFrame(c)
+	if err != nil {
+		a.closeSystemLocked()
+		return hopabi.Resp{}, fmt.Errorf("system call read: %w", err)
+	}
+	_ = c.SetDeadline(time.Time{})
+	if kind != systemapi.KindResult {
+		a.closeSystemLocked()
+		return hopabi.Resp{}, fmt.Errorf("system call: unexpected frame kind %d", kind)
+	}
+	resp, err := hopabi.DecodeResp(payload)
+	if err != nil {
+		a.closeSystemLocked()
+		return hopabi.Resp{}, err
+	}
+	if resp.Seq != req.Seq {
+		a.closeSystemLocked()
+		return hopabi.Resp{}, fmt.Errorf("system call: response seq %d, want %d", resp.Seq, req.Seq)
+	}
+	if resp.Status != hopabi.StatusOK {
+		if resp.Status == hopabi.StatusNoEnt {
+			return resp, fmt.Errorf("system call op %d: %w: %s", req.Op, fs.ErrNotExist, resp.Data)
+		}
+		return resp, fmt.Errorf("system call op %d: status %d: %s", req.Op, resp.Status, resp.Data)
+	}
+	return resp, nil
+}
+
 const rpcTimeout = 10 * time.Second
+
+// MaxIOChunk is de publieke bulkgrens van het system-callcontract over het
+// interne LAN. De mailbox draagt sinds slot-ABI v6 geen data-RPC meer.
+const MaxIOChunk = systemapi.MaxIOChunk
 
 // Stat geeft de grootte van een bestand (of 0 voor een dir).
 func (a *App) Stat(path string) (uint64, error) {
@@ -328,7 +363,7 @@ func (a *App) Stat(path string) (uint64, error) {
 	return resp.Size, err
 }
 
-// ReadAt leest maximaal n bytes vanaf off (n ≤ hopabi.MaxChunk per call).
+// ReadAt leest maximaal n bytes vanaf off (n ≤ MaxIOChunk per call).
 func (a *App) ReadAt(path string, off uint64, n int) ([]byte, error) {
 	resp, err := a.rpc(hopabi.Req{Op: hopabi.OpRead, Path: path, Off: off, N: uint64(n)}, rpcTimeout)
 	if err != nil {
@@ -341,8 +376,8 @@ func (a *App) ReadAt(path string, off uint64, n int) ([]byte, error) {
 // random-access primitive needed by embedded databases and is deliberately
 // bounded to the same ABI chunk size as ReadAt.
 func (a *App) WriteAt(path string, off uint64, data []byte) (int, error) {
-	if len(data) > hopabi.MaxChunk {
-		return 0, fmt.Errorf("hop-ABI: write chunk %d exceeds %d", len(data), hopabi.MaxChunk)
+	if len(data) > MaxIOChunk {
+		return 0, fmt.Errorf("system call: write chunk %d exceeds %d", len(data), MaxIOChunk)
 	}
 	_, err := a.rpc(hopabi.Req{Op: hopabi.OpWrite, Path: path, Off: off, Data: data}, rpcTimeout)
 	if err != nil {
@@ -364,8 +399,9 @@ func (a *App) ReadFile(path string) ([]byte, error) {
 		return nil, err
 	}
 	buf := make([]byte, 0, size)
+	chunkSize := MaxIOChunk
 	for off := uint64(0); off < size; {
-		chunk, err := a.ReadAt(path, off, hopabi.MaxChunk)
+		chunk, err := a.ReadAt(path, off, chunkSize)
 		if err != nil {
 			return nil, err
 		}
@@ -391,8 +427,9 @@ func (a *App) WriteFile(path string, data []byte) error {
 	if _, err := a.rpc(hopabi.Req{Op: hopabi.OpTruncate, Path: path, N: 0}, rpcTimeout); err != nil {
 		return err
 	}
-	for off := 0; off < len(data); off += hopabi.MaxChunk {
-		end := off + hopabi.MaxChunk
+	chunkSize := MaxIOChunk
+	for off := 0; off < len(data); off += chunkSize {
+		end := off + chunkSize
 		if end > len(data) {
 			end = len(data)
 		}

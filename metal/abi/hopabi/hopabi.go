@@ -1,7 +1,7 @@
-// Package hopabi definieert het wire-format van de hop-ABI-RPC over de
-// mailbox-ringen (PLAN.md §3): app → HOP requests op de outbox
-// (ring.TypeRPCReq), HOP → app responses op de inbox (ring.TypeRPCResp).
-// Voor beide kanten dezelfde encoder/decoder, versie-veld verplicht.
+// Package hopabi definieert de compacte request/response-payload van HOP's
+// system calls. Sinds slot-ABI v6 draagt systemapi deze payload over het
+// gewone interne LAN; de oude mailbox-recordtypes 3/4 zijn alleen gereserveerd.
+// Voor beide kanten geldt dezelfde encoder/decoder en een verplicht versieveld.
 //
 // Frame (little-endian), 24-byte kop + variabel:
 //
@@ -24,8 +24,8 @@ const Version = 1
 // Ops.
 const (
 	OpStat   = 1 // stat(path) → size (dir: size 0, status Ok)
-	OpRead   = 2 // read(path, off, n≤MaxChunk) → data
-	OpWrite  = 3 // write(path, off, data≤MaxChunk); maakt bestand + ouder-dirs
+	OpRead   = 2 // read(path, off, n≤transportgrens) → data
+	OpWrite  = 3 // write(path, off, data≤transportgrens); maakt bestand + ouder-dirs
 	OpList   = 4 // list(path) → namen, "\n"-gescheiden ("naam/" = dir)
 	OpRemove = 5 // remove(path) (bestand of lege dir)
 
@@ -67,7 +67,9 @@ const (
 	StatusDenied = 3 // buiten mounts/eigen root
 )
 
-// MaxChunk is de maximale datalengte per read/write (ring-record ≤ cap/2).
+// MaxChunk is de historische mailboxgrens. Nieuwe systemapi-verbindingen
+// begrenzen hun payload met systemapi.MaxIOChunk; deze constante blijft voor
+// compatibele payloadtests en voor callers die zelf een kleinere grens willen.
 const MaxChunk = 8 << 10
 
 const hdrLen = 24
@@ -109,7 +111,7 @@ func EncodeReq(r Req) []byte {
 	return b
 }
 
-// DecodeReq parseert een request (payload van een TypeRPCReq-record).
+// DecodeReq parseert een requestpayload.
 func DecodeReq(b []byte) (Req, error) {
 	if len(b) < hdrLen {
 		return Req{}, fmt.Errorf("hopabi: request te kort (%d)", len(b))

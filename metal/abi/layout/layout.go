@@ -871,7 +871,11 @@ const (
 	// ctx-blok is kern-staat in de plan-regio, waar geen app bij kan):
 	// CtxKickTarget, CtxWakes en CtxUnitSlot, plus CtxWakeNoPeek als bit 63
 	// in CtxWake.
-	ABIVersion = 5
+	// 6 (03-09): storage/store-calls verhuisden van de mailboxringen naar het
+	// ene system-callcontract over het slot-LAN. De outbox is voortaan alleen
+	// bootstrap-/crashlog. Een oud image zou anders tien seconden op een RPC-
+	// response wachten die bewust nooit meer komt; hard weigeren is eerlijker.
+	ABIVersion = 6
 )
 
 // AbiTailAt geeft de basis van de ABI-staart van een slot: net boven zijn

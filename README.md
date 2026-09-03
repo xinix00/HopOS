@@ -22,7 +22,7 @@ firmware ──boot──▶ one Go image (EL2)
    ┌────────────────────┴───────────────────────────────┐
    │ core 0: HOP — kernel + orchestrator                │
    │   L2 frame switch + NAT · NVMe + file layer        │
-   │   mailbox rings · PSCI core lifecycle · fb console │
+   │   system calls (slot LAN) · PSCI cores · fb console│
    └───────┬────────────────────────────────────────────┘
            │ PSCI CPU_ON/OFF · per-slot message rings
    ┌───────┴────────────────────────────────────────────┐

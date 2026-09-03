@@ -34,6 +34,7 @@ import (
 
 	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/board"
+	"github.com/xinix00/HopOS/metal/cpu/idle"
 	"github.com/xinix00/HopOS/metal/cpu/memlimit"
 	"github.com/xinix00/HopOS/metal/cpu/smp"
 	"github.com/xinix00/HopOS/metal/driver/fb"
@@ -276,6 +277,14 @@ func main() {
 	}
 	hopnet.ForcePoll = bootParam("hopos.rxpoll") == "1"
 	slots.ForceIdleYield = bootParam("hopos.idleyield") == "1"
+	hopswitch.UsePump(func(status func() bool, wake func()) {
+		idle.WatchWork(status, wake)
+	})
+	// HOP is poort 0 van dezelfde LAN-switch. Die poort moet bestaan vóór
+	// hopnet zijn device-naad opbouwt; er is geen tweede gateway-queue meer.
+	if err := hopswitch.Up(); err != nil {
+		fail("switch", err)
+	}
 	netErr := hopnet.Up()
 	// De wekker voor app-cores die op EL2 slapen (IdleYield, Cores.Kick):
 	// alleen op een board dat kan kicken, en ná de vectoren — de kick is een
@@ -289,12 +298,6 @@ func main() {
 		// de board/NIC-bring-up-op-levende-hardware (de hoofdverdachte).
 		kernflip.MarkNetUp()
 	}
-	// De interne L2-switch (per-slot netwerk): elke task krijgt een adres op
-	// het interne net en kan met appnet een eigen stack opbrengen.
-	if err := hopswitch.Up(); err != nil {
-		fail("switch", err)
-	}
-
 	// USB-invoer (alleen de gui-smaak): toetsenbord en muis op het ijzer. Hier
 	// en niet eerder, want de gebeurtenissen gaan over de interne switch naar
 	// de display-app — dezelfde POST /input die de browser-KVM gebruikt.
@@ -483,6 +486,13 @@ func main() {
 		slots.UseStore(newS3Store(s3), "apps/"+cfg.Cluster.Name)
 		fmt.Printf("hop: app object store enabled — apps/%s/<job>/ in the same bucket\n",
 			cfg.Cluster.Name)
+	}
+	if netErr == nil {
+		go func() {
+			if err := slots.ServeSystem(); err != nil {
+				fmt.Printf("system: %v — app calls unavailable\n", err)
+			}
+		}()
 	}
 
 	// Bewust géén template-substitutie ({{host}} e.d.) in de jobspecs: adressen

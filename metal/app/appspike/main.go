@@ -80,6 +80,9 @@ func main() {
 
 	// Object-store-demo (de persistente laag naast hopfs): zie store_demo.go.
 	if app.Env("STOREDEMO") == "roundtrip" {
+		if _, err := appnet.Up(app); err != nil {
+			exitf(app, 1, "STOREDEMO net: %v", err)
+		}
 		storeDemo(app) // keert niet terug (exit)
 	}
 
@@ -87,9 +90,14 @@ func main() {
 	// stuk van de keten. Exitcodes dragen het resultaat naar HOP.
 	switch app.Env("FSDEMO") {
 	case "writer":
+		if _, err := appnet.Up(app); err != nil {
+			exitf(app, 1, "FSDEMO writer net: %v", err)
+		}
 		// Schrijf de gedeelde dataset in het gemounte /data, en een privé-
 		// bestand in de eigen root (die geen andere task ooit ziet).
-		data := make([]byte, 100<<10)
+		// Twee MiB dwingt twee volledige system-callframes af: dit is de QEMU-
+		// regressie tegen het oude 8KiB-per-2ms-plafond.
+		data := make([]byte, 2<<20)
 		for i := range data {
 			data[i] = byte(i*13 + 7)
 		}
@@ -102,6 +110,9 @@ func main() {
 		exitf(app, 0, "FSDEMO writer: /data/db.bin (%d bytes) + eigen /prive.txt geschreven", len(data))
 
 	case "reader":
+		if _, err := appnet.Up(app); err != nil {
+			exitf(app, 1, "FSDEMO reader net: %v", err)
+		}
 		// Lees de gedeelde dataset en exit met de checksum; bewijs en passant
 		// dat andermans privé-bestand en een '..'-escape onzichtbaar zijn.
 		b, err := app.ReadFile("/data/db.bin")
@@ -118,6 +129,9 @@ func main() {
 		exitf(app, sum, "FSDEMO reader: %d bytes, checksum %#x", len(b), sum)
 
 	case "denied":
+		if _, err := appnet.Up(app); err != nil {
+			exitf(app, 1, "FSDEMO denied net: %v", err)
+		}
 		// Zonder mount bestaat /data voor deze task simpelweg niet.
 		if _, err := app.ReadFile("/data/db.bin"); err == nil {
 			exitf(app, 1, "FSDEMO denied: LEK — /data zichtbaar zonder mount")

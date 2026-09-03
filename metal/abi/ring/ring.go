@@ -17,6 +17,7 @@ package ring
 
 import (
 	"fmt"
+	"unsafe"
 
 	"github.com/xinix00/HopOS/metal/dev"
 )
@@ -43,9 +44,12 @@ const (
 	TypePad = 0
 
 	// hop-ABI recordtypes.
-	TypeLog     = 1 // app → HOP (outbox): logregel
-	TypeRPCReq  = 3 // app → HOP (outbox): hop-ABI-request (zie metal/abi/hopabi)
-	TypeRPCResp = 4 // HOP → app (inbox): hop-ABI-response
+	TypeLog = 1 // app → HOP (outbox): logregel
+	// 3/4 waren tot ABI v5 de data-RPC over de mailbox. Gereserveerd zodat
+	// stale records nooit als een ander type worden geïnterpreteerd; ABI v6
+	// gebruikt systemapi over het LAN voor alle gewone calls.
+	TypeRPCReq  = 3
+	TypeRPCResp = 4
 	TypeFrame   = 5 // frame-ringen: één rauw Ethernet-frame (metal/net/hopswitch)
 )
 
@@ -72,13 +76,30 @@ func Init(base uintptr, size uint64) {
 
 // Ring is één kant van een SPSC-ring op fysiek adres base.
 type Ring struct {
-	base    uintptr
-	size    uint64
+	base uintptr
+	size uint64
+	// keep houdt heap-backed lokale ringen levend. Shared-memoryringen laten
+	// dit nil; New gebruikt dezelfde wire-layout maar bezit zijn backing zelf.
+	keep    []uint64
 	corrupt bool   // consumer zag een onmogelijke header; ring is dood
 	why     string // de meting van dát moment (CorruptWhy) — anders is een
 	// corrupt-verklaring van buiten niet te onderscheiden van een lege ring,
 	// en dat onderscheid was precies de jacht van 17-08 (boot 9: slot-TX
 	// leest eeuwig leeg terwijl de app schrijft).
+}
+
+// New maakt een lokaal, heap-backed exemplaar met exact dezelfde layout als
+// een shared-memoryring. Dit is bedoeld voor een vertrouwde poort aan HOP's
+// eigen kant van dezelfde switch: geen aparte queue of afwijkend device-
+// contract, gewoon nog een SPSC-ring. size wordt naar acht bytes afgerond.
+func New(size uint64) *Ring {
+	size = align8(size)
+	words := make([]uint64, (dataOff+size)/8)
+	base := uintptr(unsafe.Pointer(&words[0]))
+	Init(base, size)
+	r := Open(base)
+	r.keep = words
+	return r
 }
 
 // HeadPending geeft de producer-index en of er ongelezen records liggen — de
@@ -155,17 +176,24 @@ func (r *Ring) writeRec(off uint64, typ uint32, p []byte) {
 	dev.Push(addr+recHdr, uintptr(align8(uint64(len(p)))))
 }
 
-// Write plaatst een record; false als de ring vol is (aanroeper beslist:
-// droppen of opnieuw proberen). Alleen door de producer aan te roepen.
-func (r *Ring) Write(typ uint32, p []byte) bool {
+// WriteNotify plaatst een record. notify is waar wanneer de ring vóór deze
+// schrijf leeg was: de producer heeft dan de overgang leeg → niet-leeg gemaakt
+// en moet de tegenpartij één keer wekken. Dat is het generieke doorbell-
+// contract van alle gebruikers van de ring; ARM mag daaronder SEV gebruiken en
+// RISC-V een IPI/fallback, maar de datapad-code kent dat verschil niet.
+//
+// Alleen door de producer aan te roepen. Bij een volle/ongeldige ring zijn ok
+// en notify beide false.
+func (r *Ring) WriteNotify(typ uint32, p []byte) (ok, notify bool) {
 	need := recHdr + align8(uint64(len(p)))
 	if need > r.size/2 {
-		return false // onredelijk groot record
+		return false, false // onredelijk groot record
 	}
 	head, tail := r.head(), r.tail()
 	if head-tail > r.size {
-		return false // onmogelijke indexen (malafide consument): niets schrijven
+		return false, false // onmogelijke indexen (malafide consument): niets schrijven
 	}
+	wasEmpty := head == tail
 
 	// Past het record nog aaneengesloten tot het einde van de buffer?
 	if contig := r.size - head%r.size; need > contig {
@@ -174,10 +202,10 @@ func (r *Ring) Write(typ uint32, p []byte) bool {
 		// PAD-lengte bijna 2^64 worden en de header zelf voorbij de datarand
 		// staan.
 		if contig < recHdr {
-			return false
+			return false, false
 		}
 		if r.size-(head-tail) < contig+need {
-			return false
+			return false, false
 		}
 		// PAD-record over de staart, dan vooraan verder. De Push hoort er net zo
 		// hard bij als bij een echt record: zonder blijft deze header in de cache
@@ -195,13 +223,20 @@ func (r *Ring) Write(typ uint32, p []byte) bool {
 		head += contig
 	}
 	if r.size-(head-tail) < need {
-		return false
+		return false, false
 	}
 
 	r.writeRec(head, typ, p)
 	dev.MB() // payload publiceren vóór de index
 	r.setHead(head + need)
-	return true
+	return true, wasEmpty
+}
+
+// Write is de bestaande plaatsings-API voor aanroepers die geen wekbesluit
+// nodig hebben.
+func (r *Ring) Write(typ uint32, p []byte) bool {
+	ok, _ := r.WriteNotify(typ, p)
+	return ok
 }
 
 // ReadInto haalt het volgende record op en kopieert de payload in buf (door

@@ -24,6 +24,7 @@ import (
 	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/board"
 	_ "github.com/xinix00/HopOS/metal/board/qemuvirt/hop" // registreert het board (init) + basis-hooks
+	"github.com/xinix00/HopOS/metal/cpu/idle"
 	"github.com/xinix00/HopOS/metal/cpu/memlimit"
 	"github.com/xinix00/HopOS/metal/dev"
 	"github.com/xinix00/HopOS/metal/driver/fb"
@@ -170,12 +171,16 @@ func main() {
 	}
 	fmt.Println("HOPOS_FBCONS_OK — universele fb-log-console: renderer + printk-mirror bewezen")
 
-	if err := hopnet.Up(); err != nil {
-		fail("net", err)
-	}
-	// De interne L2-switch (per-slot netwerk) — vóór de eerste slots.Start.
+	// HOP is poort 0; de switch moet daarom vóór hopnet zijn ringdevice
+	// aanbieden. Dit is dezelfde volgorde als de echte agent-main.
+	hopswitch.UsePump(func(status func() bool, wake func()) {
+		idle.WatchWork(status, wake)
+	})
 	if err := hopswitch.Up(); err != nil {
 		fail("switch", err)
+	}
+	if err := hopnet.Up(); err != nil {
+		fail("net", err)
 	}
 	if err := serveHello(); err != nil {
 		fail("http", err)
@@ -206,6 +211,11 @@ func main() {
 	// tasks volumes mounten en via de hop-ABI bij hun bestanden.
 	fsys := hopfs.New(disk)
 	slots.UseFS(fsys)
+	go func() {
+		if err := slots.ServeSystem(); err != nil {
+			fail("system service", err)
+		}
+	}()
 
 	// Kern-flip-regressie (image/qemu-run.sh flip): kern A springt hier in de
 	// bundel (keert niet terug); de geflipte kern B meldt HOPOS_FLIP_BOOT en
@@ -356,7 +366,7 @@ func main() {
 	mustExit("vol-writer", 1, 10*time.Second, 0)
 
 	// HOP rekent zelf de som over hetzelfde bestand in de storage-laag.
-	dbBytes := make([]byte, 100<<10)
+	dbBytes := make([]byte, 2<<20)
 	if n, err := fsys.ReadAt("/data/db.bin", 0, dbBytes); err != nil || n != len(dbBytes) {
 		fail("vol-check", fmt.Errorf("db.bin lezen: n=%d, %v", n, err))
 	}

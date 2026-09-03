@@ -31,6 +31,7 @@ package idle
 
 import (
 	"runtime/goos"
+	"sync/atomic"
 
 	"github.com/xinix00/HopOS/metal/dev"
 )
@@ -98,9 +99,17 @@ func governor(pollUntil int64) {
 	// nog zonder waarden, maar dezelfde ronde als op ARM), dan de doorbell —
 	// zelfde twee redenen als op ARM (zie rxdoor.go).
 	idleMode()
-	if rxDoor() {
-		countWake()
-		return
+	// Re-entrantie, dezelfde reden als op ARM (idle_arm64.go): WakeSleeper
+	// neemt de timer-lock, en is die bezet, dan slaapt lock2 via semasleep →
+	// goos.Idle → hier — en dat zonder guard tot de stack op is. Dan alleen
+	// slapen; de unlocker wekt ons. Eén hart per bewoner, dus één vlag.
+	// (workDoor bewaakt zichzelf: alleen in de scheduler-idle, zie rxdoor.go.)
+	if !nested.Swap(true) {
+		defer nested.Store(false)
+		if rxDoor() || workDoor() {
+			countWake()
+			return
+		}
 	}
 	if sharedAddr.Load() != 0 {
 		// Slot-app: yield naar de switcher, alleen wonend of niet.
@@ -129,6 +138,9 @@ func governor(pollUntil int64) {
 		prev(pollUntil)
 	}
 }
+
+// nested: "de governor loopt al" op dit hart (zie governor).
+var nested atomic.Bool
 
 // applyIdleMode: nog geen modi op deze architectuur. Het woord komt wél
 // langs — dezelfde ronde, hetzelfde woord — zodat een RISC-V-board dat ooit

@@ -44,6 +44,39 @@ func TestRoundtrip(t *testing.T) {
 	}
 }
 
+func TestWriteNotifyAlleenOpLegeOvergang(t *testing.T) {
+	r := newRing(512)
+	if ok, notify := r.WriteNotify(TypeLog, []byte("een")); !ok || !notify {
+		t.Fatalf("eerste write: ok=%v notify=%v, wil beide true", ok, notify)
+	}
+	if ok, notify := r.WriteNotify(TypeLog, []byte("twee")); !ok || notify {
+		t.Fatalf("tweede write zonder drain: ok=%v notify=%v, wil true/false", ok, notify)
+	}
+	buf := make([]byte, 512)
+	for range 2 {
+		if _, _, ok := r.ReadInto(buf); !ok {
+			t.Fatal("record ontbreekt")
+		}
+	}
+	if ok, notify := r.WriteNotify(TypeLog, []byte("drie")); !ok || !notify {
+		t.Fatalf("write na volledige drain: ok=%v notify=%v, wil beide true", ok, notify)
+	}
+}
+
+func TestNewBezitBacking(t *testing.T) {
+	r := New(513)
+	if r.keep == nil || r.size != 520 {
+		t.Fatalf("New: backing=%v size=%d, wil backing en 520", r.keep != nil, r.size)
+	}
+	if !r.Write(TypeLog, []byte("lokaal")) {
+		t.Fatal("lokale ring weigert write")
+	}
+	buf := make([]byte, 32)
+	if _, n, ok := r.ReadInto(buf); !ok || string(buf[:n]) != "lokaal" {
+		t.Fatalf("lokale roundtrip: n=%d ok=%v data=%q", n, ok, buf[:n])
+	}
+}
+
 func TestFIFOEnTypes(t *testing.T) {
 	r := newRing(512)
 	types := []uint32{TypeLog, TypeRPCReq, TypeRPCResp, TypeFrame}

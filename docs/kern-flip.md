@@ -65,9 +65,14 @@ De architectuur heeft het zware werk al gedaan:
 - **Alle app-staat woont in de partitie** (ABI-staart: control page, ringen,
   koppen) — die overleeft een kern-wissel per definitie.
 - **Apps draaien door zonder HOP**: yields/parks worden op de app-core zelf
-  afgehandeld, de heartbeat is app-zijdig, hop-ABI-RPC's hebben een timeout.
+  afgehandeld, de heartbeat is app-zijdig, system calls (sinds slot-ABI 6 over
+  het slot-LAN naar `10.100.0.1:10100`) hebben een timeout.
   De enige koppeling is `hopswitch.loop()` (frames), en dat gat overbruggen
   TCP-peers met retransmits. Gat-budget: seconden.
+- **Open punt: de flip controleert de slot-ABI van bewoners niet.** Een
+  bewoner van vóór ABI 6 praat na de wissel tegen een mailbox die geen data-
+  RPC meer beantwoordt (elke call loopt in zijn timeout) — stop zo'n app vóór
+  de flip, of laat de handoff de geplaatste ABI dragen en `AdoptSlots` weigeren.
 - **Netboot is 01-09 gesloopt** — pakket en al, inclusief het sign-gereedschap.
   Het deed hetzelfde als de flip maar primitiever, en twee mechanismen voor één
   ding is er één te veel. De fetch is nu een kleine sha256-gecontroleerde GET

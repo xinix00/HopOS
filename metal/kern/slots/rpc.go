@@ -121,10 +121,13 @@ func ok(req hopabi.Req, size uint64, data []byte) []byte {
 }
 
 // listResp bouwt de respons van een List-op (fs én store): namen gejoind met
-// "\n", begrensd op één ring-record — zonder cap wedget een grote dir de
-// servicer permanent (de write-lus herprobeert eeuwig). Geen paginatie in de
-// ABI, dus: te groot → nette fout i.p.v. hang.
+// "\n" en begrensd op de opgegeven transportlimiet. Geen paginatie in de ABI,
+// dus: te groot → nette fout in plaats van een onbegrensde allocatie.
 func listResp(req hopabi.Req, names []string) []byte {
+	return listRespLimit(req, names, hopabi.MaxChunk)
+}
+
+func listRespLimit(req hopabi.Req, names []string, maxChunk int) []byte {
 	// Eerst begrenzen, dan pas alloceren. Namen zijn al opslagstate; een te
 	// grote directory mag daar niet nog een even grote tijdelijke Join-buffer
 	// naast zetten om vervolgens alleen een fout terug te sturen.
@@ -134,8 +137,8 @@ func listResp(req hopabi.Req, names []string) []byte {
 		if i > 0 {
 			separator = 1
 		}
-		if len(name) > hopabi.MaxChunk-total-separator {
-			return fail(req, fmt.Errorf("list %q: more than max %d bytes (too many entries)", req.Path, hopabi.MaxChunk))
+		if len(name) > maxChunk-total-separator {
+			return fail(req, fmt.Errorf("list %q: more than max %d bytes (too many entries)", req.Path, maxChunk))
 		}
 		total += separator + len(name)
 	}
@@ -150,7 +153,7 @@ func listResp(req hopabi.Req, names []string) []byte {
 }
 
 // handle voert één hop-ABI-request uit (aangeroepen door de servicer-lus).
-func (s *servicer) handle(payload []byte) []byte {
+func (s *servicer) handleWithLimit(payload []byte, maxChunk int) []byte {
 	req, err := hopabi.DecodeReq(payload)
 	if err != nil {
 		return hopabi.EncodeResp(hopabi.Resp{Status: hopabi.StatusError, Data: []byte(err.Error())})
@@ -178,8 +181,8 @@ func (s *servicer) handle(payload []byte) []byte {
 			return fail(req, err)
 		}
 		n := req.N
-		if n > hopabi.MaxChunk {
-			n = hopabi.MaxChunk
+		if n > uint64(maxChunk) {
+			n = uint64(maxChunk)
 		}
 		buf := make([]byte, n)
 		read, err := fsys.ReadAt(rp, req.Off, buf)
@@ -193,8 +196,8 @@ func (s *servicer) handle(payload []byte) []byte {
 		if err != nil {
 			return fail(req, err)
 		}
-		if len(req.Data) > hopabi.MaxChunk {
-			return fail(req, fmt.Errorf("write %d > max %d", len(req.Data), hopabi.MaxChunk))
+		if len(req.Data) > maxChunk {
+			return fail(req, fmt.Errorf("write %d > max %d", len(req.Data), maxChunk))
 		}
 		if err := fsys.WriteAt(rp, req.Off, req.Data); err != nil {
 			return fail(req, err)
@@ -207,9 +210,9 @@ func (s *servicer) handle(payload []byte) []byte {
 			return fail(req, err)
 		}
 		// Een naam bevat minstens één byte; met de scheidende newlines passen
-		// daarom nooit meer dan (MaxChunk+1)/2 namen. Begrens de hopfs-lijst op
+		// daarom nooit meer dan (maxChunk+1)/2 namen. Begrens de hopfs-lijst op
 		// dat aantal; listResp hieronder blijft de enige byte-/serialisatiegrens.
-		const maxListNames = (hopabi.MaxChunk + 1) / 2
+		maxListNames := (maxChunk + 1) / 2
 		names, truncated, err := fsys.ListN(rp, maxListNames)
 		if err != nil {
 			return fail(req, err)
@@ -217,7 +220,7 @@ func (s *servicer) handle(payload []byte) []byte {
 		if truncated {
 			return fail(req, fmt.Errorf("list %q: too many entries for one response", req.Path))
 		}
-		return listResp(req, names)
+		return listRespLimit(req, names, maxChunk)
 
 	case hopabi.OpRemove:
 		rp, err := s.resolve(req.Path)
@@ -256,15 +259,4 @@ func (s *servicer) handle(payload []byte) []byte {
 		return s.storeDrop(req)
 	}
 	return fail(req, fmt.Errorf("onbekende op %d", req.Op))
-}
-
-// oversizeResp bouwt een korte foutrespons als een handler-respons nooit in de
-// inbox-ring past — het vangnet dat de servicer-write-lus niet eeuwig laat
-// spinnen (Seq/Op uit het request zodat de app-kant kan correleren).
-func oversizeResp(reqPayload []byte) []byte {
-	req, _ := hopabi.DecodeReq(reqPayload)
-	return hopabi.EncodeResp(hopabi.Resp{
-		Op: req.Op, Status: hopabi.StatusError, Seq: req.Seq,
-		Data: []byte("respons te groot voor de ring"),
-	})
 }

@@ -1,82 +1,93 @@
-// Host-tests voor de gateway-poort (gateway.go): frames naar 10.100.0.1
-// gaan de interne NIC in (niet de masquerade), extern verkeer blijft
-// masqueraden, ARP-replies voor de gateway-MAC bereiken de interne NIC, en
-// verkeer van de interne NIC terug wordt gewoon op dst-MAC bezorgd.
+// Host-tests voor HOP als LAN-poort 0: dezelfde SPSC-ringen als app-poorten,
+// geen heap-backed gatewayqueue en geen synchrone teruglus in de switchlock.
 package hopswitch
 
 import (
 	"bytes"
-	"encoding/binary"
 	"testing"
-	"time"
 
 	"github.com/xinix00/HopOS/metal/abi/layout"
+	"github.com/xinix00/HopOS/metal/abi/ring"
 )
 
-// captureGateway registreert een vangnet-gatewayRx en geeft de vangst terug.
-func captureGateway(t *testing.T) *[][]byte {
+func testHostPort(t *testing.T) *hostDevice {
 	t.Helper()
-	var got [][]byte
-	SetGatewayRx(func(p []byte) { got = append(got, append([]byte(nil), p...)) })
-	t.Cleanup(func() { SetGatewayRx(nil) })
-	return &got
+	txMem := testDeviceMemory(t, 64<<10)
+	rxMem := testDeviceMemory(t, 64<<10)
+	txBase, rxBase := testDeviceAddress(txMem), testDeviceAddress(rxMem)
+	ring.Init(txBase, 32<<10)
+	ring.Init(rxBase, 32<<10)
+	d := &hostDevice{tx: ring.Open(txBase), rx: ring.Open(rxBase)}
+	mu.Lock()
+	if len(ports) == 0 {
+		ports = make([]*port, layout.MaxSlots+1)
+	}
+	ports[0] = &port{tx: d.tx, rx: d.rx}
+	host = d
+	mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		if len(ports) > 0 && host == d {
+			ports[0], host = nil, nil
+		}
+		mu.Unlock()
+	})
+	return d
 }
 
-// forwardEnDrain doet één switch-ronde zoals switchPass dat doet: forward onder
-// mu (dáár wordt een gateway-frame alleen gequeued) en de aflevering aan de
-// interne NIC erna, búiten mu. Die scheiding ís het contract — zie gateway.go.
-func forwardEnDrain(src int, p []byte) {
+func forwardOnce(src int, p []byte) {
 	mu.Lock()
 	forward(src, p)
 	mu.Unlock()
-	drainGateway()
 }
 
-func TestGatewayIPGaatInterneNICIn(t *testing.T) {
+func receiveFrame(t *testing.T, d *hostDevice) []byte {
+	t.Helper()
+	b := make([]byte, maxFrameLen)
+	n, err := d.Receive(b)
+	if err != nil {
+		t.Fatalf("host Receive: %v", err)
+	}
+	if n == 0 {
+		return nil
+	}
+	return b[:n]
+}
+
+func TestGatewayIPGaatLANPoortNulIn(t *testing.T) {
 	resetNAT()
 	nic := setUplink(t)
 	leerGateway(t)
-	got := captureGateway(t)
+	h := testHostPort(t)
 
-	// Slot 1 → 10.100.0.1:9080 (de leader): interne NIC, géén masquerade.
 	f := mkFrame(protoTCP, hostMAC, layout.SlotMAC(1), layout.SlotIP4(1), layout.HostIP4(), 5555, 9080, nil)
-	forwardEnDrain(1, f)
-	if len(*got) != 1 {
-		t.Fatalf("interne NIC kreeg %d frames, wil 1", len(*got))
+	forwardOnce(1, f)
+	got := receiveFrame(t, h)
+	if !bytes.Equal(got, f) {
+		t.Fatalf("poort 0 kreeg %d bytes, wil het ongewijzigde frame (%d)", len(got), len(f))
 	}
 	if len(nic.sent) != 0 {
 		t.Fatal("frame voor de gateway lekte de fysieke NIC uit")
 	}
-	// Ongewijzigd bezorgd: geen NAT op dit pad.
-	if !bytes.Equal((*got)[0], f) {
-		t.Fatal("gateway-frame is onderweg herschreven — dit pad hoort NAT-vrij te zijn")
-	}
 }
 
-// De framegrens staat vóór elke forward-tak: een slot kan dus noch een
-// buurring met een record groter dan diens MTU-buffer vergiftigen, noch zo'n
-// record door de heap-backed gateway-wachtrij laten kopiëren.
-func TestIngressFramegrensVoorForwardEnGatewayKopie(t *testing.T) {
+func TestIngressFramegrensVoorLANRingen(t *testing.T) {
 	resetNAT()
 	victim := attachTestSlot(t, 2)
-	gotGateway := captureGateway(t)
+	h := testHostPort(t)
 	srcMAC, dstMAC := layout.SlotMAC(1), layout.SlotMAC(2)
 
 	exact := make([]byte, maxFrameLen)
 	copy(exact[0:6], dstMAC[:])
 	copy(exact[6:12], srcMAC[:])
-	mu.Lock()
-	forward(1, exact)
-	mu.Unlock()
+	forwardOnce(1, exact)
 	buf := make([]byte, maxFrameLen)
 	if n, err := victim.Receive(buf); err != nil || n != maxFrameLen {
 		t.Fatalf("frame op de grens: n=%d err=%v, wil %d", n, err, maxFrameLen)
 	}
 
 	oversized := append(append([]byte(nil), exact...), 0)
-	mu.Lock()
-	forward(1, oversized)
-	mu.Unlock()
+	forwardOnce(1, oversized)
 	if n, err := victim.Receive(buf); err != nil || n != 0 {
 		t.Fatalf("oversized frame bereikte buurring: n=%d err=%v", n, err)
 	}
@@ -84,20 +95,15 @@ func TestIngressFramegrensVoorForwardEnGatewayKopie(t *testing.T) {
 		t.Fatalf("oversized frame maakte buurring corrupt: %s", victim.rx.CorruptWhy())
 	}
 
-	// Dezelfde grens moet vóór gwEnqueueLocked's heap-kopie staan.
 	toGateway := mkFrame(protoTCP, hostMAC, srcMAC, layout.SlotIP4(1), layout.HostIP4(), 5555, 9080, nil)
 	toGateway = append(toGateway, make([]byte, maxFrameLen+1-len(toGateway))...)
-	forwardEnDrain(1, toGateway)
-	if len(*gotGateway) != 0 {
-		t.Fatal("oversized frame werd naar de heap-backed gateway-queue gekopieerd")
+	forwardOnce(1, toGateway)
+	if got := receiveFrame(t, h); got != nil {
+		t.Fatal("oversized frame werd in poort 0 geschreven")
 	}
 
-	// Een reject mag de ring niet vergiftigen: het eerstvolgende gewone frame
-	// moet nog steeds door dezelfde poort kunnen.
 	small := exact[:ethLen]
-	mu.Lock()
-	forward(1, small)
-	mu.Unlock()
+	forwardOnce(1, small)
 	if n, err := victim.Receive(buf); err != nil || n != len(small) {
 		t.Fatalf("ring werkte niet meer na reject: n=%d err=%v", n, err)
 	}
@@ -107,157 +113,95 @@ func TestExternBlijftMasquerade(t *testing.T) {
 	resetNAT()
 	nic := setUplink(t)
 	leerGateway(t)
-	got := captureGateway(t)
-
+	h := testHostPort(t)
 	f := mkFrame(protoTCP, hostMAC, layout.SlotMAC(1), layout.SlotIP4(1), extIP, 5555, 443, nil)
-	forwardEnDrain(1, f)
-	if len(*got) != 0 {
-		t.Fatal("extern verkeer belandde op de interne NIC")
+	forwardOnce(1, f)
+	if got := receiveFrame(t, h); got != nil {
+		t.Fatal("extern verkeer belandde op poort 0")
 	}
 	if len(nic.sent) != 1 {
 		t.Fatalf("extern verkeer niet gemasqueradeerd (%d frames op de NIC)", len(nic.sent))
 	}
 }
 
-func TestArpReplyBereiktInterneNIC(t *testing.T) {
+func TestHostPoortAntwoordWordtInDezelfdeSwitchrondeBezorgd(t *testing.T) {
 	resetNAT()
-	setUplink(t)
-	got := captureGateway(t)
-
-	// Een ARP-reply (unicast naar de gateway-MAC) — het antwoord op een
-	// who-has van de interne NIC. Geen IPv4, dus vroeger "viel dit weg".
-	var f [42]byte
-	copy(f[0:6], hostMAC[:])
-	m := layout.SlotMAC(3)
-	copy(f[6:12], m[:])
-	f[12], f[13] = 0x08, 0x06
-	a := f[ethLen:]
-	a[0], a[1], a[2], a[3], a[4], a[5], a[7] = 0, 1, 8, 0, 6, 4, 2 // eth/IPv4, oper=reply
-	copy(a[8:14], m[:])
-	binary.BigEndian.PutUint32(a[14:], layout.SlotIP4(3))
-	copy(a[18:24], hostMAC[:])
-	binary.BigEndian.PutUint32(a[24:], layout.HostIP4())
-
-	forwardEnDrain(3, f[:])
-	if len(*got) != 1 {
-		t.Fatalf("ARP-reply bereikte de interne NIC niet (%d frames)", len(*got))
-	}
-}
-
-// De teruglus-regressie: gvisor antwoordt SYNCHROON binnen InjectInbound (een
-// SYN naar een gesloten node-poort levert direct een RST), en dat antwoord komt
-// via internalTx.WriteNotify → FromGateway de switch weer in — op dezelfde
-// goroutine. Werd gatewayRx onder mu aangeroepen, dan pakte FromGateway
-// diezelfde niet-reentrante mutex en stond de switch permanent stil: één SYN van
-// een willekeurige app naar een dichte poort velde het netwerk van de hele node.
-// Deze test bootst precies die teruglus na (de echte gvisor-stack past niet in
-// een host-test) en moet gewoon aflopen.
-func TestGatewayTeruglusDeadlocktNiet(t *testing.T) {
-	resetNAT()
-	setUplink(t)
-	leerGateway(t)
+	h := testHostPort(t)
 	read := testSlotRing(t, 1)
-	mu.Lock()
-	up = true // FromGateway eist een draaiende switch
-	mu.Unlock()
-	t.Cleanup(func() { mu.Lock(); up = false; mu.Unlock() })
-
-	// De "stack": elk ontvangen frame lokt onmiddellijk een antwoord uit dat
-	// terug de switch in gaat — zoals een RST op een gesloten poort.
-	var beantwoord int
-	SetGatewayRx(func(p []byte) {
-		beantwoord++
-		rst := mkFrame(protoTCP, layout.SlotMAC(1), hostMAC, layout.HostIP4(), layout.SlotIP4(1), 9080, 5555, nil)
-		FromGateway(rst) // ← dit pakte vroeger mu terwijl switchPass hem vasthield
-	})
-	t.Cleanup(func() { SetGatewayRx(nil) })
-
-	// Slot 1 → 10.100.0.1:9080 (dichte poort): de switch-ronde moet aflopen.
-	f := mkFrame(protoTCP, hostMAC, layout.SlotMAC(1), layout.SlotIP4(1), layout.HostIP4(), 5555, 9080, nil)
-	klaar := make(chan struct{})
-	go func() {
-		defer close(klaar)
-		forwardEnDrain(1, f)
-	}()
-	select {
-	case <-klaar:
-	case <-time.After(5 * time.Second):
-		t.Fatal("switch-ronde liep vast op de gateway-teruglus (deadlock)")
+	f := mkFrame(protoTCP, layout.SlotMAC(1), hostMAC, layout.HostIP4(), layout.SlotIP4(1), 9080, 5555, []byte("hoi"))
+	if err := h.Transmit(f); err != nil {
+		t.Fatal(err)
 	}
-	if beantwoord != 1 {
-		t.Fatalf("interne NIC kreeg %d frames, wil 1", beantwoord)
+	buf := make([]byte, layout.NetRingDataCap)
+	if !switchPass(buf) {
+		t.Fatal("switch zag poort-0-frame niet")
 	}
-	if got := read(); got == nil {
-		t.Fatal("het antwoord van de interne NIC kwam niet in de ring van slot 1")
+	if got := read(); !bytes.Equal(got, f) {
+		t.Fatalf("antwoord beschadigd: got=%x want=%x", got, f)
 	}
 }
 
-func TestFromGatewayBezorgtOpSlot(t *testing.T) {
+func TestRXWakeAlleenOpLeegNaarNietLeeg(t *testing.T) {
 	resetNAT()
 	read := testSlotRing(t, 2)
 	mu.Lock()
-	up = true // FromGateway eist een draaiende switch
-	mu.Unlock()
-	t.Cleanup(func() { mu.Lock(); up = false; mu.Unlock() })
-
-	// Antwoord van de interne NIC (leader → app in slot 2).
-	f := mkFrame(protoTCP, layout.SlotMAC(2), hostMAC, layout.HostIP4(), layout.SlotIP4(2), 9080, 5555, []byte("hoi"))
-	FromGateway(f)
-	got := read()
-	if got == nil {
-		t.Fatal("niets bezorgd in de ring van slot 2")
+	wakes := 0
+	rxWake = func(slot int) {
+		if slot == 2 {
+			wakes++
+		}
 	}
-	if !bytes.Equal(got, f) {
-		t.Fatal("frame beschadigd onderweg")
+	mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		rxWake = nil
+		mu.Unlock()
+	})
+
+	f := mkFrame(protoTCP, layout.SlotMAC(2), layout.SlotMAC(1), layout.SlotIP4(1), layout.SlotIP4(2), 1111, 2222, nil)
+	forwardOnce(1, f)
+	forwardOnce(1, f)
+	if wakes != 1 {
+		t.Fatalf("twee writes zonder drain gaven %d wakes, wil 1", wakes)
+	}
+	if read() == nil || read() == nil {
+		t.Fatal("frames ontbreken")
+	}
+	forwardOnce(1, f)
+	if wakes != 2 {
+		t.Fatalf("write na drain gaf totaal %d wakes, wil 2", wakes)
 	}
 }
 
-// Een slot mag zich niet als een ánder slot voordoen. Dit is de regel die
-// ARP-vergiftiging tussen buren onmogelijk maakt: zonder hem kan slot 2 een
-// ARP-reply namens slot 1 sturen en daarna diens verkeer ontvangen — en sinds
-// HOP toetsaanslagen naar de display stuurt (gui/usbin) is dat meeluisteren
-// met wat de gebruiker typt.
-func TestSlotMagGeenVreemdeBronMACGebruiken(t *testing.T) {
+func TestSwitchPendingBeltConservatiefBijLockContention(t *testing.T) {
+	mu.Lock()
+	defer mu.Unlock()
+	if !switchPending() {
+		t.Fatal("lock contention must preserve a possible producer doorbell")
+	}
+}
+
+func TestSlotMagGeenVreemdeBronMACOfIPGebruiken(t *testing.T) {
 	resetNAT()
 	setUplink(t)
 	leerGateway(t)
-	got := captureGateway(t)
+	h := testHostPort(t)
 
-	// Slot 2 stuurt een frame met de MAC én het IP van slot 1.
-	f := mkFrame(protoTCP, hostMAC, layout.SlotMAC(1), layout.SlotIP4(1), layout.HostIP4(), 5555, 9080, nil)
-	forwardEnDrain(2, f)
-	if len(*got) != 0 {
-		t.Fatalf("vervalst frame kwam tóch bij de interne NIC (%d)", len(*got))
+	vervalsteMAC := mkFrame(protoTCP, hostMAC, layout.SlotMAC(1), layout.SlotIP4(1), layout.HostIP4(), 5555, 9080, nil)
+	forwardOnce(2, vervalsteMAC)
+	if receiveFrame(t, h) != nil {
+		t.Fatal("vervalste bron-MAC kwam bij HOP")
 	}
 
-	// Hetzelfde frame vanaf zijn eigen slot gaat wél door — de regel mag geen
-	// gewoon verkeer breken.
+	vervalstIP := mkFrame(protoTCP, hostMAC, layout.SlotMAC(2), layout.SlotIP4(1), layout.HostIP4(), 5555, 9080, nil)
+	forwardOnce(2, vervalstIP)
+	if receiveFrame(t, h) != nil {
+		t.Fatal("vervalst bron-IP kwam bij HOP")
+	}
+
 	eigen := mkFrame(protoTCP, hostMAC, layout.SlotMAC(1), layout.SlotIP4(1), layout.HostIP4(), 5555, 9080, nil)
-	forwardEnDrain(1, eigen)
-	if len(*got) != 1 {
-		t.Fatalf("eigen frame kwam niet aan (%d)", len(*got))
-	}
-}
-
-// Slot-naar-slot loopt langs dezelfde controle: een vervalst frame bereikt de
-// ring van het doelslot niet.
-func TestVervalstFrameBereiktBuurslotNiet(t *testing.T) {
-	resetNAT()
-	lees2 := testSlotRing(t, 2)
-
-	f := mkFrame(protoTCP, layout.SlotMAC(2), layout.SlotMAC(1), layout.SlotIP4(1), layout.SlotIP4(2), 1234, 80, nil)
-	mu.Lock()
-	forward(3, f) // slot 3 doet alsof hij slot 1 is
-	mu.Unlock()
-	if got := lees2(); got != nil {
-		t.Fatal("buurslot kreeg een vervalst frame")
-	}
-
-	// Vanaf slot 1 zelf komt hij wél aan.
-	mu.Lock()
-	forward(1, f)
-	mu.Unlock()
-	if got := lees2(); got == nil {
-		t.Fatal("echt frame kwam niet bij het buurslot aan")
+	forwardOnce(1, eigen)
+	if got := receiveFrame(t, h); !bytes.Equal(got, eigen) {
+		t.Fatal("eigen frame kwam niet aan")
 	}
 }

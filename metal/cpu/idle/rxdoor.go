@@ -49,6 +49,8 @@ var (
 	rxStatus atomic.Pointer[func() (uint64, bool)] // head + pending van de RX-ring
 	rxDoorPA atomic.Uintptr                        // CtrlRXDoor op de eigen control-page
 	rxPumpG  atomic.Uint64                         // g-pointer van de slapende RX-pomp
+	work     atomic.Pointer[func() bool]           // HOP: gedeeld werk achter een doorbell
+	workWake atomic.Pointer[func()]                // maakt HOP's lokale pomp runnable
 )
 
 // WatchRXRing hangt de doorbell aan: door is het CtrlRXDoor-woord van de
@@ -62,6 +64,47 @@ func WatchRXRing(door uintptr, status func() (uint64, bool)) {
 // RXPumpG registreert de goroutine van de RX-pomp als wek-doel; aanroepen op
 // de pomp-goroutine zelf, vóór zijn eerste slaap (runtime.GetG geeft de gp).
 func RXPumpG(gp uint) { rxPumpG.Store(uint64(gp)) }
+
+// WatchWork is de HOP-variant van hetzelfde level-triggered contract. Een
+// producer doet dev.Notify na leeg→niet-leeg; zodra het event de idle core
+// wekt, kijkt de governor naar status en belt hij de lokale pomp. Die bel is
+// bewust een callback: de HOP-pomp wacht op een Go-kanaal, niet op de
+// time.Sleep-timer waarvoor runtime.WakeSleeper bedoeld is. Apps registreren
+// hier niets; hun RX gebruikt de control-pagevariant boven.
+func WatchWork(status func() bool, wake func()) {
+	workWake.Store(&wake)
+	work.Store(&status)
+}
+
+func workDoor() bool {
+	f := work.Load()
+	if f == nil {
+		return false
+	}
+	// Wekken is hier "een goroutine runnable maken" (kanaal-send, en ook de
+	// mutex-Unlock in status met wachters), en dat mag alleen in de idle van
+	// de scheduler zelf: P vast, geen lock2 in gang. De hook draait óók vanuit
+	// semasleep — een M zonder P, of een mutex-wachter — en dan sloopt
+	// ready/wakep de scheduler: runqput op een nil-P (gemeten 03-09, de eerste
+	// WakeSleeper), of een tweede slaap op dezelfde m.mWaitList. Het werk
+	// blijft dan liggen tot de volgende echte idle-ronde of de failsafe van de
+	// switch (hopswitch.loop); rxDoor hoeft dit niet — WakeSleeper is per
+	// ontwerp vanaf elke M veilig.
+	if !runtime.IdleMayReady() {
+		return false
+	}
+	if !(*f)() {
+		return false
+	}
+	wake := workWake.Load()
+	if wake == nil {
+		WorkWakeFailed.Add(1)
+		return false
+	}
+	(*wake)()
+	WorkWoken.Add(1)
+	return true
+}
 
 // rxDoor is de eerste stap van élke governor-ronde. Niets te doen → drempel
 // wapenen en false (ga gewoon slapen; de peek waakt). Wel iets → drempel
@@ -98,3 +141,5 @@ func rxDoor() bool {
 // geregistreerde pomp, gelukte en mislukte wekpogingen (WakeSleeper: mislukt =
 // de pomp sliep net niet). Een app kan ze tonen (vitals).
 var DoorNoPump, DoorWoken, DoorWakeFailed atomic.Uint64
+
+var WorkWoken, WorkWakeFailed atomic.Uint64

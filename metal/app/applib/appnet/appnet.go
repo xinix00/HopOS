@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	"github.com/xinix00/HopOS/metal/abi/ring"
+	"github.com/xinix00/HopOS/metal/dev"
 )
 
 // nic is het netdev.Device over de eigen frame-ringen.
@@ -47,6 +48,9 @@ func (n *nic) Receive(buf []byte) (int, error) {
 func (n *nic) Transmit(buf []byte) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.tx.Write(ring.TypeFrame, buf)
+	_, notify := n.tx.WriteNotify(ring.TypeFrame, buf)
+	if notify {
+		dev.Notify()
+	}
 	return nil
 }

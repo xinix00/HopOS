@@ -26,6 +26,7 @@ import (
 	"io"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xinix00/HopOS/metal/abi/layout"
@@ -36,23 +37,23 @@ import (
 	"github.com/xinix00/HopOS/metal/net/hopswitch"
 )
 
-// Eén servicer per slot: de outbox is SPSC, dus er mag nooit meer dan één
-// consumer leven. De servicer draint logs (TypeLog) én bedient hop-ABI-RPC's
-// (TypeRPCReq → fs/fetch → TypeRPCResp op de inbox). Start verdringt de oude
-// servicer synchroon vóór de ringen opnieuw geïnitialiseerd worden — anders
-// kan bij een snelle Stop→Start een oude naast de nieuwe blijven lezen (twee
-// schrijvers op tail). Alles draait op de HOP-kern: Go-synchronisatie volstaat.
+// Eén servicer per slot: hij bezit de app-identiteit, storagegrenzen en de
+// bootstrap-/crashlog-outbox. Gewone calls komen via system.go over het LAN
+// bij hetzelfde object uit. Start verdringt de oude servicer synchroon vóór
+// ringen en IP opnieuw bruikbaar zijn; zo kan een oude lifecycle nooit bij de
+// mounts van zijn opvolger komen.
 type servicer struct {
 	slot int
 	stop chan struct{} // gesloten: servicer moet weg
 	done chan struct{} // gesloten zodra de servicer weg is
 
-	sawLive   bool        // ctx ooit levend gezien (dan is niet-levend = einde)
-	idleStart time.Time   // eerste lege pass zonder levende ctx (start-gratie)
-	logs      chan string // logregels (drop bij trage lezer)
-	root      string      // eigen (lege) hopfs-root van deze task
-	job       string      // job-naam = de store-naamruimte ("" = geen store)
-	mounts    [][2]string // {local, shared}, langste local eerst
+	sawLive   bool         // ctx ooit levend gezien (dan is niet-levend = einde)
+	idleStart time.Time    // eerste lege pass zonder levende ctx (start-gratie)
+	logs      chan string  // logregels (drop bij trage lezer)
+	root      string       // eigen (lege) hopfs-root van deze task
+	job       string       // job-naam = de store-naamruimte ("" = geen store)
+	mounts    [][2]string  // {local, shared}, langste local eerst
+	sysConns  atomic.Int32 // open system-callverbindingen (system.go, cap maxSystemConns)
 
 	// De levenslijn van de store-ops (storage.go): evict cancelt hem, zodat
 	// een servicer die minutenlang in een S3-transfer hangt een Stop→Start
@@ -352,7 +353,6 @@ func (s *servicer) run() {
 		return
 	}
 	out := ring.Open(layout.RingOutboxAt(ram, ramSize))
-	in := ring.Open(layout.RingInboxAt(ram, ramSize))
 	// Eén hergebruikte leesbuffer i.p.v. een allocatie per record: de payload
 	// wordt synchroon verwerkt (log → string-kopie; RPC → handle retourneert
 	// vóór de volgende lees), dus hergebruik is veilig.
@@ -412,30 +412,7 @@ func (s *servicer) run() {
 			// (30-07: de apploader meldde netjes waarom hij stopte en niemand kon
 			// het terugvinden). Onder diagMu, want de lifecycle leest en wist dit
 			// veld terwijl deze servicer erin schrijft.
-			line := string(p)
-			diagMu.Lock()
-			lastLog[s.slot] = line
-			diagMu.Unlock()
-			select {
-			case s.logs <- line:
-			default:
-			}
-		case ring.TypeRPCReq:
-			resp := s.handle(p)
-			if !in.Fits(len(resp)) {
-				// Een respons die nooit in de ring past zou de schrijf-lus
-				// hieronder eeuwig laten spinnen (Write weigert 'm blijvend,
-				// niet tijdelijk). Handlers begrenzen hun data al; dit is het
-				// vangnet dat ook toekomstige ops afdekt.
-				resp = oversizeResp(p)
-			}
-			for !in.Write(ring.TypeRPCResp, resp) {
-				select {
-				case <-s.stop:
-					return
-				case <-time.After(time.Millisecond):
-				}
-			}
+			s.recordLog(string(p))
 		}
 	}
 }
