@@ -18,3 +18,8 @@ TEXT ·elrEL1(SB),NOSPLIT,$0-8
 	WORD	$0xd5384020	// mrs x0, elr_el1
 	MOVD	R0, ret+0(FP)
 	RET
+
+TEXT ·mpidrEL1(SB),NOSPLIT,$0-8
+	WORD	$0xd53800a0	// mrs x0, mpidr_el1
+	MOVD	R0, ret+0(FP)
+	RET

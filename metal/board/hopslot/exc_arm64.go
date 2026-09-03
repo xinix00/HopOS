@@ -4,10 +4,11 @@ package hopslot
 
 import "github.com/usbarmory/tamago/arm64"
 
-// esrEL1/farEL1/elrEL1: zie exc_arm64.s.
+// esrEL1/farEL1/elrEL1/mpidrEL1: zie exc_arm64.s.
 func esrEL1() uint64
 func farEL1() uint64
 func elrEL1() uint64
+func mpidrEL1() uint64
 
 // reportException is wat een gekooide app bij een EL1-exception meldt vóór
 // tamago hem afmaakt: ESR, FAR en ELR. Zonder dit is élke exception "EL1
@@ -18,6 +19,9 @@ func elrEL1() uint64
 // exception.
 func reportException(pc uintptr) {
 	esr, far, elr := esrEL1(), farEL1(), elrEL1()
-	print("EL1 exception: esr=", esr, " ec=", esr>>26, " far=", far, " elr=", elr, " pc=", pc, "\n")
+	// Welke core: een SMP-app heeft er twee, en "de eerste goroutine op het
+	// tweede hart" is een ander verhaal dan een fout op het eerste (M4, 02-09).
+	aff := mpidrEL1() & 0xFFFFFF
+	print("EL1 exception: esr=", esr, " ec=", esr>>26, " far=", far, " elr=", elr, " pc=", pc, " core=", aff, "\n")
 	arm64.DefaultExceptionHandler(pc)
 }

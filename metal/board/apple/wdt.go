@@ -141,6 +141,22 @@ func WDTPet() {
 // WDTPetEvery is de cadans die bij bovenstaande timeout hoort.
 func WDTPetEvery() time.Duration { return wdtPetEvery }
 
+// WDTReboot laat de watchdog NU afgaan: alarm op één tik, teller op nul,
+// reset-bit aan — m1n1's wdt_reboot, en de hardware-helft van hopos.reboot=1.
+// Keert niet terug; blijft er tóch iets over, dan zegt de aanroeper dat.
+func WDTReboot() {
+	base := ADTReg("/arm-io/wdt", 0)
+	if base == 0 {
+		return
+	}
+	dev.Write32(uintptr(base)+wdtAlarm, 1)
+	dev.Write32(uintptr(base)+wdtCount, 0)
+	dev.Write32(uintptr(base)+wdtCtl, wdtCtlReset)
+	dev.MB()
+	for {
+	}
+}
+
 // WDTDisable is WDTQuiet onder de naam die het beleid kent: de uitweg voor
 // bring-up (hopos.wd=off). Een bevroren node die blijft stáán is te
 // onderzoeken, een node die reset-cyclet niet.

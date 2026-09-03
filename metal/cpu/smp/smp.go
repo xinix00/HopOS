@@ -29,6 +29,7 @@ import (
 
 	"github.com/xinix00/HopOS/metal/abi/layout"
 	"github.com/xinix00/HopOS/metal/cpu/el2"
+	"github.com/xinix00/HopOS/metal/cpu/idle"
 	"github.com/xinix00/HopOS/metal/dev"
 )
 
@@ -73,6 +74,15 @@ func writeHandoff(cp uintptr, sp, mp, gp, fn unsafe.Pointer, stub uint64) {
 	dev.Write64(cp+layout.CtrlSMPTcr, regime.tcr)
 	dev.Write64(cp+layout.CtrlSMPMair, regime.mair)
 	dev.Write64(cp+layout.CtrlSMPVbar, regime.vbar)
+	// Naar DRAM, niet alleen naar onze cache: de lezer is de EL2-trampoline
+	// van de nieuwe core, en die leest met de MMU UIT — dus langs élke cache
+	// heen. Een cacheable store van deze core is voor een andere core
+	// coherent, maar niet voor een niet-cacheable lees; op QEMU (geen
+	// cachemodel) viel dat nooit op, op de M4 leest de tweede core dan de
+	// vorige inhoud van de page: garbage als sp/g0/ttbr0 (02-09). Eén veeg
+	// over het hele SMP-venster van de control-page (0x40..0xFF: Vbar op
+	// 0x78, Sp..Ttbr0 op 0x88..0xB0, Tcr 0xD8, Mair 0xF8).
+	dev.CleanInv(cp+0x40, 0xC0)
 }
 
 // Configure wired de goos.Task-hook en zet GOMAXPROCS op het aantal cores.
@@ -110,6 +120,10 @@ func Configure(prim, cores int, ctrl uintptr) {
 	// (CNTKCTL_EL1); daarmee wekt zijn WFE net zo goed.
 	goos.Task = task
 	runtime.GOMAXPROCS(cores)
+	// De idle-governor mag een core nu hoogstens één ms laten slapen: op EL2
+	// is hij voor de runtime onbereikbaar, en met een tweede core is er
+	// iemand die op hem wacht (idle.wakeAt).
+	idle.MultiCore(true)
 }
 
 // task is de goos.Task-hook: de runtime roept 'm aan (vanuit newosproc) als hij

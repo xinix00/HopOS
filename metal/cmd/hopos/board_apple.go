@@ -85,6 +85,7 @@ func init() {
 		Arm:      apple.WDTArm,
 		Pet:      apple.WDTPet,
 		PetEvery: apple.WDTPetEvery(),
+		Reboot:   apple.WDTReboot,
 	}
 
 	// De klokwachter: meldt alleen wanneer een cluster van p-state verandert.

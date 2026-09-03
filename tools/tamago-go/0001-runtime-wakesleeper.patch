@@ -1,0 +1,56 @@
+# runtime.WakeSleeper — de SMP-veilige bel voor de RX-pomp (metal/cpu/idle/rxdoor.go).
+# Toepassen in de tamago-go-fork: cd ~/tamago-go && git apply <dit bestand>
+# De runtime wordt per build uit $GOROOT/src gecompileerd, de toolchain hoeft niet opnieuw.
+diff --git a/src/runtime/wakesleeper_tamago.go b/src/runtime/wakesleeper_tamago.go
+new file mode 100644
+index 00000000..535fa18d
+--- /dev/null
++++ b/src/runtime/wakesleeper_tamago.go
+@@ -0,0 +1,47 @@
++// Copyright 2026 HopOS. Same license as the Go runtime.
++
++//go:build tamago
++
++package runtime
++
++import "unsafe"
++
++// WakeSleeper makes gp's pending time.Sleep expire now. It is the lock-correct
++// form of WakeG: the same effect (the goroutine's cached sleep timer fires at
++// the owning P's next timer check), but through the timer's own lock, so it
++// is safe from any M — an idle hook (goos.Idle) on a second core while the
++// first one runs the scheduler, or an M that has released its P (semasleep
++// during a stop-the-world). WakeG rewrites the heap without locks, which is
++// fine on the single core tamago was designed for and corrupts the heap on
++// two (a heaped timer without a heap, measured on Apple M4, 2026-09-03); a
++// goready-based wake needs a P and the semasleep caller has none.
++//
++// Reports whether a sleep was pending. Not pending — no timer yet, already
++// fired (when == 0), or stopped (zombie) — means gp is not parked in a sleep,
++// and then nothing is touched: readying a goroutine that is not waiting is
++// fatal, and a sleep that has parked but not yet armed its timer
++// (resetForSleep) is simply woken by a later call.
++func WakeSleeper(gp uint) bool {
++	gp0 := (*g)(unsafe.Pointer(uintptr(gp)))
++	t := gp0.timer
++	if t == nil {
++		return false
++	}
++	t.lock()
++	if t.state&timerHeaped == 0 || t.state&timerZombie != 0 || t.when == 0 {
++		t.unlock()
++		return false
++	}
++	// The heaped branch of (*timer).modify, with when = 1: mark modified and
++	// lower the heap's minWhenModified so adjust re-sorts and run fires it.
++	t.when = 1
++	t.state |= timerModified
++	if min := t.ts.minWhenModified.Load(); min == 0 || min > 1 {
++		// Force timerModified out to t.astate before updating
++		// minWhenModified, to synchronize with ts.adjust (see modify).
++		t.astate.Store(t.state)
++		t.ts.updateMinWhenModified(1)
++	}
++	t.unlock()
++	return true
++}

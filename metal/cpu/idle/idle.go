@@ -118,8 +118,28 @@ func wakeAt(pollUntil int64) uint64 {
 	if d <= 0 {
 		return 0
 	}
-	return counterNow() + uint64(d)*CounterHz()/1_000_000_000
+	at := counterNow() + uint64(d)*CounterHz()/1_000_000_000
+	// Een SMP-app: hoogstens één milliseconde weg. Een core die op EL2 slaapt
+	// is voor de Go-runtime onbereikbaar — geen stop-the-world, geen
+	// preemptie, geen wakep komt daar aan — en met twee cores wacht de ander
+	// dan op hem. Op één core kan dat niet (er is niemand om op te wachten),
+	// op twee hing de app (M4, 03-09: de eerste core sliep met een wektijd van
+	// minuten omdat zijn P geen nabije timers had, de tweede stond op 100% in
+	// de STW-wacht). Eén ms is de cadans van de wekker en van de event-stream:
+	// de runtime kijkt dan elke ms weer, en de core slaapt ertussen écht.
+	if multiCore.Load() {
+		if cap := counterNow() + CounterHz()/1000; at > cap {
+			at = cap
+		}
+	}
+	return at
 }
+
+// multiCore: deze app draait op meer dan één core (cpu/smp.Configure zet hem).
+var multiCore atomic.Bool
+
+// MultiCore meldt de governor dat de app SMP is; zie wakeAt.
+func MultiCore(on bool) { multiCore.Store(on) }
 
 // Publish laat de teller vanaf nu óók op addr landen — het CtrlIdle-woord
 // van de eigen control-page (device-gemapt: gealigneerde 64-bit store, door

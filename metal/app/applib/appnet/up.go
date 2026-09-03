@@ -84,7 +84,7 @@ func Up(a *applib.App) (string, error) {
 	// bepaalt rxPoll (default = de vaste 300µs die hier altijd stond) — maar
 	// de slaap is sinds de doorbell een BODEM, geen latency meer: de
 	// idle-governor wapent een wek-drempel op de control-page en wekt deze
-	// goroutine (runtime.Wake) zodra de switcher of een eigen idle-ronde
+	// goroutine (runtime.WakeSleeper) zodra de switcher of een eigen idle-ronde
 	// verkeer ziet (idle/rxdoor.go). De cap mag dus groot.
 	idle.WatchRXRing(
 		layout.CtrlPageAt(a.RAMStart, a.RAMSize)+layout.CtrlRXDoor,

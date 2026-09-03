@@ -66,6 +66,34 @@ type wdHardware struct {
 	// eronder (cadans + probe-timeout van 3s moet er comfortabel in passen),
 	// niet zó strak dat één trage probe al een reset is.
 	PetEvery time.Duration
+	// Reboot laat de hardware NU resetten (optioneel): de weg van
+	// hopos.reboot=1. Ontbreekt hij, dan wapent rebootNow en aait niet.
+	Reboot func()
+}
+
+// rebootNow is de "CRASH-object"-knop (Derek, 02-09): een kern-flip naar een
+// image met hopos.reboot=1 is een herstart-verzoek op afstand — de geflipte
+// kern doet niets anders dan de watchdog laten afgaan, en de node komt schoon
+// terug in zijn geïnstalleerde image. Voor een meetbank zonder iemand bij de
+// knop; het enige wat een flip anders niet kan is een core die vast staat
+// weer vrij krijgen.
+func rebootNow() {
+	if nodeWDT == nil {
+		fmt.Println("hopos.reboot=1 but this board wires no hardware watchdog — cannot reboot, continuing HOPOS_REBOOT_UNAVAILABLE")
+		return
+	}
+	if nodeWDT.Reboot != nil {
+		fmt.Println("hopos.reboot=1: resetting the node via the watchdog NOW HOPOS_REBOOT")
+		nodeWDT.Reboot()
+	} else if desc, ok := nodeWDT.Arm(); ok {
+		fmt.Printf("hopos.reboot=1: watchdog armed and never petted (%s) — reset follows HOPOS_REBOOT\n", desc)
+	} else {
+		fmt.Printf("hopos.reboot=1 but the watchdog refuses (%s) — continuing HOPOS_REBOOT_UNAVAILABLE\n", desc)
+		return
+	}
+	for {
+		time.Sleep(time.Second)
+	}
 }
 
 // nodeWDT wordt door de board-init gezet; main start de canary.

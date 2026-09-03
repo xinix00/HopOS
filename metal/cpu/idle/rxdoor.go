@@ -20,9 +20,14 @@ package idle
 //     (CtxRingHeadPA). Verschil = er kwam verkeer = hij is tóch due. De
 //     core zelf wordt sowieso elke ~1-2ms wakker (ARM event-stream,
 //     RISC-V SleepCap), dus dit kost geen extra wekker.
-//  3. WEKKEN (hier, zodra de ronde wél iets ziet): runtime.Wake zet de
-//     slaap-timer van de pomp-goroutine op "nu" — het primitief dat tamago
-//     voor bare-metal interrupt-handlers heeft, en dit is er precies één.
+//  3. WEKKEN (hier, zodra de ronde wél iets ziet): runtime.WakeSleeper stopt
+//     de slaap-timer van de pomp-goroutine onder de timer-lock en zet hem
+//     klaar via het gewone ready-pad. NIET runtime.Wake (tamago's WakeG):
+//     die herschrijft de timer-heap zonder lock, wat op één core klopt (de
+//     scheduler staat stil als de idle-hook draait) en op een SMP-app de
+//     heap van de andere core sloopt — een geheapte timer zonder heap,
+//     gemeten op de M4 03-09. WakeSleeper is onze toevoeging aan de
+//     tamago-go-fork (tools/tamago-go/).
 //
 // Het gewapend-teken (bit 63) is een grens, geen detail: een app die zijn
 // ring nooit leest (geen netstack) wapent nooit, dus de peek laat hem met
@@ -76,7 +81,7 @@ func rxDoor() bool {
 		return false
 	}
 	dev.Write64(door, 0) // ontwapenen: er wordt aan gewerkt
-	if gp := rxPumpG.Load(); gp != 0 && runtime.Wake(uint(gp)) {
+	if gp := rxPumpG.Load(); gp != 0 && runtime.WakeSleeper(uint(gp)) {
 		return true
 	}
 	return false

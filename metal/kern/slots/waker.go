@@ -84,7 +84,15 @@ func wakeDue(i int, now uint64) bool {
 	if t := ctxRead(i, layout.CtxWake); t == 0 || now >= t {
 		return true
 	}
-	door := ctrlRead(i, layout.CtrlRXDoor)
+	// De control-page via het ctx-blok, niet via de partitie van slot i: een
+	// secundaire core van een SMP-app heeft geen eigen partitie maar wel een
+	// ctx-blok, en daar staat de gedeelde page (dispatchSMP).
+	cp := ctxRead(i, layout.CtxCtrlPA)
+	if cp == 0 {
+		return false
+	}
+	dev.Pull(uintptr(cp)+layout.CtrlRXDoor, 8)
+	door := dev.Read64(uintptr(cp) + layout.CtrlRXDoor)
 	if door&rxArmed == 0 {
 		return false // geen netstack die de ring leest: RX is geen reden
 	}
@@ -107,4 +115,22 @@ func EL2Sleeps() uint64 {
 		n += ctxRead(i, layout.CtxSleeps)
 	}
 	return n
+}
+
+// CoreDump is de per-core-regel van de idle-meetlat (cmd/hopos idleStat):
+// per draaiende core zijn ctx-staat, EL2-slaapteller, wektijd en de
+// control-page uit het ctx-blok — genoeg om te zien wélke core niet slaapt
+// en of de wekker hem überhaupt als bewoner ziet.
+func CoreDump() string {
+	out := ""
+	now := dev.Counter()
+	for i := 1; i <= NumSlots(); i++ {
+		core := coreOf(i)
+		if !coreRunning(core) {
+			continue
+		}
+		out += fmt.Sprintf(" [core %d: state=%d sleeps=%d wake=%+d cp=%#x]", core,
+			ctxState(i), ctxRead(i, layout.CtxSleeps), int64(ctxRead(i, layout.CtxWake))-int64(now), ctxRead(i, layout.CtxCtrlPA))
+	}
+	return out
 }

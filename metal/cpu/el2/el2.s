@@ -45,6 +45,15 @@ TEXT s2tramp(SB),NOSPLIT|NOFRAME,$0
 	ADD	$16, R7, R8
 	MOVD	R8, RSP
 
+	// VPIDR/VMPIDR_EL2: wat de app op EL1 bij midr/mpidr te zien krijgt. Bij
+	// EL2-entry zijn ze architectureel UNKNOWN (op de M4 las een app 0 voor
+	// zijn tweede core, 03-09) — de Pi-boot zet ze al zo (el2Pi). Een app die
+	// zijn core meldt, zoals hopslot's exception-rapport, zegt dan de waarheid.
+	WORD	$0xd5380004	// mrs x4, midr_el1
+	WORD	$0xd51c0004	// msr vpidr_el2, x4
+	WORD	$0xd53800a4	// mrs x4, mpidr_el1
+	WORD	$0xd51c00a4	// msr vmpidr_el2, x4
+
 	// VTCR_EL2: 4KB-granule, 32-bit IPA, PS = min(PARange, 44-bit). De pool
 	// ligt op servers vér boven de oude 40-bit/1TB-aanname (Altra: het
 	// bulk-DRAM huist in dezelfde hoge regionen als de 16TB-UART — gemeten

@@ -472,7 +472,28 @@ func (s *servicer) dispatchSMP() {
 		fmt.Printf("HOPOS_SMP_DISPATCH_FAIL slot %d core %d: slot heeft geen partitie\n", s.slot, c)
 		return
 	}
-	if err := dispatchCore(c, cageSMPEntryPC(), uint64(cp)); err != nil {
+	// Het ctx-blok van de secundaire core krijgt dezelfde twee woorden als de
+	// primaire bij armSlot: de (gedeelde) control-page en het head-woord van
+	// de RX-ring. Het fault-rapport van switch.s, de doorbell-peek van de
+	// rotatie en de wekker lezen ze per CORE — zo idlet een SMP-app net als
+	// elke andere (yield naar EL2, kick van HOP) in plaats van te spinnen.
+	ctxWrite(c, layout.CtxCtrlPA, uint64(cp))
+	ctxWrite(c, layout.CtxRingHeadPA, ctxRead(s.slot, layout.CtxRingHeadPA))
+	// En dezelfde registratie als armSlot voor een eerste core: de secundaire
+	// is bewoner "slot c" van core c (ctx-blok c). Zonder dat is hij voor de
+	// rotatie en de wekker niemand — hij yieldt dan naar EL2 en wordt nooit
+	// meer gewekt, en bij een stop parkeert hij niet (M4, 03-09: app hangt,
+	// "core 2 did not park", partitie in quarantaine). Zelfde twee routes:
+	// een core die parkeert of al draait via boot-pending in de rotatie, een
+	// koude/geparkeerde via reset + mailbox.
+	var err error
+	if coreRunning(c) || coreParks(c) {
+		err = bootPendingDispatch(c, c, cageSMPEntryPC(), uint64(cp))
+	} else {
+		residentReset(c, c)
+		err = dispatchCore(c, cageSMPEntryPC(), uint64(cp))
+	}
+	if err != nil {
 		fmt.Printf("HOPOS_SMP_DISPATCH_FAIL slot %d core %d: %v\n", s.slot, c, err)
 	} else {
 		// Ook het SLAGEN melden. Dat lijkt ruis (het gebeurt één keer per extra
@@ -1076,7 +1097,15 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	ctrlWrite(i, layout.CtrlCores, uint64(cores))
 	// De idle-modus van het board voor deze core (layout.CtrlIdleMode): hoe
 	// de app hoort te idlen. Nul = de default van de architectuur. Een
-	// SMP-slot krijgt geen yield-idle: de wekker kent één core per slot.
+	// SMP-app krijgt GEEN yield-idle: een core die op EL2 slaapt is voor de
+	// Go-runtime onbereikbaar (geen stop-the-world, preemptie of wakep komt
+	// daar aan), en met een tweede core wacht die dan op hem. Gemeten M4
+	// 03-09: met yield hing een 2-core-app (eerste core op EL2 met een
+	// wektijd van minuten, tweede op 100% in de STW-wacht); met een 1ms-cap
+	// op de wektijd (idle.MultiCore) hing hij nog steeds, beide cores op
+	// 100% in de governor met RX pending. Open: waarom de pomp dan niet
+	// draint. Tot dat begrepen is idlet een SMP-app met de Sleeper van het
+	// board (op Apple: de WFE-spin, ~70% per core — stabiel, wel duur).
 	mode := idleModeOf(core)
 	if cores > 1 {
 		mode &^= layout.IdleYield

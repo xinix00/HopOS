@@ -243,6 +243,11 @@ func main() {
 		fmt.Printf("flip: adopted kernel generation %d — %s, %d resident(s) handed over, previous kernel had %#x+%dMB HOPOS_FLIP_BOOT\n",
 			flipped.Gen, hopBudget(), len(flipped.Slots), flipped.OldBase, flipped.OldSize>>20)
 	}
+	// hopos.reboot=1: dit image is een herstart-verzoek (watchdog.go
+	// rebootNow) — ná het flip-rapport, zodat de console zegt wat er gebeurde.
+	if bootParam("hopos.reboot") == "1" {
+		rebootNow()
+	}
 
 	// Log-console op de firmware-framebuffer als het board er een heeft — het
 	// beeld-kanaal voor een node zónder debug-kabel. Zo niet (QEMU -nographic,

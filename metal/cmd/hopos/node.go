@@ -64,6 +64,7 @@ func idleStat() {
 		fmt.Printf("idle: %.0f wakes/s, %.1f%% idle, %.0f irq/s, %.0f empty rx rounds/s; waker %.0f rounds/s, asleep %.0f/s, kicks %.0f/s; app cores %.0f el2 sleeps/s HOPOS_IDLESTAT\n",
 			float64(w1-w0)/dt, 100*float64(t1-t0)/hz/dt, float64(i1-i0)/dt, float64(r1-r0)/dt,
 			float64(wr1-wr0)/dt, float64(wa1-wa0)/dt, float64(wk1-wk0)/dt, float64(s1-s0)/dt)
+		fmt.Printf("idle: cores%s\n", slots.CoreDump())
 		w0, t0, i0, r0, at = w1, t1, i1, r1, now
 		wr0, wa0, wk0, s0 = wr1, wa1, wk1, s1
 	}

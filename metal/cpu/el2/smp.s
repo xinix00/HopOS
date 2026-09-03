@@ -64,6 +64,15 @@ TEXT smpEL2Tramp(SB),NOSPLIT|NOFRAME,$0
 	MOVD	0x50(R1), R3	// layout.CtrlVecPA
 	WORD	$0xd51cc003	// msr vbar_el2, x3
 
+	// VPIDR/VMPIDR_EL2: wat de app op EL1 bij midr/mpidr te zien krijgt. Bij
+	// EL2-entry zijn ze architectureel UNKNOWN (op de M4 las een app 0 voor
+	// zijn tweede core, 03-09) — de Pi-boot zet ze al zo (el2Pi). Een app die
+	// zijn core meldt, zoals hopslot's exception-rapport, zegt dan de waarheid.
+	WORD	$0xd5380004	// mrs x4, midr_el1
+	WORD	$0xd51c0004	// msr vpidr_el2, x4
+	WORD	$0xd53800a4	// mrs x4, mpidr_el1
+	WORD	$0xd51c00a4	// msr vmpidr_el2, x4
+
 	// Kooi-profiel gekozen op CtrlS2Table (R2) — dit is de gedeelde trampoline
 	// voor ZOWEL een app-SMP-core ALS een node-runtime-core (HOP zelf):
 	//   R2 == 0  → node-core: GÉÉN stage-2-kooi, HCR zonder VM/TSC (de node mag
@@ -95,12 +104,17 @@ vtcrps2:
 	DSB	$15
 
 	// HCR_EL2: RW(31) | TSC(19, trap SMC — zie el2.s: een app-SMC bestaat
-	// niet, dus trap = ontsnappingspoging) | VM(0, stage-2 aan). Geen
-	// IMO(4)/GIC: de hard-kill loopt via stage-2-intrekking (Revoke), niet via
-	// een IRQ — een secundaire SMP-core deelt tabel én VMID met de primaire,
-	// dus dezelfde TLBI velt ook hem.
+	// niet, dus trap = ontsnappingspoging) | FMO(3) | VM(0, stage-2 aan).
+	// Geen IMO(4)/GIC: de hard-kill loopt via stage-2-intrekking (Revoke),
+	// niet via een IRQ — een secundaire SMP-core deelt tabel én VMID met de
+	// primaire, dus dezelfde TLBI velt ook hem. FMO WEL, en om dezelfde reden
+	// als op de eerste core (el2.s): een fast-IPI van HOP's wekker is op
+	// Apple een FIQ, en die hoort op EL2 te landen (switch.s ackt hem) — nooit
+	// in de app. Zonder FMO stond hij hier alleen op de eerste core van een
+	// app, en kreeg de tweede core hem als EL1-exception (M4, 02-09).
 	MOVD	$1<<31, R4
 	ORR	$1<<19, R4, R4
+	ORR	$1<<3, R4, R4
 	ORR	$1, R4, R4
 	WORD	$0xd51c1104	// msr hcr_el2, x4
 	B	s2done
