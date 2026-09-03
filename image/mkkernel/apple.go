@@ -83,7 +83,7 @@ func writeAppleBoot(p *payload, out string) {
 // verwijzing in board/apple/bootstub.go zou hij hem bovendien helemaal
 // weggooien, en dan struikelt dit.
 func (p *payload) stub(img []byte, name string, at, room uint64) uint64 {
-	const pkg = "github.com/xinix00/HopOS/metal/board/apple."
+	const pkg = "github.com/xinix00/HopOS/metal/v2/board/apple."
 	off, size := p.symbol(pkg + name + ".abi0")
 	if size == 0 || size > room {
 		die("%s: %d bytes past niet op image-offset %#x (ruimte %d)", name, size, at, room)

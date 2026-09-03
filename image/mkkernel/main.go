@@ -259,10 +259,10 @@ func writePEReloc(paths []string, outPath string) {
 	// voor élke kandidaat de ene payload. De bases blijven absoluut (ze
 	// beschrijven vensters, geen payload-woorden) en staan bewust NIET in de
 	// reloc-tabel.
-	if _, size := ps[0].symbol("github.com/xinix00/HopOS/metal/board/uefi.uefiSlots"); size < uint64(2+len(ps))*8 {
+	if _, size := ps[0].symbol("github.com/xinix00/HopOS/metal/v2/board/uefi.uefiSlots"); size < uint64(2+len(ps))*8 {
 		die("uefiSlots te klein voor %d varianten", len(ps))
 	}
-	off, _ := ps[0].symbol("github.com/xinix00/HopOS/metal/board/uefi.uefiSlots")
+	off, _ := ps[0].symbol("github.com/xinix00/HopOS/metal/v2/board/uefi.uefiSlots")
 	binary.LittleEndian.PutUint64(ps[0].img[off:], uint64(len(ps)))
 	binary.LittleEndian.PutUint64(ps[0].img[off+8:], 0) // stride 0 = reloc-modus
 	for i, p := range ps {
@@ -271,7 +271,7 @@ func writePEReloc(paths []string, outPath string) {
 
 	// De reloc-descriptor + de tabel zelf, pagina-rond ná de payload.
 	tabOff := (uint64(len(ps[0].img)) + 0xfff) &^ 0xfff
-	roff, rsize := ps[0].symbol("github.com/xinix00/HopOS/metal/board/uefi.uefiReloc")
+	roff, rsize := ps[0].symbol("github.com/xinix00/HopOS/metal/v2/board/uefi.uefiReloc")
 	if rsize < 16 {
 		die("uefiReloc te klein (%d)", rsize)
 	}
