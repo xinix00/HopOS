@@ -7,6 +7,7 @@ package dev
 
 import (
 	"encoding/binary"
+	"sync"
 	"unsafe"
 )
 
@@ -63,9 +64,90 @@ func toAlign8(addr uintptr) int {
 	return int(-addr & 7)
 }
 
+// normalWindows: de vensters die met memattr.NormalNC van Device-nGnRnE naar
+// Normal-NC zijn gezet (MarkNormal). Daarbinnen mag een kopie gewoon memmove
+// zijn; daarbuiten blijft de 8-byte-discipline van device-geheugen. De lijst
+// is kort (ringstaarten, twee DMA-regio's) en verandert alleen bij attach,
+// dus een lineaire zoektocht per kopie kost niets naast de kopie zelf.
+//
+// Waarom dit ertoe doet: op de M4 kost één Device-store ~290ns, dus 1MiB in
+// Write64-stappen is 38ms — 27MB/s voor élke ring en DMA-buffer (gemeten
+// 03-09). Op Normal-NC doet de store-buffer write-combining en mag de
+// compiler LDP/STP gebruiken: hetzelfde MiB in enkele milliseconden.
+var (
+	normalMu      sync.RWMutex
+	normalWindows []normalWindow
+)
+
+// normalWindow: cached = Normal-WB (gecached, memattr.NormalWB), anders
+// Normal-NC (ongecached, memattr.NormalNC). Het verschil zit in Push/Pull: een
+// WB-venster deelt de ABI met lezers die de cache niet zien — de EL2-switcher
+// op de app-core draait met de MMU uit en leest de ringkop en de deurbel dus
+// rechtstreeks uit DRAM — dus daar is cache-onderhoud per publicatie de eis,
+// precies zoals op riscv64 (share_riscv64.go). NC en device hebben dat niet.
+type normalWindow struct {
+	lo, hi uintptr
+	cached bool
+}
+
+// MarkNormal registreert [addr, addr+size) als Normal-NC-geheugen. Aanroepen
+// na een geslaagde memattr.NormalNC (die doet het zelf) — nooit voor een
+// venster dat nog device-gemapt is: dan zou memmove ongealigneerde of vector-
+// accesses op nGnRnE doen, en dat is een fault.
+func MarkNormal(addr, size uintptr) { mark(addr, size, false) }
+
+// MarkCached registreert [addr, addr+size) als Normal-WB-geheugen (gecached,
+// inner-shareable): memmove voor de payload, en Push/Pull doen er echt
+// cache-onderhoud. Aanroepen na een geslaagde memattr.NormalWB.
+func MarkCached(addr, size uintptr) { mark(addr, size, true) }
+
+func mark(addr, size uintptr, cached bool) {
+	if size == 0 {
+		return
+	}
+	normalMu.Lock()
+	normalWindows = append(normalWindows, normalWindow{addr, addr + size, cached})
+	normalMu.Unlock()
+}
+
+// IsNormal meldt of [addr, addr+n) geheel in een geregistreerd Normal-venster
+// ligt (NC of WB): dan mag een kopie memmove zijn.
+func IsNormal(addr uintptr, n int) bool {
+	_, ok := lookup(addr, n)
+	return ok
+}
+
+// IsCached meldt of [addr, addr+n) geheel in een Normal-WB-venster ligt: dan
+// horen bij Push en Pull echte clean/invalidate-stappen.
+func IsCached(addr uintptr, n int) bool {
+	w, ok := lookup(addr, n)
+	return ok && w.cached
+}
+
+// lookup: het LAATST geregistreerde venster dat het bereik dekt wint. Een
+// board mapt eerst een hele DMA-regio NC en daarna één blok erin WB (de
+// databuffer); het jongere, kleinere venster is dan het juiste antwoord. De
+// omgekeerde volgorde gaf op T21 (03-09) een WB-blok waar Push/Pull niets
+// deden: memmove uit een cache die de DMA niet ziet.
+func lookup(addr uintptr, n int) (normalWindow, bool) {
+	normalMu.RLock()
+	defer normalMu.RUnlock()
+	end := addr + uintptr(n)
+	for i := len(normalWindows) - 1; i >= 0; i-- {
+		if w := normalWindows[i]; addr >= w.lo && end <= w.hi {
+			return w, true
+		}
+	}
+	return normalWindow{}, false
+}
+
 // Copy kopieert src naar fysiek adres dst (elke alignment).
 func Copy(dst uintptr, src []byte) {
 	n := len(src)
+	if IsNormal(dst, n) {
+		copy(unsafe.Slice((*byte)(unsafe.Pointer(dst)), n), src)
+		return
+	}
 	i := 0
 	for pro := toAlign8(dst); i < n && pro > 0; i, pro = i+1, pro-1 {
 		*(*byte)(unsafe.Pointer(dst + uintptr(i))) = src[i]
@@ -85,6 +167,10 @@ func Copy(dst uintptr, src []byte) {
 // CopyOut leest len(dst) bytes vanaf fysiek adres src (elke alignment) naar dst.
 func CopyOut(dst []byte, src uintptr) {
 	n := len(dst)
+	if IsNormal(src, n) {
+		copy(dst, unsafe.Slice((*byte)(unsafe.Pointer(src)), n))
+		return
+	}
 	i := 0
 	for pro := toAlign8(src); i < n && pro > 0; i, pro = i+1, pro-1 {
 		dst[i] = *(*byte)(unsafe.Pointer(src + uintptr(i)))

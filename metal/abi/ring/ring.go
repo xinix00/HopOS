@@ -80,7 +80,28 @@ type Ring struct {
 	size uint64
 	// keep houdt heap-backed lokale ringen levend. Shared-memoryringen laten
 	// dit nil; New gebruikt dezelfde wire-layout maar bezit zijn backing zelf.
-	keep    []uint64
+	keep []uint64
+	// normal: de backing is de Go-heap (New) — dan mag de payload met memmove.
+	// Voor shared-memoryringen beslist dev.Copy/CopyOut dat zelf aan de hand
+	// van de Normal-vensters die memattr.NormalNC registreerde: op Device-
+	// nGnRnE is één gealigneerde Write64 per woord de eis, en op de M4 kost zo'n
+	// store ~290ns — 38ms per MiB, 27MB/s (gemeten 03-09, hole-reads). De
+	// kopwoorden blijven Read64/Write64: die zijn de publicatie, en de
+	// barrières eromheen (dev.MB) ordenen Normal-NC net zo goed als device.
+	normal bool
+	// coherent: de backing is gecached én gedeeld met een cache-coherente
+	// tegenpartij (memattr.NormalWB, dev.IsCached) of de eigen heap. Dan is
+	// Push/Pull op data en headers loos werk — de cores zien elkaars caches —
+	// en zou de clean+invalidate per record (gemeten 03-09: drie DSB's per
+	// frame) de winst van memmove weer opeten. Wat wél blijft: de kop wordt
+	// na een publicatie gecleand, want de EL2-switcher peekt hem zonder MMU.
+	coherent bool
+	// peeked: de kop van deze ring wordt gelezen door een lezer zonder cache
+	// (de EL2-switcher, MMU uit — de RX-ring van een app, CtxRingHeadPA). Dan
+	// cleant setHead de kop ook op een coherente ring. Alleen HOP zet dit, op
+	// precies die ring (hopswitch.Attach): een clean plus DSB per frame op
+	// élke kop kostte de app-kant de helft van zijn doorvoer (T13, 03-09).
+	peeked  bool
 	corrupt bool   // consumer zag een onmogelijke header; ring is dood
 	why     string // de meting van dát moment (CorruptWhy) — anders is een
 	// corrupt-verklaring van buiten niet te onderscheiden van een lege ring,
@@ -99,6 +120,7 @@ func New(size uint64) *Ring {
 	Init(base, size)
 	r := Open(base)
 	r.keep = words
+	r.normal, r.coherent = true, true
 	return r
 }
 
@@ -129,7 +151,7 @@ func (r *Ring) CorruptWhy() string { return r.why }
 // expliciet, en het kost één op per ring.
 func Open(base uintptr) *Ring {
 	dev.Pull(base+hdrSize, 8)
-	return &Ring{base: base, size: dev.Read64(base + hdrSize)}
+	return &Ring{base: base, size: dev.Read64(base + hdrSize), coherent: dev.IsCached(base, dataOff)}
 }
 
 // De vier kop-accessors doen het cache-onderhoud van de ABI: Pull vóór een lees,
@@ -139,23 +161,47 @@ func Open(base uintptr) *Ring {
 // aanroepers, want dít zijn de enige plekken waar de kop van een ring gelezen of
 // geschreven wordt — één plek, geen discipline.
 func (r *Ring) head() uint64 {
-	dev.Pull(r.base+hdrHead, 8)
+	r.pull(r.base+hdrHead, 8)
 	return dev.Read64(r.base + hdrHead)
 }
 
 func (r *Ring) tail() uint64 {
-	dev.Pull(r.base+hdrTail, 8)
+	r.pull(r.base+hdrTail, 8)
 	return dev.Read64(r.base + hdrTail)
 }
 
 func (r *Ring) setHead(v uint64) {
 	dev.Write64(r.base+hdrHead, v)
-	dev.Push(r.base+hdrHead, 8)
+	// Een gepeekte kop (zie het veld) gaat ook coherent langs Push: de
+	// EL2-switcher leest hem met de MMU uit (cpu/el2/switch.s) en ziet alleen
+	// wat in het geheugen staat. In een gecached venster is dat één clean van
+	// één regel; op device/NC een no-op.
+	if r.peeked || !r.coherent {
+		dev.Push(r.base+hdrHead, 8)
+	}
 }
+
+// SetPeeked meldt dat een lezer zonder cache de kop van deze ring leest; zie
+// het veld. Door de producer te zetten, vóór het eerste record.
+func (r *Ring) SetPeeked() { r.peeked = true }
 
 func (r *Ring) setTail(v uint64) {
 	dev.Write64(r.base+hdrTail, v)
-	dev.Push(r.base+hdrTail, 8)
+	r.push(r.base+hdrTail, 8)
+}
+
+// push/pull: het cache-onderhoud van data, headers en staart — overgeslagen
+// op een coherente ring (zie het veld), anders dev.Push/Pull.
+func (r *Ring) push(addr, size uintptr) {
+	if !r.coherent {
+		dev.Push(addr, size)
+	}
+}
+
+func (r *Ring) pull(addr, size uintptr) {
+	if !r.coherent {
+		dev.Pull(addr, size)
+	}
 }
 
 // putHdr schrijft één recordheader en publiceert hem meteen. ÉLKE header loopt
@@ -166,14 +212,18 @@ func (r *Ring) setTail(v uint64) {
 func (r *Ring) putHdr(off, length uint64, typ uint32) {
 	addr := r.base + dataOff + uintptr(off%r.size)
 	dev.Write64(addr, length|uint64(typ)<<32)
-	dev.Push(addr, recHdr)
+	r.push(addr, recHdr)
 }
 
 func (r *Ring) writeRec(off uint64, typ uint32, p []byte) {
 	r.putHdr(off, uint64(len(p)), typ)
 	addr := r.base + dataOff + uintptr(off%r.size)
-	dev.Copy(addr+recHdr, p)
-	dev.Push(addr+recHdr, uintptr(align8(uint64(len(p)))))
+	if r.normal {
+		copy(unsafe.Slice((*byte)(unsafe.Pointer(addr+recHdr)), len(p)), p)
+	} else {
+		dev.Copy(addr+recHdr, p)
+	}
+	r.push(addr+recHdr, uintptr(align8(uint64(len(p)))))
 }
 
 // WriteNotify plaatst een record. notify is waar wanneer de ring vóór deze
@@ -283,7 +333,7 @@ func (r *Ring) ReadInto(buf []byte) (typ uint32, n int, ok bool) {
 		// weg (Push), maar op een niet-coherente architectuur kan er nog een oude
 		// regel van ons in de weg staan. Eerst de header, dan (na de
 		// lengtevalidatie hieronder) de payload — nooit meer dan gepubliceerd is.
-		dev.Pull(addr, recHdr)
+		r.pull(addr, recHdr)
 		hdr := dev.Read64(addr)
 		length, rtyp := uint32(hdr), uint32(hdr>>32)
 		need := recHdr + align8(uint64(length))
@@ -299,8 +349,12 @@ func (r *Ring) ReadInto(buf []byte) (typ uint32, n int, ok bool) {
 			r.setTail(tail + need)
 			continue
 		}
-		dev.Pull(addr+recHdr, uintptr(length))
-		dev.CopyOut(buf[:length], addr+recHdr)
+		r.pull(addr+recHdr, uintptr(length))
+		if r.normal {
+			copy(buf[:length], unsafe.Slice((*byte)(unsafe.Pointer(addr+recHdr)), length))
+		} else {
+			dev.CopyOut(buf[:length], addr+recHdr)
+		}
 		dev.MB() // payload gekopieerd vóór de ruimte vrijgeven
 		r.setTail(tail + need)
 		return rtyp, int(length), true

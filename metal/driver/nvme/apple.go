@@ -59,9 +59,20 @@ const (
 	tcbOffPRP1    = 24
 	tcbOffPRP2    = 32
 
-	appleDataOff = 0x18000
-	applePRPOff  = appleDataOff + maxTransferSize
-	appleDMANeed = applePRPOff + prpListSize
+	// De PRP-lijst blijft bij de queues in het eerste 2MB-blok (device/NC);
+	// de databuffer krijgt een eigen 2MB-blok, zodat het board precies dát
+	// blok gecached kan mappen (memattr.NormalWB): een read eindigt dan in een
+	// memmove uit de cache in plaats van ongecachete loads (~100MB/s op de
+	// M4, gemeten 03-09), met één invalidate na de DMA; een write cleant vóór
+	// de opdracht. Queues, TCB's en PRP's blijven ongecached: die pollt en
+	// schrijft de driver per woord, en daar is device-geheugen goed voor.
+	applePRPOff  = 0x18000
+	appleDataOff = 0x200000
+	appleDMANeed = appleDataOff + maxTransferSize
+	// AppleDataOff/AppleDataSize: het bufferblok, voor het board dat het
+	// gecached wil mappen (2MB-grens en -maat, wat memattr eist).
+	AppleDataOff  = appleDataOff
+	AppleDataSize = 0x200000
 )
 
 // AppleConfig zijn de adressen die de ADT levert (via het param-blok van het

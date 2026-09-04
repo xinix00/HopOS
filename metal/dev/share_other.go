@@ -1,4 +1,4 @@
-//go:build !riscv64
+//go:build !riscv64 && !(tamago && arm64)
 
 package dev
 

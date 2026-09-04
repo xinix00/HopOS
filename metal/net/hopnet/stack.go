@@ -20,6 +20,7 @@ import (
 
 	"github.com/xinix00/lean/leannet"
 
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 	"github.com/xinix00/HopOS/metal/v2/board"
 )
 
@@ -37,6 +38,13 @@ func stackUp(loc *locdev, nc board.NetConfig, mac string) (func([]byte) error, e
 		IP:     pfx.Addr().As4(),
 		Prefix: pfx.Bits(),
 		Budget: netBudget(),
+		// Per verbinding niet meer buffer (rx + tx samen) dan één slot-frame-
+		// ring: het venster dat HOP een app adverteert is wat die app in één
+		// burst mag sturen, en dat moet in zijn TX-ring (960KB) passen — anders
+		// dropt zijn Transmit en herstelt TCP het met retransmits. De ringen
+		// verdubbelen binnen dit plafond, dus rx stopt onder de helft. Zelfde
+		// grens als appnet aan de andere kant.
+		MaxBufPerConn: layout.NetRingDataCap,
 	}
 	copy(cfg.MAC[:], loc.mac[:])
 	if gw, err := netip.ParseAddr(nc.GW); err == nil && gw.Is4() {

@@ -28,6 +28,7 @@ import (
 	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 	"github.com/xinix00/HopOS/metal/v2/board"
 	"github.com/xinix00/HopOS/metal/v2/board/apple"
+	"github.com/xinix00/HopOS/metal/v2/cpu/memattr"
 	"github.com/xinix00/HopOS/metal/v2/driver/fb"
 	"github.com/xinix00/HopOS/metal/v2/driver/nvme"
 	"github.com/xinix00/HopOS/metal/v2/driver/pcie"
@@ -208,6 +209,20 @@ func (machine) Disk() (*nvme.Controller, uint64, uint64, error) {
 			NVMe:  uintptr(nvmeBase),
 			NVMMU: uintptr(nvmmu),
 			RTKit: &rtkit.Dev{Name: "ans", Base: uintptr(asc), Alloc: apple.StorageBuf},
+		}
+		// De opslag-DMA-regio op Normal-NC: van ons (PA-plan), 2MB-gealigneerd,
+		// en elke sector loopt er via dev.Copy/CopyOut doorheen. Op Device-
+		// nGnRnE is dat 8 bytes per ~290ns-load: 14MB/s lezen, 71ms per MiB
+		// (gemeten 03-09). NC is coherent met de ANS en de NVMe zonder
+		// onderhoud; de driver zet al een DMB tussen queue-entry en bel.
+		if err := memattr.NormalNC(uintptr(apple.StorageDMAPA), apple.StorageDMASize); err != nil {
+			fmt.Printf("nvme: dma window stays device-mapped (%v) — 8-byte copies\n", err)
+		} else if err := memattr.NormalWB(uintptr(apple.StorageDMAPA)+nvme.AppleDataOff, nvme.AppleDataSize); err != nil {
+			// De databuffer gecached: lezen wordt een memmove uit de cache
+			// i.p.v. ~100MB/s aan ongecachete loads; de driver cleant/invalideert
+			// per opdracht (dev.Push/Pull in xfer). Blijft hij NC, dan werkt
+			// alles nog, alleen trager.
+			fmt.Printf("nvme: data buffer stays uncached (%v)\n", err)
 		}
 		return c, c.InitApple(cfg, apple.StorageDMAPA, apple.StorageDMASize)
 	}

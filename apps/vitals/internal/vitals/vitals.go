@@ -97,6 +97,7 @@ var tests = []struct{ Name, Desc string }{
 	{"memlat", "memory latency"},
 	{"rx", "download throughput"},
 	{"disk", "NVMe through the system-call path"},
+	{"syscall", "system-call floor vs keep-alive HTTP to the agent"},
 	{"storm", "connection storm (via published port)"},
 	{"rtt", "TCP round-trips to the gateway"},
 	{"gc", "allocation rate + GC pauses"},
@@ -201,6 +202,8 @@ func (s *Server) run(name string, q url.Values) *Result {
 		s.runRx(res, q)
 	case "disk":
 		s.runDisk(res, q)
+	case "syscall":
+		s.runSyscall(res, q)
 	case "storm":
 		s.runStorm(res, q)
 	case "rtt":

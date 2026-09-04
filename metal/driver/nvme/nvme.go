@@ -388,13 +388,19 @@ func (c *Controller) xfer(opc uint32, lba uint64, p []byte, write bool) error {
 	if lba+nlb > c.Blocks {
 		return fmt.Errorf("nvme: lba %d+%d buiten namespace (%d)", lba, nlb, c.Blocks)
 	}
+	// Is de databuffer gecached (het board mapte zijn blok Normal-WB), dan
+	// moet wat wij schreven vóór de opdracht naar het geheugen, en wat de
+	// controller schreef na afloop uit onze cache. Op device- of NC-geheugen
+	// zijn beide een no-op; de kopie zelf kiest dev.Copy/CopyOut al.
 	if write {
 		dev.Copy(c.buf, p)
+		dev.Push(c.buf, uintptr(len(p)))
 	}
 	prp1, prp2 := c.dataPRPs(uint64(len(p)))
 	err := c.submit(&c.io, cmd{opc: opc, nsid: nsid, prp1: prp1, prp2: prp2,
 		dw10: uint32(lba), dw11: uint32(lba >> 32), dw12: uint32(nlb - 1)})
 	if err == nil && !write {
+		dev.Pull(c.buf, uintptr(len(p)))
 		dev.CopyOut(p, c.buf)
 	}
 	return err

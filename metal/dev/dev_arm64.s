@@ -56,3 +56,28 @@ TEXT ·Counter(SB),NOSPLIT,$0-8
 	WORD	$0xd53be040	// mrs x0, cntvct_el0
 	MOVD	R0, ret+0(FP)
 	RET
+
+// Clean: DC CVAC (clean naar PoC, géén invalidate) per cache-regel over
+// [addr, addr+size), afgesloten met DSB ISH. Voor een woord dat een lezer
+// zonder cache moet zien (de EL2-switcher, MMU uit: ringkop, deurbel) terwijl
+// de regel zelf gewoon geldig in de cache mag blijven — dat is het verschil
+// met CleanInv, en de reden dat dit de goedkope variant is.
+TEXT ·Clean(SB),NOSPLIT,$0-16
+	MOVD	addr+0(FP), R0
+	MOVD	size+8(FP), R1
+	CBZ	R1, done
+	ADD	R0, R1, R1	// R1 = einde (exclusief)
+	WORD	$0xd53b0022	// mrs x2, ctr_el0
+	UBFX	$16, R2, $4, R2	// DminLine: log2(regel/4B)
+	MOVD	$4, R3
+	LSL	R2, R3, R3	// R3 = regelgrootte in bytes
+	SUB	$1, R3, R4
+	BIC	R4, R0, R0	// start op regelgrens
+loop:
+	WORD	$0xd50b7a20	// dc cvac, x0
+	ADD	R3, R0, R0
+	CMP	R1, R0
+	BLO	loop
+	WORD	$0xd5033b9f	// dsb ish
+done:
+	RET

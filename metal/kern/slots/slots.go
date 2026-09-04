@@ -33,9 +33,30 @@ import (
 	"github.com/xinix00/HopOS/metal/v2/abi/place"
 	"github.com/xinix00/HopOS/metal/v2/abi/ring"
 	"github.com/xinix00/HopOS/metal/v2/board"
+	"github.com/xinix00/HopOS/metal/v2/cpu/memattr"
 	"github.com/xinix00/HopOS/metal/v2/dev"
 	"github.com/xinix00/HopOS/metal/v2/net/hopswitch"
 )
+
+// mapTailNormal zet de 2MB-ABI-staart van een slot (control-page, mailbox,
+// frame-ringen) op Normal-WB in HOP's eigen map: gecached, inner-shareable,
+// gewoon geheugen. Zonder dit is hij Device-nGnRnE — tamago mapt alles buiten
+// de eigen RAM-declaratie zo, en op de M4 bovendien het hele DRAM in 2MB-
+// device-blokken — en dan kopieert de switch elk frame per 8 bytes met een
+// store van ~290ns: 27MB/s, gemeten 03-09; Normal-NC (de tussenstap) gaf
+// 116MB/s, gecached is het memcpy. HOP en app zijn cache-coherent; de enige
+// lezer zonder cache is de EL2-switcher op de app-core (MMU uit), en die
+// krijgt kop en deurbel via dev.Push/Pull, die in zo'n venster echt vegen.
+// De app zet zíjn kant net zo (applib.Init) — vandaar slot-ABI 7. Vóór de
+// eerste schrijf in de staart, zodat élke HOP-schrijf erin dezelfde weg
+// neemt. Weigert memattr (venster niet op 2MB-grenzen, GB-grens), dan blijft
+// het device-pad met zijn 8-byte-kopieën: traag maar correct. Idempotent, dus
+// ook bij adoptie en herstart gewoon opnieuw aanroepen.
+func mapTailNormal(i int, tail uintptr) {
+	if err := memattr.NormalWB(tail, layout.AbiTail); err != nil {
+		fmt.Printf("slot %d: ring window stays device-mapped (%v) — 8-byte copies\n", i, err)
+	}
+}
 
 // Eén servicer per slot: hij bezit de app-identiteit, storagegrenzen en de
 // bootstrap-/crashlog-outbox. Gewone calls komen via system.go over het LAN
@@ -1038,6 +1059,7 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 
 	// Control-page vegen, env-blob schrijven, hop-ABI-ringen klaarzetten,
 	// BOOTING, core wekken — alles op de fysieke plekken uit het board-plan.
+	mapTailNormal(i, layout.AbiTailAt(base, appRAM))
 	ctrlPA := layout.CtrlPageAt(base, appRAM)
 	dev.Clear(ctrlPA, layout.CtrlStride)
 	if len(envBlob) > 0 {

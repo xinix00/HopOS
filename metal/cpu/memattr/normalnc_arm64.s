@@ -17,13 +17,16 @@ TEXT ·writeMAIR(SB),NOSPLIT,$0-8
 	WORD	$0xd5033fdf	// isb
 	RET
 
-// flushTLB: DSB ISH (de tabel-writes zichtbaar voor de walker) → TLBI VMALLE1
-// (alle stage-1-vertalingen van deze EL/VMID weg) → DSB ISH (de invalidatie
+// flushTLB: DSB ISH (de tabel-writes zichtbaar voor de walker) → TLBI VMALLE1IS
+// (alle stage-1-vertalingen van deze EL/VMID weg, op élke core van het inner-
+// shareable domein: de tabellen zijn gedeeld — HOP's EL2-map draait de
+// switcher op alle app-cores, en een SMP-app deelt zijn map met zijn
+// secundairen) → DSB ISH (de invalidatie
 // afgerond) → ISB (geen speculatieve toegang met een oude vertaling meer).
 // Deze volgorde is de architectuur-eis, niet voorzichtigheid.
 TEXT ·flushTLB(SB),NOSPLIT,$0
 	WORD	$0xd5033b9f	// dsb ish
-	WORD	$0xd508871f	// tlbi vmalle1
+	WORD	$0xd508831f	// tlbi vmalle1is — inner-shareable: óók de andere cores
 	WORD	$0xd5033b9f	// dsb ish
 	WORD	$0xd5033fdf	// isb
 	RET

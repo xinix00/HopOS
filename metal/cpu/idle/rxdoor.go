@@ -91,9 +91,11 @@ func workDoor() bool {
 	// switch (hopswitch.loop); rxDoor hoeft dit niet — WakeSleeper is per
 	// ontwerp vanaf elke M veilig.
 	if !runtime.IdleMayReady() {
+		WorkNotReady.Add(1)
 		return false
 	}
 	if !(*f)() {
+		WorkIdle.Add(1)
 		return false
 	}
 	wake := workWake.Load()
@@ -119,11 +121,17 @@ func rxDoor() bool {
 	}
 	head, pending := (*f)()
 	door := rxDoorPA.Load()
+	// De deurbel wordt óók gelezen door de EL2-switcher, met de MMU uit — dus
+	// rechtstreeks uit DRAM. Sinds ABI 7 is de staart gecached, en dan is
+	// Push (clean) de enige manier waarop hij het woord ziet; op device/NC is
+	// Push een no-op.
 	if !pending {
 		dev.Write64(door, head|rxArmed)
+		dev.Push(door, 8)
 		return false
 	}
 	dev.Write64(door, 0) // ontwapenen: er wordt aan gewerkt
+	dev.Push(door, 8)
 	gp := rxPumpG.Load()
 	if gp == 0 {
 		DoorNoPump.Add(1)
@@ -143,3 +151,7 @@ func rxDoor() bool {
 var DoorNoPump, DoorWoken, DoorWakeFailed atomic.Uint64
 
 var WorkWoken, WorkWakeFailed atomic.Uint64
+
+// WorkNotReady/WorkIdle: de twee manieren waarop workDoor níet wekt — de hook
+// draaide buiten de scheduler-idle (IdleMayReady onwaar), of er lag niets.
+var WorkNotReady, WorkIdle atomic.Uint64

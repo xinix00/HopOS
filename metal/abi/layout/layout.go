@@ -869,7 +869,13 @@ const (
 	// ene system-callcontract over het slot-LAN. De outbox is voortaan alleen
 	// bootstrap-/crashlog. Een oud image zou anders tien seconden op een RPC-
 	// response wachten die bewust nooit meer komt; hard weigeren is eerlijker.
-	ABIVersion = 6
+	// 7 (03-09): de ABI-staart is Normal-WB aan beide kanten (gecached, inner-
+	// shareable) in plaats van device: HOP (kern/slots.mapTailNormal) én app
+	// (applib.Init) zetten hun map om, en alles wat de EL2-switcher zonder
+	// MMU leest — ringkop, deurbel — gaat langs dev.Push/Pull, die daar nu
+	// echt vegen. Een oud image met een device-staart tegenover een gecachte
+	// HOP zou stil stale koppen lezen: het adres blijft, het contract niet.
+	ABIVersion = 7
 )
 
 // AbiTailAt geeft de basis van de ABI-staart van een slot: net boven zijn

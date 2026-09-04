@@ -57,6 +57,15 @@ func Up(a *applib.App) (string, error) {
 		MAC:    layout.SlotMAC(a.Slot),
 		GW:     ip4bytes(host),
 		Budget: budget,
+		// Per verbinding niet meer buffer (rx + tx samen) dan één frame-ring
+		// naar HOP: het venster dat wij adverteren is wat HOP in één burst mag
+		// sturen, en een venster groter dan de ring (960KB) laat de switch met
+		// tegendruk wachten tot wij de ring leegpompen — gemeten 03-09: 459 →
+		// 155 MB/s zodra de ring niet meer krimpt na bulk. De ringen groeien
+		// per verdubbeling binnen dit plafond, dus rx stopt onder de helft en
+		// tx houdt de rest; de helft als plafond liet tx op zijn vloer van 4KB
+		// hangen (stat na bulk 821µs).
+		MaxBufPerConn: layout.NetRingDataCap,
 	}
 	cfg.AdvWS = wsShiftFor(budget / 4)
 

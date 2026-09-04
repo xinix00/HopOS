@@ -94,8 +94,21 @@ func Init() *App {
 		RAMSize:  uint64(end - start),
 	}
 
+	// De eigen ABI-staart (2MB achter de RAM-declaratie: control-page,
+	// mailbox, frame-ringen) op Normal-WB: gecached, inner-shareable. tamago
+	// mapt alles buiten de RAM-declaratie als Device-nGnRnE, en dan is elke
+	// ringkopie 8 bytes per ~290ns-store (27MB/s op de M4, gemeten 03-09).
+	// HOP zet zijn kant net zo (kern/slots.mapTailNormal) — dat is het contract
+	// van slot-ABI 7: beide gecached, en alles wat de EL2-switcher (MMU uit)
+	// leest gaat langs dev.Push/Pull. Vóór de eerste ring.Open, zodat elke
+	// ring meteen het memmove-pad krijgt. Melden na de outbox — dan kán het.
+	tailErr := memattr.NormalWB(layout.AbiTailAt(a.RAMStart, a.RAMSize), layout.AbiTail)
+
 	a.out = ring.Open(layout.RingOutboxAt(a.RAMStart, a.RAMSize))
 	a.env = a.readEnv()
+	if tailErr != nil {
+		a.Logf("abi: tail window stays device-mapped (%v) — 8-byte ring copies", tailErr)
+	}
 
 	// Kreeg deze app het glas (gui/fbgrant zette FB_*), dan is dat venster DRAM
 	// en hoort het als write-combine gemapt te worden. De stage-2 van de kooi

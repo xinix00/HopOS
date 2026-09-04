@@ -123,7 +123,13 @@ func rxDue(i int) bool {
 		return false // geen netstack die de ring leest: RX is geen reden
 	}
 	headPA := ctxRead(i, layout.CtxRingHeadPA)
-	return headPA != 0 && dev.Read64(uintptr(headPA)) != door&^rxArmed
+	if headPA == 0 {
+		return false
+	}
+	// De kop staat in de staart van de app en is sinds ABI 7 gecached: eerst
+	// vegen, anders leest HOP zijn eigen oude regel (de app publiceert met Push).
+	dev.Pull(uintptr(headPA), 8)
+	return dev.Read64(uintptr(headPA)) != door&^rxArmed
 }
 
 // ctxRead leest een veld uit het ctx-blok van slot i (spiegel van ctxWrite).

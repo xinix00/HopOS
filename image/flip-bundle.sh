@@ -87,7 +87,10 @@ for V in "1:$T1" "2:$T2"; do
 		-ldflags "-w -buildid= -T ${V#*:} -R 0x1000" -o "out/flip-v${V%%:*}.elf" ./cmd/hopos
 done
 
-GO111MODULE=off go run "$DIR"/image/mkkernel/*.go -elfreloc -o "$OUT" \
+# FLIPABI=<n>: de flip-ABI in de HOPRELO1-staart (default: die van mkkernel).
+# De DRAAIENDE kern vergelijkt hem met zijn eigen kern/kernflip.ABI en weigert
+# bij verschil ("bundel spreekt flip-ABI 2, deze kern 1 — niet springen").
+GO111MODULE=off go run "$DIR"/image/mkkernel/*.go -elfreloc ${FLIPABI:+-flipabi "$FLIPABI"} -o "$OUT" \
 	-elf out/flip-v1.elf -elf out/flip-v2.elf
 rm -f out/flip-v1.elf out/flip-v2.elf
 

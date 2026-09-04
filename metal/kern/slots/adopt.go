@@ -214,6 +214,7 @@ func AdoptSlots(states []SlotState) int {
 			fmt.Printf("slot %d: %d mount(s) handed over but this kernel has no storage layer — the app will get errors\n", i, len(st.Mounts))
 		}
 
+		mapTailNormal(i, layout.AbiTailAt(st.PartBase, appRAM))
 		hopswitch.Attach(i, layout.NetRingBaseAt(st.PartBase, appRAM))
 		for _, p := range st.Ports {
 			// Zelfde paar als Start publiceert; een fout hier kost de poort,

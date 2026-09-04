@@ -345,6 +345,9 @@ func main() {
 			slots.UseFS(hopfs.NewRange(disk, first, count))
 			fmt.Printf("storage: nvme %q — %d MB of our own, LBA %d..%d — volumes available\n",
 				disk.Model, count*disk.BlockSize>>20, first, first+count-1)
+			if bootParam("hopos.nvmebench") == "1" {
+				nvmeBench(disk, first, count)
+			}
 		}
 	} else if win := board.Current().PCIe(); win.ECAMBase == 0 {
 		fmt.Println("storage: no ECAM window on this board — running without volumes (NVMe pending)")

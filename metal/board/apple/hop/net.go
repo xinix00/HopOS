@@ -16,6 +16,7 @@ import (
 
 	"github.com/xinix00/HopOS/metal/v2/board"
 	"github.com/xinix00/HopOS/metal/v2/board/apple"
+	"github.com/xinix00/HopOS/metal/v2/cpu/memattr"
 	"github.com/xinix00/HopOS/metal/v2/driver/nic/tg3"
 	"github.com/xinix00/HopOS/metal/v2/driver/pcie"
 	"github.com/xinix00/HopOS/metal/v2/net/netdev"
@@ -132,6 +133,18 @@ func (machine) ProbeNIC() (netdev.Device, net.HardwareAddr, error) {
 	}
 	nic.SetPortMode(speed, fd)
 
+	// De DMA-regio op Normal-NC: hij is van ons (PA-plan), 2MB-gealigneerd, en
+	// de tg3 kopieert elk frame ermee. Op Device-nGnRnE is dat 8 bytes per
+	// ~290ns-load: 20-28MB/s over de draad (gemeten 03-09). NC is coherent met
+	// DMA zonder onderhoud; de driver zet al een DMB tussen descriptor en bel.
+	if err := memattr.NormalNC(uintptr(apple.NetDMAPA), netDMASize); err != nil {
+		fmt.Printf("tg3: dma window stays device-mapped (%v) — 8-byte copies\n", err)
+	} else if err := memattr.NormalWB(uintptr(apple.NetDMAPA)+tg3.BufOff, tg3.BufSize); err != nil {
+		// De pakketbuffers gecached: per frame een memmove uit de cache met
+		// één invalidate (RX) of clean (TX) in de driver. Blijft het NC, dan
+		// werkt alles nog, alleen op ~100MB/s aan ongecachete loads.
+		fmt.Printf("tg3: packet buffers stay uncached (%v)\n", err)
+	}
 	if err := nic.Init(uintptr(apple.NetDMAPA), netDMASize); err != nil {
 		return nil, nil, err
 	}

@@ -39,9 +39,22 @@ func AllowDMA(paddr, size uint64) bool {
 		return false
 	}
 	base := uintptr(sart)
+	// Staat precies dit venster er al (een vorige kern van ons: elke flip
+	// vraagt dezelfde StorageDMAPA opnieuw), dan is dat het antwoord. Anders
+	// vreet elke flip een entry en na zestien staat de opslag stil met "SART
+	// would not open a window" — gemeten 03-09, twaalf flips na de power-cycle.
+	for i := uintptr(0); i < sartEntries; i++ {
+		if dev.Read32(base+sartConfig+i*4) == 0 {
+			continue
+		}
+		if uint64(dev.Read32(base+sartPAddr+i*4))<<sartShift == paddr &&
+			uint64(dev.Read32(base+sartSize+i*4))<<sartShift == size {
+			return true
+		}
+	}
 	for i := uintptr(0); i < sartEntries; i++ {
 		if dev.Read32(base+sartConfig+i*4) != 0 {
-			continue // van de firmware
+			continue // van de firmware, of van een vorige kern
 		}
 		dev.Write32(base+sartPAddr+i*4, uint32(paddr>>sartShift))
 		dev.Write32(base+sartSize+i*4, uint32(size>>sartShift))

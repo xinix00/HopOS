@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"sync"
 	"unsafe"
+
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // De tabel-layout van tamago's identity-map (arm64/mmu.go): L1 op
@@ -33,6 +35,12 @@ const (
 	// EL1-RW, attribuut-index 2 (Normal-NC) en niet-uitvoerbaar. Een
 	// framebuffer hoort nooit code te zijn.
 	ncBlock = descBlock | 1<<10 | 0x3<<8 | 0x0<<6 | ncIndex<<2 | 0x3<<53
+	// Hetzelfde blok op tamago's eigen index 1 (Normal WB, MAIR 0xFF): gecached,
+	// inner-shareable. Voor de ABI-staart van een slot: HOP en app zijn
+	// cache-coherent, alleen de EL2-switcher (MMU uit) niet — die krijgt zijn
+	// woorden via dev.Push/Pull (share_arm64.go).
+	wbIndex = 1
+	wbBlock = descBlock | 1<<10 | 0x3<<8 | 0x0<<6 | wbIndex<<2 | 0x3<<53
 )
 
 var (
@@ -50,6 +58,30 @@ var (
 // Idempotent en veilig bij herhaling: een tweede aanroep op hetzelfde venster
 // schrijft dezelfde entries.
 func NormalNC(va, size uintptr) error {
+	if err := remap(va, size, ncBlock); err != nil {
+		return err
+	}
+	// Vanaf nu is dit Normal-geheugen: dev.Copy/CopyOut mogen er memmove op
+	// doen in plaats van de 8-byte-discipline van device-geheugen.
+	dev.MarkNormal(va, size)
+	return nil
+}
+
+// NormalWB zet [va, va+size) op Normal-WB, gecached en inner-shareable —
+// gewoon geheugen dus, met memcpy-snelheid. Dezelfde grenzen en dezelfde
+// weigeringen als NormalNC. Alleen voor een venster dat beide CPU-kanten
+// delen (de ABI-staart van een slot): DMA-regio's blijven NC, want een device
+// snoopt geen cache. Wie er woorden mee deelt met een lezer zonder cache (de
+// EL2-switcher) leunt op dev.Push/Pull, die hier echt onderhoud gaan doen.
+func NormalWB(va, size uintptr) error {
+	if err := remap(va, size, wbBlock); err != nil {
+		return err
+	}
+	dev.MarkCached(va, size)
+	return nil
+}
+
+func remap(va, size uintptr, block uint64) error {
 	if size == 0 {
 		return nil
 	}
@@ -94,7 +126,7 @@ func NormalNC(va, size uintptr) error {
 	}
 	gbBase := (lo >> 30) << 30
 	for a := lo; a < hi; a += block2M {
-		l2[(a-gbBase)>>21] = uint64(a) | ncBlock
+		l2[(a-gbBase)>>21] = uint64(a) | block
 	}
 	flushTLB()
 	return nil

@@ -19,3 +19,6 @@ package memattr
 // hier een echte implementatie, niet eerder: ongebruikte MMU-code die nooit op
 // silicium liep is een belofte, geen fundament.
 func NormalNC(va, size uintptr) error { return nil }
+
+// NormalWB: idem — buiten arm64 is er geen device-mapping om te vervangen.
+func NormalWB(va, size uintptr) error { return nil }

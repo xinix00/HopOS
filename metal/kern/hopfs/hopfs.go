@@ -166,17 +166,27 @@ var errNoEnt = fmt.Errorf("hopfs: bestaat niet")
 // IsNotExist meldt of err "bestaat niet" is (voor de status-mapping).
 func IsNotExist(err error) bool { return err == errNoEnt }
 
+// alloc geeft het volgende blok, en de VOLGORDE is de doorvoer: ReadAt en
+// WriteAt bundelen opeenvolgende bloknummers tot één NVMe-opdracht
+// (contiguousRun, tot maxIOBlocks), en een bestand dat blok voor blok in
+// dalende volgorde kreeg, kost 256 opdrachten per MiB in plaats van één.
+// Precies dat deed de oude LIFO-pop van de vrijlijst: release duwt de blokken
+// van een bestand oplopend, en van achteren poppen geeft ze aflopend terug —
+// gemeten 03-09 als 160MB/s lezen en 300MB/s schrijven na de eerste Remove,
+// tegen 700MB/s op een vers bestand. Daarom eerst vers uit de teller (altijd
+// oplopend) en pas als de schijf op is de vrijlijst, van voren af, zodat een
+// vrijgegeven bestand in dezelfde volgorde terugkomt als het weg ging.
 func (f *FS) alloc() (uint32, error) {
-	if n := len(f.free); n > 0 {
-		b := f.free[n-1]
-		f.free = f.free[:n-1]
+	if f.next < f.max {
+		f.next++
+		return f.next - 1, nil
+	}
+	if len(f.free) > 0 {
+		b := f.free[0]
+		f.free = f.free[1:]
 		return b, nil
 	}
-	if f.next >= f.max {
-		return 0, fmt.Errorf("hopfs: schijf vol (%d blokken)", f.max)
-	}
-	f.next++
-	return f.next - 1, nil
+	return 0, fmt.Errorf("hopfs: schijf vol (%d blokken)", f.max)
 }
 
 func (f *FS) lba(block uint32) uint64 {

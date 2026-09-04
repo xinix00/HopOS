@@ -195,6 +195,10 @@ func Attach(i int, netPA uintptr) {
 		tx: ring.Open(netPA + layout.NetTXOff),
 		rx: ring.Open(netPA + layout.NetRXOff),
 	}
+	// De kop van de RX-ring is CtxRingHeadPA: de EL2-switcher peekt hem
+	// zonder MMU bij de rotatie (cpu/el2/switch.s), dus die kop moet bij elke
+	// publicatie het geheugen halen — ook nu de staart gecached is (ABI 7).
+	ports[i].rx.SetPeeked()
 }
 
 // Detach ontkoppelt slot i. Keert pas terug als de switch-lus de ringen

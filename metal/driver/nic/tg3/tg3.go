@@ -460,12 +460,22 @@ const (
 	offRxStd  = 0x1000 // producer-ring
 	offRxRet  = offRxStd + rxStdRing*rxDescSize
 	offTxBD   = offRxRet + rxRetRing*rxDescSize
-	offRxBuf  = 0x20000 // pakketbuffers
-	offTxBuf  = offRxBuf + rxStdRing*rxBufSize
+	// Pakketbuffers op een eigen 2MB-grens: descriptors, status-blok en ringen
+	// blijven in het eerste blok (device/NC, per woord gepold), de buffers
+	// kan het board gecached mappen (memattr.NormalWB) — dan is de kopie per
+	// frame een memmove uit de cache, met één invalidate na DMA-in (Receive)
+	// en één clean vóór DMA-uit (Transmit) via dev.Pull/Push. RX en TX samen
+	// zijn precies 2MB.
+	offRxBuf = 0x200000 // pakketbuffers
+	offTxBuf = offRxBuf + rxStdRing*rxBufSize
 
 	// NeedBytes is wat de driver aan DMA-geheugen vraagt (het board reserveert
 	// het in zijn PA-plan; op Apple is dat NetDMAPA/NetDMASize).
 	NeedBytes = offTxBuf + txRing*rxBufSize
+	// BufOff/BufSize: het bufferblok (RX + TX), voor het board dat het
+	// gecached wil mappen (2MB-grens en -maat, wat memattr eist).
+	BufOff  = offRxBuf
+	BufSize = NeedBytes - offRxBuf
 
 	// Registers voor de ringen (tg3.h).
 	// LET OP de twee vensters: 0x78/0x80 is het REGISTER-venster,
@@ -939,6 +949,7 @@ func (n *Net) Receive(buf []byte) (int, error) {
 	if flags&rxdFlagError != 0 || errVLAN&rxdErrMask != 0 || length < 14 || length > len(buf) {
 		return 0, nil // stuk frame of te groot voor de aanroeper: laten vallen
 	}
+	dev.Pull(src, uintptr(length)) // gecachte buffer: de DMA-inhoud uit onze cache halen
 	dev.CopyOut(buf[:length], src)
 	return length, nil
 }
@@ -958,6 +969,7 @@ func (n *Net) Transmit(buf []byte) error {
 
 	dst := n.r.dma + offTxBuf + uintptr(n.r.txProd)*rxBufSize
 	dev.Copy(dst, buf)
+	dev.Push(dst, uintptr(len(buf))) // gecachte buffer: naar het geheugen vóór de descriptor
 	d := n.r.dma + offTxBD + uintptr(n.r.txProd)*txDescSize
 	dev.Write32(d+0, uint32(uint64(dst)>>32))
 	dev.Write32(d+4, uint32(dst))
