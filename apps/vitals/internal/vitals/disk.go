@@ -15,9 +15,6 @@ package vitals
 import (
 	"bytes"
 	"fmt"
-	"github.com/xinix00/HopOS/metal/v2/app/applib/appnet"
-	"github.com/xinix00/HopOS/metal/v2/cpu/idle"
-	"github.com/xinix00/HopOS/metal/v2/dev"
 	"io"
 	"net/url"
 	"time"
@@ -269,60 +266,13 @@ func (s *Server) runSyscall(res *Result, q url.Values) {
 			time.Sleep(time.Duration(qInt(q, "gap", 0, 0, 5000)) * time.Millisecond)
 		}
 		lat := make([]float64, 0, n)
-		// Splitsing per call: tot de pomp het antwoord-frame uit de ring haalde
-		// (verzoek + HOP + wek van de pomp) en daarna (pomp → deze goroutine).
-		var toTX, txToPump, afterPump []float64
 		for k := 0; k < n; k++ {
 			t := time.Now()
 			if _, err := s.cfg.FS.Stat(path); err != nil {
 				res.Err = fmt.Sprintf("stat: %v", err)
 				return
 			}
-			t3 := time.Now()
-			lat = append(lat, t3.Sub(t).Seconds()*1e6)
-			t1, t2 := appnet.LastTXNs.Load(), appnet.LastRXNs.Load()
-			if t1 >= t.UnixNano() && t1 <= t2 && t2 <= t3.UnixNano() {
-				toTX = append(toTX, float64(t1-t.UnixNano())/1e3)
-				txToPump = append(txToPump, float64(t2-t1)/1e3)
-				afterPump = append(afterPump, float64(t3.UnixNano()-t2)/1e3)
-			}
-		}
-		// Klok-sonde: CNTVCT in het pad van een stat, HOP meet verzoek →
-		// servicer met dezelfde teller (hopos.idlestat: "probe req").
-		if !q.Has("noprobe") {
-			plat := make([]float64, 0, n)
-			hz := float64(idle.CounterHz())
-			var b [5]int
-			for k := 0; k < n; k++ {
-				c0 := dev.Counter()
-				s.cfg.FS.Stat(fmt.Sprintf("/vitals-probe.%d", c0)) // bestaat niet; de fout is de bedoeling
-				us := float64(dev.Counter()-c0) / hz * 1e6
-				plat = append(plat, us)
-				switch {
-				case us < 50:
-					b[0]++
-				case us < 100:
-					b[1]++
-				case us < 500:
-					b[2]++
-				case us < 1000:
-					b[3]++
-				default:
-					b[4]++
-				}
-			}
-			res.add("probe stat p50", pct(plat, 50), "µs")
-			res.add("probe stat p99", pct(plat, 99), "µs")
-			res.add("probe stat max", pct(plat, 100), "µs")
-			res.linef("probe: counter %.0f Hz, total %d/%d/%d/%d/%d [<50/<100/<500/<1000/≥1000 µs]", hz, b[0], b[1], b[2], b[3], b[4])
-		}
-		if len(toTX) > 0 {
-			res.add("to-tx p50", pct(toTX, 50), "µs")
-			res.add("to-tx p99", pct(toTX, 99), "µs")
-			res.add("tx-to-pump p50", pct(txToPump, 50), "µs")
-			res.add("tx-to-pump p99", pct(txToPump, 99), "µs")
-			res.add("after-pump p99", pct(afterPump, 99), "µs")
-			res.add("split n", float64(len(toTX)), "")
+			lat = append(lat, time.Since(t).Seconds()*1e6)
 		}
 		res.add("stat p50", pct(lat, 50), "µs")
 		res.add("stat p99", pct(lat, 99), "µs")

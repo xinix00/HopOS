@@ -42,14 +42,17 @@ func resetNAT() {
 // modelleert device-geheugen en wordt na het loskoppelen automatisch opgeruimd.
 func testSlotRing(t *testing.T, i int) func() []byte {
 	t.Helper()
-	buf := testDeviceMemory(t, 64<<10)
+	buf := testDeviceMemory(t, 512<<10)
 	base := testDeviceAddress(buf)
-	ring.Init(base, 32<<10)
+	ring.Init(base, 256<<10)
+	ring.Init(base+256<<10, 256<<10)
 	mu.Lock()
 	if len(ports) == 0 {
 		ports = make([]*port, layout.MaxSlots+1)
 	}
-	pt := &port{rx: ring.Open(base)}
+	// Ook een TX-ring: zonder loopt de switch-pas op nil en slikt zijn
+	// recover dat — de test slaagde dan met een PANIC-regel (review 05-09).
+	pt := &port{rx: ring.Open(base), tx: ring.Open(base + 256<<10)}
 	ports[i] = pt
 	mu.Unlock()
 	t.Cleanup(func() {

@@ -12,11 +12,13 @@ import (
 
 func testHostPort(t *testing.T) *hostDevice {
 	t.Helper()
-	txMem := testDeviceMemory(t, 64<<10)
-	rxMem := testDeviceMemory(t, 64<<10)
+	// Ringen van 256 KiB: een record mag hoogstens de halve ring zijn, en de
+	// grootste LAN-frame is sinds de jumbo-MTU 65553 bytes (layout.NetMTU).
+	txMem := testDeviceMemory(t, 512<<10)
+	rxMem := testDeviceMemory(t, 512<<10)
 	txBase, rxBase := testDeviceAddress(txMem), testDeviceAddress(rxMem)
-	ring.Init(txBase, 32<<10)
-	ring.Init(rxBase, 32<<10)
+	ring.Init(txBase, 256<<10)
+	ring.Init(rxBase, 256<<10)
 	d := &hostDevice{tx: ring.Open(txBase), rx: ring.Open(rxBase)}
 	mu.Lock()
 	if len(ports) == 0 {
@@ -173,11 +175,22 @@ func TestRXWakeAlleenOpLeegNaarNietLeeg(t *testing.T) {
 	}
 }
 
-func TestSwitchPendingBeltConservatiefBijLockContention(t *testing.T) {
+// switchPending leest sinds 04-09 zónder slot: een TryLock is een CAS, en
+// een exclusive zet op de M4 het event-register, waarna HOP's WFE meteen
+// terugkeert (1,7M rondes/s). Onder lock-contention belt hij dus niet meer
+// conservatief, maar meldt hij wat er werkelijk in de TX-ringen ligt.
+func TestSwitchPendingLeestOnderLockContention(t *testing.T) {
+	testSlotRing(t, 1)
 	mu.Lock()
 	defer mu.Unlock()
+	if switchPending() {
+		t.Fatal("niets in de TX-ringen, maar de bel gaat")
+	}
+	if !ports[1].tx.Write(ring.TypeFrame, make([]byte, 64)) {
+		t.Fatal("testframe past niet in de TX-ring")
+	}
 	if !switchPending() {
-		t.Fatal("lock contention must preserve a possible producer doorbell")
+		t.Fatal("frame in de TX-ring, maar de bel zwijgt onder lock-contention")
 	}
 }
 

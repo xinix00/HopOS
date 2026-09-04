@@ -149,13 +149,13 @@ tegelijk de best te bewijzen: elke app-start loopt erdoorheen.
 - **Twee cores op de M4 — de crash is OPGELOST (03-09)**: de RX-doorbell wekte
   de pomp-goroutine met tamago's `WakeG`, dat de timer-heap zonder lock
   herschrijft; op twee cores sloopt de ene core zo de heap van de andere.
-  Nu `runtime.WakeSleeper` in de tamago-go-fork
-  (`tools/tamago-go/0001-runtime-wakesleeper.patch`): onder de timer-lock,
+  Nu `runtime.IdleMayReady` plus de sysmon-lite (`NextTimer`/`RunIdleTimers`) in de tamago-go-fork
+  (`tools/tamago-go/0001-runtime-idlehook.patch`): onder de timer-lock,
   alleen een nog lopende slaap. Bewijs: 2 cores, 150 s load, 5440 requests,
   0 fouten.
 - **Yield-idle voor SMP-apps — GEBOUWD EN OP DE M4 BEWEZEN (03-09)**: de
   Linux-vorm, een reschedule-IPI. De runtime wekt een slapende sibling via
-  `goos.Wake` (semawakeup, preemptM, WakeSleeper), `cpu/smp` maakt er HVC #4
+  `goos.Wake` (semawakeup, preemptM, RunIdleTimers), `cpu/smp` maakt er HVC #4
   van, en de switcher wekt de sibling (`CtxKickTarget`, `CtxUnitSlot`,
   `CtxWakes`). De echte fout eronder: de switcher zocht de bewoner via de
   VMID, en een tweede core deelt die van zijn primaire — nu `SchedCurrent`.

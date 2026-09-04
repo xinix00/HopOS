@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"github.com/xinix00/HopOS/metal/v2/net/hopswitch"
 	"runtime"
-	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/xinix00/HopOS/metal/v2/board"
@@ -76,33 +74,13 @@ func idleStat() {
 			float64(wr1-wr0)/dt, float64(wa1-wa0)/dt, float64(wk1-wk0)/dt, float64(dk1-dk0)/dt,
 			float64(sw1-sw0)/dt, float64(nr1-nr0)/dt, float64(wi1-wi0)/dt, float64(s1-s0)/dt)
 		fmt.Printf("idle: cores%s\n", slots.CoreDump())
-		fmt.Printf("idle: rx notify %s; fallback after %s\n", rxReasons(&slots.RXNotify), rxReasons(&slots.RXFallbackAfter))
 		ts := hopnet.Stats()
 		fmt.Printf("idle: hop tcp retrans %d, fast %d, persist %d, zero-window %d; segs out %d (%d B) in %d (%d B); drops bad %d short %d noport %d replyfull %d\n", ts.TCPRetransmits, ts.TCPFastRetransmits, ts.TCPPersistProbes, ts.TCPZeroWindows, ts.TCPSegsOut, ts.TCPBytesOut, ts.TCPSegsIn, ts.TCPBytesIn, ts.DropBadFrame, ts.DropShortFrame, ts.DropNoPort, ts.DropReplyFull)
-		if hz := idle.CounterHz(); hz > 0 {
-			fmt.Printf("idle: hop stages: switch %d ms, stack %d ms (%d frames), svc %d ms (cumulative)\n", hopswitch.SwitchTicks.Load()*1000/hz, hopnet.StackTicks.Load()*1000/hz, hopnet.StackFrames.Load(), slots.SvcTicks.Load()*1000/hz)
-		}
 		var ms runtime.MemStats
 		runtime.ReadMemStats(&ms)
 		fmt.Printf("idle: switch work by door %d, by failsafe timer %d; rx full %d, rx drops %d, nat oversize %d; hop gc %d\n", hopswitch.WorkByDoor.Load(), hopswitch.WorkByTimer.Load(), hopswitch.RXFull.Load(), hopswitch.RXDrops.Load(), hopswitch.NATOversize.Load(), ms.NumGC)
-		slots.ProbeHz = idle.CounterHz()
-		if hz := slots.ProbeHz; hz > 0 {
-			fmt.Printf("idle: probe req %s (max %d µs); svc %s [<50/<100/<500/<1000/≥1000 µs]\n", slots.ProbeBuckets(&slots.ProbeReq), slots.ProbeMaxReq.Load()*1e6/hz, slots.ProbeBuckets(&slots.SvcBuckets))
-		}
 
 		w0, t0, i0, r0, at = w1, t1, i1, r1, now
 		wr0, wa0, wk0, dk0, sw0, nr0, wi0, s0 = wr1, wa1, wk1, dk1, sw1, nr1, wi1, s1
 	}
-}
-
-// rxReasons: de kick-meetlat van kern/slots als "kick=N disarmed=N ...".
-func rxReasons(c *[4]atomic.Uint64) string {
-	var b strings.Builder
-	for i, n := range slots.RXReasonNames {
-		if i > 0 {
-			b.WriteByte(' ')
-		}
-		fmt.Fprintf(&b, "%s=%d", n, c[i].Load())
-	}
-	return b.String()
 }

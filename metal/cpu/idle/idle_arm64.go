@@ -27,9 +27,8 @@ import (
 	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
-// wfeIdle/hvcYield/cntkctlSet/cntfrq/counterNow/mmfr0/wfiUntil: zie idle_arm64.s.
+// wfeIdle/hvcYield/cntkctlSet/cntfrq/counterNow/mmfr0: zie idle_arm64.s.
 func wfeIdle() uint64
-func wfiUntil(ticks uint64) uint64
 func hvcYield(deadline uint64) uint64
 func cntkctlSet(v uint64)
 func cntfrq() uint64
@@ -75,15 +74,11 @@ func Enable() {
 	if t := hz / 500_000; t > wfeMinSleep {
 		wfeMinSleep = t
 	}
-	timerCap = hz / 1000 // 1ms, de bovengrens van één deadline-slaap
 	if sleeper == nil {
 		sleeper = WFESleep
 	}
 	goos.Idle = governor
 }
-
-// timerCap is de bovengrens van één deadline-slaap (WFISleep), in ticks.
-var timerCap uint64
 
 // WFESleep is de default-Sleeper: WFE's tot er écht geslapen is, met de
 // counterstand eromheen. De lus is nodig omdat het event-register vrijwel
@@ -130,34 +125,6 @@ func pending() bool {
 	return false
 }
 
-// WFISleep is de Sleeper voor silicium waar WFE ín de scheduler-lus niet
-// slaapt: eerst de WFE-drain, en leverde die niets op, dan de FYSIEKE TIMER
-// als deadline (WFI met CNTP_TVAL). Alleen kiezen (Use) waar het board dit
-// gemeten heeft — WFI raakt de interrupt-wereld van het board (een pending
-// interrupt die niemand afhandelt maakt hem een no-op, een timer-FIQ die de
-// core niet bereikt maakt hem een eeuwige slaap) en QEMU-TCG modelleert hem
-// anders dan ijzer.
-//
-// WAAROM DIT BESTAAT (gemeten 29-08, Mac mini M4). Een kale burst van 1000
-// WFE's sliep daar keurig 1,046ms per stuk: de event-stream doet zijn werk.
-// Maar ín de governor keerde elke WFE meteen terug — 3,3M idle-rondes per
-// seconde met 120ns "slaap" per ronde. Het verschil is de Go-scheduler
-// eromheen: elke exclusive (LDAXR/STLXR in findRunnable) zet het event-
-// register, dus er staat áltijd een event klaar en de drain-lus van vier
-// verliest die race. WFI kent dat probleem niet — die wacht op een echte
-// interrupt-gebeurtenis, en de fysieke timer levert er precies één: gemeten
-// 1.000163 ticks voor een deadline van 1ms, en 5.000133 voor 5ms.
-func WFISleep(wake uint64) uint64 {
-	slept := WFESleep(wake)
-	// Een WFI is doof voor SEV: wat er ná deze check binnenkomt ligt tot de
-	// timer (≤ timerCap). Daarom kiest een board dit alleen als WFE er niet
-	// slaapt — zie board/apple (04-09: op de M4 slaapt WFE op EL2 wél).
-	if slept < wfeMinSleep && !pending() {
-		slept += sleepUntil(wake)
-	}
-	return slept
-}
-
 // yieldSleep is de Sleeper voor silicium waar een app-core op EL1 niet kan
 // slapen (de M4, gemeten 02-09: WFE keert direct terug en geen FIQ wekt een
 // WFI — timer noch IPI). De slaap gebeurt dan waar hij wél werkt: op EL2,
@@ -166,25 +133,6 @@ func WFISleep(wake uint64) uint64 {
 // wekker kickt hem met een IPI als de wektijd (CtxWake) verstreken is of er
 // RX ligt: m1n1's park-recept op ditzelfde silicium, met de wekker in HOP.
 func yieldSleep(wake uint64) uint64 { return hvcYield(wake) }
-
-// sleepUntil slaapt tot de wektijd (absolute counterstand; 0 = geen deadline),
-// begrensd op timerCap, en geeft de werkelijk verstreken ticks terug.
-func sleepUntil(wake uint64) uint64 {
-	d := timerCap
-	if wake != 0 {
-		now := counterNow()
-		if wake <= now {
-			return 0 // deadline al verstreken: niet slapen
-		}
-		if r := wake - now; r < d {
-			d = r
-		}
-	}
-	if d == 0 {
-		return 0
-	}
-	return wfiUntil(d)
-}
 
 // CounterHz is de eenheid van de teller: generic-timer-ticks per seconde
 // (CNTFRQ). Een vólledig idle core accumuleert ~CounterHz per seconde —
@@ -221,7 +169,7 @@ func governor(pollUntil int64) {
 	// Een M zonder P is geen idle-core maar een wachter (runtime semasleep:
 	// een mutex-wachter, een M in stopm tijdens een stop-the-world) — dat
 	// komt alleen op een SMP-app voor. Voor hem alleen de slaap: geen
-	// doorbell, geen WakeSleeper, niets dat een P nodig heeft (zie waitSleep).
+	// doorbell, geen bel, niets dat een P nodig heeft (zie waitSleep).
 	if _, pp := runtime.GetG(); pp == 0 {
 		waitSleep(pollUntil)
 		return
@@ -236,12 +184,13 @@ func governor(pollUntil int64) {
 		waitSleep(pollUntil)
 		return
 	}
-	// Re-entrantie: de governor kan zichzelf aanroepen — WakeSleeper neemt de
-	// timer-lock, en is die bezet (de andere core), dan slaapt lock2 via
-	// semasleep → goos.Idle → hier. Dan alleen slapen; de unlocker kickt ons
-	// (semawakeup → goos.Wake). Anders: governor → WakeSleeper → lock2 →
-	// semasleep → governor → … tot de stack op is, terwijl de andere core
-	// 200 miljoen keer per twee minuten kickt (QEMU 03-09, gdb-stackwalk).
+	// Re-entrantie: de governor kan zichzelf aanroepen — de bel is een
+	// kanaal-send en die neemt het kanaal-slot, en is dat bezet (de andere
+	// core), dan slaapt lock2 via semasleep → goos.Idle → hier. Dan alleen
+	// slapen; de unlocker kickt ons (semawakeup → goos.Wake). Anders:
+	// governor → bel → lock2 → semasleep → governor → … tot de stack op is,
+	// terwijl de andere core 200 miljoen keer per twee minuten kickt (QEMU
+	// 03-09, gdb-stackwalk, toen nog met de timer-lock).
 	c := coreIndex()
 	if nested[c].Swap(true) {
 		waitSleep(pollUntil)
@@ -263,20 +212,15 @@ func governor(pollUntil int64) {
 	// onze P), en anders hoogstens tot de vroegste timer van élke P slapen.
 	ran, kicked, now := runtime.RunIdleTimers()
 	if ran {
-		IdleTimersRun.Add(1)
 		countWake()
 		return
 	}
 	if nt := runtime.NextTimer(); nt != 0 && (pollUntil == 0 || nt < pollUntil) {
-		if pollUntil != 0 && pollUntil-nt > 1e6 {
-			YieldFarWake.Add(1)
-		}
 		pollUntil = nt
 	}
 	if kicked {
 		// De eigenaar is gekickt en draait zijn timer zo; niet zelf op die
 		// (verstreken) wektijd blijven hangen — dat is een spin op de HVC.
-		IdleTimersKick.Add(1)
 		if min := now + 200e3; pollUntil < min {
 			pollUntil = min
 		}
@@ -317,7 +261,7 @@ func applyIdleMode(mode uint64) { yieldMode.Store(mode&layout.IdleYield != 0) }
 
 // waitSleep is de slaap van een M zonder P (runtime semasleep: een
 // mutex-wachter, een M in stopm tijdens een stop-the-world). Niets van de
-// governor: geen doorbell, geen WakeSleeper, geen pointer-store (een write
+// governor: geen doorbell, geen bel, geen pointer-store (een write
 // barrier leest daar p.wbBuf van een nil P — de stage-2-fault van 03-09).
 // Alleen slapen tot de wektijd of tot een sibling hem via goos.Wake kickt
 // (semawakeup) — dat is wat zo'n wachter nodig heeft. Zonder yield: de Sleeper.
@@ -338,7 +282,3 @@ func coreIndex() int {
 	m := dev.MPIDR()
 	return int(m&0xF) | int((m>>8)&0x3)<<4
 }
-
-// IdleTimersRun: de governor draaide een due timer van een idle P (sysmon-
-// lite); YieldFarWake: de eigen pollUntil lag > 1 ms voorbij zo'n timer.
-var IdleTimersRun, IdleTimersKick, YieldFarWake atomic.Uint64

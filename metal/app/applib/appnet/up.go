@@ -98,9 +98,9 @@ func Up(a *applib.App) (string, error) {
 	// zijn hele core slapen (zie metal/cpu/idle). Hoe lang die slaap is,
 	// bepaalt rxPoll (default = de vaste 300µs die hier altijd stond) — maar
 	// de slaap is sinds de doorbell een BODEM, geen latency meer: de
-	// idle-governor wapent een wek-drempel op de control-page en wekt deze
-	// goroutine (runtime.WakeSleeper) zodra de switcher of een eigen idle-ronde
-	// verkeer ziet (idle/rxdoor.go). De cap mag dus groot.
+	// pomp wapent een wek-drempel op de control-page en de governor of de
+	// doorbell-ISR belt hem zodra de switcher of een eigen idle-ronde verkeer
+	// ziet (idle/rxdoor.go). De cap mag dus groot.
 	idle.WatchRXRing(
 		layout.CtrlPageAt(a.RAMStart, a.RAMSize)+layout.CtrlRXDoor,
 		nd.rx.HeadPending)
@@ -128,9 +128,6 @@ func Up(a *applib.App) (string, error) {
 		corruptLogged := false
 		for {
 			n, err := nd.Receive(buf)
-			if n > 0 {
-				LastRXNs.Store(time.Now().UnixNano())
-			}
 			if n == 0 || err != nil {
 				// Een dode ring is stil: ReadInto geeft niets meer, HeadPending
 				// blijft "ja". Eén regel met de reden, anders is dat een
@@ -154,16 +151,6 @@ func Up(a *applib.App) (string, error) {
 						}
 					case <-timer.C:
 						PumpTimer.Add(1)
-						if _, pending := nd.rx.HeadPending(); pending {
-							PumpTimerData.Add(1)
-							PumpMissNs.Add(uint64(d))
-							for {
-								m := PumpMissMaxNs.Load()
-								if uint64(d) <= m || PumpMissMaxNs.CompareAndSwap(m, uint64(d)) {
-									break
-								}
-							}
-						}
 					}
 				}
 				idle.PumpAwake()

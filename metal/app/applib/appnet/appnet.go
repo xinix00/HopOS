@@ -36,23 +36,15 @@ var errTXRingFull = errors.New("appnet: TX ring bleef vol")
 // Tellers van het transport, voor een app die ze wil tonen (vitals):
 // TXWaits = Transmit trof de ring vol en wachtte; TXDrops = na txBackpressure
 // alsnog opgegeven (de stack ziet een device-fout, TCP herstelt met RTO);
-// PumpEarly = de pomp is vóór zijn timer gewekt (kick); PumpTimer = de timer
-// liep af, PumpTimerData = ... en er lag al RX (een gemiste kick).
-var TXWaits, TXDrops, PumpEarly, PumpTimer, PumpTimerData, PumpMissNs, PumpMissMaxNs atomic.Uint64
-
-// LastRXNs: wanneer de pomp zijn laatste frame uit de ring haalde (UnixNano);
-// een meetlat om een call-latentie te splitsen in vóór en ná de pomp.
-var LastRXNs atomic.Int64
-
-// LastTXNs: wanneer Transmit zijn laatste frame in de ring zette (UnixNano).
-var LastTXNs atomic.Int64
+// PumpEarly = de pomp is vóór zijn timer gewekt (de bel); PumpTimer = de
+// poll-timer liep af.
+var TXWaits, TXDrops, PumpEarly, PumpTimer atomic.Uint64
 
 // Counters geeft de tellers als map, voor een status-pagina.
 func Counters() map[string]uint64 {
 	m := map[string]uint64{
 		"tx_waits": TXWaits.Load(), "tx_drops": TXDrops.Load(),
-		"pump_early": PumpEarly.Load(), "pump_timer": PumpTimer.Load(), "pump_timer_data": PumpTimerData.Load(),
-		"pump_miss_us": PumpMissNs.Load() / 1000, "pump_miss_max_us": PumpMissMaxNs.Load() / 1000,
+		"pump_early": PumpEarly.Load(), "pump_timer": PumpTimer.Load(),
 	}
 	if st := current; st != nil {
 		ts := st.Stats()
@@ -95,9 +87,6 @@ func (n *nic) Transmit(buf []byte) error {
 		if ok {
 			if notify {
 				dev.Notify()
-			}
-			if len(buf) > 64 { // geen kale ACK: de stempel hoort bij een verzoek
-				LastTXNs.Store(time.Now().UnixNano())
 			}
 			return nil
 		}

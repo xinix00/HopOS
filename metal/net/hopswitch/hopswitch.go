@@ -270,9 +270,6 @@ var WorkByDoor, WorkByTimer atomic.Uint64
 // (na txBackpressure, en elk frame daarna tot er weer ruimte is).
 var RXFull, RXDrops atomic.Uint64
 
-// SwitchTicks: tellerticks doorgebracht in switch-passes (meetlat, idlestat).
-var SwitchTicks atomic.Uint64
-
 func switchPending() bool {
 	// Zonder slot, met kale loads. Dit draait in de idle-governor tussen
 	// twee WFE's (cpu/idle WFESleep), en een TryLock is een CAS — een
@@ -317,8 +314,6 @@ func switchPass(buf []byte) (worked bool) {
 }
 
 func switchPassLocked(buf []byte) (worked bool) {
-	t0 := dev.Counter()
-	defer func() { SwitchTicks.Add(dev.Counter() - t0) }()
 	mu.Lock()
 	defer func() {
 		mu.Unlock()

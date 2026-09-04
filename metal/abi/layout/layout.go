@@ -376,10 +376,6 @@ const (
 	// schrijver, en de switcher leest deze regel al vers (cipa) op elk pad dat
 	// hem nodig heeft.
 	CtxRingHeadPA = 520
-	// CtxLastPC: de EL1-PC waarop de switcher deze core het laatst met een
-	// IPI onderbrak (ELR_EL2 in fiq:, switch.s) — een steekproef van "wat
-	// doet een draaiende core" voor HOP's stilstand-log (kern/slots/waker.go).
-	CtxLastPC = 528
 	// CtxKickPending: een sibling-wek (HVC #4, switch.s wake:) kwam terwijl
 	// deze core nog draaide of net aan het yielden was. Zonder dit woord ging
 	// de wek verloren: wake: zet CtxWake op "nu", maar een yield die daarna
@@ -387,6 +383,9 @@ const (
 	// (waitSleep, wektijd oneindig) sliep dan tot een volgende toevallige
 	// kick: seconden stilstand met alles runnable (2-core-app, 04-09). De
 	// yield leest het woord ná zijn schrijf en maakt er "nu" van; resume wist.
+	// Volgorde in wake:: eerst dit woord, DSB, dan CtxWake — anders kon de
+	// yield het woord nog als 0 zien terwijl zijn wektijd wake's 0 al had
+	// overschreven.
 	CtxKickPending = 536
 
 	// CtxLen is hoeveel een verse init van het ctx-blok moet nullen: het hele

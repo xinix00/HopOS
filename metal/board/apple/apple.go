@@ -163,24 +163,6 @@ func hwinit1() {
 	// vereist CNTHCTL_EL2.EL1PCTEN — cpuinit.s zet die in beide lay-outs.
 	ARM64.InitGenericTimers(0, 0)
 	idle.Enable()
-	// De deadline-slaap (WFI op de fysieke timer) aanzetten: op dit silicium
-	// keert WFE ín de scheduler-lus meteen terug (3,3M idle-rondes/s) terwijl
-	// WFI met een timer-deadline exact slaapt — beide gemeten met cmd/probeapple
-	// op 29-08, zie docs/archief/apple-m4.md. Ná Enable: die zet de cap.
-	//
-	// Maar alleen als de timer-FIQ deze core ook echt bereikt. Op t8132 is dat
-	// niet vanzelfsprekend: op een core die de firmware niet zelf configureerde
-	// gáát de timer wel af (ISTATUS wordt 1) maar wekt hij niet, en het register
-	// dat die poort opent is vergrendeld. WFI is dan een eeuwige slaap. Meten,
-	// niet aannemen — TimerWakes doet dat zonder ooit te kunnen hangen.
-	// 04-09: NIET meer gekozen. De 3,3M rondes/s van 29-08 waren de te lage
-	// wfeMinSleep op een 1GHz-teller (zie cpu/idle: 64 ticks = 64ns), sinds
-	// die schaalt slaapt WFE op EL2 hier gewoon op de event-stream. En WFI is
-	// doof voor SEV: elke dev.Notify van een app die tijdens de WFI-fase viel
-	// lag tot de timer — 6% van de system calls van een 2-core-app deed er
-	// 1ms over (klok-sonde 04-09). TimerWakes blijft de meting (en de deadline-
-	// slaap staat klaar voor een board waar WFE niet slaapt).
-	_ = TimerWakes()
 }
 
 //go:linkname nanotime runtime/goos.Nanotime

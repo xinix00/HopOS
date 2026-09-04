@@ -22,7 +22,7 @@ Legenda: ✅ bedraad én bewezen op dit board · 🟡 fallback of gat dat het si
 | Cores.State | ✅ PSCI | 🟡 eigen boekhouding, niet silicium | ✅ | ✅ | ✅ | ✅ | ✅ reset-blok |
 | App-core idle | ⚪ WFE, TCG slaapt niet; hoort erbij | ✅ IdleYield, EL2-WFI, 0% | ❓ WFE default | ❓ WFE default | ❓ WFE default | ✅ WFE, P2b gemeten | ✅ ecall naar M-mode, wfi op CLINT |
 | Kick | ⚪ event-stream wekt zelf | ✅ fast IPI | ⚪ | ⚪ | ⚪ | ⚪ | ⚪ CLINT core-lokaal, cap 2 ms |
-| HOP-core idle | ⚪ WFESleep, warm by design | ✅ WFISleep mits TimerWakes | ❓ WFESleep default | ❓ | ❓ | ✅ | ✅ MSleep mits CLINT-probe |
+| HOP-core idle | ⚪ WFESleep, warm by design | ✅ WFESleep (WFI was doof voor SEV, 04-09) | ❓ WFESleep default | ❓ | ❓ | ✅ | ✅ MSleep mits CLINT-probe |
 | NIC-interrupt | ✅ GICv3 + virtio-SPI | 🟡 **poll**, AIC + MSI open | 🟡 **poll** | 🟡 **poll** | 🟡 **poll** | 🟡 **poll** | 🟡 **poll** |
 | HartTimerer | ⚪ | ⚪ | ⚪ | ⚪ | ⚪ | ⚪ | ✅ probe per boot |
 | SMP-app | ✅ 03-09 | ✅ 03-09 | ❓ | ❓ | ❓ | ❓ | ⚪ één app-hart |

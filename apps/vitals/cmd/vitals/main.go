@@ -32,9 +32,7 @@
 package main
 
 import (
-	"fmt"
 	"runtime"
-	"time"
 
 	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 	"github.com/xinix00/HopOS/metal/v2/app/applib"
@@ -115,31 +113,11 @@ func main() {
 		Counters: func() map[string]uint64 {
 			m := appnet.Counters()
 			m["door_irqs"], m["door_irq_woken"] = idle.DoorIRQs.Load(), idle.DoorIRQWoken.Load()
-			m["door_gov_woken"], m["door_gov_failed"], m["door_gov_remote"] = idle.DoorWoken.Load(), idle.DoorWakeFailed.Load(), idle.DoorWokenRemote.Load()
-			m["door_ws_idlep"], m["door_ws_self"] = idle.WakeSleeperIdleP(), idle.WakeSleeperSelf()
-			m["idle_timers_run"], m["yield_far_wake"] = idle.IdleTimersRun.Load(), idle.YieldFarWake.Load()
-			m["idle_timers_kick"] = idle.IdleTimersKick.Load()
+			m["door_gov_woken"], m["door_gov_failed"] = idle.DoorWoken.Load(), idle.DoorWakeFailed.Load()
 			return m
 		},
 	})
 	srv.Start()
-	// Starvation-detector (jacht 04-09): slaapt 50 ms; wordt hij > 200 ms te
-	// laat wakker, dan kwam geen enkele core aan de scheduler toe — dump dan
-	// meteen alle goroutine-stacks naar het log (hoogstens drie keer).
-	go func() {
-		dumps := 0
-		buf := make([]byte, 64<<10)
-		for {
-			t := time.Now()
-			time.Sleep(50 * time.Millisecond)
-			if late := time.Since(t) - 50*time.Millisecond; late > 200*time.Millisecond && dumps < 3 {
-				dumps++
-				n := runtime.Stack(buf, true)
-				vitals.SetStall(fmt.Sprintf("STALL %d at %s: sampler woke %v late\n%s", dumps, time.Now().Format(time.RFC3339), late, buf[:n]))
-				app.Logf("STALL %d: sampler woke %v late (dump in /api/state)", dumps, late)
-			}
-		}
-	}()
 
 	app.Logf("vitals %s: serving on %s:%s (slot %d, %s, %d core(s))",
 		version, ip, port, app.Slot, runtime.GOARCH, runtime.NumCPU())

@@ -25,7 +25,7 @@ import (
 
 // slotRingCap is de datacapaciteit per richting in deze test: ruim voor een
 // handshake plus wat data, klein genoeg om per test te alloceren.
-const slotRingCap = 32 << 10
+const slotRingCap = 256 << 10 // ≥ 2× de grootste LAN-frame (jumbo, 65553 B)
 
 // slotNIC is de app-kant van de frame-ringen: schrijven in TX (die de switch
 // leest), lezen uit RX (waar de switch bezorgt). Dit is dezelfde vorm als de

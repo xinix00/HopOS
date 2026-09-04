@@ -121,7 +121,7 @@ func Configure(prim, cores int, ctrl uintptr) {
 	// die idlet slaapt op EL2 en is daar voor de runtime onbereikbaar; alles
 	// wat de scheduler naar een andere M stuurt — semawakeup (wakep, notes,
 	// netpoll-break), preemptM (stop-the-world) en een timer op diens heap
-	// (WakeSleeper) — loopt door goos.Wake, en dat wordt hier HVC #4 naar de
+	// (de bel van de RX-pomp) — loopt door goos.Wake, en dat wordt hier HVC #4 naar de
 	// switcher (cpu/el2 switch.s wake:), die de sibling wekt. Elke M kent zijn
 	// core via goos.ProcID (minit): het MPIDR-affiniteitswoord + 1, want 0 is
 	// de M die er al was vóór deze haak bestond — de primaire. VÓÓR

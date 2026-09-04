@@ -18,7 +18,6 @@ package hopnet
 import (
 	"encoding/binary"
 	"fmt"
-	"github.com/xinix00/HopOS/metal/v2/dev"
 	"net"
 	"sync/atomic"
 	"time"
@@ -217,13 +216,6 @@ func rxPass(nic netdev.Device, recv func([]byte) error, buf []byte) (worked bool
 	if n == 0 || err != nil {
 		return false
 	}
-	t0 := dev.Counter()
 	_ = recv(buf[:n])
-	StackTicks.Add(dev.Counter() - t0)
-	StackFrames.Add(1)
 	return true
 }
-
-// StackTicks/StackFrames: tellerticks en frames in de stack-ontvangst van HOP
-// (meetlat, idlestat).
-var StackTicks, StackFrames atomic.Uint64

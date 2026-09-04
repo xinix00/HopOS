@@ -7,7 +7,6 @@ package slots
 
 import (
 	"fmt"
-	"github.com/xinix00/HopOS/metal/v2/dev"
 	"net"
 	"strconv"
 	"strings"
@@ -118,11 +117,7 @@ func serveSystemConn(conn net.Conn, s *servicer) {
 		}
 		switch kind {
 		case systemapi.KindCall:
-			c0 := dev.Counter()
 			resp := s.handleWithLimit(payload, systemapi.MaxIOChunk, scratch)
-			d := dev.Counter() - c0
-			probeBucket(&SvcBuckets, d)
-			SvcTicks.Add(d)
 			if err := systemapi.WriteFrame(conn, systemapi.KindResult, resp); err != nil {
 				return
 			}

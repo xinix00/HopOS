@@ -20,14 +20,12 @@ package idle
 //     (CtxRingHeadPA). Verschil = er kwam verkeer = hij is tóch due. De
 //     core zelf wordt sowieso elke ~1-2ms wakker (ARM event-stream,
 //     RISC-V SleepCap), dus dit kost geen extra wekker.
-//  3. WEKKEN (hier, zodra de ronde wél iets ziet): runtime.WakeSleeper stopt
-//     de slaap-timer van de pomp-goroutine onder de timer-lock en zet hem
-//     klaar via het gewone ready-pad. NIET runtime.Wake (tamago's WakeG):
-//     die herschrijft de timer-heap zonder lock, wat op één core klopt (de
-//     scheduler staat stil als de idle-hook draait) en op een SMP-app de
-//     heap van de andere core sloopt — een geheapte timer zonder heap,
-//     gemeten op de M4 03-09. WakeSleeper is onze toevoeging aan de
-//     tamago-go-fork (tools/tamago-go/).
+//  3. WEKKEN (hier, zodra de ronde wél iets ziet): een token in de bel, het
+//     gebufferde kanaal waarop de pomp naast zijn poll-timer wacht (appnet).
+//     Een gewone kanaal-send dus, via het ready-pad van de scheduler — géén
+//     timer-heap aanraken (tamago's WakeG herschrijft die zonder lock en
+//     sloopte op een SMP-app de heap van de andere core, M4 03-09) en géén
+//     race met een pomp die nog niet geparkeerd is: het token blijft liggen.
 //
 // Het gewapend-teken (bit 63) is een grens, geen detail: een app die zijn
 // ring nooit leest (geen netstack) wapent nooit, dus de peek laat hem met
@@ -95,13 +93,11 @@ func PumpAwake() {
 	}
 }
 
-
 // WatchWork is de HOP-variant van hetzelfde level-triggered contract. Een
 // producer doet dev.Notify na leeg→niet-leeg; zodra het event de idle core
 // wekt, kijkt de governor naar status en belt hij de lokale pomp. Die bel is
-// bewust een callback: de HOP-pomp wacht op een Go-kanaal, niet op de
-// time.Sleep-timer waarvoor runtime.WakeSleeper bedoeld is. Apps registreren
-// hier niets; hun RX gebruikt de control-pagevariant boven.
+// bewust een callback: de HOP-pomp wacht op zijn eigen Go-kanaal. Apps
+// registreren hier niets; hun RX gebruikt de control-pagevariant boven.
 func WatchWork(status func() bool, wake func()) {
 	workWake.Store(&wake)
 	work.Store(&status)
@@ -117,10 +113,10 @@ func workDoor() bool {
 	// de scheduler zelf: P vast, geen lock2 in gang. De hook draait óók vanuit
 	// semasleep — een M zonder P, of een mutex-wachter — en dan sloopt
 	// ready/wakep de scheduler: runqput op een nil-P (gemeten 03-09, de eerste
-	// WakeSleeper), of een tweede slaap op dezelfde m.mWaitList. Het werk
+	// wek uit de idle-hook), of een tweede slaap op dezelfde m.mWaitList. Het werk
 	// blijft dan liggen tot de volgende echte idle-ronde of de failsafe van de
-	// switch (hopswitch.loop); rxDoor hoeft dit niet — WakeSleeper is per
-	// ontwerp vanaf elke M veilig.
+	// switch (hopswitch.loop). rxDoor heeft dezelfde poort: ook de bel is een
+	// kanaal-send.
 	if !runtime.IdleMayReady() {
 		WorkNotReady.Add(1)
 		return false
@@ -157,8 +153,8 @@ func rxDoor() bool {
 	// slaap, PumpAwake ontwapent hem erna. Hier alleen bellen: een token in
 	// het gebufferde kanaal waarop de pomp met zijn timer wacht (appnet). Is
 	// de pomp nog niet geparkeerd, dan ligt het token klaar en slaapt hij
-	// niet — de verloren wek van WakeSleeper (pomp tussen wapenen en
-	// parkeren, 04-09) bestaat zo niet meer, en de pomp wordt runnable op
+	// niet — een wek die vóór het parkeren valt (pomp tussen wapenen en
+	// parkeren, 04-09) gaat zo niet verloren, en de pomp wordt runnable op
 	// déze P, dus terug naar de scheduler is precies goed. Alleen vanuit de
 	// scheduler-idle (IdleMayReady): een kanaal-send readyt een goroutine.
 	if !runtime.IdleMayReady() {
@@ -196,13 +192,9 @@ func ringBell() bool {
 }
 
 // DoorNoPump/DoorWoken/DoorWakeFailed: de meetlat van de bel — rondes zonder
-// geregistreerde pomp, gelukte en mislukte wekpogingen (WakeSleeper: mislukt =
-// de pomp sliep net niet). Een app kan ze tonen (vitals).
-var DoorNoPump, DoorWoken, DoorWakeFailed, DoorWokenRemote atomic.Uint64
-
-// WakeSleeperIdleP/Self: de lokale gevallen van WakeSleeper (runtime-tellers).
-func WakeSleeperIdleP() uint64 { return runtime.WakeSleeperIdleP.Load() }
-func WakeSleeperSelf() uint64  { return runtime.WakeSleeperSelf.Load() }
+// geregistreerde bel, gelukte belletjes en belletjes die al vol stonden (de
+// pomp was al onderweg). Een app kan ze tonen (vitals).
+var DoorNoPump, DoorWoken, DoorWakeFailed atomic.Uint64
 
 var WorkWoken, WorkWakeFailed atomic.Uint64
 

@@ -57,26 +57,6 @@ func WakerStats() (rounds, armed, kicks uint64) {
 // DirectRXKicks telt de doelgerichte leeg→niet-leeg-kicks van de switch.
 func DirectRXKicks() uint64 { return directRXKicks.Load() }
 
-// Meetlat van de directe kick (hopos.idlestat): per notify de uitkomst, en bij
-// elke fallback-kick van de wekker de laatste uitkomst van dat slot — zo is
-// te zien waaróm de directe kick het antwoord niet bracht (2-core-jacht 04-09).
-const (
-	rxKicked   = iota // een geyielde core gekickt
-	rxDisarmed        // deurbel uit: de pomp draait (of is nog niet zover)
-	rxBehind          // deurbel aan maar head <= drempel
-	rxRunning         // due, maar geen enkele core van de eenheid geyield
-	rxReasons
-)
-
-var (
-	RXNotify        [rxReasons]atomic.Uint64
-	RXFallbackAfter [rxReasons]atomic.Uint64
-	rxLast          [64]uint8
-)
-
-// RXReasonNames: volgorde van RXNotify/RXFallbackAfter.
-var RXReasonNames = [rxReasons]string{"kick", "disarmed", "behind", "running"}
-
 func wakeRX(i int) {
 	core := coreOf(i)
 	if slotShares(i) || !coreRunning(core) {
@@ -88,14 +68,12 @@ func wakeRX(i int) {
 	// tot een seconde, want alleen de pomp had een timer (rtt p99 145 ms tot
 	// 4,8 s op een 2-core-app, 04-09). De ctx-blokken van de secundairen
 	// staan op de core-indexen ná de primaire (cpu/smp: prim+1..).
-	kicked := false
 	if n := coreCount(i); n > 1 {
 		for c := i + 1; c < i+n; c++ {
 			if ctxState(c) == layout.CtxSaved && rxDue(c) {
 				if phys := physCore(coreOf(c)); phys >= 0 {
 					cores().Kick(phys)
 					directRXKicks.Add(1)
-					kicked = true
 				}
 			}
 		}
@@ -106,11 +84,6 @@ func wakeRX(i int) {
 	// leeg→niet-leeg-overgang van een bulk-transfer, en dat kostte HOP → app
 	// 3,5× (04-09).
 	if !rxDue(i) {
-		if doorWord(i)&rxArmed == 0 {
-			rxNote(i, rxDisarmed)
-		} else {
-			rxNote(i, rxBehind)
-		}
 		return
 	}
 	if ctxState(i) != layout.CtxSaved {
@@ -120,48 +93,12 @@ func wakeRX(i int) {
 		// geackt worden en niets doen — en een vFIQ voor een app die hem niet
 		// afhandelt laat elke WFI meteen terugkeren.
 		if coreCount(i) != 1 || ctrlRead(i, layout.CtrlDoorIRQ) == 0 {
-			if kicked {
-				rxNote(i, rxKicked)
-			} else {
-				rxNote(i, rxRunning)
-			}
 			return
 		}
 	}
 	if phys := physCore(core); phys >= 0 {
 		cores().Kick(phys)
 		directRXKicks.Add(1)
-		kicked = true
-	}
-	if kicked {
-		rxNote(i, rxKicked)
-	} else {
-		rxNote(i, rxRunning)
-	}
-}
-
-// doorWord: het CtrlRXDoor-woord van slot i (via het ctx-blok, zie rxDue).
-func doorWord(i int) uint64 {
-	cp := ctxRead(i, layout.CtxCtrlPA)
-	if cp == 0 {
-		return 0
-	}
-	dev.Pull(uintptr(cp)+layout.CtrlRXDoor, 8)
-	return dev.Read64(uintptr(cp) + layout.CtrlRXDoor)
-}
-
-func rxNote(i int, r int) {
-	RXNotify[r].Add(1)
-	if i < len(rxLast) {
-		rxLast[i] = uint8(r)
-	}
-}
-
-// rxFallback: de wekker kickt slot i op RX (rxDue) — boek de laatste directe
-// uitkomst van dat slot.
-func rxFallback(i int) {
-	if i < len(rxLast) {
-		RXFallbackAfter[rxLast[i]].Add(1)
 	}
 }
 
@@ -171,42 +108,13 @@ func waker() {
 		time.Sleep(time.Millisecond)
 		wakerRounds.Add(1)
 		now := dev.Counter()
-		if ps := int(ProfileSlot.Load()); ps > 0 && ps <= NumSlots() && coreRunning(coreOf(ps)) {
-			profileTick(ps)
-		}
 		for i := 1; i <= NumSlots(); i++ {
 			core := coreOf(i)
 			if slotShares(i) || !coreRunning(core) {
 				continue // gedeelde cores wekt de rotatie; een geparkeerde core slaapt niet
 			}
 			if ctxState(i) != layout.CtxSaved {
-				// Draait, boot, of dood: niets te wekken. Maar een eenheid
-				// waarvan de deurbel due is en waarvan géén core geyield is,
-				// tick na tick, is de 2-core-stilstand (pomp slaapt tot zijn
-				// timer, 614 ms gemeten 04-09): één keer de staat loggen.
-				if u := int(ctxRead(i, layout.CtxUnitSlot)); (u == i || u == 0) && coreCount(i) > 1 && rxDue(i) && !unitSaved(i) {
-					stuck[i]++
-					switch {
-					case stuck[i] == 4 || stuck[i]%64 == 0:
-						fmt.Printf("waker: unit %d rx due for %d ticks, no yielded core: %s\n", i, stuck[i], unitDump(i))
-						// Steekproef van de PC's: een IPI naar elke core van de
-						// eenheid; de fiq-handler legt ELR_EL2 in CtxLastPC.
-						for c := i; c < i+coreCount(i); c++ {
-							if phys := physCore(coreOf(c)); phys >= 0 {
-								cores().Kick(phys)
-							}
-						}
-					case stuck[i] == 5 || stuck[i]%64 == 1:
-						out := ""
-						for c := i; c < i+coreCount(i); c++ {
-							out += fmt.Sprintf(" core %d pc=%#x", coreOf(c), ctxRead(c, layout.CtxLastPC))
-						}
-						fmt.Printf("waker: unit %d sampled:%s\n", i, out)
-					}
-				} else if u == i || u == 0 {
-					stuck[i] = 0
-				}
-				continue
+				continue // draait, boot, of dood: niets te wekken
 			}
 			wakerArmed.Add(1)
 			if !wakeDue(i, now) {
@@ -215,13 +123,6 @@ func waker() {
 			if phys := physCore(core); phys >= 0 {
 				kick(phys)
 				wakerKicks.Add(1)
-				if rxDue(i) {
-					u := int(ctxRead(i, layout.CtxUnitSlot))
-					if u == 0 {
-						u = i
-					}
-					rxFallback(u)
-				}
 			}
 		}
 	}
@@ -308,29 +209,4 @@ func CoreDump() string {
 			ctxRead(i, layout.CtxKickTarget), ctxRead(i, layout.CtxUnitSlot), ctxRead(i, layout.CtxCtrlPA))
 	}
 	return out
-}
-
-var stuck [64]int
-
-// SvcTicks: tellerticks in de servicer (meetlat, idlestat).
-var SvcTicks atomic.Uint64
-
-// unitSaved: is een core van de eenheid van primaire i geyield (CtxSaved)?
-func unitSaved(i int) bool {
-	for c := i; c < i+coreCount(i); c++ {
-		if ctxState(c) == layout.CtxSaved {
-			return true
-		}
-	}
-	return false
-}
-
-// unitDump: de ctx-staat van de cores van eenheid i, voor de stilstand-log.
-func unitDump(i int) string {
-	out := ""
-	for c := i; c < i+coreCount(i); c++ {
-		w := ctxRead(c, layout.CtxWake)
-		out += fmt.Sprintf("[core %d: state=%d wake=%+d nopeek=%v kick=%#x] ", coreOf(c), ctxState(c), int64(w&^layout.CtxWakeNoPeek)-int64(dev.Counter()), w&layout.CtxWakeNoPeek != 0, ctxRead(c, layout.CtxKickTarget))
-	}
-	return out + fmt.Sprintf("door=%#x", doorWord(i))
 }

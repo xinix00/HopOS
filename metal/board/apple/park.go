@@ -50,21 +50,6 @@ func TimerProbe(ticks uint64) (fired bool, isr uint64) {
 	return v>>32&1 != 0, v & 0xFFFFFFFF
 }
 
-// TimerWakes meldt of de fysieke timer deze core uit WFI kan halen.
-//
-// Dit is een REGEL en geen meting, en dat is met tegenzin. De vraag zelf is
-// niet veilig te stellen — luidt het antwoord nee, dan kost hem stellen een
-// eeuwige slaap. En het voor de hand liggende meetpunt werkt niet: ISR_EL1
-// meldt op een zuinige core keurig `0x40` (FIQ pending) en tóch keert WFI daar
-// nooit terug (GEMETEN 29-08). De FIQ komt dus wél aan; het is de WFI-wek zelf
-// die dichtstaat, en dat is Apple's CYC_OVRD — vergrendeld op t8132, net als de
-// timer-FIQ-poort (zie cpuinit.s).
-//
-// Wat overblijft is het waarneembare verschil: de core die de FIRMWARE startte
-// is geconfigureerd, elke core die daarná uit reset kwam niet, en niemand kan
-// dat nog rechtzetten. HopAlive is precies dat onderscheid — dat woord wordt
-// alleen gezet door een core die zichzelf ná de firmware in cpuinit meldde.
-func TimerWakes() bool { return dev.Read64(HopAlive) == 0 }
 func ReadSPRRConfig() uint64
 
 // Idle-mechanica (meting, zie regs_arm64.s).

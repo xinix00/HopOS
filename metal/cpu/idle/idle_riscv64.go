@@ -100,8 +100,8 @@ func governor(pollUntil int64) {
 	// nog zonder waarden, maar dezelfde ronde als op ARM), dan de doorbell —
 	// zelfde twee redenen als op ARM (zie rxdoor.go).
 	idleMode()
-	// Re-entrantie, dezelfde reden als op ARM (idle_arm64.go): WakeSleeper
-	// neemt de timer-lock, en is die bezet, dan slaapt lock2 via semasleep →
+	// Re-entrantie, dezelfde reden als op ARM (idle_arm64.go): de bel neemt
+	// het kanaal-slot, en is dat bezet, dan slaapt lock2 via semasleep →
 	// goos.Idle → hier — en dat zonder guard tot de stack op is. Dan alleen
 	// slapen; de unlocker wekt ons. Eén hart per bewoner, dus één vlag.
 	// (workDoor bewaakt zichzelf: alleen in de scheduler-idle, zie rxdoor.go.)

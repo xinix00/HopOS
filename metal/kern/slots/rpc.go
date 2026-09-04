@@ -17,11 +17,8 @@ package slots
 import (
 	"errors"
 	"fmt"
-	"github.com/xinix00/HopOS/metal/v2/dev"
 	"sort"
-	"strconv"
 	"strings"
-	"sync/atomic"
 
 	"github.com/xinix00/HopOS/metal/v2/abi/hopabi"
 	"github.com/xinix00/HopOS/metal/v2/kern/hopfs"
@@ -172,7 +169,6 @@ func (s *servicer) handleWithLimit(payload []byte, maxChunk int, scratch []byte)
 
 	switch req.Op {
 	case hopabi.OpStat:
-		probeStat(req.Path)
 		rp, err := s.resolve(req.Path)
 		if err != nil {
 			return fail(req, err)
@@ -274,69 +270,4 @@ func (s *servicer) handleWithLimit(payload []byte, maxChunk int, scratch []byte)
 		return s.storeDrop(req)
 	}
 	return fail(req, fmt.Errorf("onbekende op %d", req.Op))
-}
-
-// Klok-sonde (hopos.idlestat): een stat op "/vitals-probe.<CNTVCT>" draagt de
-// tellerstand van de app vlak vóór het verzoek; het verschil met nu is
-// verzoek → servicer, in buckets van µs: <50, <100, <500, <1000, ≥1000. SvcBuckets
-// telt de servicer-tijd van élk verzoek in dezelfde buckets. ProbeHz zet de
-// board-code (cmd/hopos): de tellerfrequentie.
-const probePrefix = "/vitals-probe."
-
-var (
-	ProbeHz     uint64
-	ProbeReq    [5]atomic.Uint64
-	SvcBuckets  [5]atomic.Uint64
-	ProbeMaxReq atomic.Uint64 // ticks
-	probeSlowN  atomic.Uint64
-)
-
-func probeBucket(b *[5]atomic.Uint64, ticks uint64) {
-	hz := ProbeHz
-	if hz == 0 {
-		return
-	}
-	us := ticks * 1e6 / hz
-	switch {
-	case us < 50:
-		b[0].Add(1)
-	case us < 100:
-		b[1].Add(1)
-	case us < 500:
-		b[2].Add(1)
-	case us < 1000:
-		b[3].Add(1)
-	default:
-		b[4].Add(1)
-	}
-}
-
-func probeStat(path string) {
-	if !strings.HasPrefix(path, probePrefix) {
-		return
-	}
-	sent, err := strconv.ParseUint(path[len(probePrefix):], 10, 64)
-	if err != nil {
-		return
-	}
-	now := dev.Counter()
-	if now <= sent {
-		return
-	}
-	d := now - sent
-	probeBucket(&ProbeReq, d)
-	for {
-		m := ProbeMaxReq.Load()
-		if d <= m || ProbeMaxReq.CompareAndSwap(m, d) {
-			break
-		}
-	}
-	if ProbeHz != 0 && d*2000 > ProbeHz && probeSlowN.Add(1) <= 4 {
-		fmt.Printf("probe slow request: sent=%d d=%d µs\n", sent, d*1e6/ProbeHz)
-	}
-}
-
-// ProbeBuckets: "a/b/c/d/e" voor de idlestat-regel.
-func ProbeBuckets(b *[5]atomic.Uint64) string {
-	return fmt.Sprintf("%d/%d/%d/%d/%d", b[0].Load(), b[1].Load(), b[2].Load(), b[3].Load(), b[4].Load())
 }

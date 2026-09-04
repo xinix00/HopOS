@@ -75,31 +75,6 @@ TEXT ·cntfrq(SB),NOSPLIT,$0-8
 	MOVD	R0, ret+0(FP)
 	RET
 
-// counterNow: de rauwe generic-timer-stand. wakeAt (idle.go) rekent er de
-// pollUntil van de scheduler mee om naar de CNTVCT-stand die de EL2-switch
-// als wektijd begrijpt — zelfde naam en rol als de TIME-CSR-lees op riscv64.
-// func wfiUntil(ticks uint64) uint64 — slaap tot de fysieke timer over `ticks`
-// afloopt: CNTP_TVAL zetten, timer aan (IMASK=0), WFI, timer weer uit. De
-// interrupt komt nooit als exception binnen (DAIF is gemaskeerd en niemand
-// routeert de AIC/GIC), maar wekt WFI wél — dat is precies wat de architectuur
-// voor WFI-wake-up events belooft, en het is op de M4 gemeten. De timer gaat
-// erna uit, anders blijft hij pending en is de eerstvolgende WFI een no-op.
-TEXT ·wfiUntil(SB),NOSPLIT,$0-16
-	MOVD	ticks+0(FP), R2
-	WORD	$0xd53be040	// mrs x0, cntvct_el0
-	WORD	$0xd51be202	// msr cntp_tval_el0, x2
-	MOVD	$1, R3
-	WORD	$0xd51be223	// msr cntp_ctl_el0, x3 (ENABLE, IMASK=0)
-	ISB	$15
-	WFI
-	MOVD	$0, R3
-	WORD	$0xd51be223	// msr cntp_ctl_el0, x3 (uit: geen pending timer laten staan)
-	ISB	$15
-	WORD	$0xd53be041	// mrs x1, cntvct_el0
-	SUB	R0, R1, R0
-	MOVD	R0, ret+8(FP)
-	RET
-
 // func mmfr0() uint64 — ID_AA64MMFR0_EL1: bits 63:60 = ECV (FEAT_ECV, nodig
 // voor CNTKCTL_EL1.EVNTIS).
 TEXT ·mmfr0(SB),NOSPLIT,$0-8
