@@ -897,7 +897,21 @@ const (
 	// MMU leest — ringkop, deurbel — gaat langs dev.Push/Pull, die daar nu
 	// echt vegen. Een oud image met een device-staart tegenover een gecachte
 	// HOP zou stil stale koppen lezen: het adres blijft, het contract niet.
-	ABIVersion = 8
+	//
+	// 10 (04-09): CtrlDoorIRQ (app -> HOP: "maak van mijn deurbel een vFIQ")
+	// nam 0x118, dus CtrlEnvData schoof naar 0x120. Dat is exact de wijziging
+	// die versie 4 veroorzaakte: een ouder image leest zijn env dan acht bytes
+	// te vroeg. Verder in deze ronde: de deurbel is van de pomp (wapenen en
+	// ontwapenen rond zijn slaap) en HOP kickt alleen een gewapende deur.
+	//
+	// WAAROM 10 EN NIET 8. Versie 9 is publiek geweest (v2.0.0 en v2.0.1, met
+	// de netwerkpot en de frameq-descriptorqueues), en die indeling is daarna
+	// teruggedraaid naar vaste 2MiB slot-ringen. 7 en 8 hebben alleen op een
+	// branch bestaan. De teller telt dus door boven alles wat ooit is
+	// uitgegeven: een nieuwer image hoort nooit een LAGER getal te dragen dan
+	// een ouder, anders leest een mens de verkeerde kant op waar de code
+	// alleen "gelijk of niet" ziet.
+	ABIVersion = 10
 )
 
 // AbiTailAt geeft de basis van de ABI-staart van een slot: net boven zijn

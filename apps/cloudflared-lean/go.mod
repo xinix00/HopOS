@@ -11,7 +11,7 @@ go 1.26.4
 
 require (
 	github.com/xinix00/HopOS/metal/v2 v2.0.1
-	github.com/xinix00/lean v0.99.0
+	github.com/xinix00/lean v1.1.0
 	golang.org/x/net v0.58.0
 )
 
