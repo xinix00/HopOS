@@ -101,9 +101,10 @@ type Ring struct {
 	// cleant setHead de kop ook op een coherente ring. Alleen HOP zet dit, op
 	// precies die ring (hopswitch.Attach): een clean plus DSB per frame op
 	// élke kop kostte de app-kant de helft van zijn doorvoer (T13, 03-09).
-	peeked  bool
-	corrupt bool   // consumer zag een onmogelijke header; ring is dood
-	why     string // de meting van dát moment (CorruptWhy) — anders is een
+	peeked    bool
+	headDirty bool   // gepeekte kop geschreven, nog niet gecleand (PublishHead)
+	corrupt   bool   // consumer zag een onmogelijke header; ring is dood
+	why       string // de meting van dát moment (CorruptWhy) — anders is een
 	// corrupt-verklaring van buiten niet te onderscheiden van een lege ring,
 	// en dat onderscheid was precies de jacht van 17-08 (boot 9: slot-TX
 	// leest eeuwig leeg terwijl de app schrijft).
@@ -172,11 +173,24 @@ func (r *Ring) tail() uint64 {
 
 func (r *Ring) setHead(v uint64) {
 	dev.Write64(r.base+hdrHead, v)
-	// Een gepeekte kop (zie het veld) gaat ook coherent langs Push: de
-	// EL2-switcher leest hem met de MMU uit (cpu/el2/switch.s) en ziet alleen
-	// wat in het geheugen staat. In een gecached venster is dat één clean van
-	// één regel; op device/NC een no-op.
-	if r.peeked || !r.coherent {
+	// Een gepeekte kop (zie het veld) moet het geheugen halen: de EL2-
+	// switcher leest hem met de MMU uit (cpu/el2/switch.s). Maar niet per
+	// record — een clean plus DSB per frame kostte de bulk HOP → app tot 4×
+	// (04-09). De producer cleant hem één keer per burst met PublishHead; hier
+	// alleen het niet-coherente pad (riscv64).
+	if !r.coherent {
+		dev.Push(r.base+hdrHead, 8)
+	} else if r.peeked {
+		r.headDirty = true
+	}
+}
+
+// PublishHead cleant de kop van een gepeekte ring naar het geheugen als er
+// sinds de vorige keer records bij kwamen: één clean per burst, door de
+// producer aan het eind van zijn pas. Zonder peeked-lezer een no-op.
+func (r *Ring) PublishHead() {
+	if r.headDirty {
+		r.headDirty = false
 		dev.Push(r.base+hdrHead, 8)
 	}
 }

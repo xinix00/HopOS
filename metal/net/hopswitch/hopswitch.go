@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xinix00/HopOS/metal/v2/abi/layout"
@@ -237,8 +238,17 @@ func loop() {
 	// ronde (Go ≥1.23: Reset laat nooit een oude waarde op het kanaal).
 	const failsafe = time.Millisecond
 	t := time.NewTimer(failsafe)
+	byTimer := false
 	for {
 		if switchPass(buf) {
+			// Meetlat (hopos.idlestat): werk gevonden ná de failsafe i.p.v. na
+			// een bel = een SEV die HOP's WFE miste, en dat is dan een frame dat
+			// tot een milliseconde lag (de 1ms-staart van een system call).
+			if byTimer {
+				WorkByTimer.Add(1)
+			} else {
+				WorkByDoor.Add(1)
+			}
 			// Laat de doelnetstack consumeren vóór een nieuwe volle burst.
 			runtime.Gosched()
 			continue
@@ -246,20 +256,28 @@ func loop() {
 		t.Reset(failsafe)
 		select {
 		case <-switchDoor:
+			byTimer = false
 		case <-t.C:
+			byTimer = true
 		}
 	}
 }
 
+// WorkByDoor/WorkByTimer: switch-rondes mét werk, naar hoe de lus gewekt werd.
+var WorkByDoor, WorkByTimer atomic.Uint64
+
+// RXFull: een RX-ring zat vol (backpressure begonnen); RXDrops: frames gedropt
+// (na txBackpressure, en elk frame daarna tot er weer ruimte is).
+var RXFull, RXDrops atomic.Uint64
+
 func switchPending() bool {
-	if !mu.TryLock() {
-		// Conservatief bellen. De switch kan de lock precies tussen zijn laatste
-		// lege check en zijn kanaal-wacht vasthouden; false zou dan het event
-		// verliezen en de failsafe van loop nodig maken. Een overbodig kanaaltoken is
-		// goedkoop en de status blijft level-triggered.
-		return true
-	}
-	defer mu.Unlock()
+	// Zonder slot, met kale loads. Dit draait in de idle-governor tussen
+	// twee WFE's (cpu/idle WFESleep), en een TryLock is een CAS — een
+	// exclusive zet op de M4 het event-register, waarna de volgende WFE
+	// meteen terugkeert: HOP spinde op 1,7M rondes/s (04-09). De lezing is
+	// level-triggered en mag racen: een verschaalde poort-pointer of een
+	// half-geschreven kop geeft hooguit een overbodige bel, en de switch-lus
+	// kijkt zelf onder mu nog een keer.
 	for _, pt := range ports {
 		if pt != nil {
 			_, pending := pt.tx.HeadPending()
@@ -324,6 +342,13 @@ func switchPassLocked(buf []byte) (worked bool) {
 			fmt.Printf("HOPOS_NETRING_TX_CORRUPT: slot %d: %s\n", i, pt.tx.CorruptWhy())
 		}
 	}
+	// De RX-koppen die deze pas bewogen één keer naar het geheugen, voor de
+	// switcher-peek (ring.PublishHead) — niet per frame.
+	for i := 1; i <= layout.MaxSlots; i++ {
+		if pt := ports[i]; pt != nil {
+			pt.rx.PublishHead()
+		}
+	}
 	return worked
 }
 
@@ -356,19 +381,28 @@ func writeRXLocked(i int, p []byte) {
 		if ok {
 			ports[i].rxBlocked = false
 			if notify {
+				// Kop naar het geheugen vóór de kick: een core die op EL2
+				// slaapt peekt na zijn wekker de kop in DRAM, en een kop die
+				// nog in HOP's cache staat is voor hem leeg — dan slaapt hij
+				// door tot zijn timer (T30, 04-09: schrijven 690 → 40 MB/s).
+				// Eén clean per burst, want een burst wekt maar één keer.
+				ports[i].rx.PublishHead()
 				wakeRXLocked(i)
 			}
 			return
 		}
 		if ports[i].rxBlocked {
+			RXDrops.Add(1)
 			return
 		}
 		if !woken {
+			RXFull.Add(1)
 			wakeRXLocked(i)
 			woken = true
 		}
 		if time.Now().After(deadline) {
 			ports[i].rxBlocked = true
+			RXDrops.Add(1)
 			return
 		}
 		runtime.Gosched()

@@ -342,11 +342,13 @@ func main() {
 		if disk, first, count, err := bd.Disk(); err != nil {
 			fmt.Printf("storage: %v — running without volumes\n", err)
 		} else {
-			slots.UseFS(hopfs.NewRange(disk, first, count))
+			fsys := hopfs.NewRange(disk, first, count)
+			slots.UseFS(fsys)
 			fmt.Printf("storage: nvme %q — %d MB of our own, LBA %d..%d — volumes available\n",
 				disk.Model, count*disk.BlockSize>>20, first, first+count-1)
 			if bootParam("hopos.nvmebench") == "1" {
 				nvmeBench(disk, first, count)
+				hopfsBench(fsys)
 			}
 		}
 	} else if win := board.Current().PCIe(); win.ECAMBase == 0 {

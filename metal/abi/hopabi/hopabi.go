@@ -74,6 +74,11 @@ const MaxChunk = 8 << 10
 
 const hdrLen = 24
 
+// HdrLen is de lengte van de responskop: wie een respons in een eigen buffer
+// opbouwt (EncodeRespInto) zet de data op HdrLen, en wie hem in delen leest
+// (applib.ReadInto) leest eerst HdrLen bytes en dan de data.
+const HdrLen = hdrLen
+
 // Req is een hop-ABI-request.
 type Req struct {
 	Op   uint8
@@ -142,6 +147,18 @@ func EncodeResp(r Resp) []byte {
 	le.PutUint64(b[8:], r.Size)
 	copy(b[hdrLen:], r.Data)
 	return b
+}
+
+// EncodeRespInto schrijft de kop van r in dst[:HdrLen]; de n databytes staan
+// er al, op dst[HdrLen:HdrLen+n] (de aanroeper liet hopfs daar direct in
+// lezen). Geeft dst[:HdrLen+n]. Zelfde wire-vorm als EncodeResp, zonder de
+// kopie en zonder een verse MiB per call.
+func EncodeRespInto(dst []byte, r Resp, n int) []byte {
+	dst[0], dst[1] = Version, r.Op
+	le.PutUint16(dst[2:], r.Status)
+	le.PutUint32(dst[4:], r.Seq)
+	le.PutUint64(dst[8:], r.Size)
+	return dst[:hdrLen+n]
 }
 
 // DecodeResp parseert een response (payload van een TypeRPCResp-record).

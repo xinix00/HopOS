@@ -101,6 +101,16 @@ yield:
 	// rotatie deze bewoner niet te hervatten. 0 = nu — een yield zonder
 	// wektijd gedraagt zich dus exact als vóór dit veld bestond.
 	MOVD	R3, 464(R1)
+	// Kwam er een sibling-wek (HVC #4) binnen vóór of tijdens deze yield?
+	// wake: zet layout.CtxKickPending; dan is onze wektijd "nu" — anders was
+	// die wek zojuist overschreven (lost wakeup, 04-09). DSB: de eigen
+	// schrijf vóór de lees, tegenover wake: die schrijft en dan DSB doet.
+	DSB	$15
+	MOVD	536(R1), R2	// layout.CtxKickPending
+	CBZ	R2, nokick
+	MOVD	ZR, 536(R1)
+	MOVD	ZR, 464(R1)	// layout.CtxWake = nu
+nokick:
 	LDP	16(RSP), (R2, R3)	// originele x2/x3
 	STP	(R2, R3), 40(R1)
 	// Wie hier slaapt (layout.CtxKickTarget): het MPIDR-affiniteitswoord van
@@ -295,8 +305,14 @@ timed:
 	CBZ	R13, notdue
 	MOVD	(R13), R13	// live head (producer: hopswitch)
 	AND	$0x7FFFFFFFFFFFFFFF, R12, R12	// drempel zonder het gewapend-teken
+	// "Voorbij" is groter-dan, niet ongelijk: de kop hier komt uit DRAM en
+	// mag achterlopen op wat de bewoner in zijn cache zag toen hij de
+	// deurbel wapende (HOP cleant hem per burst, niet per frame — T30/T31,
+	// 04-09). Een achterlopende kop is dan géén verkeer; ongelijk-is-due
+	// wekte de core spookachtig bij elke ronde en liet schrijven van 690
+	// naar 30 MB/s zakken. De kop is een monotone teller, dus unsigned.
 	CMP	R12, R13
-	BNE	resume		// de ring groeide voorbij de drempel: due
+	BHI	resume		// de ring groeide voorbij de drempel: due
 notdue:
 	MOVD	$1, R11		// levend, alleen nog niet due
 skip:
@@ -323,6 +339,7 @@ resume:
 	MOVD	R8, 32(RSP)	// layout.SchedCurrent = deze bewoner
 	MOVD	$3, R9		// staat → running
 	MOVD	R9, (R1)
+	MOVD	ZR, 536(R1)	// layout.CtxKickPending: verbruikt door deze hervatting
 	DSB	$15
 
 	// VTTBR omzetten naar de EENHEID van deze bewoner (layout.CtxUnitSlot,
@@ -414,6 +431,15 @@ fiq:
 	WORD	$0xd53df120	// mrs x0, s3_5_c15_c1_1 (IPI_SR_EL1)
 	CBZ	R0, fault
 	WORD	$0xd51df120	// msr s3_5_c15_c1_1, x0 (ack)
+	// Steekproef: de onderbroken EL1-PC in het eigen ctx-blok (CtxLastPC),
+	// zodat HOP kan zien wat een core doet die "draait" maar niets
+	// afhandelt (2-core-stilstand, 04-09). x0..x3 zijn hier klad.
+	MOVD	32(RSP), R1	// layout.SchedCurrent
+	MOVD	208(RSP), R2	// layout.SchedS2PA
+	ADD	R1<<16, R2, R2
+	ADD	$0x6000, R2, R2	// eigen ctx (layout.CtxOff)
+	WORD	$0xd53c4020	// mrs x0, elr_el2
+	MOVD	R0, 528(R2)	// layout.CtxLastPC
 	// De doorbell als interrupt: draait de app (dit is idx 10, dus ja) en
 	// heeft hij zich aangemeld (layout.CtrlDoorIRQ in zijn control-page),
 	// dan een virtuele FIQ pending zetten (HCR_EL2.VF; FMO staat al). EL1
@@ -494,6 +520,8 @@ wakescan:
 	CMP	R0, R5		// die core?
 	BNE	wakenext
 	MOVD	ZR, 464(R4)	// layout.CtxWake = nu
+	MOVD	$1, R5
+	MOVD	R5, 536(R4)	// layout.CtxKickPending: ook als hij nog draait
 	MOVD	488(R4), R5	// layout.CtxWakes: geteld, voor de meetlat
 	ADD	$1, R5, R5
 	MOVD	R5, 488(R4)

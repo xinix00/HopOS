@@ -55,6 +55,7 @@ func stackUp(loc *locdev, nc board.NetConfig, mac string) (func([]byte) error, e
 	// De ISS-seed hoeft niet kryptografisch, wel per boot anders — de klok
 	// ná SNTP bestaat hier nog niet, dus de boot-tijd is wat er is.
 	st := leannet.NewStack(loc, cfg, uint32(time.Now().UnixNano()))
+	current = st
 
 	// Netstack in Go's standaard net-package hangen: hierna werken
 	// net.Listen, net/http en DNS voor alle HOP-kern-code. ICMP-echo zit er
@@ -87,4 +88,14 @@ func wsShiftFor(maxBuf int) uint8 {
 		shift++
 	}
 	return shift
+}
+
+var current *leannet.Stack
+
+// Stats: de tellers van HOP's eigen stack (telemetrie; nul vóór Up).
+func Stats() leannet.Stats {
+	if current == nil {
+		return leannet.Stats{}
+	}
+	return current.Stats()
 }

@@ -61,6 +61,41 @@ func WatchRXRing(door uintptr, status func() (uint64, bool)) {
 	rxStatus.Store(&status)
 }
 
+// PumpSleep wapent de deurbel namens de pomp vlak vóór zijn slaap: "ik slaap
+// vanaf kop H — is er iets bij, wek me". Meldt onwaar als er intussen tóch
+// iets ligt; dan slaapt de pomp niet maar pompt hij. Dat is de klassieke
+// wapen-en-hercontroleer-stap: zonder de hercontrole valt een frame dat net
+// vóór het wapenen kwam tussen wal en schip. HOP's kick (ook de vFIQ voor een
+// draaiende core, door_arm64.go) komt alleen als de deurbel gewapend is —
+// één kick per burst, niet per frame: een kick per frame kostte de bulk
+// HOP → app 3,5× (534 → 150 MB/s, gemeten 04-09).
+func PumpSleep() bool {
+	f := rxStatus.Load()
+	door := rxDoorPA.Load()
+	if f == nil || door == 0 {
+		return true
+	}
+	head, pending := (*f)()
+	if pending {
+		return false
+	}
+	dev.Write64(door, head|rxArmed)
+	dev.Push(door, 8)
+	if _, pending := (*f)(); pending {
+		PumpAwake()
+		return false
+	}
+	return true
+}
+
+// PumpAwake ontwapent de deurbel: de pomp draait, kicks zijn nu overbodig.
+func PumpAwake() {
+	if door := rxDoorPA.Load(); door != 0 {
+		dev.Write64(door, 0)
+		dev.Push(door, 8)
+	}
+}
+
 // RXPumpG registreert de goroutine van de RX-pomp als wek-doel; aanroepen op
 // de pomp-goroutine zelf, vóór zijn eerste slaap (runtime.GetG geeft de gp).
 func RXPumpG(gp uint) { rxPumpG.Store(uint64(gp)) }
@@ -119,36 +154,47 @@ func rxDoor() bool {
 	if f == nil {
 		return false
 	}
-	head, pending := (*f)()
-	door := rxDoorPA.Load()
-	// De deurbel wordt óók gelezen door de EL2-switcher, met de MMU uit — dus
-	// rechtstreeks uit DRAM. Sinds ABI 7 is de staart gecached, en dan is
-	// Push (clean) de enige manier waarop hij het woord ziet; op device/NC is
-	// Push een no-op.
-	if !pending {
-		dev.Write64(door, head|rxArmed)
-		dev.Push(door, 8)
+	if _, pending := (*f)(); !pending {
 		return false
 	}
-	dev.Write64(door, 0) // ontwapenen: er wordt aan gewerkt
-	dev.Push(door, 8)
+	// De deurbel zelf blijft van de pomp: PumpSleep wapent hem vlak vóór de
+	// slaap, PumpAwake ontwapent hem erna. De governor schreef hem vroeger
+	// ook, maar op een 2-core-app is dat een race met de pomp op de andere
+	// core (een ontwapening ná diens wapening = verloren wek, tot een
+	// seconde). Wekken volstaat: slaapt de pomp nog tussen wapenen en parkeren,
+	// dan mislukt de wek, blijft de deur gewapend en kickt HOP's wekker ons
+	// binnen een milliseconde opnieuw.
 	gp := rxPumpG.Load()
 	if gp == 0 {
 		DoorNoPump.Add(1)
 		return false
 	}
-	if runtime.WakeSleeper(uint(gp)) {
-		DoorWoken.Add(1)
-		return true
+	woken, remote := runtime.WakeSleeper(uint(gp))
+	if !woken {
+		DoorWakeFailed.Add(1)
+		return false
 	}
-	DoorWakeFailed.Add(1)
-	return false
+	DoorWoken.Add(1)
+	if remote {
+		// De pomp hoort bij de andere core en die is gekickt; terug naar
+		// onze scheduler levert niets op — die vond net niets en zou hier
+		// meteen weer staan, met een IPI naar de pomp-core per ronde (319k/s
+		// op de M4, 04-09: de pomp-core verloor de helft van zijn tijd aan
+		// het afhandelen). Slapen dus; de volgende burst kickt ons wel weer.
+		DoorWokenRemote.Add(1)
+		return false
+	}
+	return true
 }
 
 // DoorNoPump/DoorWoken/DoorWakeFailed: de meetlat van de bel — rondes zonder
 // geregistreerde pomp, gelukte en mislukte wekpogingen (WakeSleeper: mislukt =
 // de pomp sliep net niet). Een app kan ze tonen (vitals).
-var DoorNoPump, DoorWoken, DoorWakeFailed atomic.Uint64
+var DoorNoPump, DoorWoken, DoorWakeFailed, DoorWokenRemote atomic.Uint64
+
+// WakeSleeperIdleP/Self: de lokale gevallen van WakeSleeper (runtime-tellers).
+func WakeSleeperIdleP() uint64 { return runtime.WakeSleeperIdleP.Load() }
+func WakeSleeperSelf() uint64  { return runtime.WakeSleeperSelf.Load() }
 
 var WorkWoken, WorkWakeFailed atomic.Uint64
 

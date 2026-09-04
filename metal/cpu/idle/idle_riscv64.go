@@ -30,6 +30,7 @@
 package idle
 
 import (
+	"runtime"
 	"runtime/goos"
 	"sync/atomic"
 
@@ -104,11 +105,25 @@ func governor(pollUntil int64) {
 	// goos.Idle → hier — en dat zonder guard tot de stack op is. Dan alleen
 	// slapen; de unlocker wekt ons. Eén hart per bewoner, dus één vlag.
 	// (workDoor bewaakt zichzelf: alleen in de scheduler-idle, zie rxdoor.go.)
-	if !nested.Swap(true) {
+	// En alleen vanuit de scheduler-idle (IdleMayReady): een M in semasleep
+	// zou anders spinnen op zijn eigen pomp-timer (idle_arm64.go, 04-09).
+	if runtime.IdleMayReady() && !nested.Swap(true) {
 		defer nested.Store(false)
 		if rxDoor() || workDoor() {
 			countWake()
 			return
+		}
+		// Sysmon-lite, zie idle_arm64.go (één P per bewoner: vrijwel altijd niets).
+		ran, kicked, now := runtime.RunIdleTimers()
+		if ran {
+			countWake()
+			return
+		}
+		if nt := runtime.NextTimer(); nt != 0 && (pollUntil == 0 || nt < pollUntil) {
+			pollUntil = nt
+		}
+		if kicked && pollUntil < now+200e3 {
+			pollUntil = now + 200e3
 		}
 	}
 	if sharedAddr.Load() != 0 {

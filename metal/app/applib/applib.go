@@ -11,6 +11,7 @@ package applib
 
 import (
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"runtime"
@@ -266,8 +267,16 @@ func (a *App) printk(c byte) {
 	if n == 0 {
 		return
 	}
-	if a.mu.TryLock() {
-		a.out.Write(ring.TypeLog, a.pkBuf[:n])
+	// Begrensd wachten op de lock, dan tóch schrijven: op een SMP-app houdt
+	// de andere core hem in Logf vast (een frame over de system-verbinding),
+	// en met een kale TryLock verdween de hele panic-uitvoer (04-09: exit 2
+	// zonder één regel). Torn output is dan de prijs, geen output niet.
+	locked := false
+	for i := 0; i < 1<<16 && !locked; i++ {
+		locked = a.mu.TryLock()
+	}
+	a.out.Write(ring.TypeLog, a.pkBuf[:n])
+	if locked {
 		a.mu.Unlock()
 	}
 	if c != '\n' {
@@ -381,13 +390,92 @@ func (a *App) Stat(path string) (uint64, error) {
 	return resp.Size, err
 }
 
-// ReadAt leest maximaal n bytes vanaf off (n ≤ MaxIOChunk per call).
+// ReadAt leest maximaal n bytes vanaf off (n ≤ MaxIOChunk per call) in een
+// verse buffer. Wie een buffer heeft, gebruikt ReadInto: dat is dezelfde call
+// zonder de allocatie.
 func (a *App) ReadAt(path string, off uint64, n int) ([]byte, error) {
-	resp, err := a.rpc(hopabi.Req{Op: hopabi.OpRead, Path: path, Off: off, N: uint64(n)}, rpcTimeout)
+	buf := make([]byte, n)
+	m, err := a.ReadInto(path, off, buf)
 	if err != nil {
 		return nil, err
 	}
-	return resp.Data, nil
+	return buf[:m], nil
+}
+
+// ReadInto leest maximaal len(dst) bytes vanaf off rechtstreeks in dst
+// (len(dst) ≤ MaxIOChunk) en geeft het aantal gelezen bytes; 0 = einde van
+// het bestand. De respons wordt in delen gelezen — kop, dan data in dst — dus
+// een read van 1MiB kost geen allocatie en geen kopie meer dan de ring→dst.
+// Dat afval (2MiB per call) hield de GC van de app aan het werk, en op één
+// core kreeg de RX-pomp dan zijn beurt niet (gemeten 04-09).
+func (a *App) ReadInto(path string, off uint64, dst []byte) (int, error) {
+	if len(dst) > MaxIOChunk {
+		return 0, fmt.Errorf("system call: read chunk %d exceeds %d", len(dst), MaxIOChunk)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.seq++
+	req := hopabi.Req{Op: hopabi.OpRead, Path: path, Off: off, N: uint64(len(dst)), Seq: a.seq}
+	if !a.sysReady {
+		return 0, fmt.Errorf("system call: network is not ready; call appnet.Up first")
+	}
+	c, err := a.systemConnLocked()
+	if err != nil {
+		return 0, err
+	}
+	_ = c.SetDeadline(time.Now().Add(rpcTimeout))
+	if err := systemapi.WriteFrame(c, systemapi.KindCall, hopabi.EncodeReq(req)); err != nil {
+		a.closeSystemLocked()
+		return 0, fmt.Errorf("system call write: %w", err)
+	}
+	kind, n, err := systemapi.ReadHeader(c)
+	if err != nil {
+		a.closeSystemLocked()
+		return 0, fmt.Errorf("system call read: %w", err)
+	}
+	if kind != systemapi.KindResult || n < hopabi.HdrLen {
+		a.closeSystemLocked()
+		return 0, fmt.Errorf("system call: unexpected frame kind %d (%d bytes)", kind, n)
+	}
+	var hdr [hopabi.HdrLen]byte
+	if _, err := io.ReadFull(c, hdr[:]); err != nil {
+		a.closeSystemLocked()
+		return 0, fmt.Errorf("system call read: %w", err)
+	}
+	resp, err := hopabi.DecodeResp(hdr[:])
+	if err != nil {
+		a.closeSystemLocked()
+		return 0, err
+	}
+	data := n - hopabi.HdrLen
+	if resp.Seq != req.Seq {
+		a.closeSystemLocked()
+		return 0, fmt.Errorf("system call: response seq %d, want %d", resp.Seq, req.Seq)
+	}
+	if resp.Status != hopabi.StatusOK {
+		// De fouttekst is klein; lees hem in een eigen bufje en laat de
+		// verbinding schoon achter.
+		msg := make([]byte, data)
+		if _, err := io.ReadFull(c, msg); err != nil {
+			a.closeSystemLocked()
+			return 0, fmt.Errorf("system call read: %w", err)
+		}
+		_ = c.SetDeadline(time.Time{})
+		if resp.Status == hopabi.StatusNoEnt {
+			return 0, fmt.Errorf("system call op %d: %w: %s", req.Op, fs.ErrNotExist, msg)
+		}
+		return 0, fmt.Errorf("system call op %d: status %d: %s", req.Op, resp.Status, msg)
+	}
+	if data > len(dst) {
+		a.closeSystemLocked()
+		return 0, fmt.Errorf("system call: read returned %d bytes for a %d-byte buffer", data, len(dst))
+	}
+	if _, err := io.ReadFull(c, dst[:data]); err != nil {
+		a.closeSystemLocked()
+		return 0, fmt.Errorf("system call read: %w", err)
+	}
+	_ = c.SetDeadline(time.Time{})
+	return data, nil
 }
 
 // WriteAt writes one chunk at off without truncating the file. It is the
@@ -416,18 +504,20 @@ func (a *App) ReadFile(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	buf := make([]byte, 0, size)
-	chunkSize := MaxIOChunk
+	buf := make([]byte, size)
 	for off := uint64(0); off < size; {
-		chunk, err := a.ReadAt(path, off, chunkSize)
+		end := off + uint64(MaxIOChunk)
+		if end > size {
+			end = size
+		}
+		n, err := a.ReadInto(path, off, buf[off:end])
 		if err != nil {
 			return nil, err
 		}
-		if len(chunk) == 0 {
+		if n == 0 {
 			return nil, fmt.Errorf("hop-ABI: lege read op %d/%d", off, size)
 		}
-		buf = append(buf, chunk...)
-		off += uint64(len(chunk))
+		off += uint64(n)
 	}
 	return buf, nil
 }

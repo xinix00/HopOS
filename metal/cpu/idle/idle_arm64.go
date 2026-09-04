@@ -102,8 +102,32 @@ func WFESleep(wake uint64) uint64 {
 	var slept uint64
 	for i := 0; slept < wfeMinSleep && i < 4; i++ {
 		slept += wfeIdle()
+		// Een snelle terugkeer is meestal een verschaald event — maar soms
+		// de échte bel (dev.Notify van een app-core, SEV): die zit in
+		// hetzelfde event-register en werd hier tot 04-09 gewoon weggeslikt,
+		// waarna de volgende WFE tot de event-stream-tick sliep. Op een
+		// 2-core-app (ACK-SEV van de pomp-core vlak vóór het verzoek van de
+		// andere core) trof dat 6% van de system calls: 1ms i.p.v. 20µs.
+		if pending() {
+			break
+		}
 	}
 	return slept
+}
+
+// pending: ligt er werk waarvoor de governor wakker hoort te zijn — HOP's
+// switch-ringen (WatchWork) of de RX-ring van een app (RXStatus). Alleen
+// lezen, geen wekken: dat doet de governor zelf (workDoor/rxDoor).
+func pending() bool {
+	if f := work.Load(); f != nil && (*f)() {
+		return true
+	}
+	if f := rxStatus.Load(); f != nil {
+		if _, p := (*f)(); p {
+			return true
+		}
+	}
+	return false
 }
 
 // WFISleep is de Sleeper voor silicium waar WFE ín de scheduler-lus niet
@@ -125,7 +149,10 @@ func WFESleep(wake uint64) uint64 {
 // 1.000163 ticks voor een deadline van 1ms, en 5.000133 voor 5ms.
 func WFISleep(wake uint64) uint64 {
 	slept := WFESleep(wake)
-	if slept < wfeMinSleep {
+	// Een WFI is doof voor SEV: wat er ná deze check binnenkomt ligt tot de
+	// timer (≤ timerCap). Daarom kiest een board dit alleen als WFE er niet
+	// slaapt — zie board/apple (04-09: op de M4 slaapt WFE op EL2 wél).
+	if slept < wfeMinSleep && !pending() {
 		slept += sleepUntil(wake)
 	}
 	return slept
@@ -199,6 +226,16 @@ func governor(pollUntil int64) {
 		waitSleep(pollUntil)
 		return
 	}
+	// Een M mét P maar in semasleep (lock2-contentie, m.locks > 0) is óók een
+	// wachter: goos.Idle hoort daar te slapen tot de unlocker kickt. Doet de
+	// bel hier zijn werk — rxDoor vindt de pomp-timer op de eigen P, "wekt"
+	// hem en keert terug — dan is dat een spin: semasleep roept de governor
+	// meteen weer aan, 480k rondes/s op een 2-core-app (04-09), en de pomp
+	// zelf komt pas aan de beurt als de lock vrij is.
+	if !runtime.IdleMayReady() {
+		waitSleep(pollUntil)
+		return
+	}
 	// Re-entrantie: de governor kan zichzelf aanroepen — WakeSleeper neemt de
 	// timer-lock, en is die bezet (de andere core), dan slaapt lock2 via
 	// semasleep → goos.Idle → hier. Dan alleen slapen; de unlocker kickt ons
@@ -217,6 +254,32 @@ func governor(pollUntil int64) {
 	if rxDoor() || workDoor() {
 		countWake()
 		return
+	}
+	// Sysmon-lite (04-09): tamago heeft geen sysmon, dus een timer op een
+	// idle P (zonder M) draait alleen als een zoekende M hem steelt — en de
+	// yield hieronder sliep tot de eigen pollUntil, tot 4,8 s voorbij de
+	// 2 ms-timer van de pomp op de andere P (sampler 466 ms te laat, 2-core-
+	// app). Dus: due timers van idle P's nu draaien (de goroutine landt op
+	// onze P), en anders hoogstens tot de vroegste timer van élke P slapen.
+	ran, kicked, now := runtime.RunIdleTimers()
+	if ran {
+		IdleTimersRun.Add(1)
+		countWake()
+		return
+	}
+	if nt := runtime.NextTimer(); nt != 0 && (pollUntil == 0 || nt < pollUntil) {
+		if pollUntil != 0 && pollUntil-nt > 1e6 {
+			YieldFarWake.Add(1)
+		}
+		pollUntil = nt
+	}
+	if kicked {
+		// De eigenaar is gekickt en draait zijn timer zo; niet zelf op die
+		// (verstreken) wektijd blijven hangen — dat is een spin op de HVC.
+		IdleTimersKick.Add(1)
+		if min := now + 200e3; pollUntil < min {
+			pollUntil = min
+		}
 	}
 	var slept uint64
 	if a := sharedAddr.Load(); a != 0 && dev.Read64(a) != 0 {
@@ -275,3 +338,7 @@ func coreIndex() int {
 	m := dev.MPIDR()
 	return int(m&0xF) | int((m>>8)&0x3)<<4
 }
+
+// IdleTimersRun: de governor draaide een due timer van een idle P (sysmon-
+// lite); YieldFarWake: de eigen pollUntil lag > 1 ms voorbij zo'n timer.
+var IdleTimersRun, IdleTimersKick, YieldFarWake atomic.Uint64

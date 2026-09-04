@@ -11,7 +11,43 @@ import (
 	"time"
 
 	"github.com/xinix00/HopOS/metal/v2/driver/nvme"
+	"github.com/xinix00/HopOS/metal/v2/kern/hopfs"
 )
+
+// hopfsBench meet dezelfde schijf dóór hopfs: 16 MiB schrijven en lezen in
+// calls van 1 MiB en van 64 KiB, in de eigen root van de bench. Het verschil
+// met de rauwe cijfers hierboven is wat hopfs zelf kost — runs, allocatie,
+// per-blok-werk — zónder servicer en transport.
+func hopfsBench(fsys *hopfs.FS) {
+	const path = "/.bench/hopfs.bin"
+	buf := make([]byte, 1<<20)
+	for i := range buf {
+		buf[i] = byte(i * 13)
+	}
+	defer fsys.RemoveAll("/.bench")
+	for _, sz := range []int{1 << 20, 64 << 10} {
+		n := (16 << 20) / sz
+		t0 := time.Now()
+		for k := 0; k < n; k++ {
+			if err := fsys.WriteAt(path, uint64(k*sz), buf[:sz]); err != nil {
+				fmt.Printf("hopfs bench: write: %v\n", err)
+				return
+			}
+		}
+		w := time.Since(t0)
+		t1 := time.Now()
+		for k := 0; k < n; k++ {
+			if _, err := fsys.ReadAt(path, uint64(k*sz), buf[:sz]); err != nil {
+				fmt.Printf("hopfs bench: read: %v\n", err)
+				return
+			}
+		}
+		r := time.Since(t1)
+		fmt.Printf("hopfs bench: %4d KiB x%-4d write %6.1f MB/s (%5.0f us/call), read %6.1f MB/s (%5.0f us/call) HOPOS_NVMEBENCH\n",
+			sz>>10, n, float64(n*sz)/w.Seconds()/1e6, float64(w.Microseconds())/float64(n),
+			float64(n*sz)/r.Seconds()/1e6, float64(r.Microseconds())/float64(n))
+	}
+}
 
 func nvmeBench(disk *nvme.Controller, first, count uint64) {
 	bs := disk.BlockSize

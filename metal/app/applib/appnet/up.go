@@ -99,6 +99,14 @@ func Up(a *applib.App) (string, error) {
 		layout.CtrlPageAt(a.RAMStart, a.RAMSize)+layout.CtrlRXDoor,
 		nd.rx.HeadPending)
 	lo, hi, hold := rxPoll(a.Env("RXPOLL"))
+	// Meer cores: de deurbel-interrupt (1-core-pad) bestaat daar niet, dus
+	// een gemiste kick — beide cores druk of onderweg naar hun yield als het
+	// antwoord valt — kost de hele slaap. Met hi = 1 s was dat één keer 614 ms
+	// op een 32 MiB-read (04-09). Begrens de slaap: hooguit 2 ms per miss, en
+	// idle kost dat 500 EL2-rondjes/s op één core. RXPOLL blijft de knop.
+	if runtime.GOMAXPROCS(0) > 1 && a.Env("RXPOLL") == "" && hi > 2*time.Millisecond {
+		hi = 2 * time.Millisecond
+	}
 	go func() {
 		gp, _ := runtime.GetG()
 		idle.RXPumpG(gp) // dit is de goroutine die de bel wekt
@@ -107,6 +115,9 @@ func Up(a *applib.App) (string, error) {
 		corruptLogged := false
 		for {
 			n, err := nd.Receive(buf)
+			if n > 0 {
+				LastRXNs.Store(time.Now().UnixNano())
+			}
 			if n == 0 || err != nil {
 				// Een dode ring is stil: ReadInto geeft niets meer, HeadPending
 				// blijft "ja". Eén regel met de reden, anders is dat een
@@ -117,7 +128,29 @@ func Up(a *applib.App) (string, error) {
 						corruptLogged = true
 					}
 				}
-				time.Sleep(d)
+				// Deurbel wapenen vóór de slaap (en niet slapen als er net
+				// iets kwam); ontwapenen zodra we weer draaien. Zo kickt HOP
+				// alleen een pomp die slaapt — zie idle.PumpSleep.
+				if idle.PumpSleep() {
+					t0 := time.Now()
+					time.Sleep(d)
+					if time.Since(t0) < d {
+						PumpEarly.Add(1)
+					} else {
+						PumpTimer.Add(1)
+						if _, pending := nd.rx.HeadPending(); pending {
+							PumpTimerData.Add(1)
+							PumpMissNs.Add(uint64(d))
+							for {
+								m := PumpMissMaxNs.Load()
+								if uint64(d) <= m || PumpMissMaxNs.CompareAndSwap(m, uint64(d)) {
+									break
+								}
+							}
+						}
+					}
+				}
+				idle.PumpAwake()
 				// Niets gevonden. De eerste `hold` lege rondes blijven op lo —
 				// dát is het venster waarin het antwoord van een lopend gesprek
 				// hoort te komen — en pas daarna zakken we terug naar hi. Bij
@@ -140,7 +173,11 @@ func Up(a *applib.App) (string, error) {
 	// De doorbell als interrupt (cpu/idle/door_arm64.go): alleen voor een
 	// app met één core — HCR_EL2.VF is per core en de ack moet op dezelfde
 	// core landen als de injectie. Meerdere cores: de governor-doorbell blijft.
-	if runtime.NumCPU() == 1 && idle.ServeDoorIRQ() {
+	// GOMAXPROCS(0) en niet NumCPU: tamago's NumCPU is altijd 1, ook op een
+	// app met twee cores (smp.Configure zet alleen GOMAXPROCS). Met de
+	// interrupt aan op een 2-core-app kickt HOP hem juist niet (coreCount)
+	// en zakt alles naar de poll-timer — gemeten 04-09, 6 MB/s.
+	if runtime.GOMAXPROCS(0) == 1 && a.Env("HOP_DOORIRQ") != "0" && idle.ServeDoorIRQ() {
 		a.EnableDoorIRQ()
 		a.Logf("appnet: RX doorbell served as interrupt")
 	}

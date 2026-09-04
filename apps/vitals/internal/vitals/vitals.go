@@ -19,6 +19,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xinix00/lean/leanhttp"
@@ -52,7 +53,10 @@ type Config struct {
 	HopAddr string // agent-API (temperatuur); default 10.100.0.1:8080
 	HopKey  string // "" = geen agent-API, temperatuur blijft n/a
 	RxURL   string // bron van de download-test; default een plain-http CDN
-	FS      FS     // bestandslaag voor de disk-test (applib.App); nil = test slaat over
+	// Counters: kale tellers uit de app-runtime (doorbell-interrupts en
+	// -wekkingen), voor in de state-JSON — de tamago-main geeft ze door.
+	Counters func() map[string]uint64
+	FS       FS // bestandslaag voor de disk-test (applib.App); nil = test slaat over
 }
 
 // defaultRxURL is een publiek 100MB-bestand over plain http (leanhttp linkt
@@ -293,6 +297,7 @@ func (s *Server) writeState(w leanhttp.ResponseWriter) {
 		Temp    int                `json:"temp_milli_c"`
 		Running string             `json:"running"`
 		Note    string             `json:"note"`
+		Stall   string             `json:"stall,omitempty"`
 		Tests   []testInfo         `json:"tests"`
 		Results map[string]*Result `json:"results"`
 	}{
@@ -316,11 +321,19 @@ func (s *Server) writeState(w leanhttp.ResponseWriter) {
 		Temp:    s.temp.get(s.cfg),
 		Results: map[string]*Result{},
 	}
+	if s.cfg.Counters != nil {
+		for k, v := range s.cfg.Counters() {
+			state.Node[k] = v
+		}
+	}
 	for _, t := range tests {
 		state.Tests = append(state.Tests, testInfo{t.Name, t.Desc})
 	}
 	s.mu.Lock()
 	state.Running, state.Note = s.running, s.note
+	if v := stall.Load(); v != nil {
+		state.Stall = v.(string)
+	}
 	for k, v := range s.results {
 		state.Results[k] = v
 	}
@@ -342,3 +355,9 @@ func (s *Server) ctrl(off uint64) uint64 {
 	}
 	return s.cfg.CtrlRead(off)
 }
+
+// stall: de laatste starvation-dump (cmd/vitals), zichtbaar in /api/state.
+var stall atomic.Value
+
+// SetStall bewaart een starvation-dump voor /api/state.
+func SetStall(text string) { stall.Store(text) }

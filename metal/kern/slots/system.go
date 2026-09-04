@@ -7,10 +7,12 @@ package slots
 
 import (
 	"fmt"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 	"net"
 	"strconv"
 	"strings"
 
+	"github.com/xinix00/HopOS/metal/v2/abi/hopabi"
 	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 	"github.com/xinix00/HopOS/metal/v2/abi/systemapi"
 )
@@ -94,8 +96,14 @@ func serveSystemConn(conn net.Conn, s *servicer) {
 			fmt.Printf("HOPOS_SYSTEM_PANIC slot %d: %v\n", s.slot, r)
 		}
 	}()
+	// Twee buffers per verbinding, voor de hele levensduur: requests komen
+	// in inbuf, de bulk-read-respons wordt in scratch opgebouwd. Zo kost een
+	// call van 1MiB geen enkele allocatie op HOP — het waren er twee, en die
+	// hielden HOP's GC aan het werk terwijl apps op hem wachtten (04-09).
+	inbuf := make([]byte, systemapi.MaxPayload)
+	scratch := make([]byte, hopabi.HdrLen+systemapi.MaxIOChunk)
 	for {
-		kind, payload, err := systemapi.ReadFrame(conn)
+		kind, payload, err := systemapi.ReadFrameInto(conn, inbuf)
 		if err != nil {
 			return
 		}
@@ -110,7 +118,9 @@ func serveSystemConn(conn net.Conn, s *servicer) {
 		}
 		switch kind {
 		case systemapi.KindCall:
-			resp := s.handleWithLimit(payload, systemapi.MaxIOChunk)
+			c0 := dev.Counter()
+			resp := s.handleWithLimit(payload, systemapi.MaxIOChunk, scratch)
+			probeBucket(&SvcBuckets, dev.Counter()-c0)
 			if err := systemapi.WriteFrame(conn, systemapi.KindResult, resp); err != nil {
 				return
 			}

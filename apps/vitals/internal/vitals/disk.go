@@ -15,6 +15,9 @@ package vitals
 import (
 	"bytes"
 	"fmt"
+	"github.com/xinix00/HopOS/metal/v2/app/applib/appnet"
+	"github.com/xinix00/HopOS/metal/v2/cpu/idle"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 	"io"
 	"net/url"
 	"time"
@@ -28,6 +31,7 @@ import (
 type FS interface {
 	Stat(path string) (uint64, error)
 	ReadAt(path string, off uint64, n int) ([]byte, error)
+	ReadInto(path string, off uint64, dst []byte) (int, error)
 	WriteAt(path string, off uint64, data []byte) (int, error)
 	Remove(path string) error
 }
@@ -84,8 +88,11 @@ func (s *Server) runDisk(res *Result, q url.Values) {
 	}
 	wel := time.Since(t0).Seconds()
 
-	// Lezen: zelfde chunks terug, lengte gecontroleerd.
+	// Lezen: zelfde chunks terug in één hergebruikte buffer (ReadInto — geen
+	// afval per call, anders meet je de GC van de test zelf), lengte én
+	// inhoud gecontroleerd.
 	rlat := make([]float64, 0, len(wlat))
+	rbuf := make([]byte, chunk)
 	t1 := time.Now()
 	for off := 0; off < total; off += chunk {
 		n := chunk
@@ -93,11 +100,12 @@ func (s *Server) runDisk(res *Result, q url.Values) {
 			n = total - off
 		}
 		t := time.Now()
-		got, err := fs.ReadAt(path, uint64(off), n)
+		m, err := fs.ReadInto(path, uint64(off), rbuf[:n])
 		if err != nil {
 			res.Err = fmt.Sprintf("read at %d: %v", off, err)
 			return
 		}
+		got := rbuf[:m]
 		if len(got) != n {
 			res.Err = fmt.Sprintf("read at %d: %d bytes, want %d", off, len(got), n)
 			return
@@ -261,13 +269,60 @@ func (s *Server) runSyscall(res *Result, q url.Values) {
 			time.Sleep(time.Duration(qInt(q, "gap", 0, 0, 5000)) * time.Millisecond)
 		}
 		lat := make([]float64, 0, n)
+		// Splitsing per call: tot de pomp het antwoord-frame uit de ring haalde
+		// (verzoek + HOP + wek van de pomp) en daarna (pomp → deze goroutine).
+		var toTX, txToPump, afterPump []float64
 		for k := 0; k < n; k++ {
 			t := time.Now()
 			if _, err := s.cfg.FS.Stat(path); err != nil {
 				res.Err = fmt.Sprintf("stat: %v", err)
 				return
 			}
-			lat = append(lat, time.Since(t).Seconds()*1e6)
+			t3 := time.Now()
+			lat = append(lat, t3.Sub(t).Seconds()*1e6)
+			t1, t2 := appnet.LastTXNs.Load(), appnet.LastRXNs.Load()
+			if t1 >= t.UnixNano() && t1 <= t2 && t2 <= t3.UnixNano() {
+				toTX = append(toTX, float64(t1-t.UnixNano())/1e3)
+				txToPump = append(txToPump, float64(t2-t1)/1e3)
+				afterPump = append(afterPump, float64(t3.UnixNano()-t2)/1e3)
+			}
+		}
+		// Klok-sonde: CNTVCT in het pad van een stat, HOP meet verzoek →
+		// servicer met dezelfde teller (hopos.idlestat: "probe req").
+		if !q.Has("noprobe") {
+			plat := make([]float64, 0, n)
+			hz := float64(idle.CounterHz())
+			var b [5]int
+			for k := 0; k < n; k++ {
+				c0 := dev.Counter()
+				s.cfg.FS.Stat(fmt.Sprintf("/vitals-probe.%d", c0)) // bestaat niet; de fout is de bedoeling
+				us := float64(dev.Counter()-c0) / hz * 1e6
+				plat = append(plat, us)
+				switch {
+				case us < 50:
+					b[0]++
+				case us < 100:
+					b[1]++
+				case us < 500:
+					b[2]++
+				case us < 1000:
+					b[3]++
+				default:
+					b[4]++
+				}
+			}
+			res.add("probe stat p50", pct(plat, 50), "µs")
+			res.add("probe stat p99", pct(plat, 99), "µs")
+			res.add("probe stat max", pct(plat, 100), "µs")
+			res.linef("probe: counter %.0f Hz, total %d/%d/%d/%d/%d [<50/<100/<500/<1000/≥1000 µs]", hz, b[0], b[1], b[2], b[3], b[4])
+		}
+		if len(toTX) > 0 {
+			res.add("to-tx p50", pct(toTX, 50), "µs")
+			res.add("to-tx p99", pct(toTX, 99), "µs")
+			res.add("tx-to-pump p50", pct(txToPump, 50), "µs")
+			res.add("tx-to-pump p99", pct(txToPump, 99), "µs")
+			res.add("after-pump p99", pct(afterPump, 99), "µs")
+			res.add("split n", float64(len(toTX)), "")
 		}
 		res.add("stat p50", pct(lat, 50), "µs")
 		res.add("stat p99", pct(lat, 99), "µs")
