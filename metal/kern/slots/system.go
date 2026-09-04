@@ -120,7 +120,9 @@ func serveSystemConn(conn net.Conn, s *servicer) {
 		case systemapi.KindCall:
 			c0 := dev.Counter()
 			resp := s.handleWithLimit(payload, systemapi.MaxIOChunk, scratch)
-			probeBucket(&SvcBuckets, dev.Counter()-c0)
+			d := dev.Counter() - c0
+			probeBucket(&SvcBuckets, d)
+			SvcTicks.Add(d)
 			if err := systemapi.WriteFrame(conn, systemapi.KindResult, resp); err != nil {
 				return
 			}

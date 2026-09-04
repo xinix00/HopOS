@@ -78,10 +78,13 @@ func idleStat() {
 		fmt.Printf("idle: cores%s\n", slots.CoreDump())
 		fmt.Printf("idle: rx notify %s; fallback after %s\n", rxReasons(&slots.RXNotify), rxReasons(&slots.RXFallbackAfter))
 		ts := hopnet.Stats()
-		fmt.Printf("idle: hop tcp retrans %d, fast %d, persist %d, zero-window %d; drops bad %d short %d noport %d replyfull %d\n", ts.TCPRetransmits, ts.TCPFastRetransmits, ts.TCPPersistProbes, ts.TCPZeroWindows, ts.DropBadFrame, ts.DropShortFrame, ts.DropNoPort, ts.DropReplyFull)
+		fmt.Printf("idle: hop tcp retrans %d, fast %d, persist %d, zero-window %d; segs out %d (%d B) in %d (%d B); drops bad %d short %d noport %d replyfull %d\n", ts.TCPRetransmits, ts.TCPFastRetransmits, ts.TCPPersistProbes, ts.TCPZeroWindows, ts.TCPSegsOut, ts.TCPBytesOut, ts.TCPSegsIn, ts.TCPBytesIn, ts.DropBadFrame, ts.DropShortFrame, ts.DropNoPort, ts.DropReplyFull)
+		if hz := idle.CounterHz(); hz > 0 {
+			fmt.Printf("idle: hop stages: switch %d ms, stack %d ms (%d frames), svc %d ms (cumulative)\n", hopswitch.SwitchTicks.Load()*1000/hz, hopnet.StackTicks.Load()*1000/hz, hopnet.StackFrames.Load(), slots.SvcTicks.Load()*1000/hz)
+		}
 		var ms runtime.MemStats
 		runtime.ReadMemStats(&ms)
-		fmt.Printf("idle: switch work by door %d, by failsafe timer %d; rx full %d, rx drops %d; hop gc %d\n", hopswitch.WorkByDoor.Load(), hopswitch.WorkByTimer.Load(), hopswitch.RXFull.Load(), hopswitch.RXDrops.Load(), ms.NumGC)
+		fmt.Printf("idle: switch work by door %d, by failsafe timer %d; rx full %d, rx drops %d, nat oversize %d; hop gc %d\n", hopswitch.WorkByDoor.Load(), hopswitch.WorkByTimer.Load(), hopswitch.RXFull.Load(), hopswitch.RXDrops.Load(), hopswitch.NATOversize.Load(), ms.NumGC)
 		slots.ProbeHz = idle.CounterHz()
 		if hz := slots.ProbeHz; hz > 0 {
 			fmt.Printf("idle: probe req %s (max %d µs); svc %s [<50/<100/<500/<1000/≥1000 µs]\n", slots.ProbeBuckets(&slots.ProbeReq), slots.ProbeMaxReq.Load()*1e6/hz, slots.ProbeBuckets(&slots.SvcBuckets))

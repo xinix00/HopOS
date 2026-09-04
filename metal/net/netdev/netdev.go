@@ -12,6 +12,8 @@
 // zonder conversie, adapter of import in één richting.
 package netdev
 
+import "github.com/xinix00/HopOS/metal/v2/abi/layout"
+
 // Device is het rauwe-frame-contract. Het is bewust minimaal: alles wat een
 // stack verder wil weten (MAC, link-status, statistiek) is board-kennis en
 // loopt buiten dit interface om.
@@ -32,7 +34,7 @@ type Device interface {
 // Framematen. MTU is de payload, EthernetMaximumSize de kop plus marge —
 // samen de buffergrootte die een RX-lus nodig heeft.
 const (
-	MTU                 = 1500
+	MTU                 = layout.NetMTU
 	EthernetHeaderSize  = 14
 	EthernetMaximumSize = 18
 )

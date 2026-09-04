@@ -419,9 +419,20 @@ const (
 	// eerlijk in twee richtingen — TX onderin, RX erboven. Afgeleid en niet met de
 	// hand uitgerekend: dan is "past het?" een eigenschap van de indeling en geen
 	// hoop. Wijzigt AbiTail of AbiNetOff, dan schuiven deze mee.
-	NetRingHalf    = (AbiTail - AbiNetOff) / 2 // 960KB per richting
-	NetTXOff       = 0x0
-	NetRXOff       = NetRingHalf
+	NetRingHalf = (AbiTail - AbiNetOff) / 2 // 960KB per richting
+	NetTXOff    = 0x0
+	NetRXOff    = NetRingHalf
+	// NetMTU: de MTU van het slot-LAN (de frame-ringen). Geen draad, geen
+	// bitfouten, dus zo groot als IPv4 toelaat: één 1 MiB-chunk is dan 16
+	// segmenten i.p.v. 700, met 8 ACK's i.p.v. 350 (04-09). Beide stacks
+	// adverteren en klemmen de MSS per bestemming (leannet Config.MTU): naar
+	// buiten het prefix blijft het 1500, de uplink-NIC ziet nooit een jumbo.
+	// Geen ABI-bump: TCP onderhandelt de MSS, een oude kant klemt op 1460.
+	NetMTU = 65535
+	// En op datzelfde LAN geen transport-checksums (leannet LinkTrusted):
+	// geheugen heeft geen bitfouten, en de twee passen per MiB per kant
+	// waren de grootste hap van HOP's werk. Dít is wél een ABI-bump (7→8):
+	// een oude app verifieert nog en zou HOP's segmenten stil droppen.
 	NetRingDataCap = NetRingHalf - 0x1000 // minus de ringkop
 )
 
@@ -887,7 +898,7 @@ const (
 	// MMU leest — ringkop, deurbel — gaat langs dev.Push/Pull, die daar nu
 	// echt vegen. Een oud image met een device-staart tegenover een gecachte
 	// HOP zou stil stale koppen lezen: het adres blijft, het contract niet.
-	ABIVersion = 7
+	ABIVersion = 8
 )
 
 // AbiTailAt geeft de basis van de ABI-staart van een slot: net boven zijn

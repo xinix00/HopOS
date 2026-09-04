@@ -31,10 +31,12 @@ package hopswitch
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xinix00/HopOS/metal/v2/net/netdev"
@@ -299,6 +301,13 @@ func uplinkMulticastTx(p []byte) {
 func (u *Uplink) Transmit(buf []byte) error {
 	uplinkTxMu.Lock()
 	defer uplinkTxMu.Unlock()
+	if len(buf) > uplinkMaxFrame {
+		// Een jumbo van het slot-LAN hoort hier nooit te komen (de stacks
+		// klemmen de MSS per bestemming, layout.NetMTU); de NIC-driver zou
+		// zijn 2 KB-descriptor overlopen. Tellen en droppen.
+		NATOversize.Add(1)
+		return errOversize
+	}
 	return u.nic.Transmit(buf)
 }
 
@@ -1095,3 +1104,11 @@ func PublishedPorts(i int) []uint16 {
 	}
 	return out
 }
+
+// uplinkMaxFrame: de klassieke Ethernet-grens van de fysieke NIC's.
+const uplinkMaxFrame = 1500 + 18
+
+var (
+	NATOversize atomic.Uint64
+	errOversize = errors.New("hopswitch: frame te groot voor de uplink")
+)

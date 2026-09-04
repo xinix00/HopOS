@@ -59,6 +59,7 @@ func Counters() map[string]uint64 {
 		m["tcp_retrans"], m["tcp_fast_retrans"] = uint64(ts.TCPRetransmits), uint64(ts.TCPFastRetransmits)
 		m["tcp_persist"], m["tcp_zero_window"] = uint64(ts.TCPPersistProbes), uint64(ts.TCPZeroWindows)
 		m["drop_bad"], m["drop_short"], m["drop_noport"], m["drop_replyfull"] = uint64(ts.DropBadFrame), uint64(ts.DropShortFrame), uint64(ts.DropNoPort), uint64(ts.DropReplyFull)
+		m["tcp_segs_out"], m["tcp_bytes_out"], m["tcp_segs_in"], m["tcp_bytes_in"] = uint64(ts.TCPSegsOut), uint64(ts.TCPBytesOut), uint64(ts.TCPSegsIn), uint64(ts.TCPBytesIn)
 	}
 	return m
 }

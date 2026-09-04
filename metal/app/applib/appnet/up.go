@@ -65,7 +65,13 @@ func Up(a *applib.App) (string, error) {
 		// per verdubbeling binnen dit plafond, dus rx stopt onder de helft en
 		// tx houdt de rest; de helft als plafond liet tx op zijn vloer van 4KB
 		// hangen (stat na bulk 821µs).
-		MaxBufPerConn: layout.NetRingDataCap,
+		// Per ring (leannet 04-09) en de helft van de slot-ring: het venster
+		// moet ónder de ring blijven, anders loopt die vol zodra HOP sneller is
+		// dan de pomp van een app (128× rx-full en 2 drops bij vier hameraars
+		// zonder checksums, 04-09) — en de switch blokkeert dan 10 ms voor iedereen.
+		MaxBufPerConn: layout.NetRingDataCap / 2,
+		MTU:           layout.NetMTU,
+		LinkTrusted:   true, // zie layout.NetMTU: het slot-LAN is geheugen
 	}
 	cfg.AdvWS = wsShiftFor(budget / 4)
 
@@ -107,10 +113,17 @@ func Up(a *applib.App) (string, error) {
 	if runtime.GOMAXPROCS(0) > 1 && a.Env("RXPOLL") == "" && hi > 2*time.Millisecond {
 		hi = 2 * time.Millisecond
 	}
+	// De bel: een gebufferd kanaal (één token) waarop de pomp naast zijn
+	// poll-timer wacht. Governor en doorbell-ISR bellen (idle.RXBell), en
+	// een bel die vóór het parkeren valt blijft gewoon liggen.
+	bell := make(chan struct{}, 1)
+	idle.RXBell(bell)
 	go func() {
-		gp, _ := runtime.GetG()
-		idle.RXPumpG(gp) // dit is de goroutine die de bel wekt
-		buf := make([]byte, leannet.MTU+leannet.EthernetMaximumSize)
+		timer := time.NewTimer(time.Hour)
+		if !timer.Stop() {
+			<-timer.C
+		}
+		buf := make([]byte, layout.NetMTU+leannet.EthernetMaximumSize)
 		d, empty := lo, 0
 		corruptLogged := false
 		for {
@@ -132,11 +145,14 @@ func Up(a *applib.App) (string, error) {
 				// iets kwam); ontwapenen zodra we weer draaien. Zo kickt HOP
 				// alleen een pomp die slaapt — zie idle.PumpSleep.
 				if idle.PumpSleep() {
-					t0 := time.Now()
-					time.Sleep(d)
-					if time.Since(t0) < d {
+					timer.Reset(d)
+					select {
+					case <-bell:
 						PumpEarly.Add(1)
-					} else {
+						if !timer.Stop() {
+							<-timer.C
+						}
+					case <-timer.C:
 						PumpTimer.Add(1)
 						if _, pending := nd.rx.HeadPending(); pending {
 							PumpTimerData.Add(1)
@@ -151,6 +167,10 @@ func Up(a *applib.App) (string, error) {
 					}
 				}
 				idle.PumpAwake()
+				select { // een verschaald token hoort bij wat we nu gaan lezen
+				case <-bell:
+				default:
+				}
 				// Niets gevonden. De eerste `hold` lege rondes blijven op lo —
 				// dát is het venster waarin het antwoord van een lopend gesprek
 				// hoort te komen — en pas daarna zakken we terug naar hi. Bij

@@ -272,6 +272,11 @@ func main() {
 	// De idle-meetlat van HOP's eigen core (node.go idleStat), opt-in — en de
 	// knop die de RX-lus terug in de poll-stand zet (hopnet.ForcePoll), vóór
 	// Up, want die kiest.
+	if v := bootParam("hopos.profile"); v != "" {
+		n := 0
+		fmt.Sscanf(v, "%d", &n)
+		slots.ProfileSlot.Store(int32(n))
+	}
 	if bootParam("hopos.idlestat") == "1" {
 		go idleStat()
 	}

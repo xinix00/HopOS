@@ -171,6 +171,9 @@ func waker() {
 		time.Sleep(time.Millisecond)
 		wakerRounds.Add(1)
 		now := dev.Counter()
+		if ps := int(ProfileSlot.Load()); ps > 0 && ps <= NumSlots() && coreRunning(coreOf(ps)) {
+			profileTick(ps)
+		}
 		for i := 1; i <= NumSlots(); i++ {
 			core := coreOf(i)
 			if slotShares(i) || !coreRunning(core) {
@@ -308,6 +311,9 @@ func CoreDump() string {
 }
 
 var stuck [64]int
+
+// SvcTicks: tellerticks in de servicer (meetlat, idlestat).
+var SvcTicks atomic.Uint64
 
 // unitSaved: is een core van de eenheid van primaire i geyield (CtxSaved)?
 func unitSaved(i int) bool {

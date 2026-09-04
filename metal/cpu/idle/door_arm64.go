@@ -17,7 +17,6 @@ package idle
 import (
 	"os"
 	"os/signal"
-	"runtime"
 	"sync/atomic"
 
 	"github.com/usbarmory/tamago/arm64"
@@ -64,10 +63,8 @@ func doorISR() {
 	DoorIRQs.Add(1)
 	if f := rxStatus.Load(); f != nil {
 		if _, pending := (*f)(); pending {
-			if gp := rxPumpG.Load(); gp != 0 {
-				if woken, _ := runtime.WakeSleeper(uint(gp)); woken {
-					DoorIRQWoken.Add(1)
-				}
+			if ringBell() {
+				DoorIRQWoken.Add(1)
 			}
 		}
 	}

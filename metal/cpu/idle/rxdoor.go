@@ -48,7 +48,6 @@ const rxArmed = uint64(1) << 63
 var (
 	rxStatus atomic.Pointer[func() (uint64, bool)] // head + pending van de RX-ring
 	rxDoorPA atomic.Uintptr                        // CtrlRXDoor op de eigen control-page
-	rxPumpG  atomic.Uint64                         // g-pointer van de slapende RX-pomp
 	work     atomic.Pointer[func() bool]           // HOP: gedeeld werk achter een doorbell
 	workWake atomic.Pointer[func()]                // maakt HOP's lokale pomp runnable
 )
@@ -96,9 +95,6 @@ func PumpAwake() {
 	}
 }
 
-// RXPumpG registreert de goroutine van de RX-pomp als wek-doel; aanroepen op
-// de pomp-goroutine zelf, vóór zijn eerste slaap (runtime.GetG geeft de gp).
-func RXPumpG(gp uint) { rxPumpG.Store(uint64(gp)) }
 
 // WatchWork is de HOP-variant van hetzelfde level-triggered contract. Een
 // producer doet dev.Notify na leeg→niet-leeg; zodra het event de idle core
@@ -158,33 +154,45 @@ func rxDoor() bool {
 		return false
 	}
 	// De deurbel zelf blijft van de pomp: PumpSleep wapent hem vlak vóór de
-	// slaap, PumpAwake ontwapent hem erna. De governor schreef hem vroeger
-	// ook, maar op een 2-core-app is dat een race met de pomp op de andere
-	// core (een ontwapening ná diens wapening = verloren wek, tot een
-	// seconde). Wekken volstaat: slaapt de pomp nog tussen wapenen en parkeren,
-	// dan mislukt de wek, blijft de deur gewapend en kickt HOP's wekker ons
-	// binnen een milliseconde opnieuw.
-	gp := rxPumpG.Load()
-	if gp == 0 {
-		DoorNoPump.Add(1)
+	// slaap, PumpAwake ontwapent hem erna. Hier alleen bellen: een token in
+	// het gebufferde kanaal waarop de pomp met zijn timer wacht (appnet). Is
+	// de pomp nog niet geparkeerd, dan ligt het token klaar en slaapt hij
+	// niet — de verloren wek van WakeSleeper (pomp tussen wapenen en
+	// parkeren, 04-09) bestaat zo niet meer, en de pomp wordt runnable op
+	// déze P, dus terug naar de scheduler is precies goed. Alleen vanuit de
+	// scheduler-idle (IdleMayReady): een kanaal-send readyt een goroutine.
+	if !runtime.IdleMayReady() {
 		return false
 	}
-	woken, remote := runtime.WakeSleeper(uint(gp))
-	if !woken {
+	if !ringBell() {
+		// Bel stond al: de pomp draait op de andere core (of is daar
+		// runnable). Terug naar de scheduler zou hier spinnen (96k rondes per
+		// run, 2-core, 04-09); slapen, de pomp ontwapent de deur zelf.
 		DoorWakeFailed.Add(1)
 		return false
 	}
 	DoorWoken.Add(1)
-	if remote {
-		// De pomp hoort bij de andere core en die is gekickt; terug naar
-		// onze scheduler levert niets op — die vond net niets en zou hier
-		// meteen weer staan, met een IPI naar de pomp-core per ronde (319k/s
-		// op de M4, 04-09: de pomp-core verloor de helft van zijn tijd aan
-		// het afhandelen). Slapen dus; de volgende burst kickt ons wel weer.
-		DoorWokenRemote.Add(1)
+	return true
+}
+
+// rxBell is het kanaal van de RX-pomp (appnet.Up); RXBell registreert het.
+var rxBell atomic.Pointer[chan struct{}]
+
+func RXBell(c chan struct{}) { rxBell.Store(&c) }
+
+// ringBell legt een token in de bel; false als hij al vol is (of er geen is).
+func ringBell() bool {
+	p := rxBell.Load()
+	if p == nil {
+		DoorNoPump.Add(1)
 		return false
 	}
-	return true
+	select {
+	case *p <- struct{}{}:
+		return true
+	default:
+		return false
+	}
 }
 
 // DoorNoPump/DoorWoken/DoorWakeFailed: de meetlat van de bel — rondes zonder

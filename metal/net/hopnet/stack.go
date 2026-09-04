@@ -44,7 +44,17 @@ func stackUp(loc *locdev, nc board.NetConfig, mac string) (func([]byte) error, e
 		// dropt zijn Transmit en herstelt TCP het met retransmits. De ringen
 		// verdubbelen binnen dit plafond, dus rx stopt onder de helft. Zelfde
 		// grens als appnet aan de andere kant.
-		MaxBufPerConn: layout.NetRingDataCap,
+		// Per ring (leannet 04-09) en de helft van de slot-ring: het venster
+		// moet ónder de ring blijven, anders loopt die vol zodra HOP sneller is
+		// dan de pomp van een app (128× rx-full en 2 drops bij vier hameraars
+		// zonder checksums, 04-09) — en de switch blokkeert dan 10 ms voor iedereen.
+		MaxBufPerConn: layout.NetRingDataCap / 2,
+		// HOP's adres is dat van de uplink, maar zijn device is het slot-LAN:
+		// dáár geldt de jumbo-MTU (naar apps), naar buiten blijft het 1500.
+		MTU:         layout.NetMTU,
+		MTUNet:      ip4bytes(layout.HostIP4()),
+		MTUPrefix:   layout.NetPrefix,
+		LinkTrusted: true, // de ringen zijn geheugen: geen checksums naar apps
 	}
 	copy(cfg.MAC[:], loc.mac[:])
 	if gw, err := netip.ParseAddr(nc.GW); err == nil && gw.Is4() {
@@ -99,3 +109,5 @@ func Stats() leannet.Stats {
 	}
 	return current.Stats()
 }
+
+func ip4bytes(v uint32) [4]byte { return [4]byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)} }
