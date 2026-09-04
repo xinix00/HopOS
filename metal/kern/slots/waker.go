@@ -59,7 +59,19 @@ func DirectRXKicks() uint64 { return directRXKicks.Load() }
 
 func wakeRX(i int) {
 	core := coreOf(i)
-	if slotShares(i) || !coreRunning(core) || ctxState(i) != layout.CtxSaved || !rxDue(i) {
+	if slotShares(i) || !coreRunning(core) {
+		return
+	}
+	if ctxState(i) != layout.CtxSaved {
+		// De app draait. Alleen kicken als hij zijn doorbell als interrupt
+		// afhandelt (CtrlDoorIRQ, één-core-app): de switcher maakt van de IPI
+		// dan een virtuele FIQ voor EL1. Anders zou de kick op EL2 alleen
+		// geackt worden en niets doen — en een vFIQ voor een app die hem niet
+		// afhandelt laat elke WFI meteen terugkeren.
+		if coreCount(i) != 1 || ctrlRead(i, layout.CtrlDoorIRQ) == 0 {
+			return
+		}
+	} else if !rxDue(i) {
 		return
 	}
 	if phys := physCore(core); phys >= 0 {

@@ -60,6 +60,10 @@ TEXT el2entry(SB),NOSPLIT|NOFRAME,$0
 	CBZ	R3, exited
 	CMP	$4, R3
 	BEQ	wake
+#ifdef VHE
+	CMP	$5, R3	// doorbell-ack: alleen waar de fast-IPI een vFIQ werd (Apple)
+	BEQ	doorack
+#endif
 
 yield:
 	// Idle-yield (HVC #1): de bewoner van DEZE core staat in het sched-blok
@@ -410,6 +414,39 @@ fiq:
 	WORD	$0xd53df120	// mrs x0, s3_5_c15_c1_1 (IPI_SR_EL1)
 	CBZ	R0, fault
 	WORD	$0xd51df120	// msr s3_5_c15_c1_1, x0 (ack)
+	// De doorbell als interrupt: draait de app (dit is idx 10, dus ja) en
+	// heeft hij zich aangemeld (layout.CtrlDoorIRQ in zijn control-page),
+	// dan een virtuele FIQ pending zetten (HCR_EL2.VF; FMO staat al). EL1
+	// neemt hem zodra F daar open staat, tamago's vector maakt er zijn
+	// interrupt-signaal van, en de ISR van de app wekt zijn RX-pomp — ook
+	// als de core druk is met GC en de idle-governor dus niet aan de beurt
+	// komt (gemeten 04-09: dan 1ms per call op de poll-timer). Zonder vlag:
+	// alleen de ack, precies als voorheen. Eigen ctx via SchedCurrent (zie
+	// yield:), control-page via CtxCtrlPA; MMU uit, dus dit leest DRAM — de
+	// app publiceert de vlag met een clean.
+	MOVD	32(RSP), R1	// layout.SchedCurrent
+	MOVD	208(RSP), R2	// layout.SchedS2PA
+	ADD	R1<<16, R2, R2
+	ADD	$0x6000, R2, R2	// eigen ctx (layout.CtxOff)
+	MOVD	8(R2), R3	// layout.CtxCtrlPA
+	CBZ	R3, fiqdone
+	MOVD	0x118(R3), R3	// layout.CtrlDoorIRQ
+	CBZ	R3, fiqdone
+	WORD	$0xd53c1100	// mrs x0, hcr_el2
+	ORR	$0x40, R0, R0	// VF (bit 6): virtuele FIQ pending voor EL1
+	WORD	$0xd51c1100	// msr hcr_el2, x0
+fiqdone:
+	LDP	(RSP), (R0, R1)
+	LDP	16(RSP), (R2, R3)
+	ISB	$15
+	ERET
+
+// doorack: HVC #5 — de app heeft zijn doorbell-interrupt afgehandeld: de
+// virtuele FIQ weer weg (level: anders vuurt hij opnieuw zodra EL1 F opent).
+doorack:
+	WORD	$0xd53c1100	// mrs x0, hcr_el2
+	BIC	$0x40, R0, R0	// VF eraf
+	WORD	$0xd51c1100	// msr hcr_el2, x0
 	LDP	(RSP), (R0, R1)
 	LDP	16(RSP), (R2, R3)
 	ISB	$15

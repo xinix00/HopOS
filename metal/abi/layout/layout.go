@@ -952,6 +952,16 @@ const (
 	CtrlFaultFAR = 0x60 // FAR_EL2: faultadres
 	CtrlFaultVec = 0x68 // vectorindex + 1 (0 = geen fault gezien)
 
+	// CtrlDoorIRQ (app → HOP/EL2): 1 = deze app wil zijn RX-doorbell als
+	// interrupt. HOP kickt hem dan óók als hij draait (niet alleen als hij op
+	// EL2 slaapt), en de EL2-switcher maakt van die fast-IPI een virtuele FIQ
+	// (HCR_EL2.VF) voor EL1; de app ackt met HVC #5. Zonder deze vlag blijft
+	// alles zoals het was: een app die de vFIQ niet afhandelt zou anders in
+	// elke WFI meteen terugkeren. Alleen zinvol (en door HOP gehonoreerd)
+	// voor een app met één core: HCR_EL2 is per core en de ack moet op
+	// dezelfde core landen als de injectie.
+	CtrlDoorIRQ = 0x118
+
 	// SMP (fase 5): één app over meerdere cores, gedeelde heap. HOP zet bij
 	// Start het aantal cores en waar de app zijn extra cores mag opbrengen; de
 	// app-runtime (OS-laag, niet app-code) leest ze en brengt de secundaire
@@ -1098,7 +1108,7 @@ const (
 	// Env-blob: door HOP geschreven "key=val\n..."-bytes die de app-lib bij
 	// start inleest (de Docker-vorm: env meegegeven bij het starten). Vervangt
 	// het kernel-envp dat bare metal niet heeft. Loopt tot de staart-woorden.
-	CtrlEnvData = 0x118
+	CtrlEnvData = 0x120 // (04-09: was 0x118; CtrlDoorIRQ kreeg dat woord)
 	CtrlEnvMax  = CtrlIdleMode - CtrlEnvData
 
 	// DE STAART: HOP → app-woorden die ná de env-regio zijn bijgekomen staan

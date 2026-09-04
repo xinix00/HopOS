@@ -76,6 +76,11 @@ func (a *App) ctrlGet(off uintptr) uint64 {
 	return dev.Read64(p)
 }
 
+// EnableDoorIRQ meldt HOP en de EL2-switcher dat deze app zijn RX-doorbell
+// als interrupt afhandelt (layout.CtrlDoorIRQ; cpu/idle.ServeDoorIRQ moet
+// dan draaien). Aanroepen door appnet, niet door de app zelf.
+func (a *App) EnableDoorIRQ() { a.ctrlSet(layout.CtrlDoorIRQ, 1) }
+
 func (a *App) ctrlSet(off uintptr, v uint64) {
 	p := layout.CtrlPageAt(a.RAMStart, a.RAMSize) + off
 	dev.Write64(p, v)

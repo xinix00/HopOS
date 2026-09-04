@@ -137,6 +137,13 @@ func Up(a *applib.App) (string, error) {
 	// De stack bewaren voor WatchStats: één per app, en de tellers zijn
 	// precies wat een veld-jacht nodig heeft (zie de spin/stilte-jacht 15-08).
 	current = st
+	// De doorbell als interrupt (cpu/idle/door_arm64.go): alleen voor een
+	// app met één core — HCR_EL2.VF is per core en de ack moet op dezelfde
+	// core landen als de injectie. Meerdere cores: de governor-doorbell blijft.
+	if runtime.NumCPU() == 1 && idle.ServeDoorIRQ() {
+		a.EnableDoorIRQ()
+		a.Logf("appnet: RX doorbell served as interrupt")
+	}
 	a.NetworkReady()
 
 	return layout.IP4Str(ip), nil
