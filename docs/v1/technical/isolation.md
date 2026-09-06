@@ -52,7 +52,7 @@ slots 1-6, 8-126: unaffected, still serving
 ### Small enough to actually read
 
 Lines of code, excluding tests, comments and blanks — counted **the way the
-compiler sees it** by [`tools/loc.go`](../../tools/loc.go), which runs
+compiler sees it** by [`tools/loc.go`](../../../tools/loc.go), which runs
 `go list -deps` per release image. A file that only links for one instruction
 set or one board counts only there; example apps, probes and dev targets
 don't ride along. If it isn't in the image you boot, it isn't in the number.

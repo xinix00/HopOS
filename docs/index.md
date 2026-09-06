@@ -1,37 +1,37 @@
 # HopOS documentation
 
-HopOS is the Go-only OS: a ~6 MB signed image is the entire node, every app
-runs on its own physical cores behind a hardware cage, and all state lives
-in S3 — not on the machine. Two architectures, arm64 and riscv64, under one
-app ABI. Product page: [gethop.org/hopos](https://gethop.org/hopos/).
+HopOS runs native Go applications on ARM64 and RISC-V using TamaGo. The node assigns memory and cores, starts and stops applications, handles shared I/O, and maintains the job state needed to manage them.
 
-## Quick start
+Each application has its own memory partition and runtime. Applications can use dedicated cores or explicitly share a core pool with trusted applications. Sharing cores does not merge their memory partitions. SMP assigns multiple dedicated cores to one application.
 
-1. **[Flash & boot](boot.md)** — the [imager](https://github.com/xinix00/hop-imager) writes a card, verifies it and finds your nodes, in one window without a terminal; or take the image files by hand (UEFI stick, Raspberry Pi or Radxa SD card, RISC-V SD image, QEMU). Signed images: [newest release](https://github.com/xinix00/HopOS/releases/latest).
-2. **[Configure](config.md)** — the six lines that define a node; same keys on every board, editable before or after writing the card.
-3. **[Write an app](app.md)** — compile a Go program for HopOS and run it as a job.
+Application system calls use the existing internal network path. The node identifies the caller and dispatches the operation through that application's servicer. A logical doorbell tells a resident to inspect published work; physical wake mechanisms depend on the architecture and board.
 
-## Technical
+A kernel flip replaces the node kernel while preserving running applications. Its procedure, compatibility requirements, and failure behavior are documented below.
 
-- **[Architecture](technical/architecture.md)** — one orchestrator core, every app its own kernel.
-- **[Isolation](technical/isolation.md)** — the hardware cage: stage-2, whole cores, zero syscalls.
-- **[Networking](technical/networking.md)** — a network stack per app, a switch in the node.
-- **[Stateless](technical/stateless.md)** — state on S3, not on metal.
-- **[Slot-lifecycle](slot-lifecycle-grenzen.md)** (NL, intern) — wie garandeert wat in de start/stop-keten: wat HOP's runner al afdekt, waarom `slots` dun blijft, en welke lifecycle-machinerie bewust ontbreekt.
-- **[Core-deling & de stille core](coredeling-ontwerp.md)** (NL, intern) — wektijd + doorbell + round-robin: hoe meerdere apps één core delen en een idle app (bijna) niets kost; de schedbench-metingen en wat er bewust is weggelaten.
-- **[Support-matrix](support.md)** (NL, intern) — per board per poot van het board/kooi-contract: bedraad en bewezen, fallback, of gat; met de goedkoopste route per gat.
-- **[Geheugen](geheugen-ontwerp.md)** (NL, intern) — de keten van DRAM tot app-heap: wat HOP zelf houdt, hoe een partitie uitgedeeld en teruggegeven wordt, welke plafonds er zijn, en de vallen met datum.
-- **GUI — SURF** — network-transparent windows: an app draws anywhere in the
-  cluster, a display node composites it, and a window fails over when HOP
-  restarts its app elsewhere. The node-side display grant ships in `metal/gui`;
-  the windowing, compositor and browser-KVM stack is built as plain HopOS apps
-  in the [hop-os-surf](https://github.com/xinix00/hop-os-surf) repo. Prebuilt
-  SURF apps (display, browser, clock, …) are on the
-  [releases page](https://github.com/xinix00/hop-os-surf/releases).
+## Use HopOS
 
-## Related
+- [Getting started](getting-started.md) — select, configure, install, and boot an image; run a first job.
+- [Applications](apps.md) — write and build an app; choose dedicated cores, trusted sharing, or SMP.
+- [Operations](operations.md) — deploy and replace jobs, inspect logs, use files and volumes, and recover a node.
+- [Kernel flip](kernel-flip.md) — update a running kernel and understand what is preserved.
 
-- **HOP, the orchestrator** (jobs, CLI, cluster, S3 state) has its own docs:
-  [gethop.org/hop/docs](https://gethop.org/hop/docs/)
-- **Design notes** — the engineering dossiers behind all of this (bring-up
-  logs, silicon errata, measurements; Dutch): [archief/](archief/)
+## Understand the implementation
+
+- [Architecture](architecture.md) — the shared framework, architecture and board boundaries, and source layout.
+- [Lifecycle and ownership](lifecycle.md) — allocation, publication, waiting, confirmed termination, and reuse.
+- [Networking and system calls](networking.md) — caller, transport, frame rings, switching, NAT, and notification.
+
+## Reference
+
+- [Configuration](configuration.md) — node settings, job fields, units, and defaults.
+- [Boards and drivers](boards-drivers.md) — boot methods, memory, cores, devices, and board-specific behavior.
+- [Development](development.md) — toolchain, dependencies, image builds, and verification commands.
+
+## Measurements and coverage
+
+- [Measurements](measurements.md) — throughput, latency, memory budgets, and measurement conditions.
+- [Implementation and test status](status.md) — available features, tested candidates, board coverage, and remaining checks.
+
+This set describes the v2.2.2 source baseline. Hardware results identify the candidate on which they were obtained. Physical network IRQ integration is a planned follow-up; physical boards currently use receive polling.
+
+[Previous documentation (v1)](v1/index.md) is retained for comparison.

@@ -35,7 +35,7 @@ flowchart LR
 The internal network is the same on every node and needs no server to hand
 out addresses. Everything is derived from the slot number, so the switch and
 each app's stack compute identical values and can never drift
-([`metal/abi/layout`](../../metal/abi/layout/layout.go)):
+([`metal/abi/layout`](../../../metal/abi/layout/layout.go)):
 
 | | IP | MAC |
 |---|---|---|
@@ -53,14 +53,14 @@ only the node's uplink address is real out there.
 Each app's memory partition ends in two single-producer/single-consumer
 rings — TX (app → switch) and RX (switch → app) — carrying raw Ethernet
 frames, 1 MB of capacity per direction
-([layout](../../metal/abi/layout/layout.go): `NetTXOff` / `NetRXOff`). The
+([layout](../../../metal/abi/layout/layout.go): `NetTXOff` / `NetRXOff`). The
 app runs its stack on top; the switch is the sole counterpart on the other
 end. This is the isolation boundary made physical (see below).
 
 ## The switch: three destinations
 
 Core 0 drains every slot's TX ring and forwards each frame on its
-destination MAC ([`hopswitch.go`](../../metal/net/hopswitch/hopswitch.go)).
+destination MAC ([`hopswitch.go`](../../../metal/net/hopswitch/hopswitch.go)).
 There are exactly three things a frame can be:
 
 1. **App → app (internal).** Destination is another slot's MAC. The switch
@@ -69,8 +69,8 @@ There are exactly three things a frame can be:
    memory-copy speed.
 2. **App → the node itself.** Destination is `10.100.0.1`. HOP hangs on its
    own switch as "port 0": a second internal NIC on the node's stack
-   ([`gateway.go`](../../metal/net/hopswitch/gateway.go),
-   [`internal.go`](../../metal/net/hopnet/internal.go)). An app reaches the
+   ([`gateway.go`](../../../metal/net/hopswitch/gateway.go),
+   [`internal.go`](../../../metal/net/hopnet/internal.go)). An app reaches the
    agent (`:8080`) and the leader (`:9080`) on `10.100.0.1` directly — no
    NAT, no proxy, and **not one byte leaves the physical NIC**.
 3. **App → world (and back).** Destination is the gateway MAC but the IP is
@@ -86,7 +86,7 @@ A job's `ports` become **stateless DNAT rules**: `node-IP:port` →
 `slot-IP:port`. Every inbound packet just gets its headers rewritten
 (destination address + port, checksums patched incrementally per RFC 1624 —
 no per-connection state, no connection table) and is dropped into the target
-slot's ring ([`nat.go`](../../metal/net/hopswitch/nat.go), `dnatInLocked`).
+slot's ring ([`nat.go`](../../../metal/net/hopswitch/nat.go), `dnatInLocked`).
 The app binds the same port number it is published on, handed to it as
 `ER_PORT_<NAME>`. This is how the outside world reaches a service running on
 an app core.
@@ -104,7 +104,7 @@ right host, the switch takes the shortcut when that host is you.
 When an app dials out — an HTTP client, a database driver, `cloudflared`, a
 DNS query — HOP masquerades it: source `slot-IP:port` → `node-IP:node-port`,
 out the uplink, and the reply is rewritten back and delivered straight into
-the slot's RX ring ([`nat.go`](../../metal/net/hopswitch/nat.go),
+the slot's RX ring ([`nat.go`](../../../metal/net/hopswitch/nat.go),
 `natOutbound` / `replyInLocked`). It is **conntrack-light**, on purpose:
 
 - TCP and UDP both (so QUIC and DNS work).
@@ -156,7 +156,7 @@ MAC onto the LAN, or reach the uplink directly.
 HOP brings up the real NIC under a pure-Go TCP/IP stack — `lneto`, reached
 through `go-net`, which hooks it into Go's standard `net` package, so the
 agent/leader get ordinary `net.Listen` / `net/http`
-([`hopnet.go`](../../metal/net/hopnet/hopnet.go)). Both come from our own forks
+([`hopnet.go`](../../../metal/net/hopnet/hopnet.go)). Both come from our own forks
 ([xinix00/lneto](https://github.com/xinix00/lneto),
 [xinix00/go-net](https://github.com/xinix00/go-net)) because bringing this up on
 metal turned up correctness bugs we had to fix; those fixes are open upstream

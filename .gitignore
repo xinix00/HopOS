@@ -114,3 +114,44 @@ __pycache__/
 # zolang de ronde loopt (docs/meetinstrumenten.md houdt vast wat er blijvend
 # uit komt) en horen niet in de historie van de boom.
 docs/reviews/
+
+# Archived versioned documentation; local review material stays ignored.
+!docs/v1/LAATSTE_PLAN.md
+!docs/v1/app.md
+!docs/v1/archief/app-memory.md
+!docs/v1/archief/bcm2712-c1-erratum.md
+!docs/v1/archief/gui-ontwerp.md
+!docs/v1/archief/indeling.md
+!docs/v1/archief/pe-relocatie.md
+!docs/v1/archief/uefi.md
+!docs/v1/boot.md
+!docs/v1/config.md
+!docs/v1/coredeling-ontwerp.md
+!docs/v1/geheugen-ontwerp.md
+!docs/v1/index.md
+!docs/v1/kern-flip.md
+!docs/v1/leannet-ontwerp.md
+!docs/v1/meetinstrumenten.md
+!docs/v1/menu.md
+!docs/v1/netstack-upstream.md
+!docs/v1/slot-lifecycle-grenzen.md
+!docs/v1/support.md
+!docs/v1/technical/architecture.md
+!docs/v1/technical/framework-contract.md
+!docs/v1/technical/isolation.md
+!docs/v1/technical/networking.md
+!docs/v1/technical/release-afronding.md
+!docs/v1/technical/release-aux-driver-review.md
+!docs/v1/technical/release-evidence/2026-09-06-222-host-target-gate.log
+!docs/v1/technical/release-evidence/2026-09-06-hardware.json
+!docs/v1/technical/release-evidence/2026-09-06-host-target-gate.log
+!docs/v1/technical/release-evidence/nic-after.log
+!docs/v1/technical/release-evidence/nic-before.log
+!docs/v1/technical/release-evidence/nic-switch.log
+!docs/v1/technical/release-logboek.md
+!docs/v1/technical/release-nic-review.md
+!docs/v1/technical/release-status.md
+!docs/v1/technical/release-storage-review.md
+!docs/v1/technical/stateless.md
+docs/v1/reviews/
+docs/v1/upstream-pr-stijl.md

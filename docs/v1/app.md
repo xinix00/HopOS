@@ -17,7 +17,7 @@ tools/tamago-go/apply.sh          # onze patches op de toolchain (tools/tamago-g
 ## 2. A realistic app — with networking
 
 You almost always want the network, so the starting point includes it. The
-repo carries this as [`metal/app/hello`](../metal/app/hello/main.go):
+repo carries this as [`metal/app/hello`](../../metal/app/hello/main.go):
 
 ```go
 package main

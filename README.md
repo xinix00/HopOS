@@ -2,9 +2,9 @@
 
 **A bare-metal Go operating system for edge computing. No Linux — one static Go binary *is* the OS.**
 
-**Docs:** [flash & boot](docs/boot.md) · [configure](docs/config.md) · [write an app](docs/app.md) · [technical](docs/index.md) — site: [gethop.org](https://gethop.org)
+**Docs:** [flash & boot](docs/getting-started.md) · [configure](docs/configuration.md) · [write an app](docs/apps.md) · [technical](docs/index.md) — site: [gethop.org](https://gethop.org)
 
-**Download:** signed boot images for UEFI arm64, Raspberry Pi 4/5, the Radxa Zero 3E and the RISC-V LicheeRV Nano are in the [newest release](https://github.com/xinix00/HopOS/releases/latest) — every board is a complete medium image (`gunzip | dd`, boot) and the default config runs as-is. The quick road is the [imager](https://github.com/xinix00/hop-imager): it burns a card and verifies it, configures one afterwards, and finds the nodes on your network — one window, no terminal ([flash & boot](docs/boot.md) has both roads and the signature check).
+**Download:** signed boot images for UEFI arm64, Raspberry Pi 4/5, the Radxa Zero 3E and the RISC-V LicheeRV Nano are in the [newest release](https://github.com/xinix00/HopOS/releases/latest) — every board is a complete medium image (`gunzip | dd`, boot) and the default config runs as-is. The quick road is the [imager](https://github.com/xinix00/hop-imager): it burns a card and verifies it, configures one afterwards, and finds the nodes on your network — one window, no terminal ([flash & boot](docs/getting-started.md) has both roads and the signature check).
 
 HopOS turns a multi-core board — ARM64 or RISC-V — into a small fleet of single-purpose computers. Core 0 runs **HOP**, the orchestrator-kernel: it hands out cores, memory partitions and network identities, streams each app's image into its partition, and dispatches. Every app then does its own work on its own hardware, inside its own hardware-enforced memory partition, *natively on its own dedicated CPU core*. There is no shell, no libc, no userland, no processes — killing an app means switching its core off.
 
@@ -37,7 +37,7 @@ firmware ──boot──▶ one Go image (EL2)
 - **Dedicated cores, one app each.** HOP builds the stage-2 cage, starts the core via PSCI and dispatches — milliseconds. Done or killed = core reset, slot free. By default a core is never time-sliced or shared between apps; apps you explicitly group may share a pool of cores cooperatively (*sharegroups*, below).
 - **One-phase start.** HOP streams a job's image straight into the slot's partition — every byte lands at the address it will run at — and the core then comes out of reset on a cage stub that verifies its own cage before jumping in. No loader in the slot and no staged copy, so a partition carries the app plus its heap and nothing else (a 30 MB `cloudflared` used to need 124 MB). Streaming is what makes this affordable on core 0: only the read block is buffered, never the image, and the orchestrator bounds how many run at once.
 - **1 to N cores per app**: an app can be given multiple dedicated cores, with Go's own runtime spreading its goroutines across them over a shared heap. Sharing within one app is one trust domain — app-to-app isolation is unaffected. Proven in QEMU and on Raspberry Pi 4 and 5 hardware.
-- **Isolation is hardware, not policy.** HopOS boots at the machine's highest privilege level — EL2 on ARM, machine mode on RISC-V — and every slot runs one level below it, inside a cage it can't even *address* HOP's memory or another slot's through. This is an invariant, not an option: an EL1 boot is refused, and so is a RISC-V hart without supervisor mode. The mechanism is per silicon (a stage-2 table on ARM; a PMP whitelist plus a per-slot Sv39 table on the C906, which has no hypervisor extension) — the app ABI is identical either way. See [docs/technical/isolation.md](docs/technical/isolation.md).
+- **Isolation is hardware, not policy.** HopOS boots at the machine's highest privilege level — EL2 on ARM, machine mode on RISC-V — and every slot runs one level below it, inside a cage it can't even *address* HOP's memory or another slot's through. This is an invariant, not an option: an EL1 boot is refused, and so is a RISC-V hart without supervisor mode. The mechanism is per silicon (a stage-2 table on ARM; a PMP whitelist plus a per-slot Sv39 table on the C906, which has no hypervisor extension) — the app ABI is identical either way. See [docs/technical/isolation.md](docs/v1/technical/isolation.md).
 - **One artifact for every slot.** App images are linked once at a canonical address and the hardware does the relocation — the stage-2 mapping on ARM, a per-slot Sv39 table on RISC-V. No per-slot builds, no relocation shims.
 - **Apps never share memory with each other.** Cooperation happens through messages (per-slot ring buffers to HOP, network between apps) and through shared *files* — never shared mutable state across app boundaries.
 
@@ -80,7 +80,7 @@ hopos.init[]={"name":"welcome","driver":"hop","artifacts":[
   "ports":{"http":80}}
 ```
 
-One job, one configuration, two builds — see [docs/config.md](docs/config.md) for the full form.
+One job, one configuration, two builds — see [docs/config.md](docs/configuration.md) for the full form.
 
 A complete app:
 
@@ -139,7 +139,7 @@ No shell. No exec, no second binary, no users. No persistence. No VMs, WASM or c
 
 The Pi 5 boot requirements are non-obvious and documented in [`sd-rpi5/`](sd-rpi5/): the EEPROM bootloader validates images as Linux kernels unless `os_check=0`, silently ignores `kernel_address`, and always loads raw images at `0x80000`.
 
-C1-stepping BCM2712 silicon has an interconnect erratum (fabric deadlock when sustained PCIe inbound DMA coincides with fabric-wide operations, fixed in D0) that HopOS works around in three layers — see [docs/archief/bcm2712-c1-erratum.md](docs/archief/bcm2712-c1-erratum.md).
+C1-stepping BCM2712 silicon has an interconnect erratum (fabric deadlock when sustained PCIe inbound DMA coincides with fabric-wide operations, fixed in D0) that HopOS works around in three layers — see [docs/archief/bcm2712-c1-erratum.md](docs/v1/archief/bcm2712-c1-erratum.md).
 
 ## Repository layout
 
@@ -171,7 +171,7 @@ tools/       release tooling (signed assets), test + soak scripts
 
 The placement and import-direction rules (apps can never link against
 HOP internals — the app side sees only `abi/`) are documented in
-[docs/archief/indeling.md](docs/archief/indeling.md) (Dutch).
+[docs/archief/indeling.md](docs/v1/archief/indeling.md) (Dutch).
 
 ## Building & running
 
@@ -196,7 +196,7 @@ The QEMU demo and the Pi acceptance images build from public modules only. `meta
 
 Working today: the full multikernel (slots, hardware-cage isolation, dynamic memory partitions, hard-kill), multi-core apps (1 to N dedicated cores per app on a shared heap), one-phase starts (the image streams into the partition; no loader in the slot), per-app networking with full NAT, NVMe storage with shared volumes, and framebuffer + UART consoles — proven in QEMU, on Raspberry Pi 4 and 5, on a Radxa Zero 3E, and on a 128-core Ampere Altra running all 127 application cores simultaneously. On the Pi 5 the network path is fully self-hosted: HopOS trains the PCIe link itself (the firmware doesn't) and drives the RP1 GEM NIC with its own drivers, then DHCP and NTP. Since v1.6.0 the same node runs on **riscv64**: a €15 LicheeRV Nano boots a signed image, joins the LAN over its own DWMAC driver, and holds the same isolation contract as the Altra through a PMP cage instead of stage-2. On the roadmap: Orion O6N bring-up, NVMe on real hardware, and line-rate throughput.
 
-Built on [TamaGo](https://github.com/usbarmory/tamago) (bare-metal Go) and [lneto](https://github.com/xinix00/lneto) via [go-net](https://github.com/xinix00/go-net) (pure-Go TCP/IP) — our forks while the fixes from bringing that stack up on metal are open upstream, see [docs/netstack-upstream.md](docs/netstack-upstream.md).
+Built on [TamaGo](https://github.com/usbarmory/tamago) (bare-metal Go) and [lneto](https://github.com/xinix00/lneto) via [go-net](https://github.com/xinix00/go-net) (pure-Go TCP/IP) — our forks while the fixes from bringing that stack up on metal are open upstream, see [docs/netstack-upstream.md](docs/v1/netstack-upstream.md).
 
 ## License
 

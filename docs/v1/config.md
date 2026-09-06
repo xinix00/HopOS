@@ -203,7 +203,7 @@ explicit address. The display's `"FB":"1"` asks for the framebuffer grant
 served over HTTP. A USB keyboard and mouse plugged into the node arrive with
 that same grant — screen and input are one seat, so there is nothing extra to
 configure. This whole block ships as the default config in every GUI
-release asset ([`image/hopos-gui.cfg`](../image/hopos-gui.cfg) in the tree,
+release asset ([`image/hopos-gui.cfg`](../../image/hopos-gui.cfg) in the tree,
 [`hopos.cfg`](https://github.com/xinix00/HopOS/releases/latest/download/hopos.cfg)
 in the newest release).
 
