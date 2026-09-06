@@ -53,9 +53,9 @@ var (
 func isAppCore(c int) bool { return c > HopReserved() && c <= layout.NumAppCores() }
 
 // runFree: staan er `cores` opeenvolgende, vrije app-cores vanaf primary?
-func runFree(primary, cores int) bool {
+func runFree(primary, cores int, class string) bool {
 	for c := primary; c < primary+cores; c++ {
-		if !isAppCore(c) || !coreFree(c) {
+		if !isAppCore(c) || !coreFree(c) || (class != "" && CoreClass(c) != class) {
 			return false
 		}
 	}
@@ -81,10 +81,10 @@ func reserve(cage, primary, cores int, group string) int {
 func coreFree(c int) bool { return coreGroup[c] == "" && coreApps[c] == 0 }
 
 // freeCores verzamelt de vrije app-cores (oplopend, deterministisch).
-func freeCores() []int {
+func freeCores(class string) []int {
 	var f []int
 	for c := HopReserved() + 1; c <= layout.NumAppCores(); c++ {
-		if coreFree(c) {
+		if coreFree(c) && (class == "" || CoreClass(c) == class) {
 			f = append(f, c)
 		}
 	}
@@ -110,7 +110,7 @@ func leastLoaded(cores []int) int {
 //
 // De allocator boekt élke core die de kooi bezet houdt — bij SMP dus ook de
 // secundairen — zodat een volgende plaatsing er nooit stil bovenop landt.
-func PlaceCage(cage int, group string, poolCores, cores int) (int, error) {
+func PlaceCage(cage int, group string, poolCores, cores int, class string) (int, error) {
 	poolMu.Lock()
 	defer poolMu.Unlock()
 
@@ -125,7 +125,7 @@ func PlaceCage(cage int, group string, poolCores, cores int) (int, error) {
 	}
 
 	if group == "" {
-		return placeDedicated(cage, cores)
+		return placeDedicated(cage, cores, class)
 	}
 	if cores > 1 {
 		// Een gedeelde kooi draait per definitie op één core (de pool ís het
@@ -137,7 +137,7 @@ func PlaceCage(cage int, group string, poolCores, cores int) (int, error) {
 
 	pool, ok := groupPool[group]
 	if !ok {
-		free := freeCores()
+		free := freeCores(class)
 		if len(free) < poolCores {
 			return 0, fmt.Errorf("sharegroup %q vraagt %d cores, %d vrij", group, poolCores, len(free))
 		}
@@ -158,6 +158,13 @@ func PlaceCage(cage int, group string, poolCores, cores int) (int, error) {
 		return 0, fmt.Errorf("%w: sharegroup %q heeft een pool van %d core(s), maar kooi %d vraagt %d — één sharegroup, één poolgrootte",
 			ErrPoolSize, group, len(pool), cage, poolCores)
 	}
+	// Existing pools retain their physical cores, including after adoption.
+	// A joining member may constrain them, but may never silently move them.
+	for _, c := range pool {
+		if class != "" && CoreClass(c) != class {
+			return 0, fmt.Errorf("%w: sharegroup %q has core %d of class %q, requested %q", ErrPoolSize, group, c, CoreClass(c), class)
+		}
+	}
 	return reserve(cage, leastLoaded(pool), 1, group), nil
 }
 
@@ -173,15 +180,15 @@ func PlaceCage(cage int, group string, poolCores, cores int) (int, error) {
 // door boven het aantal cores, en een 1-core app hoeft niet op zijn eigen
 // nummer te draaien om te werken. Hij mag alleen nooit stil op een bezette
 // core belanden — zie reserve.
-func placeDedicated(cage, cores int) (int, error) {
-	if runFree(cage, cores) {
+func placeDedicated(cage, cores int, class string) (int, error) {
+	if runFree(cage, cores, class) {
 		return reserve(cage, cage, cores, ""), nil
 	}
 	if cores > 1 {
 		return 0, fmt.Errorf("SMP-kooi %d vraagt de cores %d..%d (eigen core plus de cores erna) en die zijn niet allemaal vrij",
 			cage, cage, cage+cores-1)
 	}
-	free := freeCores()
+	free := freeCores(class)
 	if len(free) == 0 {
 		return 0, fmt.Errorf("geen vrije app-core voor kooi %d (node vol op cores; delen vraagt een sharegroup)", cage)
 	}
@@ -262,4 +269,11 @@ func resetPools() {
 	cageCore = map[int]int{}
 	cageSpan = map[int]int{}
 	cageGroup = map[int]string{}
+}
+
+// CanPlaceDedicated is a read-only hint; PlaceCage performs the reservation.
+func CanPlaceDedicated(primary, cores int) bool {
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	return cores > 0 && runFree(primary, cores, "")
 }

@@ -29,6 +29,32 @@ package hopswitch
 
 import "time"
 
+// Tijdens adoptie zijn deze poorten nog van de overgedragen apps, ook als
+// hun routering nog niet is teruggezet. Laat dat verkeer niet bij de nieuwe
+// node-stack belanden: een TCP-reset daar zou een levende appverbinding doden.
+// Een niet-nil map houdt ook uitgaande conntrack-toewijzing tegen tot herstel.
+// De bestaande switchlock beschermt ook deze tijdelijke claim.
+var adoptionPorts map[uint16]bool
+
+// HoldAdoptionPorts wordt vóór het starten van de externe RX aangeroepen.
+// Pakketten wachten niet in een nieuwe queue; TCP probeert ze opnieuw zodra
+// de gewone routering klaarstaat.
+func HoldAdoptionPorts(nodePorts []uint16) {
+	mu.Lock()
+	defer mu.Unlock()
+	adoptionPorts = make(map[uint16]bool, len(nodePorts))
+	for _, p := range nodePorts {
+		adoptionPorts[p] = true
+	}
+}
+
+// FinishAdoption geeft de tijdelijke claims vrij ná slot- en NAT-herstel.
+func FinishAdoption() {
+	mu.Lock()
+	adoptionPorts = nil
+	mu.Unlock()
+}
+
 // FlowState is één masquerade-flow in overdraagbare vorm: platte velden,
 // geen pointers, vaste maten.
 type FlowState struct {

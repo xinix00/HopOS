@@ -18,7 +18,7 @@ Dit is de afwerkvolgorde vanaf de frameworkreview van 6 september 2026. De [meet
 - Een kernel-flip behoudt apps, hun geheugen en eigendom. Beheerverbindingen mogen opnieuw aansluiten; doorlopende appverbindingen en agentherstel worden afzonderlijk getoetst.
 - Alleen benodigde code. Een fix mag vereenvoudigen; nieuwe functies en algemene herontwerpen horen niet in deze afronding.
 
-**Afbakening van Derek, 6 september:** de fysieke netwerk-IRQ-aansluiting op alle boards en de bijbehorende hardwaretest volgen later. De huidige pollingpaden blijven in deze kandidaat bestaan. Dit is een expliciet uitgesteld onderdeel van de visie, geen blokkade voor deze correctness-ronde en geen claim dat alle boards al interruptgedreven werken. Het bestaande logische deurbel-/wekprotocol blijft wel binnen deze ronde.
+**Afbakening van Derek, 6 september:** de fysieke netwerk-IRQ-aansluiting op alle boards en de bijbehorende hardwaretest krijgen een eigen vervolg na de docs-overhaul, voor een volgende puntrelease. De huidige pollingpaden blijven in deze kandidaat bestaan. Dit is een expliciet uitgesteld onderdeel van de visie, geen blokkade voor deze correctness-ronde en geen claim dat alle boards al interruptgedreven werken. Het bestaande logische deurbel-/wekprotocol blijft wel binnen deze ronde.
 
 ## De zes stappen
 
@@ -27,7 +27,7 @@ Dit is de afwerkvolgorde vanaf de frameworkreview van 6 september 2026. De [meet
 | 1. Meetlat en framework afronden | Bestaande bevindingen koppelen aan reparatie en bewijs. De frameworkdoorloop niet opnieuw doen. Overgebleven board-/drivergrenzen meenemen in stap 2. | Frameworkreparaties en gerichte host-/QEMU-regressies uitgevoerd. |
 | 2. Resterende codepunten sluiten | De voorbereide log-adoptiepatch in de HOP-dependency opnemen via een gepubliceerde versie. Eén afgebakende correctness-doorloop van de gebruikte drivers: initialisatie, buffer-/DMA-grenzen, eigendom, publicatie, completion, foutafhandeling en overdracht bij stop/flip. Per driver: akkoord, concrete fix of expliciet buiten releasesupport. | Afgetekend voor code/host: HOP v1.0.1 geïntegreerd; drie driverreviews en hun fixes getest. Hardwaregrenzen en uitgestelde IRQ expliciet beschreven. Zie logboek L04–L08. |
 | 3. Eén testbare kandidaat maken | Na de resterende fixes bronversie, dependencies, buildinstellingen en image-hashes vastleggen. Gerichte regressies van die fixes en de bestaande build-/integratiematrix op deze kandidaat uitvoeren. | Afgetekend: host-/targetgates, zeven definitieve bundels, lifecycle/netwerk-QEMU en echte agent op de exacte virt-bundel slagen. Bron-/artifact-hashes vastgelegd; logboek L09–L10. |
-| 4. Laatste hardware-ronde | Onderstaande vaste lijst op de M4 en RISC-V uitvoeren. Begin met versie-/compatibiliteitscontrole, daarna flip naar de kandidaat en testen. Resultaten en eventuele afwijkingen bewaren. | Derek plaatst 2.2.0 na afronding van stappen 2–3. Nog geen kandidaatbewijs op hardware. |
+| 4. Laatste hardware-ronde | Onderstaande vaste lijst op de M4 en RISC-V uitvoeren. Begin met versie-/compatibiliteitscontrole, daarna flip naar de kandidaat en testen. Resultaten en eventuele afwijkingen bewaren. | In uitvoering op 2.2.0; deelbewijs en open bevindingen in logboek L12–L13. |
 | 5. Bevindingen, docs-overhaul en release vastleggen | Alleen aangetoonde fouten uit de ronde herstellen en gericht hertesten. Herstructureer en actualiseer de volledige documentatie vanuit het contract, zoals hieronder beschreven. Leg support, beperkingen, performance en bewijs vast. | Open. Volledige docs-overhaul door Derek toegevoegd. Reviewbewijs is inmiddels niet langer genegeerd. |
 | 6. Aftekenen | Controleer onderstaande eindvoorwaarden; wijs exact de geteste kandidaat aan als releaseklaar. Publicatie is daarna de uitvoerhandeling, geen nieuwe reviewronde. | Open. |
 
@@ -43,11 +43,21 @@ Opdracht van Derek, 6 september: de docs zijn verouderd; nu het contract helder 
 4. Geef elk onderwerp één actuele uitleg; verwijder dubbele of strijdige beschrijvingen. Markeer historische plannen/reviews als historisch en verwijs naar hun opvolger. Werk README, docs-index/menu, supportmatrix en onderlinge links mee bij.
 5. Controleer voorbeelden, commando's, versie-/ABI-nummers en links. Teken de overhaul af wanneer een nieuwe lezer kan vinden wat het OS belooft, hoe het werkt, hoe hij het gebruikt en welk bewijs daarbij hoort, zonder tegenstrijdige routes.
 
+Neem de actuele [Hier staan we-tabel](release-status.md) mee: mogelijkheden, boardbewijs en gepland werk blijven afzonderlijk herkenbaar.
+
 Uitkomst: een kleine, geordende en actuele documentatieset die dezelfde eenvoud als het OS uitstraalt. Geen nieuwe wiki-infrastructuur of documentatieframework nodig.
+
+## Vervolg na de docs: fysieke netwerk-IRQ in een volgende puntrelease
+
+Besluit Derek, 6 september: eerst de huidige correctness-ronde en docs afronden. Daarna de fysieke netwerk-IRQ per board aansluiten en toetsen, vanuit dezelfde visie: één netwerk-IRQ en één logische deurbel per bewoner. Dit is een afzonderlijk vervolg op de zes release-afrondingsstappen, geen extra eindvoorwaarde voor de huidige release.
+
+De huidige polling is volgens Derek snel genoeg. Het doel van dit vervolg is vooral minder CPU-werk bij stilte en lager energieverbruik; een snelheidswinst is geen voorwaarde of vooraf bewezen claim. Controleer per board ontvangst, slapen/wekken en flip-overdracht, en vergelijk idle-/energiegedrag en doorvoer met polling. Werk daarna de boarddocumentatie en het testbewijs bij en lever het als nieuwe puntrelease. Het versienummer staat nog niet vast.
+
+**Updatepad, besluit Derek:** de fixes worden 2.2.1. LicheeRV kan die met zijn oude downloader nog niet via flip ophalen en krijgt na plaatsing van 2.2.1 zijn hardwarehertest. M4 en Radxa worden via flip verder getoetst. Pi 4 en Pi 5 vallen ook na herstart tijdens de gerichte hertest uit; de volgende stap is overgangsdiagnose via UART, niet meer blinde flips (L30).
 
 ## De vaste hardwarelijst
 
-Testnodes: **192.168.1.122 — M4 mini** en **192.168.1.150 — RISC-V**. Derek heeft beide volledig als testhardware vrijgegeven. De eerder uitgelezen capaciteit is negen app-cores op de M4 en één op RISC-V.
+Testnodes: **192.168.1.122 — M4 mini**, **192.168.1.150 — LicheeRV**, **192.168.1.144 — Pi 4**, **192.168.1.193 — Pi 5** en **192.168.1.241 — Radxa**. Derek heeft deze nodes voor de hardware-ronde beschikbaar gesteld. De beheer-API meldt negen appcores op M4, één op LicheeRV en drie op elk van de overige boards. Bereikbaarheid is gecontroleerd; dit is geen hardware-aftekening.
 
 Release **2.2** is een versienaam; flip-ABI **2** is een afzonderlijk compatibiliteitsnummer. Voor de eerste sprong controleren we de concrete images en het overdrachtscontract, inclusief eventuele switchcode-eisen. Een passend ABI-nummer alleen bewijst niet dat twee willekeurige builds uitwisselbaar zijn. Een extra flash is niet de standaardstap: met een compatibele draaiende 2.2-kernel gaan we verder via flip.
 
@@ -60,6 +70,8 @@ Release **2.2** is een versienaam; flip-ABI **2** is een afzonderlijk compatibil
 | H4. Drie opeenvolgende flips | Houd appvoortgang en een app-TCP-verbinding bij; neem gedeelde bewoners en op de M4 SMP mee. Controleer taken, verse logs en daarna stop/vervang/hergebruik. | Geen appherstart; bootmarker gelijk en voortgang stijgt; dezelfde appverbinding blijft werken; agent neemt eigendom over en kan apps weer beheren. Logging herstelt volgens het bestaande best-effortcontract. |
 | H5. I/O en performance | Draai dezelfde disk-/netwerkworkload vóór en na de kandidaat, op dezelfde node en met dezelfde instellingen, driemaal per versie. Meet start/stop/geheugenwissen apart. | Data-inhoud klopt; geen onverklaarde terugval buiten de gemeten spreiding. De genoemde circa 4000 MB/s telt alleen mee als die workload op het betreffende apparaat opnieuw is gemeten. |
 | H6. Gecombineerd gebruik | Dertig minuten compute en I/O met normale slaap-/wekovergangen en enkele start-/stopacties. | Geen vastloper, onverwachte herstart, datacorruptie of oplopend verlies van geheugen-/coreclaims. |
+
+Bij een gecontroleerd mislukte flip hoort ook automatisch watchdogherstel bij H4. Het blinde opstartbudget is begrensd; noteer de reset en terugkeer afzonderlijk van een geslaagde zero-reboot-flip. De interne agentprobe bewijst geen externe NIC-ontvangst.
 
 Dit zijn begrensde acceptatieproeven, geen bewijs van onbeperkte uptime. Niet ieder geval is op ieder board toepasbaar; vermeld bij een overgeslagen proef de concrete reden. Actieve uitbraaktests blijven buiten deze afgesproken ronde. Een mislukte proef levert één bevinding met reproduceerbaar begin, verwacht gedrag en werkelijk resultaat op.
 

@@ -25,7 +25,7 @@ require github.com/xinix00/hoplock v0.4.1
 // Gemeten 19-08 in deze boom; surf's go.mod draagt dezelfde waarschuwing.
 
 require (
-	github.com/xinix00/hop v1.0.1
+	github.com/xinix00/hop v1.0.2
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20260709184058-243e02a382f8
 )
 
@@ -35,6 +35,3 @@ require (
 // alles wat metal importeert (hop-os-surf, de vitals/welcome-apps) bouwde
 // eerder tegen ongepatchte upstream-lneto terwijl metal zelf de fixes had.
 // Onze eigen code in onze eigen module heeft dat probleem niet.
-
-// Tot hop's volgende release: hopos.PoolReporter (de optionele
-// grootste-gat-vraag) staat daar nog niet in.

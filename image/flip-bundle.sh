@@ -30,6 +30,8 @@ set -e
 TAMAGO="${TAMAGO:-$HOME/tamago-go/bin/go}"
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BOARD="${1:-}"
+. "$DIR/image/lib.sh"
+trap clean_embeds EXIT INT TERM
 
 # Per board: GOARCH · build-tags · primair linkadres · schaduwadres · extra.
 # Het schaduwadres doet niets in het eindproduct — het is puur diff-bewijs —
@@ -54,6 +56,12 @@ esac
 cd "$DIR/metal"
 mkdir -p out
 OUT="out/hopos-$BOARD.flip"
+
+if [ "$BOARD" = licheerv ]; then
+	build_licheerv_cagestub 0x88000000
+	cp out/stub-slot.bin kern/cagestub/stub-slot.bin
+	TAGS="$TAGS embedcagestub"
+fi
 
 # CFG=<pad>: de platform-config MEE IN DE BUNDEL (zelfde mechaniek en om
 # dezelfde reden als in apple-m4.sh) — een board zonder loader léést zijn

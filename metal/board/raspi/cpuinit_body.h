@@ -52,18 +52,18 @@ uartklaar:
 	// EL2-vectortabel → ·faultdump2: mocht er tóch iets naar EL2 trappen,
 	// dan een 'Y'-dump (ESR/ELR/FAR_EL2) i.p.v. een stille hang. Tabel op
 	// 0x8B000, zelfde vrije gat als de EL1-tabel (0x8A000). Hier gebouwd,
-	// vóór boot.h VBAR_EL2 erheen zet. B-encoding: 0x14000000 |
-	// ((doel-entry)>>2 & imm26).
+	// vóór boot.h VBAR_EL2 erheen zet. Een flip kan de kern buiten het
+	// ±128MB-bereik van B plaatsen: gebruik dezelfde absolute trampoline
+	// als Apple (ldr x16, #8; br x16; .quad doel).
 	MOVD	$0x8B000, R2
 	MOVD	$·faultdump2(SB), R3
 	MOVD	$16, R4
 vecvul2:
-	SUB	R2, R3, R6
-	LSR	$2, R6, R6
-	AND	$0x03FFFFFF, R6, R6
-	MOVD	$0x14000000, R7
-	ORR	R7, R6, R6
+	MOVD	$0x58000050, R6 // ldr x16, #8
 	MOVW	R6, (R2)
+	MOVD	$0xd61f0200, R7 // br x16
+	MOVW	R7, 4(R2)
+	MOVD	R3, 8(R2)
 	ADD	$0x80, R2
 	SUBS	$1, R4
 	BNE	vecvul2
@@ -125,12 +125,12 @@ TEXT ·el1Pi(SB),NOSPLIT|NOFRAME,$0
 	MOVD	$·faultdump(SB), R3
 	MOVD	$16, R4
 vecvul:
-	SUB	R2, R3, R6	// B-encoding: 0x14000000 | ((doel-entry)>>2 & imm26)
-	LSR	$2, R6, R6
-	AND	$0x03FFFFFF, R6, R6
-	MOVD	$0x14000000, R7
-	ORR	R7, R6, R6
+	// Ook deze vroege foutvector moet een verplaatste kern kunnen bereiken.
+	MOVD	$0x58000050, R6 // ldr x16, #8
 	MOVW	R6, (R2)
+	MOVD	$0xd61f0200, R7 // br x16
+	MOVW	R7, 4(R2)
+	MOVD	R3, 8(R2)
 	ADD	$0x80, R2
 	SUBS	$1, R4
 	BNE	vecvul
@@ -146,8 +146,11 @@ vecvul:
 	// Dus: D-cache per 64B-lijn invalideren over de hele RAM-declaratie
 	// (de firmware heeft het image zelf naar PoC gecleand — DRAM is de
 	// waarheid, bewezen door de uncached 'P2R'-executie), en I-cache leeg.
-	MOVD	$0x80000, R0
-	MOVD	$0x8080000, R1
+	// De flip patcht deze declaratie; het koude laadadres zegt hier niets
+	// meer over het venster waarin deze kern werkelijk woont.
+	MOVD	runtime∕goos·RamStart(SB), R0
+	MOVD	runtime∕goos·RamSize(SB), R1
+	ADD	R0, R1, R1
 dcinv:
 	WORD	$0xd5087620	// dc ivac, x0
 	ADD	$64, R0

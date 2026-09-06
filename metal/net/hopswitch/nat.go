@@ -575,6 +575,9 @@ func natInbound(f []byte) bool {
 	if binary.BigEndian.Uint32(ip[16:]) != uplink.ip {
 		return false
 	}
+	if adoptionPorts[binary.BigEndian.Uint16(l4[2:])] {
+		return true // nog van de overgedragen app; nooit naar de node-stack
+	}
 	if replyInLocked(f, ip, l4, proto, now) {
 		return true
 	}
@@ -836,6 +839,12 @@ func flowForPacket(proto byte, slot int, slotIP uint32, slotPort uint16, dstIP u
 // flowLogEvery loggen, zodat een dader niet via het rejectpad core 0 kan
 // gijzelen.
 func flowFor(proto byte, slot int, slotIP uint32, slotPort uint16, dstIP uint32, dstPort uint16, now time.Time) *flow {
+	// Attached apps can send before their old conntrack has been restored.
+	// A new mapping would hide the old tuple/port from RestoreNAT. Retransmit
+	// after FinishAdoption instead; a non-nil empty map also means adoption.
+	if adoptionPorts != nil {
+		return nil
+	}
 	k := fkey{proto, slotIP, dstIP, slotPort, dstPort}
 	if fl := lookupFlowLocked(k, now); fl != nil {
 		return fl

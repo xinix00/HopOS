@@ -138,9 +138,7 @@ if [ "$PAYLOAD" = agent ]; then
 #    (kern/cagestub); de kooi-waarden zet HOP er runtime in (kern/cage rekent
 #    ze uit).
 echo "== kooi-stub ==" >&2
-riscv64-elf-as -march=rv64imac_zicsr -o "$OUT/stub-slot.o" "$DIR/image/licheerv/stub-slot/stub-slot.S"
-riscv64-elf-ld -Ttext=$SLOTBASE -o "$OUT/stub-slot.elf" "$OUT/stub-slot.o"
-riscv64-elf-objcopy -O binary "$OUT/stub-slot.elf" "$OUT/stub-slot.bin"
+build_licheerv_cagestub "$SLOTBASE"
 
 # 2. De HOP-kern zelf.
 # De platform-config gaat mee ín het image: dit board kan zijn eigen

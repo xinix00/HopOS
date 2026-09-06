@@ -95,6 +95,7 @@ func Serve(port int) {
 // bij de seriële lijn: twee cat-processen op dezelfde tty splitsten de bytes).
 func stream(c net.Conn) {
 	defer c.Close()
+	var closed atomic.Bool
 
 	// LEZEN, ook al stuurt een console-lezer niets: zonder read-kant merken we
 	// een weggelopen client alléén als er iets te schrijven is. Bij een stille
@@ -108,12 +109,13 @@ func stream(c net.Conn) {
 	go func() {
 		io.Copy(io.Discard, c)
 		c.Close() // EOF of fout = client weg; de Write hieronder faalt nu meteen
+		closed.Store(true)
 	}()
 
 	// Beginnen bij het oudste dat nog bewaard is, niet bij nul: dan krijgt een
 	// lezer die na de boot verbindt alsnog de hele geschiedenis die er ís.
 	seen := conlog.Dropped()
-	for {
+	for !closed.Load() {
 		data, next := conlog.Since(seen)
 		if len(data) > 0 {
 			if _, err := c.Write(data); err != nil {

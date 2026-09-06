@@ -21,6 +21,7 @@ func resetNAT() {
 	mu.Lock()
 	defer mu.Unlock()
 	pubs = nil
+	adoptionPorts = nil
 	uplink = nil
 	neigh = map[uint32]neighbor{}
 	gwMAC = [6]byte{}

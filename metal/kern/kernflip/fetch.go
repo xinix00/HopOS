@@ -1,5 +1,3 @@
-//go:build tamago
-
 package kernflip
 
 // De bundel binnenhalen en controleren.
@@ -59,16 +57,30 @@ func fetchBundle(url, want string) ([]byte, error) {
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("kernflip: %s: HTTP %d", url, resp.StatusCode)
 	}
-	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBundle+1))
+	// Get vereist Content-Length. Reserveer de bundel daarom precies één
+	// keer: Go 1.26 ReadAll bewaart de tussenbuffers tot de eindkopie,
+	// wat op de 32 MiB-kern van LicheeRV onnodig veel heap vraagt.
+	b, err := readBundle(resp.Body, resp.Length)
 	if err != nil {
 		return nil, fmt.Errorf("kernflip: %s: %w", url, err)
-	}
-	if len(b) > maxBundle {
-		return nil, fmt.Errorf("kernflip: %s is larger than %d bytes", url, maxBundle)
 	}
 	sum := sha256.Sum256(b)
 	if got := hex.EncodeToString(sum[:]); got != want {
 		return nil, fmt.Errorf("kernflip: %s is sha256 %s, config says %s — not booting it", url, got, want)
+	}
+	return b, nil
+}
+
+// readBundle weigert een ongeldige lengte vóór allocatie of lezen. leanhttp
+// begrenst Body op Content-Length en meldt afgebroken overdrachten; ReadFull
+// bewaakt ook hier dat alleen een volledige bundel de hashcontrole bereikt.
+func readBundle(body io.Reader, length int64) ([]byte, error) {
+	if length <= 0 || length > maxBundle {
+		return nil, fmt.Errorf("bundle length %d outside 1..%d bytes", length, maxBundle)
+	}
+	b := make([]byte, int(length))
+	if _, err := io.ReadFull(body, b); err != nil {
+		return nil, err
 	}
 	return b, nil
 }

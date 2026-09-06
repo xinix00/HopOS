@@ -14,7 +14,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"runtime"
 	"strconv"
@@ -30,7 +29,6 @@ import (
 
 	"github.com/xinix00/hop/pkg/agentboot"
 	"github.com/xinix00/hop/pkg/config"
-	"github.com/xinix00/hop/pkg/hopos"
 
 	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 	"github.com/xinix00/HopOS/metal/v2/board"
@@ -224,7 +222,7 @@ func main() {
 	// overdracht, want dáár bleef het staan (06-09). Zonder dit hangt een kern
 	// die in Adopted omvalt tot iemand de stekker pakt.
 	if kernflip.FlipPending() {
-		armBootGuard()
+		armBootGuard(idle.CounterHz())
 		// En meteen de adoptie-stand: alles hierna (Privilege, de
 		// firmware-probe, het board-opzetten) mag de app-core-regio niet vers
 		// neerzetten zolang de bewoners van de vorige kern nog draaien.
@@ -324,6 +322,16 @@ func main() {
 	if err := hopswitch.Up(); err != nil {
 		fail("switch", err)
 	}
+	if isFlip {
+		var ports []uint16
+		for _, st := range flipped.Slots {
+			ports = append(ports, st.Ports...)
+		}
+		for _, flow := range flipped.NAT.Flows {
+			ports = append(ports, flow.NodePort)
+		}
+		hopswitch.HoldAdoptionPorts(ports)
+	}
 	netErr := hopnet.Up()
 	// De wekker voor app-cores die op EL2 slapen (IdleYield, Cores.Kick):
 	// alleen op een board dat kan kicken, en ná de vectoren — de kick is een
@@ -414,6 +422,9 @@ func main() {
 		flows := hopswitch.RestoreNAT(flipped.NAT)
 		fmt.Printf("flip: %d of %d resident(s) and %d of %d NAT flow(s) survived the kernel swap HOPOS_FLIP_ADOPT\n",
 			live, len(flipped.Slots), flows, len(flipped.NAT.Flows))
+	}
+	if isFlip {
+		hopswitch.FinishAdoption()
 	}
 
 	// Board-specifiek nawerk: op de Pi's start hier het klokbeleid +
@@ -732,52 +743,6 @@ func flipRequest() func(url, sha string) error {
 	return func(url, sha string) error {
 		return kernflip.FlipFromURL(url, sha)
 	}
-}
-
-// envSlots vult de slot-env aan bij elke start: `always` gaat er altijd in
-// (mits de jobspec de sleutel niet zelf zet — de spec wint), `optin` alleen
-// als de jobspec de sleutel leeg declareert ("HOPOS_APPS":"" → HopOS vult
-// hem). Zo krijgt elke app HOPOS_HOST gratis, maar betaalt alleen wie erom
-// vraagt de env-ruimte van de app-catalogus. Puur een schil om de slotmgr —
-// de rest van het SlotManager-contract gaat er onaangeroerd doorheen.
-type envSlots struct {
-	hopos.SlotManager
-	always map[string]string
-	optin  map[string]string
-}
-
-// PoolLargest reist niet mee via de ingebedde interface — hopos.PoolReporter
-// staat bewust NAAST SlotManager — dus geeft de schil hem expliciet door. Zonder
-// dit ziet HOP's toelating de optionele interface niet en valt hij terug op de
-// som, wat precies het gedrag is dat we wilden weghalen.
-func (e envSlots) PoolLargest() uint64 {
-	if pr, ok := e.SlotManager.(hopos.PoolReporter); ok {
-		return pr.PoolLargest()
-	}
-	return 0
-}
-
-func (e envSlots) StartStream(slot int, image io.Reader, size int64, spec hopos.StartSpec) error {
-	spec.Env = e.merge(spec.Env)
-	return e.SlotManager.StartStream(slot, image, size, spec)
-}
-
-func (e envSlots) merge(env map[string]string) map[string]string {
-	out := make(map[string]string, len(env)+len(e.always))
-	for k, v := range env {
-		out[k] = v
-	}
-	for k, v := range e.always {
-		if _, ok := out[k]; !ok {
-			out[k] = v
-		}
-	}
-	for k, v := range e.optin {
-		if cur, ok := out[k]; ok && cur == "" {
-			out[k] = v
-		}
-	}
-	return out
 }
 
 // dumpBlackBox schrijft de console van de vorige boot uit. Tijdens het

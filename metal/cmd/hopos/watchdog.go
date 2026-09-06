@@ -17,6 +17,8 @@
 //     overal. Een bring-up die lééft maar geen netwerk krijgt (geen kabel,
 //     geen lease) blijft gewoon staan: het blinde aaien gaat door en de
 //     wachtregel hieronder zegt periodiek waarom er nog geen echt vangnet is.
+//     Een flip-boot krijgt maximaal twee minuten blind aaien, gedeeld door
+//     de vroege lus en fase 1; daarna moet de eigen agent aantoonbaar leven.
 //  2. LEVENSTEKEN — vanaf de eerste geslaagde probe aait de canary alleen nog
 //     op bewijs: een NIEUWE verbinding naar de eigen agent-poort, dwars door
 //     dezelfde accept-laag waar de doofheid van 02-08 zat. Stopt dat, dan
@@ -46,6 +48,7 @@ import (
 	"time"
 
 	"github.com/xinix00/HopOS/metal/v2/board"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 // wdHardware is de hardware-helft die een board in zijn init() aanlevert.
@@ -83,10 +86,12 @@ func rebootNow() {
 		return
 	}
 	if nodeWDT.Reboot != nil {
+		stopBootGuard() // an intentional reset must not keep the early pet loop alive
 		fmt.Println("hopos.reboot=1: resetting the node via the watchdog NOW HOPOS_REBOOT")
 		nodeWDT.Reboot()
 	} else if desc, ok := nodeWDT.Arm(); ok {
-		fmt.Printf("hopos.reboot=1: watchdog armed and never petted (%s) — reset follows HOPOS_REBOOT\n", desc)
+		stopBootGuard()
+		fmt.Printf("hopos.reboot=1: watchdog armed; early pet loop stopped (%s) — reset follows HOPOS_REBOOT\n", desc)
 	} else {
 		fmt.Printf("hopos.reboot=1 but the watchdog refuses (%s) — continuing HOPOS_REBOOT_UNAVAILABLE\n", desc)
 		return
@@ -102,6 +107,32 @@ var nodeWDT *wdHardware
 // earlyPet stopt de vroege aai-lus zodra nodeCanary het beleid overneemt.
 var earlyPet chan struct{}
 
+// Set once before the early worker starts; handover never renews this budget.
+// Zero is the deliberately unbounded cold-boot bring-up policy.
+var flipBootDeadline uint64
+
+// SNTP can adjust TamaGo's nanotime as well as its wall clock. This must
+// therefore read the architectural counter, not time.Now or a runtime timer.
+var bootGuardCounter = dev.Counter
+
+const flipBootGrace = 2 * time.Minute
+
+func stopBootGuard() {
+	if earlyPet != nil {
+		close(earlyPet)
+		earlyPet = nil
+	}
+}
+
+// Both blind-pet paths use this guard. Proven liveness needs no boot grace.
+func petBootGuard() bool {
+	if flipBootDeadline != 0 && int64(bootGuardCounter()-flipBootDeadline) >= 0 {
+		return false
+	}
+	nodeWDT.Pet()
+	return true
+}
+
 // armBootGuard wapent de watchdog METEEN, en aait hem tot het echte beleid
 // begint. Alleen nodig op een flip-boot, en daar is hij essentieel: het board
 // zet in SetupPlan élke watchdog stil (iBoot laat er meerdere gewapend achter,
@@ -112,7 +143,7 @@ var earlyPet chan struct{}
 // dan in zijn bring-up, dan waakt er niemand meer. GEMETEN 06-09 op de M4: een
 // mislukte flip liet de node zeven minuten volledig donker (geen ping, geen
 // console) in plaats van binnen 30 seconden te resetten.
-func armBootGuard() {
+func armBootGuard(counterHz uint64) {
 	if earlyPet != nil || bootParam("hopos.wd") == "off" || nodeWDT == nil || nodeWDT.Arm == nil {
 		return
 	}
@@ -121,17 +152,21 @@ func armBootGuard() {
 		fmt.Printf("watchdog: flip boot, but %s — this boot is UNGUARDED\n", desc)
 		return
 	}
-	fmt.Printf("watchdog: armed for the flip boot (%s) — the previous kernel's guard was silenced at board setup\n", desc)
+	fmt.Printf("watchdog: armed for the flip boot (%s) — blind pets limited to two minutes\n", desc)
+	flipBootDeadline = bootGuardCounter() + uint64(flipBootGrace/time.Second)*counterHz
 	earlyPet = make(chan struct{})
+	t := time.NewTicker(nodeWDT.PetEvery)
 	go func(stop chan struct{}) {
-		t := time.NewTicker(nodeWDT.PetEvery)
 		defer t.Stop()
 		for {
 			select {
 			case <-stop:
 				return
 			case <-t.C:
-				nodeWDT.Pet()
+				if !petBootGuard() {
+					fmt.Println("watchdog: flip boot grace expired before agent liveness — withholding pets HOPOS_BOOT_GUARD_EXPIRED")
+					return
+				}
 			}
 		}
 	}(earlyPet)
@@ -151,16 +186,18 @@ func nodeCanary() {
 		return
 	}
 	// De vroege lus van een flip-boot stopt hier: vanaf nu aait het beleid.
-	if earlyPet != nil {
-		close(earlyPet)
-		earlyPet = nil
+	stopBootGuard()
+	// Do not re-arm after expiry: that would silently grant a second grace.
+	if flipBootDeadline != 0 && int64(bootGuardCounter()-flipBootDeadline) >= 0 {
+		fmt.Println("watchdog: flip boot grace already expired — leaving hardware to reset HOPOS_BOOT_GUARD_EXPIRED")
+		return
 	}
 	desc, ok := nodeWDT.Arm()
 	if !ok {
 		fmt.Printf("watchdog: %s — node liveness is UNGUARDED\n", desc)
 		return
 	}
-	fmt.Printf("watchdog: hardware reset armed (%s) — boot guard: petting unconditionally until the agent port answers\n", desc)
+	fmt.Printf("watchdog: hardware reset armed (%s) — boot guard: blind pets until agent liveness, within any flip deadline\n", desc)
 
 	// De probe: een nieuwe verbinding naar de eigen agent-poort. Het adres
 	// per poging vers gelezen — vóór de lease is er geen adres en dus geen
@@ -190,7 +227,10 @@ func nodeCanary() {
 		if n == 3 || n%loudEvery == loudEvery-1 {
 			fmt.Printf("watchdog: no liveness sign from own agent port yet (%d attempts) — boot guard only: a full freeze resets, deafness does not yet\n", n+1)
 		}
-		nodeWDT.Pet()
+		if !petBootGuard() {
+			fmt.Println("watchdog: flip boot grace expired without agent liveness — withholding pets HOPOS_BOOT_GUARD_EXPIRED")
+			return
+		}
 		time.Sleep(nodeWDT.PetEvery)
 	}
 	fmt.Println("watchdog: liveness proven — pets now require a fresh connection to the agent port HOPOS_CANARY_LIVE")

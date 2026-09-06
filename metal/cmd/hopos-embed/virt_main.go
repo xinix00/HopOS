@@ -543,7 +543,7 @@ func main() {
 	sgCages := []int{1, 2, 3, 4}
 	sgCores := map[int]bool{}
 	for _, cage := range sgCages {
-		core, err := slots.PlaceCage(cage, "web", 2, 1)
+		core, err := slots.PlaceCage(cage, "web", 2, 1, "")
 		if err != nil {
 			fail("sg-place", err)
 		}
@@ -589,7 +589,7 @@ func main() {
 	}
 	swarmCores := map[int]bool{}
 	for cage := 1; cage <= swarmN; cage++ {
-		core, err := slots.PlaceCage(cage, "swarm", 3, 1)
+		core, err := slots.PlaceCage(cage, "swarm", 3, 1, "")
 		if err != nil {
 			fail("swarm-place", fmt.Errorf("kooi %d: %w", cage, err))
 		}
@@ -641,7 +641,7 @@ func main() {
 
 	// Herbevolk de pool: de 12 even kooien terug (joinen de bestaande pool).
 	for cage := 2; cage <= swarmN; cage += 2 {
-		core, err := slots.PlaceCage(cage, "swarm", 3, 1)
+		core, err := slots.PlaceCage(cage, "swarm", 3, 1, "")
 		if err != nil {
 			fail("swarm-replace", fmt.Errorf("kooi %d: %w", cage, err))
 		}

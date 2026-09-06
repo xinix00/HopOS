@@ -121,7 +121,7 @@ func TestTakeRangeMiddenInRegioRaaktBuurregioNiet(t *testing.T) {
 
 func TestFlipPreservesWholeGroupPool(t *testing.T) {
 	setCores(t, 3)
-	core, err := PlaceCage(4, "trusted", 2, 1)
+	core, err := PlaceCage(4, "trusted", 2, 1, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,22 +132,22 @@ func TestFlipPreservesWholeGroupPool(t *testing.T) {
 	}
 	resetPools() // new kernel's allocator
 	adoptCage(st)
-	if c, err := PlaceCage(3, "", 1, 1); err != nil || c != 3 {
+	if c, err := PlaceCage(3, "", 1, 1, ""); err != nil || c != 3 {
 		t.Fatalf("dedicated: core=%d err=%v", c, err)
 	}
-	if _, err := PlaceCage(6, "", 1, 1); err == nil {
+	if _, err := PlaceCage(6, "", 1, 1, ""); err == nil {
 		t.Fatal("empty group core was given away")
 	}
-	if c, err := PlaceCage(5, "trusted", 2, 1); err != nil || c != 2 {
+	if c, err := PlaceCage(5, "trusted", 2, 1, ""); err != nil || c != 2 {
 		t.Fatalf("join restored group: core=%d err=%v", c, err)
 	}
 	ReleaseCage(4)
-	if _, err := PlaceCage(4, "trusted", 2, 1); err != nil {
+	if _, err := PlaceCage(4, "trusted", 2, 1, ""); err != nil {
 		t.Fatalf("restart member: %v", err)
 	}
 	ReleaseCage(4)
 	ReleaseCage(5)
-	if _, err := PlaceCage(6, "", 1, 1); err != nil {
+	if _, err := PlaceCage(6, "", 1, 1, ""); err != nil {
 		t.Fatalf("last member did not release pool: %v", err)
 	}
 }

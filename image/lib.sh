@@ -18,3 +18,10 @@ clean_embeds() {
 	rm -f "$DIR/metal/kern/cagestub/stub-slot.bin" \
 		"$DIR/metal/cmd/hopos/cfgblob/hopos.cfg"
 }
+
+# Dezelfde kooi-stub voor een koude LicheeRV-boot en een flip-bundel.
+build_licheerv_cagestub() {
+	riscv64-elf-as -march=rv64imac_zicsr -o "$DIR/metal/out/stub-slot.o" "$DIR/image/licheerv/stub-slot/stub-slot.S"
+	riscv64-elf-ld -Ttext="$1" -o "$DIR/metal/out/stub-slot.elf" "$DIR/metal/out/stub-slot.o"
+	riscv64-elf-objcopy -O binary "$DIR/metal/out/stub-slot.elf" "$DIR/metal/out/stub-slot.bin"
+}

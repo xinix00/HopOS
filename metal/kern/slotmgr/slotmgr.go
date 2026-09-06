@@ -79,7 +79,7 @@ func (Manager) PoolLargest() uint64 { return slots.PoolLargest() }
 // zitten (20-08). Zie docs/slot-lifecycle-grenzen.md.
 func (Manager) StartStream(slot int, image io.Reader, size int64, spec hopos.StartSpec) error {
 	cage := phys(slot)
-	core, err := slots.PlaceCage(cage, spec.Sharegroup, spec.PoolCores, spec.Cores)
+	core, err := slots.PlaceCage(cage, spec.Sharegroup, spec.PoolCores, spec.Cores, spec.CoreClass)
 	if err != nil {
 		if errors.Is(err, slots.ErrPoolSize) {
 			// Geen capaciteitsfout: twee jobspecs in dezelfde sharegroup zijn
@@ -140,3 +140,9 @@ func (Manager) Logs(slot int) <-chan string { return slots.Logs(phys(slot)) }
 
 // Contractbewijs: Manager MOET hopos.SlotManager zijn.
 var _ hopos.SlotManager = (*Manager)(nil)
+
+func (Manager) CanPlaceDedicated(slot, cores int) bool {
+	return slots.CanPlaceDedicated(phys(slot), cores)
+}
+
+var _ hopos.DedicatedPlacement = Manager{}
