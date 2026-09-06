@@ -108,3 +108,8 @@ __pycache__/
 # die staat publiek. Genegeerd i.p.v. verplaatst: ze blijven bruikbaar waar ze
 # liggen, en de release-preflight (schone boom) struikelt er niet meer over.
 /job-*.json
+
+# Reviewrapporten van een agent-ronde: werkmateriaal, geen broncode. Ze leven
+# zolang de ronde loopt (docs/meetinstrumenten.md houdt vast wat er blijvend
+# uit komt) en horen niet in de historie van de boom.
+docs/reviews/

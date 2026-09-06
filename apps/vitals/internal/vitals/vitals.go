@@ -100,6 +100,8 @@ var tests = []struct{ Name, Desc string }{
 	{"memlat", "memory latency"},
 	{"rx", "download throughput"},
 	{"disk", "NVMe through the system-call path"},
+	{"sqlite", "SQLite on the volume path (rowid rows, 64 KiB pages, 64 MiB cache)"},
+	{"push", "upload to another app on this node (?url=, ?token= for Spin)"},
 	{"syscall", "system-call floor vs keep-alive HTTP to the agent"},
 	{"storm", "connection storm (via published port)"},
 	{"rtt", "TCP round-trips to the gateway"},
@@ -117,9 +119,10 @@ type Server struct {
 	running string // "" = niets bezig; anders de testnaam (of "all")
 	note    string // voortgangsregel van de lopende test
 
-	up   upBurst // lopende upload-reeks van /sink (zie disk.go)
-	idle idleSampler
-	temp tempCache
+	up     upBurst // lopende upload-reeks van /sink (zie disk.go)
+	sqlvfs *sqlVFS // de SQLite-VFS over cfg.FS, aangemaakt bij de eerste sqlite-test
+	idle   idleSampler
+	temp   tempCache
 }
 
 // NewServer bouwt de server; Start() begint het passieve meten.
@@ -205,6 +208,10 @@ func (s *Server) run(name string, q url.Values) *Result {
 		s.runRx(res, q)
 	case "disk":
 		s.runDisk(res, q)
+	case "sqlite":
+		s.runSQLite(res, q)
+	case "push":
+		s.runPush(res, q)
 	case "syscall":
 		s.runSyscall(res, q)
 	case "storm":
@@ -308,7 +315,7 @@ func (s *Server) writeState(w leanhttp.ResponseWriter) {
 			"ip":       s.cfg.IP,
 			"host":     s.cfg.Host,
 			"port":     s.cfg.Port,
-			"cores":    runtime.NumCPU(),
+			"cores":    runtime.GOMAXPROCS(0), // tamago's NumCPU is altijd 1; smp.Configure zet GOMAXPROCS
 			"shared":   s.ctrl(s.cfg.Offsets.Shared) == 1,
 			"uptime_s": int(time.Since(s.started).Seconds()),
 			"heap_kb":  ms.HeapAlloc >> 10,

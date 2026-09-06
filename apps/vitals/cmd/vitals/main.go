@@ -120,7 +120,7 @@ func main() {
 	srv.Start()
 
 	app.Logf("vitals %s: serving on %s:%s (slot %d, %s, %d core(s))",
-		version, ip, port, app.Slot, runtime.GOARCH, runtime.NumCPU())
+		version, ip, port, app.Slot, runtime.GOARCH, runtime.GOMAXPROCS(0))
 	app.Logf("http: %v", leanhttp.ListenAndServe(":"+port, srv.Handle))
 	app.Exit(1) // een service die stopt met serveren is een crash, by design
 }

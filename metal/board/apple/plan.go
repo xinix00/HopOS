@@ -58,6 +58,8 @@ func SetupPlan() {
 		CagePA:        CagePA,
 		TrapVecPA:     RevokeVec,
 		FlipScratchPA: FlipScratch,
+		BlackBoxPA:    BlackBox,
+		BlackBoxSize:  BlackBoxSize,
 		BootScratchPA: BootScratch,
 		NetDMAPA:      NetDMAPA,
 		RAMBase:       DRAMBase,

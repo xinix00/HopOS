@@ -23,7 +23,9 @@ import "github.com/xinix00/HopOS/metal/v2/driver/fb"
 // Wat ECHT per board verschilt is één ding — hoe je één byte op de lijn zet.
 // Dat is het argument. De rest is beleid en hoort hier:
 //
-//  1. de ring eerst, altijd. Hangt de UART-poll (kabel eruit, blok ongeklokt),
+//  0. de zwarte doos eerst: DRAM buiten elke RAM-declaratie, dus leesbaar na
+//     een crash die zelfs de ring meenam (blackbox.go);
+//  1. dan de ring. Hangt de UART-poll (kabel eruit, blok ongeklokt),
 //     dan is de byte alsnog over het netwerk op te vragen;
 //  2. dan de lijn;
 //  3. dan het glas. fb.Putc is een no-op zolang fb.Init niet gedraaid heeft,
@@ -33,6 +35,9 @@ import "github.com/xinix00/HopOS/metal/v2/driver/fb"
 // arm64, hartid op RISC-V) en een board dat hem nodig heeft zet hem in één
 // regel vóór de aanroep. Zie board/rk3566/console.go.
 func Route(c byte, line func(byte)) {
+	// De zwarte doos eerst: die ligt buiten élk kernvenster en is het enige
+	// spoor dat een crash én de reboot erna overleeft (blackbox.go).
+	bbPut(c)
 	Put(c)
 	if line != nil {
 		line(c)

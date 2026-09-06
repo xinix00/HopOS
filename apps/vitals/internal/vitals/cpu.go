@@ -213,19 +213,20 @@ func lcgBurstN(acc uint64, n int) uint64 {
 	return acc
 }
 
-// runRamp meet hoe snel de kloksnelheid OPSCHAALT onder plotselinge last, in
-// MHz over de tijd. Eerst bewust stil zijn (de hardware-governor — APSC op
-// Apple — mag terugklokken), dan vol aan en de doorvoer per 5ms-venster
-// vastleggen.
+// runRamp meet hoe snel de kloksnelheid OPSCHAALT onder plotselinge last, als
+// doorvoer (Msteps/s) over de tijd. Eerst bewust stil zijn (de hardware-
+// governor — APSC op Apple — mag terugklokken), dan vol aan en de doorvoer per
+// 5ms-venster vastleggen.
 //
-// De vertaling van doorvoer naar klok is geen aanname maar een ijking: de
-// LCG-stap is een afhankelijke MADD-keten van exact 3,0 cycles op deze cores —
-// GEMETEN 01-09 op de M4: 300,0 Msteps/s op 900 MHz én 723,8 op 2172 MHz,
-// allebei binnen een half procent van klok/3. Dus MHz = Msteps/s × 3.
+// Bewust in Msteps/s en niet in MHz (06-09): de omrekening naar klok was een
+// ijking op de M4 (LCG-stap = MADD-keten van 3,0 cycles: 300,0 Msteps/s op
+// 900 MHz, 723,8 op 2172 MHz), maar op een A72 of A55 heeft de MADD een andere
+// latency en kwam de Radxa op "306 MHz" uit. De doorvoer zelf is op elk board
+// waar; wie een klok wil, ijkt per core-type.
 //
 // Parameters: ?idle=ms (stilte vooraf, default 2000) en ?secs=n (meetduur).
-// De uitkomst: startklok, eindklok, en de tijd tot 90% van de eindklok — dát
-// getal is "hoe snel schaalt hij op".
+// De uitkomst: starttempo, eindtempo, en de tijd tot 90% van het eindtempo —
+// dát getal is "hoe snel schaalt hij op".
 func (s *Server) runRamp(res *Result, q url.Values) {
 	idleMS := qInt(q, "idle", 2000, 0, 30000)
 	secs := qInt(q, "secs", 2, 1, 10)
@@ -265,12 +266,11 @@ func (s *Server) runRamp(res *Result, q url.Values) {
 			break
 		}
 	}
-	const cyclesPerStep = 3.0
-	res.add("mhz_start", rates[0]*cyclesPerStep, "MHz")
-	res.add("mhz_top", top*cyclesPerStep, "MHz")
+	res.add("rate_start", rates[0], "Msteps/s")
+	res.add("rate_top", top, "Msteps/s")
 	res.add("ramp_ms", rampMS, "ms")
-	res.linef("idle %dms, then full load: %.0f -> %.0f MHz, >=90%% after %.0f ms",
-		idleMS, rates[0]*cyclesPerStep, top*cyclesPerStep, rampMS)
+	res.linef("idle %dms, then full load: %.0f -> %.0f Msteps/s, >=90%% after %.0f ms",
+		idleMS, rates[0], top, rampMS)
 	// De eerste 20 vensters als tijdlijn — dáár zit het verhaal.
 	n := len(rates)
 	if n > 20 {
@@ -283,7 +283,7 @@ func (s *Server) runRamp(res *Result, q url.Values) {
 		}
 		line := ""
 		for j := i; j < end; j++ {
-			line += fmt.Sprintf("  t+%3dms %5.0f MHz", j*5, rates[j]*cyclesPerStep)
+			line += fmt.Sprintf("  t+%3dms %5.0f Msteps/s", j*5, rates[j])
 		}
 		res.linef("%s", line)
 	}

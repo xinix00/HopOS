@@ -37,6 +37,7 @@ import (
 	"github.com/xinix00/HopOS/metal/v2/cpu/idle"
 	"github.com/xinix00/HopOS/metal/v2/cpu/memlimit"
 	"github.com/xinix00/HopOS/metal/v2/cpu/smp"
+	"github.com/xinix00/HopOS/metal/v2/driver/conlog"
 	"github.com/xinix00/HopOS/metal/v2/driver/fb"
 	"github.com/xinix00/HopOS/metal/v2/driver/nvme"
 	"github.com/xinix00/HopOS/metal/v2/kern/conport"
@@ -205,6 +206,31 @@ func main() {
 		b.EnableTimestamps()
 	}
 
+	// Zijn we hier via een sprong gekomen? Dan is dít het bewijs dat de nieuwe
+	// kern zijn main haalde (zie kernflip/stage.go). Vóór al het board-werk,
+	// want juist dáár zat het gat.
+	kernflip.MarkEarlyBoot()
+
+	// De zwarte doos: vanaf hier spiegelt élke console-byte naar DRAM buiten
+	// ons venster, en wat de vórige boot daar achterliet is nu veiliggesteld
+	// (driver/conlog/blackbox.go). Zo vroeg mogelijk, want de bytes die je na
+	// een mislukte flip wilt lezen zijn juist de eerste.
+	conlog.UseBlackBox(layout.BlackBoxPA(), layout.BlackBoxSize())
+	// Meteen zeggen wat de doos droeg. Zonder dit is "geen post-mortem" niet
+	// te onderscheiden van "de doos is onderweg gewist" — en juist dát is de
+	// vraag op een node die na een val eerst een ándere kern boot.
+	fmt.Printf("--- HopOS boot (black box: %d bytes carried over) ---\n", conlog.PreviousLen())
+	// Komen we uit een sprong? Dan meteen de watchdog wapenen — vóór de
+	// overdracht, want dáár bleef het staan (06-09). Zonder dit hangt een kern
+	// die in Adopted omvalt tot iemand de stekker pakt.
+	if kernflip.FlipPending() {
+		armBootGuard()
+		// En meteen de adoptie-stand: alles hierna (Privilege, de
+		// firmware-probe, het board-opzetten) mag de app-core-regio niet vers
+		// neerzetten zolang de bewoners van de vorige kern nog draaien.
+		kernflip.PresumeAdopting()
+	}
+
 	fmt.Printf("runtime %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
 
 	// Vóór alles: het privilege-niveau waarin we booten. De kooi is een
@@ -237,8 +263,21 @@ func main() {
 	// vluchtrecorder op de boot-scratch — het enige spoor dat een reboot
 	// overleeft. Meteen na Adopted (die de recorder bij een geslaagde landing
 	// al wiste), zodat de melding vóór alle andere boot-ruis staat.
+	stalled := false
 	if !isFlip {
-		kernflip.ReportLastFlip()
+		stalled = kernflip.ReportLastFlip()
+	}
+	// Het archief: de laatste poging die niet landde. Dat woord overleeft
+	// zowel de val (de node komt terug op de geïnstalleerde kern) als het
+	// herstel (de flip die hem weer optilt archiveert het spoor eerst), dus
+	// het hoort op ELKE boot gemeld te worden — niet alleen op een flip-boot.
+	if kernflip.ReportArchivedStage() {
+		stalled = true
+	}
+	// Is er iets misgegaan, dan hoort de console van die boot erbij. Anders
+	// zwijgt de doos: hij is een post-mortem, geen tweede logboek.
+	if stalled || bootParam("hopos.blackbox") == "1" {
+		dumpBlackBox()
 	}
 	if isFlip {
 		fmt.Printf("flip: adopted kernel generation %d — %s, %d resident(s) handed over, previous kernel had %#x+%dMB HOPOS_FLIP_BOOT\n",
@@ -739,4 +778,19 @@ func (e envSlots) merge(env map[string]string) map[string]string {
 		}
 	}
 	return out
+}
+
+// dumpBlackBox schrijft de console van de vorige boot uit. Tijdens het
+// uitschrijven staat het spiegelen uit: anders schrijft de doos zichzelf vol
+// met zijn eigen inhoud.
+func dumpBlackBox() {
+	prev := conlog.PreviousBoot()
+	if len(prev) == 0 {
+		return
+	}
+	conlog.Mute(true)
+	fmt.Printf("--- console before this boot (%d bytes, HOPOS_BLACKBOX) — the tail is the kernel that died ---\n", len(prev))
+	fmt.Print(string(prev))
+	fmt.Printf("\n--- end of the previous boot's console ---\n")
+	conlog.Mute(false)
 }

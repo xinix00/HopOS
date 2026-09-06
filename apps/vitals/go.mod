@@ -15,8 +15,16 @@ go 1.26.4
 // Sibling-dev (go.work) bouwt gewoon tegen de werkboom.
 require github.com/xinix00/HopOS/metal/v2 v2.1.0
 
-require github.com/xinix00/lean v1.1.0
+require (
+	github.com/ncruces/go-sqlite3 v0.35.4
+	github.com/xinix00/lean v1.1.0
+)
 
-require github.com/usbarmory/tamago v1.26.4 // indirect
+require (
+	github.com/ncruces/go-sqlite3-wasm/v5 v5.0.35304 // indirect
+	github.com/ncruces/julianday v1.0.0 // indirect
+	github.com/usbarmory/tamago v1.26.4 // indirect
+	golang.org/x/sys v0.47.0 // indirect
+)
 
 replace github.com/xinix00/HopOS/metal/v2 => ../../metal

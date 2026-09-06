@@ -102,10 +102,14 @@ const (
 	//
 	//	+0x0000000   64KB  control-pages van HOP's eigen cores (NodeCtrlPA)
 	//	+0x00F0000    2KB  EL2-vectortabel van de boot-core (TrapVecPA — cpuinit-vast!)
-	//	+0x00F8000    8B   kern-flip-vluchtrecorder (FlipScratch) — MOET buiten
+	//	+0x00F8000   16B   kern-flip-vluchtrecorder (FlipScratch) — MOET buiten
 	//	                   het image liggen: iBoot legt het bootobject bij élke
 	//	                   boot terug over RamBase+0..imageSize, dus een spoor
 	//	                   op de boot-scratch wist zichzelf (gemeten 01-09)
+	//	+0x00F8100   32KB  zwarte doos: de console-bytes van deze boot
+	//	                   (BlackBoxPA, driver/conlog) — zelfde reden als de
+	//	                   recorder hierboven, en dezelfde 32KB-gat tussen
+	//	                   +0xF8000 en +0x100000
 	//	+0x0100000  8.1MB  app-core-vectoren + stage-2-tabelblokken (CagePA)
 	//	+0x0A00000   4KB   levenstekenwoorden van de probe (WakeBase)
 	//	+0x1000000   8MB   NIC-DMA (NetDMAPA) — de tg3
@@ -115,8 +119,23 @@ const (
 	NodeCtrlPA  = StructBase + 0x0000000
 	RevokeVec   = StructBase + 0x00F0000
 	FlipScratch = StructBase + 0x00F8000
-	CagePA      = StructBase + 0x0100000
-	WakeBase    = StructBase + 0x0A00000
+	// BlackBox: de console-ring van deze boot, buiten élke RAM-declaratie —
+	// leesbaar door de kern die ná een crash of flip opkomt (driver/conlog).
+	BlackBox = StructBase + 0x00F8100
+	// 28KB en geen 32: tussen de recorder en CagePA zit maar 32512 byte vrij,
+	// en 32KB liep er 256 overheen — de eerste 256 bytes van de KOOI-regio,
+	// waar de vectoren staan die de app-cores uitvoeren. Met levende bewoners
+	// schrijf je dan console-tekst over hun instructies (Derek zag het 06-09:
+	// "zitten ze niet in memory te vroeten waar dat niet mag"). De grens
+	// hieronder maakt die fout voortaan onmogelijk te compileren.
+	BlackBoxSize = 0x7000
+
+	// De zwarte doos mag NOOIT in de kooi-regio lopen. Deze constante is
+	// negatief zodra dat wel zo is, en een negatieve waarde in een uint
+	// compileert niet — de fout landt dus op de build, niet op het ijzer.
+	_        = uint(CagePA - (BlackBox + BlackBoxSize))
+	CagePA   = StructBase + 0x0100000
+	WakeBase = StructBase + 0x0A00000
 
 	NetDMAPA = StructBase + 0x1000000
 	PoolBase = StructBase + 0x2000000

@@ -99,6 +99,44 @@ func rebootNow() {
 // nodeWDT wordt door de board-init gezet; main start de canary.
 var nodeWDT *wdHardware
 
+// earlyPet stopt de vroege aai-lus zodra nodeCanary het beleid overneemt.
+var earlyPet chan struct{}
+
+// armBootGuard wapent de watchdog METEEN, en aait hem tot het echte beleid
+// begint. Alleen nodig op een flip-boot, en daar is hij essentieel: het board
+// zet in SetupPlan élke watchdog stil (iBoot laat er meerdere gewapend achter,
+// zie board/apple/wdt.go), en het beleid wapent er pas één ná de agent. Op een
+// koude boot is dat gat ongevaarlijk — de firmware bracht ons hier. Na een
+// flip is het dat NIET: de vertrekkende kern had een gewapende watchdog, die
+// werd binnen milliseconden na de landing stilgezet, en sterft de nieuwe kern
+// dan in zijn bring-up, dan waakt er niemand meer. GEMETEN 06-09 op de M4: een
+// mislukte flip liet de node zeven minuten volledig donker (geen ping, geen
+// console) in plaats van binnen 30 seconden te resetten.
+func armBootGuard() {
+	if earlyPet != nil || bootParam("hopos.wd") == "off" || nodeWDT == nil || nodeWDT.Arm == nil {
+		return
+	}
+	desc, ok := nodeWDT.Arm()
+	if !ok {
+		fmt.Printf("watchdog: flip boot, but %s — this boot is UNGUARDED\n", desc)
+		return
+	}
+	fmt.Printf("watchdog: armed for the flip boot (%s) — the previous kernel's guard was silenced at board setup\n", desc)
+	earlyPet = make(chan struct{})
+	go func(stop chan struct{}) {
+		t := time.NewTicker(nodeWDT.PetEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				nodeWDT.Pet()
+			}
+		}
+	}(earlyPet)
+}
+
 // nodeCanary voert het beleid uit. Gestart vanuit main ná boardWarn (de
 // boards die hun blok eerst moeten bewijzen — de hart-probe op de LicheeRV —
 // hebben dat dan gedaan).
@@ -111,6 +149,11 @@ func nodeCanary() {
 	if nodeWDT == nil {
 		fmt.Println("watchdog: this board wires no hardware watchdog — node liveness is UNGUARDED")
 		return
+	}
+	// De vroege lus van een flip-boot stopt hier: vanaf nu aait het beleid.
+	if earlyPet != nil {
+		close(earlyPet)
+		earlyPet = nil
 	}
 	desc, ok := nodeWDT.Arm()
 	if !ok {

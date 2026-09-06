@@ -81,10 +81,14 @@ func SnapshotForFlip() ([]SlotState, error) {
 		if !ctxLive(ctxState(i)) {
 			continue // partitie zonder levende bewoner: laat hem gewoon achter
 		}
+		// Een SMP-app gaat gewoon mee: zijn secundaire cores draaien dezelfde
+		// switch-code (de som-toets in kernflip dekt ze), hun ctx-blokken staan
+		// op de slotindexen ná de primaire en blijven staan, en de teller
+		// hieronder (Cores) laat de nieuwe kern ze als één eenheid overnemen.
+		// De weigering die hier stond ("not adoptable in this version") maakte
+		// van elke 2-core-app een stop-vóór-de-flip, en dat is precies wat een
+		// live kernelwissel niet mag vragen (06-09).
 		n := coreCount(i)
-		if n > 1 {
-			return nil, fmt.Errorf("slot %d is an SMP app (%d cores) — not adoptable in this version", i, n)
-		}
 		svcMu.Lock()
 		s := servicers[i]
 		svcMu.Unlock()
@@ -173,7 +177,11 @@ func AdoptSlots(states []SlotState) int {
 		if st.Core >= 1 && st.Core <= layout.NumAppCores() {
 			hostCore[i] = st.Core
 		}
-		smpCores[i] = 1
+		// De vertrouwde core-telling van de eenheid (smp.go): uit de overdracht,
+		// nooit uit de control-page. Zonder dit zag Stop's stillOn-scan de
+		// secundaire cores niet en gaf releaseSlot een partitie vrij waarop
+		// nog cores draaiden; en de wekker kickte alleen de primaire.
+		smpCores[i] = max(st.Cores, 1)
 
 		// LEEFT hij ook echt? De ctx-staat zegt "de rotatie kent hem", maar
 		// alleen een OPLOPENDE heartbeat bewijst dat er nog een app in draait —
@@ -231,11 +239,11 @@ func AdoptSlots(states []SlotState) int {
 		// PlaceCage élke core als vrij en zet hij de volgende job ongevraagd
 		// naast een geadopteerde bewoner — precies de stille core-deling die het
 		// ontwerp verbiedt (timing-zijkanalen; delen hoort een keuze te zijn).
-		adoptCage(i, coreOf(i))
+		adoptCage(i, coreOf(i), coreCount(i))
 		refreshShared(coreOf(i))
 		live++
-		fmt.Printf("slot %d: adopted — partition %d MB @ %#x on core %d, %d mount(s), heartbeat running\n",
-			i, st.PartSize>>20, st.PartBase, coreOf(i), len(st.Mounts))
+		fmt.Printf("slot %d: adopted — partition %d MB @ %#x on core %d (%d core(s)), %d mount(s), heartbeat running\n",
+			i, st.PartSize>>20, st.PartBase, coreOf(i), coreCount(i), len(st.Mounts))
 	}
 	return live
 }

@@ -33,6 +33,11 @@ func (s *Server) runRx(res *Result, q url.Values) {
 		src = s.cfg.RxURL
 	}
 	capBytes := int64(qInt(q, "mb", 32, 1, 1024)) << 20
+	rxProgress.Store(0)
+	rxZeroReads.Store(0)
+	done := make(chan struct{})
+	go s.stallWatch("rx", &rxProgress, done)
+	defer close(done)
 
 	t0 := time.Now()
 	resp, err := leanhttp.Get(src)
@@ -49,6 +54,10 @@ func (s *Server) runRx(res *Result, q url.Values) {
 	for got < capBytes {
 		n, err := resp.Body.Read(buf)
 		got += int64(n)
+		rxProgress.Store(got)
+		if n == 0 && err == nil {
+			rxZeroReads.Add(1)
+		}
 		if got%(8<<20) < int64(n) {
 			s.setNote("rx %d/%d MB", got>>20, capBytes>>20)
 		}
@@ -188,6 +197,10 @@ func (s *Server) serveBlob(w leanhttp.ResponseWriter, r *leanhttp.Request) {
 	w.Header().Set("Content-Length", strconv.Itoa(total))
 
 	res := &Result{Test: "tx", Started: time.Now()}
+	txProgress.Store(0)
+	done := make(chan struct{})
+	go s.stallWatch("tx", &txProgress, done)
+	defer close(done)
 	t0 := time.Now()
 	sent := 0
 	for sent < total {
@@ -197,6 +210,7 @@ func (s *Server) serveBlob(w leanhttp.ResponseWriter, r *leanhttp.Request) {
 		}
 		m, err := w.Write(blobChunk[:n])
 		sent += m
+		txProgress.Store(int64(sent))
 		if err != nil {
 			res.Err = "client went away: " + err.Error()
 			break

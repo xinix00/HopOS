@@ -44,9 +44,38 @@ var (
 	groupPool = map[string][]int{} // sharegroup-naam → zijn app-cores
 	coreGroup = map[int]string{}   // core → sharegroup ("" = vrij of dedicated)
 	coreApps  = map[int]int{}      // core → aantal levende kooien erop
-	cageCore  = map[int]int{}      // kooi → toegewezen core (voor ReleaseCage)
+	cageCore  = map[int]int{}      // kooi → toegewezen (primaire) core
+	cageSpan  = map[int]int{}      // kooi → aantal cores dat hij bezet houdt
 	cageGroup = map[int]string{}   // kooi → sharegroup ("" = dedicated)
 )
+
+// isAppCore: ligt c in het app-bereik [HopReserved()+1, NumAppCores()]?
+func isAppCore(c int) bool { return c > HopReserved() && c <= layout.NumAppCores() }
+
+// runFree: staan er `cores` opeenvolgende, vrije app-cores vanaf primary?
+func runFree(primary, cores int) bool {
+	for c := primary; c < primary+cores; c++ {
+		if !isAppCore(c) || !coreFree(c) {
+			return false
+		}
+	}
+	return true
+}
+
+// reserve boekt de hele core-run van een kooi. ALLE cores van een SMP-app
+// gaan in coreApps, niet alleen de primaire: anders ziet de volgende
+// plaatsing de secundaire cores als vrij en zet er stil een tweede app
+// bovenop. Dat was geen theorie — gemeten 05-09 op de M4: een 1-core app die
+// op de tweede core van een SMP-buur landde deed 3144 µs per system call in
+// plaats van 23, en 0,8 in plaats van 81 MB/s inkomend. Geen fout, geen
+// logregel, alleen een app die 137x trager is.
+func reserve(cage, primary, cores int, group string) int {
+	for c := primary; c < primary+cores; c++ {
+		coreApps[c]++
+	}
+	cageCore[cage], cageSpan[cage], cageGroup[cage] = primary, cores, group
+	return primary
+}
 
 // coreFree: een app-core zonder pool-claim en zonder levende kooi.
 func coreFree(c int) bool { return coreGroup[c] == "" && coreApps[c] == 0 }
@@ -74,21 +103,14 @@ func leastLoaded(cores []int) int {
 	return best
 }
 
-// PlaceCage kiest de fysieke core voor kooi (1-based interne index) met de
-// gegeven sharegroup en poolgrootte (hele cores). group=="" → een eigen vrije
-// core (dedicated). Anders: de minst-belaste core van de pool, die zo nodig
-// wordt aangemaakt met poolCores vrije cores. Fout als er geen (genoeg) vrije
-// core is — dan is de node vol op cores (RAM is de andere muur, die HOP
-// bewaakt). Idempotent per kooi: een tweede PlaceCage voor dezelfde kooi geeft
-// dezelfde core terug (fase 2 hoeft niet opnieuw te kiezen).
+// PlaceCage kiest de fysieke core(s) voor kooi (1-based interne index) met de
+// sharegroup en poolgrootte uit de jobspec, plus het eigen core-aantal van de
+// app (cores: 1 = gewone app, >1 = SMP). Idempotent per kooi: een tweede
+// PlaceCage voor dezelfde kooi geeft dezelfde core terug (twee-fase-start).
 //
-// Een ongetagde job die geen vrije core vindt FAALT, en gaat níet stil een hart
-// delen. Dat is de kern van het model en geen capaciteitsdetail: een hart delen
-// betekent timing-zijkanalen met je medebewoner (zie docs/technical/isolation.md),
-// dus wie deelt hoort dat gekozen te hebben — welke jobs, en met wie. De
-// sharegroup-tag ÍS die keuze. Een terugval "geen core vrij, dan maar delen"
-// neemt hem stil over, en dat mag deze laag niet doen.
-func PlaceCage(cage int, group string, poolCores int) (int, error) {
+// De allocator boekt élke core die de kooi bezet houdt — bij SMP dus ook de
+// secundairen — zodat een volgende plaatsing er nooit stil bovenop landt.
+func PlaceCage(cage int, group string, poolCores, cores int) (int, error) {
 	poolMu.Lock()
 	defer poolMu.Unlock()
 
@@ -98,31 +120,33 @@ func PlaceCage(cage int, group string, poolCores int) (int, error) {
 	if poolCores < 1 {
 		poolCores = 1
 	}
-
-	if group == "" {
-		free := freeCores()
-		if len(free) == 0 {
-			return 0, fmt.Errorf("geen vrije app-core voor kooi %d (node vol op cores; delen vraagt een sharegroup)", cage)
-		}
-		c := free[0]
-		coreApps[c]++
-		cageCore[cage] = c
-		cageGroup[cage] = ""
-		return c, nil
+	if cores < 1 {
+		cores = 1
 	}
 
-	cores, ok := groupPool[group]
+	if group == "" {
+		return placeDedicated(cage, cores)
+	}
+	if cores > 1 {
+		// Een gedeelde kooi draait per definitie op één core (de pool ís het
+		// deel-mechanisme); twee tegelijk zou betekenen dat de app cores van
+		// de groep opeist die andere leden ook gebruiken.
+		return 0, fmt.Errorf("%w: sharegroup %q en %d app-cores gaan niet samen — een kooi in een sharegroup draait op één core",
+			ErrPoolSize, group, cores)
+	}
+
+	pool, ok := groupPool[group]
 	if !ok {
 		free := freeCores()
 		if len(free) < poolCores {
 			return 0, fmt.Errorf("sharegroup %q vraagt %d cores, %d vrij", group, poolCores, len(free))
 		}
-		cores = append([]int(nil), free[:poolCores]...)
-		groupPool[group] = cores
-		for _, c := range cores {
+		pool = append([]int(nil), free[:poolCores]...)
+		groupPool[group] = pool
+		for _, c := range pool {
 			coreGroup[c] = group
 		}
-	} else if len(cores) != poolCores {
+	} else if len(pool) != poolCores {
 		// De poolgrootte van een bestaande groep is NIET "first wins". Het was dat
 		// stil: een groep die met twee cores begon negeerde de vier die de volgende
 		// job vroeg, en die job kreeg dus de helft van zijn afgesproken hart-budget
@@ -132,13 +156,36 @@ func PlaceCage(cage int, group string, poolCores int) (int, error) {
 		// aanroeper te horen in plaats van te raden waarom zijn app te weinig
 		// hart heeft.
 		return 0, fmt.Errorf("%w: sharegroup %q heeft een pool van %d core(s), maar kooi %d vraagt %d — één sharegroup, één poolgrootte",
-			ErrPoolSize, group, len(cores), cage, poolCores)
+			ErrPoolSize, group, len(pool), cage, poolCores)
 	}
-	c := leastLoaded(cores)
-	coreApps[c]++
-	cageCore[cage] = c
-	cageGroup[cage] = group
-	return c, nil
+	return reserve(cage, leastLoaded(pool), 1, group), nil
+}
+
+// placeDedicated kiest de core(s) van een kooi zonder sharegroup. Kooi == core
+// is hier de REGEL en niet het toeval: een SMP-app draait per definitie op
+// kooi..kooi+cores-1 (smp.go) en de kern weigert elke andere primaire core
+// (validateSMPPlacement). Wie hier "de laagste vrije core" pakt, laat die twee
+// uit elkaar lopen — dan lukt een SMP-start afhankelijk van de vólgorde waarin
+// jobs geplaatst zijn (gemeten 05-09: cloudflared eerst weghalen en Spin met
+// twee cores plaatsen faalde met "kooi 2 woont op core 1", andersom niet).
+//
+// Een gewone app houdt de terugval op de laagste vrije core: kooinummers lopen
+// door boven het aantal cores, en een 1-core app hoeft niet op zijn eigen
+// nummer te draaien om te werken. Hij mag alleen nooit stil op een bezette
+// core belanden — zie reserve.
+func placeDedicated(cage, cores int) (int, error) {
+	if runFree(cage, cores) {
+		return reserve(cage, cage, cores, ""), nil
+	}
+	if cores > 1 {
+		return 0, fmt.Errorf("SMP-kooi %d vraagt de cores %d..%d (eigen core plus de cores erna) en die zijn niet allemaal vrij",
+			cage, cage, cage+cores-1)
+	}
+	free := freeCores()
+	if len(free) == 0 {
+		return 0, fmt.Errorf("geen vrije app-core voor kooi %d (node vol op cores; delen vraagt een sharegroup)", cage)
+	}
+	return reserve(cage, free[0], 1, ""), nil
 }
 
 // ReleaseCage geeft de core van een gestopte kooi terug. Een dedicated core
@@ -153,10 +200,17 @@ func ReleaseCage(cage int) {
 		return
 	}
 	grp := cageGroup[cage]
+	span := cageSpan[cage]
+	if span < 1 {
+		span = 1
+	}
 	delete(cageCore, cage)
+	delete(cageSpan, cage)
 	delete(cageGroup, cage)
-	if coreApps[c] > 0 {
-		coreApps[c]--
+	for x := c; x < c+span; x++ { // de hele run terug, ook de SMP-secundairen
+		if coreApps[x] > 0 {
+			coreApps[x]--
+		}
 	}
 	if grp == "" {
 		return // dedicated: core is nu vrij (coreApps==0, coreGroup=="")
@@ -195,15 +249,15 @@ func ReleaseCage(cage int) {
 // TERUGGEVEN gaat via de gewone weg (ReleaseCage), en dat klopt: dit vult
 // precies de boekhouding die de plaatser zou hebben gehad als híj de app had
 // neergezet, dus zijn Stop ruimt hem net zo op als bij elke andere kooi.
-func adoptCage(cage, core int) {
+func adoptCage(cage, core, cores int) {
 	poolMu.Lock()
 	defer poolMu.Unlock()
 	if _, ok := cageCore[cage]; ok {
 		return
 	}
-	cageCore[cage] = core
-	cageGroup[cage] = ""
-	coreApps[core]++
+	// De hele run: een geadopteerde SMP-app houdt zijn secundaire cores net zo
+	// bezet als een vers geplaatste (zie reserve).
+	reserve(cage, core, max(cores, 1), "")
 }
 
 // resetPools wist alle allocator-staat (alleen voor host-tests tussen cases).
@@ -214,5 +268,6 @@ func resetPools() {
 	coreGroup = map[int]string{}
 	coreApps = map[int]int{}
 	cageCore = map[int]int{}
+	cageSpan = map[int]int{}
 	cageGroup = map[int]string{}
 }

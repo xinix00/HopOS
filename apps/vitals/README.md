@@ -14,6 +14,7 @@ board.
 | membw | STREAM-achtig copy/triad | DRAM-controller-config |
 | memlat | pointer-chase over oplopende working-sets | cache-hiërarchie, DRAM-latentie |
 | rx | download van een externe bron (plain http) | doorvoer app-stack → gwnat → NIC → internet |
+| sqlite | SQLite (rowid-rijen van 1 MiB, 64 KiB-pagina's, 64 MiB cache) op het volume-pad; `?trap=1` zet de WITHOUT ROWID-valkuil ernaast | wat een database op de system-call-laag haalt, en hoe hij ingericht moet |
 | tx | client-gedreven: `curl -o /dev/null http://node:8090/blob?mb=64` | zendkant van hetzelfde pad |
 | up | client-gedreven: reeks PUTs van 1 MiB naar `/sink` (`perf.sh`) | ontvangkant van hetzelfde pad |
 | disk | schrijven/lezen via het system-callpad (1 MiB per call), 4 KiB-writes, kale Stat-calls | LAN-pad vs. hopfs/NVMe: alles boven de Stat-vloer is schijf |

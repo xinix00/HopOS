@@ -10,10 +10,12 @@
 package applib
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"net"
+	"os"
 	"runtime"
 	"runtime/goos"
 	"strconv"
@@ -46,8 +48,9 @@ type App struct {
 
 	// Na appnet.Up lopen gewone calls en logs over één blijvende verbinding
 	// naar 10.100.0.1. De mailbox blijft alleen bootstrap/crash-fallback.
-	sysReady bool
-	sysConn  net.Conn
+	sysReady   bool
+	sysConn    net.Conn
+	sysRetryAt time.Time // Logf: niet vaker dan eens per halve seconde opnieuw dialen
 
 	// printk-regelbuffer (appboard.PrintkSink): runtime-output komt per byte
 	// binnen en gaat per regel de log-ring op. Vast formaat, want de schrijver
@@ -291,6 +294,20 @@ func (a *App) Logf(format string, args ...any) {
 	msg := []byte(fmt.Sprintf(format, args...))
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	// Ook hier de verbinding zelf terughalen als hij weg is. Logf deed dat
+	// niet: na een kern-flip krijgt de eerste call een RST, sluit de
+	// verbinding, en tot een VOLGENDE system call hem opnieuw opende ging
+	// élke logregel het terugvalpad in — tot 100 × 1 ms wachten op de
+	// mailboxring, mét a.mu vast, dus met elke system call erachter in de
+	// rij. Een app die veel logt (cloudflared) kroop daardoor na een flip:
+	// 4,8 in plaats van 32 MB/s door de tunnel (06-09), en een herstart
+	// "loste het op". Eén dialpoging per halve seconde, zodat een kern die
+	// echt weg is geen connect per logregel kost.
+	if a.sysReady && a.sysConn == nil && time.Now().After(a.sysRetryAt) {
+		if _, err := a.systemConnLocked(); err != nil {
+			a.sysRetryAt = time.Now().Add(500 * time.Millisecond)
+		}
+	}
 	if a.sysReady && a.sysConn != nil {
 		_ = a.sysConn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
 		if err := systemapi.WriteFrame(a.sysConn, systemapi.KindLog, msg); err == nil {
@@ -339,43 +356,82 @@ func (a *App) closeSystemLocked() {
 	}
 }
 
+// systemRPCLocked doet één system call, en probeert hem precies één keer
+// opnieuw als het TRANSPORT wegviel: reset, EOF, een write die niet wegkon.
+// Dat gebeurt bij een kern-flip — de kern onder de app wordt vervangen, en
+// met hem zijn TCP-stack; de verbinding naar 10.100.0.1:10100 bestaat aan de
+// overkant dan niet meer en de eerste call erna krijgt een RST (gemeten 06-09
+// op QEMU: "connection reset by peer — mount weg?", en de app viel om terwijl
+// de kern onder hem juist netjes geland was). Vóór slot-ABI 6 liepen calls
+// over de mailboxringen in de partitie en overleefden ze de wissel vanzelf;
+// sinds TCP moet de client dat zelf doen.
+//
+// Herhalen is veilig: elke op in hopabi is idempotent (write = dezelfde bytes
+// op dezelfde plek, truncate = dezelfde lengte, store-push/pull = vervangend,
+// lezen is puur). De enige uitzondering is remove: was de eerste poging wél
+// aangekomen, dan zegt de tweede "bestaat niet" — en dat is dan precies wat
+// de aanroeper wilde. Een timeout herhalen we NIET: die call kan nog lopen.
 func (a *App) systemRPCLocked(req hopabi.Req, timeout time.Duration) (hopabi.Resp, error) {
+	resp, err, transport := a.systemRPCOnce(req, timeout)
+	if err == nil || !transport {
+		return resp, err
+	}
+	resp, err, _ = a.systemRPCOnce(req, timeout)
+	if err != nil && req.Op == hopabi.OpRemove && errors.Is(err, fs.ErrNotExist) {
+		return resp, nil
+	}
+	return resp, err
+}
+
+// systemRPCOnce is één poging; transport zegt of de fout vóór een antwoord
+// in het transport zat (en de call dus herhaald mag worden).
+func (a *App) systemRPCOnce(req hopabi.Req, timeout time.Duration) (resp hopabi.Resp, err error, transport bool) {
 	c, err := a.systemConnLocked()
 	if err != nil {
-		return hopabi.Resp{}, err
+		return hopabi.Resp{}, err, true
 	}
 	_ = c.SetDeadline(time.Now().Add(timeout))
 	payload := hopabi.EncodeReq(req)
 	if err := systemapi.WriteFrame(c, systemapi.KindCall, payload); err != nil {
 		a.closeSystemLocked()
-		return hopabi.Resp{}, fmt.Errorf("system call write: %w", err)
+		return hopabi.Resp{}, fmt.Errorf("system call write: %w", err), !isTimeout(err)
 	}
 	kind, payload, err := systemapi.ReadFrame(c)
 	if err != nil {
 		a.closeSystemLocked()
-		return hopabi.Resp{}, fmt.Errorf("system call read: %w", err)
+		return hopabi.Resp{}, fmt.Errorf("system call read: %w", err), !isTimeout(err)
 	}
 	_ = c.SetDeadline(time.Time{})
 	if kind != systemapi.KindResult {
 		a.closeSystemLocked()
-		return hopabi.Resp{}, fmt.Errorf("system call: unexpected frame kind %d", kind)
+		return hopabi.Resp{}, fmt.Errorf("system call: unexpected frame kind %d", kind), false
 	}
-	resp, err := hopabi.DecodeResp(payload)
+	resp, err = hopabi.DecodeResp(payload)
 	if err != nil {
 		a.closeSystemLocked()
-		return hopabi.Resp{}, err
+		return hopabi.Resp{}, err, false
 	}
 	if resp.Seq != req.Seq {
 		a.closeSystemLocked()
-		return hopabi.Resp{}, fmt.Errorf("system call: response seq %d, want %d", resp.Seq, req.Seq)
+		return hopabi.Resp{}, fmt.Errorf("system call: response seq %d, want %d", resp.Seq, req.Seq), false
 	}
 	if resp.Status != hopabi.StatusOK {
 		if resp.Status == hopabi.StatusNoEnt {
-			return resp, fmt.Errorf("system call op %d: %w: %s", req.Op, fs.ErrNotExist, resp.Data)
+			return resp, fmt.Errorf("system call op %d: %w: %s", req.Op, fs.ErrNotExist, resp.Data), false
 		}
-		return resp, fmt.Errorf("system call op %d: status %d: %s", req.Op, resp.Status, resp.Data)
+		return resp, fmt.Errorf("system call op %d: status %d: %s", req.Op, resp.Status, resp.Data), false
 	}
-	return resp, nil
+	return resp, nil, false
+}
+
+// isTimeout: een verstreken deadline. Zo'n call kan aan de overkant nog lopen
+// en wordt daarom nooit herhaald.
+func isTimeout(err error) bool {
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 const rpcTimeout = 10 * time.Second
@@ -414,43 +470,54 @@ func (a *App) ReadInto(path string, off uint64, dst []byte) (int, error) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.seq++
-	req := hopabi.Req{Op: hopabi.OpRead, Path: path, Off: off, N: uint64(len(dst)), Seq: a.seq}
 	if !a.sysReady {
 		return 0, fmt.Errorf("system call: network is not ready; call appnet.Up first")
 	}
+	// Zelfde retry-regel als systemRPCLocked: één keer opnieuw als het
+	// transport wegviel (kern-flip). Lezen is puur, dus altijd veilig.
+	n, err, transport := a.readIntoOnce(path, off, dst)
+	if err == nil || !transport {
+		return n, err
+	}
+	n, err, _ = a.readIntoOnce(path, off, dst)
+	return n, err
+}
+
+func (a *App) readIntoOnce(path string, off uint64, dst []byte) (int, error, bool) {
+	a.seq++
+	req := hopabi.Req{Op: hopabi.OpRead, Path: path, Off: off, N: uint64(len(dst)), Seq: a.seq}
 	c, err := a.systemConnLocked()
 	if err != nil {
-		return 0, err
+		return 0, err, true
 	}
 	_ = c.SetDeadline(time.Now().Add(rpcTimeout))
 	if err := systemapi.WriteFrame(c, systemapi.KindCall, hopabi.EncodeReq(req)); err != nil {
 		a.closeSystemLocked()
-		return 0, fmt.Errorf("system call write: %w", err)
+		return 0, fmt.Errorf("system call write: %w", err), !isTimeout(err)
 	}
 	kind, n, err := systemapi.ReadHeader(c)
 	if err != nil {
 		a.closeSystemLocked()
-		return 0, fmt.Errorf("system call read: %w", err)
+		return 0, fmt.Errorf("system call read: %w", err), !isTimeout(err)
 	}
 	if kind != systemapi.KindResult || n < hopabi.HdrLen {
 		a.closeSystemLocked()
-		return 0, fmt.Errorf("system call: unexpected frame kind %d (%d bytes)", kind, n)
+		return 0, fmt.Errorf("system call: unexpected frame kind %d (%d bytes)", kind, n), false
 	}
 	var hdr [hopabi.HdrLen]byte
 	if _, err := io.ReadFull(c, hdr[:]); err != nil {
 		a.closeSystemLocked()
-		return 0, fmt.Errorf("system call read: %w", err)
+		return 0, fmt.Errorf("system call read: %w", err), false
 	}
 	resp, err := hopabi.DecodeResp(hdr[:])
 	if err != nil {
 		a.closeSystemLocked()
-		return 0, err
+		return 0, err, false
 	}
 	data := n - hopabi.HdrLen
 	if resp.Seq != req.Seq {
 		a.closeSystemLocked()
-		return 0, fmt.Errorf("system call: response seq %d, want %d", resp.Seq, req.Seq)
+		return 0, fmt.Errorf("system call: response seq %d, want %d", resp.Seq, req.Seq), false
 	}
 	if resp.Status != hopabi.StatusOK {
 		// De fouttekst is klein; lees hem in een eigen bufje en laat de
@@ -458,24 +525,24 @@ func (a *App) ReadInto(path string, off uint64, dst []byte) (int, error) {
 		msg := make([]byte, data)
 		if _, err := io.ReadFull(c, msg); err != nil {
 			a.closeSystemLocked()
-			return 0, fmt.Errorf("system call read: %w", err)
+			return 0, fmt.Errorf("system call read: %w", err), false
 		}
 		_ = c.SetDeadline(time.Time{})
 		if resp.Status == hopabi.StatusNoEnt {
-			return 0, fmt.Errorf("system call op %d: %w: %s", req.Op, fs.ErrNotExist, msg)
+			return 0, fmt.Errorf("system call op %d: %w: %s", req.Op, fs.ErrNotExist, msg), false
 		}
-		return 0, fmt.Errorf("system call op %d: status %d: %s", req.Op, resp.Status, msg)
+		return 0, fmt.Errorf("system call op %d: status %d: %s", req.Op, resp.Status, msg), false
 	}
 	if data > len(dst) {
 		a.closeSystemLocked()
-		return 0, fmt.Errorf("system call: read returned %d bytes for a %d-byte buffer", data, len(dst))
+		return 0, fmt.Errorf("system call: read returned %d bytes for a %d-byte buffer", data, len(dst)), false
 	}
 	if _, err := io.ReadFull(c, dst[:data]); err != nil {
 		a.closeSystemLocked()
-		return 0, fmt.Errorf("system call read: %w", err)
+		return 0, fmt.Errorf("system call read: %w", err), false
 	}
 	_ = c.SetDeadline(time.Time{})
-	return data, nil
+	return data, nil, false
 }
 
 // WriteAt writes one chunk at off without truncating the file. It is the

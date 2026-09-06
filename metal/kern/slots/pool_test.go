@@ -1,6 +1,7 @@
 package slots
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/xinix00/HopOS/metal/v2/abi/layout"
@@ -18,7 +19,7 @@ func TestPoolDedicatedEigenCore(t *testing.T) {
 	setCores(t, 4)
 	seen := map[int]bool{}
 	for cage := 1; cage <= 4; cage++ {
-		c, err := PlaceCage(cage, "", 1)
+		c, err := PlaceCage(cage, "", 1, 1)
 		if err != nil {
 			t.Fatalf("kooi %d: %v", cage, err)
 		}
@@ -30,7 +31,7 @@ func TestPoolDedicatedEigenCore(t *testing.T) {
 	// Vijfde dedicated app past niet: 4 cores op. Géén stille terugval naar
 	// delen — delen is een keuze die de aanroeper maakt met een sharegroup, want
 	// het is een vertrouwensbeslissing (medebewoners zien elkaars timing).
-	if _, err := PlaceCage(5, "", 1); err == nil {
+	if _, err := PlaceCage(5, "", 1, 1); err == nil {
 		t.Fatal("5e dedicated kooi moet falen: delen vraagt een sharegroup")
 	}
 }
@@ -41,7 +42,7 @@ func TestPoolSharegroupBalanceert(t *testing.T) {
 	// sharegroup met een pool van 2 hele cores → 2 cores, 2 kooien elk.
 	got := map[int]int{}
 	for cage := 4; cage <= 7; cage++ {
-		c, err := PlaceCage(cage, "web", 2)
+		c, err := PlaceCage(cage, "web", 2, 1)
 		if err != nil {
 			t.Fatalf("kooi %d: %v", cage, err)
 		}
@@ -56,11 +57,11 @@ func TestPoolSharegroupBalanceert(t *testing.T) {
 		}
 	}
 	// Een andere sharegroup pakt de resterende 2 cores.
-	if _, err := PlaceCage(8, "db", 2); err != nil {
+	if _, err := PlaceCage(8, "db", 2, 1); err != nil {
 		t.Fatalf("tweede sharegroup: %v", err)
 	}
 	// En dan is het op: geen vrije core meer voor een derde pool.
-	if _, err := PlaceCage(9, "cache", 1); err == nil {
+	if _, err := PlaceCage(9, "cache", 1, 1); err == nil {
 		t.Fatal("derde pool moet falen (alle 4 cores vergeven)")
 	}
 }
@@ -68,7 +69,7 @@ func TestPoolSharegroupBalanceert(t *testing.T) {
 func TestPoolReleaseGeeftPoolTerug(t *testing.T) {
 	setCores(t, 4)
 	for cage := 4; cage <= 7; cage++ {
-		if _, err := PlaceCage(cage, "web", 2); err != nil {
+		if _, err := PlaceCage(cage, "web", 2, 1); err != nil {
 			t.Fatalf("kooi %d: %v", cage, err)
 		}
 	}
@@ -76,12 +77,12 @@ func TestPoolReleaseGeeftPoolTerug(t *testing.T) {
 	ReleaseCage(4)
 	ReleaseCage(5)
 	ReleaseCage(6)
-	if _, err := PlaceCage(10, "other", 3); err == nil {
+	if _, err := PlaceCage(10, "other", 3, 1); err == nil {
 		t.Fatal("pool 'web' zou zijn 2 cores nog moeten vasthouden (1 lid leeft)")
 	}
 	// Laatste lid weg: nu komen alle 2 pool-cores vrij → 3 zijn er vrij (2+1... nee: 4 totaal, web had 2, 2 vrij + 2 terug = 4).
 	ReleaseCage(7)
-	if _, err := PlaceCage(11, "other", 4); err != nil {
+	if _, err := PlaceCage(11, "other", 4, 1); err != nil {
 		t.Fatalf("na leegloop pool moeten alle 4 cores vrij zijn: %v", err)
 	}
 }
@@ -91,32 +92,32 @@ func TestPoolReleaseGeeftPoolTerug(t *testing.T) {
 // hart dan zijn spec zei zonder dat iemand het merkte.
 func TestPoolGrootteMismatchWordtGeweigerd(t *testing.T) {
 	setCores(t, 6)
-	if _, err := PlaceCage(4, "web", 2); err != nil {
+	if _, err := PlaceCage(4, "web", 2, 1); err != nil {
 		t.Fatalf("eerste kooi: %v", err)
 	}
-	if _, err := PlaceCage(5, "web", 4); err == nil {
+	if _, err := PlaceCage(5, "web", 4, 1); err == nil {
 		t.Fatal("een tweede spec met 4 cores in een pool van 2 moet falen, niet stil 2 krijgen")
 	}
 	// Dezelfde grootte blijft natuurlijk gewoon werken — en een default-loze
 	// aanvraag (0 → 1) tegen een pool van 1 óók.
-	if _, err := PlaceCage(6, "web", 2); err != nil {
+	if _, err := PlaceCage(6, "web", 2, 1); err != nil {
 		t.Fatalf("gelijke poolgrootte moet gewoon slagen: %v", err)
 	}
-	if _, err := PlaceCage(7, "solo", 0); err != nil {
+	if _, err := PlaceCage(7, "solo", 0, 1); err != nil {
 		t.Fatalf("eerste kooi van 'solo': %v", err)
 	}
-	if _, err := PlaceCage(8, "solo", 1); err != nil {
+	if _, err := PlaceCage(8, "solo", 1, 1); err != nil {
 		t.Fatalf("poolCores 0 en 1 zijn hetzelfde (0 wordt 1): %v", err)
 	}
 }
 
 func TestPlaceCageIdempotent(t *testing.T) {
 	setCores(t, 4)
-	c1, err := PlaceCage(4, "web", 2)
+	c1, err := PlaceCage(4, "web", 2, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c2, err := PlaceCage(4, "web", 2) // fase 2 van dezelfde kooi
+	c2, err := PlaceCage(4, "web", 2, 1) // fase 2 van dezelfde kooi
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +132,7 @@ func TestPoolRespecteertHopReserved(t *testing.T) {
 	resetPools()
 	defer SetHopCores(1)
 	for cage := 1; cage <= 3; cage++ {
-		c, err := PlaceCage(cage, "", 1)
+		c, err := PlaceCage(cage, "", 1, 1)
 		if err != nil {
 			t.Fatalf("kooi %d: %v", cage, err)
 		}
@@ -139,7 +140,69 @@ func TestPoolRespecteertHopReserved(t *testing.T) {
 			t.Fatalf("kooi %d kreeg core %d — core 1 is gereserveerd voor HOP", cage, c)
 		}
 	}
-	if _, err := PlaceCage(4, "", 1); err == nil {
+	if _, err := PlaceCage(4, "", 1, 1); err == nil {
 		t.Fatal("4e dedicated moet falen: maar 3 app-cores (2..4)")
+	}
+}
+
+// Een SMP-kooi houdt zijn hele core-run bezet, niet alleen de primaire. Zonder
+// dat landt de volgende app stil op de tweede core van de SMP-app: geen fout,
+// alleen een buurman die 137x trager is (gemeten 05-09 op de M4).
+func TestPoolSMPReserveertZijnHeleRun(t *testing.T) {
+	setCores(t, 4)
+	c, err := PlaceCage(2, "", 1, 2) // kooi 2 met twee cores → 2 en 3
+	if err != nil {
+		t.Fatalf("SMP-kooi 2: %v", err)
+	}
+	if c != 2 {
+		t.Fatalf("SMP-kooi 2 kreeg core %d, wil zijn eigen core 2", c)
+	}
+	next, err := PlaceCage(4, "", 1, 1)
+	if err != nil {
+		t.Fatalf("kooi 4: %v", err)
+	}
+	if next == 3 {
+		t.Fatal("kooi 4 landde op core 3 — de tweede core van de SMP-app")
+	}
+	if next != 4 {
+		t.Fatalf("kooi 4 kreeg core %d, wil 4", next)
+	}
+
+	// En terug: de hele run komt vrij, niet alleen de primaire core.
+	ReleaseCage(2)
+	for _, core := range []int{2, 3} {
+		if !coreFree(core) {
+			t.Fatalf("core %d is na ReleaseCage nog bezet", core)
+		}
+	}
+}
+
+// De primaire core van een SMP-app MOET zijn eigen kooinummer zijn (smp.go
+// dispatcht kooi+1..kooi+cores-1, validateSMPPlacement weigert de rest). Past
+// die run niet, dan is dat een duidelijke fout en geen stille andere plaatsing.
+func TestPoolSMPWeigertEenBezetteRun(t *testing.T) {
+	setCores(t, 4)
+	if _, err := PlaceCage(3, "", 1, 1); err != nil { // core 3 bezet
+		t.Fatalf("kooi 3: %v", err)
+	}
+	if _, err := PlaceCage(2, "", 1, 2); err == nil {
+		t.Fatal("SMP-kooi 2 moet falen: core 3 is bezet")
+	}
+	// Buiten het core-bereik telt net zo goed: kooi 4 + 1 = core 5 bestaat niet.
+	if _, err := PlaceCage(4, "", 1, 2); err == nil {
+		t.Fatal("SMP-kooi 4 moet falen: core 5 bestaat niet op een 4-core node")
+	}
+}
+
+// Een kooi in een sharegroup draait op één core — de pool ís het deelmechanisme.
+// Twee cores vragen én delen is een tegenstrijdige spec, geen capaciteitsfout.
+func TestPoolSharegroupMetSMPWordtGeweigerd(t *testing.T) {
+	setCores(t, 4)
+	err := func() error { _, err := PlaceCage(1, "web", 2, 2); return err }()
+	if err == nil {
+		t.Fatal("sharegroup + 2 app-cores moet falen")
+	}
+	if !errors.Is(err, ErrPoolSize) {
+		t.Fatalf("fout moet ErrPoolSize dragen (geen pending-capaciteit): %v", err)
 	}
 }

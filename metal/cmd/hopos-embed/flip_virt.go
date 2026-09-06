@@ -42,14 +42,21 @@ var (
 
 // flipSlot is de bewoner die de flip moet overleven; flipHand draagt de
 // handoff van kern A naar B (gezet door flipAdopt, gelezen door flipVerify).
-const flipSlot = 1
+// flipSlot draagt de bewoner die de kooi van een net gestopte SMP-app
+// hergebruikt (de race van 06-09); flipSlot2 is een tweede bewoner ernaast.
+// Op de M4 stierf een flip in precies deze vorm, terwijl dezelfde bundel met
+// één rustig geplaatste bewoner wél landde.
+const (
+	flipSlot  = 2
+	flipSlot2 = 1
+)
 
 var flipHand kernflip.Handoff
 
 // flipLogs telt de logregels van de bewoner: zijn ronde-teller uit de
 // outkeep-sessie. Loopt hij ná de flip door, dan komen de antwoorden nog
 // steeds terug en is de NAT-mapping écht overgedragen.
-var flipLogs int
+var flipLogs, flipLogs2 int
 
 // flipAdopt draait ZEER VROEG in main (vóór slots/stage2 iets initialiseren):
 // het consumeert het handoff-blob en zet de adoptie-stand, zodat InitVectors
@@ -69,12 +76,15 @@ func flipAdopt() {
 	}
 }
 
-// flipGens is hoe vaak deze regressie flipt. TWEE, en dat is geen luxe: pas
-// bij de tweede flip is het venster dat teruggegeven wordt écht geleende
-// pool-grond (het eerste kern-venster is op elk board een plan-hole). Daarmee
-// bewijst de bank het hele leen-model — lenen, springen, teruggeven — én dat
-// dezelfde bewoner twee kernwissels onder zich door overleeft.
-const flipGens = 2
+// flipGens is hoe vaak deze regressie flipt. Minstens TWEE, en dat is geen
+// luxe: pas bij de tweede flip is het venster dat teruggegeven wordt écht
+// geleende pool-grond (het eerste kern-venster is op elk board een plan-hole).
+// DRIE sinds 06-09: op de M4 landden generatie 1 en 2, en stierf 2 → 3 — de
+// derde sprong gaat van een geleend venster naar het volgende, met het venster
+// van twee generaties terug alweer als pool. Daarmee bewijst de bank het hele
+// leen-model — lenen, springen, teruggeven, opnieuw lenen — én dat dezelfde
+// bewoners drie kernwissels onder zich door overleven.
+const flipGens = 3
 
 // flipDemo draait ná hopswitch.Up(): in kern A start hij de app en springt,
 // in elke volgende kern adopteert hij wat er nog leeft en flipt zo nodig door.
@@ -91,30 +101,56 @@ func flipDemo() {
 		// NAT-bewijs: raakt de conntrack-mapping bij de wissel kwijt, dan vindt
 		// het antwoord de weg terug niet meer en valt de app om met
 		// "NAT-mapping weg?" — precies wat een cloudflared-tunnel zou doen.
+		// De RACE van 06-09, nagebouwd, en daarom vóór de bewoners: een
+		// SMP-app stoppen en zijn kooi meteen opnieuw vullen zónder te wachten
+		// tot de afbraak klaar is. Op de M4 viel de node daar twee keer op om
+		// (generatie 2→3 en de herhaling), terwijl dezelfde flip mét wachten
+		// wél landde. Wat er dan nog staat is een secundaire core met
+		// ctx-staat Dead die nog in de bewonerslijst van zijn core hangt —
+		// precies wat de core-dump vlak vóór de val liet zien.
+		fmt.Println("flip: race — an SMP app is torn down and its cage reused without waiting...")
+		mustStart("flip-race", flipSlot, 64<<20, 2,
+			map[string]string{"ROLE": "flip-race"}, nil, nil, nil)
+		mustReady("flip-race", flipSlot, 5*time.Second)
+		if err := slots.Stop(flipSlot, 3*time.Second); err != nil {
+			fail("flip-race-stop", err)
+		}
+		slots.ReleaseCage(flipSlot)
+
 		fmt.Println("flip: starting a resident with a live outbound session that has to survive the flip...")
+		// De bewoner die de kooi van de gestopte SMP-app hergebruikt.
 		mustStart("flip-resident", flipSlot, 64<<20, 1,
 			map[string]string{"ROLE": "flip-survivor", "NETDEMO": "outkeep", "MOUNTCHECK": "/data/flip.txt"},
 			map[string]string{"/data": "/data"}, map[string]int{"http": 8080}, &flipLogs)
 		mustReady("flip-resident", flipSlot, 5*time.Second)
-		// Even laten praten: de conntrack-mapping moet bestaan vóór we springen.
+		// De tweede bewoner, met een core ertussen vrij: eigen volume, eigen
+		// poort, eigen uitgaande sessie — alles wat de eerste ook heeft.
+		mustStart("flip-resident-2", flipSlot2, 64<<20, 1,
+			map[string]string{"ROLE": "flip-survivor-2", "NETDEMO": "outkeep", "MOUNTCHECK": "/data2/flip.txt"},
+			map[string]string{"/data2": "/data2"}, map[string]int{"http": 8081}, &flipLogs2)
+		mustReady("flip-resident-2", flipSlot2, 5*time.Second)
+
+		// Even laten praten: de conntrack-mappings moeten bestaan vóór we springen.
 		time.Sleep(2500 * time.Millisecond)
-		if n := len(hopswitch.SnapshotNAT().Flows); n == 0 {
-			fail("flip-nat", fmt.Errorf("geen enkele NAT-flow vóór de flip — de regressie zou de overdracht niet bewijzen"))
+		if n := len(hopswitch.SnapshotNAT().Flows); n < 2 {
+			fail("flip-nat", fmt.Errorf("%d NAT-flow(s) vóór de flip, twee bewoners horen er twee te hebben — de regressie zou de overdracht niet bewijzen", n))
 		}
-		fmt.Printf("flip: resident in slot %d is ready (heartbeat %d), %d NAT flow(s) live\n",
-			flipSlot, slots.Get(flipSlot).Heartbeat, len(hopswitch.SnapshotNAT().Flows))
+		fmt.Printf("flip: residents in slot %d and %d are ready (heartbeat %d, %d), %d NAT flow(s) live\n",
+			flipSlot, flipSlot2, slots.Get(flipSlot).Heartbeat, slots.Get(flipSlot2).Heartbeat, len(hopswitch.SnapshotNAT().Flows))
 	}
 
 	if kernflip.Generation() >= flipGens {
 		// Klaar met flippen: de bewoner heeft ze allemaal overleefd en mag weg,
 		// zodat de rest van de demo zijn slots vrij heeft.
 		mustStop("flip-resident-stop", flipSlot, 3*time.Second)
-		// De kooi ook teruggeven. In het agent-pad doet slotmgr dat bij zijn
+		mustStop("flip-resident-2-stop", flipSlot2, 3*time.Second)
+		// De kooien ook teruggeven. In het agent-pad doet slotmgr dat bij zijn
 		// Stop; deze demo gebruikt slots.Start/Stop rechtstreeks, dus hier met
 		// de hand. Zonder dit blijft de core van de geadopteerde bewoner als
 		// bezet geboekt — precies wat adoptCage bedoelt, maar dan voor altijd.
 		slots.ReleaseCage(flipSlot)
-		fmt.Printf("HOPOS_FLIP_OK — resident survived %d kernel flips; borrow-and-return proven\n", flipGens)
+		slots.ReleaseCage(flipSlot2)
+		fmt.Printf("HOPOS_FLIP_OK — two residents survived %d kernel flips; borrow-and-return proven\n", flipGens)
 		return
 	}
 
@@ -128,7 +164,7 @@ func flipDemo() {
 	if err != nil {
 		fail("flip-fetch", err)
 	}
-	fmt.Printf("flip: bundle is %d bytes — flipping with a live resident\n", len(b))
+	fmt.Printf("flip: bundle is %d bytes — flipping with two live residents\n", len(b))
 	if err := kernflip.Flip(b); err != nil {
 		fail("flip", err)
 	}
@@ -145,6 +181,7 @@ func flipVerify() {
 	// gebeurt dat vanzelf, want HOP's LogBroadcaster vraagt zijn kanaal per
 	// slot op wanneer hij het nodig heeft.
 	go drainLogs(flipSlot, &flipLogs)
+	go drainLogs(flipSlot2, &flipLogs2)
 	if flows != len(flipHand.NAT.Flows) {
 		fail("flip-adopt", fmt.Errorf("%d van %d NAT-flows overleefden de flip", flows, len(flipHand.NAT.Flows)))
 	}
@@ -154,38 +191,45 @@ func flipVerify() {
 	if live == 0 {
 		fail("flip-adopt", fmt.Errorf("de flip droeg geen bewoners over — de regressie bewijst dan niets"))
 	}
-	// Het bewijs dat hij niet herstart is: de app-status is nog READY (een
+	// Het bewijs dat ze niet herstart zijn: de app-status is nog READY (een
 	// verse app zou door BOOTING moeten) en de heartbeat LOOPT door — met een
 	// stand die hoger ligt dan de nul waar een herstarte app op begint.
-	s := slots.Get(flipSlot)
-	if s.App != layout.StatusReady || s.Heartbeat == 0 {
-		fail("flip-adopt", fmt.Errorf("slot %d: status=%d heartbeat=%d na de flip", flipSlot, s.App, s.Heartbeat))
+	for _, slot := range []int{flipSlot, flipSlot2} {
+		s := slots.Get(slot)
+		if s.App != layout.StatusReady || s.Heartbeat == 0 {
+			fail("flip-adopt", fmt.Errorf("slot %d: status=%d heartbeat=%d na de flip", slot, s.App, s.Heartbeat))
+		}
+		hb := s.Heartbeat
+		time.Sleep(600 * time.Millisecond)
+		if s = slots.Get(slot); s.Heartbeat <= hb {
+			fail("flip-adopt", fmt.Errorf("slot %d: heartbeat staat stil na de flip (%d → %d)", slot, hb, s.Heartbeat))
+		}
+		fmt.Printf("HOPOS_FLIP_ADOPT_OK — resident slot %d never stopped (generation %d): status=READY, heartbeat %d→%d across the kernel flip\n",
+			slot, flipHand.Gen, hb, s.Heartbeat)
 	}
-	hb := s.Heartbeat
-	time.Sleep(600 * time.Millisecond)
-	if s = slots.Get(flipSlot); s.Heartbeat <= hb {
-		fail("flip-adopt", fmt.Errorf("slot %d: heartbeat staat stil na de flip (%d → %d)", flipSlot, hb, s.Heartbeat))
-	}
-	fmt.Printf("HOPOS_FLIP_ADOPT_OK — resident slot %d never stopped (generation %d): status=READY, heartbeat %d→%d across the kernel flip\n",
-		flipSlot, flipHand.Gen, hb, s.Heartbeat)
 
 	// En het NAT-bewijs: de app moet ná de wissel nog steeds antwoorden krijgen
 	// op de socket die hij vóór de wissel opende. Zijn ronde-teller loopt door
 	// in de logs; raakte de mapping kwijt, dan exit hij met "NAT-mapping weg?"
 	// en ziet de status hieronder dat meteen.
-	before := flipLogs
+	before, before2 := flipLogs, flipLogs2
 	time.Sleep(3 * time.Second)
-	s = slots.Get(flipSlot)
-	if s.App != layout.StatusReady {
-		fail("flip-nat", fmt.Errorf("slot %d: status=%d exit=%d na de flip — de uitgaande sessie overleefde de wissel niet",
-			flipSlot, s.App, s.ExitCode))
+	for _, r := range []struct {
+		slot         int
+		before, logs int
+	}{{flipSlot, before, flipLogs}, {flipSlot2, before2, flipLogs2}} {
+		s := slots.Get(r.slot)
+		if s.App != layout.StatusReady {
+			fail("flip-nat", fmt.Errorf("slot %d: status=%d exit=%d na de flip — de uitgaande sessie overleefde de wissel niet",
+				r.slot, s.App, s.ExitCode))
+		}
+		if r.logs <= r.before {
+			fail("flip-nat", fmt.Errorf("slot %d: geen nieuwe ronde gelogd na de flip (%d) — het antwoord vindt de weg terug niet meer",
+				r.slot, r.logs))
+		}
 	}
-	if flipLogs <= before {
-		fail("flip-nat", fmt.Errorf("slot %d: geen nieuwe ronde gelogd na de flip (%d) — het antwoord vindt de weg terug niet meer",
-			flipSlot, flipLogs))
-	}
-	fmt.Printf("HOPOS_FLIP_NAT_OK — %d conntrack flow(s) carried over: the resident's outbound session kept getting answers (%d → %d rounds)\n",
-		flows, before, flipLogs)
+	fmt.Printf("HOPOS_FLIP_NAT_OK — %d conntrack flow(s) carried over: both residents' outbound sessions kept getting answers (%d → %d, %d → %d rounds)\n",
+		flows, before, flipLogs, before2, flipLogs2)
 
 	// Het geleende model sluit zijn cirkel zónder dat iemand iets teruggeeft:
 	// deze kern claimde bij zijn poolInit alleen zijn éigen venster, dus het

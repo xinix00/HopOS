@@ -30,6 +30,7 @@ type FS interface {
 	ReadAt(path string, off uint64, n int) ([]byte, error)
 	ReadInto(path string, off uint64, dst []byte) (int, error)
 	WriteAt(path string, off uint64, data []byte) (int, error)
+	Truncate(path string, size uint64) error
 	Remove(path string) error
 }
 

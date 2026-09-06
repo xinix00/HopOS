@@ -1,5 +1,9 @@
 # Kern-flip: HopOS onder zichzelf updaten (live, zonder de apps te raken)
 
+> Het gereedschap waarmee een mislukte flip te ondervragen is — vluchtrecorder,
+> zwarte doos, kooi-post-mortem, boot-guard, de QEMU-regressie — staat in
+> [docs/meetinstrumenten.md](meetinstrumenten.md).
+
 Status: **arm64 op IJZER bewezen — Mac mini M4, 02-09: een kern gewisseld
 onder een draaiende app, node bleef stabiel (Derek: "live patching is een
 ding"). QEMU-regressie sinds 31-08/01-09; riscv64 gebouwd, ijzer open.**
@@ -329,11 +333,14 @@ node draait door op de zittende kern. Wat hij weigert:
 - **Node-SMP actief** (`smp.NodeStarted() > 0`): de extra node-cores draaien
   goroutines van de vertrekkende kern. Flip vereist `hopos.cores=1`; quiesce is
   v2.
-- **Een SMP-app** (cores > 1). Bij het narekenen bleek de boekhouding te
-  passen — `Cores` staat in het slot-record, de secundaire cores draaien
-  app-code op hun eigen mailbox in de plan-regio, en `CtrlSMPTramp` wijst sinds
-  de blob-verhuizing naar de plan-kopie. Maar er is nooit een SMP-app dóór een
-  flip gehaald, en een onbewezen aanname hoort niet in dit pad.
+- ~~Een SMP-app (cores > 1)~~ — **mag sinds 06-09**. De boekhouding paste al
+  (`Cores` staat in het slot-record, de secundaire cores draaien app-code op
+  hun eigen mailbox in de plan-regio, `CtrlSMPTramp` wijst naar de plan-kopie);
+  wat ontbrak was de bewezen aanname. Die is er nu: de adoptie zet `smpCores`
+  uit de overdracht (niet meer hard op 1) en boekt de hele core-run in de pool
+  (`adoptCage` met span), en de QEMU-regressie flipt sindsdien drie keer met
+  een 2-core-app op slot 1 én een 1-core-app op slot 3 als bewoners, waarna de
+  demo's eigen SMP-test nog slaagt.
 - ~~Een task met gemounte volumes~~ — **mag sinds 01-09**, en de oude reden was
   verkeerd geredeneerd. Klopt: hopfs overleeft de flip niet. Maar hij overleeft
   een **reboot** evenmin — hij is bewust vluchtig (`kern/hopfs`: "géén

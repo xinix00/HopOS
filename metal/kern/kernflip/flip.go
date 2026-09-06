@@ -30,6 +30,9 @@ func FlipFromURL(url, sha string) error {
 	if len(img) == 0 {
 		return fmt.Errorf("kernflip: no URL configured")
 	}
+	// Eerst bewaren wat er stond: als de vorige poging niet landde, is dít het
+	// laatste moment waarop dat spoor nog bestaat (zie stage.go).
+	archiveStage(curGen)
 	stage(stFetched)
 	fmt.Printf("kernflip: fetched %d bytes, sha256 verified\n", len(img))
 	// Draaien we al uit precies deze bundel? Dan niet opnieuw springen: dat is
@@ -57,10 +60,11 @@ func FlipFromURL(url, sha string) error {
 // bestaan op het moment van de HVC.
 //
 // Zittende apps gaan mee: ze worden geïnventariseerd en aan de nieuwe kern
-// overgedragen, die ze adopteert zonder ze aan te raken. Wat níet mee kan,
-// weigert deze functie vóór er iets geleend of geschreven is — node-SMP,
-// SMP-apps, gemounte volumes, en een nieuwe kern met andere switch-code (zie
-// docs/kern-flip.md voor het waarom van elk).
+// overgedragen, die ze adopteert zonder ze aan te raken — ook een app met
+// meer cores (zijn secundairen draaien dezelfde switch-code en de overdracht
+// draagt zijn core-telling, sinds 06-09). Wat níet mee kan, weigert deze
+// functie vóór er iets geleend of geschreven is — node-SMP en een nieuwe kern
+// met andere switch-code (zie docs/kern-flip.md voor het waarom van elk).
 // kernHeader is de ruimte onder het linkadres die een kern-image vrij houdt
 // (de boot-header van mkkernel): de vloer voor place.Build, zoals cageFloor dat
 // voor een app is.
@@ -128,7 +132,7 @@ func Flip(bundle []byte) error {
 	// hier — vóór er iets geleend of geschreven wordt:
 	//
 	//  1. hun wereld moet overdraagbaar zijn (SnapshotForFlip weigert wat niet
-	//     kan: SMP, gemounte volumes);
+	//     in het blob past);
 	//  2. de nieuwe kern moet EXACT dezelfde switch-code dragen. Een geyielde
 	//     of parkerende app-core staat op dit moment ín die code (de kopie in
 	//     de plan-regio); komt de nieuwe kern met andere bytes, dan zou hij ze
@@ -286,7 +290,7 @@ func Flip(bundle []byte) error {
 	fmt.Printf("kernflip: %d MB placed at %#x (+%d relocs), %d resident(s), %d NAT flow(s) and %d B of agent state handed over, jumping to %#x — HOPOS_FLIP_JUMP\n",
 		bun.FlatSize>>20, win, bun.RelocCount(), len(residents), len(nat.Flows), len(agentState), entry)
 	// x0 van de nieuwe kern = wat de firmware óns ooit gaf (DTB-pointer of 0).
-	stage(stJumping)
+	stageJump(curGen + 1)
 	chainload(entry, firmwareArg())
 	return fmt.Errorf("kernflip: chainload keerde terug — dat kan niet")
 }

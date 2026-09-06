@@ -549,6 +549,13 @@ type Plan struct {
 	// heeft er (nog) geen plek voor en de recorder is een no-op.
 	FlipScratchPA uint64
 
+	// BlackBoxPA/BlackBoxSize: de console-zwarte-doos (driver/conlog), zelfde
+	// soort plek als FlipScratchPA — buiten elke RAM-declaratie en buiten wat
+	// de firmware bij een verse boot overschrijft. 0 = dit board heeft er geen
+	// en dan is de zwarte doos simpelweg uit.
+	BlackBoxPA   uint64
+	BlackBoxSize uint64
+
 	// TrapVecPA is de vectortabel van de HOP-core zelf (ARM: EL2, 2KB-
 	// aligned) — waar cpuinit VBAR_EL2 van core 0 heen zette. InitVectors
 	// plugt er alleen de HVC-revoke-handler in (offset 0x400) en laat de rest
@@ -668,6 +675,17 @@ func HandoffPtrPA() uintptr { return pa(plan.BootScratchPA + HandoffPtrOff) }
 // flip, fetch aantoonbaar wél gebeurd). De plek moet dus buiten het image én
 // buiten alles wat vóór ReportLastFlip schrijft liggen, en dat weet alleen het
 // board.
+// BlackBoxPA/BlackBoxSize: de plek van de console-zwarte-doos, of 0.
+func BlackBoxPA() uintptr { return pa(plan.BlackBoxPA) }
+
+// BlackBoxSize is de omvang in bytes (0 = geen zwarte doos).
+func BlackBoxSize() int {
+	if plan.BlackBoxPA == 0 {
+		return 0
+	}
+	return int(plan.BlackBoxSize)
+}
+
 func FlipStagePA() uintptr {
 	if plan.FlipScratchPA == 0 {
 		return 0
