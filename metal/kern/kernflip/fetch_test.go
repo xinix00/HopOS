@@ -12,28 +12,6 @@ import (
 	"testing"
 )
 
-type unreadableBundle struct{ t *testing.T }
-
-func (r unreadableBundle) Read([]byte) (int, error) {
-	r.t.Fatal("invalid length read the body")
-	return 0, io.EOF
-}
-
-func TestReadBundleLength(t *testing.T) {
-	for _, n := range []int64{-1, 0, maxBundle + 1, 1 << 62} {
-		if _, err := readBundle(unreadableBundle{t}, n); err == nil {
-			t.Fatalf("accepted length %d", n)
-		}
-	}
-	b, err := readBundle(bytes.NewReader([]byte("abc")), 3)
-	if err != nil || string(b) != "abc" || cap(b) != 3 {
-		t.Fatalf("read = %q, cap %d, err %v", b, cap(b), err)
-	}
-	if _, err = readBundle(bytes.NewReader([]byte("ab")), 3); !errors.Is(err, io.ErrUnexpectedEOF) {
-		t.Fatalf("truncation: %v", err)
-	}
-}
-
 func TestFetchBundleIntegrity(t *testing.T) {
 	payload := []byte("complete kernel bundle")
 	sum := sha256.Sum256(payload)
@@ -71,30 +49,60 @@ func TestFetchBundleIntegrity(t *testing.T) {
 	}
 }
 
-// A realistic LicheeRV bundle: compare transient allocation pressure without
-// relying on the host GC schedule or claiming the board's OOM is diagnosed.
-func BenchmarkBundleRead(b *testing.B) {
-	payload := make([]byte, 6100000)
-	for _, exact := range []bool{false, true} {
-		name := "ReadAll"
-		if exact {
-			name = "ExactLength"
+func fetchBundle(url, want string) ([]byte, error) {
+	var b bytes.Buffer
+	_, _, err := fetchBundleInto(url, want, func(n int64) (io.Writer, error) { b.Grow(int(n)); return &b, nil })
+	return b.Bytes(), err
+}
+
+type boundedBundleSink struct {
+	bytes    int
+	maxWrite int
+}
+
+func (s *boundedBundleSink) Write(p []byte) (int, error) {
+	s.bytes += len(p)
+	s.maxWrite = max(s.maxWrite, len(p))
+	return len(p), nil
+}
+func TestFetchBundleStreamsWithBoundedWrites(t *testing.T) {
+	payload := bytes.Repeat([]byte("pool"), 1537534)
+	sum := sha256.Sum256(payload)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		w.Write(payload)
+	}))
+	defer srv.Close()
+	var sink boundedBundleSink
+	n, _, err := fetchBundleInto(srv.URL, hex.EncodeToString(sum[:]), func(length int64) (io.Writer, error) {
+		if length != int64(len(payload)) {
+			t.Fatal(length)
 		}
-		b.Run(name, func(b *testing.B) {
-			b.ReportAllocs()
-			b.SetBytes(int64(len(payload)))
-			for i := 0; i < b.N; i++ {
-				var p []byte
-				var err error
-				if exact {
-					p, err = readBundle(bytes.NewReader(payload), int64(len(payload)))
-				} else {
-					p, err = io.ReadAll(io.LimitReader(bytes.NewReader(payload), maxBundle+1))
-				}
-				if err != nil || !bytes.Equal(p, payload) {
-					b.Fatal(err)
-				}
-			}
-		})
+		return &sink, nil
+	})
+	if err != nil || n != int64(len(payload)) || sink.bytes != len(payload) || sink.maxWrite > 32<<10 {
+		t.Fatalf("n=%d sink=%+v err=%v", n, sink, err)
+	}
+}
+
+type shortBundleSink struct{}
+
+func (shortBundleSink) Write(p []byte) (int, error) { return len(p) - 1, nil }
+func TestFetchBundleStorageFailure(t *testing.T) {
+	payload := []byte("pool storage")
+	sum := sha256.Sum256(payload)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		w.Write(payload)
+	}))
+	defer srv.Close()
+	denied := errors.New("no partition")
+	_, _, err := fetchBundleInto(srv.URL, hex.EncodeToString(sum[:]), func(int64) (io.Writer, error) { return nil, denied })
+	if !errors.Is(err, denied) {
+		t.Fatalf("reservation: %v", err)
+	}
+	_, _, err = fetchBundleInto(srv.URL, hex.EncodeToString(sum[:]), func(int64) (io.Writer, error) { return shortBundleSink{}, nil })
+	if !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("short write: %v", err)
 	}
 }

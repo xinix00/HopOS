@@ -22,11 +22,13 @@ Werkstand van de release-afronding, 6 september 2026. Deze tabel wordt tijdens d
 | Board | Architectuur | Appcores | 20 lifecyclecycli | Sharing / buur behouden | SMP-compute | Drie flips + blijvende app-TCP + beheer daarna | Fysieke netwerk-IRQ |
 | --- | --- | ---: | --- | --- | --- | --- | --- |
 | Mac mini M4 | ARM64 | 9 | Geslaagd | Geslaagd | Geslaagd | Geslaagd met laatste fixes, generaties 11–13; inkomende én uitgaande TCP | Gepland |
-| LicheeRV | RISC-V | 1 | Geslaagd | Geslaagd | Niet toepasbaar | Wacht op 2.2.1 en hertest; oude downloader valt uit | Gepland |
-| Raspberry Pi 4 | ARM64 | 3 | Geslaagd | Geslaagd | Geslaagd | Herhaling na reset valt opnieuw uit na download; UART-diagnose open | Gepland |
-| Raspberry Pi 5 | ARM64 | 3 | Geslaagd | Geslaagd | Geslaagd | Eerste flip geslaagd; herhaling na reset valt opnieuw uit; UART-diagnose open | Gepland |
+| LicheeRV | RISC-V | 1 | Geslaagd | Geslaagd | Niet toepasbaar | Sharing/geheugen/wake slagen; download-OOM gecorrigeerd met poolstaging voor 2.2.2; hardwarehertest morgen | Gepland |
+| Raspberry Pi 4 | ARM64 | 3 | Geslaagd | Geslaagd | Geslaagd | Geslaagd op 2.2.1: generaties 1–3, dezelfde twee inkomende TCP-sockets, sharing + SMP, vrijgeven/hergebruik en beheer daarna | Gepland |
+| Raspberry Pi 5 | ARM64 | 3 | Geslaagd | Geslaagd | Geslaagd | Geslaagd op 2.2.1: generaties 7–9, dezelfde twee inkomende TCP-sockets, sharing + SMP en beheer daarna | Gepland |
 | Radxa | ARM64 | 3 | Geslaagd | Geslaagd | Geslaagd | Geslaagd, generaties 3–5; inkomende én uitgaande TCP | Gepland |
 
 Bewijs: [hardwaremap](../reviews/2026-09-06-framework/hardware/), met name logboek L15, L26 en L28. De kolom lifecycle tekent de uitgevoerde cycli af, niet automatisch de aanvullende proef op schoon geheugen. De drie-flips-proef is een begrensde acceptatietest, geen claim van onbeperkte foutloosheid. Uitgaande NAT-verbindingen zijn op M4 en Radxa in dezelfde drie-flips-proef getoetst.
 
 De resterende afwerkpunten staan in het [draaiboek](release-afronding.md): bekende fouten sluiten, ontbrekende hardware-/I/O-proeven, dertig minuten gecombineerd gebruik, docs-overhaul en eindaftekening. Fysieke netwerk-IRQ is het expliciet geplande functionele vervolg; open aftekeningen worden niet als ontbrekende productfuncties gepresenteerd.
+
+Voor **v2.2.2** is de kerneldownload naar het bestaande geleende venster verplaatst; het kernelgeheugen is niet vergroot. Bron-/buildcontroles slagen. De laatste hardwarecontrole volgt op de release; bovenstaande geslaagde flipreeksen zijn nog geen bewijs voor deze nieuwe downloader. Zie logboek L41.

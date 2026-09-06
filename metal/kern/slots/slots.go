@@ -23,7 +23,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -778,29 +777,6 @@ func checkSlot(i int) error {
 	return nil
 }
 
-// devReaderAt is een io.ReaderAt over een stuk device-geheugen (de partitie-
-// staging waar de image in staat) — zo parseert debug/elf de ELF zonder dat
-// het bestand ooit volledig in de kern-RAM staat.
-type devReaderAt struct {
-	base uintptr
-	size int64
-}
-
-func (d devReaderAt) ReadAt(p []byte, off int64) (int, error) {
-	if off < 0 || off >= d.size {
-		return 0, io.EOF
-	}
-	n := len(p)
-	if int64(n) > d.size-off {
-		n = int(d.size - off)
-	}
-	dev.CopyOut(p[:n], d.base+uintptr(off))
-	if n < len(p) {
-		return n, io.EOF
-	}
-	return n, nil
-}
-
 // Start laadt image in slot i (1-based, = core-index): de bytes gaan de staging
 // bovenin de partitie in, waarna de ELF daaruit geparsed en geplaatst wordt
 // (placeFromStaging), de RAM-declaratie naar memLimit gepatcht, en de core
@@ -985,7 +961,7 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 	// daar draait een image op de adressen waarop het gelinkt is. Het plafond is
 	// de staging-onderkant: segmenten mogen hun eigen kopieerbron niet raken.
 	linkBase := cageLinkBase()
-	plan, err := place.Build(devReaderAt{base: stageAddr, size: imgSize}, imgSize,
+	plan, err := place.Build(dev.ReaderAt{Base: stageAddr, Size: imgSize}, imgSize,
 		linkBase, appRAM, cageFloor, uint64(stageAddr)-base, i, layout.ABIVersion)
 	if err != nil {
 		return err

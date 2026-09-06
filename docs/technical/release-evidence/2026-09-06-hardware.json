@@ -241,25 +241,111 @@
       "stop_reuse_after_flips": "pass"
     },
     "pi4": {
-      "flip": "failed again after manual restart; download+SHA passed; newgeneration unconfirmed",
+      "flip": "pass",
       "memory_canary": "3x1MiB sampled windows zero on samepartition reuse, threecycles passed",
       "quiet_shared_wake": "10rounds passed",
-      "next": "UART transition trace or separately arranged cold candidate install"
+      "release": "2.2.1 candidate; outgoing cold kernel had old watchdog policy",
+      "three_flips": [
+        {
+          "generation": 1,
+          "attempts": 1,
+          "samples": 24,
+          "max_rtt_s": 5.219843499988201,
+          "artifact_sha256": "3e6ba1fe939fe4964c8696ae3410c7570a78f9616872f86bd56d8cab76b90d7e"
+        },
+        {
+          "generation": 2,
+          "attempts": 1,
+          "samples": 12,
+          "max_rtt_s": 8.014346541996929,
+          "artifact_sha256": "30890cf0351a1e736eb0f9a9cff12fab6d41b6937769045a4f14105ac5a87062"
+        },
+        {
+          "generation": 3,
+          "attempts": 1,
+          "samples": 30,
+          "max_rtt_s": 4.32326699999976,
+          "artifact_sha256": "3e6ba1fe939fe4964c8696ae3410c7570a78f9616872f86bd56d8cab76b90d7e"
+        }
+      ],
+      "same_two_inbound_tcp_sockets_across_all_three": true,
+      "shared_and_smp_residents_preserved": true,
+      "post_flip_neighbor_replacement": "pass",
+      "smp_release": "192MiB and 2048 CPU shares released",
+      "all_released": {
+        "cpu_cores": 3,
+        "memory_bytes": 8281653248,
+        "cpu_used_shares": 0,
+        "memory_used_bytes": 0,
+        "tasks_running": 0,
+        "attributes": {
+          "node.arch": "arm64",
+          "node.cores.big": "3",
+          "node.docker": "false",
+          "node.id": "hopos-71e38861",
+          "node.os": "hopos"
+        }
+      },
+      "class_shared_first_then_smp": "pass",
+      "fresh_exact_log_marker": "pass",
+      "console": "network console; reopened UART gave no readable fresh output",
+      "limit": "Previous hang cause not established; maximum observed echo RTT 8.014 seconds during flips; outbound TCP not included in this Pi4 series.",
+      "evidence_sha256": {
+        "h4-final-results.json": "9d53ad7c1475bfa00b0730c7893e819bd0940a662056612930759b4016391c31",
+        "final-class-first-smp.json": "545472fea61548992f7bddc7020280d0a752e5051372d51da0aff7992bab4484",
+        "flip-live-console.log": "16f81b9e88ebae59e45f3d03632ee934944fb2420ed72acad4f1826bc046555c"
+      }
     },
     "pi5": {
-      "flip": "failed again after manual restart; download+SHA passed; newgeneration unconfirmed",
-      "memory_canary": "3x1MiB sampled windows zero on samepartition reuse, threecycles passed",
-      "quiet_shared_wake": "10rounds passed",
-      "next": "UART transition trace or separately arranged cold candidate install"
+      "release": "2.2.1",
+      "three_flips": [
+        {
+          "generation": 7,
+          "attempts": 1,
+          "samples": 14,
+          "max_rtt_s": 8.58280316699529,
+          "artifact_sha256": "93deb61714ef1a7cf45f543cfedfe679ef89f76208db5cdde2e5017fc015056a"
+        },
+        {
+          "generation": 8,
+          "attempts": 1,
+          "samples": 14,
+          "max_rtt_s": 7.482992541001295,
+          "artifact_sha256": "b5fe1cee1a87daf43207da51461b681ffda4bcb10817820afe31b0fa1c41f461"
+        },
+        {
+          "generation": 9,
+          "attempts": 2,
+          "samples": 134,
+          "max_rtt_s": 9.464804959003231,
+          "artifact_sha256": "93deb61714ef1a7cf45f543cfedfe679ef89f76208db5cdde2e5017fc015056a"
+        }
+      ],
+      "same_two_inbound_tcp_sockets_across_all_three": true,
+      "shared_and_smp_residents_preserved": true,
+      "post_flip_management_and_fresh_logs": "pass",
+      "limit": "Earlier hang cause not proven; generation9 required a logged pre-jump download retry."
     },
     "riscv": {
-      "flip": "deferred until user installs2.2.1; old downloader failure",
-      "download_fix": "exact allocation+ReadFull, host/target tested, not yetonRVhardware"
+      "release": "2.2.1 installed",
+      "class_sharing_memory_canary_quiet_wake": "pass",
+      "flip": "blocked by proven fatal OOM in readBundle before body read or flip jump",
+      "diagnostic_server_socket_bytes": 131072,
+      "autonomous_cold_recovery_seconds": 89.29614924998896,
+      "next": "User publishes2.2.2; cold install and final hardware tests tomorrow",
+      "uart_fatal": "runtime: out of memory: cannot allocate 8388608-byte block (8028160 in use)",
+      "failing_source": "metal/kern/kernflip/fetch.go:81",
+      "zero_body_reproduction": true,
+      "watchdog_recovered_after_uart_reproduction": true,
+      "source_fix": "v2.2.2 candidate streams bundle into existing pool loan, fixed32KiB buffer; shared dev.ReaderAt",
+      "kernel_window_mib": 32,
+      "app_pool_mib": 222,
+      "new_downloader_hardware": "not yet tested"
     }
   },
   "remaining": [
-    "Pi4/Pi5 transition diagnosis after repeated failed flips",
-    "LicheeRV hardware rerun after installing2.2.1",
+    "Pi4 transition diagnosis and full flip series",
+    "LicheeRV download failure diagnosis on2.2.1, after Pi4",
     "30-minute combined soak",
     "documentation overhaul",
     "final signoff"
@@ -538,5 +624,14 @@
       "status": "normal flip adopted; canary proven; resident preserved"
     },
     "welcome_http_after_restore": 200
+  },
+  "release_222_validation": {
+    "host_target_gate": "pass, all boards incl Apple",
+    "race": "kernflip,abi/place,abi/layout passed",
+    "broader_slots_race": "checkptr failure in existing ownership fixture dev.Clear; ordinary slots tests passed",
+    "rv_cold_image_and_dual_link_bundle": "built",
+    "hardware": "deferred to tomorrow by user",
+    "irq": "after docs, later point release",
+    "gate_log": "2026-09-06-222-host-target-gate.log"
   }
 }

@@ -3,8 +3,8 @@
 package kernflip
 
 import (
-	"bytes"
 	"fmt"
+	"io"
 	"runtime"
 	"time"
 
@@ -22,35 +22,45 @@ import (
 // platform-config zegt, en flipt erin. Keert alleen terug met een fout; de node
 // draait dan gewoon door op de zittende kern.
 func FlipFromURL(url, sha string) error {
-	fmt.Printf("kernflip: fetching %s\n", url)
-	img, err := fetchBundle(url, sha)
+	defer slots.LifecycleWindow()()
+	var win, total, staging uint64
+	defer func() {
+		if total != 0 {
+			slots.ReturnKernWindow()
+		}
+	}()
+	fmt.Printf("kernflip: fetching %s into the new window\n", url)
+	length, sum, err := fetchBundleInto(url, sha, func(n int64) (io.Writer, error) {
+		lo, hi := runtime.MemRegion()
+		var err error
+		win, total, err = slots.BorrowKernWindow(uint64(hi-lo) + handoffTail)
+		if err != nil {
+			return nil, err
+		}
+		var ok bool
+		staging, _, ok = layout.StageAddr(win, total-handoffTail, n)
+		if !ok {
+			return nil, fmt.Errorf("kernflip: bundle does not fit the new window")
+		}
+		slots.EnsureVectors()
+		slots.Scrub(uintptr(win), uintptr(total), nil)
+		return &windowWriter{base: uintptr(staging), left: n}, nil
+	})
 	if err != nil {
 		return err
 	}
-	if len(img) == 0 {
-		return fmt.Errorf("kernflip: no URL configured")
-	}
-	// Eerst bewaren wat er stond: als de vorige poging niet landde, is dít het
-	// laatste moment waarop dat spoor nog bestaat (zie stage.go).
 	archiveStage(curGen)
 	stage(stFetched)
-	fmt.Printf("kernflip: fetched %d bytes, sha256 verified\n", len(img))
-	// Draaien we al uit precies deze bundel? Dan niet opnieuw springen: dat is
-	// een bootlus die alleen met een stekker te doorbreken is. De vorige kern
-	// schreef de som van zijn eigen bundel in het handoff-blob, dus dit kost
-	// geen tweede lezing van wat er draait.
-	if curSum != 0 && curSum == checksum.FNV64(img) {
-		stageClear()
-		return fmt.Errorf("kernflip: already running the kernel from %s (generation %d) — staying put", url, curGen)
+	defer stageClear()
+	fmt.Printf("kernflip: fetched %d bytes, sha256 verified\n", length)
+	if curSum != 0 && curSum == sum {
+		return fmt.Errorf("kernflip: already running the kernel from %s (generation %d)", url, curGen)
 	}
-	if err := Flip(img); err != nil {
-		// Niet gesprongen: de kern leeft en heeft de fout gemeld — het spoor
-		// is verteld en mag weg, anders meldt een latere gewone reboot een
-		// flip-mislukking die er geen was.
-		stageClear()
+	bun, err := ParseBundleReader(dev.ReaderAt{Base: uintptr(staging), Size: length}, length)
+	if err != nil {
 		return err
 	}
-	return nil
+	return flip(bun, sum, win, total, staging-win)
 }
 
 // Flip plaatst de bundel in een uit de pool geleend venster en springt erin.
@@ -63,7 +73,7 @@ func FlipFromURL(url, sha string) error {
 // overgedragen, die ze adopteert zonder ze aan te raken — ook een app met
 // meer cores (zijn secundairen draaien dezelfde switch-code en de overdracht
 // draagt zijn core-telling, sinds 06-09). Wat níet mee kan, weigert deze
-// functie vóór er iets geleend of geschreven is — node-SMP en een nieuwe kern
+// functie vóór de sprong — node-SMP en een nieuwe kern
 // met andere switch-code (zie docs/kern-flip.md voor het waarom van elk).
 // kernHeader is de ruimte onder het linkadres die een kern-image vrij houdt
 // (de boot-header van mkkernel): de vloer voor place.Build, zoals cageFloor dat
@@ -71,30 +81,21 @@ func FlipFromURL(url, sha string) error {
 const kernHeader = 64
 
 func Flip(bundle []byte) error {
-	// Het lifecycle-venster over de HELE flip, en dat is geen voorzorg maar
-	// een correctheidseis: tussen de inventarisatie van de bewoners en de
-	// sprong zitten honderden milliseconden (242MB vegen, 13MB kopiëren, beide
-	// met yields erin). Zou de agent daarin een slot starten, dan stond die
-	// bewoner niet in de overdracht terwijl zijn core wél doordraait — en de
-	// volgende kern zou zijn partitie als vrije pool zien. Dat is de
-	// dubbeluitgifte van 31-08, dan via een race. Bij succes keert deze functie
-	// nooit terug, dus de unlock is er voor de faalpaden.
-	//
-	// Dit venster is ook een WACHTPLEK: draait er net een slot-start of -stop,
-	// dan staat de flip hier stil tot die klaar is. Vandaar de regel ervoor —
-	// een flip die hier blijft hangen ziet er anders uit als een flip die
-	// nooit begon.
-	fmt.Printf("kernflip: waiting for the slot lifecycle window\n")
 	defer slots.LifecycleWindow()()
+	bun, err := ParseBundle(bundle)
+	if err != nil {
+		return err
+	}
+	return flip(bun, checksum.FNV64(bundle), 0, 0, 0)
+}
+
+// The URL path has already reserved and scrubbed its window. The byte-slice
+// entry point (embedded fixtures) borrows one after validation instead.
+func flip(bun *Bundle, sum, win, total, stagingOffset uint64) error {
 	stage(stWindowHeld)
-	fmt.Printf("kernflip: lifecycle window held, validating the bundle\n")
 
 	if err := archPreflight(); err != nil {
 		return err
-	}
-	bun, err := ParseBundle(bundle)
-	if err != nil {
-		return fmt.Errorf("kernflip: %w", err)
 	}
 	if bun.FlipABI != ABI {
 		return fmt.Errorf("kernflip: bundel spreekt flip-ABI %d, deze kern %d — niet springen", bun.FlipABI, ABI)
@@ -107,15 +108,15 @@ func Flip(bundle []byte) error {
 	// en dezelfde RAM-symbolen als een app-plaatsing (kern/slots
 	// placeFromStaging): de nieuwe kern is dezelfde soort bewoner als een app,
 	// alleen zonder slot-ABI-stempel (abi 0) en met de header-ruimte als vloer.
-	// Alles wat hier faalt, faalt vóór de lening.
-	f, err := leanelf.Open(bytes.NewReader(bun.ELF), int64(len(bun.ELF)))
+	// De URL-route heeft hier al een eigen lening, die bij iedere fout teruggaat.
+	f, err := leanelf.Open(bun.ELFReader(), bun.ELFSize())
 	if err != nil {
 		return fmt.Errorf("kernflip: elf parse: %w", err)
 	}
 	if f.Entry != bun.Entry {
 		return fmt.Errorf("kernflip: ELF-entry %#x ≠ staart-entry %#x", f.Entry, bun.Entry)
 	}
-	plan, err := place.Build(bytes.NewReader(bun.ELF), int64(len(bun.ELF)),
+	plan, err := place.Build(bun.ELFReader(), bun.ELFSize(),
 		bun.LinkLoad, bun.FlatSize, kernHeader, bun.FlatSize, 0, 0)
 	if err != nil {
 		return fmt.Errorf("kernflip: %w", err)
@@ -129,7 +130,7 @@ func Flip(bundle []byte) error {
 	}
 
 	// De bewoners, en of ze deze flip kunnen overleven. Twee eisen, allebei
-	// hier — vóór er iets geleend of geschreven wordt:
+	// hier — vóór de nieuwe kern geplaatst wordt:
 	//
 	//  1. hun wereld moet overdraagbaar zijn (SnapshotForFlip weigert wat niet
 	//     in het blob past);
@@ -169,13 +170,16 @@ func Flip(bundle []byte) error {
 	if bun.FlatSize+handoffTail > ramSize {
 		return fmt.Errorf("kernflip: payload (%d MB) past niet in een kern-venster van %d MB", bun.FlatSize>>20, ramSize>>20)
 	}
-	win, total, err := slots.BorrowKernWindow(ramSize + handoffTail)
-	if err != nil {
-		return fmt.Errorf("kernflip: %w", err)
+	preloaded := total != 0
+	if preloaded && bun.FlatSize > stagingOffset {
+		return fmt.Errorf("kernflip: payload overlaps staged bundle")
 	}
-	fail := func(err error) error {
-		slots.ReturnKernWindow()
-		return err
+	if !preloaded {
+		win, total, err = slots.BorrowKernWindow(ramSize + handoffTail)
+		if err != nil {
+			return err
+		}
+		defer slots.ReturnKernWindow()
 	}
 	// Vanaf hier vertelt de flip wat hij doet, stap voor stap. Dat is geen
 	// ruis maar het enige diagnosemiddel dat deze operatie heeft: hij eindigt
@@ -199,19 +203,23 @@ func Flip(bundle []byte) error {
 	// De veeg is die van de slot-lifecycle (slots.Scrub) — één lus voor beide,
 	// zodat "een app-start doorstaat dit wél" een bruikbare vergelijking is.
 	stage(stVectors)
-	t0 := time.Now()
-	slots.Scrub(uintptr(win), uintptr(total), nil)
+	if !preloaded {
+		t0 := time.Now()
+		slots.Scrub(uintptr(win), uintptr(total), nil)
+		fmt.Printf("kernflip: window scrubbed in %v, placing segments\n", time.Since(t0).Round(time.Millisecond))
+	} else {
+		fmt.Printf("kernflip: window scrubbed before download, placing segments\n")
+	}
 	stage(stScrubbed)
-	fmt.Printf("kernflip: window scrubbed in %v, placing segments\n", time.Since(t0).Round(time.Millisecond))
 
-	// Segmenten plaatsen: venster + (linkadres − linkbasis), per segment uit
-	// het plan (al gevalideerd). Het kopiëren zelf is het enige verschil met
-	// een app-plaatsing: die schuift device→device vanuit de staging, dit is
-	// een Go-slice — in brokken met een yield (copyRange).
+	// Dezelfde ELF-plaatsing als bij apps: bron in de eigen staging, bestemming
+	// onderin het venster. ReaderAt houdt device-toegang uit de Go-parser.
 	delta := win - bun.LinkLoad
 	for _, sg := range plan.Segs {
 		dst := uintptr(sg.Dst + delta)
-		copyRange(dst, bun.ELF[sg.Off:sg.Off+sg.Filesz])
+		if err := copyReaderRange(dst, bun.ELFReader(), int64(sg.Off), sg.Filesz); err != nil {
+			return err
+		}
 		if sg.Memsz > sg.Filesz {
 			dev.Clear(dst+uintptr(sg.Filesz), sg.Memsz-sg.Filesz)
 		}
@@ -221,8 +229,11 @@ func Flip(bundle []byte) error {
 	// De reloc-pass: elk tabelwoord draagt een absoluut adres op de linkbasis;
 	// delta erbij en het wijst het venster in. (Offsets zijn al gevalideerd.)
 	for i := 0; i < bun.RelocCount(); i++ {
-		a := uintptr(win) + uintptr(uint32(bun.Relocs[i*4])|uint32(bun.Relocs[i*4+1])<<8|
-			uint32(bun.Relocs[i*4+2])<<16|uint32(bun.Relocs[i*4+3])<<24)
+		off, err := bun.RelocAt(i)
+		if err != nil {
+			return err
+		}
+		a := uintptr(win) + uintptr(off)
 		dev.Write64(a, dev.Read64(a)+delta)
 	}
 
@@ -249,19 +260,19 @@ func Flip(bundle []byte) error {
 	nat := hopswitch.SnapshotNAT()
 	agentState, err := snapshotAgent()
 	if err != nil {
-		return fail(err)
+		return err
 	}
 	blob, err := encodeHandoff(Handoff{
 		OldBase: uint64(me0), OldSize: ramSize,
 		Window: win, Total: total,
 		Gen:       curGen + 1,
-		BundleSum: checksum.FNV64(bundle),
+		BundleSum: sum,
 		Slots:     residents,
 		NAT:       nat,
 		Agent:     agentState,
 	}, handoffTail)
 	if err != nil {
-		return fail(fmt.Errorf("kernflip: %w", err))
+		return fmt.Errorf("kernflip: %w", err)
 	}
 	stage(stCaptured)
 	hb := uintptr(win + total - handoffTail)
@@ -336,20 +347,22 @@ func bundleSwitchHash(f *leanelf.File) (uint64, error) {
 	return checksum.FNV64(blobs), nil
 }
 
-// copyRange schuift bytes de (device-gemapte) bestemming in, in brokken met
-// een yield ertussen: één ononderbroken kopie van een kern-image verhongert
-// op één core de netstack en de heartbeat-lezers (zelfde les als coopCleanInv
-// in kern/slots).
-func copyRange(dst uintptr, src []byte) {
-	const chunk = 1 << 20
-	for len(src) > 0 {
-		n := len(src)
-		if n > chunk {
-			n = chunk
+// copyReaderRange keeps device memory behind explicit, alignment-safe reads.
+func copyReaderRange(dst uintptr, src io.ReaderAt, off int64, size uint64) error {
+	buf := make([]byte, 32<<10)
+	for size > 0 {
+		n := uint64(len(buf))
+		if size < n {
+			n = size
 		}
-		dev.Copy(dst, src[:n])
+		if err := readBundleAt(src, buf[:n], off); err != nil {
+			return err
+		}
+		dev.Copy(dst, buf[:n])
 		dst += uintptr(n)
-		src = src[n:]
+		off += int64(n)
+		size -= n
 		runtime.Gosched()
 	}
+	return nil
 }

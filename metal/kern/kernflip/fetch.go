@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"strings"
 	"time"
@@ -35,52 +36,58 @@ const maxBundle = 64 << 20
 // fetchBundle haalt url op en geeft de bytes terug als de SHA-256 klopt met
 // want (hex, hoofdletterongevoelig). Elke fout is een reden om niet te
 // springen.
-func fetchBundle(url, want string) ([]byte, error) {
+// fetchBundleInto streams to storage reserved by the caller after the length
+// is checked. Its working memory is fixed, independent of the bundle size.
+func fetchBundleInto(url, want string, reserve func(int64) (io.Writer, error)) (int64, uint64, error) {
 	want = strings.ToLower(strings.TrimSpace(want))
-	if want == "" {
-		return nil, fmt.Errorf("kernflip: %s configured without hopos.flip.sha256 — refusing to boot an unverified kernel", url)
-	}
 	if len(want) != 64 {
-		return nil, fmt.Errorf("kernflip: hopos.flip.sha256 is %d characters, want 64 hex", len(want))
+		return 0, 0, fmt.Errorf("kernflip: expected a 64-character SHA-256")
 	}
-
-	// Eén verbinding, meteen opgeruimd: dit pad draait één keer, en een
-	// netstack-budget vasthouden voor een client die klaar is, is precies wat
-	// een node met weinig RAM niet moet doen.
+	if _, err := hex.DecodeString(want); err != nil {
+		return 0, 0, fmt.Errorf("kernflip: invalid SHA-256: %w", err)
+	}
 	cl := &leanhttp.Client{IdleTimeout: 5 * time.Second}
 	defer cl.CloseIdle()
 	resp, err := cl.Get(url)
 	if err != nil {
-		return nil, fmt.Errorf("kernflip: %s: %w", url, err)
+		return 0, 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("kernflip: %s: HTTP %d", url, resp.StatusCode)
+		return 0, 0, fmt.Errorf("kernflip: HTTP %d", resp.StatusCode)
 	}
-	// Get vereist Content-Length. Reserveer de bundel daarom precies één
-	// keer: Go 1.26 ReadAll bewaart de tussenbuffers tot de eindkopie,
-	// wat op de 32 MiB-kern van LicheeRV onnodig veel heap vraagt.
-	b, err := readBundle(resp.Body, resp.Length)
-	if err != nil {
-		return nil, fmt.Errorf("kernflip: %s: %w", url, err)
-	}
-	sum := sha256.Sum256(b)
-	if got := hex.EncodeToString(sum[:]); got != want {
-		return nil, fmt.Errorf("kernflip: %s is sha256 %s, config says %s — not booting it", url, got, want)
-	}
-	return b, nil
-}
-
-// readBundle weigert een ongeldige lengte vóór allocatie of lezen. leanhttp
-// begrenst Body op Content-Length en meldt afgebroken overdrachten; ReadFull
-// bewaakt ook hier dat alleen een volledige bundel de hashcontrole bereikt.
-func readBundle(body io.Reader, length int64) ([]byte, error) {
+	length := resp.Length
 	if length <= 0 || length > maxBundle {
-		return nil, fmt.Errorf("bundle length %d outside 1..%d bytes", length, maxBundle)
+		return 0, 0, fmt.Errorf("bundle length %d outside 1..%d bytes", length, maxBundle)
 	}
-	b := make([]byte, int(length))
-	if _, err := io.ReadFull(body, b); err != nil {
-		return nil, err
+	dst, err := reserve(length)
+	if err != nil {
+		return 0, 0, err
 	}
-	return b, nil
+	sha := sha256.New()
+	content := fnv.New64a()
+	buf := make([]byte, 32<<10)
+	for left := length; left > 0; {
+		n := int64(len(buf))
+		if left < n {
+			n = left
+		}
+		if _, err := io.ReadFull(resp.Body, buf[:n]); err != nil {
+			return 0, 0, err
+		}
+		written, err := dst.Write(buf[:n])
+		if err != nil {
+			return 0, 0, err
+		}
+		if int64(written) != n {
+			return 0, 0, io.ErrShortWrite
+		}
+		sha.Write(buf[:n])
+		content.Write(buf[:n])
+		left -= n
+	}
+	if got := hex.EncodeToString(sha.Sum(nil)); got != want {
+		return 0, 0, fmt.Errorf("kernflip: SHA-256 mismatch: got %s, want %s", got, want)
+	}
+	return length, content.Sum64(), nil
 }
