@@ -2,9 +2,11 @@
 
 Voortgang, aftekeningen en besluiten staan in het [release-logboek](release-logboek.md). Dat logboek wordt bij iedere afgeronde wijziging of nieuwe bevinding bijgewerkt; aftekenen gebeurt uitsluitend met genoemd bewijs.
 
-Dit is de afwerkvolgorde vanaf de frameworkreview van 6 september 2026. De [meetlat](framework-contract.md) staat vast; we beginnen de review niet opnieuw. Het [reparatieverslag](../reviews/2026-09-06-framework/fixes/README.md) en het [aanvullende testbewijs](../reviews/2026-09-06-framework/acceptance/README.md) leggen vast wat al gedaan is.
+**Actuele volgorde (besluit Derek, 6 september, L42):** nu de volledige docs-overhaul (stap 5); daarna morgen de laatste hardwarecontrole op v2.2.2, met eerst LicheeRV koud installeren en de flipreeks toetsen (stap 4, inclusief resterend H6); daarna eindaftekening (stap 6). De functionele wijzigingen voor v2.2.2 blijven hierbij. Fysieke netwerk-IRQ volgt afzonderlijk na deze afronding. De stapnummers hieronder blijven vaste verwijzingen; hun numerieke volgorde is voor deze laatste ronde dus aangepast.
 
-**Begin:** de visie is beschreven, het framework is eraan getoetst, de gevonden frameworkfouten zijn gerepareerd en de lokale regressies zijn uitgevoerd. Er is nog een voorbereide HOP-agentpatch en er zijn nog onderdelen af te tekenen.
+Dit plan komt uit de frameworkreview van 6 september 2026. De [meetlat](framework-contract.md) staat vast; we beginnen de review niet opnieuw. Het [reparatieverslag](../reviews/2026-09-06-framework/fixes/README.md) en het [aanvullende testbewijs](../reviews/2026-09-06-framework/acceptance/README.md) leggen vast wat al gedaan is.
+
+**Begin:** de visie is beschreven, het framework is eraan getoetst, de gevonden frameworkfouten zijn gerepareerd en de lokale regressies zijn uitgevoerd. De HOP-patches zijn geïntegreerd via v1.0.2; documentatie en de laatste hardware-aftekening staan nog open.
 
 **Eind:** de releasecode volgt onze visie, alle bekende blokkerende fouten binnen de beloofde functies zijn opgelost en de uiteindelijke kandidaat heeft de toepasselijke tests doorstaan. Naar ons beste vermogen werkt dit goed. Ongeteste boards en beperkingen staan eerlijk bij de release; die worden niet als bewezen ondersteuning gepresenteerd.
 
@@ -25,17 +27,17 @@ Dit is de afwerkvolgorde vanaf de frameworkreview van 6 september 2026. De [meet
 | Stap | Werk en concrete uitkomst | Huidige status |
 | --- | --- | --- |
 | 1. Meetlat en framework afronden | Bestaande bevindingen koppelen aan reparatie en bewijs. De frameworkdoorloop niet opnieuw doen. Overgebleven board-/drivergrenzen meenemen in stap 2. | Frameworkreparaties en gerichte host-/QEMU-regressies uitgevoerd. |
-| 2. Resterende codepunten sluiten | De voorbereide log-adoptiepatch in de HOP-dependency opnemen via een gepubliceerde versie. Eén afgebakende correctness-doorloop van de gebruikte drivers: initialisatie, buffer-/DMA-grenzen, eigendom, publicatie, completion, foutafhandeling en overdracht bij stop/flip. Per driver: akkoord, concrete fix of expliciet buiten releasesupport. | Afgetekend voor code/host: HOP v1.0.1 geïntegreerd; drie driverreviews en hun fixes getest. Hardwaregrenzen en uitgestelde IRQ expliciet beschreven. Zie logboek L04–L08. |
+| 2. Resterende codepunten sluiten | De voorbereide log-adoptiepatch in de HOP-dependency opnemen via een gepubliceerde versie. Eén afgebakende correctness-doorloop van de gebruikte drivers: initialisatie, buffer-/DMA-grenzen, eigendom, publicatie, completion, foutafhandeling en overdracht bij stop/flip. Per driver: akkoord, concrete fix of expliciet buiten releasesupport. | Afgetekend voor code/host: HOP v1.0.2 geïntegreerd; drie driverreviews en hun fixes getest. Hardwaregrenzen en uitgestelde IRQ expliciet beschreven. Zie logboek L04–L08. |
 | 3. Eén testbare kandidaat maken | Na de resterende fixes bronversie, dependencies, buildinstellingen en image-hashes vastleggen. Gerichte regressies van die fixes en de bestaande build-/integratiematrix op deze kandidaat uitvoeren. | Afgetekend: host-/targetgates, zeven definitieve bundels, lifecycle/netwerk-QEMU en echte agent op de exacte virt-bundel slagen. Bron-/artifact-hashes vastgelegd; logboek L09–L10. |
-| 4. Laatste hardware-ronde | Onderstaande vaste lijst op de M4 en RISC-V uitvoeren. Begin met versie-/compatibiliteitscontrole, daarna flip naar de kandidaat en testen. Resultaten en eventuele afwijkingen bewaren. | In uitvoering op 2.2.0; deelbewijs en open bevindingen in logboek L12–L13. |
-| 5. Bevindingen, docs-overhaul en release vastleggen | Alleen aangetoonde fouten uit de ronde herstellen en gericht hertesten. Herstructureer en actualiseer de volledige documentatie vanuit het contract, zoals hieronder beschreven. Leg support, beperkingen, performance en bewijs vast. | Open. Volledige docs-overhaul door Derek toegevoegd. Reviewbewijs is inmiddels niet langer genegeerd. |
+| 4. Laatste hardware-ronde | Onderstaande vaste lijst op de M4 en RISC-V uitvoeren. Begin met versie-/compatibiliteitscontrole, daarna flip naar de kandidaat en testen. Resultaten en eventuele afwijkingen bewaren. | ARM-deelproeven en flipreeksen geslaagd op de vastgelegde kandidaten. Nieuwe downloader voor 2.2.2 nog op hardware toetsen; morgen na de docs, met eerst LicheeRV. Zie L36–L42. |
+| 5. Bevindingen, docs-overhaul en release vastleggen | Alleen aangetoonde fouten uit de ronde herstellen en gericht hertesten. Herstructureer en actualiseer de volledige documentatie vanuit het contract, zoals hieronder beschreven. Leg support, beperkingen, performance en bewijs vast. | Nu aan de beurt. Compact releasebewijs staat in versiebeheer; de uitgebreide lokale reviewmap is gitignored. Zie L33 en L42. |
 | 6. Aftekenen | Controleer onderstaande eindvoorwaarden; wijs exact de geteste kandidaat aan als releaseklaar. Publicatie is daarna de uitvoerhandeling, geen nieuwe reviewronde. | Open. |
 
 Stap 2 is een controle op het bestaande aanbod, geen opdracht tot meer drivers of functies. Voor de release beloofde drivers moeten slagen; niet-geteste varianten krijgen expliciet geen hardware-aftekening. De claims voor andere boards blijven beperkt tot het werkelijk uitgevoerde bewijs, bijvoorbeeld alleen een geslaagde build.
 
 ## Stap 5: volledige docs-overhaul
 
-Opdracht van Derek, 6 september: de docs zijn verouderd; nu het contract helder is, structureren we ze opnieuw als één samenhangend geheel. Dit is een eigen afwerkpunt na de hardware-ronde, geen extra productfunctie en geen reden om de afgesloten codecontrole opnieuw te beginnen.
+Opdracht van Derek, 6 september: de docs zijn verouderd; nu het contract helder is, structureren we ze opnieuw als één samenhangend geheel. Dit is een eigen afwerkpunt, op Dereks verzoek nu vóór de laatste hardwarehertest. Het is geen extra productfunctie en geen reden om de afgesloten codecontrole opnieuw te beginnen.
 
 1. Inventariseer alle publieke en technische docs. Geef iedere pagina één bestemming: actueel houden/herschrijven, samenvoegen, of als historisch onderzoek archiveren. Behoud het testbewijs.
 2. Maak één duidelijke ingang en leesvolgorde: **visie en contract → architectuur en lifecycle → apps en core sharing → drivers en boards → bouwen/installeren/flippen → beheer, testen en releasebewijs**. Houd eenvoudige gebruiksinstructies leesbaar zonder interne onderzoeksverslagen nodig te hebben.
@@ -53,7 +55,7 @@ Besluit Derek, 6 september: eerst de huidige correctness-ronde en docs afronden.
 
 De huidige polling is volgens Derek snel genoeg. Het doel van dit vervolg is vooral minder CPU-werk bij stilte en lager energieverbruik; een snelheidswinst is geen voorwaarde of vooraf bewezen claim. Controleer per board ontvangst, slapen/wekken en flip-overdracht, en vergelijk idle-/energiegedrag en doorvoer met polling. Werk daarna de boarddocumentatie en het testbewijs bij en lever het als nieuwe puntrelease. Het versienummer staat nog niet vast.
 
-**Updatepad, besluit Derek:** de fixes worden 2.2.1. LicheeRV kan die met zijn oude downloader nog niet via flip ophalen en krijgt na plaatsing van 2.2.1 zijn hardwarehertest. M4 en Radxa worden via flip verder getoetst. Pi 4 en Pi 5 vallen ook na herstart tijdens de gerichte hertest uit; de volgende stap is overgangsdiagnose via UART, niet meer blinde flips (L30).
+**Updatepad, laatste besluit Derek:** de codewijzigingen worden v2.2.2. De LicheeRV-download-OOM is in de bron gecorrigeerd door de bundel rechtstreeks in het geleende venster te downloaden; de kern blijft 32 MiB. Eerst docs, daarna morgen koud installeren op LicheeRV en de nieuwe downloader op hardware toetsen. Pi 4 en Pi 5 hebben inmiddels hun drie-flips-reeksen doorstaan; die bewijzen hun geteste kandidaten, niet automatisch de nieuwe downloader. Zie L38–L42.
 
 ## De vaste hardwarelijst
 
@@ -80,7 +82,7 @@ Dit zijn begrensde acceptatieproeven, geen bewijs van onbeperkte uptime. Niet ie
 - [ ] De uiteindelijke code voldoet aan de visie en de regels E1–E9; bekende afwijkingen zijn opgelost of de betreffende functie behoort expliciet niet tot de releasebelofte.
 - [x] De HOP-logpatch zit in de werkelijk gebouwde, gepubliceerde dependency; geen tijdelijke lokale vervanging in de release.
 - [x] De voor de release gebruikte drivers zijn afgetekend tegen stap 2 (code-/hostscope; fysieke werking volgt in stap 4).
-- [x] Buildmatrix, relevante hosttests en QEMU-integratie slagen op de uiteindelijke kandidaat.
+- [x] Buildmatrix en relevante hosttests slagen met de laatste bronwijzigingen (L41); eerder QEMU-integratiebewijs blijft aan de daar vastgelegde kandidaat gekoppeld.
 - [ ] De toepasselijke hardwareproeven H0–H6 slagen op M4 en RISC-V, met bewaard bewijs.
 - [ ] Er zijn geen open fouten binnen het beloofde aanbod die tot verkeerd eigendom, verloren wekwerk, vastlopen, onbedoelde herstart of datacorruptie leiden; gemeten performance heeft geen onverklaarde regressie.
 - [ ] Releaseversie, bron-/image-hashes, supportmatrix, beperkingen en testresultaten zijn vastgelegd en beschikbaar in versiebeheer.
