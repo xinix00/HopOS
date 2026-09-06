@@ -38,9 +38,10 @@ const (
 
 // Dev is een geopende SMC.
 type Dev struct {
-	rt    *rtkit.Dev
-	shmem uintptr // door de SMC zelf opgegeven; hier landen waarden > 4 bytes
-	msgid uint64
+	rt     *rtkit.Dev
+	shmem  uintptr // door de SMC zelf opgegeven; hier landen waarden > 4 bytes
+	failed error   // an unconfirmed command cannot share its buffer/id with a retry
+	msgid  uint64
 
 	pending map[uint8]bool
 	result  map[uint8]uint64
@@ -123,17 +124,23 @@ func (d *Dev) send(cmd uint8, size uint8, key uint32) error {
 
 // cmd stuurt een opdracht en wacht op het antwoord met hetzelfde id.
 func (d *Dev) cmd(c uint8, size uint8, key uint32) (uint64, error) {
+	if d.failed != nil {
+		return 0, d.failed
+	}
 	id := uint8(d.msgid & 0xf)
 	if err := d.send(c, size, key); err != nil {
+		d.failed = err
 		return 0, err
 	}
 	deadline := time.Now().Add(time.Second)
 	for d.pending[id] {
 		if err := d.rt.Poll(); err != nil {
+			d.failed = err
 			return 0, err
 		}
 		if time.Now().After(deadline) {
-			return 0, fmt.Errorf("smc: command %#x (key %s) got no answer", c, KeyString(key))
+			d.failed = fmt.Errorf("smc: command %#x (key %s) got no answer; no further commands until coprocessor restart", c, KeyString(key))
+			return 0, d.failed
 		}
 	}
 	r := d.result[id]

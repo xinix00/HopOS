@@ -140,3 +140,18 @@ func TestKeyCodeTableAnchors(t *testing.T) {
 		}
 	}
 }
+
+func TestRolloverPreservesHeldKeys(t *testing.T) {
+	var k Keyboard
+	key := []byte{0, 0, 4, 0, 0, 0, 0, 0}
+	k.Decode(key, nil)
+	if ev := k.Decode([]byte{0, 0, 1, 1, 1, 1, 1, 1}, nil); len(ev) != 0 {
+		t.Fatalf("rollover released keys: %v", ev)
+	}
+	if ev := k.Decode(key, nil); len(ev) != 0 {
+		t.Fatalf("rollover duplicated press: %v", ev)
+	}
+	if ev := k.Decode(make([]byte, 8), nil); len(ev) != 1 || ev[0].Kind != KeyUp {
+		t.Fatalf("real release: %v", ev)
+	}
+}

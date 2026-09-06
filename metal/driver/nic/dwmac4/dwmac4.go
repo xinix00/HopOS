@@ -559,6 +559,9 @@ func (n *Net) Receive(buf []byte) (int, error) {
 		n.rxLastErr = sts
 	default:
 		length = rxLen(sts)
+		if length > bufSize-4 {
+			length = 0 // reported length includes FCS in this DMA buffer
+		}
 		if length > len(buf) {
 			length = len(buf)
 		}

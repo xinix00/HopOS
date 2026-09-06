@@ -14,8 +14,8 @@
 package idle
 
 import (
-	"time"
 	"sync/atomic"
+	"time"
 	_ "unsafe" // voor go:linkname naar runtime.nanotime
 
 	"github.com/xinix00/HopOS/metal/v2/dev"
@@ -125,7 +125,10 @@ func wakeAt(pollUntil int64) uint64 {
 	if d > int64(time.Hour) {
 		d = int64(time.Hour)
 	}
-	return counterNow() + uint64(d)*CounterHz()/1_000_000_000
+	hz := CounterHz()
+	// Split seconds from nanoseconds: even one hour × 1 GHz overflows
+	// when multiplied before division. CNTFRQ is a 32-bit frequency.
+	return counterNow() + uint64(d/1_000_000_000)*hz + uint64(d%1_000_000_000)*hz/1_000_000_000
 }
 
 // Publish laat de teller vanaf nu óók op addr landen — het CtrlIdle-woord

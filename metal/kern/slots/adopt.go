@@ -11,14 +11,12 @@ package slots
 // wie zijn logs draint, welke poorten gepubliceerd zijn) — en dat is precies
 // wat hier terugkomt.
 //
-// De harde regel: liveness wordt GEMETEN, niet aangenomen. Een slot dat zijn
-// heartbeat niet laat lopen wordt niet geadopteerd maar opgeruimd — dan
-// degradeert de flip voor dat slot naar het bestaande gedrag (task weg,
-// monitor herstart hem) in plaats van een spookpartitie te erven.
+// Eigendom blijft bestaan tot beëindiging bevestigd is. Een heartbeat is
+// gezondheidsinformatie, geen toestemming om geheugen opnieuw uit te geven.
 
 import (
 	"fmt"
-	"time"
+	"slices"
 
 	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 	"github.com/xinix00/HopOS/metal/v2/net/hopswitch"
@@ -39,14 +37,16 @@ const (
 // weten. Puur data (geen pointers, vaste maten): kern/kernflip serialiseert
 // hem in het handoff-blob.
 type SlotState struct {
-	Slot     int
-	PartBase uint64
-	PartSize uint64
-	Core     int
-	Cores    int
-	Job      string      // object-store-naamruimte van de task ("" = geen)
-	Ports    []uint16    // gepubliceerde node-poorten (tcp+udp, zoals Start ze zette)
-	Mounts   [][2]string // {local, shared} — de volume-tabel van de servicer
+	ShareGroup string
+	GroupCores []int // volledige pool, ook tijdelijk lege cores
+	Slot       int
+	PartBase   uint64
+	PartSize   uint64
+	Core       int
+	Cores      int
+	Job        string      // object-store-naamruimte van de task ("" = geen)
+	Ports      []uint16    // gepubliceerde node-poorten (tcp+udp, zoals Start ze zette)
+	Mounts     [][2]string // {local, shared} — de volume-tabel van de servicer
 }
 
 // SnapshotForFlip beschrijft elke levende bewoner voor het handoff-blob, en
@@ -54,22 +54,7 @@ type SlotState struct {
 // de veilige kant: de flip gaat dan gewoon niet door en de node draait door op
 // de zittende kern.
 //
-// v1-grenzen (docs/kern-flip.md):
-//   - een SMP-app (cores > 1). De boekhouding erváán zou passen (Cores staat in
-//     dit record, de secundaire cores draaien app-code op hun eigen mailbox in
-//     de plan-regio, en CtrlSMPTramp wijst sinds de blob-verhuizing naar de
-//     plan-kopie) — maar er is nooit een SMP-app dóór een flip gehaald, en dit
-//     is geen plek voor een onbewezen aanname.
-//
-// MOUNTS gaan sinds 01-09 wél mee, en de reden dat ze dat eerst niet deden was
-// verkeerd geredeneerd. Klopt: hopfs overleeft de flip niet — maar hij
-// overleeft een REBOOT evenmin, want hij is bewust vluchtig (kern/hopfs: "géén
-// persistentie … bij boot is alles per definitie leeg", de bron is S3). De
-// flip maakt het dus niet erger dan de bestaande update-weg; hij maakt het
-// alleen zichtbaar, omdat de app blijft leven terwijl zijn volume leeg wordt.
-// Wat een geadopteerde app nodig heeft is dus niet zijn oude inhoud maar zijn
-// mount-PUNTEN terug — anders schrijft hij vanaf nu in het niets. Die gaan mee
-// (AdoptSlots maakt de dirs opnieuw aan, net als armSlot bij een gewone start).
+// Mount-punten gaan mee; hopfs-inhoud blijft zoals bij boot vluchtig.
 func SnapshotForFlip() ([]SlotState, error) {
 	partOnce.Do(poolInit)
 	var out []SlotState
@@ -78,8 +63,8 @@ func SnapshotForFlip() ([]SlotState, error) {
 		if !ok {
 			continue
 		}
-		if !ctxLive(ctxState(i)) {
-			continue // partitie zonder levende bewoner: laat hem gewoon achter
+		if quarantined[i] || !ctxLive(ctxState(i)) {
+			return nil, fmt.Errorf("slot %d: reserved owner is not ready for flip", i)
 		}
 		// Een SMP-app gaat gewoon mee: zijn secundaire cores draaien dezelfde
 		// switch-code (de som-toets in kernflip dekt ze), hun ctx-blokken staan
@@ -97,14 +82,14 @@ func SnapshotForFlip() ([]SlotState, error) {
 			Core: coreOf(i), Cores: n,
 			Ports: hopswitch.PublishedPorts(i),
 		}
+		st.ShareGroup, st.GroupCores = snapshotGroup(i)
+		if len(st.ShareGroup) > maxFlipJob {
+			return nil, fmt.Errorf("slot %d: sharegroup name exceeds %d bytes", i, maxFlipJob)
+		}
 		if s != nil {
 			st.Job, st.Mounts = s.job, s.mounts
 		}
-		// Wat de overdracht niet kan dragen, hoort HIER te stranden en niet ná
-		// de sprong: een blob dat de nieuwe kern weigert wordt in zijn geheel
-		// weggegooid, en dán staat de adoptie uit terwijl er wél bewoners
-		// draaien — de verse-boot-paden zouden hun plan-regio vegen. De grenzen
-		// spiegelen die van decodeHandoff (kern/kernflip).
+		// Weiger vóór de sprong wat de volgende kern niet kan lezen.
 		if len(st.Ports) > maxFlipPorts || len(st.Job) > maxFlipJob || len(st.Mounts) > maxFlipMounts {
 			return nil, fmt.Errorf("slot %d: %d published port(s) / %d-byte job name / %d mount(s) exceeds what the handoff blob carries (%d/%d/%d)",
 				i, len(st.Ports), len(st.Job), len(st.Mounts), maxFlipPorts, maxFlipJob, maxFlipMounts)
@@ -116,7 +101,7 @@ func SnapshotForFlip() ([]SlotState, error) {
 		}
 		out = append(out, st)
 	}
-	return out, nil
+	return out, ValidateAdoption(out)
 }
 
 // SetFlipCapable meldt of deze node zichzelf later mag vervangen (de
@@ -131,12 +116,9 @@ func SnapshotForFlip() ([]SlotState, error) {
 // zodra er bewoners leven.
 func SetFlipCapable(v bool) { cageSetFlipCapable(v) }
 
-// AdoptSlots neemt de bewoners uit het handoff-blob over. Geeft terug hoeveel
-// er daadwerkelijk leefden; de rest is opgeruimd (partitie terug de pool in).
-//
-// Aanroepen ná hopswitch.Up() en ná UseFS/UseStore — de servicer die hier
-// start bedient meteen weer RPC's — en vóór de agent zijn eerste plaatsing
-// doet.
+// AdoptSlots herstelt eerst alle eigendomsclaims, daarna de diensten.
+// Aanroepen vóór de agent of andere plaatsing. Een onbruikbare overdracht
+// stopt de boot: doorgaan met een gedeeltelijke allocator is nooit veilig.
 func AdoptSlots(states []SlotState) int {
 	if len(states) == 0 {
 		return 0
@@ -147,62 +129,23 @@ func AdoptSlots(states []SlotState) int {
 	// handler van DEZE kern moet er zijn vóór er iets te revoken valt.
 	vectorsOnce.Do(cageInit)
 
-	// Hield de arch-laag de adoptie-stand vast? cageInit hierboven verifieert
-	// dat de zittende switch-code écht de onze is; blijkt dat niet zo, dan
-	// heeft hij de plan-regio inmiddels vers neergezet en zijn de bewoners
-	// hoe dan ook weg. Dan is overnemen liegen: hun partities zouden bezet
-	// blijven voor apps die niet meer draaien.
 	if !cageAdoptable() {
-		fmt.Printf("HOPOS_FLIP_ADOPT_ABORT: the cage layer could not preserve the residents — releasing %d partition(s) instead\n", len(states))
-		return 0
+		panic("kernflip: cage layer cannot preserve live owners")
 	}
-
-	live := 0
+	if err := ValidateAdoption(states); err != nil {
+		panic(fmt.Sprintf("kernflip: invalid ownership: %v", err))
+	}
+	// Geen service of nieuwe plaatsing vóór ALLE oude claims terug zijn.
 	for _, st := range states {
-		if st.Slot < 1 || st.Slot > layout.MaxSlots || st.PartSize == 0 {
-			continue
+		if err := partAdopt(st.Slot, st.PartBase, st.PartSize); err != nil {
+			panic(fmt.Sprintf("kernflip: cannot reserve owner: %v", err))
 		}
+		adoptCage(st)
+		hostCore[st.Slot], smpCores[st.Slot] = st.Core, st.Cores
+	}
+	for _, st := range states {
 		i := st.Slot
-		// De partitie eerst uit de pool knippen: vanaf dit moment kan geen
-		// plaatsing hem meer uitdelen, ook niet als de liveness-meting hieronder
-		// nog loopt.
-		if err := partAdopt(i, st.PartBase, st.PartSize); err != nil {
-			fmt.Printf("HOPOS_FLIP_ADOPT_FAIL slot %d: %v\n", i, err)
-			continue
-		}
-		// De core-grens is het aantal FYSIEKE app-cores, niet de slot-capaciteit:
-		// hostCore is op MaxSlots gedimensioneerd, maar een corenummer daarboven
-		// zou de rotatie op een sched-blok laten wijzen dat bij geen enkele core
-		// hoort.
-		if st.Core >= 1 && st.Core <= layout.NumAppCores() {
-			hostCore[i] = st.Core
-		}
-		// De vertrouwde core-telling van de eenheid (smp.go): uit de overdracht,
-		// nooit uit de control-page. Zonder dit zag Stop's stillOn-scan de
-		// secundaire cores niet en gaf releaseSlot een partitie vrij waarop
-		// nog cores draaiden; en de wekker kickte alleen de primaire.
-		smpCores[i] = max(st.Cores, 1)
-
-		// LEEFT hij ook echt? De ctx-staat zegt "de rotatie kent hem", maar
-		// alleen een OPLOPENDE heartbeat bewijst dat er nog een app in draait —
-		// en dat is precies het verschil tussen een bewoner overnemen en een
-		// spookpartitie erven. De app schrijft hem elke ~50ms (applib), dus dit
-		// venster is ruim; de flip zelf duurde langer dan dit.
-		if !adoptLives(i) {
-			fmt.Printf("slot %d: no heartbeat after the flip — releasing it instead of adopting HOPOS_FLIP_ADOPT_DEAD\n", i)
-			releaseSlot(i, true)
-			continue
-		}
-
-		// De ringen blijven zoals ze zijn: hun koppen staan in de partitie en de
-		// app is er middenin bezig. Alleen de LEZERS komen terug — de servicer
-		// (ring.Open, geen Init) en de switch-poort.
-		appRAM, err := appRAMSize(st.PartSize)
-		if err != nil {
-			fmt.Printf("HOPOS_FLIP_ADOPT_FAIL slot %d: %v\n", i, err)
-			releaseSlot(i, true)
-			continue
-		}
+		appRAM, _ := appRAMSize(st.PartSize) // validated before any service starts
 		// De mount-punten terug. hopfs is vluchtig (zie de kop hierboven), dus de
 		// INHOUD is weg — maar de app leeft door en moet wél weer ergens kunnen
 		// lezen en schrijven. Zelfde stap als armSlot bij een gewone start: de
@@ -235,40 +178,76 @@ func AdoptSlots(states []SlotState) int {
 			}
 		}
 		go registerServicer(i, fmt.Sprintf("/.tasks/slot%d", i), st.Job, st.Mounts).run()
-		// De core-boekhouding van de plaatser terug (pool.go): zonder dit ziet
-		// PlaceCage élke core als vrij en zet hij de volgende job ongevraagd
-		// naast een geadopteerde bewoner — precies de stille core-deling die het
-		// ontwerp verbiedt (timing-zijkanalen; delen hoort een keuze te zijn).
-		adoptCage(i, coreOf(i), coreCount(i))
 		refreshShared(coreOf(i))
-		live++
-		fmt.Printf("slot %d: adopted — partition %d MB @ %#x on core %d (%d core(s)), %d mount(s), heartbeat running\n",
+		fmt.Printf("slot %d: adopted — partition %d MB @ %#x on core %d (%d core(s)), %d mount(s), ownership restored\n",
 			i, st.PartSize>>20, st.PartBase, coreOf(i), coreCount(i), len(st.Mounts))
 	}
-	return live
+	return len(states)
 }
 
-// adoptLives meet of er in slot i nog een app draait: de heartbeat moet binnen
-// een halve seconde oplopen (applib tikt elke ~50ms).
-func adoptLives(i int) bool {
-	if !ctxLive(ctxState(i)) {
-		return false
+// ValidateAdoption checks the complete ownership picture both before the jump
+// and before restoring claims. There are few cages: pairwise checks keep this
+// boot-only path simple and need no second allocator or synchronization.
+func ValidateAdoption(states []SlotState) error {
+	for j, s := range states {
+		if s.Slot < 1 || s.Slot > layout.MaxSlots || s.PartSize == 0 ||
+			s.PartBase > ^uint64(0)-s.PartSize || s.PartBase%part2M != 0 || s.PartSize%part2M != 0 {
+			return fmt.Errorf("invalid partition for cage %d", s.Slot)
+		}
+		if _, err := appRAMSize(s.PartSize); err != nil {
+			return err
+		}
+		if s.Cores < 1 || !isAppCore(s.Core) || s.Cores > layout.NumAppCores()-s.Core+1 ||
+			(s.Cores > 1 && s.Core != s.Slot) {
+			return fmt.Errorf("invalid core span for cage %d", s.Slot)
+		}
+		if s.ShareGroup == "" {
+			if len(s.GroupCores) != 0 {
+				return fmt.Errorf("dedicated cage %d has a group pool", s.Slot)
+			}
+		} else {
+			if len(s.ShareGroup) > maxFlipJob || s.Cores != 1 || !slices.Contains(s.GroupCores, s.Core) {
+				return fmt.Errorf("invalid group for cage %d", s.Slot)
+			}
+			for k, c := range s.GroupCores {
+				if !isAppCore(c) || slices.Contains(s.GroupCores[:k], c) {
+					return fmt.Errorf("invalid group core %d", c)
+				}
+			}
+		}
+		for _, p := range states[:j] {
+			if s.Slot == p.Slot || (s.PartBase < p.PartBase+p.PartSize && p.PartBase < s.PartBase+s.PartSize) {
+				return fmt.Errorf("overlapping owners %d and %d", s.Slot, p.Slot)
+			}
+			if (s.Cores > 1 && p.Slot > s.Slot && p.Slot < s.Slot+s.Cores) ||
+				(p.Cores > 1 && s.Slot > p.Slot && s.Slot < p.Slot+p.Cores) {
+				return fmt.Errorf("overlapping contexts %d and %d", s.Slot, p.Slot)
+			}
+			if s.ShareGroup != "" && s.ShareGroup == p.ShareGroup {
+				if !slices.Equal(s.GroupCores, p.GroupCores) {
+					return fmt.Errorf("inconsistent group %q", s.ShareGroup)
+				}
+				continue
+			}
+			for c := HopReserved() + 1; c <= layout.NumAppCores(); c++ {
+				owns := func(v SlotState) bool { return (c >= v.Core && c < v.Core+v.Cores) || slices.Contains(v.GroupCores, c) }
+				if owns(s) && owns(p) {
+					return fmt.Errorf("core %d has conflicting owners", c)
+				}
+			}
+		}
 	}
-	hb := ctrlRead(i, layout.CtrlHeartbeat)
-	return pollUntil(500*time.Millisecond, func() bool {
-		return ctrlRead(i, layout.CtrlHeartbeat) != hb
-	})
+	return nil
 }
 
 // partAdopt claimt een bestaande partitie voor slot i: hij wordt uit de vrije
 // lijst geknipt in plaats van eruit gesneden. Fout als het bereik niet (meer)
-// vrij is — dan klopt het blob niet bij deze pool en is niet-adopteren het
-// enige veilige antwoord.
+// vrij is — dan stopt adoptie de boot vóór plaatsing of services.
 func partAdopt(i int, base, size uint64) error {
 	partOnce.Do(poolInit)
 	partMu.Lock()
 	defer partMu.Unlock()
-	if i < 1 || i > layout.MaxSlots {
+	if i < 1 || i > layout.MaxSlots || size == 0 || base > ^uint64(0)-size || base%part2M != 0 || size%part2M != 0 {
 		return fmt.Errorf("slot %d buiten bereik", i)
 	}
 	if partOf[i].size != 0 {

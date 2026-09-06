@@ -33,7 +33,6 @@ import (
 
 	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 	"github.com/xinix00/HopOS/metal/v2/cpu/el2"
-	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
 var (
@@ -116,11 +115,7 @@ func nodeTask(sp, mp, gp, fn unsafe.Pointer) {
 	// gedeelde deel via writeHandoff (smp.go); daarbovenop de node-profielvelden.
 	cp := layout.NodeCtrlPA(c)
 	writeHandoff(cp, sp, mp, gp, fn, nodeStub)
-	dev.Write64(cp+layout.CtrlS2Table, 0)                        // node-profiel: geen stage-2-kooi
-	dev.Write64(cp+layout.CtrlVecPA, uint64(layout.TrapVecPA())) // EL2-vectoren (revoke), als core 0
-	dev.Write64(cp+layout.CtrlSlot, 0)                           // VMID 0 = die van core 0 (TLBI-broadcast)
-	dev.Write64(cp+layout.CtrlSMPMbox, 0)                        // node-cores parkeren niet
-	dev.MB()                                                     // handoff zichtbaar vóór de dispatch
+	el2.PrepareSMP(cp, cp, 0, 0, 0, uint64(layout.TrapVecPA()))
 
 	nodeDispatch(c, nodeTramp, uint64(cp))
 	atomic.StoreUint32(&nodeBootLock, 0)

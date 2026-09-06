@@ -231,33 +231,25 @@ func ReleaseCage(cage int) {
 	}
 }
 
-// adoptCage neemt een kooi over die al op zijn core draait — de kern-flip
-// (docs/kern-flip.md). Zonder dit begint de nieuwe kern met een lege
-// allocator en ziet hij élke core als vrij, terwijl er bewoners op draaien:
-// de eerstvolgende plaatsing zou dan ongevraagd naast een geadopteerde app
-// landen. Dat is geen capaciteitsfout maar een isolatie-keuze die stil
-// genomen wordt, en juist die mag deze laag nooit maken.
-//
-// De SHAREGROUP komt bewust niet mee. De groepslijst is niet af te leiden uit
-// de bewoners (een pool van drie cores met één app ziet er hetzelfde uit als
-// een pool van één), en een half herstelde groep zou de volgende job van die
-// groep hard weigeren met ErrPoolSize. Zo blijft de core bezet — wat de
-// invariant is die telt — en stelt de eerste nieuwe job van een sharegroup
-// zijn pool gewoon opnieuw samen. Kosten: mogelijk een andere core-set dan
-// vóór de flip. Dat is een plaatsingsdetail, geen correctheidsfout.
-//
-// TERUGGEVEN gaat via de gewone weg (ReleaseCage), en dat klopt: dit vult
-// precies de boekhouding die de plaatser zou hebben gehad als híj de app had
-// neergezet, dus zijn Stop ruimt hem net zo op als bij elke andere kooi.
-func adoptCage(cage, core, cores int) {
+// snapshotGroup copies the complete pool, including cores without a resident.
+func snapshotGroup(cage int) (string, []int) {
 	poolMu.Lock()
 	defer poolMu.Unlock()
-	if _, ok := cageCore[cage]; ok {
-		return
+	group := cageGroup[cage]
+	return group, append([]int(nil), groupPool[group]...)
+}
+
+// adoptCage restores a record already checked by ValidateAdoption.
+func adoptCage(st SlotState) {
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	if st.ShareGroup != "" && groupPool[st.ShareGroup] == nil {
+		groupPool[st.ShareGroup] = append([]int(nil), st.GroupCores...)
+		for _, c := range st.GroupCores {
+			coreGroup[c] = st.ShareGroup
+		}
 	}
-	// De hele run: een geadopteerde SMP-app houdt zijn secundaire cores net zo
-	// bezet als een vers geplaatste (zie reserve).
-	reserve(cage, core, max(cores, 1), "")
+	reserve(st.Slot, st.Core, st.Cores, st.ShareGroup)
 }
 
 // resetPools wist alle allocator-staat (alleen voor host-tests tussen cases).

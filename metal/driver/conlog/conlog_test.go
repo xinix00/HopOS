@@ -74,3 +74,11 @@ func TestSinceSlaatOverWatDeRingKwijtIs(t *testing.T) {
 		t.Fatalf("next = %d, want %d", next, pos)
 	}
 }
+
+func TestFutureCursorIsBounded(t *testing.T) {
+	reset()
+	put("current")
+	if b, next := Since(^uint64(0)); len(b) != 0 || next != pos {
+		t.Fatalf("future cursor: %d bytes next%d", len(b), next)
+	}
+}

@@ -48,6 +48,7 @@ var (
 // Aanroepen zodra het board zijn plan heeft en vóór de eerste console-byte die
 // je wilt bewaren; pa 0 of een te kleine size schakelt hem uit.
 func UseBlackBox(pa uintptr, size int) {
+	bbBase, bbCap, bbHead, bbPrev = 0, 0, 0, nil
 	if pa == 0 || size <= bbHdrLen+64 {
 		return
 	}
@@ -56,9 +57,9 @@ func UseBlackBox(pa uintptr, size int) {
 	if dev.Read64(pa) == bbMagic {
 		head = dev.Read64(pa + 8)
 		if head > 0 {
-			n := int(head)
-			if n > capacity {
-				n = capacity
+			n := capacity
+			if head < uint64(n) {
+				n = int(head)
 			}
 			buf := make([]byte, n)
 			start := head - uint64(n)

@@ -204,3 +204,60 @@ func TestHandoffFullConntrackFits(t *testing.T) {
 	t.Logf("blob met volle conntrack (%d flows) + 16 slots = %d bytes van %d",
 		hopswitch.MaxFlows, len(b), handoffTail)
 }
+
+func TestHandoffPreservesGroupPool(t *testing.T) {
+	in := Handoff{Slots: []slots.SlotState{{Slot: 4, Core: 1, Cores: 1, ShareGroup: "trusted", GroupCores: []int{1, 2, 3}}}}
+	b, err := encodeHandoff(in, handoffTail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := decodeHandoff(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.Slots[0]
+	if got.ShareGroup != "trusted" || len(got.GroupCores) != 3 || got.GroupCores[2] != 3 {
+		t.Fatalf("lost group: %+v", got)
+	}
+	binary.LittleEndian.PutUint64(b[handHead+72:], ^uint64(0))
+	if _, err := decodeHandoff(b); err == nil {
+		t.Fatal("accepted impossible group length")
+	}
+}
+
+func TestParseBundleRejectsWrappedHeader(t *testing.T) {
+	b := buildBundle(t, 0x40000000, 0x100000, 0x40001000, nil)
+	binary.LittleEndian.PutUint64(b[len(b)-16:], ^uint64(7))
+	if _, err := ParseBundle(b); err == nil {
+		t.Fatal("accepted wrapped header")
+	}
+	b = buildBundle(t, ^uint64(0xffff), 0x100000, 0x1000, nil)
+	if _, err := ParseBundle(b); err == nil {
+		t.Fatal("accepted wrapped image range")
+	}
+}
+
+func TestHandoffRejectsTruncatedServices(t *testing.T) {
+	b, err := encodeHandoff(Handoff{Agent: []byte("owners")}, handoffTail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int{handHead, handHead + 24, len(b) - 8} {
+		if _, err := decodeHandoff(b[:n]); err == nil {
+			t.Fatalf("accepted truncation at %d", n)
+		}
+	}
+}
+
+func TestSnapshotAgentFailureRefusesTransfer(t *testing.T) {
+	old := agentSnapshot
+	t.Cleanup(func() { agentSnapshot = old })
+	agentSnapshot = func() ([]byte, error) { return make([]byte, maxAgentState+1), nil }
+	if _, err := snapshotAgent(); err == nil {
+		t.Fatal("oversized state discarded without error")
+	}
+	agentSnapshot = nil
+	if b, err := snapshotAgent(); err != nil || b != nil {
+		t.Fatalf("no-agent kernel: %v", err)
+	}
+}

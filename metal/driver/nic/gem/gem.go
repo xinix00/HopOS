@@ -84,6 +84,8 @@ const (
 	rxWrap  = 1 << 1
 	// RX-descriptor woord 1.
 	rxLenMask = 0x1FFF
+	rxSOF     = 1 << 14
+	rxEOF     = 1 << 15
 
 	// TX-descriptor woord 1.
 	txUsed = 1 << 31
@@ -284,7 +286,11 @@ func (n *Net) Receive(buf []byte) (int, error) {
 		return 0, nil
 	}
 	dev.MB()
-	length := int(dev.Read32(d+4) & rxLenMask)
+	status := dev.Read32(d + 4)
+	length := int(status & rxLenMask)
+	if status&(rxSOF|rxEOF) != rxSOF|rxEOF || length > mtuBuf {
+		length = 0 // only a complete frame inside this DMA buffer
+	}
 	if length > len(buf) {
 		length = len(buf)
 	}

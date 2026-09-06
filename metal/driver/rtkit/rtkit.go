@@ -94,6 +94,7 @@ type Dev struct {
 
 	iopPower uint64
 	apPower  uint64
+	bufSizes [epOSLog + 1]uint64 // trusted bounds of host-allocated buffers
 	bufs     [epOSLog + 1]uint64 // per systeem-endpoint het afgegeven adres
 	appEP    map[uint32]bool     // applicatie-endpoints die "aan" gemeld hebben
 }
@@ -206,6 +207,7 @@ func (d *Dev) giveBuffer(msg uint64, ep uint32) error {
 	iova := msg & (1<<42 - 1)
 	if iova != 0 {
 		d.bufs[ep] = iova
+		d.bufSizes[ep] = 0 // firmware-owned address has no host allocation bound
 		return nil
 	}
 	size := pages << 12
@@ -227,6 +229,7 @@ func (d *Dev) giveBuffer(msg uint64, ep uint32) error {
 	}
 	dev.Clear(p, size)
 	d.bufs[ep] = uint64(p)
+	d.bufSizes[ep] = size
 	return d.send(typed(msgBufferRequest)|pages<<44|uint64(p), ep)
 }
 
@@ -238,9 +241,6 @@ func (d *Dev) Poll() error {
 		msg, ep, ok := d.recv()
 		if !ok {
 			return nil
-		}
-		if ep >= epSystem {
-			continue // van het apparaat zelf; wij spreken alleen de systeemkant
 		}
 		if err := d.handle(msg, ep); err != nil {
 			return err
@@ -374,7 +374,7 @@ func (d *Dev) Crashlog() string {
 		entryHdr  = 16
 	)
 	b := uintptr(d.bufs[epCrashlog])
-	if b == 0 {
+	if b == 0 || d.bufSizes[epCrashlog] < hdrSize {
 		return "no crashlog buffer"
 	}
 	if m := dev.Read32(b); m != magicCLHE {
@@ -382,9 +382,10 @@ func (d *Dev) Crashlog() string {
 	}
 	out := ""
 	p := b + hdrSize
-	for i := 0; i < 32; i++ {
+	end := b + uintptr(d.bufSizes[epCrashlog])
+	for i := 0; i < 32 && p <= end && end-p >= entryHdr; i++ {
 		t, l := dev.Read32(p), dev.Read32(p+12)
-		if t == magicCLHE || l < entryHdr || l > 1<<16 {
+		if t == magicCLHE || l < entryHdr || l > 1<<16 || uintptr(l) > end-p {
 			break
 		}
 		if t == magicCstr {

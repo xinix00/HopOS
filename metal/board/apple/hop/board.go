@@ -42,6 +42,10 @@ import (
 // machine is de board-implementatie voor Apple silicon onder m1n1.
 type machine struct{}
 
+// De boardallocator en driver moeten exact dezelfde DMA-grens gebruiken.
+const _ = uint(apple.StorageDriverReserved - nvme.AppleDMAReserved)
+const _ = uint(nvme.AppleDMAReserved - apple.StorageDriverReserved)
+
 // init registreert dit board: elke HOP-binary voor dit bord importeert deze
 // hop-helft (cmd/hopos/board_apple.go), dus board.Current() is meteen geldig.
 func init() { board.Use(machine{}) }

@@ -73,6 +73,8 @@ const (
 	// gecached wil mappen (2MB-grens en -maat, wat memattr eist).
 	AppleDataOff  = appleDataOff
 	AppleDataSize = 0x200000
+	// Reserve the complete cached block before uncached RTKit allocations.
+	AppleDMAReserved = AppleDataOff + AppleDataSize
 )
 
 // AppleConfig zijn de adressen die de ADT levert (via het param-blok van het
@@ -152,7 +154,7 @@ func (c *Controller) InitApple(cfg AppleConfig, dmaBase uintptr, dmaSize uint64)
 	if dmaSize < appleDMANeed {
 		return fmt.Errorf("nvme: DMA-regio %d bytes, ANS vraagt %d", dmaSize, appleDMANeed)
 	}
-	if dmaBase&0x3fff != 0 {
+	if dmaBase == 0 || uint64(dmaBase) > ^uint64(0)-dmaSize || dmaBase&0x3fff != 0 {
 		return fmt.Errorf("nvme: DMA-regio %#x niet op 16KB uitgelijnd", dmaBase)
 	}
 	c.Base, c.nvmmu, c.rt = cfg.NVMe, cfg.NVMMU, cfg.RTKit
@@ -178,6 +180,15 @@ func (c *Controller) InitApple(cfg AppleConfig, dmaBase uintptr, dmaSize uint64)
 		c.serviceCoprocessor()
 	}
 
+	// Oude DMA moet aantoonbaar gestopt zijn voordat queuegeheugen wijzigt.
+	dev.Write32(c.Base+regCC, dev.Read32(c.Base+regCC)&^uint32(ccEnable))
+	if err := c.waitCSTS(0, 5*time.Second); err != nil {
+		return err
+	}
+	c.failed = nil
+	dev.Clear(dmaBase, appleDMANeed)
+	dev.Push(dmaBase+appleDataOff, maxTransferSize)
+
 	// De queues. Elk paar heeft drie tabellen: de TCB's voor de NVMMU, de
 	// opdrachten zelf, en de completions. Allemaal 16KB-uitgelijnd.
 	c.admin = queue{tcb: dmaBase, sq: dmaBase + 0x4000, cq: dmaBase + 0x8000, phase: 1, id: 0}
@@ -185,7 +196,6 @@ func (c *Controller) InitApple(cfg AppleConfig, dmaBase uintptr, dmaSize uint64)
 	c.buf = dmaBase + appleDataOff
 	c.prpList = dmaBase + applePRPOff
 	c.MaxTransfer = maxTransferSize
-	dev.Clear(dmaBase, appleDMANeed)
 
 	// DSTRD is 0 op dit silicium; CAP uitlezen doet m1n1 hier niet en de
 	// completion-doorbellen liggen op de vaste plek die daarbij hoort.
@@ -208,10 +218,6 @@ func (c *Controller) InitApple(cfg AppleConfig, dmaBase uintptr, dmaSize uint64)
 	// eigen maten erin komt niet ready — gemeten 29-08, en m1n1 doet het
 	// daarom ook zo: alleen SHN wissen en EN zetten.
 	const ccSHN = 3 << 14
-	dev.Write32(c.Base+regCC, dev.Read32(c.Base+regCC)&^uint32(ccEnable))
-	if err := c.waitCSTS(0, 5*time.Second); err != nil {
-		return err
-	}
 	dev.Write32(c.Base+regAQA, (qEntries-1)<<16|(qEntries-1))
 	write64LoHi(c.Base+regASQ, uint64(c.admin.sq))
 	write64LoHi(c.Base+regACQ, uint64(c.admin.cq))

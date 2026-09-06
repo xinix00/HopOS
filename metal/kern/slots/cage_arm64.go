@@ -165,9 +165,15 @@ func cageIdent(i int) string { return "" }
 // ARM beslist kern/stage2 daarop of de EL2-blobs naar de plan-regio verhuizen.
 func cageSetFlipCapable(v bool) { stage2.SetFlipCapable(v) }
 
-// cageAdoptable: mag de slot-laag de bewoners van de vórige kern overnemen
-// (kern-flip, docs/kern-flip.md)? Op ARM houdt kern/stage2 dat antwoord vast:
-// hij kreeg de adoptie-stand van kernflip en trekt hem in als de switch-code
-// die in de plan-regio staat niet byte-voor-byte de zijne blijkt — dan heeft
-// hij die regio vers neergezet en bestaan de bewoners niet meer.
+// cageAdoptable meldt een gevalideerde kernel-overdracht. Incompatibele
+// levende switchcode stopt de boot vóórdat claims kunnen worden vrijgegeven.
 func cageAdoptable() bool { return stage2.Adopting() }
+
+// cageSMPContext freezes the EL1 request and supplies privileges from HOP's
+// own plan. The running app cannot change this handoff after publication.
+func cageSMPContext(slot, core int, cp uintptr) uint64 {
+	dst := ctxPA(core) + layout.CtxSMP
+	el2.PrepareSMP(dst, cp, uint64(layout.CageTablePA(slot)), uint64(slot),
+		uint64(layout.ParkMboxPA(core)), uint64(layout.VecBasePA()))
+	return uint64(dst)
+}

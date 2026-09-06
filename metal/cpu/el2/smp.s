@@ -9,8 +9,8 @@
 //
 //   - smpEL2Tramp draait op de nieuwe core op EL2 (MMU uit), uit HOP's image
 //     (identity → symbooladres = fysiek). PSCI CPU_ON springt hierheen met
-//     x0 = fysiek adres van de control-page van de primaire. Het leest de door
-//     goos.Task neergelegde M-context (en VMID/vectoren) van die page,
+//     x0 = fysiek adres van een node-owned startcontext. Het leest de door
+//     HOP gekopieerde M-context en vertrouwde VMID/vectoren van die context,
 //     activeert de gedeelde stage-2, en ERET't naar de EL1-stub.
 //   - smpEL1Stub draait op EL1 onder de gedeelde stage-2, uit het APP-image
 //     (IPA). Het zet de eigen stage-1 MMU aan met het GEËRFDE vertaalregime
@@ -28,13 +28,11 @@
 #include "sysreg.h"
 #include "drop.h"
 
-// smpEL2Tramp: entry voor een secundaire SMP-core (EL2, MMU uit). x0 = het
-// FYSIEKE adres van de control-page van de primaire — de app geeft die PA mee
-// als ctx-argument van PSCI CPU_ON, dus de trampoline krijgt 'm rechtstreeks
-// in x0 (de app kent verder alleen IPA's). Data-gedreven zoals el2.s: geen
-// #defines, board-neutraal onder elk PA-plan.
+// smpEL2Tramp: entry voor een secundaire SMP-core (EL2, MMU uit).
+// x0 is uitsluitend een node-owned handoff van PrepareSMP. De offsets zijn
+// dezelfde als op de control-page, maar app-geheugen wordt hier niet gelezen.
 TEXT smpEL2Tramp(SB),NOSPLIT|NOFRAME,$0
-	MOVD	R0, R1		// R1 = control-page van de primaire (fysiek)
+	MOVD	R0, R1		// R1 = vertrouwde startcontext (fysiek)
 
 	// M-context die goos.Task neerlegde (IPA-waarden; geldig zodra de gedeelde
 	// stage-2/stage-1 straks actief is). In callee-saved regs tot na de ERET.
@@ -48,8 +46,7 @@ TEXT smpEL2Tramp(SB),NOSPLIT|NOFRAME,$0
 	MOVD	0xB8(R1), R6	// layout.CtrlSlot     → VMID (primair slot)
 
 	// TPIDR_EL2 = fysieke parkeer-mailbox van déze secundaire core. De
-	// primaire ctrl-page is gedeeld, dus de secundaire mailbox komt via een
-	// eigen veld dat HOP vlak vóór de dispatch zette (CtrlSMPMbox).
+	// mailbox komt uit HOP's per-core handoff (CtrlSMPMbox).
 	MOVD	0xD0(R1), R7	// layout.CtrlSMPMbox
 	WORD	$0xd51cd047	// msr tpidr_el2, x7
 
@@ -73,7 +70,7 @@ TEXT smpEL2Tramp(SB),NOSPLIT|NOFRAME,$0
 	WORD	$0xd53800a4	// mrs x4, mpidr_el1
 	WORD	$0xd51c00a4	// msr vmpidr_el2, x4
 
-	// Kooi-profiel gekozen op CtrlS2Table (R2) — dit is de gedeelde trampoline
+	// Kooi-profiel gekozen op de vertrouwde CtrlS2Table (R2) — dit is de gedeelde trampoline
 	// voor ZOWEL een app-SMP-core ALS een node-runtime-core (HOP zelf):
 	//   R2 == 0  → node-core: GÉÉN stage-2-kooi, HCR zonder VM/TSC (de node mag
 	//              SMC/HVC — PSCI, Revoke). Spiegelt bootKernel's HCR van core 0.
@@ -142,11 +139,11 @@ s2done:
 
 	// Het geërfde EL1-vertaalregime voor de stub: de dispatchende primaire —
 	// app-runtime (goos.Task) óf node (ConfigureNode) — las zijn ÁCTIEVE
-	// MAIR/TCR/VBAR_EL1 en legde ze op de control-page; de stub zet ze blind.
+	// MAIR/TCR/VBAR_EL1 en legde ze in de handoff; de stub zet ze blind.
 	// Eén mechanisme voor beide profielen, geen hardcoded kopieën: de node-
 	// primaire kan mmu48's 48-bit-wereld draaien (Altra: UART/watchdog op
 	// 16TB) en tamago-defaults zouden die onvertaalbaar laten. R1 is nog de
-	// control-page; R5/R6/R7 zijn na hun scratch/VMID/TPIDR-gebruik vrij.
+	// handoff; R5/R6/R7 zijn na hun scratch/VMID/TPIDR-gebruik vrij.
 	MOVD	0xF8(R1), R5	// layout.CtrlSMPMair → x5
 	MOVD	0xD8(R1), R6	// layout.CtrlSMPTcr  → x6
 	MOVD	0x78(R1), R7	// layout.CtrlSMPVbar → x7

@@ -19,6 +19,7 @@ out-release/
 # blijft intern op de vijf al-getrackte diepte-docs na.
 !docs/*.md
 !docs/technical/*.md
+!docs/technical/release-evidence/*.log
 !docs/archief/bcm2712-c1-erratum.md
 !docs/archief/uefi.md
 !docs/archief/app-memory.md

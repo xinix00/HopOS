@@ -6,8 +6,8 @@ package kernflip
 // pointer naar.
 //
 // Alles hierin is BOEKHOUDING, geen inhoud: de app-werelden zelf blijven staan
-// waar ze staan. Daarom is het klein, vast van vorm, en mag het bij twijfel
-// weggegooid worden — dan degradeert de flip naar een gewone boot.
+// waar ze staan. Bij een onbruikbare overdracht stopt de nieuwe boot; de
+// allocator mag mogelijk levende eigenaren nooit als vrije ruimte behandelen.
 
 import (
 	"encoding/binary"
@@ -41,14 +41,15 @@ const maxAgentState = 128 << 10
 //	            nieuwVenster.base | nieuwVenster.total | slotCount | generatie |
 //	            bundelsom | (rest gereserveerd)
 //	per slot:  slot | partBase | partSize | core | nPorts | jobLen |
-//	           cores | nMounts | nPorts×u64 (poort) | job-bytes |
+//	           cores | nMounts | groupLen | nGroupCores | groupCores×u64 |
+//	           group-bytes (8-uitgelijnd) | nPorts×u64 (poort) | job-bytes |
 //	           per mount: localLen | sharedLen | bytes (alles 8-uitgelijnd)
 //	NAT-blok:  masqNext | gwMAC+gwKnown | flowCount | flowCount×24B
 //	agent:     lengte | JSON-bytes (8-uitgelijnd) — de state van HOP zelf
 const (
-	handVersion = 5
+	handVersion = 6
 	handHead    = 128
-	slotHead    = 64
+	slotHead    = 80
 )
 
 // Handoff is wat de vertrekkende kern achterliet.
@@ -86,6 +87,9 @@ type Handoff struct {
 // dan is dat een fout vóór de sprong (en dus geen flip) in plaats van een half
 // blob dat de nieuwe kern moet zien te overleven.
 func encodeHandoff(h Handoff, max int) ([]byte, error) {
+	if len(h.Agent) > maxAgentState {
+		return nil, fmt.Errorf("agent state exceeds handoff limit")
+	}
 	b := make([]byte, handHead)
 	binary.LittleEndian.PutUint64(b[0:], handMagic)
 	binary.LittleEndian.PutUint64(b[8:], handVersion)
@@ -107,7 +111,16 @@ func encodeHandoff(h Handoff, max int) ([]byte, error) {
 		binary.LittleEndian.PutUint64(rec[40:], uint64(len(s.Job)))
 		binary.LittleEndian.PutUint64(rec[48:], uint64(s.Cores))
 		binary.LittleEndian.PutUint64(rec[56:], uint64(len(s.Mounts)))
+		binary.LittleEndian.PutUint64(rec[64:], uint64(len(s.ShareGroup)))
+		binary.LittleEndian.PutUint64(rec[72:], uint64(len(s.GroupCores)))
 		b = append(b, rec[:]...)
+		for _, c := range s.GroupCores {
+			b = binary.LittleEndian.AppendUint64(b, uint64(c))
+		}
+		b = append(b, s.ShareGroup...)
+		for len(b)%8 != 0 {
+			b = append(b, 0)
+		}
 		for _, p := range s.Ports {
 			b = binary.LittleEndian.AppendUint64(b, uint64(p))
 		}
@@ -156,7 +169,7 @@ func encodeHandoff(h Handoff, max int) ([]byte, error) {
 }
 
 // decodeHandoff leest het blob terug. Elke afwijking geeft een fout: de
-// aanroeper behandelt dat als "gewone boot", en dat is altijd veilig.
+// aanroeper stopt de boot voordat een gedeeltelijke allocator bruikbaar wordt.
 func decodeHandoff(b []byte) (Handoff, error) {
 	var h Handoff
 	if len(b) < handHead {
@@ -192,10 +205,19 @@ func decodeHandoff(b []byte) (Handoff, error) {
 		jobLen := binary.LittleEndian.Uint64(b[off+40:])
 		s.Cores = int(binary.LittleEndian.Uint64(b[off+48:]))
 		nMounts := binary.LittleEndian.Uint64(b[off+56:])
-		if s.Cores < 1 {
-			s.Cores = 1
-		}
+		groupLen := binary.LittleEndian.Uint64(b[off+64:])
+		nGroup := binary.LittleEndian.Uint64(b[off+72:])
 		off += slotHead
+		if groupLen > 256 || nGroup > 1024 || nGroup*8+groupLen > uint64(len(b)-off) {
+			return h, fmt.Errorf("slot-record %d: invalid group length", k)
+		}
+		for j := uint64(0); j < nGroup; j++ {
+			s.GroupCores = append(s.GroupCores, int(binary.LittleEndian.Uint64(b[off:])))
+			off += 8
+		}
+		s.ShareGroup = string(b[off : off+int(groupLen)])
+		off += int(groupLen)
+		off += (8 - off&7) & 7
 		if nPorts > 64 || jobLen > 256 {
 			return h, fmt.Errorf("slot-record %d: %d poorten / %d job-bytes is onzin", k, nPorts, jobLen)
 		}
@@ -231,12 +253,9 @@ func decodeHandoff(b []byte) (Handoff, error) {
 		h.Slots = append(h.Slots, s)
 	}
 
-	// Het NAT-blok is OPTIONEEL bij het lezen: een blob zonder (of met een
-	// afgekapte) conntrack levert een node zonder overgenomen flows op, en dat
-	// is een degradatie — verbindingen breken — maar geen reden om de hele
-	// adoptie weg te gooien en de apps te laten vallen.
+	// This version always carries both service blocks, even when empty.
 	if off+24 > len(b) {
-		return h, nil
+		return h, fmt.Errorf("truncated NAT header")
 	}
 	h.NAT.MasqNext = uint16(binary.LittleEndian.Uint64(b[off:]))
 	mac := binary.LittleEndian.Uint64(b[off+8:])
@@ -247,8 +266,7 @@ func decodeHandoff(b []byte) (Handoff, error) {
 	nf := binary.LittleEndian.Uint64(b[off+16:])
 	off += 24
 	if nf > uint64(hopswitch.MaxFlows) || off+int(nf)*24 > len(b) {
-		fmt.Printf("kernflip: conntrack block claims %d flows and does not fit — continuing without it\n", nf)
-		return h, nil
+		return h, fmt.Errorf("invalid conntrack length %d", nf)
 	}
 	for k := uint64(0); k < nf; k++ {
 		w0 := binary.LittleEndian.Uint64(b[off:])
@@ -263,18 +281,13 @@ func decodeHandoff(b []byte) (Handoff, error) {
 		off += 24
 	}
 
-	// Het agent-blok, net als het NAT-blok optioneel bij het lezen: zonder
-	// agent-state draaien de apps gewoon door en corrigeert de leader de
-	// administratie bij zijn eerste synchronisatie. Dat is een degradatie,
-	// geen reden om de bewoners te laten vallen.
 	if off+8 > len(b) {
-		return h, nil
+		return h, fmt.Errorf("truncated agent header")
 	}
 	na := binary.LittleEndian.Uint64(b[off:])
 	off += 8
 	if na > uint64(maxAgentState) || off+int(na) > len(b) {
-		fmt.Printf("kernflip: agent state block claims %d bytes and does not fit — continuing without it\n", na)
-		return h, nil
+		return h, fmt.Errorf("invalid agent state length %d", na)
 	}
 	h.Agent = append([]byte(nil), b[off:off+int(na)]...)
 	return h, nil

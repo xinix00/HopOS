@@ -1,6 +1,7 @@
 package rkscan
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/xinix00/HopOS/metal/v2/dev"
@@ -327,6 +328,9 @@ const (
 // heeft die maat. Een monitor die 1080p60 niet kan is buiten bereik van deze
 // eerste versie.
 func VOPScanout(base uintptr, w, h, stride int) error {
+	if w != hDisplay || h != vDisplay || stride < w*4 || stride%4 != 0 || base == 0 || uint64(base) > 1<<32 || uint64(stride) > ((1<<32)-uint64(base))/uint64(h) {
+		return fmt.Errorf("display: invalid 1080p framebuffer geometry or 32-bit DMA range")
+	}
 	if err := VOPPixelClock(); err != nil {
 		return err
 	}

@@ -143,13 +143,10 @@ func installSwitchCode() {
 
 	if mmodeAdopting {
 		if dev.Read64(base) != switchMagic || dev.Read64(base+swHash) != sum {
-			// Zelfde afweging als op ARM (kern/stage2): we zijn al gesprongen en
-			// een kern zonder werkende switcher kan niets, dus installeren we
-			// alsnog vers en geven we de bewoners op — kern/slots ziet dat via
-			// cageAdoptable en laat hun partities los.
+			// Live bewoners kunnen deze code nog uitvoeren: nooit overschrijven.
 			fmt.Printf("HOPOS_FLIP_SWITCHCODE_MISMATCH: resident M-mode code (%#x) is not ours (%#x) — refusing to adopt residents\n",
 				dev.Read64(base+swHash), sum)
-			mmodeAdopting = false
+			panic("cage: incompatible live switch code; refusing cold initialization")
 		} else {
 			b := uint64(base)
 			mmode.SetRelocated(b+dev.Read64(base+swEntry), b+dev.Read64(base+swPark))
@@ -766,3 +763,6 @@ func cageLinkBase() uint64 {
 	}
 	return pool[0].Base
 }
+
+// SMP is unavailable on the current RISC-V board.
+func cageSMPContext(slot, core int, cp uintptr) uint64 { return uint64(cp) }

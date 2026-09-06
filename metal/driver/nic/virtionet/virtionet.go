@@ -240,7 +240,7 @@ func (n *Net) Receive(buf []byte) (int, error) {
 
 	slot := uintptr(n.rx.lastUsed % uint16(n.qsize))
 	elem := n.rx.used + 4 + slot*8
-	descIdx := uint16(dev.Read32(elem)) // used_elem.id (device-eigen: valideren!)
+	descID := dev.Read32(elem) // used_elem.id (device-eigen: valideren!)
 
 	// De used-ring is device-eigen: een corrupt of kwaadaardig device kan hier
 	// een id buiten [0, qsize) plaatsen. Ongecontroleerd is descIdx een rauwe
@@ -249,14 +249,15 @@ func (n *Net) Receive(buf []byte) (int, error) {
 	// weten niet welke buffer erbij hoort (we verliezen hooguit één RX-descriptor
 	// bij dit device-fout-event) — en ga verder. Dit is het patroon dat de
 	// toekomstige RTL8126-driver overneemt.
-	if int(descIdx) >= n.qsize {
+	if descID >= uint32(n.qsize) {
 		n.rx.lastUsed++
 		return 0, nil
 	}
 
+	descIdx := uint16(descID)
 	length := int(dev.Read32(elem + 4)) // used_elem.len (incl. virtio-hdr)
 
-	if length > hdrLen {
+	if length > hdrLen && length <= bufSize {
 		frame := length - hdrLen
 		if frame > len(buf) {
 			frame = len(buf)
@@ -293,6 +294,9 @@ func (n *Net) recycleRx(descIdx uint16) {
 // blokkeren alleen als de ring vol is (availIdx - used.idx >= qsize) — dan is
 // die oudste frame nog niet verzonden en zou overschrijven het corrumperen.
 func (n *Net) Transmit(buf []byte) error {
+	if len(buf) == 0 || len(buf) > bufSize-hdrLen {
+		return errors.New("virtionet: frame does not fit TX buffer")
+	}
 	n.tx.lastUsed = dev.Read16(n.tx.used + 2) // voltooide descriptors terugnemen
 	if n.tx.availIdx-n.tx.lastUsed >= uint16(n.qsize) {
 		// Ring vol: begrensd wachten tot het device een descriptor vrijgeeft.
@@ -310,13 +314,9 @@ func (n *Net) Transmit(buf []byte) error {
 
 	// 12-byte virtio-header (nul) + frame.
 	dev.Clear(bufAddr, hdrLen)
-	frame := buf
-	if len(frame) > bufSize-hdrLen {
-		frame = frame[:bufSize-hdrLen]
-	}
-	dev.Copy(bufAddr+hdrLen, frame)
+	dev.Copy(bufAddr+hdrLen, buf)
 
-	n.setDesc(&n.tx, slot, bufAddr, uint32(hdrLen+len(frame)), 0)
+	n.setDesc(&n.tx, slot, bufAddr, uint32(hdrLen+len(buf)), 0)
 	n.setAvail(&n.tx, int(n.tx.availIdx), uint16(slot))
 	n.tx.availIdx++
 	dev.MB()

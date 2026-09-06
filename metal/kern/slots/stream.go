@@ -147,7 +147,7 @@ func startStream(i int, r io.Reader, imgSize int64, memLimit uint64, cores int, 
 	// Cache-hygiëne van de vorige huurder, vóór de ongecachte writes (zie
 	// startImage). Coöperatief: dit yieldt tussendoor, en we houden hier
 	// bewust geen venster vast.
-	coopCleanInv(uintptr(base), uintptr(size))
+	prepareMemory(uintptr(base), uintptr(size))
 
 	// De stroom: elke byte meteen op zijn eindadres. De plaatser valideert
 	// alles (venster, volgorde, maat) en Finish draait dezelfde Build als het

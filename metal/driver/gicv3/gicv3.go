@@ -21,13 +21,6 @@ import (
 	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
-const (
-	gicdIROUTER  = 0x6100
-	firstSPI     = 32
-	firstSpecial = 1020                        // 1020..1023: geen echte interrupt
-	affMask      = uint64(0xFF)<<32 | 0xFFFFFF // Aff3:Aff2:Aff1:Aff0, IRM (bit 31) = 0
-)
-
 // Ctrl is één GICv3, geïnitialiseerd voor de aanroepende core.
 type Ctrl struct {
 	hw    gic.GIC
@@ -45,14 +38,16 @@ func New(gicd, gicr uintptr) *Ctrl {
 }
 
 func (c *Ctrl) Enable(l irq.Line) error {
-	c.hw.EnableInterrupt(l.ID)
-	if l.ID >= firstSPI {
-		dev.Write64(uintptr(c.hw.GICD)+gicdIROUTER+8*uintptr(l.ID), c.mpidr&affMask)
-	}
-	return nil
+	return enableLine(uintptr(c.hw.GICD), uintptr(c.hw.GICR), l.ID, c.mpidr)
 }
 
-func (c *Ctrl) Disable(l irq.Line) { c.hw.DisableInterrupt(l.ID) }
+func (c *Ctrl) Disable(l irq.Line) {
+	if l.ID >= 0 && l.ID < firstSpecial {
+		base, n, bit := lineReg(uintptr(c.hw.GICD), uintptr(c.hw.GICR), l.ID)
+		dev.Write32(base+0x180+4*n, bit) // W1C: never read-modify-write peers
+		dev.MB()
+	}
+}
 
 // Claim leest ICC_IAR0 en doet meteen de EOI (tamago's GetInterrupt doet
 // beide); een speciaal nummer (1020+) is "niets".

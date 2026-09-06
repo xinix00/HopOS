@@ -927,6 +927,7 @@ func (n *Net) Receive(buf []byte) (int, error) {
 	if prod == n.r.rxRetIdx {
 		return 0, nil
 	}
+	dev.MB() // observe completion before its descriptor and packet
 	d := n.r.dma + offRxRet + uintptr(n.r.rxRetIdx)*rxDescSize
 	idxLen := dev.Read32(d + 8)
 	flags := dev.Read32(d+12) & 0xffff
@@ -936,21 +937,22 @@ func (n *Net) Receive(buf []byte) (int, error) {
 	// (tg3_rx: `len = ... - ETH_FCS_LEN`). Vier bytes te veel doorgeven betekent
 	// vier bytes rommel achter élk pakket dat de stack krijgt.
 	length := int(idxLen&0xffff) - 4
-	src := n.r.dma + offRxBuf + uintptr(opaque&0xffff)*rxBufSize
+	index := opaque & 0xffff
+	if flags&rxdFlagError != 0 || errVLAN&rxdErrMask != 0 || index >= rxStdRing || length < 14 || length > rxDMASize-4 || length > len(buf) {
+		length = 0
+	} else {
+		src := n.r.dma + offRxBuf + uintptr(index)*rxBufSize
+		dev.Pull(src, uintptr(length))
+		dev.CopyOut(buf[:length], src)
+	}
 
+	// Eerst de kopie afmaken; pas daarna mag DMA deze buffer opnieuw vullen.
+	dev.MB()
 	n.r.rxRetIdx = (n.r.rxRetIdx + 1) % rxRetRing
 	n.wr(mbRxRetCons, n.r.rxRetIdx)
-
-	// De buffer weer aanbieden: zijn descriptor staat al goed (adres en lengte
-	// veranderen niet), alleen de producer schuift op.
 	n.r.rxStdIdx = (n.r.rxStdIdx + 1) % rxStdRing
 	n.wr(mbRxStdProd, n.r.rxStdIdx)
 
-	if flags&rxdFlagError != 0 || errVLAN&rxdErrMask != 0 || length < 14 || length > len(buf) {
-		return 0, nil // stuk frame of te groot voor de aanroeper: laten vallen
-	}
-	dev.Pull(src, uintptr(length)) // gecachte buffer: de DMA-inhoud uit onze cache halen
-	dev.CopyOut(buf[:length], src)
 	return length, nil
 }
 

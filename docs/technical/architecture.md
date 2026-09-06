@@ -36,11 +36,15 @@ flowchart LR
   need a 124 MB partition). The download runs on HOP's own network stack and
   buffers only its read block; how many run at once is the orchestrator's
   call.
-- **No interrupts.** Everything polls; idle ARM cores sleep on the event
-  stream (~1 ms granularity) and are woken by work, and a spare RISC-V hart
-  pauses on a counter instead (no `wfi` — on the C906 that is not a
-  guaranteed-to-return hint, and one wrong guess is a hart that never looks
-  up again). Fewer moving parts, no IRQ routing, deterministic behaviour.
+- **One network IRQ, one logical doorbell per resident.** Work stays in
+  the rings/control page: publish it, ring, then let the resident process it.
+  Notifications may coalesce; checking for work before sleeping prevents lost
+  wakeups. The board implements waiting and waking with its event/IPI or
+  counter mechanism, with polling where a device has no IRQ integration.
+  Explicitly trusted sharegroups use the same wake path while retaining
+  separate memory cages. Lifecycle operations finish in order before their
+  memory or core claims become reusable. See the
+  [framework contract](framework-contract.md).
 - **Discovery, not configuration.** UEFI boards read ACPI (MADT, MCFG,
   SPCR, GTDT); Pis read the device tree; the LicheeRV's map is board
   constants, because that SoC hands us no description of itself. The same job

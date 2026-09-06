@@ -293,13 +293,14 @@ func (n *Net) Receive(buf []byte) (int, error) {
 	// Alleen complete, foutvrije frames afleveren; ALIGN_2B zet 2 pad-bytes
 	// vóór het frame (in de lengte meegeteld, valkuil 6). FCS strippen doet
 	// de MAC al (CRC_FWD staat uit).
-	if flags&(dmaSOP|dmaEOP) == dmaSOP|dmaEOP && flags&rxErrMask == 0 && length > 2 {
+	if flags&(dmaSOP|dmaEOP) == dmaSOP|dmaEOP && flags&rxErrMask == 0 && length > 2 && length <= bufSize {
 		got = length - 2
 		if got > len(buf) {
 			got = len(buf)
 		}
 		dev.CopyOut(buf[:got], n.rxBufs+uintptr(i)*bufSize+2)
 	}
+	dev.MB() // finish reading the packet before returning its buffer to DMA
 	n.rxCons = (n.rxCons + 1) & 0xFFFF
 	n.wr(rdmaRing16+0x0C, n.rxCons)
 	return got, nil

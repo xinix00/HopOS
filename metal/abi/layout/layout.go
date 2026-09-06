@@ -388,9 +388,12 @@ const (
 	// overschreven.
 	CtxKickPending = 536
 
-	// CtxLen is hoeveel een verse init van het ctx-blok moet nullen: het hele
-	// blok tot en met de cacheline van CtxRevoke (512..575) plus slack tot een
-	// ronde macht van twee — er ligt niets van de ABI voorbij dit punt.
+	// Node-owned entry argument, separate from the resident control-page.
+	CtxBootArg = 544
+	// Trusted SMP handoff, using control-field offsets within 256 bytes.
+	// Only HOP writes it, before the secondary is dispatched.
+	CtxSMP = 768
+	// Entire context, including the trusted SMP handoff.
 	CtxLen = 1024
 	// FP staat bewust NIET in dit blok, op geen van beide architecturen: de laag
 	// die HOP bezit draait met zijn MMU uit (Device-geheugen) en een SIMD-store
@@ -444,9 +447,15 @@ const (
 // Aanroepen VÓÓR uitlijnen/trimmen: elke kunstmatige grens kost anders tot
 // 4MB en laat snippers < korrel sterven.
 func Coalesce(regs []Region) []Region {
+	for _, r := range regs {
+		checkRegion(r)
+	}
 	sort.Slice(regs, func(i, j int) bool { return regs[i].Base < regs[j].Base })
 	out := regs[:0]
 	for _, r := range regs {
+		if r.Size == 0 {
+			continue
+		}
 		if n := len(out); n > 0 && r.Base <= out[n-1].Base+out[n-1].Size {
 			if end := r.Base + r.Size; end > out[n-1].Base+out[n-1].Size {
 				out[n-1].Size = end - out[n-1].Base
@@ -466,7 +475,7 @@ func Coalesce(regs []Region) []Region {
 // ok=false: de image past niet (of imgSize is onzin).
 func StageAddr(ramBase, ramSize uint64, imgSize int64) (addr, staged uint64, ok bool) {
 	staged = (uint64(imgSize) + 7) &^ 7
-	if imgSize <= 0 || staged >= ramSize {
+	if imgSize <= 0 || staged >= ramSize || ramBase > ^uint64(0)-ramSize {
 		return 0, staged, false
 	}
 	return ramBase + ramSize - staged, staged, true
@@ -617,7 +626,56 @@ func UsePlan(p Plan) {
 	case p.TrapVecPA&0x7FF != 0:
 		panic("layout: Plan.TrapVecPA niet 2KB-aligned (VBAR-eis)")
 	}
+	// Alleen pool versus gereserveerd: trap-vectoren en boot-scratch mogen
+	// bewust onderdeel van een grotere admin-regio zijn.
+	reserved := []Region{
+		{p.NodeCtrlPA, uint64(MaxSlots+1) * CtrlStride},
+		{p.CagePA, uint64(MaxSlots+1) * CageStride},
+		{p.BootScratchPA, HandoffPtrOff + 16},
+	}
+	for _, r := range []Region{
+		{p.TrapVecPA, 0x800}, {p.FlipScratchPA, 8},
+		{p.BlackBoxPA, p.BlackBoxSize}, {p.USBDMAPA, USBDMASize},
+		// De NIC-maat is board-specifiek (LicheeRV: 448KB, ARM: 8MB).
+		// Bewaak hier het basisadres; het board bewaakt de volledige carve.
+		{p.NetDMAPA, 1},
+	} {
+		if r.Base != 0 {
+			reserved = append(reserved, r)
+		}
+	}
+	for _, r := range reserved {
+		checkRegion(r)
+	}
+	for i, r := range p.Pool {
+		checkRegion(r)
+		if r.Size == 0 || (r.Base|r.Size)&((2<<20)-1) != 0 {
+			panic("layout: pool region empty or not 2MB-aligned")
+		}
+		for _, other := range p.Pool[:i] {
+			if regionsOverlap(r, other) {
+				panic("layout: overlapping pool regions")
+			}
+		}
+		for _, admin := range reserved {
+			if regionsOverlap(r, admin) {
+				panic("layout: pool overlaps reserved region")
+			}
+		}
+	}
 	plan = p
+}
+
+// checkRegion houdt alle intervalberekeningen overflow-vrij. Onbruikbare
+// firmwaregeometrie is een bootfout, geen lege pool die een fallback toestaat.
+func checkRegion(r Region) {
+	if r.Size > ^uint64(0)-r.Base {
+		panic("layout: memory region overflows")
+	}
+}
+
+func regionsOverlap(a, b Region) bool {
+	return a.Size != 0 && b.Size != 0 && a.Base < b.Base+b.Size && b.Base < a.Base+a.Size
 }
 
 // NetDMAPA geeft de fysieke NIC-DMA-regio van het plan (NetDMASize groot).
@@ -736,9 +794,13 @@ func Pool() []Region {
 // vallen weg. Zo benut een board zijn volledige RAM (meerdere banken, ook
 // boven 4GB) zonder ooit een hole uit te delen. Leeg = de aanroeper valt terug.
 func CarvePool(banks, holes []Region, min uint64) []Region {
-	regs := append([]Region(nil), banks...)
+	regs := Coalesce(append([]Region(nil), banks...))
 	// Elke hole uit elke overlappende bank knippen (kan 'm splitsen).
 	for _, h := range holes {
+		checkRegion(h)
+		if h.Size == 0 {
+			continue
+		}
 		hEnd := h.Base + h.Size
 		var next []Region
 		for _, r := range regs {
@@ -760,7 +822,11 @@ func CarvePool(banks, holes []Region, min uint64) []Region {
 	const mb2 = 2 << 20
 	var out []Region
 	for _, r := range regs {
-		base := (r.Base + mb2 - 1) &^ (mb2 - 1)
+		pad := -r.Base & (mb2 - 1)
+		if pad >= r.Size {
+			continue
+		}
+		base := r.Base + pad
 		end := (r.Base + r.Size) &^ (mb2 - 1)
 		if end > base && end-base >= min {
 			out = append(out, Region{Base: base, Size: end - base})

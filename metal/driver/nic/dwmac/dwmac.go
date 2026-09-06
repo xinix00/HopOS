@@ -406,7 +406,7 @@ func (n *Net) Receive(buf []byte) (int, error) {
 		n.rxLastErr = sts
 	default:
 		length = int(sts>>rxLenShift&rxLenMask) - 4 // FCS eraf
-		if length < 0 {
+		if length < 0 || length > maxFrame-4 {
 			length = 0
 		}
 		if length > len(buf) {

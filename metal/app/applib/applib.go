@@ -113,7 +113,7 @@ func Init() *App {
 	// ring meteen het memmove-pad krijgt. Melden na de outbox — dan kán het.
 	tailErr := memattr.NormalWB(layout.AbiTailAt(a.RAMStart, a.RAMSize), layout.AbiTail)
 
-	a.out = ring.Open(layout.RingOutboxAt(a.RAMStart, a.RAMSize))
+	a.out = ring.Open(layout.RingOutboxAt(a.RAMStart, a.RAMSize), layout.RingDataCap)
 	a.env = a.readEnv()
 	if tailErr != nil {
 		a.Logf("abi: tail window stays device-mapped (%v) — 8-byte ring copies", tailErr)

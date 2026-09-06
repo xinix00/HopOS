@@ -60,6 +60,23 @@ func poolReset(t *testing.T, regs []layout.Region) {
 		partFree = append(partFree, region{r.Base, r.Size})
 	}
 	partOf = make([]region, layout.SlotCap+1)
+	quarantined = make([]bool, layout.SlotCap+1)
+}
+
+func TestAllocationRejectsOverflowBeforeChangingPool(t *testing.T) {
+	poolReset(t, []layout.Region{{Base: 0x80000000, Size: 64 << 20}})
+	before := PoolBytes()
+	for _, size := range []uint64{0, ^uint64(0), ^uint64(0) - 1} {
+		if _, _, err := partAlloc(1, size); err == nil {
+			t.Fatalf("accepted invalid partition size %d", size)
+		}
+		if _, _, err := BorrowKernWindow(size); err == nil {
+			t.Fatalf("accepted invalid kernel window size %d", size)
+		}
+	}
+	if PoolBytes() != before {
+		t.Fatal("invalid allocation changed the free pool")
+	}
 }
 
 // De maat die partAlloc teruggeeft ÍS de partitie, ook als de aanvraag geen
@@ -112,15 +129,19 @@ func TestPartAllocFailKeepsTheReservation(t *testing.T) {
 	}
 }
 
-// Een re-place van hetzelfde slot moet zijn EIGEN regio wel kunnen hergebruiken:
-// het terugdraaien mag dat niet blokkeren.
-func TestPartAllocReplaceReusesItsOwnRegion(t *testing.T) {
+// Hergebruik vereist eerst vrijgeven; alloceren beëindigt geen eigenaar.
+func TestPartAllocReuseRequiresRelease(t *testing.T) {
 	poolReset(t, []layout.Region{{Base: 0x80000000, Size: 32 << 20}})
 
 	if _, _, err := partAlloc(1, 30<<20); err != nil {
 		t.Fatalf("eerste allocatie: %v", err)
 	}
-	// Zonder hergebruik van zijn eigen 30MB is er nergens 30MB vrij.
+	// Ook een passende aanvraag mag de bestaande eigenaar niet vervangen.
+	if _, _, err := partAlloc(1, 30<<20); err == nil {
+		t.Fatal("duplicate allocation replaced an existing owner")
+	}
+	partRelease(1)
+	// Nu komt hetzelfde bereik wel terug beschikbaar.
 	if _, _, err := partAlloc(1, 30<<20); err != nil {
 		t.Fatalf("re-place van hetzelfde slot: %v", err)
 	}

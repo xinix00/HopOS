@@ -95,7 +95,7 @@ flip)
 			"$TAMAGO" build -tags "qemuvirt linkcpuinit$GUITAG" -trimpath \
 			-ldflags "-w -buildid= -T ${VAR%%:*} -R 0x1000$FLIPX" -o "${VAR#*:}" ./cmd/hopos-embed
 	done
-	GO111MODULE=off go run "$DIR"/image/mkkernel/*.go -elfreloc -flipabi 1 -o out/flip.img \
+	GO111MODULE=off go run "$DIR"/image/mkkernel/*.go -elfreloc -flipabi 2 -o out/flip.img \
 		-elf out/hopos-flipA.elf -elf out/hopos-flipB.elf
 	KERNEL=out/hopos-flipA.elf
 	FWD="hostfwd=tcp:127.0.0.1:${HOPPORT:-8080}-10.0.2.15:80,hostfwd=tcp:127.0.0.1:${PORTPUB:-18080}-10.0.2.15:8080"

@@ -71,6 +71,12 @@ type Plan struct {
 // afwijking is een fout: een plan is compleet geldig of bestaat niet. Bewust géén abi/layout-import (abi-pakketten zijn vlak): alles
 // komt als parameter binnen.
 func Build(r io.ReaderAt, imgSize int64, linkBase, appRAM, loOff, topOff uint64, slot int, abi uint64) (*Plan, error) {
+	if err := checkWindow(linkBase, appRAM, loOff, topOff); err != nil {
+		return nil, err
+	}
+	if imgSize <= 0 {
+		return nil, fmt.Errorf("invalid image size %d", imgSize)
+	}
 	f, err := leanelf.Open(r, imgSize)
 	if err != nil {
 		return nil, fmt.Errorf("elf parse: %w", err)
@@ -167,4 +173,12 @@ func readU64(f *leanelf.File, addr uint64) (uint64, error) {
 		return 0, err
 	}
 	return binary.LittleEndian.Uint64(b[:]), nil
+}
+
+// checkWindow valideert één keer de geometrie vóór adresberekeningen of writes.
+func checkWindow(base, size, lo, top uint64) error {
+	if size < 8 || base > ^uint64(0)-size || lo >= top || top > size {
+		return fmt.Errorf("invalid placement window %#x+%#x [%#x,%#x)", base, size, lo, top)
+	}
+	return nil
 }

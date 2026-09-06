@@ -331,7 +331,7 @@ boot:
 	MOVD	$3, R9
 	MOVD	R9, (R1)
 	DSB	$15
-	MOVD	8(R1), R0	// layout.CtxCtrlPA → x0 (zoals PSCI 'm zou geven)
+	MOVD	544(R1), R0	// layout.CtxBootArg → x0 (zoals PSCI 'm zou geven)
 	MOVD	16(R1), R2	// layout.CtxBootPC (s2tramp)
 	JMP	(R2)
 

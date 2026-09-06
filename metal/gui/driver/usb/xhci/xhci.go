@@ -270,9 +270,9 @@ func (h *HC) Reset() error {
 	cmd := dev.Read32(h.op + opUSBCmd)
 	if cmd&cmdRun != 0 {
 		dev.Write32(h.op+opUSBCmd, cmd&^cmdRun)
-		if err := h.wait(opUSBSts, stsHCH, stsHCH, 500*time.Millisecond, "halt"); err != nil {
-			return err
-		}
+	}
+	if err := h.wait(opUSBSts, stsHCH, stsHCH, 500*time.Millisecond, "halt"); err != nil {
+		return err
 	}
 	dev.Write32(h.op+opUSBCmd, dev.Read32(h.op+opUSBCmd)|cmdHCRST)
 	dev.MB()

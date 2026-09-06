@@ -247,7 +247,10 @@ func Flip(bundle []byte) error {
 	stage(stRebased)
 	fmt.Printf("kernflip: placed and rebased, capturing state\n")
 	nat := hopswitch.SnapshotNAT()
-	agentState := snapshotAgent()
+	agentState, err := snapshotAgent()
+	if err != nil {
+		return fail(err)
+	}
 	blob, err := encodeHandoff(Handoff{
 		OldBase: uint64(me0), OldSize: ramSize,
 		Window: win, Total: total,

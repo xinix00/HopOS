@@ -63,11 +63,18 @@ func Dropped() uint64 {
 // begint hij bij het oudste dat er nog is. Dan mist hij bytes, en dat is eerlijk:
 // de ring is per definitie de láátste Size bytes.
 func Since(from uint64) (data []byte, next uint64) {
-	oldest := Dropped()
+	next = pos
+	if from > next {
+		from = next
+	}
+	oldest := uint64(0)
+	if next > Size {
+		oldest = next - Size
+	}
 	if from < oldest {
 		from = oldest
 	}
-	n := pos - from
+	n := next - from
 	if n == 0 {
 		return nil, from
 	}

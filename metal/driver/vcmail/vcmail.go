@@ -102,14 +102,40 @@ func (m *Mbox) CallN(tags []Tag) bool {
 // een onverklaarbare bug.
 var mboxMu sync.Mutex
 
+// The single firmware buffer remains owned until its exact reply arrives.
+var pendingAddr uint32
+
+const bufferSize = 4096
+
 func (m *Mbox) do(tags []Tag) bool {
 	mboxMu.Lock()
 	defer mboxMu.Unlock()
+	if m.Buf == 0 || m.Buf%16 != 0 || uint64(m.Buf) > uint64(^uint32(0))-bufferSize {
+		return false
+	}
+	remaining := bufferSize - 12 // header and end tag
+	for _, t := range tags {
+		if remaining < 12 || len(t.Words) > (remaining-12)/4 {
+			return false
+		}
+		remaining -= 12 + 4*len(t.Words)
+	}
+	if pendingAddr != 0 {
+		if !m.waitReply(pendingAddr) {
+			return false
+		}
+		pendingAddr = 0
+	}
+
 	// Eerst de inbox leegvegen: een eerder getimeout antwoord dat blijft
 	// liggen zet anders álle volgende calls één respons achter (GEMETEN
 	// 2026-07-11: na een trage SetClockRate tijdens HDMI-werk las elke call
 	// het antwoord van zijn voorganger — 0.0°C, ARM 0 MHz).
+	drainUntil := time.Now().Add(500 * time.Millisecond)
 	for dev.Read32(m.Base+mbox0Status)&statusEmpty == 0 {
+		if time.Now().After(drainUntil) {
+			return false
+		}
 		_ = dev.Read32(m.Base + mbox0Read)
 	}
 
@@ -132,22 +158,12 @@ func (m *Mbox) do(tags []Tag) bool {
 	if !m.wait(mbox1Status, statusFull) {
 		return false
 	}
-	dev.Write32(m.Base+mbox1Write, uint32(m.Buf)|chProps)
-
-	// Antwoord op óns kanaal afwachten (andere kanalen komen hier niet voor,
-	// maar overslaan is goedkoop en veilig).
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for {
-		if !m.wait(mbox0Status, statusEmpty) {
-			return false
-		}
-		if dev.Read32(m.Base+mbox0Read)&0xF == chProps {
-			break
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
+	pendingAddr = uint32(m.Buf) | chProps
+	dev.Write32(m.Base+mbox1Write, pendingAddr)
+	if !m.waitReply(pendingAddr) {
+		return false
 	}
+	pendingAddr = 0
 	if dev.Read32(m.Buf+4) != respSuccess {
 		return false
 	}
@@ -163,6 +179,20 @@ func (m *Mbox) do(tags []Tag) bool {
 		p += 12 + uintptr(len(t.Words))*4
 	}
 	return true
+}
+
+// waitReply consumes only the acknowledgement of this buffer, within one
+// deadline. A timeout keeps pendingAddr so the next call cannot overwrite it.
+func (m *Mbox) waitReply(addr uint32) bool {
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if dev.Read32(m.Base+mbox0Status)&statusEmpty == 0 && dev.Read32(m.Base+mbox0Read) == addr {
+			dev.MB()
+			return true
+		}
+		time.Sleep(10 * time.Microsecond)
+	}
+	return false
 }
 
 // wait polt tot statusbit `bit` in register `reg` zakt (vol/leeg), begrensd.

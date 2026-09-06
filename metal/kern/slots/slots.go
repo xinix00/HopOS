@@ -98,7 +98,16 @@ var (
 // (cpu/memlimit dicht sindsdien de OOM-route).
 var lifecycleMu sync.Mutex
 
-// Scrub veegt [addr,addr+size) net als dev.CleanInv, maar in brokken van 4MB
+// Alleen de lifecycle schrijft dit: onzeker gestopt is nog steeds eigendom.
+var quarantined []bool
+
+func quarantineSlot(i int) {
+	quarantined[i] = true
+	fmt.Printf("slot %d: owner retained — execution unconfirmed HOPOS_PART_QUARANTINE\n", i)
+}
+
+// Scrub initialiseert nieuwe eigenaarsruimte: oude cachelijnen afvoeren,
+// alle bytes wissen en de writes publiceren, in brokken van 4MB
 // met een yield ertussen: de hele node draait op één core (GOMAXPROCS=1), dus
 // een ononderbroken asm-veeg over een partitie (96MB × 127 loaders ≈ 12s
 // gemeten) verhongert de netstack, /health, de switch en de heartbeat.
@@ -126,14 +135,16 @@ func Scrub(addr, size uintptr, progress func(done, total uintptr)) {
 			progress(total-size, total)
 		}
 		dev.CleanInv(addr, n)
+		dev.Clear(addr, uint64(n))
+		dev.Push(addr, n)
 		addr += n
 		size -= n
 		runtime.Gosched()
 	}
 }
 
-// coopCleanInv is de naam waaronder de slot-lifecycle hem gebruikt: stil.
-func coopCleanInv(addr, size uintptr) { Scrub(addr, size, nil) }
+// prepareMemory is gedeeld door blob- en streaming-plaatsing.
+func prepareMemory(addr, size uintptr) { Scrub(addr, size, nil) }
 
 // lifecycleWindow serialiseert een lifecycle (zie lifecycleMu). De vorm met
 // een closer is gebleven zodat de drie aanroepers (Start, StartStaged, Stop)
@@ -290,6 +301,10 @@ func validateSMPPlacement(i, cores int) error {
 // eerst de core-aware SMP-toets, dan de echte slotclaim, en pas na succes de
 // stale grant van een aantoonbaar dode vorige eigenaar vrijgeven.
 func claimStart(i, cores int, shared bool) error {
+	partOnce.Do(poolInit)
+	if _, _, owned := partitionOf(i); owned {
+		return fmt.Errorf("slot %d: still owns memory; finish Stop before Start", i)
+	}
 	if err := validateSMPPlacement(i, cores); err != nil {
 		return err
 	}
@@ -373,7 +388,7 @@ func (s *servicer) run() {
 		fmt.Printf("HOPOS_SERVICER_NO_PARTITION slot %d\n", s.slot)
 		return
 	}
-	out := ring.Open(layout.RingOutboxAt(ram, ramSize))
+	out := ring.Open(layout.RingOutboxAt(ram, ramSize), layout.RingDataCap)
 	// Eén hergebruikte leesbuffer i.p.v. een allocatie per record: de payload
 	// wordt synchroon verwerkt (log → string-kopie; RPC → handle retourneert
 	// vóór de volgende lees), dus hergebruik is veilig.
@@ -442,11 +457,18 @@ func (s *servicer) run() {
 // gezet door goos.Task) en dispatcht die namens hem. De app kan het niet zelf:
 // de parkeer-mailboxen liggen bewust buiten elke stage-2-map, zodat een app
 // nooit een core (van zichzelf of een ander) kan opbrengen — alleen HOP.
-// Ctx = de fysieke control-page van de primaire (de SMP-trampoline leest daar
-// de M-context, gedeelde stage-2 en VMID van); de secundaire mailbox gaat via
-// CtrlSMPMbox mee (de primaire page is gedeeld). Klaar → CtrlSMPReq weer 0,
-// waar de app op wacht.
+// Alleen de EL1-startgegevens komen uit de app-page; cageSMPContext voegt
+// HOP's eigen privilege-instellingen toe. Klaar → CtrlSMPReq weer 0.
 func (s *servicer) dispatchSMP() {
+	// Dezelfde volgorde als Start/Stop/Flip, zonder dat de servicer op hun
+	// lock wacht: Stop kan hem dus altijd afvoeren. Verzoek blijft staan.
+	if !lifecycleMu.TryLock() {
+		return
+	}
+	defer lifecycleMu.Unlock()
+	if quarantined[s.slot] {
+		return
+	}
 	c := int(ctrlRead(s.slot, layout.CtrlSMPReq))
 	if c == 0 {
 		return
@@ -463,13 +485,17 @@ func (s *servicer) dispatchSMP() {
 		dev.MB()
 		return
 	}
-	ctrlWrite(s.slot, layout.CtrlSMPMbox, uint64(layout.ParkMboxPA(c)))
-	dev.MB()
+	if coreRunning(c) && ctxLive(ctxState(c)) {
+		// Een herhaald verzoek start dezelfde context niet nogmaals.
+		ctrlWrite(s.slot, layout.CtrlSMPReq, 0)
+		return
+	}
 	cp, ok := CtrlPageOf(s.slot)
 	if !ok {
 		fmt.Printf("HOPOS_SMP_DISPATCH_FAIL slot %d core %d: slot heeft geen partitie\n", s.slot, c)
 		return
 	}
+	startCtx := cageSMPContext(s.slot, c, cp)
 	// Het ctx-blok van de secundaire core krijgt dezelfde twee woorden als de
 	// primaire bij armSlot: de (gedeelde) control-page en het head-woord van
 	// de RX-ring. Het fault-rapport van switch.s, de doorbell-peek van de
@@ -487,12 +513,13 @@ func (s *servicer) dispatchSMP() {
 	// koude/geparkeerde via reset + mailbox.
 	var err error
 	if coreRunning(c) || coreParks(c) {
-		err = bootPendingDispatch(c, c, cageSMPEntryPC(), uint64(cp))
+		err = bootPendingDispatch(c, c, cageSMPEntryPC(), startCtx)
 	} else {
 		residentReset(c, c)
-		err = dispatchCore(c, cageSMPEntryPC(), uint64(cp))
+		err = dispatchCore(c, cageSMPEntryPC(), startCtx)
 	}
 	if err != nil {
+		quarantineSlot(s.slot)
 		fmt.Printf("HOPOS_SMP_DISPATCH_FAIL slot %d core %d: %v\n", s.slot, c, err)
 	} else {
 		// Ook het SLAGEN melden. Dat lijkt ruis (het gebeurt één keer per extra
@@ -872,11 +899,11 @@ func startImage(i int, image []byte, memLimit uint64, cores int, env map[string]
 	// Coherentie vóór de ongecachte writes: de vórige huurder draaide
 	// cacheable (hele heap); zijn dirty lines eerst wegschrijven+invalideren,
 	// anders clobberen ze straks onze verse image (QEMU verhult dit — geen
-	// caches; op de A76 echt, gemeten 2026-07-10). Coöperatief (coopCleanInv):
+	// caches; op de A76 echt, gemeten 2026-07-10). Coöperatief (prepareMemory):
 	// dit is de zware core-0-op van de 127-loader-burst — in brokken vegen met
 	// een yield ertussen houdt de netstack/health/switch levend (het slot hangt
 	// hier niet aan de switch: bij hergebruik detachte releaseSlot, vers nooit).
-	coopCleanInv(uintptr(base), uintptr(size))
+	prepareMemory(uintptr(base), uintptr(size))
 
 	// De image bovenin het app-RAM plaatsen (staging, layout.StageAddr — het
 	// gedeelde contract met de apploader), zodat de laag geplaatste segmenten
@@ -1003,7 +1030,10 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// (armed) blijft de opbouw staan.
 	var armed bool
 	defer func() {
-		if armed {
+		if armed || errors.Is(err, ErrDispatch) {
+			if !armed {
+				quarantineSlot(i)
+			}
 			return
 		}
 		hopswitch.Detach(i)
@@ -1224,6 +1254,11 @@ func Stop(i int, timeout time.Duration) error {
 	// ~50ms (sinds de I$-fix), dus ook een delete-storm blijft snel: ~200ms
 	// per stop i.p.v. de oude 10s-timeouts.
 	defer lifecycleWindow()()
+	if _, _, owned := partitionOf(i); !owned {
+		return nil // Een leeg kooinummer zegt niets over de bewoner van core i.
+	}
+	// Geen nieuwe secundaire dispatch; de bestaande servicer eerst klaar.
+	evictServicer(i)
 	ctrlWrite(i, layout.CtrlKill, 1)
 	dev.MB()
 	// Gedeelde core (er leeft nog een andere bewoner op de core van dit
@@ -1241,6 +1276,7 @@ func Stop(i int, timeout time.Duration) error {
 		var stopErr error
 		if !waitCtxDead(i, timeout) {
 			cageRevoke(i)
+			wakeForStop(i)
 			// De intrekking raakt een gesavede bewoner pas bij zijn
 			// eerstvolgende hervatting (≤ een paar yield-tikken): dan faultt
 			// hij op de genulde tabel en meldt de switch hem dood.
@@ -1275,21 +1311,7 @@ func Stop(i int, timeout time.Duration) error {
 	if stillOn {
 		// Eén intrekking velt álle cores van het slot (gedeelde tabel/VMID).
 		cageRevoke(i)
-		// Een core die op EL2 slaapt (geyield, CtxSaved) voelt de intrekking
-		// niet: hij voert geen vertaalde instructie uit tot zijn wektijd. Dus
-		// wektijd op "nu" en kicken — de rotatie hervat hem in de ingetrokken
-		// kooi, zijn eerste fetch faultt, en hij parkeert zoals elke andere
-		// (QEMU 03-09: "core 2 did not park" bij een 2-core-app die yieldt).
-		for c := core; c < core+n; c++ {
-			if coreRunning(c) && ctxState(c) == layout.CtxSaved {
-				ctxWrite(c, layout.CtxWake, 0)
-				if k := cores().Kick; k != nil {
-					if phys := physCore(c); phys >= 0 {
-						k(phys)
-					}
-				}
-			}
-		}
+		wakeForStop(i)
 		for c := core; c < core+n; c++ {
 			if !coreRunning(c) {
 				continue
@@ -1305,18 +1327,40 @@ func Stop(i int, timeout time.Duration) error {
 	return stopErr
 }
 
+// wakeForStop laat ook slapende en nog boot-pending contexten de
+// intrekking waarnemen. Core en kooi vallen bij delen niet samen.
+func wakeForStop(i int) {
+	core := coreOf(i)
+	for c := core; c < core+coreCount(i); c++ {
+		ctx := c
+		if c == core {
+			ctx = i
+		}
+		if !coreRunning(c) {
+			continue
+		}
+		if ctxState(ctx) == layout.CtxSaved {
+			ctxWrite(ctx, layout.CtxWake, 0)
+		}
+		if kick := cores().Kick; kick != nil {
+			if phys := physCore(c); phys >= 0 {
+				kick(phys)
+			}
+		}
+	}
+}
+
 // releaseSlot maakt een gestopt slot vrij: van de switch af, poorten in, en
 // de partitie terug naar de pool (de cores zijn geparkeerd, dus niemand raakt
 // het geheugen meer — pas bij een volgende Start worden ze her-gedispatcht).
 //
-// freePartition=false is de fail-closed-variant: alles losmaken behálve het
-// geheugen. Dat is het geval waarin de intrekking niet bevestigd kon worden —
-// dan kán er nog een core met een levende vertaling naar deze partitie zijn, en
-// die partitie mag de pool niet in (first-fit deelt hem anders uit aan de
-// volgende huurder, die dan het geheugen met een vreemde deelt). Het geheugen
-// blijft dus in quarantaine bij die core; een volgende geslaagde Stop of een
-// reconcile ruimt op. Zelfde beleid als slotmgr.Stop voor de core-reservering.
+// freePartition=false bewaart de volledige eigenaar, inclusief core-span en
+// grants. Pas een volgende bevestigde Stop mag deze administratie opruimen.
 func releaseSlot(i int, freePartition bool) {
+	if !freePartition {
+		quarantineSlot(i)
+		return
+	}
 	// Post-mortem eerst: de status en het fault-rapport van dit slot staan op zijn
 	// control-page, en die woont in de partitie die we hieronder teruggeven. Wie
 	// ná een Stop vraagt "waaróm viel hij" (de regressie, `hop logs`, een
@@ -1368,11 +1412,8 @@ func releaseSlot(i int, freePartition bool) {
 	hopswitch.Detach(i)
 	hopswitch.UnpublishSlot(i)
 	grantRelease(i) // grant terug (fb: HOP-console weer op het glas)
-	if freePartition {
-		partRelease(i)
-	} else {
-		fmt.Printf("slot %d: partition quarantined — revocation unconfirmed, memory NOT returned to the pool HOPOS_PART_QUARANTINE\n", i)
-	}
+	partRelease(i)
+	quarantined[i] = false
 	if i >= 1 && i <= layout.MaxSlots {
 		// Bewoners-boekhouding van de core-deling: uit de lijst van zijn
 		// core, ctx-staat op Empty (het slot is écht weg — de rotatie slaat
@@ -1413,7 +1454,7 @@ func drainLastWords(i int) {
 	if !ok {
 		return
 	}
-	out := ring.Open(layout.RingOutboxAt(ram, ramSize))
+	out := ring.Open(layout.RingOutboxAt(ram, ramSize), layout.RingDataCap)
 	buf := make([]byte, layout.RingDataCap)
 	last := ""
 	for range 256 { // begrensd: een post-mortem mag nooit blijven hangen

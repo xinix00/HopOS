@@ -53,6 +53,7 @@ var (
 // de init-volgorde tussen dit pakket en het board-pakket is niet gegarandeerd.
 func poolInit() {
 	partOf = make([]region, layout.MaxSlots+1)
+	quarantined = make([]bool, layout.MaxSlots+1)
 	smpCores = make([]int, layout.MaxSlots+1)
 	hostCore = make([]int, layout.MaxSlots+1) // slot→core (share.go)
 	for _, r := range layout.Pool() {
@@ -107,37 +108,22 @@ func align2M(n uint64) uint64 { return (n + part2M - 1) &^ (part2M - 1) }
 // alleen partities draagt. Laag-eerst zou het lage blok volproppen en de bulk
 // nooit raken.
 func partAlloc(i int, size uint64) (base, grown uint64, err error) {
+	if i < 1 || i > layout.MaxSlots {
+		return 0, 0, fmt.Errorf("invalid slot %d", i)
+	}
 	partOnce.Do(poolInit)
+	if size == 0 || size > ^uint64(0)-(part2M-1) {
+		return 0, 0, fmt.Errorf("invalid partition size %d", size)
+	}
 	size = align2M(size)
 	partMu.Lock()
 	defer partMu.Unlock()
 
-	// De vorige reservering van dit slot pas teruggeven als de nieuwe past.
-	//
-	// Hier stond releaseLocked(i) vooraan, "defensief bij een re-Start". Dat is
-	// het juist niet: faalt de zoektocht hieronder, dan keert deze functie terug
-	// met een fout terwijl de partitie van slot i al vrij in de pool ligt — en
-	// dan geeft de VOLGENDE plaatsing dat geheugen aan iemand anders terwijl de
-	// bewoner er nog in draait. Stille corruptie, en precies op het pad dat een
-	// onplaatsbare job elke vijf seconden opnieuw raakt (Derek, 19-08).
-	//
-	// Teruggeven MOET wel vóór de zoektocht, want een re-Start van hetzelfde
-	// slot heeft juist zijn eigen regio nodig om weer te passen. Dus: eerst een
-	// momentopname, dan vrijgeven en zoeken, en bij een misser alles terugzetten
-	// zoals het was. De vrije lijst is een handvol regio's — die kopie is
-	// goedkoper dan één verkeerd uitgedeelde partitie.
-	hadFree := append([]region(nil), partFree...)
-	hadOf := region{}
-	if i >= 0 && i <= layout.MaxSlots {
-		hadOf = partOf[i]
+	// Een nieuwe eigenaar begint pas na expliciet vrijgeven van de vorige.
+	// Geen tijdelijke vrijgave, kopie van de vrije lijst of rollback nodig.
+	if partOf[i].size != 0 {
+		return 0, 0, fmt.Errorf("slot %d still owns a partition", i)
 	}
-	restore := func() {
-		partFree = hadFree
-		if i >= 0 && i <= layout.MaxSlots {
-			partOf[i] = hadOf
-		}
-	}
-	releaseLocked(i)
 
 	// Best-fit: de KLEINSTE regio die deze partitie nog kan dragen. Hoog-eerst
 	// (wat hier stond) is goed voor de bulk-boven-de-4GB-vraag, maar het kiest
@@ -167,7 +153,6 @@ func partAlloc(i int, size uint64) (base, grown uint64, err error) {
 		}
 	}
 	if best < 0 {
-		restore()
 		return 0, 0, fmt.Errorf("%w: partition %d MB does not fit the pool (full, fragmented, or no base the cage can describe)", ErrNoPartition, size>>20)
 	}
 	r := partFree[best]
@@ -306,6 +291,9 @@ func insertFree(r region) {
 // eerste loopt is een programmeerfout van de flip-laag en faalt.
 func BorrowKernWindow(size uint64) (base, grown uint64, err error) {
 	partOnce.Do(poolInit)
+	if size == 0 || size > ^uint64(0)-(part2M-1) {
+		return 0, 0, fmt.Errorf("invalid partition size %d", size)
+	}
 	size = align2M(size)
 	partMu.Lock()
 	defer partMu.Unlock()

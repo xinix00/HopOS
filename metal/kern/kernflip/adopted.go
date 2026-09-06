@@ -40,7 +40,7 @@ func Adopted() (Handoff, bool) {
 	dev.Write64(ptrPA, 0)
 	dev.Write64(ptrPA+8, 0)
 	dev.MB()
-	if magic != handMagic || ptr%8 != 0 {
+	if magic != handMagic {
 		fmt.Printf("kernflip: stray handoff pointer on the boot scratch (%#x/%#x) — ignored, cold boot\n", ptr, magic)
 		return Handoff{}, false
 	}
@@ -50,9 +50,9 @@ func Adopted() (Handoff, bool) {
 	// wat hij als RamSize patcht. Eén vergelijking, en de hele klasse "lees op
 	// een adres dat een ander daar neerlegde" is weg — tot nu was de magic op
 	// de scratch het enige dat deze read afdekte.
-	if end := ownRamEnd(); end != 0 && ptr != end {
-		fmt.Printf("kernflip: handoff pointer %#x is not at our RAM end (%#x) — ignored, cold boot\n", ptr, end)
-		return Handoff{}, false
+	if end := ownRamEnd(); ptr == 0 || ptr%8 != 0 || (end != 0 && ptr != end) {
+		setAdopting(true)
+		panic(fmt.Sprintf("kernflip: invalid handoff pointer %#x (RAM end %#x); refusing cold boot", ptr, end))
 	}
 	// Het blob uit de staart van ons eigen venster lezen. De kop eerst (die
 	// draagt de lengte-informatie via slotCount), dan ruim genoeg voor de

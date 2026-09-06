@@ -19,7 +19,7 @@ func testHostPort(t *testing.T) *hostDevice {
 	txBase, rxBase := testDeviceAddress(txMem), testDeviceAddress(rxMem)
 	ring.Init(txBase, 256<<10)
 	ring.Init(rxBase, 256<<10)
-	d := &hostDevice{tx: ring.Open(txBase), rx: ring.Open(rxBase)}
+	d := &hostDevice{tx: ring.Open(txBase, 256<<10), rx: ring.Open(rxBase, 256<<10)}
 	mu.Lock()
 	if len(ports) == 0 {
 		ports = make([]*port, layout.MaxSlots+1)

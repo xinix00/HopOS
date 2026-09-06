@@ -6,9 +6,9 @@
 // Geheugenindeling (alle velden 64-bit, gealigneerd):
 //
 //	+0x00 head   producer-index (bytes, monotoon oplopend)
-//	+0x08 tail   consumer-index
+//	+0x40 tail   consumer-index
 //	+0x10 size   datacapaciteit in bytes (door HOP gezet bij slot-start)
-//	+0x40 data   [size]byte, circulair
+//	+0x80 data   [size]byte, circulair
 //
 // Records: 8-byte header {len uint32, typ uint32} + payload, opgevuld tot een
 // 8-voud. Een record wrapt nooit: past hij niet meer aaneengesloten, dan vult
@@ -119,7 +119,7 @@ func New(size uint64) *Ring {
 	words := make([]uint64, (dataOff+size)/8)
 	base := uintptr(unsafe.Pointer(&words[0]))
 	Init(base, size)
-	r := Open(base)
+	r := Open(base, size)
 	r.keep = words
 	r.normal, r.coherent = true, true
 	return r
@@ -145,14 +145,16 @@ func (r *Ring) markCorrupt(why string) {
 // CorruptWhy geeft de reden van de corrupt-verklaring ("" = niet corrupt).
 func (r *Ring) CorruptWhy() string { return r.why }
 
-// Open koppelt aan een door Init klaargezette ring. Pull vóór het lezen van de
-// capaciteit, net als bij de kop-accessors hieronder: Init schreef die van het
-// andere hart af. In de praktijk dekte de partitie-brede veeg vóór de dispatch
-// dit al, maar dat is een toevallige dekking en geen contract — hier staat het
-// expliciet, en het kost één op per ring.
-func Open(base uintptr) *Ring {
-	dev.Pull(base+hdrSize, 8)
-	return &Ring{base: base, size: dev.Read64(base + hdrSize), coherent: dev.IsCached(base, dataOff)}
+// Open koppelt aan een door Init klaargezette ring met de capaciteit van de
+// eigenaar. Het maatwoord in shared memory is informatief: de tegenpartij kan
+// het wijzigen en mag daarmee nooit onze fysieke grenzen bepalen.
+// base en size komen uit de vertrouwde layout, niet uit de ringkop.
+func Open(base uintptr, size uint64) *Ring {
+	if size < 2*recHdr || size%8 != 0 || base%8 != 0 ||
+		base > ^uintptr(0)-dataOff || size > uint64(^uintptr(0)-base-dataOff) {
+		panic("ring: invalid backing range")
+	}
+	return &Ring{base: base, size: size, coherent: dev.IsCached(base, dataOff)}
 }
 
 // De vier kop-accessors doen het cache-onderhoud van de ABI: Pull vóór een lees,

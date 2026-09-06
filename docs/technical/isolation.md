@@ -30,11 +30,12 @@ The cage is hardware, not policy.
   explicit, node-granted DeviceGrant (off unless you wire it): still
   node-granted, never app-initiated, and an app can never aim DMA. Firmware
   calls (SMC) from a cage trap at EL2 — there is no legitimate app SMC.
-- **Kill is revocation.** Stopping a stubborn app doesn't ask it nicely: the
-  node revokes its stage-2 map and the core faults synchronously into the
-  EL2 vectors, which park it (on RISC-V the node resets the hart, which hands
-  back a provably clean slot). A cage violation prints the fault (ESR/FAR, or
-  `mcause`/`mepc`/`mtval`) on the console while every other slot keeps serving.
+- **Kill is revocation with confirmation.** The node requests exit, then
+  revokes the cage or resets the hart when necessary. Sleeping contexts are
+  woken to observe the revocation. Memory is released only after all of the
+  owner's contexts have stopped; a timeout retains the owner and its complete
+  claims. A shared neighbour keeps its memory and execution. The next owner
+  gets initialized memory. See the [framework contract](framework-contract.md).
 
 ```
 $ run apply --name escape-probe    # deliberately reads outside its cage

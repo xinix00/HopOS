@@ -90,20 +90,21 @@ func watch(cfg Config, maxHz uint32) {
 
 	// Elke flank logt (dat was een Verbose-knop die overal aanstond): flanken
 	// zijn zeldzaam en de regel is de soak-diagnose.
-	set := func(hz uint32, why string) {
+	set := func(hz uint32, why string) bool {
 		if actual, ok := cfg.Mbox.SetClockRate(vcmail.ClockARM, hz); ok {
 			fmt.Printf("dvfs: → %d MHz (%s)\n", actual/1_000_000, why)
+			return true
 		} else {
-			fmt.Println("dvfs: SetClockRate failed — skipping this transition")
+			fmt.Println("dvfs: SetClockRate failed — retaining the previous policy state")
 		}
+		return false
 	}
 
 	// Toestand niet aannemen maar zetten (GEMETEN 2026-07-11: met een
 	// arm_freq_min-vloer boot de firmware op de vloer, niet op vol — de hele
 	// P1-acceptatie draaide per ongeluk op 800MHz): boot-werk verdient de
 	// volle klok, daarna regeert het beleid.
-	high := true
-	set(maxHz, "boot")
+	high := set(maxHz, "boot")
 
 	tickHz := idle.CounterHz()
 	for {
@@ -144,15 +145,15 @@ func watch(cfg Config, maxHz uint32) {
 
 		switch {
 		case busy && !high:
-			high = true
 			quiet = time.Now() // anders valt de klok één stil sample later
 			// alweer terug ("idle 30s" één tel na "busy" — gemeten 19-07)
-			set(maxHz, "busy")
+			high = set(maxHz, "busy")
 		case busy:
 			quiet = time.Now()
 		case high && time.Since(quiet) > cooldown:
-			high = false
-			set(cfg.LowHz, "idle 30s")
+			if set(cfg.LowHz, "idle 30s") {
+				high = false
+			}
 		}
 
 		if time.Since(lastTele) >= telemetr {

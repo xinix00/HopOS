@@ -55,7 +55,7 @@ type arena struct{ cur, end uintptr }
 
 func (a *arena) alloc(n, align uintptr) (uintptr, error) {
 	p := (a.cur + align - 1) &^ (align - 1)
-	if p+n > a.end {
+	if align == 0 || align&(align-1) != 0 || a.cur > ^uintptr(0)-(align-1) || p > a.end || n > a.end-p {
 		return 0, fmt.Errorf("xhci: DMA-regio vol (%d bytes gevraagd, %d over)", n, a.end-a.cur)
 	}
 	a.cur = p + n
@@ -102,7 +102,10 @@ func (h *HC) Start(dmaBase, dmaSize uintptr) error {
 	if h.poisoned != nil {
 		return fmt.Errorf("xhci %s: Start vereist eerst een geslaagde controllerreset: %w", h.Name, h.poisoned)
 	}
-	if dmaSize == 0 {
+	if h.running {
+		return fmt.Errorf("xhci %s: Start requires a halted controller", h.Name)
+	}
+	if dmaSize == 0 || dmaBase > ^uintptr(0)-dmaSize || uint64(dmaBase+dmaSize) > ^uint64(0)-h.BusOff {
 		return fmt.Errorf("xhci %s: lege DMA-regio", h.Name)
 	}
 	// Het board-venster is vast voor de levensduur van de node. Na een poisoned
@@ -121,7 +124,7 @@ func (h *HC) Start(dmaBase, dmaSize uintptr) error {
 			break
 		}
 	}
-	if h.page > 65536 {
+	if ps == 0 || h.page > 65536 {
 		return fmt.Errorf("xhci %s: paginagrootte %d — buiten wat deze driver plant", h.Name, h.page)
 	}
 
@@ -204,7 +207,7 @@ func (h *HC) Start(dmaBase, dmaSize uintptr) error {
 	dev.MB()
 	dev.Write32(h.op+opUSBCmd, dev.Read32(h.op+opUSBCmd)|cmdRun)
 	if err := h.wait(opUSBSts, stsHCH, 0, 500*time.Millisecond, "run"); err != nil {
-		return err
+		return h.quarantine(err)
 	}
 	h.running = true
 	return nil
@@ -383,8 +386,8 @@ func (h *HC) waitEvent(match func(event) bool, d time.Duration, what string) (ev
 			return ev, nil
 		}
 		if time.Now().After(deadline) {
-			return event{}, fmt.Errorf("xhci %s: geen antwoord op %s binnen %v (USBSTS %#08x)",
-				h.Name, what, d, dev.Read32(h.op+opUSBSts))
+			return event{}, h.quarantine(fmt.Errorf("geen antwoord op %s binnen %v (USBSTS %#08x)",
+				what, d, dev.Read32(h.op+opUSBSts)))
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -394,6 +397,9 @@ func (h *HC) waitEvent(match func(event) bool, d time.Duration, what string) (ev
 // Command Completion Event dat naar precies dít TRB terugwijst. Sequentieel:
 // er staat er nooit meer dan één uit.
 func (h *HC) command(p0, p1, p2, ctrl uint32, what string) (event, error) {
+	if h.poisoned != nil {
+		return event{}, h.poisoned
+	}
 	trb := h.cmd.push(p0, p1, p2, ctrl)
 	h.doorbell(0, 0)
 	ev, err := h.waitEvent(func(e event) bool {
@@ -415,7 +421,10 @@ func (h *HC) Stop() {
 		return
 	}
 	dev.Write32(h.op+opUSBCmd, dev.Read32(h.op+opUSBCmd)&^uint32(cmdRun))
-	_ = h.wait(opUSBSts, stsHCH, stsHCH, 500*time.Millisecond, "halt")
+	if err := h.wait(opUSBSts, stsHCH, stsHCH, 500*time.Millisecond, "halt"); err != nil {
+		h.quarantine(err)
+		return
+	}
 	h.running = false
 }
 

@@ -34,8 +34,8 @@ func Up(a *applib.App) (string, error) {
 	host := layout.HostIP4()
 
 	nd := &nic{
-		tx: ring.Open(layout.NetRingTXAt(a.RAMStart, a.RAMSize)),
-		rx: ring.Open(layout.NetRingRXAt(a.RAMStart, a.RAMSize)),
+		tx: ring.Open(layout.NetRingTXAt(a.RAMStart, a.RAMSize), layout.NetRingDataCap),
+		rx: ring.Open(layout.NetRingRXAt(a.RAMStart, a.RAMSize), layout.NetRingDataCap),
 	}
 
 	// Het budget: 1/8 van de partitie, geklemd. Een welcome-app van 16MB

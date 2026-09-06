@@ -41,6 +41,14 @@ const (
 	stage2PA    = structBase + 0x20000 // app-core-vectoren + stage-2-tabelblokken
 	revokeVecPA = structBase + 0xF0000 // EL2-vectortabel van core 0 (cpuinit-vast!)
 
+	// Blok 0 draagt de switcher; de app-blokken moeten vóór de vaste
+	// HOP-trapvector eindigen. Deze carve draagt 12 kooien, niet de algemene
+	// SlotCap=128: kooi 13 zou de HOP-trapvector overschrijven.
+	maxCages = (revokeVecPA-stage2PA)/layout.CageStride - 1
+	// Compile-time: ook de node-control-pages moeten binnen hun carve passen.
+	_ = uint(stage2PA - nodeCtrlPA - (maxCages+1)*layout.CtrlStride)
+	_ = uint(revokeVecPA - stage2PA - (maxCages+1)*layout.CageStride)
+
 	netDMAPA = 0x06400000 // NIC-DMA-ringen/buffers (NetDMASize)
 
 	// USB-DMA (USBDMASize = 2MB) in het gat tussen de NIC-regio en de
@@ -89,6 +97,7 @@ func SetupPlan() {
 	if dev.MPIDR()&0xFFFFFF != 0 {
 		return
 	}
+	layout.SetMaxSlots(maxCages)
 	p := layout.Plan{
 		NodeCtrlPA:    nodeCtrlPA,
 		CagePA:        stage2PA,

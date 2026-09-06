@@ -63,7 +63,7 @@ func attachTestSlot(t *testing.T, i int) *slotNIC {
 	if len(ports) == 0 {
 		ports = make([]*port, layout.MaxSlots+1)
 	}
-	ports[i] = &port{tx: ring.Open(txBase), rx: ring.Open(rxBase)}
+	ports[i] = &port{tx: ring.Open(txBase, slotRingCap), rx: ring.Open(rxBase, slotRingCap)}
 	mu.Unlock()
 	t.Cleanup(func() {
 		mu.Lock()
@@ -71,7 +71,7 @@ func attachTestSlot(t *testing.T, i int) *slotNIC {
 		mu.Unlock()
 	})
 	// De app leest/schrijft dezelfde ringen vanaf de andere kant.
-	return &slotNIC{tx: ring.Open(txBase), rx: ring.Open(rxBase)}
+	return &slotNIC{tx: ring.Open(txBase, slotRingCap), rx: ring.Open(rxBase, slotRingCap)}
 }
 
 // dataOffTest is de ringkop-maat uit de ABI (ring.dataOff is intern): head,

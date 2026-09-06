@@ -77,6 +77,9 @@ func NewStream(sink Sink, imgSize int64, linkBase, appRAM, loOff uint64, slot in
 		imgSize: uint64(imgSize),
 		cfg:     buildCfg{linkBase: linkBase, appRAM: appRAM, loOff: loOff, slot: slot, abi: abi},
 	}
+	if err := checkWindow(linkBase, appRAM, loOff, appRAM); err != nil {
+		s.fail = err
+	}
 	if imgSize <= 0 {
 		s.failf("image size unknown (Content-Length required)")
 	}
@@ -90,7 +93,7 @@ func (s *Stream) Write(p []byte) (int, error) {
 	if s.fail != nil {
 		return 0, s.fail
 	}
-	if s.pos+uint64(len(p)) > s.imgSize {
+	if uint64(len(p)) > s.imgSize-s.pos-uint64(len(s.head)) {
 		return 0, s.failf("more bytes than the announced %d", s.imgSize)
 	}
 	n := len(p)
@@ -140,10 +143,11 @@ func (s *Stream) parseHead() (bool, error) {
 	if phentsize < 56 || phnum == 0 {
 		return false, s.failf("bogus program header table (%d × %d bytes)", phnum, phentsize)
 	}
-	end := phoff + phnum*phentsize
-	if end > maxHead {
+	tableSize := phnum * phentsize // both factors originate in uint16 fields
+	if phoff > maxHead || tableSize > maxHead-phoff {
 		return false, s.failf("program headers at %#x+%#x beyond the %d-byte head", phoff, phnum*phentsize, maxHead)
 	}
+	end := phoff + tableSize
 	if uint64(len(b)) < end {
 		return false, nil
 	}
@@ -171,6 +175,9 @@ func (s *Stream) parseHead() (bool, error) {
 			seg.Dst < s.cfg.linkBase+s.cfg.loOff ||
 			seg.Dst > s.cfg.linkBase+s.cfg.appRAM-seg.Memsz {
 			return false, s.failf("segment %#x+%#x outside the partition window", seg.Dst, seg.Memsz)
+		}
+		if seg.Off > s.imgSize || seg.Filesz > s.imgSize-seg.Off {
+			return false, s.failf("segment file-offset %#x+%#x outside image (%d bytes)", seg.Off, seg.Filesz, s.imgSize)
 		}
 		last = seg.Off + seg.Filesz
 		s.segs = append(s.segs, seg)

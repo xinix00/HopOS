@@ -118,3 +118,73 @@ func TestTakeRangeMiddenInRegioRaaktBuurregioNiet(t *testing.T) {
 		t.Error("het geknipte bereik staat nog als vrij te boek")
 	}
 }
+
+func TestFlipPreservesWholeGroupPool(t *testing.T) {
+	setCores(t, 3)
+	core, err := PlaceCage(4, "trusted", 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	group, pool := snapshotGroup(4)
+	st := SlotState{Slot: 4, Core: core, Cores: 1, ShareGroup: group, GroupCores: pool, PartBase: 0x80000000, PartSize: 32 << 20}
+	if err := ValidateAdoption([]SlotState{st}); err != nil {
+		t.Fatal(err)
+	}
+	resetPools() // new kernel's allocator
+	adoptCage(st)
+	if c, err := PlaceCage(3, "", 1, 1); err != nil || c != 3 {
+		t.Fatalf("dedicated: core=%d err=%v", c, err)
+	}
+	if _, err := PlaceCage(6, "", 1, 1); err == nil {
+		t.Fatal("empty group core was given away")
+	}
+	if c, err := PlaceCage(5, "trusted", 2, 1); err != nil || c != 2 {
+		t.Fatalf("join restored group: core=%d err=%v", c, err)
+	}
+	ReleaseCage(4)
+	if _, err := PlaceCage(4, "trusted", 2, 1); err != nil {
+		t.Fatalf("restart member: %v", err)
+	}
+	ReleaseCage(4)
+	ReleaseCage(5)
+	if _, err := PlaceCage(6, "", 1, 1); err != nil {
+		t.Fatalf("last member did not release pool: %v", err)
+	}
+}
+
+func TestAdoptionRejectsConflictingOwners(t *testing.T) {
+	setCores(t, 4)
+	first := SlotState{Slot: 1, Core: 1, Cores: 1, PartBase: 0x80000000, PartSize: 32 << 20}
+	second := SlotState{Slot: 2, Core: 2, Cores: 1, PartBase: 0x84000000, PartSize: 32 << 20}
+	if err := ValidateAdoption([]SlotState{first, second}); err != nil {
+		t.Fatal(err)
+	}
+	for name, change := range map[string]func(*SlotState){
+		"duplicate cage":      func(s *SlotState) { s.Slot = 1 },
+		"memory overlap":      func(s *SlotState) { s.PartBase = first.PartBase },
+		"range overflow":      func(s *SlotState) { s.PartBase = ^uint64(0) - 0x1fffff },
+		"silent core sharing": func(s *SlotState) { s.Core = 1 },
+		"node core":           func(s *SlotState) { s.Core = 0 },
+		"smp beyond hardware": func(s *SlotState) { s.Cores = 4 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := second
+			change(&s)
+			if ValidateAdoption([]SlotState{first, s}) == nil {
+				t.Fatal("accepted")
+			}
+		})
+	}
+	first.ShareGroup = "trusted"
+	first.GroupCores = []int{1, 2}
+	if ValidateAdoption([]SlotState{first, second}) == nil {
+		t.Fatal("empty group core overlapped dedicated owner")
+	}
+}
+
+func TestPartAdoptRejectsWrappedRange(t *testing.T) {
+	poolReset(t, []layout.Region{{Base: 0x80000000, Size: 0x10000000}})
+	if err := partAdopt(1, ^uint64(0)-0x1fffff, 32<<20); err == nil {
+		t.Fatal("accepted wrapped range")
+	}
+}

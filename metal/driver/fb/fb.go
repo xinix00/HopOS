@@ -55,6 +55,7 @@ var (
 // console actief. Alleen 16- en 32-bpp; een lege/onbegrepen descriptor laat de
 // console uit (Putc blijft dan een no-op — geen scherm is geen fout).
 func Init(desc Desc) {
+	active = false
 	if desc.Base == 0 || desc.Width <= 0 || desc.Height <= 0 || desc.Stride <= 0 {
 		return
 	}
@@ -64,6 +65,9 @@ func Init(desc Desc) {
 	case 16:
 		bpx = 2
 	default:
+		return
+	}
+	if desc.Width > desc.Stride/bpx || uintptr(desc.Height) > (^uintptr(0)-desc.Base)/uintptr(desc.Stride) {
 		return
 	}
 	d = desc
@@ -127,7 +131,7 @@ func Header(lines ...string) {
 // alléén in de vaste header (nooit door de log) en raakt andere pixels dan
 // Putc (log-rijen ≥ top) — lock-vrij naast de printk-hook, zoals alles hier.
 func HeaderStatus(line int, s string) {
-	if !active || line >= top {
+	if !active || line < 0 || line >= top {
 		return
 	}
 	const w = 26 // dekt "mem 100% (128/128MB)" ruim

@@ -348,6 +348,12 @@ func (d *Device) buildInput(entries int, add uint32) {
 // een completion vragen en het echte aantal bytes uit de datafase halen.
 func (d *Device) control(reqType, req uint8, val, idx, length uint16) (int, error) {
 	h := d.hc
+	if h.poisoned != nil {
+		return 0, h.poisoned
+	}
+	if length > bufCtrlSize {
+		return 0, fmt.Errorf("xhci: control transfer exceeds buffer")
+	}
 	r := d.res.ctrl
 	in := reqType&0x80 != 0
 
@@ -394,6 +400,9 @@ func (d *Device) control(reqType, req uint8, val, idx, length uint16) (int, erro
 			return 0, fmt.Errorf("xhci %s: control %#02x/%d datafase — %s (%d)",
 				h.Name, reqType, req, compName(ev.comp), ev.comp)
 		}
+		if ev.rem > uint32(length) {
+			return 0, h.quarantine(fmt.Errorf("control completion exceeds transfer length"))
+		}
 		got = int(length) - int(ev.rem)
 	}
 	ev, err := h.waitEvent(func(e event) bool {
@@ -423,10 +432,14 @@ func (d *Device) readDescriptors() error {
 
 	// Eerst acht bytes: bij full-speed staat de echte EP0-pakketgrootte pas in
 	// byte 7, en tot we die weten mogen we niet meer dan één pakket vragen.
-	if _, err := d.control(0x80, reqGetDescriptor, descDevice<<8, 0, 8); err != nil {
-		return fmt.Errorf("device descriptor (8): %w", err)
+	if n, err := d.control(0x80, reqGetDescriptor, descDevice<<8, 0, 8); err != nil || n < 8 {
+		return fmt.Errorf("device descriptor (8): got %d bytes: %v", n, err)
 	}
-	if mps := int(d.bufBytes(8)[7]); mps > 0 && mps != d.mps0 {
+	mps, err := descriptorMPS0(d.Speed, d.bufBytes(8)[7])
+	if err != nil {
+		return err
+	}
+	if mps != d.mps0 {
 		d.mps0 = mps
 		// Evaluate Context: alleen EP0 aanpassen, het slot laten staan.
 		d.buildInput(1, addEP0)
@@ -436,16 +449,16 @@ func (d *Device) readDescriptors() error {
 		}
 	}
 
-	if _, err := d.control(0x80, reqGetDescriptor, descDevice<<8, 0, 18); err != nil {
-		return fmt.Errorf("device descriptor: %w", err)
+	if n, err := d.control(0x80, reqGetDescriptor, descDevice<<8, 0, 18); err != nil || n < 18 {
+		return fmt.Errorf("device descriptor (18): got %d bytes: %v", n, err)
 	}
 	dd := d.bufBytes(18)
 	d.VendorID = uint16(dd[8]) | uint16(dd[9])<<8
 	d.ProductID = uint16(dd[10]) | uint16(dd[11])<<8
 
 	// Configuratiedescriptor: eerst de kop voor wTotalLength, dan het geheel.
-	if _, err := d.control(0x80, reqGetDescriptor, descConfig<<8, 0, 9); err != nil {
-		return fmt.Errorf("config descriptor (9): %w", err)
+	if n, err := d.control(0x80, reqGetDescriptor, descConfig<<8, 0, 9); err != nil || n < 9 {
+		return fmt.Errorf("config descriptor (9): got %d bytes: %v", n, err)
 	}
 	cd := d.bufBytes(9)
 	total := int(cd[2]) | int(cd[3])<<8
@@ -485,14 +498,14 @@ func (d *Device) parseConfig(b []byte) {
 		switch b[i+1] {
 		case descInterface:
 			cur, curProto = -1, ProtoNone
-			if l >= 9 && b[i+5] == classHID && b[i+6] == subClassBoot &&
+			if l >= 9 && b[i+3] == 0 && b[i+5] == classHID && b[i+6] == subClassBoot &&
 				(b[i+7] == ProtoKeyboard || b[i+7] == ProtoMouse) &&
 				!d.hasProto(int(b[i+7])) && len(d.ifaces) < maxHIDIfaces {
 				cur, curProto = int(b[i+2]), int(b[i+7])
 			}
 		case descEndpoint:
 			// bmAttributes[1:0] == 3 = interrupt, bEndpointAddress bit 7 = IN.
-			if l >= 7 && cur >= 0 && b[i+3]&0x3 == 3 && b[i+2]&0x80 != 0 {
+			if l >= 7 && cur >= 0 && b[i+3]&0x3 == 3 && b[i+2]&0x80 != 0 && b[i+2]&0xF != 0 && (int(b[i+4])|int(b[i+5])<<8)&0x7FF != 0 {
 				ep := int(b[i+2] & 0xF)
 				d.ifaces = append(d.ifaces, hidIface{
 					num:      cur,
@@ -603,6 +616,9 @@ func (d *Device) configure() error {
 		}
 		// SET_IDLE(0) = alleen rapporteren bij verandering. Ook optioneel.
 		_, _ = d.control(0x21, hidSetIdle, 0, uint16(f.num), 0)
+		if h.poisoned != nil {
+			return h.poisoned
+		}
 		d.arm(f)
 	}
 	return nil
@@ -657,6 +673,10 @@ func (d *Device) handle(f *hidIface, ev event, buf []byte) (int, int, bool) {
 	h := d.hc
 	switch ev.comp {
 	case ccSuccess, ccShortPacket:
+		if ev.rem > uint32(reportLen(f.mps)) {
+			d.lastErr = h.quarantine(fmt.Errorf("interrupt completion exceeds transfer length"))
+			return 0, 0, false
+		}
 		n := reportLen(f.mps) - int(ev.rem)
 		if n > len(buf) {
 			n = len(buf)
@@ -768,4 +788,27 @@ func (d *Device) String() string {
 	}
 	return fmt.Sprintf("%s %04x:%04x on port %d (%s, slot %d)",
 		what, d.VendorID, d.ProductID, d.Port, d.Speed, d.Slot)
+}
+
+// SuperSpeed encodes bMaxPacketSize0 as an exponent; USB2 uses bytes.
+func descriptorMPS0(speed Speed, value byte) (int, error) {
+	switch speed {
+	case SpeedSuper:
+		if value == 9 {
+			return 512, nil
+		}
+	case SpeedHigh:
+		if value == 64 {
+			return 64, nil
+		}
+	case SpeedLow:
+		if value == 8 {
+			return 8, nil
+		}
+	case SpeedFull:
+		if value == 8 || value == 16 || value == 32 || value == 64 {
+			return int(value), nil
+		}
+	}
+	return 0, fmt.Errorf("xhci: invalid EP0 packet size %d for %s", value, speed)
 }

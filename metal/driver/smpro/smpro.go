@@ -38,8 +38,9 @@ const (
 // doorbell al bereikbaar gemaakt (uefi.MapHigh) — dit package kent het
 // board niet.
 type Dev struct {
-	ch uint32
-	ss acpi.PCCSubspace
+	pending bool // the PCC buffer still belongs to firmware after a timeout
+	ch      uint32
+	ss      acpi.PCCSubspace
 }
 
 func New(ch int, ss acpi.PCCSubspace) *Dev { return &Dev{ch: uint32(ch), ss: ss} }
@@ -61,7 +62,13 @@ func (d *Dev) SoCTemp() (mC int, ok bool) {
 // (zelfde regel als fw/acpi). Eén aanroeper (de telemetrie-goroutine), dus
 // geen lock.
 func (d *Dev) call(m0, m1, m2 uint32) (r0, r1 uint32, ok bool) {
+	if d.ss.ShmemBase == 0 || d.ss.ShmemLen < 20 {
+		return 0, 0, false
+	}
 	sh := uintptr(d.ss.ShmemBase)
+	if d.pending && dev.Read32(sh+4)&(stCmdComplete<<16) == 0 {
+		return 0, 0, false
+	}
 	dev.Write32(sh, pccSignature|d.ch)
 	// command (u16 @4) en status (u16 @6) in één uitgelijnde 32-bit write:
 	// commandtype = bits 31:28 van het bericht, CMD_COMPLETE gewist, de
@@ -71,6 +78,8 @@ func (d *Dev) call(m0, m1, m2 uint32) (r0, r1 uint32, ok bool) {
 	dev.Write32(sh+8, m0)
 	dev.Write32(sh+12, m1)
 	dev.Write32(sh+16, m2)
+	d.pending = true
+	dev.MB()
 	d.ring()
 
 	// Linux budgetteert 500× de PCCT-latentie; zelfde budget met een vloer,
@@ -87,6 +96,8 @@ func (d *Dev) call(m0, m1, m2 uint32) (r0, r1 uint32, ok bool) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+	d.pending = false
+	dev.MB()
 	return dev.Read32(sh + 8), dev.Read32(sh + 12), true
 }
 

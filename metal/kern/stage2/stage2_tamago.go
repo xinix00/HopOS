@@ -117,21 +117,9 @@ func SetFlipCapable(v bool) { flipCapable = v }
 // precies omdat de flip-laag vooraf toetste dat de som gelijk is: een kern die
 // andere switch-code draagt kan met levende bewoners niet eens vertrekken.
 //
-// Klopt de som hier tóch niet, dan is de aanname van dat contract gebroken
-// (een bug, of DRAM dat corrumpeerde tussen de toets en de sprong) en is er
-// geen nette uitweg meer: we zijn al gesprongen, en een kern zónder werkende
-// switch-code kan niets. Dus installeren we alsnog vers, en trekken we de
-// adoptie-stand in — wat twee dingen betekent, allebei bedoeld:
-//
-//   - InitVectors zet de app-core-regio vers neer (thunks, parkeerlus,
-//     sched-blokken, ctx-staten), dus de bewoners van de vorige kern zijn hoe
-//     dan ook weg;
-//   - kern/slots ziet dat via cageAdoptable en geeft hun partities vrij in
-//     plaats van ze te reserveren voor apps die niet meer draaien.
-//
-// Cores die op dít moment ín de oude kopie stonden zijn daarmee verloren. Dat
-// is het eerlijke antwoord op een onmogelijke toestand — en de node-watchdog
-// is het vangnet als de node er alsnog door omvalt.
+// Klopt de som hier tóch niet, dan stopt deze boot vóór enige koude init.
+// De oude cores kunnen nog draaien: mismatch geeft geen toestemming hun
+// code, contexten of geheugen te overschrijven of opnieuw uit te geven.
 func installSwitchCode() {
 	blobs := imageBlobs()
 	if blobs == nil {
@@ -154,7 +142,7 @@ func installSwitchCode() {
 		if dev.Read64(base) != switchMagic || dev.Read64(base+swHash) != sum {
 			fmt.Printf("HOPOS_FLIP_SWITCHCODE_MISMATCH: resident switch code (%#x) is not ours (%#x) — refusing to adopt residents\n",
 				dev.Read64(base+swHash), sum)
-			adopting = false
+			panic("stage2: incompatible live switch code; refusing cold initialization")
 		} else {
 			b := uint64(base)
 			el2.SetRelocated(b+dev.Read64(base+swEntry),

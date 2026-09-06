@@ -52,7 +52,7 @@ func testSlotRing(t *testing.T, i int) func() []byte {
 	}
 	// Ook een TX-ring: zonder loopt de switch-pas op nil en slikt zijn
 	// recover dat — de test slaagde dan met een PANIC-regel (review 05-09).
-	pt := &port{rx: ring.Open(base), tx: ring.Open(base + 256<<10)}
+	pt := &port{rx: ring.Open(base, 256<<10), tx: ring.Open(base+256<<10, 256<<10)}
 	ports[i] = pt
 	mu.Unlock()
 	t.Cleanup(func() {
@@ -62,7 +62,7 @@ func testSlotRing(t *testing.T, i int) func() []byte {
 		}
 		mu.Unlock()
 	})
-	rd := ring.Open(base)
+	rd := ring.Open(base, 256<<10)
 	out := make([]byte, 32<<10)
 	return func() []byte {
 		typ, n, ok := rd.ReadInto(out)

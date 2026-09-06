@@ -16,23 +16,17 @@ var agentSnapshot func() ([]byte, error)
 // agentboot.Options.OnSnapshot).
 func UseAgentState(snap func() ([]byte, error)) { agentSnapshot = snap }
 
-// snapshotAgent leest de agent-state, of geeft niets als er geen agent is.
-// Een fout is geen reden om de flip af te blazen: de apps overleven hem toch,
-// en de leader herstelt de administratie bij zijn eerste synchronisatie. Wel
-// luid, want het verschil tussen "geen agent" en "agent kon niet" is precies
-// wat je wil weten als de taken daarna vreemd doen.
-func snapshotAgent() []byte {
+// snapshotAgent refuses a flip that would lose a configured agent's owners.
+func snapshotAgent() ([]byte, error) {
 	if agentSnapshot == nil {
-		return nil
+		return nil, nil
 	}
 	b, err := agentSnapshot()
 	if err != nil {
-		fmt.Printf("kernflip: could not snapshot the agent state (%v) — flipping without it; the leader will resync\n", err)
-		return nil
+		return nil, fmt.Errorf("snapshot agent: %w", err)
 	}
 	if len(b) > maxAgentState {
-		fmt.Printf("kernflip: agent state is %d bytes, over the %d-byte handoff limit — flipping without it; the leader will resync\n", len(b), maxAgentState)
-		return nil
+		return nil, fmt.Errorf("agent state is %d bytes, limit %d", len(b), maxAgentState)
 	}
-	return b
+	return b, nil
 }

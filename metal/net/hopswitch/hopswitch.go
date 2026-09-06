@@ -193,8 +193,8 @@ func Attach(i int, netPA uintptr) {
 		return
 	}
 	ports[i] = &port{
-		tx: ring.Open(netPA + layout.NetTXOff),
-		rx: ring.Open(netPA + layout.NetRXOff),
+		tx: ring.Open(netPA+layout.NetTXOff, layout.NetRingDataCap),
+		rx: ring.Open(netPA+layout.NetRXOff, layout.NetRingDataCap),
 	}
 	// De kop van de RX-ring is CtxRingHeadPA: de EL2-switcher peekt hem
 	// zonder MMU bij de rotatie (cpu/el2/switch.s), dus die kop moet bij elke

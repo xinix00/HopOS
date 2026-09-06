@@ -59,7 +59,7 @@ func DirectRXKicks() uint64 { return directRXKicks.Load() }
 
 func wakeRX(i int) {
 	core := coreOf(i)
-	if slotShares(i) || !coreRunning(core) {
+	if !coreRunning(core) {
 		return
 	}
 	// Een unit met meer cores: kick élke geyielde core van de unit waarvan de
@@ -103,25 +103,28 @@ func wakeRX(i int) {
 }
 
 func waker() {
-	kick := cores().Kick
 	for {
 		time.Sleep(time.Millisecond)
-		wakerRounds.Add(1)
-		now := dev.Counter()
-		for i := 1; i <= NumSlots(); i++ {
-			core := coreOf(i)
-			if slotShares(i) || !coreRunning(core) {
-				continue // gedeelde cores wekt de rotatie; een geparkeerde core slaapt niet
-			}
-			if ctxState(i) != layout.CtxSaved {
-				continue // draait, boot, of dood: niets te wekken
-			}
-			wakerArmed.Add(1)
-			if !wakeDue(i, now) {
-				continue
-			}
+		wakeSleeping(dev.Counter())
+	}
+}
+
+// Every resident can make its physical core due, including shared residents
+// whose cage number exceeds the core count. The switcher decides who runs.
+func wakeSleeping(now uint64) {
+	wakerRounds.Add(1)
+	for i := 1; i <= layout.MaxSlots; i++ {
+		if ctxState(i) != layout.CtxSaved {
+			continue
+		}
+		core := coreOf(i)
+		if !coreRunning(core) {
+			continue
+		}
+		wakerArmed.Add(1)
+		if wakeDue(i, now) {
 			if phys := physCore(core); phys >= 0 {
-				kick(phys)
+				cores().Kick(phys)
 				wakerKicks.Add(1)
 			}
 		}

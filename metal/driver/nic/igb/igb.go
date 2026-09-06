@@ -330,6 +330,9 @@ func (n *Net) Receive(buf []byte) (int, error) {
 	}
 	dev.MB()
 	length := int(dev.Read32(d+12) & 0xFFFF)
+	if length > bufSize {
+		length = 0 // device length must fit its DMA buffer
+	}
 	if status&rxEOP == 0 {
 		// Frame > buffer (kan niet bij 2KB vs MTU 1522) — descriptor weg-
 		// gooien en doorschuiven i.p.v. een halve frame afleveren.

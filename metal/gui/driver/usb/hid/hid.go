@@ -159,6 +159,13 @@ func (k *Keyboard) Decode(r []byte, out []Event) []Event {
 
 	var keys [6]uint8
 	copy(keys[:], r[2:8])
+	// An error report does not say that previously held keys were released.
+	for _, u := range keys {
+		if u >= 1 && u <= 3 {
+			k.mods = mods
+			return out
+		}
+	}
 
 	// Losgelaten: zat in de oude verzameling, niet in de nieuwe.
 	for _, u := range k.keys {

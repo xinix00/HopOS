@@ -253,11 +253,19 @@ func bootPendingDispatch(core, i int, tramp, ctx uint64) error {
 	// CtxCtrlPA staat er al: armSlot schrijft hem voor élk slot, direct vóór
 	// deze call (slots.go).
 	ctxWrite(i, layout.CtxBootPC, tramp)
+	ctxWrite(i, layout.CtxBootArg, ctx)
 	dev.MB()
 	ctxWrite(i, layout.CtxState, layout.CtxBootPending)
 	if err := residentAdd(core, i); err != nil {
 		ctxWrite(i, layout.CtxState, layout.CtxEmpty)
 		return err
+	}
+	// Publiceer eerst de bewoner, bel daarna de core: alle bestaande
+	// bewoners kunnen slapen met een deadline die nog ver weg ligt.
+	if kick := cores().Kick; kick != nil {
+		if phys := physCore(core); phys >= 0 {
+			kick(phys)
+		}
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -322,14 +330,8 @@ func bootPendingDispatch(core, i int, tramp, ctx uint64) error {
 		time.Sleep(time.Millisecond)
 	}
 
-	// Ook ná de escalatie niet opgepikt: boekhouding terugdraaien. Won hij de
-	// race tóch nog (staat al Running), dan hoort hij juist terug in de lijst.
-	residentRemove(core, i)
-	dev.MB()
-	if ctxState(i) != layout.CtxBootPending {
-		return residentAdd(core, i) // won de race tóch: terug in de lijst
-	}
-	ctxWrite(i, layout.CtxState, layout.CtxEmpty)
+	// Uitkomst onzeker: de switcher kan het verzoek nog oppakken. Laat
+	// context en bewoner staan; alleen Stop mag bewezen beëindigen.
 	return fmt.Errorf("slot %d: core %d never yielded to boot its new resident, even after reclaiming it from slot %d", i, core, hog)
 }
 

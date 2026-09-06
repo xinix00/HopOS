@@ -18,7 +18,7 @@ import (
 // ABI is de versie van het flip-contract: de staart-vorm, het handoff-blob en
 // de chainload-entryconditie samen. De bundel draagt hem (mkkernel -flipabi);
 // een mismatch is een geweigerde flip — dan is de gewone reboot-update de weg.
-const ABI = 1
+const ABI = 2
 
 // relocMagic spelt "HOPRELO1" (little-endian) — zelfde woord als mkkernel.
 const relocMagic = 0x314F4C4552504F48
@@ -54,7 +54,7 @@ func ParseBundle(b []byte) (*Bundle, error) {
 		return nil, fmt.Errorf("geen HOPRELO1-staart — is dit een kale ELF i.p.v. een flip-bundel (mkkernel -elfreloc)?")
 	}
 	hdrOff := binary.LittleEndian.Uint64(ftr[:8])
-	if hdrOff%8 != 0 || hdrOff+hdrLen > uint64(len(b)-ftrLen) {
+	if hdrOff%8 != 0 || hdrOff > uint64(len(b)-ftrLen-hdrLen) {
 		return nil, fmt.Errorf("staart-header buiten het bestand (%#x)", hdrOff)
 	}
 	hdr := b[hdrOff : hdrOff+hdrLen]
@@ -84,7 +84,7 @@ func ParseBundle(b []byte) (*Bundle, error) {
 	if bun.FlatSize == 0 || bun.FlatSize > 1<<32 {
 		return nil, fmt.Errorf("platte beeldgrootte %#x is onzin", bun.FlatSize)
 	}
-	if bun.LinkLoad%0x10000 != 0 {
+	if bun.LinkLoad%0x10000 != 0 || bun.LinkLoad > ^uint64(0)-bun.FlatSize {
 		return nil, fmt.Errorf("linkbasis %#x niet 64KB-uitgelijnd", bun.LinkLoad)
 	}
 	if bun.Entry < bun.LinkLoad+64 || bun.Entry >= bun.LinkLoad+bun.FlatSize || bun.Entry%4 != 0 {

@@ -23,7 +23,7 @@ func newRing(size uint64) *Ring {
 	base := uintptr(unsafe.Pointer(&buf[0]))
 	base = (base + 7) &^ 7
 	Init(base, size)
-	return Open(base)
+	return Open(base, size)
 }
 
 func TestRoundtrip(t *testing.T) {
@@ -274,4 +274,45 @@ func FuzzReadInto(f *testing.F) {
 		}
 		t.Fatalf("ReadInto blijft leveren (head=%#x)", head)
 	})
+}
+
+// Reopening during adoption must preserve the owner's bounds even when the
+// informational wire size differs. This stays inside host-owned backing.
+func TestOpenUsesOwnerCapacity(t *testing.T) {
+	for _, wireSize := range []uint64{0, 8, 512, ^uint64(0)} {
+		r := newRing(128)
+		dev.Write64(r.base+hdrSize, wireSize)
+		r = Open(r.base, 128)
+		if r.size != 128 || r.Fits(64) {
+			t.Fatalf("wire size %#x changed owner capacity", wireSize)
+		}
+		for round := 0; round < 20; round++ {
+			if !r.Write(TypeLog, []byte("bounded")) {
+				t.Fatal("bounded write failed")
+			}
+			var buf [32]byte
+			if _, n, ok := r.ReadInto(buf[:]); !ok || string(buf[:n]) != "bounded" {
+				t.Fatal("bounded read failed")
+			}
+		}
+	}
+}
+
+func TestOpenRejectsInvalidOwnerRange(t *testing.T) {
+	for _, tc := range []struct {
+		base uintptr
+		size uint64
+	}{
+		{0x1000, 0}, {0x1000, 7}, {0x1000, 17}, {0x1001, 128},
+		{^uintptr(7), 128}, {0x1000, ^uint64(7)},
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("Open(%#x, %#x) accepted invalid owner range", tc.base, tc.size)
+				}
+			}()
+			Open(tc.base, tc.size)
+		}()
+	}
 }

@@ -81,6 +81,7 @@ type Controller struct {
 	MaxTransfer uint64 // grootste Read/Write in bytes
 	Model       string
 
+	failed     error      // onzekere completion: DMA blijft gereserveerd, geen hergebruik
 	mu         sync.Mutex // serialiseert I/O (één in-flight command, één DMA-buf)
 	dstrd      uint64
 	totalBytes uint64     // TNVMCAP uit de controller-identify
@@ -126,6 +127,9 @@ type cmd struct {
 // submit schrijft de command in de SQ, belt de doorbell en polt de CQ tot de
 // completion binnen is. Geeft de statuscode (0 = succes) terug.
 func (c *Controller) submit(q *queue, m cmd) error {
+	if c.failed != nil {
+		return c.failed
+	}
 	cid := q.tail // uniek genoeg: één command in flight per queue
 	if c.nvmmu != 0 {
 		// De ANS: altijd slot 0. De lineaire submissiemodus wijst het slot aan
@@ -180,13 +184,18 @@ func (c *Controller) submit(q *queue, m cmd) error {
 		status := dev.Read32(cqe + 12)
 		if (status>>16)&1 == q.phase {
 			dev.MB()
+			if status&0xffff != cid {
+				c.failed = fmt.Errorf("nvme: completion CID %d, expected %d", status&0xffff, cid)
+				return c.failed
+			}
 			// De NVMMU houdt het slot vast tot je het ongeldig verklaart; doe
 			// je dat niet, dan is de tabel na 64 opdrachten vol en hangt de
 			// volgende. TCB_STAT meldt of de invalidatie aankwam.
 			if c.nvmmu != 0 {
 				dev.Write32(c.nvmmu+regNVMMUTCBInval, cid)
 				if st := dev.Read32(c.nvmmu + regNVMMUTCBStat); st != 0 {
-					return fmt.Errorf("nvme: NVMMU invalidation for slot %d failed (%#x)", cid, st)
+					c.failed = fmt.Errorf("nvme: NVMMU invalidation for slot %d failed (%#x)", cid, st)
+					return c.failed
 				}
 			}
 			q.head = (q.head + 1) % qEntries
@@ -200,7 +209,8 @@ func (c *Controller) submit(q *queue, m cmd) error {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("nvme: timeout on command %#x", m.opc)
+			c.failed = fmt.Errorf("nvme: timeout on command %#x; DMA retained", m.opc)
+			return c.failed
 		}
 		c.serviceCoprocessor()
 		runtime.Gosched()
@@ -251,10 +261,16 @@ func Probe(win pcie.Window, dmaBase uintptr, dmaSize uint64) (*Controller, error
 // Init reset de controller, zet admin- en I/O-queues op en identificeert de
 // namespace. dmaBase/dmaSize is de (device-gemapte, niet-gecachte) DMA-regio.
 func (c *Controller) Init(dmaBase uintptr, dmaSize uint64) error {
+	if dmaBase == 0 || dmaBase&(dmaPageSize-1) != 0 || uint64(dmaBase) > ^uint64(0)-dmaSize {
+		return errors.New("nvme: invalid DMA range/alignment")
+	}
 	if dmaSize < genericDMANeed {
 		return fmt.Errorf("nvme: DMA-regio %d bytes, minimaal %d", dmaSize, genericDMANeed)
 	}
 	cap := dev.Read64(c.Base + regCAP)
+	if (cap>>48)&0xf != 0 {
+		return errors.New("nvme: controller requires pages larger than 4KB")
+	}
 	c.dstrd = (cap >> 32) & 0xf
 	if mqes := cap & 0xffff; mqes+1 < qEntries {
 		return fmt.Errorf("nvme: MQES %d < %d", mqes+1, qEntries)
@@ -267,13 +283,14 @@ func (c *Controller) Init(dmaBase uintptr, dmaSize uint64) error {
 	c.buf = dmaBase + genericDataOff
 	c.prpList = dmaBase + genericPRPOff
 	c.MaxTransfer = maxTransferSize
-	dev.Clear(dmaBase, genericDMANeed)
 
 	// Reset → admin-queues registreren → enable.
 	dev.Write32(c.Base+regCC, 0)
 	if err := c.waitCSTS(0, 5*time.Second); err != nil {
 		return err
 	}
+	c.failed = nil
+	dev.Clear(dmaBase, genericDMANeed)
 	dev.Write32(c.Base+regAQA, (qEntries-1)<<16|(qEntries-1))
 	dev.Write64(c.Base+regASQ, uint64(c.admin.sq))
 	dev.Write64(c.Base+regACQ, uint64(c.admin.cq))
@@ -305,6 +322,7 @@ func (c *Controller) identifyCtrl() error {
 	if err := c.submit(&c.admin, cmd{opc: admIdentify, prp1: uint64(c.buf), dw10: 1}); err != nil {
 		return err
 	}
+	dev.Pull(c.buf, dmaPageSize)
 	model := make([]byte, 40)
 	dev.CopyOut(model, c.buf+24)
 	c.Model = trim(model)
@@ -329,7 +347,7 @@ func (c *Controller) identifyNS() error {
 	flbas := uint64(dev.Read8(c.buf+26)) & 0xf
 	lbads := (dev.Read32(c.buf+128+uintptr(flbas)*4) >> 16) & 0xff
 	c.BlockSize = 1 << lbads
-	if c.Blocks == 0 || c.BlockSize == 0 || c.BlockSize > 4096 {
+	if c.Blocks == 0 || lbads < 9 || lbads > 12 || dev.Read32(c.buf+128+uintptr(flbas)*4)&0xffff != 0 || dev.Read8(c.buf+29)&7 != 0 {
 		return fmt.Errorf("nvme: namespace onbruikbaar (blocks=%d bs=%d)", c.Blocks, c.BlockSize)
 	}
 	return nil
@@ -373,6 +391,9 @@ func (c *Controller) dataPRPs(n uint64) (prp1, prp2 uint64) {
 func (c *Controller) xfer(opc uint32, lba uint64, p []byte, write bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.failed != nil {
+		return c.failed
+	}
 	// Nul bytes expliciet weigeren. NLB is een 0-based veld (dw12 = nlb-1), dus
 	// een lege transfer maakt daar 0xffffffff van: een opdracht van 4Gi blokken
 	// op één DMA-pagina — de controller DMA't dan ver buiten onze buffer. Er is
@@ -380,12 +401,12 @@ func (c *Controller) xfer(opc uint32, lba uint64, p []byte, write bool) error {
 	if len(p) == 0 {
 		return errors.New("nvme: zero-length transfer")
 	}
-	if uint64(len(p)) > c.MaxTransfer || uint64(len(p))%c.BlockSize != 0 {
+	if c.BlockSize == 0 || uint64(len(p)) > maxTransferSize || uint64(len(p)) > c.MaxTransfer || uint64(len(p))%c.BlockSize != 0 {
 		return fmt.Errorf("nvme: length %d not a block multiple (bs=%d, max %d)",
 			len(p), c.BlockSize, c.MaxTransfer)
 	}
 	nlb := uint64(len(p)) / c.BlockSize
-	if lba+nlb > c.Blocks {
+	if lba > c.Blocks || nlb > c.Blocks-lba || nlb > 1<<16 {
 		return fmt.Errorf("nvme: lba %d+%d buiten namespace (%d)", lba, nlb, c.Blocks)
 	}
 	// Is de databuffer gecached (het board mapte zijn blok Normal-WB), dan
