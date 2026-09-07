@@ -13,7 +13,7 @@ go 1.26.4
 // go.mod, dus de enige die met GOWORK=off (release.sh) reproduceerbaar
 // bouwt; de v1.12-beta's zijn keten-beta's en bouwen alleen op deze Mac.
 // Sibling-dev (go.work) bouwt gewoon tegen de werkboom.
-require github.com/xinix00/HopOS/metal/v2 v2.2.2
+require github.com/xinix00/HopOS/metal/v2 v2.2.3
 
 require (
 	github.com/ncruces/go-sqlite3 v0.35.4
