@@ -42,10 +42,11 @@ const part2M = 2 << 20
 type region struct{ base, size uint64 }
 
 var (
-	partMu   sync.Mutex
-	partOnce sync.Once
-	partFree []region // vrije stukken, lazy uit het board-plan
-	partOf   []region // per slot: de actieve reservering (size 0 = geen); lazy
+	partMu       sync.Mutex
+	partOnce     sync.Once
+	partFree     []region // vrije stukken, lazy uit het board-plan
+	partCapacity uint64   // allocatable bytes, excluding the active kernel
+	partOf       []region // per slot: de actieve reservering (size 0 = geen); lazy
 	// op layout.MaxSlots+1 gedimensioneerd (het board zet MaxSlots vóór gebruik)
 )
 
@@ -56,28 +57,30 @@ func poolInit() {
 	quarantined = make([]bool, layout.MaxSlots+1)
 	smpCores = make([]int, layout.MaxSlots+1)
 	hostCore = make([]int, layout.MaxSlots+1) // slot→core (share.go)
-	for _, r := range layout.Pool() {
-		partFree = append(partFree, region{r.Base, r.Size})
+	start, end := ownRegion()
+	initPartitionMemory(layout.Pool(), layout.Kernel(), start, end)
+}
+
+// Reconstruct the same ownership map at every boot: all reusable memory,
+// minus the current kernel. The previous kernel has no claim after handover.
+// Keep the board's pool order intact: its first entry is the app link base.
+func initPartitionMemory(pool []layout.Region, cold layout.Region, start, end uint64) {
+	regions := append([]layout.Region(nil), pool...)
+	if cold.Size != 0 {
+		regions = append(regions, cold)
 	}
-	// Het EIGEN venster uit de pool knippen (kern-flip, docs/kern-flip.md): na
-	// een flip woont deze kern in een regio die het board-plan als pool
-	// declareert — die mag nooit aan een app worden uitgedeeld. Op een gewone
-	// boot is het venster al een plan-hole en is dit een no-op; de bron is de
-	// éigen RAM-declaratie (ownRegion), dus dit dekt élke flip-positie zonder
-	// board-kennis. Host: (0,0) — tests zien exact het oude gedrag.
-	if s, e := ownRegion(); e > s {
-		takeRange(s, e)
+	var occupied []layout.Region
+	if end > start {
+		occupied = []layout.Region{{Base: start, Size: end - start}}
 	}
-	// Op ADRES sorteren — en alleen deze kopie, niet Plan.Pool: element 0 daarvan
-	// bepaalt het linkadres van élk app-image (cageLinkBase), dus die orde is
-	// functioneel en mag niet verschuiven.
-	//
-	// Waarom sorteren moet: releaseLocked voegt een vrijgegeven stuk gesorteerd in
-	// en smelt het met zijn twee BUREN. Op een ongesorteerde lijst wijst "de buur"
-	// naar een willekeurige regio, dus smelt hij niet — en dan heelt fragmentatie
-	// nooit meer. Het LicheeRV-plan zet de hoge regio bewust vooraan, dus dit is
-	// daar geen theorie.
-	sort.Slice(partFree, func(a, b int) bool { return partFree[a].base < partFree[b].base })
+	partFree, partCapacity = nil, 0
+	for _, source := range regions {
+		for _, r := range layout.CarvePool([]layout.Region{source}, occupied, part2M) {
+			partFree = append(partFree, region{r.Base, r.Size})
+			partCapacity += r.Size
+		}
+	}
+	sort.Slice(partFree, func(i, j int) bool { return partFree[i].base < partFree[j].base })
 }
 
 func align2M(n uint64) uint64 { return (n + part2M - 1) &^ (part2M - 1) }
@@ -300,6 +303,14 @@ func BorrowKernWindow(size uint64) (base, grown uint64, err error) {
 	if kernWindow.size != 0 {
 		return 0, 0, fmt.Errorf("kern-flip: er staat al een geleend venster (%#x+%d MB)", kernWindow.base, kernWindow.size>>20)
 	}
+	// Returning to the cold window restores the board's original geometry.
+	// It is an ordinary free claim: a resident there prevents this preference.
+	cold := layout.Kernel()
+	if cold.Size >= size && freeSpan(cold.Base, cold.Base+size) {
+		takeRange(cold.Base, cold.Base+size)
+		kernWindow = region{cold.Base, size}
+		return cold.Base, size, nil
+	}
 	best := -1
 	for idx := len(partFree) - 1; idx >= 0; idx-- {
 		r := partFree[idx]
@@ -353,11 +364,8 @@ func partitionOf(i int) (base, size uint64, ok bool) {
 // PoolBytes is de totale grootte van de partitie-pool — de plaatsings-ceiling
 // die HOP krijgt. HOP overspawnt daar (per-job MemoryLimit) nooit overheen.
 func PoolBytes() uint64 {
-	var n uint64
-	for _, r := range layout.Pool() {
-		n += r.Size
-	}
-	return n
+	partOnce.Do(poolInit)
+	return partCapacity
 }
 
 // PoolLargest is de grootste partitie die op dít moment nog te plaatsen is: het

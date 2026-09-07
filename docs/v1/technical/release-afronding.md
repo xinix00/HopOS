@@ -93,3 +93,28 @@ Dit zijn begrensde acceptatieproeven, geen bewijs van onbeperkte uptime. Niet ie
 ## Actuele aanvulling — L45
 
 De Engelse documentatie staat nu rechtstreeks in `docs/`; de vorige set, dit draaiboek en het logboek staan in `docs/v1/`. Morgen eerst de gemelde LicheeRV-uitval met twee gedeelde apps reproduceren en debuggen, daarna de nieuwe flipdownload testen. Sharing is hiervoor opnieuw open; de bronreview heeft nog geen oorzaak bewezen.
+
+## Release-day TODO — 7 September 2026
+
+Derek plans to publish tomorrow. Complete these two website follow-ups alongside the existing acceptance work:
+
+- [ ] **LicheeRV:** reproduce and resolve the two-app shared-core failure, verify neighbor survival and stop/reuse, then test the revised download and consecutive FLIPs with resident/TCP preservation. Record the tested build and results; update the website and documentation status from that evidence.
+- [ ] **M4 write throughput:** repeat the approximately 4000 MB/s workload three times on the release candidate. Record the command, storage device, data size, cache/flush policy, timing boundary and results. Update the website and measurements page with the reproducible result and conditions, replacing the current developer-reported attribution when supported.
+
+Finish by checking that the website, documentation and release evidence describe the same candidate and results. Physical network IRQ remains the separate later task.
+
+
+**7 September hardware update (L49–L50):** original RV startup OOM reproduction and three neighbor-preserving replacements pass on the single-buffer candidate. Revised downloader and four resident-preserving swaps pass; TCP checked in two pairs, with one pre-download dial timeout between them. Hash/identical rejection and subsequent app reuse pass. Still open: one uninterrupted three-flip TCP sequence; original cold-window reuse/capacity limitation; application origin/attach configuration; Cold restoration using the late-probe reboot retry now passes (L51); this does not close cold-window reuse. The earlier blanket “sharing failure” item is superseded by these specific findings. H6 and M4 throughput remain open.
+
+
+**Scope correction, 7 September (L52):** remove the explicit reboot option, its board callback and the late-probe retry. Keep automatic watchdog fault recovery. Complete cold-window reuse through FLIP ownership/allocation; a reboot is not an acceptable substitute for an online update.
+
+
+**L53 supersedes the RV kernel-window and TCP continuity blockers:** four consecutive live swaps preserve one resident and one continuously held TCP socket. Swaps 2 and 4 return to the original window; the full 206-MiB user workload starts afterward without reboot. Common allocator implementation and LicheeRV board declaration tested. Remaining overall release work includes application endpoint integration, the separately listed H6/I/O work and M4 throughput measurement; cold-window declarations on other boards require their fixed boot structures to be accounted for.
+
+- [ ] L53 follow-up: identify the isolated plugin download stall (2.7/10.6 MB). Cancellation/release and retry passed; neighbor IDs remained stable. Keep separate from the successful kernel-window acceptance.
+
+**L54 transport investigation:** ten original-source and ten local HTTP downloads pass; the basic 60-second silent-stream abort works. A separate false-idle timeout is reproduced with continuous slow traffic and corrected in the uncommitted HOP checkout. Await the candidate slow/silent hardware results and a published HOP version before changing the production dependency pin. The original isolated stall is not assigned an unproven cause.
+
+
+**L55 transport result:** false-idle timeout reproduced and corrected; slow and silent hardware fixtures behave correctly, and 30 ordinary downloads pass across before/local/after runs. Original isolated stall not reproduced or assigned an unproven cause. Remaining release action: publish the uncommitted HOP change from `fix/download-idle-progress`, update the HopOS pin to that real tag, and verify the published-dependency build. Other explicitly listed application integration and broader I/O tasks retain their own scope.

@@ -152,12 +152,10 @@ func listRespLimit(req hopabi.Req, names []string, maxChunk int) []byte {
 	return ok(req, uint64(len(names)), data)
 }
 
-// handle voert één hop-ABI-request uit (aangeroepen door de servicer-lus).
-// handleWithLimit bedient één call. scratch (HdrLen+maxChunk groot, per
-// verbinding) is de responsbuffer van de bulk-read: hopfs leest er direct
-// in en de kop komt ervoor — geen make van een MiB en geen kopie per call.
-// nil = het oude pad (allocatie), voor tests en kleine paden.
-func (s *servicer) handleWithLimit(payload []byte, maxChunk int, scratch []byte) []byte {
+// handleWithLimit verwerkt het verzoek vóór de werkbuffer als antwoord
+// wordt hergebruikt. DecodeReq kopieert het pad; OpRead gebruikt geen Data.
+// De verbinding verstuurt het antwoord vóór de volgende read in dezelfde buffer.
+func (s *servicer) handleWithLimit(payload []byte, maxChunk int, work *[]byte) []byte {
 	req, err := hopabi.DecodeReq(payload)
 	if err != nil {
 		return hopabi.EncodeResp(hopabi.Resp{Status: hopabi.StatusError, Data: []byte(err.Error())})
@@ -188,19 +186,16 @@ func (s *servicer) handleWithLimit(payload []byte, maxChunk int, scratch []byte)
 		if n > uint64(maxChunk) {
 			n = uint64(maxChunk)
 		}
-		if len(scratch) >= hopabi.HdrLen+int(n) {
-			read, err := fsys.ReadAt(rp, req.Off, scratch[hopabi.HdrLen:hopabi.HdrLen+int(n)])
-			if err != nil {
-				return fail(req, err)
-			}
-			return hopabi.EncodeRespInto(scratch, hopabi.Resp{Op: req.Op, Seq: req.Seq, Size: uint64(read)}, read)
+		need := hopabi.HdrLen + int(n)
+		if cap(*work) < need {
+			*work = make([]byte, need)
 		}
-		buf := make([]byte, n)
-		read, err := fsys.ReadAt(rp, req.Off, buf)
+		buf := (*work)[:need]
+		read, err := fsys.ReadAt(rp, req.Off, buf[hopabi.HdrLen:])
 		if err != nil {
 			return fail(req, err)
 		}
-		return ok(req, uint64(read), buf[:read])
+		return hopabi.EncodeRespInto(buf, hopabi.Resp{Op: req.Op, Seq: req.Seq, Size: uint64(read)}, read)
 
 	case hopabi.OpWrite:
 		rp, err := s.resolve(req.Path)

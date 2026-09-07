@@ -7,22 +7,19 @@ package slots
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"strings"
 
-	"github.com/xinix00/HopOS/metal/v2/abi/hopabi"
 	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 	"github.com/xinix00/HopOS/metal/v2/abi/systemapi"
 )
 
 // maxSystemConns begrenst de open system-callverbindingen per app-lifecycle.
-// ReadFrame alloceert per frame tot MaxPayload (ruim 1MiB) op HOP's heap, en
-// elke verbinding kost de node-stack zijn buffers; zonder cap laat één app met
-// N verbindingen HOP's heap N MiB groeien tot de kern OOM't — en dan vallen
-// álle slots. Dezelfde isolatiegrens als maxNodes in kern/hopfs. applib houdt
-// er één open; de tweede is voor een herverbinding waarvan HOP de FIN van de
-// oude nog niet zag.
+// Elke verbinding houdt netwerkbuffers en herbruikbare callbuffers vast.
+// applib houdt er één open; de tweede is voor een herverbinding waarvan
+// HOP de FIN van de oude nog niet zag.
 const maxSystemConns = 2
 
 // ServeSystem luistert op HOP's vaste interne servicepoort. Aanroepen nadat
@@ -95,15 +92,21 @@ func serveSystemConn(conn net.Conn, s *servicer) {
 			fmt.Printf("HOPOS_SYSTEM_PANIC slot %d: %v\n", s.slot, r)
 		}
 	}()
-	// Twee buffers per verbinding, voor de hele levensduur: requests komen
-	// in inbuf, de bulk-read-respons wordt in scratch opgebouwd. Zo kost een
-	// call van 1MiB geen enkele allocatie op HOP — het waren er twee, en die
-	// hielden HOP's GC aan het werk terwijl apps op hem wachtten (04-09).
-	inbuf := make([]byte, systemapi.MaxPayload)
-	scratch := make([]byte, hopabi.HdrLen+systemapi.MaxIOChunk)
+	// Alleen ruimte voor werk dat werkelijk langskomt. Twee maximale buffers
+	// per verbinding kostten ook een log-only app ruim 2 MiB kernelheap.
+	// Eén caller: verzoek verwerken, antwoord versturen, daarna hergebruiken.
+	// Hergebruik blijft: na groei kost dezelfde payloadmaat geen allocatie.
+	var work []byte
 	for {
-		kind, payload, err := systemapi.ReadFrameInto(conn, inbuf)
-		if err != nil {
+		kind, n, err := systemapi.ReadHeader(conn)
+		if err != nil || (kind != systemapi.KindCall && kind != systemapi.KindLog) {
+			return
+		}
+		if cap(work) < n {
+			work = make([]byte, n)
+		}
+		payload := work[:n]
+		if _, err := io.ReadFull(conn, payload); err != nil {
 			return
 		}
 		// Een verbinding hoort bij één lifecycle. Een oude app die na een
@@ -117,7 +120,7 @@ func serveSystemConn(conn net.Conn, s *servicer) {
 		}
 		switch kind {
 		case systemapi.KindCall:
-			resp := s.handleWithLimit(payload, systemapi.MaxIOChunk, scratch)
+			resp := s.handleWithLimit(payload, systemapi.MaxIOChunk, &work)
 			if err := systemapi.WriteFrame(conn, systemapi.KindResult, resp); err != nil {
 				return
 			}

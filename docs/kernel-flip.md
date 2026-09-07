@@ -44,7 +44,7 @@ borrowed destination window
 +-------------------------+ high addresses
 ```
 
-The LicheeRV kernel budget remains **32 MiB**. Pool staging replaces the former large download allocation; it does not increase the configured kernel heap. The allocator rounds the loan to its existing allocation granularity and keeps the handoff outside the new runtime's RAM.
+The LicheeRV kernel reservation remains **32 MiB**, including the 256 KiB handoff tail. After a flip, runtime RAM occupies 31.75 MiB inside that reservation. Pool staging replaces the former large heap allocation, and subsequent flips keep the same reservation size.
 
 Sources: [fetch.go](../metal/kern/kernflip/fetch.go), [bundle.go](../metal/kern/kernflip/bundle.go), [flip.go](../metal/kern/kernflip/flip.go), [dev/reader.go](../metal/dev/reader.go), [layout](../metal/abi/layout/), [partmem.go](../metal/kern/slots/partmem.go).
 
@@ -56,7 +56,9 @@ The new kernel recognizes and validates the handoff before cold initialization. 
 
 Application memory, TCP stacks and persistent execution structures stay in place. Supported NAT transfer allows existing app connections to continue. Node-owned connections are recreated: management clients reconnect, and the app's standard system client reconnects on the eligible transport failures described in [Networking](networking.md).
 
-Old kernel space is reusable only where the board's memory plan permits it. A fixed cold-boot reservation is not automatically added to the application pool. Subsequent flips therefore still require an available contiguous destination.
+The allocator reconstructs ownership from the reusable board regions and excludes the active kernel. A departed pool kernel has no remaining claim. Boards can also declare their cold kernel reservation reusable when it contains no persistent boot, DMA or control data. The same allocator then makes it available to apps or another kernel. Capacity reporting excludes the active kernel reservation.
+
+LicheeRV declares its original 32 MiB kernel window reusable. FLIP prefers that original address when the complete destination is free; if an app owns it, FLIP chooses another free window. A second flip can therefore restore the original placement geometry. Hardware verification covers four swaps on one persistent app TCP connection, returning to the original window at swaps two and four, followed by the full 206 MiB cloudflared/Stulp/plugins workload. Other boards retain their fixed cold reservations until their persistent structures are accounted for. Total free bytes still do not guarantee a sufficiently large contiguous destination.
 
 Sources: [adopted.go](../metal/kern/kernflip/adopted.go), [slots/adopt.go](../metal/kern/slots/adopt.go), [handoff.go](../metal/net/hopswitch/handoff.go).
 

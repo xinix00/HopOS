@@ -30,7 +30,7 @@ App-core counts describe the tested machines. “Passed” covers the stated tes
 | Raspberry Pi 4 | ARM64 | 3 | Passed | Passed | Passed | Generations 1–3 on 2.2.1 candidates; the same two incoming sockets throughout. Release and replacement passed. |
 | Raspberry Pi 5 | ARM64 | 3 | Passed | Passed | Passed | Generations 7–9 on 2.2.1 candidates; the same two incoming sockets. Generation 9 required one retry after a pre-jump download dial timeout. |
 | Radxa Zero 3E | ARM64 | 3 | Passed | Passed | Passed | Generations 3–5; incoming and outgoing app TCP connections retained. |
-| LicheeRV Nano | RISC-V | 1 | Passed | Earlier fixtures passed; current two-app failure reported, investigation open | Not applicable | Pending: UART established OOM during the old download allocation. The v2.2.2 pool-download correction awaits hardware testing. |
+| LicheeRV Nano | RISC-V | 1 | Passed | Single-buffer candidate: cloudflared + Stulp + plugins (206 MiB) start; three plugin replacements preserve neighbors | Not applicable | Window-reuse candidate: generations 1–4 retain the resident and the same TCP socket throughout. Swaps 2 and 4 return to the original kernel window; all three user apps fit afterward. |
 | QEMU virt | ARM64 | Configuration-dependent | Separate integration coverage | Separate integration coverage | Separate integration coverage | Emulation results are retained separately from physical-board results. |
 | UEFI / Altra | ARM64 | Machine-dependent | Not signed off in this round | Not signed off in this round | Not signed off in this round | Builds pass; no new physical acceptance result from this round. |
 
@@ -47,9 +47,13 @@ Gate output: [v2.2.2 host and target checks](v1/technical/release-evidence/2026-
 
 ## Remaining release work
 
-A reported LicheeRV failure with two apps sharing its app hart reopens sharing acceptance. Source review has not established its cause. Reproduce and debug this case before the remaining flip tests; the earlier fixture results remain historical evidence.
+The LicheeRV startup OOM and cold-window reuse issues pass hardware retesting on the current candidate. The original three jobs start in one sharegroup; four kernel swaps retain one test resident and the same host TCP socket. Swaps two and four return to the original kernel window, and the complete 206 MiB workload fits afterward without reboot. See [logbook L53](v1/technical/release-logboek.md) and [compact evidence](v1/technical/release-evidence/2026-09-07-licheerv-window-reuse.json). These results identify tested candidates, not the previously published stock v2.2.2.
 
-The final hardware round is scheduled for **7 September 2026**, after this documentation pass. Start with a cold installation of v2.2.2 on LicheeRV: its installed downloader cannot load the correction through the failing allocation path. Then check rejected downloads and released claims, three consecutive flips with residents and persistent TCP, and management/reuse afterward.
+Transport follow-up found and corrected a false-idle timeout in HOP: UI progress batching delayed the idle-clock refresh. A continuously slow fixture fails on the old code and completes on the corrected candidate; genuinely silent streams still abort and release their claim. Ten original-source downloads before the fix, ten local downloads, and ten original-source downloads after it pass. The original isolated stall did not recur, so its cause is not established. See [transport evidence](v1/technical/release-evidence/2026-09-07-licheerv-transport.json).
+
+The corrected HOP dependency is uncommitted and unpublished. Publish it and update the production HopOS dependency pin before making a release claim; the hardware candidate used an isolated local replacement (L55).
+
+The supplied application definitions still point origin/attach traffic at an unoccupied slot; full service integration needs corrected endpoints. Reusable cold reservations are enabled on LicheeRV. Other boards require their persistent boot structures to be accounted for before their original reservations can enter the pool. The explicit reboot option has been removed; online updates use FLIP.
 
 The remaining hardware/I/O comparisons and the thirty-minute combined compute/I/O run remain in the [release plan](v1/technical/release-afronding.md). Final acceptance identifies the actual tested release artifacts. Physical network IRQ integration follows separately after this round.
 

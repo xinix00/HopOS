@@ -156,6 +156,7 @@ func init() {
 
 	layout.UsePlan(layout.Plan{
 		RAMBase:       dramBase,
+		Kernel:        layout.Region{Base: licheerv.HopBase, Size: licheerv.HopSize},
 		NodeCtrlPA:    nodeCtrlPA,
 		BootScratchPA: bootScratchPA,
 		CagePA:        slotBlockPA,

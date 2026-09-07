@@ -25,6 +25,9 @@ func TestUsePlanPoolCannotOverlapAdminOrItself(t *testing.T) {
 		name   string
 		change func(*Plan)
 	}{
+		{"kernel overlaps pool", func(p *Plan) { p.Kernel = p.Pool[0] }},
+		{"kernel overlaps scratch", func(p *Plan) { p.Kernel = Region{Base: p.BootScratchPA, Size: 2 << 20} }},
+		{"kernel alignment", func(p *Plan) { p.Kernel = Region{Base: 0x40000001, Size: 32 << 20} }},
 		{"pool overlap", func(p *Plan) { p.Pool = append(p.Pool, p.Pool[0]) }},
 		{"overflow", func(p *Plan) { p.Pool = []Region{{Base: ^uint64((2 << 20) - 1), Size: 2 << 20}} }},
 		{"alignment", func(p *Plan) { p.Pool[0].Base++ }},

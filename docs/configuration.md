@@ -57,7 +57,6 @@ Defaults below refer to code behavior unless a template default is explicitly st
 | `hopos.s3.key`, `hopos.s3.secret` | Strings; empty | S3 credentials retained by the node. |
 | `hopos.s3.pathstyle` | `1` enables it | Use path-style S3 addressing. |
 | `hopos.wd` | `off` disables it | Otherwise use the board's watchdog policy where hardware is wired. |
-| `hopos.reboot` | `1` requests reset at boot | Deliberate reset path using the board watchdog; not a normal service setting. |
 | `hopos.blackbox` | `1` | Print the previous boot's retained console. |
 | `hopos.rxpoll` | `1` | Force receive polling. Physical IRQ integration and its test scope are tracked in [status](status.md). |
 | `hopos.idleyield` | `1` | Force the application's idle-yield path for diagnostics. |

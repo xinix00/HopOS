@@ -587,6 +587,11 @@ type Plan struct {
 	// je twee keer moet uitrekenen wat een app krijgt.
 	Pool []Region // vrij DRAM voor app-partities (2MB-korrel)
 
+	// Kernel is the reusable cold kernel reservation, including its flip tail.
+	// Zero leaves a board's fixed boot reservation outside the allocator.
+	// It must contain no persistent firmware, DMA or control structures.
+	Kernel Region
+
 	// RAMBase is waar het DRAM van dit board fysiek begint — het meetpunt van
 	// RequiredRAM. Optioneel: 0 betekent HopRAMStart, de statische
 	// qemuvirt-waarde waar de check historisch tegen rekende. Zet hem op elk
@@ -647,12 +652,16 @@ func UsePlan(p Plan) {
 	for _, r := range reserved {
 		checkRegion(r)
 	}
-	for i, r := range p.Pool {
+	allocatable := append([]Region(nil), p.Pool...)
+	if p.Kernel.Size != 0 {
+		allocatable = append(allocatable, p.Kernel)
+	}
+	for i, r := range allocatable {
 		checkRegion(r)
 		if r.Size == 0 || (r.Base|r.Size)&((2<<20)-1) != 0 {
 			panic("layout: pool region empty or not 2MB-aligned")
 		}
-		for _, other := range p.Pool[:i] {
+		for _, other := range allocatable[:i] {
 			if regionsOverlap(r, other) {
 				panic("layout: overlapping pool regions")
 			}
@@ -786,6 +795,9 @@ func Pool() []Region {
 	pa(plan.NodeCtrlPA) // guard
 	return plan.Pool
 }
+
+// Kernel returns the board's reusable cold kernel reservation.
+func Kernel() Region { return plan.Kernel }
 
 // CarvePool bouwt een partitie-pool uit de fysieke geheugenbanken (uit de DTB)
 // minus alle holes (HOP-kern, control-regio's, DTB, /memreserve/). Pure

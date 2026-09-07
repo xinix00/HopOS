@@ -123,26 +123,3 @@ func TestFlipCanaryWithoutAgentStopsBlindPets(t *testing.T) {
 		t.Fatal("failed canary kept petting")
 	}
 }
-func TestIntentionalRebootStopsEarlyPets(t *testing.T) {
-	watchdogFixture(t)
-	earlyPet = make(chan struct{})
-	stopped := earlyPet
-	marker := new(int)
-	nodeWDT.Reboot = func() {
-		select {
-		case <-stopped:
-		default:
-			t.Fatal("reboot left early pet worker running")
-		}
-		if earlyPet != nil {
-			t.Fatal("reboot retained early owner")
-		}
-		panic(marker) // emulate non-returning hardware reset, without hardware
-	}
-	defer func() {
-		if got := recover(); got != marker {
-			t.Fatalf("unexpected reset result: %v", got)
-		}
-	}()
-	rebootNow()
-}

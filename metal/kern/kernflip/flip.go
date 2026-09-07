@@ -31,9 +31,8 @@ func FlipFromURL(url, sha string) error {
 	}()
 	fmt.Printf("kernflip: fetching %s into the new window\n", url)
 	length, sum, err := fetchBundleInto(url, sha, func(n int64) (io.Writer, error) {
-		lo, hi := runtime.MemRegion()
 		var err error
-		win, total, err = slots.BorrowKernWindow(uint64(hi-lo) + handoffTail)
+		win, total, err = slots.BorrowKernWindow(kernelWindowSize())
 		if err != nil {
 			return nil, err
 		}
@@ -61,6 +60,16 @@ func FlipFromURL(url, sha string) error {
 		return err
 	}
 	return flip(bun, sum, win, total, staging-win)
+}
+
+// A reusable cold reservation includes the handoff, just as an app's
+// reservation includes its ABI tail. Its size stays constant across flips.
+func kernelWindowSize() uint64 {
+	if cold := layout.Kernel(); cold.Size != 0 {
+		return cold.Size
+	}
+	start, end := runtime.MemRegion()
+	return uint64(end-start) + handoffTail
 }
 
 // Flip plaatst de bundel in een uit de pool geleend venster en springt erin.
@@ -175,7 +184,7 @@ func flip(bun *Bundle, sum, win, total, stagingOffset uint64) error {
 		return fmt.Errorf("kernflip: payload overlaps staged bundle")
 	}
 	if !preloaded {
-		win, total, err = slots.BorrowKernWindow(ramSize + handoffTail)
+		win, total, err = slots.BorrowKernWindow(kernelWindowSize())
 		if err != nil {
 			return err
 		}

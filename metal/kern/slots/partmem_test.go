@@ -56,8 +56,11 @@ func poolReset(t *testing.T, regs []layout.Region) {
 	defer partMu.Unlock()
 	partOnce.Do(func() {})
 	partFree = nil
+	partCapacity = 0
+	kernWindow = region{}
 	for _, r := range regs {
 		partFree = append(partFree, region{r.Base, r.Size})
+		partCapacity += r.Size
 	}
 	partOf = make([]region, layout.SlotCap+1)
 	quarantined = make([]bool, layout.SlotCap+1)
@@ -279,4 +282,91 @@ func TestLicheeRVOneRegionPlacesWhatThreeCouldNot(t *testing.T) {
 				got>>20, vrij>>20)
 		}
 	})
+}
+
+// Rebuild ownership as real cold/flip boots do. No MMIO is needed to prove
+// that residents survive, the old kernel is free, and the original trio fits.
+func TestKernelDoubleFlipRestoresColdWindowAndAppCapacity(t *testing.T) {
+	const mib = 1 << 20
+	cold := layout.Region{Base: 0x84000000, Size: 32 * mib}
+	pool := []layout.Region{
+		{Base: 0x88000000, Size: 126 * mib},
+		{Base: 0x80000000, Size: 64 * mib},
+		{Base: 0x86000000, Size: 32 * mib},
+	}
+	p := layout.Plan{NodeCtrlPA: 0x10000000, CagePA: 0x12000000,
+		BootScratchPA: 0x14000000, Pool: pool, Kernel: cold}
+	layout.UsePlan(p)
+	t.Cleanup(func() { p.Kernel = layout.Region{}; layout.UsePlan(p) })
+	poolReset(t, pool)
+	boot := func(start, size uint64) {
+		initPartitionMemory(pool, cold, start, start+size)
+		kernWindow = region{}
+		partOf = make([]region, layout.SlotCap+1)
+		if PoolBytes() != 222*mib {
+			t.Fatalf("kernel reservation leaked: capacity %d MiB", PoolBytes()/mib)
+		}
+	}
+	boot(cold.Base, cold.Size)
+	resident, _, err := partAlloc(2, 48*mib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, size, err := BorrowKernWindow(32 * mib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == cold.Base || size != cold.Size {
+		t.Fatalf("bad first loan %#x/%d", first, size)
+	}
+	boot(first, size-0x40000)
+	if err := partAdopt(2, resident, 48*mib); err != nil {
+		t.Fatal(err)
+	}
+	second, size, err := BorrowKernWindow(32 * mib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != cold.Base || size != cold.Size {
+		t.Fatalf("did not return home: %#x/%d", second, size)
+	}
+	ReturnKernWindow() // failed download returns this exact loan
+	if !freeSpan(cold.Base, cold.Base+cold.Size) {
+		t.Fatal("failed flip retained cold window")
+	}
+	second, size, err = BorrowKernWindow(32 * mib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boot(second, size-0x40000)
+	// Simulate the already authorized stop of the test resident, then the
+	// exact cloudflared/Stulp/plugins order from the hardware reproduction.
+	for i, n := range []uint64{32, 48, 126} {
+		if _, _, err := partAlloc(i+2, n*mib); err != nil {
+			t.Fatalf("app %d (%d MiB): %v", i, n, err)
+		}
+	}
+}
+
+func TestBorrowKernelDoesNotDisplaceAppInColdWindow(t *testing.T) {
+	cold := layout.Region{Base: 0x84000000, Size: 32 << 20}
+	pool := []layout.Region{{Base: 0x88000000, Size: 126 << 20}}
+	p := layout.Plan{NodeCtrlPA: 0x10000000, CagePA: 0x12000000,
+		BootScratchPA: 0x14000000, Pool: pool, Kernel: cold}
+	layout.UsePlan(p)
+	t.Cleanup(func() { p.Kernel = layout.Region{}; layout.UsePlan(p) })
+	poolReset(t, pool)
+	initPartitionMemory(pool, cold, 0x8dc00000, 0x8fdc0000)
+	base, _, err := partAlloc(2, 32<<20)
+	if err != nil || base != cold.Base {
+		t.Fatalf("cold window unavailable to app: %#x, %v", base, err)
+	}
+	win, _, err := BorrowKernWindow(32 << 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ReturnKernWindow()
+	if win == cold.Base {
+		t.Fatal("flip overlapped resident app")
+	}
 }

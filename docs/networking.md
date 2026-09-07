@@ -48,3 +48,8 @@ Application-owned TCP state stays with the app. The handoff preserves supported 
 The system service's TCP endpoint belongs to the old node kernel and is recreated. The app library closes a failed system connection and retries a request once on a non-timeout transport failure. It does not retry a timeout, because the operation may still be running. Protocol and operation errors are returned to the caller. The first system call after a flip can therefore include reconnection latency.
 
 This internal reconnect is separate from retaining an app's connection to an external client. See [Kernel flip](kernel-flip.md) for the transfer sequence and [Measurements](measurements.md) for observed latency and throughput.
+
+
+## Artifact download progress
+
+The streamed artifact path distinguishes idle time from total duration: header waiting is bounded, and the body can take longer than a minute while bytes continue arriving. The corrected HOP implementation refreshes its existing 60-second idle timer on every positive read, independently of batched UI progress. A silent stream is closed and an unstarted app's claim is released. See [Status](status.md) for the tested candidate and dependency publication state.
