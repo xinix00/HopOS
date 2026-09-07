@@ -96,6 +96,8 @@ De Engelse documentatie staat nu rechtstreeks in `docs/`; de vorige set, dit dra
 
 ## Release-day TODO — 7 September 2026
 
+- [ ] **Website release cleanup (Derek, L56):** review all public pages for temporary investigation notes, placeholders and superseded failure notices. Replace them with the current, verified release capabilities and concrete remaining limitations. In particular, remove outdated suggestions that LicheeRV sharing or FLIP is broken; L53–L55 record the completed framework investigation. Keep debugging history in the logbook, and keep the separate application integration check explicit in the acceptance list. Check the final website against the documentation and release evidence before publication; no temporary status wording may remain merely because it was accurate during development.
+
 Derek plans to publish tomorrow. Complete these two website follow-ups alongside the existing acceptance work:
 
 - [ ] **LicheeRV:** reproduce and resolve the two-app shared-core failure, verify neighbor survival and stop/reuse, then test the revised download and consecutive FLIPs with resident/TCP preservation. Record the tested build and results; update the website and documentation status from that evidence.
