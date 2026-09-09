@@ -272,8 +272,11 @@ const (
 	// cpu/el2/switch.s. CtxState is tevens het slot-levensteken dat HOP leest
 	// (kern/slots): de vector-paden zetten 'm op dead bij een exit of fault.
 	// LET OP: alle offsets staan als literals in switch.s — samen wijzigen.
-	CtxOff   = 0x6000
-	CtxState = 0 // CtxEmpty..CtxDead (zie onder)
+	CtxOff = 0x6000
+	// Secondary CPU contexts use spare space, independently of cage tables.
+	SMPCtxOff = 0x6800
+	CtxNextPA = 576 // trusted circular sibling-context link; never app-writable
+	CtxState  = 0   // CtxEmpty..CtxDead (zie onder)
 	// CtxCtrlPA: de control-page-PA van de bewoner van dit slot. HOP zet hem bij
 	// élke start (armSlot). Twee lezers, en die hebben hem nodig omdát de ABI in
 	// de partitie woont: de EL2-trampoline krijgt hem als x0 bij een cold boot,
@@ -771,6 +774,19 @@ func FlipStagePA() uintptr {
 // hiermee overeenkomen — het board checkt dat in zijn init).
 func VecBasePA() uintptr { return pa(plan.CagePA) }
 func TrapVecPA() uintptr { return pa(plan.TrapVecPA) }
+
+// SMPContextID encodes a secondary logical core (2..128) in a resident byte.
+// IDs 1..128 remain cage identities; secondary IDs occupy 129..255.
+func SMPContextID(core int) int { return SlotCap - 1 + core }
+
+// ContextPA keeps cage contexts and secondary CPU contexts disjoint without
+// enlarging the persistent administration region.
+func ContextPA(id int) uintptr {
+	if id > SlotCap {
+		return CageTablePA(id-SlotCap+1) + SMPCtxOff
+	}
+	return CageTablePA(id) + CtxOff
+}
 
 // CageTablePA geeft de fysieke basis van het stage-2-tabelblok van slot i.
 func CageTablePA(i int) uintptr {

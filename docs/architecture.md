@@ -19,7 +19,7 @@ The framework decides who owns a resource and when ownership may change. Archite
 
 On ARM64, HOP runs at EL2 and applications at EL1; stage-2 translation bounds their physical access. On RISC-V, HOP runs in machine mode and applications in supervisor mode; PMP bounds physical access and Sv39 provides translation. The common cage interface gives both implementations the same lifecycle responsibilities.
 
-A cage identifies an application and its partition. A core identifies an execution resource. Their numbers need not match: several cages can share one core, and one SMP application can own several cores.
+A cage identifies an application and its partition. A core identifies an execution resource. Their numbers need not match: several cages can share one core, and one SMP application can own several cores. Each application receives one first-free cage ID. The node selects physical cores separately, including the contiguous run for an SMP app. Secondary CPU contexts use separate space in the existing administration region; they do not occupy another application's cage or IP address.
 
 ## An application request
 

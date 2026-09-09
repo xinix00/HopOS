@@ -69,6 +69,9 @@ A job's `volumes` map maps a shared path to an app-local mount path. For example
 
 Local `hopfs` is scratch storage: file metadata resides in node RAM and file blocks reside on NVMe. It is initialized empty at boot. Do not use local roots or volumes as durable storage across reboot or kernel flip. A node without usable block storage can still run compute, but jobs requiring volumes are rejected.
 
+The file index stores allocated contiguous block runs (extents); holes require no entries. File length is bounded by the configured disk window rather than the former aggregate 16-GiB index ceiling. A contiguous file uses one extent regardless of length. Fragmentation remains bounded to 262,144 live file extents across the filesystem; free physical runs are coalesced and shortened index arrays release excess capacity. Reads and writes retain the device's transfer-size batching. Physical capacity, fragmentation metadata and the node-count limit are separate constraints.
+
+
 S3-backed cluster state and the app object store are separate services. Restoring a desired job after reboot means placing a new task, not resuming its old memory. Use the configured object-store operations for data that needs the durability of that service; their scope and configuration are described in [apps](apps.md) and [configuration](configuration.md).
 
 ## Stop and resource reuse

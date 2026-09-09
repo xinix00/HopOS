@@ -120,3 +120,21 @@ Finish by checking that the website, documentation and release evidence describe
 
 
 **L55 transport result:** false-idle timeout reproduced and corrected; slow and silent hardware fixtures behave correctly, and 30 ordinary downloads pass across before/local/after runs. Original isolated stall not reproduced or assigned an unproven cause. Remaining release action: publish the uncommitted HOP change from `fix/download-idle-progress`, update the HopOS pin to that real tag, and verify the published-dependency build. Other explicitly listed application integration and broader I/O tasks retain their own scope.
+
+
+**L59 cage/core separation:** remove the shared-app cage offset and the SMP requirement that cage identity equal its primary core. First-free cage allocation, independent physical placement and existing-app request translation now pass host/target tests and mixed sharing/SMP QEMU acceptance, including live FLIP and cleanup. Two requested LicheeRV FLIPs pass; the second returns to the original kernel window. Stulp, plugins and cloudflared are running from unchanged definitions as cages 1–3, with three seconds between submissions. Derek checks Stulp behavior. Publish the HOP allocation change together with the pending idle fix, pin that published dependency, and retain final artifact acceptance. ARM physical acceptance of the changed SMP switch remains distinct from QEMU evidence. The requested simplification review removed obsolete placement hints/adapters and multi-cage task reservations; no new locks, worker loops or administration allocation were added.
+
+
+**L60 operator acceptance:** Derek confirms Stulp works correctly after L59, with no observed regression. Close the LicheeRV application integration item for this candidate. Remaining order: publish/pin HOP and build the release candidate; test M4, Pi 4, Pi 5 and Radxa physical sharing/SMP, stop/reuse and compatible consecutive FLIPs; finish H5 I/O comparisons (including the M4 write measurement) and H6 thirty-minute combined compute/I/O; remove temporary website wording and synchronize docs; sign off exact release artifacts. The changed ARM switch requires stopping incompatible old residents for the initial transition; subsequent same-switch FLIPs test resident/TCP continuity. No additional broad review or IRQ work is added.
+
+
+**L61 storage capacity correction:** compact extent indexing removes the old aggregate16GiB logical-span limit. Host capacity/error/reuse tests and the target gate pass; the M4 candidate and9GiB source-plus-backup verification fixture are built. Physical deployment/testing remains open pending target and temporary-data confirmation. Existing HopFS metadata is not transferred across FLIP. Close this concrete regression with hardware evidence before final release; it belongs to the existing storage acceptance, not a new architecture expansion.
+
+
+**L62 M4 update:** with Derek's completed backup and explicit one-time authorization, the extent candidate is installed by FLIP. Spin and cloudflared are restored and running. The automated large-copy fixture faulted before progress; its cause remains unestablished and physical HopFS capacity acceptance is still open for Derek's database/backup check. Do not add metadata migration: Derek explicitly excludes that work for this transition.
+
+
+**L63 supersedes L62 startup signoff:** the first restored apps faulted shortly after the running snapshot. A diagnostic FLIP restores observed local HTTP operation, but the ARM transition cause remains open. Cloudflared also requires the original deployment order because its configured origin is Spin at 10.100.0.3. Verify sustained local and tunnel operation before claiming services restored; physical large-copy acceptance remains open.
+
+
+**L64 service restoration:** Derek restores cloudflared first, Spin second, preserving the tunnel origin at 10.100.0.3. Both tasks report zero restarts and local Spin HTTP returns 200; Derek confirms operation. Immediate restoration is complete. The original ARM transition fault investigation and physical large-copy acceptance remain separate open items. Preserve this deployment order on future updates.

@@ -146,52 +146,39 @@ func TestPoolRespecteertHopReserved(t *testing.T) {
 	}
 }
 
-// Een SMP-kooi houdt zijn hele core-run bezet, niet alleen de primaire. Zonder
-// dat landt de volgende app stil op de tweede core van de SMP-app: geen fout,
-// alleen een buurman die 137x trager is (gemeten 05-09 op de M4).
-func TestPoolSMPReserveertZijnHeleRun(t *testing.T) {
+// Cage IDs do not select physical cores. Every secondary stays reserved.
+func TestPoolSMPReservesIndependentCoreRun(t *testing.T) {
 	setCores(t, 4)
-	c, err := PlaceCage(2, "", 1, 2, "") // kooi 2 met twee cores → 2 en 3
-	if err != nil {
-		t.Fatalf("SMP-kooi 2: %v", err)
+	c, err := PlaceCage(8, "", 1, 2, "")
+	if err != nil || c != 1 {
+		t.Fatalf("cage8 placement=%d %v", c, err)
 	}
-	if c != 2 {
-		t.Fatalf("SMP-kooi 2 kreeg core %d, wil zijn eigen core 2", c)
+	next, err := PlaceCage(2, "", 1, 1, "")
+	if err != nil || next != 3 {
+		t.Fatalf("neighbor placement=%d %v", next, err)
 	}
-	next, err := PlaceCage(4, "", 1, 1, "")
-	if err != nil {
-		t.Fatalf("kooi 4: %v", err)
-	}
-	if next == 3 {
-		t.Fatal("kooi 4 landde op core 3 — de tweede core van de SMP-app")
-	}
-	if next != 4 {
-		t.Fatalf("kooi 4 kreeg core %d, wil 4", next)
-	}
-
-	// En terug: de hele run komt vrij, niet alleen de primaire core.
-	ReleaseCage(2)
-	for _, core := range []int{2, 3} {
-		if !coreFree(core) {
-			t.Fatalf("core %d is na ReleaseCage nog bezet", core)
-		}
+	ReleaseCage(8)
+	if !coreFree(1) || !coreFree(2) || coreFree(3) {
+		t.Fatal("release affected wrong physical cores")
 	}
 }
 
-// De primaire core van een SMP-app MOET zijn eigen kooinummer zijn (smp.go
-// dispatcht kooi+1..kooi+cores-1, validateSMPPlacement weigert de rest). Past
-// die run niet, dan is dat een duidelijke fout en geen stille andere plaatsing.
-func TestPoolSMPWeigertEenBezetteRun(t *testing.T) {
+func TestPoolSMPFindsRunAfterSharedResidents(t *testing.T) {
 	setCores(t, 4)
-	if _, err := PlaceCage(3, "", 1, 1, ""); err != nil { // core 3 bezet
-		t.Fatalf("kooi 3: %v", err)
+	for cage := 1; cage <= 6; cage++ {
+		if core, err := PlaceCage(cage, "trusted", 1, 1, ""); err != nil || core != 1 {
+			t.Fatalf("shared cage%d=%d %v", cage, core, err)
+		}
 	}
-	if _, err := PlaceCage(2, "", 1, 2, ""); err == nil {
-		t.Fatal("SMP-kooi 2 moet falen: core 3 is bezet")
+	if core, err := PlaceCage(7, "", 1, 2, ""); err != nil || core != 2 {
+		t.Fatalf("SMP=%d %v", core, err)
 	}
-	// Buiten het core-bereik telt net zo goed: kooi 4 + 1 = core 5 bestaat niet.
-	if _, err := PlaceCage(4, "", 1, 2, ""); err == nil {
-		t.Fatal("SMP-kooi 4 moet falen: core 5 bestaat niet op een 4-core node")
+	if _, err := PlaceCage(8, "", 1, 2, ""); err == nil {
+		t.Fatal("accepted occupied core span")
+	}
+	ReleaseCage(7)
+	if core, err := PlaceCage(7, "", 1, 3, ""); err != nil || core != 2 {
+		t.Fatalf("reused SMP=%d %v", core, err)
 	}
 }
 
@@ -229,18 +216,18 @@ func TestPoolClassSharingAndSMP(t *testing.T) {
 			t.Fatalf("shared cage %d: core=%d err=%v", cage, core, err)
 		}
 	}
-	if CanPlaceDedicated(7, 2) || !CanPlaceDedicated(8, 2) {
+	if runFree(7, 2, "") || !runFree(8, 2, "") {
 		t.Fatal("SMP free-run query ignores physical pool")
 	}
 	if core, err := PlaceCage(8, "", 1, 2, "big"); err != nil || core != 8 {
 		t.Fatalf("SMP core=%d err=%v", core, err)
 	}
 	ReleaseCage(10)
-	if CanPlaceDedicated(7, 1) {
+	if runFree(7, 1, "") {
 		t.Fatal("live neighbor lost pool")
 	}
 	ReleaseCage(11)
-	if !CanPlaceDedicated(7, 1) {
+	if !runFree(7, 1, "") {
 		t.Fatal("last neighbor did not release pool")
 	}
 }

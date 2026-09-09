@@ -66,13 +66,9 @@ func SnapshotForFlip() ([]SlotState, error) {
 		if quarantined[i] || !ctxLive(ctxState(i)) {
 			return nil, fmt.Errorf("slot %d: reserved owner is not ready for flip", i)
 		}
-		// Een SMP-app gaat gewoon mee: zijn secundaire cores draaien dezelfde
-		// switch-code (de som-toets in kernflip dekt ze), hun ctx-blokken staan
-		// op de slotindexen ná de primaire en blijven staan, en de teller
-		// hieronder (Cores) laat de nieuwe kern ze als één eenheid overnemen.
-		// De weigering die hier stond ("not adoptable in this version") maakte
-		// van elke 2-core-app een stop-vóór-de-flip, en dat is precies wat een
-		// live kernelwissel niet mag vragen (06-09).
+		// An SMP resident keeps its primary cage context and separate per-core
+		// secondary contexts. Core+Cores preserves that physical span; the cage
+		// number does not constrain it. kernflip checks the live switch code.
 		n := coreCount(i)
 		svcMu.Lock()
 		s := servicers[i]
@@ -197,8 +193,7 @@ func ValidateAdoption(states []SlotState) error {
 		if _, err := appRAMSize(s.PartSize); err != nil {
 			return err
 		}
-		if s.Cores < 1 || !isAppCore(s.Core) || s.Cores > layout.NumAppCores()-s.Core+1 ||
-			(s.Cores > 1 && s.Core != s.Slot) {
+		if s.Cores < 1 || !isAppCore(s.Core) || s.Cores > layout.NumAppCores()-s.Core+1 {
 			return fmt.Errorf("invalid core span for cage %d", s.Slot)
 		}
 		if s.ShareGroup == "" {
@@ -218,10 +213,6 @@ func ValidateAdoption(states []SlotState) error {
 		for _, p := range states[:j] {
 			if s.Slot == p.Slot || (s.PartBase < p.PartBase+p.PartSize && p.PartBase < s.PartBase+s.PartSize) {
 				return fmt.Errorf("overlapping owners %d and %d", s.Slot, p.Slot)
-			}
-			if (s.Cores > 1 && p.Slot > s.Slot && p.Slot < s.Slot+s.Cores) ||
-				(p.Cores > 1 && s.Slot > p.Slot && s.Slot < p.Slot+p.Cores) {
-				return fmt.Errorf("overlapping contexts %d and %d", s.Slot, p.Slot)
 			}
 			if s.ShareGroup != "" && s.ShareGroup == p.ShareGroup {
 				if !slices.Equal(s.GroupCores, p.GroupCores) {

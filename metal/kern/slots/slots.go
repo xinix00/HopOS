@@ -196,23 +196,8 @@ func prepStart(i int, memLimit uint64, cores int, env map[string]string, mounts 
 	if cores < 1 {
 		cores = 1
 	}
-	// SMP-apps (cores>1) zijn dedicated: ze pakken cores i..i+cores-1, dus die
-	// moeten binnen de fysieke app-cores vallen. Een cores=1-app mag op elke
-	// kooi (die kan een gedeelde core zijn, ver boven NumAppCores) — checkSlot
-	// bewaakt daar de kooi-grens (MaxSlots).
-	//
-	// De aanname "SMP ⇒ slot == core" staat elders in dit bestand als commentaar
-	// (Stop's kill-scan rekent op core..core+n-1) maar werd nergens afgedwongen.
-	// Voor een pool-geplaatste kooi (coreOf(i) != i) liep dat stil uit de pas:
-	// smp.Configure leidt de secundaire cores af van de ÉCHTE core (coreOf(i)),
-	// terwijl dispatchSMP ze tegen slot i toetste — dan wordt elke lazy
-	// SMP-aanvraag geweigerd en degradeert de app stilletjes naar één core.
-	// Liever hard falen: SMP hoort op zijn eigen core te wonen. Die toets staat
-	// NIET hier maar in validateSMPPlacement, want coreOf(i) leest hostCore en
-	// dat wordt door StartShared/StartStreamOn pas ná prepStart gezet — hier las
-	// hij dus de VORIGE plaatsing (gevonden 20-08).
-	if cores > 1 && i+cores-1 > layout.NumAppCores() {
-		return nil, nil, 0, fmt.Errorf("SMP: %d cores vanaf slot %d overschrijden de %d app-cores", cores, i, layout.NumAppCores())
+	if cores > layout.NumAppCores() {
+		return nil, nil, 0, fmt.Errorf("SMP: %d cores exceed %d app cores", cores, layout.NumAppCores())
 	}
 	// DNS-resolver van de node meegeven, zodat een app die naar buiten praat
 	// (cloudflared, servers) namen kan opzoeken — de query loopt als gewoon
@@ -286,12 +271,11 @@ func (g *startGrant) rollback(i int, err error) {
 	g.acquired = false
 }
 
-// validateSMPPlacement toetst dat een SMP-app op zijn eigen core woont. Apart
-// van prepStart omdat hij hostCore leest: aanroepen ná de plaatsing.
-func validateSMPPlacement(i, cores int) error {
-	if cores > 1 && coreOf(i) != i {
-		return fmt.Errorf("SMP: kooi %d woont op core %d (gedeelde/pool-plaatsing) — %d cores vraagt een eigen core (slot == core)",
-			i, coreOf(i), cores)
+// validateSMPPlacement checks the actual assigned physical span after placement.
+func validateSMPPlacement(i, count int) error {
+	core := coreOf(i)
+	if count > 1 && (!isAppCore(core) || count > layout.NumAppCores()-core+1) {
+		return fmt.Errorf("SMP: cage %d has invalid physical core span %d + %d", i, core, count)
 	}
 	return nil
 }
@@ -317,7 +301,7 @@ func claimStart(i, cores int, shared bool) error {
 // coresFree bewaakt (ín het venster) dat de cores van het slot niet draaien —
 // geparkeerd of cold mag: dat is precies een core die HOP kan (her)starten.
 func coresFree(i, cores int, why string) error {
-	for c := i; c < i+cores; c++ {
+	for c := coreOf(i); c < coreOf(i)+cores; c++ {
 		if coreRunning(c) {
 			return fmt.Errorf("core %d still running (%s)", c, why)
 		}
@@ -468,23 +452,29 @@ func (s *servicer) dispatchSMP() {
 	if quarantined[s.slot] {
 		return
 	}
-	c := int(ctrlRead(s.slot, layout.CtrlSMPReq))
-	if c == 0 {
+	requested := int(ctrlRead(s.slot, layout.CtrlSMPReq))
+	if requested == 0 {
 		return
 	}
 	// Vertrouwde core-telling uit HOP-geheugen (smpCores), NOOIT ctrlRead
 	// (CtrlCores) — die page is app-schrijfbaar; een opgehoogde CtrlCores zou
 	// anders een app buurcores in zijn kooi laten trekken. Zie smp.go.
 	cores := coreCount(s.slot)
-	if c <= s.slot || c > s.slot+cores-1 || c > layout.NumAppCores() {
+	// The existing app ABI requests virtual CPUs relative to its cage ID.
+	// Translate only after checking the trusted width; never treat this as a
+	// physical core number supplied by the app.
+	offset := requested - s.slot
+	if offset < 1 || offset >= cores {
 		// Buiten het toegewezen core-bereik: weiger (de app hoort dit niet te
 		// vragen). Verzoek intrekken zodat de app niet eeuwig wacht.
-		fmt.Printf("HOPOS_SMP_REJECT slot %d: core %d outside [%d,%d]\n", s.slot, c, s.slot+1, s.slot+cores-1)
+		fmt.Printf("HOPOS_SMP_REJECT slot %d: core %d outside [%d,%d]\n", s.slot, requested, s.slot+1, s.slot+cores-1)
 		ctrlWrite(s.slot, layout.CtrlSMPReq, 0)
 		dev.MB()
 		return
 	}
-	if coreRunning(c) && ctxLive(ctxState(c)) {
+	c := coreOf(s.slot) + offset
+	id := smpContext(s.slot, c)
+	if coreRunning(c) && ctxLive(ctxState(id)) {
 		// Een herhaald verzoek start dezelfde context niet nogmaals.
 		ctrlWrite(s.slot, layout.CtrlSMPReq, 0)
 		return
@@ -500,11 +490,11 @@ func (s *servicer) dispatchSMP() {
 	// de RX-ring. Het fault-rapport van switch.s, de doorbell-peek van de
 	// rotatie en de wekker lezen ze per CORE — zo idlet een SMP-app net als
 	// elke andere (yield naar EL2, kick van HOP) in plaats van te spinnen.
-	ctxWrite(c, layout.CtxCtrlPA, uint64(cp))
-	ctxWrite(c, layout.CtxRingHeadPA, ctxRead(s.slot, layout.CtxRingHeadPA))
-	ctxWrite(c, layout.CtxUnitSlot, uint64(s.slot)) // tabel + VMID van de primaire
+	ctxWrite(id, layout.CtxCtrlPA, uint64(cp))
+	ctxWrite(id, layout.CtxRingHeadPA, ctxRead(s.slot, layout.CtxRingHeadPA))
+	ctxWrite(id, layout.CtxUnitSlot, uint64(s.slot)) // tabel + VMID van de primaire
 	// En dezelfde registratie als armSlot voor een eerste core: de secundaire
-	// is bewoner "slot c" van core c (ctx-blok c). Zonder dat is hij voor de
+	// uses its secondary context on physical core c. Without registration,
 	// rotatie en de wekker niemand — hij yieldt dan naar EL2 en wordt nooit
 	// meer gewekt, en bij een stop parkeert hij niet (M4, 03-09: app hangt,
 	// "core 2 did not park", partitie in quarantaine). Zelfde twee routes:
@@ -512,9 +502,9 @@ func (s *servicer) dispatchSMP() {
 	// koude/geparkeerde via reset + mailbox.
 	var err error
 	if coreRunning(c) || coreParks(c) {
-		err = bootPendingDispatch(c, c, cageSMPEntryPC(), startCtx)
+		err = bootPendingDispatch(c, id, cageSMPEntryPC(), startCtx)
 	} else {
-		residentReset(c, c)
+		residentReset(c, id)
 		err = dispatchCore(c, cageSMPEntryPC(), startCtx)
 	}
 	if err != nil {
@@ -1168,6 +1158,7 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// doorbell-peek (layout.CtxRingHeadPA; de wek-drempel schrijft de app
 	// zelf op CtrlRXDoor). Zelfde publicatiepad als CtxCtrlPA.
 	ctxWrite(i, layout.CtxRingHeadPA, uint64(netPA)+uint64(layout.NetRXOff)+ring.HeadOff)
+	prepareSMPContexts(i, cores)
 	// coreParks erbij: een core die niet resetbaar is heeft ALTIJD de
 	// boot-pending-route — zijn switcher draait er vanaf de boot (cageInit
 	// trekt hem in via parkenter), dus de rotatie pikt élke boot-pending op.
@@ -1273,8 +1264,7 @@ func Stop(i int, timeout time.Duration) error {
 	// smpCores (door Start gezet) — NIET uit de app-schrijfbare CtrlCores: een
 	// verlaagde CtrlCores zou anders levende secundaire cores voor deze scan
 	// verbergen en releaseSlot een nog-draaiende partitie laten vrijgeven.
-	// (SMP-apps zijn altijd dedicated met slot = core; hun secundaire cores
-	// zijn dan core+1..core+n-1, exact het oude bereik.)
+	// SMP secondary CPUs belong to the assigned physical span.
 	n := coreCount(i)
 	stillOn := false
 	for c := core; c < core+n; c++ {
@@ -1308,10 +1298,7 @@ func Stop(i int, timeout time.Duration) error {
 func wakeForStop(i int) {
 	core := coreOf(i)
 	for c := core; c < core+coreCount(i); c++ {
-		ctx := c
-		if c == core {
-			ctx = i
-		}
+		ctx := smpContext(i, c)
 		if !coreRunning(c) {
 			continue
 		}
@@ -1394,8 +1381,12 @@ func releaseSlot(i int, freePartition bool) {
 		// Bewoners-boekhouding van de core-deling: uit de lijst van zijn
 		// core, ctx-staat op Empty (het slot is écht weg — de rotatie slaat
 		// gaten en Empty over), en de slot→core-koppeling los.
-		residentRemove(coreOf(i), i)
-		ctxWrite(i, layout.CtxState, layout.CtxEmpty)
+		for c := coreOf(i); c < coreOf(i)+coreCount(i); c++ {
+			id := smpContext(i, c)
+			residentRemove(c, id)
+			ctxWrite(id, layout.CtxState, layout.CtxEmpty)
+			ctxWrite(id, layout.CtxNextPA, 0)
+		}
 		dev.MB()
 		if hostCore != nil {
 			hostCore[i] = 0
@@ -1659,9 +1650,8 @@ func SetHopCores(n int) {
 	hopReserved = n - 1
 }
 
-// HopReserved is de core-offset tussen een HOP-slot (1-based, zoals HOP ze telt)
-// en de interne slot/core-index: intern = HOP-slot + HopReserved. slotmgr past
-// 'm toe zodat slots.* zelf onveranderd op slot=core=layout kan blijven werken.
+// HopReserved counts additional physical cores reserved for the node runtime.
+// It never shifts cage identities or their IP addresses.
 func HopReserved() int { return hopReserved }
 
 // CoreClass geeft de cluster-klasse van slot i. De indeling is board-kennis

@@ -168,31 +168,14 @@ func PlaceCage(cage int, group string, poolCores, cores int, class string) (int,
 	return reserve(cage, leastLoaded(pool), 1, group), nil
 }
 
-// placeDedicated kiest de core(s) van een kooi zonder sharegroup. Kooi == core
-// is hier de REGEL en niet het toeval: een SMP-app draait per definitie op
-// kooi..kooi+cores-1 (smp.go) en de kern weigert elke andere primaire core
-// (validateSMPPlacement). Wie hier "de laagste vrije core" pakt, laat die twee
-// uit elkaar lopen — dan lukt een SMP-start afhankelijk van de vólgorde waarin
-// jobs geplaatst zijn (gemeten 05-09: cloudflared eerst weghalen en Spin met
-// twee cores plaatsen faalde met "kooi 2 woont op core 1", andersom niet).
-//
-// Een gewone app houdt de terugval op de laagste vrije core: kooinummers lopen
-// door boven het aantal cores, en een 1-core app hoeft niet op zijn eigen
-// nummer te draaien om te werken. Hij mag alleen nooit stil op een bezette
-// core belanden — zie reserve.
+// placeDedicated chooses the first free physical run, independently of cage ID.
 func placeDedicated(cage, cores int, class string) (int, error) {
-	if runFree(cage, cores, class) {
-		return reserve(cage, cage, cores, ""), nil
+	for core := HopReserved() + 1; core <= layout.NumAppCores(); core++ {
+		if runFree(core, cores, class) {
+			return reserve(cage, core, cores, ""), nil
+		}
 	}
-	if cores > 1 {
-		return 0, fmt.Errorf("SMP-kooi %d vraagt de cores %d..%d (eigen core plus de cores erna) en die zijn niet allemaal vrij",
-			cage, cage, cage+cores-1)
-	}
-	free := freeCores(class)
-	if len(free) == 0 {
-		return 0, fmt.Errorf("geen vrije app-core voor kooi %d (node vol op cores; delen vraagt een sharegroup)", cage)
-	}
-	return reserve(cage, free[0], 1, ""), nil
+	return 0, fmt.Errorf("no free run of %d %q app cores for cage %d", cores, class, cage)
 }
 
 // ReleaseCage geeft de core van een gestopte kooi terug. Een dedicated core
@@ -269,11 +252,4 @@ func resetPools() {
 	cageCore = map[int]int{}
 	cageSpan = map[int]int{}
 	cageGroup = map[int]string{}
-}
-
-// CanPlaceDedicated is a read-only hint; PlaceCage performs the reservation.
-func CanPlaceDedicated(primary, cores int) bool {
-	poolMu.Lock()
-	defer poolMu.Unlock()
-	return cores > 0 && runFree(primary, cores, "")
 }

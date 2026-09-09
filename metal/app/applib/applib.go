@@ -167,6 +167,7 @@ func Init() *App {
 	// er iets van merkt of aan hoeft te doen. Configure is een no-op bij één
 	// core, dus hier geen SMP-vertakking. Vóór READY, zodat wie op READY wacht
 	// meteen de volledige machine ziet.
+	// SMP requests retain their cage-relative ABI; the node maps them to cores.
 	smp.Configure(a.Slot, int(a.ctrlGet(layout.CtrlCores)), layout.CtrlPageAt(a.RAMStart, a.RAMSize))
 
 	// Idle-tik-teller publiceren (metal/cpu/idle → CtrlIdle): het klok-signaal

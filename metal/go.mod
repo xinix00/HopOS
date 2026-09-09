@@ -4,13 +4,13 @@ go 1.26.4
 
 require github.com/usbarmory/tamago v1.26.4
 
-require github.com/xinix00/lean v1.1.0
+require github.com/xinix00/lean v1.1.1
 
 require github.com/xinix00/hoplockserver v0.2.1 // indirect
 
 // Directe dep sinds de app-object-store (cmd/hopos/store.go gebruikt de
 // streaming object-API + ListObjects van v0.3.0).
-require github.com/xinix00/hoplock v0.4.1
+require github.com/xinix00/hoplock v0.4.2
 
 // De gepubliceerde HOP-tag waar deze boom tegen bouwt (o.a.
 // hopos.ErrNoCapacity en StartStaged mét jobnaam). GEEN lokale replace meer
@@ -25,7 +25,7 @@ require github.com/xinix00/hoplock v0.4.1
 // Gemeten 19-08 in deze boom; surf's go.mod draagt dezelfde waarschuwing.
 
 require (
-	github.com/xinix00/hop v1.0.2
+	github.com/xinix00/hop v1.0.6
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20260709184058-243e02a382f8
 )
 

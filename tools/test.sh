@@ -28,8 +28,6 @@ go test -tags gui "$@" \
 	./gui/fbgrant ./gui/driver/usb/hid ./kern/cage ./driver/nic/dwmac ./driver/nic/dwmac4 ./cmd/hopos/cfgblob ./driver/conlog \
 	./kern/cagestub ./net/nodemac ./kern/conport
 
-# Test de echte adapter: optionele plaatsingsvragen moeten de runner bereiken.
-go test "$@" ./cmd/hopos/envslots.go ./cmd/hopos/envslots_test.go
 go test "$@" ./cmd/hopos/watchdog.go ./cmd/hopos/watchdog_policy_test.go
 
 TAMAGO="${TAMAGO:-$HOME/tamago-go/bin/go}"

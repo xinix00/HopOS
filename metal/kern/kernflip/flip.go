@@ -167,7 +167,7 @@ func flip(bun *Bundle, sum, win, total, stagingOffset uint64) error {
 			return fmt.Errorf("kernflip: %d resident(s) alive but the new kernel's switch code cannot be verified: %w", len(residents), err)
 		}
 		if mine == 0 || mine != theirs {
-			return fmt.Errorf("kernflip: the new kernel's switch code differs (%#x vs %#x) — cannot flip with %d live resident(s); stop them or use a reboot update",
+			return fmt.Errorf("kernflip: the new kernel's switch code differs (%#x vs %#x) — cannot flip with %d live resident(s); stop them before installing changed switch code",
 				theirs, mine, len(residents))
 		}
 	}

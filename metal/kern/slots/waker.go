@@ -69,9 +69,10 @@ func wakeRX(i int) {
 	// 4,8 s op een 2-core-app, 04-09). De ctx-blokken van de secundairen
 	// staan op de core-indexen ná de primaire (cpu/smp: prim+1..).
 	if n := coreCount(i); n > 1 {
-		for c := i + 1; c < i+n; c++ {
-			if ctxState(c) == layout.CtxSaved && rxDue(c) {
-				if phys := physCore(coreOf(c)); phys >= 0 {
+		for c := core + 1; c < core+n; c++ {
+			ctx := smpContext(i, c)
+			if ctxState(ctx) == layout.CtxSaved && rxDue(ctx) {
+				if phys := physCore(c); phys >= 0 {
 					cores().Kick(phys)
 					directRXKicks.Add(1)
 				}
@@ -113,7 +114,10 @@ func waker() {
 // whose cage number exceeds the core count. The switcher decides who runs.
 func wakeSleeping(now uint64) {
 	wakerRounds.Add(1)
-	for i := 1; i <= layout.MaxSlots; i++ {
+	for i := 1; i <= layout.SMPContextID(layout.NumAppCores()); i++ {
+		if i > layout.MaxSlots && i <= layout.SlotCap {
+			continue
+		}
 		if ctxState(i) != layout.CtxSaved {
 			continue
 		}
@@ -180,7 +184,10 @@ func ctxRead(i int, off uintptr) uint64 {
 // (layout.CtxSleeps) — cumulatief; hopos.idlestat maakt er een tempo van.
 func EL2Sleeps() uint64 {
 	var n uint64
-	for i := 1; i <= layout.MaxSlots; i++ {
+	for i := 1; i <= layout.SMPContextID(layout.NumAppCores()); i++ {
+		if i > layout.MaxSlots && i <= layout.SlotCap {
+			continue
+		}
 		n += ctxRead(i, layout.CtxSleeps)
 	}
 	return n
@@ -193,8 +200,17 @@ func EL2Sleeps() uint64 {
 func CoreDump() string {
 	out := ""
 	now := dev.Counter()
-	for i := 1; i <= NumSlots(); i++ {
+	for i := 1; i <= layout.SMPContextID(layout.NumAppCores()); i++ {
+		if i > layout.MaxSlots && i <= layout.SlotCap {
+			continue
+		}
+		if ctxState(i) == layout.CtxEmpty {
+			continue
+		}
 		core := coreOf(i)
+		if core < 1 || core > layout.NumAppCores() {
+			continue
+		}
 		_, res := residents(core)
 		if !coreRunning(core) {
 			if st := ctxState(i); st != layout.CtxEmpty || res != 0 {

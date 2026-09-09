@@ -50,14 +50,3 @@ func (e envSlots) merge(env map[string]string) map[string]string {
 	}
 	return out
 }
-
-// The embedded SlotManager omits optional placement hints. Preserve the
-// physical free-run query so a shared pool does not hide an available SMP run.
-func (e envSlots) CanPlaceDedicated(slot, cores int) bool {
-	if placement, ok := e.SlotManager.(hopos.DedicatedPlacement); ok {
-		return placement.CanPlaceDedicated(slot, cores)
-	}
-	return true // no hint: StartStream remains the placement authority
-}
-
-var _ hopos.DedicatedPlacement = envSlots{}

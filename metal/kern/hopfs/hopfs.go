@@ -19,14 +19,6 @@ import (
 // BlockSize is de logische blokmaat (8 NVMe-LBA's van 512B).
 const BlockSize = 4096
 
-// holeBlock is de sentinel voor een niet-gealloceerd gat in een bestand: een
-// blokindex die de payload (nog) niet raakte. Leest als nul en kost geen
-// schijf. Zo is een schrijf op een grote offset O(payload) i.p.v. het hele
-// gat 0..off vol te nullen onder f.mu — dat bevroor alle andere slots' fs-RPC's
-// (één sparse write van 1 byte op schijf-4096 = seconden schijf-I/O onder lock).
-// Geldige blokindexen zijn 0..max-1 met max ≤ 2^32-1, dus ^uint32(0) botst nooit.
-const holeBlock = ^uint32(0)
-
 // maxNodes begrenst het aantal nodes in de boom. Anders dan bestandsgrootte
 // (die de schijf zelf begrenst) leeft de metadata volledig in HOP's RAM: een
 // app die eindeloos kleine bestanden aanmaakt gebruikt ~0 schijf maar laat
@@ -35,25 +27,14 @@ const holeBlock = ^uint32(0)
 // task mag HOP nooit vellen. ~1M nodes is ruim maar begrensd.
 const maxNodes = 1 << 20
 
-// maxIndexBlocks begrenst het TOTAAL aantal blok-indexen in de boom — de
-// tweede helft van dezelfde grens als maxNodes, en de reparatie van een gat
-// daarin: ook de blok-index van een bestand is metadata in HOP's RAM (4 byte
-// per 4KB-blok), en die groeit met de OFFSET waarop geschreven wordt, niet met
-// de payload. De schijfgrens in WriteAt dekt dat niet: één `write(off=schijf-1,
-// 1 byte)` van een willekeurige app vroeg ~0 schijf maar liet de index tot de
-// hele schijf groeien (op een 256GB-NVMe ~256MB) → kern-OOM → álle slots dood.
-//
-// 4M indexen = 16MB HOP-RAM = 16GB totaal geadresseerde bestandsruimte. Dat is
-// de eerlijke bovengrens van deze laag: hopfs indexeert op 4KB in HOP's heap,
-// dus de praktische grens is dít budget, niet de schijfmaat. Voor de ontworpen
-// rol (scratch/RAM-overloop; de bron is S3, niets is persistent) is dat ruim —
-// en vol = een directe fout i.p.v. een node die omvalt.
-const maxIndexBlocks = 1 << 22
+// maxIndexExtents bounds fragmentation metadata, not file lengths. A contiguous
+// file needs one extent regardless of its size; sparse holes need none.
+const maxIndexExtents = 1 << 18
 
 type node struct {
 	dir      bool
 	children map[string]*node // dir
-	blocks   []uint32         // file: blokindexen
+	extents  []extent         // file: sorted allocated runs; holes are implicit
 	size     uint64           // file: lengte in bytes
 }
 
@@ -74,11 +55,11 @@ type FS struct {
 	lbasPerBlock uint64 // fysieke LBA's per logisch hopfs-blok
 	maxIOBlocks  uint64 // hopfs-blokken per diskcommand
 	root         *node
-	free         []uint32 // teruggegeven blokken
-	next         uint32   // bump-allocator
-	max          uint32   // totaal aantal blokken
-	nodes        int      // aantal nodes in de boom (excl. root), tegen OOM
-	index        int      // totaal aantal blok-indexen in de boom, tegen OOM
+	free         []diskRange // sorted, coalesced returned runs
+	next         uint32      // bump-allocator
+	max          uint32      // totaal aantal blokken
+	nodes        int         // aantal nodes in de boom (excl. root), tegen OOM
+	index        int         // total file extents, against unbounded fragmentation
 }
 
 // New maakt een lege bestandslaag op de (als leeg beschouwde) schijf.
@@ -166,49 +147,8 @@ var errNoEnt = fmt.Errorf("hopfs: bestaat niet")
 // IsNotExist meldt of err "bestaat niet" is (voor de status-mapping).
 func IsNotExist(err error) bool { return err == errNoEnt }
 
-// alloc geeft het volgende blok, en de VOLGORDE is de doorvoer: ReadAt en
-// WriteAt bundelen opeenvolgende bloknummers tot één NVMe-opdracht
-// (contiguousRun, tot maxIOBlocks), en een bestand dat blok voor blok in
-// dalende volgorde kreeg, kost 256 opdrachten per MiB in plaats van één.
-// Precies dat deed de oude LIFO-pop van de vrijlijst: release duwt de blokken
-// van een bestand oplopend, en van achteren poppen geeft ze aflopend terug —
-// gemeten 03-09 als 160MB/s lezen en 300MB/s schrijven na de eerste Remove,
-// tegen 700MB/s op een vers bestand. Daarom eerst vers uit de teller (altijd
-// oplopend) en pas als de schijf op is de vrijlijst, van voren af, zodat een
-// vrijgegeven bestand in dezelfde volgorde terugkomt als het weg ging.
-func (f *FS) alloc() (uint32, error) {
-	if f.next < f.max {
-		f.next++
-		return f.next - 1, nil
-	}
-	if len(f.free) > 0 {
-		b := f.free[0]
-		f.free = f.free[1:]
-		return b, nil
-	}
-	return 0, fmt.Errorf("hopfs: schijf vol (%d blokken)", f.max)
-}
-
 func (f *FS) lba(block uint32) uint64 {
 	return f.base + uint64(block)*f.lbasPerBlock
-}
-
-// contiguousRun telt vanaf start maximaal limit fysiek opeenvolgende blokken.
-// Gaten stoppen de run. Alleen zulke runs mogen als één NVMe-transfer worden
-// aangeboden; de bestandsindex kan door hergebruik immers gefragmenteerd zijn.
-func contiguousRun(blocks []uint32, start, limit uint64) uint64 {
-	if start >= uint64(len(blocks)) || limit == 0 || blocks[start] == holeBlock {
-		return 0
-	}
-	first := uint64(blocks[start])
-	run := uint64(1)
-	for run < limit && start+run < uint64(len(blocks)) {
-		if blocks[start+run] == holeBlock || uint64(blocks[start+run]) != first+run {
-			break
-		}
-		run++
-	}
-	return run
 }
 
 // Stat geeft (size, isDir).
@@ -289,7 +229,7 @@ func (f *FS) MkdirAll(path string) error {
 	return nil
 }
 
-// ReadAt leest maximaal len(p) bytes vanaf off; geeft n terug (kort bij EOF).
+// ReadAt reads at most len(p) bytes; implicit holes read as zero.
 func (f *FS) ReadAt(path string, off uint64, p []byte) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -307,43 +247,27 @@ func (f *FS) ReadAt(path string, off uint64, p []byte) (int, error) {
 	if off >= n.size {
 		return 0, nil
 	}
-	want := uint64(len(p))
-	if off+want > n.size {
-		want = n.size - off
-	}
+	want := min(uint64(len(p)), n.size-off)
 	var buf [BlockSize]byte
 	done := uint64(0)
 	for done < want {
-		bi := (off + done) / BlockSize
-		bo := (off + done) % BlockSize
-		chunk := BlockSize - bo
-		if chunk > want-done {
-			chunk = want - done
-		}
-		// Volledige, fysiek opeenvolgende hopfs-blokken gaan in één diskcommand.
-		// Een partiële kop/staart blijft hieronder de behoudende read-modify-copy.
-		if bo == 0 && chunk == BlockSize && n.blocks[bi] != holeBlock {
-			limit := (want - done) / BlockSize
-			if limit > f.maxIOBlocks {
-				limit = f.maxIOBlocks
-			}
-			run := contiguousRun(n.blocks, bi, limit)
-			bytes := run * BlockSize
-			if err := f.disk.Read(f.lba(n.blocks[bi]), p[done:done+bytes]); err != nil {
+		bi, bo := (off+done)/BlockSize, (off+done)%BlockSize
+		block, run, mapped := n.lookup(uint32(bi))
+		chunk := min(uint64(BlockSize)-bo, want-done)
+		if !mapped {
+			chunk = min(uint64(run)*BlockSize-bo, want-done)
+			clear(p[done : done+chunk])
+		} else if bo == 0 && chunk == BlockSize {
+			chunk = min(uint64(run), f.maxIOBlocks, (want-done)/BlockSize) * BlockSize
+			if err := f.disk.Read(f.lba(block), p[done:done+chunk]); err != nil {
 				return int(done), err
 			}
-			done += bytes
-			continue
+		} else {
+			if err := f.disk.Read(f.lba(block), buf[:]); err != nil {
+				return int(done), err
+			}
+			copy(p[done:done+chunk], buf[bo:bo+chunk])
 		}
-		if n.blocks[bi] == holeBlock { // gat: leest als nul
-			clear(p[done : done+chunk])
-			done += chunk
-			continue
-		}
-		if err := f.disk.Read(f.lba(n.blocks[bi]), buf[:]); err != nil {
-			return int(done), err
-		}
-		copy(p[done:done+chunk], buf[bo:bo+chunk])
 		done += chunk
 	}
 	return int(done), nil
@@ -378,169 +302,117 @@ func (f *FS) file(path string) (*node, error) {
 	return n, nil
 }
 
-// growTo groeit de blokkenlijst van n met GATEN tot need blokken, tegen het
-// index-budget (zie maxIndexBlocks): weigeren VÓÓR de groei-lus, want de lus
-// zelf is de schade (allocatie onder f.mu). what benoemt de vrager in de fout.
-func (f *FS) growTo(n *node, need uint64, what string) error {
-	if grow := int(need) - len(n.blocks); grow > 0 {
-		if f.index+grow > maxIndexBlocks {
-			return fmt.Errorf("hopfs: bestandsindex-budget vol (%d van %d blokken; %s vraagt %d bij)",
-				f.index, maxIndexBlocks, what, grow)
-		}
-		f.index += grow
-	}
-	for uint64(len(n.blocks)) < need {
-		n.blocks = append(n.blocks, holeBlock)
-	}
-	return nil
-}
-
-// WriteAt schrijft p op off; maakt het bestand (en ouder-dirs) zo nodig aan
-// en groeit het bij schrijven voorbij het einde (gat = nulbytes).
+// WriteAt retains successful earlier chunks on an I/O error. A fresh mapping
+// is published only after its data has been written, never exposing old owners.
 func (f *FS) WriteAt(path string, off uint64, p []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-
-	// off komt (via de hop-ABI) ongecontroleerd van de app: overflow-veilig
-	// rekenen en tot de fysieke schijfcapaciteit begrenzen. De overflow-guard
-	// is verplicht — off+len bij uint64-max wrapt en laat de schrijf-lus buiten
-	// n.blocks indexeren (panic → hele EL2-kern valt). De capaciteitsgrens is
-	// de natuurlijke grens (zoals Linux vollopen): een bestand mag zo groot als
-	// de schijf, maar niet daarbuiten — dat zou toch alloc-falen, nu met een
-	// directe fout i.p.v. een doemende groei-lus onder f.mu.
 	end := off + uint64(len(p))
 	if end < off {
-		return fmt.Errorf("hopfs: offset %d + %d bytes overflowt", off, len(p))
+		return fmt.Errorf("hopfs: offset overflow")
 	}
-	if diskBytes := uint64(f.max) * BlockSize; end > diskBytes {
-		return fmt.Errorf("hopfs: offset %d + %d bytes > schijf (%d)", off, len(p), diskBytes)
+	if end > uint64(f.max)*BlockSize {
+		return fmt.Errorf("hopfs: write exceeds disk window")
 	}
-
 	n, err := f.file(path)
 	if err != nil {
 		return err
 	}
-
-	// Foutsemantiek is POSIX-achtig: een write die halverwege faalt (schijf
-	// vol, disk-I/O) laat een deels geschreven bestand achter. Onderweg
-	// gealloceerde blokken blijven gewoon van het bestand (Remove geeft ze
-	// terug, en bij boot is alles sowieso leeg) — geen lek, dus ook geen
-	// terugdraai-administratie. Alleen size wordt pas bij succes bijgewerkt.
-
-	// Groei tot het benodigde aantal blokken met GATEN: geen alloc, geen
-	// disk-write. Een gat leest als nul en wordt pas een echt blok als de
-	// payload het hieronder raakt — sparse, dus een schrijf op een grote
-	// offset kost geen schijf-I/O voor het gat.
-	if err := f.growTo(n, (end+BlockSize-1)/BlockSize, fmt.Sprintf("offset %d", off)); err != nil {
-		return err
+	if len(p) == 0 {
+		return nil
 	}
-
 	var buf [BlockSize]byte
 	done := uint64(0)
 	for done < uint64(len(p)) {
-		bi := (off + done) / BlockSize
-		bo := (off + done) % BlockSize
-		chunk := BlockSize - bo
-		if chunk > uint64(len(p))-done {
-			chunk = uint64(len(p)) - done
-		}
-		// Een reeks volledige blokken eerst alloceren en daarna als één transfer
-		// schrijven zolang hun fysieke bloknummers oplopen. De bump-allocator
-		// levert voor nieuwe bestanden normaal de hele MiB als één run; na
-		// Remove/hergebruik kan fragmentatie ontstaan en knippen we vanzelf.
+		bi, bo := (off+done)/BlockSize, (off+done)%BlockSize
+		block, available, mapped := n.lookup(uint32(bi))
+		chunk := min(uint64(BlockSize)-bo, uint64(len(p))-done)
+		run := uint32(1)
 		if bo == 0 && chunk == BlockSize {
-			limit := (uint64(len(p)) - done) / BlockSize
-			if limit > f.maxIOBlocks {
-				limit = f.maxIOBlocks
-			}
-			var first uint32
-			run := uint64(0)
-			for run < limit {
-				idx := bi + run
-				if n.blocks[idx] == holeBlock {
-					b, err := f.alloc()
-					if err != nil {
-						return err
-					}
-					n.blocks[idx] = b
-				}
-				b := n.blocks[idx]
-				if run == 0 {
-					first = b
-				} else if uint64(b) != uint64(first)+run {
-					break
-				}
-				run++
-			}
-			bytes := run * BlockSize
-			if err := f.disk.Write(f.lba(first), p[done:done+bytes]); err != nil {
-				return err
-			}
-			done += bytes
-			continue
+			run = uint32(min(uint64(available), f.maxIOBlocks, (uint64(len(p))-done)/BlockSize))
 		}
-		// Raakt de payload een gat, dan nú pas een echt blok alloceren.
-		fresh := n.blocks[bi] == holeBlock
-		if fresh {
-			b, err := f.alloc()
+		if !mapped {
+			block, run, err = f.allocRun(run)
 			if err != nil {
 				return err
 			}
-			n.blocks[bi] = b
-		}
-		lba := f.lba(n.blocks[bi])
-		if chunk < BlockSize { // deelblok: bestaande inhoud behouden
-			if fresh {
-				buf = [BlockSize]byte{} // vers gat leest als nul → geen disk-read
-			} else if err := f.disk.Read(lba, buf[:]); err != nil {
-				return err
+			if f.index >= maxIndexExtents && !n.joins(uint32(bi), block, run) {
+				f.freeRun(block, run)
+				return fmt.Errorf("hopfs: fragmented file index full (%d extents)", f.index)
 			}
 		}
-		copy(buf[bo:bo+chunk], p[done:done+chunk])
-		if err := f.disk.Write(lba, buf[:]); err != nil {
+		var payload []byte
+		if bo == 0 && chunk == BlockSize {
+			chunk = uint64(run) * BlockSize
+			payload = p[done : done+chunk]
+		} else {
+			clear(buf[:])
+			if mapped {
+				if err := f.disk.Read(f.lba(block), buf[:]); err != nil {
+					return err
+				}
+			}
+			copy(buf[bo:bo+chunk], p[done:done+chunk])
+			payload = buf[:]
+		}
+		if err := f.disk.Write(f.lba(block), payload); err != nil {
+			if !mapped {
+				f.freeRun(block, run)
+			}
 			return err
 		}
+		if !mapped {
+			f.mapRun(n, extent{uint32(bi), block, run})
+		}
 		done += chunk
-	}
-	if end > n.size {
-		n.size = end
+		n.size = max(n.size, off+done)
 	}
 	return nil
 }
 
-// Truncate zet het bestand op precies size bytes en maakt het (met ouder-dirs)
-// aan als het nog niet bestond. Krimpen geeft de blokken voorbij de nieuwe
-// lengte terug; groeien voegt gaten toe (die lezen als nul, zoals bij WriteAt).
-//
-// Dit is de helft die "een bestand schrijven" nodig had en niet had: WriteAt
-// alleen kan een bestand niet KORTER maken, dus een kortere nieuwe inhoud liet
-// de oude staart staan en een lege inhoud liet het oude bestand volledig
-// intact. De aanroeper (de hop-ABI-WriteFile) zet daarom eerst op 0.
+// Truncate grows sparsely; shrinking returns runs and zeros the retained tail
+// so a later extension cannot reveal discarded bytes.
 func (f *FS) Truncate(path string, size uint64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-
-	if diskBytes := uint64(f.max) * BlockSize; size > diskBytes {
-		return fmt.Errorf("hopfs: truncate %d > schijf (%d)", size, diskBytes)
+	if size > uint64(f.max)*BlockSize {
+		return fmt.Errorf("hopfs: truncate exceeds disk window")
 	}
 	n, err := f.file(path)
 	if err != nil {
 		return err
 	}
-
-	need := int((size + BlockSize - 1) / BlockSize)
-	if need > len(n.blocks) {
-		if err := f.growTo(n, uint64(need), fmt.Sprintf("truncate %d", size)); err != nil {
-			return err
-		}
-	} else {
-		for _, b := range n.blocks[need:] {
-			if b != holeBlock { // gaten zijn nooit gealloceerd
-				f.free = append(f.free, b)
+	if size < n.size {
+		if tail := size % BlockSize; tail != 0 {
+			block, _, mapped := n.lookup(uint32(size / BlockSize))
+			if mapped {
+				var buf [BlockSize]byte
+				if err := f.disk.Read(f.lba(block), buf[:]); err != nil {
+					return err
+				}
+				clear(buf[tail:])
+				if err := f.disk.Write(f.lba(block), buf[:]); err != nil {
+					return err
+				}
 			}
 		}
-		f.index -= len(n.blocks) - need
-		n.blocks = n.blocks[:need]
+		need := uint32((size + BlockSize - 1) / BlockSize)
+		keep := 0
+		for _, e := range n.extents {
+			if e.logical >= need {
+				f.freeRun(e.physical, e.count)
+				f.index--
+				continue
+			}
+			if uint64(e.logical)+uint64(e.count) > uint64(need) {
+				retain := need - e.logical
+				f.freeRun(e.physical+retain, e.count-retain)
+				e.count = retain
+			}
+			n.extents[keep] = e
+			keep++
+		}
+		n.extents = compact(n.extents[:keep])
 	}
 	n.size = size
 	return nil
@@ -595,10 +467,9 @@ func (f *FS) release(n *node) {
 		}
 		return
 	}
-	f.index -= len(n.blocks) // index-budget terug (zie maxIndexBlocks)
-	for _, b := range n.blocks {
-		if b != holeBlock { // gaten zijn nooit gealloceerd
-			f.free = append(f.free, b)
-		}
+	f.index -= len(n.extents)
+	for _, e := range n.extents {
+		f.freeRun(e.physical, e.count)
 	}
+	n.extents = nil
 }

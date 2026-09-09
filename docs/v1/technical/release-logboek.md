@@ -417,3 +417,71 @@ Public evidence: [transport before/after results](release-evidence/2026-09-07-li
 ### L56 — website cleanup is an explicit release acceptance item
 
 Derek requests that temporary placeholders and investigation wording be removed from the public website before release. A statement that was accurate during debugging must not remain as a stale description of the product after the issue has been resolved. Add this check to both the canonical release plan and the website TODO. Describe verified capabilities and concrete remaining limitations on public pages; retain debugging history and superseded findings here. In particular, the LicheeRV framework status must reflect L53–L55. The separate application endpoint integration check remains open. This entry records the requested release check, not completion of the website cleanup or publication.
+
+
+### L57 — requested application deployment on user-installed 2.2.3
+
+Derek reports LicheeRV at 192.168.1.150 running release 2.2.3. Remove the welcome job and submit the unchanged root definitions for cloudflared-lean, Stulp and Stulp-plugins in that order, waiting three seconds after each submission before the next. All three reach running with zero reported restarts; claimed app memory is 206 MiB of 222 MiB. This verifies startup only; Derek will check Stulp application behavior. The API health check succeeds but does not independently expose the release version. Local evidence: `../reviews/2026-09-07-licheerv-sharing/v223-app-install.json`. No build, flash, FLIP or commit is performed.
+
+
+### L58 — corrected application submission order
+
+At Derek's request, delete all three jobs and wait until their tasks are removed. Submit the unchanged root job definitions in the corrected order: Stulp, Stulp-plugins, cloudflared-lean, waiting three seconds between requests. All three reach running with zero reported restarts. This supersedes the deployment order in L57; application behavior remains for Derek to check. Local evidence: `../reviews/2026-09-07-licheerv-sharing/v223-app-install-reordered.json`. No kernel update or reboot is performed.
+
+
+### L59 — cage IDs and physical cores are independent; two RV FLIPs and ordered app deployment
+
+Derek observes that the first shared app receives 10.100.0.3 despite cage 1 being free. HOP deliberately skipped IDs through the physical core count to protect an old SMP coupling: primary cage ID equalled primary core, and secondary CPU contexts occupied other cage context blocks. This was an allocation rule, not evidence of failed release. Derek requests independent cage/core assignment, a final simplification review, then removal of apps, two FLIPs, and unchanged Stulp → Stulp-plugins → cloudflared-lean submissions three seconds apart.
+
+HOP now reserves one first-free cage per app, including SMP and adopted tasks. The node independently selects the physical dedicated core run or trusted group pool. Secondary CPU context IDs use the remaining values in the existing resident byte, and their contexts occupy previously unused space in the existing per-core administration blocks. No new memory region, worker, mutex or handoff field is introduced. Cage table rebuild preserves an unrelated secondary context. Start initializes the trusted sibling wake chain; dispatch, wake, stop/release and FLIP adoption use the actual physical assignment. A QEMU run exposed the remaining app-side assumption: existing apps send cage-relative virtual CPU requests. The kernel now validates and translates those requests, retaining compatibility with existing app binaries. The ARM switch code changes; its existing compatibility check prevents transferring old incompatible live contexts.
+
+Simplification review removes shared-ID offsets, multi-cage task reservations, the optional physical-placement hint and its forwarding adapters, and obsolete cage/core overlap restrictions. Physical capacity and class checks remain in the existing node allocator. Node-reserved physical cores affect core placement and advertised classes, never cage IDs or IP addresses.
+
+Validation: HOP full tests and runner/agent race tests pass. HopOS host tests and full TamaGo target matrix pass. Slots/stage2 race tests pass with checkptr disabled for the existing uintptr-based host MMIO fixtures; the initial default race invocation stopped at that fixture's pointer instrumentation, not a reported data race. Regression tests cover separate context storage, sibling wake routing, existing app CPU request translation, arbitrary cage/core adoption, physical overlap rejection, and complete core release. QEMU actual-agent acceptance places six shared apps in cages 1–6 on core 1 and a two-core SMP app in cage 7 on cores 2–3. Concurrent checksummed compute, three timer/wake rounds, live FLIP retaining all task/boot identities and the existing SMP TCP socket, adopted stop, neighbor preservation, cage-1 reuse and zero final claims pass.
+
+Hardware: on Derek's user-installed 2.2.3 LicheeRV, remove apps and verify zero memory claims. Two uncommitted candidate bundles pass FLIP: generation 1 uses 0x82000000, generation 2 returns to the original 0x84000000 window. The first empty handoff caused the existing init-job configuration to seed welcome; that resident survived the second FLIP. The harness's expectation of an empty post-FLIP task list was corrected in the record rather than counted as a kernel failure. Remove welcome, then submit the unchanged root definitions in the requested order with three seconds between requests. All three run with zero reported restarts: Stulp cage 1 / 10.100.0.2, plugins cage 2 / .3, cloudflared cage 3 / .4. App claims are 206 MiB of 222 MiB. Derek checks full Stulp behavior.
+
+The build uses an isolated local HOP replacement; production metal/go.mod is not pointed at a local checkout or unpublished tag. HOP publication, the actual dependency pin, and final release artifact signoff remain necessary. No commit, tag, flash or reboot was performed. No physical ARM SMP acceptance is claimed from QEMU. Public evidence: [cage/core separation](release-evidence/2026-09-07-cage-core-separation.json). Local records use the cage-/hop-cage- prefixes under ../reviews/2026-09-07-licheerv-sharing/.
+
+
+### L60 — Derek accepts Stulp behavior on the LicheeRV candidate
+
+Derek reports that Stulp works correctly again with no observed regression after the L59 deployment. Record this as operator acceptance of the supplied application setup, distinct from the automated startup, compute and FLIP evidence. The application integration item is closed for this tested candidate; this is not an exhaustive plugin-protocol certification. Remaining work is published HOP dependency integration, physical ARM acceptance of cage/core separation and the changed SMP switch, the agreed H5 I/O comparisons and H6 combined run, website/documentation cleanup, and final artifact signoff. IRQ remains the later point-release task.
+
+
+### L61 — replace the global 16-GiB logical index limit with compact extents
+
+Derek reports SQLite backup failure at offset 8,349,814,784: the global index has 4,194,278 of 4,194,304 entries and needs another 256. Derek clarifies that one roughly 8-GB database is being backed up; source plus backup plausibly accounts for the aggregate limit. The error itself establishes index exhaustion, not physical disk exhaustion. The old index represented every logical4KiB position, including sparse holes, with a uint32 entry; its July memory guard capped all logical file spans at16GiB regardless of the roughly400GB disk window. The earlier storage review missed this capacity restriction.
+
+At Derek's request, replace per-block arrays with sorted sparse extents and a coalesced physical free-range list. Adjacent mappings merge only when both logical and physical addresses are contiguous. Sparse length changes need no index entries. Existing bump-first allocation and transfer batching remain. No new lock or background worker. Bound live file extents to262144 rather than total logical blocks; compact shortened file/free arrays when backing capacity exceeds twice their live length. This bounds fragmentation metadata, not all node heap allocations.
+
+The same path now zeros the retained partial block when truncating, preventing discarded bytes reappearing on extension. Fresh block mappings become visible only after successful disk writes; failed fresh writes return the run without exposing previous-owner bytes. Successful earlier chunks remain valid if a later I/O fails. Disk-window and arithmetic bounds remain.
+
+Before/after host evidence: old code fails a9GiB source plus9GiB backup at the16GiB aggregate boundary; new code succeeds with two file extents. A simulated400GiB device fills with one contiguous extent, refuses further physical allocation, releases fully and can be reused. Sparse endpoint writes, zero-I/O sparse truncate, randomized fragmented I/O versus an independent byte-array model, truncation/re-extension, injected write failures, metadata-budget rollback and two-sided merging at the budget pass. Existing1MiB batching tests, HopFS/slots host tests, HopFS race tests and the full host/TamaGo target gate pass. This is simulated capacity coverage, not a hardware throughput result.
+
+A review M4 FLIP bundle and a private-root9GiB source/copy/readback SHA256 hardware fixture are built. The isolated build includes the pending local HOP dependency changes. No device has been modified for this HopFS change. Pending clarification: confirm the target (presumed192.168.1.122) and that temporary filesystem contents may be rebuilt. The current kernel initializes a fresh HopFS index after FLIP; this change does not add metadata transfer. Do not describe existing database files as preserved by that update.
+
+Public record: [HopFS extent evidence](release-evidence/2026-09-07-hopfs-extents.json). Local before/after logs and fixture source are under ../reviews/2026-09-07-hopfs-extents/. No commits, tags or publication.
+
+
+### L62 — M4 FLIP installed; Spin and cloudflared restored for Derek
+
+Derek confirms his backup is complete and explicitly authorizes the one-time transition without filesystem migration or compatibility work. Save the original job definitions locally with restrictive permissions, stop their tasks, and verify released app claims. M4 accepts the extent-index candidate and adopts kernel generation2 at0x100dbc00000; the original configured NVMe window is detected (395188MiB, LBA19659256..120827418). No reboot or cold flash.
+
+The private9GiB source/backup fixture starts but faults before reporting progress (vec4, ESR0x2000000, FAR0), repeating under the existing task restart policy. Its cause is not established; do not count this as physical storage acceptance or infer database corruption. The kernel remains reachable. Derek requests Spin and cloudflared back for his own test. Stop the fixture and its host harness, then submit the saved original Spin definition followed three seconds later by cloudflared. Both reach running with zero reported restarts. Existing HopFS contents were allowed to be discarded; no metadata migration was added. Original job definitions containing credentials remain private and are not included in public evidence.
+
+The FLIP is accepted, host coverage remains green, and physical database/backup acceptance is pending Derek's check. Updated public [extent evidence](release-evidence/2026-09-07-hopfs-extents.json); local console and task records under ../reviews/2026-09-07-hopfs-extents/. No commit or publication.
+
+
+### L63 — correction: running was not application acceptance
+
+Derek reports that the restored services do not work. The initial L62 task-state snapshot was too early: Spin, cloudflared and the storage fixture faulted shortly after startup on the first M4 extent candidate (ARM vector 4, ESR 0x02000000). Stop the restart loops. Add minimal ARM fault-PC reporting using the dead context's existing resume word; normal ARM and VHE target builds pass. An empty FLIP to this diagnostic candidate reaches generation 3. Spin then responds with HTTP 200 and no restarts during observation; this behavioral change alone does not establish the original fault's cause. The changed switch-code publication path remains under investigation.
+
+A separate restoration error is confirmed from cloudflared's logs: its configured origin is 10.100.0.3:80, while restoring Spin first assigned it 10.100.0.2. Preserve the original cloudflared-first, Spin-second deployment order. Cloudflared registers tunnel connections; this does not by itself prove origin reachability. Spin was subsequently deleted through the API, so check operator activity before replacing that task. Physical large-copy acceptance and sustained end-to-end service acceptance remain open. No reboot, commit or publication.
+
+
+### L64 — original IP order restored; Derek confirms service operation
+
+Derek confirms that the Spin deletion in L63 was his own restart to restore the correct order: cloudflared first (cage 1, 10.100.0.2), Spin second (cage 2, 10.100.0.3). IP addresses matter because the tunnel origin is configured explicitly. Read-only verification finds both original jobs running with zero restarts and Spin's local port 80 returning HTTP 200. Derek reports no issue. No additional app replacement or FLIP is performed after his confirmation. Future restoration must preserve this order.
+
+This closes the immediate service-restoration request. It does not establish why the initial ARM candidate faulted before the diagnostic FLIP, or complete the physical large-copy test. Keep those acceptance items distinct. Local final snapshot: /tmp/hopos-hopfs-extents/restoration-check.json.

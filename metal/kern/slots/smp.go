@@ -1,10 +1,13 @@
 package slots
 
-// SMP (fase 5): een app met cores > 1 draait op één primair slot plus de
-// cores-1 cores erna (primair+1 .. primair+cores-1), samen op één gedeelde
-// heap. De geheugenisolatie zit in de stage-2-kooi (hardware), en de
-// capaciteits-accounting (welke cores vrij zijn) doet HOP's HopRunner. Start
-// weigert al te beginnen op een core die niet uit is.
+import (
+	"github.com/xinix00/HopOS/metal/v2/abi/layout"
+	"github.com/xinix00/HopOS/metal/v2/dev"
+)
+
+// SMP apps own one cage and a contiguous physical core span. The primary CPU
+// uses the cage context; each secondary uses a separate per-core context.
+// Physical ownership is maintained by the node core allocator.
 //
 // SECURITY (isolatie-invariant): het aantal cores van een app MAG NIET uit de
 // control-page (CtrlCores) worden teruggelezen voor vertrouwensbeslissingen.
@@ -41,4 +44,32 @@ func coreCount(i int) int {
 		c = 1
 	}
 	return c
+}
+
+// smpContext returns a CPU's context identity within this cage.
+func smpContext(slot, core int) int {
+	if core == coreOf(slot) {
+		return slot
+	}
+	return layout.SMPContextID(core)
+}
+
+// prepareSMPContexts initializes the complete trusted sibling chain before
+// dispatch. Secondary CPUs share the app's memory but never its CPU context.
+func prepareSMPContexts(slot, count int) {
+	first := coreOf(slot)
+	for core := first; core < first+count; core++ {
+		id := smpContext(slot, core)
+		if core != first {
+			dev.Clear(ctxPA(id), layout.CtxLen)
+			ctxWrite(id, layout.CtxCtrlPA, ctxRead(slot, layout.CtxCtrlPA))
+			ctxWrite(id, layout.CtxRingHeadPA, ctxRead(slot, layout.CtxRingHeadPA))
+			ctxWrite(id, layout.CtxUnitSlot, uint64(slot))
+		}
+		next := slot
+		if core+1 < first+count {
+			next = smpContext(slot, core+1)
+		}
+		ctxWrite(id, layout.CtxNextPA, uint64(ctxPA(next)))
+	}
 }

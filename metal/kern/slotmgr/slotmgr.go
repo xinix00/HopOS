@@ -21,23 +21,13 @@ import (
 	"github.com/xinix00/HopOS/metal/v2/kern/slots"
 )
 
-// Manager implementeert hopos.SlotManager tegen metal/kern/slots.
-//
-// Slot-vertaling: HOP telt zijn slots 1-based en oblivious; als de node cores
-// voor zijn eigen runtime reserveert (slots.SetHopCores), liggen de app-cores
-// niet op 1..N maar op (1+HopReserved)..N. Deze adapter is dé (en enige) plek
-// die HOP-slot → interne slot vertaalt (intern = HOP-slot + HopReserved), zodat
-// slots.* zelf onveranderd op slot=core=layout kan blijven. Bij hopReserved=0
-// (default) is phys() de identiteit — geen gedragswijziging.
+// Manager passes cage IDs unchanged; physical placement belongs to the node.
 type Manager struct{}
 
 func New() *Manager {
 	usageOnce.Do(startUsage) // de per-slot CPU-meting (usage.go) loopt zolang de node leeft
 	return &Manager{}
 }
-
-// phys vertaalt een HOP-slot naar de interne slot/core-index.
-func phys(slot int) int { return slot + slots.HopReserved() }
 
 // NumCores is de EERLIJKE app-core-capaciteit die HOP ziet: de PSCI-getelde
 // app-cores min de door de node-runtime gereserveerde cores (HopReserved).
@@ -53,7 +43,8 @@ func (Manager) NumCores() int {
 	return 0
 }
 
-func (Manager) CoreClass(slot int) string { return slots.CoreClass(phys(slot)) }
+// CoreClass enumerates advertised physical app cores, not cage identities.
+func (Manager) CoreClass(core int) string { return slots.CoreClass(core + slots.HopReserved()) }
 
 // PoolLargest vult hopos.PoolReporter: de grootste partitie die er NU nog in
 // past, zodat HOP's toelating een job kan weigeren die nergens meer past in
@@ -78,7 +69,7 @@ func (Manager) PoolLargest() uint64 { return slots.PoolLargest() }
 // bij te blijven, anders krijgt de volgende job een core waarop nog leven kan
 // zitten (20-08). Zie docs/slot-lifecycle-grenzen.md.
 func (Manager) StartStream(slot int, image io.Reader, size int64, spec hopos.StartSpec) error {
-	cage := phys(slot)
+	cage := slot
 	core, err := slots.PlaceCage(cage, spec.Sharegroup, spec.PoolCores, spec.Cores, spec.CoreClass)
 	if err != nil {
 		if errors.Is(err, slots.ErrPoolSize) {
@@ -106,7 +97,7 @@ func (Manager) StartStream(slot int, image io.Reader, size int64, spec hopos.Sta
 }
 
 func (Manager) Stop(slot int, timeout time.Duration) error {
-	if err := slots.Stop(phys(slot), timeout); err != nil {
+	if err := slots.Stop(slot, timeout); err != nil {
 		// NIET releasen bij een Stop-fout ("not dead after revocation"): de kooi
 		// kan nog een zombie-bewoner in de rotatielijst hebben (na een revoke
 		// sterft die pas bij zijn eerstvolgende hervatting — en een compute-buur
@@ -115,12 +106,12 @@ func (Manager) Stop(slot int, timeout time.Duration) error {
 		// core gereserveerd; reconcile (of een volgende geslaagde Stop) ruimt op.
 		return err
 	}
-	slots.ReleaseCage(phys(slot)) // pas na een schone Stop: core/pool-boekhouding vrij
+	slots.ReleaseCage(slot) // pas na een schone Stop: core/pool-boekhouding vrij
 	return nil
 }
 
 func (Manager) Status(slot int) hopos.SlotStatus {
-	s := slots.Get(phys(slot))
+	s := slots.Get(slot)
 	return hopos.SlotStatus{
 		CoreOn:    s.CoreOn,
 		App:       s.App,
@@ -128,7 +119,7 @@ func (Manager) Status(slot int) hopos.SlotStatus {
 		Heartbeat: s.Heartbeat,
 		RAMSize:   s.RAMSize,
 		MemSys:    s.MemSys,
-		CPUPct:    cpuPct(phys(slot)),
+		CPUPct:    cpuPct(slot),
 		FaultVec:  s.FaultVec,
 		FaultESR:  s.FaultESR,
 		FaultFAR:  s.FaultFAR,
@@ -136,13 +127,7 @@ func (Manager) Status(slot int) hopos.SlotStatus {
 	}
 }
 
-func (Manager) Logs(slot int) <-chan string { return slots.Logs(phys(slot)) }
+func (Manager) Logs(slot int) <-chan string { return slots.Logs(slot) }
 
 // Contractbewijs: Manager MOET hopos.SlotManager zijn.
 var _ hopos.SlotManager = (*Manager)(nil)
-
-func (Manager) CanPlaceDedicated(slot, cores int) bool {
-	return slots.CanPlaceDedicated(phys(slot), cores)
-}
-
-var _ hopos.DedicatedPlacement = Manager{}

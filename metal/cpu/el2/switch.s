@@ -72,12 +72,18 @@ yield:
 	// SMP-app deelt de VMID van zijn primaire, en schreef zo zijn staat in
 	// het ctx-blok van de primaire — waarna zijn eigen blok op "running"
 	// bleef staan, zijn rotatie geen levende bewoner zag en de core parkeerde
-	// (QEMU + M4, 03-09). Zijn contextblok = CagePA + slot<<16 + CtxOff;
+	// (QEMU + M4, 03-09). IDs 1..128 select primary cage contexts;
+	// IDs 129..255 select secondary core contexts (id-127, CtxSecondaryOff).
 	// CagePA komt uit het sched-blok (SP = scratch = blok+16, dus
 	// veld-offset − 16: SchedS2PA(224) → 208, SchedCurrent(48) → 32).
-	MOVD	32(RSP), R0	// layout.SchedCurrent = slot van de bewoner
+	MOVD	32(RSP), R0	// layout.SchedCurrent = context ID van de bewoner
 	MOVD	208(RSP), R1	// layout.SchedS2PA
-	ADD	R0<<16, R1, R1
+	CMP	$128, R0
+	BLS	yieldctx
+	SUB	$127, R0, R0
+	ADD	$0x800, R1, R1	// CtxSecondaryOff - CtxOff
+yieldctx:
+	ADD	R0<<16, R1, R1 // context index
 	ADD	$0x6000, R1, R1	// x1 = ctx (layout.CtxOff)
 
 	// GPRs: x4..x29 in paren, x30 los; x0..x3 uit de scratch. CtxGPRs=24.
@@ -183,7 +189,12 @@ exited:
 	// er is net een slot vrijgekomen, een boot-pending buur mag direct).
 	MOVD	32(RSP), R0	// layout.SchedCurrent (zie yield: niet de VMID)
 	MOVD	208(RSP), R1	// layout.SchedS2PA
-	ADD	R0<<16, R1, R1
+	CMP	$128, R0
+	BLS	exitctx
+	SUB	$127, R0, R0
+	ADD	$0x800, R1, R1	// CtxSecondaryOff - CtxOff
+exitctx:
+	ADD	R0<<16, R1, R1 // context index
 	ADD	$0x6000, R1, R1
 	MOVD	$4, R2
 	MOVD	R2, (R1)
@@ -197,8 +208,16 @@ fault:
 	// bewoner dood en draait de rest van de core gewoon door.
 	MOVD	32(RSP), R0	// layout.SchedCurrent (zie yield: niet de VMID)
 	MOVD	208(RSP), R1	// layout.SchedS2PA
-	ADD	R0<<16, R1, R1
+	CMP	$128, R0
+	BLS	faultctx
+	SUB	$127, R0, R0
+	ADD	$0x800, R1, R1	// CtxSecondaryOff - CtxOff
+faultctx:
+	ADD	R0<<16, R1, R1 // context index
 	ADD	$0x6000, R1, R1	// x1 = ctx-blok van de bewoner (layout.CtxOff)
+	// A dead context never resumes: retain the fault PC in its resume word.
+	WORD	$0xd53c4020	// mrs x0, elr_el2
+	MOVD	R0, 288(R1)	// layout.CtxResume = fault PC
 	MOVD	8(R1), R3	// layout.CtxCtrlPA = zijn control-page (door HOP gezet)
 	ADD	$1, R2, R2
 	MOVD	R2, 0x68(R3)	// layout.CtrlFaultVec = vec+1
@@ -264,7 +283,13 @@ scan:
 	MOVBU	(R7)(R4), R8	// kandidaat-slot (0 = gat)
 	CBZ	R8, skip
 	MOVD	208(RSP), R1	// ctx van de kandidaat
-	ADD	R8<<16, R1, R1
+	MOVD	R8, R9	// preserve the context ID for SchedCurrent
+	CMP	$128, R9
+	BLS	scanctx
+	SUB	$127, R9, R9
+	ADD	$0x800, R1, R1
+scanctx:
+	ADD	R9<<16, R1, R1
 	ADD	$0x6000, R1, R1
 	MOVD	(R1), R9
 	CMP	$1, R9		// boot-pending? een verse start wacht nooit
@@ -444,7 +469,12 @@ fiq:
 	// app publiceert de vlag met een clean.
 	MOVD	32(RSP), R1	// layout.SchedCurrent
 	MOVD	208(RSP), R2	// layout.SchedS2PA
-	ADD	R1<<16, R2, R2
+	CMP	$128, R1
+	BLS	fiqctx
+	SUB	$127, R1, R1
+	ADD	$0x800, R2, R2
+fiqctx:
+	ADD	R1<<16, R2, R2 // context index
 	ADD	$0x6000, R2, R2	// eigen ctx (layout.CtxOff)
 	MOVD	8(R2), R3	// layout.CtxCtrlPA
 	CBZ	R3, fiqdone
@@ -491,19 +521,20 @@ doorack:
 wake:
 	MOVD	32(RSP), R1	// layout.SchedCurrent (zie yield: niet de VMID)
 	MOVD	208(RSP), R2	// layout.SchedS2PA
-	ADD	R1<<16, R2, R2
+	CMP	$128, R1
+	BLS	wakectx
+	SUB	$127, R1, R1
+	ADD	$0x800, R2, R2
+wakectx:
+	ADD	R1<<16, R2, R2 // context index
 	ADD	$0x6000, R2, R2	// x2 = eigen ctx (layout.CtxOff)
 	STP	(R4, R5), 56(R2)	// x4/x5 kladden
 	MOVD	(RSP), R0	// x0 = doel (originele x0)
 	MOVD	8(R2), R1	// x1 = eigen CtxCtrlPA = de eenheid
-	// De eenheid begint bij de primaire (layout.CtxUnitSlot, door HOP
-	// gezet), niet bij de eigen slot: een secundaire moet de primaire
-	// kunnen wekken.
-	MOVD	496(R2), R4	// layout.CtxUnitSlot
-	MOVD	208(RSP), R5	// layout.SchedS2PA
-	ADD	R4<<16, R5, R4
-	ADD	$0x6000, R4, R4	// x4 = ctx_k, vanaf de primaire
-	MOVD	$8, R3		// hoogstens 8 cores per app
+	// Trusted circular sibling chain, built before dispatch. Cage IDs and
+	// physical core indices are independent; adjacent cage contexts may
+	// belong to unrelated apps. Single-core apps point back to themselves.
+	MOVD	R2, R4
 wakescan:
 	MOVD	8(R4), R5
 	CMP	R1, R5		// zelfde control-page?
@@ -533,8 +564,9 @@ wakescan:
 #endif
 	B	wakedone
 wakenext:
-	ADD	$0x10000, R4, R4	// volgende slot (layout.CageStride)
-	SUBS	$1, R3, R3
+	MOVD	576(R4), R4	// layout.CtxNextPA (node-owned)
+	CBZ	R4, wakedone
+	CMP	R2, R4		// back at the caller: every sibling checked
 	BNE	wakescan
 wakedone:
 	LDP	56(R2), (R4, R5)

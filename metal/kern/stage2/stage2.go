@@ -272,6 +272,7 @@ func initAppCoreRegion(s2PA, entryPA uint64) {
 	// Build van dat slot, en verse DRAM is geen nul.
 	for s := 1; s <= layout.MaxSlots; s++ {
 		dev.Write64(layout.CageTablePA(s)+layout.CtxOff+layout.CtxState, layout.CtxEmpty)
+		dev.Write64(layout.CageTablePA(s)+layout.SMPCtxOff+layout.CtxState, layout.CtxEmpty)
 	}
 	dev.CleanInv(vecs, 0x800)
 	dev.MB()
@@ -336,7 +337,9 @@ func Build(i int, ipaBase, paBase, size uint64) (uint64, error) {
 	// mag (en moet) hier vers op Empty — de aanroeper zet 'm daarna op
 	// Running/BootPending bij de dispatch.
 	base := layout.CageTablePA(i)
-	dev.Clear(base, layout.CageStride)
+	// The secondary CPU context in this block may belong to another cage.
+	dev.Clear(base, layout.SMPCtxOff)
+	dev.Clear(base+layout.SMPCtxOff+layout.CtxLen, layout.CageStride-layout.SMPCtxOff-layout.CtxLen)
 
 	l1 := uint64(base + l1Off)
 	l2Part := uint64(base + l2PartOff)

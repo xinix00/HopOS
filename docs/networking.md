@@ -11,7 +11,7 @@ Each application runs its own TCP/IP stack over frame rings in its partition. Th
 | External peer | App rings → switch/NAT → physical NIC; replies are translated and delivered to the app's RX ring. |
 | Published app port | Node port publication and NAT select the app; the app's stack accepts the connection. |
 
-The internal address plan is deterministic. The node is `10.100.0.1`; app IP and MAC addresses are derived from their slot identities. The gateway path translates between the internal node address and the node stack's configured address. An internal service request does not need to leave the physical NIC.
+The internal address plan is deterministic. The node is `10.100.0.1`; app IP and MAC addresses are derived from their cage identities. Cage 1 uses `10.100.0.2`, cage 2 uses `10.100.0.3`, and so on, independently of physical core placement. A completed stop makes that cage ID available again. An address identifies a placement, not a permanent job name. The gateway path translates between the internal node address and the node stack's configured address. An internal service request does not need to leave the physical NIC.
 
 The switch is the single consumer of an app's TX ring and producer of its RX ring. It limits bursts and uses bounded backpressure rather than waiting indefinitely for a receiver. Frame bounds and source identity are checked at the switch boundary.
 

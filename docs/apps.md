@@ -98,6 +98,8 @@ Submit the manifest through `POST /v1/jobs`; [operations](operations.md) covers 
 | A pool of two cores shared by trusted applications | `"cpu_shares":2048,"tags":{"sharegroup":"trusted"}` |
 | Restrict that pool to big cores | Add `"core-class":"big"` inside the same `tags` object |
 
+Every application reserves one cage, including SMP applications. Cage IDs are allocated from the first free ID and are reusable after a completed stop; sharing does not reserve the low IDs for dedicated applications.
+
 Without `sharegroup`, `cpu_shares` selects the application's dedicated core count. An SMP application has one application address space and a runtime using the assigned cores. Placement requires an available contiguous core run.
 
 With `sharegroup`, `cpu_shares` selects the **pool size**. Each member itself runs on one core and keeps its own memory partition. Two members each requesting 2048 shares use one pool of two cores. They do not reserve four cores. Members must agree on pool size. Use sharing only for applications you intend to place together; separate jobs do not share cores implicitly.

@@ -89,7 +89,8 @@ func writeHandoff(cp uintptr, sp, mp, gp, fn unsafe.Pointer, stub uint64) {
 // No-op bij cores ≤ 1 (dan blijft de runtime single-core, zoals altijd) — de
 // aanroeper hoeft dus niet zelf op "SMP of niet" te vertakken.
 //
-//   - prim:  slotnummer van de primaire core (= board.CoreID())
+//   - prim: cage-relative virtual CPU base; the node translates requests
+//     to this app's assigned physical core span
 //   - cores: totaal aantal cores voor deze app (door HOP op de control-page gezet)
 //
 // De EL2-trampoline (fysiek, door HOP gepubliceerd) en de EL1-stub (eigen IPA)

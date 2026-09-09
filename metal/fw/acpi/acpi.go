@@ -210,6 +210,17 @@ type CPU struct {
 	UID     uint32 // ACPI processor UID
 	MPIDR   uint64 // affiniteitsroute voor PSCI CPU_ON
 	Enabled bool   // GICC-flags bit 0
+	// GICR is het redistributor-frame van déze core (GICC offset 60; 0 als de
+	// firmware het niet invult en de MADT alleen een GICR-range draagt). Dat
+	// is wat een GICv3-driver per core nodig heeft — voor HOP's eigen core om
+	// zijn interrupts te nemen (driver/gicv3).
+	GICR uint64
+	// EffClass is de "Processor Power Efficiency Class" (GICC offset 76, ACPI
+	// 6.0+): een lager getal is zuiniger. Op een tri-cluster-SoC (O6N: A520/
+	// A720/A720-boost) is dít de universele bron voor de clusterklasse van een
+	// core — geen MPIDR-tabel per board. Alle cores gelijk (of alles 0) =
+	// de firmware zegt niets; dan valt het board terug op eigen kennis.
+	EffClass uint8
 }
 
 // MADT geeft de cores (GICC-entries) plus het GICD-basisadres (0 = geen
@@ -229,11 +240,16 @@ func (t *Tables) MADT() (cpus []CPU, gicd uint64, err error) {
 		switch typ {
 		case 0x0b: // GICC (ACPI 6.x: 80 bytes; MPIDR op offset 68)
 			if l >= 76 {
-				cpus = append(cpus, CPU{
+				c := CPU{
 					UID:     u32(e[8:]),
 					MPIDR:   u64(e[68:]),
 					Enabled: u32(e[12:])&1 != 0,
-				})
+					GICR:    u64(e[60:]),
+				}
+				if l >= 77 {
+					c.EffClass = e[76]
+				}
+				cpus = append(cpus, c)
 			}
 		case 0x0c: // GICD (24 bytes: GicId@4, PhysicalBaseAddress@8, versie@20)
 			if l >= 16 {

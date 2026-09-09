@@ -188,3 +188,45 @@ func TestPartAdoptRejectsWrappedRange(t *testing.T) {
 		t.Fatal("accepted wrapped range")
 	}
 }
+
+// Cage identities and physical core spans are independent across a flip.
+// In particular, a neighbouring cage must not collide with an SMP secondary.
+func TestAdoptionSeparatesCagesFromSMPCores(t *testing.T) {
+	setCores(t, 4)
+	states := []SlotState{
+		{Slot: 1, Core: 3, Cores: 2, PartBase: 0x80000000, PartSize: 32 << 20},
+		{Slot: 2, Core: 1, Cores: 1, PartBase: 0x82000000, PartSize: 32 << 20},
+	}
+	if err := ValidateAdoption(states); err != nil {
+		t.Fatalf("independent cage/core placement rejected: %v", err)
+	}
+	for _, st := range states {
+		adoptCage(st)
+	}
+	if cageCore[1] != 3 || cageSpan[1] != 2 || cageCore[2] != 1 {
+		t.Fatalf("restored placement: cores=%v spans=%v", cageCore, cageSpan)
+	}
+	if runFree(3, 1, "") || runFree(4, 1, "") {
+		t.Fatal("adoption released an SMP resident's physical core")
+	}
+	if !runFree(2, 1, "") {
+		t.Fatal("cage 2 incorrectly reserves physical core 2")
+	}
+	ReleaseCage(1)
+	if !runFree(3, 2, "") || runFree(1, 1, "") {
+		t.Fatal("release did not preserve the unrelated cage's physical owner")
+	}
+}
+
+func TestAdoptionRejectsPhysicalSMPOverlap(t *testing.T) {
+	setCores(t, 4)
+	first := SlotState{Slot: 6, Core: 2, Cores: 2, PartBase: 0x80000000, PartSize: 32 << 20}
+	for _, core := range []int{2, 3} {
+		second := SlotState{Slot: 1, Core: core, Cores: 1, PartBase: 0x82000000, PartSize: 32 << 20}
+		for _, states := range [][]SlotState{{first, second}, {second, first}} {
+			if ValidateAdoption(states) == nil {
+				t.Fatalf("accepted duplicate physical owner on core %d", core)
+			}
+		}
+	}
+}

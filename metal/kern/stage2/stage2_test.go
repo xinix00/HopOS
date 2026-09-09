@@ -305,3 +305,27 @@ func TestRebuildVeegtOudeMap(t *testing.T) {
 		t.Fatalf("%d partitie-blokken na rebuild naar 8MB, verwacht 4", blokken)
 	}
 }
+
+// A cage's table block also stores the independent secondary CPU context for
+// the same-numbered core. Rebuilding the cage must not erase that live CPU.
+func TestBuildPreservesIndependentSecondaryContext(t *testing.T) {
+	const cage = 3
+	secondary := layout.CageTablePA(cage) + layout.SMPCtxOff
+	primary := layout.CageTablePA(cage) + layout.CtxOff
+	for off := uintptr(0); off < layout.CtxLen; off += 8 {
+		dev.Write64(secondary+off, 0x53504d0000000000|uint64(off))
+	}
+	dev.Write64(primary+layout.CtxState, layout.CtxDead)
+	if _, err := Build(cage, layout.SlotBase(cage), tPoolPA, 32<<20); err != nil {
+		t.Fatal(err)
+	}
+	for off := uintptr(0); off < layout.CtxLen; off += 8 {
+		want := uint64(0x53504d0000000000) | uint64(off)
+		if got := dev.Read64(secondary + off); got != want {
+			t.Fatalf("secondary context overwritten at %#x: got %#x, want %#x", off, got, want)
+		}
+	}
+	if got := dev.Read64(primary + layout.CtxState); got != layout.CtxEmpty {
+		t.Fatalf("new cage retained old primary state %d", got)
+	}
+}

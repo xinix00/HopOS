@@ -27,43 +27,45 @@ import (
 	"github.com/xinix00/lean/leandhcp"
 )
 
-// machine is de board-implementatie voor UEFI/ACPI-platforms.
-type machine struct{}
+// Machine is de board-implementatie voor UEFI/ACPI-platforms. Geëxporteerd
+// zodat een concreet UEFI-bord (board/o6n) hem kan embedden en alleen zijn
+// eigen kennis overschrijft (clusterklassen, thermometer, NIC-interrupt).
+type Machine struct{}
 
 // init registreert dit board; het PA-plan zette de basis al (board/uefi
 // plan.go, met de app-guard), het app-contract idem (appboard.go).
-func init() { board.Use(machine{}) }
+func init() { board.Use(Machine{}) }
 
 // Conformiteit compile-time bewezen: zonder deze regel leunt het Board-
 // contract puur op board.Use() at runtime en wordt een gemiste methode pas
 // op het bord zichtbaar (Derek, 18-07).
-var _ board.Board = machine{}
+var _ board.Board = Machine{}
 
 // SelfPlannedPool meldt dat dit board zijn slot-pool al op de gemeten vrije
 // RAM heeft geplukt (basis-init, usablePool) — de main slaat dan de
 // RequiredRAM-check over (die op statische qemuvirt-adressen leunt; hier
 // zinloos).
-func (machine) SelfPlannedPool() bool { return true }
+func (Machine) SelfPlannedPool() bool { return true }
 
 // Privilege/Firmware: EL2-boot vereist; de PSCI-provider zit onder ons (FADT
 // bevestigt de SMC-conduit — de HopOS-invariant).
-func (machine) Privilege() error { return board.RequireEL2(uefi.BootEL()) }
-func (machine) Firmware() string { return psci.Line(uefi.BootEL()) }
+func (Machine) Privilege() error { return board.RequireEL2(uefi.BootEL()) }
+func (Machine) Firmware() string { return psci.Line(uefi.BootEL()) }
 
 // CoreID: eigen MPIDR opzoeken in de MADT-volgorde — dé core-nummering van
 // dit platform (zie uefi.CoreID/coreIDFromMADT in de basis).
-func (machine) CoreID() int { return uefi.CoreID() }
+func (Machine) CoreID() int { return uefi.CoreID() }
 
 // MemTotal: het conventionele RAM uit de boot-memory-map plus de eigen
 // claim (die stond op het moment van het snapshot als LoaderData geboekt).
-func (machine) MemTotal() uint64 { return uefi.MemTotal() }
+func (Machine) MemTotal() uint64 { return uefi.MemTotal() }
 
 // CoreClass: de Altra (en QEMU-N1) is homogeen — alles is "big".
-func (machine) CoreClass(i int) string { return "big" }
+func (Machine) CoreClass(i int) string { return "big" }
 
-func (machine) TimerOffset() int64     { return uefi.ARM64.TimerOffset }
-func (machine) SetTimerOffset(o int64) { uefi.ARM64.TimerOffset = o }
-func (machine) SetWallTime(ns int64)   { uefi.ARM64.SetTime(ns) }
+func (Machine) TimerOffset() int64     { return uefi.ARM64.TimerOffset }
+func (Machine) SetTimerOffset(o int64) { uefi.ARM64.TimerOffset = o }
+func (Machine) SetWallTime(ns int64)   { uefi.ARM64.SetTime(ns) }
 
 // Cores: PSCI via de gedeelde wrappers (metal/cpu/psci). De core-index wordt
 // via de MADT naar het MPIDR-target vertaald. De app-lijst komt uit de MADT
@@ -71,7 +73,7 @@ func (machine) SetWallTime(ns int64)   { uefi.ARM64.SetTime(ns) }
 // INVALID_PARAMS voor bestaande cores, en dan adverteerde HOP nul slots. Op de
 // Altra 127 — slots begrenst zelf op MaxSlots/pool. Geen Reset: een
 // ingetrokken core parkeert zichzelf in de EL2-lus.
-func (machine) Cores() board.Cores {
+func (Machine) Cores() board.Cores {
 	return board.Cores{
 		App: func() []int {
 			var app []int
@@ -133,7 +135,7 @@ func eachECAM(fn func(win pcie.Window, startBus int) bool) bool {
 // ProbeNIC: MCFG → hiërarchie-scan → eerste igb-familielid → reset/link →
 // ringen in het NetDMA-plan → DHCP. Hoge ECAM's/BAR's gaan door MapHigh
 // (Altra: boven de vlakke 512GB, gemeten 13-07).
-func (machine) ProbeNIC() (netdev.Device, net.HardwareAddr, error) {
+func (Machine) ProbeNIC() (netdev.Device, net.HardwareAddr, error) {
 	var d *pcie.Device
 	eachECAM(func(win pcie.Window, startBus int) bool {
 		for _, c := range pcie.ScanConfigured(win, startBus) {
@@ -185,15 +187,15 @@ func (machine) ProbeNIC() (netdev.Device, net.HardwareAddr, error) {
 }
 
 // Net geeft de DHCP-lease als NetConfig (gedeelde omzetting in metal/board).
-func (machine) Net() board.NetConfig { return board.NetFromLease(lease) }
+func (Machine) Net() board.NetConfig { return board.NetFromLease(lease) }
 
 // DHCPLease (board.LeaseHolder): hopnet start er de renewal op.
-func (machine) DHCPLease() (leandhcp.Lease, bool) { return lease, lease.Acquired }
+func (Machine) DHCPLease() (leandhcp.Lease, bool) { return lease, lease.Acquired }
 
 // PCIe: het eerste bereikbare MCFG-segment als ECAM-venster (NVMe-fase;
 // MMIOBase blijft 0 — BAR's zijn op UEFI-platforms al door de firmware
 // toegewezen, HOP hoeft niets uit te delen).
-func (machine) PCIe() pcie.Window {
+func (Machine) PCIe() pcie.Window {
 	var win pcie.Window
 	eachECAM(func(w pcie.Window, _ int) bool {
 		win = w
@@ -203,4 +205,4 @@ func (machine) PCIe() pcie.Window {
 }
 
 // Framebuffer: het GOP-beeld dat de stub bewaarde (basis, uefi.GOPFramebuffer).
-func (machine) Framebuffer() (fb.Desc, bool) { return uefi.GOPFramebuffer() }
+func (Machine) Framebuffer() (fb.Desc, bool) { return uefi.GOPFramebuffer() }

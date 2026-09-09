@@ -135,10 +135,16 @@ func cageForceYield(core, hog int) {
 // vertrouwde code is de EL2-trampoline, en die woont in HOP's eigen image.
 const cageFloor = 0
 
-// cageFaultRegs: de EL2-switch dumpt hier (nog) geen registers bij een fault —
-// het rapport is ESR/FAR op de control-page, en dat was op deze architectuur
-// altijd al genoeg om te jagen. Zie de RISC-V-helft voor wat er meer kan.
-func cageFaultRegs(int) string { return "" }
+// The fatal-fault path keeps ELR_EL2 in the dead context's resume word.
+// Unlike FAR, this identifies the failing instruction for an undefined opcode.
+func cageFaultRegs(i int) string {
+	pc := ctxRead(i, layout.CtxResume)
+	base := uint64(layout.SwitchCodePA())
+	if pc >= base && pc-base < uint64(layout.SwitchCodeMax) {
+		return fmt.Sprintf(" pc=%#x (switch+%#x)", pc, pc-base)
+	}
+	return fmt.Sprintf(" pc=%#x", pc)
+}
 
 // cageWhy: hier staat geen stub vóór de app die kan stranden — het stukje
 // vertrouwde code is de EL2-trampoline in HOP's eigen image, en een fout daar
@@ -172,7 +178,7 @@ func cageAdoptable() bool { return stage2.Adopting() }
 // cageSMPContext freezes the EL1 request and supplies privileges from HOP's
 // own plan. The running app cannot change this handoff after publication.
 func cageSMPContext(slot, core int, cp uintptr) uint64 {
-	dst := ctxPA(core) + layout.CtxSMP
+	dst := ctxPA(smpContext(slot, core)) + layout.CtxSMP
 	el2.PrepareSMP(dst, cp, uint64(layout.CageTablePA(slot)), uint64(slot),
 		uint64(layout.ParkMboxPA(core)), uint64(layout.VecBasePA()))
 	return uint64(dst)

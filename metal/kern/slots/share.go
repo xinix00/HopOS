@@ -28,6 +28,9 @@ var hostCore []int
 
 // coreOf geeft de fysieke core waar slot i woont.
 func coreOf(i int) int {
+	if i > layout.SlotCap {
+		return i - layout.SlotCap + 1
+	}
 	if i >= 1 && i < len(hostCore) && hostCore[i] != 0 {
 		return hostCore[i]
 	}
@@ -35,7 +38,7 @@ func coreOf(i int) int {
 }
 
 // ctxPA is het switch-contextblok van slot i (in zijn stage-2-tabelblok).
-func ctxPA(i int) uintptr { return layout.CageTablePA(i) + layout.CtxOff }
+func ctxPA(i int) uintptr { return layout.ContextPA(i) }
 
 // ctxState leest het levensteken van slot i (layout.Ctx*-waarden; de
 // arch-switch schrijft Running/Saved/Dead, HOP Empty/BootPending/Running).

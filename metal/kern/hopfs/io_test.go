@@ -65,19 +65,3 @@ func TestAaneengeslotenIOWordtPerMiBGebundeld(t *testing.T) {
 		t.Fatalf("reads=%+v, wil twee runs van 1MiB", runs)
 	}
 }
-
-func TestContiguousRunStoptBijGatEnFragment(t *testing.T) {
-	blocks := []uint32{10, 11, holeBlock, 12, 14, 15}
-	if got := contiguousRun(blocks, 0, 6); got != 2 {
-		t.Fatalf("run vóór gat=%d, wil 2", got)
-	}
-	if got := contiguousRun(blocks, 2, 6); got != 0 {
-		t.Fatalf("run op gat=%d, wil 0", got)
-	}
-	if got := contiguousRun(blocks, 3, 3); got != 1 {
-		t.Fatalf("run vóór fragment=%d, wil 1", got)
-	}
-	if got := contiguousRun(blocks, 4, 2); got != 2 {
-		t.Fatalf("laatste run=%d, wil 2", got)
-	}
-}

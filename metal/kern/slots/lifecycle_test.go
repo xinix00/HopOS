@@ -195,6 +195,9 @@ func TestErrDispatchKeepsHostCoreAndGrant(t *testing.T) {
 // prepStart las hij de VORIGE plaatsing en liet een pool-geplaatste SMP-kooi
 // stilletjes door (gevonden 20-08).
 func TestValidateSMPPlacementUsesPlacedCore(t *testing.T) {
+	oldCores := layout.NumAppCores()
+	layout.SetAppCores(8)
+	t.Cleanup(func() { layout.SetAppCores(oldCores) })
 	const slot = 1
 	oldHostCore := hostCore
 	if len(hostCore) <= slot {
@@ -207,8 +210,11 @@ func TestValidateSMPPlacementUsesPlacedCore(t *testing.T) {
 		hostCore[slot] = old
 		hostCore = oldHostCore
 	})
-	if err := validateSMPPlacement(slot, 2); err == nil {
-		t.Fatal("pool-geplaatste SMP-kooi moet geweigerd worden")
+	if err := validateSMPPlacement(slot, 2); err != nil {
+		t.Fatalf("independent SMP placement rejected: %v", err)
+	}
+	if err := validateSMPPlacement(slot, 3); err == nil {
+		t.Fatal("accepted physical span beyond core limit")
 	}
 	if err := validateSMPPlacement(slot, 1); err != nil {
 		t.Fatalf("single-core placement: %v", err)

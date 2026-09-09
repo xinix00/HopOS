@@ -209,3 +209,67 @@ func TestPendingBootRingsAfterPublishingResident(t *testing.T) {
 		t.Fatal("sleeping core was not notified of its new resident")
 	}
 }
+
+func TestSMPContextOwnershipAndWakeAreIndependentOfCages(t *testing.T) {
+	base, _ := ownershipFixture(t)
+	hostCore[1], smpCores[1] = 3, 2
+	hostCore[4], smpCores[4] = 1, 1
+	ctxWrite(4, layout.CtxState, layout.CtxSaved)
+	ctxWrite(4, layout.CtxCtrlPA, 0x1234)
+	ctxWrite(1, layout.CtxCtrlPA, base)
+	head := base + 4096
+	ctxWrite(1, layout.CtxRingHeadPA, head)
+	prepareSMPContexts(1, 2)
+	secondary := smpContext(1, 4)
+	if secondary <= layout.SlotCap || ctxPA(secondary) == ctxPA(4) {
+		t.Fatal("secondary CPU aliases cage4")
+	}
+	if ctxState(4) != layout.CtxSaved || ctxRead(4, layout.CtxCtrlPA) != 0x1234 {
+		t.Fatal("preparing SMP damaged neighbor")
+	}
+	if ctxRead(1, layout.CtxNextPA) != uint64(ctxPA(secondary)) || ctxRead(secondary, layout.CtxNextPA) != uint64(ctxPA(1)) {
+		t.Fatal("sibling chain incomplete")
+	}
+	if ctxRead(secondary, layout.CtxUnitSlot) != 1 || ctxRead(secondary, layout.CtxCtrlPA) != base {
+		t.Fatal("secondary has wrong cage owner")
+	}
+	for _, id := range []int{1, secondary} {
+		ctxWrite(id, layout.CtxState, layout.CtxSaved)
+	}
+	for _, core := range []int{3, 4} {
+		dev.Write64(layout.ParkMboxPA(core), base)
+	}
+	dev.Write64(uintptr(base)+layout.CtrlRXDoor, rxArmed|3)
+	dev.Write64(uintptr(head), 4)
+	kicks := map[int]int{}
+	board.Use(ownershipBoard{kick: func(core int) { kicks[core]++ }})
+	wakeRX(1)
+	if kicks[3] != 1 || kicks[4] != 1 || len(kicks) != 2 {
+		t.Fatalf("wrong CPUs woken: %v", kicks)
+	}
+}
+
+func TestSMPRequestTranslatesVirtualCPUToAssignedCore(t *testing.T) {
+	base, size := ownershipFixture(t)
+	if err := partAdopt(7, base, size); err != nil {
+		t.Fatal(err)
+	}
+	hostCore[7], smpCores[7] = 2, 2
+	cp, ok := CtrlPageOf(7)
+	if !ok {
+		t.Fatal("missing control page")
+	}
+	ctxWrite(7, layout.CtxCtrlPA, uint64(cp))
+	prepareSMPContexts(7, 2)
+	// Existing apps number secondary requests relative to their cage (7+1),
+	// while this app physically owns cores 2 and 3.
+	ctrlWrite(7, layout.CtrlSMPReq, 8)
+	(&servicer{slot: 7}).dispatchSMP()
+	id := layout.SMPContextID(3)
+	if ctrlRead(7, layout.CtrlSMPReq) != 0 || ctxRead(id, layout.CtxUnitSlot) != 7 || dev.Read64(layout.ParkMboxPA(3)+layout.SchedCurrent) != uint64(id) {
+		t.Fatal("virtual CPU8 was not dispatched as cage7 on physical core3")
+	}
+	if ctxState(8) != layout.CtxEmpty {
+		t.Fatal("virtual CPU request touched unrelated cage8")
+	}
+}

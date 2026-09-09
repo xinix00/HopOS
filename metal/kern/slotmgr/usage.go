@@ -99,7 +99,7 @@ func usageLoop() {
 		if expect == 0 {
 			continue
 		}
-		for i := slots.HopReserved() + 1; i <= layout.MaxSlots; i++ {
+		for i := 1; i <= layout.MaxSlots; i++ {
 			s := slots.Get(i)
 			if !s.CoreOn || s.Cores == 0 || !accounts(s) {
 				seen[i] = false
