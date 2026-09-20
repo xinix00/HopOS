@@ -158,3 +158,9 @@ docs/v1/upstream-pr-stijl.md
 
 uefi-esp-o6n/
 uefi-esp-o6n-agent/
+
+# Idem voor de Ampere Altra: sinds board/uefi een laag is en elke machine zijn
+# eigen board heeft, bouwt elk board in zijn eigen ESP (image/uefi-run.sh
+# ESPSUF). Build-output met een node-config erin, dus nooit de boom in.
+uefi-esp-altra/
+uefi-esp-altra-agent/
