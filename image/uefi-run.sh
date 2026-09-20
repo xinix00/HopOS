@@ -48,11 +48,12 @@ MEM="${MEM:-6G}"
 CPU="${CPU:-neoverse-n1}"
 MODE="${1:-probe}"
 [ $# -gt 0 ] && shift # rest gaat door naar QEMU (zie "$@" aan het eind)
-BOARD="${BOARD:-uefi}"     # uefi (generiek: Altra/QEMU) of o6n (Orion O6N)
+BOARD="${BOARD:-edk2}"     # edk2 (QEMU/EDK2), altra (Ampere) of o6n (Orion O6N)
 case "$BOARD" in
-uefi) ;;
-o6n) BUILD_ONLY=1 ;;       # geen QEMU-model: bouwen en klaar
-*) echo "BOARD=$BOARD onbekend (uefi|o6n)" >&2; exit 64 ;;
+edk2) ;;                   # de proeftuin: draait echt in QEMU
+altra) BUILD_ONLY=1 ;;     # geen QEMU-model van een Altra: bouwen en klaar
+o6n) BUILD_ONLY=1 ;;       # idem voor de Orion O6N
+*) echo "BOARD=$BOARD onbekend (edk2|altra|o6n)" >&2; exit 64 ;;
 esac
 
 
@@ -74,8 +75,11 @@ esac
 # (board/o6n/hop.DefaultNICIRQ / DefaultClock) in een flip-kern.
 SLOTS="${SLOTS:-0xB0000000 0xA0000000 0xC8000000 0x88000000 0xE8000000 0x50000000}"
 
+# Elke machine zijn eigen ESP: de proeftuin houdt de kale naam (zij draait in
+# QEMU en is het meest aangeroepen), de fysieke borden krijgen een achtervoegsel
+# zodat twee builds elkaar niet overschrijven.
 ESPSUF=""
-[ "$BOARD" = o6n ] && ESPSUF="-o6n"
+[ "$BOARD" != edk2 ] && ESPSUF="-$BOARD"
 case "$MODE" in
 probe)
 	PKG=./cmd/probeuefi

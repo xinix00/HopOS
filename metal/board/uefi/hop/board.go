@@ -1,6 +1,11 @@
-// Package hop is de HOP-bedrading van het uefi-board — de brug waardoor
-// cmd/hopos (agent, leader, slots, stage-2-isolatie, NAT) op élk UEFI/ACPI-
-// platform draait, de Ampere Altra voorop. Alles wat een Pi-board uit
+// Package hop is de generieke UEFI/ACPI-LAAG: de brug waardoor cmd/hopos
+// (agent, leader, slots, stage-2-isolatie, NAT) op een UEFI-platform draait.
+//
+// Dit is geen board en registreert zich ook niet als board. Een machine
+// IMPLEMENTEERT deze laag: board/altra (Ampere Altra), board/o6n (Radxa Orion
+// O6N) en board/edk2 (de virtuele EDK2-machine) embedden Machine, registreren
+// zichzelf en brengen hun eigen drivers mee (RegisterNIC). Zo draagt een kern
+// alleen de code van de machine waarvoor hij gebouwd is. Alles wat een Pi-board uit
 // boardkennis haalt, komt hier uit wat de firmware al vertelde: cores uit de
 // MADT, RAM uit de memory-map, PCIe uit de MCFG, beeld uit GOP, en CPU_ON via
 // PSCI (conduit uit de FADT — SMC, de HopOS-invariant).
@@ -24,8 +29,6 @@ import (
 	"github.com/xinix00/HopOS/metal/v2/board/uefi"
 	"github.com/xinix00/HopOS/metal/v2/cpu/psci"
 	"github.com/xinix00/HopOS/metal/v2/driver/fb"
-	"github.com/xinix00/HopOS/metal/v2/driver/nic/igb"
-	"github.com/xinix00/HopOS/metal/v2/driver/nic/rtl8126"
 	"github.com/xinix00/HopOS/metal/v2/driver/pcie"
 	"github.com/xinix00/lean/leandhcp"
 )
@@ -35,9 +38,9 @@ import (
 // eigen kennis overschrijft (clusterklassen, thermometer, NIC-interrupt).
 type Machine struct{}
 
-// init registreert dit board; het PA-plan zette de basis al (board/uefi
-// plan.go, met de app-guard), het app-contract idem (appboard.go).
-func init() { board.Use(Machine{}) }
+// GEEN init met board.Use: registreren doet de machine die deze laag
+// implementeert. Het PA-plan zette de basis al (board/uefi plan.go, met de
+// app-guard), het app-contract idem (appboard.go).
 
 // Conformiteit compile-time bewezen: zonder deze regel leunt het Board-
 // contract puur op board.Use() at runtime en wordt een gemiste methode pas
@@ -185,90 +188,41 @@ func eachECAM(fn func(win pcie.Window, startBus int) bool) bool {
 	return false
 }
 
-// nicDriver is één PCIe-NIC-driver die dit board kent: herkent hij (vendor,
-// device), dan brengt Up hem op in het NetDMA-plan en geeft hij het device +
-// zijn frame-bufferbereik terug (voor de Normal-WB-remap). Eén tabel voor
-// álle UEFI-boards: een igb (Altra, QEMU) of een RTL8126 (Orion O6N) — welke
-// het is, zegt de MCFG-scan, niet de build.
+// nicDriver is één PCIe-NIC-driver die de máchine meebrengt: herkent hij
+// (vendor, device), dan brengt up hem op in het NetDMA-plan en geeft hij het
+// device + zijn frame-bufferbereik terug (voor de Normal-WB-remap).
+//
+// De tabel is leeg tot een board hem vult. Dat is het verschil met vroeger,
+// toen deze laag igb én rtl8126 kende: een Altra-kern draagt nu geen
+// Realtek-code en een O6N-kern geen Intel-code. Welk van de geregistreerde
+// drivers het wordt, zegt nog steeds de MCFG-scan en niet de build.
 type nicDriver struct {
 	name  string
 	match func(vendor, device uint16) bool
 	up    func(d *pcie.Device) (nic netdev.Device, mac [6]byte, bufBase, bufSize uintptr, err error)
 }
 
-var nicDrivers = []nicDriver{
-	{"igb", func(v, d uint16) bool { return v == 0x8086 && igb.Supported(d) }, upIGB},
-	{"rtl8126", rtl8126.Supported, upRTL8126},
+var nicDrivers []nicDriver
+
+// RegisterNIC meldt een NIC-driver aan bij deze laag; een board roept hem aan
+// in zijn init, vóór ProbeNIC. De volgorde is de aanmeldvolgorde: de eerste
+// die een device herkent, wint.
+func RegisterNIC(name string, match func(vendor, device uint16) bool,
+	up func(d *pcie.Device) (netdev.Device, [6]byte, uintptr, uintptr, error)) {
+	nicDrivers = append(nicDrivers, nicDriver{name, match, up})
 }
 
-// upIGB: BAR0 → reset/link → ringen (Altra-recept, sinds 13-07).
-func upIGB(d *pcie.Device) (netdev.Device, [6]byte, uintptr, uintptr, error) {
-	bar := d.BAR(0)
-	if bar == 0 || !uefi.MapHigh(bar, 0x20000) {
-		return nil, [6]byte{}, 0, 0, fmt.Errorf("igb: BAR0 %#x unreachable", bar)
-	}
-	d.Enable()
-	nic := &igb.Net{Base: uintptr(bar)}
-	if err := nic.Reset(); err != nil {
-		return nil, [6]byte{}, 0, 0, err
-	}
-	speed, fd, err := nic.LinkUp(8 * time.Second)
-	if err != nil {
-		return nil, [6]byte{}, 0, 0, err
-	}
-	fmt.Printf("net: igb %04x:%04x link %dMbps full-duplex=%v MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
-		d.VendorID, d.DeviceID, speed, fd,
-		nic.MAC[0], nic.MAC[1], nic.MAC[2], nic.MAC[3], nic.MAC[4], nic.MAC[5])
-	if err := nic.Init(layout.NetDMAPA(), layout.NetDMASize); err != nil {
-		return nil, [6]byte{}, 0, 0, err
-	}
-	base, size := nic.BufRegion()
-	return nic, nic.MAC, base, size, nil
-}
-
-// upRTL8126: BAR2 (het MMIO-blok van de Realtek; BAR0 is de I/O-alias) →
-// reset/MAC → ringen + MAC aan → PHY/autoneg. NBASE-T-autonegotiatie kan
-// seconden duren, dus een ruimere link-wacht dan de igb.
-func upRTL8126(d *pcie.Device) (netdev.Device, [6]byte, uintptr, uintptr, error) {
-	bar := d.BAR(2)
-	if bar == 0 || !uefi.MapHigh(bar, 0x10000) {
-		return nil, [6]byte{}, 0, 0, fmt.Errorf("rtl8126: BAR2 %#x unreachable", bar)
-	}
-	d.Enable()
-	nic := &rtl8126.Net{Base: uintptr(bar)}
-	nicRTL = nic
-	if err := nic.Reset(); err != nil {
-		return nil, [6]byte{}, 0, 0, err
-	}
-	if err := nic.Init(layout.NetDMAPA(), layout.NetDMASize); err != nil {
-		return nil, [6]byte{}, 0, 0, err
-	}
-	speed, fd, err := nic.LinkUp(12 * time.Second)
-	if err != nil {
-		return nil, [6]byte{}, 0, 0, err
-	}
-	fmt.Printf("net: %s %04x:%04x xid %#x link %dMbps full-duplex=%v MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
-		nic.Name, d.VendorID, d.DeviceID, nic.XID, speed, fd,
-		nic.MAC[0], nic.MAC[1], nic.MAC[2], nic.MAC[3], nic.MAC[4], nic.MAC[5])
-	base, size := nic.BufRegion()
-	return nic, nic.MAC, base, size, nil
-}
-
-// nicDev/nicStartBus/nicRTL: wat ProbeNIC vond — voor de interruptbedrading
-// van een concreet bord (board/o6n/hop: de INTx-lijn hangt aan de root-port
-// = het MCFG-segment waarin de NIC zat) en voor de IRQ-hooks van de driver.
+// nicDev/nicStartBus: wat ProbeNIC vond — voor de interruptbedrading van een
+// concrete machine (board/o6n/hop: de INTx-lijn hangt aan de root-port = het
+// MCFG-segment waarin de NIC zat).
 var (
 	nicDev      *pcie.Device
 	nicStartBus int
-	nicRTL      *rtl8126.Net
 )
 
 // NIC geeft het PCIe-device van de gekozen NIC en het startbusnummer van
 // zijn MCFG-segment (de root-port); nil = geen NIC.
 func NIC() (*pcie.Device, int) { return nicDev, nicStartBus }
-
-// RTL geeft de Realtek-driver als de NIC er een is (nil = igb of geen).
-func RTL() *rtl8126.Net { return nicRTL }
 
 // ProbeNIC: MCFG → hiërarchie-scan → eerste NIC uit de drivertabel → op →
 // DHCP. Hoge ECAM's/BAR's gaan door MapHigh (Altra: boven de vlakke 512GB,

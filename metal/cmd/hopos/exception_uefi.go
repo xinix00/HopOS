@@ -1,4 +1,4 @@
-//go:build uefi || o6n
+//go:build altra || edk2 || o6n
 
 package main
 

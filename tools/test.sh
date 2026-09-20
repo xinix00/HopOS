@@ -77,7 +77,7 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 # virt (bewijst de bedrading zonder Display-board), rpi5 (mét) en rpi4 (de
 # VL805-USB achter de BCM2711-root-complex — de enige plek waar dat pad
 # compileert).
-for tags in "linkcpuinit" "rpi4 linkcpuinit" "rpi5 linkcpuinit" "uefi linkcpuinit" "o6n linkcpuinit" "gui linkcpuinit" "rpi4 gui linkcpuinit" "rpi5 gui linkcpuinit" "o6n gui linkcpuinit"; do
+for tags in "linkcpuinit" "rpi4 linkcpuinit" "rpi5 linkcpuinit" "altra linkcpuinit" "edk2 linkcpuinit" "o6n linkcpuinit" "gui linkcpuinit" "rpi4 gui linkcpuinit" "rpi5 gui linkcpuinit" "o6n gui linkcpuinit"; do
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "$tags" -o /dev/null ./cmd/hopos
 done
@@ -133,7 +133,9 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 # gesloopt (opruimronde 18-07): hun functie is geproductiseerd (PSCI/CPU_ON in
 # de mains, PCIe→RP1→GEM→DHCP in hopnet.Up) — terughalen kan uit git history.
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-	"$TAMAGO" build -tags "uefi linkcpuinit" -o /dev/null ./cmd/probeuefi
+	"$TAMAGO" build -tags "edk2 linkcpuinit" -o /dev/null ./cmd/probeuefi
+GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
+	"$TAMAGO" build -tags "altra linkcpuinit" -o /dev/null ./cmd/probeuefi
 # De Orion O6N-smaak van dezelfde probe (board/o6n): het meetinstrument dat
 # op dat bord als eerste boot (BOARD=o6n image/uefi-run.sh probe).
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
@@ -169,4 +171,4 @@ else
 	echo "gate: apple-smaak overgeslagen (tamago-fork ../../tamago ontbreekt)" >&2
 fi
 
-echo "OK: host-tests groen, tamago-gate (arm64: virt/rpi4/rpi5/uefi/o6n kaal + gui-smaken + embed-mains incl. rk3566 + probeuefi + proberk3566 + rk3566-agent kaal én gui${APPLE_GATE}; riscv64: cmd/hopos kaal én embedcfg/embedcagestub + slot-demo + slot-app + switchtest) gebouwd" >&2
+echo "OK: host-tests groen, tamago-gate (arm64: virt/rpi4/rpi5/altra/edk2/o6n kaal + gui-smaken + embed-mains incl. rk3566 + probeuefi + proberk3566 + rk3566-agent kaal én gui${APPLE_GATE}; riscv64: cmd/hopos kaal én embedcfg/embedcagestub + slot-demo + slot-app + switchtest) gebouwd" >&2

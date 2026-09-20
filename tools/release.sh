@@ -10,7 +10,7 @@
 # gui-code in gelinkt zit.
 #
 # dd-bare images (gunzip | dd, medium boot — het hoofdpad, élk board):
-#   hopos-uefi[-headless].img.gz         elke UEFI-arm64-machine (USB-stick)
+#   hopos-altra[-headless].img.gz        Ampere Altra/AmpereOne (USB-stick)
 #   hopos-rpi5[-headless].img.gz         Pi 5
 #   hopos-rpi4[-headless].img.gz         Pi 4
 #   hopos-radxa-zero3[-headless].img.gz  Radxa Zero 3E (donor-U-Boot ingebakken)
@@ -26,7 +26,7 @@
 #                                        smaak (geen framebuffer op dit silicium)
 #
 # drop-in-updates voor een bestaand boot-medium:
-#   BOOTAA64.EFI / BOOTAA64-headless.EFI
+#   BOOTAA64-altra.EFI / BOOTAA64-altra-headless.EFI
 #                     naar EFI/BOOT/ op een bestaande FAT-stick (de
 #                     headless-variant daar hernoemen naar BOOTAA64.EFI)
 #   hopos-rpi5[-headless].zip   Pi 5 — uitpakken op de SD-bootfs
@@ -92,14 +92,14 @@ gzimg() { # gzimg <bron.img> <asset-naam zonder .gz>
 #    het vers gebouwde img worden meegenomen — nooit iets anders uit de
 #    gitignorede uefi-esp-agent/, daar wonen node-configs met geheimen (het
 #    img krijgt zijn config als template uit image/, zie uefi-run.sh).
-echo ">> hopos-uefi-headless.img.gz + BOOTAA64-headless.EFI (uefi-run.sh agent, GUI=0, build-only)" >&2
-BUILD_ONLY=1 GUI=0 "$DIR/image/uefi-run.sh" agent >/dev/null
-cp "$DIR/uefi-esp-agent/EFI/BOOT/BOOTAA64.EFI" "$DIST/BOOTAA64-headless.EFI"
-gzimg "$DIR/metal/out/hopos-uefi.img" hopos-uefi-headless.img
-echo ">> hopos-uefi.img.gz + BOOTAA64.EFI (uefi-run.sh agent, build-only)" >&2
-BUILD_ONLY=1 "$DIR/image/uefi-run.sh" agent >/dev/null
-cp "$DIR/uefi-esp-agent/EFI/BOOT/BOOTAA64.EFI" "$DIST/"
-gzimg "$DIR/metal/out/hopos-uefi.img" hopos-uefi.img
+echo ">> hopos-altra-headless.img.gz + BOOTAA64-altra-headless.EFI (BOARD=altra uefi-run.sh agent, GUI=0)" >&2
+BOARD=altra GUI=0 "$DIR/image/uefi-run.sh" agent >/dev/null
+cp "$DIR/uefi-esp-altra-agent/EFI/BOOT/BOOTAA64.EFI" "$DIST/BOOTAA64-altra-headless.EFI"
+gzimg "$DIR/metal/out/hopos-altra.img" hopos-altra-headless.img
+echo ">> hopos-altra.img.gz + BOOTAA64-altra.EFI (BOARD=altra uefi-run.sh agent)" >&2
+BOARD=altra "$DIR/image/uefi-run.sh" agent >/dev/null
+cp "$DIR/uefi-esp-altra-agent/EFI/BOOT/BOOTAA64.EFI" "$DIST/BOOTAA64-altra.EFI"
+gzimg "$DIR/metal/out/hopos-altra.img" hopos-altra.img
 
 # 2b. De Orion O6N: hetzelfde UEFI-recept met BOARD=o6n (board/o6n), als
 #     dd-bare stick in beide smaken. De PE apart erbij, voor een bestaande stick.

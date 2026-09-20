@@ -1,8 +1,8 @@
-//go:build uefi && !o6n
+//go:build edk2
 
-// board_uefi.go — de UEFI/ACPI-kant van de agent-main (Ampere Altra en de
-// QEMU-proeftuin): dezelfde HOP-agent-bytes, met het uefi-board voor
-// discovery (MADT/MCFG/GOP/PSCI) en de igb-NIC. De RAM-declaratie is hier
+// board_edk2.go — de EDK2-proeftuin-kant van de agent-main (QEMU virt met
+// EDK2-firmware): dezelfde HOP-agent-bytes, met de generieke UEFI-laag voor
+// discovery (MADT/MCFG/GOP/PSCI) en het EDK2-board eroverheen (alleen igb). De RAM-declaratie is hier
 // eigendom van board/uefi: het venster wordt door de PE-stub gekozen en
 // RamStart per variant door mkkernel -pe gepatcht.
 package main
@@ -12,8 +12,8 @@ import (
 	"time"
 	_ "unsafe" // go:linkname (RAM-declaratie)
 
+	_ "github.com/xinix00/HopOS/metal/v2/board/edk2/hop" // registreert het board (init); de basis levert de tamago-hooks
 	"github.com/xinix00/HopOS/metal/v2/board/uefi"
-	uefihop "github.com/xinix00/HopOS/metal/v2/board/uefi/hop" // registreert het board (init); de basis levert de tamago-hooks
 	"github.com/xinix00/HopOS/metal/v2/kern/kernflip"
 )
 
@@ -65,5 +65,4 @@ func init() {
 
 	// Board-nawerk (het Pi-equivalent is StartDVFS): de temperatuur-
 	// telemetrie uit de SMpro — de klok zelf is op servers firmware-domein.
-	boardExtra = uefihop.StartTelemetry
 }

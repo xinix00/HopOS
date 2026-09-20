@@ -12,7 +12,7 @@ Use the release asset matching the board. These names come from [the release bui
 | Raspberry Pi 5 | `hopos-rpi5-headless.img.gz` | Complete SD image |
 | Radxa Zero 3E | `hopos-radxa-zero3-headless.img.gz` | Complete SD image with its U-Boot boot chain |
 | LicheeRV Nano | `hopos-licheerv-headless.img.gz` | Complete SD image with `fip.bin` and embedded node configuration |
-| ARM64 UEFI | `hopos-uefi-headless.img.gz` | FAT boot medium containing `EFI/BOOT/BOOTAA64.EFI` |
+| Ampere Altra / AmpereOne | `hopos-altra-headless.img.gz` | FAT boot medium containing `EFI/BOOT/BOOTAA64.EFI` |
 | Mac mini M4 | `hopos-m4-headless.img.gz` | Installer medium; run its installer from macOS Recovery |
 
 The M4 asset is an installer medium, not an SD-style replacement for the Mac's internal disk. Hardware details and prerequisites belong in [boards and drivers](boards-drivers.md). The Pi, Radxa, and UEFI release builders also produce GUI variants; start with headless when display and input are not required.

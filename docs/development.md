@@ -50,7 +50,7 @@ BUILD_ONLY=1 GUI=0 sh image/uefi-run.sh agent
 | `radxa-zero3.sh` | `metal/out/hopos-radxa-zero3.img`; downloads/caches the donor boot chain if absent |
 | `licheerv-agent.sh` | `metal/out/hopos-licheerv.img` and FIP output; requires the vendor inputs |
 | `apple-m4.sh` with `AGENT=1` | `metal/out/hopos-apple.img`; without `AGENT=1`, the default is a probe |
-| `uefi-run.sh agent` | EFI output and `metal/out/hopos-uefi.img`; `BUILD_ONLY=1` stops before launching QEMU |
+| `uefi-run.sh agent` | EFI output and `metal/out/hopos-edk2.img` (QEMU/EDK2); `BOARD=altra` or `BOARD=o6n` builds for that machine instead |
 
 The Pi scripts report missing firmware and omit the complete card image when prerequisites are absent. Building the kernel alone does not create a bootable full image. [Getting started](getting-started.md) distinguishes writing a card, updating boot files, and installing an Apple boot object.
 
