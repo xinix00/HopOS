@@ -66,7 +66,14 @@ type Tables struct {
 	tables   map[string]uintptr // signature → fysiek adres van de tabelheader
 	cache    map[string][]byte  // gedecodeerde tabel per signature (device-reads
 	// zijn duur: elke MCFG/MADT werd anders 2× per boot uit device-mem gehaald)
-	Sigs []string // alle signatures in XSDT-volgorde (voor de dump)
+	Sigs []string   // alle signatures in XSDT-volgorde (voor de dump)
+	all  []tableRef // élke tabel, ook dubbele signatures (SSDT's, voor de AML-scan)
+}
+
+// tableRef is één XSDT-entry.
+type tableRef struct {
+	sig string
+	pa  uintptr
 }
 
 // plausiblePA weegt een fysiek tabeladres uit de firmware vóór we het
@@ -155,6 +162,7 @@ func Parse(rsdp uintptr) (*Tables, error) {
 		}
 		sig := string(mem(pa, 4))
 		t.Sigs = append(t.Sigs, sig)
+		t.all = append(t.all, tableRef{sig, pa})
 		if _, dup := t.tables[sig]; !dup {
 			t.tables[sig] = pa
 		}
@@ -187,6 +195,11 @@ func (t *Tables) decode(sig string) []byte {
 	if !ok {
 		return nil
 	}
+	return decodeAt(pa)
+}
+
+// decodeAt leest en verifieert de SDT op pa (nil = onbruikbaar).
+func decodeAt(pa uintptr) []byte {
 	if !plausiblePA(pa, 36) {
 		return nil
 	}
@@ -261,6 +274,36 @@ func (t *Tables) MADT() (cpus []CPU, gicd uint64, err error) {
 	return cpus, gicd, nil
 }
 
+// GIC geeft de overige MADT-blokken die een GICv3-driver nodig heeft: het
+// GICR-discovery-bereik (type 0x0e: alle redistributor-frames achter elkaar,
+// stride per frame = 128KB, of 256KB als de GIC VLPI-frames heeft — GIC-700
+// op de O6N) en de ITS-basis (type 0x0f). 0 = niet aanwezig.
+func (t *Tables) GIC() (gicrBase, gicrLen, its uint64) {
+	b := t.table("APIC")
+	if b == nil {
+		return 0, 0, 0
+	}
+	for off := 44; off+2 <= len(b); {
+		typ, l := b[off], int(b[off+1])
+		if l < 2 || off+l > len(b) {
+			break
+		}
+		e := b[off : off+l]
+		switch typ {
+		case 0x0e: // GICR: reserved@2, DiscoveryRangeBase@4, DiscoveryRangeLength@12
+			if l >= 16 {
+				gicrBase, gicrLen = u64(e[4:]), uint64(u32(e[12:]))
+			}
+		case 0x0f: // ITS: reserved@2, GicItsId@4, PhysicalBase@8
+			if l >= 16 && its == 0 {
+				its = u64(e[8:])
+			}
+		}
+		off += l
+	}
+	return gicrBase, gicrLen, its
+}
+
 // ECAM is één MCFG-entry: een PCIe-configuratievenster.
 type ECAM struct {
 	Base     uint64
@@ -293,16 +336,50 @@ func (t *Tables) MCFG() ([]ECAM, error) {
 // een PL011-subset, zelfde DR/FR-offsets). De Altra en QEMU melden beide een
 // van deze twee.
 func (t *Tables) SPCR() (base uint64, ifType uint8, err error) {
+	c, err := t.Console()
+	return c.Base, c.IfType, err
+}
+
+// Console is de SPCR-console zoals de firmware hem beschrijft: adres,
+// interface-type (0x00/0x01/0x12 = 16550-familie, 0x03 = PL011, 0x0d/0x0e =
+// SBSA/PL011-subset) en de registerstap. De Orion O6N (Cix P1) heeft een
+// DesignWare 8250 op 32-bit-stride, de Altra/QEMU een PL011 — één tabel,
+// twee registerlayouts, dus de main kiest de poke-laag op IfType.
+type Console struct {
+	Base   uint64
+	IfType uint8
+	// Shift is de registerstap als macht van twee (0 = byte-stride, 2 =
+	// 32-bit-stride), afgeleid van de GAS access size (1=byte, 2=word,
+	// 3=dword, 4=qword; 0 = niet gezegd → byte).
+	Shift uint
+}
+
+// Is16550 meldt of de console een 16550-compatibele UART is (anders PL011-
+// familie: 0x03 PL011, 0x0d/0x0e SBSA, of onbekend — dan blijft PL011 de
+// gok die het tot nu toe altijd was).
+func (c Console) Is16550() bool {
+	switch c.IfType {
+	case 0x00, 0x01, 0x02, 0x12: // 16550, 16450, MAX311xE (16550-compatibel), 16550 met GAS-parameters
+		return true
+	}
+	return false
+}
+
+// Console leest de SPCR (Interface Type op offset 36, Generic Address
+// Structure op offset 40: space(1) width(1) off(1) access(1) address(8)).
+func (t *Tables) Console() (Console, error) {
 	b := t.table("SPCR")
 	if b == nil {
-		return 0, 0, fmt.Errorf("acpi: no SPCR")
+		return Console{}, fmt.Errorf("acpi: no SPCR")
 	}
 	if len(b) < 52 {
-		return 0, 0, fmt.Errorf("acpi: SPCR too short (%d)", len(b))
+		return Console{}, fmt.Errorf("acpi: SPCR too short (%d)", len(b))
 	}
-	// Generic Address Structure op offset 40: space(1) width(1) off(1)
-	// access(1) address(8).
-	return u64(b[44:]), b[36], nil
+	c := Console{Base: u64(b[44:]), IfType: b[36]}
+	if acc := b[43]; acc >= 2 && acc <= 4 {
+		c.Shift = uint(acc - 1)
+	}
+	return c, nil
 }
 
 // Watchdog geeft de SBSA Generic Watchdog uit de GTDT (platform-timer-

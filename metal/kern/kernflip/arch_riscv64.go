@@ -21,6 +21,7 @@ func blobSymbols() [][2]string { return mmode.BlobSymbols }
 func maxBlobSize() uint64      { return mmode.MaxBlobSize }
 func switchCodeHash() uint64   { return slots.SwitchCodeHash() }
 func setAdopting(v bool)       { slots.SetAdopting(v) }
+func preserveParkedCores()     {}
 
 // nodeCoresActive: dit board geeft HOP één hart (node_riscv64.go:
 // smp.ConfigureNode is er een no-op), dus er zijn nooit extra node-cores om
@@ -34,6 +35,11 @@ func firmwareArg() uint64 { return 0 }
 func archPreflight() error { return nil }
 
 func chainload(entry, x0arg uint64) { slots.ChainloadM(entry, x0arg) }
+
+func ownRamStart() uintptr {
+	s, _ := runtime.MemRegion()
+	return uintptr(s)
+}
 
 func ownRamEnd() uint64 {
 	_, end := runtime.MemRegion()

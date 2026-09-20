@@ -8,6 +8,14 @@
 #   image/uefi-run.sh probe        idem
 #   image/uefi-run.sh agent        de échte HOP-node (cmd/hopos + app-image)
 #
+#   BOARD=o6n image/uefi-run.sh probe|agent
+#       de Radxa Orion O6N (board/o6n: hetzelfde UEFI-pad met de O6N-kennis,
+#       -tags o6n). Geen QEMU-model van dat bord, dus impliciet BUILD_ONLY:
+#       het resultaat is de stick metal/out/hopos-o6n[-probe].img (dd) plus
+#       de losse PE in uefi-esp-o6n[-agent]/EFI/BOOT/BOOTAA64.EFI. Zelfde
+#       recept, zelfde stub, zelfde venster-kandidaten.
+#
+#
 # Eén script, twee modi (qemu-run.sh-precedent): het zelfkiezende venster,
 # de mkkernel-verpakking en het QEMU-recept zijn identiek; alleen de payload
 # en de netwerk-forwards verschillen. De -cpu is neoverse-n1 (Altra-silicium);
@@ -40,6 +48,13 @@ MEM="${MEM:-6G}"
 CPU="${CPU:-neoverse-n1}"
 MODE="${1:-probe}"
 [ $# -gt 0 ] && shift # rest gaat door naar QEMU (zie "$@" aan het eind)
+BOARD="${BOARD:-uefi}"     # uefi (generiek: Altra/QEMU) of o6n (Orion O6N)
+case "$BOARD" in
+uefi) ;;
+o6n) BUILD_ONLY=1 ;;       # geen QEMU-model: bouwen en klaar
+*) echo "BOARD=$BOARD onbekend (uefi|o6n)" >&2; exit 64 ;;
+esac
+
 
 # De venster-kandidaten: de stub kiest bij boot de eerste waar AllocatePages
 # slaagt (zie metal/board/uefi). Elke kandidaat heeft 160MB aaneengesloten
@@ -55,17 +70,21 @@ MODE="${1:-probe}"
 # dan print hij "RAM WINDOW BUSY" + de vrije regio's — voeg dan een kandidaat
 # toe. Gespreid over het lage Altra-DRAM (0x80000000..0xFFFFFFFF) + een lage
 # QEMU-terugvaller.
+# LDX="-X pkg.Var=waarde": extra linker-vlaggen, bv. de O6N-A/B-defaults
+# (board/o6n/hop.DefaultNICIRQ / DefaultClock) in een flip-kern.
 SLOTS="${SLOTS:-0xB0000000 0xA0000000 0xC8000000 0x88000000 0xE8000000 0x50000000}"
 
+ESPSUF=""
+[ "$BOARD" = o6n ] && ESPSUF="-o6n"
 case "$MODE" in
 probe)
 	PKG=./cmd/probeuefi
-	ESP="$DIR/uefi-esp"
+	ESP="$DIR/uefi-esp$ESPSUF"
 	FWD=""
 	;;
 agent)
 	PKG=./cmd/hopos
-	ESP="$DIR/uefi-esp-agent"
+	ESP="$DIR/uefi-esp$ESPSUF-agent"
 	FWD="hostfwd=tcp:127.0.0.1:8080-10.0.2.15:8080,hostfwd=tcp:127.0.0.1:9080-10.0.2.15:9080,hostfwd=tcp:127.0.0.1:18080-10.0.2.15:18080"
 	;;
 *)
@@ -79,8 +98,18 @@ mkdir -p out
 
 # Twee smaken: kaal (headless) en gui (metal/gui + fb-grant). Default gui;
 # GUI=0 bouwt de kale smaak. (Zelfde knop in alle imagescripts.)
-TAGS="uefi linkcpuinit"
+TAGS="$BOARD linkcpuinit"
 [ "${GUI:-1}" = 1 ] && TAGS="$TAGS gui"
+
+# VHE: EL2 in de E2H-lay-out (cpu/el2/sysreg.h HCR_BASE + de _EL12-encoderingen),
+# de kern zelf blijft op EL1. Default AAN voor de O6N: daar sterft een kern
+# onder nVHE-EL1 binnen 0,5 s stil, onder VHE loopt hij door (17-09) — Linux,
+# FreeBSD en GRUB draaien op dat bord óók VHE. Op de Altra/QEMU (Neoverse-N1,
+# VHE-capable) is het een knop: VHE=1.
+VHEDEF=0
+[ "$BOARD" = o6n ] && VHEDEF=1
+ASMFLAGS="all=-D=GIC_IPI" # SGI-kick voor app-cores (20-09)
+[ "${VHE:-$VHEDEF}" = 1 ] && ASMFLAGS="all=-D=VHE -D=GIC_IPI"
 
 # In agent-modus de app-image (door de node streamend geplaatst vanaf de
 # http.server-URL in de jobspec). Canoniek gelinkt (slot-1-IPA; zonder -s:
@@ -105,10 +134,10 @@ ELFS=""
 PIDS=""
 for base in $SLOTS; do
 	text=$(printf '0x%X' $((base + 0x10000)))
-	out="hopos-uefi-$MODE-$base.elf"
+	out="hopos-$BOARD-$MODE-$base.elf"
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-		"$TAMAGO" build -tags "$TAGS" -trimpath \
-		-ldflags "-buildid= -w -T $text -R 0x1000" -o "out/$out" "$PKG" &
+		"$TAMAGO" build -tags "$TAGS" -trimpath ${ASMFLAGS:+-asmflags "$ASMFLAGS"} \
+		-ldflags "-buildid= -w -T $text -R 0x1000 ${LDX:-}" -o "out/$out" "$PKG" &
 	PIDS="$PIDS $!"
 	ELFS="$ELFS -elf metal/out/$out"
 done
@@ -138,16 +167,18 @@ dd if=/dev/zero of=metal/out/uefi-vars.fd bs=1m count=64 2>/dev/null
 #     stukloopt. De config is ALTIJD een template (of CFG=...): nooit de
 #     hopos.cfg uit de ESP-boom, daar wonen de echte sleutels. UEFI-firmware
 #     leest FAT12/16/32 van removable media, dus FAT16 is binnen de spec.
-if [ "$MODE" = agent ]; then
-	DEFCFG="$DIR/image/hopos-headless.cfg"
-	[ "${GUI:-1}" = 1 ] && DEFCFG="$DIR/image/hopos-gui.cfg"
-	go run "$DIR/image/mkcard/main.go" -o metal/out/hopos-uefi.img -size 64 \
-		-start 8192 -label hopos -vollabel -cfgwindow 1048576 \
-		"$ESP/EFI/BOOT/BOOTAA64.EFI=EFI/BOOT/BOOTAA64.EFI" \
-		"${CFG:-$DEFCFG}=hopos.cfg" >&2
-	echo "metal/out/hopos-uefi.img (dd-baar, config = $(basename "${CFG:-$DEFCFG}"))" >&2
-	echo "flash: diskutil unmountDisk /dev/diskN && sudo dd if=metal/out/hopos-uefi.img of=/dev/rdiskN bs=4m" >&2
-fi
+#     De probe krijgt óók een stick (hopos-<board>-probe.img): dat is het
+#     meetinstrument dat op een nieuw bord als eerste boot (O6N-bring-up).
+IMG="metal/out/hopos-$BOARD.img"
+[ "$MODE" = probe ] && IMG="metal/out/hopos-$BOARD-probe.img"
+DEFCFG="$DIR/image/hopos-headless.cfg"
+[ "${GUI:-1}" = 1 ] && DEFCFG="$DIR/image/hopos-gui.cfg"
+go run "$DIR/image/mkcard/main.go" -o "$IMG" -size 64 \
+	-start 8192 -label hopos -vollabel -cfgwindow 1048576 \
+	"$ESP/EFI/BOOT/BOOTAA64.EFI=EFI/BOOT/BOOTAA64.EFI" \
+	"${CFG:-$DEFCFG}=hopos.cfg" >&2
+echo "$IMG (dd-baar, config = $(basename "${CFG:-$DEFCFG}"))" >&2
+echo "flash: diskutil unmountDisk /dev/diskN && sudo dd if=$IMG of=/dev/rdiskN bs=4m" >&2
 
 echo "BOOTAA64.EFI ($(du -h "$ESP/EFI/BOOT/BOOTAA64.EFI" | cut -f1), mode=$MODE) klaar — EDK2 boot..." >&2
 [ "$MODE" = agent ] && echo "agent: curl http://127.0.0.1:8080/health · leader: curl http://127.0.0.1:9080/health" >&2

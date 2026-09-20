@@ -23,6 +23,7 @@ func blobSymbols() [][2]string { return el2.BlobSymbols }
 func maxBlobSize() uint64      { return el2.MaxBlobSize }
 func switchCodeHash() uint64   { return stage2.SwitchCodeHash() }
 func setAdopting(v bool)       { stage2.SetAdopting(v) }
+func preserveParkedCores()     { stage2.PreserveParkedCores() }
 
 // nodeCoresActive: hoeveel EXTRA cores draaien de node-runtime van deze kern
 // (hopos.cores > 1). Die voeren Go-code uit die na de sprong niet meer bestaat,
@@ -56,6 +57,11 @@ func chainload(entry, x0arg uint64) { el2.Chainload(entry, x0arg) }
 // constructie in de staart van het geleende venster, direct boven wat hij als
 // RamSize patcht. Adopted toetst de scratch-pointer daartegen, zodat een
 // verdwaalde of vergiftigde waarde nooit een wilde read wordt.
+func ownRamStart() uintptr {
+	s, _ := runtime.MemRegion()
+	return uintptr(s)
+}
+
 func ownRamEnd() uint64 {
 	_, end := runtime.MemRegion()
 	return uint64(end)

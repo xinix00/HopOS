@@ -10,6 +10,12 @@ package el2
 // install draait) geven de accessors het image-adres: exact het oude gedrag.
 var relocEntry, relocTramp, relocSMP uint64
 
+// PublishCode invalidates instruction caches throughout the inner-shareable
+// domain after the caller has cleaned newly written code to PoC. The copied
+// trampolines may move during an empty FLIP; their own local invalidation
+// cannot protect instructions fetched before reaching that invalidation.
+func PublishCode()
+
 // SetRelocated schakelt de accessors om naar de plan-kopieën. Eén schrijver
 // (stage2.InitVectors, achter vectorsOnce), vóór de eerste dispatch.
 func SetRelocated(entry, tramp, smp uint64) {

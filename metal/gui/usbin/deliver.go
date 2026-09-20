@@ -88,12 +88,12 @@ func (d *deliverer) close() {
 	close(d.q)
 }
 
-// listen opent de luisterpost op het interne gateway-adres en geeft het adres
-// terug dat in de grant mee moet. Alleen dát adres: het is gebonden aan HOP's
-// interne NIC, dus van buiten de node is er niets te bereiken.
+// listen uses the node stack, like the system service. The switch translates
+// the advertised gateway address to that stack's interface address. Only the
+// framebuffer holder's internal peer address is accepted (see allowed).
 func listen() (*deliverer, string, error) {
 	addr := fmt.Sprintf("%s:%d", layout.IP4Str(layout.HostIP4()), inputPort)
-	l, err := net.Listen("tcp", addr)
+	l, err := net.Listen("tcp", fmt.Sprintf(":%d", inputPort))
 	if err != nil {
 		return nil, "", err
 	}
@@ -157,7 +157,22 @@ func (d *deliverer) Sink(e hid.Event) {
 }
 
 func (d *deliverer) run() {
-	for e := range d.q {
+	// The display's read deadline detects a lost node-side stream after FLIP.
+	// Empty lines keep an idle keyboard alive without generating input events.
+	tick := time.NewTicker(5 * time.Second)
+	defer tick.Stop()
+	for {
+		var e hid.Event
+		select {
+		case <-tick.C:
+			d.send("\n")
+			continue
+		case next, ok := <-d.q:
+			if !ok {
+				return
+			}
+			e = next
+		}
 		if e.Kind != hid.MouseMove {
 			d.send(d.body(e))
 			continue

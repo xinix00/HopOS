@@ -46,6 +46,11 @@ var (
 	source      = "jitter"
 	sinceReseed uint64
 	fill        func([]byte) (string, bool)
+	// Init runs inside runtime.randinit, before normal scheduler startup.
+	// Passing a local array to the indirect fill callback made it escape to
+	// the heap. Keep this workspace under mu so seeding itself needs no
+	// allocator. Fill callbacks must finish using the slice before returning.
+	initSeed [48]byte
 )
 
 // Init seedt de DRBG. fillFn is de hardwarebron van het board (trng.Fill of
@@ -56,13 +61,14 @@ func Init(fillFn func([]byte) (string, bool), counter func() uint64) {
 	mu.Lock()
 	defer mu.Unlock()
 	fill = fillFn
-	var seed [48]byte
-	if src, ok := fill(seed[:]); ok {
+	clear(initSeed[:])
+	if src, ok := fill(initSeed[:]); ok {
 		source = src
 	} else {
-		jitterSeed(seed[:], counter)
+		jitterSeed(initSeed[:], counter)
 	}
-	state = sha256.Sum256(seed[:])
+	state = sha256.Sum256(initSeed[:])
+	clear(initSeed[:])
 }
 
 // Source geeft de gekozen entropiebron ("rndr", "smccc-trng" of "jitter")

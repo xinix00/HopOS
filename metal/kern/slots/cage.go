@@ -57,6 +57,7 @@ type cageContract struct {
 	prepare    func(i int, linkBase, base, size, entry uint64) error
 	linkBase   func() uint64
 	linkWindow func(size uint64) uint64
+	reserve    func(size uint64) uint64 // extra translation storage in the same physical claim
 	// spin
 	entryPC    func(i int) uint64
 	smpEntryPC func() uint64
@@ -77,7 +78,7 @@ type cageContract struct {
 
 var _ = cageContract{
 	cageInit, cageSetFlipCapable, cageAdoptable,
-	cagePrepare, cageLinkBase, cageLinkWindow,
+	cagePrepare, cageLinkBase, cageLinkWindow, cageReserve,
 	cageEntryPC, cageSMPEntryPC, cageDispatch, cageColdStart,
 	coreRunning, coreParks, coreStopped,
 	cageRevoke, cageForceYield,

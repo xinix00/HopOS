@@ -67,7 +67,9 @@ func (machine) ProbeNIC() (netdev.Device, net.HardwareAddr, error) {
 	if rev := nic.Rev() >> 24 & 0xF; rev != 6 {
 		return nil, nil, fmt.Errorf("genet: rev-nibble %d (verwacht 6 = v5)", rev)
 	}
-	nic.Reset()
+	if err := nic.Reset(); err != nil {
+		return nil, nil, err
+	}
 	addr, _, _, found := nic.PHYScan()
 	if !found {
 		return nil, nil, fmt.Errorf("genet: geen PHY op de MDIO-bus")

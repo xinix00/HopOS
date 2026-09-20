@@ -956,7 +956,7 @@ func placeFromStaging(i int, base, size uint64, stageAddr uintptr, imgSize int64
 	if err != nil {
 		return err
 	}
-	// De slot-cap (maxLimitFor) toetst armSlot — die dekt óók het
+	// Het app-adresvenster toetst armSlot — die dekt óók het
 	// zelfplaats-pad; segmenten voor een te grote job schuiven dan één keer
 	// voor niets, maar het faalpad is identiek (de partitie komt terug).
 	delta := base - linkBase // PA = linkadres + delta (identiek slot: 0)
@@ -1022,8 +1022,8 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 		return fmt.Errorf("entry %#x buiten het linkvenster van dit slot %#x..%#x",
 			entry, linkBase, linkBase+window)
 	}
-	if max := maxLimitFor(linkBase); memLimit > max {
-		return fmt.Errorf("memLimit %d MB > %d MB slot-cap (één GB-blok vanaf linkadres %#x, geklemd onder CtrlBase; groter vergt vensteruitbreiding — zie slots/partmem.go)", memLimit>>20, max>>20, linkBase)
+	if size > window {
+		return fmt.Errorf("partition %d MiB exceeds the %d MiB app address window at %#x", size>>20, window>>20, linkBase)
 	}
 
 	// SPSC-hygiëne: geen oude servicer meer op deze ringen vóór her-init,

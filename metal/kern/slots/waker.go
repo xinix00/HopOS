@@ -57,9 +57,15 @@ func WakerStats() (rounds, armed, kicks uint64) {
 // DirectRXKicks telt de doelgerichte leeg→niet-leeg-kicks van de switch.
 func DirectRXKicks() uint64 { return directRXKicks.Load() }
 
+// RXKickNoCore/RXKickNotDue/RXKickNotSaved: waarom wakeRX níet kickte —
+// de meetlat van de directe RX-kick (20-09: 3 directe kicks/s tegen 700
+// timer-wekken/s in de app; welke poort hield hem tegen?).
+var RXKickNoCore, RXKickNotDue, RXKickNotSaved atomic.Uint64
+
 func wakeRX(i int) {
 	core := coreOf(i)
 	if !coreRunning(core) {
+		RXKickNoCore.Add(1)
 		return
 	}
 	// Een unit met meer cores: kick élke geyielde core van de unit waarvan de
@@ -85,6 +91,7 @@ func wakeRX(i int) {
 	// leeg→niet-leeg-overgang van een bulk-transfer, en dat kostte HOP → app
 	// 3,5× (04-09).
 	if !rxDue(i) {
+		RXKickNotDue.Add(1)
 		return
 	}
 	if ctxState(i) != layout.CtxSaved {
@@ -94,6 +101,7 @@ func wakeRX(i int) {
 		// geackt worden en niets doen — en een vFIQ voor een app die hem niet
 		// afhandelt laat elke WFI meteen terugkeren.
 		if coreCount(i) != 1 || ctrlRead(i, layout.CtrlDoorIRQ) == 0 {
+			RXKickNotSaved.Add(1)
 			return
 		}
 	}

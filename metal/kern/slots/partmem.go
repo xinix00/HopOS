@@ -85,6 +85,20 @@ func initPartitionMemory(pool []layout.Region, cold layout.Region, start, end ui
 
 func align2M(n uint64) uint64 { return (n + part2M - 1) &^ (part2M - 1) }
 
+// One physical claim owns the visible partition and any translation storage.
+// The architecture reports its table requirement; allocation/release/adoption
+// stay generic. PartSize always means the visible partition, including AbiTail.
+func claimSize(size uint64) (uint64, error) {
+	if size == 0 || size > cageLinkWindow(size) {
+		return 0, fmt.Errorf("partition %d MiB exceeds the app address window", size>>20)
+	}
+	extra := cageReserve(size)
+	if size > ^uint64(0)-extra || extra%part2M != 0 {
+		return 0, fmt.Errorf("invalid translation reserve for partition %d", size)
+	}
+	return size + extra, nil
+}
+
 // partAlloc reserveert size voor slot i uit de pool en geeft basis én de
 // WERKELIJKE maat terug — opgerond naar de 2MB-blokkorrel van de map. Meer
 // eist geen enkele kooi meer sinds TOR (de cageGrain/cageBaseAlign-naad die
@@ -119,6 +133,10 @@ func partAlloc(i int, size uint64) (base, grown uint64, err error) {
 		return 0, 0, fmt.Errorf("invalid partition size %d", size)
 	}
 	size = align2M(size)
+	claim, err := claimSize(size)
+	if err != nil {
+		return 0, 0, err
+	}
 	partMu.Lock()
 	defer partMu.Unlock()
 
@@ -143,12 +161,12 @@ func partAlloc(i int, size uint64) (base, grown uint64, err error) {
 	best := -1
 	for idx := len(partFree) - 1; idx >= 0; idx-- {
 		r := partFree[idx]
-		if r.size < size {
+		if r.size < claim {
 			continue
 		}
 		// Draagt hij een bruikbare basis? Zo niet, dan is hij voor déze maat geen
 		// kandidaat — anders zou best-fit een regio kiezen die straks afketst.
-		if (r.base+r.size-size)&^(part2M-1) < r.base {
+		if (r.base+r.size-claim)&^(part2M-1) < r.base {
 			continue
 		}
 		if best < 0 || r.size < partFree[best].size {
@@ -165,13 +183,13 @@ func partAlloc(i int, size uint64) (base, grown uint64, err error) {
 	// TOR kan de kooi elk bereik uitdrukken; onder NAPOT was dat de maat zelf,
 	// en koos de allocator anders adressen die de whitelist niet kón beschrijven
 	// (gemeten 31-07: "basis 0x8bf00000 niet gealigneerd op maat 0x4000000").
-	base = (r.base + r.size - size) &^ (part2M - 1)
+	base = (r.base + r.size - claim) &^ (part2M - 1)
 	// Voor- en achterstuk teruggeven; het middenstuk is van dit slot.
 	rest := partFree[:best:best]
 	if base > r.base {
 		rest = append(rest, region{r.base, base - r.base})
 	}
-	if end := base + size; end < r.base+r.size {
+	if end := base + claim; end < r.base+r.size {
 		rest = append(rest, region{end, r.base + r.size - end})
 	}
 	partFree = append(rest, partFree[best+1:]...)
@@ -200,6 +218,7 @@ func releaseLocked(i int) {
 		return
 	}
 	partOf[i] = region{}
+	r.size += cageReserve(r.size)
 	insertFree(r)
 }
 
@@ -394,33 +413,15 @@ func PoolLargest() uint64 {
 		for size > 0 && (r.base+r.size-size)&^(part2M-1) < r.base {
 			size -= part2M
 		}
+		size = cageLinkWindow(size)
+		if extra := cageReserve(size); extra <= size {
+			size -= extra
+		} else {
+			size = 0
+		}
 		if size > best {
 			best = size
 		}
 	}
-	return best
-}
-
-// maxLimitFor begrenst een partitie: hij moet binnen één 1GB-blok vanaf
-// linkBase blijven (de stage-2-kooi mapt de partitie met één L2-tabel) én
-// onder CtrlBase (waar het IPA-beeld van de app z'n control-page verwacht).
-// Voor het canonieke linkBase 0x50000000 komt dat uit op 768MB (0x30000000):
-// [0x40000000,0x80000000) is het GB-blok, minus de 0x10000000 tussen linkBase
-// en dat blok. Dit is een bewuste, gedeelde slot-cap — geen bug.
-//
-// De lift wanneer de eerste app > 768MB verschijnt: het venster verruimen —
-// de control-regio's (CtrlBase e.v.) omhoog schuiven zodat een groter GB-blok
-// past, óf een multi-GB stage-2-map (meer dan één L2-tabel per partitie). Beide
-// zijn asm-/layout-werk per board; tot dan is 768MB de harde per-slot-ceiling.
-//
-// linkBase is altijd het canonieke slot-1-adres: beide aanroepers pinnen 'm op
-// layout.SlotBase(1) (images zijn canoniek gelinkt — de stage-2 ís de
-// relocatie). De aftrekking hieronder kan dus niet underflowen; wie hier ooit
-// een variabele linkBase langs wil sturen, moet dát eerst afvangen.
-func maxLimitFor(linkBase uint64) uint64 {
-	gbEnd := (linkBase &^ (1<<30 - 1)) + (1 << 30)
-	if gbEnd > layout.CtrlBase {
-		gbEnd = layout.CtrlBase
-	}
-	return gbEnd - linkBase
+	return cageLinkWindow(best)
 }

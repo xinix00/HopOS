@@ -294,10 +294,50 @@ func uplinkMulticastTx(p []byte) {
 	}
 	uplinkTxMu.Lock()
 	defer uplinkTxMu.Unlock()
-	uplink.nic.Transmit(p)
+	uplink.nic.Transmit(p) // doorbell volgt bij FlushUplinkTX, na de switch-ronde
 }
 
-// Transmit verstuurt één frame op de NIC (geserialiseerd).
+// FlushUplinkTX zet de TX-doorbell van de uplink-NIC voor alles wat sinds de
+// vorige flush klaargezet is (netdev.Flusher; no-op zonder). De switch-lus
+// roept hem na elke ronde met werk; HOP's eigen stack via locdev.Transmit
+// na elk frame (niemand anders flusht voor hem).
+func FlushUplinkTX() {
+	if uplink == nil {
+		return
+	}
+	if f, ok := uplink.nic.(netdev.Flusher); ok {
+		uplinkTxMu.Lock()
+		f.FlushTX()
+		uplinkTxMu.Unlock()
+	}
+}
+
+// FlushRX/FlushTX (netdev.Flusher): doorgeven aan de NIC.
+func (u *Uplink) FlushRX() {
+	if f, ok := u.nic.(netdev.Flusher); ok {
+		f.FlushRX()
+	}
+}
+
+func (u *Uplink) FlushTX() { FlushUplinkTX() }
+
+// RearmIRQ (netdev.IRQRearmer): doorgeven aan de NIC.
+func (u *Uplink) RearmIRQ() {
+	if r, ok := u.nic.(netdev.IRQRearmer); ok {
+		r.RearmIRQ()
+	}
+}
+
+func (u *Uplink) Batch(on bool) {
+	if f, ok := u.nic.(netdev.Flusher); ok {
+		uplinkTxMu.Lock()
+		f.Batch(on)
+		uplinkTxMu.Unlock()
+	}
+}
+
+// Transmit verstuurt één frame op de NIC (geserialiseerd); de doorbell volgt
+// bij FlushTX (batching, netdev.Flusher).
 func (u *Uplink) Transmit(buf []byte) error {
 	uplinkTxMu.Lock()
 	defer uplinkTxMu.Unlock()

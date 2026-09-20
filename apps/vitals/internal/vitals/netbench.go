@@ -12,6 +12,7 @@ package vitals
 //	rtt    kale TCP-handshakes naar de gateway: de vloer van het interne pad
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"net/url"
@@ -40,7 +41,7 @@ func (s *Server) runRx(res *Result, q url.Values) {
 	defer close(done)
 
 	t0 := time.Now()
-	resp, err := leanhttp.Get(src)
+	resp, err := leanhttp.GetCall(leanhttp.Call{URL: src, Header: leanhttp.Header{"User-Agent": "HopOS-vitals"}})
 	if err != nil {
 		res.Err = err.Error()
 		return
@@ -52,7 +53,11 @@ func (s *Server) runRx(res *Result, q url.Values) {
 	var got int64
 	t1 := time.Now()
 	for got < capBytes {
-		n, err := resp.Body.Read(buf)
+		want := int64(len(buf))
+		if capBytes-got < want {
+			want = capBytes - got
+		}
+		n, err := resp.Body.Read(buf[:want])
 		got += int64(n)
 		rxProgress.Store(got)
 		if n == 0 && err == nil {
@@ -70,6 +75,10 @@ func (s *Server) runRx(res *Result, q url.Values) {
 		}
 	}
 	el := time.Since(t1).Seconds()
+	if got < capBytes {
+		res.Err = fmt.Sprintf("short benchmark response: read %d bytes, requested %d", got, capBytes)
+		return
+	}
 
 	res.add("throughput", float64(got)/el/1e6, "MB/s")
 	res.add("read", float64(got>>20), "MB")

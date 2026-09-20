@@ -164,6 +164,9 @@ func (m *Manager) Scan() {
 					// Wel iets, maar geen boot-HID. Geen fout: een stick in de
 					// poort is gewoon niets voor deze stack.
 					fmt.Printf("usb: %s port %d: device is not a boot-HID — ignored\n", hc.Name, p.Num)
+					// Remember this connected device until unplug or controller
+					// recovery; repeatedly enumerating a storage device serves no input.
+					known[p.Num] = &port{}
 					hc.ClearChanges(p.Num)
 					continue
 				}
@@ -184,6 +187,9 @@ func (m *Manager) Scan() {
 // ingedrukt was, moet bij de display worden losgelaten — anders blijft hij daar
 // voor altijd staan.
 func (m *Manager) release(p *port) {
+	if p.dev == nil {
+		return // known non-HID device; Attach already released its hardware slot
+	}
 	m.evs = m.evs[:0]
 	m.appendReset(p)
 	m.emit()
@@ -222,6 +228,9 @@ func (m *Manager) Poll() {
 			continue
 		}
 		for _, p := range known {
+			if p.dev == nil {
+				continue // known non-HID device
+			}
 			// Meerdere keren per beurt: één apparaat kan twee endpoints hebben
 			// (toetsenbord én muis op één dongle) en Report levert er één per
 			// aanroep. Begrensd op maxPerPoll zodat een druk apparaat de

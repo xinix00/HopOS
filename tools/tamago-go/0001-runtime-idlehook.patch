@@ -1,9 +1,19 @@
+Subject: [PATCH 1/2] runtime: expose guarded idle helpers and wake parked processors
+
+Provide a readiness predicate for idle-hook callbacks, a view of pending
+processor timers, and cooperative wakeups for processors sleeping in the
+platform idle hook. Note waits and stopped processors must not service
+callbacks: require an unblocked M with a running P and no runtime locks. Use that
+same predicate when servicing another processor's timers.
+
+This wakes cooperative safepoints; it does not add asynchronous preemption.
+Base revision and validation are documented in README.md and BASE_REVISION.
+
 diff --git a/src/runtime/idlehook_tamago.go b/src/runtime/idlehook_tamago.go
 new file mode 100644
-index 00000000..19574162
 --- /dev/null
 +++ b/src/runtime/idlehook_tamago.go
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,79 @@
 +// Copyright 2026 HopOS. Same license as the Go runtime.
 +//
 +// The idle hook's helpers: IdleMayReady (may it ready goroutines), and the
@@ -17,14 +27,15 @@ index 00000000..19574162
 +
 +// IdleMayReady reports whether the goos.Idle hook is running in the
 +// scheduler's own idle path (findRunnable -> beforeIdle): this M holds a P and
-+// is not inside lock2. Only there may the hook make goroutines runnable — a
-+// channel send, a mutex unlock with waiters, goready. The hook is also called
-+// from semasleep: an M parked without a P, or a mutex waiter with m.locks > 0.
++// is not inside lock2 or a note wait. Only there may the hook make goroutines
++// runnable — a channel send, a mutex unlock with waiters, goready. The hook is also called
++// from semasleep: an M parked without a P, a mutex waiter with m.locks > 0,
++// or a blocked note waiter (including the STW coordinator with a stopped P).
 +// There ready/wakep would corrupt the scheduler itself — runqput on a nil P,
 +// or a second sleep on the same m.mWaitList node (lock_spinbit.go).
 +func IdleMayReady() bool {
 +	gp := getg()
-+	return gp.m.p != 0 && gp.m.locks == 0
++	return gp.m.p != 0 && gp.m.locks == 0 && !gp.m.blocked && gp.m.p.ptr().status == _Prunning
 +}
 +
 +// NextTimer is the earliest timer over all Ps (0 = none), for the idle hook
@@ -57,7 +68,7 @@ index 00000000..19574162
 +// as NextTimer; otherwise it does nothing.
 +func RunIdleTimers() (ran, kicked bool, now int64) {
 +	gp := getg()
-+	if gp.m.p == 0 || gp.m.locks != 0 {
++	if !IdleMayReady() {
 +		return false, false, 0
 +	}
 +	own := gp.m.p.ptr()

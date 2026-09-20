@@ -45,6 +45,7 @@ package main
 import (
 	"fmt"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/xinix00/HopOS/metal/v2/board"
@@ -114,6 +115,9 @@ func petBootGuard() bool {
 // mislukte flip liet de node zeven minuten volledig donker (geen ping, geen
 // console) in plaats van binnen 30 seconden te resetten.
 func armBootGuard(counterHz uint64) {
+	if bootParam("hopos.wd") == "off" && nodeWDTOff != nil {
+		nodeWDTOff() // vóór de 12 s van de vorige kern om zijn: dit is de flip-boot
+	}
 	if earlyPet != nil || bootParam("hopos.wd") == "off" || nodeWDT == nil || nodeWDT.Arm == nil {
 		return
 	}
@@ -147,6 +151,9 @@ func armBootGuard(counterHz uint64) {
 // hebben dat dan gedaan).
 func nodeCanary() {
 	if bootParam("hopos.wd") == "off" {
+		if nodeWDTOff != nil {
+			nodeWDTOff() // een flip-boot erft een gewapende watchdog van de vorige kern
+		}
 		fmt.Println("watchdog: not armed (hopos.wd=off) — node liveness is UNGUARDED, " +
 			"a frozen node stays up for a post-mortem instead of reset-cycling.")
 		return
@@ -210,6 +217,12 @@ func nodeCanary() {
 	misses := 0
 	for {
 		time.Sleep(nodeWDT.PetEvery)
+		if r := resetReason.Load(); r != nil {
+			fmt.Printf("watchdog: reset requested (%s) — withholding pets, hardware reset follows HOPOS_RESET_REQUESTED\n", *r)
+			for {
+				time.Sleep(time.Hour)
+			}
+		}
 		if probe(3 * time.Second) {
 			nodeWDT.Pet()
 			misses = 0
@@ -218,4 +231,20 @@ func nodeCanary() {
 		misses++
 		fmt.Printf("watchdog: liveness probe failed (%d in a row) — withholding the pet; hardware reset follows unless the node recovers HOPOS_CANARY_MISS\n", misses)
 	}
+}
+
+// resetReason: gezet door requestNodeReset; de canary houdt dan zijn pets in
+// en laat het ijzer de node herstarten (HOP-leven = node-leven).
+var resetReason atomic.Pointer[string]
+
+// nodeWDTOff: de hardware-watchdog uitzetten (boards waar de firmware of de
+// vorige kern hem gewapend achterlaat); gebruikt door hopos.wd=off.
+var nodeWDTOff func()
+
+// requestNodeReset (hopnet.AddressLost): een gecontroleerde herstart via de
+// watchdog. Zonder gewapende watchdog blijft het bij de melding — dan is
+// er niets dat kan resetten, en dat staat al op de console.
+func requestNodeReset(reason string) {
+	fmt.Printf("node: reset requested — %s HOPOS_RESET_REQUEST\n", reason)
+	resetReason.Store(&reason)
 }

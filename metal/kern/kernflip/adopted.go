@@ -92,6 +92,7 @@ func Adopted() (Handoff, bool) {
 	// dit is het laatste moment waarop dat spoor bestaat (stage.go).
 	archiveStage(h.Gen)
 	stage(stLanded)
+	preserveParkedCores()
 	setAdopting(len(h.Slots) > 0)
 	curGen, curSum = h.Gen, h.BundleSum
 	return h, true
@@ -109,8 +110,9 @@ func Adopted() (Handoff, bool) {
 // alleen te reproduceren MET bewoners: acht flips op rij zonder bewoners
 // landden allemaal (generatie 2 t/m 9), met bewoners viel ongeveer één op drie.
 //
-// Adopted verfijnt de stand later (nul bewoners = alsnog vers neerzetten); dit
-// is de veilige kant van de twijfel voor het venster ervóór.
+// Adopted verfijnt de stand later: zonder bewoners worden de contexten opnieuw
+// ingericht, maar parkcode en mailbox-sentinels van geparkeerde cores blijven
+// behouden. Dit is de veilige kant van de twijfel voor het venster ervóór.
 func PresumeAdopting() {
 	if !FlipPending() {
 		return

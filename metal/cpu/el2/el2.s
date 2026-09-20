@@ -54,7 +54,7 @@ TEXT s2tramp(SB),NOSPLIT|NOFRAME,$0
 	WORD	$0xd53800a4	// mrs x4, mpidr_el1
 	WORD	$0xd51c00a4	// msr vmpidr_el2, x4
 
-	// VTCR_EL2: 4KB-granule, 32-bit IPA, PS = min(PARange, 44-bit). De pool
+	// VTCR_EL2: 4KB-granule, 39-bit IPA, PS = min(PARange, 44-bit). De pool
 	// ligt op servers vér boven de oude 40-bit/1TB-aanname (Altra: het
 	// bulk-DRAM huist in dezelfde hoge regionen als de 16TB-UART — gemeten
 	// 15-07: met PS=40 stierf elke loader op een address-size-fault bij zijn
@@ -67,7 +67,7 @@ TEXT s2tramp(SB),NOSPLIT|NOFRAME,$0
 	BLT	vtcrps		// PARange < 44-bit: het silicium-maximum
 	MOVD	$4, R5		// anders klemmen op 44-bit (16TB)
 vtcrps:
-	MOVD	$0x80003560, R4	// VTCR zonder PS-veld
+	MOVD	$0x80003559, R4	// VTCR zonder PS-veld
 	ORR	R5<<16, R4, R4
 	WORD	$0xd51c2144	// msr vtcr_el2, x4
 
@@ -75,6 +75,7 @@ vtcrps:
 	LSL	$48, R6, R5
 	ORR	R2, R5, R5
 	WORD	$0xd51c2105	// msr vttbr_el2, x5
+	ISB	$15		// select this VMID before its TLBI (VTTBR context synchronization)
 	WORD	$0xd50c87df	// tlbi vmalls12e1
 	DSB	$15
 
@@ -97,7 +98,7 @@ vtcrps:
 	// ziet alleen zijn WFI terugkeren). Op boards zonder IPI komt er nooit
 	// een FIQ — en komt er tóch een, dan is het een fault-rapport, niet iets
 	// wat een app ziet.
-	MOVD	$1<<31, R4
+	MOVD	$HCR_BASE, R4	// RW (+E2H onder VHE, sysreg.h)
 	ORR	$1<<19, R4, R4
 	ORR	$1<<3, R4, R4
 	ORR	$1, R4, R4

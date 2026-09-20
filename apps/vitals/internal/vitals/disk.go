@@ -14,9 +14,12 @@ package vitals
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/xinix00/lean/leanhttp"
@@ -34,13 +37,38 @@ type FS interface {
 	Remove(path string) error
 }
 
+// storageReason recognizes only the node's explicit absence response. Missing
+// files still prove the storage service exists; unexpected I/O errors fail.
+func (s *Server) storageReason() (string, error) {
+	if s.cfg.FS == nil {
+		return "no file layer", nil
+	}
+	_, err := s.cfg.FS.Stat("/")
+	if err != nil && strings.HasSuffix(err.Error(), ": no storage layer on board") {
+		return "no storage layer on board", nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		err = nil
+	}
+	return "", err
+}
+
+func (s *Server) requireStorage(res *Result) bool {
+	reason, err := s.storageReason()
+	if err != nil {
+		res.Err = fmt.Sprintf("storage probe: %v", err)
+	} else if reason != "" {
+		res.Skipped = reason
+	}
+	return err == nil && reason == ""
+}
+
 // runDisk: schrijven, lezen, 4 KiB-writes en de Stat-vloer op één bestand in
 // de eigen root (?path= kiest een ander, bijvoorbeeld een mount). Het bestand
 // wordt na afloop weggehaald; hopfs is toch vluchtig.
 func (s *Server) runDisk(res *Result, q url.Values) {
 	fs := s.cfg.FS
-	if fs == nil {
-		res.Err = "no file layer (not running as a HopOS app)"
+	if !s.requireStorage(res) {
 		return
 	}
 	mb := qInt(q, "mb", 64, 1, 1024)
@@ -247,7 +275,14 @@ func (s *Server) serveSink(w leanhttp.ResponseWriter, r *leanhttp.Request) {
 // het wek-pad van een stille verbinding, dan zijn beide even traag.
 func (s *Server) runSyscall(res *Result, q url.Values) {
 	n := qInt(q, "n", 200, 10, 5000)
-	if s.cfg.FS != nil {
+	reason, err := s.storageReason()
+	if err != nil {
+		res.Err = fmt.Sprintf("storage probe: %v", err)
+		return
+	}
+	if reason != "" {
+		res.linef("stat phase skipped: %s", reason)
+	} else {
 		path := "/vitals-syscall.bin"
 		if _, err := s.cfg.FS.WriteAt(path, 0, []byte{1}); err != nil {
 			res.Err = fmt.Sprintf("prepare: %v", err)
@@ -288,13 +323,21 @@ func (s *Server) runSyscall(res *Result, q url.Values) {
 			res.Err = fmt.Sprintf("GET %s: %v", target, err)
 			return
 		}
-		_, _ = io.Copy(io.Discard, resp.Body)
+		_, readErr := io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
+		if resp.StatusCode != leanhttp.StatusOK || readErr != nil {
+			res.Err = fmt.Sprintf("GET %s: HTTP %d, body error %v", target, resp.StatusCode, readErr)
+			return
+		}
 		lat = append(lat, time.Since(t).Seconds()*1e6)
 	}
 	res.add("GET p50", pct(lat, 50), "µs")
 	res.add("GET p99", pct(lat, 99), "µs")
-	res.linef("%d stat calls on the persistent system connection vs %d keep-alive GET %s", n, n, target)
+	if reason == "" {
+		res.linef("%d stat calls on the persistent system connection vs %d keep-alive GET %s", n, n, target)
+	} else {
+		res.linef("%d keep-alive GET %s; storage comparison unavailable", n, target)
+	}
 }
 
 func firstDiff(a, b []byte) int {

@@ -43,10 +43,14 @@ const (
 	// sinds ABIVersion 2 in de partitie van het slot zelf, dus dit gat is vrij.
 	// De offsets hieronder blijven staan waar ze staan: REVOKE_OFF en CARVE_SIZE
 	// zijn literals in init.s.)
+	nvmeDMAOff = carveOff + 0x200000 // aligned DRAM window; queues and cached data stay separate
+	nvmeDMALen = 0x600000
 	stage2Off  = carveOff + 0x900000  // (SlotCap+1)×64KB ≈ 8MB
 	revokeOff  = carveOff + 0x900800  // REVOKE_OFF in init.s (stage2 slot-0 +0x800)
 	netDMAOff  = carveOff + 0x1200000 // NetDMASize (8MB)
 	scratchOff = carveOff + 0x1A00000
+	fwFactsOff = carveOff + 0x1C00000 // firmware-feiten voor een geflipte kern (uefi.go fwFacts): 8KB kop + cfg + memmap (~264KB)
+	usbDMAOff  = carveOff + 0x1E00000 // final 2MB: xHCI DMA, Device-mapped, outside firmware facts
 
 	poolOff = carveOff + carveSize // einde van HOP's voetafdruk (kern-RAM + carve)
 
@@ -116,10 +120,11 @@ func init() {
 
 	layout.UsePlan(layout.Plan{
 		NodeCtrlPA:    b + ctrlOff,
-		CagePA:        b + stage2Off,
+		CagePA:        persistentCage.Base + (stage2Off - carveOff),
 		TrapVecPA:     b + revokeOff,
 		NetDMAPA:      b + netDMAOff,
 		BootScratchPA: b + scratchOff,
+		USBDMAPA:      persistentCage.Base + (usbDMAOff - carveOff),
 		Pool:          pool,
 	})
 
@@ -137,6 +142,24 @@ func init() {
 			panic("uefi: MEMMAP_CAP in init.s wijkt af van memmapCap")
 		}
 	}
+}
+
+// Footprint (kernflip.BoardFootprint): Go-RAM + carve, wat een kern hier
+// beslaat en wat een flip dus moet lenen en vegen.
+func Footprint() uint64 { return poolOff }
+
+// OldCarve (kernflip.BoardOldCarve) returns the persistent administration
+// owner, which can precede OldBase by several generations. Never retain
+// another predecessor carve: only this owner survives kernel replacement.
+func OldCarve(oldBase, oldSize uint64) (uint64, uint64) {
+	return persistentCage.Base, persistentCage.Size
+}
+
+// NVMeDMA supplies a 2MiB-aligned window inside the existing carve, outside
+// Go RAM and the persistent cage region. The storage board hook maps queues
+// uncached and only the isolated payload block write-back cached.
+func NVMeDMA() (base uintptr, size uint64) {
+	return Base() + nvmeDMAOff, nvmeDMALen
 }
 
 // usablePool verzamelt ÁLLE ná-ExitBootServices vrije, bereikbare RAM als
@@ -175,6 +198,18 @@ func usablePool() []layout.Region {
 			raw = append(raw, layout.Region{Base: start, Size: end - start})
 		}
 	}
+	// De verboden ranges: HOP's voetafdruk plus élke niet-bruikbare
+	// descriptor. Dat laatste is niet dubbelop: de O6N-firmware levert een
+	// memory-map met OVERLAPPENDE descriptors (FreeBSD-meting jan. 2025:
+	// reserved-in-reserved rond 0x82500000), en "de eerste descriptor die
+	// het adres dekt" is dan niet per se de strengste. Alles wat ergens als
+	// reserved/MMIO/ACPI/runtime geboekt staat, valt buiten de pool.
+	forbidden := cagePoolHoles(b, hopEnd-b, persistentCage)
+	for _, d := range MemoryMap() {
+		if !usableRAM(d.Type) && d.Pages > 0 {
+			forbidden = append(forbidden, layout.Region{Base: d.Start, Size: d.Pages * 4096})
+		}
+	}
 	for _, d := range MemoryMap() {
 		if !usableRAM(d.Type) {
 			continue
@@ -183,16 +218,8 @@ func usablePool() []layout.Region {
 		if start >= pa48Limit {
 			continue
 		}
-		switch {
-		case end <= b || start >= hopEnd: // geen overlap met de voetafdruk
-			add(start, end)
-		default: // overlap: het deel eronder en/of erboven blijft pool
-			if start < b {
-				add(start, b)
-			}
-			if end > hopEnd {
-				add(hopEnd, end)
-			}
+		for _, span := range subtract(start, end, forbidden) {
+			add(span[0], span[1])
 		}
 	}
 	// 2. Aangrenzend/overlappend samensmelten (layout.Coalesce): descriptor-
@@ -222,6 +249,31 @@ func usablePool() []layout.Region {
 		}
 	}
 	return regs
+}
+
+// subtract knipt [start, end) rond élke verboden regio: wat overblijft zijn
+// de spans die de pool in mogen.
+func subtract(start, end uint64, forbidden []layout.Region) [][2]uint64 {
+	spans := [][2]uint64{{start, end}}
+	for _, f := range forbidden {
+		fe := f.Base + f.Size
+		var next [][2]uint64
+		for _, sp := range spans {
+			switch {
+			case fe <= sp[0] || f.Base >= sp[1]: // geen overlap
+				next = append(next, sp)
+			default:
+				if sp[0] < f.Base {
+					next = append(next, [2]uint64{sp[0], f.Base})
+				}
+				if sp[1] > fe {
+					next = append(next, [2]uint64{fe, sp[1]})
+				}
+			}
+		}
+		spans = next
+	}
+	return spans
 }
 
 // ECAMWindow geeft het te mappen MMIO-venster van een MCFG-entry. De

@@ -37,7 +37,7 @@ TEXT el2entry(SB),NOSPLIT|NOFRAME,$0
 	// scratch-indeling (SP-relatief): +0 x0, +8 x1, +16 x2, +24 x3.
 	STP	(R0, R1), (RSP)
 
-#ifdef VHE
+#ifdef APPLE_IPI
 	// Idx 10 (FIQ vanuit EL1): op Apple is dat HOP's kick — de fast IPI
 	// waarmee de wekker een app-core wekt die op EL1 draait (yieldSleep). Acken
 	// en terug; de app ziet alleen zijn WFI terugkeren.
@@ -60,7 +60,7 @@ TEXT el2entry(SB),NOSPLIT|NOFRAME,$0
 	CBZ	R3, exited
 	CMP	$4, R3
 	BEQ	wake
-#ifdef VHE
+#ifdef APPLE_IPI
 	CMP	$5, R3	// doorbell-ack: alleen waar de fast-IPI een vFIQ werd (Apple)
 	BEQ	doorack
 #endif
@@ -248,7 +248,7 @@ sleep:
 	MOVD	472(R1), R0
 	ADD	$1, R0, R0
 	MOVD	R0, 472(R1)
-#ifdef VHE
+#ifdef APPLE_IPI
 	// Apple: WFE slaapt hier niet (CYC_OVRD, buiten bereik op de M4) en de
 	// event stream wekt dus niets. m1n1's recept op dit silicium: wfi, en een
 	// fast IPI die hem wekt — HOP's wekker stuurt die zodra een bewoner due
@@ -259,7 +259,31 @@ sleep:
 	CBZ	R0, rotate
 	WORD	$0xd51df120	// msr s3_5_c15_c1_1, x0 (ack)
 #else
+#ifdef GIC_IPI
+	// GICv3 (UEFI/Altra, O6N, QEMU virt): zelfde recept als Apple, met een
+	// SGI als kick (board.Cores.Kick → gicv3.SendSGI). De CPU-interface van
+	// déze core elke keer scherp zetten (idempotent, vier sysregs): SRE op
+	// EL2 en EL1, alle prioriteiten door, Group 1 aan. Dan WFI — die wekt
+	// óók op een gemaskeerde pending interrupt — en de SGI acken via
+	// IAR1/EOIR1, anders keert de volgende WFI meteen terug.
+	MOVD	$0xf, R0
+	WORD	$0xd51cc9a0	// msr icc_sre_el2, x0 (SRE|DFB|DIB|Enable)
+	MOVD	$0x1, R0
+	WORD	$0xd518cca0	// msr icc_sre_el1, x0
+	MOVD	$0xff, R0
+	WORD	$0xd5184600	// msr icc_pmr_el1, x0
+	MOVD	$0x1, R0
+	WORD	$0xd518cce0	// msr icc_igrpen1_el1, x0
+	WORD	$0xd5033fdf	// isb
+	WFI
+	WORD	$0xd538cc00	// mrs x0, icc_iar1_el1
+	AND	$0xffffff, R0, R0
+	CMP	$1020, R0
+	BHS	rotate		// spurious (1020-1023) of LPI-bereik: niets te acken
+	WORD	$0xd518cc20	// msr icc_eoir1_el1, x0
+#else
 	WFE
+#endif
 #endif
 
 rotate:
@@ -449,7 +473,7 @@ park:
 	ADD	$0x1000, R2, R2
 	JMP	(R2)
 
-#ifdef VHE
+#ifdef APPLE_IPI
 fiq:
 	// Apple's fast IPI (m1n1 smp.c, Linux irq-apple-aic.c): pending in
 	// IPI_SR_EL1 bit 0, wissen door 1 terug te schrijven. Geen IPI pending
@@ -513,7 +537,7 @@ doorack:
 //   - zet diens CtxWake op "nu": de rotatie op die core hervat hem bij zijn
 //     eerstvolgende ronde (QEMU: de WFE-lus spint, dus meteen; HOP's wekker
 //     kickt hem hoe dan ook binnen een ms);
-//   - op Apple (VHE) ook meteen de fast IPI, m1n1's recept: core | cluster<<16
+//   - op Apple ook meteen de fast IPI, m1n1's recept: core | cluster<<16
 //     uit aff0 | aff1<<8 — de WFI in sleep: keert dan direct terug.
 // Alleen x0..x3 zijn hier klad (scratch); x4/x5 gaan even in het GPR-vak van
 // de eigen ctx — de bewoner draait, dat vak is dood tot zijn volgende yield.
@@ -555,12 +579,28 @@ wakescan:
 	ADD	$1, R5, R5
 	MOVD	R5, 488(R4)
 	DSB	$15
-#ifdef VHE
+#ifdef APPLE_IPI
 	AND	$0xFF, R0, R5	// core = aff0
 	LSR	$8, R0, R4
 	AND	$0xFF, R4, R4	// cluster = aff1
 	ORR	R4<<16, R5, R5
 	WORD	$0xd51df025	// msr s3_5_c15_c0_1, x5 (IPI_RR_GLOBAL_EL1)
+#else
+#ifdef GIC_IPI
+	// GICv3: dezelfde kick als board.Cores.Kick (gicv3.SendSGI), nu vanuit
+	// EL2 naar de sibling: SGI 1 naar aff2/aff1 met aff0 als target-bit.
+	AND	$0xFF, R0, R5	// aff0
+	MOVD	$1, R4
+	LSL	R5, R4, R4	// target list = 1 << aff0
+	LSR	$8, R0, R5
+	AND	$0xFF, R5, R5	// aff1
+	ORR	R5<<16, R4, R4
+	LSR	$16, R0, R5
+	AND	$0xFF, R5, R5	// aff2
+	ORR	R5<<32, R4, R4
+	ORR	$1<<24, R4, R4	// INTID 1 (gicv3.KickSGI)
+	WORD	$0xd518cba4	// msr icc_sgi1r_el1, x4
+#endif
 #endif
 	B	wakedone
 wakenext:

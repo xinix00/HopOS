@@ -22,6 +22,7 @@ import (
 	"runtime"
 	"runtime/goos"
 	"sync/atomic"
+	"time"
 
 	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 	"github.com/xinix00/HopOS/metal/v2/dev"
@@ -53,19 +54,7 @@ func mmfr0() uint64
 // EVNTI 11: 2^20 ticks = 1,048ms = 954 wekken/s — precies wat er gemeten is.)
 func Enable() {
 	hz := cntfrq()
-	shift := uint64(0)
-	if mmfr0()>>60&0xF != 0 && uint64(1)<<16 < hz/2000 { // FEAT_ECV én bit 15 < 0,5ms
-		shift = 8
-	}
-	i := uint64(15)                                     // EVNTI is 4 bits: 15 is tegelijk het maximum én de start
-	for i > 4 && (uint64(1)<<(i+1+shift))*2000 > hz*3 { // periode > 1,5ms → fijnere bit
-		i--
-	}
-	v := uint64(1<<2 | i<<4) // EVNTEN | EVNTI
-	if shift != 0 {
-		v |= 1 << 17 // EVNTIS: EVNTI telt in stappen van 256
-	}
-	cntkctlSet(v)
+	setEventStream(1500 * time.Microsecond)
 
 	// De "echt geslapen"-grens in TICKS is tellerafhankelijk (zie
 	// wfeMinSleep): op 1GHz was de vaste 64 nog geen 64 nanoseconden, en dan
@@ -103,17 +92,32 @@ func WFESleep(wake uint64) uint64 {
 		// waarna de volgende WFE tot de event-stream-tick sliep. Op een
 		// 2-core-app (ACK-SEV van de pomp-core vlak vóór het verzoek van de
 		// andere core) trof dat 6% van de system calls: 1ms i.p.v. 20µs.
-		if pending() {
+		if pending() || timerDue() {
 			break
 		}
 	}
 	return slept
 }
 
+// timerDue: is de vroegste timer van de runtime al verstreken? Dat is wat
+// een interrupt achterlaat: de IRQ-vector (tamago handleInterrupt →
+// os/signal.Relay → WakeG) zet de timer van de signal-lus op "nu" en keert
+// terug in de WFE hierboven — die keerde daardoor snel terug, en zonder deze
+// check ging de lus gewoon de volgende WFE in, tot de event-stream-tik. Dat
+// was de milliseconde op élke NIC-interrupt (O6N 18-09: rtt p50 1010 µs
+// tegen 152 µs gepold). Eén NextTimer per snelle terugkeer, verder niets.
+func timerDue() bool {
+	nt := runtime.NextTimer()
+	return nt != 0 && nt <= nanotime()
+}
+
 // pending: ligt er werk waarvoor de governor wakker hoort te zijn — HOP's
 // switch-ringen (WatchWork) of de RX-ring van een app (RXStatus). Alleen
 // lezen, geen wekken: dat doet de governor zelf (workDoor/rxDoor).
 func pending() bool {
+	if irqPending() {
+		return true
+	}
 	if f := work.Load(); f != nil && (*f)() {
 		return true
 	}
@@ -200,7 +204,7 @@ func governor(pollUntil int64) {
 	// De doorbell: ligt er RX, dan is de pomp nu gewekt en is slapen precies
 	// verkeerd; ligt er niets, dan is de drempel nu gewapend en bewaakt de
 	// rotatie-peek de rest van deze slaap (zie rxdoor.go).
-	if rxDoor() || workDoor() {
+	if rxDoor() || workDoor() || irqDoor() {
 		countWake()
 		return
 	}
@@ -281,4 +285,24 @@ var nested [64]atomic.Bool
 func coreIndex() int {
 	m := dev.MPIDR()
 	return int(m&0xF) | int((m>>8)&0x3)<<4
+}
+
+// setEventStream kiest de EVNTI-bit met de grootste periode die nog onder
+// maxPeriod blijft (zie Enable voor de M4/ECV-schaling).
+func setEventStream(maxPeriod time.Duration) {
+	hz := cntfrq()
+	shift := uint64(0)
+	if mmfr0()>>60&0xF != 0 && uint64(1)<<16 < hz/2000 { // FEAT_ECV én bit 15 < 0,5ms
+		shift = 8
+	}
+	limit := uint64(maxPeriod.Nanoseconds()) // periode in ns: 2^(i+1+shift)/hz * 1e9
+	i := uint64(15)
+	for i > 4 && (uint64(1)<<(i+1+shift))*1_000_000_000 > hz*limit {
+		i--
+	}
+	v := uint64(1<<2 | i<<4) // EVNTEN | EVNTI
+	if shift != 0 {
+		v |= 1 << 17 // EVNTIS: EVNTI telt in stappen van 256
+	}
+	cntkctlSet(v)
 }

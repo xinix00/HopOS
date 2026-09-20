@@ -53,3 +53,35 @@ func TestEP0DescriptorPacketSize(t *testing.T) {
 		t.Fatal("invalid full-speed packet size")
 	}
 }
+
+// Exercise real Start allocations in ten unaligned slices of one DMA region.
+// Root-only hosts need at most one device slot per physical port.
+func TestTenRootHostsFitExistingDMAWindow(t *testing.T) {
+	const size = 2 << 20
+	memory := make([]byte, size)
+	var pin runtime.Pinner
+	pin.Pin(&memory[0])
+	defer pin.Unpin()
+	base := uintptr(unsafe.Pointer(&memory[0]))
+	span := uintptr(size / 10)
+	for i := 0; i < 10; i++ {
+		regs := make([]uint64, 1024)
+		pin.Pin(&regs[0])
+		p := uintptr(unsafe.Pointer(&regs[0]))
+		h := &HC{Base: p, op: p + 0x40, rt: p + 0x200, slots: 16, ports: 1 + i%2, ctx64: true, ac64: true}
+		dev.Write32(h.op+opPageSize, 1)
+		start := base + uintptr(i)*span
+		dev.Write8(start+span-1, 0xab)
+		if err := h.Start(start, span); err != nil {
+			t.Fatalf("host%d: %v", i, err)
+		}
+		if h.nSlots != h.ports || len(h.res) != h.ports+1 {
+			t.Fatalf("host%d slots=%d ports=%d", i, h.nSlots, h.ports)
+		}
+		if h.arena.cur > start+span || dev.Read8(start+span-1) != 0xab {
+			t.Fatalf("host%d crossed DMA slice", i)
+		}
+		runtime.KeepAlive(regs)
+	}
+	runtime.KeepAlive(memory)
+}

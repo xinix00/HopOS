@@ -257,6 +257,13 @@ func main() {
 	slots.SetFlipCapable(bootParam("hopos.flip.enable") != "0")
 
 	flipped, isFlip := kernflip.Adopted()
+	if isFlip && kernflip.BoardOldCarve != nil {
+		// De carve van de vorige kern: parkeerlussen en mailboxen van de
+		// app-cores draaien daar nog (zie layout.ExcludeFromPool).
+		if b, n := kernflip.BoardOldCarve(flipped.OldBase, flipped.OldSize); n != 0 {
+			layout.ExcludeFromPool(b, n)
+		}
+	}
 	// Is er een flip geweest die NIET geland is, dan staat dat in de
 	// vluchtrecorder op de boot-scratch — het enige spoor dat een reboot
 	// overleeft. Meteen na Adopted (die de recorder bij een geslaagde landing
@@ -282,18 +289,10 @@ func main() {
 			flipped.Gen, hopBudget(), len(flipped.Slots), flipped.OldBase, flipped.OldSize>>20)
 	}
 
-	// Log-console op de firmware-framebuffer als het board er een heeft — het
-	// beeld-kanaal voor een node zónder debug-kabel. Zo niet (QEMU -nographic,
-	// board vóór zijn beeld-fase): no-op, printk blijft naar UART/log.
-	if d, ok := board.Current().Framebuffer(); ok {
-		fb.Init(d)
-		fb.Header(bunny...) // vaste bunny bovenin, de logs scrollen eronder
-		fmt.Printf("console: framebuffer %dx%d @ %#x, %d bpp — mirroring log to display\n",
-			d.Width, d.Height, uint64(d.Base), d.BPP)
-		// Live meetregels rechts naast de bunny (Derek 15-07): kern-mem,
-		// datum, tijd — met seconden, elke seconde ververst: een bevroren
-		// klok = een hangende kern, in één oogopslag.
-		go screenStatus()
+	// On FLIP, a resident display keeps its pixels. Restore its grant before
+	// deciding whether the framebuffer is available for a kernel console.
+	if !isFlip {
+		initFramebufferConsole()
 	}
 
 	// Netwerk opbrengen. Geen harde eis (net als storage en SNTP hieronder):
@@ -332,8 +331,24 @@ func main() {
 	// alleen op een board dat kan kicken, en ná de vectoren — de kick is een
 	// HVC naar HOP's eigen EL2-handler.
 	slots.StartWaker()
-	if netErr != nil {
-		fmt.Printf("net: %v — continuing headless/compute-only (no external network)\n", netErr)
+	// Geen netwerk bij boot is geen eindtoestand (19-09, Derek: "als alles
+	// opstart zonder netwerk wil ik niet ineens 100 dode nodes hebben"): een
+	// switch die later opkomt, een DHCP-server die nog niet luistert, een
+	// kabel die er straks in gaat. Dus: blijven proberen, met oplopende pauze
+	// tot een halve minuut, en pas dóór als het er is — de agent heeft een
+	// adres nodig. De koude boot-guard aait ondertussen blind; een geflipte
+	// kern verliest na twee minuten zijn gratie en komt koud terug, waar
+	// dezelfde lus wacht. Tot 19-09 parkeerde de node hier voorgoed
+	// (HOPOS_NODE_HEADLESS) en was elke boot zonder netwerk een dode node.
+	for attempt, wait := 1, 5*time.Second; netErr != nil; attempt++ {
+		if attempt == 1 || attempt%10 == 0 {
+			fmt.Printf("net: %v — no external network yet, retrying (attempt %d, every %s) HOPOS_NET_RETRY\n", netErr, attempt, wait)
+		}
+		time.Sleep(wait)
+		if wait < 30*time.Second {
+			wait += 5 * time.Second
+		}
+		netErr = hopnet.Up()
 	}
 	// Open de optionele TCP-console zodra het netwerk er is, vóór storage,
 	// klok en agent. De ring replayt, dus ook een latere boothang blijft van
@@ -384,6 +399,9 @@ func main() {
 		if disk, first, count, err := bd.Disk(); err != nil {
 			fmt.Printf("storage: %v — running without volumes\n", err)
 		} else {
+			if bootParam("hopos.nvmewipe") == "1" || DefaultNVMeWipe == "1" {
+				nvmeWipe(disk, first, count) // beide partitietabellen weg (zie nvmewipe.go)
+			}
 			fsys := hopfs.NewRange(disk, first, count)
 			slots.UseFS(fsys)
 			fmt.Printf("storage: nvme %q — %d MB of our own, LBA %d..%d — volumes available\n",
@@ -420,6 +438,9 @@ func main() {
 	}
 	if isFlip {
 		hopswitch.FinishAdoption()
+	}
+	if isFlip && !guiDisplayAdopted() {
+		initFramebufferConsole()
 	}
 
 	// Board-specifiek nawerk: op de Pi's start hier het klokbeleid +
@@ -656,16 +677,6 @@ func main() {
 	fmt.Printf("memory: HOP itself has %s — %s\n", hopBudget(), hopUsage())
 	slots.SetKernMem(hopUsage)
 
-	// Zonder extern netwerk kan de agent/leader niet luisteren: net.SocketFunc is
-	// nil, dus agentboot.Run zou meteen falen en fail("agent") de node alsnog
-	// permanent hangen — ná een misleidend HOPOS_AGENT_UP. Degradeer echt: de
-	// interne switch, klok, storage en dvfs draaien al; blijf headless leven
-	// (een reboot of latere link herstelt) i.p.v. de agent te starten en te faulten.
-	if netErr != nil {
-		park(fmt.Sprintf("hop: headless — no external network, agent/leader not started; node %s stays alive HOPOS_NODE_HEADLESS",
-			cfg.Node.ID))
-	}
-
 	// De auth-poort (zie hopos.apikey hierboven): zonder sleutel en zonder
 	// expliciete opt-out gaat de API niet open. De node blijft leven — switch,
 	// klok, storage en dvfs draaien al — zodat dit een configuratiefout is die
@@ -689,6 +700,11 @@ func main() {
 	// De node-watchdog: één beleid voor elk board (watchdog.go), ná boardWarn
 	// zodat een board dat zijn WDT-blok eerst moet bewijzen (de hart-probe op
 	// de LicheeRV) die uitslag heeft.
+	// Een verloren adres op een draaiende node (DHCPNAK, ander adres, lease
+	// niet meer te verlengen): de stack kan niet van adres wisselen, dus
+	// HOP-leven = node-leven — de canary houdt zijn pets in en het ijzer
+	// reset. Na de boot wacht dezelfde retry-lus hierboven op het netwerk.
+	hopnet.AddressLost = requestNodeReset
 	go nodeCanary()
 
 	// De flip is pas écht geland als de agent gaat draaien: recorder leeg.
@@ -753,4 +769,18 @@ func dumpBlackBox() {
 	fmt.Print(string(prev))
 	fmt.Printf("\n--- end of the previous boot's console ---\n")
 	conlog.Mute(false)
+}
+
+// initFramebufferConsole starts the console only when no resident display owns it.
+func initFramebufferConsole() {
+	if d, ok := board.Current().Framebuffer(); ok {
+		fb.Init(d)
+		fb.Header(bunny...) // vaste bunny bovenin, de logs scrollen eronder
+		fmt.Printf("console: framebuffer %dx%d @ %#x, %d bpp — mirroring log to display\n",
+			d.Width, d.Height, uint64(d.Base), d.BPP)
+		// Live meetregels rechts naast de bunny (Derek 15-07): kern-mem,
+		// datum, tijd — met seconden, elke seconde ververst: een bevroren
+		// klok = een hangende kern, in één oogopslag.
+		go screenStatus()
+	}
 }

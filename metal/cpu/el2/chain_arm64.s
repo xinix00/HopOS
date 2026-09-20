@@ -4,9 +4,10 @@
 //
 //   - EL1 (QEMU virt, later de Pi's): HVC #2 naar de handler die InitVectors
 //     op de revoke-vectoren legde (slot 0x400, synchrone exception uit een
-//     lager EL). LET OP: dat pad veegt de caches nog NIET — op QEMU (TCG,
-//     geen cachemodel) is dat onzichtbaar, maar het is een bekend gat voor de
-//     eerste EL1-board-flip op ijzer.
+//     lager EL). That handler disables EL1 translation/caching and runs
+//     I_HYGIENE before fetching the new entry, just like the VHE path below.
+//     It does not clean the old kernel's D-cache; placement writes the new
+//     image through device memory, outside the old kernel's cached window.
 //   - EL2 mét VHE (de M4: E2H staat er vast op 1): een HVC zou hier op het
 //     same-level-slot (0x200) landen, waar het board zijn fault-dumper heeft.
 //     Op EL2 is er ook niemand nodig — we doen zelf wat m1n1 vóór élke
@@ -77,6 +78,7 @@ sweep:
 	// draaide. Zelfde blok als de app-drop en de SMP-secundaire (hygiene.h,
 	// mét de Altra-les van 15-07 erin) — drie ingangen, één implementatie.
 	I_HYGIENE
+	MOVD	$0, R1		// x1 = 0: "geen firmware" voor een UEFI-stub (init.s fwentry)
 	JMP	(R16)
 hvc:
 	MOVD	R16, R2		// de handler verwacht entry in x0, firmware-x0 in x1

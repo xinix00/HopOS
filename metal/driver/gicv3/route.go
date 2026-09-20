@@ -19,7 +19,10 @@ func lineReg(gicd, gicr uintptr, id int) (uintptr, uintptr, uint32) {
 }
 
 // GICD_IROUTER[32] starts at 0x6100: the INTID-indexed base is 0x6000.
-// Route and group are published before enabling the interrupt.
+// Route and group are published before enabling the interrupt. Group 1:
+// the IGROUPR bit is SET (0 = Group 0, which is the secure world on a DS=0
+// GIC and unreachable for us; on DS=0 the write is WI and the bit already
+// reads 1 for every non-secure interrupt).
 func enableLine(gicd, gicr uintptr, id int, mpidr uint64) error {
 	if id < 0 || id >= firstSpecial {
 		return fmt.Errorf("gicv3: invalid interrupt %d", id)
@@ -28,7 +31,7 @@ func enableLine(gicd, gicr uintptr, id int, mpidr uint64) error {
 	if id >= firstSPI {
 		dev.Write64(gicd+0x6000+8*uintptr(id), mpidr&affMask)
 	}
-	dev.Write32(base+0x80+4*n, dev.Read32(base+0x80+4*n)&^bit)
+	dev.Write32(base+0x80+4*n, dev.Read32(base+0x80+4*n)|bit)
 	dev.MB()
 	dev.Write32(base+0x100+4*n, bit)
 	dev.MB()

@@ -80,7 +80,7 @@ TEXT smpEL2Tramp(SB),NOSPLIT|NOFRAME,$0
 	CMP	$0, R2
 	BEQ	s2none
 
-	// VTCR_EL2: 4KB-granule, 32-bit IPA, PS = min(PARange, 44-bit) —
+	// VTCR_EL2: 4KB-granule, 39-bit IPA, PS = min(PARange, 44-bit) —
 	// identiek aan el2.s (zie dáár waarom: hoge partities + silicium-klem).
 	WORD	$0xd5380705	// mrs x5, id_aa64mmfr0_el1
 	AND	$0xF, R5
@@ -88,7 +88,7 @@ TEXT smpEL2Tramp(SB),NOSPLIT|NOFRAME,$0
 	BLT	vtcrps2		// PARange < 44-bit: het silicium-maximum
 	MOVD	$4, R5		// anders klemmen op 44-bit (16TB)
 vtcrps2:
-	MOVD	$0x80003560, R4	// VTCR zonder PS-veld
+	MOVD	$0x80003559, R4	// VTCR zonder PS-veld
 	ORR	R5<<16, R4, R4
 	WORD	$0xd51c2144	// msr vtcr_el2, x4
 
@@ -97,6 +97,7 @@ vtcrps2:
 	LSL	$48, R6, R5
 	ORR	R2, R5, R5
 	WORD	$0xd51c2105	// msr vttbr_el2, x5
+	ISB	$15		// select this VMID before its TLBI (VTTBR context synchronization)
 	WORD	$0xd50c87df	// tlbi vmalls12e1
 	DSB	$15
 
@@ -109,7 +110,7 @@ vtcrps2:
 	// Apple een FIQ, en die hoort op EL2 te landen (switch.s ackt hem) — nooit
 	// in de app. Zonder FMO stond hij hier alleen op de eerste core van een
 	// app, en kreeg de tweede core hem als EL1-exception (M4, 02-09).
-	MOVD	$1<<31, R4
+	MOVD	$HCR_BASE, R4	// RW (+E2H onder VHE, sysreg.h)
 	ORR	$1<<19, R4, R4
 	ORR	$1<<3, R4, R4
 	ORR	$1, R4, R4
@@ -126,9 +127,10 @@ s2none:
 	// waar core 0 mee draait; daarna de eigen TLB schoon beginnen.
 	MOVD	$0, R4
 	WORD	$0xd51c2104	// msr vttbr_el2, x4
+	ISB	$15		// select this VMID before its TLBI (VTTBR context synchronization)
 	WORD	$0xd50c87df	// tlbi vmalls12e1
 	DSB	$15
-	MOVD	$1<<31, R4
+	MOVD	$HCR_BASE, R4	// RW (+E2H onder VHE, sysreg.h)
 	WORD	$0xd51c1104	// msr hcr_el2, x4
 
 s2done:

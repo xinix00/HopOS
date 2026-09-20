@@ -137,6 +137,11 @@ func (h *HC) Start(dmaBase, dmaSize uintptr) error {
 	}
 
 	h.nSlots = h.slots
+	// Only directly attached devices are supported: one slot per root port.
+	// Extra hardware slots cannot be used without hub routing support.
+	if h.nSlots > h.ports {
+		h.nSlots = h.ports
+	}
 	if h.nSlots > maxDevices {
 		h.nSlots = maxDevices
 	}

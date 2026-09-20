@@ -4,8 +4,8 @@ package vitals
 // pad loopt via HOP's heartbeat naar de leader (board.TempMilliC → agent →
 // /v1/agents). Vitals bevraagt dus de agent-API — elke agent proxyt de
 // leader-API door, dus HOP_ADDR mag gewoon naar de eigen node (10.100.0.1:8080)
-// wijzen. Auth is HOP's HMAC-schema; zonder HOP_KEY blijft temperatuur n/a en
-// werkt al het andere gewoon. De handtekening moet byte-voor-byte gelijk zijn
+// wijzen. With HOP_KEY, requests use HOP HMAC authentication; without a key,
+// the API is queried unsigned for explicitly open nodes. De handtekening moet byte-voor-byte gelijk zijn
 // aan hop/pkg/httputil.Sign (zelfde schema als hop-os-surf's app/hopapi).
 
 import (
@@ -13,7 +13,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"strings"
+	"net/url"
 	"sync"
 	"time"
 
@@ -37,13 +37,10 @@ type tempCache struct {
 	v  int
 }
 
-// get geeft de nodetemperatuur in milli-°C; 0 = onbekend (geen key, geen
+// get geeft de nodetemperatuur in milli-°C; 0 = onbekend (geen
 // sensor, of de API antwoordt niet — voor een meetinstrument is "geen cijfer"
 // beter dan een oud cijfer dat vers oogt).
 func (t *tempCache) get(cfg Config) int {
-	if cfg.HopKey == "" {
-		return 0
-	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if time.Since(t.at) < 5*time.Second {
@@ -54,15 +51,17 @@ func (t *tempCache) get(cfg Config) int {
 	return t.v
 }
 
-// fetchTemp haalt /v1/agents op en kiest de eigen node: het agent-endpoint
-// bevat het node-IP (HOPOS_HOST). Geen match — bijvoorbeeld zonder
-// HOPOS_HOST — dan de heetste van het cluster: voor een throttle-meting is te
-// heet gemeld beter dan niets.
+// fetchTemp reads the selected node's temperature. With no host configured,
+// only a single-node response can be attributed safely.
 func fetchTemp(cfg Config) int {
 	const path = "/v1/agents"
+	var headers leanhttp.Header
+	if cfg.HopKey != "" {
+		headers = leanhttp.Header{"X-Hop-Auth": sign(cfg.HopKey, "GET", path, nil)}
+	}
 	resp, err := leanhttp.Do(leanhttp.Call{
 		URL:     "http://" + cfg.HopAddr + path,
-		Header:  leanhttp.Header{"X-Hop-Auth": sign(cfg.HopKey, "GET", path, nil)},
+		Header:  headers,
 		Timeout: 5 * time.Second,
 	})
 	if err != nil {
@@ -76,16 +75,16 @@ func fetchTemp(cfg Config) int {
 	if err := json.NewDecoder(resp.Body).Decode(&agents); err != nil {
 		return 0
 	}
-	max := 0
 	for _, a := range agents {
-		if cfg.Host != "" && strings.Contains(a.Endpoint, cfg.Host) {
+		endpoint, err := url.Parse(a.Endpoint)
+		if err == nil && cfg.Host != "" && endpoint.Hostname() == cfg.Host {
 			return a.TempMilliC
 		}
-		if a.TempMilliC > max {
-			max = a.TempMilliC
-		}
 	}
-	return max
+	if cfg.Host == "" && len(agents) == 1 {
+		return agents[0].TempMilliC
+	}
+	return 0
 }
 
 // sign bouwt HOP's request-handtekening: HMAC-SHA256 over

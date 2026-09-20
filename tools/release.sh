@@ -101,6 +101,17 @@ BUILD_ONLY=1 "$DIR/image/uefi-run.sh" agent >/dev/null
 cp "$DIR/uefi-esp-agent/EFI/BOOT/BOOTAA64.EFI" "$DIST/"
 gzimg "$DIR/metal/out/hopos-uefi.img" hopos-uefi.img
 
+# 2b. De Orion O6N: hetzelfde UEFI-recept met BOARD=o6n (board/o6n), als
+#     dd-bare stick in beide smaken. De PE apart erbij, voor een bestaande stick.
+echo ">> hopos-o6n-headless.img.gz + BOOTAA64-o6n-headless.EFI (BOARD=o6n uefi-run.sh agent, GUI=0)" >&2
+BOARD=o6n GUI=0 "$DIR/image/uefi-run.sh" agent >/dev/null
+cp "$DIR/uefi-esp-o6n-agent/EFI/BOOT/BOOTAA64.EFI" "$DIST/BOOTAA64-o6n-headless.EFI"
+gzimg "$DIR/metal/out/hopos-o6n.img" hopos-o6n-headless.img
+echo ">> hopos-o6n.img.gz + BOOTAA64-o6n.EFI (BOARD=o6n uefi-run.sh agent)" >&2
+BOARD=o6n "$DIR/image/uefi-run.sh" agent >/dev/null
+cp "$DIR/uefi-esp-o6n-agent/EFI/BOOT/BOOTAA64.EFI" "$DIST/BOOTAA64-o6n.EFI"
+gzimg "$DIR/metal/out/hopos-o6n.img" hopos-o6n.img
+
 # 3. Pi-zips: drop-in op de SD-bootfs — precies de bestandsnamen die de
 #    firmware verwacht (config.txt wijst de kernel aan), niets hernoemen;
 #    alleen de zip-naam draagt de smaak. Zelfde volgorde: headless, dan gui.
@@ -242,6 +253,7 @@ NOTES="Prebuilt, signed boot images — https://gethop.org/hopos/ for the 5-minu
 
 **Images — flash and boot.** \`gunzip\`, \`dd\` to an SD card or USB stick, done: firmware/boot chain is already on it, nothing to rename or copy. The boot partition is plain FAT, so it mounts on macOS/Windows/Linux afterwards — \`hopos.cfg\` stays editable and a kernel update is a file copy.
 
+- **hopos-o6n.img.gz** — Radxa Orion O6 / O6N (CIX P1), dd to a USB stick; boots through the board's UEFI (ACPI mode)
 - **hopos-uefi.img.gz** — any UEFI arm64 box, dd to a USB stick
 - **hopos-rpi5.img.gz** — Raspberry Pi 5
 - **hopos-rpi4.img.gz** — Raspberry Pi 4

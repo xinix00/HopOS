@@ -21,7 +21,24 @@ import (
 // FlipFromURL haalt een flip-bundel op, controleert zijn SHA-256 tegen wat de
 // platform-config zegt, en flipt erin. Keert alleen terug met een fout; de node
 // draait dan gewoon door op de zittende kern.
+// movingWindowGuard: een geadopteerde kern op een verhuizend venster (UEFI)
+// heeft geen eigen app-core-regio — de parkeerlussen, mailboxen en switch-
+// code leven in de carve van de EERSTE kern, en zijn plan wijst naar zijn
+// eigen (lege) carve. Een tweede flip op rij leest dan bij EnsureVectors zijn
+// eigen mailboxen als "unparked" en panict (QEMU 17-09; de M4-dood van
+// 06-09). Tot de adoptie die regio overneemt of de cores herparkeert: één
+// flip per boot, en een nette weigering vóór er iets wordt aangeraakt.
+func movingWindowGuard() error {
+	if curGen > 0 && BoardFootprint != nil && !BoardPersistentCages {
+		return fmt.Errorf("kernflip: this kernel was itself flipped in (generation %d); a further flip on a moving-window board needs a reboot first", curGen)
+	}
+	return nil
+}
+
 func FlipFromURL(url, sha string) error {
+	if err := movingWindowGuard(); err != nil {
+		return err
+	}
 	defer slots.LifecycleWindow()()
 	var win, total, staging uint64
 	defer func() {
@@ -37,7 +54,7 @@ func FlipFromURL(url, sha string) error {
 			return nil, err
 		}
 		var ok bool
-		staging, _, ok = layout.StageAddr(win, total-handoffTail, n)
+		staging, _, ok = layout.StageAddr(win, windowRAM(total), n)
 		if !ok {
 			return nil, fmt.Errorf("kernflip: bundle does not fit the new window")
 		}
@@ -64,12 +81,50 @@ func FlipFromURL(url, sha string) error {
 
 // A reusable cold reservation includes the handoff, just as an app's
 // reservation includes its ABI tail. Its size stays constant across flips.
+// BoardFootprint, als een board hem zet, is wat een kern op dit board
+// werkelijk beslaat: Go-RAM plús de carve erachter (UEFI: 128 + 32 MB). De
+// flip leent, veegt en reserveert dan die hele voetafdruk — niet alleen de
+// Go-RAM plus staart. Zonder hook stond de carve van een geflipte kern
+// buiten het geleende venster: ongeveegd (parkeer-mailboxen vol rommel →
+// "empty flip has an unparked core") en voor de pool gewoon vrij.
+var BoardFootprint func() uint64
+
+// BoardPersistentCages promises that incoming plans preserve the executing
+// app-core administration and exclude its owner from allocation every boot.
+var BoardPersistentCages bool
+
+// BoardScratchInWindow: de boot-scratch van dit board ligt ín het kernvenster
+// (UEFI: b+scratchOff), dus een geleend venster heeft zijn eigen scratch en
+// het handoff-paar moet dáár landen. Boards met een cpuinit-vaste scratch
+// (Apple, Pi, RK3566, QEMU, LicheeRV) lezen altijd hetzelfde adres; daar
+// verhuist het paar niet — de M4 bootte anders "clean" over zijn bewoners
+// (18-09, generatie 5→6: pointer in het nieuwe venster, lezer op de vaste).
+var BoardScratchInWindow bool
+
+func kernelRAMSize() uint64 {
+	start, end := runtime.MemRegion()
+	return uint64(end - start)
+}
+
 func kernelWindowSize() uint64 {
+	if BoardFootprint != nil {
+		if fp := BoardFootprint(); fp >= kernelRAMSize()+handoffTail {
+			return fp
+		}
+	}
 	if cold := layout.Kernel(); cold.Size != 0 {
 		return cold.Size
 	}
-	start, end := runtime.MemRegion()
-	return uint64(end-start) + handoffTail
+	return kernelRAMSize() + handoffTail
+}
+
+// windowRAM is de Go-RAM van de nieuwe kern in een geleend venster: de
+// handoff-staart ligt er direct boven (Adopted toetst daarop).
+func windowRAM(total uint64) uint64 {
+	if BoardFootprint != nil {
+		return kernelRAMSize()
+	}
+	return total - handoffTail
 }
 
 // Flip plaatst de bundel in een uit de pool geleend venster en springt erin.
@@ -90,6 +145,9 @@ func kernelWindowSize() uint64 {
 const kernHeader = 64
 
 func Flip(bundle []byte) error {
+	if err := movingWindowGuard(); err != nil {
+		return err
+	}
 	defer slots.LifecycleWindow()()
 	bun, err := ParseBundle(bundle)
 	if err != nil {
@@ -100,6 +158,21 @@ func Flip(bundle []byte) error {
 
 // The URL path has already reserved and scrubbed its window. The byte-slice
 // entry point (embedded fixtures) borrows one after validation instead.
+// BoardHandoff, als een board hem zet, draait vlak vóór de sprong met de
+// basis van het nieuwe venster: wat het board de nieuwe kern buiten het
+// handoff-blob om wil meegeven. UEFI (board/uefi FwFactsCopy) kopieert zo
+// zijn firmware-feiten (SystemTable, memory map, GOP, hopos.cfg) naar de
+// carve van het nieuwe venster — de geflipte kern heeft geen stub die ze
+// van de firmware haalt. Boards zonder zo'n behoefte laten hem nil.
+var BoardHandoff func(newBase uintptr)
+
+// BoardOldCarve, als een board hem zet, geeft bij adoptie het stuk van de
+// vórige kern dat NIET terug de pool in mag: zijn carve (parkeerlussen,
+// mailboxen, stage-2 van bewoners). De vorige kern draaide met dezelfde
+// board-indeling, dus het board kan het uit OldBase afleiden. Zonder hook
+// gaat alleen het venster terug (vaste-venster-boards: zelfde carve).
+var BoardOldCarve func(oldBase, oldSize uint64) (base, size uint64)
+
 func flip(bun *Bundle, sum, win, total, stagingOffset uint64) error {
 	stage(stWindowHeld)
 
@@ -250,7 +323,7 @@ func flip(bun *Bundle, sum, win, total, stagingOffset uint64) error {
 	// nieuwe kern declareert exact zijn venster (de handoff-staart valt er
 	// bewust buiten).
 	dev.Write64(uintptr(win+(syms[place.SymRAMStart].Value-bun.LinkLoad)), win)
-	dev.Write64(uintptr(win+(syms[place.SymRAMSize].Value-bun.LinkLoad)), total-handoffTail)
+	dev.Write64(uintptr(win+(syms[place.SymRAMSize].Value-bun.LinkLoad)), windowRAM(total))
 
 	// Het handoff-blob, boven de RAM-declaratie van de nieuwe kern. De
 	// conntrack gaat mee: de apps overleven de wissel, dus hun VERBINDINGEN
@@ -284,7 +357,7 @@ func flip(bun *Bundle, sum, win, total, stagingOffset uint64) error {
 		return fmt.Errorf("kernflip: %w", err)
 	}
 	stage(stCaptured)
-	hb := uintptr(win + total - handoffTail)
+	hb := uintptr(win + windowRAM(total))
 	dev.Clear(hb, handoffTail)
 	dev.Copy(hb, blob)
 
@@ -299,15 +372,27 @@ func flip(bun *Bundle, sum, win, total, stagingOffset uint64) error {
 	// De veeg vóór de plaatsing blijft wél nodig, en om een andere reden: die
 	// gaat over de vórige huurder van dit venster, en dát was een app-core die
 	// er cacheable in woonde.
-	dev.Write64(layout.HandoffPtrPA(), uint64(hb))
-	dev.Write64(layout.HandoffPtrPA()+8, handMagic)
+	// Het pointer/magic-paar hoort op de boot-scratch van het NIEUWE venster:
+	// dáár kijkt Adopted() in de nieuwe kern (zijn plan is zijn eigen
+	// venster). Op boards met een vast venster is dat dezelfde scratch als de
+	// onze; op UEFI leent de flip een ander venster (17-09: de geflipte kern
+	// zag geen handoff en bootte "clean" — agent-staat kwijt).
+	ptrPA := layout.HandoffPtrPA()
+	if s := ownRamStart(); BoardScratchInWindow && s != 0 && uintptr(win) != s {
+		ptrPA = uintptr(win) + (ptrPA - s)
+	}
+	dev.Write64(ptrPA, uint64(hb))
+	dev.Write64(ptrPA+8, handMagic)
 	// En de pointer-lijn zelf ook: die 64-byte cachelijn deelt hij op de
 	// boot-scratch met woorden die cpuinit en de parkeerstubs straks met de
 	// MMU uit beschrijven (DTBPtr, MPIDR, HopAlive) — blijft onze lijn dirty
 	// hangen, dan draait een latere eviction die verse waarden stil terug.
-	dev.CleanInv(layout.HandoffPtrPA(), 16)
+	dev.CleanInv(ptrPA, 16)
 	dev.MB()
 
+	if BoardHandoff != nil {
+		BoardHandoff(uintptr(win))
+	}
 	stage(stHandoff)
 	entry := win + (bun.Entry - bun.LinkLoad)
 	fmt.Printf("kernflip: %d MB placed at %#x (+%d relocs), %d resident(s), %d NAT flow(s) and %d B of agent state handed over, jumping to %#x — HOPOS_FLIP_JUMP\n",

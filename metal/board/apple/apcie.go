@@ -128,6 +128,43 @@ func poll32(a uintptr, mask, want uint32, d time.Duration) bool {
 // niet geprobeerd.
 func PCIeUp() string { return pcieReport }
 
+// portBases: het registerblok van elke poort zoals InitPCIe hem vond (0 = niet
+// opgebracht); PortBase geeft hem aan wie de poort verder bedient (MSI).
+var portBases [8]uintptr
+
+// PortBase geeft het registerblok van rootpoort port (0 = onbekend): wat
+// InitPCIe vond, of anders rechtstreeks uit de ADT — een geflipte kern treft
+// de PCIe al opgebracht aan en slaat InitPCIe over.
+func PortBase(port int) uintptr {
+	if port < 0 || port >= len(portBases) {
+		return 0
+	}
+	if portBases[port] != 0 {
+		return portBases[port]
+	}
+	t, ok := ADT()
+	if !ok {
+		return 0
+	}
+	chain, ok := t.PathTrace(apciePath)
+	if !ok {
+		return 0
+	}
+	node := chain[len(chain)-1]
+	nPorts := int(t.U32(node, "#ports", 0))
+	_, regSize, _ := t.Prop(node, "reg")
+	nRegs := int(regSize / 16)
+	if nPorts == 0 || nRegs <= apcieSharedRegs {
+		return 0
+	}
+	base, _, ok := t.RegAt(chain, port*((nRegs-apcieSharedRegs)/nPorts)+apcieSharedRegs)
+	if !ok {
+		return 0
+	}
+	portBases[port] = uintptr(base)
+	return portBases[port]
+}
+
 // InitPCIe brengt de PCIe-controller en zijn poorten op. Idempotent: draait de
 // controller al — omdat m1n1 ons boot en het al deed — dan blijft alles staan.
 // Dat onderscheid is geen luxe: de bring-up twee keer doen zou een werkende
@@ -250,6 +287,9 @@ func InitPCIe() error {
 		_ = ltssm // alleen de t602x-tak gebruikt hem
 
 		cfg := configBase + uintptr(port)<<15
+		if port < len(portBases) {
+			portBases[port] = pb
+		}
 		step(fmt.Sprintf("apcie: port %d base %#x phy %#x config %#x", port, pb, pphy, cfg))
 		if err := initPort(t, bridge, pb, pphy, cfg, apply); err != nil {
 			return err

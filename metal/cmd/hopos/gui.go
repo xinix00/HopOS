@@ -16,5 +16,7 @@ import (
 )
 
 func init() {
-	slots.RegisterGrant(slots.GrantHooks{Env: fbgrant.Env, Arm: fbgrant.Arm, Release: fbgrant.Release})
+	slots.RegisterGrant(slots.GrantHooks{Adopt: fbgrant.Adopt, Env: fbgrant.Env, Arm: fbgrant.Arm, Release: fbgrant.Release})
 }
+
+func guiDisplayAdopted() bool { return fbgrant.Holder() != 0 }

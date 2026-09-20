@@ -12,6 +12,7 @@ package hop
 import (
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/xinix00/HopOS/metal/v2/board"
@@ -148,7 +149,6 @@ func (machine) ProbeNIC() (netdev.Device, net.HardwareAddr, error) {
 	if err := nic.Init(uintptr(apple.NetDMAPA), netDMASize); err != nil {
 		return nil, nil, err
 	}
-
 	// Een lease halen is meteen het bewijs dat DMA beide kanten op werkt:
 	// DISCOVER de deur uit, OFFER binnen. Mislukt hij, dan zeggen de tellers van
 	// de ontvangstketen wat er wél gebeurde.
@@ -159,8 +159,32 @@ func (machine) ProbeNIC() (netdev.Device, net.HardwareAddr, error) {
 	}
 	lease = l
 
+	// De NIC-interrupt, eenmalig en pas ná een geslaagde probe (een retry
+	// maakt een nieuwe driver-instantie; de bedrading hoort bij de laatste).
+	// Ná de TCP-console (HOPOS_CONPORT_UP komt na het netwerk): elke stap is
+	// dan te volgen — een val vóór de console laat niets na (bundel 18).
+	sel := DefaultNICIRQ
+	if v := configAll("hopos.nicirq"); len(v) > 0 {
+		sel = v[0]
+	}
+	if sel == "auto" {
+		irqOnce.Do(func() {
+			go func() {
+				time.Sleep(15 * time.Second)
+				if err := wireNICIRQ(nic); err != nil {
+					fmt.Printf("irq: NIC interrupt not wired (%v) — RX stays polled\n", err)
+				}
+			}()
+		})
+	} else {
+		fmt.Println("irq: NIC interrupt off (hopos.nicirq=0) — RX stays polled")
+	}
 	return nic, mac, nil
 }
+
+var (
+	irqOnce sync.Once
+)
 
 // Net is het IP-plan: wat de DHCP-server gaf. Zonder lease blijft het leeg en
 // boot HopOS headless — de eerlijke uitkomst, geen verzonnen statisch adres.
@@ -174,3 +198,16 @@ func (machine) Net() board.NetConfig {
 // DHCPLease vult board.LeaseHolder: hopnet start hiermee de renewal, zodat de
 // lease niet verloopt op een node die weken aan staat.
 func (machine) DHCPLease() (leandhcp.Lease, bool) { return lease, lease.Acquired }
+
+// Config: de config-lezer van de kern (cmd/hopos), die óók de ingebakken
+// config kent. apple.BootParamAll leest alleen het param-blok van een loader,
+// en zonder loader (het geïnstalleerde bootobject, elke flip) is dat leeg —
+// daardoor deed hopos.nicirq= op dit board nooit iets (19-09).
+var Config func(key string) []string
+
+func configAll(key string) []string {
+	if Config != nil {
+		return Config(key)
+	}
+	return apple.BootParamAll(key)
+}

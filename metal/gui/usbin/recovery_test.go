@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/xinix00/HopOS/metal/v2/gui/driver/usb/hid"
+	"github.com/xinix00/HopOS/metal/v2/gui/driver/usb/xhci"
 )
 
 func TestForgetControllerReleasesInputAndInvalidatesAllHandles(t *testing.T) {
@@ -49,5 +50,22 @@ func TestEmitDropsBufferedEventsWithoutSink(t *testing.T) {
 	m.emit()
 	if len(m.evs) != 0 {
 		t.Fatalf("eventbuffer zonder sink hield %d events vast", len(m.evs))
+	}
+}
+
+func TestNonHIDPortDoesNotPollOrDetachAndRecoveryForgetsIt(t *testing.T) {
+	m := New(func(e hid.Event) { t.Fatalf("ignored non-HID emitted input: %+v", e) })
+	hc := new(xhci.HC)
+	ignored := &port{}
+	known := map[int]*port{1: ignored}
+	m.ports[hc] = known
+	m.Poll() // A nil Device marks a successfully released, unsupported device.
+	m.release(ignored)
+	if len(known) != 1 {
+		t.Fatal("ignored device lost its connected-port marker")
+	}
+	m.forgetController(known)
+	if len(known) != 0 {
+		t.Fatal("controller recovery did not allow re-enumeration")
 	}
 }

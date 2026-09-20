@@ -62,7 +62,7 @@ Defaults below refer to code behavior unless a template default is explicitly st
 | `hopos.idleyield` | `1` | Force the application's idle-yield path for diagnostics. |
 | `hopos.idlestat` | `1` | Enable idle statistics output. |
 
-`hopos.nvmebench=1` enables a boot-time disk benchmark that performs writes. It belongs in a controlled storage test, not an ordinary node template. Board-specific settings belong in [boards and drivers](boards-drivers.md).
+The UEFI stub reads at most 16 KiB of `hopos.cfg` (builds before 17 September 2026 read 4 KiB and silently dropped the rest; the GUI template is 8 KiB). `hopos.nvmewipe=1` zeroes the first and last MiB of the HopOS disk window at boot, removing both GPT copies so firmware stops booting a leftover OS from the NVMe; remove the line after one boot. `hopos.nvmebench=1` enables a boot-time disk benchmark that performs writes. It belongs in a controlled storage test, not an ordinary node template. Board-specific settings belong in [boards and drivers](boards-drivers.md).
 
 The watchdog's flip-boot grace is two minutes of raw architectural counter time, shared across early bring-up and the initial canary phase. Cold boot retains its existing unlimited bring-up policy until first agent liveness. Subsequent pets require fresh self-connections to the agent. This does not test physical NIC ingress; see [status](status.md) for hardware reset evidence.
 
@@ -79,7 +79,7 @@ The management schema comes from HOP, pinned to `v1.0.2` in this tree. Use `driv
 | `artifacts[].match` | String map; unrestricted when absent | Attribute equality constraints, such as `node.arch: arm64` or `riscv64`. |
 | `affinity` | String map | Job-level node attribute constraints; all must match. |
 | `count` | Integer; `1` | Desired number of instances. |
-| `memory_limit` | Positive byte count | Required for a usable HopOS partition; 0 is rejected by the partition allocator. Rounded up to 2 MiB. Includes image and a 2 MiB ABI tail, not just heap. The rounded partition must be at least 4 MiB; the ELF and runtime need additional usable space. |
+| `memory_limit` | Positive byte count | Required for a usable HopOS partition; 0 is rejected by the partition allocator. Rounded up to 2 MiB. Includes image and a 2 MiB ABI tail, not just heap. The rounded partition must be at least 4 MiB; the ELF and runtime need additional usable space. Large-partition support in the current working tree removes the old ARM 768 MiB limit: placement is bounded by contiguous free memory and the architecture address window. If translation tables outgrow their existing storage, the same physical claim reserves another 2 MiB outside app-visible RAM; small partitions have no such overhead. See [memory ownership](lifecycle.md). |
 | `cpu_shares` | Integer; 0/absent becomes `1024` | 1024 per whole core. The agent rounds positive fractional-core requests upward. |
 | `ports` | Name → integer | Node port publication. `0` requests a dynamic port. The assigned port is passed as `ER_PORT_<NAME>`. |
 | `env` | String → string | Application environment. |

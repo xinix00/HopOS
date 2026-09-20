@@ -53,6 +53,7 @@ func init() { board.Use(machine{}) }
 // Conformiteit compile-time bewezen (Derek, 18-07): zonder deze regel leunt het
 // Board-contract puur op board.Use() at runtime.
 var _ board.Board = machine{}
+var _ board.NICInterrupter = machine{}
 
 // cpuOf vertaalt een logische HopOS-core (1..N) naar de cpu-index van de
 // boom; -1 als hij niet bestaat. Core 0 is HOP's eigen cpu. Dezelfde volgorde

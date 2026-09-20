@@ -35,8 +35,10 @@ import (
 	"github.com/xinix00/HopOS/metal/v2/cpu/drbg"
 	"github.com/xinix00/HopOS/metal/v2/cpu/idle"
 	"github.com/xinix00/HopOS/metal/v2/cpu/trng"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 	"github.com/xinix00/HopOS/metal/v2/driver/conlog"
 	"github.com/xinix00/HopOS/metal/v2/driver/fb"
+	"github.com/xinix00/HopOS/metal/v2/driver/ns16550"
 	"github.com/xinix00/HopOS/metal/v2/driver/pl011"
 	"github.com/xinix00/HopOS/metal/v2/fw/acpi"
 	"github.com/xinix00/HopOS/metal/v2/fw/bootcfg"
@@ -70,6 +72,9 @@ func Base() uintptr { return uintptr(ramStartAsm()) }
 
 // ramStartAsm leest runtime/goos.RamStart (cpu_arm64.s).
 func ramStartAsm() uint64
+
+// sctlrEL1 leest SCTLR_EL1 (cpu_arm64.s): bit 0 = MMU aan.
+func sctlrEL1() uint64
 
 // uefiSlots is de kandidatentabel van de stub, gepatcht door mkkernel -pe:
 // [0]=aantal, [1]=stride in bytes tussen de payload-varianten in de geladen
@@ -110,7 +115,7 @@ var memmapBuf [memmapCap]byte
 // hexLine is de regelbuffer van de stub voor de vrije-regio-dump bij "RAM
 // WINDOW BUSY" (UCS-2: 2×16 hexcijfers + spatie + \r\n + NUL). uint16 dwingt
 // de 2-byte-uitlijning af die OutputString-tekst nodig heeft.
-var hexLine [40]uint16
+var hexLine [80]uint16
 
 // gopInfo is het firmware-beeld, door de stub vóór ExitBootServices uit het
 // Graphics Output Protocol gehaald (asm-contract): [0] = lineaire
@@ -120,7 +125,7 @@ var hexLine [40]uint16
 var gopInfo [3]uint64
 
 // cfgCap moet gelijk zijn aan CFG_CAP in init.s (asm kent geen Go-constanten).
-const cfgCap = 0x1000
+const cfgCap = 0x4000 // 16KB — de gui-template is 8KB; met 4KB (t/m 17-09) verdween de tweede helft stil
 
 // cfgBuf/cfgLen: hopos.cfg van de ESP-root, door de stub vóór ExitBootServices
 // via het firmware-SimpleFileSystem gelezen (asm-contract, gopInfo-patroon:
@@ -381,6 +386,61 @@ var ramStackOffset uint = 0x100
 // de acpi-alignment-bug van 13-07 gevonden).
 var uartBase uintptr
 
+// uart16550/uartShift: de registerlayout van de SPCR-console — PL011 (Altra,
+// QEMU) of 16550 met een registerstap (DesignWare 8250 op de O6N, 32-bit-
+// stride). Beide poke-lagen zijn pure functies zonder init, dus veilig als
+// printk-hook.
+var (
+	uart16550 bool
+	uartShift uint
+)
+
+// earlyUART is de PL011 waarop de asm ná ExitBootServices zijn "K2"/"K1"-
+// markers zet en die hwinit1 meteen als console-spiegel neemt: een link-
+// time constante van het board (early_o6n.go: de debug-header van de Orion;
+// early_generic.go: 0 = geen). Vóór hwinit1 is er geen ACPI en dus geen
+// SPCR — dit is de enige stem in dat gat, en de reden dat een stille boot
+// nu in fases valt.
+//
+// uartMirror is een tweede PL011 waar printk óók naartoe schrijft: de
+// debug-header van een bord waarvan de SPCR een andere UART noemt (O6N:
+// UART2 op 0x040d0000). 0 = geen. Gezet via hopos.uart= (hwinit1) of door
+// een board-pakket (MirrorConsole).
+var uartMirror uintptr
+
+// MirrorConsole laat printk vanaf nu ook naar de PL011 op base schrijven.
+// Idempotent; base == de SPCR-UART is een no-op.
+func MirrorConsole(base uintptr) {
+	if base != 0 && base != uartBase {
+		uartMirror = base
+	}
+}
+
+// parseHex leest "0x..." of kale hex.
+func parseHex(s string) (uint64, bool) {
+	if len(s) > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X') {
+		s = s[2:]
+	}
+	if s == "" || len(s) > 16 {
+		return 0, false
+	}
+	var v uint64
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= '0' && c <= '9':
+			v = v<<4 | uint64(c-'0')
+		case c >= 'a' && c <= 'f':
+			v = v<<4 | uint64(c-'a'+10)
+		case c >= 'A' && c <= 'F':
+			v = v<<4 | uint64(c-'A'+10)
+		default:
+			return 0, false
+		}
+	}
+	return v, true
+}
+
 // acpiTables is de bij hwinit1 geparste tabellenset; Tables() geeft hem aan
 // de main (nil = parse mislukt — de main meldt en stopt).
 var acpiTables *acpi.Tables
@@ -388,8 +448,152 @@ var acpiTables *acpi.Tables
 // Tables geeft de bij boot geparste ACPI-tabellen.
 func Tables() *acpi.Tables { return acpiTables }
 
+// EarlyMark zet één teken op de vroege UART (asm, init.s): de meetlat van
+// de boot vóór en tijdens hwinit1. No-op zonder earlyUART.
+func EarlyMark(c byte)
+
+// fwFacts: de firmware-feiten die de stub vóór ExitBootServices verzamelde,
+// als blok in de carve (fwFactsOff, plan.go) zodat een GEFLIPTE kern — die
+// zonder firmware binnenkomt (init.s fwentry, x1 = 0) — ze terugvindt. De
+// koude boot publiceert ze in hwinit1, de geflipte boot herstelt ze daar,
+// vóór alles wat ze nodig heeft (extendVA, ACPI, GOP, config). Het blok ligt
+// buiten de Go-RAM (Device-gemapt): alleen 8-byte dev-toegang, geen memmove.
+//
+//	+0    magic "HOPFWFCT"   +8   sysTable      +16  imageHandle
+//	+24   memmapSize          +32  memmapDesc    +40  memmapVer
+//	+48   bootELVal           +56  gopInfo[3]    +80  cfgLen
+//	+88   kooi-feiten (cage_origin.go, 4 woorden)
+//	+0x1000 cfgBuf[:4K]        +0x2000 memmapBuf (memmapCap)
+//	+0x42000 cfgBuf[4K:]       (de rest van een config > 4KB)
+//
+// De indeling ligt VAST: de stick-kern die vandaag draait publiceert zo, en
+// een nieuwere geflipte kern moet dat blok kunnen lezen (17-09: een
+// verschoven map-offset = een crash bij elke flip; 20-09: een "reparatie"
+// die bootELVal naar +120 verhuisde las gopInfo van de stick-kern één woord
+// te vroeg en stierf in de boot — bundel 49). Nieuwe woorden komen ALTIJD
+// achteraan. Een langere config gaat in een staart die oude kernen nooit
+// schrijven en nieuwe alleen lezen als cfgLen daarom vraagt.
+const (
+	fwFactsMagic = 0x5443465746504f48 // "HOPFWFCT"
+	fwFactsCfg   = 0x1000
+	fwFactsCfg1  = 0x1000 // eerste 4KB van de config
+	fwFactsMap   = 0x2000
+	fwFactsCfg2  = fwFactsMap + memmapCap // config voorbij 4KB
+	fwFactsSize  = fwFactsCfg2 + cfgCap - fwFactsCfg1
+)
+
+func fwFactsPublish() {
+	b := Base() + fwFactsOff
+	persistentCage = reservedCarve(uint64(Base()), carveOff, carveSize, cageReservation{})
+	dev.Write64(b+cageFactsOffset, cageFactsTag)
+	dev.Write64(b+cageFactsOffset+8, cageFactsVersion)
+	dev.Write64(b+cageFactsOffset+16, persistentCage.Base)
+	dev.Write64(b+cageFactsOffset+24, persistentCage.Size)
+	dev.Write64(b+8, sysTable)
+	dev.Write64(b+16, imageHandle)
+	dev.Write64(b+24, memmapSize)
+	dev.Write64(b+32, memmapDesc)
+	dev.Write64(b+40, memmapVer)
+	dev.Write64(b+48, bootELVal)
+	for i, v := range gopInfo {
+		dev.Write64(b+56+uintptr(i)*8, v)
+	}
+	dev.Write64(b+80, cfgLen)
+	devCopyOut(b+fwFactsCfg, cfgBuf[:fwFactsCfg1])
+	devCopyOut(b+fwFactsMap, memmapBuf[:memmapSize])
+	devCopyOut(b+fwFactsCfg2, cfgBuf[fwFactsCfg1:])
+	dev.Write64(b, fwFactsMagic)
+	dev.MB()
+}
+
+func fwFactsRestore() bool {
+	b := Base() + fwFactsOff
+	if dev.Read64(b) != fwFactsMagic {
+		return false
+	}
+	var err error
+	persistentCage, err = decodeCageReservation(dev.Read64(b+cageFactsOffset), dev.Read64(b+cageFactsOffset+8), dev.Read64(b+cageFactsOffset+16), dev.Read64(b+cageFactsOffset+24), carveSize)
+	if err != nil {
+		panic(err)
+	}
+	sysTable = dev.Read64(b + 8)
+	imageHandle = dev.Read64(b + 16)
+	memmapSize = dev.Read64(b + 24)
+	memmapDesc = dev.Read64(b + 32)
+	memmapVer = dev.Read64(b + 40)
+	bootELVal = dev.Read64(b + 48)
+	for i := range gopInfo {
+		gopInfo[i] = dev.Read64(b + 56 + uintptr(i)*8)
+	}
+	cfgLen = dev.Read64(b + 80)
+	if cfgLen > cfgCap {
+		cfgLen = cfgCap
+	}
+	if memmapSize > memmapCap {
+		memmapSize = memmapCap
+	}
+	devCopyIn(cfgBuf[:fwFactsCfg1], b+fwFactsCfg)
+	devCopyIn(memmapBuf[:memmapSize], b+fwFactsMap)
+	if cfgLen > fwFactsCfg1 {
+		devCopyIn(cfgBuf[fwFactsCfg1:cfgLen], b+fwFactsCfg2)
+	}
+	return sysTable != 0
+}
+
+// FwFactsCopy (kernflip.BoardHandoff): het fwFacts-blok van dit venster naar
+// de carve van het nieuwe venster — daar zoekt de geflipte kern (Base() is
+// dan het nieuwe venster). Beide kanten Device-geheugen: per 8 bytes.
+func FwFactsCopy(newBase uintptr) {
+	src, dst := Base()+fwFactsOff, newBase+fwFactsOff
+	size := uintptr(fwFactsSize)
+	if !MapHigh(uint64(dst), uint64(size)) {
+		printkStr("kernflip: firmware facts NOT copied (new window unreachable)\n")
+		return
+	}
+	for off := uintptr(8); off < size; off += 8 { // magic als laatste
+		dev.Write64(dst+off, dev.Read64(src+off))
+	}
+	dev.Write64(dst, dev.Read64(src))
+	dev.MB()
+}
+
+func printkStr(s string) { earlySay(s) }
+
+// devCopyOut/devCopyIn: per 8 bytes (het blok is Device-geheugen).
+func devCopyOut(dst uintptr, src []byte) {
+	for i := 0; i < len(src); i += 8 {
+		var w uint64
+		for k := 0; k < 8 && i+k < len(src); k++ {
+			w |= uint64(src[i+k]) << (8 * k)
+		}
+		dev.Write64(dst+uintptr(i), w)
+	}
+}
+
+func devCopyIn(dst []byte, src uintptr) {
+	for i := 0; i < len(dst); i += 8 {
+		w := dev.Read64(src + uintptr(i))
+		for k := 0; k < 8 && i+k < len(dst); k++ {
+			dst[i+k] = byte(w >> (8 * k))
+		}
+	}
+}
+
 //go:linkname hwinit1 runtime/goos.Hwinit1
 func hwinit1() {
+	coldBoot := sysTable != 0 // capture before restoring the previous kernel's facts
+	// Firmware-feiten: een koude boot legt ze in de carve, een geflipte kern
+	// (sysTable nog 0, want geen stub) haalt ze daar vandaan. Vóór alles.
+	if sysTable != 0 {
+		fwFactsPublish()
+	} else if fwFactsRestore() {
+		earlySay("hwinit1: firmware facts restored from the carve (kernel flip)\n")
+	}
+	// De vroege UART is vanaf het eerste moment óók printk-bestemming: een
+	// panic in de runtime-init hieronder wordt dan gehoord.
+	if earlyUART != 0 {
+		uartMirror = earlyUART
+	}
 	ARM64.Init()
 	ARM64.EnableCache()
 	ARM64.InitGenericTimers(0, 0) // CNTFRQ is door de firmware gezet
@@ -409,14 +613,32 @@ func hwinit1() {
 	if sysTable != 0 {
 		extendVA()
 	}
-
+	if earlyUART != 0 {
+		earlySay("\nhwinit1: go runtime up, parsing ACPI\n")
+	}
 	if t, err := acpi.Parse(RSDP()); err == nil {
 		acpiTables = t
 		// MapHigh vóór gebruik: een onbereikbare UART laat de allereerste
 		// printk faulten — en de panic verdrinkt dan in dezelfde printk
 		// (Altra-meting 13-07: blauw scherm zonder tekst).
-		if base, _, err := t.SPCR(); err == nil && base != 0 && MapHigh(base, 0x1000) {
-			uartBase = uintptr(base)
+		// Op een bord met een vroege UART (O6N) is dát de console en blijft
+		// de SPCR-UART onaangeraakt: die wijst naar UART0/UART3, waarvan de
+		// SCP de klok dichthoudt — gemeten 09-09: elke write daarheen hield
+		// de bus vast tot de SE-firmware de klok even terugzette.
+		if c, err := t.Console(); err == nil && c.Base != 0 && (earlyUART == 0 || t.OEMID != EarlyUARTOEM) && MapHigh(c.Base, 0x1000) {
+			uart16550, uartShift = c.Is16550(), c.Shift
+			uartBase = uintptr(c.Base)
+		}
+		// hopos.uart=0xADDR in hopos.cfg: een PL011 die de SPCR níét noemt —
+		// de O6N-firmware zet haar SPCR op UART0/UART3 terwijl de debug-header
+		// UART2 (0x040d0000) is. Vóór de cfg-lezing is de stick-config al in
+		// cfgBuf (de stub las hem vóór ExitBootServices), dus dit werkt vanaf
+		// de allereerste printk. Wordt er al op geprint via de SPCR, dan
+		// spiegelt printk naar beide.
+		if v := BootConfigAll("hopos.uart"); len(v) > 0 {
+			if base, ok := parseHex(v[0]); ok && base != 0 && MapHigh(base, 0x1000) {
+				MirrorConsole(uintptr(base))
+			}
 		}
 		// De core-lijst voor CPUOn/CoreID (board.go): MADT-volgorde is de
 		// platform-nummering. Disabled cores eruit (review #14): CPU_ON op
@@ -431,21 +653,50 @@ func hwinit1() {
 		}
 	}
 
+	if earlyUART != 0 {
+		if acpiTables != nil {
+			earlySay("hwinit1: ACPI parsed, console on the header UART\n")
+		} else {
+			earlySay("hwinit1: ACPI PARSE FAILED\n")
+		}
+	}
+
 	// Het firmware-beeld (GOP, door de stub bewaard): ná ExitBootServices
 	// zwijgt de firmware-console, dus dit is hoe het scherm blijft praten —
 	// beeld = firmware-buffer, geen driver.
-	if d, ok := gopDesc(true); ok {
+	// A resident display may still own these pixels across FLIP. Main decides
+	// whether to start a console after restoring framebuffer grant ownership.
+	if d, ok := gopDesc(true); ok && coldBoot {
 		fb.Init(d)
+	}
+	earlySay("hwinit1: done\n")
+}
+
+// earlySay print via de printk-hook — voor hwinit1, waar fmt nog niet mag.
+func earlySay(s string) {
+	for i := 0; i < len(s); i++ {
+		printk(s[i])
 	}
 }
 
 //go:linkname printk runtime/goos.Printk
 func printk(c byte) {
 	conlog.Put(c) // ook over het netwerk op te vragen (driver/conlog)
+	fb.Putc(c)    // beeld eerst: UART-pollen mag de schermdiagnose niet verbergen
 	if uartBase != 0 {
-		pl011.Putc(uartBase, c)
+		if uart16550 {
+			ns16550.Putc(uartBase, uartShift, c)
+		} else {
+			pl011.Putc(uartBase, c)
+		}
 	}
-	fb.Putc(c) // no-op zonder scherm
+	if uartMirror != 0 {
+		pl011.Putc(uartMirror, c)
+	} else if uartBase == 0 && earlyUART != 0 {
+		// Vóór hwinit1 (runtime-init, een throw in rt0): de vroege UART is
+		// dan de enige stem — anders sterft zo'n throw geluidloos.
+		pl011.Putc(earlyUART, c)
+	}
 }
 
 //go:linkname nanotime runtime/goos.Nanotime
@@ -462,7 +713,16 @@ func nanotime() int64 {
 // via een EL3-monitor en is met de EL3-check in metal/cpu/trng crash-veilig.
 
 //go:linkname initRNG runtime/goos.InitRNG
-func initRNG() { drbg.Init(trng.Fill, ARM64.Counter) }
+func initRNG() {
+	fill := trng.Fill
+	if earlyUART != 0 {
+		// O6N: RNDR is er nooit apart getimed (de stille boots van 09-09
+		// bleken een dangling TTBR1, niet RNDR) — tot die meting de
+		// jitter-seed, geen hardwarebron.
+		fill = func([]byte) (string, bool) { return "", false }
+	}
+	drbg.Init(fill, ARM64.Counter)
+}
 
 // RNGSource geeft de gekozen entropiebron ("rndr", "smccc-trng" of "jitter")
 // terug — voor de discovery-print en de boot-log.

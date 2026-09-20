@@ -299,8 +299,14 @@ func cagePrepare(i int, linkBase, base, size, entry uint64) error {
 	}
 	dev.Copy(uintptr(base), blob)
 
+	// The walker must be allowed to read overflow tables in this same claim.
+	// They remain outside the app-visible RAM mapping.
+	claimSize := size + cageReserve(size)
+	if claimSize < size || base+claimSize < base {
+		return fmt.Errorf("cage slot %d: partition claim overflows", i)
+	}
 	plan := cage.Plan{Allow: []cage.Window{
-		{Base: base, Size: size, R: true, W: true, X: true},
+		{Base: base, Size: claimSize, R: true, W: true, X: true},
 	}}
 	if gb, gs, ok := grantWindow(i); ok {
 		plan.Allow = append(plan.Allow, cage.Window{Base: gb, Size: gs, R: true, W: true})
@@ -365,15 +371,15 @@ func cagePrepare(i int, linkBase, base, size, entry uint64) error {
 	// komt vers uit reset met caches ÚIT en leest dus rechtstreeks DRAM. Zonder
 	// deze veeg start het op wat er in DRAM stond, niet op wat wij schreven —
 	// dezelfde klasse als de write-buffer-les van 30-07, maar nu andersom.
-	// Eén call over de hele partitie: 64MB × 64B-regels kost ~ms bij een start,
-	// en het dekt image, stub, tabel en de ABI-staart in één keer.
-	dev.CleanInv(uintptr(base), uintptr(size))
+	// One sweep covers the complete claim: image, stub, ABI tail and any
+	// overflow mapping tables beyond the visible partition.
+	dev.CleanInv(uintptr(base), uintptr(claimSize))
 	dev.MB()
 	return nil
 }
 
-// slotMap zet de map-helft van de kooi in de ABI-staart van de partitie en geeft
-// de wortel terug die de stub in zijn map-register schrijft. Twee vensters:
+// slotMap writes the cage mapping into ABI slack or the claim's reserved
+// overflow area and returns its root. The app still sees two RAM windows:
 //
 //   - **app-RAM, cachebaar** — het canonieke linkadres → de echte partitie. Dit
 //     is waar verplaatsen voor bestaat: élk slot ziet zichzelf op hetzelfde adres.
@@ -385,6 +391,9 @@ func cagePrepare(i int, linkBase, base, size, entry uint64) error {
 // user-mode, en hij draait in machine mode — dus fetcht hij ongetranslateerd, ook
 // ná zijn eigen csrw satp.
 func slotMap(i int, linkBase, base, size uint64) (uint64, error) {
+	if size <= layout.AbiTail || linkBase >= rvMapLimit || size > rvMapLimit-linkBase {
+		return 0, fmt.Errorf("partition %#x+%#x exceeds positive Sv39 address space", linkBase, size)
+	}
 	appRAM := size - layout.AbiTail
 	windows := []cage.MapWindow{
 		{Link: linkBase, Phys: base, Size: appRAM, R: true, W: true, X: true},
@@ -395,6 +404,9 @@ func slotMap(i int, linkBase, base, size uint64) (uint64, error) {
 	// whitelist wel toestaat maar de map niet kent. Identiek gemapt, zodat het
 	// adres in de env (FB_BASE) blijft kloppen, en als device — het ís een device.
 	if gb, gs, ok := grantWindow(i); ok {
+		if gb >= rvMapLimit || gs > rvMapLimit-gb {
+			return 0, fmt.Errorf("grant %#x+%#x exceeds positive Sv39 address space", gb, gs)
+		}
 		if gb%cage.BlockSize != 0 || gs%cage.BlockSize != 0 {
 			return 0, fmt.Errorf("grant %#x+%#x does not fit the map's %dMB block grain",
 				gb, gs, cage.BlockSize>>20)
@@ -405,15 +417,26 @@ func slotMap(i int, linkBase, base, size uint64) (uint64, error) {
 	}
 
 	tbl := layout.AbiTailAt(base, appRAM) + layout.AbiMapOff
+	capacity := uint64(layout.AbiNetOff - layout.AbiMapOff)
+	if reserve := cageReserve(size); reserve != 0 {
+		tbl, capacity = uintptr(base+size), reserve
+	}
 	m, err := cage.Relocate(cage.MapPlan{TableBase: uint64(tbl), Windows: windows})
 	if err != nil {
 		return 0, err
 	}
+	if uint64(len(m.Bytes)) > capacity {
+		return 0, fmt.Errorf("map needs %d bytes, reserved storage has %d", len(m.Bytes), capacity)
+	}
 	if i >= 0 && i < len(mapRoot) {
 		mapRoot[i] = m.Root // voor het post-mortem: wiens map keek er?
 	}
-	// Gewone (cachebare) writes: de veeg over de hele partitie onderaan
-	// cagePrepare publiceert ze, net als de stub en de app-segmenten.
+	// PMP permits this owner to read the complete reserve. Clear its unused
+	// bytes too, so a new owner cannot inspect a previous tenant's contents.
+	if reserve := cageReserve(size); reserve != 0 {
+		dev.Clear(tbl, reserve)
+	}
+	// cagePrepare publishes the entire physical claim after these writes.
 	dev.Copy(tbl, m.Bytes)
 	return m.Root, nil
 }
@@ -754,7 +777,38 @@ func cageSMPEntryPC() uint64 { return 0 }
 // groter is dan wat de map beschrijft — de tabel legt exact deze partitie op het
 // linkadres, dus alles daarbuiten is per definitie ongemapt. Dat houdt de
 // entry-check even streng als vóór de map.
-func cageLinkWindow(size uint64) uint64 { return size }
+const rvMapLimit = uint64(1) << 38 // positive canonical half of Sv39
+
+func cageLinkWindow(size uint64) uint64 {
+	base := cageLinkBase()
+	if base >= rvMapLimit {
+		return 0
+	}
+	if size > rvMapLimit-base {
+		return rvMapLimit - base
+	}
+	return size
+}
+
+// cageReserve keeps small mappings in the existing ABI slack. Larger mappings
+// use one extra allocation block in the same claim, outside visible app RAM.
+// One root page and one page per mapped GiB describe RAM; two spare pages
+// accommodate an ordinary MMIO grant crossing a GiB boundary. slotMap checks
+// the actual table size, including grants, before writing either storage area.
+func cageReserve(size uint64) uint64 {
+	if size == 0 {
+		return 0
+	}
+	const giga = uint64(1) << 30
+	if size > rvMapLimit {
+		return cage.BlockSize
+	}
+	pages := 1 + ((cageLinkBase()%giga + size + giga - 1) / giga) + 2
+	if pages*cage.PageSize <= layout.AbiNetOff-layout.AbiMapOff {
+		return 0
+	}
+	return cage.BlockSize
+}
 
 func cageLinkBase() uint64 {
 	pool := layout.Pool()

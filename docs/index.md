@@ -24,6 +24,7 @@ A kernel flip replaces the node kernel while preserving running applications. It
 ## Reference
 
 - [Configuration](configuration.md) — node settings, job fields, units, and defaults.
+- [Board support and follow-up checklist](support.md) — the complete board contract matrix, including O6N, implementation gaps and acceptance work.
 - [Boards and drivers](boards-drivers.md) — boot methods, memory, cores, devices, and board-specific behavior.
 - [Development](development.md) — toolchain, dependencies, image builds, and verification commands.
 
@@ -32,6 +33,6 @@ A kernel flip replaces the node kernel while preserving running applications. It
 - [Measurements](measurements.md) — throughput, latency, memory budgets, and measurement conditions.
 - [Implementation and test status](status.md) — available features, tested candidates, board coverage, and remaining checks.
 
-This set describes the v2.2.2 source baseline. Hardware results identify the candidate on which they were obtained. Physical network IRQ integration is a planned follow-up; physical boards currently use receive polling.
+This set describes the v2.2.2 source baseline. Hardware results identify the candidate on which they were obtained. The [board checklist](support.md) defines the follow-up beyond release acceptance, including idle, DVFS, devices and network IRQ. Physical boards currently use receive polling.
 
 [Previous documentation (v1)](v1/index.md) is retained for comparison.

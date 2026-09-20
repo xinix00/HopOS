@@ -36,6 +36,7 @@ package irq
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -66,10 +67,12 @@ type Controller interface {
 }
 
 var (
-	mu    sync.Mutex
-	ctrl  Controller
-	lines = map[int]*line{}
-	fired atomic.Uint64 // geclaimde interrupts, totaal — het bewijs dat ze aankomen
+	mu     sync.Mutex
+	ctrl   Controller
+	lines  = map[int]*line{}
+	fired  atomic.Uint64 // geclaimde interrupts, totaal — het bewijs dat ze aankomen
+	passes atomic.Uint64 // isr-rondes
+
 )
 
 // Fired geeft hoeveel interrupts er tot nu toe geclaimd zijn (alle lijnen).
@@ -121,27 +124,71 @@ func Enable(l Line) error {
 // acken, de wachter wekken en de lijn completeren. Draait als gewone
 // goroutine (tamago's ServiceInterrupts), dus mag alles wat Go mag.
 func dispatch() {
+	// Eén isr-ronde claimt tot de controller niets meer heeft. Een lijn die
+	// binnen één ronde blijft terugkomen is een level-bron die niemand laat
+	// zakken: een lijn die de firmware aan liet staan (UEFI-timer, UART, een
+	// watchdog-waarschuwing) en die wij niet kennen, of een device waarvan de
+	// ack de lijn niet laat vallen. Zonder grens spint deze goroutine dan
+	// voor eeuwig in Claim→EOI→Claim met I gemaskeerd — de O6N-"freeze bij de
+	// eerste wachttijd" (17-09/18-09): geen pets meer, watchdog na 12 s. Dus:
+	// onbekend = meteen uit, bekend maar blijvend = na strayLimit uit, en
+	// beide één regel. Wait valt dan terug op zijn maximum: pollen, geen hang.
+	seen := map[int]int{}
+	if n := passes.Add(1); n <= 5 {
+		defer fmt.Printf("irq: isr pass #%d done\n", n) // de eerste vijf rondes, als bewijs dat de dispatcher terugkeert
+	}
 	for {
 		l, ok := ctrl.Claim()
 		if !ok {
 			return
 		}
-		fired.Add(1)
+		if n := fired.Add(1); n <= 3 {
+			fmt.Printf("irq: claim #%d is INTID %d\n", n, l.ID) // de eerste drie, als bewijs dat het pad leeft
+		}
 		mu.Lock()
 		ln := lines[l.ID]
 		mu.Unlock()
-		if ln != nil {
-			if ln.Ack != nil {
-				ln.Ack()
-			}
-			select {
-			case ln.fired <- struct{}{}:
-			default: // al gewekt en nog niet opgehaald: één is genoeg
-			}
+		seen[l.ID]++
+		if ln == nil {
+			ctrl.Disable(l)
+			ctrl.Complete(l)
+			fmt.Printf("irq: INTID %d fired but nobody serves it (left enabled by the firmware?) — line disabled\n", l.ID)
+			continue
+		}
+		if ln.Ack != nil {
+			ln.Ack()
+		}
+		select {
+		case ln.fired <- struct{}{}:
+		default: // al gewekt en nog niet opgehaald: één is genoeg
 		}
 		ctrl.Complete(l)
+		if seen[l.ID] > strayLimit {
+			// Een BEDIENDE lijn die binnen één ronde blijft terugkomen is
+			// geen vastzitter maar een NIC onder last (tg3: een status-
+			// update per frame, de mailbox-ack en de NOW-hertrigger houden
+			// de lijn bij 25k frames/s praktisch continu hoog). Die lijn
+			// voorgoed uitzetten was de M4-dood van vanmiddag: ná een pull
+			// 0 interrupts/s, elke frame op de failsafe van 10 ms, 118 → 45
+			// MB/s, en de O6N kreeg de schuld (bundels 47-55, 20-09). Dus:
+			// de ronde afbreken (de pomp en de wachter komen aan de beurt,
+			// de device-ack houdt de lijn intussen laag), niets uitzetten,
+			// één regel per pass. Onbekende lijnen gaan hierboven nog wél uit.
+			if n := strayPasses.Add(1); n <= 3 {
+				fmt.Printf("irq: INTID %d came back %d times in one pass — pass ended, line stays enabled\n", l.ID, strayLimit)
+			}
+			return
+		}
 	}
 }
+
+// strayPasses telt de afgebroken isr-rondes (de eerste drie melden zich).
+var strayPasses atomic.Uint64
+
+// strayLimit: hoe vaak één lijn binnen één isr-ronde mag terugkomen voordat
+// hij als vastzittend geldt. Ruim boven wat een NIC-burst legitiem doet
+// (een ack per claim laat de lijn zakken), ver onder "voor eeuwig".
+const strayLimit = 256
 
 // Wait blokkeert de aanroeper tot lijn l vuurde, of tot max verstreken is
 // (true = gevuurd). Een lijn die niet geregistreerd is wacht gewoon max —

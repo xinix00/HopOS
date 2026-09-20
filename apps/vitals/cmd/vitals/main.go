@@ -13,7 +13,7 @@
 //	ER_PORT_HTTP   de gepubliceerde poort (uit ports:{http:...}); fallback 8080
 //	HOPOS_HOST     het node-IP (HOP zet hem altijd); doel van de storm-test
 //	HOP_ADDR       agent-API voor temperatuur (default 10.100.0.1:8080)
-//	HOP_KEY        cluster-key voor de agent-API; leeg = geen temperatuur
+//	HOP_KEY        cluster-key voor de agent-API; leeg = unsigned request
 //	VITALS_RX_URL  bron voor de download-test (plain http; default cachefly)
 //
 // Jobspec (poort 8090, naast welcome's 80):

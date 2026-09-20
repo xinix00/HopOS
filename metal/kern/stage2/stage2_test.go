@@ -7,7 +7,9 @@
 package stage2
 
 import (
+	"bytes"
 	"os"
+	"syscall"
 	"testing"
 	"unsafe"
 
@@ -26,12 +28,48 @@ const (
 // s2buf draagt de echte tabellen; package-var zodat de GC hem nooit opruimt
 // terwijl layout er nog met een uintptr naar wijst.
 var s2buf []byte
+var extraTables = map[int]uint64{}
+
+// Only table memory is real host RAM; the app payload remains an opaque PA
+// interval ending at that table memory. Test cleanup releases the mapping.
+func buildPartition(t *testing.T, cage int, ipa, size uint64) uint64 {
+	t.Helper()
+	pa := uint64(tPoolPA)
+	delete(extraTables, cage)
+	if reserve := TableReserve(ipa, size); reserve != 0 {
+		// A non-fixed high address hint models a large physical partition
+		// without allocating its payload. Unlike MAP_FIXED, an occupied hint
+		// is never replaced. Only the 2MB table tail gets actual host pages.
+		n := uintptr(reserve + (2 << 20))
+		p, _, errno := syscall.Syscall6(syscall.SYS_MMAP, 1<<40, n,
+			syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_ANON|syscall.MAP_PRIVATE, ^uintptr(0), 0)
+		if errno != 0 {
+			t.Fatalf("map host table memory: %v", errno)
+		}
+		t.Cleanup(func() {
+			syscall.Syscall(syscall.SYS_MUNMAP, p, n, 0)
+			delete(extraTables, cage)
+		})
+		tablePA := (uint64(p) + (2 << 20) - 1) &^ ((2 << 20) - 1)
+		if tablePA < size || tablePA+reserve > 1<<44 {
+			t.Fatalf("host table address %#x cannot model %#x-byte partition", tablePA, size)
+		}
+		pa = tablePA - size
+		extraTables[cage] = tablePA
+	}
+	if l1, err := Build(cage, ipa, pa, size); err != nil {
+		t.Fatal(err)
+	} else if l1 != uint64(layout.CageTablePA(cage))+l1Off {
+		t.Fatalf("wrong root %#x", l1)
+	}
+	return pa
+}
 
 func TestMain(m *testing.M) {
 	// SlotCap-maat (niet MaxSlots): de slot-105-regressietest bouwt kooien
 	// tot in de hoogste slots.
 	s2buf = make([]byte, (layout.SlotCap+2)*layout.CageStride)
-	base := (uintptr(unsafe.Pointer(&s2buf[0])) + 0x7FF) &^ 0x7FF // VBAR-uitlijning
+	base := (uintptr(unsafe.Pointer(&s2buf[0])) + 0xFFF) &^ 0xFFF // stage-2 table alignment
 	layout.UsePlan(layout.Plan{
 		NodeCtrlPA:    tCtrlPA,
 		CagePA:        uint64(base),
@@ -47,263 +85,167 @@ func rd(pa uint64) uint64 { return dev.Read64(uintptr(pa)) }
 // paOf haalt het uitgangsadres uit een descriptor (OA-bits [47:12]).
 func paOf(d uint64) uint64 { return d & 0x0000_FFFF_FFFF_F000 }
 
-func TestBuildBereik(t *testing.T) {
-	if _, err := Build(0, layout.SlotBase(1), tPoolPA, 2<<20); err == nil {
-		t.Error("slot 0 geaccepteerd")
-	}
-	if _, err := Build(layout.MaxSlots+1, layout.SlotBase(1), tPoolPA, 2<<20); err == nil {
-		t.Error("slot buiten MaxSlots geaccepteerd")
-	}
-}
-
-// De volledige map van slot 1, descriptor voor descriptor.
-func TestBuildSlot1(t *testing.T) {
-	const size = 64 << 20 // 64MB-partitie
-	ipa := layout.SlotBase(1)
-	l1, err := Build(1, ipa, tPoolPA, size)
-	if err != nil {
-		t.Fatal(err)
-	}
-	base := uint64(layout.CageTablePA(1))
-	if l1 != base+l1Off {
-		t.Fatalf("VTTBR-adres %#x, verwacht %#x", l1, base+l1Off)
-	}
-
-	// L1: het slot-GB → L2part, het ctrl-GB → L2dev, verder niets.
-	if got := rd(base + l1Off + (ipa>>30)*8); got != base+l2PartOff|descTable {
-		t.Fatalf("L1[slot-GB] = %#x", got)
-	}
-	if got := rd(base + l1Off + 2*8); got != base+l2DevOff|descTable {
-		t.Fatalf("L1[ctrl-GB] = %#x", got)
-	}
-	if got := rd(base + l1Off + 3*8); got != 0 {
-		t.Fatalf("L1[3] = %#x, hoort leeg — het net-ring-GB bestaat niet meer (de ringen liggen in de partitie)", got)
-	}
-	if got := rd(base + l1Off + 0*8); got != 0 {
-		t.Fatalf("L1[0] = %#x, hoort leeg", got)
-	}
-
-	// L2part: precies size/2MB blokken, IPA→partitie-PA, en verder leeg.
-	first := (ipa - ipa&^((1<<30)-1)) >> 21
-	for idx := uint64(0); idx < 512; idx++ {
-		got := rd(base + l2PartOff + idx*8)
-		if idx >= first && idx < first+size>>21 {
-			want := tPoolPA + (idx-first)<<21 | blockRW
-			if got != want {
-				t.Fatalf("L2part[%d] = %#x, verwacht %#x", idx, got, want)
-			}
-		} else if got != 0 {
-			t.Fatalf("L2part[%d] = %#x, hoort leeg", idx, got)
-		}
-	}
-
-	// L2dev: alleen de ctrl-L3 op 384 (die draagt nu enkel de boot-scratch).
-	for idx := uint64(0); idx < 512; idx++ {
-		got := rd(base + l2DevOff + idx*8)
-		var want uint64
-		if idx == 384 {
-			want = base + l3CtrlOff | descTable
-		}
-		if got != want {
-			t.Fatalf("L2dev[%d] = %#x, verwacht %#x", idx, got, want)
-		}
-	}
-
-	// L3ctrl: alléén de boot-scratch, read-only op page 0. De eigen control-page
-	// hoort hier niet meer te staan — die woont sinds ABIVersion 2 in de staart
-	// van de partitie en valt dus onder L2part hierboven. Elke andere entry zou
-	// betekenen dat er nog een gedeelde ctrl-regio in de kooi hangt.
-	if got := rd(base + l3CtrlOff); got != tBootScratchPA|pageRO {
-		t.Fatalf("L3ctrl[0] = %#x (boot-scratch hoort RO)", got)
-	}
-	for idx := uint64(1); idx < 512; idx++ {
-		if got := rd(base + l3CtrlOff + idx*8); got != 0 {
-			t.Fatalf("L3ctrl[%d] = %#x, hoort leeg (een ctrl-page in de kooi?)", idx, got)
-		}
-	}
-}
-
-// Slot 3 linkt op 0x90000000 — hetzelfde GB als de ctrl/ring-regio, dus de
-// partitie deelt zijn L2 met de device-L3's. Op de maximale venstermaat
-// (512MB) moet de hoogste partitie-index (383) nog vóór de eerste
-// device-index (384) blijven — de "indexes botsen niet"-claim uit de code.
-func TestBuildSlot3DeeltGBMetDevices(t *testing.T) {
-	const size = 512 << 20
-	ipa := layout.SlotBase(3)
-	if ipa>>30 != layout.CtrlBase>>30 {
-		t.Fatalf("testaanname stuk: SlotBase(3)=%#x ligt niet in het ctrl-GB", ipa)
-	}
-	if _, err := Build(3, ipa, tPoolPA, size); err != nil {
-		t.Fatal(err)
-	}
-	base := uint64(layout.CageTablePA(3))
-
-	// Beide L1-entries wijzen naar dezelfde L2 (dev), L2part blijft leeg.
-	if got := rd(base + l1Off + 2*8); got != base+l2DevOff|descTable {
-		t.Fatalf("L1[2] = %#x", got)
-	}
-	for idx := uint64(0); idx < 512; idx++ {
-		if got := rd(base + l2PartOff + idx*8); got != 0 {
-			t.Fatalf("L2part[%d] = %#x, hoort ongebruikt", idx, got)
-		}
-	}
-
-	first := (ipa - layout.CtrlBase&^((1<<30)-1)) >> 21
-	last := first + size>>21 - 1
-	if last >= 384 {
-		t.Fatalf("partitie-index %d botst met device-index 384", last)
-	}
-	for idx := uint64(0); idx < 512; idx++ {
-		got := rd(base + l2DevOff + idx*8)
-		var want uint64
-		switch {
-		case idx >= first && idx <= last:
-			want = tPoolPA + (idx-first)<<21 | blockRW
-		case idx == 384:
-			want = base + l3CtrlOff | descTable
-		}
-		if got != want {
-			t.Fatalf("L2dev[%d] = %#x, verwacht %#x", idx, got, want)
-		}
-	}
-	// En verder niets in het device-GB: geen ctrl-page, geen ringen.
-	for idx := uint64(1); idx < 512; idx++ {
-		if got := rd(base + l3CtrlOff + idx*8); got != 0 {
-			t.Fatalf("L3ctrl[%d] = %#x, hoort leeg", idx, got)
-		}
-	}
-}
-
-// De slot-105-regressie (Altra 15-07): met een per-slot IPA-venster voor de
-// ringen liep dat venster bij slot ≥105 over de 1GB-L2-grens — index 512 werd
-// stil in de buurtabel geschreven en de IPA bleef ongemapt (stage-2-fault op de
-// eerste ring-read, FAR 0xC0000010; precies 104 van 127 slots leefden).
-//
-// Die hele klasse bestaat niet meer sinds de slot-ABI in de partitie-staart
-// woont: er is geen per-slot IPA-venster meer dat met het slotnummer kan
-// opschuiven. Deze test houdt dat vast — ook het hoogste slot mapt precies zijn
-// partitie plus de boot-scratch, en niets in het device-GB.
-func TestBuildHoogsteSlotHeeftGeenEigenIPAVenster(t *testing.T) {
-	old := layout.MaxSlots
-	layout.SetMaxSlots(127)
-	defer layout.SetMaxSlots(old)
-	if _, err := Build(105, layout.SlotBase(1), tPoolPA, 64<<20); err != nil {
-		t.Fatal(err)
-	}
-	base := uint64(layout.CageTablePA(105))
-	if got := rd(base + l1Off + 3*8); got != 0 {
-		t.Fatalf("L1[3] = %#x, hoort leeg — het net-ring-GB bestaat niet meer (de ringen liggen in de partitie)", got)
-	}
-	if got := rd(base + l3CtrlOff); got != tBootScratchPA|pageRO {
-		t.Fatalf("L3ctrl[0] = %#x (boot-scratch hoort RO)", got)
-	}
-	for idx := uint64(1); idx < 512; idx++ {
-		if got := rd(base + l3CtrlOff + idx*8); got != 0 {
-			t.Fatalf("L3ctrl[%d] = %#x, hoort leeg", idx, got)
-		}
-	}
-}
-
 type leaf struct {
-	pa, size uint64
-	ro       bool
+	ipa, pa, size uint64
+	rw            bool
 }
 
-// walk leest de tabellen van slot i terug zoals de MMU: L1 → L2 → L3, en
-// verzamelt elk uitdeelbaar bereik (blok of pagina).
+// Walk all reachable descriptors. Tables may only inhabit this cage's fixed
+// metadata or its additional trusted reservation, never arbitrary host memory.
 func walk(t *testing.T, i int) []leaf {
 	t.Helper()
 	var out []leaf
-	seen := map[uint64]bool{}
-	var walkTbl func(tbl uint64, level int)
-	walkTbl = func(tbl uint64, level int) {
-		if seen[tbl] {
-			return
+	base := uint64(layout.CageTablePA(i))
+	var walkTbl func(tbl, ipa uint64, level int)
+	walkTbl = func(tbl, ipa uint64, level int) {
+		inCage := tbl >= base && tbl+4096 <= base+layout.CageStride
+		extra := extraTables[i]
+		inExtra := extra != 0 && tbl >= extra && tbl+4096 <= extra+(2<<20)
+		if (!inCage && !inExtra) || tbl&4095 != 0 {
+			t.Fatalf("table pointer %#x outside cage %d metadata", tbl, i)
 		}
-		seen[tbl] = true
+		shift := uint(39 - level*9)
 		for idx := uint64(0); idx < 512; idx++ {
 			d := rd(tbl + idx*8)
+			addr := ipa + idx<<shift
 			switch {
 			case d == 0:
 			case level < 3 && d&3 == descTable:
-				walkTbl(paOf(d), level+1)
+				walkTbl(paOf(d), addr, level+1)
 			case level == 2 && d&3 == descBlock:
-				out = append(out, leaf{paOf(d), 2 << 20, d>>6&3 == 1})
+				out = append(out, leaf{addr, paOf(d), 2 << 20, d>>6&3 == 3})
 			case level == 3 && d&3 == descPage:
-				out = append(out, leaf{paOf(d), 4 << 10, d>>6&3 == 1})
+				out = append(out, leaf{addr, paOf(d), 4 << 10, d>>6&3 == 3})
 			default:
-				t.Fatalf("onverwachte descriptor %#x op level %d idx %d", d, level, idx)
+				t.Fatalf("unexpected descriptor %#x at level %d index %d", d, level, idx)
 			}
 		}
 	}
-	walkTbl(uint64(layout.CageTablePA(i))+l1Off, 1)
+	walkTbl(base+l1Off, 0, 1)
 	return out
 }
 
-// Dé isolatiebelofte, als eigenschap: bouw slot 1 en slot 2 naast elkaar en
-// bewijs dat slot 1 geen byte van slot 2 kan raken — geen partitie, geen
-// ctrl-page, geen ringen — en al helemaal niet de stage-2-tabellen zelf.
-// Het enige toegestane gedeelde adres is de boot-scratch, en die is read-only.
-func TestIsolatieTussenSlots(t *testing.T) {
-	const size = 64 << 20
-	pa1, pa2 := uint64(tPoolPA), uint64(tPoolPA+size)
-	if _, err := Build(1, layout.SlotBase(1), pa1, size); err != nil {
-		t.Fatal(err)
+func assertPartition(t *testing.T, cage int, ipa, pa, size uint64) {
+	t.Helper()
+	leaves := walk(t, cage)
+	if uint64(len(leaves)) != size>>21 {
+		t.Fatalf("%d leaves for %#x-byte partition, want %d", len(leaves), size, size>>21)
 	}
-	if _, err := Build(2, layout.SlotBase(2), pa2, size); err != nil {
-		t.Fatal(err)
-	}
-
-	vanAnder := []struct {
-		naam       string
-		base, size uint64
-	}{
-		// De partitie dekt nu óók de ABI van slot 2 (control-page, hop-ABI-ringen,
-		// frame-ringen liggen in zijn staart) — precies de winst van ABIVersion 2:
-		// één regio om af te schermen i.p.v. vier.
-		{"partitie + ABI-staart", pa2, size},
-		{"stage-2-tabellen", uint64(layout.CageTablePA(0)), uint64(layout.MaxSlots+1) * layout.CageStride},
-	}
-	roGezien := 0
-	for _, l := range walk(t, 1) {
-		for _, r := range vanAnder {
-			if l.pa < r.base+r.size && r.base < l.pa+l.size {
-				t.Errorf("slot 1 mapt %s van slot 2/HOP: PA %#x (+%#x)", r.naam, l.pa, l.size)
-			}
+	for n, l := range leaves {
+		off := uint64(n) << 21
+		if l.ipa != ipa+off || l.pa != pa+off || l.size != 2<<20 || !l.rw {
+			t.Fatalf("leaf %d: %+v, want IPA %#x -> PA %#x, 2MB RW", n, l, ipa+off, pa+off)
 		}
-		if l.ro {
-			roGezien++
-			if l.pa != tBootScratchPA {
-				t.Errorf("onverwacht read-only bereik op %#x", l.pa)
-			}
-		} else if l.pa == tBootScratchPA {
-			t.Error("boot-scratch staat RW in de map")
-		}
-	}
-	if roGezien != 1 {
-		t.Errorf("%d read-only entries, verwacht precies 1 (de boot-scratch)", roGezien)
 	}
 }
 
-// Een re-Start met een kleinere partitie mag niets van de oude, grotere map
-// laten staan (Build hoort eerst te vegen).
-func TestRebuildVeegtOudeMap(t *testing.T) {
+func TestBuildPrivatePartition(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		ipa, size uint64
+	}{
+		{"small", layout.SlotBase(1), 64 << 20},
+		{"cross-first-GB", layout.SlotBase(1), (768 << 20) + (2 << 20)},
+		{"two-GB", layout.SlotBase(1), 2 << 30},
+		{"five-GB", layout.SlotBase(1), 5 << 30},
+		{"full-inline-window", layout.SlotBase(1), (11 << 30) - (layout.SlotBase(1) & ((1 << 30) - 1))},
+		{"twenty-GB-external-tables", layout.SlotBase(1), 20 << 30},
+		{"full-canonical-window", layout.SlotBase(1), IPALimit - layout.SlotBase(1)},
+		{"noncanonical", layout.SlotBase(3), 1 << 30},
+		{"first-RAM-address", 1 << 30, 2 << 20},
+		{"last-block", IPALimit - (2 << 20), 2 << 20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const cage = 3
+			pa := buildPartition(t, cage, tc.ipa, tc.size)
+			assertPartition(t, cage, tc.ipa, pa, tc.size)
+		})
+	}
+}
+
+func cageBytes(i int) []byte {
+	return unsafe.Slice((*byte)(unsafe.Pointer(layout.CageTablePA(i))), layout.CageStride)
+}
+
+func TestBuildRejectsInvalidRangeWithoutWrites(t *testing.T) {
+	const cage = 3
+	const block = uint64(2 << 20)
 	ipa := layout.SlotBase(1)
-	if _, err := Build(1, ipa, tPoolPA, 64<<20); err != nil {
+	if _, err := Build(cage, ipa, tPoolPA, 2<<30); err != nil {
+		t.Fatal(err)
+	}
+	before := append([]byte(nil), cageBytes(cage)...)
+	for _, tc := range []struct {
+		name          string
+		slot          int
+		ipa, pa, size uint64
+	}{
+		{"zero-slot", 0, ipa, tPoolPA, block},
+		{"high-slot", layout.MaxSlots + 1, ipa, tPoolPA, block},
+		{"zero-size", cage, ipa, tPoolPA, 0},
+		{"unaligned-IPA", cage, ipa + 4096, tPoolPA, block},
+		{"unaligned-PA", cage, ipa, tPoolPA + 4096, block},
+		{"unaligned-size", cage, ipa, tPoolPA, block + 4096},
+		{"framebuffer-GB", cage, layout.FbIPA, tPoolPA, block},
+		{"cross-IPA-limit", cage, ipa, tPoolPA, IPALimit - ipa + block},
+		{"IPA-limit", cage, IPALimit, tPoolPA, block},
+		{"IPA-wrap", cage, ^uint64(0) &^ (block - 1), tPoolPA, block},
+		{"size-wrap", cage, ipa, tPoolPA, ^uint64(0) &^ (block - 1)},
+		{"PA-wrap", cage, ipa, ^uint64(0) &^ (block - 1), block},
+		{"PA-limit", cage, ipa, (1 << 44) - block, 2 * block},
+		{"PA-table-reserve-limit", cage, ipa, (1 << 44) - (20 << 30), 20 << 30},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Build(tc.slot, tc.ipa, tc.pa, tc.size); err == nil {
+				t.Fatal("invalid partition accepted")
+			}
+			if !bytes.Equal(before, cageBytes(cage)) {
+				t.Fatal("rejected input changed an existing cage")
+			}
+		})
+	}
+}
+
+func TestBuildIsolatesLargeNeighborPartitions(t *testing.T) {
+	ipa := layout.SlotBase(1)
+	size := uint64(5 << 30)
+	if _, err := Build(1, ipa, tPoolPA, size); err != nil {
+		t.Fatal(err)
+	}
+	neighbor := append([]byte(nil), cageBytes(1)...)
+	if _, err := Build(2, ipa, tPoolPA+size, size); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(neighbor, cageBytes(1)) {
+		t.Fatal("large cage build overwrote its neighbor")
+	}
+	assertPartition(t, 1, ipa, tPoolPA, size)
+	assertPartition(t, 2, ipa, tPoolPA+size, size)
+	// Exact coverage above excludes node scratch, cage metadata, and every
+	// byte of the other partition, including its ABI tail.
+}
+
+func TestBuildHighCageUsesCanonicalIPA(t *testing.T) {
+	old := layout.MaxSlots
+	layout.SetMaxSlots(127)
+	defer layout.SetMaxSlots(old)
+	ipa := layout.SlotBase(1)
+	if _, err := Build(105, ipa, tPoolPA, 2<<30); err != nil {
+		t.Fatal(err)
+	}
+	assertPartition(t, 105, ipa, tPoolPA, 2<<30)
+}
+
+func TestRebuildClearsOldGBsAndFramebuffer(t *testing.T) {
+	ipa := layout.SlotBase(1)
+	buildPartition(t, 1, ipa, 20<<30)
+	if err := GrantWindow(1, 0x3e108000, 8<<20); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Build(1, ipa, tPoolPA, 8<<20); err != nil {
 		t.Fatal(err)
 	}
-	blokken := 0
-	for _, l := range walk(t, 1) {
-		if l.pa >= tPoolPA && l.pa < tPoolPA+(1<<30) {
-			blokken++
-		}
-	}
-	if blokken != 4 {
-		t.Fatalf("%d partitie-blokken na rebuild naar 8MB, verwacht 4", blokken)
-	}
+	assertPartition(t, 1, ipa, tPoolPA, 8<<20)
 }
 
 // A cage's table block also stores the independent secondary CPU context for
@@ -316,7 +258,7 @@ func TestBuildPreservesIndependentSecondaryContext(t *testing.T) {
 		dev.Write64(secondary+off, 0x53504d0000000000|uint64(off))
 	}
 	dev.Write64(primary+layout.CtxState, layout.CtxDead)
-	if _, err := Build(cage, layout.SlotBase(cage), tPoolPA, 32<<20); err != nil {
+	if _, err := Build(cage, layout.SlotBase(cage), tPoolPA, 5<<30); err != nil {
 		t.Fatal(err)
 	}
 	for off := uintptr(0); off < layout.CtxLen; off += 8 {
@@ -327,5 +269,18 @@ func TestBuildPreservesIndependentSecondaryContext(t *testing.T) {
 	}
 	if got := dev.Read64(primary + layout.CtxState); got != layout.CtxEmpty {
 		t.Fatalf("new cage retained old primary state %d", got)
+	}
+}
+
+func TestTableReservationBoundary(t *testing.T) {
+	ipa := layout.SlotBase(1)
+	inlineMax := uint64(11<<30) - (ipa & ((1 << 30) - 1))
+	for _, tc := range []struct{ size, want uint64 }{
+		{0, 0}, {5 << 30, 0}, {inlineMax, 0}, {inlineMax + (2 << 20), 2 << 20},
+		{20 << 30, 2 << 20}, {IPALimit - ipa, 2 << 20},
+	} {
+		if got := TableReserve(ipa, tc.size); got != tc.want {
+			t.Fatalf("TableReserve(%#x, %#x)=%#x, want %#x", ipa, tc.size, got, tc.want)
+		}
 	}
 }

@@ -146,10 +146,13 @@ const (
 
 // Net is één NIC.
 type Net struct {
-	Base uintptr // BAR0 (registerblok)
-	Cfg  uintptr // PCI config space van deze functie (ECAM), 0 = BAR0-spiegel
-	mac  net.HardwareAddr
-	r    rings
+	rxSince          int     // frames sinds de laatste FlushRX (zelf-flush om de 32 bij batching)
+	batch            bool    // netdev.Flusher: doorbells uitstellen tot FlushRX/FlushTX (aan ná net-up)
+	rxDirty, txDirty bool    // mailboxen nog niet geschreven sinds de laatste Flush (netdev.Flusher)
+	Base             uintptr // BAR0 (registerblok)
+	Cfg              uintptr // PCI config space van deze functie (ECAM), 0 = BAR0-spiegel
+	mac              net.HardwareAddr
+	r                rings
 
 	fwMbox uint32 // laatste waarde uit de firmware-mailbox (diagnose)
 }
@@ -549,6 +552,7 @@ const (
 	wdmacStatusTagFix = 0x20000000 // 5755-plus
 
 	hostccMode32Byte = 0x100 // 32-byte status-blok (tp->coalesce_mode)
+	hostccModeNow    = 0x8   // HOSTCC_MODE_NOW: status-blok nú bijwerken (tg3_int_reenable)
 	rcvdbdiInvRingSz = 0x10  // ringgrootte staat in de RCB
 	rcvbdiRCBAttn    = 0x4
 	rcvlpcClass0Attn = 0x4
@@ -586,6 +590,12 @@ const (
 	mbRxRetCons = 0x0280 + 4
 	mbTxProd    = 0x0300 + 4
 	mbInterrupt = 0x0200 + 4
+
+	// MSGINT_MODE (tg3.h): bit 1 = MSI-berichten aan (MSGINT_MODE_ENABLE).
+	regMsgIntMode    = 0x6000
+	msgIntModeEnable = 0x2
+	pciCapPtr        = 0x34
+	pciCapMSI        = 0x05
 
 	bdinfoMaxlenShift = 16
 	txdFlagEnd        = 0x0004
@@ -947,13 +957,40 @@ func (n *Net) Receive(buf []byte) (int, error) {
 	}
 
 	// Eerst de kopie afmaken; pas daarna mag DMA deze buffer opnieuw vullen.
+	// De mailboxen (return-consumer, std-producer) gaan pas bij FlushRX: twee
+	// PCIe-writes per burst in plaats van per frame (netdev.Flusher).
 	dev.MB()
 	n.r.rxRetIdx = (n.r.rxRetIdx + 1) % rxRetRing
-	n.wr(mbRxRetCons, n.r.rxRetIdx)
 	n.r.rxStdIdx = (n.r.rxStdIdx + 1) % rxStdRing
-	n.wr(mbRxStdProd, n.r.rxStdIdx)
+	n.rxDirty = true
+	// Zelf om de 32 frames flushen (zie igb: de uplink-wrapper lust door een
+	// burst heen, de NIC mag nooit zonder std-buffers zitten).
+	if n.rxSince++; !n.batch || n.rxSince >= 32 {
+		n.FlushRX()
+	}
 
 	return length, nil
+}
+
+// FlushRX meldt de NIC hoever we met de return-ring zijn en hoeveel
+// std-buffers weer vrij zijn. Aanroepen vanuit de RX-pomp na een burst.
+func (n *Net) FlushRX() {
+	n.rxSince = 0
+	if n.rxDirty {
+		n.wr(mbRxRetCons, n.r.rxRetIdx)
+		n.wr(mbRxStdProd, n.r.rxStdIdx)
+		n.rxDirty = false
+	}
+}
+
+// FlushTX zet de send-producer-mailbox (de doorbell) voor alles wat sinds
+// de vorige flush klaargezet is; Transmit roept hem zelf als de ring vol
+// dreigt te raken.
+func (n *Net) FlushTX() {
+	if n.txDirty {
+		n.wr(mbTxProd, n.r.txProd)
+		n.txDirty = false
+	}
 }
 
 // Transmit stuurt één frame. Blokkeert kort als de ring vol is.
@@ -963,6 +1000,9 @@ func (n *Net) Transmit(buf []byte) error {
 	}
 	next := (n.r.txProd + 1) % txRing
 	deadline := time.Now().Add(100 * time.Millisecond)
+	if next == n.txConsumer() {
+		n.FlushTX() // ring vol zonder doorbell: eerst wat klaarstaat de draad op
+	}
 	for next == n.txConsumer() {
 		if time.Now().After(deadline) {
 			return fmt.Errorf("tg3: transmit ring full")
@@ -980,9 +1020,94 @@ func (n *Net) Transmit(buf []byte) error {
 	dev.MB()
 
 	n.r.txProd = next
-	n.wr(mbTxProd, n.r.txProd)
+	n.txDirty = true // doorbell (send-producer) volgt bij FlushTX
+	if !n.batch {
+		n.FlushTX()
+	}
 	return nil
 }
 
 // BufRegion geeft de DMA-regio die deze driver gebruikt (voor diagnose).
 func (n *Net) BufRegion() (base uintptr, size uintptr) { return n.r.dma, NeedBytes }
+
+// EnableMSI zet de PCI-MSI-capability van de chip op (adres, data, één
+// vector) en laat de chip MSI-berichten sturen (MSGINT_MODE). De interrupt
+// zelf blijft gemaskeerd tot IRQUnmask: de chip meldt zich bij elke update van
+// het status-blok zolang de interrupt-mailbox op 0 staat (tg3_enable_ints).
+func (n *Net) EnableMSI(addr uint64, data uint32) error {
+	ptr := n.cfgRead32(pciCapPtr) & 0xff
+	for i := 0; ptr != 0 && i < 16; i++ {
+		w := n.cfgRead32(uintptr(ptr))
+		if w&0xff != pciCapMSI {
+			ptr = w >> 8 & 0xff
+			continue
+		}
+		ctrl := w >> 16 & 0xffff
+		n.cfgWrite32(uintptr(ptr)+4, uint32(addr))
+		dataOff := uintptr(ptr) + 8
+		if ctrl&0x80 != 0 { // 64-bit adres
+			n.cfgWrite32(uintptr(ptr)+8, uint32(addr>>32))
+			dataOff = uintptr(ptr) + 12
+		}
+		n.cfgWrite32(dataOff, n.cfgRead32(dataOff)&^0xffff|data&0xffff)
+		// Message Control: enable aan, multiple-message-enable 0 (één vector).
+		n.cfgWrite32(uintptr(ptr), w&^(0x7f<<16)|1<<16)
+		n.wr(regMsgIntMode, n.rd(regMsgIntMode)|msgIntModeEnable)
+		n.rd(regMsgIntMode) // posted writes de brug uit
+		return nil
+	}
+	return fmt.Errorf("tg3: no MSI capability")
+}
+
+// IRQUnmask/AckIRQ/RearmIRQ: de interrupt-mailbox. 1 = gemaskeerd (tg3_disable_ints),
+// 0 = open (tg3_enable_ints zonder tagged status). De ack maskeert, zoals
+// tg3_msi doet; RearmIRQ (vanuit WaitNIC, ná de pomp) opent hem weer.
+func (n *Net) IRQUnmask() {
+	// tg3_enable_ints: MASK_PCI_INT eraf — enableRegAccess zet hem, zoals
+	// tg3 bij init, en zonder deze stap komt er nooit een MSI uit de chip.
+	n.cfgWrite32(pciMiscHostCtrl, n.cfgRead32(pciMiscHostCtrl)&^uint32(miscMaskPCIInt))
+	n.wrMbox(mbInterrupt, 0)
+}
+
+// AckIRQ maskeert (mailbox 1). Het UPDATED-bit van het status-blok wissen
+// (zoals tg3_interrupt doet) is HIER geprobeerd en teruggedraaid: daarna
+// kwam er geen interrupt meer (bundel 37, 20-09: 0 irq/s, cyclus terug op
+// 21 ms). Waarom is open; de storm ná verkeer (bundel 36) wordt eerst
+// gemeten via IRQDiag in de idlestat-regel.
+func (n *Net) AckIRQ() { n.wrMbox(mbInterrupt, 1) }
+
+// RearmIRQ opent de mailbox weer — en doet dan wat tg3_int_reenable doet:
+// kwam er werk binnen terwijl de mailbox dicht stond, dan trekt de chip
+// daar NIET alsnog de lijn voor. Bij bulk merk je dat niet (het volgende
+// frame werkt het status-blok opnieuw bij), maar een los frame — een SYN,
+// de ACK van een klein venster — bleef liggen tot de failsafe van de pomp
+// (10 ms). Dat was de héle 45 MB/s over de draad: venster 480 KB gedeeld
+// door een RTT van 10,5 ms, op elk paar waar de M4 in zat (L83, 20-09;
+// gepold deed dezelfde draad 100-118 MB/s). Linux: na het openen kijken of
+// er werk staat en dan HOSTCC_MODE_NOW zetten, zodat de chip meteen een
+// status-update plus interrupt afgeeft.
+func (n *Net) RearmIRQ() {
+	n.wrMbox(mbInterrupt, 0)
+	if n.rxProducer() != n.r.rxRetIdx {
+		n.wr(hostccMode, n.rd(hostccMode)|hostccModeNow)
+	}
+}
+
+// MiscHostCtrl geeft MISC_HOST_CTRL (diagnose: staat MASK_PCI_INT nog?).
+func (n *Net) MiscHostCtrl() uint32 { return n.cfgRead32(pciMiscHostCtrl) }
+
+// IRQDiag: het status-woord van het status-blok (bit 0 = UPDATED), HOSTCC_MODE,
+// en de PCI-status (bit 3 = INTx# asserted) — of de chip zijn lijn trekt.
+func (n *Net) IRQDiag() (status, hostcc, pciStatus uint32) {
+	return n.statusWord(0), n.rd(hostccMode), n.cfgRead32(pciCommand) >> 16
+}
+
+// Batch (netdev.Flusher): doorbells uitstellen tot FlushRX/FlushTX. Uit
+// zolang er geen pomp is die flusht (boot); uitzetten flusht meteen.
+func (n *Net) Batch(on bool) {
+	n.batch = on
+	if !on {
+		n.FlushRX()
+		n.FlushTX()
+	}
+}

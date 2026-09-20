@@ -174,6 +174,7 @@ func installSwitchCode() {
 	// cacheable instructie-fetch moet ze vers uit DRAM halen.
 	dev.CleanInv(base, off)
 	dev.MB()
+	el2.PublishCode()
 
 	el2.SetRelocated(uint64(dst[0]), uint64(dst[1]), uint64(dst[2]))
 }

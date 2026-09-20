@@ -13,10 +13,11 @@ package main
 
 import (
 	"fmt"
+	"github.com/usbarmory/tamago/arm64"
 	_ "unsafe"
 
 	"github.com/xinix00/HopOS/metal/v2/board/apple"
-	_ "github.com/xinix00/HopOS/metal/v2/board/apple/hop" // registreert het board (init)
+	"github.com/xinix00/HopOS/metal/v2/board/apple/hop"
 	"github.com/xinix00/HopOS/metal/v2/cmd/hopos/cfgblob"
 )
 
@@ -54,6 +55,7 @@ func init() {
 		}
 		return cfgblob.All(key)
 	}
+	hop.Config = bootParamAll // het board leest zijn knoppen via dezelfde bron
 
 	// Node-identiteit-terugval: het serienummer van de machine. Twee nodes op
 	// één LAN mogen nooit allebei "hopos-1" heten. Bij voorkeur uit de boom
@@ -93,4 +95,14 @@ func init() {
 	// hardware-governor zelf hebt aangezet (Derek, 01-09). Zwijgt volledig op
 	// een node die op zijn plafond blijft staan.
 	boardExtra = func() { go apple.PStateWatch() }
+}
+
+// Een EL1-exception op HOP's core mét adres: ESR/FAR/PC vóór tamago's panic.
+// Zonder dit is een data-abort in een driver "EL1 exception" en niets meer
+// (bundel 23, 18-09).
+func init() {
+	arm64.SystemExceptionHandler = func(pc uintptr) {
+		fmt.Printf("!!EL1 ESR=%#016x FAR=%#016x PC=%#x\n", apple.ReadESR(), apple.ReadFAR(), pc)
+		arm64.DefaultExceptionHandler(pc)
+	}
 }

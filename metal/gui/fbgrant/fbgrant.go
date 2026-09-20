@@ -123,6 +123,33 @@ func Arm(i int) error {
 	return stage2.GrantWindow(i, b, s)
 }
 
+// Adopt restores ownership only from the previous kernel's preserved cage
+// mapping, never from app environment or a reconnecting client's claims.
+func Adopt(i int) error {
+	d, ok := board.Current().Framebuffer()
+	if !ok || d.Base == 0 || d.Height <= 0 || d.Stride <= 0 ||
+		uint64(d.Stride) > ^uint64(0)/uint64(d.Height) {
+		return nil
+	}
+	b, s := uint64(d.Base), uint64(d.Stride)*uint64(d.Height)
+	has, err := stage2.HasGrantWindow(i, b, s)
+	if err != nil || !has {
+		return err
+	}
+	return adoptHolder(i, b, s)
+}
+
+func adoptHolder(i int, b, s uint64) error {
+	mu.Lock()
+	defer mu.Unlock()
+	if holder != 0 && holder != i {
+		return fmt.Errorf("framebuffer mapped by both cages %d and %d", holder, i)
+	}
+	holder, base, size = i, b, s
+	fb.Disable()
+	return nil
+}
+
 // Release is de releaseSlot-hook (slots.GrantHooks.Release): geeft de grant
 // terug bij het vrijkomen van het slot en zet HOP's console terug op het
 // scherm (verse Init: schone lei, log loopt weer).

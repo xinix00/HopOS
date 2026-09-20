@@ -61,9 +61,9 @@ const (
 	// fysieke partitie die partAlloc uit de pool van het board sneed (precies
 	// job.MemoryLimit groot — de werkelijke RAM-declaratie wordt bij het laden
 	// gepatcht). De stride is dus een IPA-vorm, geen fysieke reservering; de
-	// fysieke capaciteit is de pool (Plan.Pool). Canoniek IPA binnen één GB →
-	// stage-2 mapt met één L2-tabel (tevens de per-app maat-grens, zie
-	// maxLimitFor in slots).
+	// fysieke capaciteit is de pool (Plan.Pool). ARM stage-2 maps the entire
+	// partition across the available 39-bit IPA space; the slot stride is
+	// not a per-app memory limit.
 	SlotsBase  = 0x50000000
 	SlotStride = 0x20000000 // 512MB IPA-venster per slot
 
@@ -1328,3 +1328,31 @@ func HostIP4() uint32 { return SlotIP4(0) }
 
 // SlotMAC geeft de deterministische MAC van slot i (HOP = slot 0 → ..:00).
 func SlotMAC(i int) [6]byte { return [6]byte{0x02, 0, 0, 0, 0, byte(i)} }
+
+// ExcludeFromPool haalt [base, base+size) uit de partitie-pool — vóór slots
+// hem inleest. Gebruikt door een geadopteerde kern-flip voor de carve van de
+// vórige kern: daar draaien de parkeerlussen en staan de parkeer-mailboxen
+// van de app-cores nog, en de tweede flip op rij leende dat stuk als
+// kernvenster (QEMU 17-09: "stage2: empty flip has an unparked core 1", de
+// M4-"tweede flip"-dood van 06-09).
+func ExcludeFromPool(base, size uint64) {
+	if size == 0 {
+		return
+	}
+	end := base + size
+	var out []Region
+	for _, r := range plan.Pool {
+		rEnd := r.Base + r.Size
+		if end <= r.Base || base >= rEnd {
+			out = append(out, r)
+			continue
+		}
+		if base > r.Base {
+			out = append(out, Region{Base: r.Base, Size: base - r.Base})
+		}
+		if end < rEnd {
+			out = append(out, Region{Base: end, Size: rEnd - end})
+		}
+	}
+	plan.Pool = out
+}

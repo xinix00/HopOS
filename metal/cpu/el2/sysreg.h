@@ -26,10 +26,16 @@
 #ifdef VHE
 #define EL1OP1 0x50000
 #define CPTR_EL2_NOTRAP 0x300000  /* CPACR-vorm: FPEN=0b11, verder RES0 */
+#define HCR_BASE 0x480000000      /* RW(31) | E2H(34): de VHE-lay-out op EL2 */
 #else
 #define EL1OP1 0
 #define CPTR_EL2_NOTRAP 0x33FF    /* RES1-bits, TFP=0 */
+#define HCR_BASE 0x80000000       /* RW(31) alleen: nVHE */
 #endif
+/* HCR_BASE: élke HCR_EL2-schrijver (boot.h, el2.s, smp.s) begint hiermee.
+ * Op Apple staat E2H vast op 1; op de O6N (17-09) is E2H de KEUZE die het
+ * verschil maakt tussen een kern die binnen 0,5 s stil sterft (nVHE-EL1) en
+ * een die doorloopt — Linux, FreeBSD en GRUB draaien daar allemaal VHE. */
 
 #define MRS_SCTLR_EL1(rt)      WORD $(0xd5381000|EL1OP1|rt)
 #define MSR_SCTLR_EL1(rt)      WORD $(0xd5181000|EL1OP1|rt)

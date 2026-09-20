@@ -15,6 +15,8 @@ The internal address plan is deterministic. The node is `10.100.0.1`; app IP and
 
 The switch is the single consumer of an app's TX ring and producer of its RX ring. It limits bursts and uses bounded backpressure rather than waiting indefinitely for a receiver. Frame bounds and source identity are checked at the switch boundary.
 
+Outbound NAT state is bounded to 512 flows per app and 4096 per node. At the limit, new outbound flows are dropped; existing mappings remain usable. After FINs in both directions, a TCP mapping has a 60-second idle timeout; expired mappings are swept every 30 seconds. A reset releases its mapping immediately. Reuse HTTP connections for repeated requests: rapidly opening and closing connections can exhaust this budget even when few requests are active. These limits apply to outbound masquerade state, not to the number of inbound connections on a stateless published port.
+
 Sources: [hopswitch.go](../metal/net/hopswitch/hopswitch.go), [gateway.go](../metal/net/hopswitch/gateway.go), [nat.go](../metal/net/hopswitch/nat.go), [hopnet](../metal/net/hopnet/), [appnet](../metal/app/applib/appnet/).
 
 ## One standard caller per app

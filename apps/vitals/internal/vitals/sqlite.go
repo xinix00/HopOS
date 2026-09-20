@@ -149,8 +149,7 @@ type sqlOutcome struct {
 }
 
 func (s *Server) runSQLite(res *Result, q url.Values) {
-	if s.cfg.FS == nil {
-		res.Err = "no file layer (not running as a HopOS app)"
+	if !s.requireStorage(res) {
 		return
 	}
 	mb := qInt(q, "mb", 32, 1, 512)

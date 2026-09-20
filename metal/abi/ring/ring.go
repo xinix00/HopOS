@@ -130,7 +130,12 @@ func New(size uint64) *Ring {
 // wek-drempel op de control-page, pending het wek-besluit van de governor.
 func (r *Ring) HeadPending() (uint64, bool) {
 	h := r.head()
-	return h, h != r.tail()
+	// An observer may sample head before another core consumes newly
+	// published records and advances tail beyond that sampled head. Only a
+	// bounded forward distance means pending data; inequality also treats
+	// that stale-head snapshot as work. Unsigned distance retains wraparound.
+	n := h - r.tail()
+	return h, n != 0 && n <= r.size
 }
 
 // markCorrupt zet de vlag met de reden; de eerste reden wint (de vervolgstaat

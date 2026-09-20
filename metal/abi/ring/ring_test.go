@@ -316,3 +316,32 @@ func TestOpenRejectsInvalidOwnerRange(t *testing.T) {
 		}()
 	}
 }
+
+func TestHeadPendingSnapshots(t *testing.T) {
+	const capacity = 128
+	for _, tc := range []struct {
+		name       string
+		head, tail uint64
+		pending    bool
+	}{
+		{"empty", 64, 64, false},
+		{"unread", 80, 64, true},
+		{"full", 192, 64, true},
+		// Observer reads H=64; producer publishes and consumer drains to
+		// T=80 before the observer reads tail. The two reads are not atomic.
+		{"old-head-new-tail", 64, 80, false},
+		{"outside-capacity", 200, 64, false},
+		{"pending-across-counter-wrap", 8, ^uint64(0) - 7, true},
+		{"stale-head-across-counter-wrap", ^uint64(0) - 7, 8, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := New(capacity)
+			r.setHead(tc.head)
+			r.setTail(tc.tail)
+			head, pending := r.HeadPending()
+			if head != tc.head || pending != tc.pending {
+				t.Fatalf("HeadPending()=(%#x, %v), want (%#x, %v)", head, pending, tc.head, tc.pending)
+			}
+		})
+	}
+}

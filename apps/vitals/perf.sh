@@ -62,6 +62,8 @@ if not r:
     print("disk: no result"); sys.exit(1)
 if r.get("error"):
     print("disk: ERROR", r["error"]); sys.exit(1)
+if r.get("skipped"):
+    print("disk: SKIPPED", r["skipped"]); sys.exit(0)
 m = {x["name"]: x for x in r["metrics"]}
 print("disk      %8.1f MB/s   write, %d KiB per call" % (m["write"]["value"], m["chunk"]["value"]))
 print("          %8.1f MB/s   read" % m["read"]["value"])

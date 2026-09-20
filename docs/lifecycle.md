@@ -62,3 +62,12 @@ The governing paths are [slots.go](../metal/kern/slots/slots.go), [stream.go](..
 During a [kernel flip](kernel-flip.md), existing application memory and execution remain in place. The new kernel restores partitions, full core spans and group pools before making the allocator available. Health information is checked separately from ownership. A missing heartbeat does not release a claim.
 
 Operator actions are described in [Operations](operations.md); implementation and hardware coverage are recorded in [Status](status.md).
+
+
+## Large partitions and translation storage
+
+The allocator, release path and FLIP adoption use one ownership model on ARM64 and RISC-V. A job's `memory_limit` describes its visible partition, including the existing 2 MiB ABI tail. Architecture code reports any additional translation storage needed; the allocator reserves it with that partition and releases the entire claim only after confirmed termination. It is not a second allocation or a second lifecycle.
+
+Small mappings use existing table storage. When that is insufficient, one additional 2 MiB block is reserved beyond the visible partition. ARM keeps its stage-2 tables inaccessible to the app. RISC-V permits its hardware page walker to read its own tables inside the PMP-owned claim; modifying a mapping still cannot escape that claim. Actual table size is checked before publication. The FLIP record keeps the visible partition size; the same architecture rule reconstructs its full reservation before reuse is possible.
+
+The current large-memory change uses ARM's 39-bit stage-2 address space and RISC-V's positive Sv39 range. These are address-space bounds, not fixed physical slices or per-core reservations. The available contiguous pool usually provides the lower limit. A larger memory allowance does not change the app's ABI-tail layout, require a board-specific app image, or merge a neighbor's memory. Hardware acceptance of the change is recorded in the release logbook.

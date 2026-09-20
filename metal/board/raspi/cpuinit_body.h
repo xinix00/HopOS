@@ -261,16 +261,21 @@ TEXT ·faultdump2(SB),NOSPLIT|NOFRAME,$0
 faulthang2:
 	B	faulthang2
 
-// uputc: teken in R3 naar de UART (R8=DR, R9=FR), met TXFF-poll.
+// uputc: diagnostic UART output must not block boot when the UART is full
+// or unclocked. Same poll bound as earlyPi; R15 is scratch in every caller.
 TEXT ·uputc(SB),NOSPLIT|NOFRAME,$0
+	MOVD	$100000, R15
 uputw:
+	SUBS	$1, R15
+	BEQ	uputdone
 	MOVWU	(R9), R10
 	TBNZ	$5, R10, uputw
 	MOVW	R3, (R8)
+uputdone:
 	RET
 
 // uhex: R4 als hex op de UART; R5 = aantal nibbles (8 of 16). Clobbert
-// R3/R5/R6/R10/R11; bewaart de link-register rond de geneste BL.
+// R3/R5/R6/R10/R11/R15; bewaart de link-register rond de geneste BL.
 TEXT ·uhex(SB),NOSPLIT|NOFRAME,$0
 	MOVD	R30, R11
 uhexlus:

@@ -1,6 +1,6 @@
 # Boards and drivers
 
-[Documentation index](index.md) · [Architecture](architecture.md) · [Test status](status.md)
+[Documentation index](index.md) · [Architecture](architecture.md) · [Test status](status.md) · [Complete support checklist](support.md)
 
 The shared framework owns app partitions, placement, lifecycle and services. Architecture code implements the execution boundary. Board code supplies the memory plan, core operations and devices. The tables below describe implemented paths; [status](status.md) records which builds and hardware transitions have actually been tested.
 
@@ -14,6 +14,7 @@ The shared framework owns app partitions, placement, lifecycle and services. Arc
 | Raspberry Pi 5, ARM64 | Pi firmware loads the kernel; EL2 and per-app stage-2 tables | Shared Raspberry Pi core implementation with Pi 5 device addresses. [Board](../metal/board/rpi5/hop/board.go), [plan](../metal/board/rpi5/rpi5.go). |
 | Radxa Zero 3 / RK3566, ARM64 | U-Boot loads the kernel; EL2 and per-app stage-2 tables | PSCI core operations; board carve and app pool. [Board](../metal/board/rk3566/hop/board.go), [plan](../metal/board/rk3566/plan.go). |
 | UEFI ARM64, including the Altra profile | UEFI stub retains ACPI, memory-map and GOP information; EL2 required | MADT CPU topology and PSCI; reserved kernel/carve window, app pool checked against the firmware memory map. [Board](../metal/board/uefi/hop/board.go), [plan](../metal/board/uefi/plan.go). |
+| Radxa Orion O6N / Cix P1, ARM64 | Dedicated O6N profile over the UEFI path; EL2 required | Inherits firmware memory-map, MADT and PSCI handling; uses MADT efficiency classes when available. [Board](../metal/board/o6n/hop/board.go). Boot and full operation confirmed by Derek on 17 September 2026; O6N measurements remain separate from generic UEFI results. |
 | LicheeRV Nano / SG2002, RISC-V64 | FIP monitor replaces OpenSBI; HOP runs in M-mode, apps use the PMP execution boundary | Two known harts, with the non-HOP hart available to apps; board-defined memory plan. [Core code](../metal/board/licheerv/hop/hart.go), [plan](../metal/board/licheerv/hop/plan.go). |
 
 Memory plans reserve node structures and DMA separately from app partitions. Available capacity depends on the actual topology, memory plan and current owners. A board name does not imply support for every device in the same silicon family. Installation profiles and toolchains are described in [development](development.md).
@@ -27,7 +28,8 @@ Memory plans reserve node structures and DMA separately from app partitions. Ava
 | Pi 4 | BCM [`genet`](../metal/driver/nic/genet/genet.go) | No NVMe path exposed by the current board implementation | Firmware framebuffer; GUI build available |
 | Pi 5 | Cadence [`gem`](../metal/driver/nic/gem/gem.go) in RP1, through Broadcom PCIe | RP1 is wired; NVMe-HAT support is not provided by that wiring | Firmware framebuffer; GUI build available |
 | RK3566 | DesignWare [`dwmac4`](../metal/driver/nic/dwmac4/dwmac4.go) | No storage ECAM window exposed by this board profile | VOP2 scanout in the GUI build |
-| UEFI ARM64 | Supported Intel adapter through [`igb`](../metal/driver/nic/igb/igb.go) and firmware-configured PCIe | Generic NVMe probe, limited to the existing bus-0 discovery path | GOP framebuffer if supplied by firmware |
+| UEFI ARM64 | Supported Intel `igb` or Realtek `rtl8126` adapter through firmware-configured PCIe; first supported port | [MCFG hierarchy NVMe discovery](../metal/board/uefi/hop/storage.go), including controllers behind root ports; whole selected device assigned to HopOS | GOP framebuffer if supplied by firmware |
+| Radxa Orion O6N | Inherits the UEFI RTL8126 path; first supported port | Inherits UEFI MCFG hierarchy discovery and whole-device NVMe allocation | Inherited GOP, conditional on firmware; board operation confirmed, display-specific measurements tracked separately |
 | LicheeRV | DesignWare [`dwmac`](../metal/driver/nic/dwmac/dwmac.go) and board PHY setup | No local block-storage driver; SD is the boot medium | Headless |
 
 The node brings up storage in [`main.go`](../metal/cmd/hopos/main.go). Absence of storage does not prevent compute, but a job requiring volumes cannot start without the storage service. Local `hopfs` is scratch storage; its durability limits are described in [operations](operations.md).
@@ -36,7 +38,7 @@ GUI is an optional build profile. It registers display grants separately from th
 
 ## Interrupts, idle and reset
 
-Only QEMU virt currently supplies the physical NIC interrupt path: virtio-net through GICv3, with a 10 ms fallback check. The physical boards use the existing 300 µs RX poll interval. Physical IRQ integration on those boards is a subsequent task, separate from the v2.2.2 hardware round. The implementation is in [hopnet](../metal/net/hopnet/hopnet.go) and [QEMU IRQ wiring](../metal/board/qemuvirt/hop/net.go).
+Only QEMU virt currently supplies the physical NIC interrupt path: virtio-net through GICv3, with a 10 ms fallback check. The physical boards use the existing 300 µs RX poll interval. Physical IRQ integration is one item in the [board follow-up checklist](support.md), alongside idle, clocks, sensors, storage and display; it is separate from the current release acceptance. The implementation is in [hopnet](../metal/net/hopnet/hopnet.go) and [QEMU IRQ wiring](../metal/board/qemuvirt/hop/net.go).
 
 The architectural rule remains one network interrupt for external work and one logical doorbell per resident. The doorbell tells the app to inspect published work; it is not a message counter. App wakeup and the current physical RX polling policy are different layers. [Networking](networking.md) explains their relationship.
 

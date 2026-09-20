@@ -18,8 +18,17 @@ import (
 	"github.com/xinix00/HopOS/metal/v2/dev"
 )
 
-// wdRefresh onthoudt het refresh-frame zodat WatchdogPet de teller herstart.
-var wdRefresh uintptr
+// wdRefresh/wdControl/wdTicks onthouden de frames en de WOR-waarde zodat
+// WatchdogPet de teller herstart — via WRR én door WOR opnieuw te schrijven.
+// Dat laatste is per spec óók een refresh (WCV = teller + WOR) en het is de
+// enige weg die op de O6N werkt: daar doet een write naar het refresh-frame
+// niets (cixtech/cix-linux-main#25, BIOS 1.2.1). Twee writes per aai kost
+// niets; één stille watchdog-reset kost een node.
+var (
+	wdRefresh uintptr
+	wdControl uintptr
+	wdTicks   uint32
+)
 
 // WatchdogArm wapent de SBSA-watchdog met de gegeven timeout. Alleen de
 // hardware — het beleid (wanneer aaien, wanneer niet) woont in
@@ -55,13 +64,35 @@ func WatchdogArm(timeout time.Duration) (desc string, ok bool) {
 	dev.Write32(uintptr(refresh), 1)                 // WRR: teller vers
 	dev.Write32(uintptr(control), 1)                 // WCS: enable
 	dev.MB()
-	wdRefresh = uintptr(refresh)
+	wdRefresh, wdControl, wdTicks = uintptr(refresh), uintptr(control), uint32(ticks)
 	return fmt.Sprintf("SBSA watchdog, %v (refresh %#x, control %#x)", timeout, refresh, control), true
 }
 
-// WatchdogPet herstart de SBSA-teller.
-func WatchdogPet() { dev.Write32(wdRefresh, 1) }
+// WatchdogPet herstart de SBSA-teller: WRR, en WOR opnieuw (zie wdTicks).
+func WatchdogPet() {
+	dev.Write32(wdRefresh, 1)
+	dev.Write32(wdControl+0x8, wdTicks)
+}
 
 // cntfrq leest CNTFRQ_EL0 (cpu_arm64.s) — de tikfrequentie van de
 // system counter, door de firmware gezet.
 func cntfrq() uint32
+
+// WatchdogOff zet de SBSA-watchdog uit (WCS.enable = 0) — voor hopos.wd=off op
+// een geflipte kern: de vórige kern wapende hem voor de flip-boot, en zonder
+// pets zou hij de node na 12 s resetten. Een post-mortem wil juist dat een
+// hangende node blijft staan (de Ampere-hang van 19-09, L83).
+func WatchdogOff() bool {
+	t := Tables()
+	if t == nil {
+		return false
+	}
+	refresh, control, found := t.Watchdog()
+	if !found || !MapHigh(refresh, 0x1000) || !MapHigh(control, 0x1000) {
+		return false
+	}
+	dev.Write32(uintptr(control), 0) // WCS: disable
+	dev.MB()
+	fmt.Printf("watchdog: SBSA disabled for a post-mortem (WCS now %#x, control %#x)\n", dev.Read32(uintptr(control)), control)
+	return true
+}

@@ -57,9 +57,13 @@ const (
 	dmaPageSize     = 4096
 	maxTransferSize = 1 << 20 // één volledig system/storage-frame
 	prpListSize     = dmaPageSize
-	genericDataOff  = 4 * dmaPageSize
-	genericPRPOff   = genericDataOff + maxTransferSize
-	genericDMANeed  = genericPRPOff + prpListSize
+	// Keep payload data in its own block, like ANS. Boards may cache this
+	// window; queues and PRP entries remain outside it and uncached.
+	DataOff        = 2 << 20
+	DataSize       = 2 << 20
+	genericDataOff = DataOff
+	genericPRPOff  = 4 * dmaPageSize
+	genericDMANeed = DataOff + DataSize
 )
 
 // queue is één SQ/CQ-paar met poll-state.
@@ -276,8 +280,8 @@ func (c *Controller) Init(dmaBase uintptr, dmaSize uint64) error {
 		return fmt.Errorf("nvme: MQES %d < %d", mqes+1, qEntries)
 	}
 
-	// DMA-indeling: vier queue-pagina's, één MiB aaneengesloten data en één
-	// PRP-lijstpagina. Eén system/storage-frame kan zo één NVMe-opdracht zijn.
+	// Four queue pages and one PRP page precede an isolated data block.
+	// One system/storage frame still fits one NVMe command.
 	c.admin = queue{sq: dmaBase, cq: dmaBase + 4096, phase: 1, id: 0}
 	c.io = queue{sq: dmaBase + 2*4096, cq: dmaBase + 3*4096, phase: 1, id: 1}
 	c.buf = dmaBase + genericDataOff

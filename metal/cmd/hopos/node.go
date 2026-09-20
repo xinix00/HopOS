@@ -78,7 +78,7 @@ func idleStat() {
 		fmt.Printf("idle: hop tcp retrans %d, fast %d, persist %d, zero-window %d; segs out %d (%d B) in %d (%d B); drops bad %d short %d noport %d replyfull %d\n", ts.TCPRetransmits, ts.TCPFastRetransmits, ts.TCPPersistProbes, ts.TCPZeroWindows, ts.TCPSegsOut, ts.TCPBytesOut, ts.TCPSegsIn, ts.TCPBytesIn, ts.DropBadFrame, ts.DropShortFrame, ts.DropNoPort, ts.DropReplyFull)
 		var ms runtime.MemStats
 		runtime.ReadMemStats(&ms)
-		fmt.Printf("idle: switch work by door %d, by failsafe timer %d; rx full %d, rx drops %d, nat oversize %d; hop gc %d\n", hopswitch.WorkByDoor.Load(), hopswitch.WorkByTimer.Load(), hopswitch.RXFull.Load(), hopswitch.RXDrops.Load(), hopswitch.NATOversize.Load(), ms.NumGC)
+		fmt.Printf("idle: switch work by door %d, by failsafe timer %d; rx full %d, rx drops %d, nat oversize %d; hop gc %d; rx-kick skipped: no core %d, not due %d, not saved %d\n", hopswitch.WorkByDoor.Load(), hopswitch.WorkByTimer.Load(), hopswitch.RXFull.Load(), hopswitch.RXDrops.Load(), hopswitch.NATOversize.Load(), ms.NumGC, slots.RXKickNoCore.Load(), slots.RXKickNotDue.Load(), slots.RXKickNotSaved.Load())
 
 		w0, t0, i0, r0, at = w1, t1, i1, r1, now
 		wr0, wa0, wk0, dk0, sw0, nr0, wi0, s0 = wr1, wa1, wk1, dk1, sw1, nr1, wi1, s1

@@ -8,7 +8,7 @@ package slots
 
 import "fmt"
 
-// GrantHooks zijn de drie lifecycle-haakjes van één grant-provider:
+// GrantHooks zijn de lifecycle-haakjes van één grant-provider:
 //   - Env (startGrant.prepare, ná claimSlot): mag de slot-env aanvullen (bv.
 //     FB_* voor de houder); geeft de (eventueel gekopieerde) env terug.
 //   - Arm (armSlot, ná de kooi-bouw en vóór de dispatch): mapt het venster
@@ -18,8 +18,10 @@ import "fmt"
 //     PMP-kooi op RISC-V programmeert alle vensters in één keer en kan er
 //     naderhand niets meer bij doen (locked entries zijn definitief tot de
 //     hart-reset). Providers die alleen ARM ondersteunen laten dit nil.
+//   - Adopt restores provider bookkeeping from an inherited cage before services start.
 //   - Release (releaseSlot): geeft de grant terug bij het vrijkomen.
 type GrantHooks struct {
+	Adopt   func(i int) error
 	Env     func(i int, env map[string]string) map[string]string
 	Arm     func(i int) error
 	Window  func(i int) (base, size uint64, ok bool)

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -17,7 +18,9 @@ import (
 )
 
 func TestSmoke(t *testing.T) {
-	s := NewServer(Config{Version: "test", Arch: "host", Port: "0"})
+	previous := runtime.GOMAXPROCS(2)
+	t.Cleanup(func() { runtime.GOMAXPROCS(previous) })
+	s := NewServer(Config{Version: "test", Arch: "host", Port: "0", HopAddr: "127.0.0.1:1"})
 	s.Start()
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -44,6 +47,9 @@ func TestSmoke(t *testing.T) {
 		t.Fatalf("page: code %d", code)
 	}
 	var state struct {
+		Node struct {
+			Cores int `json:"cores"`
+		} `json:"node"`
 		Running string             `json:"running"`
 		Results map[string]*Result `json:"results"`
 		Tests   []struct{ Name string }
@@ -54,6 +60,10 @@ func TestSmoke(t *testing.T) {
 		t.Fatalf("state: %v", err)
 	} else if len(state.Tests) == 0 {
 		t.Fatal("state: no tests listed")
+	}
+
+	if state.Node.Cores != runtime.GOMAXPROCS(0) {
+		t.Fatalf("reported cores=%d, configured=%d", state.Node.Cores, runtime.GOMAXPROCS(0))
 	}
 
 	// Eén echte run door de dispatcher heen; gc met 1s is de snelste.

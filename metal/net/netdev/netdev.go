@@ -38,3 +38,27 @@ const (
 	EthernetHeaderSize  = 14
 	EthernetMaximumSize = 18
 )
+
+// Flusher is de optionele batching-kant van een NIC: een driver die hem
+// draagt schrijft zijn doorbells (RX-producer, TX-tail) niet per frame maar
+// pas bij Flush. De RX-pomp roept FlushRX aan na elke burst (en om de zoveel
+// frames, zodat de NIC nooit zonder descriptors zit); wie zendt roept FlushTX
+// aan na zijn burst. Per frame scheelt dat één tot drie PCIe-schrijf- of
+// leesacties, en op een 1 Gbit-link zijn dat er 70.000 per seconde (L83, de
+// 100 MB/s-jacht). Een device zonder Flusher gedraagt zich als vroeger.
+// Batch(true) zet het uitstellen aan; tot dan (boot: DHCP, discovery — niemand
+// die flusht) schrijft de driver zijn doorbells per frame zoals vroeger.
+// Bundel 30/82 (19-09) leerde het: uitgesteld zonder flusher = geen lease,
+// geen netwerk, watchdog.
+// IRQRearmer: een device dat zijn RX-interrupt na de ack weer opent. De
+// RX-pomp roept het aan op het moment dat hij gaat wachten (hopnet.rxLoop),
+// niet eerder — zie daar.
+type IRQRearmer interface {
+	RearmIRQ()
+}
+
+type Flusher interface {
+	FlushRX()
+	FlushTX()
+	Batch(on bool)
+}

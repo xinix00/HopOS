@@ -51,3 +51,9 @@ TEXT ·tlbiAll(SB),NOSPLIT,$0-0
 	WORD	$0xd5033f9f	// dsb sy
 	WORD	$0xd5033fdf	// isb
 	RET
+
+// func sctlrEL1() uint64
+TEXT ·sctlrEL1(SB),NOSPLIT,$0-8
+	MRS	SCTLR_EL1, R0
+	MOVD	R0, ret+0(FP)
+	RET

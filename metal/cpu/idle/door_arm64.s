@@ -12,3 +12,10 @@ TEXT ·hvcDoorAck(SB),NOSPLIT,$0
 TEXT ·fiqEnable(SB),NOSPLIT,$0
 	MSR	$0b0001, DAIFClr
 	RET
+
+// irqEnable: alleen het I-masker eraf (DAIFClr #2) — F blijft dicht. Op Apple
+// is F de weg van de timer-FIQ die WFI wekt zonder ooit genomen te worden;
+// tamago's irq_enable zou I én F openzetten en die FIQ als exception nemen.
+TEXT ·irqEnable(SB),NOSPLIT,$0
+	MSR	$0b0010, DAIFClr
+	RET

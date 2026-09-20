@@ -66,6 +66,9 @@
 #ifndef BOARD_EL1
 #define BOARD_EL1
 #endif
+/* De lege TTBR1-tabel (zie cpuinitEL1): één 4KB-pagina in het gat tussen
+ * tamago's vectortabel (RamStart+0) en zijn L1 (RamStart+0x4000). */
+#define TTBR1_EMPTY_OFF 0x3000
 
 TEXT BOOT_ENTRY(SB),NOSPLIT|NOFRAME,$0
 	MOVD	R0, R9		// x0 bij binnenkomst: DTB of param-blok
@@ -108,7 +111,7 @@ TEXT ·cpuinitEL2(SB),NOSPLIT|NOFRAME,$0
 #endif
 	// HCR_EL2 = RW alleen: EL1 draait AArch64, stage-2 uit, niets getrapt.
 	// De app-cores krijgen hun RW|TSC|VM|FMO van de trampoline (el2.s).
-	MOVD	$1<<31, R0
+	MOVD	$HCR_BASE, R0	// RW (+E2H onder VHE, sysreg.h)
 	WORD	$0xd51c1100	// msr hcr_el2, x0
 	BOARD_EL2
 	MOVD	$·cpuinitEL1(SB), R3
@@ -122,6 +125,30 @@ TEXT ·cpuinitEL1(SB),NOSPLIT|NOFRAME,$0
 	BIC	$1<<1, R0
 	BIC	$1<<0, R0
 	MSR	R0, SCTLR_EL1
+	ISB	$15
+
+	// TTBR1_EL1 → een genulde tabel (RamStart+0x3000, TTBR1_EMPTY_OFF). Tamago
+	// zet TTBR0/TCR/MAIR maar laat TTBR1 staan zoals de firmware hem
+	// achterliet, met TCR.EPD1=0: het bovenste VA-bereik loopt dan door een
+	// tabel op een willekeurig adres. Een speculatieve walk daarheen geeft
+	// geen exception, maar op een busadres zonder antwoord blijft de core
+	// stil hangen — de Orion O6N (Cortex-A720/A520, 17-09): élke kern op
+	// EL1 dood binnen 0,5 s, geen trap, PSCI "ON"; met deze tabel loopt
+	// alles. Op de Pi's, Altra, M4 en QEMU stond daar toevallig iets
+	// onschuldigs. Linux en FreeBSD zetten TTBR1 altijd zelf (hun kernel
+	// woont er); wij hebben er niets, dus: een lege tabel, elke walk stopt
+	// op ingang 0. Vóór de runtime (MMU uit: dit is DRAM), 512 woorden.
+	MOVD	runtime∕goos·RamStart(SB), R0
+	ADD	$TTBR1_EMPTY_OFF, R0
+	MOVD	R0, R1
+	MOVD	$512, R2
+ttbr1zero:
+	MOVD	ZR, (R1)
+	ADD	$8, R1
+	SUBS	$1, R2
+	BNE	ttbr1zero
+	DSB	$15
+	MSR	R0, TTBR1_EL1
 	ISB	$15
 
 	// Stack aan het einde van de eigen RAM-declaratie.

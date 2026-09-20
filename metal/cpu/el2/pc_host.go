@@ -14,6 +14,9 @@ func EntryPC() uint64      { return 0 }
 
 func SetRelocated(entry, tramp, smp uint64) {}
 
+// Non-ARM builds have no EL2 blobs to publish (ImageBlobs returns zeros).
+func PublishCode() {}
+
 func ImageBlobs() (entry, entryEnd, tramp, trampEnd, smp, smpEnd uint64) {
 	return 0, 0, 0, 0, 0, 0
 }

@@ -10,8 +10,8 @@ package vitals
 import (
 	"fmt"
 	"net/url"
-	"sort"
 	"runtime"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -48,7 +48,7 @@ func (s *Server) runCPU(res *Result, q url.Values) {
 
 	steps := float64(bursts) * burstSteps
 	res.add("rate", steps/el/1e6, "Msteps/s")
-	res.add("burst", el / float64(bursts) * 1e6, "µs")
+	res.add("burst", el/float64(bursts)*1e6, "µs")
 	res.linef("%d bursts of %d LCG steps in %.2fs (incl. one Gosched per burst)",
 		bursts, burstSteps, el)
 }
@@ -186,7 +186,7 @@ func (s *Server) runBurn(res *Result, q url.Values) {
 	if maxTemp > 0 {
 		res.add("temp_max", float64(maxTemp)/1000, "C")
 	} else {
-		res.linef("no temperature available (set HOP_KEY to read it from the agent API)")
+		res.linef("no temperature available (check the node sensor, HOP_ADDR and API authentication)")
 	}
 }
 

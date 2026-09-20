@@ -62,7 +62,7 @@ elif [ "${EMBED:-0}" = 1 ]; then
 else
 	TARGET=./cmd/probeapple; NAME=probeapple; TAGS="linkcpuinit highram"
 fi
-ASMFLAGS="all=-D=VHE"
+ASMFLAGS="all=-D=VHE -D=APPLE_IPI"
 
 # Linkadres 0x101_0001_0000 in het venster vanaf 0x101_0000_0000
 # (apple.RamBase): de +0x10000-vorm van elk board.

@@ -56,11 +56,13 @@ const (
 	rdmaRing16  = 0x3000 // WRITE_PTR +0, PROD +8, CONS +C, BUF_SIZE +10, START +14, END +1C, XON +28, READ_PTR +2C
 	rdmaRingCfg = 0x3040
 	rdmaCtrl    = 0x3044
+	rdmaStatus  = 0x3048
 	rdmaBurst   = 0x304C
 	txBD        = 0x4000
 	tdmaRing16  = 0x5000 // READ_PTR +0, CONS +8, PROD +C, BUF_SIZE +10, START +14, END +1C, FLOW +28, WRITE_PTR +2C
 	tdmaRingCfg = 0x5040
 	tdmaCtrl    = 0x5044
+	tdmaStatus  = 0x5048
 	tdmaBurst   = 0x504C
 
 	// LENGTH_STATUS-bits (woord 0 van elke descriptor; lengte in [27:16]).
@@ -75,7 +77,10 @@ const (
 	nBD     = 256  // descriptors per richting (alle aan ring 16, als U-Boot)
 	bufSize = 2048 // RX_BUF_LENGTH; ook de TX-korrel
 
-	txTimeout = 100 * time.Millisecond
+	txTimeout      = 100 * time.Millisecond
+	dmaStopTimeout = 5 * time.Millisecond
+	dmaEnableMask  = 1 | 0xFFFF<<1 | 1<<17 // global and every ring
+	dmaDisabled    = 1
 )
 
 // Net is één GENET-instantie.
@@ -100,7 +105,23 @@ func (n *Net) Rev() uint32 { return n.rd(sysRevCtrl) }
 // tijdelijke local-loopback voor een stabiele rxclk — en SW_RESET daarna
 // écht wissen, valkuil 2), MIB-reset, framelengte, RX-alignment, interrupts
 // dicht (wij pollen) en de poort-mux naar de externe GPHY. Hierna werkt MDIO.
-func (n *Net) Reset() {
+func (n *Net) Reset() error {
+	// A FLIP inherits an active NIC. Stop it before MAC reset, PHY negotiation,
+	// or ring writes; clearing DMA_EN alone does not confirm completion.
+	// Follow Linux bcmgenet_dma_teardown: leave ring enables and MAC TX
+	// intact while stopping TX, allow queued packets to drain, then stop RX.
+	n.mod(umacCmd, 1<<1, 0)
+	if err := n.stopDMA(tdmaCtrl, tdmaStatus, "TX"); err != nil {
+		return err
+	}
+	time.Sleep(10 * time.Millisecond)
+	if err := n.stopDMA(rdmaCtrl, rdmaStatus, "RX"); err != nil {
+		return err
+	}
+	// Both engines are stopped; stale queue enables can now be cleared.
+	n.mod(tdmaCtrl, dmaEnableMask, 0)
+	n.mod(rdmaCtrl, dmaEnableMask, 0)
+	n.mod(umacCmd, 1, 0)
 	r := n.rd(sysRBufFlushCtrl)
 	n.wr(sysRBufFlushCtrl, r|2)
 	time.Sleep(10 * time.Microsecond)
@@ -126,6 +147,24 @@ func (n *Net) Reset() {
 	n.wr(intrl2_1Clear, 0xFFFFFFFF)
 
 	n.wr(sysPortCtrl, 3) // PORT_MODE_EXT_GPHY
+	return nil
+}
+
+// stopDMA waits for the hardware acknowledgement; a cleared enable bit alone
+// does not permit MAC reset or descriptor rewrites.
+func (n *Net) stopDMA(ctrl, status uintptr, direction string) error {
+	n.mod(ctrl, 1, 0)
+	deadline := time.Now().Add(dmaStopTimeout)
+	for {
+		v := n.rd(status)
+		if v&dmaDisabled != 0 {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("genet: %s DMA stop timeout (status %#x)", direction, v)
+		}
+		time.Sleep(time.Microsecond)
+	}
 }
 
 // MDIORead leest een clause-22 PHY-register via de interne unimac-MDIO.
@@ -193,9 +232,7 @@ func (n *Net) Init(dmaBase, dmaSize uintptr, speed int, fd bool) error {
 	n.wr(umacMDFAddr+12, uint32(n.MAC[2])<<24|uint32(n.MAC[3])<<16|uint32(n.MAC[4])<<8|uint32(n.MAC[5]))
 	n.wr(umacMDFCtrl, 1<<16|1<<15)
 
-	// DMA uit + flushen vóór de ringen (Linux-volgorde).
-	n.mod(tdmaCtrl, 1, 0)
-	n.mod(rdmaCtrl, 1, 0)
+	// Reset has confirmed DMA stopped; flush before rewriting rings.
 	n.wr(umacTxFlush, 1)
 	time.Sleep(10 * time.Microsecond)
 	n.wr(umacTxFlush, 0)
@@ -215,39 +252,29 @@ func (n *Net) Init(dmaBase, dmaSize uintptr, speed int, fd bool) error {
 	n.wr(rdmaBurst, 8) // BCM2711: dma_max_burst_length = 8
 	n.wr(rdmaRing16+0x14, 0)
 	n.wr(rdmaRing16+0x1C, nBD*3-1)
-	n.wr(rdmaRing16+0x2C, 0) // READ_PTR
-	n.wr(rdmaRing16+0x00, 0) // WRITE_PTR
-	// RING-INDEX-INVARIANT: onze software-index (int(rxCons)%nBD) en de registers
-	// die de hardware advanceert (PROD +0x08 = HW-producer, CONS +0x0C = wij)
-	// MOETEN vanaf één bekende stand starten. De vorige code lijnde uit op een
-	// mogelijk-niet-nul leftover-PROD (valkuil 5: bootloader/netboot) terwijl het
-	// WRITE_PTR/READ_PTR hierboven op 0 werd geforceerd — als de DMA zijn volgende
-	// slot uit WRITE_PTR afleidt i.p.v. PROD%256, desynchroniseert dat bij een
-	// netboot/warm-reboot (PROD!=0) de DMA-schrijfpositie en onze index.
-	// De DMA staat hier uit (rdmaCtrl-enable boven gewist), dus we forceren PROD
-	// én CONS expliciet naar 0 — dezelfde bekende nul-stand als een SD-cold-boot
-	// (waar PROD al 0 is: dat pad blijft dus ongewijzigd). Zo kunnen index en
-	// register niet uiteenlopen, ongeacht wat de bootloader achterliet.
-	// NOG TE VERIFIËREN op een echt netboot/warm-reboot (PROD!=0 vóór onze init).
-	n.wr(rdmaRing16+0x08, 0) // PROD := 0 (incl. discard-teller in de bovenste helft, valkuil 4)
-	n.wr(rdmaRing16+0x0C, 0) // CONS := 0
-	n.rxCons = 0
+	// Hardware owns PROD. Its retained packet count and the descriptor
+	// pointers are independent: resetting pointers to zero while retaining
+	// a nonzero count makes DMA and software select different buffers.
+	// Pointer registers count 32-bit words (three per descriptor).
+	n.rxCons = n.rd(rdmaRing16+0x08) & 0xFFFF
+	rxPtr := (n.rxCons % nBD) * 3
+	n.wr(rdmaRing16+0x2C, rxPtr) // READ_PTR
+	n.wr(rdmaRing16+0x00, rxPtr) // WRITE_PTR
+	n.wr(rdmaRing16+0x0C, n.rxCons)
 	n.wr(rdmaRing16+0x10, nBD<<16|bufSize)
 	n.wr(rdmaRing16+0x28, 5<<16|nBD>>4) // XON/XOFF
 	n.wr(rdmaRingCfg, 1<<16)
 
-	// TX-ring 16. Zelfde ring-index-invariant als RX (zie daar): CONS (+0x08) is
-	// hier de HW-consumer, PROD (+0x0C) advanceren wij. Forceer beide én de
-	// pointerregisters naar 0 i.p.v. uit te lijnen op een leftover-CONS; DMA
-	// staat uit. NOG TE VERIFIËREN op een echt netboot/warm-reboot.
+	// TX mirrors RX: hardware owns CONS. Match PROD to it before enabling
+	// DMA, rather than pretending a write reset the hardware counter.
 	n.wr(tdmaBurst, 8)
 	n.wr(tdmaRing16+0x14, 0)
 	n.wr(tdmaRing16+0x1C, nBD*3-1)
-	n.wr(tdmaRing16+0x00, 0) // READ_PTR
-	n.wr(tdmaRing16+0x2C, 0) // WRITE_PTR
-	n.wr(tdmaRing16+0x08, 0) // CONS := 0
-	n.wr(tdmaRing16+0x0C, 0) // PROD := 0
-	n.txProd = 0
+	n.txProd = n.rd(tdmaRing16+0x08) & 0xFFFF
+	txPtr := (n.txProd % nBD) * 3
+	n.wr(tdmaRing16+0x00, txPtr) // READ_PTR
+	n.wr(tdmaRing16+0x2C, txPtr) // WRITE_PTR
+	n.wr(tdmaRing16+0x0C, n.txProd)
 	n.wr(tdmaRing16+0x28, 0)
 	n.wr(tdmaRing16+0x10, nBD<<16|bufSize)
 	n.wr(tdmaRingCfg, 1<<16)

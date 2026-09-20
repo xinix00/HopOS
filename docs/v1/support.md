@@ -1,5 +1,7 @@
 # Support-matrix: wie voldoet aan het contract
 
+> Historical snapshot, retained for comparison. The current English [board support and follow-up checklist](../support.md), including O6N, supersedes this matrix.
+
 *(NL, intern) Stand 2026-09-03, uit de code gelezen (metal/board/board.go + de hop-helft per board). Bijwerken zodra een cel op ijzer bewezen of gebouwd is; een cel zonder datum is een aanname.*
 
 Het generieke board/kooi-contract (`board.Board`, `board.Cores`, `idle.Sleeper`, `cpu/irq`) heeft

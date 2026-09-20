@@ -139,6 +139,14 @@ func AdoptSlots(states []SlotState) int {
 		adoptCage(st)
 		hostCore[st.Slot], smpCores[st.Slot] = st.Core, st.Cores
 	}
+	// Restore trusted device ownership before any resident can reconnect.
+	if grant.Adopt != nil {
+		for _, st := range states {
+			if err := grant.Adopt(st.Slot); err != nil {
+				panic(fmt.Sprintf("kernflip: cannot restore grant: %v", err))
+			}
+		}
+	}
 	for _, st := range states {
 		i := st.Slot
 		appRAM, _ := appRAMSize(st.PartSize) // validated before any service starts
@@ -190,6 +198,10 @@ func ValidateAdoption(states []SlotState) error {
 			s.PartBase > ^uint64(0)-s.PartSize || s.PartBase%part2M != 0 || s.PartSize%part2M != 0 {
 			return fmt.Errorf("invalid partition for cage %d", s.Slot)
 		}
+		claim, err := claimSize(s.PartSize)
+		if err != nil || s.PartBase > ^uint64(0)-claim {
+			return fmt.Errorf("invalid full reservation for cage %d", s.Slot)
+		}
 		if _, err := appRAMSize(s.PartSize); err != nil {
 			return err
 		}
@@ -211,7 +223,7 @@ func ValidateAdoption(states []SlotState) error {
 			}
 		}
 		for _, p := range states[:j] {
-			if s.Slot == p.Slot || (s.PartBase < p.PartBase+p.PartSize && p.PartBase < s.PartBase+s.PartSize) {
+			if s.Slot == p.Slot || (s.PartBase < p.PartBase+p.PartSize+cageReserve(p.PartSize) && p.PartBase < s.PartBase+claim) {
 				return fmt.Errorf("overlapping owners %d and %d", s.Slot, p.Slot)
 			}
 			if s.ShareGroup != "" && s.ShareGroup == p.ShareGroup {
@@ -241,16 +253,20 @@ func partAdopt(i int, base, size uint64) error {
 	if i < 1 || i > layout.MaxSlots || size == 0 || base > ^uint64(0)-size || base%part2M != 0 || size%part2M != 0 {
 		return fmt.Errorf("slot %d buiten bereik", i)
 	}
+	claim, err := claimSize(size)
+	if err != nil || base > ^uint64(0)-claim {
+		return fmt.Errorf("slot %d has invalid full reservation", i)
+	}
 	if partOf[i].size != 0 {
 		return fmt.Errorf("slot %d heeft al een partitie", i)
 	}
 	// HELEMAAL vrij, of niets: een deel-claim zou betekenen dat een stuk van
 	// deze partitie al aan iemand anders toebehoort, en dan is het blob niet
 	// van deze pool. Weigeren is dan het enige veilige antwoord.
-	if !freeSpan(base, base+size) {
+	if !freeSpan(base, base+claim) {
 		return fmt.Errorf("partitie %#x+%d MB ligt niet vrij in de pool van deze kern", base, size>>20)
 	}
-	takeRange(base, base+size)
+	takeRange(base, base+claim)
 	partOf[i] = region{base, size}
 	return nil
 }

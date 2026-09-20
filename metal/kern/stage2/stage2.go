@@ -8,20 +8,12 @@
 // De partitie-map is tevens de relocatie: een image is canoniek gelinkt
 // (één linkadres, doorgaans het slot-1-bereik) en de stage-2 vertaalt dat
 // IPA-bereik naar de fysieke partitie van dít slot. Zelfde artifact op elk
-// slot, nul relocatiewerk, nul overhead — de MMU doet het. De device-regio's
-// (ctrl/ringen) blijven identity.
+// slot, nul relocatiewerk, nul overhead — de MMU doet het.
 //
-// Vorm: 4KB-granule, 32-bit IPA (VTCR.T0SZ=32, startlevel 1):
-//
-//	L1[4]    1GB/entry: [ipa>>30]→L2part, [2]→L2dev (0x80000000-),
-//	         [3]→L2net (0xC0000000-: het net-ring-GB)
-//	L2part   2MB-blokken: canoniek IPA-bereik → eigen slot-partitie (PA)
-//	L2dev    [384]→L3ctrl (2MB rond CtrlBase), [392+..]→L3ring
-//	L2net    [i-1] = eigen 2MB net-ring-blok als blockRW (frame-ringen; een
-//	         eigen GB — 128×2MB paste niet in het ctrl-GB: slot ≥105 liep
-//	         over de 1GB-grens, Altra 15-07)
-//	L3ctrl   scratch-page read-only (PSCI-conduitkeuze), eigen ctrl-page RW
-//	L3ring   de eigen 64KB ring-regio RW
+// 4KB-granule, 39-bit IPA (VTCR.T0SZ=25, startlevel 1): L1 entries
+// each select one L2 table of 2MB blocks for the private partition.
+// The ABI tail belongs to that same map. GB0 stays reserved for an optional
+// framebuffer grant; apps have no mapping of node boot scratch or firmware.
 //
 // Per slot leeft het blok op layout.Stage2Table(i), met op +CtxOff het
 // switch-contextblok van de coöperatieve core-deling (cpu/el2/switch.s).
@@ -49,24 +41,23 @@ const (
 	attrAF      = 1 << 10
 	attrSHInner = 0x3 << 8
 	attrRW      = 0x3 << 6 // S2AP: lezen+schrijven
-	attrRO      = 0x1 << 6 // S2AP: alleen lezen
 	attrNormal  = 0xF << 2 // MemAttr: normal, WB cacheable (stage-1 wint bij device)
 	attrNormNC  = 0x5 << 2 // MemAttr: normal non-cacheable (framebuffer-grant:
 	// de scanout leest mee, dus geen cache-contract met de app)
 
 	blockRW   = descBlock | attrAF | attrSHInner | attrRW | attrNormal
 	blockRWNC = descBlock | attrAF | attrSHInner | attrRW | attrNormNC
-	pageRO    = descPage | attrAF | attrSHInner | attrRO | attrNormal
 	pageRWNC  = descPage | attrAF | attrSHInner | attrRW | attrNormNC
 
-	l1Off     = 0x0000
-	l2PartOff = 0x1000
-	l2DevOff  = 0x2000
-	l3CtrlOff = 0x3000
-	// +0x5000 was het net-ring-GB; sinds de frame-ringen in de ABI-staart van de
-	// eigen partitie wonen valt dat onder l2PartOff en is de offset vrij.
-	// CtxOff (0x6000, abi/layout) is het switch-contextblok — NIET herbruiken.
-	l2FbOff = 0x7000 // FB-grant-L2 (GrantWindow): identity-venster op de
+	// IPALimit is the exclusive address limit of the 39-bit stage-2 regime.
+	IPALimit uint64 = 1 << 39
+
+	l1Off = 0x0000
+	// Eleven existing table pages avoid extra reservation for small apps:
+	// +1000..5000 and +a000..f000. Contexts at +6000/+6800 and the
+	// framebuffer pages at +7000..9000 retain their existing locations.
+	inlineL2Pages = 11
+	l2FbOff       = 0x7000 // FB-grant-L2 (GrantWindow): identity-venster op de
 	// firmware-framebuffer, alleen gevuld voor het slot dat de grant houdt
 	// De twee rand-L3's van dat venster: een framebuffer is zelden 2MB-aligned,
 	// dus kop en staart worden pagina-precies gemapt i.p.v. een heel blok
@@ -109,7 +100,24 @@ const (
 // Tevens de revoke-vectoren van de HOP-core zelf op RevokeVecBase: één handler
 // (op de HVC-offset) die TLBI ALLE1IS doet. HOP draait op EL1 en kan die
 // EL2-instructie niet direct uitvoeren; Revoke doet er een HVC voor. Zie Revoke.
+// A valid empty FLIP can still have powered-on cores waiting in the park loop.
+// This is independent of adopting live contexts and their exact switch code.
+var preserveParked bool
+
+func PreserveParkedCores() { preserveParked = true }
+
+func checkParkedCores() {
+	for c := 1; c <= layout.NumAppCores(); c++ {
+		if state := dev.Read64(layout.ParkMboxPA(c)); state > 1 {
+			panic(fmt.Sprintf("stage2: empty flip has an unparked core %d (mailbox %#x)", c, state))
+		}
+	}
+}
+
 func InitVectors() {
+	if preserveParked && !adoptingNow() {
+		checkParkedCores()
+	}
 	// Eerst de switch-code-kopie de plan-regio in (docs/kern-flip.md): daarná
 	// geven de el2-accessors de kopie-adressen, zodat de thunks hieronder én
 	// elke dispatch (CtxBootPC/CtrlSMPTramp via de board-accessors) buiten het
@@ -195,6 +203,13 @@ func InitVectors() {
 		0xd5033fdf, // isb
 		0xaa0003f0, // mov  x16, x0               (entry)
 		0xaa0103e0, // mov  x0, x1                (firmware-x0: DTB of 0)
+		0xd2800001, // movz x1, #0                (x1 = 0: "geen firmware" voor een UEFI-stub, init.s fwentry)
+		// Same I_HYGIENE sequence as app dispatch and the VHE chainload.
+		// Invalidate before the first fetch from the new image: its early
+		// boot cache maintenance cannot repair instructions already fetched.
+		0xd508751f, // ic iallu
+		0xd5033f9f, // dsb sy
+		0xd5033fdf, // isb
 		0xd61f0200, // br   x16
 	}
 	for w, ins := range revoke {
@@ -248,8 +263,13 @@ func initAppCoreRegion(s2PA, entryPA uint64) {
 		0xd61f0020, // br   x1                    (→ trampoline, x0 = ctx)
 	}
 	pc := layout.ParkCodePA()
-	for w, ins := range park {
-		dev.Write32(pc+uintptr(w)*4, ins)
+	// The parked-core protocol is stable across FLIP. Cores may currently
+	// execute this loop even with no residents, so leave those instructions
+	// untouched; only a true cold boot installs them.
+	if !preserveParked {
+		for w, ins := range park {
+			dev.Write32(pc+uintptr(w)*4, ins)
+		}
 	}
 	// Sched-blokken (mailbox + core-delingsstaat) schoon: verse DRAM is geen
 	// nul (Pi-meting) — word0=0 betekent "cold" (nooit geparkeerd → eerste
@@ -261,12 +281,7 @@ func initAppCoreRegion(s2PA, entryPA uint64) {
 	// Sched-blokken zijn per CORE (mailbox + core-delingsstaat, ParkMboxPA(core)):
 	// tot NumAppCores, niet de kooi-cap. Verse DRAM is geen nul, en de plan-PA's
 	// (die switch.s per core nodig heeft) moeten er staan vóór de eerste dispatch.
-	nc := layout.NumAppCores()
-	dev.Clear(pc+0x100, uint64(nc+1)*layout.ParkMboxLen)
-	for c := 0; c <= nc; c++ {
-		mb := layout.ParkMboxPA(c)
-		dev.Write64(mb+layout.SchedS2PA, s2PA)
-	}
+	initCoreSchedules(s2PA, preserveParked)
 	// De ctx-staat van elke KOOI expliciet op Empty (per-slot, tot de kooi-cap):
 	// HOP leest dit woord (Get/waitCtxDead in kern/slots) al vóór de eerste
 	// Build van dat slot, en verse DRAM is geen nul.
@@ -276,6 +291,20 @@ func initAppCoreRegion(s2PA, entryPA uint64) {
 	}
 	dev.CleanInv(vecs, 0x800)
 	dev.MB()
+}
+
+func initCoreSchedules(s2PA uint64, keepParked bool) {
+	for c := 0; c <= layout.NumAppCores(); c++ {
+		mb := layout.ParkMboxPA(c)
+		if keepParked {
+			// Never transiently clear word0: the existing park loop interprets
+			// anything other than 1 as a dispatch and immediately reads word1.
+			dev.Clear(mb+8, layout.ParkMboxLen-8)
+		} else {
+			dev.Clear(mb, layout.ParkMboxLen)
+		}
+		dev.Write64(mb+layout.SchedS2PA, s2PA)
+	}
 }
 
 // Revoke voert de hard-kill uit op slot i: HOP nult de stage-2-tabel van het
@@ -319,12 +348,29 @@ func Revoke(i int) {
 	hvcRevoke()
 }
 
+// TableReserve returns the node-only bytes appended to a partition's physical
+// claim. Small partitions use the cage's existing table pages. A single 2MB
+// allocation grain holds every L2 page required by the 39-bit IPA regime.
+// Invalid ranges are rejected by Build before any memory is touched.
+func TableReserve(ipaBase, size uint64) uint64 {
+	if size == 0 || ipaBase >= IPALimit || size > IPALimit-ipaBase {
+		return 0
+	}
+	pages := ((ipaBase & ((1 << 30) - 1)) + size + (1 << 30) - 1) >> 30
+	if pages > inlineL2Pages {
+		return 2 << 20
+	}
+	return 0
+}
+
 // Build schrijft de stage-2-tabellen voor slot i en geeft het fysieke adres
 // van de L1-tabel terug (voor VTTBR_EL2, gezet door de EL2-trampoline).
 // ipaBase is het linkadres-bereik van de image; paBase/size is de fysieke
 // partitie die HOP voor deze task alloceerde (variabel per job). Het
 // IPA-bereik [ipaBase, ipaBase+size) wordt op [paBase, paBase+size) gelegd.
-// size ≤ één 1GB-blok vanaf ipaBase (aanroeper begrenst dit) → één L2-tabel.
+// The range may cross GB boundaries within the 39-bit IPA window.
+// The caller also owns TableReserve(ipaBase, size) bytes at paBase+size.
+// That node-only table reservation is never included in the app map.
 // De ABI-staart van het slot (control-page, hop-ABI-ringen, frame-ringen) heeft
 // hier geen eigen parameter en geen eigen venster meer: die ligt in de partitie
 // (layout, ABIVersion 2) en valt dus binnen dezelfde map.
@@ -332,71 +378,52 @@ func Build(i int, ipaBase, paBase, size uint64) (uint64, error) {
 	if i < 1 || i > layout.MaxSlots {
 		return 0, fmt.Errorf("slot %d buiten bereik", i)
 	}
-	// Het hele blok schoon, inclusief het switch-contextblok op +CtxOff: een
-	// Start gebeurt per contract op een niet-draaiend slot, dus de ctx-staat
-	// mag (en moet) hier vers op Empty — de aanroeper zet 'm daarna op
-	// Running/BootPending bij de dispatch.
+	const blockSize = uint64(2 << 20)
+	if size == 0 || (ipaBase|paBase|size)&(blockSize-1) != 0 {
+		return 0, fmt.Errorf("stage-2: partition base and nonzero size must be 2MB aligned")
+	}
+	// Check subtraction bounds before adding or writing: invalid input must
+	// neither wrap the address space nor damage an existing table/context.
+	if ipaBase < 1<<30 || ipaBase >= IPALimit || size > IPALimit-ipaBase {
+		return 0, fmt.Errorf("stage-2: partition %#x + %#x outside IPA RAM window [0x40000000, %#x)", ipaBase, size, IPALimit)
+	}
+	// Both EL2 trampolines cap VTCR.PS at 44 bits; a board with a smaller
+	// physical address space already restricts its own pool to that space.
+	const paLimit = uint64(1 << 44)
+	extra := TableReserve(ipaBase, size)
+	if paBase >= paLimit || size > paLimit-paBase || extra > paLimit-paBase-size {
+		return 0, fmt.Errorf("stage-2: physical partition %#x + %#x exceeds 44-bit PA space", paBase, size)
+	}
+
 	base := layout.CageTablePA(i)
-	// The secondary CPU context in this block may belong to another cage.
+	// The secondary CPU context may belong to another cage. All other
+	// metadata belongs to this stopped cage and starts clean, including any
+	// old framebuffer grant and its primary context.
 	dev.Clear(base, layout.SMPCtxOff)
 	dev.Clear(base+layout.SMPCtxOff+layout.CtxLen, layout.CageStride-layout.SMPCtxOff-layout.CtxLen)
-
 	l1 := uint64(base + l1Off)
-	l2Part := uint64(base + l2PartOff)
-	l2Dev := uint64(base + l2DevOff)
-	l3Ctrl := uint64(base + l3CtrlOff)
-
-	// De tabel is de IPA→PA-vertaling: alle índexen hieronder komen uit het
-	// IPA-beeld (de universele layout-constanten die de app ziet), alle
-	// wáárden zijn fysiek (de partitie uit de pool, de plan-PA's van
-	// ctrl/ringen). Op QEMU wijken die bewust van elkaar af — zo bewijst de
-	// regressie de splitsing.
-	//
-	// L1: 1GB-entries. Een IPA-bereik in het GB van de ctrl/ring-regio deelt
-	// zijn L2 met de device-L3's (indexes botsen niet: partitie ≤ idx 351,
-	// ctrl/ring op 384/392, net-ringen op 408+).
-	partL2 := l2Part
-	if ipaBase>>30 == uint64(layout.CtrlBase)>>30 {
-		partL2 = l2Dev
-	}
-	dev.Write64(base+l1Off+uintptr(ipaBase>>30)*8, partL2|descTable)
-	dev.Write64(base+l1Off+uintptr(uint64(layout.CtrlBase)>>30)*8, l2Dev|descTable)
-
-	// Partitie als 2MB-blokken: IPA (linkadres) → PA (gealloceerde partitie).
-	// De index wordt begrensd, symmetrisch met het net-ring-blok hieronder: één
-	// L2-tabel dekt 512 × 2MB = precies één GB. Valt de partitie daarbuiten, dan
-	// schrijft de lus in de buurtabellen ván dit stage-2-blok (l2Dev/l3*) en bij
-	// genoeg overschot voorbij CageStride in het blok van het VOLGENDE slot —
-	// stille kruisbesmetting van andermans kooi. De per-slot-cap (maxLimitFor)
-	// hoort dit al te voorkomen; deze guard is de vangnet-laag die niet van een
-	// juiste cap-berekening afhangt (layout-drift hoort hard te vallen, niet stil
-	// in een buurtabel te schrijven — de slot-105-les van 15-07).
-	gbBase := ipaBase &^ ((1 << 30) - 1)
-	if size == 0 {
-		return 0, fmt.Errorf("partitie-grootte 0 voor slot %d", i)
-	}
-	if last := (ipaBase + size - 1 - gbBase) >> 21; last > 511 {
-		return 0, fmt.Errorf("partitie %#x + %d MB buiten het GB-blok van het linkadres (L2-index %d > 511)",
-			ipaBase, size>>20, last)
-	}
-	for off := uint64(0); off < size; off += 2 << 20 {
-		idx := (ipaBase + off - gbBase) >> 21
-		dev.Write64(uintptr(partL2)+uintptr(idx)*8, (paBase+off)|blockRW)
+	if extra != 0 {
+		dev.Clear(uintptr(paBase+size), extra)
 	}
 
-	// L2dev → L3's voor de ctrl- en ring-regio (pagina-granulariteit).
-	devGB := uint64(layout.CtrlBase) &^ ((1 << 30) - 1)
-	dev.Write64(uintptr(l2Dev)+uintptr((uint64(layout.CtrlBase)-devGB)>>21)*8, l3Ctrl|descTable)
-
-	// L3ctrl: alleen de boot-scratch, read-only op zijn IPA (de conduitkeuze die
-	// cpuinit erop achterliet).
-	//
-	// Hier stonden ook de eigen control-page en de ring- en net-ring-regio's, elk
-	// met hun eigen IPA-venster en tabel. Die zijn weg: de slot-ABI woont sinds
-	// ABIVersion 2 in de staart van de partitie zelf (layout), en de partitie
-	// hierboven is al volledig gemapt — inclusief die staart. Eén map, één
-	// contract, en de app rekent alles uit RamStart/RamSize.
-	dev.Write64(uintptr(l3Ctrl)+0*8, uint64(layout.BootScratchPA())|pageRO)
+	// Exactly one visible partition including its ABI tail; node tables are
+	// either in this cage's fixed metadata or beyond the visible partition.
+	firstGB := ipaBase >> 30
+	for off := uint64(0); off < size; off += blockSize {
+		ipa := ipaBase + off
+		gb := ipa >> 30
+		table := gb - firstGB
+		l2 := uintptr(paBase+size) + uintptr(table)*4096
+		if extra == 0 {
+			page := table + 1
+			if table >= 5 {
+				page += 4 // skip primary/secondary contexts and framebuffer pages
+			}
+			l2 = base + uintptr(page)*4096
+		}
+		dev.Write64(base+l1Off+uintptr(gb)*8, uint64(l2)|descTable)
+		dev.Write64(l2+uintptr((ipa>>21)&511)*8, (paBase+off)|blockRW)
+	}
 
 	// Coherentie ná de tabel-writes: de page-table-walker van de app-core leest
 	// deze tabellen cacheable (VTCR IRGN/ORGN=WB), HOP schreef ze ongecached.
@@ -404,15 +431,77 @@ func Build(i int, ipaBase, paBase, size uint64) (uint64, error) {
 	// walker een oude tabel laten walken. Vegen vóór CPU_ON; er draait nu geen
 	// walker op dit blok, dus niets kan tussen de veeg en de start hercachen.
 	dev.CleanInv(base, layout.CageStride)
+	if extra != 0 {
+		dev.CleanInv(uintptr(paBase+size), uintptr(extra))
+	}
 	dev.MB()
 	return l1, nil
+}
+
+// HasGrantWindow verifies an inherited framebuffer mapping without modifying it.
+// Only the cage's own fixed tables may be followed; app memory is never trusted
+// as a table pointer. Exact descriptors also check access and memory attributes.
+func HasGrantWindow(i int, pa, size uint64) (bool, error) {
+	if i < 1 || i > layout.MaxSlots || pa == 0 || size == 0 ||
+		pa >= 1<<48 || size > (1<<48)-pa {
+		return false, fmt.Errorf("slot %d: inherited framebuffer mapping does not match", i)
+	}
+	lo := pa &^ ((2 << 20) - 1)
+	pgLo, pgHi := pa&^0xfff, (pa+size+0xfff)&^0xfff
+	ipa := uint64(layout.FbIPA)
+	if pgHi-lo > (1<<30)-(ipa&((1<<30)-1)) {
+		return false, fmt.Errorf("slot %d: inherited framebuffer mapping does not match", i)
+	}
+	base := layout.CageTablePA(i)
+	if dev.Read64(base+l1Off+uintptr(ipa>>30)*8) == 0 {
+		return false, nil
+	}
+	if dev.Read64(base+l1Off+uintptr(ipa>>30)*8) != uint64(base+l2FbOff)|descTable {
+		return false, fmt.Errorf("slot %d: inherited framebuffer mapping does not match", i)
+	}
+	// Check every entry, including unmapped neighbors: a broader old grant
+	// is not evidence of exclusive ownership of this exact framebuffer.
+	first, last := ((ipa+pgLo-lo)>>21)&511, ((ipa+pgHi-lo-1)>>21)&511
+	for idx := uint64(0); idx < 512; idx++ {
+		e := dev.Read64(base + l2FbOff + uintptr(idx)*8)
+		if idx < first || idx > last {
+			if e != 0 {
+				return false, fmt.Errorf("slot %d: inherited framebuffer has extra mappings", i)
+			}
+			continue
+		}
+		p := lo + (idx << 21) - (ipa & ((1 << 30) - 1))
+		if p >= pgLo && p+(2<<20) <= pgHi && e == p|blockRWNC {
+			continue
+		}
+		var table uintptr
+		switch e {
+		case uint64(base+l3FbHeadOff) | descTable:
+			table = base + l3FbHeadOff
+		case uint64(base+l3FbTailOff) | descTable:
+			table = base + l3FbTailOff
+		default:
+			return false, fmt.Errorf("slot %d: inherited framebuffer mapping does not match", i)
+		}
+		for j := uintptr(0); j < 512; j++ {
+			page := p + uint64(j)*0x1000
+			want := uint64(0)
+			if page >= pgLo && page < pgHi {
+				want = page | pageRWNC
+			}
+			if dev.Read64(table+j*8) != want {
+				return false, fmt.Errorf("slot %d: inherited framebuffer page does not match", i)
+			}
+		}
+	}
+	return true, nil
 }
 
 // GrantWindow mapt een fysiek venster Normal-NC op het vaste IPA-venster
 // layout.FbIPA in de bestaande kooi van slot i — de FB-grant
 // (kern/slots/fbgrant.go): een lineaire pixelbuffer, geen registers/DMA.
-// Identity kan niet: de kooi-IPA-ruimte is 32-bit (VTCR.T0SZ=32) en een
-// firmware-framebuffer mag fysiek boven de 4GB liggen (QEMU-ramfb:
+// A fixed low IPA keeps the framebuffer separate from app RAM, regardless
+// of its physical address (QEMU-ramfb:
 // 0x1bc7a0000 — de vondst van 19-07). Aanroepen ná Build en vóór de dispatch
 // (zelfde walker-regime als Build zelf).
 //

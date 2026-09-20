@@ -28,6 +28,7 @@ type idleSample struct {
 	t     time.Time
 	idle  uint64 // CtrlIdle: idle-ticks
 	wakes uint64 // CtrlWakes: idle-rondes
+	cores uint64 // CtrlCores: provisioned cores (0 means the legacy single core)
 }
 
 type idleSampler struct {
@@ -36,14 +37,18 @@ type idleSampler struct {
 	cfg  Config
 }
 
-// idleWindow is het JSON-vensterresultaat. IdlePct is -1 als de
-// tellerfrequentie onbekend is (host-build, of board zonder Hz).
+// IdlePct is -1 when the counters cannot provide a defensible percentage.
+// CtrlIdle sums scheduler idle time across cores, but omits waitSleep for
+// runtime threads without a processor. Dividing by CtrlCores would therefore
+// still undercount SMP sleep; report that limitation instead of clamping an
+// unnormalized sum to a misleading 100%.
 type idleWindow struct {
 	OK         bool    `json:"ok"`
 	SpanS      float64 `json:"span_s"`
 	IdlePct    float64 `json:"idle_pct"`
 	WakesPerS  float64 `json:"wakes_per_s"`
 	WakeCostUS float64 `json:"wake_cost_us"`
+	IdleNote   string  `json:"idle_note,omitempty"`
 }
 
 func (i *idleSampler) start(cfg Config) {
@@ -57,6 +62,7 @@ func (i *idleSampler) start(cfg Config) {
 				t:     time.Now(),
 				idle:  cfg.CtrlRead(cfg.Offsets.Idle),
 				wakes: cfg.CtrlRead(cfg.Offsets.Wakes),
+				cores: cfg.CtrlRead(cfg.Offsets.Cores),
 			}
 			i.mu.Lock()
 			i.ring = append(i.ring, s)
@@ -83,6 +89,12 @@ func (i *idleSampler) window(d time.Duration) idleWindow {
 		if i.ring[k].t.Before(cutoff) {
 			break
 		}
+		if k+1 < len(i.ring) {
+			next, current := i.ring[k+1], i.ring[k]
+			if next.idle < current.idle || next.wakes < current.wakes || max(next.cores, 1) != max(current.cores, 1) {
+				break // use only the continuous window after a reset/core change
+			}
+		}
 		base = i.ring[k]
 	}
 	span := last.t.Sub(base.t).Seconds()
@@ -93,12 +105,17 @@ func (i *idleSampler) window(d time.Duration) idleWindow {
 	w := idleWindow{OK: true, SpanS: span, IdlePct: -1}
 	dw := last.wakes - base.wakes
 	w.WakesPerS = float64(dw) / span
+	if last.cores > 1 {
+		w.IdleNote = "SMP: the idle counter omits some runtime-thread wait sleeps; a total idle percentage cannot be derived."
+		return w
+	}
 
 	var hz uint64
 	if i.cfg.CounterHz != nil {
 		hz = i.cfg.CounterHz()
 	}
 	if hz == 0 {
+		w.IdleNote = "Counter frequency unavailable."
 		return w
 	}
 	frac := float64(last.idle-base.idle) / (span * float64(hz))

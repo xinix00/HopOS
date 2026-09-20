@@ -51,7 +51,7 @@ server), dus die cijfers zijn een ondergrens; zuiver meten = van buitenaf naar
 |---|---|---|
 | `ER_PORT_HTTP` | `8080` | de gepubliceerde poort (HOP zet hem via `ports:{http:…}`) |
 | `HOP_ADDR` | `10.100.0.1:8080` | agent-API, alleen voor temperatuur |
-| `HOP_KEY` | *(leeg)* | cluster-key; leeg = temperatuur n/a, de rest werkt |
+| `HOP_KEY` | *(leeg)* | cluster key; empty = unsigned API request for an open node |
 | `VITALS_RX_URL` | cachefly 100MB | bron van de rx-test (plain http, mét Content-Length) |
 
 ## Jobspec
@@ -87,3 +87,14 @@ De go.mod pint metal **v1.11.1** — de nieuwste metal-tag zonder pad-replaces,
 dus de nieuwste die met `GOWORK=off` reproduceerbaar bouwt, én de eerste met
 `CtrlWakes`/`CtrlMemSys` in de ABI. Zodra de lneto-ronde een stabiele
 metal-tag oplevert: pin bumpen en het image wordt een paar MB kleiner.
+
+The reported core count is the app's configured Go parallelism, including SMP.
+Temperature comes from the selected node's agent record; an inaccessible API or
+missing sensor reports n/a. Disk and SQLite tests report `skipped` when the node
+explicitly has no storage service. The syscall test still measures HTTP latency
+and labels the missing storage comparison. Other I/O errors remain failures.
+
+For SMP apps, the current idle counter omits some runtime-thread wait sleeps.
+Vitals therefore reports the total idle percentage and cost per wake as `n/a`,
+with an explanation on the page and in copied reports. Wake counts remain the
+measured aggregate across the app's cores; they are not divided by core count.

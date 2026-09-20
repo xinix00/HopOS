@@ -50,7 +50,7 @@ type Config struct {
 	Offsets   Offsets
 
 	HopAddr string // agent-API (temperatuur); default 10.100.0.1:8080
-	HopKey  string // "" = geen agent-API, temperatuur blijft n/a
+	HopKey  string // empty = unsigned request to an explicitly open agent API
 	RxURL   string // bron van de download-test; default een plain-http CDN
 	// Counters: kale tellers uit de app-runtime (doorbell-interrupts en
 	// -wekkingen), voor in de state-JSON — de tamago-main geeft ze door.
@@ -80,6 +80,7 @@ type Result struct {
 	Metrics  []Metric  `json:"metrics"`
 	Lines    []string  `json:"lines,omitempty"`
 	Err      string    `json:"error,omitempty"`
+	Skipped  string    `json:"skipped,omitempty"`
 }
 
 func (r *Result) add(name string, value float64, unit string) {

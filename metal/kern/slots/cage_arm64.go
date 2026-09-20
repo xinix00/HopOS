@@ -157,10 +157,15 @@ func cageWhy(i int) string { return "" }
 // artifact in elk slot.
 func cageLinkBase() uint64 { return uint64(layout.SlotBase(1)) }
 
-// cageLinkWindow: hoe groot het linkvenster van een slot is. Op ARM het canonieke
-// IPA-venster per slot — de partitie kan kleiner zijn, maar het venster is de
-// adresruimte die de stage-2 voor dit slot beschrijft.
-func cageLinkWindow(size uint64) uint64 { return uint64(layout.SlotStride) }
+// The partition must fit the stage-2 IPA address space. Its control page and
+// rings remain in the same partition tail, not in a separate fixed window.
+func cageLinkWindow(size uint64) uint64 {
+	return min(size, stage2.IPALimit-cageLinkBase())
+}
+
+func cageReserve(size uint64) uint64 {
+	return stage2.TableReserve(cageLinkBase(), size)
+}
 
 // cageIdent: op ARM is er niets te melden dat HOP niet al weet. De CPU-identiteit
 // staat hier niet achter de kooi-naad — HOP leest MIDR/MPIDR van elke core zelf

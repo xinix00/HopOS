@@ -125,9 +125,28 @@ func Up(a *applib.App) (string, error) {
 		}
 		buf := make([]byte, layout.NetMTU+leannet.EthernetMaximumSize)
 		d, empty := lo, 0
+		delivered := 0
 		corruptLogged := false
+		linger := rxLinger(a.Env("RXLINGER"))
 		for {
 			n, err := nd.Receive(buf)
+			if n == 0 && err == nil && empty == 0 && linger > 0 {
+				// Nahangen (NAPI-stijl): er kwam net verkeer, dus het volgende
+				// frame is waarschijnlijk onderweg. Even de ringkop pollen in
+				// plaats van meteen de bel wapenen en slapen: elke slaap/wek
+				// is een SEV die álle cores raakt en een governor-ronde op de
+				// onze — gemeten 20-09 op een 1 Gbit-upload: 260-290k wekken/s
+				// bij 25k frames/s, en de ring liep daardoor vol (drops, RTO's
+				// van 250-600 ms bij de zender). Na een stille linger gaat de
+				// pomp gewoon slapen zoals altijd; bij stilte kost dit dus één
+				// linger per burst, verder niets.
+				for end := time.Now().Add(linger); time.Now().Before(end); {
+					if _, pending := nd.rx.HeadPending(); pending {
+						break
+					}
+				}
+				n, err = nd.Receive(buf)
+			}
 			if n == 0 || err != nil {
 				// Een dode ring is stil: ReadInto geeft niets meer, HeadPending
 				// blijft "ja". Eén regel met de reden, anders is dat een
@@ -172,6 +191,17 @@ func Up(a *applib.App) (string, error) {
 			}
 			d, empty = lo, 0 // verkeer: meteen weer scherp staan
 			st.RecvInboundPacket(buf[:n])
+			// Om de 16 frames afgeven: de stack heeft een eigen pomp-goroutine
+			// die de ACK's (en de data van de app) de ring in zet, en tamago
+			// preempt niet — zonder deze yield draait deze lus door zolang er
+			// frames liggen en komt die pomp pas aan de beurt als de zender
+			// zijn hele venster kwijt is. Gemeten 20-09 op een 1 Gbit-upload:
+			// 216.147 segmenten in, 298 ACK's uit, één per venster, ~21 ms per
+			// MiB, 39 MB/s met iedereen idle. HOP's uplink-lus doet hetzelfde
+			// (claimYield).
+			if delivered++; delivered%16 == 0 {
+				runtime.Gosched()
+			}
 		}
 	}()
 	// De stack bewaren voor WatchStats: één per app, en de tellers zijn
@@ -210,6 +240,18 @@ func Up(a *applib.App) (string, error) {
 // op — 1s hangt gratis onder die vloer en begrenst een bel-storing op 1s.
 // De vaste 300µs van vroeger (3.333 rondes/s, op een gedeelde core elk een
 // context-wissel) is de "300us"-stand: de ontsnappingsklep, geen default meer.
+// rxLinger leest RXLINGER uit de job-env: hoe lang de RX-lus na verkeer de
+// ringkop blijft pollen vóór hij de bel wapent. "" = 200µs, "0" = uit.
+func rxLinger(s string) time.Duration {
+	if s == "" {
+		return 200 * time.Microsecond
+	}
+	if d, err := time.ParseDuration(s); err == nil && d >= 0 {
+		return d
+	}
+	return 200 * time.Microsecond
+}
+
 func rxPoll(s string) (lo, hi time.Duration, hold int) {
 	lo, hi, hold = 300*time.Microsecond, time.Second, 4
 	if s == "" {

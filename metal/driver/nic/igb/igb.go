@@ -31,7 +31,8 @@ const (
 	regTCTL   = 0x0400
 	regMDIC   = 0x0020 // MDI control: PHY-registertoegang
 	regICR    = 0x1500 // interrupt cause (lezen = wissen)
-	regIMC    = 0x150C // interrupt mask clear (we pollen: alles dicht)
+	regIMS    = 0x1508 // interrupt mask set
+	regIMC    = 0x150C // interrupt mask clear
 
 	regRDBAL  = 0x2800
 	regRDBAH  = 0x2804
@@ -112,8 +113,13 @@ const (
 	txTimeout = 100 * time.Millisecond
 
 	bufSize = 2048 // SRRCTL BSIZEPKT-eenheid; ruim boven 1522
-	nRx     = 64
-	nTx     = 16
+	// 256 RX-descriptors (was 64): gepold om de 300 µs komen op 1 Gbit tot
+	// ~80 frames per ronde binnen, en een ring van 64 liep dan over — inbound
+	// 5 MB/s op de Altra tegen 37 gepold op de O6N met zijn ring van 256
+	// (19-09, L83). 256 × 2KB past ruim in het 2MB-bufferblok; RDLEN blijft
+	// een veelvoud van 128.
+	nRx = 256
+	nTx = 64
 
 	// bufOff: de frame-buffers beginnen in een eigen 2MB-blok, gescheiden van
 	// de descriptor-ringen in blok 0 — het klassieke coherent/streaming-
@@ -145,11 +151,15 @@ func Supported(deviceID uint16) bool { return supported[deviceID] }
 
 // Net is één igb-instantie.
 type Net struct {
-	Base   uintptr // BAR0-registerblok (door de firmware toegewezen)
-	BusOff uint64  // DMA-vertaling: busadres = fysiek + BusOff (Altra/QEMU: 0)
-	MAC    [6]byte // gelezen uit RAL0/RAH0 door Reset
+	rxSince int     // frames sinds de laatste FlushRX (zelf-flush om de 32 bij batching)
+	batch   bool    // netdev.Flusher: doorbells uitstellen tot FlushRX/FlushTX (aan ná net-up)
+	Base    uintptr // BAR0-registerblok (door de firmware toegewezen)
+	BusOff  uint64  // DMA-vertaling: busadres = fysiek + BusOff (Altra/QEMU: 0)
+	MAC     [6]byte // gelezen uit RAL0/RAH0 door Reset
 
 	rxRing, txRing uintptr
+	rxTail         int // laatst herwapende RX-descriptor die nog niet in RDT staat (-1 = niets)
+	txPending      int // TX-descriptors klaargezet sinds de laatste FlushTX (doorbell)
 	rxBufs, txBufs uintptr
 	rxHead, txHead int
 }
@@ -283,6 +293,7 @@ func (n *Net) Init(dmaBase, dmaSize uintptr) error {
 	}
 	n.wr(regRCTL, rctlEN|rctlBAM|rctlSECRC)
 	n.wr(regRDT, nRx-1) // alle descriptors aan de hardware
+	n.rxTail = -1
 
 	// TX-queue 0.
 	txBus := uint64(n.txRing) + n.BusOff
@@ -352,12 +363,40 @@ func (n *Net) Receive(buf []byte) (int, error) {
 		dev.CopyOut(buf[:length], src)
 	}
 
-	// Descriptor herwapenen en aan de hardware geven (RDT = laatst gevulde).
+	// Descriptor herwapenen; RDT (de doorbell) volgt pas bij FlushRX — één
+	// PCIe-write per burst in plaats van per frame (netdev.Flusher).
 	n.armRx(n.rxHead)
 	dev.MB()
-	n.wr(regRDT, uint32(n.rxHead))
+	n.rxTail = n.rxHead
+	// Zelf om de 32 frames flushen: de uplink-wrapper lust door een burst
+	// heen zonder naar de pomp terug te keren (bundel 83: 36 → 1 MB/s toen
+	// alleen de pomp flushte), en de NIC mag nooit zonder descriptors zitten.
+	if n.rxSince++; !n.batch || n.rxSince >= 32 {
+		n.FlushRX()
+	}
 	n.rxHead = (n.rxHead + 1) % nRx
 	return length, nil
+}
+
+// FlushRX geeft de herwapende descriptors aan de hardware (RDT = laatst
+// gevulde). Aanroepen vanuit de RX-pomp na een burst.
+func (n *Net) FlushRX() {
+	n.rxSince = 0
+	if n.rxTail >= 0 {
+		n.wr(regRDT, uint32(n.rxTail))
+		n.rxTail = -1
+	}
+}
+
+// FlushTX zet de TX-tail (de doorbell) voor alles wat sinds de vorige flush
+// klaargezet is. Aanroepen na een zendburst, onder de zendlock van de
+// aanroeper. Transmit roept hem zelf als de burst nTx-2 haalt: TDT mag nooit
+// op TDH uitkomen (zie daar).
+func (n *Net) FlushTX() {
+	if n.txPending > 0 {
+		n.wr(regTDT, uint32(n.txHead))
+		n.txPending = 0
+	}
 }
 
 // Transmit verstuurt één frame (wacht begrensd op een vrije descriptor) —
@@ -373,13 +412,13 @@ func (n *Net) Transmit(buf []byte) error {
 	// burst van nTx posts zonder deze rem doet precies dat (waarna de
 	// hardware níets meer fetcht). De e1000-invariant: max nTx−1 uitstaand,
 	// dus wachten zolang onze volgende TDT-waarde de TDH raakt.
-	next := uint32((n.txHead + 1) % nTx)
-	deadline := time.Now().Add(txTimeout)
-	for n.rd(regTDH)&0xFFFF == next {
-		if time.Now().After(deadline) {
-			return fmt.Errorf("igb: TX ring full after %v (TDH stuck at %d)", txTimeout, next)
-		}
+	// Met batching (FlushTX) is dat de rem: nooit meer dan nTx-2 descriptors
+	// klaarzetten zonder doorbell, en de DD-check hieronder (DMA-geheugen,
+	// geen TDH-lees over PCIe per frame) bewaakt het hergebruik.
+	if n.txPending >= nTx-2 {
+		n.FlushTX()
 	}
+	deadline := time.Now().Add(txTimeout)
 
 	// En de per-descriptor-status: DD gezet (writeback) of nooit gebruikt
 	// (w2==0). Begrensd wachten, gem-conventie: een hangende DMA mag de
@@ -404,6 +443,62 @@ func (n *Net) Transmit(buf []byte) error {
 	dev.Write32(d+8, uint32(len(buf))|txDTypeData|txEOP|txIFCS|txRS|txDEXT)
 	dev.MB()
 	n.txHead = (n.txHead + 1) % nTx
-	n.wr(regTDT, uint32(n.txHead)) // doorbell: hardware haalt t/m TDT-1 op
+	n.txPending++ // de doorbell (TDT) volgt bij FlushTX
+	if !n.batch {
+		n.FlushTX()
+	}
 	return nil
+}
+
+// Interrupt-bits (ICR/IMS/IMC): wat de RX-lus wekt.
+const (
+	icrRXDMT0 = 1 << 4 // RX descriptor minimum threshold
+	icrRXT0   = 1 << 7 // RX timer: frame(s) binnen
+	icrRX     = icrRXDMT0 | icrRXT0
+)
+
+// EnableIRQ laat de chip zijn INTx-lijn trekken op RX-werk (IMS = de RX-set).
+// Aanroepen nadat de lijn bij de controller scherp staat; tot dan pollt de
+// driver (Reset zet alles dicht).
+func (n *Net) EnableIRQ() {
+	n.rd(regICR) // oude oorzaken weg
+	n.wr(regIMS, icrRX)
+	dev.MB()
+}
+
+// AckIRQ laat de lijn los: eerst de oorzaken lezen (ICR is read-to-clear,
+// en de read wist alleen wat op dat moment níet gemaskeerd is — dus lezen
+// vóór het masker dichtgaat), dan het masker dicht (IMC). De pomp leest
+// daarna de ring; RearmIRQ (vanuit WaitNIC, ná de pomp-ronde) opent het
+// masker weer. Een frame dat tussen de read en de IMC landt zet ICR opnieuw
+// en trekt de lijn zodra IMS weer open is: een level-interrupt verliest
+// niets. (De omgekeerde volgorde, IMC-dan-ICR, zat in bundel 47 van 19-09;
+// of die volgorde meetbaar uitmaakte is niet vastgesteld — 47 leed vooral
+// aan een verkeerd ontdekte lijn.)
+func (n *Net) AckIRQ() {
+	n.rd(regICR)
+	n.wr(regIMC, 0xFFFFFFFF)
+	dev.MB()
+}
+
+// RearmIRQ opent het masker weer (IMS = de RX-set).
+func (n *Net) RearmIRQ() {
+	n.wr(regIMS, icrRX)
+	dev.MB()
+}
+
+// IRQDiag: één regel registers voor de interrupt-diagnose (STATUS 0x8, ICR,
+// IMS) — 0xffffffff overal betekent dat de PCIe-functie of de link weg is.
+func (n *Net) IRQDiag() string {
+	return fmt.Sprintf("STATUS=%#x ICR=%#x IMS=%#x", n.rd(0x0008), n.rd(regICR), n.rd(regIMS))
+}
+
+// Batch (netdev.Flusher): doorbells uitstellen tot FlushRX/FlushTX. Uit
+// zolang er geen pomp is die flusht (boot); uitzetten flusht meteen.
+func (n *Net) Batch(on bool) {
+	n.batch = on
+	if !on {
+		n.FlushRX()
+		n.FlushTX()
+	}
 }

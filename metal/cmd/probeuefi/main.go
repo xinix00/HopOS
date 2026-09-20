@@ -21,19 +21,24 @@ package main
 
 import (
 	"fmt"
-	"net"
 	"runtime"
 	"time"
 	_ "unsafe" // go:linkname (RAM-declaratie)
 
+	"github.com/xinix00/HopOS/metal/v2/board"
 	"github.com/xinix00/HopOS/metal/v2/board/uefi"
-	_ "github.com/xinix00/HopOS/metal/v2/board/uefi/hop" // board.Board-registratie (board.Current in de probe)
+	"github.com/xinix00/HopOS/metal/v2/cpu/irq"
 	"github.com/xinix00/HopOS/metal/v2/cpu/psci"
 	"github.com/xinix00/HopOS/metal/v2/cpu/trng"
-	"github.com/xinix00/HopOS/metal/v2/driver/nic/igb"
+	"github.com/xinix00/HopOS/metal/v2/dev"
+	"github.com/xinix00/HopOS/metal/v2/driver/nvme"
 	"github.com/xinix00/HopOS/metal/v2/driver/pcie"
-	"github.com/xinix00/lean/leandhcp"
+	"github.com/xinix00/HopOS/metal/v2/driver/scmi"
+	"github.com/xinix00/HopOS/metal/v2/net/netdev"
 )
+
+// rxbuf: één frame, om tijdens de interruptmeting de ring leeg te houden.
+var rxbuf [netdev.MTU + netdev.EthernetMaximumSize]byte
 
 // RAM-declaratie: RamStart wordt door mkkernel -pe per venster-variant
 // gepatcht (0 = onverpakt, de stub weigert dan); de stub claimt GoRAMSize
@@ -46,10 +51,25 @@ var ramStart uint
 var ramSize uint = uefi.GoRAMSize
 
 func main() {
+	// De SBSA-watchdog overnemen en in leven houden (O6N 09-09: de firmware
+	// laat hem gewapend achter; Linux' watchdog-core doet hetzelfde vanaf de
+	// probe). Zonder dit sterft de probe na de firmware-timeout — stil.
+	if desc, ok := uefi.WatchdogArm(12 * time.Second); ok {
+		say("watchdog: armed and petted every 3s (%s)\n", desc)
+		go func() {
+			for {
+				time.Sleep(3 * time.Second)
+				uefi.WatchdogPet()
+			}
+		}()
+	} else {
+		say("watchdog: %s\n", desc)
+	}
 	say("\nprobeuefi: %s on bare metal — UEFI/ACPI discovery\n", runtime.Version())
 	say("boot EL: %d (HopOS requires 2: EL2 = the stage-2 cage)\n", uefi.BootEL())
-	say("core: %d, RAM window %#x+%#x (stub-selected), SystemTable %#x\n",
-		uefi.CoreID(), uefi.Base(), uefi.KernelSize, uefi.SystemTable())
+	say("core: MADT index %d, MPIDR %#x, RAM window %#x+%#x (stub-selected), SystemTable %#x\n",
+		uefi.CoreID(), dev.MPIDR()&0xffffff, uefi.Base(), uefi.KernelSize, uefi.SystemTable())
+	say("board: %s\n", board.Current().Firmware())
 
 	// UEFI-memory-map: de RAM-waarheid (door de stub gesnapshot vóór
 	// ExitBootServices).
@@ -80,11 +100,11 @@ func main() {
 	}
 	say("ACPI: rev %d, OEM %q, tables: %v\n", t.Revision, t.OEMID, t.Sigs)
 
-	if base, ifType, err := t.SPCR(); err == nil {
-		if uefi.Reachable(base, 0x1000) {
-			say("SPCR: UART %#x type %#x (0x03=PL011, 0x0e=SBSA) — active (48-bit VA hook)\n", base, ifType)
+	if c, err := t.Console(); err == nil {
+		if uefi.Reachable(c.Base, 0x1000) {
+			say("SPCR: UART %#x type %#x (0x03=PL011, 0x0e=SBSA, 0x00/0x12=16550) stride 1<<%d — active (48-bit VA hook)\n", c.Base, c.IfType, c.Shift)
 		} else {
-			say("SPCR: UART %#x unreachable (MapHigh failed) — serial OFF, screen is the console\n", base)
+			say("SPCR: UART %#x unreachable (MapHigh failed) — serial OFF, screen is the console\n", c.Base)
 		}
 	}
 
@@ -96,17 +116,27 @@ func main() {
 				on++
 			}
 		}
-		say("MADT: %d cores (%d enabled), GICD %#x\n", len(cpus), on, gicd)
+		gicr, gicrLen, its := t.GIC()
+		say("MADT: %d cores (%d enabled), GICD %#x, GICR range %#x+%#x, ITS %#x\n", len(cpus), on, gicd, gicr, gicrLen, its)
 		show := len(cpus)
-		if show > 8 {
-			show = 8
+		if show > 16 {
+			show = 16
 		}
-		for _, c := range cpus[:show] {
-			say("  cpu uid=%d mpidr=%#x enabled=%v\n", c.UID, c.MPIDR, c.Enabled)
+		for i, c := range cpus[:show] {
+			say("  [%d] uid=%d mpidr=%#x enabled=%v eff-class=%d gicr=%#x\n", i, c.UID, c.MPIDR, c.Enabled, c.EffClass, c.GICR)
 		}
 		if len(cpus) > show {
 			say("  ... and %d more\n", len(cpus)-show)
 		}
+		// De app-cores zoals het board ze adverteert (zonder de eigen core),
+		// met de klasse die de placement straks ziet.
+		k := board.Current().Cores()
+		app := k.App()
+		say("app cores: %d — ", len(app))
+		for i := range app {
+			say("%d:%s ", app[i], board.Current().CoreClass(i+1))
+		}
+		say("\n")
 	} else {
 		say("MADT: %v\n", err)
 	}
@@ -125,6 +155,46 @@ func main() {
 		say("FADT: %v\n", err)
 	}
 
+	// _CPC (CPPC) uit de DSDT-AML: de perf-grenzen en het desired-perf-
+	// register per processor — op de O6N de SCMI-fastchannel waarmee de klok
+	// gezet wordt. Geen _CPC = de klok is firmware-domein (Altra).
+	if cpcs := t.CPCs(); len(cpcs) > 0 {
+		say("CPPC: %d _CPC objects\n", len(cpcs))
+		for _, c := range cpcs {
+			say("  %v\n", c)
+		}
+	} else {
+		say("CPPC: no _CPC in the DSDT/SSDTs (clock is firmware-managed)\n")
+	}
+
+	// SBSA-watchdog (GTDT): alleen melden; wapenen is agent-werk.
+	if refresh, control, found := t.Watchdog(); found {
+		say("GTDT: SBSA watchdog refresh %#x control %#x (WOR now %#x)\n", refresh, control,
+			func() uint32 {
+				if uefi.MapHigh(control, 0x1000) {
+					return dev.Read32(uintptr(control) + 8)
+				}
+				return 0
+			}())
+	} else {
+		say("GTDT: no SBSA watchdog\n")
+	}
+
+	// SCMI-sensoren (Cix P1): het AML-kanaal van de DSDT (PMMX, 0x065d0000).
+	// Alleen op CIXTEK-firmware: een doorbell op een vreemd adres is geen
+	// meting maar een gok.
+	if t.OEMID == "CIXTEK" {
+		scmiProbe()
+	}
+
+	// De thermometer van het board (board.Thermometer): wat de agent straks op
+	// zijn heartbeat zet.
+	if mC := board.TempMilliC(); mC != 0 {
+		say("hwmon: board thermometer %d.%dC\n", mC/1000, mC%1000/100)
+	} else {
+		say("hwmon: no board thermometer\n")
+	}
+
 	// RNG: welke entropiebron heeft de node? De runtime koos er bij boot al
 	// één (initRNG, uefi.RNGSource); hier meten we bovendien live of hij
 	// bytes levert. rndr = FEAT_RNG-instructie (O6N), smccc-trng = firmware
@@ -139,7 +209,6 @@ func main() {
 	// MCFG: PCIe-ECAM — enumereer de firmware-geconfigureerde hiërarchie van
 	// elk segment (read-only: op een server hangen de NIC's achter
 	// root-poorten, niet op bus 0). Op de Altra verschijnen hier de i210's.
-	var nic *pcie.Device
 	if ecams, err := t.MCFG(); err == nil {
 		for _, e := range ecams {
 			say("MCFG: segment %d bus %d-%d ECAM %#x\n", e.Segment, e.StartBus, e.EndBus, e.Base)
@@ -156,23 +225,57 @@ func main() {
 				case 0x01:
 					tag = "  <-- STORAGE"
 				}
-				say("  %v%s\n", d, tag)
-				if nic == nil && d.VendorID == 0x8086 && igb.Supported(d.DeviceID) {
-					nic = d
+				bars := ""
+				if d.Class>>16 == 0x02 || d.Class>>16 == 0x01 {
+					bars = fmt.Sprintf(" BAR0 %#x BAR2 %#x", d.BAR(0), d.BAR(2))
 				}
+				say("  %v%s%s\n", d, bars, tag)
 			}
 		}
 	} else {
 		say("MCFG: %v\n", err)
 	}
 
-	// De igb-proef: het volledige datapad in één meting — reset, MAC uit de
-	// NVM, link, ringen, en dan DHCP de kabel op (probe6-recept: een lease
-	// bewijst TX én RX én de bus-mastering in één keer).
-	if nic != nil {
-		igbProbe(nic)
+	// NVMe: de opslag zoals de agent hem straks pakt (board.Disk: hiërarchie-
+	// scan, BAR0, controller-init, identify) — leest de schijf niet.
+	if bd, ok := board.Current().(interface {
+		Disk() (*nvme.Controller, uint64, uint64, error)
+	}); ok {
+		say("nvme: probing (hierarchy scan, BAR0, admin queue, identify)...\n")
+		if disk, first, count, err := bd.Disk(); err != nil {
+			say("nvme: %v\n", err)
+		} else {
+			say("nvme: %q, %d MB, LBA %d..%d, block %d — controller path complete\n",
+				disk.Model, count*disk.BlockSize>>20, first, first+count-1, disk.BlockSize)
+		}
+	}
+
+	// De NIC-proef: het volledige datapad in één meting via het board zelf
+	// (driver-tabel: igb of RTL8126) — reset, MAC, ringen, link, en dan DHCP
+	// de kabel op (probe6-recept: een lease bewijst TX én RX én de
+	// bus-mastering in één keer).
+	say("net: probing (MCFG scan, driver, reset, rings, link, DHCP)...\n")
+	if nic, mac, err := board.Current().ProbeNIC(); err != nil {
+		say("net: %v\n", err)
+	} else if nic == nil {
+		say("net: no supported NIC found — driver test skipped\n")
 	} else {
-		say("igb: no known igb NIC found — driver test skipped\n")
+		nc := board.Current().Net()
+		say("net: LEASE %s gw %s dns %s (MAC %v) — driver path complete!\n", nc.CIDR, nc.GW, nc.DNS, mac)
+		// De interrupt: het board bedraadde hem in ProbeNIC (of zei waarom
+		// niet). ARP/broadcast op een LAN vuurt hem binnen seconden; wij
+		// wachten hoogstens 15s en melden wat er kwam.
+		if w, ok := board.Current().(board.NICInterrupter); ok {
+			say("irq: waiting up to 15s for the first NIC interrupt (LAN broadcast triggers it)...\n")
+			deadline := time.Now().Add(15 * time.Second)
+			for time.Now().Before(deadline) && irq.Fired() == 0 {
+				w.WaitNIC(time.Second)
+				for n, _ := nic.Receive(rxbuf[:]); n > 0; n, _ = nic.Receive(rxbuf[:]) {
+					// ring leeg pompen: anders blijft een level-lijn staan
+				}
+			}
+			say("irq: %d interrupt(s) claimed so far\n", irq.Fired())
+		}
 	}
 
 	say("\nprobeuefi: discovery complete — heartbeat every 30s\n")
@@ -183,7 +286,7 @@ func main() {
 	// erna beviel ook niet).
 	for i := 1; ; i++ {
 		time.Sleep(30 * time.Second)
-		fmt.Printf("probeuefi: tick %d, clock %s\n", i, time.Now().UTC().Format("15:04:05"))
+		fmt.Printf("probeuefi: tick %d, clock %s, irq fired %d\n", i, time.Now().UTC().Format("15:04:05"), irq.Fired())
 	}
 }
 
@@ -192,66 +295,45 @@ func say(format string, args ...any) {
 	fmt.Printf(format, args...)
 }
 
-// igbProbe meet de hele driver op één NIC: BAR uit de firmware-config,
-// reset/MAC/link, ringen in het NIC-DMA-venster, en DHCP als
-// alles-in-één-bewijs. Elke stap kondigt zich aan vóór de actie
-// (probe6-stijl: bevriest er iets, dan wijst de laatste regel de dader aan).
-func igbProbe(d *pcie.Device) {
-	bar := d.BAR(0)
-	say("igb: %v — BAR0 %#x, enabling bus mastering\n", d, bar)
-	if bar == 0 {
-		say("igb: firmware assigned no BAR0 — stop\n")
+// scmiProbe meet het SCMI-kanaal van de Cix-SCP: protocolversies, de
+// sensorlijst en één lezing per sensor. Elke stap kondigt zich aan.
+func scmiProbe() {
+	const base = 0x065d0000 // Cix DSDT: device PMMX, OperationRegion MBXO
+	if !uefi.MapHigh(base, 0x1000) {
+		say("scmi: channel %#x unreachable\n", base)
 		return
 	}
-	if !uefi.MapHigh(bar, 0x20000) {
-		say("igb: BAR0 unreachable (MapHigh failed) — stop\n")
-		return
-	}
-	d.Enable()
-
-	nic := &igb.Net{Base: uintptr(bar)}
-	say("igb: reset...\n")
-	if err := nic.Reset(); err != nil {
-		say("igb: %v\n", err)
-		return
-	}
-	say("igb: MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
-		nic.MAC[0], nic.MAC[1], nic.MAC[2], nic.MAC[3], nic.MAC[4], nic.MAC[5])
-
-	say("igb: link (SLU + PHY autoneg)...\n")
-	speed, fd, err := nic.LinkUp(8 * time.Second)
+	ch := &scmi.Channel{Base: base}
+	say("scmi: channel %#x status %#x — asking BASE version...\n", base, dev.Read32(base+4))
+	v, err := ch.Version(scmi.ProtoBase)
 	if err != nil {
-		say("igb: %v\n", err)
+		say("scmi: %v\n", err)
 		return
 	}
-	say("igb: link %dMbps full-duplex=%v\n", speed, fd)
-
-	// NIC-DMA-venster: direct boven onze RAM-partitie — buiten de
-	// RAM-declaratie (device-gemapt → ongecachet → coherent, de
-	// HopOS-conventie), maar wél eerst tegen de UEFI-memory-map bewijzen
-	// dat het conventioneel RAM is (de firmware claimde het niet voor ons).
-	const dmaSize = 0x100000 // 1MB; de ringen+buffers vragen ~180KB
-	dmaBase := uefi.Base() + uefi.KernelSize
-	if !uefi.IsUsableRAM(uint64(dmaBase), dmaSize) {
-		say("igb: %#x+%#x is geen vrij RAM volgens de memory-map — stop\n", dmaBase, dmaSize)
+	say("scmi: base protocol %d.%d\n", v>>16, v&0xffff)
+	if v, err := ch.Version(scmi.ProtoSensor); err != nil {
+		say("scmi: sensor protocol: %v\n", err)
 		return
+	} else {
+		say("scmi: sensor protocol %d.%d\n", v>>16, v&0xffff)
 	}
-	say("igb: rings at %#x, enabling RX/TX...\n", dmaBase)
-	if err := nic.Init(dmaBase, dmaSize); err != nil {
-		say("igb: %v\n", err)
-		return
-	}
-
-	say("igb: DHCP (proves TX+RX+DMA in one)...\n")
-	lease, err := leandhcp.Acquire(nic, nic.MAC, 15*time.Second)
+	sensors, err := ch.Sensors()
 	if err != nil {
-		say("igb: %v\n", err)
-		return
+		say("scmi: sensor list: %v (got %d)\n", err, len(sensors))
 	}
-	ones, _ := net.IPMask(lease.Mask[:]).Size()
-	say("igb: LEASE %d.%d.%d.%d/%d gw %d.%d.%d.%d — driver path complete!\n",
-		lease.IP[0], lease.IP[1], lease.IP[2], lease.IP[3], ones,
-		lease.GW[0], lease.GW[1], lease.GW[2], lease.GW[3])
+	for _, sn := range sensors {
+		r, err := ch.Reading(sn.ID)
+		if err != nil {
+			say("  sensor %d %q type %d exp %d: %v\n", sn.ID, sn.Name, sn.Type, sn.Exponent, err)
+			continue
+		}
+		if sn.Type == 2 {
+			mC := sn.MilliC(r)
+			say("  sensor %d %q: %d.%dC (raw %d)\n", sn.ID, sn.Name, mC/1000, mC%1000/100, r)
+		} else {
+			say("  sensor %d %q type %d: raw %d (x10^%d)\n", sn.ID, sn.Name, sn.Type, r, sn.Exponent)
+		}
+	}
 }
 
 // hang parkeert de probe na een fatale meting: de conclusie staat op de

@@ -127,7 +127,11 @@ func (d *locdev) Transmit(p []byte) error {
 			}
 		}
 	}
-	return d.nic.Transmit(p)
+	err := d.nic.Transmit(p)
+	if f, ok := d.nic.(netdev.Flusher); ok {
+		f.FlushTX() // HOP's eigen stack: frame voor frame, niemand flusht voor hem
+	}
+	return err
 }
 
 // arpSelfReply beantwoordt een ARP-request naar het eigen IP (RFC 826; zelfde
@@ -155,4 +159,31 @@ func (d *locdev) arpSelfReply(p []byte) []byte {
 	copy(b[18:24], a[8:14])
 	copy(b[24:28], a[14:18])
 	return r[:]
+}
+
+// FlushRX/FlushTX (netdev.Flusher): doorgeven aan de echte NIC. De RX-pomp
+// (rxLoop) krijgt dit device en flusht per burst.
+func (d *locdev) FlushRX() {
+	if f, ok := d.nic.(netdev.Flusher); ok {
+		f.FlushRX()
+	}
+}
+
+func (d *locdev) FlushTX() {
+	if f, ok := d.nic.(netdev.Flusher); ok {
+		f.FlushTX()
+	}
+}
+
+func (d *locdev) Batch(on bool) {
+	if f, ok := d.nic.(netdev.Flusher); ok {
+		f.Batch(on)
+	}
+}
+
+// RearmIRQ (netdev.IRQRearmer): doorgeven.
+func (d *locdev) RearmIRQ() {
+	if r, ok := d.nic.(netdev.IRQRearmer); ok {
+		r.RearmIRQ()
+	}
 }

@@ -22,6 +22,13 @@ func TestSPIRoutesItsOwnINTID(t *testing.T) {
 	if got := dev.Read64(p + 0x6100 + 48*8); got != 0 {
 		t.Fatalf("unrelated SPI80 route modified: %#x", got)
 	}
+	// Group 1: IGROUPR-bit gezet, ISENABLER-bit gezet (INTID 48 = reg 1, bit 16).
+	if got := dev.Read32(p + 0x80 + 4); got&(1<<16) == 0 {
+		t.Fatalf("INTID 48 not in Group 1: IGROUPR1=%#x", got)
+	}
+	if got := dev.Read32(p + 0x100 + 4); got&(1<<16) == 0 {
+		t.Fatalf("INTID 48 not enabled: ISENABLER1=%#x", got)
+	}
 	if enableLine(0, 0, 1020, 0) == nil || enableLine(0, 0, -1, 0) == nil {
 		t.Fatal("invalid INTID accepted")
 	}

@@ -116,6 +116,7 @@ function render() {
   t += tile('temperature', s.temp_milli_c > 0 ? fmt(s.temp_milli_c / 1000) : 'n/a', '&deg;C');
   t += tile('heap', fmt(n.heap_kb / 1024), 'MB');
   t += tile('uptime', fmt(n.uptime_s / 60), 'min');
+  if (idle.idle_note) t += '<p class="hint" style="grid-column:1/-1">' + esc(idle.idle_note) + '</p>';
   document.getElementById('tiles').innerHTML = t;
 
   const busy = s.running !== '';
@@ -150,6 +151,7 @@ function render() {
     if (!res) continue;
     r += '<div class="res"><h3>' + name + '<small>' + new Date(res.started).toLocaleTimeString() +
       ' &middot; ' + fmt(res.duration_s) + 's</small></h3>';
+    if (res.skipped) r += '<p class="hint">Skipped: ' + esc(res.skipped) + '</p>';
     if (res.error) r += '<div class="err">' + esc(res.error) + '</div>';
     if (res.metrics) r += '<div class="mrow">' + res.metrics.map(m =>
       '<div><span>' + m.name + '</span> <b>' + fmt(m.value) + '</b> ' + (m.unit || '') + '</div>').join('') + '</div>';
@@ -167,15 +169,17 @@ function copyReport() {
     n.arch + ', ' + n.cores + ' core(s)' + (n.shared ? ' (shared)' : '') + ', ' + n.ram_mb +
     ' MB partition, ' + n.runtime + ', app ' + n.version + '\n\n';
   const idle = s.idle || {};
-  if (idle.ok) out += 'idle(60s): ' + fmt(idle.idle_pct) + '% | wakes/s: ' + fmt(idle.wakes_per_s) +
-    ' | cost/wake: ' + fmt(idle.wake_cost_us) + 'us\n';
+  if (idle.ok) out += 'idle(60s): ' + (idle.idle_pct >= 0 ? fmt(idle.idle_pct) + '%' : 'n/a') +
+    ' | wakes/s: ' + fmt(idle.wakes_per_s) +
+    ' | cost/wake: ' + (idle.wake_cost_us > 0 ? fmt(idle.wake_cost_us) + 'us' : 'n/a') + '\n';
+  if (idle.idle_note) out += idle.idle_note + '\n';
   if (s.temp_milli_c > 0) out += 'temperature: ' + fmt(s.temp_milli_c / 1000) + 'C\n';
   out += '\n| test | metrics |\n|---|---|\n';
   for (const name of s.tests.map(t => t.name).concat(['tx', 'up'])) {
     const res = s.results[name];
     if (!res) continue;
-    out += '| ' + name + ' | ' + (res.error ? 'ERROR: ' + res.error :
-      res.metrics.map(m => m.name + ' ' + fmt(m.value) + (m.unit || '')).join(', ')) + ' |\n';
+    out += '| ' + name + ' | ' + (res.error ? 'ERROR: ' + res.error : res.skipped ? 'SKIPPED: ' + res.skipped :
+      (res.metrics || []).map(m => m.name + ' ' + fmt(m.value) + (m.unit || '')).join(', ')) + ' |\n';
   }
   navigator.clipboard.writeText(out);
 }

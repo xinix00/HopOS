@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -143,7 +144,7 @@ func Up() error {
 						fmt.Printf("HOPOS_DHCP_PANIC: %v — lease renewal stopped, node keeps running\n", r)
 					}
 				}()
-				leandhcp.KeepAlive(m, l)
+				keepLease(m, l)
 			}()
 		}
 	}
@@ -178,12 +179,60 @@ func rxLoop(nic netdev.Device, recv func([]byte) error, waiter board.NICInterrup
 	if waiter == nil {
 		poll = time.NewTimer(nicPoll)
 	}
+	flusher, _ := nic.(netdev.Flusher)
+	rearm, _ := nic.(netdev.IRQRearmer)
+	if flusher != nil {
+		flusher.Batch(true) // vanaf hier flusht deze pomp (RX) en de switch/locdev (TX)
+	}
+	burst := 0
+	delivered := false
 	for {
 		if rxPass(nic, recv, buf) {
+			delivered = true
+			// Batching: de RX-doorbell (RDT/mailbox) niet per frame maar per
+			// burst, en tussendoor om de 32 frames zodat de NIC nooit zonder
+			// descriptors komt te zitten.
+			if burst++; burst >= 32 && flusher != nil {
+				flusher.FlushRX()
+				burst = 0
+			}
 			continue
+		}
+		if flusher != nil {
+			if burst > 0 {
+				flusher.FlushRX()
+				burst = 0
+			}
+			flusher.FlushTX() // wat een zender zonder eigen flush achterliet (dhcp-renew) gaat nu de draad op
+		}
+		if delivered {
+			// De burst is bij de apps bezorgd: hun antwoorden (ACK's) liggen zo
+			// in hun TX-ringen. De switch nú wekken, niet pas bij HOP's idle of
+			// de failsafe — dat is de RTT van elke verbinding door deze node.
+			hopswitch.Kick()
+			delivered = false
 		}
 		rxIdle.Add(1)
 		if waiter != nil {
+			// De interrupt pas hier weer openen, ná een lege ronde — waar
+			// Linux' NAPI-poll dat ook doet (tg3_int_reenable, napi_complete).
+			// Niet in de waiter-goroutine: die liep vóór elke wacht "open +
+			// werk-check + forceer" terwijl deze pomp nog aan het legen was,
+			// en dat is een interrupt per frame bovenop de pomp, tot de
+			// watchdog (M4, bundel 35, 20-09). Werk dat tijdens het gesloten
+			// masker binnenkwam vangt de driver in zijn RearmIRQ.
+			if rearm != nil {
+				rearm.RearmIRQ()
+				// Eén ronde ná het openen: een frame dat tussen de laatste lege
+				// ronde en het openen viel maakt op een flank-chip geen
+				// interrupt meer (rtl8126) — napi_complete → re-enable →
+				// "nog werk? dan opnieuw", in die volgorde.
+				if rxPass(nic, recv, buf) {
+					delivered = true
+					burst++
+					continue
+				}
+			}
 			<-events
 			continue
 		}
@@ -218,4 +267,62 @@ func rxPass(nic netdev.Device, recv func([]byte) error, buf []byte) (worked bool
 	}
 	_ = recv(buf[:n])
 	return true
+}
+
+// AddressLost: het board/de kern beslist wat er gebeurt als het adres van
+// een draaiende node niet meer van ons is (DHCPNAK, ander adres aangeboden).
+// De stack kan niet van adres wisselen; HopOS' antwoord is een herstart
+// (cmd/hopos: de canary houdt zijn pets in). Nil = alleen melden.
+var AddressLost func(reason string)
+
+// keepLease houdt de lease in leven zolang de node leeft. leandhcp.KeepAlive
+// geeft op als de lease verlopen is zonder antwoord ("a reboot acquires a new
+// address") — dat was een dode node na elke netwerkonderbreking die langer
+// duurde dan de lease (19-09, Derek). Hier: verlopen zonder antwoord → blijven
+// rebinden per broadcast, met oplopende pauze tot een minuut, tot een server
+// hetzelfde adres bevestigt (dan gewoon verder) of het weigert (dan AddressLost).
+// Het adres blijft ondertussen in gebruik: een lease die niemand bevestigt is
+// een netwerk zonder server, geen adresconflict.
+func keepLease(mac [6]byte, l leandhcp.Lease) {
+	for {
+		leandhcp.KeepAlive(mac, l)
+		// KeepAlive keerde terug: verlopen, geweigerd of verhuisd. Eén rebind
+		// zegt welke van de drie het is — NAK is refused, een ander adres is
+		// verhuisd, geen antwoord is "geen server".
+		wait := 5 * time.Second
+		for attempt := 1; ; attempt++ {
+			fresh, err := leandhcp.Rebind(l, mac, 5*time.Second)
+			if err == nil {
+				if fresh.IP != l.IP {
+					lost(fmt.Sprintf("dhcp: server now offers %s instead of %s", fresh.IPString(), l.IPString()))
+					return
+				}
+				fmt.Printf("dhcp: lease on %s reacquired after %d attempt(s), %ds to go HOPOS_DHCP_REACQUIRED\n", l.IPString(), attempt, fresh.LeaseSecs)
+				l = fresh
+				break
+			}
+			// Een NAK herkennen we voorlopig aan de tekst: de gepubliceerde
+			// lean (v1.1.1) exporteert leandhcp.ErrRefused nog niet. Zodra de
+			// volgende lean-tag uit is: errors.Is(err, leandhcp.ErrRefused).
+			if strings.Contains(err.Error(), "DHCPNAK") {
+				lost(fmt.Sprintf("dhcp: %s refused by the server (%v)", l.IPString(), err))
+				return
+			}
+			if attempt == 1 || attempt%12 == 0 {
+				fmt.Printf("dhcp: no server confirms %s (%v) — keeping the address and retrying every %s (attempt %d) HOPOS_DHCP_RETRY\n", l.IPString(), err, wait, attempt)
+			}
+			time.Sleep(wait)
+			if wait < time.Minute {
+				wait += 5 * time.Second
+			}
+		}
+	}
+}
+
+func lost(reason string) {
+	if AddressLost != nil {
+		AddressLost(reason)
+		return
+	}
+	fmt.Printf("dhcp: %s — address lost, nothing wired to act on it HOPOS_DHCP_LOST\n", reason)
 }

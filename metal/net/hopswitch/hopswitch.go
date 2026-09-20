@@ -241,6 +241,7 @@ func loop() {
 	byTimer := false
 	for {
 		if switchPass(buf) {
+			FlushUplinkTX() // één TX-doorbell per ronde, niet per frame
 			// Meetlat (hopos.idlestat): werk gevonden ná de failsafe i.p.v. na
 			// een bel = een SEV die HOP's WFE miste, en dat is dan een frame dat
 			// tot een milliseconde lag (de 1ms-staart van een system call).
@@ -290,6 +291,12 @@ func switchPending() bool {
 }
 
 var switchDoor = make(chan struct{}, 1)
+
+// Kick wekt de switch-lus direct — voor HOP's RX-pomp ná een burst: de bel
+// via de governor werkt alleen als HOP idle is, en onder inbound verkeer is
+// HOP dat niet; de ACK's van de app lagen dan tot de 1ms-failsafe in zijn
+// TX-ring (gemeten 20-09: 37 MB/s met iedereen idle = venster ÷ RTT).
+func Kick() { notifySwitch() }
 
 func notifySwitch() {
 	select {

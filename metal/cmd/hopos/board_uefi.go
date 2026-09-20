@@ -1,4 +1,4 @@
-//go:build uefi
+//go:build uefi && !o6n
 
 // board_uefi.go — de UEFI/ACPI-kant van de agent-main (Ampere Altra en de
 // QEMU-proeftuin): dezelfde HOP-agent-bytes, met het uefi-board voor
@@ -8,11 +8,13 @@
 package main
 
 import (
+	"github.com/xinix00/HopOS/metal/v2/cmd/hopos/cfgblob"
 	"time"
 	_ "unsafe" // go:linkname (RAM-declaratie)
 
 	"github.com/xinix00/HopOS/metal/v2/board/uefi"
 	uefihop "github.com/xinix00/HopOS/metal/v2/board/uefi/hop" // registreert het board (init); de basis levert de tamago-hooks
+	"github.com/xinix00/HopOS/metal/v2/kern/kernflip"
 )
 
 // RAM-declaratie: RamStart wordt door mkkernel -pe per venster-variant
@@ -31,6 +33,7 @@ func init() {
 	// de node zonder vangnet (de Altra heeft hem wél).
 	// De hardware-helft van de node-watchdog; beleid in watchdog.go.
 	// PetEvery 4s bij de 12s-timeout van de SBSA-watchdog.
+	nodeWDTOff = func() { uefi.WatchdogOff() }
 	nodeWDT = &wdHardware{
 		Arm:      func() (string, bool) { return uefi.WatchdogArm(12 * time.Second) },
 		Pet:      uefi.WatchdogPet,
@@ -43,7 +46,22 @@ func init() {
 	// main parseert ze. Beheer = het tekstbestandje bewerken, geen rebuild.
 	// (Node-identiteit zonder hopos.node=: de main-default; een SMBIOS-
 	// serial-terugval kan later via nodeSerial.)
-	bootParamAll = uefi.BootConfigAll
+	// De stick-config (uefi.BootConfigAll, via de firmware-feiten ook ná een
+	// flip) wint; wat een flip-bundel ingebakken meebrengt (cmd/hopos/cfgblob,
+	// -tags embedcfg) vult alleen sleutels aan die de stick niet zet — zoals
+	// op de M4 (loader-blok eerst, dan cfgblob). Zo krijgt een meetbundel
+	// zijn hopos.idlestat zonder de stick te herschrijven (20-09).
+	bootParamAll = func(key string) []string {
+		if v := uefi.BootConfigAll(key); len(v) > 0 {
+			return v
+		}
+		return cfgblob.All(key)
+	}
+	kernflip.BoardHandoff = uefi.FwFactsCopy // firmware-feiten mee naar de geflipte kern
+	kernflip.BoardOldCarve = uefi.OldCarve   // de carve van de vorige kern blijft buiten de pool
+	kernflip.BoardPersistentCages = true
+	kernflip.BoardScratchInWindow = true     // scratch = b+scratchOff: het paar verhuist mee naar het geleende venster
+	kernflip.BoardFootprint = uefi.Footprint // lenen en vegen: RAM + carve, niet alleen RAM
 
 	// Board-nawerk (het Pi-equivalent is StartDVFS): de temperatuur-
 	// telemetrie uit de SMpro — de klok zelf is op servers firmware-domein.

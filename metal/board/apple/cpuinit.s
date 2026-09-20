@@ -40,6 +40,11 @@
 #ifndef VHE
 APPLE_CPUINIT_NEEDS_ASMFLAGS_D_VHE
 #endif
+// E2H register layout does not imply Apple fast-IPI registers (e.g. O6N).
+// Refuse an Apple build that silently omits its wake mechanism.
+#ifndef APPLE_IPI
+APPLE_CPUINIT_NEEDS_ASMFLAGS_D_APPLE_IPI
+#endif
 
 #define BOOT_SCRATCH    0x1010000E000	// = apple.BootScratch (pariteit: apple.go); +8 = x0
 #define HCR_SCRATCH     0x1010000E010	// = apple.HCRScratch
