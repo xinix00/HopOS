@@ -38,13 +38,10 @@ type NICInterrupt interface {
 var KnownNICLine func(rootBus int) int
 
 // DefaultNICIRQ: "known" = de lijn uit KnownNICLine (de O6N-tabel) of anders
-// pollen; "auto" = bekend of anders ontdekken via de pending-bits; een getal =
-// die INTID; "0" = pollen. hopos.nicirq= in de config wint. De standaard is
-// "known" en niet "auto": op de Ampere (Altra) wordt de ontdekte lijn netjes
-// afgeleverd (claims van INTID 156 binnen een seconde) en seconden later hangt
-// HOP's core en reset de watchdog de node — zes flips op rij op 19-09, één
-// uitzondering (bundel 49). Tot dat begrepen is pollt een onbekend UEFI-board
-// en is hopos.nicirq=auto de opt-in voor de meting.
+// pollen; een getal = die INTID; "0" = pollen. hopos.nicirq= in de config
+// wint. Een onbekend UEFI-board pollt: op de Altra is de INTx-lijn van de
+// NIC fataal op SoC-niveau (L83, 19-09), en de discovery-code van die jacht
+// is weg (20-09) — wie een lijn kent, geeft hem op.
 var DefaultNICIRQ = "known"
 
 // setupNICIRQ: de lijn kiezen, bedraden en de chip openzetten. Elke stap die
@@ -64,21 +61,9 @@ func setupNICIRQ(dev NICInterrupt, rootBus int) {
 	} else if KnownNICLine != nil {
 		line = KnownNICLine(rootBus)
 	}
-	ctrl, err := controller()
-	if err != nil {
-		fmt.Printf("irq: NIC interrupt not wired (%v) — RX stays polled\n", err)
-		return
-	}
-	if line == 0 && sel != "auto" {
-		fmt.Println("irq: no known NIC line for this platform — RX stays polled (hopos.nicirq=auto discovers one; see L83 before doing that on an Altra)")
-		return
-	}
 	if line == 0 {
-		line, err = discoverNICLine(ctrl, dev)
-		if err != nil {
-			fmt.Printf("irq: NIC interrupt not wired (%v) — RX stays polled\n", err)
-			return
-		}
+		fmt.Println("irq: no known NIC line for this platform — RX stays polled (hopos.nicirq=<INTID> wires one)")
+		return
 	}
 	if err := WireNICIRQ(line, dev.AckIRQ); err != nil {
 		fmt.Printf("irq: NIC interrupt not wired (%v) — RX stays polled\n", err)
@@ -86,67 +71,6 @@ func setupNICIRQ(dev NICInterrupt, rootBus int) {
 	}
 	nicIRQ = dev
 	dev.EnableIRQ()
-}
-
-// discoverNICLine vindt de SPI van de NIC zonder iets scherp te zetten: de
-// pending-bits van de distributor (GICD_ISPENDR) laten een level-lijn zien,
-// ook als hij uit staat. Kandidaat = een SPI die opkomt nadat de chip zijn
-// masker opent; bewijs = hij volgt dat masker (dicht → hij zakt, open → hij
-// komt terug). Zonder dat bewijs is "de eerste nieuwe pending-lijn" een gok:
-// op de Ampere kwam vanaf koud eerst SPI 52 op (niet de NIC) en pas daarna
-// SPI 124 (wél), en met de verkeerde lijn loopt de pomp op de 10ms-vangrail
-// (bundels 47/50, 19-09). Daarom een heel venster verzamelen, elke kandidaat
-// toetsen, en de afgewezen onthouden.
-func discoverNICLine(ctrl *gicv3.Ctrl, dev NICInterrupt) (int, error) {
-	pending := func() map[int]bool {
-		m := map[int]bool{}
-		for _, id := range ctrl.PendingSPIs(32, 1019) {
-			m[id] = true
-		}
-		return m
-	}
-	before := pending()
-	dev.EnableIRQ()
-	defer dev.AckIRQ() // masker weer dicht tot de lijn bedraad is
-	tried := map[int]bool{}
-	var rejected []int
-	for end := time.Now().Add(12 * time.Second); time.Now().Before(end); {
-		// Een venster lang verzamelen — de eerste die opkomt is niet per se de onze.
-		cands := map[int]bool{}
-		for w := time.Now().Add(2 * time.Second); time.Now().Before(w); {
-			for id := range pending() {
-				if !before[id] && !tried[id] {
-					cands[id] = true
-				}
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		for id := range cands {
-			tried[id] = true
-			dev.AckIRQ()
-			time.Sleep(time.Millisecond)
-			if pending()[id] {
-				fmt.Printf("irq: SPI %d (INTID %d) stays pending with the chip masked — not the NIC\n", id-32, id)
-				rejected = append(rejected, id)
-				dev.EnableIRQ()
-				continue
-			}
-			dev.EnableIRQ()
-			back := false
-			for w := time.Now().Add(3 * time.Second); time.Now().Before(w) && !back; {
-				back = pending()[id]
-				time.Sleep(10 * time.Millisecond)
-			}
-			if !back {
-				fmt.Printf("irq: SPI %d (INTID %d) dropped with the mask but did not return within 3 s — not the NIC\n", id-32, id)
-				rejected = append(rejected, id)
-				continue
-			}
-			fmt.Printf("irq: NIC line discovered: SPI %d (INTID %d) follows the chip's mask (rejected %v, %d SPIs already pending)\n", id-32, id, rejected, len(before))
-			return id, nil
-		}
-	}
-	return 0, fmt.Errorf("NIC line discovery: no SPI followed the chip's mask within 12 s (rejected %v, %d already pending)", rejected, len(before))
 }
 
 // WaitNIC (board.NICInterrupter): wacht op de NIC-lijn; zonder bedrade lijn

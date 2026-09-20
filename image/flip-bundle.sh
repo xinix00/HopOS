@@ -42,17 +42,13 @@ rpi5)      ARCH=arm64;   TAGS="rpi5 linkcpuinit";     T1=0x90000;        T2=0x10
 rpi4)      ARCH=arm64;   TAGS="rpi4 linkcpuinit";     T1=0x90000;        T2=0x10090000 ;;
 radxa)     ARCH=arm64;   TAGS="rk3566 linkcpuinit";   T1=0x02210000;     T2=0x12210000 ;;
 virt)      ARCH=arm64;   TAGS="linkcpuinit";          T1=0x40010000;     T2=0x70010000 ;;
-# Geen -D=GIC_IPI voor de echte GICv3-borden: onder die switcher yieldt een
-# bewoner nooit op de O6N (bundel 46) noch op de Altra (92/94), terwijl QEMU
-# hem slikt (L83 p31, 20-09). HOP's SGI-kick werkt ook zonder: hij wekt de WFE
-# van de switcher (Ampere bundels 85-90). uefi-run.sh (QEMU) houdt GIC_IPI,
-# zodat de gate dat pad blijft bouwen tot het op ijzer begrepen is.
+# Geen bouwvlaggen: VHE en de switcher-variant kiest het board via zijn
+# build-tag (cpu/el2/el2_*.s, board/uefi/init_*.s, board/apple/cpuinit.s).
 uefi)      ARCH=arm64;   TAGS="uefi linkcpuinit";     T1=0x50010000;     T2=0x88010000 ;;
-o6n)       ARCH=arm64;   TAGS="o6n linkcpuinit";      T1=0x50010000;     T2=0x88010000
-           ASM="all=-D=VHE" ;; # Orion O6N: UEFI-pad + board/o6n; VHE zoals uefi-run.sh (17-09)
+o6n)       ARCH=arm64;   TAGS="o6n linkcpuinit";      T1=0x50010000;     T2=0x88010000 ;; # Orion O6N: UEFI-laag + board/o6n
 apple)     ARCH=arm64;   TAGS="apple linkcpuinit highram"
            T1=0x10100010000; T2=0x10180010000
-           ASM="all=-D=VHE -D=APPLE_IPI"; WORK="$DIR/image/apple/go.work" ;;
+           WORK="$DIR/image/apple/go.work" ;;
 licheerv)  ARCH=riscv64; TAGS="licheerv linkcpuinit"; T1=0x84010000;     T2=0x88010000 ;;
 *)
 	echo "gebruik: $0 [rpi5|rpi4|radxa|virt|uefi|o6n|apple|licheerv]" >&2
@@ -102,7 +98,7 @@ esac
 
 for V in "1:$T1" "2:$T2"; do
 	GOWORK="${WORK:-off}" GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH="$ARCH" \
-		"$TAMAGO" build -tags "$TAGS" -trimpath ${ASM:+-asmflags "$ASM"} \
+		"$TAMAGO" build -tags "$TAGS" -trimpath \
 		-ldflags "-w -buildid= -T ${V#*:} -R 0x1000 ${LDX:-}" -o "out/flip-v${V%%:*}.elf" ./cmd/hopos
 done
 

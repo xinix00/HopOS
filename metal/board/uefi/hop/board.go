@@ -112,8 +112,10 @@ func (Machine) Cores() board.Cores {
 			return board.PowerState(psci.AffinityInfo(cpus[c].MPIDR))
 		},
 		// Het M4-model op een GIC (20-09): een app-core yieldt naar EL2 en
-		// slaapt daar in WFI; HOP's wekker stuurt een SGI (kern/slots
-		// waker.go) en de switcher ackt hem (cpu/el2/switch.s, GIC_IPI).
+		// slaapt daar in WFE; HOP's wekker stuurt een SGI (kern/slots
+		// waker.go), en een SGI wekt een WFE — de switcher hoeft hem niet te
+		// zien (een switcher-variant die hem zelf ackte, WFI + IAR1/EOIR1,
+		// liet op de O6N en de Altra geen bewoner meer yielden en is weg).
 		// Zonder kick wachtte elke slapende app-core op de event-stream-tik:
 		// app→HOP 2,3 ms en een hairpin van 32 ms op de Altra tegen 0,6 en
 		// 2 ms op de M4, en node-naar-node 44 MB/s met iedereen idle.

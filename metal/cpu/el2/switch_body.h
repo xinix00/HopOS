@@ -27,10 +27,6 @@
 // MRS = 0xd5300000 | (op0-2)<<19 | op1<<16 | CRn<<12 | CRm<<8 | op2<<5 | Rt,
 // MSR = idem met 0xd5100000 — dezelfde vorm als el2.s/smp.s.
 
-//go:build tamago && arm64
-
-#include "textflag.h"
-#include "sysreg.h"
 
 TEXT el2entry(SB),NOSPLIT|NOFRAME,$0
 	// x0/x1 óók naar de scratch; daarna zijn x0..x3 werkregisters. De
@@ -259,31 +255,7 @@ sleep:
 	CBZ	R0, rotate
 	WORD	$0xd51df120	// msr s3_5_c15_c1_1, x0 (ack)
 #else
-#ifdef GIC_IPI
-	// GICv3 (UEFI/Altra, O6N, QEMU virt): zelfde recept als Apple, met een
-	// SGI als kick (board.Cores.Kick → gicv3.SendSGI). De CPU-interface van
-	// déze core elke keer scherp zetten (idempotent, vier sysregs): SRE op
-	// EL2 en EL1, alle prioriteiten door, Group 1 aan. Dan WFI — die wekt
-	// óók op een gemaskeerde pending interrupt — en de SGI acken via
-	// IAR1/EOIR1, anders keert de volgende WFI meteen terug.
-	MOVD	$0xf, R0
-	WORD	$0xd51cc9a0	// msr icc_sre_el2, x0 (SRE|DFB|DIB|Enable)
-	MOVD	$0x1, R0
-	WORD	$0xd518cca0	// msr icc_sre_el1, x0
-	MOVD	$0xff, R0
-	WORD	$0xd5184600	// msr icc_pmr_el1, x0
-	MOVD	$0x1, R0
-	WORD	$0xd518cce0	// msr icc_igrpen1_el1, x0
-	WORD	$0xd5033fdf	// isb
-	WFI
-	WORD	$0xd538cc00	// mrs x0, icc_iar1_el1
-	AND	$0xffffff, R0, R0
-	CMP	$1020, R0
-	BHS	rotate		// spurious (1020-1023) of LPI-bereik: niets te acken
-	WORD	$0xd518cc20	// msr icc_eoir1_el1, x0
-#else
 	WFE
-#endif
 #endif
 
 rotate:
@@ -585,22 +557,6 @@ wakescan:
 	AND	$0xFF, R4, R4	// cluster = aff1
 	ORR	R4<<16, R5, R5
 	WORD	$0xd51df025	// msr s3_5_c15_c0_1, x5 (IPI_RR_GLOBAL_EL1)
-#else
-#ifdef GIC_IPI
-	// GICv3: dezelfde kick als board.Cores.Kick (gicv3.SendSGI), nu vanuit
-	// EL2 naar de sibling: SGI 1 naar aff2/aff1 met aff0 als target-bit.
-	AND	$0xFF, R0, R5	// aff0
-	MOVD	$1, R4
-	LSL	R5, R4, R4	// target list = 1 << aff0
-	LSR	$8, R0, R5
-	AND	$0xFF, R5, R5	// aff1
-	ORR	R5<<16, R4, R4
-	LSR	$16, R0, R5
-	AND	$0xFF, R5, R5	// aff2
-	ORR	R5<<32, R4, R4
-	ORR	$1<<24, R4, R4	// INTID 1 (gicv3.KickSGI)
-	WORD	$0xd518cba4	// msr icc_sgi1r_el1, x4
-#endif
 #endif
 	B	wakedone
 wakenext:

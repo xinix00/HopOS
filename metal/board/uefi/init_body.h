@@ -19,9 +19,6 @@
 // BootServices=0x60. BootServices: AllocatePages=0x28, GetMemoryMap=0x38,
 // ExitBootServices=0xe8. SIMPLE_TEXT_OUTPUT: OutputString=0x08.
 
-//go:build linkcpuinit
-
-#include "textflag.h"
 
 // Moet gelijk zijn aan memmapCap in uefi.go (asm kent geen Go-constanten).
 #define MEMMAP_CAP 0x40000

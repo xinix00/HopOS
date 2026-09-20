@@ -105,15 +105,8 @@ mkdir -p out
 TAGS="$BOARD linkcpuinit"
 [ "${GUI:-1}" = 1 ] && TAGS="$TAGS gui"
 
-# VHE: EL2 in de E2H-lay-out (cpu/el2/sysreg.h HCR_BASE + de _EL12-encoderingen),
-# de kern zelf blijft op EL1. Default AAN voor de O6N: daar sterft een kern
-# onder nVHE-EL1 binnen 0,5 s stil, onder VHE loopt hij door (17-09) — Linux,
-# FreeBSD en GRUB draaien op dat bord óók VHE. Op de Altra/QEMU (Neoverse-N1,
-# VHE-capable) is het een knop: VHE=1.
-VHEDEF=0
-[ "$BOARD" = o6n ] && VHEDEF=1
-ASMFLAGS="all=-D=GIC_IPI" # SGI-kick voor app-cores (20-09)
-[ "${VHE:-$VHEDEF}" = 1 ] && ASMFLAGS="all=-D=VHE -D=GIC_IPI"
+# Geen bouwvlaggen: VHE en de switcher-variant bepaalt het board via zijn
+# build-tag (cpu/el2/el2_*.s, board/uefi/init_*.s).
 
 # In agent-modus de app-image (door de node streamend geplaatst vanaf de
 # http.server-URL in de jobspec). Canoniek gelinkt (slot-1-IPA; zonder -s:
@@ -140,7 +133,7 @@ for base in $SLOTS; do
 	text=$(printf '0x%X' $((base + 0x10000)))
 	out="hopos-$BOARD-$MODE-$base.elf"
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-		"$TAMAGO" build -tags "$TAGS" -trimpath ${ASMFLAGS:+-asmflags "$ASMFLAGS"} \
+		"$TAMAGO" build -tags "$TAGS" -trimpath \
 		-ldflags "-buildid= -w -T $text -R 0x1000 ${LDX:-}" -o "out/$out" "$PKG" &
 	PIDS="$PIDS $!"
 	ELFS="$ELFS -elf metal/out/$out"

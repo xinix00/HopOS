@@ -26,25 +26,19 @@
 // interrupts richten zich op EL1, waar DAIF ze maskeert — HopOS pollt.
 //
 // VHE is hier geen keuze maar een feit: de drop (drop.h) schrijft SCTLR_EL1
-// onder E2H=1 als sctlr_el12, en dat kiest sysreg.h bij het BOUWEN
-// (-asmflags all=-D=VHE, in apple-m4.sh, flip-bundle.sh en de gate). Zonder
-// die define zou dezelfde encodering SCTLR_EL2 raken — dus faalt de build
-// hieronder met opzet, met de naam van het ontbrekende als foutmelding.
+// onder E2H=1 als sctlr_el12, en dat kiest sysreg.h op de VHE-define
+// hieronder; zonder zou dezelfde encodering SCTLR_EL2 raken.
 
 //go:build linkcpuinit
+
+// VHE en de fast IPI zijn feiten van dit silicium, dus hier gedefinieerd —
+// niet in een bouwscript (20-09).
+#define VHE
+#define APPLE_IPI
 
 #include "textflag.h"
 #include "../../cpu/el2/sysreg.h"
 #include "../../cpu/el2/drop.h"
-
-#ifndef VHE
-APPLE_CPUINIT_NEEDS_ASMFLAGS_D_VHE
-#endif
-// E2H register layout does not imply Apple fast-IPI registers (e.g. O6N).
-// Refuse an Apple build that silently omits its wake mechanism.
-#ifndef APPLE_IPI
-APPLE_CPUINIT_NEEDS_ASMFLAGS_D_APPLE_IPI
-#endif
 
 #define BOOT_SCRATCH    0x1010000E000	// = apple.BootScratch (pariteit: apple.go); +8 = x0
 #define HCR_SCRATCH     0x1010000E010	// = apple.HCRScratch

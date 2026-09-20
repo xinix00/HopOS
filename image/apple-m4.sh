@@ -30,7 +30,9 @@ mkdir -p out
 # highram: de tamago-fork geeft de Go-heap 42-bit-adressen (goos/mem_highram.go)
 # — met de default 40 bits weigert de runtime élke reservering boven 1TiB
 # ("base outside usable address space", gemeten 28-08, de eerste boot).
-# VHE (asmflags): Apple's EL2 heeft E2H vast op 1; cpu/el2/sysreg.h kiest dan
+# VHE en de fast IPI: feiten van dit silicium, gedefinieerd in board/apple/cpuinit.s
+# en cpu/el2/el2_apple.s onder de build-tag apple — geen bouwvlaggen (20-09).
+# (Historisch: Apple's EL2 heeft E2H vast op 1; cpu/el2/sysreg.h kiest dan
 # de _EL12-encoderingen voor de EL1-registers van een app.
 # CFG=<pad>: de platform-config MEE IN HET IMAGE (cmd/hopos/cfgblob). Nodig
 # zodra wij het bootobject zijn — dan is er geen loader meer die hem in het
@@ -47,8 +49,15 @@ if [ "${AGENT:-0}" = 1 ]; then
 		# reëel risico — en dan boot een node onder een naam die je niet koos.
 		[ -f "$DIR/$CFG" ] || { echo "CFG=$CFG bestaat niet (pad vanaf de repo-wortel)" >&2; exit 1; }
 		cp "$DIR/$CFG" "$DIR/metal/cmd/hopos/cfgblob/hopos.cfg"
+		# Het venster: dezelfde raw-patchbare vorm als op elke kaart en in de
+		# LicheeRV-FIP (image/hopcfg: magic-kopregel, config, '#'-padding tot
+		# 64KB). Dit board heeft geen kaart met een los hopos.cfg — de config
+		# reist ín het image — en zonder venster kon hop-imager hem niet
+		# bewerken ("this image has no config window", Derek 20-09). Voor de
+		# kern is het venster gewoon config: '#' is commentaar (fw/bootcfg).
+		go run "$DIR/image/hopcfg/main.go" pad -window 65536 "$DIR/metal/cmd/hopos/cfgblob/hopos.cfg" >&2
 		TAGS="$TAGS embedcfg"
-		echo "config ingebakken: $CFG ($(wc -c <"$DIR/$CFG" | tr -d ' ') bytes)" >&2
+		echo "config ingebakken als venster: $CFG ($(wc -c <"$DIR/$CFG" | tr -d ' ') bytes in 65536)" >&2
 	fi
 elif [ "${EMBED:-0}" = 1 ]; then
 	TARGET=./cmd/hopos-embed; NAME=hopos-apple-embed; TAGS="apple linkcpuinit highram"
@@ -62,12 +71,11 @@ elif [ "${EMBED:-0}" = 1 ]; then
 else
 	TARGET=./cmd/probeapple; NAME=probeapple; TAGS="linkcpuinit highram"
 fi
-ASMFLAGS="all=-D=VHE -D=APPLE_IPI"
 
 # Linkadres 0x101_0001_0000 in het venster vanaf 0x101_0000_0000
 # (apple.RamBase): de +0x10000-vorm van elk board.
 GOWORK="$DIR/image/apple/go.work" GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-	"$TAMAGO" build -tags "$TAGS" -trimpath -asmflags "$ASMFLAGS" \
+	"$TAMAGO" build -tags "$TAGS" -trimpath \
 	-ldflags "-T 0x10100010000 -R 0x1000" -o "out/$NAME.elf" "$TARGET"
 
 # ELF → Apple-bootobject: geen arm64-Image-header (die is van Linux en zegt

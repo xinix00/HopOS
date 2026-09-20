@@ -163,7 +163,7 @@ if [ -f ../image/apple/go.work ] && [ -d ../../tamago ]; then
 	# linkadres omdat dit board zijn venster op 1TiB+4GB heeft (apple.RamBase).
 	for spec in "linkcpuinit highram:./cmd/probeapple" "apple linkcpuinit highram:./cmd/hopos" "apple linkcpuinit highram:./cmd/hopos-embed"; do
 		GOWORK="$PWD/../image/apple/go.work" GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
-			"$TAMAGO" build -tags "${spec%%:*}" -asmflags "all=-D=VHE -D=APPLE_IPI" \
+			"$TAMAGO" build -tags "${spec%%:*}" \
 			-ldflags "-T 0x10100010000 -R 0x1000" -o /dev/null "${spec#*:}"
 	done
 	APPLE_GATE=" + apple probe/agent/embed"

@@ -15,12 +15,6 @@
 // EL2-sysregs via WORD-encodings (Go-assembler kent ze niet bij naam):
 // MSR = 0xd5180000 | op1<<16 | CRn<<12 | CRm<<8 | op2<<5 | Rt.
 
-//go:build tamago && arm64
-
-#include "textflag.h"
-#include "hygiene.h"
-#include "sysreg.h"
-#include "drop.h"
 
 TEXT s2tramp(SB),NOSPLIT|NOFRAME,$0
 	// x0 = fysieke control-page van dit slot (PSCI ctx, door HOP gezet).

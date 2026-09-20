@@ -450,49 +450,6 @@ func (n *Net) Transmit(buf []byte) error {
 	return nil
 }
 
-// Interrupt-bits (ICR/IMS/IMC): wat de RX-lus wekt.
-const (
-	icrRXDMT0 = 1 << 4 // RX descriptor minimum threshold
-	icrRXT0   = 1 << 7 // RX timer: frame(s) binnen
-	icrRX     = icrRXDMT0 | icrRXT0
-)
-
-// EnableIRQ laat de chip zijn INTx-lijn trekken op RX-werk (IMS = de RX-set).
-// Aanroepen nadat de lijn bij de controller scherp staat; tot dan pollt de
-// driver (Reset zet alles dicht).
-func (n *Net) EnableIRQ() {
-	n.rd(regICR) // oude oorzaken weg
-	n.wr(regIMS, icrRX)
-	dev.MB()
-}
-
-// AckIRQ laat de lijn los: eerst de oorzaken lezen (ICR is read-to-clear,
-// en de read wist alleen wat op dat moment níet gemaskeerd is — dus lezen
-// vóór het masker dichtgaat), dan het masker dicht (IMC). De pomp leest
-// daarna de ring; RearmIRQ (vanuit WaitNIC, ná de pomp-ronde) opent het
-// masker weer. Een frame dat tussen de read en de IMC landt zet ICR opnieuw
-// en trekt de lijn zodra IMS weer open is: een level-interrupt verliest
-// niets. (De omgekeerde volgorde, IMC-dan-ICR, zat in bundel 47 van 19-09;
-// of die volgorde meetbaar uitmaakte is niet vastgesteld — 47 leed vooral
-// aan een verkeerd ontdekte lijn.)
-func (n *Net) AckIRQ() {
-	n.rd(regICR)
-	n.wr(regIMC, 0xFFFFFFFF)
-	dev.MB()
-}
-
-// RearmIRQ opent het masker weer (IMS = de RX-set).
-func (n *Net) RearmIRQ() {
-	n.wr(regIMS, icrRX)
-	dev.MB()
-}
-
-// IRQDiag: één regel registers voor de interrupt-diagnose (STATUS 0x8, ICR,
-// IMS) — 0xffffffff overal betekent dat de PCIe-functie of de link weg is.
-func (n *Net) IRQDiag() string {
-	return fmt.Sprintf("STATUS=%#x ICR=%#x IMS=%#x", n.rd(0x0008), n.rd(regICR), n.rd(regIMS))
-}
-
 // Batch (netdev.Flusher): doorbells uitstellen tot FlushRX/FlushTX. Uit
 // zolang er geen pomp is die flusht (boot); uitzetten flusht meteen.
 func (n *Net) Batch(on bool) {

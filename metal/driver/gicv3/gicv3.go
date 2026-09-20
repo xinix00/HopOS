@@ -172,32 +172,6 @@ func FindRedistributor(base, length, mpidr uint64) (uint64, bool) {
 	return 0, false
 }
 
-// PendingSPIs geeft de SPI's in [lo, hi] die nu pending staan bij de
-// distributor — óók als ze uit staan: voor een level-lijn is dat gewoon de
-// lijnstand. Zo vindt een board de NIC-lijn door het masker van de chip te
-// openen en te kijken welke SPI opkomt, zonder ooit een onbekende lijn scherp
-// te zetten (de M4-les van 18-09, hier zonder risico).
-func (c *Ctrl) PendingSPIs(lo, hi int) []int {
-	var out []int
-	if lo < 32 {
-		lo = 32
-	}
-	if hi >= firstSpecial {
-		hi = firstSpecial - 1
-	}
-	for w := lo >> 5; w <= hi>>5; w++ {
-		bits := dev.Read32(c.gicd + gicdISPENDR + 4*uintptr(w))
-		for b := 0; bits != 0 && b < 32; b++ {
-			if bits&(1<<uint(b)) != 0 {
-				if id := w<<5 + b; id >= lo && id <= hi {
-					out = append(out, id)
-				}
-			}
-		}
-	}
-	return out
-}
-
 // KickSGI is het SGI-nummer waarmee HOP een slapende app-core wekt (kern/
 // slots waker.go via board.Cores.Kick). 1: de SGI's 0-7 laat TF-A als
 // Non-secure Group 1 achter, 8-15 zijn van de secure wereld.

@@ -21,12 +21,6 @@
 // EL2-sysregs via WORD-encodings (Go-assembler kent ze niet bij naam), exact
 // dezelfde encodings als el2.s.
 
-//go:build tamago && arm64
-
-#include "textflag.h"
-#include "hygiene.h"
-#include "sysreg.h"
-#include "drop.h"
 
 // smpEL2Tramp: entry voor een secundaire SMP-core (EL2, MMU uit).
 // x0 is uitsluitend een node-owned handoff van PrepareSMP. De offsets zijn
