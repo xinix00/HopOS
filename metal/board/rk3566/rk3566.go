@@ -50,8 +50,15 @@ const (
 	// RGMII-mode/delays en de pinmux, CRU voor klokken en resets. Uitgewerkt in
 	// grf.go, pinmux.go en cru.go; de driver zelf is driver/nic/dwmac4.
 	GMAC1Base = 0xFE010000
-	GRFBase   = 0xFDC60000
-	CRUBase   = 0xFDD20000
+
+	// GIC-600 (GICv3; rk356x-base.dtsi: GICD 0xfd400000, GICR 0xfd460000
+	// +0x80000) en de macirq van GMAC1: GIC_SPI 32 → INTID 64.
+	GICDBase   = 0xFD400000
+	GICRBase   = 0xFD460000
+	GICRLen    = 0x80000
+	GMAC1INTID = 32 + 32
+	GRFBase    = 0xFDC60000
+	CRUBase    = 0xFDD20000
 
 	// USB 3.0: twee Synopsys DWC3-cores. Beide dragen hun xHCI-registers
 	// onderin hun venster en hun globale registers op +0xC100 — de core in
@@ -107,6 +114,21 @@ const (
 	// Buiten het venster is het device-gemapt en dus coherent per constructie,
 	// net zoals de park-mailbox op de Pi buiten elke RAM-declaratie ligt.
 	WakeBase = 0x06300000
+
+	// In datzelfde megabyte, op eigen pagina's: de twee meetinstrumenten van
+	// de flip. Beide moeten een watchdog-reset én de boot van een andere kern
+	// overleven, dus horen ze buiten élke RAM-declaratie — hier is dat al zo,
+	// en device-gemapt betekent bovendien: geen cache-onderhoud, ook niet voor
+	// een kern die met de MMU uit binnenkomt.
+	//
+	// Waarom dit board ze nodig had (20-09): een flip die vóór zijn console
+	// sterft laat hier anders niets na. De Radxa liet zich daardoor niet
+	// debuggen ("UART nodig") terwijl hij de wisselvallige flip het vaakst
+	// laat zien — en de M4, die ze wél heeft, wees op 01-09 precies zo zijn
+	// eigen handoff-bug aan.
+	FlipScratch  = WakeBase + 0x1000 // vluchtrecorder: lopende stand + archief
+	BlackBox     = WakeBase + 0x8000 // console-zwarte-doos (driver/conlog)
+	BlackBoxSize = 32 << 10
 )
 
 // ARM64 core-instantie (zelfde constructie als qemuvirt/tamago's imx8mp).

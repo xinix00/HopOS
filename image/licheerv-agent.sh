@@ -164,7 +164,7 @@ go run "$DIR/image/hopcfg/main.go" pad -window 65536 "$DIR/metal/cmd/hopos/cfgbl
 # image; hier draait het op het app-hart, dus moet het meeliften.
 cp "$OUT/stub-slot.bin" "$DIR/metal/kern/cagestub/stub-slot.bin"
 echo "== HOP-kern bouwen (agent: cmd/hopos -tags licheerv,embedcfg,embedcagestub; config $(basename "$CFG")) ==" >&2
-rv "licheerv linkcpuinit embedcfg embedcagestub" "-s -w -T $((RUNADDR + 0x10000)) -R 0x1000" "$OUT/hopos-lrv.elf" ./cmd/hopos
+rv "licheerv linkcpuinit embedcfg embedcagestub" "-s -w -T $((RUNADDR + 0x10000)) -R 0x1000 $VERSION_X" "$OUT/hopos-lrv.elf" ./cmd/hopos
 
 fi # PAYLOAD=agent
 

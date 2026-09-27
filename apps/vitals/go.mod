@@ -17,7 +17,7 @@ require github.com/xinix00/HopOS/metal/v2 v2.2.7
 
 require (
 	github.com/ncruces/go-sqlite3 v0.35.4
-	github.com/xinix00/lean v1.1.0
+	github.com/xinix00/lean v1.2.0
 )
 
 require (

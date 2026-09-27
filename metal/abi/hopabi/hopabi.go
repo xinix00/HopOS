@@ -50,6 +50,30 @@ const (
 	OpStoreList = 10 // list(path): keys onder eigen map + pad-prefix, "\n"-gescheiden
 	OpStoreDrop = 11 // drop(path): object weg (idempotent)
 
+	// De codec-ops: een taak haalt een stream door het codec-blok van het
+	// board. Alleen de BESTURING loopt hier; de beelden niet. Een 4K-beeld in
+	// P010 is 24MB en bij 24fps is dat 597MB/s, terwijl het slot-LAN op
+	// 550MB/s piekt — die bytes zouden dus niet eens passen, laat staan dat
+	// het verstandig zou zijn ze twee keer te verplaatsen. In plaats daarvan
+	// wijst de app buffers aan in zijn EIGEN partitie (Off = afstand vanaf
+	// RamStart, N = lengte); HOP controleert dat ze daarbinnen liggen en hangt
+	// ze in de page tables van de codec. Dát is de grant, en meteen de
+	// isolatie: het ijzer kan niets zien wat niet van deze taak is.
+	//
+	// NIET idempotent, in tegenstelling tot alles hierboven: twee keer
+	// dezelfde Feed is twee happen bitstream. De client mag ze dus niet
+	// herhalen als het transport wegviel (applib doet dat ook niet).
+	OpCodecOpen  = 14 // open(data=OpenArgs) → handvat in Size
+	OpCodecFeed  = 15 // feed(off,n=buffer, data=FeedArgs): bitstream erin
+	OpCodecOffer = 16 // offer(off,n=buffer, data=BufArgs): lege beeldbuffer erin
+	OpCodecPoll  = 17 // poll(data=BufArgs) → nul of meer Event-records
+	OpCodecClose = 18 // close(data=BufArgs)
+
+	// Eén SCSI-uitwisseling met een apparaat dat de taak via zijn mounts
+	// ziet. Niet herhaalbaar: een opdracht kan de drive al veranderd hebben.
+	// De payloads en de sense-data staan in device.go.
+	OpDeviceCommand = 19
+
 	// 12 en 13 waren OpSurfGrant/OpSurfRevoke: een GUI-app liet de display
 	// read-only in zijn vensterbuffer kijken (gui-ontwerp P3). Gesloopt op
 	// 06-08, dezelfde dag als gebouwd — gemeten op ijzer bleek er precies één

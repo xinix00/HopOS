@@ -42,11 +42,28 @@ const (
 // Protocol-ID's en berichten (DEN 0056 / Cix AcpiScmi.h).
 const (
 	ProtoBase   = 0x10
+	ProtoPower  = 0x11
 	ProtoPerf   = 0x13
 	ProtoSensor = 0x15
 
 	MsgVersion    = 0x000
 	MsgAttributes = 0x001
+
+	// Base (ProtoBase): welke protocollen dit kanaal aanbiedt. Op een bord
+	// met meerdere SCMI-kanalen is dat de enige manier om te weten welk
+	// kanaal welke dienst draait — een device-tree noemt namen, geen adressen.
+	BaseListProtocols = 0x006
+
+	// Power (ProtoPower): staat zetten en opvragen. PowerOn is de waarde die
+	// de Cix-TF-A verwacht voor "aan"; bit 30 is in SCMI de uit-stand.
+	MsgPowerStateSet = 0x004
+	MsgPowerStateGet = 0x005
+	PowerOn          = 0x00000000
+	PowerOff         = 1 << 30
+
+	// Performance (ProtoPerf): het niveau van een domein lezen en zetten.
+	PerfLevelSet = 0x007
+	PerfLevelGet = 0x008
 
 	SensorDescriptionGet = 0x003
 	SensorReadingGet     = 0x006
@@ -74,6 +91,13 @@ type Channel struct {
 	// NoSleep: wachten door te spinnen i.p.v. time.Sleep — voor gebruik
 	// vóór de scheduler draait (hwinit1). Begrensd op ~1M polls.
 	NoSleep bool
+	// Ring vervangt de MMIO-doorbell. De Cix P1 heeft twéé SCMI-kanalen: de
+	// mailbox die de AML gebruikt (doorbell op Base+0x80, Ring blijft nil) en
+	// een kanaal naar de TF-A waarvan de doorbell een SMC is. Dat tweede
+	// kanaal schakelt de stroomdomeinen van GPU, VPU en NPU — en tegelijk de
+	// interconnect-permissies, zonder welke elke registerlees op die blokken
+	// een SError geeft.
+	Ring func()
 }
 
 func (c *Channel) rd(off uintptr) uint32    { return dev.Read32(c.Base + off) }
@@ -104,7 +128,11 @@ func (c *Channel) Call(proto, msg uint32, req []uint32) ([]uint32, error) {
 	if err := c.waitFree(timeout); err != nil {
 		return nil, fmt.Errorf("scmi: channel busy before %#x/%#x: %w", proto, msg, err)
 	}
-	c.wr(offSign, cixSignature)
+	if c.Ring == nil {
+		// De signatuur is een gewoonte van Cix' AML; het TF-A-kanaal kent hem
+		// niet en we laten zijn gereserveerde woord daarom met rust.
+		c.wr(offSign, cixSignature)
+	}
 	c.wr(offFlags, 0)
 	for i, w := range req {
 		c.wr(offPayload+uintptr(i)*4, w)
@@ -113,7 +141,11 @@ func (c *Channel) Call(proto, msg uint32, req []uint32) ([]uint32, error) {
 	c.wr(offHeader, header(proto, msg, c.token()))
 	c.wr(offStatus, c.rd(offStatus)&^statusFree) // kanaal bezet
 	dev.MB()
-	c.wr(offBell, 1)
+	if c.Ring != nil {
+		c.Ring() // SMC: keert pas terug als het antwoord er staat
+	} else {
+		c.wr(offBell, 1)
+	}
 	dev.MB()
 	if err := c.waitFree(timeout); err != nil {
 		return nil, fmt.Errorf("scmi: no reply to %#x/%#x: %w", proto, msg, err)
@@ -134,6 +166,93 @@ func (c *Channel) Call(proto, msg uint32, req []uint32) ([]uint32, error) {
 		return resp, fmt.Errorf("scmi: %#x/%#x status %d", proto, msg, st)
 	}
 	return resp, nil
+}
+
+// short maakt van een te kort antwoord een fout. Zonder dit gaf een antwoord
+// met alleen een status een nul terug met err == nil, en nul is precies
+// PowerOn: een zwijgende firmware bevestigde dan dat een domein aan stond.
+func short(resp []uint32, want int, err error) error {
+	if err != nil {
+		return err
+	}
+	if len(resp) < want {
+		return fmt.Errorf("scmi: reply of %d words, want %d", len(resp), want)
+	}
+	return nil
+}
+
+// PowerOn zet een stroomdomein aan (of uit, met PowerOff als state). Op de
+// Cix P1 doet de TF-A hierbij méér dan de stroom: hij opent ook de
+// interconnect voor niet-beveiligde toegang tot de registers van dat blok.
+// Zonder deze call is de eerste registerlees op de VPU of de GPU een SError
+// die geen handler nog opvangt — dit is dus de eerste stap van elke bring-up,
+// niet een energiebesparing achteraf.
+func (c *Channel) PowerOn(domain, state uint32) error {
+	// flags 0 = synchroon; de TF-A kent geen asynchrone variant.
+	_, err := c.Call(ProtoPower, MsgPowerStateSet, []uint32{0, domain, state})
+	return err
+}
+
+// PowerState leest de stand van een domein terug.
+func (c *Channel) PowerState(domain uint32) (uint32, error) {
+	resp, err := c.Call(ProtoPower, MsgPowerStateGet, []uint32{domain})
+	if err = short(resp, 2, err); err != nil {
+		return 0, err
+	}
+	return resp[1], nil
+}
+
+// Protocols geeft de protocol-ID's die dit kanaal aanbiedt.
+func (c *Channel) Protocols() ([]uint32, error) {
+	resp, err := c.Call(ProtoBase, BaseListProtocols, []uint32{0})
+	if err = short(resp, 2, err); err != nil {
+		return nil, err
+	}
+	n := int(resp[1])
+	var out []uint32
+	for i := 2; i < len(resp) && len(out) < n; i++ {
+		w := resp[i]
+		for b := 0; b < 4 && len(out) < n; b++ {
+			if p := (w >> uint(8*b)) & 0xff; p != 0 {
+				out = append(out, p)
+			}
+		}
+	}
+	return out, nil
+}
+
+// PerfLevel geeft het huidige prestatieniveau van een domein.
+func (c *Channel) PerfLevel(domain uint32) (uint32, error) {
+	resp, err := c.Call(ProtoPerf, PerfLevelGet, []uint32{domain})
+	if err = short(resp, 2, err); err != nil {
+		return 0, err
+	}
+	return resp[1], nil
+}
+
+// SetPerfLevel zet het prestatieniveau van een domein.
+func (c *Channel) SetPerfLevel(domain, level uint32) error {
+	_, err := c.Call(ProtoPerf, PerfLevelSet, []uint32{domain, level})
+	return err
+}
+
+// ClockEnable zet een klok aan of uit.
+func (c *Channel) ClockEnable(id uint32, on bool) error {
+	attr := uint32(0)
+	if on {
+		attr = 1
+	}
+	_, err := c.Call(ProtoClock, ClockConfigSet, []uint32{id, attr})
+	return err
+}
+
+// ClockRate geeft de frequentie in hertz (64 bits, laag woord eerst).
+func (c *Channel) ClockRate(id uint32) (uint64, error) {
+	resp, err := c.Call(ProtoClock, ClockRateGet, []uint32{id})
+	if err = short(resp, 3, err); err != nil {
+		return 0, err
+	}
+	return uint64(resp[1]) | uint64(resp[2])<<32, nil
 }
 
 // waitFree pollt de free-bit, begrensd.

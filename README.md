@@ -185,9 +185,10 @@ TAMAGO=~/tamago-go/bin/go image/qemu-run.sh agent    # the real agent + leader A
 # SD-card acceptance image for a Raspberry Pi 5:
 TAMAGO=~/tamago-go/bin/go image/rpi5-hopos.sh
 
-# RISC-V: a complete SD-card image for the LicheeRV Nano (config baked in —
-# that board has no SD driver; needs riscv64 binutils + the Sipeed donor fip):
-CFG=~/my-node.cfg image/licheerv-agent.sh
+# RISC-V: a complete SD-card image for the LicheeRV Nano (the headless config
+# baked in — that board has no SD driver; needs riscv64 binutils + the Sipeed
+# donor fip):
+image/licheerv-agent.sh
 ```
 
 The QEMU demo and the Pi acceptance images build from public modules only. `metal/cmd/hopos` — the full agent — additionally depends on the [HOP orchestrator](https://github.com/xinix00/hop), which is open source as well.

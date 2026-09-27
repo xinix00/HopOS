@@ -7,10 +7,15 @@
 #
 # Artefacten, elk in twee smaken — gui (default) en headless (GUI=0):
 # headless is geen uitgezette gui maar een build waar geen enkele regel
-# gui-code in gelinkt zit.
+# gui-code in gelinkt zit. Een derde smaak, media (MEDIA=1), is gui plus VPU,
+# disc en codec — en ook dat is een link-grens: in gui en headless zit geen
+# regel codec- of disc-code. Media bestaat alleen waar er een codec-blok is om
+# aan te zetten: vandaag de O6N.
 #
 # dd-bare images (gunzip | dd, medium boot — het hoofdpad, élk board):
 #   hopos-altra[-headless].img.gz        Ampere Altra/AmpereOne (USB-stick)
+#   hopos-o6n[-headless|-media].img.gz   Radxa Orion O6/O6N (USB-stick); media
+#                                        = gui + VPU (Linlon V8) + disc + codec
 #   hopos-rpi5[-headless].img.gz         Pi 5
 #   hopos-rpi4[-headless].img.gz         Pi 4
 #   hopos-radxa-zero3[-headless].img.gz  Radxa Zero 3E (donor-U-Boot ingebakken)
@@ -27,8 +32,9 @@
 #
 # drop-in-updates voor een bestaand boot-medium:
 #   BOOTAA64-altra.EFI / BOOTAA64-altra-headless.EFI
+#   BOOTAA64-o6n.EFI / BOOTAA64-o6n-headless.EFI / BOOTAA64-o6n-media.EFI
 #                     naar EFI/BOOT/ op een bestaande FAT-stick (de
-#                     headless-variant daar hernoemen naar BOOTAA64.EFI)
+#                     headless-/media-variant daar hernoemen naar BOOTAA64.EFI)
 #   hopos-rpi5[-headless].zip   Pi 5 — uitpakken op de SD-bootfs
 #   hopos-rpi4[-headless].zip   Pi 4 — idem
 #   hopos-radxa-zero3[-headless].zip     de drie bootpartitie-bestanden
@@ -102,11 +108,20 @@ cp "$DIR/uefi-esp-altra-agent/EFI/BOOT/BOOTAA64.EFI" "$DIST/BOOTAA64-altra.EFI"
 gzimg "$DIR/metal/out/hopos-altra.img" hopos-altra.img
 
 # 2b. De Orion O6N: hetzelfde UEFI-recept met BOARD=o6n (board/o6n), als
-#     dd-bare stick in beide smaken. De PE apart erbij, voor een bestaande stick.
+#     dd-bare stick in alle drie de smaken. De PE apart erbij, voor een
+#     bestaande stick. Media tussen headless en gui: gui blijft de laatste, dus
+#     de tree staat na afloop nog steeds in de default-staat. De media-stick
+#     krijgt de gui-config (er zijn precies twee default-configs); de codec
+#     komt vanzelf op zodra de firmware in /firmware op het volume staat —
+#     die is van CIX en gaat níet mee in de release.
 echo ">> hopos-o6n-headless.img.gz + BOOTAA64-o6n-headless.EFI (BOARD=o6n uefi-run.sh agent, GUI=0)" >&2
 BOARD=o6n GUI=0 "$DIR/image/uefi-run.sh" agent >/dev/null
 cp "$DIR/uefi-esp-o6n-agent/EFI/BOOT/BOOTAA64.EFI" "$DIST/BOOTAA64-o6n-headless.EFI"
 gzimg "$DIR/metal/out/hopos-o6n.img" hopos-o6n-headless.img
+echo ">> hopos-o6n-media.img.gz + BOOTAA64-o6n-media.EFI (BOARD=o6n uefi-run.sh agent, MEDIA=1)" >&2
+BOARD=o6n MEDIA=1 "$DIR/image/uefi-run.sh" agent >/dev/null
+cp "$DIR/uefi-esp-o6n-agent/EFI/BOOT/BOOTAA64.EFI" "$DIST/BOOTAA64-o6n-media.EFI"
+gzimg "$DIR/metal/out/hopos-o6n.img" hopos-o6n-media.img
 echo ">> hopos-o6n.img.gz + BOOTAA64-o6n.EFI (BOARD=o6n uefi-run.sh agent)" >&2
 BOARD=o6n "$DIR/image/uefi-run.sh" agent >/dev/null
 cp "$DIR/uefi-esp-o6n-agent/EFI/BOOT/BOOTAA64.EFI" "$DIST/BOOTAA64-o6n.EFI"
@@ -254,13 +269,15 @@ NOTES="Prebuilt, signed boot images — https://gethop.org/hopos/ for the 5-minu
 **Images — flash and boot.** \`gunzip\`, \`dd\` to an SD card or USB stick, done: firmware/boot chain is already on it, nothing to rename or copy. The boot partition is plain FAT, so it mounts on macOS/Windows/Linux afterwards — \`hopos.cfg\` stays editable and a kernel update is a file copy.
 
 - **hopos-o6n.img.gz** — Radxa Orion O6 / O6N (CIX P1), dd to a USB stick; boots through the board's UEFI (ACPI mode)
-- **hopos-uefi.img.gz** — any UEFI arm64 box, dd to a USB stick
+- **hopos-o6n-media.img.gz** — the O6N media flavour: the GUI image plus the hardware video codec (Linlon V8 VPU), USB optical drives (\`/devices/disc0\`) and the codec ABI for apps. The codec firmware belongs to CIX and is not in the image; the node loads it from \`/firmware\` on its volume and runs without the codec until it is there.
+- **hopos-altra.img.gz** — Ampere Altra / AmpereOne, dd to a USB stick; boots through the board's UEFI (ACPI mode)
 - **hopos-rpi5.img.gz** — Raspberry Pi 5
 - **hopos-rpi4.img.gz** — Raspberry Pi 4
 - **hopos-radxa-zero3.img.gz** — Radxa Zero 3E (RK3566), vendor U-Boot chain included on its raw sectors
 - **hopos-licheerv-headless.img.gz** — LicheeRV Nano (RISC-V; headless is the only flavour — no framebuffer on that silicon): this board has no SD driver, so its config is **baked into the image** — the baked config IS the headless default (\`hopos-headless.cfg\` below); to change it, rebuild with \`CFG=~/my-node.cfg image/licheerv-agent.sh /dev/diskN\`.
 - **hopos-m4-headless.img.gz** — Mac mini (Apple silicon). Not a boot medium: write it to a USB drive like any other image here, and what you get is a ready-made FAT stick holding HopOS, the installer and a README. Boot the mini into Recovery, run \`install.sh\` from the stick, and it shrinks macOS to what it actually needs and makes HopOS what the Mac starts. Headless: the display firmware does not come up on this hardware, so the node reports over the network (welcome page on port 80, console on 5555) instead of on a screen.
 - \`*-headless.img.gz\` — the same images built with \`GUI=0\` (**zero GUI code linked**) and the headless config.
+- \`*-media.img.gz\` — built with \`MEDIA=1\`: GUI plus VPU, disc and codec. The plain GUI and headless images link **zero codec or disc code**.
 
 macOS example: \`diskutil unmountDisk /dev/diskN && gunzip -c hopos-rpi5.img.gz | sudo dd of=/dev/rdiskN bs=4m\`
 
@@ -268,7 +285,7 @@ macOS example: \`diskutil unmountDisk /dev/diskN && gunzip -c hopos-rpi5.img.gz 
 
 - **hopos-rpi5.zip / hopos-rpi4.zip** — unzip onto the SD bootfs
 - **hopos-radxa-zero3.zip** — the three boot-partition files (\`extlinux.conf\` points U-Boot at our image); the partition of a card written from our .img mounts everywhere
-- **BOOTAA64.EFI** — the bare UEFI PE, for refreshing an existing stick: copy to \`EFI/BOOT/\`, put \`hopos.cfg\` (below) in the stick root. Headless: rename \`BOOTAA64-headless.EFI\` to \`BOOTAA64.EFI\`.
+- **BOOTAA64-*.EFI** — the bare UEFI PE, for refreshing an existing stick: copy to \`EFI/BOOT/\`, put \`hopos.cfg\` (below) in the stick root. Headless or media: rename \`BOOTAA64-<board>-headless.EFI\` / \`-media.EFI\` to \`BOOTAA64.EFI\`.
 - **hopos.cfg** — the default GUI config (also inside the images and zips): a full desktop — display, launcher and app catalog, no addresses to fill in and **no edit required to boot**. The API ships open (\`hopos.insecure=1\`) so a written card is a working node; set \`hopos.apikey\` and drop that line before the node leaves a LAN you trust.
 - **hopos-headless.cfg** — the headless default (inside the \`*-headless\` images/zips as \`hopos.cfg\`): same keys, no desktop — seed your own \`hopos.init[]\` jobs. For a UEFI stick, rename it to \`hopos.cfg\`.
 

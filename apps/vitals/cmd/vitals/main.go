@@ -33,6 +33,7 @@ package main
 
 import (
 	"runtime"
+	"time"
 
 	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 	"github.com/xinix00/HopOS/metal/v2/app/applib"
@@ -54,6 +55,11 @@ func main() {
 		app.Logf("vitals: net: %v", err)
 		app.Exit(1)
 	}
+
+	// De netstack-tellers van déze app in zijn eigen log, elke twee seconden
+	// en alleen als er iets verandert: dat is hoe je van buiten ziet of een
+	// verbinding gezond is of aan het herzenden (L83 p56).
+	go appnet.WatchStats(app.Logf, 2*time.Second)
 
 	port := app.Env("ER_PORT_HTTP")
 	if port == "" {

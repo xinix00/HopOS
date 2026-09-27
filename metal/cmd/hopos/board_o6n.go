@@ -15,7 +15,9 @@ import (
 	"github.com/xinix00/HopOS/metal/v2/board"
 	o6n "github.com/xinix00/HopOS/metal/v2/board/o6n/hop" // registreert het board (na board/uefi/hop)
 	"github.com/xinix00/HopOS/metal/v2/board/uefi"
+	"github.com/xinix00/HopOS/metal/v2/driver/dvfs"
 	"github.com/xinix00/HopOS/metal/v2/kern/kernflip"
+	"github.com/xinix00/HopOS/metal/v2/kern/slots"
 )
 
 //go:linkname ramStart runtime/goos.RamStart
@@ -51,12 +53,20 @@ func init() {
 	kernflip.BoardScratchInWindow = true     // scratch = b+scratchOff: het paar verhuist mee naar het geleende venster
 	kernflip.BoardFootprint = uefi.Footprint // lenen en vegen: RAM + carve, niet alleen RAM
 
-	// Board-nawerk: de klasse-indeling melden, de klok op vol (de firmware
-	// laat de cores op de boot-OPP staan) en de eerste temperatuur — de
+	// Board-nawerk: de klasse-indeling melden, het klokbeleid (de firmware
+	// laat de cores op de boot-OPP staan; hopos.clock kiest dvfs, max of
+	// firmware) en de eerste temperatuur — de
 	// thermometer zelf loopt via board.Thermometer op de heartbeat.
+	// De governor (hopos.clock=dvfs) leest de idle-teller van elke app op
+	// zijn control page — zonder dit adres ziet hij alleen de HOP-core, zoals
+	// op de Pi (board_raspi.go).
+	dvfs.SlotCtrl = slots.CtrlPageOf
+	dvfs.SlotRunning = slots.Running // yield-idle: slapen ≠ rekenen
+
 	boardExtra = func() {
 		fmt.Println(o6n.Describe())
 		o6n.StartClock(bootParam)
+		clockQuery = dvfs.Query
 		if mC := board.TempMilliC(); mC != 0 {
 			fmt.Printf("hwmon: SoC %d.%dC (SCMI) - on every heartbeat\n", mC/1000, mC%1000/100)
 		}

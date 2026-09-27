@@ -25,7 +25,6 @@ package usbin
 
 import (
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/xinix00/HopOS/metal/v2/gui/driver/usb/hid"
@@ -33,7 +32,7 @@ import (
 )
 
 // Sink krijgt elke gebeurtenis. Mag blokkeren noch panieken: hij draait op de
-// pollgoroutine van de invoerdienst.
+// goroutine die de bus bezit.
 type Sink func(hid.Event)
 
 // pollInterval is hoe vaak we de event-ring bekijken. Een boot-toetsenbord
@@ -46,6 +45,15 @@ const pollInterval = 4 * time.Millisecond
 // de poortregisters uit de hete lus.
 const scanInterval = 500 * time.Millisecond
 
+// fineRounds is hoe vaak de eigenaar na het starten van een bulk-transfer op
+// 100µs-afstand kijkt voor hij terugvalt op een milliseconde. Een toetsenbord
+// kan een milliseconde missen, bulk-opslag niet: één SCSI-opdracht is drie
+// transfers, en bij 64KB per opdracht kost een vaste milliseconde per wacht al
+// meer dan de drive zelf. GEMETEN 22-09: een Blu-ray door de share kwam zo op
+// 2,7 MB/s. Twintig rondes van 100µs dekken het normale geval; wat daarna nog
+// wacht is een trage drive, en dáár is een milliseconde precies goed.
+const fineRounds = 20
+
 // maxPerPoll begrenst hoeveel rapporten we per beurt van één apparaat
 // ophalen. Eén apparaat kan twee endpoints hebben (een combo-dongle levert
 // toetsenbord én muis), dus één per beurt zou de muis halveren; ongebrensd zou
@@ -54,24 +62,44 @@ const maxPerPoll = 4
 
 // port is één bezette roothub-poort met zijn apparaat en decoder.
 type port struct {
-	dev *xhci.Device
-	kb  hid.Keyboard
-	ms  hid.Mouse
-	buf []byte
+	dev  *xhci.Device
+	bulk *Bulk // opslag: het handvat dat de rest van de node van dit apparaat heeft
+	kb   hid.Keyboard
+	ms   hid.Mouse
+	buf  []byte
 }
 
-// Manager bedient nul of meer controllers.
+// Storage krijgt elk opslagapparaat dat de scanner vindt. Gezet door cmd/hopos
+// vóór Start; nil = deze node doet niets met opslag op USB en het apparaat
+// blijft simpelweg hangen. Eén haak en geen lijst: er is één eigenaar van de
+// bus, en die deelt het apparaat uit aan wie het hebben wil. De haak draait op
+// de goroutine van die eigenaar en mag dus zelf niets met de Bulk doen: elk
+// verzoek zou wachten op de goroutine die hem aanroept.
+var Storage func(*Bulk)
+
+// Manager bedient nul of meer controllers. Alles hierin is van één goroutine
+// (Run); Add hoort vóór Run, en wie daarna iets van de bus wil gaat via reqs.
 type Manager struct {
-	mu    sync.Mutex
 	hcs   []*xhci.HC
 	ports map[*xhci.HC]map[int]*port
 	sink  Sink
 	evs   []hid.Event // hergebruikte buffer: het pollpad mag niet allloceren
+
+	reqs  chan *bulkReq           // verzoeken van Bulk-handvatten
+	queue map[*xhci.HC][]*bulkReq // wachtend, per controller
+	busy  map[*xhci.HC]*inflight  // de ene lopende transfer per controller
+	fine  int                     // resterende fijnmazige rondes (fineRounds)
 }
 
 // New maakt een lege invoerdienst.
 func New(sink Sink) *Manager {
-	return &Manager{ports: map[*xhci.HC]map[int]*port{}, sink: sink}
+	return &Manager{
+		ports: map[*xhci.HC]map[int]*port{},
+		sink:  sink,
+		reqs:  make(chan *bulkReq),
+		queue: map[*xhci.HC][]*bulkReq{},
+		busy:  map[*xhci.HC]*inflight{},
+	}
 }
 
 // Add neemt een controller in beheer: probe, reset, structuren opzetten,
@@ -108,31 +136,52 @@ func (m *Manager) Add(hc *xhci.HC, dmaBase, dmaSize uintptr) error {
 	}
 	fmt.Printf("usb: %s PORTSC%s\n", hc.Name, st)
 
-	m.mu.Lock()
 	m.hcs = append(m.hcs, hc)
 	m.ports[hc] = map[int]*port{}
-	m.mu.Unlock()
 	return nil
 }
 
-// Run draait de scan- en pollus. Blokkeert; start hem als goroutine.
+// Run is de eigenaar van de bus: scannen, HID-rapporten ophalen en de
+// verzoeken van opslagapparaten bedienen, allemaal op deze ene goroutine.
+// Blokkeert; start hem als goroutine.
+//
+// Hij slaapt tot er een verzoek binnenkomt of er iets te doen is: de volgende
+// pollronde, of — zolang er een bulk-transfer loopt — de volgende blik op de
+// event-ring.
 func (m *Manager) Run() {
-	next := time.Now()
+	now := time.Now()
+	nextScan, nextPoll := now, now
+	wake := time.NewTimer(0)
 	for {
-		if time.Now().After(next) {
-			m.Scan()
-			next = time.Now().Add(scanInterval)
+		select {
+		case r := <-m.reqs:
+			m.enqueue(r)
+		case <-wake.C:
 		}
-		m.Poll()
-		time.Sleep(pollInterval)
+		if !time.Now().Before(nextScan) {
+			m.Scan()
+			nextScan = time.Now().Add(scanInterval)
+		}
+		if !time.Now().Before(nextPoll) {
+			m.Poll()
+			nextPoll = time.Now().Add(pollInterval)
+		}
+		m.serveBulk()
+		wait := time.Until(nextPoll)
+		if len(m.busy) > 0 {
+			step := time.Millisecond
+			if m.fine > 0 {
+				m.fine--
+				step = 100 * time.Microsecond
+			}
+			wait = min(wait, step)
+		}
+		wake.Reset(wait)
 	}
 }
 
 // Scan kijkt welke poorten er bij zijn gekomen en welke leeg zijn geraakt.
-// Publiek zodat een probe hem los kan aanroepen.
 func (m *Manager) Scan() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	for _, hc := range m.hcs {
 		known := m.ports[hc]
 		if cause := hc.RecoveryNeeded(); cause != nil {
@@ -160,12 +209,30 @@ func (m *Manager) Scan() {
 					hc.ClearChanges(p.Num)
 					continue
 				}
+				if d != nil && d.MassStorage() {
+					// Opslag hoort niet bij invoer, maar de bus heeft één eigenaar en
+					// dat is deze scanner. Het apparaat blijft dus hier in de
+					// boekhouding, zodat uittrekken gezien wordt, en wie er wél iets
+					// mee doet krijgt een Bulk via Storage. Niemand geregistreerd?
+					// Dan is het precies zoals eerst: een apparaat dat er hangt.
+					fmt.Printf("usb: %s port %d: mass storage %04x:%04x\n", hc.Name, p.Num, d.VendorID, d.ProductID)
+					b := &Bulk{
+						VendorID: d.VendorID, ProductID: d.ProductID, Host: hc.Name, Port: p.Num,
+						m: m, hc: hc, dev: d, max: d.MaxTransfer(), gone: make(chan struct{}),
+					}
+					known[p.Num] = &port{dev: d, bulk: b}
+					hc.ClearChanges(p.Num)
+					if Storage != nil {
+						Storage(b)
+					}
+					continue
+				}
 				if d == nil {
-					// Wel iets, maar geen boot-HID. Geen fout: een stick in de
-					// poort is gewoon niets voor deze stack.
+					// Wel iets, maar geen boot-HID en geen opslag. Geen fout: een
+					// dongle in de poort is gewoon niets voor deze stack.
 					fmt.Printf("usb: %s port %d: device is not a boot-HID — ignored\n", hc.Name, p.Num)
-					// Remember this connected device until unplug or controller
-					// recovery; repeatedly enumerating a storage device serves no input.
+					// Onthouden tot uittrekken of controllerherstel: telkens opnieuw
+					// enumereren levert geen invoer op.
 					known[p.Num] = &port{}
 					hc.ClearChanges(p.Num)
 					continue
@@ -188,7 +255,10 @@ func (m *Manager) Scan() {
 // voor altijd staan.
 func (m *Manager) release(p *port) {
 	if p.dev == nil {
-		return // known non-HID device; Attach already released its hardware slot
+		return // bekend niet-HID-apparaat; Attach gaf zijn hardwareslot al terug
+	}
+	if p.bulk != nil {
+		m.dropBulk(p.bulk)
 	}
 	m.evs = m.evs[:0]
 	m.appendReset(p)
@@ -206,6 +276,9 @@ func (m *Manager) forgetController(known map[int]*port) {
 	m.evs = m.evs[:0]
 	for _, p := range known {
 		m.appendReset(p)
+		if p.bulk != nil {
+			m.dropBulk(p.bulk)
+		}
 	}
 	m.emit()
 	clear(known)
@@ -218,8 +291,6 @@ func (m *Manager) appendReset(p *port) {
 
 // Poll haalt één ronde rapporten op.
 func (m *Manager) Poll() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	for hc, known := range m.ports {
 		// Een Disable Slot zonder completion maakt ook de command/event-state
 		// verdacht. Poll daarom geen enkel oud Device-handle meer tussen die
@@ -229,13 +300,16 @@ func (m *Manager) Poll() {
 		}
 		for _, p := range known {
 			if p.dev == nil {
-				continue // known non-HID device
+				continue // bekend niet-HID-apparaat
 			}
 			// Meerdere keren per beurt: één apparaat kan twee endpoints hebben
 			// (toetsenbord én muis op één dongle) en Report levert er één per
 			// aanroep. Begrensd op maxPerPoll zodat een druk apparaat de
 			// andere poorten niet uithongert.
 			for k := 0; k < maxPerPoll; k++ {
+				if p.dev.MassStorage() {
+					break // geen invoer: deze poort levert bytes op verzoek
+				}
 				n, proto, ok := p.dev.Report(p.buf)
 				if !ok {
 					break
@@ -260,17 +334,4 @@ func (m *Manager) emit() {
 		}
 	}
 	m.evs = m.evs[:0]
-}
-
-// Devices geeft een momentopname van wat er aan hangt (diagnose/log).
-func (m *Manager) Devices() []string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	var out []string
-	for _, known := range m.ports {
-		for _, p := range known {
-			out = append(out, p.dev.String())
-		}
-	}
-	return out
 }

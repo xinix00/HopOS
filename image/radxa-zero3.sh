@@ -4,6 +4,7 @@
 #
 #   image/radxa-zero3.sh          → de ECHTE agent (cmd/hopos, -tags rk3566)
 #   GUI=0 image/radxa-zero3.sh    → de kale (headless) smaak; default is MÉT gui
+#   MEDIA=1 image/radxa-zero3.sh  → de media-smaak: gui + disc + codec
 #   CFG=~/mijn-node.cfg image/...  → met je eigen config (sleutels horen daar,
 #                                    niet in de cfg-bestanden in de repo)
 #   PROBE=1 image/radxa-zero3.sh  → de bring-up-probe (cmd/proberk3566)
@@ -59,8 +60,11 @@ else
 	# Default GUI, GUI=0 bouwt de kale (headless) smaak — zelfde knop als op de
 	# Pi's. Dit bord heeft sinds 06-08 een echte scanout naar HDMI, dus "gui" is
 	# hier geen QEMU-vinkje maar beeld op een monitor.
+	# MEDIA=1: de media-smaak (gui + disc + codec; zet GUI vast op 1).
+	[ "${MEDIA:-0}" = 1 ] && GUI=1
 	GUITAG=""
 	[ "${GUI:-1}" = 1 ] && GUITAG=" gui"
+	[ "${MEDIA:-0}" = 1 ] && GUITAG="$GUITAG media"
 	TARGET=./cmd/hopos; NAME=hopos-radxa; TAGS="rk3566 linkcpuinit$GUITAG"
 fi
 
@@ -69,7 +73,7 @@ fi
 # basis is 2MB-uitgelijnd omdat een arm64-Image dat hoort te zijn.
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags "$TAGS" -trimpath \
-	-ldflags "-T 0x02210000 -R 0x1000" -o "out/$NAME.elf" "$TARGET"
+	-ldflags "-T 0x02210000 -R 0x1000 $VERSION_X" -o "out/$NAME.elf" "$TARGET"
 
 # ELF → arm64 Image (mkkernel ZONDER -raw: booti wil de ARM\x64-header).
 # -dram 0x200000 is GEMETEN (05-08): U-Boot rapporteert DRAM-start daar, en

@@ -31,11 +31,14 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 # 2. De agent-kern: cmd/hopos met het rpi4-board (build-tag kiest board_rpi4.go)
 #    Default gui; GUI=0 bouwt de
 #    kale (headless) smaak. (Zelfde knop in alle imagescripts.)
+#    MEDIA=1 bouwt de media-smaak (gui + disc + codec; zet GUI vast op 1).
+[ "${MEDIA:-0}" = 1 ] && GUI=1
 GUITAG=""
 [ "${GUI:-1}" = 1 ] && GUITAG=" gui"
+[ "${MEDIA:-0}" = 1 ] && GUITAG="$GUITAG media"
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags "rpi4 linkcpuinit$GUITAG" -trimpath \
-	-ldflags "-s -w -T 0x90000 -R 0x1000" -o out/agent4.elf ./cmd/hopos
+	-ldflags "-s -w -T 0x90000 -R 0x1000 $VERSION_X" -o out/agent4.elf ./cmd/hopos
 
 # 3. ELF → raw kernel8.img.
 cd "$DIR"
@@ -59,20 +62,14 @@ dtoverlay=disable-bt
 initramfs hopos.cfg 0x0f200000
 EOF
 
-# config.txt laadt hopos.cfg verplicht en dát bestand staat in .gitignore
-# (het bevat de API-key en de S3-geheimen). Luid falen mét het recept,
-# zelfde poortwachter als rpi5-agent.sh.
-if [ ! -f "$DIR/sd-rpi4/hopos.cfg" ]; then
-	echo "" >&2
-	echo "FOUT: sd-rpi4/hopos.cfg ontbreekt — config.txt laadt hem verplicht." >&2
-	echo "  cp image/hopos-gui.cfg sd-rpi4/hopos.cfg" >&2
-	echo "  \$EDITOR sd-rpi4/hopos.cfg   # minimaal hopos.apikey zetten" >&2
-	echo "" >&2
-	exit 1
-fi
+# config.txt laadt hopos.cfg verplicht. Dat is een van de TWEE configs
+# (image/hopos-gui.cfg of image/hopos-headless.cfg, via GUI=): elke node draait
+# dezelfde waarden, er bestaat geen persoonlijke config per board.
+CARDCFG="$DIR/image/hopos-headless.cfg"
+[ "${GUI:-1}" = 1 ] && CARDCFG="$DIR/image/hopos-gui.cfg"
 
-echo "sd-rpi4/kernel8.img (HOP-agent, $(du -h sd-rpi4/kernel8.img | cut -f1)) + config.txt + hopos.cfg klaar." >&2
-echo "flash: cp sd-rpi4/kernel8.img sd-rpi4/config.txt sd-rpi4/hopos.cfg '/Volumes/NO NAME/'" >&2
+echo "sd-rpi4/kernel8.img (HOP-agent, $(du -h sd-rpi4/kernel8.img | cut -f1)) + config.txt klaar, config = $(basename "$CARDCFG")." >&2
+echo "flash: cp sd-rpi4/kernel8.img sd-rpi4/config.txt '/Volumes/NO NAME/' && cp $CARDCFG '/Volumes/NO NAME/hopos.cfg'" >&2
 
 # 5. Het complete, dd-bare kaart-image (image/mkcard — zelfde vorm als de
 #    LicheeRV en de Radxa): MBR + FAT16 met de firmware er al op, dus gunzip|dd
@@ -80,7 +77,7 @@ echo "flash: cp sd-rpi4/kernel8.img sd-rpi4/config.txt sd-rpi4/hopos.cfg '/Volum
 #    sd-rpi4/ (gitignored; herkomst + bl31-bouwrecept in sd-rpi4/LEESMIJ.txt);
 #    ontbreekt er iets, dan slaan we dit LUID over en is de cp-flow hierboven
 #    gewoon compleet. De config in het image is ALTIJD een template (of
-#    CFG=...): nooit sd-rpi4/hopos.cfg, daar wonen de echte sleutels.
+#    CFG=...), dezelfde als het handmatige kaart-pad hierboven.
 rm -f metal/out/hopos-rpi4.img
 FW_MISSING=""
 for f in start4.elf fixup4.dat bcm2711-rpi-4-b.dtb bl31.bin; do

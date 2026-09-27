@@ -31,7 +31,10 @@ const (
 	regRxQBase   = 0x018
 	regTxQBase   = 0x01C
 	regRxStatus  = 0x020
+	regISR       = 0x024 // interrupt status (W1C met het bit zelf, zie EnableIRQ)
+	regIER       = 0x028 // interrupt enable
 	regIDR       = 0x02C // interrupt disable
+	regIMR       = 0x030 // interrupt mask (1 = uit)
 	regMAN       = 0x034 // PHY maintenance (MDIO)
 	regPBufRxCut = 0x044 // RX partial store&forward (uit = 0)
 	regSpAddr1B  = 0x088 // MAC-adres bottom
@@ -102,8 +105,42 @@ const (
 	manMustBe10 = 0b10 << 16
 
 	mtuBuf = 1536 // buffergrootte per descriptor (64-voud)
-	nRx    = 64
-	nTx    = 16
+	// 256 RX-descriptors, niet 64: bij een gepolde ontvanger (300 µs) is de
+	// ring de buffer tussen twee pomprondes, en 64 × 1,5 KB is 0,8 ms op 1
+	// Gbit — de igb ging van 5 naar 36 MB/s met 64 → 256 (L83, 19-09), de Pi 5
+	// zat op 34,6 MB/s inbound tegen 118 op de borden met een grote ring
+	// (20-09). 256 + 64 descriptors met buffers = 0,5 MB van de 8 MB net-DMA.
+	nRx = 256
+	nTx = 64
+
+	// Indeling van de DMA-regio, met de pakketbuffers op een eigen 2MB-grens.
+	// Descriptors en ringen blijven in het eerste blok (device/NC, per woord
+	// gepold); het bufferblok kan het board gecached mappen (memattr.NormalWB),
+	// en dan is de kopie per frame een memmove uit de cache in plaats van een
+	// reeks ongecachte leesloads — met één invalidate ná DMA-in (Receive) en
+	// één clean vóór DMA-uit (Transmit) via dev.Pull/Push. Zelfde naad als de
+	// tg3 (BufOff/BufSize); memattr werkt in 2MB-blokken, vandaar de grens en
+	// de maat. GEMETEN 21-09: de Pi 5 haalde 58-62 MB/s binnen tegen 400+ MB/s
+	// binnen de node, dus de kopie uit ongecached geheugen is de rem.
+	// RX en TX krijgen elk een eigen 2MB-blok, want ze willen niet hetzelfde.
+	// GEMETEN 21-09 op de Pi 5, drie keer: de ONTVANGSTkant is het snelst uit
+	// ongecached geheugen (58-62 MB/s tegen 50-54 gecached en 51-53 met
+	// Normal-NC) en de ZENDkant juist uit gecached (50 tegen 43-47). Dat is
+	// geen tegenspraak maar het verschil tussen de twee richtingen: lezen uit
+	// een verse DMA-buffer haalt hoe dan ook DRAM op, en dan is de invalidate
+	// per frame pure overhead; schrijven mag in de cache landen en pas bij de
+	// clean naar buiten. Op de M4 (tg3) loont gecached juist aan beide kanten,
+	// dus dit is een board-meting en geen regel — vandaar twee knoppen.
+	offRxBufs = 0x200000
+	offTxBufs = 0x400000
+
+	// TXBufOff/TXBufSize: het zendblok, voor een board dat het gecached wil
+	// mappen (memattr werkt in 2MB-blokken, vandaar grens én maat).
+	TXBufOff  = offTxBufs
+	TXBufSize = 0x200000
+
+	// NeedBytes is wat deze driver aan DMA-geheugen vraagt.
+	NeedBytes = offTxBufs + TXBufSize
 )
 
 // Net is één GEM-instantie.
@@ -115,6 +152,55 @@ type Net struct {
 	rxRing, txRing uintptr // descriptor-ringen (4 woorden per descriptor)
 	rxBufs, txBufs uintptr
 	rxHead, txHead int
+
+	// IRQAck: de board-kant van de rearm, ná het openen van IER — op de RP1
+	// de MSI-X IACK (rpi5.RP1MSIXAck), zodat de southbridge een nog staande
+	// lijn opnieuw als MSI afvuurt. nil = niets.
+	IRQAck func()
+}
+
+// intRCOMP: receive complete (MACB_RCOMP_OFFSET 1) — de enige lijn die de
+// RX-pomp wekt; TX loopt op de pomp-ronde mee.
+const intRCOMP = 1 << 1
+
+// De ISR van deze GEM (RP1, DCFG1.IRQCOR=0 → "clear on write", macb_main.c
+// macb_configure_caps): lezen wist niets, en een gemaskeerd bit leest als 0
+// maar blijft gelatcht — tot een W1C met dát bit. Dus altijd het expliciete
+// bit schrijven (zoals Linux: queue_writel(ISR, MACB_BIT(RCOMP))), nooit de
+// teruggelezen waarde: die is onder het masker 0, de latch bleef staan, en
+// bij IER kwam de lijn meteen terug — 134k interrupts/s op een stille Pi 5
+// (bundels 1-5 en 11, 20-09; bundel 10/12 bewezen het bit-recept).
+
+// EnableIRQ opent de RX-interrupt.
+func (n *Net) EnableIRQ() {
+	n.wr(regISR, intRCOMP)
+	n.wr(regIER, intRCOMP)
+}
+
+// AckIRQ laat de lijn los: masker dicht (IDR) en de latch gewist. Alleen
+// wissen is niet genoeg: zolang de ring werk heeft zet de GEM RCOMP meteen
+// weer, en dan is het een interrupt per frame bovenop de pomp (zie rtl8126).
+func (n *Net) AckIRQ() {
+	n.wr(regIDR, intRCOMP)
+	n.wr(regISR, intRCOMP)
+}
+
+// RearmIRQ: latch gewist, de board-ack (RP1: IACK, met het masker nog dicht,
+// zodat de RP1 een lage lijn bemonstert), dan het masker open. De pomp doet
+// hierna nog één ronde, voor een frame dat tussen de lege ronde en het openen
+// viel (hopnet.rxLoop).
+func (n *Net) RearmIRQ() {
+	n.wr(regISR, intRCOMP)
+	if n.IRQAck != nil {
+		n.IRQAck()
+	}
+	n.wr(regIER, intRCOMP)
+}
+
+// IRQDiag: ISR, IMR en de RX-status (de stats-vraag: staat er iets, staat
+// het masker open, wat zegt de ontvangstkant?).
+func (n *Net) IRQDiag() (isr, imr, rxStatus uint32) {
+	return n.rd(regISR), n.rd(regIMR), n.rd(regRxStatus)
 }
 
 func (n *Net) rd(off uintptr) uint32    { return dev.Read32(n.Base + off) }
@@ -176,14 +262,16 @@ func (n *Net) AutoNeg(phy int, timeout time.Duration) (speed int, fd bool, err e
 // ongecachet → coherent met de GEM zonder cache-onderhoud) en zet RX/TX aan.
 // speed/fd komen uit AutoNeg; de RP1-CLKGEN volgt de MAC-snelheid vanzelf.
 func (n *Net) Init(dmaBase, dmaSize uintptr, speed int, fd bool) error {
-	need := uintptr(nRx*16 + nTx*16 + nRx*mtuBuf + nTx*mtuBuf)
-	if dmaSize < need {
-		return fmt.Errorf("gem: DMA-regio %#x < %#x", dmaSize, need)
+	if dmaSize < NeedBytes {
+		return fmt.Errorf("gem: DMA-regio %#x < %#x", dmaSize, uintptr(NeedBytes))
+	}
+	if nRx*mtuBuf > offTxBufs-offRxBufs || nTx*mtuBuf > TXBufSize {
+		return fmt.Errorf("gem: buffers passen niet in hun blokken")
 	}
 	n.rxRing = dmaBase
 	n.txRing = dmaBase + nRx*16
-	n.rxBufs = dmaBase + nRx*16 + nTx*16
-	n.txBufs = n.rxBufs + nRx*mtuBuf
+	n.rxBufs = dmaBase + offRxBufs
+	n.txBufs = dmaBase + offTxBufs
 
 	// Alles uit, interrupts dicht (we pollen), status wissen — het volledige
 	// macb_reset_hw-recept (tellers, alle statusbits, RX-cut-through uit).
@@ -294,7 +382,9 @@ func (n *Net) Receive(buf []byte) (int, error) {
 	if length > len(buf) {
 		length = len(buf)
 	}
-	dev.CopyOut(buf[:length], n.rxBufs+uintptr(n.rxHead)*mtuBuf)
+	src := n.rxBufs + uintptr(n.rxHead)*mtuBuf
+	dev.Pull(src, uintptr(length)) // no-op zolang dit blok ongecached is
+	dev.CopyOut(buf[:length], src)
 
 	// Descriptor terug aan de DMA (adres blijft staan; alleen OWNED wissen).
 	dev.Write32(d+4, 0)
@@ -322,7 +412,9 @@ func (n *Net) Transmit(buf []byte) error {
 		}
 	}
 	bus := uint64(n.txBufs+uintptr(n.txHead)*mtuBuf) + n.BusOff
-	dev.Copy(n.txBufs+uintptr(n.txHead)*mtuBuf, buf)
+	dst := n.txBufs + uintptr(n.txHead)*mtuBuf
+	dev.Copy(dst, buf)
+	dev.Push(dst, uintptr(len(buf))) // en nu de DMA het mag lezen: uit de cache eruit
 	dev.Write32(d+0, uint32(bus))
 	dev.Write32(d+8, uint32(bus>>32))
 	w1 := uint32(len(buf)) | txLast

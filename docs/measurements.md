@@ -127,3 +127,92 @@ Same Vitals fixture (2 cores, 512 MiB), polled at 300 µs, no interrupt. Evidenc
 | Pi (.193) and Radxa Zero 3 (.241) on 2.2.6, 200 MB each way against the M4 | into the Pi 6.6 MB/s, out 42.3; into the Radxa 6.8, out 43.6 | 20 September evening; both boards polled at 300 µs; the inbound figure matches the small-RX-ring picture seen on the igb before its ring went from 64 to 256. |
 
 The per-connection window sits at its 480 KB cap on both paths; the node-to-node figure is window ÷ round trip. The 21 ms connection cycle (10.5 ms round trip) over the wire came from the M4 waiting for its tg3 interrupt failsafe on lone frames; polled, the same wire carries 100–114 MB/s.
+
+## Node to node on the interrupt work, 21 September 2026
+
+Every board below runs the same tree as a flipped kernel, one-core Vitals
+fixtures, 200 or 400 MB per direction, measured from node to node over the
+wire. The M4 is the constant peer. Evidence: logbook L83 points 42–53.
+
+| Board | Into the board | Out of the board | Connection cycle, one at a time | Wake path |
+| --- | --- | --- | --- | --- |
+| Orion O6N | 111.3–116.5 MB/s | 114.3–117.6 MB/s | 3.6 ms | RTL8126 INTx on the GIC |
+| Ampere Altra | 107.7–110.8 MB/s | 108.0–110.6 MB/s | 5.1 ms | polled by decision; its pump idles at the 1.3 ms event-stream tick |
+| Raspberry Pi 5 | 57.0–69.6 MB/s | 41.6–50.6 MB/s | 1.1–3.6 ms | GEM through the RP1's MSI-X, the BCM2712 MIP and a GIC-400 |
+| Radxa Zero 3 | 55.8–56.6 MB/s | 98.8–99.6 MB/s | 4.1 ms | dwmac4 channel 0 on the GIC, plus a normal-non-cacheable DMA region |
+| LicheeRV Nano | 10.6–11.2 MB/s | 9.4–9.5 MB/s | 16–19 ms | polled; this is its 100 Mbit port, not a HopOS ceiling |
+
+What each board gained on 20 and 21 September. The Pi 5 went from 34.6 MB/s
+inbound on a 64-descriptor ring to 45 on a 256-descriptor one, and to 61 once
+its NIC interrupt replaced the 300 µs poll; its idle wake rate dropped from
+824 pump rounds per second to 113, and a connection from 4.8 to 1.1 ms. The
+Radxa went from 15.9 MB/s inbound and 41.9 out to 56.6 and 98.8: the interrupt
+needed the 4.10-and-later encoding of the enable register and the
+interrupt-on-completion bit in its receive descriptors, and the last threefold
+step came from mapping its DMA region normal-non-cacheable instead of device.
+The same mapping was measured on the Pi 5 and rejected there, because inbound
+lost what outbound gained.
+
+The connection cycle carries a caveat that applies to every board: an app that
+is not woken by the direct kick waits for the 1 ms waker tick, about three
+times per connection. That is the difference between 1.1 and 3.5 ms in the
+table above; at a 200 µs tick the same path measures 1.2 ms. The tick stays at
+1 ms because the waker wakes HOP's own core and is the largest idle cost on a
+quiet node; the repair belongs at the kick that misses (L83 point 53).
+
+## How to compute a node's ceiling
+
+One app's receive rate follows two constants and the frame size. There is no
+third term and no magic:
+
+    per-app throughput = payload / (t_frame + payload / stream)
+    node throughput    = min(wire, apps × per-app throughput)
+
+`t_frame` is what one frame costs regardless of its size: the ring handover,
+the wake, the doorbell, the per-frame bookkeeping in the app's netstack.
+`stream` is what the bytes themselves cost once a frame is being processed:
+the copies and the checksum. Both are properties of the board, measured on
+it, and both belong to **one app**, because an app owns its netstack.
+
+Fitted on the Pi 5 from two measured points (the wire at a 1460-byte payload
+and the slot LAN at 65483) and then checked against the M4:
+
+| Board | `t_frame` | `stream` | Predicts the wire | Predicts in-node |
+| --- | --- | --- | --- | --- |
+| Raspberry Pi 5 | 30 µs | 489 MB/s | 44 MB/s | 400 MB/s |
+| Mac mini M4 | 11 µs | 874 MB/s | 118 MB/s | 765 MB/s |
+
+The per-frame cost measured straight off the wire, per board, at a 1460-byte
+payload. The fast boards sit at the 1 Gbit wire, so for them this is an upper
+bound on `t_frame`, not the board's limit:
+
+| Board | Wire | Frames per second | µs per frame | Limited by |
+| --- | --- | --- | --- | --- |
+| M4, O6N | 118 MB/s | 81,000 | ≤ 12 | the wire |
+| Ampere Altra | 110 | 75,000 | ≤ 13 | the wire |
+| Radxa, sending | 99 | 68,000 | ≤ 15 | close to the wire |
+| Radxa, receiving | 56 | 38,000 | 26 | the app |
+| Raspberry Pi 5 | 44 | 30,000 | 33 | the app |
+| LicheeRV Nano | 11 | 7,500 | — | its 100 Mbit port |
+
+Three consequences, all measured on 22 September (L83 points 56–59), and they
+are the reason this page states a per-app figure and a node figure separately.
+
+More connections in one app change nothing: 1, 2, 4 and 8 parallel downloads
+all land at 44–45 MB/s on the Pi 5, because they share one netstack and one
+wake path. More cores for that app change nothing either: two cores measured
+42.6 against 44.0 for one. More apps do scale: two apps on the same Pi 5,
+each pulling from a different peer, together reach 85.8 MB/s with the core
+still 45% idle — so the ceiling is the app, not the device.
+
+In-node traffic is not an exception to the model but the same formula with a
+bigger frame. The slot LAN is memory with an MTU of 65535 (`layout.NetMTU`),
+so a frame carries 45 times more bytes and the fixed cost is paid 6,000 times
+a second instead of 30,000.
+
+What would make one app faster is therefore either fewer frames, which the
+1500-byte wire does not allow, or cheaper frames: checksum offload from the
+NIC, or handing several frames across the ring per wake. Both are work in the
+receive path, not a setting. A node that runs several services does not need
+either: on an M4 or an O6N one app already fills the wire, and on a Pi 5 or a
+Radxa two or three apps do.

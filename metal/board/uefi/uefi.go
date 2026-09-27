@@ -666,8 +666,17 @@ func hwinit1() {
 	// beeld = firmware-buffer, geen driver.
 	// A resident display may still own these pixels across FLIP. Main decides
 	// whether to start a console after restoring framebuffer grant ownership.
-	if d, ok := gopDesc(true); ok && coldBoot {
-		fb.Init(d)
+	// Eén regel over wat de firmware aan beeld gaf, op élke boot. Zonder hem
+	// is "slot N: fb grant requested, board has no framebuffer" niet te
+	// scheiden van "de flip verloor de GOP-feiten" — precies de vraag die op
+	// de O6N drie dagen open stond (L83 p31-32, p40).
+	if d, ok := gopDesc(true); ok {
+		earlySay("hwinit1: firmware GOP present\n")
+		if coldBoot {
+			fb.Init(d)
+		}
+	} else {
+		earlySay("hwinit1: firmware supplied no GOP — no framebuffer this boot\n")
 	}
 	earlySay("hwinit1: done\n")
 }

@@ -158,6 +158,29 @@ func partAlloc(i int, size uint64) (base, grown uint64, err error) {
 	//
 	// Binnen de gekozen regio blijft het hoog-eerst (zie hieronder): dát deel van
 	// de oude vorm was wél om een reden zo.
+	base, err = carveLocked(claim)
+	if err != nil {
+		return 0, 0, fmt.Errorf("%w: partition %d MB does not fit the pool (full, fragmented, or no base the cage can describe)", ErrNoPartition, size>>20)
+	}
+	partOf[i] = region{base, size}
+	return base, size, nil
+}
+
+// carveLocked snijdt claim bytes uit de vrije lijst en geeft de basis. Eén
+// plek, want dit is de dubbeluitgifte-invariant: naast de partities van de
+// slots loopt ook de apparaatreservering (ReserveDevice) hierlangs.
+// Aanroepen onder partMu.
+//
+// Best-fit: de KLEINSTE regio die dit nog kan dragen. Hoog-eerst (wat hier
+// stond) is goed voor de bulk-boven-de-4GB-vraag, maar het kiest niet tussen
+// regio's die allebei passen — en dan snijdt een kleine job zijn partitie uit
+// de énige regio die nog een grote kan dragen.
+//
+// GEMETEN 31-07: een 64MB-retry pakte 0x8be00000 uit de 127MB-regio terwijl
+// de losse 64MB-regio vrij lag, en daarna paste 124MB nergens meer ("does not
+// fit the pool" bij élke volgende poging). Geen lek, geen volle pool — een
+// keuze. Best-fit laat een grote regio groot zolang een kleinere volstaat.
+func carveLocked(claim uint64) (uint64, error) {
 	best := -1
 	for idx := len(partFree) - 1; idx >= 0; idx-- {
 		r := partFree[idx]
@@ -174,7 +197,7 @@ func partAlloc(i int, size uint64) (base, grown uint64, err error) {
 		}
 	}
 	if best < 0 {
-		return 0, 0, fmt.Errorf("%w: partition %d MB does not fit the pool (full, fragmented, or no base the cage can describe)", ErrNoPartition, size>>20)
+		return 0, ErrNoPartition
 	}
 	r := partFree[best]
 	// Binnen de regio de HOOGSTE bruikbare basis. Dat is niet willekeurig: op een
@@ -183,8 +206,8 @@ func partAlloc(i int, size uint64) (base, grown uint64, err error) {
 	// TOR kan de kooi elk bereik uitdrukken; onder NAPOT was dat de maat zelf,
 	// en koos de allocator anders adressen die de whitelist niet kón beschrijven
 	// (gemeten 31-07: "basis 0x8bf00000 niet gealigneerd op maat 0x4000000").
-	base = (r.base + r.size - claim) &^ (part2M - 1)
-	// Voor- en achterstuk teruggeven; het middenstuk is van dit slot.
+	base := (r.base + r.size - claim) &^ (part2M - 1)
+	// Voor- en achterstuk teruggeven; het middenstuk is vergeven.
 	rest := partFree[:best:best]
 	if base > r.base {
 		rest = append(rest, region{r.base, base - r.base})
@@ -193,8 +216,50 @@ func partAlloc(i int, size uint64) (base, grown uint64, err error) {
 		rest = append(rest, region{end, r.base + r.size - end})
 	}
 	partFree = append(rest, partFree[best+1:]...)
-	partOf[i] = region{base, size}
-	return base, size, nil
+	return base, nil
+}
+
+// ReserveDevice neemt een blok uit de pool voor een apparaat dat met DMA in
+// gewoon DRAM werkt — nu alleen de videocodec, die er zijn page tables,
+// firmware en referentieframes in zet (bij 4K honderden megabytes, en dat is
+// precies waarom dit niet in een vaste plan-regio past zoals de NIC-ringen).
+//
+// Permanent: er is geen teruggave. Het blok telt af van wat apps kunnen
+// krijgen, en dat hoort ook zo — het is dezelfde node en hetzelfde DRAM, en
+// een node die zijn codec aanzet heeft navenant minder ruimte voor taken. De
+// capaciteit die HOP rapporteert daalt dus mee.
+func ReserveDevice(size uint64) (uint64, error) {
+	partOnce.Do(poolInit)
+	if size == 0 || size > ^uint64(0)-(part2M-1) {
+		return 0, fmt.Errorf("invalid device reservation %d", size)
+	}
+	size = align2M(size)
+	partMu.Lock()
+	defer partMu.Unlock()
+	base, err := carveLocked(size)
+	if err != nil {
+		return 0, fmt.Errorf("%w: device reservation of %d MB does not fit the pool", err, size>>20)
+	}
+	if partCapacity >= size {
+		partCapacity -= size
+	}
+	return base, nil
+}
+
+// ReleaseDevice geeft een apparaatreservering terug aan de pool. Bedoeld voor
+// het pad waar het ijzer niet opkwam: het blok is dan nooit gebruikt en een
+// node die zijn codec niet aan de praat krijgt hoort er geen kwart gigabyte
+// aan kwijt te zijn.
+func ReleaseDevice(base, size uint64) {
+	if size == 0 {
+		return
+	}
+	size = align2M(size)
+	partOnce.Do(poolInit)
+	partMu.Lock()
+	defer partMu.Unlock()
+	insertFree(region{base, size})
+	partCapacity += size
 }
 
 // partRelease geeft de reservering van slot i terug aan de pool (coalescing).

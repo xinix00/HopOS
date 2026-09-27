@@ -28,6 +28,7 @@ const (
 	trbConfigEP    = 12
 	trbEvalCtx     = 13
 	trbResetEP     = 14
+	trbStopEP      = 15
 	trbSetTRDeq    = 16
 
 	trbTransferEvt = 32
@@ -103,19 +104,28 @@ type ring struct {
 func newRing(base uintptr, bus uint64, bytes int) *ring {
 	r := &ring{base: base, bus: bus, n: bytes / 16, cycle: 1}
 	dev.Clear(base, uint64(bytes))
-	r.armLink()
+	r.armLink(false)
 	return r
 }
 
 // armLink (her)schrijft de link-TRB met de cycle-bit die de controller NU
 // verwacht. Wordt bij elke omloop herhaald: de bit klapt om, dus de link moet
 // mee.
-func (r *ring) armLink() {
+//
+// mid zegt dat de omloop MIDDEN in een TD valt. Een link-TRB zonder chain-bit
+// sluit de TD af (xHCI 4.11.5.1), dus een geketende overdracht die over de
+// ringgrens heen loopt zou halverwege afgeknipt worden. Met de bit erin loopt
+// de TD gewoon door aan de andere kant.
+func (r *ring) armLink(mid bool) {
+	ctrl := uint32(trbLink)<<trbTypeShift | trbTC | r.cycle
+	if mid {
+		ctrl |= trbChain
+	}
 	l := r.base + uintptr(r.n-1)*16
 	dev.Write32(l+0, uint32(r.bus))
 	dev.Write32(l+4, uint32(r.bus>>32))
 	dev.Write32(l+8, 0)
-	dev.Write32(l+12, uint32(trbLink)<<trbTypeShift|trbTC|r.cycle)
+	dev.Write32(l+12, ctrl)
 }
 
 // deqPtr geeft de huidige schrijfpositie als dequeue-pointer mét DCS-bit —
@@ -140,6 +150,12 @@ func (r *ring) deqPtr() uint64 {
 // device-gemapt (nGnRnE), dus de stores landen in programmavolgorde — de
 // barrière eronder is voor de doorbell die erop volgt.
 func (r *ring) push(p0, p1, p2, ctrl uint32) uint64 {
+	return r.pushTRB(p0, p1, p2, ctrl, false)
+}
+
+// pushTRB is push met de wetenschap of er nog een TRB van dezelfde TD volgt.
+// Alleen de bulk-kant ketent; al het andere is één TRB per TD.
+func (r *ring) pushTRB(p0, p1, p2, ctrl uint32, more bool) uint64 {
 	a := r.base + uintptr(r.enq)*16
 	at := r.bus + uint64(r.enq)*16
 	dev.Write32(a+0, p0)
@@ -151,7 +167,7 @@ func (r *ring) push(p0, p1, p2, ctrl uint32) uint64 {
 	if r.enq == r.n-1 {
 		// De link-TRB krijgt de OUDE cycle (hij is nu van de controller), pas
 		// daarna klapt onze verwachting om.
-		r.armLink()
+		r.armLink(more)
 		r.enq = 0
 		r.cycle ^= 1
 	}

@@ -39,7 +39,7 @@ GUI=0 sh image/rpi4-agent.sh
 GUI=0 sh image/rpi5-agent.sh
 GUI=0 sh image/radxa-zero3.sh
 sh image/licheerv-agent.sh
-AGENT=1 CFG=image/hopos-headless.cfg sh image/apple-m4.sh
+AGENT=1 sh image/apple-m4.sh
 BUILD_ONLY=1 GUI=0 sh image/uefi-run.sh agent
 ```
 
@@ -54,31 +54,18 @@ BUILD_ONLY=1 GUI=0 sh image/uefi-run.sh agent
 
 The Pi scripts report missing firmware and omit the complete card image when prerequisites are absent. Building the kernel alone does not create a bootable full image. [Getting started](getting-started.md) distinguishes writing a card, updating boot files, and installing an Apple boot object.
 
-### Configuration paths
+### Configuration
 
-`CFG` does not have one uniform path convention across all scripts:
+There are exactly two node configurations: `image/hopos-gui.cfg` and `image/hopos-headless.cfg`. Every node runs one of them with the same values; there is no per-board or per-node config. The builders pick one through `GUI=` (headless where a board has no display: LicheeRV, Mac mini). Boards that read their config from the image itself (Mac mini, LicheeRV) get it embedded, and so do their flip bundles; the others read it from their card or stick.
 
-| Script | `CFG` handling |
-| --- | --- |
-| `flip-bundle.sh`, `apple-m4.sh` | Appends `CFG` to the repository root: use a **repository-relative path**, such as `image/my-node.cfg`. |
-| `licheerv-agent.sh` | Reads the supplied filesystem path directly; use an absolute path to avoid working-directory ambiguity. |
-| Pi, Radxa, UEFI image builders | Pass/read the supplied filesystem path after script directory changes; use an absolute path. |
-
-For example:
-
-```sh
-CFG="$PWD/image/my-node.cfg" sh image/licheerv-agent.sh
-CFG=image/my-node.cfg sh image/flip-bundle.sh licheerv
-```
-
-Use the intended node configuration when building a flip. A bundle without the correct configuration can lose its identity or refuse API startup. `NOCFG=1` is an explicit build escape for configuration-free cases, not the normal update recipe.
+`CFG=` still overrides the template for a one-off measurement build. It is not a way to keep a node's own configuration. Path convention: `flip-bundle.sh` and `apple-m4.sh` take a repository-relative path; `licheerv-agent.sh` and the Pi, Radxa and UEFI builders read the path as given after changing directory, so use an absolute one.
 
 The builders create temporary embedded files and remove them on exit. Run image builds **sequentially in one checkout**: they share output names, config embeds, and cage-stub embeds. Use separate checkouts for parallel builds. Do not run `tools/test.sh` concurrently with an image build in the same tree.
 
 ## Build flip bundles
 
 ```sh
-CFG=image/my-node.cfg sh image/flip-bundle.sh rpi5
+sh image/flip-bundle.sh rpi5
 ```
 
 Accepted board arguments are `rpi4`, `rpi5`, `radxa`, `virt`, `uefi`, `apple`, and `licheerv`. Output is `metal/out/hopos-<board>.flip`, followed by its SHA-256. The builder links two kernels at different addresses and derives the relocation table from their difference. It retains symbols and clears build IDs for that comparison.

@@ -420,7 +420,7 @@ func (a *App) systemRPCOnce(req hopabi.Req, timeout time.Duration) (resp hopabi.
 		if resp.Status == hopabi.StatusNoEnt {
 			return resp, fmt.Errorf("system call op %d: %w: %s", req.Op, fs.ErrNotExist, resp.Data), false
 		}
-		return resp, fmt.Errorf("system call op %d: status %d: %s", req.Op, resp.Status, resp.Data), false
+		return resp, &CallError{req.Op, resp.Status, string(resp.Data)}, false
 	}
 	return resp, nil, false
 }
@@ -436,6 +436,19 @@ func isTimeout(err error) bool {
 }
 
 const rpcTimeout = 10 * time.Second
+
+// CallError betekent: de kern heeft het verzoek afgehandeld en gaf een fout
+// terug. Anders dan bij een verlopen call loopt er aan de overkant dus niets
+// meer.
+type CallError struct {
+	Op      uint8
+	Status  uint16
+	Message string
+}
+
+func (e *CallError) Error() string {
+	return fmt.Sprintf("system call op %d: status %d: %s", e.Op, e.Status, e.Message)
+}
 
 // MaxIOChunk is de publieke bulkgrens van het system-callcontract over het
 // interne LAN. De mailbox draagt sinds slot-ABI v6 geen data-RPC meer.
@@ -466,6 +479,17 @@ func (a *App) ReadAt(path string, off uint64, n int) ([]byte, error) {
 // Dat afval (2MiB per call) hield de GC van de app aan het werk, en op één
 // core kreeg de RX-pomp dan zijn beurt niet (gemeten 04-09).
 func (a *App) ReadInto(path string, off uint64, dst []byte) (int, error) {
+	return a.ReadIntoTimeout(path, off, dst, rpcTimeout)
+}
+
+// ReadIntoTimeout is ReadInto met een deadline van de aanroeper. Een optische
+// drive mag bij zoeken of opspinnen gerust langer doen dan de gewone
+// bestands-timeout. Een verlopen call wordt ook hier niet herhaald: die kan
+// aan de overkant nog lopen.
+func (a *App) ReadIntoTimeout(path string, off uint64, dst []byte, timeout time.Duration) (int, error) {
+	if timeout <= 0 {
+		return 0, fmt.Errorf("system call: read timeout must be positive")
+	}
 	if len(dst) > MaxIOChunk {
 		return 0, fmt.Errorf("system call: read chunk %d exceeds %d", len(dst), MaxIOChunk)
 	}
@@ -476,22 +500,22 @@ func (a *App) ReadInto(path string, off uint64, dst []byte) (int, error) {
 	}
 	// Zelfde retry-regel als systemRPCLocked: één keer opnieuw als het
 	// transport wegviel (kern-flip). Lezen is puur, dus altijd veilig.
-	n, err, transport := a.readIntoOnce(path, off, dst)
+	n, err, transport := a.readIntoOnce(path, off, dst, timeout)
 	if err == nil || !transport {
 		return n, err
 	}
-	n, err, _ = a.readIntoOnce(path, off, dst)
+	n, err, _ = a.readIntoOnce(path, off, dst, timeout)
 	return n, err
 }
 
-func (a *App) readIntoOnce(path string, off uint64, dst []byte) (int, error, bool) {
+func (a *App) readIntoOnce(path string, off uint64, dst []byte, timeout time.Duration) (int, error, bool) {
 	a.seq++
 	req := hopabi.Req{Op: hopabi.OpRead, Path: path, Off: off, N: uint64(len(dst)), Seq: a.seq}
 	c, err := a.systemConnLocked()
 	if err != nil {
 		return 0, err, true
 	}
-	_ = c.SetDeadline(time.Now().Add(rpcTimeout))
+	_ = c.SetDeadline(time.Now().Add(timeout))
 	if err := systemapi.WriteFrame(c, systemapi.KindCall, hopabi.EncodeReq(req)); err != nil {
 		a.closeSystemLocked()
 		return 0, fmt.Errorf("system call write: %w", err), !isTimeout(err)
@@ -532,7 +556,7 @@ func (a *App) readIntoOnce(path string, off uint64, dst []byte) (int, error, boo
 		if resp.Status == hopabi.StatusNoEnt {
 			return 0, fmt.Errorf("system call op %d: %w: %s", req.Op, fs.ErrNotExist, msg), false
 		}
-		return 0, fmt.Errorf("system call op %d: status %d: %s", req.Op, resp.Status, msg), false
+		return 0, &CallError{req.Op, resp.Status, string(msg)}, false
 	}
 	if data > len(dst) {
 		a.closeSystemLocked()

@@ -59,7 +59,7 @@ demo|bench)
 	[ "$MODE" = bench ] && BENCHX=" -X main.benchMode=1"
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "qemuvirt linkcpuinit$GUITAG" -trimpath \
-		-ldflags "-s -w -T 0x40010000 -R 0x1000$BENCHX" -o out/hopos-virt.elf ./cmd/hopos-embed
+		-ldflags "-s -w -T 0x40010000 -R 0x1000 $VERSION_X$BENCHX" -o out/hopos-virt.elf ./cmd/hopos-embed
 	KERNEL=out/hopos-virt.elf
 	FWD="hostfwd=tcp:127.0.0.1:${HOPPORT:-8080}-10.0.2.15:80,hostfwd=tcp:127.0.0.1:${PORTPUB:-18080}-10.0.2.15:8080"
 	echo "hopos-virt.elf ($(du -h out/hopos-virt.elf | cut -f1), incl. app.elf) gebouwd — QEMU -smp $SMP start..." >&2
@@ -73,7 +73,7 @@ agent)
 	[ -n "${HOPCFG:-}" ] && XCFG=" -X 'main.extraCfg=$HOPCFG'"
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "linkcpuinit$GUITAG" -trimpath \
-		-ldflags "-s -w -T 0x40010000 -R 0x1000$XCFG" -o out/hopos-agent.elf ./cmd/hopos
+		-ldflags "-s -w -T 0x40010000 -R 0x1000 $VERSION_X$XCFG" -o out/hopos-agent.elf ./cmd/hopos
 	KERNEL=out/hopos-agent.elf
 	FWD="hostfwd=tcp:127.0.0.1:${AGENTPORT:-8080}-10.0.2.15:8080,hostfwd=tcp:127.0.0.1:${LEADERPORT:-9080}-10.0.2.15:9080,hostfwd=tcp:127.0.0.1:${PORTPUB:-18080}-10.0.2.15:18080"
 	echo "hopos-agent.elf ($(du -h out/hopos-agent.elf | cut -f1)) gebouwd — QEMU -smp $SMP start..." >&2
@@ -93,7 +93,7 @@ flip)
 	for VAR in "0x40010000:out/hopos-flipA.elf" "0x70010000:out/hopos-flipB.elf"; do
 		GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 			"$TAMAGO" build -tags "qemuvirt linkcpuinit$GUITAG" -trimpath \
-			-ldflags "-w -buildid= -T ${VAR%%:*} -R 0x1000$FLIPX" -o "${VAR#*:}" ./cmd/hopos-embed
+			-ldflags "-w -buildid= -T ${VAR%%:*} -R 0x1000 $VERSION_X$FLIPX" -o "${VAR#*:}" ./cmd/hopos-embed
 	done
 	GO111MODULE=off go run "$DIR"/image/mkkernel/*.go -elfreloc -flipabi 2 -o out/flip.img \
 		-elf out/hopos-flipA.elf -elf out/hopos-flipB.elf

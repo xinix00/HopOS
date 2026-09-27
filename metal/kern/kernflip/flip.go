@@ -344,6 +344,13 @@ func flip(bun *Bundle, sum, win, total, stagingOffset uint64) error {
 	if err != nil {
 		return err
 	}
+	// De opslag als laatste: vastleggen en dicht. Wat een app hierna nog
+	// schrijft wacht, en komt bij de nieuwe kern niet aan — die kent alleen
+	// de boom van dit moment. Mislukt de flip verderop, dan gaat hij weer open.
+	thaw, err := freezeStorage()
+	if err != nil {
+		return err
+	}
 	blob, err := encodeHandoff(Handoff{
 		OldBase: uint64(me0), OldSize: ramSize,
 		Window: win, Total: total,
@@ -354,6 +361,7 @@ func flip(bun *Bundle, sum, win, total, stagingOffset uint64) error {
 		Agent:     agentState,
 	}, handoffTail)
 	if err != nil {
+		thaw()
 		return fmt.Errorf("kernflip: %w", err)
 	}
 	stage(stCaptured)

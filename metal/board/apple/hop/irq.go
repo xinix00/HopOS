@@ -34,10 +34,7 @@ const (
 	portMSIMapT8122 = 0x3000 // MSI-kaart t8122/t8132: 16 ingangen, bit 31 = aan
 )
 
-var (
-	nicLine irq.Line
-	nicDev  *tg3.Net
-)
+var nicLine irq.Line
 
 func wireNICIRQ(nic *tg3.Net) error {
 	t, ok := apple.ADT()
@@ -69,7 +66,12 @@ func wireNICIRQ(nic *tg3.Net) error {
 	if doorbell == 0 || pb == 0 || first == 0 {
 		return fmt.Errorf("msi facts incomplete (doorbell %#x port base %#x first irq %d)", doorbell, pb, first)
 	}
-	irq.Use(ctrl, idle.ServeIRQ)
+	// De IRQ-deur (cpu/idle/irqdoor): de vector zet alleen een vlag, de
+	// governor wekt de ISR-goroutine. Tot 21-09 liep dit board op tamago's
+	// os/signal-relay ín de exception-context, en die verloor onder load de
+	// heropening van het I-masker: de lijn bleef bij de AIC pending zonder
+	// dat er nog een exception kwam (L83 p42). Zelfde deur als op de O6N.
+	irq.Use(ctrl, idle.ServeIRQFlag)
 
 	// 1. Het doel: welk 4-bit target brengt een IRQ bij DEZE core? Software-IRQ
 	// op de eerste MSI-lijn, per kandidaat, en kijken of Fired oploopt.
@@ -158,20 +160,19 @@ func wireNICIRQ(nic *tg3.Net) error {
 	}
 	ack := nic.AckIRQ // mailbox 1: INTA# valt, de poortlijn zakt mee
 	line = irq.Line{ID: found, Ack: ack}
-	nicLine, nicDev = line, nic
+	nicLine = line
 	fmt.Printf("irq: NIC INTx on AIC irq %d (root port %d) routed to target %d — RX wakes on the interrupt\n", found, apple.EthPortDev, target)
 	return nil
 }
 
 // WaitNIC (board.NICInterrupter): wacht op de NIC-lijn, of val terug op de
-// 300µs-poll zolang er geen bedrade lijn is. De rearm ná de pomp-ronde, zoals
-// op de O6N.
+// 300µs-poll zolang er geen bedrade lijn is. Geen rearm hier: dat doet de
+// RX-pomp zelf op zijn slaapmoment (hopnet.rxLoop, netdev.IRQRearmer), ná
+// een lege ronde — zoals op de O6N.
 func (machine) WaitNIC(max time.Duration) bool {
 	if nicLine.ID == 0 {
 		time.Sleep(300 * time.Microsecond)
 		return false
 	}
-	// Geen rearm hier: dat doet de RX-pomp zelf op zijn slaapmoment
-	// (hopnet.rxLoop, netdev.IRQRearmer), ná een lege ronde.
 	return irq.Wait(nicLine, max)
 }

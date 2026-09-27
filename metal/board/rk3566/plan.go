@@ -21,7 +21,9 @@ import (
 //	                    core die met MMU uit binnenkomt, zonder cache-onderhoud
 //	0x06300000     1MB  de levenstekenwoorden van de cores (WakeBase) — óók
 //	                    buiten het venster, en dat is gemeten: binnenin bleef een
-//	                    gewekte core stil (zie park.go)
+//	                    gewekte core stil (zie park.go); in hetzelfde blok de
+//	                    vluchtrecorder (+0x1000) en de console-zwarte-doos
+//	                    (+0x8000, 32KB), die een reset moeten overleven
 //	0x06400000     8MB  NIC-DMA (NetDMAPA) — idem ongecachet, voor de GMAC
 //	0x06C00000     2MB  USB-DMA (USBDMAPA) — xHCI-ringen/contexten, idem
 //	0x07000000     8MB  framebuffer (fbPA) — een RAM-buffer, geen scanout: dit
@@ -105,6 +107,9 @@ func SetupPlan() {
 		BootScratchPA: BootScratch,
 		NetDMAPA:      netDMAPA,
 		USBDMAPA:      usbDMAPA,
+		FlipScratchPA: FlipScratch,
+		BlackBoxPA:    BlackBox,
+		BlackBoxSize:  BlackBoxSize,
 		RAMBase:       0x200000, // gemeten: waar het DRAM van dit bord begint
 	}
 	// De pool uit de gemeten banken, met onze eigen regio's eruit gesneden. De

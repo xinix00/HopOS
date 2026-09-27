@@ -37,11 +37,14 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 #    Twee smaken per board: kaal
 #    (headless) en gui (metal/gui: HVS-dumptool + :9091-debug + fb-grant).
 #    Default gui; GUI=0 bouwt de kale smaak. (Zelfde knop in alle imagescripts.)
+#    MEDIA=1 bouwt de media-smaak (gui + disc + codec; zet GUI vast op 1).
+[ "${MEDIA:-0}" = 1 ] && GUI=1
 GUITAG=""
 [ "${GUI:-1}" = 1 ] && GUITAG=" gui"
+[ "${MEDIA:-0}" = 1 ] && GUITAG="$GUITAG media"
 GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags "rpi5 linkcpuinit$GUITAG" -trimpath \
-	-ldflags "-s -w -T 0x90000 -R 0x1000" -o out/agent5.elf ./cmd/hopos
+	-ldflags "-s -w -T 0x90000 -R 0x1000 $VERSION_X" -o out/agent5.elf ./cmd/hopos
 
 # 3. ELF → raw image (Circle-recept, mkkernel).
 cd "$DIR"
@@ -76,22 +79,14 @@ framebuffer_ignore_alpha=1
 initramfs hopos.cfg 0x0f200000
 EOF
 
-# config.txt laadt hopos.cfg verplicht (`initramfs hopos.cfg`) en dát bestand
-# staat in .gitignore (het bevat de API-key en de S3-geheimen). Een verse clone
-# heeft hem dus niet — en zonder config boot de node zonder API-auth-sleutel en
-# zonder init-jobs. Luid falen mét het recept, i.p.v. een stick afleveren die
-# stil half werkt.
-if [ ! -f "$DIR/sd-rpi5/hopos.cfg" ]; then
-	echo "" >&2
-	echo "FOUT: sd-rpi5/hopos.cfg ontbreekt — config.txt laadt hem verplicht." >&2
-	echo "  cp image/hopos-gui.cfg sd-rpi5/hopos.cfg" >&2
-	echo "  \$EDITOR sd-rpi5/hopos.cfg   # minimaal hopos.apikey zetten" >&2
-	echo "" >&2
-	exit 1
-fi
+# config.txt laadt hopos.cfg verplicht (`initramfs hopos.cfg`). Dat is een van
+# de TWEE configs (image/hopos-gui.cfg of image/hopos-headless.cfg, via GUI=):
+# elke node draait dezelfde waarden, er bestaat geen persoonlijke config per board.
+CARDCFG="$DIR/image/hopos-headless.cfg"
+[ "${GUI:-1}" = 1 ] && CARDCFG="$DIR/image/hopos-gui.cfg"
 
-echo "sd-rpi5/hop-agent5.img ($(du -h sd-rpi5/hop-agent5.img | cut -f1)) + config.txt + hopos.cfg klaar." >&2
-echo "flash: cp sd-rpi5/hop-agent5.img sd-rpi5/config.txt sd-rpi5/hopos.cfg /Volumes/bootfs/ && sync && diskutil eject" >&2
+echo "sd-rpi5/hop-agent5.img ($(du -h sd-rpi5/hop-agent5.img | cut -f1)) + config.txt klaar, config = $(basename "$CARDCFG")." >&2
+echo "flash: cp sd-rpi5/hop-agent5.img sd-rpi5/config.txt /Volumes/bootfs/ && cp $CARDCFG /Volumes/bootfs/hopos.cfg && sync && diskutil eject" >&2
 
 # 5. Het complete, dd-bare kaart-image (image/mkcard — zelfde vorm als de
 #    LicheeRV en de Radxa): MBR + FAT16 met de firmware er al op, dus gunzip|dd
@@ -100,7 +95,7 @@ echo "flash: cp sd-rpi5/hop-agent5.img sd-rpi5/config.txt sd-rpi5/hopos.cfg /Vol
 #    komt uit sd-rpi5/ (gitignored; herkomst in sd-rpi5/LEESMIJ.txt).
 #    Ontbreekt er iets, dan slaan we dit LUID over en is de cp-flow hierboven
 #    gewoon compleet. De config in het image is ALTIJD een template (of
-#    CFG=...): nooit sd-rpi5/hopos.cfg, daar wonen de echte sleutels.
+#    CFG=...), dezelfde als het handmatige kaart-pad hierboven.
 rm -f metal/out/hopos-rpi5.img
 FW_MISSING=""
 for f in bcm2712-rpi-5-b.dtb overlays/bcm2712d0.dtbo; do

@@ -198,7 +198,12 @@ const (
 	rxLast       = 1 << 28 // RDES3_LAST_DESCRIPTOR
 	rxFirst      = 1 << 29 // RDES3_FIRST_DESCRIPTOR
 	rxBuf1Valid  = 1 << 24 // RDES3_BUFFER1_VALID_ADDR (bij teruggeven)
-	rxOwn        = 1 << 31 // RDES3_OWN
+	rxIOC        = 1 << 30 // RDES3_INT_ON_COMPLETION_EN: zonder dit bit vult de
+	// DMA de descriptor netjes af zonder RI te zetten — de lijn blijft dan stil
+	// terwijl het verkeer gewoon doorloopt (Radxa 20-09: 200 MB binnen, 0
+	// claims, status alleen ERI). Linux zet hem bij élke teruggave, behalve
+	// wanneer de RX-interrupt bewust uit staat (dwmac4_set_rx_owner).
+	rxOwn = 1 << 31 // RDES3_OWN
 
 	fcsLen = 4 // de MAC meldt de lengte MÉT CRC, zie rxLen
 )
@@ -210,8 +215,13 @@ const (
 // pauseframes weg in plaats van stil te verliezen (RBU in Diag maakt het
 // zichtbaar).
 const (
-	numRx   = 64
-	numTx   = 32
+	// 256 RX-descriptors: een gepolde ontvanger (300 µs) heeft de ring als
+	// buffer tussen twee pomprondes, en 64 × 1,5 KB is 0,8 ms op 1 Gbit. De
+	// igb ging van 5 naar 36 MB/s met 64 → 256 (L83, 19-09); de Radxa zat op
+	// 15,9 MB/s inbound tegen 118 op de borden met een grote ring (20-09).
+	// 256 + 64 descriptors met buffers = 0,5 MB van de 8 MB net-DMA (rk3566).
+	numRx   = 256
+	numTx   = 64
 	bufSize = 1536 // vier-voud, ruim boven de 1518 van een MTU-1500-frame
 
 	// maxFrame is wat wij versturen; de TX-lengtevelden zijn hier ruim (14/15
@@ -224,6 +234,12 @@ const (
 
 	// NeedBytes is de DMA-regio die deze driver nodig heeft. Boards reserveren
 	// dit in hun plan (Plan.NetDMAPA / NetDMASize).
+	//
+	// GEPROBEERD EN TERUGGEDRAAID 21-09: de buffers op eigen 2MB-blokken zetten
+	// zodat het board de zendkant gecached kan mappen, zoals de gem op de Pi 5
+	// (L83 p55). Daar wint het; hier niet — met Normal-NC op de hele regio doet
+	// dit silicium al 56 MB/s in en 99 uit, en gecached zenden veranderde daar
+	// niets aan. Dus geen tweede indeling voor een winst die er niet is.
 	NeedBytes = descBytes + bufBytes
 )
 
@@ -253,6 +269,50 @@ func (n *Net) wr(off uintptr, v uint32) { dev.Write32(n.Base+off, v) }
 
 func (n *Net) chrd(off uintptr) uint32    { return n.rd(dmaChanBase + off) }
 func (n *Net) chwr(off uintptr, v uint32) { n.wr(dmaChanBase+off, v) }
+
+// De RX-interrupt van kanaal 0. Twee bit-indelingen bestaan er voor het
+// enable-register en dát is precies de valkuil (dwmac4_dma.h): tot core 4.00
+// is NIE bit 16, vanaf 4.10 is het bit 15 (DMA_CHAN_INTR_ENA_NIE_4_10) —
+// Linux kiest daarom een andere ops-tabel per versie. Dit silicium is een
+// 4.20a (rk356x-base.dtsi "snps,dwmac-4.20a") en dus de 4.10-indeling.
+// GEMETEN 20-09 op de Radxa: met bit 16 las het register 0x40 terug (alleen
+// RIE bleef staan), stond de lijn nooit hoog en claimde de node 0 interrupts
+// per seconde terwijl er 200 MB binnenkwam.
+//
+// Zonder NIE geen lijn: RI zet alleen het bit, de summary (NIS) trekt de
+// lijn. Status is W1C met dezelfde nummering in beide indelingen (RI = 6,
+// NIS = 15). De lijn is level (GIC_SPI 32 LEVEL_HIGH), dus ack = masker
+// dicht én status gewist, rearm = status gewist en masker open — het
+// rtl8126-ritme.
+const (
+	chanIntrNIE = 1 << 15 // 4.10+; op een 4.00-core zou dit AIE zijn
+	chanIntrRIE = 1 << 6
+	chanStatRI  = 1 << 6
+	chanStatNIS = 1 << 15
+)
+
+// EnableIRQ opent de RX-interrupt van kanaal 0.
+func (n *Net) EnableIRQ() {
+	n.chwr(chanStatus, chanStatRI|chanStatNIS)
+	n.chwr(chanIntrEna, chanIntrNIE|chanIntrRIE)
+}
+
+// AckIRQ laat de lijn los: masker dicht, status gewist.
+func (n *Net) AckIRQ() {
+	n.chwr(chanIntrEna, 0)
+	n.chwr(chanStatus, chanStatRI|chanStatNIS)
+}
+
+// RearmIRQ: status gewist, masker open (de pomp doet hierna nog één ronde).
+func (n *Net) RearmIRQ() {
+	n.chwr(chanStatus, chanStatRI|chanStatNIS)
+	n.chwr(chanIntrEna, chanIntrNIE|chanIntrRIE)
+}
+
+// IRQDiag: kanaalstatus, interrupt-enable en de DMA-status (stats-vraag).
+func (n *Net) IRQDiag() (status, intrEna, dmaStatus uint32) {
+	return n.chrd(chanStatus), n.chrd(chanIntrEna), n.rd(regDMAStatus)
+}
 
 // Version geeft de rauwe VERSION-register-inhoud: snpsver in [7:0]. Het eerste
 // dat een bring-up hoort te lezen — een blok waarvan de APB-klok dicht staat
@@ -448,7 +508,7 @@ func (n *Net) giveRx(d uintptr, i int) {
 	dev.Write32(d+4, uint32(b>>32))
 	dev.Write32(d+8, 0) // geen tweede buffer
 	dev.MB()
-	dev.Write32(d+12, rxOwn|rxBuf1Valid) // OWN als laatste
+	dev.Write32(d+12, rxOwn|rxBuf1Valid|rxIOC) // OWN als laatste
 }
 
 // initRings legt beide ringen en hun buffers in de DMA-regio. Geen chaining en
@@ -547,6 +607,12 @@ func (n *Net) Receive(buf []byte) (int, error) {
 	if sts&rxOwn != 0 {
 		return 0, nil // nog van de DMA
 	}
+	// OWN is vrij — pas nú de rest lezen. Sinds de DMA-regio Normal-NC is
+	// (board/rk3566/hop/net.go, L83 p47) mag de CPU de bufferloads van
+	// CopyOut vóór de OWN-load uitvoeren: een control dependency ordent
+	// load→store, niet load→load. Onder Device-nGnRnE was elke load strikt
+	// geordend en viel dit niet op. Linux: dma_rmb() op dezelfde plek.
+	dev.MB()
 
 	length := 0
 	switch {

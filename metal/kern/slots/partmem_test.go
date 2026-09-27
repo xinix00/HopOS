@@ -370,3 +370,40 @@ func TestBorrowKernelDoesNotDisplaceAppInColdWindow(t *testing.T) {
 		t.Fatal("flip overlapped resident app")
 	}
 }
+
+// De codec-arena komt uit dezelfde pool als de app-partities. Dat moet ook:
+// het is hetzelfde DRAM, en twee allocators op één pool is precies de bug die
+// 31-08 twee slots op één partitie zette. Deze test bewaakt dat de reservering
+// en een partitie elkaar nooit raken, en dat de gerapporteerde capaciteit
+// meedaalt — een node die zijn videocodec aanzet heeft écht minder ruimte.
+func TestDeviceReservationDeeltDePoolMetDeSlots(t *testing.T) {
+	poolReset(t, []layout.Region{{Base: 0x80000000, Size: 512 << 20}})
+	before := PoolBytes()
+
+	arena, err := ReserveDevice(256 << 20)
+	if err != nil {
+		t.Fatalf("arena: %v", err)
+	}
+	if arena&(part2M-1) != 0 {
+		t.Errorf("arena %#x is niet 2MB-uitgelijnd", arena)
+	}
+	if got := PoolBytes(); got != before-(256<<20) {
+		t.Errorf("capaciteit %d MB, verwacht %d MB", got>>20, (before-(256<<20))>>20)
+	}
+
+	base, size, err := partAlloc(1, 128<<20)
+	if err != nil {
+		t.Fatalf("partitie naast de arena: %v", err)
+	}
+	if base < arena+(256<<20) && arena < base+size {
+		t.Errorf("partitie %#x+%#x overlapt de arena %#x+%#x", base, size, arena, 256<<20)
+	}
+
+	// En wat niet past wordt geweigerd zonder de pool aan te raken.
+	if _, err := ReserveDevice(1 << 30); err == nil {
+		t.Error("een gigabyte kwam uit een pool van een halve")
+	}
+	if _, _, err := partAlloc(2, 64<<20); err != nil {
+		t.Errorf("pool raakte beschadigd door de geweigerde reservering: %v", err)
+	}
+}

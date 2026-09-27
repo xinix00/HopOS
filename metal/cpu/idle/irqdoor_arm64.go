@@ -11,10 +11,13 @@ import (
 // De IRQ-deur: een interrupt is een wek-signaal, geen plek om runtime-code
 // te draaien. tamago's handleInterrupt roept os/signal.Relay aan ín de
 // exception-context, op de stack van wat er onderbroken werd — op de M4 gaf
-// dat de findTimer-crash (toolchain-patch 0003) en op de Ampere een stille
+// dat de findTimer-crash (toolchain-patch 0003), op de Ampere een stille
 // hang binnen seconden na de eerste NIC-interrupts (19-09, L83: zes flips
 // op rij, met de watchdog uit en de UART eraan: geen exception, geen regel,
-// gewoon weg). Dus hier het HopOS-contract: de vector (irqvec_arm64.s) zet
+// gewoon weg), en op de M4 onder load een verloren heropening van het
+// I-masker: de NIC-lijn bleef bij de AIC pending, geen exception meer, de
+// pomp op zijn 10 ms-vangrail (21-09, L83 p42). Dus op élk arm64-board het
+// HopOS-contract: de vector (irqvec_arm64.s) zet
 // alléén irqFlag en keert terug met I gemaskeerd; de governor ziet de vlag
 // in zijn ronde — dezelfde poort als rxDoor/workDoor, alleen vanuit de
 // scheduler-idle — en wekt de ISR-goroutine, die claimt, ackt en I weer
@@ -31,6 +34,10 @@ var IRQWoken atomic.Uint64
 
 func hopIRQVector()
 func syncVector(addr uintptr)
+
+// irqEnable: zie door_arm64.s — alleen I open, F dicht (op Apple is F van de
+// timer-FIQ die WFI wekt zonder ooit genomen te worden).
+func irqEnable()
 
 //go:linkname ramStart runtime/goos.RamStart
 var ramStart uint

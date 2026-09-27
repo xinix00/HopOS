@@ -10,6 +10,7 @@ import (
 	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 	"github.com/xinix00/HopOS/metal/v2/board"
 	"github.com/xinix00/HopOS/metal/v2/board/rk3566"
+	"github.com/xinix00/HopOS/metal/v2/cpu/memattr"
 	"github.com/xinix00/HopOS/metal/v2/driver/nic/dwmac4"
 	"github.com/xinix00/HopOS/metal/v2/driver/nic/mdio"
 	"github.com/xinix00/HopOS/metal/v2/net/nodemac"
@@ -166,6 +167,16 @@ func (machine) ProbeNIC() (netdev.Device, net.HardwareAddr, error) {
 
 	// 8. DMA. De ringen liggen in de plan-regio: buiten élke RAM-declaratie en
 	//    dus device-gemapt → ongecachet en coherent zonder cache-onderhoud.
+	//    Device-gemapt is alleen duur om te LEZEN: elke load is een aparte,
+	//    strikt geordende transactie, en de ontvangstkant kopieert daar elk
+	//    frame uit. Normal-NC houdt dezelfde coherentie (ongecachet, geen
+	//    onderhoud) maar laat de bus bursten — dat was op de M4 het verschil
+	//    tussen 27 en 116 MB/s (03-09) en hier tussen 17 en wat de meting
+	//    hieronder zegt. Mislukt het, dan blijft de oude mapping staan en
+	//    verliest alleen de doorvoer.
+	if err := memattr.NormalNC(layout.NetDMAPA(), netDMASize); err != nil {
+		fmt.Printf("net: NIC DMA region stays device-mapped (%v) — receive throughput is bounded by uncached reads\n", err)
+	}
 	if err := nic.Init(layout.NetDMAPA(), netDMASize, speed, fd); err != nil {
 		return nil, nil, err
 	}
@@ -176,6 +187,11 @@ func (machine) ProbeNIC() (netdev.Device, net.HardwareAddr, error) {
 	l, err := leandhcp.Acquire(nic, nic.MAC, 15*time.Second)
 	if err != nil {
 		return nil, nil, fmt.Errorf("dhcp: %w — link %dMbit fd=%v, %s", err, speed, fd, nic.Diag())
+	}
+	// De NIC-interrupt, ná de lease (DMA beide kanten op bewezen). Mislukt
+	// een stap, dan pollt de node zoals vroeger — met de reden op de console.
+	if err := wireNICIRQ(nic); err != nil {
+		fmt.Printf("irq: NIC interrupt not wired (%v) — RX stays polled\n", err)
 	}
 	lease = l
 

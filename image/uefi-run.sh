@@ -100,10 +100,14 @@ esac
 cd "$DIR/metal"
 mkdir -p out
 
-# Twee smaken: kaal (headless) en gui (metal/gui + fb-grant). Default gui;
-# GUI=0 bouwt de kale smaak. (Zelfde knop in alle imagescripts.)
+# Drie smaken: kaal (headless), gui (metal/gui + fb-grant) en media (gui +
+# VPU + disc + codec). Default gui; GUI=0 bouwt de kale smaak, MEDIA=1 de
+# media-smaak — media ís gui plus, dus MEDIA=1 zet GUI vast op 1. (Zelfde
+# knoppen in alle imagescripts.)
+[ "${MEDIA:-0}" = 1 ] && GUI=1
 TAGS="$BOARD linkcpuinit"
 [ "${GUI:-1}" = 1 ] && TAGS="$TAGS gui"
+[ "${MEDIA:-0}" = 1 ] && TAGS="$TAGS media"
 
 # Geen bouwvlaggen: VHE en de switcher-variant bepaalt het board via zijn
 # build-tag (cpu/el2/el2_*.s, board/uefi/init_*.s).
@@ -134,7 +138,7 @@ for base in $SLOTS; do
 	out="hopos-$BOARD-$MODE-$base.elf"
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "$TAGS" -trimpath \
-		-ldflags "-buildid= -w -T $text -R 0x1000 ${LDX:-}" -o "out/$out" "$PKG" &
+		-ldflags "-buildid= -w -T $text -R 0x1000 $VERSION_X ${LDX:-}" -o "out/$out" "$PKG" &
 	PIDS="$PIDS $!"
 	ELFS="$ELFS -elf metal/out/$out"
 done

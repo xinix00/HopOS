@@ -269,9 +269,17 @@ func (Machine) ProbeNIC() (netdev.Device, net.HardwareAddr, error) {
 	lease = l
 	// De NIC-interrupt, ná een geslaagde probe (een retry maakt een nieuwe
 	// driver-instantie; de bedrading hoort bij de laatste) en eenmalig.
-	if ni, ok := nic.(NICInterrupt); ok && nicLine.ID == 0 {
-		bus := nicStartBus
-		irqOnce.Do(func() { setupNICIRQ(ni, bus) })
+	if ni, ok := nic.(NICInterrupt); ok {
+		if nicLine.ID == 0 {
+			bus := nicStartBus
+			irqOnce.Do(func() { setupNICIRQ(ni, bus) })
+		}
+	} else {
+		// Geen interruptpad in deze driver (de igb van de Ampere: INTx is daar
+		// fataal op SoC-niveau, dus die code is 20-09 uit de boom). Zeg het,
+		// want stil overslaan liet de node "RX wakes on the NIC interrupt"
+		// melden terwijl hij pollde — twee keer op één avond verkeerd gelezen.
+		fmt.Println("irq: this NIC driver has no interrupt path — RX stays polled")
 	}
 	return nic, net.HardwareAddr(mac[:]), nil
 }

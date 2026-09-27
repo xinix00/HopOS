@@ -33,6 +33,11 @@ var fsys *hopfs.FS
 // UseFS koppelt de bestandslaag (eenmalig bij boot, vóór de eerste Start).
 func UseFS(f *hopfs.FS) { fsys = f }
 
+// FS geeft het volume dat HOP zelf gebruikt (nil als er geen opslag is).
+// Voor diensten van HOP die bij bestanden moeten: de codec leest er zijn
+// firmware-blobs mee.
+func FS() *hopfs.FS { return fsys }
+
 // cleanAbs normaliseert een app-pad naar "/a/b"-vorm; ".."/lege paden zijn
 // een fout (de app heeft buiten zijn zicht niets te zoeken).
 func cleanAbs(p string) (string, error) {
@@ -159,6 +164,20 @@ func (s *servicer) handleWithLimit(payload []byte, maxChunk int, work *[]byte) [
 	req, err := hopabi.DecodeReq(payload)
 	if err != nil {
 		return hopabi.EncodeResp(hopabi.Resp{Status: hopabi.StatusError, Data: []byte(err.Error())})
+	}
+
+	// De codec-ops gaan niet over opslag en hebben dus ook geen volume nodig:
+	// ze wijzen naar geheugen dat de app zelf al heeft.
+	if req.Op >= hopabi.OpCodecOpen && req.Op <= hopabi.OpCodecClose {
+		return s.codecServe(req)
+	}
+
+	// /devices is de namespace van de node zelf: geen bestanden op het volume,
+	// maar apparaten die als bestand lezen. Vóór de opslaglaag, want een node
+	// zonder volume kan wél een drive hebben — en een taak die een apparaat
+	// mount hoort niet te horen dat er geen NVMe is (devices.go).
+	if rp, err := s.resolve(req.Path); err == nil && isDevicePath(rp) {
+		return s.deviceServe(req, rp, maxChunk, work)
 	}
 
 	if fsys == nil {

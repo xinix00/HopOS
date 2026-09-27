@@ -3,6 +3,7 @@
 package xhci
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -18,6 +19,13 @@ import (
 // is geen GIC-pad en een toetsenbord is met 8ms-intervallen ruim binnen wat
 // pollen aankan. De interrupter wordt wél opgezet (de event-ring hángt eraan),
 // alleen staat IE uit en leest niemand IMAN.
+//
+// ÉÉN EIGENAAR. Niets in dit package is goroutine-veilig, en dat is de
+// bedoeling: een HC en al zijn Devices worden door precies één goroutine
+// bediend (usbin.Manager.Run). Wie verder iets van de bus wil — een drive die
+// een sector leest — vraagt het aan die goroutine. Daarom is bulk hier
+// asynchroon (StartBulk/Poll): de eigenaar moet tussen twee pakketten van een
+// drive door gewoon het toetsenbord kunnen blijven lezen.
 
 // maxDevices is hoeveel apparaten we tegelijk geadresseerd kunnen hebben. De
 // controller kan er meestal 32 of 64; wij zetten CONFIG op dit getal en leggen
@@ -53,6 +61,14 @@ const pendingCap = 64
 // die we hebben, want deze regio is 2MB voor een toetsenbord.
 type arena struct{ cur, end uintptr }
 
+// left is wat er nog vrij is: de bulk-buffer krijgt de rest (host.go, Start).
+func (a *arena) left() uintptr {
+	if a.cur >= a.end {
+		return 0
+	}
+	return a.end - a.cur
+}
+
 func (a *arena) alloc(n, align uintptr) (uintptr, error) {
 	p := (a.cur + align - 1) &^ (align - 1)
 	if align == 0 || align&(align-1) != 0 || a.cur > ^uintptr(0)-(align-1) || p > a.end || n > a.end-p {
@@ -75,6 +91,18 @@ type slotRes struct {
 	inUse       bool    // Enable Slot bevestigd, Disable Slot nog niet bevestigd
 	quarantined bool    // Disable Slot faalde: ownership onbekend, reset vereist
 }
+
+// De bulk-bouncebuffer (bulk.go): minstens 8KB om een SCSI-antwoord plus een
+// paar sectoren te dragen.
+const (
+	bulkBufMin = 8 << 10
+	// GEMETEN 22-09: een Blu-ray door de WebDAV-share haalde met 64KB per
+	// opdracht 3,6 MB/s, en dat is ongeveer wat de drive op zijn laagste
+	// toerental levert — hij gaat pas sneller draaien als de host in grotere
+	// happen leest. Dus zo groot als het venster toelaat, tot een kwart MB;
+	// daarboven wint een optische drive niets meer terug.
+	bulkBufMax = 256 << 10
+)
 
 // Verdeling van de 4KB werkbuffer per slot. Control-data en het HID-rapport
 // mogen elkaar niet raken: de interrupt-endpoint staat ARMED terwijl wij een
@@ -208,6 +236,32 @@ func (h *HC) Start(dmaBase, dmaSize uintptr) error {
 	h.write64(h.evt.ir+irERDP, h.evt.bus|erdpEHB)
 	h.write64(h.evt.ir+irERSTBA, uint64(erst)+h.BusOff)
 	dev.Write32(h.evt.ir+irIMOD, 0)
+
+	// Wat er na alle vaste structuren over is, wordt de bulk-bouncebuffer:
+	// één per controller, want BOT is per definitie serieel (commando, data,
+	// status). Begrensd op bulkBufMax — een optische drive leest het liefst in
+	// happen van tientallen kilobytes en daarboven wint het niets meer terug.
+	// Blijft er te weinig over, dan draagt deze controller alleen HID en
+	// weigert elke bulk-transfer met een fout: dit is geen reden om de
+	// controller niet te starten.
+	// Uitlijnen op 64KB: een TRB-buffer mag die grens niet kruisen, en met een
+	// uitgelijnd begin valt elk stuk van trbMax er precies binnen. Wat er te
+	// vragen valt wordt dus geteld vanaf het UITGELIJNDE begin en niet vanaf de
+	// huidige stand — alloc rondt zelf omhoog, dus vragen om precies wat er
+	// over is mislukt, en een vaste reserve van 64KB weggooien kost net zo
+	// hard. Dat kostte 22-09 twee flips: eerst geen buffer, daarna 80KB waar er
+	// 144 lag.
+	if start := (h.arena.cur + trbMax - 1) &^ (trbMax - 1); start < h.arena.end {
+		want := (h.arena.end - start) &^ (h.page - 1)
+		if want > bulkBufMax {
+			want = bulkBufMax
+		}
+		if want >= bulkBufMin {
+			if buf, err := h.arena.alloc(want, trbMax); err == nil {
+				h.bulkBuf, h.bulkSize = buf, want
+			}
+		}
+	}
 
 	dev.MB()
 	dev.Write32(h.op+opUSBCmd, dev.Read32(h.op+opUSBCmd)|cmdRun)
@@ -369,6 +423,22 @@ func (h *HC) pump() {
 	}
 }
 
+// dropRing gooit wachtende transfer-events weg die naar deze ring van dit slot
+// wijzen. Na een afgebroken transfer kan de controller er nog een hebben
+// neergezet — de echte completion, of het Stopped-event van Stop Endpoint — en
+// niemand haalt dat ooit nog op; in de wachtrij zou het alleen plaats innemen.
+func (h *HC) dropRing(slot int, r *ring) {
+	lo, hi := r.bus, r.bus+uint64(r.n)*16
+	keep := h.pending[:0]
+	for _, ev := range h.pending {
+		if ev.kind == trbTransferEvt && ev.slot == slot && ev.ptr >= lo && ev.ptr < hi {
+			continue
+		}
+		keep = append(keep, ev)
+	}
+	h.pending = keep
+}
+
 // take pakt het eerste event uit de wachtrij waarvoor match waar is.
 func (h *HC) take(match func(event) bool) (event, bool) {
 	for i, ev := range h.pending {
@@ -380,19 +450,39 @@ func (h *HC) take(match func(event) bool) (event, bool) {
 	return event{}, false
 }
 
+// errTimeout: het verwachte event kwam niet binnen de tijd. Wat dat betekent
+// hangt af van wie wachtte: een commando zonder antwoord is een controller die
+// niet meer luistert (quarantaine), een transfer zonder antwoord is meestal
+// alleen een apparaat dat hapert (die endpoint resetten, zie resetEP).
+var errTimeout = errors.New("timeout")
+
 // waitEvent pompt tot er een event langskomt dat aan match voldoet. Andere
 // events blijven in de wachtrij staan — een toetsaanslag die binnenkomt terwijl
 // we op een commando wachten mag niet verdwijnen.
 func (h *HC) waitEvent(match func(event) bool, d time.Duration, what string) (event, error) {
 	deadline := time.Now().Add(d)
+	// Eerst fijnmazig kijken, daarna rustig. Een toetsenbord kan een
+	// milliseconde missen, maar bulk-opslag niet: één SCSI-opdracht is drie
+	// transfers, dus drie keer wachten, en bij 64KB per opdracht kost een
+	// vaste milliseconde per wacht al meer dan de drive zelf. GEMETEN 22-09:
+	// een Blu-ray door de share kwam op 2,7 MB/s en dat is onder wat de
+	// drive kan. De eerste twintig rondes op 100µs kosten samen 2ms en dekken
+	// het normale geval; wat daarna nog wacht is een trage of afwezige
+	// reactie, en dáár is een milliseconde precies goed.
+	fine := 20
 	for {
 		h.pump()
 		if ev, ok := h.take(match); ok {
 			return ev, nil
 		}
 		if time.Now().After(deadline) {
-			return event{}, h.quarantine(fmt.Errorf("geen antwoord op %s binnen %v (USBSTS %#08x)",
-				what, d, dev.Read32(h.op+opUSBSts)))
+			return event{}, fmt.Errorf("xhci %s: geen antwoord op %s binnen %v (USBSTS %#08x): %w",
+				h.Name, what, d, dev.Read32(h.op+opUSBSts), errTimeout)
+		}
+		if fine > 0 {
+			fine--
+			time.Sleep(100 * time.Microsecond)
+			continue
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -411,7 +501,9 @@ func (h *HC) command(p0, p1, p2, ctrl uint32, what string) (event, error) {
 		return e.kind == trbCmdCompEvt && e.ptr == trb
 	}, time.Second, what)
 	if err != nil {
-		return ev, err
+		// De command ring is van de controller zelf: zwijgt hij daarop, dan
+		// weet niemand meer wat hij nog uitvoert of welke slots hij bezit.
+		return ev, h.quarantine(err)
 	}
 	if ev.comp != ccSuccess {
 		return ev, fmt.Errorf("xhci %s: %s afgewezen — %s (%d)", h.Name, what, compName(ev.comp), ev.comp)

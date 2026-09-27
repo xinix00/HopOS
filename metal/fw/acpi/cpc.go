@@ -16,6 +16,36 @@ type CPC struct {
 	Lowest     uint32 // [5] LowestPerformance
 	DesiredReg uint64 // [7] DesiredPerformanceRegister: SystemMemory-adres (0 = geen/andere ruimte)
 	DesiredBit uint8  // registerbreedte in bits (32 op de O6N)
+
+	// De perf-schaal is abstract (ACPI 8.4.6.1.1): pas LowestFrequency [21]
+	// en NominalFrequency [22] (MHz, revisie 3) maken er een klok van. 0 =
+	// het package draagt ze niet.
+	LowestMHz, NominalMHz uint32
+	// [13] Reference- en [14] DeliveredPerformanceCounter: wat de hardware
+	// wérkelijk levert (Linux' cppc_cpufreq leest ze voor scaling_cur_freq).
+	// Alleen de ruimte en het adres, als diagnose: 0x7f = FFH (op Arm: de
+	// AMU-systeemregisters), 0 = SystemMemory.
+	DeliveredSpace, ReferenceSpace uint8
+	DeliveredAddr, ReferenceAddr   uint64
+}
+
+// MHz rekent een perf-waarde om naar een klok via Nominal ↔ NominalMHz; 0
+// als het package geen frequenties draagt.
+func (c CPC) MHz(perf uint32) uint32 {
+	if c.Nominal == 0 || c.NominalMHz == 0 {
+		return 0
+	}
+	return uint32(uint64(perf) * uint64(c.NominalMHz) / uint64(c.Nominal))
+}
+
+// Perf is de omgekeerde van MHz: de perf-waarde bij een klok, naar beneden
+// afgerond. Draagt het package geen frequenties, dan is er niets om te rekenen
+// en is mhz al een perf-waarde (ok=false).
+func (c CPC) Perf(mhz uint32) (perf uint32, ok bool) {
+	if c.Nominal == 0 || c.NominalMHz == 0 {
+		return mhz, false
+	}
+	return uint32(uint64(mhz) * uint64(c.Nominal) / uint64(c.NominalMHz)), true
 }
 
 // CPCs zoekt álle _CPC-objecten in de DSDT en SSDT's. Leeg = geen CPPC (of
@@ -217,11 +247,19 @@ func parseCPCPackage(b []byte, i int) (CPC, bool) {
 	if d := elems[7]; d.isReg && d.space == gasSystemMem && d.addr != 0 {
 		c.DesiredReg, c.DesiredBit = d.addr, d.bits
 	}
+	if len(elems) > 14 {
+		c.ReferenceSpace, c.ReferenceAddr = elems[13].space, elems[13].addr
+		c.DeliveredSpace, c.DeliveredAddr = elems[14].space, elems[14].addr
+	}
+	if len(elems) > 22 {
+		c.LowestMHz, c.NominalMHz = pick(21), pick(22)
+	}
 	return c, true
 }
 
 // String is de diagnose-regel van één _CPC.
 func (c CPC) String() string {
-	return fmt.Sprintf("uid %d perf %d..%d (nominal %d, nonlinear %d) desired@%#x/%d",
-		c.UID, c.Lowest, c.Highest, c.Nominal, c.LowestNL, c.DesiredReg, c.DesiredBit)
+	return fmt.Sprintf("uid %d perf %d..%d (nominal %d = %d MHz, lowest %d MHz, nonlinear %d) desired@%#x/%d delivered %#x@%#x reference %#x@%#x",
+		c.UID, c.Lowest, c.Highest, c.Nominal, c.NominalMHz, c.LowestMHz, c.LowestNL, c.DesiredReg, c.DesiredBit,
+		c.DeliveredSpace, c.DeliveredAddr, c.ReferenceSpace, c.ReferenceAddr)
 }

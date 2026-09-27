@@ -321,6 +321,23 @@ func (u *Uplink) FlushRX() {
 
 func (u *Uplink) FlushTX() { FlushUplinkTX() }
 
+// UplinkIRQDiag: het interrupt-diagnosewoord van de NIC (tg3: status-woord,
+// HOSTCC_MODE, PCI-status met bit 3 = INTx# asserted) voor de stats-vraag op
+// de console-poort; ok=false zonder driver die het kent.
+func UplinkIRQDiag() (st, hc, ps uint32, ok bool) {
+	if uplink == nil {
+		return 0, 0, 0, false
+	}
+	d, ok := uplink.nic.(interface {
+		IRQDiag() (uint32, uint32, uint32)
+	})
+	if !ok {
+		return 0, 0, 0, false
+	}
+	st, hc, ps = d.IRQDiag()
+	return st, hc, ps, true
+}
+
 // RearmIRQ (netdev.IRQRearmer): doorgeven aan de NIC.
 func (u *Uplink) RearmIRQ() {
 	if r, ok := u.nic.(netdev.IRQRearmer); ok {
@@ -767,6 +784,7 @@ func natOutbound(src int, f []byte) bool {
 		// (arpLearn) en de TCP-retransmit van de app vindt 'm daarna.
 		arpForLocked(dstIP, now)
 		if !gwKnown {
+			NATNoRoute.Add(1)
 			return true // geen enkel spoor: drop, retransmit volgt
 		}
 		// En stuur het frame alvast via de gateway mee (Brother-jacht 20-08):
@@ -790,6 +808,7 @@ func natOutbound(src int, f []byte) bool {
 	previous := flowsFwd[fkey{proto, slotIP, dstIP, sport, dport}]
 	fl := flowForPacket(proto, src, slotIP, sport, dstIP, dport, l4, now)
 	if fl == nil {
+		NATFlowFull.Add(1)
 		return true // pool vol: drop
 	}
 	if known && fl == previous && proto == protoTCP &&
@@ -823,6 +842,7 @@ func hairpinOutLocked(src int, f, ip, l4 []byte, proto byte, slotIP uint32, spor
 	srvIP := layout.SlotIP4(m.slot)
 	fl := flowForPacket(proto, src, slotIP, sport, srvIP, m.slotPort, l4, now)
 	if fl == nil {
+		NATFlowFull.Add(1)
 		return true // pool vol: drop
 	}
 	reap := noteTCPFlags(fl, l4, false)
@@ -894,6 +914,19 @@ func flowFor(proto byte, slot int, slotIP uint32, slotPort uint16, dstIP uint32,
 	}
 	if len(flowsFwd) >= maxFlows || flowCountBySlot[slot] >= maxFlowsPerSlot {
 		maybeSweepExpiredLocked(now)
+		// En als de veeg niets opleverde: recycle de oudste flow van dit slot
+		// die al dicht is. Een flow met beide FIN's gezien houdt zijn plek
+		// alleen nog vast voor late retransmits (een minuut, zie noteTCPFlags);
+		// een nieuwe verbinding heeft meer recht op de tabel dan een dode.
+		//
+		// GEMETEN 21-09 op de Pi 5 (L83 p51): 200 korte verbindingen per storm
+		// vullen de 512 van een slot sneller dan die minuut ze vrijgeeft, en
+		// dan dropte dit pad de SYN — waarna de app de herzendladder van zijn
+		// stack zag (1/3/7 s) en zijn dial opgaf. In zes van twaalf rondes,
+		// met `nat_flowfull` als bewijs.
+		if len(flowsFwd) >= maxFlows || flowCountBySlot[slot] >= maxFlowsPerSlot {
+			removeFlowLocked(oldestClosedLocked(slot), false)
+		}
 	}
 	if len(flowsFwd) >= maxFlows {
 		if !now.Before(nextFlowsFullLog) {
@@ -937,6 +970,54 @@ func lookupFlowLocked(k fkey, now time.Time) *flow {
 	}
 	fl.seen = now
 	return fl
+}
+
+// NeighVia telt de neighbor-cache: hoeveel buren we kennen en van hoeveel de
+// MAC gelijk is aan die van de gateway. Dat tweede getal hoort nul te zijn:
+// een buur op hetzelfde subnet bereik je rechtstreeks. Staat het hoog, dan
+// loopt élk pakket naar die buur een omweg langs de router — twee hops per
+// richting, en dat is latency die nergens in een teller zichtbaar was.
+func NeighVia() (total, viaGW int) {
+	mu.Lock()
+	defer mu.Unlock()
+	for ip, n := range neigh {
+		if !onSubnet(ip) {
+			// Van een off-subnet afzender leren we óók (elk inkomend frame gaat
+			// door arpLearn), maar l2For kijkt daar nooit: die stuurt alles
+			// buiten het subnet sowieso naar de gateway. Zulke entries dragen
+			// terecht het router-MAC en horen niet in dit getal.
+			continue
+		}
+		total++
+		if gwKnown && n.mac == gwMAC {
+			viaGW++
+		}
+	}
+	return total, viaGW
+}
+
+// oldestClosedLocked zoekt een al gesloten flow van dit slot om te recyclen:
+// de oudste uit een begrensde steekproef. Begrensd omdat dit pad onder een
+// storm per pakket wordt gelopen en een volle scan dan O(n) per pakket kost;
+// Go's map-iteratie begint op een willekeurige plek, dus zodra er honderden
+// dode flows staan levert een steekproef er meteen een. Staan ze er niet, dan
+// valt de aanroeper terug op de drop die er altijd al was.
+func oldestClosedLocked(slot int) *flow {
+	const sample = 64
+	var best *flow
+	n := 0
+	for _, fl := range flowsFwd {
+		if n++; n > sample {
+			break
+		}
+		if fl.slot != slot || !fl.finFwd || !fl.finRev {
+			continue
+		}
+		if best == nil || fl.seen.Before(best.seen) {
+			best = fl
+		}
+	}
+	return best
 }
 
 // removeFlowLocked is het enige delete-pad voor conntrack (mu vast). compact
@@ -1159,5 +1240,18 @@ const uplinkMaxFrame = 1500 + 18
 
 var (
 	NATOversize atomic.Uint64
+
+	// NATNoRoute: een uitgaand frame naar een buur die we niet kennen én
+	// zonder gateway om het langs te sturen — gedropt, de TCP-herzending
+	// probeert het opnieuw. NATFlowFull: er kwam geen flow voor het pakket —
+	// meestal het conntrack-plafond (globaal of per slot), maar ook een
+	// uitgaande RST zonder flow, het adoptievenster na een flip of een
+	// uitgeputte poortpool tellen hier mee. Beide zijn stille drops die de app als een dial-
+	// time-out ziet, met de herzendladder van de stack eronder (1/3/7 s) —
+	// precies het beeld dat op 20-09 op drie boards als client opdook. Zonder
+	// deze twee is "de SYN kwam nooit aan" niet te scheiden van "de server
+	// antwoordde niet".
+	NATNoRoute  atomic.Uint64
+	NATFlowFull atomic.Uint64
 	errOversize = errors.New("hopswitch: frame te groot voor de uplink")
 )

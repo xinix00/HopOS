@@ -188,6 +188,12 @@ func CopyOut(dst []byte, src uintptr) {
 
 // Clear zet [dst, dst+n) op nul (elke alignment).
 func Clear(dst uintptr, n uint64) {
+	// Normal memory permits the runtime's bulk zeroing instructions. Device
+	// memory still requires aligned scalar stores (including unaligned tails).
+	if n <= uint64(^uint(0)>>1) && IsNormal(dst, int(n)) {
+		clear(unsafe.Slice((*byte)(unsafe.Pointer(dst)), int(n)))
+		return
+	}
 	i := uint64(0)
 	for pro := uint64(toAlign8(dst)); i < n && pro > 0; i, pro = i+1, pro-1 {
 		*(*byte)(unsafe.Pointer(dst + uintptr(i))) = 0

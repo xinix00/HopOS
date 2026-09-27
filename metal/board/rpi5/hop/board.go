@@ -28,6 +28,7 @@ import (
 	"github.com/xinix00/HopOS/metal/v2/board/raspi"
 	raspihop "github.com/xinix00/HopOS/metal/v2/board/raspi/hop"
 	"github.com/xinix00/HopOS/metal/v2/board/rpi5"
+	"github.com/xinix00/HopOS/metal/v2/cpu/memattr"
 	"github.com/xinix00/HopOS/metal/v2/driver/brcmpcie"
 	"github.com/xinix00/HopOS/metal/v2/driver/nic/gem"
 	"github.com/xinix00/lean/leandhcp"
@@ -120,6 +121,17 @@ func (machine) ProbeNIC() (netdev.Device, net.HardwareAddr, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("rp1: %w", err)
 	}
+	// Alleen de ZENDbuffers gecached (descriptors en ontvangstbuffers niet):
+	// een frame dat wij schrijven mag in de cache landen en pas bij de clean
+	// naar buiten, terwijl lezen uit een verse DMA-buffer toch DRAM haalt en
+	// de invalidate er alleen bij kost. GEMETEN 21-09 op dit board, beide
+	// richtingen apart — zie gem.offRxBufs. Lukt de hermapping niet, dan
+	// draait alles gewoon ongecached door.
+	if err := memattr.NormalWB(layout.NetDMAPA()+gem.TXBufOff, gem.TXBufSize); err != nil {
+		fmt.Printf("net: gem transmit buffers remain uncached (%v)\n", err)
+	} else {
+		fmt.Println("net: gem transmit buffers write-back cached (receive side stays uncached)")
+	}
 	if err := nic.Init(layout.NetDMAPA(), layout.NetDMASize, speed, fd); err != nil {
 		return nil, nil, err
 	}
@@ -129,5 +141,10 @@ func (machine) ProbeNIC() (netdev.Device, net.HardwareAddr, error) {
 		return nil, nil, err
 	}
 	raspihop.Lease = l
+	// De NIC-interrupt, ná de lease (DMA beide kanten op bewezen). Mislukt
+	// een stap, dan pollt de node zoals vroeger — met de reden op de console.
+	if err := wireNICIRQ(rc, nic); err != nil {
+		fmt.Printf("irq: NIC interrupt not wired (%v) — RX stays polled\n", err)
+	}
 	return nic, net.HardwareAddr(nic.MAC[:]), nil
 }

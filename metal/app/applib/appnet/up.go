@@ -265,9 +265,15 @@ func WatchStats(logf func(string, ...any), every time.Duration) {
 			time.Sleep(every)
 			now := st.Stats()
 			if now != last {
-				logf("netstats: refusedNoBudget=%d dropNoPort=%d dropBadFrame=%d dropReplyFull=%d arp{gaveUp=%d learnDrop=%d fullDrop=%d}",
+				// Ook de TCP-kant: zonder retransmits/zero-windows is "de
+				// verbinding haalt de helft van de draad" van buiten niet te
+				// onderscheiden van "de verbinding is gezond maar wacht" —
+				// precies de vraag die de Pi 5 op 21-09 opwierp (L83 p56).
+				logf("netstats: refusedNoBudget=%d dropNoPort=%d dropBadFrame=%d dropReplyFull=%d arp{gaveUp=%d learnDrop=%d fullDrop=%d} tcp{retrans=%d fast=%d persist=%d zeroWnd=%d segsIn=%d segsOut=%d}",
 					now.RefusedNoBudget, now.DropNoPort, now.DropBadFrame, now.DropReplyFull,
-					now.ARP.GaveUp, now.ARP.LearnDrop, now.ARP.FullDrop)
+					now.ARP.GaveUp, now.ARP.LearnDrop, now.ARP.FullDrop,
+					now.TCPRetransmits, now.TCPFastRetransmits, now.TCPPersistProbes, now.TCPZeroWindows,
+					now.TCPSegsIn, now.TCPSegsOut)
 				last = now
 			}
 		}

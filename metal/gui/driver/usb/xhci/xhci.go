@@ -201,9 +201,14 @@ type HC struct {
 	res     []*slotRes
 	cmd     *ring
 	evt     *evring
-	pending []event
-	dropped int
-	running bool
+	// De gedeelde bouncebuffer voor bulk-transfers (bulk.go). Nul als er na
+	// de vaste structuren niets meer over was: dan draagt deze controller
+	// alleen HID en weigert elke bulk-transfer.
+	bulkBuf  uintptr
+	bulkSize uintptr
+	pending  []event
+	dropped  int
+	running  bool
 
 	// poisoned betekent dat hardware- en software-ownership niet meer bewezen
 	// gelijk lopen (bv. Disable Slot zonder bevestiging). Nieuwe Enable Slot-

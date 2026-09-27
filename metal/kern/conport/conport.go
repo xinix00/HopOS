@@ -23,9 +23,11 @@
 package conport
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -46,6 +48,20 @@ const pollInterval = 100 * time.Millisecond
 const maxReaders = 4
 
 var readers atomic.Int32
+
+// Query beantwoordt een vraag die een client als EERSTE regel stuurt, vóór
+// hij de console wil zien: `printf 'stats\n' | nc node 5555` geeft dan één
+// regel antwoord en de verbinding gaat dicht. Zo zijn de tellers van de node
+// (cmd/hopos: idle, interrupts, wekker, switch) op elk moment op te vragen
+// zonder een config-knop, zonder console-ruis en zonder een tweede poort —
+// dezelfde kabel, één vraag. Leeg antwoord = geen vraag, gewoon de console.
+// Gezet door cmd/hopos; nil = alleen de console.
+var Query func(cmd string) string
+
+// queryWindow is hoe lang een verse verbinding de kans krijgt een vraag te
+// stellen; een console-lezer (nc zonder invoer, een browser) stuurt niets
+// en krijgt daarna gewoon de stroom.
+const queryWindow = 300 * time.Millisecond
 
 // Serve start de console-poort en keert meteen terug; de listener draait in een
 // eigen goroutine. port 0 = uit (en dat is de default: zonder config-sleutel
@@ -97,6 +113,19 @@ func stream(c net.Conn) {
 	defer c.Close()
 	var closed atomic.Bool
 
+	// Eerst het vraag-venster: één regel binnen queryWindow die Query kent
+	// wordt beantwoord en sluit de verbinding. Al het andere (niets, een
+	// HTTP-request, een onbekende regel) is een console-lezer.
+	r := bufio.NewReader(c)
+	c.SetReadDeadline(time.Now().Add(queryWindow))
+	if line, err := r.ReadString('\n'); err == nil && Query != nil {
+		if answer := Query(strings.TrimSpace(line)); answer != "" {
+			c.Write([]byte(answer + "\n"))
+			return
+		}
+	}
+	c.SetReadDeadline(time.Time{})
+
 	// LEZEN, ook al stuurt een console-lezer niets: zonder read-kant merken we
 	// een weggelopen client alléén als er iets te schrijven is. Bij een stille
 	// console (die-temp is één regel per minuut) blijft zo'n verbinding dus
@@ -107,7 +136,7 @@ func stream(c net.Conn) {
 	// nooit aan omdat niemand las. io.Discard, want wat een client stuurt is
 	// per definitie niet voor ons — het enige dat telt is het EINDE ervan.
 	go func() {
-		io.Copy(io.Discard, c)
+		io.Copy(io.Discard, r)
 		c.Close() // EOF of fout = client weg; de Write hieronder faalt nu meteen
 		closed.Store(true)
 	}()

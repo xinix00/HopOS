@@ -18,15 +18,17 @@ cd "$(dirname "$0")/../metal"
 # geen reviewtaak (tools/importcheck.go leest ook code achter build-tags).
 go run ../tools/importcheck.go
 
-# -tags gui: de surface-grant (kern/slots, kern/stage2) is gui-werk en zijn
-# tests dus ook; zonder de tag zouden die stil overgeslagen worden. De kale
-# stub-kant is een compilegate, geen logica — die dekken de tamago-builds
-# hieronder (elke smaak zonder gui).
-go test -tags gui "$@" \
+# -tags "gui media": de surface-grant (kern/slots, kern/stage2) is gui-werk,
+# de codec- en apparaatdienst (kern/slots codec*.go, devices.go) media-werk, en
+# hun tests dus ook; zonder de tags zouden die stil overgeslagen worden. De
+# kale stub-kant is een compilegate, geen logica — die dekken de tamago-builds
+# hieronder (elke smaak zonder gui, en gui zonder media).
+go test -tags "gui media" "$@" \
 	./abi/ring ./net/hopswitch ./kern/stage2 ./abi/layout ./abi/hopabi ./abi/systemapi ./abi/checksum \
 	./fw/fdt ./fw/adt ./fw/xnuboot ./fw/acpi ./fw/bootcfg ./kern/hopfs ./driver/vcmail ./driver/nic/mdio ./kern/slots ./kern/kernflip \
-	./gui/fbgrant ./gui/driver/usb/hid ./kern/cage ./driver/nic/dwmac ./driver/nic/dwmac4 ./cmd/hopos/cfgblob ./driver/conlog \
-	./kern/cagestub ./net/nodemac ./kern/conport ./cpu/drbg ./driver/fb
+	./gui/fbgrant ./gui/driver/usb/hid ./gui/driver/usb/xhci ./gui/usbin ./kern/cage ./driver/nic/dwmac ./driver/nic/dwmac4 ./cmd/hopos/cfgblob ./driver/conlog \
+	./kern/cagestub ./net/nodemac ./kern/conport ./cpu/drbg ./driver/fb \
+	./media/driver/vpu/mve ./media/driver/optical ./dev
 
 go test "$@" ./cmd/hopos/watchdog.go ./cmd/hopos/watchdog_policy_test.go
 
@@ -76,8 +78,9 @@ GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOA
 # Elke board-smaak kaal; plus de gui-smaak (metal/gui achter -tags gui) op
 # virt (bewijst de bedrading zonder Display-board), rpi5 (mét) en rpi4 (de
 # VL805-USB achter de BCM2711-root-complex — de enige plek waar dat pad
-# compileert).
-for tags in "linkcpuinit" "rpi4 linkcpuinit" "rpi5 linkcpuinit" "altra linkcpuinit" "edk2 linkcpuinit" "o6n linkcpuinit" "gui linkcpuinit" "rpi4 gui linkcpuinit" "rpi5 gui linkcpuinit" "o6n gui linkcpuinit"; do
+# compileert). En de media-smaak (gui + VPU + disc + codec): o6n draagt de
+# VPU-driver, rpi5 bewijst dat media zonder codec-ijzer ook linkt.
+for tags in "linkcpuinit" "rpi4 linkcpuinit" "rpi5 linkcpuinit" "altra linkcpuinit" "edk2 linkcpuinit" "o6n linkcpuinit" "gui linkcpuinit" "rpi4 gui linkcpuinit" "rpi5 gui linkcpuinit" "o6n gui linkcpuinit" "o6n gui media linkcpuinit" "rpi5 gui media linkcpuinit"; do
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "$tags" -o /dev/null ./cmd/hopos
 done
@@ -171,4 +174,4 @@ else
 	echo "gate: apple-smaak overgeslagen (tamago-fork ../../tamago ontbreekt)" >&2
 fi
 
-echo "OK: host-tests groen, tamago-gate (arm64: virt/rpi4/rpi5/altra/edk2/o6n kaal + gui-smaken + embed-mains incl. rk3566 + probeuefi + proberk3566 + rk3566-agent kaal én gui${APPLE_GATE}; riscv64: cmd/hopos kaal én embedcfg/embedcagestub + slot-demo + slot-app + switchtest) gebouwd" >&2
+echo "OK: host-tests groen, tamago-gate (arm64: apps (hello/appspike) + virt/rpi4/rpi5/altra/edk2/o6n kaal + gui-smaken + media (o6n/rpi5) + embed-mains incl. rk3566 + probeuefi + proberk3566 + rk3566-agent kaal én gui${APPLE_GATE}; riscv64: cmd/hopos kaal én embedcfg/embedcagestub + slot-demo + slot-app + switchtest) gebouwd" >&2

@@ -17,9 +17,9 @@ package hopnet
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -110,9 +110,11 @@ func Up() error {
 	if ForcePoll {
 		waiter = nil
 	}
-	if waiter != nil {
-		fmt.Println("net: RX wakes on the NIC interrupt")
-	} else {
+	// Alleen de pollende kant meldt zich hier. Een board dat een lijn bedraadt
+	// zegt zelf welke ("irq: NIC on INTID …"); dit pakket weet niet of de
+	// waiter écht een lijn heeft of intern terugvalt op de 300µs-poll, en die
+	// aanname stond als "RX wakes on the NIC interrupt" op een gepolde Ampere.
+	if waiter == nil {
 		fmt.Println("net: RX polled every 300µs (no NIC interrupt on this board, or hopos.rxpoll=1)")
 	}
 	events := make(chan struct{}, 1)
@@ -301,10 +303,7 @@ func keepLease(mac [6]byte, l leandhcp.Lease) {
 				l = fresh
 				break
 			}
-			// Een NAK herkennen we voorlopig aan de tekst: de gepubliceerde
-			// lean (v1.1.1) exporteert leandhcp.ErrRefused nog niet. Zodra de
-			// volgende lean-tag uit is: errors.Is(err, leandhcp.ErrRefused).
-			if strings.Contains(err.Error(), "DHCPNAK") {
+			if errors.Is(err, leandhcp.ErrRefused) {
 				lost(fmt.Sprintf("dhcp: %s refused by the server (%v)", l.IPString(), err))
 				return
 			}

@@ -44,6 +44,7 @@ const (
 	admDeleteCQ = 0x04
 	admCreateCQ = 0x05
 	admIdentify = 0x06
+	ioFlush     = 0x00
 	ioWrite     = 0x01
 	ioRead      = 0x02
 )
@@ -439,6 +440,25 @@ func (c *Controller) Write(lba uint64, p []byte) error {
 // Read leest len(p) bytes (blokveelvoud, ≤ MaxTransfer) vanaf blok lba.
 func (c *Controller) Read(lba uint64, p []byte) error {
 	return c.xfer(ioRead, lba, p, false)
+}
+
+// Flush maakt alles wat de controller al bevestigde duurzaam (NVMe Flush:
+// een vluchtige schrijfcache naar het medium). hopfs zet hem vóór en ná het
+// wegschrijven van zijn boom, zodat een stroomstoring nooit een boom achterlaat
+// die naar nog niet geschreven data wijst.
+//
+// Op de ANS (Apple, c.nvmmu ≠ 0) een no-op: een opdracht die de firmware daar
+// niet verwacht kan de coprocessor tot de volgende power-reset onbruikbaar
+// maken (submit, 29-08), en Flush is daar nooit op ijzer gezien. Een flip
+// heeft hem niet nodig — de controller blijft dezelfde — alleen een harde
+// stroomuitval op de M4 kan dus de laatste boom kosten.
+func (c *Controller) Flush() error {
+	if c.nvmmu != 0 {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.submit(&c.io, cmd{opc: ioFlush, nsid: nsid})
 }
 
 // trim knipt spaties en nullen van een identify-string.

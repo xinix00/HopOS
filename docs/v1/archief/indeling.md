@@ -16,6 +16,7 @@ metal/
 ├── net/       het netwerkvlak van HOP
 ├── kern/      de orchestrator zelf
 ├── gui/       het display-vlak, opt-in via `-tags gui` (20-07)
+├── media/     het media-vlak (VPU, optische drive), opt-in via `-tags "gui media"` (24-09)
 ├── board/     per-board bedrading
 ├── app/       de app-kant
 ├── cmd/       de HOP-kant binaries
@@ -86,6 +87,26 @@ beantwoordt) en de scanout-bedrading (cmd/hopos/gui_rk3566.go — board mag
 gui niet importeren, dus cmd knoopt rkscan via hop.UseScanout aan het
 board).
 
+**`media/`** — het media-vlak, sinds 24-09 om dezelfde reden als gui/: HopOS
+is compute, en wat daar niet bij hoort moet los kunnen. De drivers wonen in
+`media/driver/`: `vpu/mve` (de Linlon V8 van de O6N: MMU, firmware, ringen,
+sessies) en `optical` (SCSI/MMC over de USB-bulkweg van gui/driver/usb/xhci).
+De derde smaak, naast kaal en gui: media = gui + codec + disc, `MEDIA=1` in
+elk imagescript, `-tags "gui media"` (gui erbij omdat de USB-stack daar
+woont). Kaal en gui linken geen regel media-code. De grens loopt zoals bij
+gui en `driver/fb`: het CONTRACT blijft onder de lijn — `driver/codec` (de
+typen Engine/Session/Buffer) en de codec- en apparaat-ops in abi/hopabi (een
+app is smaak-onafhankelijk). De DIENST erachter in kern/slots (codec.go,
+codecabi.go, devices.go) staat achter `-tags media`, zoals de surface-grant
+achter gui: buiten media linkt kern alleen kern/slots/media_off.go, dat de
+codec-ops met "no codec hardware" en elke naam onder `/devices` met
+ErrNoDevice beantwoordt. De namespace `/devices` zelf (devicesdir.go) is er in
+elke smaak, zodat een pad daaronder nooit op het volume landt. Wat
+een board over zijn codec-blok weet (stroom, klok, reset) blijft in
+`board/<x>/hop` (o6n: PowerVPU) zonder de driver te kennen; cmd knoopt die
+twee aan elkaar (cmd/hopos/media_o6n.go, codecProbe) — board mag media niet
+importeren.
+
 **`board/`** — de hardware-integrator, per board in TWEE helften:
 
 - **de basis** (`board/<x>`): wat élk image — ook een app — nodig heeft om op
@@ -152,6 +173,9 @@ regel-tabel dáár en dit hoofdstuk horen samen te wijzigen):
    slots-hooktypen), en alleen `cmd/` (achter `-tags gui`) importeert het
    terug — kern/net/board raken gui nooit; kern kent gui alleen als
    niet-geregistreerde grant-haak (kern/slots/grants.go).
+   `media/` is een opt-in vlak naast gui: het mag alleen dev/abi/cpu/fw/
+   driver (en zichzelf), en alleen `cmd/` (achter `-tags media`) importeert
+   het terug — kern/net/board/gui raken media nooit.
 5. `board/appboard` (het app-contract) importeert niets; het contract
    `board` alleen appboard + de typen die het draagt (driver/fb,
    driver/pcie, `net/netdev`, en leandhcp.Lease uit github.com/xinix00/lean
@@ -188,7 +212,8 @@ code (gitignored via `*.elf`/`*.elf.gz`):
 5. Alleen voor core 0 als vertrouwde kern? → `kern/`.
 6. HOP's netwerkvlak? → `net/`. Draait het in een slot? → `app/`.
    Display-werk voorbij de firmware-framebuffer? → `gui/` (opt-in vlak,
-   alleen gelinkt met `-tags gui`).
+   alleen gelinkt met `-tags gui`). Codec-ijzer of een optische drive? →
+   `media/` (opt-in vlak, alleen gelinkt met `-tags "gui media"`).
 7. Bedrading van één board of SoC? → `board/<naam>`: runtime-hooks/boot in
    de basis, alles met drivers in `board/<naam>/hop`.
 8. Is het een binary? → HOP-kant `cmd/`, app-kant `app/`.

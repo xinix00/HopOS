@@ -12,6 +12,7 @@
 package hop
 
 import (
+	"github.com/xinix00/HopOS/metal/v2/dev"
 	"sync"
 
 	"github.com/xinix00/HopOS/metal/v2/abi/layout"
@@ -64,6 +65,11 @@ func (machine) Cores() board.Cores {
 		App:   func() []int { return board.ProbeCores(state, layout.NumAppCores()) },
 		Start: func(c int, entry, arg uint64) error { return psci.On(rk3566.Target(uint64(c)), entry, arg) },
 		State: state,
+		// Yield naar EL2 en een SEV als kick — hetzelfde als op de Pi's
+		// (board/raspi/hop), en om dezelfde reden: vier cores, één cluster,
+		// en de event stream wekt elke WFE toch al iedere ~1 ms.
+		IdleMode: func(int) uint64 { return layout.IdleYield },
+		Kick:     func(int) { dev.SEV() },
 	}
 }
 

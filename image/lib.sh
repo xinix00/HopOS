@@ -16,7 +16,9 @@
 #	trap clean_embeds EXIT INT TERM
 clean_embeds() {
 	rm -f "$DIR/metal/kern/cagestub/stub-slot.bin" \
-		"$DIR/metal/cmd/hopos/cfgblob/hopos.cfg"
+		"$DIR/metal/cmd/hopos/cfgblob/hopos.cfg" \
+		"$DIR/metal/cmd/hopos/codecblob/hevcdec.fwb" \
+		"$DIR/metal/cmd/hopos/codecblob/clip.hevc"
 }
 
 # Dezelfde kooi-stub voor een koude LicheeRV-boot en een flip-bundel.
@@ -25,3 +27,11 @@ build_licheerv_cagestub() {
 	riscv64-elf-ld -Ttext="$1" -o "$DIR/metal/out/stub-slot.elf" "$DIR/metal/out/stub-slot.o"
 	riscv64-elf-objcopy -O binary "$DIR/metal/out/stub-slot.elf" "$DIR/metal/out/stub-slot.bin"
 }
+
+# De versie van de kern: git describe van de repo-wortel, in élke kernbuild
+# gestempeld op hop's agentboot.Version (de agent meldt hem in /v1/agents en
+# de bootregel HOPOS_AGENT_UP). Zonder stempel zegt elke kern "hopos-dev" en
+# is op een node niet te zien welke release er draait (20-09).
+HOPOS_VERSION="${HOPOS_VERSION:-$(git -C "$DIR" describe --tags --always --dirty 2>/dev/null || echo hopos-dev)}"
+VERSION_X="-X github.com/xinix00/hop/pkg/agentboot.Version=$HOPOS_VERSION"
+

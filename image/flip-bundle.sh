@@ -46,12 +46,13 @@ virt)      ARCH=arm64;   TAGS="linkcpuinit";          T1=0x40010000;     T2=0x70
 # build-tag (cpu/el2/el2_*.s, board/uefi/init_*.s, board/apple/cpuinit.s).
 uefi)      ARCH=arm64;   TAGS="uefi linkcpuinit";     T1=0x50010000;     T2=0x88010000 ;;
 o6n)       ARCH=arm64;   TAGS="o6n linkcpuinit";      T1=0x50010000;     T2=0x88010000 ;; # Orion O6N: UEFI-laag + board/o6n
+altra)     ARCH=arm64;   TAGS="altra linkcpuinit";    T1=0x50010000;     T2=0x88010000 ;; # Ampere Altra: UEFI-laag + board/altra
 apple)     ARCH=arm64;   TAGS="apple linkcpuinit highram"
            T1=0x10100010000; T2=0x10180010000
            WORK="$DIR/image/apple/go.work" ;;
 licheerv)  ARCH=riscv64; TAGS="licheerv linkcpuinit"; T1=0x84010000;     T2=0x88010000 ;;
 *)
-	echo "gebruik: $0 [rpi5|rpi4|radxa|virt|uefi|o6n|apple|licheerv]" >&2
+	echo "gebruik: $0 [rpi5|rpi4|radxa|virt|uefi|o6n|altra|apple|licheerv]" >&2
 	exit 64
 	;;
 esac
@@ -62,7 +63,14 @@ OUT="out/hopos-$BOARD.flip"
 
 # Zelfde smaak als het geïnstalleerde image (uefi-run.sh: GUI=1 default): een
 # gui-kern geflipt naar een kale kern laat de display-bewoner zonder grant.
-case "$BOARD" in uefi|o6n) [ "${GUI:-1}" = 1 ] && TAGS="$TAGS gui" ;; esac
+# MEDIA=1 (of een meetbundel met FWDIR, hieronder) is de media-smaak: gui +
+# VPU + disc + codec, op élk board — een media-node flip je naar media.
+[ -n "${FWDIR:-}" ] && MEDIA=1
+if [ "${MEDIA:-0}" = 1 ]; then
+	TAGS="$TAGS gui media"
+else
+	case "$BOARD" in uefi|o6n|altra) [ "${GUI:-1}" = 1 ] && TAGS="$TAGS gui" ;; esac
+fi
 
 if [ "$BOARD" = licheerv ]; then
 	build_licheerv_cagestub 0x88000000
@@ -75,6 +83,23 @@ fi
 # config uit het image, en een geflipte kern is zo'n image. Zonder CFG zou de
 # nieuwe kern zijn naam, API-key en console-knop kwijt zijn en headless
 # booten. Geef hier dus DEZELFDE config als die van het geïnstalleerde image.
+# FWDIR=<map>: een MEETBUNDEL — de codec-firmware en een teststream mee in de
+# kern. Dat hoort niet in een release (de firmware is van CIX en hoort bij de
+# node, niet bij de kern), maar zolang er geen weg is om bestanden op HOP's
+# eigen volume te zetten is dit de enige manier om de VPU op ijzer te voeden.
+if [ -n "${FWDIR:-}" ]; then
+	[ -f "$FWDIR/hevcdec.fwb" ] || { echo "FWDIR=$FWDIR mist hevcdec.fwb" >&2; exit 1; }
+	cp "$FWDIR/hevcdec.fwb" "$DIR/metal/cmd/hopos/codecblob/hevcdec.fwb"
+	if [ -n "${CLIP:-}" ]; then
+		[ -f "$CLIP" ] || { echo "CLIP=$CLIP bestaat niet" >&2; exit 1; }
+		cp "$CLIP" "$DIR/metal/cmd/hopos/codecblob/clip.hevc"
+	else
+		: > "$DIR/metal/cmd/hopos/codecblob/clip.hevc"
+	fi
+	TAGS="$TAGS embedcodec"
+	echo "meetbundel: hevcdec.fwb + $(wc -c <"$DIR/metal/cmd/hopos/codecblob/clip.hevc" | tr -d ' ') bytes teststream" >&2
+fi
+
 if [ -n "${CFG:-}" ]; then
 	[ -f "$DIR/$CFG" ] || { echo "CFG=$CFG bestaat niet (pad vanaf de repo-wortel)" >&2; exit 1; }
 	cp "$DIR/$CFG" "$DIR/metal/cmd/hopos/cfgblob/hopos.cfg"
@@ -82,16 +107,18 @@ if [ -n "${CFG:-}" ]; then
 	echo "config ingebakken: $CFG ($(wc -c <"$DIR/$CFG" | tr -d ' ') bytes)" >&2
 fi
 # Zonder CFG boot de geflipte kern zonder naam, API-key en console-knop en
-# parkeert hij vóór de agent op HOPOS_API_NO_AUTH: ping doet het, de
-# system-poort staat open, en verder is er niets te lezen — 03-09 twee keer een
-# "hang" gejaagd die precies dit was. Voor een board dat zijn config uit het
-# image leest is dat nooit de bedoeling; wie het écht wil, zegt NOCFG=1.
+# parkeert hij vóór de agent op HOPOS_API_NO_AUTH (03-09 twee keer een "hang"
+# gejaagd die precies dit was). Boards die hun config uit het IMAGE lezen
+# (Apple, LicheeRV) krijgen daarom standaard de headless-template: dezelfde
+# config als hun geïnstalleerde image, want elke node draait een van de twee.
+# De andere boards lezen hun config van kaart of stick en hebben hem niet nodig.
 case "$BOARD" in
-apple)
-	if [ -z "${CFG:-}" ] && [ "${NOCFG:-}" != 1 ]; then
-		echo "$BOARD: geen CFG= opgegeven — de geflipte kern zou zonder config booten en parkeren (HOPOS_API_NO_AUTH)." >&2
-		echo "    geef CFG=image/apple/hopos-m4.cfg (dezelfde config als het geïnstalleerde image), of NOCFG=1 als dat bewust is." >&2
-		exit 1
+apple | licheerv)
+	if [ -z "${CFG:-}" ]; then
+		CFG=image/hopos-headless.cfg
+		cp "$DIR/$CFG" "$DIR/metal/cmd/hopos/cfgblob/hopos.cfg"
+		TAGS="$TAGS embedcfg"
+		echo "config ingebakken: $CFG (de headless-template)" >&2
 	fi
 	;;
 esac
@@ -99,7 +126,7 @@ esac
 for V in "1:$T1" "2:$T2"; do
 	GOWORK="${WORK:-off}" GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH="$ARCH" \
 		"$TAMAGO" build -tags "$TAGS" -trimpath \
-		-ldflags "-w -buildid= -T ${V#*:} -R 0x1000 ${LDX:-}" -o "out/flip-v${V%%:*}.elf" ./cmd/hopos
+		-ldflags "-w -buildid= -T ${V#*:} -R 0x1000 $VERSION_X ${LDX:-}" -o "out/flip-v${V%%:*}.elf" ./cmd/hopos
 done
 
 # FLIPABI=<n>: de flip-ABI in de HOPRELO1-staart (default: die van mkkernel).

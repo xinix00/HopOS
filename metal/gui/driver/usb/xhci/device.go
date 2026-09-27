@@ -3,6 +3,7 @@
 package xhci
 
 import (
+	"errors"
 	"fmt"
 	"math/bits"
 	"time"
@@ -90,6 +91,7 @@ type Device struct {
 	mps0    int
 	confVal int
 	ifaces  []hidIface
+	bulk    *bulkIface // mass storage in plaats van HID (bulk.go)
 	res     *slotRes
 	lastErr error
 }
@@ -117,7 +119,7 @@ func (r *ring) resetRing() {
 	dev.Clear(r.base, uint64(r.n)*16)
 	r.enq = 0
 	r.cycle = 1
-	r.armLink()
+	r.armLink(false)
 	dev.MB()
 }
 
@@ -274,7 +276,7 @@ func (h *HC) Attach(port int) (*Device, error) {
 	if err := d.readDescriptors(); err != nil {
 		return nil, h.abortAttach(slot, err)
 	}
-	if len(d.ifaces) == 0 {
+	if len(d.ifaces) == 0 && d.bulk == nil {
 		if err := h.releaseSlot(slot); err != nil {
 			return nil, err
 		}
@@ -388,17 +390,29 @@ func (d *Device) control(reqType, req uint8, val, idx, length uint16) (int, erro
 	statTRB := r.push(0, 0, 0, trbIOC|uint32(trbStatus)<<trbTypeShift|sdir<<16)
 	h.doorbell(d.Slot, 1)
 
+	// Loopt een fase mis — het apparaat stalt, of zwijgt — dan gaat EP0 terug
+	// op een verse ring. Een stall zet hem in de controller op halted en dan
+	// weigert hij elk volgend request; een half afgemaakte TD zou het volgende
+	// request achter zich laten wachten. Het apparaat is daarmee niet weg en de
+	// controller zeker niet: alleen als het resetten zelf niet lukt, is er
+	// meer aan de hand (en dat beslist command).
+	fail := func(err error) (int, error) {
+		if rerr := d.resetEP(1, r); rerr != nil {
+			return 0, fmt.Errorf("%w (EP0 reset: %v)", err, rerr)
+		}
+		return 0, err
+	}
 	got := int(length)
 	if length > 0 {
 		ev, err := h.waitEvent(func(e event) bool {
 			return e.kind == trbTransferEvt && e.ptr == dataTRB
 		}, 2*time.Second, "control data stage")
 		if err != nil {
-			return 0, err
+			return fail(err)
 		}
 		if ev.comp != ccSuccess && ev.comp != ccShortPacket {
-			return 0, fmt.Errorf("xhci %s: control %#02x/%d datafase — %s (%d)",
-				h.Name, reqType, req, compName(ev.comp), ev.comp)
+			return fail(fmt.Errorf("xhci %s: control %#02x/%d datafase — %s (%d)",
+				h.Name, reqType, req, compName(ev.comp), ev.comp))
 		}
 		if ev.rem > uint32(length) {
 			return 0, h.quarantine(fmt.Errorf("control completion exceeds transfer length"))
@@ -409,11 +423,11 @@ func (d *Device) control(reqType, req uint8, val, idx, length uint16) (int, erro
 		return e.kind == trbTransferEvt && e.ptr == statTRB
 	}, 2*time.Second, "control status stage")
 	if err != nil {
-		return 0, err
+		return fail(err)
 	}
 	if ev.comp != ccSuccess && ev.comp != ccShortPacket {
-		return 0, fmt.Errorf("xhci %s: control %#02x/%d statusfase — %s (%d)",
-			h.Name, reqType, req, compName(ev.comp), ev.comp)
+		return fail(fmt.Errorf("xhci %s: control %#02x/%d statusfase — %s (%d)",
+			h.Name, reqType, req, compName(ev.comp), ev.comp))
 	}
 	return got, nil
 }
@@ -472,7 +486,7 @@ func (d *Device) readDescriptors() error {
 	if err != nil {
 		return fmt.Errorf("config descriptor: %w", err)
 	}
-	d.parseConfig(d.bufBytes(n))
+	d.parseConfigAll(d.bufBytes(n))
 	return nil
 }
 
@@ -518,6 +532,15 @@ func (d *Device) parseConfig(b []byte) {
 			}
 		}
 		i += l
+	}
+}
+
+// parseConfigAll zoekt eerst boot-HID en laat de bulk-kant aan bulk.go: een apparaat is óf boot-HID óf
+// opslag, en de HID-vraag is de goedkoopste van de twee.
+func (d *Device) parseConfigAll(b []byte) {
+	d.parseConfig(b)
+	if len(d.ifaces) == 0 {
+		d.parseBulk(b)
 	}
 }
 
@@ -569,6 +592,9 @@ func intervalExponent(sp Speed, bInterval int) uint32 {
 // losse commando's zouden de tweede het werk van de eerste laten overschrijven,
 // want elk commando vervangt de héle endpoint-configuratie van het slot.
 func (d *Device) configure() error {
+	if d.bulk != nil {
+		return d.configureBulk()
+	}
 	h := d.hc
 
 	add, maxDCI := uint32(addSlot), 0
@@ -707,17 +733,56 @@ func (d *Device) handle(f *hidIface, ev event, buf []byte) (int, int, bool) {
 }
 
 // recover haalt een gestalde endpoint uit halted en zet zijn ring terug op nul.
-func (d *Device) recover(f *hidIface) error {
+func (d *Device) recover(f *hidIface) error { return d.resetEP(f.dci, f.ring) }
+
+// Endpoint-states in dword 0 van een endpoint context (xHCI 6.2.3).
+const (
+	epRunning = 1
+	epHalted  = 2
+)
+
+// errDetached: het apparaat heeft geen slot meer (Detach, of een controller
+// die zich herstelde).
+var errDetached = errors.New("usb: device is detached")
+
+// epState leest de state van een endpoint uit de device context die de
+// controller bijhoudt. Index dci in die context is precies het endpoint (0 is
+// het slot context).
+func (d *Device) epState(dci int) uint32 {
+	return dev.Read32(d.hc.ctxDW(d.res.devCtx, dci, 0)) & 7
+}
+
+// resetEP zet een endpoint aan de controllerkant terug op een verse ring. Welk
+// commando eerst gaat hangt af van de state: Reset Endpoint mag alleen op een
+// gestalde endpoint en Stop Endpoint alleen op een draaiende (anders Context
+// State Error, xHCI 4.6.8/4.6.9). Pas daarna mag de dequeue-pointer verzet
+// worden, anders wijst hij nog naar het TRB waar het misging. Events die nog
+// naar de oude ring wijzen gaan weg: niemand wacht er meer op.
+func (d *Device) resetEP(dci int, r *ring) error {
 	h := d.hc
-	if _, err := h.command(0, 0, 0,
-		uint32(trbResetEP)<<trbTypeShift|uint32(f.dci)<<16|uint32(d.Slot)<<24, "reset endpoint"); err != nil {
+	if d.res == nil {
+		return errDetached
+	}
+	switch d.epState(dci) {
+	case epHalted:
+		if _, err := h.command(0, 0, 0,
+			uint32(trbResetEP)<<trbTypeShift|uint32(dci)<<16|uint32(d.Slot)<<24, "reset endpoint"); err != nil {
+			return err
+		}
+	case epRunning:
+		if _, err := h.command(0, 0, 0,
+			uint32(trbStopEP)<<trbTypeShift|uint32(dci)<<16|uint32(d.Slot)<<24, "stop endpoint"); err != nil {
+			return err
+		}
+	}
+	r.resetRing()
+	deq := r.deqPtr()
+	if _, err := h.command(uint32(deq), uint32(deq>>32), 0,
+		uint32(trbSetTRDeq)<<trbTypeShift|uint32(dci)<<16|uint32(d.Slot)<<24, "set TR dequeue pointer"); err != nil {
 		return err
 	}
-	f.ring.resetRing()
-	deq := f.ring.deqPtr()
-	_, err := h.command(uint32(deq), uint32(deq>>32), 0,
-		uint32(trbSetTRDeq)<<trbTypeShift|uint32(f.dci)<<16|uint32(d.Slot)<<24, "set TR dequeue pointer")
-	return err
+	h.dropRing(d.Slot, r)
+	return nil
 }
 
 // Err geeft de laatste transferfout van dit apparaat (nil zolang alles loopt).

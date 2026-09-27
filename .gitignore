@@ -164,3 +164,10 @@ uefi-esp-o6n-agent/
 # ESPSUF). Build-output met een node-config erin, dus nooit de boom in.
 uefi-esp-altra/
 uefi-esp-altra-agent/
+# Codec-firmware (van CIX) en teststream die image/flip-bundle.sh FWDIR=...
+# alleen voor een meetbundel in de kern zet; nooit de geschiedenis in.
+metal/cmd/hopos/codecblob/*.fwb
+metal/cmd/hopos/codecblob/*.hevc
+
+# macOS Finder-metadata.
+.DS_Store

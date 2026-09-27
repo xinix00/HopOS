@@ -339,6 +339,19 @@ const (
 	// timer op diens heap — het bare-metal-equivalent van Linux'
 	// reschedule-IPI. Eén schrijver: de switcher.
 	CtxKickTarget = 480
+	// CtxKickNone is wat er staat zolang er nog geen core geyield heeft: een
+	// woord dat buiten de 24 bits van een affiniteit valt en dus nooit
+	// matcht. Nul kan dat niet zijn, want nul is een ECHT adres — fysieke
+	// core 0 — en dat was de O6N-hang van 21-09: een app van vijf cores
+	// krijgt een ketenschakel voor de core die zijn runtime lazy nooit
+	// opvraagt, en met 0 erin ving die dode schakel élke wek naar de
+	// primaire op (die op dat board juist op fysieke core 0 staat, omdat de
+	// UEFI-laag HOP's eigen core op de boot-core van de firmware legt). De
+	// primaire sliep zonder wektijd door, één sibling spinde 100% en de app
+	// schreef geen logregel meer. Schrijver: kern/slots bij het opzetten van
+	// de keten (prepareSMPContexts); daarna schrijft elke core zijn eigen
+	// affiniteit bij zijn yield.
+	CtxKickNone = 1 << 63
 	// CtxWakes (ARM): hoe vaak een sibling déze bewoner via HVC #4 wekte —
 	// de meetlat van het wekpad, naast CtxSleeps. Schrijver: de switcher van
 	// de wekkende core (in de regel van CtxWake; het wekken zelf schrijft

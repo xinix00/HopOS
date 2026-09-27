@@ -52,6 +52,7 @@ func init() {
 	// kern/slots zelf: dat pakket is host-getest en driver/dvfs sleept via
 	// cpu/idle tamago-only code mee.
 	dvfs.SlotCtrl = slots.CtrlPageOf
+	clockQuery = dvfs.Query
 
 	// Node-identiteit-terugval (P2b/C5): het board-serial — twee nodes op één
 	// LAN mogen nooit allebei "hopos-1" heten.

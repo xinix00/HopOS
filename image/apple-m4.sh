@@ -38,10 +38,13 @@ mkdir -p out
 # zodra wij het bootobject zijn — dan is er geen loader meer die hem in het
 # geheugen legt, en dit board kan zijn eigen bootmedium nog niet lezen. Zelfde
 # mechaniek als de LicheeRV; de bestemming is gitignored, want er kan een echte
-# apikey in staan. Zonder CFG blijft het beeld zoals het was: config van de
-# loader, en zonder loader boot de node headless.
+# apikey in staan. Zonder CFG de headless-template — een van de twee configs
+# die elke node draait (de M4 heeft geen scanout, dus geen GUI-variant). Tot
+# 25-09 bakte een agent-image zonder CFG géén config in, en draaide de M4 als
+# hopos-<random> met een open API.
 if [ "${AGENT:-0}" = 1 ]; then
 	TARGET=./cmd/hopos; NAME=hopos-apple; TAGS="apple linkcpuinit highram"
+	CFG="${CFG:-image/hopos-headless.cfg}"
 	if [ -n "${CFG:-}" ]; then
 		# Pad vanaf de repo-wortel, en luid struikelen als het er niet is: de
 		# bestemming is gedeelde build-staat (licheerv-agent.sh en de gate
@@ -76,7 +79,7 @@ fi
 # (apple.RamBase): de +0x10000-vorm van elk board.
 GOWORK="$DIR/image/apple/go.work" GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 	"$TAMAGO" build -tags "$TAGS" -trimpath \
-	-ldflags "-T 0x10100010000 -R 0x1000" -o "out/$NAME.elf" "$TARGET"
+	-ldflags "-T 0x10100010000 -R 0x1000 $VERSION_X" -o "out/$NAME.elf" "$TARGET"
 
 # ELF → Apple-bootobject: geen arm64-Image-header (die is van Linux en zegt
 # iBoot niets), maar de twee stubs uit board/apple vooraan. Offset 0 is waar een

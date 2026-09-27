@@ -111,11 +111,46 @@ func wakeRX(i int) {
 	}
 }
 
+// wakerTick: hoe vaak de wekker rondkijkt, en daarmee de korrel van élke wek
+// die niet rechtstreeks aankomt. GEMETEN 21-09 (L83 p53): een app wordt in de
+// trage toestand ~2,7 keer per verbinding door déze tik gewekt in plaats van
+// door de directe RX-kick, en dat is precies het gat tussen 1,1 en 3,5 ms per
+// verbinding — op 200µs zakt de cyclus mee naar 1,2 ms en volgt de
+// timer-overslaap van de app (213 → 49 µs) hem netjes.
+//
+// Waarom hij tóch op een milliseconde staat: deze lus wekt HOP's core, en op
+// een stille node is dat de grootste idle-post (M4: ~1.000 wekken/s). Vijf
+// keer zo vaak kijken kost vijf keer dat vermogen voor een latency die er pas
+// toe doet als de directe kick zijn doel mist. De reparatie hoort dáár: de
+// kick die niet aankomt (zie L83 p53), niet hier.
+var wakerTick = time.Millisecond
+
 func waker() {
 	for {
-		time.Sleep(time.Millisecond)
+		time.Sleep(wakerTick)
 		wakeSleeping(dev.Counter())
 	}
+}
+
+// Running meldt of een context van slot i (de primaire of een SMP-core van
+// dezelfde eenheid, CtxUnitSlot) nu op zijn core rekent, dus niet geyield.
+// Voor de klok-governor (driver/dvfs): een app werkt zijn idle-teller pas
+// bij als hij uit een yield terugkomt, en op een board met yield-idle slaapt
+// een stille app in één lange yield tot zijn volgende timer — een teller die
+// in een 10ms-sample niet steeg is dan slaap, geen rekenwerk (O6N, 23-09).
+func Running(slot int) bool {
+	for i := 1; i <= layout.SMPContextID(layout.NumAppCores()); i++ {
+		if i > layout.MaxSlots && i <= layout.SlotCap {
+			continue
+		}
+		if i != slot && ctxRead(i, layout.CtxUnitSlot) != uint64(slot) {
+			continue
+		}
+		if ctxState(i) == layout.CtxRunning {
+			return true
+		}
+	}
+	return false
 }
 
 // Every resident can make its physical core due, including shared residents

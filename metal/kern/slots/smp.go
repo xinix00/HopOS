@@ -1,6 +1,8 @@
 package slots
 
 import (
+	"fmt"
+
 	"github.com/xinix00/HopOS/metal/v2/abi/layout"
 	"github.com/xinix00/HopOS/metal/v2/dev"
 )
@@ -54,6 +56,27 @@ func smpContext(slot, core int) int {
 	return layout.SMPContextID(core)
 }
 
+// SMPPending laat per levend slot zien of er een ONBEANTWOORD core-verzoek
+// staat (de console-vraag `cores`). Dat getal is het verschil tussen de twee
+// verklaringen als een SMP-app bevriest, en van buiten is het anders niet te
+// zien: de app-runtime spint in goos.Task op CtrlSMPReq tot HOP hem nul maakt
+// (cpu/smp), dus één gemist verzoek verbrandt een core op 100% zonder dat de
+// app nog één logregel schrijft. Staat er een nummer, dan vroeg de app en
+// zweeg HOP; staat er 0, dan heeft de app nooit gevraagd en ligt het aan de
+// app. Precies die vraag bleef 21-09 op de O6N open bij een app met vijf
+// cores: drie secundairen kwamen op, de vierde kreeg geen enkele regel.
+func SMPPending() string {
+	out := ""
+	for i := 1; i <= layout.MaxSlots; i++ {
+		if !ctxLive(ctxState(i)) {
+			continue
+		}
+		out += fmt.Sprintf(" [slot %d: core %d, %d core(s), smpreq=%d]",
+			i, coreOf(i), coreCount(i), ctrlRead(i, layout.CtrlSMPReq))
+	}
+	return out
+}
+
 // prepareSMPContexts initializes the complete trusted sibling chain before
 // dispatch. Secondary CPUs share the app's memory but never its CPU context.
 func prepareSMPContexts(slot, count int) {
@@ -62,6 +85,12 @@ func prepareSMPContexts(slot, count int) {
 		id := smpContext(slot, core)
 		if core != first {
 			dev.Clear(ctxPA(id), layout.CtxLen)
+			// Geen wekdoel tot deze core zelf geyield heeft. Moet expliciet,
+			// want het gewiste blok staat op 0 en dat is de affiniteit van
+			// fysieke core 0 — zie layout.CtxKickNone. Een schakel voor een
+			// core die de app-runtime nooit opvraagt blijft hier staan, en
+			// ving zonder dit de wekken van de primaire op.
+			ctxWrite(id, layout.CtxKickTarget, layout.CtxKickNone)
 			ctxWrite(id, layout.CtxCtrlPA, ctxRead(slot, layout.CtxCtrlPA))
 			ctxWrite(id, layout.CtxRingHeadPA, ctxRead(slot, layout.CtxRingHeadPA))
 			ctxWrite(id, layout.CtxUnitSlot, uint64(slot))

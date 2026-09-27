@@ -17,6 +17,7 @@ import (
 	"github.com/xinix00/HopOS/metal/v2/board/raspi"
 	"github.com/xinix00/HopOS/metal/v2/board/raspi/vcfb"
 	"github.com/xinix00/HopOS/metal/v2/cpu/psci"
+	"github.com/xinix00/HopOS/metal/v2/dev"
 	"github.com/xinix00/HopOS/metal/v2/driver/fb"
 	"github.com/xinix00/HopOS/metal/v2/driver/pcie"
 	"github.com/xinix00/HopOS/metal/v2/driver/vcmail"
@@ -86,6 +87,18 @@ func (b Base) Cores() board.Cores {
 		App:   func() []int { return board.ProbeCores(state, layout.NumAppCores()) },
 		Start: func(c int, entry, arg uint64) error { return psci.On(b.Target(uint64(c)), entry, arg) },
 		State: state,
+		// Het M4-model (20/21-09, zie board/uefi/hop): een app-core yieldt
+		// naar EL2 en slaapt daar in WFE; HOP's wekker (kern/slots waker.go)
+		// kickt hem als zijn deurbel due is. Op deze GIC-400 is de kick
+		// geen SGI maar SEV: een WFE wordt gewekt door élke SEV in het
+		// systeem (ARM ARM D1.6.1), zonder GIC, zonder per-core bank-
+		// registers die alleen de core zelf kan schrijven. De prijs — de
+		// andere app-cores worden mee gewekt — is nul: de event stream wekt
+		// elke WFE toch al iedere ~1 ms, en een core zonder werk slaapt in
+		// één ronde weer. Zonder kick wachtte een slapende app op die tik:
+		// M4 → Pi 5 27 ms per verbinding (L83 p45), tegen 2,4 ms op de M4.
+		IdleMode: func(int) uint64 { return layout.IdleYield },
+		Kick:     func(int) { dev.SEV() },
 	}
 }
 

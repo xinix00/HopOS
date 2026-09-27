@@ -34,47 +34,83 @@ func (s *Server) runRx(res *Result, q url.Values) {
 		src = s.cfg.RxURL
 	}
 	capBytes := int64(qInt(q, "mb", 32, 1, 1024)) << 20
+	// n= parallelle verbindingen, elk een eigen GET van capBytes/n. Eén app
+	// met één socket haalt op een langzaam board niet de draad vol terwijl
+	// zijn cores idle staan: het plafond is venster ÷ pijplijn-round-trip
+	// per VERBINDING (L83 p56/p58). Met deze knop is te meten of "sneller"
+	// gewoon "meer dan één verbinding" heet — wat elk bulkprotocol al doet
+	// (S3-multipart, HTTP/2-streams, een backup in delen).
+	conns := qInt(q, "n", 1, 1, 16)
+	share := capBytes / int64(conns)
+	// Wat er echt gevraagd wordt: bij n=3 blijft er anders een rest over die
+	// geen verbinding haalt, en dan meldt de controle hieronder een te kort
+	// antwoord dat er niet is.
+	capBytes = share * int64(conns)
 	rxProgress.Store(0)
 	rxZeroReads.Store(0)
 	done := make(chan struct{})
 	go s.stallWatch("rx", &rxProgress, done)
 	defer close(done)
 
-	t0 := time.Now()
-	resp, err := leanhttp.GetCall(leanhttp.Call{URL: src, Header: leanhttp.Header{"User-Agent": "HopOS-vitals"}})
-	if err != nil {
-		res.Err = err.Error()
-		return
+	type result struct {
+		got    int64
+		header time.Duration
+		err    string
 	}
-	defer resp.Body.Close()
-	header := time.Since(t0)
+	var progress atomic.Int64
+	out := make([]result, conns)
+	var wg sync.WaitGroup
+	t0 := time.Now()
+	for i := 0; i < conns; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			r := &out[i]
+			h0 := time.Now()
+			resp, err := leanhttp.GetCall(leanhttp.Call{URL: src, Header: leanhttp.Header{"User-Agent": "HopOS-vitals"}})
+			if err != nil {
+				r.err = err.Error()
+				return
+			}
+			defer resp.Body.Close()
+			r.header = time.Since(h0)
+			buf := make([]byte, 64<<10)
+			for r.got < share {
+				want := int64(len(buf))
+				if share-r.got < want {
+					want = share - r.got
+				}
+				n, err := resp.Body.Read(buf[:want])
+				r.got += int64(n)
+				rxProgress.Store(progress.Add(int64(n)))
+				if n == 0 && err == nil {
+					rxZeroReads.Add(1)
+				}
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					r.err = err.Error()
+					return
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	el := time.Since(t0).Seconds()
 
-	buf := make([]byte, 64<<10)
 	var got int64
-	t1 := time.Now()
-	for got < capBytes {
-		want := int64(len(buf))
-		if capBytes-got < want {
-			want = capBytes - got
-		}
-		n, err := resp.Body.Read(buf[:want])
-		got += int64(n)
-		rxProgress.Store(got)
-		if n == 0 && err == nil {
-			rxZeroReads.Add(1)
-		}
-		if got%(8<<20) < int64(n) {
-			s.setNote("rx %d/%d MB", got>>20, capBytes>>20)
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			res.Err = err.Error()
+	var header time.Duration
+	for i := range out {
+		if out[i].err != "" {
+			res.Err = out[i].err
 			return
 		}
+		got += out[i].got
+		if out[i].header > header {
+			header = out[i].header
+		}
 	}
-	el := time.Since(t1).Seconds()
 	if got < capBytes {
 		res.Err = fmt.Sprintf("short benchmark response: read %d bytes, requested %d", got, capBytes)
 		return
@@ -83,7 +119,8 @@ func (s *Server) runRx(res *Result, q url.Values) {
 	res.add("throughput", float64(got)/el/1e6, "MB/s")
 	res.add("read", float64(got>>20), "MB")
 	res.add("header", header.Seconds()*1e3, "ms")
-	res.linef("%s (%d MB available, read %d MB)", src, resp.Length>>20, got>>20)
+	res.add("conns", float64(conns), "")
+	res.linef("%s (%d connection(s), read %d MB)", src, conns, got>>20)
 }
 
 // runStorm vuurt veel korte GETs op de eigen /ping af, standaard via de

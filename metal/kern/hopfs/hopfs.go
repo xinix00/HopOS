@@ -1,8 +1,10 @@
 // Package hopfs is HOP's minimale bestandslaag op de NVMe — de storage van
 // het plan (§3, herzien 2026-07-07): shared dirs (volumes) en de lege
-// per-task roots leven hier. Bewust géén ext4, géén persistentie: de
-// metadata (boom, extents) leeft in HOP's RAM, alleen de bestandsdata staat
-// in 4KB-blokken op de schijf, en bij boot is alles per definitie leeg.
+// per-task roots leven hier. Bewust géén ext4: de metadata (boom, extents)
+// leeft in HOP's RAM, de bestandsdata in 4KB-blokken op de schijf. Sinds
+// 24-09 legt Mount/MountRange die boom ook vast (persist.go): een flip en een
+// koude boot beginnen dan niet meer leeg. New/NewRange blijven de vluchtige
+// vorm, voor tests en voor wie bewust leeg wil beginnen.
 // Alleen HOP raakt dit pakket aan; apps komen er uitsluitend bij via de
 // hop-ABI (metal/kern/slots resolvet hun paden tegen de mount-tabel).
 package hopfs
@@ -60,6 +62,15 @@ type FS struct {
 	max          uint32      // totaal aantal blokken
 	nodes        int         // aantal nodes in de boom (excl. root), tegen OOM
 	index        int         // total file extents, against unbounded fragmentation
+
+	// Vastleggen (persist.go). Alleen gezet via Mount/MountRange.
+	persist  bool
+	slot     uint32      // blokken per snapshot-plek; het metagebied is 2×slot
+	gen      uint64      // generatie van de laatst weggeschreven boom
+	last     int         // plek (0/1) van die boom, -1 = nog geen
+	dirty    bool        // de boom veranderde sinds de laatste commit
+	pending  []diskRange // vrijgegeven, maar de schijf-boom noemt ze nog
+	commitAt int64       // unixnano van de laatste geslaagde commit
 }
 
 // New maakt een lege bestandslaag op de (als leeg beschouwde) schijf.
@@ -136,6 +147,7 @@ func (f *FS) walk(segs []string, mkParents bool) (*node, error) {
 			child = &node{dir: true, children: map[string]*node{}}
 			n.children[s] = child
 			f.nodes++
+			f.dirty = true
 		}
 		n = child
 	}
@@ -296,6 +308,7 @@ func (f *FS) file(path string) (*node, error) {
 		n = &node{}
 		parent.children[name] = n
 		f.nodes++
+		f.dirty = true
 	} else if n.dir {
 		return nil, fmt.Errorf("hopfs: %q is a directory", path)
 	}
@@ -363,9 +376,13 @@ func (f *FS) WriteAt(path string, off uint64, p []byte) error {
 		}
 		if !mapped {
 			f.mapRun(n, extent{uint32(bi), block, run})
+			f.dirty = true
 		}
 		done += chunk
-		n.size = max(n.size, off+done)
+		if off+done > n.size {
+			n.size = off + done
+			f.dirty = true
+		}
 	}
 	return nil
 }
@@ -400,13 +417,13 @@ func (f *FS) Truncate(path string, size uint64) error {
 		keep := 0
 		for _, e := range n.extents {
 			if e.logical >= need {
-				f.freeRun(e.physical, e.count)
+				f.dropRun(e.physical, e.count)
 				f.index--
 				continue
 			}
 			if uint64(e.logical)+uint64(e.count) > uint64(need) {
 				retain := need - e.logical
-				f.freeRun(e.physical+retain, e.count-retain)
+				f.dropRun(e.physical+retain, e.count-retain)
 				e.count = retain
 			}
 			n.extents[keep] = e
@@ -415,6 +432,7 @@ func (f *FS) Truncate(path string, size uint64) error {
 		n.extents = compact(n.extents[:keep])
 	}
 	n.size = size
+	f.dirty = true
 	return nil
 }
 
@@ -456,6 +474,7 @@ func (f *FS) remove(path string, recursive bool) error {
 	}
 	f.release(n)
 	delete(parent.children, name)
+	f.dirty = true
 	return nil
 }
 
@@ -469,7 +488,7 @@ func (f *FS) release(n *node) {
 	}
 	f.index -= len(n.extents)
 	for _, e := range n.extents {
-		f.freeRun(e.physical, e.count)
+		f.dropRun(e.physical, e.count)
 	}
 	n.extents = nil
 }

@@ -8,6 +8,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -60,6 +61,51 @@ func main() {
 	// dvfs-druk-flank.
 	if app.Env("BURN") != "" {
 		burn(app)
+	}
+
+	// Disc-rol: lees de optische drive die de node via zijn volumes aanbiedt
+	// (DISC=<pad>, bijvoorbeeld de mount van kern/slots.DiscPath). Dit is het
+	// bewijs dat een drive voor een app gewoon een bestand is: dezelfde stat
+	// en read als op het volume, over dezelfde weg — het slot-LAN — dus ook
+	// vanaf een andere core of een ander slot. De app kent geen SCSI, geen USB
+	// en geen sectoren.
+	if path := app.Env("DISC"); path != "" {
+		// Eerst het net: sinds ABI 6 lopen system calls over het slot-LAN, dus
+		// zonder netstack is er geen weg naar HOP. Dat ís het antwoord op
+		// "gaat dat ook over het netwerk" — ja, precies zoals de NVMe.
+		if _, err := appnet.Up(app); err != nil {
+			exitf(app, 1, "DISC net: %v", err)
+		}
+		size, err := app.Stat(path)
+		if err != nil {
+			exitf(app, 1, "DISC %s: %v", path, err)
+		}
+		app.Logf("DISC %s: %d bytes (%d MB)", path, size, size>>20)
+		b, err := app.ReadAt(path, 0, 512)
+		if err != nil {
+			exitf(app, 2, "DISC %s: read: %v", path, err)
+		}
+		app.Logf("DISC %s: first %d bytes: %x", path, len(b), b[:min(32, len(b))])
+		// Sector 16 is waar een ISO9660-volumedescriptor hoort en sector 256
+		// waar UDF zijn anker legt: twee kansen om te zeggen wát erop staat,
+		// zonder een bestandssysteem te bouwen.
+		for _, s := range []struct {
+			lba  uint64
+			mark string
+			name string
+		}{{16, "CD001", "ISO9660"}, {256, "NSR0", "UDF"}} {
+			b, err := app.ReadAt(path, s.lba*2048, 64)
+			if err != nil {
+				app.Logf("DISC sector %d: %v", s.lba, err)
+				continue
+			}
+			if bytes.Contains(b, []byte(s.mark)) {
+				app.Logf("DISC sector %d: %s found", s.lba, s.name)
+			} else {
+				app.Logf("DISC sector %d: no %s marker (%x)", s.lba, s.name, b[:8])
+			}
+		}
+		exitf(app, 0, "DISC %s: readable over the slot LAN", path)
 	}
 
 	// Isolatietest: grijp bewust buiten de eigen kooi. Onder stage-2 hoort

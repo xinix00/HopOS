@@ -80,6 +80,10 @@ type servicer struct {
 	// nooit ophoudt — de transfer breekt af en de run-lus ziet stop.
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// De codec-sessies van deze lifecycle (codecabi.go). evictServicer sluit
+	// ze; een verzoek dat daarna nog binnenkomt vindt een dichte tabel.
+	codec codecHandles
 }
 
 var (
@@ -143,7 +147,20 @@ func Scrub(addr, size uintptr, progress func(done, total uintptr)) {
 }
 
 // prepareMemory is gedeeld door blob- en streaming-plaatsing.
-func prepareMemory(addr, size uintptr) { Scrub(addr, size, nil) }
+func prepareMemory(addr, size uintptr) {
+	// Een grote app-partitie is eigen DRAM, geen MMIO. Met scalaire
+	// Device-stores kostte het wissen van 24 GiB op de O6N negen minuten, en
+	// verliep de image-download nog vóór zijn eerste read. Normal-NC staat
+	// bulk-nullen en write-combining toe, terwijl het plaatsen van de image
+	// ongecachet blijft. De gestopte partitie ligt precies op 2 MiB; er wordt
+	// geen naburige firmware of levend app-geheugen omgemapt.
+	if size >= 1<<30 {
+		if err := memattr.NormalNC(addr, size); err != nil {
+			fmt.Printf("partition bulk clear unavailable: %v\n", err)
+		}
+	}
+	Scrub(addr, size, nil)
+}
 
 // lifecycleWindow serialiseert een lifecycle (zie lifecycleMu). De vorm met
 // een closer is gebleven zodat de drie aanroepers (Start, StartStaged, Stop)
@@ -322,6 +339,11 @@ func evictServicer(i int) {
 		old.cancel()
 		close(old.stop)
 		<-old.done
+		// Een system-verbinding van deze servicer kan nog een verzoek in de
+		// lucht hebben — daar wacht done niet op. De tabel dicht maakt dat
+		// verzoek onschadelijk: het vindt geen sessie meer, en een Open die
+		// nu nog klaarkomt sluit de zijne zelf.
+		old.codec.shut()
 	}
 }
 
@@ -467,7 +489,8 @@ func (s *servicer) dispatchSMP() {
 	if offset < 1 || offset >= cores {
 		// Buiten het toegewezen core-bereik: weiger (de app hoort dit niet te
 		// vragen). Verzoek intrekken zodat de app niet eeuwig wacht.
-		fmt.Printf("HOPOS_SMP_REJECT slot %d: core %d outside [%d,%d]\n", s.slot, requested, s.slot+1, s.slot+cores-1)
+		fmt.Printf("HOPOS_SMP_REJECT slot %d: core %d outside [%d,%d] (trusted width %d)\n",
+			s.slot, requested, s.slot+1, s.slot+cores-1, cores)
 		ctrlWrite(s.slot, layout.CtrlSMPReq, 0)
 		dev.MB()
 		return
@@ -476,6 +499,14 @@ func (s *servicer) dispatchSMP() {
 	id := smpContext(s.slot, c)
 	if coreRunning(c) && ctxLive(ctxState(id)) {
 		// Een herhaald verzoek start dezelfde context niet nogmaals.
+		//
+		// Dit pad was stil, en dat is precies één van de twee verklaringen
+		// als een SMP-app blijft hangen: óf hij vroeg zijn core nooit, óf
+		// hij vroeg hem en wij zeiden "die draait al" terwijl hij nooit
+		// meedeed. Zonder regel is dat verschil niet te zien — gemeten
+		// 22-09 op de O6N: een app met vijf cores kreeg er vier, zonder één
+		// foutregel op de console.
+		fmt.Printf("slot %d: SMP core %d already live — request cleared\n", s.slot, c)
 		ctrlWrite(s.slot, layout.CtrlSMPReq, 0)
 		return
 	}
@@ -1158,6 +1189,11 @@ func armSlot(i int, base, size uint64, entry, memLimit uint64, cores int, envBlo
 	// doorbell-peek (layout.CtxRingHeadPA; de wek-drempel schrijft de app
 	// zelf op CtrlRXDoor). Zelfde publicatiepad als CtxCtrlPA.
 	ctxWrite(i, layout.CtxRingHeadPA, uint64(netPA)+uint64(layout.NetRXOff)+ring.HeadOff)
+	// En nog geen wekdoel: wat de vorige bewoner van dit blok achterliet is
+	// de affiniteit van een core die hier niets meer mee te maken heeft
+	// (layout.CtxKickNone). De echte waarde schrijft deze core zelf bij zijn
+	// eerste yield.
+	ctxWrite(i, layout.CtxKickTarget, layout.CtxKickNone)
 	prepareSMPContexts(i, cores)
 	// coreParks erbij: een core die niet resetbaar is heeft ALTIJD de
 	// boot-pending-route — zijn switcher draait er vanaf de boot (cageInit
@@ -1320,6 +1356,13 @@ func wakeForStop(i int) {
 // freePartition=false bewaart de volledige eigenaar, inclusief core-span en
 // grants. Pas een volgende bevestigde Stop mag deze administratie opruimen.
 func releaseSlot(i int, freePartition bool) {
+	// Hardware-sessies van de codec eerst: die zijn er maar een handvol op de
+	// hele node, en een app die omvalt met een open decoder zou er anders
+	// eentje vasthouden tot de volgende kern-flip. Ook op het quarantainepad —
+	// daar blijft de partitie staan, maar de app is hoe dan ook dood. De
+	// sessietabel van de taak is al dicht (evictServicer); dit vangt wat er
+	// buiten die tabel om nog op dit slot stond.
+	ReleaseCodecs(i)
 	if !freePartition {
 		quarantineSlot(i)
 		return

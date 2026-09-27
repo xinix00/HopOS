@@ -87,9 +87,6 @@ func remap(va, size uintptr, block uint64) error {
 	}
 	lo := va &^ (block2M - 1)
 	hi := (va + size + block2M - 1) &^ (block2M - 1)
-	if lo>>30 != (hi-1)>>30 {
-		return fmt.Errorf("memattr: venster %#x..%#x kruist een GB-grens", va, va+size)
-	}
 
 	// AFRONDING MAG NIET BUITEN HET VENSTER VALLEN. De MMU kan hier niet
 	// fijner dan 2MB, dus een venster dat niet op die grens ligt, zou de buren
@@ -120,13 +117,24 @@ func remap(va, size uintptr, block uint64) error {
 		mairOK = true
 	}
 
-	l2, err := l2ForGB(lo >> 30)
-	if err != nil {
-		return err
+	// Een venster mag over GB-grenzen lopen — een codec-arena is al gauw
+	// honderden megabytes en landt zelden binnen één gigabyte. Wél eerst
+	// ALLE tabellen ophalen en dan pas schrijven: zou het ophalen halverwege
+	// mislukken, dan staat de ene helft van het venster op een ander
+	// attribuut dan de andere, en dat is een fout die zich pas veel later
+	// meldt.
+	first, last := lo>>30, (hi-1)>>30
+	tables := make([]*[512]uint64, 0, last-first+1)
+	for gb := first; gb <= last; gb++ {
+		l2, err := l2ForGB(gb)
+		if err != nil {
+			return err
+		}
+		tables = append(tables, l2)
 	}
-	gbBase := (lo >> 30) << 30
 	for a := lo; a < hi; a += block2M {
-		l2[(a-gbBase)>>21] = uint64(a) | block
+		gb := a >> 30
+		tables[gb-first][(a-(gb<<30))>>21] = uint64(a) | block
 	}
 	flushTLB()
 	return nil

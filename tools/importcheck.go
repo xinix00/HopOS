@@ -72,6 +72,15 @@ func allowed(cat, imp string) bool {
 		return imp == "dev" || imp == "board" ||
 			ifirst == "abi" || ifirst == "cpu" || ifirst == "fw" ||
 			ifirst == "driver" || ifirst == "kern" || ifirst == "gui"
+	case "media":
+		// Het media-vlak, opt-in via `-tags "gui media"`: de VPU-driver en de
+		// optische drive. Compute kent media niet — alleen cmd/ importeert
+		// media terug. Het contract dat de ABI draagt (driver/codec) ligt
+		// eronder, zoals driver/fb onder gui; media zelf leunt alleen op de
+		// lagen die elke driver mag gebruiken.
+		return imp == "dev" ||
+			ifirst == "abi" || ifirst == "cpu" || ifirst == "fw" ||
+			ifirst == "driver" || ifirst == "media"
 	case "appboard":
 		return false // het app-contract importeert niets
 	case "board-contract":
@@ -95,9 +104,10 @@ func allowed(cat, imp string) bool {
 			imp == "driver/scmi" || // de console-klok van de O6N loopt via de SCP (early_o6n.go)
 			ifirst == "abi" || ifirst == "cpu" || ifirst == "fw"
 	case "board-hop":
-		// De HOP-bedrading mag alles behalve kern/app/cmd/gui (het Display-
-		// contract match structureel — daar is geen import voor nodig).
-		return icat != "kern" && icat != "app" && icat != "cmd" && icat != "gui"
+		// De HOP-bedrading mag alles behalve kern/app/cmd/gui/media (het
+		// Display-contract match structureel — daar is geen import voor nodig;
+		// de codec knoopt cmd aan, media_<board>.go).
+		return icat != "kern" && icat != "app" && icat != "cmd" && icat != "gui" && icat != "media"
 	case "app":
 		// De app-kant kent HOP uitsluitend via abi/ (+ dev/cpu/appboard/
 		// board-basis om op te draaien) — indeling.md regel 2, hier hard.

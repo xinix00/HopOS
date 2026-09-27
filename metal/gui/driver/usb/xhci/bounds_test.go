@@ -35,9 +35,18 @@ func TestControllerTimeoutKeepsDMAOwned(t *testing.T) {
 	regs := make([]uint64, 8)
 	p := uintptr(unsafe.Pointer(&regs[0]))
 	defer runtime.KeepAlive(regs)
-	h := &HC{op: p, evt: &evring{base: p, n: 1, cycle: 1}}
-	if _, err := h.waitEvent(func(event) bool { return false }, 0, "test"); err == nil || h.poisoned == nil {
-		t.Fatal("timeout lost ownership")
+	cmdMem := make([]uint64, 512)
+	cr := uintptr(unsafe.Pointer(&cmdMem[0]))
+	defer runtime.KeepAlive(cmdMem)
+	h := &HC{op: p, db: p, evt: &evring{base: p, n: 1, cycle: 1}, cmd: newRing(cr, uint64(cr), 4096)}
+	// Een transfer die uitblijft is een apparaat dat hapert: de controller
+	// blijft van ons, en de aanroeper reset alleen die endpoint.
+	if _, err := h.waitEvent(func(event) bool { return false }, 0, "test"); !errors.Is(err, errTimeout) || h.poisoned != nil {
+		t.Fatalf("transfer timeout: err=%v poisoned=%v", err, h.poisoned)
+	}
+	// Een commando dat uitblijft is de controller zelf: ownership onbekend.
+	if _, err := h.command(0, 0, 0, 0, "test"); err == nil || h.poisoned == nil {
+		t.Fatal("command timeout lost ownership")
 	}
 	dev.Write32(p+opUSBSts, 0)
 	h.running = true

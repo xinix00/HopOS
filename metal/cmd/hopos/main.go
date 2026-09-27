@@ -364,6 +364,9 @@ func main() {
 	// USB-invoer (alleen de gui-smaak): toetsenbord en muis op het ijzer. Hier
 	// en niet eerder, want de gebeurtenissen gaan over de interne switch naar
 	// de display-app — dezelfde POST /input die de browser-KVM gebruikt.
+	// De opslag-haak vóór de scan: een drive die al in de poort zit wordt
+	// tijdens de eerste ronde gevonden (disc.go).
+	startDisc()
 	startUSBInput()
 
 	// Klok via SNTP. Geen harde eis: HOP's HMAC-auth is klok-vrij, dus een
@@ -399,11 +402,12 @@ func main() {
 		if disk, first, count, err := bd.Disk(); err != nil {
 			fmt.Printf("storage: %v — running without volumes\n", err)
 		} else {
-			if bootParam("hopos.nvmewipe") == "1" || DefaultNVMeWipe == "1" {
+			wipe := storageWipe(isFlip)
+			if wipe {
 				nvmeWipe(disk, first, count) // beide partitietabellen weg (zie nvmewipe.go)
 			}
-			fsys := hopfs.NewRange(disk, first, count)
-			slots.UseFS(fsys)
+			fsys, found := hopfs.MountRange(disk, first, count, storageFresh(isFlip, wipe))
+			useFS(fsys, found, isFlip)
 			fmt.Printf("storage: nvme %q — %d MB of our own, LBA %d..%d — volumes available\n",
 				disk.Model, count*disk.BlockSize>>20, first, first+count-1)
 			if bootParam("hopos.nvmebench") == "1" {
@@ -416,9 +420,21 @@ func main() {
 	} else if disk, err := nvme.Probe(win, layout.NVMeDMABase, layout.NVMeDMASize); err != nil {
 		fmt.Printf("storage: %v — running without volumes\n", err)
 	} else {
-		slots.UseFS(hopfs.New(disk))
+		fsys, found := hopfs.Mount(disk, storageFresh(isFlip, storageWipe(isFlip)))
+		useFS(fsys, found, isFlip)
 		fmt.Printf("storage: nvme %q, %d MB — volumes available\n",
 			disk.Model, disk.Blocks*disk.BlockSize>>20)
+	}
+
+	// De videocodec: ná de opslag, want zijn firmware-blobs staan op het
+	// volume. Een node zonder codec-ijzer of zonder volume draait door zonder
+	// de dienst; er gaat niets stuk als dit niet lukt.
+	codecUp(slots.FS())
+	// Het meetinstrument draait náást de node, niet ervoor: het praat met
+	// firmware die kan stilvallen, en een node die daardoor zijn agent niet
+	// opbrengt is onbereikbaar precies wanneer je wilt weten wat er misging.
+	if p := bootParam("hopos.codecdemo"); p != "" {
+		go codecDemo(p)
 	}
 
 	// De bewoners van de vórige kern overnemen (kern-flip): pas hier, want een
@@ -709,8 +725,8 @@ func main() {
 
 	// De flip is pas écht geland als de agent gaat draaien: recorder leeg.
 	kernflip.BootLanded()
-	fmt.Printf("hop: agent starting — node %s, agent :%d, leader :%d — HOPOS_AGENT_UP\n",
-		cfg.Node.ID, cfg.Node.Port, cfg.Node.Port+1000)
+	fmt.Printf("hop: agent starting — node %s (%s), agent :%d, leader :%d — HOPOS_AGENT_UP\n",
+		cfg.Node.ID, agentboot.Version, cfg.Node.Port, cfg.Node.Port+1000)
 
 	// PID-1-regel: Run blokkeert; keert hij terug, dan is dat een fout.
 	err := agentboot.Run(context.Background(), agentboot.Options{

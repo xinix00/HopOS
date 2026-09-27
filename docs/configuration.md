@@ -56,13 +56,31 @@ Defaults below refer to code behavior unless a template default is explicitly st
 | `hopos.s3.region` | String; empty | S3 region. |
 | `hopos.s3.key`, `hopos.s3.secret` | Strings; empty | S3 credentials retained by the node. |
 | `hopos.s3.pathstyle` | `1` enables it | Use path-style S3 addressing. |
+| `hopos.storage` | `stateless` or `stateful`; `stateless` | What a cold boot does with the NVMe volumes. `stateless` starts empty: the saved file tree is cleared, so nothing that settled on the node survives a reboot. `stateful` restores the last saved tree, saved every 10 s while it changes. A kernel flip always keeps the volumes, whatever this says: running applications keep their data. A flip that dies in its boot and comes back cold through the watchdog falls under this setting. |
 | `hopos.wd` | `off` disables it | Otherwise use the board's watchdog policy where hardware is wired. |
 | `hopos.blackbox` | `1` | Print the previous boot's retained console. |
 | `hopos.rxpoll` | `1` | Force receive polling. Physical IRQ integration and its test scope are tracked in [status](status.md). |
 | `hopos.idleyield` | `1` | Force the application's idle-yield path for diagnostics. |
-| `hopos.idlestat` | `1` | Enable idle statistics output. |
+| `hopos.idlestat` | `1` | Print idle, waker and interrupt statistics on the console every 10 s. Off unless set; no release image sets it — it is a measuring instrument. |
 
-The UEFI stub reads at most 16 KiB of `hopos.cfg` (builds before 17 September 2026 read 4 KiB and silently dropped the rest; the GUI template is 8 KiB). `hopos.nvmewipe=1` zeroes the first and last MiB of the HopOS disk window at boot, removing both GPT copies so firmware stops booting a leftover OS from the NVMe; remove the line after one boot. `hopos.nvmebench=1` enables a boot-time disk benchmark that performs writes. It belongs in a controlled storage test, not an ordinary node template. Board-specific settings belong in [boards and drivers](boards-drivers.md).
+The UEFI stub reads at most 16 KiB of `hopos.cfg` (builds before 17 September 2026 read 4 KiB and silently dropped the rest; the GUI template is about 9 KiB). `hopos.nvmewipe=1` zeroes the first and last MiB of the HopOS disk window at a cold boot, removing both GPT copies so firmware stops booting a leftover OS from the NVMe, and clears the saved file tree; a flip ignores it. Remove the line after one boot. `hopos.nvmebench=1` enables a boot-time disk benchmark that performs writes. It belongs in a controlled storage test, not an ordinary node template. Board-specific settings belong in [boards and drivers](boards-drivers.md).
+
+### Clock and media keys
+
+These keys only act on a board or build flavour that has the hardware; everywhere else they are ignored.
+
+| Key | Type / default | Meaning |
+| --- | --- | --- |
+| `hopos.clock` | `dvfs`, `max` or `firmware`; `dvfs` | Orion O6N CPU clock policy over the `_CPC` fast channels. `dvfs` follows load (up within about 20 ms, down after 30 s quiet), `max` pins every domain at its ceiling, `firmware` leaves the boot operating point alone. The console command `clock [full\|quiet\|auto]` shows or pins the policy for a measurement. |
+| `hopos.mhz` | Integer MHz; no cap | Caps the ceiling of every O6N clock domain under `dvfs` and `max`, never below the domain's lowest level. The value is converted through `_CPC` NominalFrequency; a package without frequencies takes it as a raw perf value and says so on the console. |
+| `hopos.codec` | Integer MiB; `768`, `0` disables | Media flavour (`-tags "gui media"`) on a board with a codec block, currently the Orion O6N: physical memory reserved for the video codec's page tables, firmware and working memory. The default carries one 10-bit 4K stream (UHD Blu-ray, 24 MiB per reference frame); a node that only decodes 8-bit can use `256`. The firmware is read from `/firmware/<codec>.fwb` on the node volume. |
+| `hopos.codecdemo` | Path on the volume; off | Measuring instrument: HOP decodes this file itself at boot and prints frame count and fps. The codec follows from the file extension. Not for release images. |
+| `hopos.codecdemo.chunk` | KiB; `256` | Bitstream bytes per input buffer, capped at 40 MiB. A chunk that ends mid-picture yields a corrupt frame. |
+| `hopos.codecdemo.pixel` | `p010` or `nv12`; `p010` | Output format. |
+| `hopos.codecdemo.hash` | `1` | Print an FNV-1a hash of the visible bytes of each frame; `tools/refhash` computes the same hash from ffmpeg. Hashing costs more than decoding, so the fps of such a run is not a decoder speed. |
+| `hopos.codecdemo.yuv` | `1` | Also write the frames to `<path>.yuv`. |
+| `hopos.codecdemo.bufs` | Integer; `12` | Frame buffers lent to the decoder; at least its reported minimum plus one. |
+| `hopos.codecdemo.trace` | `1` | Print every firmware message. |
 
 The watchdog's flip-boot grace is two minutes of raw architectural counter time, shared across early bring-up and the initial canary phase. Cold boot retains its existing unlimited bring-up policy until first agent liveness. Subsequent pets require fresh self-connections to the agent. This does not test physical NIC ingress; see [status](status.md) for hardware reset evidence.
 
