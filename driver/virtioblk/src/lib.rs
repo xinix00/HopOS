@@ -2,7 +2,7 @@
 //!
 //! De vorm is die van de NVMe-driver uit de Go-kern
 //! (`OLD/metal/driver/nvme`): één verzoek tegelijk, één DMA-buffer, en een
-//! synchrone `read`/`write`/`flush` achter [`kern::hopfs::BlockDevice`].
+//! synchrone `read`/`write`/`flush` achter [`blkdev::BlockDevice`].
 //! Eén in-flight verzoek is geen beperking maar de vorm: de eigenaar
 //! (de hopfs-actor, `&mut self`) doet toch één ding tegelijk, en zo hoeft
 //! de driver geen tags, geen rij en geen herordening te kennen.
@@ -585,17 +585,19 @@ impl VirtioBlk {
     }
 }
 
-impl kern::hopfs::BlockDevice for VirtioBlk {
-    fn read(&mut self, lba: u64, buf: &mut [u8]) -> kern::Result {
-        self.read_at(lba, buf).map_err(|_| kern::Error::Io { lba })
+impl blkdev::BlockDevice for VirtioBlk {
+    fn read(&mut self, lba: u64, buf: &mut [u8]) -> blkdev::Result {
+        self.read_at(lba, buf)
+            .map_err(|_| blkdev::Error::Io { lba })
     }
 
-    fn write(&mut self, lba: u64, buf: &[u8]) -> kern::Result {
-        self.write_at(lba, buf).map_err(|_| kern::Error::Io { lba })
+    fn write(&mut self, lba: u64, buf: &[u8]) -> blkdev::Result {
+        self.write_at(lba, buf)
+            .map_err(|_| blkdev::Error::Io { lba })
     }
 
-    fn flush(&mut self) -> kern::Result {
-        self.sync().map_err(|_| kern::Error::Io { lba: 0 })
+    fn flush(&mut self) -> blkdev::Result {
+        self.sync().map_err(|_| blkdev::Error::Dead)
     }
 }
 

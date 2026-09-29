@@ -32,6 +32,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "blkdev"
+version = "3.0.0"
+
+[[package]]
 name = "board"
 version = "3.0.0"
 dependencies = [
@@ -97,8 +101,8 @@ dependencies = [
 name = "driver-virtioblk"
 version = "3.0.0"
 dependencies = [
+ "blkdev",
  "dev",
- "kern",
 ]
 
 [[package]]
@@ -152,6 +156,7 @@ name = "kern"
 version = "3.0.0"
 dependencies = [
  "abi",
+ "blkdev",
  "bounded",
  "leanelf",
  "sync",

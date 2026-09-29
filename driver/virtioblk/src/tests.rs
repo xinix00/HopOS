@@ -3,7 +3,7 @@
 //! klaarzette en voert hem uit op een schijf in RAM, zoals QEMU dat doet.
 
 use super::*;
-use kern::hopfs::BlockDevice;
+use blkdev::BlockDevice;
 use std::cell::RefCell;
 use std::vec;
 use std::vec::Vec;
@@ -192,6 +192,6 @@ fn a_silent_device_kills_the_driver_loudly() {
     assert_eq!(b.read_at(2, &mut [0; 512]), Err(Error::Dead));
     assert_eq!(
         BlockDevice::write(&mut b, 3, &[0; 512]),
-        Err(kern::Error::Io { lba: 3 })
+        Err(blkdev::Error::Io { lba: 3 })
     );
 }

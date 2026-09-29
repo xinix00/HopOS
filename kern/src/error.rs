@@ -145,3 +145,15 @@ impl fmt::Display for Error {
         }
     }
 }
+
+impl From<blkdev::Error> for Error {
+    /// Een blokfout wordt de I/O-fout van de kern, mét zijn LBA; een dood
+    /// device of een verzoek buiten de schijf heeft geen betere plek dan de
+    /// LBA waar het misging.
+    fn from(e: blkdev::Error) -> Self {
+        match e {
+            blkdev::Error::Io { lba } | blkdev::Error::OutOfRange { lba, .. } => Self::Io { lba },
+            blkdev::Error::Dead => Self::Io { lba: 0 },
+        }
+    }
+}

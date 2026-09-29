@@ -131,20 +131,24 @@ pub(crate) struct Ram {
 }
 
 impl BlockDevice for Ram {
-    fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result {
+    fn read(&mut self, lba: u64, buf: &mut [u8]) -> blkdev::Result {
         let o = lba as usize * 512;
-        buf.copy_from_slice(self.data.get(o..o + buf.len()).ok_or(Error::Io { lba })?);
+        buf.copy_from_slice(
+            self.data
+                .get(o..o + buf.len())
+                .ok_or(blkdev::Error::Io { lba })?,
+        );
         Ok(())
     }
-    fn write(&mut self, lba: u64, buf: &[u8]) -> Result {
+    fn write(&mut self, lba: u64, buf: &[u8]) -> blkdev::Result {
         let o = lba as usize * 512;
         self.data
             .get_mut(o..o + buf.len())
-            .ok_or(Error::Io { lba })?
+            .ok_or(blkdev::Error::Io { lba })?
             .copy_from_slice(buf);
         Ok(())
     }
-    fn flush(&mut self) -> Result {
+    fn flush(&mut self) -> blkdev::Result {
         self.flushes += 1;
         Ok(())
     }

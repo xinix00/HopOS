@@ -8,9 +8,7 @@ description = "virtio-blk over MMIO (QEMU virt): één virtqueue, één verzoek 
 
 [dependencies]
 dev = { path = "../../dev" }
-# Het blokcontract van hopfs (`kern::hopfs::BlockDevice`) en zijn fout. De
-# kern hangt zelf van geen driver af, dus dit is geen kring.
-kern = { path = "../../kern" }
+blkdev = { path = "../../blkdev" }
 
 [lints]
 workspace = true

@@ -12,6 +12,7 @@ members = [
     "cpu",
     "fw",
     "netdev",
+    "blkdev",
     "driver/pl011",
     "driver/gicv3",
     "driver/virtionet",

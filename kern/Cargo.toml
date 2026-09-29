@@ -7,6 +7,7 @@ publish.workspace = true
 description = "De orchestrator-mechanismen: slots en partities, de kooi, de system-API, hopfs, de kern-flip, de console."
 
 [dependencies]
+blkdev = { path = "../blkdev" }
 # De fundamenten en de ABI; de ijzerkant komt binnen als traits
 # (src/cage.rs), zodat `cpu`, `board` en `net` erop aansluiten zonder dat de
 # kern van hen afhangt.

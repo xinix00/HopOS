@@ -442,7 +442,7 @@ impl<'s, D: BlockDevice, L: Console> FsActor<'s, D, L> {
                     path.set(&m.shared)?;
                     fs.mkdir_all(path.as_bytes())?;
                 }
-                Ok(())
+                Ok::<(), Error>(())
             })
             .ok_or(Error::Denied)??;
         if let Some(p) = self.prepared.get_mut(i) {

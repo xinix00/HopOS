@@ -1,0 +1,10 @@
+[package]
+name = "blkdev"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Het contract tussen een blok-driver en hopfs: lezen, schrijven, flushen op LBA's. Onder driver én kern, zoals netdev."
+
+[lints]
+workspace = true

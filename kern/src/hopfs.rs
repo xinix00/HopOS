@@ -34,18 +34,10 @@ const HDR_LEN: usize = HDR_HASH_OFF + 32;
 /// Tegen een kapotte of vijandige boom die de stack opblaast.
 const MAX_DEPTH: usize = 4096;
 
-/// Het blokapparaat onder hopfs: precies de grens die hopfs nodig heeft.
-/// De NVMe-driver levert hem; de tests een schijf in RAM.
-pub trait BlockDevice {
-    /// Leest `buf.len()` bytes vanaf `lba`.
-    fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result;
-    /// Schrijft `buf` vanaf `lba`.
-    fn write(&mut self, lba: u64, buf: &[u8]) -> Result;
-    /// Maakt alles wat geschreven is duurzaam (NVMe FLUSH).
-    fn flush(&mut self) -> Result {
-        Ok(())
-    }
-}
+/// Het blokapparaat onder hopfs. Het contract woont in `blkdev`, onder
+/// driver én kern (handboek §7); hier alleen de naam, zodat `hopfs` leest
+/// als voorheen.
+pub use blkdev::BlockDevice;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct Extent {
@@ -468,7 +460,7 @@ impl<D: BlockDevice> Fs<D> {
                 if !mapped {
                     self.free_run(block, run)?;
                 }
-                return Err(e);
+                return Err(e.into());
             }
             if !mapped {
                 self.map_run(
@@ -1151,24 +1143,24 @@ mod tests {
     }
 
     impl BlockDevice for &mut RamDisk {
-        fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result {
+        fn read(&mut self, lba: u64, buf: &mut [u8]) -> blkdev::Result {
             let off = (lba * self.block) as usize;
             let s = self
                 .data
                 .get(off..off + buf.len())
-                .ok_or(Error::Io { lba })?;
+                .ok_or(blkdev::Error::Io { lba })?;
             buf.copy_from_slice(s);
             Ok(())
         }
-        fn write(&mut self, lba: u64, buf: &[u8]) -> Result {
+        fn write(&mut self, lba: u64, buf: &[u8]) -> blkdev::Result {
             if self.fail {
-                return Err(Error::Io { lba });
+                return Err(blkdev::Error::Io { lba });
             }
             let off = (lba * self.block) as usize;
             let d = self
                 .data
                 .get_mut(off..off + buf.len())
-                .ok_or(Error::Io { lba })?;
+                .ok_or(blkdev::Error::Io { lba })?;
             d.copy_from_slice(buf);
             self.writes.push((lba, buf.len()));
             Ok(())
