@@ -15,6 +15,26 @@ bench = false
 [features]
 default = []
 board-qemuvirt = ["dep:board-qemuvirt"]
+# De Pi's (board/raspi): image/rpi4.sh en image/rpi5.sh bouwen er een
+# kaart-image van; `link-raspi.ld` in plaats van `link.ld` (build.rs).
+board-rpi4 = ["dep:board-rpi4"]
+board-rpi5 = ["dep:board-rpi5"]
+# De Radxa Zero 3E (board/rk3566): image/radxa-zero3.sh bouwt er een
+# kaart-image van; `link-rk3566.ld` in plaats van `link.ld` (build.rs).
+board-rk3566 = ["dep:board-rk3566"]
+# Het generieke UEFI-board (board/uefi): QEMU virt onder EDK2 en de basis
+# van de O6N en de Altra. image/uefi-run.sh bouwt er BOOTAA64.EFI van;
+# `efi.ld` in plaats van `link.ld`, als PIE (build.rs).
+board-uefi = ["dep:board-uefi"]
+# De Radxa Orion O6N en de Ampere Altra, op het UEFI-board:
+# `BOARD=o6n|altra image/uefi-run.sh` bouwt er BOOTAA64.EFI van (efi.ld,
+# PIE, zoals board-uefi; build.rs).
+# Beide hebben DRAM vanaf 0x8000_0000: het kernvenster `window-8000` van
+# board-uefi (0x8800_0000, de Go-kandidaat van de Altra); dat zetten hun
+# eigen crates aan. Niet hier via `board-uefi/window-8000`: die vorm zet
+# ook de feature `board-uefi` van deze binary aan, en dan zijn het er twee.
+board-o6n = ["dep:board-o6n"]
+board-altra = ["dep:board-altra"]
 
 # Alleen wat de binary gebruikt (een ongebruikte dep bouwt alleen mee).
 [dependencies]
@@ -27,6 +47,8 @@ netdev = { path = "../netdev" }
 net = { path = "../net" }
 kern = { path = "../kern" }
 board = { path = "../board" }
+# De lezer van `hopos.cfg` (config.rs: van de sleutels naar de env van Hop).
+fw = { path = "../fw" }
 # De node-stack en de DHCP-client (PORT.md §2.1), op een tag en nooit over
 # een pad: lean is een eigen repo met een eigen versie.
 leannet = { git = "https://github.com/xinix00/lean.git", tag = "v3.0.0" }
@@ -34,6 +56,12 @@ leandhcp = { git = "https://github.com/xinix00/lean.git", tag = "v3.0.0" }
 # De ELF-lezer van de eerste plaatsing (slots.rs), zelfde tag.
 leanelf = { git = "https://github.com/xinix00/lean.git", tag = "v3.0.0" }
 board-qemuvirt = { path = "../board/qemuvirt", optional = true }
+board-rpi4 = { path = "../board/rpi4", optional = true }
+board-rpi5 = { path = "../board/rpi5", optional = true }
+board-rk3566 = { path = "../board/rk3566", optional = true }
+board-uefi = { path = "../board/uefi", optional = true }
+board-o6n = { path = "../board/o6n", optional = true }
+board-altra = { path = "../board/altra", optional = true }
 # De schijf van het board: `storage.rs` kent haar maten (sector, transfer).
 driver-virtioblk = { path = "../driver/virtioblk" }
 

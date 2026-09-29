@@ -191,6 +191,12 @@ pub struct PlanSpec {
     /// Het aantal fysieke app-cores, geklemd op `1..=SLOT_CAP` (0 = 3,
     /// de Pi- en QEMU-standaard van Go).
     pub app_cores: usize,
+    /// De fysieke index van de OS-core: de core waar de kern woont en die
+    /// hij met Hop deelt (PORT.md beslissing 2, 30-09). In het plan is dat
+    /// altijd logische core 0 (zijn sched-blok is blok 0); de app-cores
+    /// `1..=app_cores` zijn de andere fysieke cores op volgorde
+    /// ([`Plan::phys_core`]). 0 = de boot-core, de default op elk board.
+    pub os_core: usize,
 }
 
 /// Een gevalideerd PA-plan.
@@ -247,6 +253,13 @@ impl Plan {
         aligned("trap_vec_pa", spec.trap_vec_pa, 0x800)?;
         spec.max_slots = clamp_count(spec.max_slots, SLOT_CAP);
         spec.app_cores = clamp_count(spec.app_cores, 3);
+        // De OS-core is een van de `app_cores + 1` fysieke cores.
+        if spec.os_core > spec.app_cores {
+            return Err(Error::OutOfPlan {
+                index: spec.os_core,
+                max: spec.app_cores,
+            });
+        }
 
         let blocks = spec.max_slots as u64 + 1;
         let mut reserved = BoundedVec::<Region, 8>::new();
@@ -312,6 +325,41 @@ impl Plan {
     #[must_use]
     pub fn app_cores(&self) -> usize {
         self.spec.app_cores
+    }
+
+    /// De fysieke index van de OS-core (logische core 0).
+    #[must_use]
+    pub fn os_core(&self) -> usize {
+        self.spec.os_core
+    }
+
+    /// De fysieke index van logische core `core`: 0 is de OS-core, app-core
+    /// `i` is de `i`-de fysieke core die niet de OS-core is. Met de OS-core
+    /// op 0 is dat de identiteit (het plan van vóór 30-09).
+    #[must_use]
+    pub fn phys_core(&self, core: Core) -> usize {
+        match core.get() {
+            0 => self.spec.os_core,
+            i if i <= self.spec.os_core => i - 1,
+            i => i,
+        }
+    }
+
+    /// De logische core van fysieke core `phys`, de inverse van
+    /// [`phys_core`](Self::phys_core); `None` buiten de `app_cores + 1`
+    /// cores van dit plan.
+    #[must_use]
+    pub fn logical_core(&self, phys: usize) -> Option<Core> {
+        let os = self.spec.os_core;
+        let i = match phys {
+            p if p == os => 0,
+            p if p < os => p + 1,
+            p => p,
+        };
+        if i > self.spec.app_cores {
+            return None;
+        }
+        Core::new(i)
     }
 
     /// Toetst een index tegen `max_slots`.

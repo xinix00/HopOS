@@ -9,7 +9,7 @@
 //! <regel>`). Er wordt nooit per start gespawnd.
 //!
 //! De eerste plaatsing leest het image dat QEMU vóór de boot neerlegde
-//! (`board_qemuvirt::slots::staged_image`, image/qemu-run.sh) en loopt de
+//! (`vboard::slots::staged_image`, image/qemu-run.sh) en loopt de
 //! gewone weg: Claim, de bytes in de grant, Arm met de entry uit de ELF,
 //! de status pollen tot de app exit meldt, en Stop. Dat twee keer: slot 1
 //! op een koude core (PSCI CPU_ON), slot 2 op dezelfde core nu hij
@@ -24,10 +24,11 @@
 //!
 //! # Hop
 //!
-//! Draagt de staging de rol Hop (`board_qemuvirt::slots::staged_role`,
+//! Draagt de staging de rol Hop (`vboard::slots::staged_role`,
 //! image/qemu-run.sh), dan plaatst de kern het image één keer, in slot 1,
 //! als de bevoorrechte bewoner (PORT.md beslissing 1 en 2): `Placement::hop`
-//! (klasse small, sharegroup `hop`), 64 MiB, de env met de `HOPOS_*`-keuzes,
+//! (sharegroup `hop`, die de OS-core met de kern deelt: Hop draait in de
+//! idle van de kern, `cpu::el2::OsCore`), 64 MiB, de env met de `HOPOS_*`-keuzes,
 //! en het `Privilege`-token hoort bij slot 1 vanaf de boot (`main`). Daarna
 //! zet de switch de uplink-poorten van Hop door (8080 agent, 9080 leader)
 //! en bewaakt een taak de bewoner: elke wissel één regel, een fault of exit
@@ -44,14 +45,11 @@ use abi::layout::{ABI_CTRL_OFF, ABI_TAIL, CtxState, LINK_BASE, RING_DATA_CAP};
 use abi::place::{self, SYM_ABI, SYM_RAM_SIZE, SYM_RAM_START, SYM_SLOT_HINT, Window};
 use alloc::vec::Vec;
 use board::Board;
-use board_qemuvirt::slots::{self as vboard, StagedRole};
 use cage::{ArmCage, ArmCores, DevMem, ExecTimer, KernConsole, SlotOutbox};
-use core::fmt::Write as _;
 use core::time::Duration;
 use cpu::el2::{self, CoreState};
 use cpu::println;
 use executor::Executor;
-use kern::cage::{CoreClass, Cores as _};
 use kern::partmem::{Geometry, PartitionPool};
 use kern::pool::{CorePool, Placement};
 use kern::slots::{
@@ -61,6 +59,7 @@ use kern::slots::{
 use kern::system::{LogTee, SlotLogs};
 use kern::{Region, Slot};
 use sync::mpsc::Mailbox;
+use vboard::slots::{self as vslots, StagedRole};
 
 /// De brievenbus van de lifecycle-actor. Hij staat in `main` naast de
 /// system-listener, die er zijn verzoeken heen stuurt; de actor die hem
@@ -126,22 +125,51 @@ const SERVICE_BUF: usize = (RING_DATA_CAP / 2) as usize;
 /// een servicer per slot, en de plaatsing van het gestagede image. Faalt
 /// een stap, dan één regel met marker en draait de node door zonder slots:
 /// het netwerk en de console hebben er niets mee te maken.
-pub(crate) fn start(exec: &'static Executor, role: Option<StagedRole>) {
+///
+/// FLIP: met `adopt` (de bewoners uit het handoff-blob van een kern-flip)
+/// neemt de kooi de zittende switch-code over in plaats van hem te
+/// installeren, krijgt elke bewoner zijn kooi, ringen en servicer terug
+/// zonder dat er één byte van zijn wereld verandert, en plaatst de kern
+/// Hop niet opnieuw: Hop draait door (`HOPOS_FLIP_ADOPT`).
+pub(crate) fn start(
+    exec: &'static Executor,
+    role: Option<StagedRole>,
+    adopt: Option<Vec<kern::slots::SlotState>>,
+) {
     let board = &crate::BOARD;
-    let plan = match vboard::plan(board.cores()) {
+    let plan = match os_plan() {
         Ok(p) => p,
         Err(e) => {
             println!("slots: plan refused: {e} HOPOS_SLOT_PLAN");
             return;
         }
     };
-    let cage = match ArmCage::new(plan.clone()) {
+    // FLIP: een geadopteerde kern schrijft geen byte in de plan-regio: er
+    // draaien cores in de switch-code (`cpu::el2::adopt` eist de som).
+    let cage = match &adopt {
+        Some(_) => ArmCage::adopt(plan.clone()),
+        None => ArmCage::new(plan.clone()),
+    };
+    let mut cage = match cage {
         Ok(c) => c,
         Err(e) => {
             println!("slots: cage init: {e} HOPOS_CAGE_FAIL");
             return;
         }
     };
+    if let Some(states) = &adopt {
+        for st in states {
+            let r = Slot::new(st.slot).map_or(Err(kern::cage::CageError { code: 0 }), |s| {
+                cage.adopt_slot(s, Region::new(st.part_base, st.part_size), st.core)
+            });
+            if let Err(e) = r {
+                println!(
+                    "slots: slot {} not re-attached: cage code {} HOPOS_FLIP_ADOPT_FAIL",
+                    st.slot, e.code
+                );
+            }
+        }
+    }
     let sw = cage.installed();
     println!(
         "slots: cage up HOPOS_CAGE_UP region={:#x} switch={:#x}+{:#x} tramp={:#x} hash={:#x} app-cores={} max-slots={}",
@@ -192,6 +220,10 @@ pub(crate) fn start(exec: &'static Executor, role: Option<StagedRole>) {
     );
     let pool_bytes = parts.capacity();
     let cores = ArmCores::new(plan.clone());
+    // FLIP: de core van een geadopteerde Hop, als hij meeging.
+    let hop_core = adopt
+        .as_ref()
+        .and_then(|v| v.iter().find(|st| st.slot == HOP_SLOT).map(|st| st.core));
     let actor = async move {
         let mut lc = Lifecycle::new(
             cage,
@@ -199,9 +231,22 @@ pub(crate) fn start(exec: &'static Executor, role: Option<StagedRole>) {
             ExecTimer(exec),
             KernConsole,
             parts,
-            CorePool::new(0),
+            os_pool(),
             SERVICERS,
         );
+        // FLIP: eerst alle eigendomsclaims terug, dan pas verzoeken.
+        if let Some(states) = &adopt {
+            match lc.adopt(states) {
+                Ok(n) => {
+                    println!(
+                        "HOPOS_FLIP_ADOPT {n} of {} resident(s) adopted, ownership restored before the first request",
+                        states.len()
+                    );
+                    crate::flip::adopted_ok();
+                }
+                Err(e) => println!("slots: adoption refused: {e} HOPOS_FLIP_ADOPT_FAIL"),
+            }
+        }
         lc.run(INBOX).await;
     };
     if let Err(e) = exec.spawn(actor) {
@@ -217,13 +262,20 @@ pub(crate) fn start(exec: &'static Executor, role: Option<StagedRole>) {
             println!("slots: servicer {i} not spawned: {e:?} HOPOS_SLOT_SPAWN");
         }
     }
+    // FLIP: Hop leeft nog; alleen zijn poorten en de bewaking komen terug.
+    if let Some(core) = hop_core {
+        if let Err(e) = exec.spawn(resume_hop(exec, plan, core)) {
+            println!("slots: Hop watch not spawned: {e:?} HOPOS_SLOT_SPAWN");
+        }
+        return;
+    }
     let spawned = match role {
         Some(StagedRole::App) => exec.spawn(place_first(exec, plan)),
         Some(StagedRole::Hop) => exec.spawn(place_hop(exec, plan, pool_bytes)),
         None => {
             println!(
                 "slots: staged role word {:#x} is neither app (0) nor hop (1), nothing placed HOPOS_SLOT_NONE",
-                dev::read64(dev::Pa(vboard::STAGE_ROLE_PA))
+                dev::read64(dev::Pa(vslots::STAGE_ROLE_PA))
             );
             return;
         }
@@ -307,7 +359,7 @@ async fn status(slot: Slot) -> Option<SlotStatus> {
 /// tweede ronde bewijst het warme pad (mailbox plus SEV) waar de eerste het
 /// koude pad (PSCI CPU_ON) bewees, met een andere kooi, VMID en partitie.
 async fn place_first(exec: &'static Executor, plan: abi::layout::Plan) {
-    let Some(img) = vboard::staged_image() else {
+    let Some(img) = vslots::staged_image() else {
         println!("slots: no staged image, nothing placed HOPOS_SLOT_NONE");
         return;
     };
@@ -325,7 +377,7 @@ const HOP_NODE: &str = "hopos-qemu";
 /// De plaatsing van Hop: het gestagede image één keer in slot 1, met de
 /// env van de node, dan de poorten op de uplink en de bewaking.
 async fn place_hop(exec: &'static Executor, plan: abi::layout::Plan, pool_bytes: u64) {
-    let Some(img) = vboard::staged_image() else {
+    let Some(img) = vslots::staged_image() else {
         println!("slots: role hop but no staged image, Hop not started HOPOS_HOP_FAIL");
         return;
     };
@@ -333,10 +385,22 @@ async fn place_hop(exec: &'static Executor, plan: abi::layout::Plan, pool_bytes:
         return;
     };
     let node_ip = wait_uplink(exec).await;
-    let env = match hop_env(node_ip, plan.app_cores(), pool_bytes) {
+    // De env van Hop komt uit hopos.cfg (config.rs); op QEMU is dat de
+    // vaste QEMU_CFG tot het board de echte tekst aanreikt.
+    let cfg = crate::config::NodeCfg::parse(crate::config::QEMU_CFG);
+    let facts = crate::config::Facts {
+        default_node: HOP_NODE,
+        node_ip,
+        dns: crate::net::uplink_dns(),
+        port: HOP_PORT,
+        app_cores: plan.app_cores(),
+        pool_bytes,
+        hop_mem: HOP_MEM,
+    };
+    let env = match crate::config::hop_env(&cfg, &facts) {
         Ok(e) => e,
-        Err(_) => {
-            println!("slots: Hop env does not fit, Hop not started HOPOS_HOP_FAIL");
+        Err(e) => {
+            println!("slots: Hop env: {e}, Hop not started HOPOS_HOP_FAIL");
             return;
         }
     };
@@ -364,8 +428,9 @@ async fn place_hop(exec: &'static Executor, plan: abi::layout::Plan, pool_bytes:
     let st = status(slot).await;
     let core = st.and_then(|s| s.core).map_or(0, |(c, _)| c.get());
     let part = st.and_then(|s| s.partition).unwrap_or_default();
+    let cpu = abi::layout::Core::new(core).map_or(core, |c| plan.phys_core(c));
     println!(
-        "HOPOS_HOP_START slot={slot} core={core} entry={entry:#x} part={:#x}+{:#x} image={} env={}",
+        "HOPOS_HOP_START slot={slot} core={core} cpu={cpu} entry={entry:#x} part={:#x}+{:#x} image={} env={}",
         part.base,
         part.size,
         img.len(),
@@ -379,6 +444,28 @@ async fn place_hop(exec: &'static Executor, plan: abi::layout::Plan, pool_bytes:
             ),
         }
     }
+    watch_hop(exec, &plan, slot, core).await;
+}
+
+/// FLIP: Hop kwam mee over een kern-flip. Zijn kooi, ringen en servicer
+/// zijn al terug (`start`); de uplink-poorten zijn van de switch van déze
+/// kern en gaan opnieuw open, en de bewaking loopt verder.
+async fn resume_hop(exec: &'static Executor, plan: abi::layout::Plan, core: usize) {
+    let Some(slot) = Slot::new(HOP_SLOT) else {
+        return;
+    };
+    let _ = wait_uplink(exec).await;
+    for port in [HOP_PORT, HOP_PORT.saturating_add(1000)] {
+        match crate::net::publish(slot.get(), port).await {
+            Ok(()) => println!("net: uplink tcp :{port} -> slot {slot} :{port} HOPOS_HOP_PUBLISH"),
+            Err(e) => println!(
+                "net: uplink tcp :{port} not published to slot {slot}: {e} HOPOS_HOP_PUBLISH_FAIL"
+            ),
+        }
+    }
+    println!(
+        "slot {slot}: Hop carried over the flip on core {core}, not restarted HOPOS_HOP_RESUMED"
+    );
     watch_hop(exec, &plan, slot, core).await;
 }
 
@@ -400,60 +487,69 @@ async fn wait_uplink(exec: &'static Executor) -> Option<core::net::Ipv4Addr> {
     }
 }
 
-/// De env van Hop (`agentd_hopos::env` in de hop-repo): `key=val\n`.
-///
-/// `HOPOS_INSECURE=1`: de kern heeft nog geen bron voor een API-sleutel
-/// (`hopos.cfg` en de bootparams zijn niet geport), en zonder sleutel én
-/// zonder deze vlag weigert Hop zijn API (fail closed). Alleen QEMU draagt
-/// dit pad; een board met een sleutel geeft `HOPOS_APIKEY`. Hop meldt het
-/// zelf luid (`HOPOS_API_INSECURE`).
-fn hop_env(
-    node_ip: Option<core::net::Ipv4Addr>,
-    app_cores: usize,
-    pool_bytes: u64,
-) -> Result<alloc::string::String, core::fmt::Error> {
-    let mut env = alloc::string::String::new();
-    writeln!(env, "HOPOS_INSECURE=1")?;
-    writeln!(env, "HOPOS_NODE={HOP_NODE}")?;
-    writeln!(env, "HOPOS_CLUSTER=hopos")?;
-    if let Some(ip) = node_ip {
-        writeln!(env, "HOPOS_NODE_IP={ip}")?;
-    }
-    writeln!(env, "HOPOS_PORT={HOP_PORT}")?;
-    // Hop plant tegen de cores die hij kan uitdelen: alle app-cores min de
-    // zijne (hij deelt zijn core niet met jobs, alleen met zijn groep).
-    writeln!(env, "HOPOS_CORES={}", app_cores.saturating_sub(1).max(1))?;
-    writeln!(env, "HOPOS_MEMORY={}", pool_bytes.saturating_sub(HOP_MEM))?;
+/// `Placement::hop`: sharegroup `hop`, die de OS-core met de kern deelt
+/// ([`os_pool`]). De klasse van die core koos de bootparameter
+/// (`hopos.oscore`), niet deze plaatsing.
+fn hop_placement(plan: &abi::layout::Plan) -> kern::Result<Placement> {
+    let at = Placement::hop()?;
     println!(
-        "slots: Hop env: {} HOPOS_HOP_ENV",
-        env.trim_end().replace('\n', " ")
+        "slots: Hop shares the OS core (cpu {}) with the kern, {} app core(s) stay free HOPOS_HOP_OS_CORE",
+        plan.os_core(),
+        plan.app_cores()
     );
-    println!(
-        "slots: Hop runs with HOPOS_INSECURE=1: no API key source on this board yet HOPOS_HOP_INSECURE"
-    );
-    Ok(env)
+    Ok(at)
 }
 
-/// `Placement::hop` (klasse small, sharegroup `hop`), met de terugval van
-/// dit board: kent de kern geen kleine app-core, dan vervalt de klasse en
-/// neemt Hop de eerste vrije app-core, luid.
-fn hop_placement(plan: &abi::layout::Plan) -> kern::Result<Placement> {
-    let mut at = Placement::hop()?;
-    let cores = ArmCores::new(plan.clone());
-    let small = (1..=cores.app_cores())
-        .filter_map(kern::Core::new)
-        .any(|c| cores.class(c) == Some(CoreClass::Small));
-    if !small {
-        // QEMU virt: alle cores zijn cortex-a53 en het board noemt ze
-        // allemaal "big" (`Board::core_class`); de kooi-lijm kent geen
-        // klassen. Een klasse eisen die niet bestaat, is nooit starten.
-        println!(
-            "slots: no small app core among {} (qemu virt: all big), Hop takes the first free app core HOPOS_HOP_CLASS_FALLBACK",
-            cores.app_cores()
-        );
-        at.class = None;
+/// Het plan van deze node: de kern-core is de OS-core, en dat is de core
+/// waar dit draait (na de verhuizing bij boot, `main`). Het board-contract
+/// hiervoor (`plan(cores, os_core)`, `this_core`, `os_bell`, `kick_self`)
+/// volgen alle boards die deze lijm delen.
+pub(crate) fn os_plan() -> abi::Result<abi::layout::Plan> {
+    let board = &crate::BOARD;
+    vslots::plan(board.cores(), board.this_core())
+}
+
+/// De core-plaatsing van deze node: Hop's groep deelt de OS-core met de
+/// kern (PORT.md beslissing 2). Kan de EL2-smaak dat niet (Apple), dan
+/// krijgt Hop een app-core zoals vóór 30-09.
+fn os_pool() -> CorePool {
+    let mut pool = CorePool::new(0);
+    if cage::FLAVOR != el2::Flavor::AppleVhe
+        && let Err(e) = pool.share_os_core(kern::pool::HOP_GROUP)
+    {
+        println!("slots: Hop may not share the OS core: {e} HOPOS_OS_CORE_FAIL");
     }
-    Ok(at)
+    pool
+}
+
+/// De rotatie van de OS-core voor de slaap van de executor: de bewoners van
+/// sched-blok 0 en de kick van de app-cores, na de zelftest van de
+/// overgang (timer, yield, kick). Aanroepen op de OS-core, ná [`start`]
+/// (die de kooi-regio opzette) en ná de interrupts (de zelftest wacht op
+/// de CNTHP en de kick-SGI).
+pub(crate) fn os_core() -> Result<el2::OsCore, el2::Error> {
+    let board = &crate::BOARD;
+    let plan = os_plan().map_err(el2::Error::Plan)?;
+    let mut os = el2::OsCore::new(&plan, cage::FLAVOR, Some(board.os_bell()))?;
+    let ms = cpu::idle::freq() / 1000;
+    let t = os.selftest(false, ms, &|| {});
+    let y = os.selftest(true, 100 * ms, &|| {});
+    let k = os.selftest(false, 100 * ms, &|| board.kick_self());
+    let us = |r: Option<(el2::Back, u64)>| r.map(|(b, dt)| (b, dt * 1000 / ms.max(1)));
+    let (t, y, k) = (us(t), us(y), us(k));
+    let ok = matches!(t, Some((el2::Back::Timer, _)))
+        && matches!(y, Some((el2::Back::Yield, _)))
+        && matches!(k, Some((el2::Back::Ipi, _)));
+    println!(
+        "oscore: cpu {} self-test timer={t:?} yield={y:?} kick={k:?} (back, us) {}",
+        plan.os_core(),
+        if ok {
+            "HOPOS_OS_SELFTEST ok"
+        } else {
+            "HOPOS_OS_SELFTEST_FAIL"
+        }
+    );
+    Ok(os)
 }
 
 /// Bewaakt Hop: elke wissel van app-status, core of fault één regel, om de

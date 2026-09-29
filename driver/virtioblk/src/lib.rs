@@ -1,4 +1,4 @@
-//! virtio-blk over MMIO (QEMU virt): het blokapparaat onder hopfs.
+//! virtio-blk over virtio-mmio of virtio-pci: het blokapparaat onder hopfs.
 //!
 //! De vorm is die van de NVMe-driver uit de Go-kern
 //! (`OLD/metal/driver/nvme`): één verzoek tegelijk, één DMA-buffer, en een
@@ -7,8 +7,11 @@
 //! (de hopfs-actor, `&mut self`) doet toch één ding tegelijk, en zo hoeft
 //! de driver geen tags, geen rij en geen herordening te kennen.
 //!
-//! Het transport is virtio-mmio versie 2 (VERSION_1, virtio 1.2 §4.2.2),
-//! zoals `driver-virtionet`: getypeerde registers, één split-virtqueue
+//! Het transport is modern virtio (VERSION_1) achter
+//! [`driver_virtiopci::Transport`], zoals bij `driver-virtionet`:
+//! virtio-mmio versie 2 op QEMU virt ([`VirtioBlk::new`], virtio 1.2
+//! §4.2.2) of virtio-pci onder EDK2 ([`VirtioBlk::with_transport`] met een
+//! [`driver_virtiopci::Pci`]). Daarboven één split-virtqueue
 //! (descriptortabel, avail- en used-ring) en een DMA-regio die het board
 //! uitdeelt, buiten de kern-RAM en niet gecached gemapt. Een verzoek is een
 //! keten van drie descriptors: de kop ([`ReqHdr`], het device leest), de
@@ -36,85 +39,29 @@
 
 use core::fmt;
 use core::mem::{offset_of, size_of};
-use dev::{Pa, Reg};
+use dev::Pa;
+use driver_virtiopci::{FEAT_VERSION_1_HI, Mmio, Transport, mmio, status};
 
-/// De virtio-mmio-registers, versie 2, met de config van virtio-blk op
-/// 0x100 (virtio 1.2 §5.2.4).
+/// De config van virtio-blk (virtio 1.2 §5.2.4), alleen voor de offsets:
+/// de driver leest hem via het transport. `capacity` in sectoren van 512
+/// bytes, als twee woorden met de generatie-lus: een 64-bit lees op
+/// device-geheugen is hier gealigneerd, maar de spec noemt de config per
+/// veld en QEMU antwoordt per 32 bits.
 #[repr(C)]
-struct Regs {
-    magic: Reg<u32>,
-    version: Reg<u32>,
-    device_id: Reg<u32>,
-    vendor_id: Reg<u32>,
-    device_features: Reg<u32>,
-    device_features_sel: Reg<u32>,
-    _r0: [u32; 2],
-    driver_features: Reg<u32>,
-    driver_features_sel: Reg<u32>,
-    _r1: [u32; 2],
-    queue_sel: Reg<u32>,
-    queue_num_max: Reg<u32>,
-    queue_num: Reg<u32>,
-    _r2: [u32; 2],
-    queue_ready: Reg<u32>,
-    _r3: [u32; 2],
-    queue_notify: Reg<u32>,
-    _r4: [u32; 3],
-    interrupt_status: Reg<u32>,
-    interrupt_ack: Reg<u32>,
-    _r5: [u32; 2],
-    status: Reg<u32>,
-    _r6: [u32; 3],
-    queue_desc_lo: Reg<u32>,
-    queue_desc_hi: Reg<u32>,
-    _r7: [u32; 2],
-    queue_driver_lo: Reg<u32>,
-    queue_driver_hi: Reg<u32>,
-    _r8: [u32; 2],
-    queue_device_lo: Reg<u32>,
-    queue_device_hi: Reg<u32>,
-    _r9: [u32; 21],
-    config_generation: Reg<u32>,
-    /// `capacity` in sectoren van 512 bytes, als twee woorden: een 64-bit
-    /// lees op device-geheugen is hier gealigneerd, maar de spec noemt de
-    /// config per veld en QEMU antwoordt per 32 bits.
-    capacity_lo: Reg<u32>,
-    capacity_hi: Reg<u32>,
-    size_max: Reg<u32>,
-    seg_max: Reg<u32>,
-    _geometry: Reg<u32>,
-    blk_size: Reg<u32>,
+struct BlkConfig {
+    capacity: u64,
+    size_max: u32,
+    seg_max: u32,
+    geometry: u32,
+    blk_size: u32,
 }
 
 const _: () = {
-    assert!(offset_of!(Regs, magic) == 0x000);
-    assert!(offset_of!(Regs, version) == 0x004);
-    assert!(offset_of!(Regs, device_id) == 0x008);
-    assert!(offset_of!(Regs, vendor_id) == 0x00c);
-    assert!(offset_of!(Regs, device_features) == 0x010);
-    assert!(offset_of!(Regs, device_features_sel) == 0x014);
-    assert!(offset_of!(Regs, driver_features) == 0x020);
-    assert!(offset_of!(Regs, driver_features_sel) == 0x024);
-    assert!(offset_of!(Regs, queue_sel) == 0x030);
-    assert!(offset_of!(Regs, queue_num_max) == 0x034);
-    assert!(offset_of!(Regs, queue_num) == 0x038);
-    assert!(offset_of!(Regs, queue_ready) == 0x044);
-    assert!(offset_of!(Regs, queue_notify) == 0x050);
-    assert!(offset_of!(Regs, interrupt_status) == 0x060);
-    assert!(offset_of!(Regs, interrupt_ack) == 0x064);
-    assert!(offset_of!(Regs, status) == 0x070);
-    assert!(offset_of!(Regs, queue_desc_lo) == 0x080);
-    assert!(offset_of!(Regs, queue_desc_hi) == 0x084);
-    assert!(offset_of!(Regs, queue_driver_lo) == 0x090);
-    assert!(offset_of!(Regs, queue_driver_hi) == 0x094);
-    assert!(offset_of!(Regs, queue_device_lo) == 0x0a0);
-    assert!(offset_of!(Regs, queue_device_hi) == 0x0a4);
-    assert!(offset_of!(Regs, config_generation) == 0x0fc);
-    assert!(offset_of!(Regs, capacity_lo) == 0x100);
-    assert!(offset_of!(Regs, capacity_hi) == 0x104);
-    assert!(offset_of!(Regs, size_max) == 0x108);
-    assert!(offset_of!(Regs, seg_max) == 0x10c);
-    assert!(offset_of!(Regs, blk_size) == 0x114);
+    assert!(offset_of!(BlkConfig, capacity) == 0x00);
+    assert!(offset_of!(BlkConfig, size_max) == 0x08);
+    assert!(offset_of!(BlkConfig, seg_max) == 0x0c);
+    assert!(offset_of!(BlkConfig, geometry) == 0x10);
+    assert!(offset_of!(BlkConfig, blk_size) == 0x14);
 };
 
 /// Eén descriptor van de split-virtqueue (virtio 1.2 §2.7.5).
@@ -154,20 +101,8 @@ const _: () = {
     assert!(offset_of!(UsedElem, len) == 4);
 };
 
-/// "virt", little-endian.
-const MAGIC: u32 = 0x7472_6976;
-/// Het moderne transport.
-const VERSION_2: u32 = 2;
 /// DeviceID van een blokapparaat.
 const DEVICE_BLK: u32 = 2;
-
-const STATUS_ACK: u32 = 1 << 0;
-const STATUS_DRIVER: u32 = 1 << 1;
-const STATUS_DRIVER_OK: u32 = 1 << 2;
-const STATUS_FEATURES_OK: u32 = 1 << 3;
-
-/// VIRTIO_F_VERSION_1 (bit 32): bit 0 van het hoge feature-venster.
-const FEAT_VERSION_1_HI: u32 = 1 << 0;
 /// VIRTIO_BLK_F_RO: het device is alleen-lezen.
 const FEAT_RO: u32 = 1 << 5;
 /// VIRTIO_BLK_F_FLUSH: het device kent `VIRTIO_BLK_T_FLUSH` (een
@@ -235,6 +170,10 @@ pub enum Error {
     Legacy,
     /// Wel virtio, maar geen blokapparaat.
     NotBlock(u32),
+    /// Het device kwam niet terug uit de reset.
+    Reset,
+    /// De capaciteit bleef veranderen terwijl de driver hem las.
+    ConfigUnstable,
     /// Het device weigerde de features.
     FeaturesRefused,
     /// De queue is er niet, of kleiner dan [`QSIZE`].
@@ -278,6 +217,8 @@ impl fmt::Display for Error {
             Self::NotVirtio => f.write_str("virtioblk: no virtio-mmio"),
             Self::Legacy => f.write_str("virtioblk: legacy transport (need version 2)"),
             Self::NotBlock(id) => write!(f, "virtioblk: device id {id} is not a block device"),
+            Self::Reset => f.write_str("virtioblk: device did not come back from reset"),
+            Self::ConfigUnstable => f.write_str("virtioblk: capacity kept changing while read"),
             Self::FeaturesRefused => f.write_str("virtioblk: device refused the features"),
             Self::NoQueue(n) => write!(f, "virtioblk: queue 0 offers {n} entries, need {QSIZE}"),
             Self::DmaTooSmall { need, have } => {
@@ -311,13 +252,13 @@ pub type Result<T = (), E = Error> = core::result::Result<T, E>;
 #[must_use]
 pub unsafe fn is_modern_blk(base: Pa) -> bool {
     // SAFETY: de voorwaarde van deze functie.
-    let r: &Regs = unsafe { dev::regs(base) };
-    r.magic.read() == MAGIC && r.version.read() == VERSION_2 && r.device_id.read() == DEVICE_BLK
+    unsafe { mmio::is_modern(base, DEVICE_BLK) }
 }
 
-/// Eén virtio-blk met zijn queue en DMA-buffer.
-pub struct VirtioBlk {
-    base: Pa,
+/// Eén virtio-blk met zijn queue en DMA-buffer, over een virtio-transport:
+/// virtio-mmio op QEMU virt, virtio-pci onder EDK2.
+pub struct VirtioBlk<T: Transport = Mmio> {
+    t: T,
     dma: Pa,
     sectors: u64,
     flush: bool,
@@ -332,10 +273,11 @@ pub struct VirtioBlk {
     pub slowest_ns: u64,
 }
 
-impl VirtioBlk {
-    /// Zet het device op: reset, VERSION_1 (plus FLUSH als het device hem
-    /// biedt) onderhandelen, queue 0 in `dma`, DRIVER_OK. `clock` geeft
-    /// monotone nanoseconden, voor de time-out van een verzoek.
+impl VirtioBlk<Mmio> {
+    /// Zet het device op het virtio-mmio-slot `base` op: reset, VERSION_1
+    /// (plus FLUSH als het device hem biedt) onderhandelen, queue 0 in
+    /// `dma`, DRIVER_OK. `clock` geeft monotone nanoseconden, voor de
+    /// time-out van een verzoek.
     ///
     /// # Safety
     ///
@@ -344,14 +286,41 @@ impl VirtioBlk {
     /// deze driver en het device gebruiken, nu en zolang het programma
     /// draait.
     pub unsafe fn new(base: Pa, dma: Pa, dma_size: u64, clock: fn() -> u64) -> Result<Self> {
+        // SAFETY: de eerste helft van de voorwaarde van deze functie.
+        let t = unsafe { Mmio::new(base) };
+        t.check().map_err(|e| match e {
+            driver_virtiopci::Error::Legacy { .. } => Error::Legacy,
+            _ => Error::NotVirtio,
+        })?;
+        // SAFETY: de tweede helft van de voorwaarde van deze functie.
+        unsafe { Self::with_transport(t, dma, dma_size, clock) }
+    }
+}
+
+impl<T: Transport> VirtioBlk<T> {
+    /// Zet het device achter transport `t` op: reset, VERSION_1 (plus
+    /// FLUSH als het device hem biedt) onderhandelen, queue 0 in `dma`,
+    /// DRIVER_OK. `clock` geeft monotone nanoseconden, voor de time-out van
+    /// een verzoek.
+    ///
+    /// # Safety
+    ///
+    /// `[dma, dma+dma_size)` is gemapt, niet gecached geheugen dat alleen
+    /// deze driver en het device gebruiken, nu en zolang het programma
+    /// draait.
+    pub unsafe fn with_transport(t: T, dma: Pa, dma_size: u64, clock: fn() -> u64) -> Result<Self> {
         if dma_size < DMA_NEED {
             return Err(Error::DmaTooSmall {
                 need: DMA_NEED,
                 have: dma_size,
             });
         }
+        let id = t.device_id();
+        if id != DEVICE_BLK {
+            return Err(Error::NotBlock(id));
+        }
         let mut d = Self {
-            base,
+            t,
             dma,
             sectors: 0,
             flush: false,
@@ -363,73 +332,49 @@ impl VirtioBlk {
             requests: 0,
             slowest_ns: 0,
         };
-        let r = d.regs();
-        if r.magic.read() != MAGIC {
-            return Err(Error::NotVirtio);
-        }
-        if r.version.read() != VERSION_2 {
-            return Err(Error::Legacy);
-        }
-        let id = r.device_id.read();
-        if id != DEVICE_BLK {
-            return Err(Error::NotBlock(id));
-        }
-
-        r.status.write(0);
-        r.status.write(STATUS_ACK);
-        r.status.write(STATUS_ACK | STATUS_DRIVER);
-
-        r.device_features_sel.write(0);
-        let offered = r.device_features.read();
-        d.flush = offered & FEAT_FLUSH != 0;
-        d.read_only = offered & FEAT_RO != 0;
-        r.driver_features_sel.write(0);
-        r.driver_features.write(offered & (FEAT_FLUSH | FEAT_RO));
-        r.driver_features_sel.write(1);
-        r.driver_features.write(FEAT_VERSION_1_HI);
-        r.status
-            .write(STATUS_ACK | STATUS_DRIVER | STATUS_FEATURES_OK);
-        if r.status.read() & STATUS_FEATURES_OK == 0 {
-            return Err(Error::FeaturesRefused);
-        }
+        d.negotiate()?;
 
         // De capaciteit, consistent gelezen: de config-generatie mag tussen
         // de twee helften niet wisselen.
-        d.sectors = loop {
-            let g = r.config_generation.read();
-            let lo = u64::from(r.capacity_lo.read());
-            let hi = u64::from(r.capacity_hi.read());
-            if r.config_generation.read() == g {
-                break (hi << 32) | lo;
-            }
-        };
+        d.sectors =
+            d.t.config_read64(offset_of!(BlkConfig, capacity) as u32)
+                .ok_or(Error::ConfigUnstable)?;
 
-        r.queue_sel.write(0);
-        let max = r.queue_num_max.read();
-        if max < u32::from(QSIZE) {
-            return Err(Error::NoQueue(max));
+        d.t.select_queue(0);
+        let max = d.t.queue_num_max();
+        if max < QSIZE {
+            return Err(Error::NoQueue(u32::from(max)));
         }
-        r.queue_num.write(u32::from(QSIZE));
+        d.t.set_queue_num(QSIZE);
         dev::clear(dma, DATA_OFF as usize);
-        let split = |pa: Pa| ((pa.0 & 0xffff_ffff) as u32, (pa.0 >> 32) as u32);
-        let (lo, hi) = split(dma.add(DESC_OFF));
-        r.queue_desc_lo.write(lo);
-        r.queue_desc_hi.write(hi);
-        let (lo, hi) = split(dma.add(AVAIL_OFF));
-        r.queue_driver_lo.write(lo);
-        r.queue_driver_hi.write(hi);
-        let (lo, hi) = split(dma.add(USED_OFF));
-        r.queue_device_lo.write(lo);
-        r.queue_device_hi.write(hi);
-        r.queue_ready.write(1);
-        r.status
-            .write(STATUS_ACK | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK);
+        d.t.set_queue_addrs(dma.add(DESC_OFF), dma.add(AVAIL_OFF), dma.add(USED_OFF));
+        d.t.enable_queue();
+        d.t.set_status(
+            status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK | status::DRIVER_OK,
+        );
         Ok(d)
     }
 
-    fn regs(&self) -> &'static Regs {
-        // SAFETY: de voorwaarde van `new`.
-        unsafe { dev::regs(self.base) }
+    /// De status-handdruk tot en met FEATURES_OK: reset, ACK, DRIVER, en
+    /// VERSION_1 plus wat van FLUSH en RO geboden wordt.
+    fn negotiate(&mut self) -> Result {
+        let t = &self.t;
+        if !t.reset() {
+            return Err(Error::Reset);
+        }
+        t.set_status(status::ACKNOWLEDGE);
+        t.set_status(status::ACKNOWLEDGE | status::DRIVER);
+
+        let offered = t.device_features(0);
+        self.flush = offered & FEAT_FLUSH != 0;
+        self.read_only = offered & FEAT_RO != 0;
+        t.set_driver_features(0, offered & (FEAT_FLUSH | FEAT_RO));
+        t.set_driver_features(1, FEAT_VERSION_1_HI);
+        t.set_status(status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK);
+        if t.status() & status::FEATURES_OK == 0 {
+            return Err(Error::FeaturesRefused);
+        }
+        Ok(())
     }
 
     /// De capaciteit in sectoren van 512 bytes.
@@ -453,12 +398,7 @@ impl VirtioBlk {
     /// De lijn-kant voor een board dat de interrupt wil bevestigen: de
     /// driver pollt, maar een scherpe lijn moet toch los.
     pub fn ack(&self) -> u32 {
-        let r = self.regs();
-        let st = r.interrupt_status.read();
-        if st != 0 {
-            r.interrupt_ack.write(st);
-        }
-        st
+        self.t.ack_interrupt()
     }
 
     fn set_desc(&self, i: u16, addr: Pa, len: u32, flags: u16, next: u16) {
@@ -496,7 +436,7 @@ impl VirtioBlk {
         dev::mb();
         dev::write16(avail.add(2), self.avail_idx);
         dev::mb();
-        self.regs().queue_notify.write(0);
+        self.t.notify(0);
     }
 
     /// Wacht tot het device het verzoek terugzet in de used-ring, of tot de
@@ -585,7 +525,7 @@ impl VirtioBlk {
     }
 }
 
-impl blkdev::BlockDevice for VirtioBlk {
+impl<T: Transport> blkdev::BlockDevice for VirtioBlk<T> {
     fn read(&mut self, lba: u64, buf: &mut [u8]) -> blkdev::Result {
         self.read_at(lba, buf)
             .map_err(|_| blkdev::Error::Io { lba })

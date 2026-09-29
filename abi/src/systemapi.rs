@@ -233,7 +233,11 @@ pub enum PrivOp {
     /// Zet de klok: `n` de Unix-tijd in nanoseconden.
     SetClock = 0x45,
     /// Flip naar een nieuwe kern: `off` het gereserveerde slot waarin de
-    /// bundel gestroomd is, `path` de verwachte SHA-256 (32 bytes).
+    /// bundel gestroomd is (START_SLOT met de jobnaam
+    /// `kern::system::FLIP_BUNDLE_JOB`, dan STREAM_IMAGE: rauw, zonder
+    /// plaatsing), `path` de verwachte SHA-256 (32 bytes, of 64 hex-tekens).
+    /// `STATUS_OK`: de bundel is getoetst en klaargelegd, de sprong volgt
+    /// een halve seconde later; het slot is dan al terug in de pool.
     Flip = 0x46,
 }
 

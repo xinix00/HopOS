@@ -197,6 +197,9 @@ pub enum Request {
     Status(Slot),
     /// De servicer zag een SMP-verzoek (vuur-en-vergeet).
     Smp(Slot),
+    /// Beschrijf elke levende bewoner voor de kern-flip
+    /// ([`Lifecycle::snapshot`]); het antwoord is [`Response::Snapshot`].
+    Snapshot,
 }
 
 /// Het antwoord van de actor.
@@ -208,6 +211,8 @@ pub enum Response {
     Done,
     /// De status.
     Status(SlotStatus),
+    /// De bewoners voor het handoff-blob van de kern-flip.
+    Snapshot(Vec<SlotState>),
     /// Het lukte niet.
     Failed(Error),
 }
@@ -643,6 +648,7 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
                 self.smp(slot);
                 Ok(Response::Done)
             }
+            Request::Snapshot => self.snapshot().map(Response::Snapshot),
         };
         r.unwrap_or_else(Response::Failed)
     }
@@ -825,9 +831,7 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
     async fn wait_quiet(&self, slot: Slot, core: Core, span: usize, timeout: Duration) -> bool {
         let deadline = self.timer.now().saturating_add(timeout.as_nanos() as u64);
         loop {
-            let quiet = (core.get()..core.get() + span)
-                .filter_map(Core::new)
-                .all(|c| self.cage.quiet(slot, c));
+            let quiet = core.run(span).all(|c| self.cage.quiet(slot, c));
             if quiet {
                 return true;
             }
@@ -859,7 +863,7 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
             // Eén intrekking velt alle cores van het slot (gedeelde tabel en
             // VMID); de kick laat ook slapers de intrekking zien.
             self.cage.revoke(slot);
-            for c in (core.get()..core.get() + span).filter_map(Core::new) {
+            for c in core.run(span) {
                 self.cores.kick(c);
             }
             quiet = self.wait_quiet(slot, core, span, REVOKE_GRACE).await;
@@ -1022,20 +1026,20 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
             }
             try_push(&mut out, st)?;
         }
-        validate_adoption(&out, &self.cores, self.places.hop_reserved(), &self.parts)?;
+        validate_adoption(&out, &self.cores, &self.places, &self.parts)?;
         Ok(out)
     }
 
     /// Herstelt EERST alle eigendomsclaims, daarna de diensten (E8). Een
     /// onbruikbare overdracht is een fout vóór er iets geclaimd is.
     pub fn adopt(&mut self, states: &[SlotState]) -> Result<usize> {
-        validate_adoption(states, &self.cores, self.places.hop_reserved(), &self.parts)?;
+        validate_adoption(states, &self.cores, &self.places, &self.parts)?;
         for st in states {
             let slot = Slot::new(st.slot).ok_or(Error::SlotRange {
                 slot: st.slot,
                 max: SLOT_CAP,
             })?;
-            let core = Core::new(st.core).ok_or(Error::CoreRange {
+            let core = adopted_core(st.core).ok_or(Error::CoreRange {
                 core: st.core,
                 max: self.cores.app_cores(),
             })?;
@@ -1044,7 +1048,7 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
             for c in &st.group_cores {
                 try_push(
                     &mut group_cores,
-                    Core::new(*c).ok_or(Error::CoreRange { core: *c, max: 0 })?,
+                    adopted_core(*c).ok_or(Error::CoreRange { core: *c, max: 0 })?,
                 )?;
             }
             let mut name = GroupName::new();
@@ -1115,11 +1119,23 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
 pub fn validate_adoption(
     states: &[SlotState],
     cores: &impl Cores,
-    hop_reserved: usize,
+    places: &CorePool,
     parts: &PartitionPool,
 ) -> Result {
+    let hop_reserved = places.hop_reserved();
     let app = cores.app_cores();
     let is_app = |c: usize| c > hop_reserved && c <= app;
+    // De OS-core (logische core 0, PORT.md beslissing 2): alleen een bewoner
+    // van een groep die hem van deze kern mag delen (Hop's groep `hop`, en
+    // wat de config vertrouwt), met één core en de OS-core als hele pool.
+    // Zo neemt de nieuwe kern na een flip Hop op de OS-core over, en nooit
+    // een gewone app die daar volgens een blob zou staan.
+    let on_os = |s: &SlotState| {
+        s.core == Core::OS.get()
+            && s.cores == 1
+            && places.os_group(&s.share_group)
+            && s.group_cores.as_slice() == [Core::OS.get()]
+    };
     for (j, s) in states.iter().enumerate() {
         let bad = Error::Range {
             base: s.part_base,
@@ -1139,7 +1155,7 @@ pub fn validate_adoption(
             .checked_add(parts.reserve_of(s.part_size))
             .ok_or(bad)?;
         s.part_base.checked_add(claim).ok_or(bad)?;
-        if s.cores < 1 || !is_app(s.core) || s.cores > app + 1 - s.core {
+        if s.cores < 1 || !(is_app(s.core) || on_os(s)) || s.cores > app + 1 - s.core {
             return Err(Error::CoreRange {
                 core: s.core,
                 max: app,
@@ -1163,7 +1179,9 @@ pub fn validate_adoption(
                 });
             }
             for (k, c) in s.group_cores.iter().enumerate() {
-                if !is_app(*c) || s.group_cores.get(..k).is_some_and(|p| p.contains(c)) {
+                if !(is_app(*c) || on_os(s))
+                    || s.group_cores.get(..k).is_some_and(|p| p.contains(c))
+                {
                     return Err(Error::CoreRange { core: *c, max: app });
                 }
             }
@@ -1197,6 +1215,16 @@ pub fn validate_adoption(
         }
     }
     Ok(())
+}
+
+/// De core uit een handoff-blob: 0 is de OS-core ([`Core::OS`]), de rest
+/// een app-core. Of hij daar mag staan, toetste [`validate_adoption`].
+fn adopted_core(c: usize) -> Option<Core> {
+    if c == Core::OS.get() {
+        Some(Core::OS)
+    } else {
+        Core::new(c)
+    }
 }
 
 #[cfg(test)]
@@ -1748,7 +1776,7 @@ pub(crate) mod tests {
         let p = pool();
         let first = st(1, 1, 1, 0x8000_0000);
         let second = st(2, 2, 1, 0x8400_0000);
-        validate_adoption(&[first.clone(), second.clone()], &b, 0, &p).unwrap();
+        validate_adoption(&[first.clone(), second.clone()], &b, &CorePool::new(0), &p).unwrap();
         let changes: [fn(&mut SlotState); 6] = [
             |s| s.slot = 1,
             |s| s.part_base = 0x8000_0000,
@@ -1760,15 +1788,45 @@ pub(crate) mod tests {
         for change in changes {
             let mut s2 = second.clone();
             change(&mut s2);
-            assert!(validate_adoption(&[first.clone(), s2], &b, 0, &p).is_err());
+            assert!(validate_adoption(&[first.clone(), s2], &b, &CorePool::new(0), &p).is_err());
         }
         let mut grouped = first;
         grouped.share_group = b"trusted".to_vec();
         grouped.group_cores = vec![1, 2];
         assert!(
-            validate_adoption(&[grouped, second], &b, 0, &p).is_err(),
+            validate_adoption(&[grouped, second], &b, &CorePool::new(0), &p).is_err(),
             "empty group core overlapped dedicated owner"
         );
+    }
+
+    // PORT.md beslissing 2: na een flip neemt de nieuwe kern Hop op de
+    // OS-core over, want zijn groep mag die core delen; een gewone app die
+    // volgens het blob op de OS-core staat, weigert hij.
+    #[test]
+    fn adoption_takes_hop_on_the_os_core_and_nobody_else() {
+        let b = FakeCores::new(1);
+        let p = pool();
+        let mut places = CorePool::new(0);
+        places.share_os_core(crate::pool::HOP_GROUP).unwrap();
+        let mut hop = st(1, 0, 1, 0x8000_0000);
+        hop.share_group = crate::pool::HOP_GROUP.to_vec();
+        hop.group_cores = vec![0];
+        let app = st(2, 1, 1, 0x8400_0000);
+        validate_adoption(&[hop.clone(), app.clone()], &b, &places, &p).unwrap();
+        // Dezelfde Hop bij een kern die de OS-core niet deelt: geweigerd.
+        assert!(validate_adoption(&[hop.clone()], &b, &CorePool::new(0), &p).is_err());
+        // Een andere groep of een dedicated app op core 0: geweigerd.
+        let mut other = hop.clone();
+        other.share_group = b"web".to_vec();
+        assert!(validate_adoption(&[other], &b, &places, &p).is_err());
+        assert!(validate_adoption(&[st(3, 0, 1, 0x8800_0000)], &b, &places, &p).is_err());
+        // Twee cores op de OS-core: geweigerd.
+        let mut wide = hop.clone();
+        wide.cores = 2;
+        assert!(validate_adoption(&[wide], &b, &places, &p).is_err());
+        // En de actor plaatst hem terug op Core::OS.
+        assert_eq!(adopted_core(0), Some(Core::OS));
+        assert_eq!(adopted_core(1), Core::new(1));
     }
 
     #[test]
@@ -1778,8 +1836,13 @@ pub(crate) mod tests {
         let first = st(6, 2, 2, 0x8000_0000);
         for core in [2, 3] {
             let second = st(1, core, 1, 0x8200_0000);
-            assert!(validate_adoption(&[first.clone(), second.clone()], &b, 0, &p).is_err());
-            assert!(validate_adoption(&[second, first.clone()], &b, 0, &p).is_err());
+            assert!(
+                validate_adoption(&[first.clone(), second.clone()], &b, &CorePool::new(0), &p)
+                    .is_err()
+            );
+            assert!(
+                validate_adoption(&[second, first.clone()], &b, &CorePool::new(0), &p).is_err()
+            );
         }
     }
 

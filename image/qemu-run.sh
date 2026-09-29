@@ -15,6 +15,15 @@
 #   APP=/pad/naar/elf ROLE=0|1 image/qemu-run.sh   een kant-en-klare ELF
 #   APP= image/qemu-run.sh           zonder app-image
 #   image/qemu-run.sh -s -S          extra argumenten gaan naar QEMU (gdb)
+#   SMP=2 image/qemu-run.sh          twee cores: de kern en Hop delen de
+#                                    OS-core, de andere is een volle
+#                                    app-core (PORT.md beslissing 2);
+#                                    standaard 4
+#   OSCORE=1 image/qemu-run.sh       de OS-core (bootparameter
+#                                    hopos.oscore=<small|mid|big|N> in de
+#                                    FDT-bootargs); de kern boot op core 0
+#                                    en verhuist er vóór de eerste bewoner
+#                                    heen. Standaard geen: de boot-core
 #   DISK=pad image/qemu-run.sh       de schijf (raw); standaard
 #                                    target/hopos-disk.img, 64 MiB, aangemaakt
 #                                    (ijl) als hij ontbreekt. Een verse schijf
@@ -88,6 +97,12 @@ if [ -n "$IMAGE" ]; then
 	set -- -device "loader,file=$IMAGE,addr=0xb0200000,force-raw=on" \
 		-device "loader,addr=0xb0100000,data=$SIZE,data-len=8" \
 		-device "loader,addr=0xb0100008,data=$ROLE,data-len=8" "$@"
+fi
+
+# De OS-core als bootparameter: QEMU legt -append in /chosen/bootargs van
+# de DTB, en daar leest het board hem (board/qemuvirt `os_core`).
+if [ -n "${OSCORE:-}" ]; then
+	set -- -append "hopos.oscore=$OSCORE" "$@"
 fi
 
 # De schijf: ijl aangemaakt als hij er niet is (dd met seek schrijft niets).

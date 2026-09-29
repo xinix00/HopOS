@@ -2,3 +2,5 @@
 .DS_Store
 .claude/
 *.log
+# De donor-bytes van Radxa (image/radxa-zero3.sh): vendor, eenmalig gedownload.
+/image/radxa/

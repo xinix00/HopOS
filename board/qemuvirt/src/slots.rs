@@ -56,9 +56,12 @@ const _: () = assert!(STAGE_ROLE_PA + 8 <= STAGE_PA);
 const _: () = assert!(BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN <= STAGE_HDR_PA);
 const _: () = assert!(NODE_CTRL_PA >= DEVICE_WINDOW.base && CAGE_PA > NODE_CTRL_PA);
 
-/// Het PA-plan voor een node met `cores` cores (de kern-core meegeteld): elke
-/// andere core is een app-core, en elke app-core krijgt één kooi.
-pub fn plan(cores: usize) -> abi::Result<Plan> {
+/// Het PA-plan voor een node met `cores` cores, met de kern op fysieke
+/// core `os_core` (de OS-core, PORT.md beslissing 2): elke andere core is
+/// een app-core met één kooi, en de OS-core draagt er één bij, want Hop
+/// woont daar sinds 30-09 naast de kern. Twee cores geven zo twee kooien:
+/// Hop op de OS-core en een app op de volle app-core.
+pub fn plan(cores: usize, os_core: usize) -> abi::Result<Plan> {
     let app_cores = cores.saturating_sub(1).max(1);
     let mut pool = Pool::new();
     for r in POOL {
@@ -72,8 +75,9 @@ pub fn plan(cores: usize) -> abi::Result<Plan> {
         cage_pa: CAGE_PA,
         boot_scratch_pa: BOOT_SCRATCH_PA,
         pool,
-        max_slots: app_cores,
+        max_slots: app_cores + 1,
         app_cores,
+        os_core,
         ..PlanSpec::default()
     })?;
     // De kooi-regio moet helemaal in het Device-venster vallen: een
@@ -95,6 +99,12 @@ pub fn plan(cores: usize) -> abi::Result<Plan> {
 #[must_use]
 pub const fn mpidr(core: usize) -> u64 {
     ((core % 16) as u64) | (((core / 16) as u64) << 8)
+}
+
+/// De fysieke core-index bij een MPIDR van virt: de inverse van [`mpidr`].
+#[must_use]
+pub const fn core_of(mpidr: u64) -> usize {
+    (mpidr & 0xf) as usize + ((mpidr >> 8) & 0xff) as usize * 16
 }
 
 /// Het image dat QEMU vóór de boot neerlegde, of `None` als het maatwoord

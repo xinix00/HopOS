@@ -4,10 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "virtio-blk over MMIO (QEMU virt): één virtqueue, één verzoek tegelijk, een DMA-buffer; het blokapparaat onder hopfs."
+description = "virtio-blk over virtio-mmio (QEMU virt) of virtio-pci (EDK2): één virtqueue, één verzoek tegelijk, een DMA-buffer; het blokapparaat onder hopfs."
 
 [dependencies]
 dev = { path = "../../dev" }
+driver-virtiopci = { path = "../virtiopci" }
 blkdev = { path = "../../blkdev" }
 
 [lints]

@@ -111,6 +111,13 @@ impl core::fmt::Display for Slot {
 pub struct Core(u16);
 
 impl Core {
+    /// De OS-core: logische core 0, waar de kern zelf woont en die hij deelt
+    /// met Hop en met de sharegroups die hem mogen delen (PORT.md beslissing
+    /// 2). Geen app-core: [`Core::new`] geeft hem nooit, zodat een getal van
+    /// buiten hem niet kan aanwijzen; alleen de plaatsing kiest hem
+    /// ([`crate::pool::CorePool::share_os_core`]).
+    pub const OS: Core = Core(0);
+
     /// Core `c`, of `None` buiten `1..=CORE_CAP`.
     #[must_use]
     pub const fn new(c: usize) -> Option<Core> {
@@ -126,6 +133,15 @@ impl Core {
     #[must_use]
     pub const fn get(self) -> usize {
         self.0 as usize
+    }
+
+    /// De core-run van een kooi: deze core en de `span - 1` erna. Anders dan
+    /// `(c..c + span).filter_map(Core::new)` laat dit [`Core::OS`] niet
+    /// weg: een stop die de OS-core oversloeg, zag een bewoner daar meteen
+    /// als stil.
+    pub fn run(self, span: usize) -> impl Iterator<Item = Core> {
+        core::iter::once(self)
+            .chain((self.get() + 1..self.get() + span.max(1)).filter_map(Core::new))
     }
 }
 

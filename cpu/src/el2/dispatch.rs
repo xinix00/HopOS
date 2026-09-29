@@ -21,7 +21,7 @@
 //! `stp x2, x3, [sp, #16]`, `x2` = de vectorindex, en een sprong naar de
 //! switcher. Daar kiest de index het pad: 8 (0x400, synchroon uit EL1) met
 //! EC = HVC kiest op de immediate ([`HVC_EXIT`], [`HVC_YIELD`],
-//! [`HVC_WAKE`], [`HVC_DOOR_ACK`]); 10 (0x500, FIQ uit EL1) is op Apple de
+//! [`HVC_WAKE`], [`HVC_DOOR_ACK`], [`HVC_KICK_OS`]); 10 (0x500, FIQ uit EL1) is op Apple de
 //! kick; al het andere is een fault-rapport op de control-page van de
 //! bewoner, waarna die dood is en de core doorroteert.
 
@@ -54,6 +54,12 @@ pub const HVC_YIELD: u64 = 1;
 pub const HVC_WAKE: u64 = 4;
 /// HVC #5: de doorbell-interrupt is afgehandeld (alleen Apple).
 pub const HVC_DOOR_ACK: u64 = 5;
+/// HVC #6: bel de kern op de OS-core (een frame op de TX-ring, een
+/// system-call): de switcher stuurt zijn kick-SGI als de kern op dat moment
+/// geen SEV hoort (`oscore::SCHED_OS_KICK`), en keert meteen terug. Een
+/// yield (HVC #1) belt ook, want een app die idle gaat na een publicatie
+/// wacht meestal op het antwoord.
+pub const HVC_KICK_OS: u64 = 6;
 
 /// De vectorindex van een synchrone exception uit een lagere EL (AArch64).
 pub const VEC_SYNC_LOWER: u64 = 8;

@@ -1,10 +1,11 @@
 //! De slaap van een arm64-core: de [`Sleeper`] van de executor, en de klok
 //! ([`now`]) die de executor als [`executor::Clock`] krijgt.
 //!
-//! Dit bezit: de keuze van de event-stream (EVNTI per CNTFRQ), de drie
-//! manieren van slapen (WFE met event-stream, WFI op de fysieke timer, de
-//! yield naar de EL2-switcher op een gedeelde core) en de tellers die zeggen
-//! of een core slaapt of spint. Niet van hier: wat er te doen is. De deuren
+//! Dit bezit: de keuze van de event-stream (EVNTI per CNTFRQ), de manieren
+//! van slapen (WFE met event-stream, WFI op de fysieke timer, de yield naar
+//! de EL2-switcher op een gedeelde core, en op de OS-core de rotatie over
+//! zijn bewoners) en de tellers die zeggen of een core slaapt of spint.
+//! Niet van hier: wat er te doen is. De deuren
 //! (IRQ-vlag, ringkoppen) zitten in de executor en komen binnen als het
 //! `ready`-predicaat; de governor uit de Go-kern, met zijn `nested`-vlaggen,
 //! `RunIdleTimers` en `IdleMayReady`, bestaat niet meer (PORT §4).
@@ -13,6 +14,7 @@
 //! een slapende core is clock-gated en verbruikt vrijwel niets, op elke
 //! kloksnelheid. Een core die "idle" spint is dat niet.
 
+use crate::el2::{OsCore, TURN_CAP_NS, Turn};
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use dev::Pa;
 use executor::Sleeper;
@@ -144,6 +146,14 @@ pub enum Mode {
     /// gemeten 02-09: WFE keert direct terug en geen FIQ wekt een WFI); de
     /// slaap gebeurt dan op EL2, waar hij wél werkt.
     Yield,
+    /// De OS-core (PORT.md beslissing 2): idle is een beurt voor de volgende
+    /// bewoner die aan de beurt is ([`OsCore::run`]), op EL1 onder stage-2,
+    /// tot een interrupt, de kick van een app-core, de deadline of zijn
+    /// eigen yield de core teruggeeft. Is niemand aan de beurt, dan slaapt
+    /// de core in zijn basismodus (WFE of WFI) tot de vroegste wektijd.
+    /// Een ronde-modus: de slaper staat erin zodra hij een [`OsCore`] host
+    /// ([`ArmSleeper::host`]); als basismodus leest hij als `Wfe`.
+    Resident,
 }
 
 /// De meetlat van de slaap (handboek §4): zonder deze getallen is "de node
@@ -178,6 +188,7 @@ pub struct ArmSleeper {
     shared: Option<Pa>,
     publish_idle: Option<Pa>,
     publish_wakes: Option<Pa>,
+    os: Option<OsCore>,
     /// De meetlat.
     pub stats: Stats,
 }
@@ -197,8 +208,16 @@ impl ArmSleeper {
             shared: None,
             publish_idle: None,
             publish_wakes: None,
+            os: None,
             stats: Stats::default(),
         }
+    }
+
+    /// Maakt deze core de OS-core: vanaf de volgende idle-ronde is idle een
+    /// beurt voor zijn bewoners ([`Mode::Resident`]). Alleen op de core van
+    /// de kern zelf, en één keer.
+    pub fn host(&mut self, os: OsCore) {
+        self.os = Some(os);
     }
 
     /// Kijk elke ronde naar dit woord (CtrlShared): niet-nul betekent dat
@@ -215,11 +234,23 @@ impl ArmSleeper {
         self.publish_wakes = Some(wakes);
     }
 
-    /// Welke modus deze ronde geldt: een gedeelde core yieldt altijd.
+    /// Welke modus deze ronde geldt: een gedeelde core yieldt altijd, de
+    /// OS-core geeft zijn idle aan zijn bewoners.
     fn round_mode(&self) -> Mode {
         match self.shared {
             Some(w) if dev::read64(w) != 0 => Mode::Yield,
+            _ if self.os.is_some() => Mode::Resident,
             _ => self.mode,
+        }
+    }
+
+    /// De slaap zelf als niemand de core krijgt: de basismodus. `Resident`
+    /// als basis is WFE; `Yield` ook, want de kern staat zelf op EL2 en een
+    /// HVC daar is een trap naar zichzelf.
+    fn base_mode(&self) -> Mode {
+        match self.mode {
+            Mode::Wfi => Mode::Wfi,
+            Mode::Wfe | Mode::Resident | Mode::Yield => Mode::Wfe,
         }
     }
 
@@ -298,7 +329,25 @@ impl Sleeper for ArmSleeper {
             return;
         }
         let slept = match self.round_mode() {
-            Mode::Wfe => {
+            Mode::Resident => self.resident(now, until, ready, daif),
+            mode => self.nap(mode, now, until, ready, daif),
+        };
+        self.account(slept);
+    }
+}
+
+impl ArmSleeper {
+    /// Eén slaap in `mode`, met de maskers `daif` terug zoals ze stonden.
+    fn nap(
+        &self,
+        mode: Mode,
+        now: u64,
+        until: Option<u64>,
+        ready: &dyn Fn() -> bool,
+        daif: u64,
+    ) -> u64 {
+        match mode {
+            Mode::Wfe | Mode::Resident => {
                 arch::restore(daif);
                 let deadline = until.map(|u| deadline_ticks(now, u, self.hz));
                 self.wfe_sleep(deadline, ready)
@@ -314,8 +363,54 @@ impl Sleeper for ArmSleeper {
                 arch::restore(daif);
                 arch::hvc_yield(self.yield_deadline(now, until))
             }
+        }
+    }
+
+    /// De idle van de OS-core: een beurt voor de volgende bewoner, tot
+    /// hooguit de deadline van de executor (en de vangrail van
+    /// [`TURN_CAP_NS`]). Is niemand aan de beurt, dan de basisslaap tot de
+    /// deadline of de vroegste wektijd van een bewoner, wat eerst komt; in
+    /// WFI met de kick scherp, want een SEV wekt WFI niet.
+    ///
+    /// Een beurt telt niet als slaap van de kern: de tijd staat in de
+    /// meetlat van de OS-core (`el2::OS_STATS`).
+    fn resident(
+        &mut self,
+        now: u64,
+        until: Option<u64>,
+        ready: &dyn Fn() -> bool,
+        daif: u64,
+    ) -> u64 {
+        let cap = now.saturating_add(TURN_CAP_NS);
+        let deadline = deadline_ticks(now, until.map_or(cap, |u| u.min(cap)), self.hz);
+        let turn = match self.os.as_mut() {
+            Some(os) => os.run(deadline),
+            None => Turn::Idle { wake: None },
         };
-        self.account(slept);
+        let wake = match turn {
+            Turn::Ran(_) => {
+                arch::restore(daif);
+                return 0;
+            }
+            Turn::Idle { wake } => wake,
+        };
+        let until = match (until, wake) {
+            (u, None) => u,
+            (u, Some(t)) => {
+                let w = now.saturating_add(ticks_to_ns(t.saturating_sub(arch::counter()), self.hz));
+                Some(u.map_or(w, |u| u.min(w)))
+            }
+        };
+        let base = self.base_mode();
+        let listen = base == Mode::Wfi;
+        if listen && let Some(os) = &self.os {
+            os.listen(true);
+        }
+        let slept = self.nap(base, now, until, ready, daif);
+        if listen && let Some(os) = &self.os {
+            os.listen(false);
+        }
+        slept
     }
 }
 

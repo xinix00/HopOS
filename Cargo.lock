@@ -47,6 +47,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "board-altra"
+version = "3.0.0"
+dependencies = [
+ "board",
+ "board-uefi",
+ "bounded",
+ "cpu",
+ "dev",
+ "driver-igb",
+ "driver-nvme",
+ "driver-pcie",
+ "driver-smpro",
+ "executor",
+ "netdev",
+ "sync",
+]
+
+[[package]]
+name = "board-o6n"
+version = "3.0.0"
+dependencies = [
+ "board",
+ "board-uefi",
+ "bounded",
+ "cpu",
+ "dev",
+ "driver-dvfs",
+ "driver-nvme",
+ "driver-pcie",
+ "driver-rtl8126",
+ "driver-scmi",
+ "executor",
+ "netdev",
+ "sync",
+]
+
+[[package]]
 name = "board-qemuvirt"
 version = "3.0.0"
 dependencies = [
@@ -58,6 +95,100 @@ dependencies = [
  "driver-pl011",
  "driver-virtioblk",
  "driver-virtionet",
+ "executor",
+ "fw",
+ "netdev",
+ "sync",
+]
+
+[[package]]
+name = "board-raspi"
+version = "3.0.0"
+dependencies = [
+ "abi",
+ "blkdev",
+ "board",
+ "bounded",
+ "cpu",
+ "dev",
+ "driver-gicv2",
+ "driver-pl011",
+ "driver-vcmail",
+ "executor",
+ "fw",
+ "netdev",
+ "sync",
+]
+
+[[package]]
+name = "board-rk3566"
+version = "3.0.0"
+dependencies = [
+ "abi",
+ "board",
+ "cpu",
+ "dev",
+ "driver-dwmac4",
+ "driver-gicv3",
+ "driver-mdio",
+ "driver-ns16550",
+ "driver-virtioblk",
+ "executor",
+ "fw",
+ "net",
+ "netdev",
+ "sync",
+]
+
+[[package]]
+name = "board-rpi4"
+version = "3.0.0"
+dependencies = [
+ "abi",
+ "board",
+ "board-raspi",
+ "cpu",
+ "dev",
+ "driver-genet",
+ "driver-gicv2",
+ "driver-mdio",
+ "driver-pl011",
+]
+
+[[package]]
+name = "board-rpi5"
+version = "3.0.0"
+dependencies = [
+ "abi",
+ "board",
+ "board-raspi",
+ "cpu",
+ "dev",
+ "driver-brcmpcie",
+ "driver-gem",
+ "driver-gicv2",
+ "driver-mdio",
+ "driver-pl011",
+ "netdev",
+ "sync",
+]
+
+[[package]]
+name = "board-uefi"
+version = "3.0.0"
+dependencies = [
+ "abi",
+ "board",
+ "bounded",
+ "cpu",
+ "dev",
+ "driver-gicv3",
+ "driver-ns16550",
+ "driver-pcie",
+ "driver-pl011",
+ "driver-virtioblk",
+ "driver-virtionet",
+ "driver-virtiopci",
  "executor",
  "fw",
  "netdev",
@@ -84,9 +215,95 @@ name = "dev"
 version = "3.0.0"
 
 [[package]]
+name = "driver-brcmpcie"
+version = "3.0.0"
+dependencies = [
+ "dev",
+]
+
+[[package]]
+name = "driver-dvfs"
+version = "3.0.0"
+
+[[package]]
+name = "driver-dwmac4"
+version = "3.0.0"
+dependencies = [
+ "dev",
+ "driver-mdio",
+ "netdev",
+ "sync",
+]
+
+[[package]]
+name = "driver-gem"
+version = "3.0.0"
+dependencies = [
+ "dev",
+ "driver-mdio",
+ "netdev",
+ "sync",
+]
+
+[[package]]
+name = "driver-genet"
+version = "3.0.0"
+dependencies = [
+ "dev",
+ "driver-mdio",
+ "netdev",
+ "sync",
+]
+
+[[package]]
+name = "driver-gicv2"
+version = "3.0.0"
+dependencies = [
+ "cpu",
+ "dev",
+]
+
+[[package]]
 name = "driver-gicv3"
 version = "3.0.0"
 dependencies = [
+ "dev",
+]
+
+[[package]]
+name = "driver-igb"
+version = "3.0.0"
+dependencies = [
+ "dev",
+ "driver-mdio",
+ "netdev",
+ "sync",
+]
+
+[[package]]
+name = "driver-mdio"
+version = "3.0.0"
+
+[[package]]
+name = "driver-ns16550"
+version = "3.0.0"
+dependencies = [
+ "dev",
+]
+
+[[package]]
+name = "driver-nvme"
+version = "3.0.0"
+dependencies = [
+ "blkdev",
+ "dev",
+]
+
+[[package]]
+name = "driver-pcie"
+version = "3.0.0"
+dependencies = [
+ "bounded",
  "dev",
 ]
 
@@ -98,11 +315,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "driver-rtl8126"
+version = "3.0.0"
+dependencies = [
+ "dev",
+ "driver-mdio",
+ "netdev",
+ "sync",
+]
+
+[[package]]
+name = "driver-scmi"
+version = "3.0.0"
+dependencies = [
+ "dev",
+]
+
+[[package]]
+name = "driver-smpro"
+version = "3.0.0"
+dependencies = [
+ "dev",
+]
+
+[[package]]
+name = "driver-vcmail"
+version = "3.0.0"
+dependencies = [
+ "dev",
+]
+
+[[package]]
 name = "driver-virtioblk"
 version = "3.0.0"
 dependencies = [
  "blkdev",
  "dev",
+ "driver-virtiopci",
 ]
 
 [[package]]
@@ -111,8 +360,17 @@ version = "3.0.0"
 dependencies = [
  "bounded",
  "dev",
+ "driver-virtiopci",
  "netdev",
  "sync",
+]
+
+[[package]]
+name = "driver-virtiopci"
+version = "3.0.0"
+dependencies = [
+ "dev",
+ "driver-pcie",
 ]
 
 [[package]]
@@ -137,11 +395,18 @@ version = "3.0.0"
 dependencies = [
  "abi",
  "board",
+ "board-altra",
+ "board-o6n",
  "board-qemuvirt",
+ "board-rk3566",
+ "board-rpi4",
+ "board-rpi5",
+ "board-uefi",
  "cpu",
  "dev",
  "driver-virtioblk",
  "executor",
+ "fw",
  "kern",
  "leandhcp",
  "leanelf",

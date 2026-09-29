@@ -13,4 +13,7 @@ echo "== target: bibliotheken (aarch64)"
 cargo build --quiet --target aarch64-unknown-none-softfloat
 echo "== target: hopos (qemuvirt)"
 cargo build --quiet --target aarch64-unknown-none-softfloat -p hopos --features board-qemuvirt
+echo "== target: hopos (rpi4, rpi5)"
+cargo build --quiet --target aarch64-unknown-none-softfloat -p hopos --features board-rpi4
+cargo build --quiet --target aarch64-unknown-none-softfloat -p hopos --features board-rpi5
 echo "poort groen"

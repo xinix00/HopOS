@@ -32,10 +32,22 @@
 #               appspike stopt met code 0 (applib: shutdown code=0) en Hop
 #               herstart een service, dus de toets pollt tot hij running ziet.
 #
-# Een HOPOS_PANIC, HOPOS_EXCEPTION, HOPOS_HOP_FAULT, HOPOS_HOP_EXIT of
-# HOP_STATE_SKIPPED is meteen rood. Rood bewaart de console (en drukt hem af).
+# De OS-core (PORT.md beslissing 2): Hop deelt de core van de kern
+# (HOPOS_HOP_START slot=1 core=0, cpu = de OS-core), de overgang bewees
+# zichzelf bij boot (HOPOS_OS_SELFTEST ok: terug op de timer, een yield en
+# de kick-SGI), en appspike landt op de eerste app-core (HOPOS_SLOT_START
+# slot=2 core=1). Met SMP=2 is dat de enige andere core; met OSCORE=1
+# verhuist de kern eerst naar core 1 en wordt core 0 die app-core
+# (HOPOS_OSCORE_PARKED, en cpu=0 voor slot 2).
+#
+# Een HOPOS_PANIC, HOPOS_EXCEPTION, HOPOS_HOP_FAULT, HOPOS_HOP_EXIT,
+# HOP_STATE_SKIPPED, of een OS-core die niet deelt (HOPOS_OS_SELFTEST_FAIL,
+# HOPOS_OS_CORE_FAIL, HOPOS_OSCORE_FALLBACK, HOPOS_CAGE_FAIL) is meteen rood.
+# Rood bewaart de console (en drukt hem af).
 #
 #   tools/qemu-test-hop.sh                 TIMEOUT=60 standaard, in seconden
+#   SMP=2 tools/qemu-test-hop.sh           twee cores (standaard 4)
+#   SMP=2 OSCORE=1 tools/qemu-test-hop.sh  de kern en Hop op core 1
 #   KEEP_LOG=pad tools/qemu-test-hop.sh    bewaart ook een groene console
 #   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT   de host-poorten; bezet = een vrije
 #                                          poort van het OS, luid gemeld
@@ -101,7 +113,10 @@ fi
 (cd "$ART" && exec python3 -m http.server "$ARTPORT" --bind 127.0.0.1) >"$ART/http.log" 2>&1 &
 HPID=$!
 
-echo "== booten op QEMU virt met Hop (tot ${TIMEOUT}s; system :$SYSPORT, agent :$AGENTPORT, leader :$LEADERPORT, artifacts :$ARTPORT)"
+OSCPU="${OSCORE:-0}"
+APPCPU=1
+[ "$OSCPU" = 0 ] || APPCPU=0
+echo "== booten op QEMU virt met Hop, ${SMP:-4} cores, OS-core $OSCPU (tot ${TIMEOUT}s; system :$SYSPORT, agent :$AGENTPORT, leader :$LEADERPORT, artifacts :$ARTPORT)"
 SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP=hop DISK="$DISK" \
 	sh "$DIR/image/qemu-run.sh" </dev/null >"$LOG" 2>&1 &
 QPID=$!
@@ -109,9 +124,10 @@ QPID=$!
 has() { tr -d '\r' <"$LOG" | grep -q -E "$1"; }
 
 # De vaste markers (grep -E), in de volgorde waarin ze horen te komen.
-BOOT_MARKS="HOPOS_BOOT|HOPOS_CLOCK_FIXED|HOPOS_PRIVILEGE|HOPOS_DISK_UP model=virtio-blk|HOPOS_FS_UP fresh=1|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_HOP_START slot=1|uplink tcp :8080 -> slot 1 :8080 HOPOS_HOP_PUBLISH|uplink tcp :9080 -> slot 1 :9080 HOPOS_HOP_PUBLISH|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
-PLACE_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|HOPOS_SLOT_START slot=2|slot 2: HOPOS_APPSPIKE_FS ok|slot 2: HOPOS_APPSPIKE_DONE pass=9 fail=0|hopfs: slot 1 saved /hop/agent-state.json as /volumes/hop/agent-state.json .*HOPOS_FS_SAVED"
-RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOP_STATE_SKIPPED"
+BOOT_MARKS="HOPOS_BOOT|HOPOS_CLOCK_FIXED|HOPOS_PRIVILEGE|HOPOS_DISK_UP model=virtio-blk|HOPOS_FS_UP fresh=1|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_OS_SELFTEST ok|HOPOS_HOP_START slot=1 core=0 cpu=$OSCPU |uplink tcp :8080 -> slot 1 :8080 HOPOS_HOP_PUBLISH|uplink tcp :9080 -> slot 1 :9080 HOPOS_HOP_PUBLISH|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
+[ "$OSCPU" = 0 ] || BOOT_MARKS="$BOOT_MARKS|HOPOS_OSCORE_PARKED"
+PLACE_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|HOPOS_SLOT_START slot=2 core=1 cpu=$APPCPU |slot 2: HOPOS_APPSPIKE_FS ok|slot 2: HOPOS_APPSPIKE_DONE pass=9 fail=0|hopfs: slot 1 saved /hop/agent-state.json as /volumes/hop/agent-state.json .*HOPOS_FS_SAVED"
+RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOP_STATE_SKIPPED|HOPOS_OS_SELFTEST_FAIL|HOPOS_OS_CORE_FAIL|HOPOS_OSCORE_FALLBACK|HOPOS_CAGE_FAIL"
 
 all() {
 	(
@@ -223,6 +239,10 @@ else
 	fail=1
 fi
 echo "   tijd: $(($(date +%s) - START)) s na de start van QEMU"
+# De meetlat: de rtt van appspike's NET-toets en de laatste tik met de
+# overgangen van de OS-core (in/irq/ipi/timer/yield en de tijd van Hop).
+echo "   meting: $(tr -d '\r' <"$LOG" | grep -o 'dial_us=[0-9]*' | tr '\n' ' ')"
+echo "   meting: $(tr -d '\r' <"$LOG" | grep -o 'os(in=.*' | tail -1)"
 if [ "$fail" != 0 ]; then
 	KEEP="$(mktemp -t hopos-qemu-hop-rood.XXXXXX)"
 	tr -d '\r' <"$LOG" >"$KEEP"
@@ -243,7 +263,7 @@ LOG="$(mktemp -t hopos-qemu-hop2.XXXXXX)"
 SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP=hop DISK="$DISK" \
 	sh "$DIR/image/qemu-run.sh" </dev/null >"$LOG" 2>&1 &
 QPID=$!
-RESTART_MARKS="HOPOS_FS_UP fresh=0|hopfs: tree restored|HOPOS_HOP_START slot=1|slot 1: .*HOP_ADOPTED"
+RESTART_MARKS="HOPOS_FS_UP fresh=0|hopfs: tree restored|HOPOS_HOP_START slot=1 core=0 cpu=$OSCPU |slot 1: .*HOP_ADOPTED"
 START=$(date +%s)
 elapsed=0
 while ! all "$RESTART_MARKS"; do

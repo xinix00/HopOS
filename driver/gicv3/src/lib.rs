@@ -36,10 +36,13 @@
 
 use core::fmt;
 use core::mem::offset_of;
+use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use dev::{Pa, Reg};
 
 /// De INTID van SPI 0.
 pub const FIRST_SPI: u32 = 32;
+/// Het aantal SGI's (INTID 0..=15): de IPI's van de GIC.
+pub const SGI_COUNT: u32 = 16;
 /// De eerste speciale INTID (1020-1023): "niets" bij een claim.
 pub const FIRST_SPECIAL: u32 = 1020;
 
@@ -186,9 +189,13 @@ impl fmt::Display for Error {
 }
 
 /// Eén GICv3, voor de core die hem opzet.
+///
+/// Het redistributor-frame is dat van de core van de kern, en die kan bij
+/// boot verhuizen (de OS-core, PORT.md beslissing 2): daarom een atomic die
+/// [`Gic::set_redistributor`] één keer bijstelt, vóór [`Gic::init`].
 pub struct Gic<I: Icc> {
     gicd: Pa,
-    gicr: Pa,
+    gicr: AtomicU64,
     icc: I,
 }
 
@@ -202,7 +209,26 @@ impl<I: Icc> Gic<I> {
     /// 128 KB redistributor) die zolang het programma draait blijven.
     #[must_use]
     pub const unsafe fn new(gicd: Pa, gicr: Pa, icc: I) -> Self {
-        Self { gicd, gicr, icc }
+        Self {
+            gicd,
+            gicr: AtomicU64::new(gicr.0),
+            icc,
+        }
+    }
+
+    /// Zet het redistributor-frame op dat van de core die de GIC bedient
+    /// (zie [`find_redistributor`]), vóór [`Gic::init`].
+    ///
+    /// # Safety
+    ///
+    /// `gicr` is een gemapt GICv3-redistributorframe van 128 KB dat zolang
+    /// het programma draait blijft, zoals bij [`Gic::new`].
+    pub unsafe fn set_redistributor(&self, gicr: Pa) {
+        self.gicr.store(gicr.0, Relaxed);
+    }
+
+    fn gicr(&self) -> Pa {
+        Pa(self.gicr.load(Relaxed))
     }
 
     fn d(&self) -> &'static Gicd {
@@ -211,8 +237,8 @@ impl<I: Icc> Gic<I> {
     }
 
     fn r(&self) -> &'static Gicr {
-        // SAFETY: de voorwaarde van `new`.
-        unsafe { dev::regs(self.gicr) }
+        // SAFETY: de voorwaarde van `new` en `set_redistributor`.
+        unsafe { dev::regs(self.gicr()) }
     }
 
     /// Zet de GIC op voor deze core: de redistributor wakker, de
@@ -303,7 +329,7 @@ impl<I: Icc> Gic<I> {
             gicd: self.gicd,
             gicd_iidr: self.d().iidr.read(),
             gicd_ctlr: self.d().ctlr.read(),
-            gicr: self.gicr,
+            gicr: self.gicr(),
             gicr_iidr: self.r().iidr.read(),
             gicr_typer: self.r().typer.read(),
         }
@@ -334,6 +360,30 @@ impl fmt::Display for Describe {
             self.gicr_typer
         )
     }
+}
+
+/// De ICC_SGI1R_EL1-waarde die SGI `intid` naar precies de core met
+/// affiniteit `mpidr` stuurt: affinity routing met IRM = 0, TargetList-bit
+/// aff0 % 16, RS = aff0 / 16, en Aff1..Aff3 op hun plek (ARM IHI 0069,
+/// ICC_SGI1R_EL1).
+///
+/// Een waarde en geen schrijfactie: de zender is de EL2-switcher van een
+/// app-core (de kick naar de OS-core, PORT.md beslissing 2), die het woord
+/// uit het sched-blok leest en zelf schrijft. Zo raakt een app nooit een
+/// GIC-register: op EL1 trapt ICC_SGI1R toch naar EL2 zodra FMO of IMO
+/// staat.
+#[must_use]
+pub const fn sgi1r(mpidr: u64, intid: u32) -> u64 {
+    let aff0 = mpidr & 0xff;
+    let aff1 = (mpidr >> 8) & 0xff;
+    let aff2 = (mpidr >> 16) & 0xff;
+    let aff3 = (mpidr >> 32) & 0xff;
+    (1 << (aff0 % 16))
+        | (aff1 << 16)
+        | (((intid % SGI_COUNT) as u64) << 24)
+        | (aff2 << 32)
+        | ((aff0 / 16) << 44)
+        | (aff3 << 48)
 }
 
 /// Zoekt in de GICR-reeks `[base, base+len)` het RD_base-frame van de core
@@ -480,6 +530,23 @@ mod tests {
         // SAFETY: zie hierboven.
         let gic = unsafe { Gic::new(pa(&mut d), pa(&mut r), &icc) };
         assert_eq!(gic.init(), Err(Error::Asleep));
+    }
+
+    #[test]
+    fn sgi1r_aims_at_exactly_one_core() {
+        // Core 0 van cluster 0, SGI 8: alleen TargetList-bit 0.
+        assert_eq!(sgi1r(0, 8), (8 << 24) | 1);
+        // QEMU virt core 1 (aff0 = 1).
+        assert_eq!(sgi1r(1, 8), (8 << 24) | 2);
+        // Aff1 = 0xa (de O6N-vorm 0xa00), aff0 = 0.
+        assert_eq!(sgi1r(0x8000_0a00, 3), (3 << 24) | (0xa << 16) | 1);
+        // Aff0 = 17: RS = 1, bit 1.
+        assert_eq!(sgi1r(17, 0), (1 << 44) | 2);
+        // Aff2 en Aff3.
+        assert_eq!(
+            sgi1r(0x12_0003_0000, 1),
+            (1 << 24) | (3 << 32) | (0x12 << 48) | 1
+        );
     }
 
     #[test]

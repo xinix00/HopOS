@@ -209,10 +209,32 @@ pub trait Conn {
 pub trait Hooks {
     /// Zet de klok (Unix-nanoseconden).
     fn set_clock(&self, unix_ns: u64);
-    /// Start een kern-flip naar de bundel die in slot `bundle` gestroomd is
-    /// en de SHA-256 `sha256` moet hebben. De details (reserveren zonder
-    /// starten) komen met de flip zelf.
-    fn flip(&self, bundle: Slot, sha256: &[u8; 32]) -> Result;
+    /// Start een kern-flip naar `bundle` (rauw gestroomd in een slot dat
+    /// met [`FLIP_BUNDLE_JOB`] gereserveerd is), die de SHA-256 `sha256`
+    /// moet hebben. De haak toetst en legt de nieuwe kern klaar, synchroon:
+    /// na zijn `Ok` geeft de system-API het slot terug aan de pool, dus wat
+    /// de haak uit de bundel nodig heeft, moet dan al gekopieerd zijn. De
+    /// sprong zelf komt later, van de eigenaar van de flip (hij moet dit
+    /// antwoord nog naar Hop laten gaan).
+    fn flip(&self, bundle: &FlipBundle, sha256: &[u8; 32]) -> Result;
+}
+
+/// De jobnaam waarmee Hop een slot reserveert voor een flip-bundel: de
+/// bytes van STREAM_IMAGE gaan dan rauw de partitie in (vanaf offset 0),
+/// zonder plaatsing en zonder start, tot PrivOp::FLIP ze opeist. Een naam
+/// en geen vlag in de wire: Hop spreekt de ABI van zijn getagde HopOS
+/// (alpha.4), en een naam past daarin zonder nieuw veld.
+pub const FLIP_BUNDLE_JOB: &[u8] = b"hopos.flip-bundle";
+
+/// Een complete flip-bundel in een gereserveerde partitie.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct FlipBundle {
+    /// Het slot waarin hij stroomde.
+    pub slot: Slot,
+    /// De fysieke basis van de partitie: byte 0 van de bundel.
+    pub base: u64,
+    /// De lengte van de bundel.
+    pub len: u64,
 }
 
 /// Het slot achter een bron-IP, of `None` als het geen app-adres is.
@@ -663,6 +685,8 @@ struct Placer {
     /// De entry uit de header.
     entry: u64,
     ready: bool,
+    /// Een flip-bundel: bytes rauw naar hun offset, geen ELF en geen start.
+    raw: bool,
 }
 
 impl Placer {
@@ -682,7 +706,24 @@ impl Placer {
             scr_off: 0,
             entry: 0,
             ready: false,
+            raw: false,
         })
+    }
+
+    /// Een rauwe stroom voor een flip-bundel: `size` bytes op offset 0 van
+    /// een partitie met `app_ram` bytes onder de staart.
+    fn raw(size: u64, app_ram: u64) -> core::result::Result<Placer, Fail> {
+        if size > app_ram {
+            return Err(Self::fail(
+                "flip bundle larger than its partition",
+                size,
+                app_ram,
+            ));
+        }
+        let mut p = Placer::new(size, app_ram)?;
+        p.raw = true;
+        p.ready = true;
+        Ok(p)
     }
 
     /// Hoeveel bytes er binnen zijn.
@@ -712,6 +753,11 @@ impl Placer {
                 have + chunk.len() as u64,
                 self.size,
             ));
+        }
+        if self.raw {
+            g.write(mem, self.pos, chunk)?;
+            self.pos += chunk.len() as u64;
+            return Ok(());
         }
         if self.ready {
             return self.route(g, mem, chunk);
@@ -1470,11 +1516,27 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
                 Ok((0, 0))
             }
             PrivOp::Flip => {
-                let sha: &[u8; 32] = c.path.try_into().map_err(|_| Error::TooLarge {
-                    len: c.path.len(),
-                    max: 32,
-                })?;
-                hooks.flip(target(c)?, sha)?;
+                let sha = &flip_sum(c.path)?;
+                let slot = target(c)?;
+                let complete = self.with_stream(slot, |s| {
+                    s.placer.raw && s.placer.received() == s.placer.size
+                });
+                if complete != Some(true) {
+                    return Err(Error::NotOwned { slot: slot.get() }.into());
+                }
+                let Some(s) = self.take_stream(slot) else {
+                    return Err(Error::NotOwned { slot: slot.get() }.into());
+                };
+                let bundle = FlipBundle {
+                    slot,
+                    base: s.grant.region().base,
+                    len: s.placer.size,
+                };
+                let r = hooks.flip(&bundle, sha);
+                // Gelukt of niet: het slot gaat terug. Bij succes heeft de
+                // haak de nieuwe kern al buiten de partitie klaargelegd.
+                let _ = slots::call(self.inbox, reply, Request::Abort(s.grant)).await;
+                r?;
                 Ok((0, 0))
             }
         }
@@ -1566,12 +1628,19 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             _ => return Err(Error::Busy.into()),
         };
         let region = grant.region();
+        let flip = req.job == FLIP_BUNDLE_JOB;
         let placer = region
             .size
             .checked_sub(ABI_TAIL)
             .filter(|&ram| abi::layout::Tail::new(LINK_BASE, ram).is_some())
             .ok_or(Fail::Kern(Error::PartitionSize { size: region.size }))
-            .and_then(|ram| Placer::new(req.image_size, ram));
+            .and_then(|ram| {
+                if flip {
+                    Placer::raw(req.image_size, ram)
+                } else {
+                    Placer::new(req.image_size, ram)
+                }
+            });
         let placer = match placer {
             Ok(p) => p,
             Err(e) => {
@@ -1644,6 +1713,11 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         if received < size {
             return answer_stream(data, received, StreamState::More, None);
         }
+        // Een complete flip-bundel blijft in de tabel liggen tot FLIP hem
+        // opeist (of STOP_SLOT hem afbreekt): "geplaatst" is hier "binnen".
+        if self.with_stream(slot, |s| s.placer.raw) == Some(true) {
+            return answer_stream(data, received, StreamState::Placed, None);
+        }
         let Some(mut s) = self.take_stream(slot) else {
             return Err(Error::NotOwned { slot: slot.get() }.into());
         };
@@ -1709,6 +1783,35 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         dst.copy_from_slice(&b);
         Ok((0, b.len()))
     }
+}
+
+/// De som van een FLIP: 32 rauwe bytes, of 64 hex-tekens (de client van
+/// applib draagt het pad als tekst, en Hop heeft de som al als hex).
+fn flip_sum(path: &[u8]) -> Result<[u8; 32]> {
+    if let Ok(raw) = <[u8; 32]>::try_from(path) {
+        return Ok(raw);
+    }
+    let bad = Error::TooLarge {
+        len: path.len(),
+        max: 64,
+    };
+    if path.len() != 64 {
+        return Err(bad);
+    }
+    let nib = |c: u8| match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    };
+    let mut out = [0u8; 32];
+    for (o, pair) in out.iter_mut().zip(path.chunks_exact(2)) {
+        let (Some(h), Some(l)) = (nib(pair[0]), nib(pair[1])) else {
+            return Err(bad);
+        };
+        *o = (h << 4) | l;
+    }
+    Ok(out)
 }
 
 /// Het doelslot van een bevoegde call (`off`).
@@ -1980,8 +2083,8 @@ mod tests {
         fn set_clock(&self, unix_ns: u64) {
             self.0.set(unix_ns);
         }
-        fn flip(&self, bundle: Slot, sha256: &[u8; 32]) -> Result {
-            self.1.set(Some((bundle.get(), *sha256)));
+        fn flip(&self, bundle: &FlipBundle, sha256: &[u8; 32]) -> Result {
+            self.1.set(Some((bundle.slot.get(), *sha256)));
             Ok(())
         }
     }
@@ -2442,7 +2545,7 @@ mod tests {
     }
 
     #[test]
-    fn flip_passes_slot_and_sha_to_the_hook() {
+    fn flip_without_a_bundle_never_reaches_the_hook() {
         let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
         let tee = LogTee::new(&con, &logs);
         let mut a = node(&svc, &con);
@@ -2467,8 +2570,79 @@ mod tests {
             &sys, &mut a, &inbox, &reply, &mut p, &mut mem, &hooks, &tee, None,
         );
         let res = results(&p.tx);
-        assert_eq!((res[0].1, res[1].1), (STATUS_OK, STATUS_ERROR));
-        assert_eq!(hooks.1.get(), Some((5, sha)));
+        // Geen gestroomde bundel in slot 5: geweigerd; een som van 31 bytes
+        // ook. De haak ziet geen van beide.
+        assert_eq!((res[0].1, res[1].1), (STATUS_ERROR, STATUS_ERROR));
+        assert_eq!(hooks.1.get(), None);
+    }
+
+    #[test]
+    fn flip_bundle_streams_raw_and_reaches_the_hook_once() {
+        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
+        let tee = LogTee::new(&con, &logs);
+        let mut a = node(&svc, &con);
+        let reply = Reply::new();
+        let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        // Geen ELF: een flip-bundel gaat rauw de partitie in.
+        let bundle = b"not an ELF but a flip bundle".repeat(3);
+        let start = {
+            let r = StartReq {
+                memory_limit: 8 * MIB,
+                image_size: bundle.len() as u64,
+                cores: 1,
+                pool_cores: 1,
+                core_class: abi::systemapi::CoreClass::Any,
+                group: b"",
+                env: b"",
+                job: FLIP_BUNDLE_JOB,
+            };
+            let mut v = vec![0u8; 512];
+            let n = r.encode(&mut v, 1).unwrap();
+            v.truncate(n);
+            v
+        };
+        let sha = [9u8; 32];
+        // Als hex, zoals Hop hem stuurt; de rauwe vorm toetst de test
+        // hierboven.
+        let hex = b"09".repeat(32);
+        let flip = enc(&abi::hopabi::Req {
+            op: PrivOp::Flip.op(),
+            seq: 5,
+            off: 3,
+            path: &hex,
+            ..Default::default()
+        });
+        let mut p = Pipe::new(
+            NET | 2,
+            &[
+                start,
+                enc(&stream_req(2, 3, 0, &bundle[..40])),
+                enc(&stream_req(3, 3, 40, &bundle[40..])),
+                op(PrivOp::SlotStatus, 4, 3, 0),
+                flip.clone(),
+                flip,
+            ],
+        );
+        let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
+        let _ = drive(
+            &sys, &mut a, &inbox, &reply, &mut p, &mut mem, &hooks, &tee, None,
+        );
+        let res = results(&p.tx);
+        assert_eq!(res[0].3, 3);
+        assert_eq!(stream_state(&res[1]), StreamState::More);
+        assert_eq!(stream_state(&res[2]), StreamState::Placed, "complete");
+        let info = SlotInfo::decode(&res[3].4).unwrap();
+        assert_eq!(info.state, SlotState::Streaming as u8, "not started");
+        assert_eq!(
+            (res[4].1, res[5].1),
+            (STATUS_OK, STATUS_ERROR),
+            "claimed once"
+        );
+        assert_eq!(hooks.1.get(), Some((3, sha)));
+        // De bytes staan rauw vanaf offset 0 van de partitie.
+        let part = info.partition;
+        assert!(part >= bundle.len() as u64);
     }
 
     #[test]

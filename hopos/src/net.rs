@@ -87,6 +87,9 @@ static UPLINK_ACK: Ack = Ack::new();
 /// zet het in `HOPOS_NODE_IP`, want de leader moet het endpoint zien dat
 /// van buiten bereikbaar is, niet het slot-adres.
 static UPLINK_IP: AtomicU32 = AtomicU32::new(0);
+/// De DNS-server uit de lease (big-endian als getal; 0 = geen): Hop krijgt
+/// hem in zijn env, want zonder resolver haalt hij niets op naam.
+static UPLINK_DNS: AtomicU32 = AtomicU32::new(0);
 /// De bevestiging van een `Publish`; de plaatsing van Hop is de enige
 /// zender en wacht elke bevestiging af voor hij de volgende stuurt.
 static PUBLISH_ACK: Ack = Ack::new();
@@ -136,6 +139,14 @@ pub(crate) const SYSTEM_WORKERS: usize = 3 * MAX_SYSTEM_CONNS as usize + 2;
 /// Weigeringen van de listener die een eigen regel krijgen; daarna tellen
 /// we alleen (handboek §6: falen is luid, en één keer).
 const LOUD_REFUSALS: u64 = 3;
+
+/// De DNS-server uit de lease, of `None` zolang er geen lease is.
+pub(crate) fn uplink_dns() -> Option<Ipv4Addr> {
+    match UPLINK_DNS.load(Relaxed) {
+        0 => None,
+        ip => Some(Ipv4Addr::from(ip)),
+    }
+}
 
 /// Het uplink-adres na de lease, of `None` zolang er geen lease is.
 pub(crate) fn uplink_ip() -> Option<Ipv4Addr> {
@@ -404,6 +415,7 @@ impl Node {
         };
         *STACK.borrow_mut() = Some(stack);
         UPLINK_IP.store(ip, Relaxed);
+        UPLINK_DNS.store(u32::from(lease.dns), Relaxed);
         println!(
             "net: {} (mac {}, gw {}) HOPOS_NET_UP",
             lease.ip,

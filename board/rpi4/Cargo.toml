@@ -1,0 +1,21 @@
+[package]
+name = "board-rpi4"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Raspberry Pi 4 (BCM2711, 4x Cortex-A72): PL011, GIC-400, GENET, de vaste tabellen."
+
+[dependencies]
+dev = { path = "../../dev" }
+abi = { path = "../../abi" }
+cpu = { path = "../../cpu" }
+board = { path = "../../board" }
+board-raspi = { path = "../raspi" }
+driver-pl011 = { path = "../../driver/pl011" }
+driver-gicv2 = { path = "../../driver/gicv2" }
+driver-genet = { path = "../../driver/nic/genet" }
+driver-mdio = { path = "../../driver/nic/mdio" }
+
+[lints]
+workspace = true

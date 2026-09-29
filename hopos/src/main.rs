@@ -13,6 +13,8 @@
 #![allow(clippy::expect_used)] // boot-code: vóór de agent draait is falen parkeren (handboek §12)
 
 mod clock;
+mod config;
+mod flip; // FLIP: de kern-flip (flip.rs)
 mod net;
 mod slots;
 mod storage;
@@ -22,7 +24,6 @@ extern crate alloc;
 use alloc::boxed::Box;
 use board::Board;
 use board::heap::Heap;
-use board_qemuvirt::slots::{StagedRole, staged_role};
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use cpu::println;
@@ -33,16 +34,125 @@ use kern::system::{Hooks, LogTee, Privilege, System};
 use netdev::Device;
 use sync::mpsc::Mailbox;
 use sync::{Local, Signal};
+use vboard::slots::{StagedRole, staged_role};
 
-#[cfg(not(feature = "board-qemuvirt"))]
-compile_error!("kies precies één board: --features board-qemuvirt");
+#[cfg(not(any(
+    feature = "board-qemuvirt",
+    feature = "board-rpi4",
+    feature = "board-rpi5",
+    feature = "board-rk3566",
+    feature = "board-uefi",
+    feature = "board-o6n",
+    feature = "board-altra"
+)))]
+compile_error!(
+    "kies precies één board: --features board-qemuvirt, board-rpi4, board-rpi5, board-rk3566, board-uefi, board-o6n of board-altra"
+);
+
+// De O6N en de Altra bouwen op het UEFI-board; naast elkaar of naast een
+// ander board kan niet.
+#[cfg(any(
+    all(feature = "board-o6n", feature = "board-altra"),
+    all(
+        any(feature = "board-o6n", feature = "board-altra"),
+        any(
+            feature = "board-qemuvirt",
+            feature = "board-rpi4",
+            feature = "board-rpi5",
+            feature = "board-rk3566",
+            feature = "board-uefi"
+        )
+    )
+))]
+compile_error!("twee boards tegelijk: kies er één");
+
+#[cfg(any(
+    all(feature = "board-qemuvirt", feature = "board-rpi4"),
+    all(feature = "board-qemuvirt", feature = "board-rpi5"),
+    all(feature = "board-rpi4", feature = "board-rpi5"),
+    all(feature = "board-rk3566", feature = "board-qemuvirt"),
+    all(feature = "board-rk3566", feature = "board-rpi4"),
+    all(feature = "board-rk3566", feature = "board-rpi5"),
+    all(feature = "board-uefi", feature = "board-qemuvirt"),
+    all(feature = "board-uefi", feature = "board-rpi4"),
+    all(feature = "board-uefi", feature = "board-rpi5"),
+    all(feature = "board-uefi", feature = "board-rk3566")
+))]
+compile_error!("twee boards tegelijk: kies er één");
 
 /// Het board van deze binary: één, gekozen door een feature.
+// Het board onder een neutrale naam: de slot-, kooi- en flip-lijm
+// (slots.rs, cage.rs, flip.rs) lezen het plan van het board als `vboard`
+// (`slots::plan(cores, os_core)`, `mpidr`, `core_of`, de staging,
+// `KERN_RAM`, `DMA`), en elk board levert die namen met zijn eigen getallen.
+#[cfg(feature = "board-qemuvirt")]
+extern crate board_qemuvirt as vboard;
+
 #[cfg(feature = "board-qemuvirt")]
 type Machine = board_qemuvirt::QemuVirt;
 
 #[cfg(feature = "board-qemuvirt")]
 static BOARD: Machine = board_qemuvirt::QemuVirt::new();
+
+// De Pi's, onder dezelfde naam `vboard`.
+#[cfg(feature = "board-rpi4")]
+extern crate board_rpi4 as vboard;
+
+#[cfg(feature = "board-rpi4")]
+type Machine = board_rpi4::Rpi4;
+
+#[cfg(feature = "board-rpi4")]
+static BOARD: Machine = board_rpi4::Rpi4::new();
+
+#[cfg(feature = "board-rpi5")]
+extern crate board_rpi5 as vboard;
+
+#[cfg(feature = "board-rpi5")]
+type Machine = board_rpi5::Rpi5;
+
+#[cfg(feature = "board-rpi5")]
+static BOARD: Machine = board_rpi5::Rpi5::new();
+
+// De Radxa Zero 3E, onder dezelfde naam en om dezelfde reden als de Pi's.
+#[cfg(feature = "board-rk3566")]
+extern crate board_rk3566 as vboard;
+
+#[cfg(feature = "board-rk3566")]
+type Machine = board_rk3566::Rk3566;
+
+#[cfg(feature = "board-rk3566")]
+static BOARD: Machine = board_rk3566::Rk3566::new();
+
+// Het generieke UEFI-board (QEMU onder EDK2; de basis van de O6N en de
+// Altra), onder dezelfde naam en om dezelfde reden als de Pi's.
+#[cfg(feature = "board-uefi")]
+extern crate board_uefi as vboard;
+
+#[cfg(feature = "board-uefi")]
+type Machine = board_uefi::Uefi;
+
+#[cfg(feature = "board-uefi")]
+static BOARD: Machine = board_uefi::Uefi::new();
+
+// De Radxa Orion O6N en de Ampere Altra: het UEFI-board met hun eigen NIC,
+// NVMe en thermometer. Hun crates geven de namen van het UEFI-plan door.
+#[cfg(feature = "board-o6n")]
+extern crate board_o6n as vboard;
+
+#[cfg(feature = "board-o6n")]
+type Machine = board_o6n::O6n;
+
+#[cfg(feature = "board-o6n")]
+static BOARD: Machine = board_o6n::O6n::new();
+
+#[cfg(feature = "board-altra")]
+extern crate board_altra as vboard;
+
+#[cfg(feature = "board-altra")]
+type Machine = board_altra::Altra;
+
+#[cfg(feature = "board-altra")]
+static BOARD: Machine = board_altra::Altra::new();
 
 /// De heap: een bump-allocator met een plafond over de kern-RAM.
 #[global_allocator]
@@ -59,7 +169,7 @@ const BUNNY: [&str; 5] = [
     r#"   (\(\"#,
     r#"   ( -.-)     HopOS"#,
     r#"   o_(")(")   --------------"#,
-    r#"              the Go-only OS"#,
+    r#"              the Rust-only OS"#,
     "",
 ];
 
@@ -93,17 +203,72 @@ extern "C" fn kmain(dtb: u64, el: u64) -> ! {
 
     board.init_heap(&HEAP);
     board.discover(dtb);
+    // De OS-core (PORT.md beslissing 2): de kern woont op de core die de
+    // bootparameter kiest. Staat hij daar nog niet, dan verhuist hij nu,
+    // vóór er één lijn, timer of bewoner aan deze core hangt; deze core
+    // wordt dan een app-core.
+    move_to_os_core(board, dtb, el);
+    boot(board, dtb, el)
+}
+
+/// De `dtb` en het EL van de boot, voor de kern na zijn verhuizing.
+static BOOT_ARGS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// Verhuist de kern naar de OS-core als hij daar niet draait: die core komt
+/// op met hetzelfde EL2-regime en een verse stack en gaat verder in
+/// [`boot`], en deze core wacht tot de kooi-regio er is en parkeert dan als
+/// app-core (`cpu::el2::hold`; de kooi haalt hem daar op). Keert alleen
+/// terug als er niet verhuisd hoeft te worden, of als het niet kan (luid:
+/// de kern blijft dan waar hij is).
+fn move_to_os_core(board: &'static Machine, dtb: u64, el: u8) {
+    let (os, why) = board.os_core();
+    let here = board.this_core();
+    if let Some(why) = why {
+        println!(
+            "oscore: hopos.oscore not honoured ({why}), the kern stays on core {here} HOPOS_OSCORE_FALLBACK"
+        );
+        return;
+    }
+    if os == here {
+        return;
+    }
+    BOOT_ARGS[0].store(dtb, Relaxed);
+    BOOT_ARGS[1].store(u64::from(el), Relaxed);
+    let target = vboard::slots::mpidr(os);
+    println!(
+        "oscore: moving the kern from core {here} to core {os} (mpidr {target:#x}) HOPOS_OSCORE_MOVE"
+    );
+    match cpu::smp::start_one(os, target, moved) {
+        Ok(()) => cpu::el2::hold(),
+        Err(e) => println!("oscore: {e}, the kern stays on core {here} HOPOS_OSCORE_FALLBACK"),
+    }
+}
+
+/// De kern op de OS-core na de verhuizing: verder waar `kmain` was.
+fn moved(core: usize) -> ! {
+    println!("oscore: the kern runs on core {core} HOPOS_OSCORE_UP");
+    let el = u8::try_from(BOOT_ARGS[1].load(Relaxed)).unwrap_or(0);
+    boot(&BOARD, BOOT_ARGS[0].load(Relaxed), el)
+}
+
+/// De boot vanaf de landing, op de OS-core: de executor en al zijn taken.
+fn boot(board: &'static Machine, dtb: u64, el: u8) -> ! {
+    // FLIP: de landing, als eerste na de heap. Een overdracht van een
+    // vorige kern draagt de bewoners; die adopteren de slots straks.
+    let landing = flip::land(dtb);
 
     let exec: &'static Executor = EXEC.get();
     exec.set_clock(board.clock());
 
     println!(
-        "boot: HopOS v{} on {}, EL{el}, {} cores ({}), {} MB DRAM HOPOS_BOOT",
+        "boot: HopOS v{} on {}, EL{el}, {} cores ({}), {} MB DRAM HOPOS_BOOT gen={} stamp={}",
         env!("CARGO_PKG_VERSION"),
         Machine::NAME,
         board.cores(),
         board.core_class(0),
         board.mem_total() >> 20,
+        flip::generation(), // FLIP: 1 koud, N+1 na een flip vanaf N
+        env!("HOPOS_STAMP"),
     );
 
     // De wandklok vóór er een bewoner is: zonder SNTP (nog niet geport) een
@@ -152,7 +317,10 @@ extern "C" fn kmain(dtb: u64, el: u64) -> ! {
         Ok(Some(nic)) => {
             println!("net: nic up HOPOS_NIC_UP mac={}", nic.mac());
             let params = net::Params {
-                max_slots: board.cores().saturating_sub(1).max(1),
+                // Eén slot per app-core plus één voor de OS-core, waar Hop
+                // naast de kern woont (het plan van het board, PORT.md
+                // beslissing 2): twee cores zijn twee slots.
+                max_slots: board.cores().saturating_sub(1).max(1) + 1,
                 clock: board.clock(),
                 slot_wake: slots::wake,
             };
@@ -165,9 +333,19 @@ extern "C" fn kmain(dtb: u64, el: u64) -> ! {
     }
 
     // De slots: de kooi-lijm, de lifecycle-actor en de servicers (slots.rs).
-    slots::start(exec, role);
+    // FLIP: na een landing adopteren de slots de bewoners in plaats van
+    // Hop opnieuw te plaatsen; de flip-taak en de guard spawnen hier.
+    flip::start(exec, landing.is_some());
+    slots::start(exec, role, landing.map(|h| h.slots));
 
+    // De OS-core (PORT.md beslissing 2): de idle van de kern is de rotatie
+    // over zijn bewoners (Hop). Lukt dat niet, dan houdt de kern zijn core
+    // voor zichzelf, luid, en draait Hop nooit.
     let mut sleeper = board.sleeper();
+    match slots::os_core() {
+        Ok(os) => sleeper.host(os),
+        Err(e) => println!("oscore: {e}, the kern keeps its core to itself HOPOS_OS_CORE_FAIL"),
+    }
     exec.run(&mut sleeper)
 }
 
@@ -262,8 +440,8 @@ impl PhysMem for DevMem {
 }
 
 /// De haken van de system-API: de klok van Hop zet de wandklok van de kern
-/// (en daarmee die van elke kooi); de flip heeft nog geen pad en weigert
-/// luid in plaats van stil te slikken.
+/// (en daarmee die van elke kooi); de flip toetst de bundel en legt de
+/// nieuwe kern klaar (flip.rs), de sprong komt van de flip-taak.
 struct BootHooks;
 
 impl Hooks for BootHooks {
@@ -271,11 +449,8 @@ impl Hooks for BootHooks {
         let off = clock::set(unix_ns, (BOARD.clock())());
         println!("system: wall clock set by Hop to {unix_ns} ns (offset {off} ns) HOPOS_CLOCK_SET");
     }
-    fn flip(&self, bundle: kern::Slot, _sha256: &[u8; 32]) -> kern::Result {
-        println!(
-            "system: flip to the bundle in slot {bundle} refused, no flip path yet HOPOS_FLIP_REFUSED"
-        );
-        Err(kern::Error::Kind)
+    fn flip(&self, bundle: &kern::system::FlipBundle, sha256: &[u8; 32]) -> kern::Result {
+        flip::prepare(bundle, sha256) // FLIP: toetsen en klaarleggen (flip.rs)
     }
 }
 
@@ -302,13 +477,27 @@ async fn tick(exec: &'static Executor) {
         exec.until(start.saturating_add(n.saturating_mul(1_000_000_000)))
             .await;
         let s = &exec.stats;
+        // De OS-core: overgangen naar een bewoner, waardoor de kern terugkwam,
+        // en de tijd die de bewoners kregen. Zonder deze getallen is "Hop
+        // krijgt tijd" niet te onderscheiden van "de kern spint".
+        let o = &cpu::el2::OS_STATS;
         println!(
-            "HOPOS_TICK {n} sleeps={} polls={} irq(timer={} nic={} other={})",
+            "HOPOS_TICK {n} sleeps={} polls={} irq(timer={} nic={} other={}) os(in={} irq={} ipi={} timer={} yield={} exit={} fault={} idle={} res_ms={} kicks={})",
             s.sleeps.load(Relaxed),
             s.polls.load(Relaxed),
             IRQS[0].load(Relaxed),
             IRQS[1].load(Relaxed),
             IRQS[2].load(Relaxed),
+            o.entries.load(Relaxed),
+            o.irq.load(Relaxed),
+            o.ipi.load(Relaxed),
+            o.timer.load(Relaxed),
+            o.yields.load(Relaxed),
+            o.exits.load(Relaxed),
+            o.faults.load(Relaxed),
+            o.idle.load(Relaxed),
+            o.ticks.load(Relaxed) / (cpu::idle::freq() / 1000).max(1),
+            o.kicks.load(Relaxed),
         );
     }
 }

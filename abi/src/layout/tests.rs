@@ -372,3 +372,29 @@ fn plan_adressen_en_uitsluiten() {
         ]
     );
 }
+
+// De OS-core (PORT.md beslissing 2): logische core 0 is hij, de app-cores
+// zijn de andere fysieke cores op volgorde, en de afbeelding is haar eigen
+// inverse.
+#[test]
+fn os_core_maps_logical_to_physical() {
+    let mut spec = test_spec();
+    spec.app_cores = 3;
+    let plan = Plan::new(spec.clone()).unwrap();
+    assert_eq!(plan.os_core(), 0);
+    for i in 0..=3 {
+        assert_eq!(plan.phys_core(Core::new(i).unwrap()), i);
+    }
+    spec.os_core = 2;
+    let plan = Plan::new(spec.clone()).unwrap();
+    let phys: Vec<usize> = (0..=3)
+        .map(|i| plan.phys_core(Core::new(i).unwrap()))
+        .collect();
+    assert_eq!(phys, [2, 0, 1, 3]);
+    for p in 0..=3 {
+        assert_eq!(plan.phys_core(plan.logical_core(p).unwrap()), p);
+    }
+    assert_eq!(plan.logical_core(4), None);
+    spec.os_core = 4;
+    assert!(Plan::new(spec).is_err());
+}

@@ -91,13 +91,22 @@ pub const DTB_FALLBACK: Pa = Pa(0x4000_0000);
 
 /// De distributor van de GICv3 (`VIRT_GIC_DIST`).
 pub const GICD: Pa = Pa(0x0800_0000);
-/// De redistributor-reeks (`VIRT_GIC_REDIST`): 128 KB per core, HOP is
-/// core 0 en dus het eerste frame.
+/// De redistributor-reeks (`VIRT_GIC_REDIST`): 128 KB per core. Het frame
+/// van de OS-core zoekt `start_interrupts` op zijn MPIDR op.
 pub const GICR: Pa = Pa(0x080a_0000);
 /// De lengte van de redistributor-reeks: 123 frames van 128 KB.
 pub const GICR_LEN: u64 = 0x00f6_0000;
 /// De PPI van de EL1-fysieke timer (CNTP): INTID 30.
 pub const TIMER_PPI: u32 = 30;
+/// De PPI van de EL2-fysieke timer (CNTHP): INTID 26. De deadline van de
+/// executor terwijl een bewoner de OS-core heeft (`cpu::el2::OsCore`): een
+/// bewoner op EL1 ziet deze timer niet en kan hem niet uitzetten.
+pub const HYP_TIMER_PPI: u32 = 26;
+/// De kick van de OS-core: SGI 8, gestuurd door de EL2-switcher van een
+/// app-core die de kern nodig heeft terwijl die geen SEV hoort (PORT.md
+/// beslissing 2). Boven de 0..7 die Linux-achtige firmware voor zichzelf
+/// houdt.
+pub const KICK_SGI: u32 = 8;
 
 /// QEMU virt plaatst 32 virtio-mmio-transports vanaf 0x0a00_0000 (stride
 /// 0x200, SPI 16 + n). Zonder FDT scannen we ze op DeviceID.
@@ -113,8 +122,8 @@ const CORES_DEFAULT: usize = 4;
 // identity map in `mmu` zet de eerste gigabyte als Device).
 static UART: Pl011 = unsafe { Pl011::new(UART0) };
 
-/// De GIC. Het redistributor-frame van core 0 is het eerste van de reeks;
-/// `start_interrupts` controleert dat met `find_redistributor`.
+/// De GIC. Het redistributor-frame is dat van de OS-core; `start_interrupts`
+/// zoekt het op met `find_redistributor` en zet het.
 // SAFETY: GICD en GICR zijn de GICv3-blokken van QEMU virt en liggen in de
 // Device-gigabyte van de identity map.
 static GIC: Gic<arch::SysRegIcc> = unsafe { Gic::new(GICD, GICR, arch::SysRegIcc) };
@@ -206,6 +215,39 @@ impl QemuVirt {
             .find(|&(pa, _)| is(pa))
     }
 
+    /// De fysieke index van de core waar dit draait.
+    #[must_use]
+    pub fn this_core(&self) -> usize {
+        slots::core_of(arch::mpidr())
+    }
+
+    /// De OS-core die de bootargs vragen (`hopos.oscore=<small|mid|big|N>`),
+    /// met een reden als de vraag niet kon: dan de boot-core (0), luid. Op
+    /// QEMU virt zijn alle cores big, dus `small` en `mid` vallen terug.
+    #[must_use]
+    pub fn os_core(&self) -> (usize, Option<&'static str>) {
+        let args = fdt().and_then(|f| f.bootargs()).unwrap_or("");
+        os_core_of(args, self.cores(), |c| self.core_class(c))
+    }
+
+    /// De kick van de OS-core voor de rotatie van `cpu::el2`: de SGI naar
+    /// deze core (aanroepen op de OS-core), en de peek waarmee de kern na
+    /// een terugkeer ziet of het de kick was.
+    #[must_use]
+    pub fn os_bell(&self) -> cpu::el2::Bell {
+        cpu::el2::Bell {
+            sgi1r: driver_gicv3::sgi1r(arch::mpidr(), KICK_SGI),
+            sgir: 0,
+            intid: KICK_SGI,
+            pending: arch::hppir1,
+        }
+    }
+
+    /// Stuurt de kick naar deze core zelf: de zelftest van het IPI-pad.
+    pub fn kick_self(&self) {
+        arch::sgi1r(driver_gicv3::sgi1r(arch::mpidr(), KICK_SGI));
+    }
+
     /// Vindt en initialiseert de schijf (virtio-blk) in de schijf-helft van
     /// de DMA-regio. `Ok(None)` = geen schijf aan dit board; één keer.
     ///
@@ -236,6 +278,40 @@ impl QemuVirt {
             if disk.can_flush() { "yes" } else { "no" }
         );
         Ok(Some(disk))
+    }
+}
+
+/// De OS-core uit de bootargs `args` op een board met `cores` cores en
+/// klassen `class`: `hopos.oscore=N` is core N, een klasse is de eerste core
+/// van die klasse. Zonder vraag de boot-core (0); een vraag die niet kan,
+/// geeft ook 0, met de reden.
+fn os_core_of(
+    args: &str,
+    cores: usize,
+    class: impl Fn(usize) -> CoreClass,
+) -> (usize, Option<&'static str>) {
+    let Some(v) = args
+        .split_ascii_whitespace()
+        .find_map(|a| a.strip_prefix("hopos.oscore="))
+    else {
+        return (0, None);
+    };
+    let want = match v {
+        "small" => Some(CoreClass::Small),
+        "mid" => Some(CoreClass::Mid),
+        "big" => Some(CoreClass::Big),
+        _ => None,
+    };
+    if let Some(k) = want {
+        return match (0..cores).find(|c| class(*c) == k) {
+            Some(c) => (c, None),
+            None => (0, Some("no core of that class")),
+        };
+    }
+    match v.parse::<usize>() {
+        Ok(n) if n < cores => (n, None),
+        Ok(_) => (0, Some("no such core")),
+        Err(_) => (0, Some("not small, mid, big or a core number")),
     }
 }
 
@@ -342,16 +418,24 @@ impl Board for QemuVirt {
     fn start_interrupts(&self) -> Result<&'static Signal, Error> {
         let mpidr = arch::mpidr();
         // SAFETY: de reeks is de GICR van virt, gemapt als Device.
-        let rd = unsafe { driver_gicv3::find_redistributor(GICR, GICR_LEN, mpidr) };
-        if rd != Some(GICR) {
-            return Err(Error::Irq("no redistributor frame for core 0"));
-        }
+        let rd = unsafe { driver_gicv3::find_redistributor(GICR, GICR_LEN, mpidr) }
+            .ok_or(Error::Irq("no redistributor frame for the OS core"))?;
+        // SAFETY: `rd` is een frame uit die reeks, voor deze core.
+        unsafe { GIC.set_redistributor(rd) };
         GIC.init()
             .map_err(|_| Error::Irq("redistributor stays asleep"))?;
         // De timer-PPI moet scherp staan in de GIC: anders bereikt hij de
         // core niet en wekt hij de WFI van de slaap nooit.
         GIC.enable(TIMER_PPI, mpidr)
             .map_err(|_| Error::Irq("timer PPI refused"))?;
+        // De OS-core: de EL2-timer (de deadline tijdens de beurt van een
+        // bewoner) en de kick van de app-cores. Zonder scherpe lijn trapt
+        // geen van beide naar EL2 en houdt een bewoner de core tot hij zelf
+        // yieldt.
+        GIC.enable(HYP_TIMER_PPI, mpidr)
+            .map_err(|_| Error::Irq("hyp timer PPI refused"))?;
+        GIC.enable(KICK_SGI, mpidr)
+            .map_err(|_| Error::Irq("kick SGI refused"))?;
         cpu::println!("irq: {}", GIC.describe());
         // Vanaf hier mag de vector komen: hij zet de vlag, wekt de
         // dispatch-taak via `cpu::irq::on_irq` en keert gemaskeerd terug.
@@ -369,6 +453,17 @@ impl Board for QemuVirt {
                 (TIMER_PPI, _) => {
                     arch::timer_off();
                     d.timer += 1;
+                }
+                // De EL2-timer: normaal zet de rotatie hem zelf uit bij de
+                // terugkeer, en dan valt de lijn vóór hij geclaimd wordt.
+                (HYP_TIMER_PPI, _) => {
+                    arch::hyp_timer_off();
+                    d.timer += 1;
+                }
+                // De kick: hij heeft zijn werk al gedaan (de core is terug
+                // bij de kern); alleen tellen en afsluiten.
+                (KICK_SGI, _) => {
+                    cpu::el2::OS_STATS.kicks.fetch_add(1, Relaxed);
                 }
                 // De NIC: de device-kant ack (de lijn valt), dan de bel.
                 (id, Some((line, ack))) if id == line => {

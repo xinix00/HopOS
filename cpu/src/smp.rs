@@ -248,6 +248,21 @@ pub fn configure_node(cores: usize, target: Target, main: CoreMain) -> Result<us
     Ok(DISPATCHED.load(Acquire))
 }
 
+/// Start precies één core op het EL2-regime van deze core, met een verse
+/// stack en `main`: de verhuizing van de kern naar de OS-core bij boot
+/// (PORT.md beslissing 2, `hopos.oscore`), dezelfde opgang als
+/// [`configure_node`] maar los van de node-telling. De aanroeper geeft
+/// daarna zijn eigen core op (`cpu::el2::hold`).
+pub fn start_one(core: usize, target: u64, main: CoreMain) -> Result {
+    let regime = arch::regime();
+    let entry = arch::entry_pa();
+    let sp = new_stack().ok_or(Error::OutOfMemory { core })?;
+    let h = new_handoff(Handoff::new(core, sp, main, regime)).ok_or(Error::OutOfMemory { core })?;
+    let pa = Pa(core::ptr::from_ref(h) as usize as u64);
+    dev::push(pa, core::mem::size_of::<Handoff>());
+    psci::cpu_on(target, entry, pa.0).map_err(|err| Error::Psci { target, err })
+}
+
 /// Hoeveel node-cores (naast core 0) hun Rust-entry bereikten: het bewijs
 /// dat de extra cores écht draaien, niet alleen gevraagd zijn.
 #[must_use]

@@ -4,7 +4,7 @@
 
 use super::*;
 use blkdev::BlockDevice;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::vec;
 use std::vec::Vec;
 
@@ -83,13 +83,9 @@ fn clock() -> u64 {
     })
 }
 
-/// Een driver op een nep-regio van `dma` met een schijf van `sectors`,
-/// zonder `new` (geen registers om mee te onderhandelen), zoals de test van
-/// virtio-net.
-fn fake(sectors: u64, flush: bool) -> (VirtioBlk, Vec<u64>, Vec<u64>) {
-    let mut regs = vec![0u64; 64];
-    let mut mem = vec![0u64; DMA_NEED as usize / 8];
-    let dma = Pa(mem.as_mut_ptr() as usize as u64);
+/// Zet het nep-device klaar op de DMA-regio `dma` met een schijf van
+/// `sectors`.
+fn install(dma: Pa, sectors: u64) {
     DEV.with(|d| {
         *d.borrow_mut() = Some(Device {
             dma,
@@ -100,8 +96,21 @@ fn fake(sectors: u64, flush: bool) -> (VirtioBlk, Vec<u64>, Vec<u64>) {
             now: 0,
         });
     });
+}
+
+/// Een driver op een nep-regio van `dma` met een schijf van `sectors`,
+/// zonder `new` (geen registers om mee te onderhandelen), zoals de test van
+/// virtio-net.
+fn fake(sectors: u64, flush: bool) -> (VirtioBlk, Vec<u64>, Vec<u64>) {
+    let mut regs = vec![0u64; 64];
+    let mut mem = vec![0u64; DMA_NEED as usize / 8];
+    let dma = Pa(mem.as_mut_ptr() as usize as u64);
+    install(dma, sectors);
     let b = VirtioBlk {
-        base: Pa(regs.as_mut_ptr() as usize as u64),
+        // SAFETY: `regs` gaat met de driver mee terug naar de test en is een
+        // heel slot groot (512 bytes); alleen QueueNotify en de
+        // interrupt-registers worden geraakt.
+        t: unsafe { Mmio::new(Pa(regs.as_mut_ptr() as usize as u64)) },
         dma,
         sectors,
         flush,
@@ -194,4 +203,146 @@ fn a_silent_device_kills_the_driver_loudly() {
         BlockDevice::write(&mut b, 3, &[0; 512]),
         Err(blkdev::Error::Io { lba: 3 })
     );
+}
+
+/// Een nep-transport: de registers als velden, zodat de init over elke
+/// `Transport` getoetst wordt; het device zelf is de klok, zoals hierboven.
+struct FakeT {
+    id: u32,
+    offered: u32,
+    capacity: u64,
+    max: u16,
+    status: Cell<u8>,
+    features: RefCell<Vec<(u32, u32)>>,
+    /// De queue: (grootte, desc, avail, used, aan).
+    queue: RefCell<(u16, Pa, Pa, Pa, bool)>,
+    notified: Cell<u32>,
+}
+
+impl FakeT {
+    fn new(id: u32, max: u16) -> Self {
+        Self {
+            id,
+            offered: FEAT_FLUSH | 1 << 1,
+            capacity: 64,
+            max,
+            status: Cell::new(0),
+            features: RefCell::new(Vec::new()),
+            queue: RefCell::new((0, Pa(0), Pa(0), Pa(0), false)),
+            notified: Cell::new(0),
+        }
+    }
+}
+
+impl Transport for FakeT {
+    fn device_id(&self) -> u32 {
+        self.id
+    }
+    fn device_features(&self, window: u32) -> u32 {
+        if window == 0 { self.offered } else { 1 }
+    }
+    fn set_driver_features(&self, window: u32, bits: u32) {
+        self.features.borrow_mut().push((window, bits));
+    }
+    fn status(&self) -> u8 {
+        self.status.get()
+    }
+    fn set_status(&self, s: u8) {
+        self.status.set(s);
+    }
+    fn select_queue(&mut self, q: u16) {
+        assert_eq!(q, 0);
+    }
+    fn queue_num_max(&self) -> u16 {
+        self.max
+    }
+    fn set_queue_num(&self, n: u16) {
+        self.queue.borrow_mut().0 = n;
+    }
+    fn set_queue_addrs(&self, d: Pa, a: Pa, u: Pa) {
+        let mut q = self.queue.borrow_mut();
+        (q.1, q.2, q.3) = (d, a, u);
+    }
+    fn enable_queue(&mut self) {
+        self.queue.borrow_mut().4 = true;
+    }
+    fn notify(&self, q: u16) {
+        assert_eq!(q, 0);
+        self.notified.set(self.notified.get() + 1);
+    }
+    fn ack_interrupt(&self) -> u32 {
+        0
+    }
+    fn config_generation(&self) -> u32 {
+        0
+    }
+    fn config_read8(&self, _: u32) -> u8 {
+        u8::MAX
+    }
+    fn config_read32(&self, off: u32) -> u32 {
+        match off {
+            0 => self.capacity as u32,
+            4 => (self.capacity >> 32) as u32,
+            _ => u32::MAX,
+        }
+    }
+}
+
+#[test]
+fn init_over_any_transport_then_a_round_trip() {
+    let mut mem = vec![0u64; DMA_NEED as usize / 8];
+    let dma = Pa(mem.as_mut_ptr() as usize as u64);
+    install(dma, 64);
+    // SAFETY: `mem` leeft de hele test en is `DMA_NEED` groot.
+    let mut b =
+        unsafe { VirtioBlk::with_transport(FakeT::new(2, 8), dma, DMA_NEED, clock) }.unwrap();
+    assert_eq!((b.sectors(), b.can_flush()), (64, true));
+    let t = &b.t;
+    // Alleen FLUSH van wat geboden werd, en VERSION_1.
+    assert_eq!(
+        *t.features.borrow(),
+        [(0, FEAT_FLUSH), (1, FEAT_VERSION_1_HI)]
+    );
+    assert_eq!(
+        *t.queue.borrow(),
+        (
+            QSIZE,
+            dma.add(DESC_OFF),
+            dma.add(AVAIL_OFF),
+            dma.add(USED_OFF),
+            true
+        )
+    );
+    assert_eq!(t.status.get() & status::DRIVER_OK, status::DRIVER_OK);
+
+    let data = vec![0xa5u8; 1024];
+    b.write_at(4, &data).unwrap();
+    let mut got = vec![0u8; 1024];
+    b.read_at(4, &mut got).unwrap();
+    assert!(got == data, "read back differs");
+    assert_eq!(b.t.notified.get(), 2, "one doorbell per request");
+    assert_eq!(seen().len(), 2);
+    drop(mem);
+}
+
+#[test]
+fn init_refuses_wrong_devices_small_queues_and_small_dma() {
+    let mut mem = vec![0u64; DMA_NEED as usize / 8];
+    let dma = Pa(mem.as_mut_ptr() as usize as u64);
+    // SAFETY: `mem` leeft de hele test en is `DMA_NEED` groot.
+    let e = unsafe { VirtioBlk::with_transport(FakeT::new(1, 8), dma, DMA_NEED, clock) }.err();
+    assert_eq!(e, Some(Error::NotBlock(1)));
+    // SAFETY: zie boven.
+    let e = unsafe { VirtioBlk::with_transport(FakeT::new(2, 2), dma, DMA_NEED, clock) }.err();
+    assert_eq!(e, Some(Error::NoQueue(2)));
+    // SAFETY: zie boven.
+    let e = unsafe { VirtioBlk::with_transport(FakeT::new(2, 8), dma, 4096, clock) }.err();
+    assert_eq!(
+        e,
+        Some(Error::DmaTooSmall {
+            need: DMA_NEED,
+            have: 4096
+        })
+    );
+    drop(mem);
 }

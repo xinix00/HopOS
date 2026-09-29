@@ -17,8 +17,15 @@
 
 ENTRY(_start)
 
+/*
+ * KERN_END staat als afstand tot KERN_BASE, niet als eigen adres: de
+ * flip-bundel (image/flip-bundle.sh) linkt de kern een tweede keer op een
+ * schaduwadres (HOPOS_LINK_BASE, zie build.rs) en leest de relocatietabel
+ * uit het verschil. Een vast __heap_end zou dan in de ADRP van de code een
+ * verschil geven dat geen 8-byte-woord is, en de diff terecht laten falen.
+ */
 KERN_BASE = 0x40200000;
-KERN_END = 0x4f000000;
+KERN_END = KERN_BASE + 0x0ee00000;
 STACK_SIZE = 0x40000;
 
 SECTIONS

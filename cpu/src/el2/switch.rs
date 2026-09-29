@@ -25,15 +25,18 @@
 
 use super::Error;
 use super::dispatch::{
-    Flavor, HVC_DOOR_ACK, HVC_EXIT, HVC_WAKE, MAX_BLOB, SCRATCH_X2, VEC_FIQ_LOWER, VEC_SYNC_LOWER,
+    Flavor, HVC_DOOR_ACK, HVC_EXIT, HVC_KICK_OS, HVC_WAKE, MAX_BLOB, SCRATCH_X2, VEC_FIQ_LOWER,
+    VEC_SYNC_LOWER,
 };
 use super::layout::{
     CAGE_STRIDE, CTX_BOOT_ARG, CTX_BOOT_PC, CTX_CTRL_PA, CTX_GPRS, CTX_KICK_PENDING,
     CTX_KICK_TARGET, CTX_NEXT_PA, CTX_OFF, CTX_REGIME, CTX_REGIME_ARM_WORDS, CTX_RESUME,
     CTX_RING_HEAD_PA, CTX_SLEEPS, CTX_SP, CTX_STATE, CTX_UNIT_SLOT, CTX_WAKE, CTX_WAKE_NO_PEEK,
-    CTX_WAKES, CtxState, PARK_CODE_OFF, PARK_PARKED, SCHED_COUNT, SCHED_CURRENT, SCHED_CURSOR,
-    SCHED_LIST, SCHED_MBOX_CTX, SCHED_MBOX_PC, SCHED_S2_PA, SCHED_SCRATCH, SLOT_CAP, SMP_CTX_OFF,
+    CTX_WAKES, CtxState, PARK_CODE_OFF, PARK_MBOX_OFF, PARK_PARKED, SCHED_COUNT, SCHED_CURRENT,
+    SCHED_CURSOR, SCHED_LIST, SCHED_MBOX_CTX, SCHED_MBOX_PC, SCHED_S2_PA, SCHED_SCRATCH, SLOT_CAP,
+    SMP_CTX_OFF,
 };
+use super::oscore::{SCHED_OS_KICK, SCHED_OS_KICK_PA, SCTLR_EL1_CLEAN, SPSR_EL1H_MASKED};
 use abi::hopabi::{
     CTRL_DOOR_IRQ, CTRL_ENTRY, CTRL_FAULT_ESR, CTRL_FAULT_FAR, CTRL_FAULT_VEC, CTRL_MBOX_PA,
     CTRL_RX_DOOR, CTRL_S2_TABLE, CTRL_SLOT, CTRL_SMP_FN, CTRL_SMP_G0, CTRL_SMP_MAIR, CTRL_SMP_MBOX,
@@ -86,14 +89,20 @@ const HCR_FMO: u64 = 1 << 3;
 const HCR_VM: u64 = 1 << 0;
 const HCR_VF: u64 = 1 << 6;
 
-/// SCTLR_EL1 bij de drop: de RES1-bits, M/C/I/A/WXN uit. NOOIT erven.
-const SCTLR_EL1_CLEAN: u64 = 0x30d0_0800;
+// SCTLR_EL1 bij de drop (`SCTLR_EL1_CLEAN`: de RES1-bits, M/C/I/A/WXN uit,
+// NOOIT erven) en de SPSR ervan (`SPSR_EL1H_MASKED`: EL1h, DAIF dicht)
+// komen uit `oscore`, dat een eerste beurt op de OS-core net zo zet.
 /// CPTR_EL2 zonder FP-trap. nVHE: de RES1-bits met TFP=0. VHE: de
 /// CPACR-vorm, FPEN=0b11.
 const CPTR_NOTRAP_NVHE: u64 = 0x33FF;
 const CPTR_NOTRAP_VHE: u64 = 0x30_0000;
-/// SPSR_EL2 voor de drop: EL1h, DAIF gemaskeerd.
-const SPSR_EL1H_MASKED: u64 = 0x3c5;
+/// Het kick-woord van de OS-core, gezien vanaf de kooi-basis: sched-blok 0
+/// (logische core 0 is de OS-core), veld [`SCHED_OS_KICK`].
+const OS_KICK_OFF: u64 = PARK_MBOX_OFF + SCHED_OS_KICK;
+/// Het adres van GICD_SGIR ernaast (GICv2), veld [`SCHED_OS_KICK_PA`].
+const OS_KICK_PA_OFF: u64 = PARK_MBOX_OFF + SCHED_OS_KICK_PA;
+const _: () = assert!(OS_KICK_OFF.is_multiple_of(8) && OS_KICK_OFF < 32760);
+const _: () = assert!(OS_KICK_PA_OFF.is_multiple_of(8) && OS_KICK_PA_OFF < 32760);
 
 /// De MPIDR-affiniteit (aff0..aff2) waarmee een sibling een core aanwijst.
 const MPIDR_AFF: u64 = 0xFF_FFFF;
@@ -215,6 +224,34 @@ global_asm!(
     msr hcr_el2, x4
     .endm
 
+// hopos_el2_kick_os: de bel naar de OS-core (PORT.md beslissing 2). Staat in
+// sched-blok 0 een ICC_SGI1R-waarde, dan hoort de kern op dit moment geen
+// SEV (hij draait een bewoner, of slaapt in WFI) en krijgt hij een SGI. Nul
+// = niets doen, en dan raakt deze code ook geen GIC-register (Apple, of een
+// board zonder kick). Staat er ook een GICD_SGIR-adres (GICv2, de GIC-400
+// van de Pi's), dan is de kick een 32-bit MMIO-schrijf daarheen; met de
+// MMU uit is dat Device-geheugen. Anders ICC_SGI1R (GICv3), met SRE op EL2
+// eerst: na PSCI CPU_ON is ICC_SRE_EL2 van de firmware, en zonder SRE is
+// ICC_SGI1R ongedefinieerd (QEMU: RAO). Klad: x2, x3.
+    .macro hopos_el2_kick_os
+    ldr x2, [sp, #{sp_s2pa}]
+    ldr x3, [x2, #{os_kick}]
+    cbz x3, 6f
+    ldr x2, [x2, #{os_kick_pa}]
+    cbz x2, 5f
+    str w3, [x2]
+    dsb sy
+    b 6f
+5:
+    mrs x2, s3_4_c12_c9_5
+    orr x2, x2, #1
+    msr s3_4_c12_c9_5, x2
+    isb
+    msr s3_0_c12_c11_5, x3
+    isb
+6:
+    .endm
+
 // ===========================================================================
 // De drie blobs van één smaak.
 // ===========================================================================
@@ -244,11 +281,13 @@ global_asm!(
     cmp x1, #{ec_hvc}
     b.ne .L\p\()_fault
     // De HVC-immediate kiest: 0 exit, 4 wek een sibling, 5 doorbell-ack
-    // (Apple); al het andere is de idle-yield (1).
+    // (Apple), 6 bel de OS-core; al het andere is de idle-yield (1).
     and x3, x0, #0xffff
     cbz x3, .L\p\()_exited
     cmp x3, #{hvc_wake}
     b.eq .L\p\()_wake
+    cmp x3, #{hvc_kick_os}
+    b.eq .L\p\()_kickos
     .if \apple
     cmp x3, #{hvc_door_ack}
     b.eq .L\p\()_doorack
@@ -344,6 +383,11 @@ global_asm!(
     mov x2, #{st_saved}
     str x2, [x1, #{state}]
     dsb sy
+    // Een app die idle gaat, wacht meestal op de kern (een antwoord op wat
+    // hij net publiceerde): bel de OS-core als die een SEV niet hoort.
+    .if \apple == 0
+    hopos_el2_kick_os
+    .endif
     b .L\p\()_sleep
 
 // exited: HVC 0, de coöperatieve exit. Dead en meteen roteren, zonder slaap:
@@ -601,6 +645,16 @@ global_asm!(
     eret
     .endif
 
+// kickos: HVC 6, de expliciete bel naar de OS-core; meteen terug.
+.L\p\()_kickos:
+    .if \apple == 0
+    hopos_el2_kick_os
+    .endif
+    ldp x0, x1, [sp]
+    ldp x2, x3, [sp, #{scratch_x2}]
+    isb
+    eret
+
 // wake: HVC 4, de reschedule-IPI van Linux in HopOS-vorm. x0 = de affiniteit
 // van de sibling. Zoek langs de vertrouwde circulaire keten (CTX_NEXT_PA,
 // door de kern gezet) de context met dezelfde control-page (de eenheid, niet
@@ -830,6 +884,9 @@ hopos_el2_park_end:
     vec_sync = const VEC_SYNC_LOWER,
     ec_hvc = const crate::vectors::EC_HVC64,
     hvc_wake = const HVC_WAKE,
+    hvc_kick_os = const HVC_KICK_OS,
+    os_kick = const OS_KICK_OFF,
+    os_kick_pa = const OS_KICK_PA_OFF,
     hvc_door_ack = const HVC_DOOR_ACK,
     sp_current = const SP_CURRENT,
     sp_s2pa = const SP_S2_PA,

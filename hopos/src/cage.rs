@@ -19,14 +19,13 @@
 
 use abi::hopabi::{
     AppStatus, CTRL_CORES, CTRL_ENTRY, CTRL_EXIT_CODE, CTRL_FAULT_ESR, CTRL_FAULT_FAR,
-    CTRL_FAULT_VEC, CTRL_HEARTBEAT, CTRL_KILL, CTRL_MBOX_PA, CTRL_RAM_SIZE, CTRL_S2_TABLE,
-    CTRL_SLOT, CTRL_SMP_REQ, CTRL_STATUS, CTRL_VEC_PA, CTRL_WALL_OFF,
+    CTRL_FAULT_VEC, CTRL_HEARTBEAT, CTRL_IDLE_MODE, CTRL_KILL, CTRL_MBOX_PA, CTRL_RAM_SIZE,
+    CTRL_S2_TABLE, CTRL_SLOT, CTRL_SMP_REQ, CTRL_STATUS, CTRL_VEC_PA, CTRL_WALL_OFF, IDLE_YIELD,
 };
 use abi::layout::{
     self, ABI_TAIL, CTRL_STRIDE, CtxState, LINK_BASE, NET_RING_DATA_CAP, Plan, RING_DATA_CAP, Tail,
 };
 use abi::ring;
-use board_qemuvirt::slots::mpidr;
 use core::future::Future;
 use core::time::Duration;
 use cpu::el2::{self, CoreState, Flavor, Installed, Start};
@@ -38,6 +37,7 @@ use kern::slots::Outbox;
 use kern::{Core, Region, SLOT_CAP, Slot};
 use net::ring::AbiTx;
 use net::switch::{Ack, Command};
+use vboard::slots::mpidr;
 
 /// De bevestiging van de `Attach` van een verse kooi aan de switch. Niemand
 /// wacht erop (de kooi-trait is synchroon); het resultaat wordt bij de
@@ -49,6 +49,20 @@ static DETACH_ACK: Ack = Ack::new();
 /// De EL2-smaak van QEMU virt: E2H=0, de switcher slaapt in WFE. Het board
 /// kiest, niet een bouwvlag (cpu::el2 `Flavor`).
 pub(crate) const FLAVOR: Flavor = Flavor::Nvhe;
+
+/// Hoe een app-core idlet (`CTRL_IDLE_MODE`). Op QEMU virt een yield naar
+/// de switcher (HVC #1): de kern slaapt daar in WFI, die geen SEV hoort,
+/// dus een app die publiceert en dan op zijn antwoord wacht, bereikte de
+/// kern pas op diens volgende deadline (de failsafe van de switch, 1 ms).
+/// De switcher belt de OS-core bij een yield (`cpu::el2::OsCore::listen`).
+/// GEMETEN 30-09, `tools/qemu-test-hop.sh` (4 cores): de `dial_us` van
+/// appspike 3840 en 3543 met WFE-idle, 2852 en 2852 met yield-idle, bij 38
+/// kicks per appspike-run. Een board met WFE in de kern hoort de SEV wel en
+/// laat het veld leeg (de app kiest dan zelf).
+#[cfg(feature = "board-qemuvirt")]
+const APP_IDLE_MODE: u64 = IDLE_YIELD;
+#[cfg(not(feature = "board-qemuvirt"))]
+const APP_IDLE_MODE: u64 = 0;
 
 /// De foutcodes van [`CageError`] aan deze kant. De tekst met de getallen
 /// staat op de console (één regel met marker); de code gaat de kern in.
@@ -125,6 +139,18 @@ impl ArmCage {
     pub(crate) fn new(plan: Plan) -> Result<ArmCage, el2::Error> {
         let installed = el2::install_switch_code(&plan, FLAVOR)?;
         el2::init_app_cores(&plan, &installed, false)?;
+        // De boot-core, als de kern bij boot naar de OS-core verhuisde
+        // (main, `hopos.oscore`): nu is er een parkeerlus, en wordt hij een
+        // geparkeerde app-core, vóór de eerste dispatch.
+        if let Some(m) = el2::held() {
+            let phys = vboard::slots::core_of(m);
+            let core = plan.logical_core(phys).ok_or(el2::Error::UnparkedCore {
+                core: phys,
+                mbox: 0,
+            })?;
+            el2::release_held(&plan, core)?;
+            println!("oscore: boot core {phys} parked as app core {core} HOPOS_OSCORE_PARKED");
+        }
         Ok(ArmCage {
             plan,
             installed,
@@ -197,6 +223,7 @@ impl ArmCage {
             // De wandklok vóór de start, zoals de Go-kern: Hop stempelt
             // zijn taken ermee vanaf zijn eerste regel (clock.rs).
             (CTRL_WALL_OFF, crate::clock::offset()),
+            (CTRL_IDLE_MODE, APP_IDLE_MODE),
         ] {
             dev::write64(ctrl.add(off), v);
         }
@@ -217,6 +244,72 @@ impl ArmCage {
         el2::arm_context(ctx, ctrl, s, tail.net_rx().0 + ring::HEAD_OFF);
         dev::mb();
         attach(s, tail);
+        Ok(())
+    }
+}
+
+// FLIP: de adoptie na een kern-flip (hopos/src/flip.rs).
+impl ArmCage {
+    /// Neemt de zittende kooi-regio over: de switch-code moet dezelfde som
+    /// hebben als de onze (`cpu::el2::adopt`), en er wordt niets
+    /// geschreven, want er draaien cores in.
+    pub(crate) fn adopt(plan: Plan) -> Result<ArmCage, el2::Error> {
+        let installed = el2::adopt(&plan, FLAVOR)?;
+        Ok(ArmCage {
+            plan,
+            installed,
+            built: [None; SLOT_CAP + 1],
+        })
+    }
+
+    /// Geeft een levende bewoner zijn plek in de lijm terug: de
+    /// control-page en de core (voor status, stop en klok), en zijn
+    /// frame-ringen aan de switch van deze kern. Zonder ring-init: de
+    /// indexen staan in de ring zelf, en de app schrijft er nog in.
+    pub(crate) fn adopt_slot(
+        &mut self,
+        slot: Slot,
+        part: Region,
+        core: usize,
+    ) -> Result<(), CageError> {
+        let s = self.slot(slot)?;
+        let c = layout::Core::new(core).ok_or(err(code::PLAN))?;
+        let tail = tail_of(part).ok_or(err(code::TAIL))?;
+        let ctrl = tail.ctrl_page();
+        dev::pull(ctrl.add(CTRL_ENTRY), 8);
+        let entry = dev::read64(ctrl.add(CTRL_ENTRY));
+        if let Some(b) = self.built.get_mut(slot.get()) {
+            *b = Some(Built {
+                ctrl,
+                core: c,
+                entry,
+                part,
+            });
+        }
+        // De OS-core: de nieuwe kern geeft Hop de core weer in zijn idle.
+        // Het plan (en dus de bewonerslijst van sched-blok 0) overleefde de
+        // flip ongeschreven; staat hij er toch niet meer in, dan terug, met
+        // zijn bewaarde staat.
+        if core == 0 {
+            let ctx = self.plan.ctx_pa(s).map_err(|_| err(code::PLAN))?;
+            match el2::rehost(&self.plan, ctx) {
+                Ok(again) => println!(
+                    "cage: slot {slot} back in the OS core rotation (re-added: {again}) HOPOS_OS_HOST"
+                ),
+                Err(e) => {
+                    println!(
+                        "cage: slot {slot} not back on the OS core: {e} HOPOS_FLIP_ADOPT_FAIL"
+                    );
+                    return Err(err(code::DISPATCH));
+                }
+            }
+        }
+        attach(s, tail);
+        crate::clock::attach(slot, ctrl);
+        println!(
+            "cage: slot {slot} adopted: part {:#x}+{:#x}, ctrl {:#x}, core {core}, entry {entry:#x}",
+            part.base, part.size, ctrl.0
+        );
         Ok(())
     }
 }
@@ -322,15 +415,22 @@ impl Cage for ArmCage {
         let c = layout::Core::new(core.get()).ok_or(err(code::PLAN))?;
         let ctx = self.plan.ctx_pa(s).map_err(|_| err(code::PLAN))?;
         let tramp = self.installed.tramp;
+        let phys = self.plan.phys_core(c);
         // De startregel van elke levensduur, welke weg hij ook kwam (de
         // boot-plaatsing of `STREAM_IMAGE` van Hop): hier, want dit is de
-        // ene plek waar elke start langskomt.
+        // ene plek waar elke start langskomt. `core` is logisch (0 = de
+        // OS-core), `cpu` fysiek.
         let started = || {
             println!(
-                "HOPOS_SLOT_START slot={slot} core={core} entry={:#x} part={:#x}+{:#x}",
+                "HOPOS_SLOT_START slot={slot} core={core} cpu={phys} entry={:#x} part={:#x}+{:#x}",
                 b.entry, b.part.base, b.part.size
             );
         };
+        if core == Core::OS {
+            return self.host(slot, ctx, b, phys, started);
+        }
+        // Een app-core: stond dit slot ooit op de OS-core, dan niet meer.
+        let _ = el2::unhost(&self.plan, ctx);
         match el2::dispatch(&self.plan, c, ctx, tramp, b.ctrl.0) {
             Ok(Start::Woken) => {
                 println!("cage: slot {slot} dispatched to parked core {core} (mailbox + SEV)");
@@ -342,7 +442,7 @@ impl Cage for ArmCage {
                 // de trampoline in, x0 = de control-page. Daarna leeft hij
                 // in de parkeerlus van HopOS en gaat elke dispatch via de
                 // mailbox.
-                let target = mpidr(core.get());
+                let target = mpidr(phys);
                 let r = cpu::psci::cpu_on(target, tramp.0, b.ctrl.0);
                 println!(
                     "cage: slot {slot} core {core} cold: PSCI CPU_ON mpidr={target:#x} entry={:#x} x0={:#x} -> {r:?}",
@@ -377,6 +477,11 @@ impl Cage for ArmCage {
 
     fn quiet(&self, slot: Slot, core: Core) -> bool {
         let dead = matches!(self.ctx_state(slot), Some(CtxState::Empty | CtxState::Dead));
+        if core == Core::OS {
+            // De OS-core parkeert nooit (de kern draait er); stil is dood,
+            // of niet meer in zijn rotatie.
+            return dead || !self.ctx(slot).is_some_and(|c| el2::hosts(&self.plan, c));
+        }
         let parked = layout::Core::new(core.get())
             .and_then(|c| el2::core_state(&self.plan, c).ok())
             .is_some_and(|st| matches!(st, CoreState::Cold | CoreState::Parked));
@@ -396,6 +501,16 @@ impl Cage for ArmCage {
         if let Err(e) = el2::revoke(&self.plan, s) {
             println!("cage: slot {slot}: revoke: {e} HOPOS_CAGE_REVOKE");
         }
+        // Op de OS-core is de kern de enige die een bewoner de core geeft:
+        // uit de rotatie is een bevestigd einde, ook voor een bewoner die
+        // met een verre wektijd lag te slapen en de intrekking nooit zou
+        // voelen.
+        if let Some(ctx) = self.ctx(slot)
+            && el2::unhost(&self.plan, ctx).unwrap_or(false)
+        {
+            el2::ctx_write(ctx, layout::CTX_STATE, CtxState::Dead.raw());
+            println!("cage: slot {slot}: out of the OS core rotation HOPOS_OS_UNHOST");
+        }
     }
 
     fn smp_request(&self, slot: Slot) -> u64 {
@@ -407,10 +522,16 @@ impl Cage for ArmCage {
     }
 
     fn status(&self, slot: Slot) -> Status {
-        let core_on = self
-            .built(slot)
-            .and_then(|b| el2::core_state(&self.plan, b.core).ok())
-            .is_some_and(|st| matches!(st, CoreState::Running(_)));
+        // Op de OS-core staat de core altijd aan; de vraag is of de bewoner
+        // er nog in de rotatie staat.
+        let core_on = self.built(slot).is_some_and(|b| {
+            if b.core.get() == 0 {
+                self.ctx(slot).is_some_and(|c| el2::hosts(&self.plan, c))
+            } else {
+                el2::core_state(&self.plan, b.core)
+                    .is_ok_and(|st| matches!(st, CoreState::Running(_)))
+            }
+        });
         Status {
             core_on,
             app: self.ctrl_read(slot, CTRL_STATUS),
@@ -424,8 +545,42 @@ impl Cage for ArmCage {
     }
 }
 
-/// De app-cores van QEMU virt: logische core i is MPIDR i (`mpidr`), de
-/// toestand komt uit de park-mailbox.
+// De OS-core (PORT.md beslissing 2): de bewoners van de kern-core.
+impl ArmCage {
+    /// Maakt `slot` bewoner van de OS-core (fysiek `cpu`): de rotatie van
+    /// de kern (`cpu::el2::OsCore`) geeft hem de core in de idle van de
+    /// executor. Zijn idle wordt een yield (`CTRL_IDLE_MODE`): WFE op EL1
+    /// zou de hele core laten slapen, en op QEMU spinnen tot de volgende
+    /// interrupt.
+    fn host(
+        &self,
+        slot: Slot,
+        ctx: Pa,
+        b: Built,
+        cpu: usize,
+        started: impl Fn(),
+    ) -> Result<(), CageError> {
+        dev::write64(b.ctrl.add(CTRL_IDLE_MODE), IDLE_YIELD);
+        dev::push(b.ctrl.add(CTRL_IDLE_MODE), 8);
+        match el2::host(&self.plan, ctx, b.entry, b.ctrl.0) {
+            Ok(()) => {
+                println!(
+                    "cage: slot {slot} hosted on the OS core (cpu {cpu}), next to the kern HOPOS_OS_HOST"
+                );
+                started();
+                Ok(())
+            }
+            Err(e) => {
+                println!("cage: slot {slot} on the OS core: {e} HOPOS_CAGE_DISPATCH");
+                Err(err(code::DISPATCH))
+            }
+        }
+    }
+}
+
+/// De cores van QEMU virt: logische core 0 is de OS-core, app-core i de
+/// i-de andere fysieke core (`Plan::phys_core`), MPIDR via `mpidr`; de
+/// toestand van een app-core komt uit de park-mailbox.
 pub(crate) struct ArmCores {
     plan: Plan,
 }
@@ -443,7 +598,8 @@ impl Cores for ArmCores {
     }
 
     fn phys(&self, core: Core) -> Option<u32> {
-        (core.get() <= self.plan.app_cores()).then(|| u32::try_from(core.get()).ok())?
+        let c = layout::Core::new(core.get()).filter(|_| core.get() <= self.plan.app_cores())?;
+        u32::try_from(self.plan.phys_core(c)).ok()
     }
 
     fn class(&self, _core: Core) -> Option<CoreClass> {
@@ -452,6 +608,9 @@ impl Cores for ArmCores {
     }
 
     fn power(&self, core: Core) -> Power {
+        if core == Core::OS {
+            return Power::On; // de kern zelf
+        }
         match layout::Core::new(core.get()).and_then(|c| el2::core_state(&self.plan, c).ok()) {
             Some(CoreState::Running(_)) => Power::On,
             _ => Power::Off,
@@ -459,7 +618,11 @@ impl Cores for ArmCores {
     }
 
     fn kick(&mut self, core: Core) {
-        el2::kick(FLAVOR, mpidr(core.get()));
+        // De OS-core hoeft geen kick: de kern geeft zijn bewoners zelf de
+        // core, in elke idle-ronde.
+        if let Some(c) = layout::Core::new(core.get()).filter(|_| core != Core::OS) {
+            el2::kick(FLAVOR, mpidr(self.plan.phys_core(c)));
+        }
     }
 }
 

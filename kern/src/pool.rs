@@ -8,8 +8,15 @@
 //!
 //! Een jobspec vraagt een klasse ([`CoreClass`]); de plaatsing kiest alleen
 //! cores met die klasse ([`Cores::class`]). Hop-de-bewoner vraagt
-//! [`Placement::hop`]: klasse small, sharegroup `hop`, één core, en die
-//! core deelt hij met wie zich in dezelfde groep meldt (PORT.md beslissing 1).
+//! [`Placement::hop`]: sharegroup `hop`, één core, en die core deelt hij met
+//! wie zich in dezelfde groep meldt (PORT.md beslissing 1).
+//!
+//! De OS-core ([`Core::OS`], PORT.md beslissing 2, 30-09): de kern deelt
+//! zijn eigen core met de groepen die hij daarvoor aanwijst
+//! ([`CorePool::share_os_core`]): Hop, en vertrouwde apps. Zo past het hele
+//! OS inclusief Hop op één core en houdt een board met twee cores een volle
+//! app-core over. Een groep die de OS-core niet mag delen, komt er nooit;
+//! een dedicated plaatsing ook niet.
 //!
 //! Puur boekhouding, geen MMIO. Eigendom van de lifecycle-actor.
 
@@ -23,6 +30,9 @@ pub const MAX_GROUP_NAME: usize = 256;
 pub const MAX_GROUPS: usize = 32;
 /// Het maximale aantal cores in één sharegroup.
 pub const MAX_GROUP_CORES: usize = 64;
+/// Hoeveel sharegroups tegelijk de OS-core mogen delen: Hop en een handvol
+/// vertrouwde groepen.
+pub const MAX_OS_GROUPS: usize = 4;
 
 /// De naam van een sharegroup.
 pub type GroupName = BoundedVec<u8, MAX_GROUP_NAME>;
@@ -44,8 +54,13 @@ pub struct Placement {
 pub const HOP_GROUP: &[u8] = b"hop";
 
 impl Placement {
-    /// De plaatsing van Hop-de-bewoner: één kleine core, gedeeld in de
-    /// groep `hop`.
+    /// De plaatsing van Hop-de-bewoner: één core, gedeeld in de groep `hop`.
+    /// Mag de groep de OS-core delen ([`CorePool::share_os_core`]), dan is
+    /// het die; anders een app-core, zoals vóór 30-09.
+    ///
+    /// Geen klasse meer: Hop woont waar de kern woont, en welke klasse dát
+    /// is, kiest de bootparameter van de OS-core (`hopos.oscore`), niet de
+    /// jobspec.
     pub fn hop() -> Result<Placement> {
         let mut name = GroupName::new();
         for b in HOP_GROUP {
@@ -58,7 +73,7 @@ impl Placement {
             group: Some(name),
             pool_cores: 1,
             cores: 1,
-            class: Some(CoreClass::Small),
+            class: None,
         })
     }
 }
@@ -76,9 +91,10 @@ struct CagePlace {
     group: Option<usize>,
 }
 
-/// De plaatsing van alle kooien op de app-cores.
+/// De plaatsing van alle kooien op de app-cores en de OS-core.
 pub struct CorePool {
     hop_reserved: usize,
+    os_groups: BoundedVec<GroupName, MAX_OS_GROUPS>,
     groups: [Option<Group>; MAX_GROUPS],
     core_group: [Option<u8>; CORE_CAP + 1],
     core_apps: [u16; CORE_CAP + 1],
@@ -92,11 +108,38 @@ impl CorePool {
     pub fn new(hop_reserved: usize) -> CorePool {
         CorePool {
             hop_reserved,
+            os_groups: BoundedVec::new(),
             groups: [const { None }; MAX_GROUPS],
             core_group: [None; CORE_CAP + 1],
             core_apps: [0; CORE_CAP + 1],
             cages: [None; SLOT_CAP + 1],
         }
+    }
+
+    /// Laat sharegroup `name` de OS-core delen: vanaf nu plaatst elke kooi
+    /// van die groep op [`Core::OS`]. Beleid van de kern bij boot (Hop, en de
+    /// groepen die de config vertrouwt); alleen op een board waar de kern
+    /// zijn core kan delen (de rotatie van `cpu::el2`).
+    pub fn share_os_core(&mut self, name: &[u8]) -> Result {
+        if self.os_group(name) {
+            return Ok(());
+        }
+        let mut g = GroupName::new();
+        for b in name {
+            g.push(*b).map_err(|_| Error::TooLarge {
+                len: name.len(),
+                max: MAX_GROUP_NAME,
+            })?;
+        }
+        self.os_groups
+            .push(g)
+            .map_err(|_| Error::Full { cap: MAX_OS_GROUPS })
+    }
+
+    /// Mag groep `name` de OS-core delen?
+    #[must_use]
+    pub fn os_group(&self, name: &[u8]) -> bool {
+        self.os_groups.iter().any(|g| g.as_slice() == name)
     }
 
     fn is_app_core(&self, cores: &impl Cores, c: usize) -> bool {
@@ -109,6 +152,50 @@ impl CorePool {
             (Some(want), Some(core)) => cores.class(core) == Some(want),
             (Some(_), None) => false,
         }
+    }
+
+    /// Een kooi van een groep die de OS-core deelt: altijd [`Core::OS`], één
+    /// core, en een gevraagde klasse moet die van de OS-core zijn.
+    fn place_os(
+        &mut self,
+        cores: &impl Cores,
+        slot: Slot,
+        name: &GroupName,
+        spec: &Placement,
+    ) -> Result<Core> {
+        if spec.cores.max(1) > 1 || spec.pool_cores.max(1) > 1 {
+            return Err(Error::PoolSize {
+                have: 1,
+                want: spec.cores.max(spec.pool_cores),
+            });
+        }
+        if let Some(want) = spec.class
+            && cores.class(Core::OS) != Some(want)
+        {
+            return Err(Error::ClassMismatch { core: 0 });
+        }
+        let gid = match self.group_id(name) {
+            Some(g) => g,
+            None => {
+                let gid = self
+                    .groups
+                    .iter()
+                    .position(Option::is_none)
+                    .ok_or(Error::Full { cap: MAX_GROUPS })?;
+                let mut members = BoundedVec::new();
+                members.push(Core::OS).map_err(|_| Error::Full {
+                    cap: MAX_GROUP_CORES,
+                })?;
+                if let Some(g) = self.groups.get_mut(gid) {
+                    *g = Some(Group {
+                        name: name.clone(),
+                        cores: members,
+                    });
+                }
+                gid
+            }
+        };
+        Ok(self.reserve(slot, Core::OS, 1, Some(gid)))
     }
 
     /// Een app-core zonder groepsclaim en zonder levende kooi.
@@ -162,6 +249,9 @@ impl CorePool {
         let Some(name) = &spec.group else {
             return self.place_dedicated(cores, slot, n, spec.class);
         };
+        if self.os_group(name.as_slice()) {
+            return self.place_os(cores, slot, name, spec);
+        }
         if n > 1 {
             // Een gedeelde kooi draait per definitie op één core: de pool ís
             // het deelmechanisme.
@@ -612,16 +702,59 @@ pub(crate) mod tests {
         );
     }
 
-    // Dereks eis: Hop vraagt small en deelt zijn core.
+    // PORT.md beslissing 2 (30-09): Hop deelt de OS-core met de kern, en een
+    // vertrouwde groep mag erbij; een dedicated job en een gewone groep
+    // komen er nooit.
     #[test]
-    fn hop_asks_small_and_shares_its_core() {
+    fn hop_and_trusted_groups_share_the_os_core() {
+        let b = FakeCores::new(1);
+        let mut p = CorePool::new(0);
+        p.share_os_core(HOP_GROUP).unwrap();
+        p.share_os_core(b"trusted").unwrap();
+        p.share_os_core(HOP_GROUP).unwrap(); // idempotent
+        let hop = p.place(&b, s(1), &Placement::hop().unwrap()).unwrap();
+        assert_eq!(hop, Core::OS, "Hop did not land on the OS core");
+        assert_eq!(
+            p.place(&b, s(2), &shared("trusted", 1, None)).unwrap(),
+            Core::OS
+        );
+        // De enige app-core blijft vrij voor een dedicated job.
+        assert_eq!(p.place(&b, s(3), &ded(1, None)).unwrap().get(), 1);
+        assert!(p.place(&b, s(4), &ded(1, None)).is_err());
+        // Een gewone groep vindt geen app-core meer, en neemt nooit de OS-core.
+        assert!(p.place(&b, s(5), &shared("web", 1, None)).is_err());
+        // Een OS-groep is één core, geen SMP.
+        let mut smp = shared("trusted", 1, None);
+        smp.cores = 2;
+        assert!(p.place(&b, s(6), &smp).is_err());
+        assert_eq!(p.placement_of(s(1)), Some((Core::OS, 1)));
+        p.release(s(1));
+        p.release(s(2));
+        assert_eq!(
+            p.place(&b, s(1), &Placement::hop().unwrap()).unwrap(),
+            Core::OS
+        );
+    }
+
+    // Zonder OS-core-deling (een board zonder de rotatie van cpu::el2) is Hop
+    // een gewone gedeelde groep op een app-core, zoals vóór 30-09.
+    #[test]
+    fn hop_without_os_sharing_takes_an_app_core() {
         use CoreClass::{Big, Small};
         let b = FakeCores::with(4, &[(1, Big), (2, Big), (3, Small), (4, Small)]);
         let mut p = CorePool::new(0);
         let hop = p.place(&b, s(1), &Placement::hop().unwrap()).unwrap();
-        assert_eq!(hop.get(), 3, "Hop landed on a non-small core");
+        assert_eq!(hop.get(), 1);
         let buddy = p.place(&b, s(2), &Placement::hop().unwrap()).unwrap();
         assert_eq!(buddy, hop, "a trusted buddy did not share Hop's core");
-        assert_eq!(p.place(&b, s(3), &ded(1, Some(Small))).unwrap().get(), 4);
+        assert_eq!(p.place(&b, s(3), &ded(1, Some(Small))).unwrap().get(), 3);
+    }
+
+    #[test]
+    fn a_core_run_keeps_the_os_core() {
+        let run: Vec<usize> = Core::OS.run(1).map(Core::get).collect();
+        assert_eq!(run, [0]);
+        let run: Vec<usize> = Core::new(2).unwrap().run(3).map(Core::get).collect();
+        assert_eq!(run, [2, 3, 4]);
     }
 }

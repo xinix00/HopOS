@@ -7,8 +7,11 @@
 //! behandelen (E8). Het herstel van de claims zelf is
 //! [`crate::slots::Lifecycle::adopt`].
 //!
-//! Het downloaden, plaatsen en relokeren van de bundel en de sprong zijn
-//! van `cpu` en het board (zie het rapport, "niet geport").
+//! Daarnaast de bundel ([`Bundle`]: de kern-ELF plus zijn relocatietabel,
+//! `image/flip-bundle.sh`), het platte neerleggen ervan ([`flatten`]) en de
+//! som die hem vertrouwd maakt ([`sha256`]). Het relokeren en de sprong met
+//! de MMU uit zijn van `cpu::el2::chain`; het ophalen doet Hop (`POST
+//! /flip`), dat de bundel in een gereserveerd slot stroomt.
 
 use crate::cage::PhysMem;
 use crate::slots::{Mount, SlotState, try_push};
@@ -590,10 +593,350 @@ pub fn mark_early_boot(mem: &mut impl PhysMem, plan: &FlipPlan) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// De bundel: de kern-ELF plus zijn relocatietabel (image/flip-bundle.sh).
+// ---------------------------------------------------------------------------
+
+/// De versie van het flip-contract van v3: de staart-vorm, het handoff-blob
+/// en de ingangsconditie samen. De Go-generatie sprak ABI 2 (een geleend
+/// venster, `RamStart`/`RamSize`-patches); v3 plaatst de nieuwe kern op het
+/// koude adres van de oude, dus een Go-bundel wordt hier geweigerd.
+pub const FLIP_ABI: u32 = 3;
+/// "HOPRELO1" little-endian: hetzelfde woord als `mkkernel -elfreloc`.
+pub const RELOC_MAGIC: u64 = 0x314F_4C45_5250_4F48;
+/// De kop van de staart: magic, versie, flip-ABI, ELF-maat, linkbasis,
+/// platte maat, entry, aantal relocaties.
+pub const BUNDLE_HEAD: usize = 56;
+/// De voet: de offset van de kop en nog een keer de magic.
+pub const BUNDLE_FOOT: usize = 16;
+/// De grootste platte kern (image plus BSS en stack): een kern van v3 is
+/// ruim een MiB (1,1 MiB gemeten 29-09); 64 MiB is een typefout, geen kern.
+pub const MAX_FLAT: u64 = 64 << 20;
+
+/// Een gevalideerde flip-bundel over de bytes waarin Hop hem stroomde.
+///
+/// # Invariants
+///
+/// `elf` en `relocs` liggen binnen de bundel; elke relocatie-offset is
+/// 8-uitgelijnd en valt met zijn woord binnen `flat_size`; `entry` ligt in
+/// `[link_load, link_load + flat_size)` en is 4-uitgelijnd.
+#[derive(Debug)]
+pub struct Bundle<'a> {
+    /// De onaangeroerde kern-ELF (met symbooltabel).
+    pub elf: &'a [u8],
+    /// De flip-ABI van de bundel.
+    pub flip_abi: u32,
+    /// De linkbasis: het laagste laadadres van de ELF.
+    pub link_load: u64,
+    /// Het platte beeld inclusief BSS en stack.
+    pub flat_size: u64,
+    /// Het entrypoint, absoluut op de linkbasis.
+    pub entry: u64,
+    relocs: &'a [u8],
+}
+
+fn le64(b: &[u8], at: usize) -> Result<u64> {
+    b.get(at..at + 8)
+        .and_then(|s| <[u8; 8]>::try_from(s).ok())
+        .map(u64::from_le_bytes)
+        .ok_or(Error::Corrupt { at })
+}
+
+fn le32(b: &[u8], at: usize) -> Result<u32> {
+    b.get(at..at + 4)
+        .and_then(|s| <[u8; 4]>::try_from(s).ok())
+        .map(u32::from_le_bytes)
+        .ok_or(Error::Corrupt { at })
+}
+
+impl<'a> Bundle<'a> {
+    /// Valideert een bundel. Elke afwijking is een fout: een bundel is
+    /// compleet geldig of bestaat niet, want de bytes komen van het net en
+    /// dit pad springt er straks in (`bundle.go`, ParseBundleReader).
+    pub fn parse(b: &'a [u8]) -> Result<Bundle<'a>> {
+        if b.len() < BUNDLE_HEAD + BUNDLE_FOOT + 64 {
+            return Err(Error::Corrupt { at: b.len() });
+        }
+        let foot = b.len() - BUNDLE_FOOT;
+        let magic = le64(b, foot + 8)?;
+        if magic != RELOC_MAGIC {
+            // Een kale ELF in plaats van een bundel, of een afgekapte stroom.
+            return Err(Error::Version {
+                have: magic,
+                want: RELOC_MAGIC,
+            });
+        }
+        let head = usize::try_from(le64(b, foot)?).map_err(|_| Error::Corrupt { at: foot })?;
+        if !head.is_multiple_of(8) || head > foot - BUNDLE_HEAD {
+            return Err(Error::Corrupt { at: foot });
+        }
+        if le64(b, head)? != RELOC_MAGIC {
+            return Err(Error::Corrupt { at: head });
+        }
+        let version = le32(b, head + 8)?;
+        if version != 1 {
+            return Err(Error::Version {
+                have: u64::from(version),
+                want: 1,
+            });
+        }
+        let elf_size = le64(b, head + 16)?;
+        let count = le64(b, head + 48)?;
+        let bundle = Bundle {
+            flip_abi: le32(b, head + 12)?,
+            link_load: le64(b, head + 24)?,
+            flat_size: le64(b, head + 32)?,
+            entry: le64(b, head + 40)?,
+            elf: b
+                .get(..usize::try_from(elf_size).unwrap_or(usize::MAX))
+                .filter(|_| elf_size != 0 && elf_size <= head as u64)
+                .ok_or(Error::Corrupt { at: head + 16 })?,
+            relocs: {
+                let start = head + BUNDLE_HEAD;
+                let room = (foot - start) as u64 / 4;
+                if count > room {
+                    return Err(Error::Corrupt { at: head + 48 });
+                }
+                b.get(start..start + count as usize * 4)
+                    .ok_or(Error::Corrupt { at: start })?
+            },
+        };
+        if bundle.flat_size == 0 || bundle.flat_size > MAX_FLAT {
+            return Err(Error::TooLarge {
+                len: usize::try_from(bundle.flat_size).unwrap_or(usize::MAX),
+                max: MAX_FLAT as usize,
+            });
+        }
+        let end = bundle.link_load.checked_add(bundle.flat_size);
+        if !bundle.link_load.is_multiple_of(0x1000) || end.is_none() {
+            return Err(Error::Range {
+                base: bundle.link_load,
+                size: bundle.flat_size,
+            });
+        }
+        if bundle.entry < bundle.link_load
+            || end.is_some_and(|e| bundle.entry >= e)
+            || !bundle.entry.is_multiple_of(4)
+        {
+            return Err(Error::Range {
+                base: bundle.entry,
+                size: bundle.flat_size,
+            });
+        }
+        for (i, off) in bundle.relocs().enumerate() {
+            if !off.is_multiple_of(8) || u64::from(off) + 8 > bundle.flat_size {
+                return Err(Error::Corrupt {
+                    at: head + BUNDLE_HEAD + i * 4,
+                });
+            }
+        }
+        // INVARIANT: bereiken, uitlijning en elke relocatie zijn getoetst.
+        Ok(bundle)
+    }
+
+    /// De relocatie-offsets: elk een 8-byte-woord in het platte beeld dat
+    /// een absoluut adres op de linkbasis draagt.
+    pub fn relocs(&self) -> impl Iterator<Item = u32> + Clone + '_ {
+        self.relocs
+            .chunks_exact(4)
+            .filter_map(|c| <[u8; 4]>::try_from(c).ok())
+            .map(u32::from_le_bytes)
+    }
+
+    /// Het aantal relocaties.
+    #[must_use]
+    pub fn reloc_count(&self) -> usize {
+        self.relocs.len() / 4
+    }
+}
+
+/// Legt de PT_LOAD-segmenten van de bundel plat neer op `dst` (het beeld
+/// zoals het op de linkbasis zou staan, maar dan op `dst`): eerst het hele
+/// beeld op nul (BSS, stack, gaten), dan de bytes. Geeft het aantal
+/// segmenten. Relocaties zijn niet van hier (`cpu::el2::chain::relocate`).
+///
+/// De ELF-entry moet die van de staart zijn: twee bronnen die het oneens
+/// zijn, is een bundel die niet van één build komt.
+pub fn flatten(bundle: &Bundle<'_>, mem: &mut impl PhysMem, dst: u64) -> Result<usize> {
+    let f = leanelf::File::parse(bundle.elf).map_err(|_| Error::Corrupt { at: 0 })?;
+    if f.entry != bundle.entry {
+        return Err(Error::Version {
+            have: f.entry,
+            want: bundle.entry,
+        });
+    }
+    let end = bundle.link_load + bundle.flat_size;
+    mem.clear(dst, bundle.flat_size.next_multiple_of(8));
+    let mut n = 0;
+    for s in f.segments().filter(|s| s.kind == leanelf::PT_LOAD) {
+        let bad = Error::Range {
+            base: s.paddr,
+            size: s.memsz,
+        };
+        let s_end = s.paddr.checked_add(s.memsz).ok_or(bad)?;
+        if s.paddr < bundle.link_load || s_end > end || s.filesz > s.memsz {
+            return Err(bad);
+        }
+        let bytes = usize::try_from(s.off)
+            .ok()
+            .zip(usize::try_from(s.filesz).ok())
+            .and_then(|(o, l)| bundle.elf.get(o..o.checked_add(l)?))
+            .ok_or(Error::Corrupt { at: 0 })?;
+        mem.copy_in(dst + (s.paddr - bundle.link_load), bytes);
+        n += 1;
+    }
+    if n == 0 {
+        return Err(Error::Corrupt { at: 0 });
+    }
+    Ok(n)
+}
+
+// ---------------------------------------------------------------------------
+// SHA-256 (FIPS 180-4): de som van de bundel is het vertrouwensanker.
+// ---------------------------------------------------------------------------
+
+/// Een incrementele SHA-256. Hier en niet uit `leantls`: die houdt hem
+/// crate-privé, en een kern die één hash nodig heeft linkt geen TLS-stapel
+/// (dezelfde afweging als `leans3/src/sha256.rs`).
+#[derive(Clone)]
+pub struct Sha256 {
+    h: [u32; 8],
+    buf: [u8; 64],
+    fill: usize,
+    len: u64,
+}
+
+const SHA_K: [u32; 64] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
+impl Default for Sha256 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Sha256 {
+    /// Een verse hash.
+    #[must_use]
+    pub const fn new() -> Sha256 {
+        Sha256 {
+            h: [
+                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+                0x5be0cd19,
+            ],
+            buf: [0; 64],
+            fill: 0,
+            len: 0,
+        }
+    }
+
+    fn block(&mut self, b: &[u8; 64]) {
+        let mut w = [0u32; 64];
+        for (i, c) in b.chunks_exact(4).enumerate() {
+            if let (Some(d), Ok(v)) = (w.get_mut(i), <[u8; 4]>::try_from(c)) {
+                *d = u32::from_be_bytes(v);
+            }
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+        let [mut a, mut b2, mut c, mut d, mut e, mut f, mut g, mut h] = self.h;
+        for (k, wi) in SHA_K.iter().zip(w.iter()) {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ (!e & g);
+            let t1 = h
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(*k)
+                .wrapping_add(*wi);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b2) ^ (a & c) ^ (b2 & c);
+            let t2 = s0.wrapping_add(maj);
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t1);
+            d = c;
+            c = b2;
+            b2 = a;
+            a = t1.wrapping_add(t2);
+        }
+        for (s, v) in self.h.iter_mut().zip([a, b2, c, d, e, f, g, h]) {
+            *s = s.wrapping_add(v);
+        }
+    }
+
+    /// Voert bytes in.
+    pub fn update(&mut self, mut data: &[u8]) {
+        self.len = self.len.wrapping_add(data.len() as u64);
+        while !data.is_empty() {
+            let take = (64 - self.fill).min(data.len());
+            let (now, rest) = data.split_at(take);
+            if let Some(d) = self.buf.get_mut(self.fill..self.fill + take) {
+                d.copy_from_slice(now);
+            }
+            self.fill += take;
+            data = rest;
+            if self.fill == 64 {
+                let b = self.buf;
+                self.block(&b);
+                self.fill = 0;
+            }
+        }
+    }
+
+    /// De som.
+    #[must_use]
+    pub fn finish(mut self) -> [u8; 32] {
+        let bits = self.len.wrapping_mul(8);
+        self.update(&[0x80]);
+        while self.fill != 56 {
+            self.update(&[0]);
+        }
+        self.update(&bits.to_be_bytes());
+        let mut out = [0u8; 32];
+        for (o, v) in out.chunks_exact_mut(4).zip(self.h) {
+            o.copy_from_slice(&v.to_be_bytes());
+        }
+        out
+    }
+}
+
+/// De SHA-256 van `data` in één keer.
+#[must_use]
+pub fn sha256(data: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(data);
+    h.finish()
+}
+
+/// De eerste acht bytes van een som als getal: de `bundle_sum` in het
+/// handoff-blob ("flip naar deze bundel" mag geen eeuwige lus worden).
+#[must_use]
+pub fn sum64(sum: &[u8; 32]) -> u64 {
+    let mut w = [0u8; 8];
+    w.copy_from_slice(sum.get(..8).unwrap_or(&[0; 8]));
+    u64::from_le_bytes(w)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::stage2::tests::SparseMem;
+    use std::string::String;
     use std::vec;
 
     fn m(l: &str, s: &str) -> Mount {
@@ -835,5 +1178,148 @@ mod tests {
         assert_eq!(take_last_flip(&mut mem, &PLAN), Some((Stage::EarlyMain, 9)));
         assert_eq!(mem.read64(PLAN.stage_pa), 0);
         assert!(Stage::NetUp.describe().contains("network"));
+    }
+    #[test]
+    fn sha256_known_vectors() {
+        let hex = |s: [u8; 32]| {
+            s.iter()
+                .map(|b| std::format!("{b:02x}"))
+                .collect::<String>()
+        };
+        assert_eq!(
+            hex(sha256(b"abc")),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            hex(sha256(b"")),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        // Over een blokgrens, in brokken: dezelfde som als in één keer.
+        let long: Vec<u8> = (0..1000u32).map(|i| i as u8).collect();
+        let mut h = Sha256::new();
+        for c in long.chunks(37) {
+            h.update(c);
+        }
+        assert_eq!(h.finish(), sha256(&long));
+        assert_eq!(
+            hex(sha256(
+                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+            )),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+    }
+
+    /// Een minimale ELF64 met één PT_LOAD: `code` op `paddr`, `memsz` groot.
+    fn mini_elf(entry: u64, paddr: u64, code: &[u8], memsz: u64) -> Vec<u8> {
+        let mut e = vec![0u8; 128];
+        e[..4].copy_from_slice(b"\x7fELF");
+        e[4] = 2;
+        e[5] = 1;
+        e[6] = 1;
+        e[16..18].copy_from_slice(&2u16.to_le_bytes());
+        e[18..20].copy_from_slice(&183u16.to_le_bytes());
+        e[20..24].copy_from_slice(&1u32.to_le_bytes());
+        e[24..32].copy_from_slice(&entry.to_le_bytes());
+        e[32..40].copy_from_slice(&64u64.to_le_bytes());
+        e[52..54].copy_from_slice(&64u16.to_le_bytes());
+        e[54..56].copy_from_slice(&56u16.to_le_bytes());
+        e[56..58].copy_from_slice(&1u16.to_le_bytes());
+        let ph = 64;
+        e[ph..ph + 4].copy_from_slice(&1u32.to_le_bytes());
+        e[ph + 4..ph + 8].copy_from_slice(&5u32.to_le_bytes());
+        e[ph + 8..ph + 16].copy_from_slice(&128u64.to_le_bytes());
+        e[ph + 16..ph + 24].copy_from_slice(&paddr.to_le_bytes());
+        e[ph + 24..ph + 32].copy_from_slice(&paddr.to_le_bytes());
+        e[ph + 32..ph + 40].copy_from_slice(&(code.len() as u64).to_le_bytes());
+        e[ph + 40..ph + 48].copy_from_slice(&memsz.to_le_bytes());
+        e[ph + 48..ph + 56].copy_from_slice(&0x1000u64.to_le_bytes());
+        e.extend_from_slice(code);
+        e
+    }
+
+    /// Een bundel zoals image/flip-bundle.sh hem schrijft.
+    fn mini_bundle(
+        elf: &[u8],
+        abi: u32,
+        link: u64,
+        flat: u64,
+        entry: u64,
+        relocs: &[u32],
+    ) -> Vec<u8> {
+        let mut b = elf.to_vec();
+        while !b.len().is_multiple_of(8) {
+            b.push(0);
+        }
+        let head = b.len() as u64;
+        b.extend_from_slice(&RELOC_MAGIC.to_le_bytes());
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&abi.to_le_bytes());
+        for v in [elf.len() as u64, link, flat, entry, relocs.len() as u64] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        for r in relocs {
+            b.extend_from_slice(&r.to_le_bytes());
+        }
+        while !b.len().is_multiple_of(8) {
+            b.push(0);
+        }
+        b.extend_from_slice(&head.to_le_bytes());
+        b.extend_from_slice(&RELOC_MAGIC.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn bundle_parses_flattens_and_lists_relocations() {
+        let link = 0x6020_0000u64;
+        let mut code = vec![0u8; 64];
+        code[8..16].copy_from_slice(&(link + 0x20).to_le_bytes());
+        let elf = mini_elf(link, link, &code, 0x2000);
+        let b = mini_bundle(&elf, FLIP_ABI, link, 0x2000, link, &[8]);
+        let bun = Bundle::parse(&b).unwrap();
+        assert_eq!(
+            (bun.flip_abi, bun.link_load, bun.flat_size, bun.entry),
+            (FLIP_ABI, link, 0x2000, link)
+        );
+        assert_eq!(bun.relocs().collect::<Vec<_>>(), [8]);
+        assert_eq!(bun.reloc_count(), 1);
+        let mut mem = SparseMem::default();
+        mem.write64(0x10_0000 + 0x1ff8, 0xdead); // rommel in de BSS
+        assert_eq!(flatten(&bun, &mut mem, 0x10_0000).unwrap(), 1);
+        assert_eq!(mem.read64(0x10_0008), link + 0x20);
+        assert_eq!(mem.read64(0x10_1ff8), 0, "BSS not cleared");
+    }
+
+    #[test]
+    fn bundle_refuses_what_it_cannot_jump_into() {
+        let link = 0x4020_0000u64;
+        let elf = mini_elf(link, link, &[0u8; 64], 0x1000);
+        let good = mini_bundle(&elf, FLIP_ABI, link, 0x1000, link, &[0, 8]);
+        assert!(Bundle::parse(&good).is_ok());
+        // Een kale ELF, een afgekapte stroom, een omgevallen staart.
+        assert!(Bundle::parse(&elf).is_err());
+        assert!(Bundle::parse(&good[..good.len() - 1]).is_err());
+        let bad: [(u64, u64, &[u32]); 5] = [
+            (0x1000, link + 0x1000, &[]),   // entry buiten het beeld
+            (0x1000, link + 2, &[]),        // entry niet uitgelijnd
+            (0x1000, link, &[4]),           // relocatie niet uitgelijnd
+            (0x1000, link, &[0x1000 - 4]),  // relocatie over de rand
+            (MAX_FLAT + 0x1000, link, &[]), // een beeld dat geen kern is
+        ];
+        for (flat, entry, relocs) in bad {
+            let b = mini_bundle(&elf, FLIP_ABI, link, flat, entry, relocs);
+            assert!(
+                Bundle::parse(&b).is_err(),
+                "accepted {flat:#x} {entry:#x} {relocs:?}"
+            );
+        }
+        // Een segment buiten het gedeclareerde beeld is een weigering bij het
+        // neerleggen, niet een schrijf over de buren.
+        let b = mini_bundle(&elf, FLIP_ABI, link, 0x800, link, &[]);
+        let bun = Bundle::parse(&b).unwrap();
+        assert!(flatten(&bun, &mut SparseMem::default(), 0x10_0000).is_err());
+        // Twee entries die het oneens zijn: niet van één build.
+        let b = mini_bundle(&elf, FLIP_ABI, link, 0x1000, link + 8, &[]);
+        let bun = Bundle::parse(&b).unwrap();
+        assert!(flatten(&bun, &mut SparseMem::default(), 0x10_0000).is_err());
     }
 }

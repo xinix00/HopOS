@@ -8,7 +8,10 @@
 //! parkeerlus, als `global_asm!`); en de Rust-kant daarvan (`dispatch.rs`):
 //! de switch-code naar de plan-regio met descriptor en som, de thunks en
 //! sched-blokken, [`dispatch`], [`kick`], [`revoke`], [`prepare_smp`],
-//! [`adopt`] en de lezers van het ctx-blok.
+//! [`adopt`] en de lezers van het ctx-blok; en de OS-core (`oscore.rs`,
+//! PORT.md beslissing 2): de kern op EL2 als eerste bewoner van zijn eigen
+//! core, die zijn idle aan de andere bewoners geeft ([`OsCore`], [`host`])
+//! en ze terugneemt op elke interrupt, kick of deadline.
 //!
 //! De kern van v3 draait zélf op EL2 (de boot-stub blijft daar), dus een
 //! intrekking is geen hypercall meer maar een TLB-invalidatie ter plekke:
@@ -16,8 +19,10 @@
 //! naast zijn voorganger ligt. Hetzelfde geldt voor de Apple-kick (in Go
 //! HVC #3): de kern schrijft het IPI-register zelf.
 
+pub mod chain;
 mod dispatch;
 mod layout;
+mod oscore;
 pub mod stage2;
 #[cfg(all(target_os = "none", target_arch = "aarch64"))]
 mod switch;
@@ -26,12 +31,16 @@ mod switch;
 mod switch;
 
 pub use dispatch::{
-    CoreState, Flavor, HVC_DOOR_ACK, HVC_EXIT, HVC_WAKE, HVC_YIELD, Installed, MAX_BLOB, SW_ENTRY,
-    SW_HASH, SW_HEAD, SW_LEN, SW_SMP, SW_TRAMP, SWITCH_MAGIC, Start, VEC_COUNT, VEC_FIQ_LOWER,
-    VEC_STRIDE, VEC_SYNC_LOWER, VEC_TABLE_LEN, adopt, apple_ipi_target, arm_context, check_parked,
-    context_id, context_pa, core_state, ctx_read, ctx_state, ctx_write, dispatch, image_hash,
-    init_app_cores, install_switch_code, installed_hash, kick, prepare_smp, revoke, rx_due,
-    wake_due,
+    CoreState, Flavor, HVC_DOOR_ACK, HVC_EXIT, HVC_KICK_OS, HVC_WAKE, HVC_YIELD, Installed,
+    MAX_BLOB, SW_ENTRY, SW_HASH, SW_HEAD, SW_LEN, SW_SMP, SW_TRAMP, SWITCH_MAGIC, Start, VEC_COUNT,
+    VEC_FIQ_LOWER, VEC_STRIDE, VEC_SYNC_LOWER, VEC_TABLE_LEN, adopt, apple_ipi_target, arm_context,
+    check_parked, context_id, context_pa, core_state, ctx_read, ctx_state, ctx_write, dispatch,
+    image_hash, init_app_cores, install_switch_code, installed_hash, kick, prepare_smp, revoke,
+    rx_due, wake_due,
+};
+pub use oscore::{
+    Back, Bell, OsCore, SCHED_OS_KICK, SCHED_OS_KICK_PA, STATS as OS_STATS, Stats as OsStats,
+    TURN_CAP_NS, Turn, held, hold, host, hosts, rehost, release_held, unhost,
 };
 
 use core::fmt;
@@ -133,6 +142,9 @@ pub enum Error {
     },
     /// Het plan weigerde een index.
     Plan(abi::Error),
+    /// Deze EL2-smaak kan de OS-core niet delen (Apple: geen GIC-kick, en
+    /// het FIQ-pad van de OS-core is niet geport).
+    OsCoreFlavor,
 }
 
 impl fmt::Display for Error {
@@ -196,6 +208,9 @@ impl fmt::Display for Error {
                 write!(f, "mailbox argument {arg:#x} reads as cold or parked")
             }
             Self::Plan(e) => write!(f, "plan: {e}"),
+            Self::OsCoreFlavor => {
+                write!(f, "this EL2 flavor cannot share the OS core with residents")
+            }
         }
     }
 }

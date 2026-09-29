@@ -10,6 +10,23 @@ pub(crate) fn timer_off() {
     imp::timer_off();
 }
 
+/// De EL2-timer (CNTHP) uit: zijn lijn valt.
+pub(crate) fn hyp_timer_off() {
+    imp::hyp_timer_off();
+}
+
+/// De hoogste pending Group-1-INTID (ICC_HPPIR1_EL1), zonder claim: de
+/// peek waarmee de OS-core na een terugkeer ziet of het de kick was.
+pub(crate) fn hppir1() -> u32 {
+    (imp::icc_hppir1() & 0xff_ffff) as u32
+}
+
+/// Schrijft ICC_SGI1R_EL1: een SGI volgens `v` (zie
+/// `driver_gicv3::sgi1r`).
+pub(crate) fn sgi1r(v: u64) {
+    imp::icc_sgi1r(v);
+}
+
 /// Opent I: het begin van interrupt-afhandeling, en het einde van elke
 /// dispatch-ronde (de vector keert gemaskeerd terug).
 pub(crate) fn irq_unmask() {
@@ -80,6 +97,26 @@ mod imp {
         unsafe { asm!("msr cntp_ctl_el0, xzr", "isb", options(nomem, nostack)) };
     }
 
+    pub(super) fn hyp_timer_off() {
+        // SAFETY: CNTHP_CTL_EL2 = 0 zet de EL2-timer van deze core uit; geen
+        // geheugeneffect.
+        unsafe { asm!("msr cnthp_ctl_el2, xzr", "isb", options(nomem, nostack)) };
+    }
+
+    pub(super) fn icc_hppir1() -> u64 {
+        let v: u64;
+        // SAFETY: ICC_HPPIR1_EL1 (S3_0_C12_C12_2) lezen claimt niets en
+        // heeft geen neveneffect.
+        unsafe { asm!("mrs {}, S3_0_C12_C12_2", out(reg) v, options(nomem, nostack)) };
+        v
+    }
+
+    pub(super) fn icc_sgi1r(v: u64) {
+        // SAFETY: ICC_SGI1R_EL1 (S3_0_C12_C11_5) stuurt een SGI; geen
+        // geheugen.
+        unsafe { asm!("msr S3_0_C12_C11_5, {}", "isb", in(reg) v, options(nomem, nostack)) };
+    }
+
     pub(super) fn irq_unmask() {
         // SAFETY: alleen PSTATE.I van deze core; geen `nomem`, zodat geen
         // geheugentoegang over het openen heen schuift.
@@ -145,6 +182,11 @@ mod imp {
         0
     }
     pub(super) fn timer_off() {}
+    pub(super) fn hyp_timer_off() {}
+    pub(super) fn icc_hppir1() -> u64 {
+        1023
+    }
+    pub(super) fn icc_sgi1r(_v: u64) {}
     pub(super) fn irq_unmask() {}
     pub(super) fn icc_enable_sre() {}
     pub(super) fn icc_set_pmr(_v: u64) {}
