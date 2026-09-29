@@ -16,13 +16,14 @@
 //! de enige producer per RX-ring en de enige consument per TX-ring, zonder
 //! slot. De deur van de executor leest alleen [`Published`], met kale loads.
 
-use crate::nat::{Nat, NatIo, NatState, Proto, Uplink};
+use crate::nat::{FlowState, Nat, NatIo, NatState, Proto, Uplink};
 use crate::plan::{
     HOST_MAC, MAX_LAN_FRAME, PORTS, SLOT_CAP, UPLINK_MAX_FRAME, host_ip4, slot_ip4, slot_mac,
 };
 use crate::ring::{KIND_FRAME, KIND_UPLINK, Reader, Writer};
 use crate::wire::{ET_ARP, ET_IPV4, ET_IPV6, ETH_LEN, be16, be32, byte, mac_at, put_mac, put16};
 use crate::{Error, Frame, LogFn, Result, Stats, UPLINK_QUEUE};
+use alloc::vec::Vec;
 use core::fmt;
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -105,6 +106,71 @@ impl Default for Ack {
     }
 }
 
+/// De conntrack zoals de kern-flip hem meeneemt: de flows in de buffer
+/// die de aanroeper meegaf (verplaatst, niet gedeeld), plus de twee
+/// woorden van [`NatState`].
+#[derive(Debug, Default)]
+pub struct NatSnapshot {
+    /// De levende flows (de buffer van de aanroeper, ingekort).
+    pub flows: Vec<FlowState>,
+    /// De volgende masquerade-kandidaat.
+    pub masq_next: u16,
+    /// De geleerde gateway-MAC.
+    pub gw_mac: Option<[u8; 6]>,
+}
+
+impl NatSnapshot {
+    /// De snapshot als [`NatState`] over zijn eigen flows.
+    #[must_use]
+    pub fn state(&self) -> NatState<'_> {
+        NatState {
+            flows: &self.flows,
+            masq_next: self.masq_next,
+            gw_mac: self.gw_mac,
+        }
+    }
+}
+
+/// De antwoordplek van [`Command::SnapshotNat`]: de actor legt de snapshot
+/// erin en luidt de bel. Eén aanroeper tegelijk (de flip-taak).
+pub struct NatReply {
+    done: Signal,
+    snap: Mailbox<NatSnapshot, 1>,
+}
+
+impl NatReply {
+    /// Een lege antwoordplek.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            done: Signal::new(),
+            snap: Mailbox::new(),
+        }
+    }
+
+    fn complete(&self, s: NatSnapshot) {
+        let _ = self.snap.try_send(s);
+        self.done.set();
+    }
+
+    /// Wacht op de snapshot. Er leeft geen lening over de `.await`: de
+    /// snapshot komt als waarde terug.
+    pub async fn wait(&self) -> NatSnapshot {
+        loop {
+            self.done.wait().await;
+            if let Some(s) = self.snap.try_recv() {
+                return s;
+            }
+        }
+    }
+}
+
+impl Default for NatReply {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Een bericht aan de switch-actor.
 pub enum Command<'a, R, W> {
     /// Koppelt slot `slot` aan de switch met zijn twee ringen (door de
@@ -172,6 +238,19 @@ pub enum Command<'a, R, W> {
         state: NatState<'a>,
         /// Bevestiging.
         ack: &'a Ack,
+    },
+    /// Beschrijft de conntrack voor de kern-flip in `buf` (de aanroeper
+    /// geeft een buffer van `MAX_FLOWS` plaatsen mee; de actor alloceert
+    /// niets) en bevriest de masquerade-toewijzing: een nieuwe uitgaande
+    /// verbinding tussen deze snapshot en de sprong zou geen flow in het
+    /// blob hebben, en zijn SYN-retransmit krijgt er op de nieuwe kern
+    /// gewoon een. Gaat de flip niet door, dan ontdooit
+    /// [`Command::FinishAdoption`] hem weer.
+    SnapshotNat {
+        /// De buffer, als waarde: hij komt gevuld terug in `reply`.
+        buf: Vec<FlowState>,
+        /// De antwoordplek.
+        reply: &'a NatReply,
     },
     /// De tik van de flow-expiry-taak: veeg de verlopen flows.
     Sweep,
@@ -415,6 +494,20 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
                     self.nat
                         .restore(&state, |s| ports.get(s).is_some_and(Option::is_some), now);
                 ack.complete(Ok(u32::try_from(n).unwrap_or(u32::MAX)));
+            }
+            Command::SnapshotNat { mut buf, reply } => {
+                // Eerst dicht, dan lezen: zo staat er na de snapshot geen
+                // nieuwe flow meer in de tabel die het blob mist. Een lege
+                // claimlijst past altijd.
+                let _ = self.nat.hold_adoption(&[]);
+                let st = self.nat.snapshot(now, &mut buf);
+                let (n, masq_next, gw_mac) = (st.flows.len(), st.masq_next, st.gw_mac);
+                buf.truncate(n);
+                reply.complete(NatSnapshot {
+                    flows: buf,
+                    masq_next,
+                    gw_mac,
+                });
             }
             Command::Sweep => self.nat.sweep(now),
         }

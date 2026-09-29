@@ -607,6 +607,11 @@ pub const RELOC_MAGIC: u64 = 0x314F_4C45_5250_4F48;
 /// De kop van de staart: magic, versie, flip-ABI, ELF-maat, linkbasis,
 /// platte maat, entry, aantal relocaties.
 pub const BUNDLE_HEAD: usize = 56;
+/// De kop van versie 2: die van versie 1 plus de som van de switch-code
+/// ([`Bundle::switch_sum`]).
+pub const BUNDLE_HEAD_V2: usize = 64;
+/// De versie van de staart die `image/flip-bundle.sh` schrijft.
+pub const BUNDLE_VERSION: u32 = 2;
 /// De voet: de offset van de kop en nog een keer de magic.
 pub const BUNDLE_FOOT: usize = 16;
 /// De grootste platte kern (image plus BSS en stack): een kern van v3 is
@@ -632,6 +637,16 @@ pub struct Bundle<'a> {
     pub flat_size: u64,
     /// Het entrypoint, absoluut op de linkbasis.
     pub entry: u64,
+    /// De FNV-1a-som over de EL2-switch-code van de nieuwe kern
+    /// (`cpu::el2::image_hash`), zoals het bundelscript hem uit de
+    /// symbolen van de koude link rekende. `None` in een bundel van versie
+    /// 1: die kan de flip niet vóór de sprong toetsen, en wordt geweigerd.
+    ///
+    /// Waarom in de bundel: de nieuwe kern adopteert de zittende kopie
+    /// alleen bij een gelijke som (`cpu::el2::adopt`), en zonder deze
+    /// toets merkt pas de gelande kern een verschil, twee minuten later,
+    /// als de guard koud herstart.
+    pub switch_sum: Option<u64>,
     relocs: &'a [u8],
 }
 
@@ -674,11 +689,18 @@ impl<'a> Bundle<'a> {
             return Err(Error::Corrupt { at: head });
         }
         let version = le32(b, head + 8)?;
-        if version != 1 {
-            return Err(Error::Version {
-                have: u64::from(version),
-                want: 1,
-            });
+        let head_len = match version {
+            1 => BUNDLE_HEAD,
+            2 => BUNDLE_HEAD_V2,
+            _ => {
+                return Err(Error::Version {
+                    have: u64::from(version),
+                    want: u64::from(BUNDLE_VERSION),
+                });
+            }
+        };
+        if head > foot - head_len {
+            return Err(Error::Corrupt { at: foot });
         }
         let elf_size = le64(b, head + 16)?;
         let count = le64(b, head + 48)?;
@@ -687,12 +709,17 @@ impl<'a> Bundle<'a> {
             link_load: le64(b, head + 24)?,
             flat_size: le64(b, head + 32)?,
             entry: le64(b, head + 40)?,
+            switch_sum: if version >= 2 {
+                Some(le64(b, head + 56)?)
+            } else {
+                None
+            },
             elf: b
                 .get(..usize::try_from(elf_size).unwrap_or(usize::MAX))
                 .filter(|_| elf_size != 0 && elf_size <= head as u64)
                 .ok_or(Error::Corrupt { at: head + 16 })?,
             relocs: {
-                let start = head + BUNDLE_HEAD;
+                let start = head + head_len;
                 let room = (foot - start) as u64 / 4;
                 if count > room {
                     return Err(Error::Corrupt { at: head + 48 });
@@ -726,7 +753,7 @@ impl<'a> Bundle<'a> {
         for (i, off) in bundle.relocs().enumerate() {
             if !off.is_multiple_of(8) || u64::from(off) + 8 > bundle.flat_size {
                 return Err(Error::Corrupt {
-                    at: head + BUNDLE_HEAD + i * 4,
+                    at: head + head_len + i * 4,
                 });
             }
         }
@@ -1266,6 +1293,46 @@ mod tests {
         b.extend_from_slice(&head.to_le_bytes());
         b.extend_from_slice(&RELOC_MAGIC.to_le_bytes());
         b
+    }
+
+    /// Een bundel van versie 2: met de som van de switch-code.
+    fn mini_bundle2(elf: &[u8], link: u64, flat: u64, sum: u64, relocs: &[u32]) -> Vec<u8> {
+        let mut b = elf.to_vec();
+        while !b.len().is_multiple_of(8) {
+            b.push(0);
+        }
+        let head = b.len() as u64;
+        b.extend_from_slice(&RELOC_MAGIC.to_le_bytes());
+        b.extend_from_slice(&2u32.to_le_bytes());
+        b.extend_from_slice(&FLIP_ABI.to_le_bytes());
+        for v in [elf.len() as u64, link, flat, link, relocs.len() as u64, sum] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        for r in relocs {
+            b.extend_from_slice(&r.to_le_bytes());
+        }
+        while !b.len().is_multiple_of(8) {
+            b.push(0);
+        }
+        b.extend_from_slice(&head.to_le_bytes());
+        b.extend_from_slice(&RELOC_MAGIC.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn a_version_2_bundle_carries_its_switch_code_sum() {
+        let link = 0x6020_0000u64;
+        let elf = mini_elf(link, link, &[0u8; 64], 0x2000);
+        let b = mini_bundle2(&elf, link, 0x2000, 0xfeed_f00d, &[8, 16]);
+        let bun = Bundle::parse(&b).unwrap();
+        assert_eq!(bun.switch_sum, Some(0xfeed_f00d));
+        assert_eq!(bun.relocs().collect::<Vec<_>>(), [8, 16]);
+        let v1 = mini_bundle(&elf, FLIP_ABI, link, 0x2000, link, &[8]);
+        assert_eq!(Bundle::parse(&v1).unwrap().switch_sum, None);
+        let mut v3 = b.clone();
+        let head = elf.len().next_multiple_of(8);
+        v3[head + 8] = 3;
+        assert!(Bundle::parse(&v3).is_err(), "an unknown tail version");
     }
 
     #[test]

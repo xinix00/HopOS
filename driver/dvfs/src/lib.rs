@@ -14,9 +14,10 @@
 //!   blijft het vangnet.
 //!
 //! Dit crate is het beleid als rekenwerk: [`Governor::step`] krijgt de
-//! tellers van één sample en zegt of de knop om moet. De taak eromheen (een
-//! `after(SAMPLE_NS)`-lus die de tellers leest) is van de binary, de knop
-//! van het board. Zo is het hele beleid op de host te toetsen.
+//! tellers van één sample en zegt of de knop om moet. De taak eromheen is
+//! [`run`]: een lus op de slaap van de executor die de tellers leest (de
+//! binary geeft ze), de flanken en elke 10 s een meetregel logt. De knop is
+//! van het board. Zo is het hele beleid op de host te toetsen, ook de lus.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -31,6 +32,7 @@
 )]
 
 use core::fmt;
+use core::future::Future;
 
 /// De sample-tijd.
 pub const SAMPLE_NS: u64 = 10_000_000;
@@ -72,6 +74,15 @@ pub trait Knob {
     fn full(&mut self) -> Option<Level>;
     /// Naar de stil-stand.
     fn quiet(&mut self) -> Option<Level>;
+}
+
+impl<K: Knob + ?Sized> Knob for &mut K {
+    fn full(&mut self) -> Option<Level> {
+        (**self).full()
+    }
+    fn quiet(&mut self) -> Option<Level> {
+        (**self).quiet()
+    }
 }
 
 /// Een console-pin: `clock full|quiet|auto`, zodat één kern beide standen
@@ -296,6 +307,124 @@ impl<const N: usize> Governor<N> {
             *last = s.idle;
         }
         busy
+    }
+}
+
+/// Om de hoeveel tijd [`run`] zijn meetregel logt.
+pub const REPORT_NS: u64 = 10_000_000_000;
+
+/// Wat [`run`] van de binary nodig heeft buiten de knop: de klok, de slaap
+/// en de tellers.
+pub trait Host<const N: usize> {
+    /// Monotone nanoseconden.
+    fn now(&self) -> u64;
+    /// Slaapt `ns` nanoseconden (de timer van de executor).
+    fn sleep(&self, ns: u64) -> impl Future<Output = ()>;
+    /// Het verwachte idle-tempo per core per sample (CNTFRQ maal
+    /// [`SAMPLE_NS`]).
+    fn expect(&self) -> u64;
+    /// Vult de tellers van dit sample.
+    fn sample(&mut self, out: &mut [Sample; N]);
+    /// De temperatuur voor de meetregel, in milligraden; 0 = geen.
+    fn temp_milli_c(&mut self) -> i32;
+    /// Eén Engelse logregel.
+    fn log(&self, args: fmt::Arguments<'_>);
+}
+
+/// De governor als taak: eerst de klok vol ("boot"), dan elke
+/// [`SAMPLE_NS`] een sample en een oordeel over het venster van 50 ms, de
+/// flank naar stil na [`COOLDOWN_NS`], en elke [`REPORT_NS`] één
+/// meetregel (`HOPOS_CLOCK`). `hold` is de pin uit de config
+/// (`hopos.clock`). Keert nooit terug.
+pub async fn run<const N: usize>(mut knob: impl Knob, hold: Hold, host: &mut impl Host<N>) {
+    let mut g: Governor<N> = Governor::new();
+    g.hold = hold;
+    let c = g.boot(host.now(), &mut knob);
+    report_change(host, &c);
+    let mut samples = [Sample::default(); N];
+    let mut last_report = host.now();
+    let mut level = c.level;
+    loop {
+        host.sleep(SAMPLE_NS).await;
+        let now = host.now();
+        host.sample(&mut samples);
+        if let Some(c) = g.step(now, host.expect(), &samples, &mut knob) {
+            report_change(host, &c);
+            if c.level.is_some() {
+                level = c.level;
+            }
+        }
+        if now.saturating_sub(last_report) >= REPORT_NS {
+            last_report = now;
+            let t = host.temp_milli_c();
+            let busy = g.busy.filter(|b| now.saturating_sub(b.at_ns) < REPORT_NS);
+            host.log(format_args!(
+                "dvfs: clock {} ({}), temp {}.{} C, busy {} HOPOS_CLOCK",
+                level.map_or(
+                    Level {
+                        value: 0,
+                        unit: "?"
+                    },
+                    |l| l
+                ),
+                if g.is_full() { "full" } else { "quiet" },
+                t / 1000,
+                (t % 1000).abs() / 100,
+                Busy::describe(busy),
+            ));
+        }
+    }
+}
+
+fn report_change<const N: usize>(host: &impl Host<N>, c: &Change) {
+    match c.level {
+        Some(l) => host.log(format_args!(
+            "dvfs: -> {l} ({}, {}) HOPOS_CLOCK_EDGE",
+            if c.full { "full" } else { "quiet" },
+            c.why
+        )),
+        None => host.log(format_args!(
+            "dvfs: clock change to {} ({}) failed, the policy keeps its state",
+            if c.full { "full" } else { "quiet" },
+            c.why
+        )),
+    }
+}
+
+impl Busy {
+    /// "none", of de bron en zijn idle.
+    fn describe(b: Option<Busy>) -> BusyText {
+        BusyText(b)
+    }
+}
+
+/// [`Busy`] als tekst voor de meetregel.
+struct BusyText(Option<Busy>);
+
+impl fmt::Display for BusyText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            None => f.write_str("none"),
+            Some(b) if b.source == 0 => {
+                write!(f, "kern core ({} permille idle)", b.idle_permille)
+            }
+            Some(b) => write!(f, "slot {} ({} permille idle)", b.source, b.idle_permille),
+        }
+    }
+}
+
+/// De pin uit `hopos.clock`: `dvfs` (of niets) is het beleid, `max` vast
+/// vol, `quiet` vast stil, `firmware` geen governor (de boot-OPP blijft).
+/// `None` = firmware; een onbekende waarde is het beleid (de aanroeper
+/// meldt hem).
+#[must_use]
+pub fn hold_of(v: &str) -> (Option<Hold>, bool) {
+    match v {
+        "" | "dvfs" | "auto" => (Some(Hold::Auto), true),
+        "max" | "full" => (Some(Hold::Full), true),
+        "quiet" | "min" => (Some(Hold::Quiet), true),
+        "firmware" | "off" => (None, true),
+        _ => (Some(Hold::Auto), false),
     }
 }
 

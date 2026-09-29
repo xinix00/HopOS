@@ -26,6 +26,19 @@
 
 mod arch;
 mod mmu;
+// `-device ramfb` over fw_cfg (ramfb.rs), alleen in de gui-smaak; kaal een
+// stub met dezelfde signatuur (handboek §7, docs/gui.md).
+#[cfg(feature = "gui")]
+mod ramfb;
+#[cfg(not(feature = "gui"))]
+mod ramfb {
+    //! Kaal gebouwd: geen beeld.
+
+    /// Altijd headless.
+    pub(crate) fn framebuffer() -> Option<driver_fb::Desc> {
+        None
+    }
+}
 pub mod slots;
 
 use board::heap::Heap;
@@ -39,6 +52,11 @@ use driver_virtioblk::VirtioBlk;
 use driver_virtionet::{IrqAck, VirtioNet};
 use fw::fdt::Fdt;
 use sync::{Local, Signal};
+
+/// De schijf die `probe_disk` geeft: de virtio-blk op de mmio-bus. De binary
+/// noemt hem `vboard::Disk`, zodat de geprobede schijf van de bench naar de
+/// opslag gaat zonder dat de binary het type per board kent.
+pub type Disk = VirtioBlk;
 
 #[cfg(test)]
 mod tests;
@@ -483,6 +501,10 @@ impl Board for QemuVirt {
     /// Vindt het virtio-net-slot, zet de driver op in de NIC-DMA-regio en
     /// hangt zijn lijn aan de GIC. Een lijn die niet aan wil, laat de NIC
     /// pollen: interrupts zijn een verbetering, geen voorwaarde.
+    fn framebuffer(&self) -> Option<board::fb::Desc> {
+        ramfb::framebuffer()
+    }
+
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error> {
         if NIC_CLAIMED.swap(true, Relaxed) {
             return Err(Error::Twice("probe_nic"));

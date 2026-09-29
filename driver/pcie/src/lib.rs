@@ -794,6 +794,22 @@ impl Function {
         self.set_command(c, CMD_INTX_DISABLE);
     }
 
+    /// Het fysieke adres van de MSI-X-tabel van `m`: het adres van zijn
+    /// BAR plus de offset. `None` als die BAR niet toegewezen is.
+    pub fn msix_table_addr<C: Config + ?Sized>(&self, c: &C, m: &Msix) -> Option<u64> {
+        let bar = self.bar_addr(c, m.table.bar);
+        (bar != 0).then(|| bar + u64::from(m.table.off))
+    }
+
+    /// De INTx-pin van de functie: 0 = INTA tot 3 = INTD, `None` als hij
+    /// geen INTx heeft (register 0x3d is 0) of een onzinwaarde meldt.
+    pub fn intx_pin<C: Config + ?Sized>(&self, c: &C) -> Option<u8> {
+        match c.read8(self.bdf, 0x3d) {
+            p @ 1..=4 => Some(p - 1),
+            _ => None,
+        }
+    }
+
     /// De onderhandelde link, als dit een PCIe-functie is.
     pub fn link<C: Config + ?Sized>(&self, c: &C) -> Option<Link> {
         let cap = self.find_cap(c, CAP_PCIE)?;
@@ -803,6 +819,41 @@ impl Function {
             width: ((status >> 4) & 0x3f) as u8,
         })
     }
+}
+
+/// De INTx-swizzle van een PCI-PCI-bridge: pin `pin` (0 = INTA) van
+/// device `dev` achter de bridge komt op pin `(pin + dev) % 4` van de
+/// bridge zelf (PCI-to-PCI Bridge Architecture, tabel 9-1; Linux'
+/// `pci_swizzle_interrupt_pin`).
+#[must_use]
+pub const fn swizzle(pin: u8, dev: u8) -> u8 {
+    (pin.wrapping_add(dev)) % 4
+}
+
+/// Hoe diep [`intx_at_root`] door bridges loopt: een root-poort en een
+/// switch (upstream plus downstream) is drie; meer hebben onze boards niet.
+const INTX_DEPTH: usize = 6;
+
+/// De INTx-pin van `f` zoals hij op de root-bus `root` aankomt: `(device,
+/// pin)` op die bus, na de swizzle door elke bridge op de weg. Dat paar
+/// zoekt het board op in de `_PRT` van de host-bridge. `None` als de
+/// functie geen INTx heeft of de weg niet te vinden is.
+pub fn intx_at_root<C: Config + ?Sized>(c: &C, root: u8, f: &Function) -> Option<(u8, u8)> {
+    let mut pin = f.intx_pin(c)?;
+    let mut here = f.bdf;
+    for _ in 0..INTX_DEPTH {
+        if here.bus == root {
+            return Some((here.dev, pin));
+        }
+        // De bridge waarachter `here` hangt: secondary = zijn bus. Alleen
+        // bridges op of onder de root-bus tellen.
+        let bridge = find(c, root, |b| {
+            b.is_bridge() && (c.read32(b.bdf, reg::BUS_NUMBERS) >> 8) as u8 == here.bus
+        })?;
+        pin = swizzle(pin, here.dev);
+        here = bridge.bdf;
+    }
+    None
 }
 
 /// De capability-lijst van één functie, zie [`Function::caps`].

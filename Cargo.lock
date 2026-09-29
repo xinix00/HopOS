@@ -17,6 +17,7 @@ dependencies = [
  "abi",
  "bounded",
  "dev",
+ "driver-codec",
  "executor",
  "leannet",
  "netdev",
@@ -32,6 +33,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bench"
+version = "3.0.0"
+dependencies = [
+ "applib",
+ "sync",
+]
+
+[[package]]
 name = "blkdev"
 version = "3.0.0"
 
@@ -41,6 +50,7 @@ version = "3.0.0"
 dependencies = [
  "abi",
  "dev",
+ "driver-fb",
  "executor",
  "netdev",
  "sync",
@@ -65,6 +75,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "board-apple"
+version = "3.0.0"
+dependencies = [
+ "abi",
+ "board",
+ "cpu",
+ "dev",
+ "driver-aic",
+ "driver-nvme",
+ "driver-pcie",
+ "driver-rtkit",
+ "driver-smc",
+ "driver-tg3",
+ "executor",
+ "fw",
+ "netdev",
+ "sync",
+]
+
+[[package]]
+name = "board-licheerv"
+version = "3.0.0"
+dependencies = [
+ "abi",
+ "board",
+ "cpu",
+ "dev",
+ "driver-dwmac",
+ "driver-mdio",
+ "driver-ns16550",
+ "driver-virtioblk",
+ "executor",
+ "net",
+ "netdev",
+ "sync",
+]
+
+[[package]]
 name = "board-o6n"
 version = "3.0.0"
 dependencies = [
@@ -79,6 +127,7 @@ dependencies = [
  "driver-rtl8126",
  "driver-scmi",
  "executor",
+ "fw",
  "netdev",
  "sync",
 ]
@@ -91,8 +140,26 @@ dependencies = [
  "board",
  "cpu",
  "dev",
+ "driver-fb",
  "driver-gicv3",
  "driver-pl011",
+ "driver-virtioblk",
+ "driver-virtionet",
+ "executor",
+ "fw",
+ "netdev",
+ "sync",
+]
+
+[[package]]
+name = "board-qemuvirt-riscv"
+version = "3.0.0"
+dependencies = [
+ "abi",
+ "board",
+ "cpu",
+ "dev",
+ "driver-ns16550",
  "driver-virtioblk",
  "driver-virtionet",
  "executor",
@@ -111,6 +178,7 @@ dependencies = [
  "bounded",
  "cpu",
  "dev",
+ "driver-fb",
  "driver-gicv2",
  "driver-pl011",
  "driver-vcmail",
@@ -129,12 +197,14 @@ dependencies = [
  "cpu",
  "dev",
  "driver-dwmac4",
+ "driver-fb",
  "driver-gicv3",
  "driver-mdio",
  "driver-ns16550",
  "driver-virtioblk",
  "executor",
  "fw",
+ "gui-rkscan",
  "net",
  "netdev",
  "sync",
@@ -182,6 +252,7 @@ dependencies = [
  "bounded",
  "cpu",
  "dev",
+ "driver-fb",
  "driver-gicv3",
  "driver-ns16550",
  "driver-pcie",
@@ -215,6 +286,14 @@ name = "dev"
 version = "3.0.0"
 
 [[package]]
+name = "driver-aic"
+version = "3.0.0"
+dependencies = [
+ "cpu",
+ "dev",
+]
+
+[[package]]
 name = "driver-brcmpcie"
 version = "3.0.0"
 dependencies = [
@@ -222,8 +301,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "driver-codec"
+version = "3.0.0"
+
+[[package]]
 name = "driver-dvfs"
 version = "3.0.0"
+
+[[package]]
+name = "driver-dwmac"
+version = "3.0.0"
+dependencies = [
+ "dev",
+ "driver-mdio",
+ "netdev",
+]
 
 [[package]]
 name = "driver-dwmac4"
@@ -233,6 +325,13 @@ dependencies = [
  "driver-mdio",
  "netdev",
  "sync",
+]
+
+[[package]]
+name = "driver-fb"
+version = "3.0.0"
+dependencies = [
+ "dev",
 ]
 
 [[package]]
@@ -268,6 +367,13 @@ name = "driver-gicv3"
 version = "3.0.0"
 dependencies = [
  "dev",
+]
+
+[[package]]
+name = "driver-hid"
+version = "3.0.0"
+dependencies = [
+ "bounded",
 ]
 
 [[package]]
@@ -315,6 +421,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "driver-rtkit"
+version = "3.0.0"
+dependencies = [
+ "dev",
+]
+
+[[package]]
 name = "driver-rtl8126"
 version = "3.0.0"
 dependencies = [
@@ -332,10 +445,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "driver-smc"
+version = "3.0.0"
+dependencies = [
+ "dev",
+ "driver-rtkit",
+]
+
+[[package]]
 name = "driver-smpro"
 version = "3.0.0"
 dependencies = [
  "dev",
+]
+
+[[package]]
+name = "driver-tg3"
+version = "3.0.0"
+dependencies = [
+ "dev",
+ "driver-mdio",
+ "netdev",
+ "sync",
 ]
 
 [[package]]
@@ -374,6 +505,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "driver-xhci"
+version = "3.0.0"
+dependencies = [
+ "bounded",
+ "dev",
+]
+
+[[package]]
 name = "executor"
 version = "3.0.0"
 dependencies = [
@@ -390,27 +529,65 @@ dependencies = [
 ]
 
 [[package]]
+name = "gui-fbgrant"
+version = "3.0.0"
+dependencies = [
+ "abi",
+ "dev",
+ "driver-fb",
+ "kern",
+]
+
+[[package]]
+name = "gui-rkscan"
+version = "3.0.0"
+dependencies = [
+ "dev",
+ "driver-fb",
+]
+
+[[package]]
+name = "gui-usbin"
+version = "3.0.0"
+dependencies = [
+ "abi",
+ "bounded",
+ "dev",
+ "driver-hid",
+ "driver-xhci",
+ "sync",
+]
+
+[[package]]
 name = "hopos"
 version = "3.0.0"
 dependencies = [
  "abi",
  "board",
  "board-altra",
+ "board-apple",
+ "board-licheerv",
  "board-o6n",
  "board-qemuvirt",
+ "board-qemuvirt-riscv",
  "board-rk3566",
  "board-rpi4",
  "board-rpi5",
  "board-uefi",
+ "bounded",
  "cpu",
  "dev",
+ "driver-codec",
+ "driver-fb",
  "driver-virtioblk",
  "executor",
  "fw",
+ "gui-fbgrant",
  "kern",
  "leandhcp",
  "leanelf",
  "leannet",
+ "media-mve",
  "net",
  "netdev",
  "sync",
@@ -423,6 +600,7 @@ dependencies = [
  "abi",
  "blkdev",
  "bounded",
+ "driver-codec",
  "leanelf",
  "sync",
 ]
@@ -448,6 +626,19 @@ version = "3.0.0"
 source = "git+https://github.com/xinix00/lean.git?tag=v3.0.0#a7e089448c903fe199b604d246401cbd88640de3"
 
 [[package]]
+name = "media-mve"
+version = "3.0.0"
+dependencies = [
+ "bounded",
+ "dev",
+ "driver-codec",
+]
+
+[[package]]
+name = "media-optical"
+version = "3.0.0"
+
+[[package]]
 name = "net"
 version = "3.0.0"
 dependencies = [
@@ -465,6 +656,10 @@ version = "3.0.0"
 dependencies = [
  "sync",
 ]
+
+[[package]]
+name = "netmeter"
+version = "3.0.0"
 
 [[package]]
 name = "sync"

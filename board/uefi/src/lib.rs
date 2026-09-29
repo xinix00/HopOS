@@ -33,11 +33,38 @@
 mod arch;
 pub mod boot;
 mod efi;
+// De vorm van het EL2-regime van de kern: nVHE, of VHE met de feature
+// `vhe` (de O6N, en de proef op QEMU met neoverse-n1).
+mod el2;
 mod entry;
 pub mod facts;
+mod flip; // FLIP: de feitenpagina voor een geflipte kern (het flip-spoor)
+pub mod irq;
+// De framebuffer van de firmware (GOP), alleen in de gui-smaak; kaal een
+// stub met dezelfde signatuur (handboek §7, docs/gui.md).
+#[cfg(feature = "gui")]
+mod gop;
+#[cfg(not(feature = "gui"))]
+mod gop {
+    //! Kaal gebouwd: geen GOP, headless.
+    use crate::efi::Efi;
+    use crate::mmu::{self, Mmu};
+
+    /// Niets te lezen.
+    pub(crate) fn discover(_efi: &Efi) {}
+    /// Geen beeld.
+    pub(crate) fn framebuffer() -> Option<driver_fb::Desc> {
+        None
+    }
+    /// Niets te mappen.
+    pub(crate) fn map(_m: &mut Mmu) -> Result<(), mmu::Error> {
+        Ok(())
+    }
+}
 mod memmap;
 mod mmu;
 pub mod slots;
+pub mod watchdog;
 
 use board::heap::Heap;
 use board::{Board, CoreClass, Dispatched, Error, Plan, Region};
@@ -51,6 +78,11 @@ use driver_virtioblk::VirtioBlk;
 use driver_virtionet::VirtioNet;
 use driver_virtiopci::pci::{self, Pci};
 use sync::Signal;
+
+/// De schijf die `probe_disk` geeft: de virtio-blk over PCI. De binary noemt
+/// hem `vboard::Disk`, zodat de geprobede schijf van de bench naar de opslag
+/// gaat zonder dat de binary het type per board kent.
+pub type Disk = VirtioBlk<Pci>;
 
 /// Het kernvenster: één allocatie van de stub op een vast adres, zodat de
 /// kern-flip en de slot-lijm er constanten van kunnen maken (zoals op
@@ -67,6 +99,11 @@ pub const WINDOW_PA: u64 = 0x5000_0000;
 /// Zie de standaardversie hierboven.
 #[cfg(feature = "window-8000")]
 pub const WINDOW_PA: u64 = 0x8800_0000;
+
+/// Draait de kern van dit board onder E2H = 1 (feature `vhe`, zie
+/// `el2`)? De binary toetst bij het bouwen dat de switcher-smaak van zijn
+/// app-cores en zijn OS-core hiermee klopt (`hopos/src/cage.rs` `FLAVOR`).
+pub const KERN_VHE: bool = el2::VHE;
 
 /// De maat van het kernvenster: 320 MB.
 pub const WINDOW: u64 = 0x1400_0000;
@@ -97,10 +134,19 @@ pub const DMA: Region = Region {
     size: 0x0100_0000,
 };
 
-/// De NIC-helft van de DMA-regio.
+/// De NIC-helft van de DMA-regio, min de laatste MB (de ITS).
 pub const NET_DMA: Region = Region {
     base: Pa(WINDOW_PA + 0x0e00_0000),
-    size: 0x0080_0000,
+    size: 0x0070_0000,
+};
+
+/// De tabellen van de GICv3-ITS en de LPI's ([`irq`]): 1 MB aan het eind
+/// van de NIC-helft, 64 KB-gealigneerd en Normal-NC zoals alle DMA, zodat
+/// de GIC en wij hetzelfde zien zonder cache-onderhoud. Een NIC-driver
+/// vraagt hoogstens 2 MB plus 640 KB (rtl8126, igb: `DMA_NEED`).
+pub const ITS_DMA: Region = Region {
+    base: Pa(WINDOW_PA + 0x0e70_0000),
+    size: driver_gicv3::its::MEM_LEN,
 };
 
 /// De schijf-helft van de DMA-regio.
@@ -126,7 +172,8 @@ pub const LOADER: Region = Region {
 const _: () = {
     assert!(HEAP.end().0 == TABLES.base.0 && TABLES.end().0 == KERN_RAM.end().0);
     assert!(KERN_RAM.end().0 == DMA.base.0 && DMA.end().0 == ADMIN.base.0);
-    assert!(NET_DMA.end().0 == BLK_DMA.base.0 && BLK_DMA.end().0 == DMA.end().0);
+    assert!(NET_DMA.end().0 == ITS_DMA.base.0 && ITS_DMA.end().0 == BLK_DMA.base.0);
+    assert!(BLK_DMA.end().0 == DMA.end().0 && ITS_DMA.base.0.is_multiple_of(0x1_0000));
     assert!(ADMIN.end().0 == LOADER.base.0 && LOADER.end().0 == WINDOW_PA + WINDOW);
     assert!(driver_virtioblk::DMA_NEED <= BLK_DMA.size);
     assert!(WINDOW_PA.is_multiple_of(2 << 20));
@@ -202,6 +249,9 @@ fn os_core_of(
 /// in de bootlog noemen.
 const PCI_LOG_MAX: usize = 32;
 
+/// De bel van de NIC-lijn (MSI-X of INTx), zie [`Uefi::probe_nic`].
+static NIC_BELL: Signal = Signal::new();
+
 /// Is de NIC al geprobed? `probe_nic` mag één keer.
 static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// Is de schijf al geprobed? `probe_disk` mag één keer.
@@ -266,10 +316,12 @@ fn ecams() -> impl Iterator<Item = (Ecam, u16, u8)> {
     })
 }
 
-/// De eerste virtio-functie van type `ty` op een van de segmenten.
-fn find_virtio(ty: u32) -> Option<(Ecam, Function)> {
-    ecams().find_map(|(e, _, start)| {
-        driver_pcie::find(&e, start, |f| pci::device_type(f) == Some(ty)).map(|f| (e, f))
+/// De eerste virtio-functie van type `ty` op een van de segmenten, met
+/// het segment en de eerste bus van zijn venster.
+fn find_virtio(ty: u32) -> Option<(Ecam, Function, u16, u8)> {
+    ecams().find_map(|(e, seg, start)| {
+        driver_pcie::find(&e, start, |f| pci::device_type(f) == Some(ty))
+            .map(|f| (e, f, seg, start))
     })
 }
 
@@ -291,7 +343,7 @@ impl Uefi {
         if DISK_CLAIMED.swap(true, Relaxed) {
             return Err(Error::Twice("probe_disk"));
         }
-        let Some((e, f)) = find_virtio(2) else {
+        let Some((e, f, _, _)) = find_virtio(2) else {
             return Ok(None);
         };
         // SAFETY: de BAR's van een door de firmware geconfigureerde functie
@@ -351,14 +403,23 @@ impl Uefi {
         facts::tables(*sig).next()
     }
 
+    /// De OEM-ID van de XSDT (zes bytes): de toets van een board-crate dat
+    /// dit werkelijk zijn machine is vóór er board-kennis in MMIO gaat.
+    #[must_use]
+    pub fn oem_id(&self) -> [u8; 6] {
+        facts::oem_id()
+    }
+
     /// Alle ACPI-tabellen met signature `sig` (de SSDT's).
     pub fn acpi_tables(&self, sig: &[u8; 4]) -> impl Iterator<Item = &'static [u8]> {
         facts::tables(*sig)
     }
 
-    /// Zet SPI of PPI `intid` aan, naar deze core, en luidt `bell` als hij
-    /// komt; `ack` draait in de dispatch vóór de EOI (de device-kant van
-    /// een level-lijn, zodat hij valt). Hoogstens [`LINES`] lijnen.
+    /// Zet SPI, PPI of LPI `intid` aan, naar deze core, en luidt `bell` als
+    /// hij komt; `ack` draait in de dispatch vóór de EOI (de device-kant van
+    /// een level-lijn, zodat hij valt). Een LPI komt van de ITS
+    /// ([`irq::wire_msix`]) en gaat aan in zijn configuratietabel, niet in
+    /// de distributor. Hoogstens [`LINES`] lijnen.
     pub fn enable_line(&self, intid: u32, bell: &'static Signal, ack: fn()) -> Result<(), Error> {
         let slot = LINE_IDS
             .iter()
@@ -367,6 +428,9 @@ impl Uefi {
         if let (Some(b), Some(a)) = (LINE_BELLS.get(slot), LINE_ACKS.get(slot)) {
             b.store(core::ptr::from_ref(bell).cast_mut(), Relaxed);
             a.store(ack as *mut (), Relaxed);
+        }
+        if irq::is_lpi(intid) {
+            return irq::enable_lpi(intid);
         }
         gic()
             .enable(intid, arch::mpidr())
@@ -422,6 +486,13 @@ impl Default for Uefi {
     }
 }
 
+/// De GOP-framebuffer van de stub, voor de boards op dit board (O6N,
+/// Altra): hun `Board::framebuffer` geeft deze door. Kaal altijd `None`.
+#[must_use]
+pub fn gop_framebuffer() -> Option<board::fb::Desc> {
+    gop::framebuffer()
+}
+
 impl Board for Uefi {
     type Nic = VirtioNet<Pci>;
     type Sleeper = cpu::idle::ArmSleeper;
@@ -460,6 +531,7 @@ impl Board for Uefi {
                 .unwrap_or("?")
                 .trim_end_matches(['\0', ' ']),
         );
+        el2::report();
         let cfg = self.config();
         if !cfg.is_empty() {
             cpu::println!("cfg: hopos.cfg from the ESP, {} bytes HOPOS_CFG", cfg.len());
@@ -472,9 +544,16 @@ impl Board for Uefi {
     }
 
     /// WFI op de timer-PPI, zoals op virt (dezelfde GIC-bedrading, en de
-    /// PPI komt uit de GTDT).
+    /// PPI komt uit de GTDT). Onder VHE is de timer van de kern de CNTHP
+    /// (PPI 26): `cntp_*_el0` vanaf EL2 met E2H = 1 is die van EL2, en de
+    /// dispatch zet hem uit via `hyp_timer_off`.
     fn sleeper(&self) -> Self::Sleeper {
-        cpu::idle::ArmSleeper::new(cpu::idle::Mode::Wfi)
+        let s = cpu::idle::ArmSleeper::new(cpu::idle::Mode::Wfi);
+        // Onder E2H = 1 wiste de event-stream-write van `new` de
+        // EL1-timerbits van CNTHCTL_EL2: terug, anders trapt de teller in
+        // elke bewoner. Onder nVHE niets.
+        el2::el1_timer_access();
+        s
     }
 
     fn mem_total(&self) -> u64 {
@@ -539,6 +618,7 @@ impl Board for Uefi {
         gic.enable(KICK_SGI, mpidr)
             .map_err(|_| Error::Irq("kick SGI refused"))?;
         cpu::println!("irq: {}", gic.describe());
+        irq::start_its(&gic);
         arch::irq_unmask();
         Ok(&cpu::irq::IRQ_PENDING)
     }
@@ -568,23 +648,50 @@ impl Board for Uefi {
         d
     }
 
-    /// De eerste virtio-net over PCI. Geen lijn: INTx vraagt de _PRT uit de
-    /// DSDT (AML) en MSI(-X) de ITS; tot die er zijn pollt de pomp op zijn
-    /// vangrail (interrupts zijn een verbetering, geen voorwaarde).
+    fn framebuffer(&self) -> Option<board::fb::Desc> {
+        gop::framebuffer()
+    }
+
+    /// De eerste virtio-net over PCI, op MSI-X via de ITS (vector 0 voor
+    /// beide queues), anders gepold op de vangrail (`hopos.nicirq=off`
+    /// kiest het tweede).
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error> {
         if NIC_CLAIMED.swap(true, Relaxed) {
             return Err(Error::Twice("probe_nic"));
         }
-        let Some((e, f)) = find_virtio(1) else {
+        let Some((e, f, seg, root_bus)) = find_virtio(1) else {
             return Ok(None);
         };
         // SAFETY: zie `probe_disk`.
-        let t = unsafe { Pci::new(&e, &f) }.map_err(|_| Error::Nic("virtio-pci transport"))?;
+        let mut t = unsafe { Pci::new(&e, &f) }.map_err(|_| Error::Nic("virtio-pci transport"))?;
+        let mode = irq::nic_mode(irq::Mode::Auto);
+        if matches!(mode, irq::Mode::Auto | irq::Mode::Msix) {
+            // De queues krijgen vector 0 bij hun opzet; zonder MSI-X aan
+            // op de functie negeert het device hem (dan INTx of pollen).
+            t.use_msix(0);
+        }
         // SAFETY: NET_DMA is van deze driver alleen, Normal-NC gemapt.
-        let nic = unsafe { VirtioNet::with_transport(t, NET_DMA.base, NET_DMA.size) }
+        let mut nic = unsafe { VirtioNet::with_transport(t, NET_DMA.base, NET_DMA.size) }
             .map_err(|_| Error::Nic("virtio-net init failed"))?;
+        // Alleen MSI-X: INTx op virtio-pci vraagt een ack die het
+        // ISR-register leest, en QEMU's `_PRT` loopt via link-devices die
+        // `fw::aml` luid weigert. Zonder MSI-X pollt de pomp.
+        let mode = match mode {
+            irq::Mode::Auto | irq::Mode::Msix if nic.transport().msix_ok() => irq::Mode::Msix,
+            _ => irq::Mode::Off,
+        };
+        let at = irq::At {
+            ecam: &e,
+            seg,
+            root_bus,
+            f: &f,
+        };
+        let wired = irq::wire(&at, mode, &NIC_BELL, irq::no_ack, irq::no_ack);
+        if !matches!(wired, irq::Wired::Polled(_)) {
+            nic.set_irq(&NIC_BELL);
+        }
         cpu::println!(
-            "net: virtio-net-pci at {}, polled, queue {}",
+            "net: virtio-net-pci at {}, {wired}, queue {} HOPOS_NIC_IRQ",
             f.bdf,
             nic.queue_size()
         );

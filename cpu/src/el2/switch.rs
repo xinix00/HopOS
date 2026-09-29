@@ -468,6 +468,16 @@ global_asm!(
     mov x9, x8
     hopos_el2_ctx_of x9, x1
     ldr x9, [x1, #{state}]
+    // De hercontrole (30-09, sharegroups op app-cores): staat de byte er na
+    // de staat nog? De kern haalt een slot eerst uit elke lijst en schrijft
+    // pas daarna zijn nieuwe staat (`dispatch::forget`, `join`); wie hier de
+    // nieuwe staat ziet, ziet dus ook dat de byte weg is. Zonder dit startte
+    // een oude core een slot dat intussen op een andere core boot-pending
+    // stond, als hij tussen byte en staat werd opgehouden.
+    dmb sy
+    ldrb w10, [x7, x4]
+    cmp x10, x8
+    b.ne .L\p\()_skip
     cmp x9, #{st_boot_pending}
     b.eq .L\p\()_boot
     cmp x9, #{st_saved}

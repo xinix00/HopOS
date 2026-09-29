@@ -499,6 +499,21 @@ impl<D: Dial, T: Timer> Client<D, T> {
         }
     }
 
+    /// Doet één call ZONDER herhaling: voor ops die niet idempotent zijn.
+    /// Twee keer dezelfde codec-feed is twee happen bitstream; valt het
+    /// transport weg, dan beslist de aanroeper (na een kern-flip bestaat de
+    /// sessie toch niet meer).
+    pub async fn call_once(
+        &mut self,
+        mut req: Req<'_>,
+        dst: &mut [u8],
+        timeout: Duration,
+    ) -> Result<(Resp, usize)> {
+        self.seq = self.seq.wrapping_add(1);
+        req.seq = self.seq;
+        self.once(&req, dst, timeout).await.map_err(|a| a.err)
+    }
+
     /// De grootte van een bestand (0 voor een map).
     pub async fn stat(&mut self, path: &str) -> Result<u64> {
         let (r, _) = self

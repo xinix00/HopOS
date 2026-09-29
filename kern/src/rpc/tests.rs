@@ -323,3 +323,34 @@ fn unknown_and_store_ops_are_not_file_calls() {
         assert!(!is_fs_op(op), "op {op}");
     }
 }
+
+/// De kern-flip: de bevriezing legt eerst vast (de nieuwe kern mount die
+/// generatie) en zegt welke generatie het werd; zonder verandering blijft
+/// de generatie staan.
+#[test]
+fn freeze_commits_first_and_names_the_generation() {
+    let svc = Servicers::new();
+    let con = FakeConsole::default();
+    let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
+    start(&mut a, 2, 8, 1).unwrap();
+    let g = svc.current(s(2)).unwrap();
+    let (fs, _) = disk(64);
+    let mut f = FsActor::new(fs, &svc, &con);
+    let mut c = fs_call(2, g, OP_WRITE, "voor-de-flip", 0, 0, b"staat");
+    f.handle(&mut c).unwrap();
+    assert_eq!(f.freeze(), Ok((1, 0)));
+    assert!(f.frozen);
+    assert!(con.saw("frozen for the kernel flip HOPOS_FS_FROZEN generation=1"));
+    assert_eq!(
+        f.freeze(),
+        Ok((1, 0)),
+        "nothing changed: the same generation"
+    );
+    let disk = f.fs.into_disk();
+    let (mut g2, m) = Fs::mount(disk, 0, (64 << 20) / 512, 512, 1 << 20, false).unwrap();
+    assert!(matches!(
+        m,
+        crate::hopfs::Mounted::Restored { generation: 1, .. }
+    ));
+    assert_eq!(g2.stat(b"/.tasks/slot2/voor-de-flip").unwrap(), (5, false));
+}

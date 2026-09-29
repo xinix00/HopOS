@@ -864,6 +864,11 @@ mod arch {
 
     // De overgang en de vectoren, twee smaken uit één bron (zoals de
     // switcher): nVHE (op1 = 0) en VHE (op1 = 5, de _EL12-encoderingen).
+    // De VHE-smaak eist dat de kern zelf onder E2H = 1 draait: onder E2H = 0
+    // zijn de _EL12-encoderingen UNDEFINED (29-09, QEMU neoverse-n1 met een
+    // nVHE-kern: EC 0x0 op `hopos_os_vhe_enter` + 0x40 bij de zelftest).
+    // Het board kiest die vorm (board/uefi/src/el2.rs), de binary toetst
+    // dat die bij de smaak past (hopos/src/cage.rs).
     //
     // De frame op SP_EL2 (128 bytes): +0..+88 x19..x30, +96 x18 en de ctx,
     // +112 HCR en VBAR van de kern. SP_EL2 verandert niet door een beurt op

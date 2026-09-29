@@ -771,3 +771,54 @@ fn errors_display_their_numbers() {
         "acpi: DSDT signature missing at 0x1000 (found ?SD?)"
     );
 }
+
+/// Een IORT met een ITS-groep, een SMMUv3 en twee root-complexen: segment
+/// 0 direct naar de ITS met basis 0x1_0000, segment 1 door de SMMU.
+fn iort() -> Vec<u8> {
+    let mut b = vec![0u8; 48 - 36];
+    let node = |typ: u8, len: u16, nmap: u32, map_off: u32| {
+        let mut n = vec![0u8; usize::from(len)];
+        n[0] = typ;
+        n[1..3].copy_from_slice(&len.to_le_bytes());
+        n[8..12].copy_from_slice(&nmap.to_le_bytes());
+        n[12..16].copy_from_slice(&map_off.to_le_bytes());
+        n
+    };
+    let map = |base: u32, span: u32, out: u32, to: u32, flags: u32| {
+        [base, span, out, to, flags]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<u8>>()
+    };
+    b[0..4].copy_from_slice(&4u32.to_le_bytes()); // vier knopen
+    b[4..8].copy_from_slice(&48u32.to_le_bytes());
+    // 48: de ITS-groep.
+    b.extend(node(0, 24, 0, 0));
+    // 72: SMMUv3, eigen MSI (single) plus 0..0xffff naar de ITS op 0x2_0000.
+    let mut smmu = node(4, 16 + 40, 2, 16);
+    smmu[16..36].copy_from_slice(&map(0, 0, 0x99, 48, 1));
+    smmu[36..56].copy_from_slice(&map(0, 0xffff, 0x2_0000, 48, 0));
+    b.extend(smmu);
+    // 128: root-complex segment 0.
+    let mut rc0 = node(2, 36 + 20, 1, 36);
+    rc0[28..32].copy_from_slice(&0u32.to_le_bytes());
+    rc0[36..56].copy_from_slice(&map(0, 0xffff, 0x1_0000, 48, 0));
+    b.extend(rc0);
+    // 184: root-complex segment 1, door de SMMU.
+    let mut rc1 = node(2, 36 + 20, 1, 36);
+    rc1[28..32].copy_from_slice(&1u32.to_le_bytes());
+    rc1[36..56].copy_from_slice(&map(0, 0xffff, 0x100, 72, 0));
+    b.extend(rc1);
+    sdt(b"IORT", &b)
+}
+
+#[test]
+fn iort_maps_a_requester_id_to_its_device_id() {
+    let t = iort();
+    assert_eq!(iort_device_id(&t, 0, 0x3100), Some(0x1_3100));
+    // Door de SMMU: RC 0x10 -> SMMU 0x110 -> ITS 0x2_0110.
+    assert_eq!(iort_device_id(&t, 1, 0x10), Some(0x2_0110));
+    assert_eq!(iort_device_id(&t, 2, 0x10), None);
+    // Een kromme tabel is `None`, geen panic.
+    assert_eq!(iort_device_id(&t[..60], 0, 0), None);
+}

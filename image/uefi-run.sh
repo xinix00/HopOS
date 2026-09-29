@@ -14,6 +14,9 @@
 #                                     hopos-stage.elf op de ESP, rol app
 #   APP=/pad/elf ROLE=app|hop ...     een kant-en-klare ELF
 #   CFG=pad image/uefi-run.sh         hopos.cfg (standaard: een minimale)
+#   GUI=1 image/uefi-run.sh           de gui-smaak (`--features gui`, docs/gui.md):
+#                                     de console op de GOP; QEMU krijgt
+#                                     `-device ramfb` (EDK2 maakt er een GOP van)
 #   image/uefi-run.sh -s -S           de rest gaat naar QEMU (gdb)
 #
 # Het resultaat is een ESP-map, target/uefi-esp[-$BOARD]/: EFI/BOOT/
@@ -63,6 +66,17 @@ if ! grep -q "^$FEATURE *=" "$DIR/hopos/Cargo.toml"; then
 	exit 1
 fi
 
+# FEATURES=vhe (of een andere lijst) komt achter de board-feature: de proef
+# van de VHE-switcher op QEMU met CPU=neoverse-n1 (hopos/src/cage.rs).
+if [ -n "${FEATURES:-}" ]; then
+	FEATURE="$FEATURE,$FEATURES"
+fi
+
+QGUI=""
+if [ "${GUI:-0}" = 1 ]; then
+	FEATURE="$FEATURE,gui"
+	QGUI="-device ramfb"
+fi
 ESP="${ESP:-$DIR/target/uefi-esp$([ "$BOARD" = uefi ] || echo "-$BOARD")}"
 TDIR="$DIR/target/uefi"
 OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
@@ -164,7 +178,7 @@ fi
 
 exec qemu-system-aarch64 -M virt,gic-version=3,virtualization=on \
 	-cpu "$CPU" -smp "$SMP" -m "$MEM" \
-	-nographic -monitor none -serial stdio \
+	-nographic -monitor none -serial stdio $QGUI \
 	-drive "if=pflash,format=raw,readonly=on,file=$QEMU_SHARE/edk2-aarch64-code.fd" \
 	-drive "if=pflash,format=raw,file=$VARS" \
 	-device qemu-xhci \

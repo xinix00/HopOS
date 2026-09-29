@@ -131,10 +131,14 @@ const SERVICE_BUF: usize = (RING_DATA_CAP / 2) as usize;
 /// installeren, krijgt elke bewoner zijn kooi, ringen en servicer terug
 /// zonder dat er één byte van zijn wereld verandert, en plaatst de kern
 /// Hop niet opnieuw: Hop draait door (`HOPOS_FLIP_ADOPT`).
+///
+/// `app_env` is de env van een gestagede app (`hopos.appenv`, [`app_env`]);
+/// Hop krijgt de zijne uit `hopos.cfg`.
 pub(crate) fn start(
     exec: &'static Executor,
     role: Option<StagedRole>,
     adopt: Option<Vec<kern::slots::SlotState>>,
+    app_env: Vec<u8>,
 ) {
     let board = &crate::BOARD;
     let plan = match os_plan() {
@@ -160,7 +164,14 @@ pub(crate) fn start(
     if let Some(states) = &adopt {
         for st in states {
             let r = Slot::new(st.slot).map_or(Err(kern::cage::CageError { code: 0 }), |s| {
-                cage.adopt_slot(s, Region::new(st.part_base, st.part_size), st.core)
+                // FLIP: de SMP-breedte mee, anders vindt een revoke de
+                // secundaires van een SMP-app niet.
+                cage.adopt_slot(
+                    s,
+                    Region::new(st.part_base, st.part_size),
+                    st.core,
+                    st.cores,
+                )
             });
             if let Err(e) = r {
                 println!(
@@ -233,6 +244,9 @@ pub(crate) fn start(
             parts,
             os_pool(),
             SERVICERS,
+            // De device-grants (gui.rs): de framebuffer in de gui-smaak,
+            // kaal niets.
+            crate::gui::slot_grants(),
         );
         // FLIP: eerst alle eigendomsclaims terug, dan pas verzoeken.
         if let Some(states) = &adopt {
@@ -272,7 +286,7 @@ pub(crate) fn start(
         return;
     }
     let spawned = match role {
-        Some(StagedRole::App) => exec.spawn(place_first(exec, plan)),
+        Some(StagedRole::App) => exec.spawn(place_first(exec, plan, app_env)),
         Some(StagedRole::Hop) => exec.spawn(place_hop(exec, plan, pool_bytes)),
         None => {
             println!(
@@ -360,17 +374,40 @@ async fn status(slot: Slot) -> Option<SlotStatus> {
 /// eerste vrije core, en dat is core 1, die nu in de parkeerlus staat: de
 /// tweede ronde bewijst het warme pad (mailbox plus SEV) waar de eerste het
 /// koude pad (PSCI CPU_ON) bewees, met een andere kooi, VMID en partitie.
-async fn place_first(exec: &'static Executor, plan: abi::layout::Plan) {
+async fn place_first(exec: &'static Executor, plan: abi::layout::Plan, env: Vec<u8>) {
     let Some(img) = vslots::staged_image() else {
         println!("slots: no staged image, nothing placed HOPOS_SLOT_NONE");
         return;
     };
     for i in 1..=plan.max_slots().min(2) {
         let Some(slot) = Slot::new(i) else { return };
-        if !run_once(exec, &plan, slot, img).await {
+        if !run_once(exec, &plan, slot, img, &env).await {
             return;
         }
     }
+}
+
+/// De env van een gestagede app uit de bootparameter `hopos.appenv`:
+/// `KEY=val`, meer sleutels met komma's (`GUI=display,MODE=x`), want een
+/// bootarg kent geen spaties of regels. Zo krijgt appspike op QEMU de env
+/// die een jobspec hem zou geven, bijvoorbeeld het glas
+/// (tools/qemu-test.sh met `GUI=display`). Te lang voor de control-page
+/// is één regel en een lege env: de app draait dan zoals zonder.
+pub(crate) fn app_env(param: &str) -> Vec<u8> {
+    let mut env = Vec::new();
+    if param.is_empty() {
+        return env;
+    }
+    if param.len() >= CTRL_ENV_MAX as usize || env.try_reserve_exact(param.len() + 1).is_err() {
+        println!(
+            "slots: hopos.appenv of {} bytes refused, the control page holds {CTRL_ENV_MAX} HOPOS_SLOT_ENV",
+            param.len()
+        );
+        return env;
+    }
+    env.extend(param.bytes().map(|b| if b == b',' { b'\n' } else { b }));
+    env.push(b'\n');
+    env
 }
 
 /// De naam van deze node in Hop's cluster.
@@ -600,12 +637,13 @@ async fn run_once(
     plan: &abi::layout::Plan,
     slot: Slot,
     img: &[u8],
+    env: &[u8],
 ) -> bool {
     let at = Placement {
         cores: 1,
         ..Placement::default()
     };
-    let entry = match place(slot, img, FIRST_MEM, at, &[], Vec::new()).await {
+    let entry = match place(slot, img, FIRST_MEM, at, env, Vec::new()).await {
         Ok(e) => e,
         Err(e) => {
             println!("slot {slot}: not started: {e} HOPOS_SLOT_FAIL");
@@ -647,8 +685,8 @@ fn kern_mounts(list: &[(&[u8], &[u8])]) -> kern::Result<Vec<Mount>> {
 }
 
 /// Plaatst `img` in `slot` met `mem` bytes, de core-vraag `at` en de
-/// volumes `mounts`: Claim, de segmenten, de patches en de env in de grant,
-/// Arm. Geeft de entry.
+/// volumes `mounts`: Claim, de segmenten, de patches, de env langs de
+/// grant-aanbieder van de actor en dan in de grant, Arm. Geeft de entry.
 async fn place(
     slot: Slot,
     img: &[u8],
@@ -667,8 +705,15 @@ async fn place(
         Ok(placement) => {
             let mut grant = grant;
             let mut mem = DevMem;
-            let written = write_image(&mut grant, &mut mem, img, &placement)
-                .and_then(|()| write_env(&mut grant, &mut mem, env));
+            let mut written = write_image(&mut grant, &mut mem, img, &placement);
+            if written.is_ok() {
+                // De grant-haak, zoals een start van Hop (kern/src/system.rs):
+                // de actor laat de aanbieder de env aanvullen.
+                written = match grant_env(slot, env).await {
+                    Ok(env) => write_env(&mut grant, &mut mem, &env),
+                    Err(e) => Err(e),
+                };
+            }
             if let Err(e) = written {
                 let _ = ask(Request::Abort(grant)).await;
                 return Err(e);
@@ -681,6 +726,19 @@ async fn place(
             let _ = ask(Request::Abort(grant)).await;
             Err(e)
         }
+    }
+}
+
+/// De env van een start langs de grant-aanbieder van de actor
+/// (`Request::Env`); het antwoord is de complete blob.
+async fn grant_env(slot: Slot, env: &[u8]) -> Result<Vec<u8>, PlaceError> {
+    let mut own = Vec::new();
+    own.try_reserve_exact(env.len())
+        .map_err(|_| PlaceError::Kern(kern::Error::OutOfMemory { bytes: env.len() }))?;
+    own.extend_from_slice(env);
+    match ask(Request::Env { slot, env: own }).await? {
+        Response::Env(e) => Ok(e),
+        _ => Err(PlaceError::Reply),
     }
 }
 

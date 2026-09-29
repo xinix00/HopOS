@@ -117,3 +117,37 @@ pub fn check_stage(start: u64, end: u64) -> Option<(u64, u64)> {
     (len > 0 && len <= STAGE_MAX + (STAGE_PA - lo) && start >= lo && end <= hi)
         .then_some((start, len))
 }
+
+// --- De kern-flip (hopos/src/flip.rs, docs/flip.md) ---------------------
+//
+// Van het flip-spoor, niet van het board: alleen getallen, in de vorm die
+// `map` er al voor vrijhield (de recorder en de trampoline op de
+// boot-scratch-pagina's, het blob onder het staging-maatwoord). De staging
+// is waar config.txt het image van Hop laadde; na zijn plaatsing dood.
+// Op ijzer nog niet geflipt.
+
+/// Waar de nieuwe kern heen gaat: het koude linkadres
+/// (`hopos/link-raspi.ld`, `KERN_BASE`), waar de firmware hem laadt.
+pub const FLIP_LINK_BASE: u64 = map::KERN_BASE;
+/// Geen PIE.
+pub const FLIP_PIE: bool = false;
+/// Het beeld blijft onder het einde van de kern-RAM.
+pub const FLIP_IMAGE_END: u64 = map::KERN_END;
+/// De staging van het platte, gerelokeerde beeld.
+pub const FLIP_STAGE_PA: u64 = STAGE_PA;
+/// De grootste staging.
+pub const FLIP_STAGE_MAX: u64 = STAGE_MAX;
+/// De vluchtrecorder.
+pub const FLIP_RECORDER_PA: u64 = BOOT_SCRATCH_PA + 0x1000;
+/// De trampoline (Normal, want het laadvenster is RAM).
+pub const FLIP_TRAMP_PA: u64 = BOOT_SCRATCH_PA + 0x2000;
+/// De maat van het handoff-blob.
+pub const FLIP_HANDOFF_LEN: u64 = 0x4_0000;
+/// Het handoff-blob, direct onder het staging-maatwoord.
+pub const FLIP_HANDOFF_PA: u64 = STAGE_HDR_PA - FLIP_HANDOFF_LEN;
+
+const _: () = {
+    assert!(FLIP_RECORDER_PA >= STAGE_ROLE_PA + 8);
+    assert!(FLIP_TRAMP_PA + 0x1000 <= FLIP_HANDOFF_PA);
+    assert!(FLIP_HANDOFF_PA + FLIP_HANDOFF_LEN <= STAGE_HDR_PA);
+};

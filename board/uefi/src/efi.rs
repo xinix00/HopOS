@@ -56,6 +56,7 @@ mod off {
     pub(super) const BS_HANDLE_PROTOCOL: u64 = 0x98;
     pub(super) const BS_EXIT_BOOT_SERVICES: u64 = 0xe8;
     pub(super) const BS_SET_WATCHDOG: u64 = 0x100;
+    pub(super) const BS_LOCATE_PROTOCOL: u64 = 0x140;
     pub(super) const OUT_STRING: u64 = 0x08;
     pub(super) const LI_DEVICE: u64 = 0x18;
     pub(super) const LI_IMAGE_BASE: u64 = 0x40;
@@ -274,6 +275,21 @@ impl Efi {
             guid.as_ptr(),
             &mut iface,
         );
+        (st == SUCCESS && iface != 0).then_some(iface)
+    }
+
+    /// De eerste instantie van een protocol, ongeacht het handvat
+    /// (`LocateProtocol`): de GOP van de console (gop.rs).
+    #[cfg_attr(not(feature = "gui"), expect(dead_code))]
+    pub(crate) fn locate_protocol(&self, guid: &[u8; 16]) -> Option<u64> {
+        type LocateProtocol =
+            extern "efiapi" fn(guid: *const u8, registration: u64, iface: *mut u64) -> Status;
+        let f = Self::func(self.bs, off::BS_LOCATE_PROTOCOL);
+        let mut iface = 0u64;
+        // SAFETY: de invariant van `Efi`; `guid` en `iface` leven over de
+        // call, en een registratie van nul is "geen" volgens de spec.
+        let st =
+            unsafe { core::mem::transmute::<u64, LocateProtocol>(f) }(guid.as_ptr(), 0, &mut iface);
         (st == SUCCESS && iface != 0).then_some(iface)
     }
 

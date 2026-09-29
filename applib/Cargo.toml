@@ -17,6 +17,14 @@ netdev = { path = "../netdev" }
 # De netstack (PORT.md §2.1), op een tag en nooit over een pad: lean is een
 # eigen repo met een eigen poort.
 leannet = { git = "https://github.com/xinix00/lean.git", tag = "v3.0.0" }
+# De codec-namen en -nummers (feature `media`, src/codec.rs): dezelfde
+# nummering als de kern, uit het contract zelf.
+driver-codec = { path = "../driver/codec", optional = true }
+
+[features]
+default = []
+# De codec-client (src/codec.rs, docs/media.md).
+media = ["dep:driver-codec"]
 
 [lints]
 workspace = true

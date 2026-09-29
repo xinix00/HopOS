@@ -1,5 +1,5 @@
 //! De losse instructies van een app-core: de teller, de slaap, de yield en
-//! de exit. Op ARM64 echte instructies; elders een stub-module met dezelfde
+//! de exit. Op ARM64 en RISC-V echte instructies; elders een stub-module met dezelfde
 //! signaturen, zodat de logica eromheen op de host test (handboek §7: `cfg`
 //! op module-niveau).
 //!
@@ -101,6 +101,36 @@ mod imp {
         unsafe { asm!("hvc #6", options(nostack, preserves_flags)) };
     }
 
+    /// Wekt de sibling-core van deze app met affiniteit `aff` (HVC #4): de
+    /// switcher zoekt hem in de vertrouwde keten van de eenheid, zet zijn
+    /// wek-latch en zijn wektijd op nu, en hervat ons meteen. Een sibling die
+    /// nog draait, ziet de latch bij zijn volgende yield (de lost wakeup van
+    /// 04-09). De SEV erna wekt een switcher die in WFE slaapt.
+    #[inline]
+    pub(crate) fn hvc_wake(aff: u64) {
+        // SAFETY: HVC #4 trapt naar de EL2-switcher, die alleen x0..x3 als
+        // klad gebruikt en ze uit zijn scratch terugzet (`switch.rs`,
+        // `.Lwake`), en met ERET terugkeert naar de instructie hierna. De
+        // keten die hij afloopt is vertrouwd (de kern zette hem), dus `aff`
+        // kan alleen een context van déze app raken. Geen `nomem`: wat de
+        // aanroeper voor de sibling klaarzette, moet vóór de wek zichtbaar
+        // zijn.
+        unsafe {
+            asm!("hvc #4", "sev", in("x0") aff, options(nostack, preserves_flags));
+        }
+    }
+
+    /// De MPIDR-affiniteit van deze core (aff0..aff2), zoals de switcher hem
+    /// in het wekdoel zet. Op EL1 is dit VMPIDR_EL2, en de trampolines zetten
+    /// die op de echte MPIDR.
+    #[inline]
+    pub(crate) fn core_id() -> u64 {
+        let v: u64;
+        // SAFETY: een lees van een systeemregister zonder bijwerkingen.
+        unsafe { asm!("mrs {}, mpidr_el1", out(reg) v, options(nomem, nostack, preserves_flags)) };
+        v & 0xFF_FFFF
+    }
+
     /// Geeft de core aan de kern terug (HVC #0 naar de EL2-parkeerlus).
     /// PSCI CPU_OFF was op de Pi 5-stockfirmware een deur zonder terugweg;
     /// de kern bezit zijn cores en ze gaan nooit terug naar de firmware.
@@ -114,7 +144,109 @@ mod imp {
     }
 }
 
-#[cfg(not(all(target_os = "none", target_arch = "aarch64")))]
+#[cfg(all(target_os = "none", target_arch = "riscv64"))]
+mod imp {
+    //! RISC-V (supervisor mode onder de M-mode-switcher van de kern,
+    //! `cpu::riscv::switch`). Dezelfde zes werkwoorden als op ARM, andere
+    //! letters: de teller is de TIME-CSR, de yield en de exit zijn `ecall`
+    //! met a7 = 0 (wektijd in a0) en a7 = 1. Er is geen event-register en
+    //! een `wfi` van een bewoner wekt nooit (de switcher laat hem met mie = 0
+    //! draaien): elke wacht is een yield (Go, cpu/idle/idle_riscv64.go:
+    //! "de ecall is zijn enige route naar een wfi").
+    use core::arch::asm;
+
+    /// De timebase van de TIME-CSR. RISC-V heeft geen register waaruit hij
+    /// volgt (ARM heeft CNTFRQ_EL0); de 10 MHz van QEMU virt. De LicheeRV
+    /// telt 25 MHz: daar hoort de kern hem op de control-page te zetten
+    /// (Go, board/hopslot: "komt er een tweede board, dan op de
+    /// control-page"), en tot dat woord er is, loopt de klok van een app
+    /// daar 2,5x te traag.
+    const TIMEBASE_HZ: u64 = 10_000_000;
+
+    /// De TIME-CSR.
+    #[inline]
+    pub(crate) fn counter() -> u64 {
+        let v: u64;
+        // SAFETY: `rdtime` leest een teller zonder bijwerkingen; de switcher
+        // zet `mcounteren.TM` in `parkenter`, dus in S-mode trapt hij niet.
+        unsafe { asm!("rdtime {}", out(reg) v, options(nomem, nostack, preserves_flags)) };
+        v
+    }
+
+    /// De timebase.
+    #[inline]
+    pub(crate) fn counter_hz() -> u64 {
+        TIMEBASE_HZ
+    }
+
+    /// Geen ID-register met FEAT_ECV: nul.
+    #[inline]
+    pub(crate) fn mmfr0() -> u64 {
+        0
+    }
+
+    /// Geen event-stream: niets te zetten.
+    #[inline]
+    pub(crate) fn set_cntkctl(_v: u64) {}
+
+    /// Een korte wacht: een yield naar nu (de switcher geeft een buur zijn
+    /// beurt en hervat ons), want een `wfi` wekt hier nooit.
+    #[inline]
+    pub(crate) fn wfe() -> u64 {
+        hvc_yield(0)
+    }
+
+    /// De coöperatieve yield naar de M-mode-switcher (`ecall`, a7 = 0), met
+    /// de wektijd in a0: vóór die tellerstand hoeft de rotatie ons niet te
+    /// hervatten. Geeft de idle-wall-tijd in tikken.
+    #[inline]
+    pub(crate) fn hvc_yield(deadline: u64) -> u64 {
+        let a = counter();
+        // SAFETY: de switcher bewaart x1..x31 en ons S-regime en hervat ons
+        // op de instructie na de `ecall` (mepc + 4). `clobber_abi("C")` laat
+        // de compiler alle caller-saved registers als verloren beschouwen,
+        // ook de FP-registers, die de switcher niet bewaart.
+        unsafe {
+            asm!(
+                "ecall",
+                inout("a0") deadline => _,
+                in("a7") 0u64,
+                clobber_abi("C"),
+                options(nostack),
+            );
+        }
+        counter().wrapping_sub(a)
+    }
+
+    /// De kern heeft op riscv64 geen OS-core-rotatie: niets te bellen.
+    #[inline]
+    pub(crate) fn hvc_kick_os() {}
+
+    /// Geen SMP-apps op riscv64: niets te wekken.
+    #[inline]
+    pub(crate) fn hvc_wake(_aff: u64) {}
+
+    /// Eén core per slot op riscv64; S-mode kan `mhartid` niet lezen.
+    #[inline]
+    pub(crate) fn core_id() -> u64 {
+        0
+    }
+
+    /// Klaar: `ecall` met a7 = 1. De switcher zet ons dood, veegt de cache
+    /// en roteert weg; het hart draait door voor de buren.
+    pub(crate) fn park_exit() -> ! {
+        loop {
+            // SAFETY: de exit-ecall keert niet terug (de switcher hervat een
+            // dode bewoner nooit); doet hij het toch, dan opnieuw.
+            unsafe { asm!("ecall", in("a7") 1u64, options(nomem, nostack)) };
+        }
+    }
+}
+
+#[cfg(not(any(
+    all(target_os = "none", target_arch = "aarch64"),
+    all(target_os = "none", target_arch = "riscv64")
+)))]
 mod imp {
     //! Host-stub: dezelfde signaturen, geen ijzer. De teller is een
     //! getal dat de tests zetten; slapen en yielden duren niets.
@@ -147,6 +279,14 @@ mod imp {
 
     /// Geen kern om te kicken: een no-op.
     pub(crate) fn hvc_kick_os() {}
+
+    /// Geen switcher en geen sibling: een no-op.
+    pub(crate) fn hvc_wake(_aff: u64) {}
+
+    /// De host is één core.
+    pub(crate) fn core_id() -> u64 {
+        0
+    }
 
     pub(crate) fn park_exit() -> ! {
         loop {

@@ -18,9 +18,10 @@
 //!
 //! 1. interrupts dicht, MMU, D- en I-cache uit (lezen-en-maskeren, m1n1's
 //!    `mmu_disable`, zoals de Go-sprong op de M4);
-//! 2. het kern-RAM by-VA vegen (`dc civac`): elke dirty regel van de oude
-//!    kern (stack, heap, .data) moet naar DRAM vóór de kopie, anders drukt
-//!    een latere eviction oude bytes over de nieuwe kern heen;
+//! 2. het kern-RAM en het beeld by-VA vegen (`dc civac`, twee vensters: op
+//!    UEFI ligt het beeld buiten het kernvenster): elke dirty regel van de
+//!    oude kern (stack, heap, .data) moet naar DRAM vóór de kopie, anders
+//!    drukt een latere eviction oude bytes over de nieuwe kern heen;
 //! 3. het platte beeld woordgewijs van de staging naar het koude adres, met
 //!    de MMU uit (dus Device-nGnRnE: gealigneerd, ongecached, geen
 //!    speculatie die een regel terugbrengt);
@@ -114,11 +115,18 @@ pub struct Jump {
     pub entry: u64,
     /// x0 voor de nieuwe kern: wat de firmware óns gaf (de DTB-pointer).
     pub x0: u64,
-    /// Het cacheable kern-RAM dat geveegd wordt: `[sweep.0, sweep.1)`. Het
-    /// moet `dst` omvatten.
-    pub sweep: (Pa, Pa),
-    /// Waar de trampoline heen gaat: buiten het kern-RAM, buiten het beeld
-    /// en de staging, in RAM dat de identity map uitvoerbaar mapt.
+    /// Het cacheable RAM dat geveegd wordt: twee vensters `[a, b)` (een
+    /// leeg venster is `a == b`). Samen omvatten ze het kern-RAM en het
+    /// hele beeld op `dst`: op virt en de Pi's ligt het beeld in het
+    /// kern-RAM en is het tweede venster leeg; op UEFI koos de firmware
+    /// een plek buiten het kernvenster, en is het tweede venster het oude
+    /// beeld.
+    pub sweep: [(Pa, Pa); 2],
+    /// Waar de trampoline heen gaat: buiten het beeld en de staging, in
+    /// RAM dat de identity map uitvoerbaar mapt. Hij mag in een geveegd
+    /// venster liggen (de heap-top op de Radxa): na zijn kopie draait er
+    /// geen Rust meer, en het vegen van zijn eigen regels (die al in DRAM
+    /// staan) verandert niets aan wat hij uitvoert.
     pub tramp: Pa,
 }
 
@@ -147,28 +155,26 @@ impl Jump {
         if self.entry < self.dst.0 || self.entry >= self.dst.0.saturating_add(self.len) {
             return bad("entry outside the image", self.entry);
         }
-        if self.dst.0 < self.sweep.0.0 || self.dst.0.saturating_add(self.len) > self.sweep.1.0 {
-            return bad("image outside the swept kernel RAM", self.dst.0);
+        let end = self.dst.0.saturating_add(self.len);
+        let covered = self
+            .sweep
+            .iter()
+            .any(|(a, b)| self.dst.0 >= a.0 && end <= b.0);
+        if !covered {
+            return bad("image outside the swept RAM", self.dst.0);
         }
-        if overlaps(
-            self.src.0,
-            self.len,
-            self.sweep.0.0,
-            self.sweep.1.0 - self.sweep.0.0,
-        ) {
-            return bad("staging inside the swept kernel RAM", self.src.0);
+        for (a, b) in self.sweep {
+            if b.0 < a.0 {
+                return bad("sweep window ends before it starts", a.0);
+            }
+            if overlaps(self.src.0, self.len, a.0, b.0 - a.0) {
+                return bad("staging inside the swept RAM", self.src.0);
+            }
         }
-        if overlaps(
-            self.tramp.0,
-            t,
-            self.sweep.0.0,
-            self.sweep.1.0 - self.sweep.0.0,
-        ) || overlaps(self.tramp.0, t, self.src.0, self.len)
+        if overlaps(self.tramp.0, t, self.dst.0, self.len)
+            || overlaps(self.tramp.0, t, self.src.0, self.len)
         {
-            return bad(
-                "trampoline overlaps the kernel RAM or the staging",
-                self.tramp.0,
-            );
+            return bad("trampoline overlaps the image or the staging", self.tramp.0);
         }
         Ok(())
     }
@@ -188,9 +194,9 @@ impl Jump {
 ///   niemand anders dat bereik of `tramp` nog beschrijft;
 /// - alles wat de nieuwe kern moet lezen buiten het beeld (het handoff-blob,
 ///   het pointer/magic-paar, de recorder) al naar DRAM geveegd is;
-/// - geen andere core in `[sweep.0, sweep.1)` schrijft of er code uitvoert
-///   (de app-cores draaien in hun partities en in de switch-code in de
-///   plan-regio, nooit in het kern-RAM).
+/// - geen andere core in de vensters van `sweep` schrijft of er code
+///   uitvoert (de app-cores draaien in hun partities en in de switch-code
+///   in de plan-regio, nooit in het kern-RAM of het kern-beeld).
 pub unsafe fn chain(j: &Jump) -> ChainError {
     if let Err(e) = j.check() {
         return e;
@@ -220,7 +226,7 @@ mod arch {
     // sprongen), want hij draait op een adres dat hij niet kent.
     //
     // In: x0 = dst, x1 = src, x2 = len (8-voud), x3 = entry, x4 = x0 van de
-    // nieuwe kern, x5/x6 = het te vegen venster.
+    // nieuwe kern, x5/x6 en x7/x8 = de twee te vegen vensters.
     core::arch::global_asm!(
         r#"
     .pushsection .text.hopos_chain, "ax"
@@ -248,7 +254,13 @@ hopos_chain_tramp:
     dc civac, x5
     add x5, x5, x10
     b 1b
-2:  dsb sy
+2:  bic x7, x7, x11
+5:  cmp x7, x8
+    b.hs 6f
+    dc civac, x7
+    add x7, x7, x10
+    b 5b
+6:  dsb sy
     // Het beeld naar het koude adres, woord voor woord.
 3:  cbz x2, 4f
     ldr x9, [x1], #8
@@ -311,8 +323,10 @@ hopos_chain_tramp_end:
                 in("x2") j.len,
                 in("x3") j.entry,
                 in("x4") j.x0,
-                in("x5") j.sweep.0.0,
-                in("x6") j.sweep.1.0,
+                in("x5") j.sweep[0].0.0,
+                in("x6") j.sweep[0].1.0,
+                in("x7") j.sweep[1].0.0,
+                in("x8") j.sweep[1].1.0,
                 options(noreturn, nostack)
             )
         }
@@ -373,7 +387,7 @@ mod tests {
             len: 0x1000,
             entry: 0x4020_0000,
             x0: 0,
-            sweep: (Pa(0x4000_0000), Pa(0x4f00_0000)),
+            sweep: [(Pa(0x4000_0000), Pa(0x4f00_0000)), (Pa(0), Pa(0))],
             tramp: Pa(0xB000_2000),
         };
         assert_eq!(j.check(), Err(ChainError::NoTrampoline));

@@ -40,6 +40,8 @@ use core::fmt;
 use core::mem::{offset_of, size_of};
 use dev::{Pa, Reg};
 
+pub mod apple;
+
 /// De controller-registers (NVMe 1.4 §3.1) op BAR0.
 #[repr(C)]
 struct Regs {

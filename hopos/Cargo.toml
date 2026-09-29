@@ -30,11 +30,58 @@ board-uefi = ["dep:board-uefi"]
 # `BOARD=o6n|altra image/uefi-run.sh` bouwt er BOOTAA64.EFI van (efi.ld,
 # PIE, zoals board-uefi; build.rs).
 # Beide hebben DRAM vanaf 0x8000_0000: het kernvenster `window-8000` van
-# board-uefi (0x8800_0000, de Go-kandidaat van de Altra); dat zetten hun
-# eigen crates aan. Niet hier via `board-uefi/window-8000`: die vorm zet
+# board-uefi (0x8800_0000, de Go-kandidaat van de Altra), via de feature
+# van hun eigen crate. Niet hier via `board-uefi/window-8000`: die vorm zet
 # ook de feature `board-uefi` van deze binary aan, en dan zijn het er twee.
-board-o6n = ["dep:board-o6n"]
-board-altra = ["dep:board-altra"]
+# (Tot 29-09 zette niemand hem aan en zocht de stub op beide het venster
+# van QEMU, 0x5000_0000.) De O6N draait bovendien de hele kern onder
+# E2H = 1 (`vhe`, de A720 eist het: Go 17-09).
+board-o6n = ["dep:board-o6n", "board-o6n/window-8000", "board-o6n/vhe"]
+board-altra = ["dep:board-altra", "board-altra/window-8000"]
+# VHE afdwingen op een board dat anders nVHE kiest: de switcher-smaak `Vhe`
+# (hopos/src/cage.rs `FLAVOR`) en de kern onder E2H = 1 (board-uefi `vhe`,
+# board/uefi/src/el2.rs). De proef op QEMU met een VHE-model
+# (`FEATURES=vhe CPU=neoverse-n1 sh tools/qemu-uefi-test.sh`) vóór de O6N.
+# Alleen het UEFI-board kent de VHE-kern; op een ander board weigert de
+# build (cage.rs).
+vhe = ["board-uefi?/vhe"]
+# De riscv64-boards (`--target riscv64gc-unknown-none-elf`, docs/boards-riscv.md):
+# QEMU virt in machine mode (`-bios none`, tools/qemu-riscv-test.sh) en de
+# Sipeed LicheeRV Nano (SG2002, image/licheerv-agent.sh). Beide linken met
+# `link-riscv.ld` (build.rs), elk op zijn eigen basis.
+board-qemuvirt-riscv = ["dep:board-qemuvirt-riscv"]
+board-licheerv = ["dep:board-licheerv"]
+# De Mac mini M4 (board/apple): een raw image achter m1n1 of als eigen
+# bootobject (image/apple-m4.sh, docs/boards-apple.md); `link-apple.ld`,
+# gelinkt op 1 TiB + 4 GB (build.rs).
+board-apple = ["dep:board-apple"]
+
+# Het gui-vlak (gui.rs, docs/gui.md): de console op het glas als het board
+# een framebuffer geeft, de meetregels naast de bunny, en de
+# framebuffer-grant aan de display-app. Kaal linkt er geen regel van mee.
+# De `?`-vorm zet de gui van alleen het gekozen board aan.
+gui = [
+    "dep:driver-fb",
+    "dep:gui-fbgrant",
+    "board-qemuvirt?/gui",
+    "board-rpi4?/gui",
+    "board-rpi5?/gui",
+    "board-rk3566?/gui",
+    "board-uefi?/gui",
+    "board-o6n?/gui",
+    "board-altra?/gui",
+]
+
+# Het media-vlak (codec.rs, docs/media.md): de codec-ops van de system-API
+# en de VPU-driver; op de O6N zet `board-o6n?/media` het aanzetten van de
+# VPU aan. Kaal antwoorden de codec-ops "onbekende op".
+media = [
+    "kern/media",
+    "dep:driver-codec",
+    "dep:media-mve",
+    "dep:bounded",
+    "board-o6n?/media",
+]
 
 # Alleen wat de binary gebruikt (een ongebruikte dep bouwt alleen mee).
 [dependencies]
@@ -62,6 +109,16 @@ board-rk3566 = { path = "../board/rk3566", optional = true }
 board-uefi = { path = "../board/uefi", optional = true }
 board-o6n = { path = "../board/o6n", optional = true }
 board-altra = { path = "../board/altra", optional = true }
+board-qemuvirt-riscv = { path = "../board/qemuvirt-riscv", optional = true }
+board-licheerv = { path = "../board/licheerv", optional = true }
+board-apple = { path = "../board/apple", optional = true }
+# Het gui-vlak (feature `gui`): de console en het grant-beleid.
+driver-fb = { path = "../driver/fb", optional = true }
+gui-fbgrant = { path = "../gui/fbgrant", optional = true }
+# Het media-vlak (feature `media`): het contract en de VPU-driver.
+driver-codec = { path = "../driver/codec", optional = true }
+media-mve = { path = "../media/mve", optional = true }
+bounded = { path = "../bounded", optional = true }
 # De schijf van het board: `storage.rs` kent haar maten (sector, transfer).
 driver-virtioblk = { path = "../driver/virtioblk" }
 

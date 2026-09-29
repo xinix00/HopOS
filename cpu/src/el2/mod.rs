@@ -31,12 +31,12 @@ mod switch;
 mod switch;
 
 pub use dispatch::{
-    CoreState, Flavor, HVC_DOOR_ACK, HVC_EXIT, HVC_KICK_OS, HVC_WAKE, HVC_YIELD, Installed,
+    CoreState, Flavor, HVC_DOOR_ACK, HVC_EXIT, HVC_KICK_OS, HVC_WAKE, HVC_YIELD, Installed, Join,
     MAX_BLOB, SW_ENTRY, SW_HASH, SW_HEAD, SW_LEN, SW_SMP, SW_TRAMP, SWITCH_MAGIC, Start, VEC_COUNT,
     VEC_FIQ_LOWER, VEC_STRIDE, VEC_SYNC_LOWER, VEC_TABLE_LEN, adopt, apple_ipi_target, arm_context,
-    check_parked, context_id, context_pa, core_state, ctx_read, ctx_state, ctx_write, dispatch,
-    image_hash, init_app_cores, install_switch_code, installed_hash, kick, prepare_smp, revoke,
-    rx_due, wake_due,
+    chain, check_parked, context_id, context_pa, core_state, ctx_read, ctx_state, ctx_write,
+    dispatch, evict, forget, image_hash, init_app_cores, install_switch_code, installed_hash, join,
+    kick, prepare_secondary, prepare_smp, residents, revoke, rx_due, wake_due,
 };
 pub use oscore::{
     Back, Bell, OsCore, SCHED_OS_KICK, SCHED_OS_KICK_PA, STATS as OS_STATS, Stats as OsStats,
@@ -145,6 +145,11 @@ pub enum Error {
     /// Deze EL2-smaak kan de OS-core niet delen (Apple: geen GIC-kick, en
     /// het FIQ-pad van de OS-core is niet geport).
     OsCoreFlavor,
+    /// De bewonerslijst van een core is vol, zonder gat.
+    RosterFull {
+        /// Het aantal ingangen.
+        count: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -210,6 +215,9 @@ impl fmt::Display for Error {
             Self::Plan(e) => write!(f, "plan: {e}"),
             Self::OsCoreFlavor => {
                 write!(f, "this EL2 flavor cannot share the OS core with residents")
+            }
+            Self::RosterFull { count } => {
+                write!(f, "resident list is full ({count}) with no free gap")
             }
         }
     }

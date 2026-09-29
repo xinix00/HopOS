@@ -26,10 +26,11 @@
 //! bewoner, waarna die dood is en de core doorroteert.
 
 use super::layout::{
-    CAGE_STRIDE, CTX_CTRL_PA, CTX_KICK_NONE, CTX_KICK_TARGET, CTX_LEN, CTX_OFF, CTX_RING_HEAD_PA,
-    CTX_STATE, CTX_UNIT_SLOT, CTX_WAKE, CTX_WAKE_NO_PEEK, Core, CtxState, PARK_CODE_OFF, PARK_COLD,
-    PARK_MBOX_LEN, PARK_MBOX_OFF, PARK_PARKED, Plan, SCHED_COUNT, SCHED_CURRENT, SCHED_CURSOR,
-    SCHED_LIST, SCHED_MBOX_CTX, SCHED_MBOX_PC, SCHED_ROTOR, SCHED_S2_PA, SLOT_CAP, SMP_CTX_OFF,
+    CAGE_STRIDE, CTX_BOOT_ARG, CTX_BOOT_PC, CTX_CTRL_PA, CTX_KICK_NONE, CTX_KICK_PENDING,
+    CTX_KICK_TARGET, CTX_LEN, CTX_NEXT_PA, CTX_OFF, CTX_RING_HEAD_PA, CTX_STATE, CTX_UNIT_SLOT,
+    CTX_WAKE, CTX_WAKE_NO_PEEK, Core, CtxState, PARK_CODE_OFF, PARK_COLD, PARK_MBOX_LEN,
+    PARK_MBOX_OFF, PARK_PARKED, Plan, SCHED_COUNT, SCHED_CURRENT, SCHED_CURSOR, SCHED_LIST,
+    SCHED_MBOX_CTX, SCHED_MBOX_PC, SCHED_ROTOR, SCHED_S2_PA, SLOT_CAP, SMP_CTX_OFF,
     SWITCH_CODE_MAX, Slot,
 };
 use super::{Error, stage2, switch};
@@ -520,6 +521,218 @@ pub fn dispatch(plan: &Plan, core: Core, ctx: Pa, entry: Pa, arg: u64) -> Result
     }
     dev::notify();
     Ok(Start::Woken)
+}
+
+// ---------------------------------------------------------------------------
+// De rotatie van een app-core: bewoners erbij en eraf (share.go).
+// ---------------------------------------------------------------------------
+
+/// Hoe een bewoner bij een app-core kwam ([`join`]).
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Join {
+    /// De core draaide: de bewoner staat boot-pending in zijn lijst, en de
+    /// rotatie start hem bij de eerstvolgende yield van een buur.
+    Joined,
+    /// De core staat stil (koud of geparkeerd): er is geen rotatie die hem
+    /// oppikt, dus het is een gewoon startschot ([`dispatch`]).
+    Idle,
+}
+
+/// Het sched-blok van `core` en de lengte van zijn bewonerslijst, geklemd
+/// op [`SLOT_CAP`]. Die klem is een isolatiegrens: één plek voorbij de
+/// lijst is het woord `SCHED_S2_PA`, waarmee de switcher elk ctx-blok op
+/// deze core vindt (share.go `residents`, en daar ook op één plek).
+fn roster(plan: &Plan, core: Core) -> Result<(Pa, usize), Error> {
+    let mb = plan.park_mbox_pa(core).map_err(Error::Plan)?;
+    let n = usize::try_from(dev::read64(mb.add(SCHED_COUNT))).unwrap_or(SLOT_CAP);
+    Ok((mb, n.min(SLOT_CAP)))
+}
+
+/// De context-id's in de bewonerslijst van `core`, gaten overgeslagen, in
+/// lijstvolgorde. Geeft het aantal.
+pub fn residents(plan: &Plan, core: Core, mut each: impl FnMut(u8)) -> Result<usize, Error> {
+    let (mb, n) = roster(plan, core)?;
+    let mut count = 0;
+    for i in 0..n {
+        let id = dev::read8(mb.add(SCHED_LIST + i as u64));
+        if id != 0 {
+            each(id);
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// Zet `id` in de lijst van sched-blok `mb` (lengte `n`): staat hij er al,
+/// dan niets; anders het eerste gat, anders achteraan. Eerst kijken of hij
+/// er al staat, dán pas "vol": andersom weigerde Go een geldige herstart
+/// zodra de lijst ooit tot `SLOT_CAP` gegroeid was, want gaten laten de
+/// lengte staan (share.go `residentAdd`).
+fn list_add(mb: Pa, n: usize, id: u8) -> Result<(), Error> {
+    let mut gap = None;
+    for i in 0..n {
+        match dev::read8(mb.add(SCHED_LIST + i as u64)) {
+            x if x == id => return Ok(()),
+            0 if gap.is_none() => gap = Some(i),
+            _ => {}
+        }
+    }
+    match gap {
+        Some(i) => dev::write8(mb.add(SCHED_LIST + i as u64), id),
+        // `>=` en niet `>`: bij n == SLOT_CAP schreef de append op
+        // SCHED_S2_PA.
+        None if n >= SLOT_CAP => return Err(Error::RosterFull { count: n }),
+        None => {
+            // De ingang vóór de lengte, met een barrière: de rotatie ziet
+            // nooit een staart die nog niet geschreven is.
+            dev::write8(mb.add(SCHED_LIST + n as u64), id);
+            dev::mb();
+            dev::write64(mb.add(SCHED_COUNT), n as u64 + 1);
+        }
+    }
+    dev::mb();
+    dev::push(mb, PARK_MBOX_LEN as usize);
+    Ok(())
+}
+
+/// Haalt `id` uit de lijst van `core` (een gat; de rotatie slaat nullen
+/// over en [`join`] hergebruikt ze). Geeft of hij erin stond.
+fn list_remove(plan: &Plan, core: Core, id: u8) -> Result<bool, Error> {
+    let (mb, n) = roster(plan, core)?;
+    let mut was = false;
+    for i in 0..n {
+        if dev::read8(mb.add(SCHED_LIST + i as u64)) == id {
+            dev::write8(mb.add(SCHED_LIST + i as u64), 0);
+            was = true;
+        }
+    }
+    dev::mb();
+    dev::push(mb, PARK_MBOX_LEN as usize);
+    Ok(was)
+}
+
+/// Zet de bewoner met ctx-blok `ctx` erbij op de DRAAIENDE app-core `core`
+/// (`bootPendingDispatch` in share.go): `entry` en `arg` zoals bij
+/// [`dispatch`], de staat boot-pending, en hij in de bewonerslijst. De
+/// rotatie start hem bij de eerstvolgende yield van een buur, exact het
+/// mailbox-pad maar EL2 naar EL2.
+///
+/// Staat de core stil, dan [`Join::Idle`] en geen enkele schrijf: dan is
+/// het een gewoon startschot. De aanroeper moet daarna ook kijken of de
+/// core tussen zijn lijstlezing en onze append parkeerde (de park-race uit
+/// share.go): dan pikt niemand de bewoner meer op, en is het alsnog een
+/// [`dispatch`]. Zo'n core staat in de parkeerlus en leest geen lijst meer,
+/// dus dat startschot is het enige.
+///
+/// De volgorde is die van de rotatie-hercontrole (`switch.rs`): eerst de
+/// ctx, dan de staat, dan de lijst. De rotatie leest byte, staat en de byte
+/// nog eens; wie de nieuwe staat ziet, ziet ook de lijst die erbij hoort.
+pub fn join(plan: &Plan, core: Core, ctx: Pa, entry: Pa, arg: u64) -> Result<Join, Error> {
+    if arg <= PARK_PARKED {
+        return Err(Error::BadArg { arg });
+    }
+    let id = context_id(plan, ctx).ok_or(Error::BadContext { pa: ctx.0 })?;
+    let (mb, n) = roster(plan, core)?;
+    if dev::read64(mb.add(SCHED_MBOX_CTX)) <= PARK_PARKED {
+        return Ok(Join::Idle);
+    }
+    ctx_write(ctx, CTX_BOOT_PC, entry.0);
+    ctx_write(ctx, CTX_BOOT_ARG, arg);
+    ctx_write(ctx, CTX_WAKE, 0);
+    ctx_write(ctx, CTX_KICK_PENDING, 0);
+    dev::mb();
+    ctx_write(ctx, CTX_STATE, CtxState::BootPending.raw());
+    if let Err(e) = list_add(mb, n, id) {
+        ctx_write(ctx, CTX_STATE, CtxState::Empty.raw());
+        return Err(e);
+    }
+    Ok(Join::Joined)
+}
+
+/// Haalt de bewoner met ctx-blok `ctx` uit de rotatie van `core`, voor de
+/// intrekking: uit de lijst, en is hij niet aan het draaien (geyield of nog
+/// nooit gestart), dan Dead. Een geyielde bewoner met een verre wektijd
+/// hervat anders pas bij die wektijd, en voelt de intrekking zo lang niet;
+/// uit de lijst is hij nooit meer aan de beurt, en dat is een bevestigd
+/// einde. Een draaiende bewoner faultt op de ingetrokken tabel en meldt
+/// zichzelf dood. Geeft of hij in de lijst stond.
+///
+/// Een rotatie die hem nét vóór de verwijdering las, hervat hem nog één
+/// keer: op de ingetrokken tabel faultt hij bij zijn eerste instructie, en
+/// is hij opnieuw dood.
+pub fn evict(plan: &Plan, core: Core, ctx: Pa) -> Result<bool, Error> {
+    let id = context_id(plan, ctx).ok_or(Error::BadContext { pa: ctx.0 })?;
+    let was = list_remove(plan, core, id)?;
+    if matches!(
+        ctx_state(ctx),
+        Some(CtxState::BootPending | CtxState::Saved)
+    ) {
+        ctx_write(ctx, CTX_STATE, CtxState::Dead.raw());
+    }
+    Ok(was)
+}
+
+/// Haalt kooi `slot` uit de lijst van ELKE app-core, vóór zijn nieuwe
+/// levensduur. Een gestopt lid van een groep blijft als dode byte in de
+/// lijst van zijn oude core staan; komt het slot daarna op een andere core
+/// terecht, dan zou die oude rotatie zijn verse boot-pending staat zien en
+/// hem daar óók starten. Vóór elke staatswissel van het slot, zodat de
+/// hercontrole van de rotatie de verwijdering ziet.
+pub fn forget(plan: &Plan, slot: Slot) -> Result<(), Error> {
+    let id = u8::try_from(slot.get()).map_err(|_| Error::BadContextId { id: 0 })?;
+    for c in 1..=plan.app_cores() {
+        let core = Core::new(c).ok_or(Error::Plan(abi::Error::OutOfPlan {
+            index: c,
+            max: SLOT_CAP,
+        }))?;
+        list_remove(plan, core, id)?;
+    }
+    Ok(())
+}
+
+/// Maakt het ctx-blok van de secundaire op `core` klaar voor een nieuwe
+/// levensduur van eenheid `unit` (`prepareSMPContexts`): gewist, de
+/// control-page van de eenheid (het fault-rapport en de wek-keten vinden
+/// hem hier), de eenheid zelf (tabel en VMID bij een hervatting), GEEN
+/// RX-peek (alleen de primaire leest de ring; een secundaire op elk frame
+/// hervatten is alleen maar een pingpong), en het wekdoel van zijn core.
+///
+/// Het wekdoel staat er meteen, niet pas na de eerste yield: een wek (HVC
+/// #4) die komt vóórdat de secundaire ooit yieldde, landde anders nergens,
+/// en zijn eerste yield sliep dan tot zijn wektijd. Nu zet de wek de latch,
+/// en ziet de eerste yield hem.
+pub fn prepare_secondary(
+    plan: &Plan,
+    core: Core,
+    unit: Slot,
+    ctrl: Pa,
+    kick_target: u64,
+) -> Result<Pa, Error> {
+    let ctx = plan.smp_ctx_pa(core).map_err(Error::Plan)?;
+    dev::clear(ctx, CTX_LEN as usize);
+    ctx_write(ctx, CTX_CTRL_PA, ctrl.0);
+    ctx_write(ctx, CTX_UNIT_SLOT, unit.get() as u64);
+    ctx_write(ctx, CTX_RING_HEAD_PA, 0);
+    ctx_write(ctx, CTX_KICK_TARGET, kick_target);
+    ctx_write(ctx, CTX_STATE, CtxState::Empty.raw());
+    Ok(ctx)
+}
+
+/// Sluit de vertrouwde wek-keten over de contexten van één eenheid:
+/// elk ctx-blok wijst naar het volgende, het laatste terug naar het eerste
+/// (`CTX_NEXT_PA`, de keten die HVC #4 afloopt). Eén context is een keten
+/// van nul: geen schakel, want een oude schakel van een vorige SMP-
+/// levensduur van dit slot wees anders naar contexten die er niet meer bij
+/// horen.
+pub fn chain(ctxs: &[Pa]) {
+    let n = ctxs.len();
+    for (i, c) in ctxs.iter().enumerate() {
+        let next = match ctxs.get((i + 1) % n.max(1)) {
+            Some(x) if n > 1 => x.0,
+            _ => 0,
+        };
+        ctx_write(*c, CTX_NEXT_PA, next);
+    }
 }
 
 /// Het wekdoel van Apple's fast IPI voor een core met affiniteit `mpidr`:

@@ -28,8 +28,18 @@
 //!
 //! [`Request::Abort`] geeft een grant terug waarin nooit iets draaide: de
 //! gewone rollback.
+//!
+//! # De device-grants
+//!
+//! De actor bezit ook de grant-aanbieder ([`Grants`], kaal [`NoGrants`]) en
+//! roept hem op de vier plekken uit `kern::grants`: [`Request::Env`] tussen
+//! de claim en de env op de control-page, `arm` na de kooibouw en vóór de
+//! dispatch, `adopt` bij de adoptie na een flip, en `release` na een
+//! bevestigde stop en bij elke abort. Eén eigenaar voor partitie én glas:
+//! wie de grant vrijgeeft, weet dat de houder niet meer draait.
 
 use crate::cage::{Cage, Console, Cores, PortError, Power, Status, Timer};
+use crate::grants::{Grants, NoGrants};
 use crate::partmem::{Owned, Partition, PartitionPool, Quarantined, Stopped};
 use crate::pool::{CorePool, GroupName, Placement};
 use crate::{Core, Error, GRAIN, Region, Result, SLOT_CAP, Slot};
@@ -201,6 +211,16 @@ pub enum Request {
     },
     /// Geef een grant terug waarin nooit iets draaide.
     Abort(ImageGrant),
+    /// De env van een lopende start (`key=val\n`, zoals hij op de
+    /// control-page gaat): de grant-aanbieder mag regels toevoegen. Alleen
+    /// voor een slot in de stroom, tussen de claim en [`Request::Arm`]; het
+    /// antwoord is [`Response::Env`] met de complete blob.
+    Env {
+        /// Het slot van de stroom.
+        slot: Slot,
+        /// De env zoals de start hem vroeg.
+        env: Vec<u8>,
+    },
     /// Stop een slot; `timeout` is de coöperatieve kans.
     Stop {
         /// Het slot.
@@ -228,6 +248,8 @@ pub enum Response {
     Status(SlotStatus),
     /// De bewoners voor het handoff-blob van de kern-flip.
     Snapshot(Vec<SlotState>),
+    /// De env van de start, met wat de grant-aanbieder erbij zette.
+    Env(Vec<u8>),
     /// Het lukte niet.
     Failed(Error),
 }
@@ -434,6 +456,25 @@ impl Servicers {
         self.table.borrow().get(slot.get()).copied().flatten()
     }
 
+    /// De partitie van de levende bewoner van `slot`: de basis en maat die
+    /// de actor bij de start in de besturing zette. `None` zonder levende
+    /// servicer (gestopt, of nog niet gestart) of met een lege partitie:
+    /// een codec-grant op een slot dat vrijkomt, weigert dan dicht.
+    ///
+    /// De actor zet basis en maat vóór hij de generatie publiceert
+    /// (`register`), en haalt de generatie weg vóór er iets vrijkomt
+    /// (`evict`); wie hier een partitie krijgt, krijgt die van de levensduur
+    /// die [`Servicers::current`] op dat moment zag. Twee atomics die samen
+    /// iets betekenen, zijn hier veilig omdat er maar één schrijver is en
+    /// de lezer binnen één synchrone beurt blijft (handboek §1.3).
+    #[must_use]
+    pub fn partition(&self, slot: Slot) -> Option<Region> {
+        self.current(slot)?;
+        let ctl = self.ctl(slot)?;
+        let size = ctl.size.load(Acquire);
+        (size > 0).then(|| Region::new(ctl.base.load(Acquire), size))
+    }
+
     fn set(&self, slot: Slot, v: Option<u32>) -> Option<u32> {
         let mut t = self.table.borrow_mut();
         match t.get_mut(slot.get()) {
@@ -598,8 +639,8 @@ pub const MAX_FLIP_MOUNTS: usize = 32;
 pub const MAX_FLIP_PATH: usize = 256;
 
 /// De lifecycle-actor. Eén taak; hij bezit de pool, de plaatsing, de
-/// bewoners en de kooi.
-pub struct Lifecycle<'s, C, K, T, L> {
+/// bewoners, de kooi en de grant-aanbieder (`G`, kaal [`NoGrants`]).
+pub struct Lifecycle<'s, C, K, T, L, G = NoGrants> {
     cage: C,
     cores: K,
     timer: T,
@@ -609,10 +650,17 @@ pub struct Lifecycle<'s, C, K, T, L> {
     residents: [Option<Resident>; SLOT_CAP + 1],
     svc: &'s Servicers,
     generation: u32,
+    grants: G,
 }
 
-impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
-    /// Een actor over deze kooi, cores en pools.
+impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K, T, L, G> {
+    /// Een actor over deze kooi, cores en pools, met `grants` als
+    /// grant-aanbieder (de gui-smaak geeft zijn framebuffer-grant, kaal
+    /// [`NoGrants`]).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "elk deel is een eigenaar die als waarde de actor in gaat; een bouwer zou alleen de volgorde verstoppen"
+    )]
     pub fn new(
         cage: C,
         cores: K,
@@ -621,6 +669,7 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
         parts: PartitionPool,
         places: CorePool,
         svc: &'s Servicers,
+        grants: G,
     ) -> Self {
         Lifecycle {
             cage,
@@ -632,6 +681,7 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
             residents: [const { None }; SLOT_CAP + 1],
             svc,
             generation: 0,
+            grants,
         }
     }
 
@@ -655,6 +705,7 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
                 self.abort(grant);
                 Ok(Response::Done)
             }
+            Request::Env { slot, env } => self.env(slot, env).map(Response::Env),
             Request::Stop { slot, timeout } => {
                 self.stop(slot, timeout).await.map(|()| Response::Done)
             }
@@ -779,6 +830,21 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
                 code: e.code,
             });
         }
+        // De grant-haak na de kooibouw en vóór het startschot (Go:
+        // `grantArm` in `armSlot`): het venster van de houder de kooi in.
+        // Faalt hij, dan is dat een startfout zoals een mislukte bouw: er
+        // draaide nog niets, dus poorten dicht en de grant terug (de abort
+        // geeft ook de device-grant vrij).
+        if let Err(e) = self.grants.arm(slot) {
+            self.log.log(format_args!(
+                "slot {slot}: device grant not armed: {e}, start refused HOPOS_GRANT_ARM_FAIL"
+            ));
+            if !ports.is_empty() {
+                self.cage.unpublish(slot);
+            }
+            self.abort(grant);
+            return Err(e);
+        }
         self.register(slot, generation, region);
         let dispatch = self.cage.dispatch(slot, core);
         let part = grant.part.dispatched();
@@ -872,16 +938,68 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
     }
 
     /// De gewone rollback: de grant komt terug en er draaide nooit iets.
+    /// Een device-grant van deze start gaat mee terug (Go: `rollback` van
+    /// `startGrant`): wie nooit draaide, houdt geen glas vast.
     fn abort(&mut self, grant: ImageGrant) {
         if !self.streaming(&grant) {
             return;
         }
         let slot = grant.slot();
+        self.grants.release(slot);
         grant.part.abandon(&mut self.parts);
         self.places.release(slot);
         if let Some(e) = self.residents.get_mut(slot.get()) {
             *e = None;
         }
+    }
+
+    /// De env-haak van een lopende start (Go: `prepareGrantedEnv`): de
+    /// grant-aanbieder mag regels achter de env van `slot` zetten, en de
+    /// complete blob gaat terug naar wie de stroom houdt, die hem op de
+    /// control-page schrijft.
+    ///
+    /// Alleen voor een slot in de stroom: de grant die hier ontstaat, gaat
+    /// terug bij de abort of na de bevestigde stop, en een slot zonder
+    /// stroom heeft geen van beide voor zich. Past het geheel niet in de
+    /// control-page ([`abi::hopabi::CTRL_ENV_MAX`]), dan is dat een
+    /// weigering van de grant, geen fout van de start: de grant gaat terug
+    /// en de app draait zonder, met één regel.
+    fn env(&mut self, slot: Slot, mut env: Vec<u8>) -> Result<Vec<u8>> {
+        if !self
+            .resident(slot)
+            .is_some_and(|r| matches!(r.held, Held::Streaming))
+        {
+            return Err(Error::NotOwned { slot: slot.get() });
+        }
+        let mut extra = Vec::new();
+        self.grants.env(slot, &env, &mut extra);
+        if extra.is_empty() {
+            return Ok(env);
+        }
+        // Een env zonder slotregel krijgt er een: anders plakt de eerste
+        // regel van de aanbieder aan de laatste waarde van de start.
+        let sep = usize::from(env.last().is_some_and(|&b| b != b'\n'));
+        let max = abi::hopabi::CTRL_ENV_MAX as usize;
+        let len = env.len() + sep + extra.len();
+        let refused = if len > max {
+            Some(Error::TooLarge { len, max })
+        } else {
+            env.try_reserve(sep + extra.len())
+                .err()
+                .map(|_| Error::OutOfMemory { bytes: len })
+        };
+        if let Some(e) = refused {
+            self.grants.release(slot);
+            self.log.log(format_args!(
+                "slot {slot}: device grant refused: env {e}, the app runs without it HOPOS_GRANT_ENV"
+            ));
+            return Ok(env);
+        }
+        if sep == 1 {
+            env.push(b'\n');
+        }
+        env.extend_from_slice(&extra);
+        Ok(env)
     }
 
     /// Stopt de servicer van `slot` en wacht tot hij weg is.
@@ -972,6 +1090,10 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
             Held::Quarantined(q) => q.confirm(&mut self.parts, Stopped::confirmed(slot)).ok(),
             Held::Streaming => None,
         };
+        // Pas na de bevestigde stop gaat de device-grant terug (Go:
+        // `grantRelease` in `releaseSlot`): in quarantaine kan de houder nog
+        // tekenen, dus daar blijft hij van het slot.
+        self.grants.release(slot);
         if let Some(p) = owned {
             p.release(&mut self.parts, Stopped::confirmed(slot))?;
         }
@@ -1154,6 +1276,20 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
                 });
             }
         }
+        // Dan de device-grants, uit de geërfde kooien en vóór er één bewoner
+        // opnieuw verbindt (Go: `grant.Adopt` in `adopt.go`, dat daar
+        // panikeerde). Een fout laat de claims staan en start geen dienst:
+        // fail-closed, de watchdog en Hop ruimen op.
+        for st in states {
+            if let Some(slot) = Slot::new(st.slot)
+                && let Err(e) = self.grants.adopt(slot)
+            {
+                self.log.log(format_args!(
+                    "slot {slot}: device grant not restored: {e} HOPOS_GRANT_ADOPT_FAIL"
+                ));
+                return Err(e);
+            }
+        }
         // Pas nu de diensten: geen servicer vóór ALLE oude claims terug zijn.
         for st in states {
             if let Some(slot) = Slot::new(st.slot)
@@ -1210,6 +1346,11 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
     /// De cores.
     pub fn cores(&mut self) -> &mut K {
         &mut self.cores
+    }
+
+    /// De grant-aanbieder (voor de tests).
+    pub fn grants(&mut self) -> &mut G {
+        &mut self.grants
     }
 }
 
@@ -1327,6 +1468,12 @@ fn adopted_core(c: usize) -> Option<Core> {
 }
 
 #[cfg(test)]
+mod smp_tests;
+
+#[cfg(test)]
+mod grant_tests;
+
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::cage::CageError;
@@ -1337,7 +1484,7 @@ pub(crate) mod tests {
     use std::string::String;
     use std::vec;
 
-    const MIB: u64 = 1 << 20;
+    pub(crate) const MIB: u64 = 1 << 20;
 
     /// Hoe de nep-app op een stop reageert.
     #[derive(Copy, Clone, PartialEq)]
@@ -1359,6 +1506,8 @@ pub(crate) mod tests {
         pub(crate) dispatched: Vec<(usize, usize)>,
         pub(crate) secondaries: Vec<(usize, usize)>,
         pub(crate) fail_dispatch: bool,
+        /// Het startschot van een secundaire faalt (onbekende uitkomst).
+        pub(crate) fail_secondary: bool,
         pub(crate) fail_build: bool,
         pub(crate) smp_req: [u64; 16],
         pub(crate) calls: Cell<u32>,
@@ -1368,6 +1517,11 @@ pub(crate) mod tests {
         pub(crate) unpublished: Vec<usize>,
         /// Een poort die al van dit slot is (de switch weigert hem).
         pub(crate) taken: Option<(u16, usize)>,
+        /// Cores die nooit stil worden, wat de app ook doet (een secundaire
+        /// die de intrekking niet bevestigt).
+        pub(crate) stuck: [bool; 16],
+        /// Welke (slot, core)-paren de stop naar stilte vroeg.
+        pub(crate) asked_quiet: RefCell<Vec<(usize, usize)>>,
     }
 
     impl FakeCage {
@@ -1381,12 +1535,15 @@ pub(crate) mod tests {
                 dispatched: Vec::new(),
                 secondaries: Vec::new(),
                 fail_dispatch: false,
+                fail_secondary: false,
                 fail_build: false,
                 smp_req: [0; 16],
                 calls: Cell::new(0),
                 published: Vec::new(),
                 unpublished: Vec::new(),
                 taken: None,
+                stuck: [false; 16],
+                asked_quiet: RefCell::new(Vec::new()),
             }
         }
     }
@@ -1428,14 +1585,21 @@ pub(crate) mod tests {
             core: Core,
         ) -> core::result::Result<(), CageError> {
             self.secondaries.push((slot.get(), core.get()));
+            if self.fail_secondary {
+                return Err(CageError { code: 7 });
+            }
             Ok(())
         }
         fn request_exit(&mut self, slot: Slot) {
             self.calls.set(self.calls.get() + 1);
             self.exit_asked[slot.get()] = true;
         }
-        fn quiet(&self, slot: Slot, _: Core) -> bool {
+        fn quiet(&self, slot: Slot, core: Core) -> bool {
             self.calls.set(self.calls.get() + 1);
+            self.asked_quiet.borrow_mut().push((slot.get(), core.get()));
+            if self.stuck[core.get()] {
+                return false;
+            }
             let i = slot.get();
             match self.obey {
                 Obey::Exit => self.exit_asked[i] || self.revoked[i],
@@ -1501,7 +1665,8 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) type Actor<'s> = Lifecycle<'s, FakeCage, FakeCores, FakeTimer, &'s FakeConsole>;
+    pub(crate) type Actor<'s, G = NoGrants> =
+        Lifecycle<'s, FakeCage, FakeCores, FakeTimer, &'s FakeConsole, G>;
 
     pub(crate) fn actor<'s>(
         svc: &'s Servicers,
@@ -1510,6 +1675,18 @@ pub(crate) mod tests {
         pool_mib: u64,
         cores: usize,
     ) -> Actor<'s> {
+        actor_with(svc, con, obey, pool_mib, cores, NoGrants)
+    }
+
+    /// Een actor met een eigen grant-aanbieder.
+    pub(crate) fn actor_with<'s, G: Grants>(
+        svc: &'s Servicers,
+        con: &'s FakeConsole,
+        obey: Obey,
+        pool_mib: u64,
+        cores: usize,
+        grants: G,
+    ) -> Actor<'s, G> {
         let parts = PartitionPool::new(
             &[Region::new(0x8000_0000, pool_mib * MIB)],
             Region::default(),
@@ -1526,6 +1703,7 @@ pub(crate) mod tests {
             parts,
             CorePool::new(0),
             svc,
+            grants,
         )
     }
 
@@ -1533,7 +1711,7 @@ pub(crate) mod tests {
         Slot::new(i).unwrap()
     }
 
-    fn ded(cores: usize) -> Placement {
+    pub(crate) fn ded(cores: usize) -> Placement {
         Placement {
             group: None,
             pool_cores: 1,
@@ -1544,19 +1722,24 @@ pub(crate) mod tests {
 
     /// Claim + arm, zoals Hop een start doet, met een servicer die zijn
     /// levensduur al uitdiende (de tests draaien geen servicer-taak).
-    pub(crate) fn start(a: &mut Actor<'_>, slot: usize, mib: u64, cores: usize) -> Result {
+    pub(crate) fn start<G: Grants>(
+        a: &mut Actor<'_, G>,
+        slot: usize,
+        mib: u64,
+        cores: usize,
+    ) -> Result {
         start_live(a, slot, mib, cores)?;
         a.svc.ctl(s(slot)).unwrap().gone.set();
         Ok(())
     }
 
     /// Claim + arm; de servicer-taak draait de test zelf.
-    fn start_live(a: &mut Actor<'_>, slot: usize, mib: u64, cores: usize) -> Result {
+    fn start_live<G: Grants>(a: &mut Actor<'_, G>, slot: usize, mib: u64, cores: usize) -> Result {
         let g = block_on(a.claim(StartSpec::new(s(slot), mib * MIB, ded(cores))))?;
         block_on(a.arm(g, 0x4001_0000))
     }
 
-    pub(crate) fn stop(a: &mut Actor<'_>, slot: usize) -> Result {
+    pub(crate) fn stop<G: Grants>(a: &mut Actor<'_, G>, slot: usize) -> Result {
         block_on(a.stop(s(slot), Duration::from_millis(50)))
     }
 

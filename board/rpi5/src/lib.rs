@@ -39,7 +39,7 @@ use driver_brcmpcie::{EpBar, InWin, OutWin, Rc};
 use driver_gem::Gem;
 use driver_pl011::Pl011;
 
-pub use board_raspi::{DMA, KERN_RAM};
+pub use board_raspi::{DMA, Disk, KERN_RAM};
 
 /// De debug-UART (PL011, de 3-pins JST-SH-connector; Linux ttyAMA10). De
 /// firmware zet hem op 115200 zodra hij zelf logt (`uart_2ndstage=1`).

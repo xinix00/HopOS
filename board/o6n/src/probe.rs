@@ -76,6 +76,19 @@ pub(crate) mod tests {
     use std::cell::RefCell;
     use std::collections::HashMap;
 
+    /// De tabel van het Go-board (uit de device tree) en de `_PRT` van de
+    /// Cix-DSDT zeggen hetzelfde, voor alle vijf de root-poorten: de lijn
+    /// die `board_uefi::irq` uit de DSDT haalt, is de lijn die op 18-09
+    /// (L80) vuurde.
+    #[test]
+    fn the_dt_table_matches_the_dsdt() {
+        let dsdt = include_bytes!("../../../fw/src/acpi/testdata/o6n-dsdt.aml");
+        for bus in [0x00, 0x30, 0x60, 0x90, 0xc0] {
+            let prt = fw::aml::prt(dsdt, 0, bus).unwrap();
+            assert_eq!(prt.lookup(0, 0), nic_intid(bus), "root bus {bus:#x}");
+        }
+    }
+
     /// Een config-space in RAM: per functie 64 dwords.
     #[derive(Default)]
     pub(crate) struct FakeCfg {

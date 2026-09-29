@@ -27,6 +27,10 @@
 
 pub mod heap;
 
+/// De framebuffer-beschrijving van [`Board::framebuffer`], zodat een board
+/// hem noemt zonder eigen dependency.
+pub use driver_fb as fb;
+
 use core::fmt;
 use dev::Pa;
 use sync::Signal;
@@ -203,6 +207,14 @@ pub trait Board: Sync {
 
     /// Vindt en initialiseert de NIC. `Ok(None)` = geen NIC; één keer.
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error>;
+
+    /// De lineaire framebuffer van dit board, als er een beeld loopt (GOP,
+    /// de VideoCore-mailbox, `ramfb`, of de eigen scanout van de RK3566).
+    /// `None` = headless, en dat is geen fout. Alleen met de feature `gui`
+    /// levert een board er een (docs/gui.md).
+    fn framebuffer(&self) -> Option<fb::Desc> {
+        None
+    }
 }
 
 #[cfg(test)]

@@ -4,7 +4,7 @@
 use super::*;
 use abi::Region;
 use abi::checksum::fnv64;
-use abi::layout::{CTX_BOOT_PC, CTX_NEXT_PA, CTX_SLEEPS, PlanSpec};
+use abi::layout::{CTX_BOOT_PC, CTX_NEXT_PA, CTX_SLEEPS, CTX_SMP, PlanSpec};
 
 /// Een buffer met een gegarandeerde uitlijning; het adres is de `Pa`.
 struct Buf {
@@ -406,4 +406,183 @@ fn revoke_clears_the_tables_of_the_slot_only() {
         CtxState::Saved.raw(),
         "a half-saved context must survive the kill"
     );
+}
+
+/// De keuze van de rotatie (`switch.rs`, `.Lrotate`), in Rust naast de
+/// assembly gelegd: round-robin vanaf cursor+1, de eerste die boot-pending
+/// is, of Saved en aan de beurt op `now`; met de hercontrole van de byte.
+/// Schrijft wat de switcher schrijft (cursor, current, staat) en geeft de
+/// gekozen context-id, of `None` (slapen of parkeren).
+fn rotate(p: &Plan, c: Core, now: u64) -> Option<u8> {
+    let mb = p.park_mbox_pa(c).unwrap();
+    let n = dev::read64(mb.add(SCHED_COUNT)) as usize;
+    let mut cur = dev::read64(mb.add(SCHED_CURSOR)) as usize;
+    for _ in 0..n {
+        cur = (cur + 1) % n;
+        let id = dev::read8(mb.add(SCHED_LIST + cur as u64));
+        if id == 0 {
+            continue;
+        }
+        let ctx = context_pa(p, id).unwrap();
+        let st = ctx_state(ctx);
+        if dev::read8(mb.add(SCHED_LIST + cur as u64)) != id {
+            continue;
+        }
+        let due = match st {
+            Some(CtxState::BootPending) => true,
+            Some(CtxState::Saved) => {
+                let w = ctx_read(ctx, CTX_WAKE) & !CTX_WAKE_NO_PEEK;
+                w == 0 || now >= w
+            }
+            _ => false,
+        };
+        if due {
+            dev::write64(mb.add(SCHED_CURSOR), cur as u64);
+            dev::write64(mb.add(SCHED_CURRENT), u64::from(id));
+            ctx_write(ctx, CTX_STATE, CtxState::Running.raw());
+            return Some(id);
+        }
+    }
+    None
+}
+
+/// Een yield zoals de switcher hem bewaart: Saved met wektijd `wake`.
+fn yield_at(ctx: Pa, wake: u64) {
+    ctx_write(ctx, CTX_WAKE, wake);
+    ctx_write(ctx, CTX_STATE, CtxState::Saved.raw());
+}
+
+// Twee kooien op één app-core (share.go, 30-09 naar Rust): de eerste is
+// een gewoon startschot, de tweede komt erbij op de draaiende core als
+// boot-pending, en daarna wisselen ze elkaar af op hun yields.
+#[test]
+fn two_residents_take_turns_on_one_app_core() {
+    let (_buf, p) = plan();
+    init_region(&p, Pa(0x4000_0000), Some(&[0; 4])).unwrap();
+    let (a, b) = (p.ctx_pa(slot(1)).unwrap(), p.ctx_pa(slot(2)).unwrap());
+    let mb = p.park_mbox_pa(core(1)).unwrap();
+
+    // Koud: join weigert te schrijven, het is een gewoon startschot.
+    assert_eq!(
+        join(&p, core(1), b, Pa(0x4000_A100), 0x5200_0000),
+        Ok(Join::Idle)
+    );
+    assert_eq!(ctx_state(b), Some(CtxState::Empty));
+    assert_eq!(
+        dispatch(&p, core(1), a, Pa(0x4000_A100), 0x5100_0000),
+        Ok(Start::Cold)
+    );
+
+    // De tweede erbij: boot-pending, met zijn trampoline en control-page.
+    assert_eq!(
+        join(&p, core(1), b, Pa(0x4000_A100), 0x5200_0000),
+        Ok(Join::Joined)
+    );
+    assert_eq!(ctx_state(b), Some(CtxState::BootPending));
+    assert_eq!(ctx_read(b, CTX_BOOT_PC), 0x4000_A100);
+    assert_eq!(ctx_read(b, CTX_BOOT_ARG), 0x5200_0000);
+    let mut ids = Vec::new();
+    assert_eq!(residents(&p, core(1), |id| ids.push(id)), Ok(2));
+    assert_eq!(ids, [1, 2]);
+    // Twee keer erbij is één keer.
+    join(&p, core(1), b, Pa(0x4000_A100), 0x5200_0000).unwrap();
+    assert_eq!(dev::read64(mb.add(SCHED_COUNT)), 2);
+
+    // A yieldt tot t=100: B boot. B yieldt tot t=50: op t=10 is niemand aan
+    // de beurt (de switcher slaapt), op t=60 B, op t=100 A.
+    yield_at(a, 100);
+    assert_eq!(rotate(&p, core(1), 0), Some(2));
+    yield_at(b, 50);
+    assert_eq!(rotate(&p, core(1), 10), None);
+    assert_eq!(rotate(&p, core(1), 60), Some(2));
+    yield_at(b, 500);
+    assert_eq!(rotate(&p, core(1), 100), Some(1));
+    // Om de beurt: met beide aan de beurt wint de volgende na de cursor.
+    yield_at(a, 0);
+    yield_at(b, 0);
+    let turns: Vec<u8> = (0..4)
+        .map(|_| {
+            let id = rotate(&p, core(1), 1000).unwrap();
+            yield_at(context_pa(&p, id).unwrap(), 0);
+            id
+        })
+        .collect();
+    assert_eq!(turns, [2, 1, 2, 1]);
+
+    // Een lid eraf: A uit de lijst en dood (hij lag geyield), B draait door.
+    assert_eq!(evict(&p, core(1), a), Ok(true));
+    assert_eq!(ctx_state(a), Some(CtxState::Dead));
+    assert_eq!(rotate(&p, core(1), 1000), Some(2));
+    assert_eq!(rotate(&p, core(1), 1000), None, "B is running, A is gone");
+    // Een draaiende bewoner blijft Running: hij faultt zelf op de intrekking.
+    assert_eq!(evict(&p, core(1), b), Ok(true));
+    assert_eq!(ctx_state(b), Some(CtxState::Running));
+    // Het gat wordt hergebruikt: de lijst groeit niet.
+    ctx_write(a, CTX_STATE, CtxState::Empty.raw());
+    join(&p, core(1), a, Pa(0x4000_A100), 0x5100_0000).unwrap();
+    assert_eq!(dev::read64(mb.add(SCHED_COUNT)), 2);
+}
+
+// De hercontrole: een slot dat van de ene core naar de andere verhuist,
+// wordt eerst uit elke lijst gehaald; een oude rotatie die zijn byte nog
+// las, ziet bij de hercontrole het gat en start hem niet.
+#[test]
+fn a_forgotten_slot_is_never_booted_by_its_old_core() {
+    let (_buf, p) = plan();
+    init_region(&p, Pa(0x4000_0000), Some(&[0; 4])).unwrap();
+    let (a, b) = (p.ctx_pa(slot(1)).unwrap(), p.ctx_pa(slot(2)).unwrap());
+    dispatch(&p, core(1), a, Pa(0x4000_A100), 0x5100_0000).unwrap();
+    join(&p, core(1), b, Pa(0x4000_A100), 0x5200_0000).unwrap();
+    ctx_write(b, CTX_STATE, CtxState::Dead.raw());
+    forget(&p, slot(2)).unwrap();
+    let mut ids = Vec::new();
+    residents(&p, core(1), |id| ids.push(id)).unwrap();
+    assert_eq!(ids, [1]);
+    // Slot 2 staat nu boot-pending op core 2; core 1 ziet hem niet meer.
+    dispatch(
+        &p,
+        core(2),
+        p.ctx_pa(slot(3)).unwrap(),
+        Pa(0x4000_A100),
+        0x5300_0000,
+    )
+    .unwrap();
+    join(&p, core(2), b, Pa(0x4000_A100), 0x5200_0000).unwrap();
+    yield_at(a, 1_000_000);
+    assert_eq!(rotate(&p, core(1), 0), None);
+    assert_eq!(ctx_state(b), Some(CtxState::BootPending));
+}
+
+// Een SMP-eenheid: de secundaire krijgt een eigen ctx-blok met de
+// control-page en de eenheid van de primaire, zijn wekdoel meteen, geen
+// RX-peek, en de keten loopt rond.
+#[test]
+fn secondary_contexts_chain_back_to_the_primary() {
+    let (_buf, p) = plan();
+    init_region(&p, Pa(0x4000_0000), Some(&[0; 4])).unwrap();
+    let prim = p.ctx_pa(slot(1)).unwrap();
+    let ctrl = Pa(0x5100_0000);
+    dev::write64(p.smp_ctx_pa(core(2)).unwrap().add(CTX_KICK_PENDING), 1);
+    let sec = prepare_secondary(&p, core(2), slot(1), ctrl, 0x2).unwrap();
+    let sec3 = prepare_secondary(&p, core(3), slot(1), ctrl, 0x3).unwrap();
+    assert_eq!(ctx_read(sec, CTX_CTRL_PA), ctrl.0);
+    assert_eq!(ctx_read(sec, CTX_UNIT_SLOT), 1);
+    assert_eq!(ctx_read(sec, CTX_RING_HEAD_PA), 0);
+    assert_eq!(ctx_read(sec, CTX_KICK_TARGET), 0x2);
+    assert_eq!(ctx_read(sec, CTX_KICK_PENDING), 0, "a stale latch survived");
+    assert_eq!(ctx_state(sec), Some(CtxState::Empty));
+    chain(&[prim, sec, sec3]);
+    assert_eq!(ctx_read(prim, CTX_NEXT_PA), sec.0);
+    assert_eq!(ctx_read(sec, CTX_NEXT_PA), sec3.0);
+    assert_eq!(ctx_read(sec3, CTX_NEXT_PA), prim.0);
+    // Het startschot van de secundaire: zijn eigen context-id op zijn core.
+    dispatch(&p, core(2), sec, Pa(0x4000_A200), sec.0 + CTX_SMP).unwrap();
+    let mb = p.park_mbox_pa(core(2)).unwrap();
+    assert_eq!(
+        dev::read64(mb.add(SCHED_CURRENT)),
+        u64::from(core(2).smp_context_id().unwrap())
+    );
+    // Eén context: geen schakel meer.
+    chain(&[prim]);
+    assert_eq!(ctx_read(prim, CTX_NEXT_PA), 0);
 }

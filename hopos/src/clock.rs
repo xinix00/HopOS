@@ -64,6 +64,16 @@ pub(crate) fn attach(slot: Slot, ctrl: dev::Pa) {
     }
 }
 
+/// De control-page van slot `i` als hij een gebouwde kooi heeft: de
+/// telemetrie leest er de idle-teller en de heartbeat en zet er de
+/// temperatuur op (telemetry.rs, watchdog.rs).
+pub(crate) fn ctrl_page(i: usize) -> Option<dev::Pa> {
+    match CTRL.get(i).map(|c| c.load(Relaxed)) {
+        Some(0) | None => None,
+        Some(pa) => Some(dev::Pa(pa)),
+    }
+}
+
 /// De kooi van `slot` is ingetrokken: zijn page is niet meer van hem.
 pub(crate) fn detach(slot: Slot) {
     if let Some(c) = CTRL.get(slot.get()) {

@@ -7,7 +7,9 @@
 //! Op de host staan hier stubs met dezelfde signatuur, zodat de logica
 //! erboven test (handboek §7: `cfg` op module-niveau).
 
-/// De timer uit: zijn lijn valt, tot de slaap hem weer zet.
+/// De EL1-timer (CNTP, PPI 30) uit: zijn lijn valt, tot de slaap hem weer
+/// zet. Onder VHE slaapt de kern op de CNTHP en is dit de timer van een
+/// bewoner.
 pub(crate) fn timer_off() {
     imp::timer_off();
 }
@@ -160,9 +162,25 @@ mod imp {
     }
 
     pub(super) fn timer_off() {
-        // SAFETY: CNTP_CTL_EL0 = 0 zet de eigen fysieke timer van deze core
-        // uit; geen geheugeneffect.
-        unsafe { asm!("msr cntp_ctl_el0, xzr", "isb", options(nomem, nostack)) };
+        // Onder VHE is `cntp_ctl_el0` vanaf EL2 de CNTHP (die zet
+        // `hyp_timer_off` al uit); de EL1-timer van PPI 30 heet dan
+        // CNTP_CTL_EL02 (S3_5_C14_C2_1). De nVHE-tak is de instructie van
+        // vóór VHE.
+        // SAFETY: de fysieke EL1-timer van deze core op 0 zetten; geen
+        // geheugeneffect. De EL02-encodering staat alleen in de VHE-build,
+        // waar de kern onder E2H = 1 draait en hij bestaat.
+        unsafe {
+            asm!(
+                ".if {vhe}",
+                "msr S3_5_C14_C2_1, xzr",
+                ".else",
+                "msr cntp_ctl_el0, xzr",
+                ".endif",
+                "isb",
+                vhe = const crate::el2::VHE as u8,
+                options(nomem, nostack)
+            )
+        };
     }
 
     pub(super) fn irq_unmask() {

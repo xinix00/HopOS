@@ -586,3 +586,81 @@ fn run_loop_attach_forward_detach() {
     settle();
     assert_eq!(exec.live_tasks(), 0, "de lus stopte niet op de stopbel");
 }
+
+/// De flip in het klein: een uitgaande TCP-flow van slot 1 op de oude
+/// switch, de snapshot via de brievenbus (`SnapshotNat`), en op een verse
+/// switch het herstel (`HoldAdoption`, `RestoreNat`, `FinishAdoption`).
+/// Het antwoord van de peer op de oude node-poort moet daarna gewoon in
+/// slot 1 landen, op de oude poort van de app.
+#[test]
+fn de_conntrack_overleeft_de_flip_via_de_actor() {
+    let mut old = harness();
+    old.uplink();
+    old.leer_gateway();
+    let _host = old.host();
+    let _app = old.attach(1);
+    let out = mk_frame(
+        PROTO_TCP,
+        HOST_MAC,
+        slot_mac(1),
+        slot_ip4(1),
+        EXT_IP,
+        5555,
+        443,
+        &[],
+    );
+    old.forward_once(1, &out);
+    let sent = old.sent();
+    assert_eq!(sent.len(), 1, "de SYN ging de uplink niet op");
+    let node_port = be16(&sent[0], ETH_LEN + 20);
+
+    let reply: &'static NatReply = leak(NatReply::new());
+    let buf = vec![FlowState::default(); crate::MAX_FLOWS];
+    old.sw.handle(Command::SnapshotNat { buf, reply });
+    let snap = reply.snap.try_recv().expect("geen snapshot");
+    assert_eq!(snap.flows.len(), 1);
+    assert_eq!(snap.flows[0].node_port, node_port);
+    assert_eq!(snap.gw_mac, Some(GW_MAC0));
+
+    // Bevroren: een nieuwe uitgaande verbinding krijgt geen flow meer.
+    let other = mk_frame(
+        PROTO_TCP,
+        HOST_MAC,
+        slot_mac(1),
+        slot_ip4(1),
+        EXT_IP,
+        6666,
+        443,
+        &[],
+    );
+    old.forward_once(1, &other);
+    assert!(old.sent().is_empty(), "na de snapshot nog een nieuwe flow");
+    assert_eq!(old.sw.nat().flow_count(), 1);
+
+    // De nieuwe kern.
+    let mut new = harness();
+    new.uplink();
+    let mut app = new.attach(1);
+    let ack: &'static Ack = leak(Ack::new());
+    let ports: &'static [u16] = Box::leak(vec![node_port].into_boxed_slice());
+    new.sw.handle(Command::HoldAdoption { ports, ack });
+    assert_eq!(ack.try_take(), Some(Ok(0)));
+    let flows: &'static [FlowState] = Box::leak(snap.flows.clone().into_boxed_slice());
+    let state = NatState {
+        flows,
+        masq_next: snap.masq_next,
+        gw_mac: snap.gw_mac,
+    };
+    new.sw.handle(Command::RestoreNat { state, ack });
+    assert_eq!(ack.try_take(), Some(Ok(1)), "de flow kwam niet terug");
+    new.sw.handle(Command::FinishAdoption { ack });
+    assert_eq!(ack.try_take(), Some(Ok(0)));
+
+    let mut back = mk_frame(
+        PROTO_TCP, NIC_MAC, GW_MAC0, EXT_IP, NODE_IP, 443, node_port, b"hallo",
+    );
+    assert!(new.sw.nat.inbound(&mut new.sw.core, &mut back, fake_now()));
+    let got = app.rx.frame().expect("het antwoord landde niet in slot 1");
+    assert_eq!(be32(&got, ETH_LEN + 16), slot_ip4(1));
+    assert_eq!(be16(&got, ETH_LEN + 22), 5555);
+}

@@ -39,9 +39,12 @@
 //! de lijven van uitgegeven blokken zijn van wie ze kreeg.
 
 use core::alloc::{GlobalAlloc, Layout};
-use core::cell::RefCell;
+use core::cell::UnsafeCell;
 use core::fmt;
-use sync::Local;
+use core::sync::atomic::{
+    AtomicU64,
+    Ordering::{Acquire, Relaxed, Release},
+};
 
 /// De kop van een blok: `size | USED` en de maat van de voorganger. Zestien
 /// bytes, zodat elk lijf op de korrel uitgelijnd blijft.
@@ -546,14 +549,102 @@ impl State {
     }
 }
 
+/// Het slot van de allocator (handboek §1.3, slot 1): alleen een slot
+/// omdat een SMP-app met meer dan één core alloceert (een taak die
+/// [`crate::smp::spawn_on`] plaatst, is een blok van de ene core dat de
+/// andere vrijgeeft). Op één core is hij nooit bezet als iemand hem vraagt.
+///
+/// De vorm van §3: het slot omhult de staat en is privé aan deze module;
+/// de enige weg erheen is [`HeapLock::with`], en de sluiting kan niets
+/// buiten de heap aanroepen en niets laten ontsnappen. Nooit in een ISR (een
+/// app heeft geen vectoren) en nooit over een `.await` (de heap is
+/// synchroon). Wachten is een kale lees-lus, geen CAS per ronde (§3.6).
+///
+/// Een allocatie vanuit een allocatie op dezelfde core (kan niet: de heap
+/// roept niets aan, maar een paniek midden in `alloc` zou het proberen)
+/// faalt, zoals de `RefCell` van vóór 30-09 dat deed, in plaats van zichzelf
+/// eeuwig te laten wachten: de eigenaar staat in het slot.
+///
+/// # Invariants
+///
+/// `st` wordt alleen aangeraakt binnen [`HeapLock::with`], door de core die
+/// `owner` van [`FREE`] naar zijn eigen id wisselde, tot hij hem terugzet.
+struct HeapLock {
+    /// De MPIDR-affiniteit van de core die de staat heeft, of [`FREE`].
+    owner: AtomicU64,
+    st: UnsafeCell<State>,
+}
+
+/// Het slot is vrij. Een affiniteit is hooguit 24 bits.
+const FREE: u64 = u64::MAX;
+
+// SAFETY: door de invariant raakt precies één core tegelijk `st` aan; de
+// Acquire van de wissel en de Release van de vrijgave ordenen de
+// schrijvingen van de vorige houder vóór de lezingen van de volgende.
+unsafe impl Sync for HeapLock {}
+
+/// De meetlat van het slot (§3.8): hoe vaak gepakt, hoe vaak er gewacht
+/// werd, en de langste wacht in lees-rondes.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct LockStats {
+    /// Keren gepakt.
+    pub taken: u64,
+    /// Keren dat een andere core hem had.
+    pub contended: u64,
+    /// De langste wacht, in rondes van de lees-lus.
+    pub longest_spin: u64,
+    /// Geweigerd omdat deze core hem al had.
+    pub reentered: u64,
+}
+
+static LOCK_TAKEN: AtomicU64 = AtomicU64::new(0);
+static LOCK_CONTENDED: AtomicU64 = AtomicU64::new(0);
+static LOCK_LONGEST: AtomicU64 = AtomicU64::new(0);
+static LOCK_REENTERED: AtomicU64 = AtomicU64::new(0);
+
+impl HeapLock {
+    const fn new(st: State) -> Self {
+        Self {
+            owner: AtomicU64::new(FREE),
+            st: UnsafeCell::new(st),
+        }
+    }
+
+    /// Draait `f` met de staat; `None` als deze core hem al heeft.
+    fn with<R>(&self, f: impl FnOnce(&mut State) -> R) -> Option<R> {
+        let me = crate::arch::core_id();
+        let mut spins: u64 = 0;
+        while let Err(cur) = self.owner.compare_exchange_weak(FREE, me, Acquire, Relaxed) {
+            if cur == me {
+                LOCK_REENTERED.fetch_add(1, Relaxed);
+                return None;
+            }
+            while self.owner.load(Relaxed) != FREE {
+                spins = spins.wrapping_add(1);
+                core::hint::spin_loop();
+            }
+        }
+        LOCK_TAKEN.fetch_add(1, Relaxed);
+        if spins > 0 {
+            LOCK_CONTENDED.fetch_add(1, Relaxed);
+            LOCK_LONGEST.fetch_max(spins, Relaxed);
+        }
+        // SAFETY: de wissel hierboven maakte deze core de enige houder
+        // (de invariant van `HeapLock`); de lening leeft tot de vrijgave
+        // hieronder en ontsnapt niet uit `f`.
+        let r = f(unsafe { &mut *self.st.get() });
+        self.owner.store(FREE, Release);
+        Some(r)
+    }
+}
+
 /// De heap van een app: vrije lijsten per klasse over één gebied.
 ///
-/// Eén core alloceert, en een app heeft geen ISR (de vectoren zijn dicht),
-/// dus de staat is een [`Local`] met een `RefCell` en geen slot. Een
-/// allocatie vanuit een allocatie (kan niet: de heap roept niets aan) zou
-/// de lening dicht vinden en faalt dan, in plaats van te panikeren.
+/// Tot 30-09 was de staat een [`sync::Local`] met een `RefCell`: één core
+/// alloceerde, en een app heeft geen ISR. Een SMP-app alloceert op elke
+/// core (de taken van zijn executors), dus nu het slot uit §1.3.
 pub struct Heap {
-    st: Local<RefCell<State>>,
+    st: HeapLock,
 }
 
 impl Heap {
@@ -561,7 +652,7 @@ impl Heap {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            st: Local::new(RefCell::new(State::empty())),
+            st: HeapLock::new(State::empty()),
         }
     }
 
@@ -576,23 +667,19 @@ impl Heap {
     /// via wat de heap uitgeeft. Blokken uit een vorige `init` worden niet
     /// meer gebruikt.
     pub unsafe fn init(&self, start: usize, end: usize) {
-        if let Ok(mut st) = self.st.get().try_borrow_mut() {
-            st.init(start, end);
-        }
+        self.st.with(|st| st.init(start, end));
     }
 
     /// Zet het plafond voor de bytes in gebruik, hooguit de maat van het
     /// gebied. Wat al uitgegeven is, blijft staan.
     pub fn set_ceiling(&self, bytes: usize) {
-        if let Ok(mut st) = self.st.get().try_borrow_mut() {
-            st.ceiling = bytes.min(st.end - st.start);
-        }
+        self.st.with(|st| st.ceiling = bytes.min(st.end - st.start));
     }
 
     /// Reserveert `size` bytes met uitlijning `align` (een macht van twee,
     /// hooguit [`MAX_ALIGN`]); het adres, of `None` als het niet past.
     pub fn reserve(&self, size: usize, align: usize) -> Option<usize> {
-        self.st.get().try_borrow_mut().ok()?.alloc(size, align)
+        self.st.with(|st| st.alloc(size, align)).flatten()
     }
 
     /// Geeft het blok op `p` terug. Iets dat geen bezet blok is, wordt
@@ -605,9 +692,7 @@ impl Heap {
     /// vrijgave vangt de heap meestal, maar niet als het blok intussen
     /// opnieuw uitgegeven is.)
     pub unsafe fn release(&self, p: usize) {
-        if let Ok(mut st) = self.st.get().try_borrow_mut() {
-            st.free(p);
-        }
+        self.st.with(|st| st.free(p));
     }
 
     /// Bytes in gebruik, koppen inbegrepen: de geheugen-draw voor de
@@ -626,23 +711,27 @@ impl Heap {
     /// De meetlat.
     #[must_use]
     pub fn stats(&self) -> HeapStats {
-        self.st
-            .get()
-            .try_borrow()
-            .map(|st| st.stats())
-            .unwrap_or_default()
+        self.st.with(|st| st.stats()).unwrap_or_default()
+    }
+
+    /// De meetlat van het slot, over alle heaps van dit image.
+    #[must_use]
+    pub fn lock_stats() -> LockStats {
+        LockStats {
+            taken: LOCK_TAKEN.load(Relaxed),
+            contended: LOCK_CONTENDED.load(Relaxed),
+            longest_spin: LOCK_LONGEST.load(Relaxed),
+            reentered: LOCK_REENTERED.load(Relaxed),
+        }
     }
 
     /// Loopt de hele heap af en toetst de invarianten (zie [`State`]). Voor
     /// tests en diagnose; lineair in het aantal blokken.
     pub fn check(&self) -> Result<Walk, Corrupt> {
-        match self.st.get().try_borrow() {
-            Ok(st) => st.check(),
-            Err(_) => Err(Corrupt {
-                at: 0,
-                why: "heap busy",
-            }),
-        }
+        self.st.with(|st| st.check()).unwrap_or(Err(Corrupt {
+            at: 0,
+            why: "heap busy",
+        }))
     }
 }
 

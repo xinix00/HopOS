@@ -32,9 +32,23 @@
 extern crate alloc;
 
 mod arch;
+#[cfg(feature = "gui")]
+mod display;
 mod mmu;
 pub mod slots;
 pub mod soc;
+
+/// Zonder de feature `gui`: geen beeldketen aan boord, dus headless. Een
+/// kale node linkt geen regel display-code en er tekent geen logconsole in
+/// een buffer die niemand uitleest (Go: "geen dood gewicht", Derek 06-08).
+/// De fb-regio in het plan blijft in béíde smaken: één plan is goedkoper
+/// dan twee.
+#[cfg(not(feature = "gui"))]
+mod display {
+    pub(crate) fn framebuffer(_clock: fn() -> u64) -> Option<driver_fb::Desc> {
+        None
+    }
+}
 
 #[cfg(test)]
 mod tests;
@@ -53,6 +67,11 @@ use driver_virtioblk::VirtioBlk;
 use fw::fdt::Fdt;
 use netdev::Mac;
 use sync::{Local, Signal};
+
+/// De schijf die `probe_disk` geeft: het type van de opslag; er is nog geen SD-
+/// driver. De binary noemt hem `vboard::Disk`, zodat de geprobede schijf van de
+/// bench naar de opslag gaat zonder dat de binary het type per board kent.
+pub type Disk = VirtioBlk;
 
 /// De debug-UART (UART2 op de 40-pins header: pin 8 TX, 10 RX, 6 GND):
 /// DesignWare APB, 16550-compatibel, `reg-shift = 2`. U-Boot liet hem op
@@ -113,8 +132,8 @@ pub const USB_DMA: Region = Region {
 };
 /// De framebuffer in DRAM (8 MB, 1920x1080x4), Normal-NC. U-Boot laat op
 /// dit bord géén scherm achter (GEMETEN 05-08: geen simple-framebuffer, en
-/// `Out: serial@fe660000` zonder vidconsole); de VOP2-scanout naar HDMI was
-/// in Go gui-werk en is nog niet geport.
+/// `Out: serial@fe660000` zonder vidconsole); met de feature `gui` scant
+/// de VOP2 hem uit naar HDMI (`display`, `gui-rkscan`).
 pub const FB_RAM: Region = Region {
     base: Pa(0x0700_0000),
     size: 0x0080_0000,
@@ -505,6 +524,12 @@ impl Board for Rk3566 {
 
     fn clock(&self) -> executor::Clock {
         cpu::idle::now
+    }
+
+    /// De buffer uit het plan ([`FB_RAM`]); met `gui` start de eerste
+    /// aanroep de scanout naar HDMI, zonder is het board headless (`None`).
+    fn framebuffer(&self) -> Option<driver_fb::Desc> {
+        display::framebuffer(cpu::idle::now)
     }
 
     /// WFI met de fysieke timer op de deadline: hetzelfde pad als QEMU virt

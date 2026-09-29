@@ -1,6 +1,7 @@
 # Boards: de UEFI-machines (O6N en Altra)
 
-Stand 29-09-2026, avond. Wat er voor de Radxa Orion O6N en de Ampere Altra
+Stand 29-09-2026, nacht (interrupts over PCI, watchdog, klok en thermiek
+erbij). Wat er voor de Radxa Orion O6N en de Ampere Altra
 in v3 gebouwd is, wat je bij de eerste boot op de console hoort te zien, wat
 er nog niet is, en wat je meet. De lat is de contractmatrix van de Go-kern
 (`OLD/docs/support.md`): een v3-board is pas klaar als het op elk gemeten
@@ -19,15 +20,68 @@ er een hebt), Secure Boot uit. Beide boards zijn het UEFI-board
 `board-o6n` en `board-altra`. De binary kiest met `--features board-o6n` of
 `board-altra`.
 
-**Stand van de build:** de board-crates en alle drivers bouwen voor
-`aarch64-unknown-none-softfloat` en zijn groen op host-test, clippy en fmt.
-`hopos` met `board-o6n`/`board-altra` bouwt op dit moment níet, om dezelfde
-reden als `board-uefi` zelf: de core-0-lijm in `hopos/src/slots.rs` vraagt
-van het board `this_core()`, `os_bell()`, `kick_self()` en `plan(cores,
-core)`, en `board-uefi` levert die nog niet. De O6N- en Altra-crates geven
-alles wat `Uefi` heeft door (`Deref`), dus zodra `board-uefi` bouwt, bouwen
-zij ook. Toets vóór je naar het board loopt: `BOARD=uefi image/uefi-run.sh`
-boot op QEMU, en `BOARD=o6n` en `BOARD=altra` leveren een `BOOTAA64.EFI`.
+**Stand van de build:** alle drie de UEFI-images bouwen (`tools/gate.sh`),
+en `tools/qemu-uefi-test.sh` boot het generieke image op QEMU/EDK2 mét
+interrupts over PCI. Toets vóór je naar het board loopt: die test groen, en
+`BOARD=o6n` en `BOARD=altra` leveren een `BOOTAA64.EFI`.
+
+## Interrupts over PCI, watchdog, klok en thermiek (alle UEFI-boards)
+
+Wat de Go-kern op UEFI nooit had: MSI-X. Een PCIe-device krijgt nu, in deze
+volgorde (`board_uefi::irq`, `hopos.nicirq=auto`):
+
+1. **MSI-X via de GICv3-ITS** (`driver_gicv3::its`): de ITS uit de MADT, zijn
+   tabellen en de LPI-tabellen in de laatste MB van de NIC-DMA-helft
+   (`ITS_DMA`, Normal-NC), één collectie op de redistributor van de
+   OS-core, per device `MAPD`/`MAPTI`, vector 0 in de MSI-X-tabel. De
+   DeviceID komt uit de IORT (root-complex, eventueel door een SMMU, naar
+   de ITS-groep). Zonder IORT-weg geen MSI-X (een verkeerde DeviceID is
+   stil: de ITS gooit de schrijf weg), tenzij `hopos.nicirq=msix` de gok
+   DeviceID = requester-id afdwingt.
+2. **INTx uit de `_PRT`** van de host-bridge (`fw::aml`: een minimale lezer
+   die alleen statische `_PRT`-pakketten leest en een methode of een
+   link-device luid weigert), na de swizzle door de bridges. Op de O6N zegt
+   de DSDT precies wat de Go-tabel uit de device tree wist (host-test tegen
+   de echte DSDT: 477 voor bus 0x30, en de vier andere root-poorten).
+3. **Pollen** op 300 µs, met de reden op de regel.
+
+`hopos.nicirq=` in `hopos.cfg`: `auto` (standaard), `msix`, `intx`, `off`
+(of `0`), of een INTID (bordkennis die de DSDT niet heeft).
+
+De verwachte regels (QEMU/EDK2, 29-09):
+
+```
+irq: ITS IIDR 0x43b TYPER 0x1f0001efb1, 16 DeviceID bits, device table flat (4 KB pages), doorbell 0x8090040, LPIs enabled on the redistributor at 0x80a0000 HOPOS_ITS_UP
+net: virtio-net-pci at 00:02.0, MSI-X via the ITS, LPI 8192 (DeviceID 0x10), queue 256 HOPOS_NIC_IRQ
+net: pump on the nic (irq line, 10 ms guard), uplink queues 2x128 HOPOS_NET_PUMP
+HOPOS_TICK 2 sleeps=1120 polls=2070 irq(timer=0 nic=17 other=0) os(...) temp=-
+```
+
+Zonder ITS: `HOPOS_ITS_NONE`; LPI's die al aan stonden met andermans tabel:
+`HOPOS_ITS_FAIL` (EnableLPIs is eenmaal gezet vaak niet terug te zetten).
+
+**De watchdog** (`hopos::watchdog`, het beleid in `kern::watchdog` met de
+policy-tests van Go naam voor naam): de SBSA-watchdog uit de GTDT, 12 s
+gevraagd, aaien elke 2 s. Fase 1 blind tot het levensteken (het net op, en
+als Hop op de node woont zijn heartbeat die loopt), op een flip-boot
+hoogstens twee minuten op de rauwe teller; fase 2 alleen op bewijs.
+`hopos.wd=off` zet hem uit (ook een die de vorige kern wapende). Regels:
+`HOPOS_WD_ARMED`, `HOPOS_CANARY_LIVE`, `HOPOS_CANARY_MISS`,
+`HOPOS_BOOT_GUARD`, `HOPOS_BOOT_GUARD_EXPIRED`, `HOPOS_RESET_REQUESTED`;
+QEMU heeft er geen: `watchdog: no SBSA watchdog in the GTDT (QEMU?) - node
+liveness is UNGUARDED HOPOS_WD_NONE`. Let op een teller van 1 GHz
+(Armv8.6+, de O6N): WOR is 32 bits, dus de timeout wordt 8,6 s en de
+armed-regel zegt dat.
+
+**De thermiek** (`hopos::telemetry`): elke seconde op de tik (`temp=41.5C`,
+`-` zonder sensor) en op de control-page van Hop (`CTRL_TEMP`, milligraden;
+`applib::Ctrl::temp_milli_c`), voor zijn heartbeat.
+
+**De klok** (`driver_dvfs::run` op de OS-core): sample elke 10 ms, oordeel
+over 50 ms, omhoog op last, omlaag na 30 s stil; elke 10 s een meetregel
+`dvfs: clock <MHz> (full|quiet), temp <C>, busy <bron> HOPOS_CLOCK`, en een
+regel per flank (`HOPOS_CLOCK_EDGE`). `hopos.clock=dvfs|max|quiet|firmware`
+pint, `hopos.mhz=` klemt het plafond.
 
 ## Radxa Orion O6N
 
@@ -40,17 +94,64 @@ boot op QEMU, en `BOARD=o6n` en `BOARD=altra` leveren een `BOOTAA64.EFI`.
 | Thermometer: SCP via SCMI op 0x065d0000 (het kanaal van de DSDT-`_TMP`) | `driver-scmi`, `board-o6n::thermal` | 6 + 2 host-tests; kiest CPU-sensoren, anders alle Celsius |
 | Klok: `_CPC`-scanner (AML zonder interpreter), domeinen, `CpcKnob` | `board-o6n::{cpc, clock}`, `driver-dvfs` | 3 + 3 host-tests; het beleid 8 host-tests |
 | Core-klassen: MADT, anders `_CPC` (25%-clustering), anders vast per MPIDR (aff1 0-3 small) | `board-o6n::class` | 4 host-tests, waaronder de meting van 17-09 (2232 ×4, 8192/7876/7246/6931 ×2 = small ×4, big ×8) |
-| PCIe-zoektocht: eerste Realtek, eerste NVMe, INTx per root-poort | `board-o6n::probe` | 2 host-tests op een nep-config-space |
+| PCIe-zoektocht: eerste Realtek, eerste NVMe, INTx per root-poort | `board-o6n::probe` | 3 host-tests op een nep-config-space, en de INTx-tabel tegen de `_PRT` van de echte DSDT |
+| NIC-lijn: MSI-X via de ITS als de IORT de DeviceID kent, anders INTx 477 uit de `_PRT` | `board-uefi::irq`, `driver-gicv3::its` | ITS: 5 host-tests (commando's, plat en twee niveaus, een route); `_PRT`: 5 host-tests; op QEMU/EDK2 bewezen met virtio-net |
+| Klok: `CpcKnob` uit DSDT en SSDT's, na de OEM-toets `CIXTEK` | `board-o6n::machine`, `driver-dvfs::run` | de taak op de host: zakken na 30 s, opklokken op last, de meetregel |
+
+### EL2: de hele kern onder VHE (E2H = 1)
+
+Op de Cortex-A720 stierf een EL1 onder nVHE binnen een halve seconde (Go,
+17-09), dus de O6N draait VHE, en niet alleen in de switcher van de
+app-cores: de hele kern draait onder E2H = 1 (`board-o6n` zet altijd
+`board-uefi/vhe` aan, `board/uefi/src/el2.rs`). De ingang zet E2H met de
+MMU nog uit en schrijft TCR_EL2 en SCTLR_EL2 in de vorm van TCR_EL1 en
+SCTLR_EL1, CPTR_EL2 in de CPACR-vorm en CNTHCTL_EL2 in de VHE-lay-out
+(EL1PCTEN/EL1PTEN op 10/11); de map zet PXN naast XN. De OS-core-rotatie
+(Hop op de kern-core) en de switcher van de app-cores (`hopos_el2_vhe`)
+gebruiken de `_EL12`-encoderingen voor het EL1-regime van hun bewoners, en
+die bestaan alleen onder E2H = 1: een VHE-switcher op een nVHE-kern gaf op
+29-09 een `exception: sync/el2 ESR=0x2000000 (EC 0x0)` in
+`hopos_os_vhe_enter` bij de zelftest van de OS-core. De build weigert die
+combinatie nu (`hopos/src/cage.rs`). Onder E2H = 1 is de timer van de kern
+de CNTHP (PPI 26: `cntp_*_el0` vanaf EL2), dezelfde timer die de OS-core
+op de deadline zet; ze wisselen elkaar af op dezelfde core.
+
+**Bewezen op QEMU, niet op de A720.** `FEATURES=vhe CPU=neoverse-n1 sh
+tools/qemu-uefi-test.sh` (EDK2, 4 cores, de hele appspike-keten in twee
+slots en de toetsen van buiten) is drie keer groen, ook met de kern
+verhuisd naar core 2 (`hopos.oscore=2`), en `FEATURES=vhe CPU=neoverse-n1
+sh tools/qemu-uefi-flip-test.sh` (Hop als bewoner van de OS-core, de flip
+met de som over de vhe-blobs) is groen. De kale nVHE-weg (`sh
+tools/qemu-uefi-test.sh`, cortex-a57) is ongewijzigd. Het kernvenster van
+de O6N staat sinds 29-09 echt op 0x8800_0000: `window-8000` werd tot dan
+door niemand aangezet.
 
 ### Wat je hoort te zien (in deze volgorde)
 
-- `uefi: booted at EL2 ... OEM "CIXTEK"` en `pcie: ...` per functie (van
-  `board-uefi`). Kijk of beide Realteks en de NVMe erin staan, met hun BAR's.
+- `uefi: booted at EL2 ... window 0x88000000+0x14000000 ... OEM "CIXTEK"`,
+  meteen gevolgd door `uefi: kern under E2H=1 (VHE), HCR_EL2 0x480000038
+  HOPOS_UEFI_VHE` (HCR teruggelezen: RW, IMO/FMO/AMO en E2H). Staat daar
+  `HOPOS_UEFI_VHE_FAIL`, dan nam de core E2H niet aan. Dan `pcie: ...` per
+  functie (van `board-uefi`). Kijk of beide Realteks en de NVMe erin staan,
+  met hun BAR's.
+- `slots: cage up HOPOS_CAGE_UP ... hash=0x...` en `oscore: cpu 0 self-test
+  timer=Some((Timer, ~1000+)) yield=Some((Yield, ..)) kick=Some((Ipi, ..))
+  (back, us) HOPOS_OS_SELFTEST ok`: de rotatie onder VHE op de kern-core
+  (op QEMU timer ~1300, yield ~20, kick ~10 µs).
 - `o6n: 11 app cores, classes from Mpidr - small 3, mid 0, big 8` (of
   `Madt`). De kern-core is core 0; is dat een A520, dan staat er small 3.
 - `boot: HopOS v3.0.0 on o6n, EL2, 12 cores (...) HOPOS_BOOT`.
-- `net: RTL8125? 10ec:8125 at 31:00.0 xid 0x... link 2500 Mbps full duplex, polled (INTx 477 known, not wired)`
-  en dan `HOPOS_NIC_UP mac=...` en na DHCP `HOPOS_NET_UP`.
+- `irq: ITS IIDR 0x... ... HOPOS_ITS_UP` (de GIC-700 heeft een ITS; de regel
+  zegt DeviceID-bits en plat of twee niveaus).
+- `net: RTL8125? 10ec:8125 at 31:00.0 xid 0x... link 2500 Mbps full duplex, MSI-X via the ITS, LPI 8192 (DeviceID 0x...) (the DT table said INTID 477) HOPOS_NIC_IRQ`,
+  of zonder IORT-weg `..., INTx on INTID 477 (SPI 445) ...`, en dan
+  `HOPOS_NIC_UP mac=...` en na DHCP `HOPOS_NET_UP`. In de tik moet `nic=`
+  oplopen met het verkeer.
+- `dvfs: 5 _CPC domains, policy Auto, ... HOPOS_CLOCK_UP` en `dvfs: -> 2600
+  MHz (fastest domain) (full, boot) HOPOS_CLOCK_EDGE`; na 30 s stil de flank
+  naar quiet, en elke 10 s `HOPOS_CLOCK` met de temperatuur.
+- `watchdog: hardware reset armed (SBSA watchdog, 8.5 s ...) ...
+  HOPOS_WD_ARMED`, na DHCP (en Hop) `HOPOS_CANARY_LIVE`.
 - `disk: nvme <model> at ... HOPOS_NVME_UP`, dan `HOPOS_DISK_UP` en
   `HOPOS_FS_UP` (hopfs op de NVMe; het hele device is van HopOS, stateful).
 - Bij de eerste temperatuurvraag: `hwmon: N SCMI sensors of M (first ...)`.
@@ -61,22 +162,23 @@ became 1`, `HOPOS_NIC_FAIL`, `HOPOS_NVME_FAIL`.
 
 ### Wat er nog niet is
 
-- **De NIC-interrupt.** De lijn staat in `probe::nic_intid` (477 voor LAN 2
-  achter bus 0x30, gemeten L80) en de driver kent de les van 17-20/09 (masker
-  dicht bij de ack, W1C van alle bits, rearm plus eigen blik op de ring in
-  `flush`). Maar `board-uefi` geeft geen weg om een SPI scherp te zetten en
-  in `dispatch_interrupts` te herkennen: de O6N pollt. Nodig in `board-uefi`:
-  `enable_line(intid, ack)` en een haak in de dispatch, zoals `NIC_IRQ` op virt.
-- **De klok.** Beleid, knop en `_CPC`-scanner zijn er; `board-uefi` geeft de
-  DSDT/SSDT niet door, dus er zijn geen fastchannel-adressen en er draait geen
-  governor-taak. Zonder dit blijven de grote cores op de boot-OPP (Go: 1,5
-  GHz). Nodig: een tabel-toegang in `board-uefi` (`acpi_table(sig)`) en een
-  taak in `hopos` die `Governor::step` elke 10 ms voedt.
-- **De `_CPC`-klassenbron**, om dezelfde reden: nu MADT, anders de MPIDR-tabel.
-- **De OEM-toets** (`CIXTEK`) vóór de SCMI-toegang: het O6N-image is O6N-eigen.
+- **VHE op de A720 is onbewezen.** QEMU's neoverse-n1 is VHE zonder de
+  eigenaardigheden van de A720; wat de O6N van E2H = 1 vindt, zegt de
+  eerste boot (`HOPOS_UEFI_VHE`, de zelftest van de OS-core, en of een
+  bewoner langer dan een halve seconde leeft: Hop's `HOP_UP` en de tik).
+- **MSI-X op ijzer is onbewezen.** Of de Cix-IORT de root-complexen naar
+  de ITS afbeeldt, en of de RTL8125 op MSI-X zijn IntrStatus-flank zo geeft
+  als op INTx, zegt de eerste boot. Zonder IORT-weg valt hij terug op INTx
+  477 (L80: één interrupt per frame, rtt p50 156-201 µs). Met
+  `hopos.nicirq=intx` meet je de terugval los.
+- **De NVMe-lijn.** Het blokcontract (`blkdev`, hopfs) is synchroon: de
+  actor wacht op zijn completion, dus een bel heeft nog geen wachter. De
+  NVMe pollt zijn CQ; interrupts erop horen bij een asynchrone blok-actor.
+- **De `_CPC`-klassenbron**: nu MADT, anders de MPIDR-tabel.
 - **De header-UART** (0x040d0000) als spiegel: de console is die van de SPCR.
-- De temperatuur gaat nog niet op de heartbeat: `O6n::temp_milli_c` bestaat,
-  een aanroeper in `hopos` niet.
+- **De kern-core in het klokbeleid**: zijn idle-tijd staat in de slaper van
+  de executor en die leest geen taak; Hop (die de core deelt) telt wel mee,
+  als slot.
 - Twee poorten tegelijk (de eerste ondersteunde wint), VPU en USB (media/gui).
 
 ### Wat je meet (lat: L74-L83 van de Go-kern)
@@ -89,8 +191,15 @@ became 1`, `HOPOS_NIC_FAIL`, `HOPOS_NVME_FAIL`.
    MB/s beide kanten; `slowest_ns`. Herstart: hopfs herstelt (`restored`).
 4. Core-klassen: klopt de indeling met het ijzer (4× A520, 8× A720)? Is
    core 0 een A520 of een A720?
-5. Temperatuur: één lezing, en of die bij belasting stijgt.
-6. Watchdog, FLIP, lifecycle: zoals `board-uefi` ze levert.
+5. Temperatuur: `temp=` op de tik en `HOPOS_CLOCK`, en of die bij
+   belasting stijgt.
+6. Interrupts: `nic=` in de tik tegen de pakketten; rtt p50 met MSI-X tegen
+   INTx (`hopos.nicirq=intx`) tegen gepold (`off`); geen `stray`-regel.
+7. Klok: `HOPOS_CLOCK_EDGE` naar quiet na 30 s idle, en binnen ~20 ms terug
+   naar vol onder last (Go L83: 867 tegen 267 Msteps/s).
+8. Watchdog: armed-regel (de echte timeout), `HOPOS_CANARY_LIVE`; dan de
+   kabel eruit tot `HOPOS_CANARY_MISS` en de reset (de O6N-refresh: WRR
+   werkt daar niet, WOR opnieuw schrijven wel).
 
 ## Ampere Altra
 
@@ -109,17 +218,22 @@ became 1`, `HOPOS_NIC_FAIL`, `HOPOS_NVME_FAIL`.
 - `uefi: booted at EL2 ...`, `pcie: segment ...` voor elk segment.
 - `boot: HopOS v3.0.0 on altra, EL2, 128 cores (big) ... HOPOS_BOOT` (of 80,
   afhankelijk van de SKU).
-- `net: igb 8086:1533 at ... link 1000 Mbps full duplex, polled`, dan
-  `HOPOS_NIC_UP` en `HOPOS_NET_UP`.
+- `net: igb 8086:1533 at ... link 1000 Mbps full duplex, polled (hopos.nicirq=off) HOPOS_NIC_IRQ`,
+  dan `HOPOS_NIC_UP` en `HOPOS_NET_UP`.
+- `hwmon: SoC 45.2C (SMpro, PCC channel 14)` en daarna `temp=` op de tik.
+- `watchdog: hardware reset armed (SBSA watchdog, 12.0 s ...) ... HOPOS_WD_ARMED`
+  (servers zijn braaf SBSA; de eerste echte proef van dit pad).
+- `dvfs: server clocks are firmware domain on this board HOPOS_CLOCK_NONE`.
 - `disk: nvme ... HOPOS_NVME_UP`, `HOPOS_DISK_UP`, `HOPOS_FS_UP`.
 
 ### Wat er nog niet is
 
-- **De thermometer staat niet aan**: `Altra::open_hwmon(pcct)` wil de
-  PCCT-bytes, en `board-uefi` geeft geen tabellen door. Nodig: dezelfde
-  `acpi_table(sig)` als voor de O6N.
-- **Gepold, en dat blijft zo**: de `_PRT`-INTx doodt de SoC (L83); MSI-X via
-  de ITS valt buiten de scope.
+- **Gepold, en dat blijft zo** (standaard `hopos.nicirq=off` op dit
+  board): de `_PRT`-INTx doodt de SoC (L83, 19-09, UART-bewijs). MSI-X via
+  de ITS is er nu wel, maar op deze machine nooit gemeten, en de igb vraagt
+  voor MSI-X nog GPIE/IVAR-werk in de driver (enkelvoudige MSI-X-modus is
+  onbewezen). `hopos.nicirq=msix` is een experiment, geen profiel.
+- **De NVMe-lijn**: zoals op de O6N (synchroon blokcontract).
 - Het geheugenplan is dat van `board-uefi`: of de pool de ~300 GB boven de
   512 GB haalt (Go 15-07: 1,62 GB zonder de hoge map), zegt de bootregel van
   `board-uefi`.

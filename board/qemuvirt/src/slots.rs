@@ -170,3 +170,38 @@ mod imp {
         0
     }
 }
+
+// --- De kern-flip (hopos/src/flip.rs, docs/flip.md) ---------------------
+//
+// Van het flip-spoor, niet van het board: alleen getallen. De staging is
+// de plek waar QEMU het image van Hop legde (na zijn plaatsing dood
+// geheugen); de recorder, de trampoline en het handoff-blob liggen op de
+// boot-scratch-pagina's ertussen. Alles buiten het kern-RAM en de pool.
+
+/// Waar de nieuwe kern heen gaat: het koude linkadres (`hopos/link.ld`,
+/// `KERN_BASE`), dus precies waar QEMU hem ook zou laden.
+pub const FLIP_LINK_BASE: u64 = 0x4020_0000;
+/// Geen PIE: de basis is [`FLIP_LINK_BASE`], niet wat een stub koos.
+pub const FLIP_PIE: bool = false;
+/// Het beeld op het koude adres blijft hieronder: de DMA-regio, waar de
+/// NIC schrijft tot de nieuwe kern hem reset.
+pub const FLIP_IMAGE_END: u64 = 0x4f00_0000;
+/// De staging van het platte, gerelokeerde beeld.
+pub const FLIP_STAGE_PA: u64 = STAGE_PA;
+/// De grootste staging.
+pub const FLIP_STAGE_MAX: u64 = STAGE_MAX;
+/// De vluchtrecorder (twee woorden: de lopende stand en het archief).
+pub const FLIP_RECORDER_PA: u64 = BOOT_SCRATCH_PA + 0x1000;
+/// De trampoline van de sprong: een pagina, uitvoerbaar (Normal) gemapt.
+pub const FLIP_TRAMP_PA: u64 = BOOT_SCRATCH_PA + 0x2000;
+/// De maat van het handoff-blob (`kern::kernflip::HANDOFF_TAIL`).
+pub const FLIP_HANDOFF_LEN: u64 = 0x4_0000;
+/// Het handoff-blob: de 256 KiB direct onder het staging-maatwoord.
+pub const FLIP_HANDOFF_PA: u64 = STAGE_HDR_PA - FLIP_HANDOFF_LEN;
+
+const _: () = {
+    assert!(FLIP_RECORDER_PA >= BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN);
+    assert!(FLIP_TRAMP_PA >= FLIP_RECORDER_PA + 16);
+    assert!(FLIP_TRAMP_PA + 0x1000 <= FLIP_HANDOFF_PA);
+    assert!(FLIP_HANDOFF_PA + FLIP_HANDOFF_LEN <= STAGE_HDR_PA);
+};

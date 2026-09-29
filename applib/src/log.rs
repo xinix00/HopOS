@@ -140,7 +140,15 @@ fn write_lines(mut p: Printk<'_>, args: fmt::Arguments<'_>) {
 /// de main-schil het App zette, of als de outbox al geleend is (een
 /// `Display` die zelf logt, een paniek midden in een logregel), wordt het
 /// bericht gedropt en geteld.
+///
+/// Een secundaire core van een SMP-app logt niet: de outbox heeft één
+/// producer, de primaire ([`crate::smp`]). Zijn regel wordt gedropt en
+/// geteld.
 pub fn emit(args: fmt::Arguments<'_>) {
+    if !crate::smp::on_primary() {
+        DROPPED.fetch_add(1, Relaxed);
+        return;
+    }
     match crate::rt::app() {
         Some(app) => app.log(args),
         None => emit_to(None, args),
@@ -151,6 +159,10 @@ pub fn emit(args: fmt::Arguments<'_>) {
 /// niemand de stack nog, dus een regel in de zendring van TCP is een regel
 /// die nooit aankomt.
 pub fn emit_outbox(args: fmt::Arguments<'_>) {
+    if !crate::smp::on_primary() {
+        DROPPED.fetch_add(1, Relaxed);
+        return;
+    }
     match crate::rt::app() {
         Some(app) => app.log_outbox(args),
         None => emit_to(None, args),

@@ -865,5 +865,85 @@ pub fn gtdt_watchdog(table: &[u8]) -> Option<Watchdog> {
     None
 }
 
+/// Het IORT-knooptype van een ITS-groep.
+const IORT_ITS_GROUP: u8 = 0;
+/// Het IORT-knooptype van een PCI-root-complex.
+const IORT_ROOT_COMPLEX: u8 = 2;
+/// De IORT-knooptypes van een SMMU (v1/v2 en v3): de DeviceID gaat er
+/// doorheen (de SMMU zelf laten we op zijn firmware-stand).
+const IORT_SMMU: u8 = 3;
+const IORT_SMMU_V3: u8 = 4;
+/// Zoveel knopen volgen we van root-complex naar ITS; meer is een kring.
+const IORT_HOPS: usize = 4;
+
+/// De DeviceID die de ITS ziet voor requester-id `rid` op PCI-segment
+/// `seg`, via de ID-afbeeldingen van de IORT (root-complex, eventueel door
+/// een SMMU, naar een ITS-groep). `None` als de IORT geen weg kent.
+///
+/// Zonder dit getal schrijft een device zijn MSI met een DeviceID die de ITS
+/// niet kent, en dat is stil: de schrijf verdwijnt. QEMU virt beeldt het
+/// segment 1-op-1 af; een SoC met meer root-complexen (de O6N) kan elk
+/// segment een eigen basis geven.
+#[must_use]
+pub fn iort_device_id(table: &[u8], seg: u16, rid: u16) -> Option<u32> {
+    let t = checked_table(table, b"IORT", 48).ok()?;
+    let count = le32(t, 36)?;
+    let first = le32(t, 40)? as usize;
+    // Het root-complex van dit segment.
+    let mut off = first;
+    let mut node = None;
+    for _ in 0..count.min(256) {
+        let typ = *t.get(off)?;
+        let len = usize::from(le16(t, off + 1)?);
+        if len < 16 {
+            return None;
+        }
+        if typ == IORT_ROOT_COMPLEX && le32(t, off + 28)? == u32::from(seg) {
+            node = Some(off);
+            break;
+        }
+        off += len;
+    }
+    let mut at = node?;
+    let mut id = u32::from(rid);
+    for _ in 0..IORT_HOPS {
+        let (next, out) = iort_map(t, at, id)?;
+        match *t.get(next)? {
+            IORT_ITS_GROUP => return Some(out),
+            IORT_SMMU | IORT_SMMU_V3 => {
+                at = next;
+                id = out;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Eén stap door de ID-afbeeldingen van IORT-knoop `node`: de knoop waar
+/// `id` heen gaat en het nieuwe ID. Een "single mapping" (vlag 0) is het
+/// eigen ID van een SMMU of PMCG, niet dat van een device erachter.
+fn iort_map(t: &[u8], node: usize, id: u32) -> Option<(usize, u32)> {
+    let n = le32(t, node + 8)?;
+    let arr = node + le32(t, node + 12)? as usize;
+    for i in 0..n.min(64) as usize {
+        let m = arr + 20 * i;
+        let (base, span, out, to, flags) = (
+            le32(t, m)?,
+            le32(t, m + 4)?,
+            le32(t, m + 8)?,
+            le32(t, m + 12)? as usize,
+            le32(t, m + 16)?,
+        );
+        if flags & 1 != 0 {
+            continue;
+        }
+        if id >= base && id - base <= span {
+            return Some((to, out.checked_add(id - base)?));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests;

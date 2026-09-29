@@ -3,13 +3,15 @@
 //! GIC, plan), gaat door naar [`Uefi`].
 
 use crate::class::{self, CoreFacts};
+use crate::clock::{self, CpcKnob};
+use crate::cpc::{self, Cpc, MAX_CPCS};
 use crate::probe::{self, CLASS_NVME};
 use crate::thermal::{self, SCMI_CHANNEL, Thermo};
 use board::heap::Heap;
 use board::{Board, CoreClass, Dispatched, Error, Plan};
 use board_uefi::{BLK_DMA, NET_DMA, Uefi};
 use bounded::BoundedVec;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use dev::Pa;
 use driver_nvme::Nvme;
@@ -97,11 +99,58 @@ impl O6n {
         Ok(Some(disk))
     }
 
+    /// Is dit werkelijk een Cix P1 (de XSDT-OEM-ID)? Het image draait ook
+    /// op andere UEFI-machines (de Ampere, 19-09); mailbox- en
+    /// fastchannel-adressen zijn alleen hier van ons.
+    #[must_use]
+    pub fn is_cix(&self) -> bool {
+        self.uefi.oem_id() == crate::OEM_ID
+    }
+
+    /// De klokknop uit de `_CPC`'s van de DSDT en de SSDT's: één
+    /// desired-perf-woord per domein, het plafond geklemd op `mhz` als die
+    /// gegeven is (`hopos.mhz`). Of waarom niet.
+    pub fn clock_knob(&self, mhz: Option<u32>) -> Result<CpcKnob, &'static str> {
+        if !self.is_cix() {
+            return Err("not a Cix P1 (OEM ID), no _CPC fastchannels");
+        }
+        let mut cpcs: BoundedVec<Cpc, MAX_CPCS> = BoundedVec::new();
+        for t in self
+            .uefi
+            .acpi_tables(b"DSDT")
+            .chain(self.uefi.acpi_tables(b"SSDT"))
+        {
+            cpc::scan(t, &mut cpcs);
+        }
+        let mut ds = clock::domains(cpcs.as_slice());
+        if ds.is_empty() {
+            return Err("no _CPC with a 32-bit desired-perf register");
+        }
+        if let Some(m) = mhz {
+            clock::cap(ds.as_mut_slice(), m);
+        }
+        if !ds
+            .as_slice()
+            .iter()
+            .all(|d| board_uefi::map_device(d.reg.0, 4))
+        {
+            return Err("a desired-perf register is unreachable");
+        }
+        // SAFETY: elk register komt uit de `_CPC` van deze firmware (de
+        // OEM-toets hierboven) en is Device-gemapt (`map_device`); alleen
+        // deze knop schrijft erin.
+        Ok(unsafe { CpcKnob::new(ds) })
+    }
+
     /// De heetste CPU-sensor van de SCP in milligraden, 0 = geen meting.
     /// De eerste vraag opent het SCMI-kanaal en kiest de sensoren (één
     /// regel op de console); daarna hoogstens één SCMI-ronde per seconde.
+    /// Alleen op een Cix P1: elders is het SCMI-adres niet van ons.
     #[must_use]
     pub fn temp_milli_c(&self) -> i32 {
+        if !self.is_cix() {
+            return 0;
+        }
         let mut t = THERMO.get().borrow_mut();
         let now = cpu::idle::now();
         t.get_or_insert_with(open_thermo)
@@ -269,11 +318,23 @@ impl Board for O6n {
         self.uefi.dispatch_interrupts()
     }
 
+    /// De GOP van de eigen firmware, zoals het UEFI-board hem las (alleen
+    /// in de gui-smaak; kaal `None`, docs/gui.md).
+    fn framebuffer(&self) -> Option<board::fb::Desc> {
+        board_uefi::gop_framebuffer()
+    }
+
     /// De eerste Realtek-poort (geen twee-poorts-aggregatie): BAR2 (het
     /// MMIO-blok; BAR0 is de I/O-alias), reset en MAC, ringen en MAC aan,
-    /// dan PHY en autoneg. Gepold: de INTx-lijn staat in
-    /// [`probe::nic_intid`], maar `board-uefi` geeft nog geen weg om een
-    /// SPI scherp te zetten en in de dispatch te herkennen.
+    /// dan PHY en autoneg, en dan de lijn (`board_uefi::irq`): MSI-X via de
+    /// ITS als de IORT de DeviceID kent, anders INTx uit de `_PRT` van de
+    /// root-poort (bus 0x30: GSI 0x1dd, INTID 477), anders gepold.
+    /// `hopos.nicirq` kiest anders (`msix`, `intx`, `off`, een INTID).
+    ///
+    /// De ack is voor beide dezelfde (`IrqAck::ack`: masker dicht, status
+    /// schoon); de driver heropent het masker in `flush`. Bij INTx is dat
+    /// de level-lijn laten vallen (de freeze van 17/18-09), bij MSI-X de
+    /// voorwaarde voor een volgende flank.
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error> {
         if NIC_CLAIMED.swap(true, Relaxed) {
             return Err(Error::Twice("probe_nic"));
@@ -303,8 +364,25 @@ impl Board for O6n {
             cpu::println!("net: {} {e}", nic_name(&nic));
             Error::Nic("rtl8126 has no link")
         })?;
+        let wired = match segs.as_slice().iter().find(|(_, s)| *s == hit.root_bus) {
+            Some((e, _)) => {
+                NIC_ACK.get().set(Some(nic.irq_ack()));
+                let at = board_uefi::irq::At {
+                    ecam: e,
+                    seg: seg_of(hit.root_bus),
+                    root_bus: hit.root_bus,
+                    f: &hit.f,
+                };
+                let mode = board_uefi::irq::nic_mode(board_uefi::irq::Mode::Auto);
+                board_uefi::irq::wire(&at, mode, &NIC_BELL, rtl_ack, rtl_ack)
+            }
+            None => board_uefi::irq::Wired::Polled("no config window for the root bus"),
+        };
+        if !matches!(wired, board_uefi::irq::Wired::Polled(_)) {
+            nic.set_irq(&NIC_BELL);
+        }
         cpu::println!(
-            "net: {} {:04x}:{:04x} at {} xid {:#x} link {link}, polled (INTx {} known, not wired)",
+            "net: {} {:04x}:{:04x} at {} xid {:#x} link {link}, {wired} (the DT table said INTID {}) HOPOS_NIC_IRQ",
             nic_name(&nic),
             hit.f.vendor,
             hit.f.device,
@@ -314,6 +392,28 @@ impl Board for O6n {
         );
         Ok(Some(nic))
     }
+}
+
+/// De bel van de NIC-lijn.
+static NIC_BELL: Signal = Signal::new();
+
+/// De ack van de Realtek (masker dicht, status schoon), voor de dispatch
+/// op de kern-core; gezet vóór de lijn scherp gaat.
+static NIC_ACK: Local<Cell<Option<driver_rtl8126::IrqAck>>> = Local::new(Cell::new(None));
+
+/// De ack van de NIC-lijn, uit de dispatch vóór de EOI.
+fn rtl_ack() {
+    if let Some(a) = NIC_ACK.get().get() {
+        let _ = a.ack();
+    }
+}
+
+/// Het PCI-segment van het venster dat op `root_bus` begint (op de O6N
+/// allemaal 0: vijf vensters, elk een eigen root-poort).
+fn seg_of(root_bus: u8) -> u16 {
+    board_uefi::pcie_segments()
+        .find(|(_, _, start)| *start == root_bus)
+        .map_or(0, |(_, seg, _)| seg)
 }
 
 fn nic_name(n: &Rtl8126) -> &'static str {

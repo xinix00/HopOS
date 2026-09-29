@@ -192,3 +192,108 @@ fn the_window_clamps_one_long_sleep() {
         "2600 MHz"
     );
 }
+
+/// Een host voor [`run`]: de tijd loopt één sample per slaap, de bronnen
+/// zijn een stille kern-core en een slot dat na `busy_from` gaat rekenen.
+struct FakeHost {
+    now: std::cell::Cell<u64>,
+    idle: [u64; 2],
+    busy_from: u64,
+    log: std::cell::RefCell<std::vec::Vec<std::string::String>>,
+}
+
+/// Een slaap die één keer `Pending` zegt: zo is elke poll van `run` één
+/// sample.
+struct Once(bool);
+
+impl Future for Once {
+    type Output = ();
+    fn poll(
+        mut self: core::pin::Pin<&mut Self>,
+        _: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<()> {
+        if self.0 {
+            core::task::Poll::Ready(())
+        } else {
+            self.0 = true;
+            core::task::Poll::Pending
+        }
+    }
+}
+
+impl Host<2> for FakeHost {
+    fn now(&self) -> u64 {
+        self.now.get()
+    }
+    fn sleep(&self, ns: u64) -> impl Future<Output = ()> {
+        self.now.set(self.now.get() + ns);
+        Once(false)
+    }
+    fn expect(&self) -> u64 {
+        EXPECT
+    }
+    fn sample(&mut self, out: &mut [Sample; 2]) {
+        let busy = self.now.get() >= self.busy_from;
+        self.idle[0] += EXPECT;
+        self.idle[1] += if busy { 0 } else { EXPECT };
+        for (i, s) in out.iter_mut().enumerate() {
+            *s = Sample {
+                live: true,
+                idle: self.idle[i],
+                cores: 1,
+                running: true,
+            };
+        }
+    }
+    fn temp_milli_c(&mut self) -> i32 {
+        41_500
+    }
+    fn log(&self, args: fmt::Arguments<'_>) {
+        self.log.borrow_mut().push(std::format!("{args}"));
+    }
+}
+
+#[test]
+fn the_task_cools_down_reports_and_wakes_on_load() {
+    use std::sync::Arc;
+    use std::task::Wake;
+    struct Nop;
+    impl Wake for Nop {
+        fn wake(self: Arc<Self>) {}
+    }
+    let w = std::task::Waker::from(Arc::new(Nop));
+    let mut cx = core::task::Context::from_waker(&w);
+    let mut host = FakeHost {
+        now: std::cell::Cell::new(0),
+        idle: [0; 2],
+        busy_from: 40_000_000_000,
+        log: std::cell::RefCell::default(),
+    };
+    let mut knob = Knob2::default();
+    {
+        let mut fut = core::pin::pin!(run(&mut knob, Hold::Auto, &mut host));
+        // 45 s aan samples: 30 s stil (zakken), dan last (opklokken).
+        for _ in 0..4_500 {
+            let _ = fut.as_mut().poll(&mut cx);
+        }
+    }
+    let log = host.log.borrow();
+    assert!(log[0].contains("-> 2600 MHz (full, boot)"), "{}", log[0]);
+    assert!(
+        log.iter()
+            .any(|l| l.contains("-> 800 MHz (quiet, idle 30s)"))
+    );
+    assert!(log.iter().any(|l| l.contains("(full, busy)")));
+    let report = log.iter().find(|l| l.ends_with("HOPOS_CLOCK")).unwrap();
+    assert!(report.contains("temp 41.5 C"), "{report}");
+    assert_eq!((knob.full, knob.quiet), (2, 1));
+}
+
+#[test]
+fn the_config_pins_the_clock() {
+    assert_eq!(hold_of(""), (Some(Hold::Auto), true));
+    assert_eq!(hold_of("max"), (Some(Hold::Full), true));
+    assert_eq!(hold_of("quiet"), (Some(Hold::Quiet), true));
+    assert_eq!(hold_of("firmware"), (None, true));
+    assert_eq!(hold_of("turbo"), (Some(Hold::Auto), false));
+}

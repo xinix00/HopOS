@@ -12,12 +12,17 @@
 #![no_main]
 #![allow(clippy::expect_used)] // boot-code: vóór de agent draait is falen parkeren (handboek §12)
 
+mod bench; // de meetbanken achter hopos.nvmebench en hopos.idlestat (bench.rs)
 mod clock;
+mod codec; // het media-vlak (codec.rs); kaal een stub, feature `media`
 mod config;
 mod flip; // FLIP: de kern-flip (flip.rs)
+mod gui; // het gui-vlak (gui.rs); kaal no-ops, feature `gui`
 mod net;
 mod slots;
 mod storage;
+mod telemetry; // de thermiek op tik en heartbeat, en het klokbeleid (telemetry.rs)
+mod watchdog; // de node-watchdog: kern::watchdog op de hardware (watchdog.rs)
 
 extern crate alloc;
 
@@ -43,11 +48,51 @@ use vboard::slots::{StagedRole, staged_role};
     feature = "board-rk3566",
     feature = "board-uefi",
     feature = "board-o6n",
-    feature = "board-altra"
+    feature = "board-altra",
+    feature = "board-qemuvirt-riscv",
+    feature = "board-licheerv",
+    feature = "board-apple"
 )))]
 compile_error!(
-    "kies precies één board: --features board-qemuvirt, board-rpi4, board-rpi5, board-rk3566, board-uefi, board-o6n of board-altra"
+    "kies precies één board: --features board-qemuvirt, board-rpi4, board-rpi5, board-rk3566, board-uefi, board-o6n, board-altra, board-qemuvirt-riscv, board-licheerv of board-apple"
 );
+
+// De Mac mini M4 heeft een eigen ingang en een eigen linkscript: naast een
+// ander board kan niet.
+#[cfg(all(
+    feature = "board-apple",
+    any(
+        feature = "board-qemuvirt",
+        feature = "board-rpi4",
+        feature = "board-rpi5",
+        feature = "board-rk3566",
+        feature = "board-uefi",
+        feature = "board-o6n",
+        feature = "board-altra",
+        feature = "board-qemuvirt-riscv",
+        feature = "board-licheerv"
+    )
+))]
+compile_error!("twee boards tegelijk: kies er één");
+
+// De riscv64-boards (`--target riscv64gc-unknown-none-elf`): naast elkaar
+// of naast een arm64-board kan niet.
+#[cfg(any(
+    all(feature = "board-qemuvirt-riscv", feature = "board-licheerv"),
+    all(
+        any(feature = "board-qemuvirt-riscv", feature = "board-licheerv"),
+        any(
+            feature = "board-qemuvirt",
+            feature = "board-rpi4",
+            feature = "board-rpi5",
+            feature = "board-rk3566",
+            feature = "board-uefi",
+            feature = "board-o6n",
+            feature = "board-altra"
+        )
+    )
+))]
+compile_error!("twee boards tegelijk: kies er één");
 
 // De O6N en de Altra bouwen op het UEFI-board; naast elkaar of naast een
 // ander board kan niet.
@@ -154,6 +199,37 @@ type Machine = board_altra::Altra;
 #[cfg(feature = "board-altra")]
 static BOARD: Machine = board_altra::Altra::new();
 
+// De riscv64-boards (docs/boards-riscv.md): QEMU virt in machine mode als
+// proefbank en de LicheeRV Nano, onder dezelfde naam `vboard`.
+#[cfg(feature = "board-qemuvirt-riscv")]
+extern crate board_qemuvirt_riscv as vboard;
+
+#[cfg(feature = "board-qemuvirt-riscv")]
+type Machine = board_qemuvirt_riscv::QemuVirtRiscv;
+
+#[cfg(feature = "board-qemuvirt-riscv")]
+static BOARD: Machine = board_qemuvirt_riscv::QemuVirtRiscv::new();
+
+#[cfg(feature = "board-licheerv")]
+extern crate board_licheerv as vboard;
+
+#[cfg(feature = "board-licheerv")]
+type Machine = board_licheerv::LicheeRv;
+
+#[cfg(feature = "board-licheerv")]
+static BOARD: Machine = board_licheerv::LicheeRv::new();
+
+// De Mac mini M4 (board/apple), onder dezelfde naam en om dezelfde reden
+// als de Pi's.
+#[cfg(feature = "board-apple")]
+extern crate board_apple as vboard;
+
+#[cfg(feature = "board-apple")]
+type Machine = board_apple::Apple;
+
+#[cfg(feature = "board-apple")]
+static BOARD: Machine = board_apple::Apple::new();
+
 /// De heap: een bump-allocator met een plafond over de kern-RAM.
 #[global_allocator]
 static HEAP: Heap = Heap::new();
@@ -178,7 +254,9 @@ const BUNNY: [&str; 5] = [
 #[unsafe(no_mangle)]
 extern "C" fn kmain(dtb: u64, el: u64) -> ! {
     let board: &'static Machine = &BOARD;
-    cpu::console::set_sink(board.console());
+    let uart = board.console();
+    cpu::console::set_sink(uart);
+    gui::keep_uart(uart); // de tee naar het glas komt in `boot` (gui.rs)
 
     println!();
     for line in BUNNY {
@@ -271,6 +349,11 @@ fn boot(board: &'static Machine, dtb: u64, el: u8) -> ! {
         env!("HOPOS_STAMP"),
     );
 
+    // De console op het glas, op de OS-core (gui.rs): de bunny als kop,
+    // de log eronder. Zonder framebuffer of kaal gebouwd: één regel of
+    // niets.
+    gui::init_framebuffer_console(board);
+
     // De wandklok vóór er een bewoner is: zonder SNTP (nog niet geport) een
     // vaste waarde, luid. Hop stempelt zijn taken ermee (clock.rs).
     let off = clock::set(
@@ -297,8 +380,14 @@ fn boot(board: &'static Machine, dtb: u64, el: u8) -> ! {
         );
     }
     // De opslag vóór de system-API: die krijgt de hopfs-actor alleen als
-    // er een schijf is (anders weigert elke bestandscall luid).
-    let fs = storage::start(exec);
+    // er een schijf is (anders weigert elke bestandscall luid). De schijf
+    // wordt één keer geprobed; de meetbanken (bench.rs, alleen met
+    // hopos.nvmebench of hopos.idlestat) lenen hem vóór de opslag hem mount.
+    let disk = bench::start(exec, dtb, storage::probe());
+    let fs = storage::start(exec, disk);
+    // MEDIA: de codec-dienst ná de opslag, want de firmware-blobs staan op
+    // het volume (codec.rs); zonder VPU meldt hij luid dat er geen is.
+    codec::up(exec);
     let system = system(privilege, fs);
 
     // De IRQ-dispatch spawnt als eerste: hij is de pomp van alle lijnen.
@@ -309,6 +398,11 @@ fn boot(board: &'static Machine, dtb: u64, el: u8) -> ! {
         Err(e) => println!("irq: {e}, running on the sleep failsafe HOPOS_IRQ_FAIL"),
     }
     exec.spawn(tick(exec)).expect("spawn tick");
+    // De node-watchdog (op een flip-boot meteen met de boot-guard) en de
+    // telemetrie: thermiek en klokbeleid.
+    watchdog::start(exec);
+    telemetry::start(exec);
+    gui::start_screen_status(exec); // de meetregels naast de bunny
 
     // Het netwerkvlak (net.rs): de pomp op de NIC, de switch, poort 0 met
     // de node-stack, DHCP en de system-listener. Zonder NIC draait de kern
@@ -331,12 +425,20 @@ fn boot(board: &'static Machine, dtb: u64, el: u8) -> ! {
         Ok(None) => println!("net: no NIC on this board HOPOS_NIC_NONE"),
         Err(e) => println!("net: {e} HOPOS_NIC_FAIL"),
     }
+    // De USB-invoer na het netwerk (gui.rs): de stroom naar de display-app
+    // loopt over de switch.
+    gui::start_usb_input(exec);
 
     // De slots: de kooi-lijm, de lifecycle-actor en de servicers (slots.rs).
     // FLIP: na een landing adopteren de slots de bewoners in plaats van
     // Hop opnieuw te plaatsen; de flip-taak en de guard spawnen hier.
     flip::start(exec, landing.is_some());
-    slots::start(exec, role, landing.map(|h| h.slots));
+    // De env van een gestagede app (appspike op QEMU): `hopos.appenv`.
+    let app_env = match role {
+        Some(StagedRole::App) => slots::app_env(&bench::bootparam(dtb, "hopos.appenv")),
+        _ => alloc::vec::Vec::new(),
+    };
+    slots::start(exec, role, landing.map(|h| h.slots), app_env);
 
     // De OS-core (PORT.md beslissing 2): de idle van de kern is de rotatie
     // over zijn bewoners (Hop). Lukt dat niet, dan houdt de kern zijn core
@@ -482,7 +584,7 @@ async fn tick(exec: &'static Executor) {
         // krijgt tijd" niet te onderscheiden van "de kern spint".
         let o = &cpu::el2::OS_STATS;
         println!(
-            "HOPOS_TICK {n} sleeps={} polls={} irq(timer={} nic={} other={}) os(in={} irq={} ipi={} timer={} yield={} exit={} fault={} idle={} res_ms={} kicks={})",
+            "HOPOS_TICK {n} sleeps={} polls={} irq(timer={} nic={} other={}) os(in={} irq={} ipi={} timer={} yield={} exit={} fault={} idle={} res_ms={} kicks={}) temp={}",
             s.sleeps.load(Relaxed),
             s.polls.load(Relaxed),
             IRQS[0].load(Relaxed),
@@ -498,6 +600,7 @@ async fn tick(exec: &'static Executor) {
             o.idle.load(Relaxed),
             o.ticks.load(Relaxed) / (cpu::idle::freq() / 1000).max(1),
             o.kicks.load(Relaxed),
+            telemetry::Temp(telemetry::temp_milli_c()),
         );
     }
 }

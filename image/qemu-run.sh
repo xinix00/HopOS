@@ -24,6 +24,12 @@
 #                                    FDT-bootargs); de kern boot op core 0
 #                                    en verhuist er vóór de eerste bewoner
 #                                    heen. Standaard geen: de boot-core
+#   APP=appspike APPENV=GUI=display image/qemu-run.sh
+#                                    de env van de gestagede app
+#                                    (bootparameter hopos.appenv; meer
+#                                    sleutels met komma's). Het glas zelf
+#                                    vraagt een gui-kern en ramfb: zie
+#                                    GUI=display in tools/qemu-test.sh
 #   DISK=pad image/qemu-run.sh       de schijf (raw); standaard
 #                                    target/hopos-disk.img, 64 MiB, aangemaakt
 #                                    (ijl) als hij ontbreekt. Een verse schijf
@@ -114,10 +120,14 @@ if [ -n "$IMAGE" ]; then
 		-device "loader,addr=0xb0100008,data=$ROLE,data-len=8" "$@"
 fi
 
-# De OS-core als bootparameter: QEMU legt -append in /chosen/bootargs van
-# de DTB, en daar leest het board hem (board/qemuvirt `os_core`).
-if [ -n "${OSCORE:-}" ]; then
-	set -- -append "hopos.oscore=$OSCORE" "$@"
+# De bootparameters: QEMU legt -append in /chosen/bootargs van de DTB, en
+# daar leest het board ze (board/qemuvirt `os_core`, hopos `bootparam`).
+# Eén -append: een tweede zou de eerste vervangen.
+ARGS=""
+[ -n "${OSCORE:-}" ] && ARGS="hopos.oscore=$OSCORE"
+[ -n "${APPENV:-}" ] && ARGS="${ARGS:+$ARGS }hopos.appenv=$APPENV"
+if [ -n "$ARGS" ]; then
+	set -- -append "$ARGS" "$@"
 fi
 
 # De schijf: ijl aangemaakt als hij er niet is (dd met seek schrijft niets).

@@ -24,6 +24,17 @@ driver-dwmac4 = { path = "../../driver/nic/dwmac4" }
 # vandaag één schijf-type. Dit board heeft (nog) geen SD/eMMC-driver en
 # geeft altijd `Ok(None)`.
 driver-virtioblk = { path = "../../driver/virtioblk" }
+# De beschrijving van een framebuffer (`Board::framebuffer`): ook zonder
+# `gui` nodig, want de stub geeft hetzelfde type (`None`).
+driver-fb = { path = "../../driver/fb" }
+# De beeldketen (PD_VO, VOP2, DW-HDMI): alleen met `gui`. Een headless node
+# draagt geen regel display-code (Go: "geen dood gewicht", Derek 06-08).
+gui-rkscan = { path = "../../gui/rkscan", optional = true }
+
+[features]
+# De eigen scanout naar HDMI: `framebuffer()` start de keten en geeft de
+# buffer uit het plan. Zonder deze feature is het board headless.
+gui = ["dep:gui-rkscan"]
 
 [lints]
 workspace = true

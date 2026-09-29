@@ -14,15 +14,34 @@
 //! Met `HOLD=1` in de env blijft de app daarna leven (de heartbeat loopt
 //! door), voor wie de kill-vlag wil toetsen.
 //!
+//! Twee rollen (`ROLE` in de env) voegen een toets toe:
+//!
+//! - `SMP`: de app draait met `cores: 2` of meer. Een taak op core 1 hoogt
+//!   een teller op en alloceert, terwijl core 0 de outbox schrijft; de
+//!   teller moet lopen terwijl core 0 bezig is, en de heap moet heel zijn
+//!   (`HOPOS_APPSPIKE_SMP`).
+//! - `SHARE`: de app is lid van een sharegroup met een buur op dezelfde
+//!   app-core. Hij wacht tot de kern `CTRL_SHARED` zet (de buur is er) en
+//!   telt dan zijn beurten: elke idle-ronde is een yield naar de switcher,
+//!   die de core aan de buur geeft (`HOPOS_APPSPIKE_SHARE`).
+//!
 //! Canoniek gelinkt (applib/link.ld): de stage-2-map van de kern legt het
 //! image op de partitie van elk slot, en de kern patcht RamStart en RamSize
 //! bij plaatsing.
 
 #![cfg_attr(target_os = "none", no_std, no_main)]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use applib::appnet::{self, TcpStream};
+use applib::heap::Heap;
 use applib::net::{self, Nic};
-use applib::{App, AppStatus, EXEC, clock, heap::HEAP, log, sys};
+use applib::{App, AppStatus, EXEC, clock, heap::HEAP, log, smp, sys};
+use core::sync::atomic::{
+    AtomicBool, AtomicU64,
+    Ordering::{Acquire, Relaxed, Release},
+};
 use core::time::Duration;
 use netdev::Device;
 
@@ -65,6 +84,11 @@ async fn spike(app: &'static App) {
     let mut s = Score::default();
     ctrl_page(app, &mut s);
     env(app, &mut s);
+    match app.env("ROLE") {
+        Some("SMP") => smp_role(app, &mut s).await,
+        Some("SHARE") => share_role(app, &mut s).await,
+        _ => {}
+    }
     logs(&mut s).await;
     frame(app, &mut s).await;
     timer(&mut s).await;
@@ -109,6 +133,152 @@ fn env(app: &App, s: &mut Score) {
     let role = app.env("ROLE").unwrap_or("-");
     let port = app.env("ER_PORT_HTTP").unwrap_or("-");
     s.check("ENV", true, format_args!("ROLE={role} ER_PORT_HTTP={port}"));
+}
+
+/// Hoe lang de SMP-toets op de opgang van de andere cores wacht.
+const SMP_WAIT: Duration = Duration::from_secs(5);
+
+/// De teller van de taak op core 1.
+static SMP_TICKS: AtomicU64 = AtomicU64::new(0);
+/// Allocaties die de taak op core 1 deed en weer vrijgaf.
+static SMP_ALLOCS: AtomicU64 = AtomicU64::new(0);
+/// De core waarop de taak draaide, zoals hij het zelf zag.
+static SMP_WHERE: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Core 0 vraagt de taak te stoppen.
+static SMP_STOP: AtomicBool = AtomicBool::new(false);
+/// Het antwoord van core 1, als taak terug op core 0.
+static SMP_REPLIED: AtomicU64 = AtomicU64::new(0);
+
+/// De taak op core 1: tellen en alloceren tot core 0 stop zegt, dan het
+/// eindgetal als taak terug naar core 0 (de wek de andere kant op).
+async fn smp_counter() {
+    SMP_WHERE.store(smp::current() as u64, Release);
+    while !SMP_STOP.load(Acquire) {
+        SMP_TICKS.fetch_add(1, Relaxed);
+        if SMP_TICKS.load(Relaxed).is_multiple_of(64) {
+            // Een blok van deze core, vrijgegeven op deze core, terwijl core
+            // 0 ook alloceert: het slot van de heap.
+            let mut v: Vec<u8> = Vec::new();
+            if v.try_reserve(96).is_ok() {
+                SMP_ALLOCS.fetch_add(1, Relaxed);
+            }
+        }
+    }
+    let n = SMP_TICKS.load(Relaxed);
+    let _ = smp::spawn_on(0, async move {
+        SMP_REPLIED.store(n.max(1), Release);
+    });
+}
+
+/// De SMP-toets: `cores: 2` of meer, een taak op core 1 die telt terwijl
+/// core 0 zijn outbox schrijft. Bewijst dat de tweede core in de kooi van
+/// deze app draait (hij ziet dezelfde statics), parallel (de teller loopt
+/// terwijl core 0 niet yieldt), dat werk heen en terug gaat (`spawn_on`
+/// met een wek per kant), en dat de heap het samen overleeft.
+async fn smp_role(app: &'static App, s: &mut Score) {
+    let cores = app.cores();
+    let t0 = clock::now_ns();
+    let limit = SMP_WAIT.as_nanos() as u64;
+    while !smp::is_up(1) && clock::now_ns().saturating_sub(t0) < limit {
+        EXEC.after(Duration::from_millis(5)).await;
+    }
+    let up_ms = clock::now_ns().saturating_sub(t0) / 1_000_000;
+    if cores < 2 || !smp::is_up(1) {
+        s.check(
+            "SMP",
+            false,
+            format_args!("cores={cores} online={} after {up_ms} ms", smp::online()),
+        );
+        return;
+    }
+    if let Err(e) = smp::spawn_on(1, smp_counter()) {
+        s.check("SMP", false, format_args!("cores={cores} spawn_on(1): {e}"));
+        return;
+    }
+    // Wacht tot de taak op core 1 loopt.
+    let t1 = clock::now_ns();
+    while SMP_TICKS.load(Relaxed) == 0 && clock::now_ns().saturating_sub(t1) < limit {
+        EXEC.after(Duration::from_millis(1)).await;
+    }
+    // Core 0 schrijft zijn outbox zonder te yielden, en alloceert ook: loopt
+    // de teller intussen door, dan draait core 1 echt naast ons.
+    let before = SMP_TICKS.load(Relaxed);
+    let mut mine = 0u32;
+    for i in 1..=16u32 {
+        log!(
+            "HOPOS_APPSPIKE_SMP_LINE {i}/16 from core {}",
+            smp::current()
+        );
+        let mut v: Vec<u8> = Vec::new();
+        if v.try_reserve(80).is_ok() {
+            mine += 1;
+        }
+    }
+    let during = SMP_TICKS.load(Relaxed).wrapping_sub(before);
+    SMP_STOP.store(true, Release);
+    let t2 = clock::now_ns();
+    while SMP_REPLIED.load(Acquire) == 0 && clock::now_ns().saturating_sub(t2) < limit {
+        EXEC.after(Duration::from_millis(1)).await;
+    }
+    let ticks = SMP_REPLIED.load(Acquire);
+    let on = SMP_WHERE.load(Acquire);
+    let heap = HEAP.check();
+    let lock = Heap::lock_stats();
+    s.check(
+        "SMP",
+        on == 1 && during > 0 && ticks > 0 && heap.is_ok() && mine == 16,
+        format_args!(
+            "cores={cores} online={} up_ms={up_ms} task_core={on} ticks={ticks} during_log={during} allocs={} remote_spawns={} kicks={} heap_ok={} lock_taken={} lock_contended={} lock_spin_max={}",
+            smp::online(),
+            SMP_ALLOCS.load(Relaxed),
+            smp::REMOTE_SPAWNS.load(Relaxed),
+            smp::KICKS.load(Relaxed),
+            heap.is_ok(),
+            lock.taken,
+            lock.contended,
+            lock.longest_spin
+        ),
+    );
+}
+
+/// Hoe lang de SHARE-toets op zijn buur wacht.
+const SHARE_WAIT: Duration = Duration::from_secs(30);
+
+/// Hoeveel slaapjes van 1 ms de SHARE-toets telt.
+const SHARE_NAPS: u32 = 100;
+
+/// De SHARE-toets: wacht tot de kern `CTRL_SHARED` zet (een tweede lid
+/// van de groep woont op deze core), en slaap dan honderd keer 1 ms. Elke
+/// slaap is een idle-ronde, en op een gedeelde core is die een yield naar
+/// de switcher: de beurt gaat naar de buur. Groen als het slot gedeeld was
+/// en er beurten waren, en de klok liep zoals beloofd (de buur hield de
+/// core niet vast).
+async fn share_role(app: &'static App, s: &mut Score) {
+    let c = app.ctrl();
+    let t0 = clock::now_ns();
+    let limit = SHARE_WAIT.as_nanos() as u64;
+    while !c.is_shared() && clock::now_ns().saturating_sub(t0) < limit {
+        EXEC.after(Duration::from_millis(10)).await;
+    }
+    let waited_ms = clock::now_ns().saturating_sub(t0) / 1_000_000;
+    let shared = c.is_shared();
+    let rounds = c.idle_rounds();
+    let t1 = clock::now_ns();
+    for _ in 0..SHARE_NAPS {
+        EXEC.after(Duration::from_millis(1)).await;
+    }
+    let ms = clock::now_ns().saturating_sub(t1) / 1_000_000;
+    let yields = c.idle_rounds().wrapping_sub(rounds);
+    s.check(
+        "SHARE",
+        shared && yields >= u64::from(SHARE_NAPS) && ms < 2000,
+        format_args!(
+            "yields={yields} naps={SHARE_NAPS} ms={ms} shared={} waited_ms={waited_ms} yield_mode={} idle_ticks={}",
+            u8::from(shared),
+            c.is_yield_mode(),
+            c.idle_ticks()
+        ),
+    );
 }
 
 /// Aantal logregels van de logtoets.

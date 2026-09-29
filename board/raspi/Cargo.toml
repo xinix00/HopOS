@@ -20,6 +20,14 @@ board = { path = "../../board" }
 driver-pl011 = { path = "../../driver/pl011" }
 driver-gicv2 = { path = "../../driver/gicv2" }
 driver-vcmail = { path = "../../driver/vcmail" }
+# De framebuffer-beschrijving van `Board::framebuffer` (vcfb.rs).
+driver-fb = { path = "../../driver/fb" }
 
 [lints]
 workspace = true
+
+[features]
+default = []
+# De framebuffer via de VideoCore (vcfb.rs): alleen de gui-smaak ontdekt
+# en mapt hem; kaal gebouwd is het board headless (docs/gui.md).
+gui = []

@@ -189,3 +189,43 @@ pub(crate) fn map_device(pa: u64, size: u64) -> bool {
     crate::arch::tlbi_all();
     ok
 }
+
+// --- De kern-flip (hopos/src/flip.rs, docs/flip.md) ---------------------
+//
+// Van het flip-spoor, niet van het board: alleen getallen, in de
+// loader-regio van het kernvenster zoals op virt (de staging is waar de
+// stub `hopos-stage.elf` las, na de plaatsing van Hop dood geheugen). De
+// kern is hier een PIE: de firmware koos zijn basis, en de nieuwe kern gaat
+// op dezelfde basis (`__efi_head`), binnen de maat die de firmware toen
+// gaf. De feiten van de stub (ACPI, de kaart, de config) overleven de
+// sprong in een eigen pagina ([`FLIP_FACTS_PA`], `crate::flip`).
+
+/// Geen vast linkadres: de basis komt uit de stub.
+pub const FLIP_LINK_BASE: u64 = 0;
+/// PIE: de basis is `__efi_head` van de draaiende kern.
+pub const FLIP_PIE: bool = true;
+/// Geen vaste grens: het nieuwe beeld moet in het oude passen.
+pub const FLIP_IMAGE_END: u64 = 0;
+/// De staging van het platte beeld.
+pub const FLIP_STAGE_PA: u64 = STAGE_PA;
+/// De grootste staging.
+pub const FLIP_STAGE_MAX: u64 = STAGE_MAX;
+/// De vluchtrecorder.
+pub const FLIP_RECORDER_PA: u64 = BOOT_SCRATCH_PA + 0x1000;
+/// De trampoline (Normal: de loader-regio is RAM uit de kaart).
+pub const FLIP_TRAMP_PA: u64 = BOOT_SCRATCH_PA + 0x2000;
+/// De feiten van de stub voor een kern die zonder firmware binnenkomt.
+pub const FLIP_FACTS_PA: u64 = BOOT_SCRATCH_PA + 0x3000;
+/// Hoeveel ruimte die feiten hebben.
+pub const FLIP_FACTS_LEN: u64 = 0x2000;
+/// De maat van het handoff-blob.
+pub const FLIP_HANDOFF_LEN: u64 = 0x4_0000;
+/// Het handoff-blob, direct onder het staging-maatwoord.
+pub const FLIP_HANDOFF_PA: u64 = STAGE_HDR_PA - FLIP_HANDOFF_LEN;
+
+const _: () = {
+    assert!(FLIP_RECORDER_PA >= BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN);
+    assert!(FLIP_TRAMP_PA + 0x1000 <= FLIP_FACTS_PA);
+    assert!(FLIP_FACTS_PA + FLIP_FACTS_LEN <= FLIP_HANDOFF_PA);
+    assert!(FLIP_HANDOFF_PA + FLIP_HANDOFF_LEN <= STAGE_HDR_PA);
+};

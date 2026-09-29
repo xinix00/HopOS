@@ -19,9 +19,13 @@
 //! - [`appnet`]: de netstack (`leannet`) over die ringen, met async TCP-
 //!   en UDP-handvatten en de system-client over een echte verbinding.
 //! - [`sys`]: de system-API-client over een [`sys::Conn`].
+//! - [`smp`]: meer cores voor één app (`cores: N` in de jobspec): één
+//!   executor per core en [`smp::spawn_on`].
 //!
-//! Wat hier niet staat: SMP (één app-core, PORT.md beslissing 8), de codec-
-//! en device-ops.
+//! - `codec` (feature `media`): de codec-client; een stream door de
+//!   hardwaredecoder zonder dat er een beeld over de verbinding gaat.
+//!
+//! Wat hier niet staat: de device-ops.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -42,6 +46,8 @@ mod contract;
 pub mod app;
 pub mod appnet;
 pub mod clock;
+#[cfg(feature = "media")]
+pub mod codec;
 pub mod ctrl;
 pub mod heap;
 pub mod log;
@@ -49,6 +55,7 @@ pub mod net;
 pub mod ring;
 pub mod rt;
 pub mod sleep;
+pub mod smp;
 pub mod sys;
 pub mod tail;
 

@@ -19,6 +19,13 @@ driver-pl011 = { path = "../../driver/pl011" }
 driver-gicv3 = { path = "../../driver/gicv3" }
 driver-virtionet = { path = "../../driver/virtionet" }
 driver-virtioblk = { path = "../../driver/virtioblk" }
+# De framebuffer-beschrijving van `Board::framebuffer` (ramfb.rs).
+driver-fb = { path = "../../driver/fb" }
 
 [lints]
 workspace = true
+
+[features]
+default = []
+# `-device ramfb` over fw_cfg (ramfb.rs): de console op het glas in QEMU.
+gui = []

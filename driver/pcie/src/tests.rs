@@ -320,3 +320,40 @@ fn ecam_refuses_buses_outside_its_window() {
     assert!(probe(&e, bdf(5, 0, 0)).is_none());
     assert_eq!(e.buses(), (0, 0));
 }
+
+#[test]
+fn intx_swizzles_up_to_the_root_bus() {
+    let c = fabric();
+    // De NIC op 01:00.0 met INTB (pin 2 in het register): achter de
+    // root-poort op 00:01.0 wordt dat (1 + 0) % 4 = INTB van device 1.
+    c.funcs.borrow_mut().get_mut(&bdf(1, 0, 0)).unwrap().space[0x3c / 4] = 2 << 8;
+    let nic = probe(&c, bdf(1, 0, 0)).unwrap();
+    assert_eq!(nic.intx_pin(&c), Some(1));
+    assert_eq!(intx_at_root(&c, 0, &nic), Some((1, 1)));
+    // Een functie op de root-bus zelf: geen swizzle.
+    c.funcs.borrow_mut().get_mut(&bdf(0, 2, 0)).unwrap().space[0x3c / 4] = 1 << 8;
+    let f = probe(&c, bdf(0, 2, 0)).unwrap();
+    assert_eq!(intx_at_root(&c, 0, &f), Some((2, 0)));
+    // Zonder pin: geen INTx.
+    let none = probe(&c, bdf(0, 3, 0)).unwrap();
+    assert_eq!(intx_at_root(&c, 0, &none), None);
+    assert_eq!(swizzle(3, 2), 1);
+}
+
+#[test]
+fn msix_table_sits_in_its_bar() {
+    let c = fabric();
+    let nic = probe(&c, bdf(1, 0, 0)).unwrap();
+    let m = Msix {
+        cap: 0x50,
+        size: 4,
+        table: BarOffset { bar: 2, off: 0x40 },
+        pba: BarOffset { bar: 2, off: 0x80 },
+    };
+    assert_eq!(nic.msix_table_addr(&c, &m), Some(0x2000_0040));
+    let unassigned = Msix {
+        table: BarOffset { bar: 4, off: 0 },
+        ..m
+    };
+    assert_eq!(nic.msix_table_addr(&c, &unassigned), None);
+}

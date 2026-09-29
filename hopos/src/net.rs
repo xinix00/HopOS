@@ -452,6 +452,7 @@ impl Node {
 
         if exec.spawn(keep_lease(exec, mac, lease)).is_err() {
             println!("net: dhcp keeper not spawned, the lease will lapse HOPOS_DHCP_LOST");
+            crate::watchdog::request_reset("dhcp keeper not spawned");
         }
         if exec.spawn(system_listener(exec, lease.ip, api)).is_err() {
             println!("system: listener not spawned HOPOS_SYSTEM_FAIL");
@@ -679,6 +680,7 @@ async fn keep_lease(exec: &'static Executor, mac: [u8; 6], lease: Lease) {
                 "dhcp: bind udp {}: {e}, the lease will lapse HOPOS_DHCP_LOST",
                 leandhcp::CLIENT_PORT
             );
+            crate::watchdog::request_reset("dhcp keeper could not bind");
             return;
         }
     };
@@ -704,7 +706,13 @@ async fn keep_lease(exec: &'static Executor, mac: [u8; 6], lease: Lease) {
                 return;
             }
             Err(e) => {
+                // Go hing `requestNodeReset` aan `hopnet.AddressLost`: de stack
+                // kan niet van adres wisselen, dus een verloren lease is het
+                // einde van deze node-levensduur. De watchdog houdt zijn pets
+                // in en het ijzer reset; zonder gewapende watchdog blijft het
+                // bij de melding.
                 println!("{e} HOPOS_DHCP_LOST");
+                crate::watchdog::request_reset("dhcp lease lost");
                 return;
             }
         };

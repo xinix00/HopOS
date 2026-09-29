@@ -272,6 +272,8 @@ pub enum CommitWhy {
     Periodic,
     /// Een slot stopte.
     Stopped(Slot),
+    /// De kern-flip: de laatste commit van deze kern, vlak vóór de sprong.
+    Flip,
 }
 
 /// Een bericht aan de actor.
@@ -281,6 +283,12 @@ pub enum FsMsg {
     Call(FsCall),
     /// Leg de boom vast als hij veranderde.
     Commit(CommitWhy),
+    /// De kern-flip: leg de boom vast en neem daarna geen call meer aan
+    /// (elke call krijgt [`Error::Busy`], luid) tot [`FsMsg::Thaw`]. Het
+    /// antwoord draagt de vastgelegde generatie als `size`.
+    Freeze,
+    /// De flip ging niet door: de actor neemt weer calls aan.
+    Thaw,
 }
 
 /// Een bericht met zijn antwoordplek.
@@ -306,7 +314,7 @@ pub async fn call<'a>(
     }) {
         return match env.msg {
             FsMsg::Call(c) => Err(c),
-            FsMsg::Commit(_) => Ok(FsDone {
+            FsMsg::Commit(_) | FsMsg::Freeze | FsMsg::Thaw => Ok(FsDone {
                 buf: Vec::new(),
                 out: Vec::new(),
                 result: Err(Error::Busy),
@@ -319,6 +327,40 @@ pub async fn call<'a>(
             return Ok(d);
         }
     }
+}
+
+/// Bevriest de actor voor de kern-flip en geeft de generatie die hij net
+/// vastlegde: wat daarna op de schijf staat, is precies wat de nieuwe kern
+/// mount. Een volle brievenbus is [`Error::Busy`] (en dan geen flip).
+pub async fn freeze<'a>(inbox: &FsInbox<'a>, reply: &'a Reply) -> Result<u64> {
+    let _ = reply.done.take();
+    if inbox
+        .try_send(FsEnvelope {
+            msg: FsMsg::Freeze,
+            reply: Some(reply),
+        })
+        .is_err()
+    {
+        return Err(Error::Busy);
+    }
+    loop {
+        reply.done.wait().await;
+        if let Some(d) = reply.take_fs() {
+            return d.result.map(|(generation, _)| generation);
+        }
+    }
+}
+
+/// Ontdooit de actor na een flip die niet doorging. Vuur-en-vergeet: een
+/// volle brievenbus is `false`, en dan zegt de aanroeper het luid.
+#[must_use]
+pub fn thaw(inbox: &FsInbox<'_>) -> bool {
+    inbox
+        .try_send(FsEnvelope {
+            msg: FsMsg::Thaw,
+            reply: None,
+        })
+        .is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -339,6 +381,12 @@ pub struct FsActor<'s, D, L> {
     commit_fails: u64,
     /// Blokfouten onder een call; dezelfde regel.
     io_fails: u64,
+    /// Bevroren voor de kern-flip ([`FsMsg::Freeze`]): calls worden
+    /// geweigerd, commits overgeslagen. De boom op de schijf is dan die
+    /// van de nieuwe kern.
+    frozen: bool,
+    /// Geweigerde calls tijdens de bevriezing.
+    frozen_calls: u64,
     path: PathBuf,
 }
 
@@ -356,6 +404,8 @@ impl<'s, D: BlockDevice, L: Console> FsActor<'s, D, L> {
             saved: [None; SLOT_CAP + 1],
             commit_fails: 0,
             io_fails: 0,
+            frozen: false,
+            frozen_calls: 0,
             path: PathBuf::new(),
         }
     }
@@ -365,6 +415,24 @@ impl<'s, D: BlockDevice, L: Console> FsActor<'s, D, L> {
         loop {
             let env = inbox.recv().await;
             match env.msg {
+                FsMsg::Call(mut c) if self.frozen => {
+                    // Luid, de eerste paar keer: een call die hier strandt
+                    // hoort de aanroeper opnieuw te doen op de nieuwe kern.
+                    self.frozen_calls += 1;
+                    if self.frozen_calls <= LOUD_COMMIT_FAILS {
+                        self.log.log(format_args!(
+                            "hopfs: slot {} op {} refused, frozen for the kernel flip HOPOS_FS_FROZEN_CALL",
+                            c.slot, c.op
+                        ));
+                    }
+                    if let Some(reply) = env.reply {
+                        reply.put_fs(FsDone {
+                            buf: core::mem::take(&mut c.buf),
+                            out: core::mem::take(&mut c.out),
+                            result: Err(Error::Busy),
+                        });
+                    }
+                }
                 FsMsg::Call(mut c) => {
                     let result = self.handle(&mut c);
                     if let Err(Error::Io { lba }) = result {
@@ -386,9 +454,48 @@ impl<'s, D: BlockDevice, L: Console> FsActor<'s, D, L> {
                         });
                     }
                 }
+                FsMsg::Commit(_) if self.frozen => {}
                 FsMsg::Commit(why) => self.commit(why),
+                FsMsg::Freeze => {
+                    let result = self.freeze();
+                    if let Some(reply) = env.reply {
+                        reply.put_fs(FsDone {
+                            buf: Vec::new(),
+                            out: Vec::new(),
+                            result,
+                        });
+                    }
+                }
+                FsMsg::Thaw => {
+                    self.frozen = false;
+                    self.log.log(format_args!(
+                        "hopfs: thawed, the flip did not go through ({} call(s) were refused) HOPOS_FS_THAWED",
+                        self.frozen_calls
+                    ));
+                    self.frozen_calls = 0;
+                }
             }
         }
+    }
+
+    /// De bevriezing van de kern-flip: eerst vastleggen, dan pas dicht. Een
+    /// commit die faalt bevriest niet: dan zou de nieuwe kern een oudere
+    /// boom mounten dan de apps denken, en dat is geen flip maar verlies.
+    fn freeze(&mut self) -> Result<(u64, usize)> {
+        self.fs.commit()?;
+        self.frozen = true;
+        self.frozen_calls = 0;
+        let g = self.fs.generation();
+        self.log.log(format_args!(
+            "hopfs: tree committed as generation {g} and frozen for the kernel flip HOPOS_FS_FROZEN generation={g}"
+        ));
+        Ok((g, 0))
+    }
+
+    /// De generatie van de laatst vastgelegde boom.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.fs.generation()
     }
 
     /// Legt de boom vast als hij veranderde; één regel per nieuwe generatie.
@@ -404,6 +511,9 @@ impl<'s, D: BlockDevice, L: Console> FsActor<'s, D, L> {
                     )),
                     CommitWhy::Stopped(s) => self.log.log(format_args!(
                         "hopfs: tree committed as generation {g} (slot {s} stopped) HOPOS_FS_COMMIT"
+                    )),
+                    CommitWhy::Flip => self.log.log(format_args!(
+                        "hopfs: tree committed as generation {g} (kernel flip) HOPOS_FS_COMMIT"
                     )),
                 }
             }

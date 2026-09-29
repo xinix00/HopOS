@@ -17,7 +17,11 @@
 //!   MADT-efficiëntieklasse niet;
 //! - de thermometer ([`thermal`]): de SCP via SCMI.
 //!
-//! De codec (VPU) en USB horen bij media en gui en staan hier niet.
+//! - de codec ([`codec`], feature `media`): de VPU uit de DSDT, stroom en
+//!   klokken via SCMI, en de stroomcyclus als hij vastzit. De driver zelf
+//!   (`media-mve`) importeert board niet en omgekeerd.
+//!
+//! USB hoort bij gui en staat hier niet.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -32,6 +36,8 @@
 
 pub mod class;
 pub mod clock;
+#[cfg(feature = "media")]
+pub mod codec;
 pub mod cpc;
 mod machine;
 pub mod probe;
@@ -42,7 +48,15 @@ pub use machine::{LINK_TIMEOUT_NS, O6n};
 // De slot- en flip-lijm van de binary leest het plan onder deze namen
 // (`slots::plan`, `mpidr`, de staging, `KERN_RAM`, `DMA`), zoals bij de
 // Pi's; op de O6N zijn het die van het UEFI-board.
-pub use board_uefi::{DMA, KERN_RAM, slots};
+pub use board_uefi::{DMA, KERN_RAM, KERN_VHE, irq, slots, watchdog};
+// De rekenkern en de taak van het klokbeleid, voor de telemetrie van de
+// binary (die dit crate alleen als `vboard` kent).
+pub use driver_dvfs as dvfs;
+
+/// De schijf die `probe_disk` geeft: de NVMe. De binary noemt hem
+/// `vboard::Disk`, zodat de geprobede schijf van de bench naar de opslag gaat
+/// zonder dat de binary het type per board kent.
+pub type Disk = driver_nvme::Nvme;
 
 /// De XSDT-OEM-ID van de Cix-firmware: de runtime-toets dat dit werkelijk
 /// een Cix P1 is vóór er board-kennis (mailbox-adressen) in MMIO gaat. Een

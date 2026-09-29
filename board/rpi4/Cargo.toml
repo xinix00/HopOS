@@ -19,3 +19,8 @@ driver-mdio = { path = "../../driver/nic/mdio" }
 
 [lints]
 workspace = true
+
+[features]
+default = []
+# De VideoCore-framebuffer (board-raspi, vcfb.rs).
+gui = ["board-raspi/gui"]

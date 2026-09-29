@@ -35,10 +35,15 @@ pub use machine::Altra;
 
 // De slot- en flip-lijm van de binary leest het plan onder deze namen,
 // zoals bij de Pi's; op de Altra zijn het die van het UEFI-board.
-pub use board_uefi::{DMA, KERN_RAM, slots};
+pub use board_uefi::{DMA, KERN_RAM, KERN_VHE, irq, slots, watchdog};
 
 use board::CoreClass;
 use driver_pcie::{Config, Function, find};
+
+/// De schijf die `probe_disk` geeft: de NVMe. De binary noemt hem
+/// `vboard::Disk`, zodat de geprobede schijf van de bench naar de opslag gaat
+/// zonder dat de binary het type per board kent.
+pub type Disk = driver_nvme::Nvme;
 
 /// De naam, voor de bootlog.
 pub const NAME: &str = "altra";

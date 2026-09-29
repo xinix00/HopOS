@@ -1391,6 +1391,10 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
                     };
                     self.fs_call(who, head, reply, buf, out).await
                 }
+                #[cfg(feature = "media")] // MEDIA: de codec-ops, synchroon (codecabi.rs).
+                Ok(call) if crate::codecabi::is_codec_op(call.op) => {
+                    crate::codecabi::serve(slot, who.generation, &call.as_req(), out)
+                }
                 Ok(call) => self.call(slot, &call, reply, mem, hooks, out).await,
                 Err(_) => encode_resp(out, 0, STATUS_ERROR, 0, 0, b"bad request"),
             };
@@ -1722,10 +1726,17 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         let Some(mut s) = self.take_stream(slot) else {
             return Err(Error::NotOwned { slot: slot.get() }.into());
         };
-        let placed = s
-            .placer
-            .finish(&mut s.grant, mem, slot)
-            .and_then(|entry| s.put_env(mem).map(|()| entry).map_err(Fail::from));
+        let placed = match s.placer.finish(&mut s.grant, mem, slot) {
+            // De grant-haak vóór de env op de control-page gaat (Go:
+            // `prepareGrantedEnv`): de actor bezit de aanbieder en geeft de
+            // complete env terug. Faalt de stap, dan ruimt de abort
+            // hieronder de grant op.
+            Ok(entry) => match self.grant_env(reply, slot, &mut s.env).await {
+                Ok(()) => s.put_env(mem).map(|()| entry).map_err(Fail::from),
+                Err(e) => Err(Fail::from(e)),
+            },
+            Err(e) => Err(e),
+        };
         let r = match placed {
             Ok(entry) => {
                 let grant = s.grant;
@@ -1739,6 +1750,23 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         match r.map_err(Fail::from).and_then(done) {
             Ok(_) => answer_stream(data, received, StreamState::Placed, None),
             Err(e) => answer_stream(data, received, StreamState::Failed, Some(e)),
+        }
+    }
+
+    /// Laat de grant-aanbieder van de actor de env van `slot` aanvullen
+    /// ([`Request::Env`]); `env` wordt de complete blob.
+    async fn grant_env(&self, reply: &'r Reply, slot: Slot, env: &mut Vec<u8>) -> Result {
+        let asked = Request::Env {
+            slot,
+            env: core::mem::take(env),
+        };
+        match slots::call(self.inbox, reply, asked).await? {
+            Response::Env(e) => {
+                *env = e;
+                Ok(())
+            }
+            Response::Failed(e) => Err(e),
+            _ => Err(Error::Busy),
         }
     }
 
@@ -2219,9 +2247,9 @@ mod tests {
     /// Dient `p` tot EOF, met de actor en (als die er is) een servicer
     /// ernaast. Geeft de uitkomst van `serve`.
     #[expect(clippy::too_many_arguments, reason = "de hele kern van een test")]
-    fn drive<'i, 'r, const N: usize>(
+    fn drive<'i, 'r, G: crate::grants::Grants, const N: usize>(
         sys: &System<'i, 'r, N>,
-        a: &mut Actor<'_>,
+        a: &mut Actor<'_, G>,
         inbox: &'i Mailbox<Envelope<'r>, N>,
         reply: &'r Reply,
         p: &mut Pipe,
@@ -2296,6 +2324,73 @@ mod tests {
         let too_big = vec![0u8; MAX_PAYLOAD + 1];
         assert!(crate::testutil::block_on(write_frame(&mut w, KIND_CALL, &too_big)).is_err());
         assert!(w.tx.is_empty(), "oversized frame half written");
+    }
+
+    /// De grant-haak in de stroom: een start met `GUI=display` krijgt de
+    /// regels van de aanbieder op de control-page, achter een slotregel,
+    /// en de aanbieder wordt pas na de bouw gearmd.
+    #[test]
+    fn the_grant_env_lands_on_the_control_page() {
+        /// Een aanbieder die bij `GUI=display` één regel geeft en telt.
+        #[derive(Default)]
+        struct Glass {
+            armed: Vec<usize>,
+        }
+        impl crate::grants::Grants for Glass {
+            fn env(&mut self, _: Slot, env: &[u8], out: &mut Vec<u8>) {
+                if crate::grants::env_get(env, "GUI") == Some(b"display") {
+                    out.extend_from_slice(b"FB_BASE=0x20000000\n");
+                }
+            }
+            fn arm(&mut self, slot: Slot) -> Result {
+                self.armed.push(slot.get());
+                Ok(())
+            }
+            fn adopt(&mut self, _: Slot) -> Result {
+                Ok(())
+            }
+            fn release(&mut self, _: Slot) {}
+        }
+        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
+        let tee = LogTee::new(&con, &logs);
+        let mut a =
+            crate::slots::tests::actor_with(&svc, &con, Obey::Exit, 64, 4, Glass::default());
+        crate::slots::tests::start(&mut a, 1, 8, 1).unwrap();
+        let reply = Reply::new();
+        let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8).with_logs(&logs);
+        let img = elf(u64::from(abi::ABI_VERSION));
+        assert!(img.len() <= MAX_IO_CHUNK, "one chunk");
+        let mut p = Pipe::new(
+            NET | 2,
+            &[
+                start_call(1, img.len() as u64, b"GUI=display"),
+                enc(&stream_req(2, 2, 0, &img)),
+            ],
+        );
+        let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
+        let r = drive(
+            &sys, &mut a, &inbox, &reply, &mut p, &mut mem, &hooks, &tee, None,
+        );
+        assert_eq!(r, End::Peer);
+        let res = results(&p.tx);
+        assert_eq!(
+            (res[0].1, res[0].3),
+            (STATUS_OK, 2),
+            "the kern picks slot 2"
+        );
+        assert_eq!(stream_state(&res[1]), StreamState::Placed, "{:?}", res[1]);
+        assert_eq!(a.grants().armed, [1, 2]);
+        let part = a.status(s(2)).partition.unwrap();
+        let ctrl = part.base + part.size - ABI_TAIL + ABI_CTRL_OFF;
+        let want = b"GUI=display\nFB_BASE=0x20000000\n";
+        assert_eq!(
+            mem.read64(ctrl + abi::hopabi::CTRL_ENV_LEN),
+            want.len() as u64
+        );
+        let mut got = [0u8; 31];
+        read_bytes(&mem, ctrl + abi::hopabi::CTRL_ENV_DATA, &mut got);
+        assert_eq!(&got, want);
     }
 
     /// De hele levensloop: start (de kern kiest slot 3), het image in drie

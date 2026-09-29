@@ -80,13 +80,48 @@ __efi_head:
     .section .text.efientry, "ax"
     .global _start_efi
 _start_efi:
+    // x1 = 0: geen SystemTable, dus een kern-flip (crate::flip). Vóór de
+    // eerste store: de stack van de oude kern ligt misschien waar nu onze
+    // code staat.
+    cbz x1, 20f
     stp x29, x30, [sp, #-32]!
     mov x29, sp
     stp x19, x20, [sp, #16]
     mov x19, x0
     mov x20, x1
+    bl 30f
+    mov x0, x19
+    mov x1, x20
+    bl hopos_efi_main
+    ldp x19, x20, [sp, #16]
+    ldp x29, x30, [sp], #32
+    ret
 
-    adrp x9, __efi_head
+    // De flip-ingang: MMU uit, geen firmware. Eigen stack, dezelfde
+    // relocatie en BSS als hierboven, en dan de weg van de koude stub naar
+    // kmain, met de feiten van de koude boot (FLIP_FACTS_PA). Zonder
+    // feiten parkeert de core: een kern zonder console, ACPI en kaart kan
+    // niets, en de guard van de oude generatie is er niet meer.
+20: adrp x9, __stack_top
+    add x9, x9, :lo12:__stack_top
+    mov sp, x9
+    bl 30f
+    ldr x9, ={facts}
+    ldr x10, [x9]
+    ldr x11, ={facts_magic}
+    cmp x10, x11
+    b.ne 29f
+    mov x4, x9
+    ldr x0, [x9, #{ttbr0}]
+    ldr x1, [x9, #{ttbr0} + 8]
+    ldr x2, [x9, #{ttbr0} + 16]
+    ldr x3, [x9, #{ttbr0} + 24]
+    b uefi_enter_flipped
+29: wfe
+    b 29b
+
+    // De zelf-relocatie en de BSS (blad-routine: alleen x9 tot x14).
+30: adrp x9, __efi_head
     add x9, x9, :lo12:__efi_head
     adrp x10, __rela_start
     add x10, x10, :lo12:__rela_start
@@ -111,17 +146,17 @@ _start_efi:
     b.hs 4f
     str xzr, [x10], #8
     b 3b
-4:
-    mov x0, x19
-    mov x1, x20
-    bl hopos_efi_main
-    ldp x19, x20, [sp, #16]
-    ldp x29, x30, [sp], #32
-    ret
+4:  ret
 
     .global uefi_enter_kernel
 uefi_enter_kernel:
-    msr daifset, #0xf
+    mov x23, xzr
+    b 10f
+    // Dezelfde weg voor een geflipte kern, met x4 = de feitenpagina: die
+    // gaan vlak vóór kmain terug in de statics (hopos_efi_flip_facts).
+uefi_enter_flipped:
+    mov x23, x4
+10: msr daifset, #0xf
     mov x19, x0
     mov x20, x1
     mov x21, x2
@@ -140,13 +175,24 @@ uefi_enter_kernel:
     dsb sy
     isb
 
+    // HCR_EL2 vers (crate::el2 `HCR`), met de MMU uit en vóór TCR en
+    // SCTLR: onder VHE bepaalt E2H de lay-out van die twee. De nVHE-tak is
+    // byte voor byte de ingang van vóór VHE.
+    .if {vhe}
+    ldr x9, ={hcr}
+    .else
     mov x9, #(1 << 31)
     orr x9, x9, #(7 << 3)
+    .endif
     msr hcr_el2, x9
     isb
     msr mdcr_el2, xzr
     msr hstr_el2, xzr
+    .if {vhe}
+    ldr x9, ={cptr}
+    .else
     mov x9, #0x33ff
+    .endif
     msr cptr_el2, x9
     msr cnthctl_el2, x22
     msr cntvoff_el2, xzr
@@ -188,7 +234,11 @@ uefi_enter_kernel:
     tlbi alle2
     dsb ish
     isb
+    .if {vhe}
+    ldr x9, ={sctlr}
+    .else
     ldr x9, =(0x30c50830 | (1 << 0) | (1 << 2) | (1 << 3) | (1 << 12))
+    .endif
     msr sctlr_el2, x9
     isb
     adrp x9, __hopos_vectors
@@ -199,7 +249,10 @@ uefi_enter_kernel:
 8:  adrp x9, __stack_top
     add x9, x9, :lo12:__stack_top
     mov sp, x9
-    mov x29, xzr
+    cbz x23, 11f
+    mov x0, x23
+    bl hopos_efi_flip_facts
+11: mov x29, xzr
     mov x30, xzr
     mov x0, xzr
     mov x1, x21
@@ -209,4 +262,11 @@ uefi_enter_kernel:
     .ltorg
 "#,
     mair = const cpu::boot::MAIR,
+    vhe = const crate::el2::VHE as u8,
+    hcr = const crate::el2::HCR,
+    cptr = const crate::el2::CPTR,
+    sctlr = const crate::el2::SCTLR,
+    facts = const crate::slots::FLIP_FACTS_PA,
+    facts_magic = const crate::flip::FACTS_MAGIC,
+    ttbr0 = const crate::flip::W_TTBR0 * 8,
 );

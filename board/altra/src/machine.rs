@@ -172,6 +172,13 @@ impl Board for Altra {
         self.uefi.console()
     }
 
+    /// De GOP van de eigen firmware, zoals het UEFI-board hem las (alleen
+    /// in de gui-smaak; kaal `None`, docs/gui.md). Een Altra-server heeft
+    /// meestal een BMC-VGA; de GOP daarvan is een gewone lineaire buffer.
+    fn framebuffer(&self) -> Option<board::fb::Desc> {
+        board_uefi::gop_framebuffer()
+    }
+
     fn privilege(&self, el: u8) -> Result<(), Error> {
         self.uefi.privilege(el)
     }

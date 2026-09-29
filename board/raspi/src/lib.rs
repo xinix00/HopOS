@@ -28,6 +28,24 @@ pub mod cfg;
 pub mod dt;
 pub mod map;
 pub mod slots;
+// De framebuffer via de VideoCore: alleen in de gui-smaak (docs/gui.md);
+// kaal een stub met dezelfde signatuur (handboek §7).
+#[cfg(feature = "gui")]
+mod vcfb;
+#[cfg(not(feature = "gui"))]
+mod vcfb {
+    //! Kaal gebouwd: geen framebuffer.
+    use core::cell::RefCell;
+    use driver_vcmail::Mbox;
+
+    /// Altijd headless.
+    pub(crate) fn framebuffer(
+        _mbox: &RefCell<Option<Mbox>>,
+        _tables: Option<crate::map::Tables>,
+    ) -> Option<driver_fb::Desc> {
+        None
+    }
+}
 
 #[cfg(test)]
 mod tests;
@@ -46,6 +64,12 @@ use sync::{LocalCell, Signal};
 
 pub use driver_gicv2;
 pub use driver_vcmail;
+
+/// De schijf die `probe_disk` geeft: geen, want de Pi's hebben nog geen
+/// blokdriver ([`NoDisk`]). De binary noemt hem `vboard::Disk`, zodat de
+/// geprobede schijf van de bench naar de opslag gaat zonder dat de binary het
+/// type per board kent.
+pub type Disk = NoDisk;
 
 /// De kern-RAM als board-regio.
 pub const KERN_RAM: Region = Region {
@@ -529,6 +553,11 @@ impl<S: Soc> Board for Raspi<S> {
             nic: pass.claimed.saturating_sub(other),
             other,
         }
+    }
+
+    fn framebuffer(&self) -> Option<driver_fb::Desc> {
+        // De ene ontdekking van deze boot (vcfb.rs); kaal altijd `None`.
+        vcfb::framebuffer(&MBOX, S::tables())
     }
 
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error> {

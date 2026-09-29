@@ -8,6 +8,10 @@
 //! [`FS_INBOX`]. De committer bezit niets: hij kijkt naar de
 //! servicer-tabel en stuurt een `Commit`.
 //!
+//! De kern-flip: vóór de sprong legt de actor de boom vast en neemt hij
+//! niets meer aan ([`freeze_for_flip`]); de nieuwe kern mount dezelfde
+//! schijf en vindt precies die generatie.
+//!
 //! Stateful: een koude boot laadt de laatst vastgelegde boom (Go:
 //! `hopos.storage=stateful`). Deze kern kent nog geen bootparameters, en
 //! Hop's staat op `/hop/` moet een herstart overleven; wie leeg wil
@@ -15,18 +19,73 @@
 
 use board::Board;
 use core::future::Future;
+use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use core::time::Duration;
 use cpu::println;
 use driver_virtioblk::{MAX_TRANSFER, SECTOR};
 use executor::Executor;
 use kern::cage::Timer;
 use kern::hopfs::{Fs, Mounted};
-use kern::rpc::{FsActor, FsInbox, committer};
+use kern::rpc::{self, FsActor, FsInbox, committer};
+use kern::slots::Reply;
 use sync::mpsc::Mailbox;
+use sync::{Either, select};
 
 /// De brievenbus van de hopfs-actor: de verbindingstaken van de
 /// system-API sturen er hun bestandscalls heen, de committer zijn commits.
 pub(crate) static FS_INBOX: FsInbox<'static> = Mailbox::new();
+
+/// Draait de hopfs-actor? Zonder actor valt er vóór een flip niets te
+/// bevriezen.
+static UP: AtomicBool = AtomicBool::new(false);
+
+/// De antwoordplek van de flip-taak bij de actor (één aanroeper).
+static FREEZE_REPLY: Reply = Reply::new();
+
+/// Draait de hopfs-actor?
+pub(crate) fn is_up() -> bool {
+    UP.load(Relaxed)
+}
+
+/// De kern-flip vóór de sprong: de boom vastleggen en de actor dicht (elke
+/// call daarna is `Busy`, luid; `HOPOS_FS_FROZEN`). Geeft de vastgelegde
+/// generatie: de nieuwe kern mount precies die (`HOPOS_FS_UP fresh=0
+/// generation=N`). `Ok(None)` zonder schijf. Een actor die niet binnen
+/// `wait` antwoordt, of een commit die faalt, is een fout: dan geen flip,
+/// want wat de apps schreven zou de nieuwe kern niet vinden.
+///
+/// Dat de actor tussen deze bevriezing en de sprong niets meer schrijft,
+/// is de vorm: hij is de enige die de schijf aanraakt (PORT.md §3), en hij
+/// weigert alles.
+pub(crate) async fn freeze_for_flip(
+    exec: &'static Executor,
+    wait: Duration,
+) -> kern::Result<Option<u64>> {
+    if !is_up() {
+        return Ok(None);
+    }
+    match select(rpc::freeze(&FS_INBOX, &FREEZE_REPLY), exec.after(wait)).await {
+        Either::Left(Ok(g)) => Ok(Some(g)),
+        Either::Left(Err(e)) => {
+            println!("hopfs: not frozen for the flip: {e} HOPOS_FS_FREEZE_FAIL");
+            Err(e)
+        }
+        Either::Right(()) => {
+            println!(
+                "hopfs: the actor did not freeze within {} ms HOPOS_FS_FREEZE_FAIL",
+                wait.as_millis()
+            );
+            Err(kern::Error::Busy)
+        }
+    }
+}
+
+/// De flip ging niet door: de actor weer open. `false` als het bericht de
+/// actor niet bereikte (volle brievenbus).
+#[must_use]
+pub(crate) fn thaw_after_flip() -> bool {
+    !is_up() || rpc::thaw(&FS_INBOX)
+}
 
 /// De klok van de executor als `kern::cage::Timer`, voor de committer.
 struct ExecTimer(&'static Executor);
@@ -40,21 +99,32 @@ impl Timer for ExecTimer {
     }
 }
 
-/// Zet de opslag op: schijf zoeken, hopfs mounten, actor en committer
-/// spawnen. Geeft `true` als de bestandscalls bediend worden; zonder schijf
-/// draait de node door en weigert elke bestandscall luid.
-pub(crate) fn start(exec: &'static Executor) -> bool {
-    let board = &crate::BOARD;
-    let disk = match board.probe_disk() {
-        Ok(Some(d)) => d,
+/// Zoekt de schijf van het board, één keer voor de hele boot: `probe_disk`
+/// mag maar één keer, en de schijf gaat eerst langs de bench (bench.rs)
+/// en dan naar [`start`]. Geen schijf of een fout is één regel en `None`:
+/// de node draait door en weigert elke bestandscall luid.
+pub(crate) fn probe() -> Option<vboard::Disk> {
+    match crate::BOARD.probe_disk() {
+        Ok(Some(d)) => Some(d),
         Ok(None) => {
             println!("disk: no virtio-blk on this board, file calls refused HOPOS_DISK_NONE");
-            return false;
+            None
         }
         Err(e) => {
             println!("disk: {e}, file calls refused HOPOS_DISK_FAIL");
-            return false;
+            None
         }
+    }
+}
+
+/// Zet de opslag op de geprobede schijf ([`probe`]): hopfs mounten, actor
+/// en committer spawnen. Geeft `true` als de bestandscalls bediend worden;
+/// zonder schijf draait de node door en weigert elke bestandscall luid (de
+/// regel gaf [`probe`] al).
+pub(crate) fn start(exec: &'static Executor, disk: Option<vboard::Disk>) -> bool {
+    let board = &crate::BOARD;
+    let Some(disk) = disk else {
+        return false;
     };
     let sectors = disk.sectors();
     println!(
@@ -104,6 +174,7 @@ pub(crate) fn start(exec: &'static Executor) -> bool {
         println!("hopfs: actor not spawned, file calls refused HOPOS_FS_FAIL");
         return false;
     }
+    UP.store(true, Relaxed);
     let commit = async move {
         committer(&crate::SERVICERS, &FS_INBOX, &ExecTimer(exec), max_slots).await;
     };

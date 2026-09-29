@@ -13,7 +13,7 @@
 use crate::contract::{
     CTRL_CORES, CTRL_ENV_DATA, CTRL_ENV_LEN, CTRL_ENV_MAX, CTRL_EXIT_CODE, CTRL_HEARTBEAT,
     CTRL_IDLE, CTRL_IDLE_MODE, CTRL_KILL, CTRL_MEM_SYS, CTRL_RAM_SIZE, CTRL_RX_DOOR, CTRL_SHARED,
-    CTRL_STATUS, CTRL_WAKES, CTRL_WALL_OFF, IDLE_YIELD,
+    CTRL_STATUS, CTRL_TEMP, CTRL_WAKES, CTRL_WALL_OFF, IDLE_YIELD,
 };
 use dev::Pa;
 
@@ -80,6 +80,14 @@ impl Ctrl {
         self.set(CTRL_HEARTBEAT, beat);
     }
 
+    /// De die-temperatuur van de node in milligraden, zoals de kern hem
+    /// elke seconde neerzet; 0 = geen meting (een board zonder sensor, of
+    /// nog geen seconde telemetrie). Voor de heartbeat van Hop.
+    #[must_use]
+    pub fn temp_milli_c(&self) -> i32 {
+        i32::try_from(self.get(CTRL_TEMP) as i64).unwrap_or(0)
+    }
+
     /// De laatst geschreven hartslag.
     #[must_use]
     pub fn heartbeat(&self) -> u64 {
@@ -144,6 +152,14 @@ impl Ctrl {
     #[must_use]
     pub fn is_yield_mode(&self) -> bool {
         self.get(CTRL_IDLE_MODE) & IDLE_YIELD != 0
+    }
+
+    /// Het aantal idle-rondes dat de slaper publiceerde (`CtrlWakes`): op
+    /// een gedeelde core of in yield-modus is elke ronde een yield naar de
+    /// switcher.
+    #[must_use]
+    pub fn idle_rounds(&self) -> u64 {
+        self.get(CTRL_WAKES)
     }
 
     /// Publiceert de idle-teller (geslapen tikken) en het aantal rondes.

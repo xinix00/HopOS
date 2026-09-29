@@ -98,7 +98,8 @@ struct CommonCfg {
     /// Leest de grootste queue die het device biedt; de driver mag er een
     /// kleinere in schrijven.
     queue_size: Reg<u16>,
-    _queue_msix_vector: Reg<u16>,
+    /// De MSI-X-vector van de gekozen queue; NO_VECTOR (0xffff) na reset.
+    queue_msix_vector: Reg<u16>,
     queue_enable: Reg<u16>,
     queue_notify_off: Reg<u16>,
     queue_desc_lo: Reg<u32>,
@@ -120,7 +121,7 @@ const _: () = {
     assert!(offset_of!(CommonCfg, config_generation) == 0x15);
     assert!(offset_of!(CommonCfg, queue_select) == 0x16);
     assert!(offset_of!(CommonCfg, queue_size) == 0x18);
-    assert!(offset_of!(CommonCfg, _queue_msix_vector) == 0x1a);
+    assert!(offset_of!(CommonCfg, queue_msix_vector) == 0x1a);
     assert!(offset_of!(CommonCfg, queue_enable) == 0x1c);
     assert!(offset_of!(CommonCfg, queue_notify_off) == 0x1e);
     assert!(offset_of!(CommonCfg, queue_desc_lo) == 0x20);
@@ -256,6 +257,11 @@ pub struct Pci {
     pending: Option<Pa>,
     /// Het notify-adres per aangezette queue.
     doorbells: [Option<Pa>; MAX_QUEUES],
+    /// De MSI-X-vector die elke queue bij [`Transport::enable_queue`]
+    /// krijgt (`None` = NO_VECTOR laten staan: INTx of pollen).
+    msix: Option<u16>,
+    /// Nam het device de vector bij elke queue aan?
+    msix_ok: bool,
 }
 
 impl Pci {
@@ -307,7 +313,26 @@ impl Pci {
             selected: 0,
             pending: None,
             doorbells: [None; MAX_QUEUES],
+            msix: None,
+            msix_ok: true,
         })
+    }
+
+    /// Elke queue die hierna aangezet wordt, meldt zich op MSI-X-vector
+    /// `vector` (virtio 1.2 §4.1.5.1.2: `queue_msix_vector` vóór
+    /// `queue_enable`). Zonder dit blijft hij op NO_VECTOR staan, en met
+    /// MSI-X aan zwijgt het device dan helemaal (QEMU: `msix_notify` alleen
+    /// voor een vector). De config-wijziging blijft op NO_VECTOR: die
+    /// pollen we niet eens.
+    pub fn use_msix(&mut self, vector: u16) {
+        self.msix = Some(vector);
+    }
+
+    /// Nam het device de vector van [`Pci::use_msix`] bij elke queue aan?
+    /// Een device dat hem niet kan toewijzen, leest NO_VECTOR terug.
+    #[must_use]
+    pub fn msix_ok(&self) -> bool {
+        self.msix.is_some() && self.msix_ok
     }
 
     fn common(&self) -> &'static CommonCfg {
@@ -400,6 +425,13 @@ impl Transport for Pci {
     }
 
     fn enable_queue(&mut self) {
+        if let Some(v) = self.msix {
+            let c = self.common();
+            c.queue_msix_vector.write(v);
+            if c.queue_msix_vector.read() != v {
+                self.msix_ok = false;
+            }
+        }
         self.common().queue_enable.write(1);
         if let Some(slot) = self.doorbells.get_mut(usize::from(self.selected)) {
             *slot = self.pending;

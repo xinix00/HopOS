@@ -24,6 +24,10 @@ driver-nvme = { path = "../../driver/nvme" }
 driver-scmi = { path = "../../driver/scmi" }
 driver-dvfs = { path = "../../driver/dvfs" }
 
+# De `_PRT`-toets van `probe::nic_intid` tegen de echte DSDT.
+[dev-dependencies]
+fw = { path = "../../fw" }
+
 # Geen doc-voorbeelden: de doctest-ronde zou alleen de hele
 # UEFI-board-boom opnieuw linken.
 [lib]
@@ -31,3 +35,17 @@ doctest = false
 
 [lints]
 workspace = true
+
+[features]
+default = []
+# De GOP-framebuffer van de firmware (board-uefi, gop.rs).
+gui = ["board-uefi/gui"]
+# De VPU aanzetten (src/codec.rs): vensters uit de DSDT, stroom en klokken
+# via SCMI, de stroomcyclus bij een vastgelopen blok (docs/media.md).
+media = []
+# De twee keuzes van het UEFI-board die de binary voor de O6N altijd
+# aanzet (hopos/Cargo.toml `board-o6n`), en de host-tests van de werkruimte
+# niet: het kernvenster voor DRAM op 0x8000_0000, en de kern onder E2H = 1
+# (board/uefi/src/el2.rs; de A720 eist VHE, Go 17-09).
+window-8000 = ["board-uefi/window-8000"]
+vhe = ["board-uefi/vhe"]

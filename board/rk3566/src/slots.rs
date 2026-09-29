@@ -161,3 +161,38 @@ pub fn staged_image() -> Option<&'static [u8]> {
 pub fn staged_role() -> Option<StagedRole> {
     Some(StagedRole::App)
 }
+
+// --- De kern-flip (hopos/src/flip.rs, docs/flip.md) ---------------------
+//
+// Van het flip-spoor, niet van het board: alleen getallen. De staging, het
+// blob en de recorder liggen in Device-vensters (woordgewijs geschreven en
+// geveegd, dus goed); de trampoline moet uitvoerbaar zijn, en het enige
+// Normal-RAM buiten de pool is de kern-RAM zelf: de bovenste pagina van de
+// heap. Dat mag, want na de kopie van de trampoline draait er geen Rust
+// meer, en het nieuwe beeld reikt er niet (`cpu::el2::chain`, `check`). Op
+// ijzer nog niet geflipt.
+
+/// Waar de nieuwe kern heen gaat: het koude linkadres
+/// (`hopos/link-rk3566.ld`, `KERN_BASE`).
+pub const FLIP_LINK_BASE: u64 = 0x0221_0000;
+/// Geen PIE.
+pub const FLIP_PIE: bool = false;
+/// De trampoline: de bovenste pagina van de kern-RAM.
+pub const FLIP_TRAMP_PA: u64 = crate::KERN_RAM.base.0 + crate::KERN_RAM.size - 0x1000;
+/// Het beeld blijft onder de trampoline.
+pub const FLIP_IMAGE_END: u64 = FLIP_TRAMP_PA;
+/// De staging van het platte, gerelokeerde beeld.
+pub const FLIP_STAGE_PA: u64 = STAGE_PA;
+/// De grootste staging.
+pub const FLIP_STAGE_MAX: u64 = STAGE_MAX;
+/// De vluchtrecorder: het woord dat al voor een watchdog-reset vrijlag.
+pub const FLIP_RECORDER_PA: u64 = FLIP_SCRATCH_PA;
+/// De maat van het handoff-blob.
+pub const FLIP_HANDOFF_LEN: u64 = 0x4_0000;
+/// Het handoff-blob, direct onder het staging-maatwoord.
+pub const FLIP_HANDOFF_PA: u64 = STAGE_HDR_PA - FLIP_HANDOFF_LEN;
+
+const _: () = {
+    assert!(FLIP_HANDOFF_PA >= crate::STAGE_WINDOW.base.0);
+    assert!(FLIP_HANDOFF_PA + FLIP_HANDOFF_LEN <= STAGE_HDR_PA);
+};

@@ -454,6 +454,11 @@ mod arch {
     //   `node_started`.
     // - Het regime van core 0 zetten. MMU uit betekent dat de loads
     //   Device-toegang zijn: gealigneerd, en `dev::push` bracht ze naar DRAM.
+    //   HCR_EL2 eerst, met een ISB: een kern onder E2H = 1 (VHE, de O6N)
+    //   geeft TCR_EL2 en SCTLR_EL2 in de vorm van TCR_EL1 en SCTLR_EL1, en
+    //   E2H bepaalt hoe de core die velden leest (Linux' `init_el2` zet
+    //   HCR_EL2 ook als eerste). Onder nVHE maakt de volgorde niets uit:
+    //   MMU uit en DAIF dicht (29-09).
     // - Eerst de TLB en de I-cache van deze core schoon, dan SCTLR (MMU en
     //   caches aan), ISB.
     // - De stack, en `bl` naar Rust met x0 ongewijzigd: de handoff is het
@@ -476,14 +481,15 @@ hopos_smp_entry:
     cmp x1, #2
     b.ne 9f
 
+    ldr x1, [x0, #{hcr}]
+    msr hcr_el2, x1
+    isb
     ldr x1, [x0, #{mair}]
     msr mair_el2, x1
     ldr x1, [x0, #{tcr}]
     msr tcr_el2, x1
     ldr x1, [x0, #{ttbr0}]
     msr ttbr0_el2, x1
-    ldr x1, [x0, #{hcr}]
-    msr hcr_el2, x1
     ldr x1, [x0, #{vbar}]
     msr vbar_el2, x1
     dsb ish

@@ -12,6 +12,19 @@
 //!
 //! De specificatie is `OLD/metal/cpu` en de assembly ernaast; elk bestand
 //! draagt de gedateerde metingen van zijn Go-voorganger mee.
+//!
+//! De cfg-splitsing. [`riscv`] heeft zijn instructies achter
+//! `all(target_arch = "riscv64", target_os = "none")` en daarbuiten stubs,
+//! net als de arm64-modules: zo testen zijn rekenkunde en de riscv-boards op
+//! de host, en bouwt de werkruimte als geheel voor elk doel. De arm64-modules bouwen op elk doel:
+//! hun instructies staan achter `all(target_arch = "aarch64", target_os =
+//! "none")` en daarbuiten is elk een stub met dezelfde signatuur (handboek
+//! §7). Dat is bewust zo gelaten: de lijm van `hopos` (slots, cage, flip,
+//! main) noemt `cpu::el2`, `cpu::smp` en `cpu::psci` bij naam, en ze achter
+//! `target_arch = "aarch64"` zetten breekt de riscv64-build van `hopos` tot
+//! die lijm per architectuur gesplitst is (`hopos/src/cage_riscv.rs` is de
+//! riscv-helft daarvan). Tot dan draait er op riscv64 geen arm64-instructie:
+//! de stubs zijn leeg.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -36,3 +49,5 @@ pub mod psci;
 pub mod smp;
 pub mod trng;
 pub mod vectors;
+
+pub mod riscv;

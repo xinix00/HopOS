@@ -15,10 +15,28 @@
 //!    de RSDP uit de configuratietabel, de ACPI-feiten, `hopos.cfg` en het
 //!    gestagede image van de ESP, het kernvenster (heap, DMA, kooi), de
 //!    identity map van 48 bits uit de memory map, en `ExitBootServices`.
-//! 3. `uefi_enter_kernel` (assembly): MMU uit, EL2 saneren (HCR_EL2 vers
-//!    met E2H = 0, de trap-registers op "geen traps"), onze map aan, de
-//!    eigen stack en vectoren, en `kmain(0, el)`: dezelfde `kmain` als op
-//!    virt.
+//! 3. `uefi_enter_kernel` (assembly): MMU uit, EL2 saneren (HCR_EL2 vers,
+//!    de trap-registers op "geen traps"), onze map aan, de eigen stack en
+//!    vectoren, en `kmain(0, el)`: dezelfde `kmain` als op virt.
+//!
+//! De vorm van EL2 kiest de feature `vhe` van dit crate ([`crate::el2`]):
+//!
+//! - kaal (QEMU virt, de Altra): nVHE, HCR_EL2 met E2H = 0, en TCR_EL2,
+//!   SCTLR_EL2, CPTR_EL2 en CNTHCTL_EL2 in de EL2-vorm. Byte voor byte de
+//!   ingang van vóór VHE;
+//! - `vhe` (de O6N altijd; op QEMU met `FEATURES=vhe CPU=neoverse-n1`):
+//!   de hele kern onder E2H = 1. De ingang zet E2H in HCR_EL2 met de MMU
+//!   nog uit, en schrijft daarna TCR_EL2 en SCTLR_EL2 in de vorm van
+//!   TCR_EL1 en SCTLR_EL1, CPTR_EL2 in de CPACR-vorm en CNTHCTL_EL2 in de
+//!   VHE-lay-out (EL1PCTEN/EL1PTEN op 10/11); MAIR, de map, de vectoren en
+//!   de stack blijven. De map zet PXN naast XN (bit 54 is daar UXN). Onder
+//!   E2H = 1 zijn `cntp_*_el0` vanaf EL2 de CNTHP (PPI 26) en schrijft
+//!   `cntkctl_el1` CNTHCTL_EL2; de OS-core-rotatie en de switcher van de
+//!   app-cores gebruiken voor het EL1-regime van hun bewoners de
+//!   `_EL12`-encoderingen, die alleen onder E2H = 1 bestaan (29-09: onder
+//!   E2H = 0 gaf de zelftest van de OS-core een EC 0x0 in
+//!   `hopos_os_vhe_enter`). Bewezen op QEMU virt met neoverse-n1 (29-09),
+//!   nog niet op de A720 van de O6N.
 //!
 //! Waarom de relocatie van ons is en niet van de firmware: EDK2 past
 //! PE-relocaties toe, maar dan moest een host-tool de ELF-relocaties naar
@@ -115,6 +133,8 @@ fn prepare(efi: &Efi, el: u8) -> Result<Enter, (&'static str, Status)> {
             size >> 10
         );
     }
+    // Het beeld van de firmware, zolang de boot services leven (gop.rs).
+    crate::gop::discover(efi);
     let rsdp = efi.config_table(&fw::acpi::ACPI_20_GUID).ok_or((
         "no ACPI 2.0 RSDP in the configuration table",
         efi::NOT_FOUND,
@@ -307,6 +327,8 @@ fn build_map(map: &Map) -> Result<Mmu, mmu::Error> {
     for d in map.iter().filter(memmap::Desc::is_ram) {
         m.map(d.base, d.end() - d.base, ram_bits)?;
     }
+    // De framebuffer Normal-NC, na de RAM: de laatste mapping wint.
+    crate::gop::map(&mut m)?;
     m.map(DMA.base.0, DMA.size, mmu::attrs(ATTR_NORMAL_NC))?;
     m.map(ADMIN.base.0, ADMIN.size, dev_bits)?;
     Ok(m)
@@ -326,12 +348,11 @@ fn stage_role(cfg: &str) -> u64 {
     }
 }
 
-/// TCR_EL2 (niet-VHE) voor 48 bits: T0SZ = 16, walks WB-WA inner
-/// shareable, 4 KB-korrel, PS uit ID_AA64MMFR0_EL1.PARange (tot 48 bits:
-/// 52 bits vraagt een andere korrel), en de RES1-bits 23 en 31.
+/// TCR_EL2 voor 48 bits in de vorm van het regime van de kern
+/// ([`crate::el2::tcr`]: nVHE met PS op 16, VHE met IPS op 32), met
+/// PARange uit ID_AA64MMFR0_EL1.
 fn tcr() -> u64 {
-    let ps = (crate::arch::mmfr0() & 0xf).min(5);
-    (1 << 31) | (1 << 23) | (ps << 16) | (3 << 12) | (1 << 10) | (1 << 8) | 16
+    crate::el2::tcr(crate::arch::mmfr0() & 0xf)
 }
 
 /// De exit en de sprong. Keert alleen terug als de firmware niet loslaat.
@@ -354,23 +375,29 @@ fn go(efi: Efi, e: Enter) -> Status {
     // De sprong zet de MMU even uit: wat de core in dat venster ophaalt
     // (de code van de sprong) en wat de walker straks leest (de tabellen)
     // moet in het geheugen staan, niet alleen in de cache.
+    // De feiten voor een kern die later zonder firmware binnenkomt (de
+    // kern-flip, crate::flip): hier, want nu is de kaart definitief.
+    let cnthctl = cnthctl();
+    crate::flip::publish(e.ttbr0, e.tcr, e.el, cnthctl);
     let (img, len) = (facts::IMAGE[0].load(Relaxed), facts::IMAGE[1].load(Relaxed));
     dev::push(Pa(img), usize::try_from(len).unwrap_or(0));
     dev::push(Pa(e.tables.0), usize::try_from(e.tables.1).unwrap_or(0));
-    crate::arch::enter_kernel(e.ttbr0, e.tcr, e.el, cnthctl())
+    crate::arch::enter_kernel(e.ttbr0, e.tcr, e.el, cnthctl)
 }
 
-/// CNTHCTL_EL2 (niet-VHE): de EL1-teller en -timer open (EL1PCTEN,
-/// EL1PCEN), en de event-stream van EL2 aan met dezelfde EVNTI-keuze als
-/// `cpu::idle` voor CNTKCTL_EL1 maakt: onder E2H = 0 bepaalt CNTHCTL_EL2 de
-/// stream van EL2, en zonder stream wekt een WFE van de kern alleen op een
-/// SEV of een interrupt (de Pi-ingang zet hetzelfde; bevinding van de
-/// Pi-bring-up, 30-09). De bits van EVNTEN, EVNTI en EVNTIS staan in beide
-/// registers op dezelfde plek. Op de Altra (25 MHz) is dat EVNTI 14.
+/// CNTHCTL_EL2: de EL1-teller en -timer open (EL1PCTEN en EL1PCEN op bits
+/// 0 en 1 onder nVHE, EL1PCTEN en EL1PTEN op 10 en 11 onder VHE:
+/// [`crate::el2::CNTHCTL_EL1_ACCESS`]), en de event-stream van EL2 aan met
+/// dezelfde EVNTI-keuze als `cpu::idle` voor CNTKCTL_EL1 maakt:
+/// CNTHCTL_EL2 bepaalt de stream van EL2, en zonder stream wekt een WFE van
+/// de kern alleen op een SEV of een interrupt (de Pi-ingang zet hetzelfde;
+/// bevinding van de Pi-bring-up, 30-09). De bits van EVNTEN, EVNTI en
+/// EVNTIS staan in beide registers en beide lay-outs op dezelfde plek. Op
+/// de Altra (25 MHz) is dat EVNTI 14.
 fn cnthctl() -> u64 {
     let ecv = (crate::arch::mmfr0() >> 60) & 0xf >= 1;
     let stream = cpu::idle::event_stream(cpu::idle::freq(), ecv, cpu::idle::EVENT_STREAM_MAX_NS);
-    0b11 | stream
+    crate::el2::CNTHCTL_EL1_ACCESS | stream
 }
 
 /// De SystemTable terug uit een `Efi` die de exit weigerde (alleen voor de

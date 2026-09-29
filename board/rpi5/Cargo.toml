@@ -22,3 +22,8 @@ driver-brcmpcie = { path = "../../driver/brcmpcie" }
 
 [lints]
 workspace = true
+
+[features]
+default = []
+# De VideoCore-framebuffer (board-raspi, vcfb.rs).
+gui = ["board-raspi/gui"]

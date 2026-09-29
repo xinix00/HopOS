@@ -36,8 +36,11 @@
 extern crate alloc;
 
 pub mod cage;
+#[cfg(feature = "media")]
+pub mod codecabi;
 pub mod conport;
 mod error;
+pub mod grants;
 pub mod hopfs;
 pub mod kernflip;
 pub mod partmem;
@@ -47,6 +50,7 @@ mod sha256;
 pub mod slots;
 pub mod stage2;
 pub mod system;
+pub mod watchdog;
 
 #[cfg(test)]
 mod testutil;

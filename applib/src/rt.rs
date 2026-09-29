@@ -1,11 +1,13 @@
 //! De main-schil: van `_start` tot de `async fn` van de app.
 //!
 //! De volgorde is die van `applib.Init` in Go, zonder wat hier niet meer
-//! bestaat (memattr, memlimit, SMP, de idle-hooks): de staart uitrekenen,
-//! de outbox inhangen (vanaf dan kan de app loggen, ook een paniek), de
-//! heap en de klok, READY, en dan twee taken op de executor van de
-//! app-core: de heartbeat en de app zelf. Keert de app terug, dan is dat
-//! exit 0, na het net-afscheid van [`App::shutdown`].
+//! bestaat (memattr, memlimit, de idle-hooks): de staart uitrekenen, de
+//! outbox inhangen (vanaf dan kan de app loggen, ook een paniek), de heap
+//! en de klok, READY, en dan de taken op de executor van de app-core: de
+//! heartbeat, de app zelf, en bij een SMP-app de opgang van zijn andere
+//! cores ([`crate::smp::bring_up`], wat in Go `smp.Configure` was). Keert
+//! de app terug, dan is dat exit 0, na het net-afscheid van
+//! [`App::shutdown`].
 //!
 //! Een app schrijft:
 //!
@@ -42,8 +44,10 @@ pub const TIMERS: usize = 32;
 /// De executor van een app-core.
 pub type Exec = Executor<TASKS, TIMERS>;
 
-/// De executor van de app-core. Eén core, één executor (handboek §4).
-pub static EXEC: Local<Exec> = Local::new(Executor::new());
+/// De executor van de primaire app-core. Eén core, één executor (handboek
+/// §4); een SMP-app heeft er één per core, in [`crate::smp::EXECS`], en dit
+/// is de eerste.
+pub static EXEC: &Local<Exec> = &crate::smp::EXECS[0];
 
 /// Het App van dit image, gezet door de main-schil vóór de eerste taak.
 static APP: Local<OnceCell<App>> = Local::new(OnceCell::new());
@@ -114,6 +118,12 @@ where
     exec.set_clock(clock::now_ns);
     clock::start_event_stream();
     app.announce();
+    crate::smp::init(app);
+    if app.cores() > 1
+        && let Err(e) = exec.spawn(crate::smp::bring_up(app))
+    {
+        crate::log!("applib: spawn of the SMP bring-up failed: {e} HOPOS_APP_SPAWN");
+    }
 
     let spawned = exec.spawn(watch(app)).and_then(|()| {
         exec.spawn(async move {
@@ -314,6 +324,11 @@ mod entry {
     /// de stage-2-intrekking niet meer voelde (19-07).
     #[panic_handler]
     fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
+        // Een secundaire core van een SMP-app: niet over de outbox (die heeft
+        // één producer, de primaire), alleen tellen en de core teruggeven.
+        if !crate::smp::on_primary() {
+            crate::smp::secondary_panicked();
+        }
         // Alleen de outbox: de stack wordt na dit punt niet meer gepompt.
         crate::log::emit_outbox(format_args!("panic: {info} HOPOS_APP_PANIC"));
         match super::app() {

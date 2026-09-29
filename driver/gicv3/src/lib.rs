@@ -39,6 +39,8 @@ use core::mem::offset_of;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use dev::{Pa, Reg};
 
+pub mod its;
+
 /// De INTID van SPI 0.
 pub const FIRST_SPI: u32 = 32;
 /// Het aantal SGI's (INTID 0..=15): de IPI's van de GIC.
@@ -106,7 +108,12 @@ struct Gicr {
     typer: Reg<u64>,
     _r0: u32,
     waker: Reg<u32>,
-    _r1: [u32; 16378],
+    _r1: [u32; 22],
+    /// De LPI-configuratietabel (1 byte per LPI): adres, cache, IDbits.
+    propbaser: Reg<u64>,
+    /// De LPI-pending-tabel (1 bit per INTID), 64 KB-gealigneerd.
+    pendbaser: Reg<u64>,
+    _r2: [u32; 16352],
     // SGI_base, op +0x10000.
     _s0: [u32; 32],
     igroupr0: Reg<u32>,
@@ -129,6 +136,8 @@ const _: () = {
     assert!(offset_of!(Gicr, iidr) == 0x0004);
     assert!(offset_of!(Gicr, typer) == 0x0008);
     assert!(offset_of!(Gicr, waker) == 0x0014);
+    assert!(offset_of!(Gicr, propbaser) == 0x0070);
+    assert!(offset_of!(Gicr, pendbaser) == 0x0078);
     assert!(offset_of!(Gicr, igroupr0) == 0x1_0080);
     assert!(offset_of!(Gicr, isenabler0) == 0x1_0100);
     assert!(offset_of!(Gicr, icenabler0) == 0x1_0180);
@@ -142,6 +151,34 @@ const _: () = {
 const CTLR_ARE_NS: u32 = 1 << 4;
 /// GICD_CTLR: Group 1 aan (NS-view EnableGrp1A; DS=1: EnableGrp1).
 const CTLR_ENABLE_GRP1_NS: u32 = 1 << 1;
+/// GICD_TYPER: de distributor kent LPI's.
+const TYPER_LPIS: u32 = 1 << 17;
+/// GICR_TYPER: deze redistributor kan LPI's (PLPIS).
+const RTYPER_PLPIS: u64 = 1;
+/// GICR_CTLR: LPI's aan. Eenmaal gezet is uitzetten IMPLEMENTATION
+/// DEFINED; daarom de toets bij [`Gic::enable_lpis`].
+const RCTLR_ENABLE_LPIS: u32 = 1;
+/// GICR_PENDBASER: de pending-tabel is nul (PTZ): de GIC hoeft hem niet te
+/// lezen.
+const PENDBASER_PTZ: u64 = 1 << 62;
+/// PROPBASER/PENDBASER InnerCache [9:7] = 0b001: Normal non-cacheable, want
+/// de tabellen staan in de NC-gemapte DMA-regio van het board. Zo zien de
+/// GIC en wij hetzelfde zonder cache-onderhoud, ook op een GIC die niet
+/// coherent aan de caches hangt.
+const BASER_INNER_NC: u64 = 1 << 7;
+/// De adresbits [51:12] van PROPBASER.
+const PROP_ADDR: u64 = 0x000f_ffff_ffff_f000;
+/// De eerste LPI (INTID 8192).
+pub const FIRST_LPI: u32 = 8192;
+/// De INTID-breedte die wij de LPI's geven: 14 bits, dus INTID 8192 tot en
+/// met 16383. Het minimum dat LPI's toelaat, en een configuratietabel van
+/// 8 KB en een pending-tabel van 2 KB; HopOS bedient een handvol devices.
+pub const LPI_ID_BITS: u32 = 14;
+/// De maat van de LPI-configuratietabel bij [`LPI_ID_BITS`].
+pub const LPI_PROP_LEN: u64 = (1 << LPI_ID_BITS) - FIRST_LPI as u64;
+/// De maat van de pending-tabel bij [`LPI_ID_BITS`] (een bit per INTID,
+/// vanaf 0).
+pub const LPI_PEND_LEN: u64 = (1 << LPI_ID_BITS) / 8;
 /// GICR_WAKER: de core slaapt.
 const WAKER_PROCESSOR_SLEEP: u32 = 1 << 1;
 /// GICR_WAKER: de redistributor slaapt nog.
@@ -177,6 +214,21 @@ pub enum Error {
     BadIntId(u32),
     /// De redistributor bleef slapen (GICR_WAKER).
     Asleep,
+    /// Distributor of redistributor kent geen LPI's (GICD_TYPER.LPIS,
+    /// GICR_TYPER.PLPIS).
+    NoLpis,
+    /// De distributor kan minder INTID-bits dan [`LPI_ID_BITS`].
+    LpiBits {
+        /// Wat GICD_TYPER.IDbits zegt.
+        have: u32,
+    },
+    /// LPI's stonden al aan met een tabel die niet de onze is. Terugzetten
+    /// kan niet (EnableLPIs is eenmaal gezet vaak blijvend), dus we laten
+    /// hem staan en pollen.
+    LpisTaken {
+        /// Het adres in GICR_PROPBASER.
+        at: u64,
+    },
 }
 
 impl fmt::Display for Error {
@@ -184,6 +236,15 @@ impl fmt::Display for Error {
         match self {
             Self::BadIntId(id) => write!(f, "gicv3: invalid interrupt {id}"),
             Self::Asleep => f.write_str("gicv3: redistributor stays asleep (WAKER)"),
+            Self::NoLpis => f.write_str("gicv3: no LPI support (GICD_TYPER.LPIS/GICR_TYPER.PLPIS)"),
+            Self::LpiBits { have } => write!(
+                f,
+                "gicv3: distributor supports {have} INTID bits, LPIs need {LPI_ID_BITS}"
+            ),
+            Self::LpisTaken { at } => write!(
+                f,
+                "gicv3: LPIs already enabled with a property table at {at:#x} that is not ours"
+            ),
         }
     }
 }
@@ -308,11 +369,68 @@ impl<I: Icc> Gic<I> {
     }
 
     /// Claimt de hoogste wachtende interrupt (ICC_IAR1); `None` bij een
-    /// speciale INTID (niets te doen).
+    /// speciale INTID (1020 tot en met 1023: niets te doen). Een LPI
+    /// (8192 en hoger) is een gewone claim: tot 29-09 stond hier `id <
+    /// 1020`, en dat las elke MSI als "niets".
     #[must_use]
     pub fn claim(&self) -> Option<u32> {
         let id = self.icc.iar1() & 0xff_ffff;
-        (id < FIRST_SPECIAL).then_some(id)
+        (!(FIRST_SPECIAL..FIRST_SPECIAL + 4).contains(&id)).then_some(id)
+    }
+
+    /// Zet de LPI's aan op de redistributor van deze core: de
+    /// configuratietabel op `prop` ([`LPI_PROP_LEN`] bytes, 4 KB-gealigneerd)
+    /// en de pending-tabel op `pend` ([`LPI_PEND_LEN`] bytes,
+    /// 64 KB-gealigneerd), beide nul en Normal-NC. Geeft `true` als de LPI's
+    /// al aan stonden met precies deze tabellen (een kern na een flip op
+    /// hetzelfde venster): dan hergebruiken we ze.
+    ///
+    /// EnableLPIs weer uitzetten is IMPLEMENTATION DEFINED, en PROPBASER
+    /// wijzigen terwijl hij aan staat UNPREDICTABLE (GICv3 §12.11.2). Daarom
+    /// geen poging: andermans tabel is [`Error::LpisTaken`] en de devices
+    /// pollen.
+    pub fn enable_lpis(&self, prop: Pa, pend: Pa) -> Result<bool, Error> {
+        let d = self.d();
+        let r = self.r();
+        let dtyper = d.typer.read();
+        if dtyper & TYPER_LPIS == 0 || r.typer.read() & RTYPER_PLPIS == 0 {
+            return Err(Error::NoLpis);
+        }
+        let bits = ((dtyper >> 19) & 0x1f) + 1;
+        if bits < LPI_ID_BITS {
+            return Err(Error::LpiBits { have: bits });
+        }
+        if r.ctlr.read() & RCTLR_ENABLE_LPIS != 0 {
+            let at = r.propbaser.read() & PROP_ADDR;
+            return if at == prop.0 {
+                Ok(true)
+            } else {
+                Err(Error::LpisTaken { at })
+            };
+        }
+        r.propbaser
+            .write((prop.0 & PROP_ADDR) | BASER_INNER_NC | u64::from(LPI_ID_BITS - 1));
+        r.pendbaser
+            .write((pend.0 & 0x000f_ffff_ffff_0000) | BASER_INNER_NC | PENDBASER_PTZ);
+        dev::mb();
+        r.ctlr.update(|c| c | RCTLR_ENABLE_LPIS);
+        dev::mb();
+        Ok(false)
+    }
+
+    /// Staan de LPI's op deze redistributor al aan (een vorige kern, of
+    /// firmware)?
+    #[must_use]
+    pub fn lpis_enabled(&self) -> bool {
+        self.r().ctlr.read() & RCTLR_ENABLE_LPIS != 0
+    }
+
+    /// Het fysieke adres van het RD_base-frame van deze core (voor een
+    /// ITS met PTA = 1) en zijn GICR_TYPER (het processornummer voor een
+    /// ITS met PTA = 0).
+    #[must_use]
+    pub fn redistributor(&self) -> (Pa, u64) {
+        (self.gicr(), self.r().typer.read())
     }
 
     /// Sluit een geclaimde interrupt af (ICC_EOIR1: priority drop én

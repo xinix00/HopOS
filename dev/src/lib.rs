@@ -295,6 +295,23 @@ mod arch {
 
 #[cfg(all(target_os = "none", target_arch = "riscv64"))]
 mod arch {
+    //! RISC-V. De C906 van de LicheeRV is NIET cache-coherent met DMA-masters
+    //! (de dwmac) en niet met het andere hart: elke gedeelde buffer gaat door
+    //! het T-Head-onderhoud (XuanTie CMO, van vóór Zicbom). Met de feature
+    //! `thead` doen `push`/`pull` dat per regel van [`LINE`] bytes; zonder
+    //! (QEMU virt, coherent) is een fence de hele ordening.
+    //!
+    //! De encodings komen 1:1 uit de vendor-kernel
+    //! (linux_5.10/arch/riscv/mm/cacheflush.c), met rs1 = a0:
+    //!
+    //! ```text
+    //! th.dcache.cpa  a0 = 0x0295000b   clean op fysiek adres
+    //! th.dcache.cipa a0 = 0x02b5000b   clean + invalidate op fysiek adres
+    //! th.sync.is        = 0x01b0000b   wacht tot het onderhoud af is
+    //! ```
+    //!
+    //! De PA-varianten, omdat deze ops voor de kern zijn en de kern in
+    //! machine mode zonder vertaling draait: daar ís een adres fysiek.
     use super::Pa;
     use core::arch::asm;
 
@@ -304,18 +321,57 @@ mod arch {
         unsafe { asm!("fence rw, rw", options(nostack, preserves_flags)) }
     }
 
-    // De C906 van de LicheeRV is niet cache-coherent met zijn buren en kent
-    // het T-Head-onderhoud (`th.dcache.cpa`/`th.dcache.ipa`). Dat komt met
-    // het board-crate; tot dan is een fence de ordening zonder het vegen, en
-    // dat is op QEMU (coherent) correct.
+    #[cfg(feature = "thead")]
     #[inline]
-    pub(super) fn push(_pa: Pa, _len: usize) {
-        mb();
+    fn lines(pa: Pa, len: usize, op: impl Fn(u64)) {
+        use super::LINE;
+        if len == 0 {
+            return;
+        }
+        let start = pa.0 & !(LINE - 1);
+        let end = pa.0.wrapping_add(len as u64);
+        let mut a = start;
+        while a < end {
+            op(a);
+            a = a.wrapping_add(LINE);
+        }
+        // SAFETY: `th.sync.is` wacht tot het onderhoud hierboven voltooid
+        // is; geen ander effect.
+        unsafe { asm!(".4byte 0x01b0000b", options(nostack, preserves_flags)) }
     }
 
+    /// Clean: wat de CPU schreef, staat daarna in DRAM. Ná het schrijven en
+    /// vóór het ophogen van een ringkop of het zetten van een OWN-bit.
     #[inline]
-    pub(super) fn pull(_pa: Pa, _len: usize) {
+    pub(super) fn push(pa: Pa, len: usize) {
         mb();
+        #[cfg(feature = "thead")]
+        lines(pa, len, |a| {
+            // SAFETY: `th.dcache.cpa` op een fysiek adres (machine mode, geen
+            // vertaling) schrijft alleen een vuile regel terug.
+            unsafe { asm!(".4byte 0x0295000b", in("a0") a, options(nostack, preserves_flags)) }
+        });
+        #[cfg(not(feature = "thead"))]
+        let _ = (pa, len);
+    }
+
+    /// Clean + invalidate: wat een ander schreef, wordt daarna vers gelezen.
+    /// Clean én invalidate (niet alleen invalidate), zoals `dc civac` op ARM:
+    /// een eigen vuile regel gaat eerst naar DRAM, dus er raakt niets kwijt.
+    /// Daarom ook de les van 30-07 (de ring die stilviel): wat twee schrijvers
+    /// heeft, hoort niet in één regel, want de invalidate van de één gooit de
+    /// schrijf van de ander alsnog weg als die tussen clean en lees valt.
+    #[inline]
+    pub(super) fn pull(pa: Pa, len: usize) {
+        mb();
+        #[cfg(feature = "thead")]
+        lines(pa, len, |a| {
+            // SAFETY: `th.dcache.cipa` op een fysiek adres: clean en
+            // invalidate van één regel; geen verlies van eigen writes.
+            unsafe { asm!(".4byte 0x02b5000b", in("a0") a, options(nostack, preserves_flags)) }
+        });
+        #[cfg(not(feature = "thead"))]
+        let _ = (pa, len);
     }
 
     #[inline]

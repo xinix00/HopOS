@@ -12,6 +12,9 @@ abi = { path = "../abi" }
 netdev = { path = "../netdev" }
 executor = { path = "../executor" }
 sync = { path = "../sync" }
+# De beschrijving van een framebuffer (`Board::framebuffer`); de console
+# zelf linkt alleen de binary met de feature `gui`.
+driver-fb = { path = "../driver/fb" }
 
 [lints]
 workspace = true

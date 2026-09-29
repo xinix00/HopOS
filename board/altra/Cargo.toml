@@ -30,3 +30,12 @@ doctest = false
 
 [lints]
 workspace = true
+
+[features]
+default = []
+# De GOP-framebuffer van de firmware (board-uefi, gop.rs), zoals op de O6N.
+gui = ["board-uefi/gui"]
+# Het kernvenster voor DRAM op 0x8000_0000 (board-uefi `WINDOW_PA`): de
+# binary zet het altijd aan (hopos/Cargo.toml `board-altra`), de host-tests
+# van de werkruimte niet.
+window-8000 = ["board-uefi/window-8000"]
