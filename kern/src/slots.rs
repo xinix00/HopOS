@@ -1,0 +1,1769 @@
+//! De slot-lifecycle: één actor die start, stop, status, SMP en adoptie
+//! serialiseert, plus per slot een servicer-taak.
+//!
+//! In Go was dit `lifecycleMu` (één Start/Stop tegelijk), `svcMu` (de
+//! servicer-tabel), `partMu`/`poolMu` (partities en cores) en `diagMu`. Hier
+//! is serialisatie de vorm: de [`Lifecycle`]-actor is één taak met een
+//! [`Mailbox`], en hij bezit de partitie-pool, de core-plaatsing en de
+//! bewoners als gewone `&mut self`. De servicer-tabel is een
+//! [`LocalCell`] die alleen de actor schrijft en de system-listener kort
+//! leest (handboek §1.1).
+//!
+//! LEES VOORDAT JE HIER MACHINERIE BIJBOUWT: `OLD/docs/v1/
+//! slot-lifecycle-grenzen.md`. Hop serialiseert de opdrachten al, en dit
+//! ontwerp reconcilieert geen in-memory staat: het faalt luid en de watchdog
+//! reset de node.
+//!
+//! # Een start in twee stappen
+//!
+//! De download van een image duurt minuten en mag de actor niet vasthouden.
+//! Daarom (zoals `startStream` in Go, dat het venster twee keer kort pakte):
+//!
+//! 1. [`Request::Claim`]: plaatsen, partitie reserveren, wissen (E1, E3).
+//!    Het antwoord is een [`ImageGrant`]: het recht om in die ene partitie te
+//!    schrijven. Grote data loopt niet door de kern; de grant wel.
+//! 2. [`Request::Arm`]: de grant komt terug, de kooi wordt gebouwd (E5) en
+//!    gedispatcht. Faalt het startschot, dan is de uitkomst onbekend en gaat
+//!    de eigenaar in quarantaine (lifecycle.md stap 4).
+//!
+//! [`Request::Abort`] geeft een grant terug waarin nooit iets draaide: de
+//! gewone rollback.
+
+use crate::cage::{Cage, Console, Cores, Power, Status, Timer};
+use crate::partmem::{Owned, Partition, PartitionPool, Quarantined, Stopped};
+use crate::pool::{CorePool, GroupName, Placement};
+use crate::{Core, Error, GRAIN, Region, Result, SLOT_CAP, Slot};
+use alloc::vec::Vec;
+use core::sync::atomic::{
+    AtomicU8, AtomicU32, AtomicU64,
+    Ordering::{AcqRel, Acquire, Relaxed, Release},
+};
+use core::time::Duration;
+use sync::mpsc::Mailbox;
+use sync::{Either, LocalCell, Signal, select};
+
+/// De brokmaat van de scrub. Een ononderbroken veeg over een partitie
+/// verhongert de netstack (96 MB x 127 loaders is ongeveer 12 s, gemeten in
+/// de Go-kern); tussen twee brokken yieldt de actor.
+pub const SCRUB_CHUNK: u64 = 4 << 20;
+/// Het wachtpatroon van stop: kijk elke 10 ms.
+pub const STOP_POLL: Duration = Duration::from_millis(10);
+/// Hoe lang een ingetrokken slot krijgt om te sterven. De intrekking raakt
+/// een gesavede bewoner pas bij zijn volgende hervatting (een paar
+/// yield-tikken).
+pub const REVOKE_GRACE: Duration = Duration::from_secs(1);
+/// De start-gratie van een servicer: bij de start is de ctx heel even nog
+/// leeg. Zonder gratie stierf de servicer meteen en verdronk niemand meer de
+/// logs van de echte app (gemeten 30-07: de stervensreden van welcome bleef
+/// in de ring staan).
+pub const IDLE_GRACE: Duration = Duration::from_secs(2);
+/// De tik van een servicer zonder werk.
+pub const SERVICER_TICK: Duration = Duration::from_millis(2);
+/// De ringsoort van een logregel (`ring.TypeLog`).
+pub const KIND_LOG: u8 = 1;
+const _: () = assert!(KIND_LOG as u32 == abi::ring::Kind::LOG.raw());
+
+/// Pusht met een faalbare reservering (handboek §6: `Vec::push` breekt bij
+/// OOM het programma af).
+pub(crate) fn try_push<T>(v: &mut Vec<T>, x: T) -> Result {
+    v.try_reserve(1).map_err(|_| Error::OutOfMemory {
+        bytes: core::mem::size_of::<T>(),
+    })?;
+    v.push(x);
+    Ok(())
+}
+
+/// Kopieert een slice naar een verse `Vec`, faalbaar.
+pub(crate) fn try_vec<T: Clone>(s: &[T]) -> Result<Vec<T>> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(s.len())
+        .map_err(|_| Error::OutOfMemory {
+            bytes: core::mem::size_of_val(s),
+        })?;
+    v.extend_from_slice(s);
+    Ok(v)
+}
+
+/// Eén volume: `{local, shared}`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Mount {
+    /// Het pad zoals de app het ziet.
+    pub local: Vec<u8>,
+    /// Het gedeelde pad in hopfs.
+    pub shared: Vec<u8>,
+}
+
+/// Wat een start vraagt.
+#[derive(Clone, Debug)]
+pub struct StartSpec {
+    /// Het slot.
+    pub slot: Slot,
+    /// De zichtbare partitie in bytes (`memory_limit`, inclusief ABI-staart).
+    pub mem_limit: u64,
+    /// De core-vraag.
+    pub placement: Placement,
+    /// De job-naam (de store-naamruimte; leeg = geen).
+    pub job: Vec<u8>,
+    /// De volumes.
+    pub mounts: Vec<Mount>,
+    /// De gepubliceerde poorten.
+    pub ports: Vec<u16>,
+}
+
+impl StartSpec {
+    /// Een spec zonder job, volumes of poorten.
+    #[must_use]
+    pub fn new(slot: Slot, mem_limit: u64, placement: Placement) -> StartSpec {
+        StartSpec {
+            slot,
+            mem_limit,
+            placement,
+            job: Vec::new(),
+            mounts: Vec::new(),
+            ports: Vec::new(),
+        }
+    }
+}
+
+/// Het recht om de image van één start in zijn partitie te schrijven.
+///
+/// Uitgegeven door [`Request::Claim`], terug via [`Request::Arm`] of
+/// [`Request::Abort`]. Zolang de grant buiten is, draait er niets in de
+/// partitie (hij draagt een `Partition<Free>`).
+#[must_use = "een grant die niet terugkomt houdt de partitie geclaimd"]
+#[derive(Debug)]
+pub struct ImageGrant {
+    part: Partition<crate::partmem::Free>,
+    generation: u32,
+}
+
+impl ImageGrant {
+    /// Het slot.
+    #[must_use]
+    pub fn slot(&self) -> Slot {
+        self.part.slot()
+    }
+
+    /// De partitie.
+    #[must_use]
+    pub fn region(&self) -> Region {
+        self.part.region()
+    }
+
+    /// Schrijft `bytes` op offset `off` in de partitie; buiten de partitie
+    /// is een fout, nooit een schrijf.
+    pub fn write(&mut self, mem: &mut impl crate::cage::PhysMem, off: u64, bytes: &[u8]) -> Result {
+        let r = self.region();
+        let len = bytes.len() as u64;
+        match off.checked_add(len) {
+            Some(end) if end <= r.size => {
+                mem.copy_in(r.base + off, bytes);
+                Ok(())
+            }
+            _ => Err(Error::Range {
+                base: r.base.wrapping_add(off),
+                size: len,
+            }),
+        }
+    }
+}
+
+/// Een verzoek aan de lifecycle-actor.
+#[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "een claim draagt zijn spec door de brievenbus; een Box zou een onfaalbare allocatie zijn"
+)]
+pub enum Request {
+    /// Plaats, reserveer en wis; het antwoord is een [`ImageGrant`].
+    Claim(StartSpec),
+    /// Bouw de kooi en dispatch; `entry` is het startadres van de image.
+    Arm {
+        /// De grant uit de claim.
+        grant: ImageGrant,
+        /// Het startadres.
+        entry: u64,
+    },
+    /// Geef een grant terug waarin nooit iets draaide.
+    Abort(ImageGrant),
+    /// Stop een slot; `timeout` is de coöperatieve kans.
+    Stop {
+        /// Het slot.
+        slot: Slot,
+        /// Hoe lang de app krijgt om zelf te stoppen.
+        timeout: Duration,
+    },
+    /// De status van een slot.
+    Status(Slot),
+    /// De servicer zag een SMP-verzoek (vuur-en-vergeet).
+    Smp(Slot),
+}
+
+/// Het antwoord van de actor.
+#[derive(Debug)]
+pub enum Response {
+    /// De claim lukte.
+    Granted(ImageGrant),
+    /// Klaar.
+    Done,
+    /// De status.
+    Status(SlotStatus),
+    /// Het lukte niet.
+    Failed(Error),
+}
+
+/// De toestand van een slot in het grootboek.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Occupancy {
+    /// Geen eigenaar.
+    Empty,
+    /// Geclaimd; de image stroomt (de grant is buiten).
+    Streaming,
+    /// Gedispatcht.
+    Running,
+    /// Beëindiging onbevestigd; het geheugen blijft gereserveerd.
+    Quarantined,
+}
+
+/// Wat HOP over een slot ziet.
+#[derive(Copy, Clone, Debug)]
+pub struct SlotStatus {
+    /// De toestand in het grootboek.
+    pub occupancy: Occupancy,
+    /// De primaire core en de span.
+    pub core: Option<(Core, usize)>,
+    /// De partitie.
+    pub partition: Option<Region>,
+    /// Wat de kooi meldt.
+    pub cage: Status,
+}
+
+/// Een antwoordplek voor één aanroeper. Een aanroeper uit een vaste pool
+/// (een system-verbinding, de boot-code) heeft er één.
+pub struct Reply {
+    done: Signal,
+    val: LocalCell<Option<Response>>,
+}
+
+impl Reply {
+    /// Een lege antwoordplek.
+    #[must_use]
+    pub const fn new() -> Reply {
+        Reply {
+            done: Signal::new(),
+            val: LocalCell::cell(None),
+        }
+    }
+
+    fn put(&self, r: Response) {
+        *self.val.borrow_mut() = Some(r);
+        self.done.set();
+    }
+}
+
+impl Default for Reply {
+    fn default() -> Self {
+        Reply::new()
+    }
+}
+
+/// Een verzoek met zijn antwoordplek.
+pub struct Envelope<'a> {
+    req: Request,
+    reply: Option<&'a Reply>,
+}
+
+/// Stuurt `req` naar de actor en wacht op het antwoord.
+pub async fn call<'a, const N: usize>(
+    inbox: &Mailbox<Envelope<'a>, N>,
+    reply: &'a Reply,
+    req: Request,
+) -> Result<Response> {
+    let _ = reply.done.take();
+    inbox
+        .try_send(Envelope {
+            req,
+            reply: Some(reply),
+        })
+        .map_err(|_| Error::Busy)?;
+    reply.done.wait().await;
+    let r = reply.val.borrow_mut().take();
+    r.ok_or(Error::Busy)
+}
+
+/// De besturing van één servicer-taak.
+///
+/// `stop` is een [`Signal`] en geen `Stop`: een `Stop` gaat nooit meer uit,
+/// en de taak dient het ene slot over vele levensduren. De servicer is de
+/// enige wachter; de actor neemt de oude bel weg vóór een nieuwe start.
+pub struct ServicerCtl {
+    stop: Signal,
+    gone: Signal,
+    start: Signal,
+    conns: AtomicU8,
+    generation: AtomicU32,
+    base: AtomicU64,
+    size: AtomicU64,
+}
+
+impl ServicerCtl {
+    const fn new() -> ServicerCtl {
+        ServicerCtl {
+            stop: Signal::new(),
+            gone: Signal::new(),
+            start: Signal::new(),
+            conns: AtomicU8::new(0),
+            generation: AtomicU32::new(0),
+            base: AtomicU64::new(0),
+            size: AtomicU64::new(0),
+        }
+    }
+
+    /// Probeert een system-verbinding te claimen (hooguit `max`).
+    pub fn try_conn(&self, max: u8) -> bool {
+        if self.conns.fetch_add(1, AcqRel) >= max {
+            self.conns.fetch_sub(1, AcqRel);
+            return false;
+        }
+        true
+    }
+
+    /// Geeft een system-verbinding terug.
+    pub fn drop_conn(&self) {
+        self.conns.fetch_sub(1, AcqRel);
+    }
+
+    /// Het aantal open system-verbindingen.
+    #[must_use]
+    pub fn conns(&self) -> u8 {
+        self.conns.load(Relaxed)
+    }
+}
+
+/// De servicers van alle slots: per slot de besturing, plus de leesbare
+/// tabel van wie er NU leeft (met de generatie van zijn levensduur).
+pub struct Servicers {
+    ctl: [ServicerCtl; SLOT_CAP + 1],
+    table: LocalCell<[Option<u32>; SLOT_CAP + 1]>,
+}
+
+impl Servicers {
+    /// Een lege tabel, voor in een `static`.
+    #[must_use]
+    pub const fn new() -> Servicers {
+        Servicers {
+            ctl: [const { ServicerCtl::new() }; SLOT_CAP + 1],
+            table: LocalCell::cell([None; SLOT_CAP + 1]),
+        }
+    }
+
+    /// De besturing van `slot`.
+    #[must_use]
+    pub fn ctl(&self, slot: Slot) -> Option<&ServicerCtl> {
+        self.ctl.get(slot.get())
+    }
+
+    /// De generatie van de levende servicer van `slot`, of `None`. Eén
+    /// lening, geen `.await`.
+    #[must_use]
+    pub fn current(&self, slot: Slot) -> Option<u32> {
+        self.table.borrow().get(slot.get()).copied().flatten()
+    }
+
+    fn set(&self, slot: Slot, v: Option<u32>) -> Option<u32> {
+        let mut t = self.table.borrow_mut();
+        match t.get_mut(slot.get()) {
+            Some(e) => core::mem::replace(e, v),
+            None => None,
+        }
+    }
+}
+
+impl Default for Servicers {
+    fn default() -> Self {
+        Servicers::new()
+    }
+}
+
+/// De outbox van één levensduur, zoals de servicer hem leest.
+pub trait Outbox {
+    /// Het volgende record in `buf`: soort en lengte.
+    fn read_into(&mut self, buf: &mut [u8]) -> Option<(u8, usize)>;
+    /// Is de ring corrupt?
+    fn corrupt(&self) -> bool;
+    /// Leeft de context van het slot nog?
+    fn live(&self) -> bool;
+    /// Staat er een onbeantwoord SMP-verzoek?
+    fn smp_pending(&self) -> bool;
+}
+
+/// De servicer-taak van één slot: wacht op een start, dient die levensduur,
+/// meldt `gone`, en opnieuw. Eén taak per slot uit een vaste pool; er wordt
+/// nooit per start gespawnd.
+///
+/// `open` opent de outbox voor de partitie van de nieuwe levensduur.
+pub async fn servicer_task<'a, O, T, L, const N: usize>(
+    slot: Slot,
+    svc: &Servicers,
+    mut open: impl FnMut(Region) -> O,
+    timer: &T,
+    log: &L,
+    inbox: &Mailbox<Envelope<'a>, N>,
+    buf: &mut [u8],
+) where
+    O: Outbox,
+    T: Timer,
+    L: Console,
+{
+    let Some(ctl) = svc.ctl(slot) else { return };
+    loop {
+        ctl.start.wait().await;
+        let part = Region::new(ctl.base.load(Acquire), ctl.size.load(Acquire));
+        serve(slot, ctl, &mut open(part), timer, log, inbox, buf).await;
+        ctl.gone.set();
+    }
+}
+
+/// Eén levensduur: outbox lezen, logs doorzetten, SMP-verzoeken melden.
+/// Stopt bij evict, een corrupte ring of een weggevallen context.
+async fn serve<'a, O: Outbox, T: Timer, L: Console, const N: usize>(
+    slot: Slot,
+    ctl: &ServicerCtl,
+    out: &mut O,
+    timer: &T,
+    log: &L,
+    inbox: &Mailbox<Envelope<'a>, N>,
+    buf: &mut [u8],
+) {
+    let mut saw_live = false;
+    let mut idle_since: Option<u64> = None;
+    loop {
+        if ctl.stop.take() {
+            return;
+        }
+        // De app kan geparkeerde cores niet zelf starten (de mailboxen liggen
+        // buiten elke stage-2-map); de actor dispatcht namens hem.
+        if out.smp_pending() {
+            let _ = inbox.try_send(Envelope {
+                req: Request::Smp(slot),
+                reply: None,
+            });
+        }
+        if let Some((kind, n)) = out.read_into(buf) {
+            let line = buf.get(..n).unwrap_or(&[]);
+            if kind == KIND_LOG {
+                log.app_line(slot, line);
+            } else {
+                log.log(format_args!(
+                    "slot {slot}: stray record {kind} HOPOS_RING_STRAY"
+                ));
+            }
+            continue;
+        }
+        if out.corrupt() {
+            log.log(format_args!(
+                "slot {slot}: outbox corrupt HOPOS_SERVICER_RING"
+            ));
+            return;
+        }
+        if out.live() {
+            saw_live = true;
+        } else if saw_live {
+            return;
+        } else {
+            let since = *idle_since.get_or_insert(timer.now());
+            if timer.now().saturating_sub(since) > IDLE_GRACE.as_nanos() as u64 {
+                return;
+            }
+        }
+        if let Either::Left(()) = select(ctl.stop.wait(), timer.sleep(SERVICER_TICK)).await {
+            return;
+        }
+    }
+}
+
+enum Held {
+    Streaming,
+    Running(Partition<Owned>),
+    Quarantined(Partition<Quarantined>),
+}
+
+struct Resident {
+    held: Held,
+    core: Core,
+    span: usize,
+    generation: u32,
+    job: Vec<u8>,
+    mounts: Vec<Mount>,
+    ports: Vec<u16>,
+}
+
+/// Alles wat een volgende kern over één levende bewoner moet weten (de
+/// flip). Puur data.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SlotState {
+    /// De sharegroup (leeg = dedicated).
+    pub share_group: Vec<u8>,
+    /// De volledige pool van de groep, ook tijdelijk lege cores.
+    pub group_cores: Vec<usize>,
+    /// Het slot.
+    pub slot: usize,
+    /// De basis van de zichtbare partitie.
+    pub part_base: u64,
+    /// De maat van de zichtbare partitie.
+    pub part_size: u64,
+    /// De primaire core.
+    pub core: usize,
+    /// De span.
+    pub cores: usize,
+    /// De job-naam.
+    pub job: Vec<u8>,
+    /// De gepubliceerde poorten.
+    pub ports: Vec<u16>,
+    /// De volumes.
+    pub mounts: Vec<Mount>,
+}
+
+/// De grenzen van wat het handoff-blob per slot draagt.
+pub const MAX_FLIP_PORTS: usize = 64;
+/// De langste job- en groepsnaam in het blob.
+pub const MAX_FLIP_JOB: usize = 256;
+/// Het maximale aantal volumes per slot in het blob.
+pub const MAX_FLIP_MOUNTS: usize = 32;
+/// Het langste volumepad in het blob.
+pub const MAX_FLIP_PATH: usize = 256;
+
+/// De lifecycle-actor. Eén taak; hij bezit de pool, de plaatsing, de
+/// bewoners en de kooi.
+pub struct Lifecycle<'s, C, K, T, L> {
+    cage: C,
+    cores: K,
+    timer: T,
+    log: L,
+    parts: PartitionPool,
+    places: CorePool,
+    residents: [Option<Resident>; SLOT_CAP + 1],
+    svc: &'s Servicers,
+    generation: u32,
+}
+
+impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
+    /// Een actor over deze kooi, cores en pools.
+    pub fn new(
+        cage: C,
+        cores: K,
+        timer: T,
+        log: L,
+        parts: PartitionPool,
+        places: CorePool,
+        svc: &'s Servicers,
+    ) -> Self {
+        Lifecycle {
+            cage,
+            cores,
+            timer,
+            log,
+            parts,
+            places,
+            residents: [const { None }; SLOT_CAP + 1],
+            svc,
+            generation: 0,
+        }
+    }
+
+    /// De lus van de actor: verzoek lezen, afhandelen, antwoorden.
+    pub async fn run<const N: usize>(&mut self, inbox: &Mailbox<Envelope<'_>, N>) {
+        loop {
+            let env = inbox.recv().await;
+            let r = self.handle(env.req).await;
+            if let Some(reply) = env.reply {
+                reply.put(r);
+            }
+        }
+    }
+
+    /// Handelt één verzoek af.
+    pub async fn handle(&mut self, req: Request) -> Response {
+        let r = match req {
+            Request::Claim(spec) => self.claim(spec).await.map(Response::Granted),
+            Request::Arm { grant, entry } => self.arm(grant, entry).map(|()| Response::Done),
+            Request::Abort(grant) => {
+                self.abort(grant);
+                Ok(Response::Done)
+            }
+            Request::Stop { slot, timeout } => {
+                self.stop(slot, timeout).await.map(|()| Response::Done)
+            }
+            Request::Status(slot) => Ok(Response::Status(self.status(slot))),
+            Request::Smp(slot) => {
+                self.smp(slot);
+                Ok(Response::Done)
+            }
+        };
+        r.unwrap_or_else(Response::Failed)
+    }
+
+    fn resident(&self, slot: Slot) -> Option<&Resident> {
+        self.residents.get(slot.get()).and_then(Option::as_ref)
+    }
+
+    fn resident_mut(&mut self, slot: Slot) -> Option<&mut Resident> {
+        self.residents.get_mut(slot.get()).and_then(Option::as_mut)
+    }
+
+    /// Stap 1 van een start: plaats, reserveer en wis (E1, E3). De claim
+    /// komt pas na de toetsen; een geweigerde claim laat niets achter.
+    async fn claim(&mut self, spec: StartSpec) -> Result<ImageGrant> {
+        let slot = spec.slot;
+        if slot.get() > self.parts.max_slots() {
+            return Err(Error::SlotRange {
+                slot: slot.get(),
+                max: self.parts.max_slots(),
+            });
+        }
+        if self.resident(slot).is_some() || self.parts.partition_of(slot).is_some() {
+            return Err(Error::StillOwned { slot: slot.get() });
+        }
+        let core = self.places.place(&self.cores, slot, &spec.placement)?;
+        let span = spec.placement.cores.max(1);
+        // Dedicated: de cores moeten geparkeerd of koud zijn. Een gedeelde
+        // core draait meestal juist (zijn buren).
+        if spec.placement.group.is_none()
+            && let Some(busy) = (core.get()..core.get() + span)
+                .filter_map(Core::new)
+                .find(|c| self.cores.power(*c) != Power::Off)
+        {
+            self.places.release(slot);
+            return Err(Error::CoreBusy { core: busy.get() });
+        }
+        let part = match self.parts.alloc(slot, spec.mem_limit) {
+            Ok(p) => p,
+            Err(e) => {
+                self.places.release(slot);
+                return Err(e);
+            }
+        };
+        // E3: een nieuwe eigenaar krijgt gewist geheugen, in brokken.
+        let r = part.region();
+        let mut off = 0;
+        while off < r.size {
+            let n = SCRUB_CHUNK.min(r.size - off);
+            self.cage.clear(r.base + off, n);
+            off += n;
+            sync::yield_now().await;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        let generation = self.generation;
+        if let Some(e) = self.residents.get_mut(slot.get()) {
+            *e = Some(Resident {
+                held: Held::Streaming,
+                core,
+                span,
+                generation,
+                job: spec.job,
+                mounts: spec.mounts,
+                ports: spec.ports,
+            });
+        }
+        Ok(ImageGrant { part, generation })
+    }
+
+    fn streaming(&self, grant: &ImageGrant) -> bool {
+        self.resident(grant.slot())
+            .is_some_and(|r| matches!(r.held, Held::Streaming) && r.generation == grant.generation)
+    }
+
+    /// Stap 2: bouw de kooi (E5), registreer de servicer, dispatch.
+    fn arm(&mut self, grant: ImageGrant, entry: u64) -> Result {
+        let slot = grant.slot();
+        if !self.streaming(&grant) {
+            // Een grant uit een andere levensduur: niets aanraken. Het token
+            // droppen laat een eventuele claim staan (fail-closed).
+            return Err(Error::NotOwned { slot: slot.get() });
+        }
+        let (core, span, generation) = match self.resident(slot) {
+            Some(r) => (r.core, r.span, r.generation),
+            None => return Err(Error::NotOwned { slot: slot.get() }),
+        };
+        let region = grant.region();
+        if let Err(e) = self.cage.build(slot, region, entry, core, span) {
+            // Nooit gedispatcht: bevestigde afwezigheid van uitvoering.
+            self.abort(grant);
+            return Err(Error::Cage {
+                slot: slot.get(),
+                code: e.code,
+            });
+        }
+        self.register(slot, generation, region);
+        let dispatch = self.cage.dispatch(slot, core);
+        let part = grant.part.dispatched();
+        let held = match dispatch {
+            Ok(()) => Held::Running(part),
+            Err(_) => {
+                // Onbekende uitkomst: de core kan alsnog aangaan. Partitie,
+                // volledige core-claim en servicer blijven staan.
+                self.log.log(format_args!(
+                    "slot {slot}: owner retained, execution unconfirmed HOPOS_PART_QUARANTINE"
+                ));
+                Held::Quarantined(part.quarantine(&mut self.parts))
+            }
+        };
+        let failed = matches!(held, Held::Quarantined(_));
+        if let Some(r) = self.resident_mut(slot) {
+            r.held = held;
+        }
+        if failed {
+            return Err(Error::Dispatch {
+                slot: slot.get(),
+                core: core.get(),
+            });
+        }
+        Ok(())
+    }
+
+    fn register(&mut self, slot: Slot, generation: u32, region: Region) {
+        if let Some(ctl) = self.svc.ctl(slot) {
+            let _ = ctl.stop.take();
+            let _ = ctl.gone.take();
+            ctl.generation.store(generation, Release);
+            ctl.base.store(region.base, Release);
+            ctl.size.store(region.size, Release);
+            self.svc.set(slot, Some(generation));
+            ctl.start.set();
+        }
+    }
+
+    /// De gewone rollback: de grant komt terug en er draaide nooit iets.
+    fn abort(&mut self, grant: ImageGrant) {
+        if !self.streaming(&grant) {
+            return;
+        }
+        let slot = grant.slot();
+        grant.part.abandon(&mut self.parts);
+        self.places.release(slot);
+        if let Some(e) = self.residents.get_mut(slot.get()) {
+            *e = None;
+        }
+    }
+
+    /// Stopt de servicer van `slot` en wacht tot hij weg is.
+    async fn evict(&mut self, slot: Slot) {
+        if self.svc.set(slot, None).is_none() {
+            return;
+        }
+        if let Some(ctl) = self.svc.ctl(slot) {
+            ctl.stop.set();
+            ctl.gone.wait().await;
+        }
+    }
+
+    async fn wait_quiet(&self, slot: Slot, core: Core, span: usize, timeout: Duration) -> bool {
+        let deadline = self.timer.now().saturating_add(timeout.as_nanos() as u64);
+        loop {
+            let quiet = (core.get()..core.get() + span)
+                .filter_map(Core::new)
+                .all(|c| self.cage.quiet(slot, c));
+            if quiet {
+                return true;
+            }
+            if self.timer.now() >= deadline {
+                return false;
+            }
+            self.timer.sleep(STOP_POLL).await;
+        }
+    }
+
+    /// Stop: eerst de servicer weg, dan de coöperatieve kans, dan de
+    /// intrekking. Alleen een bevestigde beëindiging geeft de partitie en de
+    /// cores terug (E2, E9); anders quarantaine, en een latere stop mag het
+    /// opnieuw proberen.
+    async fn stop(&mut self, slot: Slot, timeout: Duration) -> Result {
+        let Some(r) = self.resident(slot) else {
+            return Ok(()); // Een leeg kooinummer zegt niets over core i.
+        };
+        if matches!(r.held, Held::Streaming) {
+            // De grant is buiten; Hop serialiseert Stop tegen een lopende
+            // stream (slot-lifecycle-grenzen.md). Eerst Abort.
+            return Err(Error::StillOwned { slot: slot.get() });
+        }
+        let (core, span) = (r.core, r.span);
+        self.evict(slot).await;
+        self.cage.request_exit(slot);
+        let mut quiet = self.wait_quiet(slot, core, span, timeout).await;
+        if !quiet {
+            // Eén intrekking velt alle cores van het slot (gedeelde tabel en
+            // VMID); de kick laat ook slapers de intrekking zien.
+            self.cage.revoke(slot);
+            for c in (core.get()..core.get() + span).filter_map(Core::new) {
+                self.cores.kick(c);
+            }
+            quiet = self.wait_quiet(slot, core, span, REVOKE_GRACE).await;
+        }
+        let Some(r) = self.residents.get_mut(slot.get()).and_then(Option::take) else {
+            return Ok(());
+        };
+        if !quiet {
+            let held = match r.held {
+                Held::Running(p) => Held::Quarantined(p.quarantine(&mut self.parts)),
+                other => other,
+            };
+            self.log.log(format_args!(
+                "slot {slot}: owner retained, execution unconfirmed HOPOS_PART_QUARANTINE"
+            ));
+            if let Some(e) = self.residents.get_mut(slot.get()) {
+                *e = Some(Resident { held, ..r });
+            }
+            return Err(Error::NotStopped {
+                slot: slot.get(),
+                core: core.get(),
+            });
+        }
+        let owned = match r.held {
+            Held::Running(p) => Some(p),
+            Held::Quarantined(q) => q.confirm(&mut self.parts, Stopped::confirmed(slot)).ok(),
+            Held::Streaming => None,
+        };
+        if let Some(p) = owned {
+            p.release(&mut self.parts, Stopped::confirmed(slot))?;
+        }
+        self.places.release(slot);
+        Ok(())
+    }
+
+    /// De status van `slot`.
+    #[must_use]
+    pub fn status(&self, slot: Slot) -> SlotStatus {
+        let r = self.resident(slot);
+        SlotStatus {
+            occupancy: match r.map(|r| &r.held) {
+                None => Occupancy::Empty,
+                Some(Held::Streaming) => Occupancy::Streaming,
+                Some(Held::Running(_)) => Occupancy::Running,
+                Some(Held::Quarantined(_)) => Occupancy::Quarantined,
+            },
+            core: r.map(|r| (r.core, r.span)),
+            partition: self.parts.partition_of(slot),
+            cage: if r.is_some() {
+                self.cage.status(slot)
+            } else {
+                Status::default()
+            },
+        }
+    }
+
+    /// Dispatcht een extra SMP-core namens de app. Alleen de breedte uit
+    /// HOP's eigen boekhouding telt, NOOIT de app-schrijfbare page: een
+    /// opgehoogde telling zou anders buurcores in de kooi trekken.
+    fn smp(&mut self, slot: Slot) {
+        let requested = self.cage.smp_request(slot);
+        if requested == 0 {
+            return;
+        }
+        let Some(r) = self.resident(slot) else {
+            self.cage.clear_smp_request(slot);
+            return;
+        };
+        if !matches!(r.held, Held::Running(_)) {
+            return; // Quarantaine: het verzoek blijft staan.
+        }
+        let (core, span) = (r.core, r.span);
+        // De app vraagt virtuele CPU's relatief aan zijn kooinummer.
+        let offset = requested.wrapping_sub(slot.get() as u64);
+        if offset < 1 || offset >= span as u64 {
+            self.log.log(format_args!(
+                "HOPOS_SMP_REJECT slot {slot}: core {requested} outside [{},{}] (trusted width {span})",
+                slot.get() + 1,
+                slot.get() + span - 1
+            ));
+            self.cage.clear_smp_request(slot);
+            return;
+        }
+        let Some(c) = Core::new(core.get() + offset as usize) else {
+            self.cage.clear_smp_request(slot);
+            return;
+        };
+        if self.cores.power(c) == Power::On && !self.cage.quiet(slot, c) {
+            // Dit pad was stil, en dat is een van de twee verklaringen als
+            // een SMP-app hangt (22-09, O6N: vijf cores gevraagd, vier
+            // gekregen, geen foutregel).
+            self.log.log(format_args!(
+                "slot {slot}: SMP core {c} already live — request cleared"
+            ));
+            self.cage.clear_smp_request(slot);
+            return;
+        }
+        match self.cage.dispatch_secondary(slot, c) {
+            Ok(()) => self.log.log(format_args!(
+                "slot {slot}: SMP core {c} dispatched HOPOS_SMP_DISPATCH_OK"
+            )),
+            Err(e) => {
+                self.log.log(format_args!(
+                    "HOPOS_SMP_DISPATCH_FAIL slot {slot} core {c}: code {}",
+                    e.code
+                ));
+                if let Some(Some(r)) = self.residents.get_mut(slot.get())
+                    && let Held::Running(_) = r.held
+                    && let Held::Running(p) = core::mem::replace(&mut r.held, Held::Streaming)
+                {
+                    r.held = Held::Quarantined(p.quarantine(&mut self.parts));
+                }
+            }
+        }
+        self.cage.clear_smp_request(slot);
+    }
+
+    /// Beschrijft elke levende bewoner voor de flip, en weigert als er iets
+    /// bij zit dat niet over te dragen is (quarantaine, een lopende stream,
+    /// een dode context). Weigeren is de veilige kant: de flip gaat niet door.
+    pub fn snapshot(&self) -> Result<Vec<SlotState>> {
+        let mut out = Vec::new();
+        for (slot, region, quarantined) in self.parts.owners() {
+            let r = self.resident(slot);
+            let live = matches!(r.map(|r| &r.held), Some(Held::Running(_)));
+            if quarantined || !live || !self.cage.live(slot) {
+                return Err(Error::Quarantined { slot: slot.get() });
+            }
+            let Some(r) = r else { continue };
+            let mut st = SlotState {
+                slot: slot.get(),
+                part_base: region.base,
+                part_size: region.size,
+                core: r.core.get(),
+                cores: r.span,
+                job: try_vec(&r.job)?,
+                ports: try_vec(&r.ports)?,
+                mounts: try_vec(&r.mounts)?,
+                ..SlotState::default()
+            };
+            if let Some((name, members)) = self.places.group_of(slot) {
+                st.share_group = try_vec(name.as_slice())?;
+                for c in members {
+                    try_push(&mut st.group_cores, c.get())?;
+                }
+            }
+            if st.ports.len() > MAX_FLIP_PORTS
+                || st.job.len() > MAX_FLIP_JOB
+                || st.share_group.len() > MAX_FLIP_JOB
+                || st.mounts.len() > MAX_FLIP_MOUNTS
+                || st
+                    .mounts
+                    .iter()
+                    .any(|m| m.local.len() > MAX_FLIP_PATH || m.shared.len() > MAX_FLIP_PATH)
+            {
+                return Err(Error::TooLarge {
+                    len: st.job.len().max(st.ports.len()),
+                    max: MAX_FLIP_JOB,
+                });
+            }
+            try_push(&mut out, st)?;
+        }
+        validate_adoption(&out, &self.cores, self.places.hop_reserved(), &self.parts)?;
+        Ok(out)
+    }
+
+    /// Herstelt EERST alle eigendomsclaims, daarna de diensten (E8). Een
+    /// onbruikbare overdracht is een fout vóór er iets geclaimd is.
+    pub fn adopt(&mut self, states: &[SlotState]) -> Result<usize> {
+        validate_adoption(states, &self.cores, self.places.hop_reserved(), &self.parts)?;
+        for st in states {
+            let slot = Slot::new(st.slot).ok_or(Error::SlotRange {
+                slot: st.slot,
+                max: SLOT_CAP,
+            })?;
+            let core = Core::new(st.core).ok_or(Error::CoreRange {
+                core: st.core,
+                max: self.cores.app_cores(),
+            })?;
+            let part = self.parts.adopt(slot, st.part_base, st.part_size)?;
+            let mut group_cores: Vec<Core> = Vec::new();
+            for c in &st.group_cores {
+                try_push(
+                    &mut group_cores,
+                    Core::new(*c).ok_or(Error::CoreRange { core: *c, max: 0 })?,
+                )?;
+            }
+            let mut name = GroupName::new();
+            for b in &st.share_group {
+                name.push(*b).map_err(|_| Error::TooLarge {
+                    len: st.share_group.len(),
+                    max: crate::pool::MAX_GROUP_NAME,
+                })?;
+            }
+            let group = (!st.share_group.is_empty()).then_some((&name, group_cores.as_slice()));
+            self.places.adopt(slot, core, st.cores, group)?;
+            self.generation = self.generation.wrapping_add(1);
+            let generation = self.generation;
+            if let Some(e) = self.residents.get_mut(slot.get()) {
+                *e = Some(Resident {
+                    held: Held::Running(part),
+                    core,
+                    span: st.cores,
+                    generation,
+                    job: try_vec(&st.job)?,
+                    mounts: try_vec(&st.mounts)?,
+                    ports: try_vec(&st.ports)?,
+                });
+            }
+        }
+        // Pas nu de diensten: geen servicer vóór ALLE oude claims terug zijn.
+        for st in states {
+            if let Some(slot) = Slot::new(st.slot)
+                && let Some(generation) = self.resident(slot).map(|r| r.generation)
+            {
+                self.register(slot, generation, Region::new(st.part_base, st.part_size));
+                self.log.log(format_args!(
+                    "slot {slot}: adopted — partition {} MB @ {:#x} on core {} ({} core(s)), ownership restored",
+                    st.part_size >> 20,
+                    st.part_base,
+                    st.core,
+                    st.cores
+                ));
+            }
+        }
+        Ok(states.len())
+    }
+
+    /// De partitie-pool (alleen lezen: capaciteit, grootste gat).
+    #[must_use]
+    pub fn parts(&self) -> &PartitionPool {
+        &self.parts
+    }
+
+    /// De pool voor de flip-lening; de flip loopt door de actor.
+    pub fn parts_mut(&mut self) -> &mut PartitionPool {
+        &mut self.parts
+    }
+
+    /// De kooi (voor de board-glue en de tests).
+    pub fn cage(&mut self) -> &mut C {
+        &mut self.cage
+    }
+
+    /// De cores.
+    pub fn cores(&mut self) -> &mut K {
+        &mut self.cores
+    }
+}
+
+/// Toetst het complete eigendomsbeeld, vóór de sprong én vóór het herstel.
+/// Er zijn weinig kooien: paarsgewijze toetsen houden dit boot-pad simpel.
+pub fn validate_adoption(
+    states: &[SlotState],
+    cores: &impl Cores,
+    hop_reserved: usize,
+    parts: &PartitionPool,
+) -> Result {
+    let app = cores.app_cores();
+    let is_app = |c: usize| c > hop_reserved && c <= app;
+    for (j, s) in states.iter().enumerate() {
+        let bad = Error::Range {
+            base: s.part_base,
+            size: s.part_size,
+        };
+        if s.slot < 1
+            || s.slot > parts.max_slots()
+            || s.part_size == 0
+            || s.part_base.checked_add(s.part_size).is_none()
+            || s.part_base % GRAIN != 0
+            || s.part_size % GRAIN != 0
+        {
+            return Err(bad);
+        }
+        let claim = s
+            .part_size
+            .checked_add(parts.reserve_of(s.part_size))
+            .ok_or(bad)?;
+        s.part_base.checked_add(claim).ok_or(bad)?;
+        if s.cores < 1 || !is_app(s.core) || s.cores > app + 1 - s.core {
+            return Err(Error::CoreRange {
+                core: s.core,
+                max: app,
+            });
+        }
+        if s.share_group.is_empty() {
+            if !s.group_cores.is_empty() {
+                return Err(Error::PoolSize {
+                    have: s.group_cores.len(),
+                    want: 0,
+                });
+            }
+        } else {
+            if s.share_group.len() > MAX_FLIP_JOB
+                || s.cores != 1
+                || !s.group_cores.contains(&s.core)
+            {
+                return Err(Error::PoolSize {
+                    have: s.group_cores.len(),
+                    want: s.cores,
+                });
+            }
+            for (k, c) in s.group_cores.iter().enumerate() {
+                if !is_app(*c) || s.group_cores.get(..k).is_some_and(|p| p.contains(c)) {
+                    return Err(Error::CoreRange { core: *c, max: app });
+                }
+            }
+        }
+        for p in states.get(..j).unwrap_or(&[]) {
+            let p_claim = p.part_size.saturating_add(parts.reserve_of(p.part_size));
+            if s.slot == p.slot
+                || (s.part_base < p.part_base.saturating_add(p_claim)
+                    && p.part_base < s.part_base.saturating_add(claim))
+            {
+                return Err(Error::NotFree {
+                    base: s.part_base,
+                    size: s.part_size,
+                });
+            }
+            if !s.share_group.is_empty() && s.share_group == p.share_group {
+                if s.group_cores != p.group_cores {
+                    return Err(Error::PoolSize {
+                        have: p.group_cores.len(),
+                        want: s.group_cores.len(),
+                    });
+                }
+                continue;
+            }
+            let owns = |v: &SlotState, c: usize| {
+                (c >= v.core && c < v.core + v.cores) || v.group_cores.contains(&c)
+            };
+            if let Some(c) = (hop_reserved + 1..=app).find(|c| owns(s, *c) && owns(p, *c)) {
+                return Err(Error::CoreBusy { core: c });
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::cage::CageError;
+    use crate::partmem::Geometry;
+    use crate::pool::tests::FakeCores;
+    use crate::testutil::{FakeTimer, block_on, join2};
+    use std::cell::{Cell, RefCell};
+    use std::string::String;
+    use std::vec;
+
+    const MIB: u64 = 1 << 20;
+
+    /// Hoe de nep-app op een stop reageert.
+    #[derive(Copy, Clone, PartialEq)]
+    pub(crate) enum Obey {
+        /// Stopt op de kill-vlag.
+        Exit,
+        /// Stopt pas na de intrekking.
+        Revoke,
+        /// Stopt nooit (een core die niet parkeert).
+        Never,
+    }
+
+    pub(crate) struct FakeCage {
+        pub(crate) obey: Obey,
+        pub(crate) exit_asked: [bool; 16],
+        pub(crate) revoked: [bool; 16],
+        pub(crate) cleared: Vec<(u64, u64)>,
+        pub(crate) built: Vec<(usize, Region, usize, usize)>,
+        pub(crate) dispatched: Vec<(usize, usize)>,
+        pub(crate) secondaries: Vec<(usize, usize)>,
+        pub(crate) fail_dispatch: bool,
+        pub(crate) fail_build: bool,
+        pub(crate) smp_req: [u64; 16],
+        pub(crate) calls: Cell<u32>,
+    }
+
+    impl FakeCage {
+        pub(crate) fn new(obey: Obey) -> FakeCage {
+            FakeCage {
+                obey,
+                exit_asked: [false; 16],
+                revoked: [false; 16],
+                cleared: Vec::new(),
+                built: Vec::new(),
+                dispatched: Vec::new(),
+                secondaries: Vec::new(),
+                fail_dispatch: false,
+                fail_build: false,
+                smp_req: [0; 16],
+                calls: Cell::new(0),
+            }
+        }
+    }
+
+    impl Cage for FakeCage {
+        fn link_window(&self, size: u64) -> u64 {
+            size
+        }
+        fn reserve(&self, _: u64) -> u64 {
+            0
+        }
+        fn clear(&mut self, base: u64, len: u64) {
+            self.cleared.push((base, len));
+        }
+        fn build(
+            &mut self,
+            slot: Slot,
+            part: Region,
+            _: u64,
+            first: Core,
+            cores: usize,
+        ) -> core::result::Result<(), CageError> {
+            if self.fail_build {
+                return Err(CageError { code: 7 });
+            }
+            self.built.push((slot.get(), part, first.get(), cores));
+            Ok(())
+        }
+        fn dispatch(&mut self, slot: Slot, core: Core) -> core::result::Result<(), CageError> {
+            self.dispatched.push((slot.get(), core.get()));
+            if self.fail_dispatch {
+                return Err(CageError { code: 1 });
+            }
+            Ok(())
+        }
+        fn dispatch_secondary(
+            &mut self,
+            slot: Slot,
+            core: Core,
+        ) -> core::result::Result<(), CageError> {
+            self.secondaries.push((slot.get(), core.get()));
+            Ok(())
+        }
+        fn request_exit(&mut self, slot: Slot) {
+            self.calls.set(self.calls.get() + 1);
+            self.exit_asked[slot.get()] = true;
+        }
+        fn quiet(&self, slot: Slot, _: Core) -> bool {
+            self.calls.set(self.calls.get() + 1);
+            let i = slot.get();
+            match self.obey {
+                Obey::Exit => self.exit_asked[i] || self.revoked[i],
+                Obey::Revoke => self.revoked[i],
+                Obey::Never => false,
+            }
+        }
+        fn live(&self, _: Slot) -> bool {
+            true
+        }
+        fn revoke(&mut self, slot: Slot) {
+            self.calls.set(self.calls.get() + 1);
+            self.revoked[slot.get()] = true;
+        }
+        fn smp_request(&self, slot: Slot) -> u64 {
+            self.smp_req[slot.get()]
+        }
+        fn clear_smp_request(&mut self, slot: Slot) {
+            self.smp_req[slot.get()] = 0;
+        }
+        fn status(&self, _: Slot) -> Status {
+            Status::default()
+        }
+    }
+
+    #[derive(Default)]
+    pub(crate) struct FakeConsole {
+        pub(crate) lines: RefCell<Vec<String>>,
+        pub(crate) app: RefCell<Vec<(usize, Vec<u8>)>>,
+    }
+
+    impl Console for &FakeConsole {
+        fn log(&self, args: core::fmt::Arguments<'_>) {
+            self.lines.borrow_mut().push(std::format!("{args}"));
+        }
+        fn app_line(&self, slot: Slot, line: &[u8]) {
+            self.app.borrow_mut().push((slot.get(), line.to_vec()));
+        }
+    }
+
+    impl FakeConsole {
+        pub(crate) fn saw(&self, marker: &str) -> bool {
+            self.lines.borrow().iter().any(|l| l.contains(marker))
+        }
+    }
+
+    pub(crate) type Actor<'s> = Lifecycle<'s, FakeCage, FakeCores, FakeTimer, &'s FakeConsole>;
+
+    pub(crate) fn actor<'s>(
+        svc: &'s Servicers,
+        con: &'s FakeConsole,
+        obey: Obey,
+        pool_mib: u64,
+        cores: usize,
+    ) -> Actor<'s> {
+        let parts = PartitionPool::new(
+            &[Region::new(0x8000_0000, pool_mib * MIB)],
+            Region::default(),
+            Region::default(),
+            Geometry::FLAT,
+            SLOT_CAP,
+        )
+        .unwrap();
+        Lifecycle::new(
+            FakeCage::new(obey),
+            FakeCores::new(cores),
+            FakeTimer::default(),
+            con,
+            parts,
+            CorePool::new(0),
+            svc,
+        )
+    }
+
+    pub(crate) fn s(i: usize) -> Slot {
+        Slot::new(i).unwrap()
+    }
+
+    fn ded(cores: usize) -> Placement {
+        Placement {
+            group: None,
+            pool_cores: 1,
+            cores,
+            class: None,
+        }
+    }
+
+    /// Claim + arm, zoals Hop een start doet, met een servicer die zijn
+    /// levensduur al uitdiende (de tests draaien geen servicer-taak).
+    pub(crate) fn start(a: &mut Actor<'_>, slot: usize, mib: u64, cores: usize) -> Result {
+        start_live(a, slot, mib, cores)?;
+        a.svc.ctl(s(slot)).unwrap().gone.set();
+        Ok(())
+    }
+
+    /// Claim + arm; de servicer-taak draait de test zelf.
+    fn start_live(a: &mut Actor<'_>, slot: usize, mib: u64, cores: usize) -> Result {
+        let g = block_on(a.claim(StartSpec::new(s(slot), mib * MIB, ded(cores))))?;
+        a.arm(g, 0x4001_0000)
+    }
+
+    fn stop(a: &mut Actor<'_>, slot: usize) -> Result {
+        block_on(a.stop(s(slot), Duration::from_millis(50)))
+    }
+
+    #[test]
+    fn start_places_scrubs_builds_and_dispatches() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
+        start(&mut a, 1, 16, 1).unwrap();
+        let st = a.status(s(1));
+        assert_eq!(st.occupancy, Occupancy::Running);
+        assert_eq!(a.cage.built.len(), 1);
+        assert_eq!(a.cage.dispatched, vec![(1, 1)]);
+        assert_eq!(svc.current(s(1)), Some(1), "servicer not registered");
+    }
+
+    // E3: een nieuwe eigenaar krijgt gewist geheugen, in brokken.
+    #[test]
+    fn new_owner_memory_is_clean() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
+        let g = block_on(a.claim(StartSpec::new(s(2), 10 * MIB, ded(1)))).unwrap();
+        let r = g.region();
+        let covered: u64 = a.cage.cleared.iter().map(|c| c.1).sum();
+        assert_eq!(covered, r.size);
+        assert_eq!(a.cage.cleared.first().unwrap().0, r.base);
+        assert!(a.cage.cleared.iter().all(|c| c.1 <= SCRUB_CHUNK));
+        a.abort(g);
+    }
+
+    #[test]
+    fn abort_returns_memory_that_never_ran() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Exit, 32, 4);
+        let g = block_on(a.claim(StartSpec::new(s(1), 32 * MIB, ded(1)))).unwrap();
+        a.abort(g);
+        assert_eq!(a.status(s(1)).occupancy, Occupancy::Empty);
+        start(&mut a, 2, 32, 1).unwrap();
+    }
+
+    #[test]
+    fn duplicate_start_claim_failure_keeps_live_owner() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
+        start(&mut a, 1, 16, 1).unwrap();
+        let before = a.parts.partition_of(s(1));
+        assert_eq!(start(&mut a, 1, 16, 1), Err(Error::StillOwned { slot: 1 }));
+        assert_eq!(a.parts.partition_of(s(1)), before);
+        assert_eq!(a.status(s(1)).occupancy, Occupancy::Running);
+    }
+
+    #[test]
+    fn build_failure_is_an_ordinary_rollback() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Exit, 32, 4);
+        a.cage.fail_build = true;
+        assert!(matches!(
+            start(&mut a, 1, 32, 1),
+            Err(Error::Cage { slot: 1, code: 7 })
+        ));
+        assert!(a.cage.dispatched.is_empty());
+        assert_eq!(a.status(s(1)).occupancy, Occupancy::Empty);
+        a.cage.fail_build = false;
+        start(&mut a, 1, 32, 1).unwrap();
+    }
+
+    // ErrDispatch: de uitkomst is onbekend, dus placement, partitie en
+    // servicer blijven staan (slot-lifecycle-grenzen.md fix 1).
+    #[test]
+    fn err_dispatch_keeps_host_core_and_grant() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Never, 32, 2);
+        a.cage.fail_dispatch = true;
+        assert!(matches!(
+            start(&mut a, 1, 32, 1),
+            Err(Error::Dispatch { slot: 1, core: 1 })
+        ));
+        let st = a.status(s(1));
+        assert_eq!(st.occupancy, Occupancy::Quarantined);
+        assert_eq!(
+            st.core.map(|c| c.0.get()),
+            Some(1),
+            "possibly live core given away"
+        );
+        assert!(con.saw("HOPOS_PART_QUARANTINE"));
+        assert!(a.parts.is_quarantined(s(1)));
+    }
+
+    #[test]
+    fn ownership_quarantine_retains_ownership() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Never, 32, 2);
+        start(&mut a, 1, 32, 1).unwrap();
+        assert!(matches!(
+            stop(&mut a, 1),
+            Err(Error::NotStopped { slot: 1, .. })
+        ));
+        assert_eq!(a.status(s(1)).occupancy, Occupancy::Quarantined);
+        assert!(a.cage.revoked[1], "no hard kill before quarantine");
+        // Het geheugen en de core zijn niet vrij.
+        assert!(start(&mut a, 2, 2, 1).is_err());
+    }
+
+    #[test]
+    fn ownership_quarantined_smp_second_stop() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Never, 32, 4);
+        start(&mut a, 1, 32, 2).unwrap();
+        assert!(stop(&mut a, 1).is_err());
+        // De cores parkeren later alsnog: de tweede stop bevestigt en ruimt op.
+        a.cage.obey = Obey::Revoke;
+        stop(&mut a, 1).unwrap();
+        assert_eq!(a.status(s(1)).occupancy, Occupancy::Empty);
+        assert!(!a.parts.is_quarantined(s(1)));
+        start(&mut a, 2, 32, 2).unwrap();
+    }
+
+    #[test]
+    fn ownership_flip_cannot_omit_quarantine() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Never, 64, 4);
+        start(&mut a, 1, 16, 1).unwrap();
+        assert_eq!(a.snapshot().unwrap().len(), 1);
+        assert!(stop(&mut a, 1).is_err());
+        assert!(matches!(a.snapshot(), Err(Error::Quarantined { slot: 1 })));
+    }
+
+    #[test]
+    fn stop_confirms_before_release_and_frees_everything() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Exit, 32, 1);
+        start(&mut a, 1, 32, 1).unwrap();
+        stop(&mut a, 1).unwrap();
+        assert!(!a.cage.revoked[1], "cooperative exit needed no revocation");
+        assert_eq!(a.status(s(1)).occupancy, Occupancy::Empty);
+        assert_eq!(svc.current(s(1)), None);
+        start(&mut a, 3, 32, 1).unwrap();
+    }
+
+    #[test]
+    fn empty_stop_does_not_touch_another_cage_on_same_numbered_core() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
+        start(&mut a, 2, 16, 1).unwrap(); // Landt op core 1.
+        let before = a.cage.calls.get();
+        stop(&mut a, 1).unwrap();
+        assert_eq!(a.cage.calls.get(), before, "empty stop touched the cage");
+        assert!(!a.cage.exit_asked[2]);
+    }
+
+    #[test]
+    fn stop_wake_uses_cage_context_and_physical_core() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Revoke, 64, 6);
+        start(&mut a, 5, 16, 1).unwrap(); // Core 1.
+        start(&mut a, 1, 16, 2).unwrap(); // Cores 2 en 3.
+        stop(&mut a, 1).unwrap();
+        assert_eq!(
+            &a.cores.kicks[1..5],
+            &[0, 1, 1, 0],
+            "kick missed the physical span"
+        );
+        assert!(a.cage.revoked[1] && !a.cage.revoked[5]);
+    }
+
+    #[test]
+    fn smp_request_translates_virtual_cpu_to_assigned_core() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Exit, 64, 6);
+        start(&mut a, 9, 8, 1).unwrap(); // Core 1.
+        start(&mut a, 4, 8, 3).unwrap(); // Cores 2..4.
+        // De app vraagt virtuele CPU 5 (= slot 4 + 1): dat is core 3.
+        a.cage.smp_req[4] = 5;
+        a.smp(s(4));
+        assert_eq!(a.cage.secondaries, vec![(4, 3)]);
+        assert_eq!(a.cage.smp_req[4], 0);
+        // Buiten de vertrouwde breedte: geweigerd en beantwoord.
+        a.cage.smp_req[4] = 7;
+        a.smp(s(4));
+        assert_eq!(a.cage.secondaries.len(), 1);
+        assert_eq!(a.cage.smp_req[4], 0);
+        assert!(con.saw("HOPOS_SMP_REJECT"));
+    }
+
+    #[test]
+    fn ownership_stop_serializes_smp_dispatch() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
+        start(&mut a, 1, 8, 2).unwrap();
+        a.cage.smp_req[1] = 2;
+        stop(&mut a, 1).unwrap();
+        // Het verzoek komt pas na de stop bij de actor aan: geen dispatch.
+        block_on(a.handle(Request::Smp(s(1))));
+        assert!(
+            a.cage.secondaries.is_empty(),
+            "stopped owner got a secondary"
+        );
+    }
+
+    // De actor-lus met een brievenbus en een antwoordplek.
+    #[test]
+    fn lifecycle_actor_answers_over_the_mailbox() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
+        let reply = Reply::new();
+        let inbox: Mailbox<Envelope<'_>, 4> = Mailbox::new();
+        let client = async {
+            let spec = StartSpec::new(s(1), 8 * MIB, ded(1));
+            let Response::Granted(g) = call(&inbox, &reply, Request::Claim(spec)).await.unwrap()
+            else {
+                panic!("no grant");
+            };
+            let r = call(&inbox, &reply, Request::Arm { grant: g, entry: 0 })
+                .await
+                .unwrap();
+            assert!(matches!(r, Response::Done));
+            let Response::Status(st) = call(&inbox, &reply, Request::Status(s(1))).await.unwrap()
+            else {
+                panic!("no status");
+            };
+            st.occupancy
+        };
+        let mut actor_loop = core::pin::pin!(a.run(&inbox));
+        let mut client = core::pin::pin!(client);
+        let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
+        let got = loop {
+            let _ = actor_loop.as_mut().poll(&mut cx);
+            if let core::task::Poll::Ready(v) = client.as_mut().poll(&mut cx) {
+                break v;
+            }
+        };
+        assert_eq!(got, Occupancy::Running);
+    }
+
+    struct FakeOutbox<'c> {
+        lines: Vec<Vec<u8>>,
+        live: &'c Cell<bool>,
+    }
+
+    impl Outbox for FakeOutbox<'_> {
+        fn read_into(&mut self, buf: &mut [u8]) -> Option<(u8, usize)> {
+            let l = self.lines.pop()?;
+            buf[..l.len()].copy_from_slice(&l);
+            Some((KIND_LOG, l.len()))
+        }
+        fn corrupt(&self) -> bool {
+            false
+        }
+        fn live(&self) -> bool {
+            self.live.get()
+        }
+        fn smp_pending(&self) -> bool {
+            false
+        }
+    }
+
+    // Evict = stop.set(); gone.wait(): de stop wacht tot de servicer weg is,
+    // en de logregels van de app komen door.
+    #[test]
+    fn stop_evicts_servicer_and_waits_for_gone() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let live = Cell::new(true);
+        let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
+        start_live(&mut a, 1, 8, 1).unwrap();
+        let inbox: Mailbox<Envelope<'_>, 4> = Mailbox::new();
+        let timer = FakeTimer::default();
+        let conr = &con;
+        let mut buf = [0u8; 64];
+        let servicer = servicer_task(
+            s(1),
+            &svc,
+            |_| FakeOutbox {
+                lines: vec![b"hello".to_vec()],
+                live: &live,
+            },
+            &timer,
+            &conr,
+            &inbox,
+            &mut buf,
+        );
+        let mut servicer = core::pin::pin!(servicer);
+        let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
+        for _ in 0..4 {
+            let _ = servicer.as_mut().poll(&mut cx);
+        }
+        assert_eq!(con.app.borrow().as_slice(), &[(1, b"hello".to_vec())]);
+        let ((), r) = join2(
+            async {
+                for _ in 0..64 {
+                    core::future::poll_fn(|cx| {
+                        let _ = servicer.as_mut().poll(cx);
+                        core::task::Poll::Ready(())
+                    })
+                    .await;
+                    sync::yield_now().await;
+                }
+            },
+            a.stop(s(1), Duration::from_millis(20)),
+        );
+        r.unwrap();
+        assert_eq!(svc.current(s(1)), None);
+    }
+
+    fn st(slot: usize, core: usize, cores: usize, base: u64) -> SlotState {
+        SlotState {
+            slot,
+            core,
+            cores,
+            part_base: base,
+            part_size: 32 * MIB,
+            ..SlotState::default()
+        }
+    }
+
+    fn pool() -> PartitionPool {
+        PartitionPool::new(
+            &[Region::new(0x8000_0000, 256 * MIB)],
+            Region::default(),
+            Region::default(),
+            Geometry::FLAT,
+            SLOT_CAP,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn adoption_rejects_conflicting_owners() {
+        let b = FakeCores::new(4);
+        let p = pool();
+        let first = st(1, 1, 1, 0x8000_0000);
+        let second = st(2, 2, 1, 0x8400_0000);
+        validate_adoption(&[first.clone(), second.clone()], &b, 0, &p).unwrap();
+        let changes: [fn(&mut SlotState); 6] = [
+            |s| s.slot = 1,
+            |s| s.part_base = 0x8000_0000,
+            |s| s.part_base = u64::MAX - 0x1f_ffff,
+            |s| s.core = 1,
+            |s| s.core = 0,
+            |s| s.cores = 4,
+        ];
+        for change in changes {
+            let mut s2 = second.clone();
+            change(&mut s2);
+            assert!(validate_adoption(&[first.clone(), s2], &b, 0, &p).is_err());
+        }
+        let mut grouped = first;
+        grouped.share_group = b"trusted".to_vec();
+        grouped.group_cores = vec![1, 2];
+        assert!(
+            validate_adoption(&[grouped, second], &b, 0, &p).is_err(),
+            "empty group core overlapped dedicated owner"
+        );
+    }
+
+    #[test]
+    fn adoption_rejects_physical_smp_overlap() {
+        let b = FakeCores::new(4);
+        let p = pool();
+        let first = st(6, 2, 2, 0x8000_0000);
+        for core in [2, 3] {
+            let second = st(1, core, 1, 0x8200_0000);
+            assert!(validate_adoption(&[first.clone(), second.clone()], &b, 0, &p).is_err());
+            assert!(validate_adoption(&[second, first.clone()], &b, 0, &p).is_err());
+        }
+    }
+
+    #[test]
+    fn adoption_separates_cages_from_smp_cores() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Exit, 256, 4);
+        let states = [st(1, 3, 2, 0x8000_0000), st(2, 1, 1, 0x8200_0000)];
+        assert_eq!(a.adopt(&states).unwrap(), 2);
+        assert_eq!(
+            a.places.placement_of(s(1)).map(|p| (p.0.get(), p.1)),
+            Some((3, 2))
+        );
+        assert_eq!(
+            a.places.placement_of(s(2)).map(|p| (p.0.get(), p.1)),
+            Some((1, 1))
+        );
+        let b = FakeCores::new(4);
+        assert!(!a.places.run_free(&b, 3, 1, None) && !a.places.run_free(&b, 4, 1, None));
+        assert!(
+            a.places.run_free(&b, 2, 1, None),
+            "cage 2 reserved physical core 2"
+        );
+        // De bewoners zijn weer van iemand: hun geheugen is niet vrij.
+        assert!(a.parts.partition_of(s(1)).is_some());
+        assert_eq!(
+            svc.current(s(2)),
+            Some(2),
+            "adopted resident has no servicer"
+        );
+        assert!(con.saw("adopted"));
+    }
+
+    #[test]
+    fn flip_preserves_whole_group_pool() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Exit, 256, 3);
+        let mut spec = StartSpec::new(s(4), 32 * MIB, ded(1));
+        spec.placement.group = Some({
+            let mut g = GroupName::new();
+            for b in b"trusted" {
+                g.push(*b).unwrap();
+            }
+            g
+        });
+        spec.placement.pool_cores = 2;
+        let g = block_on(a.claim(spec.clone())).unwrap();
+        a.arm(g, 0).unwrap();
+        let states = a.snapshot().unwrap();
+        assert_eq!(states[0].group_cores, vec![1, 2]);
+
+        // De nieuwe kern.
+        let (svc2, con2) = (Servicers::new(), FakeConsole::default());
+        let mut b = actor(&svc2, &con2, Obey::Exit, 256, 3);
+        b.adopt(&states).unwrap();
+        assert_eq!(start(&mut b, 3, 8, 1), Ok(()));
+        assert_eq!(b.places.placement_of(s(3)).unwrap().0.get(), 3);
+        assert!(
+            start(&mut b, 6, 8, 1).is_err(),
+            "empty group core was given away"
+        );
+        let mut join = spec;
+        join.slot = s(5);
+        let g = block_on(b.claim(join)).unwrap();
+        assert_eq!(b.places.placement_of(s(5)).unwrap().0.get(), 2);
+        b.arm(g, 0).unwrap();
+    }
+}

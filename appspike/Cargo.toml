@@ -1,0 +1,21 @@
+[package]
+name = "appspike"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "De ABI-toets: een app die elk contract van de kern aanraakt en het bewijs op zijn log zet."
+build = "build.rs"
+
+[[bin]]
+name = "appspike"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+applib = { path = "../applib" }
+netdev = { path = "../netdev" }
+
+[lints]
+workspace = true

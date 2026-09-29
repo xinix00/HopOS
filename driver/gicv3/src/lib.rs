@@ -1,0 +1,523 @@
+//! De GICv3-interruptcontroller: distributor, redistributor, claim en EOI.
+//!
+//! Eén driver voor elk ARM-board met zo'n GIC: QEMU virt, de Radxa
+//! (GIC-600), de Altra, de Orion O6N (GIC-700). De Pi's hebben een GIC-400
+//! (v2) en krijgen hun eigen driver.
+//!
+//! Group 1, niet Group 0 (09-09): op élk bord met TF-A op EL3 staat
+//! GICD_CTLR.DS=0 en is Group 0 het secure domein; voor ons (non-secure
+//! EL2) zijn de Group-0-registers RAZ/WI en meldt ICC_IAR0 nooit iets.
+//! Non-secure Group 1 is wat de firmware voor het OS overlaat, en het is
+//! ook op een GIC zonder security (QEMU: DS=1) gewoon beschikbaar. Dus:
+//! IGROUPR-bit gezet, EnableGrp1NS in GICD_CTLR, ICC_IGRPEN1 en IAR1/EOIR1.
+//!
+//! Wat deze driver bewust NIET doet: alle interrupts van de distributor
+//! uitzetten bij `init` (tamago's gebruik). Op een bord met firmware-eigen
+//! lijnen (SCP, EC) is dat niet ons register; wij raken alleen de lijnen
+//! aan die wij aanzetten. En de route van een SPI gaat expliciet naar déze
+//! core, met IRM=0: een app-core mag nooit een doel zijn. Dat is de
+//! isolatieregel, niet "meestal".
+//!
+//! De CPU-interface (de ICC-systeemregisters) is een instructie, geen
+//! MMIO, en assembly hoort in `cpu` en `board` (handboek §5): het board
+//! levert hem via de trait [`Icc`]. Zo test de driver op de host met een
+//! nep-interface.
+
+#![cfg_attr(not(test), no_std)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
+
+use core::fmt;
+use core::mem::offset_of;
+use dev::{Pa, Reg};
+
+/// De INTID van SPI 0.
+pub const FIRST_SPI: u32 = 32;
+/// De eerste speciale INTID (1020-1023): "niets" bij een claim.
+pub const FIRST_SPECIAL: u32 = 1020;
+
+/// De prioriteit die wij onze lijnen geven: midden in het bereik, zodat
+/// een PMR van 0xff ze doorlaat en de firmware er nog boven en onder kan.
+const PRIORITY: u8 = 0xa0;
+
+/// De redistributor-frames: RD_base (64 KB) + SGI_base (64 KB) = 128 KB;
+/// bij VLPIS (GICv4) nog VLPI_base en een gereserveerd frame erbij.
+const FRAME: u64 = 0x1_0000;
+
+/// De affiniteitsbits van MPIDR voor IROUTER: aff0-2 en aff3.
+const AFF_MASK: u64 = (0xff << 32) | 0xff_ffff;
+
+/// Het distributor-blok (ARM IHI 0069, tabel 12-25).
+#[repr(C)]
+struct Gicd {
+    ctlr: Reg<u32>,
+    typer: Reg<u32>,
+    iidr: Reg<u32>,
+    _r0: [u32; 29],
+    igroupr: [Reg<u32>; 32],
+    isenabler: [Reg<u32>; 32],
+    icenabler: [Reg<u32>; 32],
+    ispendr: [Reg<u32>; 32],
+    icpendr: [Reg<u32>; 32],
+    isactiver: [Reg<u32>; 32],
+    icactiver: [Reg<u32>; 32],
+    ipriorityr: [Reg<u8>; 1024],
+    _r1: [u32; 256],
+    icfgr: [Reg<u32>; 64],
+    _r2: [u32; 5312],
+    /// IROUTER, geïndexeerd op INTID (de eerste 32 zijn gereserveerd): de
+    /// INTID-basis ligt op 0x6000, IROUTER[32] op 0x6100.
+    irouter: [Reg<u64>; 1020],
+}
+
+const _: () = {
+    assert!(offset_of!(Gicd, ctlr) == 0x0000);
+    assert!(offset_of!(Gicd, typer) == 0x0004);
+    assert!(offset_of!(Gicd, iidr) == 0x0008);
+    assert!(offset_of!(Gicd, igroupr) == 0x0080);
+    assert!(offset_of!(Gicd, isenabler) == 0x0100);
+    assert!(offset_of!(Gicd, icenabler) == 0x0180);
+    assert!(offset_of!(Gicd, ispendr) == 0x0200);
+    assert!(offset_of!(Gicd, icpendr) == 0x0280);
+    assert!(offset_of!(Gicd, isactiver) == 0x0300);
+    assert!(offset_of!(Gicd, icactiver) == 0x0380);
+    assert!(offset_of!(Gicd, ipriorityr) == 0x0400);
+    assert!(offset_of!(Gicd, icfgr) == 0x0c00);
+    assert!(offset_of!(Gicd, irouter) == 0x6000);
+};
+
+/// Eén redistributor: het RD_base-frame en het SGI_base-frame erachter
+/// (ARM IHI 0069, tabellen 12-27 en 12-29).
+#[repr(C)]
+struct Gicr {
+    ctlr: Reg<u32>,
+    iidr: Reg<u32>,
+    /// 64 bit: bit 4 Last, bit 1 VLPIS, [63:32] de affiniteit van de PE.
+    typer: Reg<u64>,
+    _r0: u32,
+    waker: Reg<u32>,
+    _r1: [u32; 16378],
+    // SGI_base, op +0x10000.
+    _s0: [u32; 32],
+    igroupr0: Reg<u32>,
+    _s1: [u32; 31],
+    isenabler0: Reg<u32>,
+    _s2: [u32; 31],
+    icenabler0: Reg<u32>,
+    _s3: [u32; 31],
+    ispendr0: Reg<u32>,
+    _s4: [u32; 31],
+    icpendr0: Reg<u32>,
+    _s5: [u32; 95],
+    ipriorityr: [Reg<u8>; 32],
+    _s6: [u32; 504],
+    icfgr: [Reg<u32>; 2],
+}
+
+const _: () = {
+    assert!(offset_of!(Gicr, ctlr) == 0x0000);
+    assert!(offset_of!(Gicr, iidr) == 0x0004);
+    assert!(offset_of!(Gicr, typer) == 0x0008);
+    assert!(offset_of!(Gicr, waker) == 0x0014);
+    assert!(offset_of!(Gicr, igroupr0) == 0x1_0080);
+    assert!(offset_of!(Gicr, isenabler0) == 0x1_0100);
+    assert!(offset_of!(Gicr, icenabler0) == 0x1_0180);
+    assert!(offset_of!(Gicr, ispendr0) == 0x1_0200);
+    assert!(offset_of!(Gicr, icpendr0) == 0x1_0280);
+    assert!(offset_of!(Gicr, ipriorityr) == 0x1_0400);
+    assert!(offset_of!(Gicr, icfgr) == 0x1_0c00);
+};
+
+/// GICD_CTLR: affinity routing (NS-view ARE_NS; DS=1: ARE).
+const CTLR_ARE_NS: u32 = 1 << 4;
+/// GICD_CTLR: Group 1 aan (NS-view EnableGrp1A; DS=1: EnableGrp1).
+const CTLR_ENABLE_GRP1_NS: u32 = 1 << 1;
+/// GICR_WAKER: de core slaapt.
+const WAKER_PROCESSOR_SLEEP: u32 = 1 << 1;
+/// GICR_WAKER: de redistributor slaapt nog.
+const WAKER_CHILDREN_ASLEEP: u32 = 1 << 2;
+/// GICR_TYPER: het laatste frame van de reeks.
+const TYPER_LAST: u64 = 1 << 4;
+/// GICR_TYPER: GICv4-frames (vier in plaats van twee).
+const TYPER_VLPIS: u64 = 1 << 1;
+/// De poll-grens op GICR_WAKER. Op DS=0 is WAKER secure-only en RAZ/WI:
+/// dan is hij al wakker, want de firmware bracht deze core op.
+const WAKER_POLLS: u32 = 1 << 16;
+
+/// De CPU-interface: de ICC-systeemregisters van de Group-1-set. Het board
+/// levert ze met `asm!`.
+pub trait Icc {
+    /// Zet de systeemregister-interface aan (ICC_SRE_EL2 en _EL1: SRE, en
+    /// op EL2 ook Enable).
+    fn enable_sre(&self);
+    /// Zet het prioriteitsmasker (ICC_PMR_EL1).
+    fn set_pmr(&self, pmr: u8);
+    /// Zet Group 1 aan of uit (ICC_IGRPEN1_EL1).
+    fn set_grp1(&self, on: bool);
+    /// Leest ICC_IAR1_EL1: de claim.
+    fn iar1(&self) -> u32;
+    /// Schrijft ICC_EOIR1_EL1: priority drop én deactivate (EOImode 0).
+    fn eoir1(&self, intid: u32);
+}
+
+/// Waarom de GIC iets weigert.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Error {
+    /// Geen geldige INTID voor deze operatie.
+    BadIntId(u32),
+    /// De redistributor bleef slapen (GICR_WAKER).
+    Asleep,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BadIntId(id) => write!(f, "gicv3: invalid interrupt {id}"),
+            Self::Asleep => f.write_str("gicv3: redistributor stays asleep (WAKER)"),
+        }
+    }
+}
+
+/// Eén GICv3, voor de core die hem opzet.
+pub struct Gic<I: Icc> {
+    gicd: Pa,
+    gicr: Pa,
+    icc: I,
+}
+
+impl<I: Icc> Gic<I> {
+    /// Een GIC met de distributor op `gicd` en het redistributor-frame
+    /// (RD_base) van DEZE core op `gicr` (zie [`find_redistributor`]).
+    ///
+    /// # Safety
+    ///
+    /// `gicd` en `gicr` zijn gemapte GICv3-blokken (64 KB distributor,
+    /// 128 KB redistributor) die zolang het programma draait blijven.
+    #[must_use]
+    pub const unsafe fn new(gicd: Pa, gicr: Pa, icc: I) -> Self {
+        Self { gicd, gicr, icc }
+    }
+
+    fn d(&self) -> &'static Gicd {
+        // SAFETY: de voorwaarde van `new`.
+        unsafe { dev::regs(self.gicd) }
+    }
+
+    fn r(&self) -> &'static Gicr {
+        // SAFETY: de voorwaarde van `new`.
+        unsafe { dev::regs(self.gicr) }
+    }
+
+    /// Zet de GIC op voor deze core: de redistributor wakker, de
+    /// CPU-interface aan (SRE, PMR 0xff, Group 1), en in de distributor
+    /// affinity routing en Group 1 aan zonder de andere bits (Group 0 is
+    /// van de firmware) aan te raken. Idempotent.
+    pub fn init(&self) -> Result<(), Error> {
+        let r = self.r();
+        r.waker.update(|w| w & !WAKER_PROCESSOR_SLEEP);
+        let mut polls = 0;
+        while r.waker.read() & WAKER_CHILDREN_ASLEEP != 0 {
+            polls += 1;
+            if polls > WAKER_POLLS {
+                return Err(Error::Asleep);
+            }
+        }
+        self.icc.enable_sre();
+        self.icc.set_pmr(0xff);
+        self.icc.set_grp1(true);
+        self.d()
+            .ctlr
+            .update(|c| c | CTLR_ARE_NS | CTLR_ENABLE_GRP1_NS);
+        dev::mb();
+        Ok(())
+    }
+
+    /// Zet lijn `id` aan: route (SPI) naar de core met `mpidr`, Group 1,
+    /// onze prioriteit, en dan pas enable. Route en groep staan vóór de
+    /// enable, anders kan de lijn één keer verkeerd afgaan.
+    pub fn enable(&self, id: u32, mpidr: u64) -> Result<(), Error> {
+        if id >= FIRST_SPECIAL {
+            return Err(Error::BadIntId(id));
+        }
+        let bit = 1u32 << (id % 32);
+        if id < FIRST_SPI {
+            let r = self.r();
+            r.igroupr0.update(|g| g | bit);
+            r.ipriorityr[id as usize].write(PRIORITY);
+            dev::mb();
+            r.isenabler0.write(bit);
+        } else {
+            let d = self.d();
+            let n = (id / 32) as usize;
+            d.irouter[id as usize].write(mpidr & AFF_MASK);
+            d.igroupr[n].update(|g| g | bit);
+            d.ipriorityr[id as usize].write(PRIORITY);
+            dev::mb();
+            d.isenabler[n].write(bit);
+        }
+        dev::mb();
+        Ok(())
+    }
+
+    /// Zet lijn `id` uit. ICENABLER is write-1-to-clear: nooit
+    /// lezen-aanpassen-schrijven, dat zou de buren raken.
+    pub fn disable(&self, id: u32) {
+        if id >= FIRST_SPECIAL {
+            return;
+        }
+        let bit = 1u32 << (id % 32);
+        if id < FIRST_SPI {
+            self.r().icenabler0.write(bit);
+        } else {
+            self.d().icenabler[(id / 32) as usize].write(bit);
+        }
+        dev::mb();
+    }
+
+    /// Claimt de hoogste wachtende interrupt (ICC_IAR1); `None` bij een
+    /// speciale INTID (niets te doen).
+    #[must_use]
+    pub fn claim(&self) -> Option<u32> {
+        let id = self.icc.iar1() & 0xff_ffff;
+        (id < FIRST_SPECIAL).then_some(id)
+    }
+
+    /// Sluit een geclaimde interrupt af (ICC_EOIR1: priority drop én
+    /// deactivate).
+    pub fn eoi(&self, id: u32) {
+        self.icc.eoir1(id);
+    }
+
+    /// De IIDR's en CTLR: de meting dat we met de goede blokken praten
+    /// (GIC-700: GICD_IIDR 0x0402143b).
+    #[must_use]
+    pub fn describe(&self) -> Describe {
+        Describe {
+            gicd: self.gicd,
+            gicd_iidr: self.d().iidr.read(),
+            gicd_ctlr: self.d().ctlr.read(),
+            gicr: self.gicr,
+            gicr_iidr: self.r().iidr.read(),
+            gicr_typer: self.r().typer.read(),
+        }
+    }
+}
+
+/// Eén regel voor de bootlog.
+#[derive(Debug, Clone, Copy)]
+pub struct Describe {
+    gicd: Pa,
+    gicd_iidr: u32,
+    gicd_ctlr: u32,
+    gicr: Pa,
+    gicr_iidr: u32,
+    gicr_typer: u64,
+}
+
+impl fmt::Display for Describe {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "GICD {:#x} (IIDR {:#x}, CTLR {:#x}), GICR {:#x} (IIDR {:#x}, TYPER {:#x})",
+            self.gicd.0,
+            self.gicd_iidr,
+            self.gicd_ctlr,
+            self.gicr.0,
+            self.gicr_iidr,
+            self.gicr_typer
+        )
+    }
+}
+
+/// Zoekt in de GICR-reeks `[base, base+len)` het RD_base-frame van de core
+/// met dit MPIDR: elk frame draagt in GICR_TYPER[63:32] de affiniteit van
+/// zijn PE, en is 128 KB (v3) of 256 KB (v4, VLPIS) groot. Stopt op
+/// TYPER.Last of het eind van de reeks.
+///
+/// GICR_TYPER staat op +0x8; +0 is CTLR|IIDR en matchte op QEMU alleen per
+/// ongeluk (core 0 = affiniteit 0, IIDR hoog woord 0). O6N 09-09: "EE".
+///
+/// # Safety
+///
+/// `[base, base+len)` is een gemapte GICR-reeks.
+#[must_use]
+pub unsafe fn find_redistributor(base: Pa, len: u64, mpidr: u64) -> Option<Pa> {
+    let want = ((mpidr & 0xff_ffff) | ((mpidr >> 32 & 0xff) << 24)) as u32;
+    let mut off = 0u64;
+    while off + FRAME <= len {
+        let typer = dev::read64(base.add(off + 8));
+        if (typer >> 32) as u32 == want {
+            return Some(base.add(off));
+        }
+        if typer & TYPER_LAST != 0 {
+            break;
+        }
+        // v3: RD + SGI = 2 frames; v4 (VLPIS): RD + SGI + VLPI + reserved =
+        // 4 frames (GICv3/4 §12.10). Tot 17-09 stond hier 3 frames voor v4:
+        // op de GIC-700 van de O6N liep de zoeker dan langs de frames heen
+        // ("no redistributor for MPIDR 0xa00") en bleef de NIC gepold.
+        off += if typer & TYPER_VLPIS != 0 {
+            4 * FRAME
+        } else {
+            2 * FRAME
+        };
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    #[derive(Default)]
+    struct FakeIcc {
+        sre: Cell<bool>,
+        pmr: Cell<u8>,
+        grp1: Cell<bool>,
+        pending: RefCell<Vec<u32>>,
+        eoi: RefCell<Vec<u32>>,
+    }
+
+    impl Icc for &FakeIcc {
+        fn enable_sre(&self) {
+            self.sre.set(true);
+        }
+        fn set_pmr(&self, pmr: u8) {
+            self.pmr.set(pmr);
+        }
+        fn set_grp1(&self, on: bool) {
+            self.grp1.set(on);
+        }
+        fn iar1(&self) -> u32 {
+            self.pending.borrow_mut().pop().unwrap_or(1023)
+        }
+        fn eoir1(&self, intid: u32) {
+            self.eoi.borrow_mut().push(intid);
+        }
+    }
+
+    /// Nep-geheugen voor een distributor (0x8000) en een redistributor
+    /// (0x20000), als u64 zodat 8-byte-registers gealigneerd zijn.
+    fn mem() -> (Vec<u64>, Vec<u64>) {
+        (vec![0; 0x8000 / 8], vec![0; 0x2_0000 / 8])
+    }
+
+    fn pa(v: &mut [u64]) -> Pa {
+        Pa(v.as_mut_ptr() as usize as u64)
+    }
+
+    #[test]
+    fn spi_routes_its_own_intid_and_joins_group_1() {
+        let (mut d, mut r) = mem();
+        let icc = FakeIcc::default();
+        // SAFETY: de vectoren leven de hele test en zijn groot genoeg.
+        let gic = unsafe { Gic::new(pa(&mut d), pa(&mut r), &icc) };
+        for id in [32, 48, 1019] {
+            gic.enable(id, 0x12_8000_0003).unwrap();
+            assert_eq!(
+                dev::read64(pa(&mut d).add(0x6000 + 8 * u64::from(id))),
+                0x12_0000_0003,
+                "id {id}"
+            );
+        }
+        // Een ongerelateerde route (SPI 80) blijft onaangeroerd.
+        assert_eq!(dev::read64(pa(&mut d).add(0x6100 + 48 * 8)), 0);
+        // INTID 48 = register 1, bit 16: Group 1 en enabled.
+        assert_ne!(dev::read32(pa(&mut d).add(0x80 + 4)) & (1 << 16), 0);
+        assert_ne!(dev::read32(pa(&mut d).add(0x100 + 4)) & (1 << 16), 0);
+        assert_eq!(dev::read8(pa(&mut d).add(0x400 + 48)), PRIORITY);
+        assert_eq!(gic.enable(1020, 0), Err(Error::BadIntId(1020)));
+    }
+
+    #[test]
+    fn ppi_lives_in_the_redistributor_sgi_frame() {
+        let (mut d, mut r) = mem();
+        let icc = FakeIcc::default();
+        // SAFETY: zie hierboven.
+        let gic = unsafe { Gic::new(pa(&mut d), pa(&mut r), &icc) };
+        gic.enable(30, 0).unwrap();
+        assert_eq!(dev::read32(pa(&mut r).add(0x1_0080)), 1 << 30);
+        assert_eq!(dev::read32(pa(&mut r).add(0x1_0100)), 1 << 30);
+        assert_eq!(dev::read8(pa(&mut r).add(0x1_0400 + 30)), PRIORITY);
+        gic.disable(30);
+        assert_eq!(dev::read32(pa(&mut r).add(0x1_0180)), 1 << 30);
+        // De distributor is niet aangeraakt.
+        assert!(d.iter().all(|&w| w == 0));
+    }
+
+    #[test]
+    fn init_wakes_and_enables_and_claim_skips_specials() {
+        let (mut d, mut r) = mem();
+        dev::write32(pa(&mut r).add(0x14), WAKER_PROCESSOR_SLEEP);
+        let icc = FakeIcc::default();
+        // SAFETY: zie hierboven.
+        let gic = unsafe { Gic::new(pa(&mut d), pa(&mut r), &icc) };
+        gic.init().unwrap();
+        assert_eq!(dev::read32(pa(&mut r).add(0x14)), 0);
+        assert_eq!(dev::read32(pa(&mut d)), CTLR_ARE_NS | CTLR_ENABLE_GRP1_NS);
+        assert!(icc.sre.get() && icc.grp1.get());
+        assert_eq!(icc.pmr.get(), 0xff);
+        icc.pending.borrow_mut().extend([1023, 30]);
+        assert_eq!(gic.claim(), Some(30));
+        gic.eoi(30);
+        assert_eq!(gic.claim(), None);
+        assert_eq!(*icc.eoi.borrow(), vec![30]);
+    }
+
+    #[test]
+    fn a_redistributor_that_never_wakes_is_an_error() {
+        let (mut d, mut r) = mem();
+        dev::write32(pa(&mut r).add(0x14), WAKER_CHILDREN_ASLEEP);
+        let icc = FakeIcc::default();
+        // SAFETY: zie hierboven.
+        let gic = unsafe { Gic::new(pa(&mut d), pa(&mut r), &icc) };
+        assert_eq!(gic.init(), Err(Error::Asleep));
+    }
+
+    #[test]
+    fn find_redistributor_walks_v3_and_v4_frames() {
+        // Vier v3-frames (128 KB elk): affiniteit 0, 1, 2, 3; de laatste
+        // draagt Last.
+        let mut v3 = vec![0u64; 4 * 0x2_0000 / 8];
+        let base = pa(&mut v3);
+        for i in 0..4u64 {
+            let mut typer = i << 32;
+            if i == 3 {
+                typer |= TYPER_LAST;
+            }
+            dev::write64(base.add(i * 0x2_0000 + 8), typer);
+        }
+        let len = 4 * 0x2_0000;
+        // SAFETY: de vector is de reeks.
+        unsafe {
+            assert_eq!(
+                find_redistributor(base, len, 2),
+                Some(base.add(2 * 0x2_0000))
+            );
+            assert_eq!(find_redistributor(base, len, 7), None);
+        }
+        // v4: 256 KB per frame; MPIDR 0xa00 (aff1 = 0xa) op het tweede.
+        let mut v4 = vec![0u64; 2 * 0x4_0000 / 8];
+        let base = pa(&mut v4);
+        dev::write64(base.add(8), TYPER_VLPIS);
+        dev::write64(
+            base.add(0x4_0000 + 8),
+            (0xa00 << 32) | TYPER_VLPIS | TYPER_LAST,
+        );
+        // SAFETY: zie hierboven.
+        unsafe {
+            assert_eq!(
+                find_redistributor(base, 2 * 0x4_0000, 0x8000_0a00),
+                Some(base.add(0x4_0000))
+            );
+        }
+    }
+}

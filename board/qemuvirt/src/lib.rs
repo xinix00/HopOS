@@ -1,0 +1,357 @@
+//! QEMU virt (aarch64): PL011, GICv3, virtio-net, FDT; het eerste board van v3.
+//!
+//! De machine is `-M virt,gic-version=3,virtualization=on`: HopOS eist
+//! EL2, QEMU levert PSCI via SMC, tot 12 cores, een GICv3. Dezelfde
+//! bouwstenen als de Orion O6N (daar via TF-A), en daarom het
+//! referentiedoel: wat hier werkt, werkt daar op de adressen na.
+//!
+//! In tegenstelling tot QEMU's imx8mp-evk (directe `-kernel`-boot, geen
+//! TF-A) levert virt gegarandeerd PSCI, tot `-smp 12`, en een GICv3.
+//!
+//! Dit crate bezit de adressen van het board (`hw/arm/virt.c`, stabiel
+//! gedocumenteerd), de identity map, de klok, de timer, de slaap en de
+//! bedrading van de drivers. De drivers zelf kennen geen adres.
+
+#![cfg_attr(not(test), no_std)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
+
+mod arch;
+mod mmu;
+
+use board::heap::Heap;
+use board::{Board, CoreClass, Dispatched, Error, Plan, Region};
+use core::cell::Cell;
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
+use dev::Pa;
+use driver_gicv3::Gic;
+use driver_pl011::Pl011;
+use driver_virtionet::{IrqAck, VirtioNet};
+use fw::fdt::Fdt;
+use sync::{Local, Signal};
+
+#[cfg(test)]
+mod tests;
+
+/// De PL011 van virt.
+pub const UART0: Pa = Pa(0x0900_0000);
+
+/// De kern-RAM: image, stack en heap (de Go-kern: `layout.HopRAMStart` en
+/// `HopRAMSize`, 240 MB). Normal, gecached.
+pub const KERN_RAM: Region = Region {
+    base: Pa(0x4000_0000),
+    size: 0x0f00_0000,
+};
+
+/// De DMA-regio: de bovenste 16 MB van HOP's partitie, buiten de
+/// kern-RAM en dus niet gecached gemapt (`layout.DMABase`).
+pub const DMA: Region = Region {
+    base: Pa(0x4f00_0000),
+    size: 0x0100_0000,
+};
+
+/// De NIC-helft van de DMA-regio (`layout.NetDMABase`, `NetDMASize`):
+/// virtio-net onderin, NVMe krijgt straks de bovenste helft. Twee
+/// subregio's in plaats van één gedeelde allocator: in de Go-kern kon de
+/// globale DMA-allocator anders geheugen uit de NVMe-helft uitdelen.
+pub const NET_DMA: Region = Region {
+    base: Pa(0x4f00_0000),
+    size: 0x0080_0000,
+};
+
+/// Waar QEMU de DTB legt als het image een ELF is dat niet op de RAM-basis
+/// begint (`hw/arm/boot.c`: "put the DTB at the base of RAM"). Daarom
+/// linkt `hopos/link.ld` het image op 0x4020_0000: de eerste 2 MB zijn van
+/// de DTB.
+pub const DTB_FALLBACK: Pa = Pa(0x4000_0000);
+
+/// De distributor van de GICv3 (`VIRT_GIC_DIST`).
+pub const GICD: Pa = Pa(0x0800_0000);
+/// De redistributor-reeks (`VIRT_GIC_REDIST`): 128 KB per core, HOP is
+/// core 0 en dus het eerste frame.
+pub const GICR: Pa = Pa(0x080a_0000);
+/// De lengte van de redistributor-reeks: 123 frames van 128 KB.
+pub const GICR_LEN: u64 = 0x00f6_0000;
+/// De PPI van de EL1-fysieke timer (CNTP): INTID 30.
+pub const TIMER_PPI: u32 = 30;
+
+/// QEMU virt plaatst 32 virtio-mmio-transports vanaf 0x0a00_0000 (stride
+/// 0x200, SPI 16 + n). Zonder FDT scannen we ze op DeviceID.
+pub const VIRTIO_MMIO: Pa = Pa(0x0a00_0000);
+const VIRTIO_STRIDE: u64 = 0x200;
+const VIRTIO_SLOTS: u64 = 32;
+
+/// Zonder FDT: het aantal cores dat `image/qemu-run.sh` vraagt.
+const CORES_DEFAULT: usize = 4;
+
+/// De UART. Eén per board.
+// SAFETY: 0x0900_0000 is de PL011 van QEMU virt en blijft gemapt (de
+// identity map in `mmu` zet de eerste gigabyte als Device).
+static UART: Pl011 = unsafe { Pl011::new(UART0) };
+
+/// De GIC. Het redistributor-frame van core 0 is het eerste van de reeks;
+/// `start_interrupts` controleert dat met `find_redistributor`.
+// SAFETY: GICD en GICR zijn de GICv3-blokken van QEMU virt en liggen in de
+// Device-gigabyte van de identity map.
+static GIC: Gic<arch::SysRegIcc> = unsafe { Gic::new(GICD, GICR, arch::SysRegIcc) };
+
+/// De bel van de NIC: de dispatch luidt hem, de RX-pomp wacht erop.
+static NIC_BELL: Signal = Signal::new();
+
+/// De NIC-lijn en zijn ack, gezet door `probe_nic`, gelezen door de
+/// dispatch-taak. Beide draaien op de executor van core 0.
+static NIC_IRQ: Local<Cell<Option<(u32, IrqAck)>>> = Local::new(Cell::new(None));
+
+/// Het adres van een geldige DTB, 0 = geen.
+static DTB: AtomicU64 = AtomicU64::new(0);
+/// Het bij boot gevonden DRAM (bytes, 0 = onbekend).
+static MEM_TOTAL: AtomicU64 = AtomicU64::new(0);
+/// Het aantal cores uit de FDT, 0 = onbekend.
+static CORES: AtomicUsize = AtomicUsize::new(0);
+
+/// Is de NIC al geprobed? `probe_nic` mag één keer.
+static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
+
+fn console_write(b: &[u8]) {
+    UART.write(b);
+}
+
+/// De DTB op `pa` als slice, als er een geldige header staat.
+///
+/// Het is de enige plek waar dit board firmware-geheugen als bytes leest:
+/// eerst de acht header-bytes per woord (via `dev`), en pas als de
+/// gedeclareerde grootte klopt, de hele blob.
+fn dtb_at(pa: u64) -> Option<Fdt<'static>> {
+    if pa == 0 || !KERN_RAM.contains(Pa(pa)) || !pa.is_multiple_of(8) {
+        return None;
+    }
+    let mut head = [0u8; 8];
+    dev::copy_out(&mut head, Pa(pa));
+    let total = fw::fdt::total_size(&head)?;
+    if !KERN_RAM.contains(Pa(pa).add(total as u64 - 1)) {
+        return None;
+    }
+    // SAFETY: `[pa, pa+total)` ligt in de kern-RAM (hierboven getoetst), is
+    // gemapt als Normal, en wordt door niemand beschreven: de DTB ligt
+    // onder het image (link.ld begint op 0x4020_0000) en buiten de heap.
+    let blob = unsafe { core::slice::from_raw_parts(pa as usize as *const u8, total) };
+    Fdt::new(blob).ok()
+}
+
+fn fdt() -> Option<Fdt<'static>> {
+    dtb_at(DTB.load(Relaxed))
+}
+
+/// QEMU virt als board.
+pub struct QemuVirt;
+
+impl QemuVirt {
+    /// Het board. Alle staat staat in statics; dit is het handvat.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+
+    /// Zoekt de virtio-net: uit de FDT als die er is, anders door de 32
+    /// vaste slots te scannen. Geeft basis en INTID.
+    fn find_virtio_net() -> Option<(Pa, u32)> {
+        let is_net = |base: Pa| {
+            // SAFETY: elk kandidaat-adres ligt in het virtio-mmio-venster van
+            // virt (0x0a00_0000 + n * 0x200), in de Device-gigabyte.
+            unsafe { driver_virtionet::is_modern_net(base) }
+        };
+        let in_window =
+            |pa: Pa| pa.0 >= VIRTIO_MMIO.0 && pa.0 < VIRTIO_MMIO.0 + VIRTIO_SLOTS * VIRTIO_STRIDE;
+        if let Some(list) = fdt().and_then(|f| f.virtio_mmio().ok()) {
+            return list
+                .iter()
+                .map(|t| (Pa(t.reg.addr), t.intid))
+                .filter(|&(pa, _)| in_window(pa))
+                .find(|&(pa, _)| is_net(pa));
+        }
+        (0..VIRTIO_SLOTS)
+            .map(|i| (VIRTIO_MMIO.add(i * VIRTIO_STRIDE), 48 + i as u32))
+            .find(|&(pa, _)| is_net(pa))
+    }
+}
+
+impl Default for QemuVirt {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Board for QemuVirt {
+    type Nic = VirtioNet;
+    type Sleeper = cpu::idle::ArmSleeper;
+
+    const NAME: &'static str = "qemuvirt";
+
+    fn console(&self) -> fn(&[u8]) {
+        UART.init();
+        console_write
+    }
+
+    fn firmware(&self) -> &'static str {
+        "boot: QEMU virt, EL2, PSCI via SMC (no firmware below us)"
+    }
+
+    fn init_heap(&self, heap: &Heap) {
+        let (start, end) = arch::heap_bounds();
+        // SAFETY: `link.ld` legt `__heap_start` achter image en stack en
+        // `__heap_end` op het begin van de DMA-regio; dat bereik is gemapt
+        // (Normal) en niemand anders gebruikt het.
+        unsafe { heap.init(start, end) };
+    }
+
+    /// De DTB: x0 als de firmware hem gaf, anders de RAM-basis waar QEMU
+    /// hem voor een ELF-image legt. Vroeg lezen: wat de kern straks vraagt
+    /// (DRAM, cores) staat daarna in atomics.
+    fn discover(&self, dtb: u64) {
+        let Some((pa, f)) = [dtb, DTB_FALLBACK.0]
+            .into_iter()
+            .find_map(|pa| dtb_at(pa).map(|f| (pa, f)))
+        else {
+            cpu::println!(
+                "WARNING HOPOS_RAM_CHECK_SKIPPED: no valid DTB (x0={dtb:#x}) - trusting the static layout"
+            );
+            return;
+        };
+        DTB.store(pa, Relaxed);
+        MEM_TOTAL.store(f.mem_total().unwrap_or(0), Relaxed);
+        CORES.store(f.cpu_count().unwrap_or(0), Relaxed);
+        let gic_ok = f
+            .gic_v3()
+            .is_some_and(|g| g.dist.addr == GICD.0 && g.redist.addr == GICR.0);
+        cpu::println!(
+            "fdt: {} bytes at {pa:#x}, bootargs {:?}{}",
+            f.size(),
+            f.bootargs().unwrap_or(""),
+            if gic_ok {
+                ""
+            } else {
+                ", GIC differs from the board plan"
+            },
+        );
+    }
+
+    fn clock(&self) -> executor::Clock {
+        cpu::idle::now
+    }
+
+    /// WFI met de fysieke timer op de deadline. `cpu::idle` kiest WFI alleen
+    /// waar het board bewezen heeft dat de timer-PPI de WFI wekt: GEMETEN
+    /// 29-09 op QEMU 11.0.2 (`-cpu cortex-a53`), één wek per seconde op een
+    /// lege executor, met PPI 30 scherp in de GIC (zonder dat wekt de timer
+    /// de WFI nooit: de eerste boot hing daar). WFE is op QEMU-TCG een
+    /// no-op en zou spinnen.
+    fn sleeper(&self) -> Self::Sleeper {
+        cpu::idle::ArmSleeper::new(cpu::idle::Mode::Wfi)
+    }
+
+    fn mem_total(&self) -> u64 {
+        MEM_TOTAL.load(Relaxed)
+    }
+
+    fn cores(&self) -> usize {
+        match CORES.load(Relaxed) {
+            0 => CORES_DEFAULT,
+            n => n,
+        }
+    }
+
+    fn core_class(&self, _core: usize) -> CoreClass {
+        // Homogene cores (allemaal cortex-a53): één klasse, de beste. Een
+        // verzonnen 1-3/4-7/8-11-split maakte in de Go-kern met MaxSlots=3
+        // álle slots "small", en elke mid/big-job permanent onplaatsbaar.
+        CoreClass::Big
+    }
+
+    fn plan(&self) -> Plan {
+        Plan {
+            kern_ram: KERN_RAM,
+            dma: DMA,
+            net_dma: NET_DMA,
+        }
+    }
+
+    fn start_interrupts(&self) -> Result<&'static Signal, Error> {
+        let mpidr = arch::mpidr();
+        // SAFETY: de reeks is de GICR van virt, gemapt als Device.
+        let rd = unsafe { driver_gicv3::find_redistributor(GICR, GICR_LEN, mpidr) };
+        if rd != Some(GICR) {
+            return Err(Error::Irq("no redistributor frame for core 0"));
+        }
+        GIC.init()
+            .map_err(|_| Error::Irq("redistributor stays asleep"))?;
+        // De timer-PPI moet scherp staan in de GIC: anders bereikt hij de
+        // core niet en wekt hij de WFI van de slaap nooit.
+        GIC.enable(TIMER_PPI, mpidr)
+            .map_err(|_| Error::Irq("timer PPI refused"))?;
+        cpu::println!("irq: {}", GIC.describe());
+        // Vanaf hier mag de vector komen: hij zet de vlag, wekt de
+        // dispatch-taak via `cpu::irq::on_irq` en keert gemaskeerd terug.
+        arch::irq_unmask();
+        Ok(&cpu::irq::IRQ_PENDING)
+    }
+
+    fn dispatch_interrupts(&self) -> Dispatched {
+        let nic = NIC_IRQ.get().get();
+        let mut d = Dispatched::default();
+        while let Some(id) = GIC.claim() {
+            match (id, nic) {
+                // De timer: uit tot de volgende slaap hem op de nieuwe
+                // deadline zet. Zo valt de lijn en wekt hij niet opnieuw.
+                (TIMER_PPI, _) => {
+                    arch::timer_off();
+                    d.timer += 1;
+                }
+                // De NIC: de device-kant ack (de lijn valt), dan de bel.
+                (id, Some((line, ack))) if id == line => {
+                    ack.ack();
+                    NIC_BELL.set();
+                    d.nic += 1;
+                }
+                _ => d.other += 1,
+            }
+            GIC.eoi(id);
+        }
+        // De vector liet I dicht; de ronde is klaar, dus weer open.
+        arch::irq_unmask();
+        d
+    }
+
+    /// Vindt het virtio-net-slot, zet de driver op in de NIC-DMA-regio en
+    /// hangt zijn lijn aan de GIC. Een lijn die niet aan wil, laat de NIC
+    /// pollen: interrupts zijn een verbetering, geen voorwaarde.
+    fn probe_nic(&self) -> Result<Option<Self::Nic>, Error> {
+        if NIC_CLAIMED.swap(true, Relaxed) {
+            return Err(Error::Twice("probe_nic"));
+        }
+        let Some((base, intid)) = Self::find_virtio_net() else {
+            return Ok(None);
+        };
+        // SAFETY: `base` is een virtio-mmio-slot van virt (Device-gemapt),
+        // en NET_DMA is van deze driver alleen: buiten de kern-RAM, Normal
+        // non-cacheable gemapt, en door niets anders uitgedeeld.
+        let mut nic = unsafe { VirtioNet::new(base, NET_DMA.base, NET_DMA.size) }
+            .map_err(|_| Error::Nic("virtio-net init failed"))?;
+        if intid != 0 && GIC.enable(intid, arch::mpidr()).is_ok() {
+            NIC_IRQ.get().set(Some((intid, nic.irq_ack())));
+            nic.set_irq(&NIC_BELL);
+        }
+        cpu::println!(
+            "net: virtio-net at {:#x}, intid {intid}, queue {}",
+            base.0,
+            nic.queue_size()
+        );
+        Ok(Some(nic))
+    }
+}

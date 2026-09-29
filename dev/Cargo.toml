@@ -1,0 +1,10 @@
+[package]
+name = "dev"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Het MMIO-primitief van HopOS: gealigneerde vluchtige toegang, barrières, cache-onderhoud; host-stubs voor tests."
+
+[lints]
+workspace = true

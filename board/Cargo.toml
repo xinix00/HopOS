@@ -1,0 +1,17 @@
+[package]
+name = "board"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Het board-contract: wat een machine moet kunnen (cores, geheugen, NIC, console, klok, slaap)."
+
+[dependencies]
+dev = { path = "../dev" }
+abi = { path = "../abi" }
+netdev = { path = "../netdev" }
+executor = { path = "../executor" }
+sync = { path = "../sync" }
+
+[lints]
+workspace = true
