@@ -164,19 +164,29 @@ pub(crate) static LIFECYCLE: Mailbox<Envelope<'static>, LIFECYCLE_DEPTH> = Mailb
 /// Zolang er geen servicer leeft, laat de system-listener niemand toe.
 pub(crate) static SERVICERS: Servicers = Servicers::new();
 
-/// De antwoordplek van de system-listener (één verbinding tegelijk).
-static SYSTEM_REPLY: Reply = Reply::new();
+/// De system-API, gedeeld door alle verbindingstaken (net.rs). Zonder
+/// `Privilege`: het token hoort bij het slot van Hop en wordt door de
+/// lifecycle geslagen zodra die Hop start.
+static SYSTEM: System<'static, 'static, LIFECYCLE_DEPTH> =
+    System::new(&LIFECYCLE, &SERVICERS, None, SLOT_MAX).with_logs(&slots::LOGS);
 
-/// De system-API voor de listener. Zonder `Privilege`: het token hoort bij
-/// het slot van Hop en wordt door de lifecycle geslagen zodra die Hop start.
+/// De antwoordplekken van de system-API: één per verbindingstaak, zodat
+/// een antwoord van de actor nooit bij een andere verbinding landt.
+static SYSTEM_REPLIES: [Reply; net::SYSTEM_WORKERS] = [const { Reply::new() }; net::SYSTEM_WORKERS];
+
+/// De haken en de console van de system-API, gedeeld door alle taken.
+static SYSTEM_HOOKS: BootHooks = BootHooks;
+static SYSTEM_LOG: LogTee<'static, KernConsole> = LogTee::new(KernConsole, &slots::LOGS);
+
+/// De system-API voor de listener.
 fn system_api() -> net::SystemApi<LIFECYCLE_DEPTH, DevMem, BootHooks, LogTee<'static, KernConsole>>
 {
     net::SystemApi {
-        system: System::new(&LIFECYCLE, &SERVICERS, None, SLOT_MAX).with_logs(&slots::LOGS),
-        reply: &SYSTEM_REPLY,
+        system: &SYSTEM,
+        replies: &SYSTEM_REPLIES,
         mem: DevMem,
-        hooks: BootHooks,
-        log: LogTee::new(KernConsole, &slots::LOGS),
+        hooks: &SYSTEM_HOOKS,
+        log: &SYSTEM_LOG,
     }
 }
 
@@ -187,6 +197,8 @@ const SLOT_MAX: usize = abi::layout::SLOT_CAP;
 
 /// Fysiek geheugen woordgewijs via `dev`, voor de image-stream van de
 /// system-API. Wat het adres mag zijn, bewaakt de grant van de lifecycle.
+/// Een handvat zonder staat: elke verbindingstaak krijgt een kloon.
+#[derive(Clone, Copy)]
 struct DevMem;
 
 impl PhysMem for DevMem {
@@ -206,12 +218,12 @@ impl PhysMem for DevMem {
 struct BootHooks;
 
 impl Hooks for BootHooks {
-    fn set_clock(&mut self, unix_ns: u64) {
+    fn set_clock(&self, unix_ns: u64) {
         println!(
             "system: clock set to {unix_ns} ns ignored, no wall clock yet HOPOS_CLOCK_IGNORED"
         );
     }
-    fn flip(&mut self, bundle: kern::Slot, _sha256: &[u8; 32]) -> kern::Result {
+    fn flip(&self, bundle: kern::Slot, _sha256: &[u8; 32]) -> kern::Result {
         println!(
             "system: flip to the bundle in slot {bundle} refused, no flip path yet HOPOS_FLIP_REFUSED"
         );

@@ -469,3 +469,184 @@ fn log_lines_go_over_the_system_connection_once_it_is_up() {
         ]
     );
 }
+
+// ---- Flush en het net-afscheid ----
+
+/// Een kern die één verbinding aanneemt en alles leest tot EOF.
+async fn sink(l: TcpListener, got: &'static RefCell<Option<Vec<u8>>>) {
+    let mut c = l.accept().await.unwrap();
+    let mut all = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = c.read(&mut buf).await.unwrap();
+        if n == 0 {
+            break;
+        }
+        all.extend_from_slice(&buf[..n]);
+    }
+    *got.borrow_mut() = Some(all);
+}
+
+/// Het geval van 29-09: een regel die vlak vóór de exit de zendbuffer in
+/// gaat, komt aan, omdat de shutdown pas klaar is als de FIN bevestigd is.
+/// Daarna gaat er niets nieuws meer open.
+#[test]
+fn a_line_written_just_before_shutdown_arrives() {
+    let p = pair();
+    let l = p.kern.tcp_listen(sys::ADDRESS.1).unwrap();
+    let got = slot();
+    p.exec.spawn(sink(l, got)).unwrap();
+    let (app, kern) = (p.app, p.kern);
+    let done = slot();
+    let t0 = now();
+    p.exec
+        .spawn(async move {
+            let mut c = app.tcp_connect(HOST, sys::ADDRESS.1).await.unwrap();
+            let _udp = app.udp_bind(0).unwrap();
+            let _l = app.tcp_listen(8080).unwrap();
+            c.write_all(b"HOPOS_APPSPIKE_NETLOG last words")
+                .await
+                .unwrap();
+            // Geen flush, geen pauze: meteen het afscheid.
+            let d = app.shutdown(Duration::from_millis(200)).await;
+            // Op het moment van terugkeer (hierna zou de core parkeren) heeft
+            // de stack van de kern elke byte al.
+            let at_exit = kern.stats().unwrap().tcp_bytes_in;
+            let again = app.tcp_connect(HOST, sys::ADDRESS.1).await.map(|_| ());
+            let bind = app.udp_bind(0).map(|_| ());
+            *done.borrow_mut() = Some((d, again, bind, now(), at_exit));
+        })
+        .unwrap();
+    p.run_until(|| done.borrow().is_some());
+    let (d, again, bind, t, at_exit) = done.borrow_mut().take().unwrap();
+    assert!(d.drained, "{d:?}");
+    assert_eq!(at_exit, b"HOPOS_APPSPIKE_NETLOG last words".len());
+    assert_eq!((d.closed, d.untracked), (3, 0));
+    assert!(t - t0 < 200_000_000, "afscheid duurde {} ns", t - t0);
+    assert_eq!(again, Err(NetError::ShuttingDown));
+    assert_eq!(bind, Err(NetError::ShuttingDown));
+    // Bevestigd is bij de kern: zijn lezer krijgt de regel en dan EOF.
+    p.run_until(|| got.borrow().is_some());
+    assert_eq!(
+        got.borrow_mut().take().unwrap(),
+        b"HOPOS_APPSPIKE_NETLOG last words"
+    );
+}
+
+/// Zonder verbindingen is het afscheid meteen klaar.
+#[test]
+fn shutdown_without_connections_is_immediate() {
+    let p = pair();
+    let app = p.app;
+    let done = slot();
+    p.exec
+        .spawn(async move {
+            let d = app.shutdown(Duration::from_millis(200)).await;
+            *done.borrow_mut() = Some(d);
+        })
+        .unwrap();
+    p.run_until(|| done.borrow().is_some());
+    let d = done.borrow_mut().take().unwrap();
+    assert!(d.drained && d.closed == 0 && d.waited_us == 0, "{d:?}");
+}
+
+/// Een flush is pas klaar als de peer alles heeft: direct daarna ligt elke
+/// byte in de ontvangstring van de kern, zonder dat de pomp van de app nog
+/// iets hoeft te doen.
+#[test]
+fn flush_returns_once_the_peer_has_every_byte() {
+    const N: usize = 12 << 10;
+    let p = pair();
+    let l = p.kern.tcp_listen(7).unwrap();
+    let peer = slot();
+    p.exec
+        .spawn(async move {
+            // Aannemen en dan niet lezen: wat binnen is, blijft in de ring.
+            *peer.borrow_mut() = Some(l.accept().await.unwrap());
+        })
+        .unwrap();
+    let (app, kern) = (p.app, p.kern);
+    let flushed = slot();
+    p.exec
+        .spawn(async move {
+            let mut c = app.tcp_connect(HOST, 7).await.unwrap();
+            let data: Vec<u8> = (0..N).map(|i| i as u8).collect();
+            c.write_all(&data).await.unwrap();
+            let r = c.flush().await;
+            // Op het moment van terugkeer, niet later.
+            let at_flush = kern.stats().unwrap().tcp_bytes_in;
+            *flushed.borrow_mut() = Some((r, at_flush));
+            // Open houden: een close hoort niet bij deze toets.
+            core::future::pending::<()>().await;
+        })
+        .unwrap();
+    p.run_until(|| flushed.borrow().is_some() && peer.borrow().is_some());
+    assert_eq!(flushed.borrow_mut().take(), Some((Ok(()), N)));
+    let kc = peer.borrow_mut().take().unwrap();
+    let mut buf = vec![0u8; 2 * N];
+    let mut have = 0;
+    while let Ok(Ok(n)) = p.kern.with(|st| st.tcp_read(kc.h, &mut buf[have..], now())) {
+        have += n;
+    }
+    assert_eq!(have, N);
+    assert!(buf[..N].iter().enumerate().all(|(i, &b)| b == i as u8));
+}
+
+/// Een peer die niet leest, laat het venster dichtlopen: de flush geeft
+/// dan op de deadline van de stream een timeout, en liegt geen `Ok`.
+#[test]
+fn flush_times_out_on_a_peer_that_does_not_read() {
+    let p = pair();
+    let l = p.kern.tcp_listen(7).unwrap();
+    let peer = slot();
+    p.exec
+        .spawn(async move {
+            *peer.borrow_mut() = Some(l.accept().await.unwrap());
+        })
+        .unwrap();
+    let app = p.app;
+    let got = slot();
+    p.exec
+        .spawn(async move {
+            let mut c = app.tcp_connect(HOST, 7).await.unwrap();
+            // Schrijven tot ook de eigen zendring vol is.
+            c.set_timeout(Some(Duration::from_millis(50)));
+            let chunk = vec![0x5a; 64 << 10];
+            let mut wrote = 0;
+            while let Ok(n) = c.write(&chunk).await {
+                wrote += n;
+            }
+            c.set_timeout(Some(Duration::from_millis(100)));
+            let t0 = now();
+            let r = c.flush().await;
+            *got.borrow_mut() = Some((r, wrote, now() - t0));
+            core::future::pending::<()>().await;
+        })
+        .unwrap();
+    p.run_until(|| got.borrow().is_some());
+    let (r, wrote, dt) = got.borrow_mut().take().unwrap();
+    assert_eq!(r, Err(NetError::Timeout));
+    assert!(wrote > 64 << 10, "wrote {wrote}");
+    assert!((100_000_000..200_000_000).contains(&dt), "{dt}");
+}
+
+/// De tabel is vast: wat niet past, werkt wel maar telt als niet gevolgd.
+#[test]
+fn a_full_open_table_counts_instead_of_growing() {
+    assert_eq!(open_slots_for(0), OPEN_MIN);
+    assert_eq!(open_slots_for(2 << 20), 128);
+    assert_eq!(open_slots_for(BUDGET_MAX), OPEN_MAX);
+    assert_eq!(open_slots_for(usize::MAX), OPEN_MAX);
+    let p = pair();
+    let slots = open_slots_for(BUDGET);
+    let ls: Vec<TcpListener> = (0..=slots)
+        .map(|i| p.app.tcp_listen(1000 + i as u16).unwrap())
+        .collect();
+    assert!(ls[..slots].iter().all(|l| l.slot.is_some()));
+    assert_eq!(ls[slots].slot, None);
+    assert_eq!(p.app.untracked.get(), 1);
+    // Eén dicht, en de plek is weer vrij.
+    drop(ls);
+    let l = p.app.tcp_listen(999).unwrap();
+    assert_eq!(l.slot, Some(0));
+}

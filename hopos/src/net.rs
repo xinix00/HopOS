@@ -11,6 +11,10 @@
 //!   iets wil, stuurt een [`Command`] naar [`COMMANDS`];
 //! - de host-taak bezit HOP's twee ringen van poort 0: eerst rauw voor DHCP,
 //!   daarna in de `HostPort` met de node-stack erachter;
+//! - de system-listener bezit de listen-socket en geeft elke toegelaten
+//!   verbinding (handvat plus [`Admitted`]) als waarde aan een vrije taak uit
+//!   een vaste pool van [`SYSTEM_WORKERS`]; die taak bezit haar buffers en
+//!   haar [`Reply`], en sluit het handvat zelf;
 //! - de node-stack zelf staat in [`STACK`], een `LocalCell`. Dat is een
 //!   bewuste afwijking van "een actor met berichten" (PORT.md §3 zegt: een
 //!   `net.Conn` wordt een handvat met een rij): `leannet` is sans-I/O en elke
@@ -33,9 +37,9 @@ use core::time::Duration;
 use cpu::println;
 use dev::Pa;
 use executor::{Clock, Executor};
-use kern::cage::{Console, PhysMem};
+use kern::cage::{Console, PhysMem, Timer};
 use kern::slots::Reply;
-use kern::system::{Conn, Hooks, MAX_PAYLOAD, PORT, System};
+use kern::system::{Admitted, Conn, End, Hooks, MAX_PAYLOAD, MAX_SYSTEM_CONNS, PORT, System};
 use leandhcp::{Action, Client, Instant, KeepAction, Keeper, Lease};
 use leannet::{Endpoint, ListenHandle, Stack, TcpHandle, UdpHandle};
 use net::host::{HostPort, HostStack};
@@ -100,8 +104,19 @@ const DHCP_RETRY: Duration = Duration::from_secs(5);
 /// op.
 const NET_BUDGET: usize = 8 << 20;
 
-/// De callbuffer van de system-listener: één frame van de grootste payload.
+/// De antwoordbuffer van een system-verbinding. De callbuffer is één frame
+/// van de grootste payload ([`MAX_PAYLOAD`]).
 const OUT_BUF: usize = 4096;
+
+/// Het totaalplafond op gelijktijdige system-verbindingen: de poolgrootte
+/// van de verbindingstaken (handboek §2: een verbinding is een taak uit een
+/// vaste pool). Per slot laat `admit` er [`MAX_SYSTEM_CONNS`] toe; dit is
+/// dat maal de drie app-slots van QEMU virt, plus twee voor Hop. Elke taak
+/// houdt een callbuffer van [`MAX_PAYLOAD`] (1 MiB plus 64 KiB) vast, dus
+/// 8 taken zijn ruim 8,5 MB van de 236 MB heap; een board met meer slots
+/// krijgt zijn weigering luid (`HOPOS_SYSTEM_FULL`) en tilt dit getal met
+/// een meting op.
+pub(crate) const SYSTEM_WORKERS: usize = 3 * MAX_SYSTEM_CONNS as usize + 2;
 
 /// Weigeringen van de listener die een eigen regel krijgen; daarna tellen
 /// we alleen (handboek §6: falen is luid, en één keer).
@@ -119,18 +134,21 @@ pub(crate) struct Params {
 }
 
 /// Wat de system-listener van de lifecycle-kant krijgt: de system-API en de
-/// lijm die `serve` vraagt. Eén listener, dus één eigenaar van dit pakket.
-pub(crate) struct SystemApi<const N: usize, M, H, C> {
+/// lijm die `serve` vraagt. De gedeelde delen zijn `static` (alle
+/// verbindingstaken lenen ze); het geheugenhandvat krijgt elke taak als
+/// eigen kloon.
+pub(crate) struct SystemApi<const N: usize, M, H: 'static, C: 'static> {
     /// De system-API over de lifecycle-inbox en de servicers.
-    pub(crate) system: System<'static, 'static, N>,
-    /// De antwoordplek van de listener.
-    pub(crate) reply: &'static Reply,
+    pub(crate) system: &'static System<'static, 'static, N>,
+    /// Eén antwoordplek per verbindingstaak: een antwoord van de actor
+    /// landt nooit bij een andere verbinding.
+    pub(crate) replies: &'static [Reply; SYSTEM_WORKERS],
     /// Fysiek geheugen voor de image-stream.
     pub(crate) mem: M,
     /// Klok en flip.
-    pub(crate) hooks: H,
+    pub(crate) hooks: &'static H,
     /// De console voor app-logregels.
-    pub(crate) log: C,
+    pub(crate) log: &'static C,
 }
 
 /// Waarom het netwerkvlak niet opkwam.
@@ -172,7 +190,7 @@ pub(crate) fn start<D, const N: usize, M, H, C>(
 ) -> Result<(), Error>
 where
     D: Device + 'static,
-    M: PhysMem + 'static,
+    M: PhysMem + Clone + 'static,
     H: Hooks + 'static,
     C: Console + 'static,
 {
@@ -307,7 +325,7 @@ impl Node {
     /// lus van poort 0 tot de stop.
     async fn run<const N: usize, M, H, C>(mut self, api: SystemApi<N, M, H, C>)
     where
-        M: PhysMem + 'static,
+        M: PhysMem + Clone + 'static,
         H: Hooks + 'static,
         C: Console + 'static,
     {
@@ -665,18 +683,72 @@ fn udp_readable(exec: &'static Executor, h: UdpHandle) -> impl Future<Output = (
 // De system-listener.
 // ---------------------------------------------------------------------------
 
-/// De listener op [`PORT`] (Go: `ServeSystem`): per verbinding
-/// `admit` (het slot uit het bron-IP, een levende servicer) en `serve`. Eén
-/// verbinding tegelijk, want `System::serve` leent de system-API als
-/// `&mut`: de grants tussen twee calls hebben één eigenaar.
+/// Eén toegelaten verbinding, zoals de listener hem aan een taak geeft: het
+/// handvat, het bronadres en de toelating (die in haar `Drop` de plaats bij
+/// het slot teruggeeft).
+struct Job {
+    h: TcpHandle,
+    remote: u32,
+    who: Admitted<'static>,
+}
+
+/// De deur van één verbindingstaak.
+enum Seat {
+    /// De taak wacht op werk.
+    Free,
+    /// De listener gaf een verbinding; de taak haalt hem op.
+    Handed(Job),
+    /// De taak dient een verbinding.
+    Busy,
+}
+
+/// De deur van één verbindingstaak: de listener schrijft `Free` naar
+/// `Handed` en luidt de bel; de taak neemt het werk en zet `Busy`, en na
+/// de verbinding weer `Free`. Een leesbare tabel (handboek §1.1): elke
+/// lening is één statement.
+struct Door {
+    seat: LocalCell<Seat>,
+    bell: Signal,
+}
+
+impl Door {
+    const fn new() -> Door {
+        Door {
+            seat: LocalCell::cell(Seat::Free),
+            bell: Signal::new(),
+        }
+    }
+}
+
+/// De deuren van de pool, één per verbindingstaak.
+static DOORS: [Door; SYSTEM_WORKERS] = [const { Door::new() }; SYSTEM_WORKERS];
+
+/// De klok van de executor als `kern::cage::Timer`, voor het toezicht op
+/// een verbinding (`LIFE_TICK`, `IDLE_TIMEOUT`).
+struct NetTimer(&'static Executor);
+
+impl Timer for NetTimer {
+    fn now(&self) -> u64 {
+        self.0.now()
+    }
+    fn sleep(&self, d: Duration) -> impl Future<Output = ()> {
+        self.0.after(d)
+    }
+}
+
+/// De listener op [`PORT`] (Go: `ServeSystem`): per verbinding `admit`
+/// (het slot uit het bron-IP, een levende servicer, hooguit
+/// [`MAX_SYSTEM_CONNS`]) en dan de verbinding naar een vrije taak uit de
+/// pool. De listener zelf leest nooit van een verbinding, dus hij staat
+/// altijd weer bij `accept`: een zwijgende peer houdt niemand op.
 async fn system_listener<const N: usize, M, H, C>(
     exec: &'static Executor,
     ip: Ipv4Addr,
-    mut api: SystemApi<N, M, H, C>,
+    api: SystemApi<N, M, H, C>,
 ) where
-    M: PhysMem,
-    H: Hooks,
-    C: Console,
+    M: PhysMem + Clone + 'static,
+    H: Hooks + 'static,
+    C: Console + 'static,
 {
     let l = match io(|st| st.tcp_listen(PORT)) {
         Ok(l) => l,
@@ -685,15 +757,21 @@ async fn system_listener<const N: usize, M, H, C>(
             return;
         }
     };
-    let (Ok(mut buf), Ok(mut out)) = (boot_buf(MAX_PAYLOAD), boot_buf(OUT_BUF)) else {
-        println!("system: no call buffers ({MAX_PAYLOAD} bytes) HOPOS_SYSTEM_FAIL");
+    let workers = spawn_workers(exec, &api);
+    if workers == 0 {
+        println!("system: no connection tasks, listener closed HOPOS_SYSTEM_FAIL");
+        io(|st| {
+            st.tcp_listen_close(l);
+            Ok(())
+        })
+        .ok();
         return;
-    };
+    }
     println!(
-        "system: listening on {ip}:{PORT} and {}:{PORT} HOPOS_SYSTEM_UP",
+        "system: listening on {ip}:{PORT} and {}:{PORT}, {workers} connection tasks HOPOS_SYSTEM_UP",
         Ipv4Addr::from(HOST_IP4)
     );
-    let (mut served, mut refused) = (0u64, 0u64);
+    let (mut served, mut refused, mut full) = (0u64, 0u64, 0u64);
     loop {
         let h = match accept(exec, l).await {
             Ok(h) => h,
@@ -703,42 +781,161 @@ async fn system_listener<const N: usize, M, H, C>(
             }
         };
         let remote = io(|st| st.tcp_remote(h)).map_or(0, |ep| u32::from_be_bytes(ep.ip));
-        match api.system.admit(remote) {
-            None => {
-                refused = refused.wrapping_add(1);
-                if refused <= LOUD_REFUSALS {
+        let Some(who) = api.system.admit(remote) else {
+            refused = refused.wrapping_add(1);
+            if refused <= LOUD_REFUSALS {
+                println!(
+                    "system: {} refused (no live slot behind it, or {MAX_SYSTEM_CONNS} open), {refused} so far HOPOS_SYSTEM_REFUSED",
+                    Ipv4Addr::from(remote)
+                );
+            }
+            close(exec, h);
+            continue;
+        };
+        match hand(Job { h, remote, who }) {
+            Ok(i) => {
+                served = served.wrapping_add(1);
+                if let Some(d) = DOORS.get(i) {
+                    d.bell.set();
+                }
+            }
+            Err(job) => {
+                // Alle taken bezet: de toelating gaat met de job terug.
+                full = full.wrapping_add(1);
+                if full <= LOUD_REFUSALS {
                     println!(
-                        "system: {} refused (no live slot behind it), {refused} so far HOPOS_SYSTEM_REFUSED",
-                        Ipv4Addr::from(remote)
+                        "system: {} refused, all {SYSTEM_WORKERS} connection tasks busy, {full} so far, {served} served HOPOS_SYSTEM_FULL",
+                        Ipv4Addr::from(job.remote)
                     );
                 }
-            }
-            Some(who) => {
-                served = served.wrapping_add(1);
-                let mut conn = TcpConn { exec, h, remote };
-                let r = api
-                    .system
-                    .serve(
-                        &mut conn,
-                        &who,
-                        api.reply,
-                        &mut api.mem,
-                        &mut api.hooks,
-                        &api.log,
-                        &mut buf,
-                        &mut out,
-                    )
-                    .await;
-                let slot = who.slot();
-                match r {
-                    Ok(()) => println!("system: slot {slot} done, {served} served"),
-                    Err(e) => println!("system: slot {slot} closed: {e}, {served} served"),
-                }
+                close(exec, job.h);
             }
         }
-        let t = exec.now();
-        let _ = io(|st| st.tcp_close(h, t));
     }
+}
+
+/// Geeft `job` aan de eerste vrije taak; geeft haar index, of de job terug
+/// als alles bezet is. Eén lening per deur.
+fn hand(job: Job) -> Result<usize, Job> {
+    for (i, d) in DOORS.iter().enumerate() {
+        let Ok(mut seat) = d.seat.try_borrow_mut() else {
+            continue;
+        };
+        if matches!(*seat, Seat::Free) {
+            *seat = Seat::Handed(job);
+            return Ok(i);
+        }
+    }
+    Err(job)
+}
+
+/// Spawnt de verbindingstaken, elk met haar eigen buffers (boot: de heap
+/// geeft ze eenmalig) en haar eigen antwoordplek. Geeft hoeveel er draaien.
+fn spawn_workers<const N: usize, M, H, C>(
+    exec: &'static Executor,
+    api: &SystemApi<N, M, H, C>,
+) -> usize
+where
+    M: PhysMem + Clone + 'static,
+    H: Hooks + 'static,
+    C: Console + 'static,
+{
+    let mut n = 0;
+    for (i, reply) in api.replies.iter().enumerate() {
+        let (Ok(buf), Ok(out)) = (boot_buf(MAX_PAYLOAD), boot_buf(OUT_BUF)) else {
+            println!(
+                "system: no call buffers ({MAX_PAYLOAD} bytes) for task {i} HOPOS_SYSTEM_FAIL"
+            );
+            break;
+        };
+        let w = Worker {
+            exec,
+            door: i,
+            system: api.system,
+            reply,
+            mem: api.mem.clone(),
+            hooks: api.hooks,
+            log: api.log,
+            buf,
+            out,
+        };
+        if exec.spawn(w.run()).is_err() {
+            println!("system: connection task {i} not spawned HOPOS_SYSTEM_FAIL");
+            break;
+        }
+        n += 1;
+    }
+    n
+}
+
+/// Eén verbindingstaak met haar eigendom: buffers, antwoordplek en
+/// geheugenhandvat. Ze dient de ene verbinding na de andere, nooit twee
+/// tegelijk.
+struct Worker<const N: usize, M, H: 'static, C: 'static> {
+    exec: &'static Executor,
+    door: usize,
+    system: &'static System<'static, 'static, N>,
+    reply: &'static Reply,
+    mem: M,
+    hooks: &'static H,
+    log: &'static C,
+    buf: Vec<u8>,
+    out: Vec<u8>,
+}
+
+impl<const N: usize, M: PhysMem, H: Hooks, C: Console> Worker<N, M, H, C> {
+    async fn run(mut self) {
+        let Some(door) = DOORS.get(self.door) else {
+            return;
+        };
+        let timer = NetTimer(self.exec);
+        loop {
+            door.bell.wait().await;
+            let seat = core::mem::replace(&mut *door.seat.borrow_mut(), Seat::Busy);
+            let Seat::Handed(job) = seat else {
+                // Een bel zonder werk (samengevoegd): de deur blijft zoals hij was.
+                *door.seat.borrow_mut() = seat;
+                continue;
+            };
+            let mut conn = TcpConn {
+                exec: self.exec,
+                h: job.h,
+                remote: job.remote,
+            };
+            let end = self
+                .system
+                .serve(
+                    &mut conn,
+                    &job.who,
+                    self.reply,
+                    &timer,
+                    &mut self.mem,
+                    self.hooks,
+                    self.log,
+                    &mut self.buf,
+                    &mut self.out,
+                )
+                .await;
+            let slot = job.who.slot();
+            match end {
+                End::Peer => println!("system: slot {slot} done"),
+                End::Evicted => println!("system: slot {slot} closed: {end} HOPOS_SYSTEM_EVICTED"),
+                End::Idle | End::Failed(_) => println!("system: slot {slot} closed: {end}"),
+            }
+            // Eerst het handvat dicht, dan de plaats terug (de `Drop` van
+            // de toelating): een nieuwe verbinding van het slot vindt de
+            // oude nooit nog half open.
+            close(self.exec, job.h);
+            drop(job);
+            *door.seat.borrow_mut() = Seat::Free;
+        }
+    }
+}
+
+/// Sluit een handvat; een al gesloten handvat is geen fout.
+fn close(exec: &Executor, h: TcpHandle) {
+    let t = exec.now();
+    let _ = io(|st| st.tcp_close(h, t));
 }
 
 /// Wacht op de volgende verbinding van de listener.

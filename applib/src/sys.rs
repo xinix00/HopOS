@@ -436,6 +436,12 @@ impl<D: Dial, T: Timer> Client<D, T> {
         self.conn.is_some()
     }
 
+    /// De open verbinding, als die er is: voor wie hem wil flushen na een
+    /// call zonder antwoord ([`Client::log`]).
+    pub fn conn_mut(&mut self) -> Option<&mut D::Conn> {
+        self.conn.as_mut()
+    }
+
     /// Eén poging, met verbinden en deadline. Een fout sluit de verbinding,
     /// behalve een nette foutstatus van de kern.
     async fn once(

@@ -29,8 +29,21 @@
 //! [`Request::Abort`]: de kern ruimt zijn eigen reserveringen op.
 //!
 //! De TCP-verbinding komt van `leannet`, over de [`Conn`]-trait.
+//!
+//! # Verbindingen naast elkaar
+//!
+//! [`System`] is deelbaar: [`System::serve`] leent hem als `&self`, en elke
+//! verbinding is een eigen taak uit een vaste pool met haar eigen buffers en
+//! haar eigen [`Reply`]. De staat die tussen twee calls leeft (de stromen)
+//! is een leesbare tabel in een `LocalCell` (handboek §1.1): elke lening
+//! duurt één synchrone stap, nooit over een `.await`. Een verbinding hoort
+//! bij één levensduur van haar slot: wisselt die (stop, herstart), dan sluit
+//! de kern haar binnen [`LIFE_TICK`], ook als de peer zwijgt. Gemeten 29-09
+//! vóór deze vorm: één verbinding tegelijk, en de half-open verbinding van
+//! een geparkeerde app hield de listener voor altijd vast (de toets van
+//! buiten zag daarna nooit meer een antwoord).
 
-use crate::cage::{Console, CoreClass, PhysMem};
+use crate::cage::{Console, CoreClass, PhysMem, Timer};
 use crate::pool::{GroupName, Placement};
 use crate::slots::{
     self, Envelope, ImageGrant, Occupancy, Reply, Request, Response, Servicers, StartSpec, try_vec,
@@ -45,8 +58,8 @@ use core::fmt;
 use core::future::Future;
 use core::sync::atomic::{AtomicBool, Ordering::AcqRel};
 use core::time::Duration;
-use sync::LocalCell;
 use sync::mpsc::Mailbox;
+use sync::{Either, LocalCell, select};
 
 /// De versie van het frame (`systemapi.Version`).
 pub const VERSION: u8 = 1;
@@ -90,6 +103,28 @@ pub const MAX_SYMBOLS: u64 = 16 << 20;
 pub const LOG_RING_BYTES: usize = 2048;
 /// De langste regel in die ring; langer wordt afgekapt.
 pub const LOG_LINE_MAX: usize = 256;
+/// Hoe vaak een wachtende verbinding kijkt of haar levensduur nog loopt.
+///
+/// De stopbel van de servicer heeft één wachter (de servicer zelf), dus een
+/// verbinding kijkt naar de generatie in de servicer-tabel: bij elke wek, en
+/// zonder verkeer op deze tik. Go sloot de verbinding op `<-s.stop`; hier is
+/// het hoogstens één tik later. 100 ms is ruim onder elke herstart van een
+/// slot (scrub en image-stream duren seconden), dus de nieuwe levensduur
+/// krijgt haar toelating ([`MAX_SYSTEM_CONNS`]) altijd terug; tien wekken
+/// per seconde per open verbinding is op de meetlat van 29-09 (ruim 700
+/// slaapjes per seconde op QEMU) ruis.
+pub const LIFE_TICK: Duration = Duration::from_millis(100);
+/// Hoe lang een verbinding zonder enig verkeer open blijft.
+///
+/// Go had geen time-out, wel `evict`; de generatietoets hierboven is die
+/// evict. Dit is de vangrail daarachter: een levend slot waarvan de peer
+/// verdween zonder FIN (een app-stack die opnieuw begon) houdt anders een
+/// van zijn twee plaatsen voor altijd bezet. Vijf minuten, want applib
+/// houdt zijn verbinding stil open tussen twee logregels en merkt een
+/// gesloten verbinding pas bij de volgende schrijf (die regel kan dan
+/// verloren gaan); een app die minder dan eens per vijf minuten logt, betaalt
+/// dat hoogstens één keer per vijf minuten.
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 // De framing en het adresplan zijn van `abi`; de kern spiegelt ze als
 // constanten en de compiler bewaakt dat ze gelijk blijven.
@@ -167,13 +202,16 @@ pub trait Conn {
 }
 
 /// Wat de system-API buiten de lifecycle nodig heeft.
+///
+/// Alle verbindingen delen dezelfde haken, dus `&self`: een haak met staat
+/// houdt die zelf in een `LocalCell` of stuurt een bericht aan zijn eigenaar.
 pub trait Hooks {
     /// Zet de klok (Unix-nanoseconden).
-    fn set_clock(&mut self, unix_ns: u64);
+    fn set_clock(&self, unix_ns: u64);
     /// Start een kern-flip naar de bundel die in slot `bundle` gestroomd is
     /// en de SHA-256 `sha256` moet hebben. De details (reserveren zonder
     /// starten) komen met de flip zelf.
-    fn flip(&mut self, bundle: Slot, sha256: &[u8; 32]) -> Result;
+    fn flip(&self, bundle: Slot, sha256: &[u8; 32]) -> Result;
 }
 
 /// Het slot achter een bron-IP, of `None` als het geen app-adres is.
@@ -482,8 +520,9 @@ pub struct LogTee<'a, C> {
 }
 
 impl<'a, C: Console> LogTee<'a, C> {
-    /// Een tee over `inner` naar `logs`.
-    pub fn new(inner: C, logs: &'a SlotLogs) -> Self {
+    /// Een tee over `inner` naar `logs`; `const`, zodat hij in een `static`
+    /// kan die alle verbindingstaken delen.
+    pub const fn new(inner: C, logs: &'a SlotLogs) -> Self {
         LogTee { inner, logs }
     }
 }
@@ -1041,20 +1080,131 @@ impl Stream {
 /// `out[REQ_HEADER..]` staan.
 type Answer = core::result::Result<(u64, usize), Fail>;
 
+/// Waarom een verbinding eindigde; de listener zet het in zijn regel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum End {
+    /// De peer sloot (EOF) of het transport viel weg.
+    Peer,
+    /// De levensduur van het slot is voorbij (stop of herstart); de kern
+    /// sloot, ook als de peer nog open stond.
+    Evicted,
+    /// Geen verkeer binnen [`IDLE_TIMEOUT`].
+    Idle,
+    /// Een ongeldig frame of een andere fout.
+    Failed(Error),
+}
+
+impl fmt::Display for End {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            End::Peer => f.write_str("peer closed"),
+            End::Evicted => f.write_str("slot lifetime ended, closed by the kernel"),
+            End::Idle => write!(f, "idle for {} s", IDLE_TIMEOUT.as_secs()),
+            End::Failed(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// Een verbinding onder toezicht: elke wachtende lees of schrijf kijkt op
+/// elke wek, en minstens elke [`LIFE_TICK`], of de levensduur waarvoor ze
+/// toegelaten werd nog loopt en of er recent verkeer was.
+struct Watched<'a, C, T> {
+    conn: &'a mut C,
+    timer: &'a T,
+    svc: &'a Servicers,
+    slot: Slot,
+    generation: u32,
+    /// Het laatste moment met verkeer (nanoseconden van `timer`).
+    last: u64,
+    /// Waarom het toezicht de verbinding sloot.
+    end: Option<End>,
+}
+
+impl<C: Conn, T: Timer> Watched<'_, C, T> {
+    /// Een verbinding hoort bij één levensduur: een oude app die na een
+    /// herstart nog bytes stuurt, krijgt de nieuwe eigenaar van hetzelfde
+    /// IP nooit cadeau, en een geparkeerde app houdt niets meer vast.
+    fn alive(&mut self) -> Result {
+        if self.svc.current(self.slot) == Some(self.generation) {
+            return Ok(());
+        }
+        self.end = Some(End::Evicted);
+        Err(Error::Conn)
+    }
+
+    /// De toets op een tik zonder verkeer: levensduur en stilte.
+    fn check(&mut self) -> Result {
+        self.alive()?;
+        let idle = u64::try_from(IDLE_TIMEOUT.as_nanos()).unwrap_or(u64::MAX);
+        if self.timer.now().saturating_sub(self.last) >= idle {
+            self.end = Some(End::Idle);
+            return Err(Error::Conn);
+        }
+        Ok(())
+    }
+
+    /// Noteert verkeer.
+    fn touch(&mut self, r: &Result<usize>) {
+        if matches!(r, Ok(n) if *n > 0) {
+            self.last = self.timer.now();
+        }
+    }
+}
+
+impl<C: Conn, T: Timer> Conn for Watched<'_, C, T> {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        loop {
+            // De lees links: klaar werk gaat vóór de tik. Een gedropte lees
+            // verliest niets, want een `Conn`-lees kopieert pas als hij klaar
+            // is.
+            match select(self.conn.read(buf), self.timer.sleep(LIFE_TICK)).await {
+                Either::Left(r) => {
+                    self.touch(&r);
+                    return r;
+                }
+                Either::Right(()) => self.check()?,
+            }
+        }
+    }
+
+    async fn write(&mut self, buf: &[u8]) -> Result<usize> {
+        loop {
+            // Een peer die niet leest (een geparkeerde app met een vol
+            // venster) houdt de schrijf anders voor altijd vast.
+            match select(self.conn.write(buf), self.timer.sleep(LIFE_TICK)).await {
+                Either::Left(r) => {
+                    self.touch(&r);
+                    return r;
+                }
+                Either::Right(()) => self.check()?,
+            }
+        }
+    }
+
+    fn remote_ip4(&self) -> u32 {
+        self.conn.remote_ip4()
+    }
+}
+
 /// De system-API: de bevoegdheid en de stromen die tussen twee calls leven.
+///
+/// Deelbaar tussen de verbindingstaken: alles hier is `&self`. De stromen
+/// zijn een leesbare tabel (handboek §1.1); de bevoegdheid staat vast vanaf
+/// de bouw.
 pub struct System<'i, 'r, const N: usize> {
     inbox: &'i Mailbox<Envelope<'r>, N>,
     svc: &'i Servicers,
     privilege: Option<Privilege>,
-    streams: [Option<Stream>; MAX_STREAMS],
+    streams: LocalCell<[Option<Stream>; MAX_STREAMS]>,
     logs: Option<&'i SlotLogs>,
     max_slots: usize,
 }
 
 impl<'i, 'r, const N: usize> System<'i, 'r, N> {
     /// Een system-API over deze actor en servicers, met de bevoegdheid van
-    /// Hop (als die er al is).
-    pub fn new(
+    /// Hop (als die er al is). `const`, zodat de kern hem als `static` aan
+    /// al zijn verbindingstaken kan geven.
+    pub const fn new(
         inbox: &'i Mailbox<Envelope<'r>, N>,
         svc: &'i Servicers,
         privilege: Option<Privilege>,
@@ -1064,7 +1214,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             inbox,
             svc,
             privilege,
-            streams: [const { None }; MAX_STREAMS],
+            streams: LocalCell::cell([const { None }; MAX_STREAMS]),
             logs: None,
             max_slots,
         }
@@ -1073,7 +1223,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
     /// Koppelt de logringen voor `NEXT_LOG` (gevuld door een [`LogTee`]).
     /// Zonder ringen antwoordt `NEXT_LOG` altijd leeg.
     #[must_use]
-    pub fn with_logs(mut self, logs: &'i SlotLogs) -> Self {
+    pub const fn with_logs(mut self, logs: &'i SlotLogs) -> Self {
         self.logs = Some(logs);
         self
     }
@@ -1085,7 +1235,11 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         let slot = slot_from_remote(ip, self.max_slots)?;
         let generation = self.svc.current(slot)?;
         let ctl = self.svc.ctl(slot)?;
-        ctl.try_conn(MAX_SYSTEM_CONNS).then_some(Admitted {
+        // `then`, niet `then_some`: een gretig gebouwde `Admitted` die bij
+        // een weigering wegvalt, geeft in zijn `Drop` een plaats terug die
+        // nooit genomen was (gemeten 29-09: na één weigering liet de cap een
+        // derde verbinding toe).
+        ctl.try_conn(MAX_SYSTEM_CONNS).then(|| Admitted {
             slot,
             generation,
             svc: self.svc,
@@ -1093,74 +1247,100 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
     }
 
     /// Dient één verbinding: frames lezen tot de peer weggaat, de
-    /// levensduur wisselt of een frame ongeldig is. `buf` is de callbuffer
-    /// uit de pool van deze verbinding; `out` zijn antwoordbuffer, `reply`
-    /// zijn antwoordplek bij de actor. Een `KIND_LOG`-frame gaat naar
-    /// `log.app_line`: geef een [`LogTee`] mee om het ook in `NEXT_LOG` te
-    /// zien.
+    /// levensduur van het slot eindigt, de verbinding [`IDLE_TIMEOUT`] stil
+    /// is of een frame ongeldig is. Meerdere verbindingen tegelijk mogen
+    /// (elk in een eigen taak): `buf` is de callbuffer van déze verbinding,
+    /// `out` haar antwoordbuffer, `reply` haar antwoordplek bij de actor.
+    /// `timer` draagt de tik van het toezicht. Een `KIND_LOG`-frame gaat
+    /// naar `log.app_line`: geef een [`LogTee`] mee om het ook in `NEXT_LOG`
+    /// te zien.
     #[expect(
         clippy::too_many_arguments,
-        reason = "de verbinding brengt haar eigen buffers mee"
+        reason = "de verbinding brengt haar eigen buffers, antwoordplek en tik mee"
     )]
     pub async fn serve(
-        &mut self,
+        &self,
         conn: &mut impl Conn,
         who: &Admitted<'_>,
         reply: &'r Reply,
+        timer: &impl Timer,
         mem: &mut impl PhysMem,
-        hooks: &mut impl Hooks,
+        hooks: &impl Hooks,
+        log: &impl Console,
+        buf: &mut [u8],
+        out: &mut [u8],
+    ) -> End {
+        let mut w = Watched {
+            conn,
+            timer,
+            svc: self.svc,
+            slot: who.slot,
+            generation: who.generation,
+            last: timer.now(),
+            end: None,
+        };
+        let r = self
+            .frames(&mut w, who.slot, reply, mem, hooks, log, buf, out)
+            .await;
+        match (w.end, r) {
+            (Some(end), _) => end,
+            (None, Ok(()) | Err(Error::Conn)) => End::Peer,
+            (None, Err(e)) => End::Failed(e),
+        }
+    }
+
+    /// De framelus van één verbinding.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "de verbinding brengt haar eigen buffers en antwoordplek mee"
+    )]
+    async fn frames<C: Conn, T: Timer>(
+        &self,
+        w: &mut Watched<'_, C, T>,
+        slot: Slot,
+        reply: &'r Reply,
+        mem: &mut impl PhysMem,
+        hooks: &impl Hooks,
         log: &impl Console,
         buf: &mut [u8],
         out: &mut [u8],
     ) -> Result {
         loop {
-            let (kind, n) = read_header(conn).await?;
+            let (kind, n) = read_header(w).await?;
             if kind != KIND_CALL && kind != KIND_LOG {
                 return Err(Error::Corrupt { at: 5 });
             }
             let payload = buf.get_mut(..n).ok_or(Error::TooLarge { len: n, max: 0 })?;
-            read_full(conn, payload).await?;
-            // Een verbinding hoort bij één levensduur: een oude app die na
-            // een herstart nog bytes stuurt, krijgt de nieuwe eigenaar van
-            // hetzelfde IP nooit cadeau.
-            if self.svc.current(who.slot) != Some(who.generation) {
-                return Err(Error::Conn);
-            }
+            read_full(w, payload).await?;
+            w.alive()?;
             if kind == KIND_LOG {
-                log.app_line(who.slot, payload);
+                log.app_line(slot, payload);
                 continue;
             }
             let len = match Call::decode(payload) {
-                Ok(call) => self.call(who.slot, &call, reply, mem, hooks, out).await,
+                Ok(call) => self.call(slot, &call, reply, mem, hooks, out).await,
                 Err(_) => encode_resp(out, 0, STATUS_ERROR, 0, 0, b"bad request"),
             };
-            write_frame(conn, KIND_RESULT, out.get(..len).unwrap_or(&[])).await?;
+            write_frame(w, KIND_RESULT, out.get(..len).unwrap_or(&[])).await?;
         }
     }
 
     async fn call(
-        &mut self,
+        &self,
         slot: Slot,
         c: &Call<'_>,
         reply: &'r Reply,
         mem: &mut impl PhysMem,
-        hooks: &mut impl Hooks,
+        hooks: &impl Hooks,
         out: &mut [u8],
     ) -> usize {
-        let r = match PrivOp::from_op(c.op) {
+        let r = match (PrivOp::from_op(c.op), &self.privilege) {
             // De gewone calls (hopfs, store, codec) zijn nog niet geport.
-            None => Err(Fail::Kern(Error::Kind)),
-            Some(op) => match self.privilege.take() {
-                Some(p) if p.slot == slot => {
-                    let r = self.privileged(&p, op, c, reply, mem, hooks, out).await;
-                    self.privilege = Some(p);
-                    r
-                }
-                other => {
-                    self.privilege = other;
-                    Err(Fail::Kern(Error::Privilege { slot: slot.get() }))
-                }
-            },
+            (None, _) => Err(Fail::Kern(Error::Kind)),
+            (Some(op), Some(p)) if p.slot == slot => {
+                self.privileged(p, op, c, reply, mem, hooks, out).await
+            }
+            (Some(_), _) => Err(Fail::Kern(Error::Privilege { slot: slot.get() })),
         };
         match r {
             Ok((size, data_len)) => {
@@ -1186,13 +1366,13 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         reason = "de call brengt verbinding, geheugen en haken mee"
     )]
     async fn privileged(
-        &mut self,
+        &self,
         _proof: &Privilege,
         op: PrivOp,
         c: &Call<'_>,
         reply: &'r Reply,
         mem: &mut impl PhysMem,
-        hooks: &mut impl Hooks,
+        hooks: &impl Hooks,
         out: &mut [u8],
     ) -> Answer {
         let data = out.get_mut(REQ_HEADER..).unwrap_or(&mut []);
@@ -1232,20 +1412,57 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         }
     }
 
-    fn stream_of(&mut self, slot: Slot) -> Option<&mut Stream> {
-        self.streams.iter_mut().flatten().find(|s| s.slot() == slot)
+    // De stromentabel. Elke toegang is één synchrone lening; wie iets met
+    // een stroom wil over een `.await` heen, haalt hem eruit (`take_stream`)
+    // en is dan de enige eigenaar.
+
+    /// Loopt er een stroom voor `slot`?
+    fn has_stream(&self, slot: Slot) -> bool {
+        self.streams
+            .borrow()
+            .iter()
+            .flatten()
+            .any(|s| s.slot() == slot)
     }
 
-    fn take_stream(&mut self, slot: Slot) -> Option<Stream> {
+    /// Is er plaats voor nog een stroom?
+    fn has_room(&self) -> bool {
+        self.streams.borrow().iter().any(Option::is_none)
+    }
+
+    /// Doet `f` op de stroom van `slot`, binnen één lening.
+    fn with_stream<R>(&self, slot: Slot, f: impl FnOnce(&mut Stream) -> R) -> Option<R> {
         self.streams
+            .borrow_mut()
+            .iter_mut()
+            .flatten()
+            .find(|s| s.slot() == slot)
+            .map(f)
+    }
+
+    fn take_stream(&self, slot: Slot) -> Option<Stream> {
+        self.streams
+            .borrow_mut()
             .iter_mut()
             .find(|s| s.as_ref().is_some_and(|s| s.slot() == slot))
             .and_then(Option::take)
     }
 
+    /// Zet een stroom in een vrije plaats; is de tabel vol, dan komt hij
+    /// terug.
+    fn put_stream(&self, s: Stream) -> Option<Stream> {
+        match self.streams.borrow_mut().iter_mut().find(|e| e.is_none()) {
+            Some(e) => {
+                *e = Some(s);
+                None
+            }
+            None => Some(s),
+        }
+    }
+
     /// START_SLOT: de kern kiest een leeg slot, claimt het en houdt de
     /// grant voor de stroom.
-    async fn start(&mut self, c: &Call<'_>, reply: &'r Reply) -> Answer {
+    async fn start(&self, c: &Call<'_>, reply: &'r Reply) -> Answer {
         let req = StartReq::decode(&c.as_req())?;
         if req.image_size == 0 {
             return Err(Fail::Place(abi::Error::ImageSize(0)));
@@ -1263,9 +1480,12 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             }
             .into());
         }
-        let Some(free) = self.streams.iter().position(Option::is_none) else {
+        // Vooraf, zodat een volle tabel niets claimt; de gezaghebbende
+        // toets is `put_stream` hieronder, want tussen de twee kan een
+        // andere verbinding van Hop een plaats nemen.
+        if !self.has_room() {
             return Err(Error::Full { cap: MAX_STREAMS }.into());
-        };
+        }
         let placement = placement(&req)?;
         let env = try_vec(req.env)?;
         let job = try_vec(req.job)?;
@@ -1294,8 +1514,9 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         if let Some(e) = self.logs {
             e.clear(slot);
         }
-        if let Some(s) = self.streams.get_mut(free) {
-            *s = Some(Stream { grant, placer, env });
+        if let Some(s) = self.put_stream(Stream { grant, placer, env }) {
+            let _ = slots::call(self.inbox, reply, Request::Abort(s.grant)).await;
+            return Err(Error::Full { cap: MAX_STREAMS }.into());
         }
         Ok((slot.get() as u64, 0))
     }
@@ -1303,12 +1524,10 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
     /// Het eerste slot zonder eigenaar. Hop serialiseert zijn starts, dus
     /// tussen de vraag en de claim komt er niemand tussen; komt er toch
     /// iemand, dan weigert de claim met `StillOwned` en faalt de start luid.
-    async fn free_slot(&mut self, reply: &'r Reply) -> Result<Slot> {
+    async fn free_slot(&self, reply: &'r Reply) -> Result<Slot> {
         for i in 1..=self.max_slots.min(SLOT_CAP) {
             let Some(slot) = Slot::new(i) else { continue };
-            if self.privilege.as_ref().is_some_and(|p| p.slot == slot)
-                || self.stream_of(slot).is_some()
-            {
+            if self.privilege.as_ref().is_some_and(|p| p.slot == slot) || self.has_stream(slot) {
                 continue;
             }
             match slots::call(self.inbox, reply, Request::Status(slot)).await? {
@@ -1325,29 +1544,28 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
 
     /// STREAM_IMAGE: bytes naar hun plek; bij de laatste plaatsen en armen.
     async fn stream(
-        &mut self,
+        &self,
         c: &Call<'_>,
         reply: &'r Reply,
         mem: &mut impl PhysMem,
         data: &mut [u8],
     ) -> Answer {
         let slot = target(c)?;
-        let (fed, received, size) = {
-            let s = self
-                .stream_of(slot)
-                .ok_or(Error::NotOwned { slot: slot.get() })?;
-            let have = s.placer.received();
-            let fed = if c.n == have {
-                s.placer.feed(&mut s.grant, mem, c.data)
-            } else {
-                Err(Placer::fail(
-                    "chunk offset differs from bytes received",
-                    c.n,
-                    have,
-                ))
-            };
-            (fed, s.placer.received(), s.placer.size)
-        };
+        let (fed, received, size) = self
+            .with_stream(slot, |s| {
+                let have = s.placer.received();
+                let fed = if c.n == have {
+                    s.placer.feed(&mut s.grant, mem, c.data)
+                } else {
+                    Err(Placer::fail(
+                        "chunk offset differs from bytes received",
+                        c.n,
+                        have,
+                    ))
+                };
+                (fed, s.placer.received(), s.placer.size)
+            })
+            .ok_or(Error::NotOwned { slot: slot.get() })?;
         if let Err(e) = fed {
             // Een geweigerde brok breekt de stroom af: de kern ruimt op.
             if let Some(s) = self.take_stream(slot) {
@@ -1382,7 +1600,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
     }
 
     /// SLOT_STATUS: het grootboek van de actor plus de stand van een stroom.
-    async fn status(&mut self, c: &Call<'_>, reply: &'r Reply, data: &mut [u8]) -> Answer {
+    async fn status(&self, c: &Call<'_>, reply: &'r Reply, data: &mut [u8]) -> Answer {
         let slot = target(c)?;
         let st = match slots::call(self.inbox, reply, Request::Status(slot)).await? {
             Response::Status(st) => st,
@@ -1391,8 +1609,8 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         };
         let (core, span) = st.core.map_or((0, 0), |(c, s)| (c.get() as u16, s as u16));
         let (received, image_size) = self
-            .stream_of(slot)
-            .map_or((0, 0), |s| (s.placer.received(), s.placer.size));
+            .with_stream(slot, |s| (s.placer.received(), s.placer.size))
+            .unwrap_or((0, 0));
         let info = SlotInfo {
             state: match st.occupancy {
                 Occupancy::Empty => SlotState::Empty,
@@ -1535,6 +1753,7 @@ mod tests {
     use crate::stage2::tests::SparseMem;
     use crate::testutil::FakeTimer;
     use abi::systemapi::{StreamState, plain_req, stream_req};
+    use core::cell::Cell;
     use core::pin::pin;
     use core::task::{Context, Poll, Waker};
     use std::collections::VecDeque;
@@ -1544,11 +1763,14 @@ mod tests {
     const MIB: u64 = 1 << 20;
 
     /// Een verbinding in RAM die per `read` hooguit `chunk` bytes geeft.
+    /// Met `hold` is een lege rij geen EOF maar een peer die zwijgt en open
+    /// blijft: de half-open verbinding van een geparkeerde app.
     struct Pipe {
         rx: VecDeque<u8>,
         tx: Vec<u8>,
         chunk: usize,
         ip: u32,
+        hold: bool,
     }
 
     impl Pipe {
@@ -1562,6 +1784,15 @@ mod tests {
                 tx: Vec::new(),
                 chunk: 7,
                 ip,
+                hold: false,
+            }
+        }
+
+        /// Een peer die zwijgt en nooit sluit.
+        fn silent(ip: u32) -> Pipe {
+            Pipe {
+                hold: true,
+                ..Pipe::new(ip, &[])
             }
         }
     }
@@ -1572,7 +1803,14 @@ mod tests {
             for b in buf.iter_mut().take(n) {
                 *b = self.rx.pop_front().unwrap();
             }
-            core::future::ready(Ok(n))
+            let wait = n == 0 && self.hold && !buf.is_empty();
+            core::future::poll_fn(move |_| {
+                if wait {
+                    Poll::Pending
+                } else {
+                    Poll::Ready(Ok(n))
+                }
+            })
         }
         fn write(&mut self, buf: &[u8]) -> impl Future<Output = Result<usize>> {
             self.tx.extend_from_slice(buf);
@@ -1645,13 +1883,13 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct NoHooks(u64, Option<(usize, [u8; 32])>);
+    struct NoHooks(Cell<u64>, Cell<Option<(usize, [u8; 32])>>);
     impl Hooks for NoHooks {
-        fn set_clock(&mut self, unix_ns: u64) {
-            self.0 = unix_ns;
+        fn set_clock(&self, unix_ns: u64) {
+            self.0.set(unix_ns);
         }
-        fn flip(&mut self, bundle: Slot, sha256: &[u8; 32]) -> Result {
-            self.1 = Some((bundle.get(), *sha256));
+        fn flip(&self, bundle: Slot, sha256: &[u8; 32]) -> Result {
+            self.1.set(Some((bundle.get(), *sha256)));
             Ok(())
         }
     }
@@ -1765,19 +2003,21 @@ mod tests {
     /// ernaast. Geeft de uitkomst van `serve`.
     #[expect(clippy::too_many_arguments, reason = "de hele kern van een test")]
     fn drive<'i, 'r, const N: usize>(
-        sys: &mut System<'i, 'r, N>,
+        sys: &System<'i, 'r, N>,
         a: &mut Actor<'_>,
         inbox: &'i Mailbox<Envelope<'r>, N>,
         reply: &'r Reply,
         p: &mut Pipe,
         mem: &mut SparseMem,
-        hooks: &mut NoHooks,
+        hooks: &NoHooks,
         tee: &LogTee<'_, &FakeConsole>,
         mut svc: Option<&mut Servicer<'_>>,
-    ) -> Result {
+    ) -> End {
         let who = sys.admit(p.ip).unwrap();
+        let timer = FakeTimer::default();
         let (mut buf, mut out) = (vec![0u8; 64 << 10], vec![0u8; 8192]);
-        let mut serve = pin!(sys.serve(p, &who, reply, mem, hooks, tee, &mut buf, &mut out));
+        let mut serve =
+            pin!(sys.serve(p, &who, reply, &timer, mem, hooks, tee, &mut buf, &mut out));
         let mut run = pin!(a.run(inbox));
         let mut cx = Context::from_waker(Waker::noop());
         for _ in 0..100_000 {
@@ -1831,6 +2071,7 @@ mod tests {
             tx: Vec::new(),
             chunk: 1,
             ip: 0,
+            hold: false,
         };
         let (kind, n) = crate::testutil::block_on(read_header(&mut p)).unwrap();
         assert_eq!((kind, n), (KIND_CALL, MAX_IO_CHUNK));
@@ -1850,8 +2091,7 @@ mod tests {
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let mut sys =
-            System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8).with_logs(&logs);
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8).with_logs(&logs);
         let timer = FakeTimer::default();
         let mut sbuf = [0u8; 256];
         let mut servicer: Servicer<'_> = std::boxed::Box::pin(servicer_task(
@@ -1879,19 +2119,19 @@ mod tests {
                 op(PrivOp::SetClock, 8, 0, 1_759_000_000),
             ],
         );
-        let (mut mem, mut hooks) = (SparseMem::default(), NoHooks::default());
+        let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
         let r = drive(
-            &mut sys,
+            &sys,
             &mut a,
             &inbox,
             &reply,
             &mut p,
             &mut mem,
-            &mut hooks,
+            &hooks,
             &tee,
             Some(&mut servicer),
         );
-        assert_eq!(r, Err(Error::Conn), "stream should end at EOF");
+        assert_eq!(r, End::Peer, "stream should end at EOF");
         let res = results(&p.tx);
         assert_eq!(res.len(), 8);
         assert_eq!(
@@ -1909,7 +2149,7 @@ mod tests {
         assert_eq!(info.partition, 8 * MIB);
         assert_eq!((res[5].3, &res[5].4[..]), (1, &b"app says hi"[..]));
         assert_eq!((res[6].3, res[6].4.len()), (0, 0), "log ring drained");
-        assert_eq!(hooks.0, 1_759_000_000);
+        assert_eq!(hooks.0.get(), 1_759_000_000);
 
         // Het image staat op zijn plek, gepatcht, met de env op de page.
         let part = a.status(s(3)).partition.unwrap();
@@ -1952,7 +2192,7 @@ mod tests {
             ],
         );
         let _ = drive(
-            &mut sys, &mut a, &inbox, &reply, &mut other, &mut mem, &mut hooks, &tee, None,
+            &sys, &mut a, &inbox, &reply, &mut other, &mut mem, &hooks, &tee, None,
         );
         assert!(results(&other.tx).iter().all(|r| r.1 == STATUS_DENIED));
         assert_eq!(a.status(s(3)).occupancy, Occupancy::Running);
@@ -1966,13 +2206,13 @@ mod tests {
             ],
         );
         let _ = drive(
-            &mut sys,
+            &sys,
             &mut a,
             &inbox,
             &reply,
             &mut stop,
             &mut mem,
-            &mut hooks,
+            &hooks,
             &tee,
             Some(&mut servicer),
         );
@@ -1991,7 +2231,7 @@ mod tests {
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let mut sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
         let bad_abi = elf(10);
         let good = elf(u64::from(abi::ABI_VERSION));
         let mut p = Pipe::new(
@@ -2017,9 +2257,9 @@ mod tests {
                 op(PrivOp::SlotStatus, 13, 3, 0),
             ],
         );
-        let (mut mem, mut hooks) = (SparseMem::default(), NoHooks::default());
+        let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
         let _ = drive(
-            &mut sys, &mut a, &inbox, &reply, &mut p, &mut mem, &mut hooks, &tee, None,
+            &sys, &mut a, &inbox, &reply, &mut p, &mut mem, &hooks, &tee, None,
         );
         let res = results(&p.tx);
         let text = |r: &Res| std::string::String::from_utf8_lossy(&r.4).into_owned();
@@ -2049,7 +2289,7 @@ mod tests {
         let mut a = node(&svc, &con);
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let mut sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
         let sha = [7u8; 32];
         let flip = abi::hopabi::Req {
             op: PrivOp::Flip.op(),
@@ -2063,13 +2303,13 @@ mod tests {
             ..flip
         };
         let mut p = Pipe::new(NET | 2, &[enc(&flip), enc(&short)]);
-        let (mut mem, mut hooks) = (SparseMem::default(), NoHooks::default());
+        let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
         let _ = drive(
-            &mut sys, &mut a, &inbox, &reply, &mut p, &mut mem, &mut hooks, &tee, None,
+            &sys, &mut a, &inbox, &reply, &mut p, &mut mem, &hooks, &tee, None,
         );
         let res = results(&p.tx);
         assert_eq!((res[0].1, res[1].1), (STATUS_OK, STATUS_ERROR));
-        assert_eq!(hooks.1, Some((5, sha)));
+        assert_eq!(hooks.1.get(), Some((5, sha)));
     }
 
     #[test]
@@ -2111,12 +2351,204 @@ mod tests {
         let one = sys.admit(NET | 2).unwrap();
         let two = sys.admit(NET | 2).unwrap();
         assert!(sys.admit(NET | 2).is_none(), "third connection admitted");
+        // Een weigering kost geen plaats: ook de vierde blijft buiten.
+        assert!(sys.admit(NET | 2).is_none(), "a refusal gave a seat back");
+        assert_eq!(svc.ctl(s(1)).unwrap().conns(), 2);
         drop(one);
         assert!(sys.admit(NET | 2).is_some());
         drop(two);
         assert!(
             sys.admit(NET | 3).is_none(),
             "slot without servicer admitted"
+        );
+    }
+
+    /// Een lege omgeving van één verbinding: buffers, antwoordplek, geheugen.
+    struct Seat {
+        buf: Vec<u8>,
+        out: Vec<u8>,
+        reply: Reply,
+        mem: SparseMem,
+    }
+
+    impl Seat {
+        fn new() -> Seat {
+            Seat {
+                buf: vec![0u8; 4096],
+                out: vec![0u8; 4096],
+                reply: Reply::new(),
+                mem: SparseMem::default(),
+            }
+        }
+    }
+
+    /// Het gebrek van 29-09: een half-open verbinding (de app parkeerde en
+    /// zond nooit zijn FIN) mag een andere verbinding niet ophouden. Hop in
+    /// slot 1 krijgt zijn antwoorden terwijl slot 2 zwijgt en openstaat.
+    #[test]
+    fn a_silent_connection_does_not_hold_up_another() {
+        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
+        let tee = LogTee::new(&con, &logs);
+        let mut a = node(&svc, &con);
+        // De antwoordplekken leven langer dan de inbox die ernaar wijst.
+        let (mut s1, mut s2) = (Seat::new(), Seat::new());
+        let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8).with_logs(&logs);
+        let (timer, hooks) = (FakeTimer::default(), NoHooks::default());
+        let mut quiet = Pipe::silent(NET | 3);
+        let mut hop = Pipe::new(
+            NET | 2,
+            &[
+                op(PrivOp::SlotStatus, 1, 2, 0),
+                op(PrivOp::SetClock, 2, 0, 42),
+            ],
+        );
+        let (w1, w2) = (sys.admit(quiet.ip).unwrap(), sys.admit(hop.ip).unwrap());
+        let mut done = None;
+        {
+            let mut f1 = pin!(sys.serve(
+                &mut quiet,
+                &w1,
+                &s1.reply,
+                &timer,
+                &mut s1.mem,
+                &hooks,
+                &tee,
+                &mut s1.buf,
+                &mut s1.out,
+            ));
+            let mut f2 = pin!(sys.serve(
+                &mut hop,
+                &w2,
+                &s2.reply,
+                &timer,
+                &mut s2.mem,
+                &hooks,
+                &tee,
+                &mut s2.buf,
+                &mut s2.out,
+            ));
+            let mut run = pin!(a.run(&inbox));
+            let mut cx = Context::from_waker(Waker::noop());
+            for _ in 0..1000 {
+                let _ = run.as_mut().poll(&mut cx);
+                assert!(f1.as_mut().poll(&mut cx).is_pending(), "silent peer closed");
+                if let Poll::Ready(e) = f2.as_mut().poll(&mut cx) {
+                    done = Some(e);
+                    break;
+                }
+            }
+            assert!(f1.as_mut().poll(&mut cx).is_pending());
+            assert_eq!(
+                svc.ctl(s(2)).unwrap().conns(),
+                1,
+                "silent peer lost its seat"
+            );
+        }
+        assert_eq!(done, Some(End::Peer));
+        let res = results(&hop.tx);
+        assert_eq!(res.len(), 2);
+        let info = SlotInfo::decode(&res[0].4).unwrap();
+        assert_eq!(info.slot_state(), Some(SlotState::Running));
+        assert_eq!((res[1].1, hooks.0.get()), (STATUS_OK, 42));
+    }
+
+    /// Een stop sluit elke verbinding van het slot, ook twee die zwijgen, en
+    /// geeft hun plaatsen terug; daartussen houdt de cap de derde buiten.
+    #[test]
+    fn a_stop_closes_every_connection_of_the_slot() {
+        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
+        let tee = LogTee::new(&con, &logs);
+        let mut a = node(&svc, &con);
+        let (mut s1, mut s2) = (Seat::new(), Seat::new());
+        let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
+        let sys = System::new(&inbox, &svc, None, 8);
+        let (timer, hooks) = (FakeTimer::default(), NoHooks::default());
+        let (mut p1, mut p2) = (Pipe::silent(NET | 3), Pipe::silent(NET | 3));
+        let (w1, w2) = (sys.admit(NET | 3).unwrap(), sys.admit(NET | 3).unwrap());
+        assert!(sys.admit(NET | 3).is_none(), "third connection admitted");
+        let mut ends = [None, None];
+        {
+            let mut f1 = pin!(sys.serve(
+                &mut p1,
+                &w1,
+                &s1.reply,
+                &timer,
+                &mut s1.mem,
+                &hooks,
+                &tee,
+                &mut s1.buf,
+                &mut s1.out,
+            ));
+            let mut f2 = pin!(sys.serve(
+                &mut p2,
+                &w2,
+                &s2.reply,
+                &timer,
+                &mut s2.mem,
+                &hooks,
+                &tee,
+                &mut s2.buf,
+                &mut s2.out,
+            ));
+            let mut cx = Context::from_waker(Waker::noop());
+            for _ in 0..100 {
+                assert!(f1.as_mut().poll(&mut cx).is_pending());
+                assert!(f2.as_mut().poll(&mut cx).is_pending());
+            }
+            let stop = Request::Stop {
+                slot: s(2),
+                timeout: Duration::from_millis(50),
+            };
+            let r = crate::testutil::block_on(a.handle(stop));
+            assert!(matches!(r, Response::Done), "stop not confirmed");
+            let [e1, e2] = &mut ends;
+            for _ in 0..10 {
+                for (f, e) in [(f1.as_mut(), &mut *e1), (f2.as_mut(), &mut *e2)] {
+                    if e.is_none()
+                        && let Poll::Ready(x) = f.poll(&mut cx)
+                    {
+                        *e = Some(x);
+                    }
+                }
+            }
+        }
+        assert_eq!(ends, [Some(End::Evicted), Some(End::Evicted)]);
+        drop((w1, w2));
+        assert_eq!(svc.ctl(s(2)).unwrap().conns(), 0, "seats not given back");
+        assert!(sys.admit(NET | 3).is_none(), "stopped slot admitted");
+    }
+
+    /// Een verbinding zonder verkeer van een levend slot sluit na
+    /// [`IDLE_TIMEOUT`], niet eerder.
+    #[test]
+    fn a_silent_connection_of_a_live_slot_times_out() {
+        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
+        let tee = LogTee::new(&con, &logs);
+        let _a = node(&svc, &con);
+        let mut seat = Seat::new();
+        let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
+        let sys = System::new(&inbox, &svc, None, 8);
+        let (timer, hooks) = (FakeTimer::default(), NoHooks::default());
+        let mut p = Pipe::silent(NET | 3);
+        let who = sys.admit(NET | 3).unwrap();
+        let end = crate::testutil::block_on(sys.serve(
+            &mut p,
+            &who,
+            &seat.reply,
+            &timer,
+            &mut seat.mem,
+            &hooks,
+            &tee,
+            &mut seat.buf,
+            &mut seat.out,
+        ));
+        assert_eq!(end, End::Idle);
+        let idle = IDLE_TIMEOUT.as_nanos() as u64;
+        let now = timer.now.get();
+        assert!(
+            (idle..idle + 2 * LIFE_TICK.as_nanos() as u64).contains(&now),
+            "closed after {now} ns"
         );
     }
 }

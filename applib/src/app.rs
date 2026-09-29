@@ -14,6 +14,7 @@ use crate::ring::Writer;
 use crate::tail::{Tail, TailError, tail_of};
 use core::cell::{Cell, RefCell};
 use core::fmt;
+use core::time::Duration;
 
 /// Waarom een app niet op zijn slot past.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -45,6 +46,11 @@ pub enum Beat {
 /// Elke hoeveelste hartslag de geheugen-draw meegaat: 40 × 50 ms = 2 s,
 /// het ritme van de Go-watch.
 pub const MEM_EVERY: u64 = 40;
+
+/// Hoe lang [`App::shutdown`] hooguit op het net-afscheid wacht. Het
+/// slot-LAN is geheugen en de kern bevestigt in microseconden; wat na
+/// 200 ms nog openstaat, wacht op een peer die er niet meer is.
+pub const SHUTDOWN_LIMIT: Duration = Duration::from_millis(200);
 
 /// Het handvat van een app.
 pub struct App {
@@ -181,13 +187,39 @@ impl App {
         Beat::Alive
     }
 
+    /// Stopt de app netjes met exitcode `code`: eerst het net-afscheid
+    /// ([`Net::shutdown`](crate::appnet::Net::shutdown): elk open handvat
+    /// dicht en de pomp door tot elke FIN bevestigd is, hooguit
+    /// [`SHUTDOWN_LIMIT`]), één regel met de uitkomst, en dan
+    /// [`App::exit`]. Keert nooit terug.
+    ///
+    /// Waarom: `exit` parkeert de core, en wat dan nog in een TCP-zendbuffer
+    /// staat, bereikt niemand meer. Gemeten 29-09: de laatste logregel van
+    /// appspike over de system-verbinding stond na `log_us=320` in de
+    /// buffer, en de kern zag hem nooit.
+    pub async fn shutdown(&self, code: u64) {
+        if let Some(net) = crate::appnet::net() {
+            let d = net.shutdown(SHUTDOWN_LIMIT).await;
+            crate::log!(
+                "applib: shutdown code={code} closed={} drained={} waited_us={} untracked={} HOPOS_APP_SHUTDOWN",
+                d.closed,
+                d.drained,
+                d.waited_us,
+                d.untracked
+            );
+        }
+        self.exit(code)
+    }
+
     /// Meldt de exitcode en geeft de core aan de kern terug. Keert nooit
     /// terug, en doet niets meer dan dat: geen taken, geen timers. Dus ook
     /// veilig vanuit de paniek, waar de executor niet meer draait.
     ///
-    /// Bewust geen net-afscheid: een peer merkt de dood via zijn eigen
-    /// deadline, en dat moet hij toch kunnen, want een switch kan een
-    /// verbinding op elk moment stil doodmaken.
+    /// Geen net-afscheid: dat doet [`App::shutdown`], en dit is de weg voor
+    /// wie niet mag wachten (de paniek, een kill van de kern). Een peer
+    /// merkt de dood dan via zijn eigen deadline, en dat moet hij toch
+    /// kunnen, want een switch kan een verbinding op elk moment stil
+    /// doodmaken.
     pub fn exit(&self, code: u64) -> ! {
         self.ctrl.mark_exited(code);
         arch::park_exit()

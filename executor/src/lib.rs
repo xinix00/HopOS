@@ -134,7 +134,12 @@ unsafe fn drop_waker(_: *const ()) {}
 pub struct Executor<const TASKS: usize = 512, const TIMERS: usize = 256> {
     slots: [Slot; TASKS],
     spawn: Mailbox<Task, 64>,
-    timers: RefCell<[Option<(u64, Waker)>; TIMERS]>,
+    timers: RefCell<[Option<(u64, u32, Waker)>; TIMERS]>,
+    /// De generatie van de volgende registratie: elke plaats in het wiel
+    /// draagt de generatie van zijn huidige bewoner, zodat een `After` die
+    /// zijn plaats al kwijt is (verlopen, hergebruikt) nooit die van een
+    /// ander wist.
+    timer_gen: Cell<u32>,
     clock: Cell<Option<Clock>>,
     /// De meetlat.
     pub stats: Stats,
@@ -154,6 +159,7 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
             slots: [const { Slot::new() }; TASKS],
             spawn: Mailbox::new(),
             timers: RefCell::new([const { None }; TIMERS]),
+            timer_gen: Cell::new(0),
             clock: Cell::new(None),
             stats: Stats {
                 rounds: AtomicU64::new(0),
@@ -213,7 +219,7 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
         self.timers
             .borrow()
             .iter()
-            .filter_map(|e| e.as_ref().map(|(dl, _)| *dl))
+            .filter_map(|e| e.as_ref().map(|(dl, _, _)| *dl))
             .min()
     }
 
@@ -247,8 +253,8 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
         let mut worked = false;
         let mut timers = self.timers.borrow_mut();
         for entry in timers.iter_mut() {
-            if entry.as_ref().is_some_and(|(dl, _)| *dl <= now)
-                && let Some((_, w)) = entry.take()
+            if entry.as_ref().is_some_and(|(dl, _, _)| *dl <= now)
+                && let Some((_, _, w)) = entry.take()
             {
                 w.wake();
                 worked = true;
@@ -311,7 +317,8 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
 pub struct After<const TASKS: usize, const TIMERS: usize> {
     exec: &'static Executor<TASKS, TIMERS>,
     deadline: u64,
-    slot: Option<usize>,
+    /// De plaats in het wiel en de generatie waarmee wij hem namen.
+    slot: Option<(usize, u32)>,
 }
 
 impl<const TASKS: usize, const TIMERS: usize> Future for After<TASKS, TIMERS> {
@@ -323,11 +330,22 @@ impl<const TASKS: usize, const TIMERS: usize> Future for After<TASKS, TIMERS> {
             return Poll::Ready(());
         }
         let mut timers = this.exec.timers.borrow_mut();
-        if this.slot.is_none() {
-            this.slot = timers.iter().position(Option::is_none);
+        // Een plaats die wij eerder namen kan verlopen en hergebruikt zijn:
+        // dan is de generatie erin niet meer de onze en zoeken we opnieuw.
+        if let Some((i, g)) = this.slot
+            && timers[i].as_ref().is_none_or(|(_, owner, _)| *owner != g)
+        {
+            this.slot = None;
+        }
+        if this.slot.is_none()
+            && let Some(i) = timers.iter().position(Option::is_none)
+        {
+            let g = this.exec.timer_gen.get().wrapping_add(1);
+            this.exec.timer_gen.set(g);
+            this.slot = Some((i, g));
         }
         match this.slot {
-            Some(i) => timers[i] = Some((this.deadline, cx.waker().clone())),
+            Some((i, g)) => timers[i] = Some((this.deadline, g, cx.waker().clone())),
             None => {
                 // Geen timerslot: spin op ronde-korrel, en tel het.
                 this.exec.stats.timer_overflows.fetch_add(1, Relaxed);
@@ -340,8 +358,17 @@ impl<const TASKS: usize, const TIMERS: usize> Future for After<TASKS, TIMERS> {
 
 impl<const TASKS: usize, const TIMERS: usize> Drop for After<TASKS, TIMERS> {
     fn drop(&mut self) {
-        if let Some(i) = self.slot.take() {
-            self.exec.timers.borrow_mut()[i] = None;
+        // Alleen onze eigen registratie wissen: draagt de plaats een andere
+        // generatie, dan heeft `expire_timers` hem al teruggegeven en nam een
+        // andere timer hem over. Een onvoorwaardelijke wis liet die voor
+        // altijd slapen (gemeten 29-09 op QEMU virt: met een tik per lees van
+        // elke system-verbinding hing zo in vijf van vijf runs een servicer
+        // of de slot-keten).
+        if let Some((i, g)) = self.slot.take() {
+            let mut timers = self.exec.timers.borrow_mut();
+            if timers[i].as_ref().is_some_and(|(_, owner, _)| *owner == g) {
+                timers[i] = None;
+            }
         }
     }
 }
@@ -453,6 +480,30 @@ mod tests {
         }
         assert_eq!(ROUNDS.load(SeqCst), 3);
         assert_eq!(e.live_tasks(), 0);
+    }
+
+    /// Een verstreken timer die pas daarna gedropt wordt, wist niet de
+    /// registratie van een timer die zijn plaats in het wiel al overnam.
+    #[test]
+    fn late_drop_of_an_expired_timer_keeps_the_next_one() {
+        static CLOCK: AtomicU64 = AtomicU64::new(0);
+        fn clock() -> u64 {
+            CLOCK.load(SeqCst)
+        }
+        let e: &'static Executor<8, 4> = Box::leak(Box::new(Executor::new()));
+        e.set_clock(clock);
+        let mut cx = Context::from_waker(Waker::noop());
+        CLOCK.store(1_000, SeqCst);
+        let mut a = e.after(Duration::from_nanos(100));
+        assert!(Pin::new(&mut a).poll(&mut cx).is_pending());
+        CLOCK.store(1_100, SeqCst);
+        assert!(e.expire_timers(clock())); // a's plaats is weer vrij
+        let mut b = e.after(Duration::from_nanos(1_000));
+        assert!(Pin::new(&mut b).poll(&mut cx).is_pending()); // b neemt hem
+        drop(a);
+        assert_eq!(e.next_deadline(), Some(2_100), "b's timer was wiped");
+        drop(b);
+        assert_eq!(e.next_deadline(), None);
     }
 
     #[test]

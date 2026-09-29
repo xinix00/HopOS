@@ -5,7 +5,7 @@
 //! de outbox inhangen (vanaf dan kan de app loggen, ook een paniek), de
 //! heap en de klok, READY, en dan twee taken op de executor van de
 //! app-core: de heartbeat en de app zelf. Keert de app terug, dan is dat
-//! exit 0.
+//! exit 0, na het net-afscheid van [`App::shutdown`].
 //!
 //! Een app schrijft:
 //!
@@ -71,6 +71,7 @@ pub async fn watch(app: &'static App) {
     let mut beat: u64 = 0;
     loop {
         beat = beat.wrapping_add(1);
+        // Een kill wacht niet op het net-afscheid: de kern vraagt nu.
         if app.beat(beat, HEAP.used()) == Beat::Kill {
             app.exit(0);
         }
@@ -96,10 +97,18 @@ where
     let app: &'static App = APP.get().get_or_init(move || fresh);
 
     let heap_end = start.saturating_add(size).saturating_sub(STACK_SIZE);
-    HEAP.init(
-        symbols::heap_start(),
-        usize::try_from(heap_end).unwrap_or(0),
-    );
+    // SAFETY: tussen het einde van het image (`__hopapp_heap_start`, het
+    // laatste symbool van applib/link.ld) en de stack onder de top van de
+    // RAM-declaratie ligt niets: dat stuk van de eigen partitie is van
+    // niemand anders (stage-2 geeft het alleen aan deze app) en leeft zo
+    // lang als de app. `init` gebeurt één keer, vóór de eerste allocatie.
+    // Op de host is het begin 0 en blijft de heap leeg.
+    unsafe {
+        HEAP.init(
+            symbols::heap_start(),
+            usize::try_from(heap_end).unwrap_or(0),
+        );
+    }
 
     let exec: &'static Exec = EXEC.get();
     exec.set_clock(clock::now_ns);
@@ -109,7 +118,7 @@ where
     let spawned = exec.spawn(watch(app)).and_then(|()| {
         exec.spawn(async move {
             main(app).await;
-            app.exit(0);
+            app.shutdown(0).await;
         })
     });
     if let Err(e) = spawned {

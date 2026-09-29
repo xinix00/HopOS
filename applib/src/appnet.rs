@@ -25,9 +25,14 @@
 //! eigen verbinding naar de kern als `KindLog`, met de outbox als terugval;
 //! het paniekpad blijft altijd op de outbox.
 //!
+//! Een app die stopt, sluit eerst netjes ([`Net::shutdown`], via
+//! `App::shutdown`): elk open handvat dicht, FIN na de data, en de pomp
+//! draait door tot elke FIN bevestigd is of de grens verstrijkt. Daarvoor
+//! houdt de [`Net`] een vaste tabel bij van wat de app open heeft.
+//!
 //! Dit module bezit de stack van de app (na [`up`], te vinden via [`net`]),
-//! de RX-bel en de log-verbinding; de ringen zelf zijn van de [`Nic`] die
-//! de pomp-taak bezit.
+//! de tabel van open handvatten, de RX-bel en de log-verbinding; de ringen
+//! zelf zijn van de [`Nic`] die de pomp-taak bezit.
 
 use crate::app::App;
 use crate::clock;
@@ -38,7 +43,7 @@ use crate::net::{Nic, PUMP_EARLY, PUMP_TIMER, RxPoll, host_ip, mac_of, slot_ip, 
 use crate::rt::{EXEC, Exec};
 use crate::sys::{self, ConnError};
 use alloc::vec::Vec;
-use core::cell::{OnceCell, RefCell};
+use core::cell::{Cell, OnceCell, RefCell};
 use core::fmt;
 use core::future::{Future, poll_fn};
 use core::pin::pin;
@@ -77,6 +82,38 @@ pub const SPIN_GUARD: Duration = Duration::from_micros(50);
 /// Hoe lang een dial naar de kern mag duren voor de system-client opgeeft.
 pub const SYS_DIAL_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Hoe lang [`TcpStream::flush`] wacht als de stream geen deadline heeft.
+/// Het slot-LAN is geheugen: een ACK van de kern komt in microseconden, dus
+/// wat na 200 ms nog open staat, wacht op iets anders dan de draad.
+pub const FLUSH_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Om de zoveel kijkt een wachtende flush of shutdown opnieuw. Wat hij
+/// afwacht (een andere verbinding die stil wordt, een budget dat terugkomt)
+/// wekt zijn eigen taak niet; een koud pad mag daarom pollen.
+pub const SETTLE_TICK: Duration = Duration::from_millis(1);
+
+/// De vloer van de tabel van open handvatten.
+pub const OPEN_MIN: usize = 64;
+
+/// Het plafond van die tabel. Een verbinding kost minstens 20 KiB budget
+/// (de vloeren van leannet: 16 KiB RX, 4 KiB TX), dus het grootste budget
+/// ([`BUDGET_MAX`]) draagt er ruim 800.
+pub const OPEN_MAX: usize = 1024;
+
+/// De maat van de tabel bij `budget`: één plek per 16 KiB budget, binnen
+/// [`OPEN_MIN`]..[`OPEN_MAX`]. Meer verbindingen dan dat past toch niet.
+#[must_use]
+pub const fn open_slots_for(budget: usize) -> usize {
+    let n = budget >> 14;
+    if n < OPEN_MIN {
+        OPEN_MIN
+    } else if n > OPEN_MAX {
+        OPEN_MAX
+    } else {
+        n
+    }
+}
+
 /// Waarom een netwerk-op niet lukte.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum NetError {
@@ -103,6 +140,8 @@ pub enum NetError {
     },
     /// De pomp-taak kon niet gespawnd worden.
     Spawn,
+    /// De app sluit af ([`Net::shutdown`]); er gaat niets nieuws meer open.
+    ShuttingDown,
 }
 
 impl fmt::Display for NetError {
@@ -117,6 +156,7 @@ impl fmt::Display for NetError {
             Self::Nic(e) => write!(f, "frame rings: {e}"),
             Self::OutOfMemory { bytes } => write!(f, "out of memory for {bytes} bytes"),
             Self::Spawn => f.write_str("cannot spawn the pump task"),
+            Self::ShuttingDown => f.write_str("the app is shutting down"),
         }
     }
 }
@@ -276,6 +316,40 @@ pub struct Net {
     ip: [u8; 4],
     frame_len: usize,
     dns: Option<[u8; 4]>,
+    /// Wat de app open heeft, zodat [`Net::shutdown`] het kan sluiten: een
+    /// vaste tabel, één keer gealloceerd, die nooit groeit. Een lening
+    /// duurt één statement.
+    open: RefCell<Vec<Option<Open>>>,
+    /// Handvatten die niet in de tabel pasten.
+    untracked: Cell<u64>,
+    /// [`Net::shutdown`] is begonnen: niets nieuws meer open.
+    closing: Cell<bool>,
+    /// Pomp-rondes die eindigden met een lege `poll_transmit`: alles wat
+    /// toen klaarstond, staat op de TX-ring. [`TcpStream::flush`] wacht op
+    /// een ronde na zijn eigen writes.
+    tx_rounds: Cell<u64>,
+}
+
+/// Een handvat dat de app open heeft.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Open {
+    Tcp(TcpHandle),
+    Listen(ListenHandle),
+    Udp(UdpHandle),
+}
+
+/// Wat [`Net::shutdown`] deed.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Drain {
+    /// Gesloten handvatten: verbindingen, listeners en UDP-sockets.
+    pub closed: usize,
+    /// Elke verbinding gaf haar buffers terug, dus elke FIN is bevestigd
+    /// en elk datagram is de deur uit.
+    pub drained: bool,
+    /// Hoe lang het afscheid duurde, in microseconden.
+    pub waited_us: u64,
+    /// Handvatten die de tabel niet kon volgen; die bleven open.
+    pub untracked: u64,
 }
 
 impl Net {
@@ -283,6 +357,13 @@ impl Net {
     /// en zijn tijd uit `clock` (dezelfde klok als die van `exec`).
     pub fn new(cfg: Config, seed: u32, exec: &'static Exec, clock: fn() -> u64) -> Result<Self> {
         let stack = Stack::new(cfg, seed)?;
+        let slots = open_slots_for(cfg.budget);
+        let mut open = Vec::new();
+        open.try_reserve_exact(slots)
+            .map_err(|_| NetError::OutOfMemory {
+                bytes: slots * core::mem::size_of::<Option<Open>>(),
+            })?;
+        open.resize(slots, None);
         Ok(Self {
             ip: cfg.ip,
             frame_len: stack.frame_len(),
@@ -290,6 +371,10 @@ impl Net {
             exec,
             clock,
             dns: None,
+            open: RefCell::new(open),
+            untracked: Cell::new(0),
+            closing: Cell::new(false),
+            tx_rounds: Cell::new(0),
         })
     }
 
@@ -370,7 +455,7 @@ impl Net {
         let mut corrupt_logged = false;
         loop {
             let got = self.ingest(nic, buf);
-            self.flush(nic, buf).await;
+            self.transmit(nic, buf).await;
             if got == RX_BATCH {
                 // Er ligt waarschijnlijk meer; eerst de rest een beurt.
                 yield_now().await;
@@ -426,11 +511,12 @@ impl Net {
     /// Alles wat de stack klaar heeft naar de TX-ring. Een frame dat na de
     /// tegendruk van de ring nog niet kon, is weg en geteld
     /// (`net::TX_DROPS`); TCP hertransmitteert.
-    async fn flush(&self, nic: &mut Nic, buf: &mut [u8]) {
+    async fn transmit(&self, nic: &mut Nic, buf: &mut [u8]) {
         let mut sent = 0;
         loop {
             let now = self.now();
             let Ok(Some(n)) = self.with(|st| st.poll_transmit(now, buf)) else {
+                self.tx_rounds.set(self.tx_rounds.get().wrapping_add(1));
                 return;
             };
             if let Some(frame) = buf.get(..n) {
@@ -524,8 +610,13 @@ impl Net {
 
     /// Opent een TCP-listener op `port` (0 kiest een efemere).
     pub fn tcp_listen(&'static self, port: u16) -> Result<TcpListener> {
+        self.admit()?;
         let h = self.with(|st| st.tcp_listen(port))??;
-        Ok(TcpListener { net: self, h })
+        Ok(TcpListener {
+            net: self,
+            h,
+            slot: self.track(Open::Listen(h)),
+        })
     }
 
     /// Verbindt met `ip:port`; de stack geeft na 30 s zonder antwoord op.
@@ -552,13 +643,10 @@ impl Net {
         port: u16,
         deadline: Option<u64>,
     ) -> Result<TcpStream> {
+        self.admit()?;
         let now = self.now();
         let h = self.with(|st| st.tcp_connect(ip, port, deadline, now))??;
-        let s = TcpStream {
-            net: self,
-            h,
-            deadline: None,
-        };
+        let s = self.stream(h);
         self.wait(
             deadline,
             |st, now| st.tcp_poll_connect(h, now),
@@ -570,11 +658,13 @@ impl Net {
 
     /// Bindt UDP-poort `port` (0 kiest een efemere).
     pub fn udp_bind(&'static self, port: u16) -> Result<UdpSocket> {
+        self.admit()?;
         let h = self.with(|st| st.udp_bind(port))??;
         Ok(UdpSocket {
             net: self,
             h,
             deadline: None,
+            slot: self.track(Open::Udp(h)),
         })
     }
 
@@ -609,6 +699,134 @@ impl Net {
     fn at(&self, d: Option<Duration>) -> Option<u64> {
         d.map(|d| self.now().saturating_add(nanos(d)))
     }
+
+    // ---- De tabel van open handvatten en het afscheid ----
+
+    /// Weigert iets nieuws zodra [`Net::shutdown`] begon.
+    fn admit(&self) -> Result {
+        if self.closing.get() {
+            return Err(NetError::ShuttingDown);
+        }
+        Ok(())
+    }
+
+    /// Een [`TcpStream`] over `h`, in de tabel.
+    fn stream(&'static self, h: TcpHandle) -> TcpStream {
+        TcpStream {
+            net: self,
+            h,
+            deadline: None,
+            slot: self.track(Open::Tcp(h)),
+        }
+    }
+
+    /// Zet `o` in de tabel; de plek. Is de tabel vol, dan blijft het
+    /// handvat werken maar sluit [`Net::shutdown`] het niet: één regel bij
+    /// de eerste keer, daarna alleen de teller.
+    fn track(&self, o: Open) -> Option<usize> {
+        let slot = self.open.try_borrow_mut().ok().and_then(|mut t| {
+            let i = t.iter().position(Option::is_none)?;
+            *t.get_mut(i)? = Some(o);
+            Some(i)
+        });
+        if slot.is_none() {
+            let n = self.untracked.get();
+            self.untracked.set(n.saturating_add(1));
+            if n == 0 {
+                let cap = self.open.try_borrow().map_or(0, |t| t.len());
+                log!(
+                    "appnet: open table full ({cap}), shutdown will not close this handle HOPOS_APPNET_UNTRACKED"
+                );
+            }
+        }
+        slot
+    }
+
+    /// Haalt `o` van plek `slot`, als het daar nog staat (een shutdown kan
+    /// hem al weggehaald hebben).
+    fn untrack(&self, slot: Option<usize>, o: Open) {
+        let Some(i) = slot else {
+            return;
+        };
+        if let Ok(mut t) = self.open.try_borrow_mut()
+            && let Some(e) = t.get_mut(i)
+            && *e == Some(o)
+        {
+            *e = None;
+        }
+    }
+
+    /// Sluit alles uit de tabel: listeners (hun backlog gaat mee),
+    /// verbindingen (FIN na de gebufferde data) en UDP-sockets. Het aantal
+    /// dat de stack aannam.
+    fn close_all(&self) -> usize {
+        let now = self.now();
+        let n = self.open.try_borrow().map_or(0, |t| t.len());
+        let mut closed = 0;
+        for i in 0..n {
+            let taken = self
+                .open
+                .try_borrow_mut()
+                .ok()
+                .and_then(|mut t| t.get_mut(i).and_then(Option::take));
+            let Some(o) = taken else {
+                continue;
+            };
+            let ok = self.with(|st| match o {
+                Open::Tcp(h) => st.tcp_close(h, now).is_ok(),
+                Open::Listen(h) => {
+                    st.tcp_listen_close(h);
+                    true
+                }
+                Open::Udp(h) => {
+                    st.udp_close(h);
+                    true
+                }
+            });
+            if ok == Ok(true) {
+                closed += 1;
+            }
+        }
+        closed
+    }
+
+    /// Is de stack leeg? Elke verbinding gaf haar buffers terug (leannet
+    /// geeft het zendbudget pas terug als de FIN bevestigd is, of als de
+    /// verbinding opgeruimd werd), en er ligt niets meer in een rij.
+    fn drained(&self) -> bool {
+        let now = self.now();
+        self.with(|st| st.budget_free() == st.config().budget && st.next_timeout(now) != Some(now))
+            .unwrap_or(false)
+    }
+
+    /// Het net-afscheid van een app die stopt: niets nieuws meer open, de
+    /// log-verbinding en elk handvat uit de tabel dicht (FIN na de data),
+    /// en dan wachten tot de stack leeg is ([`Drain::drained`]) of `limit`
+    /// verstrijkt. De pomp draait intussen gewoon als eigen taak; hij zet
+    /// de FIN's op de draad en neemt de ACK's aan.
+    ///
+    /// Waarom: `App::exit` parkeert de core, en wat dan nog in een
+    /// zendbuffer staat, is weg. Gemeten 29-09: een logregel over de
+    /// system-verbinding (`log_us=320`) die de kern nooit zag.
+    pub async fn shutdown(&self, limit: Duration) -> Drain {
+        let t0 = self.now();
+        let deadline = t0.saturating_add(nanos(limit));
+        self.closing.set(true);
+        close_log_link();
+        let closed = self.close_all();
+        let mut drained = self.drained();
+        while !drained && self.now() < deadline {
+            let tick = self.now().saturating_add(nanos(SETTLE_TICK)).min(deadline);
+            self.exec.until(tick).await;
+            drained = self.drained();
+        }
+        Drain {
+            closed,
+            drained,
+            waited_us: self.now().saturating_sub(t0) / 1000,
+            untracked: self.untracked.get(),
+        }
+    }
 }
 
 /// Een duur in nanoseconden, verzadigd.
@@ -620,6 +838,8 @@ fn nanos(d: Duration) -> u64 {
 pub struct TcpListener {
     net: &'static Net,
     h: ListenHandle,
+    /// De plek in de tabel van open handvatten.
+    slot: Option<usize>,
 }
 
 impl TcpListener {
@@ -645,17 +865,14 @@ impl TcpListener {
                 |st, w| st.listen_register_waker(h, w),
             )
             .await?;
-        Ok(TcpStream {
-            net: self.net,
-            h: c,
-            deadline: None,
-        })
+        Ok(self.net.stream(c))
     }
 }
 
 impl Drop for TcpListener {
     fn drop(&mut self) {
         let h = self.h;
+        self.net.untrack(self.slot, Open::Listen(h));
         let _ = self.net.with(|st| st.tcp_listen_close(h));
     }
 }
@@ -665,6 +882,8 @@ pub struct TcpStream {
     net: &'static Net,
     h: TcpHandle,
     deadline: Option<u64>,
+    /// De plek in de tabel van open handvatten.
+    slot: Option<usize>,
 }
 
 impl TcpStream {
@@ -726,11 +945,60 @@ impl TcpStream {
         Ok(())
     }
 
+    /// Wacht tot alles wat de app op deze verbinding schreef, op de draad
+    /// staat en bevestigd is. Op de deadline van de stream, of zonder
+    /// deadline na [`FLUSH_TIMEOUT`], wint [`NetError::Timeout`]; een reset
+    /// geeft de fout van de stack.
+    ///
+    /// leannet v3.0.0 laat per verbinding niet zien hoeveel er nog
+    /// onbevestigd is. Deze flush wacht daarom op het sterkere, wél
+    /// zichtbare: een pomp-ronde na de eigen writes die alles op de TX-ring
+    /// zette, en een stack zonder één lopende timer (`next_timeout` leeg:
+    /// geen hertransmissie, geen persist, geen rij). Dat bewijst dat ook
+    /// deze verbinding alles bevestigd kreeg. De prijs: zolang een andere
+    /// verbinding een timer heeft (een eigen onbevestigde write, of een
+    /// sluitende verbinding in FIN-WAIT of TIME-WAIT), wacht de flush tot
+    /// die stil is of tot zijn deadline. Te laat is hier beter dan te
+    /// vroeg: een `Ok` liegt nooit.
+    pub async fn flush(&mut self) -> Result {
+        let (net, h) = (self.net, self.h);
+        let deadline = self
+            .deadline
+            .unwrap_or_else(|| net.now().saturating_add(nanos(FLUSH_TIMEOUT)));
+        let round = net.tx_rounds.get();
+        loop {
+            // Een tik, zodat een andere verbinding die stil wordt ook gezien
+            // wordt: die wekt deze taak niet.
+            let tick = net.now().saturating_add(nanos(SETTLE_TICK)).min(deadline);
+            let r = net
+                .wait(
+                    Some(tick),
+                    |st, now| {
+                        st.tcp_state(h)?;
+                        let on_wire = net.tx_rounds.get() != round;
+                        if on_wire && st.next_timeout(now).is_none() {
+                            Ok(())
+                        } else {
+                            Err(StackError::WouldBlock)
+                        }
+                    },
+                    |st, w| st.tcp_register_write_waker(h, w),
+                )
+                .await;
+            match r {
+                Err(NetError::Timeout) if net.now() < deadline => {}
+                other => return other,
+            }
+        }
+    }
+
     /// Sluit de verbinding: FIN na de gebufferde data, en de pomp stuurt
     /// hem. Synchroon, want de stack wacht nergens op; wie de peer wil zien
-    /// sluiten, leest tot EOF vóór hij dit doet.
+    /// sluiten, leest tot EOF vóór hij dit doet, en wie wil weten dat de
+    /// data aankwam, doet eerst [`TcpStream::flush`].
     pub fn close(self) -> Result {
         let (net, h) = (self.net, self.h);
+        net.untrack(self.slot, Open::Tcp(h));
         // `Drop` zou nog een keer sluiten; dat is idempotent, maar zo zegt
         // de fout van deze close wat er gebeurde.
         core::mem::forget(self);
@@ -760,6 +1028,7 @@ impl TcpStream {
 impl Drop for TcpStream {
     fn drop(&mut self) {
         let (net, h) = (self.net, self.h);
+        net.untrack(self.slot, Open::Tcp(h));
         let now = net.now();
         // Een handvat dat de stack al opruimde (een mislukte dial) geeft
         // `Closed`; dat is hier het goede einde.
@@ -772,6 +1041,8 @@ pub struct UdpSocket {
     net: &'static Net,
     h: UdpHandle,
     deadline: Option<u64>,
+    /// De plek in de tabel van open handvatten.
+    slot: Option<usize>,
 }
 
 impl UdpSocket {
@@ -826,6 +1097,7 @@ impl UdpSocket {
 impl Drop for UdpSocket {
     fn drop(&mut self) {
         let h = self.h;
+        self.net.untrack(self.slot, Open::Udp(h));
         let _ = self.net.with(|st| st.udp_close(h));
     }
 }
@@ -949,9 +1221,9 @@ static LOG_KICK: Signal = Signal::new();
 ///
 /// Uit tenzij `LOGNET=1` in de env staat of de app dit aanroept. Waarom
 /// niet altijd: een regel in de zendring is pas bij de kern als de pomp
-/// hem verstuurd heeft, en `App::exit` parkeert de core meteen. De laatste
-/// regels vóór een exit (`HOPOS_APPSPIKE_DONE`) haalden de kern dan niet,
-/// en de outbox heeft dat probleem niet.
+/// hem verstuurd heeft. `App::shutdown` wacht daar nu op (tot 200 ms),
+/// maar `App::exit` en de paniek parkeren de core meteen, en de outbox
+/// heeft dat probleem niet.
 pub fn log_via_system(net: &'static Net) -> Result {
     {
         let mut link = log_cell().try_borrow_mut().map_err(|_| NetError::Busy)?;
@@ -1025,9 +1297,12 @@ pub(crate) fn try_log(line: &[u8]) -> bool {
 /// wegschrijven, en na een fout opnieuw verbinden.
 async fn log_link(net: &'static Net, addr: ([u8; 4], u16)) {
     loop {
-        let connected = log_cell()
-            .try_borrow()
-            .is_ok_and(|l| l.as_ref().is_some_and(|l| l.conn.is_some()));
+        let connected = match log_cell().try_borrow() {
+            // Weggehaald door een shutdown: deze taak is klaar.
+            Ok(l) if l.is_none() => return,
+            Ok(l) => l.as_ref().is_some_and(|l| l.conn.is_some()),
+            Err(_) => false,
+        };
         if !connected {
             match net
                 .tcp_connect_timeout(addr.0, addr.1, SYS_DIAL_TIMEOUT)
@@ -1051,6 +1326,30 @@ async fn log_link(net: &'static Net, addr: ([u8; 4], u16)) {
         flush_tail().await;
         LOG_KICK.wait().await;
     }
+}
+
+/// Haalt de log-verbinding weg voor een shutdown: een half verstuurde
+/// staart krijgt nog één kans in de zendring, dan gaat de verbinding dicht
+/// (FIN na de data) en schrijft `log!` weer naar de outbox. De taak
+/// [`log_link`] ziet de lege plek en stopt.
+fn close_log_link() {
+    let link = log_cell().try_borrow_mut().ok().and_then(|mut l| l.take());
+    LOG_KICK.set();
+    let Some(link) = link else {
+        return;
+    };
+    if let Some(conn) = link.conn.as_ref()
+        && link.tail_len > 0
+    {
+        let (net, h) = (conn.net, conn.h);
+        let now = net.now();
+        let tail = link.tail.get(..link.tail_len).unwrap_or_default();
+        // Wat nu niet past, is weg: de app stopt, en een half frame is
+        // voor de kern toch al een kapotte verbinding.
+        let _ = net.with(|st| st.tcp_write(h, tail, now));
+    }
+    // `Drop` van de `TcpStream` sluit hem.
+    drop(link);
 }
 
 /// Schrijft de staart van een half verstuurd log-frame weg. Een fout sluit

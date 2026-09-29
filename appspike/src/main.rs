@@ -75,7 +75,8 @@ async fn spike(app: &'static App) {
     if app.env("HOLD") == Some("1") {
         core::future::pending::<()>().await;
     }
-    app.exit(u64::from(s.fail));
+    // Netjes: eerst het net-afscheid (elke FIN bevestigd), dan de exit.
+    app.shutdown(u64::from(s.fail)).await;
 }
 
 /// De control-page: READY staat er, de RAM-maat is wat de app van zichzelf
@@ -233,34 +234,49 @@ async fn network(app: &'static App, s: &mut Score) {
         .log(b"HOPOS_APPSPIKE_NETLOG via the system connection")
         .await;
     let log_us = clock::now_ns().wrapping_sub(t1) / 1000;
-    // `log` keert terug zodra de regel in de TCP-zendbuffer staat; de pomp
-    // van de app zet hem pas op de draad als hij een beurt krijgt. Zonder
-    // deze pauze parkeert `exit` de core met het frame nog in de buffer, en
-    // ziet de kern niets (gemeten 29-09: log_us=320, geen regel). Een echte
-    // `flush` bij exit hoort in applib; tot dan wacht de toets één tik.
-    EXEC.after(Duration::from_millis(50)).await;
-    match r {
-        Ok(()) => s.check(
+    // `log` keert terug zodra de regel in de TCP-zendbuffer staat, niet als
+    // hij aankwam (gemeten 29-09: log_us=320, en zonder wachten zag de kern
+    // niets). `flush` wacht tot de kern hem bevestigde; zo meet de toets
+    // wat hij belooft, en niet een pauze die toevallig lang genoeg is.
+    let t2 = clock::now_ns();
+    let flushed = match client.conn_mut() {
+        Some(conn) => Some(conn.flush().await),
+        None => None,
+    };
+    let flush_us = clock::now_ns().wrapping_sub(t2) / 1000;
+    let ip = format_args!("ip={a}.{b}.{c}.{d} dial_us={dial_us}");
+    match (r, flushed) {
+        (Ok(()), Some(Ok(()))) => s.check(
             "NET",
             true,
-            format_args!("ip={a}.{b}.{c}.{d} dial_us={dial_us} log_us={log_us}"),
+            format_args!("{ip} log_us={log_us} flush_us={flush_us}"),
         ),
-        Err(e) => s.check(
+        (Err(e), _) => s.check("NET", false, format_args!("{ip} log: {e}")),
+        (Ok(()), Some(Err(e))) => s.check(
             "NET",
             false,
-            format_args!("ip={a}.{b}.{c}.{d} dial_us={dial_us} log: {e}"),
+            format_args!("{ip} flush after {flush_us}us: {e}"),
         ),
+        (Ok(()), None) => s.check("NET", false, format_args!("{ip} no connection to flush")),
     }
 }
 
-/// De heap: de executor alloceerde de taken, dus er is iets in gebruik, en
-/// het plafond ligt onder de stack.
+/// De heap: de executor alloceerde de taken, dus er is iets in gebruik, het
+/// plafond ligt onder de stack, en de wandeling vindt geen gebroken
+/// invariant. De piek en de weigeringen gaan mee als meetlat.
 fn heap(app: &App, s: &mut Score) {
-    let used = HEAP.used();
-    let cap = HEAP.capacity();
-    s.check(
-        "HEAP",
-        used > 0 && used <= cap && cap < app.ram_size(),
-        format_args!("used={used} capacity={cap}"),
-    );
+    let st = HEAP.stats();
+    let walk = HEAP.check();
+    let (used, cap) = (st.used, st.capacity);
+    match walk {
+        Ok(w) => s.check(
+            "HEAP",
+            used > 0 && used <= cap && cap < app.ram_size(),
+            format_args!(
+                "used={used} peak={} capacity={cap} allocs={} frees={} failed={} blocks={} free_blocks={}",
+                st.peak, st.allocs, st.frees, st.failed, w.blocks, w.free_blocks
+            ),
+        ),
+        Err(e) => s.check("HEAP", false, format_args!("used={used} {e}")),
+    }
 }
