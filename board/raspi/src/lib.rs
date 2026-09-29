@@ -192,34 +192,43 @@ impl<S: Soc> Raspi<S> {
     /// De OS-core die de bootargs vragen (`hopos.oscore=`), met een reden
     /// als het niet kan. Op de Pi blijft de kern op de boot-core: de cores
     /// zijn homogeen (elke vraag om een klasse is core 0 al), en een
-    /// verhuizing zou de GIC-400-route en de kick vragen die dit board nog
-    /// niet heeft.
+    /// verhuizing zou de SPI-route van de GIC-400 (ITARGETSR wijst naar de
+    /// core die `enable` riep) en de stop van de boot-core op ijzer vragen,
+    /// en die zijn hier niet bewezen.
     #[must_use]
     pub fn os_core(&self) -> (usize, Option<&'static str>) {
         match boot_param("hopos.oscore") {
             "" | "0" | "small" | "mid" | "big" => (0, None),
-            _ => (0, Some("the Pi keeps the OS on core 0 (GIC-400, no kick)")),
+            _ => (0, Some("the Pi keeps the OS on core 0 (GIC-400 SPI route)")),
         }
     }
 
     /// De kick van de OS-core voor de rotatie van `cpu::el2`: op een GIC-400
-    /// is er geen ICC_SGI1R (een SGI gaat via GICD_SGIR, MMIO), en de
-    /// switcher raakt bij een nulwoord geen GIC-register (`switch.rs`,
-    /// `hopos_el2_kick_os`). Dus geen kick: de kern komt tijdens de beurt
-    /// van een bewoner terug op zijn timer of een device-interrupt.
+    /// is er geen ICC_SGI1R, een SGI is een MMIO-schrijf naar GICD_SGIR. Dus
+    /// `sgir` = de PA daarvan (de switcher van een app-core draait met de
+    /// MMU uit) en `sgi1r` = het 32-bit woord `(1 << (16 + cpu)) | intid`
+    /// ([`driver_gicv2::Gic::sgi_word`]); de peek is GICC_HPPIR. Aanroepen
+    /// op de OS-core, na `start_interrupts` (het masker komt uit
+    /// `Gic::init`).
     #[must_use]
     pub fn os_bell(&self) -> cpu::el2::Bell {
+        let gic = S::gic();
         cpu::el2::Bell {
-            sgi1r: 0,
-            sgir: 0,
-            intid: driver_gicv2::FIRST_SPECIAL + 3,
-            pending: no_kick,
+            sgi1r: u64::from(gic.sgi_word(KICK_SGI)),
+            sgir: gic.sgir_pa().0,
+            intid: KICK_SGI,
+            pending: hppir::<S>,
         }
     }
 
-    /// De zelftest van de kick: op een GIC-400 is er geen kick (zie
-    /// [`os_bell`](Self::os_bell)), dus niets; de zelftest meldt dat luid.
-    pub fn kick_self(&self) {}
+    /// Stuurt de kick naar deze core zelf: de zelftest van het IPI-pad. Een
+    /// SGI naar het eigen masker in de doellijst is op GICv2 gewoon een SGI
+    /// (IHI 0048B 4.3.15); er is geen tweede core voor nodig, dus dit
+    /// bewijst ook QEMU `raspi4b` zonder PSCI.
+    pub fn kick_self(&self) {
+        let gic = S::gic();
+        gic.send_sgi(gic.sgi_word(KICK_SGI));
+    }
 
     /// De mailbox op, en wat de firmware over zichzelf zegt.
     fn mailbox(&self) {
@@ -338,12 +347,34 @@ impl<S: Soc> Default for Raspi<S> {
 /// De PPI van de EL2-fysieke timer (CNTHP).
 pub const HYP_TIMER_PPI: u32 = 26;
 
+/// De kick van de OS-core: SGI 8, gestuurd door de EL2-switcher van een
+/// app-core die de kern nodig heeft terwijl die geen SEV hoort (PORT.md
+/// beslissing 2).
+///
+/// Dezelfde 8 als QEMU virt en UEFI, niet de 7 van Rockchip: daar houdt
+/// TF-A SGI 8..15 als Secure Group 1, en een niet-beveiligde schrijf is
+/// RAZ/WI. De Pi's hebben die beperking niet: de BL31 van de Pi 4 en de
+/// Pi 5 (plat/rpi) kent geen beveiligde interrupts, `gicv2_pcpu_distif_init`
+/// zet alle SGI's en PPI's dus in Group 1, en de VideoCore-firmware gebruikt
+/// geen SGI (de secundaire cores wachten in een spin-table op WFE). 0..7
+/// laten we vrij zoals op virt: Linux-achtige gasten rekenen erop. Op ijzer
+/// NOG NIET GEMETEN (docs/boards-pi.md).
+pub const KICK_SGI: u32 = 8;
+
 /// De device-ack van de CNTHP.
 static HYP_TIMER_ACK: fn() = arch::hyp_timer_off;
 
-/// De peek van een board zonder kick: altijd "spurious".
-fn no_kick() -> u32 {
-    driver_gicv2::FIRST_SPECIAL + 3
+/// De "ack" van de kick: er is geen device om los te laten (de core is al
+/// terug bij de kern); alleen tellen.
+static KICK_ACK: fn() = count_kick;
+
+fn count_kick() {
+    cpu::el2::OS_STATS.kicks.fetch_add(1, Relaxed);
+}
+
+/// De peek van de OS-core: GICC_HPPIR van de GIC-400 van deze SoC.
+fn hppir<S: Soc>() -> u32 {
+    S::gic().hppir()
 }
 
 /// Een Normal-WB-blok (1 GB of 2 MB, de beschrijving is dezelfde).
@@ -470,6 +501,13 @@ impl<S: Soc> Board for Raspi<S> {
                 "irq: CNTHP PPI {HYP_TIMER_PPI} refused, the OS-core rotation runs without its timer"
             );
         }
+        // De kick van de app-cores: zonder vermelding in de dispatch zou de
+        // eerste claim hem als onbekende lijn uitzetten.
+        if cpu::irq::enable(cpu::irq::Line(KICK_SGI), Some(&KICK_ACK)).is_err() {
+            cpu::println!(
+                "irq: kick SGI {KICK_SGI} refused, the OS core hears app cores only on its timer"
+            );
+        }
         cpu::println!("irq: {}", gic.describe());
         // Vanaf hier mag de vector komen: hij zet de vlag, wekt de
         // dispatch-taak via `cpu::irq::on_irq` en keert gemaskeerd terug.
@@ -478,15 +516,18 @@ impl<S: Soc> Board for Raspi<S> {
     }
 
     fn dispatch_interrupts(&self) -> Dispatched {
+        let k0 = cpu::el2::OS_STATS.kicks.load(Relaxed);
         let pass = cpu::irq::global().dispatch();
         // De vector liet I dicht; de ronde is klaar, dus weer open.
         arch::irq_unmask();
+        // De kicks van deze ronde zijn geen NIC-werk.
+        let kicks = cpu::el2::OS_STATS.kicks.load(Relaxed).wrapping_sub(k0);
+        let kicks = u32::try_from(kicks).unwrap_or(u32::MAX);
+        let other = u32::from(pass.disabled.is_some()).saturating_add(kicks);
         Dispatched {
             timer: 0,
-            nic: pass
-                .claimed
-                .saturating_sub(u32::from(pass.disabled.is_some())),
-            other: u32::from(pass.disabled.is_some()),
+            nic: pass.claimed.saturating_sub(other),
+            other,
         }
     }
 

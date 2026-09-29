@@ -13,7 +13,14 @@
 #   HOPOS_CAGE_UP   de kooi-regio in het Device-venster van de Pi-kaart;
 #   stage:          een -initrd in het laadvenster (appspike), gelezen maar
 #                   met `hopos.stage=none` niet geplaatst (zie hieronder);
-#   HOPOS_TICK 3    drie seconden executor en slaap (WFE + event-stream).
+#   HOPOS_TICK 3    drie seconden executor en slaap (WFE + event-stream);
+#   HOPOS_OS_SELFTEST ok
+#                   de overgang van de OS-core: de CNTHP (PPI 26) haalt een
+#                   spinnende bewoner terug, een HVC #1 komt terug als yield,
+#                   en de kick-SGI via GICD_SGIR naar de core zelf komt terug
+#                   als IPI (board_raspi::KICK_SGI; geen tweede core nodig);
+#   kicks=1         de dispatch claimde die kick als bekende lijn en telde
+#                   hem, in plaats van hem als onbekend uit te zetten.
 #
 # Wat QEMU raspi4b NIET kan en dit script dus niet bewijst: de GENET (QEMU
 # haalt de node uit de DTB; de kern ziet dat en zegt HOPOS_NIC_NONE), en een
@@ -42,7 +49,7 @@ OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/n
 "$OBJCOPY" -O binary "$DIR/target/$TARGET/release/hopos" "$TMP/kernel8.img"
 "$OBJCOPY" --strip-debug "$DIR/target/$TARGET/release/appspike" "$TMP/app.elf"
 
-MARKERS="P2|HopOS|HOPOS_BOOT|irq: GIC-400|HOPOS_TICK 3"
+MARKERS="P2|HopOS|HOPOS_BOOT|irq: GIC-400|HOPOS_TICK 3|HOPOS_OS_SELFTEST ok|kicks=1)"
 set -- -kernel "$TMP/kernel8.img" -append "hopos.stage=none"
 if [ -f "$DTB" ]; then
 	set -- "$@" -dtb "$DTB" -initrd "$TMP/app.elf"
@@ -77,4 +84,5 @@ if [ "$fail" -ne 0 ]; then
 	exit 1
 fi
 grep -v "HOPOS_TICK" "$TMP/console.log" | head -40
+grep "HOPOS_TICK 3 " "$TMP/console.log" | head -1
 echo "qemu-rpi4-test: groen"

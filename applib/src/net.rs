@@ -40,6 +40,16 @@ pub static TX_DROPS: AtomicU64 = AtomicU64::new(0);
 pub static PUMP_EARLY: AtomicU64 = AtomicU64::new(0);
 /// De poll-timer van de pomp liep af.
 pub static PUMP_TIMER: AtomicU64 = AtomicU64::new(0);
+/// Kicks naar de OS-core (HVC #6) na een leeg-naar-niet-leeg op de TX-ring.
+/// Eén per burst, niet per frame: de switch van de kern leest de ring leeg
+/// zodra hij wakker is.
+///
+/// GEMETEN 29-09, `tools/qemu-test.sh` (virt, 4 cores, zes appspike-runs per
+/// kant): `dial_us` gemiddeld 3025 zonder en 2922 met de kick (binnen de
+/// ruis: na de SYN wacht de app, en die idle-yield kickte al), `flush_us`
+/// 1548 zonder en 1193 met (-23%: daar publiceert de app en rekent hij door
+/// tot zijn flush). 3 à 4 kicks tot en met de dial.
+pub static TX_KICKS: AtomicU64 = AtomicU64::new(0);
 
 /// Het interne IPv4 van slot `slot` (big-endian).
 #[must_use]
@@ -110,7 +120,14 @@ impl Nic {
         match self.tx.write(Kind::FRAME, frame) {
             Ok(was_empty) => {
                 if was_empty {
+                    // De SEV wekt een kern in WFE; de kick een kern die een
+                    // bewoner draait of in WFI slaapt (Go: `dev.Notify`, dat
+                    // op de M4 beide deed). Zonder kick hoorde de kern een
+                    // app die na zijn publicatie blijft rekenen pas op zijn
+                    // failsafe van 1 ms of op de idle-yield van de app.
                     dev::notify();
+                    crate::arch::hvc_kick_os();
+                    TX_KICKS.fetch_add(1, Relaxed);
                 }
                 Ok(())
             }

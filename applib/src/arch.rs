@@ -4,7 +4,7 @@
 //! op module-niveau).
 //!
 //! Waarom dit in applib staat en niet in `cpu`: een app-image is board-loos
-//! (de kooi ís het board, `board/hopslot` in de Go-boom), en deze vijf
+//! (de kooi ís het board, `board/hopslot` in de Go-boom), en deze zes
 //! instructies zijn alles wat een gekooide core van zijn silicium ziet.
 
 pub(crate) use imp::*;
@@ -85,6 +85,22 @@ mod imp {
         counter().wrapping_sub(a)
     }
 
+    /// De expliciete bel naar de OS-core (HVC #6): de switcher van deze
+    /// core stuurt de kick-SGI als de kern op dat moment geen SEV hoort (hij
+    /// draait een bewoner of slaapt in WFI; sched-blok 0 zegt het), en
+    /// hervat ons meteen. Op de OS-core zelf is het een yield naar nu: de
+    /// kern draait zijn ronde en geeft de core terug.
+    #[inline]
+    pub(crate) fn hvc_kick_os() {
+        // SAFETY: HVC #6 trapt naar de EL2-switcher; die gebruikt alleen
+        // x2/x3 als klad, zet x0..x3 terug uit zijn scratch en keert met ERET
+        // terug naar de instructie hierna (`switch.rs`, `.Lkickos`). Op de
+        // OS-core bewaart de rotatie de hele ctx en hervat hem daar ook
+        // (`oscore.rs`, `settle`). Geen `nomem`: de publicatie op de ring
+        // moet vóór de trap staan (de aanroeper deed `dev::notify`, een DSB).
+        unsafe { asm!("hvc #6", options(nostack, preserves_flags)) };
+    }
+
     /// Geeft de core aan de kern terug (HVC #0 naar de EL2-parkeerlus).
     /// PSCI CPU_OFF was op de Pi 5-stockfirmware een deur zonder terugweg;
     /// de kern bezit zijn cores en ze gaan nooit terug naar de firmware.
@@ -128,6 +144,9 @@ mod imp {
     pub(crate) fn hvc_yield(_deadline: u64) -> u64 {
         0
     }
+
+    /// Geen kern om te kicken: een no-op.
+    pub(crate) fn hvc_kick_os() {}
 
     pub(crate) fn park_exit() -> ! {
         loop {

@@ -13,10 +13,14 @@
 //! aangezet. Wat [`Gic::init`] doet is idempotent: PMR open, EnableGrp1 in
 //! GICC_CTLR en GICD_CTLR (NS-view bit 0).
 //!
-//! Geen SGI's: de kern wekt een app-core op een GIC-400 met SEV, want
-//! GICD_ISENABLER0 is per core gebankt en alleen door die core zelf te
-//! schrijven. Een PPI (de timer) kan HOP's core wel voor zichzelf aanzetten,
-//! om dezelfde reden.
+//! Eén SGI: de kick van de OS-core (PORT.md beslissing 2). De switcher van
+//! een app-core schrijft hem als 32-bit woord naar GICD_SGIR
+//! ([`Gic::sgir_pa`], [`Gic::sgi_word`]), de OS-core zet hem voor zichzelf
+//! scherp ([`Controller::enable`]: GICD_IPRIORITYR0..3 en ISENABLER0 zijn per
+//! core gebankt, dus alleen de ontvanger kan dat) en ziet hem met
+//! [`Gic::hppir`] zonder te claimen. De andere kant op (de kern wekt een
+//! app-core) blijft SEV: een app-core is nooit een doel van de GIC. Een PPI
+//! (de timers) zet de OS-core om dezelfde bank-reden zelf aan.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -31,10 +35,12 @@
 
 use core::fmt;
 use core::mem::offset_of;
-use core::sync::atomic::{AtomicU8, Ordering::Relaxed};
+use core::sync::atomic::{AtomicU8, AtomicU32, Ordering::Relaxed};
 use cpu::irq::{Controller, Error, Line};
 use dev::{Pa, Reg};
 
+/// Het aantal SGI's (INTID 0..=15).
+pub const SGI_COUNT: u32 = 16;
 /// De eerste PPI.
 pub const FIRST_PPI: u32 = 16;
 /// De INTID van SPI 0.
@@ -65,6 +71,8 @@ struct Gicd {
     itargetsr: [Reg<u8>; 1020],
     _r2: u32,
     icfgr: [Reg<u32>; 64],
+    _r3: [u32; 128],
+    sgir: Reg<u32>,
 }
 
 const _: () = {
@@ -81,6 +89,7 @@ const _: () = {
     assert!(offset_of!(Gicd, ipriorityr) == 0x400);
     assert!(offset_of!(Gicd, itargetsr) == 0x800);
     assert!(offset_of!(Gicd, icfgr) == 0xc00);
+    assert!(offset_of!(Gicd, sgir) == 0xf00);
 };
 
 /// De CPU-interface (ARM IHI 0048B, tabel 4-2).
@@ -113,6 +122,11 @@ pub struct Gic {
     /// Het CPU-masker van deze core in GICD_ITARGETSR-termen; 0 = nog
     /// niet gelezen.
     mask: AtomicU8,
+    /// De laatste rauwe GICC_IAR van [`claim`](Controller::claim): bij een
+    /// SGI dragen bits 12:10 de bron-core, en GICC_EOIR wil precies die
+    /// waarde terug (IHI 0048B 4.4.5). Eén claimer (de OS-core), en claim
+    /// en complete volgen elkaar in de dispatch-ronde op.
+    iar: AtomicU32,
 }
 
 impl Gic {
@@ -129,6 +143,7 @@ impl Gic {
             gicd,
             gicc,
             mask: AtomicU8::new(0),
+            iar: AtomicU32::new(FIRST_SPECIAL + 3),
         }
     }
 
@@ -170,6 +185,36 @@ impl Gic {
         self.mask.load(Relaxed)
     }
 
+    /// De PA van GICD_SGIR: waar de switcher van een app-core (EL2, MMU
+    /// uit) het woord van [`sgi_word`](Self::sgi_word) heen schrijft.
+    #[must_use]
+    pub fn sgir_pa(&self) -> Pa {
+        self.gicd.add(offset_of!(Gicd, sgir) as u64)
+    }
+
+    /// Het GICD_SGIR-woord dat SGI `intid` naar precies deze core stuurt
+    /// (aanroepen op de ontvanger, na [`init`](Self::init)):
+    /// TargetListFilter 0 (de lijst), CPUTargetList in 23:16 = het eigen
+    /// masker, dus `(1 << (16 + cpu)) | intid`, en NSATT 0.
+    #[must_use]
+    pub fn sgi_word(&self, intid: u32) -> u32 {
+        (u32::from(self.cpu_mask().max(1)) << 16) | (intid % SGI_COUNT)
+    }
+
+    /// Stuurt een SGI met het woord van [`sgi_word`](Self::sgi_word).
+    pub fn send_sgi(&self, word: u32) {
+        dev::mb();
+        self.d().sgir.write(word);
+        dev::mb();
+    }
+
+    /// De hoogste pending INTID van deze core (GICC_HPPIR), zonder hem te
+    /// claimen; 1023 = niets. Bij een SGI vallen de bron-bits (12:10) weg.
+    #[must_use]
+    pub fn hppir(&self) -> u32 {
+        self.c().hppir.read() & 0x3ff
+    }
+
     /// Maakt SPI `id` flankgevoelig (ICFGR bit 1 van zijn paar), vóór de
     /// enable: voor lijnen die een flank zijn (de MSI-vectoren van de MIP
     /// op de Pi 5).
@@ -202,10 +247,13 @@ impl Gic {
 impl Controller for Gic {
     /// Prioriteit, route naar deze core, dan pas scherp: route en
     /// prioriteit staan vóór de enable, anders kan de lijn één keer
-    /// verkeerd afgaan. Een PPI heeft geen route (hij is van de core zelf).
+    /// verkeerd afgaan. Een SGI of PPI heeft geen route (hij is van de core
+    /// zelf, en zijn prioriteit en enable zijn gebankt: dit geldt alleen
+    /// voor de aanroepende core). Op de GIC-400 zijn SGI's altijd scherp
+    /// (ISENABLER0[15:0] is RAO/WI); de schrijf is dan onschadelijk.
     fn enable(&self, l: Line) -> Result<(), Error> {
         let id = l.0;
-        if !(FIRST_PPI..FIRST_SPECIAL).contains(&id) {
+        if id >= FIRST_SPECIAL {
             return Err(Error::Rejected { line: id });
         }
         let d = self.d();
@@ -230,7 +278,7 @@ impl Controller for Gic {
     /// ICENABLER is write-1-to-clear: nooit lezen-aanpassen-schrijven, dat
     /// zou de buren raken.
     fn disable(&self, l: Line) {
-        if !(FIRST_PPI..FIRST_SPECIAL).contains(&l.0) {
+        if l.0 >= FIRST_SPECIAL {
             return;
         }
         if let Some(r) = self.d().icenabler.get((l.0 / 32) as usize) {
@@ -239,17 +287,30 @@ impl Controller for Gic {
         }
     }
 
-    /// GICC_IAR: de claim. 1020 en hoger is "niets".
+    /// GICC_IAR: de claim. 1020 en hoger is "niets". De rauwe waarde blijft
+    /// bewaard voor [`complete`](Controller::complete).
     fn claim(&self) -> Option<Line> {
-        let id = self.c().iar.read() & 0x3ff;
-        (id < FIRST_SPECIAL).then_some(Line(id))
+        let raw = self.c().iar.read();
+        let id = raw & 0x3ff;
+        if id >= FIRST_SPECIAL {
+            return None;
+        }
+        self.iar.store(raw & 0x1fff, Relaxed);
+        Some(Line(id))
     }
 
-    /// GICC_EOIR met dezelfde INTID (EOImode 0: priority drop én
-    /// deactivate). De CPUID-bits zijn alleen voor SGI's, en die claimen
-    /// wij niet.
+    /// GICC_EOIR (EOImode 0: priority drop én deactivate). Bij een SGI met
+    /// de bron-core erbij, uit de laatste claim van diezelfde INTID: een
+    /// EOI met de verkeerde CPUID deactiveert niets, en de SGI blijft dan
+    /// actief tot de volgende boot.
     fn complete(&self, l: Line) {
-        self.c().eoir.write(l.0);
+        let raw = self.iar.load(Relaxed);
+        let v = if l.0 < SGI_COUNT && raw & 0x3ff == l.0 {
+            raw
+        } else {
+            l.0
+        };
+        self.c().eoir.write(v);
     }
 }
 
@@ -336,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn ppi_has_no_route_and_sgis_are_refused() {
+    fn ppi_and_sgi_have_no_route_and_specials_are_refused() {
         let (mut d, mut c) = mem();
         let dp = pa(&mut d);
         // SAFETY: zie hierboven.
@@ -345,7 +406,11 @@ mod tests {
         g.enable(Line(30)).unwrap();
         assert_eq!(dev::read8(dp.add(0x800 + 30)), 0);
         assert_eq!(dev::read32(dp.add(0x100)), 1 << 30);
-        assert_eq!(g.enable(Line(5)), Err(Error::Rejected { line: 5 }));
+        // De kick-SGI: prioriteit en enable, geen target.
+        g.enable(Line(8)).unwrap();
+        assert_eq!(dev::read8(dp.add(0x400 + 8)), PRIORITY);
+        assert_eq!(dev::read8(dp.add(0x800 + 8)), 0);
+        assert_eq!(dev::read32(dp.add(0x100)), 1 << 8);
         assert_eq!(g.enable(Line(1020)), Err(Error::Rejected { line: 1020 }));
         // Een SGI of speciale lijn raakt ICFGR niet.
         g.set_edge(5);
@@ -365,5 +430,33 @@ mod tests {
         g.complete(Line(97));
         assert_eq!(dev::read32(cp.add(0x10)), 97);
         assert!(g.describe().to_string().starts_with("GIC-400: GICD"));
+    }
+
+    #[test]
+    fn sgi_word_aims_at_this_core_and_eoi_keeps_the_source() {
+        let (mut d, mut c) = mem();
+        let (dp, cp) = (pa(&mut d), pa(&mut c));
+        // Deze core is interface 2 (masker 0x4).
+        dev::write32(dp.add(0x800), 0x0404_0404);
+        // SAFETY: zie hierboven.
+        let g = unsafe { Gic::new(dp, cp) };
+        g.init();
+        assert_eq!(g.sgir_pa(), dp.add(0xf00));
+        assert_eq!(g.sgi_word(8), (1 << (16 + 2)) | 8);
+        g.send_sgi(g.sgi_word(8));
+        assert_eq!(dev::read32(dp.add(0xf00)), 0x0004_0008);
+        // HPPIR zonder de bron-bits.
+        dev::write32(cp.add(0x18), (1 << 10) | 8);
+        assert_eq!(g.hppir(), 8);
+        // Een SGI van core 1: de EOI draagt de bron terug.
+        dev::write32(cp.add(0x0c), (1 << 10) | 8);
+        assert_eq!(g.claim(), Some(Line(8)));
+        g.complete(Line(8));
+        assert_eq!(dev::read32(cp.add(0x10)), (1 << 10) | 8);
+        // Een SPI daarna: kale INTID.
+        dev::write32(cp.add(0x0c), 97);
+        assert_eq!(g.claim(), Some(Line(97)));
+        g.complete(Line(97));
+        assert_eq!(dev::read32(cp.add(0x10)), 97);
     }
 }

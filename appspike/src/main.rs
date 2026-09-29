@@ -246,7 +246,8 @@ async fn network(app: &'static App, s: &mut Score) -> Option<appnet::SystemClien
         None => None,
     };
     let flush_us = clock::now_ns().wrapping_sub(t2) / 1000;
-    let ip = format_args!("ip={a}.{b}.{c}.{d} dial_us={dial_us}");
+    let kicks = net::TX_KICKS.load(core::sync::atomic::Ordering::Relaxed);
+    let ip = format_args!("ip={a}.{b}.{c}.{d} dial_us={dial_us} tx_kicks={kicks}");
     match (r, flushed) {
         (Ok(()), Some(Ok(()))) => s.check(
             "NET",
