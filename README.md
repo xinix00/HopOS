@@ -29,13 +29,26 @@ bounded/    bounded collections, fallible
 sync/       Signal, Stop, channels, Local: the concurrency primitives
 executor/   one executor per core: tasks, timers, the idle governor
 abi/        the kernel/app contract: layout, rings, control page, system API
-cpu/        architecture: boot, vectors, EL2 and stage-2, PSCI, IRQ
-fw/         firmware readers: FDT, ACPI, ADT
-driver/     one crate per device
+netdev/     the NIC contract; blkdev/ the block device contract
+cpu/        architecture: boot, vectors, EL2 with the switcher and the OS-core
+            rotation, PSCI, IRQ, idle, TRNG, the kernel flip jump
+fw/         firmware readers: FDT, ACPI, bootcfg
+driver/     one crate per device: pl011, ns16550, gicv2, gicv3, pcie, virtio
+            (mmio and pci), virtionet, virtioblk, nvme, vcmail, brcmpcie,
+            nic/{mdio, igb, rtl8126, genet, gem, dwmac4}, scmi, smpro, dvfs
 net/        the switch, NAT, node networking
-kern/       slots, cage, hopfs, kernel flip, console
-board/      one crate per board
+kern/       slots, cage, hopfs, the system API, the kernel flip, the console
+board/      the Board contract; qemuvirt, uefi, o6n, altra, raspi, rpi4,
+            rpi5, rk3566
 applib/     the app runtime; apps link against it
 appspike/   the ABI test app
 hopos/      the kernel binary; picks exactly one board
+image/      the image builders per board; tools/ the gate and the QEMU tests
+docs/       the per-board checklists
 ```
+
+Build and test: `sh tools/gate.sh` (host tests, clippy, fmt, target builds),
+then `sh tools/qemu-test.sh`, `sh tools/qemu-test-hop.sh`,
+`sh tools/qemu-test-flip.sh`, `sh tools/qemu-uefi-test.sh` and
+`sh tools/qemu-rpi4-test.sh`. Images: `image/uefi-run.sh` (`BOARD=uefi|o6n|altra`),
+`image/rpi4.sh`, `image/rpi5.sh`, `image/radxa-zero3.sh`, `image/flip-bundle.sh`.
