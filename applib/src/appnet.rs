@@ -11,10 +11,13 @@
 //! `WouldBlock` de waker van deze taak op het handvat registreren. Een
 //! lening over een `.await` bestaat hier niet.
 //!
-//! Het interne net is deterministisch, dus er wordt niets geresolved: het
+//! Het interne net is deterministisch, dus daar wordt niets geresolved: het
 //! slot-IP en de MAC komen uit het slotnummer (`abi::layout`), de gateway is
 //! de kern (10.100.0.1) als statische buur, en de DNS-server staat in de env
-//! (`DNS`, of Go's `HOP_DNS`). Het bufferbudget is een achtste van de
+//! (`DNS`, of Go's `HOP_DNS`; voor Hop zet de kern daar de server uit zijn
+//! lease, `hopos/src/config.rs`).
+//! Namen buiten het slot-LAN lost [`resolve`] op: één A-vraag per keer over
+//! UDP naar die server ([`dns`]). Het bufferbudget is een achtste van de
 //! RAM-declaratie, geklemd op 1 tot 16 MiB (`NET_BUDGET` in de env wint).
 //!
 //! Deadlines lopen op het timerwiel van de executor (`Exec::until`), niet in
@@ -53,6 +56,9 @@ use core::time::Duration;
 use leannet::{Config, ListenHandle, Stack, TcpHandle, UdpHandle};
 use sync::{Local, Signal, yield_now};
 
+pub mod dns;
+
+pub use dns::DnsError;
 pub use leannet::{Endpoint, Error as StackError, Stats, TcpState};
 
 /// Het adres van de kern op het slot-LAN (de gateway).
@@ -91,6 +97,15 @@ pub const FLUSH_TIMEOUT: Duration = Duration::from_millis(200);
 /// afwacht (een andere verbinding die stil wordt, een budget dat terugkomt)
 /// wekt zijn eigen taak niet; een koud pad mag daarom pollen.
 pub const SETTLE_TICK: Duration = Duration::from_millis(1);
+
+/// Hoe lang één DNS-vraag op antwoord wacht voor de ene herhaling. Een
+/// resolver op het LAN antwoordt in milliseconden, een koude recursieve
+/// lookup bij de provider in honderden; drie seconden is ruim, en twee
+/// pogingen houden een verloren datagram onder de zes seconden.
+pub const DNS_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Hoeveel DNS-vragen [`Net::resolve`] stuurt: de eerste en één herhaling.
+pub const DNS_ATTEMPTS: u8 = 2;
 
 /// De vloer van de tabel van open handvatten.
 pub const OPEN_MIN: usize = 64;
@@ -142,6 +157,8 @@ pub enum NetError {
     Spawn,
     /// De app sluit af ([`Net::shutdown`]); er gaat niets nieuws meer open.
     ShuttingDown,
+    /// Een naam werd geen adres ([`resolve`]).
+    Dns(DnsError),
 }
 
 impl fmt::Display for NetError {
@@ -157,6 +174,7 @@ impl fmt::Display for NetError {
             Self::OutOfMemory { bytes } => write!(f, "out of memory for {bytes} bytes"),
             Self::Spawn => f.write_str("cannot spawn the pump task"),
             Self::ShuttingDown => f.write_str("the app is shutting down"),
+            Self::Dns(e) => write!(f, "{e}"),
         }
     }
 }
@@ -164,6 +182,12 @@ impl fmt::Display for NetError {
 impl From<StackError> for NetError {
     fn from(e: StackError) -> Self {
         Self::Stack(e)
+    }
+}
+
+impl From<DnsError> for NetError {
+    fn from(e: DnsError) -> Self {
+        Self::Dns(e)
     }
 }
 
@@ -180,6 +204,16 @@ static BELL: Signal = Signal::new();
 #[must_use]
 pub fn net() -> Option<&'static Net> {
     NET.get().get()
+}
+
+/// Het IPv4-adres van `host` over de stack van deze app: een naam die al
+/// een adres is meteen, anders een A-vraag aan de DNS-server uit de env
+/// ([`Net::resolve`]).
+pub async fn resolve(host: &str) -> Result<[u8; 4]> {
+    if let Some(ip) = parse_ip4(host) {
+        return Ok(ip);
+    }
+    net().ok_or(NetError::NotUp)?.resolve(host).await
 }
 
 /// Het budget: `env` (bytes, of met `k`/`m`) als die er is en klopt, anders
@@ -316,6 +350,9 @@ pub struct Net {
     ip: [u8; 4],
     frame_len: usize,
     dns: Option<[u8; 4]>,
+    /// Telt de DNS-vragen, zodat twee vragen in dezelfde klok-tik toch een
+    /// ander id krijgen.
+    dns_seq: Cell<u16>,
     /// Wat de app open heeft, zodat [`Net::shutdown`] het kan sluiten: een
     /// vaste tabel, één keer gealloceerd, die nooit groeit. Een lening
     /// duurt één statement.
@@ -371,6 +408,7 @@ impl Net {
             exec,
             clock,
             dns: None,
+            dns_seq: Cell::new(0),
             open: RefCell::new(open),
             untracked: Cell::new(0),
             closing: Cell::new(false),
@@ -666,6 +704,69 @@ impl Net {
             deadline: None,
             slot: self.track(Open::Udp(h)),
         })
+    }
+
+    /// Het IPv4-adres van `host`: een naam die al een adres is meteen, anders
+    /// een A-vraag aan de DNS-server uit de env ([`Net::dns`]).
+    pub async fn resolve(&'static self, host: &str) -> Result<[u8; 4]> {
+        if let Some(ip) = parse_ip4(host) {
+            return Ok(ip);
+        }
+        let server = self.dns.ok_or(NetError::Dns(DnsError::NoServer))?;
+        self.resolve_via(server, host).await
+    }
+
+    /// Vraagt `server` om het A-record van `host`: één vraag, wachten tot
+    /// [`DNS_TIMEOUT`], en na stilte één herhaling met een nieuw id.
+    ///
+    /// Een datagram van een ander adres, of met een verkeerd id of een
+    /// andere vraag, telt niet en de wacht gaat door: een laat antwoord op
+    /// de vorige poging of een gok van buiten maakt de vraag niet stuk. Een
+    /// echt antwoord dat nee zegt (NXDOMAIN, geen A, kapot) is meteen de
+    /// uitkomst; nog eens vragen verandert daar niets aan.
+    pub async fn resolve_via(&'static self, server: [u8; 4], host: &str) -> Result<[u8; 4]> {
+        let mut query = [0u8; dns::QUERY_MAX];
+        let mut buf = [0u8; dns::UDP_MAX];
+        let mut sock = self.udp_bind(0)?;
+        let to = Endpoint {
+            ip: server,
+            port: dns::PORT,
+        };
+        for _ in 0..DNS_ATTEMPTS {
+            let id = self.dns_id();
+            let n = dns::encode_query(id, host, &mut query)?;
+            sock.set_timeout(Some(DNS_TIMEOUT));
+            sock.send_to(to, query.get(..n).unwrap_or_default()).await?;
+            loop {
+                let (n, from) = match sock.recv_from(&mut buf).await {
+                    Ok(got) => got,
+                    Err(NetError::Timeout) => break,
+                    Err(e) => return Err(e),
+                };
+                if from != to {
+                    continue;
+                }
+                match dns::parse_answer(id, host, buf.get(..n).unwrap_or_default()) {
+                    Ok(ip) => return Ok(ip),
+                    Err(DnsError::BadId { .. } | DnsError::Mismatch) => {}
+                    Err(e) => return Err(NetError::Dns(e)),
+                }
+            }
+        }
+        Err(NetError::Dns(DnsError::Timeout {
+            attempts: DNS_ATTEMPTS,
+        }))
+    }
+
+    /// Een id voor de volgende DNS-vraag: de klok en een teller door elkaar.
+    /// Geen geheim (de app heeft geen entropiebron), maar anders per vraag,
+    /// zodat een laat antwoord op de vorige poging niet telt.
+    fn dns_id(&self) -> u16 {
+        let seq = self.dns_seq.get().wrapping_add(1);
+        self.dns_seq.set(seq);
+        let t = self.now();
+        let mixed = t ^ (t >> 16) ^ (t >> 32) ^ u64::from(seq).wrapping_mul(0x9e37);
+        (mixed & 0xffff) as u16
     }
 
     /// Een system-API-client over deze stack: hij verbindt bij de eerste

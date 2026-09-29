@@ -650,3 +650,165 @@ fn a_full_open_table_counts_instead_of_growing() {
     let l = p.app.tcp_listen(999).unwrap();
     assert_eq!(l.slot, Some(0));
 }
+
+// ---- DNS over het testnet: de kern speelt de server op poort 53 ----
+
+/// Wat de nep-server met de zoveelste vraag doet.
+type Answerer = fn(usize, u16, &str) -> Vec<Vec<u8>>;
+
+/// Een DNS-server op de kern die elke vraag aan `answer` voorlegt (het
+/// volgnummer, het id en de gevraagde naam) en stuurt wat die teruggeeft,
+/// in volgorde; niets is zwijgen. Telt de vragen in `seen`.
+async fn fake_dns(server: UdpSocket, answer: Answerer, seen: &'static Cell<usize>) {
+    let mut buf = [0u8; 512];
+    loop {
+        let (n, from) = server.recv_from(&mut buf).await.unwrap();
+        let q = &buf[..n];
+        let id = u16::from_be_bytes([q[0], q[1]]);
+        // De naam uit de vraag: labels vanaf offset 12.
+        let mut name = std::string::String::new();
+        let mut at = 12;
+        while q[at] != 0 {
+            let len = usize::from(q[at]);
+            if !name.is_empty() {
+                name.push('.');
+            }
+            name.push_str(core::str::from_utf8(&q[at + 1..at + 1 + len]).unwrap());
+            at += 1 + len;
+        }
+        let i = seen.get();
+        seen.set(i + 1);
+        for reply in answer(i, id, &name) {
+            server.send_to(from, &reply).await.unwrap();
+        }
+    }
+}
+
+/// Draait één resolve van `host` in slot 1 tegen een nep-server die met
+/// `answer` antwoordt; de uitkomst, het aantal vragen en de duur.
+fn resolve_against(answer: Answerer, host: &'static str) -> (Result<[u8; 4]>, usize, u64) {
+    let p = pair();
+    let seen: &'static Cell<usize> = leak(Cell::new(0));
+    let server = p.kern.udp_bind(dns::PORT).unwrap();
+    p.exec.spawn(fake_dns(server, answer, seen)).unwrap();
+    let got = slot();
+    let app = p.app;
+    let t0 = now();
+    p.exec
+        .spawn(async move {
+            let r = app.resolve_via(HOST, host).await;
+            *got.borrow_mut() = Some((r, now()));
+        })
+        .unwrap();
+    p.run_until(|| got.borrow().is_some());
+    let (r, t) = got.borrow_mut().take().unwrap();
+    (r, seen.get(), t - t0)
+}
+
+const A: &[u8] = &[140, 82, 121, 4];
+
+fn good(_: usize, id: u16, host: &str) -> Vec<Vec<u8>> {
+    vec![dns::tests::answer(
+        id,
+        0,
+        host,
+        &[(dns::tests::AT_QNAME, 1, A)],
+    )]
+}
+
+#[test]
+fn a_name_resolves_over_udp() {
+    let (r, seen, took) = resolve_against(good, "github.com");
+    assert_eq!((r, seen), (Ok([140, 82, 121, 4]), 1));
+    assert!(took < 100_000_000, "resolve duurde {took} ns");
+}
+
+#[test]
+fn a_wrong_id_is_ignored_and_the_right_answer_still_counts() {
+    fn liar(_: usize, id: u16, host: &str) -> Vec<Vec<u8>> {
+        // Eerst een vervalsing met een ander id, dan een met een andere
+        // naam (beide met een ander adres), dan het echte antwoord: de
+        // eerste twee mogen niet winnen en de wacht niet breken.
+        let fake = &[(dns::tests::AT_QNAME, 1, &[6u8; 4][..])];
+        let mut out = vec![
+            dns::tests::answer(id ^ 1, 0, host, fake),
+            dns::tests::answer(id, 0, "evil.example", fake),
+        ];
+        out.extend(good(0, id, host));
+        out
+    }
+    let (r, seen, _) = resolve_against(liar, "github.com");
+    assert_eq!((r, seen), (Ok([140, 82, 121, 4]), 1));
+}
+
+#[test]
+fn silence_gets_one_retry_with_a_new_id() {
+    fn second(i: usize, id: u16, host: &str) -> Vec<Vec<u8>> {
+        if i == 1 {
+            good(i, id, host)
+        } else {
+            Vec::new()
+        }
+    }
+    let (r, seen, took) = resolve_against(second, "pool.ntp.org");
+    assert_eq!((r, seen), (Ok([140, 82, 121, 4]), 2));
+    let t = u64::try_from(DNS_TIMEOUT.as_nanos()).unwrap();
+    assert!(took >= t && took < 2 * t, "{took}");
+
+    fn never(_: usize, _: u16, _: &str) -> Vec<Vec<u8>> {
+        Vec::new()
+    }
+    let (r, seen, took) = resolve_against(never, "pool.ntp.org");
+    assert_eq!(
+        (r, seen),
+        (Err(NetError::Dns(DnsError::Timeout { attempts: 2 })), 2)
+    );
+    assert!(took >= 2 * t && took < 3 * t, "{took}");
+}
+
+#[test]
+fn crooked_answers_over_the_wire_are_errors() {
+    fn truncated(_: usize, id: u16, host: &str) -> Vec<Vec<u8>> {
+        let m = dns::tests::answer(id, 0, host, &[(dns::tests::AT_QNAME, 1, A)]);
+        vec![m[..m.len() - 2].to_vec()]
+    }
+    fn only_aaaa(_: usize, id: u16, host: &str) -> Vec<Vec<u8>> {
+        vec![dns::tests::answer(
+            id,
+            0,
+            host,
+            &[(dns::tests::AT_QNAME, 28, &[0; 16])],
+        )]
+    }
+    fn nxdomain(_: usize, id: u16, host: &str) -> Vec<Vec<u8>> {
+        vec![dns::tests::answer(id, 3, host, &[])]
+    }
+    for (f, want) in [
+        (truncated as Answerer, DnsError::Truncated),
+        (only_aaaa, DnsError::NoAnswer),
+        (nxdomain, DnsError::NxDomain),
+    ] {
+        let (r, seen, _) = resolve_against(f, "example.com");
+        // Een antwoord dat nee zegt, wordt niet nog eens gevraagd.
+        assert_eq!((r, seen), (Err(NetError::Dns(want)), 1));
+    }
+}
+
+#[test]
+fn an_address_needs_no_server_and_a_name_without_server_says_so() {
+    let p = pair();
+    let got = slot();
+    let app = p.app;
+    p.exec
+        .spawn(async move {
+            let ip = app.resolve("10.0.2.2").await;
+            let name = app.resolve("github.com").await;
+            *got.borrow_mut() = Some((ip, name));
+        })
+        .unwrap();
+    p.run_until(|| got.borrow().is_some());
+    assert_eq!(
+        got.borrow_mut().take(),
+        Some((Ok([10, 0, 2, 2]), Err(NetError::Dns(DnsError::NoServer))))
+    );
+}
