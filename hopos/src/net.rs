@@ -31,7 +31,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::future::{Future, poll_fn};
 use core::net::Ipv4Addr;
-use core::sync::atomic::Ordering::Relaxed;
+use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use core::task::{Context, Poll, Waker};
 use core::time::Duration;
 use cpu::println;
@@ -80,6 +80,14 @@ static HOST_BELL: Signal = Signal::new();
 static STOP: Stop = Stop::new();
 /// De bevestiging van `SetUplink` na DHCP.
 static UPLINK_ACK: Ack = Ack::new();
+/// Het uplink-adres na de lease (big-endian als getal; 0 = nog geen lease).
+/// Eén schrijver (de host-taak), gelezen door de plaatsing van Hop: die
+/// zet het in `HOPOS_NODE_IP`, want de leader moet het endpoint zien dat
+/// van buiten bereikbaar is, niet het slot-adres.
+static UPLINK_IP: AtomicU32 = AtomicU32::new(0);
+/// De bevestiging van een `Publish`; de plaatsing van Hop is de enige
+/// zender en wacht elke bevestiging af voor hij de volgende stuurt.
+static PUBLISH_ACK: Ack = Ack::new();
 /// De node-stack, gezet door de host-taak na de lease. Zie de moduledoc
 /// voor waarom dit een `LocalCell` is en geen actor.
 static STACK: LocalCell<Option<Stack>> = LocalCell::cell(None);
@@ -121,6 +129,31 @@ pub(crate) const SYSTEM_WORKERS: usize = 3 * MAX_SYSTEM_CONNS as usize + 2;
 /// Weigeringen van de listener die een eigen regel krijgen; daarna tellen
 /// we alleen (handboek §6: falen is luid, en één keer).
 const LOUD_REFUSALS: u64 = 3;
+
+/// Het uplink-adres na de lease, of `None` zolang er geen lease is.
+pub(crate) fn uplink_ip() -> Option<Ipv4Addr> {
+    match UPLINK_IP.load(Relaxed) {
+        0 => None,
+        ip => Some(Ipv4Addr::from(ip)),
+    }
+}
+
+/// Zet TCP-poort `port` van de uplink door naar dezelfde poort in `slot`
+/// (DNAT in de switch, `Command::Publish`), zoals de Go-kern dat deed met
+/// de poorten uit een jobspec. Wacht op de bevestiging van de switch.
+pub(crate) async fn publish(slot: usize, port: u16) -> Result<(), net::Error> {
+    let cmd = Command::Publish {
+        proto: net::nat::Proto::Tcp,
+        node_port: port,
+        slot,
+        slot_port: port,
+        ack: &PUBLISH_ACK,
+    };
+    if COMMANDS.try_send(cmd).is_err() {
+        return Err(net::Error::Full("switch mailbox", switch::COMMANDS));
+    }
+    PUBLISH_ACK.wait().await.map(|_| ())
+}
 
 /// De vaste instellingen van het netwerkvlak, uit `main`.
 pub(crate) struct Params {
@@ -363,6 +396,7 @@ impl Node {
             }
         };
         *STACK.borrow_mut() = Some(stack);
+        UPLINK_IP.store(ip, Relaxed);
         println!(
             "net: {} (mac {}, gw {}) HOPOS_NET_UP",
             lease.ip,

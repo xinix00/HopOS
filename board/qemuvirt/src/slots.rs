@@ -39,6 +39,12 @@ pub const POOL: [Region; 2] = [
 /// (`-device loader,addr=…,data=<maat>,data-len=8` in image/qemu-run.sh).
 /// Nul = er is niets gestaged.
 pub const STAGE_HDR_PA: u64 = 0xB010_0000;
+/// Het woord met de rol van het gestagede image, direct na de maat
+/// (`-device loader,addr=…+8,data=<rol>,data-len=8`): 0 = een gewone app
+/// voor het ABI-bewijs (tools/qemu-test.sh), 1 = Hop, de bevoorrechte
+/// bewoner (PORT.md beslissing 1, tools/qemu-test-hop.sh). QEMU begint met
+/// nul-RAM, dus een run zonder dit woord is een gewone app.
+pub const STAGE_ROLE_PA: u64 = STAGE_HDR_PA + 8;
 /// Waar QEMU het image rauw neerlegt (`-device loader,file=…,addr=…,
 /// force-raw=on`): tussen de boot-scratch en de tweede pool-regio, dus
 /// buiten alles wat de lifecycle uitdeelt of wist.
@@ -46,7 +52,7 @@ pub const STAGE_PA: u64 = 0xB020_0000;
 /// De grootste staging: tot aan de tweede pool-regio.
 pub const STAGE_MAX: u64 = 0xB100_0000 - STAGE_PA;
 
-const _: () = assert!(STAGE_HDR_PA + 8 <= STAGE_PA);
+const _: () = assert!(STAGE_ROLE_PA + 8 <= STAGE_PA);
 const _: () = assert!(BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN <= STAGE_HDR_PA);
 const _: () = assert!(NODE_CTRL_PA >= DEVICE_WINDOW.base && CAGE_PA > NODE_CTRL_PA);
 
@@ -99,10 +105,34 @@ pub fn staged_image() -> Option<&'static [u8]> {
     imp::stage()
 }
 
+/// Wat het gestagede image is: welke weg de kern ermee gaat.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum StagedRole {
+    /// Een gewone app: de kern plaatst hem zelf, twee keer (het ABI-bewijs).
+    App,
+    /// Hop: de kern plaatst hem één keer, in slot 1, met de bevoegdheid.
+    Hop,
+}
+
+/// De rol uit [`STAGE_ROLE_PA`]; een onbekend woord is `None` (de kern
+/// plaatst dan niets en zegt dat luid).
+#[must_use]
+pub fn staged_role() -> Option<StagedRole> {
+    match imp::role() {
+        0 => Some(StagedRole::App),
+        1 => Some(StagedRole::Hop),
+        _ => None,
+    }
+}
+
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 mod imp {
-    use super::{STAGE_HDR_PA, STAGE_MAX, STAGE_PA};
+    use super::{STAGE_HDR_PA, STAGE_MAX, STAGE_PA, STAGE_ROLE_PA};
     use dev::Pa;
+
+    pub(super) fn role() -> u64 {
+        dev::read64(Pa(STAGE_ROLE_PA))
+    }
 
     pub(super) fn stage() -> Option<&'static [u8]> {
         let size = dev::read64(Pa(STAGE_HDR_PA));
@@ -124,5 +154,9 @@ mod imp {
     //! Host-stub: er is geen QEMU die iets neerlegde.
     pub(super) fn stage() -> Option<&'static [u8]> {
         None
+    }
+
+    pub(super) fn role() -> u64 {
+        0
     }
 }

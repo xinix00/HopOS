@@ -11,20 +11,23 @@
 #![no_main]
 #![allow(clippy::expect_used)] // boot-code: vóór de agent draait is falen parkeren (handboek §12)
 
+mod clock;
 mod net;
 mod slots;
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use board::Board;
 use board::heap::Heap;
+use board_qemuvirt::slots::{StagedRole, staged_role};
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use cpu::println;
 use executor::Executor;
 use kern::cage::{Console, PhysMem};
 use kern::slots::{Envelope, Reply, Servicers};
-use kern::system::{Hooks, LogTee, System};
+use kern::system::{Hooks, LogTee, Privilege, System};
 use netdev::Device;
 use sync::mpsc::Mailbox;
 use sync::{Local, Signal};
@@ -101,6 +104,33 @@ extern "C" fn kmain(dtb: u64, el: u64) -> ! {
         board.mem_total() >> 20,
     );
 
+    // De wandklok vóór er een bewoner is: zonder SNTP (nog niet geport) een
+    // vaste waarde, luid. Hop stempelt zijn taken ermee (clock.rs).
+    let off = clock::set(
+        clock::BOOT_WALL_SECS.saturating_mul(1_000_000_000),
+        exec.now(),
+    );
+    println!(
+        "clock: no SNTP yet, wall clock fixed at 2026-09-29T00:00:00Z (unix {} s, offset {off} ns) HOPOS_CLOCK_FIXED",
+        clock::BOOT_WALL_SECS
+    );
+
+    // Wat QEMU stagede, en of er dus een Hop is: alleen dan bestaat het
+    // token, en het hoort bij het slot waar de kern Hop plaatst, vóór de
+    // system-listener de eerste verbinding ziet (PORT.md beslissing 1).
+    let role = staged_role();
+    let privilege = match role {
+        Some(StagedRole::Hop) => kern::Slot::new(slots::HOP_SLOT).and_then(Privilege::boot),
+        _ => None,
+    };
+    if let Some(p) = &privilege {
+        println!(
+            "system: privilege minted for slot {} (Hop) HOPOS_PRIVILEGE",
+            p.slot()
+        );
+    }
+    let system = system(privilege);
+
     // De IRQ-dispatch spawnt als eerste: hij is de pomp van alle lijnen.
     // Faalt de controller, dan draait de node door op de vangrail van de
     // slaap (interrupts zijn een verbetering, geen voorwaarde).
@@ -121,7 +151,7 @@ extern "C" fn kmain(dtb: u64, el: u64) -> ! {
                 clock: board.clock(),
                 slot_wake: slots::wake,
             };
-            if let Err(e) = net::start(exec, nic, params, system_api()) {
+            if let Err(e) = net::start(exec, nic, params, system_api(system)) {
                 println!("net: {e} HOPOS_NET_FAIL");
             }
         }
@@ -130,7 +160,7 @@ extern "C" fn kmain(dtb: u64, el: u64) -> ! {
     }
 
     // De slots: de kooi-lijm, de lifecycle-actor en de servicers (slots.rs).
-    slots::start(exec);
+    slots::start(exec, role);
 
     let mut sleeper = board.sleeper();
     exec.run(&mut sleeper)
@@ -164,11 +194,18 @@ pub(crate) static LIFECYCLE: Mailbox<Envelope<'static>, LIFECYCLE_DEPTH> = Mailb
 /// Zolang er geen servicer leeft, laat de system-listener niemand toe.
 pub(crate) static SERVICERS: Servicers = Servicers::new();
 
-/// De system-API, gedeeld door alle verbindingstaken (net.rs). Zonder
-/// `Privilege`: het token hoort bij het slot van Hop en wordt door de
-/// lifecycle geslagen zodra die Hop start.
-static SYSTEM: System<'static, 'static, LIFECYCLE_DEPTH> =
-    System::new(&LIFECYCLE, &SERVICERS, None, SLOT_MAX).with_logs(&slots::LOGS);
+/// De system-API van deze boot, gedeeld door alle verbindingstaken
+/// (net.rs), met het token van Hop als die er is.
+///
+/// Geen `static`: `Privilege::boot` is geen `const` (hij slaat het token
+/// precies één keer), dus de API wordt één keer bij boot gebouwd en leeft
+/// daarna voor altijd. Boot-code: een heap die dit niet kan geven, is
+/// parkeren.
+fn system(privilege: Option<Privilege>) -> &'static System<'static, 'static, LIFECYCLE_DEPTH> {
+    Box::leak(Box::new(
+        System::new(&LIFECYCLE, &SERVICERS, privilege, SLOT_MAX).with_logs(&slots::LOGS),
+    ))
+}
 
 /// De antwoordplekken van de system-API: één per verbindingstaak, zodat
 /// een antwoord van de actor nooit bij een andere verbinding landt.
@@ -179,10 +216,11 @@ static SYSTEM_HOOKS: BootHooks = BootHooks;
 static SYSTEM_LOG: LogTee<'static, KernConsole> = LogTee::new(KernConsole, &slots::LOGS);
 
 /// De system-API voor de listener.
-fn system_api() -> net::SystemApi<LIFECYCLE_DEPTH, DevMem, BootHooks, LogTee<'static, KernConsole>>
-{
+fn system_api(
+    system: &'static System<'static, 'static, LIFECYCLE_DEPTH>,
+) -> net::SystemApi<LIFECYCLE_DEPTH, DevMem, BootHooks, LogTee<'static, KernConsole>> {
     net::SystemApi {
-        system: &SYSTEM,
+        system,
         replies: &SYSTEM_REPLIES,
         mem: DevMem,
         hooks: &SYSTEM_HOOKS,
@@ -213,15 +251,15 @@ impl PhysMem for DevMem {
     }
 }
 
-/// De haken van de system-API zolang er geen wandklok en geen flip-pad is:
-/// luid weigeren in plaats van stil slikken.
+/// De haken van de system-API: de klok van Hop zet de wandklok van de kern
+/// (en daarmee die van elke kooi); de flip heeft nog geen pad en weigert
+/// luid in plaats van stil te slikken.
 struct BootHooks;
 
 impl Hooks for BootHooks {
     fn set_clock(&self, unix_ns: u64) {
-        println!(
-            "system: clock set to {unix_ns} ns ignored, no wall clock yet HOPOS_CLOCK_IGNORED"
-        );
+        let off = clock::set(unix_ns, (BOARD.clock())());
+        println!("system: wall clock set by Hop to {unix_ns} ns (offset {off} ns) HOPOS_CLOCK_SET");
     }
     fn flip(&self, bundle: kern::Slot, _sha256: &[u8; 32]) -> kern::Result {
         println!(

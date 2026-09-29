@@ -20,7 +20,9 @@
 #                   de toets van buiten samenvalt), en na de stop van slot 2
 #                   (bewijst dat de listener na de keten niet hangt).
 #   appspike        het ABI-bewijs: appspike (door QEMU gestaged, zie
-#                   image/qemu-run.sh) draait in slot 1 op een app-core in
+#                   image/qemu-run.sh; zonder rolwoord op STAGE_ROLE_PA is
+#                   het een gewone app, dus plaatst de kern hem zelf; de
+#                   kring met Hop staat in tools/qemu-test-hop.sh) draait in slot 1 op een app-core in
 #                   zijn stage-2-kooi, al zijn toetsen groen via de servicer
 #                   op de console (HOPOS_APPSPIKE_DONE ... fail=0), en de kern
 #                   ziet exit 0 (HOPOS_SLOT_DONE); daarna hetzelfde in slot 2

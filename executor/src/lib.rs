@@ -100,6 +100,15 @@ pub struct Stats {
 struct Slot {
     ready: AtomicBool,
     task: RefCell<Option<Task>>,
+    /// De taak van dit slot wordt nu gepolld (hij is even uit `task`). Een
+    /// nieuwe taak mag hier dan niet in: de lopende poll zet zijn taak na
+    /// afloop terug en zou de nieuwe overschrijven. Dat gebeurde met een
+    /// taak die zelf rondes draait (`step`, zoals `Nested` in Hop): de
+    /// binnenste ronde zette een verse spawn (de RX-pomp van appnet) in het
+    /// "lege" slot van de wachtende taak, en de buitenste ronde gooide hem
+    /// weg. Gemeten 29-09 op QEMU virt: de pomp van Hop stond na 14
+    /// timer-wekken stil en een SYN op :8080 kreeg nooit antwoord.
+    polling: Cell<bool>,
 }
 
 impl Slot {
@@ -107,7 +116,13 @@ impl Slot {
         Self {
             ready: AtomicBool::new(false),
             task: RefCell::new(None),
+            polling: Cell::new(false),
         }
+    }
+
+    /// Vrij voor een nieuwe taak: geen taak, en niet midden in een poll.
+    fn is_free(&self) -> bool {
+        !self.polling.get() && self.task.borrow().is_none()
     }
 }
 
@@ -234,7 +249,7 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
         let mut worked = false;
         while let Some(task) = self.spawn.try_recv() {
             worked = true;
-            let free = self.slots.iter().find(|s| s.task.borrow().is_none());
+            let free = self.slots.iter().find(|s| s.is_free());
             match free {
                 Some(slot) => {
                     *slot.task.borrow_mut() = Some(task);
@@ -280,7 +295,10 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
             let waker = Self::waker(slot);
             let mut cx = Context::from_waker(&waker);
             self.stats.polls.fetch_add(1, Relaxed);
-            if task.as_mut().poll(&mut cx).is_pending() {
+            slot.polling.set(true);
+            let pending = task.as_mut().poll(&mut cx).is_pending();
+            slot.polling.set(false);
+            if pending {
                 *slot.task.borrow_mut() = Some(task);
             }
             worked = true;
@@ -429,6 +447,31 @@ mod tests {
         assert!(e.step());
         assert!(DONE.load(SeqCst));
         assert_eq!(e.live_tasks(), 0);
+    }
+
+    #[test]
+    fn a_spawn_during_a_nested_round_is_not_lost() {
+        // Hop's `Nested`: een taak spawnt en draait dan zelf rondes. De
+        // binnenste ronde mag de nieuwe taak niet in het slot van de
+        // wachtende taak zetten, anders overschrijft de buitenste ronde hem.
+        static GO: Signal = Signal::new();
+        static RAN: AtomicBool = AtomicBool::new(false);
+        let e = exec();
+        e.spawn(async move {
+            e.spawn(async {
+                GO.wait().await;
+                RAN.store(true, SeqCst);
+            })
+            .unwrap();
+            e.step(); // de binnenste ronde: plaatst en pollt de nieuwe taak
+            core::future::pending::<()>().await;
+        })
+        .unwrap();
+        e.step();
+        assert_eq!(e.live_tasks(), 2, "the nested spawn was overwritten");
+        GO.set();
+        e.step();
+        assert!(RAN.load(SeqCst));
     }
 
     #[test]

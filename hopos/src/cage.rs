@@ -20,7 +20,7 @@
 use abi::hopabi::{
     AppStatus, CTRL_CORES, CTRL_ENTRY, CTRL_EXIT_CODE, CTRL_FAULT_ESR, CTRL_FAULT_FAR,
     CTRL_FAULT_VEC, CTRL_HEARTBEAT, CTRL_KILL, CTRL_MBOX_PA, CTRL_RAM_SIZE, CTRL_S2_TABLE,
-    CTRL_SLOT, CTRL_SMP_REQ, CTRL_STATUS, CTRL_VEC_PA,
+    CTRL_SLOT, CTRL_SMP_REQ, CTRL_STATUS, CTRL_VEC_PA, CTRL_WALL_OFF,
 };
 use abi::layout::{
     self, ABI_TAIL, CTRL_STRIDE, CtxState, LINK_BASE, NET_RING_DATA_CAP, Plan, RING_DATA_CAP, Tail,
@@ -104,6 +104,10 @@ struct Built {
     ctrl: Pa,
     /// De primaire core.
     core: layout::Core,
+    /// De entry uit de ELF en de partitie, voor de startregel.
+    entry: u64,
+    /// De partitie van deze levensduur.
+    part: Region,
 }
 
 /// De kooi van QEMU virt: stage-2 onder EL2, de switcher in de plan-regio,
@@ -190,6 +194,9 @@ impl ArmCage {
             (CTRL_MBOX_PA, mbox.0),
             (CTRL_CORES, cores as u64),
             (CTRL_STATUS, AppStatus::Booting as u64),
+            // De wandklok vóór de start, zoals de Go-kern: Hop stempelt
+            // zijn taken ermee vanaf zijn eerste regel (clock.rs).
+            (CTRL_WALL_OFF, crate::clock::offset()),
         ] {
             dev::write64(ctrl.add(off), v);
         }
@@ -294,8 +301,11 @@ impl Cage for ArmCage {
             *b = Some(Built {
                 ctrl: tail.ctrl_page(),
                 core,
+                entry,
+                part,
             });
         }
+        crate::clock::attach(slot, tail.ctrl_page());
         println!(
             "cage: slot {slot} built: part {:#x}+{:#x} -> ipa {LINK_BASE:#x}, l1 {:#x}, ctrl {:#x}, core {core}",
             part.base,
@@ -312,9 +322,19 @@ impl Cage for ArmCage {
         let c = layout::Core::new(core.get()).ok_or(err(code::PLAN))?;
         let ctx = self.plan.ctx_pa(s).map_err(|_| err(code::PLAN))?;
         let tramp = self.installed.tramp;
+        // De startregel van elke levensduur, welke weg hij ook kwam (de
+        // boot-plaatsing of `STREAM_IMAGE` van Hop): hier, want dit is de
+        // ene plek waar elke start langskomt.
+        let started = || {
+            println!(
+                "HOPOS_SLOT_START slot={slot} core={core} entry={:#x} part={:#x}+{:#x}",
+                b.entry, b.part.base, b.part.size
+            );
+        };
         match el2::dispatch(&self.plan, c, ctx, tramp, b.ctrl.0) {
             Ok(Start::Woken) => {
                 println!("cage: slot {slot} dispatched to parked core {core} (mailbox + SEV)");
+                started();
                 Ok(())
             }
             Ok(Start::Cold) => {
@@ -328,6 +348,9 @@ impl Cage for ArmCage {
                     "cage: slot {slot} core {core} cold: PSCI CPU_ON mpidr={target:#x} entry={:#x} x0={:#x} -> {r:?}",
                     tramp.0, b.ctrl.0
                 );
+                if r.is_ok() {
+                    started();
+                }
                 r.map_err(|e| err(code::PSCI + e.code().unsigned_abs() as u32))
             }
             Err(e) => {
@@ -368,6 +391,7 @@ impl Cage for ArmCage {
     }
 
     fn revoke(&mut self, slot: Slot) {
+        crate::clock::detach(slot);
         let Ok(s) = self.slot(slot) else { return };
         if let Err(e) = el2::revoke(&self.plan, s) {
             println!("cage: slot {slot}: revoke: {e} HOPOS_CAGE_REVOKE");

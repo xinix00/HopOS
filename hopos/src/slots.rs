@@ -21,22 +21,37 @@
 //! trampoline en de parkeerlus van `cpu::el2` werkten zonder één fix; van
 //! CPU_ON tot READY minder dan de 20 ms van de eerste poll, en van de
 //! exit-HVC tot de geparkeerde mailbox (1) binnen één poll.
+//!
+//! # Hop
+//!
+//! Draagt de staging de rol Hop (`board_qemuvirt::slots::staged_role`,
+//! image/qemu-run.sh), dan plaatst de kern het image één keer, in slot 1,
+//! als de bevoorrechte bewoner (PORT.md beslissing 1 en 2): `Placement::hop`
+//! (klasse small, sharegroup `hop`), 64 MiB, de env met de `HOPOS_*`-keuzes,
+//! en het `Privilege`-token hoort bij slot 1 vanaf de boot (`main`). Daarna
+//! zet de switch de uplink-poorten van Hop door (8080 agent, 9080 leader)
+//! en bewaakt een taak de bewoner: elke wissel één regel, een fault of exit
+//! luid, zonder stop (wie Hop herstart is een volgende stap). Appspike
+//! plaatst de kern dan niet meer: dat doet Hop zelf, via de system-API.
 
 extern crate alloc;
 
 #[path = "cage.rs"]
 mod cage;
 
-use abi::layout::{ABI_TAIL, CtxState, LINK_BASE, RING_DATA_CAP};
+use abi::hopabi::{CTRL_ENV_DATA, CTRL_ENV_LEN, CTRL_ENV_MAX};
+use abi::layout::{ABI_CTRL_OFF, ABI_TAIL, CtxState, LINK_BASE, RING_DATA_CAP};
 use abi::place::{self, SYM_ABI, SYM_RAM_SIZE, SYM_RAM_START, SYM_SLOT_HINT, Window};
 use alloc::vec::Vec;
 use board::Board;
-use board_qemuvirt::slots as vboard;
+use board_qemuvirt::slots::{self as vboard, StagedRole};
 use cage::{ArmCage, ArmCores, DevMem, ExecTimer, KernConsole, SlotOutbox};
+use core::fmt::Write as _;
 use core::time::Duration;
 use cpu::el2::{self, CoreState};
 use cpu::println;
 use executor::Executor;
+use kern::cage::{CoreClass, Cores as _};
 use kern::partmem::{Geometry, PartitionPool};
 use kern::pool::{CorePool, Placement};
 use kern::slots::{
@@ -73,6 +88,31 @@ const FIRST_DEADLINE: Duration = Duration::from_secs(20);
 /// Het poll-ritme van de boot-plaatsing.
 const FIRST_POLL: Duration = Duration::from_millis(20);
 
+/// Het slot van Hop: de plaatsing bij boot, en het slot dat de bevoegdheid
+/// draagt (`main` slaat het token vóór de system-listener start).
+pub(crate) const HOP_SLOT: usize = 1;
+
+/// De partitie van Hop: 64 MiB, staart inbegrepen. Ruim: de release-ELF is
+/// 594 KiB laadbaar (gemeten 29-09), de rest is heap voor agent, leader,
+/// de HTTP-verbindingen en de download-buffer (64 KiB per hap).
+const HOP_MEM: u64 = 64 << 20;
+
+/// De agent-poort van Hop; de leader luistert op poort + 1000 (zoals Go).
+/// Beide worden op de uplink doorgezet.
+const HOP_PORT: u16 = 8080;
+
+/// Hoe lang de plaatsing van Hop op de DHCP-lease wacht voor
+/// `HOPOS_NODE_IP`. QEMU's user-net antwoordt binnen een milliseconde; zonder
+/// lease start Hop toch, met zijn slot-adres als endpoint (luid).
+const UPLINK_WAIT: Duration = Duration::from_secs(10);
+
+/// Het ritme van de bewaking van Hop: een regel per wissel, en om de
+/// [`HOP_BEAT_EVERY`] rondes een hartslagregel.
+const HOP_WATCH: Duration = Duration::from_secs(1);
+
+/// Om de hoeveel rondes van [`HOP_WATCH`] de bewaking de hartslag toont.
+const HOP_BEAT_EVERY: u64 = 30;
+
 /// De buffer van een servicer: één maximaal record (de halve outbox).
 const SERVICE_BUF: usize = (RING_DATA_CAP / 2) as usize;
 
@@ -80,7 +120,7 @@ const SERVICE_BUF: usize = (RING_DATA_CAP / 2) as usize;
 /// een servicer per slot, en de plaatsing van het gestagede image. Faalt
 /// een stap, dan één regel met marker en draait de node door zonder slots:
 /// het netwerk en de console hebben er niets mee te maken.
-pub(crate) fn start(exec: &'static Executor) {
+pub(crate) fn start(exec: &'static Executor, role: Option<StagedRole>) {
     let board = &crate::BOARD;
     let plan = match vboard::plan(board.cores()) {
         Ok(p) => p,
@@ -144,6 +184,7 @@ pub(crate) fn start(exec: &'static Executor) {
         pool.len(),
         parts.largest() >> 20
     );
+    let pool_bytes = parts.capacity();
     let cores = ArmCores::new(plan.clone());
     let actor = async move {
         let mut lc = Lifecycle::new(
@@ -170,7 +211,18 @@ pub(crate) fn start(exec: &'static Executor) {
             println!("slots: servicer {i} not spawned: {e:?} HOPOS_SLOT_SPAWN");
         }
     }
-    if let Err(e) = exec.spawn(place_first(exec, plan)) {
+    let spawned = match role {
+        Some(StagedRole::App) => exec.spawn(place_first(exec, plan)),
+        Some(StagedRole::Hop) => exec.spawn(place_hop(exec, plan, pool_bytes)),
+        None => {
+            println!(
+                "slots: staged role word {:#x} is neither app (0) nor hop (1), nothing placed HOPOS_SLOT_NONE",
+                dev::read64(dev::Pa(vboard::STAGE_ROLE_PA))
+            );
+            return;
+        }
+    };
+    if let Err(e) = spawned {
         println!("slots: first placement not spawned: {e:?} HOPOS_SLOT_SPAWN");
     }
 }
@@ -261,6 +313,175 @@ async fn place_first(exec: &'static Executor, plan: abi::layout::Plan) {
     }
 }
 
+/// De naam van deze node in Hop's cluster.
+const HOP_NODE: &str = "hopos-qemu";
+
+/// De plaatsing van Hop: het gestagede image één keer in slot 1, met de
+/// env van de node, dan de poorten op de uplink en de bewaking.
+async fn place_hop(exec: &'static Executor, plan: abi::layout::Plan, pool_bytes: u64) {
+    let Some(img) = vboard::staged_image() else {
+        println!("slots: role hop but no staged image, Hop not started HOPOS_HOP_FAIL");
+        return;
+    };
+    let Some(slot) = Slot::new(HOP_SLOT) else {
+        return;
+    };
+    let node_ip = wait_uplink(exec).await;
+    let env = match hop_env(node_ip, plan.app_cores(), pool_bytes) {
+        Ok(e) => e,
+        Err(_) => {
+            println!("slots: Hop env does not fit, Hop not started HOPOS_HOP_FAIL");
+            return;
+        }
+    };
+    let at = match hop_placement(&plan) {
+        Ok(a) => a,
+        Err(e) => {
+            println!("slots: Hop placement: {e}, Hop not started HOPOS_HOP_FAIL");
+            return;
+        }
+    };
+    let entry = match place(slot, img, HOP_MEM, at, env.as_bytes()).await {
+        Ok(e) => e,
+        Err(e) => {
+            println!("slot {slot}: Hop not started: {e} HOPOS_HOP_FAIL");
+            return;
+        }
+    };
+    let st = status(slot).await;
+    let core = st.and_then(|s| s.core).map_or(0, |(c, _)| c.get());
+    let part = st.and_then(|s| s.partition).unwrap_or_default();
+    println!(
+        "HOPOS_HOP_START slot={slot} core={core} entry={entry:#x} part={:#x}+{:#x} image={} env={}",
+        part.base,
+        part.size,
+        img.len(),
+        env.len()
+    );
+    for port in [HOP_PORT, HOP_PORT.saturating_add(1000)] {
+        match crate::net::publish(slot.get(), port).await {
+            Ok(()) => println!("net: uplink tcp :{port} -> slot {slot} :{port} HOPOS_HOP_PUBLISH"),
+            Err(e) => println!(
+                "net: uplink tcp :{port} not published to slot {slot}: {e} HOPOS_HOP_PUBLISH_FAIL"
+            ),
+        }
+    }
+    watch_hop(exec, &plan, slot, core).await;
+}
+
+/// Wacht tot de lease er is, hooguit [`UPLINK_WAIT`]; `None` na de termijn.
+async fn wait_uplink(exec: &'static Executor) -> Option<core::net::Ipv4Addr> {
+    let deadline = exec.now().saturating_add(UPLINK_WAIT.as_nanos() as u64);
+    loop {
+        if let Some(ip) = crate::net::uplink_ip() {
+            return Some(ip);
+        }
+        if exec.now() >= deadline {
+            println!(
+                "slots: no uplink lease after {} s, Hop announces its slot address HOPOS_HOP_NO_UPLINK",
+                UPLINK_WAIT.as_secs()
+            );
+            return None;
+        }
+        exec.after(Duration::from_millis(50)).await;
+    }
+}
+
+/// De env van Hop (`agentd_hopos::env` in de hop-repo): `key=val\n`.
+///
+/// `HOPOS_INSECURE=1`: de kern heeft nog geen bron voor een API-sleutel
+/// (`hopos.cfg` en de bootparams zijn niet geport), en zonder sleutel én
+/// zonder deze vlag weigert Hop zijn API (fail closed). Alleen QEMU draagt
+/// dit pad; een board met een sleutel geeft `HOPOS_APIKEY`. Hop meldt het
+/// zelf luid (`HOPOS_API_INSECURE`).
+fn hop_env(
+    node_ip: Option<core::net::Ipv4Addr>,
+    app_cores: usize,
+    pool_bytes: u64,
+) -> Result<alloc::string::String, core::fmt::Error> {
+    let mut env = alloc::string::String::new();
+    writeln!(env, "HOPOS_INSECURE=1")?;
+    writeln!(env, "HOPOS_NODE={HOP_NODE}")?;
+    writeln!(env, "HOPOS_CLUSTER=hopos")?;
+    if let Some(ip) = node_ip {
+        writeln!(env, "HOPOS_NODE_IP={ip}")?;
+    }
+    writeln!(env, "HOPOS_PORT={HOP_PORT}")?;
+    // Hop plant tegen de cores die hij kan uitdelen: alle app-cores min de
+    // zijne (hij deelt zijn core niet met jobs, alleen met zijn groep).
+    writeln!(env, "HOPOS_CORES={}", app_cores.saturating_sub(1).max(1))?;
+    writeln!(env, "HOPOS_MEMORY={}", pool_bytes.saturating_sub(HOP_MEM))?;
+    println!(
+        "slots: Hop env: {} HOPOS_HOP_ENV",
+        env.trim_end().replace('\n', " ")
+    );
+    println!(
+        "slots: Hop runs with HOPOS_INSECURE=1: no API key source on this board yet HOPOS_HOP_INSECURE"
+    );
+    Ok(env)
+}
+
+/// `Placement::hop` (klasse small, sharegroup `hop`), met de terugval van
+/// dit board: kent de kern geen kleine app-core, dan vervalt de klasse en
+/// neemt Hop de eerste vrije app-core, luid.
+fn hop_placement(plan: &abi::layout::Plan) -> kern::Result<Placement> {
+    let mut at = Placement::hop()?;
+    let cores = ArmCores::new(plan.clone());
+    let small = (1..=cores.app_cores())
+        .filter_map(kern::Core::new)
+        .any(|c| cores.class(c) == Some(CoreClass::Small));
+    if !small {
+        // QEMU virt: alle cores zijn cortex-a53 en het board noemt ze
+        // allemaal "big" (`Board::core_class`); de kooi-lijm kent geen
+        // klassen. Een klasse eisen die niet bestaat, is nooit starten.
+        println!(
+            "slots: no small app core among {} (qemu virt: all big), Hop takes the first free app core HOPOS_HOP_CLASS_FALLBACK",
+            cores.app_cores()
+        );
+        at.class = None;
+    }
+    Ok(at)
+}
+
+/// Bewaakt Hop: elke wissel van app-status, core of fault één regel, om de
+/// [`HOP_BEAT_EVERY`] seconden de hartslag. Een fault of exit is luid en
+/// het einde van de bewaking; een herstart van Hop is een volgende stap
+/// (de kern stopt hem niet, zodat zijn staat voor diagnose blijft staan).
+async fn watch_hop(exec: &'static Executor, plan: &abi::layout::Plan, slot: Slot, core: usize) {
+    let t0 = exec.now();
+    let mut last: Option<(u64, u64, bool)> = None;
+    let mut round: u64 = 0;
+    loop {
+        let Some(st) = status(slot).await else {
+            println!("slot {slot}: Hop status unavailable HOPOS_HOP_FAIL");
+            return;
+        };
+        let seen = (st.cage.app, st.cage.fault_vec, st.cage.core_on);
+        round = round.wrapping_add(1);
+        if last != Some(seen) || round.is_multiple_of(HOP_BEAT_EVERY) {
+            probe(plan, slot, core, &st, exec.now().saturating_sub(t0));
+            last = Some(seen);
+        }
+        if st.cage.fault_vec != 0 {
+            println!(
+                "slot {slot}: Hop faulted vec={} esr={:#x} far={:#x} HOPOS_HOP_FAULT",
+                st.cage.fault_vec - 1,
+                st.cage.fault_esr,
+                st.cage.fault_far
+            );
+            return;
+        }
+        if st.cage.app == abi::hopabi::AppStatus::Exited as u64 {
+            println!(
+                "slot {slot}: Hop exited with {} HOPOS_HOP_EXIT",
+                st.cage.exit_code
+            );
+            return;
+        }
+        exec.after(HOP_WATCH).await;
+    }
+}
+
 /// Eén levensduur van `img` in `slot`: plaatsen, volgen tot de exit, en
 /// stoppen. Geeft `true` als de stop bevestigd is (core en partitie vrij).
 async fn run_once(
@@ -269,7 +490,11 @@ async fn run_once(
     slot: Slot,
     img: &[u8],
 ) -> bool {
-    let entry = match place(slot, img).await {
+    let at = Placement {
+        cores: 1,
+        ..Placement::default()
+    };
+    let entry = match place(slot, img, FIRST_MEM, at, &[]).await {
         Ok(e) => e,
         Err(e) => {
             println!("slot {slot}: not started: {e} HOPOS_SLOT_FAIL");
@@ -278,27 +503,25 @@ async fn run_once(
     };
     let st = status(slot).await;
     let core = st.and_then(|s| s.core).map_or(0, |(c, _)| c.get());
-    let part = st.and_then(|s| s.partition).unwrap_or_default();
+    // De startregel (`HOPOS_SLOT_START`) zette de kooi-lijm al bij de
+    // dispatch; hier alleen wat alleen de boot-plaatsing weet.
     println!(
-        "HOPOS_SLOT_START slot={slot} core={core} entry={entry:#x} part={:#x}+{:#x} image={}",
-        part.base,
-        part.size,
+        "slot {slot}: placed by the kern, image {} bytes, entry {entry:#x}",
         img.len()
     );
     watch_first(exec, plan, slot, core).await
 }
 
-/// Plaatst `img` in `slot`: Claim, de segmenten en de patches in de grant,
-/// Arm. Geeft de entry.
-async fn place(slot: Slot, img: &[u8]) -> Result<u64, PlaceError> {
-    let spec = StartSpec::new(
-        slot,
-        FIRST_MEM,
-        Placement {
-            cores: 1,
-            ..Placement::default()
-        },
-    );
+/// Plaatst `img` in `slot` met `mem` bytes en de core-vraag `at`: Claim,
+/// de segmenten, de patches en de env in de grant, Arm. Geeft de entry.
+async fn place(
+    slot: Slot,
+    img: &[u8],
+    mem: u64,
+    at: Placement,
+    env: &[u8],
+) -> Result<u64, PlaceError> {
+    let spec = StartSpec::new(slot, mem, at);
     let grant = match ask(Request::Claim(spec)).await? {
         Response::Granted(g) => g,
         _ => return Err(PlaceError::Reply),
@@ -307,7 +530,8 @@ async fn place(slot: Slot, img: &[u8]) -> Result<u64, PlaceError> {
         Ok(placement) => {
             let mut grant = grant;
             let mut mem = DevMem;
-            let written = write_image(&mut grant, &mut mem, img, &placement);
+            let written = write_image(&mut grant, &mut mem, img, &placement)
+                .and_then(|()| write_env(&mut grant, &mut mem, env));
             if let Err(e) = written {
                 let _ = ask(Request::Abort(grant)).await;
                 return Err(e);
@@ -407,6 +631,26 @@ fn write_image(
             .map_err(PlaceError::Kern)?;
     }
     Ok(())
+}
+
+/// Legt de env-blob (`key=val\n`) op de control-page, zoals `put_env` van
+/// de system-API: de app leest hem bij zijn start (`applib::App::env`).
+/// Een lege env schrijft niets; de claim wiste de page al (E3).
+fn write_env(grant: &mut ImageGrant, mem: &mut DevMem, env: &[u8]) -> Result<(), PlaceError> {
+    if env.is_empty() {
+        return Ok(());
+    }
+    if env.len() as u64 > CTRL_ENV_MAX {
+        return Err(PlaceError::Kern(kern::Error::TooLarge {
+            len: env.len(),
+            max: CTRL_ENV_MAX as usize,
+        }));
+    }
+    let ctrl = grant.region().size.saturating_sub(ABI_TAIL) + ABI_CTRL_OFF;
+    grant
+        .write(mem, ctrl + CTRL_ENV_DATA, env)
+        .and_then(|()| grant.write(mem, ctrl + CTRL_ENV_LEN, &(env.len() as u64).to_le_bytes()))
+        .map_err(PlaceError::Kern)
 }
 
 /// Volgt een bewoner tot zijn exit: elke statuswissel één regel met de
