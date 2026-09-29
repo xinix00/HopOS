@@ -55,8 +55,8 @@ use kern::cage::{CoreClass, Cores as _};
 use kern::partmem::{Geometry, PartitionPool};
 use kern::pool::{CorePool, Placement};
 use kern::slots::{
-    Envelope, ImageGrant, Lifecycle, Reply, Request, Response, Servicers, SlotStatus, StartSpec,
-    call, servicer_task,
+    Envelope, ImageGrant, Lifecycle, Mount, Reply, Request, Response, Servicers, SlotStatus,
+    StartSpec, call, servicer_task,
 };
 use kern::system::{LogTee, SlotLogs};
 use kern::{Region, Slot};
@@ -96,6 +96,12 @@ pub(crate) const HOP_SLOT: usize = 1;
 /// 594 KiB laadbaar (gemeten 29-09), de rest is heap voor agent, leader,
 /// de HTTP-verbindingen en de download-buffer (64 KiB per hap).
 const HOP_MEM: u64 = 64 << 20;
+
+/// Het volume van Hop: `/hop` in zijn zicht, `/volumes/hop` op hopfs. Daar
+/// bewaart `agentd-hopos` zijn `agent-state.json` en leest hij hem na een
+/// herstart terug (`Node::restore`); zijn eigen root (`/.tasks/slot1`) is
+/// bij elke start leeg, het volume niet.
+const HOP_VOLUME: (&[u8], &[u8]) = (b"/hop", b"/volumes/hop");
 
 /// De agent-poort van Hop; de leader luistert op poort + 1000 (zoals Go).
 /// Beide worden op de uplink doorgezet.
@@ -341,7 +347,14 @@ async fn place_hop(exec: &'static Executor, plan: abi::layout::Plan, pool_bytes:
             return;
         }
     };
-    let entry = match place(slot, img, HOP_MEM, at, env.as_bytes()).await {
+    let volume = match kern_mounts(&[HOP_VOLUME]) {
+        Ok(m) => m,
+        Err(e) => {
+            println!("slots: Hop volume: {e}, Hop not started HOPOS_HOP_FAIL");
+            return;
+        }
+    };
+    let entry = match place(slot, img, HOP_MEM, at, env.as_bytes(), volume).await {
         Ok(e) => e,
         Err(e) => {
             println!("slot {slot}: Hop not started: {e} HOPOS_HOP_FAIL");
@@ -494,7 +507,7 @@ async fn run_once(
         cores: 1,
         ..Placement::default()
     };
-    let entry = match place(slot, img, FIRST_MEM, at, &[]).await {
+    let entry = match place(slot, img, FIRST_MEM, at, &[], Vec::new()).await {
         Ok(e) => e,
         Err(e) => {
             println!("slot {slot}: not started: {e} HOPOS_SLOT_FAIL");
@@ -512,16 +525,42 @@ async fn run_once(
     watch_first(exec, plan, slot, core).await
 }
 
-/// Plaatst `img` in `slot` met `mem` bytes en de core-vraag `at`: Claim,
-/// de segmenten, de patches en de env in de grant, Arm. Geeft de entry.
+/// De volumes als `kern::slots::Mount`, faalbaar gealloceerd.
+fn kern_mounts(list: &[(&[u8], &[u8])]) -> kern::Result<Vec<Mount>> {
+    let copy = |b: &[u8]| -> kern::Result<Vec<u8>> {
+        let mut v = Vec::new();
+        v.try_reserve_exact(b.len())
+            .map_err(|_| kern::Error::OutOfMemory { bytes: b.len() })?;
+        v.extend_from_slice(b);
+        Ok(v)
+    };
+    let mut out = Vec::new();
+    out.try_reserve_exact(list.len())
+        .map_err(|_| kern::Error::OutOfMemory {
+            bytes: list.len() * core::mem::size_of::<Mount>(),
+        })?;
+    for (local, shared) in list {
+        out.push(Mount {
+            local: copy(local)?,
+            shared: copy(shared)?,
+        });
+    }
+    Ok(out)
+}
+
+/// Plaatst `img` in `slot` met `mem` bytes, de core-vraag `at` en de
+/// volumes `mounts`: Claim, de segmenten, de patches en de env in de grant,
+/// Arm. Geeft de entry.
 async fn place(
     slot: Slot,
     img: &[u8],
     mem: u64,
     at: Placement,
     env: &[u8],
+    mounts: Vec<Mount>,
 ) -> Result<u64, PlaceError> {
-    let spec = StartSpec::new(slot, mem, at);
+    let mut spec = StartSpec::new(slot, mem, at);
+    spec.mounts = mounts;
     let grant = match ask(Request::Claim(spec)).await? {
         Response::Granted(g) => g,
         _ => return Err(PlaceError::Reply),

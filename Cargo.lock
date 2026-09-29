@@ -52,6 +52,7 @@ dependencies = [
  "dev",
  "driver-gicv3",
  "driver-pl011",
+ "driver-virtioblk",
  "driver-virtionet",
  "executor",
  "fw",
@@ -93,6 +94,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "driver-virtioblk"
+version = "3.0.0"
+dependencies = [
+ "dev",
+ "kern",
+]
+
+[[package]]
 name = "driver-virtionet"
 version = "3.0.0"
 dependencies = [
@@ -127,6 +136,7 @@ dependencies = [
  "board-qemuvirt",
  "cpu",
  "dev",
+ "driver-virtioblk",
  "executor",
  "kern",
  "leandhcp",

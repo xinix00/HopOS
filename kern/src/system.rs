@@ -45,6 +45,7 @@
 
 use crate::cage::{Console, CoreClass, PhysMem, Timer};
 use crate::pool::{GroupName, Placement};
+use crate::rpc::{self, FsCall, FsInbox};
 use crate::slots::{
     self, Envelope, ImageGrant, Occupancy, Reply, Request, Response, Servicers, StartSpec, try_vec,
 };
@@ -1197,6 +1198,7 @@ pub struct System<'i, 'r, const N: usize> {
     privilege: Option<Privilege>,
     streams: LocalCell<[Option<Stream>; MAX_STREAMS]>,
     logs: Option<&'i SlotLogs>,
+    fs: Option<&'i FsInbox<'r>>,
     max_slots: usize,
 }
 
@@ -1216,8 +1218,18 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             privilege,
             streams: LocalCell::cell([const { None }; MAX_STREAMS]),
             logs: None,
+            fs: None,
             max_slots,
         }
+    }
+
+    /// Koppelt de hopfs-actor voor de bestandscalls ([`crate::rpc`]).
+    /// Zonder actor (een board zonder schijf) antwoordt elke bestandscall
+    /// met een fout, zoals Go zonder `UseFS`.
+    #[must_use]
+    pub const fn with_fs(mut self, fs: &'i FsInbox<'r>) -> Self {
+        self.fs = Some(fs);
+        self
     }
 
     /// Koppelt de logringen voor `NEXT_LOG` (gevuld door een [`LogTee`]).
@@ -1267,8 +1279,8 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         mem: &mut impl PhysMem,
         hooks: &impl Hooks,
         log: &impl Console,
-        buf: &mut [u8],
-        out: &mut [u8],
+        buf: &mut Vec<u8>,
+        out: &mut Vec<u8>,
     ) -> End {
         let mut w = Watched {
             conn,
@@ -1280,7 +1292,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             end: None,
         };
         let r = self
-            .frames(&mut w, who.slot, reply, mem, hooks, log, buf, out)
+            .frames(&mut w, who, reply, mem, hooks, log, buf, out)
             .await;
         match (w.end, r) {
             (Some(end), _) => end,
@@ -1297,14 +1309,15 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
     async fn frames<C: Conn, T: Timer>(
         &self,
         w: &mut Watched<'_, C, T>,
-        slot: Slot,
+        who: &Admitted<'_>,
         reply: &'r Reply,
         mem: &mut impl PhysMem,
         hooks: &impl Hooks,
         log: &impl Console,
-        buf: &mut [u8],
-        out: &mut [u8],
+        buf: &mut Vec<u8>,
+        out: &mut Vec<u8>,
     ) -> Result {
+        let slot = who.slot;
         loop {
             let (kind, n) = read_header(w).await?;
             if kind != KIND_CALL && kind != KIND_LOG {
@@ -1318,10 +1331,74 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
                 continue;
             }
             let len = match Call::decode(payload) {
+                Ok(call) if rpc::is_fs_op(call.op) => {
+                    // Alleen getallen en bereiken: de lening van `buf` eindigt
+                    // hier, want de buffer zelf gaat zo naar de hopfs-actor.
+                    let path = REQ_HEADER..REQ_HEADER + call.path.len();
+                    let head = FsHead {
+                        op: call.op,
+                        seq: call.seq,
+                        off: call.off,
+                        n: call.n,
+                        data: path.end..n,
+                        path,
+                    };
+                    self.fs_call(who, head, reply, buf, out).await
+                }
                 Ok(call) => self.call(slot, &call, reply, mem, hooks, out).await,
                 Err(_) => encode_resp(out, 0, STATUS_ERROR, 0, 0, b"bad request"),
             };
             write_frame(w, KIND_RESULT, out.get(..len).unwrap_or(&[])).await?;
+        }
+    }
+
+    /// Een bestandscall: de buffers van de verbinding gaan als waarde naar
+    /// de hopfs-actor en komen met het antwoord terug.
+    async fn fs_call(
+        &self,
+        who: &Admitted<'_>,
+        h: FsHead,
+        reply: &'r Reply,
+        buf: &mut Vec<u8>,
+        out: &mut Vec<u8>,
+    ) -> usize {
+        let Some(inbox) = self.fs else {
+            return encode_resp(
+                out,
+                h.op,
+                STATUS_ERROR,
+                h.seq,
+                0,
+                b"no storage layer on board",
+            );
+        };
+        let c = FsCall {
+            slot: who.slot,
+            generation: who.generation,
+            op: h.op,
+            off: h.off,
+            n: h.n,
+            path: h.path,
+            data: h.data,
+            buf: core::mem::take(buf),
+            out: core::mem::take(out),
+        };
+        let result = match rpc::call(inbox, reply, c).await {
+            Ok(d) => {
+                (*buf, *out) = (d.buf, d.out);
+                d.result
+            }
+            Err(c) => {
+                (*buf, *out) = (c.buf, c.out);
+                Err(Error::Busy)
+            }
+        };
+        match result {
+            Ok((size, data_len)) => {
+                put_resp_head(out, h.op, STATUS_OK, h.seq, size);
+                (REQ_HEADER + data_len).min(out.len())
+            }
+            Err(e) => fail(out, h.op, h.seq, &Fail::Kern(e)),
         }
     }
 
@@ -1335,7 +1412,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         out: &mut [u8],
     ) -> usize {
         let r = match (PrivOp::from_op(c.op), &self.privilege) {
-            // De gewone calls (hopfs, store, codec) zijn nog niet geport.
+            // De store- en codec-calls zijn nog niet geport.
             (None, _) => Err(Fail::Kern(Error::Kind)),
             (Some(op), Some(p)) if p.slot == slot => {
                 self.privileged(p, op, c, reply, mem, hooks, out).await
@@ -1347,16 +1424,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
                 put_resp_head(out, c.op, STATUS_OK, c.seq, size);
                 (REQ_HEADER + data_len).min(out.len())
             }
-            Err(e) => {
-                let status = match e {
-                    Fail::Kern(Error::NoEnt) => STATUS_NO_ENT,
-                    Fail::Kern(Error::Privilege { .. }) => STATUS_DENIED,
-                    _ => STATUS_ERROR,
-                };
-                let mut msg = [0u8; 160];
-                let n = fmt_into(&mut msg, &e);
-                encode_resp(out, c.op, status, c.seq, 0, msg.get(..n).unwrap_or(&[]))
-            }
+            Err(e) => fail(out, c.op, c.seq, &e),
         }
     }
 
@@ -1644,6 +1712,30 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
 }
 
 /// Het doelslot van een bevoegde call (`off`).
+/// De kop van een bestandscall zonder lening: getallen en de bereiken van
+/// pad en data in de callbuffer.
+struct FsHead {
+    op: u8,
+    seq: u32,
+    off: u64,
+    n: u64,
+    path: core::ops::Range<usize>,
+    data: core::ops::Range<usize>,
+}
+
+/// Een foutantwoord: de status uit de fout (bestaat niet, geweigerd, of
+/// algemeen) en de tekst in de data.
+fn fail(out: &mut [u8], op: u8, seq: u32, e: &Fail) -> usize {
+    let status = match e {
+        Fail::Kern(Error::NoEnt) => STATUS_NO_ENT,
+        Fail::Kern(Error::Privilege { .. } | Error::Denied) => STATUS_DENIED,
+        _ => STATUS_ERROR,
+    };
+    let mut msg = [0u8; 160];
+    let n = fmt_into(&mut msg, e);
+    encode_resp(out, op, status, seq, 0, msg.get(..n).unwrap_or(&[]))
+}
+
 fn target(c: &Call<'_>) -> Result<Slot> {
     usize::try_from(c.off)
         .ok()
@@ -2280,6 +2372,73 @@ mod tests {
         let info = SlotInfo::decode(&res[12].4).unwrap();
         assert_eq!(info.slot_state(), Some(SlotState::Empty));
         assert_eq!(a.status(s(3)).occupancy, Occupancy::Empty);
+    }
+
+    #[test]
+    fn file_calls_travel_to_the_hopfs_actor_and_back() {
+        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
+        let tee = LogTee::new(&con, &logs);
+        let mut a = node(&svc, &con);
+        let reply = Reply::new();
+        let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
+        let fsin: FsInbox<'_> = Mailbox::new();
+        let sys = System::new(&inbox, &svc, None, 8).with_fs(&fsin);
+        let req = |op: u8, seq: u32, path: &'static [u8], data: &'static [u8], n: u64| {
+            enc(&abi::hopabi::Req {
+                op,
+                seq,
+                n,
+                path,
+                data,
+                ..Default::default()
+            })
+        };
+        use abi::hopabi::{OP_LIST, OP_READ, OP_STAT, OP_WRITE};
+        let calls = [
+            req(OP_WRITE, 1, b"a/b.txt", b"hoi", 0),
+            req(OP_READ, 2, b"/a/b.txt", b"", MAX_IO_CHUNK as u64 * 4),
+            req(OP_STAT, 3, b"nope", b"", 0),
+            req(OP_STAT, 4, b"../slot1/x", b"", 0),
+            req(OP_LIST, 5, b"/", b"", 0),
+        ];
+        let mut p = Pipe::new(NET | 3, &calls);
+        let (fs, _) = crate::rpc::tests::disk(16);
+        let mut fsa = crate::rpc::FsActor::new(fs, &svc, &con);
+        let mut run: Servicer<'_> = std::boxed::Box::pin(async { fsa.run(&fsin).await });
+        let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
+        let end = drive(
+            &sys,
+            &mut a,
+            &inbox,
+            &reply,
+            &mut p,
+            &mut mem,
+            &hooks,
+            &tee,
+            Some(&mut run),
+        );
+        assert_eq!(end, End::Peer);
+        let res = results(&p.tx);
+        assert_eq!((res[0].1, res[0].3), (STATUS_OK, 3));
+        assert_eq!(
+            (res[1].1, res[1].3, &res[1].4[..]),
+            (STATUS_OK, 3, &b"hoi"[..])
+        );
+        assert_eq!(res[2].1, STATUS_NO_ENT);
+        assert_eq!(res[3].1, STATUS_DENIED);
+        assert_eq!((res[4].1, &res[4].4[..]), (STATUS_OK, &b"a/"[..]));
+
+        // Zonder schijf: een nette fout, en de verbinding leeft door.
+        let bare = System::new(&inbox, &svc, None, 8);
+        let mut p = Pipe::new(NET | 3, &[req(OP_STAT, 1, b"x", b"", 0)]);
+        let _ = drive(
+            &bare, &mut a, &inbox, &reply, &mut p, &mut mem, &hooks, &tee, None,
+        );
+        let res = results(&p.tx);
+        assert_eq!(
+            (res[0].1, &res[0].4[..]),
+            (STATUS_ERROR, &b"no storage layer on board"[..])
+        );
     }
 
     #[test]

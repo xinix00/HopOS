@@ -34,6 +34,8 @@ leandhcp = { git = "https://github.com/xinix00/lean.git", tag = "v3.0.0" }
 # De ELF-lezer van de eerste plaatsing (slots.rs), zelfde tag.
 leanelf = { git = "https://github.com/xinix00/lean.git", tag = "v3.0.0" }
 board-qemuvirt = { path = "../board/qemuvirt", optional = true }
+# De schijf van het board: `storage.rs` kent haar maten (sector, transfer).
+driver-virtioblk = { path = "../driver/virtioblk" }
 
 [lints]
 workspace = true

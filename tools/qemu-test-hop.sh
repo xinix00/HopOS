@@ -10,20 +10,30 @@
 # plaatst hem in slot 2. Groen alleen als:
 #
 #   kern        HOPOS_BOOT, HOPOS_CLOCK_FIXED, HOPOS_PRIVILEGE, HOPOS_NET_UP,
-#               HOPOS_SYSTEM_UP, HOPOS_HOP_START slot=1, en twee keer
+#               HOPOS_SYSTEM_UP, HOPOS_DISK_UP en HOPOS_FS_UP fresh=1 (een
+#               verse schijf per run), HOPOS_HOP_START slot=1, en twee keer
 #               HOPOS_HOP_PUBLISH (8080 en 9080);
 #   Hop         via de servicer van slot 1: HOP_UP en HOP_LEADER;
 #   van buiten  POST http://127.0.0.1:$LEADERPORT/v1/jobs wordt aangenomen
 #               (onbeveiligd: de kern geeft Hop HOPOS_INSECURE=1);
 #   de plaatsing HOP_JOB_PLACED slot=2, HOPOS_SLOT_START slot=2 en
-#               "slot 2: HOPOS_APPSPIKE_DONE pass=8 fail=0";
+#               "slot 2: HOPOS_APPSPIKE_DONE pass=9 fail=0" (met de
+#               FS-toets in de eigen root van slot 2);
+#   Hop's staat de kern ziet slot 1 zijn agent-state.json in zijn volume
+#               bewaren ("hopfs: slot 1 saved /hop/agent-state.json as
+#               /volumes/hop/..." HOPOS_FS_SAVED), en HOP_STATE_SKIPPED komt
+#               nergens voor (dan kon Hop zijn staat niet kwijt); daarna een
+#               HOPOS_FS_COMMIT (de boom op de schijf vastgelegd);
+#   de herstart  een tweede boot op dezelfde schijf: HOPOS_FS_UP fresh=0
+#               ("hopfs: tree restored"), en Hop leest zijn staat terug
+#               (Node::restore) en neemt de kooi van spike over: HOP_ADOPTED;
 #   van buiten  GET http://127.0.0.1:$AGENTPORT/tasks toont de taak van
 #               "spike" als running. Een exit bestaat daar niet als staat:
 #               appspike stopt met code 0 (applib: shutdown code=0) en Hop
 #               herstart een service, dus de toets pollt tot hij running ziet.
 #
-# Een HOPOS_PANIC, HOPOS_EXCEPTION, HOPOS_HOP_FAULT of HOPOS_HOP_EXIT is
-# meteen rood. Rood bewaart de console (en drukt hem af).
+# Een HOPOS_PANIC, HOPOS_EXCEPTION, HOPOS_HOP_FAULT, HOPOS_HOP_EXIT of
+# HOP_STATE_SKIPPED is meteen rood. Rood bewaart de console (en drukt hem af).
 #
 #   tools/qemu-test-hop.sh                 TIMEOUT=60 standaard, in seconden
 #   KEEP_LOG=pad tools/qemu-test-hop.sh    bewaart ook een groene console
@@ -38,6 +48,7 @@ HOP_DIR="${HOP_DIR:-$DIR/../hop/hop}"
 TARGET=aarch64-unknown-none-softfloat
 LOG="$(mktemp -t hopos-qemu-hop.XXXXXX)"
 ART="$(mktemp -d -t hopos-art.XXXXXX)"
+DISK="$ART/disk.img"
 QPID=""
 HPID=""
 cleanup() {
@@ -91,16 +102,16 @@ fi
 HPID=$!
 
 echo "== booten op QEMU virt met Hop (tot ${TIMEOUT}s; system :$SYSPORT, agent :$AGENTPORT, leader :$LEADERPORT, artifacts :$ARTPORT)"
-SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP=hop \
+SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP=hop DISK="$DISK" \
 	sh "$DIR/image/qemu-run.sh" </dev/null >"$LOG" 2>&1 &
 QPID=$!
 
 has() { tr -d '\r' <"$LOG" | grep -q -E "$1"; }
 
 # De vaste markers (grep -E), in de volgorde waarin ze horen te komen.
-BOOT_MARKS="HOPOS_BOOT|HOPOS_CLOCK_FIXED|HOPOS_PRIVILEGE|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_HOP_START slot=1|uplink tcp :8080 -> slot 1 :8080 HOPOS_HOP_PUBLISH|uplink tcp :9080 -> slot 1 :9080 HOPOS_HOP_PUBLISH|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
-PLACE_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|HOPOS_SLOT_START slot=2|slot 2: HOPOS_APPSPIKE_DONE pass=8 fail=0"
-RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL"
+BOOT_MARKS="HOPOS_BOOT|HOPOS_CLOCK_FIXED|HOPOS_PRIVILEGE|HOPOS_DISK_UP model=virtio-blk|HOPOS_FS_UP fresh=1|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_HOP_START slot=1|uplink tcp :8080 -> slot 1 :8080 HOPOS_HOP_PUBLISH|uplink tcp :9080 -> slot 1 :9080 HOPOS_HOP_PUBLISH|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
+PLACE_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|HOPOS_SLOT_START slot=2|slot 2: HOPOS_APPSPIKE_FS ok|slot 2: HOPOS_APPSPIKE_DONE pass=9 fail=0|hopfs: slot 1 saved /hop/agent-state.json as /volumes/hop/agent-state.json .*HOPOS_FS_SAVED"
+RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOP_STATE_SKIPPED"
 
 all() {
 	(
@@ -153,6 +164,20 @@ sys.exit(0 if any(t.get("job_name") == "spike" and t.get("state") == "running" f
 	fi
 	step
 done
+
+# De herstart hieronder leest terug wat er VASTGELEGD is: wacht tot de
+# committer (elke 10 s, kern::rpc::COMMIT_EVERY) de boom na de eerste
+# bewaarde staat van Hop wegschreef.
+committed() {
+	tr -d '\r' <"$LOG" | awk '/HOPOS_FS_SAVED/ { s = 1 } s && /HOPOS_FS_COMMIT($| )/ { c = 1 } END { exit !c }'
+}
+if [ -n "$TASKS" ] && [ "${TASKS#(nog niet running)}" = "$TASKS" ]; then
+	i=0
+	while ! committed && [ "$i" -lt 150 ] && ! has "$RED"; do
+		sleep 0.1
+		i=$((i + 1))
+	done
+fi
 kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
 QPID=""
@@ -191,6 +216,12 @@ if has "$RED"; then
 	echo "   ROOD $(tr -d '\r' <"$LOG" | grep -m1 -E "$RED")"
 	fail=1
 fi
+if committed; then
+	echo "   ok  vastgelegd na de bewaarde staat: $(tr -d '\r' <"$LOG" | grep -E 'HOPOS_FS_COMMIT($| )' | tail -1)"
+else
+	echo "   ROOD geen HOPOS_FS_COMMIT na HOPOS_FS_SAVED"
+	fail=1
+fi
 echo "   tijd: $(($(date +%s) - START)) s na de start van QEMU"
 if [ "$fail" != 0 ]; then
 	KEEP="$(mktemp -t hopos-qemu-hop-rood.XXXXXX)"
@@ -201,4 +232,53 @@ if [ "$fail" != 0 ]; then
 	exit 1
 fi
 [ -n "${KEEP_LOG:-}" ] && tr -d '\r' <"$LOG" >"$KEEP_LOG"
+
+# De herstart: dezelfde schijf, een nieuwe boot. hopfs vindt de boom terug
+# (fresh=0), Hop leest zijn agent-state.json uit /hop/ (Node::restore) en
+# neemt de kooi van zijn taak over: HOP_ADOPTED. Dat de kooi na een koude
+# boot leeg is, merkt Hop daarna zelf; hier telt dat hij zijn staat terugvond.
+echo "== herstart op dezelfde schijf (tot ${TIMEOUT}s)"
+LOG1="$LOG"
+LOG="$(mktemp -t hopos-qemu-hop2.XXXXXX)"
+SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP=hop DISK="$DISK" \
+	sh "$DIR/image/qemu-run.sh" </dev/null >"$LOG" 2>&1 &
+QPID=$!
+RESTART_MARKS="HOPOS_FS_UP fresh=0|hopfs: tree restored|HOPOS_HOP_START slot=1|slot 1: .*HOP_ADOPTED"
+START=$(date +%s)
+elapsed=0
+while ! all "$RESTART_MARKS"; do
+	has "$RED" && break
+	kill -0 "$QPID" 2>/dev/null || break
+	[ "$elapsed" -ge "$TIMEOUT" ] && break
+	step
+done
+kill "$QPID" 2>/dev/null || true
+wait "$QPID" 2>/dev/null || true
+QPID=""
+IFS='|'
+for m in $RESTART_MARKS; do
+	if has "$m"; then
+		echo "   ok  $m: $(tr -d '\r' <"$LOG" | grep -m1 -E "$m")"
+	else
+		echo "   ROOD $m ontbreekt"
+		fail=1
+	fi
+done
+IFS="$IFS_WAS"
+if has "$RED"; then
+	echo "   ROOD $(tr -d '\r' <"$LOG" | grep -m1 -E "$RED")"
+	fail=1
+fi
+echo "   tijd: $(($(date +%s) - START)) s na de herstart"
+if [ "$fail" != 0 ]; then
+	KEEP="$(mktemp -t hopos-qemu-hop-rood.XXXXXX)"
+	tr -d '\r' <"$LOG" >"$KEEP"
+	echo "== console van de herstart bewaard in $KEEP"
+	cat "$KEEP"
+	rm -f "$LOG"
+	exit 1
+fi
+[ -n "${KEEP_LOG:-}" ] && tr -d '\r' <"$LOG" >"$KEEP_LOG.restart"
+rm -f "$LOG"
+LOG="$LOG1"
 echo "qemu-kring groen"

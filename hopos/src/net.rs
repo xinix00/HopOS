@@ -39,7 +39,9 @@ use dev::Pa;
 use executor::{Clock, Executor};
 use kern::cage::{Console, PhysMem, Timer};
 use kern::slots::Reply;
-use kern::system::{Admitted, Conn, End, Hooks, MAX_PAYLOAD, MAX_SYSTEM_CONNS, PORT, System};
+use kern::system::{
+    Admitted, Conn, End, Hooks, MAX_IO_CHUNK, MAX_PAYLOAD, MAX_SYSTEM_CONNS, PORT, System,
+};
 use leandhcp::{Action, Client, Instant, KeepAction, Keeper, Lease};
 use leannet::{Endpoint, ListenHandle, Stack, TcpHandle, UdpHandle};
 use net::host::{HostPort, HostStack};
@@ -112,16 +114,21 @@ const DHCP_RETRY: Duration = Duration::from_secs(5);
 /// op.
 const NET_BUDGET: usize = 8 << 20;
 
-/// De antwoordbuffer van een system-verbinding. De callbuffer is één frame
-/// van de grootste payload ([`MAX_PAYLOAD`]).
-const OUT_BUF: usize = 4096;
+/// De antwoordbuffer van een system-verbinding: de kop plus één I/O-brok,
+/// want een `read` antwoordt met tot [`MAX_IO_CHUNK`] bytes (Hop leest zijn
+/// staat in brokken van 1 MiB). De callbuffer is één frame van de grootste
+/// payload ([`MAX_PAYLOAD`]). Beide gaan per bestandscall als waarde naar
+/// de hopfs-actor en terug (`kern::rpc`); er wordt niets per call
+/// gealloceerd.
+const OUT_BUF: usize = kern::system::REQ_HEADER + MAX_IO_CHUNK;
 
 /// Het totaalplafond op gelijktijdige system-verbindingen: de poolgrootte
 /// van de verbindingstaken (handboek §2: een verbinding is een taak uit een
 /// vaste pool). Per slot laat `admit` er [`MAX_SYSTEM_CONNS`] toe; dit is
 /// dat maal de drie app-slots van QEMU virt, plus twee voor Hop. Elke taak
-/// houdt een callbuffer van [`MAX_PAYLOAD`] (1 MiB plus 64 KiB) vast, dus
-/// 8 taken zijn ruim 8,5 MB van de 236 MB heap; een board met meer slots
+/// houdt een callbuffer van [`MAX_PAYLOAD`] (1 MiB plus 64 KiB) en een
+/// antwoordbuffer van 1 MiB vast, dus 8 taken zijn ruim 17 MB van de 236 MB
+/// heap; een board met meer slots
 /// krijgt zijn weigering luid (`HOPOS_SYSTEM_FULL`) en tilt dit getal met
 /// een meting op.
 pub(crate) const SYSTEM_WORKERS: usize = 3 * MAX_SYSTEM_CONNS as usize + 2;

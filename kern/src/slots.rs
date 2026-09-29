@@ -240,9 +240,14 @@ pub struct SlotStatus {
 
 /// Een antwoordplek voor één aanroeper. Een aanroeper uit een vaste pool
 /// (een system-verbinding, de boot-code) heeft er één.
+///
+/// Dezelfde plek draagt ook het antwoord van de hopfs-actor
+/// ([`crate::rpc`]): een aanroeper doet één verzoek tegelijk, dus de bel
+/// wordt nooit door twee actoren tegelijk geluid.
 pub struct Reply {
-    done: Signal,
+    pub(crate) done: Signal,
     val: LocalCell<Option<Response>>,
+    fs: LocalCell<Option<crate::rpc::FsDone>>,
 }
 
 impl Reply {
@@ -252,12 +257,25 @@ impl Reply {
         Reply {
             done: Signal::new(),
             val: LocalCell::cell(None),
+            fs: LocalCell::cell(None),
         }
     }
 
     fn put(&self, r: Response) {
         *self.val.borrow_mut() = Some(r);
         self.done.set();
+    }
+
+    /// Het antwoord van de hopfs-actor: de buffers gaan terug naar hun
+    /// eigenaar, met de uitkomst.
+    pub(crate) fn put_fs(&self, d: crate::rpc::FsDone) {
+        *self.fs.borrow_mut() = Some(d);
+        self.done.set();
+    }
+
+    /// Haalt het antwoord van de hopfs-actor op (één lening).
+    pub(crate) fn take_fs(&self) -> Option<crate::rpc::FsDone> {
+        self.fs.borrow_mut().take()
     }
 }
 
@@ -342,9 +360,16 @@ impl ServicerCtl {
 
 /// De servicers van alle slots: per slot de besturing, plus de leesbare
 /// tabel van wie er NU leeft (met de generatie van zijn levensduur).
+///
+/// Naast de generatie staat per slot de volume-tabel van die levensduur (Go:
+/// `servicer.mounts`; de eigen root is `/.tasks/slot<N>` en volgt uit het
+/// slot): de actor schrijft hem bij de start, de hopfs-actor leest hem kort
+/// bij elke bestandscall ([`crate::rpc::resolve`]). `None` is "geen zicht":
+/// elke bestandscall wordt dan geweigerd.
 pub struct Servicers {
     ctl: [ServicerCtl; SLOT_CAP + 1],
     table: LocalCell<[Option<u32>; SLOT_CAP + 1]>,
+    mounts: LocalCell<[Option<Vec<Mount>>; SLOT_CAP + 1]>,
 }
 
 impl Servicers {
@@ -354,6 +379,25 @@ impl Servicers {
         Servicers {
             ctl: [const { ServicerCtl::new() }; SLOT_CAP + 1],
             table: LocalCell::cell([None; SLOT_CAP + 1]),
+            mounts: LocalCell::cell([const { None }; SLOT_CAP + 1]),
+        }
+    }
+
+    /// Doet `f` op de volume-tabel van `slot` (langste `local` eerst),
+    /// binnen één lening. `None` als het slot geen zicht heeft.
+    pub fn with_mounts<R>(&self, slot: Slot, f: impl FnOnce(&[Mount]) -> R) -> Option<R> {
+        self.mounts
+            .borrow()
+            .get(slot.get())
+            .and_then(Option::as_ref)
+            .map(|m| f(m))
+    }
+
+    /// Zet de volume-tabel van `slot` (genormaliseerd door
+    /// [`crate::rpc::mount_table`]). Alleen de lifecycle-actor schrijft.
+    pub(crate) fn set_mounts(&self, slot: Slot, m: Option<Vec<Mount>>) {
+        if let Some(e) = self.mounts.borrow_mut().get_mut(slot.get()) {
+            *e = m;
         }
     }
 
@@ -615,6 +659,8 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
     /// komt pas na de toetsen; een geweigerde claim laat niets achter.
     async fn claim(&mut self, spec: StartSpec) -> Result<ImageGrant> {
         let slot = spec.slot;
+        // De volumes eerst: een spec die buiten zijn zicht wil, claimt niets.
+        crate::rpc::mount_table(&spec.mounts)?;
         if slot.get() > self.parts.max_slots() {
             return Err(Error::SlotRange {
                 slot: slot.get(),
@@ -722,6 +768,24 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
     }
 
     fn register(&mut self, slot: Slot, generation: u32, region: Region) {
+        // De volumes van deze levensduur, genormaliseerd. De claim toetste
+        // ze al; faalt het hier toch (geheugen, of een geadopteerde spec),
+        // dan krijgt het slot geen zicht en weigert elke bestandscall luid,
+        // in plaats van dat een volume stil in de eigen root belandt.
+        let mounts = match self
+            .resident(slot)
+            .map(|r| crate::rpc::mount_table(&r.mounts))
+        {
+            Some(Ok(m)) => Some(m),
+            Some(Err(e)) => {
+                self.log.log(format_args!(
+                    "slot {slot}: volumes refused: {e}, file calls denied HOPOS_FS_MOUNTS"
+                ));
+                None
+            }
+            None => None,
+        };
+        self.svc.set_mounts(slot, mounts);
         if let Some(ctl) = self.svc.ctl(slot) {
             let _ = ctl.stop.take();
             let _ = ctl.gone.take();
@@ -751,6 +815,7 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
         if self.svc.set(slot, None).is_none() {
             return;
         }
+        self.svc.set_mounts(slot, None);
         if let Some(ctl) = self.svc.ctl(slot) {
             ctl.stop.set();
             ctl.gone.wait().await;
@@ -1336,8 +1401,24 @@ pub(crate) mod tests {
         a.arm(g, 0x4001_0000)
     }
 
-    fn stop(a: &mut Actor<'_>, slot: usize) -> Result {
+    pub(crate) fn stop(a: &mut Actor<'_>, slot: usize) -> Result {
         block_on(a.stop(s(slot), Duration::from_millis(50)))
+    }
+
+    /// Een start met volumes, zoals de kern Hop plaatst.
+    pub(crate) fn start_with_mounts(
+        a: &mut Actor<'_>,
+        slot: usize,
+        mib: u64,
+        cores: usize,
+        mounts: Vec<Mount>,
+    ) -> Result {
+        let mut spec = StartSpec::new(s(slot), mib * MIB, ded(cores));
+        spec.mounts = mounts;
+        let g = block_on(a.claim(spec))?;
+        a.arm(g, 0x4001_0000)?;
+        a.svc.ctl(s(slot)).unwrap().gone.set();
+        Ok(())
     }
 
     #[test]

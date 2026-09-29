@@ -70,6 +70,9 @@ pub enum Error {
     NotEmpty,
     /// Een pad met `..` of een lege naam.
     BadPath,
+    /// Een pad buiten het zicht van de taak: buiten de eigen root en de
+    /// volumes (`errDenied` in Go).
+    Denied,
     /// Het blokapparaat meldde een fout op dit LBA.
     Io { lba: u64 },
     /// De schijf (het venster) is vol.
@@ -131,6 +134,7 @@ impl fmt::Display for Error {
             Self::Kind => f.write_str("wrong kind (file or directory)"),
             Self::NotEmpty => f.write_str("directory not empty"),
             Self::BadPath => f.write_str("invalid path"),
+            Self::Denied => f.write_str("outside the task's root and volumes"),
             Self::Io { lba } => write!(f, "block I/O failed at LBA {lba}"),
             Self::DiskFull { blocks } => write!(f, "disk full ({blocks} blocks)"),
             Self::Conn => f.write_str("connection closed"),

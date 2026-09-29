@@ -1,4 +1,5 @@
-//! QEMU virt (aarch64): PL011, GICv3, virtio-net, FDT; het eerste board van v3.
+//! QEMU virt (aarch64): PL011, GICv3, virtio-net, virtio-blk, FDT; het eerste
+//! board van v3.
 //!
 //! De machine is `-M virt,gic-version=3,virtualization=on`: HopOS eist
 //! EL2, QEMU levert PSCI via SMC, tot 12 cores, een GICv3. Dezelfde
@@ -34,6 +35,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use dev::Pa;
 use driver_gicv3::Gic;
 use driver_pl011::Pl011;
+use driver_virtioblk::VirtioBlk;
 use driver_virtionet::{IrqAck, VirtioNet};
 use fw::fdt::Fdt;
 use sync::{Local, Signal};
@@ -59,12 +61,26 @@ pub const DMA: Region = Region {
 };
 
 /// De NIC-helft van de DMA-regio (`layout.NetDMABase`, `NetDMASize`):
-/// virtio-net onderin, NVMe krijgt straks de bovenste helft. Twee
+/// virtio-net onderin, de schijf de bovenste helft ([`BLK_DMA`]). Twee
 /// subregio's in plaats van één gedeelde allocator: in de Go-kern kon de
 /// globale DMA-allocator anders geheugen uit de NVMe-helft uitdelen.
 pub const NET_DMA: Region = Region {
     base: Pa(0x4f00_0000),
     size: 0x0080_0000,
+};
+
+/// De schijf-helft van de DMA-regio (de plek van de NVMe in Go): de ringen
+/// en de databuffer van virtio-blk (`driver_virtioblk::DMA_NEED`, ruim 1
+/// MiB van de 8).
+pub const BLK_DMA: Region = Region {
+    base: Pa(0x4f80_0000),
+    size: 0x0080_0000,
+};
+
+const _: () = {
+    assert!(NET_DMA.base.0 == DMA.base.0 && NET_DMA.end().0 == BLK_DMA.base.0);
+    assert!(BLK_DMA.end().0 == DMA.end().0);
+    assert!(driver_virtioblk::DMA_NEED <= BLK_DMA.size);
 };
 
 /// Waar QEMU de DTB legt als het image een ELF is dat niet op de RAM-basis
@@ -120,6 +136,9 @@ static CORES: AtomicUsize = AtomicUsize::new(0);
 /// Is de NIC al geprobed? `probe_nic` mag één keer.
 static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
 
+/// Is de schijf al geprobed? `probe_disk` mag één keer.
+static DISK_CLAIMED: AtomicBool = AtomicBool::new(false);
+
 fn console_write(b: &[u8]) {
     UART.write(b);
 }
@@ -163,11 +182,16 @@ impl QemuVirt {
     /// Zoekt de virtio-net: uit de FDT als die er is, anders door de 32
     /// vaste slots te scannen. Geeft basis en INTID.
     fn find_virtio_net() -> Option<(Pa, u32)> {
-        let is_net = |base: Pa| {
-            // SAFETY: elk kandidaat-adres ligt in het virtio-mmio-venster van
-            // virt (0x0a00_0000 + n * 0x200), in de Device-gigabyte.
+        Self::find_virtio(|base| {
+            // SAFETY: `find_virtio` geeft alleen adressen in het
+            // virtio-mmio-venster van virt, in de Device-gigabyte.
             unsafe { driver_virtionet::is_modern_net(base) }
-        };
+        })
+    }
+
+    /// Het eerste virtio-mmio-slot waarop `is` ja zegt, met zijn INTID:
+    /// uit de FDT als die er is, anders door de 32 vaste slots te scannen.
+    fn find_virtio(is: impl Fn(Pa) -> bool) -> Option<(Pa, u32)> {
         let in_window =
             |pa: Pa| pa.0 >= VIRTIO_MMIO.0 && pa.0 < VIRTIO_MMIO.0 + VIRTIO_SLOTS * VIRTIO_STRIDE;
         if let Some(list) = fdt().and_then(|f| f.virtio_mmio().ok()) {
@@ -175,11 +199,43 @@ impl QemuVirt {
                 .iter()
                 .map(|t| (Pa(t.reg.addr), t.intid))
                 .filter(|&(pa, _)| in_window(pa))
-                .find(|&(pa, _)| is_net(pa));
+                .find(|&(pa, _)| is(pa));
         }
         (0..VIRTIO_SLOTS)
             .map(|i| (VIRTIO_MMIO.add(i * VIRTIO_STRIDE), 48 + i as u32))
-            .find(|&(pa, _)| is_net(pa))
+            .find(|&(pa, _)| is(pa))
+    }
+
+    /// Vindt en initialiseert de schijf (virtio-blk) in de schijf-helft van
+    /// de DMA-regio. `Ok(None)` = geen schijf aan dit board; één keer.
+    ///
+    /// Geen methode van [`Board`]: het blokcontract is van `kern::hopfs`,
+    /// en het board-contract hangt niet van de kern af. De binary kent haar
+    /// board concreet.
+    pub fn probe_disk(&self) -> Result<Option<VirtioBlk>, Error> {
+        if DISK_CLAIMED.swap(true, Relaxed) {
+            return Err(Error::Twice("probe_disk"));
+        }
+        let Some((base, _intid)) = Self::find_virtio(|base| {
+            // SAFETY: `find_virtio` geeft alleen adressen in het
+            // virtio-mmio-venster van virt, in de Device-gigabyte.
+            unsafe { driver_virtioblk::is_modern_blk(base) }
+        }) else {
+            return Ok(None);
+        };
+        // SAFETY: `base` is een virtio-mmio-slot van virt (Device-gemapt),
+        // en BLK_DMA is van deze driver alleen: buiten de kern-RAM, Normal
+        // non-cacheable gemapt (`mmu`), en door niets anders uitgedeeld. De
+        // lijn blijft uit: de driver pollt (zijn doc zegt waarom).
+        let disk = unsafe { VirtioBlk::new(base, BLK_DMA.base, BLK_DMA.size, cpu::idle::now) }
+            .map_err(|_| Error::Disk("virtio-blk init failed"))?;
+        cpu::println!(
+            "disk: virtio-blk at {:#x}, {} sectors, flush {}",
+            base.0,
+            disk.sectors(),
+            if disk.can_flush() { "yes" } else { "no" }
+        );
+        Ok(Some(disk))
     }
 }
 

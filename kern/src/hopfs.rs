@@ -284,6 +284,48 @@ impl<D: BlockDevice> Fs<D> {
         Ok(Some(out))
     }
 
+    /// De namen in een directory, gesorteerd en `\n`-gescheiden in `dst`
+    /// (dirs krijgen een `/`), zonder allocatie: het antwoord van de
+    /// system-API gaat zo rechtstreeks in de antwoordbuffer van de
+    /// verbinding. Geeft `(aantal, bytes)`; past de lijst niet, dan
+    /// [`Error::TooLarge`] zonder half antwoord (`listRespLimit` in Go:
+    /// eerst begrenzen, dan pas schrijven).
+    pub fn list_into(&mut self, path: &[u8], dst: &mut [u8]) -> Result<(usize, usize)> {
+        let n = self.walk(&split(path)?, false)?;
+        let node = self.node(n)?;
+        if !node.dir {
+            return Err(Error::Kind);
+        }
+        let mut total = 0usize;
+        for (i, (name, c)) in node.children.iter().enumerate() {
+            let slash = usize::from(self.node(*c)?.dir);
+            total += usize::from(i > 0) + name.len() + slash;
+            if total > dst.len() {
+                return Err(Error::TooLarge {
+                    len: total,
+                    max: dst.len(),
+                });
+            }
+        }
+        let mut at = 0usize;
+        for (i, (name, c)) in node.children.iter().enumerate() {
+            let mut put = |b: &[u8]| {
+                if let Some(d) = dst.get_mut(at..at + b.len()) {
+                    d.copy_from_slice(b);
+                }
+                at += b.len();
+            };
+            if i > 0 {
+                put(b"\n");
+            }
+            put(name);
+            if self.node(*c)?.dir {
+                put(b"/");
+            }
+        }
+        Ok((node.children.len(), at))
+    }
+
     /// Maakt een directory, inclusief ouders.
     pub fn mkdir_all(&mut self, path: &[u8]) -> Result {
         let n = self.walk(&split(path)?, true)?;
@@ -730,6 +772,12 @@ impl<D: BlockDevice> Fs<D> {
                 slot: p,
             },
         ))
+    }
+
+    /// Geeft het blokapparaat terug (een test die opnieuw mount).
+    #[cfg(test)]
+    pub(crate) fn into_disk(self) -> D {
+        self.disk
     }
 
     /// De generatie van de laatst weggeschreven boom.

@@ -15,7 +15,7 @@
 //! | [`cage::Cores`] | het board (PSCI, klassen small/mid/big) | [`cage`] |
 //! | [`cage::Timer`] | de executor | [`cage`] |
 //! | [`cage::PhysMem`] | `dev` via het board | [`cage`] |
-//! | [`hopfs::BlockDevice`] | de NVMe-driver | [`hopfs`] |
+//! | [`hopfs::BlockDevice`] | de blok-driver (virtio-blk op QEMU, NVMe op ijzer) | [`hopfs`] |
 //! | [`system::Conn`] | `leannet` | [`system`] |
 //!
 //! De specificatie is de Go-kern in `OLD/metal/kern`; de regels E1 tot E9
@@ -42,6 +42,7 @@ pub mod hopfs;
 pub mod kernflip;
 pub mod partmem;
 pub mod pool;
+pub mod rpc;
 mod sha256;
 pub mod slots;
 pub mod stage2;

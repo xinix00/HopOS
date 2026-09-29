@@ -18,6 +18,7 @@ board = { path = "../../board" }
 driver-pl011 = { path = "../../driver/pl011" }
 driver-gicv3 = { path = "../../driver/gicv3" }
 driver-virtionet = { path = "../../driver/virtionet" }
+driver-virtioblk = { path = "../../driver/virtioblk" }
 
 [lints]
 workspace = true

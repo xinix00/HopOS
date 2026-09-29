@@ -1,0 +1,16 @@
+[package]
+name = "driver-virtioblk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "virtio-blk over MMIO (QEMU virt): één virtqueue, één verzoek tegelijk, een DMA-buffer; het blokapparaat onder hopfs."
+
+[dependencies]
+dev = { path = "../../dev" }
+# Het blokcontract van hopfs (`kern::hopfs::BlockDevice`) en zijn fout. De
+# kern hangt zelf van geen driver af, dus dit is geen kring.
+kern = { path = "../../kern" }
+
+[lints]
+workspace = true

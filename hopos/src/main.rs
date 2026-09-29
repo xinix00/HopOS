@@ -4,8 +4,9 @@
 //! De bootvolgorde is die van de Go-main (`OLD/metal/cmd/hopos/main.go`)
 //! voor zover de lagen eronder er zijn: console, bunny, `runtime`-regel,
 //! het privilege-niveau, de firmware-regel, en dan het werk als taken op de
-//! executor. Een taak per lus: de tik, de IRQ-dispatch, en het netwerkvlak
-//! (net.rs: pomp, switch, poort 0, DHCP, de system-listener).
+//! executor. Een taak per lus: de tik, de IRQ-dispatch, de opslag
+//! (storage.rs: de schijf, hopfs, de hopfs-actor en de committer) en het
+//! netwerkvlak (net.rs: pomp, switch, poort 0, DHCP, de system-listener).
 
 #![no_std]
 #![no_main]
@@ -14,6 +15,7 @@
 mod clock;
 mod net;
 mod slots;
+mod storage;
 
 extern crate alloc;
 
@@ -129,7 +131,10 @@ extern "C" fn kmain(dtb: u64, el: u64) -> ! {
             p.slot()
         );
     }
-    let system = system(privilege);
+    // De opslag vóór de system-API: die krijgt de hopfs-actor alleen als
+    // er een schijf is (anders weigert elke bestandscall luid).
+    let fs = storage::start(exec);
+    let system = system(privilege, fs);
 
     // De IRQ-dispatch spawnt als eerste: hij is de pomp van alle lijnen.
     // Faalt de controller, dan draait de node door op de vangrail van de
@@ -201,10 +206,15 @@ pub(crate) static SERVICERS: Servicers = Servicers::new();
 /// precies één keer), dus de API wordt één keer bij boot gebouwd en leeft
 /// daarna voor altijd. Boot-code: een heap die dit niet kan geven, is
 /// parkeren.
-fn system(privilege: Option<Privilege>) -> &'static System<'static, 'static, LIFECYCLE_DEPTH> {
-    Box::leak(Box::new(
-        System::new(&LIFECYCLE, &SERVICERS, privilege, SLOT_MAX).with_logs(&slots::LOGS),
-    ))
+fn system(
+    privilege: Option<Privilege>,
+    fs: bool,
+) -> &'static System<'static, 'static, LIFECYCLE_DEPTH> {
+    let mut s = System::new(&LIFECYCLE, &SERVICERS, privilege, SLOT_MAX).with_logs(&slots::LOGS);
+    if fs {
+        s = s.with_fs(&storage::FS_INBOX);
+    }
+    Box::leak(Box::new(s))
 }
 
 /// De antwoordplekken van de system-API: één per verbindingstaak, zodat

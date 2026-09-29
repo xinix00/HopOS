@@ -100,6 +100,8 @@ pub enum Error {
     },
     /// De NIC is gevonden maar zijn initialisatie faalde.
     Nic(&'static str),
+    /// De schijf is gevonden maar haar initialisatie faalde.
+    Disk(&'static str),
     /// De interruptcontroller kwam niet op.
     Irq(&'static str),
     /// Een methode die maar één keer mag, werd twee keer aangeroepen.
@@ -114,6 +116,7 @@ impl fmt::Display for Error {
                 "booted at EL{el}: HopOS requires EL2 (QEMU: virtualization=on)"
             ),
             Self::Nic(why) => write!(f, "nic init: {why}"),
+            Self::Disk(why) => write!(f, "disk init: {why}"),
             Self::Irq(why) => write!(f, "interrupt controller: {why}"),
             Self::Twice(what) => write!(f, "{what} called twice"),
         }

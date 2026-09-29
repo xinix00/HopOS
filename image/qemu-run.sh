@@ -2,8 +2,9 @@
 # Boot HopOS v3 op QEMU -M virt. Altijd virtualization=on: HopOS eist een
 # EL2-boot (de stage-2-kooi is een invariant, geen optie); PSCI via SMC,
 # GICv3, tot 12 cores: dezelfde bouwstenen als de O6N. De QEMU-regel is die
-# van de Go-generatie (OLD/image/qemu-run.sh), zonder de NVMe-schijf (nog
-# geen driver). Drie hostfwd's: de system-API (10.0.2.15:10100) op
+# van de Go-generatie (OLD/image/qemu-run.sh), met een virtio-blk-schijf in
+# plaats van de NVMe: hopfs mount hem bij boot, en Hop bewaart er zijn staat
+# op (`/hop/`). Drie hostfwd's: de system-API (10.0.2.15:10100) op
 # 127.0.0.1:$SYSPORT, en de API van Hop: de agent (:8080) op
 # 127.0.0.1:$AGENTPORT en de leader (:9080) op 127.0.0.1:$LEADERPORT. De
 # kern zet 8080 en 9080 van de uplink door naar het slot van Hop (DNAT).
@@ -14,6 +15,11 @@
 #   APP=/pad/naar/elf ROLE=0|1 image/qemu-run.sh   een kant-en-klare ELF
 #   APP= image/qemu-run.sh           zonder app-image
 #   image/qemu-run.sh -s -S          extra argumenten gaan naar QEMU (gdb)
+#   DISK=pad image/qemu-run.sh       de schijf (raw); standaard
+#                                    target/hopos-disk.img, 64 MiB, aangemaakt
+#                                    (ijl) als hij ontbreekt. Een verse schijf
+#                                    is een lege hopfs; een bestaande houdt de
+#                                    volumes over een herstart (stateful).
 #
 # APP=hop bouwt `agentd-hopos` in de hop-repo ($HOP_DIR, standaard
 # ../hop/hop naast deze repo) met cargo en neemt alleen het bestand: geen
@@ -37,6 +43,8 @@ LEADERPORT="${LEADERPORT:-9080}"
 HOP_DIR="${HOP_DIR:-$DIR/../hop/hop}"
 TARGET=aarch64-unknown-none-softfloat
 STAGE_MAX=14680064 # 0xB100_0000 - 0xB020_0000
+DISK="${DISK:-$DIR/target/hopos-disk.img}"
+DISK_MIB="${DISK_MIB:-64}"
 
 cd "$DIR"
 cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt
@@ -82,6 +90,13 @@ if [ -n "$IMAGE" ]; then
 		-device "loader,addr=0xb0100008,data=$ROLE,data-len=8" "$@"
 fi
 
+# De schijf: ijl aangemaakt als hij er niet is (dd met seek schrijft niets).
+if [ ! -e "$DISK" ]; then
+	mkdir -p "$(dirname "$DISK")"
+	dd if=/dev/zero of="$DISK" bs=1048576 count=0 seek="$DISK_MIB" 2>/dev/null
+	echo "qemu-run: new disk $DISK ($DISK_MIB MiB)" >&2
+fi
+
 # virtio-net expliciet op de mmio-bus (virt zet hem anders op PCIe) en
 # modern (force-legacy=false: transportversie 2). -m 3G: het PA-plan van
 # virt legt de slot-pool tot voorbij 0xC000_0000.
@@ -93,4 +108,6 @@ exec qemu-system-aarch64 -M virt,gic-version=3,highmem-ecam=off,virtualization=o
 	-global virtio-mmio.force-legacy=false \
 	-device virtio-net-device,netdev=n0,bus=virtio-mmio-bus.0 \
 	-netdev "user,id=n0,$FWD" \
+	-drive "if=none,format=raw,file=$DISK,id=disk0" \
+	-device virtio-blk-device,drive=disk0,bus=virtio-mmio-bus.1 \
 	-kernel "$KERNEL" "$@"

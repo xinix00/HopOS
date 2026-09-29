@@ -7,6 +7,9 @@
 #   HOPOS_BOOT      de kern haalde kmain, de console en de executor;
 #   HOPOS_TICK 3    drie seconden executor, timer en IRQ-deur;
 #   HOPOS_NIC_UP    de virtio-net (QEMU heeft er altijd een in deze regel).
+#   HOPOS_DISK_UP   de virtio-blk op een verse schijf van 64 MiB (per run
+#                   een eigen tijdelijk bestand, dus altijd leeg);
+#   HOPOS_FS_UP     hopfs erop gemount, vers (fresh=1);
 #   HOPOS_NET_UP    pomp, switch, poort 0 en een DHCP-lease van user-net;
 #   HOPOS_SYSTEM_UP de system-listener op poort 10100;
 #   extern          een TCP-verbinding van de host via hostfwd naar
@@ -24,7 +27,9 @@
 #                   het een gewone app, dus plaatst de kern hem zelf; de
 #                   kring met Hop staat in tools/qemu-test-hop.sh) draait in slot 1 op een app-core in
 #                   zijn stage-2-kooi, al zijn toetsen groen via de servicer
-#                   op de console (HOPOS_APPSPIKE_DONE ... fail=0), en de kern
+#                   op de console (HOPOS_APPSPIKE_DONE pass=9 fail=0, met
+#                   HOPOS_APPSPIKE_FS: schrijven, stat, lezen, lijst en weg in
+#                   de eigen root via de system-API naar hopfs), en de kern
 #                   ziet exit 0 (HOPOS_SLOT_DONE); daarna hetzelfde in slot 2
 #                   op de warm geparkeerde core, met zijn logregel over de
 #                   system-API (die bleef vóór 29-09 hangen achter de
@@ -35,14 +40,40 @@
 #
 #   tools/qemu-test.sh          TIMEOUT=30 standaard, in seconden
 #   KEEP_LOG=pad tools/qemu-test.sh   bewaart ook een groene console
+#   SYSPORT=poort               de host-kant van de hostfwd; bezet = een vrije
+#                               poort van het OS, luid gemeld
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TIMEOUT="${TIMEOUT:-30}"
-SYSPORT="${SYSPORT:-10100}" # de host-kant van de hostfwd naar de system-API
 TARGET=aarch64-unknown-none-softfloat
 LOG="$(mktemp -t hopos-qemu.XXXXXX)"
-trap 'rm -f "$LOG"; [ -n "${QPID:-}" ] && kill "$QPID" 2>/dev/null; true' EXIT INT TERM
+DISK="$(mktemp -t hopos-disk.XXXXXX)"
+trap 'rm -f "$LOG" "$DISK"; [ -n "${QPID:-}" ] && kill "$QPID" 2>/dev/null; true' EXIT INT TERM
+
+# Een host-poort: de gevraagde als hij vrij is, anders een vrije van het
+# OS. Zo draait de toets naast een andere QEMU.
+port() {
+	python3 - "$1" "$2" <<'PY'
+import socket, sys
+want, name = int(sys.argv[1]), sys.argv[2]
+s = socket.socket()
+try:
+    s.bind(("127.0.0.1", want))
+    print(want)
+except OSError:
+    s.close()
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    got = s.getsockname()[1]
+    print(f"   {name} {want} is taken, using {got}", file=sys.stderr)
+    print(got)
+s.close()
+PY
+}
+SYSPORT="$(port "${SYSPORT:-10100}" SYSPORT)" # de host-kant van de hostfwd naar de system-API
+# Een verse, ijle schijf van 64 MiB: hopfs begint leeg.
+dd if=/dev/zero of="$DISK" bs=1048576 count=0 seek=64 2>/dev/null
 
 cd "$DIR"
 echo "== bouwen: hopos (qemuvirt)"
@@ -56,8 +87,9 @@ SPIKE="$DIR/target/$TARGET/release/appspike"
 SPIKE_SIZE=$(wc -c <"$SPIKE" | tr -d ' ')
 # De markers van het ABI-bewijs (grep -E): het aantal toetsen groeit met
 # appspike, dus "alles groen" is fail=0.
-SLOT_MARKS="HOPOS_SLOT_START slot=1|slot 1: HOPOS_APPSPIKE_NETLOG|slot 1: HOPOS_APPSPIKE_DONE pass=[0-9]+ fail=0|HOPOS_SLOT_DONE slot=1 exit=0|slot 1: stopped.*HOPOS_SLOT_STOPPED"
-SLOT_MARKS="$SLOT_MARKS|HOPOS_SLOT_START slot=2|slot 2: HOPOS_APPSPIKE_NETLOG|slot 2: HOPOS_APPSPIKE_DONE pass=[0-9]+ fail=0|HOPOS_SLOT_DONE slot=2 exit=0|slot 2: stopped.*HOPOS_SLOT_STOPPED"
+SLOT_MARKS="HOPOS_DISK_UP model=virtio-blk blocks=131072|HOPOS_FS_UP fresh=1"
+SLOT_MARKS="$SLOT_MARKS|HOPOS_SLOT_START slot=1|slot 1: HOPOS_APPSPIKE_NETLOG|slot 1: HOPOS_APPSPIKE_FS ok|slot 1: HOPOS_APPSPIKE_DONE pass=9 fail=0|HOPOS_SLOT_DONE slot=1 exit=0|slot 1: stopped.*HOPOS_SLOT_STOPPED"
+SLOT_MARKS="$SLOT_MARKS|HOPOS_SLOT_START slot=2|slot 2: HOPOS_APPSPIKE_NETLOG|slot 2: HOPOS_APPSPIKE_FS ok|slot 2: HOPOS_APPSPIKE_DONE pass=9 fail=0|HOPOS_SLOT_DONE slot=2 exit=0|slot 2: stopped.*HOPOS_SLOT_STOPPED"
 # De momenten van de toets van buiten (grep -E), in volgorde.
 PROBE_AT="HOPOS_SYSTEM_UP|slot 1: .*HOPOS_APPNET_UP|slot 2: stopped.*HOPOS_SLOT_STOPPED"
 
@@ -68,6 +100,8 @@ qemu-system-aarch64 -M virt,gic-version=3,highmem-ecam=off,virtualization=on \
 	-global virtio-mmio.force-legacy=false \
 	-device virtio-net-device,netdev=n0,bus=virtio-mmio-bus.0 \
 	-netdev "user,id=n0,hostfwd=tcp:127.0.0.1:${SYSPORT}-:10100" \
+	-drive "if=none,format=raw,file=$DISK,id=disk0" \
+	-device virtio-blk-device,drive=disk0,bus=virtio-mmio-bus.1 \
 	-device "loader,file=$SPIKE,addr=0xb0200000,force-raw=on" \
 	-device "loader,addr=0xb0100000,data=$SPIKE_SIZE,data-len=8" \
 	-kernel "$KERNEL" </dev/null >"$LOG" 2>&1 &

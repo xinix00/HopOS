@@ -4,8 +4,9 @@
 //! Wat de Go-appspike over veel rollen verspreidde (READY, heartbeat, logs,
 //! net, bestanden, isolatie), doet deze in één doorloop over wat applib nu
 //! draagt: de control-page lezen en terugschrijven, de env, een reeks
-//! logregels, een frame op de TX-ring, de klok, de heap, de heartbeat en een
-//! system-call over de eigen netstack. Elke
+//! logregels, een frame op de TX-ring, de klok, de heap, de heartbeat, een
+//! system-call over de eigen netstack en de bestandscalls in de eigen root
+//! (hopfs op de schijf van de kern). Elke
 //! toets is één regel `HOPOS_APPSPIKE_<TOETS> ok|FAIL ...` met de getallen
 //! erbij; de laatste regel is `HOPOS_APPSPIKE_DONE pass=N fail=M`, en de
 //! exitcode is het aantal mislukte toetsen. De soak-scripts greppen erop.
@@ -68,7 +69,8 @@ async fn spike(app: &'static App) {
     frame(app, &mut s).await;
     timer(&mut s).await;
     heartbeat(app, &mut s).await;
-    network(app, &mut s).await;
+    let client = network(app, &mut s).await;
+    files(client, &mut s).await;
     heap(app, &mut s);
 
     log!("HOPOS_APPSPIKE_DONE pass={} fail={}", s.pass, s.fail);
@@ -200,12 +202,12 @@ const NET_DIAL: Duration = Duration::from_secs(3);
 /// de kern (10.100.0.1:10100) en één `stat` over die verbinding via
 /// `sys::Client`. Zonder listener aan de kern-kant faalt hij met de reden
 /// (refused, of een timeout als er niemand antwoordt).
-async fn network(app: &'static App, s: &mut Score) {
+async fn network(app: &'static App, s: &mut Score) -> Option<appnet::SystemClient> {
     let n = match appnet::up(app) {
         Ok(n) => n,
         Err(e) => {
             s.check("NET", false, format_args!("up: {e}"));
-            return;
+            return None;
         }
     };
     let [a, b, c, d] = n.ip();
@@ -219,16 +221,16 @@ async fn network(app: &'static App, s: &mut Score) {
                 false,
                 format_args!("ip={a}.{b}.{c}.{d} connect {ip:?}:{port}: {e}"),
             );
-            return;
+            return None;
         }
     };
     let dial_us = clock::now_ns().wrapping_sub(t0) / 1000;
     let mut client = n.system_client_over(conn);
-    // Eén logregel over de system-verbinding (KindLog): dat pad bestaat in
-    // de kern van v3 al helemaal (listener, admit, servicer, LogTee), terwijl
-    // de gewone bestandscalls (stat, read) nog op de rpc/mounts-port wachten.
-    // De kern zet de regel als `slot N: ...` op zijn console, en dát is het
-    // bewijs van buitenaf: app, switch, kern-stack en system-API in één lijn.
+    // Eén logregel over de system-verbinding (KindLog): listener, admit,
+    // servicer en LogTee. De kern zet de regel als `slot N: ...` op zijn
+    // console, en dát is het bewijs van buitenaf: app, switch, kern-stack en
+    // system-API in één lijn. De bestandscalls volgen over dezelfde
+    // verbinding (`files`).
     let t1 = clock::now_ns();
     let r = client
         .log(b"HOPOS_APPSPIKE_NETLOG via the system connection")
@@ -258,6 +260,96 @@ async fn network(app: &'static App, s: &mut Score) {
             format_args!("{ip} flush after {flush_us}us: {e}"),
         ),
         (Ok(()), None) => s.check("NET", false, format_args!("{ip} no connection to flush")),
+    }
+    Some(client)
+}
+
+/// Het bestand van de FS-toets, in de eigen root (`/.tasks/slot<N>/`).
+const FS_FILE: &str = "hallo.txt";
+
+/// De inhoud: langer dan één hopfs-blok niet nodig, wel met een staart die
+/// een truncate zichtbaar zou maken.
+const FS_DATA: &[u8] = b"hallo van appspike, via de system-API naar hopfs op de schijf\n";
+
+/// De bestandscalls over dezelfde verbinding: schrijven (truncate plus
+/// write), `stat`, teruglezen, de lijst van de eigen root en weer weg. De
+/// root is bij elke start leeg (de kern veegt hem), dus de lijst is precies
+/// dit ene bestand.
+async fn files(client: Option<appnet::SystemClient>, s: &mut Score) {
+    let Some(mut c) = client else {
+        s.check("FS", false, format_args!("no system connection"));
+        return;
+    };
+    let t0 = clock::now_ns();
+    let r = fs_round(&mut c).await;
+    let us = clock::now_ns().wrapping_sub(t0) / 1000;
+    match r {
+        Ok((size, names)) => s.check(
+            "FS",
+            true,
+            format_args!("file={FS_FILE} size={size} list={names} us={us}"),
+        ),
+        Err(why) => s.check("FS", false, format_args!("{why} after {us} us")),
+    }
+}
+
+/// Wat er in de FS-toets misging, met de call of het getal erbij.
+enum Why {
+    /// Een call faalde.
+    Sys(&'static str, sys::Error),
+    /// Een call gaf iets anders dan verwacht.
+    Num(&'static str, u64),
+}
+
+impl Why {
+    fn sys(what: &'static str, e: sys::Error) -> Why {
+        Why::Sys(what, e)
+    }
+    fn num(what: &'static str, n: u64) -> Why {
+        Why::Num(what, n)
+    }
+}
+
+impl core::fmt::Display for Why {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Why::Sys(what, e) => write!(f, "{what}: {e}"),
+            Why::Num(what, n) => write!(f, "{what} {n}"),
+        }
+    }
+}
+
+/// Eén ronde; geeft de maat en het aantal namen, of wat er misging.
+async fn fs_round(c: &mut appnet::SystemClient) -> Result<(u64, usize), Why> {
+    c.write_file(FS_FILE, FS_DATA)
+        .await
+        .map_err(|e| Why::sys("write_file", e))?;
+    let size = c.stat(FS_FILE).await.map_err(|e| Why::sys("stat", e))?;
+    if size != FS_DATA.len() as u64 {
+        return Err(Why::num("stat size", size));
+    }
+    let mut buf = [0u8; 128];
+    let n = c
+        .read_into(FS_FILE, 0, &mut buf)
+        .await
+        .map_err(|e| Why::sys("read_into", e))?;
+    if buf.get(..n) != Some(FS_DATA) {
+        return Err(Why::num("read back bytes", n as u64));
+    }
+    let mut list = [0u8; 256];
+    let n = c
+        .list("/", &mut list)
+        .await
+        .map_err(|e| Why::sys("list", e))?;
+    let names = sys::names(list.get(..n).unwrap_or(&[])).count();
+    if !sys::names(list.get(..n).unwrap_or(&[])).any(|x| x == FS_FILE) {
+        return Err(Why::num("list without the file, names", names as u64));
+    }
+    c.remove(FS_FILE).await.map_err(|e| Why::sys("remove", e))?;
+    match c.stat(FS_FILE).await {
+        Err(sys::Error::NotFound { .. }) => Ok((size, names)),
+        Ok(n) => Err(Why::num("still there after remove, size", n)),
+        Err(e) => Err(Why::sys("stat after remove", e)),
     }
 }
 
