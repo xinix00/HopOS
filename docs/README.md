@@ -12,6 +12,7 @@ de consoleregel die erbij hoort en wat een afwijking betekent.
 | `sh tools/qemu-test-hop.sh` | de kern start Hop met het token op de OS-core; een `POST /v1/jobs` van de host laat Hop appspike plaatsen; Hop bewaart zijn staat en leest hem na een herstart terug |
 | `SMP=2 sh tools/qemu-test-hop.sh` | hetzelfde met twee cores: kern plus Hop op één core, de app op de andere |
 | `SMP=2 OSCORE=1 sh tools/qemu-test-hop.sh` | de kern verhuist bij boot naar core 1 |
+| `sh tools/qemu-test-welcome.sh` | Hop plaatst welcome met `"ports":{"http":80}`; de kern zet poort 80 door naar het slot, `curl` van de host krijgt de pagina met de bunny en `/health`, en na `DELETE /v1/jobs/welcome` is de poort weer dicht |
 | `sh tools/qemu-test-flip.sh` | de kern-flip: Hop overleeft de wissel van de kern zonder herstart |
 | `sh tools/qemu-uefi-test.sh` | de EFI-stub op EDK2, ACPI, PCIe, virtio over PCI, de hele appspike-keten |
 | `sh tools/qemu-rpi4-test.sh` | het Pi 4-board op QEMU's raspi4b tot de executor-tik |
@@ -35,6 +36,12 @@ de consoleregel die erbij hoort en wat een afwijking betekent.
 Hop zelf komt uit de hop-repo (`agentd-hopos`); de image-scripts bouwen
 hem via `HOP_DIR` en bakken hem in als bewoner. Secure Boot moet uit op de
 UEFI-boards.
+
+Een devicedag eindigt met een pagina in de browser: bouw
+[`apps/welcome`](../apps/welcome/README.md), zet `welcome.elf` op een
+HTTP-server op de laptop, en `curl -X POST -d '{"name":"welcome","driver":"hop","artifacts":[{"url":"http://LAPTOP:8000/welcome.elf"}],"memory_limit":33554432,"ports":{"http":80}}' http://NODE:9080/v1/jobs`
+(met `hopos.insecure=1`); daarna toont `http://NODE/` de bunny, de node, het
+slot, de uptime, de verzoeken en de heap.
 
 ## Nog niet, en op ijzer nog nooit gedraaid
 

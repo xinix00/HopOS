@@ -77,6 +77,23 @@ pub struct CageError {
     pub code: u32,
 }
 
+/// Waarom een poort van een jobspec niet doorgezet werd.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum PortError {
+    /// De poort staat al voor een ander slot open.
+    Taken {
+        /// De poort.
+        port: u16,
+        /// Het slot dat hem heeft.
+        owner: usize,
+    },
+    /// De switch nam hem niet aan (vol, of er is geen switch).
+    Refused {
+        /// De poort.
+        port: u16,
+    },
+}
+
 /// Wat een kooi over een slot meldt: de control-page en het fault-rapport.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 pub struct Status {
@@ -146,6 +163,28 @@ pub trait Cage {
     fn clear_smp_request(&mut self, slot: Slot);
     /// De status van `slot` voor HOP.
     fn status(&self, slot: Slot) -> Status;
+    /// Zet elke poort in `ports` van de uplink door naar dezelfde poort in
+    /// `slot` (DNAT in de switch, tcp en udp, zoals Go's `armSlot`), en
+    /// wacht op de bevestiging: een poort die al van een ander slot is, laat
+    /// de start falen in plaats van een app die niemand bereikt. Bij een
+    /// fout staat er niets meer van `slot` open (alles of niets).
+    ///
+    /// Het slot-LAN hoort bij de kooi: wie de ringen aan de switch hangt
+    /// ([`Cage::build`]), zet ook de deuren open. Zonder netwerk (de tests,
+    /// een board zonder NIC) is er niets door te zetten.
+    fn publish(
+        &mut self,
+        slot: Slot,
+        ports: &[u16],
+    ) -> impl Future<Output = Result<(), PortError>> {
+        let _ = (slot, ports);
+        core::future::ready(Ok(()))
+    }
+    /// Trekt elke publicatie van `slot` in, en de flows die erbij horen.
+    /// Bij elke stop en na een mislukte start; zonder publicaties een no-op.
+    fn unpublish(&mut self, slot: Slot) {
+        let _ = slot;
+    }
 }
 
 /// De console van de kern: markerregels en de logregels van apps.

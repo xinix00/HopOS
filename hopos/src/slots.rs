@@ -243,6 +243,8 @@ pub(crate) fn start(
                         states.len()
                     );
                     crate::flip::adopted_ok();
+                    // De poorten van de jobspecs: de NAT van deze kern is leeg.
+                    lc.republish().await;
                 }
                 Err(e) => println!("slots: adoption refused: {e} HOPOS_FLIP_ADOPT_FAIL"),
             }

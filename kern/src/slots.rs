@@ -29,7 +29,7 @@
 //! [`Request::Abort`] geeft een grant terug waarin nooit iets draaide: de
 //! gewone rollback.
 
-use crate::cage::{Cage, Console, Cores, Power, Status, Timer};
+use crate::cage::{Cage, Console, Cores, PortError, Power, Status, Timer};
 use crate::partmem::{Owned, Partition, PartitionPool, Quarantined, Stopped};
 use crate::pool::{CorePool, GroupName, Placement};
 use crate::{Core, Error, GRAIN, Region, Result, SLOT_CAP, Slot};
@@ -82,6 +82,21 @@ pub(crate) fn try_vec<T: Clone>(s: &[T]) -> Result<Vec<T>> {
         })?;
     v.extend_from_slice(s);
     Ok(v)
+}
+
+/// Een lijst poorten voor een logregel: `:80 :8081`, zonder allocatie.
+struct PortList<'a>(&'a [u16]);
+
+impl core::fmt::Display for PortList<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for (i, p) in self.0.iter().enumerate() {
+            if i > 0 {
+                f.write_str(" ")?;
+            }
+            write!(f, ":{p}")?;
+        }
+        Ok(())
+    }
 }
 
 /// Eén volume: `{local, shared}`.
@@ -635,7 +650,7 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
     pub async fn handle(&mut self, req: Request) -> Response {
         let r = match req {
             Request::Claim(spec) => self.claim(spec).await.map(Response::Granted),
-            Request::Arm { grant, entry } => self.arm(grant, entry).map(|()| Response::Done),
+            Request::Arm { grant, entry } => self.arm(grant, entry).await.map(|()| Response::Done),
             Request::Abort(grant) => {
                 self.abort(grant);
                 Ok(Response::Done)
@@ -725,8 +740,14 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
             .is_some_and(|r| matches!(r.held, Held::Streaming) && r.generation == grant.generation)
     }
 
-    /// Stap 2: bouw de kooi (E5), registreer de servicer, dispatch.
-    fn arm(&mut self, grant: ImageGrant, entry: u64) -> Result {
+    /// Stap 2: zet de poorten door, bouw de kooi (E5), registreer de
+    /// servicer, dispatch.
+    ///
+    /// De poorten gaan vóór de bouw en vóór het startschot open, zoals in
+    /// Go's `armSlot`: een poort die al van een ander slot is, laat de start
+    /// dan falen terwijl er nog niets draait en de grant gewoon terug kan.
+    /// Na een geslaagde dispatch komt er geen faalbare stap meer.
+    async fn arm(&mut self, grant: ImageGrant, entry: u64) -> Result {
         let slot = grant.slot();
         if !self.streaming(&grant) {
             // Een grant uit een andere levensduur: niets aanraken. Het token
@@ -738,8 +759,20 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
             None => return Err(Error::NotOwned { slot: slot.get() }),
         };
         let region = grant.region();
+        let ports = match self.resident(slot) {
+            Some(r) => try_vec(&r.ports)?,
+            None => Vec::new(),
+        };
+        if let Err(e) = self.publish(slot, &ports).await {
+            self.abort(grant);
+            return Err(e);
+        }
         if let Err(e) = self.cage.build(slot, region, entry, core, span) {
-            // Nooit gedispatcht: bevestigde afwezigheid van uitvoering.
+            // Nooit gedispatcht: bevestigde afwezigheid van uitvoering. De
+            // poorten gingen al open; die horen bij deze start en gaan dicht.
+            if !ports.is_empty() {
+                self.cage.unpublish(slot);
+            }
             self.abort(grant);
             return Err(Error::Cage {
                 slot: slot.get(),
@@ -771,6 +804,41 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
             });
         }
         Ok(())
+    }
+
+    /// Zet de poorten van een start door (via de kooi, die het slot-LAN
+    /// bezit), met één regel per start. Een weigering trekt in wat er al
+    /// open stond: alles of niets.
+    async fn publish(&mut self, slot: Slot, ports: &[u16]) -> Result {
+        if ports.is_empty() {
+            return Ok(());
+        }
+        match self.cage.publish(slot, ports).await {
+            Ok(()) => {
+                self.log.log(format_args!(
+                    "slot {slot}: {} port(s) published tcp+udp on the uplink: {} HOPOS_SLOT_PUBLISH",
+                    ports.len(),
+                    PortList(ports)
+                ));
+                Ok(())
+            }
+            Err(e) => {
+                self.cage.unpublish(slot);
+                let err = match e {
+                    PortError::Taken { port, owner } => Error::PortTaken {
+                        slot: slot.get(),
+                        port,
+                        owner,
+                    },
+                    PortError::Refused { port } => Error::PortRefused {
+                        slot: slot.get(),
+                        port,
+                    },
+                };
+                self.log.log(format_args!("{err} HOPOS_SLOT_PUBLISH_FAIL"));
+                Err(err)
+            }
+        }
     }
 
     fn register(&mut self, slot: Slot, generation: u32, region: Region) {
@@ -856,8 +924,20 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
             return Err(Error::StillOwned { slot: slot.get() });
         }
         let (core, span) = (r.core, r.span);
+        let published = !r.ports.is_empty();
         self.evict(slot).await;
         self.cage.request_exit(slot);
+        // De deuren dicht zodra de app gevraagd is te stoppen: een nieuwe
+        // verbinding naar een app die weggaat, bereikt niemand meer, en de
+        // poort is dan vrij voor de volgende start (Go: `UnpublishSlot` in
+        // de stop). Ook bij quarantaine: wat er nog draait, is niet meer
+        // van buiten bereikbaar.
+        self.cage.unpublish(slot);
+        if published {
+            self.log.log(format_args!(
+                "slot {slot}: ports withdrawn from the uplink HOPOS_SLOT_UNPUBLISH"
+            ));
+        }
         let mut quiet = self.wait_quiet(slot, core, span, timeout).await;
         if !quiet {
             // Eén intrekking velt alle cores van het slot (gedeelde tabel en
@@ -1092,6 +1172,25 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console> Lifecycle<'s, C, K, T, L> {
         Ok(states.len())
     }
 
+    /// Zet de poorten van elke geadopteerde bewoner opnieuw door: de NAT is
+    /// van de switch van déze kern en begon leeg (Go: de her-publicatie in
+    /// `adopt.go`). Na [`Lifecycle::adopt`], vóór het eerste verzoek. Een
+    /// weigering is één regel en laat de bewoner staan: hij draait, alleen
+    /// niet van buiten bereikbaar, en een stop van Hop ruimt op.
+    pub async fn republish(&mut self) {
+        for i in 1..=SLOT_CAP {
+            let Some(slot) = Slot::new(i) else { continue };
+            let ports = match self.resident(slot) {
+                Some(r) if !r.ports.is_empty() => match try_vec(&r.ports) {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                },
+                _ => continue,
+            };
+            let _ = self.publish(slot, &ports).await;
+        }
+    }
+
     /// De partitie-pool (alleen lezen: capaciteit, grootste gat).
     #[must_use]
     pub fn parts(&self) -> &PartitionPool {
@@ -1263,6 +1362,12 @@ pub(crate) mod tests {
         pub(crate) fail_build: bool,
         pub(crate) smp_req: [u64; 16],
         pub(crate) calls: Cell<u32>,
+        /// Wat er doorgezet werd: slot en poorten, in volgorde.
+        pub(crate) published: Vec<(usize, Vec<u16>)>,
+        /// Welke slots hun publicaties terugtrokken, in volgorde.
+        pub(crate) unpublished: Vec<usize>,
+        /// Een poort die al van dit slot is (de switch weigert hem).
+        pub(crate) taken: Option<(u16, usize)>,
     }
 
     impl FakeCage {
@@ -1279,6 +1384,9 @@ pub(crate) mod tests {
                 fail_build: false,
                 smp_req: [0; 16],
                 calls: Cell::new(0),
+                published: Vec::new(),
+                unpublished: Vec::new(),
+                taken: None,
             }
         }
     }
@@ -1350,6 +1458,25 @@ pub(crate) mod tests {
         }
         fn status(&self, _: Slot) -> Status {
             Status::default()
+        }
+        fn publish(
+            &mut self,
+            slot: Slot,
+            ports: &[u16],
+        ) -> impl core::future::Future<Output = core::result::Result<(), PortError>> {
+            let r = match self.taken {
+                Some((port, owner)) if ports.contains(&port) => {
+                    Err(PortError::Taken { port, owner })
+                }
+                _ => {
+                    self.published.push((slot.get(), ports.to_vec()));
+                    Ok(())
+                }
+            };
+            core::future::ready(r)
+        }
+        fn unpublish(&mut self, slot: Slot) {
+            self.unpublished.push(slot.get());
         }
     }
 
@@ -1426,7 +1553,7 @@ pub(crate) mod tests {
     /// Claim + arm; de servicer-taak draait de test zelf.
     fn start_live(a: &mut Actor<'_>, slot: usize, mib: u64, cores: usize) -> Result {
         let g = block_on(a.claim(StartSpec::new(s(slot), mib * MIB, ded(cores))))?;
-        a.arm(g, 0x4001_0000)
+        block_on(a.arm(g, 0x4001_0000))
     }
 
     pub(crate) fn stop(a: &mut Actor<'_>, slot: usize) -> Result {
@@ -1444,9 +1571,80 @@ pub(crate) mod tests {
         let mut spec = StartSpec::new(s(slot), mib * MIB, ded(cores));
         spec.mounts = mounts;
         let g = block_on(a.claim(spec))?;
-        a.arm(g, 0x4001_0000)?;
+        block_on(a.arm(g, 0x4001_0000))?;
         a.svc.ctl(s(slot)).unwrap().gone.set();
         Ok(())
+    }
+
+    /// Een start met gepubliceerde poorten, zoals Hop een jobspec start.
+    fn start_with_ports(a: &mut Actor<'_>, slot: usize, ports: &[u16]) -> Result {
+        let mut spec = StartSpec::new(s(slot), 16 * MIB, ded(1));
+        spec.ports = ports.to_vec();
+        let g = block_on(a.claim(spec))?;
+        block_on(a.arm(g, 0x4001_0000))?;
+        a.svc.ctl(s(slot)).unwrap().gone.set();
+        Ok(())
+    }
+
+    #[test]
+    fn ports_open_before_the_start_and_close_at_the_stop() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
+        start_with_ports(&mut a, 2, &[80, 8443]).unwrap();
+        assert_eq!(a.cage.published, [(2, vec![80, 8443])]);
+        // Vóór het startschot: de publicatie kwam vóór de bouw.
+        assert_eq!(a.cage.built.len(), 1);
+        assert!(con.saw("slot 2: 2 port(s) published tcp+udp on the uplink: :80 :8443"));
+        assert!(a.cage.unpublished.is_empty());
+        stop(&mut a, 2).unwrap();
+        assert_eq!(a.cage.unpublished, [2]);
+        assert!(con.saw("HOPOS_SLOT_UNPUBLISH"));
+        // Zonder poorten wordt er niets doorgezet, en een stop zegt niets.
+        start(&mut a, 3, 16, 1).unwrap();
+        assert_eq!(a.cage.published.len(), 1);
+        let lines = con.lines.borrow().len();
+        stop(&mut a, 3).unwrap();
+        assert!(
+            !con.lines.borrow()[lines..]
+                .iter()
+                .any(|l| l.contains("UNPUBLISH"))
+        );
+    }
+
+    #[test]
+    fn a_taken_port_refuses_the_start_and_leaves_nothing() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
+        a.cage.taken = Some((80, 1));
+        let e = start_with_ports(&mut a, 2, &[8080, 80]).unwrap_err();
+        assert_eq!(
+            e,
+            Error::PortTaken {
+                slot: 2,
+                port: 80,
+                owner: 1
+            }
+        );
+        assert!(con.saw("slot 2: port 80 is taken by slot 1 HOPOS_SLOT_PUBLISH_FAIL"));
+        // Niets gebouwd, niets gedispatcht, alles ingetrokken en terug.
+        assert!(a.cage.built.is_empty() && a.cage.dispatched.is_empty());
+        assert_eq!(a.cage.unpublished, [2]);
+        assert_eq!(a.status(s(2)).occupancy, Occupancy::Empty);
+        assert!(a.parts.partition_of(s(2)).is_none());
+        // Het slot is daarna gewoon weer te starten.
+        a.cage.taken = None;
+        start_with_ports(&mut a, 2, &[8080]).unwrap();
+    }
+
+    #[test]
+    fn a_failed_build_withdraws_the_ports() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
+        a.cage.fail_build = true;
+        assert!(start_with_ports(&mut a, 2, &[80]).is_err());
+        assert_eq!(a.cage.published, [(2, vec![80])]);
+        assert_eq!(a.cage.unpublished, [2]);
+        assert_eq!(a.status(s(2)).occupancy, Occupancy::Empty);
     }
 
     #[test]
@@ -1850,8 +2048,12 @@ pub(crate) mod tests {
     fn adoption_separates_cages_from_smp_cores() {
         let (svc, con) = (Servicers::new(), FakeConsole::default());
         let mut a = actor(&svc, &con, Obey::Exit, 256, 4);
-        let states = [st(1, 3, 2, 0x8000_0000), st(2, 1, 1, 0x8200_0000)];
+        let mut states = [st(1, 3, 2, 0x8000_0000), st(2, 1, 1, 0x8200_0000)];
+        states[1].ports = vec![80];
         assert_eq!(a.adopt(&states).unwrap(), 2);
+        // De NAT van de nieuwe kern is leeg: alleen slot 2 had poorten.
+        block_on(a.republish());
+        assert_eq!(a.cage.published, [(2, vec![80])]);
         assert_eq!(
             a.places.placement_of(s(1)).map(|p| (p.0.get(), p.1)),
             Some((3, 2))
@@ -1890,7 +2092,7 @@ pub(crate) mod tests {
         });
         spec.placement.pool_cores = 2;
         let g = block_on(a.claim(spec.clone())).unwrap();
-        a.arm(g, 0).unwrap();
+        block_on(a.arm(g, 0)).unwrap();
         let states = a.snapshot().unwrap();
         assert_eq!(states[0].group_cores, vec![1, 2]);
 
@@ -1908,6 +2110,6 @@ pub(crate) mod tests {
         join.slot = s(5);
         let g = block_on(b.claim(join)).unwrap();
         assert_eq!(b.places.placement_of(s(5)).unwrap().0.get(), 2);
-        b.arm(g, 0).unwrap();
+        block_on(b.arm(g, 0)).unwrap();
     }
 }

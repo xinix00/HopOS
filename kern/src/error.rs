@@ -83,6 +83,15 @@ pub enum Error {
     Privilege { slot: usize },
     /// De brievenbus van de actor zit vol.
     Busy,
+    /// Een poort van de jobspec is op deze node al van een ander slot
+    /// (`owner`); de start gaat niet door.
+    PortTaken {
+        slot: usize,
+        port: u16,
+        owner: usize,
+    },
+    /// De switch nam de publicatie van een poort niet aan (vol, geen switch).
+    PortRefused { slot: usize, port: u16 },
 }
 
 impl fmt::Display for Error {
@@ -142,6 +151,12 @@ impl fmt::Display for Error {
                 write!(f, "slot {slot}: privileged operation without privilege")
             }
             Self::Busy => f.write_str("actor mailbox full"),
+            Self::PortTaken { slot, port, owner } => {
+                write!(f, "slot {slot}: port {port} is taken by slot {owner}")
+            }
+            Self::PortRefused { slot, port } => {
+                write!(f, "slot {slot}: port {port} not published by the switch")
+            }
         }
     }
 }

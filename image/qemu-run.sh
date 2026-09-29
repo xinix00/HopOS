@@ -29,6 +29,21 @@
 #                                    (ijl) als hij ontbreekt. Een verse schijf
 #                                    is een lege hopfs; een bestaande houdt de
 #                                    volumes over een herstart (stateful).
+#   WEBPORT=8081 image/qemu-run.sh   een vierde hostfwd: 127.0.0.1:$WEBPORT
+#                                    naar poort 80 van de gast, de poort die
+#                                    een jobspec met "ports":{"http":80}
+#                                    publiceert (de kern zet hem door naar
+#                                    het slot van de app)
+#   ARTIFACT=welcome image/qemu-run.sh
+#                                    een app-ELF voor Hop: een crate uit deze
+#                                    werkruimte (of een pad naar een ELF),
+#                                    zonder debug-info op een artifact-server
+#                                    op 127.0.0.1:$ARTPORT (standaard 8000),
+#                                    voor de gast
+#                                    http://10.0.2.2:$ARTPORT/<naam>.elf. Het
+#                                    script drukt de URL en het curl-commando
+#                                    met de jobspec af; de server stopt met
+#                                    QEMU.
 #
 # APP=hop bouwt `agentd-hopos` in de hop-repo ($HOP_DIR, standaard
 # ../hop/hop naast deze repo) met cargo en neemt alleen het bestand: geen
@@ -112,12 +127,46 @@ if [ ! -e "$DISK" ]; then
 	echo "qemu-run: new disk $DISK ($DISK_MIB MiB)" >&2
 fi
 
+# De artifact-server voor een app die Hop ophaalt (ARTIFACT). Zonder
+# debug-info, zoals de staging hierboven; de symbolen blijven voor de
+# plaatsing. QEMU draait dan als kind (geen exec), zodat de server met hem
+# stopt.
+ARTPID=""
+if [ -n "${ARTIFACT:-}" ]; then
+	ARTPORT="${ARTPORT:-8000}"
+	case "$ARTIFACT" in
+	*/*) ARTELF="$ARTIFACT" ;;
+	*)
+		cargo build --quiet --release --target "$TARGET" -p "$ARTIFACT"
+		ARTELF="$DIR/target/$TARGET/release/$ARTIFACT"
+		;;
+	esac
+	ARTDIR="$(mktemp -d -t hopos-artifact.XXXXXX)"
+	ARTNAME="$(basename "$ARTELF" .elf).elf"
+	OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
+	if [ -n "$OBJCOPY" ]; then
+		"$OBJCOPY" --strip-debug "$ARTELF" "$ARTDIR/$ARTNAME"
+	else
+		cp "$ARTELF" "$ARTDIR/$ARTNAME"
+	fi
+	(cd "$ARTDIR" && exec python3 -m http.server "$ARTPORT" --bind 127.0.0.1) >/dev/null 2>&1 &
+	ARTPID=$!
+	trap 'kill "$ARTPID" 2>/dev/null; rm -rf "$ARTDIR"' EXIT INT TERM
+	{
+		echo "qemu-run: artifact http://10.0.2.2:$ARTPORT/$ARTNAME (host 127.0.0.1:$ARTPORT)"
+		echo "qemu-run: curl -X POST -d '{\"name\":\"$(basename "$ARTNAME" .elf)\",\"driver\":\"hop\",\"artifacts\":[{\"url\":\"http://10.0.2.2:$ARTPORT/$ARTNAME\"}],\"memory_limit\":33554432,\"ports\":{\"http\":80}}' http://127.0.0.1:$LEADERPORT/v1/jobs"
+	} >&2
+fi
+
 # virtio-net expliciet op de mmio-bus (virt zet hem anders op PCIe) en
 # modern (force-legacy=false: transportversie 2). -m 3G: het PA-plan van
 # virt legt de slot-pool tot voorbij 0xC000_0000.
 FWD="hostfwd=tcp:127.0.0.1:${SYSPORT}-:10100"
 FWD="$FWD,hostfwd=tcp:127.0.0.1:${AGENTPORT}-:8080,hostfwd=tcp:127.0.0.1:${LEADERPORT}-:9080"
-exec qemu-system-aarch64 -M virt,gic-version=3,highmem-ecam=off,virtualization=on \
+if [ -n "${WEBPORT:-}" ]; then
+	FWD="$FWD,hostfwd=tcp:127.0.0.1:${WEBPORT}-:80"
+fi
+set -- -M virt,gic-version=3,highmem-ecam=off,virtualization=on \
 	-cpu cortex-a53 -smp "$SMP" -m 3G \
 	-nographic -monitor none -serial stdio \
 	-global virtio-mmio.force-legacy=false \
@@ -126,3 +175,8 @@ exec qemu-system-aarch64 -M virt,gic-version=3,highmem-ecam=off,virtualization=o
 	-drive "if=none,format=raw,file=$DISK,id=disk0" \
 	-device virtio-blk-device,drive=disk0,bus=virtio-mmio-bus.1 \
 	-kernel "$KERNEL" "$@"
+if [ -n "$ARTPID" ]; then
+	qemu-system-aarch64 "$@"
+else
+	exec qemu-system-aarch64 "$@"
+fi

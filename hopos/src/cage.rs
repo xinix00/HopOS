@@ -32,7 +32,9 @@ use cpu::el2::{self, CoreState, Flavor, Installed, Start};
 use cpu::println;
 use dev::Pa;
 use executor::Executor;
-use kern::cage::{Cage, CageError, Console, CoreClass, Cores, PhysMem, Power, Status, Timer};
+use kern::cage::{
+    Cage, CageError, Console, CoreClass, Cores, PhysMem, PortError, Power, Status, Timer,
+};
 use kern::slots::Outbox;
 use kern::{Core, Region, SLOT_CAP, Slot};
 use net::ring::AbiTx;
@@ -45,6 +47,13 @@ use vboard::slots::mpidr;
 static ATTACH_ACK: Ack = Ack::new();
 /// De bevestiging van de `Detach` bij een stop.
 static DETACH_ACK: Ack = Ack::new();
+/// De bevestiging van elke `Publish` van de poorten van een jobspec. De
+/// lifecycle-actor is de enige zender en wacht elke bevestiging af.
+static PUBLISH_ACK: Ack = Ack::new();
+/// De bevestiging van de `UnpublishSlot` bij een stop. Niemand wacht erop:
+/// de brievenbus is een rij, dus een publicatie van een volgende start komt
+/// altijd ná deze intrekking aan de beurt.
+static UNPUBLISH_ACK: Ack = Ack::new();
 
 /// De EL2-smaak van QEMU virt: E2H=0, de switcher slaapt in WFE. Het board
 /// kiest, niet een bouwvlag (cpu::el2 `Flavor`).
@@ -357,6 +366,48 @@ fn detach(slot: Slot) {
     }
 }
 
+/// Zet de poorten van een jobspec door, elk voor tcp en udp (Go's
+/// `armSlot`: de jobspec kent geen protocol, en een app die er één bedient
+/// laat de ander onbeantwoord). Stopt bij de eerste weigering; wat er al
+/// open stond, trekt de lifecycle in ([`Cage::unpublish`]).
+async fn publish_ports(slot: Slot, ports: &[u16]) -> Result<(), PortError> {
+    use net::nat::Proto;
+    if !crate::net::switch_up() {
+        let port = ports.first().copied().unwrap_or(0);
+        println!(
+            "cage: slot {slot}: no switch on this node, port {port} not published HOPOS_CAGE_PUBLISH"
+        );
+        return Err(PortError::Refused { port });
+    }
+    for &port in ports {
+        for proto in [Proto::Tcp, Proto::Udp] {
+            match crate::net::publish_via(&PUBLISH_ACK, proto, slot.get(), port).await {
+                Ok(()) => {}
+                Err(net::Error::AlreadyPublished { port, slot: owner }) => {
+                    return Err(PortError::Taken { port, owner });
+                }
+                Err(e) => {
+                    println!("cage: slot {slot}: port {port}: {e} HOPOS_CAGE_PUBLISH");
+                    return Err(PortError::Refused { port });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Trekt de publicaties (en flows) van `slot` in, zonder te wachten.
+fn unpublish_ports(slot: Slot) {
+    let _ = UNPUBLISH_ACK.try_take();
+    let cmd = Command::UnpublishSlot {
+        slot: slot.get(),
+        ack: &UNPUBLISH_ACK,
+    };
+    if crate::net::COMMANDS.try_send(cmd).is_err() {
+        println!("cage: slot {slot}: switch mailbox full, unpublish not sent HOPOS_CAGE_PUBLISH");
+    }
+}
+
 impl Cage for ArmCage {
     fn link_window(&self, size: u64) -> u64 {
         link_window(size)
@@ -542,6 +593,18 @@ impl Cage for ArmCage {
             fault_esr: self.ctrl_read(slot, CTRL_FAULT_ESR),
             fault_far: self.ctrl_read(slot, CTRL_FAULT_FAR),
         }
+    }
+
+    fn publish(
+        &mut self,
+        slot: Slot,
+        ports: &[u16],
+    ) -> impl Future<Output = Result<(), PortError>> {
+        publish_ports(slot, ports)
+    }
+
+    fn unpublish(&mut self, slot: Slot) {
+        unpublish_ports(slot);
     }
 }
 

@@ -42,6 +42,7 @@ board/      the Board contract; qemuvirt, uefi, o6n, altra, raspi, rpi4,
             rpi5, rk3566
 applib/     the app runtime; apps link against it
 appspike/   the ABI test app
+apps/       the apps: welcome, the page on a published port
 hopos/      the kernel binary; picks exactly one board
 image/      the image builders per board; tools/ the gate and the QEMU tests
 docs/       the per-board checklists
@@ -49,6 +50,6 @@ docs/       the per-board checklists
 
 Build and test: `sh tools/gate.sh` (host tests, clippy, fmt, target builds),
 then `sh tools/qemu-test.sh`, `sh tools/qemu-test-hop.sh`,
-`sh tools/qemu-test-flip.sh`, `sh tools/qemu-uefi-test.sh` and
+`sh tools/qemu-test-welcome.sh`, `sh tools/qemu-test-flip.sh`, `sh tools/qemu-uefi-test.sh` and
 `sh tools/qemu-rpi4-test.sh`. Images: `image/uefi-run.sh` (`BOARD=uefi|o6n|altra`),
 `image/rpi4.sh`, `image/rpi5.sh`, `image/radxa-zero3.sh`, `image/flip-bundle.sh`.

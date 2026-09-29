@@ -46,6 +46,7 @@ members = [
     "board/altra",
     "applib",
     "appspike",
+    "apps/welcome",
     "hopos",
 ]
 # De host-poort (cargo test, cargo clippy) draait over de bibliotheken; de
@@ -91,6 +92,9 @@ default-members = [
     "board/o6n",
     "board/altra",
     "applib",
+    # welcome draagt zijn paginatoetsen op de host; het image zelf bouwt
+    # alleen voor een target (tools/gate.sh).
+    "apps/welcome",
 ]
 
 [workspace.package]

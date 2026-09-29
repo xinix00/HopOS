@@ -1622,6 +1622,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         let slot = self.free_slot(reply).await?;
         let mut spec = StartSpec::new(slot, req.memory_limit, placement);
         spec.job = job;
+        spec.ports = start_ports(&req)?;
         let grant = match slots::call(self.inbox, reply, Request::Claim(spec)).await? {
             Response::Granted(g) => g,
             Response::Failed(e) => return Err(e.into()),
@@ -1850,6 +1851,21 @@ fn target(c: &Call<'_>) -> Result<Slot> {
 }
 
 /// De core-vraag van een start.
+/// De poorten van een start, elk één keer: twee namen in de jobspec met
+/// hetzelfde nummer (`http` en `web` op 80) zijn één publicatie, geen
+/// botsing met zichzelf. De toetsen (hoeveel, geen 0) deed `StartReq::decode`.
+fn start_ports(req: &StartReq<'_>) -> Result<Vec<u16>> {
+    let mut out: Vec<u16> = Vec::new();
+    for p in req.ports() {
+        if !out.contains(&p) {
+            out.try_reserve(1)
+                .map_err(|_| Error::OutOfMemory { bytes: 2 })?;
+            out.push(p);
+        }
+    }
+    Ok(out)
+}
+
 fn placement(req: &StartReq<'_>) -> Result<Placement> {
     use abi::systemapi::CoreClass as Wire;
     let group = if req.group.is_empty() {
@@ -2033,6 +2049,11 @@ mod tests {
     }
 
     fn start_call(seq: u32, image_size: u64, env: &[u8]) -> Vec<u8> {
+        start_call_ports(seq, image_size, env, &[])
+    }
+
+    /// Een START_SLOT met poorten in de draadvorm (`u16` little-endian).
+    fn start_call_ports(seq: u32, image_size: u64, env: &[u8], ports: &[u8]) -> Vec<u8> {
         let r = StartReq {
             memory_limit: 8 * MIB,
             image_size,
@@ -2041,6 +2062,7 @@ mod tests {
             core_class: abi::systemapi::CoreClass::Any,
             group: b"",
             env,
+            ports,
             job: b"demo",
         };
         let mut v = vec![0u8; 512];
@@ -2304,7 +2326,8 @@ mod tests {
         let mut p = Pipe::new(
             NET | 2,
             &[
-                start_call(1, img.len() as u64, env),
+                // Twee namen op 80 (http en web) en 8443: twee publicaties.
+                start_call_ports(1, img.len() as u64, env, &[80, 0, 80, 0, 0xfb, 0x20]),
                 enc(&stream_req(2, 3, 0, &img[..c1])),
                 enc(&stream_req(3, 3, c1 as u64, &img[c1..c2])),
                 enc(&stream_req(4, 3, c2 as u64, &img[c2..])),
@@ -2345,6 +2368,10 @@ mod tests {
         assert_eq!((res[5].3, &res[5].4[..]), (1, &b"app says hi"[..]));
         assert_eq!((res[6].3, res[6].4.len()), (0, 0), "log ring drained");
         assert_eq!(hooks.0.get(), 1_759_000_000);
+
+        // De poorten gingen bij de plaatsing open, elk één keer.
+        assert_eq!(a.cage().published, [(3, vec![80, 8443])]);
+        assert!(con.saw("slot 3: 2 port(s) published tcp+udp on the uplink: :80 :8443"));
 
         // Het image staat op zijn plek, gepatcht, met de env op de page.
         let part = a.status(s(3)).partition.unwrap();
@@ -2595,6 +2622,7 @@ mod tests {
                 core_class: abi::systemapi::CoreClass::Any,
                 group: b"",
                 env: b"",
+                ports: &[],
                 job: FLIP_BUNDLE_JOB,
             };
             let mut v = vec![0u8; 512];

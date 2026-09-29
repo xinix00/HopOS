@@ -1,6 +1,7 @@
 #!/bin/sh
 # De poort van HopOS v3 (handboek §9): host-tests, clippy met de harde set,
-# rustfmt, en de target-builds van ELK board. Rood is rood.
+# rustfmt, de target-builds van de apps (appspike, welcome) en van ELK
+# board. Rood is rood.
 #
 # De boards: virt, rpi4, rpi5 en rk3566 als debug-build in de gedeelde
 # target-map (compileert en linkt tegen hun linkscript), en de drie
@@ -21,6 +22,8 @@ echo "== rustfmt"
 cargo fmt --check
 echo "== target: bibliotheken (aarch64)"
 cargo build --quiet --target aarch64-unknown-none-softfloat
+echo "== target: apps (appspike, welcome)"
+cargo build --quiet --target aarch64-unknown-none-softfloat -p appspike -p welcome
 echo "== target: hopos (qemuvirt)"
 cargo build --quiet --target aarch64-unknown-none-softfloat -p hopos --features board-qemuvirt
 echo "== target: hopos (rpi4, rpi5)"

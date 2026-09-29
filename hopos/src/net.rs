@@ -31,7 +31,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::future::{Future, poll_fn};
 use core::net::Ipv4Addr;
-use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use core::task::{Context, Poll, Waker};
 use core::time::Duration;
 use cpu::println;
@@ -93,6 +93,10 @@ static UPLINK_DNS: AtomicU32 = AtomicU32::new(0);
 /// De bevestiging van een `Publish`; de plaatsing van Hop is de enige
 /// zender en wacht elke bevestiging af voor hij de volgende stuurt.
 static PUBLISH_ACK: Ack = Ack::new();
+/// Draait de switch-actor? Gezet na zijn spawn, nooit meer terug (de
+/// switch stopt niet). Wie op een bevestiging van de switch wil wachten,
+/// kijkt eerst hier.
+static SWITCH_UP: AtomicBool = AtomicBool::new(false);
 /// De node-stack, gezet door de host-taak na de lease. Zie de moduledoc
 /// voor waarom dit een `LocalCell` is en geen actor.
 static STACK: LocalCell<Option<Stack>> = LocalCell::cell(None);
@@ -157,20 +161,42 @@ pub(crate) fn uplink_ip() -> Option<Ipv4Addr> {
 }
 
 /// Zet TCP-poort `port` van de uplink door naar dezelfde poort in `slot`
-/// (DNAT in de switch, `Command::Publish`), zoals de Go-kern dat deed met
-/// de poorten uit een jobspec. Wacht op de bevestiging van de switch.
+/// (DNAT in de switch, `Command::Publish`): de poorten van Hop zelf. Wacht
+/// op de bevestiging van de switch.
 pub(crate) async fn publish(slot: usize, port: u16) -> Result<(), net::Error> {
+    publish_via(&PUBLISH_ACK, net::nat::Proto::Tcp, slot, port).await
+}
+
+/// Zet poort `port` (`proto`) van de uplink door naar dezelfde poort in
+/// `slot` en wacht op `ack`. Elke zender heeft zijn eigen `ack` en stuurt
+/// pas een volgende als de vorige bevestigd is: de plaatsing van Hop
+/// ([`publish`]) en de lifecycle-actor (de poorten van een jobspec,
+/// `cage.rs`). Alleen met een draaiende switch ([`switch_up`]): anders
+/// leest niemand de brievenbus en duurt de wacht eeuwig.
+pub(crate) async fn publish_via(
+    ack: &'static Ack,
+    proto: net::nat::Proto,
+    slot: usize,
+    port: u16,
+) -> Result<(), net::Error> {
+    let _ = ack.try_take();
     let cmd = Command::Publish {
-        proto: net::nat::Proto::Tcp,
+        proto,
         node_port: port,
         slot,
         slot_port: port,
-        ack: &PUBLISH_ACK,
+        ack,
     };
     if COMMANDS.try_send(cmd).is_err() {
         return Err(net::Error::Full("switch mailbox", switch::COMMANDS));
     }
-    PUBLISH_ACK.wait().await.map(|_| ())
+    ack.wait().await.map(|_| ())
+}
+
+/// Draait de switch-actor? Zonder NIC niet, en dan beantwoordt niemand een
+/// commando.
+pub(crate) fn switch_up() -> bool {
+    SWITCH_UP.load(Relaxed)
 }
 
 /// De vaste instellingen van het netwerkvlak, uit `main`.
@@ -296,6 +322,7 @@ where
     let mut sw_buf = boot_buf(MAX_LAN_FRAME)?;
     exec.spawn(async move { sw.run(exec, &mut sw_buf, &STOP).await })
         .map_err(|_| Error::Spawn("switch"))?;
+    SWITCH_UP.store(true, Relaxed);
     exec.spawn(switch::flow_expiry(exec, &COMMANDS, &STOP))
         .map_err(|_| Error::Spawn("flow expiry"))?;
     println!(

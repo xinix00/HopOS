@@ -313,7 +313,13 @@ impl CoreClass {
 
 /// Het vaste deel van een [`PrivOp::StartSlot`]-request, vooraan in `data`
 /// (little-endian). Daarachter: `group_len` bytes sharegroup-naam, dan
-/// `env_len` bytes env-blob (`key=val\n`).
+/// `env_len` bytes env-blob (`key=val\n`), dan `port_count` poorten van elk
+/// [`PORT_LEN`] bytes (`u16` little-endian).
+///
+/// `port_count` staat op de plek die tot alpha.7 `reserved` heette en 0
+/// was: een Hop van vóór de poorten stuurt dus nul poorten, en dezelfde
+/// bytes betekenen hetzelfde. Een kern van vóór de poorten weigert een start
+/// mét poorten luid (de lengte klopt niet), nooit stil zonder publicatie.
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 pub struct StartHead {
@@ -330,8 +336,9 @@ pub struct StartHead {
     pub core_class: u8,
     /// De lengte van de sharegroup-naam (0 = eigen cores).
     pub group_len: u8,
-    /// Gereserveerd, 0.
-    pub reserved: u16,
+    /// Het aantal gepubliceerde poorten achter de env (de `ports` van de
+    /// jobspec), hoogstens [`MAX_START_PORTS`].
+    pub port_count: u16,
     /// De lengte van de env-blob.
     pub env_len: u32,
     /// Gereserveerd, 0.
@@ -340,6 +347,15 @@ pub struct StartHead {
 
 /// De lengte van [`StartHead`] op de draad.
 pub const START_HEAD_LEN: usize = 32;
+
+/// De bytes van één poort achter de env: een `u16`, little-endian.
+pub const PORT_LEN: usize = 2;
+
+/// Zoveel poorten mag één start publiceren. Elke poort kost de NAT twee
+/// publicaties (tcp en udp, zoals Go) uit een tabel van 512 voor de hele
+/// node; zestien per app is ruim voor een dienst en houdt één jobspec uit
+/// de buurt van dat plafond.
+pub const MAX_START_PORTS: usize = 16;
 
 macro_rules! field {
     ($t:ty, $f:ident, $off:expr) => {
@@ -354,7 +370,7 @@ field!(StartHead, cores, 16);
 field!(StartHead, pool_cores, 18);
 field!(StartHead, core_class, 20);
 field!(StartHead, group_len, 21);
-field!(StartHead, reserved, 22);
+field!(StartHead, port_count, 22);
 field!(StartHead, env_len, 24);
 field!(StartHead, reserved2, 28);
 
@@ -375,8 +391,35 @@ pub struct StartReq<'a> {
     pub group: &'a [u8],
     /// De env-blob (`key=val\n`), voor de control-page.
     pub env: &'a [u8],
+    /// De gepubliceerde poorten zoals ze op de draad staan: [`PORT_LEN`]
+    /// bytes per poort, `u16` little-endian ([`StartReq::ports`] leest ze,
+    /// [`port_blob`] schrijft ze). De kern zet elke poort van de uplink door
+    /// naar dezelfde poort in het slot, tcp en udp.
+    pub ports: &'a [u8],
     /// De jobnaam (de store-naamruimte).
     pub job: &'a [u8],
+}
+
+/// Schrijft `ports` in de draadvorm van [`StartReq::ports`] in `dst`; geeft
+/// de lengte. Meer dan [`MAX_START_PORTS`] of een poort 0 wordt geweigerd,
+/// zoals de kern dat bij het lezen ook doet.
+pub fn port_blob(ports: &[u16], dst: &mut [u8]) -> Result<usize> {
+    if ports.len() > MAX_START_PORTS {
+        return Err(Error::TooMany {
+            what: "start ports",
+            cap: MAX_START_PORTS,
+        });
+    }
+    if ports.contains(&0) {
+        return Err(Error::Missing("port number"));
+    }
+    let need = ports.len() * PORT_LEN;
+    let len = dst.len();
+    let out = dst.get_mut(..need).ok_or(short(len, need))?;
+    for (d, p) in out.chunks_exact_mut(PORT_LEN).zip(ports) {
+        d.copy_from_slice(&p.to_le_bytes());
+    }
+    Ok(need)
 }
 
 /// Een little-endian `u16` op `b[i..]`, of 0 als `b` te kort is.
@@ -417,6 +460,7 @@ impl<'a> StartReq<'a> {
             len: self.env.len(),
             max: u32::MAX as usize,
         })?;
+        let port_count = port_count(self.ports)?;
         let req = crate::hopabi::Req {
             op: PrivOp::StartSlot.op(),
             seq,
@@ -424,7 +468,7 @@ impl<'a> StartReq<'a> {
             ..Default::default()
         };
         let at = crate::hopabi::encode_req(dst, &req)?;
-        let need = at + START_HEAD_LEN + self.group.len() + self.env.len();
+        let need = at + START_HEAD_LEN + self.group.len() + self.env.len() + self.ports.len();
         let len = dst.len();
         let out = dst.get_mut(at..need).ok_or(short(len, need))?;
         let (head, rest) = out.split_at_mut(START_HEAD_LEN);
@@ -434,12 +478,14 @@ impl<'a> StartReq<'a> {
         head[18..20].copy_from_slice(&self.pool_cores.to_le_bytes());
         head[20] = self.core_class as u8;
         head[21] = group_len;
-        head[22..24].fill(0);
+        head[22..24].copy_from_slice(&port_count.to_le_bytes());
         head[24..28].copy_from_slice(&env_len.to_le_bytes());
         head[28..32].fill(0);
-        let (group, env) = rest.split_at_mut(self.group.len());
+        let (group, rest) = rest.split_at_mut(self.group.len());
+        let (env, ports) = rest.split_at_mut(self.env.len());
         group.copy_from_slice(self.group);
         env.copy_from_slice(self.env);
+        ports.copy_from_slice(self.ports);
         Ok(need)
     }
 
@@ -454,14 +500,18 @@ impl<'a> StartReq<'a> {
             .get(..START_HEAD_LEN)
             .ok_or(short(d.len(), START_HEAD_LEN))?;
         let group_len = usize::from(head[21]);
+        let ports_len = usize::from(le16(head, 22)).saturating_mul(PORT_LEN);
         let env_len = le32(head, 24) as usize;
         let need = START_HEAD_LEN
             .saturating_add(group_len)
-            .saturating_add(env_len);
+            .saturating_add(env_len)
+            .saturating_add(ports_len);
         if d.len() != need {
             return Err(short(d.len(), need));
         }
-        let (group, env) = d[START_HEAD_LEN..].split_at(group_len);
+        let (group, rest) = d[START_HEAD_LEN..].split_at(group_len);
+        let (env, ports) = rest.split_at(env_len);
+        port_count(ports)?;
         Ok(StartReq {
             memory_limit: le64(head, 0),
             image_size: le64(head, 8),
@@ -470,10 +520,40 @@ impl<'a> StartReq<'a> {
             core_class: CoreClass::from_raw(head[20])?,
             group,
             env,
+            ports,
             job: r.path,
         })
     }
+
+    /// De gepubliceerde poorten, in de volgorde van de draad.
+    pub fn ports(&self) -> impl Iterator<Item = u16> + 'a {
+        self.ports
+            .chunks_exact(PORT_LEN)
+            .map(|p| u16::from_le_bytes([p[0], p[1]]))
+    }
 }
+
+/// Het aantal poorten in een draadblob, na de toetsen: een hele poort per
+/// [`PORT_LEN`] bytes, hoogstens [`MAX_START_PORTS`], geen poort 0.
+fn port_count(ports: &[u8]) -> Result<u16> {
+    if !ports.len().is_multiple_of(PORT_LEN) {
+        return Err(short(ports.len(), ports.len() + 1));
+    }
+    let n = ports.len() / PORT_LEN;
+    if n > MAX_START_PORTS {
+        return Err(Error::TooMany {
+            what: "start ports",
+            cap: MAX_START_PORTS,
+        });
+    }
+    if ports.chunks_exact(PORT_LEN).any(|p| p == [0, 0]) {
+        return Err(Error::Missing("port number"));
+    }
+    // Past: MAX_START_PORTS is ver onder u16::MAX (de assertie hieronder).
+    Ok(n as u16)
+}
+
+const _: () = assert!(MAX_START_PORTS <= u16::MAX as usize);
 
 /// Een [`PrivOp::StreamImage`]-request.
 #[must_use]
@@ -775,6 +855,7 @@ mod tests {
             core_class: CoreClass::Big,
             group: b"web",
             env: b"A=1\nB=2\n",
+            ports: &[80, 0, 0x90, 0x1f],
             job: b"demo",
         };
         let mut buf = [0u8; 256];
@@ -791,6 +872,51 @@ mod tests {
         assert_eq!(StartReq::decode(&bad), Err(Error::BadKind(9)));
         let mut tiny = [0u8; 40];
         assert!(s.encode(&mut tiny, 1).is_err());
+    }
+
+    #[test]
+    fn start_draagt_de_poorten_achter_de_env() {
+        let mut blob = [0u8; MAX_START_PORTS * PORT_LEN + 2];
+        let n = port_blob(&[80, 8081], &mut blob).unwrap();
+        let s = StartReq {
+            memory_limit: 32 << 20,
+            image_size: 1 << 20,
+            cores: 1,
+            env: b"ER_PORT_HTTP=80\n",
+            ports: &blob[..n],
+            job: b"welcome",
+            ..Default::default()
+        };
+        let mut buf = [0u8; 256];
+        let len = s.encode(&mut buf, 1).unwrap();
+        let req = crate::hopabi::decode_req(&buf[..len]).unwrap();
+        let back = StartReq::decode(&req).unwrap();
+        assert_eq!(back.ports().collect::<Vec<_>>(), [80, 8081]);
+        assert_eq!(back.env, b"ER_PORT_HTTP=80\n");
+        // Het aantal staat op de oude plek van `reserved`, offset 22 van de kop.
+        let head = crate::hopabi::HDR_LEN + s.job.len();
+        assert_eq!(&buf[head + 22..head + 24], &[2, 0]);
+
+        // Een start zonder poorten is byte voor byte die van alpha.7.
+        let old = StartReq { ports: &[], ..s };
+        let len = old.encode(&mut buf, 1).unwrap();
+        assert_eq!(&buf[head + 22..head + 24], &[0, 0]);
+        let req = crate::hopabi::decode_req(&buf[..len]).unwrap();
+        assert_eq!(StartReq::decode(&req).unwrap().ports().count(), 0);
+
+        // Poort 0, te veel poorten en een halve poort worden geweigerd.
+        let mut spare = [0u8; MAX_START_PORTS * PORT_LEN + 2];
+        assert!(port_blob(&[80, 0], &mut spare).is_err());
+        assert!(port_blob(&[1; MAX_START_PORTS + 1], &mut spare).is_err());
+        assert!(port_blob(&[80], &mut [0u8; 1]).is_err());
+        let zero = StartReq {
+            ports: &[0, 0],
+            ..s
+        };
+        let len = zero.encode(&mut buf, 1);
+        assert!(len.is_err());
+        let half = StartReq { ports: &[80], ..s };
+        assert!(half.encode(&mut buf, 1).is_err());
     }
 
     #[test]
