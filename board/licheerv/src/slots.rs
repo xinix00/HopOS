@@ -86,10 +86,20 @@ pub const fn core_of(mpidr: u64) -> usize {
     mpidr as usize
 }
 
-/// Geen staging op dit board.
+/// Een image op een 8-grens: de ELF-lezer leest woorden.
+#[repr(C, align(8))]
+struct Aligned<T: ?Sized>(T);
+
+/// Het app-image van de eerste plaatsing, in de kern gebakken door
+/// `image/licheerv-agent.sh` (`APP=appspike`, via `HOPOS_LRV_STAGE` en
+/// build.rs); leeg zonder. Het staat in `.rodata` van het image dat de FSBL
+/// laadt, want er is geen QEMU die het in het RAM legt.
+static STAGE: &Aligned<[u8]> = &Aligned(*include_bytes!(concat!(env!("OUT_DIR"), "/stage.bin")));
+
+/// Het gebakken image, of `None`.
 #[must_use]
 pub fn staged_image() -> Option<&'static [u8]> {
-    None
+    Some(&STAGE.0).filter(|b| !b.is_empty())
 }
 
 /// Wat het gestagede image is.
@@ -101,10 +111,12 @@ pub enum StagedRole {
     Hop,
 }
 
-/// Geen staging, dus geen rol: de kern plaatst niets en zegt dat.
+/// Een gebakken image is altijd een gewone app (het ABI-bewijs, twee keer
+/// door de kern geplaatst); Hop op de LicheeRV komt via zijn eigen weg. Zonder
+/// image zegt de plaatsing dat er niets is (`HOPOS_SLOT_NONE`).
 #[must_use]
 pub fn staged_role() -> Option<StagedRole> {
-    None
+    Some(StagedRole::App)
 }
 
 // --- De kern-flip (hopos/src/flip.rs, docs/flip.md) ---------------------

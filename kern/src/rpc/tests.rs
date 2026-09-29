@@ -354,3 +354,127 @@ fn freeze_commits_first_and_names_the_generation() {
     ));
     assert_eq!(g2.stat(b"/.tasks/slot2/voor-de-flip").unwrap(), (5, false));
 }
+
+// ---------------------------------------------------------------------------
+// De kern als lezer: de firmware van de codec (docs/media.md, haak 3).
+// ---------------------------------------------------------------------------
+
+/// Pollt `f` tot hij klaar is en laat de actor ertussen draaien: de
+/// executor van de kern in het klein, met een waker die niets doet (elke
+/// bel wordt bij de volgende poll gezien).
+fn drive<F: core::future::Future>(
+    actor: &mut FsActor<'_, Ram, &FakeConsole>,
+    inbox: &FsInbox<'_>,
+    f: F,
+) -> F::Output {
+    use core::pin::pin;
+    use core::task::{Context, Poll, Waker};
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut f = pin!(f);
+    let mut run = pin!(actor.run(inbox));
+    for _ in 0..10_000 {
+        if let Poll::Ready(v) = f.as_mut().poll(&mut cx) {
+            return v;
+        }
+        let _ = run.as_mut().poll(&mut cx);
+    }
+    panic!("de lezing kwam nooit terug");
+}
+
+#[test]
+fn the_kern_reads_a_firmware_blob_without_a_slot() {
+    let svc = Servicers::new();
+    let con = FakeConsole::default();
+    let (mut fs, _) = disk(64);
+    // Een blob van 300 KB, zoals de echte: over meer blokken dan één
+    // `read_at`-stap en met een staart die geen heel blok is.
+    let blob: Vec<u8> = (0..300 * 1024 + 17).map(|i| (i * 7 % 251) as u8).collect();
+    fs.write_at(b"/firmware/hevcdec.fwb", 0, &blob).unwrap();
+    fs.write_at(b"/.tasks/slot2/geheim", 0, b"van de app")
+        .unwrap();
+    let mut f = FsActor::new(fs, &svc, &con);
+
+    // Het handvat van de actor: maat, data, en de weigeringen.
+    let mut head = [0u8; 4];
+    assert_eq!(
+        f.kern_read(b"/firmware/hevcdec.fwb", 0, &mut []),
+        Ok((blob.len() as u64, 0)),
+        "leeg is een stat"
+    );
+    assert_eq!(
+        f.kern_read(b"firmware//./hevcdec.fwb", 1, &mut head),
+        Ok((blob.len() as u64, 4))
+    );
+    assert_eq!(head, blob[1..5]);
+    assert_eq!(
+        f.kern_read(b"/firmware/av1dec.fwb", 0, &mut head),
+        Err(Error::NoEnt)
+    );
+    assert_eq!(f.kern_read(b"/firmware", 0, &mut head), Err(Error::Kind));
+    assert_eq!(
+        f.kern_read(b"/.tasks/slot2/geheim", 0, &mut head),
+        Err(Error::Denied)
+    );
+    assert_eq!(
+        f.kern_read(b"/firmware/../.tasks", 0, &mut head),
+        Err(Error::Denied)
+    );
+
+    // De hele weg: brievenbus, actor, antwoordplek, één blob in RAM.
+    let reply = Reply::new();
+    let inbox: FsInbox<'_> = Mailbox::new();
+    let got = drive(
+        &mut f,
+        &inbox,
+        read_file(&inbox, &reply, b"/firmware/hevcdec.fwb", 4 << 20),
+    );
+    assert_eq!(got.unwrap(), blob);
+    let got = drive(
+        &mut f,
+        &inbox,
+        read_file(&inbox, &reply, b"/firmware/hevcdec.fwb", 1024),
+    );
+    assert_eq!(
+        got,
+        Err(Error::TooLarge {
+            len: blob.len(),
+            max: 1024
+        }),
+        "te groot: niets gealloceerd"
+    );
+    let got = drive(
+        &mut f,
+        &inbox,
+        read_file(&inbox, &reply, b"/firmware/vp9dec.fwb", 4 << 20),
+    );
+    assert_eq!(got, Err(Error::NoEnt), "de naam die mist, is een NoEnt");
+
+    // In stukken, met dezelfde buffers heen en terug (de teststream).
+    let mut off = 0u64;
+    let mut out = vec![0u8; 64 << 10];
+    let mut path = b"/firmware/hevcdec.fwb".to_vec();
+    let mut seen = Vec::new();
+    loop {
+        let r = KernRead { path, off, out };
+        let d = drive(&mut f, &inbox, kern_read(&inbox, &reply, r));
+        let (size, n) = d.result.unwrap();
+        assert_eq!(size, blob.len() as u64);
+        seen.extend_from_slice(&d.out[..n]);
+        (path, out) = (d.buf, d.out);
+        off += n as u64;
+        if n == 0 {
+            break;
+        }
+    }
+    assert_eq!(seen, blob);
+
+    // Bevroren voor de flip weigert ook de kern, en de buffers komen terug.
+    f.freeze().unwrap();
+    let r = KernRead { path, off: 0, out };
+    let d = drive(&mut f, &inbox, kern_read(&inbox, &reply, r));
+    assert_eq!(d.result, Err(Error::Busy));
+    assert_eq!(
+        (d.buf.as_slice(), d.out.len()),
+        (&b"/firmware/hevcdec.fwb"[..], 64 << 10)
+    );
+}

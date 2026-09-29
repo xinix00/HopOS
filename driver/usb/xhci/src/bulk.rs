@@ -20,7 +20,7 @@ use crate::ring::{
     CC_SHORT_PACKET, CC_STALL, CC_SUCCESS, TRB_CHAIN, TRB_CONFIG_EP, TRB_IOC, TRB_ISP, TRB_NORMAL,
     TRB_TRANSFER_EVT, TRB_TYPE_SHIFT,
 };
-use crate::{Error, Hc, Poison, Result};
+use crate::{Error, Hc, Poison, Result, Timer};
 
 // Mass storage, bulk-only transport (USB Mass Storage Class, Bulk-Only
 // Transport 1.0). SubClass 6 is "SCSI transparent command set": een
@@ -139,7 +139,7 @@ impl Hc {
     /// tegenhanger van `configure` voor een opslagapparaat: geen
     /// SET_PROTOCOL, geen armeren, want bulk werkt op verzoek en niet uit
     /// zichzelf.
-    pub(crate) fn configure_bulk(&mut self, slot: usize) -> Result {
+    pub(crate) async fn configure_bulk(&mut self, slot: usize, t: &impl Timer) -> Result {
         let f = self.dev_ref(slot)?.bulk.ok_or(Error::NoBulk)?;
         let (inp, in_deq, out_deq) = {
             let r = self.res_mut(slot)?;
@@ -170,14 +170,17 @@ impl Hc {
         dev::mb();
         let p = inp.0 + self.bus_off;
         self.command(
+            t,
             p as u32,
             (p >> 32) as u32,
             0,
             TRB_CONFIG_EP << TRB_TYPE_SHIFT | (slot as u32) << 24,
             "configure endpoint",
-        )?;
+        )
+        .await?;
         let conf_val = self.dev_ref(slot)?.conf_val_of();
-        self.control(slot, 0x00, REQ_SET_CONFIG, u16::from(conf_val), 0, 0)?;
+        self.control(slot, 0x00, REQ_SET_CONFIG, u16::from(conf_val), 0, 0, t)
+            .await?;
         Ok(())
     }
 
@@ -265,8 +268,14 @@ impl Hc {
     /// Kijkt of de transfer klaar is. `Ok(None)`: nog onderweg, vraag het
     /// straks weer. `Ok(Some(n))`: wat er werkelijk overkwam, bij IN
     /// gekopieerd naar `dst`; een korte IN is normaal en geen fout, de drive
-    /// mag minder geven dan gevraagd. Wacht nooit.
-    pub fn poll_bulk(&mut self, td: &BulkTd, dst: &mut [u8]) -> Result<Option<usize>> {
+    /// mag minder geven dan gevraagd. Wacht alleen bij een stall (het
+    /// vrijmaken van de endpoint).
+    pub async fn poll_bulk(
+        &mut self,
+        td: &BulkTd,
+        dst: &mut [u8],
+        t: &impl Timer,
+    ) -> Result<Option<usize>> {
         let slot = self.live(&td.dev)?;
         self.pump();
         let Some(ev) = self.take(|e| e.kind == TRB_TRANSFER_EVT && e.ptr == td.trb) else {
@@ -301,7 +310,7 @@ impl Hc {
                 // een commando niet aankan en verwacht dat de host de
                 // endpoint vrijmaakt en de status ophaalt. Dus herstellen en
                 // de aanroeper laten beslissen.
-                self.clear_halt(slot, td.dci, td.ring, td.is_in)?;
+                self.clear_halt(slot, td.dci, td.ring, td.is_in, t).await?;
                 Err(Error::Stalled)
             }
             code => Err(Error::Transfer { what: "bulk", code }),
@@ -313,31 +322,40 @@ impl Hc {
     /// annuleert. De controller blijft gewoon draaien: dat een drive niet
     /// antwoordt zegt niets over de bus, en het toetsenbord ernaast heeft er
     /// geen last van. De BOT-laag doet daarna zelf zijn reset.
-    pub fn abort_bulk(&mut self, td: &BulkTd) -> Result {
+    pub async fn abort_bulk(&mut self, td: &BulkTd, t: &impl Timer) -> Result {
         let slot = self.live(&td.dev)?;
-        self.reset_ep(slot, td.dci, td.ring)
+        self.reset_ep(slot, td.dci, td.ring, t).await
     }
 
     /// Haalt een endpoint uit halted aan beide kanten: eerst de controller
     /// (`reset_ep`), dan het apparaat zelf (CLEAR_FEATURE op de endpoint, dat
     /// ook zijn data-toggle terugzet). Die volgorde is die van de USB-spec en
     /// van Linux.
-    fn clear_halt(&mut self, slot: usize, dci: u32, ring: RingId, is_in: bool) -> Result {
-        self.reset_ep(slot, dci, ring)?;
+    async fn clear_halt(
+        &mut self,
+        slot: usize,
+        dci: u32,
+        ring: RingId,
+        is_in: bool,
+        t: &impl Timer,
+    ) -> Result {
+        self.reset_ep(slot, dci, ring, t).await?;
         let ep = (dci / 2) as u16 | if is_in { 0x80 } else { 0 };
-        self.control(slot, 0x02, REQ_CLEAR_FEATURE, FEAT_ENDPOINT_HALT, ep, 0)?;
+        self.control(slot, 0x02, REQ_CLEAR_FEATURE, FEAT_ENDPOINT_HALT, ep, 0, t)
+            .await?;
         Ok(())
     }
 
     /// De mass-storage-reset van BOT: het apparaat gooit zijn
     /// commandostaat weg en beide endpoints komen uit halted. De uitweg als
     /// host en drive het spoor bijster zijn.
-    pub fn reset_recovery(&mut self, d: &Device) -> Result {
+    pub async fn reset_recovery(&mut self, d: &Device, t: &impl Timer) -> Result {
         let slot = self.live(d)?;
         let f = self.dev_ref(slot)?.bulk.ok_or(Error::NoBulk)?;
         // Class-specific request 0xFF op de interface (BOT 1.0 §3.1).
-        self.control(slot, 0x21, 0xFF, 0, u16::from(f.num), 0)?;
-        self.clear_halt(slot, f.in_dci, IN_RING, true)?;
-        self.clear_halt(slot, f.out_dci, OUT_RING, false)
+        self.control(slot, 0x21, 0xFF, 0, u16::from(f.num), 0, t)
+            .await?;
+        self.clear_halt(slot, f.in_dci, IN_RING, true, t).await?;
+        self.clear_halt(slot, f.out_dci, OUT_RING, false, t).await
     }
 }

@@ -4,19 +4,43 @@
 //! Op de host schrijven `dev::read32`/`write32` vluchtig naar gewoon
 //! geheugen, dus een `Vec<u64>` is een nep-registerblok of een
 //! nep-DMA-regio. De klok is een teller die bij elke blik een milliseconde
-//! verder staat, zodat elke wachtlus eindigt.
+//! verder staat en bij elke slaap de hele slaap, zodat elke wachtlus
+//! eindigt; de slaap zelf is meteen klaar, dus één poll draait een
+//! `async` pad tot het eind ([`block`]).
 
 use super::*;
 use crate::device::{descriptor_mps0, interval_exponent, parse_config};
 use crate::host::SlotRes;
+use core::future::{Future, ready};
+use core::pin::pin;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use core::task::{Context, Poll, Waker};
 use std::vec;
 use std::vec::Vec;
 
 static NOW: AtomicU64 = AtomicU64::new(0);
 
-fn clock() -> u64 {
-    NOW.fetch_add(1_000_000, Relaxed)
+/// De klok van de tests: elke blik een milliseconde, elke slaap zijn duur.
+struct Clock;
+
+impl Timer for Clock {
+    fn now(&self) -> u64 {
+        NOW.fetch_add(1_000_000, Relaxed)
+    }
+    fn sleep(&self, ns: u64) -> impl Future<Output = ()> {
+        NOW.fetch_add(ns, Relaxed);
+        ready(())
+    }
+}
+
+/// Draait een `async` pad dat nooit echt wacht: de slaap van [`Clock`] is
+/// meteen klaar.
+fn block<F: Future>(f: F) -> F::Output {
+    let mut f = pin!(f);
+    match f.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(v) => v,
+        Poll::Pending => panic!("a test future waited"),
+    }
 }
 
 /// Nep-geheugen: 8-uitgelijnd en zo lang de test loopt.
@@ -33,7 +57,7 @@ impl Mem {
 
 /// Een controller met `n` slots aan software-kant, zonder één register.
 fn ownership_hc(n: usize) -> Hc {
-    let mut h = Hc::at(Pa(0), "test", 0, clock);
+    let mut h = Hc::at(Pa(0), "test", 0);
     h.n_slots = n;
     for i in 1..=n {
         h.res[i] = Some(SlotRes {
@@ -74,19 +98,19 @@ fn arena_rejects_wrapped_allocation() {
 // Go: TestControlRefusesUnconfirmedOwnerBeforeTouchingDMA
 #[test]
 fn control_refuses_unconfirmed_owner_before_touching_dma() {
-    let mut h = Hc::at(Pa(0), "test", 0, clock);
+    let mut h = Hc::at(Pa(0), "test", 0);
     h.poisoned = Some(Poison::DisableUnconfirmed { slot: 1 });
     assert!(matches!(
-        h.control(1, 0, 0, 0, 0, 0),
+        block(h.control(1, 0, 0, 0, 0, 0, &Clock)),
         Err(Error::Poisoned(_))
     ));
     assert!(matches!(
-        h.command(0, 0, 0, 0, "test"),
+        block(h.command(&Clock, 0, 0, 0, 0, "test")),
         Err(Error::Poisoned(_))
     ));
     h.poisoned = None;
     assert_eq!(
-        h.control(1, 0, 0, 0, 0, device::BUF_CTRL_SIZE as u16 + 1),
+        block(h.control(1, 0, 0, 0, 0, device::BUF_CTRL_SIZE as u16 + 1, &Clock)),
         Err(Error::ControlTooLong {
             len: device::BUF_CTRL_SIZE as u16 + 1
         })
@@ -99,7 +123,7 @@ fn controller_timeout_keeps_dma_owned() {
     let regs = Mem::new(64);
     let cmd_mem = Mem::new(4096);
     let p = regs.pa();
-    let mut h = Hc::at(p, "test", 0, clock);
+    let mut h = Hc::at(p, "test", 0);
     h.probed = true;
     h.op = p;
     h.db = p;
@@ -107,20 +131,20 @@ fn controller_timeout_keeps_dma_owned() {
     h.cmd = Some(Ring::new(cmd_mem.pa(), cmd_mem.pa().0, 4096));
     // Een transfer die uitblijft is een apparaat dat hapert: de controller
     // blijft van ons, en de aanroeper reset alleen die endpoint.
-    let r = h.wait_event(|_| false, 0, "test");
+    let r = block(h.wait_event(&Clock, |_| false, 0, "test"));
     assert!(matches!(r, Err(Error::EventTimeout { .. })), "{r:?}");
     assert_eq!(h.poisoned, None);
     // Een commando dat uitblijft is de controller zelf: ownership onbekend.
-    let r = h.command(0, 0, 0, 0, "test");
+    let r = block(h.command(&Clock, 0, 0, 0, 0, "test"));
     assert!(matches!(r, Err(Error::Poisoned(_))), "{r:?}");
     assert!(h.poisoned.is_some(), "command timeout lost ownership");
     h.running = true;
     assert!(
-        h.start(Pa(4096), 4096).is_err(),
+        block(h.start(Pa(4096), 4096, &Clock)).is_err(),
         "running controller can overwrite DMA"
     );
     h.poisoned = None;
-    assert_eq!(h.start(Pa(4096), 4096), Err(Error::Running));
+    assert_eq!(block(h.start(Pa(4096), 4096, &Clock)), Err(Error::Running));
 }
 
 // Go: TestEP0DescriptorPacketSize
@@ -145,7 +169,7 @@ fn ten_root_hosts_fit_existing_dma_window() {
     for i in 0..10u64 {
         let regs = Mem::new(8192);
         let p = regs.pa();
-        let mut h = Hc::at(p, "test", 0, clock);
+        let mut h = Hc::at(p, "test", 0);
         h.probed = true;
         h.op = p.add(0x40);
         h.rt = p.add(0x200);
@@ -157,8 +181,7 @@ fn ten_root_hosts_fit_existing_dma_window() {
         dev::write32(h.op.add(0x08), 1); // PAGESIZE: 4KB
         let start = base + i * span;
         dev::write8(Pa(start + span - 1), 0xab);
-        h.start(Pa(start), span)
-            .unwrap_or_else(|e| panic!("host{i}: {e}"));
+        block(h.start(Pa(start), span, &Clock)).unwrap_or_else(|e| panic!("host{i}: {e}"));
         assert_eq!(h.n_slots, usize::from(h.max_ports), "host{i}");
         assert!(h.res[h.n_slots].is_some() && h.res[h.n_slots + 1].is_none());
         assert!(h.arena.cur <= start + span, "host{i} crossed DMA slice");
@@ -237,7 +260,7 @@ fn out_of_range_enabled_slot_is_disabled_or_controller_poisoned() {
     // Bevestigde cleanup.
     let mut h = ownership_hc(2);
     let mut disabled = 0;
-    let r = h.claim_enabled_slot(3, |_, slot| {
+    let r = h.claim_enabled_slot_with(3, |_, slot| {
         disabled = slot;
         Ok(())
     });
@@ -256,13 +279,13 @@ fn out_of_range_enabled_slot_is_disabled_or_controller_poisoned() {
 
     // Cleanup faalt.
     let mut h = ownership_hc(2);
-    let r = h.claim_enabled_slot(3, |_, _| Err(Error::NotRunning));
+    let r = h.claim_enabled_slot_with(3, |_, _| Err(Error::NotRunning));
     assert!(matches!(r, Err(Error::Poisoned(_))) && h.poisoned.is_some());
 
     // Slot 0 kan niet gedisabled worden.
     let mut h = ownership_hc(2);
     let mut called = false;
-    let r = h.claim_enabled_slot(0, |_, _| {
+    let r = h.claim_enabled_slot_with(0, |_, _| {
         called = true;
         Ok(())
     });
@@ -274,10 +297,10 @@ fn out_of_range_enabled_slot_is_disabled_or_controller_poisoned() {
 
     // Een slot in bereik dat al bezet is.
     let mut h = ownership_hc(2);
-    assert_eq!(h.claim_enabled_slot(1, |_, _| Ok(())), Ok(()));
+    assert_eq!(h.claim_enabled_slot_with(1, |_, _| Ok(())), Ok(()));
     assert!(h.res[1].as_ref().unwrap().in_use);
     assert_eq!(
-        h.claim_enabled_slot(1, |_, _| Ok(())),
+        h.claim_enabled_slot_with(1, |_, _| Ok(())),
         Err(Error::Poisoned(Poison::SlotBusy { slot: 1 }))
     );
 }
@@ -289,7 +312,7 @@ fn poisoned_controller_refuses_new_attach_before_mmio() {
     h.running = true;
     h.poisoned = Some(Poison::DisableUnconfirmed { slot: 1 });
     assert_eq!(
-        h.attach(1),
+        block(h.attach(1, &Clock)),
         Err(Error::Poisoned(Poison::DisableUnconfirmed { slot: 1 }))
     );
 }
@@ -297,7 +320,7 @@ fn poisoned_controller_refuses_new_attach_before_mmio() {
 // --- recovery_test.go -------------------------------------------------------
 
 fn poisoned_hc() -> Hc {
-    let mut h = Hc::at(Pa(0), "test", 0, clock);
+    let mut h = Hc::at(Pa(0), "test", 0);
     h.dma_base = Pa(0x12_0000);
     h.dma_size = 0x20_0000;
     h.poisoned = Some(Poison::DisableUnconfirmed { slot: 1 });

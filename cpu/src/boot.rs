@@ -53,6 +53,30 @@ pub const fn block(pa: u64, attr: u64) -> u64 {
     d
 }
 
+/// Het merkteken van een kern-flip in x3 bij de ingang ("HOPFLIPE"
+/// little-endian): de trampoline van `cpu::el2::chain` zet het, geen
+/// firmware doet dat (het Linux-bootprotocol eist x1 tot en met x3 nul, en
+/// de Pi-firmware, U-Boot en QEMU houden zich daaraan).
+///
+/// Waarom: `_start` laat bij een koude boot alleen de core met affiniteit 0
+/// door; een firmware die alle cores op de ingang loslaat, krijgt zo één
+/// kern en een parkeerlus. Een geflipte kern springt vanaf de OS-core, en
+/// die is niet per se core 0 (`hopos.oscore`, PORT.md beslissing 2): zonder
+/// dit merkteken parkeerde de nieuwe kern zich zonder één regel (29-09,
+/// gezien in de ingang, niet op ijzer). Met het merkteken mag elke core
+/// door; er komt er ook maar één, want de app-cores draaien in de
+/// switch-code in de plan-regio en raken het beeld nooit.
+pub const FLIP_ENTRY: u64 = 0x4550_494C_4650_4F48;
+
+/// De poort van `_start`, als Rust: gaat een core met MPIDR-affiniteit
+/// `aff` en `x3` bij de ingang door naar `kmain`? De assembly hieronder is
+/// dezelfde beslissing in vier instructies; deze vorm is er voor de
+/// host-tests.
+#[must_use]
+pub const fn admits(aff: u64, x3: u64) -> bool {
+    aff & 0xff_ffff == 0 || x3 == FLIP_ENTRY
+}
+
 /// Parkeert deze core voor altijd: een WFE-lus, zodat hij niets verbruikt
 /// en niets meer aanraakt.
 pub fn park() -> ! {
@@ -81,7 +105,8 @@ mod arch {
 }
 
 // De stub. Registers: x19 = MPIDR-affiniteit, x20 = DTB (x0 van de
-// firmware), x21 = het EL.
+// firmware), x21 = het EL. x3 = [`FLIP_ENTRY`] laat elke core door
+// ([`admits`]): een geflipte kern komt op de OS-core binnen.
 //
 // TCR_EL2 (niet-VHE): T0SZ = 25 (39-bit VA, start op niveau 1), IRGN0 en
 // ORGN0 = WB-WA, SH0 = inner, TG0 = 4 KB, PS uit ID_AA64MMFR0_EL1.PARange,
@@ -101,7 +126,11 @@ core::arch::global_asm!(
 _start:
     mrs x19, mpidr_el1
     and x19, x19, #0xffffff
+    ldr x9, ={flip}
+    cmp x3, x9
+    b.eq 8f
     cbnz x19, 9f
+8:
     mov x20, x0
     mrs x21, CurrentEL
     lsr x21, x21, #2
@@ -163,6 +192,7 @@ _start:
     .ltorg
 "#,
     mair = const MAIR,
+    flip = const FLIP_ENTRY,
 );
 
 #[cfg(test)]
@@ -177,6 +207,23 @@ mod tests {
         assert_eq!(block(0x4000_0000, ATTR_NORMAL), 0x4000_0705);
         // DMA: index 2, inner shareable, XN.
         assert_eq!(block(0x4f00_0000, ATTR_NORMAL_NC), 0x0040_0000_4f00_0709);
+    }
+
+    #[test]
+    fn only_core_zero_boots_cold_and_any_core_lands_a_flip() {
+        // Koud: de core met affiniteit 0, en alleen die.
+        assert!(admits(0, 0));
+        assert!(!admits(1, 0), "a second core must park on a cold boot");
+        assert!(!admits(0x100, 0), "Pi 5: core 1 is aff1 = 1");
+        // Een flip vanaf de OS-core: core 2 op virt, core 1 op de Pi 5.
+        assert!(admits(2, FLIP_ENTRY));
+        assert!(admits(0x100, FLIP_ENTRY));
+        // Alleen het volle merkteken; rommel in x3 is geen flip.
+        assert!(!admits(3, FLIP_ENTRY ^ 1));
+        assert!(!admits(3, u64::from(FLIP_ENTRY as u32)));
+        // De bovenste bits van MPIDR (U, MT, RES1) tellen niet mee.
+        assert!(admits(0x8000_0000, 0));
+        assert_eq!(&FLIP_ENTRY.to_le_bytes(), b"HOPFLIPE");
     }
 
     #[test]

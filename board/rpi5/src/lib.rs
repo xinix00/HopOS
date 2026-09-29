@@ -39,6 +39,9 @@ use driver_brcmpcie::{EpBar, InWin, OutWin, Rc};
 use driver_gem::Gem;
 use driver_pl011::Pl011;
 
+// De twee xHCI's in de RP1 (usb.rs).
+mod usb;
+
 pub use board_raspi::{DMA, Disk, KERN_RAM};
 
 /// De debug-UART (PL011, de 3-pins JST-SH-connector; Linux ttyAMA10). De
@@ -108,6 +111,10 @@ impl Soc for Bcm2712 {
 
     fn core_of(mpidr: u64) -> usize {
         slots::core_of(mpidr)
+    }
+
+    fn usb_hosts(ctx: &board_raspi::usb::UsbCtx) -> board::UsbHosts {
+        usb::hosts(ctx)
     }
 
     fn tables() -> Option<Tables> {

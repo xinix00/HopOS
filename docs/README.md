@@ -10,7 +10,7 @@ de consoleregel die erbij hoort en wat een afwijking betekent.
 | --- | --- |
 | `sh tools/qemu-test.sh` | boot op virt, netwerk, opslag, appspike in slot 1 en 2 in een stage-2-kooi, tien toetsen |
 | `GUI=1 sh tools/qemu-test.sh` | hetzelfde met de console op een `ramfb`: de bunny, mem, datum en tijd op het glas, geschoten via de QEMU-monitor |
-| `GUI=display sh tools/qemu-test.sh` | de framebuffer-grant: een app met `GUI=display` in zijn env krijgt het glas in zijn kooi (`HOPOS_FB_GRANT`, `HOPOS_FB_ARM`), en na de stop komt de console terug (`HOPOS_FB_RELEASE`) |
+| `GUI=display sh tools/qemu-test.sh` | de hele gui-keten: qemu-xhci met toetsenbord en muis (`HOPOS_USB_UP`), de display-app krijgt het glas in zijn kooi (`HOPOS_FB_GRANT`, `HOPOS_DISPLAY_UP`), verbindt met de input-listener (`HOPOS_INPUT_CONN`), een `sendkey` en een `mouse_move` komen aan (`HOPOS_DISPLAY_INPUT keys=1 moves=1`), de screendump toont de app, en na de stop komt de console terug (`HOPOS_FB_RELEASE`) |
 | `sh tools/qemu-test-hop.sh` | de kern start Hop met het token op de OS-core; een `POST /v1/jobs` van de host laat Hop appspike plaatsen; Hop bewaart zijn staat en leest hem na een herstart terug |
 | `SMP=2 sh tools/qemu-test-hop.sh` | hetzelfde met twee cores: kern plus Hop op één core, de app op de andere |
 | `SMP=2 OSCORE=1 sh tools/qemu-test-hop.sh` | de kern verhuist bij boot naar core 1 |
@@ -18,14 +18,19 @@ de consoleregel die erbij hoort en wat een afwijking betekent.
 | `sh tools/qemu-test-smp.sh` | een SMP-app: appspike met `cores: 2` krijgt zijn tweede core in de eigen kooi, telt erop, en houdt beide cores na een herstart door Hop |
 | `sh tools/qemu-test-share.sh` | een sharegroep: twee appspikes delen één app-core in coöperatieve rotatie, allebei groen, en een lid dat stopt komt terug naast het levende lid |
 | `sh tools/qemu-test-bench.sh` | de meetketen: Hop plaatst `apps/bench` met poort 80, `tools/netmeter` meet van de host (rtt, storm, in, out), twee apps meten elkaar door de switch, BURN draait, `hopos.idlestat=1` drukt de meetlat, en een tweede boot doet `hopos.nvmebench=1`; de getallen staan in [measurements.md](measurements.md) |
-| `sh tools/qemu-test-flip.sh` | de kern-flip: hopfs bevroren en gecommit, de NAT-flows gevangen, de sprong, Hop overleeft zonder herstart, een TCP-verbinding die op kern A openging wordt door kern B beantwoord |
+| `sh tools/qemu-test-mcast.sh` | multicast in de node: een bench joint 224.0.0.251, een tweede zendt, de switch floodt, `HOPOS_BENCH_MCAST recv=3` |
+| `sh tools/qemu-test-flip.sh` | de kern-flip: hopfs bevroren en gecommit, de NAT-flows gevangen, de sprong, Hop overleeft zonder herstart, en een uitgaande TCP-verbinding van een app (rol FLIPCONN) loopt door: drie antwoorden via kern A, drie via kern B, over één verbinding |
 | `MISMATCH=1 sh tools/qemu-test-flip.sh` | een bundel met een andere switch-code wordt vóór de sprong geweigerd (Hop geeft 502) |
+| `COLD=1 sh tools/qemu-test-flip.sh` | de koude flip (`"cold":true` op `POST /flip`): Hop stopt zijn taken, de kern zet de app-cores uit en springt zonder adoptie, Hop start koud en plaatst de job opnieuw |
+| `OSCORE=1 sh tools/qemu-test-flip.sh` | de flip vanaf een verhuisde kern (ook met `COLD=1`) |
+| `BOARD=rpi4 sh tools/qemu-test-flip.sh` | de flip-ingang van de Pi op raspi4b: een core met het merkteken komt tot de kern en leest de DTB opnieuw |
 | `sh tools/qemu-uefi-test.sh` | de EFI-stub op EDK2, ACPI, PCIe, virtio over PCI met MSI-X via de ITS (`nic=` loopt op in de tik), de hele appspike-keten |
 | `GUI=1 sh tools/qemu-uefi-test.sh` | hetzelfde met de GOP van EDK2 als console |
 | `FEATURES=vhe CPU=neoverse-n1 sh tools/qemu-uefi-test.sh` | de VHE-switcher (E2H=1), de smaak die de O6N eist, op een VHE-model |
-| `sh tools/qemu-uefi-flip-test.sh` | de kern-flip op EDK2: kern B landt op de PIE-basis van kern A |
+| `sh tools/qemu-uefi-flip-test.sh` | de kern-flip op EDK2: kern B landt op de PIE-basis van kern A (ook `COLD=1`, en onder VHE met `FEATURES=vhe CPU=neoverse-n1`) |
 | `sh tools/qemu-rpi4-test.sh` | het Pi 4-board op QEMU's raspi4b tot de executor-tik |
-| `sh tools/qemu-riscv-test.sh` | QEMU virt riscv64 in machine mode: boot, net, opslag, en de zelftest van de PMP-kooi |
+| `sh tools/qemu-riscv-test.sh` | QEMU virt riscv64 in machine mode: boot, net, opslag, de zelftest van de PMP-kooi (met de kill-tick), en appspike twee keer door de lifecycle van de kern in een PMP-plus-Sv39-kooi |
+| `sh tools/qemu-riscv-test-hop.sh` | Hop als bewoner op het hart van de kern op riscv64, een `POST /v1/jobs` plaatst appspike, en Hop komt na een herstart terug |
 
 `sh tools/gate.sh` is de poort vóór elke commit: host-tests, clippy met
 `-D warnings`, rustfmt, en de target-builds van alle boards (ook met `gui`
@@ -93,34 +98,40 @@ board ooit gestart. De lijst is de eerlijke stand vóór de devicedag.
   een andere core dan 0?).
 - **Radxa.** Geen SD-driver; de EDID-lezer, de DDC-pinmux en de GRF zijn
   ongemeten; DWC3-USB is niet geport; de flip is gebouwd, niet gesprongen.
-- **Kern-flip.** Op de UEFI-boards en de Pi's alleen gebouwd. De koude flip
-  (`cold` op `POST /flip`) is gedocumenteerd, niet gebouwd. Een uitgaande
-  TCP-verbinding van een app over de flip is alleen op de host getoetst.
+- **Kern-flip.** Op de UEFI-boards en de Pi's alleen gebouwd (de Pi houdt
+  zijn kern op core 0, dus een flip landt daar altijd op core 0); de Radxa
+  staget Hop niet, dus de koude flip weigert daar; op de Pi 5 weigert de
+  koude flip als er ooit een app-core draaide (CPU_OFF komt daar niet
+  terug). Koud: `hop flip <url> <sha256> --cold`.
 - **SMP en sharegroepen.** Niet op Apple, RISC-V of ijzer. De join-wacht van
   5 ms is een spin op de kern-core.
-- **Gui.** Er is nog geen display-app in Rust; de input-listener op
-  10.100.0.1:7879 voor de HID-bezorging ontbreekt; de xHCI-driver wacht
-  blokkerend op de klok (tot 2 s per poortreset); de log wrapt en scrollt
-  niet.
-- **RISC-V.** appspike draait nog niet in een slot via de lifecycle
-  (`cage_riscv.rs`, de applib-runtime voor riscv64); geen OS-core-rotatie,
-  lottery of flip; de LicheeRV bouwt (FIP uit de donor) en heeft nooit
+- **Gui.** De USB-lijnen zijn niet bedraad (de xHCI-driver pollt elke
+  4 ms); USB-opslag wordt gezien maar heeft geen aanvraagpad;
+  `qemu-uefi-test.sh` heeft geen `GUI=display`-stand; de O6N-toets dat het
+  firmware-RAM in ACPI-geheugen ligt is niet geport; de log wrapt en
+  scrolt niet. De display-app en de USB-keten zijn alleen op QEMU en EDK2
+  gezien.
+- **RISC-V.** Geen kick van app naar kern (de tegenhanger van HVC #6, dus
+  een rtt van 5,4 ms tegen 2,9 ms op arm64), geen SMP of sharegroepen,
+  geen flip (`RvCage::adopt` weigert), de C906L van de LicheeRV slaapt niet
+  (zijn comparator is onbewezen, dus hij spint), geen SD-driver; de LicheeRV
+  bouwt (FIP uit de donor, met `hopos.cfg` in het image) en heeft nooit
   gedraaid.
-- **Mac mini M4.** Het board, ADT, xnuboot, GPT, AIC, tg3, rtkit, de ANS
-  (lezen én schrijven, in het gat na de macOS-partities) en de SMC zijn
-  geport en host-getest; de OS-core-rotatie voor `AppleVhe` (fast IPI,
-  timer-FIQ) en de CPU_ON-haak (er is geen PSCI) ontbreken, dus het
-  slot-plan weigert standaard luid (`hopos.cages=on` haalt de rem eraf).
-  Nooit gedraaid.
+- **Mac mini M4.** Alles is geport en host-getest, inclusief de OS-core-
+  rotatie voor `AppleVhe` (fast IPI, timer-FIQ), CPU_ON zonder PSCI, de
+  watchdog en de ingebakken config; het slot-plan doet bij de eerste
+  aanroep een voorproef (`HOPOS_APPLE_PREFLIGHT`). De koude flip werkt er
+  niet (PSCI CPU_OFF zonder EL3). Nooit gedraaid.
 - **Hop op de host.** Geen SIGTERM-afhandeling in `agentd` (std heeft geen
-  signaal-API: een gedode daemon laat zijn lease via de TTL verlopen), geen
-  SSE `/v1/events`, geen live log-tail, geen streaming door de proxy; de
-  Linux-isolatie is in Alpine als root bewezen, niet op een echte host.
-- **applib.** Geen `join_group` (multicast), geen tellerfrequentie, de
-  timebase staat vast op 10 MHz (de LicheeRV heeft 25 MHz), en de
-  TcpConn-adapter staat dubbel (hop-http en welcome).
-- **ABI.** `CTRL_TEMP` (de thermiek op de control-page van Hop) is nieuw en
-  verkleint `CTRL_ENV_MAX`; Hop hoort op de tag van deze kern te staan.
+  signaal-API: een gedode daemon laat zijn lease via de TTL verlopen); een
+  stroom waarvan de lezer weg is, komt pas bij de volgende keepalive vrij;
+  de Linux-isolatie is in Alpine als root bewezen, niet op een echte host.
+- **applib.** Geen `leave_group` (leannet heeft geen leave: een lean-punt);
+  hop-http draagt zijn eigen TcpConn-adapter tot Hop op de tag met
+  `applib::tcp` staat.
+- **ABI.** `CTRL_TEMP` (de thermiek) en `CTRL_TIMEBASE_HZ` (de timebase van
+  de app) zijn nieuw en verkleinen `CTRL_ENV_MAX`; Hop hoort op de tag van
+  deze kern te staan.
 - De IPv6-baan van leannet.
 
 Hoe de code geschreven is: het Rust-handboek van haas.software

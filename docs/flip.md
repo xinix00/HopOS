@@ -3,11 +3,14 @@
 Een draaiende node vervangt zijn kern zonder herstart. De apps, Hop, hun
 verbindingen door de switch, de NAT-flows en de volumes blijven; alleen de
 kern wisselt. Dit is de procedure per board, de markers die erbij horen, de
-faalmodi en wat de boot-guard doet. De code: `hopos/src/flip.rs` (beleid),
-`kern/src/kernflip.rs` (bundel, blob, recorder), `cpu/src/el2/chain.rs` (de
-sprong), `image/flip-bundle.sh` (de bundel), de `FLIP_*`-blokken in
-`board/*/src/slots.rs` (de adressen) en `board/uefi/src/flip.rs` (de
-feitenpagina van UEFI).
+faalmodi en wat de boot-guard doet. Daarnaast de koude flip: dezelfde
+trigger met `"cold":true`, voor een kern met een andere switch-code (zie
+"De koude flip"). De code: `hopos/src/flip.rs` (beleid),
+`kern/src/kernflip.rs` (bundel, blob, recorder, de plek in de staging),
+`cpu/src/el2/chain.rs` (de sprong en de uit-stub van de koude flip),
+`cpu/src/boot.rs` (de ingang: `FLIP_ENTRY`), `image/flip-bundle.sh` (de
+bundel), de `FLIP_*`-blokken in `board/*/src/slots.rs` (de adressen) en
+`board/uefi/src/flip.rs` (de feitenpagina van UEFI).
 
 ## Wat er overgaat, en wat niet
 
@@ -15,7 +18,7 @@ feitenpagina van UEFI).
 | --- | --- |
 | De bewoners (Hop en elke app) | Hun kooien, partities en cores blijven staan; het handoff-blob draagt de boekhouding en de nieuwe kern adopteert ze (`HOPOS_FLIP_ADOPT`). Hop wordt niet herstart. |
 | De gepubliceerde poorten | De nieuwe kern publiceert ze opnieuw (`HOPOS_HOP_PUBLISH`, `republish`); een TCP-verbinding naar een gepubliceerde poort overleeft de sprong (DNAT is stateloos). |
-| De NAT-flows (conntrack) | De switch-actor geeft een snapshot als waarde (`Command::SnapshotNat`) en zet daarmee de masquerade dicht; na de landing houdt de nieuwe switch de node-poorten vast vóór zijn eerste ronde, en na de adoptie komen de flows terug (`RestoreNat`). |
+| De NAT-flows (conntrack) | De switch-actor geeft een snapshot als waarde (`Command::SnapshotNat`) en zet daarmee de masquerade dicht; na de landing houdt de nieuwe switch de node-poorten vast vóór zijn eerste ronde, en na de adoptie komen de flows terug (`RestoreNat`). Een UITGAANDE TCP-verbinding van een app loopt zo door, over de slirp van QEMU heen: de toets FLIPCONN (hieronder). |
 | De volumes (hopfs) | Vóór de sprong legt de actor de boom vast en neemt hij niets meer aan (`HOPOS_FS_FROZEN generation=N`); de nieuwe kern mount precies die generatie (`HOPOS_FS_UP fresh=0 generation=N`). |
 | De switch-code van de app-cores | Blijft staan; de nieuwe kern adopteert haar alleen bij een gelijke som, en die som toetst de oude kern al vóór de sprong. |
 | Niet: de system-API-verbindingen | Die zijn van de kern; Hop's system-client bouwt ze opnieuw op. |
@@ -57,7 +60,8 @@ opties).
 
    `202` betekent: de kern nam de bundel aan en springt over een halve
    seconde. `502` met een reden: de kern weigerde vóór de sprong en draait
-   gewoon door.
+   gewoon door. Een `502` met `switch code mismatch` vraagt de koude flip:
+   dezelfde regel met `,"cold":true` in de body (zie "De koude flip").
 
 4. Kijk naar de console, in deze volgorde:
 
@@ -85,12 +89,12 @@ opties).
 
 | Board | Bundel | Koud adres | Staging, blob, recorder, trampoline | Bewezen |
 | --- | --- | --- | --- | --- |
-| QEMU virt | `flip-bundle.sh virt` | `0x4020_0000` (link.ld) | de staging van QEMU op `0xB020_0000`, de boot-scratch-pagina's op `0xB000_0000` | `sh tools/qemu-test-flip.sh`, ook `MISMATCH=1` |
-| UEFI (EDK2) | `flip-bundle.sh uefi` | de basis die de firmware koos (`__efi_head`), binnen `SizeOfImage` | de loader-regio van het kernvenster (`0x5000_0000` + 256 MB) | `sh tools/qemu-uefi-flip-test.sh` |
+| QEMU virt | `flip-bundle.sh virt` | `0x4020_0000` (link.ld) | de staging van QEMU op `0xB020_0000`, de boot-scratch-pagina's op `0xB000_0000` | `sh tools/qemu-test-flip.sh`, ook `MISMATCH=1`, `COLD=1` en `OSCORE=1` |
+| UEFI (EDK2) | `flip-bundle.sh uefi` | de basis die de firmware koos (`__efi_head`), binnen `SizeOfImage` | de loader-regio van het kernvenster (`0x5000_0000` + 256 MB) | `sh tools/qemu-uefi-flip-test.sh`, ook `COLD=1` |
 | Orion O6N | `flip-bundle.sh o6n` | idem | idem, venster op `0x8800_0000` | nog niet op ijzer |
 | Ampere Altra | `flip-bundle.sh altra` | idem | idem, venster op `0x8800_0000` | nog niet op ijzer |
-| Pi 4, Pi 5 | `flip-bundle.sh rpi4` / `rpi5` | `0x80000` (link-raspi.ld) | de initramfs-plek van Hop op `0x0F20_0000`, de boot-scratch op `0x0F10_0000` | nog niet op ijzer |
-| Radxa Zero 3E | `flip-bundle.sh radxa` | `0x0221_0000` (link-rk3566.ld) | het staging-venster op `0x0780_0000`, de recorder op `FLIP_SCRATCH_PA`, de trampoline op de bovenste pagina van de kern-RAM | nog niet op ijzer |
+| Pi 4, Pi 5 | `flip-bundle.sh rpi4` / `rpi5` | `0x80000` (link-raspi.ld) | achter de initramfs van Hop op `0x0F20_0000`, de boot-scratch op `0x0F10_0000` | bundels gebouwd; de ingang op QEMU raspi4b (`BOARD=rpi4 sh tools/qemu-test-flip.sh`); nog niet op ijzer |
+| Radxa Zero 3E | `flip-bundle.sh radxa` | `0x0221_0000` (link-rk3566.ld) | het staging-venster op `0x0780_0000`, de recorder op `FLIP_SCRATCH_PA`, de trampoline op de bovenste pagina van de kern-RAM | bundel gebouwd; de ingang is `_start`, dezelfde als virt (`OSCORE=1`); nog niet op ijzer |
 
 Wat per board eerst te kijken is, morgen op het ijzer:
 
@@ -104,11 +108,33 @@ Wat per board eerst te kijken is, morgen op het ijzer:
   console: er is geen ConOut meer, de eerste regel is de bunny. De nieuwe
   kern moet in de maat van de oude passen (`image too large` anders).
 - **Pi 4, Pi 5.** De nieuwe kern komt binnen op `_pi_start` met x0 = de
-  DTB-pointer die de firmware de eerste kern gaf, op de OS-core (niet per
-  se core 0). Eerst bewijzen: de Pi-ingang aanvaardt een andere core dan
-  core 0 en een tweede keer dezelfde DTB. De staging is de plek van het
-  initramfs van Hop: na zijn plaatsing dood geheugen.
-- **Radxa.** De trampoline staat in de kern-RAM (de bovenste heap-pagina):
+  DTB-pointer die de firmware de eerste kern gaf, x1 = x2 = 0 en x3 =
+  `cpu::boot::FLIP_ENTRY` ("HOPFLIPE"), op de core waar de oude kern
+  draaide. De ingang aanvaardt een andere core dan core 0 alleen met dat
+  merkteken: `_start` laat bij een koude boot alleen affiniteit 0 door
+  (een firmware die alle cores loslaat, krijgt één kern), en `_pi_start`
+  houdt x3 vast over zijn kladwerk heen (x22). De feitenpagina van de Pi
+  is de DTB zelf: de firmware legde hem in het laadvenster
+  (`device_tree_address`), buiten de kern-RAM en de pool, en de oude kern
+  toetst vóór de sprong dat daar nog een FDT-kop staat
+  (`HOPOS_FLIP_REFUSED firmware DTB gone`). Bewezen op QEMU raspi4b
+  (29-09, `BOARD=rpi4 sh tools/qemu-test-flip.sh`): core 1 met het
+  merkteken komt door `_pi_start` en `_start` tot kmain en leest dezelfde
+  DTB een tweede keer (`fdt:`, `mem:`, `vcmail:`); zonder merkteken
+  parkeert hij na `P2`. De Pi houdt zijn kern op core 0
+  (`board_raspi::os_core`, de SPI-route van de GIC-400), dus op ijzer landt
+  een flip altijd op core 0; een kern die elders landt, verhuist terug
+  (`HOPOS_OSCORE_MOVE`). Op ijzer eerst kijken: de 'P2' en de bunny na
+  `HOPOS_FLIP_JUMP`, en `fdt:` met hetzelfde adres. De staging is de plek
+  van het initramfs van Hop; het nieuwe beeld gaat erachter, zodat Hop er
+  blijft liggen voor een koude flip.
+- **Radxa.** De ingang is `_start` zelf (U-Boot `booti`), met dezelfde
+  poort als virt: `OSCORE=1 sh tools/qemu-test-flip.sh` bewijst een flip
+  vanaf core 1 op precies die code. De DTB en de initrd (`hopos.cfg`)
+  liggen in gaten van de pool (`FW_HOLES`), dus ook daar is de DTB de
+  feitenpagina. Er is geen staging van Hop, dus een koude flip weigert
+  (`cold flip without a staged image`).
+  De trampoline staat in de kern-RAM (de bovenste heap-pagina):
   het enige uitvoerbare RAM buiten de pool. `cpu::el2::chain` staat dat toe
   zolang het beeld hem niet raakt. Eerst bewijzen dat de heap die pagina op
   het moment van de flip niet gebruikt (de heap is een bump-allocator; een
@@ -127,11 +153,15 @@ kern weigert terwijl Hop nog wacht op zijn FLIP-antwoord, krijgt Hop terug
 | `HOPOS_FLIP_REFUSED bundle invalid` | haak | geen HOPRELO1-staart, een afgekapte stroom, een beeld buiten de grenzen, een relocatie die niet klopt |
 | `HOPOS_FLIP_REFUSED bundle carries no switch code sum` | haak | een bundel van versie 1 (alpha.7 en ouder): die kan de switch-code niet laten toetsen |
 | `HOPOS_FLIP_REFUSED flip ABI mismatch` | haak | een bundel van een andere generatie (Go was ABI 2) |
-| `HOPOS_FLIP_REFUSED switch code mismatch` | haak | de EL2-switch-code van de nieuwe kern is een andere dan die waarin de bewoners draaien; zie "De koude weg" |
+| `HOPOS_FLIP_REFUSED switch code mismatch` | haak | de EL2-switch-code van de nieuwe kern is een andere dan die waarin de bewoners draaien; zie "De koude flip" |
 | `HOPOS_FLIP_REFUSED image too large` | haak | het beeld past niet in de staging of niet op het koude adres (UEFI: niet in het oude image) |
 | `HOPOS_FLIP_REFUSED same bundle` | haak | deze kern kwam al uit die bundel; een flip naar zichzelf wordt geen lus |
+| `HOPOS_FLIP_REFUSED firmware DTB gone` | haak | op een DTB-board (virt, Pi, Radxa) staat op x0 van de firmware geen FDT-kop meer; de nieuwe kern zou zonder geheugenkaart landen |
+| `HOPOS_FLIP_REFUSED cold flip without a staged image` | haak | koud, maar er ligt geen ELF in de staging om Hop uit te starten (de Radxa, of een eerdere warme flip die er overheen moest: `HOPOS_FLIP_STAGE_SHARED`) |
 | `HOPOS_FS_FREEZE_FAIL` en `HOPOS_FLIP_FAIL` | flip-taak | de commit faalde of de actor antwoordde niet binnen 2 s; er is niets bevroren |
 | `HOPOS_FLIP_FAIL` na `HOPOS_FS_FROZEN` | flip-taak | de conntrack, de bewoners, het blob of de indeling van de sprong faalde; hopfs ontdooit (`HOPOS_FS_THAWED`) en de masquerade gaat weer open |
+| `HOPOS_FLIP_COLD_STOP_FAIL`, `HOPOS_FLIP_COLD_CORE`, dan `HOPOS_FLIP_FAIL` | flip-taak, koud | een bewoner stopte niet, of een app-core ging niet uit binnen een seconde (AFFINITY_INFO); hopfs ontdooit. Gestopte bewoners blijven gestopt (Hop plaatst ze opnieuw), een uitgezette core staat op "koud" in zijn mailbox, dus de volgende dispatch is weer een CPU_ON |
+| `HOPOS_FLIP_FAIL cold flip: CPU_OFF has no way back on this board` | flip-taak, koud | de Pi 5: CPU_OFF is daar een deur zonder terugweg (10-07), dus koud kan alleen zolang geen app-core ooit draaide |
 
 Na de sprong bestaat kern A niet meer, en is een koude herstart de enige
 weg terug. Dat is geen geslaagde flip: de apps beginnen dan opnieuw (hopfs
@@ -158,35 +188,131 @@ levende bewoners is erger dan een koude boot. Alleen "de executor draait"
 is geen voorwaarde (06-09 op de M4: een guard die dat toetste, liet een
 kern zonder net twee minuten petten en dan toch vallen).
 
+Na een koude flip is er niets te adopteren; daar is het net de enige
+voorwaarde, en een koude landing zonder net valt ook terug op een koude boot
+(het bootmedium, dus de kern van vóór de flip).
+
 Wat de guard niet dekt: een kern die hangt vóór zijn executor draait. Dat
 is de hardware-watchdog van het board.
 
-## De koude weg
+## De koude flip
 
 Past de switch-code niet (een wijziging in `cpu/src/el2/switch.rs` of de
-blobs), dan weigert de flip vóór de sprong. De update gaat dan koud: het
-nieuwe image op het bootmedium (`image/*.sh`, `image/uefi-run.sh`) en een
-herstart. Hop leest zijn staat terug van hopfs (stateful), de apps worden
-opnieuw geplaatst.
+blobs), dan weigert de warme flip vóór de sprong: de bewoners draaien in de
+oude switch-code, en de nieuwe kern mag die alleen adopteren bij een gelijke
+som. De weg is dan de koude flip, op dezelfde ene trigger:
 
-Een "koude flip" (`cold` als vlag op dezelfde ene trigger, `POST /flip`:
-de bewoners netjes stoppen, hopfs vastleggen, springen met een leeg blob,
-en de nieuwe kern plaatst Hop koud) is NIET gebouwd. Wat ervoor nodig is:
-een image van Hop dat de sprong overleeft. De staging waar de kern Hop koud
-uit plaatst, is precies waar de bundel ligt; Hop moet dus eerst naar een
-eigen plek in het kernvenster (of Hop staat op hopfs en de nieuwe kern
-laadt hem daarvandaan). Tot dan is koud installeren de weg.
+```sh
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"url":"http://LAPTOP:8000/hopos-<board>.flip","sha256":"<som>","cold":true}' \
+  http://NODE:8080/flip
+```
+
+Wat er gebeurt, in volgorde:
+
+1. **Hop** haalt de bundel en stroomt hem de kern in, zoals warm. Pas dan
+   stopt hij zijn eigen taken op deze node (`agent.stop_all`, dezelfde
+   Stop-acties als een preemptie: `HOP_FLIP_COLD_STOP stopped=N`); de jobs
+   blijven in de agent-staat op hopfs. Dan de FLIP met `n` =
+   `abi::systemapi::FLIP_COLD`. Een URL die niet werkt, stopt dus niets.
+2. **De haak** toetst de som en de bundel, maar niet de switch-code
+   (`HOPOS_FLIP_COLD_ASKED`), en eist een ELF in de staging: de nieuwe
+   kern start Hop daaruit. Het nieuwe beeld gaat ACHTER dat image
+   (`kernflip::stage_slot`), niet eroverheen; ook bij een warme flip, zodat
+   Hop na elke warme flip nog klaarligt voor een latere koude. Geen extra
+   kopie van Hop, en geen plek in het kernvenster erbij.
+3. **De flip-taak** legt hopfs vast (`HOPOS_FS_FROZEN`), stopt elke
+   bewoner die niet op de OS-core woont en die Hop liet staan
+   (`HOPOS_FLIP_COLD_STOP slot=N`), en zet elke geparkeerde app-core uit:
+   `cpu::el2::chain::send_off` stuurt hem via zijn park-mailbox naar een
+   uit-stub op de plek van de trampoline, die "koud" in de mailbox schrijft
+   en PSCI CPU_OFF doet (weigert de firmware, dan terug de parkeerlus in).
+   De taak wacht tot AFFINITY_INFO voor elke app-core OFF zegt
+   (`HOPOS_FLIP_COLD stopped=N cores_off=K`). Dan het blob: alleen de vlag
+   "koud", de generatie en de som, geen bewoners en geen conntrack; de
+   sprong is die van warm (`HOPOS_FLIP_JUMP`).
+4. **De nieuwe kern** leest het blob (`HOPOS_FLIP_BOOT gen=G
+   HOPOS_FLIP_COLD_BOOT`) en boot verder als een koude kern: eigen
+   switch-code (`HOPOS_CAGE_UP` met de nieuwe som), PSCI CPU_ON voor elke
+   app-core die hij gebruikt, dezelfde hopfs-generatie
+   (`HOPOS_FS_UP fresh=0`), en Hop koud uit de staging (`HOPOS_HOP_START`,
+   `HOP_UP`). Hop leest zijn staat terug van hopfs en plaatst de jobs
+   opnieuw. De guard eist alleen het net binnen de gratie
+   (`HOPOS_FLIP_SETTLED`).
+
+Waarom CPU_OFF en geen parkeerlus die blijft (29-09): de nieuwe kern
+installeert zijn switch-code en parkeerlus opnieuw en start elke core met
+CPU_ON; een core die nog in de oude parkeerlus staat, geeft ALREADY_ON en
+staat midden in code die net overschreven wordt. Op de Pi 5-stockfirmware
+komt een uitgezette core niet terug (10-07): daar weigert de koude flip
+zodra een app-core ooit draaide.
+
+Wat de koude flip niet meeneemt: de verbindingen (Hop en de apps
+herstarten), de conntrack, en elke taak die Hop niet opnieuw plaatst. De
+volumes blijven (hopfs). Na de sprong is de koude flip even onherroepelijk
+als de warme; vóór de sprong laat elke fout een kern achter die doordraait.
+
+De koude installatie (het image op het bootmedium en een herstart) blijft
+de weg voor een node zonder staging van Hop (de Radxa) en voor een kern
+die zelf niet opkomt.
 
 ## Toetsen
 
 - `sh tools/qemu-test-flip.sh`: virt, alles hierboven, plus een
   TCP-verbinding van de host naar Hop die op kern A opengaat en door kern B
-  beantwoord wordt, en hopfs- en conntrack-getallen die aan beide kanten
-  gelijk zijn.
+  beantwoord wordt, hopfs- en conntrack-getallen die aan beide kanten
+  gelijk zijn, en FLIPCONN: een appspike met `ROLE=FLIPCONN` opent vóór de
+  flip een UITGAANDE TCP-verbinding naar een echo op de host (10.0.2.2,
+  door de masquerade en de slirp van QEMU) en stuurt elke seconde een
+  regel. De echo zet er `A` voor, en `B` zodra de console
+  `HOPOS_FLIP_BOOT` toont. Groen bij `HOPOS_APPSPIKE_FLIPCONN ok before=N
+  after=M` met M > N, zonder fout van de stack in de app en met precies één
+  verbinding bij de echo. Gemeten 29-09: `before=3 after=6`, 3 antwoorden
+  via kern A en 3 via kern B, op virt en onder EDK2. Slirp laat het toe: de
+  host-kant van de flow is de socket van slirp, en die ziet alleen een
+  paar seconden stilte op dezelfde vier-tupel.
 - `MISMATCH=1 sh tools/qemu-test-flip.sh`: dezelfde bundel met een andere
   switch-code-som; groen alleen bij een weigering vóór de sprong.
-- `sh tools/qemu-uefi-flip-test.sh`: hetzelfde onder EDK2, met de PIE-basis
-  en de feitenpagina.
+- `COLD=1 sh tools/qemu-test-flip.sh`: de koude flip met die bundel. Eerst
+  een appspike die blijft (`HOLD=1`, een bewoner op een app-core), dan warm
+  (geweigerd, 502), dan koud (202): `HOP_FLIP_COLD_STOP`,
+  `HOPOS_FLIP_COLD cores_off>=1`, `HOPOS_FLIP_BOOT gen=2`,
+  `HOPOS_FLIP_COLD_BOOT`, dezelfde hopfs-generatie, `HOP_UP` ná de landing
+  (twee `HOP_BOOT` in de console), en daarna weer werk op een core die
+  kern A uitzette (CPU_ON). Gemeten 29-09: `stopped=0 cores_off=1` (Hop
+  stopte de appspike zelf, de kern zette de core uit), en de koud
+  herstarte Hop plaatste de job van vóór de flip vanzelf opnieuw. Het pad
+  waarin de KERN een bewoner stopt die Hop liet staan
+  (`HOPOS_FLIP_COLD_STOP slot=N`), loopt in deze toets dus niet.
+- `OSCORE=1 sh tools/qemu-test-flip.sh` (ook met `COLD=1`): de kern op
+  core 1; kern B komt daar door `_start` (`oscore: cpu 1 self-test` na de
+  landing, geen `HOPOS_OSCORE_MOVE`). Dezelfde ingang als de Radxa en, via
+  `_pi_start`, de Pi's.
+- `BOARD=rpi4 sh tools/qemu-test-flip.sh`: de flip-ingang van de Pi op QEMU
+  raspi4b (geen net, dus geen flip): core 1 met de registers van de
+  trampoline komt tot kmain met dezelfde DTB; zonder merkteken parkeert hij.
+- `sh tools/qemu-uefi-flip-test.sh`: hetzelfde als de eerste onder EDK2,
+  met de PIE-basis en de feitenpagina; `COLD=1` ervoor is de koude flip
+  onder EDK2 (Hop koud uit `hopos-stage.elf`, dat de feitenpagina terugwijst).
+  Groen 29-09, beide.
 - Host: `net` (`de_conntrack_overleeft_de_flip_via_de_actor`), `kern`
   (`a_version_2_bundle_carries_its_switch_code_sum`,
-  `freeze_commits_first_and_names_the_generation`), `cpu` (`chain`).
+  `freeze_commits_first_and_names_the_generation`,
+  `a_cold_handoff_carries_its_flag_and_nothing_to_adopt`,
+  `the_new_image_goes_behind_hop_in_the_staging`, en in `system` de vlag
+  tot aan de haak), `cpu` (`chain`: `only_a_parked_core_is_sent_to_the_off_stub`;
+  `boot`: `only_core_zero_boots_cold_and_any_core_lands_a_flip`), `sync`
+  (`one_place_holds_one_and_never_spins`).
+
+## Lessen
+
+- 29-09: de eerste flip met een app op een app-core (FLIPCONN) hing de
+  OS-core van kern B, zonder regel, zodra Hop daarna een taak plaatste. De
+  `Ack` van de switch is een brievenbus met één plaats, en de adoptie
+  stuurt twee `Attach`-en met dezelfde `Ack` vóór de switch draait. Bij één
+  plaats is het volgnummer "gevuld" van de ene ronde hetzelfde getal als
+  "leeg" van de volgende, dus het tweede resultaat won het slot opnieuw en
+  daarna draaide elke `try_recv` voor altijd (gevonden met `info registers`
+  over QMP: de PC in `cage::attach`, in `Mailbox::try_recv`). De fix zit in
+  `sync::mpsc`: de producer toetst `enq - deq < N` vóór de claim. Een flip
+  met alleen Hop (op de OS-core) zag het nooit.

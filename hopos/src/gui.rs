@@ -19,6 +19,11 @@
 //!   `Local` van deze core aanraken.
 //! - de framebuffer-grant ([`gui_fbgrant::FbGrant`]) is van de
 //!   lifecycle-actor, via [`GuiGrants`] (`kern::grants::Grants`).
+//! - de USB-controllers zijn van één taak, de USB-taak ([`usb`]): hij
+//!   bezit de `gui_usbin::Manager` als `&mut` en is de enige die een xHCI
+//!   aanraakt. Wat hij leest, gaat als waarde door een SPSC-rij naar de
+//!   input-listener in `net.rs` (`net::input`), die de rij bezit en de
+//!   regels aan de display-app schrijft.
 
 #[cfg(feature = "gui")]
 pub(crate) use on::*;
@@ -199,11 +204,222 @@ mod on {
     }
 
     /// De USB-invoer na het netwerk: HOP serveert de HID-stroom op het
-    /// interne gateway-adres, en dat bestaat pas na de switch. Vandaag
-    /// meldt nog geen board zijn xHCI's aan (docs/gui.md: de bedrading per
-    /// board), dus dit is één regel.
-    pub(crate) fn start_usb_input(_exec: &'static Executor) {
-        println!("usb: no host controllers registered on this board HOPOS_USB_NONE");
+    /// interne gateway-adres, en dat bestaat pas na de switch. Het board
+    /// noemt zijn controllers (`Board::usb_hosts`: PCIe en firmware zijn
+    /// dan al gedaan); de USB-taak brengt ze op en pompt de rapporten.
+    pub(crate) fn start_usb_input(exec: &'static Executor) {
+        usb::start(exec);
+    }
+
+    /// De houder van het glas als slot van de ABI (het bron-IP van de
+    /// display-app volgt eruit), voor de input-listener. `None` zonder
+    /// houder, of als de grant net geleend is (dan komt er niemand binnen,
+    /// en de volgende regel toetst opnieuw).
+    pub(crate) fn glass_holder() -> Option<abi::layout::Slot> {
+        let s = GRANT.try_borrow().ok()?.holder()?;
+        abi::layout::Slot::new(s.get())
+    }
+
+    /// De USB-taak (Go: `usbin.Start` en `Manager.Run`).
+    ///
+    /// Eigendom: de taak bezit de `Manager` (alle controllers) en de
+    /// zendkant van [`INPUT`]; de input-listener (`net::input`) bezit de
+    /// ontvangkant. Een rapport gaat als waarde van de een naar de ander;
+    /// vol is weggooien en tellen, want de pollus mag nooit wachten op een
+    /// display die niet leest.
+    mod usb {
+        use super::GRANT;
+        use board::{Board, UsbHost, UsbHosts, UsbKind};
+        use core::fmt;
+        use core::future::Future;
+        use core::net::Ipv4Addr;
+        use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+        use core::time::Duration;
+        use cpu::println;
+        use driver_hid::Event;
+        use driver_xhci::Hc;
+        use executor::Executor;
+        use gui_usbin::deliver::{self, INPUT_PORT, InputQueue, InputTx};
+        use gui_usbin::register::{HostSpec, PrepareError, Registry};
+        use gui_usbin::{Manager, Sink, Timer};
+
+        /// De rij van de USB-taak naar de input-listener.
+        static INPUT: InputQueue = InputQueue::new();
+
+        /// Gebeurtenissen die de rij niet meer in pasten (de listener liep
+        /// achter). Een meting, geen fout: invoer is lossy by design.
+        pub(crate) static QUEUE_DROPS: AtomicU64 = AtomicU64::new(0);
+
+        /// Gebeurtenissen die de USB-taak las, totaal.
+        pub(crate) static EVENTS: AtomicU64 = AtomicU64::new(0);
+
+        /// Het timerwiel van de executor als klok en slaap van de driver:
+        /// een poortreset of een commando slaapt hierop in plaats van de
+        /// core vast te houden.
+        #[derive(Clone, Copy)]
+        struct UsbTimer(&'static Executor);
+
+        impl Timer for UsbTimer {
+            fn now(&self) -> u64 {
+                self.0.now()
+            }
+            fn sleep(&self, ns: u64) -> impl Future<Output = ()> {
+                self.0.after(Duration::from_nanos(ns))
+            }
+        }
+
+        /// De sink van de manager: invoer de rij in, logregels naar de
+        /// console.
+        struct UsbSink {
+            tx: InputTx<'static>,
+        }
+
+        impl Sink for UsbSink {
+            fn input(&mut self, e: Event) {
+                EVENTS.fetch_add(1, Relaxed);
+                if !deliver::offer(&mut self.tx, e) {
+                    // Eén regel bij de eerste, daarna tellen.
+                    if QUEUE_DROPS.fetch_add(1, Relaxed) == 0 {
+                        println!(
+                            "usb: input queue full ({} events), dropping (counted) HOPOS_USB_QUEUE_FULL",
+                            deliver::QUEUE_DEPTH
+                        );
+                    }
+                }
+            }
+
+            fn log(&mut self, args: fmt::Arguments<'_>) {
+                println!("{args}");
+            }
+        }
+
+        /// Vraagt het board zijn controllers, belooft het invoeradres aan de
+        /// grant en spawnt de USB-taak. De belofte gaat vóór de taak (en
+        /// dus vóór elke plaatsing, die `main` pas hierna start): de
+        /// bring-up zelf slaapt op de executor, en een display-app die
+        /// intussen het glas kreeg, moet het adres al in zijn env hebben.
+        /// Komt geen controller op, dan trekt de taak het in.
+        pub(super) fn start(exec: &'static Executor) {
+            let hosts = crate::BOARD.usb_hosts();
+            if hosts.is_empty() {
+                println!("usb: no host controllers on this board HOPOS_USB_NONE");
+                return;
+            }
+            let Some((tx, rx)) = INPUT.split() else {
+                println!("usb: input queue already taken HOPOS_USB_FAIL");
+                return;
+            };
+            if let Ok(mut g) = GRANT.try_borrow_mut() {
+                g.use_input(Ipv4Addr::from(abi::layout::HOST_IP4), INPUT_PORT);
+            }
+            let fb = GRANT
+                .try_borrow()
+                .ok()
+                .and_then(|g| g.desc())
+                .map(|d| (d.width, d.height));
+            if exec.spawn(run(exec, hosts, UsbSink { tx })).is_err() {
+                println!("usb: task not spawned HOPOS_USB_FAIL");
+                stop_input();
+                return;
+            }
+            if exec
+                .spawn(crate::net::input::serve(
+                    exec,
+                    deliver::Deliverer::new(rx, fb),
+                ))
+                .is_err()
+            {
+                println!("usb: input listener not spawned HOPOS_USB_FAIL");
+            }
+        }
+
+        /// Trekt het invoeradres in bij de grant.
+        fn stop_input() {
+            if let Ok(mut g) = GRANT.try_borrow_mut() {
+                g.stop_input();
+            }
+        }
+
+        /// De taak: controllers op, dan de ronde van de manager tot het
+        /// einde van de node (Go's `Run`; er zijn nog geen bulk-verzoeken
+        /// van buiten, dus alleen de slaap tot de volgende ronde).
+        async fn run(exec: &'static Executor, hosts: UsbHosts, mut sink: UsbSink) {
+            let mut reg = Registry::new();
+            for h in hosts.iter() {
+                let spec = HostSpec {
+                    name: h.name,
+                    base: h.regs.base,
+                    bus_off: h.bus_off,
+                    dma: h.dma.base,
+                    dma_size: h.dma.size,
+                };
+                if reg.register(spec).is_err() {
+                    println!(
+                        "usb: {}: more controllers than the manager takes, skipped",
+                        h.name
+                    );
+                }
+            }
+            let t = UsbTimer(exec);
+            let mut mgr = Manager::new(t);
+            let live = reg
+                .bring_up(&mut mgr, &mut sink, async |spec: &HostSpec| {
+                    make(&hosts, spec, &t).await
+                })
+                .await;
+            if live == 0 {
+                stop_input();
+                println!("usb: no controller came up, INPUT_ADDR withdrawn HOPOS_USB_NONE");
+                return;
+            }
+            println!(
+                "usb: {live} controller(s) up, polling every {} ms HOPOS_USB_UP",
+                gui_usbin::POLL_INTERVAL_NS / 1_000_000
+            );
+            loop {
+                let wait = mgr.step(&mut sink).await;
+                exec.after(Duration::from_nanos(wait)).await;
+            }
+        }
+
+        /// Maakt de driver voor één aangeboden controller: een DWC3-core
+        /// eerst in hostmodus, dan de xHCI op hetzelfde venster.
+        async fn make(hosts: &UsbHosts, spec: &HostSpec, t: &UsbTimer) -> Result<Hc, PrepareError> {
+            let Some(h) = hosts.iter().find(|h| h.name == spec.name) else {
+                return Err(PrepareError {
+                    what: "controller not offered by the board",
+                    value: spec.base.0,
+                });
+            };
+            if h.kind == UsbKind::Dwc3 {
+                dwc3_host_mode(h, t).await?;
+            }
+            // SAFETY: het venster komt van `Board::usb_hosts`: het
+            // capability-blok van een xHCI (of een DWC3 die nu in hostmodus
+            // staat), Device gemapt voor altijd door het board, en `h.dma` is
+            // DMA-geheugen dat het board voor deze controller alleen plande.
+            Ok(unsafe { Hc::new(spec.base, spec.name, spec.bus_off) })
+        }
+
+        /// De DWC3-core van `h` in hostmodus (de RK3566), met de globale
+        /// registers in één regel: op dat silicium is de vraag niet "werkt
+        /// de driver" maar "staat de klok en de PHY aan" (Go, 06-08).
+        async fn dwc3_host_mode(h: &UsbHost, t: &UsbTimer) -> Result<(), PrepareError> {
+            // SAFETY: het board noemt dit venster als DWC3-core: de
+            // globale registers liggen op +0xC100 binnen `h.regs`, Device
+            // gemapt voor altijd.
+            let core = unsafe { driver_dwc3::Core::new(h.regs.base) };
+            let r = core.host_mode(t).await;
+            let g = core.regs();
+            println!(
+                "usb: {} dwc3 id={:08x} gctl={:08x} usb2={:08x} usb3={:08x} gsts={:08x}",
+                h.name, g.id, g.ctl, g.usb2_phy, g.usb3_pipe, g.sts
+            );
+            r.map_err(|e| PrepareError {
+                what: e.what(),
+                value: e.value(),
+            })
+        }
     }
 
     /// Een regel van hoogstens 32 bytes op de stack: de meetregels

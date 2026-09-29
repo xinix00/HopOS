@@ -1,4 +1,4 @@
-//! Een `applib::appnet::TcpStream` als verbinding voor leanhttp.
+//! Een `appnet::TcpStream` als verbinding voor leanhttp (feature `http`).
 //!
 //! Bezit de stroom en zijn twee termijnen. De stroom heeft alleen async
 //! methodes (`read`, `write`); leanhttp vraagt poll-methodes. De brug maakt
@@ -7,23 +7,56 @@
 //! geeft `Pending`, en wegvallen kost niets, want hij hield niets vast
 //! buiten die registratie.
 //!
-//! Dezelfde vorm als `hop-http/src/conn.rs` in de hop-repo; die crate is
-//! van Hop en hangt aan een HopOS-tag, dus een app in deze repo kan hem niet
-//! gebruiken zonder een pad over de repo-grens. Komt er een derde app, dan
-//! hoort dit in applib (achter een feature, want niet elke app praat HTTP).
+//! De termijnen van de server (KAM: verzoekkop, body, schrijven) lopen op
+//! het timerwiel van de executor van de app-core: een verbinding die zwijgt,
+//! wordt na haar termijn gewekt en gesloten, en houdt geen taak uit een
+//! vaste pool vast.
 //!
-//! De termijnen van de server (verzoekkop, body, schrijven) lopen op het
-//! timerwiel van de executor: een verbinding die zwijgt, wordt na haar
-//! termijn gewekt en gesloten, en houdt geen taak uit de pool vast.
+//! Waarom hier: tot alpha.9 stond deze brug twee keer, in `apps/welcome` en
+//! in Hop's `hop-http`, en de twee liepen al uit elkaar (de kap als
+//! constructor-argument tegen een bouwer, een net andere foutvertaling).
+//! Eén brug, één plek voor een fix. Achter een feature, want niet elke app
+//! praat HTTP en leanhttp hoort dan niet in zijn image.
+//!
+//! Wat hier niet staat: de server zelf (leanhttp), de stack (`appnet`).
 
+use crate::appnet::{NetError, StackError, TcpStream};
+use crate::rt::Exec;
 use alloc::boxed::Box;
-use applib::appnet::{NetError, StackError, TcpStream};
-use applib::rt::Exec;
 use core::future::Future;
 use core::pin::{Pin, pin};
 use core::task::{Context, Poll};
 use core::time::Duration;
 use leanhttp::{AsyncRead, AsyncWrite, Close, IoError};
+
+/// Wat de brug van een stroom vraagt: lezen, schrijven, sluiten.
+///
+/// [`TcpStream`] is de enige echte; de trait bestaat zodat de brug op de
+/// host te toetsen is tegen een nep-stroom, zonder stack en zonder ringen.
+pub trait Stream {
+    /// Leest hooguit `buf.len()` bytes; 0 is EOF.
+    fn read(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<usize, NetError>>;
+
+    /// Schrijft een deel van `data`; het aantal bytes.
+    fn write(&mut self, data: &[u8]) -> impl Future<Output = Result<usize, NetError>>;
+
+    /// Sluit de stroom: FIN na de gebufferde data.
+    fn close(self) -> Result<(), NetError>;
+}
+
+impl Stream for TcpStream {
+    fn read(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<usize, NetError>> {
+        TcpStream::read(self, buf)
+    }
+
+    fn write(&mut self, data: &[u8]) -> impl Future<Output = Result<usize, NetError>> {
+        TcpStream::write(self, data)
+    }
+
+    fn close(self) -> Result<(), NetError> {
+        TcpStream::close(self)
+    }
+}
 
 /// Een wekker op het timerwiel: de future van `Exec::until`.
 type Alarm = Pin<Box<dyn Future<Output = ()>>>;
@@ -64,35 +97,44 @@ impl Deadline {
 }
 
 /// Een TCP-verbinding van de app als leanhttp-verbinding.
-pub(crate) struct TcpConn {
-    stream: Option<TcpStream>,
+pub struct TcpConn<S: Stream = TcpStream> {
+    stream: Option<S>,
     exec: &'static Exec,
     read: Deadline,
     write: Deadline,
-    cap: Duration,
+    cap: Option<Duration>,
 }
 
-impl TcpConn {
-    /// Neemt `stream` over; de termijnen lopen op `exec`, en elke
-    /// leestermijn wordt afgekapt op `cap`.
-    ///
-    /// Waarom de kap: de keep-alive-stilte van leanhttp is 60 s, en een
-    /// browser houdt zijn verbinding zolang open. Met een vaste pool van
-    /// werkers houdt zo'n stille verbinding een werker vast; na `cap` gaat
-    /// hij dicht en opent de browser gewoon een nieuwe.
-    pub(crate) fn new(stream: TcpStream, exec: &'static Exec, cap: Duration) -> Self {
+impl<S: Stream> TcpConn<S> {
+    /// Neemt `stream` over; de termijnen lopen op `exec`.
+    pub fn new(stream: S, exec: &'static Exec) -> Self {
         Self {
             stream: Some(stream),
             exec,
             read: Deadline::default(),
             write: Deadline::default(),
-            cap,
+            cap: None,
         }
+    }
+
+    /// Kapt elke leestermijn die de server zet af op `cap`.
+    ///
+    /// Waarom: de keep-alive-stilte van leanhttp is 60 s, en een browser
+    /// houdt zijn verbinding zolang open. Met een vaste pool van werkers
+    /// (of een poort die één verbinding tegelijk bedient) houdt zo'n stille
+    /// verbinding een werker een minuut vast; na `cap` gaat hij dicht en
+    /// opent de browser gewoon een nieuwe. Een termijn `None` (de server
+    /// leest dan niet) blijft `None`.
+    #[must_use]
+    pub fn with_read_cap(mut self, cap: Duration) -> Self {
+        self.cap = Some(cap);
+        self
     }
 }
 
 /// Een netfout als fout van de verbinding.
-fn io_error(e: NetError) -> IoError {
+#[must_use]
+pub fn io_error(e: NetError) -> IoError {
     match e {
         NetError::Timeout | NetError::Stack(StackError::DeadlineExceeded) => IoError::TimedOut,
         NetError::Stack(StackError::Reset) => IoError::Reset,
@@ -103,7 +145,7 @@ fn io_error(e: NetError) -> IoError {
     }
 }
 
-impl AsyncRead for TcpConn {
+impl<S: Stream> AsyncRead for TcpConn<S> {
     fn poll_read(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<Result<usize, IoError>> {
         let Some(s) = self.stream.as_mut() else {
             return Poll::Ready(Err(IoError::Closed));
@@ -118,14 +160,16 @@ impl AsyncRead for TcpConn {
     }
 
     fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), IoError> {
-        // `None` (de server leest nu niet) blijft `None`.
-        let timeout = timeout.map(|t| t.min(self.cap));
+        let timeout = match (timeout, self.cap) {
+            (Some(t), Some(c)) => Some(t.min(c)),
+            (t, _) => t,
+        };
         self.read.set(self.exec, timeout);
         Ok(())
     }
 }
 
-impl AsyncWrite for TcpConn {
+impl<S: Stream> AsyncWrite for TcpConn<S> {
     fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, IoError>> {
         let Some(s) = self.stream.as_mut() else {
             return Poll::Ready(Err(IoError::Closed));
@@ -145,7 +189,7 @@ impl AsyncWrite for TcpConn {
     }
 }
 
-impl Close for TcpConn {
+impl<S: Stream> Close for TcpConn<S> {
     fn poll_close(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), IoError>> {
         // Synchroon: FIN na de gebufferde data, de pomp stuurt hem. Twee keer
         // sluiten is één keer sluiten.
@@ -155,3 +199,6 @@ impl Close for TcpConn {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -18,7 +18,7 @@
 //! is, krijgt [`BulkError::Gone`], ook als er op dezelfde poort intussen een
 //! nieuwe drive zit.
 
-use crate::{Ctl, Manager, Sink};
+use crate::{Ctl, Manager, Sink, Timer};
 use core::fmt;
 use driver_xhci::{BulkTd, Device};
 
@@ -171,7 +171,7 @@ pub(crate) struct Inflight {
     pub(crate) td: Option<BulkTd>,
 }
 
-impl Manager {
+impl<T: Timer> Manager<T> {
     /// Zet een verzoek achteraan de rij van zijn controller. Een verzoek
     /// voor een controller die er niet is, krijgt meteen
     /// [`BulkError::Gone`]; een volle rij [`BulkError::Busy`].
@@ -187,15 +187,16 @@ impl Manager {
 
     /// Het bulk-deel van één ronde: lopende transfers afmaken of laten
     /// verlopen, en daarna per vrije controller het volgende verzoek starten.
-    pub fn serve_bulk(&mut self, sink: &mut impl Sink) {
-        let now = (self.clock)();
+    pub async fn serve_bulk(&mut self, sink: &mut impl Sink) {
+        let t = &self.timer;
+        let now = t.now();
         let mut started = false;
         for c in self.ctls.iter_mut() {
-            finish(c, now, sink);
+            finish(c, now, sink, t).await;
             while c.busy.is_none()
                 && let Some(r) = c.queue.remove(0)
             {
-                started |= start(c, r, sink);
+                started |= start(c, r, sink, t).await;
             }
         }
         if started {
@@ -205,12 +206,12 @@ impl Manager {
 }
 
 /// Maakt de lopende transfer van `c` af, of laat hem verlopen.
-fn finish(c: &mut Ctl, now: u64, sink: &mut impl Sink) {
+async fn finish(c: &mut Ctl, now: u64, sink: &mut impl Sink, t: &impl Timer) {
     let Some(f) = c.busy else {
         return;
     };
     let r = match f.td {
-        Some(td) => c.hc.poll_bulk(&td, sink.bulk_in(&f.req)),
+        Some(td) => c.hc.poll_bulk(&td, sink.bulk_in(&f.req), t).await,
         None => Ok(None),
     };
     let reply = match r {
@@ -219,7 +220,7 @@ fn finish(c: &mut Ctl, now: u64, sink: &mut impl Sink) {
             // De drive zwijgt. Alleen zijn endpoint gaat terug naar nul; de
             // controller en alles wat er verder aan hangt lopen door.
             if let Some(td) = f.td
-                && let Err(e) = c.hc.abort_bulk(&td)
+                && let Err(e) = c.hc.abort_bulk(&td, t).await
             {
                 sink.log(format_args!(
                     "usb: {} port {}: aborting a bulk transfer: {e}",
@@ -248,14 +249,14 @@ fn device_of(c: &Ctl, id: BulkId) -> Option<Device> {
 /// commando's met hun eigen korte timeouts en loopt dus meteen door; een
 /// datatransfer wordt alleen gestart en in latere rondes afgemaakt. Geeft
 /// terug of er een transfer op de ring ging.
-fn start(c: &mut Ctl, r: BulkReq, sink: &mut impl Sink) -> bool {
+async fn start(c: &mut Ctl, r: BulkReq, sink: &mut impl Sink, t: &impl Timer) -> bool {
     let Some(d) = device_of(c, r.id) else {
         sink.bulk_done(&r, Err(BulkError::Gone));
         return false;
     };
     let td = match r.op {
         BulkOp::Reset => {
-            let res = c.hc.reset_recovery(&d).map(|()| 0);
+            let res = c.hc.reset_recovery(&d, t).await.map(|()| 0);
             sink.bulk_done(&r, res.map_err(BulkError::Xhci));
             return false;
         }

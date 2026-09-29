@@ -230,6 +230,21 @@ type Machine = board_apple::Apple;
 #[cfg(feature = "board-apple")]
 static BOARD: Machine = board_apple::Apple::new();
 
+/// De architectuur van deze binary, voor de runtime-regel.
+const ARCH: &str = if cfg!(target_arch = "riscv64") {
+    "riscv64"
+} else {
+    "aarch64"
+};
+
+/// De teller waarin de meetlat van de OS-core (`el2::OS_STATS.ticks`)
+/// telt: CNTFRQ op arm64, de timebase van de TIME-CSR op riscv64.
+const OS_HZ: fn() -> u64 = if cfg!(target_arch = "riscv64") {
+    cpu::riscv::idle::hz
+} else {
+    cpu::idle::freq
+};
+
 /// De heap: een bump-allocator met een plafond over de kern-RAM.
 #[global_allocator]
 static HEAP: Heap = Heap::new();
@@ -265,8 +280,9 @@ extern "C" fn kmain(dtb: u64, el: u64) -> ! {
     println!();
 
     println!(
-        "runtime {} none/aarch64 (HopOS v{})",
+        "runtime {} none/{} (HopOS v{})",
         env!("HOPOS_RUSTC"),
+        ARCH,
         env!("CARGO_PKG_VERSION")
     );
 
@@ -598,7 +614,7 @@ async fn tick(exec: &'static Executor) {
             o.exits.load(Relaxed),
             o.faults.load(Relaxed),
             o.idle.load(Relaxed),
-            o.ticks.load(Relaxed) / (cpu::idle::freq() / 1000).max(1),
+            o.ticks.load(Relaxed) / (OS_HZ() / 1000).max(1),
             o.kicks.load(Relaxed),
             telemetry::Temp(telemetry::temp_milli_c()),
         );

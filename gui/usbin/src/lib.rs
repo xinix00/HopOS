@@ -19,7 +19,10 @@
 //!   HID-rapporten ophalen en bulk-verzoeken bedienen gebeurt allemaal in
 //!   zijn [`Manager::step`], op één taak. Dat vervangt Go's `Run`-goroutine
 //!   met zijn `select` en timer: de binary draait de lus (zie
-//!   [`Manager::step`] voor de vorm) en geeft de klok.
+//!   [`Manager::step`] voor de vorm) en geeft de klok en de slaap
+//!   ([`Timer`]). Elke wachtende hardwarestap (een poortreset, een
+//!   commando) slaapt op die timer, dus een insteek houdt de executor niet
+//!   vast.
 //! - De [`deliver`]-logica: de begrensde rij naar de display, de cursor, het
 //!   samenvoegen van muisbewegingen en de JSON-regels, zonder socket. De
 //!   verbinding zelf (listen op 7879, accept, schrijven met deadline) is van
@@ -53,6 +56,8 @@ use core::fmt;
 use dev::Pa;
 use driver_hid::{Event, Events, Keyboard, Mouse};
 use driver_xhci::{Device, Hc, PROTO_MOUSE};
+
+pub use driver_xhci::Timer;
 
 pub mod deliver;
 pub mod register;
@@ -209,11 +214,12 @@ impl Ctl {
 /// één taak; [`Manager::add`] hoort vóór de eerste [`Manager::step`], en wie
 /// daarna iets van de bus wil, stuurt een [`BulkReq`] via
 /// [`Manager::enqueue`].
-pub struct Manager {
+pub struct Manager<T: Timer> {
     ctls: BoundedVec<Ctl, MAX_HOSTS>,
     /// Hergebruikte buffer: het pollpad alloceert niet.
     evs: Events,
-    clock: fn() -> u64,
+    /// De klok en de slaap van de eigenaar-taak.
+    timer: T,
     next_scan: u64,
     next_poll: u64,
     /// Resterende fijnmazige rondes ([`FINE_ROUNDS`]).
@@ -222,14 +228,14 @@ pub struct Manager {
     next_bulk: u32,
 }
 
-impl Manager {
-    /// Een lege invoerdienst. `clock` geeft monotone nanoseconden.
+impl<T: Timer> Manager<T> {
+    /// Een lege invoerdienst op de klok en de slaap van `timer`.
     #[must_use]
-    pub fn new(clock: fn() -> u64) -> Self {
+    pub fn new(timer: T) -> Self {
         Self {
             ctls: BoundedVec::new(),
             evs: Events::new(),
-            clock,
+            timer,
             next_scan: 0,
             next_poll: 0,
             fine: 0,
@@ -247,10 +253,11 @@ impl Manager {
     /// `[dma, dma+size)`, poortvoeding aan. Een controller die niet
     /// antwoordt is geen fatale fout: een board mag meer controllers
     /// aanbieden dan er fysiek bedraad zijn, en de melding is dan de meting.
-    pub fn add(&mut self, mut hc: Hc, dma: Pa, size: u64, sink: &mut impl Sink) -> Result {
+    pub async fn add(&mut self, mut hc: Hc, dma: Pa, size: u64, sink: &mut impl Sink) -> Result {
         if self.ctls.is_full() {
             return Err(Error::TooManyHosts);
         }
+        let t = &self.timer;
         hc.probe()?;
         let (ver, slots, ports, ctx64) = hc.info();
         sink.log(format_args!(
@@ -260,9 +267,9 @@ impl Manager {
             ver & 0xFF,
             if ctx64 { 64 } else { 32 }
         ));
-        hc.reset()?;
-        hc.start(dma, size)?;
-        hc.power_on();
+        hc.reset(t).await?;
+        hc.start(dma, size, t).await?;
+        hc.power_on(t).await;
         // De rauwe poortstand, één regel. Dit is de meting die op ijzer telt:
         // een controller die netjes opkomt maar op géén poort CCS meldt, is
         // een controller die niet aan de fysieke connector hangt, en dat is
@@ -286,21 +293,21 @@ impl Manager {
     ///     if let Either::Left(req) = select(REQS.recv(), after(wait)).await {
     ///         mgr.enqueue(req, &mut sink);
     ///     }
-    ///     wait = mgr.step(&mut sink);
+    ///     wait = mgr.step(&mut sink).await;
     /// }
     /// ```
-    pub fn step(&mut self, sink: &mut impl Sink) -> u64 {
-        let now = (self.clock)();
+    pub async fn step(&mut self, sink: &mut impl Sink) -> u64 {
+        let now = self.timer.now();
         if now >= self.next_scan {
-            self.scan(sink);
-            self.next_scan = (self.clock)().saturating_add(SCAN_INTERVAL_NS);
+            self.scan(sink).await;
+            self.next_scan = self.timer.now().saturating_add(SCAN_INTERVAL_NS);
         }
-        if (self.clock)() >= self.next_poll {
-            self.poll(sink);
-            self.next_poll = (self.clock)().saturating_add(POLL_INTERVAL_NS);
+        if self.timer.now() >= self.next_poll {
+            self.poll(sink).await;
+            self.next_poll = self.timer.now().saturating_add(POLL_INTERVAL_NS);
         }
-        self.serve_bulk(sink);
-        let mut wait = self.next_poll.saturating_sub((self.clock)());
+        self.serve_bulk(sink).await;
+        let mut wait = self.next_poll.saturating_sub(self.timer.now());
         if self.ctls.iter().any(|c| c.busy.is_some()) {
             let step = if self.fine > 0 {
                 self.fine -= 1;
@@ -314,8 +321,8 @@ impl Manager {
     }
 
     /// Kijkt welke poorten er bij zijn gekomen en welke leeg zijn geraakt.
-    pub fn scan(&mut self, sink: &mut impl Sink) {
-        let (mut next_bulk, evs) = (self.next_bulk, &mut self.evs);
+    pub async fn scan(&mut self, sink: &mut impl Sink) {
+        let (mut next_bulk, evs, t) = (self.next_bulk, &mut self.evs, &self.timer);
         for (host, c) in self.ctls.iter_mut().enumerate() {
             if let Some(cause) = c.hc.recovery_needed() {
                 // HCRST maakt elk bestaand handvat ongeldig, ook als maar één
@@ -325,7 +332,7 @@ impl Manager {
                 // de normale scan aangesloten apparaten in dezelfde ronde
                 // opnieuw.
                 forget_controller(c, evs, sink);
-                if let Err(e) = c.hc.recover() {
+                if let Err(e) = c.hc.recover(t).await {
                     sink.log(format_args!(
                         "usb: {}: controller recovery after {cause} failed: {e}",
                         c.hc.name()
@@ -338,15 +345,15 @@ impl Manager {
                 ));
             }
             for n in 1..=c.hc.num_ports() {
-                scan_port(c, host as u8, n, &mut next_bulk, evs, sink);
+                scan_port(c, host as u8, n, &mut next_bulk, evs, sink, t).await;
             }
         }
         self.next_bulk = next_bulk;
     }
 
     /// Haalt één ronde rapporten op.
-    pub fn poll(&mut self, sink: &mut impl Sink) {
-        let evs = &mut self.evs;
+    pub async fn poll(&mut self, sink: &mut impl Sink) {
+        let (evs, t) = (&mut self.evs, &self.timer);
         let mut buf = [0u8; REPORT_BUF];
         for c in self.ctls.iter_mut() {
             // Een Disable Slot zonder completion maakt ook de
@@ -366,7 +373,7 @@ impl Manager {
                 // Meerdere keren per beurt: één apparaat kan twee endpoints
                 // hebben en `report` levert er één per aanroep.
                 for _ in 0..MAX_PER_POLL {
-                    let Some(r) = c.hc.report(&d, &mut buf) else {
+                    let Some(r) = c.hc.report(&d, &mut buf, t).await else {
                         break;
                     };
                     let rep = buf.get(..r.len).unwrap_or_default();
@@ -383,19 +390,20 @@ impl Manager {
 }
 
 /// Eén poort in de scan.
-fn scan_port(
+async fn scan_port(
     c: &mut Ctl,
     host: u8,
     n: u8,
     next_bulk: &mut u32,
     evs: &mut Events,
     sink: &mut impl Sink,
+    t: &impl Timer,
 ) {
     let p = c.hc.port(n);
     let have = c.known.iter().position(|k| k.num == n);
     match (p.connected, have) {
         (true, None) => {
-            attach_port(c, host, n, next_bulk, sink);
+            attach_port(c, host, n, next_bulk, sink, t).await;
             c.hc.clear_changes(n);
         }
         (false, Some(i)) => {
@@ -409,7 +417,7 @@ fn scan_port(
                         c.hc.name()
                     )),
                 }
-                release(c, &mut k, evs, sink);
+                release(c, &mut k, evs, sink, t).await;
             }
             c.hc.clear_changes(n);
         }
@@ -418,9 +426,16 @@ fn scan_port(
 }
 
 /// Een net aangesloten poort enumereren en boeken.
-fn attach_port(c: &mut Ctl, host: u8, n: u8, next_bulk: &mut u32, sink: &mut impl Sink) {
+async fn attach_port(
+    c: &mut Ctl,
+    host: u8,
+    n: u8,
+    next_bulk: &mut u32,
+    sink: &mut impl Sink,
+    t: &impl Timer,
+) {
     let name = c.hc.name();
-    let d = match c.hc.attach(n) {
+    let d = match c.hc.attach(n, t).await {
         Ok(d) => d,
         Err(e) => {
             sink.log(format_args!("usb: {name} port {n}: {e}"));
@@ -482,7 +497,7 @@ fn attach_port(c: &mut Ctl, host: u8, n: u8, next_bulk: &mut u32, sink: &mut imp
             "usb: {name} port {n}: more than {MAX_KNOWN} ports in use, device released"
         ));
         if let Some(d) = k.dev
-            && let Err(e) = c.hc.detach(&d)
+            && let Err(e) = c.hc.detach(&d, t).await
         {
             sink.log(format_args!("usb: {name}: detach failed: {e}"));
         }
@@ -493,7 +508,13 @@ fn attach_port(c: &mut Ctl, host: u8, n: u8, next_bulk: &mut u32, sink: &mut imp
 /// geen opruimwerk maar een correctie: een toets die tijdens het uittrekken
 /// ingedrukt was, moet bij de display worden losgelaten, anders blijft hij
 /// daar voor altijd staan.
-fn release(c: &mut Ctl, k: &mut Known, evs: &mut Events, sink: &mut impl Sink) {
+async fn release(
+    c: &mut Ctl,
+    k: &mut Known,
+    evs: &mut Events,
+    sink: &mut impl Sink,
+    t: &impl Timer,
+) {
     let Some(d) = k.dev else {
         return; // bekend niet-HID-apparaat; Attach gaf zijn slot al terug
     };
@@ -503,7 +524,7 @@ fn release(c: &mut Ctl, k: &mut Known, evs: &mut Events, sink: &mut impl Sink) {
     evs.clear();
     append_reset(k, evs);
     emit(evs, sink);
-    if let Err(e) = c.hc.detach(&d) {
+    if let Err(e) = c.hc.detach(&d, t).await {
         sink.log(format_args!(
             "usb: {}: detach could not confirm the controller slot: {e}",
             c.hc.name()

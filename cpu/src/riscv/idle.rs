@@ -16,6 +16,8 @@
 
 use super::clint::{Clint, NEVER};
 use super::csr;
+use super::oscore::OsCore;
+use crate::el2::{TURN_CAP_NS, Turn};
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use dev::Pa;
 use executor::Sleeper;
@@ -96,11 +98,14 @@ pub struct Stats {
     pub caught: AtomicU64,
 }
 
-/// De [`Sleeper`] van het hart van de kern: `wfi` op de eigen `mtimecmp`.
+/// De [`Sleeper`] van het hart van de kern: `wfi` op de eigen `mtimecmp`,
+/// of, als het hart bewoners heeft ([`RvSleeper::host`]), een beurt voor de
+/// volgende die aan de beurt is.
 pub struct RvSleeper {
     clint: Option<Clint>,
     hart: usize,
     cap_ns: u64,
+    os: Option<OsCore>,
     /// De meetlat.
     pub stats: Stats,
 }
@@ -115,6 +120,7 @@ impl RvSleeper {
             clint,
             hart,
             cap_ns: WFI_CAP_NS,
+            os: None,
             stats: Stats::default(),
         }
     }
@@ -127,15 +133,24 @@ impl RvSleeper {
         self
     }
 
-    /// De OS-core-rotatie van arm64 (PORT.md beslissing 2) bestaat op RISC-V
-    /// nog niet: Hop woont hier op een app-hart. De haak bestaat zodat de
-    /// gedeelde main dezelfde boot draait; hij laat de rotatie vallen en de
-    /// kern houdt zijn hart voor zichzelf.
-    pub fn host(&mut self, _os: crate::el2::OsCore) {
+    /// Maakt dit hart de OS-core (PORT.md beslissing 2): vanaf de volgende
+    /// idle-ronde is idle een beurt voor zijn bewoners
+    /// ([`super::oscore::OsCore::run`]). Alleen op het hart van de kern zelf,
+    /// en één keer. Zonder bewezen wekker kan de kern een bewoner niet
+    /// terughalen op zijn deadline: dan geen rotatie, luid.
+    pub fn host(&mut self, os: OsCore) {
+        if self.clint.is_none() {
+            crate::println!(
+                "oscore: hart {} has no proven CLINT, no residents next to the kern HOPOS_OS_CORE_NONE",
+                self.hart
+            );
+            return;
+        }
         crate::println!(
-            "oscore: no OS-core rotation on riscv64 yet, the kern keeps hart {} to itself HOPOS_OS_CORE_NONE",
+            "oscore: hart {} hosts residents in the idle of the kern HOPOS_OS_CORE_UP",
             self.hart
         );
+        self.os = Some(os);
     }
 
     /// De `mtimecmp`-PA van dit hart, voor een sched-blok (0 = geen).
@@ -159,6 +174,29 @@ impl RvSleeper {
     }
 }
 
+impl RvSleeper {
+    /// De idle van de OS-core: een beurt voor de volgende bewoner, tot
+    /// hooguit de deadline van de executor (en de vangrail van
+    /// [`TURN_CAP_NS`]). `None`: er draaide er een, de kern is terug en
+    /// slaapt niet. Anders de deadline waarop hij mag slapen: de zijne, of
+    /// de vroegste wektijd van een bewoner als die eerder komt.
+    fn resident(&mut self, now: u64, until: Option<u64>) -> Option<Option<u64>> {
+        let os = self.os.as_mut()?;
+        let hz = hz();
+        let cap = now.saturating_add(TURN_CAP_NS);
+        let u = until.map_or(cap, |u| u.min(cap));
+        let deadline = csr::rdtime().saturating_add(ns_to_ticks(u.saturating_sub(now), hz));
+        match os.run(deadline) {
+            Turn::Ran(_) => None,
+            Turn::Idle { wake: None } => Some(until),
+            Turn::Idle { wake: Some(t) } => {
+                let w = now.saturating_add(ticks_to_ns(t.saturating_sub(csr::rdtime()), hz));
+                Some(Some(until.map_or(w, |u| u.min(w))))
+            }
+        }
+    }
+}
+
 impl Sleeper for RvSleeper {
     fn sleep(&mut self, now: u64, until: Option<u64>, ready: &dyn Fn() -> bool) {
         let prev = csr::mask();
@@ -167,6 +205,18 @@ impl Sleeper for RvSleeper {
             self.stats.caught.fetch_add(1, Relaxed);
             return;
         }
+        let until = match self.os {
+            Some(_) => match self.resident(now, until) {
+                // Een beurt telt niet als slaap van de kern: de tijd staat
+                // in de meetlat van de OS-core (`el2::OS_STATS`).
+                None => {
+                    csr::restore(prev);
+                    return;
+                }
+                Some(u) => u,
+            },
+            None => until,
+        };
         let slept = match self.clint {
             Some(c) => self.nap(c, now, until),
             None => 0,

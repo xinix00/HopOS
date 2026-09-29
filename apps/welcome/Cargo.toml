@@ -13,7 +13,7 @@ path = "src/main.rs"
 bench = false
 
 [dependencies]
-applib = { path = "../../applib" }
+applib = { path = "../../applib", features = ["http"] }
 sync = { path = "../../sync" }
 # HTTP/1.1 zonder TLS (PORT.md §2.1), op een tag en nooit over een pad:
 # lean is een eigen repo met een eigen poort. Dezelfde tag als Hop.

@@ -36,7 +36,9 @@ use super::layout::{
     SCHED_CURSOR, SCHED_LIST, SCHED_MBOX_CTX, SCHED_MBOX_PC, SCHED_S2_PA, SCHED_SCRATCH, SLOT_CAP,
     SMP_CTX_OFF,
 };
-use super::oscore::{SCHED_OS_KICK, SCHED_OS_KICK_PA, SCTLR_EL1_CLEAN, SPSR_EL1H_MASKED};
+use super::oscore::{
+    SCHED_OS_KICK, SCHED_OS_KICK_PA, SCTLR_EL1_CLEAN, SPSR_EL1H_MASKED, apple_kick_target,
+};
 use abi::hopabi::{
     CTRL_DOOR_IRQ, CTRL_ENTRY, CTRL_FAULT_ESR, CTRL_FAULT_FAR, CTRL_FAULT_VEC, CTRL_MBOX_PA,
     CTRL_RX_DOOR, CTRL_S2_TABLE, CTRL_SLOT, CTRL_SMP_FN, CTRL_SMP_G0, CTRL_SMP_MAIR, CTRL_SMP_MBOX,
@@ -103,6 +105,11 @@ const OS_KICK_OFF: u64 = PARK_MBOX_OFF + SCHED_OS_KICK;
 const OS_KICK_PA_OFF: u64 = PARK_MBOX_OFF + SCHED_OS_KICK_PA;
 const _: () = assert!(OS_KICK_OFF.is_multiple_of(8) && OS_KICK_OFF < 32760);
 const _: () = assert!(OS_KICK_PA_OFF.is_multiple_of(8) && OS_KICK_PA_OFF < 32760);
+
+/// Het masker dat van het Apple-kick-woord in sched-blok 0 het
+/// IPI_RR-doel maakt (het scherp-bit eraf, `oscore::apple_kick_word`).
+const APPLE_KICK_MASK: u64 = apple_kick_target(u64::MAX);
+const _: () = assert!(APPLE_KICK_MASK == !(1 << 63));
 
 /// De MPIDR-affiniteit (aff0..aff2) waarmee een sibling een core aanwijst.
 const MPIDR_AFF: u64 = 0xFF_FFFF;
@@ -252,6 +259,41 @@ global_asm!(
 6:
     .endm
 
+// hopos_el2_kick_os_apple: dezelfde bel op Apple, waar geen GIC is: de fast
+// IPI (IPI_RR_GLOBAL_EL1) naar de OS-core. Het woord in sched-blok 0 is het
+// doel (core | cluster << 16) met bit 63 als "scherp" (het doel van E-core
+// 0 is 0); het masker haalt dat bit eraf (oscore `apple_kick_word`). De
+// kern slaapt in WFI of draait een bewoner met FMO: de FIQ haalt hem in
+// beide gevallen terug, en hij ackt hem zelf (les 04-09). Klad: x2, x3.
+    .macro hopos_el2_kick_os_apple
+    ldr x2, [sp, #{sp_s2pa}]
+    ldr x3, [x2, #{os_kick}]
+    cbz x3, 6f
+    and x3, x3, #{apple_kick_mask}
+    msr s3_5_c15_c0_1, x3
+    isb
+6:
+    .endm
+
+// hopos_el2_mmu_off: een core die m1n1 uit zijn spin-table loslaat, komt
+// binnen als FUNCTIE, op EL2 met m1n1's MMU en caches nog aan (29-08, de
+// hop-avond). De trampolines hieronder schrijven VBAR, VTTBR en HCR en
+// lezen de control-page als fysiek adres: dat mag alleen met de MMU uit.
+// Dus eerst maskers dicht en M, C en I uit, zonder cache-onderhoud op
+// set/way (de machine reset erop terwijl een andere core loopt, 29-08). Op
+// een core uit de parkeerlus of de brievenbus staat alles al uit, en is dit
+// niets. Klad: x9.
+    .macro hopos_el2_mmu_off
+    msr daifset, #0xf
+    mrs x9, sctlr_el2
+    bic x9, x9, #(1 << 0)
+    bic x9, x9, #(1 << 2)
+    bic x9, x9, #(1 << 12)
+    dsb sy
+    msr sctlr_el2, x9
+    isb
+    .endm
+
 // ===========================================================================
 // De drie blobs van één smaak.
 // ===========================================================================
@@ -385,7 +427,9 @@ global_asm!(
     dsb sy
     // Een app die idle gaat, wacht meestal op de kern (een antwoord op wat
     // hij net publiceerde): bel de OS-core als die een SEV niet hoort.
-    .if \apple == 0
+    .if \apple
+    hopos_el2_kick_os_apple
+    .else
     hopos_el2_kick_os
     .endif
     b .L\p\()_sleep
@@ -657,7 +701,9 @@ global_asm!(
 
 // kickos: HVC 6, de expliciete bel naar de OS-core; meteen terug.
 .L\p\()_kickos:
-    .if \apple == 0
+    .if \apple
+    hopos_el2_kick_os_apple
+    .else
     hopos_el2_kick_os
     .endif
     ldp x0, x1, [sp]
@@ -726,6 +772,9 @@ global_asm!(
     .balign 64
     .global \p\()_tramp
 \p\()_tramp:
+    .if \apple
+    hopos_el2_mmu_off
+    .endif
     // Vectoren eerst: elke exception hierna rapporteert.
     ldr x1, [x0, #{c_vec_pa}]
     msr vbar_el2, x1
@@ -770,6 +819,9 @@ global_asm!(
     .balign 64
     .global \p\()_smp
 \p\()_smp:
+    .if \apple
+    hopos_el2_mmu_off
+    .endif
     mov x1, x0
     ldr x10, [x1, #{c_smp_sp}]
     ldr x11, [x1, #{c_smp_mp}]
@@ -897,6 +949,7 @@ hopos_el2_park_end:
     hvc_kick_os = const HVC_KICK_OS,
     os_kick = const OS_KICK_OFF,
     os_kick_pa = const OS_KICK_PA_OFF,
+    apple_kick_mask = const APPLE_KICK_MASK,
     hvc_door_ack = const HVC_DOOR_ACK,
     sp_current = const SP_CURRENT,
     sp_s2pa = const SP_S2_PA,

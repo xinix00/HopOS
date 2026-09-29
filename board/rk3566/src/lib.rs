@@ -37,6 +37,8 @@ mod display;
 mod mmu;
 pub mod slots;
 pub mod soc;
+// De twee DWC3-cores als USB-host (usb.rs).
+pub mod usb;
 
 /// Zonder de feature `gui`: geen beeldketen aan boord, dus headless. Een
 /// kale node linkt geen regel display-code en er tekent geen logconsole in
@@ -125,7 +127,7 @@ pub const NET_DMA: Region = Region {
     base: Pa(0x0640_0000),
     size: 0x0080_0000,
 };
-/// De xHCI-DMA (2 MB), Normal-NC; nog geen gebruiker in v3.
+/// De xHCI-DMA (2 MB), Normal-NC: de twee DWC3-cores (`usb`), elk de helft.
 pub const USB_DMA: Region = Region {
     base: Pa(0x06C0_0000),
     size: 0x0020_0000,
@@ -528,6 +530,10 @@ impl Board for Rk3566 {
 
     /// De buffer uit het plan ([`FB_RAM`]); met `gui` start de eerste
     /// aanroep de scanout naar HDMI, zonder is het board headless (`None`).
+    fn usb_hosts(&self) -> board::UsbHosts {
+        usb::hosts()
+    }
+
     fn framebuffer(&self) -> Option<driver_fb::Desc> {
         display::framebuffer(cpu::idle::now)
     }

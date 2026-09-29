@@ -92,6 +92,24 @@ pub const fn event_stream(hz: u64, ecv: bool, max_period_ns: u64) -> u64 {
     v
 }
 
+/// De bits van de event-stream in CNTKCTL_EL1 en CNTHCTL_EL2 (in beide
+/// op dezelfde plek): EVNTEN (2), EVNTDIR (3), EVNTI (7:4) en EVNTIS (17).
+pub const EVENT_STREAM_BITS: u64 = (0xF << 4) | (1 << 3) | (1 << 2) | (1 << 17);
+
+/// De event-stream `stream` in een CNTHCTL_EL2 die `old` was, met de rest
+/// intact.
+///
+/// Waarom dit bestaat: onder E2H = 1 schrijft `msr cntkctl_el1` vanaf EL2
+/// in werkelijkheid CNTHCTL_EL2 (de vondst van de Apple-agent, board/apple
+/// `sleeper`, en daarna op de O6N-vorm van board-uefi). Een blinde write
+/// zet de event-stream goed maar wist EL1PCTEN en EL1PTEN (10, 11) en de
+/// EL0-bits (0, 1, 8, 9), en dan trapt een `mrs cntpct_el0` van elke
+/// bewoner. Dus alleen de stream-bits vervangen.
+#[must_use]
+pub const fn merge_event_stream(old: u64, stream: u64) -> u64 {
+    (old & !EVENT_STREAM_BITS) | (stream & EVENT_STREAM_BITS)
+}
+
 /// De grens in ticks tussen "de WFE slikte alleen een verschaald event" en
 /// "de core heeft echt geslapen": ~2 µs, met 64 ticks als bodem.
 ///
@@ -197,10 +215,20 @@ impl ArmSleeper {
     /// Een sleeper in modus `mode`. Zet op deze core de event-stream aan
     /// (CNTKCTL is per core): zonder die stream wekt een WFE op een stille
     /// core nooit, en ook de EL2-switcher slaapt erop.
+    ///
+    /// Onder E2H = 1 op EL2 (Apple, de O6N, board-uefi met `vhe`) is dat
+    /// register CNTHCTL_EL2, en dan alleen de stream-bits
+    /// ([`merge_event_stream`]): de timertoegang van de bewoners blijft
+    /// staan. Elders een gewone write, zoals altijd.
     #[must_use]
     pub fn new(mode: Mode) -> Self {
         let hz = arch::freq();
-        arch::set_cntkctl(event_stream(hz, arch::has_ecv(), EVENT_STREAM_MAX_NS));
+        let stream = event_stream(hz, arch::has_ecv(), EVENT_STREAM_MAX_NS);
+        if arch::is_el2_vhe() {
+            arch::set_cntkctl(merge_event_stream(arch::cntkctl(), stream));
+        } else {
+            arch::set_cntkctl(stream);
+        }
         Self {
             mode,
             hz,
@@ -451,8 +479,34 @@ mod arch {
 
     pub(super) fn set_cntkctl(v: u64) {
         // SAFETY: CNTKCTL_EL1 regelt alleen EL0-toegang en de event-stream
-        // van deze core; de ISB maakt de stream meteen actief.
+        // van deze core; de ISB maakt de stream meteen actief. Onder E2H = 1
+        // op EL2 is het CNTHCTL_EL2, en dan geeft de aanroeper een waarde
+        // die de rest van dat register behoudt.
         unsafe { asm!("msr cntkctl_el1, {}", "isb", in(reg) v, options(nostack)) };
+    }
+
+    /// CNTKCTL_EL1 zoals hij nu staat (onder E2H = 1 op EL2: CNTHCTL_EL2).
+    pub(super) fn cntkctl() -> u64 {
+        let v: u64;
+        // SAFETY: een lees zonder neveneffect.
+        unsafe { asm!("mrs {}, cntkctl_el1", out(reg) v, options(nomem, nostack)) };
+        v
+    }
+
+    /// Draait deze core op EL2 met HCR_EL2.E2H = 1? HCR_EL2 wordt alleen op
+    /// EL2 gelezen: op EL1 (een app) is dat een trap.
+    pub(super) fn is_el2_vhe() -> bool {
+        let el: u64;
+        // SAFETY: CurrentEL lezen heeft geen neveneffect en mag op EL1.
+        unsafe { asm!("mrs {}, CurrentEL", out(reg) el, options(nomem, nostack)) };
+        if (el >> 2) & 3 != 2 {
+            return false;
+        }
+        let hcr: u64;
+        // SAFETY: we staan op EL2 (net getoetst); HCR_EL2 lezen heeft geen
+        // neveneffect.
+        unsafe { asm!("mrs {}, hcr_el2", out(reg) hcr, options(nomem, nostack)) };
+        hcr & (1 << 34) != 0
     }
 
     /// Maskeert I en F en geeft DAIF zoals het stond.
@@ -562,6 +616,12 @@ mod arch {
         false
     }
     pub(super) fn set_cntkctl(_v: u64) {}
+    pub(super) fn cntkctl() -> u64 {
+        0
+    }
+    pub(super) fn is_el2_vhe() -> bool {
+        false
+    }
     pub(super) fn mask() -> u64 {
         0
     }
@@ -609,6 +669,25 @@ mod tests {
             evnti(event_stream(1_000_000_000, false, EVENT_STREAM_MAX_NS)),
             15
         );
+    }
+
+    #[test]
+    fn under_vhe_only_the_stream_bits_change() {
+        let m4 = event_stream(1_000_000_000, true, EVENT_STREAM_MAX_NS);
+        // CNTHCTL_EL2 zoals board/apple hem bij de ingang zet: EL0PCTEN,
+        // EL0VCTEN, EL1PCTEN, EL1PTEN (0, 1, 10, 11), plus een oude stream.
+        let old = 0x3 | 0xc00 | (1 << 2) | (15 << 4);
+        let v = merge_event_stream(old, m4);
+        assert_eq!(v & 0xc03, 0xc03, "de timertoegang van de bewoners blijft");
+        assert_eq!(v & EVENT_STREAM_BITS, m4);
+        // EL0VTEN/EL0PTEN (8, 9) en ECV-bits erboven blijven ook.
+        let old = (1 << 8) | (1 << 9) | (1 << 12);
+        assert_eq!(merge_event_stream(old, m4) & !EVENT_STREAM_BITS, old);
+        // Een waarde van `event_stream` valt altijd binnen het masker.
+        for hz in [25_000_000, 54_000_000, 62_500_000, 1_000_000_000] {
+            let s = event_stream(hz, true, EVENT_STREAM_MAX_NS);
+            assert_eq!(s & !EVENT_STREAM_BITS, 0, "{hz} Hz");
+        }
     }
 
     #[test]

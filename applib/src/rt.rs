@@ -115,6 +115,9 @@ where
     }
 
     let exec: &'static Exec = EXEC.get();
+    // De timebase vóór de eerste klok-lees: op RISC-V komt hij alleen van de
+    // control-page (de kern zet hem bij de bouw, `CTRL_TIMEBASE_HZ`).
+    clock::adopt_timebase(&app.ctrl());
     exec.set_clock(clock::now_ns);
     clock::start_event_stream();
     app.announce();
@@ -190,7 +193,10 @@ const _: () = {
     }
 };
 
-#[cfg(all(target_os = "none", target_arch = "aarch64"))]
+#[cfg(all(
+    target_os = "none",
+    any(target_arch = "aarch64", target_arch = "riscv64")
+))]
 mod symbols {
     //! De woorden die de kern bij plaatsing in het image patcht, en de grens
     //! van het image.
@@ -263,7 +269,10 @@ mod symbols {
     }
 }
 
-#[cfg(not(all(target_os = "none", target_arch = "aarch64")))]
+#[cfg(not(all(
+    target_os = "none",
+    any(target_arch = "aarch64", target_arch = "riscv64")
+)))]
 mod symbols {
     //! Host-stub: een image buiten de kern om, zonder heap.
     use crate::contract::{ABI_TAIL, SLOT_LINK_BASE};
@@ -279,7 +288,7 @@ mod symbols {
 
 #[cfg(all(target_os = "none", target_arch = "aarch64"))]
 mod entry {
-    //! `_start` en de paniek.
+    //! `_start` op arm64.
 
     // De ingang. De EL2-trampoline van de kern heeft stage-2, de timers en
     // een schone SCTLR al geregeld en ERET't hierheen op EL1; wat rest:
@@ -316,6 +325,66 @@ mod entry {
         "    b 3b",
         gap = const super::STACK_TOP_GAP,
     );
+}
+
+#[cfg(all(target_os = "none", target_arch = "riscv64"))]
+mod entry {
+    //! `_start` op riscv64.
+
+    // De ingang in supervisor mode. De M-mode-switcher van de kern
+    // (`cpu::riscv::switch`) zette de kooi (PMP plus de Sv39-tabel die het
+    // linkadres op de partitie legt), `mret`'te hierheen met a0 = de
+    // control-page (op het linkadres) en ra, sp, gp en tp op nul, en laat de
+    // app draaien
+    // met `mie` = 0: interrupts bestaan hier niet (een app heeft geen
+    // vectoren; `stvec` staat op 0 en een trap is een fault die de switcher
+    // meldt). Wat rest is wat ook op arm64 rest: de stack bovenin de
+    // RAM-declaratie, `.bss` vegen, en door naar de Rust-kant.
+    //
+    // De woorden heten zoals `abi::place` ze zoekt, met `/` en `.` erin: dus
+    // tussen aanhalingstekens (LLVM's assembler citeert, een `sym`-operand
+    // niet). `lla` is pc-relatief: het image draait op zijn linkadres, maar
+    // zo hangt `_start` daar niet eens van af.
+    //
+    // `gp` blijft nul: de linker ontspant hier niets naar gp (lld doet dat
+    // alleen met `--relax-gp`), en een bewoner die gp nodig had, zou hem
+    // van de switcher toch als nul krijgen.
+    core::arch::global_asm!(
+        ".section .text._start, \"ax\"",
+        ".global _start",
+        "_start:",
+        "    csrw sie, zero",
+        "    lla t0, \"runtime/goos.RamStart\"",
+        "    ld t0, 0(t0)",
+        "    lla t1, \"runtime/goos.RamSize\"",
+        "    ld t1, 0(t1)",
+        "    add t0, t0, t1",
+        "    addi t0, t0, -{gap}",
+        "    andi t0, t0, -16",
+        "    mv sp, t0",
+        "    lla t0, __hopapp_bss_start",
+        "    lla t1, __hopapp_bss_end",
+        "1:  bgeu t0, t1, 2f",
+        "    sd zero, 0(t0)",
+        "    addi t0, t0, 8",
+        "    j 1b",
+        "2:  call __applib_main",
+        // `__applib_main` keert nooit terug; doet hij het toch, dan de
+        // exit-ecall (a7 = 1), zodat de switcher het hart teruggeeft.
+        "3:  li a7, 1",
+        "    ecall",
+        "    j 3b",
+        gap = const super::STACK_TOP_GAP,
+    );
+}
+
+#[cfg(all(
+    target_os = "none",
+    any(target_arch = "aarch64", target_arch = "riscv64")
+))]
+mod panic {
+    //! De paniek, voor beide architecturen: de outbox is dezelfde en de exit
+    //! is `arch::park_exit` (HVC #0 of de exit-ecall).
 
     /// De paniek: de reden naar de outbox (elke regel een record, zonder
     /// allocatie), dan exit 2 en de core terug naar de kern. Zonder deze

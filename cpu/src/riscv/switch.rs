@@ -35,15 +35,35 @@
 //!    schrijven weggeveegd (`th.dcache.cipa`, met de feature `thead`). Op
 //!    QEMU zijn de macro's leeg.
 //!
-//! Wat hier (nog) NIET is: de kill-tick (`SCHED_TICK_TICKS`): een bewoner
-//! wordt ingetrokken bij zijn volgende yield (`CTX_REVOKE`). Een bewoner die
-//! nooit yieldt, houdt dit hart tot de kern het reset (C906L) of de node.
+//! Vier dingen van de Go-switcher die er sinds 29-09 ook hier zijn:
+//!
+//! - **De kill-tick** (`SCHED_TICK_TICKS`, 0 = geen): vóór elke sprong naar
+//!   een bewoner de eigen comparator op nu + de periode en alleen MTIE aan.
+//!   Een tick kijkt naar één woord (`CTX_REVOKE`) en gaat bij niet-nul naar
+//!   de teardown; anders terug dezelfde bewoner in. Geen preemptie: een
+//!   bewoner die nooit yieldt, houdt het hart, maar de kern kan hem wel
+//!   beëindigen zonder resetblok.
+//! - **De intrekking van een slaper**: een bewoner die geyield is of nog
+//!   BootPending staat en ingetrokken wordt, gaat bij de volgende ronde
+//!   dood zonder nog één instructie te draaien.
+//! - **De kick als wek** (`msip`): wie door de kick wakker werd, geeft elke
+//!   geyielde bewoner één beurt, en **de deurbel** (`CTRL_RX_DOOR` tegen de
+//!   kop van de RX-ring, `CTX_RING_HEAD_PA`) maakt een slaper met RX meteen
+//!   due, zoals `el2::rx_due` op ARM.
+//! - **De hercontrole van de lijst** bij een koude boot, na het lezen van
+//!   de staat: een slot dat naar een ander hart verhuisde, start niet op
+//!   twee.
+//!
+//! Wat hier NIET is: de FP-registers. Een bewoner met `f`-registers
+//! (riscv64gc) houdt ze over een yield alleen omdat er één bewoner per hart
+//! is; een gedeeld hart vraagt eerst het bewaren van f0..f31 en `fcsr`.
 
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 use abi::layout::{
     CTX_BOOT_ARG, CTX_BOOT_PC, CTX_CTRL_PA, CTX_GPRS, CTX_OFF, CTX_REGIME, CTX_RESUME, CTX_REVOKE,
-    CTX_STATE, CTX_WAKE, CTX_WAKE_NO_PEEK, CtxState, SCHED_CLINT_PA, SCHED_COUNT, SCHED_CURRENT,
-    SCHED_LIST, SCHED_MSIP_PA, SCHED_ROTOR, SCHED_S2_PA, SCHED_SCRATCH, SCHED_SLEEP_CAP,
+    CTX_RING_HEAD_PA, CTX_STATE, CTX_WAKE, CTX_WAKE_NO_PEEK, CtxState, SCHED_CLINT_PA, SCHED_COUNT,
+    SCHED_CURRENT, SCHED_LIST, SCHED_MSIP_PA, SCHED_ROTOR, SCHED_S2_PA, SCHED_SCRATCH,
+    SCHED_SLEEP_CAP, SCHED_TICK_TICKS,
 };
 
 /// De verschuiving van slot naar kooi-blok (`CAGE_STRIDE` = 64 KB).
@@ -81,8 +101,54 @@ pub fn park_pc() -> u64 {
     imp::park()
 }
 
+/// De periode van de kill-tick: 10 ms, het getal van de Go-kern
+/// (`killTickTicks`, board/licheerv/hop/hart.go). De tick zelf is een
+/// handvol instructies; de periode begrenst hoe lang een intrekking van een
+/// bewoner die niet yieldt onderweg is.
+pub const KILL_TICK_NS: u64 = 10_000_000;
+
+/// Wat de kooi per app-hart van het board weet: de wekker, de bel, de
+/// slaap- en tickperiode, de attributen van de CPU en of het hart een
+/// resetblok heeft. Het board vult hem (`app_hart`); de kooi-lijm
+/// (`hopos/src/cage_riscv.rs`) schrijft hem in het sched-blok.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct AppHart {
+    /// `mtimecmp` van het hart zoals HET hart hem adresseert (0 = geen
+    /// wekker: de switcher spint en er is geen kill-tick). Op de SG2002 is
+    /// de CLINT per core: elk hart ziet zijn eigen comparator op index 0.
+    pub mtimecmp: dev::Pa,
+    /// `msip` van het hart zoals de KERN hem adresseert (0 = geen bel: de
+    /// kern kan het hart niet wekken, en een dispatch wacht op de volgende
+    /// ronde van de switcher).
+    pub msip: dev::Pa,
+    /// De langste slaap in tikken (0 = niet slapen: spinnen).
+    pub sleep_cap: u64,
+    /// De kill-tick in tikken (0 = geen).
+    pub tick: u64,
+    /// De PTE-attributen voor normaal RAM.
+    pub attrs: super::sv39::Attrs,
+    /// De PMP van de CPU.
+    pub pmp: super::pmp::Profile,
+    /// Heeft het hart een resetblok (de harde intrekking)?
+    pub resettable: bool,
+}
+
+/// Het bereik `[begin, einde)` van de switch-code in het image: wat een
+/// app-hart van de kern uitvoert.
+#[must_use]
+pub fn code_range() -> (u64, u64) {
+    imp::range()
+}
+
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 mod imp {
+    pub(super) fn range() -> (u64, u64) {
+        unsafe extern "C" {
+            /// Het einde van de switch-code (hieronder).
+            static __hopos_mmode_end: u8;
+        }
+        (park(), (&raw const __hopos_mmode_end) as u64)
+    }
     pub(super) fn entry() -> u64 {
         unsafe extern "C" {
             /// De trap-ingang (hieronder).
@@ -102,6 +168,9 @@ mod imp {
 #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
 mod imp {
     //! Host-stub: er is geen switcher.
+    pub(super) fn range() -> (u64, u64) {
+        (0, 0)
+    }
     pub(super) fn entry() -> u64 {
         0
     }
@@ -120,6 +189,9 @@ macro_rules! cache_macros {
     .macro HOPOS_RV_CIPA reg
     .insn r 0x0b, 0, 1, x0, \reg, x11
     .endm
+    .macro HOPOS_RV_CPA reg
+    .insn r 0x0b, 0, 1, x0, \reg, x9
+    .endm
     .macro HOPOS_RV_SYNC
     .4byte 0x01b0000b
     .endm
@@ -137,6 +209,8 @@ macro_rules! cache_macros {
         r#"
     .macro HOPOS_RV_CIPA reg
     .endm
+    .macro HOPOS_RV_CPA reg
+    .endm
     .macro HOPOS_RV_SYNC
     .endm
     .macro HOPOS_RV_CIALL
@@ -153,19 +227,51 @@ core::arch::global_asm!(
     cache_macros!(),
     r#"
     .section .text.hopos_mmode, "ax"
+
+    // De kill-tick: de comparator van DIT hart op nu + SCHED_TICK_TICKS en
+    // alleen MTIE aan, vlak vóór elke sprong naar een bewoner (koude boot,
+    // hervatting, de terugkeer van een tick). Een machine-timer-interrupt
+    // wordt in S-mode altijd genomen, ongeacht mstatus.MIE; in machine mode
+    // (MIE = 0) nooit. Zonder comparator of zonder periode: mie = 0, het
+    // gedrag van vóór de tick (Go, `ARMTICK` in cpu/mmode/switch.s).
+    // Clobbert t0..t2; sp is het sched-blok. De volgorde van mtimecmp is die
+    // van de spec (lo = alles-één, hi, lo): de c900-CLINT weigert 64-bit
+    // MMIO, en een halve waarde in het verleden zou meteen vuren.
+    .macro HOPOS_RV_ARMTICK
+    csrw mie, zero
+    ld t0, {tick}(sp)
+    ld t1, {clint}(sp)
+    beqz t0, 1f
+    beqz t1, 1f
+    rdtime t2
+    add t2, t2, t0
+    li t0, -1
+    sw t0, 0(t1)
+    srli t0, t2, 32
+    sw t0, 4(t1)
+    sw t2, 0(t1)
+    li t0, 128
+    csrw mie, t0
+1:
+    .endm
+
     .balign 4
     .global __hopos_parkenter
 __hopos_parkenter:
     csrw mie, zero
+    // Geen erfenis: MIE uit (park rekent erop dat een wek nooit als trap
+    // genomen wordt) en mscratch meteen op het sched-blok, zodat een trap
+    // vóór de eerste bewoner niet op een willekeurige sp spilt (Go,
+    // `parkenter`).
+    csrci mstatus, 8
     // De TIME-CSR voor de bewoners (mcounteren.TM): de klok van een app is
     // `rdtime`, en zonder dit bit is dat in S-mode een illegal instruction.
     li t0, 2
     csrw mcounteren, t0
     mv sp, a1
+    csrw mscratch, sp
     la t0, __hopos_mentry
     csrw mtvec, t0
-    li t0, 8 | 128
-    csrs mie, t0
     j 50f
 
     .balign 4
@@ -175,6 +281,9 @@ __hopos_mentry:
     sd t0, {scratch}+0(sp)
     sd t1, {scratch}+8(sp)
     sd t2, {scratch}+16(sp)
+    // EERST de interruptbit: sinds de kill-tick staat MTIE aan terwijl een
+    // bewoner draait, en een tick die in de fault-tak viel, meldde een
+    // gezonde bewoner dood (Go, de kop van cpu/mmode/switch.s).
     csrr t0, mcause
     bltz t0, 30f
     li t1, 9
@@ -254,12 +363,34 @@ __hopos_mentry:
     HOPOS_RV_SYNC
     j 50f
 
-    // --- een interrupt terwijl een bewoner draait -------------------------
-    // Een bewoner draait met mie = 0 (geen kill-tick in deze versie), dus dit
-    // hoort niet te gebeuren: bron dicht en terug de bewoner in, alsof er
-    // niets was. mepc wijst al naar de volgende instructie.
+    // --- een interrupt terwijl een bewoner draait: de kill-tick -----------
+    // Eén vraag: wil de kern deze bewoner dood (CTX_REVOKE, vers gelezen)?
+    // Zo ja, de teardown; zo nee, opnieuw wapenen en terug de bewoner in,
+    // zonder rotatie (dit is geen preemptie) en zonder +4 op mepc (bij een
+    // interrupt wijst mepc naar de instructie die nog moet komen). Een
+    // andere bron dan de timer hoort hier niet: bron dicht en terug.
 30:
+    slli t0, t0, 1
+    srli t0, t0, 1
+    li t1, 7
+    bne t0, t1, 39f
+    ld t0, {current}(sp)
+    beqz t0, 39f
+    ld t1, {s2}(sp)
+    slli t0, t0, {shift}
+    add t1, t1, t0
+    li t0, {ctxoff}
+    add t1, t1, t0
+    addi t0, t1, {revoke}
+    HOPOS_RV_CIPA t0
+    HOPOS_RV_SYNC
+    ld t0, 0(t0)
+    bnez t0, 45f
+    HOPOS_RV_ARMTICK
+    j 38f
+39:
     csrw mie, zero
+38:
     ld t0, {scratch}+0(sp)
     ld t1, {scratch}+8(sp)
     ld t2, {scratch}+16(sp)
@@ -309,8 +440,16 @@ __hopos_mentry:
     sd zero, {current}(sp)
 
     // --- rotate ---------------------------------------------------------
-    // s1 = lijstlengte, s2 = index, s3 = pogingen, s4 = vroegste wektijd.
+    // s1 = lijstlengte, s2 = index, s3 = pogingen, s4 = vroegste wektijd,
+    // s7 = gewekt door de kick (msip): dan is elke geyielde bewoner één keer
+    // aan de beurt, want de reden om te wachten kan net vervallen zijn (een
+    // intrekking, RX). Te vroeg hervatten is altijd veilig: de bewoner kijkt,
+    // vindt niets en yieldt met een verse wektijd. Zo hoeft de kern een
+    // wektijd nooit te overschrijven (dat woord heeft één schrijver, Go).
 50:
+    li s7, 0
+53:
+    csrw mie, zero
     csrw satp, zero
     sfence.vma
     addi t0, sp, 64
@@ -343,15 +482,53 @@ __hopos_mentry:
     HOPOS_RV_SYNC
     ld t0, {state}(s6)
     li t1, {bootpending}
-    beq t0, t1, 70f
+    beq t0, t1, 56f
     li t1, {saved}
     bne t0, t1, 55f
+    // Ingetrokken terwijl hij sliep of nog niet draaide: nooit meer
+    // binnenlaten, meteen dood. Een bewoner met een verre wektijd voelde de
+    // intrekking anders pas op die wektijd (de les van `el2::evict`).
+56:
+    addi t2, s6, {revoke}
+    HOPOS_RV_CIPA t2
+    HOPOS_RV_SYNC
+    ld t2, 0(t2)
+    beqz t2, 57f
+    mv t1, s6
+    j 45b
+57:
+    li t1, {bootpending}
+    beq t0, t1, 70f
+    bnez s7, 80f
     ld t0, {wake}(s6)
     li t1, {nopeek}
+    and t3, t0, t1
     not t1, t1
     and t0, t0, t1
     rdtime t1
     bgeu t1, t0, 80f
+    bnez t3, 54f
+    // Niet aan de beurt, maar de deurbel dan? Dezelfde vraag als
+    // `el2::rx_due` op ARM: is de drempel gewapend (bit 63 van CTRL_RX_DOOR)
+    // en groeide de kop van de RX-ring erVOORBIJ? Voorbij, niet ongelijk: de
+    // kop mag achterlopen op wat de bewoner zag (04-09). Beide woorden vers:
+    // de drempel schrijft de bewoner, de kop de switch van de kern.
+    ld t2, {ctrl}(s6)
+    beqz t2, 54f
+    addi t2, t2, {rxdoor}
+    HOPOS_RV_CIPA t2
+    HOPOS_RV_SYNC
+    ld t2, 0(t2)
+    bgez t2, 54f
+    ld t1, {ringhead}(s6)
+    beqz t1, 54f
+    HOPOS_RV_CIPA t1
+    HOPOS_RV_SYNC
+    ld t1, 0(t1)
+    slli t2, t2, 1
+    srli t2, t2, 1
+    bltu t2, t1, 80f
+54:
     bgeu t0, s4, 55f
     mv s4, t0
 55:
@@ -362,9 +539,13 @@ __hopos_mentry:
     // Niemand aan de beurt: slapen tot de vroegste wektijd, geklemd op de
     // slaapgrens, of tot de kick. Zonder wekker (CLINT_PA 0) of zonder
     // grens (SLEEP_CAP 0): meteen opnieuw rondkijken (spinnen kan niet
-    // hangen, Go 30-07).
+    // hangen, Go 30-07). SCHED_CURRENT = 0 en naar DRAM: "dit hart draait
+    // niemand" is wat de kern hier leest.
 60:
     sd zero, {current}(sp)
+    fence
+    HOPOS_RV_CPA sp
+    HOPOS_RV_SYNC
     ld a3, {clint}(sp)
     ld a4, {cap}(sp)
     beqz a3, 50b
@@ -374,27 +555,52 @@ __hopos_mentry:
     bltu t0, s4, 61f
     mv t0, s4
 61:
-    // De wekkers aan: een bewoner draaide met mie = 0, en een `wfi` zonder
-    // enable wekt nooit (MIE blijft uit: een wek, geen trap).
-    li t1, 8 | 128
-    csrs mie, t1
     li t1, -1
     sw t1, 0(a3)
     srli t2, t0, 32
     sw t2, 4(a3)
     sw t0, 0(a3)
+    // De wekkers aan, alleen hier en met MIE uit: `wfi` kijkt naar
+    // mip & mie, niet naar mstatus.MIE, dus hij wekt zonder dat er een trap
+    // genomen wordt, en een kick vlak vóór de `wfi` staat al pending.
+    li t1, 8 | 128
+    csrw mie, t1
     wfi
+    csrr t2, mip
+    andi s7, t2, 8
+    csrw mie, zero
     li t1, -1
     sw t1, 0(a3)
     sw t1, 4(a3)
     ld a4, {msip}(sp)
-    beqz a4, 50b
+    beqz a4, 53b
     sw zero, 0(a4)
-    j 50b
+    j 53b
 
     // --- koude boot van de bewoner in s6 (slot s5, index s2) ------------
-    // De kooi uit het ctx-blok: pmpaddr0..7, dan pmpcfg0, en teruglezen.
+    // Eerst de lijst nog eens, NÁ de staat. De kern haalt een slot uit de
+    // lijst van zijn vorige hart vóór hij het op een ander hart BootPending
+    // zet (`cage_riscv.rs`, `forget`); een rotatie die de lijst nog oud las
+    // en de staat al nieuw, zou het slot anders op twee harts starten. Wie de
+    // nieuwe staat ziet, ziet ook de lijst van daarvóór.
 70:
+    addi t0, sp, {list}
+    add t0, t0, s2
+    HOPOS_RV_CIPA t0
+    HOPOS_RV_SYNC
+    lbu t0, 0(t0)
+    bne t0, s5, 55b
+    // Het regime vers uit DRAM: de kern schreef het vanaf zijn hart.
+    addi t0, s6, 256
+    HOPOS_RV_CIPA t0
+    addi t0, s6, 320
+    HOPOS_RV_CIPA t0
+    addi t0, s6, 384
+    HOPOS_RV_CIPA t0
+    addi t0, s6, 512
+    HOPOS_RV_CIPA t0
+    HOPOS_RV_SYNC
+    // De kooi uit het ctx-blok: pmpaddr0..7, dan pmpcfg0, en teruglezen.
     ld t0, {regime}+{pa0}+0(s6)
     csrw pmpaddr0, t0
     ld t0, {regime}+{pa0}+8(s6)
@@ -446,14 +652,16 @@ __hopos_mentry:
     csrc mstatus, t0
     csrw medeleg, zero
     csrw mideleg, zero
-    csrw mie, zero
     sd s2, {rotor}(sp)
     sd s5, {current}(sp)
+    fence
+    HOPOS_RV_CPA sp
     li t0, {running}
     sd t0, {state}(s6)
     fence
     HOPOS_RV_CIPA s6
     HOPOS_RV_SYNC
+    HOPOS_RV_ARMTICK
     csrw mscratch, sp
     ld a0, {bootarg}(s6)
     li a1, 0
@@ -499,14 +707,16 @@ __hopos_mentry:
     csrc mstatus, t0
     li t0, 1 << 11
     csrs mstatus, t0
-    csrw mie, zero
     sd s2, {rotor}(sp)
     sd s5, {current}(sp)
+    fence
+    HOPOS_RV_CPA sp
     li t0, {running}
     sd t0, {state}(s6)
     fence
     HOPOS_RV_CIPA s6
     HOPOS_RV_SYNC
+    HOPOS_RV_ARMTICK
     csrw mscratch, sp
     mv x31, s6
     ld x1, {gprs}+0(x31)
@@ -541,6 +751,8 @@ __hopos_mentry:
     ld x30, {gprs}+232(x31)
     ld x31, {gprs}+240(x31)
     mret
+    .global __hopos_mmode_end
+__hopos_mmode_end:
 "#,
     scratch = const SCHED_SCRATCH,
     current = const SCHED_CURRENT,
@@ -551,6 +763,7 @@ __hopos_mentry:
     clint = const SCHED_CLINT_PA,
     cap = const SCHED_SLEEP_CAP,
     msip = const SCHED_MSIP_PA,
+    tick = const SCHED_TICK_TICKS,
     shift = const CAGE_SHIFT,
     ctxoff = const CTX_OFF,
     state = const CTX_STATE,
@@ -565,6 +778,8 @@ __hopos_mentry:
     wake = const CTX_WAKE,
     nopeek = const CTX_WAKE_NO_PEEK,
     revoke = const CTX_REVOKE,
+    ringhead = const CTX_RING_HEAD_PA,
+    rxdoor = const abi::hopabi::CTRL_RX_DOOR,
     bootpending = const CtxState::BootPending as u64,
     saved = const CtxState::Saved as u64,
     running = const CtxState::Running as u64,

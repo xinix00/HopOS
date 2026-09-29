@@ -19,6 +19,7 @@ dependencies = [
  "dev",
  "driver-codec",
  "executor",
+ "leanhttp",
  "leannet",
  "netdev",
  "sync",
@@ -49,6 +50,7 @@ name = "board"
 version = "3.0.0"
 dependencies = [
  "abi",
+ "bounded",
  "dev",
  "driver-fb",
  "executor",
@@ -107,6 +109,7 @@ dependencies = [
  "driver-ns16550",
  "driver-virtioblk",
  "executor",
+ "fw",
  "net",
  "netdev",
  "sync",
@@ -142,6 +145,7 @@ dependencies = [
  "dev",
  "driver-fb",
  "driver-gicv3",
+ "driver-pcie",
  "driver-pl011",
  "driver-virtioblk",
  "driver-virtionet",
@@ -219,6 +223,7 @@ dependencies = [
  "board-raspi",
  "cpu",
  "dev",
+ "driver-brcmpcie",
  "driver-genet",
  "driver-gicv2",
  "driver-mdio",
@@ -282,8 +287,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "decode"
+version = "3.0.0"
+dependencies = [
+ "applib",
+ "bounded",
+ "leanhttp",
+]
+
+[[package]]
 name = "dev"
 version = "3.0.0"
+
+[[package]]
+name = "display"
+version = "3.0.0"
+dependencies = [
+ "applib",
+ "dev",
+ "driver-fb",
+ "sync",
+]
 
 [[package]]
 name = "driver-aic"
@@ -307,6 +331,14 @@ version = "3.0.0"
 [[package]]
 name = "driver-dvfs"
 version = "3.0.0"
+
+[[package]]
+name = "driver-dwc3"
+version = "3.0.0"
+dependencies = [
+ "dev",
+ "driver-xhci",
+]
 
 [[package]]
 name = "driver-dwmac"
@@ -578,11 +610,15 @@ dependencies = [
  "cpu",
  "dev",
  "driver-codec",
+ "driver-dwc3",
  "driver-fb",
+ "driver-hid",
  "driver-virtioblk",
+ "driver-xhci",
  "executor",
  "fw",
  "gui-fbgrant",
+ "gui-usbin",
  "kern",
  "leandhcp",
  "leanelf",

@@ -109,6 +109,20 @@ impl FbGrant {
         self.input = Some((ip, port));
     }
 
+    /// Trekt het invoeradres in: de controllers die het board noemde,
+    /// kwamen geen van alle op. Een grant na dit moment draagt geen
+    /// `INPUT_ADDR` meer; een display die hem al had, belt tevergeefs en
+    /// hoort zijn weigering.
+    pub fn stop_input(&mut self) {
+        self.input = None;
+    }
+
+    /// Het invoeradres dat met de grant meereist, als er een is.
+    #[must_use]
+    pub fn input(&self) -> Option<(Ipv4Addr, u16)> {
+        self.input
+    }
+
     /// Het slot dat het glas vasthoudt. Dat is per definitie de display-app,
     /// en dus ook de enige die de invoer mag lezen.
     #[must_use]
@@ -343,6 +357,24 @@ mod tests {
         assert!(!glass.on, "the console left the glass");
         assert_eq!(g.holder(), Some(s(3)));
         assert!(log.0.borrow().contains("HOPOS_FB_GRANT"));
+    }
+
+    #[test]
+    fn a_withdrawn_input_address_leaves_the_env() {
+        let mut g = FbGrant::new();
+        g.offer(desc()).unwrap();
+        g.use_input(Ipv4Addr::new(10, 100, 0, 1), 7879);
+        assert_eq!(g.input(), Some((Ipv4Addr::new(10, 100, 0, 1), 7879)));
+        g.stop_input();
+        assert_eq!(g.input(), None);
+        let (mut glass, log) = (TestGlass { on: true, back: 0 }, Log::default());
+        let mut out = Vec::new();
+        g.env(s(2), b"GUI=display\n", &mut out, &mut glass, &log);
+        let env = String::from_utf8(out).unwrap();
+        assert!(
+            env.contains("FB_BASE=") && !env.contains("INPUT_ADDR"),
+            "{env}"
+        );
     }
 
     #[test]

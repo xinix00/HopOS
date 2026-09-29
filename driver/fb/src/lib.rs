@@ -66,6 +66,23 @@ pub struct Desc {
 }
 
 impl Desc {
+    /// Het pixelwoord voor `argb` (0xAARRGGBB) in het formaat van dit
+    /// scherm: rood en blauw geruild bij [`Desc::swap_rb`], en r5g6b5 bij
+    /// 16 bpp. Ook voor de display-app, die met dezelfde regels tekent.
+    #[must_use]
+    pub fn encode(&self, argb: u32) -> u32 {
+        let argb = if self.swap_rb {
+            argb & 0xFF00_FF00 | (argb & 0xFF) << 16 | (argb >> 16) & 0xFF
+        } else {
+            argb
+        };
+        if self.bpp == 16 {
+            let (r, g, b) = ((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF);
+            return (r >> 3) << 11 | (g >> 2) << 5 | (b >> 3);
+        }
+        argb
+    }
+
     /// De maat van de buffer in bytes (`stride * height`), of `None` bij
     /// een geometrie die overloopt.
     #[must_use]
@@ -157,6 +174,17 @@ impl fmt::Display for Error {
 
 /// Het resultaat van deze crate.
 pub type Result<T = (), E = Error> = core::result::Result<T, E>;
+
+/// De 8x8-glyph van `c` (LSB van elke rij is de linkerpixel); buiten ASCII
+/// een `?`. Ook voor de display-app: één font op het glas, van de kern en
+/// van de app.
+#[must_use]
+pub fn glyph(c: u8) -> &'static [u8; 8] {
+    FONT8X8
+        .get(usize::from(c))
+        .or_else(|| FONT8X8.get(usize::from(b'?')))
+        .unwrap_or(&[0; 8])
+}
 
 /// De voorgrond: wit.
 const FG: u32 = 0xFFFF_FFFF;
@@ -419,16 +447,7 @@ impl Console {
     /// Het pixelwoord voor `argb` (0xAARRGGBB) in het formaat van het
     /// scherm.
     fn encode(&self, argb: u32) -> u32 {
-        let argb = if self.d.swap_rb {
-            argb & 0xFF00_FF00 | (argb & 0xFF) << 16 | (argb >> 16) & 0xFF
-        } else {
-            argb
-        };
-        if self.bpx == 2 {
-            let (r, g, b) = ((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF);
-            return (r >> 3) << 11 | (g >> 2) << 5 | (b >> 3);
-        }
-        argb
+        self.d.encode(argb)
     }
 
     /// Schrijft één pixel. Buiten het scherm is een no-op (de invariant

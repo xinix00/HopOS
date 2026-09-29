@@ -4,7 +4,7 @@
 
 use crate::device::DevState;
 use crate::ring::{CC_SUCCESS, EvRing, Event, Ring, TRB_CMD_COMP_EVT, TRB_LEN, TRB_TRANSFER_EVT};
-use crate::{CMD_RUN, ERDP_EHB, Error, Hc, Poison, Result, STS_HCH};
+use crate::{CMD_RUN, ERDP_EHB, Error, Hc, POLL_STEP_NS, Poison, Result, STS_HCH, Timer};
 use dev::{Pa, Reg};
 
 /// Hoeveel apparaten we tegelijk geadresseerd kunnen hebben. De controller
@@ -127,13 +127,28 @@ impl SlotRes {
     }
 }
 
-/// Schrijft een 64-bit registerpaar hoog-eerst. Dat is niet cosmetisch: bij
-/// CRCR, ERSTBA en ERDP draagt het LAGE woord het bit dat de controller laat
-/// latchen (RCS, respectievelijk de tabel of de leespositie). Laag eerst zou
-/// hem laten latchen op een adres waarvan de bovenhelft nog oud is.
+/// Schrijft een 64-bit registerpaar als hoog, laag, hoog. Bij CRCR en
+/// ERSTBA latcht de controller het adres op één van de twee woorden, en
+/// welke dat is, verschilt per implementatie:
+///
+/// - de Go-driver schreef hoog-eerst, omdat het LAGE woord het bit draagt
+///   dat laat latchen (RCS, de tabel); zo werkte hij op de RP1 van de Pi 5
+///   (06-08).
+/// - QEMU's `qemu-xhci` latcht op het HOGE woord (`hw/usb/hcd-xhci.c`:
+///   `xhci_ring_init` bij de schrijf van CRCR-hoog, `xhci_er_reset` bij
+///   ERSTBA-hoog), en Linux schrijft laag-dan-hoog (`lo_hi_writeq`).
+///   GEMETEN 29-09 op QEMU virt: met hoog-eerst haalde de controller zijn
+///   eerste commando van adres 0 (`usb_xhci_fetch_trb addr 0x0`), zette
+///   HCE, en elke Enable Slot bleef zonder completion.
+///
+/// Hoog, laag, hoog laat beide soorten latchen op het volledige adres: de
+/// laatste hoog-schrijf is voor een laag-latcher dezelfde waarde nog eens.
+/// Alles hier gebeurt vóór RUN of met een gestopte command ring, dus een
+/// tweede latch op dezelfde waarde is onschadelijk.
 fn write64(lo: &Reg<u32>, hi: &Reg<u32>, v: u64) {
     hi.write((v >> 32) as u32);
     lo.write(v as u32);
+    hi.write((v >> 32) as u32);
 }
 
 impl Hc {
@@ -146,7 +161,7 @@ impl Hc {
     /// Volgorde is dwingend (xHCI 4.2): eerst alles in DRAM, dan de pointers
     /// in de registers, dan pas RUN. Een controller die loopt terwijl DCBAAP
     /// nog naar nul wijst, leest device-contexten op adres 0.
-    pub fn start(&mut self, dma: Pa, size: u64) -> Result {
+    pub async fn start(&mut self, dma: Pa, size: u64, t: &impl Timer) -> Result {
         if !self.probed {
             return Err(Error::NotProbed);
         }
@@ -239,7 +254,11 @@ impl Hc {
 
         dev::mb();
         o.usbcmd.update(|v| v | CMD_RUN);
-        if self.wait(|o| o.usbsts.read(), STS_HCH, 0, "run").is_err() {
+        if self
+            .wait(t, |o| o.usbsts.read(), STS_HCH, 0, "run")
+            .await
+            .is_err()
+        {
             return Err(self.quarantine(Poison::RunTimeout));
         }
         self.running = true;
@@ -288,19 +307,27 @@ impl Hc {
     /// en zet de poorten weer aan. De eigenaar moet vóór deze aanroep zijn
     /// oude [`crate::Device`]-handvatten vergeten: HCRST maakt die per
     /// definitie ongeldig (en de generatie per slot bewijst het).
-    pub fn recover(&mut self) -> Result {
-        self.recover_with(Hc::reset, Hc::start, Hc::power_on)
+    pub async fn recover(&mut self, t: &impl Timer) -> Result {
+        let Some((base, size)) = self.recover_begin()? else {
+            return Ok(());
+        };
+        let r = self.reset(t).await;
+        self.recover_reset(r)?;
+        let r = self.start(base, size, t).await;
+        self.recover_start(r)?;
+        self.power_on(t).await;
+        self.poisoned = None;
+        Ok(())
     }
 
-    /// De host-testbare toestand rond de drie hardwarestappen.
-    pub(crate) fn recover_with(
-        &mut self,
-        mut reset: impl FnMut(&mut Self) -> Result,
-        mut start: impl FnMut(&mut Self, Pa, u64) -> Result,
-        mut power: impl FnMut(&mut Self),
-    ) -> Result {
+    /// De eerste helft van het herstel: `None` voor een gezonde controller
+    /// (niets te doen), anders het bewaarde DMA-venster. De hardwarestappen
+    /// zelf zijn `async` en staan in [`Hc::recover`]; de boekhouding eromheen
+    /// is hier en in de twee helften hierna, zodat de host-tests haar zonder
+    /// executor toetsen.
+    pub(crate) fn recover_begin(&self) -> Result<Option<(Pa, u64)>> {
         if self.poisoned.is_none() {
-            return Ok(());
+            return Ok(None);
         }
         if self.dma_size == 0 {
             return Err(Error::Dma {
@@ -308,7 +335,12 @@ impl Hc {
                 size: 0,
             });
         }
-        if let Err(e) = reset(self) {
+        Ok(Some((self.dma_base, self.dma_size)))
+    }
+
+    /// Na de reset van een herstel.
+    pub(crate) fn recover_reset(&mut self, r: Result) -> Result {
+        if let Err(e) = r {
             self.poisoned = Some(Poison::RecoveryReset);
             return Err(e);
         }
@@ -316,12 +348,35 @@ impl Hc {
         // Start-fout moet hem opnieuw zetten, anders zou de volgende scan een
         // half opgebouwde controller als gezond behandelen.
         self.poisoned = None;
-        let (base, size) = (self.dma_base, self.dma_size);
-        if let Err(e) = start(self, base, size) {
+        Ok(())
+    }
+
+    /// Na de start van een herstel.
+    pub(crate) fn recover_start(&mut self, r: Result) -> Result {
+        if let Err(e) = r {
             self.running = false;
             self.poisoned = Some(Poison::RecoveryStart);
             return Err(e);
         }
+        Ok(())
+    }
+
+    /// De host-testbare vorm van [`Hc::recover`]: dezelfde boekhouding met
+    /// de drie hardwarestappen als gewone functies.
+    #[cfg(test)]
+    pub(crate) fn recover_with(
+        &mut self,
+        mut reset: impl FnMut(&mut Self) -> Result,
+        mut start: impl FnMut(&mut Self, Pa, u64) -> Result,
+        mut power: impl FnMut(&mut Self),
+    ) -> Result {
+        let Some((base, size)) = self.recover_begin()? else {
+            return Ok(());
+        };
+        let r = reset(self);
+        self.recover_reset(r)?;
+        let r = start(self, base, size);
+        self.recover_start(r)?;
         power(self);
         self.poisoned = None;
         Ok(())
@@ -455,19 +510,20 @@ impl Hc {
     /// niet meer luistert (quarantaine, zie `command`), een transfer zonder
     /// antwoord is meestal alleen een apparaat dat hapert (die endpoint
     /// resetten).
-    pub(crate) fn wait_event(
+    pub(crate) async fn wait_event(
         &mut self,
+        t: &impl Timer,
         m: impl Fn(&Event) -> bool,
         timeout_ns: u64,
         what: &'static str,
     ) -> Result<Event> {
-        let deadline = self.now().saturating_add(timeout_ns);
+        let deadline = t.now().saturating_add(timeout_ns);
         loop {
             self.pump();
             if let Some(ev) = self.take(&m) {
                 return Ok(ev);
             }
-            if self.now() >= deadline {
+            if t.now() >= deadline {
                 let usbsts = if self.probed {
                     self.opr().usbsts.read()
                 } else {
@@ -475,15 +531,16 @@ impl Hc {
                 };
                 return Err(Error::EventTimeout { what, usbsts });
             }
-            core::hint::spin_loop();
+            t.sleep(POLL_STEP_NS).await;
         }
     }
 
     /// Zet één commando op de command ring, belt aan en wacht op het Command
     /// Completion Event dat naar precies dít TRB terugwijst. Sequentieel: er
     /// staat er nooit meer dan één uit.
-    pub(crate) fn command(
+    pub(crate) async fn command(
         &mut self,
+        t: &impl Timer,
         p0: u32,
         p1: u32,
         p2: u32,
@@ -498,11 +555,15 @@ impl Hc {
         };
         let trb = cmd.push(p0, p1, p2, ctrl);
         self.doorbell(0, 0);
-        let ev = match self.wait_event(
-            |e| e.kind == TRB_CMD_COMP_EVT && e.ptr == trb,
-            COMMAND_TIMEOUT_NS,
-            what,
-        ) {
+        let ev = match self
+            .wait_event(
+                t,
+                |e| e.kind == TRB_CMD_COMP_EVT && e.ptr == trb,
+                COMMAND_TIMEOUT_NS,
+                what,
+            )
+            .await
+        {
             Ok(ev) => ev,
             // De command ring is van de controller zelf: zwijgt hij daarop,
             // dan weet niemand meer wat hij nog uitvoert of welke slots hij
@@ -529,13 +590,14 @@ impl Hc {
 
     /// Halteert de controller. Alleen nodig bij een herstart van de stack;
     /// de datastructuren blijven staan.
-    pub fn stop(&mut self) {
+    pub async fn stop(&mut self, t: &impl Timer) {
         if !self.running {
             return;
         }
         self.opr().usbcmd.update(|v| v & !CMD_RUN);
         if self
-            .wait(|o| o.usbsts.read(), STS_HCH, STS_HCH, "halt")
+            .wait(t, |o| o.usbsts.read(), STS_HCH, STS_HCH, "halt")
+            .await
             .is_err()
         {
             self.quarantine(Poison::HaltTimeout);

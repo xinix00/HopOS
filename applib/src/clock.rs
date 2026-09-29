@@ -5,6 +5,7 @@
 //! en zet de offset op de control-page, dus die geldt één op één.
 
 use crate::arch;
+use crate::ctrl::Ctrl;
 use core::time::Duration;
 
 const NS: u128 = 1_000_000_000;
@@ -24,10 +25,35 @@ pub fn ns_to_ticks(ns: u64, hz: u64) -> u64 {
     u64::try_from(u128::from(ns) * u128::from(hz) / NS).unwrap_or(u64::MAX)
 }
 
+/// Neemt de timebase over die de kern op de control-page zette
+/// (`CTRL_TIMEBASE_HZ`) en geeft de timebase waarmee de klok vanaf nu
+/// rekent. Eén keer, in de main-schil, vóór de eerste klok-lees.
+///
+/// Op RISC-V is het woord de enige bron (de TIME-CSR telt 10 MHz op QEMU
+/// virt en 25 MHz op de LicheeRV, en er is geen register dat het zegt); op
+/// arm64 blijft CNTFRQ_EL0 de waarheid. 0 op de page (een kern van vóór het
+/// woord) laat de default van de architectuur staan.
+pub fn adopt_timebase(ctrl: &Ctrl) -> u64 {
+    arch::set_counter_hz(ctrl.get(abi::hopabi::CTRL_TIMEBASE_HZ));
+    arch::counter_hz()
+}
+
 /// Monotone nanoseconden sinds de teller begon: de klok van de executor.
 #[must_use]
 pub fn now_ns() -> u64 {
     ticks_to_ns(arch::counter(), arch::counter_hz())
+}
+
+/// De frequentie van de teller in Hz: wat één tik van [`now_ns`] en van de
+/// `CtrlIdle`-teller op de control-page waard is.
+///
+/// Een app die zijn eigen idle-tikken ([`crate::Ctrl::idle_ticks`]) naast
+/// de wandklok legt (het idle-percentage van de BURN-rol in `apps/bench`),
+/// rekent met dit getal, niet met een aanname: de Pi telt op 54 MHz, QEMU
+/// op 62,5, de Altra op 25 en de M4 op 1 GHz.
+#[must_use]
+pub fn hz() -> u64 {
+    arch::counter_hz()
 }
 
 /// De langste slaap die een wektijd uitdrukt: een uur is "nooit" genoeg,

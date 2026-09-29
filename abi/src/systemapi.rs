@@ -238,8 +238,19 @@ pub enum PrivOp {
     /// plaatsing), `path` de verwachte SHA-256 (32 bytes, of 64 hex-tekens).
     /// `STATUS_OK`: de bundel is getoetst en klaargelegd, de sprong volgt
     /// een halve seconde later; het slot is dan al terug in de pool.
+    ///
+    /// `n` draagt de vlaggen van de flip ([`FLIP_COLD`]); een Hop van vóór
+    /// de vlag stuurt 0, en dat is de warme flip van altijd.
     Flip = 0x46,
 }
+
+/// Vlag in `n` van [`PrivOp::Flip`]: de KOUDE flip. De kern stopt elke
+/// bewoner naast Hop, zet de app-cores uit en springt zonder bewoners over
+/// te dragen; de nieuwe kern installeert zijn eigen switch-code en plaatst
+/// Hop koud uit de staging (`hopos/src/flip.rs`, `docs/flip.md`). De weg
+/// voor een bundel met een andere switch-code, die de warme flip weigert.
+/// Additief (29-09): de andere bits van `n` zijn nul en blijven dat.
+pub const FLIP_COLD: u64 = 1;
 
 /// Het laagste bevoegde opnummer.
 pub const PRIV_OP_FIRST: u8 = PrivOp::StartSlot as u8;

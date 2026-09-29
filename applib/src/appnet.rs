@@ -216,6 +216,12 @@ pub async fn resolve(host: &str) -> Result<[u8; 4]> {
     net().ok_or(NetError::NotUp)?.resolve(host).await
 }
 
+/// Abonneert de stack van deze app op multicastgroep `group`
+/// ([`Net::join_group`]).
+pub fn join_group(group: [u8; 4]) -> Result {
+    net().ok_or(NetError::NotUp)?.join_group(group)
+}
+
 /// Het budget: `env` (bytes, of met `k`/`m`) als die er is en klopt, anders
 /// een achtste van `ram_size`, geklemd op [`BUDGET_MIN`]..[`BUDGET_MAX`].
 #[must_use]
@@ -704,6 +710,27 @@ impl Net {
             deadline: None,
             slot: self.track(Open::Udp(h)),
         })
+    }
+
+    /// Abonneert de stack op multicastgroep `group`, voor zijn hele
+    /// levensduur; een tweede join van dezelfde groep doet niets.
+    ///
+    /// Waarom dit genoeg is: de switch van de kern floodt elk
+    /// IP-multicastframe naar elk aangesloten slot (en de uplink,
+    /// `net/src/switch.rs`, `forward`), dus het filter zit hier, in de
+    /// stack: een UDP-socket op de poort van de groep hoort het datagram
+    /// alleen na deze join. Alleen link-local groepen (224.0.0.0/24, zoals
+    /// mDNS op 224.0.0.251); de rest weigert leannet met
+    /// [`StackError::NotLinkLocalMulticast`], en na vier groepen met
+    /// [`StackError::GroupsFull`].
+    ///
+    /// Een `leave_group` is er niet: leannet v3.0.0 en v3.1.1 kennen geen
+    /// leave (de enige consument, mDNS, verlaat nooit), en een filter hier
+    /// kan het niet namaken, want `recv_from` zegt niet aan welk adres een
+    /// datagram gericht was.
+    pub fn join_group(&self, group: [u8; 4]) -> Result {
+        self.with(|st| st.join_group(group))?
+            .map_err(NetError::Stack)
     }
 
     /// Het IPv4-adres van `host`: een naam die al een adres is meteen, anders

@@ -37,15 +37,78 @@
 
 extern crate alloc;
 
-#[path = "cage.rs"]
+// De kooi-lijm per architectuur: `cage.rs` (stage-2 en de EL2-switcher)
+// of `cage_riscv.rs` (PMP plus Sv39 en de M-mode-switcher). Beide geven de
+// kern dezelfde traits; de lifecycle hieronder is architectuur-neutraal.
+#[cfg_attr(not(target_arch = "riscv64"), path = "cage.rs")]
+#[cfg_attr(target_arch = "riscv64", path = "cage_riscv.rs")]
 mod cage;
+
+/// De architectuur-naad van deze lijm: wat op arm64 `cpu::el2` is (de
+/// toestand van een core, de kick van een slot, de OS-core), is op riscv64
+/// van de kooi-lijm zelf (`cage_riscv.rs`). Op module-niveau, zodat de
+/// lijm eronder geen `cfg` kent (handboek §7).
+#[cfg(not(target_arch = "riscv64"))]
+mod arch {
+    use super::cage::FLAVOR;
+    use cpu::el2;
+    use cpu::println;
+
+    pub(super) use cpu::el2::{OsCore, core_state};
+
+    /// De kick van een slot na een schrijf in zijn RX-ring: op QEMU virt
+    /// (nVHE) een SEV, die elke WFE-slaper wekt, dus het slot kiest geen
+    /// doel; een board met een gerichte kick (Apple's fast IPI) zoekt hier
+    /// de core van het slot op.
+    pub(super) fn wake_all() {
+        el2::kick(FLAVOR, 0);
+    }
+
+    /// Kan de EL2-smaak de OS-core met Hop delen? Apple niet.
+    pub(super) const SHARES_OS_CORE: bool = !matches!(FLAVOR, el2::Flavor::AppleVhe);
+
+    /// De rotatie van de OS-core, na de zelftest van de overgang (timer,
+    /// yield, kick).
+    pub(super) fn os_core(plan: &abi::layout::Plan) -> Result<el2::OsCore, el2::Error> {
+        let board = &crate::BOARD;
+        let mut os = el2::OsCore::new(plan, FLAVOR, Some(board.os_bell()))?;
+        let ms = cpu::idle::freq() / 1000;
+        let t = os.selftest(false, ms, &|| {});
+        let y = os.selftest(true, 100 * ms, &|| {});
+        let k = os.selftest(false, 100 * ms, &|| board.kick_self());
+        let us = |r: Option<(el2::Back, u64)>| r.map(|(b, dt)| (b, dt * 1000 / ms.max(1)));
+        let (t, y, k) = (us(t), us(y), us(k));
+        let ok = matches!(t, Some((el2::Back::Timer, _)))
+            && matches!(y, Some((el2::Back::Yield, _)))
+            && matches!(k, Some((el2::Back::Ipi, _)));
+        println!(
+            "oscore: cpu {} self-test timer={t:?} yield={y:?} kick={k:?} (back, us) {}",
+            plan.os_core(),
+            if ok {
+                "HOPOS_OS_SELFTEST ok"
+            } else {
+                "HOPOS_OS_SELFTEST_FAIL"
+            }
+        );
+        Ok(os)
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+mod arch {
+    pub(super) use super::cage::{OsCore, SHARES_OS_CORE, core_state, os_core, wake_all};
+}
 
 use abi::hopabi::{CTRL_ENV_DATA, CTRL_ENV_LEN, CTRL_ENV_MAX};
 use abi::layout::{ABI_CTRL_OFF, ABI_TAIL, CtxState, LINK_BASE, RING_DATA_CAP};
 use abi::place::{self, SYM_ABI, SYM_RAM_SIZE, SYM_RAM_START, SYM_SLOT_HINT, Window};
 use alloc::vec::Vec;
 use board::Board;
-use cage::{ArmCage, ArmCores, DevMem, ExecTimer, KernConsole, SlotOutbox};
+#[cfg(not(target_arch = "riscv64"))]
+use cage::{ArmCage as SlotCage, ArmCores as SlotCores};
+use cage::{DevMem, ExecTimer, KernConsole, SlotOutbox};
+#[cfg(target_arch = "riscv64")]
+use cage::{RvCage as SlotCage, RvCores as SlotCores};
 use core::time::Duration;
 use cpu::el2::{self, CoreState};
 use cpu::println;
@@ -151,8 +214,8 @@ pub(crate) fn start(
     // FLIP: een geadopteerde kern schrijft geen byte in de plan-regio: er
     // draaien cores in de switch-code (`cpu::el2::adopt` eist de som).
     let cage = match &adopt {
-        Some(_) => ArmCage::adopt(plan.clone()),
-        None => ArmCage::new(plan.clone()),
+        Some(_) => SlotCage::adopt(plan.clone()),
+        None => SlotCage::new(plan.clone()),
     };
     let mut cage = match cage {
         Ok(c) => c,
@@ -197,7 +260,10 @@ pub(crate) fn start(
     // regio niet raakt.
     for c in 1..=plan.app_cores() {
         if let Some(core) = abi::layout::Core::new(c) {
-            println!("slots: core {c} mailbox {:?}", el2::core_state(&plan, core));
+            println!(
+                "slots: core {c} mailbox {:?}",
+                arch::core_state(&plan, core)
+            );
         }
     }
 
@@ -229,8 +295,12 @@ pub(crate) fn start(
         pool.len(),
         parts.largest() >> 20
     );
-    let pool_bytes = parts.capacity();
-    let cores = ArmCores::new(plan.clone());
+    // Wat Hop als pool ziet: de capaciteit min wat de codec straks uit de
+    // pool reserveert (hopos/src/codec.rs), anders overschat Hop de node.
+    let pool_bytes = parts
+        .capacity()
+        .saturating_sub(crate::codec::planned_bytes());
+    let cores = SlotCores::new(plan.clone());
     // FLIP: de core van een geadopteerde Hop, als hij meeging.
     let hop_core = adopt
         .as_ref()
@@ -302,11 +372,9 @@ pub(crate) fn start(
 }
 
 /// De kick van slot `slot` na een schrijf in zijn RX-ring (de `slot_wake`
-/// van de switch). Op QEMU virt (nVHE) is de kick een SEV, die elke
-/// WFE-slaper wekt, dus het slot kiest geen doel; een board met een
-/// gerichte kick (Apple's fast IPI) zoekt hier de core van het slot op.
+/// van de switch); zie `arch::wake_all`.
 pub(crate) fn wake(_slot: usize) {
-    el2::kick(cage::FLAVOR, 0);
+    arch::wake_all();
 }
 
 /// De servicer-taak van één slot, met zijn eigen recordbuffer.
@@ -549,11 +617,11 @@ pub(crate) fn os_plan() -> abi::Result<abi::layout::Plan> {
 }
 
 /// De core-plaatsing van deze node: Hop's groep deelt de OS-core met de
-/// kern (PORT.md beslissing 2). Kan de EL2-smaak dat niet (Apple), dan
-/// krijgt Hop een app-core zoals vóór 30-09.
+/// kern (PORT.md beslissing 2). Kan de architectuur dat niet (Apple's
+/// EL2-smaak), dan krijgt Hop een app-core zoals vóór 30-09.
 fn os_pool() -> CorePool {
     let mut pool = CorePool::new(0);
-    if cage::FLAVOR != el2::Flavor::AppleVhe
+    if arch::SHARES_OS_CORE
         && let Err(e) = pool.share_os_core(kern::pool::HOP_GROUP)
     {
         println!("slots: Hop may not share the OS core: {e} HOPOS_OS_CORE_FAIL");
@@ -566,29 +634,9 @@ fn os_pool() -> CorePool {
 /// overgang (timer, yield, kick). Aanroepen op de OS-core, ná [`start`]
 /// (die de kooi-regio opzette) en ná de interrupts (de zelftest wacht op
 /// de CNTHP en de kick-SGI).
-pub(crate) fn os_core() -> Result<el2::OsCore, el2::Error> {
-    let board = &crate::BOARD;
+pub(crate) fn os_core() -> Result<arch::OsCore, el2::Error> {
     let plan = os_plan().map_err(el2::Error::Plan)?;
-    let mut os = el2::OsCore::new(&plan, cage::FLAVOR, Some(board.os_bell()))?;
-    let ms = cpu::idle::freq() / 1000;
-    let t = os.selftest(false, ms, &|| {});
-    let y = os.selftest(true, 100 * ms, &|| {});
-    let k = os.selftest(false, 100 * ms, &|| board.kick_self());
-    let us = |r: Option<(el2::Back, u64)>| r.map(|(b, dt)| (b, dt * 1000 / ms.max(1)));
-    let (t, y, k) = (us(t), us(y), us(k));
-    let ok = matches!(t, Some((el2::Back::Timer, _)))
-        && matches!(y, Some((el2::Back::Yield, _)))
-        && matches!(k, Some((el2::Back::Ipi, _)));
-    println!(
-        "oscore: cpu {} self-test timer={t:?} yield={y:?} kick={k:?} (back, us) {}",
-        plan.os_core(),
-        if ok {
-            "HOPOS_OS_SELFTEST ok"
-        } else {
-            "HOPOS_OS_SELFTEST_FAIL"
-        }
-    );
-    Ok(os)
+    arch::os_core(&plan)
 }
 
 /// Bewaakt Hop: elke wissel van app-status, core of fault één regel, om de
@@ -915,7 +963,7 @@ fn probe(plan: &abi::layout::Plan, slot: Slot, core: usize, st: &SlotStatus, dt:
     let ctx = abi::layout::Slot::new(slot.get())
         .and_then(|s| plan.ctx_pa(s).ok())
         .and_then(el2::ctx_state);
-    let mbox = abi::layout::Core::new(core).and_then(|c| el2::core_state(plan, c).ok());
+    let mbox = abi::layout::Core::new(core).and_then(|c| arch::core_state(plan, c).ok());
     println!(
         "slot {slot}: +{} ms app={} ctx={:?} mbox={:?} beat={} core_on={}",
         dt / 1_000_000,

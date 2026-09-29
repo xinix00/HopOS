@@ -9,13 +9,14 @@
 //! voor je deed. [`quiet`] zet ELK venster van `/arm-io/wdt` stil (het
 //! primaire met CTL op nul, de volgende met een nul op offset 0), ongeacht
 //! `wdt-version`: een watchdog die je per ongeluk laat staan reset je node,
-//! en een nul schrijven die er al stond kost niets. [`arm`] en [`pet`]
-//! nemen de primaire over voor het beleid van de kern (HOP-leven =
-//! node-leven), met de tellerklok van 24 MHz in de regel: die staat niet in
-//! de boom, en een verkeerde aanname hoort in de console te staan, niet in
-//! een stille reset.
+//! en een nul schrijven die er al stond kost niets. [`arm`], [`pet`] en
+//! [`off`] nemen de primaire over voor het beleid van de kern (HOP-leven =
+//! node-leven, hopos `watchdog.rs`), met dezelfde vorm als
+//! `board_uefi::watchdog` en de tellerklok van 24 MHz in de regel: die staat
+//! niet in de boom, en een verkeerde aanname hoort in de console te staan,
+//! niet in een stille reset.
 //!
-//! De clusters ([`pstate_tune`]): iBoot laat ze laag achter en na de boot
+//! De clusters ([`pstate_tune`], [`PStateWatch`]): iBoot laat ze laag achter en na de boot
 //! regelt niemand ze meer. GEMETEN 01-09: E op p-state 1 (900 MHz), P op 4;
 //! elke core die WIJ uit reset halen begint laag. Na m1n1's
 //! `cpufreq_init_cluster`-recept voor de naaste familie (t8122/t6030):
@@ -25,7 +26,8 @@
 //! om problemen.
 
 use crate::fwinfo;
-use core::fmt::Write as _;
+use core::fmt::{self, Write as _};
+use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use dev::Pa;
 
 const WDT_COUNT: u64 = 0x10;
@@ -35,8 +37,10 @@ const WDT_CTL: u64 = 0x1c;
 const WDT_CTL_RESET: u32 = 1 << 2;
 /// De tellerklok; niet in de boom (Go `wdt.go`, 31-08).
 pub const WDT_HZ: u32 = 24_000_000;
-/// De timeout: ruim boven de aai-cadans van het beleid.
-pub const WDT_TIMEOUT_S: u32 = 30;
+/// De timeout die de kern vraagt: ruim boven de aai-cadans van het beleid
+/// (2 s) en boven de langste blokkerende wacht van een coprocessor
+/// (RTKit `POWER_TIMEOUT_NS`, 5 s). Go: 30 s (`wdtTimeout`).
+pub const WDT_TIMEOUT_MS: u64 = 30_000;
 
 /// Een regel voor de console, zonder heap.
 pub struct Line {
@@ -103,27 +107,87 @@ pub fn quiet() -> Line {
     l
 }
 
-/// Wapent de primaire watchdog: [`WDT_TIMEOUT_S`] op [`WDT_HZ`]. Leest
-/// terug: een gewapende watchdog die níét reset is erger dan geen (de les
-/// van de Radxa).
-pub fn arm() -> Result<u64, &'static str> {
-    let (base, _) = fwinfo::reg("/arm-io/wdt", 0).ok_or("no /arm-io/wdt")?;
+/// De basis van de gewapende watchdog (0 = niet gewapend): [`arm`] zet
+/// hem, [`pet`] en [`off`] lezen hem. Eén schrijver, de watchdog-taak.
+static ARMED: AtomicU64 = AtomicU64::new(0);
+
+/// De gewapende watchdog, voor de consoleregel van het beleid.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Desc {
+    /// Het registerblok (`/arm-io/wdt` reg[0]).
+    pub base: u64,
+    /// De timeout in milliseconden, zoals geteld op [`WDT_HZ`].
+    pub timeout_ms: u64,
+}
+
+impl fmt::Display for Desc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Apple WDT at {:#x}, {} ms timeout at {} MHz (assumed, not in the ADT)",
+            self.base,
+            self.timeout_ms,
+            WDT_HZ / 1_000_000
+        )
+    }
+}
+
+/// Het alarm in tellertikken voor `timeout_ms`, geklemd op wat in het
+/// 32-bit ALARM past (178 s op 24 MHz) en minstens één seconde.
+#[must_use]
+pub const fn alarm_ticks(timeout_ms: u64) -> u32 {
+    let ms = if timeout_ms < 1000 { 1000 } else { timeout_ms };
+    let t = ms.saturating_mul(WDT_HZ as u64) / 1000;
+    if t > u32::MAX as u64 {
+        u32::MAX
+    } else {
+        t as u32
+    }
+}
+
+/// Wapent de primaire watchdog op `timeout_ms` (Go: 30 s, ruim boven de
+/// aai-cadans van het beleid). Leest terug: een gewapende watchdog die níét
+/// reset is erger dan geen (de les van de Radxa).
+pub fn arm(timeout_ms: u64) -> Result<Desc, &'static str> {
+    let (base, _) = fwinfo::reg("/arm-io/wdt", 0).ok_or("no /arm-io/wdt in the ADT")?;
     let b = Pa(base);
+    let ticks = alarm_ticks(timeout_ms);
     dev::write32(b.add(WDT_COUNT), 0);
-    dev::write32(b.add(WDT_ALARM), WDT_TIMEOUT_S * WDT_HZ);
+    dev::write32(b.add(WDT_ALARM), ticks);
     dev::write32(b.add(WDT_CTL), WDT_CTL_RESET);
     dev::mb();
     if dev::read32(b.add(WDT_CTL)) & WDT_CTL_RESET == 0 {
         dev::write32(b.add(WDT_CTL), 0);
         return Err("Apple WDT refuses to arm");
     }
-    Ok(base)
+    ARMED.store(base, Relaxed);
+    Ok(Desc {
+        base,
+        timeout_ms: u64::from(ticks) * 1000 / u64::from(WDT_HZ),
+    })
 }
 
-/// Aait de watchdog op `base` (uit [`arm`]): de teller op nul.
-pub fn pet(base: u64) {
-    dev::write32(Pa(base + WDT_COUNT), 0);
+/// Aait de gewapende watchdog: de teller op nul. Zonder [`arm`] niets.
+pub fn pet() {
+    let base = ARMED.load(Relaxed);
+    if base != 0 {
+        dev::write32(Pa(base + WDT_COUNT), 0);
+        dev::mb();
+    }
+}
+
+/// Zet de primaire watchdog uit (`hopos.wd=off`, ook als een vorige kern
+/// hem wapende). `true` als hij gewapend stond.
+pub fn off() -> bool {
+    let Some((base, _)) = fwinfo::reg("/arm-io/wdt", 0) else {
+        return false;
+    };
+    let b = Pa(base);
+    let was = dev::read32(b.add(WDT_CTL)) & WDT_CTL_RESET != 0;
+    dev::write32(b.add(WDT_CTL), 0);
     dev::mb();
+    ARMED.store(0, Relaxed);
+    was
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +313,89 @@ pub fn pstate_tune(target: [u64; 2], off: bool) {
     }
 }
 
+/// Het plafond uit `hopos.pstate`: "off" = alleen meten (`None`), "E,P" =
+/// die twee (elk minstens 1), anders [`PS_DEFAULT`]. Een onleesbare waarde
+/// is de default, niet de bodemklok (Go `pstateTargets`).
+#[must_use]
+pub fn pstate_targets(v: &str) -> Option<[u64; 2]> {
+    if v == "off" {
+        return None;
+    }
+    let mut it = v.split(',').map(|x| x.trim().parse::<u64>().ok());
+    match (it.next(), it.next(), it.next()) {
+        (Some(Some(e)), Some(Some(p)), None) if e >= 1 && p >= 1 => Some([e, p]),
+        _ => Some(PS_DEFAULT),
+    }
+}
+
+/// De wachter op de p-states (Go `PStateWatch`): leest per cluster
+/// CLUSTER_PSTATE en zegt alleen iets als hij VERANDERT. Dat beantwoordt de
+/// vraag die [`pstate_tune`] openliet: klokt de APSC (de hardware-governor
+/// die wij aanzetten) uit zichzelf terug als er niets te doen is, en weer
+/// omhoog onder belasting? Een node die stil op zijn plafond staat, kost
+/// dit geen consoleregel.
+///
+/// Alleen-lezen: hij schrijft nooit een p-state. Eén eigenaar, de taak die
+/// [`PStateWatch::poll`] elke paar seconden roept.
+pub struct PStateWatch {
+    /// Het DVFM-blok per cluster (E, P), als de boom het geeft.
+    base: [Option<Pa>; 2],
+    /// De laatst gemelde p-state per cluster.
+    last: [Option<u64>; 2],
+}
+
+impl PStateWatch {
+    /// De wachter over de clusters uit de ADT; de eerste [`Self::poll`] is
+    /// de nulmeting en meldt niets.
+    #[must_use]
+    pub fn new() -> Self {
+        let base = |cl: usize| {
+            (0..fwinfo::cpus())
+                .find(|&i| fwinfo::is_p_core(i) == (cl == 1))
+                .and_then(fwinfo::cpu_impl)
+                .filter(|&a| a != 0)
+                .map(|a| Pa(cluster_base(a)))
+        };
+        Self {
+            base: [base(0), base(1)],
+            last: [None, None],
+        }
+    }
+
+    /// Heeft deze node iets om te bewaken?
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.base.iter().all(Option::is_none)
+    }
+
+    /// Eén ronde: per cluster de p-state, en een regel bij een sprong.
+    pub fn poll(&mut self) {
+        for (cl, (b, last)) in self.base.iter().zip(self.last.iter_mut()).enumerate() {
+            let Some(b) = b else { continue };
+            let v = dev::read64(b.add(CL_PSTATE));
+            if v == u64::MAX {
+                continue;
+            }
+            let ps = v & PS_DESIRED;
+            if let Some(was) = *last
+                && was != ps
+            {
+                cpu::println!(
+                    "cpufreq: cluster {cl} ({}) {was} -> {ps} HOPOS_APPLE_PSTATE",
+                    if cl == 0 { "E" } else { "P" }
+                );
+            }
+            *last = Some(ps);
+        }
+    }
+}
+
+impl Default for PStateWatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,7 +417,39 @@ mod tests {
     #[test]
     fn without_a_tree() {
         assert!(quiet().as_str().contains("NOT silenced"));
-        assert!(arm().is_err());
+        assert!(arm(30_000).is_err());
+        assert!(!off());
+        pet();
         pstate_tune(PS_DEFAULT, false);
+        let mut w = PStateWatch::new();
+        assert!(w.is_empty());
+        w.poll();
+    }
+
+    #[test]
+    fn the_alarm_fits_the_register() {
+        // 30 s op 24 MHz: 720M tikken, zoals Go (31-08).
+        assert_eq!(alarm_ticks(30_000), 720_000_000);
+        // Te kort wordt een seconde, te lang de grens van 32 bits.
+        assert_eq!(alarm_ticks(10), WDT_HZ);
+        assert_eq!(alarm_ticks(1_000_000), u32::MAX);
+        let d = Desc {
+            base: 0x2_922b_0000,
+            timeout_ms: 30_000,
+        };
+        let mut l = Line::new();
+        let _ = write!(l, "{d}");
+        assert!(l.as_str().starts_with("Apple WDT at 0x2922b0000, 30000 ms"));
+    }
+
+    #[test]
+    fn the_pstate_ceiling_from_the_config() {
+        assert_eq!(pstate_targets("off"), None);
+        assert_eq!(pstate_targets(""), Some(PS_DEFAULT));
+        assert_eq!(pstate_targets("4,7"), Some([4, 7]));
+        assert_eq!(pstate_targets(" 3 , 5 "), Some([3, 5]));
+        assert_eq!(pstate_targets("0,5"), Some(PS_DEFAULT));
+        assert_eq!(pstate_targets("max"), Some(PS_DEFAULT));
+        assert_eq!(pstate_targets("1,2,3"), Some(PS_DEFAULT));
     }
 }

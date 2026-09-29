@@ -31,14 +31,13 @@
 
 extern crate alloc;
 
-mod conn;
 mod page;
 
 use alloc::vec::Vec;
 use applib::appnet::{self, TcpListener, TcpStream};
 use applib::rt::Exec;
+use applib::tcp::TcpConn;
 use applib::{App, EXEC, clock, heap::HEAP, log};
-use conn::TcpConn;
 use core::cell::Cell;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use core::time::Duration;
@@ -61,7 +60,9 @@ const DEFAULT_PORT: u16 = 80;
 /// eerste die vrijkomt.
 const WORKERS: usize = 4;
 
-/// De langste stilte op een keep-alive-verbinding (zie [`TcpConn::new`]).
+/// De langste stilte op een keep-alive-verbinding (zie
+/// [`TcpConn::with_read_cap`]): met een vaste pool van [`WORKERS`] houdt een
+/// stille browser anders een werker een minuut vast.
 const READ_CAP: Duration = Duration::from_secs(5);
 
 /// Hoe vaak de acceptor kijkt of er een werker vrij is, als ze alle vier
@@ -223,7 +224,7 @@ fn hand_off(stream: TcpStream, senders: &mut [Sender<'static, TcpStream, 1>]) ->
 async fn worker(i: usize, mut rx: Receiver<'static, TcpStream, 1>, shared: &'static Shared) {
     loop {
         let stream = rx.recv().await;
-        let conn = TcpConn::new(stream, shared.exec, READ_CAP);
+        let conn = TcpConn::new(stream, shared.exec).with_read_cap(READ_CAP);
         // Een verbinding die eindigt met een termijn of een reset is een
         // browser die wegging; dat is geen logregel waard.
         let _ = leanhttp::serve(conn, async |ex: &mut Exchange<'_, TcpConn>| {

@@ -22,10 +22,16 @@
 //!    de nieuwe core leest hem met de MMU UIT, dus langs elke cache heen. Op
 //!    QEMU (geen cachemodel) viel dat nooit op; op de M4 las de tweede core
 //!    de vorige inhoud: rommel als sp en ttbr0 (02-09).
-//! 3. PSCI CPU_ON naar `hopos_smp_entry` met de handoff in x0. De entry zet
+//! 3. CPU_ON naar `hopos_smp_entry` met de handoff in x0. De entry zet
 //!    het regime, de MMU aan en de stack, en springt naar Rust; Rust telt de
 //!    core ([`node_started`]) en roept de main van het board, die de
 //!    executor van die core draait.
+//!
+//! CPU_ON is PSCI, behalve op een board dat een eigen haak zet
+//! ([`set_cpu_on`]): Apple silicium heeft geen PSCI (een SMC zonder EL3) en
+//! start een core via m1n1's spin-table of PMGR plus een brievenbus
+//! (`board_apple::cores`). Alles in de kern dat een core koud start, gaat
+//! door [`cpu_on`].
 //!
 //! De park-mailboxen ([`dispatch`], [`park_state`]) zijn het
 //! ARM-mechanisme voor de levenscyclus van een app-core: HopOS bezit zijn
@@ -42,7 +48,7 @@ use abi::layout::{PARK_COLD, PARK_DISPATCHED, PARK_PARKED, SCHED_MBOX_CTX, SCHED
 use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::{
-    AtomicBool, AtomicUsize,
+    AtomicBool, AtomicPtr, AtomicUsize,
     Ordering::{AcqRel, Acquire, Release},
 };
 use dev::Pa;
@@ -62,6 +68,14 @@ pub type CoreMain = fn(core: usize) -> !;
 /// nummering verschilt per cluster, zie [`crate::psci`]). `None` = deze
 /// core bestaat niet.
 pub type Target = fn(core: usize) -> Option<u64>;
+
+/// De CPU_ON van een board zonder PSCI: start de core met MPIDR `target`
+/// op `entry` (fysiek, EL2, MMU uit) met `ctx` in x0. De fout in
+/// PSCI-vorm, zodat de kern één soort weigering telt.
+pub type CpuOn = fn(target: u64, entry: u64, ctx: u64) -> core::result::Result<(), psci::Error>;
+
+/// De haak van het board als rauwe pointer; null = PSCI.
+static CPU_ON_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Hoeveel node-cores hun Rust-entry bereikten.
 static STARTED: AtomicUsize = AtomicUsize::new(0);
@@ -213,6 +227,32 @@ impl fmt::Display for Error {
 /// Het resultaat van deze module.
 pub type Result<T = (), E = Error> = core::result::Result<T, E>;
 
+/// Zet de CPU_ON van het board, in plaats van PSCI. Eén keer bij boot, in
+/// `discover`, vóór de eerste core koud start (de verhuizing naar de
+/// OS-core, een kooi). Zelfde vorm als `vectors::set_hvc_handler`.
+pub fn set_cpu_on(f: CpuOn) {
+    CPU_ON_HOOK.store(f as *mut (), Release);
+}
+
+fn cpu_on_hook() -> Option<CpuOn> {
+    let p = CPU_ON_HOOK.load(Acquire);
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: alleen `set_cpu_on` schrijft dit woord, met een geldige
+    // `CpuOn`; null is hierboven uitgesloten.
+    Some(unsafe { core::mem::transmute::<*mut (), CpuOn>(p) })
+}
+
+/// Start de core met MPIDR `target` op `entry` met `ctx` in x0: de haak van
+/// het board als die er is, anders PSCI CPU_ON.
+pub fn cpu_on(target: u64, entry: u64, ctx: u64) -> core::result::Result<(), psci::Error> {
+    match cpu_on_hook() {
+        Some(f) => f(target, entry, ctx),
+        None => psci::cpu_on(target, entry, ctx),
+    }
+}
+
 /// Geeft de kern `cores` cores (core 0 telt mee): cores 1 tot `cores - 1`
 /// komen op via PSCI CPU_ON en draaien elk `main`. Geeft het aantal
 /// gedispatchte cores.
@@ -242,7 +282,7 @@ pub fn configure_node(cores: usize, target: Target, main: CoreMain) -> Result<us
             new_handoff(Handoff::new(core, sp, main, regime)).ok_or(Error::OutOfMemory { core })?;
         let pa = Pa(core::ptr::from_ref(h) as usize as u64);
         dev::push(pa, core::mem::size_of::<Handoff>());
-        psci::cpu_on(mpidr, entry, pa.0).map_err(|err| Error::Psci { target: mpidr, err })?;
+        cpu_on(mpidr, entry, pa.0).map_err(|err| Error::Psci { target: mpidr, err })?;
         DISPATCHED.fetch_add(1, Release);
     }
     Ok(DISPATCHED.load(Acquire))
@@ -260,7 +300,7 @@ pub fn start_one(core: usize, target: u64, main: CoreMain) -> Result {
     let h = new_handoff(Handoff::new(core, sp, main, regime)).ok_or(Error::OutOfMemory { core })?;
     let pa = Pa(core::ptr::from_ref(h) as usize as u64);
     dev::push(pa, core::mem::size_of::<Handoff>());
-    psci::cpu_on(target, entry, pa.0).map_err(|err| Error::Psci { target, err })
+    cpu_on(target, entry, pa.0).map_err(|err| Error::Psci { target, err })
 }
 
 /// Hoeveel node-cores (naast core 0) hun Rust-entry bereikten: het bewijs
@@ -361,7 +401,7 @@ pub fn park_state(mbox: Pa) -> Park {
 }
 
 /// Geeft het startschot: {ctx, doel-PC} in de mailbox, dan de eenmalige
-/// PSCI CPU_ON (cold) of een SEV die de parkeerlus de trampoline in laat
+/// CPU_ON (cold) of een SEV die de parkeerlus de trampoline in laat
 /// springen. Woord 0 = ctx maakt de core meteen "running".
 ///
 /// Weigert een core die niet cold of parked is: twee startschoten op één
@@ -388,7 +428,7 @@ pub fn dispatch(mbox: Pa, target: u64, entry: u64, ctx: u64) -> Result<Start> {
     dev::write64(mbox.add(SCHED_MBOX_CTX), ctx);
     dev::push(mbox, 16);
     if cold {
-        psci::cpu_on(target, entry, ctx).map_err(|err| Error::Psci { target, err })?;
+        cpu_on(target, entry, ctx).map_err(|err| Error::Psci { target, err })?;
         return Ok(Start::Cold);
     }
     dev::notify();
@@ -446,12 +486,18 @@ mod arch {
         (h.main)(h.core as usize)
     }
 
-    // De entry van een node-core, waar PSCI CPU_ON hem neerzet: EL2, MMU
-    // uit, x0 = de handoff. Alles wat Rust nog niet kan en niets meer:
+    // De entry van een node-core, waar CPU_ON hem neerzet: EL2, x0 = de
+    // handoff. Alles wat Rust nog niet kan en niets meer:
     //
     // - Niet op EL2 (een firmware die ons ergens anders aflevert): parkeren.
     //   Stil, want er is nog geen stack om te melden; core 0 ziet het aan
     //   `node_started`.
+    // - De maskers dicht en SCTLR_EL2.M/C/I uit. Na PSCI staat dat al zo, en
+    //   is dit niets. Maar m1n1 ROEPT een core uit zijn spin-table AAN als
+    //   functie, met zijn eigen MMU en caches nog aan (Apple, 29-08): de
+    //   loads van de handoff hieronder zouden dan door m1n1's map gaan en TCR
+    //   en TTBR0 wisselen onder een draaiende MMU. Geen cache-onderhoud op
+    //   set/way: de machine reset erop terwijl een andere core loopt (29-08).
     // - Het regime van core 0 zetten. MMU uit betekent dat de loads
     //   Device-toegang zijn: gealigneerd, en `dev::push` bracht ze naar DRAM.
     //   HCR_EL2 eerst, met een ISB: een kern onder E2H = 1 (VHE, de O6N)
@@ -480,6 +526,15 @@ hopos_smp_entry:
     and x1, x1, #3
     cmp x1, #2
     b.ne 9f
+
+    msr daifset, #0xf
+    mrs x1, sctlr_el2
+    bic x1, x1, #(1 << 0)
+    bic x1, x1, #(1 << 2)
+    bic x1, x1, #(1 << 12)
+    dsb sy
+    msr sctlr_el2, x1
+    isb
 
     ldr x1, [x0, #{hcr}]
     msr hcr_el2, x1
@@ -522,8 +577,8 @@ hopos_smp_entry:
 
 #[cfg(not(all(target_os = "none", target_arch = "aarch64")))]
 mod arch {
-    //! Host-stub: geen registers, geen entry. De opgang loopt tot PSCI, en
-    //! die zegt op de host NOT_SUPPORTED.
+    //! Host-stub: geen registers, geen entry. De opgang loopt tot CPU_ON,
+    //! en PSCI zegt op de host NOT_SUPPORTED.
     use super::Regime;
 
     pub(super) fn regime() -> Regime {
@@ -612,6 +667,30 @@ mod tests {
         let mut v = vec![0u64; 32];
         let pa = Pa(v.as_mut_ptr() as usize as u64);
         (v, pa)
+    }
+
+    /// Het doel dat de test-haak aanneemt; elk ander zegt NOT_SUPPORTED,
+    /// zoals PSCI op de host (de andere tests draaien parallel en zien de
+    /// haak ook).
+    const HOOKED: u64 = 0xA11E;
+    static HOOK_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn board_cpu_on(target: u64, entry: u64, ctx: u64) -> core::result::Result<(), psci::Error> {
+        if target != HOOKED {
+            return Err(psci::Error::NotSupported);
+        }
+        assert_eq!((entry, ctx), (0x8000, 0x4000_1000));
+        HOOK_CALLS.fetch_add(1, Release);
+        Ok(())
+    }
+
+    #[test]
+    fn a_board_cpu_on_replaces_psci() {
+        set_cpu_on(board_cpu_on);
+        let (_buf, mb) = mailbox();
+        assert_eq!(dispatch(mb, HOOKED, 0x8000, 0x4000_1000), Ok(Start::Cold));
+        assert_eq!(HOOK_CALLS.load(Acquire), 1);
+        assert_eq!(cpu_on(7, 0x8000, 0), Err(psci::Error::NotSupported));
     }
 
     #[test]

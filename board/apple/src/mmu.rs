@@ -31,8 +31,27 @@
 //! met de MMU uit, dus ze staan meteen in het geheugen.
 
 use crate::{DMA, DRAM_BASE, KERN_RAM, LOADER};
-use cpu::boot::{ATTR_DEVICE, ATTR_NORMAL, ATTR_NORMAL_NC, block};
+use cpu::boot::{ATTR_DEVICE, ATTR_NORMAL, ATTR_NORMAL_NC};
 use dev::Pa;
+
+/// XN van `cpu::boot::block`: in het EL2&0-regime (E2H = 1) is bit 54 UXN,
+/// alleen voor EL0.
+const UXN: u64 = 1 << 54;
+/// PXN: wat de kern op EL2 onder E2H = 1 werkelijk niet laat uitvoeren.
+const PXN: u64 = 1 << 53;
+
+/// Een blokdescriptor zoals `cpu::boot::block`, plus PXN op elk blok dat
+/// daar XN is. `cpu::boot` schrijft de nVHE-vorm (bit 54 is daar XN voor
+/// EL2); op dit VHE-only silicium is bit 54 alleen UXN en mocht de kern
+/// speculatief instructies halen uit Device-blokken (MMIO, de firmware in
+/// het DRAM, het kooi-venster) en uit de DMA-regio. Het gat zag de
+/// VHE-agent bij board-uefi (29-09, `board_uefi::el2::PXN`); hier dezelfde
+/// regel. De kern-RAM en de loader-regio blijven uitvoerbaar.
+#[must_use]
+pub(crate) const fn block(pa: u64, attr: u64) -> u64 {
+    let d = cpu::boot::block(pa, attr);
+    if d & UXN != 0 { d | PXN } else { d }
+}
 
 /// Geldig, tabel.
 const TABLE: u64 = 0b11;
@@ -199,9 +218,16 @@ mod tests {
         assert_eq!((walk(tables, DMA.base.0).unwrap() >> 2) & 7, ATTR_NORMAL_NC);
         assert_eq!((walk(tables, ADMIN.base.0).unwrap() >> 2) & 7, ATTR_DEVICE);
         assert_eq!((walk(tables, LOADER.base.0).unwrap() >> 2) & 7, ATTR_NORMAL);
-        // De kern-RAM is uitvoerbaar, de rest niet.
-        assert_eq!(walk(tables, KERN_RAM.base.0).unwrap() & (1 << 54), 0);
-        assert_ne!(walk(tables, WINDOW_END).unwrap() & (1 << 54), 0);
+        // De kern-RAM is uitvoerbaar, de rest niet: onder E2H = 1 is dat PXN
+        // (53), niet alleen UXN (54).
+        let xn = UXN | PXN;
+        assert_eq!(walk(tables, KERN_RAM.base.0).unwrap() & xn, 0);
+        assert_eq!(walk(tables, LOADER.base.0).unwrap() & xn, 0);
+        assert_eq!(walk(tables, WINDOW_END).unwrap() & xn, xn);
+        assert_eq!(walk(tables, ADMIN.base.0).unwrap() & xn, xn);
+        assert_eq!(walk(tables, DMA.base.0).unwrap() & xn, xn);
+        assert_eq!(walk(tables, 0x3_8100_0000).unwrap() & xn, xn, "MMIO");
+        assert_eq!(walk(tables, DRAM_BASE).unwrap() & xn, xn, "firmware");
         // 24 GB: de laatste 2 MB wel, de GB erna niet.
         assert!(walk(tables, DRAM_BASE + (24 << 30) - MB2).is_some());
         assert!(walk(tables, DRAM_BASE + (24 << 30)).is_none());

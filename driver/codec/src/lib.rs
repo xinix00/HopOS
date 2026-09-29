@@ -141,6 +141,37 @@ impl Codec {
             .find(|c| c.name() == name)
             .unwrap_or(Codec::Unknown)
     }
+
+    /// De codec bij de extensie van een bestandsnaam (Go: `codecFromName`
+    /// in `codecdemo.go`): `.hevc`/`.265`, `.h264`/`.264`, `.av1`, ... Een
+    /// kale elementaire stream draagt geen kop die zegt wat hij is; de naam
+    /// is de enige aanwijzing. Onbekend wordt [`Codec::Unknown`].
+    #[must_use]
+    pub fn from_file_name(path: &str) -> Codec {
+        let Some((_, ext)) = path.rsplit_once('.') else {
+            return Codec::Unknown;
+        };
+        let is = |names: &[&str]| names.iter().any(|n| ext.eq_ignore_ascii_case(n));
+        if is(&["h264", "264", "avc"]) {
+            Codec::H264
+        } else if is(&["hevc", "265", "h265"]) {
+            Codec::Hevc
+        } else if is(&["av1", "obu"]) {
+            Codec::Av1
+        } else if is(&["vp9"]) {
+            Codec::Vp9
+        } else if is(&["vp8"]) {
+            Codec::Vp8
+        } else if is(&["mpeg2", "m2v"]) {
+            Codec::Mpeg2
+        } else if is(&["vc1"]) {
+            Codec::Vc1
+        } else if is(&["jpg", "jpeg", "mjpeg"]) {
+            Codec::Jpeg
+        } else {
+            Codec::Unknown
+        }
+    }
 }
 
 impl fmt::Display for Codec {
@@ -195,6 +226,22 @@ impl Pixel {
             Pixel::P010 => "p010",
             Pixel::Y8 => "y8",
         }
+    }
+
+    /// Het formaat bij een naam (bootparameter, env van een app); onbekend
+    /// wordt [`Pixel::None`].
+    #[must_use]
+    pub fn parse(name: &str) -> Pixel {
+        [
+            Pixel::Nv12,
+            Pixel::Nv21,
+            Pixel::I420,
+            Pixel::P010,
+            Pixel::Y8,
+        ]
+        .into_iter()
+        .find(|p| p.name().eq_ignore_ascii_case(name))
+        .unwrap_or(Pixel::None)
     }
 }
 
@@ -715,6 +762,24 @@ mod tests {
         assert_eq!(Direction::from_raw(1), Direction::Encode);
         assert_eq!(Direction::from_raw(7), Direction::Decode);
         assert_eq!(Flags::EOS.0 | Flags::HEADERS.0 | Flags::KEY_FRAME.0, 7);
+    }
+
+    /// De extensies van Go's `codecFromName`, plus de pixelnamen van de
+    /// bootparameter en de env.
+    #[test]
+    fn the_codec_comes_from_the_file_name() {
+        assert_eq!(Codec::from_file_name("/data/clip.hevc"), Codec::Hevc);
+        assert_eq!(Codec::from_file_name("x.265"), Codec::Hevc);
+        assert_eq!(Codec::from_file_name("x.H264"), Codec::H264);
+        assert_eq!(Codec::from_file_name("a.b/film.avc"), Codec::H264);
+        assert_eq!(Codec::from_file_name("x.obu"), Codec::Av1);
+        assert_eq!(Codec::from_file_name("x.m2v"), Codec::Mpeg2);
+        assert_eq!(Codec::from_file_name("x.jpeg"), Codec::Jpeg);
+        assert_eq!(Codec::from_file_name("x.mkv"), Codec::Unknown);
+        assert_eq!(Codec::from_file_name("clip"), Codec::Unknown);
+        assert_eq!(Pixel::parse("p010"), Pixel::P010);
+        assert_eq!(Pixel::parse("NV12"), Pixel::Nv12);
+        assert_eq!(Pixel::parse("rgb"), Pixel::None);
     }
 
     #[test]

@@ -14,15 +14,21 @@
 //! 3. **De whitelist houdt**: een tweede bewoner zonder vertaling schrijft
 //!    naar 0x8000_0000 (de kern); PMP weigert (mcause 7), de switcher meldt
 //!    het op zijn control-page en zet hem dood.
+//! 4. **De kill-tick**: een derde bewoner die nooit yieldt (`j .`) wordt
+//!    ingetrokken (`CTX_REVOKE`) zonder bel; de tick van de switcher ziet het
+//!    woord en zet hem dood.
+//! 5. **De intrekking van een slaper**: een vierde yieldt met een wektijd in
+//!    de verre toekomst en wordt ingetrokken met de bel; de rotatie zet hem
+//!    dood zonder hem nog één instructie te geven.
 //!
 //! Draait bij boot op hart 0, vóór de slots de pool en de kooi-regio
 //! krijgen; wat hij beschrijft, wist hij weer.
 
 use abi::hopabi::{CTRL_FAULT_ESR, CTRL_FAULT_FAR, CTRL_FAULT_VEC};
 use abi::layout::{
-    CTX_BOOT_ARG, CTX_BOOT_PC, CTX_CTRL_PA, CTX_LEN, CTX_REGIME, CTX_RESUME, CTX_STATE, CtxState,
-    LINK_BASE, PARK_MBOX_LEN, SCHED_CLINT_PA, SCHED_COUNT, SCHED_LIST, SCHED_MSIP_PA, SCHED_S2_PA,
-    SCHED_SLEEP_CAP,
+    CTX_BOOT_ARG, CTX_BOOT_PC, CTX_CTRL_PA, CTX_LEN, CTX_REGIME, CTX_RESUME, CTX_REVOKE, CTX_STATE,
+    CtxState, LINK_BASE, PARK_MBOX_LEN, SCHED_CLINT_PA, SCHED_COUNT, SCHED_LIST, SCHED_MSIP_PA,
+    SCHED_S2_PA, SCHED_SLEEP_CAP, SCHED_TICK_TICKS,
 };
 use cpu::riscv::pmp::{self, Window};
 use cpu::riscv::sv39::{self, Attrs, MapWindow, Tables};
@@ -42,6 +48,14 @@ const YIELD_EXIT: [u32; 6] = [
 /// De bewoner die de kooi test: `li t0,1; slli t0,t0,31; sd zero,0(t0);
 /// j .` (een store naar 0x8000_0000, de kern).
 const ESCAPE: [u32; 4] = [0x0010_0293, 0x01f2_9293, 0x0002_b023, 0x0000_006f];
+/// De bewoner die nooit yieldt: `j .`.
+const SPIN: [u32; 1] = [0x0000_006f];
+/// De bewoner die slaapt tot nooit: `li a0,-1; li a7,0; ecall; j .` (de
+/// wektijd u64::MAX, zonder het no-peek-bit 0x7fff...).
+const SLEEP: [u32; 4] = [0xfff0_0513, 0x0000_0893, 0x0000_0073, 0x0000_006f];
+
+/// De kill-tick van de zelftest: 1 ms, zodat de toets snel is.
+const TICK_NS: u64 = 1_000_000;
 
 /// Wat de zelftest zag.
 #[derive(Debug, Default, Clone, Copy)]
@@ -54,6 +68,12 @@ pub struct Report {
     pub second: u64,
     /// mcause, mtval en vec op de control-page van de tweede.
     pub fault: (u64, u64, u64),
+    /// De eindstaat van de spinner na de intrekking (verwacht Dead), en na
+    /// hoeveel microseconden.
+    pub spin: (u64, u64),
+    /// De eindstaat van de slaper na de intrekking (verwacht Dead), en zijn
+    /// staat ervoor (verwacht Saved).
+    pub sleeper: (u64, u64),
 }
 
 impl Report {
@@ -64,6 +84,8 @@ impl Report {
             && self.first == CtxState::Dead as u64
             && self.second == CtxState::Dead as u64
             && self.fault == (7, 0x8000_0000, 1)
+            && self.spin.0 == CtxState::Dead as u64
+            && self.sleeper == (CtxState::Dead as u64, CtxState::Saved as u64)
     }
 }
 
@@ -72,6 +94,12 @@ fn copy_code(pa: u64, code: &[u32]) {
         dev::write32(Pa(pa + 4 * i as u64), *w);
     }
     dev::push(Pa(pa), 4 * code.len());
+}
+
+/// Trekt de bewoner van `ctx` in (het woord van de kern, eigen regel).
+fn revoke(ctx: Pa) {
+    dev::write64(ctx.add(CTX_REVOKE), 1);
+    dev::push(ctx.add(CTX_REVOKE), 8);
 }
 
 fn wait_state(ctx: Pa, want: u64, ms: u64) -> u64 {
@@ -109,6 +137,10 @@ pub fn selftest(
     dev::write64(
         sched.add(SCHED_SLEEP_CAP),
         cpu::riscv::idle::ns_to_ticks(cpu::riscv::idle::WFI_CAP_QEMU_NS, cpu::riscv::idle::hz()),
+    );
+    dev::write64(
+        sched.add(SCHED_TICK_TICKS),
+        cpu::riscv::idle::ns_to_ticks(TICK_NS, cpu::riscv::idle::hz()),
     );
     dev::write64(sched.add(SCHED_LIST), SLOT);
     dev::write64(sched.add(SCHED_COUNT), 1);
@@ -164,6 +196,27 @@ pub fn selftest(
         dev::read64(Pa(ctrl + CTRL_FAULT_FAR)),
         dev::read64(Pa(ctrl + CTRL_FAULT_VEC)),
     );
+
+    // De spinner: draait, en wordt zonder bel ingetrokken. Alleen de
+    // kill-tick kan hem zien.
+    copy_code(part, &SPIN);
+    arm(ctx, &enc, 0, part, ctrl);
+    clint.set_msip(hart, true);
+    let _ = wait_state(ctx, CtxState::Running as u64, 200);
+    let t0 = cpu::riscv::idle::now();
+    revoke(ctx);
+    let spun = wait_state(ctx, CtxState::Dead as u64, 200);
+    let spin = (spun, cpu::riscv::idle::now().saturating_sub(t0) / 1000);
+
+    // De slaper: yieldt tot nooit, en wordt met de bel ingetrokken.
+    copy_code(part, &SLEEP);
+    arm(ctx, &enc, 0, part, ctrl);
+    clint.set_msip(hart, true);
+    let before = wait_state(ctx, CtxState::Saved as u64, 200);
+    revoke(ctx);
+    clint.set_msip(hart, true);
+    let after = wait_state(ctx, CtxState::Dead as u64, 200);
+
     // Opruimen: de lijst leeg, de partitie terug naar nul.
     dev::write64(sched.add(SCHED_COUNT), 0);
     dev::push(sched, PARK_MBOX_LEN as usize);
@@ -174,12 +227,15 @@ pub fn selftest(
         first,
         second,
         fault,
+        spin,
+        sleeper: (after, before),
     })
 }
 
 /// Zet een koude boot klaar: het regime, de ingang, de control-page, en als
 /// laatste de staat.
 fn arm(ctx: Pa, enc: &pmp::Encoded, satp: u64, entry: u64, ctrl: u64) {
+    dev::clear(ctx, CTX_LEN as usize);
     let r = ctx.add(CTX_REGIME);
     dev::write64(r.add(REGIME_SATP), satp);
     dev::write64(r.add(REGIME_PMPCFG0), enc.cfg);

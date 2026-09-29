@@ -385,6 +385,59 @@ fn udp_round_trip() {
     );
 }
 
+/// Multicast: een socket op de poort van de groep hoort een datagram naar
+/// de groep pas na de join; de kern zendt naar de groep zoals de switch
+/// het naar elk slot floodt.
+#[test]
+fn a_group_datagram_arrives_only_after_the_join() {
+    const MDNS: Endpoint = Endpoint {
+        ip: [224, 0, 0, 251],
+        port: 5353,
+    };
+    let p = pair();
+    let kern = p.kern;
+    let app = p.app;
+    let got = slot();
+    let listen = app.udp_bind(MDNS.port).unwrap();
+    p.exec
+        .spawn(async move {
+            let mut buf = [0u8; 64];
+            let mut out = Vec::new();
+            // Vóór de join: de stack laat het datagram vallen, de wacht
+            // loopt af.
+            let mut l = listen;
+            l.set_timeout(Some(Duration::from_millis(50)));
+            out.push(l.recv_from(&mut buf).await.map(|(n, _)| buf[..n].to_vec()));
+            app.join_group(MDNS.ip).unwrap();
+            // Een tweede join is geen fout en geen tweede groep.
+            app.join_group(MDNS.ip).unwrap();
+            l.set_timeout(Some(Duration::from_millis(50)));
+            out.push(l.recv_from(&mut buf).await.map(|(n, _)| buf[..n].to_vec()));
+            *got.borrow_mut() = Some(out);
+        })
+        .unwrap();
+    p.exec
+        .spawn(async move {
+            let s = kern.udp_bind(5354).unwrap();
+            s.send_to(MDNS, b"early").await.unwrap();
+            // Na de wacht van de luisteraar: de join is er dan.
+            kern.exec.after(Duration::from_millis(60)).await;
+            s.send_to(MDNS, b"probe").await.unwrap();
+        })
+        .unwrap();
+    p.run_until(|| got.borrow().is_some());
+    let out = got.borrow_mut().take().unwrap();
+    assert_eq!(out[0], Err(NetError::Timeout));
+    assert_eq!(out[1], Ok(b"probe".to_vec()));
+    // Alleen link-local: een groep daarbuiten weigert de stack.
+    assert_eq!(
+        app.join_group([239, 1, 1, 1]),
+        Err(NetError::Stack(StackError::NotLinkLocalMulticast {
+            ip: [239, 1, 1, 1]
+        }))
+    );
+}
+
 #[test]
 fn budget_env_and_address_parsing() {
     assert_eq!(budget_for(16 << 20, None), 2 << 20);

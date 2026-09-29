@@ -8,7 +8,7 @@
 //! | `BENCH=pull`, `BENCH=push` (met `BENCH_PEER`, `BENCH_BYTES`) | doorvoer app naar app door de switch | `HOPOS_BENCH_PULL`, `HOPOS_BENCH_PUSH` |
 //! | `BURN=1` (`BURN_WORK`, `BURN_REST`) | rekenen in een werk/rust-ritme ([`load::burn`]) | `HOPOS_BENCH_BURN` |
 //! | `THRASH=1` | de heap tot 3/5 vullen en churnen ([`load::thrash`]) | `HOPOS_BENCH_THRASH` |
-//! | `MCAST=send` of `MCAST=listen` | mDNS-groep ([`load::mcast`]) | `HOPOS_BENCH_MCAST` |
+//! | `MCAST=send` of `MCAST=listen` | mDNS-groep 224.0.0.251:5353 ([`load::mcast`]); `listen` joint de groep | `HOPOS_BENCH_MCAST`, bij `listen` met `recv=N` |
 //! | `NETDEMO=out` (`NETDEMO_NAME`) | één DNS-vraag door de NAT naar buiten | `HOPOS_BENCH_NETDEMO` |
 //!
 //! Van de Go-rollen vielen weg: `NETDEMO=listen` en `dial` (dat zijn nu

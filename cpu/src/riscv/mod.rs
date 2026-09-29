@@ -20,7 +20,8 @@
 //! kick), [`idle`] (de [`executor::Sleeper`] en de klok), [`plic`] (de
 //! [`crate::irq::Controller`]), [`trng`] (er is er geen: luid). Het
 //! kooi-spoor: [`pmp`] (de whitelist, TOR), [`sv39`] (de relocatie), en
-//! [`switch`] (de M-mode-switcher op een app-hart).
+//! [`switch`] (de M-mode-switcher op een app-hart), [`oscore`] (de
+//! bewoners van het hart van de kern, in zijn idle).
 //!
 //! Wat NIET hier staat: het cache-onderhoud (`th.dcache.*` van de C906). Dat
 //! is `dev::push`/`dev::pull` achter de feature `thead` van `dev`, want
@@ -33,6 +34,7 @@ pub mod boot;
 pub mod clint;
 pub mod csr;
 pub mod idle;
+pub mod oscore;
 pub mod plic;
 pub mod pmp;
 pub mod sv39;

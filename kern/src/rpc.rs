@@ -22,6 +22,17 @@
 //! splitst later in een metadata-actor en een blok-actor, waarbij een
 //! servicer zijn extents vraagt ([`Fs::lookup`]) en zijn eigen I/O doet.
 //!
+//! # De kern als lezer
+//!
+//! De kern leest zelf ook van het volume, zonder slot en zonder generatie
+//! ([`FsMsg::KernRead`], [`kern_read`], [`read_file`]): de firmware van de
+//! videocodec (`/firmware/<naam>.fwb`, zestien blobs van zo'n 300 KB) en de
+//! teststream van het meetinstrument. Dezelfde actor, dezelfde brievenbus:
+//! de lezing is een bericht als elk ander en loopt dus nooit door een
+//! schrijf van een app heen. Het pad is een hopfs-pad, geen app-pad; de
+//! eigen roots van de taken ([`TASKS_DIR`]) zijn ook voor de kern dicht,
+//! want er is geen kern-lezing die daar iets te zoeken heeft.
+//!
 //! # Vastleggen
 //!
 //! [`committer`] legt de boom vast elke [`COMMIT_EVERY`] (Go:
@@ -289,6 +300,24 @@ pub enum FsMsg {
     Freeze,
     /// De flip ging niet door: de actor neemt weer calls aan.
     Thaw,
+    /// Een lezing voor de kern zelf ([`kern_read`]); het antwoord is een
+    /// [`FsDone`] met het pad in `buf`, de data vooraan in `out` en als
+    /// uitkomst `(bestandsmaat, gelezen bytes)`.
+    KernRead(KernRead),
+}
+
+/// Een lezing voor de kern zelf: een hopfs-pad, zonder slot en generatie.
+/// De buffers gaan als waarde heen en terug (handboek §1.2), zodat een
+/// aanroeper die in stukken leest (de teststream) nooit per stuk alloceert:
+/// de kern-heap is een bump-allocator.
+#[derive(Debug)]
+pub struct KernRead {
+    /// Het absolute hopfs-pad (`/firmware/hevcdec.fwb`).
+    pub path: Vec<u8>,
+    /// De offset in het bestand.
+    pub off: u64,
+    /// De bestemming: hooguit `out.len()` bytes, vooraan. Leeg is een stat.
+    pub out: Vec<u8>,
 }
 
 /// Een bericht met zijn antwoordplek.
@@ -314,7 +343,7 @@ pub async fn call<'a>(
     }) {
         return match env.msg {
             FsMsg::Call(c) => Err(c),
-            FsMsg::Commit(_) | FsMsg::Freeze | FsMsg::Thaw => Ok(FsDone {
+            FsMsg::Commit(_) | FsMsg::Freeze | FsMsg::Thaw | FsMsg::KernRead(_) => Ok(FsDone {
                 buf: Vec::new(),
                 out: Vec::new(),
                 result: Err(Error::Busy),
@@ -349,6 +378,75 @@ pub async fn freeze<'a>(inbox: &FsInbox<'a>, reply: &'a Reply) -> Result<u64> {
             return d.result.map(|(generation, _)| generation);
         }
     }
+}
+
+/// Leest voor de kern zelf: `r.out` vooraan gevuld vanaf `r.off`, of alleen
+/// de maat als `r.out` leeg is. Geeft altijd beide buffers terug (`buf` is
+/// het pad), ook bij een fout; een volle brievenbus is [`Error::Busy`].
+/// Een termijn legt de aanroeper er zelf omheen (een `select` met zijn
+/// timer), zoals bij [`freeze`].
+pub async fn kern_read<'a>(inbox: &FsInbox<'a>, reply: &'a Reply, r: KernRead) -> FsDone {
+    let _ = reply.done.take();
+    if let Err(sync::Full(env)) = inbox.try_send(FsEnvelope {
+        msg: FsMsg::KernRead(r),
+        reply: Some(reply),
+    }) {
+        let (buf, out) = match env.msg {
+            FsMsg::KernRead(r) => (r.path, r.out),
+            FsMsg::Call(c) => (c.buf, c.out),
+            FsMsg::Commit(_) | FsMsg::Freeze | FsMsg::Thaw => (Vec::new(), Vec::new()),
+        };
+        return FsDone {
+            buf,
+            out,
+            result: Err(Error::Busy),
+        };
+    }
+    loop {
+        reply.done.wait().await;
+        if let Some(d) = reply.take_fs() {
+            return d;
+        }
+    }
+}
+
+/// Leest een heel bestand voor de kern (de firmware van de codec): eerst de
+/// maat, dan precies zoveel bytes in één lezing. Groter dan `max` is
+/// [`Error::TooLarge`] vóór er iets gealloceerd wordt; een bestand dat
+/// tussen maat en lezing kromp, is [`Error::Corrupt`] in plaats van een
+/// blob met een staart van nullen.
+pub async fn read_file<'a>(
+    inbox: &FsInbox<'a>,
+    reply: &'a Reply,
+    path: &[u8],
+    max: usize,
+) -> Result<Vec<u8>> {
+    let r = KernRead {
+        path: crate::slots::try_vec(path)?,
+        off: 0,
+        out: Vec::new(),
+    };
+    let d = kern_read(inbox, reply, r).await;
+    let (size, _) = d.result?;
+    let len = usize::try_from(size).unwrap_or(usize::MAX);
+    if len > max {
+        return Err(Error::TooLarge { len, max });
+    }
+    let mut out: Vec<u8> = Vec::new();
+    out.try_reserve_exact(len)
+        .map_err(|_| Error::OutOfMemory { bytes: len })?;
+    out.resize(len, 0);
+    let r = KernRead {
+        path: d.buf,
+        off: 0,
+        out,
+    };
+    let d = kern_read(inbox, reply, r).await;
+    let (_, n) = d.result?;
+    if n != len {
+        return Err(Error::Corrupt { at: n });
+    }
+    Ok(d.out)
 }
 
 /// Ontdooit de actor na een flip die niet doorging. Vuur-en-vergeet: een
@@ -466,6 +564,23 @@ impl<'s, D: BlockDevice, L: Console> FsActor<'s, D, L> {
                         });
                     }
                 }
+                FsMsg::KernRead(mut r) => {
+                    // Bevroren weigert ook de kern: na de bevriezing hoort de
+                    // schijf van de volgende kern, en een lezing die daarna
+                    // nog lukt, zou een vergeten afhankelijkheid verstoppen.
+                    let result = if self.frozen {
+                        Err(Error::Busy)
+                    } else {
+                        self.kern_read(&r.path, r.off, &mut r.out)
+                    };
+                    if let Some(reply) = env.reply {
+                        reply.put_fs(FsDone {
+                            buf: r.path,
+                            out: r.out,
+                            result,
+                        });
+                    }
+                }
                 FsMsg::Thaw => {
                     self.frozen = false;
                     self.log.log(format_args!(
@@ -490,6 +605,26 @@ impl<'s, D: BlockDevice, L: Console> FsActor<'s, D, L> {
             "hopfs: tree committed as generation {g} and frozen for the kernel flip HOPOS_FS_FROZEN generation={g}"
         ));
         Ok((g, 0))
+    }
+
+    /// Eén lezing voor de kern ([`FsMsg::KernRead`]): de bestandsmaat en
+    /// hoeveel bytes er vooraan in `out` kwamen. Een map is [`Error::Kind`],
+    /// een pad onder [`TASKS_DIR`] [`Error::Denied`].
+    pub fn kern_read(&mut self, path: &[u8], off: u64, out: &mut [u8]) -> Result<(u64, usize)> {
+        clean_abs(path, &mut self.path)?;
+        let p = self.path.as_bytes();
+        if under(p, TASKS_DIR) {
+            return Err(Error::Denied);
+        }
+        let (size, dir) = self.fs.stat(p)?;
+        if dir {
+            return Err(Error::Kind);
+        }
+        if out.is_empty() {
+            return Ok((size, 0));
+        }
+        let n = self.fs.read_at(p, off, out)?;
+        Ok((size, n))
     }
 
     /// De generatie van de laatst vastgelegde boom.

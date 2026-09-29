@@ -203,9 +203,10 @@ impl QemuVirtRiscv {
         )
     }
 
-    /// De bel van de OS-core-rotatie van arm64. Op riscv64 is er geen
-    /// rotatie (`cpu::riscv::idle::RvSleeper::host`); dit is de stub die de
-    /// gedeelde lijm laat bouwen.
+    /// De bel van de OS-core-rotatie van arm64 (een GIC-SGI). Op riscv64
+    /// is de kick van de kern-hart zijn `msip` ([`Self::kick_self`],
+    /// `cpu::riscv::oscore`); dit is de stub die de gedeelde lijm laat
+    /// bouwen.
     #[must_use]
     pub fn os_bell(&self) -> cpu::el2::Bell {
         cpu::el2::Bell {
@@ -225,6 +226,39 @@ impl QemuVirtRiscv {
     #[must_use]
     pub const fn clint(&self) -> Clint {
         CLINT_DEV
+    }
+
+    /// Wat de kooi van app-hart `hart` moet weten: de SiFive-CLINT van virt
+    /// is gedeeld (elk hart zijn eigen `msip` en `mtimecmp` op zijn index),
+    /// QEMU wekt een `wfi` betrouwbaar op de wekker, en er is geen
+    /// resetblok: de kill-tick is het mes. Zonder bewezen CLINT geen wekker
+    /// (de switcher spint) en dus ook geen tick.
+    #[must_use]
+    pub fn app_hart(&self, hart: usize) -> cpu::riscv::switch::AppHart {
+        let hz = cpu::riscv::idle::hz();
+        let clint = CLINT_OK.load(Relaxed);
+        cpu::riscv::switch::AppHart {
+            mtimecmp: if clint {
+                CLINT_DEV.mtimecmp(hart)
+            } else {
+                Pa(0)
+            },
+            msip: CLINT_DEV.msip(hart),
+            sleep_cap: cpu::riscv::idle::ns_to_ticks(cpu::riscv::idle::WFI_CAP_QEMU_NS, hz),
+            tick: cpu::riscv::idle::ns_to_ticks(cpu::riscv::switch::KILL_TICK_NS, hz),
+            attrs: cpu::riscv::sv39::Attrs::Spec,
+            pmp: cpu::riscv::pmp::QEMU,
+            resettable: false,
+        }
+    }
+
+    /// Brengt app-hart `hart` naar de parkeerlus: op QEMU niets, want elk
+    /// hart begint daar bij de reset (`-bios none`).
+    pub fn start_app_hart(&self, _hart: usize) {}
+
+    /// Het resetblok van een app-hart: QEMU virt heeft er geen.
+    pub fn hold_app_hart(&self, _hart: usize) -> bool {
+        false
     }
 
     /// De zelftest van de riscv-kooi op hart 1 ([`cage`]), één regel met
@@ -260,13 +294,17 @@ impl QemuVirtRiscv {
             CLINT_DEV,
         ) {
             Ok(r) => cpu::println!(
-                "cage: riscv switcher on hart {hart}: yield resumed at {:#x}, exit state {}, escape state {} with mcause {} mtval {:#x} vec {} {}",
+                "cage: riscv switcher on hart {hart}: yield resumed at {:#x}, exit state {}, escape state {} with mcause {} mtval {:#x} vec {}, spinner state {} after the kill tick ({} us), sleeper state {} -> {} {}",
                 r.resume,
                 r.first,
                 r.second,
                 r.fault.0,
                 r.fault.1,
                 r.fault.2,
+                r.spin.0,
+                r.spin.1,
+                r.sleeper.1,
+                r.sleeper.0,
                 if r.ok() {
                     "HOPOS_RV_CAGE_UP"
                 } else {

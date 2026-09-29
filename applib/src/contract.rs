@@ -68,8 +68,9 @@ mod tests {
     fn derived_geometry_matches_the_go_numbers() {
         assert_eq!(RING_DATA_CAP, 0x7000);
         assert_eq!(NET_RING_DATA_CAP, 0xE_F000);
-        // 0xED8 tot 29-09; de temperatuur (CTRL_TEMP) nam er 8 van.
-        assert_eq!(CTRL_ENV_MAX, 0xED0);
+        // 0xED8 tot 29-09; de temperatuur (CTRL_TEMP) en de timebase
+        // (CTRL_TIMEBASE_HZ) namen er elk 8 van.
+        assert_eq!(CTRL_ENV_MAX, 0xEC8);
         assert_eq!(ABI_TAIL, 0x20_0000);
         assert_eq!((KIND_CALL, KIND_RESULT, KIND_LOG), (1, 2, 3));
     }

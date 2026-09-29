@@ -21,11 +21,14 @@ driver-virtionet = { path = "../../driver/virtionet" }
 driver-virtioblk = { path = "../../driver/virtioblk" }
 # De framebuffer-beschrijving van `Board::framebuffer` (ramfb.rs).
 driver-fb = { path = "../../driver/fb" }
+# De qemu-xhci op de PCIe-host (usb.rs), alleen met `gui`.
+driver-pcie = { path = "../../driver/pcie", optional = true }
 
 [lints]
 workspace = true
 
 [features]
 default = []
-# `-device ramfb` over fw_cfg (ramfb.rs): de console op het glas in QEMU.
-gui = []
+# `-device ramfb` over fw_cfg (ramfb.rs): de console op het glas in QEMU,
+# en de qemu-xhci op PCIe (usb.rs).
+gui = ["dep:driver-pcie"]

@@ -20,7 +20,8 @@
 //! UART-postmortem moet een bevroren node blijven staan.
 //!
 //! De hardware per board: de SBSA-watchdog uit de GTDT op de UEFI-boards
-//! (`board_uefi::watchdog`; QEMU heeft er geen), en nog niets op de Pi's
+//! (`board_uefi::watchdog`; QEMU heeft er geen), de primaire van
+//! `/arm-io/wdt` op de Mac mini (`board_apple::wdt`), en nog niets op de Pi's
 //! (de PM-watchdog via de mailbox is van het Pi-spoor: de haak is [`hw`],
 //! één module met dezelfde signatuur) en op virt.
 
@@ -174,8 +175,16 @@ fn say(e: &Event, hw: &hw::Hw) {
     }
 }
 
-/// De hardware op de UEFI-boards: de SBSA-watchdog uit de GTDT.
-#[cfg(any(feature = "board-uefi", feature = "board-o6n", feature = "board-altra"))]
+/// De hardware op de UEFI-boards: de SBSA-watchdog uit de GTDT. De
+/// LicheeRV geeft dezelfde vier namen (`board_licheerv::watchdog`, de
+/// DW-WDT; wapent alleen als de probe van de boot antwoordde, en
+/// `hopos.cfg` komt uit het venster in het image).
+#[cfg(any(
+    feature = "board-uefi",
+    feature = "board-o6n",
+    feature = "board-altra",
+    feature = "board-licheerv"
+))]
 mod hw {
     use core::fmt;
     use vboard::watchdog as wd;
@@ -235,10 +244,81 @@ mod hw {
     }
 }
 
+/// De Mac mini: de primaire watchdog van `/arm-io/wdt`, dezelfde die
+/// `discover` bij de boot stil zette (iBoot laat er meer dan één gewapend
+/// achter; natief resette de node zonder dat op 1:43, 31-08). Dezelfde vorm
+/// als de UEFI-module hierboven, met `board_apple::wdt`.
+#[cfg(feature = "board-apple")]
+mod hw {
+    use core::fmt;
+    use vboard::wdt;
+
+    /// De primaire van `/arm-io/wdt`; na `arm` zijn beschrijving of de reden
+    /// van falen.
+    pub(super) struct Hw {
+        desc: Option<wdt::Desc>,
+        why: &'static str,
+    }
+
+    impl kern::watchdog::Hardware for Hw {
+        fn arm(&mut self) -> bool {
+            // 30 s (Go `wdtTimeout`): de ANS en de SMC blokkeren bij hun
+            // opstart tot seconden (RTKit `POWER_TIMEOUT_NS`).
+            match wdt::arm(wdt::WDT_TIMEOUT_MS) {
+                Ok(d) => {
+                    self.desc = Some(d);
+                    true
+                }
+                Err(why) => {
+                    self.why = why;
+                    false
+                }
+            }
+        }
+        fn pet(&mut self) {
+            wdt::pet();
+        }
+    }
+
+    impl fmt::Display for Hw {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match &self.desc {
+                Some(d) => write!(f, "{d}"),
+                None => f.write_str(self.why),
+            }
+        }
+    }
+
+    /// Er is een kandidaat als de boom er een beschrijft; of hij wapent,
+    /// zegt `arm`.
+    pub(super) fn hardware() -> Option<Hw> {
+        Some(Hw {
+            desc: None,
+            why: "not armed",
+        })
+    }
+
+    /// Zet een gewapende watchdog uit (`hopos.wd=off`).
+    pub(super) fn off() -> bool {
+        wdt::off()
+    }
+
+    /// Een sleutel uit `hopos.cfg` (het venster in het image, of de loader).
+    pub(super) fn param(key: &'static str) -> &'static str {
+        fw::bootcfg::first(fw::bootcfg::all(crate::BOARD.config(), key))
+    }
+}
+
 /// De rest: geen watchdog bedraad. De Pi-watchdog (de PM-watchdog via de
 /// mailbox) hoort hier zodra het Pi-spoor hem levert: een eigen module met
 /// dezelfde vier namen.
-#[cfg(not(any(feature = "board-uefi", feature = "board-o6n", feature = "board-altra")))]
+#[cfg(not(any(
+    feature = "board-uefi",
+    feature = "board-o6n",
+    feature = "board-altra",
+    feature = "board-apple",
+    feature = "board-licheerv"
+)))]
 mod hw {
     use core::fmt;
 

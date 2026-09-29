@@ -37,6 +37,16 @@
 //! dispatch, `adopt` bij de adoptie na een flip, en `release` na een
 //! bevestigde stop en bij elke abort. Eén eigenaar voor partitie én glas:
 //! wie de grant vrijgeeft, weet dat de houder niet meer draait.
+//!
+//! # De device-reservering
+//!
+//! Een apparaat dat met DMA in gewoon DRAM werkt (de videocodec van de O6N:
+//! page tables, firmware, referentieframes) krijgt een blok BUITEN de
+//! partities: [`Request::ReserveDevice`] (Go: `slots.ReserveDevice`). Ook
+//! dat is een bericht aan de eigenaar van de pool, geen tweede pool: de
+//! kern vraagt het één keer bij boot (`hopos::codec`), het blok telt af van
+//! de capaciteit, en de regel `HOPOS_POOL_DEVICE` zegt waar het ligt. Komt
+//! het ijzer niet op, dan gaat het terug ([`Request::ReleaseDevice`]).
 
 use crate::cage::{Cage, Console, Cores, PortError, Power, Status, Timer};
 use crate::grants::{Grants, NoGrants};
@@ -235,6 +245,23 @@ pub enum Request {
     /// Beschrijf elke levende bewoner voor de kern-flip
     /// ([`Lifecycle::snapshot`]); het antwoord is [`Response::Snapshot`].
     Snapshot,
+    /// Een blok van `size` bytes buiten de partitie-pool voor een apparaat
+    /// met DMA (de arena van de videocodec); het antwoord is
+    /// [`Response::Device`]. Alleen de kern stuurt dit, bij boot.
+    ReserveDevice {
+        /// De maat in bytes; naar boven op de korrel.
+        size: u64,
+        /// Voor wie, voor de ene regel `HOPOS_POOL_DEVICE`.
+        what: &'static str,
+    },
+    /// Geef een blok van [`Request::ReserveDevice`] terug (het ijzer kwam
+    /// niet op).
+    ReleaseDevice {
+        /// Het blok zoals het werd gegeven.
+        region: Region,
+        /// Voor wie.
+        what: &'static str,
+    },
 }
 
 /// Het antwoord van de actor.
@@ -250,6 +277,8 @@ pub enum Response {
     Snapshot(Vec<SlotState>),
     /// De env van de start, met wat de grant-aanbieder erbij zette.
     Env(Vec<u8>),
+    /// Het blok van een [`Request::ReserveDevice`].
+    Device(Region),
     /// Het lukte niet.
     Failed(Error),
 }
@@ -715,8 +744,57 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
                 Ok(Response::Done)
             }
             Request::Snapshot => self.snapshot().map(Response::Snapshot),
+            Request::ReserveDevice { size, what } => {
+                self.reserve_device(size, what).map(Response::Device)
+            }
+            Request::ReleaseDevice { region, what } => {
+                self.release_device(region, what).map(|()| Response::Done)
+            }
         };
         r.unwrap_or_else(Response::Failed)
+    }
+
+    /// Een blok buiten de partitie-pool (Go: `ReserveDevice`): best-fit en
+    /// de hoogste basis, zoals een partitie, zodat het lage DRAM voor de
+    /// vensters en de DMA onder 4 GB blijft. Eén regel, ook bij falen: een
+    /// node zonder arena moet zeggen hoeveel er nog was.
+    fn reserve_device(&mut self, size: u64, what: &str) -> Result<Region> {
+        let size = crate::align_grain(size)
+            .filter(|s| *s != 0)
+            .ok_or(Error::PartitionSize { size })?;
+        match self.parts.reserve_device(size) {
+            Ok(base) => {
+                self.log.log(format_args!(
+                    "pool: {} MB for {what} at {base:#x} outside the partition pool, {} MB left for slots (largest {} MB) HOPOS_POOL_DEVICE base={base:#x} mb={}",
+                    size >> 20,
+                    self.parts.capacity() >> 20,
+                    self.parts.largest() >> 20,
+                    size >> 20
+                ));
+                Ok(Region::new(base, size))
+            }
+            Err(e) => {
+                self.log.log(format_args!(
+                    "pool: no {} MB for {what}: {e} ({} MB free, largest {} MB) HOPOS_POOL_DEVICE_FAIL",
+                    size >> 20,
+                    self.parts.capacity() >> 20,
+                    self.parts.largest() >> 20
+                ));
+                Err(e)
+            }
+        }
+    }
+
+    /// Geeft een apparaatblok terug aan de pool.
+    fn release_device(&mut self, region: Region, what: &str) -> Result {
+        self.parts.release_device(region.base, region.size)?;
+        self.log.log(format_args!(
+            "pool: {} MB of {what} at {:#x} back in the partition pool, {} MB for slots HOPOS_POOL_DEVICE_RELEASE",
+            region.size >> 20,
+            region.base,
+            self.parts.capacity() >> 20
+        ));
+        Ok(())
     }
 
     fn resident(&self, slot: Slot) -> Option<&Resident> {
@@ -2294,5 +2372,51 @@ pub(crate) mod tests {
         let g = block_on(b.claim(join)).unwrap();
         assert_eq!(b.places.placement_of(s(5)).unwrap().0.get(), 2);
         block_on(b.arm(g, 0)).unwrap();
+    }
+
+    /// De arena van de videocodec (docs/media.md, haak 2): een blok buiten
+    /// de partities, via de eigenaar van de pool. Geen partitie kan het
+    /// daarna krijgen; terug is de capaciteit weer heel.
+    #[test]
+    fn a_device_block_leaves_the_pool_and_comes_back() {
+        let svc = Servicers::new();
+        let con = FakeConsole::default();
+        let mut a = actor(&svc, &con, Obey::Exit, 256, 2);
+        let before = a.parts.capacity();
+        let r = block_on(a.handle(Request::ReserveDevice {
+            size: 64 * MIB - 5,
+            what: "the codec arena",
+        }));
+        let Response::Device(arena) = r else {
+            panic!("{r:?}");
+        };
+        assert_eq!(arena.size, 64 * MIB, "naar boven op de korrel");
+        assert_eq!(a.parts.capacity(), before - 64 * MIB);
+        assert!(con.saw("pool: 64 MB for the codec arena at"));
+        assert!(con.saw("HOPOS_POOL_DEVICE base="));
+        // Een partitie komt er nooit in.
+        start(&mut a, 1, 128, 1).unwrap();
+        let part = a.parts.partition_of(s(1)).unwrap();
+        assert!(!part.overlaps(arena), "{part:?} in {arena:?}");
+        // Meer dan er is: een weigering met de getallen, geen blok.
+        let r = block_on(a.handle(Request::ReserveDevice {
+            size: 128 * MIB,
+            what: "the codecdemo buffers",
+        }));
+        assert!(
+            matches!(r, Response::Failed(Error::NoPartition { .. })),
+            "{r:?}"
+        );
+        assert!(con.saw("pool: no 128 MB for the codecdemo buffers"));
+        assert!(con.saw("HOPOS_POOL_DEVICE_FAIL"));
+        // Het ijzer kwam niet op: terug.
+        let r = block_on(a.handle(Request::ReleaseDevice {
+            region: arena,
+            what: "the codec arena",
+        }));
+        assert!(matches!(r, Response::Done), "{r:?}");
+        assert!(con.saw("HOPOS_POOL_DEVICE_RELEASE"));
+        stop(&mut a, 1).unwrap();
+        assert_eq!(a.parts.capacity(), before);
     }
 }

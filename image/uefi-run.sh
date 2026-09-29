@@ -17,6 +17,14 @@
 #   GUI=1 image/uefi-run.sh           de gui-smaak (`--features gui`, docs/gui.md):
 #                                     de console op de GOP; QEMU krijgt
 #                                     `-device ramfb` (EDK2 maakt er een GOP van)
+#   MEDIA=1 BOARD=o6n image/uefi-run.sh
+#                                     de media-smaak (`--features media`,
+#                                     docs/media.md): de codec-dienst, op de
+#                                     O6N met de VPU. Eigen target-map
+#                                     (target/uefi-media) en eigen ESP
+#                                     (…-media), zodat de kale er niet door
+#                                     verdwijnt; CFG=OLD/image/hopos-media-o6n.cfg
+#                                     is de config van de mediatest
 #   image/uefi-run.sh -s -S           de rest gaat naar QEMU (gdb)
 #
 # Het resultaat is een ESP-map, target/uefi-esp[-$BOARD]/: EFI/BOOT/
@@ -77,8 +85,15 @@ if [ "${GUI:-0}" = 1 ]; then
 	FEATURE="$FEATURE,gui"
 	QGUI="-device ramfb"
 fi
-ESP="${ESP:-$DIR/target/uefi-esp$([ "$BOARD" = uefi ] || echo "-$BOARD")}"
-TDIR="$DIR/target/uefi"
+# De media-smaak: een eigen target-map (dezelfde als die van de gate, dus
+# één cache) en een eigen ESP, zodat een kale build ernaast blijft staan.
+FLAVOR=""
+if [ "${MEDIA:-0}" = 1 ]; then
+	FEATURE="$FEATURE,media"
+	FLAVOR="-media"
+fi
+ESP="${ESP:-$DIR/target/uefi-esp$([ "$BOARD" = uefi ] || echo "-$BOARD")$FLAVOR}"
+TDIR="$DIR/target/uefi$FLAVOR"
 OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
 [ -n "$OBJCOPY" ] || {
 	echo "uefi-run: rust-objcopy ontbreekt in de toolchain" >&2

@@ -24,6 +24,8 @@
 //!
 //! - `codec` (feature `media`): de codec-client; een stream door de
 //!   hardwaredecoder zonder dat er een beeld over de verbinding gaat.
+//! - `tcp` (feature `http`): de `TcpConn`-brug tussen een
+//!   [`appnet::TcpStream`] en leanhttp, voor elke app die HTTP praat.
 //!
 //! Wat hier niet staat: de device-ops.
 
@@ -49,6 +51,7 @@ pub mod clock;
 #[cfg(feature = "media")]
 pub mod codec;
 pub mod ctrl;
+pub mod fb;
 pub mod heap;
 pub mod log;
 pub mod net;
@@ -58,6 +61,8 @@ pub mod sleep;
 pub mod smp;
 pub mod sys;
 pub mod tail;
+#[cfg(feature = "http")]
+pub mod tcp;
 
 pub use app::{App, AppError, Beat};
 pub use ctrl::{AppStatus, Ctrl, Env};

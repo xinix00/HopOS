@@ -153,12 +153,63 @@ fn the_kick_is_told_apart_from_an_irq() {
 }
 
 #[test]
-fn apple_cannot_share_its_os_core_yet() {
+fn apple_shares_its_os_core_with_the_fast_ipi() {
     let (_b, plan) = plan();
-    assert!(matches!(
-        OsCore::new(&plan, Flavor::AppleVhe, None),
-        Err(Error::OsCoreFlavor)
-    ));
+    // De OS-core op P-core 6 (cpu6, MPIDR 0x80010100, GEMETEN 28-08):
+    // cluster 1, core 0.
+    let bell = Bell::apple(0x8001_0100);
+    assert_eq!(bell.sgir, 0, "geen MMIO: de kick is een systeemregister");
+    assert_eq!(bell.intid, Bell::APPLE_INTID);
+    let mut os = OsCore::new(&plan, Flavor::AppleVhe, Some(bell)).unwrap();
+    let sched = os_sched(&plan).unwrap();
+    assert_eq!(dev::read64(sched.add(SCHED_OS_KICK_PA)), 0);
+    os.listen(true);
+    let w = dev::read64(sched.add(SCHED_OS_KICK));
+    assert_eq!(w, APPLE_KICK_ARMED | (1 << 16));
+    assert_eq!(apple_kick_target(w), 1 << 16);
+    os.listen(false);
+    assert_eq!(dev::read64(sched.add(SCHED_OS_KICK)), 0);
+    // Op de host wacht er geen IPI: een onderbreking is een device.
+    host(&plan, ctx(&plan, 1), 1, 0x1000).unwrap();
+    assert_eq!(os.run(0), Turn::Ran(Back::Irq));
+}
+
+#[test]
+fn the_apple_kick_word_is_never_zero() {
+    // E-core 0 in cluster 0 heeft doel 0; zonder het scherp-bit las de
+    // switcher dat als "niet kicken" (de brievenbus-val van Go, 31-08).
+    let w = apple_kick_word(0x8000_0000);
+    assert_ne!(w, 0);
+    assert_eq!(apple_kick_target(w), 0);
+    // cpu9: cluster 1, core 3 (MPIDR 0x80010103).
+    assert_eq!(
+        apple_kick_target(apple_kick_word(0x8001_0103)),
+        3 | (1 << 16)
+    );
+    // Alleen aff0 en aff1 tellen; aff2 (de P-cores) niet.
+    assert_eq!(
+        apple_kick_target(apple_kick_word(0x8001_0000 | 0x0102)),
+        2 | (1 << 16)
+    );
+}
+
+#[test]
+fn the_vector_index_tells_how_a_turn_ended() {
+    assert_eq!(exit_of(VEC_SYNC_LOWER), Exit::Sync);
+    // IRQ (de GIC, de AIC) en FIQ (Apple: de CNTHP en de fast IPI).
+    assert_eq!(exit_of(VEC_IRQ_LOWER), Exit::Interrupt);
+    assert_eq!(exit_of(VEC_FIQ_LOWER), Exit::Interrupt);
+    // SError en AArch32: een fault.
+    for v in 11..16 {
+        assert_eq!(exit_of(v), Exit::Fault, "vector {v}");
+    }
+    // De huidige EL komt hier nooit (de vectoren sturen 0..7 door naar de
+    // kern), maar mocht het: een fault, geen stille terugkeer.
+    assert_eq!(exit_of(4), Exit::Fault);
+    // De timer wint van de kick, de kick van een device.
+    assert_eq!(interrupted(true, true), Back::Timer);
+    assert_eq!(interrupted(false, true), Back::Ipi);
+    assert_eq!(interrupted(false, false), Back::Irq);
 }
 
 #[test]

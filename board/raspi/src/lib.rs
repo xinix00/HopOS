@@ -28,6 +28,8 @@ pub mod cfg;
 pub mod dt;
 pub mod map;
 pub mod slots;
+// De USB-invoer van de Pi's (usb.rs): het DMA-stuk, de VL805-handshake.
+pub mod usb;
 // De framebuffer via de VideoCore: alleen in de gui-smaak (docs/gui.md);
 // kaal een stub met dezelfde signatuur (handboek §7).
 #[cfg(feature = "gui")]
@@ -120,6 +122,12 @@ pub trait Soc: 'static {
     fn tables() -> Option<map::Tables>;
     /// Vindt en initialiseert de NIC. `Ok(None)` = geen NIC.
     fn probe_nic(ctx: &NicCtx) -> Result<Option<Self::Nic>, Error>;
+    /// De USB-hostcontrollers, met hun PCIe-link en firmware-handshake
+    /// gedaan (usb.rs). Alleen gevraagd in de gui-smaak; standaard geen.
+    fn usb_hosts(ctx: &usb::UsbCtx) -> board::UsbHosts {
+        let _ = ctx;
+        board::UsbHosts::new()
+    }
 }
 
 /// Het adres van een geldige DTB, 0 = geen.
@@ -558,6 +566,10 @@ impl<S: Soc> Board for Raspi<S> {
     fn framebuffer(&self) -> Option<driver_fb::Desc> {
         // De ene ontdekking van deze boot (vcfb.rs); kaal altijd `None`.
         vcfb::framebuffer(&MBOX, S::tables())
+    }
+
+    fn usb_hosts(&self) -> board::UsbHosts {
+        usb::hosts::<S>()
     }
 
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error> {

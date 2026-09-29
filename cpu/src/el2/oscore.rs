@@ -33,6 +33,13 @@
 //! (en in zijn WFI-slaap, die een SEV evenmin wekt) in sched-blok 0 de
 //! ICC_SGI1R-waarde van zijn kick ([`SCHED_OS_KICK`]); de switcher van een
 //! app-core die yieldt of HVC #6 doet, stuurt dan die SGI.
+//!
+//! Op Apple (`AppleVhe`) is er geen GIC: de kick is de fast IPI
+//! (IPI_RR_GLOBAL_EL1, [`Bell::apple`]) en komt aan als FIQ, net als de
+//! CNTHP. Met HCR_EL2.FMO op 1 trapt die FIQ tijdens een beurt naar de
+//! vectoren hieronder (`fiq/lower-a64`, index 10), en de kern ackt de IPI
+//! zelf op EL2 voor hij terugkeert (les 04-09: een ongeackte fast IPI blijft
+//! staan en de core komt nooit meer tot slapen).
 
 extern crate alloc;
 
@@ -92,6 +99,68 @@ const HCR_GUEST: u64 = HCR_VM | HCR_FMO | HCR_IMO | HCR_AMO | HCR_TSC;
 const VEC_IRQ_LOWER: u64 = 9;
 const VEC_FIQ_LOWER: u64 = 10;
 
+/// Bit 63 van het kick-woord op Apple: "scherp". Het doel van de fast IPI
+/// (core | cluster << 16) is voor E-core 0 in cluster 0 gewoon 0, en 0 is
+/// in [`SCHED_OS_KICK`] "niet kicken" (dezelfde val als de brievenbus van
+/// Go 31-08, waar E-core 0 nooit werk kon aannemen). De switcher wist het
+/// bit voor hij IPI_RR_GLOBAL_EL1 schrijft (bits 29:28 zijn het type, 0 =
+/// meteen; bit 63 is er niet).
+pub(super) const APPLE_KICK_ARMED: u64 = 1 << 63;
+
+/// Het kick-woord in [`SCHED_OS_KICK`] voor de fast IPI naar de core met
+/// affiniteit `mpidr`: het IPI_RR-doel plus [`APPLE_KICK_ARMED`].
+#[must_use]
+pub(super) const fn apple_kick_word(mpidr: u64) -> u64 {
+    APPLE_KICK_ARMED | super::dispatch::apple_ipi_target(mpidr)
+}
+
+/// Wat de switcher van een kick-woord in IPI_RR_GLOBAL_EL1 schrijft: zijn
+/// masker is `apple_kick_target(u64::MAX)`, als `const` in de assembly
+/// (switch.rs), zodat de test hier en de switcher één regel delen.
+#[must_use]
+#[cfg_attr(
+    not(all(target_os = "none", target_arch = "aarch64")),
+    allow(dead_code) // op de host is er geen switcher, alleen de test
+)]
+pub(super) const fn apple_kick_target(word: u64) -> u64 {
+    word & !APPLE_KICK_ARMED
+}
+
+/// Waar een beurt eindigde, naar de vectorindex waarmee de bewoner
+/// terugkwam.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum Exit {
+    /// Synchroon (index 8): een HVC, of een fault die de ESR beschrijft.
+    Sync,
+    /// Een IRQ of FIQ uit EL1 (index 9, 10): de kern wil zijn core terug.
+    Interrupt,
+    /// SError of AArch32 (11..15): altijd een fault.
+    Fault,
+}
+
+/// De afbeelding van vectorindex naar [`Exit`]. Op elke smaak dezelfde:
+/// de GIC levert alles als IRQ, Apple de timer en de kick als FIQ en de AIC
+/// als IRQ.
+const fn exit_of(vec: u64) -> Exit {
+    match vec {
+        VEC_SYNC_LOWER => Exit::Sync,
+        VEC_IRQ_LOWER | VEC_FIQ_LOWER => Exit::Interrupt,
+        _ => Exit::Fault,
+    }
+}
+
+/// Waardoor een onderbroken beurt terugkwam: de CNTHP als hij afging
+/// (ISTATUS), anders de kick als die wacht, anders een device.
+const fn interrupted(fired: bool, kick: bool) -> Back {
+    if fired {
+        Back::Timer
+    } else if kick {
+        Back::Ipi
+    } else {
+        Back::Irq
+    }
+}
+
 /// Het ctx-blok in woorden, voor de scratch van de zelftest.
 const CTX_WORDS: usize = (super::layout::CTX_LEN / 8) as usize;
 
@@ -133,13 +202,15 @@ pub enum Turn {
 
 /// De kick van de OS-core: wat de switcher van een app-core schrijft om hem
 /// te wekken, en hoe de kern na een IRQ ziet of het de kick was. Het board
-/// kiest de weg: GICv3 een systeemregister, GICv2 een MMIO-schrijf.
+/// kiest de weg: GICv3 een systeemregister, GICv2 een MMIO-schrijf, Apple
+/// de fast IPI ([`Bell::apple`]).
 #[derive(Copy, Clone, Debug)]
 pub struct Bell {
     /// De SGI naar de OS-core, als woord: met `sgir == 0` de
     /// ICC_SGI1R_EL1-waarde (GICv3, `driver_gicv3::sgi1r`), anders de
     /// 32-bit GICD_SGIR-waarde (GICv2: CPUTargetList in bits 23:16, de
-    /// INTID in 3:0). 0 = geen kick.
+    /// INTID in 3:0). Op Apple het kick-woord van [`apple_kick_word`]. 0 =
+    /// geen kick.
     pub sgi1r: u64,
     /// De PA van GICD_SGIR (distributor + 0xF00) op een GICv2, 0 op een
     /// GICv3. De switcher draait met de MMU uit, dus dit is een fysiek adres.
@@ -148,6 +219,28 @@ pub struct Bell {
     pub intid: u32,
     /// De hoogste pending INTID (ICC_HPPIR1_EL1), zonder hem te claimen.
     pub pending: fn() -> u32,
+}
+
+impl Bell {
+    /// De "INTID" van de fast IPI: Apple heeft geen GIC, dus een waarde die
+    /// geen GIC-INTID kan zijn. [`Bell::pending`] geeft hem als IPI_SR_EL1
+    /// bit 0 staat.
+    pub const APPLE_INTID: u32 = u32::MAX;
+
+    /// De kick van Apple silicium naar de OS-core met affiniteit `mpidr`:
+    /// de switcher schrijft het doel in IPI_RR_GLOBAL_EL1 (m1n1 `smp.c`,
+    /// GEMETEN 02-09 als wek van de switcher), en de kern leest IPI_SR_EL1
+    /// bit 0 zonder te acken; de ack doet hij zelf, op EL2, bij de terugkeer
+    /// van de beurt (les 04-09).
+    #[must_use]
+    pub const fn apple(mpidr: u64) -> Bell {
+        Bell {
+            sgi1r: apple_kick_word(mpidr),
+            sgir: 0,
+            intid: Self::APPLE_INTID,
+            pending: arch::apple_ipi_pending,
+        }
+    }
 }
 
 /// De meetlat van de OS-core: overgangen naar een bewoner en waardoor de
@@ -214,12 +307,10 @@ impl OsCore {
     /// heeft en de kern niet raakt: VTCR, CPTR zonder FP-trap, de
     /// timertoegang van EL1 (CNTHCTL) en CNTVOFF 0.
     ///
-    /// Aanroepen op de OS-core zelf. Apple (`AppleVhe`) heeft geen GIC-kick
-    /// en zijn FIQ-pad is niet geport: geweigerd.
+    /// Aanroepen op de OS-core zelf. Op Apple (`AppleVhe`) hoort de kick
+    /// [`Bell::apple`] te zijn: een GIC-bel zou de switcher daar nooit
+    /// sturen (hij kent alleen de fast IPI).
     pub fn new(plan: &Plan, flavor: Flavor, bell: Option<Bell>) -> Result<OsCore, Error> {
-        if flavor == Flavor::AppleVhe {
-            return Err(Error::OsCoreFlavor);
-        }
         let core0 = Core::new(0).ok_or(Error::BadContextId { id: 0 })?;
         let sched = plan.park_mbox_pa(core0).map_err(Error::Plan)?;
         arch::prepare(flavor);
@@ -312,8 +403,8 @@ impl OsCore {
     /// Zet de staat van een bewoner na zijn beurt, en zegt waardoor de kern
     /// terug is.
     fn settle(&self, ctx: Pa, vec: u64, fired: bool) -> Back {
-        let back = match vec {
-            VEC_SYNC_LOWER => {
+        let back = match exit_of(vec) {
+            Exit::Sync => {
                 let esr = arch::esr();
                 if esr >> 26 != crate::vectors::EC_HVC64 {
                     return self.fault(ctx, vec, esr);
@@ -340,21 +431,29 @@ impl OsCore {
                 STATS.yields.fetch_add(1, Relaxed);
                 Back::Yield
             }
-            VEC_IRQ_LOWER | VEC_FIQ_LOWER => {
+            Exit::Interrupt => {
                 // Onderbroken midden in zijn werk: meteen weer aan de beurt.
                 ctx_write(ctx, CTX_WAKE, 0);
-                if fired {
-                    STATS.timer.fetch_add(1, Relaxed);
-                    Back::Timer
-                } else if self.bell.is_some_and(|b| (b.pending)() == b.intid) {
-                    STATS.ipi.fetch_add(1, Relaxed);
-                    Back::Ipi
-                } else {
-                    STATS.irq.fetch_add(1, Relaxed);
-                    Back::Irq
+                let kick = self.bell.is_some_and(|b| (b.pending)() == b.intid);
+                let back = interrupted(fired, kick);
+                match back {
+                    Back::Timer => STATS.timer.fetch_add(1, Relaxed),
+                    Back::Ipi => STATS.ipi.fetch_add(1, Relaxed),
+                    _ => STATS.irq.fetch_add(1, Relaxed),
+                };
+                // Apple: de fast IPI hier acken, op EL2, vóór de kern zijn
+                // maskers opent. Een GIC-SGI blijft pending tot de dispatch
+                // van de kern hem claimt; een fast IPI die niemand ackt,
+                // blijft staan en de core komt nooit meer tot slapen (04-09).
+                // Een FIQ die geen van beide is (een timer van de bewoner
+                // zelf, een PMC) telt als device: de kern kijkt in zijn
+                // eigen dispatch.
+                if back == Back::Ipi && self.flavor == Flavor::AppleVhe {
+                    arch::apple_ipi_ack();
                 }
+                back
             }
-            _ => return self.fault(ctx, vec, arch::esr()),
+            Exit::Fault => return self.fault(ctx, vec, arch::esr()),
         };
         ctx_write(ctx, CTX_STATE, CtxState::Saved.raw());
         back
@@ -817,6 +916,28 @@ mod arch {
         ctl & (1 << 2) != 0
     }
 
+    /// IPI_SR_EL1 bit 0: wacht er een fast IPI op deze core? Zonder ack
+    /// (de peek van [`super::Bell::apple`]); alleen op Apple silicium.
+    pub(super) fn apple_ipi_pending() -> u32 {
+        let v: u64;
+        // SAFETY: IPI_SR_EL1 lezen heeft geen neveneffect; de aanroeper is
+        // de bel van `Bell::apple`, en die bestaat alleen op een Apple-core,
+        // waar het register er is.
+        unsafe { asm!("mrs {}, s3_5_c15_c1_1", out(reg) v, options(nomem, nostack)) };
+        if v & 1 != 0 {
+            super::Bell::APPLE_INTID
+        } else {
+            0
+        }
+    }
+
+    /// Ackt de fast IPI van deze core (IPI_SR_EL1, bit 0 is W1C).
+    pub(super) fn apple_ipi_ack() {
+        // SAFETY: raakt alleen de IPI-status van deze core; alleen geroepen
+        // onder `Flavor::AppleVhe`, dus op een Apple-core.
+        unsafe { asm!("msr s3_5_c15_c1_1, {}", "isb", in(reg) 1u64, options(nomem, nostack)) };
+    }
+
     unsafe extern "C" {
         fn hopos_os_nvhe_enter(ctx: u64, hcr: u64, vbar: u64) -> u64;
         fn hopos_os_vhe_enter(ctx: u64, hcr: u64, vbar: u64) -> u64;
@@ -844,7 +965,8 @@ mod arch {
     /// Geeft de vectorindex waarmee hij terugkwam (8 synchroon, 9 IRQ, 10
     /// FIQ, 11 SError, 12..15 AArch32).
     pub(super) fn enter(flavor: Flavor, ctx: Pa, hcr: u64) -> u64 {
-        // Apple komt hier niet: `OsCore::new` weigert hem.
+        // Apple is VHE (E2H RES1): dezelfde overgang als de O6N. Het verschil
+        // (de kick als FIQ, de ack op EL2) zit in `settle`, niet hier.
         let (f, vbar): (unsafe extern "C" fn(u64, u64, u64) -> u64, u64) = match flavor {
             Flavor::Nvhe => (hopos_os_nvhe_enter, addr(&raw const hopos_os_nvhe_vectors)),
             Flavor::Vhe | Flavor::AppleVhe => {
@@ -1119,6 +1241,10 @@ mod arch {
     pub(super) fn stub(_yield: bool) -> u64 {
         0
     }
+    pub(super) fn apple_ipi_pending() -> u32 {
+        0
+    }
+    pub(super) fn apple_ipi_ack() {}
     /// Op de host komt elke beurt meteen terug op een IRQ (vector 9); de
     /// tests toetsen de rotatie, niet de overgang.
     pub(super) fn enter(_flavor: Flavor, _ctx: Pa, _hcr: u64) -> u64 {

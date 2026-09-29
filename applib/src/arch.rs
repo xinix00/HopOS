@@ -34,6 +34,11 @@ mod imp {
         v
     }
 
+    /// CNTFRQ_EL0 is de waarheid op arm64: het woord van de kern (dat
+    /// hetzelfde getal draagt) verandert niets.
+    #[inline]
+    pub(crate) fn set_counter_hz(_hz: u64) {}
+
     /// ID_AA64MMFR0_EL1: bits 63:60 zijn FEAT_ECV.
     #[inline]
     pub(crate) fn mmfr0() -> u64 {
@@ -154,14 +159,20 @@ mod imp {
     //! draaien): elke wacht is een yield (Go, cpu/idle/idle_riscv64.go:
     //! "de ecall is zijn enige route naar een wfi").
     use core::arch::asm;
+    use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
-    /// De timebase van de TIME-CSR. RISC-V heeft geen register waaruit hij
-    /// volgt (ARM heeft CNTFRQ_EL0); de 10 MHz van QEMU virt. De LicheeRV
-    /// telt 25 MHz: daar hoort de kern hem op de control-page te zetten
-    /// (Go, board/hopslot: "komt er een tweede board, dan op de
-    /// control-page"), en tot dat woord er is, loopt de klok van een app
-    /// daar 2,5x te traag.
-    const TIMEBASE_HZ: u64 = 10_000_000;
+    /// De timebase van de TIME-CSR tot de control-page iets anders zegt: de
+    /// 10 MHz van QEMU virt. RISC-V heeft geen register waaruit hij volgt
+    /// (ARM heeft CNTFRQ_EL0); de LicheeRV telt 25 MHz, en zonder het woord
+    /// van de kern liep de klok van een app daar 2,5x te traag (Go,
+    /// board/hopslot: "komt er een tweede board, dan op de control-page").
+    const DEFAULT_TIMEBASE_HZ: u64 = 10_000_000;
+
+    /// De timebase van deze app: [`DEFAULT_TIMEBASE_HZ`], of wat de kern op
+    /// de control-page zette (`CTRL_TIMEBASE_HZ`, via
+    /// [`crate::clock::adopt_timebase`]). Eén schrijver, vóór de eerste
+    /// klok-lees; daarna alleen lezers.
+    static TIMEBASE_HZ: AtomicU64 = AtomicU64::new(DEFAULT_TIMEBASE_HZ);
 
     /// De TIME-CSR.
     #[inline]
@@ -176,7 +187,15 @@ mod imp {
     /// De timebase.
     #[inline]
     pub(crate) fn counter_hz() -> u64 {
-        TIMEBASE_HZ
+        TIMEBASE_HZ.load(Relaxed)
+    }
+
+    /// Neemt de timebase van de kern over; 0 (een kern die het woord nog
+    /// niet kent) laat de default staan.
+    pub(crate) fn set_counter_hz(hz: u64) {
+        if hz != 0 {
+            TIMEBASE_HZ.store(hz, Relaxed);
+        }
     }
 
     /// Geen ID-register met FEAT_ECV: nul.
@@ -262,6 +281,9 @@ mod imp {
     pub(crate) fn counter_hz() -> u64 {
         1_000_000_000
     }
+
+    /// De host-teller is een getal van de tests: niets over te nemen.
+    pub(crate) fn set_counter_hz(_hz: u64) {}
 
     pub(crate) fn mmfr0() -> u64 {
         0

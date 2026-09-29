@@ -24,6 +24,16 @@
 //!   app-core. Hij wacht tot de kern `CTRL_SHARED` zet (de buur is er) en
 //!   telt dan zijn beurten: elke idle-ronde is een yield naar de switcher,
 //!   die de core aan de buur geeft (`HOPOS_APPSPIKE_SHARE`).
+//! - `FLIPCONN`: één UITGAANDE TCP-verbinding over de kern-flip
+//!   (`HOPOS_APPSPIKE_FLIPCONN`, `docs/flip.md`). De app verbindt met
+//!   `FLIPCONN=<ip>:<poort>` (een echo op de host, door de masquerade van
+//!   de kern en de slirp van QEMU), stuurt elke seconde een regel en telt
+//!   de antwoorden. De echo zet er een fase voor (`A` vóór de landing van
+//!   de nieuwe kern, `B` erna; het toets-script zet hem om), dus de app
+//!   weet zonder klok van de kern welke antwoorden over de flip heen kwamen.
+//!   Groen bij drie `B`-antwoorden op DEZELFDE verbinding; elke fout van de
+//!   stack (een reset, een EOF) is rood, er wordt nooit opnieuw verbonden.
+//!   Alleen deze toets draait dan: de rest bewijzen de andere rollen.
 //!
 //! Canoniek gelinkt (applib/link.ld): de stage-2-map van de kern legt het
 //! image op de partitie van elk slot, en de kern patcht RamStart en RamSize
@@ -84,6 +94,12 @@ async fn spike(app: &'static App) {
     let mut s = Score::default();
     ctrl_page(app, &mut s);
     env(app, &mut s);
+    if app.env("ROLE") == Some("FLIPCONN") {
+        flipconn_role(app, &mut s).await;
+        log!("HOPOS_APPSPIKE_DONE pass={} fail={}", s.pass, s.fail);
+        app.shutdown(u64::from(s.fail)).await;
+        return;
+    }
     match app.env("ROLE") {
         Some("SMP") => smp_role(app, &mut s).await,
         Some("SHARE") => share_role(app, &mut s).await,
@@ -279,6 +295,168 @@ async fn share_role(app: &'static App, s: &mut Score) {
             c.idle_ticks()
         ),
     );
+}
+
+/// Hoeveel antwoorden na de landing de FLIPCONN-toets eist.
+const FLIPCONN_AFTER: u32 = 3;
+
+/// Hoe lang de FLIPCONN-toets hooguit loopt: de flip moet binnen deze tijd
+/// komen en landen (op QEMU: een halve minuut tot de flip, een paar
+/// seconden sprong).
+const FLIPCONN_LIMIT: Duration = Duration::from_secs(240);
+
+/// De telling van de FLIPCONN-toets.
+#[derive(Default)]
+struct Echoes {
+    /// Regels gestuurd.
+    sent: u32,
+    /// Antwoorden van vóór de landing (`A`).
+    before: u32,
+    /// Antwoorden van na de landing (`B`).
+    after: u32,
+    /// Een antwoord dat geen van beide was.
+    odd: u32,
+}
+
+impl Echoes {
+    /// Telt de complete regels in `buf[..*len]` en schuift de rest naar
+    /// voren.
+    fn take(&mut self, buf: &mut [u8], len: &mut usize) {
+        let filled = (*len).min(buf.len());
+        let mut used = 0;
+        while let Some(nl) = buf
+            .get(used..filled)
+            .and_then(|b| b.iter().position(|c| *c == b'\n'))
+        {
+            match buf.get(used) {
+                Some(b'A') => self.before += 1,
+                Some(b'B') => self.after += 1,
+                _ => self.odd += 1,
+            }
+            used += nl + 1;
+        }
+        buf.copy_within(used..filled, 0);
+        *len = filled - used;
+    }
+}
+
+/// De FLIPCONN-toets: één uitgaande verbinding die de kern-flip overleeft
+/// (zie de moduledoc). De lus schrijft elke seconde een regel en leest tot
+/// de volgende seconde; een time-out van de read is gewoon "nog niets".
+async fn flipconn_role(app: &'static App, s: &mut Score) {
+    let target = app.env("FLIPCONN").unwrap_or("");
+    let Some((ip, port)) = target
+        .split_once(':')
+        .and_then(|(h, p)| Some((appnet::parse_ip4(h)?, p.parse::<u16>().ok()?)))
+    else {
+        s.check(
+            "FLIPCONN",
+            false,
+            format_args!("FLIPCONN={target:?} is not ip:port"),
+        );
+        return;
+    };
+    if let Err(e) = appnet::up(app) {
+        s.check("FLIPCONN", false, format_args!("up: {e}"));
+        return;
+    }
+    let mut conn = match TcpStream::connect_timeout(ip, port, NET_DIAL).await {
+        Ok(c) => c,
+        Err(e) => {
+            s.check("FLIPCONN", false, format_args!("connect {target}: {e}"));
+            return;
+        }
+    };
+    let local = conn.local().map(|e| e.port).unwrap_or(0);
+    log!("HOPOS_APPSPIKE_FLIPCONN_UP to={target} local_port={local}");
+    let t0 = clock::now_ns();
+    let limit = FLIPCONN_LIMIT.as_nanos() as u64;
+    let mut n = Echoes::default();
+    let mut buf = [0u8; 256];
+    let mut len = 0usize;
+    let failed = loop {
+        if n.after >= FLIPCONN_AFTER {
+            break None;
+        }
+        if clock::now_ns().saturating_sub(t0) > limit {
+            break Some("no answers after the landing in time");
+        }
+        n.sent += 1;
+        let line = alloc::format!("ping {}\n", n.sent);
+        if let Err(e) = conn.write_all(line.as_bytes()).await {
+            log!("HOPOS_APPSPIKE_FLIPCONN_ERR write: {e}");
+            break Some("write failed");
+        }
+        if let Err(why) = read_round(&mut conn, &mut buf, &mut len, &mut n).await {
+            break Some(why);
+        }
+        if n.sent.is_multiple_of(5) {
+            log!(
+                "HOPOS_APPSPIKE_FLIPCONN_TICK sent={} before={} after={} odd={}",
+                n.sent,
+                n.before,
+                n.after,
+                n.odd
+            );
+        }
+    };
+    let total = n.before + n.after;
+    match failed {
+        None => s.check(
+            "FLIPCONN",
+            n.before > 0 && n.odd == 0,
+            format_args!(
+                "before={} after={total} sent={} odd={} local_port={local}",
+                n.before, n.sent, n.odd
+            ),
+        ),
+        Some(why) => s.check(
+            "FLIPCONN",
+            false,
+            format_args!(
+                "{why}: before={} after={total} sent={} odd={} local_port={local}",
+                n.before, n.sent, n.odd
+            ),
+        ),
+    }
+    let _ = conn.close();
+}
+
+/// Leest één seconde lang wat de echo terugstuurt en telt het. Een
+/// time-out is "nog niets" (tijdens de sprong antwoordt niemand); een EOF
+/// of een fout van de stack (een reset) is het einde van de verbinding,
+/// en dus rood: over de flip mag hij niet breken.
+async fn read_round(
+    conn: &mut TcpStream,
+    buf: &mut [u8; 256],
+    len: &mut usize,
+    n: &mut Echoes,
+) -> Result<(), &'static str> {
+    conn.set_timeout(Some(Duration::from_secs(1)));
+    let r = loop {
+        // Een regel langer dan de buffer is geen echo: weg ermee, geteld.
+        if *len >= buf.len() {
+            *len = 0;
+            n.odd += 1;
+        }
+        match conn.read(buf.get_mut(*len..).unwrap_or(&mut [])).await {
+            Ok(0) => {
+                log!("HOPOS_APPSPIKE_FLIPCONN_ERR eof from the peer");
+                break Err("the peer closed the connection");
+            }
+            Ok(k) => {
+                *len += k;
+                n.take(buf, len);
+            }
+            Err(appnet::NetError::Timeout) => break Ok(()),
+            Err(e) => {
+                log!("HOPOS_APPSPIKE_FLIPCONN_ERR read: {e}");
+                break Err("the connection broke");
+            }
+        }
+    };
+    conn.set_timeout(None);
+    r
 }
 
 /// Aantal logregels van de logtoets.

@@ -38,7 +38,8 @@
 # kopie, en de nieuwe kern mag hem alleen adopteren bij een gelijke som.
 #
 # De node krijgt de bundel op aanvraag, via de agent-API van Hop, achter
-# dezelfde HMAC als een jobspec: POST /flip {"url","sha256"} met de som die
+# dezelfde HMAC als een jobspec: POST /flip {"url","sha256"} (en "cold":
+# true voor de koude flip, docs/flip.md: bij een andere switch-code) met de som die
 # dit script print. Die som is het vertrouwensanker.
 set -eu
 
@@ -265,3 +266,5 @@ echo "" >&2
 echo "$OUT gebouwd (board $BOARD, stempel $STAMP), sha256 $SHA" >&2
 echo "Zet hem op een webserver en vraag de flip aan op de agent-API van Hop:" >&2
 echo "  curl -X POST http://<node>:8080/flip -d '{\"url\":\"http://<ip>:<poort>/$(basename "$OUT")\",\"sha256\":\"$SHA\"}'" >&2
+echo "Weigert de node hem warm (switch code mismatch), dan koud: de taken stoppen, Hop start opnieuw:" >&2
+echo "  curl -X POST http://<node>:8080/flip -d '{\"url\":\"http://<ip>:<poort>/$(basename "$OUT")\",\"sha256\":\"$SHA\",\"cold\":true}'" >&2

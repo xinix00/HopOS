@@ -24,6 +24,20 @@ fn clock() -> u64 {
     NOW.fetch_add(1_000, Relaxed)
 }
 
+/// De timer van de tests: de klok hierboven, en een slaap die de klok
+/// vooruit zet en meteen klaar is.
+struct Clock;
+
+impl Timer for Clock {
+    fn now(&self) -> u64 {
+        clock()
+    }
+    fn sleep(&self, ns: u64) -> impl Future<Output = ()> {
+        NOW.fetch_add(ns, Relaxed);
+        ready(())
+    }
+}
+
 /// Een sink die alles opschrijft.
 #[derive(Default)]
 struct Rec {
@@ -57,7 +71,7 @@ fn ev(kind: Kind, code: i32) -> Event {
 }
 
 fn test_ctl() -> Ctl {
-    Ctl::new(Hc::unbound("test", clock))
+    Ctl::new(Hc::unbound("test"))
 }
 
 fn req(id: BulkId, tag: u32) -> BulkReq {
@@ -129,7 +143,7 @@ fn emit_drops_buffered_events_without_sink() {
 #[test]
 fn non_hid_port_does_not_poll_or_detach_and_recovery_forgets_it() {
     let mut rec = Rec::default();
-    let mut m = Manager::new(clock);
+    let mut m = Manager::new(Clock);
     let mut c = test_ctl();
     c.known
         .push(Known {
@@ -140,13 +154,13 @@ fn non_hid_port_does_not_poll_or_detach_and_recovery_forgets_it() {
     let _ = m.ctls.push(c);
     // Een `None`-apparaat is een bekend, niet-ondersteund apparaat dat zijn
     // slot al teruggaf.
-    m.poll(&mut rec);
+    run_ready(m.poll(&mut rec));
     let c = &mut m.ctls[0];
     let mut k = Known {
         num: 1,
         ..Known::default()
     };
-    release(c, &mut k, &mut m.evs, &mut rec);
+    run_ready(release(c, &mut k, &mut m.evs, &mut rec, &Clock));
     assert_eq!(
         c.known.len(),
         1,
@@ -167,7 +181,7 @@ fn non_hid_port_does_not_poll_or_detach_and_recovery_forgets_it() {
 #[test]
 fn uitgetrokken_drive_beantwoordt_elk_verzoek_met_err_gone() {
     let mut rec = Rec::default();
-    let mut m = Manager::new(clock);
+    let mut m = Manager::new(Clock);
     let _ = m.ctls.push(test_ctl());
     let (a, b) = (BulkId::new(0, 1, 1), BulkId::new(0, 2, 2));
 
@@ -198,7 +212,7 @@ fn uitgetrokken_drive_beantwoordt_elk_verzoek_met_err_gone() {
     rec.done.clear();
     let ra2 = req(a, 3);
     m.enqueue(ra2, &mut rec);
-    m.serve_bulk(&mut rec);
+    run_ready(m.serve_bulk(&mut rec));
     assert_eq!(
         rec.done,
         [(ra2, Err(BulkError::Gone))],
@@ -272,12 +286,12 @@ fn lege_transfer_is_geen_verzoek() {
 #[test]
 fn verlopen_transfer_maakt_de_controller_vrij() {
     let mut rec = Rec::default();
-    let mut m = Manager::new(clock);
+    let mut m = Manager::new(Clock);
     let _ = m.ctls.push(test_ctl());
     let mut r = req(BulkId::new(0, 1, 1), 9);
     r.deadline_ns = 0;
     m.ctls[0].busy = Some(Inflight { req: r, td: None });
-    m.serve_bulk(&mut rec);
+    run_ready(m.serve_bulk(&mut rec));
     assert_eq!(rec.done, [(r, Err(BulkError::TimedOut))]);
     assert!(m.ctls[0].busy.is_none());
 }
@@ -285,7 +299,7 @@ fn verlopen_transfer_maakt_de_controller_vrij() {
 #[test]
 fn volle_rij_en_onbekende_controller() {
     let mut rec = Rec::default();
-    let mut m = Manager::new(clock);
+    let mut m = Manager::new(Clock);
     let r = req(BulkId::new(3, 1, 1), 1);
     m.enqueue(r, &mut rec);
     assert_eq!(rec.done, [(r, Err(BulkError::Gone))]);
@@ -473,65 +487,68 @@ fn full_queue_drops() {
 #[test]
 fn step_sleeps_until_the_next_poll_or_the_next_bulk_look() {
     let mut rec = Rec::default();
-    let mut m = Manager::new(clock);
-    let w = m.step(&mut rec);
+    let mut m = Manager::new(Clock);
+    let w = run_ready(m.step(&mut rec));
     assert!(w > 0 && w <= POLL_INTERVAL_NS, "{w}");
     let _ = m.ctls.push(test_ctl());
     let r = req(BulkId::new(0, 1, 1), 1);
     m.ctls[0].busy = Some(Inflight { req: r, td: None });
     m.fine = 2;
-    assert_eq!(m.step(&mut rec), FINE_STEP_NS);
-    assert_eq!(m.step(&mut rec), FINE_STEP_NS);
-    assert_eq!(m.step(&mut rec), COARSE_STEP_NS);
+    assert_eq!(run_ready(m.step(&mut rec)), FINE_STEP_NS);
+    assert_eq!(run_ready(m.step(&mut rec)), FINE_STEP_NS);
+    assert_eq!(run_ready(m.step(&mut rec)), COARSE_STEP_NS);
 }
 
 #[test]
 fn bring_up_logs_every_failing_controller() {
-    fn fails() -> Result<Option<Pa>, PrepareError> {
-        Err(PrepareError {
-            what: "PCIe link down",
-            value: 0x1d,
-        })
-    }
     let mut reg = Registry::new();
-    for (name, base, prepare) in [
-        ("pcie", Pa(0), Some(fails as register::Prepare)),
-        ("nobase", Pa(0), None),
-        ("dead", Pa(0x1000), None),
+    for (name, base, dma_size) in [
+        ("nodma", Pa(0x1000), 0),
+        ("pcie", Pa(0x2000), 0x10_0000),
+        ("nobase", Pa(0), 0x10_0000),
+        ("dead", Pa(0x1000), 0x10_0000),
     ] {
         reg.register(HostSpec {
             name,
             base,
             bus_off: 0,
-            prepare,
+            dma: Pa(0x10_0000),
+            dma_size,
         })
         .unwrap();
     }
-    assert_eq!(
-        reg.dma_slice(2, Pa(0x10_0000), 0x20_0000),
-        (Pa(0x10_0000 + 2 * 0xaaaaa), 0xaaaaa)
-    );
     let mut rec = Rec::default();
-    let mut m = Manager::new(clock);
-    // Zonder DMA-regio gebeurt er niets.
-    assert_eq!(
-        reg.bring_up(&mut m, None, 0, &mut rec, |h, _| Hc::unbound(h.name, clock)),
-        0
-    );
-    assert_eq!(rec.logs.len(), 1);
-    rec.logs.clear();
-    let live = reg.bring_up(&mut m, Some(Pa(0x10_0000)), 0x20_0000, &mut rec, |h, _| {
-        Hc::unbound(h.name, clock)
-    });
+    let mut m = Manager::new(Clock);
+    let live = run_ready(reg.bring_up(&mut m, &mut rec, async |h: &HostSpec| {
+        if h.name == "pcie" {
+            return Err(PrepareError {
+                what: "PCIe link down",
+                value: 0x1d,
+            });
+        }
+        Ok(Hc::unbound(h.name))
+    }));
     assert_eq!(live, 0);
     assert_eq!(m.hosts(), 0);
     assert_eq!(
         rec.logs,
         [
+            "usb: nodma: this board planned no USB DMA region, skipped",
             "usb: pcie: PCIe link down (0x1d)",
             "usb: nobase: no register window, skipped",
             "usb: dead: xhci: CAPLENGTH 0x0 in raw word 0x00000000: no controller at 0x0 (0 = not clocked, 0xFF.. = dead bus)",
             "usb: no working controller on this node, input stays off",
         ]
     );
+    // Zonder aangemelde controllers gebeurt er niets, ook geen regel.
+    rec.logs.clear();
+    assert_eq!(
+        run_ready(
+            Registry::new().bring_up(&mut m, &mut rec, async |h: &HostSpec| Ok(Hc::unbound(
+                h.name
+            )))
+        ),
+        0
+    );
+    assert!(rec.logs.is_empty());
 }

@@ -1,4 +1,4 @@
-//! De kooi-lijm: de traits van `kern::cage` over `cpu::el2`, `cpu::psci`,
+//! De kooi-lijm: de traits van `kern::cage` over `cpu::el2`, `cpu::smp` (CPU_ON),
 //! `dev` en de executor van core 0.
 //!
 //! Dit bezit de per-slot wetenschap die de kern niet heeft en de switcher
@@ -91,6 +91,15 @@ const _: () = assert!(
     vboard::KERN_VHE == matches!(FLAVOR, Flavor::Vhe),
     "the EL2 flavor of the switcher and the E2H form of the kern differ"
 );
+// Apple: het board draagt zijn eigen smaak (`board_apple::FLAVOR`, E2H is
+// RES1 en de kick is de fast IPI); de lijm moet precies die installeren, en
+// de OS-core-rotatie en de koude start (`cpu::smp::cpu_on`, de haak van het
+// board in plaats van PSCI) lopen dan over hetzelfde silicium.
+#[cfg(feature = "board-apple")]
+const _: () = assert!(
+    matches!(FLAVOR, Flavor::AppleVhe) && matches!(vboard::FLAVOR, Flavor::AppleVhe),
+    "the cage glue must install the Apple flavor of the board"
+);
 // Alleen het UEFI-board kent een kern onder E2H = 1 (Apple is er VHE-only
 // van zichzelf); `vhe` op een ander board gaf een nVHE-kern met een
 // VHE-rotatie, en die valt bij de eerste zelftest.
@@ -131,7 +140,8 @@ mod code {
     pub(super) const NOT_BUILT: u32 = 5;
     /// Het startschot via de mailbox weigerde.
     pub(super) const DISPATCH: u32 = 6;
-    /// PSCI CPU_ON faalde; de code erbij is 0x100 plus de PSCI-fout.
+    /// CPU_ON faalde (PSCI, of de haak van het board: `cpu::smp::cpu_on`);
+    /// de code erbij is 0x100 plus de fout in PSCI-vorm.
     pub(super) const PSCI: u32 = 0x100;
     /// Een secundaire buiten de span van de kooi, of op de OS-core.
     pub(super) const SPAN: u32 = 7;
@@ -578,14 +588,14 @@ impl Cage for ArmCage {
                 Ok(())
             }
             Ok(Start::Cold) => {
-                // De eerste opgang van deze core: PSCI CPU_ON rechtstreeks
+                // De eerste opgang van deze core: CPU_ON rechtstreeks
                 // de trampoline in, x0 = de control-page. Daarna leeft hij
                 // in de parkeerlus van HopOS en gaat elke dispatch via de
                 // mailbox.
                 let target = mpidr(phys);
-                let r = cpu::psci::cpu_on(target, tramp.0, b.ctrl.0);
+                let r = cpu::smp::cpu_on(target, tramp.0, b.ctrl.0);
                 println!(
-                    "cage: slot {slot} core {core} cold: PSCI CPU_ON mpidr={target:#x} entry={:#x} x0={:#x} -> {r:?}",
+                    "cage: slot {slot} core {core} cold: CPU_ON mpidr={target:#x} entry={:#x} x0={:#x} -> {r:?}",
                     tramp.0, b.ctrl.0
                 );
                 if r.is_ok() {
@@ -640,9 +650,9 @@ impl Cage for ArmCage {
             }
             Ok(Start::Cold) => {
                 let target = mpidr(phys);
-                let r = cpu::psci::cpu_on(target, tramp.0, handoff.0);
+                let r = cpu::smp::cpu_on(target, tramp.0, handoff.0);
                 println!(
-                    "cage: slot {slot} SMP core {core} (cpu {phys}) cold: PSCI CPU_ON mpidr={target:#x} -> {r:?} HOPOS_SMP_CORE"
+                    "cage: slot {slot} SMP core {core} (cpu {phys}) cold: CPU_ON mpidr={target:#x} -> {r:?} HOPOS_SMP_CORE"
                 );
                 r.map_err(|e| err(code::PSCI + e.code().unsigned_abs() as u32))
             }

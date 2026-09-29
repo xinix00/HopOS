@@ -63,6 +63,10 @@ board-apple = ["dep:board-apple"]
 gui = [
     "dep:driver-fb",
     "dep:gui-fbgrant",
+    "dep:gui-usbin",
+    "dep:driver-xhci",
+    "dep:driver-hid",
+    "dep:driver-dwc3",
     "board-qemuvirt?/gui",
     "board-rpi4?/gui",
     "board-rpi5?/gui",
@@ -115,6 +119,12 @@ board-apple = { path = "../board/apple", optional = true }
 # Het gui-vlak (feature `gui`): de console en het grant-beleid.
 driver-fb = { path = "../driver/fb", optional = true }
 gui-fbgrant = { path = "../gui/fbgrant", optional = true }
+# De USB-invoer (gui.rs `usb`, net.rs `input`): de manager en de bezorging,
+# de xHCI, de HID-gebeurtenissen en de DWC3 van de RK3566.
+gui-usbin = { path = "../gui/usbin", optional = true }
+driver-xhci = { path = "../driver/usb/xhci", optional = true }
+driver-hid = { path = "../driver/usb/hid", optional = true }
+driver-dwc3 = { path = "../driver/usb/dwc3", optional = true }
 # Het media-vlak (feature `media`): het contract en de VPU-driver.
 driver-codec = { path = "../driver/codec", optional = true }
 media-mve = { path = "../media/mve", optional = true }

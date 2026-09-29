@@ -20,11 +20,16 @@ leannet = { git = "https://github.com/xinix00/lean.git", tag = "v3.0.0" }
 # De codec-namen en -nummers (feature `media`, src/codec.rs): dezelfde
 # nummering als de kern, uit het contract zelf.
 driver-codec = { path = "../driver/codec", optional = true }
+# De brug naar leanhttp (feature `http`, src/tcp.rs): dezelfde tag als Hop,
+# zodat `hop-http` en de apps één `AsyncRead` kennen.
+leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.1", optional = true }
 
 [features]
 default = []
 # De codec-client (src/codec.rs, docs/media.md).
 media = ["dep:driver-codec"]
+# De `TcpConn`-brug tussen `appnet::TcpStream` en leanhttp (src/tcp.rs).
+http = ["dep:leanhttp"]
 
 [lints]
 workspace = true

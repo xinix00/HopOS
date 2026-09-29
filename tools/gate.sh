@@ -17,9 +17,10 @@
 #
 # Het media-vlak (docs/media.md): de codec-dienst van de kern, de client
 # van applib en het aanzetten van de VPU bestaan alleen met hun feature
-# `media`; hun tests en clippy krijgen een eigen ronde, en hopos bouwt met
-# media voor virt (de dienst zonder VPU) en de O6N (de VPU, als PIE zoals
-# uefi-run.sh, in een eigen target-map).
+# `media`; hun tests en clippy krijgen een eigen ronde, hopos bouwt met
+# media voor virt (de dienst zonder VPU, clippy erbij) en de O6N (de VPU,
+# het echte bouwpad: `MEDIA=1 BOARD=o6n sh image/uefi-run.sh`, met clippy
+# op dezelfde features), en apps/decode bouwt voor het target.
 #
 # De duur staat onderaan, per stap: de grens is tien minuten.
 set -e
@@ -38,8 +39,10 @@ echo "== host: de gui-smaak van de boards (test en clippy)"
 # De framebuffer-code van de boards (vcfb, gop, ramfb, de rk3566-keten)
 # bestaat alleen met hun feature `gui`; de werkruimte-ronde hierboven ziet
 # hem dus niet (docs/gui.md).
-GUI_BOARDS="-p board-qemuvirt -p board-raspi -p board-uefi -p board-rk3566"
-GUI_FEATS="board-qemuvirt/gui,board-raspi/gui,board-uefi/gui,board-rk3566/gui"
+# De USB-bedrading per board (board/<x>/src/usb.rs) hoort erbij: de VL805
+# van de Pi 4, de RP1 van de Pi 5 en de DSDT-hosts van de O6N.
+GUI_BOARDS="-p board-qemuvirt -p board-raspi -p board-uefi -p board-rk3566 -p board-rpi4 -p board-rpi5 -p board-o6n"
+GUI_FEATS="board-qemuvirt/gui,board-raspi/gui,board-uefi/gui,board-rk3566/gui,board-rpi4/gui,board-rpi5/gui,board-o6n/gui"
 cargo test --quiet $GUI_BOARDS --features "$GUI_FEATS"
 cargo clippy --all-targets --quiet $GUI_BOARDS --features "$GUI_FEATS" -- -D warnings
 echo "== host: de VHE-vorm van het UEFI-board (test en clippy)"
@@ -59,8 +62,11 @@ echo "== rustfmt"
 cargo fmt --check
 echo "== target: bibliotheken (aarch64)"
 cargo build --quiet --target aarch64-unknown-none-softfloat
-echo "== target: apps (appspike, welcome, bench)"
-cargo build --quiet --target aarch64-unknown-none-softfloat -p appspike -p welcome -p bench
+echo "== target: apps (appspike, welcome, bench, display)"
+cargo build --quiet --target aarch64-unknown-none-softfloat -p appspike -p welcome -p bench -p display
+# De stage-1 van applib::fb bestaat alleen op het target; de host-ronde ziet
+# alleen de tabellen.
+cargo clippy --quiet --target aarch64-unknown-none-softfloat -p display -- -D warnings
 echo "== target: hopos (qemuvirt)"
 cargo build --quiet --target aarch64-unknown-none-softfloat -p hopos --features board-qemuvirt
 echo "== target: hopos (rpi4, rpi5)"
@@ -68,19 +74,37 @@ cargo build --quiet --target aarch64-unknown-none-softfloat -p hopos --features 
 cargo build --quiet --target aarch64-unknown-none-softfloat -p hopos --features board-rpi5
 echo "== target: hopos (rk3566)"
 cargo build --quiet --target aarch64-unknown-none-softfloat -p hopos --features board-rk3566
-echo "== target: hopos (apple: de Mac mini M4 onder m1n1, docs/boards-apple.md)"
-cargo build --quiet --target aarch64-unknown-none-softfloat -p hopos --features board-apple
+echo "== target: hopos (apple: de Mac mini M4, docs/boards-apple.md): clippy en het image"
+# De Apple-lijm (cage.rs, watchdog.rs, telemetry.rs) bestaat alleen met
+# board-apple; de werkruimte-clippy ziet hem niet. Het image loopt het echte
+# bouwpad: de release-build, de stub-toets en het config-venster op 0xF000.
+cargo clippy --quiet --target aarch64-unknown-none-softfloat -p hopos --features board-apple -- -D warnings
+sh image/apple-m4.sh
 echo "== target: hopos (riscv64: qemuvirt-riscv, licheerv)"
 cargo build --quiet --target riscv64gc-unknown-none-elf -p hopos --features board-qemuvirt-riscv
 cargo build --quiet --target riscv64gc-unknown-none-elf -p hopos --features board-licheerv
+echo "== target: appspike (riscv64)"
+# De riscv-_start, de paniek en de timebase van applib bestaan alleen op dat
+# doel; de host-ronde ziet ze niet. De keten zelf draait in
+# tools/qemu-riscv-test.sh.
+cargo build --quiet --target riscv64gc-unknown-none-elf -p appspike
+cargo clippy --quiet --target riscv64gc-unknown-none-elf -p appspike -p applib -- -D warnings
 echo "== target: hopos met gui (qemuvirt, rpi4, rpi5, rk3566)"
 for b in qemuvirt rpi4 rpi5 rk3566; do
 	cargo build --quiet --target aarch64-unknown-none-softfloat -p hopos --features "board-$b,gui"
 done
-echo "== target: hopos met media (qemuvirt, o6n)"
+# De USB-taak (gui.rs) en de input-listener (net.rs) bestaan alleen met gui;
+# de werkruimte-clippy ziet de binary niet.
+cargo clippy --quiet --target aarch64-unknown-none-softfloat -p hopos --features board-qemuvirt,gui -- -D warnings
+echo "== target: hopos met media (qemuvirt, o6n) en apps/decode"
+# De bring-up, de firmware-lezing en het meetinstrument (hopos/src/codec.rs)
+# bestaan alleen met media, en op de O6N; de werkruimte-clippy ziet ze niet.
+cargo clippy --quiet --target aarch64-unknown-none-softfloat -p hopos --features board-qemuvirt,media -- -D warnings
+RUSTFLAGS="-C relocation-model=pie" cargo clippy --quiet --target aarch64-unknown-none-softfloat \
+	-p hopos --features board-o6n,media --target-dir target/uefi-media -- -D warnings
 cargo build --quiet --target aarch64-unknown-none-softfloat -p hopos --features board-qemuvirt,media
-RUSTFLAGS="-C relocation-model=pie" cargo build --quiet --release --target aarch64-unknown-none-softfloat \
-	-p hopos --features board-o6n,media --target-dir target/uefi-media
+MEDIA=1 BOARD=o6n sh image/uefi-run.sh
+cargo build --quiet --release --target aarch64-unknown-none-softfloat -p decode
 echo "== image: UEFI met gui (uefi, o6n, altra)"
 GUI=1 BUILD_ONLY=1 BOARD=uefi sh image/uefi-run.sh
 GUI=1 BOARD=o6n sh image/uefi-run.sh

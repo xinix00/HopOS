@@ -132,8 +132,15 @@ pub const CTRL_IDLE_MODE: u64 = 0xFF8;
 /// `Temp: board.TempMilliC` in de Go-agent). Onder [`CTRL_IDLE_MODE`],
 /// naar beneden groeiend (29-09).
 pub const CTRL_TEMP: u64 = 0xFF0;
+/// Kern naar app: de timebase van de teller van de app in tikken per
+/// seconde, gezet bij de bouw van de kooi (0 = de app neemt wat de
+/// architectuur zelf zegt). Op arm64 zegt CNTFRQ_EL0 het al; RISC-V heeft
+/// geen register waaruit hij volgt (de TIME-CSR telt 10 MHz op QEMU virt en
+/// 25 MHz op de LicheeRV), dus daar is dit woord de enige bron. Onder
+/// [`CTRL_TEMP`], naar beneden groeiend (29-09).
+pub const CTRL_TIMEBASE_HZ: u64 = 0xFE8;
 /// De ruimte voor de env-blob.
-pub const CTRL_ENV_MAX: u64 = CTRL_TEMP - CTRL_ENV_DATA;
+pub const CTRL_ENV_MAX: u64 = CTRL_TIMEBASE_HZ - CTRL_ENV_DATA;
 
 /// De bit in [`CTRL_RX_DOOR`] die de drempel wapent; een byte-index haalt
 /// dat bit nooit.
@@ -272,6 +279,8 @@ pub struct CtrlPage {
     pub door_irq: u64,
     /// [`CTRL_ENV_DATA`].
     pub env: [u8; CTRL_ENV_MAX as usize],
+    /// [`CTRL_TIMEBASE_HZ`].
+    pub timebase_hz: u64,
     /// [`CTRL_TEMP`].
     pub temp: u64,
     /// [`CTRL_IDLE_MODE`].
@@ -279,7 +288,7 @@ pub struct CtrlPage {
 }
 
 /// Alle woord-offsets van de page, voor de uniekheidstoets.
-pub const CTRL_WORDS: [u64; 38] = [
+pub const CTRL_WORDS: [u64; 39] = [
     CTRL_STATUS,
     CTRL_EXIT_CODE,
     CTRL_KILL,
@@ -316,6 +325,7 @@ pub const CTRL_WORDS: [u64; 38] = [
     CTRL_WAKES,
     CTRL_RX_DOOR,
     CTRL_DOOR_IRQ,
+    CTRL_TIMEBASE_HZ,
     CTRL_TEMP,
     CTRL_IDLE_MODE,
 ];
@@ -364,6 +374,7 @@ at!(wakes, CTRL_WAKES);
 at!(rx_door, CTRL_RX_DOOR);
 at!(door_irq, CTRL_DOOR_IRQ);
 at!(env, CTRL_ENV_DATA);
+at!(timebase_hz, CTRL_TIMEBASE_HZ);
 at!(temp, CTRL_TEMP);
 at!(idle_mode, CTRL_IDLE_MODE);
 // De SMP-handoff in het ctx-blok draagt de control-velden onder 256 bytes.

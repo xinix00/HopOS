@@ -37,6 +37,9 @@ use dev::Pa;
 use driver_genet::Genet;
 use driver_pl011::Pl011;
 
+// De VL805 achter de PCIe-brug (usb.rs), alleen in de gui-smaak.
+mod usb;
+
 /// De PL011 UART0 op GPIO14/15 (header-pin 8/10); de Pi 4 heeft geen
 /// aparte debug-connector. De bootloader zet hem op 115200 (config.txt
 /// `uart_2ndstage=1`); `dtoverlay=disable-bt` houdt hem bij de header.
@@ -71,6 +74,10 @@ impl Soc for Bcm2711 {
     const SOC: &'static str = "BCM2711";
     const MAC_FALLBACK: u8 = 0x04;
     const VCMAIL: Pa = VCMAIL;
+
+    fn usb_hosts(ctx: &board_raspi::usb::UsbCtx) -> board::UsbHosts {
+        usb::hosts(ctx)
+    }
 
     fn uart() -> &'static Pl011 {
         &UART

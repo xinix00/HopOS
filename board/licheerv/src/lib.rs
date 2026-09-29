@@ -36,8 +36,10 @@
     )
 )]
 
+pub mod cfg;
 mod ephy;
 pub mod slots;
+pub mod watchdog;
 
 use board::heap::Heap;
 use board::{Board, CoreClass, Dispatched, Error, Plan, Region};
@@ -125,12 +127,12 @@ fn console_write(b: &[u8]) {
     UART.write_bytes(b);
 }
 
-/// De eerste waarde van een boot-sleutel: op dit board leeg. De FSBL geeft
-/// geen DTB en er is (nog) geen `hopos.cfg`-lezer (de Go-kern las hem van
-/// de SD-kaart via U-Boot's omgeving); elke sleutel is dus zijn default.
+/// De eerste waarde van een boot-sleutel uit `hopos.cfg`, het venster in
+/// het image ([`cfg`]); "" als hij er niet is. De FSBL geeft geen DTB en
+/// geen bootargs, dus dit is het enige kanaal.
 #[must_use]
-pub fn boot_param(_key: &'static str) -> &'static str {
-    ""
+pub fn boot_param(key: &'static str) -> &'static str {
+    fw::bootcfg::first(fw::bootcfg::all(cfg::text(), key))
 }
 
 /// Wacht `us` microseconden op de TIME-CSR.
@@ -186,6 +188,58 @@ impl LicheeRv {
         CLINT_DEV
     }
 
+    /// De tekst van `hopos.cfg` (het venster in het image, [`cfg`]), voor
+    /// wie meer dan één sleutel leest (de watchdog-taak: `hopos.wd`).
+    #[must_use]
+    pub fn config(&self) -> &'static str {
+        cfg::text()
+    }
+
+    /// Wat de kooi van app-hart `hart` moet weten (Go,
+    /// board/licheerv/hop/hart.go `HartTimer`). Het app-hart is de C906L:
+    ///
+    /// - de CLINT is per core en beide cores noemen zichzelf hart 0
+    ///   (gemeten 01-08, boot 8): er is GEEN bel van de kern naar de C906L,
+    ///   en zijn comparator is voor hem `mtimecmp(0)`;
+    /// - "alle stille doden staan op naam van de C906L" (01-08, de
+    ///   wfi-klasse): slapen op zijn wekker is daar nooit bewezen, dus de
+    ///   switcher spint (geen wekker, geen slaap, geen tick);
+    /// - het resetblok is het mes: de harde intrekking is reset vast (dat
+    ///   wist ook zijn PMP, gemeten 30-07) en opnieuw de parkeerlus in.
+    ///
+    /// Wie de C906L wil laten slapen, probet eerst zijn wekker op dat hart
+    /// en zet dan `mtimecmp(0)` en een slaapgrens hier (docs/boards-riscv.md).
+    #[must_use]
+    pub fn app_hart(&self, hart: usize) -> cpu::riscv::switch::AppHart {
+        cpu::riscv::switch::AppHart {
+            mtimecmp: Pa(0),
+            msip: Pa(0),
+            sleep_cap: 0,
+            tick: 0,
+            attrs: cpu::riscv::sv39::Attrs::Thead,
+            pmp: cpu::riscv::pmp::C906,
+            resettable: hart == HART_LITTLE,
+        }
+    }
+
+    /// Brengt app-hart `hart` naar de parkeerlus van de boot-stub: de C906L
+    /// uit reset op de reset-ingang, met zijn logische hart-id erbij (zijn
+    /// `mhartid` leest 0, net als dat van de C906B).
+    pub fn start_app_hart(&self, hart: usize) {
+        if hart == HART_LITTLE {
+            cpu::riscv::boot::set_reset_hart(hart);
+            self.start_little(cpu::riscv::boot::reset_pc());
+        }
+    }
+
+    /// Zet app-hart `hart` in reset; `true` als dat kon (alleen de C906L).
+    pub fn hold_app_hart(&self, hart: usize) -> bool {
+        if hart == HART_LITTLE {
+            self.hold_little();
+        }
+        hart == HART_LITTLE
+    }
+
     /// Geen schijf: er is (nog) geen SD-driver.
     pub fn probe_disk(&self) -> Result<Option<driver_virtioblk::VirtioBlk>, Error> {
         Ok(None)
@@ -227,10 +281,11 @@ impl LicheeRv {
         dev::read32(WDT.add(0x04)) == TOP | TOP << 4
     }
 
-    /// Het MAC-adres: zonder `hopos.mac` of `hopos.node` (geen DTB van de
-    /// FSBL, geen hopos.cfg-lezer op dit board) het ingebouwde adres, luid.
+    /// Het MAC-adres uit `hopos.mac`, anders afgeleid van `hopos.node`
+    /// (`net::nodemac`), allebei uit het config-venster; zonder beide het
+    /// ingebouwde adres, luid.
     fn node_mac() -> Mac {
-        let (m, src) = net::nodemac::identity("", "");
+        let (m, src) = net::nodemac::identity(boot_param("hopos.mac"), boot_param("hopos.node"));
         if src == net::nodemac::Source::Fallback {
             cpu::println!(
                 "net: WARNING no hopos.mac and no hopos.node: the built-in MAC; a second LicheeRV on this LAN will collide HOPOS_MAC_FIXED"
@@ -289,10 +344,30 @@ impl Board for LicheeRv {
         }
         cpu::println!("{}", cpu::riscv::trng::WARNING);
         let ok = self.watchdog_probe();
+        watchdog::probed(ok);
         cpu::println!(
-            "watchdog: DW-WDT {}, NOT armed (no petting policy in v3 yet)",
-            if ok { "answers" } else { "readback differs" }
+            "watchdog: DW-WDT {}",
+            if ok {
+                "answers, the watchdog task may arm it"
+            } else {
+                "readback differs, it stays unarmed HOPOS_WD_PROBE_FAIL"
+            }
         );
+        match cfg::len() {
+            Some(0) => cpu::println!(
+                "config: no hopos.cfg in the image window (CFG= of image/licheerv-agent.sh), defaults HOPOS_CFG_NONE"
+            ),
+            Some(n) if cfg::text().is_empty() => cpu::println!(
+                "config: {n} bytes in the image window are not UTF-8, ignored HOPOS_CFG_BAD"
+            ),
+            Some(n) => {
+                cpu::println!("config: hopos.cfg from the image window, {n} bytes HOPOS_CFG_UP")
+            }
+            None => cpu::println!(
+                "config: the image window claims more than {} bytes, ignored HOPOS_CFG_BAD",
+                cfg::WINDOW - cfg::TEXT_OFF
+            ),
+        }
     }
 
     fn clock(&self) -> executor::Clock {

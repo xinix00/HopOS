@@ -7,7 +7,9 @@
 //! door in een param-blok, met per accessor een terugval: twee bronnen voor
 //! hetzelfde feit. Nu is de boom de bron, en draagt het param-blok alleen
 //! nog wat de loader áls enige weet: m1n1's spin-table ([`release_addr`])
-//! en de config-tekst ([`config_text`]).
+//! en de config-tekst ([`config_text`]). Die config reist sinds 29-09 ook ín
+//! het image (een venster op 0xF000 dat `image/apple-m4.sh` vult), want na
+//! de installatie is er geen loader meer.
 //!
 //! Alles hier wordt één keer bij `discover` gevuld (op de boot-core, vóór
 //! er taken zijn) en daarna alleen gelezen: atomics, geen slot.
@@ -231,17 +233,63 @@ pub fn release_addr(i: usize) -> u64 {
     dev::read64(Pa(crate::PARAMS + PARAM_RELEASE + 8 * i as u64))
 }
 
-/// De config-tekst die de loader op [`CFG_PA`] legde ("" als er geen is).
+/// De kopregel van een ingebakken config-venster: het formaat van Go's
+/// `image/hopcfg` (kopregel, config, '#'-padding tot de venstermaat), dat
+/// voor de parser gewoon commentaar is. `image/apple-m4.sh` schrijft het op
+/// offset 0xF000 van het image.
+pub const CFG_WINDOW_MAGIC: &[u8] = b"#HOPCFG1 window=";
+
+/// Waar de config vandaan kwam.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CfgSource {
+    /// Geen config: een leeg venster zonder loader.
+    None,
+    /// Ingebakken in het image (`CFG=` van `image/apple-m4.sh`).
+    Image,
+    /// Van de m1n1-loader (`CFG=` van `image/apple/load.py`).
+    Loader,
+}
+
+/// De config in het venster `b`, met `params` = er is een param-blok van de
+/// loader. Een ingebakken venster herken je aan zijn kopregel; zonder
+/// loader en zonder kopregel is het venster niets (nullen uit het image, en
+/// geen resten van een vorige boot: de stub kopieert het bestand, venster
+/// incluis). Tekst tot de eerste nul, en alleen UTF-8.
+fn config_of(b: &[u8], params: bool) -> (&str, CfgSource) {
+    let src = if b.starts_with(CFG_WINDOW_MAGIC) {
+        CfgSource::Image
+    } else if params {
+        CfgSource::Loader
+    } else {
+        return ("", CfgSource::None);
+    };
+    let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+    match core::str::from_utf8(b.get(..end).unwrap_or_default()) {
+        Ok(t) if !t.trim().is_empty() => (t, src),
+        _ => ("", CfgSource::None),
+    }
+}
+
+/// Het config-venster op [`CFG_PA`].
+fn window() -> &'static [u8] {
+    // SAFETY: [`CFG_PA`, +4 KB) ligt in het image (Normal WB, de kern-RAM):
+    // de bytes komen uit het bestand (nullen, of het venster van
+    // `image/apple-m4.sh`) of van de loader vóór de sprong, en daarna
+    // schrijft niemand er.
+    unsafe { core::slice::from_raw_parts(CFG_PA as usize as *const u8, CFG_SIZE) }
+}
+
+/// De config-tekst: het venster uit het image, of wat de loader op
+/// [`CFG_PA`] legde ("" als er geen is).
 #[must_use]
 pub fn config_text() -> &'static str {
-    if !has_params() {
-        return "";
-    }
-    // SAFETY: [`CFG_PA`, +4 KB) ligt in het image (Normal WB, de kern-RAM),
-    // de loader schreef er vóór de sprong, en daarna schrijft niemand er.
-    let b = unsafe { core::slice::from_raw_parts(CFG_PA as usize as *const u8, CFG_SIZE) };
-    let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
-    core::str::from_utf8(b.get(..end).unwrap_or_default()).unwrap_or("")
+    config_of(window(), has_params()).0
+}
+
+/// Waar [`config_text`] vandaan kwam, voor de bootregel.
+#[must_use]
+pub fn config_source() -> CfgSource {
+    config_of(window(), has_params()).1
 }
 
 /// De x0 waarmee we binnenkwamen (boot_args), 0 als er geen was.
@@ -260,6 +308,32 @@ mod tests {
         assert_eq!(kind(None, Some("apple,everest")), b'P');
         assert_eq!(kind(Some("P"), Some("apple,sawtooth")), b'P');
         assert_eq!(kind(None, Some("ARM,v8")), 0);
+    }
+
+    #[test]
+    fn the_config_window() {
+        let mut w = [0u8; 256];
+        // Leeg, zonder loader: niets; mét loader: ook niets (een lege tekst).
+        assert_eq!(config_of(&w, false), ("", CfgSource::None));
+        assert_eq!(config_of(&w, true), ("", CfgSource::None));
+        // De loader schrijft platte tekst: alleen geldig mét param-blok.
+        let t = b"hopos.cages=on\n";
+        w[..t.len()].copy_from_slice(t);
+        assert_eq!(config_of(&w, false), ("", CfgSource::None));
+        assert_eq!(config_of(&w, true).1, CfgSource::Loader);
+        // Het ingebakken venster, met of zonder loader.
+        let v = b"#HOPCFG1 window=4096 len=0000000015\nhopos.smc=1\n\n####\n";
+        let mut w = [0u8; 256];
+        w[..v.len()].copy_from_slice(v);
+        for params in [false, true] {
+            let (text, src) = config_of(&w, params);
+            assert_eq!(src, CfgSource::Image);
+            assert_eq!(fw::bootcfg::first(fw::bootcfg::all(text, "hopos.smc")), "1");
+        }
+        // Geen UTF-8: geen config, geen paniek.
+        let mut w = [0xffu8; 32];
+        w[..CFG_WINDOW_MAGIC.len()].copy_from_slice(CFG_WINDOW_MAGIC);
+        assert_eq!(config_of(&w, false), ("", CfgSource::None));
     }
 
     #[test]

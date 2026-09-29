@@ -219,6 +219,21 @@ pub fn cpu_on(i: usize, here: usize, entry: u64, ctx: u64) -> Result<(), Error> 
     }
 }
 
+/// De CPU_ON van dit board in de vorm van `cpu::smp::CpuOn`: de haak die
+/// `discover` zet, zodat de verhuizing naar de OS-core
+/// (`cpu::smp::start_one`) en de koude start van een kooi (hopos
+/// `cage.rs`) hier uitkomen in plaats van bij een SMC zonder EL3. `target`
+/// is het MPIDR (`slots::mpidr`); de fout in PSCI-vorm ([`psci_code`]).
+pub fn cpu_on_mpidr(target: u64, entry: u64, ctx: u64) -> Result<(), cpu::psci::Error> {
+    let i = fwinfo::core_of(target).ok_or(cpu::psci::Error::InvalidParams)?;
+    let here = crate::Apple::new().this_core();
+    cpu_on(i, here, entry, ctx).map_err(|e| {
+        cpu::println!("cores: cpu {i} (mpidr {target:#x}) not started: {e}");
+        let code = i64::from(psci_code(e)) as u64;
+        cpu::psci::Error::from_ret(code).unwrap_or(cpu::psci::Error::Other(0))
+    })
+}
+
 /// Wekt de core met affiniteit `mpidr` met een fast IPI (m1n1's wek op dit
 /// silicium: deep WFI plus IPI_RR_GLOBAL, ack via IPI_SR).
 pub fn kick(mpidr: u64) {
@@ -240,5 +255,10 @@ mod tests {
     fn without_a_tree_nothing_starts() {
         assert_eq!(cpu_on(1, 0, 0x1000, 0), Err(Error::NoCore(1)));
         assert!(own_cores().is_err());
+        // De haak van `cpu::smp`: een MPIDR zonder core is INVALID_PARAMS.
+        assert_eq!(
+            cpu_on_mpidr(0x8001_0101, 0x1000, 0),
+            Err(cpu::psci::Error::InvalidParams)
+        );
     }
 }

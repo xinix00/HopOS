@@ -29,7 +29,17 @@
 #                                    (bootparameter hopos.appenv; meer
 #                                    sleutels met komma's). Het glas zelf
 #                                    vraagt een gui-kern en ramfb: zie
-#                                    GUI=display in tools/qemu-test.sh
+#                                    GUI=display hieronder
+#   GUI=display APP=display APPENV=GUI=display image/qemu-run.sh
+#                                    de gui-kern (`--features gui`) met
+#                                    `-device ramfb` in een venster, en de
+#                                    USB-invoer: `-device qemu-xhci` met
+#                                    `usb-kbd` en `usb-mouse` erachter
+#                                    (docs/gui.md). Klik in het venster en
+#                                    typ: de kern leest de toetsen en de
+#                                    muis en de display-app tekent ze.
+#                                    QDISPLAY=cocoa|gtk|sdl kiest de
+#                                    weergave (standaard die van QEMU)
 #   DISK=pad image/qemu-run.sh       de schijf (raw); standaard
 #                                    target/hopos-disk.img, 64 MiB, aangemaakt
 #                                    (ijl) als hij ontbreekt. Een verse schijf
@@ -77,7 +87,23 @@ DISK="${DISK:-$DIR/target/hopos-disk.img}"
 DISK_MIB="${DISK_MIB:-64}"
 
 cd "$DIR"
-cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt
+# GUI=display: de gui-kern, ramfb in een venster, en de USB-invoer.
+FEATURES=board-qemuvirt
+SCREEN="-nographic"
+QUSB=""
+case "${GUI:-}" in
+"") ;;
+display)
+	FEATURES=board-qemuvirt,gui
+	SCREEN="-display ${QDISPLAY:-default} -device ramfb"
+	QUSB="-device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0"
+	;;
+*)
+	echo "qemu-run: GUI=$GUI: only GUI=display" >&2
+	exit 2
+	;;
+esac
+cargo build --quiet --release --target "$TARGET" -p hopos --features "$FEATURES"
 KERNEL="$DIR/target/$TARGET/release/hopos"
 
 APP="${APP-hop}"
@@ -176,9 +202,10 @@ FWD="$FWD,hostfwd=tcp:127.0.0.1:${AGENTPORT}-:8080,hostfwd=tcp:127.0.0.1:${LEADE
 if [ -n "${WEBPORT:-}" ]; then
 	FWD="$FWD,hostfwd=tcp:127.0.0.1:${WEBPORT}-:80"
 fi
+# shellcheck disable=SC2086
 set -- -M virt,gic-version=3,highmem-ecam=off,virtualization=on \
 	-cpu cortex-a53 -smp "$SMP" -m 3G \
-	-nographic -monitor none -serial stdio \
+	$SCREEN -monitor none -serial stdio $QUSB \
 	-global virtio-mmio.force-legacy=false \
 	-device virtio-net-device,netdev=n0,bus=virtio-mmio-bus.0 \
 	-netdev "user,id=n0,$FWD" \

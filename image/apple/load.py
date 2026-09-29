@@ -235,8 +235,12 @@ print("gzdec OK: %d bytes at %#x" % (n, LOAD_AT))
 if not BARE:
     robust_writemem(PARAM_BASE, params)
 
-# Platform-config als tekst op CFG_BASE (board_apple::fwinfo::CFG_PA): het hopos.cfg-bestand
-# uit CFG=pad, plus het serial uit de ADT als hopos.serial (node-identiteit).
+# Platform-config als tekst op CFG_BASE (board_apple::fwinfo::CFG_PA): het
+# hopos.cfg-bestand uit CFG=pad. Zonder CFG blijft staan wat het image daar
+# draagt: het venster dat image/apple-m4.sh met CFG= inbakte, of nullen
+# (gzdec schreef net het hele bestand, dus er liggen geen resten van een
+# vorige boot). BARE=1 laat het venster ook staan: na een `kmutil
+# configure-boot` is het ingebakken venster de enige config.
 CFG_BASE, CFG_SIZE = LOAD_AT + 0xF000, 0x1000
 cfg = ""
 if os.environ.get("CFG"):
@@ -244,15 +248,17 @@ if os.environ.get("CFG"):
 cfgb = cfg.encode()
 if len(cfgb) >= CFG_SIZE:
     raise SystemExit("config too large: %d >= %d" % (len(cfgb), CFG_SIZE))
+baked = img[0xF000:0xF000 + 16] == b"#HOPCFG1 window="
 if BARE:
-    # Geen loader, geen config: het gebied moet leeg zijn, anders leest HopOS de
-    # resten van een vorige boot voor waarheid aan.
-    robust_writemem(CFG_BASE, b"\0" * CFG_SIZE)
     robust_writemem(PARAM_BASE, b"\0" * 0xB0)
-    print("bare: no param block, no config — the board reads the firmware itself")
-else:
+    print("bare: no param block%s; the board reads the firmware itself" % (
+        ", the baked config window stays" if baked else ", no config"))
+elif os.environ.get("CFG"):
     robust_writemem(CFG_BASE, cfgb.ljust(CFG_SIZE, b"\0"))
-    print("config: %d bytes%s" % (len(cfgb), " from " + os.environ["CFG"] if os.environ.get("CFG") else ""))
+    print("config: %d bytes from %s%s" % (len(cfgb), os.environ["CFG"],
+        " (over the baked window)" if baked else ""))
+else:
+    print("config: %s" % ("the window baked into the image" if baked else "none"))
 # De staging: image, maat, rol, en het magic als laatste (zonder magic
 # leest de kern de loader-regio niet als image).
 if os.environ.get("STAGE"):

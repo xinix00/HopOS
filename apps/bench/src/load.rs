@@ -46,6 +46,10 @@ pub(crate) async fn burn(app: &'static App) -> ! {
     );
     let t0 = clock::now_ns();
     let (mut acc, mut bursts, mut last_bursts) = (0u64, 0u64, 0u64);
+    // De idle van deze core zoals de slaper hem op de control-page zet: in
+    // tikken van de teller, dus met `clock::hz` naar nanoseconden.
+    let hz = clock::hz();
+    let mut last_idle = app.ctrl().idle_ticks();
     let mut next = t0.saturating_add(nanos(BURN_EVERY));
     let mut in_work = true;
     loop {
@@ -76,15 +80,26 @@ pub(crate) async fn burn(app: &'static App) -> ! {
                 .saturating_sub(next.saturating_sub(nanos(BURN_EVERY)))
                 .max(1);
             let rate = (bursts - last_bursts) * 1_000_000_000 / dt;
+            let idle_ticks = app.ctrl().idle_ticks();
+            let idle = idle_pct(idle_ticks.wrapping_sub(last_idle), hz, dt);
             log!(
-                "BURN: {bursts} bursts, {rate} bursts/s, phase={}, heap={} KB HOPOS_BENCH_BURN",
+                "BURN: {bursts} bursts, {rate} bursts/s, idle={idle}%, phase={}, heap={} KB HOPOS_BENCH_BURN",
                 if in_work { "work" } else { "rest" },
                 HEAP.stats().used >> 10
             );
             last_bursts = bursts;
+            last_idle = idle_ticks;
             next = now.saturating_add(nanos(BURN_EVERY));
         }
     }
+}
+
+/// Het deel van `dt_ns` dat de core sliep, in procenten: `ticks` geslapen
+/// tellertikken op `hz`. Tijdens werk hoort dit bij 0 te liggen (de burst
+/// geeft de core alleen met een yield af, nooit aan de slaper), tijdens
+/// rust bij 100; ertussenin is de heartbeat, of een core die lekt.
+fn idle_pct(ticks: u64, hz: u64, dt_ns: u64) -> u64 {
+    (clock::ticks_to_ns(ticks, hz).saturating_mul(100) / dt_ns.max(1)).min(100)
 }
 
 /// De maat van één THRASH-knoop: 48 bytes, zoals de `ball` van Go (een
@@ -211,12 +226,12 @@ const MDNS: Endpoint = Endpoint {
 };
 
 /// MCAST: `send` stuurt elke seconde een datagram naar de mDNS-groep;
-/// `listen` bindt 5353 en logt wat er binnenkomt.
+/// `listen` joint de groep, bindt 5353 en telt wat er binnenkomt.
 ///
-/// `listen` is half: applib heeft (nog) geen `join_group` op zijn `Net`
-/// (leannet heeft hem wel, `Stack::join_group`), dus de app kan de groep
-/// niet joinen en ziet alleen wat de stack zonder join aflevert. De regel
-/// zegt dat, luid, zodat een lege luisteraar geen raadsel is.
+/// Twee benches in één node bewijzen zo de keten: de switch van de kern
+/// floodt het frame van de zender naar elk slot, en de stack van de
+/// luisteraar laat het door omdat hij de groep joinde
+/// (`appnet::join_group`). Zonder join blijft `recv` op 0.
 pub(crate) async fn mcast(app: &'static App, role: &str) -> ! {
     if let Err(e) = appnet::up(app) {
         log!("MCAST {role}: network stack: {e} HOPOS_BENCH_FAIL role=mcast");
@@ -254,7 +269,11 @@ async fn mcast_send() -> ! {
     }
 }
 
-/// Bindt 5353 en logt elk datagram.
+/// De eerste zoveel datagrammen krijgen elk een regel, daarna één per
+/// tiende: een mDNS-rijk LAN hoort de console niet te vullen.
+const MCAST_LOG_FIRST: u64 = 5;
+
+/// Joint de groep, bindt 5353 en telt elk datagram (`recv=N`).
 async fn mcast_listen() -> ! {
     let udp = match UdpSocket::bind(MDNS.port) {
         Ok(u) => u,
@@ -263,18 +282,25 @@ async fn mcast_listen() -> ! {
             park().await;
         }
     };
-    log!(
-        "MCAST listen: port 5353 open, but applib has no group join yet: only what the stack delivers unjoined arrives HOPOS_BENCH_MCAST_NOJOIN"
-    );
+    if let Err(e) = appnet::join_group(MDNS.ip) {
+        log!("MCAST listen: join 224.0.0.251: {e} HOPOS_BENCH_FAIL role=mcast");
+        park().await;
+    }
+    log!("MCAST listen: joined 224.0.0.251, port 5353 open HOPOS_BENCH_UP role=mcast-listen");
     let mut buf = [0u8; 512];
+    let mut recv = 0u64;
     loop {
         match udp.recv_from(&mut buf).await {
             Ok((n, from)) => {
+                recv += 1;
+                if recv > MCAST_LOG_FIRST && !recv.is_multiple_of(10) {
+                    continue;
+                }
                 let text =
                     core::str::from_utf8(buf.get(..n).unwrap_or_default()).unwrap_or("<bin>");
                 let [a, b, c, d] = from.ip;
                 log!(
-                    "MCAST listen: {text:?} from {a}.{b}.{c}.{d}:{} HOPOS_BENCH_MCAST",
+                    "MCAST listen: {text:?} from {a}.{b}.{c}.{d}:{} HOPOS_BENCH_MCAST recv={recv}",
                     from.port
                 );
             }
@@ -321,4 +347,21 @@ async fn park() -> ! {
 /// Een duur in nanoseconden, geklemd.
 fn nanos(d: Duration) -> u64 {
     u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::idle_pct;
+
+    #[test]
+    fn idle_pct_is_the_slept_share_of_the_interval() {
+        // QEMU telt op 62,5 MHz: 5 s slaap in 10 s is de helft.
+        assert_eq!(idle_pct(312_500_000, 62_500_000, 10_000_000_000), 50);
+        // Op de M4 (1 GHz) is een tik een nanoseconde.
+        assert_eq!(idle_pct(9_900_000_000, 1_000_000_000, 10_000_000_000), 99);
+        // Een teller die verder liep dan de wandklok (afronding, een tik
+        // over de grens) blijft op 100; een leeg interval deelt niet door 0.
+        assert_eq!(idle_pct(u64::MAX, 1, 10), 100);
+        assert_eq!(idle_pct(0, 62_500_000, 0), 0);
+    }
 }

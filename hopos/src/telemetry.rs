@@ -10,7 +10,8 @@
 //!
 //! Per board ([`hw`]): de O6N meet via de SCP (SCMI) en heeft een knop
 //! (`_CPC`), de Altra meet via de SMpro (PCC) en laat de klok aan de
-//! firmware, de rest meet (nog) niets. De Pi's hebben thermometer en klok
+//! firmware, de Mac mini meet één keer bij de boot (de SMC) en bewaakt zijn
+//! p-states, de rest meet (nog) niets. De Pi's hebben thermometer en klok
 //! achter de mailbox; die is van het Pi-spoor, de haak is een eigen `hw`.
 
 use core::sync::atomic::{AtomicI32, Ordering::Relaxed};
@@ -223,10 +224,61 @@ mod hw {
     }
 }
 
+/// De Mac mini: de klok regelt het silicium zelf (de APSC, die
+/// `discover` aanzette onder het plafond van `hopos.pstate`), en de
+/// wachter meldt elke sprong (Go `PStateWatch`, `board_apple::wdt`). De
+/// thermometer is de SMC; die praat bij elke meting een RTKit-coprocessor
+/// wakker en weer in slaap (tot seconden), dus hij meet één keer bij de boot
+/// (`hopos.smc=1`, in de bootlog) en niet op de tik: een oude waarde op de
+/// heartbeat van Hop zou liegen, dus hier 0 (`-`).
+#[cfg(feature = "board-apple")]
+mod hw {
+    use core::time::Duration;
+    use cpu::println;
+    use executor::Executor;
+    use vboard::wdt::PStateWatch;
+
+    /// De cadans van de wachter (Go: twee seconden).
+    const WATCH_EVERY: Duration = Duration::from_secs(2);
+
+    pub(super) fn open() {}
+
+    pub(super) fn temp() -> i32 {
+        0
+    }
+
+    pub(super) fn governor(exec: &'static Executor) {
+        let w = PStateWatch::new();
+        if w.is_empty() {
+            println!("dvfs: no cluster blocks in the ADT, the boot clock stays HOPOS_CLOCK_NONE");
+            return;
+        }
+        println!(
+            "dvfs: the APSC governs under the hopos.pstate ceiling; watching the p-states every {} s HOPOS_APPLE_PSTATE_WATCH",
+            WATCH_EVERY.as_secs()
+        );
+        if let Err(e) = exec.spawn(watch(exec, w)) {
+            println!("dvfs: p-state watch not spawned ({e:?})");
+        }
+    }
+
+    /// De wachter: alleen-lezen, één regel per sprong.
+    async fn watch(exec: &'static Executor, mut w: PStateWatch) {
+        loop {
+            w.poll();
+            exec.after(WATCH_EVERY).await;
+        }
+    }
+}
+
 /// De rest: geen thermometer en geen knop in deze kern. De Pi's hebben
 /// beide achter de mailbox (`vcmail`: `temp`, `set_clock_rate`); die is van
 /// het Pi-spoor, en de haak is een eigen module met deze drie namen.
-#[cfg(not(any(feature = "board-o6n", feature = "board-altra")))]
+#[cfg(not(any(
+    feature = "board-o6n",
+    feature = "board-altra",
+    feature = "board-apple"
+)))]
 mod hw {
     use cpu::println;
     use executor::Executor;

@@ -30,7 +30,10 @@ struct Slot<T> {
 /// Voor slot `i` met positie `pos` (`pos % N == i`): `seq == pos` betekent
 /// leeg en beschikbaar voor de producer die `pos` wint; `seq == pos + 1`
 /// betekent gevuld en beschikbaar voor de consument die `pos` wint; de
-/// consument zet `seq` daarna op `pos + N` voor de volgende ronde.
+/// consument zet `seq` daarna op `pos + N` voor de volgende ronde. Er staan
+/// nooit meer dan `N` elementen in de rij (`enq - deq <= N`): de producer
+/// toetst dat expliciet, want bij `N == 1` is "gevuld voor `pos`" hetzelfde
+/// getal als "leeg voor `pos + 1`" (zie [`Mailbox::try_send`]).
 pub struct Mailbox<T, const N: usize> {
     slots: [Slot<T>; N],
     enq: AtomicUsize,
@@ -72,6 +75,16 @@ impl<T, const N: usize> Mailbox<T, N> {
     /// Zet `v` in de rij, of geeft hem terug als de rij vol is. Vanaf elke
     /// taak en elke core; nooit vanuit een ISR, want de consument mag geen
     /// `T` van een ISR erven.
+    ///
+    /// De capaciteitstoets vóór de claim is er voor `N == 1` (29-09, de
+    /// kern-flip): daar zegt het volgnummer van een gevuld slot (`pos + 1`)
+    /// ook "leeg" tegen de volgende producer. Zonder de toets won een tweede
+    /// `try_send` zonder `try_recv` ertussen het slot opnieuw (het eerste
+    /// element weg, `seq` op `pos + 2`), en bleef elke `try_recv` daarna
+    /// voor altijd draaien. Zo hing de OS-core van QEMU in een `try_take`
+    /// van de `Ack` van de switch, na twee geadopteerde `Attach`-en op één
+    /// `Ack`. Een verouderde `deq` maakt de toets alleen strenger: vol
+    /// zeggen waar net plaats kwam, nooit andersom.
     pub fn try_send(&self, v: T) -> Result<(), Full<T>> {
         let mut pos = self.enq.load(Relaxed);
         loop {
@@ -79,6 +92,9 @@ impl<T, const N: usize> Mailbox<T, N> {
             let seq = slot.seq.load(Acquire);
             let dif = seq.wrapping_sub(pos) as isize;
             if dif == 0 {
+                if pos.wrapping_sub(self.deq.load(Acquire)) >= N {
+                    return Err(Full(v));
+                }
                 if self
                     .enq
                     .compare_exchange_weak(pos, pos.wrapping_add(1), Relaxed, Relaxed)
@@ -197,6 +213,25 @@ mod tests {
         assert_eq!(mb.try_send(3), Ok(()));
         assert_eq!(mb.try_recv(), Some(2));
         assert_eq!(mb.try_recv(), Some(3));
+        assert_eq!(mb.try_recv(), None);
+    }
+
+    #[test]
+    fn one_place_holds_one_and_never_spins() {
+        // De brievenbus van een `Ack`: twee resultaten zonder `try_recv`
+        // ertussen. Het tweede is vol, het eerste blijft, en een lege rij
+        // zegt daarna gewoon `None` (vóór 29-09 draaide die `try_recv` voor
+        // altijd).
+        let mb: Mailbox<u32, 1> = Mailbox::new();
+        assert_eq!(mb.try_send(1), Ok(()));
+        assert_eq!(mb.try_send(2), Err(Full(2)));
+        assert_eq!(mb.try_recv(), Some(1));
+        assert_eq!(mb.try_recv(), None);
+        for i in 0..5 {
+            assert_eq!(mb.try_send(i), Ok(()));
+            assert_eq!(mb.try_send(99), Err(Full(99)));
+            assert_eq!(mb.try_recv(), Some(i));
+        }
         assert_eq!(mb.try_recv(), None);
     }
 

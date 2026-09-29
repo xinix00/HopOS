@@ -48,6 +48,20 @@ static HART_ARG: [AtomicU64; MAX_HARTS] = [const { AtomicU64::new(0) }; MAX_HART
 #[cfg_attr(target_os = "none", unsafe(link_section = ".data.hartpark"))]
 static HART_MSIP: [AtomicU64; MAX_HARTS] = [const { AtomicU64::new(0) }; MAX_HARTS];
 
+/// Het hart-id dat de reset-ingang ([`reset_pc`]) aan zijn hart geeft. Op
+/// de SG2002 noemen BEIDE cores zichzelf `mhartid` 0 (gemeten 01-08, boot
+/// 8): een C906L die uit reset `_start` inliep, nam het pad van het
+/// boot-hart en draaide `kmain` een tweede keer. Wie een hart uit reset
+/// haalt, zegt daarom hier wie het is ([`set_reset_hart`]), vóór de reset
+/// losgaat. In `.data`, om dezelfde reden als het postvak.
+#[cfg_attr(target_os = "none", unsafe(link_section = ".data.hartpark"))]
+static RESET_HART: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Welke harts [`start_hart`] al een ingang gaf (bit per hart): de kooi
+/// start een app-hart één keer; daarna leeft het in de switcher en wekt de
+/// kern het met zijn `msip`.
+static STARTED: AtomicU64 = AtomicU64::new(0);
+
 /// Waarom een hart niet gestart kon worden.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum StartError {
@@ -79,6 +93,11 @@ impl core::fmt::Display for StartError {
 /// De ingang draait zonder stack en met `mtvec` op de trap van de kern; wie
 /// Rust wil draaien, zet eerst zijn eigen `sp` (de switcher doet dat met
 /// `mscratch`).
+///
+/// `msip` = `Pa(0)`: dit hart heeft geen bel die de kern kan luiden (de
+/// SG2002: de CLINT is per core, er is geen IPI tussen de harts, Go 01-08).
+/// Dan staat het postvak klaar en haalt het hart het op zodra het de
+/// parkeerlus bereikt, uit reset via [`reset_pc`].
 pub fn start_hart(hart: usize, entry: u64, arg: u64, msip: Pa) -> Result<(), StartError> {
     if entry == 0 {
         return Err(StartError::NoEntry);
@@ -107,8 +126,59 @@ pub fn start_hart(hart: usize, entry: u64, arg: u64, msip: Pa) -> Result<(), Sta
         Pa(HART_MSIP.as_ptr() as u64),
         core::mem::size_of_val(&HART_MSIP),
     );
-    dev::write32(msip, 1);
+    if msip.0 != 0 {
+        dev::write32(msip, 1);
+    }
+    if let Some(bit) = 1u64.checked_shl(hart as u32) {
+        STARTED.fetch_or(bit, Release);
+    }
     Ok(())
+}
+
+/// Gaf [`start_hart`] dit hart al een ingang (sinds de boot)?
+#[must_use]
+pub fn is_started(hart: usize) -> bool {
+    1u64.checked_shl(hart as u32)
+        .is_some_and(|bit| STARTED.load(core::sync::atomic::Ordering::Acquire) & bit != 0)
+}
+
+/// Zet het hart-id dat [`reset_pc`] meegeeft aan het volgende hart dat uit
+/// reset komt, en publiceert het (de C906L leest het met zijn cache nog
+/// uit).
+pub fn set_reset_hart(hart: usize) {
+    RESET_HART.store(hart as u64, Release);
+    dev::push(
+        Pa(core::ptr::from_ref(&RESET_HART) as u64),
+        core::mem::size_of_val(&RESET_HART),
+    );
+}
+
+/// Het fysieke adres van de reset-ingang: dezelfde stub als `_start`, maar
+/// het hart-id komt uit [`set_reset_hart`] en niet uit `mhartid`, en het
+/// hart gaat altijd de parkeerlus in. Voor een hart dat de kern zelf uit
+/// reset haalt (de C906L van de LicheeRV, `start_little`).
+#[must_use]
+pub fn reset_pc() -> u64 {
+    imp::reset_pc()
+}
+
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+mod imp {
+    pub(super) fn reset_pc() -> u64 {
+        unsafe extern "C" {
+            /// De reset-ingang (hieronder).
+            static __hopos_resetenter: u8;
+        }
+        (&raw const __hopos_resetenter) as u64
+    }
+}
+
+#[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
+mod imp {
+    //! Host-stub: er is geen stub.
+    pub(super) fn reset_pc() -> u64 {
+        0
+    }
 }
 
 /// Parkeert dit hart voor altijd: een `wfi`-lus met de interrupts dicht.
@@ -170,6 +240,14 @@ core::arch::global_asm!(
     .section .text.boot, "ax"
     .global _start
 _start:
+    li s3, -1
+    j 10f
+    // De reset-ingang: hetzelfde regime, maar het hart-id uit RESET_HART
+    // en altijd de parkeerlus in (zie `reset_pc`).
+    .global __hopos_resetenter
+__hopos_resetenter:
+    li s3, 0
+10:
     csrw mie, zero
     la t0, __hopos_trap
     csrw mtvec, t0
@@ -180,6 +258,11 @@ _start:
     csrs mstatus, t0
     csrr s0, mhartid
     mv s1, a1
+    bltz s3, 11f
+    la t0, {reset}
+    ld s0, 0(t0)
+    j 20f
+11:
     bnez s0, 20f
 
     la sp, __stack_top
@@ -202,8 +285,12 @@ _start:
     li t0, {max}
     bgeu s0, t0, 9b
     slli s2, s0, 3
+    // Eerst kijken, dan slapen: een hart uit reset (zonder bel) vindt zijn
+    // ingang al in het postvak. Een bel ná de toets staat pending en laat
+    // de `wfi` meteen terugkeren.
+    j 23f
 21: wfi
-    la t1, {entry}
+23: la t1, {entry}
     add t1, t1, s2
     ld t3, 0(t1)
     beqz t3, 21b
@@ -228,6 +315,7 @@ _start:
     entry = sym HART_ENTRY,
     arg = sym HART_ARG,
     msip = sym HART_MSIP,
+    reset = sym RESET_HART,
 );
 
 #[cfg(test)]

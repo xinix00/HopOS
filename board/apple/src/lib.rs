@@ -27,9 +27,11 @@
 //! De Go-voorganger is `OLD/metal/board/apple` (plus `hop/`), en
 //! `OLD/docs/v1/archief/apple-m4.md` is het dossier met elke meting.
 //!
-//! Wat dit board van de rest van de kern vraagt en nog niet krijgt, staat
-//! in `docs/boards-apple.md`: de EL2-smaak `AppleVhe` in de kooi-lijm en de
-//! OS-core-rotatie, en een CPU_ON-haak in `cpu::smp` (er is geen PSCI).
+//! Wat de kern voor dit board draagt (29-09): de EL2-smaak `AppleVhe` in de
+//! kooi-lijm en de OS-core-rotatie met de fast IPI als kick
+//! (`cpu::el2::Bell::apple`), en de CPU_ON-haak van `cpu::smp`
+//! ([`cores::cpu_on_mpidr`], er is geen PSCI). Wat er op ijzer nog bewezen
+//! moet worden, staat als checklist in `docs/boards-apple.md`.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -187,36 +189,31 @@ impl Apple {
     /// De OS-core die `hopos.cfg` vraagt (`hopos.oscore=<small|mid|big|N>`),
     /// met een reden als de kern er niet heen kan. De firmware levert ons af
     /// op een P-core (cpu 6); `small` is de zuinige core die HopOS hoort te
-    /// bewonen (Go: "de hop", 29-08). Maar de verhuizing van `main` start die
-    /// core via `cpu::smp::start_one`, en dat is PSCI: op dit board een SMC
-    /// zonder EL3. Tot `cpu::smp` een CPU_ON-haak van het board kent
-    /// ([`cores::cpu_on`]), blijft de kern waar hij is, luid.
+    /// bewonen (Go: "de hop", 29-08). De verhuizing start die core via
+    /// `cpu::smp::start_one`, en dat is sinds 29-09 de CPU_ON van dit board
+    /// ([`cores::cpu_on_mpidr`], gezet in `discover`).
+    ///
+    /// Let op (29-08): een core die de kern zelf opbracht, krijgt op t8132
+    /// geen timer-FIQ. De kern draait daar dan in WFE (`sleeper` meet het
+    /// opnieuw) en de voorproef van de kooien zakt op de timer-beurt
+    /// (`HOPOS_APPLE_PREFLIGHT_FAIL`): de verhuizing kost de kooien, luid.
     #[must_use]
     pub fn os_core(&self) -> (usize, Option<&'static str>) {
         let here = self.this_core();
         let v = fw::bootcfg::first(fw::bootcfg::all(self.config(), "hopos.oscore"));
-        let (want, why) = os_core_of(v, self.cores(), |c| self.core_class(c));
-        match (want, why) {
+        match os_core_of(v, self.cores(), |c| self.core_class(c)) {
             (_, Some(why)) => (here, Some(why)),
-            (w, None) if w == usize::MAX || w == here => (here, None),
-            _ => (
-                here,
-                Some("no PSCI on Apple; the move needs a board CPU_ON in cpu::smp"),
-            ),
+            (usize::MAX, None) => (here, None),
+            (w, None) => (w, None),
         }
     }
 
-    /// De kick van de OS-core voor de rotatie van `cpu::el2`. Apple heeft
-    /// geen GIC-SGI: de kick is de fast IPI, en dat pad is in `cpu::el2`
-    /// nog niet geport (`OsCore::new` weigert `AppleVhe`). Dus geen kick.
+    /// De kick van de OS-core voor de rotatie van `cpu::el2`: de fast IPI
+    /// naar de core waar de kern draait (IPI_RR_GLOBAL, geackt via IPI_SR op
+    /// EL2), want Apple heeft geen GIC-SGI.
     #[must_use]
     pub fn os_bell(&self) -> cpu::el2::Bell {
-        cpu::el2::Bell {
-            sgi1r: 0,
-            sgir: 0,
-            intid: 0,
-            pending: || 0,
-        }
+        cpu::el2::Bell::apple(arch::mpidr())
     }
 
     /// De fast IPI naar deze core zelf: de zelftest van het IPI-pad.
@@ -230,7 +227,8 @@ impl Apple {
         cores::cpu_on(core, self.this_core(), entry, ctx)
     }
 
-    /// `hopos.cfg`: de config-tekst van de m1n1-loader ("" zonder loader).
+    /// `hopos.cfg`: het venster dat `image/apple-m4.sh` in het image bakte,
+    /// of de tekst van de m1n1-loader ("" als er geen van beide is).
     #[must_use]
     pub fn config(&self) -> &'static str {
         fwinfo::config_text()
@@ -243,10 +241,34 @@ impl Apple {
     }
 
     /// De temperatuur van de die in milli-°C via de SMC; `None` = onbekend
-    /// (alleen met `hopos.smc=1`).
+    /// (alleen met `hopos.smc=1`). Elke aanroep praat de SMC wakker en weer
+    /// in slaap (tot seconden, RTKit): niet voor een lus.
     #[must_use]
     pub fn temp_milli_c(&self) -> Option<i32> {
         storage::temp_milli_c(self.config())
+    }
+
+    /// De temperatuur in de bootlog: één meting met `hopos.smc=1`, anders
+    /// een regel waarom niet. Niet standaard: onder de Go-kern kwam het
+    /// INITIALIZE-antwoord van de SMC nooit (31-08), en een half opgestarte
+    /// RTKit-coprocessor die niemand meer pollt loopt vol (driver_smc
+    /// `open`). Dat is op ijzer niet uitgesloten, dus blijft het één
+    /// bewuste knop per installatie.
+    fn report_temp(&self, cfg: &str) {
+        if fw::bootcfg::first(fw::bootcfg::all(cfg, "hopos.smc")) != "1" {
+            println!(
+                "smc: no die temperature (hopos.smc=1 measures once at boot; the SMC answer is unproven on metal, 31-08) HOPOS_APPLE_SMC_OFF"
+            );
+            return;
+        }
+        match self.temp_milli_c() {
+            Some(t) => println!(
+                "smc: die {}.{} C at boot HOPOS_APPLE_TEMP",
+                t / 1000,
+                (t % 1000).abs() / 100
+            ),
+            None => println!("smc: no die temperature from the SMC HOPOS_APPLE_SMC_FAIL"),
+        }
     }
 
     /// De firmware-bootregels na `discover`.
@@ -331,8 +353,9 @@ impl Board for Apple {
     }
 
     /// Leest boot_args en de ADT (x0), zet de watchdogs van de firmware
-    /// stil (ALLEREERST: natief reset de node anders op 1:43, 31-08), en
-    /// zet de clusters op hun klok.
+    /// stil (ALLEREERST: natief reset de node anders op 1:43, 31-08), zet
+    /// de CPU_ON van dit board in `cpu::smp` (vóór de verhuizing naar de
+    /// OS-core), en zet de clusters op hun klok.
     fn discover(&self, dtb: u64) {
         let x0 = if dtb != 0 {
             dtb
@@ -342,15 +365,27 @@ impl Board for Apple {
         let args = fwinfo::load(x0);
         println!("watchdog: {}", wdt::quiet().as_str());
         self.report(x0, args);
+        cpu::smp::set_cpu_on(cores::cpu_on_mpidr);
         let cfg = self.config();
-        if !cfg.is_empty() {
-            println!(
+        match fwinfo::config_source() {
+            fwinfo::CfgSource::Image => println!(
+                "cfg: hopos.cfg baked into the image, {} bytes HOPOS_CFG",
+                cfg.len()
+            ),
+            fwinfo::CfgSource::Loader => println!(
                 "cfg: hopos.cfg from the loader, {} bytes HOPOS_CFG",
                 cfg.len()
-            );
+            ),
+            fwinfo::CfgSource::None => println!(
+                "cfg: no hopos.cfg (none baked in by image/apple-m4.sh CFG=, no loader) HOPOS_CFG_NONE"
+            ),
         }
         let ps = fw::bootcfg::first(fw::bootcfg::all(cfg, "hopos.pstate"));
-        wdt::pstate_tune(wdt::PS_DEFAULT, ps == "off");
+        match wdt::pstate_targets(ps) {
+            Some(t) => wdt::pstate_tune(t, false),
+            None => wdt::pstate_tune(wdt::PS_DEFAULT, true),
+        }
+        self.report_temp(cfg);
     }
 
     fn clock(&self) -> executor::Clock {
@@ -372,12 +407,11 @@ impl Board for Apple {
             "idle: timer fired={fired} fiq-at-core={wakes}, {} Hz, sleeping in {mode:?} HOPOS_APPLE_IDLE",
             cpu::idle::freq()
         );
-        let s = cpu::idle::ArmSleeper::new(mode);
-        // Onder E2H = 1 schrijft `cntkctl_el1` vanaf EL2 CNTHCTL_EL2: de
-        // event-stream staat nu goed, maar EL1PCTEN/EL1PTEN (10, 11) en de
-        // EL0-bits zijn gewist. Terugzetten, anders trapt de teller in een kooi.
-        arch::cnthctl_el1_access();
-        s
+        // Onder E2H = 1 schrijft `cntkctl_el1` vanaf EL2 CNTHCTL_EL2; sinds
+        // 29-09 vervangt `cpu::idle` daar alleen de stream-bits, dus de
+        // timertoegang van de bewoners (EL1PCTEN/EL1PTEN, de ingang in
+        // head.rs) blijft staan en hoeft het board niets terug te zetten.
+        cpu::idle::ArmSleeper::new(mode)
     }
 
     fn mem_total(&self) -> u64 {
@@ -511,24 +545,6 @@ mod arch {
         // SAFETY: opent I en F op deze core; de vectoren staan (boot).
         unsafe { asm!("msr daifclr, #3", options(nomem, nostack)) };
     }
-
-    /// Zet EL1PCTEN, EL1PTEN en de EL0-bits van CNTHCTL_EL2 (VHE-vorm)
-    /// terug, met behoud van de event-stream.
-    pub(super) fn cnthctl_el1_access() {
-        // SAFETY: CNTHCTL_EL2 regelt alleen de toegang tot de teller en de
-        // event-stream van deze core.
-        unsafe {
-            asm!(
-                "mrs {v}, cnthctl_el2",
-                "orr {v}, {v}, #0x3",
-                "orr {v}, {v}, #0xc00",
-                "msr cnthctl_el2, {v}",
-                "isb",
-                v = out(reg) _,
-                options(nomem, nostack),
-            );
-        }
-    }
 }
 
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
@@ -541,7 +557,6 @@ mod arch {
         0x8001_0100
     }
     pub(super) fn unmask() {}
-    pub(super) fn cnthctl_el1_access() {}
 }
 
 #[cfg(test)]

@@ -179,6 +179,12 @@ impl Board for Altra {
         board_uefi::gop_framebuffer()
     }
 
+    /// De xHCI's van de firmware, op klasse uit de MCFG-segmenten, zoals
+    /// het generieke UEFI-board ze vindt (docs/gui.md).
+    fn usb_hosts(&self) -> board::UsbHosts {
+        self.uefi.usb_hosts()
+    }
+
     fn privilege(&self, el: u8) -> Result<(), Error> {
         self.uefi.privilege(el)
     }

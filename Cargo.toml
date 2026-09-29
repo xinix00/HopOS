@@ -45,6 +45,7 @@ members = [
     "driver/fb",
     "driver/usb/xhci",
     "driver/usb/hid",
+    "driver/usb/dwc3",
     "gui/fbgrant",
     "gui/usbin",
     "gui/rkscan",
@@ -68,6 +69,10 @@ members = [
     "apps/welcome",
     # De meetbank in het slot (de server-kant van tools/netmeter).
     "apps/bench",
+    # De display-app: het glas en de invoer van de node (docs/gui.md).
+    "apps/display",
+    # Een stream door de videocodec van de node (docs/media.md).
+    "apps/decode",
     # De meetbank op de host: std, alleen voor de ontwikkelmachine, dus
     # geen default-member (de target-build van de bibliotheken slaat hem
     # over); tools/gate.sh toetst hem apart.
@@ -115,6 +120,7 @@ default-members = [
     "driver/fb",
     "driver/usb/xhci",
     "driver/usb/hid",
+    "driver/usb/dwc3",
     "gui/fbgrant",
     "gui/usbin",
     "gui/rkscan",
@@ -139,6 +145,11 @@ default-members = [
     "apps/welcome",
     # bench draagt de toetsen van zijn protocol op de host.
     "apps/bench",
+    # display draagt de toetsen van zijn regellezer en zijn tekenwerk op de
+    # host.
+    "apps/display",
+    # decode draagt de toetsen van zijn buffers en zijn meting op de host.
+    "apps/decode",
 ]
 
 [workspace.package]

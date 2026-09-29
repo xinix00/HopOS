@@ -92,7 +92,20 @@ pub struct Handoff {
     pub nat: NatState,
     /// De state van Hop zelf (JSON), anders worden de apps wezen.
     pub agent: Vec<u8>,
+    /// Een KOUDE flip: de vertrekkende kern stopte zijn bewoners en zette
+    /// de app-cores uit, dus er valt niets te adopteren. De nieuwe kern
+    /// boot koud (eigen switch-code, Hop koud uit de staging) en draagt
+    /// alleen de generatie en de som verder (`hopos/src/flip.rs`).
+    pub cold: bool,
 }
+
+/// De vlaggen van het blob, in het eerste vrije kopwoord ([`FLAGS_OFF`]).
+/// Additief binnen versie 6 (29-09): een kern van vóór de vlag schrijft
+/// daar nul, en dat is de warme flip. Geen nieuwe versie, want die zou een
+/// warme flip vanaf alpha.9 laten vallen op `HOPOS_FLIP_BLOB_BAD`.
+const FLAGS_OFF: usize = 72;
+/// Vlag: een koude flip ([`Handoff::cold`]).
+const FLAG_COLD: u64 = 1;
 
 fn put(b: &mut Vec<u8>, s: &[u8]) -> Result {
     b.try_reserve(s.len())
@@ -132,10 +145,11 @@ pub fn encode(h: &Handoff, max: usize) -> Result<Vec<u8>> {
         h.slots.len() as u64,
         h.generation,
         h.bundle_sum,
+        if h.cold { FLAG_COLD } else { 0 },
     ] {
         put64(&mut b, v)?;
     }
-    put(&mut b, &[0; HAND_HEAD - 72])?;
+    put(&mut b, &[0; HAND_HEAD - FLAGS_OFF - 8])?;
     for s in &h.slots {
         for v in [
             s.slot as u64,
@@ -273,6 +287,13 @@ pub fn decode(b: &[u8]) -> Result<Handoff> {
     let n = bounded(r.u64()?, 1024, 48)?;
     h.generation = r.u64()?;
     h.bundle_sum = r.u64()?;
+    // Een bit die deze kern niet kent, is een blob van een latere kern:
+    // luid, niet stil als warm gelezen.
+    let flags = r.u64()?;
+    if flags & !FLAG_COLD != 0 {
+        return Err(Error::Corrupt { at: FLAGS_OFF });
+    }
+    h.cold = flags & FLAG_COLD != 0;
     r.pos = HAND_HEAD;
     for _ in 0..n {
         if r.left() < SLOT_HEAD as u64 {
@@ -360,6 +381,34 @@ pub struct FlipPlan {
     pub stage_pa: u64,
     /// Het einde van de eigen RAM-declaratie: daar MOET het blob liggen.
     pub own_ram_end: u64,
+}
+
+/// De uitlijning van het nieuwe beeld in de staging: een cacheregel is
+/// genoeg voor de kopie, 64 KiB houdt het leesbaar in een dump.
+pub const STAGE_ALIGN: u64 = 64 << 10;
+
+/// Waar het platte beeld van `flat` bytes in de staging `[stage,
+/// stage+max)` gaat: direct achter het gestagede image `hop` (begin, maat)
+/// als dat in de staging ligt, anders vooraan. `None` als het er niet
+/// past.
+///
+/// Waarom achter Hop en niet eroverheen (29-09): na een KOUDE flip plaatst
+/// de nieuwe kern Hop opnieuw uit precies die staging, zoals bij een koude
+/// boot. Wie het beeld over Hop legt, heeft daarna een extra kopie van Hop
+/// nodig (de kern-RAM van de oude kern bestaat niet meer, de partitie van
+/// Hop is van de pool). Zo blijft Hop ook na elke warme flip liggen, en kan
+/// een latere koude flip nog.
+#[must_use]
+pub fn stage_slot(stage: u64, max: u64, flat: u64, hop: Option<(u64, u64)>) -> Option<u64> {
+    let end = stage.checked_add(max)?;
+    let at = match hop {
+        Some((start, len)) if start < end && stage < start.saturating_add(len) => start
+            .checked_add(len)?
+            .checked_next_multiple_of(STAGE_ALIGN)?
+            .max(stage),
+        _ => stage,
+    };
+    at.checked_add(flat).filter(|e| *e <= end).map(|_| at)
 }
 
 /// Wat een boot over de flip weet.
@@ -1001,6 +1050,49 @@ mod tests {
         };
         let b = encode(&h, HANDOFF_TAIL).unwrap();
         assert_eq!(decode(&b).unwrap(), h);
+    }
+
+    #[test]
+    fn the_new_image_goes_behind_hop_in_the_staging() {
+        let (stage, max) = (0xB020_0000u64, 0x00E0_0000u64);
+        // Geen Hop: vooraan.
+        assert_eq!(stage_slot(stage, max, 0x12_0000, None), Some(stage));
+        // Hop vooraan (1,1 MiB): het beeld erachter, op 64 KiB.
+        let hop = Some((stage, 0x11_8123));
+        assert_eq!(stage_slot(stage, max, 0x12_0000, hop), Some(0xB032_0000));
+        // Past het niet meer achter Hop, dan nergens: geen stille overlap.
+        assert_eq!(stage_slot(stage, max, max - 0x10_0000, hop), None);
+        // Hop buiten de staging (de Pi: waar config.txt hem legde, als dat
+        // ergens anders is) raakt de keuze niet.
+        assert_eq!(
+            stage_slot(stage, max, 0x1000, Some((0x0F20_0000, 0x1000))),
+            Some(stage)
+        );
+        // Te groot, of een staging die om 2^64 heen loopt: nee.
+        assert_eq!(stage_slot(stage, max, max + 8, None), None);
+        assert_eq!(stage_slot(u64::MAX - 8, 64, 8, None), None);
+    }
+
+    #[test]
+    fn a_cold_handoff_carries_its_flag_and_nothing_to_adopt() {
+        let cold = Handoff {
+            generation: 3,
+            bundle_sum: 0xfeed,
+            cold: true,
+            ..Handoff::default()
+        };
+        let b = encode(&cold, HANDOFF_TAIL).unwrap();
+        let back = decode(&b).unwrap();
+        assert!(back.cold && back.slots.is_empty() && back.nat.flows.is_empty());
+        assert_eq!(back, cold);
+        // Een blob van vóór de vlag (nul op zijn plek) is warm.
+        let warm = encode(&Handoff::default(), HANDOFF_TAIL).unwrap();
+        assert_eq!(&warm[FLAGS_OFF..FLAGS_OFF + 8], &[0; 8]);
+        assert!(!decode(&warm).unwrap().cold);
+        // Een onbekende vlag is een blob van een latere kern: een fout.
+        let mut later = b.clone();
+        later[FLAGS_OFF] = 0x3;
+        assert!(decode(&later).is_err());
     }
 
     #[test]

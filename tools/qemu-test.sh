@@ -44,15 +44,30 @@
 #                               plus een screendump via de monitor waarop de
 #                               console staat (voorgrond- en
 #                               achtergrondpixels van driver-fb, niet leeg)
-#   GUI=display tools/qemu-test.sh   de gui-smaak plus de framebuffer-grant
-#                               (kern::grants in de lifecycle): appspike
-#                               krijgt `GUI=display` in zijn env
-#                               (bootparameter hopos.appenv), en per slot
+#   GUI=display tools/qemu-test.sh   de gui-smaak met de display-app en de
+#                               USB-invoer (docs/gui.md): QEMU krijgt ook
+#                               `-device qemu-xhci` met `usb-kbd` en
+#                               `usb-mouse`, en in plaats van appspike
+#                               staat apps/display op de staging, met
+#                               `GUI=display,DISPLAY_QUIT=27` in zijn env
+#                               (bootparameter hopos.appenv). Per slot
 #                               eist het script HOPOS_FB_GRANT (de console
 #                               gaat van het glas), HOPOS_FB_ARM (het
-#                               venster in de kooi) en na de stop
-#                               HOPOS_FB_RELEASE; de screendump daarna
-#                               bewijst dat de console terug is op het glas
+#                               venster in de kooi), HOPOS_DISPLAY_UP en
+#                               HOPOS_DISPLAY_CONN (de app belt de
+#                               input-listener van de kern); dan een toets
+#                               en een muisbeweging via de monitor
+#                               (`sendkey`, `mouse_move`) en
+#                               HOPOS_DISPLAY_INPUT keys>=1 moves>=1. In
+#                               slot 1 volgt een screendump waarop de app
+#                               tekende (zijn achtergrond, tekst en cursor;
+#                               niet de console), dan Escape: de app stopt
+#                               (HOPOS_DISPLAY_QUIT, exit 0), de grant gaat
+#                               terug (HOPOS_FB_RELEASE), en de kern plaatst
+#                               hem opnieuw in slot 2, die het glas en de
+#                               invoer overneemt (een nieuwe verbinding van
+#                               10.100.0.3). De slotscreendump toont weer
+#                               de app.
 #   SHOT_KEEP=pad.ppm           bewaart die screendump (met GUI=1 of display)
 #   tools/qemu-test.sh          TIMEOUT=30 standaard, in seconden
 #   KEEP_LOG=pad tools/qemu-test.sh   bewaart ook een groene console
@@ -61,23 +76,33 @@
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-TIMEOUT="${TIMEOUT:-30}"
 TARGET=aarch64-unknown-none-softfloat
 GUI="${GUI:-0}"
 FEATURES=board-qemuvirt
 QGUI="-monitor none"
+QUSB=""
 APPEND=""
+# Het gestagede image: appspike (het ABI-bewijs), of met GUI=display de
+# display-app.
+APP_PKG=appspike
 case "$GUI" in
 0 | 1) ;;
-display) APPEND="hopos.appenv=GUI=display" ;;
+display)
+	APP_PKG=display
+	APPEND="hopos.appenv=GUI=display,DISPLAY_QUIT=27"
+	QUSB="-device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0"
+	;;
 *)
 	echo "GUI=$GUI: kies 0, 1 of display" >&2
 	exit 2
 	;;
 esac
+# De display-keten heeft twee plaatsingen met invoer ertussen: iets meer tijd.
+if [ "$GUI" = display ]; then TIMEOUT="${TIMEOUT:-45}"; else TIMEOUT="${TIMEOUT:-30}"; fi
 if [ "$GUI" != 0 ]; then
 	FEATURES=board-qemuvirt,gui
-	MON="$(mktemp -u -t hopos-mon.XXXXXX)"
+	# Kort pad: een unix-socket mag niet langer dan ~104 tekens zijn.
+	MON="$(mktemp -u /tmp/hopos-mon.XXXXXX)"
 	SHOT="$(mktemp -t hopos-shot.XXXXXX)"
 	QGUI="-device ramfb -monitor unix:$MON,server,nowait"
 fi
@@ -114,25 +139,40 @@ echo "== bouwen: hopos ($FEATURES)"
 cargo build --quiet --release --target "$TARGET" -p hopos --features "$FEATURES" 2>/dev/null ||
 	cargo build --release --target "$TARGET" -p hopos --features "$FEATURES"
 KERNEL="$DIR/target/$TARGET/release/hopos"
-echo "== bouwen: appspike"
-cargo build --quiet --release --target "$TARGET" -p appspike 2>/dev/null ||
-	cargo build --release --target "$TARGET" -p appspike
-SPIKE="$DIR/target/$TARGET/release/appspike"
+echo "== bouwen: $APP_PKG"
+cargo build --quiet --release --target "$TARGET" -p "$APP_PKG" 2>/dev/null ||
+	cargo build --release --target "$TARGET" -p "$APP_PKG"
+SPIKE="$DIR/target/$TARGET/release/$APP_PKG"
 SPIKE_SIZE=$(wc -c <"$SPIKE" | tr -d ' ')
-# De markers van het ABI-bewijs (grep -E): het aantal toetsen groeit met
-# appspike, dus "alles groen" is fail=0.
 SLOT_MARKS="HOPOS_DISK_UP model=virtio-blk blocks=131072|HOPOS_FS_UP fresh=1"
-SLOT_MARKS="$SLOT_MARKS|HOPOS_SLOT_START slot=1|slot 1: HOPOS_APPSPIKE_NETLOG|slot 1: HOPOS_APPSPIKE_FS ok|slot 1: HOPOS_APPSPIKE_DONE pass=9 fail=0|HOPOS_SLOT_DONE slot=1 exit=0|slot 1: stopped.*HOPOS_SLOT_STOPPED"
-SLOT_MARKS="$SLOT_MARKS|HOPOS_SLOT_START slot=2|slot 2: HOPOS_APPSPIKE_NETLOG|slot 2: HOPOS_APPSPIKE_FS ok|slot 2: HOPOS_APPSPIKE_DONE pass=9 fail=0|HOPOS_SLOT_DONE slot=2 exit=0|slot 2: stopped.*HOPOS_SLOT_STOPPED"
-# De framebuffer-grant per levensduur: toegekend vóór de start, gemapt na
-# de kooibouw, terug na de bevestigde stop.
+# De acties op de monitor (GUI=display), elk op zijn moment (grep -E), in
+# volgorde: "moment;commando;commando...". Een commando `shot` is de
+# screendump waarop de app moet staan.
+ACT_AT=""
 if [ "$GUI" = display ]; then
+	# De USB-keten van de kern: de qemu-xhci op PCIe, beide apparaten, de
+	# listener op 10.100.0.1:7879.
+	SLOT_MARKS="$SLOT_MARKS|usb: xHCI 1b36:000d at .* on PCIe|HOPOS_USB_UP|usb: qemu-xhci port [0-9]+: keyboard|usb: qemu-xhci port [0-9]+: mouse|HOPOS_INPUT_UP"
+	# Per slot: het glas, de app erop, zijn verbinding met de invoer, en
+	# een toets en een beweging die hem bereiken.
 	for i in 1 2; do
-		SLOT_MARKS="$SLOT_MARKS|slot $i: fb granted .*HOPOS_FB_GRANT|slot $i: fb window mapped at ipa .*HOPOS_FB_ARM|slot $i: fb grant released, console back on glass HOPOS_FB_RELEASE"
+		SLOT_MARKS="$SLOT_MARKS|HOPOS_SLOT_START slot=$i|slot $i: fb granted .*HOPOS_FB_GRANT|slot $i: fb window mapped at ipa .*HOPOS_FB_ARM|slot $i: display: window 0x20000000.* mapped Normal-NC|slot $i: display: glass 1280x800 .*HOPOS_DISPLAY_UP w=1280 h=800|input: 10.100.0.$((i + 1)) connected .*HOPOS_INPUT_CONN|slot $i: display: input stream .*HOPOS_DISPLAY_CONN|slot $i: display: .*HOPOS_DISPLAY_INPUT keys=[1-9][0-9]* moves=[1-9]"
 	done
+	# Slot 1 stopt op Escape: exit 0, en het glas terug aan de console.
+	SLOT_MARKS="$SLOT_MARKS|slot 1: display: quit key 27.*HOPOS_DISPLAY_QUIT|HOPOS_SLOT_DONE slot=1 exit=0|slot 1: fb grant released, console back on glass HOPOS_FB_RELEASE"
+	ACT_AT="slot 1: .*HOPOS_DISPLAY_CONN;sendkey a;mouse_move 40 30"
+	ACT_AT="$ACT_AT|slot 1: .*HOPOS_DISPLAY_INPUT keys=[1-9][0-9]* moves=[1-9];shot;sendkey esc"
+	ACT_AT="$ACT_AT|slot 2: .*HOPOS_DISPLAY_CONN;sendkey b;mouse_move -20 10"
+	# De momenten van de toets van buiten (grep -E), in volgorde.
+	PROBE_AT="HOPOS_SYSTEM_UP|slot 1: .*HOPOS_APPNET_UP|slot 2: .*HOPOS_DISPLAY_CONN"
+else
+	# De markers van het ABI-bewijs (grep -E): het aantal toetsen groeit met
+	# appspike, dus "alles groen" is fail=0.
+	SLOT_MARKS="$SLOT_MARKS|HOPOS_SLOT_START slot=1|slot 1: HOPOS_APPSPIKE_NETLOG|slot 1: HOPOS_APPSPIKE_FS ok|slot 1: HOPOS_APPSPIKE_DONE pass=9 fail=0|HOPOS_SLOT_DONE slot=1 exit=0|slot 1: stopped.*HOPOS_SLOT_STOPPED"
+	SLOT_MARKS="$SLOT_MARKS|HOPOS_SLOT_START slot=2|slot 2: HOPOS_APPSPIKE_NETLOG|slot 2: HOPOS_APPSPIKE_FS ok|slot 2: HOPOS_APPSPIKE_DONE pass=9 fail=0|HOPOS_SLOT_DONE slot=2 exit=0|slot 2: stopped.*HOPOS_SLOT_STOPPED"
+	# De momenten van de toets van buiten (grep -E), in volgorde.
+	PROBE_AT="HOPOS_SYSTEM_UP|slot 1: .*HOPOS_APPNET_UP|slot 2: stopped.*HOPOS_SLOT_STOPPED"
 fi
-# De momenten van de toets van buiten (grep -E), in volgorde.
-PROBE_AT="HOPOS_SYSTEM_UP|slot 1: .*HOPOS_APPNET_UP|slot 2: stopped.*HOPOS_SLOT_STOPPED"
 
 echo "== booten op QEMU virt (tot ${TIMEOUT}s)"
 qemu-system-aarch64 -M virt,gic-version=3,highmem-ecam=off,virtualization=on \
@@ -143,11 +183,58 @@ qemu-system-aarch64 -M virt,gic-version=3,highmem-ecam=off,virtualization=on \
 	-netdev "user,id=n0,hostfwd=tcp:127.0.0.1:${SYSPORT}-:10100" \
 	-drive "if=none,format=raw,file=$DISK,id=disk0" \
 	-device virtio-blk-device,drive=disk0,bus=virtio-mmio-bus.1 \
+	$QUSB \
 	-device "loader,file=$SPIKE,addr=0xb0200000,force-raw=on" \
 	-device "loader,addr=0xb0100000,data=$SPIKE_SIZE,data-len=8" \
 	${APPEND:+-append "$APPEND"} \
 	-kernel "$KERNEL" </dev/null >"$LOG" 2>&1 &
 QPID=$!
+
+# De monitor: elk argument is één commando. `shot` is een screendump naar
+# $SHOT; de rest gaat zoals hij staat naar QEMU.
+monitor() {
+	python3 - "$MON" "$SHOT" "$@" <<'PY'
+import socket, sys, time
+mon, shot, cmds = sys.argv[1], sys.argv[2], sys.argv[3:]
+s = socket.socket(socket.AF_UNIX)
+s.connect(mon)
+s.settimeout(2)
+try:
+    s.recv(4096)  # de banner
+except OSError:
+    pass
+for c in cmds:
+    if c == "shot":
+        c = f"screendump {shot}"
+    s.sendall((c + "\n").encode())
+    time.sleep(1 if c.startswith("screendump") else 0.3)
+PY
+}
+
+# Telt de pixels van de screendump in $SHOT: `console` (de console van de
+# kern: wit op 0x101828) of `app` (de display-app: 0x1e3a2f met tekst in
+# 0xf0e68c en de cursor in 0xff5030, en geen console-achtergrond).
+shot_check() {
+	python3 - "$SHOT" "$1" <<'PY'
+import sys
+from collections import Counter
+data = open(sys.argv[1], "rb").read()
+mode = sys.argv[2]
+# P6: magic, breedte hoogte, maxval, dan RGB.
+parts = data.split(maxsplit=4)
+w, h = int(parts[1]), int(parts[2])
+px = parts[4]
+c = Counter(px[i:i + 3] for i in range(0, min(len(px), w * h * 3), 3))
+if mode == "console":
+    fg, bg = c[b"\xff\xff\xff"], c[b"\x10\x18\x28"]
+    ok = fg > 500 and bg > w * h // 2
+    print(f"{'ok' if ok else 'ROOD'} console {w}x{h}, {fg} text pixels, {bg} background pixels")
+else:
+    bg, fg, cur, con = c[b"\x1e\x3a\x2f"], c[b"\xf0\xe6\x8c"], c[b"\xff\x50\x30"], c[b"\x10\x18\x28"]
+    ok = bg > w * h // 2 and fg > 500 and cur > 10 and con == 0
+    print(f"{'ok' if ok else 'ROOD'} app {w}x{h}, {bg} background, {fg} text, {cur} cursor, {con} console pixels")
+PY
+}
 
 # De toets van buiten: verbinden via de hostfwd en wachten tot de kern de
 # verbinding sluit (EOF). Slaagt alleen als de gast antwoordt.
@@ -195,8 +282,41 @@ need="HOPOS_BOOT|HOPOS_TICK 3|HOPOS_NIC_UP|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_SY
 PROBES=""
 next_probe=1
 nprobes=$(echo "$PROBE_AT" | awk -F'|' '{print NF}')
+ACTS=""
+next_act=1
+nacts=0
+[ -n "$ACT_AT" ] && nacts=$(echo "$ACT_AT" | awk -F'|' '{print NF}')
 elapsed=0
 while :; do
+	# De acties op de monitor, elk op zijn moment.
+	if [ "$next_act" -le "$nacts" ]; then
+		act=$(echo "$ACT_AT" | cut -d'|' -f"$next_act")
+		at="${act%%;*}"
+		if grep -q -E "$at" "$LOG"; then
+			cmds="${act#*;}"
+			IFS_WAS="$IFS"
+			IFS=';'
+			# shellcheck disable=SC2086
+			set -- $cmds
+			IFS="$IFS_WAS"
+			if monitor "$@"; then
+				ACTS="$ACTS
+   ok  monitor na '$at': $cmds"
+			else
+				ACTS="$ACTS
+   ROOD monitor na '$at': $cmds"
+			fi
+			case ";$cmds;" in
+			*";shot;"*)
+				ACTS="$ACTS
+   screendump na '$at': $(shot_check app || echo ROOD unreadable)"
+				if [ -n "${SHOT_KEEP:-}" ]; then cp "$SHOT" "$SHOT_KEEP.$next_act.ppm"; fi
+				;;
+			esac
+			next_act=$((next_act + 1))
+			continue
+		fi
+	fi
 	ok=1
 	for m in "HOPOS_BOOT" "HOPOS_TICK 3" "HOPOS_NIC_UP" "HOPOS_NET_UP" "HOPOS_SYSTEM_UP" "HOPOS_SYSTEM_REFUSED"; do
 		grep -q "$m" "$LOG" || ok=0
@@ -213,6 +333,7 @@ while :; do
 		fi
 		ok=0
 	fi
+	[ "$next_act" -le "$nacts" ] && ok=0
 	[ "$ok" = 1 ] && break
 	grep -q -E "HOPOS_PANIC|HOPOS_EXCEPTION" "$LOG" && break
 	kill -0 "$QPID" 2>/dev/null || break
@@ -229,35 +350,16 @@ if [ "$GUI" != 0 ]; then
 		sleep 0.1
 		i=$((i + 1))
 	done
-	sleep 1 # een tik van de meetregels op het glas
-	SHOT_OK="$(python3 - "$MON" "$SHOT" <<'PY'
-import socket, sys, time
-mon, shot = sys.argv[1], sys.argv[2]
-s = socket.socket(socket.AF_UNIX)
-s.connect(mon)
-s.settimeout(2)
-try:
-    s.recv(4096)  # de banner
-except OSError:
-    pass
-s.sendall(f"screendump {shot}\n".encode())
-time.sleep(1)
-data = open(shot, "rb").read()
-# P6: magic, breedte hoogte, maxval, dan RGB.
-parts = data.split(maxsplit=4)
-w, h = int(parts[1]), int(parts[2])
-px = parts[4]
-fg = bg = 0
-for i in range(0, min(len(px), w * h * 3), 3):
-    rgb = px[i:i + 3]
-    if rgb == b"\xff\xff\xff":
-        fg += 1
-    elif rgb == b"\x10\x18\x28":
-        bg += 1
-ok = fg > 500 and bg > w * h // 2
-print(f"{'ok' if ok else 'ROOD'} {w}x{h}, {fg} text pixels, {bg} background pixels")
-PY
-)" || SHOT_OK="ROOD screendump failed"
+	sleep 1 # een tik van de meetregels (of de klok van de app) op het glas
+	# Met GUI=display houdt de app in slot 2 het glas: daar hoort hij te
+	# staan, niet de console.
+	SHOT_MODE=console
+	[ "$GUI" = display ] && SHOT_MODE=app
+	if monitor shot; then
+		SHOT_OK="$(shot_check "$SHOT_MODE")" || SHOT_OK="ROOD screendump unreadable"
+	else
+		SHOT_OK="ROOD screendump failed"
+	fi
 	[ -n "${SHOT_KEEP:-}" ] && cp "$SHOT" "$SHOT_KEEP"
 fi
 kill "$QPID" 2>/dev/null || true
@@ -288,6 +390,14 @@ IFS="$IFS_WAS"
 case "$PROBES" in
 *ROOD*) fail=1 ;;
 esac
+[ -n "$ACTS" ] && echo "${ACTS#?}"
+case "$ACTS" in
+*ROOD*) fail=1 ;;
+esac
+if [ "$next_act" -le "$nacts" ]; then
+	echo "   ROOD monitor: $((nacts - next_act + 1)) van de $nacts acties nooit gedaan (moment niet gezien)"
+	fail=1
+fi
 if [ "$next_probe" -le "$nprobes" ]; then
 	echo "   ROOD extern: $((nprobes - next_probe + 1)) van de $nprobes toetsen nooit geprobeerd (moment niet gezien)"
 	fail=1

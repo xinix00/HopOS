@@ -324,6 +324,11 @@ impl Board for O6n {
         board_uefi::gop_framebuffer()
     }
 
+    /// De native xHCI's die de firmware aanzette (usb.rs; kaal geen).
+    fn usb_hosts(&self) -> board::UsbHosts {
+        crate::usb::hosts(&self.uefi)
+    }
+
     /// De eerste Realtek-poort (geen twee-poorts-aggregatie): BAR2 (het
     /// MMIO-blok; BAR0 is de I/O-alias), reset en MAC, ringen en MAC aan,
     /// dan PHY en autoneg, en dan de lijn (`board_uefi::irq`): MSI-X via de

@@ -35,12 +35,16 @@
 //! tussen twee pakketten van een drive door gewoon het toetsenbord kunnen
 //! blijven lezen.
 //!
-//! DE KLOK. Elke wachtlus leest een klok van buiten (`fn() -> u64`,
-//! monotone nanoseconden) en spint tot zijn grens, zoals `driver-nvme`. De
-//! lange wachten (poortreset tot 2 s, commando's tot 1 s) zitten alleen in
-//! het koude pad: [`Hc::reset`], [`Hc::start`], [`Hc::power_on`] en
-//! [`Hc::attach`]. Het hete pad ([`Hc::report`], [`Hc::poll_bulk`]) wacht
-//! nooit en alloceert niets.
+//! DE KLOK EN DE SLAAP. Elke wachtlus is `async` en slaapt tussen twee
+//! blikken op de [`Timer`] van de eigenaar-taak (in de binary het timerwiel
+//! van de executor). De lange wachten (poortreset tot 2 s, commando's tot
+//! 1 s) zitten alleen in het koude pad: [`Hc::reset`], [`Hc::start`],
+//! [`Hc::power_on`] en [`Hc::attach`]. Tot 29-09 spinde de driver op de
+//! klok, zoals `driver-nvme`: een insteek hield dan de hele executor van de
+//! kern tot 2 s per poortreset vast (Go sliep daar in een goroutine). Nu
+//! draait de rest van de node door terwijl een poort traint. Het hete pad
+//! ([`Hc::report`], [`Hc::poll_bulk`]) wacht alleen als een endpoint stalt
+//! (de herstelcommando's) en alloceert niets.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -54,6 +58,7 @@
 )]
 
 use core::fmt;
+use core::future::Future;
 use core::mem::offset_of;
 use dev::{Pa, Reg};
 
@@ -222,6 +227,25 @@ const REG_TIMEOUT_NS: u64 = 500_000_000;
 /// De spec eist 20ms tussen poortvoeding en een betrouwbare CCS-lezing
 /// (xHCI 4.19.3 verwijst naar USB2 9.1.2: de poort moet debouncen).
 const POWER_SETTLE_NS: u64 = 20_000_000;
+
+/// Hoe lang een wachtlus slaapt tussen twee blikken op een register of de
+/// event-ring. Een commando is op echte hardware in tientallen
+/// microseconden klaar en een poortreset in ~50 ms; een kwart milliseconde
+/// houdt een enumeratie (een dozijn commando's en transfers) ruim onder de
+/// 10 ms zonder dat de taak de executor ronde na ronde bezet houdt.
+pub const POLL_STEP_NS: u64 = 250_000;
+
+/// De klok en de slaap van de taak die de controller bezit. De binary geeft
+/// het timerwiel van zijn executor (`after`); de host-tests een klok die
+/// bij elke slaap vooruit springt.
+pub trait Timer {
+    /// Monotone nanoseconden.
+    fn now(&self) -> u64;
+
+    /// Slaapt `ns` nanoseconden. De executor draait intussen de andere
+    /// taken: dit is waar de driver de core teruggeeft.
+    fn sleep(&self, ns: u64) -> impl Future<Output = ()>;
+}
 
 /// De snelheid die de controller aan een poort meldt (xHCI 7.2.2.1.1: de
 /// default speed-ID's; een controller mag ze via zijn extended capabilities
@@ -654,8 +678,6 @@ pub struct Hc {
     /// verkeerde stuk DRAM: het soort fout dat zich als willekeurige
     /// corruptie voordoet.
     bus_off: u64,
-    /// Monotone nanoseconden, van buiten.
-    clock: fn() -> u64,
 
     // Gevuld door `probe`.
     probed: bool,
@@ -708,7 +730,8 @@ pub struct Hc {
 
 impl Hc {
     /// Een controller op `base`, nog onaangeraakt: deze functie doet geen
-    /// enkele registertoegang. `clock` geeft monotone nanoseconden.
+    /// enkele registertoegang. De klok en de slaap komen per aanroep mee
+    /// ([`Timer`]).
     ///
     /// # Safety
     ///
@@ -719,8 +742,8 @@ impl Hc {
     /// [`Hc::start`] gaat, is gemapt geheugen dat alleen deze controller
     /// gebruikt.
     #[must_use]
-    pub unsafe fn new(base: Pa, name: &'static str, bus_off: u64, clock: fn() -> u64) -> Self {
-        Self::at(base, name, bus_off, clock)
+    pub unsafe fn new(base: Pa, name: &'static str, bus_off: u64) -> Self {
+        Self::at(base, name, bus_off)
     }
 
     /// Een controller zonder venster: elke hardwarestap weigert
@@ -728,17 +751,16 @@ impl Hc {
     /// geen enkele functie een register. Voor de host-tests van de eigenaar
     /// (`usbin`) en voor een board zonder USB.
     #[must_use]
-    pub fn unbound(name: &'static str, clock: fn() -> u64) -> Self {
-        Self::at(Pa(0), name, 0, clock)
+    pub fn unbound(name: &'static str) -> Self {
+        Self::at(Pa(0), name, 0)
     }
 
     /// De staat zonder één registertoegang (ook voor de tests).
-    fn at(base: Pa, name: &'static str, bus_off: u64, clock: fn() -> u64) -> Self {
+    fn at(base: Pa, name: &'static str, bus_off: u64) -> Self {
         Self {
             base,
             name,
             bus_off,
-            clock,
             probed: false,
             op: Pa(0),
             db: Pa(0),
@@ -773,10 +795,6 @@ impl Hc {
     #[must_use]
     pub fn name(&self) -> &'static str {
         self.name
-    }
-
-    fn now(&self) -> u64 {
-        (self.clock)()
     }
 
     fn cap(&self) -> &'static CapRegs {
@@ -868,7 +886,7 @@ impl Hc {
     /// (Controller Not Ready) weg zijn: CNR is het bit dat zegt dat de
     /// interne staat nog niet bruikbaar is, en erop schrijven vóór die tijd
     /// wordt genegeerd of hangt de bus.
-    pub fn reset(&mut self) -> Result {
+    pub async fn reset(&mut self, t: &impl Timer) -> Result {
         if !self.probed {
             return Err(Error::NotProbed);
         }
@@ -877,11 +895,14 @@ impl Hc {
         if cmd & CMD_RUN != 0 {
             o.usbcmd.write(cmd & !CMD_RUN);
         }
-        self.wait(|o| o.usbsts.read(), STS_HCH, STS_HCH, "halt")?;
+        self.wait(t, |o| o.usbsts.read(), STS_HCH, STS_HCH, "halt")
+            .await?;
         o.usbcmd.update(|v| v | CMD_HCRST);
         dev::mb();
-        self.wait(|o| o.usbcmd.read(), CMD_HCRST, 0, "HCRST clear")?;
-        self.wait(|o| o.usbsts.read(), STS_CNR, 0, "controller ready")?;
+        self.wait(t, |o| o.usbcmd.read(), CMD_HCRST, 0, "HCRST clear")
+            .await?;
+        self.wait(t, |o| o.usbsts.read(), STS_CNR, 0, "controller ready")
+            .await?;
         // INVARIANT: HCRST is bevestigd; geen hardware-slot is nog bezet.
         self.poisoned = None;
         self.running = false;
@@ -918,7 +939,7 @@ impl Hc {
     /// debounce-tijd. Sommige controllers komen met de poortvoeding uit uit
     /// reset, en dan meldt een aangesloten toetsenbord zich nooit: CCS
     /// blijft 0 en je zoekt op de verkeerde plek.
-    pub fn power_on(&mut self) {
+    pub async fn power_on(&mut self, t: &impl Timer) {
         if !self.probed {
             return;
         }
@@ -928,10 +949,7 @@ impl Hc {
                 self.port_write(n, v | PSC_PP);
             }
         }
-        let until = self.now().saturating_add(POWER_SETTLE_NS);
-        while self.now() < until {
-            core::hint::spin_loop();
-        }
+        t.sleep(POWER_SETTLE_NS).await;
     }
 
     /// Wist de w1c-statusbits van een poort. Nodig vóór je op een
@@ -981,22 +999,24 @@ impl Hc {
         dev::mb();
     }
 
-    /// Pollt een operational-register tot `(waarde & mask) == want`.
-    fn wait(
+    /// Pollt een operational-register tot `(waarde & mask) == want`, en
+    /// slaapt [`POLL_STEP_NS`] tussen twee blikken.
+    async fn wait(
         &self,
+        t: &impl Timer,
         read: impl Fn(&OpRegs) -> u32,
         mask: u32,
         want: u32,
         what: &'static str,
     ) -> Result {
         let o = self.opr();
-        let deadline = self.now().saturating_add(REG_TIMEOUT_NS);
+        let deadline = t.now().saturating_add(REG_TIMEOUT_NS);
         loop {
             let v = read(o);
             if v & mask == want {
                 return Ok(());
             }
-            if self.now() >= deadline {
+            if t.now() >= deadline {
                 return Err(Error::RegTimeout {
                     what,
                     value: v,
@@ -1004,7 +1024,7 @@ impl Hc {
                     want,
                 });
             }
-            core::hint::spin_loop();
+            t.sleep(POLL_STEP_NS).await;
         }
     }
 

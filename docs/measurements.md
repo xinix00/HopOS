@@ -21,6 +21,7 @@ alleen de beste.
 | App naar app in de node | job met `"env":{"BENCH":"pull","BENCH_PEER":"10.100.0.3:80","BENCH_BYTES":"419430400"}` (of `ping`, `push`) | `HOPOS_BENCH_PULL`, `HOPOS_BENCH_RTT`, `HOPOS_BENCH_COLD` |
 | Last op een app-core | job met `"env":{"BURN":"1"}` (`BURN_WORK`, `BURN_REST` in s) | `HOPOS_BENCH_BURN` |
 | Geheugen onder druk | job met `"env":{"THRASH":"1"}` | `HOPOS_BENCH_THRASH` |
+| Multicast tussen twee apps (mDNS-groep 224.0.0.251:5353, door de switch) | eerst een job met `"env":{"MCAST":"listen"}` (joint de groep), dan een met `"env":{"MCAST":"send"}` (een probe per seconde); op QEMU groen op 29-09 in 4 s | `HOPOS_BENCH_UP role=mcast-listen`, `HOPOS_BENCH_MCAST recv=N` |
 | De idle-meetlat van de OS-core | `hopos.idlestat=1` in `hopos.cfg` of de cmdline (een getal N: elke N s) | `HOPOS_IDLESTAT` |
 | Schijf rauw en door hopfs | `hopos.nvmebench=1` (een meet-boot: de schijf blijft bij de bench) | `HOPOS_NVMEBENCH`, `_SEQ`, `_RAND` |
 | De keten op QEMU | `sh tools/qemu-test-bench.sh` | `bench-keten groen` |

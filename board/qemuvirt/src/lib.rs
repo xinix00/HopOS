@@ -40,6 +40,8 @@ mod ramfb {
     }
 }
 pub mod slots;
+// De qemu-xhci op PCIe (usb.rs), alleen in de gui-smaak.
+mod usb;
 
 use board::heap::Heap;
 use board::{Board, CoreClass, Dispatched, Error, Plan, Region};
@@ -501,6 +503,10 @@ impl Board for QemuVirt {
     /// Vindt het virtio-net-slot, zet de driver op in de NIC-DMA-regio en
     /// hangt zijn lijn aan de GIC. Een lijn die niet aan wil, laat de NIC
     /// pollen: interrupts zijn een verbetering, geen voorwaarde.
+    fn usb_hosts(&self) -> board::UsbHosts {
+        usb::hosts()
+    }
+
     fn framebuffer(&self) -> Option<board::fb::Desc> {
         ramfb::framebuffer()
     }

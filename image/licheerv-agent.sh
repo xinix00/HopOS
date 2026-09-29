@@ -12,6 +12,19 @@
 #                                            die er al een heeft (de snelle
 #                                            iteratie; de eerste kaart komt
 #                                            van het Sipeed donor-image)
+#   CFG=~/lrv.cfg image/licheerv-agent.sh  → met hopos.cfg in het image
+#                                            (hopos.node, hopos.mac, ...)
+#   APP=appspike image/licheerv-agent.sh   → met appspike in de kern
+#                                            gebakken: de kern plaatst hem
+#                                            bij de boot twee keer op de
+#                                            C906L (het ABI-bewijs op ijzer)
+#
+# hopos.cfg: de FSBL geeft geen DTB en geen bootargs, en de kern leest (nog)
+# geen SD-kaart, dus de config gaat IN het image, in een venster van 64 KiB
+# dat de kern bij de boot leest (board/licheerv/src/cfg.rs; Go deed hetzelfde
+# met image/hopcfg). Het script patcht monitor.bin vóór genfip, dus de
+# checksums van de FIP kloppen vanzelf. Let op: wat erin staat (een
+# hopos.apikey) staat dan ook in fip.bin op de kaart.
 #
 # Nodig: de donor-FIP en fiptool.py uit een Sipeed-release
 # (LICHEERV_DONOR, LICHEERV_FIPTOOL; default image/licheerv/, vendor-
@@ -52,6 +65,21 @@ echo "donor: $DONOR sha256=$DONOR_SHA" >&2
 
 mkdir -p "$OUT"
 cd "$DIR"
+# De app van de eerste plaatsing: er is geen QEMU die hem in het RAM legt,
+# dus gaat hij in de kern (board/licheerv/build.rs, HOPOS_LRV_STAGE). Zonder
+# debug-info, met de symbolen: de plaatsing leest RamStart en de rest uit de
+# symbooltabel.
+APP="${APP:-}"
+if [ -n "$APP" ]; then
+	echo "== app bouwen ($APP, $TARGET) ==" >&2
+	cargo build --quiet --release --target "$TARGET" -p "$APP"
+	"$OBJCOPY" --strip-debug "$DIR/target/$TARGET/release/$APP" "$OUT/$APP.stage"
+	HOPOS_LRV_STAGE="$OUT/$APP.stage"
+	echo "app: $APP $(wc -c <"$HOPOS_LRV_STAGE" | tr -d ' ') bytes sha256=$(sha "$HOPOS_LRV_STAGE")" >&2
+else
+	HOPOS_LRV_STAGE=""
+fi
+export HOPOS_LRV_STAGE
 echo "== kern bouwen (hopos --features board-licheerv, $TARGET) ==" >&2
 cargo build --quiet --release --target "$TARGET" -p hopos --features board-licheerv
 ELF="$DIR/target/$TARGET/release/hopos"
@@ -64,6 +92,32 @@ ELF="$DIR/target/$TARGET/release/hopos"
 ENTRY="$(python3 -c 'import struct,sys; print(hex(struct.unpack_from("<Q", open(sys.argv[1],"rb").read(32), 24)[0]))' "$ELF")"
 [ "$ENTRY" = "$RUNADDR" ] || { echo "WEIGER: entry $ENTRY is niet RUNADDR $RUNADDR (linkscript?)" >&2; exit 1; }
 "$OBJCOPY" -O binary "$ELF" "$OUT/monitor.bin"
+CFG="${CFG:-}"
+if [ -n "$CFG" ]; then
+	[ -f "$CFG" ] || { echo "config ontbreekt: $CFG" >&2; exit 1; }
+	# Het venster: "HOPOS.CFG.WINDOW", de lengte (u64 LE) op +16, de tekst
+	# op +24, 64 KiB in totaal. Precies één venster, en de tekst moet passen
+	# en UTF-8 zijn: anders weigeren, niet een halve config.
+	python3 - "$OUT/monitor.bin" "$CFG" <<'PYEOF'
+import struct, sys
+img = bytearray(open(sys.argv[1], "rb").read())
+text = open(sys.argv[2], "rb").read()
+magic = b"HOPOS.CFG.WINDOW"
+if img.count(magic) != 1:
+    sys.exit(f"cfg: {img.count(magic)} windows in the image, expected 1")
+at = img.find(magic)
+cap = 65536 - 24
+if len(text) > cap:
+    sys.exit(f"cfg: {len(text)} bytes, the window holds {cap}")
+text.decode("utf-8")
+struct.pack_into("<Q", img, at + 16, len(text))
+img[at + 24:at + 24 + len(text)] = text
+open(sys.argv[1], "wb").write(bytes(img))
+print(f"cfg: {sys.argv[2]} ({len(text)} bytes) in the window at +{at:#x}", file=sys.stderr)
+PYEOF
+else
+	echo "cfg: none (CFG=pad): the node boots on its defaults, HOPOS_MAC_FIXED" >&2
+fi
 echo "monitor: $(wc -c <"$OUT/monitor.bin" | tr -d ' ') bytes sha256=$(sha "$OUT/monitor.bin")" >&2
 
 echo "== fip-licheerv.bin ==" >&2

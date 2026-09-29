@@ -64,6 +64,9 @@ mod gop {
 mod memmap;
 mod mmu;
 pub mod slots;
+// De xHCI's op PCIe (usb.rs), alleen in de gui-smaak; het DMA-stuk ook
+// voor de O6N.
+pub mod usb;
 pub mod watchdog;
 
 use board::heap::Heap;
@@ -498,6 +501,10 @@ impl Board for Uefi {
     type Sleeper = cpu::idle::ArmSleeper;
 
     const NAME: &'static str = "uefi";
+
+    fn usb_hosts(&self) -> board::UsbHosts {
+        usb::hosts()
+    }
 
     fn console(&self) -> fn(&[u8]) {
         if !is_16550(facts::CONSOLE_TYPE.load(Relaxed)) && facts::CONSOLE_BASE.load(Relaxed) != 0 {

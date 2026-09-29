@@ -31,7 +31,25 @@
 //!
 //! De nieuwe kern komt zo binnen op exact de conditie van een koude boot
 //! (EL2, MMU uit, caches schoon), en zijn boot-stub zet alles zelf weer op.
+//! Eén verschil: x3 draagt [`crate::boot::FLIP_ENTRY`]. De sprong komt
+//! van de OS-core, en die is niet per se core 0; zonder merkteken parkeert
+//! `_start` elke core behalve core 0 (de koude-boot-poort, `cpu::boot`).
+//!
+//! # De koude flip
+//!
+//! Een koude flip (`hopos/src/flip.rs`) springt zonder bewoners: de nieuwe
+//! kern installeert zijn eigen switch-code en start de app-cores opnieuw
+//! met PSCI CPU_ON. Een core die nog in de parkeerlus van de oude
+//! switch-code staat, zou dan ALREADY_ON geven en midden in code staan die
+//! de nieuwe kern overschrijft. Daarom zet de oude kern elke geparkeerde
+//! app-core eerst uit: [`place_off_stub`] legt een stub van zes instructies
+//! neer, en [`send_off`] stuurt de core er via zijn park-mailbox heen. De
+//! stub schrijft "koud" in de mailbox en doet PSCI CPU_OFF; weigert de
+//! firmware, dan springt hij terug in de parkeerlus, en is er niets
+//! verloren. De stub ligt op de plek van de trampoline: die komt pas na de
+//! laatste CPU_OFF, en op dat moment voert geen core de stub nog uit.
 
+use abi::layout::{Core, PARK_PARKED, Plan, SCHED_MBOX_CTX, SCHED_MBOX_PC};
 use dev::Pa;
 
 /// Waarom de sprong niet door kan gaan. Alles wat hier faalt, faalt VÓÓR
@@ -56,6 +74,14 @@ pub enum ChainError {
     },
     /// Deze build heeft geen trampoline (de host).
     NoTrampoline,
+    /// Een app-core die voor de koude flip uit moet, staat niet in de
+    /// parkeerlus: hij draait nog een bewoner, of hij is koud.
+    NotParked {
+        /// De logische app-core.
+        core: usize,
+        /// Zijn mailbox-woord.
+        mbox: u64,
+    },
 }
 
 impl core::fmt::Display for ChainError {
@@ -67,6 +93,9 @@ impl core::fmt::Display for ChainError {
             ),
             Self::Layout { what, pa } => write!(f, "chain layout: {what} at {pa:#x}"),
             Self::NoTrampoline => write!(f, "this build carries no chain trampoline"),
+            Self::NotParked { core, mbox } => {
+                write!(f, "app core {core} is not parked (mailbox {mbox:#x})")
+            }
         }
     }
 }
@@ -180,6 +209,49 @@ impl Jump {
     }
 }
 
+/// Legt de uit-stub van de koude flip neer op `at` (de plek van de
+/// trampoline, [`Jump::tramp`]) en maakt hem zichtbaar voor elke core: naar
+/// DRAM, want de app-cores voeren hem uit met de MMU uit, en de I-caches
+/// van het inner-shareable domein leeg.
+///
+/// `at` komt uit het plan van het board (`FLIP_TRAMP_PA`), zoals elk adres
+/// dat `dev` krijgt; niemand anders schrijft daar.
+pub fn place_off_stub(at: Pa) -> Result<(), ChainError> {
+    let code = arch::off_stub().ok_or(ChainError::NoTrampoline)?;
+    dev::copy_in(at, code);
+    dev::push(at, code.len());
+    dev::mb();
+    super::switch::publish_code();
+    Ok(())
+}
+
+/// Stuurt de geparkeerde app-core `core` naar de uit-stub op `stub`
+/// ([`place_off_stub`]): eerst het doel, dan het startschot, dan een SEV,
+/// zoals een gewone dispatch (`dispatch`). Het argument van de stub is de
+/// parkeerlus van het plan: daar gaat hij heen als de firmware CPU_OFF
+/// weigert. Of de core echt uit is, zegt PSCI AFFINITY_INFO (de aanroeper
+/// wacht erop); de mailbox staat dan op koud, zodat de volgende dispatch
+/// in deze kern of de volgende weer PSCI CPU_ON is.
+pub fn send_off(plan: &Plan, core: Core, stub: Pa) -> Result<(), ChainError> {
+    let mb = plan.park_mbox_pa(core).map_err(|_| ChainError::Layout {
+        what: "park mailbox outside the plan",
+        pa: core.get() as u64,
+    })?;
+    let was = dev::read64(mb.add(SCHED_MBOX_CTX));
+    if was != PARK_PARKED {
+        return Err(ChainError::NotParked {
+            core: core.get(),
+            mbox: was,
+        });
+    }
+    // Het doel vóór het startschot: de lus leest woord 1 pas na woord 0.
+    dev::write64(mb.add(SCHED_MBOX_PC), stub.0);
+    dev::write64(mb.add(SCHED_MBOX_CTX), plan.park_code_pa().0);
+    dev::mb();
+    dev::notify();
+    Ok(())
+}
+
 /// Springt in de nieuwe kern. Keert alleen terug met een fout, en dan is er
 /// niets veranderd behalve de kopie van de trampoline.
 ///
@@ -187,8 +259,9 @@ impl Jump {
 ///
 /// De aanroeper maakt waar dat:
 ///
-/// - dit core 0 is en er op deze core niets meer hoeft te gebeuren: na de
-///   sprong bestaat de oude kern niet meer (geen executor, geen stack);
+/// - dit de OS-core is (de enige core met de kern erop) en er op deze core
+///   niets meer hoeft te gebeuren: na de sprong bestaat de oude kern niet
+///   meer (geen executor, geen stack);
 /// - `[src, src+len)` het complete, gerelokeerde beeld is van een bundel
 ///   waarvan de som getoetst is (`kern::kernflip::Bundle`, `sha256`), en dat
 ///   niemand anders dat bereik of `tramp` nog beschrijft;
@@ -220,13 +293,16 @@ pub unsafe fn chain(j: &Jump) -> ChainError {
 
 #[cfg(all(target_os = "none", target_arch = "aarch64"))]
 mod arch {
-    use super::Jump;
+    use super::{Jump, SCHED_MBOX_CTX};
+    use crate::boot::FLIP_ENTRY;
 
     // De trampoline. Positie-onafhankelijk (alleen registers en relatieve
     // sprongen), want hij draait op een adres dat hij niet kent.
     //
     // In: x0 = dst, x1 = src, x2 = len (8-voud), x3 = entry, x4 = x0 van de
-    // nieuwe kern, x5/x6 en x7/x8 = de twee te vegen vensters.
+    // nieuwe kern, x5/x6 en x7/x8 = de twee te vegen vensters. Uit: x0 =
+    // de x0 van de firmware, x1 = x2 = 0, x3 = het flip-merkteken
+    // (`crate::boot::FLIP_ENTRY`: elke core mag door `_start`).
     core::arch::global_asm!(
         r#"
     .pushsection .text.hopos_chain, "ax"
@@ -274,17 +350,61 @@ hopos_chain_tramp:
     mov x0, x4
     mov x1, xzr
     mov x2, xzr
-    mov x3, xzr
+    movz x3, #{f0}
+    movk x3, #{f1}, lsl #16
+    movk x3, #{f2}, lsl #32
+    movk x3, #{f3}, lsl #48
     br x16
     .global hopos_chain_tramp_end
 hopos_chain_tramp_end:
+
+    // De uit-stub van de koude flip (`place_off_stub`, `send_off`): een
+    // app-core komt hier uit zijn parkeerlus, met de MMU uit, x0 = de
+    // parkeerlus (het argument) en TPIDR_EL2 = zijn mailbox. Eerst "koud"
+    // in de mailbox, dan PSCI CPU_OFF; keert die terug (een weigering),
+    // dan terug de parkeerlus in, die zelf weer "geparkeerd" meldt.
+    .balign 64
+    .global hopos_chain_off
+hopos_chain_off:
+    mov x10, x0
+    mrs x8, tpidr_el2
+    str xzr, [x8, #{mbox_ctx}]
+    dsb sy
+    movz x0, #{off0}
+    movk x0, #{off1}, lsl #16
+    smc #0
+    br x10
+    .global hopos_chain_off_end
+hopos_chain_off_end:
     .popsection
-"#
+"#,
+        f0 = const FLIP_ENTRY & 0xffff,
+        f1 = const (FLIP_ENTRY >> 16) & 0xffff,
+        f2 = const (FLIP_ENTRY >> 32) & 0xffff,
+        f3 = const (FLIP_ENTRY >> 48) & 0xffff,
+        mbox_ctx = const SCHED_MBOX_CTX,
+        off0 = const crate::psci::CPU_OFF & 0xffff,
+        off1 = const (crate::psci::CPU_OFF >> 16) & 0xffff,
     );
 
     unsafe extern "C" {
         safe static hopos_chain_tramp: u8;
         safe static hopos_chain_tramp_end: u8;
+        safe static hopos_chain_off: u8;
+        safe static hopos_chain_off_end: u8;
+    }
+
+    /// De uit-stub als bytes.
+    pub(super) fn off_stub() -> Option<&'static [u8]> {
+        let start = &raw const hopos_chain_off;
+        let len = (&raw const hopos_chain_off_end as usize).wrapping_sub(start as usize);
+        if len == 0 || len > 256 {
+            return None;
+        }
+        // SAFETY: twee labels in dezelfde `global_asm!` hierboven, in één
+        // sectie, met het einde erachter (net getoetst): code in de eigen
+        // `.text`, leesbaar, `'static` en nooit beschreven.
+        Some(unsafe { core::slice::from_raw_parts(start, len) })
     }
 
     pub(super) fn trampoline() -> Option<&'static [u8]> {
@@ -343,6 +463,10 @@ mod arch {
         None
     }
 
+    pub(super) fn off_stub() -> Option<&'static [u8]> {
+        None
+    }
+
     /// # Safety
     ///
     /// Op de host is er niets om in te springen.
@@ -377,6 +501,58 @@ mod tests {
             assert!(relocate(base, 24, bad.into_iter(), 100).is_err());
         }
         assert_eq!(img, [1, 2, 3], "patched before the table was checked");
+    }
+
+    /// Een plan over een host-buffer (zoals de dispatch-tests): drie
+    /// app-cores, de kooi-regio vooraan.
+    fn host_plan() -> (std::vec::Vec<u64>, Plan) {
+        use abi::layout::{CAGE_STRIDE, PlanSpec, Pool};
+        let cage = 4 * CAGE_STRIDE;
+        let len = (cage + 4 * 0x1000 + 0x1000) as usize;
+        let mut mem = vec![0u64; (len + CAGE_STRIDE as usize) / 8 + 1];
+        let raw = mem.as_mut_ptr() as usize as u64;
+        let base = (raw + CAGE_STRIDE - 1) & !(CAGE_STRIDE - 1);
+        let grain = 2u64 << 20;
+        let mut pool = Pool::new();
+        let far = (base + len as u64 + 2 * grain) & !(grain - 1);
+        pool.push(abi::Region::new(far, grain)).unwrap();
+        let spec = PlanSpec {
+            node_ctrl_pa: base + cage,
+            cage_pa: base,
+            boot_scratch_pa: base + cage + 4 * 0x1000,
+            pool,
+            max_slots: 3,
+            app_cores: 3,
+            ..PlanSpec::default()
+        };
+        (mem, Plan::new(spec).unwrap())
+    }
+
+    #[test]
+    fn only_a_parked_core_is_sent_to_the_off_stub() {
+        let (_mem, p) = host_plan();
+        let c1 = Core::new(1).unwrap();
+        let mb = p.park_mbox_pa(c1).unwrap();
+        let stub = Pa(0xB000_2000);
+        // Koud (nooit gestart): niets te doen, en niets geschreven.
+        assert_eq!(
+            send_off(&p, c1, stub),
+            Err(ChainError::NotParked { core: 1, mbox: 0 })
+        );
+        assert_eq!(dev::read64(mb.add(SCHED_MBOX_PC)), 0);
+        // Een draaiende core (x0 van zijn trampoline in woord 0): nee.
+        dev::write64(mb, 0x5000_1000);
+        assert!(send_off(&p, c1, stub).is_err());
+        assert_eq!(dev::read64(mb), 0x5000_1000, "a running core was hijacked");
+        // Geparkeerd: het doel is de stub, het argument de parkeerlus (de
+        // terugweg bij een geweigerde CPU_OFF), en het woord is geen 1 meer.
+        dev::write64(mb, PARK_PARKED);
+        send_off(&p, c1, stub).unwrap();
+        assert_eq!(dev::read64(mb.add(SCHED_MBOX_PC)), stub.0);
+        assert_eq!(dev::read64(mb.add(SCHED_MBOX_CTX)), p.park_code_pa().0);
+        assert!(p.park_code_pa().0 > PARK_PARKED);
+        // De host heeft geen stub om neer te leggen.
+        assert_eq!(place_off_stub(stub), Err(ChainError::NoTrampoline));
     }
 
     #[test]

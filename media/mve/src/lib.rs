@@ -176,6 +176,15 @@ impl<F: Firmware> Device<F> {
     }
 }
 
+/// Elke firmware die de Linlon V8 kent: elf decoders en vijf encoders, de
+/// zestien `.fwb`-bestanden die Lumen van Sky1-Linux/sky1-firmware haalt
+/// (OLD/docs/media-o6n.md). De kern leest ze bij `codec::up` van het volume;
+/// de volgorde is die van [`fw_name`].
+pub const FIRMWARE: [&str; 16] = [
+    "h264dec", "hevcdec", "av1dec", "vp8dec", "vp9dec", "mpeg2dec", "mpeg4dec", "vc1dec",
+    "jpegdec", "avsdec", "avs2dec", "h264enc", "hevcenc", "vp8enc", "vp9enc", "jpegenc",
+];
+
 /// De firmwarenaam bij codec en richting (`hevcdec`, `h264enc`); `None`:
 /// dit ijzer doet het niet.
 pub fn fw_name(c: Codec, dir: Direction) -> Option<&'static str> {
