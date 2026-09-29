@@ -12,9 +12,30 @@
 //! [`crate::hopabi::Resp`], een `Log` een logregel.
 //!
 //! Hier staan ook de **bevoegde operaties** ([`PrivOp`], PORT.md §6
-//! beslissing 1b): de agent draait als bevoorrechte app in
-//! [`PRIVILEGED_SLOT`] en bestuurt de lifecycle over deze API. De kern en de
-//! agent delen de opcodes; de kern weigert ze van elk ander slot.
+//! beslissing 1): Hop, de eerste bewoner, bestuurt er de lifecycle mee. Wie
+//! ze mag, bepaalt het token dat de kern bij boot aan het slot van Hop geeft
+//! (`kern::system::Privilege`), niet een slotnummer in deze crate; de kern
+//! weigert ze van elk ander slot met [`crate::hopabi::STATUS_DENIED`].
+//!
+//! # De levensloop van een slot
+//!
+//! ```text
+//! START_SLOT(spec, image_size) -> slot        de kern kiest het slot
+//! STREAM_IMAGE(slot, 0, brok)  -> More
+//! STREAM_IMAGE(slot, n, brok)  -> More
+//! STREAM_IMAGE(slot, m, brok)  -> Placed      laatste byte: plaatsen + starten
+//!                              |  Failed(tekst)
+//! SLOT_STATUS(slot)            -> SlotInfo    staat, core, heartbeat, exit
+//! NEXT_LOG(slot, max)          -> regel | leeg
+//! STOP_SLOT(slot, timeout_ms)  -> Ok (de kern geeft vrij) | fout (quarantaine)
+//! ```
+//!
+//! Na de laatste byte plaatst de kern het image zelf: ELF lezen, het plan
+//! van [`crate::place::build`], de RAM-declaratie patchen, BSS nullen, de
+//! env op de control-page, en dan de kooi bouwen en dispatchen. Faalt dat,
+//! dan ruimt de kern zijn reserveringen zelf op; de aanroeper ruimt alleen
+//! zijn boekhouding op. Een STOP_SLOT op een half gestroomd slot breekt de
+//! stroom af. Niets blokkeert: elke call antwoordt meteen.
 //!
 //! Wat hier NIET staat: de socket zelf. De kop wordt hier geschreven en
 //! gelezen ([`encode_header`], [`HeaderReader`]); de bytes verplaatsen doet
@@ -22,7 +43,7 @@
 //! rechtstreeks in de buffer van de lezer, zonder tussenkopie (04-09: elke
 //! verse MiB per call was GC-werk aan beide kanten).
 
-use crate::layout::{HOST_IP4, Slot};
+use crate::layout::HOST_IP4;
 use crate::{Error, Result};
 
 /// De versie van het frame-formaat.
@@ -176,54 +197,77 @@ impl HeaderReader {
     }
 }
 
-/// Het slot van de bevoorrechte app: de agent (PORT.md §6 beslissing 1b).
-/// Alleen dit slot mag een [`PrivOp`] aanroepen.
-pub const PRIVILEGED_SLOT: Slot = Slot::FIRST;
-
 /// De bevoegde operaties: het opnummer van een [`crate::hopabi::Req`] in
 /// een `Call`-frame, boven de gewone ops ([`crate::hopabi::OP_MAX`]).
 ///
-/// Hoe de velden van de request gebruikt worden, staat per operatie; de
-/// response draagt de status en `size` zoals elke call.
+/// Per op staat welke velden van de request wat dragen en wat de response
+/// zegt; de helpers hieronder bouwen en lezen ze zonder allocatie. Een
+/// fout is altijd status [`crate::hopabi::STATUS_ERROR`] (of
+/// [`crate::hopabi::STATUS_DENIED`]) met de reden als tekst in `data`.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum PrivOp {
-    /// Start een slot: `n` het slot, `off` de partitiemaat in bytes, `path`
-    /// de naam van een eerder gestreamd image, `data` de env-blob. Niet
-    /// idempotent.
+    /// Reserveer een slot: `path` de jobnaam, `data` een [`StartHead`] plus
+    /// de sharegroup-naam en de env-blob ([`StartReq`]). Het antwoord: `size`
+    /// is het slot dat de kern koos. Niet idempotent.
     StartSlot = 0x40,
-    /// Stop een slot: `n` het slot. Gelukt betekent bevestigd gestopt; een
-    /// onzekere stop is een fout en het slot blijft in quarantaine.
-    StopSlot = 0x41,
-    /// De status van een slot: `n` het slot; `size` de
-    /// [`crate::hopabi::AppStatus`], `data` de laatste woorden.
-    SlotStatus = 0x42,
-    /// Stream een image naar de kern: `path` de naam, `off` de offset in het
-    /// image, `n` de totale maat, `data` een hap van hoogstens
-    /// [`MAX_IO_CHUNK`].
-    StreamImage = 0x43,
-    /// Zet de klok: `off` de wall-ns bij tellerstand 0, als
-    /// [`crate::hopabi::CTRL_WALL_OFF`].
-    SetClock = 0x44,
-    /// Flip naar een nieuwe kern: `path` de naam van een gestreamd
-    /// kern-image.
-    Flip = 0x45,
+    /// Stroom een brok image: `off` het slot, `n` de offset van de eerste
+    /// byte in het image (moet gelijk zijn aan wat de kern al ontving), `data`
+    /// de bytes, hoogstens [`MAX_IO_CHUNK`]. Het antwoord ([`StreamResp`]):
+    /// `size` de ontvangen bytes, `data[0]` een [`StreamState`], bij
+    /// [`StreamState::Failed`] gevolgd door de reden. Een fout-status is een
+    /// geweigerde brok; ook dan is de stroom afgebroken.
+    StreamImage = 0x41,
+    /// Stop een slot: `off` het slot, `n` de coöperatieve termijn in ms.
+    /// Breekt ook een half gestroomd slot af. `STATUS_OK`: de kern neemt de
+    /// vrijgave op zich; een fout: niet bevestigd, het slot blijft in
+    /// quarantaine.
+    StopSlot = 0x42,
+    /// De status van een slot: `off` het slot. Het antwoord: `data` is een
+    /// [`SlotInfo`].
+    SlotStatus = 0x43,
+    /// De volgende logregel van een slot: `off` het slot, `n` de grootste
+    /// lengte. Het antwoord: `size` 1 en de regel in `data`, of `size` 0 als
+    /// er niets klaarstaat. De kern bewaart per slot een korte ring.
+    NextLog = 0x44,
+    /// Zet de klok: `n` de Unix-tijd in nanoseconden.
+    SetClock = 0x45,
+    /// Flip naar een nieuwe kern: `off` het gereserveerde slot waarin de
+    /// bundel gestroomd is, `path` de verwachte SHA-256 (32 bytes).
+    Flip = 0x46,
 }
 
-const _: () = assert!(PrivOp::StartSlot as u8 > crate::hopabi::OP_MAX);
+/// Het laagste bevoegde opnummer.
+pub const PRIV_OP_FIRST: u8 = PrivOp::StartSlot as u8;
+/// Het hoogste bevoegde opnummer.
+pub const PRIV_OP_LAST: u8 = PrivOp::Flip as u8;
+
+const _: () = assert!(PRIV_OP_FIRST > crate::hopabi::OP_MAX);
 
 impl PrivOp {
+    /// Alle bevoegde operaties, in opnummer-volgorde.
+    pub const ALL: [PrivOp; 7] = [
+        Self::StartSlot,
+        Self::StreamImage,
+        Self::StopSlot,
+        Self::SlotStatus,
+        Self::NextLog,
+        Self::SetClock,
+        Self::Flip,
+    ];
+
     /// De bevoegde operatie van een opnummer, of `None` voor een gewone of
     /// onbekende op.
     #[must_use]
     pub const fn from_op(op: u8) -> Option<PrivOp> {
         Some(match op {
             0x40 => Self::StartSlot,
-            0x41 => Self::StopSlot,
-            0x42 => Self::SlotStatus,
-            0x43 => Self::StreamImage,
-            0x44 => Self::SetClock,
-            0x45 => Self::Flip,
+            0x41 => Self::StreamImage,
+            0x42 => Self::StopSlot,
+            0x43 => Self::SlotStatus,
+            0x44 => Self::NextLog,
+            0x45 => Self::SetClock,
+            0x46 => Self::Flip,
             _ => return None,
         })
     }
@@ -235,6 +279,413 @@ impl PrivOp {
     }
 }
 
+/// De core-klasse die een start vraagt (PORT.md §6 beslissing 3).
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+#[repr(u8)]
+pub enum CoreClass {
+    /// Geen voorkeur.
+    #[default]
+    Any = 0,
+    /// Een kleine (zuinige) core.
+    Small = 1,
+    /// Een middelgrote core.
+    Mid = 2,
+    /// Een grote core.
+    Big = 3,
+}
+
+impl CoreClass {
+    /// De klasse van een rauw getal.
+    pub const fn from_raw(v: u8) -> Result<CoreClass> {
+        match v {
+            0 => Ok(Self::Any),
+            1 => Ok(Self::Small),
+            2 => Ok(Self::Mid),
+            3 => Ok(Self::Big),
+            _ => Err(Error::BadKind(v)),
+        }
+    }
+}
+
+/// Het vaste deel van een [`PrivOp::StartSlot`]-request, vooraan in `data`
+/// (little-endian). Daarachter: `group_len` bytes sharegroup-naam, dan
+/// `env_len` bytes env-blob (`key=val\n`).
+#[repr(C)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub struct StartHead {
+    /// De zichtbare partitie in bytes (de `memory_limit` van de job,
+    /// inclusief de ABI-staart).
+    pub memory_limit: u64,
+    /// De maat van het image in bytes; de kern plaatst na precies zoveel.
+    pub image_size: u64,
+    /// De SMP-cores van de app (1 of meer).
+    pub cores: u16,
+    /// De poolgrootte in cores (alleen met een sharegroup).
+    pub pool_cores: u16,
+    /// De [`CoreClass`] als getal.
+    pub core_class: u8,
+    /// De lengte van de sharegroup-naam (0 = eigen cores).
+    pub group_len: u8,
+    /// Gereserveerd, 0.
+    pub reserved: u16,
+    /// De lengte van de env-blob.
+    pub env_len: u32,
+    /// Gereserveerd, 0.
+    pub reserved2: u32,
+}
+
+/// De lengte van [`StartHead`] op de draad.
+pub const START_HEAD_LEN: usize = 32;
+
+macro_rules! field {
+    ($t:ty, $f:ident, $off:expr) => {
+        const _: () = assert!(core::mem::offset_of!($t, $f) == $off);
+    };
+}
+
+const _: () = assert!(core::mem::size_of::<StartHead>() == START_HEAD_LEN);
+field!(StartHead, memory_limit, 0);
+field!(StartHead, image_size, 8);
+field!(StartHead, cores, 16);
+field!(StartHead, pool_cores, 18);
+field!(StartHead, core_class, 20);
+field!(StartHead, group_len, 21);
+field!(StartHead, reserved, 22);
+field!(StartHead, env_len, 24);
+field!(StartHead, reserved2, 28);
+
+/// Een [`PrivOp::StartSlot`]-request, met de variabele delen geleend.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub struct StartReq<'a> {
+    /// De zichtbare partitie in bytes.
+    pub memory_limit: u64,
+    /// De maat van het image in bytes (niet 0).
+    pub image_size: u64,
+    /// De SMP-cores van de app.
+    pub cores: u16,
+    /// De poolgrootte (sharegroup).
+    pub pool_cores: u16,
+    /// De gevraagde klasse.
+    pub core_class: CoreClass,
+    /// De sharegroup-naam; leeg = eigen cores.
+    pub group: &'a [u8],
+    /// De env-blob (`key=val\n`), voor de control-page.
+    pub env: &'a [u8],
+    /// De jobnaam (de store-naamruimte).
+    pub job: &'a [u8],
+}
+
+/// Een little-endian `u16` op `b[i..]`, of 0 als `b` te kort is.
+fn le16(b: &[u8], i: usize) -> u16 {
+    b.get(i..i + 2)
+        .and_then(|s| <[u8; 2]>::try_from(s).ok())
+        .map_or(0, u16::from_le_bytes)
+}
+
+/// Een little-endian `u32` op `b[i..]`, of 0.
+fn le32(b: &[u8], i: usize) -> u32 {
+    b.get(i..i + 4)
+        .and_then(|s| <[u8; 4]>::try_from(s).ok())
+        .map_or(0, u32::from_le_bytes)
+}
+
+/// Een little-endian `u64` op `b[i..]`, of 0.
+fn le64(b: &[u8], i: usize) -> u64 {
+    b.get(i..i + 8)
+        .and_then(|s| <[u8; 8]>::try_from(s).ok())
+        .map_or(0, u64::from_le_bytes)
+}
+
+/// Een te kort buffer.
+fn short(len: usize, need: usize) -> Error {
+    Error::Short { len, need }
+}
+
+impl<'a> StartReq<'a> {
+    /// Schrijft de hele call-payload (kop, jobnaam, [`StartHead`], groep,
+    /// env) in `dst`; geeft de lengte.
+    pub fn encode(&self, dst: &mut [u8], seq: u32) -> Result<usize> {
+        let group_len = u8::try_from(self.group.len()).map_err(|_| Error::PayloadTooLarge {
+            len: self.group.len(),
+            max: u8::MAX as usize,
+        })?;
+        let env_len = u32::try_from(self.env.len()).map_err(|_| Error::PayloadTooLarge {
+            len: self.env.len(),
+            max: u32::MAX as usize,
+        })?;
+        let req = crate::hopabi::Req {
+            op: PrivOp::StartSlot.op(),
+            seq,
+            path: self.job,
+            ..Default::default()
+        };
+        let at = crate::hopabi::encode_req(dst, &req)?;
+        let need = at + START_HEAD_LEN + self.group.len() + self.env.len();
+        let len = dst.len();
+        let out = dst.get_mut(at..need).ok_or(short(len, need))?;
+        let (head, rest) = out.split_at_mut(START_HEAD_LEN);
+        head[0..8].copy_from_slice(&self.memory_limit.to_le_bytes());
+        head[8..16].copy_from_slice(&self.image_size.to_le_bytes());
+        head[16..18].copy_from_slice(&self.cores.to_le_bytes());
+        head[18..20].copy_from_slice(&self.pool_cores.to_le_bytes());
+        head[20] = self.core_class as u8;
+        head[21] = group_len;
+        head[22..24].fill(0);
+        head[24..28].copy_from_slice(&env_len.to_le_bytes());
+        head[28..32].fill(0);
+        let (group, env) = rest.split_at_mut(self.group.len());
+        group.copy_from_slice(self.group);
+        env.copy_from_slice(self.env);
+        Ok(need)
+    }
+
+    /// Leest een start uit een gedecodeerde request; toetst op, maten en
+    /// klasse.
+    pub fn decode(r: &crate::hopabi::Req<'a>) -> Result<StartReq<'a>> {
+        if r.op != PrivOp::StartSlot.op() {
+            return Err(Error::BadKind(r.op));
+        }
+        let d = r.data;
+        let head = d
+            .get(..START_HEAD_LEN)
+            .ok_or(short(d.len(), START_HEAD_LEN))?;
+        let group_len = usize::from(head[21]);
+        let env_len = le32(head, 24) as usize;
+        let need = START_HEAD_LEN
+            .saturating_add(group_len)
+            .saturating_add(env_len);
+        if d.len() != need {
+            return Err(short(d.len(), need));
+        }
+        let (group, env) = d[START_HEAD_LEN..].split_at(group_len);
+        Ok(StartReq {
+            memory_limit: le64(head, 0),
+            image_size: le64(head, 8),
+            cores: le16(head, 16),
+            pool_cores: le16(head, 18),
+            core_class: CoreClass::from_raw(head[20])?,
+            group,
+            env,
+            job: r.path,
+        })
+    }
+}
+
+/// Een [`PrivOp::StreamImage`]-request.
+#[must_use]
+pub fn stream_req(seq: u32, slot: u64, offset: u64, chunk: &[u8]) -> crate::hopabi::Req<'_> {
+    crate::hopabi::Req {
+        op: PrivOp::StreamImage.op(),
+        seq,
+        off: slot,
+        n: offset,
+        path: &[],
+        data: chunk,
+    }
+}
+
+/// Een request met alleen getallen: stop, status, log, klok.
+#[must_use]
+pub fn plain_req(op: PrivOp, seq: u32, slot: u64, n: u64) -> crate::hopabi::Req<'static> {
+    crate::hopabi::Req {
+        op: op.op(),
+        seq,
+        off: slot,
+        n,
+        path: &[],
+        data: &[],
+    }
+}
+
+/// Waar een stroom staat na een brok.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum StreamState {
+    /// Er mogen meer bytes komen.
+    More = 0,
+    /// De laatste byte is binnen; het image is geplaatst en de app gestart.
+    Placed = 1,
+    /// De laatste byte is binnen, maar plaatsen of starten faalde; de reden
+    /// staat erachter. De kern heeft zijn reserveringen opgeruimd (of, bij
+    /// een onbekende dispatch-uitkomst, het slot in quarantaine gezet).
+    Failed = 2,
+}
+
+/// Het antwoord op een [`PrivOp::StreamImage`].
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct StreamResp<'a> {
+    /// Hoeveel bytes de kern nu heeft.
+    pub received: u64,
+    /// De stand.
+    pub state: StreamState,
+    /// De reden bij [`StreamState::Failed`]; anders leeg.
+    pub why: &'a [u8],
+}
+
+impl<'a> StreamResp<'a> {
+    /// Schrijft de data van het antwoord (stand plus reden) in `dst`; geeft
+    /// de lengte. `received` gaat in `Resp.size`.
+    pub fn encode_data(&self, dst: &mut [u8]) -> Result<usize> {
+        let need = 1 + self.why.len();
+        let len = dst.len();
+        let out = dst.get_mut(..need).ok_or(short(len, need))?;
+        out[0] = self.state as u8;
+        out[1..].copy_from_slice(self.why);
+        Ok(need)
+    }
+
+    /// Leest het antwoord uit een gedecodeerde response met status OK.
+    pub fn decode(r: &crate::hopabi::Resp<'a>) -> Result<StreamResp<'a>> {
+        let (&state, why) = r.data.split_first().ok_or(short(0, 1))?;
+        let state = match state {
+            0 => StreamState::More,
+            1 => StreamState::Placed,
+            2 => StreamState::Failed,
+            v => return Err(Error::BadKind(v)),
+        };
+        Ok(StreamResp {
+            received: r.size,
+            state,
+            why,
+        })
+    }
+}
+
+/// De toestand van een slot in het grootboek van de kern.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+#[repr(u8)]
+pub enum SlotState {
+    /// Geen eigenaar.
+    #[default]
+    Empty = 0,
+    /// Gereserveerd; het image stroomt.
+    Streaming = 1,
+    /// Gedispatcht.
+    Running = 2,
+    /// Beëindiging onbevestigd; het slot wordt niet hergebruikt.
+    Quarantined = 3,
+}
+
+/// Het antwoord op een [`PrivOp::SlotStatus`], in `data` (little-endian).
+#[repr(C)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub struct SlotInfo {
+    /// De [`SlotState`] als getal.
+    pub state: u8,
+    /// 1 als de primaire core van het slot draait.
+    pub core_on: u8,
+    /// Gereserveerd, 0.
+    pub reserved: u16,
+    /// De primaire fysieke core (0 = geen).
+    pub core: u16,
+    /// Het aantal cores van het slot.
+    pub span: u16,
+    /// De app-status van de control-page ([`crate::hopabi::AppStatus`]).
+    pub app: u64,
+    /// De exitcode.
+    pub exit_code: u64,
+    /// De heartbeat-teller van de app.
+    pub heartbeat: u64,
+    /// De RAM-maat die de app zelf meldt.
+    pub ram_size: u64,
+    /// Vector + 1 van een fault (0 = geen).
+    pub fault_vec: u64,
+    /// ESR van die fault.
+    pub fault_esr: u64,
+    /// FAR van die fault.
+    pub fault_far: u64,
+    /// De partitiemaat in bytes (0 = geen partitie).
+    pub partition: u64,
+    /// Tijdens een stroom: de ontvangen bytes.
+    pub received: u64,
+    /// Tijdens een stroom: de aangekondigde image-maat.
+    pub image_size: u64,
+}
+
+/// De lengte van [`SlotInfo`] op de draad.
+pub const SLOT_INFO_LEN: usize = 88;
+
+const _: () = assert!(core::mem::size_of::<SlotInfo>() == SLOT_INFO_LEN);
+field!(SlotInfo, state, 0);
+field!(SlotInfo, core_on, 1);
+field!(SlotInfo, reserved, 2);
+field!(SlotInfo, core, 4);
+field!(SlotInfo, span, 6);
+field!(SlotInfo, app, 8);
+field!(SlotInfo, exit_code, 16);
+field!(SlotInfo, heartbeat, 24);
+field!(SlotInfo, ram_size, 32);
+field!(SlotInfo, fault_vec, 40);
+field!(SlotInfo, fault_esr, 48);
+field!(SlotInfo, fault_far, 56);
+field!(SlotInfo, partition, 64);
+field!(SlotInfo, received, 72);
+field!(SlotInfo, image_size, 80);
+
+impl SlotInfo {
+    /// De bytes op de draad.
+    #[must_use]
+    pub fn encode(&self) -> [u8; SLOT_INFO_LEN] {
+        let mut b = [0u8; SLOT_INFO_LEN];
+        b[0] = self.state;
+        b[1] = self.core_on;
+        b[2..4].copy_from_slice(&self.reserved.to_le_bytes());
+        b[4..6].copy_from_slice(&self.core.to_le_bytes());
+        b[6..8].copy_from_slice(&self.span.to_le_bytes());
+        let words = [
+            self.app,
+            self.exit_code,
+            self.heartbeat,
+            self.ram_size,
+            self.fault_vec,
+            self.fault_esr,
+            self.fault_far,
+            self.partition,
+            self.received,
+            self.image_size,
+        ];
+        for (w, o) in words.iter().zip(b[8..].chunks_exact_mut(8)) {
+            o.copy_from_slice(&w.to_le_bytes());
+        }
+        b
+    }
+
+    /// Leest de bytes van de draad.
+    pub fn decode(b: &[u8]) -> Result<SlotInfo> {
+        if b.len() < SLOT_INFO_LEN {
+            return Err(short(b.len(), SLOT_INFO_LEN));
+        }
+        Ok(SlotInfo {
+            state: b[0],
+            core_on: b[1],
+            reserved: le16(b, 2),
+            core: le16(b, 4),
+            span: le16(b, 6),
+            app: le64(b, 8),
+            exit_code: le64(b, 16),
+            heartbeat: le64(b, 24),
+            ram_size: le64(b, 32),
+            fault_vec: le64(b, 40),
+            fault_esr: le64(b, 48),
+            fault_far: le64(b, 56),
+            partition: le64(b, 64),
+            received: le64(b, 72),
+            image_size: le64(b, 80),
+        })
+    }
+
+    /// De [`SlotState`], of `None` voor een onbekende waarde.
+    #[must_use]
+    pub const fn slot_state(&self) -> Option<SlotState> {
+        Some(match self.state {
+            0 => SlotState::Empty,
+            1 => SlotState::Streaming,
+            2 => SlotState::Running,
+            3 => SlotState::Quarantined,
+            _ => return None,
+        })
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,11 +746,99 @@ mod tests {
 
     #[test]
     fn bevoegde_ops_botsen_niet() {
+        let mut seen = 0;
         for op in 0..=u8::MAX {
             if let Some(p) = PrivOp::from_op(op) {
                 assert_eq!(p.op(), op);
                 assert!(op > crate::hopabi::OP_MAX);
+                assert!((PRIV_OP_FIRST..=PRIV_OP_LAST).contains(&op));
+                seen += 1;
             }
         }
+        assert_eq!(seen, PrivOp::ALL.len());
+        for (i, p) in PrivOp::ALL.iter().enumerate() {
+            assert_eq!(usize::from(p.op() - PRIV_OP_FIRST), i, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn start_roundtrip_over_de_call_payload() {
+        let s = StartReq {
+            memory_limit: 64 << 20,
+            image_size: 3 << 20,
+            cores: 2,
+            pool_cores: 4,
+            core_class: CoreClass::Big,
+            group: b"web",
+            env: b"A=1\nB=2\n",
+            job: b"demo",
+        };
+        let mut buf = [0u8; 256];
+        let n = s.encode(&mut buf, 7).unwrap();
+        let req = crate::hopabi::decode_req(&buf[..n]).unwrap();
+        assert_eq!((req.op, req.seq), (PrivOp::StartSlot.op(), 7));
+        assert_eq!(StartReq::decode(&req).unwrap(), s);
+        // Een afgekapte payload of een onbekende klasse wordt geweigerd.
+        let short = crate::hopabi::decode_req(&buf[..n - 1]).unwrap();
+        assert!(matches!(StartReq::decode(&short), Err(Error::Short { .. })));
+        let at = crate::hopabi::HDR_LEN + 4 + 20;
+        buf[at] = 9;
+        let bad = crate::hopabi::decode_req(&buf[..n]).unwrap();
+        assert_eq!(StartReq::decode(&bad), Err(Error::BadKind(9)));
+        let mut tiny = [0u8; 40];
+        assert!(s.encode(&mut tiny, 1).is_err());
+    }
+
+    #[test]
+    fn stream_antwoord_roundtrip() {
+        for (state, why) in [
+            (StreamState::More, &b""[..]),
+            (StreamState::Placed, b""),
+            (StreamState::Failed, b"no PT_LOAD segments"),
+        ] {
+            let r = StreamResp {
+                received: 42,
+                state,
+                why,
+            };
+            let mut d = [0u8; 64];
+            let n = r.encode_data(&mut d).unwrap();
+            let resp = crate::hopabi::Resp {
+                op: PrivOp::StreamImage.op(),
+                size: 42,
+                data: &d[..n],
+                ..Default::default()
+            };
+            assert_eq!(StreamResp::decode(&resp).unwrap(), r);
+        }
+        let empty = crate::hopabi::Resp::default();
+        assert!(StreamResp::decode(&empty).is_err());
+        let req = stream_req(3, 5, 1024, b"abc");
+        assert_eq!((req.off, req.n, req.data), (5, 1024, &b"abc"[..]));
+    }
+
+    #[test]
+    fn slot_info_roundtrip() {
+        let i = SlotInfo {
+            state: SlotState::Running as u8,
+            core_on: 1,
+            reserved: 0,
+            core: 3,
+            span: 2,
+            app: 2,
+            exit_code: 0,
+            heartbeat: 99,
+            ram_size: 62 << 20,
+            fault_vec: 0,
+            fault_esr: 0,
+            fault_far: 0,
+            partition: 64 << 20,
+            received: 0,
+            image_size: 0,
+        };
+        let b = i.encode();
+        assert_eq!(SlotInfo::decode(&b).unwrap(), i);
+        assert_eq!(i.slot_state(), Some(SlotState::Running));
+        assert!(SlotInfo::decode(&b[..SLOT_INFO_LEN - 1]).is_err());
     }
 }

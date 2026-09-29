@@ -4,7 +4,8 @@
 //! Wat de Go-appspike over veel rollen verspreidde (READY, heartbeat, logs,
 //! net, bestanden, isolatie), doet deze in één doorloop over wat applib nu
 //! draagt: de control-page lezen en terugschrijven, de env, een reeks
-//! logregels, een frame op de TX-ring, de klok, de heap en de heartbeat. Elke
+//! logregels, een frame op de TX-ring, de klok, de heap, de heartbeat en een
+//! system-call over de eigen netstack. Elke
 //! toets is één regel `HOPOS_APPSPIKE_<TOETS> ok|FAIL ...` met de getallen
 //! erbij; de laatste regel is `HOPOS_APPSPIKE_DONE pass=N fail=M`, en de
 //! exitcode is het aantal mislukte toetsen. De soak-scripts greppen erop.
@@ -16,15 +17,21 @@
 //! image op de partitie van elk slot, en de kern patcht RamStart en RamSize
 //! bij plaatsing.
 
-#![no_std]
-#![no_main]
+#![cfg_attr(target_os = "none", no_std, no_main)]
 
+use applib::appnet::{self, TcpStream};
 use applib::net::{self, Nic};
-use applib::{App, AppStatus, EXEC, clock, heap::HEAP, log};
+use applib::{App, AppStatus, EXEC, clock, heap::HEAP, log, sys};
 use core::time::Duration;
 use netdev::Device;
 
 applib::main!(spike);
+
+/// Op de host bestaat dit image niet: daar is dit alleen een lege binary,
+/// zodat de host-poort (clippy `--all-targets`) hem kan typechecken zonder
+/// allocator en paniekhaak van het slot.
+#[cfg(not(target_os = "none"))]
+fn main() {}
 
 /// Het resultaat van de doorloop.
 #[derive(Default)]
@@ -61,6 +68,7 @@ async fn spike(app: &'static App) {
     frame(app, &mut s).await;
     timer(&mut s).await;
     heartbeat(app, &mut s).await;
+    network(app, &mut s).await;
     heap(app, &mut s);
 
     log!("HOPOS_APPSPIKE_DONE pass={} fail={}", s.pass, s.fail);
@@ -182,6 +190,67 @@ async fn heartbeat(app: &App, s: &mut Score) {
             app.ctrl().idle_ticks()
         ),
     );
+}
+
+/// Hoe lang de NET-toets op de handshake met de kern wacht.
+const NET_DIAL: Duration = Duration::from_secs(3);
+
+/// De netstack: `appnet::up`, een TCP-verbinding naar de system-listener van
+/// de kern (10.100.0.1:10100) en één `stat` over die verbinding via
+/// `sys::Client`. Zonder listener aan de kern-kant faalt hij met de reden
+/// (refused, of een timeout als er niemand antwoordt).
+async fn network(app: &'static App, s: &mut Score) {
+    let n = match appnet::up(app) {
+        Ok(n) => n,
+        Err(e) => {
+            s.check("NET", false, format_args!("up: {e}"));
+            return;
+        }
+    };
+    let [a, b, c, d] = n.ip();
+    let (ip, port) = sys::ADDRESS;
+    let t0 = clock::now_ns();
+    let conn = match TcpStream::connect_timeout(ip, port, NET_DIAL).await {
+        Ok(conn) => conn,
+        Err(e) => {
+            s.check(
+                "NET",
+                false,
+                format_args!("ip={a}.{b}.{c}.{d} connect {ip:?}:{port}: {e}"),
+            );
+            return;
+        }
+    };
+    let dial_us = clock::now_ns().wrapping_sub(t0) / 1000;
+    let mut client = n.system_client_over(conn);
+    // Eén logregel over de system-verbinding (KindLog): dat pad bestaat in
+    // de kern van v3 al helemaal (listener, admit, servicer, LogTee), terwijl
+    // de gewone bestandscalls (stat, read) nog op de rpc/mounts-port wachten.
+    // De kern zet de regel als `slot N: ...` op zijn console, en dát is het
+    // bewijs van buitenaf: app, switch, kern-stack en system-API in één lijn.
+    let t1 = clock::now_ns();
+    let r = client
+        .log(b"HOPOS_APPSPIKE_NETLOG via the system connection")
+        .await;
+    let log_us = clock::now_ns().wrapping_sub(t1) / 1000;
+    // `log` keert terug zodra de regel in de TCP-zendbuffer staat; de pomp
+    // van de app zet hem pas op de draad als hij een beurt krijgt. Zonder
+    // deze pauze parkeert `exit` de core met het frame nog in de buffer, en
+    // ziet de kern niets (gemeten 29-09: log_us=320, geen regel). Een echte
+    // `flush` bij exit hoort in applib; tot dan wacht de toets één tik.
+    EXEC.after(Duration::from_millis(50)).await;
+    match r {
+        Ok(()) => s.check(
+            "NET",
+            true,
+            format_args!("ip={a}.{b}.{c}.{d} dial_us={dial_us} log_us={log_us}"),
+        ),
+        Err(e) => s.check(
+            "NET",
+            false,
+            format_args!("ip={a}.{b}.{c}.{d} dial_us={dial_us} log: {e}"),
+        ),
+    }
 }
 
 /// De heap: de executor alloceerde de taken, dus er is iets in gebruik, en

@@ -1,8 +1,9 @@
 //! De system-API-client: calls van de app naar de kern over één blijvende
 //! verbinding naar 10.100.0.1:10100 op het slot-LAN.
 //!
-//! De netstack (`leannet`) is nog niet gekoppeld, dus de client praat over
-//! een [`Conn`]-trait; wie een verbinding levert, levert hem via [`Dial`].
+//! De client praat over een [`Conn`]-trait; wie een verbinding levert,
+//! levert hem via [`Dial`]. De echte levert [`crate::appnet`]: een
+//! `TcpStream` over de eigen netstack ([`crate::appnet::Net::system_client`]).
 //! De bytes zijn die van `systemapi` en `hopabi` in de Go-boom: een framekop
 //! van 12 bytes (`"HOPS"`, versie, soort, lengte) met daarin een request of
 //! response met een kop van 24 bytes.
@@ -37,7 +38,7 @@ use core::time::Duration;
 use sync::{Either, select};
 
 /// Het adres van de kern op het slot-LAN.
-pub const ADDRESS: ([u8; 4], u16) = ([10, 100, 0, 1], SYS_PORT);
+pub const ADDRESS: ([u8; 4], u16) = (abi::layout::HOST_IP4.to_be_bytes(), SYS_PORT);
 
 /// De bulkgrens per call.
 pub const MAX_CHUNK: usize = MAX_IO_CHUNK;

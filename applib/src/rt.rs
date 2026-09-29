@@ -305,7 +305,8 @@ mod entry {
     /// de stage-2-intrekking niet meer voelde (19-07).
     #[panic_handler]
     fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
-        crate::log!("panic: {info} HOPOS_APP_PANIC");
+        // Alleen de outbox: de stack wordt na dit punt niet meer gepompt.
+        crate::log::emit_outbox(format_args!("panic: {info} HOPOS_APP_PANIC"));
         match super::app() {
             Some(app) => app.exit(2),
             None => crate::arch::park_exit(),

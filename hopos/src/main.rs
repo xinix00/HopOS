@@ -4,21 +4,30 @@
 //! De bootvolgorde is die van de Go-main (`OLD/metal/cmd/hopos/main.go`)
 //! voor zover de lagen eronder er zijn: console, bunny, `runtime`-regel,
 //! het privilege-niveau, de firmware-regel, en dan het werk als taken op de
-//! executor. Een taak per lus: de tik, de IRQ-dispatch, de NIC-pomp.
+//! executor. Een taak per lus: de tik, de IRQ-dispatch, en het netwerkvlak
+//! (net.rs: pomp, switch, poort 0, DHCP, de system-listener).
 
 #![no_std]
 #![no_main]
 #![allow(clippy::expect_used)] // boot-code: vóór de agent draait is falen parkeren (handboek §12)
 
+mod net;
+mod slots;
+
+extern crate alloc;
+
 use board::Board;
 use board::heap::Heap;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use core::time::Duration;
 use cpu::println;
 use executor::Executor;
+use kern::cage::{Console, PhysMem};
+use kern::slots::{Envelope, Reply, Servicers};
+use kern::system::{Hooks, LogTee, System};
 use netdev::Device;
-use sync::{Local, Signal, select};
+use sync::mpsc::Mailbox;
+use sync::{Local, Signal};
 
 #[cfg(not(feature = "board-qemuvirt"))]
 compile_error!("kies precies één board: --features board-qemuvirt");
@@ -101,14 +110,27 @@ extern "C" fn kmain(dtb: u64, el: u64) -> ! {
     }
     exec.spawn(tick(exec)).expect("spawn tick");
 
+    // Het netwerkvlak (net.rs): de pomp op de NIC, de switch, poort 0 met
+    // de node-stack, DHCP en de system-listener. Zonder NIC draait de kern
+    // door zonder net; dat is een board, geen fout.
     match board.probe_nic() {
         Ok(Some(nic)) => {
             println!("net: nic up HOPOS_NIC_UP mac={}", nic.mac());
-            exec.spawn(nic_pump(exec, nic)).expect("spawn nic");
+            let params = net::Params {
+                max_slots: board.cores().saturating_sub(1).max(1),
+                clock: board.clock(),
+                slot_wake: slots::wake,
+            };
+            if let Err(e) = net::start(exec, nic, params, system_api()) {
+                println!("net: {e} HOPOS_NET_FAIL");
+            }
         }
         Ok(None) => println!("net: no NIC on this board HOPOS_NIC_NONE"),
         Err(e) => println!("net: {e} HOPOS_NIC_FAIL"),
     }
+
+    // De slots: de kooi-lijm, de lifecycle-actor en de servicers (slots.rs).
+    slots::start(exec);
 
     let mut sleeper = board.sleeper();
     exec.run(&mut sleeper)
@@ -130,74 +152,84 @@ async fn irq_dispatch(board: &'static Machine, bell: &'static Signal) {
     }
 }
 
-/// De vangrail van de RX-pomp als de NIC een lijn heeft. De Go-kern nam
-/// 10 ms omdat tamago's IRQ-pad flanken verloor (21-09, L83 p42); hier is
-/// de lijn level-triggered en de deur dicht, dus is de vangrail een
-/// vangrail, en houdt 100 ms de node ver onder de 100 wekken per seconde.
-const RX_GUARD: Duration = Duration::from_millis(100);
+/// De diepte van de lifecycle-inbox: een verzoek per system-verbinding plus
+/// de boot-code, met marge.
+pub(crate) const LIFECYCLE_DEPTH: usize = 8;
 
-/// De microslaap van de pomp zonder lijn (de Go-kern: 300 µs).
-const RX_POLL: Duration = Duration::from_micros(300);
+/// De inbox van de lifecycle-actor. De actor zelf is van het slot-spoor
+/// (slots.rs); de system-listener stuurt hier zijn verzoeken heen.
+pub(crate) static LIFECYCLE: Mailbox<Envelope<'static>, LIFECYCLE_DEPTH> = Mailbox::new();
 
-/// De RX-pomp: wacht op de bel van de NIC (of de vangrail), haalt alles
-/// op, en doet één doorbell per burst. Tot `net` de uplink drijft, meldt
-/// hij alleen het eerste frame; een ARP-vraag naar de gateway zorgt dat er
-/// een komt (QEMU's user-net stuurt uit zichzelf niets).
-async fn nic_pump<N: Device>(exec: &'static Executor, mut nic: N) {
-    let arp = arp_who_has(nic.mac().0, GUEST_IP, GATEWAY_IP);
-    if let Err(e) = nic.transmit(&arp) {
-        println!("net: arp probe not sent: {e}");
-    }
-    nic.flush();
-    let mut buf = [0u8; netdev::MAX_FRAME];
-    let mut frames: u64 = 0;
-    loop {
-        while let Some(n) = nic.receive(&mut buf) {
-            frames += 1;
-            if frames == 1 {
-                println!("net: first frame received HOPOS_RX_FRAME len={n}");
-            }
-        }
-        nic.flush();
-        match nic.irq() {
-            Some(bell) => {
-                let _ = select(bell.wait(), exec.after(RX_GUARD)).await;
-            }
-            None => exec.after(RX_POLL).await,
-        }
+/// De servicers van alle slots: de lifecycle-actor schrijft, `admit` leest.
+/// Zolang er geen servicer leeft, laat de system-listener niemand toe.
+pub(crate) static SERVICERS: Servicers = Servicers::new();
+
+/// De antwoordplek van de system-listener (één verbinding tegelijk).
+static SYSTEM_REPLY: Reply = Reply::new();
+
+/// De system-API voor de listener. Zonder `Privilege`: het token hoort bij
+/// het slot van Hop en wordt door de lifecycle geslagen zodra die Hop start.
+fn system_api() -> net::SystemApi<LIFECYCLE_DEPTH, DevMem, BootHooks, LogTee<'static, KernConsole>>
+{
+    net::SystemApi {
+        system: System::new(&LIFECYCLE, &SERVICERS, None, SLOT_MAX).with_logs(&slots::LOGS),
+        reply: &SYSTEM_REPLY,
+        mem: DevMem,
+        hooks: BootHooks,
+        log: LogTee::new(KernConsole, &slots::LOGS),
     }
 }
 
-/// Het adres van de gast op QEMU's user-net (de slirp-default).
-const GUEST_IP: [u8; 4] = [10, 0, 2, 15];
-/// De gateway van QEMU's user-net.
-const GATEWAY_IP: [u8; 4] = [10, 0, 2, 2];
+/// Het hoogste slotnummer dat de system-API kent: het plafond uit de ABI.
+/// `admit` vraagt daarbovenop een levende servicer, dus een te ruime grens
+/// laat niemand extra binnen.
+const SLOT_MAX: usize = abi::layout::SLOT_CAP;
 
-/// Een ARP-vraag "wie heeft `target`?" van `mac`/`ip`, opgevuld tot de
-/// Ethernet-minimumlengte van 60 bytes.
-fn arp_who_has(mac: [u8; 6], ip: [u8; 4], target: [u8; 4]) -> [u8; 60] {
-    let mut f = [0u8; 60];
-    let fields: [&[u8]; 11] = [
-        &[0xff; 6],    // bestemming: broadcast
-        &mac,          // bron
-        &[0x08, 0x06], // EtherType ARP
-        &[0x00, 0x01], // hardware: Ethernet
-        &[0x08, 0x00], // protocol: IPv4
-        &[6, 4],       // adreslengtes
-        &[0x00, 0x01], // operatie: request
-        &mac,          // afzender-MAC
-        &ip,           // afzender-IP
-        &[0; 6],       // doel-MAC: onbekend
-        &target,       // doel-IP
-    ];
-    let mut at = 0;
-    for field in fields {
-        if let Some(dst) = f.get_mut(at..at + field.len()) {
-            dst.copy_from_slice(field);
-        }
-        at += field.len();
+/// Fysiek geheugen woordgewijs via `dev`, voor de image-stream van de
+/// system-API. Wat het adres mag zijn, bewaakt de grant van de lifecycle.
+struct DevMem;
+
+impl PhysMem for DevMem {
+    fn read64(&self, pa: u64) -> u64 {
+        dev::read64(dev::Pa(pa))
     }
-    f
+    fn write64(&mut self, pa: u64, v: u64) {
+        dev::write64(dev::Pa(pa), v);
+    }
+    fn clean_inv(&mut self, pa: u64, len: u64) {
+        dev::pull(dev::Pa(pa), usize::try_from(len).unwrap_or(0));
+    }
+}
+
+/// De haken van de system-API zolang er geen wandklok en geen flip-pad is:
+/// luid weigeren in plaats van stil slikken.
+struct BootHooks;
+
+impl Hooks for BootHooks {
+    fn set_clock(&mut self, unix_ns: u64) {
+        println!(
+            "system: clock set to {unix_ns} ns ignored, no wall clock yet HOPOS_CLOCK_IGNORED"
+        );
+    }
+    fn flip(&mut self, bundle: kern::Slot, _sha256: &[u8; 32]) -> kern::Result {
+        println!(
+            "system: flip to the bundle in slot {bundle} refused, no flip path yet HOPOS_FLIP_REFUSED"
+        );
+        Err(kern::Error::Kind)
+    }
+}
+
+/// De console van de kern voor de system-API: kernregels en app-logregels.
+struct KernConsole;
+
+impl Console for KernConsole {
+    fn log(&self, args: core::fmt::Arguments<'_>) {
+        println!("{args}");
+    }
+    fn app_line(&self, slot: kern::Slot, line: &[u8]) {
+        let text = core::str::from_utf8(line).unwrap_or("<not utf-8>");
+        println!("slot {slot}: {}", text.trim_end());
+    }
 }
 
 /// De hartslag: elke seconde één regel met het tiknummer en de meetlat van

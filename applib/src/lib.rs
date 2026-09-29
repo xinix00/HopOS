@@ -16,10 +16,12 @@
 //!   een gedeelde core), met de deurbel van de RX-ring.
 //! - [`net`]: frame-niveau netwerk over de frame-ringen: de [`net::Nic`]
 //!   (`netdev::Device`), de RX-pomp en de deurbel.
+//! - [`appnet`]: de netstack (`leannet`) over die ringen, met async TCP-
+//!   en UDP-handvatten en de system-client over een echte verbinding.
 //! - [`sys`]: de system-API-client over een [`sys::Conn`].
 //!
-//! Wat hier niet staat: de netstack (`leannet`, nog niet gekoppeld), SMP
-//! (één app-core, PORT.md beslissing 8), de codec- en device-ops.
+//! Wat hier niet staat: SMP (één app-core, PORT.md beslissing 8), de codec-
+//! en device-ops.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -32,10 +34,13 @@
     )
 )]
 
+extern crate alloc;
+
 mod arch;
 mod contract;
 
 pub mod app;
+pub mod appnet;
 pub mod clock;
 pub mod ctrl;
 pub mod heap;

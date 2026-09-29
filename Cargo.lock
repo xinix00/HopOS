@@ -18,6 +18,7 @@ dependencies = [
  "bounded",
  "dev",
  "executor",
+ "leannet",
  "netdev",
  "sync",
 ]
@@ -121,10 +122,17 @@ dependencies = [
 name = "hopos"
 version = "3.0.0"
 dependencies = [
+ "abi",
  "board",
  "board-qemuvirt",
  "cpu",
+ "dev",
  "executor",
+ "kern",
+ "leandhcp",
+ "leanelf",
+ "leannet",
+ "net",
  "netdev",
  "sync",
 ]
@@ -135,8 +143,24 @@ version = "3.0.0"
 dependencies = [
  "abi",
  "bounded",
+ "leanelf",
  "sync",
 ]
+
+[[package]]
+name = "leandhcp"
+version = "3.0.0"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.0.0#a7e089448c903fe199b604d246401cbd88640de3"
+
+[[package]]
+name = "leanelf"
+version = "3.0.0"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.0.0#a7e089448c903fe199b604d246401cbd88640de3"
+
+[[package]]
+name = "leannet"
+version = "3.0.0"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.0.0#a7e089448c903fe199b604d246401cbd88640de3"
 
 [[package]]
 name = "net"

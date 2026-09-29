@@ -13,6 +13,10 @@ description = "De orchestrator-mechanismen: slots en partities, de kooi, de syst
 abi = { path = "../abi" }
 sync = { path = "../sync" }
 bounded = { path = "../bounded" }
+# De ELF-lezer van de plaatsing (STREAM_IMAGE na de laatste byte): no_std,
+# geen allocatie, geen build.rs. Getagd over de repo-grens (PORT.md §6
+# beslissing 6), nooit een pad.
+leanelf = { git = "https://github.com/xinix00/lean.git", tag = "v3.0.0" }
 
 [lints]
 workspace = true

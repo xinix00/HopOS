@@ -12,7 +12,7 @@ use crate::ctrl::{Ctrl, Env};
 use crate::log;
 use crate::ring::Writer;
 use crate::tail::{Tail, TailError, tail_of};
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use core::fmt;
 
 /// Waarom een app niet op zijn slot past.
@@ -57,6 +57,8 @@ pub struct App {
     /// leent; de lening duurt één bericht en loopt nooit over een `.await`.
     outbox: RefCell<Writer>,
     env: Env,
+    /// De netstack draait (zie [`App::network_ready`]).
+    net_ready: Cell<bool>,
 }
 
 impl App {
@@ -76,6 +78,7 @@ impl App {
             ctrl,
             outbox: RefCell::new(outbox),
             env,
+            net_ready: Cell::new(false),
         })
     }
 
@@ -112,7 +115,18 @@ impl App {
     /// Schrijft `args` als logregel(s) naar de outbox; het werk achter
     /// [`log!`](crate::log!). Is de outbox al geleend (een `Display` die zelf
     /// logt, een paniek midden in een regel), dan wordt gedropt en geteld.
+    ///
+    /// Heeft [`crate::appnet`] een log-verbinding open, dan gaat de regel
+    /// daarover (`KindLog`) en is de outbox de terugval.
     pub fn log(&self, args: fmt::Arguments<'_>) {
+        match self.outbox.try_borrow_mut() {
+            Ok(mut w) => log::emit_via_net(Some(&mut w), args),
+            Err(_) => log::emit_via_net(None, args),
+        }
+    }
+
+    /// Als [`App::log`], maar alleen de outbox (het paniekpad).
+    pub fn log_outbox(&self, args: fmt::Arguments<'_>) {
         match self.outbox.try_borrow_mut() {
             Ok(mut w) => log::emit_to(Some(&mut w), args),
             Err(_) => log::emit_to(None, args),
@@ -123,6 +137,20 @@ impl App {
     #[must_use]
     pub fn env(&self, key: &str) -> Option<&str> {
         self.env.get(key)
+    }
+
+    /// Meldt dat de eigen netstack en zijn pomp draaien: vanaf nu is er een
+    /// weg naar de system-API. [`crate::appnet::up`] roept dit precies één
+    /// keer aan, als laatste stap; zo ziet niemand "klaar" bij een stack
+    /// zonder pomp (Go's `NetworkReady`).
+    pub fn network_ready(&self) {
+        self.net_ready.set(true);
+    }
+
+    /// Draait de netstack al? Zonder stack is er geen system-transport.
+    #[must_use]
+    pub fn is_network_ready(&self) -> bool {
+        self.net_ready.get()
     }
 
     /// Meldt READY: de runtime draait. Wie op READY wacht, ziet dan ook de

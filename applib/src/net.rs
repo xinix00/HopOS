@@ -1,11 +1,10 @@
 //! Frame-niveau netwerk van een app: de [`Nic`] over de eigen frame-ringen
 //! naar de L2-switch van de kern, en de RX-pomp met de deurbel.
 //!
-//! De port van `appnet` zonder de stack: `leannet` is nog niet gekoppeld,
-//! dus wat hier staat is het twee-methode-device (`netdev::Device`)
-//! waaraan in Go elke stack-wissel hing (gVisor, lneto, leannet: elke
-//! wissel raakte alleen `up.go`). Een app die rauwe frames wil, of straks de
-//! stack, gebruikt precies dit.
+//! Het twee-methode-device (`netdev::Device`) waaraan in Go elke
+//! stack-wissel hing (gVisor, lneto, leannet: elke wissel raakte alleen
+//! `up.go`). De stack zelf staat in [`crate::appnet`] en gebruikt precies
+//! dit; een app die rauwe frames wil ook.
 //!
 //! Het interne net is deterministisch: kern op .1, slot i op .(i+1)/24, MAC
 //! `02:00:00:00:00:<slot>`. Er wordt niets geresolved; beide kanten leiden het

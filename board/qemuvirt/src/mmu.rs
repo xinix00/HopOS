@@ -12,8 +12,13 @@
 //! - 0x4f00_0000 tot 0x5000_0000: de DMA-regio, Normal non-cacheable: een
 //!   controller leest er zonder cache-onderhoud (de Go-kern: "buiten de
 //!   RAM-declaratie, dus niet gecached").
-//! - 0x5000_0000 tot 0x1_0000_0000: de rest van de RAM (`-m 3G`), Normal
-//!   WB; de pool van de slots.
+//! - 0x5000_0000 tot 0xC000_0000: de rest van de RAM (`-m 3G`), Normal
+//!   WB; de pool van de slots en de staging van een app-image.
+//! - 0xC000_0000 tot 0xC400_0000: de control-pages en de kooi-regio
+//!   ([`crate::slots::DEVICE_WINDOW`]), Device: de app-cores lezen ze op EL2
+//!   met de MMU uit, en de park-mailbox moet zonder veeg coherent zijn (de
+//!   Go-kern mapte alles buiten zijn RAM-declaratie zo).
+//! - 0xC400_0000 tot 0x1_0000_0000: Normal WB.
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 core::arch::global_asm!(
@@ -25,7 +30,7 @@ __boot_ttbr0:
     .quad {dev0}
     .quad __boot_l2_ram + 3
     .quad {ram2}
-    .quad {ram3}
+    .quad __boot_l2_hi + 3
     .fill 508, 8, 0
 
     .balign 4096
@@ -43,13 +48,37 @@ __boot_l2_ram:
     .quad {ram1} + (blk * 0x200000)
     .set blk, blk + 1
     .endr
+
+    .balign 4096
+__boot_l2_hi:
+    .set blk, 0
+    .rept 32
+    .quad {cage} + (blk * 0x200000)
+    .set blk, blk + 1
+    .endr
+    .rept 480
+    .quad {ram3} + (blk * 0x200000)
+    .set blk, blk + 1
+    .endr
 "#,
     dev0 = const cpu::boot::block(0, cpu::boot::ATTR_DEVICE),
     ram1 = const cpu::boot::block(0x4000_0000, cpu::boot::ATTR_NORMAL),
     ram2 = const cpu::boot::block(0x8000_0000, cpu::boot::ATTR_NORMAL),
     ram3 = const cpu::boot::block(0xc000_0000, cpu::boot::ATTR_NORMAL),
+    cage = const cpu::boot::block(0xc000_0000, cpu::boot::ATTR_DEVICE),
     dma = const cpu::boot::block(0x4f00_0000, cpu::boot::ATTR_NORMAL_NC),
 );
+
+// Het Device-venster in de hoogste gigabyte is de eerste 32 blokken van
+// die gigabyte (de `.rept 32` hierboven), en draagt de control-pages en de
+// kooi-regio; de rest van de gigabyte (`.rept 480`, samen 512) is Normal.
+const _: () = {
+    use crate::slots::{CAGE_PA, DEVICE_WINDOW, NODE_CTRL_PA};
+    assert!(DEVICE_WINDOW.base == 0xC000_0000);
+    assert!(DEVICE_WINDOW.size == 32 * 0x20_0000);
+    assert!(NODE_CTRL_PA >= DEVICE_WINDOW.base);
+    assert!(CAGE_PA < DEVICE_WINDOW.base + DEVICE_WINDOW.size);
+};
 
 #[cfg(test)]
 mod tests {

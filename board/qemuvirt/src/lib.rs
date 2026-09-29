@@ -25,6 +25,7 @@
 
 mod arch;
 mod mmu;
+pub mod slots;
 
 use board::heap::Heap;
 use board::{Board, CoreClass, Dispatched, Error, Plan, Region};
