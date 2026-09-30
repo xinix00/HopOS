@@ -18,13 +18,13 @@ of faalt, en een streep waar het bewust niet komt. Stand 30-09-2026, avond.
 | Kern-flip, warm | ✓ | ✓ uit de kale kern, ✗ uit de koude gui-kern (RP1) | ✓ (3x) | ✓ (1x) | ○ | ○ | – (geen CPU_OFF) | – |
 | NIC met interrupt | ✓ | ✓ MSI-X via de MIP | – (GENET gepold, zoals Go) | ✓ SPI 64 | – (igb gepold, bewust) | ✓ RTL8125B, MSI-X via de ITS (LPI 8192) | ○ (tg3, AIC) | ○ (dwmac) |
 | Off-link door de NAT, SNTP | ✓ | ✓ | ✓ | ○ | ○ | ○ | ○ | ○ |
-| Watchdog gewapend en geaaid | – | ✓ PM (12 s) | ✓ PM | ✗ DW-WDT gemeten, aai komt | ○ SBSA | ✓ SBSA (8,5 s) | ○ | ○ DW-WDT |
-| Hardware-RNG voor de kern | ✗ (jitter) | ✓ RNG200 | ✓ RNG200 | ✗ TRNG komt | ○ SMCCC-TRNG of rndr | ○ rndr | ○ | ✗ (niets) |
+| Watchdog gewapend en geaaid | – | ✓ PM (12 s) | ✓ PM | ✓ DW-WDT (89 s) | ○ SBSA | ✓ SBSA (8,5 s) | ○ | ○ DW-WDT |
+| Hardware-RNG voor de kern | ✗ (jitter) | ✓ RNG200 | ✓ RNG200 | ✓ rk3568-rng | ○ SMCCC-TRNG of rndr | ○ rndr | ○ | ✗ (niets) |
 | Hardware-RNG voor de slots | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
-| Temperatuur in de tik | – | ✓ mailbox | ✓ mailbox | ✗ TSADC komt | ○ SMpro | ✓ SCMI (39 C in de agentlijst) | ○ | – |
+| Temperatuur in de tik | – | ✓ mailbox | ✓ mailbox | ✗ TSADC converteert niet (Go ook niet) | ○ SMpro | ✓ SCMI (39 C in de agentlijst) | ○ | – |
 | Klokbeleid (dvfs) | – | ✓ 1500/800 | ✓ 1500/600 | – | ○ | ✓ vijf `_CPC`-domeinen, 2600 MHz | – | – |
 | Console op het glas | ✓ ramfb | ✓ via flip op de eerste kaart, ✗ sinds de herflash (firmware weigert) | ✓ 32 bpp | ✓ HDMI (geen EDID) | ○ GOP | ✓ GOP 1920x1080 | – | – |
-| USB xHCI (HID, display-app) | ✓ qemu-xhci | ○ 2 xHCI's up, niets ingeplugd | ✗ VL805 koud: versie 0, HCRST | ○ 1 van 2 DWC3 | ○ | ○ 10 xHCI's up, één super-speed apparaat op XHC4 | – | – |
+| USB xHCI (HID, display-app) | ✓ qemu-xhci | ○ 2 xHCI's up, niets ingeplugd | ✗ VL805 koud: versie 0, HCRST | ○ 2 DWC3 up, niets ingeplugd | ○ | ○ 10 xHCI's up, één super-speed apparaat op XHC4 | – | – |
 | Opslag (hopfs, volumes, OP_SYNC) | ✓ virtio-blk | – (bewust geen NVMe) | – | – (stateless, alles in het geheugen) | ○ NVMe | ✓ NVMe Lexar 4 TB, hopfs hersteld (generatie 3456) | ○ ANS | – |
 | Console op 5555 | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ○ | ○ |
 | Hardwaredecoder (media-smaak) | – | – | – | – | – | ✓ Linlon V8, 85,7 fps 4K P010 via de grant | – | – |
@@ -65,16 +65,18 @@ Alleen wat nog moet; wat af is staat in de tabel hierboven.
 
 ### Radxa Zero 3E (radxa-1, 192.168.1.241)
 
-- [ ] De DW-WDT aaien, de TRNG, de TSADC en de tweede DWC3 (usbdrd30 "not
-      clocked"): de agent is bezig (30-09), daarna een warme flip en 5555.
+- [ ] De TSADC geeft geen geldige code (raw cpu 0 gpu 0, `HOPOS_TSADC_NONE`),
+      zoals in Go op 06-08; de init is die van Linux. Waarom converteert hij
+      niet.
+- [ ] De echte watchdogtoets (DW-WDT 89 s): Hop stoppen of de kabel eruit.
 - [ ] EDID: "no answer on the DDC", "sink attached: false". Hangt er een
       scherm aan?
 - [ ] De config zit in `hopos.ird`: alleen te wijzigen met `CFG=` of in de
       APPEND-regel.
 - [ ] De koude flip weigert (geen staging op de kaart; stateless, dus warm
       flippen of de kaart herstarten).
-- [ ] De kaart in `target/` is van 14:41, zonder 5555: opnieuw bouwen na de
-      agent.
+- [ ] De kaart in `target/` opnieuw flashen zodra de build van 19:05 (5555,
+      DW-WDT, TRNG, DWC3) er staat.
 
 ### Ampere Altra (altra-1)
 
