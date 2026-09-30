@@ -232,10 +232,12 @@ De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
       staan zonder hem gesloten te tellen. Fix a102e51 (RST = gesloten in
       beide richtingen, sluit-TTL en recycler pakken hem); nog te flippen
       en de storm te herhalen.
-- [ ] **Idle**: app-core 1000 tot 3000 wekken/s (poll-ronde van de
-      app-pomp), OS-core ~900/s (Go ~100, op de interrupt); een stilstaande
-      tweecore-app houdt de Pi's op 1500 MHz ("busy slot 2, 544 permille
-      idle").
+- [ ] **Idle**: fix 262ea1f (uitstelbare timers, WFE-lus, tweede core
+      telt mee). Op ijzer: app-core Pi 4 1011 → 29 wekken/s, O6N 3300 → 52
+      (4 cores, nieuwe applib op de H-kern). De OS-core op de Pi 4 telt nog
+      ~850 `sleeps=`/s: de event-stream van 1,2 ms in de WFE-lus (geen
+      executor-rondes meer, wel de teller); of de dvfs nu terugklokt bij
+      een stille tweecore-app is nog niet gezien.
 - [ ] vitals: de standaard-rx-URL (cachefly) faalt zonder DNS in de env
       ("CONNECT is not supported"); rx-duren vallen op stappen van 100 ms.
 - [ ] De Mac hangt op Wi-Fi en macOS laat netmeter niet op het LAN
