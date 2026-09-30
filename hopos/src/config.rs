@@ -69,6 +69,22 @@ const S3_KEYS: [(&str, &str); 6] = [
     ("hopos.s3.pathstyle", "HOPOS_S3_PATHSTYLE"),
 ];
 
+/// De config van Hop op QEMU: [`QEMU_CFG`] plus de S3-sleutels uit de
+/// bootargs (`-append "hopos.s3.endpoint=... hopos.s3.bucket=..."`), want
+/// dat board heeft nog geen `hopos.cfg` en de store-ops van de apps lopen
+/// via de S3 van Hop (tools/qemu-test-store.sh). Een waarde met een spatie
+/// kan niet in een bootarg; daarvoor is er het bestand.
+pub(crate) fn qemu_hop_cfg(param: impl Fn(&'static str) -> String) -> String {
+    let mut text = String::from(QEMU_CFG);
+    for (key, _) in S3_KEYS {
+        let v = param(key);
+        if !v.is_empty() {
+            let _ = writeln!(text, "{key}={v}");
+        }
+    }
+    text
+}
+
 /// De tekst van een `hopos.cfg`, gelezen met `fw::bootcfg`.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct NodeCfg<'a> {
@@ -323,6 +339,23 @@ mod tests {
         pool_bytes: 512 << 20,
         hop_mem: 64 << 20,
     };
+
+    #[test]
+    fn qemu_bootargs_add_the_s3_keys_and_nothing_else() {
+        let text = qemu_hop_cfg(|k| match k {
+            "hopos.s3.endpoint" => String::from("http://10.0.2.2:9000"),
+            "hopos.s3.bucket" => String::from("hop"),
+            "hopos.s3.secret" => String::from("geheim"),
+            _ => String::new(),
+        });
+        let b = build(&NodeCfg::parse(&text), &FACTS).unwrap();
+        assert!(b.text.contains("HOPOS_S3_ENDPOINT=http://10.0.2.2:9000\n"));
+        assert!(b.text.contains("HOPOS_S3_BUCKET=hop\n"));
+        assert!(!b.text.contains("HOPOS_S3_REGION"));
+        assert!(b.text.contains("HOPOS_INSECURE=1\n"), "QEMU_CFG stays");
+        assert!(!b.redacted().contains("geheim"));
+        assert_eq!(qemu_hop_cfg(|_| String::new()), QEMU_CFG);
+    }
 
     #[test]
     fn qemu_default_is_what_the_kernel_gave_before() {

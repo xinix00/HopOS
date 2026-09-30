@@ -407,11 +407,16 @@ pub const OP_REMOVE: u8 = 5;
 // blijft leeg, zodat een oud image een nette "onbekende op" krijgt.
 /// `truncate(path, n)`: maakt bestand en ouder-mappen.
 pub const OP_TRUNCATE: u8 = 7;
-/// Object naar eigen pad (vervangend); de maat.
+/// Object naar eigen pad (vervangend); de maat. `path` is de objectnaam
+/// binnen de eigen map, `data` leeg (het lokale pad is dezelfde naam, zoals
+/// in Go) of een ander lokaal pad (sinds alpha.12, additief).
 pub const OP_STORE_PULL: u8 = 8;
-/// Eigen pad naar object (vervangend); de maat.
+/// Eigen pad naar object (vervangend); de maat. `path` en `data` zoals bij
+/// [`OP_STORE_PULL`]: de objectnaam, en eventueel een ander lokaal pad.
 pub const OP_STORE_PUSH: u8 = 9;
-/// Keys onder de eigen map plus pad-prefix, `\n`-gescheiden.
+/// Keys onder de eigen map plus pad-prefix, `\n`-gescheiden en relatief
+/// aan de eigen map (voer voor [`OP_STORE_PULL`]); `size` het aantal. Een
+/// lijst die niet in één antwoord past, is een fout, nooit afgekapt.
 pub const OP_STORE_LIST: u8 = 10;
 /// Object weg (idempotent).
 pub const OP_STORE_DROP: u8 = 11;

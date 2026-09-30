@@ -6,8 +6,9 @@
 //! levensduur. Er is geen tweede identiteitspad.
 //!
 //! Bovenop de gewone calls staan de BEVOEGDE operaties
-//! ([`abi::systemapi::PrivOp`], 0x40 tot en met 0x46): een slot reserveren,
-//! een image erin stromen, stoppen, status, logregels, de klok, de flip.
+//! ([`abi::systemapi::PrivOp`], 0x40 tot en met 0x4A): een slot reserveren,
+//! een image erin stromen, stoppen, status, logregels, de klok, de flip,
+//! en de store-opdrachten van de apps ophalen en afronden ([`crate::store`]).
 //! Alleen het slot met de [`Privilege`] mag ze: dat is Hop, de eerste
 //! bewoner (PORT.md beslissing 1). De kern maakt het token één keer bij boot
 //! en geeft het aan het slot van Hop; nergens anders bestaat er een. Een
@@ -84,6 +85,11 @@ pub const HEADER_LEN: usize = 12;
 /// tweede is voor een herverbinding waarvan HOP de FIN van de oude nog niet
 /// zag. Elke verbinding houdt netwerk- en callbuffers vast.
 pub const MAX_SYSTEM_CONNS: u8 = 2;
+/// Zoveel system-verbindingen tegelijk voor het slot van Hop: één meer dan
+/// een app, voor de store-taak die blijvend op `NEXT_STORE` wacht
+/// ([`crate::store`]). Gemeten 30-09: met twee kreeg de kloktaak van Hop
+/// geen verbinding meer zodra de store-taak er een hield.
+pub const MAX_HOP_CONNS: u8 = MAX_SYSTEM_CONNS + 1;
 /// Het interne net: 10.100.0.0/24, HOP is .1, slot i is .(i+1).
 pub const NET: u32 = (10 << 24) | (100 << 16);
 /// Hoeveel images tegelijk mogen stromen. Hop begrenst zelf op vier
@@ -1248,6 +1254,7 @@ pub struct System<'i, 'r, const N: usize> {
     streams: LocalCell<[Option<Stream>; MAX_STREAMS]>,
     logs: Option<&'i SlotLogs>,
     fs: Option<&'i FsInbox<'r>>,
+    store: Option<&'i crate::store::StoreQueue>,
     max_slots: usize,
 }
 
@@ -1268,6 +1275,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             streams: LocalCell::cell([const { None }; MAX_STREAMS]),
             logs: None,
             fs: None,
+            store: None,
             max_slots,
         }
     }
@@ -1278,6 +1286,15 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
     #[must_use]
     pub const fn with_fs(mut self, fs: &'i FsInbox<'r>) -> Self {
         self.fs = Some(fs);
+        self
+    }
+
+    /// Koppelt de rij van de store-ops ([`crate::store`]). Zonder rij
+    /// antwoordt elke store-call met een fout: deze node heeft geen
+    /// object-store.
+    #[must_use]
+    pub const fn with_store(mut self, store: &'i crate::store::StoreQueue) -> Self {
+        self.store = Some(store);
         self
     }
 
@@ -1296,11 +1313,15 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         let slot = slot_from_remote(ip, self.max_slots)?;
         let generation = self.svc.current(slot)?;
         let ctl = self.svc.ctl(slot)?;
+        // Hop houdt één verbinding meer: zijn store-taak wacht er blijvend
+        // op NEXT_STORE, naast de eigenaar-taak en de kloktaak.
+        let hop = self.privilege.as_ref().is_some_and(|p| p.slot == slot);
+        let cap = if hop { MAX_HOP_CONNS } else { MAX_SYSTEM_CONNS };
         // `then`, niet `then_some`: een gretig gebouwde `Admitted` die bij
         // een weigering wegvalt, geeft in zijn `Drop` een plaats terug die
         // nooit genomen was (gemeten 29-09: na één weigering liet de cap een
         // derde verbinding toe).
-        ctl.try_conn(MAX_SYSTEM_CONNS).then(|| Admitted {
+        ctl.try_conn(cap).then(|| Admitted {
             slot,
             generation,
             svc: self.svc,
@@ -1394,6 +1415,19 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
                     };
                     self.fs_call(who, head, reply, buf, out).await
                 }
+                Ok(call) if crate::store::is_store_call(call.op) => {
+                    // Zoals een bestandscall: alleen getallen en bereiken, want
+                    // een lees of schrijf van Hop neemt de buffers mee.
+                    let h = crate::store::Head::new(
+                        call.op,
+                        call.seq,
+                        call.off,
+                        call.n,
+                        call.path.len(),
+                        n,
+                    );
+                    self.store_call(who, h, reply, w.timer, log, buf, out).await
+                }
                 #[cfg(feature = "media")] // MEDIA: de codec-ops, synchroon (codecabi.rs).
                 Ok(call) if crate::codecabi::is_codec_op(call.op) => {
                     crate::codecabi::serve(slot, who.generation, &call.as_req(), out)
@@ -1455,6 +1489,47 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         }
     }
 
+    /// Een store-call ([`crate::store`]): een app die wacht op Hop, of Hop
+    /// die een opdracht ophaalt, bytes verplaatst of afmeldt.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "de verbinding brengt haar eigen buffers, antwoordplek en tik mee"
+    )]
+    async fn store_call<T: Timer, L: Console>(
+        &self,
+        who: &Admitted<'_>,
+        h: crate::store::Head,
+        reply: &'r Reply,
+        timer: &T,
+        log: &L,
+        buf: &mut Vec<u8>,
+        out: &mut Vec<u8>,
+    ) -> usize {
+        let Some(queue) = self.store else {
+            return encode_resp(
+                out,
+                h.op,
+                STATUS_ERROR,
+                h.seq,
+                0,
+                b"no object store on this node (the kernel has no store queue)",
+            );
+        };
+        let cx = crate::store::Ctx {
+            queue,
+            fs: self.fs,
+            svc: self.svc,
+            slot: who.slot,
+            generation: who.generation,
+            hop: self.privilege.as_ref().filter(|p| p.slot == who.slot),
+            hop_slot: self.privilege.as_ref().map(Privilege::slot),
+            reply,
+            timer,
+            log,
+        };
+        crate::store::serve(&cx, h, buf, out).await
+    }
+
     async fn call(
         &self,
         slot: Slot,
@@ -1465,7 +1540,8 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         out: &mut [u8],
     ) -> usize {
         let r = match (PrivOp::from_op(c.op), &self.privilege) {
-            // De store- en codec-calls zijn nog niet geport.
+            // Een onbekende op (de codec-calls zonder de feature `media`;
+            // de store-calls dient `frames` via `crate::store`).
             (None, _) => Err(Fail::Kern(Error::Kind)),
             (Some(op), Some(p)) if p.slot == slot => {
                 self.privileged(p, op, c, reply, mem, hooks, out).await
@@ -1521,6 +1597,12 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             PrivOp::SetClock => {
                 hooks.set_clock(c.n);
                 Ok((0, 0))
+            }
+            // De store-ops van Hop dient `frames` via `crate::store`: ze
+            // hebben de buffers van de verbinding nodig (de bytes gaan als
+            // waarde naar de hopfs-actor). Hier komen ze nooit.
+            PrivOp::NextStore | PrivOp::StoreRead | PrivOp::StoreWrite | PrivOp::StoreDone => {
+                Err(Error::Kind.into())
             }
             PrivOp::Flip => {
                 let sha = &flip_sum(c.path)?;
@@ -3029,6 +3111,11 @@ mod tests {
             sys.admit(NET | 3).is_none(),
             "slot without servicer admitted"
         );
+        // Het slot van Hop houdt er één meer, voor zijn store-taak.
+        let hop = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let seats: Vec<_> = (0..MAX_HOP_CONNS).map(|_| hop.admit(NET | 2)).collect();
+        assert!(seats.iter().all(Option::is_some));
+        assert!(hop.admit(NET | 2).is_none(), "a fourth connection for Hop");
     }
 
     /// Een lege omgeving van één verbinding: buffers, antwoordplek, geheugen.

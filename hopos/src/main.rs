@@ -454,7 +454,13 @@ fn boot(board: &'static Machine, dtb: u64, el: u8) -> ! {
         Some(StagedRole::App) => slots::app_env(&bench::bootparam(dtb, "hopos.appenv")),
         _ => alloc::vec::Vec::new(),
     };
-    slots::start(exec, role, landing.map(|h| h.slots), app_env);
+    // De config van Hop: op QEMU de vaste tekst plus `hopos.s3.*` uit de
+    // bootargs (config.rs).
+    let hop_cfg = match role {
+        Some(StagedRole::Hop) => config::qemu_hop_cfg(|k| bench::bootparam(dtb, k)),
+        _ => alloc::string::String::new(),
+    };
+    slots::start(exec, role, landing.map(|h| h.slots), app_env, hop_cfg);
 
     // De OS-core (PORT.md beslissing 2): de idle van de kern is de rotatie
     // over zijn bewoners (Hop). Lukt dat niet, dan houdt de kern zijn core
@@ -495,6 +501,11 @@ pub(crate) static LIFECYCLE: Mailbox<Envelope<'static>, LIFECYCLE_DEPTH> = Mailb
 /// Zolang er geen servicer leeft, laat de system-listener niemand toe.
 pub(crate) static SERVICERS: Servicers = Servicers::new();
 
+/// De rij van de store-ops (`kern::store`): de apps zetten er hun
+/// store-calls in, Hop haalt ze op. Een `static`: acht plaatsen van
+/// 10,5 KiB horen in .bss, niet op de heap van de kern.
+static STORE: kern::store::StoreQueue = kern::store::StoreQueue::new();
+
 /// De system-API van deze boot, gedeeld door alle verbindingstaken
 /// (net.rs), met het token van Hop als die er is.
 ///
@@ -506,7 +517,9 @@ fn system(
     privilege: Option<Privilege>,
     fs: bool,
 ) -> &'static System<'static, 'static, LIFECYCLE_DEPTH> {
-    let mut s = System::new(&LIFECYCLE, &SERVICERS, privilege, SLOT_MAX).with_logs(&slots::LOGS);
+    let mut s = System::new(&LIFECYCLE, &SERVICERS, privilege, SLOT_MAX)
+        .with_logs(&slots::LOGS)
+        .with_store(&STORE);
     if fs {
         s = s.with_fs(&storage::FS_INBOX);
     }
@@ -599,8 +612,15 @@ async fn tick(exec: &'static Executor) {
         // en de tijd die de bewoners kregen. Zonder deze getallen is "Hop
         // krijgt tijd" niet te onderscheiden van "de kern spint".
         let o = &cpu::el2::OS_STATS;
+        // De laatste beurt en de langste sinds de vorige tik (30-09: de
+        // stilte van de hoplb-kring was niet te lezen zonder te weten wie de
+        // OS-core het laatst had), en de switch: werk na de bel tegen werk
+        // na de failsafe, volle en gedropte RX, en wat de NAT weggooide.
+        let last = o.last.load(Relaxed);
+        let long_us = o.longest.swap(0, Relaxed) / (OS_HZ() / 1_000_000).max(1);
+        let sw = &net::STATS;
         println!(
-            "HOPOS_TICK {n} sleeps={} polls={} irq(timer={} nic={} other={}) os(in={} irq={} ipi={} timer={} yield={} exit={} fault={} idle={} res_ms={} kicks={}) temp={}",
+            "HOPOS_TICK {n} sleeps={} polls={} irq(timer={} nic={} other={}) os(in={} irq={} ipi={} timer={} yield={} exit={} fault={} idle={} res_ms={} kicks={}) turn(last={}:{} long_us={long_us}) sw(door={} timer={} rxfull={} rxdrop={} big={} noroute={} txdrop={} flowfull={}) temp={}",
             s.sleeps.load(Relaxed),
             s.polls.load(Relaxed),
             IRQS[0].load(Relaxed),
@@ -616,6 +636,16 @@ async fn tick(exec: &'static Executor) {
             o.idle.load(Relaxed),
             o.ticks.load(Relaxed) / (OS_HZ() / 1000).max(1),
             o.kicks.load(Relaxed),
+            last & 0xff,
+            cpu::el2::Back::name_of((last >> 8) & 0xff),
+            sw.work_by_door.load(Relaxed),
+            sw.work_by_timer.load(Relaxed),
+            sw.rx_full.load(Relaxed),
+            sw.rx_drops.load(Relaxed),
+            sw.nat_oversize.load(Relaxed),
+            sw.nat_no_route.load(Relaxed),
+            sw.uplink_tx_drops.load(Relaxed),
+            sw.nat_flow_full.load(Relaxed),
             telemetry::Temp(telemetry::temp_milli_c()),
         );
     }

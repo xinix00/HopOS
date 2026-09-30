@@ -30,6 +30,23 @@
 //! STOP_SLOT(slot, timeout_ms)  -> Ok (de kern geeft vrij) | fout (quarantaine)
 //! ```
 //!
+//! # De store-ops van een app
+//!
+//! Een app kopieert op afroep tussen zijn eigen map in de object-store
+//! (`apps/<cluster>/<job>/`) en zijn hopfs-zicht (`OP_STORE_*` van
+//! [`crate::hopabi`]). De kern heeft geen S3, geen sleutels en geen TLS;
+//! Hop wel. Dus wacht de call van de app in een rij van de kern, en haalt
+//! Hop hem op ([`store`]):
+//!
+//! ```text
+//! app:  OP_STORE_PUSH("state.json")            wacht
+//! Hop:  NEXT_STORE(wacht)      -> StoreTask     ticket, slot, job, key, pad
+//! Hop:  STORE_READ(ticket, 0)  -> bytes         door de mounts van dat slot
+//! Hop:  PUT apps/<cluster>/<job>/state.json     op S3
+//! Hop:  STORE_DONE(ticket, OK, maat)
+//! app:                         <- maat
+//! ```
+//!
 //! Na de laatste byte plaatst de kern het image zelf: ELF lezen, het plan
 //! van [`crate::place::build`], de RAM-declaratie patchen, BSS nullen, de
 //! env op de control-page, en dan de kooi bouwen en dispatchen. Faalt dat,
@@ -68,6 +85,8 @@ pub const MAGIC: u32 = 0x5350_4f48;
 
 const _: () = assert!(MAX_PAYLOAD <= u32::MAX as usize);
 const _: () = assert!(u32::from_le_bytes(*b"HOPS") == MAGIC);
+
+pub mod store;
 
 mod mounts;
 pub use mounts::{MAX_MOUNT_BYTES, MAX_MOUNT_PATH, MAX_START_MOUNTS, MountRef, Mounts, mount_blob};
@@ -246,6 +265,28 @@ pub enum PrivOp {
     /// `n` draagt de vlaggen van de flip ([`FLIP_COLD`]); een Hop van vóór
     /// de vlag stuurt 0, en dat is de warme flip van altijd.
     Flip = 0x46,
+    /// De volgende store-opdracht van een app ([`store`]): `n` de langste
+    /// wachttijd in ms (0 = niet wachten, de kern kapt af op
+    /// [`store::MAX_WAIT_MS`]). Het antwoord: `size` 1 en een
+    /// [`store::StoreTask`] in `data`, of `size` 0 als er niets klaarstaat.
+    NextStore = 0x47,
+    /// Lees een stuk van het bestand van een opdracht (push): `off` het
+    /// ticket, `n` de offset in het bestand, `path` het lokale pad van de
+    /// opdracht (letterlijk zoals [`store::StoreTask::path`]), `data` de
+    /// grootste lengte als `u64` ([`store::read_len`]). Het antwoord:
+    /// `size` de maat van het hele bestand, `data` de bytes vanaf `n`.
+    StoreRead = 0x48,
+    /// Schrijf een stuk van het bestand van een opdracht (pull): `off` het
+    /// ticket, `n` de offset, `path` het lokale pad, `data` de bytes. Een
+    /// schrijf op offset 0 kort het bestand eerst in tot 0 (vervangend),
+    /// ook met nul bytes: zo bestaat een leeg object ook lokaal.
+    StoreWrite = 0x49,
+    /// Rond een opdracht af: `off` het ticket, `n` de maat (pull en push:
+    /// bytes; list: het aantal namen), `data` een [`store::DoneHead`] plus
+    /// de namen (list, `\n`-gescheiden, relatief aan de eigen map) of de
+    /// fouttekst. `STATUS_NO_ENT` als antwoord: de opdracht bestaat niet
+    /// meer (de app is gestopt); Hop gooit hem dan weg.
+    StoreDone = 0x4A,
 }
 
 /// Vlag in `n` van [`PrivOp::Flip`]: de KOUDE flip. De kern stopt elke
@@ -259,13 +300,13 @@ pub const FLIP_COLD: u64 = 1;
 /// Het laagste bevoegde opnummer.
 pub const PRIV_OP_FIRST: u8 = PrivOp::StartSlot as u8;
 /// Het hoogste bevoegde opnummer.
-pub const PRIV_OP_LAST: u8 = PrivOp::Flip as u8;
+pub const PRIV_OP_LAST: u8 = PrivOp::StoreDone as u8;
 
 const _: () = assert!(PRIV_OP_FIRST > crate::hopabi::OP_MAX);
 
 impl PrivOp {
     /// Alle bevoegde operaties, in opnummer-volgorde.
-    pub const ALL: [PrivOp; 7] = [
+    pub const ALL: [PrivOp; 11] = [
         Self::StartSlot,
         Self::StreamImage,
         Self::StopSlot,
@@ -273,6 +314,10 @@ impl PrivOp {
         Self::NextLog,
         Self::SetClock,
         Self::Flip,
+        Self::NextStore,
+        Self::StoreRead,
+        Self::StoreWrite,
+        Self::StoreDone,
     ];
 
     /// De bevoegde operatie van een opnummer, of `None` voor een gewone of
@@ -287,6 +332,10 @@ impl PrivOp {
             0x44 => Self::NextLog,
             0x45 => Self::SetClock,
             0x46 => Self::Flip,
+            0x47 => Self::NextStore,
+            0x48 => Self::StoreRead,
+            0x49 => Self::StoreWrite,
+            0x4A => Self::StoreDone,
             _ => return None,
         })
     }

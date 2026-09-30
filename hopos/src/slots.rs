@@ -102,6 +102,7 @@ mod arch {
 use abi::hopabi::{CTRL_ENV_DATA, CTRL_ENV_LEN, CTRL_ENV_MAX};
 use abi::layout::{ABI_CTRL_OFF, ABI_TAIL, CtxState, LINK_BASE, RING_DATA_CAP};
 use abi::place::{self, SYM_ABI, SYM_RAM_SIZE, SYM_RAM_START, SYM_SLOT_HINT, Window};
+use alloc::string::String;
 use alloc::vec::Vec;
 use board::Board;
 #[cfg(not(target_arch = "riscv64"))]
@@ -202,6 +203,7 @@ pub(crate) fn start(
     role: Option<StagedRole>,
     adopt: Option<Vec<kern::slots::SlotState>>,
     app_env: Vec<u8>,
+    hop_cfg: String,
 ) {
     let board = &crate::BOARD;
     let plan = match os_plan() {
@@ -357,7 +359,7 @@ pub(crate) fn start(
     }
     let spawned = match role {
         Some(StagedRole::App) => exec.spawn(place_first(exec, plan, app_env)),
-        Some(StagedRole::Hop) => exec.spawn(place_hop(exec, plan, pool_bytes)),
+        Some(StagedRole::Hop) => exec.spawn(place_hop(exec, plan, pool_bytes, hop_cfg)),
         None => {
             println!(
                 "slots: staged role word {:#x} is neither app (0) nor hop (1), nothing placed HOPOS_SLOT_NONE",
@@ -483,7 +485,12 @@ const HOP_NODE: &str = "hopos-qemu";
 
 /// De plaatsing van Hop: het gestagede image één keer in slot 1, met de
 /// env van de node, dan de poorten op de uplink en de bewaking.
-async fn place_hop(exec: &'static Executor, plan: abi::layout::Plan, pool_bytes: u64) {
+async fn place_hop(
+    exec: &'static Executor,
+    plan: abi::layout::Plan,
+    pool_bytes: u64,
+    hop_cfg: String,
+) {
     let Some(img) = vslots::staged_image() else {
         println!("slots: role hop but no staged image, Hop not started HOPOS_HOP_FAIL");
         return;
@@ -493,8 +500,9 @@ async fn place_hop(exec: &'static Executor, plan: abi::layout::Plan, pool_bytes:
     };
     let node_ip = wait_uplink(exec).await;
     // De env van Hop komt uit hopos.cfg (config.rs); op QEMU is dat de
-    // vaste QEMU_CFG tot het board de echte tekst aanreikt.
-    let cfg = crate::config::NodeCfg::parse(crate::config::QEMU_CFG);
+    // vaste QEMU_CFG plus `hopos.s3.*` uit de bootargs, tot het board de
+    // echte tekst aanreikt.
+    let cfg = crate::config::NodeCfg::parse(&hop_cfg);
     let facts = crate::config::Facts {
         default_node: HOP_NODE,
         node_ip,

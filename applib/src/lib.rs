@@ -19,6 +19,8 @@
 //! - [`appnet`]: de netstack (`leannet`) over die ringen, met async TCP-
 //!   en UDP-handvatten en de system-client over een echte verbinding.
 //! - [`sys`]: de system-API-client over een [`sys::Conn`].
+//! - [`store`]: pull, push, list en drop tussen de eigen map in de
+//!   object-store en het eigen zicht, over die client.
 //! - [`smp`]: meer cores voor één app (`cores: N` in de jobspec): één
 //!   executor per core en [`smp::spawn_on`].
 //!
@@ -59,6 +61,7 @@ pub mod ring;
 pub mod rt;
 pub mod sleep;
 pub mod smp;
+pub mod store;
 pub mod sys;
 pub mod tail;
 #[cfg(feature = "http")]

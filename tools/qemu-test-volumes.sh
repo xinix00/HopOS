@@ -29,11 +29,8 @@
 # alpha.10), en de rode markers van qemu-test-hop.sh zijn meteen rood. Rood
 # bewaart de console (en drukt hem af).
 #
-# Hop moet de volumes kunnen meesturen: de feature `start-mounts` van
-# hopos-runner, op de ABI van HopOS alpha.11. Tot hop op die tag staat:
-# HOP_DIR naar een kopie van hop met in `.cargo/config.toml` een [patch]
-# van abi en applib naar deze werkboom en `default = ["start-mounts"]` in
-# hopos-runner/Cargo.toml.
+# Hop stuurt de volumes mee sinds hop op de ABI van HopOS alpha.11 staat
+# (hopos-runner, start_mounts.rs).
 #
 #   tools/qemu-test-volumes.sh             TIMEOUT=90 standaard, in seconden
 #   KEEP_LOG=pad tools/qemu-test-volumes.sh

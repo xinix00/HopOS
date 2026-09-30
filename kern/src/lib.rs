@@ -49,6 +49,7 @@ pub mod rpc;
 mod sha256;
 pub mod slots;
 pub mod stage2;
+pub mod store;
 pub mod system;
 pub mod watchdog;
 
@@ -81,6 +82,10 @@ const _: () = assert!(SLOT_CAP == abi::layout::SLOT_CAP);
 pub struct Slot(u8);
 
 impl Slot {
+    /// Het eerste slot: een geldige beginwaarde voor een vaste tabel.
+    // INVARIANT: 1 ligt in 1..=SLOT_CAP.
+    pub const FIRST: Slot = Slot(1);
+
     /// Het slot `i`, of `None` buiten `1..=SLOT_CAP`.
     #[must_use]
     pub const fn new(i: usize) -> Option<Slot> {

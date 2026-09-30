@@ -45,6 +45,9 @@
 #                                    (ijl) als hij ontbreekt. Een verse schijf
 #                                    is een lege hopfs; een bestaande houdt de
 #                                    volumes over een herstart (stateful).
+#   BOOTARGS="hopos.s3.bucket=hop" image/qemu-run.sh
+#                                    extra bootparameters, letterlijk achter
+#                                    de rest in -append
 #   WEBPORT=8081 image/qemu-run.sh   een vierde hostfwd: 127.0.0.1:$WEBPORT
 #   DNSPORT=15353 image/qemu-run.sh  een UDP-hostfwd naar :5353 (hopdns)
 #                                    naar poort 80 van de gast, de poort die
@@ -153,6 +156,9 @@ fi
 ARGS=""
 [ -n "${OSCORE:-}" ] && ARGS="hopos.oscore=$OSCORE"
 [ -n "${APPENV:-}" ] && ARGS="${ARGS:+$ARGS }hopos.appenv=$APPENV"
+# BOOTARGS: meer bootparameters, letterlijk (tools/qemu-test-store.sh geeft
+# er `hopos.s3.*` mee voor Hop).
+[ -n "${BOOTARGS:-}" ] && ARGS="${ARGS:+$ARGS }$BOOTARGS"
 if [ -n "$ARGS" ]; then
 	set -- -append "$ARGS" "$@"
 fi

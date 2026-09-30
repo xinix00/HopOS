@@ -459,6 +459,7 @@ pub struct Servicers {
     ctl: [ServicerCtl; SLOT_CAP + 1],
     table: LocalCell<[Option<u32>; SLOT_CAP + 1]>,
     mounts: LocalCell<[Option<Vec<Mount>>; SLOT_CAP + 1]>,
+    jobs: LocalCell<[Option<Vec<u8>>; SLOT_CAP + 1]>,
 }
 
 impl Servicers {
@@ -469,6 +470,26 @@ impl Servicers {
             ctl: [const { ServicerCtl::new() }; SLOT_CAP + 1],
             table: LocalCell::cell([None; SLOT_CAP + 1]),
             mounts: LocalCell::cell([const { None }; SLOT_CAP + 1]),
+            jobs: LocalCell::cell([const { None }; SLOT_CAP + 1]),
+        }
+    }
+
+    /// Doet `f` op de jobnaam van de levende bewoner van `slot` (leeg = geen
+    /// job): de naamruimte van de store-ops ([`crate::store`]), binnen één
+    /// lening. `None` zonder levende servicer.
+    pub fn with_job<R>(&self, slot: Slot, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
+        self.current(slot)?;
+        let t = self.jobs.borrow();
+        let job = t.get(slot.get())?.as_deref().unwrap_or(&[]);
+        Some(f(job))
+    }
+
+    /// Zet de jobnaam van `slot` (zoals de volumes: de lifecycle-actor
+    /// schrijft bij de registratie en wist bij de evict). `None` is geen
+    /// job, en dan weigert elke store-op.
+    pub(crate) fn set_job(&self, slot: Slot, job: Option<Vec<u8>>) {
+        if let Some(e) = self.jobs.borrow_mut().get_mut(slot.get()) {
+            *e = job;
         }
     }
 
@@ -1032,6 +1053,13 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             ));
         }
         self.svc.set_mounts(slot, mounts);
+        // Een geheugenweigering hier laat het slot zonder naamruimte: elke
+        // store-op wordt dan luid geweigerd, nooit in een verkeerde map.
+        let job = self
+            .resident(slot)
+            .filter(|r| !r.job.is_empty())
+            .and_then(|r| try_vec(&r.job).ok());
+        self.svc.set_job(slot, job);
         if let Some(ctl) = self.svc.ctl(slot) {
             let _ = ctl.stop.take();
             let _ = ctl.gone.take();
@@ -1114,6 +1142,7 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             return;
         }
         self.svc.set_mounts(slot, None);
+        self.svc.set_job(slot, None);
         if let Some(ctl) = self.svc.ctl(slot) {
             ctl.stop.set();
             ctl.gone.wait().await;
@@ -1858,6 +1887,22 @@ pub(crate) mod tests {
         mounts: Vec<Mount>,
     ) -> Result {
         let mut spec = StartSpec::new(s(slot), mib * MIB, ded(cores));
+        spec.mounts = mounts;
+        let g = block_on(a.claim(spec))?;
+        block_on(a.arm(g, 0x4001_0000))?;
+        a.svc.ctl(s(slot)).unwrap().gone.set();
+        Ok(())
+    }
+
+    /// Een start met een jobnaam en volumes, zoals Hop een jobspec start.
+    pub(crate) fn start_job(
+        a: &mut Actor<'_>,
+        slot: usize,
+        job: &[u8],
+        mounts: Vec<Mount>,
+    ) -> Result {
+        let mut spec = StartSpec::new(s(slot), 8 * MIB, ded(1));
+        spec.job = job.to_vec();
         spec.mounts = mounts;
         let g = block_on(a.claim(spec))?;
         block_on(a.arm(g, 0x4001_0000))?;

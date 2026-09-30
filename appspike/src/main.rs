@@ -35,6 +35,12 @@
 //!   stack (een reset, een EOF) is rood, er wordt nooit opnieuw verbonden.
 //!   Alleen deze toets draait dan: de rest bewijzen de andere rollen.
 //!
+//! - `STORE`: de object-store (Go: `store_demo.go`), met een S3 achter Hop
+//!   (`tools/qemu-test-store.sh`): een pull van iets dat er nooit was is een
+//!   nette fout, dan push, list ziet de naam, pull naar een ander (vuil,
+//!   langer) pad dat vervangen wordt, vergelijk, drop, en list is leeg
+//!   (`HOPOS_APPSPIKE_STORE`).
+//!
 //! En één toets naast de rollen: met `VOLUME=<pad>` in de env (een pad
 //! onder een volume van de jobspec, `"volumes":{"/volumes/demo":"/data"}`)
 //! bewijst `HOPOS_APPSPIKE_VOLUME` dat een volume een levensduur overleeft
@@ -121,6 +127,9 @@ async fn spike(app: &'static App) {
     files(client.as_mut(), &mut s).await;
     if let Some(path) = app.env("VOLUME") {
         volume(path, client.as_mut(), &mut s).await;
+    }
+    if app.env("ROLE") == Some("STORE") {
+        store(client.as_mut(), &mut s).await;
     }
     heap(app, &mut s);
 
@@ -771,6 +780,93 @@ async fn volume_round(
         Ok(size) => Err(Why::num("found a file of the wrong size", size)),
         Err(e) => Err(Why::sys("stat", e)),
     }
+}
+
+/// Wat de STORE-toets pusht.
+const STORE_DATA: &[u8] = b"leven 1: geboren om te pushen\n";
+
+/// De STORE-toets: de hele keten van app via kern en Hop naar de bucket en
+/// terug.
+async fn store(client: Option<&mut appnet::SystemClient>, s: &mut Score) {
+    let Some(c) = client else {
+        s.check("STORE", false, format_args!("no system connection"));
+        return;
+    };
+    let t0 = clock::now_ns();
+    let r = store_round(c).await;
+    let us = clock::now_ns().wrapping_sub(t0) / 1000;
+    match r {
+        Ok(n) => s.check(
+            "STORE",
+            true,
+            format_args!("push/list/pull/drop round-trip verified ({n} bytes) us={us}"),
+        ),
+        Err(why) => s.check("STORE", false, format_args!("{why} after {us} us")),
+    }
+}
+
+/// Eén ronde; geeft de maat van het object.
+async fn store_round(c: &mut appnet::SystemClient) -> Result<u64, Why> {
+    use applib::store;
+    // 1. Een verse map: een pull van iets dat er nooit was is een nette fout.
+    match store::pull(c, "never-pushed.json").await {
+        Err(sys::Error::NotFound { .. }) => {}
+        Ok(n) => return Err(Why::num("pull of a never-pushed object gave", n)),
+        Err(e) => return Err(Why::sys("pull of a never-pushed object", e)),
+    }
+    // 2. Schrijven en pushen: vanaf nu is het persistent.
+    c.write_file("state.json", STORE_DATA)
+        .await
+        .map_err(|e| Why::sys("write", e))?;
+    let n = store::push(c, "state.json")
+        .await
+        .map_err(|e| Why::sys("push", e))?;
+    if n != STORE_DATA.len() as u64 {
+        return Err(Why::num("push size", n));
+    }
+    // 3. List is relatief aan de eigen map.
+    let mut buf = [0u8; 256];
+    let mut names = store::list(c, "", &mut buf)
+        .await
+        .map_err(|e| Why::sys("list", e))?;
+    let (first, more) = (names.next() == Some("state.json"), names.count());
+    if !first || more != 0 {
+        return Err(Why::num(
+            "list is not [state.json], extra names",
+            more as u64,
+        ));
+    }
+    // 4. Pull naar een ander pad dat al vuil en langer is: de bucket wint,
+    //    en er blijft geen staart staan.
+    c.write_file(
+        "copy.json",
+        b"vervuild, en met opzet veel langer dan het origineel dat terugkomt",
+    )
+    .await
+    .map_err(|e| Why::sys("dirty write", e))?;
+    let got = store::pull_to(c, "state.json", "copy.json")
+        .await
+        .map_err(|e| Why::sys("pull", e))?;
+    let mut back = [0u8; 128];
+    let len = c
+        .read_into("copy.json", 0, &mut back)
+        .await
+        .map_err(|e| Why::sys("read back", e))?;
+    if got != n || back.get(..len) != Some(STORE_DATA) {
+        return Err(Why::num("after pull the copy has bytes", len as u64));
+    }
+    // 5. Drop, en de map is weer leeg.
+    store::drop(c, "state.json")
+        .await
+        .map_err(|e| Why::sys("drop", e))?;
+    let left = store::list(c, "", &mut buf)
+        .await
+        .map_err(|e| Why::sys("list after drop", e))?
+        .count();
+    if left != 0 {
+        return Err(Why::num("names left after drop", left as u64));
+    }
+    Ok(n)
 }
 
 /// De heap: de executor alloceerde de taken, dus er is iets in gebruik, het
