@@ -219,8 +219,10 @@ De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
       tot 625 / 727 tot 797); alleen transport kern naar app 300 MB/s; een
       4 KiB-read 1,1 ms. Eerst de switch-timer, dan opnieuw meten.
 - [ ] **NAT-tabel vol**: 512 flows per slot (`HOPOS_MASQ_SLOT_FULL`), dan
-      valt een SYN en kost 1 s; storm door de NAT 1400 conn/s tot de tabel
-      vol is. TIME_WAIT-hergebruik of een grotere tabel.
+      valt een SYN en kost 1 s. Oorzaak: een inbound RST liet de flow 300 s
+      staan zonder hem gesloten te tellen. Fix a102e51 (RST = gesloten in
+      beide richtingen, sluit-TTL en recycler pakken hem); nog te flippen
+      en de storm te herhalen.
 - [ ] **Idle**: app-core 1000 tot 3000 wekken/s (poll-ronde van de
       app-pomp), OS-core ~900/s (Go ~100, op de interrupt); een stilstaande
       tweecore-app houdt de Pi's op 1500 MHz ("busy slot 2, 544 permille
