@@ -10,6 +10,8 @@ description = "virtio-blk over virtio-mmio (QEMU virt) of virtio-pci (EDK2): Ã©Ã
 dev = { path = "../../dev" }
 driver-virtiopci = { path = "../virtiopci" }
 blkdev = { path = "../../blkdev" }
+# De bel van de IRQ-lijn (`Signal`), zoals virtio-net.
+sync = { path = "../../sync" }
 
 [lints]
 workspace = true

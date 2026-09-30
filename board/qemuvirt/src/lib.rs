@@ -50,7 +50,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use dev::Pa;
 use driver_gicv3::Gic;
 use driver_pl011::Pl011;
-use driver_virtioblk::VirtioBlk;
+use driver_virtioblk::{IrqAck as BlkAck, VirtioBlk};
 use driver_virtionet::{IrqAck, VirtioNet};
 use fw::fdt::Fdt;
 use sync::{Local, Signal};
@@ -154,6 +154,14 @@ static NIC_BELL: Signal = Signal::new();
 /// De NIC-lijn en zijn ack, gezet door `probe_nic`, gelezen door de
 /// dispatch-taak. Beide draaien op de executor van core 0.
 static NIC_IRQ: Local<Cell<Option<(u32, IrqAck)>>> = Local::new(Cell::new(None));
+
+/// De bel van de schijf: de dispatch luidt hem, de hopfs-actor wacht erop
+/// tijdens een blok-verzoek (`blkdev::InFlight::done`).
+static DISK_BELL: Signal = Signal::new();
+
+/// De schijflijn en zijn ack, gezet door `probe_disk`, scherp gezet door
+/// `start_interrupts` (de GIC is dan op) en gelezen door de dispatch-taak.
+static DISK_IRQ: Local<Cell<Option<(u32, BlkAck)>>> = Local::new(Cell::new(None));
 
 /// Het adres van een geldige DTB, 0 = geen.
 static DTB: AtomicU64 = AtomicU64::new(0);
@@ -278,7 +286,7 @@ impl QemuVirt {
         if DISK_CLAIMED.swap(true, Relaxed) {
             return Err(Error::Twice("probe_disk"));
         }
-        let Some((base, _intid)) = Self::find_virtio(|base| {
+        let Some((base, intid)) = Self::find_virtio(|base| {
             // SAFETY: `find_virtio` geeft alleen adressen in het
             // virtio-mmio-venster van virt, in de Device-gigabyte.
             unsafe { driver_virtioblk::is_modern_blk(base) }
@@ -287,12 +295,20 @@ impl QemuVirt {
         };
         // SAFETY: `base` is een virtio-mmio-slot van virt (Device-gemapt),
         // en BLK_DMA is van deze driver alleen: buiten de kern-RAM, Normal
-        // non-cacheable gemapt (`mmu`), en door niets anders uitgedeeld. De
-        // lijn blijft uit: de driver pollt (zijn doc zegt waarom).
-        let disk = unsafe { VirtioBlk::new(base, BLK_DMA.base, BLK_DMA.size, cpu::idle::now) }
+        // non-cacheable gemapt (`mmu`), en door niets anders uitgedeeld.
+        let mut disk = unsafe { VirtioBlk::new(base, BLK_DMA.base, BLK_DMA.size, cpu::idle::now) }
             .map_err(|_| Error::Disk("virtio-blk init failed"))?;
+        // De lijn (30-09): de hopfs-actor wacht op de bel in plaats van de
+        // OS-core vast te houden tot het device klaar is. Scherp in de GIC
+        // pas in `start_interrupts` (vóór de GIC-init is een SPI-route niet
+        // te schrijven); tot dan, en als dat mislukt, kijkt de wachter op
+        // de vangrail van 10 ms.
+        if intid != 0 {
+            DISK_IRQ.get().set(Some((intid, disk.irq_ack())));
+            disk.set_irq(&DISK_BELL);
+        }
         cpu::println!(
-            "disk: virtio-blk at {:#x}, {} sectors, flush {}",
+            "disk: virtio-blk at {:#x}, intid {intid}, {} sectors, flush {}",
             base.0,
             disk.sectors(),
             if disk.can_flush() { "yes" } else { "no" }
@@ -456,6 +472,14 @@ impl Board for QemuVirt {
             .map_err(|_| Error::Irq("hyp timer PPI refused"))?;
         GIC.enable(KICK_SGI, mpidr)
             .map_err(|_| Error::Irq("kick SGI refused"))?;
+        // De schijf (als `probe_disk` hem vond): een weigering is geen
+        // reden om zonder interrupts te draaien, de actor valt terug op de
+        // vangrail.
+        if let Some((id, _)) = DISK_IRQ.get().get()
+            && GIC.enable(id, mpidr).is_err()
+        {
+            cpu::println!("irq: disk INTID {id} refused, the disk waits on its 10 ms guard");
+        }
         cpu::println!("irq: {}", GIC.describe());
         // Vanaf hier mag de vector komen: hij zet de vlag, wekt de
         // dispatch-taak via `cpu::irq::on_irq` en keert gemaskeerd terug.
@@ -465,8 +489,20 @@ impl Board for QemuVirt {
 
     fn dispatch_interrupts(&self) -> Dispatched {
         let nic = NIC_IRQ.get().get();
+        let disk = DISK_IRQ.get().get();
         let mut d = Dispatched::default();
         while let Some(id) = GIC.claim() {
+            // De schijf: de device-kant ack, dan de bel van de actor. Geteld
+            // onder `other`, zodat de tik zijn vorm houdt.
+            if let Some((line, ack)) = disk
+                && id == line
+            {
+                ack.ack();
+                DISK_BELL.set();
+                d.other += 1;
+                GIC.eoi(id);
+                continue;
+            }
             match (id, nic) {
                 // De timer: uit tot de volgende slaap hem op de nieuwe
                 // deadline zet. Zo valt de lijn en wekt hij niet opnieuw.

@@ -8,6 +8,15 @@
 //! een servicer zijn extents kan vragen en zijn eigen I/O doet; de
 //! lees/schrijf-paden hieronder doen het nog zelf, zoals in Go.
 //!
+//! De I/O is een future ([`BlockIo`]): elk blok-verzoek is een submit plus
+//! een `.await` op de completion, en tijdens die await draait de executor
+//! door. Les van 30-09: [`Fs::commit`] (FLUSH, de boom, FLUSH) wachtte tot
+//! dan synchroon op het device, en op een trage schijf stond de hele
+//! OS-core met Hop en de switch tot 7 s stil. De eigenaar houdt zijn boom
+//! over de await (hij is de enige die hem aanraakt, en een tweede bericht
+//! wacht in zijn brievenbus); geen `RefCell` of tabel van een ander leeft
+//! eroverheen.
+//!
 //! Paden zijn al door de mount-resolutie heen: dit is de laatste grens, dus
 //! `..` is een fout.
 
@@ -35,9 +44,10 @@ const HDR_LEN: usize = HDR_HASH_OFF + 32;
 const MAX_DEPTH: usize = 4096;
 
 /// Het blokapparaat onder hopfs. Het contract woont in `blkdev`, onder
-/// driver én kern (handboek §7); hier alleen de naam, zodat `hopfs` leest
-/// als voorheen.
-pub use blkdev::BlockDevice;
+/// driver én kern (handboek §7); hier alleen de namen: [`BlockIo`] voor de
+/// actor, [`BlockDevice`] voor wie synchroon wil (de meetbank, via
+/// `blkdev::Blocking`).
+pub use blkdev::{BlockDevice, BlockIo};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct Extent {
@@ -135,7 +145,7 @@ fn split(path: &[u8]) -> Result<Vec<&[u8]>> {
     Ok(segs)
 }
 
-impl<D: BlockDevice> Fs<D> {
+impl<D: BlockIo> Fs<D> {
     /// Een vluchtige bestandslaag op het venster `[first_lba, +blocks)`.
     /// Blok 0 is `first_lba`: hopfs kan per constructie niet buiten zijn
     /// venster schrijven (de Mac mini: macOS op dezelfde SSD, 30-08).
@@ -337,7 +347,7 @@ impl<D: BlockDevice> Fs<D> {
     }
 
     /// Leest hooguit `buf.len()` bytes; gaten lezen als nul.
-    pub fn read_at(&mut self, path: &[u8], off: u64, buf: &mut [u8]) -> Result<usize> {
+    pub async fn read_at(&mut self, path: &[u8], off: u64, buf: &mut [u8]) -> Result<usize> {
         let n = self.walk(&split(path)?, false)?;
         let node = self.node(n)?;
         if node.dir {
@@ -367,9 +377,9 @@ impl<D: BlockDevice> Fs<D> {
                 let d = buf
                     .get_mut(d0..d0 + chunk as usize)
                     .ok_or(Error::Corrupt { at: d0 })?;
-                self.disk.read(lba, d)?;
+                self.disk.read(lba, d).await?;
             } else {
-                self.disk.read(lba, &mut tmp)?;
+                self.disk.read(lba, &mut tmp).await?;
                 let (d, s) = (
                     buf.get_mut(d0..d0 + chunk as usize),
                     tmp.get(bo as usize..(bo + chunk) as usize),
@@ -398,7 +408,7 @@ impl<D: BlockDevice> Fs<D> {
     /// Schrijft `data` op `off`. Eerdere geslaagde brokken blijven bij een
     /// I/O-fout; een verse mapping wordt pas NA de data gepubliceerd, zodat
     /// een oude eigenaar nooit zichtbaar wordt.
-    pub fn write_at(&mut self, path: &[u8], off: u64, data: &[u8]) -> Result {
+    pub async fn write_at(&mut self, path: &[u8], off: u64, data: &[u8]) -> Result {
         let end = off.checked_add(data.len() as u64).ok_or(Error::Range {
             base: off,
             size: data.len() as u64,
@@ -442,11 +452,11 @@ impl<D: BlockDevice> Fs<D> {
                 let src = data
                     .get(d0..d0 + chunk as usize)
                     .ok_or(Error::Corrupt { at: d0 })?;
-                self.disk.write(self.lba(block), src)
+                self.disk.write(self.lba(block), src).await
             } else {
                 tmp.fill(0);
                 if mapped {
-                    self.disk.read(self.lba(block), &mut tmp)?;
+                    self.disk.read(self.lba(block), &mut tmp).await?;
                 }
                 if let (Some(d), Some(s)) = (
                     tmp.get_mut(bo as usize..(bo + chunk) as usize),
@@ -454,7 +464,7 @@ impl<D: BlockDevice> Fs<D> {
                 ) {
                     d.copy_from_slice(s);
                 }
-                self.disk.write(self.lba(block), &tmp)
+                self.disk.write(self.lba(block), &tmp).await
             };
             if let Err(e) = res {
                 if !mapped {
@@ -484,7 +494,7 @@ impl<D: BlockDevice> Fs<D> {
 
     /// Groeit ijl; krimpen geeft runs terug en wist de bewaarde staart, zodat
     /// een latere groei geen weggegooide bytes laat zien.
-    pub fn truncate(&mut self, path: &[u8], size: u64) -> Result {
+    pub async fn truncate(&mut self, path: &[u8], size: u64) -> Result {
         if size > u64::from(self.max) * BS {
             return Err(Error::DiskFull {
                 blocks: u64::from(self.max),
@@ -498,11 +508,11 @@ impl<D: BlockDevice> Fs<D> {
                     self.node(n)?.lookup(u32::try_from(size / BS).unwrap_or(0));
                 if mapped {
                     let mut tmp = [0u8; BLOCK_SIZE];
-                    self.disk.read(self.lba(block), &mut tmp)?;
+                    self.disk.read(self.lba(block), &mut tmp).await?;
                     if let Some(t) = tmp.get_mut(tail as usize..) {
                         t.fill(0);
                     }
-                    self.disk.write(self.lba(block), &tmp)?;
+                    self.disk.write(self.lba(block), &tmp).await?;
                 }
             }
             let need = u32::try_from(size.div_ceil(BS)).unwrap_or(u32::MAX);
@@ -715,10 +725,10 @@ pub enum Mounted {
     },
 }
 
-impl<D: BlockDevice> Fs<D> {
+impl<D: BlockIo> Fs<D> {
     /// Een bestandslaag die zijn boom vastlegt. Het metagebied is twee
     /// plekken van `min(16384, blocks/64)` blokken aan het begin.
-    pub fn mount(
+    pub async fn mount(
         disk: D,
         first_lba: u64,
         blocks: u64,
@@ -736,13 +746,13 @@ impl<D: BlockDevice> Fs<D> {
         if fresh {
             let zero = [0u8; BLOCK_SIZE];
             for p in 0..2 {
-                f.disk.write(f.lba(p * slot), &zero)?;
+                f.disk.write(f.lba(p * slot), &zero).await?;
             }
             return Ok((f, Mounted::Fresh));
         }
         let mut best: Option<(u8, u64, Vec<u8>)> = None;
         for p in 0..2u8 {
-            if let Ok((generation, tree)) = f.read_slot(p)
+            if let Ok((generation, tree)) = f.read_slot(p).await
                 && best.as_ref().is_none_or(|b| generation > b.1)
             {
                 best = Some((p, generation, tree));
@@ -781,14 +791,14 @@ impl<D: BlockDevice> Fs<D> {
     /// Expliciete duurzame barrière: ook een ongewijzigde boom vraagt een
     /// device-flush. `commit` alleen mag op vluchtige opslag niets doen;
     /// deze API mag daar nooit een duurzame bevestiging voor teruggeven.
-    pub fn sync(&mut self) -> Result<u64> {
+    pub async fn sync(&mut self) -> Result<u64> {
         if !self.persist {
             return Err(Error::VolatileStorage);
         }
         if self.dirty || self.last.is_none() {
-            self.commit()?;
+            self.commit().await?;
         } else {
-            self.disk.flush()?;
+            self.disk.flush().await?;
         }
         Ok(self.generation)
     }
@@ -800,7 +810,7 @@ impl<D: BlockDevice> Fs<D> {
     ///
     /// De flip bevriest hopfs door dit te roepen en daarna geen verzoek meer
     /// aan te nemen: de eigenaar-taak IS het slot dat `Freeze` in Go was.
-    pub fn commit(&mut self) -> Result {
+    pub async fn commit(&mut self) -> Result {
         if !self.persist || (!self.dirty && self.last.is_some()) {
             return Ok(());
         }
@@ -812,15 +822,15 @@ impl<D: BlockDevice> Fs<D> {
                 max: room as usize,
             });
         }
-        self.disk.flush()?;
+        self.disk.flush().await?;
         let target = if self.last == Some(0) { 1u8 } else { 0 };
         let generation = self.generation + 1;
         let blob = self.blob(generation, &tree)?;
         let start = u32::from(target) * self.slot;
         let (head, body) = blob.split_at(BLOCK_SIZE);
-        self.write_blocks(start + 1, body)?;
-        self.write_blocks(start, head)?;
-        self.disk.flush()?;
+        self.write_blocks(start + 1, body).await?;
+        self.write_blocks(start, head).await?;
+        self.disk.flush().await?;
         (self.generation, self.last, self.dirty) = (generation, Some(target), false);
         for r in core::mem::take(&mut self.pending) {
             self.free_run(r.start, r.count)?;
@@ -828,11 +838,11 @@ impl<D: BlockDevice> Fs<D> {
         Ok(())
     }
 
-    fn write_blocks(&mut self, b: u32, p: &[u8]) -> Result {
+    async fn write_blocks(&mut self, b: u32, p: &[u8]) -> Result {
         let step = self.max_io_blocks as usize * BLOCK_SIZE;
         for (i, chunk) in p.chunks(step).enumerate() {
             let lba = self.lba(b + (i * step / BLOCK_SIZE) as u32);
-            self.disk.write(lba, chunk)?;
+            self.disk.write(lba, chunk).await?;
         }
         Ok(())
     }
@@ -877,10 +887,10 @@ impl<D: BlockDevice> Fs<D> {
         Ok(b)
     }
 
-    fn read_slot(&mut self, p: u8) -> Result<(u64, Vec<u8>)> {
+    async fn read_slot(&mut self, p: u8) -> Result<(u64, Vec<u8>)> {
         let mut hdr = [0u8; BLOCK_SIZE];
         let start = u32::from(p) * self.slot;
-        self.disk.read(self.lba(start), &mut hdr)?;
+        self.disk.read(self.lba(start), &mut hdr).await?;
         let u64_at = |o: usize| {
             hdr.get(o..o + 8)
                 .and_then(|s| <[u8; 8]>::try_from(s).ok())
@@ -905,7 +915,7 @@ impl<D: BlockDevice> Fs<D> {
         let step = self.max_io_blocks as usize * BLOCK_SIZE;
         for (i, chunk) in tree.chunks_mut(step).enumerate() {
             let lba = self.lba(start + 1 + (i * step / BLOCK_SIZE) as u32);
-            self.disk.read(lba, chunk)?;
+            self.disk.read(lba, chunk).await?;
         }
         tree.truncate(size as usize);
         let mut sum = Sha256::new();
@@ -1157,8 +1167,13 @@ mod tests {
         }
     }
 
-    impl BlockDevice for &mut RamDisk {
-        fn read(&mut self, lba: u64, buf: &mut [u8]) -> blkdev::Result {
+    /// Een future van hopfs afdraaien: de RAM-schijf is meteen klaar.
+    fn on<F: core::future::Future>(f: F) -> F::Output {
+        blkdev::block_on(f)
+    }
+
+    impl BlockIo for RamDisk {
+        async fn read(&mut self, lba: u64, buf: &mut [u8]) -> blkdev::Result {
             let off = (lba * self.block) as usize;
             let s = self
                 .data
@@ -1167,7 +1182,7 @@ mod tests {
             buf.copy_from_slice(s);
             Ok(())
         }
-        fn write(&mut self, lba: u64, buf: &[u8]) -> blkdev::Result {
+        async fn write(&mut self, lba: u64, buf: &[u8]) -> blkdev::Result {
             if self.fail {
                 return Err(blkdev::Error::Io { lba });
             }
@@ -1178,6 +1193,9 @@ mod tests {
                 .ok_or(blkdev::Error::Io { lba })?;
             d.copy_from_slice(buf);
             self.writes.push((lba, buf.len()));
+            Ok(())
+        }
+        async fn flush(&mut self) -> blkdev::Result {
             Ok(())
         }
     }
@@ -1196,7 +1214,7 @@ mod tests {
 
     fn must_read(f: &mut Fs<&mut RamDisk>, path: &[u8], want: &[u8]) {
         let mut got = vec![0u8; want.len()];
-        assert_eq!(f.read_at(path, 0, &mut got).unwrap(), want.len());
+        assert_eq!(on(f.read_at(path, 0, &mut got)).unwrap(), want.len());
         assert!(got == want, "content differs");
     }
 
@@ -1205,7 +1223,7 @@ mod tests {
         let mut d = RamDisk::new(512, 4 << 20);
         let mut f = vol(&mut d);
         let want = pattern(2 << 20, 7);
-        f.write_at(b"/data.bin", 0, &want).unwrap();
+        on(f.write_at(b"/data.bin", 0, &want)).unwrap();
         must_read(&mut f, b"/data.bin", &want);
         drop(f);
         assert_eq!(d.writes, vec![(0, 1 << 20), (2048, 1 << 20)]);
@@ -1216,7 +1234,7 @@ mod tests {
         let mut d = RamDisk::new(4096, 1 << 20);
         let mut f = vol(&mut d);
         for n in [&b"b"[..], b"a", b"c"] {
-            f.write_at(&[b"/d/", n].concat(), 0, b"x").unwrap();
+            on(f.write_at(&[b"/d/", n].concat(), 0, b"x")).unwrap();
         }
         f.mkdir_all(b"/d/sub").unwrap();
         let names = f.list_n(b"/d", 4).unwrap().unwrap();
@@ -1236,8 +1254,8 @@ mod tests {
     fn paths_reject_dot_dot_and_kinds() {
         let mut d = RamDisk::new(4096, 1 << 20);
         let mut f = vol(&mut d);
-        assert_eq!(f.write_at(b"/a/../b", 0, b"x"), Err(Error::BadPath));
-        f.write_at(b"/f", 0, b"x").unwrap();
+        assert_eq!(on(f.write_at(b"/a/../b", 0, b"x")), Err(Error::BadPath));
+        on(f.write_at(b"/f", 0, b"x")).unwrap();
         assert_eq!(f.mkdir_all(b"/f"), Err(Error::Kind));
         assert_eq!(f.stat(b"/nope"), Err(Error::NoEnt));
         f.mkdir_all(b"/d/e").unwrap();
@@ -1251,9 +1269,12 @@ mod tests {
     fn venster_verschuift_en_begrenst() {
         let mut d = RamDisk::new(4096, 64 << 12);
         let mut f = Fs::new(&mut d, 16, 8, 4096, 1 << 20).unwrap();
-        f.write_at(b"x", 0, &[1u8; 4096]).unwrap();
+        on(f.write_at(b"x", 0, &[1u8; 4096])).unwrap();
         let big = vec![1u8; 8 * 4096];
-        assert!(f.write_at(b"y", 0, &big).is_err(), "wrote beyond window");
+        assert!(
+            on(f.write_at(b"y", 0, &big)).is_err(),
+            "wrote beyond window"
+        );
         drop(f);
         assert_eq!(d.writes.first(), Some(&(16, 4096)));
     }
@@ -1262,24 +1283,24 @@ mod tests {
     fn leeg_venster_deelt_niets_uit() {
         let mut d = RamDisk::new(4096, 1 << 16);
         let mut f = Fs::new(&mut d, 4096, 0, 4096, 1 << 20).unwrap();
-        assert!(f.write_at(b"x", 0, b"a").is_err());
+        assert!(on(f.write_at(b"x", 0, b"a")).is_err());
     }
 
     #[test]
     fn truncate_and_recycled_write_failure_do_not_expose_old_data() {
         let mut d = RamDisk::new(4096, 1 << 20);
         let mut f = vol(&mut d);
-        f.write_at(b"f", 0, &[0xAA; 8192]).unwrap();
-        f.truncate(b"f", 100).unwrap();
-        f.truncate(b"f", 8192).unwrap();
+        on(f.write_at(b"f", 0, &[0xAA; 8192])).unwrap();
+        on(f.truncate(b"f", 100)).unwrap();
+        on(f.truncate(b"f", 8192)).unwrap();
         let mut got = [0u8; 8192];
-        f.read_at(b"f", 0, &mut got).unwrap();
+        on(f.read_at(b"f", 0, &mut got)).unwrap();
         assert!(
             got[100..].iter().all(|b| *b == 0),
             "discarded bytes reappeared"
         );
         f.disk.fail = true;
-        assert!(f.write_at(b"g", 0, &[1; 4096]).is_err());
+        assert!(on(f.write_at(b"g", 0, &[1; 4096])).is_err());
         f.disk.fail = false;
         assert_eq!(
             f.stat(b"g").unwrap().0,
@@ -1293,14 +1314,13 @@ mod tests {
         let mut d = RamDisk::new(4096, 2 << 20);
         let mut f = vol(&mut d);
         for i in 0..32u8 {
-            f.write_at(&[b'f', i], 0, &pattern(4096 * (1 + i as usize % 3), i))
-                .unwrap();
+            on(f.write_at(&[b'f', i], 0, &pattern(4096 * (1 + i as usize % 3), i))).unwrap();
         }
         for i in (0..32u8).step_by(2) {
             f.remove(&[b'f', i], false).unwrap();
         }
         let big = pattern(40 * 4096, 99);
-        f.write_at(b"big", 0, &big).unwrap();
+        on(f.write_at(b"big", 0, &big)).unwrap();
         must_read(&mut f, b"big", &big);
         for i in (1..32u8).step_by(2) {
             must_read(&mut f, &[b'f', i], &pattern(4096 * (1 + i as usize % 3), i));
@@ -1311,21 +1331,21 @@ mod tests {
     fn hole_fill_merges_both_neighbors() {
         let mut d = RamDisk::new(4096, 1 << 20);
         let mut f = vol(&mut d);
-        f.write_at(b"h", 0, &[1; 4096]).unwrap();
-        f.write_at(b"h", 2 * 4096, &[3; 4096]).unwrap();
-        f.write_at(b"h", 4096, &[2; 4096]).unwrap();
+        on(f.write_at(b"h", 0, &[1; 4096])).unwrap();
+        on(f.write_at(b"h", 2 * 4096, &[3; 4096])).unwrap();
+        on(f.write_at(b"h", 4096, &[2; 4096])).unwrap();
         let n = f.walk(&split(b"h").unwrap(), false).unwrap();
         // Bump-allocatie: fysiek 0, 1, 2 voor logisch 0, 2, 1: geen buren.
         assert_eq!(f.node(n).unwrap().extents.len(), 3);
         assert_eq!(f.index, 3);
         // Aansluitend schrijven smelt samen tot één extent.
-        f.write_at(b"m", 0, &[4; 4096]).unwrap();
-        f.write_at(b"m", 4096, &[5; 4096]).unwrap();
+        on(f.write_at(b"m", 0, &[4; 4096])).unwrap();
+        on(f.write_at(b"m", 4096, &[5; 4096])).unwrap();
         let m = f.walk(&split(b"m").unwrap(), false).unwrap();
         assert_eq!(f.node(m).unwrap().extents.len(), 1);
         assert_eq!(f.index, 4);
         let mut got = [0u8; 3 * 4096];
-        f.read_at(b"h", 0, &mut got).unwrap();
+        on(f.read_at(b"h", 0, &mut got)).unwrap();
         assert!(got[..4096].iter().all(|b| *b == 1) && got[8192..].iter().all(|b| *b == 3));
     }
 
@@ -1335,7 +1355,7 @@ mod tests {
 
     fn mount(d: &mut RamDisk, fresh: bool) -> (Fs<&mut RamDisk>, Mounted) {
         let blocks = d.data.len() as u64 / 512;
-        Fs::mount(d, 0, blocks, 512, 128 << 10, fresh).unwrap()
+        on(Fs::mount(d, 0, blocks, 512, 128 << 10, fresh)).unwrap()
     }
 
     #[test]
@@ -1346,11 +1366,11 @@ mod tests {
         let (nodes, index) = {
             let (mut f, m) = mount(&mut d, false);
             assert_eq!(m, Mounted::Empty);
-            f.write_at(b"media/Films/A/a.mkv", 0, &film).unwrap();
-            f.write_at(b"media/Films/A/a.srt", 0, &sub).unwrap();
+            on(f.write_at(b"media/Films/A/a.mkv", 0, &film)).unwrap();
+            on(f.write_at(b"media/Films/A/a.srt", 0, &sub)).unwrap();
             f.mkdir_all(b"media/Backups").unwrap();
-            f.truncate(b"media/sparse", 10 << 20).unwrap();
-            f.commit().unwrap();
+            on(f.truncate(b"media/sparse", 10 << 20)).unwrap();
+            on(f.commit()).unwrap();
             (f.count, f.index)
         };
         let (mut g, m) = mount(&mut d, false);
@@ -1366,8 +1386,7 @@ mod tests {
         assert_eq!(g.stat(b"media/Backups").unwrap(), (0, true));
         assert_eq!(g.stat(b"media/sparse").unwrap().0, 10 << 20);
         assert_eq!((g.count, g.index), (nodes, index));
-        g.write_at(b"media/new.bin", 0, &pattern(2 << 20, 5))
-            .unwrap();
+        on(g.write_at(b"media/new.bin", 0, &pattern(2 << 20, 5))).unwrap();
         must_read(&mut g, b"media/Films/A/a.mkv", &film);
     }
 
@@ -1377,10 +1396,10 @@ mod tests {
         let one = pattern(8192, 1);
         let slot = {
             let (mut f, _) = mount(&mut d, false);
-            f.write_at(b"one", 0, &one).unwrap();
-            f.commit().unwrap();
-            f.write_at(b"two", 0, &pattern(8192, 2)).unwrap();
-            f.commit().unwrap();
+            on(f.write_at(b"one", 0, &one)).unwrap();
+            on(f.commit()).unwrap();
+            on(f.write_at(b"two", 0, &pattern(8192, 2))).unwrap();
+            on(f.commit()).unwrap();
             assert_eq!((f.last, f.generation), (Some(1), 2));
             f.slot
         };
@@ -1395,8 +1414,8 @@ mod tests {
         );
         must_read(&mut g, b"one", &one);
         assert_eq!(g.stat(b"two"), Err(Error::NoEnt));
-        g.write_at(b"three", 0, &pattern(100, 3)).unwrap();
-        g.commit().unwrap();
+        on(g.write_at(b"three", 0, &pattern(100, 3))).unwrap();
+        on(g.commit()).unwrap();
         assert_eq!((g.last, g.generation), (Some(1), 2));
     }
 
@@ -1405,12 +1424,12 @@ mod tests {
         let mut d = persist_disk();
         let old = pattern(1 << 20, 4);
         let (mut f, _) = mount(&mut d, false);
-        f.write_at(b"old", 0, &old).unwrap();
-        f.commit().unwrap();
+        on(f.write_at(b"old", 0, &old)).unwrap();
+        on(f.commit()).unwrap();
         let n = f.walk(&split(b"old").unwrap(), false).unwrap();
         let run = f.node(n).unwrap().extents[0];
         f.remove(b"old", false).unwrap();
-        f.write_at(b"new", 0, &pattern(4 << 20, 6)).unwrap();
+        on(f.write_at(b"new", 0, &pattern(4 << 20, 6))).unwrap();
         let n = f.walk(&split(b"new").unwrap(), false).unwrap();
         for e in &f.node(n).unwrap().extents {
             assert!(
@@ -1418,7 +1437,7 @@ mod tests {
                 "new reused old's blocks before a commit"
             );
         }
-        f.commit().unwrap();
+        on(f.commit()).unwrap();
         assert!(f.pending.is_empty());
         assert!(
             f.free
@@ -1433,10 +1452,10 @@ mod tests {
         let old = pattern(1 << 20, 4);
         {
             let (mut f, _) = mount(&mut d, false);
-            f.write_at(b"old", 0, &old).unwrap();
-            f.commit().unwrap();
+            on(f.write_at(b"old", 0, &old)).unwrap();
+            on(f.commit()).unwrap();
             f.remove(b"old", false).unwrap();
-            f.write_at(b"new", 0, &pattern(4 << 20, 6)).unwrap();
+            on(f.write_at(b"new", 0, &pattern(4 << 20, 6))).unwrap();
         } // Stroom weg vóór de commit.
         let (mut g, _) = mount(&mut d, false);
         must_read(&mut g, b"old", &old);
@@ -1447,11 +1466,11 @@ mod tests {
         let mut d = persist_disk();
         {
             let (mut f, _) = mount(&mut d, false);
-            f.write_at(b"x", 0, &pattern(4096, 1)).unwrap();
-            f.commit().unwrap();
+            on(f.write_at(b"x", 0, &pattern(4096, 1))).unwrap();
+            on(f.commit()).unwrap();
         }
         let blocks = d.data.len() as u64 / 512 / 2;
-        let (g, m) = Fs::mount(&mut d, 0, blocks, 512, 128 << 10, false).unwrap();
+        let (g, m) = on(Fs::mount(&mut d, 0, blocks, 512, 128 << 10, false)).unwrap();
         assert_eq!((m, g.count), (Mounted::Empty, 0));
     }
 
@@ -1460,10 +1479,10 @@ mod tests {
         let mut d = persist_disk();
         {
             let (mut f, _) = mount(&mut d, false);
-            f.write_at(b"x", 0, &pattern(4096, 1)).unwrap();
-            f.commit().unwrap();
-            f.write_at(b"y", 0, &pattern(4096, 2)).unwrap();
-            f.commit().unwrap();
+            on(f.write_at(b"x", 0, &pattern(4096, 1))).unwrap();
+            on(f.commit()).unwrap();
+            on(f.write_at(b"y", 0, &pattern(4096, 2))).unwrap();
+            on(f.commit()).unwrap();
         }
         assert_eq!(mount(&mut d, true).1, Mounted::Fresh);
         let (g, m) = mount(&mut d, false);
@@ -1475,14 +1494,14 @@ mod tests {
         let mut d = persist_disk();
         {
             let (mut f, _) = mount(&mut d, false);
-            f.write_at(b"a", 0, &pattern(4096, 1)).unwrap();
-            f.write_at(b"b", 0, &pattern(4096, 2)).unwrap();
+            on(f.write_at(b"a", 0, &pattern(4096, 1))).unwrap();
+            on(f.write_at(b"b", 0, &pattern(4096, 2))).unwrap();
             let a = f.walk(&split(b"a").unwrap(), false).unwrap();
             let b = f.walk(&split(b"b").unwrap(), false).unwrap();
             let p = f.node(a).unwrap().extents[0].physical;
             f.node_mut(b).unwrap().extents[0].physical = p;
             f.dirty = true;
-            f.commit().unwrap();
+            on(f.commit()).unwrap();
         }
         let (g, m) = mount(&mut d, false);
         assert!(matches!(m, Mounted::Inconsistent { generation: 1, .. }));

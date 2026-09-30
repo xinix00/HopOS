@@ -562,6 +562,10 @@ pub struct Ans<C: Coprocessor> {
     /// Eerste en laatste bruikbare blok uit de GPT-header.
     usable: (u64, u64),
     window: Option<Window>,
+    /// De uitkomst van de laatste asynchrone opdracht en, bij een lees,
+    /// hoeveel bytes er in de databuffer klaarstaan (zie de impl van
+    /// `blkdev::AsyncBlockDevice`).
+    staged: Option<(blkdev::Result, usize)>,
     /// Meetlat: afgehandelde opdrachten.
     pub commands: u64,
     /// Meetlat: de langste opdracht in nanoseconden.
@@ -607,6 +611,7 @@ impl<C: Coprocessor> Ans<C> {
             max_transfer: MAX_TRANSFER,
             usable: (0, 0),
             window: None,
+            staged: None,
             commands: 0,
             slowest_ns: 0,
         })
@@ -1257,6 +1262,60 @@ impl<C: Coprocessor> blkdev::BlockDevice for Ans<C> {
 
     fn flush(&mut self) -> blkdev::Result {
         self.flush().map_err(|e| blk_err(&e, 0, 0))
+    }
+}
+
+/// De asynchrone vorm over het venster, met dezelfde LBA's als hierboven.
+///
+/// Nog niet echt asynchroon: [`start`](blkdev::AsyncBlockDevice::start)
+/// doet de hele opdracht (tot en met de completion) en zet alleen het
+/// kopiëren naar de aanroeper uit tot `poll_done`. De ANS vraagt tijdens het
+/// wachten om de mailbox van zijn coprocessor (`service`); die splitsen
+/// hoort bij de eerste boot op ijzer, niet bij een blinde port (30-09: de
+/// M4 is nog nooit gestart).
+impl<C: Coprocessor> blkdev::AsyncBlockDevice for Ans<C> {
+    fn max_transfer(&self) -> usize {
+        self.step()
+    }
+
+    fn start(&mut self, op: blkdev::Op<'_>) -> blkdev::Result {
+        if self.staged.is_some() {
+            return Err(blkdev::Error::Busy);
+        }
+        let staged = match op {
+            blkdev::Op::Read { lba, len } => {
+                let b = self.contract_block(lba, len)?;
+                let r = self
+                    .ready()
+                    .and_then(|()| self.transfer(IO_READ, b, len))
+                    .map_err(|e| blk_err(&e, lba, len));
+                (r, len)
+            }
+            blkdev::Op::Write { lba, data } => {
+                let b = self.contract_block(lba, data.len())?;
+                let r = self
+                    .write_at(b, data)
+                    .map_err(|e| blk_err(&e, lba, data.len()));
+                (r, 0)
+            }
+            blkdev::Op::Flush => (self.flush().map_err(|e| blk_err(&e, 0, 0)), 0),
+        };
+        self.staged = Some(staged);
+        Ok(())
+    }
+
+    fn poll_done(&mut self, into: &mut [u8]) -> core::task::Poll<blkdev::Result> {
+        let Some((r, read)) = self.staged.take() else {
+            return core::task::Poll::Ready(Err(blkdev::Error::Io { lba: 0 }));
+        };
+        if r.is_ok() && read > 0 {
+            let n = read.min(into.len());
+            dev::pull(self.data(), n);
+            if let Some(d) = into.get_mut(..n) {
+                dev::copy_out(d, self.data());
+            }
+        }
+        core::task::Poll::Ready(r)
     }
 }
 

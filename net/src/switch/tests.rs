@@ -31,6 +31,12 @@ fn fake_now() -> u64 {
     })
 }
 
+/// Slot 7 woont in deze tests op de OS-core (zoals Hop in slot 1 op de
+/// node): zijn consument kan niet lezen zolang de switch draait.
+fn slot_seven_is_resident(i: usize) -> bool {
+    i == 7
+}
+
 fn record_wake(i: usize) {
     WAKES.with(|w| w.borrow_mut().push(i));
 }
@@ -73,6 +79,7 @@ fn harness() -> H {
             clock: fake_now,
             log: no_log,
             slot_wake: record_wake,
+            resident: slot_seven_is_resident,
         },
         Wiring {
             commands,
@@ -479,6 +486,29 @@ fn rx_wacht_kort_op_lokale_consumer() {
     assert_eq!(app.rx.frame().map(|f| f.len()), Some(1000));
     assert_eq!(h.stats.rx_full.load(Relaxed), 1);
     assert_eq!(h.stats.rx_drops.load(Relaxed), 0);
+}
+
+/// Een bewoner van de OS-core wacht niet: de switch zou spinnen op een
+/// ring die pas leegloopt als hij zelf afgeeft (30-09). Droppen en tellen,
+/// meteen, zonder één kloklezing van de vangrail af te wachten.
+#[test]
+fn rx_wacht_niet_op_een_bewoner_van_de_os_core() {
+    let mut h = harness();
+    let mut app = h.attach(7);
+    app.rx.0.borrow_mut().refuse = 3;
+    TICK.with(|t| t.set(1_000_000_000)); // één lezing = één seconde
+    let t0 = NOW.with(Cell::get);
+    h.sw.core.write_rx(7, KIND_FRAME, &[0u8; 64]);
+    let spent = NOW.with(Cell::get) - t0;
+    TICK.with(|t| t.set(0));
+    assert!(spent <= 1_000_000_000, "de switch wachtte {spent} ns");
+    assert_eq!(h.stats.rx_full.load(Relaxed), 1);
+    assert_eq!(h.stats.rx_drops.load(Relaxed), 1);
+    assert_eq!(wakes(7), 1, "de bewoner krijgt wel zijn kick");
+    // Zodra er ruimte is, gaat het volgende frame er gewoon in.
+    app.rx.0.borrow_mut().refuse = 0;
+    h.sw.core.write_rx(7, KIND_FRAME, &[1u8; 64]);
+    assert_eq!(app.rx.frame().map(|f| f.len()), Some(64));
 }
 
 /// En een consument die niet leest, laat de switch na de vangrail los; tot

@@ -110,6 +110,7 @@ use cage::{ArmCage as SlotCage, ArmCores as SlotCores};
 use cage::{DevMem, ExecTimer, KernConsole, SlotOutbox};
 #[cfg(target_arch = "riscv64")]
 use cage::{RvCage as SlotCage, RvCores as SlotCores};
+use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use core::time::Duration;
 use cpu::el2::{self, CoreState};
 use cpu::println;
@@ -307,19 +308,24 @@ pub(crate) fn start(
     let hop_core = adopt
         .as_ref()
         .and_then(|v| v.iter().find(|st| st.slot == HOP_SLOT).map(|st| st.core));
+    // De actor buiten de future gebouwd (30-09): binnen `async move` stond
+    // de verse `Lifecycle` als tijdelijke waarde in het frame van de
+    // poll-functie, en dat frame (57 KB) reserveerde elke poll van de
+    // lifecycle opnieuw, bovenop de rest van de stack. Nu gaat hij als
+    // waarde de future in (de heap van de taak).
+    let mut lc = Lifecycle::new(
+        cage,
+        cores,
+        ExecTimer(exec),
+        KernConsole,
+        parts,
+        os_pool(),
+        SERVICERS,
+        // De device-grants (gui.rs): de framebuffer in de gui-smaak,
+        // kaal niets.
+        crate::gui::slot_grants(),
+    );
     let actor = async move {
-        let mut lc = Lifecycle::new(
-            cage,
-            cores,
-            ExecTimer(exec),
-            KernConsole,
-            parts,
-            os_pool(),
-            SERVICERS,
-            // De device-grants (gui.rs): de framebuffer in de gui-smaak,
-            // kaal niets.
-            crate::gui::slot_grants(),
-        );
         // FLIP: eerst alle eigendomsclaims terug, dan pas verzoeken.
         if let Some(states) = &adopt {
             match lc.adopt(states) {
@@ -370,6 +376,29 @@ pub(crate) fn start(
     };
     if let Err(e) = spawned {
         println!("slots: first placement not spawned: {e:?} HOPOS_SLOT_SPAWN");
+    }
+}
+
+/// De slots waarvan de bewoner de OS-core deelt, één bit per slot: de
+/// switch wacht niet op hun RX-ring ([`resident`]). Eén schrijver (de
+/// plaatsing van Hop), gelezen door de switch op dezelfde core.
+static OS_RESIDENTS: AtomicU64 = AtomicU64::new(0);
+
+/// Deelt de bewoner van `slot` de OS-core (Hop in slot 1)? De
+/// `resident` van de switch: zijn consument draait pas als de executor
+/// afgeeft, dus wachten op ruimte in zijn ring is stilstand (30-09).
+pub(crate) fn resident(slot: usize) -> bool {
+    slot < 64 && OS_RESIDENTS.load(Relaxed) & (1 << slot) != 0
+}
+
+/// Zet of wist `slot` als bewoner van de OS-core.
+fn set_resident(slot: usize, on: bool) {
+    if slot < 64 {
+        if on {
+            OS_RESIDENTS.fetch_or(1 << slot, Relaxed);
+        } else {
+            OS_RESIDENTS.fetch_and(!(1 << slot), Relaxed);
+        }
     }
 }
 
@@ -533,6 +562,9 @@ async fn place_hop(
             return;
         }
     };
+    // Vóór de plaatsing: zodra de poort aan de switch hangt, mag hij niet
+    // meer op Hop's ring wachten. Na de plaatsing volgt de echte core.
+    set_resident(slot.get(), arch::SHARES_OS_CORE);
     let entry = match place(slot, img, HOP_MEM, at, env.as_bytes(), volume).await {
         Ok(e) => e,
         Err(e) => {
@@ -542,6 +574,7 @@ async fn place_hop(
     };
     let st = status(slot).await;
     let core = st.and_then(|s| s.core).map_or(0, |(c, _)| c.get());
+    set_resident(slot.get(), core == 0);
     let part = st.and_then(|s| s.partition).unwrap_or_default();
     let cpu = abi::layout::Core::new(core).map_or(core, |c| plan.phys_core(c));
     println!(
@@ -569,6 +602,7 @@ async fn resume_hop(exec: &'static Executor, plan: abi::layout::Plan, core: usiz
     let Some(slot) = Slot::new(HOP_SLOT) else {
         return;
     };
+    set_resident(slot.get(), core == 0);
     let _ = wait_uplink(exec).await;
     for port in [HOP_PORT, HOP_PORT.saturating_add(1000)] {
         match crate::net::publish(slot.get(), port).await {

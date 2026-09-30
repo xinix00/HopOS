@@ -17,7 +17,30 @@
 //! - `__boot_ttbr0`: de niveau-1-tabel van de identity map (4 KB-korrel,
 //!   39-bit VA). Het board levert hem (`global_asm!`), want welk bereik
 //!   Device en welk Normal is, is board-kennis;
+//! - `__stack_guard`: de pagina direct onder de boot-stack (4 KB-gealigneerd,
+//!   de stack begint erboven). De stub maakt hem ongeldig in de map (zie
+//!   de wachtpagina hieronder);
 //! - `kmain`: `extern "C" fn(dtb: u64, el: u64) -> !`.
+//!
+//! # De wachtpagina
+//!
+//! Les van 30-09: de stack (256 KB, direct boven `.bss`) had geen
+//! wachtpagina, en een plaatsing piekte op 186 KB (het boot-frame van
+//! 125 KB bleef onder de executor staan). Een overloop schreef stil in het
+//! einde van `.bss`: de switch-tabel, de deuren van de system-API. Nu maakt
+//! de stub, met de MMU nog uit (dus zonder break-before-make: er is nog geen
+//! TLB die het oude blok kent), van het 2 MB-blok onder `__stack_guard` een
+//! niveau-3-tabel (`__guard_l3`, in de BSS) met dezelfde attributen, en zet
+//! de ene pagina van `__stack_guard` op ongeldig. Een overloop is dan een
+//! luide data-abort (`HOPOS_EXCEPTION`, ESR 0x96000007: translation fault
+//! op niveau 3, gemeten 30-09 op QEMU virt met een lees op de pagina) in
+//! plaats van corruptie. Een board waarvan de kern-RAM niet via een
+//! niveau-2-blok gemapt is, houdt zijn map zoals hij is (de stub slaat de
+//! splitsing dan over). Een board met een eigen map doet hetzelfde met
+//! [`guard_page`] (de Mac mini). De UEFI-boards nog niet: een geflipte kern
+//! erft daar de map van de koude boot (`board/uefi/src/flip.rs`), dus de
+//! wachtpagina van kern A zou midden in kern B kunnen vallen; dat vraagt
+//! eerst een vrijgave vóór de sprong.
 //!
 //! De MMU-attributen staan hier vast, zodat elk board dezelfde indexen
 //! gebruikt: [`ATTR_DEVICE`], [`ATTR_NORMAL`], [`ATTR_NORMAL_NC`].
@@ -51,6 +74,37 @@ pub const fn block(pa: u64, attr: u64) -> u64 {
         d |= XN;
     }
     d
+}
+
+/// Maakt de 4 KB-pagina van `guard` ongeldig in een map die de MMU nog niet
+/// gebruikt: de Rust-vorm van de wachtpagina van de stub (zie de moduledoc),
+/// voor een board dat zijn map zelf bouwt (de Mac mini). Staat er in
+/// `l2_entry` een blok van 2 MB dat `guard` dekt, dan wordt het een
+/// niveau-3-tabel in `l3` met dezelfde attributen, op die ene pagina na.
+/// Anders verandert er niets en is het antwoord `false`.
+///
+/// # Safety
+///
+/// De map is van geen enkele MMU in gebruik (dus geen break-before-make
+/// nodig), `l2_entry` is een niveau-2-ingang van die map, en `l3` is een
+/// 4 KB-gealigneerde pagina die van niemand anders is.
+pub unsafe fn guard_page(l2_entry: dev::Pa, l3: dev::Pa, guard: u64) -> bool {
+    const BLOCK_ADDR: u64 = 0x0000_ffff_ffe0_0000;
+    const PAGE: u64 = 4096;
+    let e = dev::read64(l2_entry);
+    let base = e & BLOCK_ADDR;
+    if e & 0b11 != 0b01 || guard & BLOCK_ADDR != base {
+        return false;
+    }
+    let attrs = e & !BLOCK_ADDR & !0b11;
+    let hole = guard & !(PAGE - 1);
+    for i in 0..512u64 {
+        let pa = base + i * PAGE;
+        let d = if pa == hole { 0 } else { pa | attrs | 0b11 };
+        dev::write64(l3.add(i * 8), d);
+    }
+    dev::write64(l2_entry, l3.0 | 0b11);
+    true
 }
 
 /// Het merkteken van een kern-flip in x3 bij de ingang ("HOPFLIPE"
@@ -170,8 +224,44 @@ _start:
     ldr x1, =((1 << 31) | (1 << 23) | (3 << 12) | (1 << 10) | (1 << 8) | 25)
     orr x1, x1, x2, lsl #16
     msr tcr_el2, x1
+    // De wachtpagina (zie de moduledoc), met de MMU uit. x1 = L1, x2 = de
+    // wachtpagina, x6 = de L2-ingang, x7 = de blokbasis, x8 = de
+    // attributen als paginadescriptor, x9 = de L3-tabel.
     adrp x1, __boot_ttbr0
     add x1, x1, :lo12:__boot_ttbr0
+    adrp x2, __stack_guard
+    add x2, x2, :lo12:__stack_guard
+    ubfx x3, x2, #30, #9
+    ldr x4, [x1, x3, lsl #3]
+    and x5, x4, #3
+    cmp x5, #3
+    b.ne 5f
+    and x4, x4, #0x0000fffffffff000
+    ubfx x3, x2, #21, #9
+    add x6, x4, x3, lsl #3
+    ldr x5, [x6]
+    and x7, x5, #3
+    cmp x7, #1
+    b.ne 5f
+    and x7, x5, #0x0000ffffffe00000
+    and x8, x5, #0xffff0000001fffff
+    and x8, x8, #0xfffffffffffffffc
+    orr x8, x8, #3
+    adrp x9, __guard_l3
+    add x9, x9, :lo12:__guard_l3
+    mov x10, #0
+4:  add x11, x7, x10, lsl #12
+    orr x11, x11, x8
+    str x11, [x9, x10, lsl #3]
+    add x10, x10, #1
+    cmp x10, #512
+    b.lo 4b
+    ubfx x3, x2, #12, #9
+    str xzr, [x9, x3, lsl #3]
+    orr x9, x9, #3
+    str x9, [x6]
+    dsb sy
+5:
     msr ttbr0_el2, x1
     dsb ish
     isb
@@ -193,6 +283,19 @@ _start:
 "#,
     mair = const MAIR,
     flip = const FLIP_ENTRY,
+);
+
+// De niveau-3-tabel van de wachtpagina: 4 KB in de BSS, gevuld door de stub
+// na het wissen van de BSS (zie de moduledoc).
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+core::arch::global_asm!(
+    r#"
+    .section .bss.hopos_guard_l3, "aw", %nobits
+    .balign 4096
+    .global __guard_l3
+__guard_l3:
+    .skip 4096
+"#
 );
 
 #[cfg(test)]
@@ -224,6 +327,31 @@ mod tests {
         // De bovenste bits van MPIDR (U, MT, RES1) tellen niet mee.
         assert!(admits(0x8000_0000, 0));
         assert_eq!(&FLIP_ENTRY.to_le_bytes(), b"HOPFLIPE");
+    }
+
+    #[test]
+    fn a_guard_page_splits_its_block_and_leaves_the_rest() {
+        let mut mem = vec![0u64; 1024 + 512];
+        let base = mem.as_mut_ptr() as u64;
+        let l3 = dev::Pa(base.next_multiple_of(4096));
+        let entry = dev::Pa(l3.0 + 4096);
+        let blk = block(0x4020_0000, ATTR_NORMAL);
+        dev::write64(entry, blk);
+        let guard = 0x4032_1000;
+        // SAFETY: `mem` is van de test en geen MMU kijkt ernaar.
+        assert!(unsafe { guard_page(entry, l3, guard) });
+        assert_eq!(dev::read64(entry), l3.0 | 0b11, "het blok is een tabel");
+        let at = |i: u64| dev::read64(l3.add(i * 8));
+        assert_eq!(at(0x121), 0, "de wachtpagina is ongeldig");
+        assert_eq!(at(0), 0x4020_0000 | (blk & 0xffc) | 0b11);
+        assert_eq!(at(0x122), 0x4032_2000 | (blk & 0xffc) | 0b11);
+        // Een ingang die geen blok is, of een blok elders: niets.
+        // SAFETY: zie hierboven.
+        assert!(!unsafe { guard_page(entry, l3, guard) });
+        dev::write64(entry, blk);
+        // SAFETY: zie hierboven.
+        assert!(!unsafe { guard_page(entry, l3, 0x4060_0000) });
+        assert_eq!(dev::read64(entry), blk);
     }
 
     #[test]

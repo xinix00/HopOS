@@ -1,8 +1,9 @@
 //! virtio-blk over virtio-mmio of virtio-pci: het blokapparaat onder hopfs.
 //!
 //! De vorm is die van de NVMe-driver uit de Go-kern
-//! (`OLD/metal/driver/nvme`): één verzoek tegelijk, één DMA-buffer, en een
-//! synchrone `read`/`write`/`flush` achter [`blkdev::BlockDevice`].
+//! (`OLD/metal/driver/nvme`): één verzoek tegelijk, één DMA-buffer, achter
+//! [`blkdev::AsyncBlockDevice`] (submit plus completion, de hopfs-actor)
+//! en [`blkdev::BlockDevice`] (synchroon, de meetbank vóór de executor).
 //! Eén in-flight verzoek is geen beperking maar de vorm: de eigenaar
 //! (de hopfs-actor, `&mut self`) doet toch één ding tegelijk, en zo hoeft
 //! de driver geen tags, geen rij en geen herordening te kennen.
@@ -18,13 +19,16 @@
 //! data (het device leest of schrijft) en de statusbyte (het device
 //! schrijft).
 //!
-//! De driver pollt de used-ring: de BlockDevice-grens is synchroon, en een
-//! verzoek op QEMU is klaar binnen de milliseconde (de IRQ-lijn komt met de
-//! splitsing in PORT.md §3, als de I/O uit de metadata-actor gaat). Een
-//! verzoek dat na [`REQUEST_TIMEOUT_NS`] niet klaar is, maakt de driver
-//! dood: het device kan nog in de buffer schrijven, dus een volgend verzoek
-//! zou andermans bytes zien. Dood is luid en blijvend (elke volgende call
-//! faalt), nooit stil.
+//! Wachten: de synchrone vorm pollt de used-ring; de asynchrone vorm geeft
+//! na de doorbell de executor terug en kijkt weer bij de bel van de
+//! IRQ-lijn ([`VirtioBlk::set_irq`], het board bedraadt hem) of, zonder
+//! lijn, pollend (`blkdev::InFlight::done`). Les van 30-09: de synchrone
+//! commit van hopfs hield de OS-core tot 7 s stil op een trage schijf (een
+//! FLUSH is op macOS een F_FULLFSYNC van het image). Een verzoek dat na
+//! [`REQUEST_TIMEOUT_NS`] niet klaar is, maakt de driver dood: het device
+//! kan nog in de buffer schrijven, dus een volgend verzoek zou andermans
+//! bytes zien. Dood is luid en blijvend (elke volgende call faalt), nooit
+//! stil.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -37,10 +41,13 @@
     )
 )]
 
+use blkdev::Op;
 use core::fmt;
 use core::mem::{offset_of, size_of};
+use core::task::Poll;
 use dev::Pa;
 use driver_virtiopci::{FEAT_VERSION_1_HI, Mmio, Transport, mmio, status};
+use sync::Signal;
 
 /// De config van virtio-blk (virtio 1.2 §5.2.4), alleen voor de offsets:
 /// de driver leest hem via het transport. `capacity` in sectoren van 512
@@ -209,6 +216,11 @@ pub enum Error {
     },
     /// Een eerder verzoek liep af; niets gaat meer naar het device.
     Dead,
+    /// Er loopt nog een verzoek (de wachter ging weg vóór de completion);
+    /// de DMA-buffer is nog van het device.
+    Busy,
+    /// Er is geen verzoek om op te wachten.
+    Idle,
 }
 
 impl fmt::Display for Error {
@@ -237,6 +249,8 @@ impl fmt::Display for Error {
                 write!(f, "virtioblk: status {status} at sector {sector}")
             }
             Self::Dead => f.write_str("virtioblk: driver dead after a timeout"),
+            Self::Busy => f.write_str("virtioblk: a request is still in flight"),
+            Self::Idle => f.write_str("virtioblk: no request in flight"),
         }
     }
 }
@@ -255,6 +269,37 @@ pub unsafe fn is_modern_blk(base: Pa) -> bool {
     unsafe { mmio::is_modern(base, DEVICE_BLK) }
 }
 
+/// Het verzoek dat op het device staat.
+#[derive(Clone, Copy, Debug)]
+struct Pending {
+    kind: u32,
+    sector: u64,
+    len: usize,
+    t0: u64,
+    /// Een FLUSH zonder FLUSH-feature: er ging niets naar het device, en
+    /// hij is meteen klaar.
+    noop: bool,
+}
+
+/// De lijn-kant van virtio-blk over virtio-mmio: de interrupt bevestigen
+/// in de dispatch van het board, los van de driver (die is van de
+/// hopfs-actor).
+#[derive(Clone, Copy)]
+pub struct IrqAck {
+    t: Mmio,
+}
+
+impl IrqAck {
+    /// Bevestigt de interrupt (InterruptStatus terug naar InterruptACK),
+    /// waarop het device zijn level-lijn loslaat. Geeft de bits die stonden.
+    pub fn ack(&self) -> u32 {
+        // InterruptStatus en InterruptACK delen niets met de ring, dus een
+        // kopie van het transport naast de driver is veilig (virtio-net doet
+        // hetzelfde).
+        self.t.ack_interrupt()
+    }
+}
+
 /// Eén virtio-blk met zijn queue en DMA-buffer, over een virtio-transport:
 /// virtio-mmio op QEMU virt, virtio-pci onder EDK2.
 pub struct VirtioBlk<T: Transport = Mmio> {
@@ -267,6 +312,8 @@ pub struct VirtioBlk<T: Transport = Mmio> {
     avail_idx: u16,
     last_used: u16,
     dead: bool,
+    pending: Option<Pending>,
+    irq: Option<&'static Signal>,
     /// Meetlat: afgehandelde verzoeken.
     pub requests: u64,
     /// Meetlat: het langste verzoek in nanoseconden.
@@ -294,6 +341,12 @@ impl VirtioBlk<Mmio> {
         })?;
         // SAFETY: de tweede helft van de voorwaarde van deze functie.
         unsafe { Self::with_transport(t, dma, dma_size, clock) }
+    }
+
+    /// Het interrupt-pad, voor de dispatch van het board.
+    #[must_use]
+    pub fn irq_ack(&self) -> IrqAck {
+        IrqAck { t: self.t }
     }
 }
 
@@ -329,6 +382,8 @@ impl<T: Transport> VirtioBlk<T> {
             avail_idx: 0,
             last_used: 0,
             dead: false,
+            pending: None,
+            irq: None,
             requests: 0,
             slowest_ns: 0,
         };
@@ -395,10 +450,17 @@ impl<T: Transport> VirtioBlk<T> {
         "virtio-blk"
     }
 
-    /// De lijn-kant voor een board dat de interrupt wil bevestigen: de
-    /// driver pollt, maar een scherpe lijn moet toch los.
+    /// De lijn-kant voor een board dat de interrupt wil bevestigen: ook
+    /// een driver die pollt, laat een scherpe lijn los.
     pub fn ack(&self) -> u32 {
         self.t.ack_interrupt()
+    }
+
+    /// Hangt de bel van de IRQ-lijn aan de driver: de asynchrone vorm wacht
+    /// er dan op (met de vangrail van `blkdev::IRQ_GUARD`) in plaats van te
+    /// pollen. Het board luidt hem vanuit zijn dispatch, na [`IrqAck::ack`].
+    pub fn set_irq(&mut self, bell: &'static Signal) {
+        self.irq = Some(bell);
     }
 
     fn set_desc(&self, i: u16, addr: Pa, len: u32, flags: u16, next: u16) {
@@ -439,39 +501,77 @@ impl<T: Transport> VirtioBlk<T> {
         self.t.notify(0);
     }
 
-    /// Wacht tot het device het verzoek terugzet in de used-ring, of tot de
-    /// time-out (dan dood).
-    fn complete(&mut self, sector: u64, t0: u64) -> Result {
+    /// Zet een verzoek op het device, of weigert. Een verzoek waarvan de
+    /// wachter wegging, wordt eerst opgehaald als het klaar is; loopt het
+    /// nog, dan [`Error::Busy`]: de DMA-buffer is nog van het device.
+    fn begin(&mut self, kind: u32, sector: u64, len: usize) -> Result {
+        if self.dead {
+            return Err(Error::Dead);
+        }
+        if self.pending.is_some() && self.reap().is_pending() {
+            return Err(Error::Busy);
+        }
+        let noop = kind == T_FLUSH && !self.flush;
+        let t0 = (self.clock)();
+        if !noop {
+            self.submit(kind, sector, len as u32);
+        }
+        self.pending = Some(Pending {
+            kind,
+            sector,
+            len,
+            t0,
+            noop,
+        });
+        Ok(())
+    }
+
+    /// Kijkt of het device het verzoek terugzette in de used-ring. Na de
+    /// time-out is de driver dood.
+    fn reap(&mut self) -> Poll<Result> {
+        let Some(p) = self.pending else {
+            return Poll::Ready(Err(Error::Idle));
+        };
+        if p.noop {
+            self.pending = None;
+            return Poll::Ready(Ok(()));
+        }
         let used = self.dma.add(USED_OFF);
-        let deadline = t0.saturating_add(REQUEST_TIMEOUT_NS);
-        while dev::read16(used.add(2)) == self.last_used {
-            if (self.clock)() >= deadline {
+        if dev::read16(used.add(2)) == self.last_used {
+            if (self.clock)() >= p.t0.saturating_add(REQUEST_TIMEOUT_NS) {
                 self.dead = true;
-                return Err(Error::Timeout { sector });
+                self.pending = None;
+                return Poll::Ready(Err(Error::Timeout { sector: p.sector }));
             }
-            core::hint::spin_loop();
+            return Poll::Pending;
         }
         // De index vóór de inhoud: pas na de barrière zijn status en data
         // van het device.
         dev::mb();
+        self.pending = None;
         self.last_used = self.last_used.wrapping_add(1);
         self.ack();
-        let dt = (self.clock)().saturating_sub(t0);
+        let dt = (self.clock)().saturating_sub(p.t0);
         self.slowest_ns = self.slowest_ns.max(dt);
         self.requests += 1;
-        match dev::read8(self.dma.add(STATUS_OFF)) {
+        Poll::Ready(match dev::read8(self.dma.add(STATUS_OFF)) {
             S_OK => Ok(()),
-            status => Err(Error::Status { sector, status }),
-        }
+            status => Err(Error::Status {
+                sector: p.sector,
+                status,
+            }),
+        })
     }
 
+    /// Het synchrone verzoek: zetten en pollen tot het klaar is.
     fn request(&mut self, kind: u32, sector: u64, len: usize) -> Result {
-        if self.dead {
-            return Err(Error::Dead);
+        self.begin(kind, sector, len)?;
+        loop {
+            if let Poll::Ready(r) = self.reap() {
+                return r;
+            }
+            core::hint::spin_loop();
         }
-        let t0 = (self.clock)();
-        self.submit(kind, sector, len as u32);
-        self.complete(sector, t0)
     }
 
     /// Toetst `len` bytes vanaf `sector` tegen de schijf.
@@ -508,6 +608,14 @@ impl<T: Transport> VirtioBlk<T> {
         self.check(sector, buf.len())?;
         let mut s = sector;
         for chunk in buf.chunks(MAX_TRANSFER) {
+            // Na een time-out kan het device nog in de buffer bezig zijn:
+            // er gaat geen byte meer in.
+            if self.dead {
+                return Err(Error::Dead);
+            }
+            if self.pending.is_some() && self.reap().is_pending() {
+                return Err(Error::Busy);
+            }
             dev::copy_in(self.dma.add(DATA_OFF), chunk);
             self.request(T_OUT, s, chunk.len())?;
             s += chunk.len() as u64 / SECTOR;
@@ -518,10 +626,69 @@ impl<T: Transport> VirtioBlk<T> {
     /// Maakt alles wat geschreven is duurzaam; zonder FLUSH-feature is er
     /// geen cache en is dit niets.
     pub fn sync(&mut self) -> Result {
-        if !self.flush {
-            return Ok(());
-        }
         self.request(T_FLUSH, 0, 0)
+    }
+
+    /// Zet één opdracht van hoogstens [`MAX_TRANSFER`] bytes op het device
+    /// (de asynchrone vorm). Een write gaat nu de DMA-buffer in, dus pas
+    /// als er niets meer loopt.
+    fn start_op(&mut self, op: Op<'_>) -> Result {
+        match op {
+            Op::Read { lba, len } => {
+                if len > MAX_TRANSFER {
+                    return Err(Error::Range { sector: lba, len });
+                }
+                self.check(lba, len)?;
+                self.begin(T_IN, lba, len)
+            }
+            Op::Write { lba, data } => {
+                if self.read_only {
+                    return Err(Error::ReadOnly);
+                }
+                if data.len() > MAX_TRANSFER {
+                    return Err(Error::Range {
+                        sector: lba,
+                        len: data.len(),
+                    });
+                }
+                self.check(lba, data.len())?;
+                if self.dead {
+                    return Err(Error::Dead);
+                }
+                if self.pending.is_some() && self.reap().is_pending() {
+                    return Err(Error::Busy);
+                }
+                dev::copy_in(self.dma.add(DATA_OFF), data);
+                self.begin(T_OUT, lba, data.len())
+            }
+            Op::Flush => self.begin(T_FLUSH, 0, 0),
+        }
+    }
+
+    /// De completion van [`start_op`](Self::start_op): bij een lees de
+    /// bytes uit de DMA-buffer naar `into`.
+    fn poll_op(&mut self, into: &mut [u8]) -> Poll<Result> {
+        let p = self.pending;
+        let r = self.reap();
+        if let (Poll::Ready(Ok(())), Some(p)) = (&r, p)
+            && p.kind == T_IN
+        {
+            let n = p.len.min(into.len());
+            if let Some(d) = into.get_mut(..n) {
+                dev::copy_out(d, self.dma.add(DATA_OFF));
+            }
+        }
+        r
+    }
+}
+
+/// De blkdev-fout van een driverfout op `lba`.
+fn blk_err(e: Error, lba: u64, len: usize) -> blkdev::Error {
+    match e {
+        Error::Range { .. } => blkdev::Error::OutOfRange { lba, len },
+        Error::Dead | Error::Timeout { .. } => blkdev::Error::Dead,
+        Error::Busy => blkdev::Error::Busy,
+        _ => blkdev::Error::Io { lba },
     }
 }
 
@@ -538,6 +705,31 @@ impl<T: Transport> blkdev::BlockDevice for VirtioBlk<T> {
 
     fn flush(&mut self) -> blkdev::Result {
         self.sync().map_err(|_| blkdev::Error::Dead)
+    }
+}
+
+impl<T: Transport> blkdev::AsyncBlockDevice for VirtioBlk<T> {
+    fn max_transfer(&self) -> usize {
+        MAX_TRANSFER
+    }
+
+    fn start(&mut self, op: Op<'_>) -> blkdev::Result {
+        let (lba, len) = match op {
+            Op::Read { lba, len } => (lba, len),
+            Op::Write { lba, data } => (lba, data.len()),
+            Op::Flush => (0, 0),
+        };
+        self.start_op(op).map_err(|e| blk_err(e, lba, len))
+    }
+
+    fn poll_done(&mut self, into: &mut [u8]) -> Poll<blkdev::Result> {
+        let lba = self.pending.map_or(0, |p| p.sector);
+        let len = self.pending.map_or(0, |p| p.len);
+        self.poll_op(into).map_err(|e| blk_err(e, lba, len))
+    }
+
+    fn irq(&self) -> Option<&'static Signal> {
+        self.irq
     }
 }
 

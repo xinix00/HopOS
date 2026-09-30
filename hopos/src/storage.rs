@@ -8,6 +8,15 @@
 //! [`FS_INBOX`]. De committer bezit niets: hij kijkt naar de
 //! servicer-tabel en stuurt een `Commit`.
 //!
+//! Wachten op de schijf: de driver zit in een [`Paced`] met de klok en de
+//! timers van de executor ([`ExecPace`]). Elk blok-verzoek is een submit plus
+//! een await op de bel van de lijn (vangrail 10 ms) of, zonder lijn, pollend
+//! op een timer, en intussen draait de executor door. Les van 30-09 (de
+//! soak): de synchrone commit hield op een trage schijf de OS-core tot 7 s
+//! stil (`late_ms=6611` op de tik, Hop en de switch zonder beurt). De mount
+//! bij de boot is de uitzondering: die draait vóór `exec.run`, met
+//! `blkdev::block_on`.
+//!
 //! De kern-flip: vóór de sprong legt de actor de boom vast en neemt hij
 //! niets meer aan ([`freeze_for_flip`]); de nieuwe kern mount dezelfde
 //! schijf en vindt precies die generatie.
@@ -17,6 +26,7 @@
 //! Hop's staat op `/hop/` moet een herstart overleven; wie leeg wil
 //! beginnen, geeft QEMU een verse schijf (image/qemu-run.sh).
 
+use blkdev::{Pace, Paced, block_on};
 use board::Board;
 use core::future::Future;
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -99,6 +109,20 @@ impl Timer for ExecTimer {
     }
 }
 
+/// De klok en de timers van de executor als `blkdev::Pace`: waarop de
+/// hopfs-actor tijdens een blok-verzoek wacht.
+pub(crate) struct ExecPace(pub(crate) &'static Executor);
+
+impl Pace for ExecPace {
+    type Sleep = executor::After<512, 256>;
+    fn now(&self) -> u64 {
+        self.0.now()
+    }
+    fn sleep(&self, d: Duration) -> Self::Sleep {
+        self.0.after(d)
+    }
+}
+
 /// Zoekt de schijf van het board, één keer voor de hele boot: `probe_disk`
 /// mag maar één keer, en de schijf gaat eerst langs de bench (bench.rs)
 /// en dan naar [`start`]. Geen schijf of een fout is één regel en `None`:
@@ -131,7 +155,18 @@ pub(crate) fn start(exec: &'static Executor, disk: Option<vboard::Disk>) -> bool
         "disk: up HOPOS_DISK_UP model={} blocks={sectors} block_size={SECTOR} max_transfer={MAX_TRANSFER}",
         disk.model()
     );
-    let (fs, found) = match Fs::mount(disk, 0, sectors, SECTOR, MAX_TRANSFER as u64, false) {
+    // Vóór `exec.run`: de mount wacht zelf (block_on pollt het device), en
+    // er is nog niemand die stil zou staan.
+    let disk = Paced::new(disk, ExecPace(exec));
+    let mounted = block_on(Fs::mount(
+        disk,
+        0,
+        sectors,
+        SECTOR,
+        MAX_TRANSFER as u64,
+        false,
+    ));
+    let (fs, found) = match mounted {
         Ok(m) => m,
         Err(e) => {
             println!("hopfs: mount failed: {e}, file calls refused HOPOS_FS_FAIL");

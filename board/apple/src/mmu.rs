@@ -62,8 +62,9 @@ pub(crate) const MB2: u64 = 2 << 20;
 /// Zoveel GB DRAM mappen we hoogstens: de mini bestaat in 16, 24 en 32 GB;
 /// 64 laat ruimte zonder de BSS op te blazen (64 L2-tabellen = 256 KB).
 pub(crate) const MAX_DRAM_GB: u64 = 64;
-/// Tabellen: L0, de lage L1, de DRAM-L1, en één L2 per GB.
-pub(crate) const TABLES: usize = 3 + MAX_DRAM_GB as usize;
+/// Tabellen: L0, de lage L1, de DRAM-L1, één L2 per GB, en de L3 van de
+/// wachtpagina onder de stack (de laatste).
+pub(crate) const TABLES: usize = 4 + MAX_DRAM_GB as usize;
 
 const _: () = {
     // Het DRAM is L0-ingang 2 en begint op een GB-grens.
@@ -138,13 +139,15 @@ pub(crate) const fn dram_gb(mem_size_actual: u64) -> u64 {
 
 /// Bouwt de map in de pool `[pool, pool + TABLES * 4096)` en geeft de L0
 /// (voor TTBR0_EL2). Schrijft alleen met `dev::write64`: dit draait met de
-/// MMU uit.
+/// MMU uit. De pagina van `guard` (`__stack_guard`, direct onder de stack)
+/// blijft ongeldig: een overloop van de stack is een fault, geen stille
+/// schrijf in de BSS (30-09, `cpu::boot`).
 ///
 /// # Safety
 ///
 /// De pool is 4 KB-gealigneerd, [`TABLES`] pagina's groot, van niemand
 /// anders, en de MMU gebruikt hem nog niet.
-pub(crate) unsafe fn build(pool: u64, mem_size_actual: u64) -> u64 {
+pub(crate) unsafe fn build(pool: u64, mem_size_actual: u64, guard: u64) -> u64 {
     let page = |i: u64| Pa(pool + i * 4096);
     for i in 0..TABLES as u64 {
         for e in 0..512 {
@@ -166,6 +169,15 @@ pub(crate) unsafe fn build(pool: u64, mem_size_actual: u64) -> u64 {
                 dev::write64(l2.add(8 * j), d);
             }
         }
+    }
+    if let Some(off) = guard.checked_sub(DRAM_BASE)
+        && off / GB < dram_gb(mem_size_actual)
+    {
+        let entry = page(3 + off / GB).add(8 * ((off % GB) / MB2));
+        // SAFETY: de voorwaarde van deze functie (de MMU gebruikt de pool
+        // nog niet); `entry` is de L2-ingang van `guard` hierboven, en de
+        // laatste pagina van de pool is voor de wachtpagina alleen.
+        let _ = unsafe { cpu::boot::guard_page(entry, page(TABLES as u64 - 1), guard) };
     }
     l0.0
 }
@@ -198,8 +210,9 @@ mod tests {
         let mut pool = vec![0u64; TABLES * 512 + 512];
         let start = (pool.as_ptr() as u64).next_multiple_of(4096);
         let off = ((start - pool.as_ptr() as u64) / 8) as usize;
+        let guard = KERN_RAM.base.0 + 0x32_1000;
         // SAFETY: de pool is een Vec van de test, 4 KB-gealigneerd gesneden.
-        let root = unsafe { build(start, 24 << 30) };
+        let root = unsafe { build(start, 24 << 30, guard) };
         assert_eq!(root, start);
         let tables = &mut pool[off..];
         // MMIO: 1 GB Device, AIC en ECAM.
@@ -231,6 +244,19 @@ mod tests {
         // 24 GB: de laatste 2 MB wel, de GB erna niet.
         assert!(walk(tables, DRAM_BASE + (24 << 30) - MB2).is_some());
         assert!(walk(tables, DRAM_BASE + (24 << 30)).is_none());
+        // De wachtpagina: zijn blok is een L3 in de laatste tabel, de pagina
+        // zelf ongeldig, zijn buren Normal en uitvoerbaar.
+        let base = tables.as_ptr() as u64;
+        let at = |pa: u64| tables[((pa - base) / 8) as usize];
+        let l1 = at(base + 4096 * 2 + 8 * ((guard - DRAM_BASE) / GB));
+        let l2 = at((l1 & 0xffff_ffff_f000) + 8 * (((guard - DRAM_BASE) % GB) / MB2));
+        assert_eq!(l2, (base + 4096 * (TABLES as u64 - 1)) | TABLE);
+        let l3 = |pa: u64| at((l2 & 0xffff_ffff_f000) + 8 * ((pa % MB2) / 4096));
+        assert_eq!(l3(guard), 0);
+        let next = l3(guard + 4096);
+        assert_eq!(next & 0xffff_ffff_f000, guard + 4096);
+        assert_eq!((next >> 2) & 7, ATTR_NORMAL);
+        assert_eq!(next & (UXN | PXN), 0);
     }
 
     #[test]

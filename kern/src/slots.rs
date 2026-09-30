@@ -60,7 +60,7 @@ use core::sync::atomic::{
 };
 use core::time::Duration;
 use sync::mpsc::Mailbox;
-use sync::{Either, LocalCell, Signal, select};
+use sync::{Either, LocalCell, Signal, select, yield_now};
 
 /// De brokmaat van de scrub. Een ononderbroken veeg over een partitie
 /// verhongert de netstack (96 MB x 127 loaders is ongeveer 12 s, gemeten in
@@ -79,6 +79,12 @@ pub const REVOKE_GRACE: Duration = Duration::from_secs(1);
 pub const IDLE_GRACE: Duration = Duration::from_secs(2);
 /// De tik van een servicer zonder werk.
 pub const SERVICER_TICK: Duration = Duration::from_millis(2);
+/// Hoeveel records de servicer achter elkaar leest voordat hij de executor
+/// een ronde geeft. Les van 30-09 (de soak): een app die zijn outbox volschrijft,
+/// hield de servicer in één poll tot de ring leeg was, en daarmee de hele
+/// OS-core (de tik, Hop, de switch). Zestien logregels is een burst; meer
+/// wacht een ronde.
+pub const SERVICER_BATCH: usize = 16;
 /// De ringsoort van een logregel (`ring.TypeLog`).
 pub const KIND_LOG: u8 = 1;
 const _: () = assert!(KIND_LOG as u32 == abi::ring::Kind::LOG.raw());
@@ -610,6 +616,7 @@ async fn serve<'a, O: Outbox, T: Timer, L: Console, const N: usize>(
 ) {
     let mut saw_live = false;
     let mut idle_since: Option<u64> = None;
+    let mut batch = 0usize;
     loop {
         if ctl.stop.take() {
             return;
@@ -631,8 +638,14 @@ async fn serve<'a, O: Outbox, T: Timer, L: Console, const N: usize>(
                     "slot {slot}: stray record {kind} HOPOS_RING_STRAY"
                 ));
             }
+            batch += 1;
+            if batch >= SERVICER_BATCH {
+                batch = 0;
+                yield_now().await;
+            }
             continue;
         }
+        batch = 0;
         if out.corrupt() {
             log.log(format_args!(
                 "slot {slot}: outbox corrupt HOPOS_SERVICER_RING"
@@ -2231,6 +2244,46 @@ pub(crate) mod tests {
         fn smp_pending(&self) -> bool {
             false
         }
+    }
+
+    // Een outbox vol logregels: de servicer geeft na elke SERVICER_BATCH
+    // records een ronde af, in plaats van de core te houden tot de ring leeg
+    // is (30-09).
+    #[test]
+    fn servicer_yields_after_a_batch_of_records() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let live = Cell::new(true);
+        let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
+        start_live(&mut a, 1, 8, 1).unwrap();
+        let inbox: Mailbox<Envelope<'_>, 4> = Mailbox::new();
+        let timer = FakeTimer::default();
+        let conr = &con;
+        let mut buf = [0u8; 64];
+        let lines: Vec<Vec<u8>> = (0..3 * SERVICER_BATCH + 5)
+            .map(|i| std::format!("line {i}").into_bytes())
+            .collect();
+        let servicer = servicer_task(
+            s(1),
+            &svc,
+            |_| FakeOutbox {
+                lines: lines.clone(),
+                live: &live,
+            },
+            &timer,
+            &conr,
+            &inbox,
+            &mut buf,
+        );
+        let mut servicer = core::pin::pin!(servicer);
+        let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
+        assert!(servicer.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(con.app.borrow().len(), SERVICER_BATCH);
+        assert!(servicer.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(con.app.borrow().len(), 2 * SERVICER_BATCH);
+        for _ in 0..4 {
+            let _ = servicer.as_mut().poll(&mut cx);
+        }
+        assert_eq!(con.app.borrow().len(), lines.len());
     }
 
     // Evict = stop.set(); gone.wait(): de stop wacht tot de servicer weg is,

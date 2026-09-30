@@ -13,7 +13,7 @@
  * daarboven begint het structurenvenster. De heap is alles tussen het einde
  * van de stack en die grens.
  *
- * Het contract met cpu::boot: __stack_top, __bss_start, __bss_end (8-
+ * Het contract met cpu::boot: __stack_top, __stack_guard, __bss_start, __bss_end (8-
  * gealigneerd); met board-rk3566: __heap_start, __heap_end; met het
  * image-script: __image_end (image_size in de header = __image_end -
  * IMAGE_BASE, BSS en stack inbegrepen).
@@ -53,7 +53,12 @@ SECTIONS
     __bss_end = .;
   }
 
+  /* De wachtpagina onder de stack (30-09): het board maakt hem ongeldig in
+   * de map, zodat een overloop een luide fault is en niet stil het einde
+   * van .bss overschrijft. Hij komt bovenop STACK_SIZE. */
   .stack (NOLOAD) : ALIGN(4096) {
+    __stack_guard = .;
+    . += 4096;
     . += STACK_SIZE;
     __stack_top = .;
   }

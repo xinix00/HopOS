@@ -327,6 +327,10 @@ pub struct Config {
     /// De doelkick van slot `i` na een leeg→niet-leeg-overgang van zijn
     /// RX-ring (een IPI, of de wek van een app die naar EL2 yieldde).
     pub slot_wake: fn(usize),
+    /// Woont de consument van slot `i` op déze core (een bewoner van de
+    /// OS-core, zoals Hop)? Dan wacht [`write_rx`](Core::write_rx) niet op
+    /// ruimte: die consument kan pas draaien als de executor afgeeft.
+    pub resident: fn(usize) -> bool,
 }
 
 /// De gedeelde kanten van de switch: wat andere taken van hem zien.
@@ -669,7 +673,11 @@ impl<R: Reader, W: Writer> Core<'_, R, W> {
     /// Het wachten is een spin, geen `.await`: de consument van een slot-ring
     /// is een andere core, dus spinnen helpt, en de actor blijft zo één
     /// synchrone ronde. Poort 0 wacht niet: zijn consument is de host-taak op
-    /// déze core, en die kan pas draaien als de actor afgeeft.
+    /// déze core, en die kan pas draaien als de actor afgeeft. Een bewoner
+    /// van de OS-core ([`Config::resident`], Hop in slot 1) ook niet, om
+    /// dezelfde reden: les van 30-09 (de soak), daar spinde de switch tot
+    /// [`TX_BACKPRESSURE`] op een ring die niemand kon legen, met de hele
+    /// OS-core stil. Voor hen: droppen en tellen, TCP herstelt.
     fn write_rx(&mut self, i: usize, kind: u32, p: &[u8]) {
         let clock = self.cfg.clock;
         let deadline = clock().saturating_add(TX_BACKPRESSURE);
@@ -697,7 +705,7 @@ impl<R: Reader, W: Writer> Core<'_, R, W> {
                 woken = true;
                 self.wake(i);
             }
-            if i == 0 || clock() > deadline {
+            if i == 0 || (self.cfg.resident)(i) || clock() > deadline {
                 if let Some(port) = self.port(i) {
                     port.rx_blocked = true;
                 }

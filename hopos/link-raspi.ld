@@ -13,7 +13,7 @@
  * het laadvenster met de DTB en de staging. De pagetabellen staan in .data
  * (.data.pagetables): discover zet er het DRAM uit de DTB bij.
  *
- * Het contract met cpu::boot: __stack_top, __bss_start, __bss_end (8-
+ * Het contract met cpu::boot: __stack_top, __stack_guard, __bss_start, __bss_end (8-
  * gealigneerd); met board-raspi: __heap_start, __heap_end, __boot_ttbr0.
  */
 
@@ -51,7 +51,12 @@ SECTIONS
     __bss_end = .;
   }
 
+  /* De wachtpagina onder de stack (30-09): het board maakt hem ongeldig in
+   * de map, zodat een overloop een luide fault is en niet stil het einde
+   * van .bss overschrijft. Hij komt bovenop STACK_SIZE. */
   .stack (NOLOAD) : ALIGN(4096) {
+    __stack_guard = .;
+    . += 4096;
     . += STACK_SIZE;
     __stack_top = .;
   }

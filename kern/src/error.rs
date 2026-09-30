@@ -172,6 +172,9 @@ impl From<blkdev::Error> for Error {
         match e {
             blkdev::Error::Io { lba } | blkdev::Error::OutOfRange { lba, .. } => Self::Io { lba },
             blkdev::Error::Dead => Self::Io { lba: 0 },
+            // Een verlaten verzoek loopt nog: later opnieuw, zoals een volle
+            // brievenbus.
+            blkdev::Error::Busy => Self::Busy,
         }
     }
 }

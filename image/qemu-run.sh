@@ -45,6 +45,14 @@
 #                                    (ijl) als hij ontbreekt. Een verse schijf
 #                                    is een lege hopfs; een bestaande houdt de
 #                                    volumes over een herstart (stateful).
+#   DISKLAT=1500000000 image/qemu-run.sh
+#                                    een trage schijf in plaats van DISK:
+#                                    QEMU's null-co met zoveel nanoseconden
+#                                    per verzoek (ook per FLUSH), leeg en
+#                                    vluchtig (leest nullen, bewaart niets).
+#                                    De proef van tools/qemu-test-slowdisk.sh:
+#                                    op macOS is een FLUSH een F_FULLFSYNC
+#                                    van 3 tot 786 ms (30-09)
 #   BOOTARGS="hopos.s3.bucket=hop" image/qemu-run.sh
 #                                    extra bootparameters, letterlijk achter
 #                                    de rest in -append
@@ -164,7 +172,13 @@ if [ -n "$ARGS" ]; then
 fi
 
 # De schijf: ijl aangemaakt als hij er niet is (dd met seek schrijft niets).
-if [ ! -e "$DISK" ]; then
+# Met DISKLAT een null-co met die latency per verzoek, zonder bestand.
+if [ -n "${DISKLAT:-}" ]; then
+	QDISK="-blockdev driver=null-co,node-name=disk0,size=$((DISK_MIB * 1048576)),latency-ns=$DISKLAT,read-zeroes=on"
+else
+	QDISK="-drive if=none,format=raw,file=$DISK,id=disk0"
+fi
+if [ -z "${DISKLAT:-}" ] && [ ! -e "$DISK" ]; then
 	mkdir -p "$(dirname "$DISK")"
 	dd if=/dev/zero of="$DISK" bs=1048576 count=0 seek="$DISK_MIB" 2>/dev/null
 	echo "qemu-run: new disk $DISK ($DISK_MIB MiB)" >&2
@@ -221,7 +235,7 @@ set -- -M virt,gic-version=3,highmem-ecam=off,virtualization=on \
 	-global virtio-mmio.force-legacy=false \
 	-device virtio-net-device,netdev=n0,bus=virtio-mmio-bus.0 \
 	-netdev "user,id=n0,$FWD" \
-	-drive "if=none,format=raw,file=$DISK,id=disk0" \
+	$QDISK \
 	-device virtio-blk-device,drive=disk0,bus=virtio-mmio-bus.1 \
 	-kernel "$KERNEL" "$@"
 if [ -n "$ARTPID" ]; then

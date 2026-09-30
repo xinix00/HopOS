@@ -346,7 +346,24 @@ fn moved(core: usize) -> ! {
 }
 
 /// De boot vanaf de landing, op de OS-core: de executor en al zijn taken.
+///
+/// Twee helften, en dat is de les van 30-09: alles wat de boot opbouwt
+/// (switch, pomp, actoren, de futures vóór hun `Box`) stond in één frame van
+/// 125 KB (`sub sp, 0x1e9a0`), en dat frame bleef onder `exec.run` staan
+/// zolang de kern leeft. Een plaatsing piekte daarop tot 186 van de 256 KB
+/// stack. [`setup`] bouwt alles in een eigen frame dat weg is vóór de
+/// executor draait; hier blijft alleen de slaper over.
 fn boot(board: &'static Machine, dtb: u64, el: u8) -> ! {
+    let exec: &'static Executor = EXEC.get();
+    let mut sleeper = setup(board, dtb, el);
+    exec.run(&mut sleeper)
+}
+
+/// Bouwt de boot op: de landing, de opslag, het net, de slots en de
+/// taken. Nooit inline: zijn frame (de grote boot-locals) moet weg zijn
+/// voordat [`boot`] de executor start.
+#[inline(never)]
+fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleeper {
     // FLIP: de landing, als eerste na de heap. Een overdracht van een
     // vorige kern draagt de bewoners; die adopteren de slots straks.
     let landing = flip::land(dtb);
@@ -433,6 +450,7 @@ fn boot(board: &'static Machine, dtb: u64, el: u8) -> ! {
                 max_slots: board.cores().saturating_sub(1).max(1) + 1,
                 clock: board.clock(),
                 slot_wake: slots::wake,
+                resident: slots::resident,
             };
             if let Err(e) = net::start(exec, nic, params, system_api(system)) {
                 println!("net: {e} HOPOS_NET_FAIL");
@@ -470,7 +488,7 @@ fn boot(board: &'static Machine, dtb: u64, el: u8) -> ! {
         Ok(os) => sleeper.host(os),
         Err(e) => println!("oscore: {e}, the kern keeps its core to itself HOPOS_OS_CORE_FAIL"),
     }
-    exec.run(&mut sleeper)
+    sleeper
 }
 
 /// Meetlat van de IRQ-dispatch: timer-, NIC- en onbekende interrupts.
@@ -599,7 +617,7 @@ impl Console for KernConsole {
 }
 
 /// De maat van de kern-stack: `STACK_SIZE` in elk linkscript (hopos/*.ld),
-/// direct boven `.bss`, zonder wachtpagina eronder.
+/// boven de wachtpagina (`__stack_guard`) direct boven `.bss`.
 const STACK_BYTES: u64 = 0x40000;
 
 /// Hoe ver onder de eigen stackpositie de meter niet wist: een IRQ-frame
@@ -613,8 +631,13 @@ const STACK_METER_SLACK: u64 = 16 * 1024;
 /// (QEMU en elke loader geven nul-RAM; na een kern-flip is de eerste meting
 /// ruis). Les van 30-09: de plaatsing van een slot (`kern::rpc::mount_table`
 /// onder de lifecycle, de publicatieregel) haalde 190 KB van de 256, en een
-/// overloop schrijft zonder wachtpagina stil in het einde van `.bss` (de
-/// switch-tabel, de deuren van de system-API, de heap). Eén scan van 32K
+/// overloop schreef zonder wachtpagina stil in het einde van `.bss` (de
+/// switch-tabel, de deuren van de system-API, de heap). Sindsdien: het
+/// boot-frame is weg vóór de executor draait ([`boot`]), de lifecycle bouwt
+/// zijn actor buiten zijn future, en de boards met `cpu::boot` en de Mac
+/// mini zetten een wachtpagina onder de stack (`__stack_guard`; de
+/// UEFI-boards nog niet, zie `cpu::boot`). Na de boot meet de tik 16 KB
+/// (dat is de meetmarge zelf), tegen 180 KB ervoor. Eén scan van 32K
 /// woorden per seconde; de schrijfslag alleen over wat de vorige tik vuil
 /// maakte.
 fn stack_high_water() -> u64 {

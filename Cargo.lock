@@ -44,6 +44,9 @@ dependencies = [
 [[package]]
 name = "blkdev"
 version = "3.0.0"
+dependencies = [
+ "sync",
+]
 
 [[package]]
 name = "board"
@@ -515,6 +518,7 @@ dependencies = [
  "blkdev",
  "dev",
  "driver-virtiopci",
+ "sync",
 ]
 
 [[package]]
@@ -595,6 +599,7 @@ name = "hopos"
 version = "3.0.0"
 dependencies = [
  "abi",
+ "blkdev",
  "board",
  "board-altra",
  "board-apple",

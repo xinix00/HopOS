@@ -119,6 +119,8 @@ fn fake(sectors: u64, flush: bool) -> (VirtioBlk, Vec<u64>, Vec<u64>) {
         avail_idx: 0,
         last_used: 0,
         dead: false,
+        pending: None,
+        irq: None,
         requests: 0,
         slowest_ns: 0,
     };
@@ -202,6 +204,57 @@ fn a_silent_device_kills_the_driver_loudly() {
     assert_eq!(
         BlockDevice::write(&mut b, 3, &[0; 512]),
         Err(blkdev::Error::Io { lba: 3 })
+    );
+}
+
+#[test]
+fn the_async_form_submits_then_completes_and_copies_a_read_out() {
+    use blkdev::{AsyncBlockDevice, BlockIo, Paced, Spin, block_on};
+    let (b, _r, _m) = fake(64, true);
+    let mut p = Paced::new(b, Spin);
+    let data: Vec<u8> = (0..8192u32).map(|i| (i * 13) as u8).collect();
+    block_on(p.write(16, &data)).unwrap();
+    let mut got = vec![0u8; 8192];
+    block_on(p.read(16, &mut got)).unwrap();
+    assert!(got == data, "read back differs");
+    block_on(p.flush()).unwrap();
+    assert_eq!(
+        seen(),
+        vec![
+            (T_OUT, 16, 8192, DESC_NEXT),
+            (T_IN, 16, 8192, DESC_NEXT | DESC_WRITE),
+            (T_FLUSH, 0, 0, 0),
+        ]
+    );
+    // Eén keer kijken is niet genoeg: het device (de klok) moet eerst lopen.
+    let b = p.dev_mut();
+    b.start(Op::Flush).unwrap();
+    assert!(b.poll_done(&mut []).is_pending());
+    assert_eq!(b.poll_done(&mut []), Poll::Ready(Ok(())));
+}
+
+#[test]
+fn an_abandoned_request_blocks_the_next_until_it_is_back() {
+    use blkdev::AsyncBlockDevice;
+    let (mut b, _r, _m) = fake(16, true);
+    DEV.with(|d| d.borrow_mut().as_mut().unwrap().mute = true);
+    b.start(Op::Read { lba: 1, len: 512 }).unwrap();
+    // De wachter ging weg; het device antwoordt niet: niets nieuws erbij.
+    assert_eq!(
+        b.start(Op::Write {
+            lba: 2,
+            data: &[1; 512]
+        }),
+        Err(blkdev::Error::Busy)
+    );
+    assert_eq!(b.write_at(2, &[1; 512]), Err(Error::Busy));
+    DEV.with(|d| d.borrow_mut().as_mut().unwrap().mute = false);
+    clock(); // Het device haalt in.
+    // Nu komt het oude verzoek terug (en wordt weggegooid), dan het nieuwe.
+    b.write_at(2, &[1; 512]).unwrap();
+    assert_eq!(
+        seen().iter().map(|e| e.0).collect::<Vec<_>>(),
+        [T_IN, T_OUT]
     );
 }
 

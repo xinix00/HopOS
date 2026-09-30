@@ -18,9 +18,18 @@
 //! een `.await`, en er wordt per call niets gealloceerd (de kern-heap is een
 //! bump-allocator: wat terugkomt uit het midden lekt).
 //!
-//! De I/O blijft voorlopig in de actor, synchroon, zoals in Go: PORT.md §3
-//! splitst later in een metadata-actor en een blok-actor, waarbij een
-//! servicer zijn extents vraagt ([`Fs::lookup`]) en zijn eigen I/O doet.
+//! De I/O blijft in de actor, maar als future: elk blok-verzoek is een
+//! submit plus een `.await` op de completion (`blkdev::InFlight`), en
+//! tijdens die await draait de executor door. Les van 30-09: tot dan wachtte
+//! de actor synchroon op het device, en de periodieke commit (FLUSH, de
+//! boom, FLUSH) hield op een trage schijf de hele OS-core tot 7 s stil: geen
+//! tik, Hop geen beurt, de switch geen frame. De actor houdt zijn boom over
+//! de await (hij is de eigenaar; een volgend bericht wacht in de
+//! brievenbus); de volume-tabel van de servicers leest hij alleen binnen
+//! een closure, dus die lening loopt nooit over een await (handboek §1.1).
+//! PORT.md §3 splitst later verder in een metadata-actor en een blok-actor,
+//! waarbij een servicer zijn extents vraagt ([`Fs::lookup`]) en zijn eigen
+//! I/O doet.
 //!
 //! # De kern als lezer
 //!
@@ -41,7 +50,7 @@
 //! de boom die haar terugvindt.
 
 use crate::cage::{Console, Timer};
-use crate::hopfs::{BlockDevice, Fs};
+use crate::hopfs::{BlockIo, Fs};
 use crate::slots::{Mount, Reply, Servicers, try_push};
 use crate::system::{MAX_IO_CHUNK, REQ_HEADER};
 use crate::{Error, Result, SLOT_CAP, Slot};
@@ -465,7 +474,8 @@ pub fn thaw(inbox: &FsInbox<'_>) -> bool {
 // De actor.
 // ---------------------------------------------------------------------------
 
-/// De eigenaar van hopfs: boom, extents, vrije lijst en (nog) de I/O.
+/// De eigenaar van hopfs: boom, extents, vrije lijst en (nog) de I/O, die
+/// als future loopt.
 pub struct FsActor<'s, D, L> {
     fs: Fs<D>,
     svc: &'s Servicers,
@@ -491,7 +501,7 @@ pub struct FsActor<'s, D, L> {
 /// Hoeveel mislukte commits (en blokfouten) een eigen regel krijgen.
 const LOUD_COMMIT_FAILS: u64 = 3;
 
-impl<'s, D: BlockDevice, L: Console> FsActor<'s, D, L> {
+impl<'s, D: BlockIo, L: Console> FsActor<'s, D, L> {
     /// Een actor over een gemounte `fs`, met de volume-tabellen uit `svc`.
     pub fn new(fs: Fs<D>, svc: &'s Servicers, log: L) -> FsActor<'s, D, L> {
         FsActor {
@@ -532,7 +542,7 @@ impl<'s, D: BlockDevice, L: Console> FsActor<'s, D, L> {
                     }
                 }
                 FsMsg::Call(mut c) => {
-                    let result = self.handle(&mut c);
+                    let result = self.handle(&mut c).await;
                     if let Err(Error::Io { lba }) = result {
                         // Een blokfout is de schijf, niet de app: luid, de
                         // eerste paar keer (de driver zelf print niet).
@@ -553,9 +563,9 @@ impl<'s, D: BlockDevice, L: Console> FsActor<'s, D, L> {
                     }
                 }
                 FsMsg::Commit(_) if self.frozen => {}
-                FsMsg::Commit(why) => self.commit(why),
+                FsMsg::Commit(why) => self.commit(why).await,
                 FsMsg::Freeze => {
-                    let result = self.freeze();
+                    let result = self.freeze().await;
                     if let Some(reply) = env.reply {
                         reply.put_fs(FsDone {
                             buf: Vec::new(),
@@ -571,7 +581,7 @@ impl<'s, D: BlockDevice, L: Console> FsActor<'s, D, L> {
                     let result = if self.frozen {
                         Err(Error::Busy)
                     } else {
-                        self.kern_read(&r.path, r.off, &mut r.out)
+                        self.kern_read(&r.path, r.off, &mut r.out).await
                     };
                     if let Some(reply) = env.reply {
                         reply.put_fs(FsDone {
@@ -596,8 +606,8 @@ impl<'s, D: BlockDevice, L: Console> FsActor<'s, D, L> {
     /// De bevriezing van de kern-flip: eerst vastleggen, dan pas dicht. Een
     /// commit die faalt bevriest niet: dan zou de nieuwe kern een oudere
     /// boom mounten dan de apps denken, en dat is geen flip maar verlies.
-    fn freeze(&mut self) -> Result<(u64, usize)> {
-        self.fs.commit()?;
+    async fn freeze(&mut self) -> Result<(u64, usize)> {
+        self.fs.commit().await?;
         self.frozen = true;
         self.frozen_calls = 0;
         let g = self.fs.generation();
@@ -610,7 +620,12 @@ impl<'s, D: BlockDevice, L: Console> FsActor<'s, D, L> {
     /// Eén lezing voor de kern ([`FsMsg::KernRead`]): de bestandsmaat en
     /// hoeveel bytes er vooraan in `out` kwamen. Een map is [`Error::Kind`],
     /// een pad onder [`TASKS_DIR`] [`Error::Denied`].
-    pub fn kern_read(&mut self, path: &[u8], off: u64, out: &mut [u8]) -> Result<(u64, usize)> {
+    pub async fn kern_read(
+        &mut self,
+        path: &[u8],
+        off: u64,
+        out: &mut [u8],
+    ) -> Result<(u64, usize)> {
         clean_abs(path, &mut self.path)?;
         let p = self.path.as_bytes();
         if under(p, TASKS_DIR) {
@@ -623,7 +638,7 @@ impl<'s, D: BlockDevice, L: Console> FsActor<'s, D, L> {
         if out.is_empty() {
             return Ok((size, 0));
         }
-        let n = self.fs.read_at(p, off, out)?;
+        let n = self.fs.read_at(p, off, out).await?;
         Ok((size, n))
     }
 
@@ -634,9 +649,9 @@ impl<'s, D: BlockDevice, L: Console> FsActor<'s, D, L> {
     }
 
     /// Legt de boom vast als hij veranderde; één regel per nieuwe generatie.
-    pub fn commit(&mut self, why: CommitWhy) {
+    pub async fn commit(&mut self, why: CommitWhy) {
         let before = self.fs.generation();
-        match self.fs.commit() {
+        match self.fs.commit().await {
             Ok(()) if self.fs.generation() != before => {
                 let g = self.fs.generation();
                 match why {
@@ -699,7 +714,7 @@ impl<'s, D: BlockDevice, L: Console> FsActor<'s, D, L> {
     /// Eén bestandscall (Go: `handleWithLimit`, zonder store en codec).
     /// Geeft het `size`-veld van het antwoord en het aantal databytes op
     /// `c.out[REQ_HEADER..]`.
-    pub fn handle(&mut self, c: &mut FsCall) -> Result<(u64, usize)> {
+    pub async fn handle(&mut self, c: &mut FsCall) -> Result<(u64, usize)> {
         if !is_fs_op(c.op) {
             return Err(Error::Kind);
         }
@@ -731,7 +746,7 @@ impl<'s, D: BlockDevice, L: Console> FsActor<'s, D, L> {
                     .out
                     .get_mut(REQ_HEADER..REQ_HEADER + n)
                     .ok_or(Error::TooLarge { len: n, max: room })?;
-                let got = self.fs.read_at(p, c.off, dst)?;
+                let got = self.fs.read_at(p, c.off, dst).await?;
                 Ok((got as u64, got))
             }
             OP_WRITE => {
@@ -742,7 +757,7 @@ impl<'s, D: BlockDevice, L: Console> FsActor<'s, D, L> {
                         max: MAX_IO_CHUNK,
                     });
                 }
-                self.fs.write_at(p, c.off, data)?;
+                self.fs.write_at(p, c.off, data).await?;
                 if volume.is_some() {
                     self.first_save(c, data.len());
                 }
@@ -778,10 +793,10 @@ impl<'s, D: BlockDevice, L: Console> FsActor<'s, D, L> {
                 // De gebruikelijke generatie- en mountresolutie geldt ook
                 // voor een barrière. Na remove sync't de app de oudermap.
                 self.fs.stat(p)?;
-                Ok((self.fs.sync()?, 0))
+                Ok((self.fs.sync().await?, 0))
             }
             OP_TRUNCATE => {
-                self.fs.truncate(p, c.n)?;
+                self.fs.truncate(p, c.n).await?;
                 Ok((c.n, 0))
             }
             _ => Err(Error::Kind),

@@ -261,6 +261,56 @@ fn write_read_flush_round_trip_over_prp_lists() {
 }
 
 #[test]
+fn the_async_form_round_trips_4k_blocks_through_the_contract() {
+    use blkdev::{BlockIo, Paced, Spin, block_on};
+    // Een namespace met 4096-byte-blokken en MDTS 2 (16 KiB per opdracht):
+    // het contract rekent in 512 bytes, de driver om, en de brokken van
+    // `Paced` volgen de transfergrens van de controller.
+    let m = mem(CAP, 12, 2);
+    let mut p = Paced::new(up(&m), Spin);
+    let data: Vec<u8> = (0..40960u32).map(|i| (i * 7) as u8).collect();
+    block_on(p.write(24, &data)).unwrap();
+    let mut got = vec![0u8; data.len()];
+    block_on(p.read(24, &mut got)).unwrap();
+    assert!(got == data, "read back differs");
+    block_on(p.flush()).unwrap();
+    let io: Vec<(u8, u64, u32)> = log().iter().skip(4).map(|e| (e.0, e.1, e.2)).collect();
+    assert_eq!(
+        io,
+        vec![
+            (IO_WRITE, 3, 4),
+            (IO_WRITE, 7, 4),
+            (IO_WRITE, 11, 2),
+            (IO_READ, 3, 4),
+            (IO_READ, 7, 4),
+            (IO_READ, 11, 2),
+            (IO_FLUSH, 0, 1),
+        ]
+    );
+    // Een LBA die niet op een blok valt, gaat niet naar de controller.
+    assert_eq!(
+        block_on(p.read(25, &mut [0; 4096])),
+        Err(blkdev::Error::OutOfRange { lba: 25, len: 4096 })
+    );
+}
+
+#[test]
+fn an_abandoned_command_blocks_the_next_until_it_is_back() {
+    use blkdev::AsyncBlockDevice;
+    let m = mem(CAP, 9, 0);
+    let mut n = up(&m);
+    CTL.with(|c| c.borrow_mut().mute = true);
+    n.start(Op::Read { lba: 1, len: 512 }).unwrap();
+    assert_eq!(n.start(Op::Flush), Err(blkdev::Error::Busy));
+    assert_eq!(n.write_at(2, &[1; 512]), Err(Error::Busy));
+    CTL.with(|c| c.borrow_mut().mute = false);
+    clock(); // De controller haalt in.
+    n.write_at(2, &[1; 512]).unwrap();
+    let ops: Vec<u8> = log().iter().skip(4).map(|e| e.0).collect();
+    assert_eq!(ops, vec![IO_READ, IO_WRITE]);
+}
+
+#[test]
 fn big_requests_split_at_the_transfer_limit() {
     // MDTS 2: vier pagina's van 4 KB per opdracht.
     let m = mem(CAP, 12, 2);

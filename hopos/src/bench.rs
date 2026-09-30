@@ -21,6 +21,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use blkdev::{Blocking, block_on};
 use core::sync::atomic::Ordering::Relaxed;
 use cpu::println;
 use driver_virtioblk::{MAX_TRANSFER, SECTOR};
@@ -343,8 +344,10 @@ impl Bench {
     /// Door hopfs: een vluchtige bestandslaag op dezelfde staart, 16 MiB
     /// in calls van 1 MiB en 64 KiB (Go: `hopfsBench`). Het verschil met
     /// de rauwe regels is wat hopfs zelf kost, zonder servicer en
-    /// transport.
+    /// transport. Synchroon, vóór de executor draait: de schijf achter
+    /// `Blocking`, elke call met `block_on` afgedraaid.
     fn hopfs<D: BlockDevice>(&self, disk: &mut D, buf: &mut [u8], span: u64) {
+        let disk = Blocking(disk);
         let mut fs = match Fs::new(disk, self.base, span / SECTOR, SECTOR, MAX_TRANSFER as u64) {
             Ok(f) => f,
             Err(e) => {
@@ -364,14 +367,14 @@ impl Bench {
             };
             let t0 = self.now();
             for k in 0..n {
-                if let Err(e) = fs.write_at(path, k * sz, chunk) {
+                if let Err(e) = block_on(fs.write_at(path, k * sz, chunk)) {
                     println!("hopfs bench: write: {e} HOPOS_NVMEBENCH_FAIL");
                     return;
                 }
             }
             let t1 = self.now();
             for k in 0..n {
-                if let Err(e) = fs.read_at(path, k * sz, chunk) {
+                if let Err(e) = block_on(fs.read_at(path, k * sz, chunk)) {
                     println!("hopfs bench: read: {e} HOPOS_NVMEBENCH_FAIL");
                     return;
                 }

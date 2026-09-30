@@ -20,6 +20,15 @@
 //! loads haalden ~100 MB/s); de driver doet dan `push` vóór een write en
 //! `pull` na een read, en op ongecachet geheugen zijn die gratis.
 //!
+//! Twee vormen van wachten: de synchrone (de init, de admin-opdrachten, de
+//! meetbank) pollt de CQ; de asynchrone ([`blkdev::AsyncBlockDevice`], de
+//! hopfs-actor) zet de opdracht klaar en geeft de executor terug tot de
+//! completion er is. Les van 30-09: de synchrone commit van hopfs hield op
+//! QEMU de OS-core tot 7 s stil; op NVMe zou een FLUSH van een consumer-SSD
+//! zonder PLP hetzelfde doen. De controller heeft geen lijn in deze driver:
+//! de wachter pollt (`blkdev::InFlight::done`), per ronde en dan op een
+//! timer, zodat Hop tijdens een lange FLUSH zijn beurten houdt.
+//!
 //! Een verzoek dat niet binnen [`COMMAND_TIMEOUT_NS`] terugkomt, maakt de
 //! driver dood: de controller kan nog in de buffer schrijven, dus een
 //! volgend verzoek zou andermans bytes zien of overschrijven. Dood is luid
@@ -36,8 +45,10 @@
     )
 )]
 
+use blkdev::Op;
 use core::fmt;
 use core::mem::{offset_of, size_of};
+use core::task::Poll;
 use dev::{Pa, Reg};
 
 pub mod apple;
@@ -241,6 +252,11 @@ pub enum Error {
     },
     /// Een eerder verzoek liep af; niets gaat meer naar de controller.
     Dead,
+    /// Er loopt nog een opdracht (de wachter ging weg vóór de completion);
+    /// de DMA-buffer is nog van de controller.
+    Busy,
+    /// Er is geen opdracht om op te wachten.
+    Idle,
 }
 
 impl fmt::Display for Error {
@@ -284,6 +300,8 @@ impl fmt::Display for Error {
                 )
             }
             Self::Dead => f.write_str("nvme: driver dead after an unfinished command"),
+            Self::Busy => f.write_str("nvme: a command is still in flight"),
+            Self::Idle => f.write_str("nvme: no command in flight"),
         }
     }
 }
@@ -318,6 +336,17 @@ impl Queue {
     }
 }
 
+/// De opdracht die op de controller staat.
+#[derive(Clone, Copy, Debug)]
+struct Pending {
+    admin: bool,
+    opc: u8,
+    cid: u16,
+    t0: u64,
+    /// Bij een lees: zoveel bytes komen uit de databuffer.
+    read: usize,
+}
+
 /// Een opdracht in opbouw.
 #[derive(Clone, Copy, Default)]
 struct Cmd {
@@ -344,6 +373,7 @@ pub struct Nvme {
     max_transfer: u64,
     model: [u8; 40],
     dead: bool,
+    pending: Option<Pending>,
     /// Meetlat: afgehandelde opdrachten.
     pub commands: u64,
     /// Meetlat: de langste opdracht in nanoseconden.
@@ -395,6 +425,7 @@ impl Nvme {
             max_transfer: MAX_TRANSFER,
             model: [0; 40],
             dead: false,
+            pending: None,
             commands: 0,
             slowest_ns: 0,
         }
@@ -464,11 +495,29 @@ impl Nvme {
     }
 
     /// Zet `m` in de SQ, luidt de doorbell en pollt de CQ tot de completion
-    /// er is. Eén opdracht tegelijk: de CID is de tail, en de CQ-entry die
-    /// terugkomt hoort bij deze opdracht of de driver is dood.
+    /// er is: de synchrone vorm ([`post`](Self::post) plus
+    /// [`reap`](Self::reap)).
     fn submit(&mut self, admin: bool, m: Cmd) -> Result {
+        self.post(admin, m, 0)?;
+        loop {
+            if let Poll::Ready(r) = self.reap() {
+                return r;
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Zet `m` in de SQ en luidt de doorbell; keert meteen terug. Eén
+    /// opdracht tegelijk: de CID is de tail, en de CQ-entry die terugkomt
+    /// hoort bij deze opdracht of de driver is dood. Een opdracht waarvan de
+    /// wachter wegging, wordt eerst opgehaald als hij klaar is; loopt hij
+    /// nog, dan [`Error::Busy`].
+    fn post(&mut self, admin: bool, m: Cmd, read: usize) -> Result {
         if self.dead {
             return Err(Error::Dead);
+        }
+        if self.pending.is_some() && self.reap().is_pending() {
+            return Err(Error::Busy);
         }
         let mut q = if admin { self.admin } else { self.io };
         let cid = q.tail;
@@ -487,22 +536,35 @@ impl Nvme {
         dev::mb();
         q.tail = (q.tail + 1) % Q_ENTRIES;
         dev::write32(self.doorbell(&q, false), u32::from(q.tail));
+        self.store(admin, q);
+        self.pending = Some(Pending {
+            admin,
+            opc: m.opc,
+            cid,
+            t0: (self.clock)(),
+            read,
+        });
+        Ok(())
+    }
 
-        let t0 = (self.clock)();
-        let deadline = t0.saturating_add(self.timeout_ns);
-        let cqe = q.cq.add(u64::from(q.head) * CQE);
-        let status = loop {
-            let st = dev::read16(cqe.add(offset_of!(Cqe, status) as u64));
-            if (st & 1 != 0) == q.phase {
-                break st;
-            }
-            if (self.clock)() >= deadline {
-                self.dead = true;
-                self.store(admin, q);
-                return Err(Error::Timeout { opc: m.opc });
-            }
-            core::hint::spin_loop();
+    /// Kijkt of de completion van de opdracht van [`post`](Self::post) er
+    /// is. Na de time-out is de driver dood.
+    fn reap(&mut self) -> Poll<Result> {
+        let Some(p) = self.pending else {
+            return Poll::Ready(Err(Error::Idle));
         };
+        let mut q = if p.admin { self.admin } else { self.io };
+        let cqe = q.cq.add(u64::from(q.head) * CQE);
+        let status = dev::read16(cqe.add(offset_of!(Cqe, status) as u64));
+        if (status & 1 != 0) != q.phase {
+            if (self.clock)() >= p.t0.saturating_add(self.timeout_ns) {
+                self.dead = true;
+                self.pending = None;
+                return Poll::Ready(Err(Error::Timeout { opc: p.opc }));
+            }
+            return Poll::Pending;
+        }
+        self.pending = None;
         // De phase vóór de inhoud: pas na de barrière is de rest van de
         // entry van de controller.
         dev::mb();
@@ -512,21 +574,21 @@ impl Nvme {
             q.phase = !q.phase;
         }
         dev::write32(self.doorbell(&q, true), u32::from(q.head));
-        self.store(admin, q);
-        if got != cid {
+        self.store(p.admin, q);
+        if got != p.cid {
             self.dead = true;
-            return Err(Error::Cid { got, want: cid });
+            return Poll::Ready(Err(Error::Cid { got, want: p.cid }));
         }
-        let dt = (self.clock)().saturating_sub(t0);
+        let dt = (self.clock)().saturating_sub(p.t0);
         self.slowest_ns = self.slowest_ns.max(dt);
         self.commands += 1;
-        match status >> 1 {
+        Poll::Ready(match status >> 1 {
             0 => Ok(()),
             s => Err(Error::Status {
-                opc: m.opc,
+                opc: p.opc,
                 status: s,
             }),
-        }
+        })
     }
 
     fn store(&mut self, admin: bool, q: Queue) {
@@ -648,20 +710,22 @@ impl Nvme {
         }
     }
 
-    fn io(&mut self, opc: u8, lba: u64, len: usize, nlb0: u32) -> Result {
+    fn io_cmd(&self, opc: u8, lba: u64, len: usize, nlb0: u32) -> Cmd {
         let (prp1, prp2) = self.prps(len as u64);
-        self.submit(
-            false,
-            Cmd {
-                opc,
-                nsid: NSID,
-                prp1,
-                prp2,
-                cdw10: (lba & 0xffff_ffff) as u32,
-                cdw11: (lba >> 32) as u32,
-                cdw12: nlb0,
-            },
-        )
+        Cmd {
+            opc,
+            nsid: NSID,
+            prp1,
+            prp2,
+            cdw10: (lba & 0xffff_ffff) as u32,
+            cdw11: (lba >> 32) as u32,
+            cdw12: nlb0,
+        }
+    }
+
+    fn io(&mut self, opc: u8, lba: u64, len: usize, nlb0: u32) -> Result {
+        let m = self.io_cmd(opc, lba, len, nlb0);
+        self.submit(false, m)
     }
 
     /// Leest `buf.len()` bytes (een blokveelvoud) vanaf `lba`, in happen van
@@ -692,9 +756,13 @@ impl Nvme {
         for chunk in buf.chunks(step) {
             let nlb0 = self.check(l, chunk.len())?;
             // Na een time-out kan de controller nog in de buffer schrijven:
-            // er gaat geen byte meer in.
+            // er gaat geen byte meer in; zolang een verlaten opdracht loopt
+            // ook niet.
             if self.dead {
                 return Err(Error::Dead);
+            }
+            if self.pending.is_some() && self.reap().is_pending() {
+                return Err(Error::Busy);
             }
             dev::copy_in(self.data(), chunk);
             dev::push(self.data(), chunk.len());
@@ -815,7 +883,87 @@ fn blk_err(e: Error, lba: u64, len: usize) -> blkdev::Error {
     match e {
         Error::Range { .. } => blkdev::Error::OutOfRange { lba, len },
         Error::Dead | Error::Timeout { .. } | Error::Cid { .. } => blkdev::Error::Dead,
+        Error::Busy => blkdev::Error::Busy,
         _ => blkdev::Error::Io { lba },
+    }
+}
+
+impl Nvme {
+    /// Zet één opdracht van hoogstens [`max_transfer`](Self::max_transfer)
+    /// bytes op de I/O-queue (de asynchrone vorm); `lba` in LBA's van de
+    /// namespace. Een write gaat nu de databuffer in, dus pas als er niets
+    /// meer loopt.
+    fn start_op(&mut self, op: Op<'_>, lba: u64) -> Result {
+        match op {
+            Op::Read { len, .. } => {
+                let nlb0 = self.check(lba, len)?;
+                let m = self.io_cmd(IO_READ, lba, len, nlb0);
+                self.post(false, m, len)
+            }
+            Op::Write { data, .. } => {
+                let nlb0 = self.check(lba, data.len())?;
+                if self.dead {
+                    return Err(Error::Dead);
+                }
+                if self.pending.is_some() && self.reap().is_pending() {
+                    return Err(Error::Busy);
+                }
+                dev::copy_in(self.data(), data);
+                dev::push(self.data(), data.len());
+                let m = self.io_cmd(IO_WRITE, lba, data.len(), nlb0);
+                self.post(false, m, 0)
+            }
+            Op::Flush => self.post(
+                false,
+                Cmd {
+                    opc: IO_FLUSH,
+                    nsid: NSID,
+                    ..Cmd::default()
+                },
+                0,
+            ),
+        }
+    }
+
+    /// De completion van [`start_op`](Self::start_op): bij een lees de
+    /// bytes uit de databuffer naar `into`.
+    fn poll_op(&mut self, into: &mut [u8]) -> Poll<Result> {
+        let read = self.pending.map_or(0, |p| p.read);
+        let r = self.reap();
+        if matches!(r, Poll::Ready(Ok(()))) && read > 0 {
+            let n = read.min(into.len());
+            dev::pull(self.data(), n);
+            if let Some(d) = into.get_mut(..n) {
+                dev::copy_out(d, self.data());
+            }
+        }
+        r
+    }
+}
+
+/// De asynchrone vorm van het blokcontract: dezelfde LBA's van 512 bytes
+/// als [`blkdev::BlockDevice`] hierboven. Zonder lijn: de wachter pollt.
+impl blkdev::AsyncBlockDevice for Nvme {
+    fn max_transfer(&self) -> usize {
+        self.step()
+    }
+
+    fn start(&mut self, op: Op<'_>) -> blkdev::Result {
+        let (lba, len) = match op {
+            Op::Read { lba, len } => (lba, len),
+            Op::Write { lba, data } => (lba, data.len()),
+            Op::Flush => (0, 0),
+        };
+        let native = if matches!(op, Op::Flush) {
+            0
+        } else {
+            self.native(lba, len)?
+        };
+        self.start_op(op, native).map_err(|e| blk_err(e, lba, len))
+    }
+
+    fn poll_done(&mut self, into: &mut [u8]) -> Poll<blkdev::Result> {
+        self.poll_op(into).map_err(|e| blk_err(e, 0, 0))
     }
 }
 

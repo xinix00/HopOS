@@ -97,6 +97,9 @@ abi = { path = "../abi" }
 netdev = { path = "../netdev" }
 net = { path = "../net" }
 kern = { path = "../kern" }
+# Het blokcontract: `Paced` en `block_on` rond de schijf van het board
+# (storage.rs, bench.rs).
+blkdev = { path = "../blkdev" }
 board = { path = "../board" }
 # De lezer van `hopos.cfg` (config.rs: van de sleutels naar de env van Hop).
 fw = { path = "../fw" }

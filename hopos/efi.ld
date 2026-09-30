@@ -17,7 +17,7 @@
  *
  * Het contract met board-uefi: __efi_head (de basis), __rela_start/end,
  * __bss_start/end, __stack_top, en de absolute maten voor de header. Met
- * cpu::boot: __stack_top, __bss_start/end, en __boot_ttbr0 (alleen voor de
+ * cpu::boot: __stack_top, __stack_guard, __bss_start/end, en __boot_ttbr0 (alleen voor de
  * virt-ingang _start, die hier niet gebruikt wordt: een lege tabel).
  */
 
@@ -76,7 +76,12 @@ SECTIONS
     __bss_end = .;
   }
 
+  /* De wachtpagina onder de stack (30-09): het board maakt hem ongeldig in
+   * de map, zodat een overloop een luide fault is en niet stil het einde
+   * van .bss overschrijft. Hij komt bovenop STACK_SIZE. */
   .stack (NOLOAD) : ALIGN(4096) {
+    __stack_guard = .;
+    . += 4096;
     . += STACK_SIZE;
     __stack_top = .;
   }

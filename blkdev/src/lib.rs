@@ -2,19 +2,71 @@
 //!
 //! Precies de grens die hopfs nodig heeft: `buf.len()` bytes lezen of
 //! schrijven vanaf een LBA van 512 bytes, en alles wat geschreven is
-//! duurzaam maken. De virtio-blk-driver op QEMU en straks de NVMe-driver op
-//! ijzer leveren hem; de tests een schijf in RAM. Het trait woont hier en
-//! niet in `kern`, omdat een driver de kern niet kent (handboek §7, dezelfde
-//! reden als `netdev`).
+//! duurzaam maken. De virtio-blk-driver op QEMU en de NVMe-driver op ijzer
+//! leveren hem; de tests een schijf in RAM. Het trait woont hier en niet in
+//! `kern`, omdat een driver de kern niet kent (handboek §7, dezelfde reden
+//! als `netdev`).
 //!
-//! De grens is synchroon: een verzoek keert terug als het klaar is. Dat
-//! houdt de executor even vast; een asynchrone vorm komt met de splitsing
-//! in een metadata-actor en een blok-actor (PORT.md §3).
+//! Twee vormen:
+//!
+//! - [`AsyncBlockDevice`]: de vorm van de driver. Eén opdracht tegelijk,
+//!   [`submit`](AsyncBlockDevice::submit) geeft een [`InFlight`], en
+//!   [`InFlight::done`] wacht op de completion: op de bel van de IRQ-lijn met
+//!   een vangrail van [`IRQ_GUARD`], of zonder lijn door te pollen (eerst
+//!   per ronde, daarna op [`POLL_PERIOD`]). Tijdens het wachten draait de
+//!   executor door. [`Paced`] maakt er de [`BlockIo`] van die hopfs gebruikt.
+//! - [`BlockDevice`]: de synchrone vorm, voor wat vóór de executor draait
+//!   (de meetbank) en voor de tests. [`Blocking`] maakt er een [`BlockIo`]
+//!   van waarvan elke future meteen klaar is; [`block_on`] draait zo'n
+//!   future af.
+//!
+//! Les van 30-09 (de soak, ruim 1100 runs): tot dan was de grens alleen
+//! synchroon. De periodieke hopfs-commit (FLUSH, de boom, FLUSH) wachtte op
+//! de executor van de OS-core tot 5 s per verzoek op het device; op macOS is
+//! een FLUSH van QEMU een F_FULLFSYNC van 3 tot 786 ms, en zolang stonden de
+//! kern, Hop en de switch stil: geen tik, geen verkeer. Met 2,5 s per
+//! verzoek nagebootst was dat een stilte van 7 s (`late_ms=6611` op de
+//! tik). Vandaar submit plus await (PORT.md §3: "de NVMe-actor: zijn lus ís
+//! één tegelijk, `submit(buf) -> InFlight`").
 
 #![cfg_attr(not(test), no_std)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 #![forbid(unsafe_code)]
 
 use core::fmt;
+use core::future::Future;
+use core::pin::Pin;
+use core::task::{Context, Poll, Waker};
+use core::time::Duration;
+use sync::Signal;
+
+/// De maat van een LBA van het contract: altijd 512 bytes, ook als het
+/// device 4096-byte-blokken heeft (dan rekent de driver om).
+pub const LBA_SIZE: u64 = 512;
+
+/// De vangrail op de IRQ-lijn: een verloren flank mag nooit een hang
+/// worden, dus wie op de bel wacht, kijkt na deze tijd toch (dezelfde
+/// 10 ms als de RX-pomp).
+pub const IRQ_GUARD: Duration = Duration::from_millis(10);
+
+/// Zonder lijn: zo lang na de submit pollt [`InFlight::done`] per ronde
+/// van de executor (een yield, geen timer). Een 4 KB-lees op NVMe is binnen
+/// een paar tientallen microseconden klaar; die hoort geen timer te kosten.
+pub const POLL_SPIN_NS: u64 = 100_000;
+
+/// Zonder lijn, na [`POLL_SPIN_NS`]: de pollperiode. Een timer, geen yield:
+/// een executor die per ronde yieldt slaapt nooit, en op de OS-core krijgt
+/// een bewoner (Hop) alleen tijd als de executor slaapt. Een FLUSH van
+/// honderden milliseconden mag Hop niet uithongeren.
+pub const POLL_PERIOD: Duration = Duration::from_micros(200);
 
 /// Waarom een blok-verzoek niet lukte. Elke variant draagt de LBA, want
 /// "I/O failed" zonder plek is niets waard op een headless node.
@@ -35,6 +87,10 @@ pub enum Error {
     /// Het device is blijvend dood (een stil device kan nog in zijn
     /// DMA-buffer schrijven, dus na één stilte is er geen weg terug).
     Dead,
+    /// Er loopt nog een opdracht waarvan de wachter wegging (een gedropte
+    /// [`Done`]): tot die terug is, gaat er niets nieuws naar het device,
+    /// want de DMA-buffer is nog van de controller (handboek §1.2).
+    Busy,
 }
 
 impl fmt::Display for Error {
@@ -48,6 +104,7 @@ impl fmt::Display for Error {
                 )
             }
             Self::Dead => f.write_str("block device is dead"),
+            Self::Busy => f.write_str("block device still busy with an abandoned request"),
         }
     }
 }
@@ -55,7 +112,9 @@ impl fmt::Display for Error {
 /// Het resultaat van een blok-verzoek.
 pub type Result<T = (), E = Error> = core::result::Result<T, E>;
 
-/// Een blokapparaat zoals hopfs het ziet.
+/// Een synchroon blokapparaat: elk verzoek keert terug als het klaar is.
+/// Voor wat vóór de executor draait (de meetbank) en voor de tests; de
+/// hopfs-actor gebruikt [`BlockIo`].
 pub trait BlockDevice {
     /// Leest `buf.len()` bytes vanaf `lba`.
     fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result;
@@ -78,3 +137,292 @@ impl<D: BlockDevice + ?Sized> BlockDevice for &mut D {
         (**self).flush()
     }
 }
+
+/// Eén opdracht aan het device, hoogstens
+/// [`max_transfer`](AsyncBlockDevice::max_transfer) bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Op<'a> {
+    /// `len` bytes lezen vanaf `lba`; de bytes komen bij de completion.
+    Read {
+        /// De eerste LBA.
+        lba: u64,
+        /// Het aantal bytes.
+        len: usize,
+    },
+    /// `data` schrijven vanaf `lba`. De driver neemt de bytes bij de
+    /// submit over (naar zijn DMA-buffer): daarna is `data` weer vrij.
+    Write {
+        /// De eerste LBA.
+        lba: u64,
+        /// De bytes.
+        data: &'a [u8],
+    },
+    /// Alles wat geschreven is duurzaam maken.
+    Flush,
+}
+
+/// Een blokapparaat in de vorm van de driver: één opdracht tegelijk, met
+/// een submit en een completion.
+///
+/// De driver bezit zijn DMA-buffer; een opdracht die loopt, is van de
+/// controller tot de completion hem teruggeeft. [`submit`] geeft daarom een
+/// [`InFlight`] die de driver leent: een tweede submit kan pas als de eerste
+/// klaar is, en dat bewijst de compiler (handboek §1.2).
+///
+/// [`submit`]: AsyncBlockDevice::submit
+pub trait AsyncBlockDevice {
+    /// De grootste transfer van één opdracht in bytes (een veelvoud van
+    /// [`LBA_SIZE`]).
+    fn max_transfer(&self) -> usize;
+
+    /// Zet `op` op het device en luidt de doorbell; keert meteen terug. Een
+    /// fout hier (buiten de schijf, dood, [`Error::Busy`]) betekent dat er
+    /// niets naar het device ging.
+    fn start(&mut self, op: Op<'_>) -> Result;
+
+    /// Kijkt of de opdracht van [`start`](Self::start) klaar is. Bij een
+    /// lees komen de bytes in `into` (vooraan, zoveel als gelezen). De
+    /// time-out van het device is van de driver: daarna is het
+    /// `Ready(Err(Dead))`, nooit eeuwig `Pending`.
+    fn poll_done(&mut self, into: &mut [u8]) -> Poll<Result>;
+
+    /// De bel van de IRQ-lijn van het device, als het board er een
+    /// bedraadt. `None` = pollen.
+    fn irq(&self) -> Option<&'static Signal> {
+        None
+    }
+
+    /// Zet `op` op het device; de [`InFlight`] wacht op de completion.
+    fn submit(&mut self, op: Op<'_>) -> Result<InFlight<'_, Self>>
+    where
+        Self: Sized,
+    {
+        self.start(op)?;
+        Ok(InFlight { dev: self })
+    }
+}
+
+/// De klok en de wekker van wie op een device wacht: de executor levert
+/// hem (in de binary `exec.after`).
+pub trait Pace {
+    /// De future van [`sleep`](Pace::sleep).
+    type Sleep: Future<Output = ()> + Unpin;
+    /// Monotone nanoseconden.
+    fn now(&self) -> u64;
+    /// Een future die na `d` klaar is.
+    fn sleep(&self, d: Duration) -> Self::Sleep;
+}
+
+/// Een [`Pace`] zonder executor: nooit slapen, altijd opnieuw kijken. Voor
+/// [`block_on`] en de tests.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Spin;
+
+impl Pace for Spin {
+    type Sleep = core::future::Ready<()>;
+    fn now(&self) -> u64 {
+        0
+    }
+    fn sleep(&self, _d: Duration) -> Self::Sleep {
+        core::future::ready(())
+    }
+}
+
+/// Een opdracht die op het device staat. Hij leent de driver: zolang hij
+/// leeft, kan er geen tweede opdracht bij.
+#[must_use = "een opdracht die niemand afwacht, houdt de driver bezet"]
+pub struct InFlight<'d, D: AsyncBlockDevice> {
+    dev: &'d mut D,
+}
+
+impl<'d, D: AsyncBlockDevice> InFlight<'d, D> {
+    /// Wacht op de completion; bij een lees komen de bytes in `into`.
+    /// Tijdens het wachten draait de executor door: op de bel van de lijn
+    /// (met de vangrail [`IRQ_GUARD`]), of pollend.
+    pub fn done<'b, P: Pace>(self, into: &'b mut [u8], pace: &'b P) -> Done<'d, 'b, D, P> {
+        Done {
+            t0: pace.now(),
+            dev: self.dev,
+            into,
+            pace,
+            sleep: None,
+        }
+    }
+}
+
+/// De future van [`InFlight::done`].
+///
+/// Hij toetst het device bij élke poll, ook als niemand hem wekte: zo werkt
+/// hij onder [`block_on`] (die pollt zonder wekker) precies als op de
+/// executor. Gedropt vóór de completion is de opdracht niet weg; de driver
+/// ruimt haar op bij de volgende submit, of weigert die met
+/// [`Error::Busy`] tot het device klaar is.
+#[must_use = "een future doet niets tot hij gepolld wordt"]
+pub struct Done<'d, 'b, D: AsyncBlockDevice, P: Pace> {
+    dev: &'d mut D,
+    into: &'b mut [u8],
+    pace: &'b P,
+    t0: u64,
+    sleep: Option<P::Sleep>,
+}
+
+impl<D: AsyncBlockDevice, P: Pace> Future for Done<'_, '_, D, P> {
+    type Output = Result;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result> {
+        // `Done` is `Unpin`: verwijzingen, een getal en een `Unpin`-slaap.
+        let this = self.get_mut();
+        loop {
+            if let Poll::Ready(r) = this.dev.poll_done(this.into) {
+                return Poll::Ready(r);
+            }
+            let period = match this.dev.irq() {
+                Some(bell) => {
+                    // Level-triggered: een bel van een vorige opdracht geeft
+                    // hoogstens één ronde te veel kijken.
+                    if Pin::new(&mut bell.wait()).poll(cx).is_ready() {
+                        this.sleep = None;
+                        continue;
+                    }
+                    IRQ_GUARD
+                }
+                None => {
+                    if this.pace.now().saturating_sub(this.t0) < POLL_SPIN_NS {
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
+                    POLL_PERIOD
+                }
+            };
+            let pace = this.pace;
+            let s = this.sleep.get_or_insert_with(|| pace.sleep(period));
+            if Pin::new(s).poll(cx).is_pending() {
+                return Poll::Pending;
+            }
+            this.sleep = None;
+        }
+    }
+}
+
+/// Het blokapparaat zoals hopfs het ziet: lezen, schrijven en flushen als
+/// futures, van elke lengte (de brokken zijn van de implementatie).
+pub trait BlockIo {
+    /// Leest `buf.len()` bytes vanaf `lba`.
+    fn read(&mut self, lba: u64, buf: &mut [u8]) -> impl Future<Output = Result>;
+    /// Schrijft `buf` vanaf `lba`.
+    fn write(&mut self, lba: u64, buf: &[u8]) -> impl Future<Output = Result>;
+    /// Maakt alles wat geschreven is duurzaam.
+    fn flush(&mut self) -> impl Future<Output = Result>;
+}
+
+impl<D: BlockIo + ?Sized> BlockIo for &mut D {
+    fn read(&mut self, lba: u64, buf: &mut [u8]) -> impl Future<Output = Result> {
+        (**self).read(lba, buf)
+    }
+    fn write(&mut self, lba: u64, buf: &[u8]) -> impl Future<Output = Result> {
+        (**self).write(lba, buf)
+    }
+    fn flush(&mut self) -> impl Future<Output = Result> {
+        (**self).flush()
+    }
+}
+
+/// Een [`AsyncBlockDevice`] met zijn [`Pace`] als [`BlockIo`]: een verzoek
+/// in brokken van `max_transfer`, elk brok een submit en een await.
+pub struct Paced<D, P> {
+    dev: D,
+    pace: P,
+}
+
+impl<D: AsyncBlockDevice, P: Pace> Paced<D, P> {
+    /// De driver `dev`, wachtend op `pace`.
+    pub fn new(dev: D, pace: P) -> Self {
+        Self { dev, pace }
+    }
+
+    /// De driver.
+    pub fn dev(&self) -> &D {
+        &self.dev
+    }
+
+    /// De driver, veranderlijk.
+    pub fn dev_mut(&mut self) -> &mut D {
+        &mut self.dev
+    }
+
+    /// De brokmaat: de grootste transfer in hele LBA's, minstens één.
+    fn step(&self) -> usize {
+        let lba = LBA_SIZE as usize;
+        let m = self.dev.max_transfer();
+        (m - m % lba).max(lba)
+    }
+}
+
+impl<D: AsyncBlockDevice, P: Pace> BlockIo for Paced<D, P> {
+    async fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result {
+        let step = self.step();
+        let mut l = lba;
+        for chunk in buf.chunks_mut(step) {
+            let len = chunk.len();
+            self.dev
+                .submit(Op::Read { lba: l, len })?
+                .done(chunk, &self.pace)
+                .await?;
+            l += len as u64 / LBA_SIZE;
+        }
+        Ok(())
+    }
+
+    async fn write(&mut self, lba: u64, buf: &[u8]) -> Result {
+        let step = self.step();
+        let mut l = lba;
+        for chunk in buf.chunks(step) {
+            self.dev
+                .submit(Op::Write {
+                    lba: l,
+                    data: chunk,
+                })?
+                .done(&mut [], &self.pace)
+                .await?;
+            l += chunk.len() as u64 / LBA_SIZE;
+        }
+        Ok(())
+    }
+
+    async fn flush(&mut self) -> Result {
+        self.dev.submit(Op::Flush)?.done(&mut [], &self.pace).await
+    }
+}
+
+/// Een synchrone [`BlockDevice`] als [`BlockIo`]: elke future is meteen
+/// klaar. Voor de meetbank (vóór de executor) en de tests.
+pub struct Blocking<D>(pub D);
+
+impl<D: BlockDevice> BlockIo for Blocking<D> {
+    async fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result {
+        self.0.read(lba, buf)
+    }
+    async fn write(&mut self, lba: u64, buf: &[u8]) -> Result {
+        self.0.write(lba, buf)
+    }
+    async fn flush(&mut self) -> Result {
+        self.0.flush()
+    }
+}
+
+/// Draait een future af zonder executor: pollen tot hij klaar is. Voor de
+/// boot (de mount vóór `exec.run`), de meetbank en de tests; op de executor
+/// hoort hij nooit, want hij houdt de core vast.
+pub fn block_on<F: Future>(f: F) -> F::Output {
+    let mut f = core::pin::pin!(f);
+    let mut cx = Context::from_waker(Waker::noop());
+    loop {
+        if let Poll::Ready(v) = f.as_mut().poll(&mut cx) {
+            return v;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+#[cfg(test)]
+mod tests;

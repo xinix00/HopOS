@@ -65,7 +65,23 @@ extern "C" fn apple_early(x0: u64, pool: u64) -> u64 {
     // SAFETY: `pool` is `__apple_tables` in de BSS (`hopos/link-apple.ld`):
     // 4 KB-gealigneerd, `mmu::TABLES` pagina's, van niemand anders, en de
     // MMU staat nog uit.
-    unsafe { crate::mmu::build(pool, actual) }
+    unsafe { crate::mmu::build(pool, actual, stack_guard()) }
+}
+
+/// Het adres van de wachtpagina onder de stack (`__stack_guard` in
+/// `hopos/link-apple.ld`).
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+fn stack_guard() -> u64 {
+    unsafe extern "C" {
+        safe static __stack_guard: u8;
+    }
+    (&raw const __stack_guard).addr() as u64
+}
+
+/// Host-stub: geen linkscript, dus geen wachtpagina.
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+fn stack_guard() -> u64 {
+    0
 }
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]

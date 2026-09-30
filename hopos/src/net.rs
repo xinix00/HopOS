@@ -210,6 +210,9 @@ pub(crate) struct Params {
     /// De kick van slot `i` na een leeg-naar-niet-leeg-schrijf in zijn
     /// RX-ring (van de slot-lifecycle; zonder slots niets).
     pub(crate) slot_wake: fn(usize),
+    /// Deelt de bewoner van slot `i` de OS-core? Dan wacht de switch niet
+    /// op zijn RX-ring (`net::switch::Config::resident`).
+    pub(crate) resident: fn(usize) -> bool,
 }
 
 /// Wat de system-listener van de lifecycle-kant krijgt: de system-API en de
@@ -292,6 +295,7 @@ where
             clock: p.clock,
             log: log_line,
             slot_wake: p.slot_wake,
+            resident: p.resident,
         },
         Wiring {
             commands: &COMMANDS,
