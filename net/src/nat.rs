@@ -516,9 +516,14 @@ impl Nat {
             return true;
         }
         if self.reply_in(io, f, ip.l4, ip.proto, u, now) {
+            io.stats().nat_reply_in.fetch_add(1, Relaxed);
             return true;
         }
-        self.dnat_in(io, f, ip.l4, ip.proto, u)
+        if self.dnat_in(io, f, ip.l4, ip.proto, u) {
+            return true;
+        }
+        io.stats().nat_in_unmatched.fetch_add(1, Relaxed);
+        false
     }
 
     /// De gedeelde staart van elk pad richting een app: bestemming

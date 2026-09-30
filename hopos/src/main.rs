@@ -730,7 +730,7 @@ async fn tick(exec: &'static Executor) {
         let sw = &net::STATS;
         let stack_kb = stack_high_water() / 1024;
         println!(
-            "HOPOS_TICK {n} late_ms={late_ms} sleeps={} polls={} irq(timer={} nic={} other={}) os(in={} irq={} ipi={} timer={} yield={} exit={} fault={} idle={} res_ms={} kicks={}) turn(last={}:{} long_us={long_us}) stack_kb={stack_kb} sw(door={} timer={} rxfull={} rxdrop={} big={} noroute={} txdrop={} flowfull={}) temp={}",
+            "HOPOS_TICK {n} late_ms={late_ms} sleeps={} polls={} irq(timer={} nic={} other={}) os(in={} irq={} ipi={} timer={} yield={} exit={} fault={} idle={} res_ms={} kicks={}) turn(last={}:{} long_us={long_us}) stack_kb={stack_kb} sw(door={} timer={} rxfull={} rxdrop={} big={} noroute={} txdrop={} flowfull={} natin={} natmiss={}) temp={}",
             s.sleeps.load(Relaxed),
             s.polls.load(Relaxed),
             IRQS[0].load(Relaxed),
@@ -756,6 +756,8 @@ async fn tick(exec: &'static Executor) {
             sw.nat_no_route.load(Relaxed),
             sw.uplink_tx_drops.load(Relaxed),
             sw.nat_flow_full.load(Relaxed),
+            sw.nat_reply_in.load(Relaxed),
+            sw.nat_in_unmatched.load(Relaxed),
             telemetry::Temp(telemetry::temp_milli_c()),
         );
     }

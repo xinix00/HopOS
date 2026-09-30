@@ -118,6 +118,15 @@ pub struct Stats {
     /// kwam nooit aan" niet te scheiden van "de server antwoordde niet"
     /// (het beeld dat op 20-09 op drie boards als client opdook).
     pub nat_flow_full: AtomicU64,
+    /// Inbound van buiten dat een masq-flow raakte en naar het slot ging:
+    /// de SYN-ACK's en de rest van elke uitgaande verbinding. Samen met
+    /// `nat_in_unmatched` scheidt dit "de SYN-ACK kwam nooit aan" van "hij
+    /// kwam aan en het slot deed er niets mee" (de Pi 5 aan het LAN, 30-09:
+    /// 5 van 15 connects naar buiten, met noroute en flowfull op nul).
+    pub nat_reply_in: AtomicU64,
+    /// Inbound aan het node-IP dat geen flow en geen publicatie raakte: dat
+    /// ging naar de node-stack (DHCP, en alles wat verdwaald is).
+    pub nat_in_unmatched: AtomicU64,
     /// Uplink-frames die de pomp niet in de ingress-rij kwijt kon.
     pub uplink_rx_drops: AtomicU64,
     /// Frames die de switch niet in de egress-rij kwijt kon.
@@ -147,6 +156,8 @@ impl Stats {
             nat_oversize: AtomicU64::new(0),
             nat_no_route: AtomicU64::new(0),
             nat_flow_full: AtomicU64::new(0),
+            nat_reply_in: AtomicU64::new(0),
+            nat_in_unmatched: AtomicU64::new(0),
             uplink_rx_drops: AtomicU64::new(0),
             uplink_tx_drops: AtomicU64::new(0),
             rx_idle: AtomicU64::new(0),
