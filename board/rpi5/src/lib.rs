@@ -395,6 +395,14 @@ fn wire_irq(rc: &Rc, nic: &mut Gem) -> Result<u32, &'static str> {
         RP1_MSIX_ENABLE | RP1_MSIX_IACK_EN,
     );
     dev::mb();
+    // Eén IACK om te beginnen: de vorige kern kan midden in een afhandeling
+    // gesprongen zijn (de MSI gestuurd, de IACK nooit gegeven), en dan
+    // wacht de RP1 eeuwig op een kern die er niet meer is. GEMETEN 30-09
+    // (drie flips vanuit de koud gebootte kaart-kern): de GEM ontving
+    // (rxstatus 0x2, de ringpointer liep) en hield zijn latch (isr 0x2),
+    // maar er kwam geen MSI meer, irq(nic=0). Op een koude boot doet de
+    // IACK niets.
+    rp1_iack();
     nic.set_irq(bell, rp1_iack);
     Ok(id)
 }
@@ -448,6 +456,20 @@ pub fn nic_diag() {
     };
     // SAFETY: RP1_ETH is het GEM-blok achter de getrainde link (net gelezen).
     let g = unsafe { driver_gem::diag(RP1_ETH) };
+    // De RX-ring ligt vooraan in NET_DMA (driver_gem::Gem::new: rx_ring =
+    // dma). Eerst zoals de CPU hem leest, dan na een clean-en-invalidate
+    // van die regels: verschillen ze, dan leest de CPU uit zijn cache en is
+    // de ring niet non-cacheable gemapt.
+    let ring = Pa(map::NET_DMA.base);
+    // SAFETY: de ring van de levende GEM, vooraan in NET_DMA.
+    let before = unsafe { driver_gem::ring_words(ring) };
+    dev::pull(ring, 64);
+    // SAFETY: idem.
+    let after = unsafe { driver_gem::ring_words(ring) };
+    cpu::println!(
+        "net: rp1 diag: rx ring {:#x}: desc0..3 (w0,w1) {before:x?}, after invalidate {after:x?}",
+        ring.0
+    );
     cpu::println!(
         "net: rp1 diag: pcie {:#x}, mip {mip:x?}, msix_cfg[eth] {cfg:#x}, entry {entry:x?}, gem nwctrl {:#x} nwcfg {:#x} nwstatus {:#x} dmacfg {:#x} txstatus {:#x} rxqbase {:#x} rxstatus {:#x} isr {:#x} imr {:#x} HOPOS_RP1_DIAG",
         rc.status(),

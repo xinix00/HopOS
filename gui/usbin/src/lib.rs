@@ -249,6 +249,18 @@ impl<T: Timer> Manager<T> {
         self.ctls.len()
     }
 
+    /// Halteert elke controller (`Hc::stop`): vóór een kern-flip, zodat
+    /// geen DMA-master op de bus door de link-reset van de nieuwe kern heen
+    /// schrijft (de Pi 5, 30-09: vijf flips vanuit een kern met koud
+    /// gestarte xHCI's eindigden met een RP1 die niets meer naar de host
+    /// kreeg). Daarna is de dienst klaar; de structuren blijven staan.
+    pub async fn stop_all(&mut self) {
+        let t = &self.timer;
+        for c in self.ctls.iter_mut() {
+            c.hc.stop(t).await;
+        }
+    }
+
     /// Neemt een controller in beheer: probe, reset, structuren opzetten in
     /// `[dma, dma+size)`, poortvoeding aan. Een controller die niet
     /// antwoordt is geen fatale fout: een board mag meer controllers

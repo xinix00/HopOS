@@ -37,17 +37,24 @@ de RNG200 (`HOPOS_RNG200_UP`) en de PM-watchdog gewapend en geaaid.
 - [ ] Dvfs via de mailbox: geport, maar de kaart heeft geen `arm_freq_min`
       (generatie 8: `HOPOS_CLOCK_NONE`, "one ARM clock"). Komt met de nieuwe
       kaart: `HOPOS_CLOCK_UP`, `HOPOS_CLOCK_EDGE` naar 800 MHz na 30 s rust.
-- [ ] **Een flip vanuit de koud gebootte kaart-kern doodt de RP1-NIC**
-      (drie keer op 30-09: J, K, L): na de landing `irq(nic=0)`, geen enkel
-      pakket (`door` blijft staan), DHCP "no server answered", de
-      boot-guard verloopt en de watchdog reset naar de kaart, die dan
-      gewoon boot. Niet de GIC (de veeg hielp niet), niet de klok (de
-      NIC-init op 1500 MHz faalde ook). De Pi 4 (GENET, gepold) flipt
-      vanuit zijn koude kaart-kern wél. Wat de koude gui-kaart-kern van
-      14:32 anders achterlaat dan de kale alpha.17-kern (waaruit acht
-      flips slaagden): USB (beide RP1-xHCI's koud geïnitialiseerd), de
-      RNG200, dvfs. Verdenking: de RP1 (PCIe, MSI-X via de MIP). Debuggen
-      op de seriële console met registerdumps na `gem up`.
+- [ ] **Een flip vanuit de koud gebootte kaart-kern doodt het pad RP1 →
+      host** (zeven keer op 30-09: J tot O): na de landing zijn de
+      GEM-registers bereikbaar en ziet hij de link, maar hij haalt zijn
+      descriptors niet uit DRAM (`rxqbase` blijft op de basis, `rxstatus
+      0x4` overrun, de descriptors onaangeroerd ook na cache-invalidatie)
+      en zijn MSI komt evenmin aan (`irq(nic=0)`); DHCP "no server
+      answered", de boot-guard verloopt, de watchdog reset naar de kaart
+      en die boot gewoon. Uitgesloten: de GIC (veeg), de klok (NIC-init op
+      1500 MHz, en de flank 10 s uitgesteld), een IACK die de RP1 nog
+      verwachtte. Uit de kale alpha.17-kern slaagden acht flips, en de Pi 4
+      (GENET op de SoC) flipt vanuit zijn koude gui-kern gewoon. Wat de
+      koude gui-kern anders achterlaat: twee draaiende xHCI's in de RP1
+      (DMA-masters op dezelfde PCIe-link) tijdens de link-reset van de
+      nieuwe kern. Sinds de commit na proef O halteert de vertrekkende
+      kern zijn xHCI's vlak vóór de sprong (`gui::quiesce_usb`,
+      `HOPOS_USB_HALTED`) en zet hij de klok vol; dat zit pas in de kaart
+      na een herflash. Proef: de nieuwe kaart koud booten (de dump op 5 en
+      30 s is dan de referentie, `HOPOS_RP1_DIAG`) en dan flippen.
 - [ ] De koude boot van de kaart van 14:32 (gezien 16:40): `HOPOS_RNG200_UP`,
       `HOPOS_CLOCK_UP` met de val naar 800 MHz na 30 s rust, USB, Hop met
       "no disk on this node", SNTP. Maar géén glas: `fb: mailbox

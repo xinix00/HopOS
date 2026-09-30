@@ -207,6 +207,22 @@ fn regs(base: Pa) -> &'static Regs {
     unsafe { dev::regs(base) }
 }
 
+/// De eerste vier RX-descriptors (w0, w1) zoals de CPU ze nu leest, voor de
+/// diagnose: staat OWNED (bit 0 van w0) waar de hardware al vulde?
+///
+/// # Safety
+///
+/// `ring` is de RX-ring van een levende `Gem` (`rx_ring` uit `new`).
+#[must_use]
+pub unsafe fn ring_words(ring: Pa) -> [u32; 8] {
+    let mut out = [0u32; 8];
+    for i in 0..4 {
+        out[2 * i] = dev::read32(ring.add((i * 16) as u64));
+        out[2 * i + 1] = dev::read32(ring.add((i * 16 + 4) as u64));
+    }
+    out
+}
+
 /// Registerdump voor de diagnose (de flip-jacht van 30-09 op de Pi 5):
 /// NWCTRL, NWCFG, NWSTATUS, DMACFG, TXSTATUS, RXQBASE, RXSTATUS, ISR, IMR.
 ///

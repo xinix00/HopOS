@@ -49,6 +49,9 @@ mod off {
     /// Geen USB-invoer.
     pub(crate) fn start_usb_input(_exec: &'static Executor) {}
 
+    /// Geen USB: niets stil te leggen.
+    pub(crate) async fn quiesce_usb(_exec: &'static Executor) {}
+
     /// De grant-aanbieder van de lifecycle: geen. Een job die om het glas
     /// vraagt, draait headless.
     pub(crate) fn slot_grants() -> kern::grants::NoGrants {
@@ -211,6 +214,21 @@ mod on {
         usb::start(exec);
     }
 
+    /// Vóór de sprong van een flip: de USB-controllers halteren (ze zijn
+    /// DMA-masters op de bus; de Pi 5, 30-09) en hoogstens een seconde
+    /// wachten tot de USB-taak dat meldt. Zonder levende USB-taak niets.
+    pub(crate) async fn quiesce_usb(exec: &'static Executor) {
+        if !usb::USB_LIVE.load(core::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        usb::FLIP_STOP.set();
+        let _ = sync::select(
+            usb::USB_QUIET.wait(),
+            exec.after(core::time::Duration::from_secs(1)),
+        )
+        .await;
+    }
+
     /// De houder van het glas als slot van de ABI (het bron-IP van de
     /// display-app volgt eruit), voor de input-listener. `None` zonder
     /// houder, of als de grant net geleend is (dan komt er niemand binnen,
@@ -228,6 +246,14 @@ mod on {
     /// vol is weggooien en tellen, want de pollus mag nooit wachten op een
     /// display die niet leest.
     mod usb {
+        /// De flip vraagt de USB-taak te stoppen (`quiesce_usb`).
+        pub(super) static FLIP_STOP: sync::Signal = sync::Signal::new();
+        /// De USB-taak meldt dat de controllers stilstaan.
+        pub(super) static USB_QUIET: sync::Signal = sync::Signal::new();
+        /// Draait de USB-taak met levende controllers?
+        pub(super) static USB_LIVE: core::sync::atomic::AtomicBool =
+            core::sync::atomic::AtomicBool::new(false);
+
         use super::GRANT;
         use board::{Board, UsbHost, UsbHosts, UsbKind};
         use core::fmt;
@@ -413,12 +439,24 @@ mod on {
                 "usb: {live} controller(s) up, polling every {} ms HOPOS_USB_UP",
                 gui_usbin::POLL_INTERVAL_NS / 1_000_000
             );
+            USB_LIVE.store(true, core::sync::atomic::Ordering::Release);
             loop {
                 #[cfg(feature = "media")]
                 if let Some(req) = sink.optical.next() {
                     mgr.enqueue(req, &mut sink);
                 }
-                let wait = mgr.step(&mut sink).await;
+                let wait = match sync::select(mgr.step(&mut sink), FLIP_STOP.wait()).await {
+                    sync::Either::Left(w) => w,
+                    sync::Either::Right(()) => {
+                        // Een flip komt: alle controllers stil, en zeggen dat
+                        // het zo is. De taak eindigt; komt de sprong er niet,
+                        // dan is de invoer weg tot de volgende boot.
+                        mgr.stop_all().await;
+                        println!("usb: {live} controller(s) halted for the flip HOPOS_USB_HALTED");
+                        USB_QUIET.set();
+                        return;
+                    }
+                };
                 #[cfg(feature = "media")]
                 let _ = sync::select(
                     exec.after(Duration::from_nanos(wait)),

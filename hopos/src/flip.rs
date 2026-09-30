@@ -902,6 +902,11 @@ async fn capture_and_jump(exec: &'static Executor, p: Prepared, frozen: &mut Fro
         }
         Err(why) => return JumpError::Nat(why),
     };
+    // 2b. De USB-controllers stil: DMA-masters op de RP1 die anders door de
+    // link-reset van de nieuwe kern heen zouden schrijven (30-09, de Pi 5:
+    // vijf flips vanuit de koud gebootte gui-kern, en de RP1 kreeg daarna
+    // niets meer naar de host, geen descriptor en geen MSI).
+    crate::gui::quiesce_usb(exec).await;
     // 3. Het laatste `.await` van deze kern: de bewoners.
     let slots: Vec<SlotState> =
         match kern::slots::call(&crate::LIFECYCLE, &REPLY, Request::Snapshot).await {

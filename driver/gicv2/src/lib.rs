@@ -410,6 +410,7 @@ mod tests {
     fn quiesce_clears_the_spi_words_only() {
         let (mut d, mut c) = mem();
         let (dp, cp) = (pa(&mut d), pa(&mut c));
+        // SAFETY: het nep-blok van `mem`, groot genoeg voor beide banken.
         let g = unsafe { Gic::new(dp, cp) };
         g.quiesce_spis();
         // Write-1-to-clear op ijzer; het nep-blok bewaart wat er geschreven is.
