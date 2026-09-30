@@ -192,7 +192,13 @@ app-core met HTTP 200, de console op 5555.
       pgctrl=0x7cef000"); daarna goed.
 - [ ] De console na de exit: de SPCR-UART blijft van de SCP; 5555 is de
       console (werkt).
-- [ ] De meting: `hopos.codecdemo`, apps/decode, 24 fps 4K P010 (Go 27,25).
+- [ ] De meting is gedaan: apps/decode via Hop met een 4K-clip van 240
+      beelden geeft `HOPOS_DECODE fps=85.7 MBps=2134` (2797 ms; de lat is
+      24 fps, Go 27,25 met Lumen). Eerst faultte de decoder na 14 beelden:
+      decode knipte zijn happen van 1 MB midden in een NAL-eenheid (de fout
+      van 22-09 in docs/media.md); nu knipt hij op de laatste startcode en
+      neemt hij de rest mee. Nog te doen: `hopos.codecdemo` (het
+      meetinstrument van de kern zelf) en Lumen.
 - [ ] De display-app en HID op de xHCI's (op XHC4 poort 2 zit een
       super-speed apparaat), de optische drive over USB-BOT en MMC (de
       device-op is gebouwd, nergens getoetst).

@@ -71,6 +71,23 @@ const IN_BUFS: usize = 4;
 /// fout, alleen een kapot beeld (22-09); een grote hap maakt dat zeldzaam.
 const IN_SIZE: usize = 1 << 20;
 
+/// Waar een hap knipt: het begin van de laatste Annex-B-startcode in `b`
+/// (`00 00 01`, met de `00` ervoor als die er is), zodat elke NAL-eenheid
+/// heel bij de decoder komt en de rest naar de volgende hap gaat. `None`
+/// als er na de eerste byte geen startcode staat (één NAL groter dan de
+/// hap: dan gaat alles, gesplitst).
+fn nal_cut(b: &[u8]) -> Option<usize> {
+    let mut i = b.len().checked_sub(3)?;
+    while i > 0 {
+        if b.get(i..i + 3) == Some(&[0, 0, 1]) {
+            let cut = if b.get(i - 1) == Some(&0) { i - 1 } else { i };
+            return (cut > 0).then_some(cut);
+        }
+        i -= 1;
+    }
+    None
+}
+
 /// De beeldbuffers zonder `DECODE_BUFS` (Go: `codecDemoBuffers`).
 const FRAMES: usize = 12;
 
@@ -325,6 +342,13 @@ async fn run(
         size: IN_SIZE as u64,
     })?;
     let mut m = Meter::default();
+    // De rest van een hap: de NAL-eenheid die over de grens van een
+    // invoerbuffer liep, voor de volgende buffer (hoogstens één hap).
+    let mut carry: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    carry.try_reserve_exact(IN_SIZE).map_err(|_| Stop::Memory {
+        want: 1,
+        size: IN_SIZE as u64,
+    })?;
     let (mut eos, mut done) = (false, false);
     let mut evs = [Event::default(); MAX_EVENTS];
     let start = clock::now_ns();
@@ -337,8 +361,29 @@ async fn run(
             let Some(buf) = b.ins.as_mut_slice().get_mut(i) else {
                 break;
             };
-            let n = src.fill(sys, buf.bytes_mut()).await.map_err(Stop::Source)?;
-            eos = (n as u64) < buf.len();
+            // Eerst de rest van de vorige hap, dan de bron erachter; dan
+            // alleen hele NAL-eenheden voeren. GEMETEN 30-09 op de O6N: een
+            // NAL die over twee happen liep liet de decoder faulten (een
+            // clip van 15 MB na 14 beelden, precies bij 1 MB; docs/media.md
+            // zag op 22-09 al kapotte beelden bij happen), een clip in één
+            // hap gaf 43 fps.
+            let n = {
+                let bytes = buf.bytes_mut();
+                let kept = carry.len();
+                if let Some(head) = bytes.get_mut(..kept) {
+                    head.copy_from_slice(&carry);
+                }
+                carry.clear();
+                let room = bytes.get_mut(kept..).unwrap_or_default();
+                let got = src.fill(sys, room).await.map_err(Stop::Source)?;
+                eos = got < room.len();
+                let mut n = kept + got;
+                if !eos && let Some(cut) = nal_cut(bytes.get(..n).unwrap_or_default()) {
+                    carry.extend_from_slice(bytes.get(cut..n).unwrap_or_default());
+                    n = cut;
+                }
+                n
+            };
             let flags = if eos { Flags::EOS } else { Flags(0) };
             m.fed += n as u64;
             ses.feed(sys, buf.off(b.ram), buf.len(), n as u64, flags, i as u64)
@@ -449,5 +494,22 @@ mod tests {
         let off = b.outs.as_slice()[2].off(ram);
         assert_eq!(Bufs::find(b.outs.as_slice(), ram, off), Some(2));
         assert_eq!(Bufs::find(b.ins.as_slice(), ram, off), None);
+    }
+}
+
+#[cfg(test)]
+mod nal_tests {
+    use super::nal_cut;
+
+    #[test]
+    fn a_chunk_is_cut_at_the_last_start_code() {
+        // Een 3-byte startcode op 6.
+        assert_eq!(nal_cut(&[0, 0, 0, 1, 9, 9, 0, 0, 1, 7, 7]), Some(6));
+        // Een 4-byte startcode op 6: de 00 ervoor hoort erbij.
+        assert_eq!(nal_cut(&[0, 0, 0, 1, 9, 9, 0, 0, 0, 1, 7]), Some(6));
+        // Alleen de startcode aan het begin: niets te knippen.
+        assert_eq!(nal_cut(&[0, 0, 0, 1, 9, 9, 9]), None);
+        assert_eq!(nal_cut(&[1, 2, 3]), None);
+        assert_eq!(nal_cut(&[]), None);
     }
 }

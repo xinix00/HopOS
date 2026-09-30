@@ -78,6 +78,11 @@ Of van een URL, zonder volume:
 De stream op het volume zetten kan met elke app die `/data` mount, of met
 Lumen; de kern leest hem daar ook voor het meetinstrument.
 
+De happen van 1 MB knippen op de laatste Annex-B-startcode, zodat elke
+NAL-eenheid heel bij de decoder komt en de rest naar de volgende hap gaat.
+GEMETEN 30-09 op de O6N: een NAL die over twee happen liep liet de decoder
+faulten na 14 beelden; heel gevoerd deed dezelfde clip 85,7 fps.
+
 ## Op QEMU
 
 Zonder VPU weigert de kern de open luid, en de app zegt dat en blijft staan

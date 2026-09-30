@@ -91,6 +91,12 @@ staart (hoogstens 1 GiB) en 4 KiB willekeurig.
 | Willekeurig 4 KiB | geen Go-getal (O6N: 4 KiB-overschrijvingen via de app 15,15 tot 17,08 MB/s) | 32051 / 32123 IOPS | | | |
 | App-opslag, 256 MiB, 1 MiB-calls | O6N 556,83 tot 625,43 / 727,49 tot 796,83; M4 1598 tot 1657 / 1064 tot 1072 MB/s | nog geen v3-rol (bench heeft geen FS-rol) | | | |
 
+## Media: de hardwaredecoder van de O6N
+
+| Meting | Go | Commando, marker | v3 O6N |
+| --- | --- | --- | --- |
+| 4K P010 door de grant, apps/decode via Hop | 27,25 fps met Lumen op GAMEOFTHRONES_S1_D1 (27-09, met de software-encoder erachter); de lat is 24 fps = 597 MB/s | `POST /v1/jobs` met `decode.elf` en `DECODE_URL` (apps/decode/README.md), `HOPOS_DECODE fps= MBps=` | **85,7 fps, 2134 MB/s**: 240 beelden 3840x2160 p010 (14 MB x265-testclip van de laptop) in 2797 ms (30-09). Eerst 43,1 fps op 10 beelden, en een fault na 14 beelden zolang decode zijn happen van 1 MB midden in een NAL-eenheid knipte; sinds de knip op de laatste startcode heel |
+
 ## Wat hier (nog) niet gemeten wordt
 
 - De kern-flip: de echo-rtt tijdens een flip (Go, Pi 4: 4,3 tot 8,0 s). `tools/soak.sh` met `FLIP=1` telt de flips en de overleving, niet de rtt.
