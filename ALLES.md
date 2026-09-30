@@ -25,12 +25,11 @@ bunny en de meetregels gezien op de HDMI) en bracht beide RP1-xHCI's op
       first-contact-ARP of de verse gateway-neighbor die verloopt.
 - [ ] Hardware-RNG voor de slots (zie Overal); de RNG200 van de SoC (Go:
       OLD/metal/board/raspi/rng.go) is niet geport, dus `HOPOS_RNG_INSECURE`.
-- [ ] De wandklok gaat niet mee over de flip: Hop had hem gezet
-      (`HOPOS_CLOCK_SET`), generatie 4 begon weer op 2026-09-29T00:00:00Z en
-      het glas toonde 29-09 00:00:40 (gezien 30-09). Sinds stempel E zit de
-      offset in de overdracht (`Handoff::wall_off`); generatie 5 landde nog
-      met `HOPOS_CLOCK_FIXED` omdat de vertrekkende kern hem nog niet
-      schreef. Te bewijzen: `HOPOS_CLOCK_CARRIED` bij de flip naar 6.
+- [ ] Het glas toont pas de echte tijd als Hop zijn uurlijkse SNTP doet:
+      de wandklok gaat sinds generatie 6 mee over de flip
+      (`HOPOS_CLOCK_CARRIED`, bewezen 30-09), maar de generaties 4 en 5
+      begonnen nog op de vaste boot-klok en die offset is wat 6 erfde.
+      Verdwijnt vanzelf na de volgende `HOPOS_CLOCK_SET`.
 - [ ] Watchdog en dvfs (Go: OLD/metal/board/raspi/watchdog.go en
       OLD/metal/driver/dvfs): nu alleen haken (`HOPOS_WD_NONE`,
       `HOPOS_CLOCK_NONE`).
@@ -53,8 +52,10 @@ de Mac.
 - [ ] De USB-UART aan de Mac, dan de bootregels lezen: `HOPOS_BOOT`, genet
       op de level-SPI met de ack, `HOPOS_OS_SELFTEST ok` (de kick op de
       GIC-400), `HOP_UP`.
-- [ ] De gui-smaak via een flip (`GUI=1 sh image/flip-bundle.sh rpi4`): het
-      glas, en VL805-USB met de firmware-handshake via vcmail (nooit gezien).
+- [ ] De gui-smaak is er warm in geflipt (`GUI=1 sh image/flip-bundle.sh
+      rpi4`, generatie 2): de agentlijst kreeg meteen `temp_milli_c` (48 tot
+      50 C) en welcome bleef 200. Zonder console onbewezen: het glas
+      (`HOPOS_FB_CONSOLE`) en VL805-USB met de firmware-handshake via vcmail.
 - [ ] Zelfde punten als de Pi 5: off-link NAT, RNG, watchdog, dvfs, de
       SD-kaart in de gui-smaak.
 
