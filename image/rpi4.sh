@@ -88,7 +88,7 @@ dtoverlay=disable-bt
 # Het image van Hop in het laadvenster (board/raspi/src/map.rs).
 $INITRAMFS
 EOF
-echo "hopos.stage=${ROLE:-hop}" >"$OUT/cmdline.txt"
+echo "hopos.stage=${ROLE:-hop}${EXTRA:+ $EXTRA}" >"$OUT/cmdline.txt"
 
 echo "rpi4: $OUT/kernel8.img ($(wc -c <"$OUT/kernel8.img" | tr -d ' ') bytes), config.txt, cmdline.txt${IMAGE:+, hop.elf ($SIZE bytes, role $ROLE)}" >&2
 

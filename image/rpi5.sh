@@ -88,7 +88,7 @@ arm_freq=1500
 # Het image van Hop in het laadvenster (board/raspi/src/map.rs).
 $INITRAMFS
 EOF
-echo "hopos.stage=${ROLE:-hop}" >"$OUT/cmdline.txt"
+echo "hopos.stage=${ROLE:-hop}${EXTRA:+ $EXTRA}" >"$OUT/cmdline.txt"
 
 echo "rpi5: $OUT/hop-agent5.img ($(wc -c <"$OUT/hop-agent5.img" | tr -d ' ') bytes), config.txt, cmdline.txt${IMAGE:+, hop.elf ($SIZE bytes, role $ROLE)}" >&2
 
