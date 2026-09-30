@@ -44,6 +44,14 @@
 #               Hop, geopend vóór de sprong en pas ná de landing afgemaakt
 #               (GET /tasks in twee helften): de gepubliceerde poort en de
 #               luisterende Hop overleven de flip met de verbinding erop.
+#   de zwarte doos  (virt, warm) daarna een system_reset over QMP, zoals een
+#               watchdog-reset: het RAM blijft, de ROM's (kern A, de staging)
+#               komen terug. Kern A boot koud (HOPOS_BOOT gen=1 stamp=A) en
+#               drukt de console van kern B af: "the console of the dead
+#               kernel (generation 2)" HOPOS_FLIP_BLACKBOX, met de laatste
+#               HOPOS_APPSPIKE_DONE van kern B erin, en HOPOS_FLIP_BLACKBOX_END.
+#               De rest van de toets kijkt alleen naar de console van vóór
+#               de reset.
 #
 # Rood is ook: HOPOS_PANIC, HOPOS_EXCEPTION, een fout van Hop, en elke
 # flip-weigering (HOPOS_FLIP_REFUSED, _FAIL, _BLOB_BAD, _GUARD,
@@ -103,7 +111,8 @@
 #                                           keer leest; en dezelfde sprong
 #                                           ZONDER merkteken: die moet na "P2"
 #                                           parkeren (de koude-boot-poort).
-#   KEEP_LOG=pad tools/qemu-test-flip.sh    bewaart ook een groene console
+#   KEEP_LOG=pad tools/qemu-test-flip.sh    bewaart ook een groene console (en
+#                                           die van na de reset in pad.reset)
 #   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT/ECHOPORT  de host-poorten
 #   HOP_DIR=pad                             de hop-repo (standaard ../hop/hop)
 #   FEATURES=vhe CPU=neoverse-n1 BOARD=uefi ...  de flip met de kern onder
@@ -406,8 +415,10 @@ if [ "$BOARD" = uefi ]; then
 		-device virtio-blk-pci,drive=disk0 \
 		</dev/null >"$LOG" 2>&1 &
 else
+	# QMP voor de reset van de zwarte doos (hieronder); qemu-run.sh geeft
+	# zijn argumenten door aan QEMU.
 	HOPOS_STAMP=A SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISK="$DISK" \
-		sh "$DIR/image/qemu-run.sh" </dev/null >"$LOG" 2>&1 &
+		sh "$DIR/image/qemu-run.sh" -qmp "unix:$ART/q.sock,server=on,wait=off" </dev/null >"$LOG" 2>&1 &
 fi
 QPID=$!
 
@@ -571,9 +582,44 @@ while :; do
 	all_after "$WORK_MARKS" && break
 	step
 done
+# De zwarte doos: na een groene warme flip op virt een system_reset (het RAM
+# blijft, zoals na een watchdog-reset), en de koude kern A moet de console
+# van kern B afdrukken. Alles vanaf de reset gaat naar een eigen log.
+RESET=""
+CUT=""
+if [ "$BOARD" = virt ] && [ "$MODE" = warm ] && [ -n "$POSTED" ] && all_after "$WORK_MARKS" && ! has "$RED"; then
+	CUT="$(wc -c <"$LOG" | tr -d ' ')"
+	RESET="$(python3 - "$ART/q.sock" <<'QMP' 2>&1
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[1])
+f = s.makefile("rw")
+f.readline()
+for cmd in ("qmp_capabilities", "system_reset"):
+    f.write(json.dumps({"execute": cmd}) + "\n")
+    f.flush()
+    while True:
+        r = json.loads(f.readline())
+        if "return" in r or "error" in r:
+            break
+print(json.dumps(r))
+QMP
+)" || RESET="ROOD qmp: $RESET"
+	n=0
+	while [ "$n" -lt 150 ] && kill -0 "$QPID" 2>/dev/null; do
+		tail -c +"$((CUT + 1))" "$LOG" | tr -d '\r' | grep -q -E 'HOPOS_FLIP_BLACKBOX_(END|EMPTY|NONE)' && break
+		sleep 0.2
+		n=$((n + 1))
+	done
+fi
 kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
 QPID=""
+if [ -n "$CUT" ]; then
+	tail -c +"$((CUT + 1))" "$LOG" | tr -d '\r' >"$ART/reset.log"
+	head -c "$CUT" "$LOG" >"$ART/before.log"
+	cp "$ART/before.log" "$LOG"
+fi
 
 fail=0
 IFS_WAS="$IFS"
@@ -698,6 +744,38 @@ if has "$RED"; then
 	echo "   ROOD $(tr -d '\r' <"$LOG" | grep -m1 -E "$RED")"
 	fail=1
 fi
+if [ "$BOARD" = virt ] && [ "$MODE" = warm ]; then
+	# De zwarte doos, uit de console van na de reset. Een regel van de doos
+	# zelf begint met "  | "; alleen de regels van kern A tellen als rood.
+	R="$ART/reset.log"
+	box() { awk '/HOPOS_FLIP_BLACKBOX$/ { f = 1; next } /HOPOS_FLIP_BLACKBOX_END/ { f = 0 } f' "$R" 2>/dev/null | grep -q -E "$1"; }
+	case "$RESET" in
+	*'"return"'*) echo "   ok  system_reset over QMP na de flip" ;;
+	*) echo "   ROOD system_reset over QMP: ${RESET:-niet gedaan (de flip was niet groen)}"; fail=1 ;;
+	esac
+	for m in "HOPOS_BOOT gen=1 stamp=A" "the console of the dead kernel \(generation 2\), last [0-9]+ bytes HOPOS_FLIP_BLACKBOX$" "HOPOS_FLIP_BLACKBOX_END"; do
+		if grep -q -E "$m" "$R" 2>/dev/null; then
+			echo "   ok  na de reset: $(grep -m1 -E "$m" "$R")"
+		else
+			echo "   ROOD na de reset: '$m' ontbreekt"
+			fail=1
+		fi
+	done
+	if box '^  \| .*HOPOS_APPSPIKE_DONE pass=9'; then
+		echo "   ok  in de doos: $(awk '/HOPOS_FLIP_BLACKBOX$/ { f = 1; next } /HOPOS_FLIP_BLACKBOX_END/ { f = 0 } f' "$R" | grep -m1 -E 'HOPOS_APPSPIKE_DONE')"
+	else
+		echo "   ROOD de doos draagt de laatste regels van kern B niet (HOPOS_APPSPIKE_DONE)"
+		fail=1
+	fi
+	if grep -v '^  | ' "$R" 2>/dev/null | grep -q -E "$RED"; then
+		echo "   ROOD na de reset: $(grep -v '^  | ' "$R" | grep -m1 -E "$RED")"
+		fail=1
+	fi
+	if [ "$fail" != 0 ] && [ -s "$R" ]; then
+		echo "== console na de reset:"
+		cat "$R"
+	fi
+fi
 if [ -n "${OSCORE:-}" ]; then
 	# Kern A verhuisde naar de OS-core; kern B kwam daar binnen (zijn
 	# zelftest van de OS-core draait op die fysieke core) en verhuisde niet.
@@ -718,4 +796,5 @@ if [ "$fail" != 0 ]; then
 	exit 1
 fi
 [ -n "${KEEP_LOG:-}" ] && tr -d '\r' <"$LOG" >"$KEEP_LOG"
+[ -n "${KEEP_LOG:-}" ] && [ -s "$ART/reset.log" ] && cp "$ART/reset.log" "$KEEP_LOG.reset"
 echo "qemu-flip groen ($BOARD, $MODE)"

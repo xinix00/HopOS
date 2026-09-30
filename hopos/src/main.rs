@@ -474,10 +474,14 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
         Some(StagedRole::Hop) => config::qemu_hop_cfg(|k| bench::bootparam(dtb, k)),
         _ => alloc::string::String::new(),
     };
-    conport::enable(config::console_enabled(
-        &config::NodeCfg::parse(&hop_cfg),
-        |k| bench::bootparam(dtb, k),
-    ));
+    let node_cfg = config::NodeCfg::parse(&hop_cfg);
+    conport::enable(config::console_enabled(&node_cfg, |k| {
+        bench::bootparam(dtb, k)
+    }));
+    REPLAY_AT.store(
+        config::replay_after(&node_cfg, |k| bench::bootparam(dtb, k)),
+        Relaxed,
+    );
 
     // Het netwerkvlak (net.rs): de pomp op de NIC, de switch, poort 0 met
     // de node-stack, DHCP en de system-listener. Zonder NIC draait de kern
@@ -727,11 +731,26 @@ fn stack_high_water() -> u64 {
 
 /// De hartslag: elke seconde één regel met het tiknummer en de meetlat van
 /// de executor.
+/// `hopos.replay=N` (config.rs): de tik waarop de kern het begin van zijn
+/// console herhaalt; 0 = nooit.
+static REPLAY_AT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 async fn tick(exec: &'static Executor) {
     let start = exec.now();
     let mut n: u64 = 0;
     loop {
         n += 1;
+        // Een late lezer (de M4 over de dockchannel) krijgt de boot alsnog:
+        // elke N tikken de kop, de oudste 16 KiB van de ring en de staart,
+        // zodat een lezer die pas na een kabel-herplug aanhaakt er een vangt.
+        let replay_at = REPLAY_AT.load(Relaxed);
+        if replay_at != 0 && n % replay_at == 0 {
+            println!(
+                "console: replaying the first 16 KiB of this boot for a late reader (hopos.replay={replay_at}) HOPOS_CONSOLE_REPLAY"
+            );
+            let bytes = conport::replay(16 * 1024);
+            println!("console: end of the replay ({bytes} bytes) HOPOS_CONSOLE_REPLAY_END");
+        }
         // De RP1-keten op 5 en 30 s (de flip-jacht van 30-09): een koude
         // boot geeft de referentie, een landing het verschil.
         #[cfg(feature = "board-rpi5")]

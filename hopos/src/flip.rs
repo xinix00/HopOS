@@ -60,6 +60,17 @@
 //! eroverheen: zo is er geen extra kopie van Hop nodig, en blijft hij ook
 //! na een warme flip liggen voor een latere koude (29-09).
 //!
+//! # De zwarte doos
+//!
+//! Elke consoleregel (de tee van `conport.rs`) gaat ook naar een ring van
+//! 16 KiB op een vaste plek naast de recorder ([`black_box`], de vorm in
+//! `kern::kernflip::box_open`). Een koude boot leest hem vóór hij er zelf in
+//! schrijft en drukt de staart af na `HOPOS_FLIP_LAST`
+//! (`HOPOS_FLIP_BLACKBOX`); een landende kern begint een verse doos met zijn
+//! generatie. Zo zegt de volgende koude boot niet alleen wáár een geflipte
+//! kern stierf, maar ook wat hij daarvoor zei: de Pi 5 zonder UART (30-09),
+//! waar de TCP-console de enige was en zijn ring met de kern verdween.
+//!
 //! Wat hier bewust NIET gebeurt: een hardware-watchdog op QEMU (die is er
 //! niet).
 
@@ -68,7 +79,10 @@ use abi::layout::{HANDOFF_MAGIC_OFF, HANDOFF_PTR_OFF};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::cell::Cell;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use core::sync::atomic::{
+    AtomicBool, AtomicU64,
+    Ordering::{Acquire, Relaxed, Release},
+};
 use core::time::Duration;
 use cpu::el2::CoreState;
 use cpu::el2::chain::{self, Jump};
@@ -78,7 +92,7 @@ use dev::Pa;
 use executor::Executor;
 use kern::cage::PhysMem;
 use kern::kernflip::{
-    self, Boot, Bundle, FLIP_ABI, FlipPlan, HAND_MAGIC, HANDOFF_TAIL, Handoff, Stage,
+    self, BOX_SHOW, Boot, Bundle, FLIP_ABI, FlipPlan, HAND_MAGIC, HANDOFF_TAIL, Handoff, Stage,
 };
 use kern::slots::{Reply, Request, Response, SlotState};
 use kern::system::FlipBundle;
@@ -142,6 +156,9 @@ static SUM: AtomicU64 = AtomicU64::new(0);
 static ADOPTED: AtomicBool = AtomicBool::new(false);
 /// Deze kern landde uit een KOUDE flip: niets te adopteren, wel de guard.
 static COLD_LANDED: AtomicBool = AtomicBool::new(false);
+/// De zwarte doos staat open: vanaf nu gaat elke consoleregel erin. Pas na
+/// de landing (zie [`land`]): wat er nog in staat, is van een vorige boot.
+static BOX_OPEN: AtomicBool = AtomicBool::new(false);
 
 /// Een klaargelegde flip: de nieuwe kern ligt gerelokeerd in de staging.
 #[derive(Copy, Clone, Debug)]
@@ -180,7 +197,102 @@ fn plan() -> FlipPlan {
         handoff_ptr_pa: BOOT_SCRATCH_PA + HANDOFF_PTR_OFF,
         stage_pa: FLIP_RECORDER_PA,
         own_ram_end: FLIP_HANDOFF_PA,
+        black_box_pa: black_box::PA,
     }
+}
+
+/// De plek van de zwarte doos (`kernflip::BOX_LEN` bytes), per board een
+/// eigen module (handboek §7). Dezelfde levensduur als de recorder: naast
+/// diens plek, buiten het kernimage, de staging, de DTB, de pool en de DMA,
+/// en nooit iets wat de firmware of de lader bij een verse boot beschrijft.
+///
+/// Virt en de Pi's: de 32 KiB direct onder het handoff-blob, boven de
+/// trampoline. Die pagina's liggen met de recorder in hetzelfde gat van de
+/// boot-scratch (de Pi: het laadvenster tussen de DTB op `0x0F00_0000` en
+/// de initramfs op `0x0F20_0000`; virt: tussen `0xB000_0000` en de
+/// staging), en daar schrijft alleen de flip: de recorder en de trampoline
+/// eronder, het blob erboven.
+#[cfg(any(
+    feature = "board-qemuvirt",
+    feature = "board-rpi4",
+    feature = "board-rpi5"
+))]
+mod black_box {
+    use kern::kernflip::BOX_LEN;
+    use vboard::slots::{FLIP_HANDOFF_PA, FLIP_RECORDER_PA, FLIP_TRAMP_PA};
+
+    /// Het begin van de doos.
+    pub(super) const PA: u64 = FLIP_HANDOFF_PA - 0x8000;
+
+    const _: () = assert!(
+        PA >= FLIP_TRAMP_PA + 0x1000
+            && PA > FLIP_RECORDER_PA
+            && PA + BOX_LEN <= FLIP_HANDOFF_PA
+            && PA.is_multiple_of(64)
+    );
+}
+
+/// UEFI (en de O6N en de Altra op dezelfde slots): hetzelfde gat, maar
+/// boven de feitenpagina van de stub. De loader-regio van het kernvenster
+/// is die van de recorder; de stub schrijft er alleen het staging-woord en
+/// de feiten.
+#[cfg(any(feature = "board-uefi", feature = "board-o6n", feature = "board-altra"))]
+mod black_box {
+    use kern::kernflip::BOX_LEN;
+    use vboard::slots::{FLIP_FACTS_LEN, FLIP_FACTS_PA, FLIP_HANDOFF_PA};
+
+    /// Het begin van de doos.
+    pub(super) const PA: u64 = FLIP_HANDOFF_PA - 0x8000;
+
+    const _: () = assert!(
+        PA >= FLIP_FACTS_PA + FLIP_FACTS_LEN
+            && PA + BOX_LEN <= FLIP_HANDOFF_PA
+            && PA.is_multiple_of(64)
+    );
+}
+
+/// De Radxa en de M4: hun plan heeft al een zwarte doos naast de recorder
+/// (`slots::BLACK_BOX`, in het plan als `black_box`, van de Go-kern
+/// overgenomen), net als hun recorder buiten de boot-scratch: op de M4 legt
+/// iBoot het bootobject bij elke boot terug over de scratch (01-09).
+/// Device-gemapt, dus het vegen is daar overbodig maar onschadelijk.
+#[cfg(any(feature = "board-rk3566", feature = "board-apple"))]
+mod black_box {
+    use kern::kernflip::BOX_LEN;
+    use vboard::slots::BLACK_BOX;
+
+    /// Het begin van de doos.
+    pub(super) const PA: u64 = BLACK_BOX.base;
+
+    const _: () = assert!(BLACK_BOX.size >= BOX_LEN && PA.is_multiple_of(64));
+}
+
+/// De riscv64-boards: nog geen plek die bewezen een reset overleeft (de
+/// LicheeRV legt zijn kooien in dezelfde staart), dus geen doos.
+#[cfg(any(feature = "board-qemuvirt-riscv", feature = "board-licheerv"))]
+mod black_box {
+    /// Geen doos.
+    pub(super) const PA: u64 = 0;
+}
+
+/// De tee van de console (`conport::tee`): de bytes ook in de zwarte doos,
+/// zodra die open is. Onder het console-slot, dus één schrijver tegelijk;
+/// een noodregel na de grens van dat slot kan een byte verminken, en een
+/// verminkte byte in een post-mortem is beter dan geen post-mortem (Go).
+pub(crate) fn black_box(b: &[u8]) {
+    if BOX_OPEN.load(Acquire) {
+        kernflip::box_write(&mut DevMem, &plan(), b);
+    }
+}
+
+/// Begint een verse doos voor deze kern en zet de tee erop.
+fn open_box(generation: u64) {
+    let p = plan();
+    if p.black_box_pa == 0 {
+        return;
+    }
+    kernflip::box_open(&mut DevMem, &p, generation);
+    BOX_OPEN.store(true, Release);
 }
 
 /// De generatie van deze kern: 1 na een koude boot.
@@ -304,6 +416,9 @@ pub(crate) fn land(x0: u64) -> Option<Handoff> {
             GENERATION.store(h.generation, Relaxed);
             SUM.store(h.bundle_sum, Relaxed);
             COLD_LANDED.store(true, Relaxed);
+            // De doos van de kern die sprong gaat weg: die leeft niet meer,
+            // maar stierf ook niet. Vanaf hier is hij van ons.
+            open_box(h.generation);
             crate::clock::restore(h.wall_off);
             println!(
                 "flip: landed cold, generation {} from a {} MB kernel at {:#x}: no residents to adopt, this kernel installs its own switch code and starts Hop from the staging HOPOS_FLIP_BOOT gen={} HOPOS_FLIP_COLD_BOOT",
@@ -319,6 +434,7 @@ pub(crate) fn land(x0: u64) -> Option<Handoff> {
         Ok(Boot::Adopted(mut h)) => {
             GENERATION.store(h.generation, Relaxed);
             SUM.store(h.bundle_sum, Relaxed);
+            open_box(h.generation);
             crate::clock::restore(h.wall_off);
             println!(
                 "flip: landed, generation {} from a {} MB kernel at {:#x}, {} resident(s), {} NAT flow(s), {} B agent state HOPOS_FLIP_BOOT gen={}",
@@ -337,9 +453,14 @@ pub(crate) fn land(x0: u64) -> Option<Handoff> {
         }
         Ok(Boot::Cold) => {
             report_cold(&mut mem, &p);
+            // Pas na het lezen: anders drukt een koude kern zijn eigen
+            // regels af als die van een dode.
+            open_box(generation());
             None
         }
         Err(e) => {
+            // De doos blijft dicht: wat erin staat (de kern die sprong) is
+            // het spoor voor de koude boot hierna.
             println!(
                 "flip: the handoff blob does not decode: {e}; resetting cold HOPOS_FLIP_BLOB_BAD"
             );
@@ -364,6 +485,60 @@ fn report_cold(mem: &mut DevMem, p: &FlipPlan) {
             s.describe()
         );
     }
+    report_black_box(mem, p);
+}
+
+/// De zwarte doos van de vorige boot: de staart (hoogstens [`BOX_SHOW`]
+/// bytes), regel voor regel met `  | ` ervoor, tussen een kop- en een
+/// slotregel, en daarna leeg. Is er niets, dan zegt één regel dat (Go:
+/// "black box: 0 bytes carried over"): anders is "geen post-mortem" niet te
+/// onderscheiden van "de doos is onderweg gewist".
+fn report_black_box(mem: &mut DevMem, p: &FlipPlan) {
+    if p.black_box_pa == 0 {
+        println!("flip: this board has no black box HOPOS_FLIP_BLACKBOX_NONE");
+        return;
+    }
+    let mut buf = [0u8; BOX_SHOW];
+    let Some(t) = kernflip::box_take(mem, p, &mut buf) else {
+        println!(
+            "flip: the black box at {:#x} carried nothing over HOPOS_FLIP_BLACKBOX_EMPTY",
+            p.black_box_pa
+        );
+        return;
+    };
+    let g = t.generation;
+    println!(
+        "flip: the console of the dead kernel (generation {g}), last {} bytes HOPOS_FLIP_BLACKBOX",
+        t.len
+    );
+    let tail = buf.get_mut(..t.len).unwrap_or_default();
+    // Alleen afdrukbaar ASCII: de console van een stervende kern kan alles
+    // bevatten, de regels hier niet. Een `\r` wordt een spatie, die valt
+    // aan het eind van de regel weg.
+    for c in tail.iter_mut() {
+        if *c == b'\r' {
+            *c = b' ';
+        } else if !(c.is_ascii_graphic() || *c == b' ' || *c == b'\n') {
+            *c = b'.';
+        }
+    }
+    let mut tail: &[u8] = tail;
+    // Een afgekapte staart begint midden in een regel: die halve regel weg.
+    if t.written > t.len as u64
+        && let Some(i) = tail.iter().position(|c| *c == b'\n')
+    {
+        tail = tail.get(i + 1..).unwrap_or_default();
+    }
+    let tail = tail.strip_suffix(b"\n").unwrap_or(tail);
+    for line in tail.split(|c| *c == b'\n') {
+        if let Ok(text) = core::str::from_utf8(line.trim_ascii_end()) {
+            println!("  | {text}");
+        }
+    }
+    println!(
+        "flip: end of the console of the dead kernel (generation {g}, {} bytes written) HOPOS_FLIP_BLACKBOX_END",
+        t.written
+    );
 }
 
 /// De koude weg terug: PSCI SYSTEM_RESET. Keert niet terug; lukt de reset

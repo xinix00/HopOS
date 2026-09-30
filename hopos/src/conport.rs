@@ -15,6 +15,11 @@
 //! noodregel uit exception-context midden in een regel) slaat de ring
 //! over, de UART krijgt alles. De lezers lenen de ring per hap
 //! (`snapshot`), nooit over een await heen.
+//!
+//! De tee geeft elke regel ook aan de zwarte doos (`flip::black_box`): een
+//! ring op een vaste plek buiten het kernimage die een watchdog-reset
+//! overleeft, want deze ring in de BSS doet dat niet. Die schrijft vanaf elke
+//! core; de volgende koude boot drukt de staart af (`HOPOS_FLIP_BLACKBOX`).
 
 use core::sync::atomic::{
     AtomicBool, AtomicPtr, AtomicUsize,
@@ -55,9 +60,13 @@ pub(crate) fn here() {
     RING_CORE.store(crate::BOARD.this_core(), Release);
 }
 
-/// De sink: eerst de vorige (de UART), dan de ring op de eigen core. De
-/// tee van het glas (gui.rs) roept dit als zijn "UART".
+/// De sink: eerst de zwarte doos, dan de vorige (de UART), dan de ring op
+/// de eigen core. De tee van het glas (gui.rs) roept dit als zijn "UART".
+///
+/// De doos eerst, zoals in Go (`conlog.Route`): hangt de UART-poll, dan
+/// staat de regel toch al in DRAM.
 pub(crate) fn tee(b: &[u8]) {
+    crate::flip::black_box(b);
     let p = PREV.load(Acquire);
     if !p.is_null() {
         // SAFETY: `PREV` wordt alleen door `install` geschreven, met een
@@ -88,6 +97,36 @@ pub(crate) fn snapshot(seen: u64, out: &mut [u8]) -> (usize, u64) {
 /// nul, zodat wie na de boot verbindt de hele geschiedenis krijgt die er is.
 pub(crate) fn oldest() -> u64 {
     RING.try_borrow().map_or(0, |r| r.oldest())
+}
+
+/// Herhaalt het begin van deze boot op de vorige sink (de UART of de
+/// dockchannel), hoogstens `max` bytes, zonder de ring opnieuw te vullen.
+/// Voor een board waarvan de lezer pas na de boot aanhaakt (de M4, 30-09:
+/// de kis-poort verschijnt pas 30 s na een herstart, en de bootregels zijn
+/// dan al weg). Alleen op de core die de ring bezit; geeft het aantal
+/// bytes.
+pub(crate) fn replay(max: usize) -> usize {
+    let p = PREV.load(Acquire);
+    if p.is_null() {
+        return 0;
+    }
+    // SAFETY: als in `tee`: `PREV` komt alleen uit `install`, met een
+    // geldige `fn(&[u8])`, en null is hierboven uitgesloten.
+    let prev = unsafe { core::mem::transmute::<*mut (), fn(&[u8])>(p) };
+    let mut seen = oldest();
+    let mut total = 0;
+    let mut buf = [0u8; 512];
+    while total < max {
+        let want = (max - total).min(buf.len());
+        let (n, next) = snapshot(seen, &mut buf[..want]);
+        if n == 0 {
+            break;
+        }
+        prev(&buf[..n]);
+        seen = next;
+        total += n;
+    }
+    total
 }
 
 /// De keuze van de config: aan of uit. Vóór de listener (net.rs) gezet.

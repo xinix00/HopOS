@@ -205,6 +205,32 @@ node heeft er nog geen gedraaid.
 - [ ] lean: de IPv6-baan van leannet, `Stack::leave_group`.
 - [ ] Replica op GitHub (`xinix00/replica`): nog geen remote.
 
+### Prestaties: waar v3 onder de Go-lat zit (vitals 30-09)
+
+De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
+
+- [ ] **1 ms per switch-oversteek** bij connect en close: rtt app naar de
+      kern 1068 tot 1980 µs (Go 156 tot 201), naar Hop 2 ms; een open
+      verbinding is snel (Stat 60 µs, ping app naar app 78 µs). De tik:
+      `sw(timer=)` loopt mee met elke handshake. App naar app pull op de
+      Radxa 6,5 MB/s met 759 timer-wekken/s en 0 kicks. Agent bezig
+      (net/src Pump, hopos/src/net.rs, applib appnet.rs).
+- [ ] **App-opslag O6N** (1 MiB-calls): schrijven 197, lezen 93 MB/s (Go 557
+      tot 625 / 727 tot 797); alleen transport kern naar app 300 MB/s; een
+      4 KiB-read 1,1 ms. Eerst de switch-timer, dan opnieuw meten.
+- [ ] **NAT-tabel vol**: 512 flows per slot (`HOPOS_MASQ_SLOT_FULL`), dan
+      valt een SYN en kost 1 s; storm door de NAT 1400 conn/s tot de tabel
+      vol is. TIME_WAIT-hergebruik of een grotere tabel.
+- [ ] **Idle**: app-core 1000 tot 3000 wekken/s (poll-ronde van de
+      app-pomp), OS-core ~900/s (Go ~100, op de interrupt); een stilstaande
+      tweecore-app houdt de Pi's op 1500 MHz ("busy slot 2, 544 permille
+      idle").
+- [ ] vitals: de standaard-rx-URL (cachefly) faalt zonder DNS in de env
+      ("CONNECT is not supported"); rx-duren vallen op stappen van 100 ms.
+- [ ] De Mac hangt op Wi-Fi en macOS laat netmeter niet op het LAN
+      ("Lokaal netwerk"-recht): alle host-getallen zijn Wi-Fi; node naar
+      node over de draad is gemeten (Pi 4 44 tot 49 MB/s van de O6N).
+
 ### Prestatietests (vitals)
 
 `apps/vitals` plaatsen en `test=all` draaien, de markers in de tabel Vitals

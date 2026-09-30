@@ -6,7 +6,8 @@ kern wisselt. Dit is de procedure per board, de markers die erbij horen, de
 faalmodi en wat de boot-guard doet. Daarnaast de koude flip: dezelfde
 trigger met `"cold":true`, voor een kern met een andere switch-code (zie
 "De koude flip"). De code: `hopos/src/flip.rs` (beleid),
-`kern/src/kernflip.rs` (bundel, blob, recorder, de plek in de staging),
+`kern/src/kernflip.rs` (bundel, blob, recorder, zwarte doos, de plek in
+de staging),
 `cpu/src/el2/chain.rs` (de sprong en de uit-stub van de koude flip),
 `cpu/src/boot.rs` (de ingang: `FLIP_ENTRY`), `image/flip-bundle.sh` (de
 bundel), de `FLIP_*`-blokken in `board/*/src/slots.rs` (de adressen) en
@@ -175,6 +176,55 @@ houdt hun volumes).
 | `HOPOS_FLIP_GUARD` | geen adoptie of geen net binnen 120 s: PSCI-reset |
 | niets na `HOPOS_FLIP_JUMP` | de nieuwe kern hangt vóór zijn console (op UEFI ook: geen feitenpagina, de core parkeert). Alleen een hardware-watchdog helpt; QEMU heeft er geen. De volgende koude boot zegt waar het stopte |
 | `HOPOS_FLIP_LAST`, `HOPOS_FLIP_ARCHIVED` | op de volgende koude boot: de stap waar de laatste flip stopte, uit de vluchtrecorder (`FLIP_RECORDER_PA`), en de poging daarvoor (06-09: zonder archief schreef de flip die een gevallen node optilde zijn eigen stappen over het spoor) |
+| `HOPOS_FLIP_BLACKBOX` ... `HOPOS_FLIP_BLACKBOX_END` | op de volgende koude boot, na `HOPOS_FLIP_LAST`: wat de dode kern zei, de laatste 4 KiB uit de zwarte doos (hieronder) |
+
+## De zwarte doos
+
+De recorder zegt wáár een geflipte kern stierf, de zwarte doos wat hij
+daarvoor zei. Aanleiding: de Pi 5 zonder UART (30-09). Een geflipte kern
+stierf daar vlak na de landing; de koude boot erna meldde alleen
+`HOPOS_FLIP_LAST` op "landed", want de TCP-console (`hopos/src/conport.rs`)
+komt pas na DHCP en zijn ring ligt in de BSS van de dode kern.
+
+Elke consoleregel gaat daarom ook naar een ring op een vaste plek naast de
+recorder (de tee in `conport.rs`, eerst de doos, dan de UART, zoals Go's
+`conlog.Route`). De vorm (`kern::kernflip::box_open`): een kop van één
+cacheregel met de magic `HOPBOX02`, de generatie van de schrijver, de
+schrijfpositie (monotoon) en de ringmaat, daarachter 16 KiB ring. Elke
+schrijf gaat eerst met de bytes en dan met de positie naar DRAM (clean en
+invalidate tot het point of coherency), want een watchdog-reset spoelt
+geen cache.
+
+- Een koude boot leest de doos in `flip::land`, vóór hij er zelf in
+  schrijft, en drukt na `HOPOS_FLIP_LAST` de staart af: een kopregel
+  `flip: the console of the dead kernel (generation N), last B bytes
+  HOPOS_FLIP_BLACKBOX`, de regels met `  | ` ervoor (alleen afdrukbaar
+  ASCII, de halve eerste regel weg), en een slotregel
+  `... HOPOS_FLIP_BLACKBOX_END`. Alleen bij de magic, de eigen ringmaat en
+  een generatie; daarna is de doos leeg. Stond er niets:
+  `HOPOS_FLIP_BLACKBOX_EMPTY` (zoals Go's "black box: 0 bytes carried
+  over"), zodat "geen post-mortem" te onderscheiden is van "gewist". Dan pas
+  begint hij een verse doos met zijn eigen generatie (1): ook een koude
+  dood staat zo op de volgende koude boot, en een kern drukt nooit zijn
+  eigen regels af.
+- Een landende kern (warm of koud geflipt) begint een verse doos met zijn
+  generatie, zonder af te drukken: de kern die sprong, stierf niet. Wat
+  hij vóór de landing zei (de bunny, `discover`), staat er niet in.
+- `HOPOS_FLIP_BLOB_BAD` opent de doos niet: de koude boot erna drukt dan
+  de console van de kern die sprong af.
+
+| Board | Doos | Waarom die een reset overleeft |
+| --- | --- | --- |
+| Pi 4, Pi 5 | `0x0F1B_7000` (het blob min 32 KiB) | het laadvenster, in het gat van de boot-scratch tussen de trampoline (`0x0F10_2000`) en het blob (`0x0F1B_F000`), met de recorder (`0x0F10_1000`); de firmware schrijft er alleen de DTB (`0x0F00_0000`) en de initramfs (`0x0F20_0000`) |
+| QEMU virt | `0xB00B_8000` | hetzelfde gat onder `0xB00C_0000`; een QEMU-reset laadt alleen de ROM's terug (de kern op `0x4020_0000`, de staging) |
+| UEFI, O6N, Altra | loader-regio + `0xB_8000` (virt: `0x600B_8000`) | hetzelfde gat, boven de feitenpagina van de stub (+ `0x3000`, 8 KiB) |
+| Radxa Zero 3E | `0x0630_8000` (`slots::BLACK_BOX`, 32 KiB) | het plan had de doos al (uit Go), naast de recorder op `0x0630_1000`, Device |
+| Mac mini M4 | ADMIN + `0xc0_8000` (`slots::BLACK_BOX`, 32 KiB) | idem, naast de recorder; niet op de boot-scratch, want iBoot legt daar het bootobject terug (01-09) |
+| riscv64 | geen (`HOPOS_FLIP_BLACKBOX_NONE`) | nog geen plek die bewezen een reset overleeft |
+
+De plek staat per board in `hopos/src/flip.rs` (`mod black_box`), met een
+`const`-assertie dat hij niet in de trampoline, de feitenpagina of het blob
+valt.
 
 ## De boot-guard
 
@@ -271,6 +321,10 @@ die zelf niet opkomt.
   via kern A en 3 via kern B, op virt en onder EDK2. Slirp laat het toe: de
   host-kant van de flow is de socket van slirp, en die ziet alleen een
   paar seconden stilte op dezelfde vier-tupel.
+  Daarna (virt) de zwarte doos: een `system_reset` over QMP, de QEMU-vorm
+  van een watchdog-reset (het RAM blijft). Kern A boot koud en drukt de
+  console van kern B af (`HOPOS_FLIP_BLACKBOX` voor generatie 2, met zijn
+  laatste `HOPOS_APPSPIKE_DONE` erin, en `HOPOS_FLIP_BLACKBOX_END`).
 - `MISMATCH=1 sh tools/qemu-test-flip.sh`: dezelfde bundel met een andere
   switch-code-som; groen alleen bij een weigering vóór de sprong.
 - `COLD=1 sh tools/qemu-test-flip.sh`: de koude flip met die bundel. Eerst
@@ -296,7 +350,10 @@ die zelf niet opkomt.
   onder EDK2 (Hop koud uit `hopos-stage.elf`, dat de feitenpagina terugwijst).
   Groen 29-09, beide.
 - Host: `net` (`de_conntrack_overleeft_de_flip_via_de_actor`), `kern`
-  (`a_version_2_bundle_carries_its_switch_code_sum`,
+  (`black_box_keeps_the_tail_and_is_read_once`: elke schrijf geveegd,
+  `black_box_short_and_oversized_writes`,
+  `black_box_refuses_rubbish_and_a_board_without_one`,
+  `a_version_2_bundle_carries_its_switch_code_sum`,
   `freeze_commits_first_and_names_the_generation`,
   `a_cold_handoff_carries_its_flag_and_nothing_to_adopt`,
   `the_new_image_goes_behind_hop_in_the_staging`, en in `system` de vlag

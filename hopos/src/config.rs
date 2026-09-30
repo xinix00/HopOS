@@ -295,6 +295,20 @@ pub(crate) fn console_enabled(cfg: &NodeCfg<'_>, param: impl Fn(&'static str) ->
     }
 }
 
+/// `hopos.replay=N`: na N seconden herhaalt de kern het begin van zijn
+/// eigen console op de UART (`conport::replay`), voor een board waarvan de
+/// lezer pas na de boot aanhaakt (de M4 over de dockchannel, 30-09). Uit
+/// `hopos.cfg` of de cmdline; 0 of niets = uit.
+pub(crate) fn replay_after(cfg: &NodeCfg<'_>, param: impl Fn(&'static str) -> String) -> u64 {
+    let v = cfg.one("hopos.replay");
+    let v = if v.is_empty() {
+        param("hopos.replay")
+    } else {
+        String::from(v)
+    };
+    v.trim().parse().unwrap_or(0)
+}
+
 /// Bouwt de env zonder te loggen: eerst alles behalve de init-jobs, dan
 /// de init-jobs als het geheel nog past.
 fn build(cfg: &NodeCfg<'_>, facts: &Facts<'_>) -> Result<EnvBlob, EnvError> {
