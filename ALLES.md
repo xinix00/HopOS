@@ -15,7 +15,7 @@ of faalt, en een streep waar het bewust niet komt. Stand 30-09-2026, avond.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Boot, EL2, kooi, zelftest | ✓ | ✓ | ✓ (zelftest koud: SError bij de VL805) | ✓ | ○ | ✓ VHE (kick via de SGI komt niet aan, de timer vangt hem) | ○ | ○ |
 | Hop als bewoner, welcome door de DNAT | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ○ | ○ |
-| Kern-flip, warm | ✓ | ✓ uit de kale kern, ✗ uit de koude gui-kern (RP1) | ✓ (3x) | ✓ (1x) | ○ | ○ | – (geen CPU_OFF) | – |
+| Kern-flip, warm | ✓ | ✓ (ook uit de koude gui-kern, sinds de xHCI-stop vóór de sprong) | ✓ (3x) | ✓ (2x) | ○ | ○ | – (geen CPU_OFF) | – |
 | NIC met interrupt | ✓ | ✓ MSI-X via de MIP | – (GENET gepold, zoals Go) | ✓ SPI 64 | – (igb gepold, bewust) | ✓ RTL8125B, MSI-X via de ITS (LPI 8192) | ○ (tg3, AIC) | ○ (dwmac) |
 | Off-link door de NAT, SNTP | ✓ | ✓ | ✓ | ○ | ○ | ○ | ○ | ○ |
 | Watchdog gewapend en geaaid | – | ✓ PM (12 s) | ✓ PM | ✓ DW-WDT (89 s) | ○ SBSA | ✓ SBSA (8,5 s) | ○ | ○ DW-WDT |
@@ -36,15 +36,10 @@ Alleen wat nog moet; wat af is staat in de tabel hierboven.
 
 ### Raspberry Pi 5 (pi5-1, 192.168.1.207)
 
-- [ ] **Een flip vanuit de koud gebootte gui-kern doodt het pad RP1 → host**
-      (zeven keer op 30-09): na de landing haalt de GEM zijn descriptors niet
-      uit DRAM en zendt hij niets (`txstatus 0x0`, `rxstatus 0x4`), de MSI
-      komt niet aan, de watchdog reset naar de kaart. Uitgesloten: de GIC,
-      de klok, een IACK. Verdenking: de twee draaiende xHCI's in de RP1
-      tijdens de link-reset van de nieuwe kern; de vertrekkende kern
-      halteert ze nu vóór de sprong (`HOPOS_USB_HALTED`), en dat zit pas in
-      de kaart van 18:22 na een herflash. Proef: koud booten, dan één flip;
-      de dump op 5 en 30 s (`HOPOS_RP1_DIAG`) toont het verschil.
+- [ ] Na de flip vanuit de verse kaart (18:22) leefde de RP1 (DHCP in 29 ms,
+      `HOPOS_FLIP_SETTLED`, welcome 200), maar 5555 en 10100 (de node-stack)
+      antwoorden daarna niet meer terwijl de DNAT-poorten werken; nakijken
+      op de volgende flip, met de dump.
 - [ ] Het glas: sinds de herflash weigert de firmware elke framebuffer
       (0x80000001), ook koud met 5 s geduld. Hangt het scherm eraan en
       stond het aan bij de power-on?
