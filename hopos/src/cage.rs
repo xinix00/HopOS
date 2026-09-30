@@ -305,6 +305,9 @@ impl ArmCage {
         ] {
             dev::write64(ctrl.add(off), v);
         }
+        // Het zaad vóór de start: de app mengt het bij zijn eerste
+        // willekeur (applib::rand, seed.rs).
+        crate::seed::plant(ctrl);
         // De hele verse page naar DRAM: de trampoline leest hem met de MMU
         // uit, langs elke cache heen.
         dev::push(ctrl, CTRL_STRIDE as usize);
@@ -391,6 +394,9 @@ impl ArmCage {
         }
         attach(s, tail);
         crate::clock::attach(slot, ctrl);
+        // Vers zaad van déze kern; de generatie telt door vanaf die van de
+        // vorige, dus de bewoner ziet hem als nieuw (seed.rs).
+        crate::seed::plant(ctrl);
         println!(
             "cage: slot {slot} adopted: part {:#x}+{:#x}, ctrl {:#x}, core {core}, entry {entry:#x}",
             part.base, part.size, ctrl.0

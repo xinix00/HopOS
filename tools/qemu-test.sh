@@ -22,6 +22,11 @@
 #                   zijn netwerk heeft (vlak voor zijn NET-toets, die dan met
 #                   de toets van buiten samenvalt), en na de stop van slot 2
 #                   (bewijst dat de listener na de keten niet hangt).
+#   het zaad        HOPOS_RNG_SLOTS source=jitter (de kern zaait zijn DRBG
+#                   uit jitter, virt heeft geen TRNG) en in slot 1
+#                   "applib: rng seed from the kernel (gen N) is jitter ...
+#                   HOPOS_APP_RNG source=jitter": de app kreeg zaad op zijn
+#                   control-page (CTRL_RNG_SEED), niet "geen zaad";
 #   appspike        het ABI-bewijs: appspike (door QEMU gestaged, zie
 #                   image/qemu-run.sh; zonder rolwoord op STAGE_ROLE_PA is
 #                   het een gewone app, dus plaatst de kern hem zelf; de
@@ -168,6 +173,10 @@ if [ "$GUI" = display ]; then
 else
 	# De markers van het ABI-bewijs (grep -E): het aantal toetsen groeit met
 	# appspike, dus "alles groen" is fail=0.
+	# Het zaad (hopos/src/seed.rs, applib::rand): virt heeft geen TRNG
+	# (cortex-a53, geen EL3), dus de kern zaait uit jitter en zegt dat, en
+	# de app ziet zaad uit jitter, niet "geen zaad".
+	SLOT_MARKS="$SLOT_MARKS|trng: WARNING the kernel DRBG is seeded from timer jitter.*HOPOS_RNG_INSECURE|HOPOS_RNG_SLOTS source=jitter|slot 1: applib: rng seed from the kernel \(gen [0-9]+\) is jitter.*HOPOS_APP_RNG source=jitter"
 	SLOT_MARKS="$SLOT_MARKS|HOPOS_SLOT_START slot=1|slot 1: HOPOS_APPSPIKE_NETLOG|slot 1: HOPOS_APPSPIKE_FS ok|slot 1: HOPOS_APPSPIKE_DONE pass=9 fail=0|HOPOS_SLOT_DONE slot=1 exit=0|slot 1: stopped.*HOPOS_SLOT_STOPPED"
 	SLOT_MARKS="$SLOT_MARKS|HOPOS_SLOT_START slot=2|slot 2: HOPOS_APPSPIKE_NETLOG|slot 2: HOPOS_APPSPIKE_FS ok|slot 2: HOPOS_APPSPIKE_DONE pass=9 fail=0|HOPOS_SLOT_DONE slot=2 exit=0|slot 2: stopped.*HOPOS_SLOT_STOPPED"
 	# De momenten van de toets van buiten (grep -E), in volgorde.

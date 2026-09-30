@@ -22,6 +22,7 @@ mod gui; // het gui-vlak (gui.rs); kaal no-ops, feature `gui`
 mod net;
 #[cfg(feature = "media")]
 mod optical;
+mod seed; // het zaad van de slots op hun control-page (seed.rs)
 mod slots;
 mod storage;
 mod telemetry; // de thermiek op tik en heartbeat, en het klokbeleid (telemetry.rs)
@@ -420,6 +421,11 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
             clock::BOOT_WALL_SECS
         );
     }
+
+    // Het zaad van de slots vóór er een kooi is: de DRBG van de kern is
+    // geseed (door het board, anders hier), en de regel zegt wat een slot
+    // op zijn control-page krijgt (seed.rs).
+    seed::init();
 
     // Wat QEMU stagede, en of er dus een Hop is: alleen dan bestaat het
     // token, en het hoort bij het slot waar de kern Hop plaatst, vóór de

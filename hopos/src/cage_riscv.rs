@@ -407,6 +407,8 @@ impl RvCage {
         ] {
             dev::write64(ctrl.add(off), v);
         }
+        // Het zaad vóór de start (seed.rs, applib::rand).
+        crate::seed::plant(ctrl);
         dev::push(ctrl, CTRL_STRIDE as usize);
         for (base, cap) in [
             (tail.outbox(), RING_DATA_CAP),

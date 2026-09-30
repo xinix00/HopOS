@@ -8,7 +8,7 @@ de consoleregel die erbij hoort en wat een afwijking betekent.
 
 | Test | Wat hij bewijst |
 | --- | --- |
-| `sh tools/qemu-test.sh` | boot op virt, netwerk, opslag, appspike in slot 1 en 2 in een stage-2-kooi, tien toetsen |
+| `sh tools/qemu-test.sh` | boot op virt, netwerk, opslag, appspike in slot 1 en 2 in een stage-2-kooi, tien toetsen; het zaad van de kern op de control-page (`HOPOS_RNG_SLOTS source=jitter`, en in de app `HOPOS_APP_RNG source=jitter`: virt heeft geen TRNG, [boards.md](boards.md)) |
 | `GUI=1 sh tools/qemu-test.sh` | hetzelfde met de console op een `ramfb`: de bunny, mem, datum en tijd op het glas, geschoten via de QEMU-monitor |
 | `GUI=display sh tools/qemu-test.sh` | de hele gui-keten: qemu-xhci met toetsenbord en muis (`HOPOS_USB_UP`), de display-app krijgt het glas in zijn kooi (`HOPOS_FB_GRANT`, `HOPOS_DISPLAY_UP`), verbindt met de input-listener (`HOPOS_INPUT_CONN`), een `sendkey` en een `mouse_move` komen aan (`HOPOS_DISPLAY_INPUT keys=1 moves=1`), de screendump toont de app, en na de stop komt de console terug (`HOPOS_FB_RELEASE`) |
 | `sh tools/qemu-test-hop.sh` | de kern start Hop met het token op de OS-core; een `POST /v1/jobs` van de host laat Hop appspike plaatsen; Hop bewaart zijn staat en leest hem na een herstart terug |

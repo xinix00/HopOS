@@ -293,10 +293,13 @@ pub fn up(app: &'static App) -> Result<&'static Net> {
     let nic = Nic::open(app).map_err(NetError::Nic)?;
     let budget = budget_for(app.ram_size(), app.env("NET_BUDGET"));
     let exec: &'static Exec = EXEC.get();
-    // Geen entropiebron in de app: de klok en het slot, zoals Go. Het zaad
-    // kiest alleen ISN's en de eerste efemere poort; een kern-flip moet niet
-    // hetzelfde tupel hergebruiken, en de klok loopt dan door.
-    let seed = (clock::now_ns() as u32) ^ ((app.slot() as u32) << 16);
+    // Het zaad van de stack kiest ISN's en de eerste efemere poort: uit de
+    // DRBG van de app (het zaad van de kern plus jitter, `rand`; de eerste
+    // zegt waar het vandaan komt). De klok en het slot blijven erin, zoals
+    // in Go: een kern-flip moet niet hetzelfde tupel hergebruiken.
+    let seed = crate::rand::Rng::open(app).next_u32()
+        ^ (clock::now_ns() as u32)
+        ^ ((app.slot() as u32) << 16);
     let dns = app.env("DNS").or(app.env("HOP_DNS")).and_then(parse_ip4);
     let fresh = Net::new(slot_config(app.slot(), budget), seed, exec, clock::now_ns)?.with_dns(dns);
     fresh.seed_neighbor(host_ip(), mac_of(0).0)?;

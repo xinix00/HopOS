@@ -233,6 +233,81 @@ pub fn source() -> Source {
     DRBG.borrow().source()
 }
 
+/// Is de DRBG van de kern geseed? Een board dat in `discover` niets
+/// zaaide, krijgt van de binary alsnog [`seed_from_cpu`]: een slot hoort
+/// zijn zaad te krijgen (`CTRL_RNG_SEED`), op elk board.
+#[must_use]
+pub fn is_seeded() -> bool {
+    DRBG.borrow().seeded
+}
+
+/// Zaait de DRBG van de kern uit de standaardbronnen van de CPU
+/// ([`trng::fill`]: RNDR, anders de SMCCC TRNG van de firmware), en anders
+/// uit jitter. Voor de boards zonder eigen TRNG-blok: UEFI (EDK2, de O6N
+/// met FEAT_RNG, de Altra met TF-A), QEMU virt en de Mac mini. De Pi's en
+/// de Radxa zaaien uit hun SoC-blok ([`trng::Kind::Soc`]).
+///
+/// Geeft de consoleregel terug (met marker); het board drukt hem af. Tot
+/// 30-09 zaaide geen van deze boards: de O6N bootte zonder één `trng:`-regel
+/// en de DRBG bleef ongeseed.
+pub fn seed_from_cpu(counter: fn() -> u64) -> Seeded {
+    init(trng::fill, counter);
+    let source = source();
+    // De reden van een jitter-zaad: nog één poging, alleen voor de regel.
+    let why = match source {
+        Source::Jitter => trng::fill(&mut [0u8; 8]).err(),
+        Source::Hardware(_) => None,
+    };
+    Seeded {
+        source,
+        why,
+        monitor: trng::has_monitor(),
+    }
+}
+
+/// De uitkomst van [`seed_from_cpu`], als consoleregel.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct Seeded {
+    /// Waar de seed vandaan kwam.
+    pub source: Source,
+    /// Waarom het geen hardware werd (alleen bij jitter).
+    pub why: Option<trng::Error>,
+    /// Zit er een EL3-monitor onder de kern (de weg naar de SMCCC TRNG)?
+    pub monitor: bool,
+}
+
+impl fmt::Display for Seeded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.source {
+            Source::Hardware(trng::Kind::Rndr) => f.write_str(
+                "trng: rndr online, the kernel DRBG is seeded from rndr (FEAT_RNG) HOPOS_RNG_RNDR_UP",
+            ),
+            Source::Hardware(trng::Kind::SmcccTrng) => f.write_str(
+                "trng: smccc-trng online, the kernel DRBG is seeded from the SMCCC TRNG (DEN 0098) HOPOS_RNG_SMCCC_UP",
+            ),
+            // Nooit uit `trng::fill`: een SoC-blok zaait zijn board zelf.
+            Source::Hardware(k @ trng::Kind::Soc(_)) => {
+                write!(f, "trng: {k} online, the kernel DRBG is seeded from {k}")
+            }
+            Source::Jitter => {
+                write!(
+                    f,
+                    "trng: WARNING the kernel DRBG is seeded from timer jitter, not hardware entropy: "
+                )?;
+                match self.why {
+                    Some(e) => write!(f, "{e}")?,
+                    None => f.write_str("no answer")?,
+                }
+                write!(
+                    f,
+                    " (EL3 monitor: {}); slots get jitter seed, avoid high-value secrets on this node HOPOS_RNG_INSECURE",
+                    if self.monitor { "yes" } else { "no" }
+                )
+            }
+        }
+    }
+}
+
 pub mod sha256 {
     //! SHA-256 (FIPS 180-4), getest tegen de vectoren van RFC 6234.
     //!
@@ -570,10 +645,35 @@ mod tests {
     }
 
     #[test]
+    fn seeded_lines_carry_their_marker() {
+        let line = |source, why| {
+            Seeded {
+                source,
+                why,
+                monitor: false,
+            }
+            .to_string()
+        };
+        assert!(line(Source::Hardware(trng::Kind::Rndr), None).ends_with("HOPOS_RNG_RNDR_UP"));
+        assert!(
+            line(Source::Hardware(trng::Kind::SmcccTrng), None).ends_with("HOPOS_RNG_SMCCC_UP")
+        );
+        let j = line(Source::Jitter, Some(trng::Error::NoSource));
+        assert!(j.contains("no FEAT_RNG") && j.contains("EL3 monitor: no"));
+        assert!(j.ends_with("HOPOS_RNG_INSECURE"));
+    }
+
+    #[test]
     fn the_core_drbg_lives_in_a_local() {
         let mut b = [0u8; 8];
         init(no_fill, ticks);
+        assert!(is_seeded());
         assert_eq!(source(), Source::Jitter);
         read(&mut b).unwrap();
+        // Op de host is er geen RNDR en geen EL3: jitter, met de reden.
+        let s = seed_from_cpu(ticks);
+        assert_eq!(s.source, Source::Jitter);
+        assert_eq!(s.why, Some(trng::Error::NoSource));
+        assert!(is_seeded());
     }
 }

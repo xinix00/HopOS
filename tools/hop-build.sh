@@ -17,7 +17,11 @@
 # hop-repo die al een tag met deze applib pint.
 #
 #   HOP_DIR=pad    de hop-repo (standaard ../hop/hop)
-#   HOP_REV=rev    wat er uit de hop-repo gekopieerd wordt (standaard HEAD)
+#   HOP_REV=rev    wat er uit de hop-repo gekopieerd wordt (standaard HEAD);
+#                  `worktree` neemt de werkboom zoals hij nu is (de
+#                  getrackte en de nieuwe, niet-genegeerde bestanden, ook
+#                  ongecommit), voor een Hop-wijziging die nog op zijn
+#                  commit wacht
 #   HOP_PATCH=0|1  tegen deze werkboom (1) of de tag van de hop-repo (0)
 set -eu
 
@@ -41,7 +45,16 @@ WORK="$DIR/target/hop-patched-$TARGET"
 SRC="$WORK/src"
 rm -rf "$SRC"
 mkdir -p "$SRC/.cargo"
-git -C "$HOP_DIR" archive "$HOP_REV" | tar -x -C "$SRC"
+if [ "$HOP_REV" = worktree ]; then
+	# Eén tar over de hele lijst (geen xargs: die kan hem in stukken
+	# knippen, en een tweede archief achter het eerste leest niemand).
+	(cd "$HOP_DIR" && git ls-files -z --cached --others --exclude-standard |
+		tar --null -T - -cf -) | tar -x -C "$SRC"
+	REV_NAME="worktree on $(git -C "$HOP_DIR" rev-parse --short HEAD)"
+else
+	git -C "$HOP_DIR" archive "$HOP_REV" | tar -x -C "$SRC"
+	REV_NAME="$HOP_REV $(git -C "$HOP_DIR" rev-parse --short "$HOP_REV")"
+fi
 # applib en abi uit deze werkboom, en sync erbij: Hop gebruikt sync ook
 # zelf, en twee sync's in één image (één van de tag, één van hier) is een
 # stille dubbele `Local`. De rest van applib's afhankelijkheden (dev,
@@ -54,6 +67,6 @@ applib = { path = "$DIR/applib" }
 abi = { path = "$DIR/abi" }
 sync = { path = "$DIR/sync" }
 EOF
-echo "hop-build: agentd-hopos from $HOP_DIR ($HOP_REV $(git -C "$HOP_DIR" rev-parse --short "$HOP_REV")) against applib of $DIR" >&2
+echo "hop-build: agentd-hopos from $HOP_DIR ($REV_NAME) against applib of $DIR" >&2
 (cd "$SRC" && cargo build --quiet --release --target "$TARGET" --target-dir "$WORK/target" -p agentd-hopos) >&2
 echo "$WORK/target/$TARGET/release/agentd-hopos"

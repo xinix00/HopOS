@@ -47,6 +47,24 @@ pub const FIRST_SPI: u32 = 32;
 pub const SGI_COUNT: u32 = 16;
 /// De eerste speciale INTID (1020-1023): "niets" bij een claim.
 pub const FIRST_SPECIAL: u32 = 1020;
+/// De SGI's die de niet-beveiligde wereld heeft: 0..=7. ARM raadt aan
+/// 8..=15 voor de secure wereld te houden, en TF-A doet dat
+/// (`ARM_IRQ_SEC_SGI_0` = 8 tot en met `ARM_IRQ_SEC_SGI_7` = 15, als Group 0
+/// of Secure Group 1; op Rockchip `RK_IRQ_SEC_SGI_*`). Een niet-beveiligde
+/// schrijf naar ICC_SGI1R_EL1 voor zo'n SGI stuurt niets, en zijn bits in
+/// GICR_IGROUPR0, ISENABLER0 en ISPENDR0 zijn voor ons RAZ/WI: de kick
+/// verdwijnt stil. Linux gebruikt om dezelfde reden alleen 0..=7 voor zijn
+/// IPI's. De Go-generatie wist het al (`KickSGI = 1`, 09-09); de Rust-kern
+/// had tot 30-09 SGI 8 op de UEFI-boards, en de O6N viel op de kick van de
+/// zelftest terug op de timer.
+pub const NS_SGI_COUNT: u32 = 8;
+
+/// Is SGI `id` er een die de niet-beveiligde wereld mag sturen en
+/// ontvangen (zie [`NS_SGI_COUNT`])?
+#[must_use]
+pub const fn is_ns_sgi(id: u32) -> bool {
+    id < NS_SGI_COUNT
+}
 
 /// De prioriteit die wij onze lijnen geven: midden in het bereik, zodat
 /// een PMR van 0xff ze doorlaat en de firmware er nog boven en onder kan.
@@ -439,6 +457,28 @@ impl<I: Icc> Gic<I> {
         self.icc.eoir1(id);
     }
 
+    /// Wat de redistributor van deze core over SGI of PPI `id` zegt: de
+    /// ruwe GICR_IGROUPR0, ISENABLER0 en ISPENDR0. `None` voor een SPI of
+    /// hoger, die niet in de redistributor wonen.
+    ///
+    /// Waarom de ruwe woorden en niet drie bits: een niet-beveiligde lezer
+    /// ziet de bits van een secure lijn als 0 (RAZ). Staat de groep van
+    /// een lijn die wij net in Group 1 zetten op 0, dan is hij niet van ons
+    /// (O6N 30-09, SGI 8), en het hele woord laat zien welke het wel zijn.
+    #[must_use]
+    pub fn local(&self, id: u32) -> Option<Local> {
+        if id >= FIRST_SPI {
+            return None;
+        }
+        let r = self.r();
+        Some(Local {
+            id,
+            igroupr0: r.igroupr0.read(),
+            isenabler0: r.isenabler0.read(),
+            ispendr0: r.ispendr0.read(),
+        })
+    }
+
     /// De IIDR's en CTLR: de meting dat we met de goede blokken praten
     /// (GIC-700: GICD_IIDR 0x0402143b).
     #[must_use]
@@ -451,6 +491,49 @@ impl<I: Icc> Gic<I> {
             gicr_iidr: self.r().iidr.read(),
             gicr_typer: self.r().typer.read(),
         }
+    }
+}
+
+/// De redistributor-kant van één SGI of PPI ([`Gic::local`]): de drie
+/// woorden van het SGI_base-frame waar zijn bit in staat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Local {
+    /// De INTID (0..=31).
+    pub id: u32,
+    /// GICR_IGROUPR0: 1 = Group 1 (niet-beveiligd), 0 = Group 0 of secure.
+    pub igroupr0: u32,
+    /// GICR_ISENABLER0: 1 = aan.
+    pub isenabler0: u32,
+    /// GICR_ISPENDR0: 1 = pending.
+    pub ispendr0: u32,
+}
+
+impl Local {
+    fn bit(&self) -> u32 {
+        1 << (self.id % 32)
+    }
+
+    /// Is de lijn van ons: Group 1 en aan? Een secure lijn leest voor ons
+    /// als geen van beide.
+    #[must_use]
+    pub fn is_ours(&self) -> bool {
+        self.igroupr0 & self.bit() != 0 && self.isenabler0 & self.bit() != 0
+    }
+
+    /// Staat de lijn pending?
+    #[must_use]
+    pub fn is_pending(&self) -> bool {
+        self.ispendr0 & self.bit() != 0
+    }
+}
+
+impl fmt::Display for Local {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "GICR_IGROUPR0 {:#010x} ISENABLER0 {:#010x} ISPENDR0 {:#010x}",
+            self.igroupr0, self.isenabler0, self.ispendr0
+        )
     }
 }
 
@@ -665,6 +748,53 @@ mod tests {
             sgi1r(0x12_0003_0000, 1),
             (1 << 24) | (3 << 32) | (0x12 << 48) | 1
         );
+    }
+
+    #[test]
+    fn sgi1r_reaches_every_o6n_core() {
+        // De Cix P1 van de O6N: twaalf cores, elk een eigen Aff1 met Aff0 =
+        // 0, bit 31 (RES1) en MT (bit 24) gezet: MPIDR 0x8100_0000 | core
+        // << 8 (de Go-regel van 17-09 zag "MPIDR 0xa00" voor core 10). Het
+        // woord is dan TargetList-bit 0, Aff1 = de core, geen RS en geen
+        // IRM, en de kick in bits 27:24; MT en bit 31 lekken nergens in.
+        for core in 0..12u64 {
+            let mpidr = 0x8100_0000 | (core << 8);
+            let w = sgi1r(mpidr, 1);
+            assert_eq!(w, (1 << 24) | (core << 16) | 1, "core {core}");
+            assert_eq!(w >> 40 & 1, 0, "IRM staat uit, core {core}");
+            assert_eq!(w >> 44 & 0xf, 0, "RS, core {core}");
+        }
+    }
+
+    #[test]
+    fn the_ns_sgis_are_the_low_eight() {
+        assert!((0..8).all(is_ns_sgi));
+        assert!(!(8..SGI_COUNT).any(is_ns_sgi));
+    }
+
+    #[test]
+    fn local_reads_the_sgi_frame_and_sees_a_secure_line() {
+        let (mut d, mut r) = mem();
+        let icc = FakeIcc::default();
+        // SAFETY: zie hierboven.
+        let gic = unsafe { Gic::new(pa(&mut d), pa(&mut r), &icc) };
+        gic.enable(1, 0).unwrap();
+        let l = gic.local(1).unwrap();
+        assert!(l.is_ours() && !l.is_pending());
+        dev::write32(pa(&mut r).add(0x1_0200), 1 << 1);
+        assert!(gic.local(1).unwrap().is_pending());
+        // Een secure lijn: de NS-schrijf van `enable` valt weg (RAZ/WI),
+        // hier nagebootst door de bits na de enable te wissen.
+        gic.enable(8, 0).unwrap();
+        dev::write32(pa(&mut r).add(0x1_0080), 1 << 1);
+        dev::write32(pa(&mut r).add(0x1_0100), 1 << 1);
+        let l = gic.local(8).unwrap();
+        assert!(!l.is_ours());
+        assert_eq!(
+            l.to_string(),
+            "GICR_IGROUPR0 0x00000002 ISENABLER0 0x00000002 ISPENDR0 0x00000002"
+        );
+        assert_eq!(gic.local(32), None);
     }
 
     #[test]

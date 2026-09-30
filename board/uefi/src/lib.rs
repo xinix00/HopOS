@@ -182,9 +182,34 @@ const _: () = {
     assert!(WINDOW_PA.is_multiple_of(2 << 20));
 };
 
-/// De kick van de OS-core: SGI 8, zoals op virt (boven de 0..7 die
-/// Linux-achtige firmware voor zichzelf houdt).
-pub const KICK_SGI: u32 = 8;
+/// De kick van de OS-core: SGI 1, zoals de Go-generatie (`KickSGI`).
+///
+/// Tot 30-09 stond hier 8, "zoals op virt", met de omgekeerde reden: niet
+/// de niet-beveiligde firmware houdt 0..=7, TF-A houdt 8..=15
+/// (`driver_gicv3::NS_SGI_COUNT`). Op QEMU (geen EL3, DS=1) merkte niemand
+/// het; op de O6N (TF-A op EL3, DS=0) kwam de kick nooit aan en ving de
+/// timer hem in de zelftest (`kick=(Timer, 100000 us, try 2)`). De Altra
+/// draait ook TF-A en zou in dezelfde val lopen. 0..=7 zijn van de
+/// niet-beveiligde wereld, en na ExitBootServices zijn wij daar de enige.
+pub const KICK_SGI: u32 = 1;
+
+// De kick moet een SGI zijn die wij mogen sturen; een secure SGI verdwijnt
+// stil (zie hierboven).
+const _: () = assert!(driver_gicv3::is_ns_sgi(KICK_SGI));
+
+/// Hoe lang [`Uefi::kick_self`] wacht tot zijn SGI pending staat: 1 ms. Een
+/// SGI naar de eigen core staat binnen microseconden in de redistributor;
+/// wat er na een milliseconde nog niet staat, komt niet.
+const KICK_SEEN_NS: u64 = 1_000_000;
+
+/// De poll-grens naast [`KICK_SEEN_NS`], voor een teller die niet loopt.
+const KICK_SEEN_POLLS: u32 = 100_000;
+
+/// Zoveel verloren kicks krijgen een regel; daarna telt [`KICKS_LOST`].
+const KICK_LOST_LINES: u32 = 2;
+
+/// Meetlat: kicks van [`Uefi::kick_self`] die niet pending kwamen.
+pub static KICKS_LOST: AtomicU32 = AtomicU32::new(0);
 
 /// Zoveel eigen lijnen kan een board aanzetten ([`Uefi::enable_line`]).
 pub const LINES: usize = 8;
@@ -385,8 +410,32 @@ impl Uefi {
     }
 
     /// Stuurt de kick naar deze core zelf: de zelftest van het IPI-pad.
+    /// Komt hij niet pending (GICR_ISPENDR0, of ICC_HPPIR1 zegt hem), dan
+    /// één luide regel met het woord, het doel en wat de redistributor zei:
+    /// de zelftest ziet daarna alleen nog `Timer` en weet niet waarom.
     pub fn kick_self(&self) {
-        arch::sgi1r(driver_gicv3::sgi1r(arch::mpidr(), KICK_SGI));
+        let mpidr = arch::mpidr();
+        let word = driver_gicv3::sgi1r(mpidr, KICK_SGI);
+        arch::sgi1r(word);
+        let gic = gic();
+        let hz = cpu::idle::freq();
+        let limit = cpu::idle::counter().wrapping_add(cpu::idle::ns_to_ticks(KICK_SEEN_NS, hz));
+        for _ in 0..KICK_SEEN_POLLS {
+            if gic.local(KICK_SGI).is_some_and(|l| l.is_pending()) || arch::hppir1() == KICK_SGI {
+                return;
+            }
+            if cpu::idle::counter().wrapping_sub(limit) as i64 >= 0 {
+                break;
+            }
+        }
+        if KICKS_LOST.fetch_add(1, Relaxed) < KICK_LOST_LINES {
+            let seen = gic.local(KICK_SGI);
+            cpu::println!(
+                "irq: kick SGI {KICK_SGI} did not arrive: ICC_SGI1R {word:#x} to MPIDR {mpidr:#x}, {}, ICC_HPPIR1 {} HOPOS_KICK_LOST",
+                Seen(seen),
+                arch::hppir1()
+            );
+        }
     }
 
     /// De OS-core die `hopos.cfg` vraagt (`hopos.oscore=<small|mid|big|N>`),
@@ -539,6 +588,12 @@ impl Board for Uefi {
                 .trim_end_matches(['\0', ' ']),
         );
         el2::report();
+        // De DRBG van de kern uit de standaardbronnen van de CPU: RNDR op
+        // de O6N (Cortex-A720, FEAT_RNG), de SMCCC TRNG van TF-A op de
+        // Altra, anders jitter (EDK2 op QEMU), met één luide regel. Tot 30-09
+        // zaaide dit board niets en bleef de DRBG stil ongeseed; nu krijgt
+        // elk slot zijn zaad (`CTRL_RNG_SEED`) uit hardware waar die er is.
+        cpu::println!("{}", cpu::drbg::seed_from_cpu(cpu::idle::counter));
         let cfg = self.config();
         if !cfg.is_empty() {
             cpu::println!("cfg: hopos.cfg from the ESP, {} bytes HOPOS_CFG", cfg.len());
@@ -624,6 +679,16 @@ impl Board for Uefi {
             .map_err(|_| Error::Irq("hyp timer PPI refused"))?;
         gic.enable(KICK_SGI, mpidr)
             .map_err(|_| Error::Irq("kick SGI refused"))?;
+        // Leest de groep of de enable terug als 0, dan is de SGI niet van
+        // ons (secure, RAZ/WI) en hoort de OS-core de app-cores alleen op
+        // zijn timer. Geen weigering: de boot kan verder, maar luid.
+        if let Some(l) = gic.local(KICK_SGI)
+            && !l.is_ours()
+        {
+            cpu::println!(
+                "irq: kick SGI {KICK_SGI} is not ours ({l}), the OS core hears app cores only on its timer HOPOS_KICK_SECURE"
+            );
+        }
         cpu::println!("irq: {}", gic.describe());
         irq::start_its(&gic);
         arch::irq_unmask();
@@ -706,6 +771,19 @@ impl Board for Uefi {
     }
 }
 
+/// De redistributor-woorden van de kick voor een logregel, of "no
+/// redistributor view" als er geen waren.
+struct Seen(Option<driver_gicv3::Local>);
+
+impl core::fmt::Display for Seen {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Some(l) => write!(f, "{l}"),
+            None => f.write_str("no redistributor view"),
+        }
+    }
+}
+
 /// Een config-space-functie als tekst, voor wie een driver op een eigen
 /// segment zoekt (de O6N- en Altra-crates).
 pub fn pcie_segments() -> impl Iterator<Item = (Ecam, u16, u8)> {
@@ -752,6 +830,18 @@ mod tests {
             os_core_of("small", 4, |_| CoreClass::Big),
             (0, Some("no core of that class"))
         );
+    }
+
+    #[test]
+    fn the_kick_of_the_o6n_os_core_is_a_non_secure_sgi() {
+        // Core 0 van de O6N (MPIDR 0x8100_0000) en core 8, de eerste big
+        // core (Aff1 = 8): TargetList-bit 0, Aff1 op 23:16, SGI 1 op 27:24.
+        assert_eq!(driver_gicv3::sgi1r(0x8100_0000, KICK_SGI), (1 << 24) | 1);
+        assert_eq!(
+            driver_gicv3::sgi1r(0x8100_0800, KICK_SGI),
+            (1 << 24) | (8 << 16) | 1
+        );
+        assert!(driver_gicv3::is_ns_sgi(KICK_SGI));
     }
 
     #[test]

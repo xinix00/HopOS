@@ -11,9 +11,10 @@
 //! start); het is een venster erop.
 
 use crate::contract::{
-    CTRL_CORES, CTRL_ENV_DATA, CTRL_ENV_LEN, CTRL_ENV_MAX, CTRL_EXIT_CODE, CTRL_HEARTBEAT,
-    CTRL_IDLE, CTRL_IDLE_MODE, CTRL_KILL, CTRL_MEM_SYS, CTRL_RAM_SIZE, CTRL_RX_DOOR, CTRL_SHARED,
-    CTRL_STATUS, CTRL_TEMP, CTRL_WAKES, CTRL_WALL_OFF, IDLE_YIELD,
+    CTRL_CORES, CTRL_ENV_DATA, CTRL_ENV_LEGACY_MAX, CTRL_ENV_LEN, CTRL_ENV_MAX, CTRL_EXIT_CODE,
+    CTRL_HEARTBEAT, CTRL_IDLE, CTRL_IDLE_MODE, CTRL_KILL, CTRL_MEM_SYS, CTRL_RAM_SIZE,
+    CTRL_RNG_SOURCE, CTRL_RX_DOOR, CTRL_SHARED, CTRL_STATUS, CTRL_TEMP, CTRL_WAKES, CTRL_WALL_OFF,
+    IDLE_YIELD, rng_source,
 };
 use dev::Pa;
 
@@ -180,8 +181,12 @@ impl Ctrl {
 /// app onafhankelijk van wat de kern daarna met de pagina doet. Opzoeken is
 /// een lineaire scan over `key=val\n`-regels; de blob is een paar honderd
 /// bytes en wordt bij de start gelezen, niet in een heet pad.
+///
+/// De buffer is zo groot als de grootste env die een kern ooit schreef
+/// ([`CTRL_ENV_LEGACY_MAX`]): een nieuwe app op een oude kern verliest
+/// zijn env niet omdat het RNG-blok (30-09) de grens verlaagde.
 pub struct Env {
-    buf: [u8; CTRL_ENV_MAX as usize],
+    buf: [u8; CTRL_ENV_LEGACY_MAX as usize],
     len: usize,
 }
 
@@ -190,18 +195,24 @@ impl Env {
     #[must_use]
     pub const fn empty() -> Self {
         Self {
-            buf: [0; CTRL_ENV_MAX as usize],
+            buf: [0; CTRL_ENV_LEGACY_MAX as usize],
             len: 0,
         }
     }
 
     /// Leest de blob van de pagina. Een lengte van 0 of voorbij het maximum
-    /// geeft een lege env: de kern weigerde zo'n env al bij de start.
+    /// geeft een lege env: de kern weigerde zo'n env al bij de start. Het
+    /// maximum is [`CTRL_ENV_MAX`] op een kern met het RNG-blok (het
+    /// bronwoord draagt de magic), en de oude grens op een kern zonder.
     #[must_use]
     pub fn read(ctrl: &Ctrl) -> Self {
         let mut env = Self::empty();
         let n = ctrl.get(CTRL_ENV_LEN);
-        if n == 0 || n > CTRL_ENV_MAX {
+        let max = match rng_source(ctrl.get(CTRL_RNG_SOURCE)) {
+            Some(_) => CTRL_ENV_MAX,
+            None => CTRL_ENV_LEGACY_MAX,
+        };
+        if n == 0 || n > max {
             return env;
         }
         let src = ctrl.addr(CTRL_ENV_DATA);
@@ -331,6 +342,13 @@ pub(crate) mod tests {
     #[test]
     fn oversized_env_length_gives_an_empty_env() {
         let mut p = Page::new();
+        p.put(CTRL_ENV_LEN, CTRL_ENV_LEGACY_MAX + 1);
+        assert!(Env::read(&p.ctrl()).is_empty());
+        // Een kern met het RNG-blok schrijft nooit meer dan CTRL_ENV_MAX.
+        p.put(
+            CTRL_RNG_SOURCE,
+            abi::hopabi::rng_source_word(abi::hopabi::RNG_SRC_JITTER),
+        );
         p.put(CTRL_ENV_LEN, CTRL_ENV_MAX + 1);
         assert!(Env::read(&p.ctrl()).is_empty());
     }

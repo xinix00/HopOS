@@ -23,6 +23,9 @@
 //!   object-store en het eigen zicht, over die client.
 //! - [`mmu`]: de stage-1 van elke app op arm64 (RAM write-back, de
 //!   control-page Normal-NC) en de vectortabel die een fault op EL1 meldt.
+//! - [`rand`]: de willekeur: een DRBG uit het zaad dat de kern op de
+//!   control-page legt (`CTRL_RNG_SEED`) en eigen jitter, met één luide
+//!   regel over de bron (`HOPOS_APP_RNG`).
 //! - [`smp`]: meer cores voor één app (`cores: N` in de jobspec): één
 //!   executor per core en [`smp::spawn_on`].
 //!
@@ -60,6 +63,7 @@ pub mod heap;
 pub mod log;
 pub mod mmu;
 pub mod net;
+pub mod rand;
 pub mod ring;
 pub mod rt;
 pub mod sleep;

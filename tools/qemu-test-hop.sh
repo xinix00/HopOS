@@ -13,7 +13,11 @@
 #               HOPOS_SYSTEM_UP, HOPOS_DISK_UP en HOPOS_FS_UP fresh=1 (een
 #               verse schijf per run), HOPOS_HOP_START slot=1, en twee keer
 #               HOPOS_HOP_PUBLISH (8080 en 9080);
-#   Hop         via de servicer van slot 1: HOP_UP en HOP_LEADER;
+#   Hop         via de servicer van slot 1: HOP_UP en HOP_LEADER, en
+#               het zaad van de kern op zijn control-page: HOPOS_RNG_SLOTS
+#               source=jitter (virt heeft geen TRNG) en "applib: rng seed
+#               from the kernel ... HOPOS_APP_RNG source=jitter" (applib
+#               van deze werkboom, dus ook met een Hop van vóór het zaad);
 #   van buiten  POST http://127.0.0.1:$LEADERPORT/v1/jobs wordt aangenomen
 #               (onbeveiligd: de kern geeft Hop HOPOS_INSECURE=1);
 #   de plaatsing HOP_JOB_PLACED slot=2, HOPOS_SLOT_START slot=2 en
@@ -127,7 +131,7 @@ QPID=$!
 has() { tr -d '\r' <"$LOG" | grep -q -E "$1"; }
 
 # De vaste markers (grep -E), in de volgorde waarin ze horen te komen.
-BOOT_MARKS="HOPOS_BOOT|HOPOS_CLOCK_FIXED|HOPOS_PRIVILEGE|HOPOS_DISK_UP model=virtio-blk|HOPOS_FS_UP fresh=1|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_OS_SELFTEST ok|HOPOS_HOP_START slot=1 core=0 cpu=$OSCPU |uplink tcp :8080 -> slot 1 :8080 HOPOS_HOP_PUBLISH|uplink tcp :9080 -> slot 1 :9080 HOPOS_HOP_PUBLISH|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
+BOOT_MARKS="HOPOS_BOOT|HOPOS_CLOCK_FIXED|HOPOS_PRIVILEGE|HOPOS_DISK_UP model=virtio-blk|HOPOS_FS_UP fresh=1|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_OS_SELFTEST ok|HOPOS_HOP_START slot=1 core=0 cpu=$OSCPU |uplink tcp :8080 -> slot 1 :8080 HOPOS_HOP_PUBLISH|uplink tcp :9080 -> slot 1 :9080 HOPOS_HOP_PUBLISH|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP|HOPOS_RNG_SLOTS source=jitter|slot 1: applib: rng seed from the kernel .*HOPOS_APP_RNG source=jitter"
 [ "$OSCPU" = 0 ] || BOOT_MARKS="$BOOT_MARKS|HOPOS_OSCORE_PARKED"
 PLACE_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|HOPOS_SLOT_START slot=2 core=1 cpu=$APPCPU |slot 2: HOPOS_APPSPIKE_FS ok|slot 2: HOPOS_APPSPIKE_DONE pass=9 fail=0|hopfs: slot 1 saved /hop/agent-state.json as /volumes/hop/agent-state.json .*HOPOS_FS_SAVED"
 RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOP_STATE_SKIPPED|HOPOS_OS_SELFTEST_FAIL|HOPOS_OS_CORE_FAIL|HOPOS_OSCORE_FALLBACK|HOPOS_CAGE_FAIL"

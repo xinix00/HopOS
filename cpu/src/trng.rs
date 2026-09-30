@@ -140,6 +140,13 @@ pub fn fill_cpu(dst: &mut [u8]) -> Result<Kind> {
     Ok(Kind::Rndr)
 }
 
+/// Zit er een EL3-monitor onder ons (ID_AA64PFR0_EL1.EL3)? Alleen dan
+/// bestaat de weg naar de SMCCC TRNG; voor de regel van een jitter-zaad.
+#[must_use]
+pub fn has_monitor() -> bool {
+    arch::has_el3()
+}
+
 /// Welke bron [`fill`] op deze core zou kiezen, zonder entropie te trekken.
 #[must_use]
 pub fn source() -> Option<Kind> {

@@ -161,8 +161,83 @@ pub const CTRL_APP_FAULT_ELR: u64 = 0xFD0;
 /// App naar kern: FAR_EL1, het adres dat hij raakte (alleen zinvol bij een
 /// abort).
 pub const CTRL_APP_FAULT_FAR: u64 = 0xFC8;
-/// De ruimte voor de env-blob.
-pub const CTRL_ENV_MAX: u64 = CTRL_APP_FAULT_FAR - CTRL_ENV_DATA;
+/// Kern naar app: 32 bytes zaad uit de DRBG van de kern (`cpu::drbg`),
+/// vier woorden van 0xFA8 tot 0xFC8, onder [`CTRL_APP_FAULT_FAR`], naar
+/// beneden groeiend (30-09). De kern zet het bij de bouw van de kooi, na
+/// een flip-adoptie en daarna elke seconde vers vanuit de telemetrie-tik;
+/// elk slot krijgt eigen bytes. Geldig alleen onder het protocol van
+/// [`CTRL_RNG_GEN`]; de bron staat in [`CTRL_RNG_SOURCE`].
+///
+/// Zaad, geen sleutel: de app haalt het door zijn eigen DRBG
+/// (`applib::rand`), samen met eigen jitter, en gebruikt het nooit rauw.
+/// Waarom op de page en niet als system-op: een woord op de page kost geen
+/// verbinding (de TLS van Hop heeft zijn zaad nodig vóór er een
+/// system-verbinding is), het is de vorm van [`CTRL_TEMP`] en
+/// [`CTRL_WALL_OFF`], en een oude app leest het simpelweg niet.
+pub const CTRL_RNG_SEED: u64 = 0xFA8;
+/// De lengte van [`CTRL_RNG_SEED`] in bytes.
+pub const CTRL_RNG_SEED_LEN: usize = 32;
+/// Kern naar app: de generatie van [`CTRL_RNG_SEED`], een seqlock met één
+/// schrijver (de kern op zijn OS-core). 0 = geen zaad (een oude kern, of
+/// een kern zonder geseede DRBG); oneven = de kern schrijft net; even en
+/// niet 0 = geldig. De kern schrijft oneven, dan het zaad en de bron, dan
+/// de volgende even waarde, met een barrière en een cache-clean na elke
+/// stap. De lezer leest de generatie, het zaad en de generatie opnieuw, en
+/// neemt het zaad alleen als beide gelijk, even en niet 0 zijn. Een nieuwe
+/// generatie is vers zaad: de app mengt het bij (herzaaien). Per page
+/// monotoon, ook over een flip: de kern telt door vanaf wat er staat.
+pub const CTRL_RNG_GEN: u64 = 0xFA0;
+/// Kern naar app: de bron van het zaad in [`CTRL_RNG_SEED`]:
+/// [`RNG_MAGIC`] in de bovenste 32 bits en een `RNG_SRC_*` in de onderste
+/// byte ([`rng_source`] leest hem). Een woord zonder de magic is geen bron:
+/// op een oude kern kan hier een lange env-blob staan (tot 0xEA8 bytes, zie
+/// [`CTRL_ENV_LEGACY_MAX`]), en tekst vormt nooit de magic (zijn bytes
+/// liggen boven 0x7F).
+pub const CTRL_RNG_SOURCE: u64 = 0xF98;
+/// De ruimte voor de env-blob. 0xEA8 tot het RNG-blok (30-09) er 40 van
+/// nam.
+pub const CTRL_ENV_MAX: u64 = CTRL_RNG_SOURCE - CTRL_ENV_DATA;
+/// De grootste env die een kern ooit schreef: 0xEA8 bytes, vóór het
+/// RNG-blok. Een lezer die ook op een oude kern moet draaien, accepteert
+/// een [`CTRL_ENV_LEN`] tot hier zolang [`CTRL_RNG_SOURCE`] geen
+/// [`RNG_MAGIC`] draagt (een oude kern); een nieuwe kern schrijft nooit
+/// meer dan [`CTRL_ENV_MAX`].
+pub const CTRL_ENV_LEGACY_MAX: u64 = CTRL_APP_FAULT_FAR - CTRL_ENV_DATA;
+
+/// De bovenste 32 bits van [`CTRL_RNG_SOURCE`]. Elke byte ligt boven 0x7F,
+/// dus een env van tekst die op een oude kern over het woord loopt, is
+/// nooit een bron.
+pub const RNG_MAGIC: u32 = 0xC0DE_5EED;
+/// [`CTRL_RNG_SOURCE`]: de DRBG van de kern is uit timing-jitter gezaaid,
+/// niet uit hardware (QEMU virt, een board zonder TRNG).
+pub const RNG_SRC_JITTER: u8 = 1;
+/// [`CTRL_RNG_SOURCE`]: hardware, RNDR (FEAT_RNG; de O6N).
+pub const RNG_SRC_RNDR: u8 = 2;
+/// [`CTRL_RNG_SOURCE`]: hardware, de SMCCC TRNG van de firmware (DEN 0098;
+/// de Altra).
+pub const RNG_SRC_SMCCC: u8 = 3;
+/// [`CTRL_RNG_SOURCE`]: hardware, een TRNG-blok van de SoC (de RNG200 van
+/// de Pi's, de RKRNG van de Radxa).
+pub const RNG_SRC_SOC: u8 = 4;
+
+/// Het woord voor [`CTRL_RNG_SOURCE`] bij bron `src` (een `RNG_SRC_*`).
+#[must_use]
+pub const fn rng_source_word(src: u8) -> u64 {
+    ((RNG_MAGIC as u64) << 32) | src as u64
+}
+
+/// De `RNG_SRC_*` uit een [`CTRL_RNG_SOURCE`]-woord, of `None` als de magic
+/// ontbreekt of de bron onbekend is (een oude kern, een env eroverheen).
+#[must_use]
+pub const fn rng_source(word: u64) -> Option<u8> {
+    if (word >> 32) as u32 != RNG_MAGIC || word & 0xFFFF_FF00 != 0 {
+        return None;
+    }
+    match word as u8 {
+        s @ (RNG_SRC_JITTER | RNG_SRC_RNDR | RNG_SRC_SMCCC | RNG_SRC_SOC) => Some(s),
+        _ => None,
+    }
+}
 
 /// [`CTRL_EXIT_CODE`] van een app die op EL1 een exception ving: het
 /// rapport staat in [`CTRL_APP_FAULT_VEC`] en de drie woorden eronder.
@@ -307,6 +382,12 @@ pub struct CtrlPage {
     pub door_irq: u64,
     /// [`CTRL_ENV_DATA`].
     pub env: [u8; CTRL_ENV_MAX as usize],
+    /// [`CTRL_RNG_SOURCE`].
+    pub rng_source: u64,
+    /// [`CTRL_RNG_GEN`].
+    pub rng_gen: u64,
+    /// [`CTRL_RNG_SEED`].
+    pub rng_seed: [u64; CTRL_RNG_SEED_LEN / 8],
     /// [`CTRL_APP_FAULT_FAR`].
     pub app_fault_far: u64,
     /// [`CTRL_APP_FAULT_ELR`].
@@ -324,7 +405,7 @@ pub struct CtrlPage {
 }
 
 /// Alle woord-offsets van de page, voor de uniekheidstoets.
-pub const CTRL_WORDS: [u64; 43] = [
+pub const CTRL_WORDS: [u64; 49] = [
     CTRL_STATUS,
     CTRL_EXIT_CODE,
     CTRL_KILL,
@@ -361,6 +442,12 @@ pub const CTRL_WORDS: [u64; 43] = [
     CTRL_WAKES,
     CTRL_RX_DOOR,
     CTRL_DOOR_IRQ,
+    CTRL_RNG_SOURCE,
+    CTRL_RNG_GEN,
+    CTRL_RNG_SEED,
+    CTRL_RNG_SEED + 8,
+    CTRL_RNG_SEED + 16,
+    CTRL_RNG_SEED + 24,
     CTRL_APP_FAULT_FAR,
     CTRL_APP_FAULT_ELR,
     CTRL_APP_FAULT_ESR,
@@ -414,6 +501,11 @@ at!(wakes, CTRL_WAKES);
 at!(rx_door, CTRL_RX_DOOR);
 at!(door_irq, CTRL_DOOR_IRQ);
 at!(env, CTRL_ENV_DATA);
+at!(rng_source, CTRL_RNG_SOURCE);
+at!(rng_gen, CTRL_RNG_GEN);
+at!(rng_seed, CTRL_RNG_SEED);
+// Het zaad sluit precies aan op het fault-rapport erboven.
+const _: () = assert!(CTRL_RNG_SEED + CTRL_RNG_SEED_LEN as u64 == CTRL_APP_FAULT_FAR);
 at!(app_fault_far, CTRL_APP_FAULT_FAR);
 at!(app_fault_elr, CTRL_APP_FAULT_ELR);
 at!(app_fault_esr, CTRL_APP_FAULT_ESR);
@@ -678,6 +770,22 @@ mod tests {
             );
         }
         const { assert!(CTRL_WORDS.len() >= 20) };
+    }
+
+    /// Het bronwoord van het RNG-blok: alleen met de magic, alleen een
+    /// bekende bron, en tekst (een env op een oude kern) is nooit een bron.
+    #[test]
+    fn rng_source_needs_the_magic() {
+        for s in [RNG_SRC_JITTER, RNG_SRC_RNDR, RNG_SRC_SMCCC, RNG_SRC_SOC] {
+            assert_eq!(rng_source(rng_source_word(s)), Some(s));
+        }
+        assert_eq!(rng_source(0), None);
+        assert_eq!(rng_source(rng_source_word(0)), None);
+        assert_eq!(rng_source(rng_source_word(9)), None);
+        assert_eq!(rng_source(rng_source_word(RNG_SRC_SOC) | 0x100), None);
+        assert_eq!(rng_source(u64::from_le_bytes(*b"HOP_X=1\n")), None);
+        assert_eq!(CTRL_ENV_LEGACY_MAX, 0xEA8);
+        assert_eq!(CTRL_ENV_MAX, 0xE78);
     }
 
     #[test]

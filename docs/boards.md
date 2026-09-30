@@ -77,6 +77,44 @@ armed-regel zegt dat.
 `-` zonder sensor) en op de control-page van Hop (`CTRL_TEMP`, milligraden;
 `applib::Ctrl::temp_milli_c`), voor zijn heartbeat.
 
+**De willekeur** (`cpu::drbg`, `hopos::seed`, `applib::rand`): het board
+zaait de DRBG van de kern in `discover` uit de standaardbronnen van de CPU
+(`cpu::drbg::seed_from_cpu`): RNDR op de O6N (Cortex-A720, FEAT_RNG), de
+SMCCC TRNG van TF-A op de Altra, en anders jitter (EDK2 op QEMU). Tot
+30-09 zaaide dit board niets: de O6N bootte zonder één `trng:`-regel en
+de DRBG bleef ongeseed. De verwachte regels:
+
+```
+trng: rndr online, the kernel DRBG is seeded from rndr (FEAT_RNG) HOPOS_RNG_RNDR_UP                  (O6N)
+trng: smccc-trng online, the kernel DRBG is seeded from the SMCCC TRNG (DEN 0098) HOPOS_RNG_SMCCC_UP (Altra)
+trng: WARNING the kernel DRBG is seeded from timer jitter, not hardware entropy: <reden> (EL3 monitor: yes|no); ... HOPOS_RNG_INSECURE
+rng: every slot gets 32 bytes from the kernel DRBG (rndr) on its control page at build and every second HOPOS_RNG_SLOTS source=hardware
+slot 1: applib: rng seeded from the kernel (rndr, gen 2) and 256 jitter samples HOPOS_APP_RNG source=hardware kind=rndr
+slot 1: hop: TLS randomness from the kernel seed (rndr, hardware) mixed with timer jitter (512 samples) HOP_TLS_ENTROPY_HW source=rndr
+```
+
+Elk slot krijgt 32 bytes uit die DRBG op zijn control-page: bij de bouw
+van de kooi, na een flip-adoptie, en elke seconde vers vanuit de
+telemetrie-tik. Het blok ligt onder het EL1-fault-rapport, naar beneden
+groeiend (`abi::hopabi`, 30-09):
+
+| Offset | Woord | Betekenis |
+| --- | --- | --- |
+| 0xFA8 tot 0xFC8 | `CTRL_RNG_SEED` | 32 bytes zaad, eigen bytes per slot |
+| 0xFA0 | `CTRL_RNG_GEN` | seqlock: 0 geen zaad, oneven de kern schrijft, even en niet 0 geldig; per page monotoon, ook over een flip |
+| 0xF98 | `CTRL_RNG_SOURCE` | `0xC0DE5EED` in de bovenste 32 bits, de bron in de onderste byte: 1 jitter, 2 rndr, 3 smccc-trng, 4 SoC-blok |
+
+De env-ruimte (`CTRL_ENV_MAX`) ging daarvoor van 0xEA8 naar 0xE78 bytes.
+Additief: een oude app leest het blok niet; een nieuwe app op een oude kern
+ziet generatie 0 (of een bronwoord zonder de magic) en meldt
+`HOPOS_APP_RNG_NONE`, en leest een env van een oude kern nog tot 0xEA8
+bytes (`CTRL_ENV_LEGACY_MAX`). De app gebruikt het zaad nooit rauw:
+`applib::rand::Rng` mengt het met eigen jitter in een ChaCha20-DRBG, en
+herzaait vanzelf als er een nieuwe generatie ligt. Waarom geen system-op:
+het zaad is nodig vóór er een verbinding is (de ISS van de netstack, de
+eerste TLS-handshake van Hop), en een woord op de page is de vorm van de
+temperatuur en de wandklok.
+
 **De klok** (`driver_dvfs::run` op de OS-core): sample elke 10 ms, oordeel
 over 50 ms, omhoog op last, omlaag na 30 s stil; elke 10 s een meetregel
 `dvfs: clock <MHz> (full|quiet), temp <C>, busy <bron> HOPOS_CLOCK`, en een
@@ -159,6 +197,15 @@ door niemand aangezet.
 Gaat het mis, dan zegt de regel welke stap: `rtl8126: <stap> timed out (reg
 0x..=0x..)`, `rtl8126: unsupported chip XID 0x...`, `nvme: CSTS.RDY never
 became 1`, `HOPOS_NIC_FAIL`, `HOPOS_NVME_FAIL`.
+
+De kick van de OS-core is SGI 1 (`board_uefi::KICK_SGI`), niet 8: TF-A
+houdt SGI 8 tot en met 15 als secure, en een niet-beveiligde kick daar
+verdwijnt stil (O6N 30-09: `kick=(Timer, 100000 us, try 2)`). Zegt de boot
+`irq: kick SGI 1 is not ours (GICR_IGROUPR0 ...) HOPOS_KICK_SECURE`, dan
+leest de redistributor de groep of de enable als 0; zegt de zelftest
+`irq: kick SGI 1 did not arrive: ICC_SGI1R 0x... to MPIDR 0x..., GICR_IGROUPR0
+... ISENABLER0 ... ISPENDR0 ..., ICC_HPPIR1 ... HOPOS_KICK_LOST`, dan ging
+het woord de deur uit maar stond de SGI na 1 ms niet pending.
 
 ### Wat er nog niet is
 

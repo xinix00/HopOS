@@ -6,7 +6,9 @@
 //! de control-page van Hop (`CTRL_TEMP`), zodat Hop hem op zijn heartbeat
 //! zet zoals de Go-agent deed (`Temp: board.TempMilliC`, zichtbaar in `hop
 //! agents`). De control-page, niet `SLOT_STATUS`: die is van de system-API
-//! (een ander spoor), en een woord op de page kost Hop geen call.
+//! (een ander spoor), en een woord op de page kost Hop geen call. De
+//! thermiek-taak is ook de tik van het slot-zaad (`seed::refresh`); het
+//! zaad zelf is van seed.rs.
 //!
 //! Per board ([`hw`]): de O6N meet via de SCP (SCMI) en heeft een knop
 //! (`_CPC`), de Altra meet via de SMpro (PCC) en laat de klok aan de
@@ -57,9 +59,12 @@ pub(crate) fn start(exec: &'static Executor) {
     hw::governor(exec);
 }
 
-/// Elke seconde: meten, bewaren, en op de control-page van Hop zetten.
+/// Elke seconde: meten, bewaren, en op de control-page van Hop zetten; en
+/// op dezelfde tik vers zaad op de page van elke kooi (seed.rs), zodat een
+/// app zonder verbinding kan herzaaien.
 async fn thermal(exec: &'static Executor) {
     loop {
+        crate::seed::refresh();
         let t = hw::temp();
         TEMP.store(t, Relaxed);
         if let Some(page) = crate::clock::ctrl_page(crate::slots::HOP_SLOT) {
