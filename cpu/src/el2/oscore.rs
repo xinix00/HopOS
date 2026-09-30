@@ -400,6 +400,28 @@ pub struct OsCore {
     bell: Option<Bell>,
 }
 
+/// Het laatste fault-rapport van een beurt: ESR, FAR, de PC van de
+/// bewoner en de vector (1 synchroon, 2 IRQ, 3 FIQ), voor een proef die
+/// geen control-page heeft (de voorproef op Apple, 30-09).
+static LAST_FAULT: [core::sync::atomic::AtomicU64; 4] = [
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+];
+
+/// Het laatste fault-rapport: `(esr, far, pc, vec)`; alles nul als er
+/// nog geen beurt op een fault eindigde.
+#[must_use]
+pub fn last_fault() -> (u64, u64, u64, u64) {
+    (
+        LAST_FAULT[0].load(Relaxed),
+        LAST_FAULT[1].load(Relaxed),
+        LAST_FAULT[2].load(Relaxed),
+        LAST_FAULT[3].load(Relaxed),
+    )
+}
+
 impl OsCore {
     /// De rotatie over het plan `plan`, met de EL2-code van `flavor` en de
     /// kick `bell` (of geen, dan hoort de kern een app-core alleen op zijn
@@ -565,6 +587,12 @@ impl OsCore {
     /// switcher), en de bewoner dood. De fault-PC staat al in zijn
     /// resume-woord.
     fn fault(&self, ctx: Pa, vec: u64, esr: u64) -> Back {
+        // Ook zonder control-page (de zelftest, de voorproef van een board)
+        // blijft het rapport leesbaar: [`last_fault`].
+        LAST_FAULT[0].store(esr, Relaxed);
+        LAST_FAULT[1].store(arch::far(), Relaxed);
+        LAST_FAULT[2].store(ctx_read(ctx, CTX_RESUME), Relaxed);
+        LAST_FAULT[3].store(vec + 1, Relaxed);
         let cp = ctx_read(ctx, CTX_CTRL_PA);
         if cp != 0 {
             for (off, v) in [

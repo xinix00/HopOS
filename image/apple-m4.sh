@@ -41,12 +41,22 @@ RAM_BASE=0x10100000000
 
 cd "$DIR"
 mkdir -p "$OUT"
-cargo build --quiet --release --target "$TARGET" -p hopos --features board-apple
 OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
 if [ -z "$OBJCOPY" ]; then
 	echo "apple-m4: rust-objcopy missing (rustup component add llvm-tools)" >&2
 	exit 1
 fi
+# EMBED=<ELF>: een gestripte app-ELF (Hop) in het kernimage zelf, voor een
+# boot zonder loader (kmutil): board/apple/build.rs bakt hem in, de kern
+# plaatst hem als Hop in slot 1 (Go: cmd/hopos-embed). Zonder EMBED= niets.
+if [ -n "${EMBED-}" ]; then
+	[ -f "$EMBED" ] || { echo "apple-m4: EMBED=$EMBED does not exist" >&2; exit 1; }
+	"$OBJCOPY" --strip-debug "$EMBED" "$OUT/embed.elf"
+	export HOPOS_EMBED="$OUT/embed.elf"
+else
+	export HOPOS_EMBED=""
+fi
+cargo build --quiet --release --target "$TARGET" -p hopos --features board-apple
 ELF="$DIR/target/$TARGET/release/hopos"
 IMG="$OUT/hopos-apple.img"
 "$OBJCOPY" -O binary "$ELF" "$IMG"

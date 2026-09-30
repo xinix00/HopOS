@@ -170,6 +170,17 @@ fn preflight(plan: &Plan) -> bool {
         _ => {}
     }
     let here = arch::mpidr();
+    // Het EL2-regime zoals iBoot of m1n1 het achterliet en de kern het
+    // zette, teruggelezen zoals Go's el2Apple (30-09: onder kmutil gaf de
+    // voorproef drie keer Fault, en zonder deze regel is dat blind).
+    println!(
+        "slots: el2 regime hcr={:#x} cnthctl={:#x} cptr={:#x} sctlr_el2={:#x} HOPOS_APPLE_EL2",
+        crate::arch::hcr(),
+        crate::arch::cnthctl(),
+        crate::arch::cptr(),
+        crate::arch::sctlr_el2()
+    );
+    crate::serror_check("everything before the preflight");
     let ok = match OsCore::new(plan, crate::FLAVOR, Some(Bell::apple(here))) {
         Ok(mut os) => {
             let ms = cpu::idle::freq() / 1000;
@@ -191,6 +202,12 @@ fn preflight(plan: &Plan) -> bool {
                     "HOPOS_APPLE_PREFLIGHT_FAIL"
                 }
             );
+            if [back(t), back(y), back(k)].contains(&Some(Back::Fault)) {
+                let (esr, far, pc, vec) = cpu::el2::last_fault();
+                println!(
+                    "slots: preflight fault: esr={esr:#x} far={far:#x} pc={pc:#x} vec={vec} HOPOS_APPLE_PREFLIGHT_FAULT"
+                );
+            }
             ok
         }
         Err(e) => {
@@ -272,12 +289,27 @@ fn staged() -> bool {
     dev::read64(Pa(STAGE_MAGIC_PA)) == STAGE_MAGIC
 }
 
+/// De ingebakken stage (build.rs, `HOPOS_EMBED`): Hop in het kernimage
+/// zelf, voor een boot zonder loader (kmutil). Leeg = niets ingebakken.
+static EMBED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/embed.elf"));
+
+/// De ingebakken stage, of `None`.
+fn embedded() -> Option<&'static [u8]> {
+    if EMBED.is_empty() { None } else { Some(EMBED) }
+}
+
 /// De rol uit [`STAGE_ROLE_PA`]. Zonder staging "app": de kern zoekt dan het
 /// image, vindt het niet en zegt `HOPOS_SLOT_NONE`.
 #[must_use]
 pub fn staged_role() -> Option<StagedRole> {
     if !staged() {
-        return Some(StagedRole::App);
+        // Zonder loader: de ingebakken stage is Hop (image/apple-m4.sh
+        // `EMBED=`), anders is er niets en zoekt de kern een app.
+        return Some(if embedded().is_some() {
+            StagedRole::Hop
+        } else {
+            StagedRole::App
+        });
     }
     match dev::read64(Pa(STAGE_ROLE_PA)) {
         0 => Some(StagedRole::App),
@@ -291,7 +323,7 @@ pub fn staged_role() -> Option<StagedRole> {
 #[must_use]
 pub fn staged_image() -> Option<&'static [u8]> {
     if !staged() {
-        return None;
+        return embedded();
     }
     let size = dev::read64(Pa(STAGE_HDR_PA));
     if size == 0 || size > STAGE_MAX {

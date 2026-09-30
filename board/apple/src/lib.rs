@@ -357,6 +357,7 @@ impl Board for Apple {
     /// de CPU_ON van dit board in `cpu::smp` (vóór de verhuizing naar de
     /// OS-core), en zet de clusters op hun klok.
     fn discover(&self, dtb: u64) {
+        serror_check("the boot, before any driver");
         let x0 = if dtb != 0 {
             dtb
         } else {
@@ -364,7 +365,9 @@ impl Board for Apple {
         };
         let args = fwinfo::load(x0);
         println!("watchdog: {}", wdt::quiet().as_str());
+        serror_check("silencing the firmware watchdogs");
         self.report(x0, args);
+        serror_check("reading the ADT and the boot-args");
         cpu::smp::set_cpu_on(cores::cpu_on_mpidr);
         let cfg = self.config();
         match fwinfo::config_source() {
@@ -385,7 +388,9 @@ impl Board for Apple {
             Some(t) => wdt::pstate_tune(t, false),
             None => wdt::pstate_tune(wdt::PS_DEFAULT, true),
         }
+        serror_check("the p-state tune");
         self.report_temp(cfg);
+        serror_check("the temperature probe (SMC)");
     }
 
     fn clock(&self) -> executor::Clock {
@@ -442,6 +447,7 @@ impl Board for Apple {
 
     fn start_interrupts(&self) -> Result<&'static Signal, Error> {
         let target = irq::start().map_err(Error::Irq)?;
+        serror_check("the AIC bring-up");
         println!(
             "irq: {} (target {target} reaches this core), fast IPI and timer FIQ",
             irq::AIC.describe()
@@ -467,8 +473,10 @@ impl Board for Apple {
         if NIC_CLAIMED.swap(true, Relaxed) {
             return Err(Error::Twice("probe_nic"));
         }
+        serror_check("the disk and everything before the NIC");
         let how = pcie::init().map_err(Error::Nic)?;
         println!("{how}");
+        serror_check("the apcie bring-up");
         let ep = match pcie::enumerate_nic() {
             Ok(ep) => ep,
             Err(why) => {
@@ -477,6 +485,7 @@ impl Board for Apple {
             }
         };
         println!("apcie: link up, endpoint {} bar0 {:#x}", ep.f, ep.bar0);
+        serror_check("the link and the enumeration");
         if !driver_tg3::drives(ep.f.vendor, ep.f.device) {
             println!("net: {} is not the tg3 we know", ep.f);
             return Ok(None);
@@ -501,6 +510,7 @@ impl Board for Apple {
             Error::Nic("tg3 init failed")
         })?;
         println!("tg3: {}", nic.describe());
+        serror_check("the tg3 init");
         match nic.link_up(8_000_000_000) {
             Ok(l) => println!(
                 "tg3: LINK UP, {} Mb/s {} duplex",
@@ -513,6 +523,26 @@ impl Board for Apple {
             }
         }
         Ok(Some(nic))
+    }
+}
+
+/// Neemt een SError op die na `stage` pending staat en meldt hem. Op dit
+/// silicium is een verboden schrijf stil en landt de abort later als
+/// SError; op EL2 blijft hij achter PSTATE.A tot de eerste beurt op EL1
+/// (de M4 onder kmutil, 30-09: de voorproef zag ESR 0xbe000000, vector 11,
+/// drie keer). Zo staat er bij welke stap hij hoort, en start de voorproef
+/// schoon.
+pub(crate) fn serror_check(stage: &str) {
+    if let Some((esr, elr, far)) = cpu::vectors::serror_drain() {
+        // De L2C-foutregisters van dit silicium (m1n1 `exception.c`:
+        // SYS_IMP_APL_L2C_ERR_STS/ADR/INF): de ADR is het adres van de
+        // schrijf die stil misging; de STS terugschrijven wist hem, anders
+        // blijft de SError terugkomen.
+        let (sts, adr, inf) = arch::l2c_err();
+        println!(
+            "apple: SError pending after {stage}: esr={esr:#x} elr={elr:#x} far={far:#x} l2c sts={sts:#x} adr={adr:#x} inf={inf:#x} HOPOS_APPLE_SERROR"
+        );
+        arch::l2c_err_clear(sts);
     }
 }
 
@@ -541,6 +571,65 @@ mod arch {
         v
     }
 
+    /// HCR_EL2 zoals hij nu staat (de teruglezing van Go's el2Apple).
+    pub(super) fn hcr() -> u64 {
+        let v: u64;
+        // SAFETY: HCR_EL2 lezen heeft geen neveneffect.
+        unsafe { asm!("mrs {}, hcr_el2", out(reg) v, options(nomem, nostack)) };
+        v
+    }
+
+    /// CNTHCTL_EL2 zoals hij nu staat.
+    pub(super) fn cnthctl() -> u64 {
+        let v: u64;
+        // SAFETY: CNTHCTL_EL2 lezen heeft geen neveneffect.
+        unsafe { asm!("mrs {}, cnthctl_el2", out(reg) v, options(nomem, nostack)) };
+        v
+    }
+
+    /// CPTR_EL2 zoals hij nu staat.
+    pub(super) fn cptr() -> u64 {
+        let v: u64;
+        // SAFETY: CPTR_EL2 lezen heeft geen neveneffect.
+        unsafe { asm!("mrs {}, cptr_el2", out(reg) v, options(nomem, nostack)) };
+        v
+    }
+
+    /// SCTLR_EL2 zoals hij nu staat.
+    pub(super) fn sctlr_el2() -> u64 {
+        let v: u64;
+        // SAFETY: SCTLR_EL2 lezen heeft geen neveneffect.
+        unsafe { asm!("mrs {}, sctlr_el2", out(reg) v, options(nomem, nostack)) };
+        v
+    }
+
+    /// De L2C-foutregisters: STS (s3_3_c15_c8_0), ADR (s3_3_c15_c9_0) en
+    /// INF (s3_3_c15_c10_0), zoals m1n1 ze bij elke exception drukt.
+    pub(super) fn l2c_err() -> (u64, u64, u64) {
+        let (sts, adr, inf): (u64, u64, u64);
+        // SAFETY: lezen van de drie foutregisters heeft geen neveneffect;
+        // m1n1 leest ze op elke Apple-SoC, ook de t8132 (het archief van
+        // 29-08 toont L2C_ERR_ADR op deze M4).
+        unsafe {
+            asm!(
+                "mrs {s}, s3_3_c15_c8_0",
+                "mrs {a}, s3_3_c15_c9_0",
+                "mrs {i}, s3_3_c15_c10_0",
+                s = out(reg) sts, a = out(reg) adr, i = out(reg) inf,
+                options(nomem, nostack)
+            );
+        }
+        (sts, adr, inf)
+    }
+
+    /// Wist de L2C-foutstatus door hem terug te schrijven (m1n1: "clear the
+    /// flag bits").
+    pub(super) fn l2c_err_clear(sts: u64) {
+        // SAFETY: het terugschrijven van de gelezen status wist de gezette
+        // vlaggen; het raakt geen geheugen.
+        unsafe { asm!("msr s3_3_c15_c8_0, {}", "isb", in(reg) sts, options(nomem, nostack)) };
+    }
+
     pub(super) fn unmask() {
         // SAFETY: opent I en F op deze core; de vectoren staan (boot).
         unsafe { asm!("msr daifclr, #3", options(nomem, nostack)) };
@@ -556,6 +645,22 @@ mod arch {
     pub(super) fn mpidr() -> u64 {
         0x8001_0100
     }
+    pub(super) fn hcr() -> u64 {
+        0
+    }
+    pub(super) fn cnthctl() -> u64 {
+        0
+    }
+    pub(super) fn cptr() -> u64 {
+        0
+    }
+    pub(super) fn sctlr_el2() -> u64 {
+        0
+    }
+    pub(super) fn l2c_err() -> (u64, u64, u64) {
+        (0, 0, 0)
+    }
+    pub(super) fn l2c_err_clear(_sts: u64) {}
     pub(super) fn unmask() {}
 }
 
