@@ -62,14 +62,18 @@ de Mac.
       rpi4`, generatie 2): de agentlijst kreeg meteen `temp_milli_c` (48 tot
       50 C) en welcome bleef 200. Zonder console onbewezen: het glas
       (`HOPOS_FB_CONSOLE`) en VL805-USB met de firmware-handshake via vcmail.
-- [ ] Zelfde punten als de Pi 5: RNG, watchdog, dvfs (generatie 3 draagt de
-      NAT-fix, niet de drivers), en de nieuwe kaart: `target/hopos-rpi4.img`
-      (30-09, 14:33, gui-smaak).
+- [ ] Generatie 4 (bundel I: RNG200, PM-watchdog, dvfs) draait sinds 14:41
+      en de node leeft door met welcome op 200, dus de aaien werken ook op
+      de BCM2711; zonder console onbewezen: `HOPOS_RNG200_UP` (Go mat een
+      trage warm-up op de Pi 4) en `HOPOS_WD_ARMED`. De nieuwe kaart:
+      `target/hopos-rpi4.img` (30-09, 14:33, gui-smaak, `arm_freq_min`
+      staat daar nog niet in: dvfs zegt dan "one ARM clock").
 
 ### Radxa Zero 3E (radxa-1)
 
-Nog niet geboot. Image: `image/radxa-zero3.sh` (`CFG=`, `APP=hop`); console
-1500000 8N1 op de header.
+Nog niet geboot. Kaart gebouwd 30-09 14:41 in de gui-smaak met Hop:
+`target/radxa-zero3/hopos-radxa-zero3.img` (`GUI=1 CFG=<radxa.cfg> APP=hop
+sh image/radxa-zero3.sh`); console 1500000 8N1 op de header.
 
 - [ ] Eerste boot: `Retrieving /hopos.ird`, de rol uit de initrd,
       `HOPOS_BOOT`, dwmac4 met de MDIO-PHY, `HOP_UP`, welcome.
@@ -82,7 +86,10 @@ Nog niet geboot. Image: `image/radxa-zero3.sh` (`CFG=`, `APP=hop`); console
 
 ### Ampere Altra (altra-1)
 
-Nog niet geboot. Stick: `target/uefi-esp-altra/` (`CFG=`, `APP=<agentd-hopos> ROLE=hop`).
+Nog niet geboot. Stick gebouwd 30-09 14:41 in de gui-smaak met Hop:
+`target/uefi-esp-altra/` (`GUI=1 BOARD=altra CFG=<altra.cfg>
+APP=<agentd-hopos> ROLE=hop sh image/uefi-run.sh`), naar een FAT32-stick met
+`hopos.cfg` naast `EFI/`.
 
 - [ ] Eerste boot: de EFI-stub, ACPI, `HOPOS_WD_ARMED` (de eerste echte proef
       van de SBSA-watchdog), igb gepold (bewust: L83), NVMe, `HOP_UP`.
@@ -91,6 +98,9 @@ Nog niet geboot. Stick: `target/uefi-esp-altra/` (`CFG=`, `APP=<agentd-hopos> RO
 - [ ] De schijf-interruptlijn: NVMe pollt (zonder de core vast te houden).
 
 ### Orion O6N (vanavond)
+
+Stick gebouwd 30-09 14:41 in de gui-smaak met Hop: `target/uefi-esp-o6n/`
+(node o6n-1, `hopos.cfg` naast `EFI/`).
 
 - [ ] De VHE-kern op de A720: op QEMU met het Neoverse-model bewezen, op
       silicium niet. Verwacht `HOPOS_UEFI_VHE`, `HOPOS_OS_SELFTEST ok`.
@@ -105,6 +115,9 @@ Nog niet geboot. Stick: `target/uefi-esp-altra/` (`CFG=`, `APP=<agentd-hopos> RO
 - [ ] `HOPOS_CLOCK_UP` met vijf `_CPC`-domeinen, de thermiek via SCMI.
 
 ### Mac mini M4 (vanavond)
+
+Image gebouwd 30-09 14:41 met Hop en de config ingebakken (node m4-1):
+`target/apple-m4/hopos-apple.img`; laden met `image/apple/boot-cycle.sh`.
 
 - [ ] Nooit gestart. Onder m1n1: `hopos x…`, de bunny, de ADT met 6 E + 4 P
       cores, de watchdogs stil, `cores: via m1n1's spin-table`, `HOPOS_BOOT`,
