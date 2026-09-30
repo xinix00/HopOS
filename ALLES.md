@@ -210,9 +210,15 @@ De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
       `sw(timer=)` loopt mee met elke handshake. Fix dbc522f (de deur van
       de switch om de slaper): QEMU rtt 2238 → 115 µs, pull 6,9 → 62,9
       MB/s; op ijzer (stempel H) Pi 4 rtt 1476 → 133 µs, Radxa 1984 → 365
-      µs, O6N 1068 → 53 µs (Go 156 tot 201: nu sneller dan Go). Nog te
-      meten: pull app naar app op ijzer. Agent bezig met de idle-wekken
-      (app-pomp 1 kHz, OS-core 900/s).
+      µs, O6N 1068 → 53 µs (Go 156 tot 201: nu sneller dan Go). Pull app
+      naar app op de Pi 4 (H): 25,9 MB/s (Radxa vóór de deur 6,5; Go op de
+      Pi 5 400 tot 542): het datapad app naar app is nog 15x onder Go.
+      Agent bezig met de idle-wekken (app-pomp 1 kHz, OS-core 900/s), die
+      hier waarschijnlijk ook achter zitten.
+- [ ] **Storm door de NAT (hairpin) stokt 1 s per ronde** op de Pi 4 (H):
+      p50 2,5 ms, p99 1002 ms, 96 conn/s, zonder `HOPOS_MASQ_SLOT_FULL`.
+      Eén SYN per ronde valt (RTO 1 s), waarschijnlijk het eerste contact
+      op het hairpin-pad (net/src/nat.rs first-contact of de deur).
 - [ ] **App-opslag O6N** (1 MiB-calls): na de deur (H) schrijven 414, lezen
       85 MB/s (Go 557 tot 625 / 727 tot 797); het leespad is de rest (was
       93, dus de deur hielp lezen niet). Agent bezig (system-API fs-ops,

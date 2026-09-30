@@ -86,7 +86,7 @@ anders vermeld. De v3-meting is `netmeter NODE:80 --phases in,out --bytes
 
 | Meting | Go | Commando, marker | v3 QEMU virt | v3 O6N | v3 Altra | v3 Pi 5 | v3 Pi 4 | v3 Radxa |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Twee apps op één node, 400 MB | M4: 769 / 764 MB/s | `BENCH=pull BENCH_BYTES=419430400`, `HOPOS_BENCH_PULL` | 62,9 MB/s (16 MiB, TCG; met de deur van de switch, dbc522f; ervoor 6,9) |  |  |  |  | 6,46 tot 6,49 MB/s |
+| Twee apps op één node, 400 MB | M4: 769 / 764 MB/s | `BENCH=pull BENCH_BYTES=419430400`, `HOPOS_BENCH_PULL` | 62,9 MB/s (16 MiB, TCG; met de deur van de switch, dbc522f; ervoor 6,9) |  |  |  |  | 6,46 tot 6,49 MB/s (vóór de deur; Pi 4 na de deur, H: 25,9 MB/s) |
 | rtt app naar app, warm | geen Go-tabel (schedbench) | `BENCH=ping`, `HOPOS_BENCH_RTT` | p50 115 µs, p99 340 µs (met de deur van de switch, dbc522f; ervoor 2238 / 2447) |  |  |  |  | p50 78 tot 79 µs, p99 123 tot 174 µs |
 | rtt na 1 s stilte (koud) | geen Go-tabel | `BENCH=ping`, `HOPOS_BENCH_COLD` | p50 375 µs (dbc522f; ervoor 2494) |  |  |  |  | p50 599 tot 742 µs |
 
