@@ -283,6 +283,19 @@ name = "bounded"
 version = "3.0.0"
 
 [[package]]
+name = "cloudflared-lean"
+version = "3.0.0"
+dependencies = [
+ "applib",
+ "leanh2",
+ "leanhttp",
+ "leanhttps",
+ "leanrand",
+ "leantls",
+ "sync",
+]
+
+[[package]]
 name = "cpu"
 version = "3.0.0"
 dependencies = [
@@ -676,14 +689,38 @@ version = "3.0.0"
 source = "git+https://github.com/xinix00/lean.git?tag=v3.0.0#a7e089448c903fe199b604d246401cbd88640de3"
 
 [[package]]
+name = "leanh2"
+version = "3.1.1"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.1#db6724745a2c579382c54a68c73c18d643d40038"
+
+[[package]]
 name = "leanhttp"
 version = "3.1.1"
 source = "git+https://github.com/xinix00/lean.git?tag=v3.1.1#db6724745a2c579382c54a68c73c18d643d40038"
 
 [[package]]
+name = "leanhttps"
+version = "3.1.1"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.1#db6724745a2c579382c54a68c73c18d643d40038"
+dependencies = [
+ "leanhttp",
+ "leantls",
+]
+
+[[package]]
 name = "leannet"
 version = "3.0.0"
 source = "git+https://github.com/xinix00/lean.git?tag=v3.0.0#a7e089448c903fe199b604d246401cbd88640de3"
+
+[[package]]
+name = "leanrand"
+version = "3.1.1"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.1#db6724745a2c579382c54a68c73c18d643d40038"
+
+[[package]]
+name = "leantls"
+version = "3.1.1"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.1#db6724745a2c579382c54a68c73c18d643d40038"
 
 [[package]]
 name = "media-mve"
@@ -730,6 +767,16 @@ name = "syncprobe"
 version = "3.0.0"
 dependencies = [
  "applib",
+]
+
+[[package]]
+name = "vitals"
+version = "3.0.0"
+dependencies = [
+ "applib",
+ "bounded",
+ "leanhttp",
+ "sync",
 ]
 
 [[package]]

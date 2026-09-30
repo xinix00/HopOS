@@ -62,8 +62,8 @@ echo "== rustfmt"
 cargo fmt --check
 echo "== target: bibliotheken (aarch64)"
 cargo build --quiet --target aarch64-unknown-none-softfloat
-echo "== target: apps (appspike, welcome, bench, display)"
-cargo build --quiet --target aarch64-unknown-none-softfloat -p appspike -p welcome -p bench -p display
+echo "== target: apps (appspike, welcome, bench, display, vitals)"
+cargo build --quiet --target aarch64-unknown-none-softfloat -p appspike -p welcome -p bench -p display -p vitals
 # De stage-1 van applib::mmu (de MMU-aan, de vectortabel, het glas)
 # bestaat alleen op het target; de host-ronde ziet alleen de tabellen.
 cargo clippy --quiet --target aarch64-unknown-none-softfloat -p display -- -D warnings

@@ -1,0 +1,26 @@
+[package]
+name = "vitals"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "De board-dokter: één app die de vitale functies van een node meet (idle, rekenen, geheugen, net, schijf, timers), met een pagina en een JSON-API."
+build = "build.rs"
+
+[[bin]]
+name = "vitals"
+path = "src/main.rs"
+bench = false
+
+[dependencies]
+# De TcpConn-brug naar leanhttp (feature `http`): de server, en de client
+# voor de rx- en storm-tests.
+applib = { path = "../../applib", features = ["http"] }
+bounded = { path = "../../bounded" }
+sync = { path = "../../sync" }
+# HTTP/1.1 zonder TLS (PORT.md §2.1), op een tag en nooit over een pad:
+# lean is een eigen repo met een eigen poort. Dezelfde tag als applib en Hop.
+leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.1" }
+
+[lints]
+workspace = true

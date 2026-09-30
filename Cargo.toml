@@ -76,11 +76,14 @@ members = [
     # Een stream door de videocodec van de node (docs/media.md).
     "apps/decode",
     "apps/syncprobe",
+    # De board-dokter: de prestatietests van een node (apps/vitals/README.md).
+    "apps/vitals",
     # De meetbank op de host: std, alleen voor de ontwikkelmachine, dus
     # geen default-member (de target-build van de bibliotheken slaat hem
     # over); tools/gate.sh toetst hem apart.
     "tools/netmeter",
     "hopos",
+    "apps/cloudflared-lean",
 ]
 # De host-poort (cargo test, cargo clippy) draait over de bibliotheken; de
 # twee binaries bouwen alleen voor een target (tools/gate.sh).
@@ -155,6 +158,9 @@ default-members = [
     "apps/display",
     # decode draagt de toetsen van zijn buffers en zijn meting op de host.
     "apps/decode",
+    # vitals draagt de toetsen van zijn rekenkant en zijn rapporten op de
+    # host.
+    "apps/vitals",
 ]
 
 [workspace.package]
