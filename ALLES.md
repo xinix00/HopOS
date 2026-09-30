@@ -13,22 +13,22 @@ of faalt, en een streep waar het bewust niet komt. Stand 30-09-2026, avond.
 
 | | QEMU virt | Pi 5 | Pi 4 | Radxa | Altra | O6N | M4 | LicheeRV |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Boot, EL2, kooi, zelftest | ✓ | ✓ | ✓ (zelftest koud: SError bij de VL805) | ✓ | ○ | ✓ VHE, kick via SGI 1 (`kick=(Ipi, 0 us)`, stempel G) | ✓ kmutil-boot, EL2; ✗ kooi: SError-storm na de AIC, preflight rood | ○ |
+| Boot, EL2, kooi, zelftest | ✓ | ✓ | ✓ (koud: SError bij de VL805; fix d0b6bd3 wacht op een koude boot) | ✓ | ○ | ✓ VHE, kick via SGI 1 (`kick=(Ipi, 0 us)`, stempel G) | ✓ kmutil-boot, EL2; ✗ kooi: SError-storm na de AIC, preflight rood | ○ |
 | Hop als bewoner, welcome door de DNAT | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ○ ingebakken (20:45), nog niet gezien | ○ |
-| Kern-flip, warm | ✓ | ✓ (ook uit de koude gui-kern, sinds de xHCI-stop vóór de sprong) | ✓ (3x) | ✓ (2x) | ○ | ○ | – (geen CPU_OFF) | – |
+| Kern-flip, warm | ✓ | ✗ sterft na de landing (stempel F, 2x); de zwarte doos leest pas de nieuwe kaart | ✓ (4x, gen 2 op F) | ✓ (3x, gen 5 op F) | ○ | ✗ de oude Hop-stage bemat de bundelpartitie te krap; met stick G (nieuwe Hop) opnieuw | – (geen CPU_OFF) | – |
 | NIC met interrupt | ✓ | ✓ MSI-X via de MIP | – (GENET gepold, zoals Go) | ✓ SPI 64 | – (igb gepold, bewust) | ✓ RTL8125B, MSI-X via de ITS (LPI 8192) | ✓ tg3 link + DHCP (gepold); ✗ doof daarna | ○ (dwmac) |
 | Off-link door de NAT, SNTP | ✓ | ✓ | ✓ | ○ | ○ | ○ | ○ | ○ |
 | Watchdog gewapend en geaaid | – | ✓ PM (12 s) | ✓ PM | ✓ DW-WDT (89 s) | ○ SBSA | ✓ SBSA (8,5 s) | ○ | ○ DW-WDT |
 | Hardware-RNG voor de kern | ✗ (jitter) | ✓ RNG200 | ✓ RNG200 | ✓ rk3568-rng | ○ SMCCC-TRNG of rndr (fc5348f) | ○ efi-rng: geen FEAT_RNG of SMCCC-TRNG, wel het EFI_RNG_PROTOCOL van de firmware (`hopos.efirng=1`, volgende stick) | ○ | ✗ (niets) |
-| Hardware-RNG voor de slots (CTRL_RNG_SEED, fc5348f) | ○ jitter | ○ | ○ | ○ | ○ | ○ | ○ | ○ |
+| Hardware-RNG voor de slots (CTRL_RNG_SEED, fc5348f) | ○ jitter | ○ (kaart-kern van vóór fc5348f) | ✓ rng200 (F) | ✓ rk3568-rng (F) | ○ | ○ jitter (G); efi-rng met de volgende stick | ○ | ○ |
 | Temperatuur in de tik | – | ✓ mailbox | ✓ mailbox | ✗ TSADC converteert niet (Go ook niet) | ○ SMpro | ✓ SCMI (39 C in de agentlijst) | ○ | – |
 | Klokbeleid (dvfs) | – | ✓ 1500/800 | ✓ 1500/600 | – | ○ | ✓ vijf `_CPC`-domeinen, 2600 MHz | – | – |
 | Console op het glas | ✓ ramfb | ✓ via flip op de eerste kaart, ✗ sinds de herflash (firmware weigert) | ✓ 32 bpp | ✓ HDMI (geen EDID) | ○ GOP | ✓ GOP 1920x1080 | – | – |
-| USB xHCI (HID, display-app) | ✓ qemu-xhci | ○ 2 xHCI's up, niets ingeplugd | ✗ VL805 koud: versie 0, HCRST | ○ 2 DWC3 up, niets ingeplugd | ○ | ✓ 10 xHCI's up, de Blu-ray-drive over USB-BOT leest de disc (Lumen) | – | – |
+| USB xHCI (HID, display-app) | ✓ qemu-xhci | ○ 2 xHCI's up, niets ingeplugd | ○ VL805 koud: fix d0b6bd3 (SCB0_SIZE, notify, twee pogingen), koude boot nodig | ○ 2 DWC3 up, niets ingeplugd | ○ | ✓ 10 xHCI's up, de Blu-ray-drive over USB-BOT leest de disc (Lumen) | – | – |
 | Opslag (hopfs, volumes, OP_SYNC) | ✓ virtio-blk | – (bewust geen NVMe) | – | – (stateless, alles in het geheugen) | ○ NVMe | ✓ NVMe Lexar 4 TB, hopfs hersteld (generatie 3456) | ✓ ANS NVMe, hopfs hersteld (395 GB) | – |
 | Console op 5555 | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ○ luistert, onbereikbaar (doof na DHCP) | ○ |
 | Hardwaredecoder (media-smaak) | – | – | – | – | – | ✓ Linlon V8, 85,7 fps 4K P010 via de grant | – | – |
-| Kaart of stick klaar in `target/` | – | ✓ 17:47 | ✓ 17:47 | ✓ 14:41 (zonder 5555) | ✓ 18:12 | ✓ 18:12 | ✓ 20:45 (Hop ingebakken) | ✗ donor-FIP |
+| Kaart of stick klaar in `target/` | – | ✓ 17:47 | ✓ 17:47 | ✓ 14:41 (zonder 5555) | ✓ 18:12 | ✓ 21:29 stempel G (nieuwe Hop) | ✓ 20:45 (Hop ingebakken) | ✗ donor-FIP |
 
 ## De nodes, één voor één
 
@@ -36,67 +36,66 @@ Alleen wat nog moet; wat af is staat in de tabel hierboven.
 
 ### Raspberry Pi 5 (pi5-1, 192.168.1.207)
 
-- [ ] Na de flip vanuit de verse kaart (18:22) leefde de RP1 (DHCP in 29 ms,
-      `HOPOS_FLIP_SETTLED`, welcome 200), maar 5555 en 10100 (de node-stack)
-      antwoorden daarna niet meer terwijl de DNAT-poorten werken; nakijken
-      op de volgende flip, met de dump.
+- [ ] De warme flip sterft na de landing (stempel F, twee keer): koud terug
+      van de kaart met "jump landed and the handover was consumed, died
+      later in the new kernel's boot". De kaart-kern is te oud voor de
+      zwarte doos; eerst de nieuwe kaart flashen, dan flippen en de doos
+      lezen (`HOPOS_FLIP_BLACKBOX`).
 - [ ] Het glas: sinds de herflash weigert de firmware elke framebuffer
       (0x80000001), ook koud met 5 s geduld. Hangt het scherm eraan en
       stond het aan bij de power-on?
-- [ ] De echte watchdogtoets: de kabel eruit of Hop stoppen, reset binnen
-      12 s.
-- [ ] USB: HID en de display-app (niets ingeplugd).
+- [ ] De echte watchdogtoets (kabel eruit of Hop stoppen, reset binnen
+      12 s), HID en de display-app.
 - [ ] De koude flip weigert zodra er een app-core draaide (CPU_OFF komt op
       de Pi 5 niet terug).
 
 ### Raspberry Pi 4 (pi4-1, 192.168.1.40)
 
-- [ ] De VL805 faalt koud: "firmware loaded by the VideoCore, version now
-      0x0", "timeout on HCRST clear", `HOPOS_USB_NONE`, en de eerste
-      EL1-beurt krijgt een SError (`HOPOS_OS_SELFTEST_FAIL vec 11`). Go's
-      handshake via vcmail nakijken (OLD/metal/board/rpi4): de notify hoort
-      een versie te geven, geen 0. Op de warme flips was de zelftest ok.
+- [ ] De VL805 koud: fix d0b6bd3 (RC met SCB0_SIZE, endpoint dicht tot de
+      VideoCore de firmware meldt, twee pogingen, SError-diagnose) is
+      alleen op QEMU getoetst; een koude boot van de nieuwe kaart moet
+      `usb: vl805 firmware 0x... loaded` geven.
 - [ ] De echte watchdogtoets, HID en de display-app.
 
 ### Radxa Zero 3E (radxa-1, 192.168.1.241)
 
-- [ ] De TSADC geeft geen geldige code (raw cpu 0 gpu 0, `HOPOS_TSADC_NONE`),
-      zoals in Go op 06-08; de init is die van Linux. Waarom converteert hij
-      niet.
-- [ ] De echte watchdogtoets (DW-WDT 89 s): Hop stoppen of de kabel eruit.
-- [ ] EDID: "no answer on the DDC", "sink attached: false". Hangt er een
-      scherm aan?
+- [ ] De TSADC geeft geen geldige code (`HOPOS_TSADC_NONE`), zoals in Go op
+      06-08; de init is die van Linux. Waarom converteert hij niet.
+- [ ] De echte watchdogtoets (DW-WDT 89 s); EDID ("no answer on the DDC").
 - [ ] De config zit in `hopos.ird`: alleen te wijzigen met `CFG=` of in de
-      APPEND-regel.
-- [ ] De koude flip weigert (geen staging op de kaart; stateless, dus warm
-      flippen of de kaart herstarten).
-- [ ] De kaart in `target/` opnieuw flashen zodra de build van 19:05 (5555,
-      DW-WDT, TRNG, DWC3) er staat.
+      APPEND-regel. De koude flip weigert (stateless: warm flippen of de
+      kaart herstarten). De kaart in `target/` is van 14:41; de node draait
+      warm op F.
 
 ### Ampere Altra (altra-1)
 
-Stick: `target/uefi-esp-altra/` (18:12, main fc66084), naar een FAT32-stick
-met `hopos.cfg` naast `EFI/`.
+Stick: `target/uefi-esp-altra/` (18:12), naar een FAT32-stick met
+`hopos.cfg` naast `EFI/`.
 
 - [ ] Eerste boot: de EFI-stub, ACPI, `HOPOS_WD_ARMED` (SBSA), igb gepold
-      (bewust), NVMe, `HOP_UP`, welcome, 5555.
-- [ ] Geen guard-pagina onder de stack op de UEFI-boards.
-- [ ] De schijf-interruptlijn: NVMe pollt.
+      (bewust), NVMe, `HOP_UP`, welcome, 5555. Geen guard-pagina onder de
+      stack; de NVMe pollt.
 
 ### Orion O6N (o6n-1, 192.168.1.205)
 
-- [ ] De zelftest-kick: de SGI van de OS-core naar zichzelf komt op de
-      GICv3 niet aan (`kick=(Timer, 100000 us, try 2)`,
-      `HOPOS_OS_SELFTEST_FAIL`); de timer vangt hem.
-- [ ] De VPU had één herstelcyclus nodig ("incomplete power state
-      pgctrl=0x7cef000"); waarom.
+Stick G (21:29): gui plus media, verse Hop; `hopos.efirng=1` staat klaar
+voor de volgende stick (nog niet erop).
+
+- [ ] **Na `DELETE` van Lumen (10 cores, 16 GiB, codec- en USB-devices)
+      weigert de kern elke plaatsing** ("unplaceable" binnen seconden,
+      Hop ziet 10 vrije cores), ook de flipbundel; alleen een koude boot
+      hielp (21:12 tot 21:34). De kooi, partitie of devices komen niet
+      vrij. Reproduceren op QEMU met een job met devices.
+- [ ] **De console-listener op 5555 neemt na een meetronde geen
+      verbindingen meer aan** (`nc -z` faalt; veel `nc | head` van de
+      agents). Lezersplaatsen lekken bij abrupt sluitende clients.
+- [ ] Lumen terugzetten na elke koude boot (spec in
+      scratchpad/o6n-job-lumen.json; welcome erbij kost Lumen een core) en
+      dan de mediaketen: MMC, de HEVC-encoder, WebDAV. De VPU had één
+      herstelcyclus nodig ("incomplete power state"); waarom.
 - [ ] `hopos.codecdemo`, de kernmeting, naast de 85,7 fps van apps/decode.
-- [ ] Lumen draait (poort 8098, 8 cores, de volumes van de NVMe) en leest
-      de Blu-ray in de drive over USB-BOT (18:40); nu de rest van de
-      mediaketen: MMC, de HEVC-encoder, WebDAV.
-- [ ] De display-app en HID op de xHCI's; hop-gui als job (de init-jobs
-      van de Go-config zijn Go-ELF's, niet overgenomen).
-- [ ] cloudflare-lean porten (een Go-wrapper om lean) en als job erbij: de
+- [ ] De display-app en HID op de xHCI's; hop-gui als job.
+- [ ] cloudflared-lean (6bbcbfa) als job met een echt token: de
       productieproef.
 
 ### Mac mini M4 (m4-1, 192.168.1.122)
@@ -171,14 +170,10 @@ node heeft er nog geen gedraaid.
 
 ## Overal
 
-- [ ] **Hardware-RNG voor de slots: gebouwd (fc5348f), nog op ijzer zien.**
-      Het zaad staat op de control page (CTRL_RNG_SEED/GEN/SOURCE, elke
-      seconde vers), applib::rand mengt het met jitter, Hop meldt
-      `HOP_TLS_ENTROPY_HW`. Per board na een flip `HOPOS_RNG_SLOTS
-      source=hardware` en in slot 1 `HOPOS_APP_RNG source=hardware` zien;
-      dan de tabel op ✓. Hop bouwt pas zonder patch na een hop-os-tag en
-      het ophogen van de drie tags in de hop-repo (agentd-hopos,
-      hopos-runner, hop-http); tot dan `HOP_REV=worktree`.
+- [ ] Hop bouwt pas zonder patch na een hop-os-tag en het ophogen van de
+      drie tags in de hop-repo (agentd-hopos, hopos-runner, hop-http); tot
+      dan `HOP_REV=worktree`. De verse Hop (applib::rand, de nieuwe MMU)
+      staat alleen op stick G.
 - [ ] Hop's downloader weigert chunked transfer ("serve it with a
       Content-Length"): example.com chunkt, een CDN ook. Of chunked lezen,
       of het luid in de docs van de jobspec.
