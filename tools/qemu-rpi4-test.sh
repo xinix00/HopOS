@@ -25,10 +25,11 @@
 #                   de RNG200 wordt NIET aangeraakt: QEMU haalt zijn node uit
 #                   de DTB en een lees op 0xFE10_4000 is een external abort
 #                   (board_raspi::rng); de DRBG zaait op jitter, luid;
-#   counter does not run
-#                   de PM-watchdog wordt NIET gewapend: QEMU modelleert het
-#                   PM-blok alleen als reset-knop (FULL_RESET reset meteen),
-#                   de teller loopt niet (board_raspi::watchdog), HOPOS_WD_NONE.
+#   HOPOS_WD_OFF    de PM-watchdog staat uit (hopos.wd=off in de append):
+#                   QEMU modelleert het PM-blok alleen als reset-knop, een
+#                   FULL_RESET reset de machine meteen, en op ijzer telt de
+#                   teller pas ná FULL_RESET (Pi 5, 30-09), dus er is geen
+#                   proef zonder wapenen (board_raspi::watchdog).
 #
 # Wat QEMU raspi4b NIET kan en dit script dus niet bewijst: de GENET (QEMU
 # haalt de node uit de DTB; de kern ziet dat en zegt HOPOS_NIC_NONE), en een
@@ -58,10 +59,10 @@ OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/n
 "$OBJCOPY" --strip-debug "$DIR/target/$TARGET/release/appspike" "$TMP/app.elf"
 
 MARKERS="P2|HopOS|HOPOS_BOOT|irq: GIC-400|HOPOS_TICK 3|HOPOS_OS_SELFTEST ok|kicks=1)"
-set -- -kernel "$TMP/kernel8.img" -append "hopos.stage=none"
+set -- -kernel "$TMP/kernel8.img" -append "hopos.stage=none hopos.wd=off"
 if [ -f "$DTB" ]; then
 	set -- "$@" -dtb "$DTB" -initrd "$TMP/app.elf"
-	MARKERS="$MARKERS|fdt: |mem: |vcmail: |HOPOS_CAGE_UP|KB at 0x8000000, role unknown|HOPOS_SLOT_NONE|no such node in the DTB (QEMU models none), not touched|HOPOS_RNG_INSECURE|counter does not run|HOPOS_WD_NONE"
+	MARKERS="$MARKERS|fdt: |mem: |vcmail: |HOPOS_CAGE_UP|KB at 0x8000000, role unknown|HOPOS_SLOT_NONE|no such node in the DTB (QEMU models none), not touched|HOPOS_RNG_INSECURE|HOPOS_WD_OFF"
 else
 	echo "qemu-rpi4-test: no DTB at $DTB, boot markers only" >&2
 fi

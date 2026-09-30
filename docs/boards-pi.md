@@ -22,11 +22,11 @@ per stap wat de console moet tonen en wat een afwijking betekent.
 | Cadence GEM (Pi 5) | `driver/nic/gem` | 7 host-tests: ringen met de bus-offset, DBW uit DCFG1, AMP, TX-overdracht, RX en rearm, de expliciete ISR-ack |
 | Broadcom-STB PCIe-RC (Pi 5, en de BCM2711-variant) | `driver/brcmpcie` | 6 host-tests: window-codering, setup (UBUS, PLL, burst, VDM), BCM2711-reset, link-fout, endpoint en BAR's, RESCAL |
 | RNG200 (BCM2711 0xFE10_4000, BCM2712 0x10_7D20_8000): de warm-up van iproc-rng200, de continue toets, de NIST/lockout-herstart van Linux; zaait de DRBG van de kern (`cpu::drbg`, `trng::Kind::Soc`) in `discover`, alleen als de DTB-node `brcm,bcm2711-rng200` aan staat | `driver/rng200`, `board/raspi/src/rng.rs` | 6 host-tests op een nep-blok met FIFO (start-volgorde, warm-up-grens, afwezig blok, vastgelopen bron, gezondheid, lege buffer); QEMU: de node ontbreekt, het blok wordt niet aangeraakt |
-| PM-watchdog (BCM2711 0xFE10_0000, BCM2712 0x10_7D20_0000): 12 s in tikken van 1/65536 s, FULL_RESET pas nadat de teller aantoonbaar loopt; `hopos.wd=off` zet hem uit zoals Linux | `board/raspi/src/watchdog.rs`, `hopos/src/watchdog.rs` | 4 host-tests op een nep-PM-blok (tikken, stilstaande teller nooit gewapend, lopende teller gewapend met behoud van RSTC-bits, erfenis van een flip zonder proef); QEMU: de teller loopt niet, niet gewapend |
+| PM-watchdog (BCM2711 0xFE10_0000, BCM2712 0x10_7D20_0000): 12 s in tikken van 1/65536 s, eerst FULL_RESET en dan de proef dat de teller loopt (op ijzer telt hij pas ná FULL_RESET, Pi 5 30-09); `hopos.wd=off` zet hem uit zoals Linux | `board/raspi/src/watchdog.rs`, `hopos/src/watchdog.rs` | 4 host-tests op een nep-PM-blok (tikken, een teller die na FULL_RESET stilstaat wordt weer gestopt en niet gewapend, lopende teller gewapend met behoud van RSTC-bits, erfenis van een flip zonder proef); QEMU: `hopos.wd=off` in de proef, want FULL_RESET reset daar meteen |
 | Klokknop: de ARM-klok via de mailbox (vol = firmware-max of `hopos.mhz`, stil = 600 MHz of het firmware-minimum) onder `driver_dvfs::run`, met dezelfde slot-tellers als de O6N | `board/raspi/src/clock.rs`, `hopos/src/telemetry.rs` | 3 host-tests op de standen (vloer, cap, één klok); QEMU: 700/700 MHz, één klok, geen knop |
 | Linkscript: raw image op 0x80000, de ingang vooraan | `hopos/link-raspi.ld` | de builds, `_pi_start == 0x80000` als link-assertie |
 | Kaart | `image/rpi4.sh`, `image/rpi5.sh` | leveren `kernel8.img` / `hop-agent5.img` en het kaart-image |
-| QEMU-rook | `tools/qemu-rpi4-test.sh` | groen: P2, bunny, DTB, kaart, mailbox, GIC-400, kooi, staging, de zelftest van de OS-core (timer, yield, kick naar zichzelf), drie tikken met `kicks=1`, en de twee weigeringen: RNG200 niet aangeraakt (`HOPOS_RNG_INSECURE`), PM-watchdog niet gewapend (`HOPOS_WD_NONE`) |
+| QEMU-rook | `tools/qemu-rpi4-test.sh` | groen: P2, bunny, DTB, kaart, mailbox, GIC-400, kooi, staging, de zelftest van de OS-core (timer, yield, kick naar zichzelf), drie tikken met `kicks=1`, en de twee weigeringen: RNG200 niet aangeraakt (`HOPOS_RNG_INSECURE`), PM-watchdog uit (`HOPOS_WD_OFF` met `hopos.wd=off`, want FULL_RESET reset daar meteen) |
 
 ## Het plan (beide Pi's gelijk)
 
@@ -174,12 +174,12 @@ Per stap: wat er moet staan, en wat het betekent als het er niet staat.
 20. **Watchdog** (na de zelftest): `watchdog: hardware reset armed (BCM PM
     watchdog at 0x107d200000, 12.0 s (786432 ticks of 1/65536 s)) - boot
     guard: blind pets until the node proves liveness HOPOS_WD_ARMED`, na
-    DHCP en de heartbeat van Hop `HOPOS_CANARY_LIVE`. Staat er `watchdog:
-    PM_WDOG reads 0x... 2 ms after loading 0xc0000: the counter does not
-    run` en `HOPOS_WD_NONE`, dan telt de teller op dit ijzer pas als WRCFG
-    op FULL_RESET staat: dan is de proef in `board_raspi::watchdog` te
-    streng voor ijzer (de proef bestaat voor QEMU, dat bij FULL_RESET
-    meteen reset); noteer de gelezen waarde. De echte toets: `hopos.wd`
+    DHCP en de heartbeat van Hop `HOPOS_CANARY_LIVE`. Staat er `watchdog: PM_WDOG
+    reads 0x... 2 ms after FULL_RESET with 0xc0000 loaded: the counter
+    does not run` en `HOPOS_WD_NONE`, dan telt dit PM-blok ook gewapend
+    niet (WRCFG is dan weer clear); noteer de gelezen waarde. Op de Pi 5
+    (30-09) bleek dat de teller pas telt ná FULL_RESET, vandaar de
+    volgorde wapenen-dan-proeven. De echte toets: `hopos.wd`
     niet zetten, Hop stoppen of de kabel eruit, en binnen ~12 s na de
     eerste `HOPOS_CANARY_MISS` hoort de Pi zelf te herstarten.
 

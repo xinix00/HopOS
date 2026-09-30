@@ -19,28 +19,33 @@ de console op het glas (`HOPOS_FB_CONSOLE`, 1920x1080, 120x67 cellen; de
 bunny en de meetregels gezien op de HDMI) en bracht beide RP1-xHCI's op
 (`HOPOS_USB_UP`).
 
-- [ ] Off-link TCP was wisselvallig: 3 van 14 connects naar buiten kwamen
-      tot HTTP 403 (verbinding stond), 11 liepen op de deadline, met
-      `noroute=0 flowfull=0 txdrop=0` (gemeten 30-09, drie jobs met een
-      artifact op neverssl.com). Oorzaak: de NAT leerde de gateway-MAC uit
-      élk frame met een off-subnet bron, ook broadcasts van buren
-      (link-local, ander subnet op hetzelfde L2), en alleen een pakket van
-      buiten zette hem terug. Fix in net/src/nat.rs: alleen unicast aan ons
-      leert het paar, de verse router-neighbor wint, en een SYN-retransmit
-      naar buiten ARP't de router. Te bewijzen op de Pi 5: drie jobs met een
-      artifact van buiten, alle connects tot HTTP 403.
-- [ ] Hardware-RNG voor de slots (zie Overal); de RNG200 van de SoC (Go:
-      OLD/metal/board/raspi/rng.go) is niet geport, dus `HOPOS_RNG_INSECURE`.
+- [ ] Off-link TCP: 3 van 14 connects naar neverssl.com kwamen tot een
+      antwoord, na de NAT-fix (a12b68f: de gateway-MAC alleen uit unicast
+      aan ons, de verse router-neighbor wint) 5 van 15. Maar de Mac haalt
+      naar dezelfde server ook maar 7 van 12, en 12 van 12 naar example.com
+      en 1.1.1.1: het meetdoel was zelf wisselvallig. De tik telt sinds
+      c9013a5 `natin` en `natmiss`; de meting tegen example.com
+      (scratchpad/dl-test.sh) zegt of er nog iets van ons is.
+- [ ] Hardware-RNG voor de slots (zie Overal). De RNG200 van de SoC zaait
+      sinds generatie 8 de kern-DRBG (`HOPOS_RNG200_UP`, gezien 30-09); de
+      slots hebben er nog niets aan.
 - [ ] Het glas toont pas de echte tijd als Hop zijn uurlijkse SNTP doet:
       de wandklok gaat sinds generatie 6 mee over de flip
       (`HOPOS_CLOCK_CARRIED`, bewezen 30-09), maar de generaties 4 en 5
       begonnen nog op de vaste boot-klok en die offset is wat 6 erfde.
       Verdwijnt vanzelf na de volgende `HOPOS_CLOCK_SET`.
-- [ ] Watchdog en dvfs (Go: OLD/metal/board/raspi/watchdog.go en
-      OLD/metal/driver/dvfs): nu alleen haken (`HOPOS_WD_NONE`,
-      `HOPOS_CLOCK_NONE`).
-- [ ] De SD-kaart draagt nog de kale kern (alpha.17): `GUI=1 sh image/rpi5.sh`
-      en opnieuw flashen, anders is de console na een herstart weg.
+- [ ] De PM-watchdog: geport, maar generatie 8 zei `the counter does not
+      run` (de teller telt op de BCM2712 pas ná FULL_RESET). Omgedraaid:
+      eerst wapenen, dan de proef. Te zien bij de volgende flip:
+      `HOPOS_WD_ARMED` en `HOPOS_CANARY_LIVE`; daarna de echte toets (Hop
+      stoppen of de kabel eruit: reset binnen ~12 s).
+- [ ] Dvfs via de mailbox: geport, maar de kaart heeft geen `arm_freq_min`
+      (generatie 8: `HOPOS_CLOCK_NONE`, "one ARM clock"). Komt met de nieuwe
+      kaart: `HOPOS_CLOCK_UP`, `HOPOS_CLOCK_EDGE` naar 800 MHz na 30 s rust.
+- [ ] De SD-kaart opnieuw flashen: `target/hopos-rpi5.img` is gebouwd
+      (30-09, 14:32) in de gui-smaak met `arm_freq_min=800` en de Hop die
+      "no disk on this node" zegt. Tot dan draagt de kaart de kale alpha.17
+      en is de console na een herstart weg.
 - [ ] USB: de xHCI's staan, maar nog geen HID gezien (niets ingeplugd) en
       geen display-app.
 - [ ] "saved agent state not restored: store i/o failed" hoort "geen schijf"
@@ -62,8 +67,9 @@ de Mac.
       rpi4`, generatie 2): de agentlijst kreeg meteen `temp_milli_c` (48 tot
       50 C) en welcome bleef 200. Zonder console onbewezen: het glas
       (`HOPOS_FB_CONSOLE`) en VL805-USB met de firmware-handshake via vcmail.
-- [ ] Zelfde punten als de Pi 5: off-link NAT, RNG, watchdog, dvfs, de
-      SD-kaart in de gui-smaak.
+- [ ] Zelfde punten als de Pi 5: RNG, watchdog, dvfs (generatie 3 draagt de
+      NAT-fix, niet de drivers), en de nieuwe kaart: `target/hopos-rpi4.img`
+      (30-09, 14:33, gui-smaak).
 
 ### Radxa Zero 3E (radxa-1)
 
@@ -141,9 +147,9 @@ node heeft er nog geen gedraaid.
 - [ ] **Hardware-RNG voor de slots. Essentieel.** Een app heeft geen
       entropiebron: TLS en de ISS van leannet komen uit timer-jitter
       (`HOP_TLS_ENTROPY_WEAK`). De kern kent `rndr` (FEAT_RNG) en de
-      SMCCC-TRNG (cpu/src/trng.rs), maar geen boards zonder die twee (de
-      Pi's: het RNG-blok van de SoC via een driver; de Radxa; de LicheeRV
-      heeft niets). Nodig: (1) een TRNG-driver per board dat er een heeft,
+      SMCCC-TRNG (cpu/src/trng.rs), en sinds 30-09 de RNG200 van de Pi's
+      (driver/rng200, `HOPOS_RNG200_UP` op de Pi 5); de Radxa en de LicheeRV
+      hebben nog niets. Nodig: (1) een TRNG-driver voor de Radxa,
       (2) de kern zaait elk slot bij de start met 32 bytes uit zijn DRBG op
       de control-page (additief ABI-blok) en ververst ze op verzoek, (3)
       applib gebruikt dat zaad voor TLS, DNS en de ISS, en meldt luid als het

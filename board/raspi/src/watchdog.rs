@@ -10,14 +10,19 @@
 //! ~16 s), PM_RSTC krijgt WRCFG = FULL_RESET, en elke schrijf eist het
 //! wachtwoord 0x5a in de topbyte. Direct MMIO, niet via de mailbox.
 //!
-//! Eén afwijking van Go, voor QEMU: `raspi4b` modelleert het PM-blok alleen
-//! als reset-knop. Een schrijf van FULL_RESET naar PM_RSTC reset de machine
-//! METEEN (hw/misc/bcm2835_powermgt.c), er loopt geen teller. Daarom laadt
-//! [`arm`] eerst PM_WDOG en kijkt na [`PROBE_NS`] of de teller afloopt; pas
-//! dan komt FULL_RESET. Een teller die stilstaat is geen watchdog, en dat
-//! zegt de kern dan hardop (`HOPOS_WD_NONE` met de reden). Staat WRCFG al op
-//! FULL_RESET (de vorige kern wapende hem, een flip), dan is dit ijzer en
+//! De teller loopt pas als WRCFG op FULL_RESET staat: GEMETEN 30-09 op de
+//! Pi 5 (BCM2712) blijft PM_WDOG zonder WRCFG op zijn laadwaarde staan
+//! (0xc0000 na 2 ms). Daarom wapent [`arm`] eerst (PM_WDOG laden, dan
+//! FULL_RESET) en kijkt hij daarna, na [`PROBE_NS`], of de teller afloopt.
+//! Een teller die dan nog stilstaat is geen watchdog: WRCFG gaat terug naar
+//! clear en de kern zegt het hardop (`HOPOS_WD_NONE` met de reden). Staat
+//! WRCFG al op FULL_RESET (de vorige kern wapende hem, een flip), dan
 //! volstaat een herlaad.
+//!
+//! QEMU `raspi4b` modelleert het PM-blok alleen als reset-knop: een schrijf
+//! van FULL_RESET reset de machine METEEN (hw/misc/bcm2835_powermgt.c), dus
+//! daar valt niets te wapenen en niets te proeven. De proef
+//! (tools/qemu-rpi4-test.sh) zet hem uit met `hopos.wd=off`.
 //!
 //! Dit bezit de drie statics van de gewapende watchdog; het beleid (wanneer
 //! aaien) is `kern::watchdog`.
@@ -89,26 +94,29 @@ fn arm_at(pm: Pa, timeout_ms: u64, now: fn() -> u64) -> Result<Desc, &'static st
     let inherited = rstc & WRCFG_MASK == WRCFG_FULL_RESET;
     dev::write32(pm.add(WDOG), PASSWORD | ticks);
     if !inherited {
-        // De proef: loopt de teller? Op QEMU niet, en daar zou de
-        // FULL_RESET hieronder de machine meteen resetten.
+        // Wapenen: WRCFG = FULL_RESET zet de teller in beweging (op ijzer
+        // telt hij niet zonder, 30-09). Dan de proef: loopt hij echt?
+        dev::write32(
+            pm.add(RSTC),
+            PASSWORD | (rstc & !WRCFG_MASK & !0xff00_0000) | WRCFG_FULL_RESET,
+        );
+        dev::mb();
         let end = now().saturating_add(PROBE_NS);
         while now() < end {
             core::hint::spin_loop();
         }
         let left = dev::read32(pm.add(WDOG)) & TICKS_MASK;
         if left == 0 || left >= ticks {
+            // Geen watchdog: WRCFG terug naar clear, zodat er ook geen
+            // verrassing komt van een teller die later alsnog gaat lopen.
+            dev::write32(pm.add(RSTC), PASSWORD | RSTC_STOP);
+            dev::mb();
             cpu::println!(
-                "watchdog: PM_WDOG reads {left:#x} {} ms after loading {ticks:#x}: the counter does not run",
+                "watchdog: PM_WDOG reads {left:#x} {} ms after FULL_RESET with {ticks:#x} loaded: the counter does not run",
                 PROBE_NS / 1_000_000
             );
-            return Err(
-                "BCM PM watchdog counter does not run (QEMU models only the reset), not armed",
-            );
+            return Err("BCM PM watchdog counter does not run after FULL_RESET, not armed");
         }
-        dev::write32(
-            pm.add(RSTC),
-            PASSWORD | (rstc & !WRCFG_MASK & !0xff00_0000) | WRCFG_FULL_RESET,
-        );
     }
     dev::mb();
     Ok(Desc {
@@ -219,17 +227,22 @@ mod tests {
     }
 
     #[test]
-    fn a_counter_that_stands_still_is_never_armed() {
-        // QEMU: de teller staat stil, en FULL_RESET zou de machine resetten.
+    fn a_counter_that_stands_still_after_full_reset_is_stopped_again() {
+        // Een PM-blok dat ook na FULL_RESET niet telt: niet gewapend, en
+        // WRCFG weer op clear (de stop van Linux), zodat er niets sluimert.
         let (b, pa) = block(0x102, 0);
         assert!(arm_at(pa, 12_000, clock).is_err());
-        assert_eq!(b[(RSTC / 4) as usize], 0x102, "PM_RSTC untouched");
+        assert_eq!(
+            b[(RSTC / 4) as usize],
+            PASSWORD | RSTC_STOP,
+            "WRCFG not cleared"
+        );
         assert_eq!(b[(WDOG / 4) as usize], PASSWORD | 786_432);
     }
 
     #[test]
     fn a_running_counter_is_armed_with_full_reset() {
-        // Op ijzer loopt de teller: 65 tikken per ms.
+        // Op ijzer loopt de teller na FULL_RESET: 65 tikken per ms.
         let (b, pa) = block(0x5a00_0112, 65);
         let d = arm_at(pa, 12_000, clock).unwrap();
         assert_eq!(d.ticks, 786_432);
