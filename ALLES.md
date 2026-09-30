@@ -88,7 +88,17 @@ voor de volgende stick (nog niet erop).
       vrij. Reproduceren op QEMU met een job met devices.
 - [ ] **De console-listener op 5555 neemt na een meetronde geen
       verbindingen meer aan** (`nc -z` faalt; veel `nc | head` van de
-      agents). Lezersplaatsen lekken bij abrupt sluitende clients.
+      agents). Lezersplaatsen lekken bij abrupt sluitende clients. Zelfde
+      beeld op de Radxa na zijn koude herstart van ~21:50 (5555 dicht, Hop
+      zonder jobs); open na de flip naar H.
+- [ ] **Hop brengt na een koude boot een oude taak terug uit zijn
+      hopfs-staat** (vitals, 10240 shares, 512 MiB) zonder leader-job:
+      `/v1/status` zegt `jobs:0`, `DELETE /v1/jobs/vitals` raakt hem niet,
+      alleen `POST :8080/stop-task/{id}` (21:37, stempel G).
+- [ ] **vitals in slot 3 stopt direct na `HOPOS_APP_MMU`** (4 cores vanaf
+      core 2, `part 0xbfe00000+0x10000000`, over de grens van 3 GiB; tien
+      keer, geen app-regel, geen fault-regel); als eerste geplaatst (slot 2)
+      draait hij, bench in slot 3 (`part 0x7f5600000`) ook (21:40, G).
 - [ ] Lumen terugzetten na elke koude boot (spec in
       scratchpad/o6n-job-lumen.json; welcome erbij kost Lumen een core) en
       dan de mediaketen: MMC, de HEVC-encoder, WebDAV. De VPU had één
@@ -214,7 +224,15 @@ De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
       naar app op de Pi 4 (H): 25,9 MB/s (Radxa vóór de deur 6,5; Go op de
       Pi 5 400 tot 542): het datapad app naar app is nog 15x onder Go.
       Agent bezig met de idle-wekken (app-pomp 1 kHz, OS-core 900/s), die
-      hier waarschijnlijk ook achter zitten.
+      hier waarschijnlijk ook achter zitten. Draadronde 30-09 (bench, drie
+      runs): pull in de node O6N (H) 141,5 tot 143,7, Pi 4 (H) 23,6 tot
+      26,7, Radxa (I) 19,9, Pi 5 (dev, zonder deur) 6,6 MB/s (Go M4 769).
+      Ping app naar app over de draad: O6N naar Pi 5 p50 200 tot 227 µs,
+      Pi 5 naar O6N 206 tot 238, Radxa (I) naar O6N 287 tot 289, maar de
+      **Pi 4 (H) naar O6N 1212 tot 1213 µs** (koud 1,3 ms; in de node 48
+      µs): de Pi 4 (GENET gepold, `nic=0` in de tik) wacht op het draadpad
+      nog ~1 ms. De Pi 5 op de kaart-kern (zonder deur) wekt koud in
+      1239 µs; na de deur koud 51 tot 144 µs.
 - [ ] **Storm door de NAT (hairpin) stokt 1 s per ronde** op de Pi 4 (H):
       p50 2,5 ms, p99 1002 ms, 96 conn/s, zonder `HOPOS_MASQ_SLOT_FULL`.
       Eén SYN per ronde valt (RTO 1 s); ook node naar node (Pi 4 naar Pi 5,
@@ -222,7 +240,13 @@ De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
       (`TCP_BACKLOG` in leannet/src/stack.rs): nu de dial snel is, komen
       200 SYN's sneller binnen dan accept ze haalt, en een SYN op een volle
       backlog valt. Een backlog van 64 in lean (tag) is de lean fix; Go's
-      O6N-storm door de NAT haalde 844 conn/s, p99 19,6 ms.
+      O6N-storm door de NAT haalde 844 conn/s, p99 19,6 ms. Node naar
+      node over de draad (vitals storm, 200 verbindingen, 8 werkers, 30-09)
+      is bimodaal: ~600 tot 700 conn/s met p50 ~10 ms, of 1400 tot 5000
+      met p50 1 tot 4 ms, zonder vaste richting of stempel; cyclus (1
+      werker) p50 ~5 tot 7 ms of ~2,4 ms (Go 1,1 tot 4,1). De 1-s-SYN op de
+      O6N viel wel samen met `HOPOS_MASQ_SLOT_FULL` (13x; een ronde storm,
+      cyclus en rtt is 500 uitgaande flows uit één slot).
 - [ ] **App-opslag O6N** (1 MiB-calls): na de deur (H) schrijven 414, lezen
       85 MB/s (Go 557 tot 625 / 727 tot 797). Oorzaak (agent, afgeleid uit
       de code en Go's meting "ongecachet 59 MB/s"): het datablok van de
@@ -231,7 +255,11 @@ De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
       mapt `BLK_DATA` Normal-WB (de driver doet al push en pull), op de
       J-stick. Bewijs na de koude boot: `hopos.nvmebench=1` (rauw lezen van
       ~100 naar >1000 MB/s) en vitals `test=disk`. Het transport kern naar
-      app (300 MB/s bij gaten lezen) is de volgende trap.
+      app (300 MB/s bij gaten lezen) is de volgende trap. Herhaald op H met
+      vitals op 4 cores en bench ernaast (30-09, drie runs): schrijven 87,7
+      tot 88,6, lezen 87,7 tot 88,3 MB/s, 4 KiB-schrijven 32 tot 33 MB/s:
+      de 414 kwam niet terug. Rauw NVMe, hopfs en sequentieel in
+      docs/measurements.md: één boot met hopos.nvmebench=1 nodig (stick-cfg).
 - [ ] **NAT-tabel vol**: 512 flows per slot (`HOPOS_MASQ_SLOT_FULL`), dan
       valt een SYN en kost 1 s. Oorzaak: een inbound RST liet de flow 300 s
       staan zonder hem gesloten te tellen. Fix a102e51 (RST = gesloten in
@@ -246,8 +274,19 @@ De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
 - [ ] vitals: de standaard-rx-URL (cachefly) faalt zonder DNS in de env
       ("CONNECT is not supported"); rx-duren vallen op stappen van 100 ms.
 - [ ] De Mac hangt op Wi-Fi en macOS laat netmeter niet op het LAN
-      ("Lokaal netwerk"-recht): alle host-getallen zijn Wi-Fi; node naar
-      node over de draad is gemeten (Pi 4 44 tot 49 MB/s van de O6N).
+      ("Lokaal netwerk"-recht): alle host-getallen zijn Wi-Fi; daarom node
+      naar node over de draad gemeten (30-09, vitals rx van `/blob`, 256
+      MB, drie runs; tabel in docs/measurements.md).
+- [ ] **Radxa over de draad ~21 MB/s in beide richtingen** (in 20,1 tot
+      22,1, uit 20,8 tot 21,6, tegen O6N, Pi 4 en Pi 5 gelijk, met 4
+      verbindingen ook; stempel F): Go 55,8 tot 56,6 in en 98,8 tot 99,6
+      uit, dus 2,6x en 4,7x onder de lat.
+- [ ] **Pi 5 uit ~43 MB/s** (42,9 tot 43,3 naar de O6N, 41,3 tot 42,5 naar
+      de Pi 4; kaart-kern dev): Go 41,6 tot 50,6, dus op de onderkant. De
+      Pi 5 in (76 tot 93, Go 57 tot 70), de Pi 4 in (41 tot 44, Go 6,6) en
+      uit (76 tot 93, Go 42,3) zitten boven de lat. De O6N haalt in >= 78
+      en uit >= 85 (Go 111 tot 118): geen peer is snel genoeg om zijn
+      plafond te zien; drie ontvangers tegelijk samen ~90.
 
 ### Prestatietests (vitals)
 
