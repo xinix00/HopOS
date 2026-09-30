@@ -36,7 +36,7 @@ use core::task::{Context, Poll, Waker};
 use core::time::Duration;
 use cpu::println;
 use dev::Pa;
-use executor::{Clock, Executor};
+use executor::{Clock, Executor, Sleeper};
 use kern::cage::{Console, PhysMem, Timer};
 use kern::slots::Reply;
 use kern::system::{
@@ -50,7 +50,7 @@ use net::nat::Uplink;
 use net::plan::MAX_LAN_FRAME;
 use net::pump::Pump;
 use net::ring::{AbiTx, KIND_UPLINK, Reader as _, Writer as _};
-use net::switch::{self, Ack, Command, Commands, Published, Switch, Wiring};
+use net::switch::{self, Ack, Command, Commands, Doorbell, Published, Switch, Wiring};
 use net::{Egress, Ingress, Stats};
 use netdev::Device;
 use sync::mpsc::Mailbox;
@@ -67,6 +67,13 @@ pub(crate) static STATS: Stats = Stats::new();
 pub(crate) static COMMANDS: Commands<'static, RingRx, RingTx> = Mailbox::new();
 /// De tabel voor de deur van de executor.
 static PUBLISHED: Published<RingRx> = Published::new();
+/// De slaper van de OS-core met de deur van de switch erom: elke idle-ronde
+/// kijkt hij met kale loads in de TX-ringen en belt [`DOOR`] als er werk
+/// ligt, zodat de kick van een app (SEV of HVC 6) de switch ook echt wekt
+/// in plaats van zijn failsafe (`net::switch::Doorbell`, de les van 30-09).
+pub(crate) fn doorbell<S: Sleeper>(inner: S) -> Doorbell<'static, RingRx, S> {
+    Doorbell::new(inner, &PUBLISHED, &DOOR)
+}
 /// Pomp naar switch.
 static INGRESS: Ingress = Ingress::new();
 /// Switch naar pomp.

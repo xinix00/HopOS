@@ -28,7 +28,7 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use core::time::Duration;
-use executor::Executor;
+use executor::{Executor, Sleeper};
 use sync::mpsc::Mailbox;
 use sync::spsc::{Receiver, Sender};
 use sync::{Either, Signal, Stop, select, yield_now};
@@ -290,10 +290,68 @@ impl<R: Reader> Published<R> {
         })
     }
 
+    /// De deur zelf: ligt er werk, dan de bel van de switch. `true` = er
+    /// werd gebeld. De bel is één `set`, en die gaat alleen bij werk: een
+    /// CAS in elke idle-ronde zou op de M4 de volgende WFE laten
+    /// terugkeren (zie [`pending`](Self::pending)).
+    pub fn ring(&self, door: &Signal) -> bool {
+        let work = self.pending();
+        if work {
+            door.set();
+        }
+        work
+    }
+
     fn set(&self, port: usize, handle: Option<u64>) {
         if let Some(h) = self.tx.get(port) {
             h.store(handle.map_or(0, |v| v.wrapping_add(1)), Relaxed);
         }
+    }
+}
+
+/// De deur van de executor: de [`Sleeper`] van de OS-core, met vóór en
+/// tijdens elke slaap de blik in de TX-ringen (Go: `pumpHook(switchPending,
+/// notifySwitch)` in de idle-governor).
+///
+/// Waarom dit bestaat (gemeten 30-09): de kick van een app (SEV plus HVC 6)
+/// haalt de OS-core wel uit zijn WFE of uit de beurt van Hop, maar niemand
+/// zette daarna de bel van de switch: `ready()` van de executor kent alleen
+/// taken. Elk frame van een app lag dan tot de [`FAILSAFE`] van 1 ms (QEMU:
+/// `switch by door 2/s, by failsafe 875/s` bij 5.561 kicks/s tijdens de
+/// pull, 7,1 MB/s app naar app en een rtt van 2,2 ms; op ijzer ~1 ms per
+/// handshake naar de kern). De deur maakt de kick weer een bel.
+///
+/// Hij wikkelt de slaper van het board: `ready()` wordt "een taak is klaar
+/// óf er ligt werk in een TX-ring", en de slaper toetst dat al met de
+/// interrupts dicht, vóór de beurt van een bewoner en tussen twee WFE's.
+/// Zo blijft de verloren-wek-race dicht: een app die publiceert ná de
+/// toets, zet het event-register (SEV) of kickt de OS-core uit zijn beurt.
+pub struct Doorbell<'a, R, S> {
+    inner: S,
+    published: &'a Published<R>,
+    door: &'a Signal,
+}
+
+impl<'a, R: Reader, S: Sleeper> Doorbell<'a, R, S> {
+    /// De slaper `inner` met de deur over `published` naar `door`.
+    pub const fn new(inner: S, published: &'a Published<R>, door: &'a Signal) -> Self {
+        Self {
+            inner,
+            published,
+            door,
+        }
+    }
+}
+
+impl<R: Reader, S: Sleeper> Sleeper for Doorbell<'_, R, S> {
+    fn sleep(&mut self, now: u64, until: Option<u64>, ready: &dyn Fn() -> bool) {
+        // Werk dat er al lag: geen slaap, de switch meteen.
+        if self.published.ring(self.door) {
+            return;
+        }
+        let (published, door) = (self.published, self.door);
+        self.inner
+            .sleep(now, until, &|| ready() || published.ring(door));
     }
 }
 
@@ -572,6 +630,9 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
             && let Some(why) = p.tx.corrupt()
         {
             p.tx_warned = true;
+            // Uit de deur: een dode ring leest daar voor altijd als "werk"
+            // (kop voorbij staart), en dan sliep de OS-core nooit meer.
+            self.published.set(i, None);
             log(format_args!("HOPOS_NETRING_TX_CORRUPT: slot {i}: {why}"));
         }
     }

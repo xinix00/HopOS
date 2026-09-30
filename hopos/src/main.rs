@@ -363,7 +363,9 @@ fn moved(core: usize) -> ! {
 /// executor draait; hier blijft alleen de slaper over.
 fn boot(board: &'static Machine, dtb: u64, el: u8) -> ! {
     let exec: &'static Executor = EXEC.get();
-    let mut sleeper = setup(board, dtb, el);
+    // De deur van de switch om de slaper heen (`net::doorbell`): zonder
+    // hem wachtte elk frame van een app op de failsafe van 1 ms.
+    let mut sleeper = net::doorbell(setup(board, dtb, el));
     exec.run(&mut sleeper)
 }
 

@@ -695,3 +695,106 @@ fn de_conntrack_overleeft_de_flip_via_de_actor() {
     assert_eq!(be32(&got, ETH_LEN + 16), slot_ip4(1));
     assert_eq!(be16(&got, ETH_LEN + 22), 5555);
 }
+
+/// Een slaper van het board zoals de deur hem ziet: telt zijn slapen en
+/// onthoudt wat `ready()` aan het eind ervan zei. `during` is wat een
+/// app-core doet terwijl de OS-core slaapt.
+struct Spy {
+    slept: &'static Cell<u32>,
+    ready_at_end: &'static Cell<Option<bool>>,
+    during: Box<dyn FnMut()>,
+}
+
+impl Sleeper for Spy {
+    fn sleep(&mut self, _now: u64, _until: Option<u64>, ready: &dyn Fn() -> bool) {
+        self.slept.set(self.slept.get() + 1);
+        (self.during)();
+        self.ready_at_end.set(Some(ready()));
+    }
+}
+
+fn spy(during: impl FnMut() + 'static) -> (Spy, &'static Cell<u32>, &'static Cell<Option<bool>>) {
+    let slept = leak(Cell::new(0));
+    let ready_at_end = leak(Cell::new(None));
+    let s = Spy {
+        slept,
+        ready_at_end,
+        during: Box::new(during),
+    };
+    (s, slept, ready_at_end)
+}
+
+/// De les van 30-09: een frame van een app lag tot de failsafe van 1 ms,
+/// omdat de kick de OS-core wel wekte maar niemand de switch belde. Werk
+/// dat er al ligt: geen slaap, de bel meteen.
+#[test]
+fn deur_belt_de_switch_als_er_al_werk_ligt() {
+    let mut h = harness();
+    let mut app = h.attach(2);
+    assert!(app.tx.push(KIND_FRAME, &[0u8; 64]));
+    let (s, slept, _) = spy(|| {});
+    let mut d = Doorbell::new(s, h.published, h.door);
+    d.sleep(0, None, &|| false);
+    assert_eq!(slept.get(), 0, "de OS-core sliep met werk in een TX-ring");
+    assert!(
+        h.door.is_set(),
+        "werk in een TX-ring, maar de switch hoorde niets"
+    );
+}
+
+/// Een app die tijdens de slaap publiceert: de slaper toetst `ready()` na
+/// zijn wek (de SEV of de kick), en de deur maakt daar een bel van.
+#[test]
+fn deur_hoort_een_publicatie_tijdens_de_slaap() {
+    let mut h = harness();
+    let app: &'static RefCell<App> = leak(RefCell::new(h.attach(3)));
+    let (s, slept, ready_at_end) = spy(move || {
+        assert!(app.borrow_mut().tx.push(KIND_FRAME, &[1u8; 64]));
+    });
+    let mut d = Doorbell::new(s, h.published, h.door);
+    d.sleep(0, None, &|| false);
+    assert_eq!(slept.get(), 1);
+    assert_eq!(
+        ready_at_end.get(),
+        Some(true),
+        "de slaper sliep door de publicatie heen"
+    );
+    assert!(h.door.is_set(), "de publicatie belde de switch niet");
+}
+
+/// Stil: de deur slaapt gewoon, zonder bel, en een taak die klaar is
+/// blijft de slaap beëindigen.
+#[test]
+fn deur_slaapt_als_er_niets_ligt() {
+    let mut h = harness();
+    let _app = h.attach(4);
+    let (s, slept, ready_at_end) = spy(|| {});
+    let mut d = Doorbell::new(s, h.published, h.door);
+    d.sleep(0, None, &|| false);
+    assert_eq!(slept.get(), 1);
+    assert_eq!(ready_at_end.get(), Some(false));
+    assert!(!h.door.is_set(), "een loze bel in een stille idle");
+    d.sleep(0, None, &|| true);
+    assert_eq!(
+        ready_at_end.get(),
+        Some(true),
+        "de taken van de executor vielen weg"
+    );
+}
+
+/// Een corrupte TX-ring leest voor de deur als eeuwig werk; de switch haalt
+/// hem uit de tabel, anders slaapt de OS-core nooit meer.
+#[test]
+fn corrupte_ring_gaat_uit_de_deur() {
+    let mut h = harness();
+    let mut app = h.attach(5);
+    assert!(app.tx.push(KIND_FRAME, &[0u8; 64]));
+    app.tx.0.borrow_mut().corrupt = Some("test");
+    assert!(h.published.pending());
+    let mut buf = vec![0u8; MAX_LAN_FRAME];
+    assert!(!h.sw.switch_pass(&mut buf));
+    assert!(
+        !h.published.pending(),
+        "een dode ring houdt de deur voor altijd open"
+    );
+}
