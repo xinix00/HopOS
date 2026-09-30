@@ -513,11 +513,14 @@ impl Local {
         1 << (self.id % 32)
     }
 
-    /// Is de lijn van ons: Group 1 en aan? Een secure lijn leest voor ons
-    /// als geen van beide.
+    /// Is de lijn van ons: staat hij aan? Een secure lijn is RAZ/WI, dus de
+    /// enable van [`Gic::enable`] blijft dan 0. De groepsbit telt bewust
+    /// niet mee: op de Cix-firmware van de O6N leest GICR_IGROUPR0 als nul
+    /// terwijl SGI 1 wel aankomt (de zelftest zag `kick=(Ipi, 0 us)`,
+    /// 30-09); de zelftest is de rechter, dit is de voorspelling.
     #[must_use]
     pub fn is_ours(&self) -> bool {
-        self.igroupr0 & self.bit() != 0 && self.isenabler0 & self.bit() != 0
+        self.isenabler0 & self.bit() != 0
     }
 
     /// Staat de lijn pending?

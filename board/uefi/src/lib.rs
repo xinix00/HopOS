@@ -679,9 +679,10 @@ impl Board for Uefi {
             .map_err(|_| Error::Irq("hyp timer PPI refused"))?;
         gic.enable(KICK_SGI, mpidr)
             .map_err(|_| Error::Irq("kick SGI refused"))?;
-        // Leest de groep of de enable terug als 0, dan is de SGI niet van
-        // ons (secure, RAZ/WI) en hoort de OS-core de app-cores alleen op
-        // zijn timer. Geen weigering: de boot kan verder, maar luid.
+        // Leest de enable terug als 0, dan is de SGI niet van ons (secure,
+        // RAZ/WI) en hoort de OS-core de app-cores alleen op zijn timer.
+        // Geen weigering: de boot kan verder, maar luid. De groepsbit is
+        // hier geen maat (de O6N leest hem als nul en de kick komt toch).
         if let Some(l) = gic.local(KICK_SGI)
             && !l.is_ours()
         {
