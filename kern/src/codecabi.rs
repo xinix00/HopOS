@@ -31,8 +31,10 @@
 //! nooit in de tabel van de opvolger, wiens handvat 1 toevallig hetzelfde
 //! getal is.
 //!
-//! Alle codec-ops zijn non-blocking (het contract van `driver-codec`). De
-//! dienst is daarom één synchrone beurt per call: de verbindingstaak leent
+//! De driverbeurten zijn non-blocking (het contract van `driver-codec`).
+//! Vóór open kan de verbindingstaak ontbrekende firmware async bijlezen;
+//! daarbij houdt zij geen lening van de dienst vast. De eigenlijke
+//! dienst is één synchrone beurt per call: de verbindingstaak leent
 //! hem via [`serve`] voor precies die beurt, zonder `.await` ertussen
 //! (handboek §1.1). Op de OS-core draait er tussen twee `.await`-punten
 //! niemand anders, dus die lening is de beurt van de eigenaar; een slot is
@@ -48,6 +50,7 @@ use abi::hopabi::codec::{
 use abi::hopabi::{
     OP_CODEC_CLOSE, OP_CODEC_FEED, OP_CODEC_OFFER, OP_CODEC_OPEN, OP_CODEC_POLL, Req,
 };
+use alloc::vec::Vec;
 use bounded::BoundedVec;
 use core::cell::RefCell;
 use core::fmt;
@@ -258,7 +261,14 @@ enum Why {
     Bad(abi::Error),
     Grant(GrantError),
     Codec(CodecError),
-    Filled { filled: u64, size: u64 },
+    FirmwareRead {
+        name: &'static str,
+        error: crate::Error,
+    },
+    Filled {
+        filled: u64,
+        size: u64,
+    },
     Unknown(u8),
 }
 
@@ -272,6 +282,7 @@ impl fmt::Display for Why {
             Why::Bad(e) => write!(f, "bad codec args: {e}"),
             Why::Grant(e) => write!(f, "{e}"),
             Why::Codec(e) => write!(f, "{e}"),
+            Why::FirmwareRead { name, error } => write!(f, "codec firmware {name}: {error}"),
             Why::Filled { filled, size } => {
                 write!(f, "filled {filled} exceeds the {size}-byte buffer")
             }
@@ -417,14 +428,21 @@ impl<E: Engine, L: Lives, C: Coherence> CodecService<E, L, C> {
         }
     }
 
+    fn firmware_needed(
+        &mut self,
+        slot: Slot,
+        generation: u32,
+        req: &Req<'_>,
+    ) -> Option<&'static str> {
+        if req.op != OP_CODEC_OPEN || self.lives.current(slot) != Some(generation) {
+            return None;
+        }
+        let a = OpenArgs::decode(req.data).ok()?;
+        self.engine.as_mut()?.firmware_needed(&config(a))
+    }
+
     fn open(&mut self, slot: Slot, gen_: u32, a: OpenArgs) -> Answer {
-        let cfg = Config {
-            codec: Codec::from_raw(a.codec),
-            dir: Direction::from_raw(a.dir),
-            pixel: Pixel::from_raw(a.pixel),
-            width: u32::from(a.width),
-            height: u32::from(a.height),
-        };
+        let cfg = config(a);
         // Eerst de tabel: een levensduur die voorbij is, krijgt geen sessie
         // (in Go kon een Open die firmware laadde een evict inhalen; hier is
         // de beurt ondeelbaar, en de toets staat vóór het ijzer).
@@ -609,6 +627,16 @@ impl<E: Engine, L: Lives, C: Coherence> CodecService<E, L, C> {
     }
 }
 
+fn config(a: OpenArgs) -> Config {
+    Config {
+        codec: Codec::from_raw(a.codec),
+        dir: Direction::from_raw(a.dir),
+        pixel: Pixel::from_raw(a.pixel),
+        width: u32::from(a.width),
+        height: u32::from(a.height),
+    }
+}
+
 /// De engine en één tabel als twee losse leningen.
 fn split<'a, E, const N: usize>(
     engine: &'a mut Option<E>,
@@ -700,6 +728,19 @@ fn write_why(dst: &mut [u8], why: &Why) -> usize {
 pub trait Port {
     /// Bedient een codec-call; geeft de lengte van het antwoord in `out`.
     fn serve(&self, slot: Slot, generation: u32, req: &Req<'_>, out: &mut [u8]) -> usize;
+    /// Ontbrekende blob voor een geldig openverzoek; geen lening over de read heen.
+    fn firmware_needed(
+        &self,
+        _slot: Slot,
+        _generation: u32,
+        _req: &Req<'_>,
+    ) -> Option<&'static str> {
+        None
+    }
+    /// Een gevalideerde blob wordt vóór openen aan de engine overgedragen.
+    fn install_firmware(&self, _name: &'static str, _bytes: Vec<u8>) -> driver_codec::Result {
+        Err(CodecError::Unsupported)
+    }
 }
 
 /// De dienst in zijn `static`: de leesbare cel plus de console van de kern.
@@ -726,6 +767,18 @@ impl<E: Engine, L: Lives, C: Coherence, K: Console> CodecCell<E, L, C, K> {
 }
 
 impl<E: Engine, L: Lives, C: Coherence, K: Console> Port for CodecCell<E, L, C, K> {
+    fn firmware_needed(&self, slot: Slot, generation: u32, req: &Req<'_>) -> Option<&'static str> {
+        self.with(|s, _| s.firmware_needed(slot, generation, req))
+            .flatten()
+    }
+    fn install_firmware(&self, name: &'static str, bytes: Vec<u8>) -> driver_codec::Result {
+        self.with(|s, _| {
+            s.engine()
+                .ok_or(CodecError::Unsupported)?
+                .install_firmware(name, bytes)
+        })
+        .unwrap_or(Err(CodecError::Busy))
+    }
     fn serve(&self, slot: Slot, generation: u32, req: &Req<'_>, out: &mut [u8]) -> usize {
         match self.cell.try_borrow_mut() {
             Ok(mut s) => s.serve(slot, generation, req, out, &self.log),
@@ -756,6 +809,82 @@ pub fn install(p: &'static dyn Port) -> bool {
     }
     *slot = Some(p);
     true
+}
+
+/// Laadt firmware voor een open buiten de enginebeurt. De antwoordplek blijft
+/// geleend tot de bestandsactor antwoordt, ook als de app zijn eigen timeout haalt.
+/// De slotgeneratie wordt daarna opnieuw gecontroleerd door de gewone open.
+pub async fn serve_with_firmware<'a>(
+    slot: Slot,
+    generation: u32,
+    req: &Req<'_>,
+    out: &mut [u8],
+    inbox: Option<&crate::rpc::FsInbox<'a>>,
+    reply: &'a crate::slots::Reply,
+) -> usize {
+    let port = *PORT.borrow();
+    let Some(port) = port else {
+        return refuse(out, req, b"this node has no codec hardware");
+    };
+    serve_loaded(port, slot, generation, req, out, inbox, reply).await
+}
+
+async fn serve_loaded<'a>(
+    port: &dyn Port,
+    slot: Slot,
+    generation: u32,
+    req: &Req<'_>,
+    out: &mut [u8],
+    inbox: Option<&crate::rpc::FsInbox<'a>>,
+    reply: &'a crate::slots::Reply,
+) -> usize {
+    if let Some(name) = port.firmware_needed(slot, generation, req)
+        && let Some(inbox) = inbox
+    {
+        match read_firmware(inbox, reply, name).await {
+            Ok(bytes) => {
+                if let Err(e) = port.install_firmware(name, bytes) {
+                    let n = write_why(out.get_mut(REQ_HEADER..).unwrap_or(&mut []), &Why::Codec(e));
+                    return answer(out, req, STATUS_ERROR, 0, n);
+                }
+            }
+            Err(error) => {
+                let n = write_why(
+                    out.get_mut(REQ_HEADER..).unwrap_or(&mut []),
+                    &Why::FirmwareRead { name, error },
+                );
+                return answer(out, req, STATUS_ERROR, 0, n);
+            }
+        }
+    }
+    port.serve(slot, generation, req, out)
+}
+
+async fn read_firmware<'a>(
+    inbox: &crate::rpc::FsInbox<'a>,
+    reply: &'a crate::slots::Reply,
+    name: &str,
+) -> crate::Result<Vec<u8>> {
+    if name.is_empty()
+        || name.len() > 32
+        || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return Err(crate::Error::Corrupt { at: 0 });
+    }
+    for dir in [b"/firmware/".as_slice(), b"/codec-firmware/".as_slice()] {
+        let mut path = [0u8; 64];
+        let n = dir.len() + name.len() + 4;
+        path[..dir.len()].copy_from_slice(dir);
+        path[dir.len()..n - 4].copy_from_slice(name.as_bytes());
+        path[n - 4..n].copy_from_slice(b".fwb");
+        match crate::rpc::read_file(inbox, reply, &path[..n], 4 << 20).await {
+            Ok(bytes) if bytes.is_empty() => return Err(crate::Error::Corrupt { at: 0 }),
+            Ok(bytes) => return Ok(bytes),
+            Err(crate::Error::NoEnt) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(crate::Error::NoEnt)
 }
 
 /// Bedient een codec-call vanuit de system-API; zonder dienst (een kern

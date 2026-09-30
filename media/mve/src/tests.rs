@@ -255,6 +255,10 @@ impl FakeFw {
 struct TestFw(Vec<u8>);
 
 impl Firmware for TestFw {
+    fn install(&mut self, _name: &'static str, bytes: Vec<u8>) -> Result {
+        self.0 = bytes;
+        Ok(())
+    }
     fn load(&mut self, _name: &str) -> Option<&[u8]> {
         (!self.0.is_empty()).then_some(self.0.as_slice())
     }
@@ -1209,4 +1213,23 @@ fn de_firmwarelijst_is_die_van_fw_name() {
         }
     }
     assert_eq!(gevraagd.as_slice(), FIRMWARE.as_slice());
+}
+
+#[test]
+fn missing_firmware_can_be_loaded_without_reprobing_the_device() {
+    let mut f = FakeVpu::new(4, 2);
+    let a = f.take_pages(512);
+    let arena = Arena::new(a, 512 * PAGE).unwrap();
+    let mut d = probe(&f, arena, Vec::new()).unwrap();
+    let config = cfg(Codec::Hevc, Pixel::Nv12);
+    assert_eq!(d.firmware_needed(&config), Some("hevcdec"));
+    assert!(matches!(d.open(&config), Err(Error::NoFirmware)));
+    assert!(d.install_firmware("hevcdec", vec![1; 300]).is_err());
+    assert_eq!(d.firmware_needed(&config), Some("hevcdec"));
+    let bin = fw_blob(2 * PAGE as usize, 0x4d000, &[0, 1]);
+    assert!(d.install_firmware("../hevcdec", bin.clone()).is_err());
+    d.install_firmware("hevcdec", bin).unwrap();
+    assert_eq!(d.firmware_needed(&config), None);
+    let s = d.open(&config).unwrap();
+    d.close(s);
 }

@@ -528,6 +528,33 @@ impl<D: Dial, T: Timer> Client<D, T> {
         Ok(r.size)
     }
 
+    /// Eén SCSI-uitwisseling, zonder automatische herhaling. Een verloren
+    /// antwoord op een vendorcommando mag nooit dezelfde mutatie herhalen.
+    /// De aanroeper bezit beide scratchbuffers; het antwoord leent `rx`.
+    pub async fn device_command<'a>(
+        &mut self,
+        path: &str,
+        command: abi::hopabi::device::Command<'_>,
+        tx: &mut [u8],
+        rx: &'a mut [u8],
+    ) -> Result<abi::hopabi::device::Reply<'a>> {
+        use abi::hopabi::device::{RESULT_LEN, Reply};
+        if rx.len() < RESULT_LEN.saturating_add(command.in_len as usize) {
+            return Err(Error::Protocol("device response buffer"));
+        }
+        let n = command
+            .encode(tx, MAX_CHUNK)
+            .map_err(|_| Error::Protocol("device command bounds"))?;
+        let req = Req {
+            data: &tx[..n],
+            ..Req::path(abi::hopabi::OP_DEVICE_COMMAND, path)
+        };
+        let timeout = Duration::from_millis(u64::from(command.timeout_ms) + 2000);
+        let (_, n) = self.call_once(req, rx, timeout).await?;
+        Reply::decode(&rx[..n], command.in_len as usize, command.data_out.len())
+            .map_err(|_| Error::Protocol("device result bounds"))
+    }
+
     /// De grootte van een bestand (0 voor een map).
     pub async fn stat(&mut self, path: &str) -> Result<u64> {
         let (r, _) = self
@@ -804,6 +831,24 @@ mod tests {
             ..Script::default()
         }));
         (Client::new(MockDial(s.clone()), Never), s)
+    }
+
+    #[test]
+    fn sync_uses_the_new_opcode_and_never_repeats_an_uncertain_barrier() {
+        let (mut c, script) = client(vec![Some(resp(1, STATUS_OK, 7, b""))]);
+        assert_eq!(block_on(c.sync("/db")), Ok(7));
+        let sent = &script.borrow().sent[0];
+        assert_eq!(sent[13], OP_SYNC);
+        assert_eq!(&sent[20..36], &[0; 16]);
+        assert_eq!(&sent[36..], b"/db");
+        let (mut c, script) = client(vec![None, Some(resp(2, STATUS_OK, 8, b""))]);
+        assert_eq!(
+            block_on(c.sync("/db")),
+            Err(Error::Transport(ConnError::Reset))
+        );
+        assert_eq!(script.borrow().dials, 1);
+        let (mut c, _) = client(vec![Some(resp(1, 1, 0, b"flush failed"))]);
+        assert!(block_on(c.sync("/db")).is_err());
     }
 
     #[test]

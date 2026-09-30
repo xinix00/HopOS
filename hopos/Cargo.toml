@@ -80,6 +80,8 @@ gui = [
 # en de VPU-driver; op de O6N zet `board-o6n?/media` het aanzetten van de
 # VPU aan. Kaal antwoorden de codec-ops "onbekende op".
 media = [
+    "gui",
+    "dep:media-optical",
     "kern/media",
     "dep:driver-codec",
     "dep:media-mve",
@@ -131,6 +133,7 @@ driver-dwc3 = { path = "../driver/usb/dwc3", optional = true }
 # Het media-vlak (feature `media`): het contract en de VPU-driver.
 driver-codec = { path = "../driver/codec", optional = true }
 media-mve = { path = "../media/mve", optional = true }
+media-optical = { path = "../media/optical", optional = true }
 bounded = { path = "../bounded", optional = true }
 # De schijf van het board: `storage.rs` kent haar maten (sector, transfer).
 driver-virtioblk = { path = "../driver/virtioblk" }

@@ -19,6 +19,8 @@ mod config;
 mod flip; // FLIP: de kern-flip (flip.rs)
 mod gui; // het gui-vlak (gui.rs); kaal no-ops, feature `gui`
 mod net;
+#[cfg(feature = "media")]
+mod optical;
 mod slots;
 mod storage;
 mod telemetry; // de thermiek op tik en heartbeat, en het klokbeleid (telemetry.rs)
@@ -540,6 +542,10 @@ fn system(
         .with_store(&STORE);
     if fs {
         s = s.with_fs(&storage::FS_INBOX);
+    }
+    #[cfg(feature = "media")]
+    {
+        s = s.with_devices(&optical::INBOX);
     }
     Box::leak(Box::new(s))
 }

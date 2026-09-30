@@ -792,6 +792,10 @@ impl<'s, D: BlockIo, L: Console> FsActor<'s, D, L> {
                 }
                 // De gebruikelijke generatie- en mountresolutie geldt ook
                 // voor een barrière. Na remove sync't de app de oudermap.
+                // De volgorde is die van de brievenbus (docs/storage-sync.md):
+                // `run` neemt pas een bericht aan als het vorige zijn I/O
+                // terug heeft, dus elke eerdere schrijf van de actor staat
+                // in het device vóór deze flush en commit beginnen.
                 self.fs.stat(p)?;
                 Ok((self.fs.sync().await?, 0))
             }

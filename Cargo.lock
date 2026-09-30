@@ -629,6 +629,7 @@ dependencies = [
  "leanelf",
  "leannet",
  "media-mve",
+ "media-optical",
  "net",
  "netdev",
  "sync",
@@ -705,6 +706,13 @@ version = "3.0.0"
 [[package]]
 name = "sync"
 version = "3.0.0"
+
+[[package]]
+name = "syncprobe"
+version = "3.0.0"
+dependencies = [
+ "applib",
+]
 
 [[package]]
 name = "welcome"

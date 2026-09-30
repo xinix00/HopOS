@@ -88,6 +88,8 @@ arm_freq=1500
 # Het image van Hop in het laadvenster (board/raspi/src/map.rs).
 $INITRAMFS
 EOF
+# EXTRA="hopos.insecure=1 hopos.node=pi5-1": meer hopos.*-sleutels in de
+# cmdline (de Pi leest zijn config uit /chosen/bootargs, niet uit een bestand).
 echo "hopos.stage=${ROLE:-hop}${EXTRA:+ $EXTRA}" >"$OUT/cmdline.txt"
 
 echo "rpi5: $OUT/hop-agent5.img ($(wc -c <"$OUT/hop-agent5.img" | tr -d ' ') bytes), config.txt, cmdline.txt${IMAGE:+, hop.elf ($SIZE bytes, role $ROLE)}" >&2

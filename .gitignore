@@ -4,3 +4,5 @@
 *.log
 # De donor-bytes van Radxa (image/radxa-zero3.sh): vendor, eenmalig gedownload.
 /image/radxa/
+# De bytecode van Python uit tools/.
+__pycache__/

@@ -1508,3 +1508,6 @@ mod tests {
         assert_eq!(g.count, 0);
     }
 }
+
+#[cfg(test)]
+mod sync_tests;

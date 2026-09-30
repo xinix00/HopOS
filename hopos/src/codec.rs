@@ -109,10 +109,8 @@ mod on {
         }
     }
 
-    /// De firmware in RAM: één keer bij de bring-up van het volume gelezen,
-    /// daarna per sessie uit de cache (de driver kent geen bestandssysteem).
-    /// Go las elke open opnieuw van de NVMe; hier kan dat niet, want een
-    /// open is één synchrone beurt, en een kern-flip leest ze toch opnieuw.
+    /// De firmwarecache: bring-up vult wat aanwezig is; een latere codec-open
+    /// laat de system-API ontbrekende blobs bijlezen vóór de synchrone driverbeurt.
     #[derive(Default)]
     pub(crate) struct Blobs {
         blobs: BoundedVec<(&'static str, Vec<u8>), MAX_BLOBS>,
@@ -121,12 +119,11 @@ mod on {
     impl Blobs {
         /// Legt een blob in de cache (de lezer van het volume); vol of te
         /// groot wordt geweigerd.
-        #[cfg_attr(
-            not(feature = "board-o6n"),
-            expect(dead_code, reason = "alleen de O6N laadt firmware")
-        )]
         pub(crate) fn put(&mut self, name: &'static str, bin: Vec<u8>) -> bool {
-            bin.len() <= MAX_BLOB && self.blobs.push((name, bin)).is_ok()
+            bin.len() <= MAX_BLOB
+                && media_mve::FIRMWARE.contains(&name)
+                && media_mve::validate_firmware(&bin).is_ok()
+                && self.blobs.push((name, bin)).is_ok()
         }
 
         /// Hoeveel blobs de cache houdt.
@@ -140,6 +137,19 @@ mod on {
     }
 
     impl Firmware for Blobs {
+        fn install(&mut self, name: &'static str, bytes: Vec<u8>) -> driver_codec::Result {
+            if !media_mve::FIRMWARE.contains(&name) || bytes.is_empty() || bytes.len() > MAX_BLOB {
+                return Err(driver_codec::Error::Unsupported);
+            }
+            if self.blobs.iter().any(|(n, _)| *n == name) {
+                return Ok(());
+            }
+            if self.put(name, bytes) {
+                Ok(())
+            } else {
+                Err(driver_codec::Error::Busy)
+            }
+        }
         fn load(&mut self, name: &str) -> Option<&[u8]> {
             self.blobs
                 .iter()

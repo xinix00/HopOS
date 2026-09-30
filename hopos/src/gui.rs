@@ -272,6 +272,8 @@ mod on {
         /// console.
         struct UsbSink {
             tx: InputTx<'static>,
+            #[cfg(feature = "media")]
+            optical: crate::optical::Bridge,
         }
 
         impl Sink for UsbSink {
@@ -290,6 +292,30 @@ mod on {
 
             fn log(&mut self, args: fmt::Arguments<'_>) {
                 println!("{args}");
+            }
+            #[cfg(feature = "media")]
+            fn storage_attached(&mut self, info: &gui_usbin::storage::BulkInfo) {
+                self.optical.attached(info);
+            }
+            #[cfg(feature = "media")]
+            fn storage_gone(&mut self, id: gui_usbin::storage::BulkId) {
+                self.optical.gone(id);
+            }
+            #[cfg(feature = "media")]
+            fn bulk_out(&mut self, req: &gui_usbin::storage::BulkReq) -> &[u8] {
+                self.optical.output(req)
+            }
+            #[cfg(feature = "media")]
+            fn bulk_in(&mut self, req: &gui_usbin::storage::BulkReq) -> &mut [u8] {
+                self.optical.input(req)
+            }
+            #[cfg(feature = "media")]
+            fn bulk_done(
+                &mut self,
+                req: &gui_usbin::storage::BulkReq,
+                r: core::result::Result<usize, gui_usbin::storage::BulkError>,
+            ) {
+                self.optical.done(req, r);
             }
         }
 
@@ -317,7 +343,18 @@ mod on {
                 .ok()
                 .and_then(|g| g.desc())
                 .map(|d| (d.width, d.height));
-            if exec.spawn(run(exec, hosts, UsbSink { tx })).is_err() {
+            if exec
+                .spawn(run(
+                    exec,
+                    hosts,
+                    UsbSink {
+                        tx,
+                        #[cfg(feature = "media")]
+                        optical: crate::optical::Bridge::default(),
+                    },
+                ))
+                .is_err()
+            {
                 println!("usb: task not spawned HOPOS_USB_FAIL");
                 stop_input();
                 return;
@@ -376,8 +413,21 @@ mod on {
                 "usb: {live} controller(s) up, polling every {} ms HOPOS_USB_UP",
                 gui_usbin::POLL_INTERVAL_NS / 1_000_000
             );
+            #[cfg(feature = "media")]
+            crate::optical::start(exec);
             loop {
+                #[cfg(feature = "media")]
+                if let Some(req) = sink.optical.next() {
+                    mgr.enqueue(req, &mut sink);
+                }
                 let wait = mgr.step(&mut sink).await;
+                #[cfg(feature = "media")]
+                let _ = sync::select(
+                    exec.after(Duration::from_nanos(wait)),
+                    crate::optical::WAKE.wait(),
+                )
+                .await;
+                #[cfg(not(feature = "media"))]
                 exec.after(Duration::from_nanos(wait)).await;
             }
         }

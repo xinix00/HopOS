@@ -73,6 +73,7 @@ members = [
     "apps/display",
     # Een stream door de videocodec van de node (docs/media.md).
     "apps/decode",
+    "apps/syncprobe",
     # De meetbank op de host: std, alleen voor de ontwikkelmachine, dus
     # geen default-member (de target-build van de bibliotheken slaat hem
     # over); tools/gate.sh toetst hem apart.

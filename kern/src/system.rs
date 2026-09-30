@@ -1254,6 +1254,7 @@ pub struct System<'i, 'r, const N: usize> {
     streams: LocalCell<[Option<Stream>; MAX_STREAMS]>,
     logs: Option<&'i SlotLogs>,
     fs: Option<&'i FsInbox<'r>>,
+    devices: Option<&'i crate::deviceabi::Inbox<'r>>,
     store: Option<&'i crate::store::StoreQueue>,
     max_slots: usize,
 }
@@ -1275,6 +1276,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             streams: LocalCell::cell([const { None }; MAX_STREAMS]),
             logs: None,
             fs: None,
+            devices: None,
             store: None,
             max_slots,
         }
@@ -1286,6 +1288,13 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
     #[must_use]
     pub const fn with_fs(mut self, fs: &'i FsInbox<'r>) -> Self {
         self.fs = Some(fs);
+        self
+    }
+
+    /// Koppelt de optische eigenaar, los van de bestandsactor.
+    #[must_use]
+    pub const fn with_devices(mut self, devices: &'i crate::deviceabi::Inbox<'r>) -> Self {
+        self.devices = Some(devices);
         self
     }
 
@@ -1401,7 +1410,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
                 continue;
             }
             let len = match Call::decode(payload) {
-                Ok(call) if rpc::is_fs_op(call.op) => {
+                Ok(call) if rpc::is_fs_op(call.op) || call.op == abi::hopabi::OP_DEVICE_COMMAND => {
                     // Alleen getallen en bereiken: de lening van `buf` eindigt
                     // hier, want de buffer zelf gaat zo naar de hopfs-actor.
                     let path = REQ_HEADER..REQ_HEADER + call.path.len();
@@ -1428,9 +1437,18 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
                     );
                     self.store_call(who, h, reply, w.timer, log, buf, out).await
                 }
-                #[cfg(feature = "media")] // MEDIA: de codec-ops, synchroon (codecabi.rs).
+                #[cfg(feature = "media")]
+                // Open kan ontbrekende firmware laden vóór de driverbeurt.
                 Ok(call) if crate::codecabi::is_codec_op(call.op) => {
-                    crate::codecabi::serve(slot, who.generation, &call.as_req(), out)
+                    crate::codecabi::serve_with_firmware(
+                        slot,
+                        who.generation,
+                        &call.as_req(),
+                        out,
+                        self.fs,
+                        reply,
+                    )
+                    .await
                 }
                 Ok(call) => self.call(slot, &call, reply, mem, hooks, out).await,
                 Err(_) => encode_resp(out, 0, STATUS_ERROR, 0, 0, b"bad request"),
@@ -1449,7 +1467,19 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         buf: &mut Vec<u8>,
         out: &mut Vec<u8>,
     ) -> usize {
-        let Some(inbox) = self.fs else {
+        let device = match crate::deviceabi::target(
+            self.svc,
+            who.slot,
+            who.generation,
+            buf.get(h.path.clone()).unwrap_or_default(),
+        ) {
+            Ok(v) => v,
+            Err(e) => return fail(out, h.op, h.seq, &Fail::Kern(e)),
+        };
+        if h.op == abi::hopabi::OP_DEVICE_COMMAND && device.is_none() {
+            return fail(out, h.op, h.seq, &Fail::Kern(Error::Denied));
+        }
+        if (device.is_some() && self.devices.is_none()) || (device.is_none() && self.fs.is_none()) {
             return encode_resp(
                 out,
                 h.op,
@@ -1458,7 +1488,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
                 0,
                 b"no storage layer on board",
             );
-        };
+        }
         let c = FsCall {
             slot: who.slot,
             generation: who.generation,
@@ -1470,7 +1500,18 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             buf: core::mem::take(buf),
             out: core::mem::take(out),
         };
-        let result = match rpc::call(inbox, reply, c).await {
+        let done = if device.is_some() {
+            match self.devices {
+                Some(inbox) => crate::deviceabi::call(inbox, reply, c).await,
+                None => Err(c),
+            }
+        } else {
+            match self.fs {
+                Some(inbox) => rpc::call(inbox, reply, c).await,
+                None => Err(c),
+            }
+        };
+        let result = match done {
             Ok(d) => {
                 (*buf, *out) = (d.buf, d.out);
                 d.result

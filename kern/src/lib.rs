@@ -39,6 +39,7 @@ pub mod cage;
 #[cfg(feature = "media")]
 pub mod codecabi;
 pub mod conport;
+pub mod deviceabi;
 mod error;
 pub mod grants;
 pub mod hopfs;

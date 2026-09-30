@@ -61,6 +61,13 @@ pub mod ring;
 pub mod rt;
 pub mod sleep;
 pub mod smp;
+/// Private stacks voor synchrone C-callbacks die de gewone executor moeten laten lopen.
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "riscv64",
+    all(target_arch = "x86_64", not(target_os = "windows"))
+))]
+pub mod stacktask;
 pub mod store;
 pub mod sys;
 pub mod tail;

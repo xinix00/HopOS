@@ -146,10 +146,16 @@ De optische drive (`media/optical`, Go `OLD/metal/media/driver/optical`) is
 voor de helft geport: de bulk-only-transportlaag (CBW, datafase, CSW met de
 toetsen op signature, tag, residu en status, reset-recovery, de ene
 herkansing op een gestalde status, REQUEST SENSE) tegen een
-`Transport`-trait, met zeven toetsen tegen een nep-drive. De MMC-laag erboven
-(INQUIRY-identiteit, GET CONFIGURATION, READ CAPACITY, READ(10), SET
-STREAMING, `read_at` over sectoren van 2048 bytes) en de device-command-ABI
-(`OP_DEVICE_COMMAND`) volgen met de USB-stack van het gui-spoor.
+`Transport`-trait, met zeven toetsen tegen een nep-drive. Daarnaast staat
+een async vorm van dezelfde laag (`media/optical/src/asynchronous.rs`) met
+de MMC-laag erboven (`mmc.rs`: openen, de maat, READ(10) over sectoren van
+2048 bytes) en de device-command-ABI (`OP_DEVICE_COMMAND`,
+`abi/src/hopabi/device.rs`). Een app bereikt een drive alleen via een
+expliciete mount op `/devices/discN` (`kern/src/deviceabi.rs`); de
+optical-owner (`hopos/src/optical.rs`, feature `media`) is een eigen actor
+naast hopfs en leent zijn transfers één tegelijk aan de USB-eigenaar, die
+dus nooit in de hopfs-actor wacht. Die async laag heeft nog geen eigen
+hosttest en is niet op QEMU of ijzer gedraaid.
 
 ## Checklist: de O6N-mediatest
 
@@ -165,7 +171,7 @@ apps/decode: `cargo build --release --target aarch64-unknown-none-softfloat
 | Stap | Marker of regel | Wat het bewijst | Afwijking |
 | --- | --- | --- | --- |
 | 0a | `pool: 768 MB for the codec arena at 0x… outside the partition pool, N MB left for slots … HOPOS_POOL_DEVICE base=0x… mb=768` (met codecdemo: 1088 MB, "the codec arena and the codecdemo buffers") | de arena komt uit de pool, vóór de eerste plaatsing | `HOPOS_POOL_DEVICE_FAIL` met vrij en grootste gat: `hopos.codec` omlaag, of de pool is kleiner dan gedacht; "did not answer": de slots kwamen niet op |
-| 0b | `codec: 16 of 16 firmware blobs read from the volume (… KB)` | de kern-lezing van hopfs: `/firmware` of `/codec-firmware` | `HOPOS_CODEC_NOFW missing=…`: die blobs staan niet op het volume (Lumen haalt ze bij zijn eerste back-up; daarna herstart); `missing=all` zonder volume |
+| 0b | `codec: 16 of 16 firmware blobs read from the volume (… KB)` | de kern-lezing van hopfs: `/firmware` of `/codec-firmware` | `HOPOS_CODEC_NOFW missing=…`: die blobs staan niet op het volume (Lumen haalt ze vóór zijn eerste back-up; de eerstvolgende open laadt ze bij); `missing=all` zonder volume |
 | 1 | `vpu: TF-A SCMI channel alive, power protocol vX.Y` | het SMC-kanaal naar de TF-A antwoordt | geen regel: het kanaal op 0x84380000 is niet gemapt of de SMC-functie klopt niet |
 | 2 | `vpu: power domains 4 5 11-15 on (confirmed by the firmware)` | hub, top en vier cores aan, teruggevraagd | `power domain N not on`: de TF-A weigert; niet verder, de eerste registerlees zou een SError zijn |
 | 3 | `vpu: mm ni700 clock on ...`, `vpu: vpu apb clock on ...` | de klokken van interconnect en blok | "no SCMI channel offers the clock protocol": registers lezen dan nul |
@@ -182,3 +188,30 @@ apps/decode: `cargo build --release --target aarch64-unknown-none-softfloat
 Een stille sessie (geen events, geen Fault) is de eerste vraag voor `state`:
 `enable`, `jobqueue`, per LSID `sched`, `irqhost`, `mmu` en de tellers
 (`flushes`, `flushback`, `eos`, `rpc[allocs]`, `bufs[offered back held]`).
+
+## Firmware installeren na boot
+
+De media-kandidaat leest bij `OP_CODEC_OPEN` een ontbrekende blob alsnog via
+het `FsInbox` van dezelfde system-verbinding. Eerst `/firmware/<name>.fwb`,
+dan `/codec-firmware/<name>.fwb` wanneer de eerste niet bestaat. De driver
+levert de vaste naam; verzoeken mogen geen vrij bestandspad kiezen. De read
+is begrensd op 4 MiB. Ontbrekende, lege, te grote of ongeldige blobs geven
+meteen een fout aan de app, zonder hardware-sessie.
+
+Het lezen gebeurt buiten de synchrone codeccel. De antwoordplek blijft van
+de verbinding tot de filesystemactor antwoordt; er wordt geen pending read
+opgegeven en daarna met dezelfde reply hergebruikt. Na de read valideert
+MVE de firmware, neemt de cache hem in eigendom en toetst de gewone open de
+slotgeneratie opnieuw. Een gestopte app krijgt zo geen nagekomen sessie.
+Bestaande sessies hebben hun eigen firmwarekopie in de arena. Cachehits doen
+geen filesystem-I/O.
+
+De app blijft verantwoordelijk voor downloaden en inhoudspins vóór openen;
+de kernel krijgt hier geen HTTP-client bij. Lumen doet dit voor alle zestien
+firmwares via zijn bestaande installer. De system-wire-ABI verandert niet.
+
+Hosttests gebruiken een echte HopFS-actor en toetsen beide mappen, een tweede
+open zonder opslagread, missende/te grote bestanden en lifecycle-wisseling
+terwijl de read loopt. De nagebootste MVE valideert een late firmware en
+opent daarna zonder opnieuw proben. De O6N-kernel (`board-o6n,media`, PIE)
+bouwt met strikte clippy. Dit is nog geen decoder-run op fysieke O6N-hardware.

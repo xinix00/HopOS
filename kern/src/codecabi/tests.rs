@@ -12,6 +12,8 @@ use driver_codec::{Graveyard, Layout, Result as CodecResult};
 struct FakeEngine {
     graves: Option<&'static Graveyard>,
     open: Vec<FakeSes>,
+    firmware_missing: bool,
+    firmware: Vec<u8>,
 }
 
 #[derive(Default)]
@@ -26,6 +28,8 @@ impl FakeEngine {
         FakeEngine {
             graves: Some(Box::leak(Box::new(Graveyard::new()))),
             open: Vec::new(),
+            firmware_missing: false,
+            firmware: Vec::new(),
         }
     }
     fn g(&self) -> &'static Graveyard {
@@ -40,7 +44,18 @@ impl Engine for FakeEngine {
     fn supports(&self, _: Codec, _: Direction) -> bool {
         true
     }
+    fn firmware_needed(&mut self, _: &Config) -> Option<&'static str> {
+        self.firmware_missing.then_some("hevcdec")
+    }
+    fn install_firmware(&mut self, _: &'static str, bytes: Vec<u8>) -> CodecResult {
+        self.firmware = bytes;
+        self.firmware_missing = false;
+        Ok(())
+    }
     fn open(&mut self, _: &Config) -> CodecResult<Session> {
+        if self.firmware_missing {
+            return Err(CodecError::NoFirmware);
+        }
         self.open.push(FakeSes::default());
         Ok(Session::new((self.open.len() - 1) as u8, self.g()))
     }
@@ -450,4 +465,151 @@ fn zonder_ijzer_weigert_de_dienst_luid() {
         )
     );
     assert!(is_codec_op(OP_CODEC_POLL) && !is_codec_op(abi::hopabi::OP_READ));
+}
+
+// Een echte HopFS-actor bedient de firmware-read terwijl de codeccel vrij is.
+fn pump_firmware<F: core::future::Future>(
+    actor: &mut crate::rpc::FsActor<'_, crate::rpc::tests::Ram, &crate::slots::tests::FakeConsole>,
+    inbox: &crate::rpc::FsInbox<'_>,
+    future: F,
+    mut between: impl FnMut(),
+) -> F::Output {
+    use core::{
+        pin::pin,
+        task::{Context, Poll, Waker},
+    };
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut future = pin!(future);
+    let mut run = pin!(actor.run(inbox));
+    for _ in 0..100 {
+        if let Poll::Ready(out) = future.as_mut().poll(&mut cx) {
+            return out;
+        }
+        between();
+        let _ = run.as_mut().poll(&mut cx);
+    }
+    panic!("firmware antwoord ontbreekt")
+}
+#[test]
+fn firmware_installed_after_boot_loads_on_open_and_survives_no_reboot() {
+    for path in [
+        b"/firmware/hevcdec.fwb".as_slice(),
+        b"/codec-firmware/hevcdec.fwb".as_slice(),
+    ] {
+        let lives = FakeLives {
+            generation: Cell::new(Some(1)),
+        };
+        let cache = Cache::default();
+        let port = CodecCell::new(&lives, &cache, Quiet);
+        let mut engine = FakeEngine::new();
+        engine.firmware_missing = true;
+        port.with(|s, _| s.install(engine)).unwrap();
+        let (mut fs, _) = crate::rpc::tests::disk(16);
+        let blob = vec![37u8; 300 * 1024 + 17];
+        crate::rpc::tests::on(fs.write_at(path, 0, &blob)).unwrap();
+        let svc = crate::slots::Servicers::new();
+        let console = crate::slots::tests::FakeConsole::default();
+        let mut actor = crate::rpc::FsActor::new(fs, &svc, &console);
+        let reply = crate::slots::Reply::new();
+        let inbox = crate::rpc::FsInbox::new();
+        let mut out = vec![0; 4096];
+        let req = open_req(&OPEN);
+        let n = pump_firmware(
+            &mut actor,
+            &inbox,
+            serve_loaded(&port, slot1(), 1, &req, &mut out, Some(&inbox), &reply),
+            || {
+                assert!(port.with(|s, _| s.has_engine()).unwrap()); // geen dienstlening over await
+            },
+        );
+        assert_eq!(
+            abi::hopabi::decode_resp(&out[..n]).unwrap().status,
+            STATUS_OK
+        );
+        port.with(|s, _| assert_eq!(s.engine().unwrap().firmware, blob))
+            .unwrap();
+        // Een tweede open behoeft geen bestandsactor of nieuwe firmwarelezing.
+        let n = pump_firmware(
+            &mut actor,
+            &inbox,
+            serve_loaded(&port, slot1(), 1, &req, &mut out, None, &reply),
+            || panic!("cachehit wachtte"),
+        );
+        assert_eq!(
+            abi::hopabi::decode_resp(&out[..n]).unwrap().status,
+            STATUS_OK
+        );
+    }
+}
+#[test]
+fn stale_owner_during_firmware_read_never_opens_a_session() {
+    let lives = FakeLives {
+        generation: Cell::new(Some(1)),
+    };
+    let cache = Cache::default();
+    let port = CodecCell::new(&lives, &cache, Quiet);
+    let mut engine = FakeEngine::new();
+    engine.firmware_missing = true;
+    port.with(|s, _| s.install(engine)).unwrap();
+    let (mut fs, _) = crate::rpc::tests::disk(16);
+    crate::rpc::tests::on(fs.write_at(b"/firmware/hevcdec.fwb", 0, b"firmware")).unwrap();
+    let svc = crate::slots::Servicers::new();
+    let console = crate::slots::tests::FakeConsole::default();
+    let mut actor = crate::rpc::FsActor::new(fs, &svc, &console);
+    let reply = crate::slots::Reply::new();
+    let inbox = crate::rpc::FsInbox::new();
+    let mut out = vec![0; 4096];
+    let req = open_req(&OPEN);
+    let n = pump_firmware(
+        &mut actor,
+        &inbox,
+        serve_loaded(&port, slot1(), 1, &req, &mut out, Some(&inbox), &reply),
+        || lives.generation.set(Some(2)),
+    );
+    assert_eq!(
+        abi::hopabi::decode_resp(&out[..n]).unwrap().status,
+        STATUS_ERROR
+    );
+    assert!(
+        port.with(|s, _| s.engine().unwrap().open.is_empty())
+            .unwrap()
+    );
+}
+#[test]
+fn missing_or_oversize_firmware_keeps_open_uncommitted_and_reports_name() {
+    for size in [0, (4 << 20) + 1] {
+        let lives = FakeLives {
+            generation: Cell::new(Some(1)),
+        };
+        let cache = Cache::default();
+        let port = CodecCell::new(&lives, &cache, Quiet);
+        let mut engine = FakeEngine::new();
+        engine.firmware_missing = true;
+        port.with(|s, _| s.install(engine)).unwrap();
+        let (mut fs, _) = crate::rpc::tests::disk(16);
+        if size != 0 {
+            crate::rpc::tests::on(fs.write_at(b"/firmware/hevcdec.fwb", 0, &vec![1; size]))
+                .unwrap();
+        }
+        let svc = crate::slots::Servicers::new();
+        let console = crate::slots::tests::FakeConsole::default();
+        let mut actor = crate::rpc::FsActor::new(fs, &svc, &console);
+        let reply = crate::slots::Reply::new();
+        let inbox = crate::rpc::FsInbox::new();
+        let mut out = vec![0; 4096];
+        let req = open_req(&OPEN);
+        let n = pump_firmware(
+            &mut actor,
+            &inbox,
+            serve_loaded(&port, slot1(), 1, &req, &mut out, Some(&inbox), &reply),
+            || {},
+        );
+        let response = abi::hopabi::decode_resp(&out[..n]).unwrap();
+        assert_eq!(response.status, STATUS_ERROR);
+        assert!(String::from_utf8_lossy(response.data).contains("hevcdec"));
+        assert!(
+            port.with(|s, _| s.engine().unwrap().open.is_empty())
+                .unwrap()
+        );
+    }
 }

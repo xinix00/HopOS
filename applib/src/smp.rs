@@ -66,12 +66,12 @@ use executor::{Executor, Sleeper, SpawnError};
 use sync::Local;
 
 /// Het grootste aantal cores van één app, de primaire meegeteld. De kern
-/// geeft er soms meer (de O6N heeft er twaalf); de rest blijft dan
-/// ongevraagd, met één regel.
-pub const MAX_CORES: usize = 8;
+/// geeft uitsluitend toegewezen cores vrij. Twaalf plaatsen dragen ook
+/// een O6N-job met elf cores; kleinere jobs reserveren geen extra stacks.
+pub const MAX_CORES: usize = 12;
 
 /// De stack van een secundaire core, uit de heap van de app.
-pub const SMP_STACK: usize = 64 << 10;
+pub const SMP_STACK: usize = 512 << 10;
 
 /// Hoe lang [`bring_up`] op de kern wacht, per verzoek en per opgang.
 pub const BRING_UP_LIMIT: Duration = Duration::from_secs(2);

@@ -22,6 +22,7 @@ de consoleregel die erbij hoort en wat een afwijking betekent.
 | `sh tools/qemu-test-mcast.sh` | multicast in de node: een bench joint 224.0.0.251, een tweede zendt, de switch floodt, `HOPOS_BENCH_MCAST recv=3` |
 | `sh tools/qemu-test-volumes.sh` | de volumes van een jobspec: een job met `"volumes":{"/data":"/volumes/demo"}` schrijft, hopfs commit, Hop herstart hem, en hij vindt zijn bestand terug (`HOPOS_SLOT_MOUNTS`) |
 | `sh tools/qemu-test-store.sh` | de store-ops: appspike doet push, list, pull en drop op zijn map `apps/<cluster>/<job>/` in een S3-nep op de host, van app via kern naar Hop en terug (`HOPOS_APPSPIKE_STORE ok`) |
+| `python3 tools/qemu-test-sync.py` | de bevestigde opslagbarrière (`OP_SYNC`, [storage-sync.md](storage-sync.md)): Hop plaatst `apps/syncprobe` met een eigen volume, die schrijft en synct een journal en 8192 databasebytes, haalt het journal weg met een barrière op de map, en QEMU krijgt SIGKILL; de koude boot van hetzelfde volume leest de bytes terug en mist het journal (`HOPOS_SYNC_WRITE`, `HOPOS_SYNC_READ`) |
 | `sh tools/qemu-test-cluster.sh` (in de hop-repo) | een cluster van een QEMU-node en een host-agent met een hoplockserver als lock: beide nodes in `hop agents`, en na het hard doden van de host-leider wint de HopOS-node de lease en plaatst hij een job op de host |
 | `sh tools/qemu-test-flip.sh` | de kern-flip: hopfs bevroren en gecommit, de NAT-flows gevangen, de sprong, Hop overleeft zonder herstart, en een uitgaande TCP-verbinding van een app (rol FLIPCONN) loopt door: drie antwoorden via kern A, drie via kern B, over één verbinding |
 | `MISMATCH=1 sh tools/qemu-test-flip.sh` | een bundel met een andere switch-code wordt vóór de sprong geweigerd (Hop geeft 502) |
@@ -110,7 +111,8 @@ board ooit gestart. De lijst is de eerlijke stand vóór de devicedag.
 - **SMP en sharegroepen.** Niet op Apple, RISC-V of ijzer. De join-wacht van
   5 ms is een spin op de kern-core.
 - **Gui.** De USB-lijnen zijn niet bedraad (de xHCI-driver pollt elke
-  4 ms); USB-opslag wordt gezien maar heeft geen aanvraagpad;
+  4 ms); USB-opslag heeft alleen het aanvraagpad van de optische drive
+  (met `media`);
   `qemu-uefi-test.sh` heeft geen `GUI=display`-stand; de O6N-toets dat het
   firmware-RAM in ACPI-geheugen ligt is niet geport; de log wrapt en
   scrolt niet. De display-app en de USB-keten zijn alleen op QEMU en EDK2
@@ -133,9 +135,14 @@ board ooit gestart. De lijst is de eerlijke stand vóór de devicedag.
   Op HopOS: de S3-lock alleen met host-tests, twee HopOS-nodes naast elkaar
   alleen op ijzer te toetsen (slirp verbindt twee QEMU's niet), en de
   CPU-meting per slot (Go's usage.go) ontbreekt nog.
-- **System-API.** De device-op (19, de optische drive over USB-BOT en MMC
-  voor lumen) is niet geport; de rest (bestanden, mounts, store, codec, de
-  bevoegde ops) is compleet.
+- **System-API.** Compleet, ook de device-op (19, de optische drive voor
+  lumen: een expliciete mount op `/devices/discN`, een eigen actor naast
+  hopfs, async BOT en de MMC-laag, de brug naar de USB-eigenaar). Die is
+  alleen gebouwd en met clippy getoetst: de async BOT, de MMC-laag en
+  `deviceabi` hebben nog geen eigen hosttest en QEMU heeft er geen proef
+  voor. Op ijzer te bewijzen: een drive over USB (INQUIRY, READ CAPACITY,
+  READ(10) en een vendorcommando via `OP_DEVICE_COMMAND`), en dat een
+  losgetrokken drive zijn uitgeleende buffers teruggeeft.
 - **applib.** Geen `leave_group` (leannet heeft geen leave: een lean-punt);
   hop-http draagt zijn eigen TcpConn-adapter tot Hop op de tag met
   `applib::tcp` staat.

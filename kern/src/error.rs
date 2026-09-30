@@ -77,6 +77,8 @@ pub enum Error {
     VolatileStorage,
     /// Het blokapparaat meldde een fout op dit LBA.
     Io { lba: u64 },
+    /// Een apparaat faalde buiten HopFS; de eigenaar logt het driverdetail.
+    Device { reason: &'static str },
     /// De schijf (het venster) is vol.
     DiskFull { blocks: u64 },
     /// De verbinding is weg of meldde een fout.
@@ -148,6 +150,7 @@ impl fmt::Display for Error {
             Self::VolatileStorage => f.write_str("storage is volatile; no durable sync available"),
             Self::Denied => f.write_str("outside the task's root and volumes"),
             Self::Io { lba } => write!(f, "block I/O failed at LBA {lba}"),
+            Self::Device { reason } => write!(f, "device: {reason}"),
             Self::DiskFull { blocks } => write!(f, "disk full ({blocks} blocks)"),
             Self::Conn => f.write_str("connection closed"),
             Self::Privilege { slot } => {

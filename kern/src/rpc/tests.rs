@@ -563,3 +563,191 @@ fn the_kern_reads_a_firmware_blob_without_a_slot() {
         (&b"/firmware/hevcdec.fwb"[..], 64 << 10)
     );
 }
+
+#[test]
+fn sync_is_scoped_to_the_live_slot_and_reports_the_durable_generation() {
+    let svc = Servicers::new();
+    let con = FakeConsole::default();
+    let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
+    start(&mut a, 2, 8, 1).unwrap();
+    let generation = svc.current(s(2)).unwrap();
+    let (fs, _) = disk(2);
+    let mut f = FsActor::new(fs, &svc, &con);
+    on(f.handle(&mut fs_call(
+        2,
+        generation,
+        OP_WRITE,
+        "db-journal",
+        0,
+        0,
+        b"original",
+    )))
+    .unwrap();
+    assert_eq!(
+        on(f.handle(&mut fs_call(
+            2,
+            generation,
+            OP_SYNC,
+            "db-journal",
+            0,
+            0,
+            &[]
+        ))),
+        Ok((1, 0))
+    );
+    assert_eq!(
+        on(f.handle(&mut fs_call(
+            2,
+            generation + 1,
+            OP_SYNC,
+            "db-journal",
+            0,
+            0,
+            &[]
+        ))),
+        Err(Error::Denied)
+    );
+    assert_eq!(
+        on(f.handle(&mut fs_call(2, generation, OP_SYNC, "../other", 0, 0, &[]))),
+        Err(Error::Denied)
+    );
+    assert_eq!(
+        on(f.handle(&mut fs_call(2, generation, OP_SYNC, "missing", 0, 0, &[]))),
+        Err(Error::NoEnt)
+    );
+    for (off, n, bytes) in [(1, 0, &[][..]), (0, 1, &[][..]), (0, 0, &[1][..])] {
+        assert_eq!(
+            on(f.handle(&mut fs_call(
+                2,
+                generation,
+                OP_SYNC,
+                "db-journal",
+                off,
+                n,
+                bytes
+            ))),
+            Err(Error::Kind)
+        );
+    }
+    on(f.handle(&mut fs_call(
+        2,
+        generation,
+        OP_REMOVE,
+        "db-journal",
+        0,
+        0,
+        &[],
+    )))
+    .unwrap();
+    assert_eq!(
+        on(f.handle(&mut fs_call(2, generation, OP_SYNC, "/", 0, 0, &[]))),
+        Ok((2, 0))
+    );
+    let disk = f.fs.into_disk();
+    assert!(disk.flushes >= 4);
+    let (mut restored, _) = on(Fs::mount(disk, 0, (2 << 20) / 512, 512, 1 << 20, false)).unwrap();
+    assert_eq!(
+        restored.stat(b"/.tasks/slot2/db-journal"),
+        Err(Error::NoEnt)
+    );
+}
+
+/// Een schijf waarvan elke schrijf pas terugkomt als de test hem loslaat,
+/// en die zijn flushes buiten de actor telt.
+struct HeldWrite<'g> {
+    ram: Ram,
+    open: &'g core::cell::Cell<bool>,
+    flushes: &'g core::cell::Cell<usize>,
+}
+
+impl blkdev::BlockIo for HeldWrite<'_> {
+    fn read(
+        &mut self,
+        lba: u64,
+        buf: &mut [u8],
+    ) -> impl core::future::Future<Output = blkdev::Result> {
+        self.ram.read(lba, buf)
+    }
+    async fn write(&mut self, lba: u64, buf: &[u8]) -> blkdev::Result {
+        let open = self.open;
+        core::future::poll_fn(move |_| {
+            if open.get() {
+                core::task::Poll::Ready(())
+            } else {
+                core::task::Poll::Pending
+            }
+        })
+        .await;
+        self.ram.write(lba, buf).await
+    }
+    async fn flush(&mut self) -> blkdev::Result {
+        self.flushes.set(self.flushes.get() + 1);
+        Ok(())
+    }
+}
+
+/// docs/storage-sync.md: de barrière staat achter de eerdere writes van de
+/// actor. Een OP_SYNC die in de brievenbus achter een schrijf staat, wacht
+/// tot die schrijf van het device terug is; pas dan flusht en bevestigt
+/// hij, en de bevestigde generatie draagt de schrijf.
+#[test]
+fn sync_waits_behind_an_earlier_write_that_is_still_on_the_device() {
+    let svc = Servicers::new();
+    let con = FakeConsole::default();
+    let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
+    start(&mut a, 2, 8, 1).unwrap();
+    let generation = svc.current(s(2)).unwrap();
+    let open = core::cell::Cell::new(true);
+    let flushes = core::cell::Cell::new(0);
+    let held = HeldWrite {
+        ram: Ram {
+            data: vec![0; 2 << 20],
+            flushes: 0,
+        },
+        open: &open,
+        flushes: &flushes,
+    };
+    let (fs, _) = on(Fs::mount(held, 0, (2 << 20) / 512, 512, 1 << 20, false)).unwrap();
+    let mut f = FsActor::new(fs, &svc, &con);
+    // De root van de levensduur staat al: de vastgehouden schrijf is dan
+    // die van de app, niet die van het klaarzetten.
+    let mut c = fs_call(2, generation, OP_STAT, "/", 0, 0, &[]);
+    on(f.handle(&mut c)).unwrap();
+    let (wrote, synced) = (Reply::new(), Reply::new());
+    let inbox: FsInbox<'_> = Mailbox::new();
+    for (call, reply) in [
+        (
+            fs_call(2, generation, OP_WRITE, "db", 0, 0, b"journal"),
+            &wrote,
+        ),
+        (fs_call(2, generation, OP_SYNC, "db", 0, 0, &[]), &synced),
+    ] {
+        assert!(
+            inbox
+                .try_send(FsEnvelope {
+                    msg: FsMsg::Call(call),
+                    reply: Some(reply),
+                })
+                .is_ok()
+        );
+    }
+    open.set(false);
+    let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
+    let mut run = core::pin::pin!(f.run(&inbox));
+    for _ in 0..8 {
+        assert!(run.as_mut().poll(&mut cx).is_pending());
+    }
+    assert!(
+        wrote.take_fs().is_none(),
+        "de schrijf staat nog op het device"
+    );
+    assert!(synced.take_fs().is_none(), "barrière vóór de schrijf");
+    assert_eq!(flushes.get(), 0, "geflusht terwijl de schrijf nog liep");
+    open.set(true);
+    for _ in 0..8 {
+        let _ = run.as_mut().poll(&mut cx);
+    }
+    assert_eq!(wrote.take_fs().map(|d| d.result), Some(Ok((7, 0))));
+    assert_eq!(synced.take_fs().map(|d| d.result), Some(Ok((1, 0))));
+    assert!(flushes.get() >= 2, "dataflush en metadataflush");
+}

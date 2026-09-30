@@ -36,6 +36,9 @@
 
 use core::fmt;
 
+pub mod asynchronous;
+pub mod mmc;
+
 /// Wat een USB-apparaat met bulk-only transport levert.
 pub trait Transport {
     /// Stuurt bytes naar de BULK-OUT-endpoint.

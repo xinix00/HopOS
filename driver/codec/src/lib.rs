@@ -42,6 +42,8 @@
 )]
 #![forbid(unsafe_code)]
 
+extern crate alloc;
+use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::{AtomicU32, Ordering::AcqRel};
 
@@ -684,6 +686,12 @@ impl Drop for Session {
 pub trait Firmware {
     /// De binary voor een naam als `hevcdec` of `h264enc`.
     fn load(&mut self, name: &str) -> Option<&[u8]>;
+
+    /// Neemt een door de driver gevalideerde blob in eigendom. Statische bronnen
+    /// mogen bij de standaardweigering blijven; bestaande sessies blijven intact.
+    fn install(&mut self, _name: &'static str, _bytes: Vec<u8>) -> Result {
+        Err(Error::Unsupported)
+    }
 }
 
 /// Het codec-ijzer van een node: de enige eigenaar van zijn sessies.
@@ -700,6 +708,17 @@ pub trait Engine {
 
     /// Start een sessie. [`Error::Busy`] is geen fout maar een "straks".
     fn open(&mut self, cfg: &Config) -> Result<Session>;
+
+    /// Ontbrekende firmware voor deze open. De kernel leest buiten de enginebeurt;
+    /// een aanwezige cache of driver zonder firmware geeft None.
+    fn firmware_needed(&mut self, _cfg: &Config) -> Option<&'static str> {
+        None
+    }
+
+    /// Valideert en neemt nieuwe firmware in eigendom vóór een volgende open.
+    fn install_firmware(&mut self, _name: &'static str, _bytes: Vec<u8>) -> Result {
+        Err(Error::Unsupported)
+    }
 
     /// Voert `filled` bytes uit `buf` in. De buffer is van het ijzer tot hij
     /// als [`Kind::Consumed`] terugkomt.

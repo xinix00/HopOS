@@ -61,6 +61,12 @@ use hwreg::{Block, EMPTY_JOB_QUEUE, FUSE_NO_HEVC, FUSE_NO_VPX, MAX_LSID};
 use proto::{FMT_I420, FMT_NV12, FMT_NV21, FMT_P010, FMT_Y8};
 use session::{Hw, Ses};
 
+/// Valideert een firmwarecontainer voordat de kernel hem in zijn cache bewaart.
+/// Dit toetst het driverformaat; de downloader controleert de bron en inhoudspins.
+pub fn validate_firmware(bytes: &[u8]) -> Result {
+    fwbin::parse(bytes).map(|_| ())
+}
+
 /// Het model in de bovenste helft van HARDWARE_ID op de O6N. De
 /// 0x5664-familie deelt registerlayout en protocol met v52/v76; oudere
 /// blokken (v500/v550/v61) hebben een andere formaattabel en weigeren we:
@@ -246,6 +252,27 @@ impl<F: Firmware> Engine for Device<F> {
             Codec::Vp8 | Codec::Vp9 => self.fuse & FUSE_NO_VPX == 0,
             _ => true,
         }
+    }
+
+    fn firmware_needed(&mut self, cfg: &Config) -> Option<&'static str> {
+        if !self.supports(cfg.codec, cfg.dir) || fw_pixel(cfg.pixel).is_none() {
+            return None;
+        }
+        let name = fw_name(cfg.codec, cfg.dir)?;
+        self.fw.load(name).is_none().then_some(name)
+    }
+
+    fn install_firmware(&mut self, name: &'static str, bytes: Vec<u8>) -> Result {
+        if !FIRMWARE.contains(&name) {
+            return Err(Error::Unsupported);
+        }
+        validate_firmware(&bytes)?;
+        // Een andere open kan tijdens de read dezelfde blob al hebben geladen.
+        // Bestaande sessies hebben hun eigen kopie in de arena.
+        if self.fw.load(name).is_some() {
+            return Ok(());
+        }
+        self.fw.install(name, bytes)
     }
 
     fn open(&mut self, cfg: &Config) -> Result<Session> {
