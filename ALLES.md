@@ -217,8 +217,12 @@ De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
       hier waarschijnlijk ook achter zitten.
 - [ ] **Storm door de NAT (hairpin) stokt 1 s per ronde** op de Pi 4 (H):
       p50 2,5 ms, p99 1002 ms, 96 conn/s, zonder `HOPOS_MASQ_SLOT_FULL`.
-      Eén SYN per ronde valt (RTO 1 s), waarschijnlijk het eerste contact
-      op het hairpin-pad (net/src/nat.rs first-contact of de deur).
+      Eén SYN per ronde valt (RTO 1 s); ook node naar node (Pi 4 naar Pi 5,
+      Radxa naar Pi 4, run 3). Verdachte: leannet's listen-backlog van 8
+      (`TCP_BACKLOG` in leannet/src/stack.rs): nu de dial snel is, komen
+      200 SYN's sneller binnen dan accept ze haalt, en een SYN op een volle
+      backlog valt. Een backlog van 64 in lean (tag) is de lean fix; Go's
+      O6N-storm door de NAT haalde 844 conn/s, p99 19,6 ms.
 - [ ] **App-opslag O6N** (1 MiB-calls): na de deur (H) schrijven 414, lezen
       85 MB/s (Go 557 tot 625 / 727 tot 797); het leespad is de rest (was
       93, dus de deur hielp lezen niet). Agent bezig (system-API fs-ops,
