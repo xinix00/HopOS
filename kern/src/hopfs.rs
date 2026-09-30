@@ -44,10 +44,11 @@ const HDR_LEN: usize = HDR_HASH_OFF + 32;
 const MAX_DEPTH: usize = 4096;
 
 /// Het blokapparaat onder hopfs. Het contract woont in `blkdev`, onder
-/// driver én kern (handboek §7); hier alleen de namen: [`BlockIo`] voor de
-/// actor, [`BlockDevice`] voor wie synchroon wil (de meetbank, via
-/// `blkdev::Blocking`).
-pub use blkdev::{BlockDevice, BlockIo};
+/// driver én kern (handboek §7); hier alleen de naam. Er is één vorm: een
+/// driver (`blkdev::AsyncBlockDevice`) in een `blkdev::Paced`; wie vóór de
+/// executor mount of meet, draait dezelfde futures af met
+/// `blkdev::block_on`.
+pub use blkdev::BlockIo;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct Extent {

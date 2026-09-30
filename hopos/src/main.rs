@@ -701,10 +701,11 @@ async fn tick(exec: &'static Executor) {
         let due = start.saturating_add(n.saturating_mul(1_000_000_000));
         exec.until(due).await;
         // Hoe laat deze tik kwam. Een kern die een tijd niets rondmaakte
-        // (30-09: de periodieke hopfs-commit wacht synchroon op twee FLUSHes
-        // van de schijf, op macOS F_FULLFSYNC's van het image, en de hele
-        // OS-core met Hop staat dan stil) haalt zijn gemiste tikken daarna in
-        // één salvo in; late_ms zegt dan hoe lang de stilte was.
+        // (30-09, tot alpha.14: de periodieke hopfs-commit wachtte synchroon
+        // op twee FLUSHes van de schijf, op macOS F_FULLFSYNC's van het
+        // image, en de hele OS-core met Hop stond dan stil) haalt zijn
+        // gemiste tikken daarna in één salvo in; late_ms zegt dan hoe lang
+        // de stilte was.
         let late_ms = exec.now().saturating_sub(due) / 1_000_000;
         let s = &exec.stats;
         // De OS-core: overgangen naar een bewoner, waardoor de kern terugkwam,

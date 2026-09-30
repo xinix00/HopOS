@@ -202,23 +202,19 @@ fn a_second_submit_waits_for_the_first() {
 }
 
 #[test]
-fn blocking_wraps_a_synchronous_device() {
-    struct Ram(Vec<u8>);
-    impl BlockDevice for Ram {
-        fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result {
-            let o = (lba * LBA_SIZE) as usize;
-            buf.copy_from_slice(&self.0[o..o + buf.len()]);
-            Ok(())
-        }
-        fn write(&mut self, lba: u64, buf: &[u8]) -> Result {
-            let o = (lba * LBA_SIZE) as usize;
-            self.0[o..o + buf.len()].copy_from_slice(buf);
-            Ok(())
-        }
+fn a_borrowed_driver_is_the_same_path_and_comes_back() {
+    // De meetbank vóór de executor: de driver geleend, `block_on` met een
+    // pollende `Pace`, en daarna is hij weer van de eigenaar.
+    let mut dev = Lagging::new(8192, 3, 4096);
+    {
+        let mut p = Paced::new(&mut dev, Spin);
+        block_on(p.write(2, &[9; 1024])).unwrap();
+        let mut got = [0; 1024];
+        block_on(p.read(2, &mut got)).unwrap();
+        assert_eq!(got, [9; 1024]);
     }
-    let mut b = Blocking(Ram(vec![0; 2048]));
-    block_on(b.write(1, &[7; 512])).unwrap();
-    let mut got = [0; 512];
-    block_on(b.read(1, &mut got)).unwrap();
-    assert_eq!(got, [7; 512]);
+    assert_eq!(dev.submits, vec![(2, 1024), (2, 1024)]);
+    // Elk verzoek werd gepolld tot het device klaar was: drie keer te
+    // vroeg plus één keer raak, per opdracht.
+    assert_eq!(dev.polls, 8);
 }

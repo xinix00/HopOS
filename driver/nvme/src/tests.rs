@@ -3,10 +3,11 @@
 //! spiegelt de controller CC.EN in CSTS.RDY, voert wat er achter de
 //! doorbells staat uit op een schijf in RAM, en zet completions met de
 //! juiste phase terug. Zo draait `new` van reset tot I/O-queue, en elke
-//! read, write en flush over echte SQ's, CQ's en PRP-lijsten.
+//! read, write en flush over echte SQ's, CQ's en PRP-lijsten, via het ene
+//! blokcontract (`start` en `poll_done`, afgedraaid met `block_on`).
 
 use super::*;
-use blkdev::BlockDevice;
+use blkdev::{AsyncBlockDevice, BlockIo, Paced, Spin, block_on};
 use std::cell::RefCell;
 use std::vec;
 use std::vec::Vec;
@@ -206,6 +207,19 @@ fn up(m: &Mem) -> Nvme {
     unsafe { Nvme::new(m.base, m.dma, DMA_NEED, clock) }.unwrap()
 }
 
+/// De driver zoals hopfs hem ziet, met een `Pace` die pollt.
+fn blk(n: &mut Nvme) -> Paced<&mut Nvme, Spin> {
+    Paced::new(n, Spin)
+}
+
+/// Eén opdracht over hetzelfde pad (`start_op`, `poll_op`), met de fout van
+/// de driver in plaats van die van het contract; `lba` in blokken van de
+/// namespace.
+fn raw(n: &mut Nvme, op: Op<'_>, lba: u64) -> Result {
+    n.start_op(op, lba)?;
+    block_on(core::future::poll_fn(|_| n.poll_op(&mut [])))
+}
+
 fn log() -> Vec<(u8, u64, u32, u64)> {
     CTL.with(|c| c.borrow().log.clone())
 }
@@ -236,12 +250,12 @@ fn write_read_flush_round_trip_over_prp_lists() {
     let mut n = up(&m);
     for len in [512usize, 4096, 8192, 12288, MAX_TRANSFER as usize] {
         let data: Vec<u8> = (0..len).map(|i| (i * 13 + len) as u8).collect();
-        BlockDevice::write(&mut n, 16, &data).unwrap();
+        block_on(blk(&mut n).write(16, &data)).unwrap();
         let mut got = vec![0u8; len];
-        BlockDevice::read(&mut n, 16, &mut got).unwrap();
+        block_on(blk(&mut n).read(16, &mut got)).unwrap();
         assert!(got == data, "{len} bytes differ");
     }
-    BlockDevice::flush(&mut n).unwrap();
+    block_on(blk(&mut n).flush()).unwrap();
     let io: Vec<(u8, u64, u32)> = log().iter().skip(4).map(|e| (e.0, e.1, e.2)).collect();
     assert_eq!(io.first(), Some(&(IO_WRITE, 16, 1)));
     assert_eq!(io.last(), Some(&(IO_FLUSH, 0, 1)));
@@ -261,8 +275,7 @@ fn write_read_flush_round_trip_over_prp_lists() {
 }
 
 #[test]
-fn the_async_form_round_trips_4k_blocks_through_the_contract() {
-    use blkdev::{BlockIo, Paced, Spin, block_on};
+fn the_contract_round_trips_4k_blocks() {
     // Een namespace met 4096-byte-blokken en MDTS 2 (16 KiB per opdracht):
     // het contract rekent in 512 bytes, de driver om, en de brokken van
     // `Paced` volgen de transfergrens van de controller.
@@ -296,16 +309,21 @@ fn the_async_form_round_trips_4k_blocks_through_the_contract() {
 
 #[test]
 fn an_abandoned_command_blocks_the_next_until_it_is_back() {
-    use blkdev::AsyncBlockDevice;
     let m = mem(CAP, 9, 0);
     let mut n = up(&m);
     CTL.with(|c| c.borrow_mut().mute = true);
     n.start(Op::Read { lba: 1, len: 512 }).unwrap();
     assert_eq!(n.start(Op::Flush), Err(blkdev::Error::Busy));
-    assert_eq!(n.write_at(2, &[1; 512]), Err(Error::Busy));
+    assert_eq!(
+        n.start(Op::Write {
+            lba: 2,
+            data: &[1; 512]
+        }),
+        Err(blkdev::Error::Busy)
+    );
     CTL.with(|c| c.borrow_mut().mute = false);
     clock(); // De controller haalt in.
-    n.write_at(2, &[1; 512]).unwrap();
+    block_on(blk(&mut n).write(2, &[1; 512])).unwrap();
     let ops: Vec<u8> = log().iter().skip(4).map(|e| e.0).collect();
     assert_eq!(ops, vec![IO_READ, IO_WRITE]);
 }
@@ -317,7 +335,7 @@ fn big_requests_split_at_the_transfer_limit() {
     let mut n = up(&m);
     assert_eq!((n.block_size(), n.max_transfer()), (4096, 16384));
     let data = vec![0xa5u8; 40960];
-    n.write_at(3, &data).unwrap();
+    block_on(blk(&mut n).write(3 * 8, &data)).unwrap(); // blok 3
     let io: Vec<(u64, u32)> = log().iter().skip(4).map(|e| (e.1, e.2)).collect();
     assert_eq!(io, vec![(3, 4), (7, 4), (11, 2)]);
 }
@@ -335,13 +353,16 @@ fn invalid_transfers_never_reach_the_controller() {
         (u64::MAX, 512),
     ] {
         assert_eq!(
-            n.write_at(lba, &vec![0; len]),
-            Err(Error::Range { lba, len }),
+            n.start(Op::Write {
+                lba,
+                data: &vec![0; len]
+            }),
+            Err(blkdev::Error::OutOfRange { lba, len }),
             "lba {lba} len {len}"
         );
     }
     assert_eq!(
-        BlockDevice::read(&mut n, NBLOCKS, &mut [0; 512]),
+        block_on(blk(&mut n).read(NBLOCKS, &mut [0; 512])),
         Err(blkdev::Error::OutOfRange {
             lba: NBLOCKS,
             len: 512
@@ -358,7 +379,7 @@ fn a_timeout_retains_the_dma_buffer() {
     let mut n = up(&m);
     CTL.with(|c| c.borrow_mut().mute = true);
     assert_eq!(
-        n.read_at(0, &mut [0; 512]),
+        raw(&mut n, Op::Read { lba: 0, len: 512 }, 0),
         Err(Error::Timeout { opc: IO_READ })
     );
     CTL.with(|c| c.borrow_mut().mute = false);
@@ -366,10 +387,20 @@ fn a_timeout_retains_the_dma_buffer() {
     dev::write8(data, 0x11);
     let mut payload = [0u8; 512];
     payload[0] = 99;
-    assert_eq!(n.write_at(1, &payload), Err(Error::Dead));
+    assert_eq!(
+        raw(
+            &mut n,
+            Op::Write {
+                lba: 1,
+                data: &payload
+            },
+            1
+        ),
+        Err(Error::Dead)
+    );
     assert_eq!(dev::read8(data), 0x11, "DMA buffer reused after a timeout");
     assert_eq!(n.io.tail, 1, "queue reused after a timeout");
-    assert_eq!(BlockDevice::flush(&mut n), Err(blkdev::Error::Dead));
+    assert_eq!(block_on(blk(&mut n).flush()), Err(blkdev::Error::Dead));
 }
 
 #[test]
@@ -377,8 +408,8 @@ fn a_foreign_completion_kills_the_driver() {
     let m = mem(CAP, 9, 0);
     let mut n = up(&m);
     CTL.with(|c| c.borrow_mut().wrong_cid = true);
-    assert!(matches!(n.sync(), Err(Error::Cid { .. })));
-    assert_eq!(n.sync(), Err(Error::Dead));
+    assert!(matches!(raw(&mut n, Op::Flush, 0), Err(Error::Cid { .. })));
+    assert_eq!(block_on(blk(&mut n).flush()), Err(blkdev::Error::Dead));
 }
 
 #[test]
@@ -454,16 +485,16 @@ fn the_block_contract_speaks_512_byte_sectors_on_4k_namespaces() {
         (4096, NBLOCKS, NBLOCKS * 8)
     );
     let data = vec![0x3cu8; 8192];
-    BlockDevice::write(&mut n, 16, &data).unwrap(); // sector 16 = blok 2
+    block_on(blk(&mut n).write(16, &data)).unwrap(); // sector 16 = blok 2
     let io = log().last().copied().unwrap();
     assert_eq!((io.0, io.1, io.2), (IO_WRITE, 2, 2));
     let mut got = vec![0u8; 8192];
-    BlockDevice::read(&mut n, 16, &mut got).unwrap();
+    block_on(blk(&mut n).read(16, &mut got)).unwrap();
     assert!(got == data);
     // Niet op een blok: geweigerd vóór de controller.
     for (lba, len) in [(3u64, 4096usize), (8, 512)] {
         assert_eq!(
-            BlockDevice::write(&mut n, lba, &vec![0; len]),
+            block_on(blk(&mut n).write(lba, &vec![0; len])),
             Err(blkdev::Error::OutOfRange { lba, len })
         );
     }

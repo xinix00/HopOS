@@ -14,8 +14,9 @@
 //! op een timer, en intussen draait de executor door. Les van 30-09 (de
 //! soak): de synchrone commit hield op een trage schijf de OS-core tot 7 s
 //! stil (`late_ms=6611` op de tik, Hop en de switch zonder beurt). De mount
-//! bij de boot is de uitzondering: die draait vóór `exec.run`, met
-//! `blkdev::block_on`.
+//! bij de boot draait vóór `exec.run`: dezelfde futures, afgedraaid met
+//! `blkdev::block_on`, dat bij elke ronde het device toetst. Er is geen
+//! tweede, synchroon driverpad (waarom: de crate-doc van `blkdev`).
 //!
 //! De kern-flip: vóór de sprong legt de actor de boom vast en neemt hij
 //! niets meer aan ([`freeze_for_flip`]); de nieuwe kern mount dezelfde
@@ -155,8 +156,9 @@ pub(crate) fn start(exec: &'static Executor, disk: Option<vboard::Disk>) -> bool
         "disk: up HOPOS_DISK_UP model={} blocks={sectors} block_size={SECTOR} max_transfer={MAX_TRANSFER}",
         disk.model()
     );
-    // Vóór `exec.run`: de mount wacht zelf (block_on pollt het device), en
-    // er is nog niemand die stil zou staan.
+    // Vóór `exec.run`: de mount wacht zelf (block_on pollt het device over
+    // hetzelfde pad als de actor straks), en er is nog niemand die stil zou
+    // staan.
     let disk = Paced::new(disk, ExecPace(exec));
     let mounted = block_on(Fs::mount(
         disk,

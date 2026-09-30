@@ -13,6 +13,11 @@
 //! ([`start`]), en `storage::start` neemt hem aan. Zo mount een bench-boot
 //! daarna gewoon, zoals in Go (`HOPOS_FS_UP` na `HOPOS_NVMEBENCH_DONE`).
 //!
+//! De bench meet het pad dat hopfs gebruikt, niet een eigen: de geleende
+//! schijf in een [`Paced`] met de pollende [`Spin`], elke opdracht een
+//! submit plus completion, afgedraaid met [`block_on`] (de executor draait
+//! nog niet; waarom er geen synchrone vorm is: de crate-doc van `blkdev`).
+//!
 //! De bench schrijft alleen in de staart van de schijf: de helft, hoogstens
 //! 1 GiB. hopfs legt zijn boom aan het begin en alloceert van voren, dus de
 //! staart is op een schijf die niet vol is van niemand; maar een meetbank
@@ -21,12 +26,12 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use blkdev::{Blocking, block_on};
+use blkdev::{BlockIo, Paced, Spin, block_on};
 use core::sync::atomic::Ordering::Relaxed;
 use cpu::println;
 use driver_virtioblk::{MAX_TRANSFER, SECTOR};
 use executor::Executor;
-use kern::hopfs::{BlockDevice, Fs};
+use kern::hopfs::Fs;
 
 /// De staart die de bench hoogstens beschrijft.
 const SPAN_MAX: u64 = 1 << 30;
@@ -191,8 +196,8 @@ impl Snap {
 }
 
 /// De schijf-bench: rauw (de Go-tabel per commandomaat, dan sequentieel
-/// en willekeurig over de staart) en door hopfs. Synchroon: de executor
-/// draait nog niet, en een bench-boot wacht erop, zoals in Go.
+/// en willekeurig over de staart) en door hopfs. Vóór de executor, met
+/// `block_on`: een bench-boot wacht erop, zoals in Go.
 fn bench_disk(exec: &'static Executor, disk: &mut vboard::Disk) {
     let sectors = disk.sectors();
     let bytes = sectors.saturating_mul(SECTOR);
@@ -220,11 +225,12 @@ fn bench_disk(exec: &'static Executor, disk: &mut vboard::Disk) {
         span >> 20
     );
     let t = Bench { exec, base };
-    let ok = t.sizes(disk, &mut buf, span)
-        && t.sequential(disk, &mut buf, span)
-        && t.random(disk, &mut buf, span);
+    let mut disk = Paced::new(disk, Spin);
+    let ok = t.sizes(&mut disk, &mut buf, span)
+        && t.sequential(&mut disk, &mut buf, span)
+        && t.random(&mut disk, &mut buf, span);
     if ok {
-        t.hopfs(disk, &mut buf, span);
+        t.hopfs(&mut disk, &mut buf, span);
     }
     println!("nvme bench: done HOPOS_NVMEBENCH_DONE");
 }
@@ -244,7 +250,7 @@ impl Bench {
     /// `n` opdrachten van `sz` bytes schrijven, dan lezen, opdracht `k` op
     /// LBA `lba(k)`. Geeft (schrijf-ns, lees-ns), of `None` na een luide
     /// fout.
-    fn pass<D: BlockDevice>(
+    fn pass<D: BlockIo>(
         &self,
         disk: &mut D,
         buf: &mut [u8],
@@ -255,7 +261,7 @@ impl Bench {
         let chunk = buf.get_mut(..sz)?;
         let t0 = self.now();
         for k in 0..n {
-            if let Err(e) = disk.write(lba(k), chunk) {
+            if let Err(e) = block_on(disk.write(lba(k), chunk)) {
                 println!(
                     "nvme bench: write {sz} at {}: {e} HOPOS_NVMEBENCH_FAIL",
                     lba(k)
@@ -265,7 +271,7 @@ impl Bench {
         }
         let t1 = self.now();
         for k in 0..n {
-            if let Err(e) = disk.read(lba(k), chunk) {
+            if let Err(e) = block_on(disk.read(lba(k), chunk)) {
                 println!(
                     "nvme bench: read {sz} at {}: {e} HOPOS_NVMEBENCH_FAIL",
                     lba(k)
@@ -278,7 +284,7 @@ impl Bench {
 
     /// De Go-tabel: per commandomaat 16 MiB schrijven en lezen (dezelfde
     /// regelvorm als `nvmeBench`, zodat de getallen naast elkaar passen).
-    fn sizes<D: BlockDevice>(&self, disk: &mut D, buf: &mut [u8], span: u64) -> bool {
+    fn sizes<D: BlockIo>(&self, disk: &mut D, buf: &mut [u8], span: u64) -> bool {
         for sz in SIZES {
             if sz > MAX_TRANSFER as u64 {
                 continue;
@@ -295,7 +301,7 @@ impl Bench {
     }
 
     /// Sequentieel over de hele staart in opdrachten van 1 MiB.
-    fn sequential<D: BlockDevice>(&self, disk: &mut D, buf: &mut [u8], span: u64) -> bool {
+    fn sequential<D: BlockIo>(&self, disk: &mut D, buf: &mut [u8], span: u64) -> bool {
         let sz = MAX_TRANSFER as u64;
         let n = span / sz;
         let step = sz / SECTOR;
@@ -315,7 +321,7 @@ impl Bench {
 
     /// Willekeurig: 4 KiB-opdrachten op pseudo-willekeurige 4 KiB-plekken
     /// in de staart (xorshift, vast zaad: elke run dezelfde plekken).
-    fn random<D: BlockDevice>(&self, disk: &mut D, buf: &mut [u8], span: u64) -> bool {
+    fn random<D: BlockIo>(&self, disk: &mut D, buf: &mut [u8], span: u64) -> bool {
         let sz: u64 = 4 << 10;
         let slots = span / sz;
         let n = slots.min(RANDOM_OPS);
@@ -344,10 +350,9 @@ impl Bench {
     /// Door hopfs: een vluchtige bestandslaag op dezelfde staart, 16 MiB
     /// in calls van 1 MiB en 64 KiB (Go: `hopfsBench`). Het verschil met
     /// de rauwe regels is wat hopfs zelf kost, zonder servicer en
-    /// transport. Synchroon, vóór de executor draait: de schijf achter
-    /// `Blocking`, elke call met `block_on` afgedraaid.
-    fn hopfs<D: BlockDevice>(&self, disk: &mut D, buf: &mut [u8], span: u64) {
-        let disk = Blocking(disk);
+    /// transport. Vóór de executor draait: elke call met `block_on`
+    /// afgedraaid.
+    fn hopfs<D: BlockIo>(&self, disk: D, buf: &mut [u8], span: u64) {
         let mut fs = match Fs::new(disk, self.base, span / SECTOR, SECTOR, MAX_TRANSFER as u64) {
             Ok(f) => f,
             Err(e) => {

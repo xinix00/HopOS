@@ -2,8 +2,10 @@
 //!
 //! De vorm is die van de NVMe-driver uit de Go-kern
 //! (`OLD/metal/driver/nvme`): één verzoek tegelijk, één DMA-buffer, achter
-//! [`blkdev::AsyncBlockDevice`] (submit plus completion, de hopfs-actor)
-//! en [`blkdev::BlockDevice`] (synchroon, de meetbank vóór de executor).
+//! [`blkdev::AsyncBlockDevice`] (submit plus completion). Dat is het enige
+//! pad: de hopfs-actor wacht erop met `.await`, en wat vóór de executor
+//! draait (de mount, de meetbank) met `blkdev::block_on` over dezelfde
+//! futures (waarom: de crate-doc van `blkdev`).
 //! Eén in-flight verzoek is geen beperking maar de vorm: de eigenaar
 //! (de hopfs-actor, `&mut self`) doet toch één ding tegelijk, en zo hoeft
 //! de driver geen tags, geen rij en geen herordening te kennen.
@@ -19,16 +21,15 @@
 //! data (het device leest of schrijft) en de statusbyte (het device
 //! schrijft).
 //!
-//! Wachten: de synchrone vorm pollt de used-ring; de asynchrone vorm geeft
-//! na de doorbell de executor terug en kijkt weer bij de bel van de
-//! IRQ-lijn ([`VirtioBlk::set_irq`], het board bedraadt hem) of, zonder
-//! lijn, pollend (`blkdev::InFlight::done`). Les van 30-09: de synchrone
-//! commit van hopfs hield de OS-core tot 7 s stil op een trage schijf (een
-//! FLUSH is op macOS een F_FULLFSYNC van het image). Een verzoek dat na
-//! [`REQUEST_TIMEOUT_NS`] niet klaar is, maakt de driver dood: het device
-//! kan nog in de buffer schrijven, dus een volgend verzoek zou andermans
-//! bytes zien. Dood is luid en blijvend (elke volgende call faalt), nooit
-//! stil.
+//! Wachten: na de doorbell gaat de executor door, en de wachter kijkt weer
+//! bij de bel van de IRQ-lijn ([`VirtioBlk::set_irq`], het board bedraadt
+//! hem) of, zonder lijn, pollend (`blkdev::InFlight::done`). Les van 30-09:
+//! de synchrone commit van hopfs hield de OS-core tot 7 s stil op een trage
+//! schijf (een FLUSH is op macOS een F_FULLFSYNC van het image). Een
+//! verzoek dat na [`REQUEST_TIMEOUT_NS`] niet klaar is, maakt de driver
+//! dood: het device kan nog in de buffer schrijven, dus een volgend verzoek
+//! zou andermans bytes zien. Dood is luid en blijvend (elke volgende call
+//! faalt), nooit stil.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -456,8 +457,8 @@ impl<T: Transport> VirtioBlk<T> {
         self.t.ack_interrupt()
     }
 
-    /// Hangt de bel van de IRQ-lijn aan de driver: de asynchrone vorm wacht
-    /// er dan op (met de vangrail van `blkdev::IRQ_GUARD`) in plaats van te
+    /// Hangt de bel van de IRQ-lijn aan de driver: de wachter wacht er dan
+    /// op (met de vangrail van `blkdev::IRQ_GUARD`) in plaats van te
     /// pollen. Het board luidt hem vanuit zijn dispatch, na [`IrqAck::ack`].
     pub fn set_irq(&mut self, bell: &'static Signal) {
         self.irq = Some(bell);
@@ -563,17 +564,6 @@ impl<T: Transport> VirtioBlk<T> {
         })
     }
 
-    /// Het synchrone verzoek: zetten en pollen tot het klaar is.
-    fn request(&mut self, kind: u32, sector: u64, len: usize) -> Result {
-        self.begin(kind, sector, len)?;
-        loop {
-            if let Poll::Ready(r) = self.reap() {
-                return r;
-            }
-            core::hint::spin_loop();
-        }
-    }
-
     /// Toetst `len` bytes vanaf `sector` tegen de schijf.
     fn check(&self, sector: u64, len: usize) -> Result {
         let n = len as u64;
@@ -587,51 +577,9 @@ impl<T: Transport> VirtioBlk<T> {
         }
     }
 
-    /// Leest `buf.len()` bytes (een veelvoud van [`SECTOR`]) vanaf `sector`,
-    /// in happen van [`MAX_TRANSFER`].
-    pub fn read_at(&mut self, sector: u64, buf: &mut [u8]) -> Result {
-        self.check(sector, buf.len())?;
-        let mut s = sector;
-        for chunk in buf.chunks_mut(MAX_TRANSFER) {
-            self.request(T_IN, s, chunk.len())?;
-            dev::copy_out(chunk, self.dma.add(DATA_OFF));
-            s += chunk.len() as u64 / SECTOR;
-        }
-        Ok(())
-    }
-
-    /// Schrijft `buf` (een veelvoud van [`SECTOR`]) vanaf `sector`.
-    pub fn write_at(&mut self, sector: u64, buf: &[u8]) -> Result {
-        if self.read_only {
-            return Err(Error::ReadOnly);
-        }
-        self.check(sector, buf.len())?;
-        let mut s = sector;
-        for chunk in buf.chunks(MAX_TRANSFER) {
-            // Na een time-out kan het device nog in de buffer bezig zijn:
-            // er gaat geen byte meer in.
-            if self.dead {
-                return Err(Error::Dead);
-            }
-            if self.pending.is_some() && self.reap().is_pending() {
-                return Err(Error::Busy);
-            }
-            dev::copy_in(self.dma.add(DATA_OFF), chunk);
-            self.request(T_OUT, s, chunk.len())?;
-            s += chunk.len() as u64 / SECTOR;
-        }
-        Ok(())
-    }
-
-    /// Maakt alles wat geschreven is duurzaam; zonder FLUSH-feature is er
-    /// geen cache en is dit niets.
-    pub fn sync(&mut self) -> Result {
-        self.request(T_FLUSH, 0, 0)
-    }
-
-    /// Zet één opdracht van hoogstens [`MAX_TRANSFER`] bytes op het device
-    /// (de asynchrone vorm). Een write gaat nu de DMA-buffer in, dus pas
-    /// als er niets meer loopt.
+    /// Zet één opdracht van hoogstens [`MAX_TRANSFER`] bytes op het device.
+    /// Een write gaat nu de DMA-buffer in, dus pas als er niets meer loopt;
+    /// een FLUSH zonder FLUSH-feature is niets (er is dan geen cache).
     fn start_op(&mut self, op: Op<'_>) -> Result {
         match op {
             Op::Read { lba, len } => {
@@ -689,22 +637,6 @@ fn blk_err(e: Error, lba: u64, len: usize) -> blkdev::Error {
         Error::Dead | Error::Timeout { .. } => blkdev::Error::Dead,
         Error::Busy => blkdev::Error::Busy,
         _ => blkdev::Error::Io { lba },
-    }
-}
-
-impl<T: Transport> blkdev::BlockDevice for VirtioBlk<T> {
-    fn read(&mut self, lba: u64, buf: &mut [u8]) -> blkdev::Result {
-        self.read_at(lba, buf)
-            .map_err(|_| blkdev::Error::Io { lba })
-    }
-
-    fn write(&mut self, lba: u64, buf: &[u8]) -> blkdev::Result {
-        self.write_at(lba, buf)
-            .map_err(|_| blkdev::Error::Io { lba })
-    }
-
-    fn flush(&mut self) -> blkdev::Result {
-        self.sync().map_err(|_| blkdev::Error::Dead)
     }
 }
 

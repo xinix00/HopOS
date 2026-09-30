@@ -7,27 +7,43 @@
 //! `kern`, omdat een driver de kern niet kent (handboek §7, dezelfde reden
 //! als `netdev`).
 //!
-//! Twee vormen:
+//! Eén vorm: [`AsyncBlockDevice`]. Eén opdracht tegelijk,
+//! [`submit`](AsyncBlockDevice::submit) geeft een [`InFlight`], en
+//! [`InFlight::done`] wacht op de completion: op de bel van de IRQ-lijn met
+//! een vangrail van [`IRQ_GUARD`], of zonder lijn door te pollen (eerst per
+//! ronde, daarna op [`POLL_PERIOD`]). Tijdens het wachten draait de executor
+//! door. [`Paced`] maakt er de [`BlockIo`] van die hopfs gebruikt. Wie vóór
+//! de executor iets met de schijf doet (de mount bij de boot, de meetbank),
+//! draait precies die futures af met [`block_on`] en een [`Pace`] die pollt
+//! ([`Spin`]): dezelfde driver, dezelfde `start` en `poll_done`, geen
+//! tweede pad.
 //!
-//! - [`AsyncBlockDevice`]: de vorm van de driver. Eén opdracht tegelijk,
-//!   [`submit`](AsyncBlockDevice::submit) geeft een [`InFlight`], en
-//!   [`InFlight::done`] wacht op de completion: op de bel van de IRQ-lijn met
-//!   een vangrail van [`IRQ_GUARD`], of zonder lijn door te pollen (eerst
-//!   per ronde, daarna op [`POLL_PERIOD`]). Tijdens het wachten draait de
-//!   executor door. [`Paced`] maakt er de [`BlockIo`] van die hopfs gebruikt.
-//! - [`BlockDevice`]: de synchrone vorm, voor wat vóór de executor draait
-//!   (de meetbank) en voor de tests. [`Blocking`] maakt er een [`BlockIo`]
-//!   van waarvan elke future meteen klaar is; [`block_on`] draait zo'n
-//!   future af.
+//! # Waarom er één pad is
 //!
-//! Les van 30-09 (de soak, ruim 1100 runs): tot dan was de grens alleen
-//! synchroon. De periodieke hopfs-commit (FLUSH, de boom, FLUSH) wachtte op
-//! de executor van de OS-core tot 5 s per verzoek op het device; op macOS is
-//! een FLUSH van QEMU een F_FULLFSYNC van 3 tot 786 ms, en zolang stonden de
-//! kern, Hop en de switch stil: geen tik, geen verkeer. Met 2,5 s per
-//! verzoek nagebootst was dat een stilte van 7 s (`late_ms=6611` op de
-//! tik). Vandaar submit plus await (PORT.md §3: "de NVMe-actor: zijn lus ís
-//! één tegelijk, `submit(buf) -> InFlight`").
+//! Les van 30-09 (de soak, ruim 1100 runs): tot alpha.14 was de grens
+//! synchroon (`read`, `write`, `flush` die terugkeerden als het klaar was).
+//! De periodieke hopfs-commit (FLUSH, de boom, FLUSH) wachtte op de executor
+//! van de OS-core tot 5 s per verzoek op het device; op macOS is een FLUSH
+//! van QEMU een F_FULLFSYNC van 3 tot 786 ms, en zolang stonden de kern, Hop
+//! en de switch stil: geen tik, geen verkeer. Met 2,5 s per verzoek
+//! nagebootst was dat een stilte van 7 s (`late_ms=6611` op de tik).
+//!
+//! In de Go-kern was synchroon wachten gratis: elke wachter was een
+//! goroutine, en een goroutine is een eigen stack. Wie op de NVMe wachtte,
+//! parkeerde zijn stack, en TamaGo's scheduler gaf de core aan de volgende.
+//! Rust heeft hier geen goroutines en geen threadscheduler: één executor per
+//! core, en een functie die wacht zonder terug te keren, houdt die core vast
+//! met alles erop. Wachten is dus `.await`, en de enige manier om zonder
+//! scheduler te wachten zonder de core vast te houden is submit plus await
+//! (PORT.md §3: "de NVMe-actor: zijn lus ís één tegelijk, `submit(buf) ->
+//! InFlight`").
+//!
+//! Een synchrone vorm ernaast was daarom geen gemak maar een tweede
+//! driverpad (post plus spin) dat de stilte terugbrengt zodra iemand hem
+//! vanaf de executor aanroept, en dat apart getest moet worden. Hij is weg:
+//! wat vóór de executor moet wachten, wacht met [`block_on`]
+//! over dezelfde async code, en daar houdt het de core terecht vast, want er
+//! draait nog niets anders.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -112,32 +128,6 @@ impl fmt::Display for Error {
 /// Het resultaat van een blok-verzoek.
 pub type Result<T = (), E = Error> = core::result::Result<T, E>;
 
-/// Een synchroon blokapparaat: elk verzoek keert terug als het klaar is.
-/// Voor wat vóór de executor draait (de meetbank) en voor de tests; de
-/// hopfs-actor gebruikt [`BlockIo`].
-pub trait BlockDevice {
-    /// Leest `buf.len()` bytes vanaf `lba`.
-    fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result;
-    /// Schrijft `buf` vanaf `lba`.
-    fn write(&mut self, lba: u64, buf: &[u8]) -> Result;
-    /// Maakt alles wat geschreven is duurzaam (NVMe FLUSH, virtio FLUSH).
-    fn flush(&mut self) -> Result {
-        Ok(())
-    }
-}
-
-impl<D: BlockDevice + ?Sized> BlockDevice for &mut D {
-    fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result {
-        (**self).read(lba, buf)
-    }
-    fn write(&mut self, lba: u64, buf: &[u8]) -> Result {
-        (**self).write(lba, buf)
-    }
-    fn flush(&mut self) -> Result {
-        (**self).flush()
-    }
-}
-
 /// Eén opdracht aan het device, hoogstens
 /// [`max_transfer`](AsyncBlockDevice::max_transfer) bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,6 +192,24 @@ pub trait AsyncBlockDevice {
     }
 }
 
+/// Een geleende driver is ook een driver: zo leent de meetbank de schijf
+/// (`Paced::new(&mut disk, Spin)`) en geeft hij hem daarna terug aan de
+/// opslag.
+impl<D: AsyncBlockDevice + ?Sized> AsyncBlockDevice for &mut D {
+    fn max_transfer(&self) -> usize {
+        (**self).max_transfer()
+    }
+    fn start(&mut self, op: Op<'_>) -> Result {
+        (**self).start(op)
+    }
+    fn poll_done(&mut self, into: &mut [u8]) -> Poll<Result> {
+        (**self).poll_done(into)
+    }
+    fn irq(&self) -> Option<&'static Signal> {
+        (**self).irq()
+    }
+}
+
 /// De klok en de wekker van wie op een device wacht: de executor levert
 /// hem (in de binary `exec.after`).
 pub trait Pace {
@@ -213,8 +221,12 @@ pub trait Pace {
     fn sleep(&self, d: Duration) -> Self::Sleep;
 }
 
-/// Een [`Pace`] zonder executor: nooit slapen, altijd opnieuw kijken. Voor
-/// [`block_on`] en de tests.
+/// Een [`Pace`] die pollt: nooit slapen, altijd opnieuw kijken. Voor
+/// [`block_on`] vóór de executor (de meetbank) en de tests. De klok staat
+/// stil, dus [`InFlight::done`] blijft in zijn yield-venster en toetst het
+/// device bij elke ronde van `block_on`; de time-out van een verzoek is van
+/// de driver (zijn eigen klok), dus ook zo wordt een stil device nooit een
+/// eeuwige lus.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Spin;
 
@@ -394,25 +406,12 @@ impl<D: AsyncBlockDevice, P: Pace> BlockIo for Paced<D, P> {
     }
 }
 
-/// Een synchrone [`BlockDevice`] als [`BlockIo`]: elke future is meteen
-/// klaar. Voor de meetbank (vóór de executor) en de tests.
-pub struct Blocking<D>(pub D);
-
-impl<D: BlockDevice> BlockIo for Blocking<D> {
-    async fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result {
-        self.0.read(lba, buf)
-    }
-    async fn write(&mut self, lba: u64, buf: &[u8]) -> Result {
-        self.0.write(lba, buf)
-    }
-    async fn flush(&mut self) -> Result {
-        self.0.flush()
-    }
-}
-
-/// Draait een future af zonder executor: pollen tot hij klaar is. Voor de
-/// boot (de mount vóór `exec.run`), de meetbank en de tests; op de executor
-/// hoort hij nooit, want hij houdt de core vast.
+/// Draait een future af zonder executor: pollen tot hij klaar is. Voor wat
+/// vóór `exec.run` op de schijf wacht (de mount bij de boot, de meetbank) en
+/// voor de tests; op de executor hoort hij nooit, want hij houdt de core
+/// vast. Het is geen tweede driverpad: dezelfde [`Paced`]-futures, dezelfde
+/// `start` en `poll_done`, alleen zonder iemand die intussen iets anders
+/// doet.
 pub fn block_on<F: Future>(f: F) -> F::Output {
     let mut f = core::pin::pin!(f);
     let mut cx = Context::from_waker(Waker::noop());

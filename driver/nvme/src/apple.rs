@@ -1005,7 +1005,9 @@ impl<C: Coprocessor> Ans<C> {
     }
 
     /// Leest `buf.len()` bytes (een veelvoud van [`BLOCK`]) vanaf blok
-    /// `block`. Lezen mag overal op de schijf.
+    /// `block`. Lezen mag overal op de schijf. Voor het board bij de probe:
+    /// de GPT ligt buiten het venster, en het blokcontract (hieronder) ziet
+    /// alleen het venster.
     pub fn read_at(&mut self, block: u64, buf: &mut [u8]) -> Result<(), C::Error> {
         self.ready()?;
         if buf.is_empty() {
@@ -1026,7 +1028,7 @@ impl<C: Coprocessor> Ans<C> {
     /// alleen binnen het venster van [`set_window`](Self::set_window).
     /// Daarbuiten, of zonder venster, weigert hij vóór er één byte naar de
     /// controller gaat.
-    pub fn write_at(&mut self, block: u64, buf: &[u8]) -> Result<(), C::Error> {
+    fn write_at(&mut self, block: u64, buf: &[u8]) -> Result<(), C::Error> {
         self.ready()?;
         self.check_window(block, buf.len())?;
         let step = self.step();
@@ -1108,7 +1110,7 @@ impl<C: Coprocessor> Ans<C> {
     /// onverwachte opdracht kan de coprocessor omleggen). Met schrijven erbij
     /// kan dat niet meer: zonder flush is een geschreven boom niet duurzaam.
     /// Linux stuurt hem op dit pad gewoon (`drivers/nvme/host/apple.c`).
-    pub fn flush(&mut self) -> Result<(), C::Error> {
+    fn flush(&mut self) -> Result<(), C::Error> {
         self.ready()?;
         self.submit(
             false,
@@ -1247,32 +1249,14 @@ impl<C: Coprocessor> Ans<C> {
 /// 4 KB, dus een verzoek moet op een blok beginnen en eindigen; hopfs
 /// schrijft in blokken van 4 KB vanaf LBA 0, dus dat doet hij altijd. Een
 /// verzoek dat dat niet doet, of buiten het venster valt, is `OutOfRange`.
-impl<C: Coprocessor> blkdev::BlockDevice for Ans<C> {
-    fn read(&mut self, lba: u64, buf: &mut [u8]) -> blkdev::Result {
-        let b = self.contract_block(lba, buf.len())?;
-        self.read_at(b, buf)
-            .map_err(|e| blk_err(&e, lba, buf.len()))
-    }
-
-    fn write(&mut self, lba: u64, buf: &[u8]) -> blkdev::Result {
-        let b = self.contract_block(lba, buf.len())?;
-        self.write_at(b, buf)
-            .map_err(|e| blk_err(&e, lba, buf.len()))
-    }
-
-    fn flush(&mut self) -> blkdev::Result {
-        self.flush().map_err(|e| blk_err(&e, 0, 0))
-    }
-}
-
-/// De asynchrone vorm over het venster, met dezelfde LBA's als hierboven.
 ///
-/// Nog niet echt asynchroon: [`start`](blkdev::AsyncBlockDevice::start)
-/// doet de hele opdracht (tot en met de completion) en zet alleen het
-/// kopiëren naar de aanroeper uit tot `poll_done`. De ANS vraagt tijdens het
-/// wachten om de mailbox van zijn coprocessor (`service`); die splitsen
-/// hoort bij de eerste boot op ijzer, niet bij een blinde port (30-09: de
-/// M4 is nog nooit gestart).
+/// Hetzelfde contract als virtio-blk en de NVMe, maar de ANS wacht nog in
+/// [`start`](blkdev::AsyncBlockDevice::start): die doet de hele opdracht
+/// (tot en met de completion) en zet alleen het kopiëren naar de aanroeper
+/// uit tot `poll_done`, die daarom altijd meteen klaar is. De ANS vraagt
+/// tijdens het wachten om de mailbox van zijn coprocessor (`service`); die
+/// splitsen hoort bij de eerste boot op ijzer, niet bij een blinde port
+/// (30-09: de M4 is nog nooit gestart).
 impl<C: Coprocessor> blkdev::AsyncBlockDevice for Ans<C> {
     fn max_transfer(&self) -> usize {
         self.step()
@@ -1408,7 +1392,7 @@ mod tests {
     //! completion terug. De schijf is RAM met een GPT-header op blok 1.
 
     use super::*;
-    use blkdev::BlockDevice as _;
+    use blkdev::{BlockIo, Paced, Spin, block_on};
     use std::cell::RefCell;
     use std::string::{String, ToString};
     use std::vec;
@@ -1697,6 +1681,12 @@ mod tests {
         a
     }
 
+    /// De ANS zoals hopfs hem ziet: het blokcontract met een `Pace` die
+    /// pollt.
+    fn blk(a: &mut Ans<Cop>) -> Paced<&mut Ans<Cop>, Spin> {
+        Paced::new(a, Spin)
+    }
+
     fn with<R>(f: impl FnOnce(&mut Ctl) -> R) -> R {
         CTL.with(|c| f(&mut c.borrow_mut()))
     }
@@ -1844,31 +1834,38 @@ mod tests {
         // Zonder venster ziet het contract geen schijf.
         assert_eq!(a.sectors(), 0);
         assert!(matches!(
-            a.read(0, &mut buf),
+            block_on(blk(&mut a).read(0, &mut buf)),
             Err(blkdev::Error::OutOfRange { .. })
         ));
         a.set_window(10, 20).unwrap();
         assert_eq!(a.sectors(), 160);
         // LBA 16 (512 bytes) = blok 2 van het venster = schijfblok 12.
-        a.write(16, &vec![0x11; 2 * BLOCK as usize]).unwrap();
+        block_on(blk(&mut a).write(16, &vec![0x11; 2 * BLOCK as usize])).unwrap();
         with(|c| {
             assert_eq!(c.log.last().map(|l| (l.2, l.3)), Some((12, 1)));
             assert!(c.disk[12 * 4096..14 * 4096].iter().all(|&x| x == 0x11));
             assert!(c.disk[11 * 4096..12 * 4096].iter().all(|&x| x == 0));
         });
-        a.read(8, &mut buf).unwrap(); // Schijfblok 11.
+        block_on(blk(&mut a).read(8, &mut buf)).unwrap(); // Schijfblok 11.
         assert!(buf.iter().all(|&x| x == 0));
-        a.read(24, &mut buf).unwrap(); // Schijfblok 13.
+        block_on(blk(&mut a).read(24, &mut buf)).unwrap(); // Schijfblok 13.
         assert!(buf.iter().all(|&x| x == 0x11));
         // Niet op een blok, geen blokveelvoud, voorbij het venster.
         let oor = |r: blkdev::Result| matches!(r, Err(blkdev::Error::OutOfRange { .. }));
-        assert!(oor(a.read(3, &mut buf)));
-        assert!(oor(a.read(8, &mut buf[..512])));
-        assert!(oor(a.write(0, &[])));
-        assert!(oor(a.write(152, &vec![0; 2 * BLOCK as usize])));
-        assert!(!oor(a.write(152, &vec![0; BLOCK as usize])));
+        assert!(oor(block_on(blk(&mut a).read(3, &mut buf))));
+        assert!(oor(block_on(blk(&mut a).read(8, &mut buf[..512]))));
+        assert!(oor(blkdev::AsyncBlockDevice::start(
+            &mut a,
+            blkdev::Op::Write { lba: 0, data: &[] }
+        )));
+        assert!(oor(block_on(
+            blk(&mut a).write(152, &vec![0; 2 * BLOCK as usize])
+        )));
+        assert!(!oor(block_on(
+            blk(&mut a).write(152, &vec![0; BLOCK as usize])
+        )));
         with(|c| assert_eq!(c.log.last().map(|l| l.2), Some(29)));
-        a.flush().unwrap();
+        block_on(blk(&mut a).flush()).unwrap();
         with(|c| assert_eq!(c.events.last(), Some(&"flush")));
     }
 

@@ -604,15 +604,6 @@ impl NoDisk {
     }
 }
 
-impl blkdev::BlockDevice for NoDisk {
-    fn read(&mut self, _lba: u64, _buf: &mut [u8]) -> blkdev::Result {
-        match *self {}
-    }
-    fn write(&mut self, _lba: u64, _buf: &[u8]) -> blkdev::Result {
-        match *self {}
-    }
-}
-
 impl blkdev::AsyncBlockDevice for NoDisk {
     fn max_transfer(&self) -> usize {
         match *self {}

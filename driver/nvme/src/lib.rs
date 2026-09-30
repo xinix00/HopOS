@@ -20,14 +20,19 @@
 //! loads haalden ~100 MB/s); de driver doet dan `push` vóór een write en
 //! `pull` na een read, en op ongecachet geheugen zijn die gratis.
 //!
-//! Twee vormen van wachten: de synchrone (de init, de admin-opdrachten, de
-//! meetbank) pollt de CQ; de asynchrone ([`blkdev::AsyncBlockDevice`], de
-//! hopfs-actor) zet de opdracht klaar en geeft de executor terug tot de
-//! completion er is. Les van 30-09: de synchrone commit van hopfs hield op
-//! QEMU de OS-core tot 7 s stil; op NVMe zou een FLUSH van een consumer-SSD
-//! zonder PLP hetzelfde doen. De controller heeft geen lijn in deze driver:
-//! de wachter pollt (`blkdev::InFlight::done`), per ronde en dan op een
-//! timer, zodat Hop tijdens een lange FLUSH zijn beurten houdt.
+//! Eén pad voor de I/O: [`blkdev::AsyncBlockDevice`] zet de opdracht klaar
+//! (`post`) en kijkt of de completion er is (`reap`). De hopfs-actor wacht
+//! erop met `.await` en geeft intussen de executor terug; wat vóór de
+//! executor draait (de mount, de meetbank) draait dezelfde futures af met
+//! `blkdev::block_on` (waarom: de crate-doc van `blkdev`). Les van 30-09:
+//! de synchrone commit van hopfs hield op QEMU de OS-core tot 7 s stil; op
+//! NVMe zou een FLUSH van een consumer-SSD zonder PLP hetzelfde doen. De
+//! controller heeft geen lijn in deze driver: de wachter pollt
+//! (`blkdev::InFlight::done`), per ronde en dan op een timer, zodat Hop
+//! tijdens een lange FLUSH zijn beurten houdt. Alleen de admin-opdrachten
+//! van [`Nvme::new`] (identify, de queues aanmelden) wachten ter plekke,
+//! met `block_on` over dezelfde `reap`: dat is de init, vóór er een
+//! blokcontract bestaat.
 //!
 //! Een verzoek dat niet binnen [`COMMAND_TIMEOUT_NS`] terugkomt, maakt de
 //! driver dood: de controller kan nog in de buffer schrijven, dus een
@@ -494,17 +499,12 @@ impl Nvme {
         self.base.add(DB + (n << (2 + self.dstrd)))
     }
 
-    /// Zet `m` in de SQ, luidt de doorbell en pollt de CQ tot de completion
-    /// er is: de synchrone vorm ([`post`](Self::post) plus
-    /// [`reap`](Self::reap)).
-    fn submit(&mut self, admin: bool, m: Cmd) -> Result {
-        self.post(admin, m, 0)?;
-        loop {
-            if let Poll::Ready(r) = self.reap() {
-                return r;
-            }
-            core::hint::spin_loop();
-        }
+    /// Eén admin-opdracht van de init ([`new`](Self::new)): zetten, en met
+    /// `block_on` over [`reap`](Self::reap) wachten tot hij terug is. Er is
+    /// dan nog geen executor en geen blokcontract; de I/O loopt nooit hier.
+    fn admin(&mut self, m: Cmd) -> Result {
+        self.post(true, m, 0)?;
+        blkdev::block_on(core::future::poll_fn(|_| self.reap()))
     }
 
     /// Zet `m` in de SQ en luidt de doorbell; keert meteen terug. Eén
@@ -548,7 +548,7 @@ impl Nvme {
     }
 
     /// Kijkt of de completion van de opdracht van [`post`](Self::post) er
-    /// is. Na de time-out is de driver dood.
+    /// is; keert meteen terug. Na de time-out is de driver dood.
     fn reap(&mut self) -> Poll<Result> {
         let Some(p) = self.pending else {
             return Poll::Ready(Err(Error::Idle));
@@ -603,15 +603,12 @@ impl Nvme {
     /// blokmaat uit de actieve LBA-indeling.
     fn identify(&mut self) -> Result {
         let buf = self.data();
-        self.submit(
-            true,
-            Cmd {
-                opc: ADM_IDENTIFY,
-                prp1: buf.0,
-                cdw10: 1,
-                ..Cmd::default()
-            },
-        )?;
+        self.admin(Cmd {
+            opc: ADM_IDENTIFY,
+            prp1: buf.0,
+            cdw10: 1,
+            ..Cmd::default()
+        })?;
         dev::pull(buf, PAGE as usize);
         dev::copy_out(&mut self.model, buf.add(24));
         // MDTS = 0 is "geen limiet"; anders 2^MDTS controllerpagina's. Onze
@@ -621,15 +618,12 @@ impl Nvme {
             self.max_transfer = self.max_transfer.min(PAGE << mdts);
         }
 
-        self.submit(
-            true,
-            Cmd {
-                opc: ADM_IDENTIFY,
-                nsid: NSID,
-                prp1: buf.0,
-                ..Cmd::default()
-            },
-        )?;
+        self.admin(Cmd {
+            opc: ADM_IDENTIFY,
+            nsid: NSID,
+            prp1: buf.0,
+            ..Cmd::default()
+        })?;
         dev::pull(buf, PAGE as usize);
         let blocks = dev::read64(buf);
         let flbas = u64::from(dev::read8(buf.add(26)) & 0xf);
@@ -650,26 +644,20 @@ impl Nvme {
     fn create_io_queues(&mut self) -> Result {
         let q = u32::from(Q_ENTRIES - 1) << 16;
         let id = u32::from(self.io.id);
-        self.submit(
-            true,
-            Cmd {
-                opc: ADM_CREATE_CQ,
-                prp1: self.io.cq.0,
-                cdw10: q | id,
-                cdw11: 1, // PC
-                ..Cmd::default()
-            },
-        )?;
-        self.submit(
-            true,
-            Cmd {
-                opc: ADM_CREATE_SQ,
-                prp1: self.io.sq.0,
-                cdw10: q | id,
-                cdw11: (id << 16) | 1, // CQID, PC
-                ..Cmd::default()
-            },
-        )
+        self.admin(Cmd {
+            opc: ADM_CREATE_CQ,
+            prp1: self.io.cq.0,
+            cdw10: q | id,
+            cdw11: 1, // PC
+            ..Cmd::default()
+        })?;
+        self.admin(Cmd {
+            opc: ADM_CREATE_SQ,
+            prp1: self.io.sq.0,
+            cdw10: q | id,
+            cdw11: (id << 16) | 1, // CQID, PC
+            ..Cmd::default()
+        })
     }
 
     /// De paginawijzers voor `n` bytes in de databuffer: PRP1 naar de eerste
@@ -723,69 +711,6 @@ impl Nvme {
         }
     }
 
-    fn io(&mut self, opc: u8, lba: u64, len: usize, nlb0: u32) -> Result {
-        let m = self.io_cmd(opc, lba, len, nlb0);
-        self.submit(false, m)
-    }
-
-    /// Leest `buf.len()` bytes (een blokveelvoud) vanaf `lba`, in happen van
-    /// [`max_transfer`](Self::max_transfer).
-    pub fn read_at(&mut self, lba: u64, buf: &mut [u8]) -> Result {
-        if buf.is_empty() {
-            return Err(Error::Range { lba, len: 0 });
-        }
-        let step = self.step();
-        let mut l = lba;
-        for chunk in buf.chunks_mut(step) {
-            let nlb0 = self.check(l, chunk.len())?;
-            self.io(IO_READ, l, chunk.len(), nlb0)?;
-            dev::pull(self.data(), chunk.len());
-            dev::copy_out(chunk, self.data());
-            l += chunk.len() as u64 / self.block_size;
-        }
-        Ok(())
-    }
-
-    /// Schrijft `buf` (een blokveelvoud) vanaf `lba`.
-    pub fn write_at(&mut self, lba: u64, buf: &[u8]) -> Result {
-        if buf.is_empty() {
-            return Err(Error::Range { lba, len: 0 });
-        }
-        let step = self.step();
-        let mut l = lba;
-        for chunk in buf.chunks(step) {
-            let nlb0 = self.check(l, chunk.len())?;
-            // Na een time-out kan de controller nog in de buffer schrijven:
-            // er gaat geen byte meer in; zolang een verlaten opdracht loopt
-            // ook niet.
-            if self.dead {
-                return Err(Error::Dead);
-            }
-            if self.pending.is_some() && self.reap().is_pending() {
-                return Err(Error::Busy);
-            }
-            dev::copy_in(self.data(), chunk);
-            dev::push(self.data(), chunk.len());
-            self.io(IO_WRITE, l, chunk.len(), nlb0)?;
-            l += chunk.len() as u64 / self.block_size;
-        }
-        Ok(())
-    }
-
-    /// Maakt alles wat de controller al bevestigde duurzaam (NVMe Flush:
-    /// een vluchtige schrijfcache naar het medium). hopfs zet hem vóór en na
-    /// het wegschrijven van zijn boom.
-    pub fn sync(&mut self) -> Result {
-        self.submit(
-            false,
-            Cmd {
-                opc: IO_FLUSH,
-                nsid: NSID,
-                ..Cmd::default()
-            },
-        )
-    }
-
     /// De hapgrootte: de grootste transfer, en minstens één blok.
     fn step(&self) -> usize {
         self.max_transfer.max(self.block_size.max(1)) as usize
@@ -837,28 +762,6 @@ impl Nvme {
     }
 }
 
-/// Het blokcontract van `blkdev`: LBA's van 512 bytes, ook als de
-/// namespace 4096-byte-blokken heeft. Dan moet een verzoek op een blok
-/// beginnen en eindigen; hopfs schrijft in blokken van 4 KB vanaf LBA 0, dus
-/// dat doet hij altijd. Zo is de NVMe voor de binary dezelfde schijf als
-/// virtio-blk ([`Nvme::sectors`], [`SECTOR`]).
-impl blkdev::BlockDevice for Nvme {
-    fn read(&mut self, lba: u64, buf: &mut [u8]) -> blkdev::Result {
-        let l = self.native(lba, buf.len())?;
-        self.read_at(l, buf).map_err(|e| blk_err(e, lba, buf.len()))
-    }
-
-    fn write(&mut self, lba: u64, buf: &[u8]) -> blkdev::Result {
-        let l = self.native(lba, buf.len())?;
-        self.write_at(l, buf)
-            .map_err(|e| blk_err(e, lba, buf.len()))
-    }
-
-    fn flush(&mut self) -> blkdev::Result {
-        self.sync().map_err(|e| blk_err(e, 0, 0))
-    }
-}
-
 /// De sector van het blokcontract.
 pub const SECTOR: u64 = 512;
 
@@ -890,8 +793,7 @@ fn blk_err(e: Error, lba: u64, len: usize) -> blkdev::Error {
 
 impl Nvme {
     /// Zet één opdracht van hoogstens [`max_transfer`](Self::max_transfer)
-    /// bytes op de I/O-queue (de asynchrone vorm); `lba` in LBA's van de
-    /// namespace. Een write gaat nu de databuffer in, dus pas als er niets
+    /// bytes op de I/O-queue; `lba` in LBA's van de namespace. Een write gaat nu de databuffer in, dus pas als er niets
     /// meer loopt.
     fn start_op(&mut self, op: Op<'_>, lba: u64) -> Result {
         match op {
@@ -941,8 +843,12 @@ impl Nvme {
     }
 }
 
-/// De asynchrone vorm van het blokcontract: dezelfde LBA's van 512 bytes
-/// als [`blkdev::BlockDevice`] hierboven. Zonder lijn: de wachter pollt.
+/// Het blokcontract van `blkdev`: LBA's van 512 bytes, ook als de
+/// namespace 4096-byte-blokken heeft. Dan moet een verzoek op een blok
+/// beginnen en eindigen; hopfs schrijft in blokken van 4 KB vanaf LBA 0, dus
+/// dat doet hij altijd. Zo is de NVMe voor de binary dezelfde schijf als
+/// virtio-blk ([`Nvme::sectors`], [`SECTOR`]). Zonder lijn: de wachter
+/// pollt.
 impl blkdev::AsyncBlockDevice for Nvme {
     fn max_transfer(&self) -> usize {
         self.step()
