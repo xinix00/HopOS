@@ -50,6 +50,15 @@ fi
 ELF="$DIR/target/$TARGET/release/hopos"
 IMG="$OUT/hopos-apple.img"
 "$OBJCOPY" -O binary "$ELF" "$IMG"
+# kmutil neemt een bootobject van hele 16 KiB-pagina's (de installer op de
+# stick weigert anders: "not a whole number of 16K pages", 30-09): nullen
+# achteraan tot de volgende grens; de stub, de parameters en de kern staan
+# vooraan en de nullen doen niets.
+SIZE=$(wc -c <"$IMG" | tr -d ' ')
+PAD=$(((16384 - SIZE % 16384) % 16384))
+if [ "$PAD" -gt 0 ]; then
+	dd if=/dev/zero bs=1 count="$PAD" >>"$IMG" 2>/dev/null
+fi
 
 # De toets: het parameterblok op 0x100 ("HOPASTUB", doel, grootte, entry)
 # moet kloppen met het ELF, en de stub-ingang op 0x800 moet code zijn. Met
@@ -80,7 +89,9 @@ def need(cond, what):
         ok = False
 need(magic == 0x4255545341504f48, "no HOPASTUB magic at 0x100")
 need(dst == base, "stub target %#x is not RAM_BASE %#x" % (dst, base))
-need(size == len(img), "stub size %#x is not the file size %#x" % (size, len(img)))
+need(size <= len(img) < size + 16384 and len(img) % 16384 == 0,
+     "stub size %#x does not fit the file size %#x (whole 16K pages, the stub first)" % (size, len(img)))
+need(not any(img[size:]), "the padding after the stub is not zero")
 need(size % 64 == 0, "stub size %#x is not a multiple of 64" % size)
 need(entry == base + 0x10000, "entry %#x is not RAM_BASE + 0x10000" % entry)
 need(img[0x800:0x804] != b"\0\0\0\0", "no code at the stub entry 0x800")
