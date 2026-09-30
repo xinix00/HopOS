@@ -52,6 +52,13 @@ static RESET: Local<Cell<Option<&'static str>>> = Local::new(Cell::new(None));
 /// niet van adres wisselen, dus HOP-leven = node-leven. De taak houdt zijn
 /// pets in en het ijzer reset. Zonder gewapende watchdog blijft het bij de
 /// melding. De DHCP-keeper in net.rs roept dit bij `HOPOS_DHCP_LOST`.
+/// Een aai buiten de watchdog-taak om: vlak vóór de sprong van een flip en
+/// meteen na een landing, zodat de teller van de vertrekkende kern (12 s op
+/// de Pi) niet afloopt terwijl de nieuwe kern nog boot (30-09).
+pub(crate) fn pet_now() {
+    hw::pet_now();
+}
+
 pub(crate) fn request_reset(reason: &'static str) {
     println!("node: reset requested - {reason} HOPOS_RESET_REQUEST");
     let r = RESET.get();
@@ -221,6 +228,17 @@ mod hw {
         }
     }
 
+    /// Een aai buiten de taak om: vlak vóór de sprong van een flip, en
+    /// meteen na een landing. Dan is deze kern nog niet gewapend en telt de
+    /// teller van de vorige door (de Pi 5, 30-09: gereset na 12 s tijdens
+    /// 5 s framebuffer-geduld), dus op de Pi's een herlaad van wat de
+    /// vorige kern wapende.
+    pub(super) fn pet_now() {
+        wd::pet();
+        #[cfg(any(feature = "board-rpi4", feature = "board-rpi5"))]
+        wd::reload_if_armed(TIMEOUT_MS);
+    }
+
     impl fmt::Display for Hw {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match &self.desc {
@@ -292,6 +310,11 @@ mod hw {
         }
     }
 
+    /// Een aai buiten de taak om (rond een flip).
+    pub(super) fn pet_now() {
+        wdt::pet();
+    }
+
     impl fmt::Display for Hw {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match &self.desc {
@@ -343,6 +366,9 @@ mod hw {
         }
         fn pet(&mut self) {}
     }
+
+    /// Geen watchdog: niets te aaien.
+    pub(super) fn pet_now() {}
 
     impl fmt::Display for Hw {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

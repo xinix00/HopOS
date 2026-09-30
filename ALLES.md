@@ -4,6 +4,31 @@ De ene lijst van wat er nog moet, sinds de eerste boot op ijzer (30-09-2026).
 Per node wat er open staat, daaronder wat overal geldt. Wat af is gaat eruit,
 niet doorgestreept. Afspraak: één lijst, hier; `docs/README.md` wijst hierheen.
 
+## De tabel
+
+De afvinkmatrix van de Go-tijd (OLD/docs/support.md: boot, idle en klokken,
+devices en diensten per board), nu voor v3 en bijgehouden op ijzer. Legenda:
+✓ gezien op het board, ○ gebouwd maar op dit board nog niet gezien, ✗ ontbreekt
+of faalt, en een streep waar het bewust niet komt. Stand 30-09-2026, avond.
+
+| | QEMU virt | Pi 5 | Pi 4 | Radxa | Altra | O6N | M4 | LicheeRV |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Boot, EL2, kooi, zelftest | ✓ | ✓ | ✓ (zelftest koud: SError bij de VL805) | ✓ | ○ | ○ | ○ | ○ |
+| Hop als bewoner, welcome door de DNAT | ✓ | ✓ | ✓ | ✓ | ○ | ○ | ○ | ○ |
+| Kern-flip, warm | ✓ | ✓ uit de kale kern, ✗ uit de koude gui-kern (RP1) | ✓ (3x) | ✓ (1x) | ○ | ○ | – (geen CPU_OFF) | – |
+| NIC met interrupt | ✓ | ✓ MSI-X via de MIP | – (GENET gepold, zoals Go) | ✓ SPI 64 | – (igb gepold, bewust) | ○ (RTL8125, MSI-X via IORT) | ○ (tg3, AIC) | ○ (dwmac) |
+| Off-link door de NAT, SNTP | ✓ | ✓ | ✓ | ○ | ○ | ○ | ○ | ○ |
+| Watchdog gewapend en geaaid | – | ✓ PM (12 s) | ✓ PM | ✗ DW-WDT gemeten, aai komt | ○ SBSA | ○ SBSA | ○ | ○ DW-WDT |
+| Hardware-RNG voor de kern | ✗ (jitter) | ✓ RNG200 | ✓ RNG200 | ✗ TRNG komt | ○ SMCCC-TRNG of rndr | ○ rndr | ○ | ✗ (niets) |
+| Hardware-RNG voor de slots | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| Temperatuur in de tik | – | ✓ mailbox | ✓ mailbox | ✗ TSADC komt | ○ SMpro | ○ SCMI | ○ | – |
+| Klokbeleid (dvfs) | – | ✓ 1500/800 | ✓ 1500/600 | – | ○ | ○ `_CPC` | – | – |
+| Console op het glas | ✓ ramfb | ✓ via flip op de eerste kaart, ✗ sinds de herflash (firmware weigert) | ✓ 32 bpp | ✓ HDMI (geen EDID) | ○ GOP | ○ GOP | – | – |
+| USB xHCI (HID, display-app) | ✓ qemu-xhci | ○ 2 xHCI's up, niets ingeplugd | ✗ VL805 koud: versie 0, HCRST | ○ 1 van 2 DWC3 | ○ | ○ (10 xHCI's) | – | – |
+| Opslag (hopfs, volumes, OP_SYNC) | ✓ virtio-blk | – (bewust geen NVMe) | – | – (stateless, alles in het geheugen) | ○ NVMe | ○ NVMe | ○ ANS | – |
+| Console op 5555 | ✓ | ✓ | ✓ | ✓ | ○ | ○ | ○ | ○ |
+| Kaart of stick klaar in `target/` | – | ✓ 17:47 | ✓ 17:47 | ✓ 14:41 (zonder 5555) | ✓ 18:12 | ✓ 18:12 | ✓ 14:41 | ✗ donor-FIP |
+
 ## De nodes, één voor één
 
 ### Raspberry Pi 5 (pi5-1) — de eerste groene node
@@ -55,6 +80,12 @@ de RNG200 (`HOPOS_RNG200_UP`) en de PM-watchdog gewapend en geaaid.
       `HOPOS_USB_HALTED`) en zet hij de klok vol; dat zit pas in de kaart
       na een herflash. Proef: de nieuwe kaart koud booten (de dump op 5 en
       30 s is dan de referentie, `HOPOS_RP1_DIAG`) en dan flippen.
+- [ ] Koude boot van de kaart van 17:47 (gezien 21:50): `HOPOS_WD_ARMED` en
+      `HOPOS_CANARY_LIVE` koud, `HOPOS_CONPORT_UP`, RNG200, dvfs, USB,
+      Hop; de referentiedump (`HOPOS_RP1_DIAG`) toont `txstatus 0x21` en
+      een lopende ringpointer, terwijl elke mislukte flip `txstatus 0x0`
+      had: na een flip zond de GEM nooit iets uit. Het glas blijft ook koud
+      geweigerd (0x80000001, 5 s geduld).
 - [ ] De koude boot van de kaart van 14:32 (gezien 16:40): `HOPOS_RNG200_UP`,
       `HOPOS_CLOCK_UP` met de val naar 800 MHz na 30 s rust, USB, Hop met
       "no disk on this node", SNTP. Maar géén glas: `fb: mailbox
@@ -91,8 +122,16 @@ Generatie 4 (bundel L, 30-09 ~19:15), gelezen via `nc 192.168.1.40 5555`:
 de VideoCore, de PM-watchdog gewapend, en drie warme flips op rij (J, K, L)
 zonder de NIC-dood van de Pi 5 (de GENET wordt gepold).
 
-- [ ] De koude boot van de nieuwe kaart (na 19:30 gebouwd) lezen op 5555:
-      het glas, de watchdog, dvfs.
+- [ ] Koude boot van de kaart van 17:47 (gezien 21:55 op 5555): RNG200,
+      het glas, dvfs 600/1500, `HOPOS_WD_ARMED` en `HOPOS_CANARY_LIVE`,
+      `HOPOS_CONPORT_UP`, Hop. Maar de VL805 faalt koud: "firmware loaded
+      by the VideoCore, version now 0x0", dan "timeout on HCRST clear",
+      `HOPOS_USB_NONE`; en de eerste EL1-beurt van de zelftest krijgt een
+      SError (`HOPOS_OS_SELFTEST_FAIL timer=(Fault, vec 11, INTID 1023)`),
+      wat past bij een PCIe-toegang op een xHCI zonder firmware. Op de
+      flips J tot L was de zelftest wel ok. Go's handshake via vcmail
+      nakijken (OLD/metal/board/rpi4): de mailbox-notify hoort een versie
+      te geven, geen 0.
 
 ### Radxa Zero 3E (radxa-1)
 
@@ -113,11 +152,12 @@ staat (`display: 1920x1080p60 on HDMI`, `HOPOS_FB_CONSOLE`), de console op
 - [ ] De DW-WDT: gemeten (89478 ms op TOP 15) maar "NOT armed (no petting
       policy in v3 yet)": aansluiten op `hopos/src/watchdog.rs` zoals de
       PM-watchdog van de Pi.
-- [ ] Geen RNG (`HOPOS_RNG_INSECURE`), geen dvfs.
-- [ ] Geen SD-driver: geen schijf, geen staat over een herstart.
+- [ ] Geen RNG (`HOPOS_RNG_INSECURE`), geen dvfs. Geen SD-driver: bewust,
+      de Radxa's zijn stateless (Derek, 30-09).
 - [ ] De config zit in `hopos.ird`: na het flashen alleen te wijzigen met
       `CFG=` of in de APPEND-regel.
-- [ ] De koude flip weigert (geen staging van Hop op de kaart).
+- [ ] De koude flip weigert (geen staging van Hop op de kaart; stateless,
+      dus alleen een warme flip of een herstart van de kaart).
 
 ### Ampere Altra (altra-1)
 

@@ -374,6 +374,11 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     // FLIP: de landing, als eerste na de heap. Een overdracht van een
     // vorige kern draagt de bewoners; die adopteren de slots straks.
     let landing = flip::land(dtb);
+    // De watchdog van de vertrekkende kern loopt door: meteen herladen, vóór
+    // het framebuffer-geduld en de rest van de boot (de Pi 5, 30-09).
+    if landing.is_some() {
+        watchdog::pet_now();
+    }
 
     let exec: &'static Executor = EXEC.get();
     exec.set_clock(board.clock());

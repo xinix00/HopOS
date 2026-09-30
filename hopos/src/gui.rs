@@ -445,12 +445,15 @@ mod on {
                 if let Some(req) = sink.optical.next() {
                     mgr.enqueue(req, &mut sink);
                 }
+                // Een flip komt (FLIP_STOP): alle controllers stil, en
+                // zeggen dat het zo is. De taak eindigt; komt de sprong er
+                // niet, dan is de invoer weg tot de volgende boot. Het
+                // signaal telt in de stap én in de slaap erna: de slaap kan
+                // een seconde zijn, en de flip wacht hoogstens één (30-09:
+                // de eerste proef zag de stop nooit).
                 let wait = match sync::select(mgr.step(&mut sink), FLIP_STOP.wait()).await {
                     sync::Either::Left(w) => w,
                     sync::Either::Right(()) => {
-                        // Een flip komt: alle controllers stil, en zeggen dat
-                        // het zo is. De taak eindigt; komt de sprong er niet,
-                        // dan is de invoer weg tot de volgende boot.
                         mgr.stop_all().await;
                         println!("usb: {live} controller(s) halted for the flip HOPOS_USB_HALTED");
                         USB_QUIET.set();
@@ -458,13 +461,23 @@ mod on {
                     }
                 };
                 #[cfg(feature = "media")]
-                let _ = sync::select(
-                    exec.after(Duration::from_nanos(wait)),
-                    crate::optical::WAKE.wait(),
+                let slept = sync::select(
+                    sync::select(
+                        exec.after(Duration::from_nanos(wait)),
+                        crate::optical::WAKE.wait(),
+                    ),
+                    FLIP_STOP.wait(),
                 )
                 .await;
                 #[cfg(not(feature = "media"))]
-                exec.after(Duration::from_nanos(wait)).await;
+                let slept =
+                    sync::select(exec.after(Duration::from_nanos(wait)), FLIP_STOP.wait()).await;
+                if matches!(slept, sync::Either::Right(())) {
+                    mgr.stop_all().await;
+                    println!("usb: {live} controller(s) halted for the flip HOPOS_USB_HALTED");
+                    USB_QUIET.set();
+                    return;
+                }
             }
         }
 

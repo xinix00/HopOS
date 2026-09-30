@@ -127,6 +127,26 @@ fn arm_at(pm: Pa, timeout_ms: u64, now: fn() -> u64) -> Result<Desc, &'static st
     })
 }
 
+/// Herlaadt een watchdog die de VORIGE kern wapende (WRCFG staat op
+/// FULL_RESET) op `timeout_ms`, ook als deze kern hem zelf nog niet heeft:
+/// meteen na een flip-landing, vóór het framebuffer-geduld van 5 s en de
+/// RNG-warm-up. GEMETEN 30-09 op de Pi 5: de vertrekkende kern liet 12 s
+/// lopen, de nieuwe kwam pas na de zelftest aan zijn eigen `arm`, en de
+/// firmware meldde `PM_RSTS 00001020`, een volledige watchdog-reset. Zonder
+/// gewapende watchdog doet dit niets.
+pub fn reload_if_armed(timeout_ms: u64) {
+    let base = BASE.load(Relaxed);
+    if base == 0 {
+        return;
+    }
+    let pm = Pa(base);
+    if dev::read32(pm.add(RSTC)) & WRCFG_MASK != WRCFG_FULL_RESET {
+        return;
+    }
+    dev::write32(pm.add(WDOG), PASSWORD | ticks_for(timeout_ms));
+    dev::mb();
+}
+
 /// Laadt de teller terug op vol.
 pub fn pet() {
     let (base, ticks) = (BASE.load(Relaxed), TICKS.load(Relaxed));
