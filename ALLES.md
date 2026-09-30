@@ -17,15 +17,11 @@ na de tweede flip (alpha.17: de NAT ARP't naar de gateway) SNTP gelukt
 flip (generatie 4, de gui-smaak: `GUI=1 sh image/flip-bundle.sh rpi5`) zette
 de console op het glas (`HOPOS_FB_CONSOLE`, 1920x1080, 120x67 cellen; de
 bunny en de meetregels gezien op de HDMI) en bracht beide RP1-xHCI's op
-(`HOPOS_USB_UP`).
+(`HOPOS_USB_UP`). Daarna, tot generatie 9: de wandklok mee over de flip,
+de temperatuur in de tik, de NAT die de gateway-MAC niet meer van buren
+leert (18 van 18 connects naar example.com, `natin` telt de antwoorden),
+de RNG200 (`HOPOS_RNG200_UP`) en de PM-watchdog gewapend en geaaid.
 
-- [ ] Off-link TCP: 3 van 14 connects naar neverssl.com kwamen tot een
-      antwoord, na de NAT-fix (a12b68f: de gateway-MAC alleen uit unicast
-      aan ons, de verse router-neighbor wint) 5 van 15. Maar de Mac haalt
-      naar dezelfde server ook maar 7 van 12, en 12 van 12 naar example.com
-      en 1.1.1.1: het meetdoel was zelf wisselvallig. De tik telt sinds
-      c9013a5 `natin` en `natmiss`; de meting tegen example.com
-      (scratchpad/dl-test.sh) zegt of er nog iets van ons is.
 - [ ] Hardware-RNG voor de slots (zie Overal). De RNG200 van de SoC zaait
       sinds generatie 8 de kern-DRBG (`HOPOS_RNG200_UP`, gezien 30-09); de
       slots hebben er nog niets aan.
@@ -34,11 +30,10 @@ bunny en de meetregels gezien op de HDMI) en bracht beide RP1-xHCI's op
       (`HOPOS_CLOCK_CARRIED`, bewezen 30-09), maar de generaties 4 en 5
       begonnen nog op de vaste boot-klok en die offset is wat 6 erfde.
       Verdwijnt vanzelf na de volgende `HOPOS_CLOCK_SET`.
-- [ ] De PM-watchdog: geport, maar generatie 8 zei `the counter does not
-      run` (de teller telt op de BCM2712 pas ná FULL_RESET). Omgedraaid:
-      eerst wapenen, dan de proef. Te zien bij de volgende flip:
-      `HOPOS_WD_ARMED` en `HOPOS_CANARY_LIVE`; daarna de echte toets (Hop
-      stoppen of de kabel eruit: reset binnen ~12 s).
+- [ ] De PM-watchdog staat gewapend sinds generatie 9 (`HOPOS_WD_ARMED`
+      12 s, `HOPOS_CANARY_LIVE`, en de node leeft daarna gewoon door: de
+      aaien werken). De echte toets is nog niet gedaan: de kabel eruit of
+      Hop stoppen, en dan een reset binnen ~12 s (dat boot de kale kaart).
 - [ ] Dvfs via de mailbox: geport, maar de kaart heeft geen `arm_freq_min`
       (generatie 8: `HOPOS_CLOCK_NONE`, "one ARM clock"). Komt met de nieuwe
       kaart: `HOPOS_CLOCK_UP`, `HOPOS_CLOCK_EDGE` naar 800 MHz na 30 s rust.
@@ -154,6 +149,9 @@ node heeft er nog geen gedraaid.
       de control-page (additief ABI-blok) en ververst ze op verzoek, (3)
       applib gebruikt dat zaad voor TLS, DNS en de ISS, en meldt luid als het
       ontbreekt.
+- [ ] Hop's downloader weigert chunked transfer ("serve it with a
+      Content-Length"): example.com chunkt, een CDN ook. Of chunked lezen,
+      of het luid in de docs van de jobspec.
 - [ ] De leader-API van Hop staat stil tijdens een download: de dispatch
       doet één aanroep tegelijk en de download zit erin (POST en DELETE
       gaven HTTP 000 na 10 s; twee keer gezien op de Pi 5). De download
