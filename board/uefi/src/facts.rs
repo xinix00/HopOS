@@ -24,6 +24,11 @@ pub(crate) const MAX_ECAM: usize = 8;
 
 /// De MPIDR-affiniteit per logische core; core 0 is de onze.
 pub(crate) static CORE_MPIDR: [AtomicU64; MAX_CORES] = [const { AtomicU64::new(0) }; MAX_CORES];
+/// Het zaad uit het EFI_RNG_PROTOCOL (boot.rs, alleen met `hopos.efirng=1`):
+/// 64 bytes in acht woorden; [`EFI_SEED_LEN`] 0 = geen.
+pub(crate) static EFI_SEED: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+/// Hoeveel bytes van [`EFI_SEED`] gelden.
+pub(crate) static EFI_SEED_LEN: AtomicUsize = AtomicUsize::new(0);
 /// De efficiëntieklasse per logische core (MADT GICC offset 76).
 pub(crate) static CORE_CLASS: [AtomicU8; MAX_CORES] = [const { AtomicU8::new(0) }; MAX_CORES];
 /// Het aantal cores (enabled GICC's); 0 = geen MADT.

@@ -73,6 +73,11 @@ mod off {
 const LOADED_IMAGE_GUID: [u8; 16] = [
     0xa1, 0x31, 0x1b, 0x5b, 0x62, 0x95, 0xd2, 0x11, 0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b,
 ];
+/// EFI_RNG_PROTOCOL_GUID (3152bca5-eade-433d-862e-c01cdc291f44), in
+/// geheugenvolgorde.
+const RNG_GUID: [u8; 16] = [
+    0xa5, 0xbc, 0x52, 0x31, 0xde, 0xea, 0x3d, 0x43, 0x86, 0x2e, 0xc0, 0x1c, 0xdc, 0x29, 0x1f, 0x44,
+];
 /// EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID, in geheugenvolgorde.
 const SIMPLE_FS_GUID: [u8; 16] = [
     0x22, 0x5b, 0x4e, 0x96, 0x59, 0x64, 0xd2, 0x11, 0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b,
@@ -89,6 +94,8 @@ type GetMemoryMap = extern "efiapi" fn(
 ) -> Status;
 type ExitBootServices = extern "efiapi" fn(image: u64, key: usize) -> Status;
 type HandleProtocol = extern "efiapi" fn(handle: u64, guid: *const u8, iface: *mut u64) -> Status;
+/// EFI_RNG_PROTOCOL.GetRNG: `algo` null = het standaardalgoritme van de firmware.
+type GetRng = extern "efiapi" fn(this: u64, algo: *const u8, len: usize, out: *mut u8) -> Status;
 type SetWatchdog =
     extern "efiapi" fn(secs: usize, code: u64, len: usize, data: *const u16) -> Status;
 type OpenVolume = extern "efiapi" fn(this: u64, root: *mut u64) -> Status;
@@ -280,7 +287,6 @@ impl Efi {
 
     /// De eerste instantie van een protocol, ongeacht het handvat
     /// (`LocateProtocol`): de GOP van de console (gop.rs).
-    #[cfg_attr(not(feature = "gui"), expect(dead_code))]
     pub(crate) fn locate_protocol(&self, guid: &[u8; 16]) -> Option<u64> {
         type LocateProtocol =
             extern "efiapi" fn(guid: *const u8, registration: u64, iface: *mut u64) -> Status;
@@ -291,6 +297,27 @@ impl Efi {
         let st =
             unsafe { core::mem::transmute::<u64, LocateProtocol>(f) }(guid.as_ptr(), 0, &mut iface);
         (st == SUCCESS && iface != 0).then_some(iface)
+    }
+
+    /// Vult `dst` uit het EFI_RNG_PROTOCOL van de firmware (de TRNG achter
+    /// de firmware, zoals Linux' `efi_get_random_bytes`), of `false` zonder
+    /// het protocol of bij een weigering. Alleen vóór ExitBootServices.
+    pub(crate) fn rng(&self, dst: &mut [u8]) -> bool {
+        let Some(iface) = self.locate_protocol(&RNG_GUID) else {
+            return false;
+        };
+        // Het protocol is { GetInfo, GetRNG }: GetRNG is het tweede woord.
+        let f = Self::func(iface, 8);
+        // SAFETY: de invariant van `Efi`; `iface` kwam net van de firmware,
+        // `dst` leeft over de call en de firmware schrijft er hoogstens
+        // `dst.len()` bytes in (de spec); een null-algoritme is "standaard".
+        let st = unsafe { core::mem::transmute::<u64, GetRng>(f) }(
+            iface,
+            core::ptr::null(),
+            dst.len(),
+            dst.as_mut_ptr(),
+        );
+        st == SUCCESS
     }
 
     /// Waar de firmware ons laadde en hoe groot: `(basis, bytes)`.

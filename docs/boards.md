@@ -84,6 +84,8 @@ SMCCC TRNG van TF-A op de Altra, en anders jitter (EDK2 op QEMU). Tot
 30-09 zaaide dit board niets: de O6N bootte zonder één `trng:`-regel en
 de DRBG bleef ongeseed. De verwachte regels:
 
+Een UEFI-board zonder FEAT_RNG en zonder SMCCC-TRNG (de O6N: de Cix heeft geen van beide, 30-09) kan met `hopos.efirng=1` in hopos.cfg de TRNG achter de firmware gebruiken: de stub vraagt vóór ExitBootServices 64 bytes aan het EFI_RNG_PROTOCOL (wat Linux' `efi_get_random_bytes` ook doet) en de kern zaait zijn DRBG daarmee als bron `efi-rng` (`HOPOS_RNG_EFI_UP`). Alleen op verzoek: Go zag op 13-07 een firmware die in dat protocol bleef hangen. Na een flip is de firmware weg en zaait de kern weer uit de CPU.
+
 ```
 trng: rndr online, the kernel DRBG is seeded from rndr (FEAT_RNG) HOPOS_RNG_RNDR_UP                  (O6N)
 trng: smccc-trng online, the kernel DRBG is seeded from the SMCCC TRNG (DEN 0098) HOPOS_RNG_SMCCC_UP (Altra)

@@ -593,7 +593,14 @@ impl Board for Uefi {
         // Altra, anders jitter (EDK2 op QEMU), met één luide regel. Tot 30-09
         // zaaide dit board niets en bleef de DRBG stil ongeseed; nu krijgt
         // elk slot zijn zaad (`CTRL_RNG_SEED`) uit hardware waar die er is.
-        cpu::println!("{}", cpu::drbg::seed_from_cpu(cpu::idle::counter));
+        if facts::EFI_SEED_LEN.load(Relaxed) > 0 {
+            cpu::drbg::init(efi_fill, cpu::idle::counter);
+            cpu::println!(
+                "trng: EFI_RNG_PROTOCOL online, the kernel DRBG is seeded from the firmware TRNG (64 bytes at boot, hopos.efirng=1) HOPOS_RNG_EFI_UP"
+            );
+        } else {
+            cpu::println!("{}", cpu::drbg::seed_from_cpu(cpu::idle::counter));
+        }
         let cfg = self.config();
         if !cfg.is_empty() {
             cpu::println!("cfg: hopos.cfg from the ESP, {} bytes HOPOS_CFG", cfg.len());
@@ -851,3 +858,26 @@ mod tests {
         assert!(!is_16550(0x03) && !is_16550(0x0e));
     }
 }
+
+/// De bron "efi-rng" voor de DRBG: het zaad dat de stub uit het
+/// EFI_RNG_PROTOCOL haalde, één keer (de firmware is na ExitBootServices
+/// weg). De DRBG vraagt bij `init` 48 bytes en bij een herzaai 24; na de
+/// 64 is de bron op en houdt de DRBG zijn staat (drbg.rs `reseed`).
+fn efi_fill(dst: &mut [u8]) -> cpu::trng::Result<cpu::trng::Kind> {
+    const NAME: &str = "efi-rng";
+    let used = EFI_USED.load(Relaxed);
+    let len = facts::EFI_SEED_LEN.load(Relaxed);
+    if used + dst.len() > len {
+        return Err(cpu::trng::Error::Exhausted(cpu::trng::Kind::Soc(NAME)));
+    }
+    for (i, b) in dst.iter_mut().enumerate() {
+        let at = used + i;
+        let w = facts::EFI_SEED.get(at / 8).map_or(0, |w| w.load(Relaxed));
+        *b = w.to_le_bytes()[at % 8];
+    }
+    EFI_USED.store(used + dst.len(), Relaxed);
+    Ok(cpu::trng::Kind::Soc(NAME))
+}
+
+/// Hoeveel bytes van het EFI-zaad al gebruikt zijn.
+static EFI_USED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);

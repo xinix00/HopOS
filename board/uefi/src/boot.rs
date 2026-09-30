@@ -182,6 +182,25 @@ fn prepare(efi: &Efi, el: u8) -> Result<Enter, (&'static str, Status)> {
         facts::CFG[0].store(f.pa, Relaxed);
         facts::CFG[1].store(f.len, Relaxed);
     }
+    // De TRNG achter de firmware (EFI_RNG_PROTOCOL), alleen op verzoek: Go
+    // zag op 13-07 een firmware die er eeuwig in bleef hangen, dus
+    // `hopos.efirng=1` in hopos.cfg zet hem aan. Voor de O6N: geen
+    // FEAT_RNG en geen SMCCC-TRNG (30-09), en dit is wat Linux daar doet.
+    if cfg_text().contains("hopos.efirng=1") {
+        let mut seed = [0u8; 64];
+        if efi.rng(&mut seed) {
+            for (w, b) in facts::EFI_SEED.iter().zip(seed.chunks_exact(8)) {
+                w.store(u64::from_le_bytes(b.try_into().unwrap_or([0; 8])), Relaxed);
+            }
+            facts::EFI_SEED_LEN.store(seed.len(), Relaxed);
+            println!(
+                "uefi: EFI_RNG_PROTOCOL gave {} bytes of firmware entropy",
+                seed.len()
+            );
+        } else {
+            println!("uefi: EFI_RNG_PROTOCOL absent or refused, the kernel seeds from the CPU");
+        }
+    }
     if let Some(f) = efi.read_file(&STAGE_NAME, slots::STAGE_MAX, Some(slots::STAGE_PA)) {
         facts::STAGE[0].store(f.pa, Relaxed);
         facts::STAGE[1].store(f.len, Relaxed);
