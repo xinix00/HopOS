@@ -30,6 +30,13 @@ const TOK_END_TREE: u32 = 9;
 
 /// Een DTB groter dan 2 MB is onzin: dat begrenst al het rekenwerk.
 pub const MAX_BLOB: usize = 2 << 20;
+/// Een initrd groter dan 64 MB is niet van ons. Los van [`MAX_BLOB`]: de
+/// initrd is al lang niet alleen de config meer maar ook het image van Hop
+/// (de Pi's laden het als `initramfs`, de Radxa draagt het samen met
+/// `hopos.cfg`), en dat is 1,5 MB gestript en groeiend (30-09). Onder de
+/// oude grens van 2 MB viel een groter image stil weg ("no initramfs").
+/// Elke aanroeper begrenst daarna nog op zijn eigen laadvenster.
+pub const MAX_INITRD: u64 = 64 << 20;
 /// De vaste headergrootte (tot en met `size_dt_struct`).
 pub const HEADER_LEN: usize = 40;
 /// Zoveel geheugenbanken houden we bij.
@@ -371,7 +378,7 @@ impl<'a> Fdt<'a> {
         };
         let s = cell(b"linux,initrd-start")?;
         let e = cell(b"linux,initrd-end")?;
-        (e > s && e - s <= MAX_BLOB as u64).then_some((s, e))
+        (e > s && e - s <= MAX_INITRD).then_some((s, e))
     }
 
     /// Het /memreserve/-blok: regio's die de firmware voor zichzelf houdt,
@@ -798,6 +805,28 @@ mod tests {
         // bootargs is een /chosen-property, niet van de root.
         assert_eq!(f.root_string("bootargs"), None);
         assert_eq!(f.initrd(), Some((0x200_0000, 0x200_0100)));
+    }
+
+    /// Een initrd met het image van Hop erin is groter dan een DTB mag zijn;
+    /// alleen boven [`MAX_INITRD`] (of leeg, of achterstevoren) is hij weg.
+    #[test]
+    fn initrd_larger_than_a_dtb() {
+        let chosen = |s: u64, e: u64| {
+            let mut b = Builder::default();
+            b.begin("").begin("chosen");
+            b.prop("linux,initrd-start", &u64s(&[s]))
+                .prop("linux,initrd-end", &u64s(&[e]));
+            b.end().end();
+            b.blob()
+        };
+        let s = 0x0a20_0000;
+        let big = chosen(s, s + (3 << 20));
+        assert_eq!(Fdt::new(&big).unwrap().initrd(), Some((s, s + (3 << 20))));
+        let edge = chosen(s, s + MAX_INITRD);
+        assert!(Fdt::new(&edge).unwrap().initrd().is_some());
+        for (a, b) in [(s, s + MAX_INITRD + 1), (s, s), (s + 1, s)] {
+            assert_eq!(Fdt::new(&chosen(a, b)).unwrap().initrd(), None);
+        }
     }
 
     #[test]

@@ -13,13 +13,18 @@
 //! plekken waar U-Boot de DTB en de initrd liet (gemeten: de DTB op
 //! ~0x7ce9d000, 17 MB ónder een vaste bovengrens die Go eerst had).
 //!
-//! Een staging zoals QEMU's `-device loader` is er op dit bord niet: de
-//! eerste app komt straks via Hop over het netwerk. Tot dan plaatst de kern
-//! niets en zegt dat (`HOPOS_SLOT_NONE`).
+//! De staging: U-Boot laadt de initrd (de container van [`crate::initrd`]:
+//! `hopos.cfg` plus het image van de bewoner), `discover` kopieert hem naar
+//! de heap en splitst hem, en [`staged_image`] geeft het image-deel. De rol
+//! komt uit `hopos.stage` in de config of de APPEND-regel, zoals op de Pi's:
+//! `hop` (de standaard: Hop, de bevoorrechte bewoner) of `app` (het
+//! ABI-bewijs van appspike). Een initrd zonder image (de oude kale
+//! `hopos.cfg`) laat de kern niets plaatsen, luid.
 
 use crate::{POOL_BASE, RAM_MAPPED_END, STRUCT_WINDOW};
 use abi::Region;
 use abi::layout::{Plan, PlanSpec, Pool, carve_pool};
+use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 /// De control-pages van de eigen cores van de kern (Go: `nodeCtrlPA`).
 pub const NODE_CTRL_PA: u64 = 0x0620_0000;
@@ -41,11 +46,12 @@ pub const FLIP_SCRATCH_PA: u64 = WAKE_PA + 0x1000;
 pub const BLACK_BOX: Region = Region::new(WAKE_PA + 0x8000, 32 << 10);
 
 /// Het maatwoord van de staging (de vorm van QEMU virt): een MB in het
-/// staging-venster. Niemand vult het op dit board; de kern-flip gebruikt
-/// het venster erachter als plek voor een platgelegde nieuwe kern.
+/// staging-venster. Niemand vult het op dit board (het image staat in de
+/// heap); de kern-flip gebruikt het venster erachter als plek voor een
+/// platgelegde nieuwe kern.
 pub const STAGE_HDR_PA: u64 = crate::STAGE_WINDOW.base.0 + 0x10_0000;
-/// Het rolwoord, direct na de maat. Dit board leest het niet
-/// ([`staged_role`]); de constante is er voor de melding van de binary.
+/// Het rolwoord, direct na de maat. `discover` schrijft de rolcode hier
+/// zoals op de Pi's; de binary noemt het woord bij een onbekende rol.
 pub const STAGE_ROLE_PA: u64 = STAGE_HDR_PA + 8;
 /// Waar een gestaged image begint.
 pub const STAGE_PA: u64 = STAGE_HDR_PA + 0x10_0000;
@@ -149,17 +155,42 @@ pub enum StagedRole {
     Hop,
 }
 
-/// Er is geen staging op dit board.
+/// De rol uit `hopos.stage`: 0 = app, 1 = Hop, anders onbekend. Zonder
+/// DTB (dus zonder initrd) blijft hij app: de kern zoekt dan het image,
+/// vindt het niet en zegt `HOPOS_SLOT_NONE`, zonder token voor een Hop die
+/// er niet is.
+pub(crate) static ROLE: AtomicU64 = AtomicU64::new(0);
+
+/// Het image uit de initrd, of `None`. Het staat in de heap (Normal,
+/// gecachet), niet in het DRAM waar U-Boot het liet: dat mapt de identity
+/// map als Device, en de ELF-lezer leest ongealigneerd. Alleen de maat is
+/// getoetst (`initrd::split`); de inhoud is onvertrouwd en gaat door de
+/// ELF-lezer en `abi::place`.
 #[must_use]
 pub fn staged_image() -> Option<&'static [u8]> {
-    None
+    crate::copied(&crate::STAGE_COPY)
 }
 
-/// Zonder staging is de rol "app": de kern zoekt dan het image, vindt het
-/// niet en zegt `HOPOS_SLOT_NONE`. Geen Hop, dus ook geen token.
+/// De rol van de staging; een onbekende `hopos.stage` is `None` (de kern
+/// plaatst dan niets en zegt dat luid).
 #[must_use]
 pub fn staged_role() -> Option<StagedRole> {
-    Some(StagedRole::App)
+    match ROLE.load(Relaxed) {
+        0 => Some(StagedRole::App),
+        1 => Some(StagedRole::Hop),
+        _ => None,
+    }
+}
+
+/// De rolcode van een `hopos.stage`-waarde: leeg of `hop` is Hop (de vorm
+/// van de Pi's, `board_raspi::slots::role_code`).
+#[must_use]
+pub fn role_code(v: &str) -> u64 {
+    match v {
+        "" | "hop" => 1,
+        "app" => 0,
+        _ => 2,
+    }
 }
 
 // --- De kern-flip (hopos/src/flip.rs, docs/flip.md) ---------------------

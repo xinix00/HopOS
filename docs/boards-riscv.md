@@ -124,6 +124,47 @@ slot 2: stopped, partition and core released HOPOS_SLOT_STOPPED
 nog niet bellen (geen HVC #6-tegenhanger), dus een TX wacht op de failsafe
 van de switch.
 
+### De donor van de LicheeRV
+
+`image/licheerv-agent.sh` heeft twee vendor-bestanden nodig die niet in de
+repo staan (gitignored, geen eigen werk): `image/licheerv/donor-fip.bin` en
+`image/licheerv/fiptool.py`. Beide komen van Sipeed, en beide zijn op 30-09
+teruggevonden en gehasht:
+
+| Bestand | Herkomst | sha256 |
+| --- | --- | --- |
+| `donor-fip.bin` (440832 bytes) | Release `20260114` van [sipeed/LicheeRV-Nano-Build](https://github.com/sipeed/LicheeRV-Nano-Build/releases/tag/20260114), asset `2026-01-14-16-03-d4003f.tar.xz`; daarin `2026-01-14-16-03-d4003f.img`, partitie 1 (FAT16, type 0x0C, LBA 1 tot 32768, 16 MiB), het bestand `fip.bin` in de root. Naast hem staan daar `boot.sd`, `ver` (`2026-01-22-14-17-d4003f.img`) en de vlagbestanden. | `d85e68836f57a9fcb1bbfba3c1ccf93d1b062ac168305d7f0cc83a72a796c6b9` |
+| `fiptool.py` (25165 bytes) | Dezelfde repo, branch `main`: `fsbl/plat/cv181x/fiptool.py` (niet de `cv180x`-versie ernaast, die een ander hash heeft). | `cc1d37d0d8fbcb3e6180c0403bcf4fa5c7038306be13779f3b8b948915084bf5` |
+
+Dit is de donor van de Go-generatie: dezelfde bytes staan in de hoofd-checkout
+(`~/Git/haas.software/hop-os`) als `OLD/image/licheerv/donor-fip.bin` en
+`OLD/image/licheerv/fiptool.py` (gitignored, dus niet in een verse clone of
+een worktree). De kortste weg, vanuit een worktree naast de hoofd-checkout:
+
+```sh
+mkdir -p image/licheerv
+cp ../hop-os/OLD/image/licheerv/donor-fip.bin ../hop-os/OLD/image/licheerv/fiptool.py image/licheerv/
+LICHEERV_DONOR_SHA256=d85e68836f57a9fcb1bbfba3c1ccf93d1b062ac168305d7f0cc83a72a796c6b9 sh image/licheerv-agent.sh
+```
+
+Zonder die kopie: pak de tar uit (1,7 GB image), en haal `fip.bin` van
+partitie 1, bijvoorbeeld op de Mac met
+`hdiutil attach -readonly -imagekey diskimage-class=CRawDiskImage 2026-01-14-16-03-d4003f.img`
+en een `cp` vanaf het gemounte `boot`-volume; of zonder mount met
+`dd if=2026-01-14-16-03-d4003f.img of=p1.img bs=512 skip=1 count=32768` en
+een FAT-lezer (`mcopy -i p1.img ::fip.bin donor-fip.bin`).
+
+Niet elke Sipeed-release geeft dezelfde bytes. De `fip.bin` van release
+`20251230` (`2025-12-30-20-00-6073d5.img.xz`) is even groot, met dezelfde
+FSBL (bouwtijd `2025-12-29T19:21:03+08:00`), DDR-parameters en OpenSBI,
+maar een andere U-Boot in het LOADER_2ND-deel (29832 bytes verschil vanaf
+offset 0x28208); sha256
+`ead936116224c25467917859594d6f5f9af2fa883b52e19be86c780ff770494d`. Die
+U-Boot wordt nooit gestart (wij zijn de monitor), maar de FSBL pakt hem wel
+uit naar 0x8020_0020, onder RUNADDR; gemeten is alleen de donor hierboven.
+Zet daarom `LICHEERV_DONOR_SHA256`, zodat het script een andere donor
+weigert.
+
 ## De kooi
 
 Op QEMU bewezen (29-09) door de lifecycle van de kern: appspike in slot 1

@@ -7,7 +7,9 @@
 //! EL2 met x0 = DTB. De keten is van Radxa (donor-bytes uit hun image, zie
 //! `image/radxa-zero3.sh`); U-Boot's distro-boot vindt `extlinux.conf`,
 //! laadt het Image en `hopos.cfg` als initrd, en geeft de APPEND-regel als
-//! bootargs. Alle drie de kanalen GEMETEN werkend op 05-08 (Go).
+//! bootargs. Alle drie de kanalen GEMETEN werkend op 05-08 (Go). Sinds
+//! 30-09 draagt de initrd naast `hopos.cfg` ook het image van Hop (de
+//! container van [`initrd`]); de kanalen zelf bleven zoals ze gemeten zijn.
 //!
 //! Dit crate bezit de adressen van het board (RK3566-TRM en
 //! rk356x-base.dtsi), de identity map, het plan, de bedrading van de
@@ -34,6 +36,7 @@ extern crate alloc;
 mod arch;
 #[cfg(feature = "gui")]
 mod display;
+pub mod initrd;
 mod mmu;
 pub mod slots;
 pub mod soc;
@@ -164,8 +167,11 @@ pub const PHY_ADDR_DTS: u8 = 1;
 const AUTONEG_NS: u64 = 8_000_000_000;
 /// Zonder DTB: vier A55's.
 const CORES_DEFAULT: usize = 4;
-/// Een initrd (hopos.cfg) groter dan dit is geen config.
-const CFG_MAX: u64 = 1 << 20;
+/// De grootste initrd (config plus image) die de kern naar de heap haalt:
+/// Hop is 1,5 MB gestript (30-09), het laadvenster van de Pi's 14 MB; 16 MB
+/// uit de heap van ~60 MB laat de kern ruim genoeg over. Het script toetst
+/// dezelfde grens (image/radxa-zero3.sh, `INITRD_MAX`).
+pub const INITRD_MAX: u64 = 16 << 20;
 
 const _: () = {
     assert!(driver_dwmac4::NEED_BYTES <= NET_DMA.size);
@@ -197,8 +203,12 @@ static NIC_IRQ: Local<Cell<Option<(u32, IrqAck)>>> = Local::new(Cell::new(None))
 
 /// De kopie van de DTB in de heap (adres, lengte; 0 = geen).
 static DTB_COPY: [AtomicUsize; 2] = [const { AtomicUsize::new(0) }; 2];
-/// De kopie van de initrd (hopos.cfg) in de heap.
+/// De hele initrd in de heap (de container, of de kale config).
+static INITRD_COPY: [AtomicUsize; 2] = [const { AtomicUsize::new(0) }; 2];
+/// De config (`hopos.cfg`): een stuk van [`INITRD_COPY`].
 static CFG_COPY: [AtomicUsize; 2] = [const { AtomicUsize::new(0) }; 2];
+/// Het image van de bewoner: een stuk van [`INITRD_COPY`], 0 = geen.
+pub(crate) static STAGE_COPY: [AtomicUsize; 2] = [const { AtomicUsize::new(0) }; 2];
 /// Waar U-Boot de DTB en de initrd liet: gaten in de pool.
 static FW_HOLES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 /// Het bij boot gevonden DRAM (bytes, 0 = onbekend).
@@ -213,14 +223,15 @@ fn console_write(b: &[u8]) {
 }
 
 /// Een blob die in de heap gekopieerd staat.
-fn copied(slot: &[AtomicUsize; 2]) -> Option<&'static [u8]> {
+pub(crate) fn copied(slot: &[AtomicUsize; 2]) -> Option<&'static [u8]> {
     let [p, n] = slot;
     let (p, n) = (p.load(Relaxed), n.load(Relaxed));
     if p == 0 {
         return None;
     }
-    // SAFETY: `[p, p+n)` is een heap-allocatie die `copy_to_heap` vulde en
-    // nooit vrijgeeft; niemand schrijft er daarna nog in.
+    // SAFETY: `[p, p+n)` ligt in een heap-allocatie die `copy_to_heap`
+    // vulde en nooit vrijgeeft (`publish` zet alleen stukken daarvan);
+    // niemand schrijft er daarna nog in.
     Some(unsafe { core::slice::from_raw_parts(p as *const u8, n) })
 }
 
@@ -236,9 +247,62 @@ fn copy_to_heap(pa: u64, len: usize, slot: &[AtomicUsize; 2]) -> Option<&'static
     // SAFETY: `p` is een verse, niet-gedeelde allocatie van `len` bytes.
     let dst = unsafe { core::slice::from_raw_parts_mut(p, len) };
     dev::copy_out(dst, Pa(pa));
-    slot[0].store(p as usize, Relaxed);
-    slot[1].store(len, Relaxed);
+    publish(slot, dst);
     copied(slot)
+}
+
+/// Zet een stuk van een blijvende heap-kopie in `slot`, voor [`copied`].
+fn publish(slot: &[AtomicUsize; 2], b: &'static [u8]) {
+    slot[0].store(b.as_ptr() as usize, Relaxed);
+    slot[1].store(b.len(), Relaxed);
+}
+
+/// De initrd uit het DRAM naar de heap, gesplitst in config en image
+/// ([`initrd`]). Een initrd die niet te
+/// splitsen is, telt helemaal niet: liever luid zonder config en zonder
+/// bewoner dan een half gelezen config met een image van onbekende maat.
+fn take_initrd(start: u64, len: u64) {
+    if len > INITRD_MAX || !in_dram(start, len) {
+        cpu::println!(
+            "stage: initrd {start:#x}+{len:#x} outside the DRAM or over {INITRD_MAX} bytes, ignored HOPOS_STAGE_REFUSED"
+        );
+    } else if let Some(blob) = copy_to_heap(start, len as usize, &INITRD_COPY) {
+        match initrd::split(blob) {
+            Ok(parts) => {
+                publish(&CFG_COPY, parts.cfg);
+                if let Some(img) = parts.image {
+                    publish(&STAGE_COPY, img);
+                }
+            }
+            Err(e) => cpu::println!(
+                "stage: initrd of {len} bytes at {start:#x} refused: {e} HOPOS_STAGE_REFUSED"
+            ),
+        }
+    } else {
+        cpu::println!("stage: no heap for an initrd of {len} bytes HOPOS_STAGE_REFUSED");
+    }
+}
+
+/// De rol van de staging uit `hopos.stage` (config of APPEND), als woord
+/// in het plan zoals op de Pi's: de binary noemt het woord bij een
+/// onbekende rol. Meldt wat er gestaged is.
+fn take_role() {
+    let role = slots::role_code(boot_param("hopos.stage"));
+    slots::ROLE.store(role, Relaxed);
+    dev::write64(Pa(slots::STAGE_ROLE_PA), role);
+    let name = match role {
+        0 => "app",
+        1 => "hop",
+        _ => "unknown (nothing will be placed)",
+    };
+    match copied(&STAGE_COPY) {
+        Some(img) => cpu::println!(
+            "stage: {} KB image from the initrd at {:#x}, role {name}",
+            img.len() >> 10,
+            img.as_ptr() as usize
+        ),
+        None => cpu::println!("stage: no image in the initrd, role {name}"),
+    }
 }
 
 /// Ligt `[pa, pa+len)` in het DRAM dat de identity map dekt?
@@ -494,9 +558,7 @@ impl Board for Rk3566 {
         if let Some((s, e)) = f.initrd() {
             FW_HOLES[2].store(s, Relaxed);
             FW_HOLES[3].store(e - s, Relaxed);
-            if e - s <= CFG_MAX && in_dram(s, e - s) {
-                let _ = copy_to_heap(s, (e - s) as usize, &CFG_COPY);
-            }
+            take_initrd(s, e - s);
         }
         let gic_ok = f
             .gic_v3()
@@ -521,6 +583,7 @@ impl Board for Rk3566 {
             ),
             None => cpu::println!("fb: none from U-Boot (as measured 05-08), UART only"),
         }
+        take_role();
         Self::report_watchdog();
     }
 
