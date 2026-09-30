@@ -19,12 +19,12 @@ of faalt, en een streep waar het bewust niet komt. Stand 30-09-2026, avond.
 | NIC met interrupt | ✓ | ✓ MSI-X via de MIP | – (GENET gepold, zoals Go) | ✓ SPI 64 | – (igb gepold, bewust) | ✓ RTL8125B, MSI-X via de ITS (LPI 8192) | ○ (tg3, AIC) | ○ (dwmac) |
 | Off-link door de NAT, SNTP | ✓ | ✓ | ✓ | ○ | ○ | ○ | ○ | ○ |
 | Watchdog gewapend en geaaid | – | ✓ PM (12 s) | ✓ PM | ✓ DW-WDT (89 s) | ○ SBSA | ✓ SBSA (8,5 s) | ○ | ○ DW-WDT |
-| Hardware-RNG voor de kern | ✗ (jitter) | ✓ RNG200 | ✓ RNG200 | ✓ rk3568-rng | ○ SMCCC-TRNG of rndr | ○ rndr | ○ | ✗ (niets) |
-| Hardware-RNG voor de slots | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| Hardware-RNG voor de kern | ✗ (jitter) | ✓ RNG200 | ✓ RNG200 | ✓ rk3568-rng | ○ SMCCC-TRNG of rndr (fc5348f) | ○ rndr (fc5348f, nog te flippen) | ○ | ✗ (niets) |
+| Hardware-RNG voor de slots (CTRL_RNG_SEED, fc5348f) | ○ jitter | ○ | ○ | ○ | ○ | ○ | ○ | ○ |
 | Temperatuur in de tik | – | ✓ mailbox | ✓ mailbox | ✗ TSADC converteert niet (Go ook niet) | ○ SMpro | ✓ SCMI (39 C in de agentlijst) | ○ | – |
 | Klokbeleid (dvfs) | – | ✓ 1500/800 | ✓ 1500/600 | – | ○ | ✓ vijf `_CPC`-domeinen, 2600 MHz | – | – |
 | Console op het glas | ✓ ramfb | ✓ via flip op de eerste kaart, ✗ sinds de herflash (firmware weigert) | ✓ 32 bpp | ✓ HDMI (geen EDID) | ○ GOP | ✓ GOP 1920x1080 | – | – |
-| USB xHCI (HID, display-app) | ✓ qemu-xhci | ○ 2 xHCI's up, niets ingeplugd | ✗ VL805 koud: versie 0, HCRST | ○ 2 DWC3 up, niets ingeplugd | ○ | ○ 10 xHCI's up, één super-speed apparaat op XHC4 | – | – |
+| USB xHCI (HID, display-app) | ✓ qemu-xhci | ○ 2 xHCI's up, niets ingeplugd | ✗ VL805 koud: versie 0, HCRST | ○ 2 DWC3 up, niets ingeplugd | ○ | ✓ 10 xHCI's up, de Blu-ray-drive over USB-BOT leest de disc (Lumen) | – | – |
 | Opslag (hopfs, volumes, OP_SYNC) | ✓ virtio-blk | – (bewust geen NVMe) | – | – (stateless, alles in het geheugen) | ○ NVMe | ✓ NVMe Lexar 4 TB, hopfs hersteld (generatie 3456) | ○ ANS | – |
 | Console op 5555 | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ○ | ○ |
 | Hardwaredecoder (media-smaak) | – | – | – | – | – | ✓ Linlon V8, 85,7 fps 4K P010 via de grant | – | – |
@@ -91,10 +91,9 @@ met `hopos.cfg` naast `EFI/`.
 - [ ] De VPU had één herstelcyclus nodig ("incomplete power state
       pgctrl=0x7cef000"); waarom.
 - [ ] `hopos.codecdemo`, de kernmeting, naast de 85,7 fps van apps/decode.
-- [ ] Lumen draait (poort 8098, 8 cores, de volumes van de NVMe); nu de
-      mediaketen zelf: een disc in de drive (op XHC4 poort 2 zit een
-      super-speed apparaat), de optische drive over USB-BOT en MMC (nergens
-      getoetst), de HEVC-encoder, WebDAV.
+- [ ] Lumen draait (poort 8098, 8 cores, de volumes van de NVMe) en leest
+      de Blu-ray in de drive over USB-BOT (18:40); nu de rest van de
+      mediaketen: MMC, de HEVC-encoder, WebDAV.
 - [ ] De display-app en HID op de xHCI's; hop-gui als job (de init-jobs
       van de Go-config zijn Go-ELF's, niet overgenomen).
 - [ ] cloudflare-lean porten (een Go-wrapper om lean) en als job erbij: de
@@ -102,16 +101,23 @@ met `hopos.cfg` naast `EFI/`.
 
 ### Mac mini M4
 
-Image: `target/apple-m4/hopos-apple.img` (14:41, config ingebakken), laden
-met `image/apple/boot-cycle.sh`.
+Image: `target/apple-m4/hopos-apple.img` (19:04, config ingebakken, hele
+16 KiB-pagina's); op de stick als `HOPOS-M4-V3.IMG`, naast het Go-object
+(`HOPOS-M4.IMG`). De M4 draait sinds 19:50 weer op Go (192.168.1.122,
+welcome geplaatst, NVMe AP0512Z, "black box: 0 bytes carried over"),
+omdat SPIN er om 20:00 op moet draaien.
 
-- [ ] Nooit gestart: onder m1n1 de bunny, de ADT met 6 E + 4 P cores, de
-      watchdogs stil, `cores: via m1n1's spin-table`, de ANS met de GPT, het
-      AIC-doel, tg3, DHCP, `HOPOS_APPLE_PREFLIGHT ok`, `HOPOS_CAGE_UP`,
-      `HOPOS_OS_SELFTEST ok`.
+- [ ] De eerste v3-boot via kmutil (19:1x, `install.sh go`) kwam niet op
+      het LAN: geen DHCP, geen nieuw MAC in de ARP-tabel, geen 5555. Blind,
+      want de M4 heeft geen console zonder debugkabel: eerst de dockchannel
+      lezen (USB-C naar de Mac, `macvdmtool reboot debugusb`, dan
+      `/dev/cu.kis-100000-ch-0`, board/apple/src/console.rs), dan pas
+      weten waar hij stokt: de bunny, de ADT met 6 E + 4 P cores, de
+      watchdogs stil, de ANS met de GPT, het AIC-doel, tg3, DHCP,
+      `HOPOS_APPLE_PREFLIGHT ok`, `HOPOS_CAGE_UP`, `HOPOS_OS_SELFTEST ok`.
 - [ ] De koude flip werkt er niet (PSCI CPU_OFF zonder EL3); na een
       verhuizing met een rode voorproef spint de oude core.
-- [ ] Installeren met kmutil (1TR), daarna `cores: ours`.
+- [ ] Na de eerste zichtbare boot: `cores: ours` (zonder m1n1's spin-table).
 
 ### LicheeRV Nano (RISC-V)
 
@@ -142,14 +148,14 @@ node heeft er nog geen gedraaid.
 
 ## Overal
 
-- [ ] **Hardware-RNG voor de slots. Essentieel.** Een app heeft geen
-      entropiebron: TLS en de ISS van leannet komen uit timer-jitter
-      (`HOP_TLS_ENTROPY_WEAK`). De kern zaait zichzelf al (rndr, SMCCC-TRNG,
-      de RNG200 van de Pi's; de Radxa-TRNG komt van de agent). Nodig: de
-      kern zaait elk slot bij de start met 32 bytes uit zijn DRBG op de
-      control-page (additief ABI-blok) en ververst ze op verzoek; applib
-      gebruikt dat zaad voor TLS, DNS en de ISS, en meldt luid als het
-      ontbreekt.
+- [ ] **Hardware-RNG voor de slots: gebouwd (fc5348f), nog op ijzer zien.**
+      Het zaad staat op de control page (CTRL_RNG_SEED/GEN/SOURCE, elke
+      seconde vers), applib::rand mengt het met jitter, Hop meldt
+      `HOP_TLS_ENTROPY_HW`. Per board na een flip `HOPOS_RNG_SLOTS
+      source=hardware` en in slot 1 `HOPOS_APP_RNG source=hardware` zien;
+      dan de tabel op ✓. Hop bouwt pas zonder patch na een hop-os-tag en
+      het ophogen van de drie tags in de hop-repo (agentd-hopos,
+      hopos-runner, hop-http); tot dan `HOP_REV=worktree`.
 - [ ] Hop's downloader weigert chunked transfer ("serve it with a
       Content-Length"): example.com chunkt, een CDN ook. Of chunked lezen,
       of het luid in de docs van de jobspec.
