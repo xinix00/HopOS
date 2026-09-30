@@ -746,7 +746,7 @@ async fn tick(exec: &'static Executor) {
         // elke N tikken de kop, de oudste 16 KiB van de ring en de staart,
         // zodat een lezer die pas na een kabel-herplug aanhaakt er een vangt.
         let replay_at = REPLAY_AT.load(Relaxed);
-        if replay_at != 0 && n % replay_at == 0 {
+        if replay_at != 0 && n.is_multiple_of(replay_at) {
             println!(
                 "console: replaying the first 16 KiB of this boot for a late reader (hopos.replay={replay_at}) HOPOS_CONSOLE_REPLAY"
             );
