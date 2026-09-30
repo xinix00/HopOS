@@ -98,31 +98,74 @@ Per stap: wat er moet staan, en wat het betekent als het er niet staat.
     kabel.
 11. **Pi 5 NIC**: `net: pcie2 link up (status 0x..b0), RP1 1de4:0001`,
     `net: rp1 up, PHY at 1`, `net: gem up, 1000 Mbps full duplex, RX on
-    INTID 166`. `PCIe bring-up failed` met de status in de regel ervoor:
+    INTID 166`. De lijn is een flank (een MSI via de MIP): het board
+    registreert hem als `Trigger::Edge` en de dispatcher zet GICD_ICFGR
+    vóór de enable (`cpu::irq::enable_as`). `PCIe bring-up failed` met de status in de regel ervoor:
     RESCAL, PLL of training (de reeks is Go's bewezen probe6-reeks).
     `RX polled: ...`: de NIC werkt, de MSI-X-weg niet; noteer de reden.
 12. **`slots: cage up HOPOS_CAGE_UP`** en `core 1..3 mailbox Ok(Cold)`.
-13. **`oscore: cpu 0 self-test timer=Some((Timer, ~1000)) yield=Some((Yield,
-    ..)) kick=Some((Ipi, ..)) HOPOS_OS_SELFTEST ok`**. Op QEMU `raspi4b`
+13. **`oscore: cpu 0 self-test timer=(Timer, ~1000 us) yield=(Yield, ..
+    us) kick=(Ipi, .. us) HOPOS_OS_SELFTEST ok`**. Op QEMU `raspi4b`
     gemeten 29-09: timer 1344 us op een termijn van 1 ms, yield 22 us, kick
-    8 us. `kick=Some((Timer, ~200000))`: de SGI kwam niet aan of de peek
-    zag hem niet; noteer de `irq: GIC-400`-regel (CTLR, cpu mask). Een
-    kick die wél aankomt maar als `Irq` terugkomt: GICC_HPPIR gaf een andere
-    INTID (een firmware-lijn met hogere prioriteit). De eerste `HOPOS_TICK`
-    toont dan `kicks=1` en `other=1`.
+    8 us. `kick=(Timer, ~200000 us)`: de SGI kwam niet aan of de peek
+    zag hem niet; noteer de `irq: GIC-400`-regel (CTLR, cpu mask). Sinds
+    30-09 handelt elke proef eerst af wat al bij de GIC wacht, doet hij het
+    tot drie keer opnieuw als een device-lijn hem onderbrak, en noemt een
+    onderbroken proef de lijn: `(Irq, 0 us, vec 9, INTID 166, INTID 166
+    pending before entry, try 3)`. Les van de eerste Pi 5-boot (30-09): drie
+    keer `Irq` na 0 us was de NIC-lijn (of een firmware-lijn, `other=1`)
+    die tussen `probe_nic` en de zelftest één keer vuurde; de vector zette
+    de vlag en keerde gemaskeerd terug, maar de dispatch-taak draait pas
+    als de executor loopt, dus de lijn stond pending bij elke proef. Staat
+    er ná drie pogingen nog een INTID, dan is die lijn echt blijvend: een
+    level-lijn zonder ack meldt de dispatch daarna als `HOPOS_IRQ_STUCK`
+    en zet hem uit.
 14. **De eerste plaatsing**: `cage: slot 1 core 1 cold: PSCI CPU_ON
     mpidr=0x1` (Pi 5: `0x100`) `-> Ok(())` en `HOPOS_SLOT_START`. Hangt
     het na `cage: slot 1 built`: geen PSCI (Pi 4: `bl31.bin` ontbreekt of
     `armstub=` staat er niet). `Err(AlreadyOn)` op de Pi 5: de armstub
     zette de cores al aan; dan een upstream-TF-A als armstub (Go-notitie).
-15. **Hop**: zijn regels via de servicer, `HOPOS_NODE_IP`, en `curl
-    http://<ip>:8080/health`.
+15. **Hop**: `slot 1: applib: stage-1 on: RAM write-back, control page
+    Normal-NC, rings write-back, 16 KB of tables HOPOS_APP_MMU` als eerste
+    regel, dan zijn regels via de servicer, `HOPOS_NODE_IP`, en `curl
+    http://<ip>:8080/health`. Een fault van Hop op EL1 (een alignment-fault,
+    een ongedefinieerde instructie) staat sinds 30-09 als `slot 1: Hop
+    faulted at EL1 vec=4 esr=0x96000021 (data abort, alignment fault)
+    elr=0x5... far=0x... HOPOS_HOP_FAULT`: de échte ESR, ELR en FAR uit de
+    vectortabel van applib. Staat er `Hop faulted vec=8 esr=0x82000005
+    (instruction abort, translation fault) far=0x200`, dan sprong hij naar
+    een lege VBAR_EL1: een Hop gebouwd tegen een applib van vóór 30-09
+    (`image/rpi5.sh` bouwt hem via `tools/hop-build.sh` tegen deze
+    werkboom; `HOP_PATCH=0` neemt de tag van de hop-repo). `HOPOS_APP_NO_MMU`:
+    de stage-1 is geweigerd en elke ongealigneerde toegang faultt.
 16. **`HOPOS_TICK`** elke seconde, `sleeps` loopt op: de WFE-slaap met de
     event-stream van EL2 werkt. Staat `sleeps` op 0 of loopt de tik achter:
     de event-stream (CNTHCTL_EL2 in `pi_entry!`).
 17. **Minuten laten draaien met verkeer** (Pi 5): de C1-stepping kan stil
     bevriezen onder RX-DMA plus fabric-werk (`OLD/docs/v1/archief/
     bcm2712-c1-erratum.md`); noteer de stepping en de tijd tot de freeze.
+
+## De eerste Pi 5-boot (30-09)
+
+Na een gave boot tot `HOPOS_HOP_START` twee fouten, beide in deze boom
+gefikst en op de host en QEMU getoetst, nog niet op ijzer:
+
+- **De zelftest van de OS-core** gaf `timer`, `yield` én `kick` op 0 us
+  terug, de eerste twee als `Irq`. Niet een lijn die permanent aanstond:
+  `set_edge(166)` werd al vóór de enable gezet, de tik telde 58 NIC-
+  interrupts per seconde (LAN-ruis, geen storm) en `os(irq=0)`. Wel een
+  lijn die al pending stond toen de zelftest begon, in de boot, vóór de
+  executor ooit de dispatch draaide (stap 13). De soort van een lijn is
+  nu deel van de registratie (`cpu::irq::Trigger`), en een level-lijn
+  zonder ack die binnen één ronde blijft terugkomen gaat uit
+  (`HOPOS_IRQ_STUCK`).
+- **Hop viel op EL1** (`esr=0x82000005 far=0x200`: de instructie-abort op
+  `VBAR_EL1 + 0x200`, dus de tweede fault). Een app draaide met de MMU
+  uit, dus op Device, en de A76 geeft op Device een alignment-fault bij
+  elke ongealigneerde toegang; QEMU-TCG toetst dat niet onder stage 2.
+  Sinds 30-09 zet `_start` van elke app een stage-1 aan (`applib::mmu`)
+  en vangt een vectortabel elke fault op EL1 (`CTRL_APP_FAULT_*`,
+  `tools/qemu-test-fault.sh`).
 
 ## Bekende gaten
 

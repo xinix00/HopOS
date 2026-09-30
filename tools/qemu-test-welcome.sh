@@ -83,7 +83,7 @@ cd "$DIR"
 echo "== bouwen: hopos (qemuvirt), welcome, en agentd-hopos in $HOP_DIR"
 cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt
 cargo build --quiet --release --target "$TARGET" -p welcome
-(cd "$HOP_DIR" && cargo build --quiet --release --target "$TARGET" -p agentd-hopos)
+HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
 
 # De artifact-server: welcome zonder debug-info, de symbolen blijven voor
 # de plaatsing.
@@ -98,7 +98,7 @@ HPID=$!
 
 echo "== booten op QEMU virt met Hop (tot ${TIMEOUT}s; leader :$LEADERPORT, artifacts :$ARTPORT, web :$WEBPORT -> gast :80)"
 SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" WEBPORT="$WEBPORT" \
-	HOP_DIR="$HOP_DIR" APP=hop DISK="$DISK" \
+	HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISK="$DISK" \
 	sh "$DIR/image/qemu-run.sh" </dev/null >"$LOG" 2>&1 &
 QPID=$!
 

@@ -237,6 +237,48 @@ impl Back {
     }
 }
 
+/// Wat één proef van [`OsCore::selftest`] zag: waardoor de kern terugkwam,
+/// na hoeveel ticks, met welke vectorindex, en wat de controller op dat
+/// moment als hoogste pending liet zien, vóór de overgang en erna (de peek
+/// van [`Bell::pending`], zonder claim).
+///
+/// Waarom zo veel: op de eerste Pi 5-boot (30-09) gaf de zelftest drie keer
+/// `Irq` na 0 us, en de regel zei niet wélke lijn. Een lijn die al vóór de
+/// overgang pending stond (een NIC-interrupt uit de boot die nog niemand
+/// claimde) is een andere fout dan een lijn die tijdens de beurt komt. Met
+/// de INTID erbij is dezelfde klasse fout op de O6N en de Altra in één
+/// regel te lezen.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct Probe {
+    /// Waardoor de kern terugkwam.
+    pub back: Back,
+    /// Na hoeveel ticks van de teller.
+    pub ticks: u64,
+    /// De vectorindex van de terugkeer (8 synchroon, 9 IRQ, 10 FIQ).
+    pub vec: u64,
+    /// De hoogste pending INTID vlak vóór de overgang (1023 = niets; zonder
+    /// bel [`Probe::NONE`]).
+    pub before: u32,
+    /// De hoogste pending INTID direct na de terugkeer.
+    pub after: u32,
+}
+
+impl Probe {
+    /// "Geen peek": een OS-core zonder bel.
+    pub const NONE: u32 = u32::MAX;
+
+    /// Stond er vóór de overgang al een lijn pending die niet de kick
+    /// `kick` is, dan die INTID. De GIC zegt 1023 (en hoger) voor niets.
+    #[must_use]
+    pub const fn stale(&self, kick: u32) -> Option<u32> {
+        if self.before >= 1020 || self.before == kick {
+            None
+        } else {
+            Some(self.before)
+        }
+    }
+}
+
 /// Wat één beurt van de rotatie deed.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Turn {
@@ -543,9 +585,9 @@ impl OsCore {
     /// stub in het kern-image) die spint (`yield_ = false`) of meteen HVC #1
     /// doet, met `kick` vlak vóór de overgang (bijvoorbeeld een SGI naar
     /// deze core, om het IPI-pad te bewijzen), en de CNTHP op `ticks` na
-    /// nu. Geeft waardoor de kern terugkwam en na hoeveel ticks; `None` als
-    /// er geen heap was voor het scratch-ctx-blok.
-    pub fn selftest(&mut self, yield_: bool, ticks: u64, kick: &dyn Fn()) -> Option<(Back, u64)> {
+    /// nu. Geeft wat de proef zag ([`Probe`]); `None` als er geen heap was
+    /// voor het scratch-ctx-blok.
+    pub fn selftest(&mut self, yield_: bool, ticks: u64, kick: &dyn Fn()) -> Option<Probe> {
         let mut block: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
         block.try_reserve_exact(CTX_WORDS).ok()?;
         block.resize(CTX_WORDS, 0);
@@ -559,11 +601,14 @@ impl OsCore {
         ctx_write(ctx, CTX_STATE, CtxState::Running.raw());
         let hcr = self.hcr & !HCR_VM;
         let daif = arch::mask();
+        let peek = || self.bell.map_or(Probe::NONE, |b| (b.pending)());
+        let before = peek();
         arch::timer_arm(arch::counter().wrapping_add(ticks));
         kick();
         let t0 = arch::counter();
         let vec = arch::enter(self.flavor, ctx, hcr);
         let dt = arch::counter().wrapping_sub(t0);
+        let after = peek();
         let fired = arch::timer_disarm();
         let back = self.settle(ctx, vec, fired);
         arch::restore(daif);
@@ -578,7 +623,13 @@ impl OsCore {
         };
         counter.fetch_sub(1, Relaxed);
         drop(block);
-        Some((back, dt))
+        Some(Probe {
+            back,
+            ticks: dt,
+            vec,
+            before,
+            after,
+        })
     }
 }
 

@@ -39,8 +39,8 @@ pub use dispatch::{
     kick, prepare_secondary, prepare_smp, residents, revoke, rx_due, wake_due,
 };
 pub use oscore::{
-    Back, Bell, OsCore, SCHED_OS_KICK, SCHED_OS_KICK_PA, STATS as OS_STATS, Stats as OsStats,
-    TURN_CAP_NS, Turn, held, hold, host, hosts, rehost, release_held, unhost,
+    Back, Bell, OsCore, Probe, SCHED_OS_KICK, SCHED_OS_KICK_PA, STATS as OS_STATS,
+    Stats as OsStats, TURN_CAP_NS, Turn, held, hold, host, hosts, rehost, release_held, unhost,
 };
 
 use core::fmt;

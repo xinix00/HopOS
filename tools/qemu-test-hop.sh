@@ -52,6 +52,9 @@
 #   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT   de host-poorten; bezet = een vrije
 #                                          poort van het OS, luid gemeld
 #   HOP_DIR=pad                            de hop-repo (standaard ../hop/hop)
+#   HOP_PATCH=0                            Hop tegen de tag van de hop-repo in
+#                                          plaats van de applib van deze
+#                                          werkboom (tools/hop-build.sh)
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -100,7 +103,7 @@ cd "$DIR"
 echo "== bouwen: hopos (qemuvirt), appspike, en agentd-hopos in $HOP_DIR"
 cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt
 cargo build --quiet --release --target "$TARGET" -p appspike
-(cd "$HOP_DIR" && cargo build --quiet --release --target "$TARGET" -p agentd-hopos)
+HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
 
 # De artifact-server: appspike zonder debug-info (1,8 MB naar 226 KB,
 # gemeten 29-09), symbolen blijven voor de plaatsing.
@@ -117,7 +120,7 @@ OSCPU="${OSCORE:-0}"
 APPCPU=1
 [ "$OSCPU" = 0 ] || APPCPU=0
 echo "== booten op QEMU virt met Hop, ${SMP:-4} cores, OS-core $OSCPU (tot ${TIMEOUT}s; system :$SYSPORT, agent :$AGENTPORT, leader :$LEADERPORT, artifacts :$ARTPORT)"
-SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP=hop DISK="$DISK" \
+SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISK="$DISK" \
 	sh "$DIR/image/qemu-run.sh" </dev/null >"$LOG" 2>&1 &
 QPID=$!
 
@@ -260,7 +263,7 @@ fi
 echo "== herstart op dezelfde schijf (tot ${TIMEOUT}s)"
 LOG1="$LOG"
 LOG="$(mktemp -t hopos-qemu-hop2.XXXXXX)"
-SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP=hop DISK="$DISK" \
+SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISK="$DISK" \
 	sh "$DIR/image/qemu-run.sh" </dev/null >"$LOG" 2>&1 &
 QPID=$!
 RESTART_MARKS="HOPOS_FS_UP fresh=0|hopfs: tree restored|HOPOS_HOP_START slot=1 core=0 cpu=$OSCPU |slot 1: .*HOP_ADOPTED"

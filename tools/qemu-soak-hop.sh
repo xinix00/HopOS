@@ -118,7 +118,7 @@ echo "== bouwen: hopos (qemuvirt) en welcome hier, hoplb-hopos in $HOPLB_DIR, ag
 (cd "$DIR" && cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt) || exit 1
 (cd "$DIR" && cargo build --quiet --release --target "$TARGET" -p welcome) || exit 1
 (cd "$HOPLB_DIR" && cargo build --quiet --release --target "$TARGET" --no-default-features --features hopos --bin hoplb-hopos) || exit 1
-(cd "$HOP_DIR" && cargo build --quiet --release --target "$TARGET" -p agentd-hopos) || exit 1
+HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")" || exit 1
 KERN="$DIR/target/$TARGET/release/hopos"
 OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
 strip_to() {
@@ -376,7 +376,7 @@ run_one() {
 	LEADERPORT="$(port)"
 	WEBPORT="$(port)"
 	SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" WEBPORT="$WEBPORT" \
-		HOP_DIR="$HOP_DIR" APP=hop DISK="$R/disk.img" \
+		HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISK="$R/disk.img" \
 		sh "$DIR/image/qemu-run.sh" -monitor "unix:$MON,server,nowait" </dev/null >"$LOG" 2>&1 &
 	QPID=$!
 	watch "$R" "$LOG" "$MON" &

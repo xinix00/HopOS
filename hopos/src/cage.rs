@@ -18,10 +18,10 @@
 //! schrijfwerk van `armSlot` (control-page, ringen, ctx-woorden).
 
 use abi::hopabi::{
-    AppStatus, CTRL_CORES, CTRL_ENTRY, CTRL_EXIT_CODE, CTRL_FAULT_ESR, CTRL_FAULT_FAR,
-    CTRL_FAULT_VEC, CTRL_HEARTBEAT, CTRL_IDLE_MODE, CTRL_KILL, CTRL_MBOX_PA, CTRL_RAM_SIZE,
-    CTRL_S2_TABLE, CTRL_SHARED, CTRL_SLOT, CTRL_SMP_REQ, CTRL_STATUS, CTRL_VEC_PA, CTRL_WALL_OFF,
-    IDLE_YIELD,
+    AppStatus, CTRL_APP_FAULT_ELR, CTRL_APP_FAULT_ESR, CTRL_APP_FAULT_FAR, CTRL_APP_FAULT_VEC,
+    CTRL_CORES, CTRL_ENTRY, CTRL_EXIT_CODE, CTRL_FAULT_ESR, CTRL_FAULT_FAR, CTRL_FAULT_VEC,
+    CTRL_HEARTBEAT, CTRL_IDLE_MODE, CTRL_KILL, CTRL_MBOX_PA, CTRL_RAM_SIZE, CTRL_S2_TABLE,
+    CTRL_SHARED, CTRL_SLOT, CTRL_SMP_REQ, CTRL_STATUS, CTRL_VEC_PA, CTRL_WALL_OFF, IDLE_YIELD,
 };
 use abi::layout::{
     self, ABI_TAIL, CTRL_STRIDE, CTX_KICK_TARGET, CTX_SMP, CtxState, LINK_BASE, NET_RING_DATA_CAP,
@@ -759,6 +759,10 @@ impl Cage for ArmCage {
             fault_vec: self.ctrl_read(slot, CTRL_FAULT_VEC),
             fault_esr: self.ctrl_read(slot, CTRL_FAULT_ESR),
             fault_far: self.ctrl_read(slot, CTRL_FAULT_FAR),
+            app_fault_vec: self.ctrl_read(slot, CTRL_APP_FAULT_VEC),
+            app_fault_esr: self.ctrl_read(slot, CTRL_APP_FAULT_ESR),
+            app_fault_elr: self.ctrl_read(slot, CTRL_APP_FAULT_ELR),
+            app_fault_far: self.ctrl_read(slot, CTRL_APP_FAULT_FAR),
         }
     }
 

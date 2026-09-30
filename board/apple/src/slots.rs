@@ -176,7 +176,7 @@ fn preflight(plan: &Plan) -> bool {
             let t = os.selftest(false, ms, &|| {});
             let y = os.selftest(true, 100 * ms, &|| {});
             let k = os.selftest(false, 100 * ms, &|| crate::cores::kick(here));
-            let back = |r: Option<(Back, u64)>| r.map(|(b, _)| b);
+            let back = |r: Option<cpu::el2::Probe>| r.map(|p| p.back);
             let ok = back(t) == Some(Back::Timer)
                 && back(y) == Some(Back::Yield)
                 && back(k) == Some(Back::Ipi);

@@ -33,7 +33,7 @@ use board::Error;
 use board_raspi::driver_gicv2::Gic;
 use board_raspi::map::{self, L2, Tables};
 use board_raspi::{NicCtx, Raspi, Soc};
-use cpu::irq::Line;
+use cpu::irq::{Line, Trigger};
 use dev::Pa;
 use driver_brcmpcie::{EpBar, InWin, OutWin, Rc};
 use driver_gem::Gem;
@@ -311,6 +311,19 @@ fn gem_ack() {
 
 static GEM_ACK: fn() = gem_ack;
 
+/// De GIC-lijn van MIP-vector `v`, en zijn soort: SPI 128 + v, en een flank.
+///
+/// Een MSI via de MIP is een puls (Linux, irq-bcm2712-mip.c: de MIP-lijnen
+/// gaan als IRQ_TYPE_EDGE_RISING naar de GIC, en de MIP zelf staat met
+/// CFG_HOST op flank), en een SPI staat in de GIC-400 na reset op level. De
+/// dispatcher zet de soort vóór de enable (`cpu::irq::enable_as`), zodat
+/// het board hem niet los kan vergeten. Tot 30-09 riep `wire_irq`
+/// `Gic::set_edge` zelf aan; dat deed het goed, maar de keuze stond buiten
+/// de registratie.
+const fn mip_line(v: u32) -> (Line, Trigger) {
+    (Line(32 + MIP_FIRST_SPI + v), Trigger::Edge)
+}
+
 /// Bedraadt de GEM-interrupt: RP1-MSI-X-entry naar de MIP naar de GIC.
 /// Elke stap die faalt laat de NIC pollen, met de reden.
 fn wire_irq(rc: &Rc, nic: &mut Gem) -> Result<u32, &'static str> {
@@ -361,9 +374,10 @@ fn wire_irq(rc: &Rc, nic: &mut Gem) -> Result<u32, &'static str> {
         dev::write32(MIP.add(o), v);
     }
     dev::mb();
-    let id = 32 + MIP_FIRST_SPI + RP1_INT_ETH;
-    GIC400.set_edge(id);
-    let bell = cpu::irq::enable(Line(id), Some(&GEM_ACK)).map_err(|_| "gic: line refused")?;
+    let (line, trigger) = mip_line(RP1_INT_ETH);
+    let id = line.0;
+    let bell =
+        cpu::irq::enable_as(line, trigger, Some(&GEM_ACK)).map_err(|_| "gic: line refused")?;
 
     // 3. De RP1: MSI aan in IACK-modus, en de GEM zelf open.
     dev::write32(
@@ -493,6 +507,8 @@ mod tests {
         assert_eq!(<Rpi5 as Board>::NAME, "rpi5");
         assert!(Bcm2712::tables().is_none());
         assert_eq!(32 + MIP_FIRST_SPI + RP1_INT_ETH, 166);
+        // De NIC-lijn is een flank: een MSI via de MIP (30-09).
+        assert_eq!(mip_line(RP1_INT_ETH), (Line(166), Trigger::Edge));
         assert_eq!(RP1_MSIX_CFG, 0x1f_0010_8808);
     }
 }

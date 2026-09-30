@@ -246,3 +246,52 @@ fn the_selftest_spinner_waits_out_a_late_timer() {
     // termijn verzadigt.
     assert_eq!(spin_limit(0, u64::MAX, hz), u64::MAX);
 }
+
+#[test]
+fn the_selftest_names_the_line_that_interrupted_it() {
+    // 30-09, de eerste Pi 5-boot: drie keer `Irq` na 0 us, zonder te zeggen
+    // welke lijn. Op de host komt elke beurt terug op vector 9; de bel
+    // peekt hier de NIC-lijn van de Pi 5 (INTID 166), die al vóór de
+    // overgang pending stond.
+    let (_b, plan) = plan();
+    fn nic() -> u32 {
+        166
+    }
+    fn kick() -> u32 {
+        8
+    }
+    let bell = |pending| Bell {
+        sgi1r: (1 << 16) | 8,
+        sgir: 0xff84_1f00,
+        intid: 8,
+        pending,
+    };
+    let mut os = OsCore::new(&plan, Flavor::Nvhe, Some(bell(nic))).unwrap();
+    let p = os.selftest(false, 1000, &|| {}).unwrap();
+    assert_eq!(p.back, Back::Irq);
+    assert_eq!(p.vec, VEC_IRQ_LOWER);
+    assert_eq!((p.before, p.after), (166, 166));
+    assert_eq!(p.stale(8), Some(166));
+    // De kick zelf is geen oude lijn: dat is de proef die slaagt.
+    let mut os = OsCore::new(&plan, Flavor::Nvhe, Some(bell(kick))).unwrap();
+    let p = os.selftest(false, 1000, &|| {}).unwrap();
+    assert_eq!(p.back, Back::Ipi);
+    assert_eq!(p.stale(8), None);
+    // Niets pending (1023) en geen bel: niets te melden.
+    let none = Probe {
+        back: Back::Timer,
+        ticks: 0,
+        vec: VEC_IRQ_LOWER,
+        before: 1023,
+        after: 1023,
+    };
+    assert_eq!(none.stale(8), None);
+    assert_eq!(
+        Probe {
+            before: Probe::NONE,
+            ..none
+        }
+        .stale(8),
+        None
+    );
+}

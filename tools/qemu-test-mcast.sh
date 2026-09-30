@@ -18,13 +18,13 @@ SYSPORT=$(port); AGENTPORT=$(port); LEADERPORT=$(port); ARTPORT=$(port); WEBPORT
 cd "$DIR"
 cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt
 cargo build --quiet --release --target "$TARGET" -p bench
-(cd "$HOP_DIR" && cargo build --quiet --release --target "$TARGET" -p agentd-hopos)
+HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
 OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
 "$OBJCOPY" --strip-debug "$DIR/target/$TARGET/release/bench" "$ART/bench.elf"
 (cd "$ART" && exec python3 -m http.server "$ARTPORT" --bind 127.0.0.1) >"$ART/http.log" 2>&1 &
 HPID=$!
 SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" WEBPORT="$WEBPORT" \
-	HOP_DIR="$HOP_DIR" APP=hop DISK="$ART/disk.img" OSCORE= \
+	HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISK="$ART/disk.img" OSCORE= \
 	sh "$DIR/image/qemu-run.sh" </dev/null >"$LOG" 2>&1 &
 QPID=$!
 has() { tr -d '\r' <"$LOG" | grep -q -E "$1"; }

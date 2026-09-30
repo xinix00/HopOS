@@ -14,6 +14,14 @@
 //! Met `HOLD=1` in de env blijft de app daarna leven (de heartbeat loopt
 //! door), voor wie de kill-vlag wil toetsen.
 //!
+//! Met `FAULT=1` in de env leest de app na zijn eerste regel het woord net
+//! onder zijn RAM-declaratie: buiten zijn stage-1, dus een vertaalfout op
+//! EL1 die de vectortabel van applib vangt (`applib::mmu`). De kern drukt
+//! dan `fault at EL1 vec=4 esr=... (data abort, translation fault) ...
+//! HOPOS_SLOT_FAULT` met de échte ESR, ELR en FAR (30-09; daarvoor sprong
+//! zo'n fault naar een lege VBAR_EL1). Geen toets in de doorloop: de app
+//! stopt hier.
+//!
 //! Twee rollen (`ROLE` in de env) voegen een toets toe:
 //!
 //! - `SMP`: de app draait met `cores: 2` of meer. Een taak op core 1 hoogt
@@ -105,6 +113,14 @@ async fn spike(app: &'static App) {
         app.ram_size(),
         app.tail().base().0
     );
+    if app.env("FAULT") == Some("1") {
+        let below = app.ram_start().saturating_sub(0x1000);
+        log!("HOPOS_APPSPIKE_FAULT reading {below:#x}, outside the stage-1 map");
+        // Een vertaalfout op EL1: keert niet terug.
+        let v = dev::read64(dev::Pa(below));
+        log!("HOPOS_APPSPIKE_FAULT FAIL: read {v:#x} without a fault");
+        app.exit(1);
+    }
     let mut s = Score::default();
     ctrl_page(app, &mut s);
     env(app, &mut s);
@@ -180,6 +196,11 @@ static SMP_TICKS: AtomicU64 = AtomicU64::new(0);
 static SMP_ALLOCS: AtomicU64 = AtomicU64::new(0);
 /// De core waarop de taak draaide, zoals hij het zelf zag.
 static SMP_WHERE: AtomicU64 = AtomicU64::new(u64::MAX);
+/// TTBR0 van core 1 zoals die hem zag (0 = MMU uit). Sinds 30-09 zet de
+/// stub van een secundaire dezelfde stage-1 aan als de primaire
+/// (`applib::mmu`); met de MMU uit zou core 1 de heap van core 0 uit het
+/// geheugen lezen terwijl die nog in zijn cache staat.
+static SMP_TTBR: AtomicU64 = AtomicU64::new(u64::MAX);
 /// Core 0 vraagt de taak te stoppen.
 static SMP_STOP: AtomicBool = AtomicBool::new(false);
 /// Het antwoord van core 1, als taak terug op core 0.
@@ -189,6 +210,7 @@ static SMP_REPLIED: AtomicU64 = AtomicU64::new(0);
 /// eindgetal als taak terug naar core 0 (de wek de andere kant op).
 async fn smp_counter() {
     SMP_WHERE.store(smp::current() as u64, Release);
+    SMP_TTBR.store(applib::mmu::regime().0, Release);
     while !SMP_STOP.load(Acquire) {
         SMP_TICKS.fetch_add(1, Relaxed);
         if SMP_TICKS.load(Relaxed).is_multiple_of(64) {
@@ -258,13 +280,16 @@ async fn smp_role(app: &'static App, s: &mut Score) {
     }
     let ticks = SMP_REPLIED.load(Acquire);
     let on = SMP_WHERE.load(Acquire);
+    // Dezelfde tabellen op beide cores (of op beide geen).
+    let ttbr = SMP_TTBR.load(Acquire);
+    let same_map = ttbr == applib::mmu::regime().0;
     let heap = HEAP.check();
     let lock = Heap::lock_stats();
     s.check(
         "SMP",
-        on == 1 && during > 0 && ticks > 0 && heap.is_ok() && mine == 16,
+        on == 1 && during > 0 && ticks > 0 && heap.is_ok() && mine == 16 && same_map,
         format_args!(
-            "cores={cores} online={} up_ms={up_ms} task_core={on} ticks={ticks} during_log={during} allocs={} remote_spawns={} kicks={} heap_ok={} lock_taken={} lock_contended={} lock_spin_max={}",
+            "cores={cores} online={} up_ms={up_ms} task_core={on} ticks={ticks} during_log={during} allocs={} remote_spawns={} kicks={} heap_ok={} lock_taken={} lock_contended={} lock_spin_max={} core1_ttbr={ttbr:#x} same_map={same_map}",
             smp::online(),
             SMP_ALLOCS.load(Relaxed),
             smp::REMOTE_SPAWNS.load(Relaxed),

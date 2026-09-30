@@ -89,7 +89,7 @@ cd "$DIR"
 echo "== bouwen: hopos (qemuvirt), welcome, en agentd-hopos in $HOP_DIR"
 cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt
 cargo build --quiet --release --target "$TARGET" -p welcome
-(cd "$HOP_DIR" && cargo build --quiet --release --target "$TARGET" -p agentd-hopos)
+HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
 
 OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
 if [ -n "$OBJCOPY" ]; then
@@ -102,7 +102,7 @@ HPID=$!
 
 echo "== booten op QEMU virt met Hop op een schijf van $DISKLAT ns per verzoek (tot ${TIMEOUT}s; web :$WEBPORT -> gast :80)"
 SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" WEBPORT="$WEBPORT" \
-	HOP_DIR="$HOP_DIR" APP=hop DISKLAT="$DISKLAT" \
+	HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISKLAT="$DISKLAT" \
 	sh "$DIR/image/qemu-run.sh" </dev/null >"$LOG" 2>&1 &
 QPID=$!
 

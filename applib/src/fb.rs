@@ -1,17 +1,17 @@
 //! Het glas en de invoer van de display-app: wat een app nodig heeft die
 //! de framebuffer-grant van de kern houdt (docs/gui.md, "De display-app").
 //!
-//! Drie delen, en dit module bezit niets dan de stage-1-tabellen die het
-//! zelf legt:
+//! Drie delen, en dit module bezit niets: de tabellen zijn van
+//! [`crate::mmu`].
 //!
 //! - [`Glass`]: de `FB_*`-sleutels uit de env (`FB_BASE`, `FB_WIDTH`,
 //!   `FB_HEIGHT`, `FB_STRIDE`, `FB_BPP`, `FB_SWAP`), getoetst voordat er
 //!   één pixel geschreven wordt: een stride kleiner dan een rij of een
 //!   diepte anders dan 16 of 32 is een weigering, geen scheve streep.
-//! - [`map`]: het venster in de eigen stage-1 als **Normal-NC**, op 4 KB.
-//!   Een app draait tot hier met de MMU uit, en dan is elke store Device:
-//!   een 1080p-frame is een miljoen losse, geordende transacties. Normal-NC
-//!   is wat Linux een framebuffer geeft (write-combine): geen cache, dus
+//! - [`map`]: het venster in de stage-1 van de app als **Normal-NC**, op
+//!   4 KB. Met de MMU uit (een app zonder stage-1) was elke store naar het
+//!   glas Device: een 1080p-frame een miljoen losse, geordende
+//!   transacties. Normal-NC is wat Linux een framebuffer geeft (write-combine): geen cache, dus
 //!   de scanout ziet elke store zonder onderhoud, maar het fabric mag
 //!   gatheren (Go `cpu/memattr`, 04-08). `FB_BASE` staat niet op 2 MB
 //!   (het IPA is `0x2000_0000` plus de offset in het blok), dus de randen
@@ -22,17 +22,13 @@
 //!   keepalive. De lezer alloceert niet en een te lange regel valt weg in
 //!   plaats van de volgende mee te nemen.
 //!
-//! De stage-1 van [`map`]: een identiteitsmap (VA = IPA) in de eerste 64 KB
-//! van het linkvenster, de ruimte die de ABI daarvoor openhoudt
-//! (`abi::layout::LINK_TEXT_OFF`). De RAM-declaratie wordt Normal
-//! write-back, de ABI-staart Device-nGnRnE (de ringen en de control-page
-//! houden de semantiek die ze met de MMU uit hadden), het venster
-//! Normal-NC. SCTLR.C blijft uit: elke data-toegang naar Normal-geheugen,
-//! ook de tabelwandeling, is dan Non-cacheable, dus de kern en de
-//! EL2-switcher (die de app-RAM met de MMU uit lezen) zien alles meteen,
-//! net als vóór de map. Wat de MMU hier koopt, is alleen het attribuut van
-//! het glas. De switcher bewaart het EL1-regime per bewoner (19 registers,
-//! `abi::layout::CTX_REGIME`), dus een yield naar Hop verliest de map niet.
+//! Het glas komt in de ene stage-1 die elke app sinds 30-09 heeft
+//! ([`crate::mmu`]): `_start` mapt RAM, tabellen en staart, en [`map`] zet
+//! er het venster bij als Normal-NC, in dezelfde tabellen. Tot 30-09 legde
+//! dit module een eigen tabel met SCTLR.C uit; zie [`crate::mmu`] waarom C
+//! nu aan mag. De switcher bewaart het EL1-regime per bewoner (19
+//! registers, `abi::layout::CTX_REGIME`), dus een yield naar Hop verliest
+//! de map niet.
 
 use crate::App;
 use core::fmt;
@@ -70,10 +66,9 @@ pub enum FbError {
         /// `FB_STRIDE * FB_HEIGHT`.
         size: u64,
     },
-    /// De stage-1 kan hier niet: een ander target, een SMP-app (de andere
-    /// cores lopen zonder MMU), of een RAM-declaratie die niet op het
-    /// linkvenster begint.
-    NoStage1(&'static str),
+    /// Er is geen stage-1 om het glas in te zetten: een ander target, of
+    /// `_start` weigerde hem ([`crate::mmu::MmuError`]).
+    NoStage1(crate::mmu::MmuError),
     /// De tabellen passen niet in de 64 KB die de ABI ervoor openhoudt.
     Tables,
 }
@@ -91,7 +86,7 @@ impl fmt::Display for FbError {
             Self::Window { base, size } => {
                 write!(f, "window {base:#x}+{size:#x} is outside the glass window")
             }
-            Self::NoStage1(why) => write!(f, "no stage-1 map: {why}"),
+            Self::NoStage1(why) => write!(f, "{why}"),
             Self::Tables => write!(f, "stage-1 tables exceed the 64 KB under the image"),
         }
     }
@@ -232,287 +227,40 @@ pub struct Mapped {
     pub table_bytes: u64,
 }
 
-/// Zet de eigen stage-1 aan met het glas als Normal-NC (zie de moduledoc).
-/// Eén keer, vóór de eerste pixel. Een weigering is geen reden om niet te
-/// tekenen: zonder map tekent de app via Device, trager maar correct.
-pub fn map(app: &App, g: &Glass) -> Result<Mapped, FbError> {
-    if app.ctrl().cores() > 1 {
-        return Err(FbError::NoStage1(
-            "an SMP app: its other cores run without a MMU",
-        ));
-    }
-    let plan = Plan::new(app, g)?;
-    stage1::enable(&plan)
-}
-
-/// Wat de stage-1 moet dragen: RAM, staart en glas, allemaal
-/// identiteit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Plan {
-    /// De RAM-declaratie `[start, end)`: image, heap, stack, en onderin de
-    /// tabellen zelf.
-    ram: (u64, u64),
-    /// De ABI-staart `[start, end)`.
-    tail: (u64, u64),
-    /// Het glas `[start, end)`, op 4 KB.
-    glass: (u64, u64),
-}
-
-impl Plan {
-    fn new(app: &App, g: &Glass) -> Result<Plan, FbError> {
-        let start = app.ram_start();
-        if start != abi::layout::LINK_BASE {
-            return Err(FbError::NoStage1(
-                "the RAM declaration does not start at the link base",
-            ));
-        }
-        let tail = app.tail().base().0;
-        let end = start.saturating_add(app.ram_size());
-        let lo = g.base & !(PAGE - 1);
-        let hi = g.base.saturating_add(g.size()).saturating_add(PAGE - 1) & !(PAGE - 1);
-        Ok(Plan {
-            ram: (start, end.min(tail)),
-            tail: (tail, tail.saturating_add(abi::layout::ABI_TAIL)),
-            glass: (lo, hi),
-        })
-    }
+/// Zet het glas als Normal-NC in de stage-1 van de app (zie de
+/// moduledoc). Eén keer, vóór de eerste pixel.
+///
+/// [`FbError::NoStage1`] is geen reden om niet te tekenen: dan draait de
+/// app zonder MMU en is het glas Device, trager maar correct.
+/// [`FbError::Tables`] wel: dan staat de MMU aan en is het glas voor stage
+/// 1 niet gemapt, dus de eerste pixel is een vertaalfout.
+pub fn map(_app: &App, g: &Glass) -> Result<Mapped, FbError> {
+    let (lo, hi) = g.pages();
+    let table_bytes = crate::mmu::map_glass(lo, hi).map_err(|e| match e {
+        crate::mmu::MmuError::Tables => FbError::Tables,
+        e => FbError::NoStage1(e),
+    })?;
+    Ok(Mapped {
+        base: lo,
+        size: hi - lo,
+        table_bytes,
+    })
 }
 
 /// Een pagina van de stage-1.
-const PAGE: u64 = 0x1000;
-/// De tabellen van de stage-1: alleen waar ze gebouwd worden (het
-/// aarch64-target) en in de tests.
-#[cfg(any(test, all(target_os = "none", target_arch = "aarch64")))]
-mod tables {
-    use super::{FbError, PAGE, Plan};
+const PAGE: u64 = crate::mmu::PAGE;
 
-    /// Een blok van de tweede laag.
-    pub(super) const BLOCK: u64 = 0x20_0000;
-    /// Een blok van de eerste laag.
-    pub(super) const GIB: u64 = 0x4000_0000;
-
-    // De descriptorbits van een stage-1-entry (4 KB-korrel, ARM ARM D8.3).
-    pub(super) const DESC_BLOCK: u64 = 0b01;
-    pub(super) const DESC_TABLE: u64 = 0b11;
-    pub(super) const DESC_PAGE: u64 = 0b11;
-    pub(super) const ATTR_SHIFT: u64 = 2;
-    /// Inner shareable.
-    pub(super) const SH_INNER: u64 = 0b11 << 8;
-    /// Access flag: zonder hem faultt de eerste toegang.
-    pub(super) const AF: u64 = 1 << 10;
-    /// Niet uitvoerbaar op EL1.
-    pub(super) const PXN: u64 = 1 << 53;
-    /// Niet uitvoerbaar op EL0.
-    pub(super) const UXN: u64 = 1 << 54;
-
-    /// De MAIR-indexen: Device-nGnRnE, Normal-NC, Normal write-back (MAIR_EL1
-    /// in [`stage1`]).
-    pub(super) const IDX_DEVICE: u64 = 0;
-    pub(super) const IDX_NC: u64 = 1;
-    pub(super) const IDX_WB: u64 = 2;
-
-    /// De attributen per soort: het type-veld vult de laag zelf in.
-    pub(super) const ATTR_RAM: u64 = IDX_WB << ATTR_SHIFT | SH_INNER | AF | UXN;
-    pub(super) const ATTR_TAIL: u64 = IDX_DEVICE << ATTR_SHIFT | AF | PXN | UXN;
-    pub(super) const ATTR_GLASS: u64 = IDX_NC << ATTR_SHIFT | SH_INNER | AF | PXN | UXN;
-
-    /// Hoeveel pagina's tabel er in de 64 KB onder het image passen.
-    pub(super) const TABLE_PAGES: usize = (abi::layout::LINK_TEXT_OFF / PAGE) as usize;
-
-    /// Het geheugen waar de tabellen in staan: entry `idx` van tabelpagina
-    /// `page`. Op het target de 64 KB onder het image (met de MMU nog uit),
-    /// in de tests een vector.
-    pub(super) trait TableMem {
-        /// Leest een entry.
-        fn get(&self, page: usize, idx: usize) -> u64;
-        /// Schrijft een entry.
-        fn set(&mut self, page: usize, idx: usize, v: u64);
-    }
-
-    /// De tabellen: pagina 0 is de eerste laag, de rest wordt uitgedeeld
-    /// zoals de map ze vraagt, tot de [`TABLE_PAGES`] op zijn.
-    pub(super) struct Tables<M: TableMem> {
-        pub(super) mem: M,
-        /// Uitgedeeld.
-        pub(super) used: usize,
-        /// Het IPA van pagina 0.
-        pub(super) base: u64,
-    }
-
-    impl<M: TableMem> Tables<M> {
-        pub(super) fn new(mem: M, base: u64) -> Tables<M> {
-            let mut t = Tables { mem, used: 1, base };
-            t.clear(0);
-            t
-        }
-
-        /// Het adres van pagina `i`.
-        pub(super) fn pa(&self, i: usize) -> u64 {
-            self.base + i as u64 * PAGE
-        }
-
-        fn clear(&mut self, page: usize) {
-            for i in 0..512 {
-                self.mem.set(page, i, 0);
-            }
-        }
-
-        /// De tabel onder entry `idx` van pagina `page`: bestaand, of vers.
-        fn child(&mut self, page: usize, idx: usize) -> Result<usize, FbError> {
-            let cur = self.mem.get(page, idx);
-            if cur & 0b11 == DESC_TABLE {
-                let pa = cur & 0x0000_FFFF_FFFF_F000;
-                return usize::try_from((pa - self.base) / PAGE).map_err(|_| FbError::Tables);
-            }
-            if cur != 0 {
-                // Een blok waar een tabel moet: de plannen overlappen.
-                return Err(FbError::Tables);
-            }
-            let new = self.used;
-            if new >= TABLE_PAGES {
-                return Err(FbError::Tables);
-            }
-            self.used += 1;
-            self.clear(new);
-            self.mem.set(page, idx, self.pa(new) | DESC_TABLE);
-            Ok(new)
-        }
-
-        /// Mapt `[lo, hi)` (4 KB-gealigneerd) op zichzelf met `attr`: hele
-        /// 2 MB-blokken als blok, de randen als pagina's.
-        pub(super) fn map(&mut self, lo: u64, hi: u64, attr: u64) -> Result<(), FbError> {
-            let mut a = lo;
-            while a < hi {
-                let l1 = usize::try_from(a / GIB)
-                    .ok()
-                    .filter(|i| *i < 512)
-                    .ok_or(FbError::Tables)?;
-                let l2page = self.child(0, l1)?;
-                let l2 = ((a % GIB) / BLOCK) as usize;
-                if a.is_multiple_of(BLOCK) && hi - a >= BLOCK {
-                    self.mem.set(l2page, l2, a | attr | DESC_BLOCK);
-                    a += BLOCK;
-                    continue;
-                }
-                let l3page = self.child(l2page, l2)?;
-                let l3 = ((a % BLOCK) / PAGE) as usize;
-                self.mem.set(l3page, l3, a | attr | DESC_PAGE);
-                a += PAGE;
-            }
-            Ok(())
-        }
-
-        /// De tabellen van `p` in `mem`.
-        pub(super) fn of(mem: M, p: &Plan) -> Result<Tables<M>, FbError> {
-            let mut t = Tables::new(mem, p.ram.0);
-            t.map(p.ram.0, p.ram.1, ATTR_RAM)?;
-            t.map(p.tail.0, p.tail.1, ATTR_TAIL)?;
-            t.map(p.glass.0, p.glass.1, ATTR_GLASS)?;
-            Ok(t)
-        }
-    }
-}
-
-#[cfg(all(target_os = "none", target_arch = "aarch64"))]
-mod stage1 {
-    //! De hardwarekant: de tabellen in het geheugen en de registers.
-
-    use super::tables::{IDX_DEVICE, IDX_NC, IDX_WB, TableMem, Tables};
-    use super::{FbError, Mapped, PAGE, Plan};
-    use core::arch::asm;
-    use dev::Pa;
-
-    /// MAIR_EL1: Device-nGnRnE, Normal-NC (0x44) en Normal write-back
-    /// (0xFF) op hun indexen.
-    const MAIR: u64 = 0x00 << (8 * IDX_DEVICE) | 0x44 << (8 * IDX_NC) | 0xFF << (8 * IDX_WB);
-
-    /// TCR_EL1: 39-bit VA vanaf de eerste laag (T0SZ 25), 4 KB-korrel,
-    /// tabelwandeling Non-cacheable (IRGN0/ORGN0 0; SCTLR.C blijft uit, zie
-    /// de moduledoc), inner shareable, geen TTBR1-wandeling (EPD1, TG1 op
-    /// 4 KB), 36-bit IPA (IPS 1: alles van een app ligt onder 4 GB).
-    const TCR: u64 = 25 | 0b11 << 12 | 1 << 23 | 0b10 << 30 | 0b001 << 32;
-
-    /// De 64 KB onder het image, rechtstreeks: de MMU staat nog uit, dus
-    /// elke store staat meteen in het geheugen.
-    struct UnderImage(u64);
-
-    impl UnderImage {
-        fn at(&self, page: usize, idx: usize) -> Pa {
-            Pa(self.0 + page as u64 * PAGE + idx as u64 * 8)
-        }
-    }
-
-    impl TableMem for UnderImage {
-        fn get(&self, page: usize, idx: usize) -> u64 {
-            dev::read64(self.at(page, idx))
-        }
-        fn set(&mut self, page: usize, idx: usize, v: u64) {
-            dev::write64(self.at(page, idx), v);
-        }
-    }
-
-    /// SCTLR_EL1.M: de MMU aan.
-    const SCTLR_M: u64 = 1 << 0;
-    /// SCTLR_EL1.C: data-cacheability. Blijft uit (zie de moduledoc).
-    const SCTLR_C: u64 = 1 << 2;
-    /// SCTLR_EL1.WXN: schrijfbaar is niet uitvoerbaar. Moet uit: het image
-    /// en de heap delen hun blokken.
-    const SCTLR_WXN: u64 = 1 << 19;
-
-    pub(super) fn enable(p: &Plan) -> Result<Mapped, FbError> {
-        let t = Tables::of(UnderImage(p.ram.0), p)?;
-        dev::mb();
-        // SAFETY: de tabellen staan in de 64 KB onder het image (de ABI
-        // houdt ze daarvoor open, `LINK_TEXT_OFF`), dekken de hele
-        // RAM-declaratie (code, heap, stack), de staart en het glas als
-        // identiteit, en zijn met de MMU uit geschreven (Device: ze staan in
-        // het geheugen). De tabelwandeling is Non-cacheable (SCTLR.C uit),
-        // dus hij ziet ze. Na `msr sctlr` loopt de code door op hetzelfde
-        // adres: VA = IPA. Interrupts staan dicht (een app heeft geen
-        // vectoren) en dit is de primaire core van een app met één core.
-        unsafe {
-            asm!(
-                "msr mair_el1, {mair}",
-                "msr tcr_el1, {tcr}",
-                "msr ttbr0_el1, {ttbr}",
-                "isb",
-                "tlbi vmalle1",
-                "dsb nsh",
-                "isb",
-                "mrs {s}, sctlr_el1",
-                "bic {s}, {s}, {off}",
-                "orr {s}, {s}, {m}",
-                "msr sctlr_el1, {s}",
-                "isb",
-                "ic iallu",
-                "dsb nsh",
-                "isb",
-                mair = in(reg) MAIR,
-                tcr = in(reg) TCR,
-                ttbr = in(reg) t.base,
-                s = out(reg) _,
-                off = in(reg) SCTLR_C | SCTLR_WXN,
-                m = in(reg) SCTLR_M,
-                options(nostack),
-            );
-        }
-        Ok(Mapped {
-            base: p.glass.0,
-            size: p.glass.1 - p.glass.0,
-            table_bytes: t.used as u64 * PAGE,
-        })
-    }
-}
-
-#[cfg(not(all(target_os = "none", target_arch = "aarch64")))]
-mod stage1 {
-    //! Elders geen ARM-stage-1: op RISC-V en op de host tekent de app
-    //! zonder map.
-
-    use super::{FbError, Mapped, Plan};
-
-    pub(super) fn enable(_p: &Plan) -> Result<Mapped, FbError> {
-        Err(FbError::NoStage1("not an aarch64 target"))
+impl Glass {
+    /// Het venster, naar buiten afgerond op 4 KB: `[lo, hi)`.
+    #[must_use]
+    pub const fn pages(&self) -> (u64, u64) {
+        let lo = self.base & !(PAGE - 1);
+        let hi = self
+            .base
+            .saturating_add(self.size())
+            .saturating_add(PAGE - 1)
+            & !(PAGE - 1);
+        (lo, hi)
     }
 }
 
@@ -704,30 +452,11 @@ impl LineReader {
 
 #[cfg(test)]
 mod tests {
-    use super::tables::*;
     use super::*;
     use std::collections::HashMap;
 
     fn env(pairs: &[(&'static str, &'static str)]) -> HashMap<&'static str, &'static str> {
         pairs.iter().copied().collect()
-    }
-
-    /// De tabelpagina's van de tests.
-    struct Pages(std::vec::Vec<[u64; 512]>);
-
-    impl Default for Pages {
-        fn default() -> Self {
-            Pages(std::vec![[0; 512]; TABLE_PAGES])
-        }
-    }
-
-    impl TableMem for Pages {
-        fn get(&self, page: usize, idx: usize) -> u64 {
-            self.0[page][idx]
-        }
-        fn set(&mut self, page: usize, idx: usize, v: u64) {
-            self.0[page][idx] = v;
-        }
     }
 
     const RAMFB: &[(&str, &str)] = &[
@@ -812,61 +541,13 @@ mod tests {
         assert_eq!(g.encode(0x00FF_0000), 0xF800);
     }
 
-    /// De ramfb van QEMU: RAM en glas als blokken, de rand van het glas
-    /// als pagina's, en alles in de 64 KB.
     #[test]
-    fn the_tables_fit_and_map_identity() {
-        let p = Plan {
-            ram: (0x5000_0000, 0x5000_0000 + 0x3e0_0000),
-            tail: (0x53e0_0000, 0x5400_0000),
-            glass: (0x2000_0000, 0x2000_0000 + 0x3e_8000),
-        };
-        let t = Tables::of(Pages::default(), &p).unwrap();
-        // L1, L2 voor GB 0 en GB 1, één L3 voor de rand van het glas.
-        assert_eq!(t.used, 4);
-        let walk = |va: u64| -> Option<u64> {
-            let l1 = t.mem.get(0, (va / GIB) as usize);
-            if l1 & 0b11 != DESC_TABLE {
-                return None;
-            }
-            let p2 = ((l1 & 0xFFFF_FFFF_F000) - t.base) / PAGE;
-            let l2 = t.mem.get(p2 as usize, ((va % GIB) / BLOCK) as usize);
-            match l2 & 0b11 {
-                DESC_BLOCK => Some(l2),
-                DESC_TABLE => {
-                    let p3 = ((l2 & 0xFFFF_FFFF_F000) - t.base) / PAGE;
-                    let e = t.mem.get(p3 as usize, ((va % BLOCK) / PAGE) as usize);
-                    (e & 0b11 == DESC_PAGE).then_some(e)
-                }
-                _ => None,
-            }
-        };
-        let ram = walk(0x5001_0000).unwrap();
-        assert_eq!(ram & 0xFFFF_FFE0_0000, 0x5000_0000);
-        assert_eq!(ram & 0x1c, IDX_WB << ATTR_SHIFT);
-        let tail = walk(0x53e0_1000).unwrap();
-        assert_eq!(tail & 0x1c, IDX_DEVICE << ATTR_SHIFT);
-        assert_ne!(tail & PXN, 0);
-        let glass_end = walk(0x2000_0000 + 0x3e_7000).unwrap();
-        assert_eq!(glass_end & 0xFFFF_FFFF_F000, 0x2000_0000 + 0x3e_7000);
-        assert_eq!(glass_end & 0x1c, IDX_NC << ATTR_SHIFT);
-        assert_eq!(walk(0x2000_0000 + 0x3e_8000), None, "past the glass");
-        assert_eq!(walk(0x4000_0000), None, "the kern is not ours");
-    }
-
-    #[test]
-    fn a_plan_that_does_not_fit_is_refused() {
-        // Een glas dat over veertien losse blokranden loopt past niet.
-        let mut t = Tables::new(Pages::default(), 0x5000_0000);
-        let mut r = Ok(());
-        for i in 0..20u64 {
-            let a = 0x2000_0000 + i * GIB / 2 + PAGE;
-            r = t.map(a, a + PAGE, ATTR_GLASS);
-            if r.is_err() {
-                break;
-            }
-        }
-        assert_eq!(r, Err(FbError::Tables));
+    fn the_glass_is_rounded_out_to_pages() {
+        let e = env(RAMFB);
+        let mut g = Glass::from_env(|k| e.get(k).copied()).unwrap();
+        assert_eq!(g.pages(), (0x2000_0000, 0x2000_0000 + 0x3e_8000));
+        g.base += 4;
+        assert_eq!(g.pages(), (0x2000_0000, 0x2000_0000 + 0x3e_9000));
     }
 
     #[test]

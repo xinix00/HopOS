@@ -21,6 +21,8 @@
 //! - [`sys`]: de system-API-client over een [`sys::Conn`].
 //! - [`store`]: pull, push, list en drop tussen de eigen map in de
 //!   object-store en het eigen zicht, over die client.
+//! - [`mmu`]: de stage-1 van elke app op arm64 (RAM write-back, de
+//!   control-page Normal-NC) en de vectortabel die een fault op EL1 meldt.
 //! - [`smp`]: meer cores voor één app (`cores: N` in de jobspec): één
 //!   executor per core en [`smp::spawn_on`].
 //!
@@ -56,6 +58,7 @@ pub mod ctrl;
 pub mod fb;
 pub mod heap;
 pub mod log;
+pub mod mmu;
 pub mod net;
 pub mod ring;
 pub mod rt;

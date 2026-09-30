@@ -71,19 +71,27 @@ mod arch {
     /// yield, kick).
     pub(super) fn os_core(plan: &abi::layout::Plan) -> Result<el2::OsCore, el2::Error> {
         let board = &crate::BOARD;
-        let mut os = el2::OsCore::new(plan, FLAVOR, Some(board.os_bell()))?;
+        let bell = board.os_bell();
+        let mut os = el2::OsCore::new(plan, FLAVOR, Some(bell))?;
         let ms = cpu::idle::freq() / 1000;
-        let t = os.selftest(false, ms, &|| {});
-        let y = os.selftest(true, 100 * ms, &|| {});
-        let k = os.selftest(false, 100 * ms, &|| board.kick_self());
-        let us = |r: Option<(el2::Back, u64)>| r.map(|(b, dt)| (b, dt * 1000 / ms.max(1)));
-        let (t, y, k) = (us(t), us(y), us(k));
-        let ok = matches!(t, Some((el2::Back::Timer, _)))
-            && matches!(y, Some((el2::Back::Yield, _)))
-            && matches!(k, Some((el2::Back::Ipi, _)));
+        let t = probe(&mut os, false, ms, &|| {});
+        let y = probe(&mut os, true, 100 * ms, &|| {});
+        let k = probe(&mut os, false, 100 * ms, &|| board.kick_self());
+        let back = |r: &Tried| r.probe.map(|p| p.back);
+        let ok = back(&t) == Some(el2::Back::Timer)
+            && back(&y) == Some(el2::Back::Yield)
+            && back(&k) == Some(el2::Back::Ipi);
+        let show = |r: Tried| Shown {
+            tried: r,
+            ms,
+            kick: bell.intid,
+        };
         println!(
-            "oscore: cpu {} self-test timer={t:?} yield={y:?} kick={k:?} (back, us) {}",
+            "oscore: cpu {} self-test timer={} yield={} kick={} {}",
             plan.os_core(),
+            show(t),
+            show(y),
+            show(k),
             if ok {
                 "HOPOS_OS_SELFTEST ok"
             } else {
@@ -91,6 +99,76 @@ mod arch {
             }
         );
         Ok(os)
+    }
+
+    /// Hoe vaak één proef het opnieuw doet als een device-lijn hem
+    /// onderbrak.
+    const PROBE_TRIES: u32 = 3;
+
+    /// Eén proef en hoe vaak hij het deed.
+    #[derive(Copy, Clone)]
+    struct Tried {
+        probe: Option<el2::Probe>,
+        tries: u32,
+    }
+
+    /// Eén proef van de zelftest, met eerst de interrupts die al wachten
+    /// afgehandeld (`crate::drain_interrupts`), en opnieuw als een
+    /// device-lijn hem onderbrak, hoogstens [`PROBE_TRIES`] keer.
+    ///
+    /// Waarom (30-09, de eerste Pi 5-boot: drie keer `Irq` na 0 us): de
+    /// zelftest draait in de boot, vóór de executor. Een lijn die al eerder
+    /// scherp stond (de NIC, INTID 166, sinds `probe_nic`) en daarna één
+    /// keer vuurde, liet de vector de vlag zetten en gemaskeerd terugkeren,
+    /// maar de dispatch-taak draait pas als de executor loopt. De lijn
+    /// stond dus nog pending bij de GIC, en elke proef kwam op 0 us terug
+    /// op een interrupt die niets met de overgang te maken had. Een lijn
+    /// die tijdens de proef komt (een frame op het LAN) is net zo min een
+    /// oordeel. Komt hij drie keer, dan zegt de regel welke lijn het was.
+    fn probe(os: &mut el2::OsCore, yield_: bool, ticks: u64, kick: &dyn Fn()) -> Tried {
+        let mut last = Tried {
+            probe: None,
+            tries: 0,
+        };
+        for n in 1..=PROBE_TRIES {
+            crate::drain_interrupts();
+            let probe = os.selftest(yield_, ticks, kick);
+            last = Tried { probe, tries: n };
+            if probe.is_none_or(|p| p.back != el2::Back::Irq) {
+                break;
+            }
+        }
+        last
+    }
+
+    /// Een proef voor de zelftest-regel: `(Timer, 1344 us)`, en bij een
+    /// onderbreking de vectorindex, de INTID die de controller na de
+    /// terugkeer liet zien, een lijn die al vóór de overgang pending stond,
+    /// en het aantal pogingen.
+    struct Shown {
+        tried: Tried,
+        ms: u64,
+        kick: u32,
+    }
+
+    impl core::fmt::Display for Shown {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            let Some(p) = self.tried.probe else {
+                return f.write_str("(none: no heap)");
+            };
+            let us = p.ticks.saturating_mul(1000) / self.ms.max(1);
+            write!(f, "({:?}, {us} us", p.back)?;
+            if !matches!(p.back, el2::Back::Timer | el2::Back::Yield | el2::Back::Ipi) {
+                write!(f, ", vec {}, INTID {}", p.vec, p.after)?;
+            }
+            if let Some(i) = p.stale(self.kick) {
+                write!(f, ", INTID {i} pending before entry")?;
+            }
+            if self.tried.tries > 1 {
+                write!(f, ", try {}", self.tried.tries)?;
+            }
+            f.write_str(")")
+        }
     }
 }
 
@@ -681,6 +759,29 @@ pub(crate) fn os_core() -> Result<arch::OsCore, el2::Error> {
     arch::os_core(&plan)
 }
 
+/// Het rapport van een exception die de app op EL1 zelf ving (de
+/// vectortabel van applib, `CTRL_APP_FAULT_*`), als stuk van een
+/// fault-regel; `None` als er geen is. Sinds 30-09: daarvoor sprong zo'n
+/// fault naar een lege VBAR_EL1 en zag de kern alleen de instructie-abort
+/// op `VBAR + 0x200` (de eerste Pi 5-boot, `esr=0x82000005 far=0x200`).
+fn el1_fault(st: &kern::cage::Status) -> Option<alloc::string::String> {
+    use core::fmt::Write;
+    if st.app_fault_vec == 0 || st.exit_code != abi::hopabi::EXIT_APP_FAULT {
+        return None;
+    }
+    let mut line = alloc::string::String::new();
+    let _ = write!(
+        line,
+        "vec={} esr={:#x} ({}) elr={:#x} far={:#x}",
+        st.app_fault_vec - 1,
+        st.app_fault_esr,
+        kern::cage::esr_class(st.app_fault_esr),
+        st.app_fault_elr,
+        st.app_fault_far
+    );
+    Some(line)
+}
+
 /// Bewaakt Hop: elke wissel van app-status, core of fault één regel, om de
 /// [`HOP_BEAT_EVERY`] seconden de hartslag. Een fault of exit is luid en
 /// het einde van de bewaking; een herstart van Hop is een volgende stap
@@ -702,11 +803,16 @@ async fn watch_hop(exec: &'static Executor, plan: &abi::layout::Plan, slot: Slot
         }
         if st.cage.fault_vec != 0 {
             println!(
-                "slot {slot}: Hop faulted vec={} esr={:#x} far={:#x} HOPOS_HOP_FAULT",
+                "slot {slot}: Hop faulted vec={} esr={:#x} ({}) far={:#x} HOPOS_HOP_FAULT",
                 st.cage.fault_vec - 1,
                 st.cage.fault_esr,
+                kern::cage::esr_class(st.cage.fault_esr),
                 st.cage.fault_far
             );
+            return;
+        }
+        if let Some(line) = el1_fault(&st.cage) {
+            println!("slot {slot}: Hop faulted at EL1 {line} HOPOS_HOP_FAULT");
             return;
         }
         if st.cage.app == abi::hopabi::AppStatus::Exited as u64 {
@@ -966,13 +1072,19 @@ async fn watch_first(
         }
         if st.cage.fault_vec != 0 {
             println!(
-                "slot {slot}: fault vec={} esr={:#x} far={:#x} HOPOS_SLOT_FAULT",
+                "slot {slot}: fault vec={} esr={:#x} ({}) far={:#x} HOPOS_SLOT_FAULT",
                 st.cage.fault_vec - 1,
                 st.cage.fault_esr,
+                kern::cage::esr_class(st.cage.fault_esr),
                 st.cage.fault_far
             );
             // De switcher meldde hem dood en parkeerde de core: de stop
             // geeft partitie en core terug, maar een tweede ronde niet.
+            stop(slot).await;
+            return false;
+        }
+        if let Some(line) = el1_fault(&st.cage) {
+            println!("slot {slot}: fault at EL1 {line} HOPOS_SLOT_FAULT");
             stop(slot).await;
             return false;
         }

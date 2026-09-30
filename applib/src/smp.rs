@@ -309,19 +309,23 @@ async fn request(exec: &'static Exec, ctrl: Ctrl, slot: u64, k: usize) -> Result
     }
     let top = (base.addr() + SMP_STACK) as u64;
     // De handoff: alleen EL1-staat. Het regime (TTBR0, TCR, MAIR, VBAR) is
-    // nul: een app draait met de MMU uit, en de stub zet niets dan de stack.
-    // Het EL2-gezag (tabel, VMID, mailbox) kopieert de kern uit zijn eigen
-    // boekhouding, nooit van deze page.
+    // dat van deze core, van de levende registers (crate::mmu): de stub van
+    // de secundaire zet het plus SCTLR M/C/I vóór zijn eerste
+    // geheugentoegang, zodat beide cores dezelfde tabellen en dezelfde
+    // cacheable kijk op de heap hebben. Tot 30-09 was dit nul (een app
+    // draaide met de MMU uit). Het EL2-gezag (tabel, VMID, mailbox)
+    // kopieert de kern uit zijn eigen boekhouding, nooit van deze page.
+    let (ttbr0, tcr, mair, vbar) = crate::mmu::regime();
     for (off, v) in [
         (CTRL_SMP_SP, top),
         (CTRL_SMP_MP, k as u64),
         (CTRL_SMP_G0, 0),
         (CTRL_SMP_FN, entry::main_addr()),
         (CTRL_SMP_STUB, entry::stub_addr()),
-        (CTRL_SMP_TTBR0, 0),
-        (CTRL_SMP_TCR, 0),
-        (CTRL_SMP_MAIR, 0),
-        (CTRL_SMP_VBAR, 0),
+        (CTRL_SMP_TTBR0, ttbr0),
+        (CTRL_SMP_TCR, tcr),
+        (CTRL_SMP_MAIR, mair),
+        (CTRL_SMP_VBAR, vbar),
     ] {
         ctrl.set(off, v);
     }
@@ -460,16 +464,42 @@ mod entry {
     //! De EL1-ingang van een secundaire core.
 
     // De SMP-trampoline van de kern (`cpu::el2`, `smpEL2Tramp`) ERET't
-    // hierheen op EL1 met x0 = de stack-top, x1 = de core-index, x3 = de
-    // Rust-entry, en in x4..x7 het EL1-regime van de primaire. Een app draait
-    // met de MMU uit, dus dat regime is leeg en blijft liggen. Interrupts
-    // dicht (een app heeft geen vectoren), de stack, en door.
+    // hierheen op EL1 met de MMU uit, met x0 = de stack-top, x1 = de
+    // core-index, x3 = de Rust-entry, en het EL1-regime van de primaire:
+    // x4 = TTBR0, x5 = MAIR, x6 = TCR, x7 = VBAR (`request`,
+    // crate::mmu::regime). Interrupts dicht, de vectortabel, en als de
+    // primaire een stage-1 heeft (TTBR0 niet 0) dezelfde tabellen met
+    // SCTLR M, C en I, vóór de eerste geheugentoegang: de stack komt uit de
+    // heap van de primaire, die daar cacheable in schreef, en met de MMU
+    // uit zou deze core een oude kopie uit het geheugen lezen. De tabellen
+    // zijn Normal-NC en de walker leest NC (crate::mmu), dus deze core ziet
+    // wat de primaire schreef zonder onderhoud. Dan de stack, en door.
     core::arch::global_asm!(
         ".section .text.applib_smp, \"ax\"",
         ".global __applib_smp_start",
         "__applib_smp_start:",
         "    msr daifset, #0xf",
-        "    mov sp, x0",
+        "    cbz x7, 1f",
+        "    msr vbar_el1, x7",
+        "1:  cbz x4, 2f",
+        "    msr mair_el1, x5",
+        "    msr tcr_el1, x6",
+        "    msr ttbr0_el1, x4",
+        "    isb",
+        "    tlbi vmalle1",
+        "    dsb nsh",
+        "    isb",
+        "    mrs x9, sctlr_el1",
+        "    orr x9, x9, #(1 << 0)",
+        "    orr x9, x9, #(1 << 2)",
+        "    orr x9, x9, #(1 << 12)",
+        "    bic x9, x9, #(1 << 19)",
+        "    msr sctlr_el1, x9",
+        "    isb",
+        "    ic iallu",
+        "    dsb nsh",
+        "    isb",
+        "2:  mov sp, x0",
         "    mov x0, x1",
         "    br x3",
     );

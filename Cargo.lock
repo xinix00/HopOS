@@ -30,6 +30,7 @@ name = "appspike"
 version = "3.0.0"
 dependencies = [
  "applib",
+ "dev",
  "netdev",
 ]
 

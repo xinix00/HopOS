@@ -125,7 +125,18 @@ async fn display(app: &'static App) {
             m.size,
             m.table_bytes
         ),
-        Err(e) => log!("display: {e}, drawing through Device HOPOS_DISPLAY_NOMAP"),
+        // Geen stage-1 (de MMU staat uit): het glas is Device, trager maar
+        // correct.
+        Err(e @ fb::FbError::NoStage1(_)) => {
+            log!("display: {e}, drawing through Device HOPOS_DISPLAY_NOMAP")
+        }
+        // De MMU staat aan maar het glas kwam er niet in: de eerste pixel
+        // zou een vertaalfout zijn (sinds 30-09 heeft elke app een
+        // stage-1, applib::mmu). Luid, en niet tekenen.
+        Err(e) => {
+            log!("display: {e}, the glass is not mapped, nothing to draw HOPOS_DISPLAY_NOMAP");
+            return;
+        }
     }
     let (tx, rx) = EVENTS.split().expect("display: event queue split once");
     let mut screen = Screen::new(Painter::new(glass), app);

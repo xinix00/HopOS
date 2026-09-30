@@ -856,6 +856,9 @@ impl Cage for RvCage {
             fault_vec: self.ctrl_read(slot, CTRL_FAULT_VEC),
             fault_esr: self.ctrl_read(slot, CTRL_FAULT_ESR),
             fault_far: self.ctrl_read(slot, CTRL_FAULT_FAR),
+            // De vectortabel van EL1 is ARM (applib::mmu); op RISC-V is een
+            // trap van de app altijd een fault van de switcher.
+            ..Status::default()
         }
     }
 

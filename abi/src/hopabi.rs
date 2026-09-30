@@ -141,8 +141,34 @@ pub const CTRL_TEMP: u64 = 0xFF0;
 /// 25 MHz op de LicheeRV), dus daar is dit woord de enige bron. Onder
 /// [`CTRL_TEMP`], naar beneden groeiend (29-09).
 pub const CTRL_TIMEBASE_HZ: u64 = 0xFE8;
+/// App naar kern: de vectorindex plus 1 van een exception die de app op
+/// EL1 zelf ving (0 = geen), gezet door de vectortabel van applib vlak
+/// vóór hij de app met [`EXIT_APP_FAULT`] laat eindigen. Onder
+/// [`CTRL_TIMEBASE_HZ`], naar beneden groeiend, met de drie woorden eronder
+/// (30-09).
+///
+/// Waarom een eigen blok naast [`CTRL_FAULT_VEC`]: dat rapport is van EL2
+/// en ziet alleen wat naar EL2 trapt. Een fault die op EL1 blijft (een
+/// alignment-fault, een ongedefinieerde instructie) sprong tot 30-09 naar
+/// een lege VBAR_EL1, en EL2 zag dan alleen de tweede fault: de
+/// instructie-abort op `VBAR + 0x200` (de eerste Pi 5-boot: `esr=0x82000005
+/// far=0x200`). Hier staat de échte.
+pub const CTRL_APP_FAULT_VEC: u64 = 0xFE0;
+/// App naar kern: ESR_EL1 van die exception.
+pub const CTRL_APP_FAULT_ESR: u64 = 0xFD8;
+/// App naar kern: ELR_EL1, de PC waar hij viel.
+pub const CTRL_APP_FAULT_ELR: u64 = 0xFD0;
+/// App naar kern: FAR_EL1, het adres dat hij raakte (alleen zinvol bij een
+/// abort).
+pub const CTRL_APP_FAULT_FAR: u64 = 0xFC8;
 /// De ruimte voor de env-blob.
-pub const CTRL_ENV_MAX: u64 = CTRL_TIMEBASE_HZ - CTRL_ENV_DATA;
+pub const CTRL_ENV_MAX: u64 = CTRL_APP_FAULT_FAR - CTRL_ENV_DATA;
+
+/// [`CTRL_EXIT_CODE`] van een app die op EL1 een exception ving: het
+/// rapport staat in [`CTRL_APP_FAULT_VEC`] en de drie woorden eronder.
+/// Geen gewone exitcode (0 klaar, 1 een spawn, 2 een paniek), en leesbaar
+/// in een hexdump.
+pub const EXIT_APP_FAULT: u64 = 0xFA17;
 
 /// De bit in [`CTRL_RX_DOOR`] die de drempel wapent; een byte-index haalt
 /// dat bit nooit.
@@ -281,6 +307,14 @@ pub struct CtrlPage {
     pub door_irq: u64,
     /// [`CTRL_ENV_DATA`].
     pub env: [u8; CTRL_ENV_MAX as usize],
+    /// [`CTRL_APP_FAULT_FAR`].
+    pub app_fault_far: u64,
+    /// [`CTRL_APP_FAULT_ELR`].
+    pub app_fault_elr: u64,
+    /// [`CTRL_APP_FAULT_ESR`].
+    pub app_fault_esr: u64,
+    /// [`CTRL_APP_FAULT_VEC`].
+    pub app_fault_vec: u64,
     /// [`CTRL_TIMEBASE_HZ`].
     pub timebase_hz: u64,
     /// [`CTRL_TEMP`].
@@ -290,7 +324,7 @@ pub struct CtrlPage {
 }
 
 /// Alle woord-offsets van de page, voor de uniekheidstoets.
-pub const CTRL_WORDS: [u64; 39] = [
+pub const CTRL_WORDS: [u64; 43] = [
     CTRL_STATUS,
     CTRL_EXIT_CODE,
     CTRL_KILL,
@@ -327,6 +361,10 @@ pub const CTRL_WORDS: [u64; 39] = [
     CTRL_WAKES,
     CTRL_RX_DOOR,
     CTRL_DOOR_IRQ,
+    CTRL_APP_FAULT_FAR,
+    CTRL_APP_FAULT_ELR,
+    CTRL_APP_FAULT_ESR,
+    CTRL_APP_FAULT_VEC,
     CTRL_TIMEBASE_HZ,
     CTRL_TEMP,
     CTRL_IDLE_MODE,
@@ -376,6 +414,10 @@ at!(wakes, CTRL_WAKES);
 at!(rx_door, CTRL_RX_DOOR);
 at!(door_irq, CTRL_DOOR_IRQ);
 at!(env, CTRL_ENV_DATA);
+at!(app_fault_far, CTRL_APP_FAULT_FAR);
+at!(app_fault_elr, CTRL_APP_FAULT_ELR);
+at!(app_fault_esr, CTRL_APP_FAULT_ESR);
+at!(app_fault_vec, CTRL_APP_FAULT_VEC);
 at!(timebase_hz, CTRL_TIMEBASE_HZ);
 at!(temp, CTRL_TEMP);
 at!(idle_mode, CTRL_IDLE_MODE);

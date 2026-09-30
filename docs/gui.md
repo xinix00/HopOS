@@ -43,7 +43,7 @@ De feature zet `gui` aan op het gekozen board (`board-x?/gui`) en linkt
 | `board/<x>/src/usb.rs`, `Board::usb_hosts` | welke controllers een board heeft: venster, lijn, soort (xHCI of DWC3), en een eigen stuk DMA-geheugen; PCIe en firmware-handshake zijn dan gedaan |
 | `hopos/src/gui.rs` | de bedrading: console op het glas, meetregels, de USB-taak (`usb`), de grant-haken |
 | `hopos/src/net.rs` (`input`) | de input-listener op `10.100.0.1:7879`: de regels naar de houder van het glas |
-| `applib/src/fb.rs` (`applib::fb`) | de app-kant: de `FB_*`-env, het venster Normal-NC in de eigen stage-1, de regellezer van `INPUT_ADDR` |
+| `applib/src/fb.rs` (`applib::fb`) | de app-kant: de `FB_*`-env, het venster Normal-NC in de stage-1 van de app (`applib::mmu`), de regellezer van `INPUT_ADDR` |
 | `apps/display` | de display-app: achtergrond, klok, de laatste invoer en de cursor op het glas |
 
 ## Per board
@@ -152,20 +152,18 @@ cursor. Geen compositor, geen `/screen.png`, geen `/kvm`. Wat hij van
 1. **De `FB_*`-env lezen** (`Glass::from_env`) en weigeren wat niet klopt:
    een stride kleiner dan breedte maal bytes per pixel, een BPP anders dan
    16 of 32, een venster buiten het glasvenster van de kooi.
-2. **Het venster in de eigen stage-1** (`fb::map`): een app draait tot
-   hier met de MMU uit, en dan is elke store Device (een 1080p-frame is
-   een miljoen losse, geordende transacties). `map` legt een
-   identiteitsmap in de 64 KB onder het image (de ABI houdt die open,
-   `LINK_TEXT_OFF`): de RAM-declaratie Normal-WB, de ABI-staart
-   Device-nGnRnE (de ringen en de control-page houden hun semantiek), het
-   glas **Normal-NC** op 4 KB (`FB_BASE` staat niet op 2 MB). SCTLR.C
-   blijft uit, dus elke data-toegang naar Normal-geheugen (ook de
-   tabelwandeling) is Non-cacheable: de kern en de EL2-switcher, die de
-   app-RAM met de MMU uit lezen, zien alles meteen, net als vóór de map.
-   De switcher bewaart het EL1-regime per bewoner, dus een yield verliest
-   de map niet. Een SMP-app weigert hij (de andere cores draaien zonder
-   MMU); zonder map tekent de app via Device, trager maar correct
-   (`HOPOS_DISPLAY_NOMAP`).
+2. **Het venster in de stage-1 van de app** (`fb::map`): sinds 30-09 heeft
+   elke app een stage-1 (`applib::mmu`, gezet in `_start`: de
+   RAM-declaratie Normal-WB, de control-page Normal-NC, de ringen
+   Normal-WB, SCTLR M/C/I), en `map` zet het glas er als **Normal-NC** op
+   4 KB bij (`FB_BASE` staat niet op 2 MB), in dezelfde tabellen in de
+   64 KB onder het image (`LINK_TEXT_OFF`). Tot 30-09 legde `fb.rs` een
+   eigen tabel met SCTLR.C uit en de staart Device; waarom dat niet meer
+   hoeft en waarom de control-page NC blijft, staat in de moduledoc van
+   `applib::mmu`. De switcher bewaart het EL1-regime per bewoner, dus een
+   yield verliest de map niet. Zonder stage-1 (`HOPOS_APP_NO_MMU`) tekent
+   de app via Device, trager maar correct (`HOPOS_DISPLAY_NOMAP`); staat
+   de MMU aan maar kwam het glas er niet in, dan tekent hij niet.
 3. **De invoer**: een TCP-client naar `INPUT_ADDR` die regels leest
    (`LineReader`, zonder allocatie), één JSON-event per regel, precies het
    object dat `POST /input` van de browser-KVM aanneemt

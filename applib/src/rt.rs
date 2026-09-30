@@ -121,6 +121,9 @@ where
     exec.set_clock(clock::now_ns);
     clock::start_event_stream();
     app.announce();
+    // Of `_start` de stage-1 aanzette (crate::mmu): één regel, zodat een
+    // console van ijzer het zegt vóór de eerste ongealigneerde toegang.
+    crate::mmu::report();
     crate::smp::init(app);
     if app.cores() > 1
         && let Err(e) = exec.spawn(crate::smp::bring_up(app))
@@ -139,6 +142,14 @@ where
         app.exit(1);
     }
     exec.run(&mut AppSleeper::new(app.ctrl()))
+}
+
+/// De RAM-declaratie van dit image: (`RamStart`, `RamSize`) zoals de kern
+/// ze patchte.
+#[must_use]
+pub fn ram_declaration() -> (u64, u64) {
+    let (start, size, _) = symbols::ram();
+    (start, size)
 }
 
 /// De main-schil van een app: `applib::main!(app_main)`, met
@@ -291,39 +302,97 @@ mod entry {
     //! `_start` op arm64.
 
     // De ingang. De EL2-trampoline van de kern heeft stage-2, de timers en
-    // een schone SCTLR al geregeld en ERET't hierheen op EL1; wat rest:
-    // interrupts dicht (een app heeft geen vectoren), de stack bovenin de
-    // RAM-declaratie, `.bss` vegen, en door naar de Rust-kant. De kern
-    // veegde `.bss` bij plaatsing al; het nog eens doen maakt het image
-    // onafhankelijk van de lader (QEMU `-kernel`, een apploader).
+    // een schone SCTLR al geregeld en ERET't hierheen op EL1, met de MMU
+    // uit. Wat rest, in deze volgorde (crate::mmu, "De volgorde in
+    // `_start`"):
+    //
+    // 1. interrupts dicht (een app heeft geen interrupts) en VBAR_EL1 op
+    //    de vectortabel van applib: elke fault hierna wordt gemeld in
+    //    plaats van een sprong naar een lege VBAR (de Pi 5, 30-09);
+    // 2. de stack bovenin de RAM-declaratie, en de stage-1 bouwen met de
+    //    MMU nog uit (`__applib_stage1_build`, alleen gealigneerde
+    //    64-bit-toegang: met de MMU uit is alles Device);
+    // 3. MAIR, TCR, TTBR0, dan SCTLR M, C en I (WXN uit: image en heap
+    //    delen blokken), en de I-cache leeg;
+    // 4. de stack opnieuw bovenin: niets van vóór de MMU-aan wordt nog
+    //    gelezen, dus een oude kopie van die regels in een buurcache doet
+    //    er niet toe;
+    // 5. `.bss` vegen, nu cacheable (de kern veegde hem bij plaatsing al;
+    //    het nog eens doen maakt het image onafhankelijk van de lader),
+    //    het boot-woord overdragen, en door naar de Rust-kant.
+    //
+    // Weigert de bouwer (een RAM-declaratie die niet op het linkvenster
+    // begint), dan blijft de MMU uit zoals vóór 30-09 en meldt de
+    // main-schil dat luid (HOPOS_APP_NO_MMU).
+    //
+    // x19..x21 zijn callee-saved, dus ze overleven de aanroep van de
+    // bouwer: RamStart, RamSize en het boot-woord.
     core::arch::global_asm!(
         ".section .text._start, \"ax\"",
         ".global _start",
         "_start:",
         "    msr daifset, #0xf",
+        "    adrp x0, __applib_vectors",
+        "    add x0, x0, :lo12:__applib_vectors",
+        "    msr vbar_el1, x0",
+        "    isb",
         // De twee woorden bij naam, tussen aanhalingstekens: de Go-namen
         // van `abi::place` dragen een `/` en een `.`, en een `sym`-operand
         // citeert niet.
-        "    adrp x0, \"runtime/goos.RamStart\"",
-        "    ldr x0, [x0, :lo12:\"runtime/goos.RamStart\"]",
-        "    adrp x1, \"runtime/goos.RamSize\"",
-        "    ldr x1, [x1, :lo12:\"runtime/goos.RamSize\"]",
-        "    add x0, x0, x1",
+        "    adrp x19, \"runtime/goos.RamStart\"",
+        "    ldr x19, [x19, :lo12:\"runtime/goos.RamStart\"]",
+        "    adrp x20, \"runtime/goos.RamSize\"",
+        "    ldr x20, [x20, :lo12:\"runtime/goos.RamSize\"]",
+        "    add x0, x19, x20",
         "    sub x0, x0, #{gap}",
         "    and x0, x0, #0xfffffffffffffff0",
         "    mov sp, x0",
-        "    adrp x0, __hopapp_bss_start",
+        "    mov x0, x19",
+        "    mov x1, x20",
+        "    bl __applib_stage1_build",
+        "    mov x21, x0",
+        "    cbz x21, 2f",
+        "    tbnz x21, #63, 2f",
+        "    ldr x0, ={mair}",
+        "    msr mair_el1, x0",
+        "    ldr x0, ={tcr}",
+        "    msr tcr_el1, x0",
+        "    msr ttbr0_el1, x19",
+        "    isb",
+        "    tlbi vmalle1",
+        "    dsb nsh",
+        "    isb",
+        "    mrs x0, sctlr_el1",
+        "    orr x0, x0, #(1 << 0)",
+        "    orr x0, x0, #(1 << 2)",
+        "    orr x0, x0, #(1 << 12)",
+        "    bic x0, x0, #(1 << 19)",
+        "    msr sctlr_el1, x0",
+        "    isb",
+        "    ic iallu",
+        "    dsb nsh",
+        "    isb",
+        "    add x0, x19, x20",
+        "    sub x0, x0, #{gap}",
+        "    and x0, x0, #0xfffffffffffffff0",
+        "    mov sp, x0",
+        "2:  adrp x0, __hopapp_bss_start",
         "    add x0, x0, :lo12:__hopapp_bss_start",
         "    adrp x1, __hopapp_bss_end",
         "    add x1, x1, :lo12:__hopapp_bss_end",
-        "1:  cmp x0, x1",
-        "    b.hs 2f",
+        "3:  cmp x0, x1",
+        "    b.hs 4f",
         "    str xzr, [x0], #8",
-        "    b 1b",
-        "2:  bl __applib_main",
-        "3:  wfe",
         "    b 3b",
+        "4:  mov x0, x21",
+        "    bl __applib_stage1_adopt",
+        "    bl __applib_main",
+        "5:  wfe",
+        "    b 5b",
+        ".ltorg",
         gap = const super::STACK_TOP_GAP,
+        mair = const crate::mmu::MAIR,
+        tcr = const crate::mmu::TCR,
     );
 }
 

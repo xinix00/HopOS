@@ -277,11 +277,11 @@ ECHOPORT="$(port "${ECHOPORT:-8007}" ECHOPORT)"
 cd "$DIR"
 echo "== bouwen ($BOARD, $MODE): kern A (stempel A), bundel B (stempel B), appspike, agentd-hopos"
 cargo build --quiet --release --target "$TARGET" -p appspike
-(cd "$HOP_DIR" && cargo build --quiet --release --target "$TARGET" -p agentd-hopos)
+HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
 if [ "$BOARD" = uefi ]; then
 	# De ESP van kern A met Hop als gestagede bewoner (rol hop).
 	ESP="$ART/esp"
-	HOPOS_STAMP=A BUILD_ONLY=1 ESP="$ESP" APP="$HOP_DIR/target/$TARGET/release/agentd-hopos" ROLE=hop \
+	HOPOS_STAMP=A BUILD_ONLY=1 ESP="$ESP" APP="$HOP_ELF" ROLE=hop \
 		sh "$DIR/image/uefi-run.sh" 2>&1 | sed 's/^/   /'
 	[ -e "$ESP/EFI/BOOT/BOOTAA64.EFI" ] || {
 		echo "ROOD: geen BOOTAA64.EFI"
@@ -406,7 +406,7 @@ if [ "$BOARD" = uefi ]; then
 		-device virtio-blk-pci,drive=disk0 \
 		</dev/null >"$LOG" 2>&1 &
 else
-	HOPOS_STAMP=A SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP=hop DISK="$DISK" \
+	HOPOS_STAMP=A SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISK="$DISK" \
 		sh "$DIR/image/qemu-run.sh" </dev/null >"$LOG" 2>&1 &
 fi
 QPID=$!

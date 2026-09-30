@@ -113,6 +113,57 @@ pub struct Status {
     pub fault_esr: u64,
     /// Het fault-adres.
     pub fault_far: u64,
+    /// De vectorindex plus 1 van een exception die de app op EL1 zelf ving
+    /// (`CTRL_APP_FAULT_VEC`, de vectortabel van applib; 0 = geen). Het
+    /// rapport hierboven is van EL2 en ziet alleen wat naar EL2 trapt.
+    pub app_fault_vec: u64,
+    /// ESR_EL1 van die exception.
+    pub app_fault_esr: u64,
+    /// ELR_EL1: de PC waar de app viel.
+    pub app_fault_elr: u64,
+    /// FAR_EL1: het adres dat hij raakte.
+    pub app_fault_far: u64,
+}
+
+/// De klasse van een ESR (ARM ARM D24.2.40, het EC-veld en voor een abort
+/// de fault-status), als korte Engelse naam voor een fault-regel: zodat de
+/// console van ijzer in één regel zegt wat er gebeurde, niet alleen een
+/// getal. Les van 30-09 (de eerste Pi 5-boot): `esr=0x82000005` moest met
+/// de hand gedecodeerd worden tot "instruction abort, translation fault
+/// level 1".
+#[must_use]
+pub const fn esr_class(esr: u64) -> &'static str {
+    let ec = (esr >> 26) & 0x3f;
+    let fsc = esr & 0x3f;
+    match ec {
+        0x00 => "unknown or undefined instruction",
+        0x01 => "trapped WFI/WFE",
+        0x07 => "trapped FP/SIMD",
+        0x0e => "illegal execution state",
+        0x15 => "SVC",
+        0x16 => "HVC",
+        0x17 => "SMC",
+        0x18 => "trapped system register",
+        0x20 | 0x21 => match fsc {
+            0x04..=0x07 => "instruction abort, translation fault",
+            0x09..=0x0b => "instruction abort, access flag fault",
+            0x0d..=0x0f => "instruction abort, permission fault",
+            _ => "instruction abort",
+        },
+        0x22 => "PC alignment fault",
+        0x24 | 0x25 => match fsc {
+            0x21 => "data abort, alignment fault",
+            0x04..=0x07 => "data abort, translation fault",
+            0x09..=0x0b => "data abort, access flag fault",
+            0x0d..=0x0f => "data abort, permission fault",
+            0x10 => "data abort, synchronous external abort",
+            _ => "data abort",
+        },
+        0x26 => "SP alignment fault",
+        0x2f => "SError",
+        0x3c => "BRK",
+        _ => "other exception",
+    }
 }
 
 /// De kooi: bouwen, dispatchen, intrekken, wekken, en de waarheid over de
@@ -260,4 +311,25 @@ pub trait Timer {
     fn now(&self) -> u64;
     /// Slaap `d`.
     fn sleep(&self, d: Duration) -> impl Future<Output = ()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::esr_class;
+
+    // De ESR's van de eerste Pi 5-boot (30-09) en wat een app op EL1 het
+    // vaakst doet, in de woorden van de fault-regel.
+    #[test]
+    fn esr_classes_name_the_fault() {
+        assert_eq!(
+            esr_class(0x8200_0005),
+            "instruction abort, translation fault"
+        );
+        assert_eq!(esr_class(0x9600_0021), "data abort, alignment fault");
+        assert_eq!(esr_class(0x9200_0047), "data abort, translation fault");
+        assert_eq!(esr_class(0x0200_0000), "unknown or undefined instruction");
+        assert_eq!(esr_class(0x5a00_0001), "HVC");
+        assert_eq!(esr_class(0xbe00_0000), "SError");
+        assert_eq!(esr_class(0xfc00_0000), "other exception");
+    }
 }

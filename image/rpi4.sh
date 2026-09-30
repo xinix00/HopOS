@@ -49,8 +49,10 @@ IMAGE=""
 case "$APP" in
 "") ;;
 hop)
-	(cd "$HOP_DIR" && cargo build --quiet --release --target "$TARGET" -p agentd-hopos)
-	IMAGE="$HOP_DIR/target/$TARGET/release/agentd-hopos"
+	# Tegen de applib van deze werkboom (tools/hop-build.sh, HOP_PATCH=0
+	# voor de tag van de hop-repo): de stage-1 en de vectortabel van
+	# applib (30-09, de eerste Pi 5-boot) moeten in Hop zitten.
+	IMAGE="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
 	ROLE="${ROLE:-hop}"
 	;;
 */*)

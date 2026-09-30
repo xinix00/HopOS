@@ -36,7 +36,7 @@
 use core::fmt;
 use core::mem::offset_of;
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering::Relaxed};
-use cpu::irq::{Controller, Error, Line};
+use cpu::irq::{Controller, Error, Line, Trigger};
 use dev::{Pa, Reg};
 
 /// Het aantal SGI's (INTID 0..=15).
@@ -217,13 +217,22 @@ impl Gic {
 
     /// Maakt SPI `id` flankgevoelig (ICFGR bit 1 van zijn paar), vóór de
     /// enable: voor lijnen die een flank zijn (de MSI-vectoren van de MIP
-    /// op de Pi 5).
+    /// op de Pi 5). De weg voor een board is
+    /// [`Controller::set_trigger`], via `cpu::irq::enable_as`.
     pub fn set_edge(&self, id: u32) {
+        self.config(id, true);
+    }
+
+    /// ICFGR van SPI `id`: bit 1 van zijn paar is de flank (IHI 0048B
+    /// 4.3.13; bit 0 is gereserveerd). Een SGI is altijd een flank en een
+    /// PPI is op de GIC-400 vast: die blijven zoals ze zijn.
+    fn config(&self, id: u32, edge: bool) {
         if !(FIRST_SPI..FIRST_SPECIAL).contains(&id) {
             return;
         }
         if let Some(r) = self.d().icfgr.get((id / 16) as usize) {
-            r.update(|v| v | 2 << (2 * (id % 16)));
+            let bit = 2 << (2 * (id % 16));
+            r.update(|v| if edge { v | bit } else { v & !bit });
             dev::mb();
         }
     }
@@ -245,6 +254,19 @@ impl Gic {
 }
 
 impl Controller for Gic {
+    /// De soort van een SPI in GICD_ICFGR, vóór de enable (een wissel op
+    /// een scherpe lijn is UNPREDICTABLE, IHI 0048B 4.3.13). Een SPI staat
+    /// na reset op level; een MSI via een brug is een flank. Les van 30-09
+    /// (de eerste Pi 5-boot): een level-SPI achter een MSI-puls blijft
+    /// staan tot iemand hem laat zakken.
+    fn set_trigger(&self, l: Line, t: Trigger) -> Result<(), Error> {
+        if l.0 >= FIRST_SPECIAL {
+            return Err(Error::Rejected { line: l.0 });
+        }
+        self.config(l.0, t == Trigger::Edge);
+        Ok(())
+    }
+
     /// Prioriteit, route naar deze core, dan pas scherp: route en
     /// prioriteit staan vóór de enable, anders kan de lijn één keer
     /// verkeerd afgaan. Een SGI of PPI heeft geen route (hij is van de core
@@ -394,6 +416,38 @@ mod tests {
         assert_eq!(dev::read32(dp.add(0xc00 + 4 * 10)), 2 << (2 * (166 % 16)));
         g.disable(Line(166));
         assert_eq!(dev::read32(dp.add(0x180 + 4 * 5)), 1 << (166 % 32));
+    }
+
+    // De Pi 5-weg van 30-09: het board registreert de GEM-lijn (MIP-vector
+    // 6, INTID 166) als flank bij de dispatcher, en die zet ICFGR vóór de
+    // enable; een level-lijn (de Pi 4-GENET, SPI 157) blijft level, ook
+    // als hij eerder flank stond.
+    #[test]
+    fn the_dispatcher_sets_the_trigger_before_the_enable() {
+        use cpu::irq::Dispatcher;
+        let d: &'static mut [u64] = Vec::leak(vec![0; 0x1000 / 8]);
+        let c: &'static mut [u64] = Vec::leak(vec![0; 0x2000 / 8]);
+        let dp = pa(d);
+        dev::write32(dp.add(0x800), 0x0101_0101);
+        // SAFETY: de gelekte vectoren leven de hele test.
+        let g: &'static Gic = Box::leak(Box::new(unsafe { Gic::new(dp, pa(c)) }));
+        g.init();
+        let disp: &'static Dispatcher = Box::leak(Box::new(Dispatcher::new()));
+        disp.use_controller(g);
+        disp.enable_as(Line(166), Trigger::Edge, None).unwrap();
+        let icfgr10 = dev::read32(dp.add(0xc00 + 4 * 10));
+        assert_eq!(icfgr10 & (2 << (2 * (166 % 16))), 2 << (2 * (166 % 16)));
+        assert_eq!(dev::read32(dp.add(0x100 + 4 * 5)), 1 << (166 % 32));
+        // SPI 157 (INTID 189): stond op flank, wordt level.
+        dev::write32(dp.add(0xc00 + 4 * 11), u32::MAX);
+        disp.enable(Line(189), None).unwrap();
+        let icfgr11 = dev::read32(dp.add(0xc00 + 4 * 11));
+        assert_eq!(icfgr11 & (2 << (2 * (189 % 16))), 0);
+        assert_eq!(icfgr11 | (2 << (2 * (189 % 16))), u32::MAX);
+        assert_eq!(
+            g.set_trigger(Line(1023), Trigger::Edge),
+            Err(Error::Rejected { line: 1023 })
+        );
     }
 
     #[test]

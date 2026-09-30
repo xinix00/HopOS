@@ -502,11 +502,29 @@ static IRQS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 async fn irq_dispatch(board: &'static Machine, bell: &'static Signal) {
     loop {
         bell.wait().await;
-        let d = board.dispatch_interrupts();
-        IRQS[0].fetch_add(u64::from(d.timer), Relaxed);
-        IRQS[1].fetch_add(u64::from(d.nic), Relaxed);
-        IRQS[2].fetch_add(u64::from(d.other), Relaxed);
+        dispatch_once(board);
     }
+}
+
+/// Eén ronde van de dispatch van het board, geteld in [`IRQS`].
+fn dispatch_once(board: &Machine) {
+    let d = board.dispatch_interrupts();
+    IRQS[0].fetch_add(u64::from(d.timer), Relaxed);
+    IRQS[1].fetch_add(u64::from(d.nic), Relaxed);
+    IRQS[2].fetch_add(u64::from(d.other), Relaxed);
+}
+
+/// Handelt af wat al bij de controller wacht, buiten de dispatch-taak om:
+/// voor de zelftest van de OS-core, die in de boot draait, vóór de executor
+/// de taak ooit pollt (slots.rs, `probe`). Dezelfde context als de taak
+/// (de executor-core van de kern), en dezelfde ronde, dus de signalen die
+/// hij zet ziet de taak straks gewoon.
+#[cfg_attr(
+    target_arch = "riscv64",
+    allow(dead_code, reason = "de zelftest van RISC-V staat in cage_riscv.rs")
+)]
+pub(crate) fn drain_interrupts() {
+    dispatch_once(&BOARD);
 }
 
 /// De diepte van de lifecycle-inbox: een verzoek per system-verbinding plus

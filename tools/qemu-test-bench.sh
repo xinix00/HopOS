@@ -95,7 +95,7 @@ cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuv
 cargo build --quiet --release --target "$TARGET" -p bench
 cargo build --quiet --release -p netmeter
 NETMETER="$DIR/target/release/netmeter"
-(cd "$HOP_DIR" && cargo build --quiet --release --target "$TARGET" -p agentd-hopos)
+HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
 
 # De artifact-server: bench zonder debug-info, de symbolen blijven voor de
 # plaatsing.
@@ -115,7 +115,7 @@ ARGS="hopos.idlestat=1"
 
 echo "== boot 1: Hop + bench (tot ${TIMEOUT}s; leader :$LEADERPORT, artifacts :$ARTPORT, web :$WEBPORT -> gast :80; $ARGS)"
 SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" WEBPORT="$WEBPORT" \
-	HOP_DIR="$HOP_DIR" APP=hop DISK="$DISK" OSCORE= \
+	HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISK="$DISK" OSCORE= \
 	sh "$DIR/image/qemu-run.sh" -append "$ARGS" </dev/null >"$LOG" 2>&1 &
 QPID=$!
 

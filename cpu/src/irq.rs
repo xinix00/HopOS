@@ -53,17 +53,45 @@ pub const STRAY_LIMIT: u32 = 256;
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Line(pub u32);
 
+/// Hoe een lijn afgaat: het board kiest, per lijn, bij [`enable_as`].
+///
+/// Waarom dit bij de registratie hoort en niet los bij de controller: een
+/// MSI die via een brug een SPI wordt (de MIP van de Pi 5) is een flank,
+/// een SPI staat in de GIC standaard op level, en een level-lijn achter
+/// een puls blijft staan tot iemand hem laat zakken. Staat de soort in de
+/// registratie, dan zet de dispatcher hem vóór de enable (de GIC wil dat
+/// zo, IHI 0048B 4.3.13) en weet hij ook wat een lijn die blijft
+/// terugkomen betekent: bij level zonder ack laat niemand hem ooit zakken
+/// ([`Dispatcher::dispatch`]). Les van 30-09 (de eerste Pi 5-boot).
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub enum Trigger {
+    /// Level: de lijn staat zolang het device hem vasthoudt. De
+    /// standaard van een SPI en van de meeste devices.
+    #[default]
+    Level,
+    /// Flank: elke puls is één interrupt (een MSI).
+    Edge,
+}
+
 /// De device-kant van de bevestiging: wat het device nodig heeft om zijn
 /// lijn weer los te laten (virtio: InterruptACK), gedaan vóór de wachter
 /// gewekt wordt.
 pub type Ack = &'static dyn Fn();
 
-/// Wat een interrupt-controller moet kunnen. Vier werkwoorden, en niets
-/// over prioriteiten of groepen: die zijn van de driver.
+/// Wat een interrupt-controller moet kunnen. Vier werkwoorden en een
+/// instelling, en niets over prioriteiten of groepen: die zijn van de
+/// driver.
 ///
 /// De methoden nemen `&self`: een controller is een registerblok, en
 /// MMIO-registers zijn per definitie gedeeld (`dev::Reg`).
 pub trait Controller {
+    /// Zet de soort van de lijn, vóór [`Controller::enable`]. Een
+    /// controller die dat niet per lijn kan (de AIC, de PLIC: hun lijnen
+    /// hebben één vaste soort) laat de standaard staan: niets te doen.
+    fn set_trigger(&self, l: Line, t: Trigger) -> Result<(), Error> {
+        let _ = (l, t);
+        Ok(())
+    }
     /// Maakt de lijn scherp én routeert hem naar de aanroepende core.
     fn enable(&self, l: Line) -> Result<(), Error>;
     /// Zet de lijn uit.
@@ -117,6 +145,9 @@ pub struct Stats {
     pub stray_passes: AtomicU64,
     /// Onbekende lijnen die uitgezet zijn.
     pub unknown: AtomicU64,
+    /// Level-lijnen zonder device-ack die uitgezet zijn omdat ze binnen één
+    /// ronde bleven terugkomen.
+    pub stuck: AtomicU64,
 }
 
 /// Wat één dispatch-ronde zag; de dispatcher-taak logt het.
@@ -128,12 +159,15 @@ pub struct Pass {
     pub disabled: Option<Line>,
     /// De lijn waarop de ronde werd afgebroken ([`STRAY_LIMIT`]).
     pub stray: Option<Line>,
+    /// Een level-lijn zonder device-ack die op [`STRAY_LIMIT`] uitgezet is.
+    pub stuck: Option<Line>,
 }
 
 #[derive(Copy, Clone)]
 struct Entry {
     line: Line,
     ack: Option<Ack>,
+    trigger: Trigger,
 }
 
 /// De dispatcher: de tabel lijn-naar-wachter en een signaal per lijn.
@@ -168,6 +202,7 @@ impl Dispatcher {
                 passes: AtomicU64::new(0),
                 stray_passes: AtomicU64::new(0),
                 unknown: AtomicU64::new(0),
+                stuck: AtomicU64::new(0),
             },
         }
     }
@@ -184,9 +219,21 @@ impl Dispatcher {
         self.ctrl.get().is_some()
     }
 
-    /// Registreert `l` als wek-doel (met de device-ack) en maakt hem scherp
-    /// bij de controller. Geeft het signaal van de lijn.
+    /// Registreert `l` als level-wek-doel (met de device-ack) en maakt hem
+    /// scherp bij de controller. Geeft het signaal van de lijn.
     pub fn enable(&'static self, l: Line, ack: Option<Ack>) -> Result<&'static Signal, Error> {
+        self.enable_as(l, Trigger::Level, ack)
+    }
+
+    /// Registreert `l` als wek-doel van soort `trigger` (met de
+    /// device-ack), zet de soort bij de controller en maakt hem dan pas
+    /// scherp. Geeft het signaal van de lijn.
+    pub fn enable_as(
+        &'static self,
+        l: Line,
+        trigger: Trigger,
+        ack: Option<Ack>,
+    ) -> Result<&'static Signal, Error> {
         let ctrl = self.ctrl.get().ok_or(Error::NoController)?;
         let i = {
             let mut lines = self.lines.borrow_mut();
@@ -196,10 +243,15 @@ impl Dispatcher {
                 .or_else(|| lines.iter().position(Option::is_none))
                 .ok_or(Error::Full { line: l.0 })?;
             if let Some(slot) = lines.get_mut(pos) {
-                *slot = Some(Entry { line: l, ack });
+                *slot = Some(Entry {
+                    line: l,
+                    ack,
+                    trigger,
+                });
             }
             pos
         };
+        ctrl.set_trigger(l, trigger)?;
         ctrl.enable(l)?;
         self.signals.get(i).ok_or(Error::Full { line: l.0 })
     }
@@ -226,8 +278,14 @@ impl Dispatcher {
     /// de wachter wekken en de lijn completeren.
     ///
     /// Onbekend = meteen uit (een lijn die de firmware aan liet staan:
-    /// UEFI-timer, UART, een watchdog-waarschuwing). Bekend maar blijvend =
-    /// de ronde afbreken na [`STRAY_LIMIT`], en de lijn NIET uitzetten: een
+    /// UEFI-timer, UART, een watchdog-waarschuwing). Een level-lijn zonder
+    /// device-ack die [`STRAY_LIMIT`] keer terugkomt, laat niemand ooit
+    /// zakken: uit, en luid (`pass.stuck`); zijn wachter valt terug op het
+    /// maximum van [`wait`], liever pollen dan een dispatcher die de
+    /// rotatie van de OS-core voor eeuwig onderbreekt (de vrees van 30-09
+    /// bij de eerste Pi 5-boot). Bekend met een ack, of een flank, maar
+    /// blijvend = de ronde afbreken na [`STRAY_LIMIT`], en de lijn NIET
+    /// uitzetten: een
     /// bediende lijn die blijft terugkomen is een NIC onder last (tg3: een
     /// status-update per frame houdt de lijn bij 25k frames/s praktisch
     /// continu hoog). Die voorgoed uitzetten was de M4-dood van 20-09: ná
@@ -265,6 +323,11 @@ impl Dispatcher {
             if *n > STRAY_LIMIT {
                 self.stats.stray_passes.fetch_add(1, Relaxed);
                 pass.stray = Some(l);
+                if e.trigger == Trigger::Level && e.ack.is_none() {
+                    ctrl.disable(l);
+                    self.stats.stuck.fetch_add(1, Relaxed);
+                    pass.stuck = Some(l);
+                }
                 break;
             }
         }
@@ -301,9 +364,16 @@ pub fn use_controller(c: &'static dyn Controller) {
     global().use_controller(c);
 }
 
-/// Maakt lijn `l` scherp met optionele device-ack; geeft zijn signaal.
+/// Maakt level-lijn `l` scherp met optionele device-ack; geeft zijn
+/// signaal.
 pub fn enable(l: Line, ack: Option<Ack>) -> Result<&'static Signal, Error> {
     global().enable(l, ack)
+}
+
+/// Maakt lijn `l` van soort `trigger` scherp met optionele device-ack;
+/// geeft zijn signaal ([`Dispatcher::enable_as`]).
+pub fn enable_as(l: Line, trigger: Trigger, ack: Option<Ack>) -> Result<&'static Signal, Error> {
+    global().enable_as(l, trigger, ack)
 }
 
 /// Wacht tot lijn `l` vuurde of tot `max` afloopt: `true` = gevuurd.
@@ -377,6 +447,13 @@ fn report(d: &Dispatcher, before: u64, pass: Pass, log: fn(fmt::Arguments<'_>)) 
             l.0
         ));
     }
+    if let Some(l) = pass.stuck {
+        log(format_args!(
+            "irq: INTID {} came back {STRAY_LIMIT} times in one pass, a level line without a device ack that nobody lowers: line disabled, its waiter polls HOPOS_IRQ_STUCK",
+            l.0
+        ));
+        return;
+    }
     if let Some(l) = pass.stray
         && d.stats.stray_passes.load(Relaxed) <= 3
     {
@@ -419,6 +496,12 @@ mod tests {
     }
 
     impl Controller for Fake {
+        fn set_trigger(&self, l: Line, t: Trigger) -> Result<(), Error> {
+            if t == Trigger::Edge {
+                self.log.borrow_mut().push(('f', l.0));
+            }
+            Ok(())
+        }
         fn enable(&self, l: Line) -> Result<(), Error> {
             if self.refuse == Some(l.0) {
                 return Err(Error::Rejected { line: l.0 });
@@ -486,8 +569,10 @@ mod tests {
 
     #[test]
     fn stray_line_ends_the_pass_but_stays_enabled() {
+        static ACK: fn() = || {};
         let (d, f) = setup(Fake::default());
-        let s = d.enable(Line(40), None).unwrap();
+        // Een NIC onder last: bediend (een ack per claim), dus nooit uit.
+        let s = d.enable(Line(40), Some(&ACK)).unwrap();
         f.pending
             .borrow_mut()
             .extend(core::iter::repeat_n(40, STRAY_LIMIT as usize + 10));
@@ -498,6 +583,36 @@ mod tests {
         assert!(!f.log.borrow().iter().any(|&(op, _)| op == 'd'));
         // De rest blijft pending voor de volgende ronde.
         assert_eq!(f.pending.borrow().len(), 9);
+    }
+
+    // Een level-lijn die niemand laat zakken (geen device-ack) komt binnen
+    // één ronde STRAY_LIMIT keer terug: uit, en de ronde meldt hem. Een
+    // flank zonder ack die even hard komt, is verkeer en blijft aan; de
+    // soort gaat vóór de enable naar de controller.
+    #[test]
+    fn stuck_level_line_without_ack_is_disabled_an_edge_is_not() {
+        let (d, f) = setup(Fake::default());
+        let s = d.enable(Line(41), None).unwrap();
+        f.pending
+            .borrow_mut()
+            .extend(core::iter::repeat_n(41, STRAY_LIMIT as usize + 10));
+        let pass = d.dispatch();
+        assert_eq!(pass.stuck, Some(Line(41)));
+        assert_eq!(pass.stray, Some(Line(41)));
+        assert!(s.is_set());
+        assert!(f.log.borrow().contains(&('d', 41)));
+        assert_eq!(d.stats.stuck.load(SeqCst), 1);
+
+        let (d, f) = setup(Fake::default());
+        d.enable_as(Line(166), Trigger::Edge, None).unwrap();
+        assert_eq!(f.log.borrow()[..2], [('f', 166), ('e', 166)]);
+        f.pending
+            .borrow_mut()
+            .extend(core::iter::repeat_n(166, STRAY_LIMIT as usize + 10));
+        let pass = d.dispatch();
+        assert_eq!(pass.stray, Some(Line(166)));
+        assert_eq!(pass.stuck, None);
+        assert!(!f.log.borrow().iter().any(|&(op, _)| op == 'd'));
     }
 
     #[test]

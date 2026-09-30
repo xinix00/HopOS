@@ -69,8 +69,9 @@ mod tests {
         assert_eq!(RING_DATA_CAP, 0x7000);
         assert_eq!(NET_RING_DATA_CAP, 0xE_F000);
         // 0xED8 tot 29-09; de temperatuur (CTRL_TEMP) en de timebase
-        // (CTRL_TIMEBASE_HZ) namen er elk 8 van.
-        assert_eq!(CTRL_ENV_MAX, 0xEC8);
+        // (CTRL_TIMEBASE_HZ) namen er elk 8 van, het EL1-fault-rapport
+        // (CTRL_APP_FAULT_*) op 30-09 nog eens 32.
+        assert_eq!(CTRL_ENV_MAX, 0xEA8);
         assert_eq!(ABI_TAIL, 0x20_0000);
         assert_eq!((KIND_CALL, KIND_RESULT, KIND_LOG), (1, 2, 3));
     }
