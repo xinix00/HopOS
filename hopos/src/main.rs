@@ -598,6 +598,50 @@ impl Console for KernConsole {
     }
 }
 
+/// De maat van de kern-stack: `STACK_SIZE` in elk linkscript (hopos/*.ld),
+/// direct boven `.bss`, zonder wachtpagina eronder.
+const STACK_BYTES: u64 = 0x40000;
+
+/// Hoe ver onder de eigen stackpositie de meter niet wist: een IRQ-frame
+/// en de vector die tijdens de meting binnenkomen, landen daar.
+const STACK_METER_SLACK: u64 = 16 * 1024;
+
+/// De diepste stack sinds de vorige meting, in bytes, en daarna het stuk
+/// daaronder weer op nul (de volgende tik meet opnieuw).
+///
+/// De meter leest de stack van onderen tot het eerste woord dat niet nul is
+/// (QEMU en elke loader geven nul-RAM; na een kern-flip is de eerste meting
+/// ruis). Les van 30-09: de plaatsing van een slot (`kern::rpc::mount_table`
+/// onder de lifecycle, de publicatieregel) haalde 190 KB van de 256, en een
+/// overloop schrijft zonder wachtpagina stil in het einde van `.bss` (de
+/// switch-tabel, de deuren van de system-API, de heap). Eén scan van 32K
+/// woorden per seconde; de schrijfslag alleen over wat de vorige tik vuil
+/// maakte.
+fn stack_high_water() -> u64 {
+    unsafe extern "C" {
+        safe static __bss_end: u8;
+        safe static __stack_top: u8;
+    }
+    let top = (&raw const __stack_top).addr() as u64;
+    let bottom = top.saturating_sub(STACK_BYTES);
+    if bottom < (&raw const __bss_end).addr() as u64 {
+        return 0; // Een linkscript met een andere indeling: niet meten.
+    }
+    let here = 0u64;
+    let sp = (&raw const here).addr() as u64;
+    let mut p = bottom;
+    while p < top && dev::read64(dev::Pa(p)) == 0 {
+        p += 8;
+    }
+    let used = top - p;
+    let mut z = p;
+    while z < sp.saturating_sub(STACK_METER_SLACK) {
+        dev::write64(dev::Pa(z), 0);
+        z += 8;
+    }
+    used
+}
+
 /// De hartslag: elke seconde één regel met het tiknummer en de meetlat van
 /// de executor.
 async fn tick(exec: &'static Executor) {
@@ -605,8 +649,14 @@ async fn tick(exec: &'static Executor) {
     let mut n: u64 = 0;
     loop {
         n += 1;
-        exec.until(start.saturating_add(n.saturating_mul(1_000_000_000)))
-            .await;
+        let due = start.saturating_add(n.saturating_mul(1_000_000_000));
+        exec.until(due).await;
+        // Hoe laat deze tik kwam. Een kern die een tijd niets rondmaakte
+        // (30-09: de periodieke hopfs-commit wacht synchroon op twee FLUSHes
+        // van de schijf, op macOS F_FULLFSYNC's van het image, en de hele
+        // OS-core met Hop staat dan stil) haalt zijn gemiste tikken daarna in
+        // één salvo in; late_ms zegt dan hoe lang de stilte was.
+        let late_ms = exec.now().saturating_sub(due) / 1_000_000;
         let s = &exec.stats;
         // De OS-core: overgangen naar een bewoner, waardoor de kern terugkwam,
         // en de tijd die de bewoners kregen. Zonder deze getallen is "Hop
@@ -619,8 +669,9 @@ async fn tick(exec: &'static Executor) {
         let last = o.last.load(Relaxed);
         let long_us = o.longest.swap(0, Relaxed) / (OS_HZ() / 1_000_000).max(1);
         let sw = &net::STATS;
+        let stack_kb = stack_high_water() / 1024;
         println!(
-            "HOPOS_TICK {n} sleeps={} polls={} irq(timer={} nic={} other={}) os(in={} irq={} ipi={} timer={} yield={} exit={} fault={} idle={} res_ms={} kicks={}) turn(last={}:{} long_us={long_us}) sw(door={} timer={} rxfull={} rxdrop={} big={} noroute={} txdrop={} flowfull={}) temp={}",
+            "HOPOS_TICK {n} late_ms={late_ms} sleeps={} polls={} irq(timer={} nic={} other={}) os(in={} irq={} ipi={} timer={} yield={} exit={} fault={} idle={} res_ms={} kicks={}) turn(last={}:{} long_us={long_us}) stack_kb={stack_kb} sw(door={} timer={} rxfull={} rxdrop={} big={} noroute={} txdrop={} flowfull={}) temp={}",
             s.sleeps.load(Relaxed),
             s.polls.load(Relaxed),
             IRQS[0].load(Relaxed),

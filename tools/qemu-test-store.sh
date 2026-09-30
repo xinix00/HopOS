@@ -8,7 +8,10 @@
 # http: de nep heeft geen certificaat, en Hop zegt dat luid
 # (HOP_STORE_PLAIN_HTTP). De kern boot met Hop in slot 1 en hopos.s3.* in de
 # bootargs (image/qemu-run.sh BOOTARGS, hopos/src/config.rs geeft ze als
-# HOPOS_S3_* aan Hop). Van buiten gaat er één jobspec naar de leader:
+# HOPOS_S3_* aan Hop). Met een bucket is dat ook de lock van Hop's cluster,
+# en een lease vraagt een gezette klok: daarom ook een SNTP-antwoorder op de
+# host (hopos.ntp=10.0.2.2:$NTPPORT, HOP_CLOCK_SYNCED). Van buiten gaat er
+# één jobspec naar de leader:
 # appspike met ROLE=STORE (appspike/src/main.rs, Go's store_demo.go):
 #
 #   pull van iets dat er nooit was   een nette fout (NotFound)
@@ -35,7 +38,7 @@
 #
 #   tools/qemu-test-store.sh                TIMEOUT=90 standaard, in seconden
 #   KEEP_LOG=pad tools/qemu-test-store.sh
-#   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT/S3PORT  de host-poorten
+#   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT/S3PORT/NTPPORT  de host-poorten
 #   HOP_DIR=pad                             de hop-repo (standaard ../hop/hop)
 set -eu
 
@@ -50,8 +53,10 @@ S3LOG="$ART/s3.log"
 QPID=""
 HPID=""
 SPID=""
+NPID=""
 cleanup() {
 	[ -n "$QPID" ] && kill "$QPID" 2>/dev/null
+	[ -n "$NPID" ] && kill "$NPID" 2>/dev/null
 	[ -n "$HPID" ] && kill "$HPID" 2>/dev/null
 	[ -n "$SPID" ] && kill "$SPID" 2>/dev/null
 	rm -rf "$LOG" "$ART"
@@ -82,6 +87,7 @@ AGENTPORT="$(port "${AGENTPORT:-8080}" AGENTPORT)"
 LEADERPORT="$(port "${LEADERPORT:-9080}" LEADERPORT)"
 ARTPORT="$(port "${ARTPORT:-8000}" ARTPORT)"
 S3PORT="$(port "${S3PORT:-9000}" S3PORT)"
+NTPPORT="$(port "${NTPPORT:-10123}" NTPPORT)"
 
 cd "$DIR"
 echo "== bouwen: hopos (qemuvirt), appspike, en agentd-hopos in $HOP_DIR"
@@ -99,8 +105,26 @@ fi
 HPID=$!
 python3 "$DIR/tools/fakes3.py" "$S3PORT" hop >"$S3LOG" 2>&1 &
 SPID=$!
+# De tijd van de host als SNTP-server (modus 4, stratum 2; het transmit-veld
+# van de vraag terug als originate, dat toetst Hop).
+python3 - "$NTPPORT" >"$ART/ntp.log" 2>&1 <<'PY' &
+import socket, struct, sys, time
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(("127.0.0.1", int(sys.argv[1])))
+def stamp(t):
+    t += 2208988800
+    return struct.pack("!II", int(t), int((t % 1) * (1 << 32)))
+while True:
+    req, addr = s.recvfrom(512)
+    if len(req) < 48:
+        continue
+    now = time.time()
+    resp = bytes([0x24, 2, 6, 0xEC]) + bytes(8) + b"LOCL" + stamp(now) + req[40:48] + stamp(now) + stamp(time.time())
+    s.sendto(resp, addr)
+PY
+NPID=$!
 
-S3ARGS="hopos.s3.endpoint=http://10.0.2.2:$S3PORT hopos.s3.bucket=hop hopos.s3.region=us-east-1 hopos.s3.key=hopkey hopos.s3.secret=hopsecret hopos.s3.pathstyle=1"
+S3ARGS="hopos.s3.endpoint=http://10.0.2.2:$S3PORT hopos.s3.bucket=hop hopos.s3.region=us-east-1 hopos.s3.key=hopkey hopos.s3.secret=hopsecret hopos.s3.pathstyle=1 hopos.ntp=10.0.2.2:$NTPPORT"
 echo "== booten op QEMU virt met Hop en een S3-nep (tot ${TIMEOUT}s; agent :$AGENTPORT, leader :$LEADERPORT, artifacts :$ARTPORT, s3 :$S3PORT)"
 SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP=hop DISK="$DISK" \
 	BOOTARGS="$S3ARGS" sh "$DIR/image/qemu-run.sh" </dev/null >"$LOG" 2>&1 &
@@ -121,7 +145,7 @@ s3all() {
 	)
 }
 
-BOOT_MARKS="HOPOS_BOOT|HOPOS_FS_UP fresh=1|HOPOS_SYSTEM_UP|slot 1: .*HOP_STORE_PLAIN_HTTP|slot 1: .*HOP_STORE_UP|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
+BOOT_MARKS="HOPOS_BOOT|HOPOS_FS_UP fresh=1|HOPOS_SYSTEM_UP|slot 1: .*HOP_CLOCK_SYNCED|slot 1: .*HOP_STORE_PLAIN_HTTP|slot 1: .*HOP_STORE_UP|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
 RUN_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|store: slot 2 pull: no such object HOPOS_STORE_MISS|store: slot 2 push done \\(size 30\\) HOPOS_STORE_DONE|store: slot 2 list done \\(size 1\\) HOPOS_STORE_DONE|store: slot 2 pull done \\(size 30\\) HOPOS_STORE_DONE|store: slot 2 drop done|store: slot 2 list done \\(size 0\\) HOPOS_STORE_DONE|slot 2: HOPOS_APPSPIKE_STORE ok|slot 2: HOPOS_APPSPIKE_DONE pass=10 fail=0"
 S3_MARKS="S3 GET apps/hopos/spike/never-pushed.json 404|S3 PUT apps/hopos/spike/state.json 200|S3 GET \\?list prefix=apps/hopos/spike/ 200|S3 GET apps/hopos/spike/state.json 200|S3 DELETE apps/hopos/spike/state.json 204"
 RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_CAGE_FAIL|HOPOS_APPSPIKE_STORE FAIL|HOP_STORE_FAIL|HOP_STORE_KERNEL|HOPOS_STORE_NO_SERVICE|HOPOS_STORE_FULL"

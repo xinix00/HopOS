@@ -230,3 +230,19 @@ fn a_gicv2_bell_publishes_its_mmio_address() {
     os.listen(true);
     assert_eq!(dev::read64(sched.add(SCHED_OS_KICK)), (1 << 16) | 8);
 }
+
+#[test]
+fn the_selftest_spinner_waits_out_a_late_timer() {
+    // 30-09: op een volle host kwam de CNTHP van de timer-toets (1 ms) pas na
+    // 2042 us, en de spinner gaf op 2 ms al zelf op. De grens is nu twee keer
+    // de termijn plus 50 ms; bij 62,5 MHz is dat voor 1 ms 3,2M ticks.
+    let hz = 62_500_000;
+    let ms = hz / 1000;
+    let limit = spin_limit(1000, ms, hz);
+    assert_eq!(limit, 1000 + 2 * ms + 50 * ms);
+    // De gemeten vertraging past er ruim in, een timer die nooit komt niet.
+    assert!(1000 + 2042 * hz / 1_000_000 < limit);
+    // Geen overloop bij een absurde termijn: de teller loopt rond, de
+    // termijn verzadigt.
+    assert_eq!(spin_limit(0, u64::MAX, hz), u64::MAX);
+}

@@ -435,9 +435,13 @@ pub const OP_CODEC_POLL: u8 = 17;
 pub const OP_CODEC_CLOSE: u8 = 18;
 /// Eén SCSI-uitwisseling; niet herhaalbaar.
 pub const OP_DEVICE_COMMAND: u8 = 19;
+/// Bevestigde opslagbarrière voor een zichtbaar bestaand bestand of directory.
+/// `off`, `n` en data zijn nul/leeg. Geeft de vastgelegde boomgeneratie in size.
+/// Na verwijderen gebruikt de app het ouderpad; een vluchtige FS weigert.
+pub const OP_SYNC: u8 = 20;
 /// Het hoogste opnummer van deze module; de bevoegde operaties van
 /// [`crate::systemapi`] liggen erboven.
-pub const OP_MAX: u8 = OP_DEVICE_COMMAND;
+pub const OP_MAX: u8 = OP_SYNC;
 
 /// Een call-status: gelukt.
 pub const STATUS_OK: u16 = 0;

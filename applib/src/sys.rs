@@ -29,8 +29,8 @@
 use crate::contract::{
     HOPABI_HDR_LEN, HOPABI_VERSION, KIND_CALL, KIND_LOG, KIND_RESULT, MAX_IO_CHUNK, MAX_PAYLOAD,
     OP_LIST, OP_READ, OP_REMOVE, OP_STAT, OP_STORE_DROP, OP_STORE_LIST, OP_STORE_PULL,
-    OP_STORE_PUSH, OP_TRUNCATE, OP_WRITE, STATUS_NOENT, STATUS_OK, SYS_HEADER_LEN, SYS_MAGIC,
-    SYS_PORT, SYS_VERSION,
+    OP_STORE_PUSH, OP_SYNC, OP_TRUNCATE, OP_WRITE, STATUS_NOENT, STATUS_OK, SYS_HEADER_LEN,
+    SYS_MAGIC, SYS_PORT, SYS_VERSION,
 };
 use core::fmt;
 use core::future::Future;
@@ -512,6 +512,20 @@ impl<D: Dial, T: Timer> Client<D, T> {
         self.seq = self.seq.wrapping_add(1);
         req.seq = self.seq;
         self.once(&req, dst, timeout).await.map_err(|a| a.err)
+    }
+
+    /// Bevestigt data, namen en groottes op duurzame opslag; retourneert de
+    /// HopFS-generatie. Ook een directory mag (na journalverwijdering).
+    /// Geen herhaling na een verloren bevestiging: de aanroeper moet een
+    /// onzekere commit afhandelen. Een oude kern of vluchtige FS weigert.
+    pub async fn sync(&mut self, path: &str) -> Result<u64> {
+        let (r, n) = self
+            .call_once(Req::path(OP_SYNC, path), &mut [], RPC_TIMEOUT)
+            .await?;
+        if n != 0 {
+            return Err(Error::Protocol("sync response data"));
+        }
+        Ok(r.size)
     }
 
     /// De grootte van een bestand (0 voor een map).

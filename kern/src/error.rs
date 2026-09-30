@@ -73,6 +73,8 @@ pub enum Error {
     /// Een pad buiten het zicht van de taak: buiten de eigen root en de
     /// volumes (`errDenied` in Go).
     Denied,
+    /// Een duurzame barrière is gevraagd op een vluchtig bestandssysteem.
+    VolatileStorage,
     /// Het blokapparaat meldde een fout op dit LBA.
     Io { lba: u64 },
     /// De schijf (het venster) is vol.
@@ -143,6 +145,7 @@ impl fmt::Display for Error {
             Self::Kind => f.write_str("wrong kind (file or directory)"),
             Self::NotEmpty => f.write_str("directory not empty"),
             Self::BadPath => f.write_str("invalid path"),
+            Self::VolatileStorage => f.write_str("storage is volatile; no durable sync available"),
             Self::Denied => f.write_str("outside the task's root and volumes"),
             Self::Io { lba } => write!(f, "block I/O failed at LBA {lba}"),
             Self::DiskFull { blocks } => write!(f, "disk full ({blocks} blocks)"),

@@ -45,7 +45,7 @@ use crate::hopfs::{BlockDevice, Fs};
 use crate::slots::{Mount, Reply, Servicers, try_push};
 use crate::system::{MAX_IO_CHUNK, REQ_HEADER};
 use crate::{Error, Result, SLOT_CAP, Slot};
-use abi::hopabi::{OP_LIST, OP_READ, OP_REMOVE, OP_STAT, OP_TRUNCATE, OP_WRITE};
+use abi::hopabi::{OP_LIST, OP_READ, OP_REMOVE, OP_STAT, OP_SYNC, OP_TRUNCATE, OP_WRITE};
 use alloc::vec::Vec;
 use core::ops::Range;
 use core::time::Duration;
@@ -75,7 +75,7 @@ pub const COMMIT_POLL: Duration = Duration::from_secs(1);
 pub const fn is_fs_op(op: u8) -> bool {
     matches!(
         op,
-        OP_STAT | OP_READ | OP_WRITE | OP_LIST | OP_REMOVE | OP_TRUNCATE
+        OP_STAT | OP_READ | OP_WRITE | OP_LIST | OP_REMOVE | OP_TRUNCATE | OP_SYNC
     )
 }
 
@@ -770,6 +770,15 @@ impl<'s, D: BlockDevice, L: Console> FsActor<'s, D, L> {
                 }
                 self.fs.remove(p, false)?;
                 Ok((0, 0))
+            }
+            OP_SYNC => {
+                if c.off != 0 || c.n != 0 || !c.data.is_empty() {
+                    return Err(Error::Kind);
+                }
+                // De gebruikelijke generatie- en mountresolutie geldt ook
+                // voor een barrière. Na remove sync't de app de oudermap.
+                self.fs.stat(p)?;
+                Ok((self.fs.sync()?, 0))
             }
             OP_TRUNCATE => {
                 self.fs.truncate(p, c.n)?;

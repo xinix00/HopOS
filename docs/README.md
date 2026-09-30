@@ -20,6 +20,9 @@ de consoleregel die erbij hoort en wat een afwijking betekent.
 | `sh tools/qemu-test-bench.sh` | de meetketen: Hop plaatst `apps/bench` met poort 80, `tools/netmeter` meet van de host (rtt, storm, in, out), twee apps meten elkaar door de switch, BURN draait, `hopos.idlestat=1` drukt de meetlat, en een tweede boot doet `hopos.nvmebench=1`; de getallen staan in [measurements.md](measurements.md) |
 | `sh tools/qemu-soak-hop.sh 30` | de soak van de hoplb-kring (Hop, welcome, hoplb met de hairpin door de switch, plus een poller op Hop): N runs achter elkaar, een waakhond op `HOPOS_TICK` die bij een tik die meer dan 3 s uitblijft `info registers -a` en de meetlat van de OS-core uit de monitor dumpt; ook met `SMP=2`, `SMP=8` en `OSCORE=1` |
 | `sh tools/qemu-test-mcast.sh` | multicast in de node: een bench joint 224.0.0.251, een tweede zendt, de switch floodt, `HOPOS_BENCH_MCAST recv=3` |
+| `sh tools/qemu-test-volumes.sh` | de volumes van een jobspec: een job met `"volumes":{"/data":"/volumes/demo"}` schrijft, hopfs commit, Hop herstart hem, en hij vindt zijn bestand terug (`HOPOS_SLOT_MOUNTS`) |
+| `sh tools/qemu-test-store.sh` | de store-ops: appspike doet push, list, pull en drop op zijn map `apps/<cluster>/<job>/` in een S3-nep op de host, van app via kern naar Hop en terug (`HOPOS_APPSPIKE_STORE ok`) |
+| `sh tools/qemu-test-cluster.sh` (in de hop-repo) | een cluster van een QEMU-node en een host-agent met een hoplockserver als lock: beide nodes in `hop agents`, en na het hard doden van de host-leider wint de HopOS-node de lease en plaatst hij een job op de host |
 | `sh tools/qemu-test-flip.sh` | de kern-flip: hopfs bevroren en gecommit, de NAT-flows gevangen, de sprong, Hop overleeft zonder herstart, en een uitgaande TCP-verbinding van een app (rol FLIPCONN) loopt door: drie antwoorden via kern A, drie via kern B, over één verbinding |
 | `MISMATCH=1 sh tools/qemu-test-flip.sh` | een bundel met een andere switch-code wordt vóór de sprong geweigerd (Hop geeft 502) |
 | `COLD=1 sh tools/qemu-test-flip.sh` | de koude flip (`"cold":true` op `POST /flip`): Hop stopt zijn taken, de kern zet de app-cores uit en springt zonder adoptie, Hop start koud en plaatst de job opnieuw |
@@ -123,10 +126,16 @@ board ooit gestart. De lijst is de eerlijke stand vóór de devicedag.
   watchdog en de ingebakken config; het slot-plan doet bij de eerste
   aanroep een voorproef (`HOPOS_APPLE_PREFLIGHT`). De koude flip werkt er
   niet (PSCI CPU_OFF zonder EL3). Nooit gedraaid.
-- **Hop op de host.** Geen SIGTERM-afhandeling in `agentd` (std heeft geen
+- **Hop.** Geen SIGTERM-afhandeling in `agentd` op de host (std heeft geen
   signaal-API: een gedode daemon laat zijn lease via de TTL verlopen); een
   stroom waarvan de lezer weg is, komt pas bij de volgende keepalive vrij;
   de Linux-isolatie is in Alpine als root bewezen, niet op een echte host.
+  Op HopOS: de S3-lock alleen met host-tests, twee HopOS-nodes naast elkaar
+  alleen op ijzer te toetsen (slirp verbindt twee QEMU's niet), en de
+  CPU-meting per slot (Go's usage.go) ontbreekt nog.
+- **System-API.** De device-op (19, de optische drive over USB-BOT en MMC
+  voor lumen) is niet geport; de rest (bestanden, mounts, store, codec, de
+  bevoegde ops) is compleet.
 - **applib.** Geen `leave_group` (leannet heeft geen leave: een lean-punt);
   hop-http draagt zijn eigen TcpConn-adapter tot Hop op de tag met
   `applib::tcp` staat.

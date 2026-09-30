@@ -778,6 +778,21 @@ impl<D: BlockDevice> Fs<D> {
         self.generation
     }
 
+    /// Expliciete duurzame barrière: ook een ongewijzigde boom vraagt een
+    /// device-flush. `commit` alleen mag op vluchtige opslag niets doen;
+    /// deze API mag daar nooit een duurzame bevestiging voor teruggeven.
+    pub fn sync(&mut self) -> Result<u64> {
+        if !self.persist {
+            return Err(Error::VolatileStorage);
+        }
+        if self.dirty || self.last.is_none() {
+            self.commit()?;
+        } else {
+            self.disk.flush()?;
+        }
+        Ok(self.generation)
+    }
+
     /// Legt de boom vast als hij veranderde: data flushen, boom in de ANDERE
     /// plek (eerst de body, dan de kop), weer flushen, en pas dan de
     /// uitgestelde vrijgaven echt vrijgeven. De kop komt als laatste, dus een

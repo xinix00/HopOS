@@ -161,6 +161,26 @@ const fn interrupted(fired: bool, kick: bool) -> Back {
     }
 }
 
+/// De vangrail van de zelftest-spinner bovenop twee keer zijn termijn: 50
+/// ms.
+///
+/// Les van 30-09 (de soak van de hoplb-kring, `tools/qemu-soak-hop.sh`,
+/// vier QEMU's naast elkaar, load 20 op 14 host-cores): met alleen twee
+/// keer de termijn (2 ms bij de timer-toets van 1 ms) gaf de spinner op
+/// 2042 us zelf op, vóór de CNTHP van een QEMU-vCPU die even geen host-tijd
+/// kreeg, en de boot werd rood (HOPOS_OS_SELFTEST_FAIL, 1 van 25 runs met
+/// OSCORE=1). Laat is geen fout: een timer die nooit komt wel. 50 ms is
+/// ruim boven elke gemeten vertraging en houdt een board zonder routering
+/// nog steeds uit een hangende boot.
+const SELFTEST_GRACE_NS: u64 = 50_000_000;
+
+/// De tellerstand waarop de zelftest-spinner zelf opgeeft: `now` plus twee
+/// keer `ticks` plus [`SELFTEST_GRACE_NS`] op een teller van `hz`.
+fn spin_limit(now: u64, ticks: u64, hz: u64) -> u64 {
+    let grace = crate::idle::ns_to_ticks(SELFTEST_GRACE_NS, hz);
+    now.wrapping_add(ticks.saturating_mul(2).saturating_add(grace))
+}
+
 /// Het ctx-blok in woorden, voor de scratch van de zelftest.
 const CTX_WORDS: usize = (super::layout::CTX_LEN / 8) as usize;
 
@@ -185,6 +205,36 @@ pub enum Back {
     /// Een fault, een getrapte SMC, of een intrekking: de bewoner is dood en
     /// het rapport staat op zijn control-page.
     Fault,
+}
+
+impl Back {
+    /// Het getal van deze uitkomst in [`Stats::last`] (1..=6; 0 = nog geen
+    /// beurt).
+    #[must_use]
+    pub const fn code(self) -> u64 {
+        match self {
+            Back::Yield => 1,
+            Back::Exit => 2,
+            Back::Irq => 3,
+            Back::Ipi => 4,
+            Back::Timer => 5,
+            Back::Fault => 6,
+        }
+    }
+
+    /// De naam bij [`Back::code`], voor de tik-regel.
+    #[must_use]
+    pub const fn name_of(code: u64) -> &'static str {
+        match code {
+            1 => "yield",
+            2 => "exit",
+            3 => "irq",
+            4 => "ipi",
+            5 => "timer",
+            6 => "fault",
+            _ => "-",
+        }
+    }
 }
 
 /// Wat één beurt van de rotatie deed.
@@ -269,6 +319,12 @@ pub struct Stats {
     /// Kicks die de interrupt-dispatch van de kern claimde (ook die de kern
     /// uit zijn WFI haalden, niet alleen uit een beurt). Het board telt.
     pub kicks: AtomicU64,
+    /// De laatste beurt: de bewoner in bits 7:0, [`Back::code`] in 15:8.
+    /// Staat de console stil, dan zegt dit woord (via de monitor gelezen)
+    /// wie de core het laatst had en hoe hij hem teruggaf.
+    pub last: AtomicU64,
+    /// De langste beurt sinds de vorige lezer hem nulde, in ticks.
+    pub longest: AtomicU64,
 }
 
 /// De meetlat van deze node (één OS-core).
@@ -283,6 +339,8 @@ pub static STATS: Stats = Stats {
     ticks: AtomicU64::new(0),
     idle: AtomicU64::new(0),
     kicks: AtomicU64::new(0),
+    last: AtomicU64::new(0),
+    longest: AtomicU64::new(0),
 };
 
 /// De rotatie van de OS-core. Eén, eigendom van de slaap van de executor
@@ -391,13 +449,15 @@ impl OsCore {
         STATS.entries.fetch_add(1, Relaxed);
         let t0 = arch::counter();
         let vec = arch::enter(self.flavor, ctx, self.hcr);
-        STATS
-            .ticks
-            .fetch_add(arch::counter().wrapping_sub(t0), Relaxed);
+        let dt = arch::counter().wrapping_sub(t0);
+        STATS.ticks.fetch_add(dt, Relaxed);
+        STATS.longest.fetch_max(dt, Relaxed);
         self.listen(false);
         let fired = arch::timer_disarm();
         dev::write64(self.sched.add(SCHED_CURRENT), 0);
-        self.settle(ctx, vec, fired)
+        let back = self.settle(ctx, vec, fired);
+        STATS.last.store(u64::from(id) | back.code() << 8, Relaxed);
+        back
     }
 
     /// Zet de staat van een bewoner na zijn beurt, en zegt waardoor de kern
@@ -490,10 +550,11 @@ impl OsCore {
         block.try_reserve_exact(CTX_WORDS).ok()?;
         block.resize(CTX_WORDS, 0);
         let ctx = Pa(block.as_mut_ptr().addr() as u64);
-        // De spinner geeft na twee keer de termijn zelf op (een yield): een
-        // board dat de CNTHP of de kick niet naar deze core routeert, geeft
-        // zo een rode zelftest in plaats van een hangende boot.
-        let limit = arch::counter().wrapping_add(ticks.saturating_mul(2));
+        // De spinner geeft na twee keer de termijn plus een vangrail zelf op
+        // (een yield): een board dat de CNTHP of de kick niet naar deze core
+        // routeert, geeft zo een rode zelftest in plaats van een hangende
+        // boot. Zie [`spin_limit`] voor de vangrail.
+        let limit = spin_limit(arch::counter(), ticks, arch::freq());
         prepare(ctx, arch::stub(yield_), limit);
         ctx_write(ctx, CTX_STATE, CtxState::Running.raw());
         let hcr = self.hcr & !HCR_VM;

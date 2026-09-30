@@ -16,6 +16,10 @@
 //! | `hopos.apikey` | `HOPOS_APIKEY` |
 //! | `hopos.insecure=1` | `HOPOS_INSECURE=1` |
 //! | `hopos.s3.endpoint`, `.bucket`, `.region`, `.key`, `.secret`, `.pathstyle` | `HOPOS_S3_ENDPOINT` enzovoort |
+//! | `hopos.ntp` (`host` of `host:poort`) | `HOPOS_NTP` (anders `pool.ntp.org`) |
+//! | `hopos.lock.type` (`hoplockserver` of `s3`), `.url`, `.key`, `.apikey` | `HOPOS_LOCK_TYPE` enzovoort: de lease van het cluster; zonder blijft de node standalone leader |
+//! | `hopos.lease_ttl` (seconden, minstens 15) | `HOPOS_LEASE_TTL` |
+//! | `hopos.advertise` (`host:poort`) | `HOPOS_ADVERTISE`: het adres dat de andere nodes zien, achter een NAT |
 //! | `hopos.init[]` (herhaald) | `HOPOS_INIT_JOBS`: één JSON-array |
 //!
 //! en uit de kern zelf ([`Facts`]): `HOPOS_NODE_IP`, `HOPOS_PORT`,
@@ -57,7 +61,7 @@ pub(crate) const QEMU_CFG: &str = "hopos.node=hopos-qemu\nhopos.cluster=hopos\nh
 const DEFAULT_CLUSTER: &str = "hopos";
 
 /// De env-sleutels waarvan de waarde nooit op de console komt.
-const SECRETS: [&str; 2] = ["HOPOS_APIKEY", "HOPOS_S3_SECRET"];
+const SECRETS: [&str; 3] = ["HOPOS_APIKEY", "HOPOS_S3_SECRET", "HOPOS_LOCK_APIKEY"];
 
 /// De S3-sleutels: `hopos.cfg` links, de env rechts.
 const S3_KEYS: [(&str, &str); 6] = [
@@ -69,14 +73,44 @@ const S3_KEYS: [(&str, &str); 6] = [
     ("hopos.s3.pathstyle", "HOPOS_S3_PATHSTYLE"),
 ];
 
-/// De config van Hop op QEMU: [`QEMU_CFG`] plus de S3-sleutels uit de
-/// bootargs (`-append "hopos.s3.endpoint=... hopos.s3.bucket=..."`), want
+/// De cluster van Hop (`agentd_hopos::lock`): de lock, de lease, het adres
+/// dat de andere nodes zien als de uplink achter een NAT zit (QEMU slirp), en
+/// de tijdserver (een lease is een tijd: een node doet pas mee met een gezette
+/// klok, en de kern pint de wandklok op een vaste datum tot SNTP hem zet).
+/// `hopos.cfg` links, de env rechts. Zonder `hopos.lock.type` blijft de node
+/// standalone leader; de S3-sleutels alleen maken geen cluster, want die zijn
+/// ook de object-store van de apps.
+const CLUSTER_KEYS: [(&str, &str); 7] = [
+    ("hopos.lock.type", "HOPOS_LOCK_TYPE"),
+    ("hopos.lock.url", "HOPOS_LOCK_URL"),
+    ("hopos.lock.key", "HOPOS_LOCK_KEY"),
+    ("hopos.lock.apikey", "HOPOS_LOCK_APIKEY"),
+    ("hopos.lease_ttl", "HOPOS_LEASE_TTL"),
+    ("hopos.advertise", "HOPOS_ADVERTISE"),
+    ("hopos.ntp", "HOPOS_NTP"),
+];
+
+/// Wat QEMU uit de bootargs vóór [`QEMU_CFG`] zet, zodat het wint: een
+/// tweede node van een cluster heeft een eigen naam, de clusternaam en de
+/// sleutel van de rest.
+const QEMU_FIRST: [&str; 3] = ["hopos.node", "hopos.cluster", "hopos.apikey"];
+
+/// De config van Hop op QEMU: [`QEMU_FIRST`] (node, cluster, sleutel: die
+/// winnen van [`QEMU_CFG`]), dan [`QEMU_CFG`], dan de S3- en cluster-sleutels
+/// uit de bootargs (`-append "hopos.s3.endpoint=... hopos.s3.bucket=..."`), want
 /// dat board heeft nog geen `hopos.cfg` en de store-ops van de apps lopen
 /// via de S3 van Hop (tools/qemu-test-store.sh). Een waarde met een spatie
 /// kan niet in een bootarg; daarvoor is er het bestand.
 pub(crate) fn qemu_hop_cfg(param: impl Fn(&'static str) -> String) -> String {
-    let mut text = String::from(QEMU_CFG);
-    for (key, _) in S3_KEYS {
+    let mut text = String::new();
+    for key in QEMU_FIRST {
+        let v = param(key);
+        if !v.is_empty() {
+            let _ = writeln!(text, "{key}={v}");
+        }
+    }
+    text.push_str(QEMU_CFG);
+    for (key, _) in S3_KEYS.iter().chain(CLUSTER_KEYS.iter()) {
         let v = param(key);
         if !v.is_empty() {
             let _ = writeln!(text, "{key}={v}");
@@ -302,7 +336,7 @@ fn base(out: &mut String, cfg: &NodeCfg<'_>, f: &Facts<'_>) -> fmt::Result {
     if cfg.one("hopos.insecure") == "1" {
         writeln!(out, "HOPOS_INSECURE=1")?;
     }
-    for (from, to) in S3_KEYS {
+    for (from, to) in S3_KEYS.iter().chain(CLUSTER_KEYS.iter()) {
         let v = cfg.one(from);
         if !v.is_empty() {
             writeln!(out, "{to}={v}")?;
@@ -346,12 +380,14 @@ mod tests {
             "hopos.s3.endpoint" => String::from("http://10.0.2.2:9000"),
             "hopos.s3.bucket" => String::from("hop"),
             "hopos.s3.secret" => String::from("geheim"),
+            "hopos.ntp" => String::from("10.0.2.2:10123"),
             _ => String::new(),
         });
         let b = build(&NodeCfg::parse(&text), &FACTS).unwrap();
         assert!(b.text.contains("HOPOS_S3_ENDPOINT=http://10.0.2.2:9000\n"));
         assert!(b.text.contains("HOPOS_S3_BUCKET=hop\n"));
         assert!(!b.text.contains("HOPOS_S3_REGION"));
+        assert!(b.text.contains("HOPOS_NTP=10.0.2.2:10123\n"));
         assert!(b.text.contains("HOPOS_INSECURE=1\n"), "QEMU_CFG stays");
         assert!(!b.redacted().contains("geheim"));
         assert_eq!(qemu_hop_cfg(|_| String::new()), QEMU_CFG);
