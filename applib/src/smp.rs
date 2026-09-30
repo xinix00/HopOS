@@ -368,13 +368,14 @@ extern "C" fn secondary_main(k: u64) -> ! {
     if let Some(a) = AFF.get(k) {
         a.store(arch::core_id(), Release);
     }
-    exec.run(&mut CoreSleeper::new(ctrl, crate::sleep::Hw))
+    exec.run(&mut CoreSleeper::new(ctrl, crate::sleep::Hw, k))
 }
 
 /// De slaap van een secundaire core: een yield naar de switcher of WFE,
 /// zoals de control-page zegt, begrensd op [`SECONDARY_NAP`]. Geen
 /// deurbel (alleen de primaire leest de RX-ring) en geen eigen woorden op
-/// de page: zijn slaap telt hij bij in `sleep::SECONDARY_IDLE`, en de
+/// de page: zijn slaap staat in zijn eigen woord van `sleep::SECONDARY_IDLE`
+/// (bijgewerkt na elke WFE), en de
 /// primaire publiceert de som (`CtrlIdle` is de idle-tijd van álle cores
 /// van de app; de dvfs van de kern deelt door `CtrlCores`).
 ///
@@ -385,16 +386,23 @@ extern "C" fn secondary_main(k: u64) -> ! {
 pub struct CoreSleeper<I: crate::sleep::Idle> {
     ctrl: Ctrl,
     idle: I,
+    /// Zijn index binnen de app (1..): zijn woord in `sleep::SECONDARY_IDLE`.
+    core: usize,
+    /// Zijn slaap tot nu, in tikken.
+    idle_ticks: u64,
     /// Keren geslapen.
     pub naps: u64,
 }
 
 impl<I: crate::sleep::Idle> CoreSleeper<I> {
-    /// Een slaper op de control-page `ctrl`, met core `idle`.
-    pub fn new(ctrl: Ctrl, idle: I) -> Self {
+    /// Een slaper voor core `core` (1..) op de control-page `ctrl`, met core
+    /// `idle`.
+    pub fn new(ctrl: Ctrl, idle: I, core: usize) -> Self {
         Self {
             ctrl,
             idle,
+            core,
+            idle_ticks: 0,
             naps: 0,
         }
     }
@@ -420,6 +428,8 @@ impl<I: crate::sleep::Idle> CoreSleeper<I> {
         let hz = self.idle.counter_hz();
         let deadline = clock::wake_at(now, Some(until), self.idle.counter(), hz);
         self.naps = self.naps.wrapping_add(1);
+        let word = crate::sleep::SECONDARY_IDLE.get(self.core);
+        let base = self.idle_ticks;
         let slept = if self.ctrl.is_shared() || self.ctrl.is_yield_mode() {
             self.idle.hvc_yield(deadline)
         } else {
@@ -428,12 +438,20 @@ impl<I: crate::sleep::Idle> CoreSleeper<I> {
             // SECONDARY_NAP later, zoals voorheen de vangrail.
             let ctrl = &self.ctrl;
             let woke = || ready() || ctrl.is_shared() || ctrl.is_yield_mode();
-            crate::sleep::wfe_until(&mut self.idle, deadline, &woke)
+            let progress = |s: u64| {
+                if let Some(w) = word {
+                    w.store(base.wrapping_add(s), Relaxed);
+                }
+            };
+            crate::sleep::wfe_until(&mut self.idle, deadline, &woke, &progress)
         };
         // Tot 30-09 telde niemand deze slaap: een stille tweecore-app las
         // voor de dvfs als half bezig ("busy slot 2 (544 permille idle)" op
         // de Pi 4 en 5), en de kern bleef op 1500 MHz.
-        crate::sleep::SECONDARY_IDLE.fetch_add(slept, Relaxed);
+        self.idle_ticks = base.wrapping_add(slept);
+        if let Some(w) = word {
+            w.store(self.idle_ticks, Relaxed);
+        }
     }
 }
 
@@ -677,7 +695,7 @@ mod tests {
     fn a_secondary_naps_within_the_guard_rail() {
         let mut p = Page::new();
         p.put(CTRL_IDLE_MODE, IDLE_YIELD);
-        let mut s = CoreSleeper::new(p.ctrl(), Fake::default());
+        let mut s = CoreSleeper::new(p.ctrl(), Fake::default(), 3);
         s.sleep(0, None, &|| false);
         s.sleep(0, Some(1_000_000), &|| false);
         s.sleep(0, Some(1_000_000_000), &|| false);
@@ -686,44 +704,65 @@ mod tests {
         s.sleep(0, None, &|| true);
         assert_eq!(s.idle().yields.len(), 3);
         // Zonder yield-modus: WFE tot de vangrail (10 ms in stappen van
-        // 5 µs), één ronde; de slaap telt mee in SECONDARY_IDLE.
+        // 5 µs), één ronde; zijn woord in SECONDARY_IDLE loopt mee met
+        // elke WFE, niet pas aan het eind.
         let p = Page::new();
-        let mut s = CoreSleeper::new(p.ctrl(), Fake::default());
-        let before = crate::sleep::SECONDARY_IDLE.load(Relaxed);
-        s.sleep(0, None, &|| false);
+        let word = &crate::sleep::SECONDARY_IDLE[4];
+        let mut s = CoreSleeper::new(p.ctrl(), Fake::default(), 4);
+        let seen = Cell::new(0u64);
+        s.sleep(0, None, &|| {
+            let w = word.load(Relaxed);
+            assert!(w >= seen.get(), "the word went back");
+            seen.set(w);
+            false
+        });
         assert_eq!(s.idle().wfes, 2_000);
         assert_eq!(s.naps, 1);
         assert!(s.idle().yields.is_empty());
-        assert!(crate::sleep::SECONDARY_IDLE.load(Relaxed) - before >= 10_000_000);
+        // De toets na de laatste WFE, nog in de lus, zag de hele slaap al.
+        assert_eq!(seen.get(), 10_000_000);
+        assert_eq!(word.load(Relaxed), 10_000_000);
     }
 
     /// De dvfs van de kern leest `CtrlIdle` als de idle-tijd van álle cores
-    /// (hij deelt door `CtrlCores`): de primaire publiceert zijn eigen slaap
-    /// plus die van de secundaire. Tot 30-09 alleen de eigen, en een stille
-    /// tweecore-app las als "544 permille idle", dus druk.
+    /// (hij deelt door `CtrlCores`, per 10 ms): de primaire publiceert zijn
+    /// eigen slaap plus die van de secundaire, en dat na elke WFE. Tot 30-09
+    /// alleen de eigen ("544 permille idle"), en daarna alleen aan het eind
+    /// van een lange slaap (de Pi 4 met stempel I: 266 tot 653 permille).
     #[test]
-    fn the_primary_publishes_the_sleep_of_every_core() {
+    fn the_primary_publishes_the_sleep_of_every_core_while_it_sleeps() {
         use crate::sleep::AppSleeper;
         let page = Page::new();
-        let mut second = CoreSleeper::new(page.ctrl(), Fake::default());
+        let mut second = CoreSleeper::new(page.ctrl(), Fake::default(), 5);
         second.sleep(0, Some(1_000_000), &|| false); // 1 ms, 200 WFE's
         let mut first = AppSleeper::with(page.ctrl(), Fake::default());
-        first.sleep(0, Some(1_000_000), &|| false);
-        assert_eq!(first.idle_ticks(), 1_000_000);
-        // Andere tests tellen tegelijk mee in dezelfde static: minstens.
-        assert!(page.word(CTRL_IDLE) >= 2_000_000);
+        // Midden in een slaap van 50 ms (de heartbeat): na de tiende WFE
+        // staan 50 µs van de primaire en 1 ms van de secundaire al op de page.
+        let n = Cell::new(0u32);
+        let mid = Cell::new(0u64);
+        first.sleep(0, Some(50_000_000), &|| {
+            n.set(n.get() + 1);
+            if n.get() == 12 {
+                mid.set(page.word(CTRL_IDLE));
+            }
+            false
+        });
+        // Andere tests schrijven tegelijk hun eigen woorden: minstens.
+        assert!(mid.get() >= 10 * 5_000 + 1_000_000, "{}", mid.get());
+        assert_eq!(first.idle_ticks(), 50_000_000);
+        assert!(page.word(CTRL_IDLE) >= 51_000_000);
     }
 
     #[test]
     fn a_secondary_leaves_with_its_app() {
         let mut p = Page::new();
-        let s = CoreSleeper::new(p.ctrl(), Fake::default());
+        let s = CoreSleeper::new(p.ctrl(), Fake::default(), 1);
         assert!(!s.app_gone());
         p.put(CTRL_KILL, 1);
         assert!(s.app_gone());
         let mut p = Page::new();
         p.put(CTRL_STATUS, AppStatus::Exited as u64);
-        assert!(CoreSleeper::new(p.ctrl(), Fake::default()).app_gone());
+        assert!(CoreSleeper::new(p.ctrl(), Fake::default(), 1).app_gone());
     }
 
     #[test]

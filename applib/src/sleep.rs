@@ -95,18 +95,40 @@ pub fn watch_rx(door: RxDoor) {
     RX_DOOR.get().set(Some(door));
 }
 
-/// De slaap van de secundaire cores van deze app, in tikken: elke
-/// `crate::smp::CoreSleeper` telt de zijne erbij, en de primaire publiceert
-/// hem met de eigen slaap in `CtrlIdle`.
-pub(crate) static SECONDARY_IDLE: AtomicU64 = AtomicU64::new(0);
+/// De slaap van elke secundaire core van deze app, in tikken, per core
+/// (index 0 blijft leeg): elke `crate::smp::CoreSleeper` schrijft zijn eigen
+/// totaal, en de primaire publiceert de som met zijn eigen slaap in
+/// `CtrlIdle`. Eén schrijver per woord, dus een kale store: een exclusive
+/// (`fetch_add`) in de WFE-lus zou het event-register vullen en de volgende
+/// WFE meteen laten terugkeren (Altra 18-07).
+pub(crate) static SECONDARY_IDLE: [AtomicU64; crate::smp::MAX_CORES] =
+    [const { AtomicU64::new(0) }; crate::smp::MAX_CORES];
+
+/// De som van [`SECONDARY_IDLE`].
+fn secondary_idle() -> u64 {
+    SECONDARY_IDLE
+        .iter()
+        .fold(0, |a, t| a.wrapping_add(t.load(Relaxed)))
+}
 
 /// WFE's tot `woke()` of tot de teller `deadline` haalt; de tikken die ze
-/// duurden. De lus van [`AppSleeper::wfe_sleep`] en van de secundaire
-/// cores (`crate::smp::CoreSleeper`).
-pub(crate) fn wfe_until<I: Idle>(idle: &mut I, deadline: u64, woke: &dyn Fn() -> bool) -> u64 {
+/// duurden. Na elke WFE krijgt `progress` de slaap tot dan: de teller op de
+/// page moet meelopen, niet pas bij het verlaten van de lus. De dvfs van de
+/// kern kijkt per 10 ms over een venster van 50 ms, en een lus die tot de
+/// heartbeat (50 ms) slaapt, kwam anders als één klonter binnen, geklemd,
+/// met lege samples ervoor: de Pi 4 las een stille tweecore-vitals als 266
+/// tot 653 permille idle en bleef op 1500 MHz (30-09, stempel I). De lus
+/// van [`AppSleeper::wfe_sleep`] en van `crate::smp::CoreSleeper`.
+pub(crate) fn wfe_until<I: Idle>(
+    idle: &mut I,
+    deadline: u64,
+    woke: &dyn Fn() -> bool,
+    progress: &dyn Fn(u64),
+) -> u64 {
     let mut slept: u64 = 0;
     while !woke() && idle.counter() < deadline {
         slept = slept.saturating_add(idle.wfe());
+        progress(slept);
     }
     slept
 }
@@ -180,7 +202,7 @@ impl<I: Idle> AppSleeper<I> {
     /// `CtrlIdle` en `CtrlWakes`: de idle-tijd van alle cores van de app
     /// (deze plus [`SECONDARY_IDLE`]), de wekken van deze.
     fn publish(&self) {
-        let idle = self.idle_ticks.wrapping_add(SECONDARY_IDLE.load(Relaxed));
+        let idle = self.idle_ticks.wrapping_add(secondary_idle());
         self.ctrl.publish_idle(idle, self.wakes);
     }
 
@@ -213,7 +235,15 @@ impl<I: Idle> AppSleeper<I> {
                 || ctrl.is_shared()
                 || ctrl.is_yield_mode()
         };
-        wfe_until(&mut self.idle, deadline, &woke)
+        // `CtrlIdle` loopt mee met elke WFE (zie `wfe_until`).
+        let base = self.idle_ticks;
+        let progress = |s: u64| {
+            ctrl.set(
+                crate::contract::CTRL_IDLE,
+                base.wrapping_add(s).wrapping_add(secondary_idle()),
+            );
+        };
+        wfe_until(&mut self.idle, deadline, &woke, &progress)
     }
 
     /// De slaap zelf, zonder deurbel: yield of WFE.
