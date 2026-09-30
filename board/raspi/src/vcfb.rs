@@ -141,17 +141,59 @@ pub(crate) fn framebuffer(mbox: &RefCell<Option<Mbox>>, tables: Option<Tables>) 
     })
 }
 
-/// DTB eerst, dan de mailbox.
+/// Hoe lang `discover` op de firmware wacht als die de allocatie weigert
+/// (0x80000001: een tag faalde, "partial response"). GEMETEN 30-09 op de
+/// Pi 5: op een koude boot weigerde de firmware de FB-vraag die elke
+/// geflipte kern minuten later wél kreeg (dezelfde vraag, dezelfde
+/// buffer); het beeld staat dan nog niet. Een weigering is geen
+/// allocatie, dus opnieuw vragen stapelt niets (de regel hierboven gaat
+/// over een geslaagde maar onzinnige respons). Vijf seconden in stappen van
+/// een kwart; een Pi zonder scherm betaalt ze één keer per boot, alleen in
+/// de gui-smaak.
+const FB_WAIT_NS: u64 = 5_000_000_000;
+/// De stap tussen twee vragen.
+const FB_STEP_NS: u64 = 250_000_000;
+
+/// DTB eerst, dan de mailbox, met geduld voor een firmware die het beeld
+/// nog opzet.
 fn discover(mbox: &RefCell<Option<Mbox>>) -> Option<Desc> {
     if let Some(f) = crate::fdt().and_then(|f| f.framebuffer()) {
         return Some(from_fdt(f));
     }
     let mut m = mbox.try_borrow_mut().ok()?;
-    match m.as_mut()?.alloc_fb(WANT.0, WANT.1) {
-        Ok(f) => Some(from_mbox(f)),
-        Err(e) => {
-            cpu::println!("fb: mailbox framebuffer: {e} HOPOS_FB_NONE");
-            None
+    let m = m.as_mut()?;
+    let start = cpu::idle::now();
+    let mut refusals = 0u32;
+    loop {
+        match m.alloc_fb(WANT.0, WANT.1) {
+            Ok(f) => {
+                if refusals > 0 {
+                    cpu::println!(
+                        "fb: firmware ready after {} ms and {refusals} refusal(s)",
+                        cpu::idle::now().saturating_sub(start) / 1_000_000
+                    );
+                }
+                return Some(from_mbox(f));
+            }
+            Err(driver_vcmail::Error::Refused { code })
+                if cpu::idle::now().saturating_sub(start) < FB_WAIT_NS =>
+            {
+                if refusals == 0 {
+                    cpu::println!(
+                        "fb: firmware refused the framebuffer ({code:#x}), waiting up to {} s for the display",
+                        FB_WAIT_NS / 1_000_000_000
+                    );
+                }
+                refusals += 1;
+                let until = cpu::idle::now().saturating_add(FB_STEP_NS);
+                while cpu::idle::now() < until {
+                    core::hint::spin_loop();
+                }
+            }
+            Err(e) => {
+                cpu::println!("fb: mailbox framebuffer: {e} HOPOS_FB_NONE");
+                return None;
+            }
         }
     }
 }

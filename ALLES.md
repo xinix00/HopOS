@@ -37,10 +37,14 @@ de RNG200 (`HOPOS_RNG200_UP`) en de PM-watchdog gewapend en geaaid.
 - [ ] Dvfs via de mailbox: geport, maar de kaart heeft geen `arm_freq_min`
       (generatie 8: `HOPOS_CLOCK_NONE`, "one ARM clock"). Komt met de nieuwe
       kaart: `HOPOS_CLOCK_UP`, `HOPOS_CLOCK_EDGE` naar 800 MHz na 30 s rust.
-- [ ] De SD-kaart opnieuw flashen: `target/hopos-rpi5.img` is gebouwd
-      (30-09, 14:32) in de gui-smaak met `arm_freq_min=800` en de Hop die
-      "no disk on this node" zegt. Tot dan draagt de kaart de kale alpha.17
-      en is de console na een herstart weg.
+- [ ] De koude boot van de kaart van 14:32 (gezien 16:40): `HOPOS_RNG200_UP`,
+      `HOPOS_CLOCK_UP` met de val naar 800 MHz na 30 s rust, USB, Hop met
+      "no disk on this node", SNTP. Maar géén glas: `fb: mailbox
+      framebuffer: vcmail: firmware refused (0x80000001)`, terwijl elke
+      geflipte kern de zelfde vraag minuten later wel kreeg. De ontdekking
+      wacht nu tot 5 s op de firmware; en de kaart droeg nog de oude
+      watchdogproef. Nieuwe kaart nodig (na 17:00 gebouwd) en een koude
+      boot om `HOPOS_FB_CONSOLE` en `HOPOS_WD_ARMED` koud te zien.
 - [ ] USB: de xHCI's staan, maar nog geen HID gezien (niets ingeplugd) en
       geen display-app.
 - [ ] "saved agent state not restored: store i/o failed" hoort "geen schijf"
@@ -62,21 +66,22 @@ de Mac.
       rpi4`, generatie 2): de agentlijst kreeg meteen `temp_milli_c` (48 tot
       50 C) en welcome bleef 200. Zonder console onbewezen: het glas
       (`HOPOS_FB_CONSOLE`) en VL805-USB met de firmware-handshake via vcmail.
-- [ ] Generatie 4 (bundel I: RNG200, PM-watchdog, dvfs) draait sinds 14:41
-      en de node leeft door met welcome op 200, dus de aaien werken ook op
-      de BCM2711; zonder console onbewezen: `HOPOS_RNG200_UP` (Go mat een
-      trage warm-up op de Pi 4) en `HOPOS_WD_ARMED`. De nieuwe kaart:
-      `target/hopos-rpi4.img` (30-09, 14:33, gui-smaak, `arm_freq_min`
-      staat daar nog niet in: dvfs zegt dan "one ARM clock").
+- [ ] Koud geboot van de kaart van 14:33 (gezien 16:40, welcome weg):
+      zonder console onbewezen wat de kern zei; die kaart draagt nog de
+      oude watchdogproef en niet het geduld voor de framebuffer. Nieuwe
+      kaart (na 17:00) en een koude boot; `arm_freq_min` staat nog niet in
+      het Pi 4-recept, dus dvfs zegt daar "one ARM clock".
 
 ### Radxa Zero 3E (radxa-1)
 
-Nog niet geboot. Kaart gebouwd 30-09 14:41 in de gui-smaak met Hop:
-`target/radxa-zero3/hopos-radxa-zero3.img` (`GUI=1 CFG=<radxa.cfg> APP=hop
-sh image/radxa-zero3.sh`); console 1500000 8N1 op de header.
+Geboot op 30-09 (16:40) van de kaart van 14:41 (gui-smaak, Hop): Hop als
+leider radxa-1 op 192.168.1.241, welcome geplaatst en via de DNAT HTTP 200.
+Zonder seriële console aan de Mac; de kaartbouw: `GUI=1 CFG=<radxa.cfg>
+APP=hop sh image/radxa-zero3.sh`, console 1500000 8N1 op de header.
 
-- [ ] Eerste boot: `Retrieving /hopos.ird`, de rol uit de initrd,
-      `HOPOS_BOOT`, dwmac4 met de MDIO-PHY, `HOP_UP`, welcome.
+- [ ] De bootregels lezen met de UART aan de Mac: `Retrieving /hopos.ird`,
+      de rol uit de initrd, `HOPOS_BOOT`, dwmac4 met de MDIO-PHY, `HOP_UP`,
+      en wat de beeldketen (PD_VO, VOP2, DW-HDMI) zei.
 - [ ] Geen SD-driver: geen schijf, geen staat over een herstart.
 - [ ] De beeldketen (PD_VO, VOP2, DW-HDMI, EDID over DDC) is ongemeten;
       DWC3-USB nooit gezien.
