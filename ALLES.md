@@ -267,10 +267,12 @@ De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
       en de storm te herhalen.
 - [ ] **Idle**: fix 262ea1f (uitstelbare timers, WFE-lus, tweede core
       telt mee). Op ijzer: app-core Pi 4 1011 → 29 wekken/s, O6N 3300 → 52
-      (4 cores, nieuwe applib op de H-kern). De OS-core op de Pi 4 telt nog
-      ~850 `sleeps=`/s: de event-stream van 1,2 ms in de WFE-lus (geen
-      executor-rondes meer, wel de teller); of de dvfs nu terugklokt bij
-      een stille tweecore-app is nog niet gezien.
+      (4 cores, nieuwe applib op de H-kern). Met cf21ac5 (CtrlIdle na elke
+      WFE) klokt de Pi 4 met een stille tweecore-vitals terug: `dvfs:
+      clock 600 MHz (quiet), busy none`, 21,6 wekken/s. De OS-core op de
+      Pi 4 telt nog ~850 `sleeps=`/s: de event-stream van 1,2 ms in de
+      WFE-lus (geen executor-rondes meer, wel de teller). Klaar op de Pi 4
+      en de O6N (app-kant); de Radxa en de Pi 5 na hun kaart.
 - [ ] vitals: de standaard-rx-URL (cachefly) faalt zonder DNS in de env
       ("CONNECT is not supported"); rx-duren vallen op stappen van 100 ms.
 - [ ] De Mac hangt op Wi-Fi en macOS laat netmeter niet op het LAN
