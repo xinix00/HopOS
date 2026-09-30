@@ -290,6 +290,45 @@ fn the_task_cools_down_reports_and_wakes_on_load() {
 }
 
 #[test]
+fn run_after_boot_skips_the_boot_edge() {
+    // De aanroeper zette de klok al vol (vóór het net): geen tweede flank,
+    // wel de val naar stil na 30 s en de flank bij last.
+    use std::sync::Arc;
+    struct Nop;
+    impl std::task::Wake for Nop {
+        fn wake(self: Arc<Self>) {}
+    }
+    let w = std::task::Waker::from(Arc::new(Nop));
+    let mut cx = core::task::Context::from_waker(&w);
+    let mut host = FakeHost {
+        now: std::cell::Cell::new(0),
+        idle: [0; 2],
+        busy_from: 40_000_000_000,
+        log: std::cell::RefCell::default(),
+    };
+    let mut knob = Knob2::default();
+    let booted = Some(Level {
+        value: 2600,
+        unit: "MHz",
+    });
+    {
+        let mut fut = core::pin::pin!(run_after_boot(&mut knob, Hold::Auto, &mut host, booted));
+        for _ in 0..4_500 {
+            let _ = fut.as_mut().poll(&mut cx);
+        }
+    }
+    let log = host.log.borrow();
+    assert!(!log.iter().any(|l| l.contains("boot")), "{log:?}");
+    assert!(
+        log.iter()
+            .any(|l| l.contains("-> 800 MHz (quiet, idle 30s)")),
+        "{log:?}"
+    );
+    assert!(log.iter().any(|l| l.contains("(full, busy)")));
+    assert_eq!((knob.full, knob.quiet), (1, 1));
+}
+
+#[test]
 fn the_config_pins_the_clock() {
     assert_eq!(hold_of(""), (Some(Hold::Auto), true));
     assert_eq!(hold_of("max"), (Some(Hold::Full), true));

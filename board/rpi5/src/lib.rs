@@ -33,6 +33,7 @@ use board::Error;
 use board_raspi::driver_gicv2::Gic;
 use board_raspi::map::{self, L2, Tables};
 use board_raspi::{NicCtx, Raspi, Soc};
+use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use cpu::irq::{Line, Trigger};
 use dev::Pa;
 use driver_brcmpcie::{EpBar, InWin, OutWin, Rc};
@@ -361,6 +362,7 @@ fn wire_irq(rc: &Rc, nic: &mut Gem) -> Result<u32, &'static str> {
     let (bir, off) = (u64::from(tab & 7), u64::from(tab & !7));
     let bar = u64::from(rc.cfg_read32(1, 0, 0, 0x10 + 4 * bir) & !0xf);
     let entry = Pa(RP1 + bar + off + 16 * u64::from(RP1_INT_ETH));
+    MSIX_ENTRY.store(entry.0, Relaxed);
     dev::write32(entry, MIP_MSI_ADDR as u32);
     dev::write32(entry.add(4), (MIP_MSI_ADDR >> 32) as u32);
     dev::write32(entry.add(8), RP1_INT_ETH);
@@ -395,6 +397,70 @@ fn wire_irq(rc: &Rc, nic: &mut Gem) -> Result<u32, &'static str> {
     dev::mb();
     nic.set_irq(bell, rp1_iack);
     Ok(id)
+}
+
+/// De MSI-X-entry van de GEM in de RP1-tabel, zoals `wire_irq` hem zette
+/// (0 = nog niet), voor [`nic_diag`].
+static MSIX_ENTRY: AtomicU64 = AtomicU64::new(0);
+
+/// Registerdump van de RP1-NIC-keten voor de flip-jacht van 30-09 (drie
+/// warme flips vanuit de koud gebootte kaart-kern eindigden met een NIC die
+/// niets meer ontving, `irq(nic=0)`, terwijl acht flips uit de kale kern
+/// slaagden): de PCIe-status van de RC, de MIP (raw, status en de zes
+/// maskers), het RP1-MSIX_CFG-woord van de GEM, de MSI-X-entry en de GEM
+/// zelf (`driver_gem::diag`). De tik roept hem op 5 en 30 s, dus een koude
+/// boot geeft de referentie en een landing het verschil.
+pub fn nic_diag() {
+    let none = OutWin {
+        cpu: 0,
+        pcie: 0,
+        size: 0,
+    };
+    // SAFETY: PCIE2 en de SW_INIT-bank zijn BCM2712-blokken in de
+    // Device-gigabyte 64 (de vaste tabel); er wordt alleen gelezen.
+    let rc = unsafe {
+        Rc::new(
+            driver_brcmpcie::Soc::Bcm2712,
+            PCIE2,
+            PCIE_SW_INIT,
+            PCIE2_SW_INIT_ID,
+            0,
+            none,
+            [None; driver_brcmpcie::MAX_IN],
+            cpu::idle::now,
+        )
+    };
+    let (phy, dl) = rc.link_status();
+    if !(phy && dl) {
+        cpu::println!(
+            "net: rp1 diag: pcie {:#x} (phy {phy}, dl {dl}): link down, nothing behind it to read HOPOS_RP1_DIAG",
+            rc.status()
+        );
+        return;
+    }
+    let mip = [0x00u64, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70].map(|o| dev::read32(MIP.add(o)));
+    let cfg = dev::read32(Pa(RP1 + 0x10_8000 + 0x8 + 4 * u64::from(RP1_INT_ETH)));
+    let e = MSIX_ENTRY.load(Relaxed);
+    let entry = if e == 0 {
+        [0; 4]
+    } else {
+        [0u64, 4, 8, 12].map(|o| dev::read32(Pa(e).add(o)))
+    };
+    // SAFETY: RP1_ETH is het GEM-blok achter de getrainde link (net gelezen).
+    let g = unsafe { driver_gem::diag(RP1_ETH) };
+    cpu::println!(
+        "net: rp1 diag: pcie {:#x}, mip {mip:x?}, msix_cfg[eth] {cfg:#x}, entry {entry:x?}, gem nwctrl {:#x} nwcfg {:#x} nwstatus {:#x} dmacfg {:#x} txstatus {:#x} rxqbase {:#x} rxstatus {:#x} isr {:#x} imr {:#x} HOPOS_RP1_DIAG",
+        rc.status(),
+        g[0],
+        g[1],
+        g[2],
+        g[3],
+        g[4],
+        g[5],
+        g[6],
+        g[7],
+        g[8]
+    );
 }
 
 /// Het slot-plan: dat van `board_raspi`, met de A76-nummering.

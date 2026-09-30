@@ -553,6 +553,11 @@ impl<S: Soc> Board for Raspi<S> {
 
     fn start_interrupts(&self) -> Result<&'static Signal, Error> {
         let gic = S::gic();
+        // Eerst schoon: een SPI die de vorige kern actief achterliet (de
+        // flip van 30-09: de NIC-lijn zweeg voorgoed) zou anders nooit meer
+        // melden. Eén keer, op de boot-core; de app-cores raken alleen hun
+        // gebankte lijnen.
+        gic.quiesce_spis();
         gic.init();
         cpu::irq::use_controller(gic);
         // De EL2-timer: de deadline van de executor terwijl een bewoner de

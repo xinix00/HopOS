@@ -1104,6 +1104,9 @@ async fn snapshot_nat(exec: &'static Executor) -> Result<Option<NatSnapshot>, &'
 /// Het blob, het paar en de sprong. Synchroon: vanaf hier verandert er
 /// niets meer aan de staat die overgaat.
 fn handoff_and_jump(p: Prepared, slots: Vec<SlotState>, nat: kernflip::NatState) -> JumpError {
+    // De klok vol: de nieuwe kern landt niet op een stille klok (30-09, de
+    // Pi 5: twee flips vanuit 800 MHz met een NIC die nooit meer meldde).
+    crate::telemetry::clock_full_for_flip();
     // Koud of warm: het blob zegt het, de rest van de weg is dezelfde.
     let generation = generation() + 1;
     let (mut mem, fp) = (DevMem, plan());

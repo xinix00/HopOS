@@ -341,9 +341,38 @@ pub async fn run<const N: usize>(mut knob: impl Knob, hold: Hold, host: &mut imp
     g.hold = hold;
     let c = g.boot(host.now(), &mut knob);
     report_change(host, &c);
+    run_governor(g, knob, host, c.level).await;
+}
+
+/// Als [`run`], maar de boot-flank is al gezet: de aanroeper zette de klok
+/// vol met `Knob::full` vóór het net (de Pi's, hopos/src/telemetry.rs), en
+/// `level` is wat de knop toen meldde. Zo boot een geflipte kern zijn NIC
+/// op de volle klok, zoals een koude boot, ook als de vorige kern stil
+/// stond (30-09: twee flips vanuit 800 MHz met een NIC die nooit meer
+/// meldde).
+pub async fn run_after_boot<const N: usize>(
+    knob: impl Knob,
+    hold: Hold,
+    host: &mut impl Host<N>,
+    level: Option<Level>,
+) {
+    let mut g: Governor<N> = Governor::new();
+    g.hold = hold;
+    g.high = level.is_some();
+    g.quiet_since = host.now();
+    run_governor(g, knob, host, level).await;
+}
+
+/// De lus van de governor na de boot-flank.
+async fn run_governor<const N: usize>(
+    mut g: Governor<N>,
+    mut knob: impl Knob,
+    host: &mut impl Host<N>,
+    level: Option<Level>,
+) {
     let mut samples = [Sample::default(); N];
     let mut last_report = host.now();
-    let mut level = c.level;
+    let mut level = level;
     loop {
         host.sleep(SAMPLE_NS).await;
         let now = host.now();

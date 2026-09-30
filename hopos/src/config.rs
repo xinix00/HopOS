@@ -271,6 +271,30 @@ pub(crate) fn hop_env(cfg: &NodeCfg<'_>, facts: &Facts<'_>) -> Result<EnvBlob, E
     Ok(blob)
 }
 
+/// De console over TCP (conport.rs, net.rs): `hopos.console=1` zet hem
+/// aan, `=0` uit; zonder die sleutel volgt hij `hopos.insecure=1` (de
+/// testbank op het eigen LAN). Go: geen sleutel is geen poort, maar elke
+/// bankconfig had hem; hier is de bank de insecure-vlag. De poort geeft
+/// elke lezer de hele console, dus nooit stil aan op een node met een
+/// sleutel. Uit de config van Hop, anders uit de bootargs (`param`); main
+/// beslist vóór het net, want de listener start zodra de lease er is, ook
+/// na een flip waarin Hop niet opnieuw wordt geplaatst.
+pub(crate) fn console_enabled(cfg: &NodeCfg<'_>, param: impl Fn(&'static str) -> String) -> bool {
+    let key = |k: &'static str| -> String {
+        let v = cfg.one(k);
+        if v.is_empty() {
+            param(k)
+        } else {
+            String::from(v)
+        }
+    };
+    match key("hopos.console").as_str() {
+        "1" | "on" => true,
+        "0" | "off" => false,
+        _ => key("hopos.insecure") == "1",
+    }
+}
+
 /// Bouwt de env zonder te loggen: eerst alles behalve de init-jobs, dan
 /// de init-jobs als het geheel nog past.
 fn build(cfg: &NodeCfg<'_>, facts: &Facts<'_>) -> Result<EnvBlob, EnvError> {
@@ -373,6 +397,26 @@ mod tests {
         pool_bytes: 512 << 20,
         hop_mem: 64 << 20,
     };
+
+    #[test]
+    fn the_console_port_follows_the_key_and_then_the_insecure_flag() {
+        let none = |_: &'static str| String::new();
+        assert!(console_enabled(&NodeCfg::parse("hopos.insecure=1\n"), none));
+        assert!(!console_enabled(
+            &NodeCfg::parse("hopos.console=0\nhopos.insecure=1\n"),
+            none
+        ));
+        assert!(console_enabled(&NodeCfg::parse("hopos.console=on\n"), none));
+        assert!(!console_enabled(&NodeCfg::parse(""), none));
+        // De bootargs vullen aan wat de config niet zegt.
+        assert!(console_enabled(&NodeCfg::parse(""), |k| String::from(
+            if k == "hopos.console" { "1" } else { "" }
+        )));
+        assert!(!console_enabled(
+            &NodeCfg::parse("hopos.console=off\n"),
+            |_| String::from("1")
+        ));
+    }
 
     #[test]
     fn qemu_bootargs_add_the_s3_keys_and_nothing_else() {

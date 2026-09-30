@@ -179,6 +179,34 @@ impl Gic {
         dev::mb();
     }
 
+    /// Veegt alle SPI's schoon vóór [`init`](Self::init), op de boot-core:
+    /// enable, pending en actief gewist (write-1-to-clear), zodat niets van
+    /// een vorige kern blijft hangen. GEMETEN 30-09 op de Pi 5, de flip
+    /// naar generatie 2: de NIC-lijn (SPI 166, MSI-X via de MIP) gaf na de
+    /// sprong precies één interrupt en daarna nooit meer, `irq(nic=1)`
+    /// honderd tikken lang, DHCP kreeg niets en de watchdog resette de
+    /// node. De vertrekkende kern zat op 800 MHz midden in een afhandeling
+    /// en liet de lijn actief achter; een actieve flank-interrupt wordt
+    /// niet opnieuw gemeld tot zijn EOI, en die EOI komt van een kern die
+    /// er niet meer is. Alleen de SPI-woorden: de eerste 32 lijnen (SGI's,
+    /// PPI's) zijn gebankt per core en van de app-cores die doordraaien.
+    /// Woorden boven het lijnental van de GIC zijn WI.
+    pub fn quiesce_spis(&self) {
+        let d = self.d();
+        for i in 1..32 {
+            if let Some(r) = d.icenabler.get(i) {
+                r.write(0xffff_ffff);
+            }
+            if let Some(r) = d.icpendr.get(i) {
+                r.write(0xffff_ffff);
+            }
+            if let Some(r) = d.icactiver.get(i) {
+                r.write(0xffff_ffff);
+            }
+        }
+        dev::mb();
+    }
+
     /// Het CPU-masker van deze core (na [`init`](Self::init)).
     #[must_use]
     pub fn cpu_mask(&self) -> u8 {
@@ -376,6 +404,26 @@ mod tests {
 
     fn pa(v: &mut [u64]) -> Pa {
         Pa(v.as_mut_ptr() as usize as u64)
+    }
+
+    #[test]
+    fn quiesce_clears_the_spi_words_only() {
+        let (mut d, mut c) = mem();
+        let (dp, cp) = (pa(&mut d), pa(&mut c));
+        let g = unsafe { Gic::new(dp, cp) };
+        g.quiesce_spis();
+        // Write-1-to-clear op ijzer; het nep-blok bewaart wat er geschreven is.
+        assert_eq!(dev::read32(dp.add(0x184)), 0xffff_ffff, "ICENABLER[1]");
+        assert_eq!(dev::read32(dp.add(0x284)), 0xffff_ffff, "ICPENDR[1]");
+        assert_eq!(dev::read32(dp.add(0x384)), 0xffff_ffff, "ICACTIVER[1]");
+        assert_eq!(dev::read32(dp.add(0x1fc)), 0xffff_ffff, "ICENABLER[31]");
+        assert_eq!(
+            dev::read32(dp.add(0x180)),
+            0,
+            "het SGI/PPI-woord is gebankt: niet aanraken"
+        );
+        assert_eq!(dev::read32(dp.add(0x280)), 0);
+        assert_eq!(dev::read32(dp.add(0x380)), 0);
     }
 
     #[test]

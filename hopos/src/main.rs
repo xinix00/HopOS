@@ -16,6 +16,7 @@ mod bench; // de meetbanken achter hopos.nvmebench en hopos.idlestat (bench.rs)
 mod clock;
 mod codec; // het media-vlak (codec.rs); kaal een stub, feature `media`
 mod config;
+mod conport; // de console over TCP: de ring achter de UART (conport.rs)
 mod flip; // FLIP: de kern-flip (flip.rs)
 mod gui; // het gui-vlak (gui.rs); kaal no-ops, feature `gui`
 mod net;
@@ -273,7 +274,11 @@ extern "C" fn kmain(dtb: u64, el: u64) -> ! {
     let board: &'static Machine = &BOARD;
     let uart = board.console();
     cpu::console::set_sink(uart);
-    gui::keep_uart(uart); // de tee naar het glas komt in `boot` (gui.rs)
+    // De ring van de TCP-console achter de UART (conport.rs); het glas
+    // hangt straks vóór die twee: de tee van gui.rs schrijft naar de ring-tee
+    // als zijn "UART" (de tee naar het glas komt in `boot`).
+    conport::install(uart);
+    gui::keep_uart(conport::tee);
 
     println!();
     for line in BUNNY {
@@ -384,9 +389,11 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
         env!("HOPOS_STAMP"),
     );
 
-    // De console op het glas, op de OS-core (gui.rs): de bunny als kop,
-    // de log eronder. Zonder framebuffer of kaal gebouwd: één regel of
-    // niets.
+    // De ring van de TCP-console is vanaf hier van de OS-core (na een
+    // verhuizing schreef de boot-core hem tot nu), dan de console op het
+    // glas, op dezelfde core (gui.rs): de bunny als kop, de log eronder.
+    // Zonder framebuffer of kaal gebouwd: één regel of niets.
+    conport::here();
     gui::init_framebuffer_console(board);
 
     // De wandklok vóór er een bewoner is. Na een flip draagt de overdracht
@@ -448,6 +455,19 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     telemetry::start(exec);
     gui::start_screen_status(exec); // de meetregels naast de bunny
 
+    // De config van Hop: op QEMU de vaste tekst plus `hopos.s3.*` uit de
+    // bootargs (config.rs). Hier al, vóór het net: de console over TCP
+    // (conport.rs) kiest uit dezelfde config, en haar listener start zodra
+    // de lease er is, ook na een flip waarin Hop niet opnieuw wordt geplaatst.
+    let hop_cfg = match role {
+        Some(StagedRole::Hop) => config::qemu_hop_cfg(|k| bench::bootparam(dtb, k)),
+        _ => alloc::string::String::new(),
+    };
+    conport::enable(config::console_enabled(
+        &config::NodeCfg::parse(&hop_cfg),
+        |k| bench::bootparam(dtb, k),
+    ));
+
     // Het netwerkvlak (net.rs): de pomp op de NIC, de switch, poort 0 met
     // de node-stack, DHCP en de system-listener. Zonder NIC draait de kern
     // door zonder net; dat is een board, geen fout.
@@ -484,12 +504,6 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     let app_env = match role {
         Some(StagedRole::App) => slots::app_env(&bench::bootparam(dtb, "hopos.appenv")),
         _ => alloc::vec::Vec::new(),
-    };
-    // De config van Hop: op QEMU de vaste tekst plus `hopos.s3.*` uit de
-    // bootargs (config.rs).
-    let hop_cfg = match role {
-        Some(StagedRole::Hop) => config::qemu_hop_cfg(|k| bench::bootparam(dtb, k)),
-        _ => alloc::string::String::new(),
     };
     slots::start(exec, role, landing.map(|h| h.slots), app_env, hop_cfg);
 
@@ -707,6 +721,12 @@ async fn tick(exec: &'static Executor) {
     let mut n: u64 = 0;
     loop {
         n += 1;
+        // De RP1-keten op 5 en 30 s (de flip-jacht van 30-09): een koude
+        // boot geeft de referentie, een landing het verschil.
+        #[cfg(feature = "board-rpi5")]
+        if n == 5 || n == 30 {
+            vboard::nic_diag();
+        }
         let due = start.saturating_add(n.saturating_mul(1_000_000_000));
         exec.until(due).await;
         // Hoe laat deze tik kwam. Een kern die een tijd niets rondmaakte

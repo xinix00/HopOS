@@ -207,6 +207,28 @@ fn regs(base: Pa) -> &'static Regs {
     unsafe { dev::regs(base) }
 }
 
+/// Registerdump voor de diagnose (de flip-jacht van 30-09 op de Pi 5):
+/// NWCTRL, NWCFG, NWSTATUS, DMACFG, TXSTATUS, RXQBASE, RXSTATUS, ISR, IMR.
+///
+/// # Safety
+///
+/// `base` is het gemapte GEM-blok (de voorwaarde van `Gem::new`).
+#[must_use]
+pub unsafe fn diag(base: Pa) -> [u32; 9] {
+    let r = regs(base);
+    [
+        r.nwctrl.read(),
+        r.nwcfg.read(),
+        r.nwstatus.read(),
+        r.dmacfg.read(),
+        r.txstatus.read(),
+        r.rxqbase.read(),
+        r.rxstatus.read(),
+        r.isr.read(),
+        r.imr.read(),
+    ]
+}
+
 /// De device-ack van de dispatcher: masker dicht (IDR) en de latch gewist.
 ///
 /// Alleen wissen is niet genoeg: zolang de ring werk heeft, zet de GEM RCOMP

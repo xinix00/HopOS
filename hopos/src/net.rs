@@ -463,6 +463,15 @@ impl Node {
         if exec.spawn(system_listener(exec, lease.ip, api)).is_err() {
             println!("system: listener not spawned HOPOS_SYSTEM_FAIL");
         }
+        if crate::conport::enabled() {
+            if exec.spawn(console_listener(exec, lease.ip)).is_err() {
+                println!("console: listener not spawned, serial line only HOPOS_CONPORT_FAIL");
+            }
+        } else {
+            println!(
+                "console: tcp/{CONSOLE_PORT} off (hopos.console=1 or hopos.insecure=1 opens it), serial line only HOPOS_CONPORT_OFF"
+            );
+        }
 
         let Node {
             rx,
@@ -906,6 +915,84 @@ async fn system_listener<const N: usize, M, H, C>(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// De console-listener.
+// ---------------------------------------------------------------------------
+
+/// De poort van de console over TCP (Go: `kern/conport`): `nc node 5555`.
+const CONSOLE_PORT: u16 = 5555;
+
+/// De listener op [`CONSOLE_PORT`]: per verbinding een lezersplaats
+/// (`conport::READERS`, hoogstens `MAX_READERS`) en een eigen taak die de
+/// ring afspeelt en volgt (`kern::conport::stream`). De listener leest
+/// nooit zelf, dus hij staat altijd weer bij `accept`. Een fout is geen
+/// reden om de node te laten falen: de console is gemak, geen functie.
+async fn console_listener(exec: &'static Executor, ip: Ipv4Addr) {
+    let l = match io(|st| st.tcp_listen(CONSOLE_PORT)) {
+        Ok(l) => l,
+        Err(e) => {
+            println!(
+                "console: tcp/{CONSOLE_PORT} unavailable ({e}), serial line only HOPOS_CONPORT_FAIL"
+            );
+            return;
+        }
+    };
+    println!(
+        "console: also on tcp/{CONSOLE_PORT} ({ip} and {}): nc, first the history, then live HOPOS_CONPORT_UP",
+        Ipv4Addr::from(HOST_IP4)
+    );
+    loop {
+        let h = match accept(exec, l).await {
+            Ok(h) => h,
+            Err(e) => {
+                println!(
+                    "console: accept on tcp/{CONSOLE_PORT}: {e}, port closed HOPOS_CONPORT_FAIL"
+                );
+                return;
+            }
+        };
+        let remote = io(|st| st.tcp_remote(h)).map_or(0, |ep| u32::from_be_bytes(ep.ip));
+        let Some(seat) = crate::conport::READERS.admit() else {
+            // Vol: sluiten in plaats van stil vasthouden; de pool van de
+            // stack houdt plek over voor de rest van de node (Go, 11-08:
+            // negen browsertabs legden de console om).
+            println!(
+                "console: {} refused, {} readers already attached HOPOS_CONPORT_FULL",
+                Ipv4Addr::from(remote),
+                kern::conport::MAX_READERS
+            );
+            close(exec, h);
+            continue;
+        };
+        if exec.spawn(console_reader(exec, h, remote, seat)).is_err() {
+            println!("console: reader task not spawned HOPOS_CONPORT_FAIL");
+            close(exec, h);
+        }
+    }
+}
+
+/// Eén lezer: de ring vanaf het oudste dat er nog staat, en dan volgen tot
+/// hij weggaat. De plaats gaat terug als de taak eindigt.
+async fn console_reader(
+    exec: &'static Executor,
+    h: TcpHandle,
+    remote: u32,
+    seat: kern::conport::Seat<'static>,
+) {
+    let mut conn = TcpConn { exec, h, remote };
+    let mut buf = [0u8; 1024];
+    kern::conport::stream(
+        &mut conn,
+        &NetTimer(exec),
+        crate::conport::snapshot,
+        crate::conport::oldest(),
+        &mut buf,
+    )
+    .await;
+    close(exec, h);
+    drop(seat);
 }
 
 /// Geeft `job` aan de eerste vrije taak; geeft haar index, of de job terug

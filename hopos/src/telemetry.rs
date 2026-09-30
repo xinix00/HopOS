@@ -40,6 +40,12 @@ impl core::fmt::Display for Temp {
     }
 }
 
+/// De klok vol vlak vóór de sprong van een flip (flip.rs), op de boards
+/// met een knop; de rest doet niets.
+pub(crate) fn clock_full_for_flip() {
+    hw::full_for_flip();
+}
+
 /// Spawnt de thermiek-taak en, als het board een knop heeft, het
 /// klokbeleid.
 pub(crate) fn start(exec: &'static Executor) {
@@ -166,6 +172,10 @@ mod counters {
 /// De O6N: de SCP-sensoren en de `_CPC`-knop.
 #[cfg(feature = "board-o6n")]
 mod hw {
+    /// Nog niets vóór een flip: de `_CPC`-knop blijft van de governor-taak
+    /// (of een stille O6N ook een landende kern hindert, is ongemeten).
+    pub(super) fn full_for_flip() {}
+
     use super::counters::{SOURCES, SlotHost};
     use cpu::println;
     use executor::Executor;
@@ -227,6 +237,9 @@ mod hw {
     use executor::Executor;
 
     /// Opent de SMpro met de PCCT van de firmware (één proeflees, één regel).
+    /// Geen knop hier: niets te doen vóór een flip.
+    pub(super) fn full_for_flip() {}
+
     pub(super) fn open() {
         match crate::BOARD.acpi_table(b"PCCT") {
             Some(pcct) => crate::BOARD.open_hwmon(pcct),
@@ -261,6 +274,9 @@ mod hw {
     const WATCH_EVERY: Duration = Duration::from_secs(2);
 
     pub(super) fn open() {}
+
+    /// Geen knop hier: niets te doen vóór een flip.
+    pub(super) fn full_for_flip() {}
 
     pub(super) fn temp() -> i32 {
         0
@@ -299,10 +315,11 @@ mod hw {
     use super::counters::{SOURCES, SlotHost};
     use cpu::println;
     use executor::Executor;
-    use vboard::dvfs::{self, SAMPLE_NS};
+    use vboard::dvfs::{self, Knob, SAMPLE_NS};
 
     pub(super) fn open() {}
 
+    /// Geen knop hier: niets te doen vóór een flip.
     /// Milligraden uit de mailbox; 0 = geen meting (de mailbox is nog niet
     /// open, of de firmware antwoordde niet).
     pub(super) fn temp() -> i32 {
@@ -341,12 +358,38 @@ mod hw {
             mhz.map_or(0, |m| m),
             SAMPLE_NS / 1_000_000
         );
+        // De boot-flank nu, synchroon en vóór het net (main: telemetry::start
+        // gaat vóór net::start): de NIC-init hoort op de volle klok, zoals op
+        // een koude boot. Na een flip vanuit een stille kern (800 MHz)
+        // initialiseerde de NIC op 800 en sprong de klok er meteen na, en
+        // twee keer meldde de NIC daarna nooit meer (30-09, generatie 2).
+        let mut knob = knob;
+        let level = knob.full();
+        match level {
+            Some(l) => println!("dvfs: -> {l} (full, boot) HOPOS_CLOCK_EDGE"),
+            None => {
+                println!("dvfs: clock change to full (boot) failed, the policy keeps its state")
+            }
+        }
         let task = async move {
             let mut host = SlotHost::new(exec);
-            dvfs::run::<SOURCES>(knob, hold, &mut host).await;
+            dvfs::run_after_boot::<SOURCES>(knob, hold, &mut host, level).await;
         };
         if let Err(e) = exec.spawn(task) {
             println!("dvfs: task not spawned ({e:?}), the clock stays at full");
+        }
+    }
+
+    /// De klok vol vlak vóór de sprong van een flip (flip.rs): de
+    /// vertrekkende kern laat de nieuwe niet op een stille klok landen. Een
+    /// eigen knop op dezelfde mailbox; de governor-taak komt niet meer aan
+    /// de beurt.
+    pub(super) fn full_for_flip() {
+        if let Ok(mut k) = crate::BOARD.clock_knob(None) {
+            match k.full() {
+                Some(l) => println!("dvfs: -> {l} (full, flip) HOPOS_CLOCK_EDGE"),
+                None => println!("dvfs: clock change to full (flip) failed"),
+            }
         }
     }
 }
@@ -363,6 +406,9 @@ mod hw {
     use executor::Executor;
 
     pub(super) fn open() {}
+
+    /// Geen knop hier: niets te doen vóór een flip.
+    pub(super) fn full_for_flip() {}
 
     pub(super) fn temp() -> i32 {
         0

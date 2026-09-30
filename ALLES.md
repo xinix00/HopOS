@@ -37,14 +37,25 @@ de RNG200 (`HOPOS_RNG200_UP`) en de PM-watchdog gewapend en geaaid.
 - [ ] Dvfs via de mailbox: geport, maar de kaart heeft geen `arm_freq_min`
       (generatie 8: `HOPOS_CLOCK_NONE`, "one ARM clock"). Komt met de nieuwe
       kaart: `HOPOS_CLOCK_UP`, `HOPOS_CLOCK_EDGE` naar 800 MHz na 30 s rust.
+- [ ] **Een flip vanuit de koud gebootte kaart-kern doodt de RP1-NIC**
+      (drie keer op 30-09: J, K, L): na de landing `irq(nic=0)`, geen enkel
+      pakket (`door` blijft staan), DHCP "no server answered", de
+      boot-guard verloopt en de watchdog reset naar de kaart, die dan
+      gewoon boot. Niet de GIC (de veeg hielp niet), niet de klok (de
+      NIC-init op 1500 MHz faalde ook). De Pi 4 (GENET, gepold) flipt
+      vanuit zijn koude kaart-kern wél. Wat de koude gui-kaart-kern van
+      14:32 anders achterlaat dan de kale alpha.17-kern (waaruit acht
+      flips slaagden): USB (beide RP1-xHCI's koud geïnitialiseerd), de
+      RNG200, dvfs. Verdenking: de RP1 (PCIe, MSI-X via de MIP). Debuggen
+      op de seriële console met registerdumps na `gem up`.
 - [ ] De koude boot van de kaart van 14:32 (gezien 16:40): `HOPOS_RNG200_UP`,
       `HOPOS_CLOCK_UP` met de val naar 800 MHz na 30 s rust, USB, Hop met
       "no disk on this node", SNTP. Maar géén glas: `fb: mailbox
-      framebuffer: vcmail: firmware refused (0x80000001)`, terwijl elke
-      geflipte kern de zelfde vraag minuten later wel kreeg. De ontdekking
-      wacht nu tot 5 s op de firmware; en de kaart droeg nog de oude
-      watchdogproef. Nieuwe kaart nodig (na 17:00 gebouwd) en een koude
-      boot om `HOPOS_FB_CONSOLE` en `HOPOS_WD_ARMED` koud te zien.
+      framebuffer: vcmail: firmware refused (0x80000001)`, en ook elke
+      flip daarna weigert, óók met 5 s geduld, terwijl op de vorige kaart
+      elke flip het glas kreeg. Hangt het scherm nog aan de Pi 5 en stond
+      het aan bij de power-on? De nieuwe kaart (na 19:30) en een koude boot
+      met het scherm aan: `HOPOS_FB_CONSOLE`, `HOPOS_WD_ARMED`.
 - [ ] USB: de xHCI's staan, maar nog geen HID gezien (niets ingeplugd) en
       geen display-app.
 - [ ] "saved agent state not restored: store i/o failed" hoort "geen schijf"
@@ -66,11 +77,15 @@ de Mac.
       rpi4`, generatie 2): de agentlijst kreeg meteen `temp_milli_c` (48 tot
       50 C) en welcome bleef 200. Zonder console onbewezen: het glas
       (`HOPOS_FB_CONSOLE`) en VL805-USB met de firmware-handshake via vcmail.
-- [ ] Koud geboot van de kaart van 14:33 (gezien 16:40, welcome weg):
-      zonder console onbewezen wat de kern zei; die kaart draagt nog de
-      oude watchdogproef en niet het geduld voor de framebuffer. Nieuwe
-      kaart (na 17:00) en een koude boot; `arm_freq_min` staat nog niet in
-      het Pi 4-recept, dus dvfs zegt daar "one ARM clock".
+Generatie 4 (bundel L, 30-09 ~19:15), gelezen via `nc 192.168.1.40 5555`:
+`HOPOS_RNG200_UP` (BCM2711), de console op het glas (VideoCore
+1920x1080, 32 bpp, `HOPOS_FB_CONSOLE`), dvfs `HOPOS_CLOCK_UP` met
+600/1500 MHz (de Pi 4-firmware heeft zelf een vloer), VL805 geladen door
+de VideoCore, de PM-watchdog gewapend, en drie warme flips op rij (J, K, L)
+zonder de NIC-dood van de Pi 5 (de GENET wordt gepold).
+
+- [ ] De koude boot van de nieuwe kaart (na 19:30 gebouwd) lezen op 5555:
+      het glas, de watchdog, dvfs.
 
 ### Radxa Zero 3E (radxa-1)
 
@@ -79,12 +94,20 @@ leider radxa-1 op 192.168.1.241, welcome geplaatst en via de DNAT HTTP 200.
 Zonder seriële console aan de Mac; de kaartbouw: `GUI=1 CFG=<radxa.cfg>
 APP=hop sh image/radxa-zero3.sh`, console 1500000 8N1 op de header.
 
-- [ ] De bootregels lezen met de UART aan de Mac: `Retrieving /hopos.ird`,
-      de rol uit de initrd, `HOPOS_BOOT`, dwmac4 met de MDIO-PHY, `HOP_UP`,
-      en wat de beeldketen (PD_VO, VOP2, DW-HDMI) zei.
+Generatie 3 (bundel L, de eerste warme flip op de Radxa, 30-09 ~19:20):
+`HOPOS_FLIP_SETTLED`, dwmac4 1000 Mbps met DHCP in 9 ms, de beeldketen
+staat (`display: 1920x1080p60 on HDMI`, `HOPOS_FB_CONSOLE`), de console op
+`nc 192.168.1.241 5555` (`HOPOS_CONPORT_UP`), usbhost30 als xHCI up.
+
+- [ ] EDID: "no answer on the DDC at byte 0, driving 1920x1080p60 blind,
+      sink attached: false". Hangt er een scherm aan? Zo ja, dan de DDC.
+- [ ] usbdrd30: "GSNPSID names no DWC3 core (0 = not clocked)": de tweede
+      DWC3 krijgt zijn klok niet.
+- [ ] De DW-WDT: gemeten (89478 ms op TOP 15) maar "NOT armed (no petting
+      policy in v3 yet)": aansluiten op `hopos/src/watchdog.rs` zoals de
+      PM-watchdog van de Pi.
+- [ ] Geen RNG (`HOPOS_RNG_INSECURE`), geen dvfs.
 - [ ] Geen SD-driver: geen schijf, geen staat over een herstart.
-- [ ] De beeldketen (PD_VO, VOP2, DW-HDMI, EDID over DDC) is ongemeten;
-      DWC3-USB nooit gezien.
 - [ ] De config zit in `hopos.ird`: na het flashen alleen te wijzigen met
       `CFG=` of in de APPEND-regel.
 - [ ] De koude flip weigert (geen staging van Hop op de kaart).
@@ -140,6 +163,16 @@ Image gebouwd 30-09 14:41 met Hop en de config ingebakken (node m4-1):
       DW-WDT, dwmac 0x1037, de C906L via de reset-ingang, appspike.
 - [ ] Geen kick van app naar kern, geen SMP, geen flip op RISC-V; de C906L
       spint; geen SD.
+
+### De console op 5555
+
+Sinds 30-09 (commit na batch K): `nc NODE 5555` geeft de bewaarde console
+(256 KiB) en leest live mee, aan bij `hopos.insecure=1` of `hopos.console=1`.
+Gezien op de Pi 4 en de Radxa; de Pi 5 pas na een geslaagde flip of de
+nieuwe kaart.
+
+- [ ] Go's vraagvenster (`printf 'stats\n' | nc node 5555`, `disc`) is niet
+      geport: alleen de stroom.
 
 ### Nog geen node: hoplb, hopdns, hopprom, hop-gui, hoplockserver, replica
 

@@ -80,6 +80,12 @@ HTTP-server op de laptop, en `curl -X POST -d '{"name":"welcome","driver":"hop",
 slot, de uptime, de verzoeken en de heap. Daarna de meetreeks uit
 [measurements.md](measurements.md) en een flip uit [flip.md](flip.md).
 
+De console van een node zonder UART aan de laptop: `nc NODE 5555` geeft
+eerst de bewaarde console (een ring van 64 KiB, de hele boot) en leest dan
+live mee; hoogstens vier lezers tegelijk. Aan met `hopos.console=1` in de
+config of cmdline, uit met `hopos.console=0`; zonder die sleutel volgt hij
+`hopos.insecure=1` (`HOPOS_CONPORT_UP` in de boot).
+
 ## Wat er nog moet
 
 Eén lijst, per node en voor alles tegelijk: [ALLES.md](../ALLES.md) in de
