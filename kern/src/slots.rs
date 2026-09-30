@@ -1445,7 +1445,7 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             {
                 self.register(slot, generation, Region::new(st.part_base, st.part_size));
                 self.log.log(format_args!(
-                    "slot {slot}: adopted — partition {} MB @ {:#x} on core {} ({} core(s)), ownership restored",
+                    "slot {slot}: adopted: partition {} MB @ {:#x} on core {} ({} core(s)), ownership restored",
                     st.part_size >> 20,
                     st.part_base,
                     st.core,

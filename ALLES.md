@@ -11,12 +11,14 @@ niet doorgestreept. Afspraak: één lijst, hier; `docs/README.md` wijst hierheen
 Gezien op 30-09: bunny, DTB, 2040 MB, GIC-400, de RP1-NIC op 1000 Mbps met
 MSI-X via de MIP, DHCP, `HOPOS_OS_SELFTEST ok`, Hop met de MMU aan als
 leader, welcome geplaatst op core 1 en de pagina door de DNAT bij de Mac,
-en de eerste kern-flip op ijzer: generatie 2, Hop en welcome meegenomen.
+twee kern-flips op ijzer (generatie 2 en 3, Hop en welcome meegenomen), en
+na de tweede flip (alpha.17: de NAT ARP't naar de gateway) SNTP gelukt
+(`HOP_CLOCK_SYNCED`, stratum 2, 7,8 ms) en TCP naar buiten het LAN.
 
-- [ ] Off-link verkeer door de NAT: een download van buiten het LAN faalt
-      (`connect neverssl.com: deadline exceeded`), SNTP faalt (`udp: no
-      answer`). De NAT leert de gateway-MAC alleen van een binnenkomend
-      off-subnet frame. Fix: de gateway uit de lease actief ARP'en.
+- [ ] Off-link TCP is nog wisselvallig: van drie downloadpogingen naar
+      buiten kwam er één tot HTTP 403 (verbinding stond) en twee gaven
+      `deadline exceeded`. Observeren met de tellers; mogelijk de
+      first-contact-ARP of de verse gateway-neighbor die verloopt.
 - [ ] Hardware-RNG voor de slots (zie Overal).
 - [ ] Watchdog, thermiek en klok via de mailbox (nu alleen haken:
       `HOPOS_WD_NONE`, `HOPOS_CLOCK_NONE`, `temp=-`).
@@ -122,12 +124,13 @@ node heeft er nog geen gedraaid.
       de control-page (additief ABI-blok) en ververst ze op verzoek, (3)
       applib gebruikt dat zaad voor TLS, DNS en de ISS, en meldt luid als het
       ontbreekt.
-- [ ] Off-link verkeer door de NAT (zie Pi 5): één fix voor elk board.
-- [ ] SNTP: pas na de NAT-fix te beoordelen; de wandklok staat vast tot dan,
-      en https-downloads en de cluster-join wachten erop.
 - [ ] De leader-API van Hop staat stil tijdens een download: de dispatch
       doet één aanroep tegelijk en de download zit erin (POST en DELETE
-      gaven HTTP 000 na 10 s). De download hoort in een eigen taak.
+      gaven HTTP 000 na 10 s; twee keer gezien op de Pi 5). De download
+      hoort in een eigen taak.
+- [ ] Na een flip meldt Hop één keer `NEXT_STORE failed: system call timed
+      out`: de lange wacht van de store-taak liep over de flip heen; hij
+      herstelt, maar de regel hoort er niet te zijn.
 - [ ] De device-op (19): async BOT, MMC en `deviceabi` hebben geen eigen
       hosttests en geen QEMU-proef.
 - [ ] CPU-meting per slot (Go's usage.go) en `cpu_percent` in Hop.
