@@ -27,6 +27,7 @@ of faalt, en een streep waar het bewust niet komt. Stand 30-09-2026, avond.
 | USB xHCI (HID, display-app) | ✓ qemu-xhci | ○ 2 xHCI's up, niets ingeplugd | ✗ VL805 koud: versie 0, HCRST | ○ 1 van 2 DWC3 | ○ | ○ 10 xHCI's up, één super-speed apparaat op XHC4 | – | – |
 | Opslag (hopfs, volumes, OP_SYNC) | ✓ virtio-blk | – (bewust geen NVMe) | – | – (stateless, alles in het geheugen) | ○ NVMe | ✓ NVMe Lexar 4 TB, hopfs hersteld (generatie 3456) | ○ ANS | – |
 | Console op 5555 | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ○ | ○ |
+| Hardwaredecoder (media-smaak) | – | – | – | – | – | ✓ Linlon V8, 85,7 fps 4K P010 via de grant | – | – |
 | Kaart of stick klaar in `target/` | – | ✓ 17:47 | ✓ 17:47 | ✓ 14:41 (zonder 5555) | ✓ 18:12 | ✓ 18:12 | ✓ 14:41 | ✗ donor-FIP |
 
 ## De nodes, één voor één
