@@ -127,28 +127,14 @@ impl SlotRes {
     }
 }
 
-/// Schrijft een 64-bit registerpaar als hoog, laag, hoog. Bij CRCR en
-/// ERSTBA latcht de controller het adres op één van de twee woorden, en
-/// welke dat is, verschilt per implementatie:
-///
-/// - de Go-driver schreef hoog-eerst, omdat het LAGE woord het bit draagt
-///   dat laat latchen (RCS, de tabel); zo werkte hij op de RP1 van de Pi 5
-///   (06-08).
-/// - QEMU's `qemu-xhci` latcht op het HOGE woord (`hw/usb/hcd-xhci.c`:
-///   `xhci_ring_init` bij de schrijf van CRCR-hoog, `xhci_er_reset` bij
-///   ERSTBA-hoog), en Linux schrijft laag-dan-hoog (`lo_hi_writeq`).
-///   GEMETEN 29-09 op QEMU virt: met hoog-eerst haalde de controller zijn
-///   eerste commando van adres 0 (`usb_xhci_fetch_trb addr 0x0`), zette
-///   HCE, en elke Enable Slot bleef zonder completion.
-///
-/// Hoog, laag, hoog laat beide soorten latchen op het volledige adres: de
-/// laatste hoog-schrijf is voor een laag-latcher dezelfde waarde nog eens.
-/// Alles hier gebeurt vóór RUN of met een gestopte command ring, dus een
-/// tweede latch op dezelfde waarde is onschadelijk.
-fn write64(lo: &Reg<u32>, hi: &Reg<u32>, v: u64) {
-    hi.write((v >> 32) as u32);
-    lo.write(v as u32);
-    hi.write((v >> 32) as u32);
+/// Schrijft een uitgelijnd 64-bit registerpaar (CRCR, ERSTBA) in één
+/// MMIO-transactie. Hoog, laag, hoog verliest op de CIX (de O6N) de
+/// ringstand; alleen laag-dan-hoog mist QEMU's latch op het hoge woord
+/// (`hw/usb/hcd-xhci.c`). Eén native 64-bit-schrijf publiceert adres en
+/// stuurbits samen, en beide latchers zien het volledige adres. GEMETEN
+/// 30-09 op de O6N: tien xHCI's up en de Blu-ray-drive over USB-BOT.
+fn write64(lo: &Reg<u32>, _hi: &Reg<u32>, v: u64) {
+    dev::write64(Pa(core::ptr::from_ref(lo) as usize as u64), v);
 }
 
 impl Hc {

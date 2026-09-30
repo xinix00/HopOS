@@ -1044,6 +1044,24 @@ impl Hc {
         self.poisoned
     }
 
+    /// Een momentopname van de registers en ringen bij een mislukte
+    /// enumeratie, vóór het herstel: USBSTS, CRCR, het busadres van de
+    /// command ring en de stand van de event ring. Controllerstand, nooit
+    /// apparaatdata.
+    pub fn diagnostic(&self) -> [u64; 4] {
+        if !self.probed {
+            return [0; 4];
+        }
+        let o = self.opr();
+        [
+            u64::from(o.usbsts.read()),
+            u64::from(o.crcr_lo.read()) | (u64::from(o.crcr_hi.read()) << 32),
+            self.cmd.map_or(0, |r| r.bus),
+            self.evt
+                .map_or(0, |r| u64::from(dev::read32(r.base.add(12)))),
+        ]
+    }
+
     /// Of de controller draait.
     #[must_use]
     pub fn is_running(&self) -> bool {

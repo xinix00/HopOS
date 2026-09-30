@@ -450,7 +450,11 @@ async fn attach_port(
     let d = match c.hc.attach(n, t).await {
         Ok(d) => d,
         Err(e) => {
-            sink.log(format_args!("usb: {name} port {n}: {e}"));
+            let d = c.hc.diagnostic();
+            sink.log(format_args!(
+                "usb: {name} port {n}: {e}; sts={:x} crcr={:x} cmdpa={:x} event={:x}",
+                d[0], d[1], d[2], d[3]
+            ));
             return;
         }
     };
