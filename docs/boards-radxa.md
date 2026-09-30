@@ -11,9 +11,13 @@ wat de console moet tonen en wat een afwijking betekent.
 
 | Deel | Waar | Getest |
 | --- | --- | --- |
-| Board: DTB uit x0 naar de heap, geheugen en cores uit de DTB, UART2 (ns16550, stap 4), GIC-600, de klok, de watchdog (gemeten, niet gewapend), het plan, de NIC-probe | `board/rk3566` | 17 host-tests: plan, pool uit de banken min de gaten, CRU-, GRF- en iomux-woorden, aff1-nummering, de map-tellingen, en de zes van de initrd hieronder |
+| Board: DTB uit x0 naar de heap, geheugen en cores uit de DTB, UART2 (ns16550, stap 4), GIC-600, de klok, het plan, de NIC-probe | `board/rk3566` | 21 host-tests (24 met `gui`): plan, pool uit de banken min de gaten, CRU-, GRF- en iomux-woorden, aff1-nummering, de map-tellingen, de zes van de initrd hieronder, en die van de vier stukken hieronder |
+| Watchdog: de DW-WDT gewapend op TOP 15 (89,5 s, zoals Go), geaaid door de watchdog-taak van de kern, de erfenis over een flip (staat ENABLE al, dan alleen TORR en een kick), `hopos.wd=off` pulst SRST_P/T_WDT_NS (zoals Linux' `dw_wdt_stop`) en kijkt of ENABLE valt | `board/rk3566/src/watchdog.rs`, `hopos/src/watchdog.rs` | host-tests op een nep-WDT en nep-CRU in RAM: de TOP-tabel, wapenen (timeout, kick, enable, response mode 0), de erfenis één keer, geen kick zonder pclk, de reset-woorden van `off` |
+| TRNG: `rockchip,rk3568-rng` op 0xFE38_8000 als bron van de DRBG van de kern, gezaaid in `discover` | `driver/rkrng`, `board/rk3566/src/rng.rs`, de klokken en de reset in `soc.rs` | 9 host-tests op een nep-blok met hiword-masker: hele rondes, START maskeert alleen zichzelf, een dood blok is nul en geen entropie, de continue toets, de timeout zet de ring uit |
+| TSADC: temperatuur (warmste van CPU en GPU) op de tik en de heartbeat | `board/rk3566/src/tsadc.rs`, `hopos/src/telemetry.rs` | host-tests: de rk3568-codetabel met interpolatie, nul is geen meting, het delerwoord is Go's teruggelezen `0x1715` |
+| usbdrd30: klokken (CLKGATE_CON(10) bit 8..10), reset (SRST_USB3OTG0) en de OTG-poort van usb2phy0 (`phy_sus`), met de gates van usbhost30 als vangrail | `board/rk3566/src/usb.rs` (alleen met `gui`) | host-tests: de gate- en resetwoorden uit clk-rk3568.c en rk3568-cru.h, de vangrail |
 | Hop als bewoner: de initrd draagt `hopos.cfg` én het image (de container), `discover` haalt hem naar de heap en splitst hem, de rol uit `hopos.stage` | `board/rk3566/src/initrd.rs`, `slots.rs`; `image/radxa-initrd.py` | host-tests: de container uit het script (`testdata/mini.ird`), de oude kale config, zonder image, elk fout getal, de rolcodes, de grens |
-| SoC-glue: klokgates, bronkeuze en snelheidsdeler (CRU), AXI-reset, RGMII-modus (GRF), de gmac1m1-pinmux, de PHY-reset op GPIO3 PC0, de DW-watchdog | `board/rk3566/src/soc.rs` | idem |
+| SoC-glue: klokgates, bronkeuze en snelheidsdeler (CRU), AXI-reset, RGMII-modus (GRF), de gmac1m1-pinmux, de PHY-reset op GPIO3 PC0, de klokken en de reset van het TRNG | `board/rk3566/src/soc.rs` | idem |
 | Identity map: kern-RAM Normal, DMA Normal-NC, de rest Device | `board/rk3566/src/mmu.rs` | const-asserties tegen het plan |
 | DWMAC4: registerblok, ringen, DMA, MTL, MDIO-master, `netdev::Device`, IRQ-ack en rearm | `driver/nic/dwmac4` | 19 host-tests op een nep-registerblok en nep-DMA in RAM |
 | MDIO: scan, autonegotiatie, RTL8211F-delays | `driver/nic/mdio` | 10 host-tests (samen met de Pi-port) |
@@ -120,18 +124,56 @@ build gehasht. Console: USB-UART op de 40-pins header, pin 8 TX, 10 RX,
 6. **`fb: none from U-Boot`.** Go mat dat U-Boot hier geen scherm achterlaat.
    Staat er toch een framebuffer, noteer de geometrie: er is nog geen
    framebuffer-console in v3.
-7. **`watchdog: ... measured N ms at TOP 15`.** Verwacht rond 89478 ms
-   (2^31 cycli op 24 MHz). Nul betekent dat de teller niet laadt zolang hij
-   niet gewapend is; dat is ook een meting. Hij wordt NIET gewapend.
+7. **`trng: rk3568-rng at 0xfe388000 online (...), the kernel DRBG is
+   seeded from rk3568-rng HOPOS_RNG_RK3566_UP`.** Direct na de stage-regel,
+   nog in `discover`. Het blok staat niet in de DTB van U-Boot; het adres
+   komt uit rk356x-base.dtsi en werkte in Go (06-08). Stilte hier, na de
+   stage-regel en vóór `boot: HopOS`: het blok houdt de bus vast (de
+   klokgates CLKGATE_CON(9) bit 10 en 11 gaan er vlak vóór open). `trng:
+   WARNING rk3568-rng ...: <reden> ... HOPOS_RNG_INSECURE` noemt de reden:
+   `a round of 32 zero bytes` (geen klok), `START still set after 10 ms`,
+   of `two equal rounds` (een vastgelopen bron). De node draait dan op de
+   jitter-seed.
 8. **`boot: HopOS v3.0.0 on rk3566, EL2, 4 cores (big), 2046 MB DRAM
    HOPOS_BOOT`.** Het aantal cores en MB komen uit de DTB.
-9. **`irq: ...` en daarna `HOPOS_TICK 1`, `2`, ...** De tik loopt alleen als
+9. **De watchdog, de thermiek.** Vlak na de `irq:`-regel van stap 10,
+   als de taken starten:
+   `watchdog: hardware reset armed (DW-WDT at 0xfe600000, TOP 15 = 89.4 s
+   (measured in CCVR at 24 MHz, fixed-top true)) - boot guard: ...
+   HOPOS_WD_ARMED`. `from the table, CCVR did not load` in plaats van
+   `measured` betekent dat de teller na de kick nul las (Go las 2^31).
+   Zodra het net op is en Hop slaat: `watchdog: liveness proven ...
+   HOPOS_CANARY_LIVE`. Na een warme flip vanaf een kern die hem al
+   wapende komt eerst `watchdog: armed for the flip boot (... already
+   armed by the previous kernel) ... HOPOS_BOOT_GUARD`. Met `hopos.wd=off`:
+   `HOPOS_WD_OFF`, en na een flip vanaf een gewapende kern eerst
+   `watchdog: disabled for a post-mortem`; zegt de regel ervoor `still
+   enabled after pulsing SRST_P/T_WDT_NS`, dan houdt de reset hem niet
+   tegen en reset de node binnen de 89 s (dat pad is nooit op ijzer
+   gemeten). Daarna de sensor: `hwmon: TSADC at 0xfe710000 cpu 41.5C gpu
+   40.2C (raw N/M) ... HOPOS_TSADC_UP`, en `temp=41.5C` in de tik. In Go
+   converteerde deze sensor op dit bord nooit (06-08, drie hypothesen
+   weggestreept); gebeurt dat hier ook, dan: `hwmon: TSADC at 0xfe710000
+   gives no valid code (raw cpu 0 gpu 0, ...; user_con .. auto_con ..
+   clksel51 .. grf_tsadc_con ..) ... HOPOS_TSADC_NONE`, en de tik houdt
+   `temp=-`. Noteer de vier registers: Go las `0x8fc0`, `0x10033`,
+   `0x1715` en `0x107`.
+   Met `GUI=1` komt na het net (stap 13) de USB: `usb: usbdrd30 clocked (clkgate10
+   0x...0700 -> 0x...0000, softrst9 was .., otg phy_sus .. -> 0x0,
+   pipe-grf usb3otg0_con1 ..); it is the USB-C power input: ...` en, als de
+   core nu antwoordt, `usb: 2 controller(s) up ... HOPOS_USB_UP`.
+   `HOPOS_USB_OTG_REFUSED` betekent dat de gates van usbhost30 of de
+   PIPE-klokken dicht lazen terwijl usbhost30 draait: dan klopt de kaart uit
+   clk-rk3568.c niet voor dit silicium en is usbdrd30 niet aangeraakt.
+   Zegt de DWC3-regel daarna nog steeds `GSNPSID names no DWC3 core`, dan
+   was het de klok niet; noteer clkgate10 en softrst9 uit de regel.
+10. **`irq: ...` en daarna `HOPOS_TICK 1`, `2`, ...** De tik loopt alleen als
    de slaap wekt. Het board slaapt met WFI op de timer-PPI 30 (bewezen op
    QEMU, niet op dit silicium). Blijft de tik staan: zet in
    `board/rk3566/src/lib.rs` `sleeper()` op `Mode::Wfe`. `irq(timer=...)`
    moet oplopen. `irq: FAIL ... HOPOS_IRQ_FAIL` noemt de reden
    (redistributor-frame, slapende redistributor).
-10. **De NIC-keten.** Elke stap faalt met een eigen regel en `HOPOS_NIC_FAIL`:
+11. **De NIC-keten.** Elke stap faalt met een eigen regel en `HOPOS_NIC_FAIL`:
     - `no DWMAC4 at GMAC1 (version 0x0...)`: de pclk staat dicht; de regel
       geeft clksel33, clkgate17 en softrst14.
     - `DMA soft reset does not clear (bus mode 0x00000001)`: de AXI-kant
@@ -143,27 +185,27 @@ build gehasht. Console: USB-UART op de 40-pins header, pin 8 TX, 10 RX,
       ná de schrijf moeten beide `true` zijn. Zonder TX-delay komt er een
       link, werkt RX en verdwijnt elk verzonden frame (06-08).
     - `phy: no link within 8000 ms`: kabel, of de PHY-reset.
-11. **`net: dwmac4 at 0xfe010000 version 0x3051, PHY 1, link 1000 Mbps full
+12. **`net: dwmac4 at 0xfe010000 version 0x3051, PHY 1, link 1000 Mbps full
     duplex, intid 64`** en een diag-regel met `rxdesc[0] 0xc1000000`
     (OWN|IOC|BUF1V: de ring staat klaar). Dan `HOPOS_NIC_UP mac=02:48:4f:50:..`.
     Het adres volgt uit `hopos.node` (net::nodemac); `HOPOS_MAC_FIXED`
     betekent dat er geen node-naam was.
-12. **DHCP en de lijn.** De kern vraagt een lease (net.rs). In
+13. **DHCP en de lijn.** De kern vraagt een lease (net.rs). In
     `HOPOS_TICK` moet `nic=` oplopen bij verkeer: de lijn is SPI 32 (INTID
     64), NIE op bit 15 (de 4.10-indeling; 20-09 bewezen). Blijft `nic=0`
     terwijl er frames binnenkomen, dan pollt de pomp op de vangrail van
     10 ms: werkt, maar traag.
-13. **Doorvoer.** Go haalde met Normal-NC op de NIC-DMA 56,6 MB/s in en 99 uit
+14. **Doorvoer.** Go haalde met Normal-NC op de NIC-DMA 56,6 MB/s in en 99 uit
     (was 15,5 op Device). De map zet die regio vanaf de eerste instructie
     Normal-NC; meet met de netmeter als DHCP er is.
-14. **De slots.** De kooi (`HOPOS_CAGE_UP`) staat in het Device-venster op
+15. **De slots.** De kooi (`HOPOS_CAGE_UP`) staat in het Device-venster op
     0x0622_0000. De app-cores heten 0x100, 0x200, 0x300 (aff1, gemeten
     05-08). Vóór het netwerk al: `system: privilege minted for slot 1 (Hop)
     HOPOS_PRIVILEGE` (alleen met rol hop). Met `APP=` verwacht
     `slots: no staged image, nothing placed HOPOS_SLOT_NONE`; met
     `APP=appspike` twee keer `HOPOS_SLOT_START` en
     `HOPOS_APPSPIKE_DONE pass=9 fail=0`.
-15. **De kick van de OS-core.** Het board gebruikt SGI 7, niet SGI 8 zoals QEMU
+16. **De kick van de OS-core.** Het board gebruikt SGI 7, niet SGI 8 zoals QEMU
     virt: TF-A op Rockchip houdt SGI 8 tot en met 15 als Secure. De zelftest
     van de OS-core (`HOPOS_OS_SELFTEST`) moet `kick=` met een tijd tonen;
     `HOPOS_OS_SELFTEST_FAIL` met een lege kick is dit punt.
@@ -174,7 +216,7 @@ Hop woont op de OS-core naast de kern (slot 1, core 0) en wacht eerst op de
 DHCP-lease (hooguit 10 s, `UPLINK_WAIT`; zonder lease
 `HOPOS_HOP_NO_UPLINK` en meldt Hop zijn slot-adres). Daarna, in deze volgorde:
 
-16. **`HOPOS_HOP_START slot=1 core=0 cpu=0 entry=0x... part=0x...+0x4000000
+17. **`HOPOS_HOP_START slot=1 core=0 cpu=0 entry=0x... part=0x...+0x4000000
     image=N env=M`.** N is de maat van `hop.elf` uit het script (`wc -c
     target/radxa-zero3/hop.elf`, 1536920 op 30-09); een ander getal is een
     andere initrd dan je denkt. De regel `slots: Hop env: ...
@@ -183,19 +225,19 @@ DHCP-lease (hooguit 10 s, `UPLINK_WAIT`; zonder lease
     HOPOS_HOP_FAIL`: stap 5 zei al dat er geen image was.
     `Hop placement:`, `Hop env:` of `Hop not started: elf: ...` met
     `HOPOS_HOP_FAIL`: de regel noemt het getal.
-17. **`net: uplink tcp :8080 -> slot 1 :8080 HOPOS_HOP_PUBLISH`** en
+18. **`net: uplink tcp :8080 -> slot 1 :8080 HOPOS_HOP_PUBLISH`** en
     hetzelfde voor `:9080` (de leader): de switch zet de twee poorten van de
     node door naar Hop.
-18. **`slot 1: hop: agent up node=radxa-1 cluster=hopos agent=:8080
+19. **`slot 1: hop: agent up node=radxa-1 cluster=hopos agent=:8080
     leader=:9080 cores=3 HOP_UP`**, en kort daarna `HOP_LEADER` (één node is
     zijn eigen leader). `cores=3`: de drie app-cores; Hop zelf deelt core 0
     met de kern. De API staat open (`hopos.insecure=1` uit de vaste config,
     luid als `HOPOS_API_INSECURE`). Zonder schijf weigert de kern elke
     bestandscall van Hop (geen hopfs, zie hieronder): een weigering over
     `/hop` in zijn log is verwacht, maar `HOP_UP` moet er toch komen.
-19. **`curl http://<ip>:8080/health`** vanaf de laptop, met het adres uit de
+20. **`curl http://<ip>:8080/health`** vanaf de laptop, met het adres uit de
     lease (`HOPOS_NODE_IP` in `HOPOS_HOP_ENV`, of de DHCP-server).
-20. **welcome, de pagina.** Bouw en serveer hem op de laptop:
+21. **welcome, de pagina.** Bouw en serveer hem op de laptop:
 
     ```sh
     cargo build --release --target aarch64-unknown-none-softfloat -p welcome
@@ -210,7 +252,7 @@ DHCP-lease (hooguit 10 s, `UPLINK_WAIT`; zonder lease
     Op de console: `HOP_JOB_PLACED slot=2`, `HOPOS_SLOT_START slot=2 core=1
     cpu=1` (0x100: de eerste app-core, koud via PSCI CPU_ON), de poort 80
     naar slot 2, en `HOPOS_WELCOME_UP port=80`. Hangt het na `cage: slot 2
-    built`: de PSCI-weg naar de app-core (stap 14 en 15). `curl -X DELETE
+    built`: de PSCI-weg naar de app-core (stap 15 en 16). `curl -X DELETE
     http://<ip>:9080/v1/jobs/welcome` stopt hem en sluit poort 80 weer.
 
 ## Niet gedaan
@@ -226,10 +268,16 @@ DHCP-lease (hooguit 10 s, `UPLINK_WAIT`; zonder lease
 - Op ijzer is Hop op de Radxa nog nooit gestart: de container, de splitsing
   en de kaart zijn op de host bewezen, niet op dit silicium (QEMU heeft
   geen RK3566).
-- De watchdog wordt gemeten maar niet gewapend: v3 heeft nog geen
-  aai-beleid (Go: elke 20 s vanuit `cmd/hopos/watchdog.go`).
 - Geen framebuffer-console en geen VOP2/HDMI-scanout (Go: gui-werk).
-- Geen TRNG-reseed, geen temperatuursensor (Go: `trng.go`, `tsadc.go`).
+- De TSADC converteerde in Go nooit (zie stap 9); de Rust-init is die van
+  Linux, en of hij hier wel meet, zegt de eerste boot. De
+  hardware-thermal-shutdown blijft uit tot er een meting is.
+- usbdrd30 is de USB-C, en dat is ook de voedingsingang: in hostmodus
+  levert hij geen VBUS (de boost van de RK817, `OTG_SWITCH`, zit achter
+  I2C, en v3 heeft geen I2C). Een apparaat dat van de bus leeft, heeft daar
+  een hub met eigen voeding nodig. De USB3-poort van deze core bestaat op
+  de RK3566 niet (geen combphy0); `pipe-grf usb3otg0_con1` in de regel
+  zegt hoe U-Boot hem liet.
 - Geen `hopos.cfg`-venster voor raw patchen (Go's `-cfgwindow`).
 - De pool eindigt op 0xF000_0000: een bord met 8 GB gebruikt alleen de onderste
   3,75 GB.

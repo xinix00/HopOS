@@ -20,6 +20,8 @@ driver-ns16550 = { path = "../../driver/ns16550" }
 driver-gicv3 = { path = "../../driver/gicv3" }
 driver-mdio = { path = "../../driver/nic/mdio" }
 driver-dwmac4 = { path = "../../driver/nic/dwmac4" }
+# Het TRNG-blok van de SoC: de bron van de DRBG van de kern (rng.rs).
+driver-rkrng = { path = "../../driver/rkrng" }
 # Alleen voor het type van `probe_disk`: de opslag van de kern-binary kent
 # vandaag één schijf-type. Dit board heeft (nog) geen SD/eMMC-driver en
 # geeft altijd `Ok(None)`.

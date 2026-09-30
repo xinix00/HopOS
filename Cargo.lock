@@ -211,6 +211,7 @@ dependencies = [
  "driver-gicv3",
  "driver-mdio",
  "driver-ns16550",
+ "driver-rkrng",
  "driver-virtioblk",
  "executor",
  "fw",
@@ -453,6 +454,13 @@ dependencies = [
 
 [[package]]
 name = "driver-pl011"
+version = "3.0.0"
+dependencies = [
+ "dev",
+]
+
+[[package]]
+name = "driver-rkrng"
 version = "3.0.0"
 dependencies = [
  "dev",

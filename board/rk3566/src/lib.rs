@@ -13,7 +13,9 @@
 //!
 //! Dit crate bezit de adressen van het board (RK3566-TRM en
 //! rk356x-base.dtsi), de identity map, het plan, de bedrading van de
-//! drivers en de SoC-glue eronder ([`soc`]). De drivers kennen geen adres.
+//! drivers en de SoC-glue eronder ([`soc`]), de watchdog ([`watchdog`]), de
+//! temperatuursensor ([`tsadc`]) en het TRNG als bron van de DRBG van de
+//! kern (`rng`). De drivers kennen geen adres.
 //!
 //! De DTB en de initrd worden bij [`Board::discover`] naar de heap
 //! gekopieerd: U-Boot legt ze in DRAM dat de identity map als Device mapt
@@ -38,10 +40,13 @@ mod arch;
 mod display;
 pub mod initrd;
 mod mmu;
+mod rng;
 pub mod slots;
 pub mod soc;
+pub mod tsadc;
 // De twee DWC3-cores als USB-host (usb.rs).
 pub mod usb;
+pub mod watchdog;
 
 /// Zonder de feature `gui`: geen beeldketen aan boord, dus headless. Een
 /// kale node linkt geen regel display-code en er tekent geen logconsole in
@@ -367,6 +372,61 @@ pub(crate) fn pool_now() -> Pool {
     pool
 }
 
+/// De DTB uit x0 en de initrd die hij aanwijst naar de heap, en de regels
+/// die zeggen wat erin stond (`discover`).
+fn take_fdt(dtb: u64) {
+    let mut head = [0u8; 8];
+    let total = if in_dram(dtb, 8) && dtb.is_multiple_of(8) {
+        dev::copy_out(&mut head, Pa(dtb));
+        fw::fdt::total_size(&head)
+    } else {
+        None
+    };
+    let Some(f) = total
+        .filter(|&n| in_dram(dtb, n as u64))
+        .and_then(|n| copy_to_heap(dtb, n, &DTB_COPY))
+        .and_then(|b| Fdt::new(b).ok())
+    else {
+        cpu::println!(
+            "WARNING HOPOS_RAM_CHECK_SKIPPED: no valid DTB (x0={dtb:#x}) - trusting the static layout"
+        );
+        return;
+    };
+    FW_HOLES[0].store(dtb, Relaxed);
+    FW_HOLES[1].store(f.size() as u64, Relaxed);
+    MEM_TOTAL.store(f.mem_total().unwrap_or(0), Relaxed);
+    CORES.store(f.cpu_count().unwrap_or(0), Relaxed);
+    if let Some((s, e)) = f.initrd() {
+        FW_HOLES[2].store(s, Relaxed);
+        FW_HOLES[3].store(e - s, Relaxed);
+        take_initrd(s, e - s);
+    }
+    let gic_ok = f
+        .gic_v3()
+        .is_some_and(|g| g.dist.addr == GICD.0 && g.redist.addr == GICR.0);
+    cpu::println!(
+        "fdt: {} bytes at {dtb:#x}, bootargs {:?}, hopos.cfg {} bytes{}",
+        f.size(),
+        f.bootargs().unwrap_or(""),
+        cfg_text().len(),
+        if gic_ok {
+            ""
+        } else {
+            ", GIC differs from the board plan"
+        },
+    );
+    match f.framebuffer() {
+        Some(fb) => cpu::println!(
+            "fb: U-Boot left a {}x{} framebuffer at {:#x}; no framebuffer console in v3 yet",
+            fb.width,
+            fb.height,
+            fb.base
+        ),
+        None => cpu::println!("fb: none from U-Boot (as measured 05-08), UART only"),
+    }
+    take_role();
+}
+
 /// De Radxa Zero 3E als board.
 pub struct Rk3566;
 
@@ -419,17 +479,6 @@ impl Rk3566 {
     /// Stuurt de kick naar deze core zelf: de zelftest van het IPI-pad.
     pub fn kick_self(&self) {
         arch::sgi1r(driver_gicv3::sgi1r(arch::mpidr(), KICK_SGI));
-    }
-
-    /// De watchdog meten zonder te wapenen (zie [`soc::wdt_arm`]).
-    fn report_watchdog() {
-        let t = soc::wdt_probe();
-        cpu::println!(
-            "watchdog: DW-WDT at {:#x}, measured {} ms at TOP 15, fixed-top {}, NOT armed (no petting policy in v3 yet)",
-            soc::WDT.0,
-            t.ms(),
-            t.fixed
-        );
     }
 
     /// Het MAC-adres uit `hopos.mac` of `hopos.node` (Go: `nodemac`). Dit
@@ -532,59 +581,12 @@ impl Board for Rk3566 {
     }
 
     /// De DTB uit x0, en de initrd die hij aanwijst, naar de heap. Wat de
-    /// kern straks vraagt (DRAM, cores, de pool) staat daarna vast.
+    /// kern straks vraagt (DRAM, cores, de pool) staat daarna vast. Dan de
+    /// DRBG van de kern uit het TRNG (`rng`), met of zonder DTB: het blok
+    /// staat er toch niet in.
     fn discover(&self, dtb: u64) {
-        let mut head = [0u8; 8];
-        let total = if in_dram(dtb, 8) && dtb.is_multiple_of(8) {
-            dev::copy_out(&mut head, Pa(dtb));
-            fw::fdt::total_size(&head)
-        } else {
-            None
-        };
-        let Some(f) = total
-            .filter(|&n| in_dram(dtb, n as u64))
-            .and_then(|n| copy_to_heap(dtb, n, &DTB_COPY))
-            .and_then(|b| Fdt::new(b).ok())
-        else {
-            cpu::println!(
-                "WARNING HOPOS_RAM_CHECK_SKIPPED: no valid DTB (x0={dtb:#x}) - trusting the static layout"
-            );
-            return;
-        };
-        FW_HOLES[0].store(dtb, Relaxed);
-        FW_HOLES[1].store(f.size() as u64, Relaxed);
-        MEM_TOTAL.store(f.mem_total().unwrap_or(0), Relaxed);
-        CORES.store(f.cpu_count().unwrap_or(0), Relaxed);
-        if let Some((s, e)) = f.initrd() {
-            FW_HOLES[2].store(s, Relaxed);
-            FW_HOLES[3].store(e - s, Relaxed);
-            take_initrd(s, e - s);
-        }
-        let gic_ok = f
-            .gic_v3()
-            .is_some_and(|g| g.dist.addr == GICD.0 && g.redist.addr == GICR.0);
-        cpu::println!(
-            "fdt: {} bytes at {dtb:#x}, bootargs {:?}, hopos.cfg {} bytes{}",
-            f.size(),
-            f.bootargs().unwrap_or(""),
-            cfg_text().len(),
-            if gic_ok {
-                ""
-            } else {
-                ", GIC differs from the board plan"
-            },
-        );
-        match f.framebuffer() {
-            Some(fb) => cpu::println!(
-                "fb: U-Boot left a {}x{} framebuffer at {:#x}; no framebuffer console in v3 yet",
-                fb.width,
-                fb.height,
-                fb.base
-            ),
-            None => cpu::println!("fb: none from U-Boot (as measured 05-08), UART only"),
-        }
-        take_role();
-        Self::report_watchdog();
+        take_fdt(dtb);
+        rng::seed();
     }
 
     fn clock(&self) -> executor::Clock {

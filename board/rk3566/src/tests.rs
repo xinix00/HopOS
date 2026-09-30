@@ -103,15 +103,6 @@ fn the_iomux_offsets_follow_pinctrl_rockchip() {
 }
 
 #[test]
-fn the_watchdog_timeout_is_about_ninety_seconds() {
-    let t = soc::WdtTop {
-        counts: 1 << 31,
-        fixed: true,
-    };
-    assert_eq!(t.ms(), 89_478);
-}
-
-#[test]
 fn homogeneous_cores_are_all_big() {
     let b = Rk3566::new();
     assert_eq!(b.cores(), CORES_DEFAULT);

@@ -23,8 +23,9 @@
 //! (`board_uefi::watchdog`; QEMU heeft er geen), de PM-watchdog van de
 //! BCM-familie op de Pi's (`board_raspi::watchdog`, direct MMIO; QEMU
 //! `raspi4b` modelleert alleen de reset en wordt dus niet gewapend), de
-//! primaire van `/arm-io/wdt` op de Mac mini (`board_apple::wdt`), en niets
-//! op virt.
+//! primaire van `/arm-io/wdt` op de Mac mini (`board_apple::wdt`), de
+//! DesignWare-WDT op de Radxa (`board_rk3566::watchdog`, TOP 15 = 89,5 s
+//! zoals Go), en niets op virt.
 
 use core::cell::Cell;
 use core::time::Duration;
@@ -188,21 +189,29 @@ fn say(e: &Event, hw: &hw::Hw) {
 /// DW-WDT; wapent alleen als de probe van de boot antwoordde, en
 /// `hopos.cfg` komt uit het venster in het image), en de Pi's ook
 /// (`board_raspi::watchdog`, de PM-watchdog; wapent alleen als zijn teller
-/// loopt, en de sleutels staan in cmdline.txt).
+/// loopt, en de sleutels staan in cmdline.txt), en de Radxa ook
+/// (`board_rk3566::watchdog`, de DW-WDT; de sleutels uit `hopos.cfg` in de
+/// initrd, anders de APPEND-regel).
 #[cfg(any(
     feature = "board-uefi",
     feature = "board-o6n",
     feature = "board-altra",
     feature = "board-licheerv",
     feature = "board-rpi4",
-    feature = "board-rpi5"
+    feature = "board-rpi5",
+    feature = "board-rk3566"
 ))]
 mod hw {
     use core::fmt;
     use vboard::watchdog as wd;
 
     /// De gevraagde hardware-timeout (Go: 12 s).
+    #[cfg(not(feature = "board-rk3566"))]
     const TIMEOUT_MS: u64 = 12_000;
+    /// De Radxa: TOP 15, ongeveer 89,5 s, zoals Go (de DW-WDT kent alleen
+    /// machten van twee; de gemeten waarde staat in `board_rk3566::watchdog`).
+    #[cfg(feature = "board-rk3566")]
+    const TIMEOUT_MS: u64 = wd::TIMEOUT_MS;
 
     /// De SBSA-watchdog; na `arm` zijn beschrijving of de reden van falen.
     pub(super) struct Hw {
@@ -232,7 +241,8 @@ mod hw {
     /// meteen na een landing. Dan is deze kern nog niet gewapend en telt de
     /// teller van de vorige door (de Pi 5, 30-09: gereset na 12 s tijdens
     /// 5 s framebuffer-geduld), dus op de Pi's een herlaad van wat de
-    /// vorige kern wapende.
+    /// vorige kern wapende. Op de Radxa is de kick zelf die herlaad (een
+    /// DW-WDT laadt bij elke kick zijn TOP opnieuw).
     pub(super) fn pet_now() {
         wd::pet();
         #[cfg(any(feature = "board-rpi4", feature = "board-rpi5"))]
@@ -262,13 +272,22 @@ mod hw {
     }
 
     /// Een sleutel uit `hopos.cfg`.
-    #[cfg(not(any(feature = "board-rpi4", feature = "board-rpi5")))]
+    #[cfg(not(any(
+        feature = "board-rpi4",
+        feature = "board-rpi5",
+        feature = "board-rk3566"
+    )))]
     pub(super) fn param(key: &'static str) -> &'static str {
         fw::bootcfg::first(fw::bootcfg::all(crate::BOARD.config(), key))
     }
 
-    /// Een sleutel uit cmdline.txt (de Pi's: /chosen/bootargs).
-    #[cfg(any(feature = "board-rpi4", feature = "board-rpi5"))]
+    /// Een sleutel uit cmdline.txt (de Pi's: /chosen/bootargs), of op de
+    /// Radxa uit `hopos.cfg` in de initrd en anders de APPEND-regel.
+    #[cfg(any(
+        feature = "board-rpi4",
+        feature = "board-rpi5",
+        feature = "board-rk3566"
+    ))]
     pub(super) fn param(key: &'static str) -> &'static str {
         vboard::boot_param(key)
     }
@@ -344,7 +363,7 @@ mod hw {
     }
 }
 
-/// De rest (virt, de Radxa, de riscv64-virt): geen watchdog bedraad.
+/// De rest (virt, de riscv64-virt): geen watchdog bedraad.
 #[cfg(not(any(
     feature = "board-uefi",
     feature = "board-o6n",
@@ -352,7 +371,8 @@ mod hw {
     feature = "board-apple",
     feature = "board-licheerv",
     feature = "board-rpi4",
-    feature = "board-rpi5"
+    feature = "board-rpi5",
+    feature = "board-rk3566"
 )))]
 mod hw {
     use core::fmt;

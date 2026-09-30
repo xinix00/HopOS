@@ -1,6 +1,8 @@
 //! De SoC-glue van de RK3566 onder de drivers: CRU (klokken, resets), GRF
-//! (RGMII-modus), de pinmux van GMAC1, de PHY-reset op GPIO3, en de
-//! DesignWare-watchdog.
+//! (RGMII-modus), de pinmux van GMAC1, de PHY-reset op GPIO3, en de klokken
+//! en de reset van het TRNG. De watchdog, de temperatuursensor en de
+//! USB-klokken hebben elk hun eigen module (`watchdog`, `tsadc`, `usb`); zij
+//! lenen hier [`CRU`], [`GRF`] en [`hiword`].
 //!
 //! Dat het zoveel is heeft één oorzaak, en die is gemeten: U-Boot raakt op
 //! dit bord het ethernet niet aan ("No ethernet found"), dus élke laag
@@ -12,7 +14,7 @@
 //! `drivers/clk/rockchip/clk-rk3568.c` en `clk.h` (CRU),
 //! `drivers/net/ethernet/stmicro/stmmac/dwmac-rk.c` (`rk3568_set_to_rgmii`,
 //! `rk3568_set_gmac_speed`), `drivers/pinctrl/pinctrl-rockchip.c`,
-//! `drivers/gpio/gpio-rockchip.c`, `drivers/watchdog/dw_wdt.c`, en
+//! `drivers/gpio/gpio-rockchip.c`, en
 //! `rk3566-radxa-zero-3e.dts` met `rk356x-base.dtsi` voor de boardwaarden.
 //!
 //! Rockchip-registers zijn "hiword-masked": de bovenste 16 bits zijn een
@@ -29,8 +31,6 @@ pub const GRF: Pa = Pa(0xFDC6_0000);
 pub const PMU_GRF: Pa = Pa(0xFDC2_0000);
 /// GPIO-bank 3 (rk356x-base.dtsi).
 pub const GPIO3: Pa = Pa(0xFE76_0000);
-/// De watchdog (rk356x-base.dtsi: watchdog@fe600000).
-pub const WDT: Pa = Pa(0xFE60_0000);
 
 /// Een schrijfactie voor een hiword-masked veld: waarde in de onderste 16
 /// bits, maskerbits erboven.
@@ -41,7 +41,13 @@ pub const fn hiword(val: u32, mask: u32, shift: u32) -> u32 {
 
 /// Busy-wait op de architectuurklok. Alleen bij boot, in de NIC-probe.
 fn delay_ms(ms: u64) {
-    let until = cpu::idle::now().saturating_add(ms.saturating_mul(1_000_000));
+    delay_us(ms.saturating_mul(1000));
+}
+
+/// Busy-wait van `us` microseconden op de architectuurklok: de korte
+/// wachten van de SoC-glue (resets, analoge voorkanten), alleen bij boot.
+pub(crate) fn delay_us(us: u64) {
+    let until = cpu::idle::now().saturating_add(us.saturating_mul(1000));
     while cpu::idle::now() < until {
         core::hint::spin_loop();
     }
@@ -299,77 +305,34 @@ pub fn gmac_phy_reset() {
     delay_ms(50);
 }
 
-// --- de watchdog ----------------------------------------------------------
+// --- het TRNG: klokken en reset --------------------------------------------
 
-const WDT_CR: u64 = 0x00;
-const WDT_TORR: u64 = 0x04;
-const WDT_CCVR: u64 = 0x08;
-const WDT_CRR: u64 = 0x0C;
-const WDT_PARAMS: u64 = 0xF4;
-/// Eenmaal aan kan hij niet meer uit: dat is de garantie, geen gebrek.
-const WDT_ENABLE: u32 = 1 << 0;
-/// Het vaste DesignWare-restart-wachtwoord.
-const WDT_KICK: u32 = 0x76;
-/// COMP_PARAMS_1: de vaste TOP-tabel is gesynthetiseerd.
-const WDT_USE_FIX_TOP: u32 = 1 << 6;
-/// TOP 15 = 2^31 tclk-cycli; de tclk is xin24m zonder deler, dus ~89,5 s.
-const WDT_TOP: u32 = 15;
-/// De tclk.
-pub const WDT_TCLK_HZ: u32 = 24_000_000;
-/// `CLKGATE_CON(26)`: bit 13 = pclk, bit 14 = tclk (de teller zelf).
-const CLKGATE26: u64 = 0x300 + 26 * 4;
+/// `CLKGATE_CON(9)`: bit 10 = hclk, bit 11 = de kern van het TRNG
+/// (clk-rk3568.c `HCLK_TRNG_NS`, `CLK_TRNG_NS`). Beide `CLK_IGNORE_UNUSED`,
+/// dus vermoedelijk al open na de bootketen; "vermoedelijk" is precies
+/// waarom we ze toch zetten.
+const CLKGATE9: u64 = 0x300 + 9 * 4;
+const GATE_HCLK_TRNG: u32 = 10;
+const GATE_CLK_TRNG: u32 = 11;
+/// `SOFTRST_CON(6)`: SRST_TRNG_NS = 109 = bank 6, bit 13 (rk3568-cru.h).
+const SOFTRST6: u64 = 0x400 + 6 * 4;
+const SRST_TRNG: u32 = 13;
 
-/// De gemeten timeout van de watchdog.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct WdtTop {
-    /// De teller na een kick, in tclk-cycli: de werkelijke TOP.
-    pub counts: u32,
-    /// Meldt het silicium de vaste TOP-tabel?
-    pub fixed: bool,
-}
-
-impl WdtTop {
-    /// De timeout in milliseconden.
-    #[must_use]
-    pub const fn ms(self) -> u64 {
-        self.counts as u64 * 1000 / WDT_TCLK_HZ as u64
-    }
-}
-
-/// Meet de ECHTE timeout bij TOP 15 zonder te wapenen: klokken open, TORR
-/// zetten, kicken, CCVR lezen. Of dit IP-blok de vaste TOP-tabel heeft, is
-/// uit de Linux-bron niet te bewijzen; daarom meten, niet melden.
-pub fn wdt_probe() -> WdtTop {
-    dev::write32(CRU.add(CLKGATE26), hiword(0, 1, 13) | hiword(0, 1, 14));
+/// Opent de klokken van het TRNG en pulst zijn reset (Go `trngInit`; Linux
+/// neemt 2 us, wij 5). VÓÓR de eerste aanraking van het blok: een ongeklokt
+/// Rockchip-blok geeft geen abort maar houdt de bus vast (Go, 06-08: een
+/// boot die stierf vóór zijn banner).
+pub fn trng_clock_on() {
+    dev::write32(
+        CRU.add(CLKGATE9),
+        hiword(0, 1, GATE_HCLK_TRNG) | hiword(0, 1, GATE_CLK_TRNG),
+    );
     dev::mb();
-    let params = dev::read32(WDT.add(WDT_PARAMS));
-    dev::write32(WDT.add(WDT_TORR), WDT_TOP | (WDT_TOP << 4));
-    dev::write32(WDT.add(WDT_CRR), WDT_KICK);
+    dev::write32(CRU.add(SOFTRST6), hiword(1, 1, SRST_TRNG));
     dev::mb();
-    WdtTop {
-        counts: dev::read32(WDT.add(WDT_CCVR)),
-        fixed: params & WDT_USE_FIX_TOP != 0,
-    }
-}
-
-/// Wapent de watchdog (onomkeerbaar) en geeft de gemeten timeout. De
-/// volgorde van `dw_wdt_arm_system_reset`: timeout, kick, dan enable. DE
-/// RESET-SCOPE IS GEMETEN 06-08: een afgelopen teller reset de hele node
-/// (op de console direct `DDR V1.18`, de DDR-init uit de boot-ROM).
-///
-/// Wie wapent, belooft te aaien: v3 heeft nog geen watchdog-beleid (Go:
-/// `cmd/hopos/watchdog.go`, aaien elke 20 s), dus niemand roept dit nog aan.
-pub fn wdt_arm() -> WdtTop {
-    let t = wdt_probe();
-    dev::write32(WDT.add(WDT_CR), WDT_ENABLE);
+    delay_us(5);
+    dev::write32(CRU.add(SOFTRST6), hiword(0, 1, SRST_TRNG));
     dev::mb();
-    t
-}
-
-/// Zet de teller terug op vol: aanroepen zolang, en alléén zolang, de node
-/// zijn levensteken haalt.
-pub fn wdt_pet() {
-    dev::write32(WDT.add(WDT_CRR), WDT_KICK);
 }
 
 /// Herstart de hele SoC via de CRU (`RK3568_GLB_SRST_FST`, dezelfde write

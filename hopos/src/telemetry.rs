@@ -12,7 +12,8 @@
 //! (`_CPC`), de Altra meet via de SMpro (PCC) en laat de klok aan de
 //! firmware, de Mac mini meet één keer bij de boot (de SMC) en bewaakt zijn
 //! p-states, de Pi's meten en klokken via de VideoCore-mailbox
-//! (`board_raspi::clock`), de rest meet (nog) niets. Het beleid leest op de
+//! (`board_raspi::clock`), de Radxa meet met de TSADC van de SoC
+//! (`board_rk3566::tsadc`), de rest meet (nog) niets. Het beleid leest op de
 //! O6N en de Pi's dezelfde tellers ([`counters`]).
 
 use core::sync::atomic::{AtomicI32, Ordering::Relaxed};
@@ -394,12 +395,43 @@ mod hw {
     }
 }
 
+/// De Radxa: de TSADC van de SoC (`board_rk3566::tsadc`), het warmste van
+/// de twee kanalen (CPU en GPU); geen knop, de klok blijft waar U-Boot hem
+/// liet. De sensor gaf in Go nooit een conversie (06-08); `open` zegt in
+/// één regel wat hij nu teruggeeft.
+#[cfg(feature = "board-rk3566")]
+mod hw {
+    use cpu::println;
+    use executor::Executor;
+
+    /// Brengt de sensor op (busy-waits van ~5 ms, één keer bij de boot) en
+    /// meldt de eerste lezing.
+    pub(super) fn open() {
+        vboard::tsadc::open();
+    }
+
+    /// Geen knop hier: niets te doen vóór een flip.
+    pub(super) fn full_for_flip() {}
+
+    /// Milligraden; 0 = geen geldige code.
+    pub(super) fn temp() -> i32 {
+        vboard::tsadc::temp_millic().unwrap_or(0)
+    }
+
+    pub(super) fn governor(_exec: &'static Executor) {
+        println!(
+            "dvfs: no clock knob on this board, the firmware keeps its clock HOPOS_CLOCK_NONE"
+        );
+    }
+}
+
 #[cfg(not(any(
     feature = "board-o6n",
     feature = "board-altra",
     feature = "board-apple",
     feature = "board-rpi4",
-    feature = "board-rpi5"
+    feature = "board-rpi5",
+    feature = "board-rk3566"
 )))]
 mod hw {
     use cpu::println;
