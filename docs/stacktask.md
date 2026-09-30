@@ -29,7 +29,7 @@ onbekende write-uitkomst niet weer betrouwbaar.
 
 De hosttests toetsen diepe lokale frames, herhaald parkeren, integer/FP-state,
 opruimen van geannuleerde futures en nooit gestarte taken. Replica's
-`tools/qemu-persist-candidate.py` draait de echte SQLite-C-engine via deze brug
+`tools/qemu-persist.py` draait de echte SQLite-C-engine via deze brug
 op ARM64: commit, rollback, SIGKILL, koude herstart, integriteitscontrole,
 annuleren van een lange CPU-query via SQLite's progresscallback en heropenen
 met dezelfde SQLite-heap. De complete RISC-V-app bouwt; deze proef claimt geen
