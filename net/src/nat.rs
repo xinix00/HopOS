@@ -78,6 +78,13 @@ const NEIGH_TTL: u64 = 120 * SEC;
 /// storm van 127 loaders naar dezelfde onbekende host geen ARP-storm wordt.
 const ARP_EVERY: u64 = SEC;
 
+/// Een bron-IP dat nooit door de router kwam: 0.0.0.0 (DHCP), link-local
+/// 169.254/16 (RFC 3927: nooit gerouteerd), multicast en hoger (224/4 en
+/// 240/4, plus broadcast). Zo'n frame zegt niets over de gateway-MAC.
+const fn bogus_source(ip: u32) -> bool {
+    ip == 0 || ip & 0xFFFF_0000 == 0xA9FE_0000 || ip >= 0xE000_0000
+}
+
 /// Het plafond van de publicatietabel.
 pub const MAX_PUBS: usize = 512;
 /// Het plafond van de adoptieclaims tijdens een kern-flip.
@@ -344,15 +351,23 @@ impl Nat {
 
     // --- Neighbors --------------------------------------------------------
 
-    /// Leert de L2-next-hop uit een inbound frame: srcIP naar srcMAC, en een
-    /// off-subnet bron betekent dat srcMAC de gateway is. Het gateway-paar
-    /// veroudert bewust niet: élk pakket van buiten ververst het.
-    fn learn(&mut self, src_ip: u32, mac: [u8; 6], now: u64) {
+    /// Leert de L2-next-hop uit een inbound frame: srcIP naar srcMAC. Een
+    /// off-subnet bron die ons UNICAST aanspreekt (`to_us`) draagt de
+    /// gateway-MAC: zo'n frame kwam door de router. Een broadcast of
+    /// multicast van een off-subnet buurman kwam daar níét door en zegt
+    /// niets over de gateway: link-local (169.254) apparaten zonder lease,
+    /// een ander subnet op hetzelfde L2, SSDP en mDNS. GEMETEN 30-09 op de
+    /// Pi 5 aan Dereks LAN: 11 van 14 connects naar buiten liepen op de
+    /// deadline terwijl `noroute` en `flowfull` op nul stonden; de
+    /// gateway-MAC wees naar een buurman, en alleen een pakket van buiten
+    /// zette hem terug, dat zonder juiste MAC niet kwam. Het gateway-paar
+    /// veroudert bewust niet: elk unicast pakket van buiten ververst het.
+    fn learn(&mut self, src_ip: u32, mac: [u8; 6], now: u64, to_us: bool) {
         if !self.neigh.contains(&src_ip) && self.neigh.is_full() {
             self.neigh.clear(); // plafond: legen en herleren
         }
         self.neigh.insert(src_ip, Neighbor { mac, seen: now });
-        if !self.on_subnet(src_ip) {
+        if to_us && !self.on_subnet(src_ip) && !bogus_source(src_ip) {
             self.gw = Some(mac);
         }
     }
@@ -368,21 +383,26 @@ impl Nat {
     /// van buiten kwam, was `gw` leeg, en alles wat de node naar buiten wilde
     /// (SNTP, een download) werd gedropt met "geen spoor". Op QEMU zag je
     /// dat niet, want slirp is de gateway én het hele internet in één hop.
+    ///
+    /// De router zelf, vers als neighbor van het gateway-IP (zijn ARP, zijn
+    /// DHCP en DNS), is gezaghebbend; het passief geleerde paar is de
+    /// terugval, zonder ARP. Een verlopen router-neighbor gaat weg; de
+    /// SYN-retransmit in `outbound` vraagt hem dan opnieuw, en zo herstelt
+    /// een vergiftigd paar binnen een seconde nadat de router antwoordt
+    /// (30-09).
     fn l2_for(&mut self, dst_ip: u32, now: u64) -> Option<[u8; 6]> {
         if !self.on_subnet(dst_ip) {
-            if self.gw.is_some() {
-                return self.gw;
-            }
             let gateway = self.uplink.map(|u| u.gateway).unwrap_or(0);
-            if gateway == 0 || !self.on_subnet(gateway) {
-                return None;
-            }
-            let n = self.neigh.get(&gateway)?;
-            if now.saturating_sub(n.seen) > NEIGH_TTL {
+            if gateway != 0
+                && self.on_subnet(gateway)
+                && let Some(n) = self.neigh.get(&gateway)
+            {
+                if now.saturating_sub(n.seen) <= NEIGH_TTL {
+                    self.gw = Some(n.mac);
+                    return self.gw;
+                }
                 self.neigh.remove(&gateway);
-                return None;
             }
-            self.gw = Some(n.mac);
             return self.gw;
         }
         let n = self.neigh.get(&dst_ip)?;
@@ -411,7 +431,7 @@ impl Nat {
         }
         let spa = be32(f, a + 14);
         if spa != 0 && self.on_subnet(spa) {
-            self.learn(spa, mac_at(f, a + 8), now);
+            self.learn(spa, mac_at(f, a + 8), now, false);
         }
     }
 
@@ -483,7 +503,8 @@ impl Nat {
         // leren: 0.0.0.0 is off-subnet en zou de gateway-MAC vergiftigen; elk
         // apparaat op het LAN dat DHCP't werd dan even "de gateway".
         if src_ip != 0 && byte(f, 6) & 1 == 0 {
-            self.learn(src_ip, mac_at(f, 6), now);
+            let to_us = mac_at(f, 0) == u.mac;
+            self.learn(src_ip, mac_at(f, 6), now, to_us);
         }
         if be32(f, ETH_LEN + 16) != u.ip {
             return false; // niet van ons: de node-stack mag hem hebben
@@ -713,9 +734,16 @@ impl Nat {
         // Een tweede kale SYN op dezelfde levende flow is de retransmit van
         // de TCP-stack: de eerste SYN was de gratis unicast-probe. Vraag dan
         // óók broadcast-ARP, zonder eigen NUD-machine of timer; de
-        // rate-limit begrenst hem op één per seconde.
+        // rate-limit begrenst hem op één per seconde. Off-subnet gaat de
+        // vraag naar de router: een vergiftigd gateway-paar (30-09) herstelt
+        // zo op zijn antwoord, in plaats van nooit.
         if known && !created && proto == PROTO_TCP && flags & TCP_SYN != 0 && flags & TCP_ACK == 0 {
-            self.arp_for(io, dst_ip, now);
+            let ask = if self.on_subnet(dst_ip) {
+                dst_ip
+            } else {
+                u.gateway
+            };
+            self.arp_for(io, ask, now);
         }
         let reap = self.note_tcp_flags(id, flags, false);
         let Some(np) = self.flows.get(id).map(|f| f.node_port) else {

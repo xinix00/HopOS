@@ -610,9 +610,9 @@ fn unpublish_slot_compacteert_publicatiepiek() {
 fn neighbor_cache_en_plafond() {
     let (mut nat, _) = setup();
     let now = T0;
-    nat.learn(LAN_IP, LAN_MAC0, now);
+    nat.learn(LAN_IP, LAN_MAC0, now, true);
     assert_eq!(nat.l2_for(LAN_IP, now), Some(LAN_MAC0));
-    nat.learn(EXT_IP, GW_MAC0, now); // off-subnet: dit is de gateway
+    nat.learn(EXT_IP, GW_MAC0, now, true); // off-subnet: dit is de gateway
     assert_eq!(nat.l2_for(EXT_IP, now), Some(GW_MAC0));
     assert_eq!(
         nat.l2_for((NODE_IP & !0xff) | 0x42, now),
@@ -622,10 +622,10 @@ fn neighbor_cache_en_plafond() {
     let gw2 = [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x02];
     let mut i = 0u32;
     while nat.neigh.len() < MAX_NEIGH {
-        nat.learn(0x0A00_0300 + i, LAN_MAC0, now);
+        nat.learn(0x0A00_0300 + i, LAN_MAC0, now, true);
         i += 1;
     }
-    nat.learn(0x0B00_0001, gw2, now); // onbekend IP op het plafond: leging
+    nat.learn(0x0B00_0001, gw2, now, true); // onbekend IP op het plafond: leging
     assert_eq!(nat.neigh.len(), 1);
     assert_eq!(
         nat.l2_for(EXT_IP, now),
@@ -696,6 +696,133 @@ fn off_subnet_leert_de_gateway_via_arp() {
     assert_eq!(nat.flows.len(), 1);
 }
 
+/// Een broadcast of multicast van een off-subnet buurman (link-local, een
+/// ander subnet op hetzelfde L2) kwam niet door de router en mag de
+/// gateway-MAC niet zetten: gemeten 30-09 op de Pi 5 aan het LAN, 11 van
+/// 14 connects naar buiten op de deadline met `noroute` en `flowfull` nul.
+#[test]
+fn een_off_subnet_broadcast_vergiftigt_de_gateway_niet() {
+    let (mut nat, mut io) = setup();
+    leer_gateway(&mut nat, &mut io);
+    let rogue = [0x02, 0xBA, 0xD0, 0x00, 0x00, 0x77];
+    // SSDP van een apparaat op 169.254.7.7, als broadcast.
+    let mut ssdp = mk_frame(
+        PROTO_UDP,
+        [0xff; 6],
+        rogue,
+        0xA9FE_0707,
+        0xFFFF_FFFF,
+        1900,
+        1900,
+        &[1],
+    );
+    nat.inbound(&mut io, &mut ssdp, T0);
+    // Een unicast van een ander subnet op hetzelfde L2, niet aan ons.
+    let mut other = mk_frame(
+        PROTO_UDP,
+        LAN_MAC0,
+        rogue,
+        0xC0A8_0005,
+        LAN_IP,
+        5353,
+        5353,
+        &[1],
+    );
+    nat.inbound(&mut io, &mut other, T0);
+    // En een link-local bron die ons wél unicast aanspreekt: nooit gerouteerd.
+    let mut ll = mk_frame(
+        PROTO_UDP,
+        NIC_MAC,
+        rogue,
+        0xA9FE_0707,
+        NODE_IP,
+        5353,
+        5353,
+        &[1],
+    );
+    nat.inbound(&mut io, &mut ll, T0);
+    assert_eq!(
+        nat.gw,
+        Some(GW_MAC0),
+        "gateway-MAC vergiftigd door een buurman"
+    );
+    // Een off-subnet unicast aan ons kwam door de router: die MAC telt.
+    let mut via = mk_frame(PROTO_TCP, NIC_MAC, rogue, EXT_IP, NODE_IP, 443, 16002, &[]);
+    nat.inbound(&mut io, &mut via, T0);
+    assert_eq!(
+        nat.gw,
+        Some(rogue),
+        "een unicast van buiten hoort de gateway te verversen"
+    );
+}
+
+/// De router zelf, vers via ARP, wint van het passief geleerde paar: een
+/// vergiftigde gateway-MAC herstelt zodra de router iets zegt, niet pas bij
+/// een pakket van buiten (dat zonder juiste MAC nooit komt). Verloopt de
+/// router-neighbor, dan vraagt de NAT hem opnieuw en stuurt hij intussen
+/// via het paar mee.
+#[test]
+fn de_verse_router_neighbor_wint_van_het_passieve_paar() {
+    let (mut nat, mut io) = setup();
+    let rogue = [0x02, 0xBA, 0xD0, 0x00, 0x00, 0x88];
+    nat.gw = Some(rogue); // hoe dan ook vergiftigd (een oudere kern, de overdracht)
+    nat.arp_learn(&arp_reply(GW_MAC0, GW_IP), T0);
+    let syn = || {
+        let mut s = mk_frame(
+            PROTO_TCP,
+            HOST_MAC,
+            slot_mac(1),
+            slot_ip4(1),
+            EXT_IP,
+            5556,
+            443,
+            &[],
+        );
+        set_tcp_flags(&mut s, TCP_SYN);
+        s
+    };
+    assert!(nat.outbound(&mut io, 1, &mut syn(), T0 + SEC));
+    assert_eq!(io.sent.len(), 1);
+    assert_eq!(
+        io.sent[0][0..6],
+        GW_MAC0,
+        "de SYN ging naar de vergiftigde MAC"
+    );
+    assert_eq!(nat.gw, Some(GW_MAC0), "het paar hoort de router te volgen");
+
+    // De router-neighbor verloopt en het paar raakt opnieuw vergiftigd: de
+    // SYN-retransmit vraagt de router en gaat intussen via het paar mee.
+    let later = T0 + NEIGH_TTL + 2 * SEC;
+    nat.gw = Some(rogue);
+    assert!(nat.outbound(&mut io, 1, &mut syn(), later));
+    assert_eq!(
+        io.sent.len(),
+        3,
+        "een ARP-vraag naar de router en de SYN erachteraan"
+    );
+    assert!(is_bcast_arp(&io.sent[1]));
+    assert_eq!(be32(&io.sent[1], 38), GW_IP);
+    assert_eq!(io.sent[2][0..6], rogue, "intussen via het paar");
+    assert!(
+        !nat.neigh.contains(&GW_IP),
+        "de verlopen router-neighbor hoort weg"
+    );
+    // De router antwoordt, met een andere MAC dan ooit: de volgende SYN
+    // volgt hem; de retransmit vraagt de router nog eens (de rate-limit van
+    // een seconde is voorbij), dat is de gewone probe.
+    let gw_mac1 = [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x02];
+    nat.arp_learn(&arp_reply(gw_mac1, GW_IP), later + SEC);
+    assert!(nat.outbound(&mut io, 1, &mut syn(), later + 2 * SEC));
+    assert_eq!(io.sent.len(), 5, "de ARP-probe en de SYN erachteraan");
+    assert!(is_bcast_arp(&io.sent[3]));
+    assert_eq!(
+        io.sent[4][0..6],
+        gw_mac1,
+        "de SYN volgt het antwoord van de router"
+    );
+    assert_eq!(nat.gw, Some(gw_mac1));
+}
+
 fn arp_reply(from_mac: [u8; 6], from_ip: u32) -> Vec<u8> {
     let mut r = vec![0u8; 42];
     r[0..6].copy_from_slice(&NIC_MAC);
@@ -722,7 +849,7 @@ fn is_bcast_arp(f: &[u8]) -> bool {
 #[test]
 fn arp_first_contact() {
     let (mut nat, mut io) = setup();
-    nat.learn(EXT_IP, GW_MAC0, T0); // gateway bekend, zoals na elke echte boot
+    nat.learn(EXT_IP, GW_MAC0, T0, true); // gateway bekend, zoals na elke echte boot
     let mut syn = mk_frame(
         PROTO_TCP,
         HOST_MAC,
@@ -761,7 +888,7 @@ fn arp_first_contact() {
 #[test]
 fn known_neighbor_syn_retry_probes_arp() {
     let (mut nat, mut io) = setup();
-    nat.learn(LAN_IP, LAN_MAC0, T0);
+    nat.learn(LAN_IP, LAN_MAC0, T0, true);
     let mut syn = mk_frame(
         PROTO_TCP,
         HOST_MAC,
@@ -808,8 +935,8 @@ fn geen_poisoning_uit_probes_en_dhcp() {
 #[test]
 fn neighbor_expires_and_relearns() {
     let (mut nat, mut io) = setup();
-    nat.learn(EXT_IP, GW_MAC0, T0);
-    nat.learn(LAN_IP, LAN_MAC0, T0);
+    nat.learn(EXT_IP, GW_MAC0, T0, true);
+    nat.learn(LAN_IP, LAN_MAC0, T0, true);
     let syn = mk_frame(
         PROTO_TCP,
         HOST_MAC,
@@ -835,7 +962,7 @@ fn neighbor_expires_and_relearns() {
     assert_eq!(io.sent[2][0..6], GW_MAC0);
 
     let new_mac = [0x66, 0x77, 0x88, 0x99, 0xAA, 0xCC];
-    nat.learn(LAN_IP, new_mac, later);
+    nat.learn(LAN_IP, new_mac, later, true);
     nat.outbound(&mut io, 1, &mut syn.clone(), later);
     assert_eq!(io.sent.last().unwrap()[0..6], new_mac);
 }

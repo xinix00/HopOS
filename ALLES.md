@@ -19,10 +19,16 @@ de console op het glas (`HOPOS_FB_CONSOLE`, 1920x1080, 120x67 cellen; de
 bunny en de meetregels gezien op de HDMI) en bracht beide RP1-xHCI's op
 (`HOPOS_USB_UP`).
 
-- [ ] Off-link TCP is nog wisselvallig: van drie downloadpogingen naar
-      buiten kwam er één tot HTTP 403 (verbinding stond) en twee gaven
-      `deadline exceeded`. Observeren met de tellers; mogelijk de
-      first-contact-ARP of de verse gateway-neighbor die verloopt.
+- [ ] Off-link TCP was wisselvallig: 3 van 14 connects naar buiten kwamen
+      tot HTTP 403 (verbinding stond), 11 liepen op de deadline, met
+      `noroute=0 flowfull=0 txdrop=0` (gemeten 30-09, drie jobs met een
+      artifact op neverssl.com). Oorzaak: de NAT leerde de gateway-MAC uit
+      élk frame met een off-subnet bron, ook broadcasts van buren
+      (link-local, ander subnet op hetzelfde L2), en alleen een pakket van
+      buiten zette hem terug. Fix in net/src/nat.rs: alleen unicast aan ons
+      leert het paar, de verse router-neighbor wint, en een SYN-retransmit
+      naar buiten ARP't de router. Te bewijzen op de Pi 5: drie jobs met een
+      artifact van buiten, alle connects tot HTTP 403.
 - [ ] Hardware-RNG voor de slots (zie Overal); de RNG200 van de SoC (Go:
       OLD/metal/board/raspi/rng.go) is niet geport, dus `HOPOS_RNG_INSECURE`.
 - [ ] Het glas toont pas de echte tijd als Hop zijn uurlijkse SNTP doet:
