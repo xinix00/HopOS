@@ -33,6 +33,15 @@ pub(crate) fn tables_changed() {
     imp::tables_changed();
 }
 
+/// ISR_EL1: staat er op deze core een fysieke SError klaar (bit A)? Op
+/// EL2 laat ISR_EL1 de fysieke lijn zien (ARM ARM, ISR_EL1.A). De kern
+/// draait met PSTATE.A dicht, dus een asynchrone external abort (een
+/// PCIe-toegang die fout ging) blijft hier staan tot de eerste ERET naar
+/// EL1 hem neemt; deze lezing zegt vóór die tijd welke stap hem gaf.
+pub(crate) fn serror_pending() -> bool {
+    imp::isr() & (1 << 8) != 0
+}
+
 /// Het gestagede image als slice; `None` op de host.
 pub(crate) fn stage_slice(start: u64, len: u64) -> Option<&'static [u8]> {
     imp::slice(start, len)
@@ -65,6 +74,14 @@ mod imp {
         let v: u64;
         // SAFETY: MPIDR_EL1 lezen heeft geen neveneffect.
         unsafe { asm!("mrs {}, mpidr_el1", out(reg) v, options(nomem, nostack)) };
+        v
+    }
+
+    pub(super) fn isr() -> u64 {
+        let v: u64;
+        // SAFETY: ISR_EL1 lezen heeft geen neveneffect; het neemt geen
+        // exception en wist niets.
+        unsafe { asm!("mrs {}, isr_el1", out(reg) v, options(nomem, nostack)) };
         v
     }
 
@@ -114,6 +131,9 @@ mod imp {
         (0, 0)
     }
     pub(super) fn mpidr() -> u64 {
+        0
+    }
+    pub(super) fn isr() -> u64 {
         0
     }
     pub(super) fn hyp_timer_off() {}

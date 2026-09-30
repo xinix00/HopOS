@@ -113,6 +113,11 @@ pub mod tag {
     pub const FB_VIRT_SIZE: u32 = 0x0004_8004;
     /// Framebuffer: bits per pixel.
     pub const FB_DEPTH: u32 = 0x0004_8005;
+    /// Laat de VideoCore de firmware van de VL805 (de USB-controller van
+    /// de Pi 4 op PCIe) laden: één woord, het apparaatadres
+    /// (`RPI_FIRMWARE_NOTIFY_XHCI_RESET`,
+    /// `include/soc/bcm2835/raspberrypi-firmware.h`).
+    pub const NOTIFY_XHCI_RESET: u32 = 0x0003_0058;
 }
 
 /// Het klok-id van de ARM-cores (het enige dat de klokwachter aanraakt).
@@ -442,6 +447,19 @@ impl Mbox {
         Ok(mac_from_words(w))
     }
 
+    /// Meldt de VideoCore dat de VL805 op `dev_addr` (bus << 20 | dev <<
+    /// 15 | fn << 12) net uit PCIe-reset kwam, zodat hij er de firmware
+    /// in laadt (Linux `rpi_reset_reset`, `drivers/reset/reset-raspberrypi.c`).
+    /// Eén tag van vier bytes, precies zoals Linux hem stuurt. Geeft het
+    /// woord dat de firmware terugschreef; Linux kijkt er niet naar, wij
+    /// loggen het. Een geslaagde call zegt alleen dat de VideoCore het
+    /// bericht nam: of de VL805 draait, zegt pas zijn versieregister.
+    pub fn notify_xhci_reset(&mut self, dev_addr: u32) -> Result<u32> {
+        let mut w = [dev_addr];
+        self.one(tag::NOTIFY_XHCI_RESET, &mut w)?;
+        Ok(w[0])
+    }
+
     /// Vraagt een `w` x `h` x 32 bpp framebuffer (één transactie: maten,
     /// diepte, allocatie, pitch) en geeft wat er werkelijk kwam.
     ///
@@ -662,6 +680,71 @@ mod tests {
         }];
         decode(&DevBuf(b), &mut tags).unwrap();
         assert_eq!(w[1], 48_000);
+    }
+
+    #[test]
+    fn notify_xhci_reset_is_linux_word_for_word_and_reads_the_reply() {
+        let (mut regs, mut buf) = fake();
+        let r = pa(&mut regs);
+        let b = pa(&mut buf);
+        dev::write32(r.add(0x18), STATUS_EMPTY);
+        // SAFETY: de vectoren leven de hele test.
+        let mut m = unsafe { Mbox::new(r, b, ticking) };
+        let mut w = [0x0010_0000u32];
+        m.submit(&[Tag {
+            id: tag::NOTIFY_XHCI_RESET,
+            words: &mut w,
+        }])
+        .unwrap();
+        // Wat de VideoCore leest: maat 28, verzoek, de tag met vier bytes en
+        // code 0, het adres van bus 1, de eind-tag. Linux
+        // (`rpi_firmware_property`) legt precies deze zeven woorden neer.
+        let db = DevBuf(b);
+        let sent: Vec<u32> = (0..7).map(|i| db.get(i)).collect();
+        assert_eq!(sent, [28, 0, 0x0003_0058, 4, 0, 0x0010_0000, 0]);
+        assert_eq!(dev::read32(r.add(0x20)), (b.0 as u32) | 8);
+        // De nep-firmware: gelukt, de tag met zijn respons-bit, een woord
+        // terug, en het adres in MBOX0.
+        let mut db = DevBuf(b);
+        db.put(1, RESP_SUCCESS);
+        db.put(4, RESP_SUCCESS | 4);
+        db.put(5, 0);
+        dev::write32(r.add(0x00), (b.0 as u32) | 8);
+        dev::write32(r.add(0x18), 0);
+        m.wait_reply(m.pending).unwrap();
+        let mut tags = [Tag {
+            id: tag::NOTIFY_XHCI_RESET,
+            words: &mut w,
+        }];
+        decode(&DevBuf(b), &mut tags).unwrap();
+        assert_eq!(w, [0]);
+    }
+
+    #[test]
+    fn notify_xhci_reset_without_the_tag_bit_is_an_error() {
+        // Een firmware die de tag niet kent (een oude start4.elf) laat het
+        // respons-bit leeg: dat is een fout, geen stille nul.
+        let mut buf = [0u32; 8];
+        let mut w = [0x0010_0000u32];
+        encode(
+            &mut buf[..],
+            &[Tag {
+                id: tag::NOTIFY_XHCI_RESET,
+                words: &mut w,
+            }],
+        )
+        .unwrap();
+        buf[1] = RESP_SUCCESS;
+        let mut tags = [Tag {
+            id: tag::NOTIFY_XHCI_RESET,
+            words: &mut w,
+        }];
+        assert_eq!(
+            decode(&buf[..], &mut tags),
+            Err(Error::Tag {
+                id: tag::NOTIFY_XHCI_RESET
+            })
+        );
     }
 
     #[test]

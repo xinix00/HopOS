@@ -65,7 +65,7 @@ De USB-invoer per board (`Board::usb_hosts`, `board/<x>/src/usb.rs`):
 | UEFI (EDK2, QEMU) | elke xHCI op de MCFG-segmenten | klasse 0x0c0330, BAR 0 van de firmware, boven 1 TB via `map_device` | bovenste 2 MB van `BLK_DMA`, gelijk verdeeld | handmatig 29-09: twee xHCI's (de ESP-stick en `qemu-xhci`), toetsenbord, muis, opslag |
 | Orion O6N | tien native xHCI's (XHC0..5, USB0..3) | platformapparaten in de DSDT (`PNP0D10`), aan/uit en host/device uit het variabelen-RAM van de firmware (`GNVA`, `GNVL`); `usb_firmware.rs` leest de exacte vorm | bovenste 2 MB van `BLK_DMA` (de NVMe neemt de onderste 4), tien vaste stukken | nooit op ijzer |
 | Raspberry Pi 5 | twee xHCI's in de RP1 (`rp1-usb0`, `rp1-usb1`) | achter de PCIe-link die de NIC-probe traint; zonder link geen controller | 0x14a0_0000 (2 MB, `board_raspi::usb::USB_DMA`), `bus_off` 0x10_0000_0000 | nooit op ijzer |
-| Raspberry Pi 4 | de VL805 | de BCM2711-RC op (gen 2), BAR 0 op PCIe 0xf800_0000 = CPU 0x6_0000_0000 (gigabyte 24 als Device erbij), dan `NOTIFY_XHCI_RESET` over de mailbox als config 0x50 nul is | 0x14a0_0000 (2 MB) | nooit op ijzer |
+| Raspberry Pi 4 | de VL805 | de BCM2711-RC op (gen 2), BAR 0 op PCIe 0xf800_0000 = CPU 0x6_0000_0000 (gigabyte 24 als Device erbij), met de endpoint dicht, dan `NOTIFY_XHCI_RESET` over de mailbox als config 0x50 nul is, wachten tot er een versie staat (hoogstens 1 s, twee ketens), en pas dan memory-decode aan | 0x14a0_0000 (2 MB) | nooit op ijzer |
 | Radxa Zero 3E | twee DWC3-cores (`usbdrd30`, `usbhost30`) | vaste SoC-adressen; hostmodus via `driver-dwc3`, de klokken en PHY's van U-Boot | `USB_DMA` van het plan (0x06c0_0000), gehalveerd | nooit op ijzer |
 | Ampere Altra | (xHCI op PCIe, zoals UEFI) | niet bedraad: `board/altra` geeft `usb_hosts` niet door | | |
 
@@ -325,11 +325,13 @@ Elke stap met de consoleregel die erbij hoort.
   hem); `usb: rp1-usb0 xHCI ...` en `rp1-usb1`, hun PORTSC-regels, en een
   toetsenbord (Go 06-08: een Logi Bolt gaf toetsenbord én muis op één
   dongle) als `keyboard` en `mouse`.
-- [ ] Pi 4, USB: `usb: vl805 firmware ...` (al geladen, of `loaded by the
-  VideoCore, version now 0x...`; een fout is `HOPOS_USB_VL805`), dan
-  `usb: vl805 on PCIe (status 0x...)`, `usb: vl805 xHCI ...` en de
-  PORTSC-regel. Een VL805 die niet antwoordt na de handshake is de
-  volgende meting (de handshake is nieuw ten opzichte van Go).
+- [ ] Pi 4, USB, KOUD geboot: `usb: vl805 firmware 0x... loaded by the
+  VideoCore after N us (attempt 1, reply 0x...)` (of `already loaded` na
+  een warme flip), dan `usb: vl805 on PCIe (status 0xb0)`, de zelftest
+  `ok`, `usb: vl805 xHCI ...` en de PORTSC-regel. Een fout is
+  `HOPOS_USB_VL805` (de versie bleef 0; de endpoint blijft dan dicht en de
+  xHCI-registers onaangeroerd) en een SError zegt zijn stap met
+  `HOPOS_USB_SERROR`; de hele lijst staat in docs/boards-pi.md, stap 21.
 - [ ] De display-app met Hop: `HOPOS_DISPLAY_UP`, typen geeft
   `HOPOS_DISPLAY_INPUT`; op 16 bpp (de Pi 5-diepte van 11-07) klopt de
   kleur van de achtergrond (donkergroen).

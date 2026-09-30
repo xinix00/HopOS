@@ -117,6 +117,62 @@ fn bcm2711_has_no_ubus_and_resets_through_rgr1() {
     // PERST# blijft vast, de bridge is weer uit reset.
     assert_eq!(dev::read32(bp.add(off::RGR1_SW_INIT)), RGR1_PERST);
     assert_eq!(dev::read32(bp.add(off::MISC_CTRL)) & 0x30_0000, 0);
+    // SCB0_SIZE naar het inbound-totaal: 4 MB + 64 GB + 4 KB wordt 128 GB,
+    // log2 37 - 15 = 22. Wat er stond (hier all-ones in het veld) telt niet.
+    dev::write32(bp.add(off::MISC_CTRL), MISC_CTRL_SCB0_MASK);
+    r.setup();
+    assert_eq!(r.misc_ctrl() >> MISC_CTRL_SCB0_SHIFT, 22);
+}
+
+#[test]
+fn scb0_size_is_linux_educated_guess() {
+    // De Pi 4: BAR1 uit (maat 0), BAR2 4 GB op PCIe 0; Linux zet 17.
+    let pi4 = [
+        Some(InWin {
+            pcie: 0,
+            cpu: 0,
+            size: 0,
+        }),
+        Some(InWin {
+            pcie: 0,
+            cpu: 0,
+            size: 0x1_0000_0000,
+        }),
+        None,
+        None,
+    ];
+    assert_eq!(scb0_size(&pi4), Some(17));
+    // 3 GB (de dma-ranges van de upstream-DT) rondt af naar 4 GB.
+    let three = [Some(InWin {
+        pcie: 0,
+        cpu: 0,
+        size: 0xc000_0000,
+    })];
+    assert_eq!(scb0_size(&three), Some(17));
+    assert_eq!(scb0_size(&[None, None]), None);
+    assert_eq!(
+        scb0_size(&[Some(InWin {
+            pcie: 0,
+            cpu: 0,
+            size: 0x1000
+        })]),
+        None
+    );
+}
+
+#[test]
+fn the_bcm2712_keeps_its_scb_field() {
+    let mut b = block(MMIO_SIZE);
+    let mut sw = block(0x100);
+    let (bp, sp) = (pa(&mut b), pa(&mut sw));
+    dev::write32(bp.add(off::MISC_PCIE_STATUS), STATUS_RC_MODE);
+    let r = rc(Soc::Bcm2712, bp, sp);
+    r.setup();
+    assert_eq!(
+        r.misc_ctrl() & MISC_CTRL_SCB0_MASK,
+        0,
+        "Linux skips it on 7712"
+    );
 }
 
 #[test]
@@ -160,6 +216,18 @@ fn a_trained_link_checks_the_endpoint_and_assigns_bars() {
             val: 0x100_0000,
         },
     ];
+    // Gesloten: de BAR's staan, het command-register is onaangeroerd.
+    // SAFETY: geen RESCAL-blok.
+    unsafe { r.bring_up_closed(0, 0x0001_1de4, &bars) }.unwrap();
+    assert_eq!(dev::read32(bp.add(off::EXT_CFG_DATA + 0x10)), 0x100_0000);
+    assert_eq!(
+        dev::read32(bp.add(off::EXT_CFG_DATA + 4)),
+        0,
+        "still closed"
+    );
+    r.open_endpoint();
+    assert_eq!(dev::read32(bp.add(off::EXT_CFG_DATA + 4)) & 6, 6);
+    dev::write32(bp.add(off::EXT_CFG_DATA + 4), 0);
     // SAFETY: geen RESCAL-blok.
     unsafe { r.bring_up(0, 0x0001_1de4, &bars) }.unwrap();
     assert_eq!(dev::read32(bp.add(off::EXT_CFG_INDEX)), 1 << 20);

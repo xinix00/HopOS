@@ -26,7 +26,7 @@ per stap wat de console moet tonen en wat een afwijking betekent.
 | Klokknop: de ARM-klok via de mailbox (vol = firmware-max of `hopos.mhz`, stil = 600 MHz of het firmware-minimum) onder `driver_dvfs::run`, met dezelfde slot-tellers als de O6N | `board/raspi/src/clock.rs`, `hopos/src/telemetry.rs` | 3 host-tests op de standen (vloer, cap, één klok); QEMU: 700/700 MHz, één klok, geen knop |
 | Linkscript: raw image op 0x80000, de ingang vooraan | `hopos/link-raspi.ld` | de builds, `_pi_start == 0x80000` als link-assertie |
 | Kaart | `image/rpi4.sh`, `image/rpi5.sh` | leveren `kernel8.img` / `hop-agent5.img` en het kaart-image |
-| QEMU-rook | `tools/qemu-rpi4-test.sh` | groen: P2, bunny, DTB, kaart, mailbox, GIC-400, kooi, staging, de zelftest van de OS-core (timer, yield, kick naar zichzelf), drie tikken met `kicks=1`, en de twee weigeringen: RNG200 niet aangeraakt (`HOPOS_RNG_INSECURE`), PM-watchdog uit (`HOPOS_WD_OFF` met `hopos.wd=off`, want FULL_RESET reset daar meteen) |
+| QEMU-rook | `tools/qemu-rpi4-test.sh` | groen: P2, bunny, DTB, kaart, mailbox, GIC-400, kooi, staging, de zelftest van de OS-core (timer, yield, kick naar zichzelf), drie tikken met `kicks=1`, en de twee weigeringen: RNG200 niet aangeraakt (`HOPOS_RNG_INSECURE`), PM-watchdog uit (`HOPOS_WD_OFF` met `hopos.wd=off`, want FULL_RESET reset daar meteen); met `GUI=1` de gui-smaak, waar de VL805-keten de RC niet aanraakt omdat QEMU hem uit de DTB haalt (`no enabled brcm,bcm2711-pcie`, `HOPOS_USB_NONE`) |
 
 ## Het plan (beide Pi's gelijk)
 
@@ -182,6 +182,51 @@ Per stap: wat er moet staan, en wat het betekent als het er niet staat.
     volgorde wapenen-dan-proeven. De echte toets: `hopos.wd`
     niet zetten, Hop stoppen of de kabel eruit, en binnen ~12 s na de
     eerste `HOPOS_CANARY_MISS` hoort de Pi zelf te herstarten.
+21. **VL805, de USB van de Pi 4** (gui-smaak, na de NIC en vóór de
+    zelftest; `board/rpi4/src/usb.rs`). De proef is een KOUDE boot: op
+    30-09 gaf die `firmware loaded by the VideoCore, version now 0x0`, een
+    SError in de zelftest (`vec 11`) en `timeout on HCRST clear`, terwijl
+    de warme flips van diezelfde dag werkten. De keten is sindsdien die
+    van Linux: de RC op met SCB0_SIZE naar het inbound-venster, de link,
+    de BAR's met de endpoint nog dicht, `NOTIFY_XHCI_RESET`, 1 ms stil,
+    dan om de 10 ms config 0x50 tot er een versie staat (hoogstens 1 s),
+    en pas dan memory-decode aan en de host naar de USB-taak. Verwacht,
+    koud en warm:
+
+    ```
+    usb: vl805 firmware 0x...... loaded by the VideoCore after N us (attempt 1, reply 0x0)
+    usb: vl805 on PCIe (status 0xb0), xHCI window at 0x600000000 (bus 0xf8000000)
+    ...
+    oscore: cpu 0 self-test ... HOPOS_OS_SELFTEST ok
+    usb: vl805 xHCI 1.0, 32 slots, 5 ports, 32-byte contexts
+    ```
+
+    Noteer N: dat is de meting die de wachttijd moet dragen (Linux rekent
+    op minder dan 1 ms). Een warme flip die een draaiende VL805 erft, zegt
+    `usb: vl805 firmware 0x... already loaded (attempt 1)`. Wat het
+    betekent als het anders gaat:
+
+    - `usb: vl805 firmware still 0x0 N us after NOTIFY_XHCI_RESET
+      (attempt 1, reply 0x..., MISC_CTRL 0x..., status 0x...)
+      HOPOS_USB_VL805` en daarna een regel met `(attempt 2)`: de eerste
+      keten kreeg geen firmware, de tweede begint weer bij PERST#. Staat de
+      tweede er met `loaded`, dan werkt USB, maar noteer beide regels:
+      alleen de tweede poging werkt, net als op de warme flips.
+    - `usb: vl805: no firmware after 2 attempts, the xHCI registers stay
+      untouched HOPOS_USB_VL805` en `usb: no host controllers on this board
+      HOPOS_USB_NONE`: geen USB, maar ook geen SError en geen HCRST-timeout
+      meer. MISC_CTRL [31:27] hoort 0x11 (17, 4 GB) te zijn; de `reply` is
+      wat de firmware in de tag terugschreef.
+    - `usb: vl805: SError pending after <stap>; the first EL1 entry will
+      take it HOPOS_USB_SERROR`: die stap gaf de asynchrone abort die de
+      zelftest daarna als `vec 11` ziet (`the PCIe bring-up`,
+      `NOTIFY_XHCI_RESET` of `a config read of the VL805 version`). Zegt
+      hij `the boot, before any PCIe access`, dan was het niet de VL805.
+    - `usb: vl805 firmware handshake: <reden> (attempt N) HOPOS_USB_VL805`:
+      de mailbox nam de notify niet (`NOTIFY_XHCI_RESET refused by the
+      firmware`: een start4.elf zonder de tag).
+    - `usb: vl805: no enabled brcm,bcm2711-pcie in the DTB, PCIe not
+      touched`: de DTB mist de RC (QEMU, of een overlay).
 
 ## De eerste Pi 5-boot (30-09)
 

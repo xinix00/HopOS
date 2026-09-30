@@ -39,6 +39,13 @@
 # de staging wel maar plaatst hij niets (HOPOS_SLOT_NONE). App-cores zijn
 # ijzerwerk: docs/boards-pi.md.
 #
+# GUI=1 bouwt de gui-smaak (docs/gui.md) en toetst daarbovenop dat de
+# VL805-keten (board/rpi4/src/usb.rs) de PCIe-RC niet aanraakt als de DTB
+# hem niet aanzet: QEMU raspi4b modelleert geen RC en haalt de node weg, en
+# de eerste schrijf op 0xFD50_9210 was daar een synchrone abort (30-09).
+# Markers: "no enabled brcm,bcm2711-pcie in the DTB, PCIe not touched" en
+# HOPOS_USB_NONE, zonder HOPOS_EXCEPTION.
+#
 # De DTB: DTB=pad, standaard OLD/sd-rpi4/bcm2711-rpi-4-b.dtb (niet in git;
 # herkomst in OLD/sd-rpi4/LEESMIJ.txt). Zonder DTB boot de kern ook, maar
 # zonder kaart, pool en staging; dan toetst het script alleen de boot.
@@ -48,11 +55,20 @@ DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET=aarch64-unknown-none-softfloat
 DTB="${DTB:-$DIR/OLD/sd-rpi4/bcm2711-rpi-4-b.dtb}"
 SECS="${SECS:-8}"
+GUI="${GUI:-0}"
+case "$GUI" in
+0) FEATS=board-rpi4 ;;
+1) FEATS=board-rpi4,gui ;;
+*)
+	echo "GUI=$GUI: kies 0 of 1" >&2
+	exit 2
+	;;
+esac
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
 cd "$DIR"
-cargo build --quiet --release --target "$TARGET" -p hopos --features board-rpi4
+cargo build --quiet --release --target "$TARGET" -p hopos --features "$FEATS"
 cargo build --quiet --release --target "$TARGET" -p appspike
 OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
 "$OBJCOPY" -O binary "$DIR/target/$TARGET/release/hopos" "$TMP/kernel8.img"
@@ -63,6 +79,9 @@ set -- -kernel "$TMP/kernel8.img" -append "hopos.stage=none hopos.wd=off"
 if [ -f "$DTB" ]; then
 	set -- "$@" -dtb "$DTB" -initrd "$TMP/app.elf"
 	MARKERS="$MARKERS|fdt: |mem: |vcmail: |HOPOS_CAGE_UP|KB at 0x8000000, role unknown|HOPOS_SLOT_NONE|no such node in the DTB (QEMU models none), not touched|HOPOS_RNG_INSECURE|HOPOS_WD_OFF"
+	if [ "$GUI" = 1 ]; then
+		MARKERS="$MARKERS|no enabled brcm,bcm2711-pcie in the DTB, PCIe not touched|HOPOS_USB_NONE"
+	fi
 else
 	echo "qemu-rpi4-test: no DTB at $DTB, boot markers only" >&2
 fi

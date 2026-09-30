@@ -135,6 +135,10 @@ const HD_REFCLK_OVRD_EN: u32 = 1 << 16;
 const HD_REFCLK_OVRD_OUT: u32 = 1 << 20;
 const HD_L1SS_ENABLE: u32 = 1 << 21;
 const HD_SERDES_IDDQ: u32 = 1 << 27;
+/// MISC_CTRL: SCB0_SIZE [31:27], het venster naar geheugencontroller 0 als
+/// log2(maat) - 15.
+const MISC_CTRL_SCB0_SHIFT: u32 = 27;
+const MISC_CTRL_SCB0_MASK: u32 = 0x1f << MISC_CTRL_SCB0_SHIFT;
 const RGR1_PERST: u32 = 1 << 0;
 const RGR1_BRIDGE_RST: u32 = 1 << 1;
 
@@ -287,6 +291,24 @@ pub fn in_size_enc(size: u64) -> u32 {
         16..=36 => l - 15,
         _ => 0,
     }
+}
+
+/// Het SCB0_SIZE-veld van MISC_CTRL voor deze inbound-windows: hun totaal,
+/// naar boven afgerond op een macht van twee, als log2 - 15 (Linux
+/// `brcm_pcie_get_inbound_wins`, de "educated guess" zonder
+/// `brcm,scb-sizes`, en `brcm_pcie_setup`). `None` als er niets inbound
+/// is of het totaal onder 32 KB ligt.
+#[must_use]
+pub fn scb0_size(inb: &[Option<InWin>]) -> Option<u32> {
+    let tot = inb
+        .iter()
+        .flatten()
+        .fold(0u64, |n, w| n.saturating_add(w.size));
+    let l = tot.checked_next_power_of_two()?.trailing_zeros();
+    if tot == 0 || l < 15 {
+        return None;
+    }
+    Some((l - 15).min(0x1f))
 }
 
 /// Het register van RC-BAR `n` (1-genummerd) en zijn UBUS-remap.
@@ -463,6 +485,18 @@ impl Rc {
         if self.r(off::MISC_PCIE_STATUS).read() & STATUS_RC_MODE == 0 {
             return (false, false);
         }
+        // SCB0_SIZE: hoe groot het geheugen is dat een endpoint via RC_BAR2
+        // mag lezen. Linux zet het op elke STB-chip behalve de 7712-familie
+        // (de Pi 5 heeft het niet, daar keert `brcm_pcie_get_inbound_wins`
+        // eerder terug). Op de Pi 4 is het de weg waarlangs de VL805 zijn
+        // firmware binnenhaalt als de VideoCore hem laadt; wat de bridge-
+        // reset of een vorige eigenaar hier liet staan, telt niet.
+        if self.soc == Soc::Bcm2711
+            && let Some(scb) = scb0_size(&self.inb)
+        {
+            self.r(off::MISC_CTRL)
+                .update(|v| (v & !MISC_CTRL_SCB0_MASK) | (scb << MISC_CTRL_SCB0_SHIFT));
+        }
         // ASPM: alleen L1 adverteren (DT aspm-no-l0s); klasse PCI-bridge.
         self.r(off::CFG_LINK_CAP)
             .update(|v| (v & !0xc00) | (2 << 10));
@@ -619,6 +653,24 @@ impl Rc {
     /// `rescal_base` is 0 of het gemapte RESCAL-blok.
     pub unsafe fn bring_up(&self, rescal_base: u64, want: u32, bars: &[EpBar]) -> Result {
         // SAFETY: de voorwaarde van deze functie.
+        unsafe { self.bring_up_closed(rescal_base, want, bars) }?;
+        self.open_endpoint();
+        Ok(())
+    }
+
+    /// De bring-up tot en met de BAR's, met de endpoint nog dicht: zijn
+    /// command-register blijft zoals de reset hem liet (geen memory-decode,
+    /// geen bus-mastering). Dat is de stand waarin Linux een endpoint aan
+    /// zijn driver geeft (`pci_host_probe` wijst BAR's toe, pas
+    /// `pci_enable_device` in de driver opent hem), en de stand waarin de
+    /// VideoCore de VL805 van de Pi 4 zijn firmware geeft. Daarna
+    /// [`open_endpoint`](Self::open_endpoint).
+    ///
+    /// # Safety
+    ///
+    /// `rescal_base` is 0 of het gemapte RESCAL-blok.
+    pub unsafe fn bring_up_closed(&self, rescal_base: u64, want: u32, bars: &[EpBar]) -> Result {
+        // SAFETY: de voorwaarde van deze functie.
         if rescal_base != 0 && !unsafe { rescal(Pa(rescal_base), self.clock) } {
             return Err(Error::Rescal);
         }
@@ -642,8 +694,19 @@ impl Rc {
         for b in bars {
             self.cfg_write32(1, 0, 0, b.off, b.val);
         }
+        Ok(())
+    }
+
+    /// Memory-decode en bus-mastering aan op de endpoint (bus 1, dev 0,
+    /// fn 0): vanaf hier antwoordt hij op zijn BAR's.
+    pub fn open_endpoint(&self) {
         let cmd = self.cfg_read32(1, 0, 0, off::CFG_COMMAND);
         self.cfg_write32(1, 0, 0, off::CFG_COMMAND, cmd | 0x6);
-        Ok(())
+    }
+
+    /// Het rauwe MISC_CTRL (diagnose: SCB0_SIZE staat in [31:27]).
+    #[must_use]
+    pub fn misc_ctrl(&self) -> u32 {
+        self.r(off::MISC_CTRL).read()
     }
 }
