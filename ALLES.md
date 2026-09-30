@@ -188,6 +188,12 @@ Stick gebouwd 30-09 14:41 in de gui-smaak met Hop: `target/uefi-esp-o6n/`
 - [ ] De tien xHCI's uit de DSDT, de display-app, de optische drive over
       USB-BOT en MMC (de device-op is gebouwd, nergens getoetst).
 - [ ] `HOPOS_CLOCK_UP` met vijf `_CPC`-domeinen, de thermiek via SCMI.
+- [ ] De productieproef (Derek, 30-09): Lumen, de mediaserver
+      (hop-app-lumen, de Rust-port in `rust/` draait op QEMU: portaal,
+      WebDAV, beheer; de mediaketen met de disc, de hardwaredecoder en de
+      HEVC-encoder op NVMe wacht op de O6N), en cloudflare-lean (een
+      Go-wrapper om lean, nog te porten; "zal meevallen"). Beide als job op
+      de O6N via Hop.
 
 ### Mac mini M4 (vanavond)
 
