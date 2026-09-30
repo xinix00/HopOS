@@ -157,6 +157,16 @@ pub const BLK_DMA: Region = Region {
     base: Pa(WINDOW_PA + 0x0e80_0000),
     size: 0x0080_0000,
 };
+/// Het datablok van de NVMe binnen [`BLK_DMA`] (driver_nvme::DATA_OFF en
+/// DATA_SIZE; board/o6n toetst dat met een const-assert). De stub mapt dit
+/// blok Normal-WB terwijl de rest van de DMA-regio Normal-NC blijft: de
+/// driver doet zelf `push` en `pull` om elke opdracht, en een ongecachete
+/// kopie van 1 MiB kostte op de O6N ~9 ms (lezen 85 MB/s tegen Go's
+/// gecachete 2705, 30-09).
+pub const BLK_DATA: Region = Region {
+    base: Pa(BLK_DMA.base.0 + 0x0020_0000),
+    size: 0x0020_0000,
+};
 
 /// Het kooi-venster: 16 MB Device (control-pages en kooien; de app-cores
 /// lezen het op EL2 met de MMU uit).

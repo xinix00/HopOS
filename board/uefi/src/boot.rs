@@ -349,6 +349,9 @@ fn build_map(map: &Map) -> Result<Mmu, mmu::Error> {
     // De framebuffer Normal-NC, na de RAM: de laatste mapping wint.
     crate::gop::map(&mut m)?;
     m.map(DMA.base.0, DMA.size, mmu::attrs(ATTR_NORMAL_NC))?;
+    // Het datablok van de NVMe erbovenop Normal-WB (de laatste mapping
+    // wint): zie `BLK_DATA`.
+    m.map(crate::BLK_DATA.base.0, crate::BLK_DATA.size, ram_bits)?;
     m.map(ADMIN.base.0, ADMIN.size, dev_bits)?;
     Ok(m)
 }

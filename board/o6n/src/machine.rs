@@ -9,7 +9,13 @@ use crate::probe::{self, CLASS_NVME};
 use crate::thermal::{self, SCMI_CHANNEL, Thermo};
 use board::heap::Heap;
 use board::{Board, CoreClass, Dispatched, Error, Plan};
-use board_uefi::{BLK_DMA, NET_DMA, Uefi};
+use board_uefi::{BLK_DATA, BLK_DMA, NET_DMA, Uefi};
+
+// Het cacheable datablok van de stub is precies dat van de driver.
+const _: () = assert!(
+    BLK_DATA.base.0 == BLK_DMA.base.0 + driver_nvme::DATA_OFF
+        && BLK_DATA.size == driver_nvme::DATA_SIZE
+);
 use bounded::BoundedVec;
 use core::cell::{Cell, RefCell};
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};

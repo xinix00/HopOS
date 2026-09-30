@@ -224,9 +224,14 @@ De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
       backlog valt. Een backlog van 64 in lean (tag) is de lean fix; Go's
       O6N-storm door de NAT haalde 844 conn/s, p99 19,6 ms.
 - [ ] **App-opslag O6N** (1 MiB-calls): na de deur (H) schrijven 414, lezen
-      85 MB/s (Go 557 tot 625 / 727 tot 797); het leespad is de rest (was
-      93, dus de deur hielp lezen niet). Agent bezig (system-API fs-ops,
-      hopfs, NVMe-voltooiing).
+      85 MB/s (Go 557 tot 625 / 727 tot 797). Oorzaak (agent, afgeleid uit
+      de code en Go's meting "ongecachet 59 MB/s"): het datablok van de
+      NVMe lag Normal-NC en `poll_op` kopieert elke MiB met 131.072
+      vluchtige loads uit ongecachet geheugen (~9 ms per MiB). Fix: de stub
+      mapt `BLK_DATA` Normal-WB (de driver doet al push en pull), op de
+      J-stick. Bewijs na de koude boot: `hopos.nvmebench=1` (rauw lezen van
+      ~100 naar >1000 MB/s) en vitals `test=disk`. Het transport kern naar
+      app (300 MB/s bij gaten lezen) is de volgende trap.
 - [ ] **NAT-tabel vol**: 512 flows per slot (`HOPOS_MASQ_SLOT_FULL`), dan
       valt een SYN en kost 1 s. Oorzaak: een inbound RST liet de flow 300 s
       staan zonder hem gesloten te tellen. Fix a102e51 (RST = gesloten in
