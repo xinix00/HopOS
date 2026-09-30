@@ -186,9 +186,11 @@ dependencies = [
  "bounded",
  "cpu",
  "dev",
+ "driver-dvfs",
  "driver-fb",
  "driver-gicv2",
  "driver-pl011",
+ "driver-rng200",
  "driver-vcmail",
  "executor",
  "fw",
@@ -451,6 +453,13 @@ dependencies = [
 
 [[package]]
 name = "driver-pl011"
+version = "3.0.0"
+dependencies = [
+ "dev",
+]
+
+[[package]]
+name = "driver-rng200"
 version = "3.0.0"
 dependencies = [
  "dev",

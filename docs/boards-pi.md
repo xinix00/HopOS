@@ -21,9 +21,12 @@ per stap wat de console moet tonen en wat een afwijking betekent.
 | GENET v5 (Pi 4) | `driver/nic/genet` | 9 host-tests: reset met DMA-stopbevestiging, ringen die de hardwaretellers volgen, QTAG, PROD-wrap, volle ring, RX-pad en foute frames, MDIO |
 | Cadence GEM (Pi 5) | `driver/nic/gem` | 7 host-tests: ringen met de bus-offset, DBW uit DCFG1, AMP, TX-overdracht, RX en rearm, de expliciete ISR-ack |
 | Broadcom-STB PCIe-RC (Pi 5, en de BCM2711-variant) | `driver/brcmpcie` | 6 host-tests: window-codering, setup (UBUS, PLL, burst, VDM), BCM2711-reset, link-fout, endpoint en BAR's, RESCAL |
+| RNG200 (BCM2711 0xFE10_4000, BCM2712 0x10_7D20_8000): de warm-up van iproc-rng200, de continue toets, de NIST/lockout-herstart van Linux; zaait de DRBG van de kern (`cpu::drbg`, `trng::Kind::Soc`) in `discover`, alleen als de DTB-node `brcm,bcm2711-rng200` aan staat | `driver/rng200`, `board/raspi/src/rng.rs` | 6 host-tests op een nep-blok met FIFO (start-volgorde, warm-up-grens, afwezig blok, vastgelopen bron, gezondheid, lege buffer); QEMU: de node ontbreekt, het blok wordt niet aangeraakt |
+| PM-watchdog (BCM2711 0xFE10_0000, BCM2712 0x10_7D20_0000): 12 s in tikken van 1/65536 s, FULL_RESET pas nadat de teller aantoonbaar loopt; `hopos.wd=off` zet hem uit zoals Linux | `board/raspi/src/watchdog.rs`, `hopos/src/watchdog.rs` | 4 host-tests op een nep-PM-blok (tikken, stilstaande teller nooit gewapend, lopende teller gewapend met behoud van RSTC-bits, erfenis van een flip zonder proef); QEMU: de teller loopt niet, niet gewapend |
+| Klokknop: de ARM-klok via de mailbox (vol = firmware-max of `hopos.mhz`, stil = 600 MHz of het firmware-minimum) onder `driver_dvfs::run`, met dezelfde slot-tellers als de O6N | `board/raspi/src/clock.rs`, `hopos/src/telemetry.rs` | 3 host-tests op de standen (vloer, cap, één klok); QEMU: 700/700 MHz, één klok, geen knop |
 | Linkscript: raw image op 0x80000, de ingang vooraan | `hopos/link-raspi.ld` | de builds, `_pi_start == 0x80000` als link-assertie |
 | Kaart | `image/rpi4.sh`, `image/rpi5.sh` | leveren `kernel8.img` / `hop-agent5.img` en het kaart-image |
-| QEMU-rook | `tools/qemu-rpi4-test.sh` | groen: P2, bunny, DTB, kaart, mailbox, GIC-400, kooi, staging, de zelftest van de OS-core (timer, yield, kick naar zichzelf), drie tikken met `kicks=1` |
+| QEMU-rook | `tools/qemu-rpi4-test.sh` | groen: P2, bunny, DTB, kaart, mailbox, GIC-400, kooi, staging, de zelftest van de OS-core (timer, yield, kick naar zichzelf), drie tikken met `kicks=1`, en de twee weigeringen: RNG200 niet aangeraakt (`HOPOS_RNG_INSECURE`), PM-watchdog niet gewapend (`HOPOS_WD_NONE`) |
 
 ## Het plan (beide Pi's gelijk)
 
@@ -144,6 +147,41 @@ Per stap: wat er moet staan, en wat het betekent als het er niet staat.
 17. **Minuten laten draaien met verkeer** (Pi 5): de C1-stepping kan stil
     bevriezen onder RX-DMA plus fabric-werk (`OLD/docs/v1/archief/
     bcm2712-c1-erratum.md`); noteer de stepping en de tijd tot de freeze.
+18. **RNG200** (in de log direct na stap 7): `trng: RNG200 at
+    0x107d208000 (BCM2712) online, the kernel DRBG is seeded from rng200
+    HOPOS_RNG200_UP` (Pi 4: `0xfe104000 (BCM2711)`). De Pi 4 mag hier tot
+    twee seconden staan: de eerste FIFO-woorden na de warm-up komen op de
+    BCM2711 traag (Go 11-07). `trng: WARNING RNG200 ... HOPOS_RNG_INSECURE`
+    noemt de reden: `no such node in the DTB` (de DTB mist de node, of een
+    overlay haalde hem weg), `RNG_CTRL reads 0x... after enabling RBGEN`
+    (het blok antwoordt niet), `FIFO stayed empty for 2000 ms after the
+    warm-up` (noteer: Pi 4 of Pi 5), `two equal words in a row` of
+    `RNG_INT_STATUS ...` (de bron is stuk). Een `HOPOS_EXCEPTION` met FAR
+    0x107d208000 of 0xfe104000: het adres klopt niet met de DTB.
+19. **Klok** (na `irq: GIC-400`): `dvfs: ARM via the mailbox, full 1500
+    MHz, quiet 800 MHz (firmware min/max 800/1500), policy Auto, cap 0,
+    ... HOPOS_CLOCK_UP`, daarna `dvfs: -> 1500 MHz (full, boot)
+    HOPOS_CLOCK_EDGE`, na 30 s zonder last `dvfs: -> 800 MHz (quiet, idle
+    30s) HOPOS_CLOCK_EDGE`, en elke 10 s `dvfs: clock ... temp ... HOPOS_CLOCK`.
+    De getallen volgen config.txt (`image/rpi5.sh` zet `arm_freq=1500` en
+    sinds 30-09 `arm_freq_min=800`). `the firmware leaves one ARM clock,
+    1500 MHz ... HOPOS_CLOCK_NONE`: de kaart draagt een config.txt zonder
+    `arm_freq_min`; zet de regel erbij of flash opnieuw. Meldt de
+    firmware bij een flank een ander getal dan gevraagd, dan staat dat
+    getal in de flankregel (de firmware klemt, de knop liegt niet).
+    `hopos.clock=max|quiet|firmware` en `hopos.mhz=N` in cmdline.txt
+    werken zoals op de O6N.
+20. **Watchdog** (na de zelftest): `watchdog: hardware reset armed (BCM PM
+    watchdog at 0x107d200000, 12.0 s (786432 ticks of 1/65536 s)) - boot
+    guard: blind pets until the node proves liveness HOPOS_WD_ARMED`, na
+    DHCP en de heartbeat van Hop `HOPOS_CANARY_LIVE`. Staat er `watchdog:
+    PM_WDOG reads 0x... 2 ms after loading 0xc0000: the counter does not
+    run` en `HOPOS_WD_NONE`, dan telt de teller op dit ijzer pas als WRCFG
+    op FULL_RESET staat: dan is de proef in `board_raspi::watchdog` te
+    streng voor ijzer (de proef bestaat voor QEMU, dat bij FULL_RESET
+    meteen reset); noteer de gelezen waarde. De echte toets: `hopos.wd`
+    niet zetten, Hop stoppen of de kabel eruit, en binnen ~12 s na de
+    eerste `HOPOS_CANARY_MISS` hoort de Pi zelf te herstarten.
 
 ## De eerste Pi 5-boot (30-09)
 
@@ -202,8 +240,15 @@ gefikst en op de host en QEMU getoetst, nog niet op ijzer:
   op de mailbox (board/raspi/src/vcfb.rs). Gemeten 30-09 op de Pi 5:
   1920x1080, 16 bpp, `HOPOS_FB_CONSOLE`, en beide RP1-xHCI's `HOPOS_USB_UP`.
   Kaal meldt de kern alleen of de firmware er een gaf.
-- **dvfs, watchdog, RNG200, NVMe (Pi 5 pcie1)**: niet geport; `arm_freq=1500`
-  is de thermische cap op de Pi 5.
+- **RNG200, PM-watchdog, klokknop** (30-09 geport, stap 18 tot 20): op de
+  host en op QEMU bewezen tot hun weigering, niet op ijzer. Nog te zien: dat
+  de RNG200 op beide Pi's binnen de warm-up levert, dat de PM-teller vóór
+  FULL_RESET al loopt (anders weigert de proef op ijzer ook), en dat een
+  node die geen aai meer krijgt echt reset. De DRBG van de kern is
+  gezaaid, maar nog niemand trekt eruit: het zaad voor de slots staat in
+  `ALLES.md` (Overal).
+- **NVMe (Pi 5 pcie1)**: bewust niet geport. `arm_freq=1500` is de
+  thermische cap op de Pi 5; het klokbeleid volgt hem.
 - **QEMU `raspi4b`** heeft geen GENET en geen PSCI; `tools/qemu-rpi4-test.sh`
   bewijst de boot tot de tik en de overgang van de OS-core met de kick naar
   zichzelf, niet het net, een app-core of een kick van een andere core.

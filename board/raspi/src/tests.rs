@@ -174,6 +174,8 @@ fn the_board_plan_matches_the_map() {
         const SOC: &'static str = "none";
         const MAC_FALLBACK: u8 = 9;
         const VCMAIL: Pa = Pa(0);
+        const RNG200: Pa = Pa(0);
+        const PM: Pa = Pa(0);
         fn uart() -> &'static Pl011 {
             panic!("no hardware in a host test")
         }
@@ -213,4 +215,12 @@ fn the_board_plan_matches_the_map() {
     assert!(b.probe_disk().unwrap().is_none());
     assert!(b.probe_nic().unwrap().is_none());
     assert_eq!(b.probe_nic().err(), Some(Error::Twice("probe_nic")));
+    // Een RNG200 die de DTB uitzet, wordt niet aangeraakt: de DRBG zaait op
+    // jitter, en de watchdog heeft zonder `discover` geen blok.
+    rng::seed::<Fake>(Some(false));
+    assert_eq!(cpu::drbg::source(), cpu::drbg::Source::Jitter);
+    let mut buf = [0u8; 16];
+    assert!(cpu::drbg::read(&mut buf).is_ok());
+    assert_eq!(watchdog::arm(12_000), Err("no PM watchdog on this board"));
+    assert!(!watchdog::off());
 }

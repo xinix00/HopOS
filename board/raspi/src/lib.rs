@@ -1,6 +1,7 @@
 //! Het gedeelde Pi-deel (BCM2711 = Pi 4, BCM2712 = Pi 5): de DTB-boot, de
 //! geheugenkaart uit de DTB, het plan, de cmdline-config, de
-//! VideoCore-mailbox, de GIC-400 en de [`Board`]-implementatie.
+//! VideoCore-mailbox, de GIC-400, de RNG200 als bron van de DRBG, de
+//! PM-watchdog, de klokknop via de mailbox en de [`Board`]-implementatie.
 //!
 //! De specificatie is `OLD/metal/board/raspi` en de `hop`-helften van
 //! `rpi4` en `rpi5`. Wat per SoC verschilt (de adressen, de
@@ -25,11 +26,17 @@
 
 pub mod arch;
 pub mod cfg;
+// De klokknop van het klokbeleid: de ARM-klok via de mailbox (clock.rs).
+pub mod clock;
 pub mod dt;
 pub mod map;
+// De RNG200 als entropiebron van de kern (rng.rs).
+pub mod rng;
 pub mod slots;
 // De USB-invoer van de Pi's (usb.rs): het DMA-stuk, de VL805-handshake.
 pub mod usb;
+// De PM-watchdog (watchdog.rs), voor de watchdog-taak van de kern.
+pub mod watchdog;
 // De framebuffer via de VideoCore: alleen in de gui-smaak (docs/gui.md);
 // kaal een stub met dezelfde signatuur (handboek §7).
 #[cfg(feature = "gui")]
@@ -64,6 +71,7 @@ use driver_vcmail::Mbox;
 use fw::fdt::Fdt;
 use sync::{LocalCell, Signal};
 
+pub use driver_dvfs as dvfs;
 pub use driver_gicv2;
 pub use driver_vcmail;
 
@@ -114,6 +122,12 @@ pub trait Soc: 'static {
     fn gic() -> &'static Gic;
     /// De VideoCore-mailbox.
     const VCMAIL: Pa;
+    /// De RNG200 (DT `brcm,bcm2711-rng200`), Device-gemapt in de vaste
+    /// tabel.
+    const RNG200: Pa;
+    /// Het PM-blok met de watchdog (DT `watchdog@...`), Device-gemapt in de
+    /// vaste tabel.
+    const PM: Pa;
     /// Het MPIDR-target van logische core `core`.
     fn mpidr(core: usize) -> u64;
     /// De logische core bij een MPIDR: de inverse van [`mpidr`](Soc::mpidr).
@@ -215,6 +229,13 @@ impl<S: Soc> Raspi<S> {
         Ok(None)
     }
 
+    /// De klokknop voor het klokbeleid: de ARM-klok via de mailbox,
+    /// begrensd op `mhz` (`hopos.mhz`). Een reden als er niets te draaien
+    /// valt (geen mailbox, of de firmware laat één klok over).
+    pub fn clock_knob(&self, mhz: Option<u32>) -> Result<clock::MboxKnob, clock::Error> {
+        clock::knob(mhz)
+    }
+
     /// De fysieke index van de core waar dit draait.
     #[must_use]
     pub fn this_core(&self) -> usize {
@@ -292,6 +313,13 @@ impl<S: Soc> Raspi<S> {
         };
         MAC.store(cfg::mac_word(mac), Relaxed);
         *MBOX.borrow_mut() = Some(m);
+    }
+
+    /// De SoC-blokken zonder eigen trait-methode: de PM-watchdog klaar voor
+    /// de watchdog-taak, en de DRBG van de kern gezaaid uit de RNG200.
+    fn hardware(&self) {
+        watchdog::set_base(S::PM);
+        rng::seed::<S>(device_enabled(rng::COMPATIBLE));
     }
 
     /// De rest van DRAM in de kaart, de pool eruit, de staging erbij.
@@ -450,6 +478,7 @@ impl<S: Soc> Board for Raspi<S> {
                 "WARNING HOPOS_RAM_CHECK_SKIPPED: no valid DTB (x0={dtb:#x}), no pool, no staging"
             );
             self.mailbox();
+            self.hardware();
             return;
         };
         DTB.store(dtb, Relaxed);
@@ -468,6 +497,7 @@ impl<S: Soc> Board for Raspi<S> {
         );
         self.memory(&f, dtb);
         self.mailbox();
+        self.hardware();
         match f.framebuffer() {
             Some(fb) => cpu::println!(
                 "fb: firmware framebuffer {}x{} at {:#x} (no console on it yet)",

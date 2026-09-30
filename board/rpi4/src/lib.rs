@@ -31,7 +31,7 @@
 use board::Error;
 use board_raspi::driver_gicv2::Gic;
 use board_raspi::map::{self, L2, Tables};
-pub use board_raspi::{DMA, Disk, KERN_RAM, temp_millic};
+pub use board_raspi::{DMA, Disk, KERN_RAM, boot_param, dvfs, temp_millic, watchdog};
 use board_raspi::{NicCtx, Raspi, Soc};
 use dev::Pa;
 use driver_genet::Genet;
@@ -48,6 +48,12 @@ pub const UART0: Pa = Pa(0xFE20_1000);
 pub const GIC: Pa = Pa(0xFF84_0000);
 /// De VideoCore-mailbox (brcm,bcm2835-mbox, klassieke basis).
 pub const VCMAIL: Pa = Pa(0xFE00_B880);
+/// De RNG200 (DT rng@7e104000; de soc-ranges leggen 0x7e00_0000 op
+/// 0xfe00_0000). Go: `RNG200Base`.
+pub const RNG200: Pa = Pa(0xFE10_4000);
+/// Het PM-blok met de watchdog (DT watchdog@7e100000). Go: de
+/// `WatchdogBase` uit `raspi.SetupPlan`.
+pub const PM: Pa = Pa(0xFE10_0000);
 /// De GENET v5.
 pub const GENET: Pa = Pa(0xFD58_0000);
 /// De compatible van de GENET in de DTB.
@@ -74,6 +80,8 @@ impl Soc for Bcm2711 {
     const SOC: &'static str = "BCM2711";
     const MAC_FALLBACK: u8 = 0x04;
     const VCMAIL: Pa = VCMAIL;
+    const RNG200: Pa = RNG200;
+    const PM: Pa = PM;
 
     fn usb_hosts(ctx: &board_raspi::usb::UsbCtx) -> board::UsbHosts {
         usb::hosts(ctx)
@@ -238,6 +246,9 @@ __pi_l2_gb3:
         assert!(DMA.size == 8 * MB2);
         assert!(FIXED_END == 168 * MB2);
         assert!(super::PERIPH == 0xC000_0000 + 480 * MB2);
+        // De RNG200 en het PM-blok liggen in het Device-venster.
+        assert!(super::RNG200.0 >= super::PERIPH && super::PM.0 >= super::PERIPH);
+        assert!(super::RNG200.0 < 1 << 32 && super::PM.0 < 1 << 32);
     };
 
     #[cfg(all(target_arch = "aarch64", target_os = "none"))]

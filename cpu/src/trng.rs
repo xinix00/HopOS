@@ -21,6 +21,10 @@
 //! [`fill`] (met SMCCC-terugval) is voor de kern; een gekooide app gebruikt
 //! [`fill_cpu`]: een app praat nooit met de firmware, HCR_EL2.TSC trapt elke
 //! SMC uit de kooi als isolatie-overtreding.
+//!
+//! Een board met een eigen TRNG-blok in de SoC (de RNG200 van de Pi's) geeft
+//! de DRBG zijn eigen [`Fill`], die [`Kind::Soc`] meldt: dezelfde haak,
+//! geen tweede weg ernaast.
 
 use crate::psci;
 use core::fmt;
@@ -46,6 +50,9 @@ pub enum Kind {
     Rndr,
     /// SMCCC TRNG (DEN 0098), een firmware-call.
     SmcccTrng,
+    /// Een TRNG-blok van de SoC, via de driver van het board; de naam is
+    /// die van het blok ("rng200").
+    Soc(&'static str),
 }
 
 impl Kind {
@@ -55,6 +62,7 @@ impl Kind {
         match self {
             Self::Rndr => "rndr",
             Self::SmcccTrng => "smccc-trng",
+            Self::Soc(name) => name,
         }
     }
 }
@@ -156,6 +164,8 @@ pub fn describe(f: &mut dyn fmt::Write) -> fmt::Result {
             let (major, minor) = psci::split_version(psci::smc(TRNG_VERSION, 0, 0, 0));
             write!(f, "trng: smccc-trng v{major}.{minor} (DEN 0098)")
         }
+        // Nooit uit `source()`: een SoC-blok meldt zijn board zelf.
+        Some(Kind::Soc(name)) => write!(f, "trng: {name} (SoC)"),
         None => f.write_str(
             "trng: WARNING no hardware TRNG on this core: the DRBG runs on \
              jitter-seeded entropy, not hardware entropy; avoid high-value secrets on \
@@ -333,5 +343,14 @@ mod tests {
         let mut s = String::new();
         describe(&mut s).unwrap();
         assert!(s.contains("HOPOS_RNG_INSECURE"), "{s}");
+    }
+
+    #[test]
+    fn a_soc_block_is_named_by_its_board() {
+        assert_eq!(Kind::Soc("rng200").to_string(), "rng200");
+        assert_eq!(
+            Error::Exhausted(Kind::Soc("rng200")).to_string(),
+            "rng200: no entropy within the retry limit"
+        );
     }
 }

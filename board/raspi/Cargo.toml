@@ -20,6 +20,10 @@ board = { path = "../../board" }
 driver-pl011 = { path = "../../driver/pl011" }
 driver-gicv2 = { path = "../../driver/gicv2" }
 driver-vcmail = { path = "../../driver/vcmail" }
+# De RNG200, de hardware-entropie van de DRBG (rng.rs).
+driver-rng200 = { path = "../../driver/rng200" }
+# Het contract van de klokknop (clock.rs); het beleid draait in de binary.
+driver-dvfs = { path = "../../driver/dvfs" }
 # De framebuffer-beschrijving van `Board::framebuffer` (vcfb.rs).
 driver-fb = { path = "../../driver/fb" }
 

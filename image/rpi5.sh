@@ -91,9 +91,14 @@ kernel=hop-agent5.img
 os_check=0
 device_tree_address=0x0f000000
 uart_2ndstage=1
+# De stil-vloer van het klokbeleid (board/raspi/src/clock.rs vraagt het
+# minimum op en volgt): zonder deze regel klemt de Pi 5-firmware de vloer op
+# 1500 MHz (Go, gemeten 11-07), gelijk aan arm_freq hieronder, en dan is er
+# niets te draaien (HOPOS_CLOCK_NONE, "one ARM clock").
+arm_freq_min=800
 # Thermische cap voor fanloos bedrijf (arm_freq is het max; arm_freq_max
 # bestaat niet, gemeten 11-07). 2400 MHz liep zonder fan binnen minuten naar
-# 84 C; deze kern heeft (nog) geen klokwachter die terugschakelt.
+# 84 C; het klokbeleid volgt dit maximum vanzelf.
 arm_freq=1500
 # Het image van Hop in het laadvenster (board/raspi/src/map.rs).
 $INITRAMFS

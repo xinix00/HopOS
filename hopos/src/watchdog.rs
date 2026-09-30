@@ -20,10 +20,11 @@
 //! UART-postmortem moet een bevroren node blijven staan.
 //!
 //! De hardware per board: de SBSA-watchdog uit de GTDT op de UEFI-boards
-//! (`board_uefi::watchdog`; QEMU heeft er geen), de primaire van
-//! `/arm-io/wdt` op de Mac mini (`board_apple::wdt`), en nog niets op de Pi's
-//! (de PM-watchdog via de mailbox is van het Pi-spoor: de haak is [`hw`],
-//! één module met dezelfde signatuur) en op virt.
+//! (`board_uefi::watchdog`; QEMU heeft er geen), de PM-watchdog van de
+//! BCM-familie op de Pi's (`board_raspi::watchdog`, direct MMIO; QEMU
+//! `raspi4b` modelleert alleen de reset en wordt dus niet gewapend), de
+//! primaire van `/arm-io/wdt` op de Mac mini (`board_apple::wdt`), en niets
+//! op virt.
 
 use core::cell::Cell;
 use core::time::Duration;
@@ -178,12 +179,16 @@ fn say(e: &Event, hw: &hw::Hw) {
 /// De hardware op de UEFI-boards: de SBSA-watchdog uit de GTDT. De
 /// LicheeRV geeft dezelfde vier namen (`board_licheerv::watchdog`, de
 /// DW-WDT; wapent alleen als de probe van de boot antwoordde, en
-/// `hopos.cfg` komt uit het venster in het image).
+/// `hopos.cfg` komt uit het venster in het image), en de Pi's ook
+/// (`board_raspi::watchdog`, de PM-watchdog; wapent alleen als zijn teller
+/// loopt, en de sleutels staan in cmdline.txt).
 #[cfg(any(
     feature = "board-uefi",
     feature = "board-o6n",
     feature = "board-altra",
-    feature = "board-licheerv"
+    feature = "board-licheerv",
+    feature = "board-rpi4",
+    feature = "board-rpi5"
 ))]
 mod hw {
     use core::fmt;
@@ -239,8 +244,15 @@ mod hw {
     }
 
     /// Een sleutel uit `hopos.cfg`.
+    #[cfg(not(any(feature = "board-rpi4", feature = "board-rpi5")))]
     pub(super) fn param(key: &'static str) -> &'static str {
         fw::bootcfg::first(fw::bootcfg::all(crate::BOARD.config(), key))
+    }
+
+    /// Een sleutel uit cmdline.txt (de Pi's: /chosen/bootargs).
+    #[cfg(any(feature = "board-rpi4", feature = "board-rpi5"))]
+    pub(super) fn param(key: &'static str) -> &'static str {
+        vboard::boot_param(key)
     }
 }
 
@@ -309,15 +321,15 @@ mod hw {
     }
 }
 
-/// De rest: geen watchdog bedraad. De Pi-watchdog (de PM-watchdog via de
-/// mailbox) hoort hier zodra het Pi-spoor hem levert: een eigen module met
-/// dezelfde vier namen.
+/// De rest (virt, de Radxa, de riscv64-virt): geen watchdog bedraad.
 #[cfg(not(any(
     feature = "board-uefi",
     feature = "board-o6n",
     feature = "board-altra",
     feature = "board-apple",
-    feature = "board-licheerv"
+    feature = "board-licheerv",
+    feature = "board-rpi4",
+    feature = "board-rpi5"
 )))]
 mod hw {
     use core::fmt;

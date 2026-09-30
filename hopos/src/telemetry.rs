@@ -11,8 +11,9 @@
 //! Per board ([`hw`]): de O6N meet via de SCP (SCMI) en heeft een knop
 //! (`_CPC`), de Altra meet via de SMpro (PCC) en laat de klok aan de
 //! firmware, de Mac mini meet één keer bij de boot (de SMC) en bewaakt zijn
-//! p-states, de rest meet (nog) niets. De Pi's hebben thermometer en klok
-//! achter de mailbox; die is van het Pi-spoor, de haak is een eigen `hw`.
+//! p-states, de Pi's meten en klokken via de VideoCore-mailbox
+//! (`board_raspi::clock`), de rest meet (nog) niets. Het beleid leest op de
+//! O6N en de Pi's dezelfde tellers ([`counters`]).
 
 use core::sync::atomic::{AtomicI32, Ordering::Relaxed};
 use core::time::Duration;
@@ -64,74 +65,36 @@ async fn thermal(exec: &'static Executor) {
     }
 }
 
-/// De O6N: de SCP-sensoren en de `_CPC`-knop.
-#[cfg(feature = "board-o6n")]
-mod hw {
+/// De tellers van het klokbeleid, voor elk board met een knop: de
+/// idle-teller en de status van elk slot op zijn control-page, en of zijn
+/// bewoner nu rekent. Eén keer, voor de O6N en de Pi's.
+#[cfg(any(feature = "board-o6n", feature = "board-rpi4", feature = "board-rpi5"))]
+mod counters {
     use core::time::Duration;
     use cpu::println;
     use executor::Executor;
-    use vboard::dvfs::{self, Host, SAMPLE_NS, Sample};
+    use vboard::dvfs::{Host, SAMPLE_NS, Sample};
 
     /// De bronnen van het beleid: de kern-core en zestien slots (de O6N heeft
-    /// er twaalf).
-    const SOURCES: usize = 17;
-
-    pub(super) fn open() {}
-
-    pub(super) fn temp() -> i32 {
-        crate::BOARD.temp_milli_c()
-    }
-
-    fn param(key: &'static str) -> &'static str {
-        fw::bootcfg::first(fw::bootcfg::all(crate::BOARD.config(), key))
-    }
-
-    /// Het klokbeleid: `hopos.clock` (`dvfs`, `max`, `quiet`, `firmware`)
-    /// en `hopos.mhz` (het plafond).
-    pub(super) fn governor(exec: &'static Executor) {
-        let v = param("hopos.clock");
-        let (hold, ok) = dvfs::hold_of(v);
-        if !ok {
-            println!("dvfs: hopos.clock={v:?} is not dvfs, max, quiet or firmware; following load");
-        }
-        let Some(hold) = hold else {
-            println!(
-                "dvfs: hopos.clock=firmware, the boot operating point stays HOPOS_CLOCK_FIRMWARE"
-            );
-            return;
-        };
-        let mhz = param("hopos.mhz").parse::<u32>().ok();
-        let knob = match crate::BOARD.clock_knob(mhz) {
-            Ok(k) => k,
-            Err(e) => {
-                println!("dvfs: {e}, the clock stays where the firmware left it HOPOS_CLOCK_NONE");
-                return;
-            }
-        };
-        println!(
-            "dvfs: {} _CPC domains, policy {hold:?}, cap {}, sample {} ms, window 50 ms, cooldown 30 s HOPOS_CLOCK_UP",
-            knob.domains().len(),
-            mhz.map_or(0, |m| m),
-            SAMPLE_NS / 1_000_000
-        );
-        let plan = crate::slots::os_plan().ok();
-        let task = async move {
-            let mut host = O6nHost { exec, plan };
-            dvfs::run::<SOURCES>(knob, hold, &mut host).await;
-        };
-        if let Err(e) = exec.spawn(task) {
-            println!("dvfs: task not spawned ({e:?}), the clock stays at full");
-        }
-    }
+    /// er twaalf, een Pi vier).
+    pub(super) const SOURCES: usize = 17;
 
     /// De tellers voor het beleid: de idle-teller en de status van elk slot
     /// op zijn control-page, en of zijn bewoner nu rekent (het ctx-blok).
-    struct O6nHost {
+    pub(super) struct SlotHost {
         exec: &'static Executor,
         plan: Option<abi::layout::Plan>,
     }
 
-    impl O6nHost {
+    impl SlotHost {
+        /// De tellers van `exec`, met het slot-plan van de OS-core.
+        pub(super) fn new(exec: &'static Executor) -> Self {
+            Self {
+                exec,
+                plan: crate::slots::os_plan().ok(),
+            }
+        }
+
         /// Rekent de bewoner van slot `i` nu (niet geyield)? Op de O6N
         /// idlet een app met een yield (HVC), en zonder deze vraag las elke
         /// slapende app als 100% bezig en zakte de klok nooit (23-09).
@@ -151,7 +114,7 @@ mod hw {
         dev::read64(page.add(off))
     }
 
-    impl Host<SOURCES> for O6nHost {
+    impl Host<SOURCES> for SlotHost {
         fn now(&self) -> u64 {
             self.exec.now()
         }
@@ -196,6 +159,62 @@ mod hw {
 
         fn log(&self, args: core::fmt::Arguments<'_>) {
             println!("{args}");
+        }
+    }
+}
+
+/// De O6N: de SCP-sensoren en de `_CPC`-knop.
+#[cfg(feature = "board-o6n")]
+mod hw {
+    use super::counters::{SOURCES, SlotHost};
+    use cpu::println;
+    use executor::Executor;
+    use vboard::dvfs::{self, SAMPLE_NS};
+
+    pub(super) fn open() {}
+
+    pub(super) fn temp() -> i32 {
+        crate::BOARD.temp_milli_c()
+    }
+
+    fn param(key: &'static str) -> &'static str {
+        fw::bootcfg::first(fw::bootcfg::all(crate::BOARD.config(), key))
+    }
+
+    /// Het klokbeleid: `hopos.clock` (`dvfs`, `max`, `quiet`, `firmware`)
+    /// en `hopos.mhz` (het plafond).
+    pub(super) fn governor(exec: &'static Executor) {
+        let v = param("hopos.clock");
+        let (hold, ok) = dvfs::hold_of(v);
+        if !ok {
+            println!("dvfs: hopos.clock={v:?} is not dvfs, max, quiet or firmware; following load");
+        }
+        let Some(hold) = hold else {
+            println!(
+                "dvfs: hopos.clock=firmware, the boot operating point stays HOPOS_CLOCK_FIRMWARE"
+            );
+            return;
+        };
+        let mhz = param("hopos.mhz").parse::<u32>().ok();
+        let knob = match crate::BOARD.clock_knob(mhz) {
+            Ok(k) => k,
+            Err(e) => {
+                println!("dvfs: {e}, the clock stays where the firmware left it HOPOS_CLOCK_NONE");
+                return;
+            }
+        };
+        println!(
+            "dvfs: {} _CPC domains, policy {hold:?}, cap {}, sample {} ms, window 50 ms, cooldown 30 s HOPOS_CLOCK_UP",
+            knob.domains().len(),
+            mhz.map_or(0, |m| m),
+            SAMPLE_NS / 1_000_000
+        );
+        let task = async move {
+            let mut host = SlotHost::new(exec);
+            dvfs::run::<SOURCES>(knob, hold, &mut host).await;
+        };
+        if let Err(e) = exec.spawn(task) {
+            println!("dvfs: task not spawned ({e:?}), the clock stays at full");
         }
     }
 }
@@ -271,17 +290,16 @@ mod hw {
     }
 }
 
-/// De rest: geen thermometer en geen knop in deze kern. De Pi's hebben
-/// beide achter de mailbox (`vcmail`: `temp`, `set_clock_rate`); die is van
-/// het Pi-spoor, en de haak is een eigen module met deze drie namen.
 /// De Pi's: de SoC-temperatuur via de VideoCore-mailbox
 /// (`board_raspi::temp_millic`, dezelfde tag als de bootregel `vcmail:
-/// 58.713 C`). De klokknop (dvfs via de mailbox) is nog niet geport: de
-/// firmware houdt zijn klok.
+/// 58.713 C`), en de ARM-klok als knop via dezelfde mailbox
+/// (`board_raspi::clock`, Go `StartDVFS`).
 #[cfg(any(feature = "board-rpi4", feature = "board-rpi5"))]
 mod hw {
+    use super::counters::{SOURCES, SlotHost};
     use cpu::println;
     use executor::Executor;
+    use vboard::dvfs::{self, SAMPLE_NS};
 
     pub(super) fn open() {}
 
@@ -291,10 +309,45 @@ mod hw {
         vboard::temp_millic().map_or(0, |t| i32::try_from(t).unwrap_or(0))
     }
 
-    pub(super) fn governor(_exec: &'static Executor) {
+    /// Het klokbeleid: `hopos.clock` (`dvfs`, `max`, `quiet`, `firmware`)
+    /// en `hopos.mhz` (het plafond) uit cmdline.txt, zoals op de O6N.
+    pub(super) fn governor(exec: &'static Executor) {
+        let v = vboard::boot_param("hopos.clock");
+        let (hold, ok) = dvfs::hold_of(v);
+        if !ok {
+            println!("dvfs: hopos.clock={v:?} is not dvfs, max, quiet or firmware; following load");
+        }
+        let Some(hold) = hold else {
+            println!(
+                "dvfs: hopos.clock=firmware, the boot operating point stays HOPOS_CLOCK_FIRMWARE"
+            );
+            return;
+        };
+        let mhz = vboard::boot_param("hopos.mhz").parse::<u32>().ok();
+        let knob = match crate::BOARD.clock_knob(mhz) {
+            Ok(k) => k,
+            Err(e) => {
+                println!("dvfs: {e}, the clock stays where the firmware left it HOPOS_CLOCK_NONE");
+                return;
+            }
+        };
+        let p = knob.plan();
         println!(
-            "dvfs: no clock knob on this board, the firmware keeps its clock HOPOS_CLOCK_NONE"
+            "dvfs: ARM via the mailbox, full {} MHz, quiet {} MHz (firmware min/max {}/{}), policy {hold:?}, cap {}, sample {} ms, window 50 ms, cooldown 30 s HOPOS_CLOCK_UP",
+            p.full_hz / 1_000_000,
+            p.quiet_hz / 1_000_000,
+            p.min_hz / 1_000_000,
+            p.max_hz / 1_000_000,
+            mhz.map_or(0, |m| m),
+            SAMPLE_NS / 1_000_000
         );
+        let task = async move {
+            let mut host = SlotHost::new(exec);
+            dvfs::run::<SOURCES>(knob, hold, &mut host).await;
+        };
+        if let Err(e) = exec.spawn(task) {
+            println!("dvfs: task not spawned ({e:?}), the clock stays at full");
+        }
     }
 }
 

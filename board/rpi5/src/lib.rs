@@ -42,7 +42,7 @@ use driver_pl011::Pl011;
 // De twee xHCI's in de RP1 (usb.rs).
 mod usb;
 
-pub use board_raspi::{DMA, Disk, KERN_RAM, temp_millic};
+pub use board_raspi::{DMA, Disk, KERN_RAM, boot_param, dvfs, temp_millic, watchdog};
 
 /// De debug-UART (PL011, de 3-pins JST-SH-connector; Linux ttyAMA10). De
 /// firmware zet hem op 115200 zodra hij zelf logt (`uart_2ndstage=1`).
@@ -51,6 +51,12 @@ pub const UART10: Pa = Pa(0x10_7D00_1000);
 pub const GIC: Pa = Pa(0x10_7FFF_8000);
 /// De VideoCore-mailbox (DT mailbox@7c013880).
 pub const VCMAIL: Pa = Pa(0x10_7C01_3880);
+/// De RNG200 (DT rng@7d208000; de soc-ranges leggen 0 op 0x10_0000_0000).
+/// Go: `RNG200Base`.
+pub const RNG200: Pa = Pa(0x10_7D20_8000);
+/// Het PM-blok met de watchdog (DT watchdog@7d200000, `brcm,bcm2712-pm`).
+/// Go: de `WatchdogBase` uit `raspi.SetupPlan`.
+pub const PM: Pa = Pa(0x10_7D20_0000);
 /// De PCIe-root-complex van de RP1-link (pcie2).
 pub const PCIE2: Pa = Pa(0x10_0012_0000);
 /// Het gedeelde RESCAL-blok van de PCIe-controllers.
@@ -96,6 +102,8 @@ impl Soc for Bcm2712 {
     const SOC: &'static str = "BCM2712";
     const MAC_FALLBACK: u8 = 0x05;
     const VCMAIL: Pa = VCMAIL;
+    const RNG200: Pa = RNG200;
+    const PM: Pa = PM;
 
     fn uart() -> &'static Pl011 {
         &UART
@@ -471,6 +479,7 @@ __pi_l2_gb0:
         assert!(super::PCIE2.0 >> 30 == 64 && super::MIP.0 >> 30 == 64);
         assert!(super::UART10.0 >> 30 == 65 && super::GIC.0 >> 30 == 65);
         assert!(super::VCMAIL.0 >> 30 == 65);
+        assert!(super::RNG200.0 >> 30 == 65 && super::PM.0 >> 30 == 65);
         assert!(super::RP1 >> 30 == 124);
     };
 
