@@ -210,12 +210,13 @@ De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
       `sw(timer=)` loopt mee met elke handshake. Fix dbc522f (de deur van
       de switch om de slaper): QEMU rtt 2238 → 115 µs, pull 6,9 → 62,9
       MB/s; op ijzer (stempel H) Pi 4 rtt 1476 → 133 µs, Radxa 1984 → 365
-      µs. Nog te meten: pull app naar app op ijzer, de O6N (koude boot met
-      de nieuwe kern nodig: zijn Hop kan geen flip plaatsen tot de
-      kern-fix voor de bundelpartitie erop staat).
-- [ ] **App-opslag O6N** (1 MiB-calls): schrijven 197, lezen 93 MB/s (Go 557
-      tot 625 / 727 tot 797); alleen transport kern naar app 300 MB/s; een
-      4 KiB-read 1,1 ms. Eerst de switch-timer, dan opnieuw meten.
+      µs, O6N 1068 → 53 µs (Go 156 tot 201: nu sneller dan Go). Nog te
+      meten: pull app naar app op ijzer. Agent bezig met de idle-wekken
+      (app-pomp 1 kHz, OS-core 900/s).
+- [ ] **App-opslag O6N** (1 MiB-calls): na de deur (H) schrijven 414, lezen
+      85 MB/s (Go 557 tot 625 / 727 tot 797); het leespad is de rest (was
+      93, dus de deur hielp lezen niet). Agent bezig (system-API fs-ops,
+      hopfs, NVMe-voltooiing).
 - [ ] **NAT-tabel vol**: 512 flows per slot (`HOPOS_MASQ_SLOT_FULL`), dan
       valt een SYN en kost 1 s. Oorzaak: een inbound RST liet de flow 300 s
       staan zonder hem gesloten te tellen. Fix a102e51 (RST = gesloten in
