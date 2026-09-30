@@ -15,7 +15,7 @@ of faalt, en een streep waar het bewust niet komt. Stand 30-09-2026, avond.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Boot, EL2, kooi, zelftest | ✓ | ✓ | ✓ (koud: SError bij de VL805; fix d0b6bd3 wacht op een koude boot) | ✓ | ○ | ✓ VHE, kick via SGI 1 (`kick=(Ipi, 0 us)`, stempel G) | ✓ kmutil-boot, EL2; ✗ kooi: SError-storm na de AIC, preflight rood | ○ |
 | Hop als bewoner, welcome door de DNAT | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ○ ingebakken (20:45), nog niet gezien | ○ |
-| Kern-flip, warm | ✓ | ✗ sterft na de landing (F en H, 3x); de nieuwe kaart (H, met de zwarte doos) ligt in target/ | ✓ (5x, gen 3 op H) | ✓ (4x, gen 2 op H) | ○ | ✓ gen 2 op H (gui-bundel; de media-bundel wacht op de kern-fix de61b4b via de volgende stick) | – (geen CPU_OFF) | – |
+| Kern-flip, warm | ✓ | ✗ sterft na de landing (F en H, 3x); de nieuwe kaart (H, met de zwarte doos) ligt in target/ | ✓ (6x, gen 4 op I) | ✓ (5x, gen 3 op I) | ○ | ✓ gen 2 op H (gui-bundel); I geweigerd door de H-kern (bundelpartitie 8 KiB te krap, fix de61b4b zit in de I-stick): koude boot | – (geen CPU_OFF) | – |
 | NIC met interrupt | ✓ | ✓ MSI-X via de MIP | – (GENET gepold, zoals Go) | ✓ SPI 64 | – (igb gepold, bewust) | ✓ RTL8125B, MSI-X via de ITS (LPI 8192) | ✓ tg3 link + DHCP (gepold); ✗ doof daarna | ○ (dwmac) |
 | Off-link door de NAT, SNTP | ✓ | ✓ | ✓ | ○ | ○ | ○ | ○ | ○ |
 | Watchdog gewapend en geaaid | – | ✓ PM (12 s) | ✓ PM | ✓ DW-WDT (89 s) | ○ SBSA | ✓ SBSA (8,5 s) | ○ | ○ DW-WDT |
@@ -28,7 +28,7 @@ of faalt, en een streep waar het bewust niet komt. Stand 30-09-2026, avond.
 | Opslag (hopfs, volumes, OP_SYNC) | ✓ virtio-blk | – (bewust geen NVMe) | – | – (stateless, alles in het geheugen) | ○ NVMe | ✓ NVMe Lexar 4 TB, hopfs hersteld (generatie 3456) | ✓ ANS NVMe, hopfs hersteld (395 GB) | – |
 | Console op 5555 | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ○ luistert, onbereikbaar (doof na DHCP) | ○ |
 | Hardwaredecoder (media-smaak) | – | – | – | – | – | ✓ Linlon V8, 85,7 fps 4K P010 via de grant; nu tijdelijk weg (gui-flip H) tot de koude boot | – | – |
-| Kaart of stick klaar in `target/` | – | ✓ 17:47 | ✓ 17:47 | ✓ 14:41 (zonder 5555) | ✓ 18:12 | ✓ 21:29 stempel G (nieuwe Hop) | ✓ 20:45 (Hop ingebakken) | ✗ donor-FIP |
+| Kaart of stick klaar in `target/` | – | ✓ 22:37 (I) | ✓ 22:37 (I) | ✓ 22:38 (I, gepatchte Hop) | ✓ 18:12 | ✓ 22:38 stempel I (kern-fix bundelpartitie, verse Hop, efirng) | ✓ 20:45 (Hop ingebakken) | ✗ donor-FIP |
 
 ## De nodes, één voor één
 
