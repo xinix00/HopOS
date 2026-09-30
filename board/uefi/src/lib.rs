@@ -805,6 +805,29 @@ pub fn map_device(pa: u64, size: u64) -> bool {
     slots::map_device(pa, size)
 }
 
+/// De bron "efi-rng" voor de DRBG: het zaad dat de stub uit het
+/// EFI_RNG_PROTOCOL haalde, één keer (de firmware is na ExitBootServices
+/// weg). De DRBG vraagt bij `init` 48 bytes en bij een herzaai 24; na de
+/// 64 is de bron op en houdt de DRBG zijn staat (drbg.rs `reseed`).
+fn efi_fill(dst: &mut [u8]) -> cpu::trng::Result<cpu::trng::Kind> {
+    const NAME: &str = "efi-rng";
+    let used = EFI_USED.load(Relaxed);
+    let len = facts::EFI_SEED_LEN.load(Relaxed);
+    if used + dst.len() > len {
+        return Err(cpu::trng::Error::Exhausted(cpu::trng::Kind::Soc(NAME)));
+    }
+    for (i, b) in dst.iter_mut().enumerate() {
+        let at = used + i;
+        let w = facts::EFI_SEED.get(at / 8).map_or(0, |w| w.load(Relaxed));
+        *b = w.to_le_bytes()[at % 8];
+    }
+    EFI_USED.store(used + dst.len(), Relaxed);
+    Ok(cpu::trng::Kind::Soc(NAME))
+}
+
+/// Hoeveel bytes van het EFI-zaad al gebruikt zijn.
+static EFI_USED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -858,26 +881,3 @@ mod tests {
         assert!(!is_16550(0x03) && !is_16550(0x0e));
     }
 }
-
-/// De bron "efi-rng" voor de DRBG: het zaad dat de stub uit het
-/// EFI_RNG_PROTOCOL haalde, één keer (de firmware is na ExitBootServices
-/// weg). De DRBG vraagt bij `init` 48 bytes en bij een herzaai 24; na de
-/// 64 is de bron op en houdt de DRBG zijn staat (drbg.rs `reseed`).
-fn efi_fill(dst: &mut [u8]) -> cpu::trng::Result<cpu::trng::Kind> {
-    const NAME: &str = "efi-rng";
-    let used = EFI_USED.load(Relaxed);
-    let len = facts::EFI_SEED_LEN.load(Relaxed);
-    if used + dst.len() > len {
-        return Err(cpu::trng::Error::Exhausted(cpu::trng::Kind::Soc(NAME)));
-    }
-    for (i, b) in dst.iter_mut().enumerate() {
-        let at = used + i;
-        let w = facts::EFI_SEED.get(at / 8).map_or(0, |w| w.load(Relaxed));
-        *b = w.to_le_bytes()[at % 8];
-    }
-    EFI_USED.store(used + dst.len(), Relaxed);
-    Ok(cpu::trng::Kind::Soc(NAME))
-}
-
-/// Hoeveel bytes van het EFI-zaad al gebruikt zijn.
-static EFI_USED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
