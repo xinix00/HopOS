@@ -119,6 +119,24 @@ impl core::fmt::Display for PortList<'_> {
     }
 }
 
+/// De volumes van een start als één regel: `/data -> /volumes/demo`, met
+/// een komma ertussen; een pad dat geen UTF-8 is, staat er als `?`.
+struct MountList<'a>(&'a [Mount]);
+
+impl core::fmt::Display for MountList<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for (i, m) in self.0.iter().enumerate() {
+            if i > 0 {
+                f.write_str(", ")?;
+            }
+            let local = core::str::from_utf8(&m.local).unwrap_or("?");
+            let shared = core::str::from_utf8(&m.shared).unwrap_or("?");
+            write!(f, "{local} -> {shared}")?;
+        }
+        Ok(())
+    }
+}
+
 /// Eén volume: `{local, shared}`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Mount {
@@ -1003,6 +1021,16 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             }
             None => None,
         };
+        // Eén regel per levensduur met volumes: het bewijs dat de jobspec tot
+        // in de tabel van de hopfs-actor kwam (een start zonder volumes
+        // zwijgt, zoals een start zonder poorten).
+        if let Some(m) = mounts.as_deref().filter(|m| !m.is_empty()) {
+            self.log.log(format_args!(
+                "slot {slot}: {} volume(s) mounted: {} HOPOS_SLOT_MOUNTS",
+                m.len(),
+                MountList(m)
+            ));
+        }
         self.svc.set_mounts(slot, mounts);
         if let Some(ctl) = self.svc.ctl(slot) {
             let _ = ctl.stop.take();
@@ -2372,6 +2400,29 @@ pub(crate) mod tests {
         let g = block_on(b.claim(join)).unwrap();
         assert_eq!(b.places.placement_of(s(5)).unwrap().0.get(), 2);
         block_on(b.arm(g, 0)).unwrap();
+    }
+
+    /// De volumes van een bewoner gaan mee over de flip: de snapshot draagt
+    /// ze, en de nieuwe kern zet ze bij de adoptie terug in de tabel van de
+    /// hopfs-actor, met dezelfde regel als bij een start.
+    #[test]
+    fn volumes_travel_through_the_flip() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Exit, 256, 3);
+        let vol = Mount {
+            local: b"/data".to_vec(),
+            shared: b"/volumes/demo".to_vec(),
+        };
+        start_with_mounts(&mut a, 2, 8, 1, vec![vol.clone()]).unwrap();
+        assert!(con.saw("slot 2: 1 volume(s) mounted: /data -> /volumes/demo HOPOS_SLOT_MOUNTS"));
+        let states = a.snapshot().unwrap();
+        assert_eq!(states[0].mounts, core::slice::from_ref(&vol));
+
+        let (svc2, con2) = (Servicers::new(), FakeConsole::default());
+        let mut b = actor(&svc2, &con2, Obey::Exit, 256, 3);
+        b.adopt(&states).unwrap();
+        assert_eq!(svc2.with_mounts(s(2), <[Mount]>::to_vec), Some(vec![vol]));
+        assert!(con2.saw("slot 2: 1 volume(s) mounted: /data -> /volumes/demo HOPOS_SLOT_MOUNTS"));
     }
 
     /// De arena van de videocodec (docs/media.md, haak 2): een blok buiten

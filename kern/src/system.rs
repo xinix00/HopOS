@@ -1641,6 +1641,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         let mut spec = StartSpec::new(slot, req.memory_limit, placement);
         spec.job = job;
         spec.ports = start_ports(&req)?;
+        spec.mounts = start_mounts(&req)?;
         let grant = match slots::call(self.inbox, reply, Request::Claim(spec)).await? {
             Response::Granted(g) => g,
             Response::Failed(e) => return Err(e.into()),
@@ -1908,6 +1909,40 @@ fn start_ports(req: &StartReq<'_>) -> Result<Vec<u16>> {
     Ok(out)
 }
 
+/// De volumes van een start als genormaliseerde mount-tabel
+/// ([`rpc::mount_table`]: `/a/b`-vorm, langste `local` eerst). De ABI leent
+/// de bytes en toetste alleen de vorm; hier vallen de weigeringen die de
+/// toegangsgrens zijn (`/` als volume of als pad in de app, iets onder
+/// [`rpc::TASKS_DIR`], `..`, een dubbel lokaal pad), vóór er iets geclaimd
+/// is. Een pad dat na het normaliseren langer is dan de flip kan
+/// overdragen ([`slots::MAX_FLIP_PATH`]), wordt hier al geweigerd: anders
+/// zou een latere flip weigeren om iets dat bij de start vaststond.
+fn start_mounts(req: &StartReq<'_>) -> Result<Vec<slots::Mount>> {
+    const _: () = assert!(abi::systemapi::MAX_START_MOUNTS <= slots::MAX_FLIP_MOUNTS);
+    let mut mounts: Vec<slots::Mount> = Vec::new();
+    for m in abi::systemapi::Mounts::new(req.mounts) {
+        let m = m.map_err(|_| Error::BadPath)?;
+        slots::try_push(
+            &mut mounts,
+            slots::Mount {
+                local: try_vec(m.local)?,
+                shared: try_vec(m.shared)?,
+            },
+        )?;
+    }
+    let table = rpc::mount_table(&mounts)?;
+    if let Some(m) = table
+        .iter()
+        .find(|m| m.local.len().max(m.shared.len()) > slots::MAX_FLIP_PATH)
+    {
+        return Err(Error::TooLarge {
+            len: m.local.len().max(m.shared.len()),
+            max: slots::MAX_FLIP_PATH,
+        });
+    }
+    Ok(table)
+}
+
 fn placement(req: &StartReq<'_>) -> Result<Placement> {
     use abi::systemapi::CoreClass as Wire;
     let group = if req.group.is_empty() {
@@ -2090,6 +2125,75 @@ mod tests {
         v
     }
 
+    #[test]
+    fn start_mounts_validate_shared_roots_and_duplicate_local_paths() {
+        use abi::systemapi::{MountRef, mount_blob};
+        let mut bytes = [0; 256];
+        let len = mount_blob(
+            &[MountRef {
+                local: b"/media",
+                shared: b"/volumes/media",
+            }],
+            &mut bytes,
+        )
+        .unwrap();
+        let req = StartReq {
+            mounts: &bytes[..len],
+            ..Default::default()
+        };
+        assert_eq!(
+            start_mounts(&req).unwrap(),
+            vec![slots::Mount {
+                local: b"/media".to_vec(),
+                shared: b"/volumes/media".to_vec()
+            }]
+        );
+        for pair in [
+            MountRef {
+                local: b"/",
+                shared: b"/volumes/a",
+            },
+            MountRef {
+                local: b"/data",
+                shared: b"/",
+            },
+            MountRef {
+                local: b"/data",
+                shared: b"/.tasks/slot1",
+            },
+        ] {
+            let len = mount_blob(&[pair], &mut bytes).unwrap();
+            assert!(
+                start_mounts(&StartReq {
+                    mounts: &bytes[..len],
+                    ..Default::default()
+                })
+                .is_err()
+            );
+        }
+        let len = mount_blob(
+            &[
+                MountRef {
+                    local: b"/data",
+                    shared: b"/a",
+                },
+                MountRef {
+                    local: b"/data/",
+                    shared: b"/b",
+                },
+            ],
+            &mut bytes,
+        )
+        .unwrap();
+        assert!(
+            start_mounts(&StartReq {
+                mounts: &bytes[..len],
+                ..Default::default()
+            })
+            .is_err()
+        );
+    }
+
     fn start_call(seq: u32, image_size: u64, env: &[u8]) -> Vec<u8> {
         start_call_ports(seq, image_size, env, &[])
     }
@@ -2106,8 +2210,33 @@ mod tests {
             env,
             ports,
             job: b"demo",
+            mounts: &[],
         };
         let mut v = vec![0u8; 512];
+        let n = r.encode(&mut v, seq).unwrap();
+        v.truncate(n);
+        v
+    }
+
+    /// Een START_SLOT met volumes (`local`, `shared`) in de draadvorm.
+    fn start_call_mounts(seq: u32, image_size: u64, mounts: &[(&[u8], &[u8])]) -> Vec<u8> {
+        use abi::systemapi::{MountRef, mount_blob};
+        let refs: Vec<MountRef<'_>> = mounts
+            .iter()
+            .map(|&(local, shared)| MountRef { local, shared })
+            .collect();
+        let mut blob = vec![0u8; 1024];
+        let len = mount_blob(&refs, &mut blob).unwrap();
+        let r = StartReq {
+            memory_limit: 8 * MIB,
+            image_size,
+            cores: 1,
+            pool_cores: 1,
+            job: b"demo",
+            mounts: &blob[..len],
+            ..Default::default()
+        };
+        let mut v = vec![0u8; 2048];
         let n = r.encode(&mut v, seq).unwrap();
         v.truncate(n);
         v
@@ -2554,6 +2683,70 @@ mod tests {
         assert_eq!(info.slot_state(), Some(SlotState::Empty));
     }
 
+    /// Een start met volumes: van de draad tot in de mount-tabel van de
+    /// hopfs-actor, met één regel. Een volume op `/`, onder `/.tasks` of met
+    /// `..` wordt geweigerd vóór de claim: het slot blijft leeg.
+    #[test]
+    fn a_start_with_volumes_reaches_the_mount_table() {
+        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
+        let tee = LogTee::new(&con, &logs);
+        let mut a = node(&svc, &con);
+        let reply = Reply::new();
+        let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let img = elf(u64::from(abi::ABI_VERSION));
+        let mut p = Pipe::new(
+            NET | 2,
+            &[
+                start_call_mounts(1, 16, &[(b"/data", b"/.tasks/slot2")]),
+                start_call_mounts(2, 16, &[(b"/", b"/volumes/a")]),
+                start_call_mounts(3, 16, &[(b"/data", b"/")]),
+                start_call_mounts(4, 16, &[(b"/data", b"/volumes/../.tasks")]),
+                start_call_mounts(
+                    5,
+                    img.len() as u64,
+                    &[(b"data/", b"/volumes/demo"), (b"/media", b"/volumes/media")],
+                ),
+                enc(&stream_req(6, 3, 0, &img)),
+            ],
+        );
+        let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
+        let _ = drive(
+            &sys, &mut a, &inbox, &reply, &mut p, &mut mem, &hooks, &tee, None,
+        );
+        let res = results(&p.tx);
+        for r in &res[..4] {
+            assert_ne!(
+                r.1,
+                STATUS_OK,
+                "{:?}",
+                std::string::String::from_utf8_lossy(&r.4)
+            );
+        }
+        assert_eq!(res[0].1, STATUS_DENIED, "a volume under /.tasks");
+        assert_eq!(
+            (res[4].1, res[4].3),
+            (STATUS_OK, 3),
+            "the kern picks slot 3"
+        );
+        assert_eq!(stream_state(&res[5]), StreamState::Placed, "{:?}", res[5]);
+        let m = |l: &[u8], sh: &[u8]| slots::Mount {
+            local: l.to_vec(),
+            shared: sh.to_vec(),
+        };
+        // Genormaliseerd, langste `local` eerst.
+        assert_eq!(
+            svc.with_mounts(s(3), <[slots::Mount]>::to_vec),
+            Some(vec![
+                m(b"/media", b"/volumes/media"),
+                m(b"/data", b"/volumes/demo")
+            ])
+        );
+        assert!(con.saw(
+            "slot 3: 2 volume(s) mounted: /media -> /volumes/media, /data -> /volumes/demo HOPOS_SLOT_MOUNTS"
+        ));
+    }
+
     /// Een kapot image, een verkeerde ABI-stempel, een verkeerde offset en
     /// een stop halverwege: telkens ruimt de kern het slot zelf op.
     #[test]
@@ -2734,6 +2927,7 @@ mod tests {
                 env: b"",
                 ports: &[],
                 job: FLIP_BUNDLE_JOB,
+                mounts: &[],
             };
             let mut v = vec![0u8; 512];
             let n = r.encode(&mut v, 1).unwrap();

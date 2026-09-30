@@ -69,6 +69,9 @@ pub const MAGIC: u32 = 0x5350_4f48;
 const _: () = assert!(MAX_PAYLOAD <= u32::MAX as usize);
 const _: () = assert!(u32::from_le_bytes(*b"HOPS") == MAGIC);
 
+mod mounts;
+pub use mounts::{MAX_MOUNT_BYTES, MAX_MOUNT_PATH, MAX_START_MOUNTS, MountRef, Mounts, mount_blob};
+
 /// De soort van een frame.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 #[repr(u8)]
@@ -208,7 +211,8 @@ impl HeaderReader {
 #[repr(u8)]
 pub enum PrivOp {
     /// Reserveer een slot: `path` de jobnaam, `data` een [`StartHead`] plus
-    /// de sharegroup-naam en de env-blob ([`StartReq`]). Het antwoord: `size`
+    /// de sharegroup-naam, de env-blob, de poorten en de volumes
+    /// ([`StartReq`]). Het antwoord: `size`
     /// is het slot dat de kern koos. Niet idempotent.
     StartSlot = 0x40,
     /// Stroom een brok image: `off` het slot, `n` de offset van de eerste
@@ -325,12 +329,16 @@ impl CoreClass {
 /// Het vaste deel van een [`PrivOp::StartSlot`]-request, vooraan in `data`
 /// (little-endian). Daarachter: `group_len` bytes sharegroup-naam, dan
 /// `env_len` bytes env-blob (`key=val\n`), dan `port_count` poorten van elk
-/// [`PORT_LEN`] bytes (`u16` little-endian).
+/// [`PORT_LEN`] bytes (`u16` little-endian), dan `mounts_len` bytes volumes
+/// ([`mount_blob`]).
 ///
 /// `port_count` staat op de plek die tot alpha.7 `reserved` heette en 0
 /// was: een Hop van vóór de poorten stuurt dus nul poorten, en dezelfde
-/// bytes betekenen hetzelfde. Een kern van vóór de poorten weigert een start
-/// mét poorten luid (de lengte klopt niet), nooit stil zonder publicatie.
+/// bytes betekenen hetzelfde. `mounts_len` staat sinds 30-09 (alpha.11) op
+/// het tweede gereserveerde woord, met dezelfde afspraak: nul volumes zijn
+/// de bytes van alpha.10. Een kern van vóór een veld weigert een start die
+/// het gebruikt luid (de lengte van `data` klopt dan niet), nooit stil
+/// zonder de poorten of zonder het volume.
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 pub struct StartHead {
@@ -352,8 +360,9 @@ pub struct StartHead {
     pub port_count: u16,
     /// De lengte van de env-blob.
     pub env_len: u32,
-    /// Gereserveerd, 0.
-    pub reserved2: u32,
+    /// De lengte van de volume-blob achter de poorten, hoogstens
+    /// [`MAX_MOUNT_BYTES`]; tot alpha.10 gereserveerd en 0.
+    pub mounts_len: u32,
 }
 
 /// De lengte van [`StartHead`] op de draad.
@@ -383,7 +392,7 @@ field!(StartHead, core_class, 20);
 field!(StartHead, group_len, 21);
 field!(StartHead, port_count, 22);
 field!(StartHead, env_len, 24);
-field!(StartHead, reserved2, 28);
+field!(StartHead, mounts_len, 28);
 
 /// Een [`PrivOp::StartSlot`]-request, met de variabele delen geleend.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
@@ -407,6 +416,10 @@ pub struct StartReq<'a> {
     /// [`port_blob`] schrijft ze). De kern zet elke poort van de uplink door
     /// naar dezelfde poort in het slot, tcp en udp.
     pub ports: &'a [u8],
+    /// De volumes zoals ze op de draad staan ([`mount_blob`] schrijft ze,
+    /// [`Mounts`] leest ze); leeg is het formaat van alpha.10. De kern
+    /// normaliseert en toetst de paden: dat is de toegangsgrens.
+    pub mounts: &'a [u8],
     /// De jobnaam (de store-naamruimte).
     pub job: &'a [u8],
 }
@@ -472,6 +485,7 @@ impl<'a> StartReq<'a> {
             max: u32::MAX as usize,
         })?;
         let port_count = port_count(self.ports)?;
+        mounts::validate(self.mounts)?;
         let req = crate::hopabi::Req {
             op: PrivOp::StartSlot.op(),
             seq,
@@ -479,7 +493,12 @@ impl<'a> StartReq<'a> {
             ..Default::default()
         };
         let at = crate::hopabi::encode_req(dst, &req)?;
-        let need = at + START_HEAD_LEN + self.group.len() + self.env.len() + self.ports.len();
+        let need = at
+            + START_HEAD_LEN
+            + self.group.len()
+            + self.env.len()
+            + self.ports.len()
+            + self.mounts.len();
         let len = dst.len();
         let out = dst.get_mut(at..need).ok_or(short(len, need))?;
         let (head, rest) = out.split_at_mut(START_HEAD_LEN);
@@ -491,12 +510,15 @@ impl<'a> StartReq<'a> {
         head[21] = group_len;
         head[22..24].copy_from_slice(&port_count.to_le_bytes());
         head[24..28].copy_from_slice(&env_len.to_le_bytes());
-        head[28..32].fill(0);
+        // Past: `validate` begrensde de blob op MAX_MOUNT_BYTES (< u32::MAX).
+        head[28..32].copy_from_slice(&(self.mounts.len() as u32).to_le_bytes());
         let (group, rest) = rest.split_at_mut(self.group.len());
-        let (env, ports) = rest.split_at_mut(self.env.len());
+        let (env, rest) = rest.split_at_mut(self.env.len());
+        let (ports, mounts) = rest.split_at_mut(self.ports.len());
         group.copy_from_slice(self.group);
         env.copy_from_slice(self.env);
         ports.copy_from_slice(self.ports);
+        mounts.copy_from_slice(self.mounts);
         Ok(need)
     }
 
@@ -513,16 +535,20 @@ impl<'a> StartReq<'a> {
         let group_len = usize::from(head[21]);
         let ports_len = usize::from(le16(head, 22)).saturating_mul(PORT_LEN);
         let env_len = le32(head, 24) as usize;
+        let mounts_len = le32(head, 28) as usize;
         let need = START_HEAD_LEN
             .saturating_add(group_len)
             .saturating_add(env_len)
-            .saturating_add(ports_len);
+            .saturating_add(ports_len)
+            .saturating_add(mounts_len);
         if d.len() != need {
             return Err(short(d.len(), need));
         }
         let (group, rest) = d[START_HEAD_LEN..].split_at(group_len);
-        let (env, ports) = rest.split_at(env_len);
+        let (env, rest) = rest.split_at(env_len);
+        let (ports, mounts) = rest.split_at(ports_len);
         port_count(ports)?;
+        mounts::validate(mounts)?;
         Ok(StartReq {
             memory_limit: le64(head, 0),
             image_size: le64(head, 8),
@@ -532,6 +558,7 @@ impl<'a> StartReq<'a> {
             group,
             env,
             ports,
+            mounts,
             job: r.path,
         })
     }
@@ -868,6 +895,7 @@ mod tests {
             env: b"A=1\nB=2\n",
             ports: &[80, 0, 0x90, 0x1f],
             job: b"demo",
+            mounts: &[],
         };
         let mut buf = [0u8; 256];
         let n = s.encode(&mut buf, 7).unwrap();

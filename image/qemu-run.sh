@@ -46,6 +46,7 @@
 #                                    is een lege hopfs; een bestaande houdt de
 #                                    volumes over een herstart (stateful).
 #   WEBPORT=8081 image/qemu-run.sh   een vierde hostfwd: 127.0.0.1:$WEBPORT
+#   DNSPORT=15353 image/qemu-run.sh  een UDP-hostfwd naar :5353 (hopdns)
 #                                    naar poort 80 van de gast, de poort die
 #                                    een jobspec met "ports":{"http":80}
 #                                    publiceert (de kern zet hem door naar
@@ -201,6 +202,11 @@ FWD="hostfwd=tcp:127.0.0.1:${SYSPORT}-:10100"
 FWD="$FWD,hostfwd=tcp:127.0.0.1:${AGENTPORT}-:8080,hostfwd=tcp:127.0.0.1:${LEADERPORT}-:9080"
 if [ -n "${WEBPORT:-}" ]; then
 	FWD="$FWD,hostfwd=tcp:127.0.0.1:${WEBPORT}-:80"
+fi
+# DNSPORT=15353: een UDP-hostfwd naar :5353 van de gast, voor hopdns in een
+# slot (de kern publiceert tcp én udp; slirp doet UDP alleen met deze knop).
+if [ -n "${DNSPORT:-}" ]; then
+	FWD="$FWD,hostfwd=udp:127.0.0.1:${DNSPORT}-:5353"
 fi
 # shellcheck disable=SC2086
 set -- -M virt,gic-version=3,highmem-ecam=off,virtualization=on \

@@ -35,6 +35,14 @@
 //!   stack (een reset, een EOF) is rood, er wordt nooit opnieuw verbonden.
 //!   Alleen deze toets draait dan: de rest bewijzen de andere rollen.
 //!
+//! En één toets naast de rollen: met `VOLUME=<pad>` in de env (een pad
+//! onder een volume van de jobspec, `"volumes":{"/volumes/demo":"/data"}`)
+//! bewijst `HOPOS_APPSPIKE_VOLUME` dat een volume een levensduur overleeft
+//! en de eigen root niet. De eerste levensduur vindt niets en schrijft
+//! (`wrote`); de volgende (Hop herstart de service na de exit) vindt het
+//! bestand terug met dezelfde bytes (`found`), in een root die weer leeg
+//! is.
+//!
 //! Canoniek gelinkt (applib/link.ld): de stage-2-map van de kern legt het
 //! image op de partitie van elk slot, en de kern patcht RamStart en RamSize
 //! bij plaatsing.
@@ -109,8 +117,11 @@ async fn spike(app: &'static App) {
     frame(app, &mut s).await;
     timer(&mut s).await;
     heartbeat(app, &mut s).await;
-    let client = network(app, &mut s).await;
-    files(client, &mut s).await;
+    let mut client = network(app, &mut s).await;
+    files(client.as_mut(), &mut s).await;
+    if let Some(path) = app.env("VOLUME") {
+        volume(path, client.as_mut(), &mut s).await;
+    }
     heap(app, &mut s);
 
     log!("HOPOS_APPSPIKE_DONE pass={} fail={}", s.pass, s.fail);
@@ -624,13 +635,13 @@ const FS_DATA: &[u8] = b"hallo van appspike, via de system-API naar hopfs op de 
 /// write), `stat`, teruglezen, de lijst van de eigen root en weer weg. De
 /// root is bij elke start leeg (de kern veegt hem), dus de lijst is precies
 /// dit ene bestand.
-async fn files(client: Option<appnet::SystemClient>, s: &mut Score) {
-    let Some(mut c) = client else {
+async fn files(client: Option<&mut appnet::SystemClient>, s: &mut Score) {
+    let Some(c) = client else {
         s.check("FS", false, format_args!("no system connection"));
         return;
     };
     let t0 = clock::now_ns();
-    let r = fs_round(&mut c).await;
+    let r = fs_round(c).await;
     let us = clock::now_ns().wrapping_sub(t0) / 1000;
     match r {
         Ok((size, names)) => s.check(
@@ -699,6 +710,66 @@ async fn fs_round(c: &mut appnet::SystemClient) -> Result<(u64, usize), Why> {
         Err(sys::Error::NotFound { .. }) => Ok((size, names)),
         Ok(n) => Err(Why::num("still there after remove, size", n)),
         Err(e) => Err(Why::sys("stat after remove", e)),
+    }
+}
+
+/// Wat de VOLUME-toets in het volume zet.
+const VOLUME_DATA: &[u8] = b"appspike was here: this file lives in a volume, not in the root\n";
+
+/// Het bestand in de eigen root dat een nieuwe levensduur NIET mag zien.
+const ROOT_MARK: &str = "/life.txt";
+
+/// De VOLUME-toets: de eigen root is leeg (een vorige levensduur liet er
+/// [`ROOT_MARK`] achter), en het volume houdt `path` over een herstart.
+async fn volume(path: &str, client: Option<&mut appnet::SystemClient>, s: &mut Score) {
+    let Some(c) = client else {
+        s.check("VOLUME", false, format_args!("no system connection"));
+        return;
+    };
+    match volume_round(c, path).await {
+        Ok((what, n)) => s.check(
+            "VOLUME",
+            true,
+            format_args!("{what} path={path} bytes={n} root=fresh"),
+        ),
+        Err(why) => s.check("VOLUME", false, format_args!("path={path}: {why}")),
+    }
+}
+
+/// Eén ronde: `("wrote" | "found", bytes)`, of wat er misging.
+async fn volume_round(
+    c: &mut appnet::SystemClient,
+    path: &str,
+) -> Result<(&'static str, usize), Why> {
+    // De root eerst: wat een vorige levensduur daar schreef, is weg.
+    match c.stat(ROOT_MARK).await {
+        Err(sys::Error::NotFound { .. }) => {}
+        Ok(n) => return Err(Why::num("the root kept a file of a previous life, size", n)),
+        Err(e) => return Err(Why::sys("stat root mark", e)),
+    }
+    c.write_file(ROOT_MARK, b"1")
+        .await
+        .map_err(|e| Why::sys("write root mark", e))?;
+    match c.stat(path).await {
+        Err(sys::Error::NotFound { .. }) => {
+            c.write_file(path, VOLUME_DATA)
+                .await
+                .map_err(|e| Why::sys("write", e))?;
+            Ok(("wrote", VOLUME_DATA.len()))
+        }
+        Ok(size) if size == VOLUME_DATA.len() as u64 => {
+            let mut buf = [0u8; 128];
+            let n = c
+                .read_into(path, 0, &mut buf)
+                .await
+                .map_err(|e| Why::sys("read_into", e))?;
+            if buf.get(..n) != Some(VOLUME_DATA) {
+                return Err(Why::num("found other bytes, n", n as u64));
+            }
+            Ok(("found", n))
+        }
+        Ok(size) => Err(Why::num("found a file of the wrong size", size)),
+        Err(e) => Err(Why::sys("stat", e)),
     }
 }
 
