@@ -59,19 +59,22 @@ pub(crate) fn start(exec: &'static Executor) {
     hw::governor(exec);
 }
 
-/// Elke seconde: meten, bewaren, en op de control-page van Hop zetten; en
-/// op dezelfde tik vers zaad op de page van elke kooi (seed.rs), zodat een
-/// app zonder verbinding kan herzaaien.
+/// Elke seconde: meten, bewaren, en op de control-page van elke kooi
+/// zetten (niet alleen die van Hop: vitals in slot 2 las 0, 30-09); en op
+/// dezelfde tik vers zaad op de page van elke kooi (seed.rs), zodat een app
+/// zonder verbinding kan herzaaien.
 async fn thermal(exec: &'static Executor) {
     loop {
         crate::seed::refresh();
         let t = hw::temp();
         TEMP.store(t, Relaxed);
-        if let Some(page) = crate::clock::ctrl_page(crate::slots::HOP_SLOT) {
-            let at = page.add(abi::hopabi::CTRL_TEMP);
-            dev::write64(at, i64::from(t) as u64);
-            // Hop leest zijn page met de MMU uit: naar DRAM ermee.
-            dev::push(at, 8);
+        for i in 0..=kern::SLOT_CAP {
+            if let Some(page) = crate::clock::ctrl_page(i) {
+                let at = page.add(abi::hopabi::CTRL_TEMP);
+                dev::write64(at, i64::from(t) as u64);
+                // Een bewoner leest zijn page ook met de MMU uit: naar DRAM.
+                dev::push(at, 8);
+            }
         }
         exec.after(Duration::from_secs(1)).await;
     }

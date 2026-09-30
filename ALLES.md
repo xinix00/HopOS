@@ -13,10 +13,10 @@ of faalt, en een streep waar het bewust niet komt. Stand 30-09-2026, avond.
 
 | | QEMU virt | Pi 5 | Pi 4 | Radxa | Altra | O6N | M4 | LicheeRV |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Boot, EL2, kooi, zelftest | ✓ | ✓ | ✓ (zelftest koud: SError bij de VL805) | ✓ | ○ | ✓ VHE (kick via de SGI komt niet aan, de timer vangt hem) | ○ | ○ |
-| Hop als bewoner, welcome door de DNAT | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ○ | ○ |
+| Boot, EL2, kooi, zelftest | ✓ | ✓ | ✓ (zelftest koud: SError bij de VL805) | ✓ | ○ | ✓ VHE (kick via de SGI komt niet aan, de timer vangt hem) | ✓ kmutil-boot, EL2; ✗ kooi: SError-storm na de AIC, preflight rood | ○ |
+| Hop als bewoner, welcome door de DNAT | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ○ ingebakken (20:45), nog niet gezien | ○ |
 | Kern-flip, warm | ✓ | ✓ (ook uit de koude gui-kern, sinds de xHCI-stop vóór de sprong) | ✓ (3x) | ✓ (2x) | ○ | ○ | – (geen CPU_OFF) | – |
-| NIC met interrupt | ✓ | ✓ MSI-X via de MIP | – (GENET gepold, zoals Go) | ✓ SPI 64 | – (igb gepold, bewust) | ✓ RTL8125B, MSI-X via de ITS (LPI 8192) | ○ (tg3, AIC) | ○ (dwmac) |
+| NIC met interrupt | ✓ | ✓ MSI-X via de MIP | – (GENET gepold, zoals Go) | ✓ SPI 64 | – (igb gepold, bewust) | ✓ RTL8125B, MSI-X via de ITS (LPI 8192) | ✓ tg3 link + DHCP (gepold); ✗ doof daarna | ○ (dwmac) |
 | Off-link door de NAT, SNTP | ✓ | ✓ | ✓ | ○ | ○ | ○ | ○ | ○ |
 | Watchdog gewapend en geaaid | – | ✓ PM (12 s) | ✓ PM | ✓ DW-WDT (89 s) | ○ SBSA | ✓ SBSA (8,5 s) | ○ | ○ DW-WDT |
 | Hardware-RNG voor de kern | ✗ (jitter) | ✓ RNG200 | ✓ RNG200 | ✓ rk3568-rng | ○ SMCCC-TRNG of rndr (fc5348f) | ○ rndr (fc5348f, nog te flippen) | ○ | ✗ (niets) |
@@ -25,10 +25,10 @@ of faalt, en een streep waar het bewust niet komt. Stand 30-09-2026, avond.
 | Klokbeleid (dvfs) | – | ✓ 1500/800 | ✓ 1500/600 | – | ○ | ✓ vijf `_CPC`-domeinen, 2600 MHz | – | – |
 | Console op het glas | ✓ ramfb | ✓ via flip op de eerste kaart, ✗ sinds de herflash (firmware weigert) | ✓ 32 bpp | ✓ HDMI (geen EDID) | ○ GOP | ✓ GOP 1920x1080 | – | – |
 | USB xHCI (HID, display-app) | ✓ qemu-xhci | ○ 2 xHCI's up, niets ingeplugd | ✗ VL805 koud: versie 0, HCRST | ○ 2 DWC3 up, niets ingeplugd | ○ | ✓ 10 xHCI's up, de Blu-ray-drive over USB-BOT leest de disc (Lumen) | – | – |
-| Opslag (hopfs, volumes, OP_SYNC) | ✓ virtio-blk | – (bewust geen NVMe) | – | – (stateless, alles in het geheugen) | ○ NVMe | ✓ NVMe Lexar 4 TB, hopfs hersteld (generatie 3456) | ○ ANS | – |
-| Console op 5555 | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ○ | ○ |
+| Opslag (hopfs, volumes, OP_SYNC) | ✓ virtio-blk | – (bewust geen NVMe) | – | – (stateless, alles in het geheugen) | ○ NVMe | ✓ NVMe Lexar 4 TB, hopfs hersteld (generatie 3456) | ✓ ANS NVMe, hopfs hersteld (395 GB) | – |
+| Console op 5555 | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ○ luistert, onbereikbaar (doof na DHCP) | ○ |
 | Hardwaredecoder (media-smaak) | – | – | – | – | – | ✓ Linlon V8, 85,7 fps 4K P010 via de grant | – | – |
-| Kaart of stick klaar in `target/` | – | ✓ 17:47 | ✓ 17:47 | ✓ 14:41 (zonder 5555) | ✓ 18:12 | ✓ 18:12 | ✓ 14:41 | ✗ donor-FIP |
+| Kaart of stick klaar in `target/` | – | ✓ 17:47 | ✓ 17:47 | ✓ 14:41 (zonder 5555) | ✓ 18:12 | ✓ 18:12 | ✓ 20:45 (Hop ingebakken) | ✗ donor-FIP |
 
 ## De nodes, één voor één
 
@@ -99,22 +99,45 @@ met `hopos.cfg` naast `EFI/`.
 - [ ] cloudflare-lean porten (een Go-wrapper om lean) en als job erbij: de
       productieproef.
 
-### Mac mini M4
+### Mac mini M4 (m4-1, 192.168.1.122)
 
-Image: `target/apple-m4/hopos-apple.img` (19:04, config ingebakken, hele
-16 KiB-pagina's); op de stick als `HOPOS-M4-V3.IMG`, naast het Go-object
-(`HOPOS-M4.IMG`). De M4 draait sinds 19:50 weer op Go (192.168.1.122,
-welcome geplaatst, NVMe AP0512Z, "black box: 0 bytes carried over"),
-omdat SPIN er om 20:00 op moet draaien.
+Image: `target/apple-m4/hopos-apple.img` (30-09 20:45, 2588672 bytes, Hop
+ingebakken via `EMBED=`, config met `hopos.replay=45` en `hopos.cages=on`);
+nog niet geïnstalleerd. Op de stick staat de 20:25-build (SError-drain,
+zonder Hop). Console: USB-C-debugkabel, `sudo macvdmtool debugusb`
+(zonder reboot; na elke herstart van de M4 de kabel aan de Mac-kant even
+uit en in, anders enumereert de kis-poort niet), lezer
+`scratchpad/m4-watch.sh` op `/dev/cu.kis-100000-ch-0`. De kern herhaalt
+elke 45 s zijn eerste 16 KiB console (`HOPOS_CONSOLE_REPLAY`).
 
-- [ ] De eerste v3-boot via kmutil (19:1x, `install.sh go`) kwam niet op
-      het LAN: geen DHCP, geen nieuw MAC in de ARP-tabel, geen 5555. Blind,
-      want de M4 heeft geen console zonder debugkabel: eerst de dockchannel
-      lezen (USB-C naar de Mac, `macvdmtool reboot debugusb`, dan
-      `/dev/cu.kis-100000-ch-0`, board/apple/src/console.rs), dan pas
-      weten waar hij stokt: de bunny, de ADT met 6 E + 4 P cores, de
-      watchdogs stil, de ANS met de GPT, het AIC-doel, tg3, DHCP,
-      `HOPOS_APPLE_PREFLIGHT ok`, `HOPOS_CAGE_UP`, `HOPOS_OS_SELFTEST ok`.
+- [ ] v3 boot volledig onder kmutil (30-09 20:07): bunny, ADT 6 E + 4 P,
+      cores ours, NVMe AP0512Z met hopfs (395 GB), AIC, apcie 2 van 3
+      poorten, tg3 LINK UP 1000, DHCP 192.168.1.122 in 1 ms, 10100 en
+      5555 luisteren. Maar:
+- [ ] **SError-storm vanaf de AIC-start**: ESR 0xbe000000 (vector 11), niet
+      vóór de AIC, wel na elke stap daarna en continu; de EL1-beurt van de
+      preflight sterft er meteen aan (`HOPOS_APPLE_PREFLIGHT_FAULT`), de
+      kern weigert de kooien, geen Hop. Go: zo'n SError is een L2C_ERR
+      (stille verboden schrijf, adres in L2C_ERR_ADR). De 20:45-build leest
+      en wist m1n1's L2C_ERR_STS/ADR/INF bij elke drain
+      (`HOPOS_APPLE_SERROR ... l2c adr=`) en forceert de kooien
+      (`hopos.cages=on`; een bewoner draait op EL1 met PSTATE.A dicht, dus
+      Hop overleeft de storm). Eerst kijken welk adres het is (de AIC-
+      bring-up schrijft iets dat dit silicium weigert; vergelijk
+      OLD/metal/board/apple en driver/aic met m1n1's aic.c voor de t8132).
+- [ ] **Doof na DHCP**: de lease komt in 1 ms, daarna antwoordt de node
+      niet meer (geen ARP, ping, 5555, 10100 vanaf de Mac). tg3 RX-pad
+      (bijvullen van de producer-ring, of DMA die stilvalt door de
+      L2C-fout). Een tg3-diagnoseregel in de tik (`counters()`,
+      `rcb_dump()`, `irq_diag()` bestaan in driver/nic/tg3) is de volgende
+      stap; de pomp bezit de NIC, de tik niet.
+- [ ] Onder kmutil geen stage van een loader: de kern neemt nu de
+      ingebakken Hop (`board/apple/build.rs`, `HOPOS_EMBED`,
+      `slots::staged_image` valt erop terug). Nog niet op ijzer gezien.
+- [ ] Flippen op de M4: geen PSCI, dus `send_off` (CPU_OFF) bestaat niet;
+      flip.rs kent het board (`board-apple` in de koude weg) maar de warme
+      flip met een geparkeerde app-core is hier nooit gedaan. Pas zinvol
+      als Hop woont.
 - [ ] De koude flip werkt er niet (PSCI CPU_OFF zonder EL3); na een
       verhuizing met een rode voorproef spint de oude core.
 - [ ] Na de eerste zichtbare boot: `cores: ours` (zonder m1n1's spin-table).
@@ -181,3 +204,17 @@ node heeft er nog geen gedraaid.
       RISC-V komt van de control-page (staat), de tellerfrequentie.
 - [ ] lean: de IPv6-baan van leannet, `Stack::leave_group`.
 - [ ] Replica op GitHub (`xinix00/replica`): nog geen remote.
+
+### Prestatietests (vitals)
+
+`apps/vitals` plaatsen en `test=all` draaien, de markers in de tabel Vitals
+van `docs/measurements.md` (het commando staat daar en in de README).
+
+- [ ] Pi 5: vitals gedraaid, kolom in docs/measurements.md gevuld.
+- [ ] Pi 4: vitals gedraaid, kolom in docs/measurements.md gevuld.
+- [ ] Radxa: vitals gedraaid, kolom in docs/measurements.md gevuld.
+- [ ] O6N: vitals gedraaid, kolom in docs/measurements.md gevuld.
+- [ ] M4: vitals gedraaid, kolom in docs/measurements.md gevuld.
+- [ ] De netmeter-doorvoer (`netmeter NODE:80 --repeat 3`, bench in een
+      slot) per board in de tabellen Netwerk en Latentie van
+      docs/measurements.md; alleen de QEMU-kolom staat.
