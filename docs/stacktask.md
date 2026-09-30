@@ -33,5 +33,6 @@ opruimen van geannuleerde futures en nooit gestarte taken. Replica's
 op ARM64: commit, rollback, SIGKILL, koude herstart, integriteitscontrole,
 annuleren van een lange CPU-query via SQLite's progresscallback en heropenen
 met dezelfde SQLite-heap. De complete RISC-V-app bouwt; deze proef claimt geen
-RISC-V-runtimebewijs. Bronpins blijven op een gepubliceerde SDK-tag: uitsluitend
-de tijdelijke kandidaatkopie van Replica patcht naar deze werkboom.
+RISC-V-runtimebewijs. Replica pint de SDK op een gepubliceerde tag (sinds
+v3.0.0-alpha.16 met deze module en `sys::Client::sync` erin); er is geen
+kandidaatkopie of lokale patch meer.

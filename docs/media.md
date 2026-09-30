@@ -143,7 +143,7 @@ van het volume.
 ## De optische drive
 
 De optische drive (`media/optical`, Go `OLD/metal/media/driver/optical`) is
-voor de helft geport: de bulk-only-transportlaag (CBW, datafase, CSW met de
+in code aangesloten: de bulk-only-transportlaag (CBW, datafase, CSW met de
 toetsen op signature, tag, residu en status, reset-recovery, de ene
 herkansing op een gestalde status, REQUEST SENSE) tegen een
 `Transport`-trait, met zeven toetsen tegen een nep-drive. Daarnaast staat
@@ -155,7 +155,12 @@ expliciete mount op `/devices/discN` (`kern/src/deviceabi.rs`); de
 optical-owner (`hopos/src/optical.rs`, feature `media`) is een eigen actor
 naast hopfs en leent zijn transfers één tegelijk aan de USB-eigenaar, die
 dus nooit in de hopfs-actor wacht. Die async laag heeft nog geen eigen
-hosttest en is niet op QEMU of ijzer gedraaid.
+hosttest en is niet op QEMU of ijzer gedraaid. De owner start ook wanneer
+geen USB-controller beschikbaar is, zodat een discaanvraag dan `NoEnt` geeft
+in plaats van te blijven wachten. BOT-reset heeft een eigen begrensde deadline;
+een verlopen leesdeadline verhindert niet meteen de reset. De encoder blijft
+in de aparte Lumen-app; de SDK biedt maximaal twaalf app-cores en 512 KiB
+stack per daadwerkelijk gestarte secundaire core.
 
 ## Checklist: de O6N-mediatest
 
