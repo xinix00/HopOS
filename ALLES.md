@@ -13,20 +13,20 @@ of faalt, en een streep waar het bewust niet komt. Stand 30-09-2026, avond.
 
 | | QEMU virt | Pi 5 | Pi 4 | Radxa | Altra | O6N | M4 | LicheeRV |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Boot, EL2, kooi, zelftest | ✓ | ✓ | ✓ (zelftest koud: SError bij de VL805) | ✓ | ○ | ○ | ○ | ○ |
-| Hop als bewoner, welcome door de DNAT | ✓ | ✓ | ✓ | ✓ | ○ | ○ | ○ | ○ |
+| Boot, EL2, kooi, zelftest | ✓ | ✓ | ✓ (zelftest koud: SError bij de VL805) | ✓ | ○ | ✓ VHE (kick via de SGI komt niet aan, de timer vangt hem) | ○ | ○ |
+| Hop als bewoner, welcome door de DNAT | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ○ | ○ |
 | Kern-flip, warm | ✓ | ✓ uit de kale kern, ✗ uit de koude gui-kern (RP1) | ✓ (3x) | ✓ (1x) | ○ | ○ | – (geen CPU_OFF) | – |
-| NIC met interrupt | ✓ | ✓ MSI-X via de MIP | – (GENET gepold, zoals Go) | ✓ SPI 64 | – (igb gepold, bewust) | ○ (RTL8125, MSI-X via IORT) | ○ (tg3, AIC) | ○ (dwmac) |
+| NIC met interrupt | ✓ | ✓ MSI-X via de MIP | – (GENET gepold, zoals Go) | ✓ SPI 64 | – (igb gepold, bewust) | ✓ RTL8125B, MSI-X via de ITS (LPI 8192) | ○ (tg3, AIC) | ○ (dwmac) |
 | Off-link door de NAT, SNTP | ✓ | ✓ | ✓ | ○ | ○ | ○ | ○ | ○ |
-| Watchdog gewapend en geaaid | – | ✓ PM (12 s) | ✓ PM | ✗ DW-WDT gemeten, aai komt | ○ SBSA | ○ SBSA | ○ | ○ DW-WDT |
+| Watchdog gewapend en geaaid | – | ✓ PM (12 s) | ✓ PM | ✗ DW-WDT gemeten, aai komt | ○ SBSA | ✓ SBSA (8,5 s) | ○ | ○ DW-WDT |
 | Hardware-RNG voor de kern | ✗ (jitter) | ✓ RNG200 | ✓ RNG200 | ✗ TRNG komt | ○ SMCCC-TRNG of rndr | ○ rndr | ○ | ✗ (niets) |
 | Hardware-RNG voor de slots | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
-| Temperatuur in de tik | – | ✓ mailbox | ✓ mailbox | ✗ TSADC komt | ○ SMpro | ○ SCMI | ○ | – |
-| Klokbeleid (dvfs) | – | ✓ 1500/800 | ✓ 1500/600 | – | ○ | ○ `_CPC` | – | – |
-| Console op het glas | ✓ ramfb | ✓ via flip op de eerste kaart, ✗ sinds de herflash (firmware weigert) | ✓ 32 bpp | ✓ HDMI (geen EDID) | ○ GOP | ○ GOP | – | – |
-| USB xHCI (HID, display-app) | ✓ qemu-xhci | ○ 2 xHCI's up, niets ingeplugd | ✗ VL805 koud: versie 0, HCRST | ○ 1 van 2 DWC3 | ○ | ○ (10 xHCI's) | – | – |
-| Opslag (hopfs, volumes, OP_SYNC) | ✓ virtio-blk | – (bewust geen NVMe) | – | – (stateless, alles in het geheugen) | ○ NVMe | ○ NVMe | ○ ANS | – |
-| Console op 5555 | ✓ | ✓ | ✓ | ✓ | ○ | ○ | ○ | ○ |
+| Temperatuur in de tik | – | ✓ mailbox | ✓ mailbox | ✗ TSADC komt | ○ SMpro | ✓ SCMI (39 C in de agentlijst) | ○ | – |
+| Klokbeleid (dvfs) | – | ✓ 1500/800 | ✓ 1500/600 | – | ○ | ✓ vijf `_CPC`-domeinen, 2600 MHz | – | – |
+| Console op het glas | ✓ ramfb | ✓ via flip op de eerste kaart, ✗ sinds de herflash (firmware weigert) | ✓ 32 bpp | ✓ HDMI (geen EDID) | ○ GOP | ✓ GOP 1920x1080 | – | – |
+| USB xHCI (HID, display-app) | ✓ qemu-xhci | ○ 2 xHCI's up, niets ingeplugd | ✗ VL805 koud: versie 0, HCRST | ○ 1 van 2 DWC3 | ○ | ○ 10 xHCI's up, één super-speed apparaat op XHC4 | – | – |
+| Opslag (hopfs, volumes, OP_SYNC) | ✓ virtio-blk | – (bewust geen NVMe) | – | – (stateless, alles in het geheugen) | ○ NVMe | ✓ NVMe Lexar 4 TB, hopfs hersteld (generatie 3456) | ○ ANS | – |
+| Console op 5555 | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ○ | ○ |
 | Kaart of stick klaar in `target/` | – | ✓ 17:47 | ✓ 17:47 | ✓ 14:41 (zonder 5555) | ✓ 18:12 | ✓ 18:12 | ✓ 14:41 | ✗ donor-FIP |
 
 ## De nodes, één voor één
@@ -172,22 +172,32 @@ APP=<agentd-hopos> ROLE=hop sh image/uefi-run.sh`), naar een FAT32-stick met
       hergebruikt de map van de feitenpagina).
 - [ ] De schijf-interruptlijn: NVMe pollt (zonder de core vast te houden).
 
-### Orion O6N (vanavond)
+### Orion O6N
 
-Stick gebouwd 30-09 14:41 in de gui-smaak met Hop: `target/uefi-esp-o6n/`
-(node o6n-1, `hopos.cfg` naast `EFI/`).
+Geboot op 30-09 (18:31) in één keer van de media-stick (gui plus media,
+main fc66084, `BOOTAA64.EFI` naast de hernoemde Go-build): `HOPOS_UEFI_VHE`,
+de config van de ESP, de GOP-console op het glas, de NVMe (Lexar NM790
+4 TB) met hopfs hersteld uit de Go-tijd (generatie 3456), de ITS met LPI's,
+dvfs met vijf `_CPC`-domeinen naar 2600 MHz, de RTL8125B met MSI-X via de
+ITS, tien xHCI's, de SBSA-watchdog gewapend (8,5 s), de codec-firmware (16
+blobs van het volume), de VPU via SCMI (na één herstelcyclus,
+`HOPOS_VPU_RECOVER`) en de Linlon V8 up (4 cores, arena 768 MB,
+`HOPOS_CODEC_UP`), Hop als leider o6n-1 op 192.168.1.205, welcome op een
+app-core met HTTP 200, de console op 5555.
 
-- [ ] De VHE-kern op de A720: op QEMU met het Neoverse-model bewezen, op
-      silicium niet. Verwacht `HOPOS_UEFI_VHE`, `HOPOS_OS_SELFTEST ok`.
-- [ ] De console na de exit: de SPCR wijst naar een UART die de SCP dicht
-      houdt (Go: de vroege UART op 0x040d0000).
-- [ ] MSI-X op de RTL8125 via de Cix-IORT; anders `hopos.nicirq=intx`.
-- [ ] Het kernvenster op 0x8800_0000 (`window-8000`) is nieuw op ijzer.
-- [ ] De VPU: arena, firmware uit hopfs, `hopos.codecdemo`, apps/decode;
-      de meting 24 fps 4K P010 (Go: 27,25 fps).
-- [ ] De tien xHCI's uit de DSDT, de display-app, de optische drive over
-      USB-BOT en MMC (de device-op is gebouwd, nergens getoetst).
-- [ ] `HOPOS_CLOCK_UP` met vijf `_CPC`-domeinen, de thermiek via SCMI.
+- [ ] De zelftest-kick: `kick=(Timer, 100000 us, try 2)`, dus
+      `HOPOS_OS_SELFTEST_FAIL`: de SGI van de OS-core naar zichzelf komt op
+      de GICv3 van de O6N niet aan en de timer vangt hem. De rest werkt.
+- [ ] De VPU had één herstelcyclus nodig ("incomplete power state
+      pgctrl=0x7cef000"); daarna goed.
+- [ ] De console na de exit: de SPCR-UART blijft van de SCP; 5555 is de
+      console (werkt).
+- [ ] De meting: `hopos.codecdemo`, apps/decode, 24 fps 4K P010 (Go 27,25).
+- [ ] De display-app en HID op de xHCI's (op XHC4 poort 2 zit een
+      super-speed apparaat), de optische drive over USB-BOT en MMC (de
+      device-op is gebouwd, nergens getoetst).
+- [ ] De Go-config droeg init-jobs (display, launcher, apps van
+      hop-os-surf): Go-ELF's, niet overgenomen; hop-gui als job op v3.
 - [ ] De productieproef (Derek, 30-09): Lumen, de mediaserver
       (hop-app-lumen, de Rust-port in `rust/` draait op QEMU: portaal,
       WebDAV, beheer; de mediaketen met de disc, de hardwaredecoder en de
