@@ -463,6 +463,8 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     }
     // De USB-invoer na het netwerk (gui.rs): de stroom naar de display-app
     // loopt over de switch.
+    #[cfg(feature = "media")]
+    optical::start(exec);
     gui::start_usb_input(exec);
 
     // De slots: de kooi-lijm, de lifecycle-actor en de servicers (slots.rs).

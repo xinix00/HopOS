@@ -182,6 +182,7 @@ impl Transport for Link {
         Ok(n)
     }
     async fn reset_recovery(&mut self) -> core::result::Result<(), UsbError> {
+        self.deadline = self.exec.now().saturating_add(10_000_000_000);
         self.transfer(BulkOp::Reset, 0).await.map(|_| ())
     }
     fn max_transfer(&self) -> usize {

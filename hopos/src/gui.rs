@@ -413,8 +413,6 @@ mod on {
                 "usb: {live} controller(s) up, polling every {} ms HOPOS_USB_UP",
                 gui_usbin::POLL_INTERVAL_NS / 1_000_000
             );
-            #[cfg(feature = "media")]
-            crate::optical::start(exec);
             loop {
                 #[cfg(feature = "media")]
                 if let Some(req) = sink.optical.next() {
