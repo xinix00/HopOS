@@ -70,25 +70,25 @@ anders vermeld. De v3-meting is `netmeter NODE:80 --phases in,out --bytes
 
 | Meting | Go, per board | v3 QEMU virt | v3 O6N | v3 Altra | v3 Pi 5 | v3 Pi 4 | v3 Radxa |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| De node in (`in`, MB/s) | O6N 111,3 tot 116,5; Altra 107,7 tot 110,8; Pi 5 57,0 tot 69,6; Radxa 55,8 tot 56,6; Pi 4 6,6 (2.2.6, gepold); M4 43,3 tot 46,7 (bundel 25, HTTP PUT van 64 MiB) | 122,3 (TCG, slirp) | | | | | |
-| De node uit (`out`, MB/s) | O6N 114,3 tot 117,6; Altra 108,0 tot 110,6; Pi 5 41,6 tot 50,6; Radxa 98,8 tot 99,6; Pi 4 42,3; M4 47,7 tot 52,3 (HTTP GET) | 71,4 (TCG, slirp) | | | | | |
+| De node in (`in`, MB/s) | O6N 111,3 tot 116,5; Altra 107,7 tot 110,8; Pi 5 57,0 tot 69,6; Radxa 55,8 tot 56,6; Pi 4 6,6 (2.2.6, gepold); M4 43,3 tot 46,7 (bundel 25, HTTP PUT van 64 MiB) | 122,3 (TCG, slirp) |  |  | niet gemeten: netmeter mag het LAN niet op (macOS); vitals up van de laptop over Wi-Fi 14,1 tot 37,6 | 16,6 tot 20,4 (host via Wi-Fi, 200 MB, relay); bedraad van de O6N (vitals rx, 64 MB) 43,8 tot 48,6 | 10,2 tot 19,3 (Wi-Fi-host, 64 MiB; over de draad van de O6N: vitals rx 20,5 tot 21,6) |
+| De node uit (`out`, MB/s) | O6N 114,3 tot 117,6; Altra 108,0 tot 110,6; Pi 5 41,6 tot 50,6; Radxa 98,8 tot 99,6; Pi 4 42,3; M4 47,7 tot 52,3 (HTTP GET) | 71,4 (TCG, slirp) |  |  | niet gemeten: idem; vitals tx over Wi-Fi 31,3 tot 33,4 | 45,0 tot 45,9 (host via Wi-Fi, 200 MB, relay) | 13,8 tot 17,9 (Wi-Fi-host, 64 MiB) |
 
 ## Latentie en verbindingen
 
 | Meting | Go, per board | Commando, marker | v3 QEMU virt | v3 O6N | v3 Altra | v3 Pi 5 | v3 Pi 4 | v3 Radxa |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| rtt, open verbinding | O6N p50 156 / 201 / 200 µs (irq, drie runs); M4 p50 50 / 62 / 66 µs | `netmeter --phases rtt --rtt 200`, `NETMETER phase=rtt ... p50= p99=` | p50 1180 µs, p99 3472 µs | | | | | |
-| Verbindingscyclus, één tegelijk | O6N 3,6 ms; Altra 5,1 ms; Pi 5 1,1 tot 3,6 ms; Radxa 4,1 ms; LicheeRV 16 tot 19 ms | `netmeter --phases storm`, `p50=` | p50 1,44 ms | | | | | |
-| Storm, verbindingen per seconde | O6N 844 conn/s, p99 19,6 ms (irq); M4 6379 conn/s, p99 1,9 ms | `netmeter --phases storm --storm 1000`, `conn_per_s=` | 638 conn/s, p99 2,7 ms | | | | | |
-| UDP-echo, rtt en verlies | geen Go-getal | `netmeter --phases udp`, `NETMETER phase=udp ... lost=` | niet op QEMU (de hostfwd is TCP) | | | | | |
+| rtt, open verbinding | O6N p50 156 / 201 / 200 µs (irq, drie runs); M4 p50 50 / 62 / 66 µs | `netmeter --phases rtt --rtt 200`, `NETMETER phase=rtt ... p50= p99=` | p50 1180 µs, p99 3472 µs |  |  | niet gemeten (netmeter: `No route to host`, macOS Local Network) | p50 5354 tot 5945 µs, p99 92 tot 103 ms (Wi-Fi) | p50 4176 tot 5040 µs, p99 90,9 tot 96,3 ms (Wi-Fi-host) |
+| Verbindingscyclus, één tegelijk | O6N 3,6 ms; Altra 5,1 ms; Pi 5 1,1 tot 3,6 ms; Radxa 4,1 ms; LicheeRV 16 tot 19 ms | `netmeter --phases storm`, `p50=` | p50 1,44 ms |  |  | niet gemeten (idem) | p50 11,2 tot 15,5 ms (Wi-Fi plus relay) | p50 9,2 tot 10,9 ms (Wi-Fi-host) |
+| Storm, verbindingen per seconde | O6N 844 conn/s, p99 19,6 ms (irq); M4 6379 conn/s, p99 1,9 ms | `netmeter --phases storm --storm 1000`, `conn_per_s=` | 638 conn/s, p99 2,7 ms |  |  | niet gemeten (idem); vitals storm door de NAT 1398 tot 1410 conn/s, p99 5,9 tot 6,9 ms | 27 tot 72 conn/s, p99 108 tot 165 ms (storm 200, Wi-Fi plus relay) | 71 tot 88 conn/s bij `--storm 200` (Wi-Fi-host) |
+| UDP-echo, rtt en verlies | geen Go-getal | `netmeter --phases udp`, `NETMETER phase=udp ... lost=` | niet op QEMU (de hostfwd is TCP) |  |  | niet gemeten (idem) | p50 5851 tot 6342 µs, lost 0 (Wi-Fi) | p50 3220 tot 6760 µs, lost 0 (Wi-Fi-host) |
 
 ## In de node: app naar app door de switch
 
 | Meting | Go | Commando, marker | v3 QEMU virt | v3 O6N | v3 Altra | v3 Pi 5 | v3 Pi 4 | v3 Radxa |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Twee apps op één node, 400 MB | M4: 769 / 764 MB/s | `BENCH=pull BENCH_BYTES=419430400`, `HOPOS_BENCH_PULL` | 6,9 MB/s (16 MiB, TCG) | | | | | |
-| rtt app naar app, warm | geen Go-tabel (schedbench) | `BENCH=ping`, `HOPOS_BENCH_RTT` | p50 2238 µs, p99 2447 µs | | | | | |
-| rtt na 1 s stilte (koud) | geen Go-tabel | `BENCH=ping`, `HOPOS_BENCH_COLD` | p50 2494 µs | | | | | |
+| Twee apps op één node, 400 MB | M4: 769 / 764 MB/s | `BENCH=pull BENCH_BYTES=419430400`, `HOPOS_BENCH_PULL` | 6,9 MB/s (16 MiB, TCG) |  |  |  |  | 6,46 tot 6,49 MB/s |
+| rtt app naar app, warm | geen Go-tabel (schedbench) | `BENCH=ping`, `HOPOS_BENCH_RTT` | p50 2238 µs, p99 2447 µs |  |  |  |  | p50 78 tot 79 µs, p99 123 tot 174 µs |
+| rtt na 1 s stilte (koud) | geen Go-tabel | `BENCH=ping`, `HOPOS_BENCH_COLD` | p50 2494 µs |  |  |  |  | p50 599 tot 742 µs |
 
 ## De idle-meetlat van de OS-core
 
@@ -98,11 +98,11 @@ seconde, lege RX-rondes per seconde, werk na de failsafe per seconde.
 
 | Meting | Go | v3 QEMU virt | v3 O6N | v3 Altra | v3 Pi 5 | v3 Pi 4 | v3 Radxa |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Wekken per seconde, stil | gepold ~3.300, op de interrupt ~100 (de vangrail) | ~820 | | | | | |
+| Wekken per seconde, stil | gepold ~3.300, op de interrupt ~100 (de vangrail) | ~820 |  |  | ~900 (`sleeps`), ~2.000 polls/s, ~70 NIC-irq/s; tijdens vitals burn ~1.900 |  | idlestat uit; `HOPOS_TICK`: ~1.700 tot 1.900 slaapjes/s, NIC-irq ~75/s |
 | Lege RX-rondes per seconde, stil | gepold 3.333, op de interrupt ~100 | ~94 | | | | | |
-| RX-pomprondes Pi 5, stil | 824 (gepold), 113 (irq) | | | | | | |
+| RX-pomprondes Pi 5, stil | 824 (gepold), 113 (irq) |  |  |  | ~70 NIC-interrupts/s, ~2.000 polls/s |  |  |
 | NIC-interrupts, O6N | 1.813 in 40 s met een rtt-run; 3.333 polls/s gepold | | | | | | |
-| Tijd van de bewoners (Hop) op de OS-core, stil | geen Go-getal | 0,3 % | | | | | |
+| Tijd van de bewoners (Hop) op de OS-core, stil | geen Go-getal | 0,3 % |  |  |  |  | 0,14 % (`HOPOS_TICK` res_ms 1,4 ms/s) |
 
 Tijdens `BURN=1` op een app-core hoort de regel van de OS-core niet te
 bewegen (de last staat op een andere core); stijgen de wekken of de kicks
@@ -119,8 +119,8 @@ staart (hoogstens 1 GiB) en 4 KiB willekeurig.
 | Rauw, 1 MiB-opdrachten, 16 MiB, schrijven / lezen | O6N gecachet 3056,8 / 2705,6; ongecachet 49,1 / 59,1; M4 5389 tot 5756 / 1824 tot 1971 MB/s | 1260,9 / 1221,4 MB/s | | | |
 | hopfs, 1 MiB-calls, 16 MiB | O6N 2970,1 / 2716,7; M4 5480 tot 5632 / 1781 tot 1816 MB/s | 1187,0 / 1207,2 MB/s | | | |
 | Sequentieel over de staart (tot 1 GiB) | geen Go-getal | 32 MiB: 1293,0 / 1238,2 MB/s | | | |
-| Willekeurig 4 KiB | geen Go-getal (O6N: 4 KiB-overschrijvingen via de app 15,15 tot 17,08 MB/s) | 32051 / 32123 IOPS | | | |
-| App-opslag, 256 MiB, 1 MiB-calls | O6N 556,83 tot 625,43 / 727,49 tot 796,83; M4 1598 tot 1657 / 1064 tot 1072 MB/s | nog geen v3-rol (bench heeft geen FS-rol) | | | |
+| Willekeurig 4 KiB | geen Go-getal (O6N: 4 KiB-overschrijvingen via de app 15,15 tot 17,08 MB/s) | 32051 / 32123 IOPS | geen IOPS-meting; 4 KiB-overschrijvingen via de app 45,4 tot 48,9 MB/s (Go 15,15 tot 17,08); 4 KiB-lezen 3,96 tot 4,12 MB/s |  |  |
+| App-opslag, 256 MiB, 1 MiB-calls | O6N 556,83 tot 625,43 / 727,49 tot 796,83; M4 1598 tot 1657 / 1064 tot 1072 MB/s | nog geen v3-rol (bench heeft geen FS-rol) | 196,3 tot 199,2 / 92,3 tot 93,6 MB/s (vitals disk op `/data`, drie runs; ook via perf.sh 196,5 tot 198,0 / 93,0 tot 93,5) |  |  |
 
 ## Media: de hardwaredecoder van de O6N
 
