@@ -102,7 +102,8 @@ impl Proto {
     }
 }
 
-/// Het externe adres van de node: IP, prefix en de MAC van de NIC.
+/// Het externe adres van de node: IP, prefix, de MAC van de NIC en de
+/// gateway uit de lease (0 = geen: dan is alleen het subnet bereikbaar).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Uplink {
     /// Het node-IP.
@@ -111,11 +112,13 @@ pub struct Uplink {
     pub mask: u32,
     /// De MAC van de uplink-NIC.
     pub mac: [u8; 6],
+    /// De gateway (de next-hop voor alles buiten het subnet), 0 = geen.
+    pub gateway: u32,
 }
 
 impl Uplink {
-    /// Het uplink-adres uit IP, prefixlengte en MAC.
-    pub fn new(ip: u32, prefix: u32, mac: [u8; 6]) -> Result<Self, Error> {
+    /// Het uplink-adres uit IP, prefixlengte, MAC en gateway.
+    pub fn new(ip: u32, prefix: u32, mac: [u8; 6], gateway: u32) -> Result<Self, Error> {
         if prefix > 32 {
             return Err(Error::Prefix(prefix));
         }
@@ -124,7 +127,12 @@ impl Uplink {
         } else {
             u32::MAX << (32 - prefix)
         };
-        Ok(Self { ip, mask, mac })
+        Ok(Self {
+            ip,
+            mask,
+            mac,
+            gateway,
+        })
     }
 }
 
@@ -353,8 +361,28 @@ impl Nat {
     /// geleerde, nog verse neighbor, off-subnet de gateway. Vóór 20-08 gaf
     /// dit hier stil de gateway-MAC terug, waardoor er nooit ge-ARP't werd:
     /// de wifi-Brother-jacht.
+    ///
+    /// De gateway-MAC komt van twee kanten: passief uit elk frame van buiten
+    /// (`learn`), en actief uit de neighbor van het gateway-IP. Dat tweede
+    /// pad is de les van de eerste Pi 5-boot (30-09): zolang er nooit iets
+    /// van buiten kwam, was `gw` leeg, en alles wat de node naar buiten wilde
+    /// (SNTP, een download) werd gedropt met "geen spoor". Op QEMU zag je
+    /// dat niet, want slirp is de gateway én het hele internet in één hop.
     fn l2_for(&mut self, dst_ip: u32, now: u64) -> Option<[u8; 6]> {
         if !self.on_subnet(dst_ip) {
+            if self.gw.is_some() {
+                return self.gw;
+            }
+            let gateway = self.uplink.map(|u| u.gateway).unwrap_or(0);
+            if gateway == 0 || !self.on_subnet(gateway) {
+                return None;
+            }
+            let n = self.neigh.get(&gateway)?;
+            if now.saturating_sub(n.seen) > NEIGH_TTL {
+                self.neigh.remove(&gateway);
+                return None;
+            }
+            self.gw = Some(n.mac);
             return self.gw;
         }
         let n = self.neigh.get(&dst_ip)?;
@@ -657,8 +685,14 @@ impl Nat {
             Some(m) => m,
             None => {
                 // First-contact (Altra 14-07): een on-subnet bestemming die
-                // ons nooit iets stuurde is onbekend; vraag het net.
-                self.arp_for(io, dst_ip, now);
+                // ons nooit iets stuurde is onbekend; vraag het net. Een
+                // off-subnet bestemming vraagt de gateway (Pi 5, 30-09).
+                let ask = if self.on_subnet(dst_ip) {
+                    dst_ip
+                } else {
+                    u.gateway
+                };
+                self.arp_for(io, ask, now);
                 let Some(gw) = self.gw else {
                     io.stats().nat_no_route.fetch_add(1, Relaxed);
                     return true; // geen enkel spoor: drop, retransmit volgt

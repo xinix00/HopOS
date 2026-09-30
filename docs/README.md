@@ -80,76 +80,11 @@ HTTP-server op de laptop, en `curl -X POST -d '{"name":"welcome","driver":"hop",
 slot, de uptime, de verzoeken en de heap. Daarna de meetreeks uit
 [measurements.md](measurements.md) en een flip uit [flip.md](flip.md).
 
-## Nog niet, en op ijzer nog nooit gedraaid
+## Wat er nog moet
 
-Alles hieronder is op QEMU bewezen waar QEMU het kan, en op geen enkel
-board ooit gestart. De lijst is de eerlijke stand vóór de devicedag.
-
-- **O6N.** De VHE-switcher is op QEMU met het Neoverse-model bewezen, op de
-  A720 niet. De console na de exit: de SPCR wijst naar een UART die de SCP
-  dicht houdt (Go gebruikte een vroege UART op 0x040d0000). MSI-X op de
-  RTL8125 en de Cix-IORT zijn onbewezen; `hopos.nicirq=intx` meet de
-  terugval los. De VPU: het contract, de driver en de kern-kant staan, maar
-  een arena buiten de partitie-pool en de firmware-lezing uit hopfs
-  ontbreken nog, dus de codec blijft uit (`HOPOS_CODEC_OFF`); `codecdemo`
-  is niet geport; er is nog geen Rust-app die decodeert.
-- **Altra.** De NIC blijft gepold (de INTx-les L83; igb zonder MSI-X), de
-  SBSA-watchdog is zijn eerste echte proef.
-- **Overal.** NVMe pollt (het blokcontract is synchroon); INTx voor
-  virtio-pci is er niet.
-- **Pi 4 en 5.** Watchdog, thermiek en klok via de mailbox zijn alleen
-  haken; NVMe op de Pi 5 ontbreekt; de USB-bedrading (VL805, RP1) ontbreekt,
-  dus geen HID-invoer; de flip is gebouwd, niet gesprongen (`_pi_start` op
-  een andere core dan 0?).
-- **Radxa.** Geen SD-driver; de EDID-lezer, de DDC-pinmux en de GRF zijn
-  ongemeten; DWC3-USB is niet geport; de flip is gebouwd, niet gesprongen.
-- **Kern-flip.** Op de UEFI-boards en de Pi's alleen gebouwd (de Pi houdt
-  zijn kern op core 0, dus een flip landt daar altijd op core 0); de Radxa
-  staget Hop niet, dus de koude flip weigert daar; op de Pi 5 weigert de
-  koude flip als er ooit een app-core draaide (CPU_OFF komt daar niet
-  terug). Koud: `hop flip <url> <sha256> --cold`.
-- **SMP en sharegroepen.** Niet op Apple, RISC-V of ijzer. De join-wacht van
-  5 ms is een spin op de kern-core.
-- **Gui.** De USB-lijnen zijn niet bedraad (de xHCI-driver pollt elke
-  4 ms); USB-opslag heeft alleen het aanvraagpad van de optische drive
-  (met `media`);
-  `qemu-uefi-test.sh` heeft geen `GUI=display`-stand; de O6N-toets dat het
-  firmware-RAM in ACPI-geheugen ligt is niet geport; de log wrapt en
-  scrolt niet. De display-app en de USB-keten zijn alleen op QEMU en EDK2
-  gezien.
-- **RISC-V.** Geen kick van app naar kern (de tegenhanger van HVC #6, dus
-  een rtt van 5,4 ms tegen 2,9 ms op arm64), geen SMP of sharegroepen,
-  geen flip (`RvCage::adopt` weigert), de C906L van de LicheeRV slaapt niet
-  (zijn comparator is onbewezen, dus hij spint), geen SD-driver; de LicheeRV
-  bouwt (FIP uit de donor, met `hopos.cfg` in het image) en heeft nooit
-  gedraaid.
-- **Mac mini M4.** Alles is geport en host-getest, inclusief de OS-core-
-  rotatie voor `AppleVhe` (fast IPI, timer-FIQ), CPU_ON zonder PSCI, de
-  watchdog en de ingebakken config; het slot-plan doet bij de eerste
-  aanroep een voorproef (`HOPOS_APPLE_PREFLIGHT`). De koude flip werkt er
-  niet (PSCI CPU_OFF zonder EL3). Nooit gedraaid.
-- **Hop.** Geen SIGTERM-afhandeling in `agentd` op de host (std heeft geen
-  signaal-API: een gedode daemon laat zijn lease via de TTL verlopen); een
-  stroom waarvan de lezer weg is, komt pas bij de volgende keepalive vrij;
-  de Linux-isolatie is in Alpine als root bewezen, niet op een echte host.
-  Op HopOS: de S3-lock alleen met host-tests, twee HopOS-nodes naast elkaar
-  alleen op ijzer te toetsen (slirp verbindt twee QEMU's niet), en de
-  CPU-meting per slot (Go's usage.go) ontbreekt nog.
-- **System-API.** Compleet, ook de device-op (19, de optische drive voor
-  lumen: een expliciete mount op `/devices/discN`, een eigen actor naast
-  hopfs, async BOT en de MMC-laag, de brug naar de USB-eigenaar). Die is
-  alleen gebouwd en met clippy getoetst: de async BOT, de MMC-laag en
-  `deviceabi` hebben nog geen eigen hosttest en QEMU heeft er geen proef
-  voor. Op ijzer te bewijzen: een drive over USB (INQUIRY, READ CAPACITY,
-  READ(10) en een vendorcommando via `OP_DEVICE_COMMAND`), en dat een
-  losgetrokken drive zijn uitgeleende buffers teruggeeft.
-- **applib.** Geen `leave_group` (leannet heeft geen leave: een lean-punt);
-  hop-http draagt zijn eigen TcpConn-adapter tot Hop op de tag met
-  `applib::tcp` staat.
-- **ABI.** `CTRL_TEMP` (de thermiek) en `CTRL_TIMEBASE_HZ` (de timebase van
-  de app) zijn nieuw en verkleinen `CTRL_ENV_MAX`; Hop hoort op de tag van
-  deze kern te staan.
-- De IPv6-baan van leannet.
+Eén lijst, per node en voor alles tegelijk: [ALLES.md](../ALLES.md) in de
+root van de repo. Wat af is gaat eruit. De eerste groene node was de Pi 5 op
+30-09-2026, inclusief de eerste kern-flip op ijzer.
 
 Hoe de code geschreven is: het Rust-handboek van haas.software
 (`rustdoc/README.md`) en de port-notities (`rustdoc/PORT.md`).

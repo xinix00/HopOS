@@ -422,7 +422,7 @@ impl Node {
         // De switch moet het externe adres kennen vóór de stack praat: pas
         // dan scheidt de NAT gepubliceerde poorten en masquerade-flows van
         // verkeer voor de node zelf.
-        match Uplink::new(ip, cidr.prefix, mac) {
+        match Uplink::new(ip, cidr.prefix, mac, u32::from(lease.gateway)) {
             Ok(uplink) => {
                 let cmd = Command::SetUplink {
                     uplink,

@@ -11,6 +11,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 
 const NODE_IP: u32 = 0x0A00_020F; // 10.0.2.15/24
+const GW_IP: u32 = 0x0A00_0202; // 10.0.2.2, de gateway uit de lease
 const EXT_IP: u32 = 0x5DB8_D822; // 93.184.216.34 (off-subnet)
 const LAN_IP: u32 = 0x0A00_0263; // 10.0.2.99 (on-subnet)
 const GW_MAC0: [u8; 6] = [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01];
@@ -65,7 +66,7 @@ impl NatIo for TestIo {
 /// Go: `resetNAT` plus `setUplink`.
 fn setup() -> (Nat, TestIo) {
     let mut nat = Nat::new().unwrap();
-    nat.set_uplink(Uplink::new(NODE_IP, 24, NIC_MAC).unwrap());
+    nat.set_uplink(Uplink::new(NODE_IP, 24, NIC_MAC, GW_IP).unwrap());
     (nat, TestIo::new())
 }
 
@@ -633,7 +634,9 @@ fn neighbor_cache_en_plafond() {
     );
 }
 
-/// Zonder next-hop: geclaimd maar gedropt, en er mag níéts de NIC op.
+/// Zonder next-hop: geclaimd maar gedropt, en het enige dat de NIC op mag
+/// is de ARP-vraag naar de gateway (30-09: zonder die vraag kwam er op
+/// een echt LAN nooit iets van buiten, dus werd de gateway nooit geleerd).
 #[test]
 fn outbound_zonder_next_hop_dropt() {
     let (mut nat, mut io) = setup();
@@ -648,9 +651,49 @@ fn outbound_zonder_next_hop_dropt() {
         &[],
     );
     assert!(nat.outbound(&mut io, 1, &mut f, T0));
-    assert!(io.sent.is_empty());
+    assert_eq!(io.sent.len(), 1, "alleen de ARP-vraag naar de gateway");
+    assert!(is_bcast_arp(&io.sent[0]));
+    assert_eq!(
+        be32(&io.sent[0], 38),
+        GW_IP,
+        "de vraag hoort naar de gateway te gaan"
+    );
     assert_eq!(nat.flows.len(), 0, "drop hoort geen flow achter te laten");
     assert_eq!(io.stats.nat_no_route.load(Relaxed), 1);
+}
+
+/// Off-subnet zonder ooit een frame van buiten (de eerste Pi 5-boot,
+/// 30-09): de gateway-MAC komt uit de ARP-reply van de gateway zelf, en
+/// daarna gaat elk off-subnet frame die kant op.
+#[test]
+fn off_subnet_leert_de_gateway_via_arp() {
+    let (mut nat, mut io) = setup();
+    let mut syn = mk_frame(
+        PROTO_TCP,
+        HOST_MAC,
+        slot_mac(1),
+        slot_ip4(1),
+        EXT_IP,
+        5555,
+        443,
+        &[],
+    );
+    set_tcp_flags(&mut syn, TCP_SYN);
+    assert!(nat.outbound(&mut io, 1, &mut syn.clone(), T0));
+    assert_eq!(
+        io.sent.len(),
+        1,
+        "eerst alleen de ARP-vraag naar de gateway"
+    );
+    assert_eq!(be32(&io.sent[0], 38), GW_IP);
+    assert_eq!(nat.gw, None);
+
+    nat.arp_learn(&arp_reply(GW_MAC0, GW_IP), T0);
+    assert!(nat.outbound(&mut io, 1, &mut syn.clone(), T0 + SEC));
+    assert_eq!(io.sent.len(), 2, "de retransmit gaat de NIC op");
+    assert_eq!(io.sent[1][0..6], GW_MAC0, "niet naar de gateway-MAC");
+    assert_eq!(nat.gw, Some(GW_MAC0), "de gateway hoort nu geleerd te zijn");
+    assert_eq!(nat.flows.len(), 1);
 }
 
 fn arp_reply(from_mac: [u8; 6], from_ip: u32) -> Vec<u8> {

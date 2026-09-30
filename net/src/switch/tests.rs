@@ -11,6 +11,7 @@ use crate::{Egress, Ingress};
 use std::cell::{Cell, RefCell};
 
 const NODE_IP: u32 = 0x0A00_020F;
+const GW_IP: u32 = 0x0A00_0202;
 const EXT_IP: u32 = 0x5DB8_D822;
 const GW_MAC0: [u8; 6] = [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01];
 const NIC_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
@@ -129,7 +130,7 @@ impl H {
     fn uplink(&mut self) {
         self.sw
             .nat()
-            .set_uplink(Uplink::new(NODE_IP, 24, NIC_MAC).unwrap());
+            .set_uplink(Uplink::new(NODE_IP, 24, NIC_MAC, GW_IP).unwrap());
     }
 
     fn leer_gateway(&mut self) {
