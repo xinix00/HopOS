@@ -274,10 +274,36 @@ mod hw {
 /// De rest: geen thermometer en geen knop in deze kern. De Pi's hebben
 /// beide achter de mailbox (`vcmail`: `temp`, `set_clock_rate`); die is van
 /// het Pi-spoor, en de haak is een eigen module met deze drie namen.
+/// De Pi's: de SoC-temperatuur via de VideoCore-mailbox
+/// (`board_raspi::temp_millic`, dezelfde tag als de bootregel `vcmail:
+/// 58.713 C`). De klokknop (dvfs via de mailbox) is nog niet geport: de
+/// firmware houdt zijn klok.
+#[cfg(any(feature = "board-rpi4", feature = "board-rpi5"))]
+mod hw {
+    use cpu::println;
+    use executor::Executor;
+
+    pub(super) fn open() {}
+
+    /// Milligraden uit de mailbox; 0 = geen meting (de mailbox is nog niet
+    /// open, of de firmware antwoordde niet).
+    pub(super) fn temp() -> i32 {
+        vboard::temp_millic().map_or(0, |t| i32::try_from(t).unwrap_or(0))
+    }
+
+    pub(super) fn governor(_exec: &'static Executor) {
+        println!(
+            "dvfs: no clock knob on this board, the firmware keeps its clock HOPOS_CLOCK_NONE"
+        );
+    }
+}
+
 #[cfg(not(any(
     feature = "board-o6n",
     feature = "board-altra",
-    feature = "board-apple"
+    feature = "board-apple",
+    feature = "board-rpi4",
+    feature = "board-rpi5"
 )))]
 mod hw {
     use cpu::println;

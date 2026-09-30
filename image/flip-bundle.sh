@@ -7,6 +7,8 @@
 #       board: virt, uefi, o6n, altra, rpi4, rpi5, radxa
 #   HOPOS_STAMP=B image/flip-bundle.sh virt   een ander versie-stempel op
 #                                   de boot-regel (tools/qemu-test-flip.sh)
+#   GUI=1 image/flip-bundle.sh rpi5 de gui-smaak (de korte vorm van
+#                                   FEATURES=gui, zoals image/uefi-run.sh)
 #
 # Een bundel is de kern-ELF (zonder debug-info, mét symbolen) plus een
 # HOPRELO1-staart (versie 2, kern::kernflip::Bundle) met de relocatietabel
@@ -79,6 +81,12 @@ if [ -n "${FEATURES:-}" ]; then
 	case ",$FEATURES," in
 	*,vhe,*) FLAVOR=vhe ;;
 	esac
+fi
+# De gui-smaak heeft dezelfde switch-code als kaal (de EL2-blobs kennen
+# geen feature), dus een kale kern neemt een gui-bundel warm aan: zo kreeg
+# de Pi 5 op 30-09 zijn console op het glas, van generatie 3 (kaal) naar 4.
+if [ "${GUI:-0}" = 1 ]; then
+	FEATURE="$FEATURE,gui"
 fi
 
 OUT="$DIR/target/hopos-$BOARD.flip"

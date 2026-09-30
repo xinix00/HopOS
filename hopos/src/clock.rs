@@ -9,7 +9,8 @@
 //!
 //! Dit bezit de offset en een tabel van de control-pages van gebouwde
 //! kooien (per slot het fysieke adres, 0 = geen). Beide zijn atomics met één
-//! schrijver per woord: de offset zet de boot en daarna alleen `SET_CLOCK`
+//! schrijver per woord: de offset zet de boot (of, na een flip, de
+//! overdracht van de vorige kern, vóór `main`) en daarna alleen `SET_CLOCK`
 //! van Hop, de tabel zet de lifecycle-actor (via de kooi-lijm). Alles draait
 //! op de executor van core 0, dus er is niets te beschermen (handboek §1.3).
 //!
@@ -55,6 +56,13 @@ pub(crate) fn set(unix_ns: u64, now_ns: u64) -> u64 {
 /// De offset voor een verse control-page.
 pub(crate) fn offset() -> u64 {
     WALL_OFF.load(Relaxed)
+}
+
+/// De offset van de vorige kern, uit de flip-overdracht (`flip::land`, vóór
+/// er een kooi is): de teller liep door de sprong heen door, dus hij geldt
+/// nog. 0 = de vorige kern had geen klok, en dan zet `main` de vaste.
+pub(crate) fn restore(off: u64) {
+    WALL_OFF.store(off, Relaxed);
 }
 
 /// De kooi van `slot` is gebouwd met zijn control-page op `ctrl`.

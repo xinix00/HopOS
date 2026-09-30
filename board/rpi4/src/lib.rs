@@ -31,7 +31,7 @@
 use board::Error;
 use board_raspi::driver_gicv2::Gic;
 use board_raspi::map::{self, L2, Tables};
-pub use board_raspi::{DMA, Disk, KERN_RAM};
+pub use board_raspi::{DMA, Disk, KERN_RAM, temp_millic};
 use board_raspi::{NicCtx, Raspi, Soc};
 use dev::Pa;
 use driver_genet::Genet;

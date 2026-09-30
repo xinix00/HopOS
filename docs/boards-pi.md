@@ -197,8 +197,11 @@ gefikst en op de host en QEMU getoetst, nog niet op ijzer:
   54 MHz); andere EL2-boards (O6N, Altra) hebben hetzelfde nodig.
 - **GENET-interrupt** (Pi 4, SPI 157/158): niet bedraad, gepold zoals in
   Go.
-- **Framebuffer-console**: niet geport; de kern meldt of de firmware er een
-  gaf. `vcmail::alloc_fb` is er.
+- **Framebuffer-console**: in de gui-smaak (`GUI=1 sh image/rpi5.sh`, of
+  `GUI=1 sh image/flip-bundle.sh rpi5` op een draaiende node), via `FB_ALLOC`
+  op de mailbox (board/raspi/src/vcfb.rs). Gemeten 30-09 op de Pi 5:
+  1920x1080, 16 bpp, `HOPOS_FB_CONSOLE`, en beide RP1-xHCI's `HOPOS_USB_UP`.
+  Kaal meldt de kern alleen of de firmware er een gaf.
 - **dvfs, watchdog, RNG200, NVMe (Pi 5 pcie1)**: niet geport; `arm_freq=1500`
   is de thermische cap op de Pi 5.
 - **QEMU `raspi4b`** heeft geen GENET en geen PSCI; `tools/qemu-rpi4-test.sh`

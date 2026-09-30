@@ -389,16 +389,25 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     // niets.
     gui::init_framebuffer_console(board);
 
-    // De wandklok vóór er een bewoner is: zonder SNTP (nog niet geport) een
-    // vaste waarde, luid. Hop stempelt zijn taken ermee (clock.rs).
-    let off = clock::set(
-        clock::BOOT_WALL_SECS.saturating_mul(1_000_000_000),
-        exec.now(),
-    );
-    println!(
-        "clock: no SNTP yet, wall clock fixed at 2026-09-29T00:00:00Z (unix {} s, offset {off} ns) HOPOS_CLOCK_FIXED",
-        clock::BOOT_WALL_SECS
-    );
+    // De wandklok vóór er een bewoner is. Na een flip draagt de overdracht
+    // de offset van de vorige kern (Hop had hem via SNTP gezet, en de
+    // teller liep door de sprong heen door); anders een vaste waarde, luid,
+    // tot Hop hem zet. Hop stempelt zijn taken ermee (clock.rs).
+    if clock::offset() != 0 {
+        println!(
+            "clock: wall clock carried over the flip (offset {} ns) HOPOS_CLOCK_CARRIED",
+            clock::offset()
+        );
+    } else {
+        let off = clock::set(
+            clock::BOOT_WALL_SECS.saturating_mul(1_000_000_000),
+            exec.now(),
+        );
+        println!(
+            "clock: no SNTP yet, wall clock fixed at 2026-09-29T00:00:00Z (unix {} s, offset {off} ns) HOPOS_CLOCK_FIXED",
+            clock::BOOT_WALL_SECS
+        );
+    }
 
     // Wat QEMU stagede, en of er dus een Hop is: alleen dan bestaat het
     // token, en het hoort bij het slot waar de kern Hop plaatst, vóór de

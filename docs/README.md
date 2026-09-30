@@ -59,13 +59,13 @@ en `media`, en de riscv64-boards).
 | UEFI generiek (EDK2, QEMU) | `BOARD=uefi sh image/uefi-run.sh` | `target/uefi-esp-uefi/` | [boards.md](boards.md) |
 | Orion O6N | `BOARD=o6n sh image/uefi-run.sh` (met `GUI=1` voor het glas) | `target/uefi-esp-o6n/` (naar een FAT32-stick, met `hopos.cfg` naast `EFI/`) | [boards.md](boards.md) |
 | Ampere Altra | `BOARD=altra sh image/uefi-run.sh` | `target/uefi-esp-altra/` | [boards.md](boards.md) |
-| Raspberry Pi 4 | `sh image/rpi4.sh` | `target/hopos-rpi4.img` (dd) | [boards-pi.md](boards-pi.md) |
-| Raspberry Pi 5 | `sh image/rpi5.sh` | `target/hopos-rpi5.img` (dd) | [boards-pi.md](boards-pi.md) |
-| Radxa Zero 3E | `sh image/radxa-zero3.sh` | `target/radxa-zero3/hopos-radxa-zero3.img` (dd) | [boards-radxa.md](boards-radxa.md) |
+| Raspberry Pi 4 | `sh image/rpi4.sh` (met `GUI=1` voor het glas) | `target/hopos-rpi4.img` (dd) | [boards-pi.md](boards-pi.md) |
+| Raspberry Pi 5 | `sh image/rpi5.sh` (met `GUI=1` voor het glas) | `target/hopos-rpi5.img` (dd) | [boards-pi.md](boards-pi.md) |
+| Radxa Zero 3E | `sh image/radxa-zero3.sh` (met `GUI=1` voor het glas) | `target/radxa-zero3/hopos-radxa-zero3.img` (dd) | [boards-radxa.md](boards-radxa.md) |
 | QEMU virt riscv64 | `sh tools/qemu-riscv-test.sh` | draait meteen (machine mode, `-bios none`) | [boards-riscv.md](boards-riscv.md) |
 | LicheeRV Nano (SG2002) | `sh image/licheerv-agent.sh` | `target/licheerv/fip-licheerv.bin` (naar de FAT-bootpartitie) | [boards-riscv.md](boards-riscv.md) |
 | Mac mini M4 (t8132) | `sh image/apple-m4.sh` | `target/apple-m4/hopos-apple.img` (via m1n1: `image/apple/boot-cycle.sh`) | [boards-apple.md](boards-apple.md) |
-| Kern-flip-bundel | `HOPOS_STAMP=B sh image/flip-bundle.sh <virt\|uefi\|o6n\|altra\|rpi4\|rpi5\|radxa>` | `target/hopos-<board>.flip` plus `.sha256` | [flip.md](flip.md) |
+| Kern-flip-bundel | `HOPOS_STAMP=B sh image/flip-bundle.sh <virt\|uefi\|o6n\|altra\|rpi4\|rpi5\|radxa>` (met `GUI=1` voor de gui-smaak) | `target/hopos-<board>.flip` plus `.sha256` | [flip.md](flip.md) |
 
 Hop zelf komt uit de hop-repo (`agentd-hopos`); de image-scripts bouwen
 hem via `HOP_DIR` en bakken hem in als bewoner. Secure Boot moet uit op de

@@ -13,33 +13,50 @@ MSI-X via de MIP, DHCP, `HOPOS_OS_SELFTEST ok`, Hop met de MMU aan als
 leader, welcome geplaatst op core 1 en de pagina door de DNAT bij de Mac,
 twee kern-flips op ijzer (generatie 2 en 3, Hop en welcome meegenomen), en
 na de tweede flip (alpha.17: de NAT ARP't naar de gateway) SNTP gelukt
-(`HOP_CLOCK_SYNCED`, stratum 2, 7,8 ms) en TCP naar buiten het LAN.
+(`HOP_CLOCK_SYNCED`, stratum 2, 7,8 ms) en TCP naar buiten het LAN. De derde
+flip (generatie 4, de gui-smaak: `GUI=1 sh image/flip-bundle.sh rpi5`) zette
+de console op het glas (`HOPOS_FB_CONSOLE`, 1920x1080, 120x67 cellen; de
+bunny en de meetregels gezien op de HDMI) en bracht beide RP1-xHCI's op
+(`HOPOS_USB_UP`).
 
 - [ ] Off-link TCP is nog wisselvallig: van drie downloadpogingen naar
       buiten kwam er één tot HTTP 403 (verbinding stond) en twee gaven
       `deadline exceeded`. Observeren met de tellers; mogelijk de
       first-contact-ARP of de verse gateway-neighbor die verloopt.
-- [ ] Hardware-RNG voor de slots (zie Overal).
-- [ ] Watchdog, thermiek en klok via de mailbox (nu alleen haken:
-      `HOPOS_WD_NONE`, `HOPOS_CLOCK_NONE`, `temp=-`).
-- [ ] De console op het glas: het Pi-image bouwt kaal; `image/rpi5.sh` heeft
-      geen `GUI=1`.
-- [ ] USB: RP1 usb0/usb1 zijn bedraad maar nooit gezien; HID en de
-      display-app.
-- [ ] NVMe op de Pi 5 (geen schijf: Hop bewaart geen staat over een herstart).
+- [ ] Hardware-RNG voor de slots (zie Overal); de RNG200 van de SoC (Go:
+      OLD/metal/board/raspi/rng.go) is niet geport, dus `HOPOS_RNG_INSECURE`.
+- [ ] De wandklok gaat niet mee over de flip: Hop had hem gezet
+      (`HOPOS_CLOCK_SET`), generatie 4 begon weer op 2026-09-29T00:00:00Z en
+      het glas toonde 29-09 00:00:40 (gezien 30-09). Sinds stempel E zit de
+      offset in de overdracht (`Handoff::wall_off`); generatie 5 landde nog
+      met `HOPOS_CLOCK_FIXED` omdat de vertrekkende kern hem nog niet
+      schreef. Te bewijzen: `HOPOS_CLOCK_CARRIED` bij de flip naar 6.
+- [ ] Watchdog en dvfs (Go: OLD/metal/board/raspi/watchdog.go en
+      OLD/metal/driver/dvfs): nu alleen haken (`HOPOS_WD_NONE`,
+      `HOPOS_CLOCK_NONE`).
+- [ ] De SD-kaart draagt nog de kale kern (alpha.17): `GUI=1 sh image/rpi5.sh`
+      en opnieuw flashen, anders is de console na een herstart weg.
+- [ ] USB: de xHCI's staan, maar nog geen HID gezien (niets ingeplugd) en
+      geen display-app.
 - [ ] "saved agent state not restored: store i/o failed" hoort "geen schijf"
-      te zeggen.
+      te zeggen. Geen NVMe op de Pi 5: bewust niet.
 - [ ] De koude flip weigert zodra er ooit een app-core draaide (CPU_OFF komt
       op de Pi 5 niet terug).
 
 ### Raspberry Pi 4 (pi4-1)
 
-Nog niet geboot. Image: `image/rpi4.sh` (`EXTRA="hopos.insecure=1 hopos.node=pi4-1"`).
+Geboot op 30-09 met de kale kern (alpha.17, `image/rpi4.sh` met
+`EXTRA="hopos.insecure=1 hopos.node=pi4-1"`): Hop als leider op
+192.168.1.40 en welcome via de DNAT (HTTP 200), zonder seriële console aan
+de Mac.
 
-- [ ] Eerste boot: bunny, `HOPOS_BOOT`, genet op de level-SPI met de ack,
-      `HOPOS_OS_SELFTEST ok` (de kick op de GIC-400), `HOP_UP`, welcome.
-- [ ] VL805-USB met de firmware-handshake via vcmail (nooit gezien).
-- [ ] Zelfde punten als de Pi 5: off-link NAT, RNG, mailbox-watchdog, glas.
+- [ ] De USB-UART aan de Mac, dan de bootregels lezen: `HOPOS_BOOT`, genet
+      op de level-SPI met de ack, `HOPOS_OS_SELFTEST ok` (de kick op de
+      GIC-400), `HOP_UP`.
+- [ ] De gui-smaak via een flip (`GUI=1 sh image/flip-bundle.sh rpi4`): het
+      glas, en VL805-USB met de firmware-handshake via vcmail (nooit gezien).
+- [ ] Zelfde punten als de Pi 5: off-link NAT, RNG, watchdog, dvfs, de
+      SD-kaart in de gui-smaak.
 
 ### Radxa Zero 3E (radxa-1)
 

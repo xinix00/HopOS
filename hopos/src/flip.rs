@@ -304,6 +304,7 @@ pub(crate) fn land(x0: u64) -> Option<Handoff> {
             GENERATION.store(h.generation, Relaxed);
             SUM.store(h.bundle_sum, Relaxed);
             COLD_LANDED.store(true, Relaxed);
+            crate::clock::restore(h.wall_off);
             println!(
                 "flip: landed cold, generation {} from a {} MB kernel at {:#x}: no residents to adopt, this kernel installs its own switch code and starts Hop from the staging HOPOS_FLIP_BOOT gen={} HOPOS_FLIP_COLD_BOOT",
                 h.generation,
@@ -318,6 +319,7 @@ pub(crate) fn land(x0: u64) -> Option<Handoff> {
         Ok(Boot::Adopted(mut h)) => {
             GENERATION.store(h.generation, Relaxed);
             SUM.store(h.bundle_sum, Relaxed);
+            crate::clock::restore(h.wall_off);
             println!(
                 "flip: landed, generation {} from a {} MB kernel at {:#x}, {} resident(s), {} NAT flow(s), {} B agent state HOPOS_FLIP_BOOT gen={}",
                 h.generation,
@@ -1119,6 +1121,7 @@ fn handoff_and_jump(p: Prepared, slots: Vec<SlotState>, nat: kernflip::NatState)
         nat,
         agent: Vec::new(),
         cold: p.cold,
+        wall_off: crate::clock::offset(),
     };
     let blob = match kernflip::encode(&h, HANDOFF_TAIL) {
         Ok(b) => b,

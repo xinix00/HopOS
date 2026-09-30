@@ -7,6 +7,10 @@
 #   APP=appspike image/rpi5.sh       appspike, twee keer door de kern geplaatst
 #   APP=/pad/naar/elf image/rpi5.sh  een kant-en-klare ELF (rol app)
 #   APP= image/rpi5.sh               zonder image
+#   GUI=1 image/rpi5.sh              de gui-smaak (`--features gui`, docs/gui.md):
+#                                    de console op het glas via de VideoCore-
+#                                    mailbox, de RP1-xHCI's voor de invoer, en de
+#                                    framebuffer-grant aan een display-app
 #   FW=pad image/rpi5.sh             waar bcm2712-rpi-5-b.dtb en
 #                                    overlays/bcm2712d0.dtbo liggen (standaard
 #                                    OLD/sd-rpi5; herkomst in
@@ -33,7 +37,11 @@ CARD="$DIR/target/hopos-rpi5.img"
 STAGE_MAX=14680064 # 0x1000_0000 - 0x0F20_0000 (board_raspi::map::STAGE_MAX)
 
 cd "$DIR"
-cargo build --quiet --release --target "$TARGET" -p hopos --features board-rpi5
+FEATURE=board-rpi5
+if [ "${GUI:-0}" = 1 ]; then
+	FEATURE="$FEATURE,gui"
+fi
+cargo build --quiet --release --target "$TARGET" -p hopos --features "$FEATURE"
 OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
 if [ -z "$OBJCOPY" ]; then
 	echo "rpi5: rust-objcopy missing (rustup component add llvm-tools)" >&2

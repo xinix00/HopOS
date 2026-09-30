@@ -42,7 +42,7 @@ use driver_pl011::Pl011;
 // De twee xHCI's in de RP1 (usb.rs).
 mod usb;
 
-pub use board_raspi::{DMA, Disk, KERN_RAM};
+pub use board_raspi::{DMA, Disk, KERN_RAM, temp_millic};
 
 /// De debug-UART (PL011, de 3-pins JST-SH-connector; Linux ttyAMA10). De
 /// firmware zet hem op 115200 zodra hij zelf logt (`uart_2ndstage=1`).

@@ -16,6 +16,10 @@
 #                                        horen daar, niet in de repo)
 #   NODE=radxa-2 image/...               een andere hopos.node in de APPEND
 #   RADXA_DONOR=pad image/...            een eigen donor-boot-blok
+#   GUI=1 image/...                      de gui-smaak (`--features gui`,
+#                                        docs/gui.md): de console op het glas
+#                                        via VOP2 en HDMI, de DWC3's voor de
+#                                        invoer, en de framebuffer-grant
 #
 # Uitvoer in target/radxa-zero3/: hopos.elf, hopos.img (het arm64-Image),
 # hop.elf (het image van de bewoner, gestript), hopos.cfg, hopos.ird (de
@@ -54,8 +58,12 @@ mkdir -p "$OUT"
 echo "== cargo build (board-rk3566)" >&2
 # Een eigen target-map: een build voor een ander board in de gedeelde map
 # zou anders het ELF onder deze stap vervangen (dezelfde binary-naam).
+FEATURE=board-rk3566
+if [ "${GUI:-0}" = 1 ]; then
+	FEATURE="$FEATURE,gui"
+fi
 (cd "$DIR" && cargo build --release --target "$TARGET" \
-	--target-dir "$OUT/cargo" -p hopos --features board-rk3566)
+	--target-dir "$OUT/cargo" -p hopos --features "$FEATURE")
 ELF="$OUT/cargo/$TARGET/release/hopos"
 cp "$ELF" "$OUT/hopos.elf"
 

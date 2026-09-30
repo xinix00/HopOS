@@ -97,6 +97,14 @@ pub struct Handoff {
     /// boot koud (eigen switch-code, Hop koud uit de staging) en draagt
     /// alleen de generatie en de som verder (`hopos/src/flip.rs`).
     pub cold: bool,
+    /// De wandklok van de vertrekkende kern: Unix-nanoseconden bij
+    /// tellerstand 0 (`hopos/src/clock.rs`), zoals Hop hem via SNTP zette.
+    /// De teller loopt door de sprong heen door, dus de offset blijft
+    /// geldig; zonder dit veld begon elke nieuwe generatie weer op de vaste
+    /// boot-klok (gezien 30-09 op de Pi 5: 29-09 00:00:40 op het glas). 0 =
+    /// geen klok. Additief binnen versie 6, op het kopwoord na de vlaggen
+    /// ([`WALL_OFF_OFF`]): een oudere kern schrijft daar nul.
+    pub wall_off: u64,
 }
 
 /// De vlaggen van het blob, in het eerste vrije kopwoord ([`FLAGS_OFF`]).
@@ -106,6 +114,8 @@ pub struct Handoff {
 const FLAGS_OFF: usize = 72;
 /// Vlag: een koude flip ([`Handoff::cold`]).
 const FLAG_COLD: u64 = 1;
+/// Het kopwoord met de wandklok ([`Handoff::wall_off`]), na de vlaggen.
+const WALL_OFF_OFF: usize = FLAGS_OFF + 8;
 
 fn put(b: &mut Vec<u8>, s: &[u8]) -> Result {
     b.try_reserve(s.len())
@@ -146,10 +156,11 @@ pub fn encode(h: &Handoff, max: usize) -> Result<Vec<u8>> {
         h.generation,
         h.bundle_sum,
         if h.cold { FLAG_COLD } else { 0 },
+        h.wall_off,
     ] {
         put64(&mut b, v)?;
     }
-    put(&mut b, &[0; HAND_HEAD - FLAGS_OFF - 8])?;
+    put(&mut b, &[0; HAND_HEAD - WALL_OFF_OFF - 8])?;
     for s in &h.slots {
         for v in [
             s.slot as u64,
@@ -294,6 +305,7 @@ pub fn decode(b: &[u8]) -> Result<Handoff> {
         return Err(Error::Corrupt { at: FLAGS_OFF });
     }
     h.cold = flags & FLAG_COLD != 0;
+    h.wall_off = r.u64()?;
     r.pos = HAND_HEAD;
     for _ in 0..n {
         if r.left() < SLOT_HEAD as u64 {
@@ -1046,10 +1058,29 @@ mod tests {
             total: 0x0F20_0000,
             generation: 2,
             slots: vec![first, st(7, 0x9000_0000, 48, 3)],
+            wall_off: 1_790_767_915_253_886_881,
             ..Handoff::default()
         };
         let b = encode(&h, HANDOFF_TAIL).unwrap();
         assert_eq!(decode(&b).unwrap(), h);
+    }
+
+    #[test]
+    fn a_blob_from_before_the_wall_clock_gives_no_clock() {
+        // Een kern van vóór 30-09 schrijft nul op het kopwoord: dat is
+        // "geen klok", en de rest van het blob blijft wat het was.
+        let h = Handoff {
+            generation: 3,
+            slots: vec![st(1, 0xBC00_0000, 64, 1)],
+            wall_off: 1_790_767_915_253_886_881,
+            ..Handoff::default()
+        };
+        let mut b = encode(&h, HANDOFF_TAIL).unwrap();
+        b[WALL_OFF_OFF..WALL_OFF_OFF + 8].fill(0);
+        let d = decode(&b).unwrap();
+        assert_eq!(d.wall_off, 0);
+        assert_eq!(d.slots, h.slots);
+        assert_eq!(d.generation, 3);
     }
 
     #[test]

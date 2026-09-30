@@ -7,6 +7,10 @@
 #   APP=appspike image/rpi4.sh       appspike, twee keer door de kern geplaatst
 #   APP=/pad/naar/elf image/rpi4.sh  een kant-en-klare ELF (rol app)
 #   APP= image/rpi4.sh               zonder image
+#   GUI=1 image/rpi4.sh              de gui-smaak (`--features gui`, docs/gui.md):
+#                                    de console op het glas via de VideoCore-
+#                                    mailbox, de VL805 over PCIe voor de invoer, en de
+#                                    framebuffer-grant aan een display-app
 #   FW=pad image/rpi4.sh             waar start4.elf, fixup4.dat,
 #                                    bcm2711-rpi-4-b.dtb en bl31.bin liggen
 #                                    (standaard OLD/sd-rpi4; herkomst en het
@@ -33,7 +37,11 @@ CARD="$DIR/target/hopos-rpi4.img"
 STAGE_MAX=14680064 # 0x1000_0000 - 0x0F20_0000 (board_raspi::map::STAGE_MAX)
 
 cd "$DIR"
-cargo build --quiet --release --target "$TARGET" -p hopos --features board-rpi4
+FEATURE=board-rpi4
+if [ "${GUI:-0}" = 1 ]; then
+	FEATURE="$FEATURE,gui"
+fi
+cargo build --quiet --release --target "$TARGET" -p hopos --features "$FEATURE"
 OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
 if [ -z "$OBJCOPY" ]; then
 	echo "rpi4: rust-objcopy missing (rustup component add llvm-tools)" >&2
