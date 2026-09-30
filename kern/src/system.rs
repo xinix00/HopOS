@@ -1758,10 +1758,22 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             return Err(Error::Full { cap: MAX_STREAMS }.into());
         }
         let placement = placement(&req)?;
+        // De partitie van een flipbundel bemeet de kern zelf: de bundel
+        // plus de ABI-staart, op hele 2 MB. Wat Hop vraagt is een
+        // ondergrens, geen maat: een Hop die precies `bundel + staart`
+        // vroeg, kreeg na de guard-pagina 4 KiB te weinig en elke flip werd
+        // geweigerd ("length 2252800 exceeds 2248704", de O6N 30-09).
+        let mem = if req.job == FLIP_BUNDLE_JOB {
+            req.memory_limit
+                .max(req.image_size.saturating_add(ABI_TAIL))
+                .next_multiple_of(2 << 20)
+        } else {
+            req.memory_limit
+        };
         let env = try_vec(req.env)?;
         let job = try_vec(req.job)?;
         let slot = self.free_slot(reply).await?;
-        let mut spec = StartSpec::new(slot, req.memory_limit, placement);
+        let mut spec = StartSpec::new(slot, mem, placement);
         spec.job = job;
         spec.ports = start_ports(&req)?;
         spec.mounts = start_mounts(&req)?;

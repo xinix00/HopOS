@@ -207,9 +207,12 @@ De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
 - [ ] **1 ms per switch-oversteek** bij connect en close: rtt app naar de
       kern 1068 tot 1980 µs (Go 156 tot 201), naar Hop 2 ms; een open
       verbinding is snel (Stat 60 µs, ping app naar app 78 µs). De tik:
-      `sw(timer=)` loopt mee met elke handshake. App naar app pull op de
-      Radxa 6,5 MB/s met 759 timer-wekken/s en 0 kicks. Agent bezig
-      (net/src Pump, hopos/src/net.rs, applib appnet.rs).
+      `sw(timer=)` loopt mee met elke handshake. Fix dbc522f (de deur van
+      de switch om de slaper): QEMU rtt 2238 → 115 µs, pull 6,9 → 62,9
+      MB/s; op ijzer (stempel H) Pi 4 rtt 1476 → 133 µs, Radxa 1984 → 365
+      µs. Nog te meten: pull app naar app op ijzer, de O6N (koude boot met
+      de nieuwe kern nodig: zijn Hop kan geen flip plaatsen tot de
+      kern-fix voor de bundelpartitie erop staat).
 - [ ] **App-opslag O6N** (1 MiB-calls): schrijven 197, lezen 93 MB/s (Go 557
       tot 625 / 727 tot 797); alleen transport kern naar app 300 MB/s; een
       4 KiB-read 1,1 ms. Eerst de switch-timer, dan opnieuw meten.
