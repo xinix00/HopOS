@@ -19,8 +19,9 @@
 //! 2. **De yield.** Deelt dit slot zijn core (`CtrlShared`), of vraagt het
 //!    board om yield-idle (`CtrlIdleMode`, Apple silicon: op de M4 slaapt een
 //!    app-core op EL1 niet, gemeten 02-09), dan HVC #1 met de wektijd.
-//! 3. **WFE** op de event-stream, tot er echt geslapen is (zie
-//!    [`AppSleeper::wfe_sleep`]).
+//! 3. **WFE** op de event-stream, tot er werk is of de deadline verstreek
+//!    (zie [`AppSleeper::wfe_sleep`]): een wek zonder werk is geen ronde
+//!    van de executor.
 //!
 //! De verloren-wek-race: een app-core draait met de interrupts permanent
 //! gemaskeerd (hij heeft geen vectoren; de deurbel-als-vFIQ is niet
@@ -34,6 +35,7 @@ use crate::contract::RX_ARMED;
 use crate::ctrl::Ctrl;
 use crate::ring::Peek;
 use core::cell::Cell;
+use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use executor::Sleeper;
 use sync::{Local, Signal};
 
@@ -93,13 +95,20 @@ pub fn watch_rx(door: RxDoor) {
     RX_DOOR.get().set(Some(door));
 }
 
-/// De grens tussen "de WFE slikte alleen een verschaald event" en "de core
-/// heeft echt geslapen", in tikken. Het is een TIJD, ~2 µs: de vaste 64
-/// tikken van vroeger waren op de M4 (1 GHz) 64 ns, minder dan de WFE zelf,
-/// en dan spinde de core (3,6M wakes/s, gemeten 29-08). 64 blijft de bodem.
-#[must_use]
-pub fn wfe_min_sleep(hz: u64) -> u64 {
-    (hz / 500_000).max(64)
+/// De slaap van de secundaire cores van deze app, in tikken: elke
+/// `crate::smp::CoreSleeper` telt de zijne erbij, en de primaire publiceert
+/// hem met de eigen slaap in `CtrlIdle`.
+pub(crate) static SECONDARY_IDLE: AtomicU64 = AtomicU64::new(0);
+
+/// WFE's tot `woke()` of tot de teller `deadline` haalt; de tikken die ze
+/// duurden. De lus van [`AppSleeper::wfe_sleep`] en van de secundaire
+/// cores (`crate::smp::CoreSleeper`).
+pub(crate) fn wfe_until<I: Idle>(idle: &mut I, deadline: u64, woke: &dyn Fn() -> bool) -> u64 {
+    let mut slept: u64 = 0;
+    while !woke() && idle.counter() < deadline {
+        slept = slept.saturating_add(idle.wfe());
+    }
+    slept
 }
 
 /// De slaap van een app-core.
@@ -107,7 +116,6 @@ pub struct AppSleeper<I: Idle = Hw> {
     ctrl: Ctrl,
     idle: I,
     door: &'static DoorSlot,
-    min_sleep: u64,
     idle_ticks: u64,
     wakes: u64,
 }
@@ -123,12 +131,10 @@ impl AppSleeper<Hw> {
 impl<I: Idle> AppSleeper<I> {
     /// Een slaper met core `idle` (een nep-core in de tests).
     pub fn with(ctrl: Ctrl, idle: I) -> Self {
-        let min_sleep = wfe_min_sleep(idle.counter_hz());
         Self {
             ctrl,
             idle,
             door: &RX_DOOR,
-            min_sleep,
             idle_ticks: 0,
             wakes: 0,
         }
@@ -171,6 +177,13 @@ impl<I: Idle> AppSleeper<I> {
         true
     }
 
+    /// `CtrlIdle` en `CtrlWakes`: de idle-tijd van alle cores van de app
+    /// (deze plus [`SECONDARY_IDLE`]), de wekken van deze.
+    fn publish(&self) {
+        let idle = self.idle_ticks.wrapping_add(SECONDARY_IDLE.load(Relaxed));
+        self.ctrl.publish_idle(idle, self.wakes);
+    }
+
     /// Ontwapent de deurbel na de slaap en belt als er iets ligt.
     fn disarm(&self, d: RxDoor) {
         self.ctrl.set_rx_door(0);
@@ -179,23 +192,28 @@ impl<I: Idle> AppSleeper<I> {
         }
     }
 
-    /// WFE's tot er echt geslapen is. De lus is nodig omdat het
-    /// event-register vrijwel altijd vol zit als we hier komen: elke
-    /// exclusive (onze eigen atomics) zet op de N1 een wek-event, en de
-    /// eerste WFE keert dan meteen terug (gemeten 18-07 op de Altra: 4,7M
-    /// wakes/s, slaap 0,0 µs). Maar een snelle terugkeer kan ook de échte bel
-    /// zijn (een SEV van de kern), en die slikten we tot 04-09 weg: 6% van
-    /// de system calls kostte 1 ms in plaats van 20 µs. Dus na elke WFE
-    /// kijken of er werk of een verstreken deadline is.
+    /// WFE's tot er werk is of tot `deadline` (tellerstand). Werk is een
+    /// klare taak, RX in de ring (de deurbel: de kick van de kern is een
+    /// SEV), of een kern die de core nu gedeeld of in yield-modus wil.
+    ///
+    /// Na elke WFE kijken, want een snelle terugkeer kan de échte bel zijn
+    /// (tot 04-09 slikten we die weg: 6% van de system calls kostte 1 ms in
+    /// plaats van 20 µs). Maar een wek zónder werk (de tik van de
+    /// event-stream, een SEV die voor een ander was) gaat meteen de volgende
+    /// WFE in, niet terug naar de executor: Linux' `do_idle`. Tot 30-09 was
+    /// elke echte WFE een ronde, en maakte een stille app-core 1.011 (Pi 4)
+    /// tot 3.003 (Radxa) rondes per seconde van 5 tot 10 µs. Tussen twee
+    /// WFE's staan alleen loads en cache-onderhoud, geen exclusive die het
+    /// event-register weer vult (Altra 18-07: 4,7M wakes/s).
     pub fn wfe_sleep(&mut self, deadline: u64, ready: &dyn Fn() -> bool) -> u64 {
-        let mut slept: u64 = 0;
-        for _ in 0..4 {
-            slept = slept.saturating_add(self.idle.wfe());
-            if slept >= self.min_sleep || ready() || self.idle.counter() >= deadline {
-                break;
-            }
-        }
-        slept
+        let (ctrl, door) = (&self.ctrl, self.door.get().get());
+        let woke = || {
+            ready()
+                || door.is_some_and(|d| d.peek.head_pending().1)
+                || ctrl.is_shared()
+                || ctrl.is_yield_mode()
+        };
+        wfe_until(&mut self.idle, deadline, &woke)
     }
 
     /// De slaap zelf, zonder deurbel: yield of WFE.
@@ -226,12 +244,12 @@ impl<I: Idle> Sleeper for AppSleeper<I> {
         if let Some(d) = door
             && !self.arm(d)
         {
-            self.ctrl.publish_idle(self.idle_ticks, self.wakes);
+            self.publish();
             return;
         }
         let slept = self.nap(now, until, ready);
         self.idle_ticks = self.idle_ticks.wrapping_add(slept);
-        self.ctrl.publish_idle(self.idle_ticks, self.wakes);
+        self.publish();
         if let Some(d) = door {
             self.disarm(d);
         }
@@ -241,9 +259,7 @@ impl<I: Idle> Sleeper for AppSleeper<I> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::{
-        CTRL_IDLE, CTRL_IDLE_MODE, CTRL_RX_DOOR, CTRL_SHARED, CTRL_WAKES, IDLE_YIELD,
-    };
+    use crate::contract::{CTRL_IDLE_MODE, CTRL_RX_DOOR, CTRL_SHARED, CTRL_WAKES, IDLE_YIELD};
     use crate::ctrl::tests::Page;
     use crate::ring::tests::Backing;
     use crate::ring::{Kind, Writer};
@@ -291,19 +307,45 @@ mod tests {
         assert_eq!(p.word(CTRL_WAKES), 1);
     }
 
+    /// Een wek zonder werk (de event-stream, een vreemde SEV) is geen
+    /// ronde: de slaper WFE't door tot de deadline, en telt één wek.
     #[test]
-    fn wfe_loop_stops_once_it_really_slept() {
+    fn a_wake_without_work_sleeps_on_to_the_deadline() {
         let p = Page::new();
-        // 1 GHz: de grens is 2.000 tikken. Snelle terugkeren van 100 tikken
-        // (verschaalde events) tellen door tot vier pogingen.
-        let mut s = AppSleeper::with(p.ctrl(), fake(100));
-        s.sleep(0, Some(1_000_000), &|| false);
-        assert_eq!(s.idle().wfes, 4);
-        let mut s = AppSleeper::with(p.ctrl(), fake(5_000));
-        s.sleep(0, Some(1_000_000), &|| false);
+        // 1 GHz, een event-stream-tik per 1,048 ms (de M4-keuze), een
+        // deadline over 50 ms (de heartbeat): 48 WFE's, één wek.
+        let mut s = AppSleeper::with(p.ctrl(), fake(1_048_576));
+        s.sleep(0, Some(50_000_000), &|| false);
+        assert_eq!(s.idle().wfes, 48);
+        assert_eq!(p.word(CTRL_WAKES), 1);
+        assert_eq!(s.idle_ticks(), 48 * 1_048_576);
+        // Werk na de derde wek: daar houdt hij op.
+        let mut s = AppSleeper::with(p.ctrl(), fake(1_000));
+        let n = Cell::new(0u32);
+        s.sleep(0, Some(50_000_000), &|| {
+            n.set(n.get() + 1);
+            n.get() > 4 // de toets van `nap` en drie na een WFE
+        });
+        assert_eq!(s.idle().wfes, 3);
+    }
+
+    /// Wordt de core gedeeld terwijl hij in WFE ligt, dan houdt de lus op
+    /// en yieldt de volgende ronde: de buur wacht niet tot de deadline.
+    #[test]
+    fn a_core_that_becomes_shared_stops_the_wfe_loop() {
+        let p = Page::new();
+        let ctrl = p.ctrl();
+        let mut s = AppSleeper::with(ctrl, fake(1_000));
+        let n = Cell::new(0u32);
+        s.sleep(0, Some(50_000_000), &|| {
+            n.set(n.get() + 1);
+            if n.get() == 3 {
+                // De kern plaatst een buur op deze core.
+                dev::write64(ctrl.addr(CTRL_SHARED), 1);
+            }
+            false
+        });
         assert_eq!(s.idle().wfes, 1);
-        assert_eq!(s.idle_ticks(), 5_000);
-        assert_eq!(p.word(CTRL_IDLE), 5_000);
     }
 
     #[test]

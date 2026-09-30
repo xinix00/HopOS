@@ -20,7 +20,10 @@ use netdev::{Device, TxError};
 use sync::spsc::{Receiver, Sender};
 use sync::{Either, Signal, Stop, select, yield_now};
 
-/// De vangrail op de NIC-interrupt.
+/// De vangrail op de NIC-interrupt. Op het raster van 10 ms sinds boot,
+/// hetzelfde als de vangrail van de servicers (`kern::slots::SERVICER_GUARD`):
+/// dan kosten ze samen één wek per 10 ms in plaats van elk één (Linux:
+/// `round_jiffies`; QEMU 30-09: een stille OS-core ~250 naar ~210).
 pub const IRQ_GUARD: Duration = Duration::from_millis(10);
 
 /// De poll-periode zonder interrupt.
@@ -155,9 +158,12 @@ impl<'a, D: Device> Pump<'a, D> {
             self.stats.rx_idle.fetch_add(1, Relaxed);
             let stopped = match irq {
                 Some(line) => {
+                    let grid = u64::try_from(IRQ_GUARD.as_nanos()).unwrap_or(u64::MAX);
+                    let guard =
+                        exec.until((exec.now() / grid).saturating_add(1).saturating_mul(grid));
                     let w = select(
                         stop.wait(),
-                        select(self.bell.wait(), select(line.wait(), exec.after(IRQ_GUARD))),
+                        select(self.bell.wait(), select(line.wait(), guard)),
                     );
                     matches!(w.await, Either::Left(()))
                 }

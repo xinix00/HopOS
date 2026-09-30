@@ -48,6 +48,13 @@ const TX_BACKPRESSURE: u64 = 10_000_000;
 /// zoals de waker die al heeft; korter zou pollen zijn, 10 ms een zichtbare
 /// hik in elk request. Weg zodra een app-core HOP een IPI kan sturen, en
 /// zolang [`Stats::work_by_timer`] zegt dat hij nog geraakt wordt.
+///
+/// Hij is uitstelbaar (`Executor::after_deferrable`): hij vuurt in elke
+/// ronde die de core toch draait, maar wekt een slapende core niet. Wie
+/// slaapt, heeft de [`Doorbell`] al: die kijkt vóór en tijdens elke slaap in
+/// de TX-ringen. Als gewone timer wekte hij een stille OS-core elke
+/// milliseconde, met `by failsafe 0/s` (QEMU 30-09: ~710 naar ~450 wekken
+/// per seconde), en via de SEV van elke wek ook elke app-core in WFE.
 pub const FAILSAFE: Duration = Duration::from_millis(1);
 
 /// De diepte van de brievenbus van de switch.
@@ -687,7 +694,7 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
                 stop.wait(),
                 select(
                     commands.recv(),
-                    select(self.door.wait(), exec.after(FAILSAFE)),
+                    select(self.door.wait(), exec.after_deferrable(FAILSAFE)),
                 ),
             )
             .await;

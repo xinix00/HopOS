@@ -142,6 +142,18 @@ unsafe fn wake(p: *const ()) {
 
 unsafe fn drop_waker(_: *const ()) {}
 
+/// Eén plaats in het timerwiel.
+struct Timer {
+    /// De deadline, in nanoseconden op de klok.
+    at: u64,
+    /// De generatie van de registratie (zie `Executor::timer_gen`).
+    owner: u32,
+    /// Uitstelbaar: telt niet mee voor de slaap (zie
+    /// [`Executor::after_deferrable`]).
+    deferrable: bool,
+    waker: Waker,
+}
+
 /// Een executor met plaats voor `TASKS` taken en `TIMERS` lopende timers.
 ///
 /// Leeft voor altijd: in de kern een `static` in een [`sync::Local`], in
@@ -149,7 +161,7 @@ unsafe fn drop_waker(_: *const ()) {}
 pub struct Executor<const TASKS: usize = 512, const TIMERS: usize = 256> {
     slots: [Slot; TASKS],
     spawn: Mailbox<Task, 64>,
-    timers: RefCell<[Option<(u64, u32, Waker)>; TIMERS]>,
+    timers: RefCell<[Option<Timer>; TIMERS]>,
     /// De generatie van de volgende registratie: elke plaats in het wiel
     /// draagt de generatie van zijn huidige bewoner, zodat een `After` die
     /// zijn plaats al kwijt is (verlopen, hergebruikt) nooit die van een
@@ -206,11 +218,25 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
     /// Slaapt `d` lang op het timerwiel.
     pub fn after(&'static self, d: Duration) -> After<TASKS, TIMERS> {
         let ns = u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
-        After {
-            exec: self,
-            deadline: self.now().saturating_add(ns),
-            slot: None,
-        }
+        self.until(self.now().saturating_add(ns))
+    }
+
+    /// Als [`after`](Self::after), maar uitstelbaar (Linux:
+    /// `TIMER_DEFERRABLE`): hij vuurt in de eerste ronde na zijn deadline,
+    /// maar wekt een slapende core niet. [`next_deadline`](Self::next_deadline)
+    /// ziet hem niet, dus de slaper slaapt door tot een echte timer, een
+    /// interrupt of een wek.
+    ///
+    /// Voor een vangnet dat alleen nodig is zolang de core bezig is: de
+    /// failsafe van de switch (net::switch) en de tik van de servicers
+    /// (kern::slots). Een core die slaapt heeft daar een deur of een
+    /// vangrail voor. Als gewone timers wekten ze een stille OS-core elke 1
+    /// en 2 ms (QEMU 30-09, Hop plus bench: ~710 wekken per seconde, erna
+    /// ~210).
+    pub fn after_deferrable(&'static self, d: Duration) -> After<TASKS, TIMERS> {
+        let mut a = self.after(d);
+        a.deferrable = true;
+        a
     }
 
     /// Slaapt tot tijdstip `deadline` (nanoseconden op de klok).
@@ -218,6 +244,7 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
         After {
             exec: self,
             deadline,
+            deferrable: false,
             slot: None,
         }
     }
@@ -228,13 +255,16 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
         !self.spawn.is_empty() || self.slots.iter().any(|s| s.ready.load(Acquire))
     }
 
-    /// De vroegste timer-deadline, als er een timer loopt.
+    /// De vroegste deadline van een timer die een slapende core mag wekken
+    /// (dus niet de [uitstelbare](Self::after_deferrable)).
     #[must_use]
     pub fn next_deadline(&self) -> Option<u64> {
         self.timers
             .borrow()
             .iter()
-            .filter_map(|e| e.as_ref().map(|(dl, _, _)| *dl))
+            .flatten()
+            .filter(|t| !t.deferrable)
+            .map(|t| t.at)
             .min()
     }
 
@@ -268,10 +298,10 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
         let mut worked = false;
         let mut timers = self.timers.borrow_mut();
         for entry in timers.iter_mut() {
-            if entry.as_ref().is_some_and(|(dl, _, _)| *dl <= now)
-                && let Some((_, _, w)) = entry.take()
+            if entry.as_ref().is_some_and(|t| t.at <= now)
+                && let Some(t) = entry.take()
             {
-                w.wake();
+                t.waker.wake();
                 worked = true;
             }
         }
@@ -335,6 +365,7 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
 pub struct After<const TASKS: usize, const TIMERS: usize> {
     exec: &'static Executor<TASKS, TIMERS>,
     deadline: u64,
+    deferrable: bool,
     /// De plaats in het wiel en de generatie waarmee wij hem namen.
     slot: Option<(usize, u32)>,
 }
@@ -351,7 +382,7 @@ impl<const TASKS: usize, const TIMERS: usize> Future for After<TASKS, TIMERS> {
         // Een plaats die wij eerder namen kan verlopen en hergebruikt zijn:
         // dan is de generatie erin niet meer de onze en zoeken we opnieuw.
         if let Some((i, g)) = this.slot
-            && timers[i].as_ref().is_none_or(|(_, owner, _)| *owner != g)
+            && timers[i].as_ref().is_none_or(|t| t.owner != g)
         {
             this.slot = None;
         }
@@ -363,7 +394,14 @@ impl<const TASKS: usize, const TIMERS: usize> Future for After<TASKS, TIMERS> {
             this.slot = Some((i, g));
         }
         match this.slot {
-            Some((i, g)) => timers[i] = Some((this.deadline, g, cx.waker().clone())),
+            Some((i, g)) => {
+                timers[i] = Some(Timer {
+                    at: this.deadline,
+                    owner: g,
+                    deferrable: this.deferrable,
+                    waker: cx.waker().clone(),
+                });
+            }
             None => {
                 // Geen timerslot: spin op ronde-korrel, en tel het.
                 this.exec.stats.timer_overflows.fetch_add(1, Relaxed);
@@ -384,7 +422,7 @@ impl<const TASKS: usize, const TIMERS: usize> Drop for After<TASKS, TIMERS> {
         // of de slot-keten).
         if let Some((i, g)) = self.slot.take() {
             let mut timers = self.exec.timers.borrow_mut();
-            if timers[i].as_ref().is_some_and(|(_, owner, _)| *owner == g) {
+            if timers[i].as_ref().is_some_and(|t| t.owner == g) {
                 timers[i] = None;
             }
         }
@@ -547,6 +585,39 @@ mod tests {
         assert_eq!(e.next_deadline(), Some(2_100), "b's timer was wiped");
         drop(b);
         assert_eq!(e.next_deadline(), None);
+    }
+
+    /// Een uitstelbare timer bepaalt de slaap niet, maar vuurt wel in de
+    /// eerste ronde na zijn deadline: de failsafe van de switch zonder de
+    /// 1000 wekken per seconde.
+    #[test]
+    fn a_deferrable_timer_does_not_set_the_sleep_but_fires_in_the_next_round() {
+        static CLOCK: AtomicU64 = AtomicU64::new(0);
+        static FIRED: AtomicU64 = AtomicU64::new(0);
+        fn clock() -> u64 {
+            CLOCK.load(SeqCst)
+        }
+        let e: &'static Executor<8, 4> = Box::leak(Box::new(Executor::new()));
+        e.set_clock(clock);
+        CLOCK.store(1_000, SeqCst);
+        e.spawn(async move {
+            e.after_deferrable(Duration::from_nanos(100)).await;
+            FIRED.fetch_add(1, SeqCst);
+            e.after(Duration::from_nanos(1_000)).await;
+            FIRED.fetch_add(1, SeqCst);
+        })
+        .unwrap();
+        assert!(e.step());
+        assert_eq!(e.next_deadline(), None, "a deferrable timer set the sleep");
+        CLOCK.store(5_000, SeqCst); // de core sliep lang door, iets anders wekte
+        assert!(e.step()); // de uitstelbare vuurt
+        while e.step() {}
+        assert_eq!(FIRED.load(SeqCst), 1);
+        assert_eq!(e.next_deadline(), Some(6_000)); // een gewone telt weer
+        CLOCK.store(6_000, SeqCst);
+        while e.step() {}
+        assert_eq!(FIRED.load(SeqCst), 2);
+        assert_eq!(e.live_tasks(), 0);
     }
 
     #[test]

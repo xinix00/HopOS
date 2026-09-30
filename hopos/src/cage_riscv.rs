@@ -1079,6 +1079,10 @@ impl Timer for ExecTimer {
     fn sleep(&self, d: Duration) -> impl Future<Output = ()> {
         self.0.after(d)
     }
+
+    fn sleep_deferrable(&self, d: Duration) -> impl Future<Output = ()> {
+        self.0.after_deferrable(d)
+    }
 }
 
 /// De console van de kern: `cpu::println!`, en een app-regel als

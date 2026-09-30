@@ -311,6 +311,12 @@ pub trait Timer {
     fn now(&self) -> u64;
     /// Slaap `d`.
     fn sleep(&self, d: Duration) -> impl Future<Output = ()>;
+    /// Slaap `d`, maar wek er geen slapende core voor: de timer loopt af in
+    /// de eerste ronde na `d` (`Executor::after_deferrable`, Linux'
+    /// `TIMER_DEFERRABLE`). Zonder eigen vorm gewoon [`sleep`](Self::sleep).
+    fn sleep_deferrable(&self, d: Duration) -> impl Future<Output = ()> {
+        self.sleep(d)
+    }
 }
 
 #[cfg(test)]

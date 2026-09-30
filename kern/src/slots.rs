@@ -77,8 +77,17 @@ pub const REVOKE_GRACE: Duration = Duration::from_secs(1);
 /// logs van de echte app (gemeten 30-07: de stervensreden van welcome bleef
 /// in de ring staan).
 pub const IDLE_GRACE: Duration = Duration::from_secs(2);
-/// De tik van een servicer zonder werk.
+/// De tik van een servicer zonder werk. Uitstelbaar (`Timer::sleep_deferrable`):
+/// hij kijkt elke 2 ms zolang de core toch wakker is, maar wekt hem er niet
+/// voor. Als gewone timer was hij tot 500 wekken per seconde per slot van
+/// een stille OS-core (QEMU 30-09, Hop plus bench: ~450 naar ~250).
 pub const SERVICER_TICK: Duration = Duration::from_millis(2);
+/// De vangrail van een servicer op een stille core: hooguit zo lang ligt
+/// een logregel, een SMP-verzoek of een dode context ongezien. Op een raster
+/// (een veelvoud van 10 ms sinds boot), zodat de servicers van alle slots
+/// samen één wek per 10 ms kosten in plaats van één elk (Linux:
+/// `round_jiffies`).
+pub const SERVICER_GUARD: Duration = Duration::from_millis(10);
 /// Hoeveel records de servicer achter elkaar leest voordat hij de executor
 /// een ronde geeft. Les van 30-09 (de soak): een app die zijn outbox volschrijft,
 /// hield de servicer in één poll tot de ring leeg was, en daarmee de hele
@@ -662,7 +671,10 @@ async fn serve<'a, O: Outbox, T: Timer, L: Console, const N: usize>(
                 return;
             }
         }
-        if let Either::Left(()) = select(ctl.stop.wait(), timer.sleep(SERVICER_TICK)).await {
+        let grid = SERVICER_GUARD.as_nanos() as u64;
+        let guard = Duration::from_nanos(grid - timer.now() % grid);
+        let tick = select(timer.sleep_deferrable(SERVICER_TICK), timer.sleep(guard));
+        if let Either::Left(()) = select(ctl.stop.wait(), tick).await {
             return;
         }
     }

@@ -373,8 +373,10 @@ extern "C" fn secondary_main(k: u64) -> ! {
 
 /// De slaap van een secundaire core: een yield naar de switcher of WFE,
 /// zoals de control-page zegt, begrensd op [`SECONDARY_NAP`]. Geen
-/// deurbel (alleen de primaire leest de RX-ring) en geen tellers op de
-/// page (die zijn van de primaire).
+/// deurbel (alleen de primaire leest de RX-ring) en geen eigen woorden op
+/// de page: zijn slaap telt hij bij in `sleep::SECONDARY_IDLE`, en de
+/// primaire publiceert de som (`CtrlIdle` is de idle-tijd van álle cores
+/// van de app; de dvfs van de kern deelt door `CtrlCores`).
 ///
 /// Is de app weg (de primaire zette `Exited`, of de kern vraagt de stop),
 /// dan gaat deze core ook: HVC #0, en de switcher meldt zijn context dood
@@ -383,7 +385,6 @@ extern "C" fn secondary_main(k: u64) -> ! {
 pub struct CoreSleeper<I: crate::sleep::Idle> {
     ctrl: Ctrl,
     idle: I,
-    min_sleep: u64,
     /// Keren geslapen.
     pub naps: u64,
 }
@@ -391,11 +392,9 @@ pub struct CoreSleeper<I: crate::sleep::Idle> {
 impl<I: crate::sleep::Idle> CoreSleeper<I> {
     /// Een slaper op de control-page `ctrl`, met core `idle`.
     pub fn new(ctrl: Ctrl, idle: I) -> Self {
-        let min_sleep = crate::sleep::wfe_min_sleep(idle.counter_hz());
         Self {
             ctrl,
             idle,
-            min_sleep,
             naps: 0,
         }
     }
@@ -421,17 +420,20 @@ impl<I: crate::sleep::Idle> CoreSleeper<I> {
         let hz = self.idle.counter_hz();
         let deadline = clock::wake_at(now, Some(until), self.idle.counter(), hz);
         self.naps = self.naps.wrapping_add(1);
-        if self.ctrl.is_shared() || self.ctrl.is_yield_mode() {
-            self.idle.hvc_yield(deadline);
-            return;
-        }
-        let mut slept: u64 = 0;
-        for _ in 0..4 {
-            slept = slept.saturating_add(self.idle.wfe());
-            if slept >= self.min_sleep || ready() || self.idle.counter() >= deadline {
-                break;
-            }
-        }
+        let slept = if self.ctrl.is_shared() || self.ctrl.is_yield_mode() {
+            self.idle.hvc_yield(deadline)
+        } else {
+            // Tot werk of de deadline (sleep::wfe_until): een wek zonder werk
+            // is geen ronde. Een stop of een buur ziet hij hooguit
+            // SECONDARY_NAP later, zoals voorheen de vangrail.
+            let ctrl = &self.ctrl;
+            let woke = || ready() || ctrl.is_shared() || ctrl.is_yield_mode();
+            crate::sleep::wfe_until(&mut self.idle, deadline, &woke)
+        };
+        // Tot 30-09 telde niemand deze slaap: een stille tweecore-app las
+        // voor de dvfs als half bezig ("busy slot 2 (544 permille idle)" op
+        // de Pi 4 en 5), en de kern bleef op 1500 MHz.
+        crate::sleep::SECONDARY_IDLE.fetch_add(slept, Relaxed);
     }
 }
 
@@ -479,6 +481,14 @@ mod entry {
         ".global __applib_smp_start",
         "__applib_smp_start:",
         "    msr daifset, #0xf",
+        "    mov x9, #0x300000",
+        "    msr cpacr_el1, x9",
+        "    isb",
+        // Als `.inst`: de assembler van het softfloat-target kent fpcr en
+        // fpsr niet als doel, de hardware wel (MSR S3_3_C4_C4_0 en _1).
+        "    .inst 0xd51b441f",
+        "    .inst 0xd51b443f",
+        "    isb",
         "    cbz x7, 1f",
         "    msr vbar_el1, x7",
         "1:  cbz x4, 2f",
@@ -536,7 +546,7 @@ mod entry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::{CTRL_IDLE_MODE, CTRL_KILL, CTRL_STATUS, IDLE_YIELD};
+    use crate::contract::{CTRL_IDLE, CTRL_IDLE_MODE, CTRL_KILL, CTRL_STATUS, IDLE_YIELD};
     use crate::ctrl::tests::Page;
     use crate::sleep::Idle;
     use alloc::boxed::Box;
@@ -675,12 +685,33 @@ mod tests {
         // Werk: niet slapen.
         s.sleep(0, None, &|| true);
         assert_eq!(s.idle().yields.len(), 3);
-        // Zonder yield-modus: WFE tot er echt geslapen is.
+        // Zonder yield-modus: WFE tot de vangrail (10 ms in stappen van
+        // 5 µs), één ronde; de slaap telt mee in SECONDARY_IDLE.
         let p = Page::new();
         let mut s = CoreSleeper::new(p.ctrl(), Fake::default());
+        let before = crate::sleep::SECONDARY_IDLE.load(Relaxed);
         s.sleep(0, None, &|| false);
-        assert_eq!(s.idle().wfes, 1);
+        assert_eq!(s.idle().wfes, 2_000);
+        assert_eq!(s.naps, 1);
         assert!(s.idle().yields.is_empty());
+        assert!(crate::sleep::SECONDARY_IDLE.load(Relaxed) - before >= 10_000_000);
+    }
+
+    /// De dvfs van de kern leest `CtrlIdle` als de idle-tijd van álle cores
+    /// (hij deelt door `CtrlCores`): de primaire publiceert zijn eigen slaap
+    /// plus die van de secundaire. Tot 30-09 alleen de eigen, en een stille
+    /// tweecore-app las als "544 permille idle", dus druk.
+    #[test]
+    fn the_primary_publishes_the_sleep_of_every_core() {
+        use crate::sleep::AppSleeper;
+        let page = Page::new();
+        let mut second = CoreSleeper::new(page.ctrl(), Fake::default());
+        second.sleep(0, Some(1_000_000), &|| false); // 1 ms, 200 WFE's
+        let mut first = AppSleeper::with(page.ctrl(), Fake::default());
+        first.sleep(0, Some(1_000_000), &|| false);
+        assert_eq!(first.idle_ticks(), 1_000_000);
+        // Andere tests tellen tegelijk mee in dezelfde static: minstens.
+        assert!(page.word(CTRL_IDLE) >= 2_000_000);
     }
 
     #[test]

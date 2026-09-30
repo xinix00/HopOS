@@ -110,17 +110,34 @@ pub const fn merge_event_stream(old: u64, stream: u64) -> u64 {
     (old & !EVENT_STREAM_BITS) | (stream & EVENT_STREAM_BITS)
 }
 
-/// De grens in ticks tussen "de WFE slikte alleen een verschaald event" en
-/// "de core heeft echt geslapen": ~2 µs, met 64 ticks als bodem.
+/// De WFE-slaap: WFE's tot `ready()` of tot de teller `deadline` haalt, en
+/// de tijd die ze duurden (ticks). `wfe` en `counter` zijn de instructies;
+/// een test geeft een nep-core.
 ///
-/// Het getal is TIJD, geen tikken: 64 ticks was 1-2,5 µs op de
-/// 25-64 MHz-tellers waarvoor het geschreven werd, maar op de M4's 1 GHz 64
-/// nanoseconden, minder dan de WFE zelf kost; de drain-lus hield dan op
-/// vóór de core ooit sliep (gemeten 29-08: 3,6M wakes/s bij 33% "slaap").
-#[must_use]
-pub const fn wfe_min_sleep(hz: u64) -> u64 {
-    let t = hz / 500_000;
-    if t > 64 { t } else { 64 }
+/// Een wek die geen werk bracht (de tik van de event-stream, de SEV van een
+/// andere core, een verschaald event) gaat niet terug naar de executor maar
+/// meteen de volgende WFE in: Linux' `do_idle`, dat blijft liggen zolang
+/// `need_resched()` niets zegt. Tot 30-09 keerde de slaap na elke echte WFE
+/// terug, en elke event-stream-tik werd een ronde van de executor: ~830
+/// rondes per seconde op een stille Pi (de event-stream van 1,2 ms), met
+/// daarbovenop elke SEV van de kern (de Radxa-app: 3.003 per seconde).
+///
+/// Tussen twee WFE's staan alleen kale loads (`ready()` belooft dat, net als
+/// de teller): een exclusive zou het event-register weer vullen en de
+/// volgende WFE meteen laten terugkeren (Altra 18-07, 4,7M wakes/s). De
+/// eerste WFE mag wel meteen terugkeren op een event van vóór de slaap; de
+/// tweede slaapt.
+pub fn wfe_until(
+    deadline: u64,
+    ready: &dyn Fn() -> bool,
+    wfe: &mut dyn FnMut() -> u64,
+    counter: &dyn Fn() -> u64,
+) -> u64 {
+    let mut slept: u64 = 0;
+    while !ready() && counter() < deadline {
+        slept = slept.saturating_add(wfe());
+    }
+    slept
 }
 
 /// Monotone nanoseconden sinds het aanzetten van de teller: de
@@ -152,8 +169,10 @@ pub fn freq() -> u64 {
 /// Hoe een core slaapt als hij niets te doen heeft.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// WFE, begrensd door de event-stream (~1 ms): de default, want hij
-    /// wekt op elk silicium dat we kennen (behalve de M4, zie `Yield`).
+    /// WFE tot werk of de deadline ([`wfe_until`]), met de event-stream
+    /// (~1 ms) als klok: de default, want hij wekt op elk silicium dat we
+    /// kennen (behalve de M4, zie `Yield`). Zonder deadline houdt
+    /// [`WFI_CAP_NS`] de vangrail.
     Wfe,
     /// WFI met de fysieke timer op de deadline. Alleen kiezen waar het board
     /// bewezen heeft dat de timer-PPI de WFI wekt: een slaap die niet wekt
@@ -202,7 +221,6 @@ pub struct Stats {
 pub struct ArmSleeper {
     mode: Mode,
     hz: u64,
-    min_sleep: u64,
     shared: Option<Pa>,
     publish_idle: Option<Pa>,
     publish_wakes: Option<Pa>,
@@ -232,7 +250,6 @@ impl ArmSleeper {
         Self {
             mode,
             hz,
-            min_sleep: wfe_min_sleep(hz),
             shared: None,
             publish_idle: None,
             publish_wakes: None,
@@ -280,32 +297,6 @@ impl ArmSleeper {
             Mode::Wfi => Mode::Wfi,
             Mode::Wfe | Mode::Resident | Mode::Yield => Mode::Wfe,
         }
-    }
-
-    /// WFE's tot er écht geslapen is, of tot `ready()`, of tot de deadline.
-    ///
-    /// De lus is nodig omdat het event-register vrijwel altijd vol zit als
-    /// we hier komen: elke exclusive (onze eigen atomics) zet op de N1 een
-    /// wek-event, en de eerste WFE keert daardoor per direct terug (GEMETEN
-    /// 18-07 op de Altra: 4,7M wakes/s, slaap 0,0 µs). De herhaalde WFE
-    /// slaapt wél. Tussen twee pogingen toetsen we `ready()`: een snelle
-    /// terugkeer is meestal een verschaald event, maar soms de échte bel
-    /// (een SEV van een andere core, een interrupt) en die werd tot 04-09
-    /// weggeslikt, waarna de volgende WFE tot de event-stream-tik sliep: 6%
-    /// van de system calls 1 ms in plaats van 20 µs. En de deadline: dat was
-    /// de milliseconde op élke NIC-interrupt (O6N 18-09: rtt p50 1010 µs
-    /// tegen 152 µs gepold).
-    fn wfe_sleep(&self, deadline: Option<u64>, ready: &dyn Fn() -> bool) -> u64 {
-        let mut slept = 0;
-        let mut tries = 0;
-        while slept < self.min_sleep && tries < 4 {
-            slept += arch::wfe();
-            tries += 1;
-            if ready() || deadline.is_some_and(|d| arch::counter() >= d) {
-                break;
-            }
-        }
-        slept
     }
 
     /// De yield-wektijd: 0 = nu, anders de counterstand van de deadline,
@@ -376,11 +367,28 @@ impl ArmSleeper {
     ) -> u64 {
         match mode {
             Mode::Wfe | Mode::Resident => {
+                // WFE wekt alleen op een ongemaskeerde interrupt: open. Een
+                // interrupt tussen de toets en de WFE eindigt in een
+                // exception return, en die zet het event-register.
                 arch::restore(daif);
-                let deadline = until.map(|u| deadline_ticks(now, u, self.hz));
-                self.wfe_sleep(deadline, ready)
+                let cap = now.saturating_add(WFI_CAP_NS);
+                let u = until.map_or(cap, |u| u.min(cap));
+                wfe_until(
+                    deadline_ticks(now, u, self.hz),
+                    ready,
+                    &mut arch::wfe,
+                    &arch::counter,
+                )
             }
             Mode::Wfi => {
+                // Nog één toets, nu de kick scherp staat (`resident` zette
+                // `listen` net): een app die vóór `listen` publiceerde en
+                // kickte, zag nog geen bel en stuurde geen IPI. Die viel tot
+                // 30-09 op de failsafe van 1 ms; die wekt nu niet meer.
+                if ready() {
+                    arch::restore(daif);
+                    return 0;
+                }
                 let cap = now.saturating_add(WFI_CAP_NS);
                 let u = until.map_or(cap, |u| u.min(cap));
                 let slept = arch::wfi_until(deadline_ticks(now, u, self.hz));
@@ -690,11 +698,35 @@ mod tests {
         }
     }
 
+    /// Een event-stream-tik zonder werk is geen ronde van de executor: de
+    /// slaap WFE't door tot de deadline, of tot er werk ligt.
     #[test]
-    fn min_sleep_is_time_not_ticks() {
-        assert_eq!(wfe_min_sleep(54_000_000), 108);
-        assert_eq!(wfe_min_sleep(25_000_000), 64);
-        assert_eq!(wfe_min_sleep(1_000_000_000), 2000);
+    fn a_wake_without_work_sleeps_on() {
+        use core::cell::Cell;
+        // De Pi: 54 MHz, een event-stream-tik elke 65.536 ticks (1,2 ms).
+        let now = Cell::new(0u64);
+        let wfes = Cell::new(0u32);
+        let mut wfe = || {
+            wfes.set(wfes.get() + 1);
+            now.set(now.get() + 65_536);
+            65_536
+        };
+        let counter = || now.get();
+        // 10 ms (540.000 ticks) zonder werk: negen WFE's, één terugkeer.
+        let slept = wfe_until(540_000, &|| false, &mut wfe, &counter);
+        assert_eq!(wfes.get(), 9);
+        assert_eq!(slept, 9 * 65_536);
+        // Werk na de derde wek: daar houdt hij op.
+        now.set(0);
+        wfes.set(0);
+        let ready = || wfes.get() >= 3;
+        wfe_until(540_000, &ready, &mut wfe, &counter);
+        assert_eq!(wfes.get(), 3);
+        // Werk vooraf of een verstreken deadline: geen WFE.
+        wfes.set(0);
+        assert_eq!(wfe_until(540_000, &|| true, &mut wfe, &counter), 0);
+        assert_eq!(wfe_until(0, &|| false, &mut wfe, &counter), 0);
+        assert_eq!(wfes.get(), 0);
     }
 
     #[test]
