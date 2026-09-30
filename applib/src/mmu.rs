@@ -318,7 +318,8 @@ pub(crate) mod tables {
         }
 
         /// Mapt `[lo, hi)` (4 KB-gealigneerd) op zichzelf met `attr`: hele
-        /// 2 MB-blokken als blok, de randen als pagina's.
+        /// 1 GB- en 2 MB-blokken als blok, de randen als pagina's. Zo past
+        /// ook een grote codec-partitie in de 64 KB tabelruimte.
         pub(crate) fn map(&mut self, lo: u64, hi: u64, attr: u64) -> Result<(), MmuError> {
             if !lo.is_multiple_of(PAGE) || !hi.is_multiple_of(PAGE) {
                 return Err(MmuError::Tables);
@@ -329,6 +330,11 @@ pub(crate) mod tables {
                     .ok()
                     .filter(|i| *i < 512)
                     .ok_or(MmuError::Tables)?;
+                if a.is_multiple_of(GIB) && hi - a >= GIB && self.mem.get(0, l1) == 0 {
+                    self.mem.set(0, l1, a | attr | DESC_BLOCK);
+                    a += GIB;
+                    continue;
+                }
                 let l2page = self.child(0, l1)?;
                 let l2 = ((a % GIB) / BLOCK) as usize;
                 if a.is_multiple_of(BLOCK) && hi - a >= BLOCK {

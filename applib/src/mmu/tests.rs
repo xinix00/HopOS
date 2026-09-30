@@ -27,6 +27,9 @@ impl TableMem for Pages {
 /// pagina) voor `va`, of `None` als stage 1 hem niet vertaalt.
 fn walk(t: &Tables<Pages>, va: u64) -> Option<u64> {
     let l1 = t.mem.get(0, (va / GIB) as usize);
+    if l1 & 0b11 == DESC_BLOCK {
+        return Some(l1);
+    }
     if l1 & 0b11 != DESC_TABLE {
         return None;
     }
@@ -137,6 +140,29 @@ fn the_glass_joins_the_same_tables_as_normal_nc() {
     assert_eq!(walk(&t, hi), None, "past the glass");
     // De rest van de map is onveranderd.
     assert_eq!(attr(walk(&t, LINK_BASE + LINK_TEXT_OFF).unwrap()), IDX_WB);
+}
+
+#[test]
+fn large_codec_partitions_keep_cached_ram_and_exact_tail_boundaries() {
+    for gib in [8, 16, 32] {
+        for size in [gib * GIB, gib * GIB - ABI_TAIL] {
+            let p = Plan::new(LINK_BASE, size).unwrap();
+            let t = Tables::of(Pages::default(), &p).unwrap();
+            assert!(t.used <= 6, "{} table pages for {size} bytes", t.used);
+            for a in (LINK_BASE.next_multiple_of(GIB)..p.ram.1 - GIB).step_by(GIB as usize) {
+                let e = walk(&t, a).unwrap();
+                assert_eq!(e & OA, a);
+                assert_eq!(e & 3, DESC_BLOCK);
+                assert_eq!(attr(e), IDX_WB);
+                assert_eq!(e & PXN, 0);
+            }
+            assert_eq!(attr(walk(&t, p.ram.1 - PAGE).unwrap()), IDX_WB);
+            assert_eq!(attr(walk(&t, p.ctrl.0).unwrap()), IDX_NC);
+            assert_eq!(attr(walk(&t, p.rings.0).unwrap()), IDX_WB);
+            assert_eq!(walk(&t, p.rings.1), None);
+            assert_eq!(walk(&t, LINK_BASE - PAGE), None);
+        }
+    }
 }
 
 #[test]
