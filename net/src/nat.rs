@@ -1037,7 +1037,20 @@ impl Nat {
             return false;
         }
         if flags & TCP_RST != 0 {
-            return !reverse;
+            if reverse {
+                // Een inbound RST: de flow blijft voor late pakketten
+                // (zonder sequence-tracking weet de NAT niet of de
+                // ontvanger hem accepteert), maar telt als gesloten in
+                // beide richtingen: de sluit-TTL geldt en de recycler mag
+                // hem bij een volle tabel nemen. Zonder dit bleef een
+                // RST-gesloten flow TCP_IDLE (300 s) staan en liep de
+                // tabel van 512 per slot in een storm vol (Pi 5 en Pi 4,
+                // 30-09: HOPOS_MASQ_SLOT_FULL, de SYN pas na 1 s).
+                fl.fin_fwd = true;
+                fl.fin_rev = true;
+                return false;
+            }
+            return true;
         }
         if flags & TCP_FIN != 0 {
             if reverse {

@@ -428,6 +428,23 @@ fn tcp_fin_verkort_timeout_pas_na_beide_richtingen() {
 }
 
 #[test]
+fn tcp_inbound_rst_telt_als_gesloten() {
+    let (mut nat, mut io) = setup();
+    let base = 1_000 * SEC;
+    let id = flow_for(&mut nat, &mut io, PROTO_TCP, 1, 1001, EXT_IP, 443, base).unwrap();
+    assert!(
+        !nat.note_tcp_flags(id, TCP_RST | TCP_ACK, true),
+        "een inbound RST ruimt niet meteen op"
+    );
+    nat.sweep_expired(base + TCP_CLOSING_IDLE + 1);
+    assert_eq!(
+        (nat.flows.len(), nat.flows.count(1)),
+        (0, 0),
+        "een RST-gesloten flow verliep niet op de sluit-TTL"
+    );
+}
+
+#[test]
 fn tcp_rst_bezorging_en_veilige_reclaim() {
     // Outbound zonder flow.
     {
