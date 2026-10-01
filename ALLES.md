@@ -228,9 +228,20 @@ op `/dev/cu.kis-100000-ch-0`. Sinds 01-10 ook op het LAN: 5555, 8080,
       telkens achter. Fix: het transport eerlijk maken (kleinere brokken met
       een yield in de verbindingstaak en leannet); netklus, 50 tot 150
       regels, ongetoetst. Voor SQLite naast een bulk-lezer is dit het punt.
-- [ ] De hopfs-actor doet één call tegelijk: een flush van app A houdt app B
-      op. Echte parallelle calls vragen de splitsing in een metadata-actor en
-      een blok-actor (PORT.md §3). Groot.
+- [ ] **WEEKEND 4 en 5 oktober: de wachtrij naar de schijf.** De hopfs-actor
+      doet één call tegelijk, dus de node haalt 11.900 willekeurige 4 KiB-
+      leesopdrachten per seconde voor alle apps samen (één opdracht tegelijk
+      door de ANS, 84 µs); het ijzer kan er met wachtrijdiepte 100.000 tot
+      200.000. Voor 300 GB aan SQLite-databases per M4 (Derek, 01-10) is dit
+      het getal dat telt, niet de MB/s. De klus (400 tot 550 regels, zie de
+      schatting van 01-10): een blokdeur die N opdrachten tegelijk aanneemt
+      (per tag een ticket), hopfs lezen en schrijven gesplitst in een
+      synchroon plan en de I/O erbuiten (remove en truncate wachten tot het
+      stil is), de actor met meerdere datacalls in de lucht en OP_SYNC als
+      barrière, en de driver van twee naar zestien tags. Eerst meten met een
+      echte database van 100 GB of meer: pagina's per seconde, extents na het
+      vullen, de duur van een koude boot en een commit. Daarna, als het nog
+      nodig is: een paginacache in de kern voor het hete deel (24 GB RAM).
 - [ ] Rauw willekeurig 4 KiB schrijven 140k IOPS op M23 tegen 162k op M14,
       elk één monster per boot; sequentieel 4 KiB ging juist van 907 naar
       1160 MB/s. `TCB_STAT`: Linux leest 0x28120, HopOS 0x29120; werkt, maar
