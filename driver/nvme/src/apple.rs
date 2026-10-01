@@ -37,10 +37,10 @@
 //!
 //! Eén eigenaar met `&mut self`. De opstart, de GPT en het afsluiten wachten
 //! ter plekke op tag 0 (er draait dan nog niets anders). Het blokcontract
-//! wacht niet: `start` zet de opdracht op de controller en keert terug,
-//! `poll_done` haalt de completions op die er zijn (zie de impl van
-//! `blkdev::AsyncBlockDevice`). Daarnaast mag er één read-ahead in de lucht
-//! zijn: [`DEPTH`] tags, elk met een eigen helft van het datablok.
+//! wacht niet: een ticket zet de opdracht op de controller en keert terug,
+//! `reap` haalt de completions op die er zijn (zie de impl van
+//! `blkdev::AsyncBlockDevice`). [`DEPTH`] tags tegelijk, elk met zijn eigen
+//! pagina's van het datablok, en daarnaast hoogstens één read-ahead.
 
 use super::{COMMAND_TIMEOUT_NS, DATA_OFF, DATA_SIZE, MAX_TRANSFER, PAGE, Q_ENTRIES, SECTOR};
 use core::fmt;
@@ -265,14 +265,25 @@ const PER_BLOCK: u64 = BLOCK / SECTOR;
 /// niet mee.
 const SLOT: u16 = 0;
 
-/// Zoveel I/O-opdrachten van het blokcontract staan hoogstens tegelijk op de
-/// controller: de opdracht van de eigenaar plus één read-ahead. Elk heeft een
-/// eigen MiB van het datablok ([`DATA_SIZE`] is 2 MiB).
-pub const DEPTH: usize = 2;
+/// Zoveel I/O-opdrachten staan hoogstens tegelijk op de controller: de
+/// tickets van het blokcontract (tag = ticket) plus de read-ahead. Linux
+/// geeft de I/O-queue van de ANS 62 tags (`apple.c`, de admin-queue houdt
+/// 0 en 1; hier wacht de admin-queue alleen bij de opstart, als er niets
+/// anders loopt). Zestien is de diepte van de hopfs-actor (`FS_DEPTH`).
+/// GEMETEN 01-10 op de M4: tag 0 sinds 29-08, tag 1 sinds M26.
+pub const DEPTH: usize = 16;
 
-/// De tags van die opdrachten. Tag 0 is sinds 29-08 op ijzer bewezen, tag 1
-/// op 01-10 (M26: de read-ahead met de juiste bytes, zie [`write_sqe`]).
-const IO_TAGS: [u16; DEPTH] = [0, 1];
+/// De pagina's van het datablok: [`DATA_SIZE`] in stukken van [`PAGE`].
+/// Een opdracht krijgt er zoveel als hij nodig heeft, waar ze ook liggen
+/// (de PRP-lijst van zijn tag wijst ze aan, zoals Linux met een sg-lijst):
+/// zo passen één MiB voor de sequentiële lezer en vijftien opdrachten van
+/// 4 KiB samen in de 2 MiB die het board gecached mapt.
+const PAGES: usize = (DATA_SIZE / PAGE) as usize;
+/// Het hoogste aantal pagina's van één opdracht.
+const TAG_PAGES: usize = (MAX_TRANSFER / PAGE) as usize;
+/// Zoveel pagina's blijven na een read-ahead vrij voor andere opdrachten
+/// (256 KiB: zestien keer 4 KiB met ruimte).
+const AHEAD_RESERVE: usize = 64;
 
 /// Zonder lijn pollt de wachter zo lang per ronde van de executor: een
 /// opdracht van 4 KB is binnen ~10 us terug (M14: schrijven 4, lezen 9 us).
@@ -302,12 +313,18 @@ pub const DMA_ALIGN: u64 = 0x4000;
 const _: () = {
     // 128 bytes per SQE (IOSQES = 7 van iBoot) en per TCB passen in 16 KB.
     assert!(Q_ENTRIES as u64 * 128 <= 0x4000 && Q_ENTRIES as u64 * CQE <= 0x4000);
+    // Een PRP-lijst van een pagina per tag, vóór het datablok.
     assert!(PRP_OFF + DEPTH as u64 * PAGE <= DATA_OFF);
-    assert!(DEPTH as u64 * MAX_TRANSFER <= DATA_SIZE);
+    assert!((TAG_PAGES - 1) * 8 <= PAGE as usize);
+    // Een volle opdracht naast een volle read-ahead past, en een read-ahead
+    // laat de reserve over.
+    assert!(2 * TAG_PAGES <= PAGES && TAG_PAGES + AHEAD_RESERVE <= PAGES);
+    assert!(PAGES.is_multiple_of(64));
+    assert!(PAGES <= u16::MAX as usize);
     assert!(DATA_OFF.is_multiple_of(DMA_ALIGN));
-    // Tags binnen de tabel van de NVMMU, de tweede plek van een tag in de
-    // 16 KB van zijn queue.
-    assert!(IO_TAGS[DEPTH - 1] < Q_ENTRIES && (IO_TAGS[DEPTH - 1] as u64 + 1) * SQE <= 0x4000);
+    // Tags binnen de tabel van de NVMMU en binnen de 16 KB van hun queue.
+    assert!(DEPTH as u16 <= Q_ENTRIES && DEPTH as u64 * SQE <= 0x4000);
+    assert!(DEPTH <= blkdev::MAX_DEPTH);
 };
 
 /// Hoe lang de firmware mag doen over BOOT_STATUS na het gesprek.
@@ -568,8 +585,8 @@ struct Cmd {
 /// Waarvoor een I/O-opdracht op de controller staat.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Use {
-    /// De opdracht van de eigenaar: `poll_done` wacht erop.
-    Demand,
+    /// Een ticket van het blokcontract: een wachter wacht erop.
+    Ticket,
     /// Een read-ahead. `stale`: een schrijf raakte zijn blokken, of de
     /// eigenaar las iets anders; de bytes worden nooit gebruikt.
     Ahead {
@@ -578,14 +595,16 @@ enum Use {
     },
 }
 
-/// Eén I/O-opdracht op de controller, op tag `IO_TAGS[i]` met de `i`-de MiB
-/// van het datablok.
+/// Eén I/O-opdracht op de controller, op tag `i` met de pagina's van
+/// `pages[i]`.
 #[derive(Clone, Copy, Debug)]
 struct Inflight {
     opc: u8,
     /// Het eerste ANS-blok en het aantal bytes (0 bij een flush).
     block: u64,
     len: usize,
+    /// Hoeveel pagina's van het datablok hij houdt.
+    pages: usize,
     /// De LBA van het contract, voor de fout.
     lba: u64,
     t0: u64,
@@ -624,6 +643,13 @@ pub struct Ans<C: Coprocessor> {
     /// De I/O-opdrachten van het blokcontract die op de controller staan,
     /// per tag (zie de impl van `blkdev::AsyncBlockDevice`).
     inflight: [Option<Inflight>; DEPTH],
+    /// De vrije pagina's van het datablok (bit = vrij).
+    free: [u64; PAGES / 64],
+    /// Per tag de pagina's van zijn opdracht, in volgorde.
+    pages: [[u16; TAG_PAGES]; DEPTH],
+    /// Het ticket van de ene opdracht van [`blkdev::AsyncBlockDevice::start`]
+    /// (de meetbank en de tests); de wachtrij gebruikt de tickets zelf.
+    single: Option<usize>,
     /// Het blok waar de laatste lees van de eigenaar eindigde: begint de
     /// volgende daar, dan leest hij sequentieel en komt er een read-ahead.
     seq_end: u64,
@@ -680,6 +706,9 @@ impl<C: Coprocessor> Ans<C> {
             usable: (0, 0),
             window: None,
             inflight: [None; DEPTH],
+            free: [u64::MAX; PAGES / 64],
+            pages: [[0; TAG_PAGES]; DEPTH],
+            single: None,
             seq_end: u64::MAX,
             ahead_hits: 0,
             ahead_waste: 0,
@@ -735,6 +764,8 @@ impl<C: Coprocessor> Ans<C> {
         self.dead = false;
         self.window = None;
         self.inflight = [None; DEPTH];
+        self.free = [u64::MAX; PAGES / 64];
+        self.single = None;
         self.seq_end = u64::MAX;
         self.cop.boot().map_err(Error::Coprocessor)?;
 
@@ -1025,31 +1056,125 @@ impl<C: Coprocessor> Ans<C> {
         Ok(())
     }
 
-    /// De `i`-de MiB van het datablok: de buffer van `IO_TAGS[i]`.
-    fn buf(&self, i: usize) -> Pa {
-        self.data().add(i as u64 * MAX_TRANSFER)
+    /// Pagina `p` van het datablok.
+    fn page(&self, p: u16) -> Pa {
+        self.data().add(u64::from(p) * PAGE)
     }
 
-    /// De paginawijzers voor `n` bytes in buffer `i`, met de PRP-lijst van
-    /// die buffer.
+    /// Het aantal vrije pagina's.
+    fn free_pages(&self) -> usize {
+        self.free.iter().map(|w| w.count_ones() as usize).sum()
+    }
+
+    /// Geeft tag `i` zijn `n` pagina's: de laagste vrije, waar ze ook liggen.
+    /// `false` (en niets genomen) als er te weinig zijn. Met alles vrij zijn
+    /// dat de pagina's 0..n, aaneengesloten vanaf het begin van het blok
+    /// (de opstart leest de GPT zo).
+    fn take_pages(&mut self, i: usize, n: usize) -> bool {
+        if n > TAG_PAGES || self.free_pages() < n {
+            return false;
+        }
+        let Some(list) = self.pages.get_mut(i) else {
+            return false;
+        };
+        let mut k = 0;
+        for (w, word) in self.free.iter_mut().enumerate() {
+            while k < n && *word != 0 {
+                let b = word.trailing_zeros() as usize;
+                *word &= *word - 1;
+                if let Some(s) = list.get_mut(k) {
+                    *s = (w * 64 + b) as u16;
+                }
+                k += 1;
+            }
+        }
+        true
+    }
+
+    /// Geeft de `n` pagina's van tag `i` terug aan het blok.
+    fn put_pages(&mut self, i: usize, n: usize) {
+        let Some(list) = self.pages.get(i) else {
+            return;
+        };
+        for &p in list.iter().take(n) {
+            if let Some(w) = self.free.get_mut(usize::from(p) / 64) {
+                *w |= 1 << (p % 64);
+            }
+        }
+    }
+
+    /// De paginawijzers voor `n` bytes in de pagina's van tag `i`, met de
+    /// PRP-lijst van die tag.
     fn prps(&self, i: usize, n: u64) -> (u64, u64) {
-        let data = self.buf(i);
+        let Some(list) = self.pages.get(i) else {
+            return (0, 0);
+        };
+        let at = |k: usize| list.get(k).map_or(0, |&p| self.page(p).0);
         if n <= PAGE {
-            return (data.0, 0);
+            return (at(0), 0);
         }
         if n <= 2 * PAGE {
-            return (data.0, data.0 + PAGE);
+            return (at(0), at(1));
         }
-        let list = self.cfg.dma.add(PRP_OFF + i as u64 * PAGE);
-        dev::clear(list, PAGE as usize);
-        for p in 1..n.div_ceil(PAGE) {
-            dev::write64(list.add((p - 1) * 8), data.0 + p * PAGE);
+        let prp = self.cfg.dma.add(PRP_OFF + i as u64 * PAGE);
+        dev::clear(prp, PAGE as usize);
+        for k in 1..n.div_ceil(PAGE) as usize {
+            dev::write64(prp.add((k as u64 - 1) * 8), at(k));
         }
-        (data.0, list.0)
+        (at(0), prp.0)
     }
 
-    /// De opdracht over `len` bytes vanaf blok `block` via buffer `i`; de
-    /// grenzen van de schijf en de buffer getoetst.
+    /// De pagina's van tag `i` voor `len` bytes als aaneengesloten stukken:
+    /// (adres, bytes). Per stuk één cache-onderhoud met zijn barrières en één
+    /// kopie: per pagina kostte dat (GEMETEN 01-10, M27) een derde van het
+    /// leespad, 512 `dsb` per MiB. Met de laagste vrije pagina's eerst is een
+    /// opdracht bijna altijd één stuk.
+    fn runs(&self, i: usize, len: usize) -> impl Iterator<Item = (Pa, usize)> + '_ {
+        let list = self.pages.get(i).map_or(&[][..], |l| &l[..]);
+        let n = len.div_ceil(PAGE as usize).min(list.len());
+        let mut k = 0;
+        core::iter::from_fn(move || {
+            if k >= n {
+                return None;
+            }
+            let first = *list.get(k)?;
+            let mut m = 1;
+            while k + m < n && list.get(k + m) == Some(&(first + m as u16)) {
+                m += 1;
+            }
+            let at = k * PAGE as usize;
+            k += m;
+            Some((self.page(first), (m * PAGE as usize).min(len - at)))
+        })
+    }
+
+    /// Kopieert `data` in de pagina's van tag `i` en duwt ze naar het
+    /// geheugen (de controller leest buiten de cache).
+    fn fill(&self, i: usize, data: &[u8]) {
+        let mut at = 0;
+        for (pa, n) in self.runs(i, data.len()) {
+            if let Some(c) = data.get(at..at + n) {
+                dev::copy_in_normal(pa, c);
+                dev::push(pa, n);
+            }
+            at += n;
+        }
+    }
+
+    /// Kopieert de eerste `into.len()` bytes uit de pagina's van tag `i`.
+    fn drain(&self, i: usize, into: &mut [u8]) {
+        let mut at = 0;
+        for (pa, n) in self.runs(i, into.len()) {
+            if let Some(c) = into.get_mut(at..at + n) {
+                dev::pull(pa, n);
+                dev::copy_out_normal(c, pa);
+            }
+            at += n;
+        }
+    }
+
+    /// De opdracht over `len` bytes vanaf blok `block` via de pagina's van
+    /// tag `i`; de grenzen van de schijf getoetst.
     fn rw_cmd(&self, opc: u8, block: u64, len: usize, i: usize) -> Result<Cmd, C::Error> {
         let n = len as u64;
         let bad = Error::Range { block, len };
@@ -1073,11 +1198,22 @@ impl<C: Coprocessor> Ans<C> {
         })
     }
 
-    /// Eén opdracht die ter plekke wacht, via buffer 0 (de GPT bij de
-    /// opstart).
+    /// Eén opdracht die ter plekke wacht, met alles vrij: de pagina's 0..n
+    /// aan het begin van het datablok (de GPT bij de opstart, `read_at`).
+    /// De bytes staan daarna vanaf [`Self::data`]; de aanroeper leest ze.
     fn transfer(&mut self, opc: u8, block: u64, len: usize) -> Result<(), C::Error> {
-        let m = self.rw_cmd(opc, block, len, 0)?;
-        self.exec(false, m)
+        if self.inflight.iter().any(Option::is_some) || self.free_pages() != PAGES {
+            return Err(Error::Busy);
+        }
+        let n = len.div_ceil(PAGE as usize);
+        if !self.take_pages(0, n) {
+            return Err(Error::Range { block, len });
+        }
+        let r = self
+            .rw_cmd(opc, block, len, 0)
+            .and_then(|m| self.exec(false, m));
+        self.put_pages(0, n);
+        r
     }
 
     fn ready(&self) -> Result<(), C::Error> {
@@ -1295,22 +1431,19 @@ impl<C: Coprocessor> Ans<C> {
     }
 }
 
-/// Het I/O-pad van het blokcontract: opdrachten op de tags van
-/// [`IO_TAGS`], hoogstens één van de eigenaar ([`Use::Demand`]) en één
-/// read-ahead tegelijk. Niets hier wacht: `issue` zet een opdracht op de
-/// controller, `reap_io` haalt op wat terug is.
+/// Het I/O-pad van het blokcontract: tot [`DEPTH`] opdrachten tegelijk,
+/// elk op zijn eigen tag met zijn eigen pagina's ([`Use::Ticket`]), plus
+/// hoogstens één read-ahead ([`Use::Ahead`]). Niets hier wacht: `issue`
+/// zet een opdracht op de controller, `reap_io` haalt op wat terug is,
+/// `poll_ticket` rondt één ticket af.
 impl<C: Coprocessor> Ans<C> {
-    /// De index van de opdracht van de eigenaar.
-    fn demand(&self) -> Option<usize> {
-        self.inflight
-            .iter()
-            .position(|f| f.is_some_and(|f| f.use_ == Use::Demand))
-    }
-
-    /// Zet `m` op tag `IO_TAGS[i]` met buffer `i`.
+    /// Zet `m` op tag `i`; `f` houdt `f.pages` pagina's van die tag.
     fn issue(&mut self, i: usize, m: &Cmd, f: Inflight) -> Result<(), C::Error> {
-        let tag = IO_TAGS.get(i).copied().ok_or(Error::Busy)?;
-        self.post(false, tag, m)?;
+        let tag = u16::try_from(i).map_err(|_| Error::Busy)?;
+        if let Err(e) = self.post(false, tag, m) {
+            self.put_pages(i, f.pages);
+            return Err(e);
+        }
         if let Some(s) = self.inflight.get_mut(i) {
             *s = Some(Inflight {
                 t0: (self.now)(),
@@ -1321,37 +1454,54 @@ impl<C: Coprocessor> Ans<C> {
     }
 
     /// Haalt elke completion van de I/O-queue op die er is, en toetst de
-    /// time-out van wat nog loopt. Een completion voor een tag die niet in
-    /// de lucht is, of een opdracht over zijn grens, maakt de driver dood:
-    /// de controller kan dan nog in een buffer schrijven.
-    fn reap_io(&mut self) -> Result<(), C::Error> {
+    /// time-out van wat nog loopt. Geeft de tickets die klaar kwamen (bit
+    /// = tag). Een completion voor een tag die niet in de lucht is, of een
+    /// opdracht over zijn grens, maakt de driver dood: de controller kan dan
+    /// nog in een buffer schrijven.
+    fn reap_io(&mut self) -> Result<u64, C::Error> {
+        if self.dead {
+            return Err(Error::Dead);
+        }
+        let mut ready = 0u64;
+        let mut ahead_back = false;
         while let Some((cid, st)) = self.reap_one(false)? {
-            let i = IO_TAGS.iter().position(|&t| t == cid);
+            let i = usize::from(cid);
             let now = (self.now)();
-            let Some(f) = i
-                .and_then(|i| self.inflight.get_mut(i))
+            let Some(f) = self
+                .inflight
+                .get_mut(i)
                 .and_then(|s| s.as_mut().filter(|f| f.done.is_none()))
             else {
                 self.dead = true;
-                return Err(Error::Cid {
-                    got: cid,
-                    want: IO_TAGS[0],
-                });
+                return Err(Error::Cid { got: cid, want: 0 });
             };
             f.done = Some(st);
-            let (dt, stale) = (
-                now.saturating_sub(f.t0),
-                f.use_ == Use::Ahead { stale: true },
-            );
-            self.slowest_ns = self.slowest_ns.max(dt);
-            if stale && let Some(s) = i.and_then(|i| self.inflight.get_mut(i)) {
-                *s = None;
-                self.ahead_waste += 1;
+            let f = *f;
+            self.slowest_ns = self.slowest_ns.max(now.saturating_sub(f.t0));
+            match f.use_ {
+                Use::Ticket => ready |= 1 << i,
+                // Een read-ahead die niemand meer wil (geteld bij het
+                // onbruikbaar maken) of die faalde: weg.
+                Use::Ahead { stale } if stale || st != 0 => {
+                    self.release(i);
+                    self.ahead_waste += u64::from(!stale);
+                    ahead_back = true;
+                }
+                Use::Ahead { .. } => ahead_back = true,
+            }
+        }
+        if ahead_back {
+            // Een flush wacht op de read-ahead (zie `poll_ticket`): kijk hem
+            // opnieuw na.
+            for (i, f) in self.inflight.iter().enumerate() {
+                if f.is_some_and(|f| f.opc == IO_FLUSH && f.done.is_some()) {
+                    ready |= 1 << i;
+                }
             }
         }
         // Wat nog loopt, vraagt om de mailbox (een wachtende coprocessor doet
-        // geen DMA). Eerst de CQ, zoals de oude wachtlus: de mailbox kost
-        // Device-loads, en een completion die er al is wacht daar niet op.
+        // geen DMA). Eerst de CQ: de mailbox kost Device-loads, en een
+        // completion die er al is, wacht daar niet op.
         if self.inflight.iter().flatten().any(|f| f.done.is_none()) {
             self.service()?;
         }
@@ -1366,77 +1516,110 @@ impl<C: Coprocessor> Ans<C> {
             self.dead = true;
             return Err(Error::Timeout { opc });
         }
-        Ok(())
+        Ok(ready)
     }
 
-    /// Een vrije tag. Er is er altijd een: de eigenaar heeft hoogstens één
-    /// opdracht, en er is hoogstens één read-ahead ([`Self::read_ahead`]).
-    fn free_tag(&self) -> Result<usize, C::Error> {
-        self.inflight
-            .iter()
-            .position(Option::is_none)
-            .ok_or(Error::Busy)
+    /// Tag `i` en zijn pagina's weer vrij.
+    fn release(&mut self, i: usize) {
+        if let Some(f) = self.inflight.get_mut(i).and_then(Option::take) {
+            self.put_pages(i, f.pages);
+        }
+    }
+
+    /// Een vrije tag met `n` pagina's. Is er geen plaats, dan gaan eerst de
+    /// read-aheads weg die terug zijn (een lopende wordt onbruikbaar en
+    /// komt bij zijn completion vrij); daarna is het [`Error::Busy`] tot
+    /// een andere opdracht terug is.
+    fn room(&mut self, n: usize) -> Result<usize, C::Error> {
+        for again in [false, true] {
+            if again {
+                self.drop_aheads(None);
+            }
+            if let Some(i) = self.inflight.iter().position(Option::is_none)
+                && self.take_pages(i, n)
+            {
+                return Ok(i);
+            }
+        }
+        Err(Error::Busy)
     }
 
     /// Maakt de read-aheads onbruikbaar die `range` (eerste blok, aantal)
     /// raken, of allemaal bij `None`. Wat al terug is, gaat meteen weg; wat
     /// nog loopt, wordt weggegooid zodra het terugkomt.
     fn drop_aheads(&mut self, range: Option<(u64, u64)>) {
-        for s in &mut self.inflight {
-            let Some(f) = s else { continue };
+        for i in 0..DEPTH {
+            let Some(f) = self.inflight.get(i).copied().flatten() else {
+                continue;
+            };
             let hit = range.is_none_or(|(b, n)| {
                 b < f.block + f.len as u64 / BLOCK && f.block < b.saturating_add(n)
             });
             if f.use_ != (Use::Ahead { stale: false }) || !hit {
                 continue;
             }
+            self.ahead_waste += 1;
             if f.done.is_some() {
-                *s = None;
-                self.ahead_waste += 1;
-            } else {
-                f.use_ = Use::Ahead { stale: true };
+                self.release(i);
+            } else if let Some(Some(g)) = self.inflight.get_mut(i) {
+                g.use_ = Use::Ahead { stale: true };
             }
         }
     }
 
-    /// Een lees van de eigenaar: van de read-ahead als die precies deze
-    /// blokken leest (of las, zonder fout), anders een nieuwe opdracht.
-    fn start_read(&mut self, block: u64, len: usize, lba: u64) -> Result<(), C::Error> {
+    /// Een lees: van de read-ahead als die precies deze blokken leest (of
+    /// las, zonder fout), anders een nieuwe opdracht. Geeft de tag.
+    fn start_read(&mut self, block: u64, len: usize, lba: u64) -> Result<usize, C::Error> {
         self.ready()?;
-        let hit = self.inflight.iter_mut().flatten().find(|f| {
-            f.use_ == (Use::Ahead { stale: false })
-                && f.block == block
-                && f.len == len
-                && f.done.is_none_or(|s| s == 0)
+        let hit = self.inflight.iter().position(|f| {
+            f.is_some_and(|f| {
+                f.use_ == (Use::Ahead { stale: false })
+                    && f.block == block
+                    && f.len == len
+                    && f.done.is_none_or(|s| s == 0)
+            })
         });
-        if let Some(f) = hit {
-            f.use_ = Use::Demand;
+        if let Some(i) = hit
+            && let Some(Some(f)) = self.inflight.get_mut(i)
+        {
+            f.use_ = Use::Ticket;
             f.lba = lba;
             self.ahead_hits += 1;
-            return Ok(());
+            return Ok(i);
         }
-        self.drop_aheads(None);
-        let i = self.free_tag()?;
-        let m = self.rw_cmd(IO_READ, block, len, i)?;
-        self.issue(i, &m, inflight(IO_READ, block, len, lba, Use::Demand))
+        let n = len.div_ceil(PAGE as usize);
+        let i = self.room(n)?;
+        let m = match self.rw_cmd(IO_READ, block, len, i) {
+            Ok(m) => m,
+            Err(e) => {
+                self.put_pages(i, n);
+                return Err(e);
+            }
+        };
+        self.issue(i, &m, inflight(IO_READ, block, len, n, lba, Use::Ticket))?;
+        Ok(i)
     }
 
-    /// Een schrijf van de eigenaar: binnen het venster, de bytes nu in de
-    /// buffer van een vrije tag (daarna zijn ze van de aanroeper terug), en
-    /// een read-ahead over dezelfde blokken telt niet meer.
-    fn start_write(&mut self, block: u64, data: &[u8], lba: u64) -> Result<(), C::Error> {
+    /// Een schrijf: binnen het venster, de bytes nu in de pagina's van een
+    /// vrije tag (daarna zijn ze van de aanroeper terug), en een read-ahead
+    /// over dezelfde blokken telt niet meer.
+    fn start_write(&mut self, block: u64, data: &[u8], lba: u64) -> Result<usize, C::Error> {
         self.ready()?;
         self.check_window(block, data.len())?;
         self.drop_aheads(Some((block, data.len() as u64 / BLOCK)));
-        let i = self.free_tag()?;
-        let m = self.rw_cmd(IO_WRITE, block, data.len(), i)?;
-        dev::copy_in_normal(self.buf(i), data);
-        dev::push(self.buf(i), data.len());
-        self.issue(
-            i,
-            &m,
-            inflight(IO_WRITE, block, data.len(), lba, Use::Demand),
-        )
+        let n = data.len().div_ceil(PAGE as usize);
+        let i = self.room(n)?;
+        let m = match self.rw_cmd(IO_WRITE, block, data.len(), i) {
+            Ok(m) => m,
+            Err(e) => {
+                self.put_pages(i, n);
+                return Err(e);
+            }
+        };
+        self.fill(i, data);
+        let f = inflight(IO_WRITE, block, data.len(), n, lba, Use::Ticket);
+        self.issue(i, &m, f)?;
+        Ok(i)
     }
 
     /// Maakt alles wat de controller al bevestigde duurzaam (NVMe Flush).
@@ -1445,80 +1628,104 @@ impl<C: Coprocessor> Ans<C> {
     /// onverwachte opdracht kan de coprocessor omleggen). Met schrijven erbij
     /// kan dat niet meer: zonder flush is een geschreven boom niet duurzaam.
     /// Linux stuurt hem op dit pad gewoon (`drivers/nvme/host/apple.c`).
-    fn start_flush(&mut self) -> Result<(), C::Error> {
+    fn start_flush(&mut self) -> Result<usize, C::Error> {
         self.ready()?;
-        let i = self.free_tag()?;
+        let i = self.room(0)?;
         let m = Cmd {
             opc: IO_FLUSH,
             nsid: NSID,
             ..Cmd::default()
         };
-        self.issue(i, &m, inflight(IO_FLUSH, 0, 0, 0, Use::Demand))
+        self.issue(i, &m, inflight(IO_FLUSH, 0, 0, 0, 0, Use::Ticket))?;
+        Ok(i)
     }
 
     /// Na een lees van een volle hap die precies verder ging waar de vorige
     /// eindigde: de volgende hap alvast, op een vrije tag, binnen het
     /// venster. Zo leest de schijf de volgende MiB terwijl de kern deze naar
     /// de app brengt (GEMETEN 01-10: schijf 0,59 en transport 0,53 ms per
-    /// MiB, tot M21 na elkaar). Eén tegelijk; een fout hier is een dode
+    /// MiB, tot M21 na elkaar). Eén tegelijk, en alleen als er daarna nog
+    /// [`AHEAD_RESERVE`] pagina's vrij zijn: de read-ahead is een gok, de
+    /// opdrachten van anderen niet. Een vorige die terug is maar die niemand
+    /// las (de hap voorbij het eind van een bestand), maakt plaats: anders
+    /// hield hij zijn pagina's en kwam er nooit meer een (GEMETEN 01-10, M29:
+    /// de tweede run las zonder één treffer). Een fout hier is een dode
     /// driver en dat zegt de volgende opdracht.
     fn read_ahead(&mut self, block: u64, len: usize) {
         let Some(w) = self.window else { return };
         let end = block.saturating_add(len as u64 / BLOCK);
-        let busy = self
+        let n = len.div_ceil(PAGE as usize);
+        let running = self
             .inflight
             .iter()
             .flatten()
-            .any(|f| matches!(f.use_, Use::Ahead { .. }));
+            .any(|f| matches!(f.use_, Use::Ahead { .. }) && f.done.is_none());
+        if running || end > w.first + w.blocks {
+            return;
+        }
+        self.drop_aheads(None);
+        if self.free_pages() < n + AHEAD_RESERVE {
+            return;
+        }
         let Some(i) = self.inflight.iter().position(Option::is_none) else {
             return;
         };
-        if busy || end > w.first + w.blocks {
+        if !self.take_pages(i, n) {
             return;
         }
         let lba = (block - w.first) * PER_BLOCK;
-        if let Ok(m) = self.rw_cmd(IO_READ, block, len, i) {
-            let f = inflight(IO_READ, block, len, lba, Use::Ahead { stale: false });
-            let _ = self.issue(i, &m, f);
+        match self.rw_cmd(IO_READ, block, len, i) {
+            Ok(m) => {
+                let f = inflight(IO_READ, block, len, n, lba, Use::Ahead { stale: false });
+                let _ = self.issue(i, &m, f);
+            }
+            Err(_) => self.put_pages(i, n),
         }
     }
 
-    /// De completion van de opdracht van de eigenaar; bij een lees de bytes
-    /// naar `into`, en zo nodig eerst de read-ahead op de controller.
-    fn poll_demand(&mut self, into: &mut [u8]) -> core::task::Poll<Result<(), C::Error>> {
+    /// Rondt ticket `i` af als zijn completion er is (die haalde
+    /// [`Self::reap_io`] op): bij een lees de bytes naar `into`, de tag en
+    /// zijn pagina's vrij, en zo nodig de read-ahead op de controller.
+    fn poll_ticket(&mut self, i: usize, into: &mut [u8]) -> core::task::Poll<Result<(), C::Error>> {
         use core::task::Poll;
-        let Some(i) = self.demand() else {
+        let Some(f) = self.inflight.get(i).copied().flatten() else {
             return Poll::Ready(Err(Error::NotStarted));
         };
-        if let Err(e) = self.reap_io() {
-            return Poll::Ready(Err(e));
+        if f.use_ != Use::Ticket {
+            return Poll::Ready(Err(Error::NotStarted));
         }
-        let Some(f) = self.inflight.get(i).copied().flatten() else {
+        if self.dead {
+            // Dood blijft dood: de tag komt niet meer vrij (de controller
+            // kan nog in zijn pagina's schrijven).
             return Poll::Ready(Err(Error::Dead));
-        };
+        }
         let Some(st) = f.done else {
             return Poll::Pending;
         };
-        // Een flush is pas klaar als er niets anders meer in de lucht is: na
-        // de laatste flush van een bevriezing (de kern-flip) is de rij leeg.
-        let others = self.inflight.iter().flatten().any(|g| g.done.is_none());
-        if f.opc == IO_FLUSH && others {
+        // Een flush is pas klaar als er geen read-ahead meer loopt: na de
+        // laatste flush van een bevriezing (de kern-flip) is de rij leeg,
+        // want de opdrachten van de eigenaar wachtte de actor al af.
+        let ahead = self
+            .inflight
+            .iter()
+            .flatten()
+            .any(|g| matches!(g.use_, Use::Ahead { .. }) && g.done.is_none());
+        if f.opc == IO_FLUSH && ahead {
             return Poll::Pending;
         }
+        if st == 0 && f.opc == IO_READ {
+            let n = f.len.min(into.len());
+            if let Some(d) = into.get_mut(..n) {
+                self.drain(i, d);
+            }
+        }
+        self.release(i);
         if st == 0 && f.opc == IO_READ {
             let seq = f.block == self.seq_end;
             self.seq_end = f.block + f.len as u64 / BLOCK;
             if seq && f.len == self.step() {
                 self.read_ahead(self.seq_end, f.len);
             }
-            let n = f.len.min(into.len());
-            dev::pull(self.buf(i), n);
-            if let Some(d) = into.get_mut(..n) {
-                dev::copy_out_normal(d, self.buf(i));
-            }
-        }
-        if let Some(s) = self.inflight.get_mut(i) {
-            *s = None;
         }
         Poll::Ready(match st {
             0 => Ok(()),
@@ -1528,60 +1735,9 @@ impl<C: Coprocessor> Ans<C> {
             }),
         })
     }
-}
 
-/// Een opdracht in opbouw voor [`Ans::issue`].
-fn inflight(opc: u8, block: u64, len: usize, lba: u64, use_: Use) -> Inflight {
-    Inflight {
-        opc,
-        block,
-        len,
-        lba,
-        t0: 0,
-        use_,
-        done: None,
-    }
-}
-
-/// Het blokcontract van `blkdev` over het venster: LBA's van 512 bytes,
-/// LBA 0 is het eerste blok van het venster. De ANS rekent in blokken van
-/// 4 KB, dus een verzoek moet op een blok beginnen en eindigen; hopfs
-/// schrijft in blokken van 4 KB vanaf LBA 0, dus dat doet hij altijd. Een
-/// verzoek dat dat niet doet, of buiten het venster valt, is `OutOfRange`.
-///
-/// `start` zet de opdracht op de controller en keert terug; `poll_done`
-/// haalt op wat terug is. Er wacht niets: tot 01-10 (M21) deed `start` de
-/// hele opdracht en spinde de OS-core 4 us (4 KB) tot 600 us (1 MiB) per
-/// opdracht, en in die tijd stond alles stil, ook het transport van elke
-/// andere app. GEMETEN 01-10 (`m4-scale.sh`, twee apps met elk 256 MiB
-/// schrijven en lezen): M21 samen ~985 MB/s opgeteld, net als één alleen;
-/// M22 ~1400 tegen ~1280 voor één alleen. Met de read-ahead erbij leest een
-/// app 1690 MB/s in plaats van 870 tot 960. De wachter
-/// (`blkdev::InFlight::done`) pollt op [`POLL_SPIN_NS`] en [`POLL_PERIOD`];
-/// de mailbox van de coprocessor gaat leeg zolang er iets loopt.
-///
-/// Synchroon blijft synchroon: een schrijf of flush is pas klaar als zijn
-/// eigen completion terug is, en de eigenaar heeft er één tegelijk. De
-/// read-ahead is de enige tweede opdracht, en die leest alleen.
-impl<C: Coprocessor> blkdev::AsyncBlockDevice for Ans<C> {
-    fn max_transfer(&self) -> usize {
-        self.step()
-    }
-
-    fn poll_pace(&self) -> (u64, core::time::Duration) {
-        (POLL_SPIN_NS, POLL_PERIOD)
-    }
-
-    fn start(&mut self, op: blkdev::Op<'_>) -> blkdev::Result {
-        if let Some(i) = self.demand() {
-            // De wachter van de vorige ging weg (een gedropte `Done`): pas
-            // als die opdracht terug is, is haar buffer weer van ons.
-            self.reap_io().map_err(|e| blk_err(&e, 0, 0))?;
-            match self.inflight.get_mut(i) {
-                Some(s) if s.is_some_and(|f| f.done.is_some()) => *s = None,
-                _ => return Err(blkdev::Error::Busy),
-            }
-        }
+    /// Het ticket van het blokcontract voor `op`.
+    fn start_op(&mut self, op: blkdev::Op<'_>) -> blkdev::Result<usize> {
         match op {
             blkdev::Op::Read { lba, len } => {
                 let b = self.contract_block(lba, len)?;
@@ -1597,12 +1753,117 @@ impl<C: Coprocessor> blkdev::AsyncBlockDevice for Ans<C> {
         }
     }
 
+    /// De LBA van het contract van ticket `i`, voor de fout.
+    fn lba_of(&self, i: usize) -> u64 {
+        self.inflight.get(i).copied().flatten().map_or(0, |f| f.lba)
+    }
+}
+
+/// Een opdracht in opbouw voor [`Ans::issue`].
+fn inflight(opc: u8, block: u64, len: usize, pages: usize, lba: u64, use_: Use) -> Inflight {
+    Inflight {
+        opc,
+        block,
+        len,
+        pages,
+        lba,
+        t0: 0,
+        use_,
+        done: None,
+    }
+}
+
+/// Het blokcontract van `blkdev` over het venster: LBA's van 512 bytes,
+/// LBA 0 is het eerste blok van het venster. De ANS rekent in blokken van
+/// 4 KB, dus een verzoek moet op een blok beginnen en eindigen; hopfs
+/// schrijft in blokken van 4 KB vanaf LBA 0, dus dat doet hij altijd. Een
+/// verzoek dat dat niet doet, of buiten het venster valt, is `OutOfRange`.
+///
+/// Tickets: [`DEPTH`] opdrachten tegelijk, tag = ticket, elk met zijn eigen
+/// pagina's van het datablok; `reap` haalt alle completions op, `poll_tag`
+/// rondt er één af. Niets wacht: tot 01-10 (M21) spinde de OS-core 4 us
+/// (4 KB) tot 600 us (1 MiB) per opdracht, en tot de wachtrij (M27) stond
+/// er hoogstens één opdracht van de eigenaar op de controller, terwijl een
+/// willekeurige 4 KiB-lees ~84 us op de schijf zelf duurt. De wachter
+/// (`blkdev::Queue`) pollt op [`POLL_SPIN_NS`] en [`POLL_PERIOD`]; de
+/// mailbox van de coprocessor gaat leeg zolang er iets loopt.
+///
+/// Synchroon blijft synchroon: een schrijf of flush is pas klaar als zijn
+/// eigen completion terug is. De volgorde tussen opdrachten is van de
+/// aanroeper (hopfs: één call per app tegelijk, een flush pas na de
+/// schrijfs die hij moet dekken); de controller mag ze in elke volgorde
+/// afronden, zoals elke NVMe.
+///
+/// Daarnaast de ene opdracht van [`start`](blkdev::AsyncBlockDevice::start)
+/// en [`poll_done`](blkdev::AsyncBlockDevice::poll_done) (de meetbank, via
+/// `blkdev::Paced`): dat is gewoon een ticket dat de driver zelf onthoudt.
+impl<C: Coprocessor> blkdev::AsyncBlockDevice for Ans<C> {
+    fn max_transfer(&self) -> usize {
+        self.step()
+    }
+
+    fn poll_pace(&self) -> (u64, core::time::Duration) {
+        (POLL_SPIN_NS, POLL_PERIOD)
+    }
+
+    fn depth(&self) -> usize {
+        DEPTH
+    }
+
+    fn start_tag(&mut self, op: blkdev::Op<'_>) -> blkdev::Result<usize> {
+        self.start_op(op)
+    }
+
+    fn poll_tag(&mut self, t: usize, into: &mut [u8]) -> core::task::Poll<blkdev::Result> {
+        let lba = self.lba_of(t);
+        self.poll_ticket(t, into).map_err(|e| blk_err(&e, lba, 0))
+    }
+
+    fn reap(&mut self) -> blkdev::Result<u64> {
+        self.reap_io().map_err(|e| blk_err(&e, 0, 0))
+    }
+
+    fn stats(&self, out: &mut dyn fmt::Write) -> core::result::Result<u64, fmt::Error> {
+        write!(
+            out,
+            "commands={} ahead_hits={} ahead_waste={} slowest_us={} free_pages={}",
+            self.commands,
+            self.ahead_hits,
+            self.ahead_waste,
+            self.slowest_ns / 1000,
+            self.free_pages()
+        )?;
+        Ok(self.commands)
+    }
+
+    fn start(&mut self, op: blkdev::Op<'_>) -> blkdev::Result {
+        if let Some(i) = self.single {
+            // De wachter van de vorige ging weg (een gedropte `Done`): pas
+            // als die opdracht terug is, is haar buffer weer van ons.
+            self.reap_io().map_err(|e| blk_err(&e, 0, 0))?;
+            if self.poll_ticket(i, &mut []).is_pending() {
+                return Err(blkdev::Error::Busy);
+            }
+            self.single = None;
+        }
+        self.single = Some(self.start_op(op)?);
+        Ok(())
+    }
+
     fn poll_done(&mut self, into: &mut [u8]) -> core::task::Poll<blkdev::Result> {
-        let lba = self
-            .demand()
-            .and_then(|i| self.inflight.get(i).copied().flatten())
-            .map_or(0, |f| f.lba);
-        self.poll_demand(into).map_err(|e| blk_err(&e, lba, 0))
+        use core::task::Poll;
+        let Some(i) = self.single else {
+            return Poll::Ready(Err(blkdev::Error::Io { lba: 0 }));
+        };
+        let lba = self.lba_of(i);
+        let r = match self.reap_io() {
+            Err(e) => Poll::Ready(Err(e)),
+            Ok(_) => self.poll_ticket(i, into),
+        };
+        if r.is_ready() {
+            self.single = None;
+        }
+        r.map_err(|e| blk_err(&e, lba, 0))
     }
 }
 
@@ -2041,9 +2302,10 @@ mod tests {
 
     /// Schrijft op schijfblok `block` over het I/O-pad en wacht erop.
     fn write_abs(a: &mut Ans<Cop>, block: u64, data: &[u8]) -> Result<(), u32> {
-        a.start_write(block, data, 0)?;
+        let i = a.start_write(block, data, 0)?;
         loop {
-            if let core::task::Poll::Ready(r) = a.poll_demand(&mut []) {
+            a.reap_io()?;
+            if let core::task::Poll::Ready(r) = a.poll_ticket(i, &mut []) {
                 return r;
             }
         }
@@ -2419,16 +2681,17 @@ mod tests {
         read_held(&mut a, 0, 0, &mut b);
         assert!(is_hap(&b, USABLE.0));
         read_held(&mut a, LBAS, 0, &mut b);
-        // Twee happen op rij: de derde staat al op de controller, op tag 1.
+        // Twee happen op rij: de derde staat al op de controller, op de tag
+        // die de tweede net vrijgaf.
         with(|c| {
-            assert_eq!(c.held.iter().map(|h| h.0).collect::<Vec<_>>(), [1]);
-            assert_eq!(c.log.last(), Some(&(1, IO_READ, USABLE.0 + 8, 3, 1)));
+            assert_eq!(c.held.iter().map(|h| h.0).collect::<Vec<_>>(), [0]);
+            assert_eq!(c.log.last(), Some(&(1, IO_READ, USABLE.0 + 8, 3, 0)));
         });
-        // Een flush is pas klaar als er niets meer in de lucht is.
+        // Een flush is pas klaar als er geen read-ahead meer loopt.
         op(&mut a, Op::Flush).unwrap();
-        release(0);
-        assert!(poll(&mut a, &mut []).is_pending());
         release(1);
+        assert!(poll(&mut a, &mut []).is_pending());
+        release(0);
         assert_eq!(poll(&mut a, &mut []), Poll::Ready(Ok(())));
         // De derde hap komt van de read-ahead: geen nieuwe opdracht.
         let before = with(|c| c.log.len());
@@ -2456,8 +2719,8 @@ mod tests {
         let mut b = vec![0u8; HAP];
         read_held(&mut a, 0, 0, &mut b);
         read_held(&mut a, LBAS, 0, &mut b);
-        // De read-ahead op tag 1 loopt nog; een schrijf over zijn blokken
-        // gaat ernaast op tag 0, en komt eerder terug dan hij.
+        // De read-ahead op tag 0 loopt nog; een schrijf over zijn blokken
+        // gaat ernaast op tag 1, en komt eerder terug dan hij.
         let data = vec![0x5au8; BLOCK as usize];
         op(
             &mut a,
@@ -2467,38 +2730,114 @@ mod tests {
             },
         )
         .unwrap();
-        release(0);
-        assert_eq!(poll(&mut a, &mut []), Poll::Ready(Ok(())));
         release(1);
-        // De lees daarna ziet de schrijf, niet de oude bytes van de read-ahead.
-        read_held(&mut a, 2 * LBAS, 0, &mut b);
+        assert_eq!(poll(&mut a, &mut []), Poll::Ready(Ok(())));
+        release(0);
+        // De lees daarna ziet de schrijf, niet de oude bytes van de
+        // read-ahead (die nog op tag 0 terugkomt en dan weg is).
+        read_held(&mut a, 2 * LBAS, 1, &mut b);
         assert!(b[..4096].iter().all(|&x| x == 0x5a));
         assert!(is_hap(&b[4096..], USABLE.0 + 9));
         assert_eq!((a.ahead_hits, a.ahead_waste), (0, 1));
+        // Alle pagina's terug, behalve die van de volgende read-ahead.
+        assert_eq!(a.free_pages(), PAGES - HAP / PAGE as usize);
         with(|c| {
             assert_eq!(
                 c.acked.iter().map(|x| x.1).collect::<Vec<_>>(),
-                [0, 0, 0, 1, 0]
+                [0, 0, 1, 0, 1]
             );
             assert_eq!(c.tcb_mismatch, 0);
         });
     }
 
     #[test]
-    fn the_second_tag_sits_at_the_linear_entry_stride() {
-        // De nep-controller leest per 64 bytes zoals de firmware (M26), en
-        // niet op CC.IOSQES; de read-ahead op tag 1 komt met de juiste bytes.
+    fn an_unclaimed_read_ahead_makes_room_for_the_next_stream() {
         let (_m, mut a) = small_steps(false);
         let mut b = vec![0u8; HAP];
-        for k in 0..5u64 {
+        // Een stroom die stopt: zijn laatste read-ahead (hap 2) leest niemand.
+        for k in [0u64, 1] {
+            block_on(blk(&mut a).read(k * LBAS, &mut b)).unwrap();
+        }
+        // Een volgende stroom elders krijgt toch weer een read-ahead.
+        for k in [5u64, 6, 7] {
             block_on(blk(&mut a).read(k * LBAS, &mut b)).unwrap();
             assert!(is_hap(&b, USABLE.0 + 4 * k));
         }
-        assert_eq!(a.ahead_hits, 3);
+        assert_eq!((a.ahead_hits, a.ahead_waste), (1, 1));
+    }
+
+    /// Een ticket afwachten zoals de wachtrij het doet: ophalen, dan kijken.
+    fn wait_ticket(a: &mut Ans<Cop>, t: usize, into: &mut [u8]) -> Poll<blkdev::Result> {
+        let mut r = Poll::Pending;
+        for _ in 0..3 {
+            blkdev::AsyncBlockDevice::reap(a).unwrap();
+            r = blkdev::AsyncBlockDevice::poll_tag(a, t, into);
+            if r.is_ready() {
+                break;
+            }
+        }
+        r
+    }
+
+    #[test]
+    fn sixteen_tags_at_once_each_at_its_linear_entry_and_back_in_any_order() {
+        use blkdev::AsyncBlockDevice;
+        let (_m, mut a) = small_steps(true);
+        // Zestien losse blokken van 4 KiB tegelijk op de controller.
+        let tags: Vec<usize> = (0..DEPTH as u64)
+            .map(|k| {
+                a.start_tag(Op::Read {
+                    lba: (k % 40) * PER_BLOCK,
+                    len: BLOCK as usize,
+                })
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(tags, (0..DEPTH).collect::<Vec<_>>());
+        assert_eq!(
+            a.start_tag(Op::Read { lba: 0, len: 4096 }),
+            Err(blkdev::Error::Busy),
+            "de zeventiende wacht op een vrije tag"
+        );
+        with(|c| assert_eq!(c.held.len(), DEPTH));
+        // Terug in omgekeerde volgorde: elk ticket krijgt zijn eigen bytes.
+        let mut b = vec![0u8; BLOCK as usize];
+        for t in (0..DEPTH).rev() {
+            assert!(wait_ticket(&mut a, t, &mut b).is_pending());
+            release(t as u16);
+            assert_eq!(wait_ticket(&mut a, t, &mut b), Poll::Ready(Ok(())));
+            assert!(is_hap(&b, USABLE.0 + t as u64 % 40), "tag {t}");
+        }
         with(|c| {
             assert_eq!(c.tcb_mismatch, 0);
-            assert!(c.log.iter().any(|l| l.4 == 1));
+            assert!((0..DEPTH as u32).all(|t| c.log.iter().any(|l| l.4 == t)));
         });
+        assert_eq!(a.free_pages(), PAGES);
+    }
+
+    #[test]
+    fn a_request_takes_free_pages_wherever_they_lie() {
+        use blkdev::AsyncBlockDevice;
+        let (_m, mut a) = small_steps(true);
+        // Drie, twee en vier pagina's: de eerste gaat terug, en de derde
+        // schrijf krijgt dan 0, 1, 2 en 5 (de PRP-lijst wijst ze aan).
+        let w = |n: usize, v: u8| vec![v; n * BLOCK as usize];
+        let (d1, d2, d3) = (w(3, 0x11), w(2, 0x22), w(4, 0x33));
+        let t1 = a.start_tag(Op::Write { lba: 0, data: &d1 }).unwrap();
+        let t2 = a.start_tag(Op::Write { lba: 24, data: &d2 }).unwrap();
+        release(t1 as u16);
+        assert_eq!(wait_ticket(&mut a, t1, &mut []), Poll::Ready(Ok(())));
+        let t3 = a.start_tag(Op::Write { lba: 64, data: &d3 }).unwrap();
+        assert_eq!(&a.pages[t3][..4], &[0, 1, 2, 5]);
+        for t in [t2, t3] {
+            release(t as u16);
+            assert_eq!(wait_ticket(&mut a, t, &mut []), Poll::Ready(Ok(())));
+        }
+        with(|c| c.hold = false);
+        let mut b = vec![0u8; d3.len()];
+        block_on(blk(&mut a).read(64, &mut b)).unwrap();
+        assert_eq!(b, d3);
+        assert_eq!(a.free_pages(), PAGES);
     }
 
     #[test]
