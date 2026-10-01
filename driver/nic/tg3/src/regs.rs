@@ -486,8 +486,6 @@ pub(crate) const TX_MODE_ENABLE: u32 = 0x2;
 /// TX_MODE_MBUF_LOCKUP_FIX (5755-plus).
 pub(crate) const TX_MODE_MBUF_LOCKUP_FIX: u32 = 0x100;
 pub(crate) const RX_MODE_ENABLE: u32 = 0x2;
-/// RX_MODE_PROMISC: elk unicast-frame, ook niet aan ons.
-pub(crate) const RX_MODE_PROMISC: u32 = 0x100;
 /// 5755-plus.
 pub(crate) const RX_MODE_IPV6_CSUM: u32 = 0x0100_0000;
 

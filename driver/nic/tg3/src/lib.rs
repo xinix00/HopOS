@@ -912,15 +912,7 @@ impl Tg3 {
         // Pas nu de MAC zelf.
         wr(&r.tx_mode, TX_MODE_ENABLE | TX_MODE_MBUF_LOCKUP_FIX);
         self.sleep(100 * US);
-        // Promiscuous als vangnet (M4 01-10): de bootcode zette Broadcom's
-        // default terug in MAC_ADDR_0 en de MAC nam geen unicast aan; de
-        // tweede `set_mac` ná de link (`link_up`) hoort dat te verhelpen, en
-        // de diagnoseregel leest het filter terug. Op een geswitcht LAN kost
-        // promiscuous niets; weg zodra die terugleesregel ons adres toont.
-        wr(
-            &r.rx_mode,
-            RX_MODE_ENABLE | RX_MODE_IPV6_CSUM | RX_MODE_PROMISC,
-        );
+        wr(&r.rx_mode, RX_MODE_ENABLE | RX_MODE_IPV6_CSUM);
         self.sleep(10 * US);
         wr(&r.mi_stat, MI_STAT_LNKSTAT_ATTN);
         wr(&r.low_wmark, 1); // 57765-klasse: niet droppen bij flow control

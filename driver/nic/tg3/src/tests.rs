@@ -268,10 +268,7 @@ fn new_leaves_the_chip_configured_and_running() {
         MODE_ENABLE | DMAC_ERR_ENAB | WDMAC_STATUS_TAG_FIX
     );
     assert_eq!(m.r(0x045c), TX_MODE_ENABLE | TX_MODE_MBUF_LOCKUP_FIX);
-    assert_eq!(
-        m.r(0x0468),
-        RX_MODE_ENABLE | RX_MODE_IPV6_CSUM | RX_MODE_PROMISC
-    );
+    assert_eq!(m.r(0x0468), RX_MODE_ENABLE | RX_MODE_IPV6_CSUM);
     assert_eq!(m.r(0x2400), MODE_ENABLE | RCVDBDI_INV_RING_SZ);
 }
 

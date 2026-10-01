@@ -131,17 +131,23 @@ op `/dev/cu.kis-100000-ch-0`. Sinds 01-10 ook op het LAN: 5555, 8080,
       MAC_ADDR_0 hield Broadcom's default. De bootcode zet die terug ná
       onze `set_mac` (Rust schreef het adres in new en init, vóór de link;
       Go pas in Init, ná LinkUp). Fix: het adres nog eens aan het eind van
-      `link_up`, in alle vier de filters zoals Linux, met promiscuous als
-      vangnet tot de terugleesregel ons adres toont (dan weg). Met het
-      vangnet: ping, 5555, 8080, 10100, Hop leider, de node-stack ziet TCP.
+      `link_up`, in alle vier de filters zoals Linux. Bewezen zonder
+      vangnet (11:15, D5 via een flip): `mac0=0x1cf6/0x4c54fa90`,
+      `rx_mode=0x1000002`, `rx ucast` loopt. Ping, 5555, 8080, 10100, Hop
+      leider, de node-stack ziet TCP.
       De "connection refused" van Hop op de system-API was hetzelfde
       filter: applib meldt een time-out als refused.
-- [ ] **Flippen op de M4**: `image/flip-bundle.sh apple` bestaat (01-10);
-      de eerste bundel werd aangenomen, maar de nieuwe kern stierf na de
-      sprong en de watchdog bracht het geïnstalleerde image in ~20 s terug
-      (veilig). De zwarte doos staat alleen op de dockchannel. Geen PSCI,
-      dus geen CPU_OFF; de warme flip met een geparkeerde app-core is hier
-      nooit gedaan.
+- [ ] **Flippen op de M4 landt, maar adopteert niet** (01-10, twee keer):
+      `image/flip-bundle.sh apple` bestaat; de nieuwe kern komt op binnen
+      tien seconden (`HOPOS_CLOCK_CARRIED`, hopfs-generatie mee, net up,
+      5555 open), maar slot 1 (Hop) wordt niet overgenomen (geen
+      `HOPOS_FLIP_ADOPT`, geen `HOP_UP`), de tik slaapt 193.000 keer per
+      seconde (een hangende SError?), er komt geen `HOPOS_FLIP_SETTLED`,
+      en de flip-watchdog reset na twee minuten terug naar het
+      geïnstalleerde image (veilig, en handig om een bundel te toetsen).
+      Geen PSCI, dus geen CPU_OFF; de warme flip met een geparkeerde
+      app-core is op dit silicium nooit gedaan. De zwarte doos staat alleen
+      op de dockchannel.
 - [ ] De koude flip werkt er niet (PSCI CPU_OFF zonder EL3); na een
       verhuizing met een rode voorproef spint de oude core.
 - [ ] Het diagnose-image van 06:45 (met `self_test` ná de init) bootte
