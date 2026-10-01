@@ -13,22 +13,22 @@ of faalt, en een streep waar het bewust niet komt. Stand 30-09-2026, avond.
 
 | | QEMU virt | Pi 5 | Pi 4 | Radxa | Altra | O6N | M4 | LicheeRV |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Boot, EL2, kooi, zelftest | ✓ | ✓ | ✓ (koud: SError bij de VL805; fix d0b6bd3 wacht op een koude boot) | ✓ | ○ | ✓ VHE, kick via SGI 1 (`kick=(Ipi, 0 us)`, stempel G) | ✓ kmutil-boot, EL2; ✗ kooi: SError-storm na de AIC, preflight rood | ○ |
-| Hop als bewoner, welcome door de DNAT | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ○ ingebakken (20:45), nog niet gezien | ○ |
-| Kern-flip, warm | ✓ | ✗ sterft na de landing (F en H, 3x); de nieuwe kaart (H, met de zwarte doos) ligt in target/ | ✓ (6x, gen 4 op I) | ✓ (5x, gen 3 op I) | ○ | ✓ gen 2 op H (gui-bundel); I geweigerd door de H-kern (bundelpartitie 8 KiB te krap, fix de61b4b zit in de I-stick): koude boot | – (geen CPU_OFF) | – |
-| NIC met interrupt | ✓ | ✓ MSI-X via de MIP | – (GENET gepold, zoals Go) | ✓ SPI 64 | – (igb gepold, bewust) | ✓ RTL8125B, MSI-X via de ITS (LPI 8192) | ✓ tg3 link + DHCP (gepold); ✗ doof daarna | ○ (dwmac) |
+| Boot, EL2, kooi, zelftest | ✓ | ✓ | ✓ (koud: SError bij de VL805; fix d0b6bd3 wacht op een koude boot) | ✓ | ○ | ✓ VHE, kick via SGI 1 (`kick=(Ipi, 0 us)`, stempel G) | ✓ iBoot-boot (cfg in het image op 0xF000), EL2; kooi en zelftest ok, tune aan zonder SError (M7 en later) | ○ |
+| Hop als bewoner, welcome door de DNAT | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ✓ ingebakken, HOP_UP, gaat warm mee over flips (HOPOS_HOP_RESUMED) | ○ |
+| Kern-flip, warm | ✓ | ✗ sterft na de landing (F en H, 3x); de nieuwe kaart (H, met de zwarte doos) ligt in target/ | ✓ (6x, gen 4 op I) | ✓ (5x, gen 3 op I) | ○ | ✓ gen 2 op H (gui-bundel); I geweigerd door de H-kern (bundelpartitie 8 KiB te krap, fix de61b4b zit in de I-stick): koude boot | ✓ gen 1 tot 8 op 01-10 (D4b naar M15), adoptie 3 van 3, de config reist mee; koud: – (geen CPU_OFF) | – |
+| NIC met interrupt | ✓ | ✓ MSI-X via de MIP | – (GENET gepold, zoals Go) | ✓ SPI 64 | – (igb gepold, bewust) | ✓ RTL8125B, MSI-X via de ITS (LPI 8192) | ✓ tg3 BCM57766, gepold; MAC-filter na link_up (4be8b60); app naar app 4375 tot 6099 MB/s (M13 tot M15) | ○ (dwmac) |
 | Off-link door de NAT, SNTP | ✓ | ✓ | ✓ | ○ | ○ | ○ | ○ | ○ |
-| Watchdog gewapend en geaaid | – | ✓ PM (12 s) | ✓ PM | ✓ DW-WDT (89 s) | ○ SBSA | ✓ SBSA (8,5 s) | ○ | ○ DW-WDT |
-| Hardware-RNG voor de kern | ✗ (jitter) | ✓ RNG200 | ✓ RNG200 | ✓ rk3568-rng | ○ SMCCC-TRNG of rndr (fc5348f) | ○ efi-rng: geen FEAT_RNG of SMCCC-TRNG, wel het EFI_RNG_PROTOCOL van de firmware (`hopos.efirng=1`, volgende stick) | ○ | ✗ (niets) |
-| Hardware-RNG voor de slots (CTRL_RNG_SEED, fc5348f) | ○ jitter | ○ (kaart-kern van vóór fc5348f) | ✓ rng200 (F) | ✓ rk3568-rng (F) | ○ | ○ jitter (G); efi-rng met de volgende stick | ○ | ○ |
+| Watchdog gewapend en geaaid | – | ✓ PM (12 s) | ✓ PM | ✓ DW-WDT (89 s) | ○ SBSA | ✓ SBSA (8,5 s) | ✓ Apple WDT 30 s, canary op Hop's hartslag (HOPOS_CANARY_LIVE) | ○ DW-WDT |
+| Hardware-RNG voor de kern | ✗ (jitter) | ✓ RNG200 | ✓ RNG200 | ✓ rk3568-rng | ○ SMCCC-TRNG of rndr (fc5348f) | ○ efi-rng: geen FEAT_RNG of SMCCC-TRNG, wel het EFI_RNG_PROTOCOL van de firmware (`hopos.efirng=1`, volgende stick) | ○ jitter (geen FEAT_RNG, geen SMCCC) | ✗ (niets) |
+| Hardware-RNG voor de slots (CTRL_RNG_SEED, fc5348f) | ○ jitter | ○ (kaart-kern van vóór fc5348f) | ✓ rng200 (F) | ✓ rk3568-rng (F) | ○ | ○ jitter (G); efi-rng met de volgende stick | ○ jitter | ○ |
 | Temperatuur in de tik | – | ✓ mailbox | ✓ mailbox | ✗ TSADC converteert niet (Go ook niet) | ○ SMpro | ✓ SCMI (39 C in de agentlijst) | ○ | – |
-| Klokbeleid (dvfs) | – | ✓ 1500/800 | ✓ 1500/600 | – | ○ | ✓ vijf `_CPC`-domeinen, 2600 MHz | – | – |
+| Klokbeleid (dvfs) | – | ✓ 1500/800 | ✓ 1500/600 | – | ○ | ✓ vijf `_CPC`-domeinen, 2600 MHz | ✓ p-state-tune E 5/8 = 2172 MHz, P 6/20 = 2352 MHz (M7) | – |
 | Console op het glas | ✓ ramfb | ✓ via flip op de eerste kaart, ✗ sinds de herflash (firmware weigert) | ✓ 32 bpp | ✓ HDMI (geen EDID) | ○ GOP | ✓ GOP 1920x1080 | – | – |
 | USB xHCI (HID, display-app) | ✓ qemu-xhci | ○ 2 xHCI's up, niets ingeplugd | ○ VL805 koud: fix d0b6bd3 (SCB0_SIZE, notify, twee pogingen), koude boot nodig | ○ 2 DWC3 up, niets ingeplugd | ○ | ✓ 10 xHCI's up, de Blu-ray-drive over USB-BOT leest de disc (Lumen) | – | – |
-| Opslag (hopfs, volumes, OP_SYNC) | ✓ virtio-blk | – (bewust geen NVMe) | – | – (stateless, alles in het geheugen) | ○ NVMe | ✓ NVMe Lexar 4 TB, hopfs hersteld (generatie 3456) | ✓ ANS NVMe, hopfs hersteld (395 GB) | – |
-| Console op 5555 | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ○ luistert, onbereikbaar (doof na DHCP) | ○ |
+| Opslag (hopfs, volumes, OP_SYNC) | ✓ virtio-blk | – (bewust geen NVMe) | – | – (stateless, alles in het geheugen) | ○ NVMe | ✓ NVMe Lexar 4 TB, hopfs hersteld (generatie 3456) | ✓ ANS NVMe 414 GB, hopfs hersteld; rauw 4936 / 1719 MB/s (M14), door de app 1055 tot 1279 / 808 tot 886 (M15) | – |
+| Console op 5555 | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ✓ (hopos.replay=45) | ○ |
 | Hardwaredecoder (media-smaak) | – | – | – | – | – | ✓ Linlon V8, 85,7 fps 4K P010 via de grant; nu tijdelijk weg (gui-flip H) tot de koude boot | – | – |
-| Kaart of stick klaar in `target/` | – | ✓ 22:37 (I) | ✓ 22:37 (I) | ✓ 22:38 (I, gepatchte Hop) | ✓ 18:12 | ✓ 22:38 stempel I (kern-fix bundelpartitie, verse Hop, efirng) | ✓ 20:45 (Hop ingebakken) | ✗ donor-FIP |
+| Kaart of stick klaar in `target/` | – | ✓ 22:37 (I) | ✓ 22:37 (I) | ✓ 22:38 (I, gepatchte Hop) | ✓ 18:12 | ✓ 22:38 stempel I (kern-fix bundelpartitie, verse Hop, efirng) | ✓ D4b geïnstalleerd (pstate=off, zonder de fixes van 01-10); art/hopos-apple.flip = M15; nieuw image met main gewenst | ✗ donor-FIP |
 
 ## De nodes, één voor één
 
@@ -66,6 +66,12 @@ Alleen wat nog moet; wat af is staat in de tabel hierboven.
       APPEND-regel. De koude flip weigert (stateless: warm flippen of de
       kaart herstarten). De kaart in `target/` is van 14:41; de node draait
       warm op F.
+- [ ] **App naar app op AB wisselvallig** (01-10 14:40): de pull in slot 3
+      meldt `HOPOS_APPNET_RX_CORRUPT` (head=0, tail=0x3580e188) en arp
+      geeft op voor 10.100.0.2, terwijl AB 's ochtends 29,83 MB/s zonder
+      fouten deed. De Device-pool van de rk3566-kern (board/rk3566/src/mmu.rs,
+      alles boven 0x0880_0000) blijft de verdachte; de weg van de M4 (de
+      slotstaart Normal in de kernmap) is hier ook de kandidaat.
 
 ### Ampere Altra (altra-1)
 
@@ -164,38 +170,58 @@ op `/dev/cu.kis-100000-ch-0`. Sinds 01-10 ook op het LAN: 5555, 8080,
       adopteren en laat de guard de M4 binnen twee minuten koud herstarten).
       Het geïnstalleerde image is nog D4b (pstate=off); de tune reist met
       elke flip mee via de config-overdracht.
-- [ ] **De M4 app naar app: 52 MB/s** (M7, tune aan; 47 met pstate=off;
-      M8 met de slotstaart Normal is geland maar nog niet gemeten),
-      tegen 461 op de Pi 4 en 1500+ op de O6N: niet klokgebonden (2,4x
-      hogere E-klok gaf 10%). De pool is op Apple Device gemapt
-      (`dram_attr`), dus de ringbelofte staat daar uit en elke kopie uit en
-      naar een ring loopt per 8 bytes vluchtig; dat is de eerste verdachte.
-- [ ] **Een slot in quarantaine blokkeert elke flip, tot een koude reset**
-      (M4 01-10 13:00): een mislukte `cage.dispatch` (de core kwam niet
-      aantoonbaar aan) laat partitie, core en servicer staan
-      (`HOPOS_PART_QUARANTINE`, kern/src/slots.rs), en de flip weigert dan
-      te springen ("not jumped: slot 4: owner retained, execution
-      unconfirmed HOPOS_FLIP_FAIL"), ook een bundel met `hopos.cages=off`.
-      Op de M4 is er geen PSCI, dus alleen een echte reset (knop of
-      macvdmtool na een verse kabelplug) helpt. Nodig: een weg om een
-      quarantaine op te heffen (de core opnieuw proberen, of het slot
-      opgeven) zonder herstart, en Hop moet zo'n slot kennen: nu meldde Hop
-      `jobs: []` terwijl de kern 3 bewoners had, en een vitals-POST faalde
-      met "slot 5: port 8090 is taken by slot 4" (`HOP_JOB_FAILED`). Hop's
-      wezenveger (`sweep_strays`) draait alleen na een restore, en op de M4
-      herstelt Hop zijn staat niet ("store i/o failed").
-- [ ] **De P-cores van de M4 starten geen slot** (M8, 13:28): elke dispatch
-      op core 4 tot 9 faalt ("dispatch on core N failed, outcome unknown"),
-      slots 1 tot 3 op de E-cores werken. Hop probeert een geweigerde
-      plaatsing op elk volgend slot, dus één POST van bench2 zette slots 4
-      tot 9 in één keer in quarantaine en de node kan niet meer flippen.
-      Nodig: de P-cluster starten zoals m1n1 `smp.c` (PMGR aan, start per
-      cluster), en Hop moet na "refused" niet verder proberen.
-- [ ] **Hop verloor zijn jobs over de flip D4b naar M8**: de landing zei
-      "0 B agent state", Hop meldt daarna `jobs: 0` terwijl de kern slot 2
-      en 3 (bench, pull) adopteerde. Hypothese: D4b las Hop's control-page
-      Device terwijl Hop Normal WB schrijft; vanaf M8 (staart Normal) hoort
-      de staat mee te reizen. Toets: jobs op M8, flip naar M9.
+- [x] **De M4 app naar app: 52 MB/s** (M7) → **4375 tot 4404 MB/s op een
+      E-core en 6043 tot 6099 op een P-core** (M13 tot M15, 01-10, 800 MiB,
+      bad=0; 40 GiB 2813). Twee oorzaken: de pool is op Apple Device gemapt,
+      dus de kern las de ringen van de apps vluchtig per 8 bytes (M8: de
+      ABI-staart van elk slot Normal in de kernmap, `mmu::remap_normal`,
+      ringbelofte Hardware per slot), en de slots 2 en 3 zaten vast op de
+      E-cores omdat een geflipte kern geen koude core kon starten (zie
+      hieronder). Niet klokgebonden: de tune gaf op M7 10%.
+- [x] **Een geflipte kern startte geen koude core; een mislukte dispatch
+      zette het slot in quarantaine en dat blokkeerde elke flip** (M8, 01-10
+      13:28: "dispatch on core N failed, outcome unknown" op cores 4 tot 9,
+      Hop probeerde door op elk volgend slot, zes slots in quarantaine, alleen
+      de knop hielp). Oorzaak: `own_cores` keek naar het adres dat de bootstub
+      opschreef, en een geflipte kern komt niet langs de stub; het leek alsof
+      de P-cores dood waren, maar cores 4 tot 6 zijn E-cores. Fix (agent,
+      M9): `own_cores(i)` kijkt naar RVBAR van de core zelf (een HopOS-stub
+      met magic en doel), `cpu_on` wacht op de ack van de stub en trekt de
+      brievenbus anders in; een CPU_ON die weigerde vóór de core aanging is
+      `NEVER_RAN`: de kooi draait de mailbox terug, de kern geeft partitie,
+      poorten en servicer terug en zet de core uit de plaatsing tot een koude
+      boot (`HOPOS_CORE_RETIRED`), geen quarantaine. Een dispatch met echt
+      onbekende uitkomst blijft quarantaine (bewust). `ArmCores::class` komt
+      van het board, anders plaatste `core-class: big` nooit.
+- [ ] **Hop en zijn jobs over een flip**: een warme flip houdt ze (M13 →
+      M14 → M15 getoetst, 3 van 3 bewoners, vitals meet door), al meldt de
+      landing nog "0 B agent state": Hop houdt ze in zijn eigen geheugen. Het
+      gat zit bij een koude boot: dan vergeet de leader zijn jobs (de agent
+      herstart bench en pull uit zijn eigen staat, de leader zegt `jobs: 0`).
+      Hop-repo, niet klein. Ook: Hop blijft een plaatsing zonder capaciteit
+      opnieuw proberen (een vloed `HOP_JOB_FAILED`; sinds de retire
+      onschuldig, maar ruis).
+- [ ] **NVMe door de app op de M4: 1055 tot 1279 schrijven / 808 tot 886
+      lezen** (M15, vitals-M15, twee P-cores, 256 MiB) tegen Go 1598 tot
+      1657 / 1064 tot 1072. De kern zelf zit op de Go-lat (M14,
+      `hopos.nvmebench=1`: rauw 4936 / 1719, hopfs 4931 / 1771; op M9 was
+      lezen nog 158 tot 168 omdat het ANS-datablok Normal-NC stond, M10 WB;
+      M11 de host-ringen van poort 0 Hardware: transport 930 → 1521; M12
+      memcpy in het datablok; vitals-M15 vergelijkt met bcmp, 607 → 808).
+      Waar de tijd zit: schijf plus hopfs 0,59 ms per MiB, transport kern
+      naar app 0,66 ms per MiB, na elkaar (voorspeld 818, gemeten 808 tot
+      886). Weekendklus, twee stukken: (1) de ANS asynchroon (submit en poll
+      los, twee calls tegelijk, dan overlappen schijf en transport, lezen
+      rond 1500; 150 tot 250 regels); (2) een sneller transport dan TCP op
+      de OS-core (een E-core op 2172 MHz, plafond rond 1500 MB/s): een
+      datapad via gedeeld geheugen (400 tot 600 regels in ABI, applib en
+      kern) of een snellere OS-core via de tune (SError-risico).
+- [ ] `dev::LINE` is 64 terwijl de cacheline van de M4 waarschijnlijk 128
+      is: push en pull doen dubbel werk (correct, niet gemeten).
+- [ ] Het geïnstalleerde image is nog D4b (pstate=off, zonder de core-start
+      en de ANS-fixes): na een koude boot staat de M4 op D4b en moet er
+      geflipt worden (`art/hopos-apple.flip` = M15). Een nieuw image met
+      main en een cfg zonder `hopos.pstate=off` via Recovery is de nette weg.
 - [ ] De koude flip werkt er niet (PSCI CPU_OFF zonder EL3); na een
       verhuizing met een rode voorproef spint de oude core.
 - [ ] Het diagnose-image van 06:45 (met `self_test` ná de init) bootte
