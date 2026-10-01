@@ -227,6 +227,23 @@ De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
       hier waarschijnlijk ook achter zitten. Draadronde 30-09 (bench, drie
       runs): pull in de node O6N (H) 141,5 tot 143,7, Pi 4 (H) 23,6 tot
       26,7, Radxa (I) 19,9, Pi 5 (dev, zonder deur) 6,6 MB/s (Go M4 769).
+      **App naar app 01-10: Pi 4 100,6 → 271,8 MB/s** (lean v3.1.3, bench
+      met de nieuwe applib, K-kern). De oorzaak zat in leannet, niet in de
+      kern: de puller meldde 51200 segmenten van precies 16 KiB voor 800 MB
+      (`BENCH_PULL_STATS`, nieuw), één venster per rondreis van ~160 µs:
+      de ontvangstring bleef op de vloer van 16 KiB omdat de groei een vol
+      segment (MSS 65495 op het slot-LAN) of een volle ring eiste, en een
+      snelle lezer de ring leeg hield. v3.1.2 ("segment vult de lokale vrije
+      ruimte") hielp niet (100,6 bleef 100,6); v3.1.3 groeit als de zender
+      de geadverteerde rand bereikt (`rcv_nxt == adv_edge`), en telt groei en
+      weigering (`tcp_rx_grown`, `tcp_rx_grow_refused`). Nu: 15392
+      segmenten van gemiddeld 54 KB, de ring groeide vijf keer tot 480 KiB,
+      de OS-core is weer idle tijdens de pull (door 2300/s, idle 2100/s) en
+      de **puller zelf is de rem** (slot 3 op 83% bezet: checksum, de
+      kopie uit de ABI-ring met `dc civac` per regel plus vluchtige
+      8-byte-loads, de kopie naar de app, en bench's bytevergelijking).
+      Let op: de kern en applib pinden leannet nog op v3.0.0 terwijl de apps
+      v3.1.1 hadden (één lock-regel verraadde het); nu overal v3.1.3.
       Ping app naar app over de draad: O6N naar Pi 5 p50 200 tot 227 µs,
       Pi 5 naar O6N 206 tot 238, Radxa (I) naar O6N 287 tot 289, maar de
       **Pi 4 (H) naar O6N 1212 tot 1213 µs** (koud 1,3 ms; in de node 48
@@ -289,6 +306,38 @@ De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
       uit (76 tot 93, Go 42,3) zitten boven de lat. De O6N haalt in >= 78
       en uit >= 85 (Go 111 tot 118): geen peer is snel genoeg om zijn
       plafond te zien; drie ontvangers tegelijk samen ~90.
+
+- [x] **Een volle node zei "slot 5 out of range 1..4"** in plaats van
+      "full" (Pi 4, 01-10): de system-API kreeg het ABI-plafond (128) als
+      slotgrens en zocht door tot slot 5; Hop las er geen capaciteitstekort
+      in en vroeg elke paar seconden opnieuw, 128 statuscalls per vraag door
+      de lifecycle-mailbox. Fix 1c86bec: het slotaantal van het board
+      (`slot_count`), "table full (4 entries)" is voor Hop `NoCapacity`.
+- [x] **Wezen na een herstart van Hop**: twee uitgemeten benches in slot 3
+      en 4 van de Pi 4 die Hop niet kende (de jobs waren rond zijn herstart
+      verwijderd) hielden elke plaatsing en elke flip tegen tot een koude
+      flip. Hop 196b1d3: na `restore` stopt `sweep_strays` elke bewoner
+      boven slot 1 die niet in de bewaarde staat staat (`HOP_STRAY_STOPPED`).
+- [x] **"actor mailbox full" bij een flip** was de weigering van dezelfde
+      bundel (`refuse("same bundle", Busy)`); heet nu "version X, want X"
+      (1c86bec). Een koude flip naar dezelfde bundel blijft geweigerd: wie
+      alles wil herstarten, bouwt een nieuwe stempel.
+- [ ] **O6N: slot 3 sterft stil** (01-10, H-kern gen 2): elke app in slot 3
+      (vitals 30-09, pull 01-10) drukt `HOPOS_APP_MMU` en niets meer; de
+      kern meldt geen fault, hopfs zegt "slot 3 stopped", Hop plaatst
+      opnieuw, elke 10 s. Slot 2 (part 0x7f5600000) werkt; slot 3 ligt op
+      part 0xfbe00000+0x4000000, ctrl 0xffc00000, vlak onder 4 GB. Verdacht:
+      die regio is in de UEFI-kaart geen gewoon RAM (of ligt onder een
+      PCIe/MMIO-venster). Te doen bij de koude boot met de J-stick: de
+      pool-regel (`slots: pool N MB in K regions`) en de UEFI-geheugenkaart
+      lezen; tot dan geen app naar app op de O6N (bench serve pakt 2, pull 3).
+- [ ] **De puller als rem na v3.1.3** (Pi 4 272 MB/s, slot 3 op 83%):
+      kandidaten in volgorde van gewicht: de kopie uit de ABI-ring (per
+      record `dc civac` per 64 B plus vluchtige 8-byte-loads: op ARM met
+      beide kanten write-back is het cache-onderhoud loos werk, Go had
+      `Push`/`Pull` daar als no-op), de softwarechecksum, de tweede kopie
+      naar de app. Go M4 769 is een andere machine; de O6N na de koude boot
+      is de eerlijke vergelijking (was 142).
 
 ### Prestatietests (vitals)
 
