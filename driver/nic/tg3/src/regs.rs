@@ -92,11 +92,11 @@ pub(crate) struct Regs {
     /// MAC_MODE.
     pub(crate) mac_mode: Reg<u32>,
     _r5: [u8; 0xc],
-    /// MAC_ADDR_0_HIGH: de eerste twee bytes.
-    pub(crate) mac_addr0_high: Reg<u32>,
-    /// MAC_ADDR_0_LOW: de laatste vier, big-endian.
-    pub(crate) mac_addr0_low: Reg<u32>,
-    _r6: [u8; 0x24],
+    /// MAC_ADDR_0..3, elk HIGH (de eerste twee bytes) en LOW (de laatste
+    /// vier, big-endian): de vier exact-match-filters van de MAC. Linux
+    /// schrijft ze alle vier (`__tg3_set_mac_addr`).
+    pub(crate) mac_addr: [Reg<u32>; 8],
+    _r6: [u8; 0xc],
     /// MAC_RX_MTU_SIZE.
     pub(crate) rx_mtu_size: Reg<u32>,
     _r7: [u8; 0xc],
@@ -291,8 +291,7 @@ const _: () = {
     assert!(offset_of!(Regs, mb_rx_ret_cons) == 0x0284);
     assert!(offset_of!(Regs, mb_tx_prod) == 0x0304);
     assert!(offset_of!(Regs, mac_mode) == 0x0400);
-    assert!(offset_of!(Regs, mac_addr0_high) == 0x0410);
-    assert!(offset_of!(Regs, mac_addr0_low) == 0x0414);
+    assert!(offset_of!(Regs, mac_addr) == 0x0410);
     assert!(offset_of!(Regs, rx_mtu_size) == 0x043c);
     assert!(offset_of!(Regs, mi_com) == 0x044c);
     assert!(offset_of!(Regs, mi_stat) == 0x0450);
@@ -487,6 +486,8 @@ pub(crate) const TX_MODE_ENABLE: u32 = 0x2;
 /// TX_MODE_MBUF_LOCKUP_FIX (5755-plus).
 pub(crate) const TX_MODE_MBUF_LOCKUP_FIX: u32 = 0x100;
 pub(crate) const RX_MODE_ENABLE: u32 = 0x2;
+/// RX_MODE_PROMISC: elk unicast-frame, ook niet aan ons.
+pub(crate) const RX_MODE_PROMISC: u32 = 0x100;
 /// 5755-plus.
 pub(crate) const RX_MODE_IPV6_CSUM: u32 = 0x0100_0000;
 

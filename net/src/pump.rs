@@ -12,7 +12,8 @@
 //! verkeer wordt hij nooit geraakt). Zonder lijn: pollen op 300 µs, zodat de
 //! core bij stilte echt kan slapen; onder last wordt er nooit geslapen.
 
-use crate::{Frame, Stats, UPLINK_QUEUE};
+use crate::{Frame, LogFn, Stats, UPLINK_QUEUE};
+use core::fmt;
 use core::sync::atomic::Ordering::Relaxed;
 use core::time::Duration;
 use executor::Executor;
@@ -28,6 +29,10 @@ pub const IRQ_GUARD: Duration = Duration::from_millis(10);
 
 /// De poll-periode zonder interrupt.
 pub const NIC_POLL: Duration = Duration::from_micros(300);
+
+/// Hoe vaak de pomp de diagnoseregel drukt van een driver die er een heeft
+/// ([`Device::DIAG`]).
+pub const DIAG_EVERY: Duration = Duration::from_secs(5);
 
 /// Frames per RX-burst. De RX-doorbell gaat per burst, niet per frame: per
 /// frame scheelt dat één tot drie PCIe-acties, en op een 1 Gbit-link zijn
@@ -48,6 +53,17 @@ pub struct Pump<'a, D: Device> {
     /// Poll ook als het board een lijn heeft (`hopos.rxpoll=1`): de A/B-knop
     /// voor de meting, en de veiligheidsklep als een bedrading niet deugt.
     pub force_poll: bool,
+    /// De console voor de diagnoseregel van de driver.
+    log: Option<LogFn>,
+}
+
+/// De diagnoseregel van de driver als `Display`, voor `format_args!`.
+struct Diag<'a, D: Device>(&'a D);
+
+impl<D: Device> fmt::Display for Diag<'_, D> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.diag_line(f)
+    }
 }
 
 impl<'a, D: Device> Pump<'a, D> {
@@ -68,7 +84,13 @@ impl<'a, D: Device> Pump<'a, D> {
             door,
             stats,
             force_poll: false,
+            log: None,
         }
+    }
+
+    /// De console voor de diagnoseregel (alleen met [`Device::DIAG`]).
+    pub fn set_log(&mut self, log: LogFn) {
+        self.log = Some(log);
     }
 
     /// De NIC.
@@ -147,9 +169,22 @@ impl<'a, D: Device> Pump<'a, D> {
         } else {
             self.nic.irq()
         };
+        let every = u64::try_from(DIAG_EVERY.as_nanos()).unwrap_or(u64::MAX);
+        let mut diag_due = exec.now().saturating_add(every);
         loop {
             if stop.is_set() {
                 return;
+            }
+            if D::DIAG
+                && let Some(log) = self.log
+                && exec.now() >= diag_due
+            {
+                diag_due = exec.now().saturating_add(every);
+                log(format_args!(
+                    "net: nic {} idle={} HOPOS_NIC_DIAG",
+                    Diag(&self.nic),
+                    self.stats.rx_idle.load(Relaxed)
+                ));
             }
             if self.pass() {
                 yield_now().await;

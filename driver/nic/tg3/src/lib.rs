@@ -609,11 +609,17 @@ impl Tg3 {
     fn set_mac(&self) {
         let r = self.regs();
         let m = self.mac.0;
-        wr(&r.mac_addr0_high, u32::from(m[0]) << 8 | u32::from(m[1]));
-        wr(
-            &r.mac_addr0_low,
-            u32::from_be_bytes([m[2], m[3], m[4], m[5]]),
-        );
+        let high = u32::from(m[0]) << 8 | u32::from(m[1]);
+        let low = u32::from_be_bytes([m[2], m[3], m[4], m[5]]);
+        // Alle vier de filters, zoals Linux (`__tg3_set_mac_addr`): de M4
+        // (01-10) nam met alleen MAC_ADDR_0 geen enkel unicast-frame aan
+        // (rx ucast=0 naast bcast=308 in vijf seconden).
+        for pair in r.mac_addr.chunks_exact(2) {
+            if let [h, l] = pair {
+                wr(h, high);
+                wr(l, low);
+            }
+        }
     }
 
     // ── NIC-SRAM ────────────────────────────────────────────────────────────
@@ -906,7 +912,15 @@ impl Tg3 {
         // Pas nu de MAC zelf.
         wr(&r.tx_mode, TX_MODE_ENABLE | TX_MODE_MBUF_LOCKUP_FIX);
         self.sleep(100 * US);
-        wr(&r.rx_mode, RX_MODE_ENABLE | RX_MODE_IPV6_CSUM);
+        // Promiscuous als vangnet (M4 01-10): de bootcode zette Broadcom's
+        // default terug in MAC_ADDR_0 en de MAC nam geen unicast aan; de
+        // tweede `set_mac` ná de link (`link_up`) hoort dat te verhelpen, en
+        // de diagnoseregel leest het filter terug. Op een geswitcht LAN kost
+        // promiscuous niets; weg zodra die terugleesregel ons adres toont.
+        wr(
+            &r.rx_mode,
+            RX_MODE_ENABLE | RX_MODE_IPV6_CSUM | RX_MODE_PROMISC,
+        );
         self.sleep(10 * US);
         wr(&r.mi_stat, MI_STAT_LNKSTAT_ATTN);
         wr(&r.low_wmark, 1); // 57765-klasse: niet droppen bij flow control
@@ -975,6 +989,13 @@ impl Tg3 {
             if bmsr & mdio::BMSR_LINK != 0 {
                 let link = decode_aux(self.mdio_read(PHY_ADDR, MII_AUX_STAT)?)?;
                 self.set_port_mode(link);
+                // Het adres nog eens, ná de link: de bootcode van de chip zet
+                // na de reset Broadcom's default (00:10:18:00:00:00) terug in
+                // MAC_ADDR_0, ook nadat hij zijn mailbox-magic gaf, en de M4
+                // (01-10) nam daardoor geen unicast aan (de diagnoseregel las
+                // de default terug). Go schreef het adres pas in Init, ná
+                // LinkUp, en had er geen last van.
+                self.set_mac();
                 return Ok(link);
             }
             if (self.now)() >= deadline {
@@ -1357,6 +1378,34 @@ impl Mdio for Tg3 {
 }
 
 impl netdev::Device for Tg3 {
+    /// De M4 (01-10): DHCP slaagde en daarna kwam er niets meer binnen. De
+    /// MAC-tellers, de ontvangstketen, het status-blok en de ringstanden in
+    /// één regel scheiden "de MAC ziet niets" van "het strandt onderweg".
+    const DIAG: bool = true;
+
+    fn diag_line(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let r = self.regs();
+        write!(
+            f,
+            "{} | {} | {} | rings rx prod={} ret={} std={} bad={} tx cons={} prod={} full={} bells={} | mac0={:#06x}/{:#010x} rx_mode={:#x} mac_mode={:#x}",
+            self.stats(),
+            self.counters(),
+            self.irq_diag(),
+            self.rx_producer(),
+            self.rx_ret_idx,
+            self.rx_std_idx,
+            self.rx_bad,
+            self.tx_consumer(),
+            self.tx_prod,
+            self.tx_full,
+            self.doorbells,
+            r.mac_addr[0].read(),
+            r.mac_addr[1].read(),
+            r.rx_mode.read(),
+            r.mac_mode.read()
+        )
+    }
+
     /// Zet één frame op de send-ring; de doorbell volgt bij `flush`. Een
     /// volle ring krijgt eerst de doorbell voor wat al klaarstaat (anders
     /// raakt hij nooit leeg) en dan [`TxError::Full`]; Go wachtte hier tot

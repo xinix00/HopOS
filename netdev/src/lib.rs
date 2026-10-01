@@ -86,4 +86,16 @@ pub trait Device {
     fn irq(&self) -> Option<&'static Signal> {
         None
     }
+
+    /// Heeft de driver een diagnoseregel ([`diag_line`](Device::diag_line))? De pomp
+    /// drukt hem dan om de paar seconden af.
+    const DIAG: bool = false;
+
+    /// Eén regel uit de chip zelf (tellers, ringstanden): wat de MAC
+    /// ontving en waar het bleef. Alleen aangeroepen als
+    /// [`DIAG`](Device::DIAG) waar is.
+    fn diag_line(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let _ = f;
+        Ok(())
+    }
 }

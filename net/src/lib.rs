@@ -142,6 +142,11 @@ pub struct Stats {
     /// bronadres (spoof), of een intern frame dat de gateway-vertaling
     /// weigerde.
     pub host_rx_drops: AtomicU64,
+    /// Frames van een slot met een vreemd bronadres (MAC of IP niet van
+    /// dat slot): gedropt vóór alles. De M4 (01-10) bereikte de kern
+    /// nooit; dit scheidt "de switch zag het frame niet" van "hij wees het
+    /// af".
+    pub slot_src_drops: AtomicU64,
 }
 
 impl Stats {
@@ -164,6 +169,7 @@ impl Stats {
             nic_tx_errors: AtomicU64::new(0),
             host_tx_drops: AtomicU64::new(0),
             host_rx_drops: AtomicU64::new(0),
+            slot_src_drops: AtomicU64::new(0),
         }
     }
 }

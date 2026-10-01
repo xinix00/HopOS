@@ -378,6 +378,8 @@ struct Port<R, W> {
     /// De corrupt-verklaring van de TX-ring is al gemeld: één regel per
     /// leven van de poort, anders verzuipt de console.
     tx_warned: bool,
+    /// Het eerste frame met een vreemd bronadres is al gemeld.
+    src_warned: bool,
 }
 
 /// De vaste instellingen van de switch.
@@ -473,6 +475,7 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
                 rx,
                 rx_blocked: false,
                 tx_warned: false,
+                src_warned: false,
             });
         }
     }
@@ -492,6 +495,7 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
             rx,
             rx_blocked: false,
             tx_warned: false,
+            src_warned: false,
         });
         self.published.set(i, Some(handle));
         Ok(())
@@ -865,6 +869,21 @@ fn forward<R: Reader, W: Writer>(
     // wilt op een node waar HOP toetsaanslagen rondstuurt. Poort 0 is HOP
     // zelf, de vertrouwde kant.
     if src >= 1 && (mac_at(p, 6) != slot_mac(src) || !valid_source_ip(src, p)) {
+        core.stats.slot_src_drops.fetch_add(1, Relaxed);
+        let log = core.cfg.log;
+        if let Some(port) = core.ports.get_mut(src).and_then(Option::as_mut)
+            && !port.src_warned
+        {
+            port.src_warned = true;
+            log(format_args!(
+                "HOPOS_NETSWITCH_SRC_DROP: slot {src}: src mac {} (slot mac {}), ip ok {}, {} bytes, ethertype {:#06x}",
+                netdev::Mac(mac_at(p, 6)),
+                netdev::Mac(slot_mac(src)),
+                valid_source_ip(src, p),
+                p.len(),
+                be16(p, 12)
+            ));
+        }
         return;
     }
     if byte(p, 0) & 1 != 0 {

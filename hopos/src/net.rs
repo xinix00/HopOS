@@ -333,6 +333,7 @@ where
     sw.attach_host(sw_tx, sw_rx);
 
     let mut pump = Pump::new(nic, ing_tx, eg_rx, &PUMP_BELL, &DOOR, &STATS);
+    pump.set_log(log_line);
     let irq = pump.nic().irq().is_some();
     exec.spawn(async move { pump.run(exec, &STOP).await })
         .map_err(|_| Error::Spawn("pump"))?;
@@ -664,6 +665,13 @@ fn on_stack<T>(f: impl FnOnce(&mut Stack) -> leannet::Result<T>) -> leannet::Res
         Some(st) => f(st),
         None => Err(leannet::Error::StackClosed),
     }
+}
+
+/// De tellers van de node-stack voor de diagnoseregel van de tik; `None`
+/// zonder stack of tijdens een lening.
+#[cfg(feature = "board-apple")]
+pub(crate) fn stack_stats() -> Option<leannet::Stats> {
+    on_stack(|st| Ok(st.stats())).ok()
 }
 
 /// Een socket-call van buiten de host-taak: na succes de bel van de

@@ -771,6 +771,34 @@ async fn tick(exec: &'static Executor) {
         if n == 5 || n == 30 {
             vboard::nic_diag();
         }
+        // De M4 (01-10): DHCP slaagde en daarna kwam er niets meer binnen.
+        // Elke vijf tikken de node-stack en de naden van de switch, naast
+        // de chipregel van de pomp (HOPOS_NIC_DIAG).
+        #[cfg(feature = "board-apple")]
+        if n.is_multiple_of(5)
+            && let Some(st) = net::stack_stats()
+        {
+            let sw = &net::STATS;
+            println!(
+                "net: node stack tcp in={}/{} out={}/{} rtx={} drop short={} noport={} bad={} arp gave_up={} ignored={} full={} | host drops rx={} tx={} uplink rx drops={} nic tx err={} slot src drops={} HOPOS_NET_DIAG",
+                st.tcp_segs_in,
+                st.tcp_bytes_in,
+                st.tcp_segs_out,
+                st.tcp_bytes_out,
+                st.tcp_retransmits,
+                st.drop_short_frame,
+                st.drop_no_port,
+                st.drop_bad_frame,
+                st.arp.gave_up,
+                st.arp.ignored,
+                st.arp.full_drop,
+                sw.host_rx_drops.load(Relaxed),
+                sw.host_tx_drops.load(Relaxed),
+                sw.uplink_rx_drops.load(Relaxed),
+                sw.nic_tx_errors.load(Relaxed),
+                sw.slot_src_drops.load(Relaxed)
+            );
+        }
         let due = start.saturating_add(n.saturating_mul(1_000_000_000));
         exec.until(due).await;
         // Hoe laat deze tik kwam. Een kern die een tijd niets rondmaakte
