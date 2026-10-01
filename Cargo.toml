@@ -6,6 +6,7 @@ resolver = "3"
 members = [
     "dev",
     "bounded",
+    "heap",
     "sync",
     "executor",
     "abi",
@@ -90,6 +91,7 @@ members = [
 default-members = [
     "dev",
     "bounded",
+    "heap",
     "sync",
     "executor",
     "abi",

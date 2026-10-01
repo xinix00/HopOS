@@ -8,6 +8,7 @@ description = "De app-runtime: executor, ringen, system-API-client, de main-schi
 build = "build.rs"
 
 [dependencies]
+heap = { path = "../heap" }
 dev = { path = "../dev" }
 abi = { path = "../abi" }
 sync = { path = "../sync" }

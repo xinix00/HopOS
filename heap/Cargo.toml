@@ -1,0 +1,10 @@
+[package]
+name = "heap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Herbruikbare begrensde allocator voor kern en apps."
+
+[lints]
+workspace = true

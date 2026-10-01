@@ -19,6 +19,7 @@ dependencies = [
  "dev",
  "driver-codec",
  "executor",
+ "heap",
  "leanhttp",
  "leannet",
  "netdev",
@@ -58,6 +59,7 @@ dependencies = [
  "dev",
  "driver-fb",
  "executor",
+ "heap",
  "netdev",
  "sync",
 ]
@@ -624,6 +626,10 @@ dependencies = [
  "driver-xhci",
  "sync",
 ]
+
+[[package]]
+name = "heap"
+version = "3.0.0"
 
 [[package]]
 name = "hopos"

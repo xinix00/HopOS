@@ -1,7 +1,18 @@
 //! De heap op de host: over een gewone buffer, met na elke stap de
 //! invarianten van `State` via [`Heap::check`].
 
-use super::*;
+use super::{Core, GlobalAlloc, HDR, Layout, MAX_ALIGN, MIN_BLOCK, Walk};
+type Heap = super::Heap<TestCore>;
+struct TestCore;
+impl Core for TestCore {
+    fn id() -> u64 {
+        std::thread_local! { static ID: u64 = {
+            static NEXT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+            NEXT.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+        }; }
+        ID.with(|id| *id)
+    }
+}
 use std::vec::Vec;
 
 /// Een heap over een eigen, op een pagina uitgelijnde buffer.
@@ -285,4 +296,48 @@ fn seeded_random_stress_keeps_the_invariants() {
     for seed in [1, 42, 0xdead_beef, 0x9e37_79b9_7f4a_7c15] {
         stress(seed, 20_000);
     }
+}
+
+#[test]
+fn concurrent_allocations_and_cross_thread_frees_keep_ownership() {
+    let arena = Arena::new(4 << 20);
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for tag in 1..=4u8 {
+            let a = &arena;
+            handles.push(scope.spawn(move || {
+                let mut keep = Vec::new();
+                for i in 0..2000 {
+                    let p = a.alloc(1024, 64).unwrap();
+                    fill(p, 1024, tag);
+                    if i % 100 == 0 {
+                        keep.push((p, tag));
+                    } else {
+                        assert!(intact(p, 1024, tag));
+                        a.free(p);
+                    }
+                }
+                keep
+            }));
+        }
+        for h in handles {
+            for (p, tag) in h.join().unwrap() {
+                assert!(intact(p, 1024, tag));
+                arena.free(p);
+            }
+        }
+    });
+    arena.assert_whole();
+    assert_eq!(arena.heap.stats().bad_frees, 0);
+}
+#[test]
+fn reserved_core_identity_cannot_acquire_the_lock() {
+    struct Reserved;
+    impl Core for Reserved {
+        fn id() -> u64 {
+            u64::MAX
+        }
+    }
+    let h = super::Heap::<Reserved>::new();
+    assert!(h.reserve(16, 16).is_none());
 }

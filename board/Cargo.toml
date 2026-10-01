@@ -7,6 +7,7 @@ publish.workspace = true
 description = "Het board-contract: wat een machine moet kunnen (cores, geheugen, NIC, console, klok, slaap)."
 
 [dependencies]
+heap = { path = "../heap" }
 dev = { path = "../dev" }
 abi = { path = "../abi" }
 netdev = { path = "../netdev" }
