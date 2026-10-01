@@ -44,6 +44,7 @@ mod error;
 pub mod grants;
 pub mod hopfs;
 pub mod kernflip;
+pub mod nodecfg;
 pub mod partmem;
 pub mod pool;
 pub mod rpc;

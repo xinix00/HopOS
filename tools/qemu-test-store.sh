@@ -7,7 +7,7 @@
 # nagerekend, wel de payload-hash), voor de gast op 10.0.2.2 (slirp), over
 # http: de nep heeft geen certificaat, en Hop zegt dat luid
 # (HOP_STORE_PLAIN_HTTP). De kern boot met Hop in slot 1 en hopos.s3.* in de
-# bootargs (image/qemu-run.sh BOOTARGS, hopos/src/config.rs geeft ze als
+# bootargs (image/qemu-run.sh BOOTARGS, kern/src/nodecfg.rs geeft ze als
 # HOPOS_S3_* aan Hop). Met een bucket is dat ook de lock van Hop's cluster,
 # en een lease vraagt een gezette klok: daarom ook een SNTP-antwoorder op de
 # host (hopos.ntp=10.0.2.2:$NTPPORT, HOP_CLOCK_SYNCED). Van buiten gaat er

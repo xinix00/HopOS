@@ -7,7 +7,7 @@
 //!
 //! Dit bezit de ring, de tee en de lezersplaatsen; de listener en de
 //! lezertaken staan in net.rs (de node-stack), en de aan/uit-keuze komt uit
-//! de config (config.rs: `hopos.console`, anders `hopos.insecure`).
+//! de config (kern::nodecfg: `hopos.console`, anders `hopos.insecure`).
 //!
 //! Eigendom: de ring is van de OS-core (`LocalCell`, zoals het glas in
 //! gui.rs). De tee schrijft alleen op die core; een regel van een andere
@@ -41,7 +41,7 @@ static RING_CORE: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// De sink vóór ons (de UART van het board), zoals `kmain` hem zette.
 /// Null = nog geen tee.
 static PREV: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
-/// Staat de TCP-poort aan (de keuze van config.rs)?
+/// Staat de TCP-poort aan (de keuze van kern::nodecfg)?
 static ENABLED: AtomicBool = AtomicBool::new(false);
 /// De lezersplaatsen: hoogstens `kern::conport::MAX_READERS` tegelijk.
 pub(crate) static READERS: Readers = Readers::new();

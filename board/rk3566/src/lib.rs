@@ -317,8 +317,9 @@ fn fdt() -> Option<Fdt<'static>> {
     copied(&DTB_COPY).and_then(|b| Fdt::new(b).ok())
 }
 
-/// Het configbestand (de initrd) als tekst.
-fn cfg_text() -> &'static str {
+/// Het configbestand (de initrd) als tekst; "" zonder.
+#[must_use]
+pub fn cfg_text() -> &'static str {
     copied(&CFG_COPY)
         .and_then(|b| core::str::from_utf8(b).ok())
         .unwrap_or("")
@@ -332,8 +333,13 @@ pub fn boot_param(key: &'static str) -> &'static str {
     if !from_file.is_empty() {
         return from_file;
     }
-    let args = fdt().and_then(|f| f.bootargs()).unwrap_or("");
-    fw::bootcfg::first(fw::bootcfg::cmdline(args, key))
+    fw::bootcfg::first(fw::bootcfg::cmdline(bootargs(), key))
+}
+
+/// De bootargs (de APPEND van extlinux.conf); "" zonder.
+#[must_use]
+pub fn bootargs() -> &'static str {
+    fdt().and_then(|f| f.bootargs()).unwrap_or("")
 }
 
 /// De ABI-staart van een slot Normal write-back in de kernmap (Go:

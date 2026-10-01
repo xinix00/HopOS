@@ -51,11 +51,17 @@ const RANDOM_OPS: u64 = 16384;
 /// hopfs-actor.
 const QUEUE_DEPTH: usize = kern::rpc::FS_DEPTH;
 
-/// Eén bootparameter: de eerste waarde van `key`, of "" als hij niet gezet
-/// is. De tekst komt van het board (`src::text`): de FDT-bootargs op virt en
-/// de Pi's, `hopos.cfg` op de UEFI-boards, en beide op de Radxa.
+/// Eén bootparameter: de eerste waarde van `key` in [`cfg_text`], of "" als
+/// hij niet gezet is.
 pub(crate) fn bootparam(dtb: u64, key: &'static str) -> String {
-    src::param(dtb, key)
+    String::from(fw::bootcfg::first(fw::bootcfg::all(&cfg_text(dtb), key)))
+}
+
+/// De config van het board als één tekst (`kern::nodecfg::text`):
+/// `hopos.cfg` van het bootmedium en de `hopos.*`-tokens van de bootargs,
+/// per board wat het heeft.
+pub(crate) fn cfg_text(dtb: u64) -> String {
+    src::text(dtb)
 }
 
 /// Start wat de bootparameters vragen: de schijf-bench (synchroon, nu, op
@@ -491,15 +497,14 @@ mod src {
     /// De grootste DTB die gelezen wordt (die van de Pi 5 is ~80 KB).
     const DTB_MAX: usize = 1 << 20;
 
-    pub(super) fn param(dtb: u64, key: &'static str) -> String {
+    pub(super) fn text(dtb: u64) -> String {
         let Some(blob) = copy(dtb).or_else(|| copy(fallback())) else {
             return String::new();
         };
         let Ok(f) = fw::fdt::Fdt::new(&blob) else {
             return String::new();
         };
-        let args = f.bootargs().unwrap_or("");
-        String::from(fw::bootcfg::first(fw::bootcfg::cmdline(args, key)))
+        kern::nodecfg::text("", f.bootargs().unwrap_or(""))
     }
 
     /// Waar QEMU de DTB legt als x0 leeg is (een ELF-kern).
@@ -535,31 +540,34 @@ mod src {
     }
 }
 
-/// De bron op de UEFI-boards: `hopos.cfg` van de ESP.
-#[cfg(any(feature = "board-uefi", feature = "board-o6n", feature = "board-altra"))]
-mod src {
-    use alloc::string::String;
-
-    pub(super) fn param(_dtb: u64, key: &'static str) -> String {
-        String::from(fw::bootcfg::first(fw::bootcfg::all(
-            crate::BOARD.config(),
-            key,
-        )))
-    }
-}
-
-/// De bron op de Radxa: het board leest `hopos.cfg` (de initrd) en de
-/// bootargs zelf. De riscv64-boards leveren dezelfde `boot_param`.
+/// De bron op de boards met alleen een bestand: `hopos.cfg` van de ESP
+/// (UEFI), of het venster in het image (Apple, de LicheeRV).
 #[cfg(any(
-    feature = "board-rk3566",
-    feature = "board-qemuvirt-riscv",
-    feature = "board-licheerv",
-    feature = "board-apple"
+    feature = "board-uefi",
+    feature = "board-o6n",
+    feature = "board-altra",
+    feature = "board-apple",
+    feature = "board-licheerv"
 ))]
 mod src {
     use alloc::string::String;
 
-    pub(super) fn param(_dtb: u64, key: &'static str) -> String {
-        String::from(vboard::boot_param(key))
+    pub(super) fn text(_dtb: u64) -> String {
+        kern::nodecfg::text(crate::BOARD.config(), "")
+    }
+}
+
+/// De bron op de Radxa (`hopos.cfg` in de initrd, dan de bootargs) en op
+/// QEMU riscv (alleen de bootargs).
+#[cfg(any(feature = "board-rk3566", feature = "board-qemuvirt-riscv"))]
+mod src {
+    use alloc::string::String;
+
+    pub(super) fn text(_dtb: u64) -> String {
+        #[cfg(feature = "board-rk3566")]
+        let file = vboard::cfg_text();
+        #[cfg(feature = "board-qemuvirt-riscv")]
+        let file = "";
+        kern::nodecfg::text(file, vboard::bootargs())
     }
 }

@@ -103,7 +103,7 @@ kern = { path = "../kern" }
 # (storage.rs, bench.rs).
 blkdev = { path = "../blkdev" }
 board = { path = "../board" }
-# De lezer van `hopos.cfg` (config.rs: van de sleutels naar de env van Hop).
+# De lezer van `hopos.cfg` en de FDT (bench.rs: de bootparameters).
 fw = { path = "../fw" }
 # De node-stack en de DHCP-client (PORT.md §2.1), op een tag en nooit over
 # een pad: lean is een eigen repo met een eigen versie.

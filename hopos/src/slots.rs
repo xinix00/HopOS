@@ -587,8 +587,10 @@ pub(crate) fn app_env(param: &str) -> Vec<u8> {
     env
 }
 
-/// De naam van deze node in Hop's cluster.
-const HOP_NODE: &str = "hopos-qemu";
+/// De naam van deze node in Hop's cluster als `hopos.cfg` geen
+/// `hopos.node` zet (Go: `cfg.Node.ID = "hopos-1"`); QEMU zet de zijne in
+/// `kern::nodecfg::QEMU_CFG`.
+const HOP_NODE: &str = "hopos-1";
 
 /// De plaatsing van Hop: het gestagede image één keer in slot 1, met de
 /// env van de node, dan de poorten op de uplink en de bewaking.
@@ -606,11 +608,9 @@ async fn place_hop(
         return;
     };
     let node_ip = wait_uplink(exec).await;
-    // De env van Hop komt uit hopos.cfg (config.rs); op QEMU is dat de
-    // vaste QEMU_CFG plus `hopos.s3.*` uit de bootargs, tot het board de
-    // echte tekst aanreikt.
-    let cfg = crate::config::NodeCfg::parse(&hop_cfg);
-    let facts = crate::config::Facts {
+    // De env van Hop komt uit de config van het board (kern::nodecfg).
+    let cfg = kern::nodecfg::NodeCfg::parse(&hop_cfg);
+    let facts = kern::nodecfg::Facts {
         default_node: HOP_NODE,
         node_ip,
         dns: crate::net::uplink_dns(),

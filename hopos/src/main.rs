@@ -479,22 +479,23 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     telemetry::start(exec);
     gui::start_screen_status(exec); // de meetregels naast de bunny
 
-    // De config van Hop: op QEMU de vaste tekst plus `hopos.s3.*` uit de
-    // bootargs (config.rs). Hier al, vóór het net: de console over TCP
-    // (conport.rs) kiest uit dezelfde config, en haar listener start zodra
-    // de lease er is, ook na een flip waarin Hop niet opnieuw wordt geplaatst.
-    let hop_cfg = match role {
-        Some(StagedRole::Hop) => config::qemu_hop_cfg(|k| bench::bootparam(dtb, k)),
-        _ => alloc::string::String::new(),
-    };
-    let node_cfg = config::NodeCfg::parse(&hop_cfg);
-    conport::enable(config::console_enabled(&node_cfg, |k| {
-        bench::bootparam(dtb, k)
-    }));
-    REPLAY_AT.store(
-        config::replay_after(&node_cfg, |k| bench::bootparam(dtb, k)),
-        Relaxed,
-    );
+    // De config van de node: de tekst van het board (bench::cfg_text,
+    // kern::nodecfg), en alleen op QEMU, dat geen bootmedium heeft, voor Hop
+    // de vaste bankconfig erachter. Hier al, vóór het net: de console over
+    // TCP (conport.rs) kiest uit dezelfde config, en haar listener start
+    // zodra de lease er is, ook na een flip waarin Hop niet opnieuw wordt
+    // geplaatst.
+    let mut hop_cfg = bench::cfg_text(dtb);
+    if cfg!(any(
+        feature = "board-qemuvirt",
+        feature = "board-qemuvirt-riscv"
+    )) && role == Some(StagedRole::Hop)
+    {
+        hop_cfg.push_str(kern::nodecfg::QEMU_CFG);
+    }
+    let node_cfg = kern::nodecfg::NodeCfg::parse(&hop_cfg);
+    conport::enable(kern::nodecfg::console_enabled(&node_cfg));
+    REPLAY_AT.store(kern::nodecfg::replay_after(&node_cfg), Relaxed);
 
     // Het netwerkvlak (net.rs): de pomp op de NIC, de switch, poort 0 met
     // de node-stack, DHCP en de system-listener. Zonder NIC draait de kern
@@ -750,7 +751,7 @@ fn stack_high_water() -> u64 {
 
 /// De hartslag: elke seconde één regel met het tiknummer en de meetlat van
 /// de executor.
-/// `hopos.replay=N` (config.rs): de tik waarop de kern het begin van zijn
+/// `hopos.replay=N` (kern::nodecfg): de tik waarop de kern het begin van zijn
 /// console herhaalt; 0 = nooit.
 static REPLAY_AT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 

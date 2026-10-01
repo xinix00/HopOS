@@ -161,8 +161,13 @@ fn fdt() -> Option<Fdt<'static>> {
 /// `-append`); leeg als hij er niet is.
 #[must_use]
 pub fn boot_param(key: &'static str) -> &'static str {
-    let args = fdt().and_then(|f| f.bootargs()).unwrap_or("");
-    fw::bootcfg::first(fw::bootcfg::cmdline(args, key))
+    fw::bootcfg::first(fw::bootcfg::cmdline(bootargs(), key))
+}
+
+/// De FDT-bootargs (QEMU `-append`); "" zonder.
+#[must_use]
+pub fn bootargs() -> &'static str {
+    fdt().and_then(|f| f.bootargs()).unwrap_or("")
 }
 
 /// QEMU virt (riscv64) als board.

@@ -680,6 +680,7 @@ dependencies = [
  "blkdev",
  "bounded",
  "driver-codec",
+ "fw",
  "leanelf",
  "sync",
 ]

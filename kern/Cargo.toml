@@ -14,6 +14,8 @@ blkdev = { path = "../blkdev" }
 abi = { path = "../abi" }
 sync = { path = "../sync" }
 bounded = { path = "../bounded" }
+# De lezer van `hopos.cfg` (src/nodecfg.rs): één parser voor elk kanaal.
+fw = { path = "../fw" }
 # De ELF-lezer van de plaatsing (STREAM_IMAGE na de laatste byte): no_std,
 # geen allocatie, geen build.rs. Getagd over de repo-grens (PORT.md §6
 # beslissing 6), nooit een pad.
