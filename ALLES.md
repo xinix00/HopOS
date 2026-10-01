@@ -110,45 +110,44 @@ voor de volgende stick (nog niet erop).
 
 ### Mac mini M4 (m4-1, 192.168.1.122)
 
-Image: `target/apple-m4/hopos-apple.img` (30-09 20:45, 2588672 bytes, Hop
-ingebakken via `EMBED=`, config met `hopos.replay=45` en `hopos.cages=on`);
-nog niet geïnstalleerd. Op de stick staat de 20:25-build (SError-drain,
-zonder Hop). Console: USB-C-debugkabel, `sudo macvdmtool debugusb`
-(zonder reboot; na elke herstart van de M4 de kabel aan de Mac-kant even
-uit en in, anders enumereert de kis-poort niet), lezer
-`scratchpad/m4-watch.sh` op `/dev/cu.kis-100000-ch-0`. De kern herhaalt
-elke 45 s zijn eerste 16 KiB console (`HOPOS_CONSOLE_REPLAY`).
+Image: `image/apple-m4.sh` met `CFG=` (cfg ingebakken op 0xF000; nu
+`hopos.pstate=off`, `hopos.replay=45`, `hopos.cages=on`, insecure) en
+`EMBED=` (Hop ingebakken); install vanuit Recovery met `install.sh go` op
+de stick (`hopos-m4.img`, een veelvoud van 16 KiB). Console: USB-C-
+debugkabel, de kis-poort komt alleen na een verse plug aan de Mac-kant
+gevolgd door `sudo macvdmtool reboot debugusb` (1 s); `debugusb` zonder
+herstart en `reboot serial` helpen niet. Lezer `scratchpad/m4-watch.sh`
+op `/dev/cu.kis-100000-ch-0`. Sinds 01-10 ook op het LAN: 5555, 8080,
+9080, 10100 (5555 draagt de vroege bootregels niet).
 
-- [ ] v3 boot volledig onder kmutil (30-09 20:07): bunny, ADT 6 E + 4 P,
-      cores ours, NVMe AP0512Z met hopfs (395 GB), AIC, apcie 2 van 3
-      poorten, tg3 LINK UP 1000, DHCP 192.168.1.122 in 1 ms, 10100 en
-      5555 luisteren. Maar:
-- [ ] **SError-storm vanaf de AIC-start**: ESR 0xbe000000 (vector 11), niet
-      vóór de AIC, wel na elke stap daarna en continu; de EL1-beurt van de
-      preflight sterft er meteen aan (`HOPOS_APPLE_PREFLIGHT_FAULT`), de
-      kern weigert de kooien, geen Hop. Go: zo'n SError is een L2C_ERR
-      (stille verboden schrijf, adres in L2C_ERR_ADR). De 20:45-build leest
-      en wist m1n1's L2C_ERR_STS/ADR/INF bij elke drain
-      (`HOPOS_APPLE_SERROR ... l2c adr=`) en forceert de kooien
-      (`hopos.cages=on`; een bewoner draait op EL1 met PSTATE.A dicht, dus
-      Hop overleeft de storm). Eerst kijken welk adres het is (de AIC-
-      bring-up schrijft iets dat dit silicium weigert; vergelijk
-      OLD/metal/board/apple en driver/aic met m1n1's aic.c voor de t8132).
-- [ ] **Doof na DHCP**: de lease komt in 1 ms, daarna antwoordt de node
-      niet meer (geen ARP, ping, 5555, 10100 vanaf de Mac). tg3 RX-pad
-      (bijvullen van de producer-ring, of DMA die stilvalt door de
-      L2C-fout). Een tg3-diagnoseregel in de tik (`counters()`,
-      `rcb_dump()`, `irq_diag()` bestaan in driver/nic/tg3) is de volgende
-      stap; de pomp bezit de NIC, de tik niet.
-- [ ] Onder kmutil geen stage van een loader: de kern neemt nu de
-      ingebakken Hop (`board/apple/build.rs`, `HOPOS_EMBED`,
-      `slots::staged_image` valt erop terug). Nog niet op ijzer gezien.
-- [ ] Flippen op de M4: geen PSCI, dus `send_off` (CPU_OFF) bestaat niet;
-      flip.rs kent het board (`board-apple` in de koude weg) maar de warme
-      flip met een geparkeerde app-core is hier nooit gedaan. Pas zinvol
-      als Hop woont.
+- [x] **SError na de p-state-tune** (01-10): de schrijf naar P-cluster
+      +0x48400 (4442f3d) én de CL_PSTATE-schrijf zelf; met
+      `hopos.pstate=off` geen enkele SError meer, slaapt 3250/s in plaats
+      van 131.000. De tune blijft uit tot hij op dit silicium begrepen is.
+- [x] **Doof na DHCP** (01-10, 4be8b60): de tg3 nam geen unicast aan.
+      De chipregel in de tik (`HOPOS_NIC_DIAG`) zei het: `rx ucast=0`
+      naast `bcast=308` per vijf seconden, geen filter-drops, ring en
+      status-blok gezond, en de terugleesregel `mac0=0x0010/0x18000000`:
+      MAC_ADDR_0 hield Broadcom's default. De bootcode zet die terug ná
+      onze `set_mac` (Rust schreef het adres in new en init, vóór de link;
+      Go pas in Init, ná LinkUp). Fix: het adres nog eens aan het eind van
+      `link_up`, in alle vier de filters zoals Linux, met promiscuous als
+      vangnet tot de terugleesregel ons adres toont (dan weg). Met het
+      vangnet: ping, 5555, 8080, 10100, Hop leider, de node-stack ziet TCP.
+      De "connection refused" van Hop op de system-API was hetzelfde
+      filter: applib meldt een time-out als refused.
+- [ ] **Flippen op de M4**: `image/flip-bundle.sh apple` bestaat (01-10);
+      de eerste bundel werd aangenomen, maar de nieuwe kern stierf na de
+      sprong en de watchdog bracht het geïnstalleerde image in ~20 s terug
+      (veilig). De zwarte doos staat alleen op de dockchannel. Geen PSCI,
+      dus geen CPU_OFF; de warme flip met een geparkeerde app-core is hier
+      nooit gedaan.
 - [ ] De koude flip werkt er niet (PSCI CPU_OFF zonder EL3); na een
       verhuizing met een rode voorproef spint de oude core.
+- [ ] Het diagnose-image van 06:45 (met `self_test` ná de init) bootte
+      niet onder iBoot en viel in Recovery; A, D2 en D3 bootten. Oorzaak
+      niet gevonden; `self_test` schrijft in de send-RCB en hoort vóór de
+      init.
 - [ ] Na de eerste zichtbare boot: `cores: ours` (zonder m1n1's spin-table).
 
 ### LicheeRV Nano (RISC-V)
