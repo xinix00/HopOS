@@ -376,6 +376,39 @@ pub fn state() -> Result<usize, MmuError> {
     decode(STATE.load(Relaxed), start, size)
 }
 
+/// Is al het geheugen van deze app Normal (de stage-1 staat aan)? Dan mag
+/// een toegang ongealigneerd zijn ([`crate::mem`]). Vóór de overdracht in
+/// `_start` en na een weigering niet: dan is alles Device. Eén load, want
+/// elke `memcpy` vraagt het.
+#[cfg(all(target_os = "none", target_arch = "aarch64"))]
+#[inline(always)]
+pub(crate) fn normal() -> bool {
+    let w = STATE.load(Relaxed);
+    w != 0 && w & REFUSED == 0
+}
+
+/// Hoe deze app zijn frame-ringen mapt ([`abi::ring::Coherence`]):
+/// [`Hardware`](abi::ring::Coherence::Hardware) als de stage-1 aan staat
+/// (de rij "de rest van de staart" in de tabel bovenaan: `ATTR_RINGS`, WB
+/// en inner shareable; de stage-2 van de kern geeft RAM ook WB inner
+/// shareable, cpu/src/el2/stage2.rs `BLOCK_RW`). Zonder stage-1 is alles
+/// Device en moet de kopie langs het geheugen.
+///
+/// Dit is alleen de belofte van deze kant; de ring zelf kopieert pas
+/// zonder onderhoud als de kern hetzelfde belooft in de ringkop (elke
+/// v3-kern op arm64 behalve Apple, waar de pool Device is).
+///
+/// RISC-V: geen ARM-stage-1 (`hw::PRESENT` is onwaar) en de C906 is niet
+/// coherent met het andere hart; daar altijd onderhoud.
+#[must_use]
+pub fn ring_coherence() -> abi::ring::Coherence {
+    if hw::PRESENT && state().is_ok() {
+        abi::ring::Coherence::Hardware
+    } else {
+        abi::ring::Coherence::Maintained
+    }
+}
+
 /// De overdracht van `_start` na de MMU-aan: het boot-woord van
 /// [`__applib_stage1_build`]. Na de veeg van `.bss`, dus cacheable en
 /// blijvend.

@@ -28,6 +28,9 @@
     )
 )]
 
+#[cfg(target_arch = "aarch64")]
+pub mod mem;
+
 use core::cell::UnsafeCell;
 use core::ptr;
 
@@ -135,6 +138,58 @@ pub fn copy_out(dst: &mut [u8], src: Pa) {
         *b = read8(p);
         p = p.add(1);
     }
+}
+
+/// Kopieert `src` naar gedeeld geheugen op `dst` met een gewone `memcpy`,
+/// zonder vluchtige woorden: de compiler en de core mogen bundelen en
+/// vooruit lezen. Alleen voor geheugen dat op dit adres Normal gemapt is
+/// (op Device is een samengevoegde of ongealigneerde toegang een fault) en
+/// waar de tegenpartij tijdens de kopie niet in leest of schrijft, zoals een
+/// ringrecord vóór zijn publicatie. Voor al het andere: [`copy_in`].
+#[inline]
+pub fn copy_in_normal(dst: Pa, src: &[u8]) {
+    // SAFETY: `dst` komt uit de layout (zie de crate-doc) en is daar voor
+    // `src.len()` bytes van de aanroeper; die belooft bovendien dat het
+    // bereik Normal gemapt is en dat niemand anders het tijdens de kopie
+    // aanraakt. `src` is een geldige slice in eigen geheugen, dus de twee
+    // overlappen niet.
+    unsafe { ptr::copy_nonoverlapping(src.as_ptr(), dst.as_usize() as *mut u8, src.len()) }
+}
+
+/// Kopieert gedeeld Normal-geheugen op `src` naar `dst` met een gewone
+/// `memcpy`; dezelfde voorwaarden als [`copy_in_normal`]: Normal gemapt, en
+/// de tegenpartij schrijft er tijdens de kopie niet in (een gepubliceerd
+/// ringrecord dat de lezer nog niet vrijgaf).
+#[inline]
+pub fn copy_out_normal(dst: &mut [u8], src: Pa) {
+    // SAFETY: zie `copy_in_normal`; `dst` is een geldige, eigen slice en
+    // overlapt dus niet met het gedeelde bereik.
+    unsafe { ptr::copy_nonoverlapping(src.as_usize() as *const u8, dst.as_mut_ptr(), dst.len()) }
+}
+
+/// Leent `n` bytes gedeeld Normal-geheugen op `pa` als slice aan `f`,
+/// zonder kopie: een ringrecord dat de lezer in plaats leest. Alleen voor
+/// geheugen dat op dit adres Normal gemapt is en waar niemand tijdens `f`
+/// in schrijft (een gepubliceerd record dat de lezer nog niet vrijgaf, van
+/// een producer die hij vertrouwt). Voor al het andere: [`copy_out`].
+#[inline]
+pub fn view<T>(pa: Pa, n: usize, f: impl FnOnce(&[u8]) -> T) -> T {
+    // SAFETY: `pa` komt uit de layout (zie de crate-doc) en is daar voor `n`
+    // bytes van de aanroeper; die belooft dat het bereik Normal gemapt is
+    // en dat niemand er schrijft zolang de slice leeft, en die leeft alleen
+    // binnen `f`.
+    f(unsafe { core::slice::from_raw_parts(pa.as_usize() as *const u8, n) })
+}
+
+/// Leent `n` bytes gedeeld Normal-geheugen op `pa` als schrijfbare slice
+/// aan `f`: een ringrecord dat de producer in plaats vult. Dezelfde
+/// voorwaarden als [`view`], plus: niemand leest er tijdens `f` (de ruimte
+/// voorbij head, vóór de publicatie).
+#[inline]
+pub fn view_mut<T>(pa: Pa, n: usize, f: impl FnOnce(&mut [u8]) -> T) -> T {
+    // SAFETY: als `view`; de aanroeper belooft bovendien dat niemand anders
+    // het bereik leest of schrijft zolang de slice leeft (alleen binnen `f`).
+    f(unsafe { core::slice::from_raw_parts_mut(pa.as_usize() as *mut u8, n) })
 }
 
 /// Wist `len` bytes device-geheugen vanaf `pa`.
@@ -422,6 +477,19 @@ mod tests {
         copy_in(base.add(3), &src); // begint 3 bytes scheef, eindigt scheef
         let mut out = vec![0u8; 21];
         copy_out(&mut out, base.add(3));
+        assert_eq!(out, src);
+        assert_eq!(buf[0..3], [0, 0, 0]);
+        assert_eq!(buf[24], 0);
+    }
+
+    #[test]
+    fn normal_copy_round_trips_at_any_offset() {
+        let mut buf = [0u8; 48];
+        let base = pa_of(&mut buf);
+        let src: Vec<u8> = (1..=21).collect();
+        copy_in_normal(base.add(3), &src);
+        let mut out = vec![0u8; 21];
+        copy_out_normal(&mut out, base.add(3));
         assert_eq!(out, src);
         assert_eq!(buf[0..3], [0, 0, 0]);
         assert_eq!(buf[24], 0);

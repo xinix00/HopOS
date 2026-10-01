@@ -19,6 +19,12 @@ mod config;
 mod conport; // de console over TCP: de ring achter de UART (conport.rs)
 mod flip; // FLIP: de kern-flip (flip.rs)
 mod gui; // het gui-vlak (gui.rs); kaal no-ops, feature `gui`
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    not(feature = "board-apple")
+))]
+mod mem; // memcpy en memcmp met ongealigneerde ldp/stp (mem.rs)
 mod net;
 #[cfg(feature = "media")]
 mod optical;
