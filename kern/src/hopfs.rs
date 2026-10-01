@@ -3,10 +3,15 @@
 //! en sinds 24-09 legt [`Fs::commit`] de boom vast (twee plekken, de nieuwste
 //! geldige wint) zodat een flip en een koude boot niet leeg beginnen.
 //!
-//! Eén eigenaar-taak bezit de [`Fs`] als `&mut self`: de `FS.mu` uit Go is
-//! weg. De vertaling logisch naar fysiek staat open als [`Fs::lookup`], zodat
-//! een servicer zijn extents kan vragen en zijn eigen I/O doet; de
-//! lees/schrijf-paden hieronder doen het nog zelf, zoals in Go.
+//! Eén eigenaar-taak bezit de [`Fs`]: de `FS.mu` uit Go is weg. Het plan
+//! staat los van de I/O: [`Fs::read_step`] en [`Fs::write_step`] vertalen
+//! één brok synchroon (een schrijf krijgt daar zijn verse run), de I/O doet
+//! de aanroeper, en [`Fs::write_landed`] publiceert de mapping pas ná de
+//! data. [`Fs::read_at`] en [`Fs::write_at`] zijn die stappen met de eigen
+//! schijf; de actor met meerdere calls in de lucht doet ze met de boom in
+//! een [`Tree`] die alleen tussen twee stappen geleend wordt
+//! ([`read_shared`], [`write_shared`]), en legt vast met [`commit_shared`]
+//! terwijl andere calls doorlopen.
 //!
 //! De I/O is een future ([`BlockIo`]): elk blok-verzoek is een submit plus
 //! een `.await` op de completion, en tijdens die await draait de executor
@@ -24,6 +29,7 @@ use crate::sha256::Sha256;
 use crate::slots::{try_push, try_vec};
 use crate::{Error, Result};
 use alloc::vec::Vec;
+use sync::LocalCell;
 
 /// De logische blokmaat (8 NVMe-LBA's van 512 B).
 pub const BLOCK_SIZE: usize = 4096;
@@ -130,6 +136,145 @@ pub struct Fs<D> {
     last: Option<u8>,
     dirty: bool,
     pending: Vec<Run>,
+}
+
+/// Eén brok van een lees ([`Fs::read_step`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadStep {
+    /// Een gat: `len` nullen.
+    Hole {
+        /// Het aantal bytes.
+        len: usize,
+    },
+    /// Hele blokken: `len` bytes vanaf `lba`, rechtstreeks in de buffer.
+    Whole {
+        /// De eerste LBA.
+        lba: u64,
+        /// Het aantal bytes (hele blokken).
+        len: usize,
+    },
+    /// Een deel van één blok: `len` bytes vanaf `at` in het blok op `lba`.
+    Part {
+        /// De LBA van het blok.
+        lba: u64,
+        /// De plek in het blok.
+        at: usize,
+        /// Het aantal bytes.
+        len: usize,
+    },
+}
+
+/// Eén brok van een schrijf ([`Fs::write_step`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WriteStep {
+    /// De LBA van het eerste blok.
+    pub lba: u64,
+    bi: u32,
+    block: u32,
+    run: u32,
+    mapped: bool,
+    /// `None` = hele blokken; anders de plek in het ene blok (lezen,
+    /// aanvullen, schrijven).
+    pub at: Option<usize>,
+    /// Het aantal bytes data van deze brok.
+    pub len: usize,
+}
+
+/// Een vastlegging in uitvoering ([`Fs::commit_begin`]): de blob van de boom
+/// en waar hij heen gaat.
+#[derive(Debug)]
+pub struct CommitJob {
+    blob: Vec<u8>,
+    target: u8,
+    generation: u64,
+    /// De LBA van de kop; de body volgt erachter.
+    head: u64,
+    per_block: u64,
+    step: usize,
+    /// De vrijgaven die op deze vastlegging wachtten.
+    freed: Vec<Run>,
+}
+
+impl CommitJob {
+    /// De I/O van de vastlegging: flush (de data van de boom staat er dan),
+    /// de body, dan de kop, en weer een flush.
+    pub async fn io<B: BlockIo>(&self, disk: &mut B) -> Result {
+        disk.flush().await?;
+        let (head, body) = self.blob.split_at(BLOCK_SIZE.min(self.blob.len()));
+        let blocks = (self.step / BLOCK_SIZE) as u64;
+        for (i, chunk) in body.chunks(self.step.max(BLOCK_SIZE)).enumerate() {
+            let lba = self.head + (1 + i as u64 * blocks) * self.per_block;
+            disk.write(lba, chunk).await?;
+        }
+        disk.write(self.head, head).await?;
+        disk.flush().await?;
+        Ok(())
+    }
+}
+
+/// De I/O van een lees-brok naar `dst` (vooraan); geeft de bytes.
+pub async fn read_step_io<B: BlockIo>(
+    disk: &mut B,
+    s: ReadStep,
+    dst: &mut [u8],
+    tmp: &mut [u8; BLOCK_SIZE],
+) -> Result<usize> {
+    match s {
+        ReadStep::Hole { len } => {
+            dst.get_mut(..len)
+                .ok_or(Error::Corrupt { at: len })?
+                .fill(0);
+            Ok(len)
+        }
+        ReadStep::Whole { lba, len } => {
+            let d = dst.get_mut(..len).ok_or(Error::Corrupt { at: len })?;
+            disk.read(lba, d).await?;
+            Ok(len)
+        }
+        ReadStep::Part { lba, at, len } => {
+            disk.read(lba, tmp).await?;
+            let (d, src) = (dst.get_mut(..len), tmp.get(at..at + len));
+            if let (Some(d), Some(src)) = (d, src) {
+                d.copy_from_slice(src);
+            }
+            Ok(len)
+        }
+    }
+}
+
+/// De I/O van een schrijf-brok uit `src`. Een deel van een blok wordt
+/// gelezen (als het blok al een huis had), aangevuld en heel geschreven.
+pub async fn write_step_io<B: BlockIo>(
+    disk: &mut B,
+    s: &WriteStep,
+    src: &[u8],
+    tmp: &mut [u8; BLOCK_SIZE],
+) -> Result {
+    let Some(at) = s.at else {
+        return Ok(disk.write(s.lba, src).await?);
+    };
+    tmp.fill(0);
+    if s.mapped {
+        disk.read(s.lba, tmp).await?;
+    }
+    if let Some(d) = tmp.get_mut(at..at + src.len()) {
+        d.copy_from_slice(src);
+    }
+    Ok(disk.write(s.lba, tmp).await?)
+}
+
+/// Wist de staart vanaf `from` van het blok op `lba` (krimpen).
+pub async fn clear_tail<B: BlockIo>(
+    disk: &mut B,
+    lba: u64,
+    from: usize,
+    tmp: &mut [u8; BLOCK_SIZE],
+) -> Result {
+    disk.read(lba, tmp).await?;
+    if let Some(t) = tmp.get_mut(from..) {
+        t.fill(0);
+    }
+    Ok(disk.write(lba, tmp).await?)
 }
 
 const ROOT: usize = 0;
@@ -339,17 +484,28 @@ impl<D: BlockIo> Fs<D> {
         }
     }
 
-    /// De fysieke run achter logisch blok `block` van een bestand: voor een
-    /// servicer die zijn eigen I/O doet.
-    pub fn lookup(&mut self, path: &[u8], block: u32) -> Result<(u64, u32, bool)> {
-        let n = self.walk(&split(path)?, false)?;
-        let (p, run, mapped) = self.node(n)?.lookup(block);
-        Ok((self.lba(p), run, mapped))
-    }
-
     /// Leest hooguit `buf.len()` bytes; gaten lezen als nul.
     pub async fn read_at(&mut self, path: &[u8], off: u64, buf: &mut [u8]) -> Result<usize> {
-        let n = self.walk(&split(path)?, false)?;
+        let n = self.find(path)?;
+        let want = self.read_len(n, off, buf.len())?;
+        let mut tmp = [0u8; BLOCK_SIZE];
+        let mut done = 0usize;
+        while done < want {
+            let step = self.read_step(n, off + done as u64, want - done)?;
+            let dst = buf.get_mut(done..want).unwrap_or(&mut []);
+            done += read_step_io(&mut self.disk, step, dst, &mut tmp).await?;
+        }
+        Ok(done)
+    }
+
+    /// De node van een bestaand pad.
+    pub fn find(&mut self, path: &[u8]) -> Result<usize> {
+        self.walk(&split(path)?, false)
+    }
+
+    /// Hoeveel bytes een lees van hooguit `max` op `off` van node `n`
+    /// oplevert; een map is [`Error::Kind`].
+    pub fn read_len(&self, n: usize, off: u64, max: usize) -> Result<usize> {
         let node = self.node(n)?;
         if node.dir {
             return Err(Error::Kind);
@@ -357,41 +513,34 @@ impl<D: BlockIo> Fs<D> {
         if off >= node.size {
             return Ok(0);
         }
-        let want = (buf.len() as u64).min(node.size - off);
-        let mut tmp = [0u8; BLOCK_SIZE];
-        let mut done = 0u64;
-        while done < want {
-            let (bi, bo) = ((off + done) / BS, (off + done) % BS);
-            let (block, run, mapped) = self.node(n)?.lookup(u32::try_from(bi).unwrap_or(u32::MAX));
-            let mut chunk = (BS - bo).min(want - done);
-            let (d0, lba) = (done as usize, self.lba(block));
-            if !mapped {
-                chunk = (u64::from(run) * BS - bo).min(want - done);
-                if let Some(d) = buf.get_mut(d0..d0 + chunk as usize) {
-                    d.fill(0);
-                }
-            } else if bo == 0 && chunk == BS {
-                chunk = u64::from(run)
-                    .min(self.max_io_blocks)
-                    .min((want - done) / BS)
-                    * BS;
-                let d = buf
-                    .get_mut(d0..d0 + chunk as usize)
-                    .ok_or(Error::Corrupt { at: d0 })?;
-                self.disk.read(lba, d).await?;
-            } else {
-                self.disk.read(lba, &mut tmp).await?;
-                let (d, s) = (
-                    buf.get_mut(d0..d0 + chunk as usize),
-                    tmp.get(bo as usize..(bo + chunk) as usize),
-                );
-                if let (Some(d), Some(s)) = (d, s) {
-                    d.copy_from_slice(s);
-                }
+        Ok((max as u64).min(node.size - off) as usize)
+    }
+
+    /// De volgende brok van een lees van node `n` op `pos`, met nog `left`
+    /// bytes te gaan: alleen de vertaling, de I/O doet de aanroeper (zonder
+    /// de boom vast te houden, PORT.md §3).
+    pub fn read_step(&self, n: usize, pos: u64, left: usize) -> Result<ReadStep> {
+        let left = left as u64;
+        let (bi, bo) = (pos / BS, pos % BS);
+        let (block, run, mapped) = self.node(n)?.lookup(u32::try_from(bi).unwrap_or(u32::MAX));
+        let lba = self.lba(block);
+        Ok(if !mapped {
+            ReadStep::Hole {
+                len: (u64::from(run) * BS - bo).min(left) as usize,
             }
-            done += chunk;
-        }
-        Ok(done as usize)
+        } else if bo == 0 && left >= BS {
+            let blocks = u64::from(run).min(self.max_io_blocks).min(left / BS);
+            ReadStep::Whole {
+                lba,
+                len: (blocks * BS) as usize,
+            }
+        } else {
+            ReadStep::Part {
+                lba,
+                at: bo as usize,
+                len: (BS - bo).min(left) as usize,
+            }
+        })
     }
 
     fn file(&mut self, path: &[u8]) -> Result<usize> {
@@ -410,112 +559,147 @@ impl<D: BlockIo> Fs<D> {
     /// I/O-fout; een verse mapping wordt pas NA de data gepubliceerd, zodat
     /// een oude eigenaar nooit zichtbaar wordt.
     pub async fn write_at(&mut self, path: &[u8], off: u64, data: &[u8]) -> Result {
-        let end = off.checked_add(data.len() as u64).ok_or(Error::Range {
+        let n = self.write_open(path, off, data.len())?;
+        let mut tmp = [0u8; BLOCK_SIZE];
+        let mut done = 0usize;
+        while done < data.len() {
+            let pos = off + done as u64;
+            let step = self.write_step(n, pos, data.len() - done)?;
+            let src = data
+                .get(done..done + step.len)
+                .ok_or(Error::Corrupt { at: done })?;
+            let res = write_step_io(&mut self.disk, &step, src, &mut tmp).await;
+            done += self.write_landed(n, &step, pos, res)?;
+        }
+        Ok(())
+    }
+
+    /// Toetst een schrijf van `len` bytes op `off` en geeft de node van het
+    /// bestand (dat zo nodig ontstaat).
+    pub fn write_open(&mut self, path: &[u8], off: u64, len: usize) -> Result<usize> {
+        let end = off.checked_add(len as u64).ok_or(Error::Range {
             base: off,
-            size: data.len() as u64,
+            size: len as u64,
         })?;
         if end > u64::from(self.max) * BS {
             return Err(Error::DiskFull {
                 blocks: u64::from(self.max),
             });
         }
-        let n = self.file(path)?;
-        let len = data.len() as u64;
-        let mut tmp = [0u8; BLOCK_SIZE];
-        let mut done = 0u64;
-        while done < len {
-            let (bi, bo) = ((off + done) / BS, (off + done) % BS);
-            let bi = u32::try_from(bi).map_err(|_| Error::DiskFull { blocks: bi })?;
-            let (mut block, avail, mapped) = self.node(n)?.lookup(bi);
-            let mut chunk = (BS - bo).min(len - done);
-            let whole = bo == 0 && chunk == BS;
-            let mut run = 1u32;
-            if whole {
-                run = u32::try_from(
-                    u64::from(avail)
-                        .min(self.max_io_blocks)
-                        .min((len - done) / BS),
-                )
-                .unwrap_or(1);
-            }
-            if !mapped {
-                (block, run) = self.alloc_run(run)?;
-                if self.index >= MAX_INDEX_EXTENTS && !self.joins(n, bi, block, run)? {
-                    self.free_run(block, run)?;
-                    return Err(Error::Full {
-                        cap: MAX_INDEX_EXTENTS,
-                    });
-                }
-            }
-            let d0 = done as usize;
-            let res = if whole {
-                chunk = u64::from(run) * BS;
-                let src = data
-                    .get(d0..d0 + chunk as usize)
-                    .ok_or(Error::Corrupt { at: d0 })?;
-                self.disk.write(self.lba(block), src).await
-            } else {
-                tmp.fill(0);
-                if mapped {
-                    self.disk.read(self.lba(block), &mut tmp).await?;
-                }
-                if let (Some(d), Some(s)) = (
-                    tmp.get_mut(bo as usize..(bo + chunk) as usize),
-                    data.get(d0..d0 + chunk as usize),
-                ) {
-                    d.copy_from_slice(s);
-                }
-                self.disk.write(self.lba(block), &tmp).await
-            };
-            if let Err(e) = res {
-                if !mapped {
-                    self.free_run(block, run)?;
-                }
-                return Err(e.into());
-            }
-            if !mapped {
-                self.map_run(
-                    n,
-                    Extent {
-                        logical: bi,
-                        physical: block,
-                        count: run,
-                    },
-                )?;
-            }
-            done += chunk;
-            let node = self.node_mut(n)?;
-            if off + done > node.size {
-                node.size = off + done;
-            }
-            self.dirty = true;
+        self.file(path)
+    }
+
+    /// De volgende brok van een schrijf naar node `n` op `pos`, met nog
+    /// `left` bytes te gaan. Een blok zonder huis krijgt hier een verse run
+    /// (synchroon); de mapping volgt pas in [`Self::write_landed`], ná de
+    /// data.
+    pub fn write_step(&mut self, n: usize, pos: u64, left: usize) -> Result<WriteStep> {
+        let left = left as u64;
+        let (bi, bo) = (pos / BS, pos % BS);
+        let bi = u32::try_from(bi).map_err(|_| Error::DiskFull { blocks: bi })?;
+        let (mut block, avail, mapped) = self.node(n)?.lookup(bi);
+        let whole = bo == 0 && left >= BS;
+        let mut run = 1u32;
+        if whole {
+            run =
+                u32::try_from(u64::from(avail).min(self.max_io_blocks).min(left / BS)).unwrap_or(1);
         }
-        Ok(())
+        if !mapped {
+            (block, run) = self.alloc_run(run)?;
+            if self.index >= MAX_INDEX_EXTENTS && !self.joins(n, bi, block, run)? {
+                self.free_run(block, run)?;
+                return Err(Error::Full {
+                    cap: MAX_INDEX_EXTENTS,
+                });
+            }
+        }
+        let (at, len) = if whole {
+            (None, (u64::from(run) * BS) as usize)
+        } else {
+            (Some(bo as usize), (BS - bo).min(left) as usize)
+        };
+        Ok(WriteStep {
+            lba: self.lba(block),
+            bi,
+            block,
+            run,
+            mapped,
+            at,
+            len,
+        })
+    }
+
+    /// De brok van [`Self::write_step`] is terug van het device met `res`:
+    /// gelukt, dan de mapping erbij (pas nu) en de maat; mislukt, dan de
+    /// verse run terug en de fout. Geeft de geschreven bytes.
+    pub fn write_landed(
+        &mut self,
+        n: usize,
+        s: &WriteStep,
+        pos: u64,
+        res: Result,
+    ) -> Result<usize> {
+        if let Err(e) = res {
+            if !s.mapped {
+                self.free_run(s.block, s.run)?;
+            }
+            return Err(e);
+        }
+        if !s.mapped {
+            self.map_run(
+                n,
+                Extent {
+                    logical: s.bi,
+                    physical: s.block,
+                    count: s.run,
+                },
+            )?;
+        }
+        let end = pos + s.len as u64;
+        let node = self.node_mut(n)?;
+        if end > node.size {
+            node.size = end;
+        }
+        self.dirty = true;
+        Ok(s.len)
     }
 
     /// Groeit ijl; krimpen geeft runs terug en wist de bewaarde staart, zodat
     /// een latere groei geen weggegooide bytes laat zien.
     pub async fn truncate(&mut self, path: &[u8], size: u64) -> Result {
+        let n = self.truncate_open(path, size)?;
+        if let Some(lba) = self.truncate_tail(n, size)? {
+            let mut tmp = [0u8; BLOCK_SIZE];
+            clear_tail(&mut self.disk, lba, (size % BS) as usize, &mut tmp).await?;
+        }
+        self.truncate_set(n, size)
+    }
+
+    /// Toetst een truncate en geeft de node van het bestand (dat zo nodig
+    /// ontstaat).
+    pub fn truncate_open(&mut self, path: &[u8], size: u64) -> Result<usize> {
         if size > u64::from(self.max) * BS {
             return Err(Error::DiskFull {
                 blocks: u64::from(self.max),
             });
         }
-        let n = self.file(path)?;
+        self.file(path)
+    }
+
+    /// Het blok waarvan de staart vanaf `size` gewist moet worden vóór het
+    /// krimpen, als dat er is.
+    pub fn truncate_tail(&self, n: usize, size: u64) -> Result<Option<u64>> {
+        if size >= self.node(n)?.size || size.is_multiple_of(BS) {
+            return Ok(None);
+        }
+        let (block, _, mapped) = self.node(n)?.lookup(u32::try_from(size / BS).unwrap_or(0));
+        Ok(mapped.then(|| self.lba(block)))
+    }
+
+    /// De maat van node `n` wordt `size`: bij krimpen gaan de runs erachter
+    /// terug (vastgelegd pas na de volgende commit).
+    pub fn truncate_set(&mut self, n: usize, size: u64) -> Result {
         if size < self.node(n)?.size {
-            let tail = size % BS;
-            if tail != 0 {
-                let (block, _, mapped) =
-                    self.node(n)?.lookup(u32::try_from(size / BS).unwrap_or(0));
-                if mapped {
-                    let mut tmp = [0u8; BLOCK_SIZE];
-                    self.disk.read(self.lba(block), &mut tmp).await?;
-                    if let Some(t) = tmp.get_mut(tail as usize..) {
-                        t.fill(0);
-                    }
-                    self.disk.write(self.lba(block), &tmp).await?;
-                }
-            }
             let need = u32::try_from(size.div_ceil(BS)).unwrap_or(u32::MAX);
             let extents = core::mem::take(&mut self.node_mut(n)?.extents);
             let mut keep = Vec::new();
@@ -698,6 +882,104 @@ impl<D: BlockIo> Fs<D> {
     }
 }
 
+/// De boom van de actor met meerdere calls in de lucht: elke call leent
+/// hem alleen binnen één stap (synchroon), en doet zijn I/O daartussen met
+/// een eigen kopie van het gedeelde handvat (de wachtrij). Zo loopt de
+/// metadata-lening nooit over een await (PORT.md §3), en wachten twee
+/// calls nooit op elkaars schijf.
+pub type Tree<D> = LocalCell<Fs<D>>;
+
+/// [`Fs::read_at`] voor een call in de lucht, op node `n`.
+pub async fn read_shared<D: BlockIo + Copy>(
+    t: &Tree<D>,
+    n: usize,
+    off: u64,
+    buf: &mut [u8],
+) -> Result<usize> {
+    let (want, mut disk) = {
+        let fs = t.borrow();
+        (fs.read_len(n, off, buf.len())?, fs.disk())
+    };
+    let mut tmp = [0u8; BLOCK_SIZE];
+    let mut done = 0usize;
+    while done < want {
+        let step = t.borrow().read_step(n, off + done as u64, want - done)?;
+        let dst = buf.get_mut(done..want).unwrap_or(&mut []);
+        done += read_step_io(&mut disk, step, dst, &mut tmp).await?;
+    }
+    Ok(done)
+}
+
+/// [`Fs::write_at`] voor een call in de lucht, op node `n` (uit
+/// [`Fs::write_open`]). Eén schrijver per bestand tegelijk: dat bewaakt de
+/// aanroeper (twee verse runs voor hetzelfde blok zouden allebei gemapt
+/// willen worden).
+pub async fn write_shared<D: BlockIo + Copy>(
+    t: &Tree<D>,
+    n: usize,
+    off: u64,
+    data: &[u8],
+) -> Result {
+    let mut disk = t.borrow().disk();
+    let mut tmp = [0u8; BLOCK_SIZE];
+    let mut done = 0usize;
+    while done < data.len() {
+        let pos = off + done as u64;
+        let step = t.borrow_mut().write_step(n, pos, data.len() - done)?;
+        let src = data
+            .get(done..done + step.len)
+            .ok_or(Error::Corrupt { at: done })?;
+        let res = write_step_io(&mut disk, &step, src, &mut tmp).await;
+        done += t.borrow_mut().write_landed(n, &step, pos, res)?;
+    }
+    Ok(())
+}
+
+/// [`Fs::truncate`] voor een call in de lucht, op node `n` (uit
+/// [`Fs::truncate_open`]). Krimpen geeft blokken vrij: de aanroeper laat
+/// dit alleen toe als er niets anders loopt.
+pub async fn truncate_shared<D: BlockIo + Copy>(t: &Tree<D>, n: usize, size: u64) -> Result {
+    let (tail, mut disk) = {
+        let fs = t.borrow();
+        (fs.truncate_tail(n, size)?, fs.disk())
+    };
+    if let Some(lba) = tail {
+        let mut tmp = [0u8; BLOCK_SIZE];
+        clear_tail(&mut disk, lba, (size % BS) as usize, &mut tmp).await?;
+    }
+    t.borrow_mut().truncate_set(n, size)
+}
+
+/// [`Fs::commit`] voor de actor: de boom van nu vastleggen terwijl andere
+/// calls doorlopen. Geeft de nieuwe generatie, of `None` als er niets te
+/// doen was. Hoogstens één tegelijk: dat bewaakt de aanroeper.
+pub async fn commit_shared<D: BlockIo + Copy>(t: &Tree<D>) -> Result<Option<u64>> {
+    let (job, mut disk) = {
+        let mut fs = t.borrow_mut();
+        (fs.commit_begin()?, fs.disk())
+    };
+    let Some(job) = job else {
+        return Ok(None);
+    };
+    let r = job.io(&mut disk).await;
+    let mut fs = t.borrow_mut();
+    fs.commit_end(job, r)?;
+    Ok(Some(fs.generation()))
+}
+
+/// [`Fs::sync`] voor de actor: de barrière (een vastlegging, of zonder
+/// verandering alleen een flush). Geeft de bevestigde generatie.
+pub async fn sync_shared<D: BlockIo + Copy>(t: &Tree<D>) -> Result<u64> {
+    if !t.borrow().is_persistent() {
+        return Err(Error::VolatileStorage);
+    }
+    if commit_shared(t).await?.is_none() {
+        let mut disk = t.borrow().disk();
+        disk.flush().await?;
+    }
+    Ok(t.borrow().generation())
+}
+
 /// Wat [`Fs::mount`] aantrof, voor de ene consoleregel.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Mounted {
@@ -796,10 +1078,12 @@ impl<D: BlockIo> Fs<D> {
         if !self.persist {
             return Err(Error::VolatileStorage);
         }
-        if self.dirty || self.last.is_none() {
-            self.commit().await?;
-        } else {
-            self.disk.flush().await?;
+        match self.commit_begin()? {
+            Some(job) => {
+                let r = job.io(&mut self.disk).await;
+                self.commit_end(job, r)?;
+            }
+            None => self.disk.flush().await?,
         }
         Ok(self.generation)
     }
@@ -812,8 +1096,28 @@ impl<D: BlockIo> Fs<D> {
     /// De flip bevriest hopfs door dit te roepen en daarna geen verzoek meer
     /// aan te nemen: de eigenaar-taak IS het slot dat `Freeze` in Go was.
     pub async fn commit(&mut self) -> Result {
-        if !self.persist || (!self.dirty && self.last.is_some()) {
+        let Some(job) = self.commit_begin()? else {
             return Ok(());
+        };
+        let r = job.io(&mut self.disk).await;
+        self.commit_end(job, r)
+    }
+
+    /// Is de opslag duurzaam (een boom die vastgelegd wordt)?
+    #[must_use]
+    pub fn is_persistent(&self) -> bool {
+        self.persist
+    }
+
+    /// Het begin van een vastlegging: de boom van NU, als blob voor de
+    /// andere plek (`None` als er niets vast te leggen is). Synchroon, zodat
+    /// de actor intussen verder kan: wat na dit punt verandert, zet `dirty`
+    /// weer en gaat met de volgende mee, en wat na dit punt vrijkomt, wacht
+    /// op die volgende (de boom van deze vastlegging wijst er nog naar).
+    /// Hoogstens één vastlegging tegelijk: de aanroeper zorgt daarvoor.
+    pub fn commit_begin(&mut self) -> Result<Option<CommitJob>> {
+        if !self.persist || (!self.dirty && self.last.is_some()) {
+            return Ok(None);
         }
         let tree = self.encode()?;
         let room = (u64::from(self.slot) - 1) * BS;
@@ -823,29 +1127,55 @@ impl<D: BlockIo> Fs<D> {
                 max: room as usize,
             });
         }
-        self.disk.flush().await?;
         let target = if self.last == Some(0) { 1u8 } else { 0 };
         let generation = self.generation + 1;
         let blob = self.blob(generation, &tree)?;
         let start = u32::from(target) * self.slot;
-        let (head, body) = blob.split_at(BLOCK_SIZE);
-        self.write_blocks(start + 1, body).await?;
-        self.write_blocks(start, head).await?;
-        self.disk.flush().await?;
-        (self.generation, self.last, self.dirty) = (generation, Some(target), false);
-        for r in core::mem::take(&mut self.pending) {
-            self.free_run(r.start, r.count)?;
+        let job = CommitJob {
+            blob,
+            target,
+            generation,
+            head: self.lba(start),
+            per_block: self.lbas_per_block,
+            step: self.max_io_blocks as usize * BLOCK_SIZE,
+            freed: core::mem::take(&mut self.pending),
+        };
+        self.dirty = false;
+        Ok(Some(job))
+    }
+
+    /// Het einde van een vastlegging met de uitkomst `r` van
+    /// [`CommitJob::io`]: gelukt, dan is dit de generatie en komt wat de
+    /// vorige boom nog vasthield vrij; mislukt, dan blijft alles wachten op
+    /// de volgende poging.
+    pub fn commit_end(&mut self, job: CommitJob, r: Result) -> Result {
+        let CommitJob {
+            target,
+            generation,
+            freed,
+            ..
+        } = job;
+        if let Err(e) = r {
+            self.dirty = true;
+            for run in freed {
+                try_push(&mut self.pending, run)?;
+            }
+            return Err(e);
+        }
+        (self.generation, self.last) = (generation, Some(target));
+        for run in freed {
+            self.free_run(run.start, run.count)?;
         }
         Ok(())
     }
 
-    async fn write_blocks(&mut self, b: u32, p: &[u8]) -> Result {
-        let step = self.max_io_blocks as usize * BLOCK_SIZE;
-        for (i, chunk) in p.chunks(step).enumerate() {
-            let lba = self.lba(b + (i * step / BLOCK_SIZE) as u32);
-            self.disk.write(lba, chunk).await?;
-        }
-        Ok(())
+    /// Het blokapparaat zelf, als het een gedeeld handvat is (de wachtrij):
+    /// voor wie I/O doet zonder de boom vast te houden.
+    pub fn disk(&self) -> D
+    where
+        D: Copy,
+    {
+        self.disk
     }
 
     fn header(&self, generation: u64, tree_len: u64) -> [u8; HDR_HASH_OFF] {

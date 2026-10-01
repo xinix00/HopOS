@@ -18,18 +18,20 @@
 //! een `.await`, en er wordt per call niets gealloceerd (de kern-heap is een
 //! bump-allocator: wat terugkomt uit het midden lekt).
 //!
-//! De I/O blijft in de actor, maar als future: elk blok-verzoek is een
-//! submit plus een `.await` op de completion (`blkdev::InFlight`), en
-//! tijdens die await draait de executor door. Les van 30-09: tot dan wachtte
-//! de actor synchroon op het device, en de periodieke commit (FLUSH, de
-//! boom, FLUSH) hield op een trage schijf de hele OS-core tot 7 s stil: geen
-//! tik, Hop geen beurt, de switch geen frame. De actor houdt zijn boom over
-//! de await (hij is de eigenaar; een volgend bericht wacht in de
-//! brievenbus); de volume-tabel van de servicers leest hij alleen binnen
-//! een closure, dus die lening loopt nooit over een await (handboek §1.1).
-//! PORT.md §3 splitst later verder in een metadata-actor en een blok-actor,
-//! waarbij een servicer zijn extents vraagt ([`Fs::lookup`]) en zijn eigen
-//! I/O doet.
+//! De I/O loopt buiten de boom: een call wordt synchroon gepland (pad,
+//! node, een verse run) en doet daarna zijn blok-I/O als future op de
+//! wachtrij van het device (`blkdev::Queue`), met de boom alleen kort
+//! geleend tussen twee stappen (PORT.md §3: "de metadata-lening loopt nooit
+//! over de NVMe-await"). Zo staan er calls van meerdere apps tegelijk op de
+//! schijf (tot [`FS_DEPTH`]); de regels die het contract dragen, staan bij
+//! [`FsActor`]. Les van 30-09: tot dan wachtte de actor synchroon op het
+//! device, en de periodieke commit (FLUSH, de boom, FLUSH) hield op een
+//! trage schijf de hele OS-core tot 7 s stil: geen tik, Hop geen beurt, de
+//! switch geen frame. GEMETEN 01-10 op de M4 (vitals `rand=20000`, elke
+//! app één call tegelijk): met één call tegelijk in de actor (M26) haalden
+//! één, twee en vier apps samen 7.600, 9.200 en 9.300 willekeurige 4 KiB-
+//! lezingen per seconde; met de pool (M30, M31) 7.800, 14.400 en 25.000, en
+//! acht apps 36.000, met de OS-core dan vol (`busy_ms=1000`).
 //!
 //! # De kern als lezer
 //!
@@ -50,15 +52,21 @@
 //! de boom die haar terugvindt.
 
 use crate::cage::{Console, Timer};
-use crate::hopfs::{BlockIo, Fs};
+use crate::hopfs::{
+    BlockIo, Fs, Tree, commit_shared, read_shared, sync_shared, truncate_shared, write_shared,
+};
 use crate::slots::{Mount, Reply, Servicers, try_push};
 use crate::system::{MAX_IO_CHUNK, REQ_HEADER};
 use crate::{Error, Result, SLOT_CAP, Slot};
 use abi::hopabi::{OP_LIST, OP_READ, OP_REMOVE, OP_STAT, OP_SYNC, OP_TRUNCATE, OP_WRITE};
 use alloc::vec::Vec;
+use core::future::Future;
 use core::ops::Range;
+use core::pin::Pin;
+use core::task::Poll;
 use core::time::Duration;
 use sync::mpsc::Mailbox;
+use sync::{LocalCell, Pool};
 
 /// De map onder hopfs waar de eigen roots van de taken wonen.
 pub const TASKS_DIR: &[u8] = b"/.tasks";
@@ -474,10 +482,39 @@ pub fn thaw(inbox: &FsInbox<'_>) -> bool {
 // De actor.
 // ---------------------------------------------------------------------------
 
-/// De eigenaar van hopfs: boom, extents, vrije lijst en (nog) de I/O, die
-/// als future loopt.
+/// De eigenaar van hopfs: boom, extents en vrije lijst ([`Tree`]), en de
+/// calls die in de lucht zijn.
+///
+/// Meerdere calls tegelijk: wat binnenkomt, wordt synchroon gepland (pad,
+/// generatie, node, een verse run) en loopt daarna als future in een vaste
+/// [`Pool`] van [`FS_DEPTH`] plaatsen, elk met zijn eigen I/O op de
+/// wachtrij (`blkdev::Queue`). De regels die het contract dragen
+/// (docs/storage-sync.md), allemaal in `Desk::admit`:
+///
+/// - **Volgorde per app**: één call per slot tegelijk, in de volgorde van
+///   de brievenbus. Een app wacht toch al op zijn antwoord; zo ziet een
+///   tweede verbinding van dezelfde app ook nooit iets anders.
+/// - **Synchroon blijft synchroon**: het antwoord komt pas als de I/O van
+///   het device terug is (de future is dan klaar).
+/// - **OP_SYNC is een barrière plus een echte Flush**: de eerdere calls van
+///   dat slot zijn terug (de regel hierboven), dan legt hij de boom vast of
+///   flusht hij; één vastlegging tegelijk.
+/// - **Eén schrijver per bestand**, en remove, truncate, het klaarzetten
+///   van een nieuwe levensduur en de flip-bevriezing alleen als er niets
+///   anders loopt (ze geven blokken en nodes vrij).
+///
+/// Wat niet mag, wacht vooraan in de rij (de volgende in de brievenbus
+/// wacht erachter): zo blijft de volgorde van binnenkomst de volgorde van
+/// beginnen.
 pub struct FsActor<'s, D, L> {
-    fs: Fs<D>,
+    tree: Tree<D>,
+    desk: Desk<'s, L>,
+}
+
+/// Alles van de actor behalve de boom: de planning en de regels. Los van
+/// de boom, omdat de calls in de lucht de boom lenen terwijl de actor
+/// plant.
+struct Desk<'s, L> {
     svc: &'s Servicers,
     log: L,
     /// Per slot de levensduur waarvoor root en volumes klaarstaan.
@@ -496,125 +533,189 @@ pub struct FsActor<'s, D, L> {
     /// Geweigerde calls tijdens de bevriezing.
     frozen_calls: u64,
     path: PathBuf,
+    /// Per slot: heeft hij een call in de lucht?
+    busy: [bool; SLOT_CAP + 1],
+    /// De nodes met een schrijf in de lucht.
+    writing: [Option<usize>; FS_DEPTH],
+    /// Een vastlegging (commit, sync, freeze) is in de lucht.
+    committing: bool,
+    /// Er loopt iets dat alleen mag lopen (truncate, freeze).
+    alone: bool,
+    /// Meetlat: het hoogste aantal calls tegelijk in de lucht.
+    peak: usize,
 }
 
 /// Hoeveel mislukte commits (en blokfouten) een eigen regel krijgen.
 const LOUD_COMMIT_FAILS: u64 = 3;
 
-impl<'s, D: BlockIo, L: Console> FsActor<'s, D, L> {
+/// Wat een call na het plannen nog moet doen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Work {
+    /// Klaar zonder I/O, met dit antwoord.
+    Done(u64, usize),
+    /// Lezen uit node `n`.
+    Read(usize),
+    /// Schrijven naar node `n`.
+    Write(usize),
+    /// Node `n` op maat `c.n`.
+    Truncate(usize),
+    /// De barrière.
+    Sync,
+}
+
+/// Een bericht dat in de lucht is: zijn buffers en wat het doet.
+enum Job<'a> {
+    Call {
+        c: FsCall,
+        work: Work,
+        /// In een volume (voor de regel bij de eerste schrijf).
+        volume: bool,
+        reply: Option<&'a Reply>,
+    },
+    Kern {
+        r: KernRead,
+        node: usize,
+        size: u64,
+        reply: Option<&'a Reply>,
+    },
+    Commit(CommitWhy),
+    Freeze(Option<&'a Reply>),
+}
+
+/// Wat [`Desk::admit`] met een bericht doet.
+enum Admit<'a> {
+    /// Nog niet: het blijft vooraan in de rij.
+    Wait(FsEnvelope<'a>),
+    /// Afgehandeld (beantwoord of genegeerd).
+    Done,
+    /// In de lucht.
+    Go(Job<'a>),
+}
+
+/// De I/O van een call, met alleen de boom kort geleend. Geeft de uitkomst
+/// als `(size, data_len)`.
+async fn run_call<D: BlockIo + Copy>(
+    t: &Tree<D>,
+    c: &mut FsCall,
+    work: Work,
+) -> Result<(u64, usize)> {
+    match work {
+        Work::Done(size, len) => Ok((size, len)),
+        Work::Read(n) => {
+            let room = c.out.len().saturating_sub(REQ_HEADER).min(MAX_IO_CHUNK);
+            let len = usize::try_from(c.n).unwrap_or(usize::MAX).min(room);
+            let dst = c
+                .out
+                .get_mut(REQ_HEADER..REQ_HEADER + len)
+                .ok_or(Error::TooLarge { len, max: room })?;
+            let got = read_shared(t, n, c.off, dst).await?;
+            Ok((got as u64, got))
+        }
+        Work::Write(n) => {
+            let data = c.buf.get(c.data.clone()).ok_or(Error::Corrupt { at: 0 })?;
+            write_shared(t, n, c.off, data).await?;
+            Ok((data.len() as u64, 0))
+        }
+        Work::Truncate(n) => {
+            truncate_shared(t, n, c.n).await?;
+            Ok((c.n, 0))
+        }
+        Work::Sync => Ok((sync_shared(t).await?, 0)),
+    }
+}
+
+/// Een bericht in de lucht, tot het klaar is.
+async fn work<'a, D: BlockIo + Copy>(
+    t: &Tree<D>,
+    mut job: Job<'a>,
+) -> (Job<'a>, Result<(u64, usize)>) {
+    let r = match &mut job {
+        Job::Call { c, work, .. } => run_call(t, c, *work).await,
+        Job::Kern { r, node, size, .. } => read_shared(t, *node, r.off, &mut r.out)
+            .await
+            .map(|n| (*size, n)),
+        Job::Commit(_) => commit_shared(t).await.map(|g| (g.unwrap_or(0), 0)),
+        Job::Freeze(_) => commit_shared(t).await.map(|_| (t.borrow().generation(), 0)),
+    };
+    (job, r)
+}
+
+impl<'s, D: BlockIo + Copy, L: Console> FsActor<'s, D, L> {
     /// Een actor over een gemounte `fs`, met de volume-tabellen uit `svc`.
     pub fn new(fs: Fs<D>, svc: &'s Servicers, log: L) -> FsActor<'s, D, L> {
         FsActor {
-            fs,
-            svc,
-            log,
-            prepared: [None; SLOT_CAP + 1],
-            saved: [None; SLOT_CAP + 1],
-            commit_fails: 0,
-            io_fails: 0,
-            frozen: false,
-            frozen_calls: 0,
-            path: PathBuf::new(),
+            tree: LocalCell::cell(fs),
+            desk: Desk {
+                svc,
+                log,
+                prepared: [None; SLOT_CAP + 1],
+                saved: [None; SLOT_CAP + 1],
+                commit_fails: 0,
+                io_fails: 0,
+                frozen: false,
+                frozen_calls: 0,
+                path: PathBuf::new(),
+                busy: [false; SLOT_CAP + 1],
+                writing: [None; FS_DEPTH],
+                committing: false,
+                alone: false,
+                peak: 0,
+            },
         }
     }
 
-    /// De lus: één bericht tegelijk, elk antwoord terug naar zijn plek.
+    /// De lus: plannen wat binnenkomt, tot [`FS_DEPTH`] calls in de lucht,
+    /// elk antwoord terug naar zijn plek zodra zijn I/O terug is.
     pub async fn run(&mut self, inbox: &FsInbox<'_>) {
-        loop {
-            let env = inbox.recv().await;
-            match env.msg {
-                FsMsg::Call(mut c) if self.frozen => {
-                    // Luid, de eerste paar keer: een call die hier strandt
-                    // hoort de aanroeper opnieuw te doen op de nieuwe kern.
-                    self.frozen_calls += 1;
-                    if self.frozen_calls <= LOUD_COMMIT_FAILS {
-                        self.log.log(format_args!(
-                            "hopfs: slot {} op {} refused, frozen for the kernel flip HOPOS_FS_FROZEN_CALL",
-                            c.slot, c.op
-                        ));
-                    }
-                    if let Some(reply) = env.reply {
-                        reply.put_fs(FsDone {
-                            buf: core::mem::take(&mut c.buf),
-                            out: core::mem::take(&mut c.out),
-                            result: Err(Error::Busy),
-                        });
-                    }
+        let FsActor { tree, desk } = self;
+        let tree = &*tree;
+        let mut pool = core::pin::pin!(Pool::<_, FS_DEPTH>::new());
+        let mut next: Option<FsEnvelope<'_>> = None;
+        core::future::poll_fn(|cx| {
+            loop {
+                while let Poll::Ready(Some((job, r))) = pool.as_mut().poll_next(cx) {
+                    desk.land(job, r);
                 }
-                FsMsg::Call(mut c) => {
-                    let result = self.handle(&mut c).await;
-                    if let Err(Error::Io { lba }) = result {
-                        // Een blokfout is de schijf, niet de app: luid, de
-                        // eerste paar keer (de driver zelf print niet).
-                        self.io_fails += 1;
-                        if self.io_fails <= LOUD_COMMIT_FAILS {
-                            self.log.log(format_args!(
-                                "hopfs: slot {} op {}: block I/O failed at LBA {lba} ({} so far) HOPOS_FS_IO",
-                                c.slot, c.op, self.io_fails
+                let env = match next.take() {
+                    Some(e) => e,
+                    None => match Pin::new(&mut inbox.recv()).poll(cx) {
+                        Poll::Ready(e) => e,
+                        Poll::Pending => return Poll::Pending,
+                    },
+                };
+                // Wat wacht, wacht op een call in de lucht: die wekt de taak
+                // als hij klaar is.
+                match desk.admit(tree, env, pool.is_empty(), pool.is_full()) {
+                    Admit::Wait(e) => {
+                        next = Some(e);
+                        return Poll::Pending;
+                    }
+                    Admit::Done => {}
+                    Admit::Go(job) => {
+                        if pool.as_mut().push(work(tree, job)).is_err() {
+                            // `admit` liet hem alleen toe met een vrije plaats.
+                            desk.log.log(format_args!(
+                                "hopfs: no room for an admitted call HOPOS_FS_FAIL"
                             ));
                         }
+                        desk.peak = desk.peak.max(pool.len());
                     }
-                    if let Some(reply) = env.reply {
-                        reply.put_fs(FsDone {
-                            buf: c.buf,
-                            out: c.out,
-                            result,
-                        });
-                    }
-                }
-                FsMsg::Commit(_) if self.frozen => {}
-                FsMsg::Commit(why) => self.commit(why).await,
-                FsMsg::Freeze => {
-                    let result = self.freeze().await;
-                    if let Some(reply) = env.reply {
-                        reply.put_fs(FsDone {
-                            buf: Vec::new(),
-                            out: Vec::new(),
-                            result,
-                        });
-                    }
-                }
-                FsMsg::KernRead(mut r) => {
-                    // Bevroren weigert ook de kern: na de bevriezing hoort de
-                    // schijf van de volgende kern, en een lezing die daarna
-                    // nog lukt, zou een vergeten afhankelijkheid verstoppen.
-                    let result = if self.frozen {
-                        Err(Error::Busy)
-                    } else {
-                        self.kern_read(&r.path, r.off, &mut r.out).await
-                    };
-                    if let Some(reply) = env.reply {
-                        reply.put_fs(FsDone {
-                            buf: r.path,
-                            out: r.out,
-                            result,
-                        });
-                    }
-                }
-                FsMsg::Thaw => {
-                    self.frozen = false;
-                    self.log.log(format_args!(
-                        "hopfs: thawed, the flip did not go through ({} call(s) were refused) HOPOS_FS_THAWED",
-                        self.frozen_calls
-                    ));
-                    self.frozen_calls = 0;
                 }
             }
-        }
+        })
+        .await
     }
 
-    /// De bevriezing van de kern-flip: eerst vastleggen, dan pas dicht. Een
-    /// commit die faalt bevriest niet: dan zou de nieuwe kern een oudere
-    /// boom mounten dan de apps denken, en dat is geen flip maar verlies.
-    async fn freeze(&mut self) -> Result<(u64, usize)> {
-        self.fs.commit().await?;
-        self.frozen = true;
-        self.frozen_calls = 0;
-        let g = self.fs.generation();
-        self.log.log(format_args!(
-            "hopfs: tree committed as generation {g} and frozen for the kernel flip HOPOS_FS_FROZEN generation={g}"
-        ));
-        Ok((g, 0))
+    /// Eén bestandscall, van begin tot eind (de tests en wie zonder
+    /// brievenbus werkt). Geeft het `size`-veld van het antwoord en het
+    /// aantal databytes op `c.out[REQ_HEADER..]`.
+    pub async fn handle(&mut self, c: &mut FsCall) -> Result<(u64, usize)> {
+        let (work, volume) = self.desk.plan(&self.tree, c)?;
+        let r = run_call(&self.tree, c, work).await;
+        if r.is_ok() && volume && matches!(work, Work::Write(_)) {
+            self.desk.first_save(c);
+        }
+        r
     }
 
     /// Eén lezing voor de kern ([`FsMsg::KernRead`]): de bestandsmaat en
@@ -626,48 +727,288 @@ impl<'s, D: BlockIo, L: Console> FsActor<'s, D, L> {
         off: u64,
         out: &mut [u8],
     ) -> Result<(u64, usize)> {
-        clean_abs(path, &mut self.path)?;
-        let p = self.path.as_bytes();
-        if under(p, TASKS_DIR) {
-            return Err(Error::Denied);
-        }
-        let (size, dir) = self.fs.stat(p)?;
-        if dir {
-            return Err(Error::Kind);
-        }
+        let (node, size) = self.desk.plan_kern(&self.tree, path)?;
         if out.is_empty() {
             return Ok((size, 0));
         }
-        let n = self.fs.read_at(p, off, out).await?;
+        let n = read_shared(&self.tree, node, off, out).await?;
         Ok((size, n))
+    }
+
+    /// Legt de boom vast als hij veranderde; één regel per nieuwe generatie.
+    pub async fn commit(&mut self, why: CommitWhy) {
+        let r = commit_shared(&self.tree).await;
+        self.desk.committed(why, r);
+    }
+
+    /// De bevriezing van de kern-flip: eerst vastleggen, dan pas dicht.
+    pub async fn freeze(&mut self) -> Result<(u64, usize)> {
+        let r = commit_shared(&self.tree).await;
+        self.desk.frozen_after(&self.tree, r)
+    }
+
+    /// Meetlat: het hoogste aantal calls dat tegelijk in de lucht was.
+    #[must_use]
+    pub fn peak(&self) -> usize {
+        self.desk.peak
     }
 
     /// De generatie van de laatst vastgelegde boom.
     #[must_use]
     pub fn generation(&self) -> u64 {
-        self.fs.generation()
+        self.tree.borrow().generation()
     }
 
-    /// Legt de boom vast als hij veranderde; één regel per nieuwe generatie.
-    pub async fn commit(&mut self, why: CommitWhy) {
-        let before = self.fs.generation();
-        match self.fs.commit().await {
-            Ok(()) if self.fs.generation() != before => {
-                let g = self.fs.generation();
-                match why {
-                    CommitWhy::Periodic => self.log.log(format_args!(
-                        "hopfs: tree committed as generation {g} (every {} s) HOPOS_FS_COMMIT",
-                        COMMIT_EVERY.as_secs()
-                    )),
-                    CommitWhy::Stopped(s) => self.log.log(format_args!(
-                        "hopfs: tree committed as generation {g} (slot {s} stopped) HOPOS_FS_COMMIT"
-                    )),
-                    CommitWhy::Flip => self.log.log(format_args!(
-                        "hopfs: tree committed as generation {g} (kernel flip) HOPOS_FS_COMMIT"
-                    )),
+    /// Geeft de boom terug (een test die opnieuw mount).
+    #[cfg(test)]
+    pub(crate) fn into_fs(self) -> Fs<D> {
+        self.tree.into_inner().into_inner()
+    }
+
+    /// De boom zelf (een test die kijkt).
+    #[cfg(test)]
+    pub(crate) fn fs(&mut self) -> &mut Fs<D> {
+        self.tree.get_mut().get_mut()
+    }
+}
+
+impl<L: Console> Desk<'_, L> {
+    /// Mag `env` nu beginnen? Zo ja, dan plant hij het (synchroon) en geeft
+    /// het als [`Job`]; wat zonder I/O kan, wordt meteen beantwoord.
+    fn admit<'a, D: BlockIo + Copy>(
+        &mut self,
+        t: &Tree<D>,
+        env: FsEnvelope<'a>,
+        idle: bool,
+        full: bool,
+    ) -> Admit<'a> {
+        if self.alone || full {
+            return Admit::Wait(env);
+        }
+        let reply = env.reply;
+        match env.msg {
+            FsMsg::Call(c) => self.admit_call(t, c, reply, idle),
+            FsMsg::Commit(_) if self.frozen => Admit::Done,
+            FsMsg::Commit(why) if !self.committing => {
+                self.committing = true;
+                Admit::Go(Job::Commit(why))
+            }
+            FsMsg::Freeze if idle => {
+                (self.committing, self.alone) = (true, true);
+                Admit::Go(Job::Freeze(reply))
+            }
+            msg @ (FsMsg::Commit(_) | FsMsg::Freeze) => Admit::Wait(FsEnvelope { msg, reply }),
+            FsMsg::KernRead(r) => self.admit_kern(t, r, reply),
+            FsMsg::Thaw => {
+                self.frozen = false;
+                self.log.log(format_args!(
+                    "hopfs: thawed, the flip did not go through ({} call(s) were refused) HOPOS_FS_THAWED",
+                    self.frozen_calls
+                ));
+                self.frozen_calls = 0;
+                Admit::Done
+            }
+        }
+    }
+
+    fn admit_call<'a, D: BlockIo + Copy>(
+        &mut self,
+        t: &Tree<D>,
+        mut c: FsCall,
+        reply: Option<&'a Reply>,
+        idle: bool,
+    ) -> Admit<'a> {
+        if self.frozen {
+            // Luid, de eerste paar keer: een call die hier strandt hoort de
+            // aanroeper opnieuw te doen op de nieuwe kern.
+            self.frozen_calls += 1;
+            if self.frozen_calls <= LOUD_COMMIT_FAILS {
+                self.log.log(format_args!(
+                    "hopfs: slot {} op {} refused, frozen for the kernel flip HOPOS_FS_FROZEN_CALL",
+                    c.slot, c.op
+                ));
+            }
+            answer(reply, c, Err(Error::Busy));
+            return Admit::Done;
+        }
+        let i = c.slot.get();
+        let live = self.svc.current(c.slot) == Some(c.generation);
+        let busy = self.busy.get(i).copied().unwrap_or(false);
+        let fresh = live && self.prepared.get(i).copied().flatten() != Some(c.generation);
+        let wait = busy
+            || ((fresh || matches!(c.op, OP_REMOVE | OP_TRUNCATE)) && !idle)
+            || (c.op == OP_SYNC && self.committing);
+        if wait {
+            return Admit::Wait(FsEnvelope {
+                msg: FsMsg::Call(c),
+                reply,
+            });
+        }
+        let (work, volume) = match self.plan(t, &mut c) {
+            Ok(p) => p,
+            Err(e) => {
+                answer(reply, c, Err(e));
+                return Admit::Done;
+            }
+        };
+        match work {
+            Work::Done(size, len) => {
+                answer(reply, c, Ok((size, len)));
+                return Admit::Done;
+            }
+            Work::Write(n) if self.writing.contains(&Some(n)) => {
+                // Een andere app schrijft in hetzelfde bestand (een gedeeld
+                // volume): na hem. Het plannen was zonder gevolgen (het
+                // bestand bestaat al), dus straks opnieuw.
+                return Admit::Wait(FsEnvelope {
+                    msg: FsMsg::Call(c),
+                    reply,
+                });
+            }
+            Work::Write(n) => {
+                if let Some(s) = self.writing.iter_mut().find(|s| s.is_none()) {
+                    *s = Some(n);
                 }
             }
-            Ok(()) => {}
+            Work::Truncate(_) => self.alone = true,
+            Work::Sync => self.committing = true,
+            Work::Read(_) => {}
+        }
+        if let Some(b) = self.busy.get_mut(i) {
+            *b = true;
+        }
+        Admit::Go(Job::Call {
+            c,
+            work,
+            volume,
+            reply,
+        })
+    }
+
+    fn admit_kern<'a, D: BlockIo + Copy>(
+        &mut self,
+        t: &Tree<D>,
+        mut r: KernRead,
+        reply: Option<&'a Reply>,
+    ) -> Admit<'a> {
+        // Bevroren weigert ook de kern: na de bevriezing hoort de schijf van
+        // de volgende kern, en een lezing die daarna nog lukt, zou een
+        // vergeten afhankelijkheid verstoppen.
+        let plan = if self.frozen {
+            Err(Error::Busy)
+        } else {
+            self.plan_kern(t, &r.path)
+        };
+        match plan {
+            Ok((node, size)) if !r.out.is_empty() => Admit::Go(Job::Kern {
+                r,
+                node,
+                size,
+                reply,
+            }),
+            res => {
+                let result = res.map(|(_, size)| (size, 0));
+                if let Some(reply) = reply {
+                    reply.put_fs(FsDone {
+                        buf: core::mem::take(&mut r.path),
+                        out: core::mem::take(&mut r.out),
+                        result,
+                    });
+                }
+                Admit::Done
+            }
+        }
+    }
+
+    /// Een call is terug van zijn I/O: de regels vrij, het antwoord naar
+    /// zijn plek.
+    fn land(&mut self, job: Job<'_>, r: Result<(u64, usize)>) {
+        match job {
+            Job::Call {
+                c,
+                work,
+                volume,
+                reply,
+            } => {
+                if let Some(b) = self.busy.get_mut(c.slot.get()) {
+                    *b = false;
+                }
+                match work {
+                    Work::Write(n) => {
+                        if let Some(s) = self.writing.iter_mut().find(|s| **s == Some(n)) {
+                            *s = None;
+                        }
+                        if r.is_ok() && volume {
+                            self.first_save(&c);
+                        }
+                    }
+                    Work::Truncate(_) => self.alone = false,
+                    Work::Sync => self.committing = false,
+                    Work::Read(_) | Work::Done(..) => {}
+                }
+                self.io_failed(&c, &r);
+                answer(reply, c, r);
+            }
+            Job::Kern { r: k, reply, .. } => {
+                if let Some(reply) = reply {
+                    reply.put_fs(FsDone {
+                        buf: k.path,
+                        out: k.out,
+                        result: r,
+                    });
+                }
+            }
+            Job::Commit(why) => {
+                self.committing = false;
+                self.committed(why, r.map(|(g, _)| (g != 0).then_some(g)));
+            }
+            Job::Freeze(reply) => {
+                (self.committing, self.alone) = (false, false);
+                let result = match r {
+                    Ok((g, _)) => Ok(self.freeze_done(g)),
+                    Err(e) => Err(e),
+                };
+                if let Some(reply) = reply {
+                    reply.put_fs(FsDone {
+                        buf: Vec::new(),
+                        out: Vec::new(),
+                        result,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Een blokfout is de schijf, niet de app: luid, de eerste paar keer
+    /// (de driver zelf print niet).
+    fn io_failed(&mut self, c: &FsCall, r: &Result<(u64, usize)>) {
+        if let Err(Error::Io { lba }) = r {
+            self.io_fails += 1;
+            if self.io_fails <= LOUD_COMMIT_FAILS {
+                self.log.log(format_args!(
+                    "hopfs: slot {} op {}: block I/O failed at LBA {lba} ({} so far) HOPOS_FS_IO",
+                    c.slot, c.op, self.io_fails
+                ));
+            }
+        }
+    }
+
+    /// De regel van een vastlegging: één per nieuwe generatie.
+    fn committed(&mut self, why: CommitWhy, r: Result<Option<u64>>) {
+        match r {
+            Ok(Some(g)) => match why {
+                CommitWhy::Periodic => self.log.log(format_args!(
+                    "hopfs: tree committed as generation {g} (every {} s) HOPOS_FS_COMMIT",
+                    COMMIT_EVERY.as_secs()
+                )),
+                CommitWhy::Stopped(s) => self.log.log(format_args!(
+                    "hopfs: tree committed as generation {g} (slot {s} stopped) HOPOS_FS_COMMIT"
+                )),
+                CommitWhy::Flip => self.log.log(format_args!(
+                    "hopfs: tree committed as generation {g} (kernel flip) HOPOS_FS_COMMIT"
+                )),
+            },
+            Ok(None) => {}
             Err(e) => {
                 self.commit_fails += 1;
                 if self.commit_fails <= LOUD_COMMIT_FAILS {
@@ -680,22 +1021,45 @@ impl<'s, D: BlockIo, L: Console> FsActor<'s, D, L> {
         }
     }
 
+    /// Na de vastlegging van de bevriezing: dicht. Een commit die faalt
+    /// bevriest niet: dan zou de nieuwe kern een oudere boom mounten dan de
+    /// apps denken, en dat is geen flip maar verlies.
+    fn frozen_after<D: BlockIo>(
+        &mut self,
+        t: &Tree<D>,
+        r: Result<Option<u64>>,
+    ) -> Result<(u64, usize)> {
+        r?;
+        let g = t.borrow().generation();
+        Ok(self.freeze_done(g))
+    }
+
+    fn freeze_done(&mut self, g: u64) -> (u64, usize) {
+        self.frozen = true;
+        self.frozen_calls = 0;
+        self.log.log(format_args!(
+            "hopfs: tree committed as generation {g} and frozen for the kernel flip HOPOS_FS_FROZEN generation={g}"
+        ));
+        (g, 0)
+    }
+
     /// Zet root en volumes klaar voor een nieuwe levensduur (Go:
     /// `startImage`): de root van de vorige bewoner gaat weg, een verse lege
     /// komt ervoor in de plaats, en de gedeelde mappen bestaan.
-    fn prepare(&mut self, slot: Slot, generation: u32) -> Result {
+    fn prepare<D: BlockIo>(&mut self, t: &Tree<D>, slot: Slot, generation: u32) -> Result {
         let i = slot.get();
         if self.prepared.get(i).copied().flatten() == Some(generation) {
             return Ok(());
         }
+        let mut fs = t.borrow_mut();
         self.path.clear();
         push_root(slot, &mut self.path)?;
-        match self.fs.remove(self.path.as_bytes(), true) {
+        match fs.remove(self.path.as_bytes(), true) {
             Ok(()) | Err(Error::NoEnt) => {}
             Err(e) => return Err(e),
         }
-        self.fs.mkdir_all(self.path.as_bytes())?;
-        let (fs, path) = (&mut self.fs, &mut self.path);
+        fs.mkdir_all(self.path.as_bytes())?;
+        let path = &mut self.path;
         self.svc
             .with_mounts(slot, |mounts| {
                 for m in mounts {
@@ -711,10 +1075,22 @@ impl<'s, D: BlockIo, L: Console> FsActor<'s, D, L> {
         Ok(())
     }
 
-    /// Eén bestandscall (Go: `handleWithLimit`, zonder store en codec).
-    /// Geeft het `size`-veld van het antwoord en het aantal databytes op
-    /// `c.out[REQ_HEADER..]`.
-    pub async fn handle(&mut self, c: &mut FsCall) -> Result<(u64, usize)> {
+    /// Resolveert het pad van `c` naar `self.path`; geeft of het in een
+    /// volume ligt.
+    fn resolve_call(&mut self, c: &FsCall) -> Result<bool> {
+        let app_path = c.buf.get(c.path.clone()).ok_or(Error::Corrupt { at: 2 })?;
+        let (slot, path) = (c.slot, &mut self.path);
+        self.svc
+            .with_mounts(slot, |m| {
+                resolve(slot, m, app_path, path).map(|v| v.is_some())
+            })
+            .ok_or(Error::Denied)?
+    }
+
+    /// Het synchrone deel van een call (Go: `handleWithLimit`, zonder store
+    /// en codec): generatie, klaarzetten, pad, en wat zonder I/O kan. Geeft
+    /// wat er nog moet gebeuren en of het pad in een volume ligt.
+    fn plan<D: BlockIo>(&mut self, t: &Tree<D>, c: &mut FsCall) -> Result<(Work, bool)> {
         if !is_fs_op(c.op) {
             return Err(Error::Kind);
         }
@@ -723,31 +1099,19 @@ impl<'s, D: BlockIo, L: Console> FsActor<'s, D, L> {
         if self.svc.current(c.slot) != Some(c.generation) {
             return Err(Error::Denied);
         }
-        self.prepare(c.slot, c.generation)?;
-        let app_path = c.buf.get(c.path.clone()).ok_or(Error::Corrupt { at: 2 })?;
-        let (slot, path) = (c.slot, &mut self.path);
-        let volume = self
-            .svc
-            .with_mounts(slot, |m| {
-                let v = resolve(slot, m, app_path, path)?;
-                Ok::<_, Error>(v.and_then(|i| m.get(i)).map(|m| m.shared.len()))
-            })
-            .ok_or(Error::Denied)??;
+        self.prepare(t, c.slot, c.generation)?;
+        let volume = self.resolve_call(c)?;
         let p = self.path.as_bytes();
-        let room = c.out.len().saturating_sub(REQ_HEADER).min(MAX_IO_CHUNK);
-        match c.op {
+        let mut fs = t.borrow_mut();
+        let work = match c.op {
             OP_STAT => {
-                let (size, _dir) = self.fs.stat(p)?;
-                Ok((size, 0))
+                let (size, _dir) = fs.stat(p)?;
+                Work::Done(size, 0)
             }
             OP_READ => {
-                let n = usize::try_from(c.n).unwrap_or(usize::MAX).min(room);
-                let dst = c
-                    .out
-                    .get_mut(REQ_HEADER..REQ_HEADER + n)
-                    .ok_or(Error::TooLarge { len: n, max: room })?;
-                let got = self.fs.read_at(p, c.off, dst).await?;
-                Ok((got as u64, got))
+                let n = fs.find(p)?;
+                fs.read_len(n, 0, 0)?; // Een map is geen bestand.
+                Work::Read(n)
             }
             OP_WRITE => {
                 let data = c.buf.get(c.data.clone()).ok_or(Error::Corrupt { at: 0 })?;
@@ -757,34 +1121,32 @@ impl<'s, D: BlockIo, L: Console> FsActor<'s, D, L> {
                         max: MAX_IO_CHUNK,
                     });
                 }
-                self.fs.write_at(p, c.off, data).await?;
-                if volume.is_some() {
-                    self.first_save(c, data.len());
-                }
-                Ok((data.len() as u64, 0))
+                Work::Write(fs.write_open(p, c.off, data.len())?)
             }
             OP_LIST => {
+                let room = c.out.len().saturating_sub(REQ_HEADER).min(MAX_IO_CHUNK);
                 let dst = c
                     .out
                     .get_mut(REQ_HEADER..REQ_HEADER + room)
                     .unwrap_or(&mut []);
-                let (count, len) = self.fs.list_into(p, dst)?;
-                Ok((count as u64, len))
+                let (count, len) = fs.list_into(p, dst)?;
+                Work::Done(count as u64, len)
             }
             OP_REMOVE => {
                 // De eigen root en een volume zelf zijn het zicht, geen
                 // bestand: die blijven.
+                let app_path = c.buf.get(c.path.clone()).unwrap_or(&[]);
                 let mut cp = PathBuf::new();
                 clean_abs(app_path, &mut cp)?;
                 let is_mount = self
                     .svc
-                    .with_mounts(slot, |m| m.iter().any(|m| m.local == cp.as_bytes()))
+                    .with_mounts(c.slot, |m| m.iter().any(|m| m.local == cp.as_bytes()))
                     .unwrap_or(false);
                 if cp.as_bytes() == b"/" || is_mount {
                     return Err(Error::Denied);
                 }
-                self.fs.remove(p, false)?;
-                Ok((0, 0))
+                fs.remove(p, false)?;
+                Work::Done(0, 0)
             }
             OP_SYNC => {
                 if c.off != 0 || c.n != 0 || !c.data.is_empty() {
@@ -792,25 +1154,37 @@ impl<'s, D: BlockIo, L: Console> FsActor<'s, D, L> {
                 }
                 // De gebruikelijke generatie- en mountresolutie geldt ook
                 // voor een barrière. Na remove sync't de app de oudermap.
-                // De volgorde is die van de brievenbus (docs/storage-sync.md):
-                // `run` neemt pas een bericht aan als het vorige zijn I/O
-                // terug heeft, dus elke eerdere schrijf van de actor staat
-                // in het device vóór deze flush en commit beginnen.
-                self.fs.stat(p)?;
-                Ok((self.fs.sync().await?, 0))
+                // De volgorde (docs/storage-sync.md): een slot heeft één
+                // call tegelijk, dus elke eerdere schrijf van deze app is
+                // van het device terug vóór deze flush en commit beginnen.
+                fs.stat(p)?;
+                Work::Sync
             }
-            OP_TRUNCATE => {
-                self.fs.truncate(p, c.n).await?;
-                Ok((c.n, 0))
-            }
-            _ => Err(Error::Kind),
+            OP_TRUNCATE => Work::Truncate(fs.truncate_open(p, c.n)?),
+            _ => return Err(Error::Kind),
+        };
+        Ok((work, volume))
+    }
+
+    /// Het synchrone deel van een lezing voor de kern: de node en de maat.
+    fn plan_kern<D: BlockIo>(&mut self, t: &Tree<D>, path: &[u8]) -> Result<(usize, u64)> {
+        clean_abs(path, &mut self.path)?;
+        let p = self.path.as_bytes();
+        if under(p, TASKS_DIR) {
+            return Err(Error::Denied);
         }
+        let mut fs = t.borrow_mut();
+        let (size, dir) = fs.stat(p)?;
+        if dir {
+            return Err(Error::Kind);
+        }
+        Ok((fs.find(p)?, size))
     }
 
     /// Eén regel per levensduur bij de eerste geslaagde schrijf in een
     /// volume: het bewijs dat een bewoner zijn staat buiten zijn eigen root
     /// bewaart (Hop: `/hop/agent-state.json`).
-    fn first_save(&mut self, c: &FsCall, len: usize) {
+    fn first_save(&mut self, c: &FsCall) {
         let i = c.slot.get();
         if self.saved.get(i).copied().flatten() == Some(c.generation) {
             return;
@@ -818,13 +1192,30 @@ impl<'s, D: BlockIo, L: Console> FsActor<'s, D, L> {
         if let Some(s) = self.saved.get_mut(i) {
             *s = Some(c.generation);
         }
+        // Het pad van deze call opnieuw: intussen planden anderen.
+        if self.resolve_call(c).is_err() {
+            return;
+        }
         let app = c.buf.get(c.path.clone()).unwrap_or(&[]);
         let app = core::str::from_utf8(app).unwrap_or("<not utf-8>");
         let to = core::str::from_utf8(self.path.as_bytes()).unwrap_or("<not utf-8>");
         self.log.log(format_args!(
-            "hopfs: slot {} saved {app} as {to} ({len} bytes at {}) HOPOS_FS_SAVED",
-            c.slot, c.off
+            "hopfs: slot {} saved {app} as {to} ({} bytes at {}) HOPOS_FS_SAVED",
+            c.slot,
+            c.data.len(),
+            c.off
         ));
+    }
+}
+
+/// Het antwoord van een call naar zijn plek, met de buffers terug.
+fn answer(reply: Option<&Reply>, c: FsCall, result: Result<(u64, usize)>) {
+    if let Some(reply) = reply {
+        reply.put_fs(FsDone {
+            buf: c.buf,
+            out: c.out,
+            result,
+        });
     }
 }
 

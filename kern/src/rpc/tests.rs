@@ -124,84 +124,180 @@ fn mount_table_refuses_escapes() {
 // De actor op een schijf in RAM.
 // ---------------------------------------------------------------------------
 
-/// Een nep-blokapparaat: een schijf in RAM die flushes telt, en die elk
-/// verzoek meteen afrondt.
-pub(crate) struct Ram {
-    data: Vec<u8>,
-    flushes: usize,
+/// Wat een opdracht op de nep-controller is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kind {
+    Read,
+    Write,
+    Flush,
 }
 
-/// Een future van de actor of van hopfs afdraaien: de RAM-schijf is meteen
-/// klaar, dus pollen tot hij klaar is, is genoeg.
+/// Eén opdracht op de nep-controller: soort, lba, de bytes van een
+/// schrijf, en of hij terug is.
+type Tag = (Kind, u64, Vec<u8>, bool);
+
+/// De staat van de nep-controller: een schijf in RAM met tickets. Een
+/// opdracht is klaar bij de eerste `reap` erna, tenzij de test zijn soort
+/// vasthoudt; een schrijf staat pas bij zijn completion op de schijf.
+#[derive(Default)]
+pub(crate) struct RamCtl {
+    pub(crate) data: Vec<u8>,
+    pub(crate) flushes: usize,
+    /// Per tag de opdracht.
+    tags: Vec<Option<Tag>>,
+    /// Deze soorten blijven op het device tot de test ze loslaat.
+    pub(crate) hold: Vec<Kind>,
+    /// Wat er gebeurde, in volgorde: ("start" of "done", soort, lba).
+    pub(crate) log: Vec<(&'static str, Kind, u64)>,
+    /// Het hoogste aantal opdrachten tegelijk op het device.
+    pub(crate) peak: usize,
+}
+
+/// Het handvat op de nep-controller: de wachtrij bezit hem, de test kijkt
+/// mee.
+#[derive(Clone)]
+pub(crate) struct Ram(pub(crate) std::rc::Rc<core::cell::RefCell<RamCtl>>);
+
+/// De schijf van de tests: de wachtrij over de nep-controller, zoals de
+/// kern hem over de ANS heeft.
+pub(crate) type Disk = &'static blkdev::Queue<Ram, blkdev::Spin>;
+
+impl Ram {
+    pub(crate) fn new(bytes: usize) -> Ram {
+        Ram(std::rc::Rc::new(core::cell::RefCell::new(RamCtl {
+            data: vec![0; bytes],
+            tags: vec![None; 16],
+            ..RamCtl::default()
+        })))
+    }
+
+    /// De wachtrij erover, voor de hele test.
+    pub(crate) fn queue(&self) -> Disk {
+        std::boxed::Box::leak(std::boxed::Box::new(blkdev::Queue::new(
+            self.clone(),
+            blkdev::Spin,
+        )))
+    }
+
+    pub(crate) fn hold(&self, k: Kind) {
+        self.0.borrow_mut().hold.push(k);
+    }
+
+    pub(crate) fn release(&self, k: Kind) {
+        self.0.borrow_mut().hold.retain(|h| *h != k);
+    }
+
+    pub(crate) fn on_device(&self) -> usize {
+        self.0
+            .borrow()
+            .tags
+            .iter()
+            .flatten()
+            .filter(|t| !t.3)
+            .count()
+    }
+
+    pub(crate) fn flushes(&self) -> usize {
+        self.0.borrow().flushes
+    }
+
+    pub(crate) fn log(&self) -> Vec<(&'static str, Kind, u64)> {
+        self.0.borrow().log.clone()
+    }
+}
+
+impl blkdev::AsyncBlockDevice for Ram {
+    fn max_transfer(&self) -> usize {
+        1 << 20
+    }
+    fn start(&mut self, _op: blkdev::Op<'_>) -> blkdev::Result {
+        Err(blkdev::Error::Busy)
+    }
+    fn poll_done(&mut self, _into: &mut [u8]) -> core::task::Poll<blkdev::Result> {
+        core::task::Poll::Ready(Err(blkdev::Error::Dead))
+    }
+    fn depth(&self) -> usize {
+        16
+    }
+    fn start_tag(&mut self, op: blkdev::Op<'_>) -> blkdev::Result<usize> {
+        let mut c = self.0.borrow_mut();
+        let t = c
+            .tags
+            .iter()
+            .position(Option::is_none)
+            .ok_or(blkdev::Error::Busy)?;
+        let rec = match op {
+            blkdev::Op::Read { lba, len } => {
+                if lba as usize * 512 + len > c.data.len() {
+                    return Err(blkdev::Error::Io { lba });
+                }
+                (Kind::Read, lba, vec![0; len], false)
+            }
+            blkdev::Op::Write { lba, data } => (Kind::Write, lba, data.to_vec(), false),
+            blkdev::Op::Flush => (Kind::Flush, 0, Vec::new(), false),
+        };
+        c.log.push(("start", rec.0, rec.1));
+        c.tags[t] = Some(rec);
+        c.peak = c.peak.max(c.tags.iter().flatten().filter(|t| !t.3).count());
+        Ok(t)
+    }
+    fn reap(&mut self) -> blkdev::Result<u64> {
+        let mut c = self.0.borrow_mut();
+        let mut m = 0u64;
+        for t in 0..c.tags.len() {
+            let Some((k, lba, bytes, false)) = c.tags[t].clone() else {
+                continue;
+            };
+            if c.hold.contains(&k) {
+                continue;
+            }
+            let o = lba as usize * 512;
+            match k {
+                Kind::Write => {
+                    let Some(d) = c.data.get_mut(o..o + bytes.len()) else {
+                        return Err(blkdev::Error::Io { lba });
+                    };
+                    d.copy_from_slice(&bytes);
+                }
+                Kind::Flush => c.flushes += 1,
+                Kind::Read => {}
+            }
+            c.log.push(("done", k, lba));
+            c.tags[t] = Some((k, lba, bytes, true));
+            m |= 1 << t;
+        }
+        Ok(m)
+    }
+    fn poll_tag(&mut self, t: usize, into: &mut [u8]) -> core::task::Poll<blkdev::Result> {
+        let mut c = self.0.borrow_mut();
+        let Some((k, lba, bytes, true)) = c.tags[t].clone() else {
+            return core::task::Poll::Pending;
+        };
+        if k == Kind::Read {
+            let o = lba as usize * 512;
+            let n = bytes.len().min(into.len());
+            into[..n].copy_from_slice(&c.data[o..o + n]);
+        }
+        c.tags[t] = None;
+        core::task::Poll::Ready(Ok(()))
+    }
+}
+
+/// Een future van de actor of van hopfs afdraaien: pollen tot hij klaar
+/// is (de nep-controller rondt af bij elke blik, tenzij hij vasthoudt).
 pub(crate) fn on<F: core::future::Future>(f: F) -> F::Output {
     blkdev::block_on(f)
 }
 
-impl blkdev::BlockIo for Ram {
-    async fn read(&mut self, lba: u64, buf: &mut [u8]) -> blkdev::Result {
-        let o = lba as usize * 512;
-        buf.copy_from_slice(
-            self.data
-                .get(o..o + buf.len())
-                .ok_or(blkdev::Error::Io { lba })?,
-        );
-        Ok(())
-    }
-    async fn write(&mut self, lba: u64, buf: &[u8]) -> blkdev::Result {
-        let o = lba as usize * 512;
-        self.data
-            .get_mut(o..o + buf.len())
-            .ok_or(blkdev::Error::Io { lba })?
-            .copy_from_slice(buf);
-        Ok(())
-    }
-    async fn flush(&mut self) -> blkdev::Result {
-        self.flushes += 1;
-        Ok(())
-    }
-}
-
-pub(crate) fn disk(mib: usize) -> (Fs<Ram>, crate::hopfs::Mounted) {
-    let r = Ram {
-        data: vec![0; mib << 20],
-        flushes: 0,
-    };
+pub(crate) fn disk(mib: usize) -> (Fs<Disk>, crate::hopfs::Mounted) {
+    let r = Ram::new(mib << 20);
     let sectors = (mib << 20) as u64 / 512;
-    on(Fs::mount(r, 0, sectors, 512, 1 << 20, false)).unwrap()
+    on(Fs::mount(r.queue(), 0, sectors, 512, 1 << 20, false)).unwrap()
 }
 
-/// Een schijf waarvan elke FLUSH pas terugkomt als de test hem loslaat: de
-/// trage F_FULLFSYNC van 30-09 in het klein.
-struct SlowFlush<'g> {
-    ram: Ram,
-    open: &'g core::cell::Cell<bool>,
-}
-
-impl blkdev::BlockIo for SlowFlush<'_> {
-    fn read(
-        &mut self,
-        lba: u64,
-        buf: &mut [u8],
-    ) -> impl core::future::Future<Output = blkdev::Result> {
-        self.ram.read(lba, buf)
-    }
-    fn write(
-        &mut self,
-        lba: u64,
-        buf: &[u8],
-    ) -> impl core::future::Future<Output = blkdev::Result> {
-        self.ram.write(lba, buf)
-    }
-    fn flush(&mut self) -> impl core::future::Future<Output = blkdev::Result> {
-        let open = self.open;
-        core::future::poll_fn(move |_| {
-            if open.get() {
-                core::task::Poll::Ready(Ok(()))
-            } else {
-                core::task::Poll::Pending
-            }
-        })
-    }
+/// De nep-controller onder een schijf van [`disk`].
+pub(crate) fn ram(fs: &Fs<Disk>) -> Ram {
+    fs.disk().with_dev(|r| r.clone())
 }
 
 /// De les van 30-09: een commit die op de schijf wacht, houdt de actor niet
@@ -211,15 +307,8 @@ impl blkdev::BlockIo for SlowFlush<'_> {
 fn a_commit_waits_for_the_disk_without_holding_the_core() {
     let svc = Servicers::new();
     let con = FakeConsole::default();
-    let open = core::cell::Cell::new(true);
-    let slow = SlowFlush {
-        ram: Ram {
-            data: vec![0; 64 << 20],
-            flushes: 0,
-        },
-        open: &open,
-    };
-    let (mut fs, _) = on(Fs::mount(slow, 0, (64 << 20) / 512, 512, 1 << 20, false)).unwrap();
+    let (mut fs, _) = disk(64);
+    let r = ram(&fs);
     on(fs.write_at(b"/volumes/hop/state", 0, b"staat")).unwrap();
     let mut f = FsActor::new(fs, &svc, &con);
     let inbox: FsInbox<'_> = Mailbox::new();
@@ -231,15 +320,17 @@ fn a_commit_waits_for_the_disk_without_holding_the_core() {
             })
             .is_ok()
     );
-    open.set(false);
+    r.hold(Kind::Flush);
     let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
     let mut run = core::pin::pin!(f.run(&inbox));
     for _ in 0..8 {
         assert!(run.as_mut().poll(&mut cx).is_pending());
     }
     assert!(!con.saw("HOPOS_FS_COMMIT"), "committed without the disk");
-    open.set(true);
-    let _ = run.as_mut().poll(&mut cx);
+    r.release(Kind::Flush);
+    for _ in 0..8 {
+        let _ = run.as_mut().poll(&mut cx);
+    }
     assert!(con.saw("hopfs: tree committed as generation 1 (every 10 s) HOPOS_FS_COMMIT"));
 }
 
@@ -315,7 +406,7 @@ fn actor_serves_the_file_calls_in_the_own_root() {
     let mut c = fs_call(2, g, OP_READ, "../slot1/x", 0, 1, &[]);
     assert_eq!(on(f.handle(&mut c)), Err(Error::Denied));
     // Alles stond in de eigen root.
-    assert_eq!(f.fs.stat(b"/.tasks/slot2/sub/b").unwrap(), (1, false));
+    assert_eq!(f.fs().stat(b"/.tasks/slot2/sub/b").unwrap(), (1, false));
 }
 
 #[test]
@@ -334,7 +425,7 @@ fn a_new_lifetime_starts_with_an_empty_root_and_keeps_its_volume() {
     }
     assert!(con.saw("hopfs: slot 1 saved /hop/agent-state.json as /volumes/hop/agent-state.json"));
     assert_eq!(
-        f.fs.stat(b"/volumes/hop/agent-state.json").unwrap(),
+        f.fs().stat(b"/volumes/hop/agent-state.json").unwrap(),
         (2, false)
     );
     let mut c = fs_call(1, g, OP_REMOVE, "/hop", 0, 0, &[]);
@@ -374,7 +465,7 @@ fn commit_logs_once_per_generation_and_survives_a_remount() {
     on(f.commit(CommitWhy::Periodic)); // Niets veranderd: geen tweede regel.
     assert!(con.saw("hopfs: tree committed as generation 1 (slot 2 stopped) HOPOS_FS_COMMIT"));
     assert!(!con.saw("(every 10 s)"));
-    let disk = f.fs.into_disk();
+    let disk = f.into_fs().into_disk();
     let (mut g2, m) = on(Fs::mount(disk, 0, (64 << 20) / 512, 512, 1 << 20, false)).unwrap();
     assert!(matches!(m, crate::hopfs::Mounted::Restored { .. }));
     assert_eq!(g2.stat(b"/.tasks/slot2/blijft").unwrap(), (4, false));
@@ -422,14 +513,14 @@ fn freeze_commits_first_and_names_the_generation() {
     let mut c = fs_call(2, g, OP_WRITE, "voor-de-flip", 0, 0, b"staat");
     on(f.handle(&mut c)).unwrap();
     assert_eq!(on(f.freeze()), Ok((1, 0)));
-    assert!(f.frozen);
+    assert!(f.desk.frozen);
     assert!(con.saw("frozen for the kernel flip HOPOS_FS_FROZEN generation=1"));
     assert_eq!(
         on(f.freeze()),
         Ok((1, 0)),
         "nothing changed: the same generation"
     );
-    let disk = f.fs.into_disk();
+    let disk = f.into_fs().into_disk();
     let (mut g2, m) = on(Fs::mount(disk, 0, (64 << 20) / 512, 512, 1 << 20, false)).unwrap();
     assert!(matches!(
         m,
@@ -446,7 +537,7 @@ fn freeze_commits_first_and_names_the_generation() {
 /// executor van de kern in het klein, met een waker die niets doet (elke
 /// bel wordt bij de volgende poll gezien).
 fn drive<F: core::future::Future>(
-    actor: &mut FsActor<'_, Ram, &FakeConsole>,
+    actor: &mut FsActor<'_, Disk, &FakeConsole>,
     inbox: &FsInbox<'_>,
     f: F,
 ) -> F::Output {
@@ -643,8 +734,8 @@ fn sync_is_scoped_to_the_live_slot_and_reports_the_durable_generation() {
         on(f.handle(&mut fs_call(2, generation, OP_SYNC, "/", 0, 0, &[]))),
         Ok((2, 0))
     );
-    let disk = f.fs.into_disk();
-    assert!(disk.flushes >= 4);
+    let disk = f.into_fs().into_disk();
+    assert!(disk.with_dev(|r| r.flushes()) >= 4);
     let (mut restored, _) = on(Fs::mount(disk, 0, (2 << 20) / 512, 512, 1 << 20, false)).unwrap();
     assert_eq!(
         restored.stat(b"/.tasks/slot2/db-journal"),
@@ -652,102 +743,331 @@ fn sync_is_scoped_to_the_live_slot_and_reports_the_durable_generation() {
     );
 }
 
-/// Een schijf waarvan elke schrijf pas terugkomt als de test hem loslaat,
-/// en die zijn flushes buiten de actor telt.
-struct HeldWrite<'g> {
-    ram: Ram,
-    open: &'g core::cell::Cell<bool>,
-    flushes: &'g core::cell::Cell<usize>,
+/// Een actor met de brievenbus erbij, gepolld zoals de executor het doet.
+struct Bench<'s> {
+    svc: &'s Servicers,
+    con: &'s FakeConsole,
 }
 
-impl blkdev::BlockIo for HeldWrite<'_> {
-    fn read(
-        &mut self,
-        lba: u64,
-        buf: &mut [u8],
-    ) -> impl core::future::Future<Output = blkdev::Result> {
-        self.ram.read(lba, buf)
-    }
-    async fn write(&mut self, lba: u64, buf: &[u8]) -> blkdev::Result {
-        let open = self.open;
-        core::future::poll_fn(move |_| {
-            if open.get() {
-                core::task::Poll::Ready(())
-            } else {
-                core::task::Poll::Pending
-            }
-        })
-        .await;
-        self.ram.write(lba, buf).await
-    }
-    async fn flush(&mut self) -> blkdev::Result {
-        self.flushes.set(self.flushes.get() + 1);
-        Ok(())
-    }
-}
-
-/// docs/storage-sync.md: de barrière staat achter de eerdere writes van de
-/// actor. Een OP_SYNC die in de brievenbus achter een schrijf staat, wacht
-/// tot die schrijf van het device terug is; pas dan flusht en bevestigt
-/// hij, en de bevestigde generatie draagt de schrijf.
-#[test]
-fn sync_waits_behind_an_earlier_write_that_is_still_on_the_device() {
-    let svc = Servicers::new();
-    let con = FakeConsole::default();
-    let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
-    start(&mut a, 2, 8, 1).unwrap();
-    let generation = svc.current(s(2)).unwrap();
-    let open = core::cell::Cell::new(true);
-    let flushes = core::cell::Cell::new(0);
-    let held = HeldWrite {
-        ram: Ram {
-            data: vec![0; 2 << 20],
-            flushes: 0,
-        },
-        open: &open,
-        flushes: &flushes,
-    };
-    let (fs, _) = on(Fs::mount(held, 0, (2 << 20) / 512, 512, 1 << 20, false)).unwrap();
-    let mut f = FsActor::new(fs, &svc, &con);
-    // De root van de levensduur staat al: de vastgehouden schrijf is dan
-    // die van de app, niet die van het klaarzetten.
-    let mut c = fs_call(2, generation, OP_STAT, "/", 0, 0, &[]);
-    on(f.handle(&mut c)).unwrap();
-    let (wrote, synced) = (Reply::new(), Reply::new());
-    let inbox: FsInbox<'_> = Mailbox::new();
-    for (call, reply) in [
-        (
-            fs_call(2, generation, OP_WRITE, "db", 0, 0, b"journal"),
-            &wrote,
-        ),
-        (fs_call(2, generation, OP_SYNC, "db", 0, 0, &[]), &synced),
-    ] {
-        assert!(
-            inbox
-                .try_send(FsEnvelope {
-                    msg: FsMsg::Call(call),
-                    reply: Some(reply),
-                })
-                .is_ok()
-        );
-    }
-    open.set(false);
-    let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
-    let mut run = core::pin::pin!(f.run(&inbox));
-    for _ in 0..8 {
-        assert!(run.as_mut().poll(&mut cx).is_pending());
-    }
+/// Stuurt een call met zijn antwoordplek.
+fn send<'a>(inbox: &FsInbox<'a>, c: FsCall, reply: &'a Reply) {
     assert!(
-        wrote.take_fs().is_none(),
-        "de schrijf staat nog op het device"
+        inbox
+            .try_send(FsEnvelope {
+                msg: FsMsg::Call(c),
+                reply: Some(reply),
+            })
+            .is_ok()
     );
-    assert!(synced.take_fs().is_none(), "barrière vóór de schrijf");
-    assert_eq!(flushes.get(), 0, "geflusht terwijl de schrijf nog liep");
-    open.set(true);
+}
+
+/// Pollt de actor een paar rondes.
+fn spin<F: core::future::Future>(run: &mut core::pin::Pin<&mut F>) {
+    let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
     for _ in 0..8 {
         let _ = run.as_mut().poll(&mut cx);
     }
-    assert_eq!(wrote.take_fs().map(|d| d.result), Some(Ok((7, 0))));
-    assert_eq!(synced.take_fs().map(|d| d.result), Some(Ok((1, 0))));
-    assert!(flushes.get() >= 2, "dataflush en metadataflush");
+}
+
+/// De uitkomst op een antwoordplek, als die er is.
+fn got(r: &Reply) -> Option<Result<(u64, usize)>> {
+    r.take_fs().map(|d| d.result)
+}
+
+impl<'s> Bench<'s> {
+    /// Slots 2 en 3 levend met een gedeeld volume `/v`; een schijf van 16 MiB.
+    fn up(&self) -> (u32, u32, Fs<Disk>, Ram) {
+        let mut a = actor(self.svc, self.con, Obey::Exit, 64, 4);
+        for slot in [2, 3] {
+            crate::slots::tests::start_with_mounts(&mut a, slot, 8, 1, vec![m("/v", "/volumes/v")])
+                .unwrap();
+        }
+        let (g2, g3) = (
+            self.svc.current(s(2)).unwrap(),
+            self.svc.current(s(3)).unwrap(),
+        );
+        let (fs, _) = disk(16);
+        let r = ram(&fs);
+        // De slot-actor uit de test laat hij hier achter; de levensduren staan.
+        core::mem::forget(a);
+        (g2, g3, fs, r)
+    }
+}
+
+/// docs/storage-sync.md: de barrière staat achter de eerdere writes van
+/// dezelfde app. Een OP_SYNC die in de brievenbus achter een schrijf staat,
+/// wacht tot die schrijf van het device terug is; pas dan flusht en
+/// bevestigt hij, en de bevestigde generatie draagt de schrijf.
+#[test]
+fn sync_waits_behind_an_earlier_write_that_is_still_on_the_device() {
+    let (svc, con) = (Servicers::new(), FakeConsole::default());
+    let (g, _, fs, r) = Bench {
+        svc: &svc,
+        con: &con,
+    }
+    .up();
+    let mut f = FsActor::new(fs, &svc, &con);
+    // De root van de levensduur staat al: de vastgehouden schrijf is dan
+    // die van de app, niet die van het klaarzetten.
+    on(f.handle(&mut fs_call(2, g, OP_STAT, "/", 0, 0, &[]))).unwrap();
+    let (wrote, synced) = (Reply::new(), Reply::new());
+    let inbox: FsInbox<'_> = Mailbox::new();
+    send(
+        &inbox,
+        fs_call(2, g, OP_WRITE, "db", 0, 0, b"journal"),
+        &wrote,
+    );
+    send(&inbox, fs_call(2, g, OP_SYNC, "db", 0, 0, &[]), &synced);
+    r.hold(Kind::Write);
+    let mut run = core::pin::pin!(f.run(&inbox));
+    spin(&mut run);
+    assert!(got(&wrote).is_none(), "de schrijf staat nog op het device");
+    assert!(got(&synced).is_none(), "barrière vóór de schrijf");
+    assert_eq!(r.flushes(), 0, "geflusht terwijl de schrijf nog liep");
+    r.release(Kind::Write);
+    spin(&mut run);
+    assert_eq!(got(&wrote), Some(Ok((7, 0))));
+    assert_eq!(got(&synced), Some(Ok((1, 0))));
+    // De volgorde op het device: de schrijf terug, pas dan de eerste flush.
+    let log = r.log();
+    let done = log
+        .iter()
+        .position(|e| *e == ("done", Kind::Write, e.2))
+        .unwrap();
+    let flush = log.iter().position(|e| e.1 == Kind::Flush).unwrap();
+    assert!(done < flush, "{log:?}");
+    assert!(r.flushes() >= 2, "dataflush en metadataflush");
+}
+
+/// De wachtrij is voor de node: twee apps lezen tegelijk, allebei op het
+/// device, en geen van beiden krijgt antwoord vóór zijn eigen completion.
+/// Een derde call van dezelfde app als de eerste wacht op die eerste
+/// (volgorde per app), ook als het een lees is.
+#[test]
+fn two_apps_have_their_reads_on_the_device_at_once_and_one_app_keeps_its_order() {
+    let (svc, con) = (Servicers::new(), FakeConsole::default());
+    let (g2, g3, fs, r) = Bench {
+        svc: &svc,
+        con: &con,
+    }
+    .up();
+    let mut f = FsActor::new(fs, &svc, &con);
+    on(f.handle(&mut fs_call(2, g2, OP_WRITE, "a", 0, 0, &[1u8; 8192]))).unwrap();
+    on(f.handle(&mut fs_call(3, g3, OP_WRITE, "b", 0, 0, &[2u8; 8192]))).unwrap();
+    let (ra, rb, wa, ra2) = (Reply::new(), Reply::new(), Reply::new(), Reply::new());
+    let inbox: FsInbox<'_> = Mailbox::new();
+    send(&inbox, fs_call(2, g2, OP_READ, "a", 0, 4096, &[]), &ra);
+    send(&inbox, fs_call(3, g3, OP_READ, "b", 4096, 4096, &[]), &rb);
+    // Dezelfde app (een tweede verbinding): eerst een schrijf, dan een lees.
+    send(
+        &inbox,
+        fs_call(2, g2, OP_WRITE, "a", 0, 0, &[7u8; 4096]),
+        &wa,
+    );
+    send(&inbox, fs_call(2, g2, OP_READ, "a", 0, 4096, &[]), &ra2);
+    r.hold(Kind::Read);
+    r.hold(Kind::Write);
+    let mut run = core::pin::pin!(f.run(&inbox));
+    spin(&mut run);
+    assert_eq!(r.on_device(), 2, "de lezingen van slot 2 en 3 tegelijk");
+    assert!(got(&ra).is_none() && got(&rb).is_none());
+    r.release(Kind::Read);
+    spin(&mut run);
+    assert!(matches!(got(&ra), Some(Ok((4096, 4096)))));
+    assert!(matches!(got(&rb), Some(Ok((4096, 4096)))));
+    // De schrijf van slot 2 staat nu op het device; zijn lees erna niet.
+    assert_eq!(r.on_device(), 1);
+    assert!(got(&wa).is_none() && got(&ra2).is_none());
+    r.release(Kind::Write);
+    spin(&mut run);
+    assert_eq!(got(&wa), Some(Ok((4096, 0))));
+    let d = ra2.take_fs().unwrap();
+    assert_eq!(d.result, Ok((4096, 4096)));
+    assert!(
+        d.out[REQ_HEADER..REQ_HEADER + 4096].iter().all(|&x| x == 7),
+        "de lees zag de schrijf"
+    );
+    assert!(r.0.borrow().peak >= 2);
+}
+
+/// Remove geeft blokken vrij: hij wacht tot er niets meer loopt, ook niet
+/// van een andere app, en de lees die liep krijgt zijn bytes heel.
+#[test]
+fn a_remove_waits_until_no_io_is_running() {
+    let (svc, con) = (Servicers::new(), FakeConsole::default());
+    let (g2, g3, fs, r) = Bench {
+        svc: &svc,
+        con: &con,
+    }
+    .up();
+    let mut f = FsActor::new(fs, &svc, &con);
+    on(f.handle(&mut fs_call(
+        3,
+        g3,
+        OP_WRITE,
+        "/v/gedeeld",
+        0,
+        0,
+        &[9u8; 4096],
+    )))
+    .unwrap();
+    on(f.handle(&mut fs_call(2, g2, OP_STAT, "/", 0, 0, &[]))).unwrap();
+    let (rd, rm) = (Reply::new(), Reply::new());
+    let inbox: FsInbox<'_> = Mailbox::new();
+    send(
+        &inbox,
+        fs_call(3, g3, OP_READ, "/v/gedeeld", 0, 4096, &[]),
+        &rd,
+    );
+    send(
+        &inbox,
+        fs_call(2, g2, OP_REMOVE, "/v/gedeeld", 0, 0, &[]),
+        &rm,
+    );
+    r.hold(Kind::Read);
+    let mut run = core::pin::pin!(f.run(&inbox));
+    spin(&mut run);
+    assert!(got(&rm).is_none(), "remove terwijl een lees liep");
+    r.release(Kind::Read);
+    spin(&mut run);
+    let d = rd.take_fs().unwrap();
+    assert_eq!(d.result, Ok((4096, 4096)));
+    assert!(d.out[REQ_HEADER..REQ_HEADER + 4096].iter().all(|&x| x == 9));
+    assert_eq!(got(&rm), Some(Ok((0, 0))));
+}
+
+/// Twee apps die in hetzelfde bestand schrijven (een gedeeld volume): de
+/// tweede wacht op de eerste, en het bestand heeft geen dubbele mapping.
+#[test]
+fn two_writers_of_one_file_take_turns() {
+    let (svc, con) = (Servicers::new(), FakeConsole::default());
+    let (g2, g3, fs, r) = Bench {
+        svc: &svc,
+        con: &con,
+    }
+    .up();
+    let mut f = FsActor::new(fs, &svc, &con);
+    for (slot, g) in [(2, g2), (3, g3)] {
+        on(f.handle(&mut fs_call(slot, g, OP_STAT, "/", 0, 0, &[]))).unwrap();
+    }
+    let (w2, w3) = (Reply::new(), Reply::new());
+    let inbox: FsInbox<'_> = Mailbox::new();
+    send(
+        &inbox,
+        fs_call(2, g2, OP_WRITE, "/v/log", 0, 0, &[2u8; 4096]),
+        &w2,
+    );
+    send(
+        &inbox,
+        fs_call(3, g3, OP_WRITE, "/v/log", 0, 0, &[3u8; 4096]),
+        &w3,
+    );
+    r.hold(Kind::Write);
+    {
+        let mut run = core::pin::pin!(f.run(&inbox));
+        spin(&mut run);
+        assert_eq!(r.on_device(), 1, "één schrijver per bestand");
+        r.release(Kind::Write);
+        spin(&mut run);
+    }
+    assert_eq!(
+        (got(&w2), got(&w3)),
+        (Some(Ok((4096, 0))), Some(Ok((4096, 0))))
+    );
+    let mut out = [0u8; 4096];
+    assert_eq!(on(f.fs().read_at(b"/volumes/v/log", 0, &mut out)), Ok(4096));
+    assert!(
+        out.iter().all(|&x| x == 3),
+        "de laatste schrijver wint, één blok"
+    );
+}
+
+/// Een vastlegging loopt terwijl een andere app leest en schrijft: wat
+/// tijdens de vastlegging veranderde, gaat met de volgende mee.
+#[test]
+fn a_commit_runs_beside_other_calls_and_misses_nothing() {
+    let (svc, con) = (Servicers::new(), FakeConsole::default());
+    let (g2, g3, fs, r) = Bench {
+        svc: &svc,
+        con: &con,
+    }
+    .up();
+    let mut f = FsActor::new(fs, &svc, &con);
+    on(f.handle(&mut fs_call(2, g2, OP_WRITE, "/v/een", 0, 0, b"1"))).unwrap();
+    on(f.handle(&mut fs_call(3, g3, OP_STAT, "/", 0, 0, &[]))).unwrap();
+    let (sy, w3) = (Reply::new(), Reply::new());
+    let inbox: FsInbox<'_> = Mailbox::new();
+    send(&inbox, fs_call(2, g2, OP_SYNC, "/v/een", 0, 0, &[]), &sy);
+    send(
+        &inbox,
+        fs_call(3, g3, OP_WRITE, "/v/twee", 0, 0, b"22"),
+        &w3,
+    );
+    r.hold(Kind::Flush);
+    {
+        let mut run = core::pin::pin!(f.run(&inbox));
+        spin(&mut run);
+        assert_eq!(
+            got(&w3),
+            Some(Ok((2, 0))),
+            "de schrijf van slot 3 wacht niet op de flush"
+        );
+        assert!(got(&sy).is_none());
+        r.release(Kind::Flush);
+        spin(&mut run);
+    }
+    assert_eq!(got(&sy), Some(Ok((1, 0))));
+    // Generatie 1 heeft /v/een; /v/twee kwam erna en gaat met de volgende.
+    on(f.commit(CommitWhy::Periodic));
+    let disk = f.into_fs().into_disk();
+    let (mut g, _) = on(Fs::mount(disk, 0, (16 << 20) / 512, 512, 1 << 20, false)).unwrap();
+    assert_eq!(g.generation(), 2);
+    assert_eq!(g.stat(b"/volumes/v/twee").unwrap(), (2, false));
+}
+
+/// Eén vastlegging tegelijk: een OP_SYNC die binnenkomt terwijl de
+/// periodieke commit nog op de flush wacht, begint pas daarna (twee
+/// tegelijk zouden dezelfde plek beschrijven), en legt dan zijn eigen
+/// schrijf vast.
+#[test]
+fn a_sync_waits_for_a_commit_in_flight() {
+    let (svc, con) = (Servicers::new(), FakeConsole::default());
+    let (g2, _, fs, r) = Bench {
+        svc: &svc,
+        con: &con,
+    }
+    .up();
+    let mut f = FsActor::new(fs, &svc, &con);
+    on(f.handle(&mut fs_call(2, g2, OP_WRITE, "eerst", 0, 0, b"1"))).unwrap();
+    let (w, sy) = (Reply::new(), Reply::new());
+    let inbox: FsInbox<'_> = Mailbox::new();
+    assert!(
+        inbox
+            .try_send(FsEnvelope {
+                msg: FsMsg::Commit(CommitWhy::Periodic),
+                reply: None,
+            })
+            .is_ok()
+    );
+    send(&inbox, fs_call(2, g2, OP_WRITE, "daarna", 0, 0, b"22"), &w);
+    send(&inbox, fs_call(2, g2, OP_SYNC, "daarna", 0, 0, &[]), &sy);
+    r.hold(Kind::Flush);
+    {
+        let mut run = core::pin::pin!(f.run(&inbox));
+        spin(&mut run);
+        assert_eq!(
+            got(&w),
+            Some(Ok((2, 0))),
+            "de schrijf loopt naast de commit"
+        );
+        let flushes = r.log().iter().filter(|e| e.1 == Kind::Flush).count();
+        assert_eq!(flushes, 1, "één vastlegging tegelijk");
+        assert!(got(&sy).is_none());
+        r.release(Kind::Flush);
+        spin(&mut run);
+    }
+    assert_eq!(got(&sy), Some(Ok((2, 0))), "de sync legt generatie 2 vast");
+    let disk = f.into_fs().into_disk();
+    let (mut g, _) = on(Fs::mount(disk, 0, (16 << 20) / 512, 512, 1 << 20, false)).unwrap();
+    assert_eq!(g.stat(b"/.tasks/slot2/daarna").unwrap(), (2, false));
 }

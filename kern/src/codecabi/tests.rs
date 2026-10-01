@@ -469,7 +469,7 @@ fn zonder_ijzer_weigert_de_dienst_luid() {
 
 // Een echte HopFS-actor bedient de firmware-read terwijl de codeccel vrij is.
 fn pump_firmware<F: core::future::Future>(
-    actor: &mut crate::rpc::FsActor<'_, crate::rpc::tests::Ram, &crate::slots::tests::FakeConsole>,
+    actor: &mut crate::rpc::FsActor<'_, crate::rpc::tests::Disk, &crate::slots::tests::FakeConsole>,
     inbox: &crate::rpc::FsInbox<'_>,
     future: F,
     mut between: impl FnMut(),

@@ -6,9 +6,13 @@ gebruikelijke slot-, generatie- en mountcontrole. `off`, `n` en data zijn
 nul/leeg; een antwoord bevat uitsluitend de bevestigde HopFS-boomgeneratie.
 Na verwijderen van een rollback-journal gebruikt de aanroeper de oudermap.
 
-De HopFS-eigenaar serialiseert de barrière achter zijn eerdere writes. Bij
-wijzigingen voert hij de bestaande commit uit: dataflush, metadata in de
-andere plek (body vóór kop), metadataflush. Pas daarna bevestigt hij. Zonder
+De HopFS-eigenaar heeft calls van meerdere apps tegelijk op de schijf,
+maar per slot één tegelijk en in de volgorde van binnenkomst: de barrière
+begint dus pas als elke eerdere call van die app van het device terug is.
+Er loopt hoogstens één vastlegging tegelijk; schrijfs van andere apps
+lopen ernaast en gaan met de volgende mee. Bij wijzigingen voert hij de
+bestaande commit uit: dataflush, metadata in de andere plek (body vóór
+kop), metadataflush. Pas daarna bevestigt hij. Zonder
 wijzigingen doet hij nog steeds een deviceflush. Een vluchtige FS weigert met
 `VolatileStorage`. Een fout bij flush of metadatawrite komt terug via de
 system-API, dus een app kan deze niet verwarren met een duurzame commit.
