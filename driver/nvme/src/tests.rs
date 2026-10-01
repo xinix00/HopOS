@@ -499,3 +499,35 @@ fn the_block_contract_speaks_512_byte_sectors_on_4k_namespaces() {
         );
     }
 }
+
+/// Een verzoek boven de MDTS gaat als meer opdrachten tegelijk de lucht in,
+/// elk met zijn eigen stuk van de ene PRP-lijst: de bytes komen heel terug.
+#[test]
+fn one_request_carries_several_commands() {
+    // MDTS 2: vier pagina's van 4 KB per opdracht; een verzoek tot 16 ervan.
+    let m = mem(CAP, 12, 2);
+    let mut n = up(&m);
+    assert_eq!(AsyncBlockDevice::max_transfer(&n), 16 * 16384);
+    for len in [4096usize, 20480, 40960, 16 * 16384] {
+        let data: Vec<u8> = (0..len).map(|i| (i * 7 + len / 4096) as u8).collect();
+        let before = n.commands;
+        raw(
+            &mut n,
+            Op::Write {
+                lba: 1,
+                data: &data,
+            },
+            1,
+        )
+        .unwrap();
+        assert_eq!(n.commands - before, len.div_ceil(16384) as u64, "{len}");
+        let mut got = vec![0u8; len];
+        n.start_op(Op::Read { lba: 1, len }, 1).unwrap();
+        block_on(core::future::poll_fn(|_| n.poll_op(&mut got))).unwrap();
+        assert!(got == data, "{len} bytes differ");
+    }
+    // De tweede opdracht van een verzoek wijst midden in de lijst.
+    let list = m.dma.0 + PRP_OFF;
+    let prp2: Vec<u64> = log().iter().rev().take(16).map(|e| e.3).collect();
+    assert!(prp2.contains(&(list + 4 * 8)), "{prp2:x?}");
+}

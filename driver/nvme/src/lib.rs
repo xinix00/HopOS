@@ -168,6 +168,11 @@ pub const PAGE: u64 = 4096;
 /// De grootste transfer van één verzoek: één frame van de system-API
 /// (`MAX_IO_CHUNK`), één NVMe-opdracht.
 pub const MAX_TRANSFER: u64 = 1 << 20;
+/// Zoveel opdrachten zet één verzoek hoogstens tegelijk in de lucht: een
+/// verzoek groter dan de MDTS van de controller wordt evenveel opdrachten
+/// achter één doorbell, in plaats van evenveel rondes na elkaar (O6N 01-10:
+/// MDTS 512 KiB, een lees van 1 MiB waren twee seriële opdrachten).
+pub const IO_DEPTH: u64 = 16;
 /// Hoe lang één opdracht mag duren, tenzij de controller in CAP.TO langer
 /// vraagt. Een gezonde completion is er binnen microseconden.
 pub const COMMAND_TIMEOUT_NS: u64 = 5_000_000_000;
@@ -341,12 +346,18 @@ impl Queue {
     }
 }
 
-/// De opdracht die op de controller staat.
+/// De opdrachten van één verzoek die op de controller staan: `count`
+/// opdrachten met de CID's `cid..cid + count` (modulo de queue).
 #[derive(Clone, Copy, Debug)]
 struct Pending {
     admin: bool,
     opc: u8,
     cid: u16,
+    count: u16,
+    /// Zoveel completions kwamen al terug.
+    done: u16,
+    /// De eerste foutstatus van een completion.
+    status: u16,
     t0: u64,
     /// Bij een lees: zoveel bytes komen uit de databuffer.
     read: usize,
@@ -376,6 +387,8 @@ pub struct Nvme {
     block_size: u64,
     blocks: u64,
     max_transfer: u64,
+    /// De hapgrootte van één verzoek ([`Nvme::step`]), vast na de identify.
+    step: u64,
     model: [u8; 40],
     dead: bool,
     pending: Option<Pending>,
@@ -428,6 +441,7 @@ impl Nvme {
             block_size: 0,
             blocks: 0,
             max_transfer: MAX_TRANSFER,
+            step: MAX_TRANSFER,
             model: [0; 40],
             dead: false,
             pending: None,
@@ -503,86 +517,104 @@ impl Nvme {
     /// `block_on` over [`reap`](Self::reap) wachten tot hij terug is. Er is
     /// dan nog geen executor en geen blokcontract; de I/O loopt nooit hier.
     fn admin(&mut self, m: Cmd) -> Result {
-        self.post(true, m, 0)?;
+        self.post(true, &[m], 0)?;
         blkdev::block_on(core::future::poll_fn(|_| self.reap()))
     }
 
-    /// Zet `m` in de SQ en luidt de doorbell; keert meteen terug. Eén
-    /// opdracht tegelijk: de CID is de tail, en de CQ-entry die terugkomt
-    /// hoort bij deze opdracht of de driver is dood. Een opdracht waarvan de
-    /// wachter wegging, wordt eerst opgehaald als hij klaar is; loopt hij
-    /// nog, dan [`Error::Busy`].
-    fn post(&mut self, admin: bool, m: Cmd, read: usize) -> Result {
+    /// Zet de opdrachten van één verzoek in de SQ en luidt de doorbell één
+    /// keer; keert meteen terug. Eén verzoek tegelijk: de CID's zijn de
+    /// tails, en elke CQ-entry die terugkomt hoort bij dit verzoek of de
+    /// driver is dood. Een verzoek waarvan de wachter wegging, wordt eerst
+    /// opgehaald als het klaar is; loopt het nog, dan [`Error::Busy`].
+    fn post(&mut self, admin: bool, cmds: &[Cmd], read: usize) -> Result {
         if self.dead {
             return Err(Error::Dead);
         }
         if self.pending.is_some() && self.reap().is_pending() {
             return Err(Error::Busy);
         }
+        let (Some(first), Ok(count)) = (cmds.first(), u16::try_from(cmds.len())) else {
+            return Err(Error::Idle);
+        };
         let mut q = if admin { self.admin } else { self.io };
         let cid = q.tail;
-        let sqe = q.sq.add(u64::from(cid) * SQE);
-        dev::clear(sqe, SQE as usize);
-        dev::write32(
-            sqe.add(offset_of!(Sqe, cdw0) as u64),
-            u32::from(m.opc) | (u32::from(cid) << 16),
-        );
-        dev::write32(sqe.add(offset_of!(Sqe, nsid) as u64), m.nsid);
-        dev::write64(sqe.add(offset_of!(Sqe, prp1) as u64), m.prp1);
-        dev::write64(sqe.add(offset_of!(Sqe, prp2) as u64), m.prp2);
-        dev::write32(sqe.add(offset_of!(Sqe, cdw10) as u64), m.cdw10);
-        dev::write32(sqe.add(offset_of!(Sqe, cdw11) as u64), m.cdw11);
-        dev::write32(sqe.add(offset_of!(Sqe, cdw12) as u64), m.cdw12);
+        for m in cmds {
+            let sqe = q.sq.add(u64::from(q.tail) * SQE);
+            dev::clear(sqe, SQE as usize);
+            dev::write32(
+                sqe.add(offset_of!(Sqe, cdw0) as u64),
+                u32::from(m.opc) | (u32::from(q.tail) << 16),
+            );
+            dev::write32(sqe.add(offset_of!(Sqe, nsid) as u64), m.nsid);
+            dev::write64(sqe.add(offset_of!(Sqe, prp1) as u64), m.prp1);
+            dev::write64(sqe.add(offset_of!(Sqe, prp2) as u64), m.prp2);
+            dev::write32(sqe.add(offset_of!(Sqe, cdw10) as u64), m.cdw10);
+            dev::write32(sqe.add(offset_of!(Sqe, cdw11) as u64), m.cdw11);
+            dev::write32(sqe.add(offset_of!(Sqe, cdw12) as u64), m.cdw12);
+            q.tail = (q.tail + 1) % Q_ENTRIES;
+        }
         dev::mb();
-        q.tail = (q.tail + 1) % Q_ENTRIES;
         dev::write32(self.doorbell(&q, false), u32::from(q.tail));
         self.store(admin, q);
         self.pending = Some(Pending {
             admin,
-            opc: m.opc,
+            opc: first.opc,
             cid,
+            count,
+            done: 0,
+            status: 0,
             t0: (self.clock)(),
             read,
         });
         Ok(())
     }
 
-    /// Kijkt of de completion van de opdracht van [`post`](Self::post) er
-    /// is; keert meteen terug. Na de time-out is de driver dood.
+    /// Haalt de completions van het verzoek van [`post`](Self::post) op die
+    /// er zijn; keert meteen terug, `Ready` als ze er alle zijn. De
+    /// controller mag ze in elke volgorde terugzetten. Na de time-out is de
+    /// driver dood.
     fn reap(&mut self) -> Poll<Result> {
-        let Some(p) = self.pending else {
+        let Some(mut p) = self.pending else {
             return Poll::Ready(Err(Error::Idle));
         };
         let mut q = if p.admin { self.admin } else { self.io };
-        let cqe = q.cq.add(u64::from(q.head) * CQE);
-        let status = dev::read16(cqe.add(offset_of!(Cqe, status) as u64));
-        if (status & 1 != 0) != q.phase {
-            if (self.clock)() >= p.t0.saturating_add(self.timeout_ns) {
+        while p.done < p.count {
+            let cqe = q.cq.add(u64::from(q.head) * CQE);
+            let status = dev::read16(cqe.add(offset_of!(Cqe, status) as u64));
+            if (status & 1 != 0) != q.phase {
+                if (self.clock)() >= p.t0.saturating_add(self.timeout_ns) {
+                    self.dead = true;
+                    self.pending = None;
+                    return Poll::Ready(Err(Error::Timeout { opc: p.opc }));
+                }
+                self.pending = Some(p);
+                return Poll::Pending;
+            }
+            // De phase vóór de inhoud: pas na de barrière is de rest van de
+            // entry van de controller.
+            dev::mb();
+            let got = dev::read16(cqe.add(offset_of!(Cqe, cid) as u64));
+            q.head = (q.head + 1) % Q_ENTRIES;
+            if q.head == 0 {
+                q.phase = !q.phase;
+            }
+            dev::write32(self.doorbell(&q, true), u32::from(q.head));
+            self.store(p.admin, q);
+            if (got.wrapping_sub(p.cid) % Q_ENTRIES) >= p.count || got >= Q_ENTRIES {
                 self.dead = true;
                 self.pending = None;
-                return Poll::Ready(Err(Error::Timeout { opc: p.opc }));
+                return Poll::Ready(Err(Error::Cid { got, want: p.cid }));
             }
-            return Poll::Pending;
+            if p.status == 0 {
+                p.status = status >> 1;
+            }
+            p.done += 1;
+            self.commands += 1;
         }
         self.pending = None;
-        // De phase vóór de inhoud: pas na de barrière is de rest van de
-        // entry van de controller.
-        dev::mb();
-        let got = dev::read16(cqe.add(offset_of!(Cqe, cid) as u64));
-        q.head = (q.head + 1) % Q_ENTRIES;
-        if q.head == 0 {
-            q.phase = !q.phase;
-        }
-        dev::write32(self.doorbell(&q, true), u32::from(q.head));
-        self.store(p.admin, q);
-        if got != p.cid {
-            self.dead = true;
-            return Poll::Ready(Err(Error::Cid { got, want: p.cid }));
-        }
         let dt = (self.clock)().saturating_sub(p.t0);
         self.slowest_ns = self.slowest_ns.max(dt);
-        self.commands += 1;
-        Poll::Ready(match status >> 1 {
+        Poll::Ready(match p.status {
             0 => Ok(()),
             s => Err(Error::Status {
                 opc: p.opc,
@@ -636,6 +668,9 @@ impl Nvme {
         }
         self.blocks = blocks;
         self.block_size = 1 << lbads;
+        self.step = (self.max_transfer * IO_DEPTH)
+            .min(MAX_TRANSFER)
+            .max(self.block_size);
         Ok(())
     }
 
@@ -660,24 +695,32 @@ impl Nvme {
         })
     }
 
-    /// De paginawijzers voor `n` bytes in de databuffer: PRP1 naar de eerste
-    /// pagina; PRP2 voor twee pagina's direct naar de tweede, en daarboven
-    /// naar een lijst met alle vervolgpagina's.
-    fn prps(&self, n: u64) -> (u64, u64) {
-        let data = self.data();
+    /// De paginawijzers voor `n` bytes vanaf byte `off` (een veelvoud van
+    /// [`PAGE`]) in de databuffer: PRP1 naar de eerste pagina; PRP2 voor twee
+    /// pagina's direct naar de tweede, en daarboven naar de lijst van
+    /// [`Nvme::list`], op de plek van de tweede pagina. Zo deelt elke
+    /// opdracht van een verzoek dezelfde ene lijstpagina (een lijstwijzer
+    /// binnen een pagina mag, zolang hij op 8 staat; Linux' kleine PRP-pool
+    /// doet hetzelfde).
+    fn prps(&self, off: u64, n: u64) -> (u64, u64) {
+        let first = self.data().0 + off;
         if n <= PAGE {
-            return (data.0, 0);
+            return (first, 0);
         }
         if n <= 2 * PAGE {
-            return (data.0, data.0 + PAGE);
+            return (first, first + PAGE);
         }
-        let list = self.dma.add(PRP_OFF);
-        dev::clear(list, PAGE as usize);
-        let pages = n.div_ceil(PAGE);
-        for p in 1..pages {
-            dev::write64(list.add((p - 1) * 8), data.0 + p * PAGE);
+        (first, self.dma.add(PRP_OFF).0 + off / PAGE * 8)
+    }
+
+    /// Zet in de lijstpagina, voor de eerste `n` bytes van de databuffer,
+    /// op plek `i` het adres van pagina `i + 1`: elke vervolgpagina van elke
+    /// opdracht van een verzoek ([`Nvme::prps`]).
+    fn list(&self, n: u64) {
+        let (data, list) = (self.data().0, self.dma.add(PRP_OFF));
+        for p in 1..n.div_ceil(PAGE) {
+            dev::write64(list.add((p - 1) * 8), data + p * PAGE);
         }
-        (data.0, list.0)
     }
 
     /// Toetst een transfer tegen de namespace en de buffer: nul bytes is
@@ -691,29 +734,50 @@ impl Nvme {
         }
         let nlb = n / self.block_size;
         match lba.checked_add(nlb) {
-            Some(end) if end <= self.blocks && n <= self.max_transfer => {
+            Some(end) if end <= self.blocks && n <= self.step() as u64 => {
                 u32::try_from(nlb - 1).map_err(|_| bad)
             }
             _ => Err(bad),
         }
     }
 
-    fn io_cmd(&self, opc: u8, lba: u64, len: usize, nlb0: u32) -> Cmd {
-        let (prp1, prp2) = self.prps(len as u64);
-        Cmd {
-            opc,
-            nsid: NSID,
-            prp1,
-            prp2,
-            cdw10: (lba & 0xffff_ffff) as u32,
-            cdw11: (lba >> 32) as u32,
-            cdw12: nlb0,
+    /// Zet een lees of schrijf van `len` bytes vanaf `lba` (getoetst door
+    /// [`Nvme::check`]) als opdrachten van hoogstens
+    /// [`max_transfer`](Self::max_transfer) op de controller, achter één
+    /// doorbell. `read`: zoveel bytes komen daarna uit de databuffer.
+    #[inline(never)]
+    fn post_io(&mut self, opc: u8, lba: u64, len: usize, read: usize) -> Result {
+        let (bs, mt, n) = (self.block_size.max(1), self.max_transfer, len as u64);
+        self.list(n);
+        let mut cmds = [Cmd::default(); IO_DEPTH as usize];
+        let mut k = 0;
+        let mut off = 0;
+        while off < n {
+            let chunk = (n - off).min(mt);
+            let Some(c) = cmds.get_mut(k) else {
+                return Err(Error::Range { lba, len });
+            };
+            let (prp1, prp2) = self.prps(off, chunk);
+            let at = lba + off / bs;
+            *c = Cmd {
+                opc,
+                nsid: NSID,
+                prp1,
+                prp2,
+                cdw10: (at & 0xffff_ffff) as u32,
+                cdw11: (at >> 32) as u32,
+                cdw12: u32::try_from(chunk / bs - 1).map_err(|_| Error::Range { lba, len })?,
+            };
+            k += 1;
+            off += chunk;
         }
+        self.post(false, cmds.get(..k).unwrap_or_default(), read)
     }
 
-    /// De hapgrootte: de grootste transfer, en minstens één blok.
+    /// De hapgrootte van één verzoek: [`IO_DEPTH`] opdrachten van de
+    /// grootste transfer, binnen de databuffer, en minstens één blok.
     fn step(&self) -> usize {
-        self.max_transfer.max(self.block_size.max(1)) as usize
+        self.step as usize
     }
 
     /// De blokmaat van namespace 1 in bytes: de eenheid van een LBA.
@@ -792,36 +856,38 @@ fn blk_err(e: Error, lba: u64, len: usize) -> blkdev::Error {
 }
 
 impl Nvme {
-    /// Zet één opdracht van hoogstens [`max_transfer`](Self::max_transfer)
-    /// bytes op de I/O-queue; `lba` in LBA's van de namespace. Een write gaat nu de databuffer in, dus pas als er niets
+    /// Zet één verzoek van hoogstens [`IO_DEPTH`] opdrachten van
+    /// [`max_transfer`](Self::max_transfer) bytes op de I/O-queue; `lba` in
+    /// LBA's van de namespace. Een write gaat nu de databuffer in, dus pas als er niets
     /// meer loopt.
     fn start_op(&mut self, op: Op<'_>, lba: u64) -> Result {
         match op {
             Op::Read { len, .. } => {
-                let nlb0 = self.check(lba, len)?;
-                let m = self.io_cmd(IO_READ, lba, len, nlb0);
-                self.post(false, m, len)
+                self.check(lba, len)?;
+                self.post_io(IO_READ, lba, len, len)
             }
             Op::Write { data, .. } => {
-                let nlb0 = self.check(lba, data.len())?;
+                self.check(lba, data.len())?;
                 if self.dead {
                     return Err(Error::Dead);
                 }
                 if self.pending.is_some() && self.reap().is_pending() {
                     return Err(Error::Busy);
                 }
-                dev::copy_in(self.data(), data);
+                // Het datablok is RAM dat elk board Normal mapt (UEFI:
+                // write-back, `BLK_DATA`), en de controller raakt het pas na
+                // de opdracht hieronder: een gewone `memcpy`.
+                dev::copy_in_normal(self.data(), data);
                 dev::push(self.data(), data.len());
-                let m = self.io_cmd(IO_WRITE, lba, data.len(), nlb0);
-                self.post(false, m, 0)
+                self.post_io(IO_WRITE, lba, data.len(), 0)
             }
             Op::Flush => self.post(
                 false,
-                Cmd {
+                &[Cmd {
                     opc: IO_FLUSH,
                     nsid: NSID,
                     ..Cmd::default()
-                },
+                }],
                 0,
             ),
         }
@@ -836,7 +902,8 @@ impl Nvme {
             let n = read.min(into.len());
             dev::pull(self.data(), n);
             if let Some(d) = into.get_mut(..n) {
-                dev::copy_out(d, self.data());
+                // Normal en klaar (zie `start_op`): een gewone `memcpy`.
+                dev::copy_out_normal(d, self.data());
             }
         }
         r
