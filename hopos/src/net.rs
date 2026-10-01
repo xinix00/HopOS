@@ -61,6 +61,20 @@ type RingRx = AbiTx;
 /// De schrijfkant.
 type RingTx = abi::ring::Writer;
 
+/// Hoe de kern zijn kant van elke frame-ring mapt ([`abi::ring::Coherence`]),
+/// de host-ringen van poort 0 en de ringen van de slots: Normal write-back
+/// inner shareable op elk arm64-board (`cpu::boot::ATTR_NORMAL` over RAM en
+/// de pool: de Pi's, de Radxa, de UEFI-boards, QEMU virt). Niet op Apple:
+/// daar mapt de kern de pool Device (board/apple/src/mmu.rs, `dram_attr`).
+/// Niet op RISC-V: de C906 is niet coherent met het andere hart. Elke ring
+/// kopieert pas zonder onderhoud als de tegenpartij hetzelfde belooft.
+pub(crate) const RINGS: abi::ring::Coherence =
+    if cfg!(all(target_arch = "aarch64", not(feature = "board-apple"))) {
+        abi::ring::Coherence::Hardware
+    } else {
+        abi::ring::Coherence::Maintained
+    };
+
 /// De meetlat van het netwerkvlak.
 pub(crate) static STATS: Stats = Stats::new();
 /// De brievenbus van de switch: `Attach`/`Detach` van de slots komen hier.
@@ -291,10 +305,10 @@ where
     // geen app ziet ze), dus hoeven ze niet in een DMA-regio.
     let host_tx = ring_backing(HOST_RING_DATA)?; // HOP → switch
     let host_rx = ring_backing(HOST_RING_DATA)?; // switch → HOP
-    let sw_tx = AbiTx::open(host_tx, HOST_RING_DATA).map_err(Error::Ring)?;
-    let sw_rx = RingTx::open(host_rx, HOST_RING_DATA).map_err(Error::Ring)?;
-    let hop_rx = AbiTx::open(host_rx, HOST_RING_DATA).map_err(Error::Ring)?;
-    let hop_tx = RingTx::open(host_tx, HOST_RING_DATA).map_err(Error::Ring)?;
+    let sw_tx = AbiTx::open(host_tx, HOST_RING_DATA, RINGS).map_err(Error::Ring)?;
+    let sw_rx = RingTx::open_with(host_rx, HOST_RING_DATA, RINGS).map_err(Error::Ring)?;
+    let hop_rx = AbiTx::open(host_rx, HOST_RING_DATA, RINGS).map_err(Error::Ring)?;
+    let hop_tx = RingTx::open_with(host_tx, HOST_RING_DATA, RINGS).map_err(Error::Ring)?;
 
     let mut sw = Switch::new(
         switch::Config {

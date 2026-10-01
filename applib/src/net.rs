@@ -78,12 +78,15 @@ pub struct Nic {
 }
 
 impl Nic {
-    /// Opent de frame-ringen van `app`.
+    /// Opent de frame-ringen van `app` met de belofte van deze kant
+    /// ([`crate::mmu::ring_coherence`]); de ring kopieert zonder onderhoud
+    /// zodra de kern hetzelfde belooft.
     pub fn open(app: &App) -> Result<Self, abi::Error> {
         let t = app.tail();
+        let c = crate::mmu::ring_coherence();
         Ok(Self {
-            tx: Writer::open(t.net_tx(), NET_RING_DATA_CAP)?,
-            rx: Reader::open(t.net_rx(), NET_RING_DATA_CAP)?,
+            tx: Writer::open_with(t.net_tx(), NET_RING_DATA_CAP, c)?,
+            rx: Reader::open_with(t.net_rx(), NET_RING_DATA_CAP, c)?,
             rx_peek: Peek::new(t.net_rx(), NET_RING_DATA_CAP),
             mac: mac_of(app.slot()),
         })
@@ -117,8 +120,34 @@ impl Nic {
         if frame.is_empty() || !self.tx.fits(frame.len()) {
             return Err(TxError::Size(frame.len()));
         }
-        match self.tx.write(Kind::FRAME, frame) {
-            Ok(was_empty) => {
+        let r = self.tx.write(Kind::FRAME, frame).map(Some);
+        Self::sent(r, frame.len()).map(|_| ())
+    }
+
+    /// Als [`Nic::try_transmit`], maar `fill` bouwt het frame in de TX-ring
+    /// zelf: hij krijgt `max` bytes en geeft de lengte van het frame (0 =
+    /// niets te zenden, `Ok(0)`). Geen kopie uit een eigen buffer. Is er nu
+    /// geen plaats voor `max` bytes, dan [`TxError::Full`] zonder `fill` te
+    /// roepen: de aanroeper bouwt dan in zijn eigen buffer en wacht met
+    /// [`Nic::transmit_wait`].
+    pub fn try_transmit_with(
+        &mut self,
+        max: usize,
+        fill: impl FnOnce(&mut [u8]) -> usize,
+    ) -> Result<usize, TxError> {
+        let mut len = 0;
+        let r = self.tx.write_with(Kind::FRAME, max, |dst| {
+            len = fill(dst).min(dst.len());
+            len
+        });
+        Self::sent(r, max).map(|sent| if sent { len } else { 0 })
+    }
+
+    /// De afloop van een schrijf in de TX-ring: de kick bij de overgang van
+    /// leeg naar niet-leeg, de bel bij vol. `Ok(false)`: geen record.
+    fn sent(r: Result<Option<bool>, abi::Error>, len: usize) -> Result<bool, TxError> {
+        match r {
+            Ok(Some(was_empty)) => {
                 if was_empty {
                     // De SEV wekt een kern in WFE; de kick een kern die een
                     // bewoner draait of in WFI slaapt (Go: `dev.Notify`, dat
@@ -129,13 +158,14 @@ impl Nic {
                     crate::arch::hvc_kick_os();
                     TX_KICKS.fetch_add(1, Relaxed);
                 }
-                Ok(())
+                Ok(true)
             }
+            Ok(None) => Ok(false),
             Err(abi::Error::RingFull { .. }) => {
                 dev::notify();
                 Err(TxError::Full)
             }
-            Err(abi::Error::RecordTooLarge { .. }) => Err(TxError::Size(frame.len())),
+            Err(abi::Error::RecordTooLarge { .. }) => Err(TxError::Size(len)),
             // Onmogelijke indexen: de switch beschrijft ze, en er valt niets
             // meer te herstellen tot de kern het slot herstart.
             Err(_) => Err(TxError::Dead),
@@ -159,6 +189,22 @@ impl Nic {
                     yield_now().await;
                 }
                 other => return other,
+            }
+        }
+    }
+
+    /// Eén frame uit de RX-ring, in de ring zelf aan `f`: geen kopie naar
+    /// een eigen buffer. `max` is het grootste frame dat we aannemen.
+    /// Records van een ander type worden overgeslagen. De producer is de
+    /// kern, en die schrijft een gepubliceerd record niet meer
+    /// ([`abi::ring::Reader::read_with`]).
+    pub fn receive_with<T>(&mut self, max: usize, mut f: impl FnMut(&[u8]) -> T) -> Option<T> {
+        loop {
+            let got = self
+                .rx
+                .read_with(max, |kind, frame| (kind == Kind::FRAME).then(|| f(frame)))?;
+            if got.is_some() {
+                return got;
             }
         }
     }

@@ -585,7 +585,11 @@ fn attach(s: layout::Slot, tail: Tail) {
         println!("cage: an earlier attach was refused: {e} HOPOS_CAGE_ATTACH");
     }
     let (Ok(tx), Ok(rx)) = (
-        AbiTx::open(tail.net_tx(), NET_RING_DATA_CAP),
+        AbiTx::open(
+            tail.net_tx(),
+            NET_RING_DATA_CAP,
+            ring::Coherence::Maintained,
+        ),
         ring::Writer::open(tail.net_rx(), NET_RING_DATA_CAP),
     ) else {
         println!("cage: slot {s}: frame rings do not open HOPOS_CAGE_ATTACH");

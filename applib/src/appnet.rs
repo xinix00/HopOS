@@ -80,6 +80,10 @@ pub const RX_BATCH: usize = 16;
 /// Zoveel frames zendt de pomp achter elkaar voor hij een beurt afgeeft.
 pub const TX_BATCH: usize = 16;
 
+/// De ruimte die één maximaal frame in een slot-ring inneemt: kop en
+/// payload, op 8 afgerond.
+const FRAME_ROOM: u64 = (abi::ring::REC_HDR + NET_MTU as u64 + 14).next_multiple_of(8);
+
 /// De kortste slaap van de pomp. `next_timeout` geeft "nu" zolang er iets
 /// in een rij ligt dat nog op een route wacht; zonder deze bodem spint de
 /// pomp daar op.
@@ -265,12 +269,17 @@ pub fn slot_config(slot: u64, budget: usize) -> Config {
         mac: mac_of(slot).0,
         gw: host_ip(),
         budget,
-        // Per ring hooguit de helft van de slot-ring: het venster dat wij
-        // adverteren is wat de kern in één burst mag sturen, en een venster
-        // groter dan de ring laat de switch met tegendruk op ons wachten
-        // (03-09: 459 naar 155 MB/s; 04-09: 128× rx-full en twee drops bij
-        // vier hameraars).
-        max_buf_per_conn: usize::try_from(NET_RING_DATA_CAP / 2).unwrap_or(usize::MAX),
+        // Het venster dat wij adverteren is wat de kern in één burst in onze
+        // RX-ring mag zetten. Groter dan de ring laat de switch met
+        // tegendruk op ons wachten (03-09: 459 naar 155 MB/s), dus de ring
+        // min een PAD aan de rand (hooguit één frame) en één frame speling.
+        // Tot 01-10 was het de halve ring, maar het venster is de rem van
+        // één stroom: zijn rondgang (zender, switch, lezer) bepaalt de
+        // doorvoer, en twee stromen haalden samen het dubbele (O6N: één
+        // stroom 1434, met dit venster 1749 MB/s). Veel verbindingen tegelijk
+        // vullen de ring ook met de halve ring al (04-09: 128x rx-full bij
+        // vier hameraars); TCP herstelt een drop.
+        max_buf_per_conn: usize::try_from(NET_RING_DATA_CAP - 2 * FRAME_ROOM).unwrap_or(usize::MAX),
         adv_ws: ws_shift_for(budget as u64 / 4),
         mtu: NET_MTU,
         // Het slot-LAN is geheugen, geen draad: geen checksums. De kern-kant
@@ -322,7 +331,15 @@ pub fn up(app: &'static App) -> Result<&'static Net> {
         log!("appnet: log link not started: {e} HOPOS_APPNET_LOGNET");
     }
     let [a, b, c, d] = net.ip();
-    log!("appnet: up ip={a}.{b}.{c}.{d} budget={budget} mtu={NET_MTU} HOPOS_APPNET_UP");
+    // Hoe de frame-ringen kopiëren (zie `Nic::open`): op ijzer de eerste
+    // vraag als de doorvoer van een app verandert.
+    let rings = match crate::mmu::ring_coherence() {
+        crate::ring::Coherence::Hardware => "wb",
+        crate::ring::Coherence::Maintained => "maintained",
+    };
+    log!(
+        "appnet: up ip={a}.{b}.{c}.{d} budget={budget} mtu={NET_MTU} rings={rings} HOPOS_APPNET_UP"
+    );
     Ok(net)
 }
 
@@ -539,35 +556,56 @@ impl Net {
     }
 
     /// Hooguit [`RX_BATCH`] frames uit de RX-ring de stack in; het aantal.
-    fn ingest(&self, nic: &mut Nic, buf: &mut [u8]) -> usize {
+    /// Elk frame gaat vanuit de ring zelf de stack in (01-10: één kopie
+    /// minder per byte op het ontvangstpad; de lezer van een stroom zat op
+    /// het kritieke pad van elk venster). `buf` begrenst de framemaat.
+    fn ingest(&self, nic: &mut Nic, buf: &[u8]) -> usize {
         let mut got = 0;
         while got < RX_BATCH {
-            let Some(n) = netdev::Device::receive(nic, buf) else {
-                break;
-            };
-            got += 1;
             let now = self.now();
-            let frame = buf.get(..n).unwrap_or_default();
             // Een geweigerd frame telt de stack zelf (Stats); een fout per
             // frame loggen is een kapotte stack (leannet DESIGN, 11-08).
-            let _ = self.with(|st| st.receive(frame, now));
+            let rx = nic.receive_with(buf.len(), |frame| {
+                let _ = self.with(|st| st.receive(frame, now));
+            });
+            if rx.is_none() {
+                break;
+            }
+            got += 1;
         }
         got
     }
 
-    /// Alles wat de stack klaar heeft naar de TX-ring. Een frame dat na de
-    /// tegendruk van de ring nog niet kon, is weg en geteld
+    /// Alles wat de stack klaar heeft naar de TX-ring. De stack bouwt elk
+    /// frame in de ring zelf; alleen als daar geen plaats is voor een vol
+    /// frame, in `buf` met de tegendruk van [`Nic::transmit_wait`]. Een frame
+    /// dat na die tegendruk nog niet kon, is weg en geteld
     /// (`net::TX_DROPS`); TCP hertransmitteert.
     async fn transmit(&self, nic: &mut Nic, buf: &mut [u8]) {
         let mut sent = 0;
         loop {
             let now = self.now();
-            let Ok(Some(n)) = self.with(|st| st.poll_transmit(now, buf)) else {
-                self.tx_rounds.set(self.tx_rounds.get().wrapping_add(1));
-                return;
-            };
-            if let Some(frame) = buf.get(..n) {
-                let _ = nic.transmit_wait(frame, self.clock).await;
+            let direct = nic.try_transmit_with(buf.len(), |ring| {
+                self.with(|st| st.poll_transmit(now, ring))
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0)
+            });
+            match direct {
+                Ok(0) => {
+                    self.tx_rounds.set(self.tx_rounds.get().wrapping_add(1));
+                    return;
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    let Ok(Some(n)) = self.with(|st| st.poll_transmit(now, buf)) else {
+                        self.tx_rounds.set(self.tx_rounds.get().wrapping_add(1));
+                        return;
+                    };
+                    if let Some(frame) = buf.get(..n) {
+                        let _ = nic.transmit_wait(frame, self.clock).await;
+                    }
+                }
             }
             sent += 1;
             if sent % TX_BATCH == 0 {

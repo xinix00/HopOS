@@ -76,10 +76,11 @@ pub struct AbiTx {
 }
 
 impl AbiTx {
-    /// Opent de TX-ring op `base` met datacapaciteit `size` (uit de layout).
-    pub fn open(base: Pa, size: u64) -> abi::Result<Self> {
+    /// Opent de TX-ring op `base` met datacapaciteit `size` (uit de layout)
+    /// en de belofte van deze kant ([`abi::ring::Coherence`]).
+    pub fn open(base: Pa, size: u64, local: abi::ring::Coherence) -> abi::Result<Self> {
         Ok(Self {
-            ring: abi::ring::Reader::open(base, size)?,
+            ring: abi::ring::Reader::open_with(base, size, local)?,
             base,
         })
     }
