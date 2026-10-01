@@ -247,6 +247,15 @@ op `/dev/cu.kis-100000-ch-0`. Sinds 01-10 ook op het LAN: 5555, 8080,
       `rxfull` sprong van 0 naar 3110 zonder drops, de switch wachtte ~0,5 ms
       per keer op de RX-ring van pull. Met één kopie haalt de switch een
       ontvanger op een E-core soms in; niet teruggekomen in tien runs.
+- [x] **Replica (SQLite op HopFS) draait en is gemeten op de M4** (01-10,
+      M26): smoke in twee slots (`REPLICA_SQLITE_OK`, 1,23 tot 1,33 ms),
+      persist op een volume met alle markers, ook na een app-herstart op
+      hetzelfde volume (`PERSIST_READ`, `RESTORED_COLD_OK`,
+      `PIPELINE_REPAIR_OK`): 190 tot 218 ms alleen, 255 tot 325 ms naast een
+      app die 1 GiB schrijft en leest. De apps zijn gebouwd op SDK
+      v3.0.0-alpha.16 en draaien op de main-kern van vandaag. Nog te doen:
+      dezelfde proef over een echte koude boot (de knop; na een koude boot
+      herstart de agent de job op hetzelfde volume), en op de O6N en de Pi 4.
 - [ ] `dev::LINE` is 64 terwijl de cacheline van de M4 waarschijnlijk 128
       is: push en pull doen dubbel werk (correct, niet gemeten).
 - [ ] Het geïnstalleerde image is nog D4b (pstate=off, zonder de core-start
