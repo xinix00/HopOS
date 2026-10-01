@@ -85,8 +85,15 @@ fn record(v: &mut Vec<u32>, us: u32) {
     }
 }
 
-/// De eerste plek waar `a` en `b` verschillen.
+/// De eerste plek waar `a` en `b` verschillen. Eerst de hele vergelijking
+/// (`bcmp`, het snelle pad van applib), de bytelus alleen bij een
+/// verschil: die lus zat in de leestijd en kostte op de M4 een halve
+/// milliseconde per MiB (GEMETEN 01-10: lezen 560 MB/s door de app tegen
+/// 1770 door hopfs en 1521 voor het transport alleen).
 pub(crate) fn first_diff(a: &[u8], b: &[u8]) -> Option<usize> {
+    if a == b {
+        return None;
+    }
     a.iter()
         .zip(b)
         .position(|(x, y)| x != y)
