@@ -250,6 +250,51 @@ De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
       µs): de Pi 4 (GENET gepold, `nic=0` in de tik) wacht op het draadpad
       nog ~1 ms. De Pi 5 op de kaart-kern (zonder deur) wekt koud in
       1239 µs; na de deur koud 51 tot 144 µs.
+      **Datapad 01-10 (d476c80, 7599f58, fb04980; stempel X op de Pi 4 en
+      de O6N): Pi 4 app naar app 272 → 418 tot 463 MB/s, O6N 259 → 1495
+      tot 1711; O6N schrijven 290 tot 305 → 992 tot 1188, lezen 158 tot
+      168 → 472 tot 590 (vitals in slot 2) en 373 tot 376 (slot 4).** Vier
+      oorzaken, in volgorde van opbrengst: (1) `compiler_builtins` kopieert
+      op `+strict-align` per byte bij ongelijke uitlijning en vergelijkt
+      per byte, en op het framepad is bijna elke kopie ongelijk (de payload
+      op +54, de stroompositie willekeurig): eigen memcpy en memcmp met
+      ongealigneerde ldp/stp, alleen op Normal geheugen (dev/src/mem.rs;
+      Pi 4 261 → 365, O6N 259 → 545). (2) De ring deed `dc civac` per
+      record terwijl beide kanten write-back inner shareable mappen, en de
+      civac gooit de regels uit de gedeelde L2 zodat de kopie uit DRAM
+      komt: nu een belofte per kant in zijn eigen regel van de ringkop,
+      de kern op elk arm64-board behalve Apple (O6N 545 → 1050). (3) Frames
+      in plaats in de ring lezen en bouwen (1150 → 1430). (4) Het venster
+      per verbinding van een halve ring naar de ring min twee frames (→
+      1650 tot 1750). NVMe: het datablok met memcpy en tot 16 opdrachten
+      per verzoek achter één doorbell (MDTS 512 KiB: een MiB was twee
+      seriële opdrachten). Niet gehouden: de switch met één kopie (Pi 4
+      360 tegen 420, trager), een kleinere RX_BATCH, een yield per read.
+      **De lat van 2000 MB/s is niet gehaald.** De rem van één stroom is de
+      rondgang van zijn venster (de zender wacht op venster, de ontvanger
+      wekt ~1 keer per venster, alle cores ~50% idle); twee stromen samen
+      halen 2380 MB/s, en zonder de bytevergelijking van bench 1532 tot
+      1611: elke kopie minder per byte bij de ontvanger telt. Bij opslag
+      loopt alles serieel per call (hopfs ~800 µs + send ~320 µs + de app
+      ~600 µs per MiB). Volgende kandidaten: een groter venster (grotere
+      frame-ringen, de ABI-staart van 2 MB), een leesweg in plaats in
+      leannet, DMA rechtstreeks in de kernbuffer, en voor opslag de echte
+      hefboom: een fs-grant naar het voorbeeld van `codec_grant` (NVMe-PRP
+      over het RAM van de app, geen TCP). Of de PCIe van de O6N
+      I/O-coherent is (`_CCA` in de DSDT) bepaalt of de dc civac/cvac per
+      MiB weg mag. Lean hoefde niet mee: de checksums op de slot-link
+      stonden al uit.
+- [ ] **Het flipvenster van de O6N is de lopende kern: 2204 KiB.**
+      `image::limit()` op UEFI is het einde van het lopende beeld, en een
+      bundel is pas welkom als zijn beeld tot het einde van .stack daarin
+      past ("length 2269184 exceeds 2256896"). HEAD 4442f3d was al 2208
+      KiB en paste niet; fb04980 past precies (`#[inline(never)]` op de
+      mem-symbolen: LTO plakte de lus in elke aanroeper, +12 KiB; de IoPace
+      van de system-API eruit, de versie met IoPace staat in de scratchpad).
+      Elke verdere kerngroei op de O6N vraagt eerst een koude boot met een
+      nieuwe kern op de stick, en die kern hoort ruimte boven zijn eigen
+      maat te reserveren. Ook: `hopos.nvmebench=1` moet in de cfg op de
+      stick, een flipbundel draagt geen cfg.
 - [ ] **Storm door de NAT (hairpin) stokt 1 s per ronde** op de Pi 4 (H):
       p50 2,5 ms, p99 1002 ms, 96 conn/s, zonder `HOPOS_MASQ_SLOT_FULL`.
       Eén SYN per ronde valt (RTO 1 s); ook node naar node (Pi 4 naar Pi 5,
