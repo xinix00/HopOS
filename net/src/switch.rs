@@ -618,11 +618,6 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
             uplink_in(&mut self.core, &mut self.nat, fr.bytes_mut(), now);
             worked = true;
         }
-        // De RX-koppen die deze ronde bewogen één keer naar het geheugen,
-        // voor de switcher-peek; niet per frame.
-        for p in self.core.ports.iter_mut().skip(1).flatten() {
-            p.rx.publish_head();
-        }
         worked
     }
 
@@ -876,12 +871,6 @@ impl<R: Reader, W: Writer> Core<'_, R, W> {
                 InPlace::Written(notify) => {
                     port.rx_blocked = false;
                     if notify {
-                        // Kop naar het geheugen vóór de kick: een core die op
-                        // EL2 slaapt peekt na zijn wekker de kop in DRAM, en
-                        // een kop die nog in HOP's cache staat is voor hem
-                        // leeg (T30, 04-09: schrijven 690 → 40 MB/s). Eén
-                        // clean per burst.
-                        port.rx.publish_head();
                         self.wake(i);
                     }
                     return true;

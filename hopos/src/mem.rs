@@ -13,8 +13,10 @@
 //! maar de EL2-switcher op een app-core draait met de MMU uit, en een kern
 //! die op EL1 binnenkwam ook. De kern kopieert met `memcpy` alleen RAM
 //! (Normal write-back) en het glas (Normal-NC): registers en vensters van
-//! devices gaan via de vluchtige toegang van `dev`. Niet op Apple: daar
-//! mapt de kern de pool Device, en wat de kern daar kopieert, is niet
+//! devices gaan via de vluchtige toegang van `dev`. Op Apple en de Radxa
+//! mapt de kern de pool Device, behalve de staart van elk slot
+//! (`cage::tail_rings`): een ringrecord kopieert hij met `memcpy` alleen
+//! als die remap lukte; wat hij verder uit de pool kopieert, is niet
 //! nagelopen.
 //!
 //! `#[inline(never)]`: anders plakt LTO de lus in elke aanroeper, en het

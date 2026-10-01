@@ -168,11 +168,6 @@ impl<K: Key, V: Copy> Map<K, V> {
         }
         self.len = 0;
     }
-
-    /// Alle elementen, in tabelvolgorde.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (K, V)> + '_ {
-        self.slots.iter().filter_map(|s| *s)
-    }
 }
 
 #[cfg(test)]
@@ -202,6 +197,6 @@ mod tests {
         assert_eq!(m.len(), 32);
         m.clear();
         assert_eq!(m.len(), 0);
-        assert_eq!(m.iter().count(), 0);
+        assert!(m.slots.iter().all(Option::is_none));
     }
 }

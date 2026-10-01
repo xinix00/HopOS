@@ -337,18 +337,6 @@ impl Nat {
         }
     }
 
-    /// De node-poorten die voor slot `i` gepubliceerd staan, elk één keer
-    /// (ook als hij tcp én udp draagt). De kern-flip leest ze om ze na een
-    /// adoptie terug te zetten.
-    pub fn published_ports(&self, i: usize) -> impl Iterator<Item = u16> + '_ {
-        self.pubs.iter().enumerate().filter_map(move |(n, p)| {
-            let first = !self.pubs[..n]
-                .iter()
-                .any(|q| q.slot == p.slot && q.node_port == p.node_port);
-            (usize::from(p.slot) == i && first).then_some(p.node_port)
-        })
-    }
-
     // --- Neighbors --------------------------------------------------------
 
     /// Leert de L2-next-hop uit een inbound frame: srcIP naar srcMAC. Een
@@ -468,26 +456,6 @@ impl Nat {
         // tha blijft 0: onbekend, dat is de vraag.
         put32(&mut f, 38, dst_ip);
         io.uplink_tx(&f);
-    }
-
-    /// Hoeveel buren we kennen en van hoeveel de MAC gelijk is aan die van
-    /// de gateway. Dat tweede getal hoort nul te zijn: een buur op hetzelfde
-    /// subnet bereik je rechtstreeks; staat het hoog, dan loopt elk pakket
-    /// een omweg langs de router.
-    #[must_use]
-    pub fn neigh_via(&self) -> (usize, usize) {
-        let mut total = 0;
-        let mut via = 0;
-        for (ip, n) in self.neigh.iter() {
-            if !self.on_subnet(ip) {
-                continue; // off-subnet entries dragen terecht de router-MAC
-            }
-            total += 1;
-            if self.gw == Some(n.mac) {
-                via += 1;
-            }
-        }
-        (total, via)
     }
 
     // --- De vier herschrijfpaden ------------------------------------------

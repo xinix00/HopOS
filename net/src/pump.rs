@@ -50,9 +50,6 @@ pub struct Pump<'a, D: Device> {
     /// De deur van de switch.
     door: &'a Signal,
     stats: &'a Stats,
-    /// Poll ook als het board een lijn heeft (`hopos.rxpoll=1`): de A/B-knop
-    /// voor de meting, en de veiligheidsklep als een bedrading niet deugt.
-    pub force_poll: bool,
     /// De console voor de diagnoseregel van de driver.
     log: Option<LogFn>,
 }
@@ -83,7 +80,6 @@ impl<'a, D: Device> Pump<'a, D> {
             bell,
             door,
             stats,
-            force_poll: false,
             log: None,
         }
     }
@@ -164,11 +160,7 @@ impl<'a, D: Device> Pump<'a, D> {
         exec: &'static Executor<T, M>,
         stop: &Stop,
     ) {
-        let irq = if self.force_poll {
-            None
-        } else {
-            self.nic.irq()
-        };
+        let irq = self.nic.irq();
         let every = u64::try_from(DIAG_EVERY.as_nanos()).unwrap_or(u64::MAX);
         let mut diag_due = exec.now().saturating_add(every);
         loop {

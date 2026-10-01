@@ -169,15 +169,20 @@ pub fn copy_out_normal(dst: &mut [u8], src: Pa) {
 
 /// Leent `n` bytes gedeeld Normal-geheugen op `pa` als slice aan `f`,
 /// zonder kopie: een ringrecord dat de lezer in plaats leest. Alleen voor
-/// geheugen dat op dit adres Normal gemapt is en waar niemand tijdens `f`
-/// in schrijft (een gepubliceerd record dat de lezer nog niet vrijgaf, van
-/// een producer die hij vertrouwt). Voor al het andere: [`copy_out`].
+/// geheugen dat op dit adres Normal gemapt is en dat zolang niet hergebruikt
+/// wordt (een gepubliceerd record dat de lezer nog niet vrijgaf). Een
+/// producer op een andere core kan er tijdens `f` toch in schrijven; wie hem
+/// niet vertrouwt, kopieert in `f` en toetst de kopie. Voor Device-geheugen:
+/// [`copy_out`].
 #[inline]
 pub fn view<T>(pa: Pa, n: usize, f: impl FnOnce(&[u8]) -> T) -> T {
     // SAFETY: `pa` komt uit de layout (zie de crate-doc) en is daar voor `n`
-    // bytes van de aanroeper; die belooft dat het bereik Normal gemapt is
-    // en dat niemand er schrijft zolang de slice leeft, en die leeft alleen
-    // binnen `f`.
+    // bytes van de aanroeper, die belooft dat het bereik Normal gemapt is
+    // en zolang de slice leeft (alleen binnen `f`) niet hergebruikt wordt.
+    // De enige andere schrijver is de producer in een andere partitie, op
+    // een andere core en buiten dit programma: geen Rust-schrijver waartegen
+    // het geheugenmodel een race kent. Wat hij doet, kan een byte tussen
+    // twee loads laten veranderen, nooit een toegang buiten het bereik.
     f(unsafe { core::slice::from_raw_parts(pa.as_usize() as *const u8, n) })
 }
 

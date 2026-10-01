@@ -34,15 +34,16 @@ pub trait Reader {
 
     /// Als [`read_into`](Self::read_into), zonder kopie: `f` leest het
     /// record in de ring zelf (hoogstens `max` bytes), daarna gaat de ruimte
-    /// terug. Alleen voor een ring waarvan de lezer de producer vertrouwt:
-    /// poort 0, waar beide kanten de kern zijn. Een app kan haar record
-    /// tijdens `f` herschrijven, dus haar ringen gaan via `read_into`.
+    /// terug. Een app kan haar record tijdens `f` herschrijven, dus `f`
+    /// kopieert het en toetst alleen de kopie (`Core::relay` toetst in de
+    /// ring van het doel, vóór de publicatie); wat `f` in de ring zelf leest,
+    /// stuurt hooguit de weg.
     fn read_in_place<T>(&mut self, max: usize, f: impl FnOnce(u32, &[u8]) -> T) -> Option<T>;
 
     /// Mapt de kern deze ring Normal ([`abi::ring::Coherence::Hardware`])?
     /// Alleen dan mag een record in de ring zelf met `memcpy` gelezen of
-    /// gevuld worden; op Device (de pool van de Radxa, een geweigerde remap
-    /// op Apple) abort een ongealigneerde toegang.
+    /// gevuld worden; op Device (een geweigerde remap op Apple of de Radxa)
+    /// abort een ongealigneerde toegang.
     fn is_normal(&self) -> bool;
 
     /// Waarom de ring corrupt verklaard is; `None` = gezond. Een corrupte
@@ -85,11 +86,6 @@ pub trait Writer {
 
     /// Zie [`Reader::is_normal`].
     fn is_normal(&self) -> bool;
-
-    /// Cleant de kop naar het geheugen voor een lezer zonder cache (de
-    /// EL2-switcher peekt hem bij de rotatie). Eén keer per burst, niet per
-    /// frame. Standaard niets.
-    fn publish_head(&mut self) {}
 }
 
 /// De uitkomst van [`Writer::write_in_place`].
@@ -166,8 +162,6 @@ impl Reader for AbiTx {
 
 impl Writer for abi::ring::Writer {
     fn write_notify(&mut self, kind: u32, p: &[u8]) -> Option<bool> {
-        // `write` publiceert zijn kop zelf (push na elke kop), dus
-        // `publish_head` heeft hier niets meer te doen.
         self.write(Kind::new(kind)?, p).ok()
     }
 

@@ -620,7 +620,6 @@ fn unpublish_slot_compacteert_publicatiepiek() {
     nat.unpublish_slot(1);
     assert_eq!(nat.pubs.len(), 1);
     assert_eq!((nat.pubs[0].slot, nat.pubs[0].node_port), (2, 9000));
-    assert_eq!(nat.published_ports(2).collect::<Vec<_>>(), [9000]);
 }
 
 #[test]

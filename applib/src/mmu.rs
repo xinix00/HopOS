@@ -396,7 +396,8 @@ pub(crate) fn normal() -> bool {
 ///
 /// Dit is alleen de belofte van deze kant; de ring zelf kopieert pas
 /// zonder onderhoud als de kern hetzelfde belooft in de ringkop (elke
-/// v3-kern op arm64 behalve Apple, waar de pool Device is).
+/// v3-kern op arm64; op Apple en de Radxa mapt hij daarvoor de staart
+/// Normal, en weigert die remap, dan belooft hij niets).
 ///
 /// RISC-V: geen ARM-stage-1 (`hw::PRESENT` is onwaar) en de C906 is niet
 /// coherent met het andere hart; daar altijd onderhoud.

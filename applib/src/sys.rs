@@ -28,9 +28,8 @@
 
 use crate::contract::{
     HOPABI_HDR_LEN, HOPABI_VERSION, KIND_CALL, KIND_LOG, KIND_RESULT, MAX_IO_CHUNK, MAX_PAYLOAD,
-    OP_LIST, OP_READ, OP_REMOVE, OP_STAT, OP_STORE_DROP, OP_STORE_LIST, OP_STORE_PULL,
-    OP_STORE_PUSH, OP_SYNC, OP_TRUNCATE, OP_WRITE, STATUS_NOENT, STATUS_OK, SYS_HEADER_LEN,
-    SYS_MAGIC, SYS_PORT, SYS_VERSION,
+    OP_LIST, OP_READ, OP_REMOVE, OP_STAT, OP_SYNC, OP_TRUNCATE, OP_WRITE, STATUS_NOENT, STATUS_OK,
+    SYS_HEADER_LEN, SYS_MAGIC, SYS_PORT, SYS_VERSION,
 };
 use core::fmt;
 use core::future::Future;
@@ -652,38 +651,6 @@ impl<D: Dial, T: Timer> Client<D, T> {
                 }
             }
         }
-    }
-
-    /// Haalt object `path` uit de eigen bucket-map en vervangt er het lokale
-    /// bestand mee; geeft de grootte.
-    pub async fn store_pull(&mut self, path: &str) -> Result<u64> {
-        let (r, _) = self
-            .call(Req::path(OP_STORE_PULL, path), &mut [], STORE_TIMEOUT)
-            .await?;
-        Ok(r.size)
-    }
-
-    /// Uploadt het lokale bestand `path` naar de eigen bucket-map.
-    pub async fn store_push(&mut self, path: &str) -> Result<u64> {
-        let (r, _) = self
-            .call(Req::path(OP_STORE_PUSH, path), &mut [], STORE_TIMEOUT)
-            .await?;
-        Ok(r.size)
-    }
-
-    /// De objectnamen onder `prefix` in de eigen bucket-map, in `dst`.
-    pub async fn store_list(&mut self, prefix: &str, dst: &mut [u8]) -> Result<usize> {
-        let (_, n) = self
-            .call(Req::path(OP_STORE_LIST, prefix), dst, STORE_TIMEOUT)
-            .await?;
-        Ok(n)
-    }
-
-    /// Verwijdert object `path` (idempotent).
-    pub async fn store_drop(&mut self, path: &str) -> Result {
-        self.call(Req::path(OP_STORE_DROP, path), &mut [], STORE_TIMEOUT)
-            .await
-            .map(|_| ())
     }
 
     /// Eén logregel over de verbinding (`KindLog`), zonder antwoord. Een

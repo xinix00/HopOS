@@ -55,8 +55,8 @@ pub const CTRL_S2_TABLE: u64 = 0x38;
 pub const CTRL_WALL_OFF: u64 = 0x40;
 /// App naar kern: geaccumuleerde idle-TIJD in timer-tikken. Sinds 18-07
 /// tijd in plaats van rondes: rondes bleken op ijzer door SEV-ruis
-/// opgeblazen. Stond op 0xD8 en botste daar met [`CTRL_SMP_TCR`]; de
-/// uniekheidstoets bewaakt dat voortaan.
+/// opgeblazen. Stond op 0xD8 en botste daar met [`CTRL_SMP_TCR`];
+/// [`CtrlPage`] bewaakt dat voortaan.
 pub const CTRL_IDLE: u64 = 0x48;
 /// Kern naar trampoline: de fysieke basis van de EL2-vectoren.
 pub const CTRL_VEC_PA: u64 = 0x50;
@@ -70,8 +70,6 @@ pub const CTRL_FAULT_VEC: u64 = 0x68;
 pub const CTRL_CORES: u64 = 0x70;
 /// De actieve VBAR_EL1 van de dispatchende primaire, voor een secundaire.
 pub const CTRL_SMP_VBAR: u64 = 0x78;
-/// Kern naar app: het fysieke adres van de EL2-SMP-trampoline.
-pub const CTRL_SMP_TRAMP: u64 = 0x80;
 /// App naar secundaire: de stacktop (IPA).
 pub const CTRL_SMP_SP: u64 = 0x88;
 /// App naar secundaire: eerste runtime-argument (Go: `*m`).
@@ -98,14 +96,9 @@ pub const CTRL_SMP_MBOX: u64 = 0xD0;
 /// levende registers, geen afgeleide kopie: de 39-bit-standaard kon de
 /// Altra-UART op 16 TB niet vertalen, gemeten 17-07).
 pub const CTRL_SMP_TCR: u64 = 0xD8;
-/// Apploader naar kern: de maat van het gestagede image.
-pub const CTRL_STAGED_SIZE: u64 = 0xE0;
 /// App naar kern: de werkelijke geheugen-draw van de runtime (0 = nog niet
 /// gerapporteerd).
 pub const CTRL_MEM_SYS: u64 = 0xE8;
-/// Apploader naar kern: de IPA van het zelfplaatsings-stubje (0 = geen).
-/// Niet vertrouwd voor isolatie: het draait ín de kooi.
-pub const CTRL_PLACE_ENTRY: u64 = 0xF0;
 /// De actieve MAIR_EL1 van de primaire, voor een secundaire.
 pub const CTRL_SMP_MAIR: u64 = 0xF8;
 /// Kern naar app: 1 als dit slot zijn core deelt; de idle-governor yieldt
@@ -340,8 +333,9 @@ pub struct CtrlPage {
     pub cores: u64,
     /// [`CTRL_SMP_VBAR`].
     pub smp_vbar: u64,
-    /// [`CTRL_SMP_TRAMP`].
-    pub smp_tramp: u64,
+    // Vrij: 0x80, 0xE0 en 0xF0 droegen in Go de SMP-trampoline, de maat
+    // van het gestagede image en de zelfplaatsing; niemand leest ze nog.
+    _pad0: u64,
     /// [`CTRL_SMP_SP`].
     pub smp_sp: u64,
     /// [`CTRL_SMP_MP`].
@@ -364,12 +358,10 @@ pub struct CtrlPage {
     pub smp_mbox: u64,
     /// [`CTRL_SMP_TCR`].
     pub smp_tcr: u64,
-    /// [`CTRL_STAGED_SIZE`].
-    pub staged_size: u64,
+    _pad1: u64,
     /// [`CTRL_MEM_SYS`].
     pub mem_sys: u64,
-    /// [`CTRL_PLACE_ENTRY`].
-    pub place_entry: u64,
+    _pad2: u64,
     /// [`CTRL_SMP_MAIR`].
     pub smp_mair: u64,
     /// [`CTRL_SHARED`].
@@ -404,59 +396,6 @@ pub struct CtrlPage {
     pub idle_mode: u64,
 }
 
-/// Alle woord-offsets van de page, voor de uniekheidstoets.
-pub const CTRL_WORDS: [u64; 49] = [
-    CTRL_STATUS,
-    CTRL_EXIT_CODE,
-    CTRL_KILL,
-    CTRL_HEARTBEAT,
-    CTRL_RAM_SIZE,
-    CTRL_ENV_LEN,
-    CTRL_ENTRY,
-    CTRL_S2_TABLE,
-    CTRL_WALL_OFF,
-    CTRL_IDLE,
-    CTRL_VEC_PA,
-    CTRL_FAULT_ESR,
-    CTRL_FAULT_FAR,
-    CTRL_FAULT_VEC,
-    CTRL_CORES,
-    CTRL_SMP_VBAR,
-    CTRL_SMP_TRAMP,
-    CTRL_SMP_SP,
-    CTRL_SMP_MP,
-    CTRL_SMP_G0,
-    CTRL_SMP_FN,
-    CTRL_SMP_STUB,
-    CTRL_SMP_TTBR0,
-    CTRL_SLOT,
-    CTRL_SMP_REQ,
-    CTRL_MBOX_PA,
-    CTRL_SMP_MBOX,
-    CTRL_SMP_TCR,
-    CTRL_STAGED_SIZE,
-    CTRL_MEM_SYS,
-    CTRL_PLACE_ENTRY,
-    CTRL_SMP_MAIR,
-    CTRL_SHARED,
-    CTRL_WAKES,
-    CTRL_RX_DOOR,
-    CTRL_DOOR_IRQ,
-    CTRL_RNG_SOURCE,
-    CTRL_RNG_GEN,
-    CTRL_RNG_SEED,
-    CTRL_RNG_SEED + 8,
-    CTRL_RNG_SEED + 16,
-    CTRL_RNG_SEED + 24,
-    CTRL_APP_FAULT_FAR,
-    CTRL_APP_FAULT_ELR,
-    CTRL_APP_FAULT_ESR,
-    CTRL_APP_FAULT_VEC,
-    CTRL_TIMEBASE_HZ,
-    CTRL_TEMP,
-    CTRL_IDLE_MODE,
-];
-
 macro_rules! at {
     ($field:ident, $off:expr) => {
         const _: () = assert!(offset_of!(CtrlPage, $field) as u64 == $off);
@@ -480,7 +419,7 @@ at!(fault_far, CTRL_FAULT_FAR);
 at!(fault_vec, CTRL_FAULT_VEC);
 at!(cores, CTRL_CORES);
 at!(smp_vbar, CTRL_SMP_VBAR);
-at!(smp_tramp, CTRL_SMP_TRAMP);
+at!(_pad0, 0x80);
 at!(smp_sp, CTRL_SMP_SP);
 at!(smp_mp, CTRL_SMP_MP);
 at!(smp_g0, CTRL_SMP_G0);
@@ -492,9 +431,9 @@ at!(smp_req, CTRL_SMP_REQ);
 at!(mbox_pa, CTRL_MBOX_PA);
 at!(smp_mbox, CTRL_SMP_MBOX);
 at!(smp_tcr, CTRL_SMP_TCR);
-at!(staged_size, CTRL_STAGED_SIZE);
+at!(_pad1, 0xE0);
 at!(mem_sys, CTRL_MEM_SYS);
-at!(place_entry, CTRL_PLACE_ENTRY);
+at!(_pad2, 0xF0);
 at!(smp_mair, CTRL_SMP_MAIR);
 at!(shared, CTRL_SHARED);
 at!(wakes, CTRL_WAKES);
@@ -750,27 +689,6 @@ pub fn decode_resp(b: &[u8]) -> Result<Resp<'_>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Geport uit `TestCtrlOffsetsUniek`: élke offset is uniek,
-    /// 8-gealigneerd, binnen de page en buiten de env-regio. Aanleiding
-    /// (18-07): `CtrlSMPTcr` en `CtrlIdle` stonden allebei op 0xD8.
-    #[test]
-    fn ctrl_offsets_uniek() {
-        let page = crate::layout::CTRL_STRIDE;
-        for (i, &v) in CTRL_WORDS.iter().enumerate() {
-            assert!(v.is_multiple_of(8), "{v:#x} niet gealigneerd");
-            assert!(v + 8 <= page, "{v:#x} buiten de page");
-            assert!(
-                v + 8 <= CTRL_ENV_DATA || v >= CTRL_ENV_DATA + CTRL_ENV_MAX,
-                "{v:#x} overlapt de env-regio"
-            );
-            assert!(
-                !CTRL_WORDS[i + 1..].contains(&v),
-                "OFFSET-COLLISIE op {v:#x}"
-            );
-        }
-        const { assert!(CTRL_WORDS.len() >= 20) };
-    }
 
     /// Het bronwoord van het RNG-blok: alleen met de magic, alleen een
     /// bekende bron, en tekst (een env op een oude kern) is nooit een bron.

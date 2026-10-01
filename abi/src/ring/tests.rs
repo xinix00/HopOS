@@ -318,18 +318,6 @@ fn head_pending_snapshots() {
     }
 }
 
-#[test]
-fn snapshot_draagt_de_getallen() {
-    let mut h = new_ring(128);
-    h.w.write(Kind::LOG, b"x").unwrap();
-    let s = h.r.snapshot();
-    assert_eq!((s.head, s.tail, s.size, s.hdr), (16, 0, 128, 1 | 1 << 32));
-    h.g.set_head(1 << 62);
-    let _ = read(&mut h, &mut [0u8; 128]);
-    let text = format!("{}", h.r.snapshot());
-    assert!(text.contains("corrupt=head-tail>size"), "{text}");
-}
-
 /// Elke combinatie van [`Coherence`] aan de twee kanten spreekt hetzelfde
 /// protocol: dezelfde bytes, dezelfde PAD-wraps, dezelfde indexen. Op de host
 /// zijn `push`/`pull` no-ops, dus dit bewijst de vorm, niet de cache; het

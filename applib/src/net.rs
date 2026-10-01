@@ -1,5 +1,5 @@
 //! Frame-niveau netwerk van een app: de [`Nic`] over de eigen frame-ringen
-//! naar de L2-switch van de kern, en de RX-pomp met de deurbel.
+//! naar de L2-switch van de kern, de deurbel en de slaapstand van de RX-pomp.
 //!
 //! Het twee-methode-device (`netdev::Device`) waaraan in Go elke
 //! stack-wissel hing (gVisor, lneto, leannet: elke wissel raakte alleen
@@ -15,14 +15,12 @@
 
 use crate::app::App;
 use crate::contract::{NET_MTU, NET_RING_DATA_CAP, slot_ip4, slot_mac};
-use crate::log;
 use crate::ring::{Corrupt, Kind, Peek, Reader, Writer};
-use crate::rt::Exec;
 use crate::sleep::{self, RxDoor};
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use core::time::Duration;
 use netdev::{Device, Mac, TxError};
-use sync::{Either, Signal, select, yield_now};
+use sync::{Signal, yield_now};
 
 /// De MTU van het slot-LAN (geen draad, geen bitfouten).
 pub const MTU: usize = NET_MTU;
@@ -328,53 +326,6 @@ pub fn ws_shift_for(max_buf: u64) -> u8 {
         shift += 1;
     }
     shift
-}
-
-/// De RX-pomp als taak: leest frames uit de ring en geeft ze aan `deliver`;
-/// als het stil is wacht hij op de bel of zijn timer. Keert nooit terug.
-///
-/// Elke 16 frames een yield: zonder die yield draait de pomp door zolang er
-/// frames liggen en komen de ACK's van de stack pas aan de beurt als de
-/// zender zijn hele venster kwijt is (20-09, een 1 Gbit-upload: 216.147
-/// segmenten in, 298 ACK's uit, 39 MB/s).
-pub async fn pump(
-    nic: &mut Nic,
-    buf: &mut [u8],
-    bell: &'static Signal,
-    exec: &'static Exec,
-    poll: RxPoll,
-    mut deliver: impl FnMut(&[u8]),
-) {
-    nic.watch_rx(bell);
-    let mut d = poll.lo;
-    let mut empty: u32 = 0;
-    let mut delivered: u32 = 0;
-    let mut corrupt_logged = false;
-    loop {
-        if let Some(n) = nic.receive(buf) {
-            d = poll.lo;
-            empty = 0;
-            deliver(buf.get(..n).unwrap_or_default());
-            delivered = delivered.wrapping_add(1);
-            if delivered.is_multiple_of(16) {
-                yield_now().await;
-            }
-            continue;
-        }
-        // Een dode ring is stil: niets meer te lezen en toch "pending". Eén
-        // regel met de reden, anders is dat een app die "gewoon niet
-        // reageert" (de SMP-jacht van 03-09).
-        if !corrupt_logged && let Some(why) = nic.rx_corruption() {
-            log!("appnet: RX ring corrupt: {why} HOPOS_APPNET_RX_CORRUPT");
-            corrupt_logged = true;
-        }
-        match select(bell.wait(), exec.after(d)).await {
-            Either::Left(()) => PUMP_EARLY.fetch_add(1, Relaxed),
-            Either::Right(()) => PUMP_TIMER.fetch_add(1, Relaxed),
-        };
-        empty = empty.saturating_add(1);
-        d = poll.next(d, empty);
-    }
 }
 
 #[cfg(test)]

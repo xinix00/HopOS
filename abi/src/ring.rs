@@ -219,6 +219,9 @@ impl Geom {
         dev::read64(self.base.add(TAIL_OFF))
     }
 
+    /// Zet de kop en cleant hem bij elk record: een core die op EL2 slaapt
+    /// peekt na zijn wekker de kop in DRAM (T30, 04-09: zonder de clean
+    /// zakte schrijven van 690 naar 40 MB/s).
     fn set_head(self, v: u64) {
         dev::write64(self.base.add(HEAD_OFF), v);
         dev::push(self.base.add(HEAD_OFF), 8);
@@ -502,37 +505,6 @@ pub struct Record<'b> {
     pub payload: &'b [u8],
 }
 
-/// De stand van een ring in getallen, voor een lezer die "pending" ziet
-/// maar niets kan lezen.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub struct Snapshot {
-    /// De producer-index.
-    pub head: u64,
-    /// De consumer-index.
-    pub tail: u64,
-    /// De capaciteit.
-    pub size: u64,
-    /// Het kopwoord op de tail (0 als er niets ligt of het niet te lezen
-    /// is).
-    pub hdr: u64,
-    /// De corrupt-reden.
-    pub corrupt: Option<Corrupt>,
-}
-
-impl fmt::Display for Snapshot {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "head={:#x} tail={:#x} size={:#x} hdr@tail={:#x}",
-            self.head, self.tail, self.size, self.hdr
-        )?;
-        match self.corrupt {
-            Some(c) => write!(f, " corrupt={c}"),
-            None => Ok(()),
-        }
-    }
-}
-
 /// Een getoetst record dat nog in de ring staat ([`Reader::next`]).
 struct Next {
     /// De soort (nooit PAD).
@@ -648,10 +620,9 @@ impl Reader {
     /// Als [`Reader::read_into`], zonder kopie: `f` leest de payload in de
     /// ring zelf, daarna gaat de ruimte terug. `max` is de grootste payload
     /// die de lezer aanneemt (een grotere kop maakt de ring corrupt, net als
-    /// een te kleine `buf`). Alleen voor een lezer die zijn producer
-    /// vertrouwt: een producer die tijdens `f` in het record schrijft,
-    /// verandert wat `f` ziet (de app tegenover zijn RX-ring van de kern;
-    /// niet de kern tegenover een app).
+    /// een te kleine `buf`). Een producer kan tijdens `f` in het record
+    /// schrijven en verandert dan wat `f` ziet: tegenover een onvertrouwde
+    /// producer kopieert `f` en toetst hij de kopie, nooit de ring.
     pub fn read_with<T>(&mut self, max: usize, f: impl FnOnce(Kind, &[u8]) -> T) -> Option<T> {
         let r = self.next(max)?;
         if !r.hw {
@@ -733,25 +704,6 @@ impl Reader {
     fn free(&mut self, end: u64) {
         dev::mb();
         self.g.set_tail(end);
-    }
-
-    /// De stand van de ring in getallen.
-    #[must_use]
-    pub fn snapshot(&self) -> Snapshot {
-        let (head, tail, size) = (self.g.head(), self.g.tail(), self.g.size);
-        let mut hdr = 0;
-        if head != tail && tail % size <= size - REC_HDR {
-            let at = self.g.at(tail);
-            dev::pull(at, REC_HDR as usize);
-            hdr = dev::read64(at);
-        }
-        Snapshot {
-            head,
-            tail,
-            size,
-            hdr,
-            corrupt: self.corrupt,
-        }
     }
 }
 
