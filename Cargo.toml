@@ -163,6 +163,9 @@ default-members = [
     # vitals draagt de toetsen van zijn rekenkant en zijn rapporten op de
     # host.
     "apps/vitals",
+    # cloudflared-lean draagt de toetsen van zijn protocollagen op de host
+    # (registratie, Cap'n Proto, ingress, de CA's door leantls).
+    "apps/cloudflared-lean",
 ]
 
 [workspace.package]

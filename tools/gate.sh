@@ -1,7 +1,8 @@
 #!/bin/sh
 # De poort van HopOS v3 (handboek §9): host-tests, clippy met de harde set,
 # rustfmt, de host-meetbank netmeter, de target-builds van de apps
-# (appspike, welcome, bench) en van ELK board. Rood is rood.
+# (appspike, welcome, bench, display, vitals, cloudflared-lean, syncprobe)
+# en van ELK board. Rood is rood.
 #
 # De boards: virt, rpi4, rpi5, rk3566 en de twee riscv64-boards (QEMU virt
 # in machine mode en de LicheeRV, docs/boards-riscv.md) als debug-build in de gedeelde
@@ -62,11 +63,12 @@ echo "== rustfmt"
 cargo fmt --check
 echo "== target: bibliotheken (aarch64)"
 cargo build --quiet --target aarch64-unknown-none-softfloat
-echo "== target: apps (appspike, welcome, bench, display, vitals)"
-cargo build --quiet --target aarch64-unknown-none-softfloat -p appspike -p welcome -p bench -p display -p vitals
+echo "== target: apps (appspike, welcome, bench, display, vitals, cloudflared-lean, syncprobe)"
+cargo build --quiet --target aarch64-unknown-none-softfloat -p appspike -p welcome -p bench -p display -p vitals -p cloudflared-lean -p syncprobe
 # De stage-1 van applib::mmu (de MMU-aan, de vectortabel, het glas)
-# bestaat alleen op het target; de host-ronde ziet alleen de tabellen.
-cargo clippy --quiet --target aarch64-unknown-none-softfloat -p display -- -D warnings
+# bestaat alleen op het target; de host-ronde ziet alleen de tabellen. Zo
+# ook de start van cloudflared-lean (op de host een lege `main`).
+cargo clippy --quiet --target aarch64-unknown-none-softfloat -p display -p cloudflared-lean -- -D warnings
 echo "== target: hopos (qemuvirt)"
 cargo build --quiet --target aarch64-unknown-none-softfloat -p hopos --features board-qemuvirt
 echo "== target: hopos (rpi4, rpi5)"
