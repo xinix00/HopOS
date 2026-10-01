@@ -555,6 +555,16 @@ fn first_serror() -> Option<&'static str> {
     Some(unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(p as *const u8, n)) })
 }
 
+/// De ABI-staart van een slot Normal write-back in de kernmap (Go:
+/// `mapTailNormal` in `kern/slots`, slot-ABI 7): de pool is op dit silicium
+/// Device, en zonder dit loopt elke ringkopie van de kern per 8 bytes
+/// vluchtig (de M4 01-10: app naar app 52 MB/s tegen 461 op de Pi 4). Weigert
+/// buiten 2 MB-grenzen of in het kernvenster; dan blijft de staart Device:
+/// traag maar correct, en de kooi houdt dan haar ringonderhoud.
+pub fn map_tail_normal(pa: u64, size: u64) -> Result<(), &'static str> {
+    mmu::remap_normal(pa, size)
+}
+
 /// Neemt een SError op die na `stage` pending staat en meldt hem; `true`
 /// als er een was. Op dit silicium is een verboden schrijf stil en landt
 /// de abort later als SError; op EL2 blijft hij achter PSTATE.A tot de

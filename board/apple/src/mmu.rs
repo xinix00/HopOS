@@ -30,7 +30,7 @@
 //! is; de table-walker leest cacheable met IRGN/ORGN = WB). De bouw draait
 //! met de MMU uit, dus ze staan meteen in het geheugen.
 
-use crate::{DMA, DRAM_BASE, KERN_RAM, LOADER};
+use crate::{DMA, DRAM_BASE, KERN_RAM, LOADER, WINDOW_END};
 use cpu::boot::{ATTR_DEVICE, ATTR_NORMAL, ATTR_NORMAL_NC};
 use dev::Pa;
 
@@ -182,10 +182,118 @@ pub(crate) unsafe fn build(pool: u64, mem_size_actual: u64, guard: u64) -> u64 {
     l0.0
 }
 
+/// Zet de 2 MB-blokken van `[pa, pa + size)` in de levende map op Normal
+/// write-back inner shareable, niet uitvoerbaar: de ABI-staart van een slot
+/// (Go: `memattr.NormalWB` in `kern/slots`, slot-ABI 7). De pool is op dit
+/// silicium Device, en zonder dit loopt elke ringkopie van de kern per 8
+/// bytes vluchtig (de M4 01-10: app naar app 52 MB/s tegen 461 op de Pi 4).
+/// Met de staart Normal gaat de kopie als memcpy en kan de kern zijn
+/// ringbelofte waarmaken (`abi::ring::Coherence::Hardware`). Alleen op 2
+/// MB-grenzen en alleen buiten het kernvenster: de buren zijn niet van ons
+/// (Go 30-08: een framebuffer van iBoot meenemen kostte elke paar minuten een
+/// herstart). Idempotent, dus ook bij adoptie en herstart gewoon opnieuw.
+pub(crate) fn remap_normal(pa: u64, size: u64) -> Result<(), &'static str> {
+    let root = arch::ttbr0() & 0x0000_ffff_ffff_fffe;
+    // SAFETY: de wortel is de levende map van deze core zoals `build` hem
+    // maakte; `remap_in` toetst elke ingang vóór hij schrijft en doet
+    // break-before-make met de invalidatie van `arch::tlb_flush` ertussen.
+    unsafe { remap_in(root, pa, size, arch::tlb_flush) }
+}
+
+/// De tabelkant van [`remap_normal`], met de TLB-invalidatie als haak (de
+/// tests geven een lege haak en een map in een Vec).
+///
+/// # Safety
+///
+/// `root` is een map zoals [`build`] hem maakte en niemand anders schrijft
+/// erin tijdens de aanroep.
+unsafe fn remap_in(root: u64, pa: u64, size: u64, flush: fn()) -> Result<(), &'static str> {
+    if size == 0 || !pa.is_multiple_of(MB2) || !size.is_multiple_of(MB2) {
+        return Err("not on 2 MB bounds");
+    }
+    let end = pa.checked_add(size).ok_or("overflow")?;
+    if pa < DRAM_BASE || (pa < WINDOW_END && end > KERN_RAM.base.0) {
+        return Err("not pool memory");
+    }
+    let mut at = pa;
+    while at < end {
+        let entry = l2_entry(root, at).ok_or("no 2 MB block there")?;
+        let want = block(at, ATTR_NORMAL) | UXN | PXN;
+        let have = dev::read64(entry);
+        if have != want {
+            if have & 0b11 != 0b01 || have & 0x0000_ffff_ffe0_0000 != at {
+                return Err("the entry is not that block");
+            }
+            // Break-before-make: eerst ongeldig en uit de TLB's, dan het
+            // nieuwe blok; anders mag een core even twee attributen zien.
+            dev::write64(entry, 0);
+            flush();
+            dev::write64(entry, want);
+            flush();
+        }
+        at += MB2;
+    }
+    Ok(())
+}
+
+/// De L2-ingang van het 2 MB-blok op `pa`: L0 naar L1 naar L2, allebei
+/// tabellen (het DRAM gaat altijd via een L2, zie de moduledoc).
+fn l2_entry(root: u64, pa: u64) -> Option<Pa> {
+    let next = |table: u64, idx: u64| {
+        let e = dev::read64(Pa(table + 8 * idx));
+        (e & 0b11 == TABLE).then_some(e & 0x0000_ffff_ffff_f000)
+    };
+    let l1 = next(root, (pa >> 39) & 511)?;
+    let l2 = next(l1, (pa >> 30) & 511)?;
+    Some(Pa(l2 + 8 * ((pa >> 21) & 511)))
+}
+
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+mod arch {
+    use core::arch::asm;
+
+    /// TTBR0_EL2: de wortel van de levende map (E2H = 1).
+    pub(super) fn ttbr0() -> u64 {
+        let v: u64;
+        // SAFETY: TTBR0_EL2 lezen heeft geen neveneffect.
+        unsafe { asm!("mrs {}, ttbr0_el2", out(reg) v, options(nomem, nostack)) };
+        v
+    }
+
+    /// De tabelschrijf zichtbaar voor de walker, alle vertalingen van het
+    /// EL2&0-regime weg op elke core van het inner-shareable domein, de
+    /// invalidatie afgerond, en geen speculatieve toegang met een oude
+    /// vertaling meer (Go `flushTLB`; hier ALLE2IS, want onder E2H = 1 is
+    /// de map van de kern het EL2&0-regime).
+    pub(super) fn tlb_flush() {
+        // SAFETY: barrières en een TLB-invalidatie; geen geheugen.
+        unsafe {
+            asm!(
+                "dsb ish",
+                "tlbi alle2is",
+                "dsb ish",
+                "isb",
+                options(nostack)
+            )
+        };
+    }
+}
+
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+mod arch {
+    /// Host: geen levende map.
+    pub(super) fn ttbr0() -> u64 {
+        0
+    }
+
+    /// Host: niets te invalideren.
+    pub(super) fn tlb_flush() {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ADMIN, WINDOW_END};
+    use crate::ADMIN;
 
     fn walk(pool: &[u64], va: u64) -> Option<u64> {
         let base = pool.as_ptr() as u64;
@@ -203,6 +311,45 @@ mod tests {
             }
             _ => None,
         }
+    }
+
+    #[test]
+    fn the_tail_of_a_slot_becomes_normal_but_not_executable() {
+        let pool = vec![0u64; TABLES * 512 + 512];
+        let start = (pool.as_ptr() as u64).next_multiple_of(4096);
+        let off = ((start - pool.as_ptr() as u64) / 8) as usize;
+        // SAFETY: de pool is een Vec van de test, 4 KB-gealigneerd gesneden.
+        let root = unsafe { build(start, 24 << 30, KERN_RAM.base.0 + 0x32_1000) };
+        let tail = DRAM_BASE + 2 * GB + 0x3e0_0000; // in de pool onder het kernvenster
+        let before = walk(&pool[off..], tail).unwrap();
+        assert_eq!((before >> 2) & 7, ATTR_DEVICE);
+        // SAFETY: de map van deze test, niemand anders schrijft erin.
+        unsafe { remap_in(root, tail, MB2, || {}) }.unwrap();
+        let after = walk(&pool[off..], tail).unwrap();
+        assert_eq!((after >> 2) & 7, ATTR_NORMAL);
+        assert_eq!(after & 0x0000_ffff_ffe0_0000, tail);
+        assert!(
+            after & UXN != 0 && after & PXN != 0,
+            "de staart is geen code voor de kern"
+        );
+        assert_eq!((after >> 8) & 3, 0b11, "inner shareable");
+        // Idempotent, en de buren blijven Device.
+        // SAFETY: idem.
+        unsafe { remap_in(root, tail, MB2, || {}) }.unwrap();
+        assert_eq!(
+            (walk(&pool[off..], tail + MB2).unwrap() >> 2) & 7,
+            ATTR_DEVICE
+        );
+        // Geweigerd: scheef, in het kernvenster, buiten het DRAM.
+        // SAFETY: idem; een weigering schrijft niets.
+        let refused = unsafe {
+            (
+                remap_in(root, tail + 0x1000, MB2, || {}),
+                remap_in(root, KERN_RAM.base.0, MB2, || {}),
+                remap_in(root, 0x4000_0000, MB2, || {}),
+            )
+        };
+        assert!(refused.0.is_err() && refused.1.is_err() && refused.2.is_err());
     }
 
     #[test]

@@ -414,9 +414,25 @@ fn attach(s: layout::Slot, tail: Tail) {
     if let Some(Err(e)) = ATTACH_ACK.try_take() {
         println!("cage: an earlier attach was refused: {e} HOPOS_CAGE_ATTACH");
     }
+    // Op Apple is de pool Device: de staart eerst Normal write-back in de
+    // kernmap (Go: `mapTailNormal`, slot-ABI 7), en alleen dan belooft de
+    // kern zijn kant van de ringen zonder onderhoud. Weigert de remap, dan
+    // blijft het onderhoud: traag maar correct.
+    #[cfg(feature = "board-apple")]
+    let rings = match vboard::map_tail_normal(tail.base().0, ABI_TAIL) {
+        Ok(()) => ring::Coherence::Hardware,
+        Err(why) => {
+            println!(
+                "cage: slot {s}: tail stays device-mapped ({why}), rings with maintenance HOPOS_CAGE_TAIL"
+            );
+            ring::Coherence::Maintained
+        }
+    };
+    #[cfg(not(feature = "board-apple"))]
+    let rings = crate::net::RINGS;
     let (Ok(tx), Ok(rx)) = (
-        AbiTx::open(tail.net_tx(), NET_RING_DATA_CAP, crate::net::RINGS),
-        ring::Writer::open_with(tail.net_rx(), NET_RING_DATA_CAP, crate::net::RINGS),
+        AbiTx::open(tail.net_tx(), NET_RING_DATA_CAP, rings),
+        ring::Writer::open_with(tail.net_rx(), NET_RING_DATA_CAP, rings),
     ) else {
         println!("cage: slot {s}: frame rings do not open HOPOS_CAGE_ATTACH");
         return;

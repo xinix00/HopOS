@@ -164,17 +164,38 @@ op `/dev/cu.kis-100000-ch-0`. Sinds 01-10 ook op het LAN: 5555, 8080,
       adopteren en laat de guard de M4 binnen twee minuten koud herstarten).
       Het geïnstalleerde image is nog D4b (pstate=off); de tune reist met
       elke flip mee via de config-overdracht.
-- [ ] **De M4 app naar app: 52 MB/s** (M7, tune aan; 47 met pstate=off),
+- [ ] **De M4 app naar app: 52 MB/s** (M7, tune aan; 47 met pstate=off;
+      M8 met de slotstaart Normal is geland maar nog niet gemeten),
       tegen 461 op de Pi 4 en 1500+ op de O6N: niet klokgebonden (2,4x
       hogere E-klok gaf 10%). De pool is op Apple Device gemapt
       (`dram_attr`), dus de ringbelofte staat daar uit en elke kopie uit en
       naar een ring loopt per 8 bytes vluchtig; dat is de eerste verdachte.
-- [ ] **Hop en de slots lopen op de M4 uiteen na flips**: de kern nam 3
-      bewoners over terwijl Hop `jobs: []` meldde (Hop herstelt zijn staat
-      niet: "saved agent state not restored: store i/o failed"), een DELETE
-      van bench stopte slot 2, en een vitals-POST faalt daarna met "slot 5:
-      port 8090 is taken by slot 4" (`HOP_JOB_FAILED`). De wezenveger
-      (`sweep_strays`) draait alleen na een restore.
+- [ ] **Een slot in quarantaine blokkeert elke flip, tot een koude reset**
+      (M4 01-10 13:00): een mislukte `cage.dispatch` (de core kwam niet
+      aantoonbaar aan) laat partitie, core en servicer staan
+      (`HOPOS_PART_QUARANTINE`, kern/src/slots.rs), en de flip weigert dan
+      te springen ("not jumped: slot 4: owner retained, execution
+      unconfirmed HOPOS_FLIP_FAIL"), ook een bundel met `hopos.cages=off`.
+      Op de M4 is er geen PSCI, dus alleen een echte reset (knop of
+      macvdmtool na een verse kabelplug) helpt. Nodig: een weg om een
+      quarantaine op te heffen (de core opnieuw proberen, of het slot
+      opgeven) zonder herstart, en Hop moet zo'n slot kennen: nu meldde Hop
+      `jobs: []` terwijl de kern 3 bewoners had, en een vitals-POST faalde
+      met "slot 5: port 8090 is taken by slot 4" (`HOP_JOB_FAILED`). Hop's
+      wezenveger (`sweep_strays`) draait alleen na een restore, en op de M4
+      herstelt Hop zijn staat niet ("store i/o failed").
+- [ ] **De P-cores van de M4 starten geen slot** (M8, 13:28): elke dispatch
+      op core 4 tot 9 faalt ("dispatch on core N failed, outcome unknown"),
+      slots 1 tot 3 op de E-cores werken. Hop probeert een geweigerde
+      plaatsing op elk volgend slot, dus één POST van bench2 zette slots 4
+      tot 9 in één keer in quarantaine en de node kan niet meer flippen.
+      Nodig: de P-cluster starten zoals m1n1 `smp.c` (PMGR aan, start per
+      cluster), en Hop moet na "refused" niet verder proberen.
+- [ ] **Hop verloor zijn jobs over de flip D4b naar M8**: de landing zei
+      "0 B agent state", Hop meldt daarna `jobs: 0` terwijl de kern slot 2
+      en 3 (bench, pull) adopteerde. Hypothese: D4b las Hop's control-page
+      Device terwijl Hop Normal WB schrijft; vanaf M8 (staart Normal) hoort
+      de staat mee te reizen. Toets: jobs op M8, flip naar M9.
 - [ ] De koude flip werkt er niet (PSCI CPU_OFF zonder EL3); na een
       verhuizing met een rode voorproef spint de oude core.
 - [ ] Het diagnose-image van 06:45 (met `self_test` ná de init) bootte
