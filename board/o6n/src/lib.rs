@@ -50,7 +50,7 @@ pub use machine::{LINK_TIMEOUT_NS, O6n};
 // De slot- en flip-lijm van de binary leest het plan onder deze namen
 // (`slots::plan`, `mpidr`, de staging, `KERN_RAM`, `DMA`), zoals bij de
 // Pi's; op de O6N zijn het die van het UEFI-board.
-pub use board_uefi::{DMA, KERN_RAM, KERN_VHE, irq, slots, watchdog};
+pub use board_uefi::{DMA, KERN_RAM, KERN_VHE, facts, irq, slots, watchdog};
 // De rekenkern en de taak van het klokbeleid, voor de telemetrie van de
 // binary (die dit crate alleen als `vboard` kent).
 pub use driver_dvfs as dvfs;

@@ -24,6 +24,8 @@
 ENTRY(_start_efi)
 
 STACK_SIZE = 0x40000;
+/* De speling voor een grotere kern bij een flip, zie onder .stack. */
+FLIP_HEADROOM = 0x200000;
 
 SECTIONS
 {
@@ -86,6 +88,14 @@ SECTIONS
     __stack_top = .;
   }
   . = ALIGN(4096);
+  /* Speling voor een grotere kern bij een flip (01-10): een nieuw beeld
+   * moet in de allocatie van de koude boot passen (hopos/src/flip.rs
+   * image::limit), en fb04980 paste op de O6N nog precies (2204 KiB).
+   * Twee MiB in SizeOfImage, zonder sectie en dus zonder segment: de
+   * firmware geeft ze bij de koude boot mee, de loader vult ze met nullen,
+   * het platte beeld van een bundel (image/flip-bundle.sh, de segmenten)
+   * telt ze niet mee, en de feitenpagina draagt de maat over elke flip. */
+  . += FLIP_HEADROOM;
   __image_end = .;
 
   /DISCARD/ : {

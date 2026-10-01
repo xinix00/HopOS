@@ -347,10 +347,17 @@ mod image {
         &raw const __efi_head as usize as u64
     }
 
-    /// Een nieuw beeld moet in het oude passen: erachter ligt geheugen dat
-    /// de firmware niet aan ons gaf, en dat nu misschien van de pool is.
+    /// Tot waar een nieuw beeld mag reiken: het einde van wat de firmware
+    /// bij de koude boot alloceerde (`SizeOfImage` van díe kern, met de
+    /// speling van hopos/efi.ld; de feitenpagina draagt het over een flip
+    /// heen). Niet het einde van dít beeld: een geflipte kern heeft zijn
+    /// eigen maat, en erachter ligt geheugen dat de firmware niet aan ons
+    /// gaf en dat nu misschien van de pool is. Zonder feit het eigen einde.
     pub(super) fn limit() -> u64 {
-        &raw const __image_end as usize as u64
+        match vboard::facts::image_window() {
+            Some((base, size)) => base.saturating_add(size),
+            None => &raw const __image_end as usize as u64,
+        }
     }
 
     /// Het tweede veegvenster: het beeld zelf, buiten het kernvenster.

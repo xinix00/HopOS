@@ -67,6 +67,19 @@ pub(crate) static RSDP: AtomicU64 = AtomicU64::new(0);
 pub(crate) static MAP: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 /// Waar de firmware de image laadde en hoe groot hij is.
 pub(crate) static IMAGE: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// Waar de firmware het image bij de koude boot laadde en hoe groot zijn
+/// allocatie was (`SizeOfImage`, met de speling van hopos/efi.ld): het
+/// venster waarin elke geflipte kern moet passen. De feitenpagina draagt
+/// het over een flip heen. `None` zolang de stub het niet zette.
+#[must_use]
+pub fn image_window() -> Option<(u64, u64)> {
+    let (base, size) = (
+        IMAGE[0].load(core::sync::atomic::Ordering::Relaxed),
+        IMAGE[1].load(core::sync::atomic::Ordering::Relaxed),
+    );
+    (size != 0).then_some((base, size))
+}
 /// `hopos.cfg` van de ESP: adres en lengte (0 = geen bestand).
 pub(crate) static CFG: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 /// Het gestagede app-image van de ESP: adres en lengte (0 = geen).
