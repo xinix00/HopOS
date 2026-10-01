@@ -192,6 +192,21 @@ async fn pull(ip: [u8; 4], port: u16, bytes: u64) -> Result<(), NetError> {
         ns / 1_000_000,
         proto::mbps(got, ns)
     );
+    // De tellers van de stack erbij: hoeveel segmenten de bytes kostten zegt
+    // of de zender venster-beperkt was (Pi 4 01-10: 100 MB/s, en de vraag
+    // was of het venster ooit boven de vloer van 16 KiB kwam).
+    if let Some(net) = appnet::net()
+        && let Ok(st) = net.stats()
+    {
+        log!(
+            "BENCH_PULL_STATS segs_in={} bytes_in={} zero_windows={} rx_grown={} rx_grow_refused={} HOPOS_BENCH_PULL_STATS",
+            st.tcp_segs_in,
+            st.tcp_bytes_in,
+            st.tcp_zero_windows,
+            st.tcp_rx_grown,
+            st.tcp_rx_grow_refused
+        );
+    }
     if got != bytes || bad != 0 {
         return Err(NetError::Stack(appnet::StackError::Closed));
     }
