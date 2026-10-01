@@ -169,6 +169,44 @@ fn without_a_line_it_yields_first_and_then_sleeps_a_poll_period() {
     assert_eq!(clock.sleeps.get(), 1);
 }
 
+/// Een [`Lagging`] die zijn eigen pollritme opgeeft, zoals de ANS.
+struct Paced2(Lagging);
+
+impl AsyncBlockDevice for Paced2 {
+    fn max_transfer(&self) -> usize {
+        self.0.max_transfer()
+    }
+    fn start(&mut self, op: Op<'_>) -> Result {
+        self.0.start(op)
+    }
+    fn poll_done(&mut self, into: &mut [u8]) -> Poll<Result> {
+        self.0.poll_done(into)
+    }
+    fn poll_pace(&self) -> (u64, Duration) {
+        (20_000, Duration::from_micros(20))
+    }
+}
+
+#[test]
+fn a_driver_can_choose_its_own_poll_pace() {
+    let clock = Clock::new();
+    let mut dev = Paced2(Lagging::new(4096, usize::MAX, 4096));
+    let c = Arc::new(Count(AtomicUsize::new(0)));
+    let waker = Waker::from(c.clone());
+    let mut cx = Context::from_waker(&waker);
+    let pace = &clock;
+    let mut f = dev
+        .submit(Op::Read { lba: 0, len: 512 })
+        .unwrap()
+        .done(&mut [], &pace);
+    assert!(Pin::new(&mut f).poll(&mut cx).is_pending());
+    assert_eq!(clock.sleeps.get(), 0);
+    // Na zijn eigen spin-venster de timer van zijn eigen periode.
+    clock.now.set(20_000);
+    assert!(Pin::new(&mut f).poll(&mut cx).is_pending());
+    assert_eq!(clock.last.get(), Duration::from_micros(20));
+}
+
 #[test]
 fn with_a_line_it_waits_on_the_bell_behind_a_guard() {
     static BELL: Signal = Signal::new();

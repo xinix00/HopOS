@@ -35,7 +35,12 @@
 //! (`OLD/metal/driver/nvme/apple.go`) kon alleen lezen. Referentie: m1n1
 //! `src/nvme.c`, Linux `drivers/nvme/host/apple.c`.
 //!
-//! Eén verzoek tegelijk, van de eigenaar met `&mut self`; altijd slot 0.
+//! Eén eigenaar met `&mut self`. De opstart, de GPT en het afsluiten wachten
+//! ter plekke op tag 0 (er draait dan nog niets anders). Het blokcontract
+//! wacht niet: `start` zet de opdracht op de controller en keert terug,
+//! `poll_done` haalt de completions op die er zijn (zie de impl van
+//! `blkdev::AsyncBlockDevice`). Daarnaast mag er één read-ahead in de lucht
+//! zijn: [`DEPTH`] tags, elk met een eigen helft van het datablok.
 
 use super::{COMMAND_TIMEOUT_NS, DATA_OFF, DATA_SIZE, MAX_TRANSFER, PAGE, Q_ENTRIES, SECTOR};
 use core::fmt;
@@ -255,9 +260,37 @@ pub const BLOCK: u64 = 4096;
 /// Contract-sectoren per ANS-blok.
 const PER_BLOCK: u64 = BLOCK / SECTOR;
 
-/// Het slot van elke opdracht. Altijd 0: de lineaire deurbel wijst het slot
-/// aan, en op slot 0 doet de entry-afstand van iBoot (CC.IOSQES) niet mee.
+/// Het slot van de opdrachten die ter plekke wachten (admin, de GPT): 0. De
+/// lineaire deurbel wijst het slot aan, en op slot 0 doet de entry-afstand
+/// niet mee.
 const SLOT: u16 = 0;
+
+/// Zoveel I/O-opdrachten van het blokcontract staan hoogstens tegelijk op de
+/// controller: de opdracht van de eigenaar plus één read-ahead. Elk heeft een
+/// eigen MiB van het datablok ([`DATA_SIZE`] is 2 MiB).
+pub const DEPTH: usize = 2;
+
+/// De tags van die opdrachten. Tag 0 is sinds 29-08 op ijzer bewezen; de
+/// tweede is 2 en niet 1, om de entry-afstand. Linux (`apple.c`, t8103 en
+/// later) zet CC.IOSQES zelf op 6 en legt de opdracht van tag `t` op
+/// `t * 64`; wij houden iBoots CC (IOSQES = 7, les 2), en daarmee hoort hij
+/// volgens NVMe op `t * 128`. Welke van de twee de firmware leest, is op
+/// ijzer nooit gemeten, en een verkeerde plek is een crash van de
+/// coprocessor (les 3). Daarom staat een opdracht met een tag boven 0 op
+/// BEIDE plekken ([`write_sqe`]); voor tag 2 overlappen die met geen enkele
+/// plek van tag 0 (0..128) en met elkaar niet (128..192 en 256..384).
+const IO_TAGS: [u16; DEPTH] = [0, 2];
+
+/// De entry-afstand onder iBoots IOSQES = 7.
+const SQE_WIDE: u64 = 128;
+
+/// Zonder lijn pollt de wachter zo lang per ronde van de executor: een
+/// opdracht van 4 KB is binnen ~10 us terug (M14: schrijven 4, lezen 9 us).
+pub const POLL_SPIN_NS: u64 = 20_000;
+/// En daarna op deze timer. Een MiB lezen duurt ~600 us, schrijven ~210 us
+/// (M14): 20 us kost hoogstens 3 tot 10 procent te laat kijken, en de
+/// OS-core slaapt ertussen (WFI op de timer).
+pub const POLL_PERIOD: core::time::Duration = core::time::Duration::from_micros(20);
 
 // De DMA-regio: drie tabellen per queue-paar (TCB's, opdrachten,
 // completions), elk op 16 KB, dan de PRP-lijst, dan de databuffer in een
@@ -279,9 +312,12 @@ pub const DMA_ALIGN: u64 = 0x4000;
 const _: () = {
     // 128 bytes per SQE (IOSQES = 7 van iBoot) en per TCB passen in 16 KB.
     assert!(Q_ENTRIES as u64 * 128 <= 0x4000 && Q_ENTRIES as u64 * CQE <= 0x4000);
-    assert!(PRP_OFF + PAGE <= DATA_OFF);
-    assert!(MAX_TRANSFER <= DATA_SIZE);
+    assert!(PRP_OFF + DEPTH as u64 * PAGE <= DATA_OFF);
+    assert!(DEPTH as u64 * MAX_TRANSFER <= DATA_SIZE);
     assert!(DATA_OFF.is_multiple_of(DMA_ALIGN));
+    // Tags binnen de tabel van de NVMMU, de tweede plek van een tag in de
+    // 16 KB van zijn queue.
+    assert!(IO_TAGS[DEPTH - 1] < Q_ENTRIES && (IO_TAGS[DEPTH - 1] as u64 + 1) * SQE_WIDE <= 0x4000);
 };
 
 /// Hoe lang de firmware mag doen over BOOT_STATUS na het gesprek.
@@ -351,6 +387,9 @@ pub enum Error<E> {
     },
     /// Een eerder verzoek liep af; niets gaat meer naar de controller.
     Dead,
+    /// Alle I/O-tags staan nog op de controller (een wachter ging weg vóór
+    /// zijn completion); de buffers zijn nog van de controller.
+    Busy,
     /// Een lengte die geen blokveelvoud is, nul, of buiten de schijf.
     Range {
         /// Het eerste blok.
@@ -437,6 +476,7 @@ impl<E: fmt::Display> fmt::Display for Error<E> {
                 "ans: NVMMU invalidation for slot {slot} failed ({stat:#x}), driver dead"
             ),
             Self::Dead => f.write_str("ans: driver dead after an unfinished command"),
+            Self::Busy => f.write_str("ans: all I/O tags still in flight"),
             Self::Range { block, len } => {
                 write!(f, "ans: {len} bytes at block {block} out of range")
             }
@@ -535,6 +575,35 @@ struct Cmd {
     cdw12: u32,
 }
 
+/// Waarvoor een I/O-opdracht op de controller staat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Use {
+    /// De opdracht van de eigenaar: `poll_done` wacht erop.
+    Demand,
+    /// Een read-ahead. `stale`: een schrijf raakte zijn blokken, of de
+    /// eigenaar las iets anders; de bytes worden nooit gebruikt.
+    Ahead {
+        /// Niet meer bruikbaar.
+        stale: bool,
+    },
+}
+
+/// Eén I/O-opdracht op de controller, op tag `IO_TAGS[i]` met de `i`-de MiB
+/// van het datablok.
+#[derive(Clone, Copy, Debug)]
+struct Inflight {
+    opc: u8,
+    /// Het eerste ANS-blok en het aantal bytes (0 bij een flush).
+    block: u64,
+    len: usize,
+    /// De LBA van het contract, voor de fout.
+    lba: u64,
+    t0: u64,
+    use_: Use,
+    /// `None` zolang de completion er niet is, daarna SCT/SC.
+    done: Option<u16>,
+}
+
 /// Het schrijfvenster in blokken van [`BLOCK`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Window {
@@ -562,10 +631,16 @@ pub struct Ans<C: Coprocessor> {
     /// Eerste en laatste bruikbare blok uit de GPT-header.
     usable: (u64, u64),
     window: Option<Window>,
-    /// De uitkomst van de laatste asynchrone opdracht en, bij een lees,
-    /// hoeveel bytes er in de databuffer klaarstaan (zie de impl van
-    /// `blkdev::AsyncBlockDevice`).
-    staged: Option<(blkdev::Result, usize)>,
+    /// De I/O-opdrachten van het blokcontract die op de controller staan,
+    /// per tag (zie de impl van `blkdev::AsyncBlockDevice`).
+    inflight: [Option<Inflight>; DEPTH],
+    /// Het blok waar de laatste lees van de eigenaar eindigde: begint de
+    /// volgende daar, dan leest hij sequentieel en komt er een read-ahead.
+    seq_end: u64,
+    /// Meetlat: lezingen die de read-ahead al (deels) gedaan had.
+    pub ahead_hits: u64,
+    /// Meetlat: read-aheads die niemand gebruikte.
+    pub ahead_waste: u64,
     /// Meetlat: afgehandelde opdrachten.
     pub commands: u64,
     /// Meetlat: de langste opdracht in nanoseconden.
@@ -614,7 +689,10 @@ impl<C: Coprocessor> Ans<C> {
             max_transfer: MAX_TRANSFER,
             usable: (0, 0),
             window: None,
-            staged: None,
+            inflight: [None; DEPTH],
+            seq_end: u64::MAX,
+            ahead_hits: 0,
+            ahead_waste: 0,
             commands: 0,
             slowest_ns: 0,
         })
@@ -666,6 +744,8 @@ impl<C: Coprocessor> Ans<C> {
         self.started = false;
         self.dead = false;
         self.window = None;
+        self.inflight = [None; DEPTH];
+        self.seq_end = u64::MAX;
         self.cop.boot().map_err(Error::Coprocessor)?;
 
         // Dan wachten tot de NVMe-kant van de firmware er staat. Dit hoort ná
@@ -774,52 +854,88 @@ impl<C: Coprocessor> Ans<C> {
         }
     }
 
-    /// Zet `m` op het slot, vult de TCB, trekt de mailbox leeg, luidt de
-    /// lineaire deurbel met het slot, en pollt de CQ.
-    fn submit(&mut self, admin: bool, m: Cmd) -> Result<(), C::Error> {
+    /// Zet `m` op `tag` van een queue: de SQE, de TCB, de mailbox leeg, en de
+    /// lineaire deurbel met de tag. Keert meteen terug.
+    fn post(&mut self, admin: bool, tag: u16, m: &Cmd) -> Result<(), C::Error> {
         if self.dead {
             return Err(Error::Dead);
         }
-        let mut q = if admin { self.admin } else { self.io };
-        // Les 3 (29-08): het slot, niet de tail. De opdracht staat op het
-        // slot dat de deurbel aanwijst; ergens anders neerzetten laat de
-        // firmware een oude opdracht lezen bij een verse TCB, en dat meldt
-        // hij als NVME_PERM_ERR, met een crash erachteraan die de hele
-        // coprocessor tot de volgende power-reset onbruikbaar maakt (vier
-        // boots gekost).
-        let slot = SLOT;
-        let sqe = q.sq.add(u64::from(slot) * SQE);
-        dev::clear(sqe, SQE as usize);
-        let at = |off: usize| sqe.add(off as u64);
-        dev::write32(
-            at(offset_of!(Sqe, cdw0)),
-            u32::from(m.opc) | (u32::from(slot) << 16),
-        );
-        dev::write32(at(offset_of!(Sqe, nsid)), m.nsid);
-        dev::write64(at(offset_of!(Sqe, prp1)), m.prp1);
-        dev::write64(at(offset_of!(Sqe, prp2)), m.prp2);
-        dev::write32(at(offset_of!(Sqe, cdw10)), m.cdw10);
-        dev::write32(at(offset_of!(Sqe, cdw11)), m.cdw11);
-        dev::write32(at(offset_of!(Sqe, cdw12)), m.cdw12);
-        dev::mb();
-        write_tcb(q.tcb, slot, &m);
-
+        let q = if admin { self.admin } else { self.io };
+        // Les 3 (29-08): de opdracht staat op de plek die de deurbel
+        // aanwijst; ergens anders neerzetten laat de firmware een oude
+        // opdracht lezen bij een verse TCB, en dat meldt hij als
+        // NVME_PERM_ERR, met een crash erachteraan die de hele coprocessor
+        // tot de volgende power-reset onbruikbaar maakt (vier boots gekost).
+        write_sqe(q.sq, tag, m);
+        write_tcb(q.tcb, tag, m);
         // Een wachtende coprocessor doet geen DMA: eerst de mailbox leeg,
         // dan de deurbel.
         self.service()?;
         let r = self.regs();
         if admin {
-            r.db_linear_asq.write(u32::from(slot));
+            r.db_linear_asq.write(u32::from(tag));
         } else {
-            r.db_linear_iosq.write(u32::from(slot));
+            r.db_linear_iosq.write(u32::from(tag));
         }
+        Ok(())
+    }
 
+    /// Haalt de volgende completion van een queue op als die er is: de tag
+    /// en SCT/SC. Verklaart de TCB van die tag ongeldig en schuift de head
+    /// op; welke opdracht erbij hoort, toetst de aanroeper.
+    fn reap_one(&mut self, admin: bool) -> Result<Option<(u16, u16)>, C::Error> {
+        let mut q = if admin { self.admin } else { self.io };
+        let cqe = q.cq.add(u64::from(q.head) * CQE);
+        let st = dev::read16(cqe.add(offset_of!(Cqe, status) as u64));
+        if (st & 1 != 0) != q.phase {
+            return Ok(None);
+        }
+        // De phase vóór de inhoud.
+        dev::mb();
+        let cid = dev::read16(cqe.add(offset_of!(Cqe, cid) as u64));
+        // De NVMMU houdt de tag vast tot hij ongeldig verklaard is; zonder
+        // dat is de tabel na 64 opdrachten vol en hangt de volgende.
+        let mmu = self.nvmmu();
+        mmu.tcb_inval.write(u32::from(cid));
+        let stat = mmu.tcb_stat.read();
+        if stat != 0 {
+            self.dead = true;
+            return Err(Error::Nvmmu { slot: cid, stat });
+        }
+        q.head = (q.head + 1) % Q_ENTRIES;
+        if q.head == 0 {
+            q.phase = !q.phase;
+        }
+        if let Some(db) = self.regs().db.get(2 * usize::from(q.id) + 1) {
+            db.write(u32::from(q.head));
+        }
+        if admin {
+            self.admin = q;
+        } else {
+            self.io = q;
+        }
+        self.commands += 1;
+        Ok(Some((cid, st >> 1)))
+    }
+
+    /// Eén opdracht op [`SLOT`] die ter plekke wacht, terwijl de mailbox
+    /// leeggetrokken wordt: alleen voor de opstart, de GPT en het
+    /// afsluiten, als er niets anders draait en niets in de lucht is. Het
+    /// blokcontract wacht nooit zo (zie de impl van
+    /// `blkdev::AsyncBlockDevice`).
+    fn exec(&mut self, admin: bool, m: Cmd) -> Result<(), C::Error> {
+        self.post(admin, SLOT, &m)?;
         let t0 = (self.now)();
         let deadline = t0.saturating_add(COMMAND_TIMEOUT_NS);
-        let cqe = q.cq.add(u64::from(q.head) * CQE);
         let status = loop {
-            let st = dev::read16(cqe.add(offset_of!(Cqe, status) as u64));
-            if (st & 1 != 0) == q.phase {
+            if let Some((cid, st)) = self.reap_one(admin)? {
+                if cid != SLOT {
+                    self.dead = true;
+                    return Err(Error::Cid {
+                        got: cid,
+                        want: SLOT,
+                    });
+                }
                 break st;
             }
             if (self.now)() >= deadline {
@@ -829,38 +945,8 @@ impl<C: Coprocessor> Ans<C> {
             self.service()?;
             core::hint::spin_loop();
         };
-        // De phase vóór de inhoud.
-        dev::mb();
-        let got = dev::read16(cqe.add(offset_of!(Cqe, cid) as u64));
-        if got != slot {
-            self.dead = true;
-            return Err(Error::Cid { got, want: slot });
-        }
-        // De NVMMU houdt het slot vast tot het ongeldig verklaard is; zonder
-        // dat is de tabel na 64 opdrachten vol en hangt de volgende.
-        let mmu = self.nvmmu();
-        mmu.tcb_inval.write(u32::from(slot));
-        let stat = mmu.tcb_stat.read();
-        if stat != 0 {
-            self.dead = true;
-            return Err(Error::Nvmmu { slot, stat });
-        }
-        q.head = (q.head + 1) % Q_ENTRIES;
-        if q.head == 0 {
-            q.phase = !q.phase;
-        }
-        if let Some(db) = r.db.get(2 * usize::from(q.id) + 1) {
-            db.write(u32::from(q.head));
-        }
-        if admin {
-            self.admin = q;
-        } else {
-            self.io = q;
-        }
-        let dt = (self.now)().saturating_sub(t0);
-        self.slowest_ns = self.slowest_ns.max(dt);
-        self.commands += 1;
-        match status >> 1 {
+        self.slowest_ns = self.slowest_ns.max((self.now)().saturating_sub(t0));
+        match status {
             0 => Ok(()),
             s => Err(Error::Status {
                 opc: m.opc,
@@ -874,7 +960,7 @@ impl<C: Coprocessor> Ans<C> {
     /// (29-08, uit zijn eigen crashlog). m1n1 doet die vraag ook niet.
     fn identify(&mut self) -> Result<(), C::Error> {
         let buf = self.data();
-        self.submit(
+        self.exec(
             true,
             Cmd {
                 opc: ADM_IDENTIFY,
@@ -896,7 +982,7 @@ impl<C: Coprocessor> Ans<C> {
     fn create_io_queues(&mut self) -> Result<(), C::Error> {
         let q = u32::from(Q_ENTRIES - 1) << 16;
         let id = u32::from(self.io.id);
-        self.submit(
+        self.exec(
             true,
             Cmd {
                 opc: ADM_CREATE_CQ,
@@ -906,7 +992,7 @@ impl<C: Coprocessor> Ans<C> {
                 ..Cmd::default()
             },
         )?;
-        self.submit(
+        self.exec(
             true,
             Cmd {
                 opc: ADM_CREATE_SQ,
@@ -949,16 +1035,22 @@ impl<C: Coprocessor> Ans<C> {
         Ok(())
     }
 
-    /// De paginawijzers voor `n` bytes in de databuffer.
-    fn prps(&self, n: u64) -> (u64, u64) {
-        let data = self.data();
+    /// De `i`-de MiB van het datablok: de buffer van `IO_TAGS[i]`.
+    fn buf(&self, i: usize) -> Pa {
+        self.data().add(i as u64 * MAX_TRANSFER)
+    }
+
+    /// De paginawijzers voor `n` bytes in buffer `i`, met de PRP-lijst van
+    /// die buffer.
+    fn prps(&self, i: usize, n: u64) -> (u64, u64) {
+        let data = self.buf(i);
         if n <= PAGE {
             return (data.0, 0);
         }
         if n <= 2 * PAGE {
             return (data.0, data.0 + PAGE);
         }
-        let list = self.cfg.dma.add(PRP_OFF);
+        let list = self.cfg.dma.add(PRP_OFF + i as u64 * PAGE);
         dev::clear(list, PAGE as usize);
         for p in 1..n.div_ceil(PAGE) {
             dev::write64(list.add((p - 1) * 8), data.0 + p * PAGE);
@@ -966,12 +1058,12 @@ impl<C: Coprocessor> Ans<C> {
         (data.0, list.0)
     }
 
-    /// Eén opdracht over `len` bytes vanaf blok `block` via de databuffer;
-    /// de grenzen van de schijf en de buffer getoetst.
-    fn transfer(&mut self, opc: u8, block: u64, len: usize) -> Result<(), C::Error> {
+    /// De opdracht over `len` bytes vanaf blok `block` via buffer `i`; de
+    /// grenzen van de schijf en de buffer getoetst.
+    fn rw_cmd(&self, opc: u8, block: u64, len: usize, i: usize) -> Result<Cmd, C::Error> {
         let n = len as u64;
         let bad = Error::Range { block, len };
-        if len == 0 || !n.is_multiple_of(BLOCK) || n > self.max_transfer {
+        if len == 0 || !n.is_multiple_of(BLOCK) || n > self.max_transfer || i >= DEPTH {
             return Err(bad);
         }
         let nlb = n / BLOCK;
@@ -979,19 +1071,23 @@ impl<C: Coprocessor> Ans<C> {
             return Err(bad);
         }
         let nlb0 = u32::try_from(nlb - 1).map_err(|_| bad)?;
-        let (prp1, prp2) = self.prps(n);
-        self.submit(
-            false,
-            Cmd {
-                opc,
-                nsid: NSID,
-                prp1,
-                prp2,
-                cdw10: (block & 0xffff_ffff) as u32,
-                cdw11: (block >> 32) as u32,
-                cdw12: nlb0,
-            },
-        )
+        let (prp1, prp2) = self.prps(i, n);
+        Ok(Cmd {
+            opc,
+            nsid: NSID,
+            prp1,
+            prp2,
+            cdw10: (block & 0xffff_ffff) as u32,
+            cdw11: (block >> 32) as u32,
+            cdw12: nlb0,
+        })
+    }
+
+    /// Eén opdracht die ter plekke wacht, via buffer 0 (de GPT bij de
+    /// opstart).
+    fn transfer(&mut self, opc: u8, block: u64, len: usize) -> Result<(), C::Error> {
+        let m = self.rw_cmd(opc, block, len, 0)?;
+        self.exec(false, m)
     }
 
     fn ready(&self) -> Result<(), C::Error> {
@@ -1013,6 +1109,9 @@ impl<C: Coprocessor> Ans<C> {
     /// alleen het venster.
     pub fn read_at(&mut self, block: u64, buf: &mut [u8]) -> Result<(), C::Error> {
         self.ready()?;
+        if self.inflight.iter().any(Option::is_some) {
+            return Err(Error::Busy);
+        }
         if buf.is_empty() {
             return Err(Error::Range { block, len: 0 });
         }
@@ -1022,29 +1121,6 @@ impl<C: Coprocessor> Ans<C> {
             self.transfer(IO_READ, b, chunk.len())?;
             dev::pull(self.data(), chunk.len());
             dev::copy_out_normal(chunk, self.data());
-            b += chunk.len() as u64 / BLOCK;
-        }
-        Ok(())
-    }
-
-    /// Schrijft `buf` (een veelvoud van [`BLOCK`]) vanaf blok `block`,
-    /// alleen binnen het venster van [`set_window`](Self::set_window).
-    /// Daarbuiten, of zonder venster, weigert hij vóór er één byte naar de
-    /// controller gaat.
-    fn write_at(&mut self, block: u64, buf: &[u8]) -> Result<(), C::Error> {
-        self.ready()?;
-        self.check_window(block, buf.len())?;
-        let step = self.step();
-        let mut b = block;
-        for chunk in buf.chunks(step) {
-            // Na een time-out kan de controller nog in de buffer schrijven:
-            // er gaat geen byte meer in.
-            if self.dead {
-                return Err(Error::Dead);
-            }
-            dev::copy_in_normal(self.data(), chunk);
-            dev::push(self.data(), chunk.len());
-            self.transfer(IO_WRITE, b, chunk.len())?;
             b += chunk.len() as u64 / BLOCK;
         }
         Ok(())
@@ -1107,24 +1183,6 @@ impl<C: Coprocessor> Ans<C> {
         self.window.map(|w| (w.first, w.blocks))
     }
 
-    /// Maakt alles wat de controller al bevestigde duurzaam (NVMe Flush).
-    ///
-    /// De Go-versie liet dit op de ANS weg ("nooit op ijzer gezien", en een
-    /// onverwachte opdracht kan de coprocessor omleggen). Met schrijven erbij
-    /// kan dat niet meer: zonder flush is een geschreven boom niet duurzaam.
-    /// Linux stuurt hem op dit pad gewoon (`drivers/nvme/host/apple.c`).
-    fn flush(&mut self) -> Result<(), C::Error> {
-        self.ready()?;
-        self.submit(
-            false,
-            Cmd {
-                opc: IO_FLUSH,
-                nsid: NSID,
-                ..Cmd::default()
-            },
-        )
-    }
-
     /// Geeft de ANS terug zoals we hem aantroffen: I/O-queues weg, de
     /// controller via CC.SHN netjes uit, en de coprocessor in slaap.
     ///
@@ -1147,13 +1205,13 @@ impl<C: Coprocessor> Ans<C> {
                 cdw10: id,
                 ..Cmd::default()
             };
-            note(self.submit(true, del_sq));
+            note(self.exec(true, del_sq));
             let del_cq = Cmd {
                 opc: ADM_DELETE_CQ,
                 cdw10: id,
                 ..Cmd::default()
             };
-            note(self.submit(true, del_cq));
+            note(self.exec(true, del_cq));
         }
         self.started = false;
         self.window = None;
@@ -1247,62 +1305,314 @@ impl<C: Coprocessor> Ans<C> {
     }
 }
 
+/// Het I/O-pad van het blokcontract: opdrachten op de tags van
+/// [`IO_TAGS`], hoogstens één van de eigenaar ([`Use::Demand`]) en één
+/// read-ahead tegelijk. Niets hier wacht: `issue` zet een opdracht op de
+/// controller, `reap_io` haalt op wat terug is.
+impl<C: Coprocessor> Ans<C> {
+    /// De index van de opdracht van de eigenaar.
+    fn demand(&self) -> Option<usize> {
+        self.inflight
+            .iter()
+            .position(|f| f.is_some_and(|f| f.use_ == Use::Demand))
+    }
+
+    /// Zet `m` op tag `IO_TAGS[i]` met buffer `i`.
+    fn issue(&mut self, i: usize, m: &Cmd, f: Inflight) -> Result<(), C::Error> {
+        let tag = IO_TAGS.get(i).copied().ok_or(Error::Busy)?;
+        self.post(false, tag, m)?;
+        if let Some(s) = self.inflight.get_mut(i) {
+            *s = Some(Inflight {
+                t0: (self.now)(),
+                ..f
+            });
+        }
+        Ok(())
+    }
+
+    /// Haalt elke completion van de I/O-queue op die er is, en toetst de
+    /// time-out van wat nog loopt. Een completion voor een tag die niet in
+    /// de lucht is, of een opdracht over zijn grens, maakt de driver dood:
+    /// de controller kan dan nog in een buffer schrijven.
+    fn reap_io(&mut self) -> Result<(), C::Error> {
+        while let Some((cid, st)) = self.reap_one(false)? {
+            let i = IO_TAGS.iter().position(|&t| t == cid);
+            let now = (self.now)();
+            let Some(f) = i
+                .and_then(|i| self.inflight.get_mut(i))
+                .and_then(|s| s.as_mut().filter(|f| f.done.is_none()))
+            else {
+                self.dead = true;
+                return Err(Error::Cid {
+                    got: cid,
+                    want: IO_TAGS[0],
+                });
+            };
+            f.done = Some(st);
+            let (dt, stale) = (
+                now.saturating_sub(f.t0),
+                f.use_ == Use::Ahead { stale: true },
+            );
+            self.slowest_ns = self.slowest_ns.max(dt);
+            if stale && let Some(s) = i.and_then(|i| self.inflight.get_mut(i)) {
+                *s = None;
+                self.ahead_waste += 1;
+            }
+        }
+        // Wat nog loopt, vraagt om de mailbox (een wachtende coprocessor doet
+        // geen DMA). Eerst de CQ, zoals de oude wachtlus: de mailbox kost
+        // Device-loads, en een completion die er al is wacht daar niet op.
+        if self.inflight.iter().flatten().any(|f| f.done.is_none()) {
+            self.service()?;
+        }
+        let now = (self.now)();
+        let late = self
+            .inflight
+            .iter()
+            .flatten()
+            .find(|f| f.done.is_none() && now >= f.t0.saturating_add(COMMAND_TIMEOUT_NS));
+        if let Some(f) = late {
+            let opc = f.opc;
+            self.dead = true;
+            return Err(Error::Timeout { opc });
+        }
+        Ok(())
+    }
+
+    /// Een vrije tag. Er is er altijd een: de eigenaar heeft hoogstens één
+    /// opdracht, en er is hoogstens één read-ahead ([`Self::read_ahead`]).
+    fn free_tag(&self) -> Result<usize, C::Error> {
+        self.inflight
+            .iter()
+            .position(Option::is_none)
+            .ok_or(Error::Busy)
+    }
+
+    /// Maakt de read-aheads onbruikbaar die `range` (eerste blok, aantal)
+    /// raken, of allemaal bij `None`. Wat al terug is, gaat meteen weg; wat
+    /// nog loopt, wordt weggegooid zodra het terugkomt.
+    fn drop_aheads(&mut self, range: Option<(u64, u64)>) {
+        for s in &mut self.inflight {
+            let Some(f) = s else { continue };
+            let hit = range.is_none_or(|(b, n)| {
+                b < f.block + f.len as u64 / BLOCK && f.block < b.saturating_add(n)
+            });
+            if f.use_ != (Use::Ahead { stale: false }) || !hit {
+                continue;
+            }
+            if f.done.is_some() {
+                *s = None;
+                self.ahead_waste += 1;
+            } else {
+                f.use_ = Use::Ahead { stale: true };
+            }
+        }
+    }
+
+    /// Een lees van de eigenaar: van de read-ahead als die precies deze
+    /// blokken leest (of las, zonder fout), anders een nieuwe opdracht.
+    fn start_read(&mut self, block: u64, len: usize, lba: u64) -> Result<(), C::Error> {
+        self.ready()?;
+        let hit = self.inflight.iter_mut().flatten().find(|f| {
+            f.use_ == (Use::Ahead { stale: false })
+                && f.block == block
+                && f.len == len
+                && f.done.is_none_or(|s| s == 0)
+        });
+        if let Some(f) = hit {
+            f.use_ = Use::Demand;
+            f.lba = lba;
+            self.ahead_hits += 1;
+            return Ok(());
+        }
+        self.drop_aheads(None);
+        let i = self.free_tag()?;
+        let m = self.rw_cmd(IO_READ, block, len, i)?;
+        self.issue(i, &m, inflight(IO_READ, block, len, lba, Use::Demand))
+    }
+
+    /// Een schrijf van de eigenaar: binnen het venster, de bytes nu in de
+    /// buffer van een vrije tag (daarna zijn ze van de aanroeper terug), en
+    /// een read-ahead over dezelfde blokken telt niet meer.
+    fn start_write(&mut self, block: u64, data: &[u8], lba: u64) -> Result<(), C::Error> {
+        self.ready()?;
+        self.check_window(block, data.len())?;
+        self.drop_aheads(Some((block, data.len() as u64 / BLOCK)));
+        let i = self.free_tag()?;
+        let m = self.rw_cmd(IO_WRITE, block, data.len(), i)?;
+        dev::copy_in_normal(self.buf(i), data);
+        dev::push(self.buf(i), data.len());
+        self.issue(
+            i,
+            &m,
+            inflight(IO_WRITE, block, data.len(), lba, Use::Demand),
+        )
+    }
+
+    /// Maakt alles wat de controller al bevestigde duurzaam (NVMe Flush).
+    ///
+    /// De Go-versie liet dit op de ANS weg ("nooit op ijzer gezien", en een
+    /// onverwachte opdracht kan de coprocessor omleggen). Met schrijven erbij
+    /// kan dat niet meer: zonder flush is een geschreven boom niet duurzaam.
+    /// Linux stuurt hem op dit pad gewoon (`drivers/nvme/host/apple.c`).
+    fn start_flush(&mut self) -> Result<(), C::Error> {
+        self.ready()?;
+        let i = self.free_tag()?;
+        let m = Cmd {
+            opc: IO_FLUSH,
+            nsid: NSID,
+            ..Cmd::default()
+        };
+        self.issue(i, &m, inflight(IO_FLUSH, 0, 0, 0, Use::Demand))
+    }
+
+    /// Na een lees van een volle hap die precies verder ging waar de vorige
+    /// eindigde: de volgende hap alvast, op een vrije tag, binnen het
+    /// venster. Zo leest de schijf de volgende MiB terwijl de kern deze naar
+    /// de app brengt (GEMETEN 01-10: schijf 0,59 en transport 0,53 ms per
+    /// MiB, tot M21 na elkaar). Eén tegelijk; een fout hier is een dode
+    /// driver en dat zegt de volgende opdracht.
+    fn read_ahead(&mut self, block: u64, len: usize) {
+        let Some(w) = self.window else { return };
+        let end = block.saturating_add(len as u64 / BLOCK);
+        let busy = self
+            .inflight
+            .iter()
+            .flatten()
+            .any(|f| matches!(f.use_, Use::Ahead { .. }));
+        let Some(i) = self.inflight.iter().position(Option::is_none) else {
+            return;
+        };
+        if busy || end > w.first + w.blocks {
+            return;
+        }
+        let lba = (block - w.first) * PER_BLOCK;
+        if let Ok(m) = self.rw_cmd(IO_READ, block, len, i) {
+            let f = inflight(IO_READ, block, len, lba, Use::Ahead { stale: false });
+            let _ = self.issue(i, &m, f);
+        }
+    }
+
+    /// De completion van de opdracht van de eigenaar; bij een lees de bytes
+    /// naar `into`, en zo nodig eerst de read-ahead op de controller.
+    fn poll_demand(&mut self, into: &mut [u8]) -> core::task::Poll<Result<(), C::Error>> {
+        use core::task::Poll;
+        let Some(i) = self.demand() else {
+            return Poll::Ready(Err(Error::NotStarted));
+        };
+        if let Err(e) = self.reap_io() {
+            return Poll::Ready(Err(e));
+        }
+        let Some(f) = self.inflight.get(i).copied().flatten() else {
+            return Poll::Ready(Err(Error::Dead));
+        };
+        let Some(st) = f.done else {
+            return Poll::Pending;
+        };
+        // Een flush is pas klaar als er niets anders meer in de lucht is: na
+        // de laatste flush van een bevriezing (de kern-flip) is de rij leeg.
+        let others = self.inflight.iter().flatten().any(|g| g.done.is_none());
+        if f.opc == IO_FLUSH && others {
+            return Poll::Pending;
+        }
+        if st == 0 && f.opc == IO_READ {
+            let seq = f.block == self.seq_end;
+            self.seq_end = f.block + f.len as u64 / BLOCK;
+            if seq && f.len == self.step() {
+                self.read_ahead(self.seq_end, f.len);
+            }
+            let n = f.len.min(into.len());
+            dev::pull(self.buf(i), n);
+            if let Some(d) = into.get_mut(..n) {
+                dev::copy_out_normal(d, self.buf(i));
+            }
+        }
+        if let Some(s) = self.inflight.get_mut(i) {
+            *s = None;
+        }
+        Poll::Ready(match st {
+            0 => Ok(()),
+            s => Err(Error::Status {
+                opc: f.opc,
+                status: s,
+            }),
+        })
+    }
+}
+
+/// Een opdracht in opbouw voor [`Ans::issue`].
+fn inflight(opc: u8, block: u64, len: usize, lba: u64, use_: Use) -> Inflight {
+    Inflight {
+        opc,
+        block,
+        len,
+        lba,
+        t0: 0,
+        use_,
+        done: None,
+    }
+}
+
 /// Het blokcontract van `blkdev` over het venster: LBA's van 512 bytes,
 /// LBA 0 is het eerste blok van het venster. De ANS rekent in blokken van
 /// 4 KB, dus een verzoek moet op een blok beginnen en eindigen; hopfs
 /// schrijft in blokken van 4 KB vanaf LBA 0, dus dat doet hij altijd. Een
 /// verzoek dat dat niet doet, of buiten het venster valt, is `OutOfRange`.
 ///
-/// Hetzelfde contract als virtio-blk en de NVMe, maar de ANS wacht nog in
-/// [`start`](blkdev::AsyncBlockDevice::start): die doet de hele opdracht
-/// (tot en met de completion) en zet alleen het kopiëren naar de aanroeper
-/// uit tot `poll_done`, die daarom altijd meteen klaar is. De ANS vraagt
-/// tijdens het wachten om de mailbox van zijn coprocessor (`service`); die
-/// splitsen hoort bij de eerste boot op ijzer, niet bij een blinde port
-/// (30-09: de M4 is nog nooit gestart).
+/// `start` zet de opdracht op de controller en keert terug; `poll_done`
+/// haalt op wat terug is. Er wacht niets: tot 01-10 (M21) deed `start` de
+/// hele opdracht en spinde de OS-core 4 us (4 KB) tot 600 us (1 MiB) per
+/// opdracht, en in die tijd stond alles stil, ook het transport van elke
+/// andere app. GEMETEN 01-10 (`m4-scale.sh`, twee apps met elk 256 MiB
+/// schrijven en lezen): M21 samen ~985 MB/s opgeteld, net als één alleen;
+/// M22 ~1400 tegen ~1280 voor één alleen. Met de read-ahead erbij leest een
+/// app 1690 MB/s in plaats van 870 tot 960. De wachter
+/// (`blkdev::InFlight::done`) pollt op [`POLL_SPIN_NS`] en [`POLL_PERIOD`];
+/// de mailbox van de coprocessor gaat leeg zolang er iets loopt.
+///
+/// Synchroon blijft synchroon: een schrijf of flush is pas klaar als zijn
+/// eigen completion terug is, en de eigenaar heeft er één tegelijk. De
+/// read-ahead is de enige tweede opdracht, en die leest alleen.
 impl<C: Coprocessor> blkdev::AsyncBlockDevice for Ans<C> {
     fn max_transfer(&self) -> usize {
         self.step()
     }
 
+    fn poll_pace(&self) -> (u64, core::time::Duration) {
+        (POLL_SPIN_NS, POLL_PERIOD)
+    }
+
     fn start(&mut self, op: blkdev::Op<'_>) -> blkdev::Result {
-        if self.staged.is_some() {
-            return Err(blkdev::Error::Busy);
+        if let Some(i) = self.demand() {
+            // De wachter van de vorige ging weg (een gedropte `Done`): pas
+            // als die opdracht terug is, is haar buffer weer van ons.
+            self.reap_io().map_err(|e| blk_err(&e, 0, 0))?;
+            match self.inflight.get_mut(i) {
+                Some(s) if s.is_some_and(|f| f.done.is_some()) => *s = None,
+                _ => return Err(blkdev::Error::Busy),
+            }
         }
-        let staged = match op {
+        match op {
             blkdev::Op::Read { lba, len } => {
                 let b = self.contract_block(lba, len)?;
-                let r = self
-                    .ready()
-                    .and_then(|()| self.transfer(IO_READ, b, len))
-                    .map_err(|e| blk_err(&e, lba, len));
-                (r, len)
+                self.start_read(b, len, lba)
+                    .map_err(|e| blk_err(&e, lba, len))
             }
             blkdev::Op::Write { lba, data } => {
                 let b = self.contract_block(lba, data.len())?;
-                let r = self
-                    .write_at(b, data)
-                    .map_err(|e| blk_err(&e, lba, data.len()));
-                (r, 0)
+                self.start_write(b, data, lba)
+                    .map_err(|e| blk_err(&e, lba, data.len()))
             }
-            blkdev::Op::Flush => (self.flush().map_err(|e| blk_err(&e, 0, 0)), 0),
-        };
-        self.staged = Some(staged);
-        Ok(())
+            blkdev::Op::Flush => self.start_flush().map_err(|e| blk_err(&e, 0, 0)),
+        }
     }
 
     fn poll_done(&mut self, into: &mut [u8]) -> core::task::Poll<blkdev::Result> {
-        let Some((r, read)) = self.staged.take() else {
-            return core::task::Poll::Ready(Err(blkdev::Error::Io { lba: 0 }));
-        };
-        if r.is_ok() && read > 0 {
-            let n = read.min(into.len());
-            dev::pull(self.data(), n);
-            if let Some(d) = into.get_mut(..n) {
-                dev::copy_out_normal(d, self.data());
-            }
-        }
-        core::task::Poll::Ready(r)
+        let lba = self
+            .demand()
+            .and_then(|i| self.inflight.get(i).copied().flatten())
+            .map_or(0, |f| f.lba);
+        self.poll_demand(into).map_err(|e| blk_err(&e, lba, 0))
     }
 }
 
@@ -1316,6 +1626,7 @@ fn blk_err<E>(e: &Error<E>, lba: u64, len: usize) -> blkdev::Error {
         | Error::Cid { .. }
         | Error::Nvmmu { .. }
         | Error::Coprocessor(_) => blkdev::Error::Dead,
+        Error::Busy => blkdev::Error::Busy,
         _ => blkdev::Error::Io { lba },
     }
 }
@@ -1349,6 +1660,29 @@ impl<C: Coprocessor> fmt::Display for Diag<'_, C> {
         f.write_str(" crashlog=")?;
         a.cop.crashlog(f)
     }
+}
+
+/// Zet de SQE van `tag` op `tag * 64`, zoals Linux, en voor een tag boven 0
+/// ook op `tag * 128`, waar hij volgens NVMe hoort onder iBoots IOSQES = 7:
+/// welke plek de firmware leest, is nooit gemeten (zie [`IO_TAGS`]).
+fn write_sqe(sq: Pa, tag: u16, m: &Cmd) {
+    let t = u64::from(tag);
+    let wide = (tag != 0).then(|| sq.add(t * SQE_WIDE));
+    for sqe in core::iter::once(sq.add(t * SQE)).chain(wide) {
+        dev::clear(sqe, SQE as usize);
+        let at = |off: usize| sqe.add(off as u64);
+        dev::write32(
+            at(offset_of!(Sqe, cdw0)),
+            u32::from(m.opc) | (u32::from(tag) << 16),
+        );
+        dev::write32(at(offset_of!(Sqe, nsid)), m.nsid);
+        dev::write64(at(offset_of!(Sqe, prp1)), m.prp1);
+        dev::write64(at(offset_of!(Sqe, prp2)), m.prp2);
+        dev::write32(at(offset_of!(Sqe, cdw10)), m.cdw10);
+        dev::write32(at(offset_of!(Sqe, cdw11)), m.cdw11);
+        dev::write32(at(offset_of!(Sqe, cdw12)), m.cdw12);
+    }
+    dev::mb();
 }
 
 /// Vult de TCB van `slot`. De richting van de DMA: oneven opcodes
@@ -1426,6 +1760,17 @@ mod tests {
         mute: bool,
         now: u64,
         events: Vec<&'static str>,
+        /// Houd de completions van de I/O-queue vast tot [`release`]: de
+        /// opdracht is uitgevoerd (de DMA is gebeurd), maar niet bevestigd.
+        hold: bool,
+        /// Vastgehouden completions: (tag, SCT/SC, opcode).
+        held: Vec<(u16, u16, u8)>,
+        /// Bevestigde I/O-opdrachten, in volgorde: (opcode, tag).
+        acked: Vec<(u8, u16)>,
+        /// De entry-afstand die de firmware leest; `None` = uit CC.IOSQES.
+        stride: Option<u64>,
+        /// De MDTS van de identify (0 = geen grens).
+        mdts: u8,
     }
 
     thread_local! {
@@ -1472,7 +1817,8 @@ mod tests {
             let slot = dev::read32(r.add(db));
             if slot != NOTHING {
                 dev::write32(r.add(db), NOTHING);
-                exec(c, qi, slot, 1 << iosqes);
+                let stride = c.stride.unwrap_or(1 << iosqes);
+                exec(c, qi, slot, stride);
             }
         }
     }
@@ -1528,6 +1874,18 @@ mod tests {
                 sc = io(c, opc, block, cdw12, prp1, prp2);
             }
         }
+        if qi == 1 && c.hold {
+            c.held.push((cid, sc, opc));
+            return;
+        }
+        complete(c, qi, cid, sc, opc);
+    }
+
+    /// Zet de completion van `cid` in de CQ van queue `qi`.
+    fn complete(c: &mut Ctl, qi: usize, cid: u16, sc: u16, opc: u8) {
+        if qi == 1 {
+            c.acked.push((opc, cid));
+        }
         let (cq, tail, phase) = if qi == 0 {
             let (t, p) = c.q[0].map_or((0, true), |q| (q.2, q.3));
             (Pa(lo_hi(c.regs.add(0x30))), t, p)
@@ -1541,7 +1899,7 @@ mod tests {
         let t = (tail + 1) % Q_ENTRIES;
         let p = if t == 0 { !phase } else { phase };
         if qi == 0 {
-            let old = c.q[0].unwrap_or((sq, cq, 0, true));
+            let old = c.q[0].unwrap_or((Pa(0), cq, 0, true));
             c.q[0] = Some((old.0, old.1, t, p));
         } else if let Some(q) = c.q[1].as_mut() {
             q.2 = t;
@@ -1555,6 +1913,7 @@ mod tests {
                 assert_eq!(cdw10, 1, "only the controller identify (CNS 1)");
                 dev::clear(Pa(prp1), 4096);
                 dev::copy_in(Pa(prp1 + 24), b"APPLE SSD AP0512Z                       ");
+                dev::write8(Pa(prp1 + 77), c.mdts);
             }
             ADM_CREATE_CQ => c.q[1] = Some((Pa(0), Pa(prp1), 0, true)),
             ADM_CREATE_SQ => {
@@ -1694,6 +2053,37 @@ mod tests {
         CTL.with(|c| f(&mut c.borrow_mut()))
     }
 
+    /// Schrijft op schijfblok `block` over het I/O-pad en wacht erop.
+    fn write_abs(a: &mut Ans<Cop>, block: u64, data: &[u8]) -> Result<(), u32> {
+        a.start_write(block, data, 0)?;
+        loop {
+            if let core::task::Poll::Ready(r) = a.poll_demand(&mut []) {
+                return r;
+            }
+        }
+    }
+
+    /// Bevestigt de vastgehouden opdracht op `tag`.
+    fn release(tag: u16) {
+        with(|c| {
+            let i = c.held.iter().position(|h| h.0 == tag).unwrap();
+            let (cid, sc, opc) = c.held.remove(i);
+            complete(c, 1, cid, sc, opc);
+        });
+    }
+
+    /// Pollt de opdracht van de eigenaar een paar keer (de klok loopt mee).
+    fn poll(a: &mut Ans<Cop>, into: &mut [u8]) -> core::task::Poll<blkdev::Result> {
+        let mut r = blkdev::AsyncBlockDevice::poll_done(a, into);
+        for _ in 0..3 {
+            if r.is_ready() {
+                break;
+            }
+            r = blkdev::AsyncBlockDevice::poll_done(a, into);
+        }
+        r
+    }
+
     #[test]
     fn start_wakes_first_and_only_clears_shn_and_sets_en() {
         let m = machine(false, true);
@@ -1775,14 +2165,14 @@ mod tests {
         let before = with(|c| c.log.len());
         let data = vec![0xaau8; BLOCK as usize];
         assert_eq!(
-            a.write_at(20, &data),
+            write_abs(&mut a, 20, &data),
             Err(Error::NoWindow {
                 block: 20,
                 len: 4096
             })
         );
         assert!(
-            a.write_at(20, &data)
+            write_abs(&mut a, 20, &data)
                 .unwrap_err()
                 .to_string()
                 .contains("WRITE REFUSED")
@@ -1791,7 +2181,7 @@ mod tests {
         for (blk, len) in [(9, 1), (14, 2), (15, 1), (0, 1), (1, 1)] {
             let d = vec![0u8; len * BLOCK as usize];
             assert!(
-                matches!(a.write_at(blk, &d), Err(Error::OutsideWindow { .. })),
+                matches!(write_abs(&mut a, blk, &d), Err(Error::OutsideWindow { .. })),
                 "block {blk}+{len}"
             );
         }
@@ -1800,7 +2190,7 @@ mod tests {
 
         // Binnen het venster wel, over het schrijfpad (opcode 0x01,
         // richting naar het device).
-        a.write_at(13, &vec![0x5a; 2 * BLOCK as usize]).unwrap();
+        write_abs(&mut a, 13, &vec![0x5a; 2 * BLOCK as usize]).unwrap();
         with(|c| {
             assert!(c.disk[13 * 4096..15 * 4096].iter().all(|&x| x == 0x5a));
             assert_eq!(c.log.last().map(|l| l.1), Some(IO_WRITE));
@@ -1811,7 +2201,10 @@ mod tests {
         with(|c| assert_eq!(c.dirs.last(), Some(&TCB_FROM_DEVICE)));
 
         a.clear_window();
-        assert!(matches!(a.write_at(13, &data), Err(Error::NoWindow { .. })));
+        assert!(matches!(
+            write_abs(&mut a, 13, &data),
+            Err(Error::NoWindow { .. })
+        ));
     }
 
     #[test]
@@ -1949,6 +2342,179 @@ mod tests {
         let e: Error<u32> = Error::Dma { base: 1, size: 2 };
         let s: String = e.to_string();
         assert!(s.contains("0x1"));
+    }
+
+    use blkdev::Op;
+    use core::task::Poll;
+
+    /// Een hap van 16 KB (MDTS 2) en een venster van 40 blokken vanaf het
+    /// begin van het bruikbare deel: zo past een reeks happen op de
+    /// nepschijf. Elk blok draagt zijn eigen nummer.
+    fn small_steps(hold: bool, stride: Option<u64>) -> (Mem, Ans<Cop>) {
+        let m = machine(false, true);
+        with(|c| {
+            c.mdts = 2;
+            c.stride = stride;
+            for (i, b) in c.disk.chunks_mut(BLOCK as usize).enumerate().skip(2) {
+                b.fill(i as u8);
+            }
+        });
+        let mut a = up(&m);
+        a.set_window(USABLE.0, 40).unwrap();
+        with(|c| {
+            c.hold = hold;
+            c.acked.clear();
+        });
+        (m, a)
+    }
+
+    /// Het blokcontract (de inherente `start` is de opstart).
+    fn op(a: &mut Ans<Cop>, o: Op<'_>) -> blkdev::Result {
+        blkdev::AsyncBlockDevice::start(a, o)
+    }
+
+    const HAP: usize = 4 * BLOCK as usize;
+    const LBAS: u64 = HAP as u64 / SECTOR;
+
+    /// Draagt `b` de blokken vanaf schijfblok `first`?
+    fn is_hap(b: &[u8], first: u64) -> bool {
+        b.chunks(BLOCK as usize)
+            .zip(first..)
+            .all(|(c, n)| c.iter().all(|&x| x == n as u8))
+    }
+
+    /// Leest één hap op `lba` met de firmware vastgehouden: geeft de
+    /// opdracht vrij op tag `tag` en wacht.
+    fn read_held(a: &mut Ans<Cop>, lba: u64, tag: u16, b: &mut [u8]) {
+        op(a, Op::Read { lba, len: HAP }).unwrap();
+        assert!(
+            poll(a, b).is_pending(),
+            "nothing back before the completion"
+        );
+        release(tag);
+        assert_eq!(poll(a, b), Poll::Ready(Ok(())));
+    }
+
+    #[test]
+    fn a_write_comes_back_only_after_its_completion_and_a_flush_after_it() {
+        let (_m, mut a) = small_steps(true, None);
+        let data = vec![0x77u8; BLOCK as usize];
+        op(
+            &mut a,
+            Op::Write {
+                lba: 8,
+                data: &data,
+            },
+        )
+        .unwrap();
+        // De firmware deed de DMA al, maar bevestigde nog niet: de schrijf
+        // komt niet terug, hoe vaak de wachter ook kijkt.
+        let at = (USABLE.0 + 1) as usize * BLOCK as usize;
+        with(|c| assert!(c.disk[at..at + 4096].iter().all(|&x| x == 0x77)));
+        assert!(poll(&mut a, &mut []).is_pending());
+        // De flush kan er niet tussendoor: één opdracht van de eigenaar.
+        assert_eq!(op(&mut a, Op::Flush), Err(blkdev::Error::Busy));
+        release(0);
+        assert_eq!(poll(&mut a, &mut []), Poll::Ready(Ok(())));
+        // Nu de flush, en ook die alleen met zijn eigen completion.
+        op(&mut a, Op::Flush).unwrap();
+        assert!(poll(&mut a, &mut []).is_pending());
+        release(0);
+        assert_eq!(poll(&mut a, &mut []), Poll::Ready(Ok(())));
+        with(|c| {
+            assert_eq!(c.acked, vec![(IO_WRITE, 0), (IO_FLUSH, 0)]);
+            assert_eq!(c.events.last(), Some(&"flush"));
+        });
+    }
+
+    #[test]
+    fn sequential_reads_keep_one_read_ahead_in_flight_and_a_flush_waits_for_it() {
+        let (_m, mut a) = small_steps(true, None);
+        let mut b = vec![0u8; HAP];
+        read_held(&mut a, 0, 0, &mut b);
+        assert!(is_hap(&b, USABLE.0));
+        read_held(&mut a, LBAS, 0, &mut b);
+        // Twee happen op rij: de derde staat al op de controller, op tag 2.
+        with(|c| {
+            assert_eq!(c.held.iter().map(|h| h.0).collect::<Vec<_>>(), [2]);
+            assert_eq!(c.log.last(), Some(&(1, IO_READ, USABLE.0 + 8, 3, 2)));
+        });
+        // Een flush is pas klaar als er niets meer in de lucht is.
+        op(&mut a, Op::Flush).unwrap();
+        release(0);
+        assert!(poll(&mut a, &mut []).is_pending());
+        release(2);
+        assert_eq!(poll(&mut a, &mut []), Poll::Ready(Ok(())));
+        // De derde hap komt van de read-ahead: geen nieuwe opdracht.
+        let before = with(|c| c.log.len());
+        op(
+            &mut a,
+            Op::Read {
+                lba: 2 * LBAS,
+                len: HAP,
+            },
+        )
+        .unwrap();
+        assert_eq!(poll(&mut a, &mut b), Poll::Ready(Ok(())));
+        assert!(is_hap(&b, USABLE.0 + 8));
+        assert_eq!(a.ahead_hits, 1);
+        // En de vierde staat alweer op de controller.
+        with(|c| {
+            assert_eq!(c.log.len(), before + 1);
+            assert_eq!(c.log.last().map(|l| l.2), Some(USABLE.0 + 12));
+        });
+    }
+
+    #[test]
+    fn a_write_over_the_read_ahead_makes_it_stale() {
+        let (_m, mut a) = small_steps(true, None);
+        let mut b = vec![0u8; HAP];
+        read_held(&mut a, 0, 0, &mut b);
+        read_held(&mut a, LBAS, 0, &mut b);
+        // De read-ahead op tag 2 loopt nog; een schrijf over zijn blokken
+        // gaat ernaast op tag 0, en komt eerder terug dan hij.
+        let data = vec![0x5au8; BLOCK as usize];
+        op(
+            &mut a,
+            Op::Write {
+                lba: 2 * LBAS,
+                data: &data,
+            },
+        )
+        .unwrap();
+        release(0);
+        assert_eq!(poll(&mut a, &mut []), Poll::Ready(Ok(())));
+        release(2);
+        // De lees daarna ziet de schrijf, niet de oude bytes van de read-ahead.
+        read_held(&mut a, 2 * LBAS, 0, &mut b);
+        assert!(b[..4096].iter().all(|&x| x == 0x5a));
+        assert!(is_hap(&b[4096..], USABLE.0 + 9));
+        assert_eq!((a.ahead_hits, a.ahead_waste), (0, 1));
+        with(|c| {
+            assert_eq!(
+                c.acked.iter().map(|x| x.1).collect::<Vec<_>>(),
+                [0, 0, 0, 2, 0]
+            );
+            assert_eq!(c.tcb_mismatch, 0);
+        });
+    }
+
+    #[test]
+    fn the_second_tag_is_found_at_either_entry_stride() {
+        // Linux' afstand (64) en die van NVMe onder iBoots IOSQES (128).
+        for stride in [Some(64), None] {
+            let (_m, mut a) = small_steps(false, stride);
+            let mut b = vec![0u8; HAP];
+            for k in 0..5u64 {
+                block_on(blk(&mut a).read(k * LBAS, &mut b)).unwrap();
+                assert!(is_hap(&b, USABLE.0 + 4 * k));
+            }
+            assert_eq!(a.ahead_hits, 3);
+            with(|c| {
+                assert_eq!(c.tcb_mismatch, 0, "stride {stride:?}");
+                assert!(c.log.iter().any(|l| l.4 == 2));
+            });
+        }
     }
 
     #[test]

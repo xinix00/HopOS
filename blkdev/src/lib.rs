@@ -182,6 +182,14 @@ pub trait AsyncBlockDevice {
         None
     }
 
+    /// Zonder lijn: hoe lang de wachter na de submit per ronde pollt, en
+    /// daarna op welke periode. Een driver die zijn opdrachten kent, kiest
+    /// zelf (de ANS: 20 us en 20 us); anders [`POLL_SPIN_NS`] en
+    /// [`POLL_PERIOD`].
+    fn poll_pace(&self) -> (u64, Duration) {
+        (POLL_SPIN_NS, POLL_PERIOD)
+    }
+
     /// Zet `op` op het device; de [`InFlight`] wacht op de completion.
     fn submit(&mut self, op: Op<'_>) -> Result<InFlight<'_, Self>>
     where
@@ -207,6 +215,9 @@ impl<D: AsyncBlockDevice + ?Sized> AsyncBlockDevice for &mut D {
     }
     fn irq(&self) -> Option<&'static Signal> {
         (**self).irq()
+    }
+    fn poll_pace(&self) -> (u64, Duration) {
+        (**self).poll_pace()
     }
 }
 
@@ -299,11 +310,12 @@ impl<D: AsyncBlockDevice, P: Pace> Future for Done<'_, '_, D, P> {
                     IRQ_GUARD
                 }
                 None => {
-                    if this.pace.now().saturating_sub(this.t0) < POLL_SPIN_NS {
+                    let (spin, period) = this.dev.poll_pace();
+                    if this.pace.now().saturating_sub(this.t0) < spin {
                         cx.waker().wake_by_ref();
                         return Poll::Pending;
                     }
-                    POLL_PERIOD
+                    period
                 }
             };
             let pace = this.pace;
