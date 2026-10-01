@@ -452,7 +452,7 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     // MEDIA: de codec-dienst ná de opslag, want de firmware-blobs staan op
     // het volume (codec.rs); zonder VPU meldt hij luid dat er geen is.
     codec::up(exec);
-    let system = system(privilege, fs);
+    let system = system(privilege, fs, slot_count(board));
 
     // De IRQ-dispatch spawnt als eerste: hij is de pomp van alle lijnen.
     // Faalt de controller, dan draait de node door op de vangrail van de
@@ -492,10 +492,7 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
         Ok(Some(nic)) => {
             println!("net: nic up HOPOS_NIC_UP mac={}", nic.mac());
             let params = net::Params {
-                // Eén slot per app-core plus één voor de OS-core, waar Hop
-                // naast de kern woont (het plan van het board, PORT.md
-                // beslissing 2): twee cores zijn twee slots.
-                max_slots: board.cores().saturating_sub(1).max(1) + 1,
+                max_slots: slot_count(board),
                 clock: board.clock(),
                 slot_wake: slots::wake,
                 resident: slots::resident,
@@ -596,8 +593,9 @@ static STORE: kern::store::StoreQueue = kern::store::StoreQueue::new();
 fn system(
     privilege: Option<Privilege>,
     fs: bool,
+    max_slots: usize,
 ) -> &'static System<'static, 'static, LIFECYCLE_DEPTH> {
-    let mut s = System::new(&LIFECYCLE, &SERVICERS, privilege, SLOT_MAX)
+    let mut s = System::new(&LIFECYCLE, &SERVICERS, privilege, max_slots)
         .with_logs(&slots::LOGS)
         .with_store(&STORE);
     if fs {
@@ -631,10 +629,18 @@ fn system_api(
     }
 }
 
-/// Het hoogste slotnummer dat de system-API kent: het plafond uit de ABI.
-/// `admit` vraagt daarbovenop een levende servicer, dus een te ruime grens
-/// laat niemand extra binnen.
-const SLOT_MAX: usize = abi::layout::SLOT_CAP;
+/// Het aantal slots van dit board: één per app-core plus één voor de
+/// OS-core, waar Hop naast de kern woont (het plan van het board, PORT.md
+/// beslissing 2): twee cores zijn twee slots. De switch en de system-API
+/// kennen hetzelfde getal. Tot 01-10 kreeg de system-API het plafond uit de
+/// ABI (128): een volle Pi 4 zocht dan door tot slot 5, de lifecycle
+/// weigerde die met "slot 5 out of range 1..4" in plaats van "full", Hop las
+/// daar geen capaciteitstekort in en bleef elke paar seconden opnieuw
+/// vragen, en elke vraag was 128 statuscalls door de lifecycle-mailbox: een
+/// koude flip vond hem vol ("actor mailbox full").
+fn slot_count(board: &Machine) -> usize {
+    board.cores().saturating_sub(1).max(1) + 1
+}
 
 /// Fysiek geheugen woordgewijs via `dev`, voor de image-stream van de
 /// system-API. Wat het adres mag zijn, bewaakt de grant van de lifecycle.
