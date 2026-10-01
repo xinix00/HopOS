@@ -331,6 +331,30 @@ De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
       PCIe/MMIO-venster). Te doen bij de koude boot met de J-stick: de
       pool-regel (`slots: pool N MB in K regions`) en de UEFI-geheugenkaart
       lezen; tot dan geen app naar app op de O6N (bench serve pakt 2, pull 3).
+      **Koude boot met de K-stick (01-10 05:47): niet meer gezien.** Pool
+      32218 MB in 11 regio's (grootste 28462), slot 3 leeft (pull 259 MB/s
+      erin), slot 4 (vitals) op part 0xc3e00000, ook onder 4 GB. Het was
+      dus de H-kern na de "unplaceable"-nacht, niet de regio. Blijft: de
+      kern drukt zijn regio's niet af; één regel per regio bij de boot zou
+      zo'n raadsel in één oogopslag beslechten.
+- [ ] **O6N op de K-kern (koude boot 01-10)**: efi-rng bewezen
+      (`HOPOS_RNG_EFI_UP`, de slots zaaien uit efi-rng), app naar app 259
+      MB/s (was 142), vitals disk schrijven 290 tot 305, lezen 158 tot 168
+      MB/s (was 85 tot 88, Go 727): het write-back-datablok telt, maar het
+      leespad kern naar app (1 MiB-calls, vloer 76 µs) heeft een tweede rem
+      die niet het venster van de app is (vitals op lean v3.1.3 leest even
+      snel als op v3.1.2). Verdacht: de kopieën en checksums per MiB over
+      de system-verbinding (NVMe naar BLK_DATA, poll_op naar de kern, de
+      kern naar de slot-ring met `dc cvac` per regel, leannet in de app).
+      rtt app naar kern 94 µs (H: 51 tot 53).
+- [ ] **Hop: een rolling update met een vaste poort op één node slaagt
+      nooit** (O6N 01-10): een `POST /v1/jobs` voor een job die Hop uit zijn
+      bewaarde staat had hersteld, is een update (rolling); de nieuwe taak
+      wil :80 terwijl de oude hem houdt ("port 80 is taken by slot 2"), en
+      Hop probeert elke paar seconden opnieuw. Go had hetzelfde model; de
+      eerlijke fix is in Hop: bij een poortbotsing op dezelfde node de oude
+      eerst stoppen (recreate), of de botsing als "wacht" tellen in plaats
+      van als nieuwe start. Omweg: DELETE en opnieuw POSTen.
 - [ ] **De puller als rem na v3.1.3** (Pi 4 272 MB/s, slot 3 op 83%):
       kandidaten in volgorde van gewicht: de kopie uit de ABI-ring (per
       record `dc civac` per 64 B plus vluchtige 8-byte-loads: op ARM met
