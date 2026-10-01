@@ -76,9 +76,9 @@ mod imp {
     /// Geeft de idle-wall-tijd in tikken (mede-bewoner plus slaap).
     ///
     /// De Go-versie bewaarde V8-V15 en FPCR zelf omdat de switcher op EL2
-    /// met de MMU uit geen FP-store naar Device-geheugen kan doen. Dit image
-    /// is softfloat: de compiler raakt die registers nooit, dus er valt niets
-    /// te bewaren.
+    /// met de MMU uit geen FP-store naar Device-geheugen kan doen. Deze runtime
+    /// bewaart bij hardwarefloat dezelfde callee-saved staat op zijn eigen
+    /// Normal-WB-stack. Bij softfloat raakt de compiler die registers niet.
     #[inline]
     pub(crate) fn hvc_yield(deadline: u64) -> u64 {
         let a = counter();
@@ -86,7 +86,31 @@ mod imp {
         // systeemregisters en hervat ons na de HVC; `clobber_abi("C")` laat
         // de compiler alle caller-saved registers als verloren beschouwen,
         // dus ook als de switcher er een omgooit, is dat geen fout.
-        unsafe { asm!("hvc #1", in("x1") deadline, clobber_abi("C"), options(nostack)) };
+        unsafe {
+            #[cfg(target_abi = "softfloat")]
+            asm!("hvc #1", in("x1") deadline, clobber_abi("C"), options(nostack));
+            #[cfg(not(target_abi = "softfloat"))]
+            asm!(
+                "sub sp, sp, #80",
+                "stp d8, d9, [sp, #0]",
+                "stp d10, d11, [sp, #16]",
+                "stp d12, d13, [sp, #32]",
+                "stp d14, d15, [sp, #48]",
+                "mrs x9, fpcr",
+                "mrs x10, fpsr",
+                "stp x9, x10, [sp, #64]",
+                "hvc #1",
+                "ldp x9, x10, [sp, #64]",
+                "msr fpcr, x9",
+                "msr fpsr, x10",
+                "ldp d8, d9, [sp, #0]",
+                "ldp d10, d11, [sp, #16]",
+                "ldp d12, d13, [sp, #32]",
+                "ldp d14, d15, [sp, #48]",
+                "add sp, sp, #80",
+                in("x1") deadline, clobber_abi("C"),
+            );
+        }
         counter().wrapping_sub(a)
     }
 
