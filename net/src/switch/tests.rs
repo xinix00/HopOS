@@ -280,6 +280,28 @@ fn host_poort_antwoord_wordt_in_dezelfde_switchronde_bezorgd() {
     assert_eq!(app.rx.frame().as_deref(), Some(&f[..]));
 }
 
+/// Poort 0 wordt in de ring zelf gelezen (M17): extern verkeer van de
+/// node-stack gaat nog steeds de draad op, en de poort is na de ronde terug.
+#[test]
+fn host_poort_uplink_gaat_de_draad_op_en_de_poort_blijft() {
+    let mut h = harness();
+    let mut host = h.host();
+    let f = mk_frame(
+        PROTO_TCP,
+        [0xaa; 6],
+        HOST_MAC,
+        0x0A00_020F,
+        0x0808_0808,
+        5555,
+        53,
+        b"uit",
+    );
+    assert!(host.tx.push(KIND_UPLINK, &f));
+    assert!(h.pass());
+    assert_eq!(h.sent().len(), 1, "uplink-frame van poort 0 niet verstuurd");
+    assert!(h.sw.is_attached(0), "poort 0 kwam niet terug in de tabel");
+}
+
 #[test]
 fn rx_wake_alleen_op_leeg_naar_niet_leeg() {
     let mut h = harness();
@@ -385,6 +407,65 @@ fn arp_voor_de_gateway_beantwoordt_de_switch_zelf() {
         (be16(&r, 20), mac_at(&r, 22), be32(&r, 28)),
         (2, HOST_MAC, host_ip4())
     );
+}
+
+/// M20: een unicast van slot naar slot gaat door de TX-ring van ring naar
+/// ring; een vreemd bron-IP komt niet vrij en telt als bron-drop.
+#[test]
+fn ringpad_unicast_van_slot_naar_slot_en_spoof_niet() {
+    let mut h = harness();
+    let mut a = h.attach(1);
+    let mut b = h.attach(2);
+    let f = mk_frame(
+        PROTO_TCP,
+        slot_mac(2),
+        slot_mac(1),
+        slot_ip4(1),
+        slot_ip4(2),
+        1111,
+        80,
+        b"hallo",
+    );
+    assert!(a.tx.push(KIND_FRAME, &f));
+    assert!(h.pass());
+    assert_eq!(b.rx.frame().as_deref(), Some(&f[..]));
+    let spoof = mk_frame(
+        PROTO_TCP,
+        slot_mac(2),
+        slot_mac(1),
+        slot_ip4(3),
+        slot_ip4(2),
+        1111,
+        80,
+        b"nep",
+    );
+    assert!(a.tx.push(KIND_FRAME, &spoof));
+    h.pass();
+    assert!(b.rx.frame().is_none(), "spoof kwam vrij");
+    assert_eq!(h.stats.slot_src_drops.load(Relaxed), 1);
+    assert!(h.sw.is_attached(1), "slot 1 kwam niet terug in de tabel");
+}
+
+/// M20: het ARP-antwoord van de gateway gaat naar de afzender zelf, dus de
+/// poort moet terug zijn vóór de gewone weg.
+#[test]
+fn ringpad_arp_voor_de_gateway_bereikt_de_afzender() {
+    let mut h = harness();
+    let mut app = h.attach(1);
+    let mut req = ether_frame([0xff; 6], slot_mac(1), 0x0806);
+    req.resize(ETH_LEN + 28, 0);
+    put16(&mut req, 14, 1);
+    put16(&mut req, 16, 0x0800);
+    req[18] = 6;
+    req[19] = 4;
+    put16(&mut req, 20, 1);
+    req[22..28].copy_from_slice(&slot_mac(1));
+    crate::wire::put32(&mut req, 28, slot_ip4(1));
+    crate::wire::put32(&mut req, 38, host_ip4());
+    assert!(app.tx.push(KIND_FRAME, &req));
+    assert!(h.pass());
+    let r = app.rx.frame().expect("geen ARP-antwoord");
+    assert_eq!((be16(&r, 20), mac_at(&r, 22)), (2, HOST_MAC));
 }
 
 #[test]

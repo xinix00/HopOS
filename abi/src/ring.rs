@@ -279,6 +279,13 @@ impl Writer {
         })
     }
 
+    /// De belofte van deze kant ([`Coherence`]): bij `Hardware` mapt hij de
+    /// ring Normal, en mag hij erin werken als in gewoon geheugen.
+    #[must_use]
+    pub fn coherence(&self) -> Coherence {
+        self.local
+    }
+
     /// Past een record met payload van `n` bytes ooit in deze ring?
     /// [`Writer::write`] weigert records groter dan de halve buffer blijvend,
     /// dus wie herprobeert tot het lukt, toetst dit eerst.
@@ -329,10 +336,24 @@ impl Writer {
         max: usize,
         f: impl FnOnce(&mut [u8]) -> usize,
     ) -> Result<Option<bool>> {
+        self.write_with_kind(max, |p| Some((kind, f(p))))
+    }
+
+    /// Als [`Writer::write_with`], maar `f` kiest de soort pas als het record
+    /// er staat (de host-poort van de kern ziet pas aan het frame of het het
+    /// slot-LAN of de uplink op moet). `None` of lengte nul: geen record.
+    pub fn write_with_kind(
+        &mut self,
+        max: usize,
+        f: impl FnOnce(&mut [u8]) -> Option<(Kind, usize)>,
+    ) -> Result<Option<bool>> {
         let r = self.reserve(max)?;
         let at = self.g.at(r.head).add(REC_HDR);
         // Voorbij head en dus van ons tot de publicatie (zie `write`).
-        let n = dev::view_mut(at, max, f).min(max);
+        let Some((kind, n)) = dev::view_mut(at, max, f) else {
+            return Ok(None);
+        };
+        let n = n.min(max);
         if n == 0 {
             // Een PAD die `reserve` schreef, ligt ook voorbij head: niet
             // gepubliceerd, en de volgende schrijf zet hem opnieuw.
@@ -560,6 +581,12 @@ impl Reader {
             corrupt: None,
             local,
         })
+    }
+
+    /// De belofte van deze kant; zie [`Writer::coherence`].
+    #[must_use]
+    pub fn coherence(&self) -> Coherence {
+        self.local
     }
 
     /// De corrupt-reden, als de ring dood is.

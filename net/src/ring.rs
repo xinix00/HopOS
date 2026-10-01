@@ -20,7 +20,7 @@ pub const KIND_FRAME: u32 = abi::ring::Kind::FRAME.raw();
 /// blijft de switch de enige die de uplink voedt.
 pub const KIND_UPLINK: u32 = 64;
 
-use abi::ring::Kind;
+use abi::ring::{Coherence, Kind};
 use core::fmt;
 use dev::Pa;
 
@@ -31,6 +31,19 @@ pub trait Reader {
     /// maakt de ring corrupt: de inhoud komt van de producer en is
     /// onvertrouwd.
     fn read_into(&mut self, buf: &mut [u8]) -> Option<(u32, usize)>;
+
+    /// Als [`read_into`](Self::read_into), zonder kopie: `f` leest het
+    /// record in de ring zelf (hoogstens `max` bytes), daarna gaat de ruimte
+    /// terug. Alleen voor een ring waarvan de lezer de producer vertrouwt:
+    /// poort 0, waar beide kanten de kern zijn. Een app kan haar record
+    /// tijdens `f` herschrijven, dus haar ringen gaan via `read_into`.
+    fn read_in_place<T>(&mut self, max: usize, f: impl FnOnce(u32, &[u8]) -> T) -> Option<T>;
+
+    /// Mapt de kern deze ring Normal ([`abi::ring::Coherence::Hardware`])?
+    /// Alleen dan mag een record in de ring zelf met `memcpy` gelezen of
+    /// gevuld worden; op Device (de pool van de Radxa, een geweigerde remap
+    /// op Apple) abort een ongealigneerde toegang.
+    fn is_normal(&self) -> bool;
 
     /// Waarom de ring corrupt verklaard is; `None` = gezond. Een corrupte
     /// TX-ring oogt van buiten identiek aan een lege (boot 9, 17-08:
@@ -60,10 +73,35 @@ pub trait Writer {
     /// wek waard is); `None` als hij vol is.
     fn write_notify(&mut self, kind: u32, p: &[u8]) -> Option<bool>;
 
+    /// Als [`write_notify`](Self::write_notify), zonder kopie: `f` bouwt het
+    /// record in de ring zelf (hoogstens `max` bytes) en geeft de soort en de
+    /// lengte, of `None` voor geen record. Is er nu geen plaats voor `max`
+    /// bytes, dan [`InPlace::Full`] zonder `f` te roepen.
+    fn write_in_place(
+        &mut self,
+        max: usize,
+        f: impl FnOnce(&mut [u8]) -> Option<(u32, usize)>,
+    ) -> InPlace;
+
+    /// Zie [`Reader::is_normal`].
+    fn is_normal(&self) -> bool;
+
     /// Cleant de kop naar het geheugen voor een lezer zonder cache (de
     /// EL2-switcher peekt hem bij de rotatie). Eén keer per burst, niet per
     /// frame. Standaard niets.
     fn publish_head(&mut self) {}
+}
+
+/// De uitkomst van [`Writer::write_in_place`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InPlace {
+    /// Een record geschreven; `true` als de ring daarvoor leeg was (de
+    /// overgang die een wek waard is).
+    Written(bool),
+    /// `f` gaf niets: geen record.
+    Nothing,
+    /// Geen plaats voor `max` bytes; `f` is niet geroepen.
+    Full,
 }
 
 /// De leeskant van een ABI-TX-ring, met zijn geometrie erbij voor de
@@ -92,6 +130,14 @@ impl Reader for AbiTx {
     fn read_into(&mut self, buf: &mut [u8]) -> Option<(u32, usize)> {
         let r = self.ring.read_into(buf)?;
         Some((r.kind.raw(), r.payload.len()))
+    }
+
+    fn read_in_place<T>(&mut self, max: usize, f: impl FnOnce(u32, &[u8]) -> T) -> Option<T> {
+        self.ring.read_with(max, |kind, p| f(kind.raw(), p))
+    }
+
+    fn is_normal(&self) -> bool {
+        self.ring.coherence() == Coherence::Hardware
     }
 
     fn corrupt(&self) -> Option<Self::Why> {
@@ -124,6 +170,26 @@ impl Writer for abi::ring::Writer {
         // `publish_head` heeft hier niets meer te doen.
         self.write(Kind::new(kind)?, p).ok()
     }
+
+    fn write_in_place(
+        &mut self,
+        max: usize,
+        f: impl FnOnce(&mut [u8]) -> Option<(u32, usize)>,
+    ) -> InPlace {
+        let r = self.write_with_kind(max, |p| {
+            let (kind, n) = f(p)?;
+            Some((Kind::new(kind)?, n))
+        });
+        match r {
+            Ok(Some(was_empty)) => InPlace::Written(was_empty),
+            Ok(None) => InPlace::Nothing,
+            Err(_) => InPlace::Full,
+        }
+    }
+
+    fn is_normal(&self) -> bool {
+        self.coherence() == Coherence::Hardware
+    }
 }
 
 #[cfg(test)]
@@ -131,7 +197,7 @@ pub(crate) mod mem {
     //! Een ring over een host-buffer: dezelfde contracten, zonder
     //! device-geheugen. Beide helften delen één `Rc`; de probe leest een
     //! thread-lokaal register, want de tests draaien parallel.
-    use super::{Reader, Writer};
+    use super::{InPlace, Reader, Writer};
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::rc::Rc;
@@ -196,6 +262,14 @@ pub(crate) mod mem {
             buf[..p.len()].copy_from_slice(&p);
             Some((kind, p.len()))
         }
+        fn read_in_place<T>(&mut self, max: usize, f: impl FnOnce(u32, &[u8]) -> T) -> Option<T> {
+            let mut buf = vec![0u8; max];
+            let (kind, n) = self.read_into(&mut buf)?;
+            Some(f(kind, &buf[..n]))
+        }
+        fn is_normal(&self) -> bool {
+            true
+        }
         fn corrupt(&self) -> Option<&'static str> {
             self.0.borrow().corrupt
         }
@@ -227,6 +301,34 @@ pub(crate) mod mem {
             s.q.push_back((kind, p.to_vec()));
             s.writes += 1;
             Some(was_empty)
+        }
+        fn write_in_place(
+            &mut self,
+            max: usize,
+            f: impl FnOnce(&mut [u8]) -> Option<(u32, usize)>,
+        ) -> InPlace {
+            {
+                // Zoals de ABI-ring: plaats voor `max` vóór `f`, anders vol.
+                let mut s = self.0.borrow_mut();
+                if s.refuse > 0 {
+                    s.refuse -= 1;
+                    return InPlace::Full;
+                }
+                if rec_len(max) > s.cap / 2 || s.used + rec_len(max) > s.cap {
+                    return InPlace::Full;
+                }
+            }
+            let mut buf = vec![0u8; max];
+            match f(&mut buf) {
+                Some((kind, n)) if n > 0 => match self.write_notify(kind, &buf[..n.min(max)]) {
+                    Some(e) => InPlace::Written(e),
+                    None => InPlace::Full,
+                },
+                _ => InPlace::Nothing,
+            }
+        }
+        fn is_normal(&self) -> bool {
+            true
         }
     }
 

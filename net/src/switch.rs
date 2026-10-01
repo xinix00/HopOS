@@ -20,7 +20,7 @@ use crate::nat::{FlowState, Nat, NatIo, NatState, Proto, Uplink};
 use crate::plan::{
     HOST_MAC, MAX_LAN_FRAME, PORTS, SLOT_CAP, UPLINK_MAX_FRAME, host_ip4, slot_ip4, slot_mac,
 };
-use crate::ring::{KIND_FRAME, KIND_UPLINK, Reader, Writer};
+use crate::ring::{InPlace, KIND_FRAME, KIND_UPLINK, Reader, Writer};
 use crate::wire::{ET_ARP, ET_IPV4, ET_IPV6, ETH_LEN, be16, be32, byte, mac_at, put_mac, put16};
 use crate::{Error, Frame, LogFn, Result, Stats, UPLINK_QUEUE};
 use alloc::vec::Vec;
@@ -600,22 +600,14 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
     /// is de ene hergebruikte framebuffer: geen allocatie per frame.
     pub fn switch_pass(&mut self, buf: &mut [u8]) -> bool {
         let now = (self.core.cfg.clock)();
-        let mut worked = false;
-        for i in 0..=self.core.cfg.max_slots {
+        let mut worked = self.drain_host();
+        self.warn_corrupt(0);
+        for i in 1..=self.core.cfg.max_slots {
             for _ in 0..MAX_BURST {
-                let rec = match self.core.ports.get_mut(i).and_then(Option::as_mut) {
-                    Some(p) => p.tx.read_into(buf),
+                match self.step_slot(i, buf, now) {
                     None => break,
-                };
-                let Some((kind, n)) = rec else { break };
-                let Some(f) = buf.get_mut(..n) else { break };
-                match kind {
-                    KIND_FRAME => forward(&mut self.core, &mut self.nat, i, f, now),
-                    // Extern verkeer van HOP's eigen stack: de draad op.
-                    KIND_UPLINK if i == 0 => self.core.uplink_tx(f),
-                    _ => continue,
+                    Some(w) => worked |= w,
                 }
-                worked = true;
             }
             self.warn_corrupt(i);
         }
@@ -630,6 +622,82 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
         // voor de switcher-peek; niet per frame.
         for p in self.core.ports.iter_mut().skip(1).flatten() {
             p.rx.publish_head();
+        }
+        worked
+    }
+
+    /// Eén record van slot `i`: `None` als zijn ring leeg is, anders of het
+    /// een frame was. Een unicast naar een ander slot gaat van ring naar
+    /// ring ([`Core::relay`]); al het andere via `buf` en [`forward`], zoals
+    /// altijd. De poort is zolang uit de tabel en komt terug vóór `forward`,
+    /// want dat pad kan naar de afzender zelf schrijven (het ARP-antwoord
+    /// van de gateway, een haarspeld door de NAT).
+    fn step_slot(&mut self, i: usize, buf: &mut [u8], now: u64) -> Option<bool> {
+        let mut port = self.core.ports.get_mut(i).and_then(Option::take)?;
+        let mut slow = None;
+        let rec = if port.tx.is_normal() {
+            let core = &mut self.core;
+            port.tx.read_in_place(MAX_LAN_FRAME, |kind, f| {
+                if kind != KIND_FRAME {
+                    return false;
+                }
+                if !core.relay(i, f)
+                    && let Some(d) = buf.get_mut(..f.len())
+                {
+                    d.copy_from_slice(f);
+                    slow = Some(f.len());
+                }
+                true
+            })
+        } else {
+            port.tx.read_into(buf).map(|(kind, n)| {
+                slow = (kind == KIND_FRAME).then_some(n);
+                kind == KIND_FRAME
+            })
+        };
+        if let Some(p) = self.core.ports.get_mut(i) {
+            *p = Some(port);
+        }
+        if let Some(f) = slow.and_then(|n| buf.get_mut(..n)) {
+            forward(&mut self.core, &mut self.nat, i, f, now);
+        }
+        rec
+    }
+
+    /// De TX-ring van poort 0 in de ring zelf: beide kanten zijn de kern,
+    /// dus de kopie naar `buf` die een app-ring nodig heeft (een app kan
+    /// haar record na de toets herschrijven) is hier loos werk. GEMETEN
+    /// 01-10 op de M4 (M16): de switch kostte 238 us per MiB van de kern
+    /// naar een app, twee kopieën van elk byte. De poort is zolang uit de
+    /// tabel; een frame van poort 0 gaat nooit terug naar poort 0.
+    fn drain_host(&mut self) -> bool {
+        let Some(mut port) = self.core.ports.get_mut(0).and_then(Option::take) else {
+            return false;
+        };
+        let mut worked = false;
+        for _ in 0..MAX_BURST {
+            let (core, nat) = (&mut self.core, &self.nat);
+            let rec = port.tx.read_in_place(MAX_LAN_FRAME, |kind, f| match kind {
+                // Van poort 0 is er geen NAT-staart: wat `deliver` laat
+                // liggen (een frame aan de gateway zelf), vervalt.
+                KIND_FRAME => {
+                    deliver(core, nat, 0, f);
+                    true
+                }
+                // Extern verkeer van HOP's eigen stack: de draad op.
+                KIND_UPLINK => {
+                    core.uplink_tx(f);
+                    true
+                }
+                _ => false,
+            });
+            match rec {
+                Some(w) => worked |= w,
+                None => break,
+            }
+        }
+        if let Some(p) = self.core.ports.get_mut(0) {
+            *p = Some(port);
         }
         worked
     }
@@ -751,26 +819,79 @@ impl<R: Reader, W: Writer> Core<'_, R, W> {
     /// [`TX_BACKPRESSURE`] op een ring die niemand kon legen, met de hele
     /// OS-core stil. Voor hen: droppen en tellen, TCP herstelt.
     fn write_rx(&mut self, i: usize, kind: u32, p: &[u8]) {
+        self.write_rx_by(i, |rx| match rx.write_notify(kind, p) {
+            Some(notify) => InPlace::Written(notify),
+            None => InPlace::Full,
+        });
+    }
+
+    /// Een unicast van slot `src` naar een ander slot, van zijn TX-ring
+    /// direct de RX-ring van het doel in: één kopie op de OS-core in plaats
+    /// van twee. GEMETEN 01-10 op de M4 (M19): app naar app op een P-core
+    /// (6100 MB/s) was de switch 130 van de 137 ms per 800 MiB bezig, met
+    /// de kopie in `buf` en die eruit.
+    ///
+    /// De keuze valt op de bytes in de ring van de afzender, die hij nog kan
+    /// herschrijven; de toets van [`deliver`] (bron-MAC en bron-IP van
+    /// `src`, de doel-MAC) daarom op de kopie in de ring van het doel, vóór
+    /// de publicatie. Wat daar niet klopt, komt nooit vrij. `false` = niet
+    /// voor dit pad of de toets faalde: de aanroeper neemt de gewone weg
+    /// (die toetst op zijn eigen kopie en meldt een vreemde bron).
+    fn relay(&mut self, src: usize, f: &[u8]) -> bool {
+        let n = f.len();
+        if n < ETH_LEN || byte(f, 0) & 1 != 0 || mac_at(f, 0)[..5] != slot_mac(0)[..5] {
+            return false;
+        }
+        let dst = usize::from(byte(f, 5));
+        if dst == 0 || dst == src || dst > self.cfg.max_slots {
+            return false;
+        }
+        if !self.port(dst).is_some_and(|p| p.rx.is_normal()) {
+            return false;
+        }
+        let (to, from) = (slot_mac(dst), slot_mac(src));
+        self.write_rx_by(dst, |rx| {
+            rx.write_in_place(n, |d| {
+                let d = d.get_mut(..n)?;
+                d.copy_from_slice(f);
+                let ok = mac_at(d, 0) == to && mac_at(d, 6) == from && valid_source_ip(src, d);
+                ok.then_some((KIND_FRAME, n))
+            })
+        })
+    }
+
+    /// De lus van [`write_rx`](Self::write_rx) rond één schrijfpoging:
+    /// `attempt` schrijft het record of zegt vol; bij vol wachten of droppen
+    /// zoals daar beschreven. `false` = `attempt` gaf [`InPlace::Nothing`]:
+    /// er is niets geschreven en niets geteld.
+    fn write_rx_by(&mut self, i: usize, mut attempt: impl FnMut(&mut W) -> InPlace) -> bool {
         let clock = self.cfg.clock;
         let deadline = clock().saturating_add(TX_BACKPRESSURE);
         let mut woken = false;
         loop {
-            let Some(port) = self.port(i) else { return };
-            if let Some(notify) = port.rx.write_notify(kind, p) {
-                port.rx_blocked = false;
-                if notify {
-                    // Kop naar het geheugen vóór de kick: een core die op EL2
-                    // slaapt peekt na zijn wekker de kop in DRAM, en een kop
-                    // die nog in HOP's cache staat is voor hem leeg (T30,
-                    // 04-09: schrijven 690 → 40 MB/s). Eén clean per burst.
-                    port.rx.publish_head();
-                    self.wake(i);
+            let Some(port) = self.port(i) else {
+                return true;
+            };
+            match attempt(&mut port.rx) {
+                InPlace::Written(notify) => {
+                    port.rx_blocked = false;
+                    if notify {
+                        // Kop naar het geheugen vóór de kick: een core die op
+                        // EL2 slaapt peekt na zijn wekker de kop in DRAM, en
+                        // een kop die nog in HOP's cache staat is voor hem
+                        // leeg (T30, 04-09: schrijven 690 → 40 MB/s). Eén
+                        // clean per burst.
+                        port.rx.publish_head();
+                        self.wake(i);
+                    }
+                    return true;
                 }
-                return;
+                InPlace::Nothing => return false,
+                InPlace::Full => {}
             }
             if port.rx_blocked {
                 self.stats.rx_drops.fetch_add(1, Relaxed);
-                return;
+                return true;
             }
             if !woken {
                 self.stats.rx_full.fetch_add(1, Relaxed);
@@ -782,7 +903,7 @@ impl<R: Reader, W: Writer> Core<'_, R, W> {
                     port.rx_blocked = true;
                 }
                 self.stats.rx_drops.fetch_add(1, Relaxed);
-                return;
+                return true;
             }
             core::hint::spin_loop();
         }
@@ -858,8 +979,28 @@ fn forward<R: Reader, W: Writer>(
     p: &mut [u8],
     now: u64,
 ) {
-    if p.len() < ETH_LEN || p.len() > MAX_LAN_FRAME {
+    if deliver(core, nat, src, p) || src == 0 {
         return;
+    }
+    // Naar de gateway. Volgorde: eerst 10.100.0.1 zelf ("mijn node"), dan
+    // het antwoord van een gepubliceerde poort, anders masquerade.
+    if gateway_claim(core, p) || nat.slot_reply(core, src, p, now) {
+        return;
+    }
+    nat.outbound(core, src, p, now);
+}
+
+/// Het deel van [`forward`] dat het frame alleen leest: `true` = klaar
+/// (bezorgd of gedropt), `false` = een frame van een slot naar de gateway,
+/// voor de NAT.
+fn deliver<R: Reader, W: Writer>(
+    core: &mut Core<'_, R, W>,
+    nat: &Nat,
+    src: usize,
+    p: &[u8],
+) -> bool {
+    if p.len() < ETH_LEN || p.len() > MAX_LAN_FRAME {
+        return true;
     }
     // Bron-MAC-controle: een slot mag alleen zijn ÉIGEN MAC gebruiken. De
     // switch weet uit welke ring hij dit frame las en de nummering is
@@ -884,12 +1025,12 @@ fn forward<R: Reader, W: Writer>(
                 be16(p, 12)
             ));
         }
-        return;
+        return true;
     }
     if byte(p, 0) & 1 != 0 {
         // Broadcast/multicast (ARP): iedereen behalve de bron.
         if arp_reply_gateway(core, src, p) {
-            return; // who-has de gateway? HOP antwoordt zelf
+            return true; // who-has de gateway? HOP antwoordt zelf
         }
         for i in 1..=core.cfg.max_slots {
             if i != src && core.attached(i) {
@@ -902,7 +1043,7 @@ fn forward<R: Reader, W: Writer>(
         if is_ip_multicast(p) && nat.uplink().is_some() {
             core.uplink_tx(p);
         }
-        return;
+        return true;
     }
     if mac_at(p, 0)[..5] != slot_mac(0)[..5] {
         // Geen switch-MAC. IPv6-unicast van een slot naar een LAN-buur gaat
@@ -912,23 +1053,16 @@ fn forward<R: Reader, W: Writer>(
         if be16(p, 12) == ET_IPV6 && nat.uplink().is_some() {
             core.uplink_tx(p);
         }
-        return;
+        return true;
     }
     let dst = usize::from(byte(p, 5));
     if dst == 0 {
-        if src != 0 {
-            // Volgorde: eerst de gateway (10.100.0.1 = "mijn node"), dan het
-            // antwoord van een gepubliceerde poort, anders masquerade.
-            if gateway_claim(core, p) || nat.slot_reply(core, src, p, now) {
-                return;
-            }
-            nat.outbound(core, src, p, now);
-        }
-        return;
+        return false;
     }
     if dst != src && dst <= core.cfg.max_slots && core.attached(dst) {
         core.write_rx(dst, KIND_FRAME, p);
     }
+    true
 }
 
 /// Bindt L3 aan dezelfde slotidentiteit als de bron-MAC. Daardoor is het

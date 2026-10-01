@@ -19,8 +19,9 @@
 //! één producer, en die is een taak.
 
 use crate::gw;
+use crate::plan::MAX_LAN_FRAME;
 use crate::plan::is_internal;
-use crate::ring::{KIND_FRAME, KIND_UPLINK, Reader, Writer};
+use crate::ring::{InPlace, KIND_FRAME, KIND_UPLINK, Reader, Writer};
 use crate::wire::{ET_ARP, ET_IPV4, ETH_LEN, be16, be32, mac_at, put_mac, put16, put32};
 use crate::{Error, Frame, Result, Stats};
 use alloc::vec::Vec;
@@ -244,21 +245,64 @@ impl<'a, S: HostStack, R: Reader, W: Writer> HostPort<'a, S, R, W> {
                 }
             }
         }
-        let mut sent = false;
-        for _ in 0..HOST_BURST {
-            let Some(n) = self.stack.poll_transmit(buf) else {
-                break;
-            };
-            let Some(f) = buf.get_mut(..n) else { break };
-            self.transmit(f);
-            sent = true;
-        }
+        let (sent, full) = self.send_burst(buf);
         if sent {
             // De switch nú wekken: de bel via de deur van de executor werkt
             // alleen als HOP idle is, en onder verkeer is HOP dat niet.
             self.door.set();
         }
-        worked | sent
+        // Vol: de switch moet eerst lezen, en dat kan pas als wij afgeven.
+        worked | sent | full
+    }
+
+    /// Tot [`HOST_BURST`] frames van de stack de naad over, elk in de
+    /// host-TX-ring zelf gebouwd: geen kopie uit de framebuffer (GEMETEN
+    /// 01-10 op de M4, M17: 76 us per MiB van de kern naar een app). Zo zendt
+    /// de app al (applib `try_transmit_with`). Wat de lokale rij in moet
+    /// (zelf-bellen, ARP) gaat de oude weg via `buf`; dat is zeldzaam.
+    /// Geeft (iets gezonden, de ring was vol).
+    fn send_burst(&mut self, buf: &mut [u8]) -> (bool, bool) {
+        let mut sent = false;
+        for _ in 0..HOST_BURST {
+            let mut got = Got::Empty;
+            let (stack, mac, ip, slots, aside) = (
+                &mut self.stack,
+                self.mac,
+                self.ip,
+                self.max_slots,
+                &mut *buf,
+            );
+            let r = self.tx.write_in_place(MAX_LAN_FRAME, |p| {
+                let n = stack.poll_transmit(p)?;
+                let f = p.get_mut(..n)?;
+                match classify(f, mac, ip, slots) {
+                    Out::Ring(kind) => return Some((kind, n)),
+                    Out::Drop => got = Got::Drop,
+                    Out::Aside => {
+                        if let Some(d) = aside.get_mut(..n) {
+                            d.copy_from_slice(f);
+                            got = Got::Aside(n);
+                        }
+                    }
+                }
+                None
+            });
+            match (r, got) {
+                (InPlace::Full, _) => return (sent, true),
+                (InPlace::Written(_), _) => {}
+                (_, Got::Aside(n)) => {
+                    if let Some(f) = buf.get_mut(..n) {
+                        self.transmit(f);
+                    }
+                }
+                (_, Got::Drop) => {
+                    self.stats.host_rx_drops.fetch_add(1, Relaxed);
+                }
+                (_, Got::Empty) => return (sent, false),
+            }
+            sent = true;
+        }
+        (sent, false)
     }
 
     /// De lus van de host-taak. Keert terug als `stop` luidt.
@@ -293,6 +337,46 @@ impl<'a, S: HostStack, R: Reader, W: Writer> HostPort<'a, S, R, W> {
             }
         }
     }
+}
+
+/// Wat [`HostPort::send_burst`] in één beurt van de stack kreeg.
+#[derive(Clone, Copy)]
+enum Got {
+    /// De stack had niets, of zijn frame staat in de ring.
+    Empty,
+    /// Een frame van zoveel bytes voor de oude weg, in `buf`.
+    Aside(usize),
+    /// Een intern frame dat de vertaling weigerde.
+    Drop,
+}
+
+/// Waar een frame van de stack heen moet.
+enum Out {
+    /// De host-TX-ring in, met deze soort (vertaald als hij intern is).
+    Ring(u32),
+    /// De oude weg ([`HostPort::transmit`]): zelf-bellen en ARP, die de
+    /// lokale rij in kunnen.
+    Aside,
+    /// Intern maar niet vertaalbaar: nooit de draad op (zie `transmit`).
+    Drop,
+}
+
+/// De keuze van [`HostPort::transmit`] zonder de lokale rij, op het frame in
+/// de ring; een intern frame wordt hier al vertaald.
+fn classify(f: &mut [u8], mac: [u8; 6], ip: u32, max_slots: usize) -> Out {
+    if f.len() >= ETH_LEN {
+        if mac_at(f, 0) == mac || be16(f, 12) == ET_ARP {
+            return Out::Aside;
+        }
+        if be16(f, 12) == ET_IPV4 && f.len() >= ETH_LEN + 20 && is_internal(be32(f, ETH_LEN + 16)) {
+            return if gw::from_host(f, ip, max_slots) {
+                Out::Ring(KIND_FRAME)
+            } else {
+                Out::Drop
+            };
+        }
+    }
+    Out::Ring(KIND_UPLINK)
 }
 
 #[cfg(test)]
@@ -422,6 +506,22 @@ mod tests {
         t.port.stack().out.push_back(bad);
         pass(&mut t);
         assert!(t.sw_tx.pop().is_none());
+    }
+
+    /// Een volle host-TX-ring (M18: de stack zendt in de ring zelf): de
+    /// stack wordt dan niet gepolld, het frame blijft bij hem en gaat de
+    /// volgende ronde, en de ronde telt als werk zodat de host-taak afgeeft.
+    #[test]
+    fn volle_ring_houdt_het_frame_bij_de_stack() {
+        let mut t = setup();
+        let f = mk_frame(PROTO_TCP, [0xaa; 6], MAC, IP, 0x0808_0808, 5555, 53, &[]);
+        t.port.stack().out.push_back(f.clone());
+        t.sw_tx.0.borrow_mut().refuse = 1;
+        assert!(pass(&mut t), "een volle ring telde niet als werk");
+        assert!(t.sw_tx.pop().is_none());
+        assert_eq!(t.port.stack().out.len(), 1, "frame weg uit de stack");
+        pass(&mut t);
+        assert_eq!(t.sw_tx.pop(), Some((KIND_UPLINK, f)));
     }
 
     #[test]
