@@ -191,6 +191,9 @@ node heeft er nog geen gedraaid.
 
 ## Overal
 
+De leesreview van 01-10 (wat weg kan, wat simpeler kan, wat goed is, met
+de fouten die erbij gevonden zijn) staat in docs/review-2026-10-01.md.
+
 - [ ] **VÓÓR LIVE: de QEMU-config geldt op elk board** (review 01-10,
       geverifieerd in hopos/src/config.rs:56-120 en main.rs:486-495): bij
       rol Hop is de config altijd `qemu_hop_cfg`, en die bevat vast
