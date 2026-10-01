@@ -48,6 +48,10 @@ pub enum Error {
     /// Het startschot faalde: de uitkomst is ONBEKEND, de core kan alsnog
     /// aangaan. De eigenaar blijft volledig gereserveerd.
     Dispatch { slot: usize, core: usize },
+    /// De core weigerde het startschot en liep zeker niet
+    /// ([`crate::cage::CageError::NEVER_RAN`]); de partitie is terug en de
+    /// core is tot een koude boot uit de plaatsing.
+    NeverStarted { slot: usize, core: usize },
     /// Een core draait nog waar hij stil had moeten staan.
     CoreBusy { core: usize },
     /// Stop kon de beëindiging niet bevestigen; de eigenaar blijft staan.
@@ -134,6 +138,10 @@ impl fmt::Display for Error {
                     "slot {slot}: dispatch on core {core} failed, outcome unknown"
                 )
             }
+            Self::NeverStarted { slot, core } => write!(
+                f,
+                "slot {slot}: core {core} refused the start and never ran, core retired"
+            ),
             Self::CoreBusy { core } => write!(f, "core {core} still running"),
             Self::NotStopped { slot, core } => {
                 write!(f, "slot {slot}: core {core} not stopped after revocation")

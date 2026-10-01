@@ -28,6 +28,7 @@ use abi::layout::{
     Plan, RING_DATA_CAP, Tail,
 };
 use abi::ring;
+use board::Board;
 use core::future::Future;
 use core::time::Duration;
 use cpu::el2::{self, CoreState, Flavor, Installed, Join, Start};
@@ -143,6 +144,9 @@ mod code {
     /// CPU_ON faalde (PSCI, of de haak van het board: `cpu::smp::cpu_on`);
     /// de code erbij is 0x100 plus de fout in PSCI-vorm.
     pub(super) const PSCI: u32 = 0x100;
+    /// CPU_ON weigerde vóór de core aanging (`psci::Error::is_refusal`):
+    /// [`PSCI`] met [`CageError::NEVER_RAN`].
+    pub(super) const PSCI_REFUSED: u32 = PSCI | super::CageError::NEVER_RAN;
     /// Een secundaire buiten de span van de kooi, of op de OS-core.
     pub(super) const SPAN: u32 = 7;
     /// De bewonerslijst van een gedeelde core weigerde de kooi.
@@ -620,10 +624,19 @@ impl Cage for ArmCage {
                     "cage: slot {slot} core {core} cold: CPU_ON mpidr={target:#x} entry={:#x} x0={:#x} -> {r:?}",
                     tramp.0, b.ctrl.0
                 );
-                if r.is_ok() {
-                    started();
+                match r {
+                    Ok(()) => {
+                        started();
+                        Ok(())
+                    }
+                    // Geweigerd vóór de core aanging: hij liep zeker niet.
+                    // De mailbox weer koud, zodat de kern de partitie mag
+                    // teruggeven in plaats van haar in quarantaine te zetten.
+                    Err(e) if e.is_refusal() && el2::unwind_cold(&self.plan, c, ctx).is_ok() => {
+                        Err(err(code::PSCI_REFUSED + e.code().unsigned_abs() as u32))
+                    }
+                    Err(e) => Err(err(code::PSCI + e.code().unsigned_abs() as u32)),
                 }
-                r.map_err(|e| err(code::PSCI + e.code().unsigned_abs() as u32))
             }
             Err(e) => {
                 println!("cage: slot {slot} core {core}: {e} HOPOS_CAGE_DISPATCH");
@@ -1042,9 +1055,17 @@ impl Cores for ArmCores {
         u32::try_from(self.plan.phys_core(c)).ok()
     }
 
-    fn class(&self, _core: Core) -> Option<CoreClass> {
-        // Homogeen (allemaal cortex-a53): het board kent geen klassen.
-        None
+    /// De klasse van de fysieke core volgens het board. Stond op `None`
+    /// (de aanname van QEMU virt), en dan plaatste een jobspec met
+    /// `core-class` nooit: GEMETEN 01-10 op de M4, "big" gaf "no free run"
+    /// met drie P-cores vrij. Een spec zonder klasse merkt hier niets van.
+    fn class(&self, core: Core) -> Option<CoreClass> {
+        let phys = usize::try_from(self.phys(core)?).ok()?;
+        Some(match crate::BOARD.core_class(phys) {
+            board::CoreClass::Small => CoreClass::Small,
+            board::CoreClass::Mid => CoreClass::Mid,
+            board::CoreClass::Big => CoreClass::Big,
+        })
     }
 
     fn power(&self, core: Core) -> Power {

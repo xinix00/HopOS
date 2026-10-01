@@ -314,7 +314,7 @@ impl Apple {
                 console::DOCKCHANNEL
             );
         }
-        match cores::own_cores() {
+        match cores::own_cores(0) {
             Ok(()) => println!("cores: ours, RVBAR points at this image (PMGR + mailbox)"),
             Err(why) if fwinfo::has_params() => {
                 println!("cores: via m1n1's spin-table ({why})");

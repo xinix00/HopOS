@@ -36,7 +36,7 @@ pub use dispatch::{
     VEC_FIQ_LOWER, VEC_STRIDE, VEC_SYNC_LOWER, VEC_TABLE_LEN, adopt, apple_ipi_target, arm_context,
     chain, check_parked, context_id, context_pa, core_state, ctx_read, ctx_state, ctx_write,
     dispatch, evict, forget, image_hash, init_app_cores, install_switch_code, installed_hash, join,
-    kick, prepare_secondary, prepare_smp, residents, revoke, rx_due, wake_due,
+    kick, prepare_secondary, prepare_smp, residents, revoke, rx_due, unwind_cold, wake_due,
 };
 pub use oscore::{
     Back, Bell, OsCore, Probe, SCHED_OS_KICK, SCHED_OS_KICK_PA, STATS as OS_STATS,

@@ -21,10 +21,12 @@
 //! [`own_cores`] zegt welke weg er is, met de reden. RVBAR is op de M4
 //! VERGRENDELD (m1n1's `features_m4` mist `apple_sysregs_unlocked`), dus
 //! zolang m1n1 het bootobject is, landt élke core die wij uit reset halen in
-//! zíjn vectoren.
+//! zíjn vectoren. Of de cores van ons zijn, zegt RVBAR zelf: wijst hij naar
+//! een HopOS-stub die zijn brievenbus in onze scratch zoekt, dan wel. Dat
+//! geldt ook na een flip, waar de kern niet via de stub binnenkwam.
 
 use crate::fwinfo;
-use crate::head::{SCRATCH_PARK_ARG, SCRATCH_PARK_FOR, SCRATCH_PARK_PC};
+use crate::head::{SCRATCH_PARK_ARG, SCRATCH_PARK_FOR, SCRATCH_PARK_PC, STUB_MAGIC};
 use core::fmt;
 use dev::Pa;
 
@@ -59,6 +61,9 @@ pub enum Error {
     NoPmgr,
     /// De vorige overdracht werd nooit bevestigd.
     MailboxBusy,
+    /// De core kreeg zijn startbit maar pakte de brievenbus niet; de
+    /// brievenbus is ingetrokken, dus hij liep onze code niet.
+    NoAck(usize),
     /// Geen van beide wegen bestaat (geen loader, RVBAR niet van ons).
     NoWay(&'static str),
 }
@@ -71,18 +76,21 @@ impl fmt::Display for Error {
             Self::NotParked(c) => write!(f, "apple: core {c} is not in m1n1's spin-table"),
             Self::NoPmgr => f.write_str("apple: no PMGR cpu-start block in the ADT"),
             Self::MailboxBusy => f.write_str("apple: the park mailbox was never acknowledged"),
+            Self::NoAck(c) => write!(f, "apple: core {c} was started but never took the mailbox"),
             Self::NoWay(why) => write!(f, "apple: cannot start cores: {why}"),
         }
     }
 }
 
-/// De PSCI-code van een fout (-2 INVALID_PARAMS, -4 ALREADY_ON, -9 DENIED).
+/// De PSCI-code van een fout (-2 INVALID_PARAMS, -3 DENIED, -4 ALREADY_ON).
+/// Alles behalve [`Error::SelfCore`] is een weigering
+/// (`cpu::psci::Error::is_refusal`): de core liep onze code zeker niet.
 #[must_use]
 pub const fn psci_code(e: Error) -> i32 {
     match e {
         Error::NoCore(_) | Error::NotParked(_) => -2,
+        Error::NoPmgr | Error::MailboxBusy | Error::NoAck(_) | Error::NoWay(_) => -3,
         Error::SelfCore(_) => -4,
-        Error::NoPmgr | Error::MailboxBusy | Error::NoWay(_) => -9,
     }
 }
 
@@ -94,26 +102,36 @@ pub fn rvbar(i: usize) -> Option<(u64, bool)> {
     Some((v & RVBAR_ADDR, v & RVBAR_LOCK != 0))
 }
 
-/// Zijn de cores van ons? Ja als RVBAR naar het begin van ONS bootobject
-/// wijst (het adres dat de stub opschreef, niet het linkadres: RVBAR wijst
-/// naar waar iBoot het image laadde). Zo niet, dan de reden.
-pub fn own_cores() -> Result<(), &'static str> {
+/// Is core `i` van ons? Ja als zijn RVBAR naar een HopOS-stub wijst die
+/// zijn brievenbus in ONZE scratch zoekt: het parameterblok op RVBAR+0x100
+/// draagt het magic en als doel [`crate::RAM_BASE`]. Dat is precies wat de
+/// core uit reset gaat doen (`head.rs`, stub_reset). Vroeger was de maat
+/// het adres dat de stub bij de boot opschreef, en een geflipte kern komt
+/// niet langs de stub: GEMETEN 01-10 op de M4, M8 weigerde elke koude
+/// start ("no boot stub ran") terwijl RVBAR nog naar de stub van de
+/// geïnstalleerde kern wees. Zo niet, dan de reden.
+pub fn own_cores(i: usize) -> Result<(), &'static str> {
     if fwinfo::cpus() == 0 {
         return Err("no core list in the ADT");
     }
-    let (addr, locked) = rvbar(0).ok_or("no cpu-impl-reg in the ADT")?;
-    let src = crate::head::stub_source();
-    if src == 0 {
-        return Err("no boot stub ran, unknown where this image was loaded");
-    }
-    if addr == src {
+    let (addr, locked) = rvbar(i).ok_or("no cpu-impl-reg in the ADT")?;
+    if is_our_stub(addr) {
         return Ok(());
     }
     Err(if locked {
         "RVBAR is locked to another boot object (m1n1)"
     } else {
-        "RVBAR does not point at this image"
+        "RVBAR does not point at a HopOS stub"
     })
+}
+
+/// Staat op `addr` een HopOS-stub met zijn scratch op [`crate::SCRATCH`]?
+/// Alleen binnen het DRAM gelezen (daar Device gemapt, gealigneerd).
+fn is_our_stub(addr: u64) -> bool {
+    let dram = crate::DRAM_BASE..crate::DRAM_BASE + crate::mmu::MAX_DRAM_GB * crate::mmu::GB;
+    dram.contains(&addr)
+        && dev::read64(Pa(addr + 0x100)) == STUB_MAGIC
+        && dev::read64(Pa(addr + 0x108)) == crate::RAM_BASE
 }
 
 /// Laat core `i` los uit m1n1's spin-table op `entry` met `ctx` in x0.
@@ -198,6 +216,36 @@ pub fn mailbox(aff: u64, entry: u64, ctx: u64) -> Result<(), Error> {
     Ok(())
 }
 
+/// Wacht tot de stub de brievenbus bevestigt (hij zet [`PARK_FREE`] vlak
+/// voor zijn sprong).
+fn acked() -> bool {
+    let s = Pa(crate::SCRATCH);
+    (0..PARK_SPINS).any(|_| {
+        dev::pull(s.add(SCRATCH_PARK_FOR), 8);
+        dev::read64(s.add(SCRATCH_PARK_FOR)) == PARK_FREE
+    })
+}
+
+/// Trekt de brievenbus in na een core die niet bevestigde, zodat hij onze
+/// code nooit meer kan halen: eerst de entry weg (een stub die zijn adres al
+/// zag, leest dan 0 en wacht verder), dan nog één wachtronde voor een stub
+/// die de entry al las en nu bevestigt, en pas dan het adres weg. Geeft of
+/// de core het toch pakte. Zonder dit was "geen bevestiging" een onbekende
+/// uitkomst, en die kost een slot in quarantaine en een koude reset.
+fn retract() -> bool {
+    let s = Pa(crate::SCRATCH);
+    dev::write64(s.add(SCRATCH_PARK_PC), 0);
+    dev::push(s.add(SCRATCH_PARK_PC), 8);
+    dev::mb();
+    if acked() {
+        return true;
+    }
+    dev::write64(s.add(SCRATCH_PARK_FOR), PARK_FREE);
+    dev::push(s.add(SCRATCH_PARK_FOR), 8);
+    dev::mb();
+    false
+}
+
 /// De CPU_ON van dit board: start core `i` op `entry` (fysiek adres, EL2,
 /// MMU uit of die van m1n1, zie de module-doc) met `ctx` in x0.
 pub fn cpu_on(i: usize, here: usize, entry: u64, ctx: u64) -> Result<(), Error> {
@@ -207,11 +255,19 @@ pub fn cpu_on(i: usize, here: usize, entry: u64, ctx: u64) -> Result<(), Error> 
     if i == here {
         return Err(Error::SelfCore(i));
     }
-    match own_cores() {
+    match own_cores(i) {
         Ok(()) => {
             let aff = u64::from(fwinfo::cpu_reg(i).ok_or(Error::NoCore(i))?);
             mailbox(aff, entry, ctx)?;
-            pmgr_start(i)
+            if let Err(e) = pmgr_start(i) {
+                retract();
+                return Err(e);
+            }
+            if acked() || retract() {
+                Ok(())
+            } else {
+                Err(Error::NoAck(i))
+            }
         }
         // Onder m1n1: zijn spin-table (het param-blok van de loader).
         Err(_) if fwinfo::has_params() => release(i, entry, ctx),
@@ -248,13 +304,19 @@ mod tests {
     fn psci_codes() {
         assert_eq!(psci_code(Error::NoCore(11)), -2);
         assert_eq!(psci_code(Error::SelfCore(6)), -4);
-        assert_eq!(psci_code(Error::NoWay("x")), -9);
+        assert_eq!(psci_code(Error::NoWay("x")), -3);
+        // Ook een ingetrokken brievenbus is een weigering; een core die al
+        // draait niet.
+        let psci = |e| cpu::psci::Error::from_ret(i64::from(psci_code(e)) as u64);
+        assert!(psci(Error::NoAck(7)).is_some_and(|e| e.is_refusal()));
+        assert!(psci(Error::SelfCore(6)).is_some_and(|e| !e.is_refusal()));
     }
 
     #[test]
     fn without_a_tree_nothing_starts() {
         assert_eq!(cpu_on(1, 0, 0x1000, 0), Err(Error::NoCore(1)));
-        assert!(own_cores().is_err());
+        assert!(own_cores(0).is_err());
+        assert!(!is_our_stub(0x1000));
         // De haak van `cpu::smp`: een MPIDR zonder core is INVALID_PARAMS.
         assert_eq!(
             cpu_on_mpidr(0x8001_0101, 0x1000, 0),

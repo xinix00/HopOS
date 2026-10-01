@@ -114,7 +114,7 @@ __apple_head:
 
     // Het parameterblok op 0x100: magic, doel, grootte, entry.
     .space 0x100 - (. - __apple_head)
-    .quad 0x4255545341504f48
+    .quad {magic}
     .quad __apple_head
     .quad __apple_image_size
     .quad _start_apple
@@ -282,20 +282,16 @@ __apple_tables:
     .space {tables} * 4096
 "#,
     early = sym apple_early,
+    magic = const STUB_MAGIC,
     mair = const cpu::boot::MAIR,
     tcr_base = const crate::mmu::tcr(0),
     sctlr = const crate::mmu::SCTLR,
     tables = const crate::mmu::TABLES,
 );
 
-/// Wat de stub in de scratch achterliet: het adres waar de firmware het
-/// image neerzette (0 = er draaide geen stub). iBoot zet RVBAR van élke core
-/// op het begin van het bootobject; dit getal is dus waar een core uit reset
-/// landt.
-#[must_use]
-pub(crate) fn stub_source() -> u64 {
-    dev::read64(Pa(crate::SCRATCH + SCRATCH_STUB_SRC))
-}
+/// Het magic van het parameterblok op 0x100 ("HOPOSTUB"), waaraan
+/// `cores::own_cores` een stub op RVBAR herkent.
+pub(crate) const STUB_MAGIC: u64 = 0x4255_5453_4150_4f48;
 
 /// De brievenbus in de scratch (pariteit met de stub hierboven).
 pub(crate) const SCRATCH_PARK_PC: u64 = 0x30;
@@ -303,9 +299,8 @@ pub(crate) const SCRATCH_PARK_PC: u64 = 0x30;
 pub(crate) const SCRATCH_PARK_ARG: u64 = 0x38;
 /// Voor wie: aff1:aff0; `u64::MAX` = vrij.
 pub(crate) const SCRATCH_PARK_FOR: u64 = 0x40;
-/// Waar de stub het image vond.
-pub(crate) const SCRATCH_STUB_SRC: u64 = 0x48;
-/// De x0 van de firmware, door de stub bewaard.
+/// De x0 van de firmware, door de stub bewaard (op 0x48 staat waar hij het
+/// image vond).
 pub(crate) const SCRATCH_STUB_X0: u64 = 0x50;
 
 const _: () = {

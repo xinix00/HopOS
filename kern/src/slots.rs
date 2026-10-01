@@ -48,7 +48,7 @@
 //! de capaciteit, en de regel `HOPOS_POOL_DEVICE` zegt waar het ligt. Komt
 //! het ijzer niet op, dan gaat het terug ([`Request::ReleaseDevice`]).
 
-use crate::cage::{Cage, Console, Cores, PortError, Power, Status, Timer};
+use crate::cage::{Cage, CageError, Console, Cores, PortError, Power, Status, Timer};
 use crate::grants::{Grants, NoGrants};
 use crate::partmem::{Owned, Partition, PartitionPool, Quarantined, Stopped};
 use crate::pool::{CorePool, GroupName, Placement};
@@ -989,6 +989,11 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
         }
         self.register(slot, generation, region);
         let dispatch = self.cage.dispatch(slot, core);
+        if let Err(e) = dispatch
+            && e.never_ran()
+        {
+            return Err(self.never_ran(grant, core, !ports.is_empty(), e).await);
+        }
         let part = grant.part.dispatched();
         let held = match dispatch {
             Ok(()) => Held::Running(part),
@@ -1012,6 +1017,36 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             });
         }
         Ok(())
+    }
+
+    /// Het startschot bereikte de core niet ([`CageError::NEVER_RAN`]): er
+    /// draaide nooit iets, dus alles terug zoals bij een mislukte bouw
+    /// (servicer, poorten, partitie, kooinummer), en de core uit de
+    /// plaatsing tot een koude boot. Een quarantaine hier hield de partitie
+    /// vast en blokkeerde elke flip; GEMETEN 01-10 op de M4: één POST, zes
+    /// slots in quarantaine, alleen de knop maakte het schoon.
+    async fn never_ran(
+        &mut self,
+        grant: ImageGrant,
+        core: Core,
+        published: bool,
+        e: CageError,
+    ) -> Error {
+        let slot = grant.slot();
+        self.evict(slot).await;
+        if published {
+            self.cage.unpublish(slot);
+        }
+        self.abort(grant);
+        self.places.retire(core);
+        self.log.log(format_args!(
+            "slot {slot}: core {core} refused the start (cage code {:#x}), never ran: partition released, core retired until a cold boot HOPOS_CORE_RETIRED",
+            e.code & !CageError::NEVER_RAN
+        ));
+        Error::NeverStarted {
+            slot: slot.get(),
+            core: core.get(),
+        }
     }
 
     /// Zet de poorten van een start door (via de kooi, die het slot-LAN
@@ -1666,6 +1701,8 @@ pub(crate) mod tests {
         pub(crate) dispatched: Vec<(usize, usize)>,
         pub(crate) secondaries: Vec<(usize, usize)>,
         pub(crate) fail_dispatch: bool,
+        /// Het startschot wordt geweigerd vóór de core aangaat (NEVER_RAN).
+        pub(crate) refuse_dispatch: bool,
         /// Het startschot van een secundaire faalt (onbekende uitkomst).
         pub(crate) fail_secondary: bool,
         pub(crate) fail_build: bool,
@@ -1695,6 +1732,7 @@ pub(crate) mod tests {
                 dispatched: Vec::new(),
                 secondaries: Vec::new(),
                 fail_dispatch: false,
+                refuse_dispatch: false,
                 fail_secondary: false,
                 fail_build: false,
                 smp_req: [0; 16],
@@ -1736,6 +1774,11 @@ pub(crate) mod tests {
             self.dispatched.push((slot.get(), core.get()));
             if self.fail_dispatch {
                 return Err(CageError { code: 1 });
+            }
+            if self.refuse_dispatch {
+                return Err(CageError {
+                    code: CageError::NEVER_RAN | 0x103,
+                });
             }
             Ok(())
         }
@@ -2088,6 +2131,36 @@ pub(crate) mod tests {
         );
         assert!(con.saw("HOPOS_PART_QUARANTINE"));
         assert!(a.parts.is_quarantined(s(1)));
+    }
+
+    // Een geweigerde CPU_ON (NEVER_RAN): er liep niets, dus geen
+    // quarantaine. Partitie en kooinummer terug, de core uit de plaatsing,
+    // en de volgende start landt op een andere core.
+    #[test]
+    fn a_refused_core_releases_and_retires() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Exit, 64, 2);
+        a.cage.refuse_dispatch = true;
+        let g = block_on(a.claim(StartSpec::new(s(1), 32 * MIB, ded(1)))).unwrap();
+        let ctl = svc.ctl(s(1)).unwrap();
+        let (r, ()) = join2(a.arm(g, 0x4001_0000), async {
+            ctl.stop.wait().await;
+            ctl.gone.set();
+        });
+        assert!(matches!(r, Err(Error::NeverStarted { slot: 1, core: 1 })));
+        assert!(con.saw("HOPOS_CORE_RETIRED"));
+        assert!(!con.saw("HOPOS_PART_QUARANTINE"));
+        assert_eq!(a.status(s(1)).occupancy, Occupancy::Empty);
+        assert!(!a.parts.is_quarantined(s(1)));
+        assert_eq!(svc.current(s(1)), None);
+        a.cage.refuse_dispatch = false;
+        start(&mut a, 1, 32, 1).unwrap();
+        assert_eq!(a.status(s(1)).core.map(|c| c.0.get()), Some(2));
+        // Core 1 blijft uit; core 2 is bezet: geen plaats meer.
+        assert!(matches!(
+            start(&mut a, 2, 16, 1),
+            Err(Error::NoCores { cores: 1 })
+        ));
     }
 
     #[test]
