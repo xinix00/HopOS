@@ -72,7 +72,8 @@ type RingTx = abi::ring::Writer;
 /// en een corrupte RX-ring in slot 3, terwijl de Pi 4 met dezelfde kern en
 /// apps foutloos draaide). Niet op RISC-V: de C906 is niet coherent met het
 /// andere hart. Elke ring kopieert pas zonder onderhoud als de tegenpartij
-/// hetzelfde belooft.
+/// hetzelfde belooft. De ringen van een slot krijgen op Apple en de Radxa
+/// toch Hardware zodra de kooi de staart Normal mapt (`cage::tail_rings`).
 pub(crate) const RINGS: abi::ring::Coherence = if cfg!(all(
     target_arch = "aarch64",
     not(any(feature = "board-apple", feature = "board-rk3566"))

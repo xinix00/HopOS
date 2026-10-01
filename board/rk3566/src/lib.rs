@@ -339,6 +339,17 @@ pub fn boot_param(key: &'static str) -> &'static str {
     fw::bootcfg::first(fw::bootcfg::cmdline(args, key))
 }
 
+/// De ABI-staart van een slot Normal write-back in de kernmap (Go:
+/// `mapTailNormal` in `kern/slots`, slot-ABI 7), zoals op Apple: de kern
+/// mapt de pool hier Device (de tamago-keuze, zie `mmu`), en zonder dit
+/// loopt elke ringkopie per 8 bytes vluchtig met onderhoud (01-10, stempel
+/// AB: app naar app 29,83 MB/s tegen 461 op de Pi 4). Een 1 GB-blok van de
+/// boot-map wordt daarvoor gesplitst. Weigert de map, dan blijft de staart
+/// Device: traag maar correct, en de kooi houdt dan haar ringonderhoud.
+pub fn map_tail_normal(pa: u64, size: u64) -> Result<(), cpu::memattr::Error> {
+    cpu::memattr::normal_wb(pa, size)
+}
+
 /// De pool zoals het plan hem nu ziet: DTB-banken min de gaten.
 pub(crate) fn pool_now() -> Pool {
     let mut banks = [abi::Region::new(0, 0); fw::fdt::MAX_MEM_REGIONS];
