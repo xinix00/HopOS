@@ -302,6 +302,18 @@ De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
       lijsten en grenslabels als de apps, in een eigen crate; alleen de
       OS-core alloceert (`KernelCore::id()` is 0). Door een andere sessie
       voor de prestaties geschreven (Derek: drie keer zo snel); docs/heap.md.
+      A/B op de O6N (01-10 12:25, vitals in slot 2, warme flips, drie tot
+      vier runs): met heap schrijven 708, lezen 489 tot 491, write_4k ~50,
+      floor_p50 59 tot 60 µs; zonder heap 690 tot 712, 491 tot 494, 52 tot
+      53, 55 tot 64. Gelijk: de heap kost het I/O-pad niets. App naar app
+      met heap 1504 / 1582 / 1514 MB/s (X: 1495 tot 1711).
+- [ ] **O6N schrijven: ~700 MB/s in de middag tegen 800 tot 1188 in de
+      ochtend**, met dezelfde kerncode (de heap maakt geen verschil, zie
+      boven), vitals steeds in slot 2. Verschil in de meting: de ochtend
+      was een koude boot op de S/X-kern, de middag warme flips (gen 4 tot
+      6) na de Lumen-sessie van een andere agent. Nog uitzoeken: koude boot
+      op main en opnieuw meten; de NVMe-staat (de rogue-sessie schreef er
+      Lumen-beelden heen) en de plaatsing van de core tellen mee.
 - [x] **Het flipvenster van de O6N was de lopende kern: 2204 KiB.**
       `image::limit()` op UEFI was het einde van het lopende beeld, en een
       bundel is pas welkom als zijn beeld tot het einde van .stack daarin
