@@ -133,28 +133,30 @@ op `/dev/cu.kis-100000-ch-0`. Sinds 01-10 ook op het LAN: 5555, 8080,
       Hop-repo, niet klein. Ook: Hop blijft een plaatsing zonder capaciteit
       opnieuw proberen (een vloed `HOP_JOB_FAILED`; sinds de retire
       onschuldig, maar ruis).
-- [ ] **De 4 KiB-schrijfjes van de ene app zakken naar ~18 MB/s zodra een
-      andere app bulk doet** (van 82 alleen; M24). Niet de schijf: met gaten
+- [ ] **De 4 KiB-schrijfjes van de ene app naast 1 MiB-calls van een andere
+      app blijven rond 19 tot 20** (in m4-scale, twee apps die allebei
+      schrijven en lezen, nu 81; in m4-mix onder een pure bulklezer nog 19) (van 82 alleen; M24). Niet de schijf: met gaten
       lezen (geen schijfblok) zakt het ook. De coöperatieve OS-core: het
       transport van de bulk-app werkt in brokken van 1 MiB (`tcp_write`,
       150 tot 180 us per poll) en de calls van de andere wachten daar
       telkens achter. Fix: het transport eerlijk maken (kleinere brokken met
       een yield in de verbindingstaak en leannet); netklus, 50 tot 150
       regels, ongetoetst. Voor SQLite naast een bulk-lezer is dit het punt.
-- [ ] **WEEKEND 4 en 5 oktober: de wachtrij naar de schijf.** De hopfs-actor
-      doet één call tegelijk, dus de node haalt 11.900 willekeurige 4 KiB-
-      leesopdrachten per seconde voor alle apps samen (één opdracht tegelijk
-      door de ANS, 84 µs); het ijzer kan er met wachtrijdiepte 100.000 tot
-      200.000. Voor 300 GB aan SQLite-databases per M4 (Derek, 01-10) is dit
-      het getal dat telt, niet de MB/s. De klus (400 tot 550 regels, zie de
-      schatting van 01-10): een blokdeur die N opdrachten tegelijk aanneemt
-      (per tag een ticket), hopfs lezen en schrijven gesplitst in een
-      synchroon plan en de I/O erbuiten (remove en truncate wachten tot het
-      stil is), de actor met meerdere datacalls in de lucht en OP_SYNC als
-      barrière, en de driver van twee naar zestien tags. Eerst meten met een
-      echte database van 100 GB of meer: pagina's per seconde, extents na het
-      vullen, de duur van een koude boot en een commit. Daarna, als het nog
-      nodig is: een paginacache in de kern voor het hete deel (24 GB RAM).
+- [ ] **De OS-core is nu de grens voor veel kleine calls** (M32, 01-10): met
+      de wachtrij naar de schijf (de actor met zestien calls in de lucht,
+      de ANS op zestien tags) lezen vier apps samen 25.000 en acht apps
+      36.000 willekeurige 4 KiB-blokken per seconde (was 9.300 voor
+      allemaal samen); de schijf doet er 175.000 met zestien tegelijk. Bij
+      acht apps staat de OS-core op busy_ms 999, ~27 µs per call. Verder
+      vraagt een goedkoper callpad of I/O buiten de OS-core. Bewuste keuzes:
+      één call per slot tegelijk (geen parallellisme binnen één app), een
+      sync achter een lopende commit en remove/truncate op een lege pool
+      houden de calls erachter op; de commit loopt nu naast de I/O en geeft
+      soms één opdracht van 3 tot 46 ms (slowest_us). Eerst meten met een
+      echte database van 100 GB of meer blijft staan.
+- [ ] De hop-repo bouwt niet meer tegen main: agentd-hopos struikelt over
+      de leanhttp-traits van TcpConn (de queue-agent, 01-10). Voor een nieuwe
+      hop-m4.elf moet dat eerst.
 - [ ] Het geïnstalleerde image is nog D4b (pstate=off, zonder de core-start
       en de ANS-fixes): na een koude boot staat de M4 op D4b en moet er
       geflipt worden (`art/hopos-apple.flip` = M15). Een nieuw image met
@@ -194,19 +196,6 @@ node heeft er nog geen gedraaid.
 De leesreview van 01-10 (wat weg kan, wat simpeler kan, wat goed is, met
 de fouten die erbij gevonden zijn) staat in docs/review-2026-10-01.md.
 
-- [ ] **VÓÓR LIVE: de QEMU-config geldt op elk board** (review 01-10,
-      geverifieerd in hopos/src/config.rs:56-120 en main.rs:486-495): bij
-      rol Hop is de config altijd `qemu_hop_cfg`, en die bevat vast
-      `hopos.insecure=1`. Gevolg op Pi, Radxa, O6N en M4: Hop krijgt
-      `HOPOS_INSECURE=1` ook naast een `hopos.apikey`; `console_enabled`
-      valt zonder `hopos.console` terug op dat `insecure=1`, dus 5555 staat
-      open op een node met een sleutel (de doc zegt het omgekeerde);
-      `hopos.init[]` uit hopos.cfg komt nooit bij Hop; zonder `hopos.node`
-      heet een node `hopos-qemu`. Fix (~20 regels): op een board met een
-      echte cfg-tekst (UEFI `config()`, Apple, Radxa, LicheeRV) die tekst
-      doorgeven en `QEMU_CFG` alleen op qemuvirt. De tests in config.rs
-      draaien nooit (hopos is `test = false`): die hadden dit gevangen;
-      NodeCfg naar fw of kern.
 - [ ] Hop bouwt pas zonder patch na een hop-os-tag en het ophogen van de
       drie tags in de hop-repo (agentd-hopos, hopos-runner, hop-http); tot
       dan `HOP_REV=worktree`. De verse Hop (applib::rand, de nieuwe MMU)
