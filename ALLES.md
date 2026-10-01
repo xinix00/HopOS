@@ -191,6 +191,26 @@ node heeft er nog geen gedraaid.
 
 ## Overal
 
+- [ ] **VÓÓR LIVE: de QEMU-config geldt op elk board** (review 01-10,
+      geverifieerd in hopos/src/config.rs:56-120 en main.rs:486-495): bij
+      rol Hop is de config altijd `qemu_hop_cfg`, en die bevat vast
+      `hopos.insecure=1`. Gevolg op Pi, Radxa, O6N en M4: Hop krijgt
+      `HOPOS_INSECURE=1` ook naast een `hopos.apikey`; `console_enabled`
+      valt zonder `hopos.console` terug op dat `insecure=1`, dus 5555 staat
+      open op een node met een sleutel (de doc zegt het omgekeerde);
+      `hopos.init[]` uit hopos.cfg komt nooit bij Hop; zonder `hopos.node`
+      heet een node `hopos-qemu`. Fix (~20 regels): op een board met een
+      echte cfg-tekst (UEFI `config()`, Apple, Radxa, LicheeRV) die tekst
+      doorgeven en `QEMU_CFG` alleen op qemuvirt. De tests in config.rs
+      draaien nooit (hopos is `test = false`): die hadden dit gevangen;
+      NodeCfg naar fw of kern.
+- [ ] **VÓÓR LIVE: een verlopen DHCP-lease reset de node** (net.rs:739-783):
+      leandhcp geeft `Expired` als verlies en elke Err wordt `request_reset`.
+      Go hield het adres als alleen de server zweeg (hopnet.go:285-317) en
+      resette alleen bij NAK of een ander adres. Nu reset een DHCP-server die
+      langer dan de lease weg is álle nodes. Fix (~15 regels): bij `Expired`
+      het adres houden en blijven rebinden; alleen Refused en Moved resetten.
+
 - [ ] Hop bouwt pas zonder patch na een hop-os-tag en het ophogen van de
       drie tags in de hop-repo (agentd-hopos, hopos-runner, hop-http); tot
       dan `HOP_REV=worktree`. De verse Hop (applib::rand, de nieuwe MMU)
