@@ -35,8 +35,8 @@ fn handshake_against_a_coprocessor() {
     let p = pool(0x10_0000);
     let mut rt = rtkit(&p);
     rt.boot(&mut ignore).unwrap();
-    assert_eq!(rt.iop_power(), POWER_ON);
-    assert_eq!(rt.ap_power(), POWER_ON);
+    assert_eq!(rt.iop_power, POWER_ON);
+    assert_eq!(rt.ap_power, POWER_ON);
     let cpu = with(|f| dev::read32(f.base.add(fake::CPU_CONTROL)));
     assert_ne!(cpu & CPU_START, 0, "the core runs");
     with(|f| {
@@ -65,8 +65,8 @@ fn sleep_quiesces_then_sleeps_then_stops_the_core() {
     let mut rt = rtkit(&p);
     rt.boot(&mut ignore).unwrap();
     rt.sleep(&mut ignore).unwrap();
-    assert_eq!(rt.ap_power(), POWER_QUIESCED);
-    assert_eq!(rt.iop_power(), POWER_SLEEP);
+    assert_eq!(rt.ap_power, POWER_QUIESCED);
+    assert_eq!(rt.iop_power, POWER_SLEEP);
     let cpu = with(|f| dev::read32(f.base.add(fake::CPU_CONTROL)));
     assert_eq!(cpu & CPU_START, 0);
     // De volgorde: eerst de AP-kant, dan de coprocessor.
@@ -253,12 +253,10 @@ fn sart_window_lands_in_a_free_entry() {
     assert_eq!(regs[32 + 2], 0x400);
     // De vensters van de firmware zijn niet aangeraakt.
     assert_eq!(regs[16], 0x100);
-    assert_eq!(s.window(2), Some((Pa(0x8_0000_0000), 0x40_0000)));
-    assert_eq!(s.windows(), 3);
     // Dezelfde vraag nog eens (een tweede kern): hetzelfde venster, geen
     // nieuw.
     assert_eq!(s.allow(Pa(0x8_0000_0000), 0x40_0000), Ok(2));
-    assert_eq!(s.windows(), 3);
+    assert_eq!(regs[..16].iter().filter(|&&c| c != 0).count(), 3);
 }
 
 #[test]
@@ -296,6 +294,6 @@ fn boot_again_after_sleep_starts_clean() {
     // Na een slaap (of een power-reset) vraagt hij opnieuw om buffers; de
     // crashlog-vraag is dan geen crash, en het geheugen is vers.
     rt.boot(&mut ignore).unwrap();
-    assert_eq!(rt.iop_power(), POWER_ON);
+    assert_eq!(rt.iop_power, POWER_ON);
     assert_ne!(rt.crash_buf().pa, first);
 }

@@ -103,7 +103,7 @@ fn a_fill_runs_whole_rounds_with_the_ring_enabled() {
     });
     let mut a = [0u8; 48];
     t.fill(&mut a).unwrap();
-    let f = t.regs();
+    let f = t.regs;
     // 48 bytes = twee rondes; de sample-telling van Linux.
     assert_eq!(f.round, 2);
     assert_eq!(f.samples, SAMPLES);
@@ -133,7 +133,7 @@ fn a_short_buffer_takes_the_head_of_a_round() {
     let mut t = trng(Fake::default());
     let mut a = [0u8; 5];
     t.fill(&mut a).unwrap();
-    assert_eq!(t.regs().round, 1);
+    assert_eq!(t.regs.round, 1);
 }
 
 #[test]
@@ -175,14 +175,14 @@ fn a_start_that_never_falls_times_out_and_stops_the_ring() {
         Err(Error::Timeout(ctl)) => assert_ne!(ctl & CTL_START, 0),
         other => panic!("{other:?}"),
     }
-    assert_eq!(t.regs().ctl_log.last(), Some(&0xFFFF_0000));
+    assert_eq!(t.regs.ctl_log.last(), Some(&0xFFFF_0000));
 }
 
 #[test]
 fn an_empty_buffer_is_refused_without_touching_the_block() {
     let mut t = trng(Fake::default());
     assert_eq!(t.fill(&mut []), Err(Error::Empty));
-    assert!(t.regs().ctl_log.is_empty());
+    assert!(t.regs.ctl_log.is_empty());
 }
 
 #[test]

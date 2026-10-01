@@ -70,10 +70,9 @@ mod ring;
 pub use bulk::{BulkTd, TRB_MAX};
 pub use device::{Device, MAX_HID_IFACES, PROTO_KEYBOARD, PROTO_MOUSE, PROTO_NONE, Report};
 pub use host::{BULK_BUF_MAX, BULK_BUF_MIN, MAX_DEVICES, PENDING_CAP, SCRATCH_MAX};
-pub use ring::comp_name;
 
 use host::{Arena, SlotRes};
-use ring::{EvRing, Ring};
+use ring::{EvRing, Ring, comp_name};
 
 /// De capability-registers (xHCI 5.3): de eerste bytes van het venster.
 /// Read-only; ze vertellen waar de rest ligt. De operational-registers
@@ -109,6 +108,13 @@ const _: () = {
 };
 
 /// De operational-registers (xHCI 5.4), op `base + CAPLENGTH`.
+///
+/// De 64-bit registers (CRCR, DCBAAP, en ERSTBA en ERDP in [`IrRegs`])
+/// zijn `Reg<u64>`: één native 64-bit-schrijf publiceert adres en
+/// stuurbits samen. Hoog, laag, hoog verliest op de CIX (de O6N) de
+/// ringstand; alleen laag-dan-hoog mist QEMU's latch op het hoge woord
+/// (`hw/usb/hcd-xhci.c`). GEMETEN 30-09 op de O6N: tien xHCI's up en de
+/// Blu-ray-drive over USB-BOT.
 #[repr(C)]
 struct OpRegs {
     usbcmd: Reg<u32>,
@@ -116,13 +122,11 @@ struct OpRegs {
     pagesize: Reg<u32>,
     _r0: [u32; 2],
     _dnctrl: Reg<u32>,
-    /// Command ring control, laag woord: draagt RCS.
-    crcr_lo: Reg<u32>,
-    crcr_hi: Reg<u32>,
+    /// Command ring control; het lage woord draagt RCS.
+    crcr: Reg<u64>,
     _r1: [u32; 4],
     /// Device context base address array pointer.
-    dcbaap_lo: Reg<u32>,
-    dcbaap_hi: Reg<u32>,
+    dcbaap: Reg<u64>,
     config: Reg<u32>,
 }
 
@@ -131,10 +135,8 @@ const _: () = {
     assert!(offset_of!(OpRegs, usbsts) == 0x04);
     assert!(offset_of!(OpRegs, pagesize) == 0x08);
     assert!(offset_of!(OpRegs, _dnctrl) == 0x14);
-    assert!(offset_of!(OpRegs, crcr_lo) == 0x18);
-    assert!(offset_of!(OpRegs, crcr_hi) == 0x1C);
-    assert!(offset_of!(OpRegs, dcbaap_lo) == 0x30);
-    assert!(offset_of!(OpRegs, dcbaap_hi) == 0x34);
+    assert!(offset_of!(OpRegs, crcr) == 0x18);
+    assert!(offset_of!(OpRegs, dcbaap) == 0x30);
     assert!(offset_of!(OpRegs, config) == 0x38);
 };
 
@@ -164,11 +166,9 @@ struct IrRegs {
     imod: Reg<u32>,
     erstsz: Reg<u32>,
     _r0: u32,
-    erstba_lo: Reg<u32>,
-    erstba_hi: Reg<u32>,
+    erstba: Reg<u64>,
     /// Bit 3 = EHB (event handler busy, write-1-to-clear).
-    erdp_lo: Reg<u32>,
-    erdp_hi: Reg<u32>,
+    erdp: Reg<u64>,
 }
 
 const RT_IR0: u64 = 0x20;
@@ -176,9 +176,8 @@ const RT_IR0: u64 = 0x20;
 const _: () = {
     assert!(offset_of!(IrRegs, imod) == 0x04);
     assert!(offset_of!(IrRegs, erstsz) == 0x08);
-    assert!(offset_of!(IrRegs, erstba_lo) == 0x10);
-    assert!(offset_of!(IrRegs, erdp_lo) == 0x18);
-    assert!(offset_of!(IrRegs, erdp_hi) == 0x1C);
+    assert!(offset_of!(IrRegs, erstba) == 0x10);
+    assert!(offset_of!(IrRegs, erdp) == 0x18);
 };
 
 // USBCMD-bits (xHCI 5.4.1).
@@ -189,7 +188,7 @@ const CMD_HCRST: u32 = 1 << 1;
 const STS_HCH: u32 = 1 << 0;
 const STS_CNR: u32 = 1 << 11;
 
-const ERDP_EHB: u32 = 1 << 3;
+const ERDP_EHB: u64 = 1 << 3;
 
 // PORTSC-bits (xHCI 5.4.8). De schrijf-semantiek van dit register is een
 // val: CSC/PEC/PRC enzovoort zijn write-1-to-clear terwijl PED
@@ -1046,17 +1045,11 @@ impl Hc {
         let o = self.opr();
         [
             u64::from(o.usbsts.read()),
-            u64::from(o.crcr_lo.read()) | (u64::from(o.crcr_hi.read()) << 32),
+            o.crcr.read(),
             self.cmd.map_or(0, |r| r.bus),
             self.evt
                 .map_or(0, |r| u64::from(dev::read32(r.base.add(12)))),
         ]
-    }
-
-    /// Of de controller draait.
-    #[must_use]
-    pub fn is_running(&self) -> bool {
-        self.running
     }
 }
 

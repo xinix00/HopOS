@@ -77,8 +77,6 @@ const _: () = {
 
 /// FR: TX-FIFO vol.
 const FR_TXFF: u32 = 1 << 5;
-/// FR: RX-FIFO leeg.
-const FR_RXFE: u32 = 1 << 4;
 /// LCR_H: FIFO's aan.
 const LCR_FEN: u32 = 1 << 4;
 /// LCR_H: 8 databits.
@@ -169,16 +167,6 @@ impl Pl011 {
             }
             self.putc(c);
         }
-    }
-
-    /// Leest één byte als er een klaarligt.
-    #[must_use]
-    pub fn getc(&self) -> Option<u8> {
-        let r = self.regs();
-        if r.fr.read() & FR_RXFE != 0 {
-            return None;
-        }
-        Some((r.dr.read() & 0xff) as u8)
     }
 }
 

@@ -471,9 +471,6 @@ fn the_dma_layout_keeps_the_cached_block_apart() {
     ] {
         assert!(off + len <= DATA_OFF);
     }
-    let m = mem(CAP, 9, 0);
-    let n = up(&m);
-    assert_eq!(n.data_region(), (m.dma.add(DATA_OFF), 2 << 20));
 }
 
 #[test]

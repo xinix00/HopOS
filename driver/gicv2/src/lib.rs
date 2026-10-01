@@ -41,8 +41,6 @@ use dev::{Pa, Reg};
 
 /// Het aantal SGI's (INTID 0..=15).
 pub const SGI_COUNT: u32 = 16;
-/// De eerste PPI.
-pub const FIRST_PPI: u32 = 16;
 /// De INTID van SPI 0.
 pub const FIRST_SPI: u32 = 32;
 /// IAR: 1020..1023 is "niets" (1023 = spurious).
@@ -241,14 +239,6 @@ impl Gic {
     #[must_use]
     pub fn hppir(&self) -> u32 {
         self.c().hppir.read() & 0x3ff
-    }
-
-    /// Maakt SPI `id` flankgevoelig (ICFGR bit 1 van zijn paar), vóór de
-    /// enable: voor lijnen die een flank zijn (de MSI-vectoren van de MIP
-    /// op de Pi 5). De weg voor een board is
-    /// [`Controller::set_trigger`], via `cpu::irq::enable_as`.
-    pub fn set_edge(&self, id: u32) {
-        self.config(id, true);
     }
 
     /// ICFGR van SPI `id`: bit 1 van zijn paar is de flank (IHI 0048B
@@ -461,7 +451,7 @@ mod tests {
         assert_eq!(dev::read8(dp.add(0x400 + 166)), PRIORITY);
         assert_eq!(dev::read8(dp.add(0x800 + 166)), 1);
         assert_eq!(dev::read32(dp.add(0x100 + 4 * 5)), 1 << (166 % 32));
-        g.set_edge(166);
+        g.set_trigger(Line(166), Trigger::Edge).unwrap();
         assert_eq!(dev::read32(dp.add(0xc00 + 4 * 10)), 2 << (2 * (166 % 16)));
         g.disable(Line(166));
         assert_eq!(dev::read32(dp.add(0x180 + 4 * 5)), 1 << (166 % 32));
@@ -516,7 +506,7 @@ mod tests {
         assert_eq!(dev::read32(dp.add(0x100)), 1 << 8);
         assert_eq!(g.enable(Line(1020)), Err(Error::Rejected { line: 1020 }));
         // Een SGI of speciale lijn raakt ICFGR niet.
-        g.set_edge(5);
+        g.set_trigger(Line(5), Trigger::Edge).unwrap();
         assert_eq!(dev::read32(dp.add(0xc00)), 0);
     }
 

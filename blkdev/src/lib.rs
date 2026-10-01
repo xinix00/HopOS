@@ -434,11 +434,6 @@ impl<D: AsyncBlockDevice, P: Pace> Paced<D, P> {
         Self { dev, pace }
     }
 
-    /// De driver.
-    pub fn dev(&self) -> &D {
-        &self.dev
-    }
-
     /// De driver, veranderlijk.
     pub fn dev_mut(&mut self) -> &mut D {
         &mut self.dev

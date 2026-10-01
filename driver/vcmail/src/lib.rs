@@ -77,12 +77,8 @@ pub const BUFFER_BYTES: usize = 4096;
 const BUFFER_WORDS: usize = BUFFER_BYTES / 4;
 
 /// Het hoogste bufferadres dat de mailbox draagt: het register is 32 bits
-/// breed. Op de host liggen de nep-buffers van de tests boven 4 GB; daar
-/// telt alleen het protocol.
-#[cfg(not(test))]
+/// breed.
 const MAX_BUS: u64 = u32::MAX as u64;
-#[cfg(test)]
-const MAX_BUS: u64 = 1 << 48;
 
 /// Hoe lang een stap van de transactie mag duren.
 const TIMEOUT_NS: u64 = 500_000_000;
@@ -91,8 +87,6 @@ const TIMEOUT_NS: u64 = 500_000_000;
 pub mod tag {
     /// De MAC van het board (6 bytes in 2 woorden).
     pub const GET_BOARD_MAC: u32 = 0x0001_0003;
-    /// Het serienummer van het board (2 woorden).
-    pub const GET_BOARD_SERIAL: u32 = 0x0001_0004;
     /// De actuele kloksnelheid: id, Hz.
     pub const GET_CLOCK_RATE: u32 = 0x0003_0002;
     /// Het firmware-maximum van een klok.
@@ -193,28 +187,10 @@ fn words_needed(tags: &[Tag<'_>]) -> usize {
     })
 }
 
-/// Een venster van woorden: de property-buffer in device-geheugen, of een
-/// slice in een test.
-trait Words {
-    fn put(&mut self, i: usize, v: u32);
-    fn get(&self, i: usize) -> u32;
-}
-
-impl Words for [u32] {
-    fn put(&mut self, i: usize, v: u32) {
-        if let Some(w) = self.get_mut(i) {
-            *w = v;
-        }
-    }
-    fn get(&self, i: usize) -> u32 {
-        <[u32]>::get(self, i).copied().unwrap_or(0)
-    }
-}
-
-/// De property-buffer in device-geheugen.
+/// De property-buffer in device-geheugen, woord voor woord.
 struct DevBuf(Pa);
 
-impl Words for DevBuf {
+impl DevBuf {
     fn put(&mut self, i: usize, v: u32) {
         dev::write32(self.0.add(4 * i as u64), v);
     }
@@ -225,7 +201,7 @@ impl Words for DevBuf {
 
 /// Schrijft het bericht: maat, code 0, per tag {id, payload-bytes, 0,
 /// payload}, eind-tag. Geeft het aantal woorden.
-fn encode(buf: &mut (impl Words + ?Sized), tags: &[Tag<'_>]) -> Result<usize> {
+fn encode(buf: &mut DevBuf, tags: &[Tag<'_>]) -> Result<usize> {
     let n = words_needed(tags);
     if n > BUFFER_WORDS {
         return Err(Error::TooLarge { words: n });
@@ -247,7 +223,7 @@ fn encode(buf: &mut (impl Words + ?Sized), tags: &[Tag<'_>]) -> Result<usize> {
 }
 
 /// Leest de respons terug in de tags; elke tag moet zijn respons-bit hebben.
-fn decode(buf: &(impl Words + ?Sized), tags: &mut [Tag<'_>]) -> Result {
+fn decode(buf: &DevBuf, tags: &mut [Tag<'_>]) -> Result {
     let code = buf.get(1);
     if code != RESP_SUCCESS {
         return Err(Error::Refused { code });
@@ -544,6 +520,18 @@ mod tests {
         Pa(v.as_mut_ptr() as usize as u64)
     }
 
+    /// Een [`DevBuf`] over een slice: de protocoltoetsen draaien op gewoon
+    /// geheugen (boven 4 GB, maar `encode` en `decode` kijken niet naar het
+    /// adres).
+    fn devbuf(v: &mut [u64]) -> DevBuf {
+        DevBuf(pa(v))
+    }
+
+    /// De eerste `n` woorden van de buffer.
+    fn words(b: &DevBuf, n: usize) -> Vec<u32> {
+        (0..n).map(|i| b.get(i)).collect()
+    }
+
     #[test]
     fn encode_lays_out_header_tags_and_end() {
         let mut a = [7, 0];
@@ -558,11 +546,12 @@ mod tests {
                 words: &mut b,
             },
         ];
-        let mut buf = [0xffff_ffffu32; 16];
-        let n = encode(&mut buf[..], &tags).unwrap();
+        let mut mem = [u64::MAX; 8];
+        let mut buf = devbuf(&mut mem);
+        let n = encode(&mut buf, &tags).unwrap();
         assert_eq!(n, 2 + 3 + 2 + 3 + 3 + 1);
         assert_eq!(
-            buf[..n],
+            words(&buf, n),
             [
                 56,
                 0,
@@ -585,27 +574,28 @@ mod tests {
     #[test]
     fn decode_needs_the_success_codes() {
         let mut w = [0, 0];
-        let mut buf = [0u32; 8];
+        let mut mem = [0u64; 4];
+        let mut buf = devbuf(&mut mem);
         {
             let tags = [Tag {
                 id: tag::GET_TEMP,
                 words: &mut w,
             }];
-            encode(&mut buf[..], &tags).unwrap();
+            encode(&mut buf, &tags).unwrap();
         }
         let mut tags = [Tag {
             id: tag::GET_TEMP,
             words: &mut w,
         }];
-        assert_eq!(decode(&buf[..], &mut tags), Err(Error::Refused { code: 0 }));
-        buf[1] = RESP_SUCCESS;
+        assert_eq!(decode(&buf, &mut tags), Err(Error::Refused { code: 0 }));
+        buf.put(1, RESP_SUCCESS);
         assert_eq!(
-            decode(&buf[..], &mut tags),
+            decode(&buf, &mut tags),
             Err(Error::Tag { id: tag::GET_TEMP })
         );
-        buf[4] = RESP_SUCCESS | 8;
-        buf[6] = 51_234;
-        decode(&buf[..], &mut tags).unwrap();
+        buf.put(4, RESP_SUCCESS | 8);
+        buf.put(6, 51_234);
+        decode(&buf, &mut tags).unwrap();
         assert_eq!(w, [0, 51_234]);
     }
 
@@ -637,17 +627,33 @@ mod tests {
     }
 
     #[test]
+    fn the_buffer_must_fit_in_32_bits() {
+        let at = |b: u64| {
+            // SAFETY: `buffer_ok` raakt registers noch buffer aan.
+            unsafe { Mbox::new(Pa(0), Pa(b), ticking) }.buffer_ok()
+        };
+        let top = (1u64 << 32) - BUFFER_BYTES as u64;
+        assert_eq!(at(0x1000), Ok(()));
+        assert_eq!(at(top - 16), Ok(()));
+        assert_eq!(at(top + 16), Err(Error::Buffer { pa: top + 16 }));
+        assert_eq!(at(1 << 32), Err(Error::Buffer { pa: 1 << 32 }));
+    }
+
+    #[test]
     fn a_pending_request_is_never_overwritten() {
-        let (mut regs, mut buf) = fake();
+        let (mut regs, _) = fake();
         let r = pa(&mut regs);
         dev::write32(r.add(0x18), STATUS_EMPTY);
-        // SAFETY: de vectoren leven de hele test.
-        let mut m = unsafe { Mbox::new(r, pa(&mut buf), ticking) };
+        // De buffer moet onder 4 GB liggen, en daar heeft de host geen
+        // geheugen: 0x1000 is ongemapt, dus elke aanraking zou de test
+        // laten crashen. Dat is de toets "buffer untouched".
+        // SAFETY: de registers leven de hele test; de buffer wordt niet
+        // aangeraakt (zie boven).
+        let mut m = unsafe { Mbox::new(r, Pa(0x1000), ticking) };
         m.pending = 0x1008;
         assert_eq!(m.temp(), Err(Error::Timeout { stage: "reply" }));
         assert_eq!(m.pending, 0x1008);
         assert_eq!(dev::read32(r.add(0x20)), 0, "nothing published");
-        assert!(buf.iter().all(|&w| w == 0), "buffer untouched");
     }
 
     #[test]
@@ -699,9 +705,10 @@ mod tests {
         // Wat de VideoCore leest: maat 28, verzoek, de tag met vier bytes en
         // code 0, het adres van bus 1, de eind-tag. Linux
         // (`rpi_firmware_property`) legt precies deze zeven woorden neer.
-        let db = DevBuf(b);
-        let sent: Vec<u32> = (0..7).map(|i| db.get(i)).collect();
-        assert_eq!(sent, [28, 0, 0x0003_0058, 4, 0, 0x0010_0000, 0]);
+        assert_eq!(
+            words(&DevBuf(b), 7),
+            [28, 0, 0x0003_0058, 4, 0, 0x0010_0000, 0]
+        );
         assert_eq!(dev::read32(r.add(0x20)), (b.0 as u32) | 8);
         // De nep-firmware: gelukt, de tag met zijn respons-bit, een woord
         // terug, en het adres in MBOX0.
@@ -724,23 +731,24 @@ mod tests {
     fn notify_xhci_reset_without_the_tag_bit_is_an_error() {
         // Een firmware die de tag niet kent (een oude start4.elf) laat het
         // respons-bit leeg: dat is een fout, geen stille nul.
-        let mut buf = [0u32; 8];
+        let mut mem = [0u64; 4];
+        let mut buf = devbuf(&mut mem);
         let mut w = [0x0010_0000u32];
         encode(
-            &mut buf[..],
+            &mut buf,
             &[Tag {
                 id: tag::NOTIFY_XHCI_RESET,
                 words: &mut w,
             }],
         )
         .unwrap();
-        buf[1] = RESP_SUCCESS;
+        buf.put(1, RESP_SUCCESS);
         let mut tags = [Tag {
             id: tag::NOTIFY_XHCI_RESET,
             words: &mut w,
         }];
         assert_eq!(
-            decode(&buf[..], &mut tags),
+            decode(&buf, &mut tags),
             Err(Error::Tag {
                 id: tag::NOTIFY_XHCI_RESET
             })

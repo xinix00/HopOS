@@ -55,7 +55,7 @@ pub(crate) const CC_SHORT_PACKET: u32 = 13;
 
 /// De naam van een completion code, voor de logregel.
 #[must_use]
-pub fn comp_name(c: u32) -> &'static str {
+pub(crate) fn comp_name(c: u32) -> &'static str {
     match c {
         CC_SUCCESS => "success",
         2 => "data buffer error",

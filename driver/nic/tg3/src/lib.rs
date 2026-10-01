@@ -9,8 +9,10 @@
 //! praat kregen staan in `OLD/docs/v1/archief/apple-m4.md` ("Het netwerk:
 //! WERKT", 29-08).
 //!
-//! Wat deze driver NIET doet, en waarom dat mag: geen MSI (het board bedraadt
-//! INTx, of pollt), geen jumbo-frames, geen TSO of checksum-offload, geen
+//! Wat deze driver NIET doet, en waarom dat mag: geen interrupt (het board
+//! pollt; wie INTx terugbrengt, kijkt eerst naar `tg3_int_reenable`: zonder
+//! HOSTCC_MODE_NOW na het heropenen bleef een los frame 10 ms liggen, L83,
+//! 20-09), geen jumbo-frames, geen TSO of checksum-offload, geen
 //! statistieken-DMA, geen WoL, geen ASF/firmware-management. De jumbo- en
 //! mini-ringen blijven leeg: één standaard-ring van 2 KB-buffers dekt
 //! 1500-byte frames.
@@ -55,12 +57,11 @@ mod regs;
 use core::fmt;
 use core::mem::{offset_of, size_of};
 use dev::{Pa, Reg};
-use driver_mdio::{self as mdio, Mdio};
+use driver_mdio as mdio;
 use netdev::{Mac, TxError};
 use regs::*;
-use sync::Signal;
 
-pub use diag::{Counters, Describe, IrqDiag, RcbDump, SelfTest, Stats};
+pub use diag::Describe;
 pub use driver_mdio::Link;
 
 /// Broadcom.
@@ -144,8 +145,6 @@ const TX_BD: u64 = size_of::<TxBd>() as u64;
 const OFF_STATUS: u64 = 0x0000;
 /// De lengte van het status-blok (`struct tg3_hw_status`).
 const STATUS_LEN: u64 = 80;
-/// Het status-woord (bit 0 = UPDATED).
-const STATUS_WORD: u64 = 0;
 /// `idx[0]`: rx_producer in de lage helft, tx_consumer in de hoge.
 const STATUS_IDX0: u64 = 16;
 /// De producer-ring.
@@ -305,31 +304,6 @@ fn wr(reg: &Reg<u32>, v: u32) {
     dev::mb();
 }
 
-/// Het interrupt-pad: alleen de interrupt-mailbox. `Copy`, zodat het board
-/// hem naast de driver houdt voor de ack.
-#[derive(Clone, Copy)]
-pub struct IrqAck {
-    bar0: Pa,
-}
-
-impl IrqAck {
-    /// Maskeert de interrupt (mailbox 1, `tg3_disable_ints`); INTA# valt en
-    /// de poortlijn zakt mee.
-    ///
-    /// Het UPDATED-bit van het status-blok wissen (zoals `tg3_interrupt`
-    /// doet) is in Go HIER geprobeerd en teruggedraaid: daarna kwam er geen
-    /// interrupt meer (bundel 37, 20-09: 0 irq/s, cyclus terug op 21 ms).
-    pub fn ack(&self) {
-        // SAFETY: `bar0` kwam uit `Tg3::new`, dat een gemapt blok eiste; de
-        // mailbox deelt niets met de ringen.
-        let r: &Regs = unsafe { dev::regs(self.bar0) };
-        r.mb_interrupt.write(1);
-        // Terug lezen duwt de posted write de PCIe-brug uit
-        // (`tw32_mailbox_f`).
-        let _ = r.mb_interrupt.read();
-    }
-}
-
 /// Eén BCM57762.
 pub struct Tg3 {
     bar0: Pa,
@@ -353,7 +327,6 @@ pub struct Tg3 {
     fw_mbox: u32,
     /// Het PHY-id uit de probe.
     phy_id: u32,
-    irq: Option<&'static Signal>,
     /// Meetlat: RX-descriptors met een fout of een kromme lengte.
     pub rx_bad: u64,
     /// Meetlat: TX-doorbells.
@@ -422,7 +395,6 @@ impl Tg3 {
             tx_dirty: false,
             fw_mbox: 0,
             phy_id: 0,
-            irq: None,
             rx_bad: 0,
             doorbells: 0,
             tx_full: 0,
@@ -809,7 +781,7 @@ impl Tg3 {
             );
         }
         let r = self.regs();
-        Self::wr_mbox(&r.mb_interrupt, 1); // gemaskeerd tot `irq_unmask`
+        Self::wr_mbox(&r.mb_interrupt, 1); // gemaskeerd: het board pollt
         Self::wr_mbox(&r.mb_tx_prod, 0);
         Self::wr_mbox(&r.mb_rx_ret_cons, 0);
         self.tx_prod = 0;
@@ -833,8 +805,8 @@ impl Tg3 {
         wr(&r.rcv_rule_cfg, RCV_RULE_DEFAULT_CLASS);
         wr(&r.rcvlpc_config, 0x0181);
 
-        // De statistieken-tellers. Wij lezen ze via de registers, maar de
-        // blokken willen ze aan hebben staan (tg3 doet dit onvoorwaardelijk).
+        // De statistieken-tellers. Wij lezen ze niet, maar de blokken willen
+        // ze aan hebben staan (tg3 doet dit onvoorwaardelijk).
         wr(
             &r.rcvlpc_stats_enable,
             r.rcvlpc_stats_enable.read() & !RCVLPC_STATSENAB_DACK_FIX,
@@ -1034,12 +1006,6 @@ impl Tg3 {
         rev >> 12
     }
 
-    /// MISC_HOST_CTRL (diagnose: staat MASK_PCI_INT nog?).
-    #[must_use]
-    pub fn misc_host_ctrl(&self) -> u32 {
-        self.config().misc_host_ctrl.read()
-    }
-
     /// Eén regel over de chip: ASIC, MAC, PHY, firmware, en de twee
     /// registers waar de drie lessen van 29-08 in staan.
     #[must_use]
@@ -1053,171 +1019,6 @@ impl Tg3 {
             misc_host_ctrl: c.misc_host_ctrl.read(),
             pci_cmd: c.command.read() & 0xffff,
         }
-    }
-
-    /// Meet in één regel waar de ringen op staan of vallen: doet het
-    /// SRAM-venster het (via BAR0 zoals tg3, en via de config space als
-    /// tweede mening), staat INDIR_ACCESS aan, staat bus-mastering aan, en
-    /// wat zei de bootcode. Het board drukt hem af als er iets hapert, zodat
-    /// een dode ring meteen een oorzaak heeft in plaats van een symptoom.
-    /// Schrijft een proefwoord in een ongebruikt woord van de send-RCB.
-    pub fn self_test(&mut self) -> SelfTest {
-        const PROBE: u32 = 0x5a5a_1234;
-        let at = SRAM_SEND_RCB + 8;
-        self.write_mem(at, PROBE);
-        let bar = self.read_mem(at);
-        let cfg = (self.cfg.0 != 0).then(|| {
-            let c = self.config();
-            c.mem_win_base.write(at);
-            c.mem_win_data.write(!PROBE);
-            c.mem_win_base.write(at);
-            let v = c.mem_win_data.read();
-            c.mem_win_base.write(0);
-            v
-        });
-        let c = self.config();
-        SelfTest {
-            off: at,
-            bar,
-            cfg,
-            ok: bar == PROBE,
-            misc_host_ctrl: c.misc_host_ctrl.read(),
-            pci_cmd: c.command.read() & 0xffff,
-            fw_mbox: self.fw_mbox,
-        }
-    }
-
-    /// De MAC-tellers, rechtstreeks uit hun registers
-    /// (`tg3_periodic_fetch_stats`). Ze staan los van DMA: lopen ze op
-    /// terwijl het status-blok nul blijft, dan ontvángt de MAC wel degelijk
-    /// en strandt het verkeer pas op weg naar het geheugen van de host. Dat
-    /// is het verschil tussen een MAC-probleem en een transport-probleem.
-    #[must_use]
-    pub fn stats(&self) -> Stats {
-        let r = self.regs();
-        Stats {
-            rx_octets: r.rx_octets.read(),
-            rx_ucast: r.rx_ucast.read(),
-            rx_mcast: r.rx_mcast.read(),
-            rx_bcast: r.rx_bcast.read(),
-            rx_fcs_err: r.rx_fcs_err.read(),
-            tx_octets: r.tx_octets.read(),
-            tx_ucast: r.tx_ucast.read(),
-            tx_bcast: r.tx_bcast.read(),
-        }
-    }
-
-    /// De tellers van de list-placement-eenheid, precies waar het misgaat als
-    /// de MAC ontvangt en er niets in de ringen belandt. Elke teller wijst
-    /// een andere schuldige aan: geen BD beschikbaar, door een filter
-    /// gevallen, of een volle werkrij.
-    #[must_use]
-    pub fn counters(&self) -> Counters {
-        let r = self.regs();
-        Counters {
-            lpc_status: r.rcvlpc_status.read(),
-            lpc_nonempty: r.rcvlpc_nonempty.read(),
-            drop_filter: r.lpc_drop_filter.read(),
-            wq_full: r.lpc_wq_full.read(),
-            no_rcv_bd: r.lpc_no_rcv_bd.read(),
-            in_discards: r.lpc_in_discards.read(),
-            in_errors: r.lpc_in_errors.read(),
-            thresh_hit: r.lpc_thresh_hit.read(),
-            dbdi_status: r.rcvdbdi_status.read(),
-            dbdi_std_con: r.rcvdbdi_std_con.read(),
-            bdi_status: r.rcvbdi_status.read(),
-            bdi_std_prod: r.rcvbdi_std_prod.read(),
-        }
-    }
-
-    /// De twee ring-control-blocks terug uit NIC-SRAM: staat er wat we
-    /// dachten te schrijven, dan weet de chip waar zijn ringen liggen.
-    #[must_use]
-    pub fn rcb_dump(&self) -> RcbDump {
-        let one = |base: u32| {
-            [
-                self.read_mem(base),
-                self.read_mem(base + 4),
-                self.read_mem(base + 8),
-                self.read_mem(base + 12),
-            ]
-        };
-        RcbDump {
-            send: one(SRAM_SEND_RCB),
-            ret: one(SRAM_RCV_RET_RCB),
-        }
-    }
-
-    /// Het frame-bufferbereik (basis, maat), voor het board dat het gecached
-    /// wil mappen.
-    #[must_use]
-    pub fn buf_region(&self) -> (Pa, u64) {
-        (self.dma.add(BUF_OFF), BUF_LEN)
-    }
-
-    // ── Interrupts (INTx) ───────────────────────────────────────────────────
-
-    /// Opent de interrupt: MASK_PCI_INT eraf (`enable_reg_access` zet hem,
-    /// zoals tg3 bij init, en zonder deze stap trekt de chip nooit zijn lijn)
-    /// en de interrupt-mailbox op 0 (`tg3_enable_ints` zonder tagged
-    /// status). De chip meldt zich dan bij elke update van het status-blok.
-    pub fn irq_unmask(&mut self) {
-        let c = self.config();
-        wr(
-            &c.misc_host_ctrl,
-            c.misc_host_ctrl.read() & !MISC_MASK_PCI_INT,
-        );
-        Self::wr_mbox(&self.regs().mb_interrupt, 0);
-    }
-
-    /// Maskeert de interrupt (mailbox 1), zoals `tg3_msi` doet; zie
-    /// [`IrqAck::ack`].
-    pub fn ack_irq(&self) {
-        self.irq_ack().ack();
-    }
-
-    /// Het interrupt-pad, voor het board.
-    #[must_use]
-    pub fn irq_ack(&self) -> IrqAck {
-        IrqAck { bar0: self.bar0 }
-    }
-
-    /// Opent de mailbox weer, en doet dan wat `tg3_int_reenable` doet: kwam
-    /// er werk binnen terwijl de mailbox dicht stond, dan trekt de chip daar
-    /// NIET alsnog de lijn voor. Bij bulk merk je dat niet (het volgende
-    /// frame werkt het status-blok opnieuw bij), maar een los frame (een
-    /// SYN, de ACK van een klein venster) bleef liggen tot de vangrail van
-    /// de pomp (10 ms). Dat was de héle 45 MB/s over de draad: venster 480
-    /// KB gedeeld door een RTT van 10,5 ms, op elk paar waar de M4 in zat
-    /// (L83, 20-09; gepold deed dezelfde draad 100-118 MB/s). Linux: na het
-    /// openen kijken of er werk staat en dan HOSTCC_MODE_NOW zetten, zodat
-    /// de chip meteen een status-update plus interrupt afgeeft.
-    pub fn rearm_irq(&mut self) {
-        let r = self.regs();
-        Self::wr_mbox(&r.mb_interrupt, 0);
-        if self.rx_pending() {
-            wr(&r.hostcc_mode, r.hostcc_mode.read() | HOSTCC_MODE_NOW);
-        }
-    }
-
-    /// Het status-woord van het status-blok (bit 0 = UPDATED), HOSTCC_MODE,
-    /// en de PCI-status (bit 3 = INTx# asserted): trekt de chip zijn lijn?
-    #[must_use]
-    pub fn irq_diag(&self) -> IrqDiag {
-        IrqDiag {
-            status: self.status_word(STATUS_WORD),
-            hostcc: self.regs().hostcc_mode.read(),
-            pci_status: self.config().command.read() >> 16,
-        }
-    }
-
-    /// Hangt de bel aan de driver en opent de interrupt. Aanroepen nadat de
-    /// lijn bij de controller scherp staat; zonder blijft de mailbox dicht
-    /// en pollt de pomp. Daarna heropent [`flush`](netdev::Device::flush) de
-    /// interrupt na elke burst.
-    pub fn set_irq(&mut self, bell: &'static Signal) {
-        self.irq = Some(bell);
-        self.irq_unmask();
     }
 
     // ── De ringen ───────────────────────────────────────────────────────────
@@ -1356,48 +1157,7 @@ fn decode_aux(aux: u16) -> Result<Link> {
     Ok(Link { mbps, full_duplex })
 }
 
-impl Mdio for Tg3 {
-    /// Clause 22 via MI_COM.
-    fn read(&mut self, phy: u8, reg: u8) -> mdio::Result<u16> {
-        self.mdio_read(phy, reg)
-            .map_err(|_| mdio::Error::Bus { phy, reg })
-    }
-
-    fn write(&mut self, phy: u8, reg: u8, val: u16) -> mdio::Result {
-        self.mdio_write(phy, reg, val)
-            .map_err(|_| mdio::Error::Bus { phy, reg })
-    }
-}
-
 impl netdev::Device for Tg3 {
-    /// De M4 (01-10): DHCP slaagde en daarna kwam er niets meer binnen. De
-    /// MAC-tellers, de ontvangstketen, het status-blok en de ringstanden in
-    /// één regel scheiden "de MAC ziet niets" van "het strandt onderweg".
-    const DIAG: bool = true;
-
-    fn diag_line(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let r = self.regs();
-        write!(
-            f,
-            "{} | {} | {} | rings rx prod={} ret={} std={} bad={} tx cons={} prod={} full={} bells={} | mac0={:#06x}/{:#010x} rx_mode={:#x} mac_mode={:#x}",
-            self.stats(),
-            self.counters(),
-            self.irq_diag(),
-            self.rx_producer(),
-            self.rx_ret_idx,
-            self.rx_std_idx,
-            self.rx_bad,
-            self.tx_consumer(),
-            self.tx_prod,
-            self.tx_full,
-            self.doorbells,
-            r.mac_addr[0].read(),
-            r.mac_addr[1].read(),
-            r.rx_mode.read(),
-            r.mac_mode.read()
-        )
-    }
-
     /// Zet één frame op de send-ring; de doorbell volgt bij `flush`. Een
     /// volle ring krijgt eerst de doorbell voor wat al klaarstaat (anders
     /// raakt hij nooit leeg) en dan [`TxError::Full`]; Go wachtte hier tot
@@ -1448,23 +1208,15 @@ impl netdev::Device for Tg3 {
         None
     }
 
-    /// De uitgestelde mailboxen (return-consumer, std-producer, en de
-    /// send-doorbell), en met een bedrade lijn de heropening van de
-    /// interrupt ([`Tg3::rearm_irq`]).
+    /// De uitgestelde mailboxen: return-consumer, std-producer, en de
+    /// send-doorbell.
     fn flush(&mut self) {
         self.flush_rx();
         self.flush_tx();
-        if self.irq.is_some() {
-            self.rearm_irq();
-        }
     }
 
     fn mac(&self) -> Mac {
         self.mac
-    }
-
-    fn irq(&self) -> Option<&'static Signal> {
-        self.irq
     }
 }
 

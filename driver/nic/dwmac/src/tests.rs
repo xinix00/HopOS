@@ -53,8 +53,6 @@ fn fake() -> Fake {
     let dma = mem(NEED_BYTES as usize);
     let n = Dwmac {
         base: regs.base,
-        csr: CSR_250_300M,
-        now: clock,
         mac: TEST_MAC,
         ring: Rings::at(dma.base),
         rx_cur: 0,
@@ -345,7 +343,10 @@ fn a_busy_mdio_is_a_bus_error_and_the_command_is_right() {
         p.read(0, 2),
         Err(driver_mdio::Error::Bus { phy: 0, reg: 2 })
     );
-    assert_eq!(p.mdio_state(), mdio_cmd(0, 2, CSR_250_300M, false));
+    assert_eq!(
+        p.regs().gmii_addr.read(),
+        mdio_cmd(0, 2, CSR_250_300M, false)
+    );
     // Bezet: er wordt niets geschreven.
     assert_eq!(
         p.write(0, 0, 0x1200),
@@ -387,7 +388,12 @@ fn program_lays_out_the_rings_and_the_registers() {
     }
     // De ruimte tussen twee descriptors is leeg: de DMA slaat hem over.
     assert_eq!(dev::read32(n.ring.rx(0).add(DESC_SIZE)), 0);
-    assert_eq!(n.filter_mac(), TEST_MAC);
+    let m = TEST_MAC.0;
+    assert_eq!(
+        r.addr0_lo.read(),
+        u32::from_le_bytes([m[0], m[1], m[2], m[3]])
+    );
+    assert_eq!(r.addr0_hi.read(), (u32::from(m[5]) << 8) | u32::from(m[4]));
     assert_eq!(r.filter.read(), FILTER_PM | FILTER_PR);
     assert_eq!(r.conf.read(), mac_conf(100, true).unwrap());
     let op = r.op_mode.read();

@@ -457,14 +457,6 @@ impl Probe {
         }
     }
 
-    /// Het rauwe GMII_ADDR-register, voor het meetinstrument: blijft BUSY
-    /// staan, dan wacht de machine op een klok, en dat is een ander
-    /// probleem dan "er zit geen PHY".
-    #[must_use]
-    pub fn mdio_state(&self) -> u32 {
-        self.regs().gmii_addr.read()
-    }
-
     /// De DMA-softreset. Apart van `start`: de reset zet ook de
     /// MDIO-machine schoon, en het board mag hem vóór de PHY-scan doen.
     pub fn reset(&mut self) -> Result {
@@ -534,8 +526,6 @@ impl Probe {
         self.reset()?;
         let mut n = Dwmac {
             base: self.base,
-            csr: self.csr,
-            now: self.now,
             mac,
             ring: Rings::at(dma),
             rx_cur: 0,
@@ -661,8 +651,6 @@ pub struct Stats {
 /// Eén draaiende DWMAC1000.
 pub struct Dwmac {
     base: Pa,
-    csr: u32,
-    now: Clock,
     mac: Mac,
     ring: Rings,
     /// De volgende RX-descriptor die wij lezen.
@@ -743,25 +731,6 @@ impl Dwmac {
         dev::mb();
     }
 
-    /// Het MAC-adres zoals het in de perfect-filter staat.
-    #[must_use]
-    pub fn filter_mac(&self) -> Mac {
-        let r = self.regs();
-        let h = r.addr0_hi.read().to_le_bytes();
-        let l = r.addr0_lo.read().to_le_bytes();
-        Mac([l[0], l[1], l[2], l[3], h[0], h[1]])
-    }
-
-    /// De MDIO-master, ook na de start (link-status, diagnose).
-    #[must_use]
-    pub fn mdio(&self) -> Probe {
-        Probe {
-            base: self.base,
-            csr: self.csr,
-            now: self.now,
-        }
-    }
-
     /// Leest de Missed Frame and Buffer Overflow Counter en telt hem op bij
     /// de meetlat. Het register is read-and-clear, dus élke lezing is
     /// "sinds de vorige lezing" en niemand anders mag hem lezen; daarom
@@ -775,9 +744,8 @@ impl Dwmac {
 
     /// Het meetinstrument voor een mislukte bring-up: één regel die zegt of
     /// de DMA liep, waar beide ringen staan en wat de MAC ervan vond. Het
-    /// board hangt hem aan de fout als DHCP niets oplevert; dan is één boot
-    /// genoeg om te weten of TX de deur uit ging, of RX niets binnenkreeg,
-    /// of geen van beide.
+    /// board drukt hem één keer na de start, zoals de Radxa die van de
+    /// DWMAC4.
     pub fn diag(&mut self) -> Diag {
         let rx = self.ring.rx(self.rx_cur);
         let tx = self.ring.tx(self.tx_cur);

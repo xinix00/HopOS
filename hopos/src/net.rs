@@ -356,7 +356,6 @@ pub(crate) fn start<D: Device + 'static>(
     sw.attach_host(sw_tx, sw_rx);
 
     let mut pump = Pump::new(nic, ing_tx, eg_rx, &PUMP_BELL, &DOOR, &STATS);
-    pump.set_log(log_line);
     let irq = pump.nic().irq().is_some();
     exec.spawn(async move { pump.run(exec, &STOP).await })
         .map_err(|_| Error::Spawn("pump"))?;

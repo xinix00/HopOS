@@ -117,12 +117,6 @@ impl Mmio {
     pub const unsafe fn new(base: Pa) -> Self {
         Self { base }
     }
-
-    /// Het basisadres, voor de logregel.
-    #[must_use]
-    pub const fn base(&self) -> Pa {
-        self.base
-    }
 }
 
 impl Regs for Mmio {
@@ -199,11 +193,6 @@ impl<R: Regs> Rng200<R> {
             started: false,
             last: None,
         }
-    }
-
-    /// De registers, voor de logregel van het board.
-    pub fn regs(&self) -> &R {
-        &self.regs
     }
 
     /// De warm-up van iproc-rng200: RBG uit, IRQ-status wissen, RBG en RNG

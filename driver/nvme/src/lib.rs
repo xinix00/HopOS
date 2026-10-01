@@ -1,7 +1,7 @@
 //! NVMe over PCIe: het blokapparaat onder hopfs op de O6N en de Altra.
 //!
-//! De Rust-vorm van `OLD/metal/driver/nvme` (zonder de Apple-ANS, die bij het
-//! M4-board komt): een admin-queue plus één I/O-queue-paar, gepold, één
+//! De Rust-vorm van `OLD/metal/driver/nvme` (de Apple-ANS staat in
+//! [`apple`]): een admin-queue plus één I/O-queue-paar, gepold, één
 //! verzoek tegelijk in één DMA-databuffer. Dat is geen beperking maar de
 //! vorm: de eigenaar (de hopfs-actor, `&mut self`) doet één ding tegelijk,
 //! dus de driver kent geen tags, geen rij en geen herordening. De Go-`mu`
@@ -394,8 +394,6 @@ pub struct Nvme {
     pending: Option<Pending>,
     /// Meetlat: afgehandelde opdrachten.
     pub commands: u64,
-    /// Meetlat: de langste opdracht in nanoseconden.
-    pub slowest_ns: u64,
 }
 
 impl Nvme {
@@ -446,7 +444,6 @@ impl Nvme {
             dead: false,
             pending: None,
             commands: 0,
-            slowest_ns: 0,
         }
     }
 
@@ -612,8 +609,6 @@ impl Nvme {
             self.commands += 1;
         }
         self.pending = None;
-        let dt = (self.clock)().saturating_sub(p.t0);
-        self.slowest_ns = self.slowest_ns.max(dt);
         Poll::Ready(match p.status {
             0 => Ok(()),
             s => Err(Error::Status {
@@ -817,12 +812,6 @@ impl Nvme {
     pub fn version(&self) -> (u16, u8) {
         let vs = self.regs().vs.read();
         ((vs >> 16) as u16, (vs >> 8) as u8)
-    }
-
-    /// Het datablok (basis, maat) dat het board cacheable mag mappen.
-    #[must_use]
-    pub fn data_region(&self) -> (Pa, u64) {
-        (self.data(), DATA_SIZE)
     }
 }
 

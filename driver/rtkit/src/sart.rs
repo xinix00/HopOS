@@ -154,25 +154,4 @@ impl Sart {
         }
         Err(Error::Full { pa: e.0, size: e.1 })
     }
-
-    /// Venster `i` als (adres, maat), of `None` als het leeg is of niet
-    /// bestaat. Voor diagnose: staat de DMA-regio er niet in, dan komt er
-    /// geen byte van de coprocessor aan.
-    #[must_use]
-    pub fn window(&self, i: usize) -> Option<(Pa, u64)> {
-        let r = self.regs();
-        let c = r.config.get(i)?;
-        if c.read() == 0 {
-            return None;
-        }
-        let p = u64::from(r.paddr.get(i)?.read()) << SHIFT;
-        let s = u64::from(r.size.get(i)?.read()) << SHIFT;
-        Some((Pa(p), s))
-    }
-
-    /// Hoeveel vensters er openstaan.
-    #[must_use]
-    pub fn windows(&self) -> usize {
-        (0..ENTRIES).filter(|&i| self.window(i).is_some()).count()
-    }
 }

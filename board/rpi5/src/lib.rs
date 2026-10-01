@@ -36,7 +36,7 @@ use board_raspi::{NicCtx, Raspi, Soc};
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use cpu::irq::{Line, Trigger};
 use dev::Pa;
-use driver_brcmpcie::{EpBar, InWin, OutWin, Rc};
+use driver_brcmpcie::{EpBar, InWin, OutWin, Rc, delay};
 use driver_gem::Gem;
 use driver_pl011::Pl011;
 
@@ -194,13 +194,6 @@ impl Soc for Bcm2712 {
     }
 }
 
-fn delay(clock: fn() -> u64, ns: u64) {
-    let end = clock().saturating_add(ns);
-    while clock() < end {
-        core::hint::spin_loop();
-    }
-}
-
 /// De link naar de RP1, boardvast bewezen met probe6 (10-07, runs 2/4/5):
 /// RESCAL, de pcie2-RC (54 MHz-PLL!), link-training (gen 2), de RP1
 /// (1de4:0001) en zijn BAR's. BAR1 MOET op PCIe 0: RP1's eigen DMA bereikt
@@ -329,9 +322,7 @@ static GEM_ACK: fn() = gem_ack;
 /// gaan als IRQ_TYPE_EDGE_RISING naar de GIC, en de MIP zelf staat met
 /// CFG_HOST op flank), en een SPI staat in de GIC-400 na reset op level. De
 /// dispatcher zet de soort vóór de enable (`cpu::irq::enable_as`), zodat
-/// het board hem niet los kan vergeten. Tot 30-09 riep `wire_irq`
-/// `Gic::set_edge` zelf aan; dat deed het goed, maar de keuze stond buiten
-/// de registratie.
+/// het board hem niet los kan vergeten.
 const fn mip_line(v: u32) -> (Line, Trigger) {
     (Line(32 + MIP_FIRST_SPI + v), Trigger::Edge)
 }
@@ -464,11 +455,9 @@ pub fn nic_diag() {
     // van die regels: verschillen ze, dan leest de CPU uit zijn cache en is
     // de ring niet non-cacheable gemapt.
     let ring = Pa(map::NET_DMA.base);
-    // SAFETY: de ring van de levende GEM, vooraan in NET_DMA.
-    let before = unsafe { driver_gem::ring_words(ring) };
+    let before = driver_gem::ring_words(ring);
     dev::pull(ring, 64);
-    // SAFETY: idem.
-    let after = unsafe { driver_gem::ring_words(ring) };
+    let after = driver_gem::ring_words(ring);
     cpu::println!(
         "net: rp1 diag: rx ring {:#x}: desc0..3 (w0,w1) {before:x?}, after invalidate {after:x?}",
         ring.0

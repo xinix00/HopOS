@@ -76,10 +76,7 @@ fn setup_programs_windows_ubus_and_the_pll() {
     dev::write32(bp.add(off::MISC_PCIE_STATUS), STATUS_RC_MODE);
     dev::write32(bp.add(off::HARD_DEBUG), HD_SERDES_IDDQ | 1);
     let r = rc(Soc::Bcm2712, bp, sp);
-    let (rc_mode, pll) = r.setup();
-    assert!(rc_mode);
-    // De nep-MDIO wist bit 31 nooit: de PLL is niet bevestigd.
-    assert!(!pll);
+    assert!(r.setup());
     assert_eq!(
         dev::read32(bp.add(off::HARD_DEBUG)),
         1,
@@ -111,7 +108,7 @@ fn bcm2711_has_no_ubus_and_resets_through_rgr1() {
     let (bp, sp) = (pa(&mut b), pa(&mut sw));
     dev::write32(bp.add(off::MISC_PCIE_STATUS), STATUS_RC_MODE);
     let r = rc(Soc::Bcm2711, bp, sp);
-    assert_eq!(r.setup(), (true, true));
+    assert!(r.setup());
     assert!(sw.iter().all(|&w| w == 0), "no external reset controller");
     assert_eq!(dev::read32(bp.add(0x40ac)), 0, "no UBUS remap");
     // PERST# blijft vast, de bridge is weer uit reset.

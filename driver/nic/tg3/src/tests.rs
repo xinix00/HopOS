@@ -190,7 +190,7 @@ fn chip_state<T>(f: impl FnOnce(&Chip) -> T) -> T {
 #[test]
 fn misc_host_ctrl_with_indir_access_is_written_first_and_again_after_reset() {
     let m = chip(false);
-    let n = up(&m);
+    let _n = up(&m);
     let want =
         0xf000_0000 | MISC_MASK_PCI_INT | MISC_WORD_SWAP | MISC_INDIR_ACCESS | MISC_PCISTATE_RW;
     // Bij de eerste klokslag (de slaap na MAC_MODE, vóór de reset) stond het
@@ -202,7 +202,6 @@ fn misc_host_ctrl_with_indir_access_is_written_first_and_again_after_reset() {
     // De reset wiste het bit; de driver zette het terug. De rommel in de lage
     // bits is niet teruggeschreven, CHIPREV wel.
     assert_eq!(m.c(0x68), want, "INDIR_ACCESS restored after reset");
-    assert_eq!(n.misc_host_ctrl(), want);
 }
 
 #[test]
@@ -400,14 +399,6 @@ fn the_aux_status_table_is_tg3s() {
     assert_eq!(decode_aux(0), Err(Error::LinkState { aux: 0 }));
 }
 
-#[test]
-fn the_shared_mdio_layer_finds_the_phy() {
-    let m = chip(false);
-    let mut n = up(&m);
-    let p = mdio::scan(&mut n).unwrap();
-    assert_eq!((p.addr, p.id1, p.id2), (1, PHY_ID1, PHY_ID2));
-}
-
 // ── RX ──────────────────────────────────────────────────────────────────────
 
 /// Zet één return-descriptor klaar op plek `slot`.
@@ -586,70 +577,16 @@ fn transmit_refuses_bad_sizes_and_a_full_ring() {
     assert_eq!(m.r(0x0304), 1, "pending frame rung before refusing");
 }
 
-// ── Interrupts ──────────────────────────────────────────────────────────────
-
-#[test]
-fn the_interrupt_mailbox_and_mask() {
-    let m = chip(false);
-    let mut n = up(&m);
-    n.irq_unmask();
-    assert_eq!(m.c(0x68) & MISC_MASK_PCI_INT, 0, "MASK_PCI_INT off");
-    assert_ne!(m.c(0x68) & MISC_INDIR_ACCESS, 0, "the rest stays");
-    assert_eq!(m.r(0x0204), 0, "mailbox open");
-    n.ack_irq();
-    assert_eq!(m.r(0x0204), 1, "ack masks");
-    n.irq_ack().ack();
-    assert_eq!(m.r(0x0204), 1);
-    // Niets in de ring: alleen de mailbox open.
-    n.rearm_irq();
-    assert_eq!(m.r(0x0204), 0);
-    assert_eq!(m.r(0x3c00) & HOSTCC_MODE_NOW, 0);
-    // Werk dat binnenkwam terwijl de mailbox dicht stond: HOSTCC_MODE_NOW.
-    n.ack_irq();
-    ret_desc(&m, 0, 68, 0);
-    set_rx_producer(&m, 1);
-    n.rearm_irq();
-    assert_ne!(m.r(0x3c00) & HOSTCC_MODE_NOW, 0, "status update now");
-    dev::write32(m.dma, 1);
-    let d = n.irq_diag();
-    assert_eq!((d.status, d.pci_status), (1, CMD >> 16));
-}
-
-#[test]
-fn with_a_bell_flush_reopens_the_interrupt() {
-    static BELL: Signal = Signal::new();
-    let m = chip(false);
-    let mut n = up(&m);
-    assert!(n.irq().is_none());
-    n.set_irq(&BELL);
-    assert!(n.irq().is_some());
-    n.ack_irq();
-    n.flush();
-    assert_eq!(m.r(0x0204), 0, "flush rearms");
-}
-
 // ── Diagnose ────────────────────────────────────────────────────────────────
 
 #[test]
-fn diagnostics_read_as_one_line_each() {
+fn describe_is_one_line() {
     let m = chip(false);
-    let mut n = up(&m);
+    let n = up(&m);
     let d = format!("{}", n.describe());
     assert!(d.contains("ASIC 0x57766"), "{d}");
     assert!(d.contains("mac 1c:f6:4c:54:fa:90"), "{d}");
     assert!(d.contains("fw_mbox 0xb49a89ab"), "{d}");
-    let t = n.self_test();
-    assert!(t.ok && t.cfg == Some(!0x5a5a_1234), "{t}");
-    assert!(format!("{t}").contains("(OK)"));
-    dev::write32(at(m.bar0, 0x0880), 69945);
-    assert!(format!("{}", n.stats()).contains("rx oct=69945"));
-    dev::write32(at(m.bar0, 0x224c), 7);
-    assert!(format!("{}", n.counters()).contains("no_rcv_bd=7"));
-    let rcb = format!("{}", n.rcb_dump());
-    assert!(rcb.starts_with("tg3: send[addr="), "{rcb}");
-    assert!(format!("{}", n.irq_diag()).contains("hostcc"));
-    assert_eq!(n.buf_region(), (m.dma.add(BUF_OFF), BUF_LEN));
-    assert_eq!(n.asic_rev(), 0x57766);
 }
 
 #[test]

@@ -198,8 +198,6 @@ struct State {
     /// Een opdracht zonder bevestiging: blijvend, want zijn id en het
     /// gedeelde geheugen zijn nog van hem.
     failed: Option<Error>,
-    /// Meetlat: meldingen van de SMC zelf, die wij niet gebruiken.
-    notifications: u64,
 }
 
 impl State {
@@ -221,8 +219,8 @@ impl State {
             }
             return;
         }
+        // Een melding van de SMC zelf, geen antwoord; wij gebruiken ze niet.
         if (msg & 0xff) as u8 == CMD_NOTIFICATION {
-            self.notifications += 1;
             return;
         }
         let id = ((msg >> 12) & 0xf) as usize;
@@ -267,7 +265,6 @@ impl Smc {
                 results: [0; 16],
                 msgid: 0,
                 failed: None,
-                notifications: 0,
             },
         };
         s.with_rt(|rt, app| rt.boot(app))?;
@@ -311,18 +308,6 @@ impl Smc {
     /// Zet de SMC in slaap (zie [`Rtkit::sleep`]).
     pub fn sleep(&mut self) -> Result {
         self.with_rt(|rt, app| rt.sleep(app))
-    }
-
-    /// De coprocessor eronder, voor zijn crashlog en meetlatten.
-    #[must_use]
-    pub fn rtkit(&self) -> &Rtkit {
-        &self.rt
-    }
-
-    /// Meetlat: meldingen van de SMC zelf.
-    #[must_use]
-    pub fn notifications(&self) -> u64 {
-        self.st.notifications
     }
 
     fn send(&mut self, cmd: u8, size: u8, key: u32) -> Result<usize> {

@@ -405,7 +405,6 @@ dependencies = [
  "dev",
  "driver-mdio",
  "netdev",
- "sync",
 ]
 
 [[package]]
@@ -438,7 +437,6 @@ dependencies = [
  "dev",
  "driver-mdio",
  "netdev",
- "sync",
 ]
 
 [[package]]
@@ -535,7 +533,6 @@ dependencies = [
  "dev",
  "driver-mdio",
  "netdev",
- "sync",
 ]
 
 [[package]]

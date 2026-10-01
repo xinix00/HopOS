@@ -8,7 +8,6 @@ description = "Intel igb-familie (I210/I211 op de Ampere Altra, 82576 in QEMU): 
 
 [dependencies]
 dev = { path = "../../../dev" }
-sync = { path = "../../../sync" }
 netdev = { path = "../../../netdev" }
 driver-mdio = { path = "../mdio" }
 

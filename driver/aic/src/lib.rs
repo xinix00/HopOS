@@ -124,19 +124,24 @@ pub type Result<T = (), E = Error> = core::result::Result<T, E>;
 /// veelvoud van 32 met `nr_irq <= max_irq`.
 pub struct Aic {
     base: AtomicU64,
+    /// Het eerste config-woord; de bitmap-tabellen liggen erachter
+    /// ([`Table`]).
     cfg: AtomicU64,
-    sw_set: AtomicU64,
-    sw_clr: AtomicU64,
-    mask_set: AtomicU64,
-    mask_clr: AtomicU64,
-    hw_state: AtomicU64,
     event: AtomicU64,
     nr_irq: AtomicU32,
     max_irq: AtomicU32,
     target: AtomicU32,
     version: AtomicU32,
-    /// Meetlat: events van een ander type dan HW (overgeslagen).
-    pub odd_events: AtomicU64,
+}
+
+/// De bitmap-tabellen na de `max_irq` config-woorden, in deze volgorde en
+/// elk `max_irq / 32` woorden (m1n1 `aic.c`; HW_STATE volgt als vijfde).
+#[derive(Copy, Clone)]
+enum Table {
+    SwSet = 0,
+    SwClr = 1,
+    MaskSet = 2,
+    MaskClr = 3,
 }
 
 impl Default for Aic {
@@ -152,17 +157,11 @@ impl Aic {
         Self {
             base: AtomicU64::new(0),
             cfg: AtomicU64::new(0),
-            sw_set: AtomicU64::new(0),
-            sw_clr: AtomicU64::new(0),
-            mask_set: AtomicU64::new(0),
-            mask_clr: AtomicU64::new(0),
-            hw_state: AtomicU64::new(0),
             event: AtomicU64::new(0),
             nr_irq: AtomicU32::new(0),
             max_irq: AtomicU32::new(0),
             target: AtomicU32::new(0),
             version: AtomicU32::new(0),
-            odd_events: AtomicU64::new(0),
         }
     }
 
@@ -189,15 +188,7 @@ impl Aic {
         if max == 0 || !max.is_multiple_of(32) || nr > max || max > MAX_IRQS {
             return Err(Error::Sizes { cap0, max: maxn });
         }
-        let words = u64::from(max / 32) * 4;
-        let cfg = base.0 + p.extint_base;
-        let sw_set = cfg + 4 * u64::from(max);
-        self.cfg.store(cfg, Relaxed);
-        self.sw_set.store(sw_set, Relaxed);
-        self.sw_clr.store(sw_set + words, Relaxed);
-        self.mask_set.store(sw_set + 2 * words, Relaxed);
-        self.mask_clr.store(sw_set + 3 * words, Relaxed);
-        self.hw_state.store(sw_set + 4 * words, Relaxed);
+        self.cfg.store(base.0 + p.extint_base, Relaxed);
         self.nr_irq.store(nr, Relaxed);
         self.max_irq.store(max, Relaxed);
         self.version.store(dev::read32(base), Relaxed);
@@ -212,12 +203,6 @@ impl Aic {
         Ok(())
     }
 
-    /// Staat de controller klaar?
-    #[must_use]
-    pub fn is_ready(&self) -> bool {
-        self.event.load(Relaxed) != 0
-    }
-
     /// Het aantal hardware-IRQ's dat dit silicium meldt.
     #[must_use]
     pub fn nr_irq(&self) -> u32 {
@@ -230,21 +215,27 @@ impl Aic {
         self.target.store(t & CFG_TARGET, Relaxed);
     }
 
-    /// Het gekozen doel.
-    #[must_use]
-    pub fn target(&self) -> u32 {
-        self.target.load(Relaxed)
-    }
-
     /// Het woord en de bit van IRQ `id` in een bitmap-tabel; `None` buiten
     /// het bereik.
     fn bit(&self, id: u32) -> Option<(u64, u32)> {
         (id < self.nr_irq()).then(|| (u64::from(id / 32) * 4, 1 << (id % 32)))
     }
 
-    fn write_bit(&self, table: &AtomicU64, id: u32) {
+    /// Het adres van tabel `t`: na de `max_irq` config-woorden, elke tabel
+    /// `max_irq / 8` bytes. Nul vóór [`init`](Self::init).
+    fn table(&self, t: Table) -> u64 {
+        let c = self.cfg.load(Relaxed);
+        let max = u64::from(self.max_irq.load(Relaxed));
+        if c == 0 {
+            0
+        } else {
+            c + 4 * max + t as u64 * (max / 8)
+        }
+    }
+
+    fn write_bit(&self, table: Table, id: u32) {
         let Some((w, b)) = self.bit(id) else { return };
-        let t = table.load(Relaxed);
+        let t = self.table(table);
         if t != 0 {
             dev::write32(Pa(t + w), b);
             dev::mb();
@@ -254,31 +245,12 @@ impl Aic {
     /// Laat IRQ `id` vanuit software vuren (SW_SET): de meetlat waarmee het
     /// board het doel vindt zonder een device nodig te hebben.
     pub fn soft_raise(&self, id: u32) {
-        self.write_bit(&self.sw_set, id);
+        self.write_bit(Table::SwSet, id);
     }
 
     /// Haalt de software-IRQ weer weg (SW_CLR).
     pub fn soft_clear(&self, id: u32) {
-        self.write_bit(&self.sw_clr, id);
-    }
-
-    /// Staat de hardware-IRQ (HW_STATE) op dit moment aan?
-    #[must_use]
-    pub fn pending(&self, id: u32) -> bool {
-        let (Some((w, b)), t) = (self.bit(id), self.hw_state.load(Relaxed)) else {
-            return false;
-        };
-        t != 0 && dev::read32(Pa(t + w)) & b != 0
-    }
-
-    /// Het config-woord van IRQ `id` (diagnose).
-    #[must_use]
-    pub fn cfg(&self, id: u32) -> u32 {
-        let c = self.cfg.load(Relaxed);
-        if c == 0 || id >= self.nr_irq() {
-            return 0;
-        }
-        dev::read32(Pa(c + 4 * u64::from(id)))
+        self.write_bit(Table::SwClr, id);
     }
 
     /// Eén regel voor de bootlog.
@@ -290,7 +262,7 @@ impl Aic {
             nr: self.nr_irq(),
             max: self.max_irq.load(Relaxed),
             event: self.event.load(Relaxed),
-            target: self.target(),
+            target: self.target.load(Relaxed),
         }
     }
 }
@@ -335,19 +307,22 @@ impl Controller for Aic {
             return Err(IrqError::Rejected { line: l.0 });
         }
         let a = Pa(c + 4 * u64::from(l.0));
-        dev::write32(a, (dev::read32(a) & !CFG_TARGET) | self.target());
-        self.write_bit(&self.mask_clr, l.0);
+        dev::write32(
+            a,
+            (dev::read32(a) & !CFG_TARGET) | self.target.load(Relaxed),
+        );
+        self.write_bit(Table::MaskClr, l.0);
         Ok(())
     }
 
     fn disable(&self, l: Line) {
-        self.write_bit(&self.mask_set, l.0);
+        self.write_bit(Table::MaskSet, l.0);
     }
 
     /// Leest het event-register. De lees is tegelijk de ack, en de AIC heeft
     /// een HW-IRQ dan al gemaskeerd; `complete` maakt hem weer scherp. Een
     /// event van een ander type (op dit silicium horen die niet te komen:
-    /// IPI's zijn fast) wordt geteld en overgeslagen.
+    /// IPI's zijn fast) wordt overgeslagen.
     fn claim(&self) -> Option<Line> {
         let ev = self.event.load(Relaxed);
         if ev == 0 {
@@ -360,16 +335,14 @@ impl Controller for Aic {
             match decode(dev::read32(Pa(ev)), max) {
                 None => return None,
                 Some((EVENT_TYPE_HW, line)) => return Some(Line(line)),
-                Some(_) => {
-                    self.odd_events.fetch_add(1, Relaxed);
-                }
+                Some(_) => {}
             }
         }
         None
     }
 
     fn complete(&self, l: Line) {
-        self.write_bit(&self.mask_clr, l.0);
+        self.write_bit(Table::MaskClr, l.0);
     }
 }
 

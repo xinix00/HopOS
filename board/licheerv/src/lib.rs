@@ -438,12 +438,9 @@ impl Board for LicheeRv {
         // SAFETY: GMAC is de dwmac van de SG2002 met open klokgates.
         let mut probe =
             unsafe { Probe::new(GMAC, driver_dwmac::CSR_250_300M, cpu::riscv::idle::now) };
-        let v = probe.version();
-        if v == 0 || v == 0xffff_ffff {
-            return Err(Error::Nic(
-                "no MAC at 0x04070000 (version reads 0 or all-ones)",
-            ));
-        }
+        let v = probe
+            .check()
+            .map_err(|_| Error::Nic("no MAC at 0x04070000 (version reads 0 or all-ones)"))?;
         ephy::init(wait_us);
         wait_us(50_000);
         let Some(phy) = driver_mdio::scan(&mut probe) else {
@@ -467,7 +464,7 @@ impl Board for LicheeRv {
         );
         // SAFETY: NET_DMA is van deze driver alleen, lijn-gealigneerd en
         // onder 4 GB; de driver doet het cache-onderhoud (dev met `thead`).
-        let nic = unsafe {
+        let mut nic = unsafe {
             probe.start(
                 NET_DMA.base,
                 NET_DMA.size,
@@ -477,6 +474,7 @@ impl Board for LicheeRv {
             )
         }
         .map_err(|_| Error::Nic("dwmac start failed"))?;
+        cpu::println!("net: dwmac {}", nic.diag());
         Ok(Some(nic))
     }
 }

@@ -15,9 +15,8 @@
 //! PHY-autoneg na reset, NVM-autoload van het MAC) staan gemarkeerd.
 //!
 //! De driver is een actor-onderdeel: wie `&mut self` heeft, is de enige die
-//! de ringen aanraakt. Het interrupt-pad raakt alleen ICR en IMS, via
-//! [`IrqAck`]. Doorbells (RDT, TDT) vallen in [`flush`](netdev::Device::flush),
-//! één keer per burst.
+//! de ringen aanraakt. Geen interrupt: het board pollt. Doorbells (RDT, TDT)
+//! vallen in [`flush`](netdev::Device::flush), één keer per burst.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -35,7 +34,6 @@ use core::mem::{offset_of, size_of};
 use dev::{Pa, Reg};
 use driver_mdio::{self as mdio, Link, Mdio};
 use netdev::{Mac, TxError};
-use sync::Signal;
 
 /// De registers van de 82575+-familie (Linux `e1000_regs.h`): 82576 in
 /// QEMU, I210/I211 op de Altra. De queue-registers zijn de queue-0-aliassen
@@ -56,8 +54,7 @@ struct Regs {
     /// Interrupt cause: lezen wist.
     icr: Reg<u32>,
     _ics: Reg<u32>,
-    /// Interrupt mask set.
-    ims: Reg<u32>,
+    _ims: Reg<u32>,
     /// Interrupt mask clear.
     imc: Reg<u32>,
     _r5: [u32; 1212],
@@ -93,7 +90,6 @@ const _: () = {
     assert!(offset_of!(Regs, rctl) == 0x0100);
     assert!(offset_of!(Regs, tctl) == 0x0400);
     assert!(offset_of!(Regs, icr) == 0x1500);
-    assert!(offset_of!(Regs, ims) == 0x1508);
     assert!(offset_of!(Regs, imc) == 0x150c);
     assert!(offset_of!(Regs, rdbal) == 0x2800);
     assert!(offset_of!(Regs, rdbah) == 0x2804);
@@ -184,14 +180,6 @@ const TX_RS: u32 = 1 << 27;
 const TX_DEXT: u32 = 1 << 29;
 const TX_PAY_SHIFT: u32 = 14;
 const TX_DD: u32 = 1 << 0;
-// Interrupts (ICR/IMS): TX-writeback, link-wissel, RX-overflow, RX-timer.
-/// RX descriptor written back (RXDW, `E1000_ICR_RXT0` in Linux' naam).
-const INT_RXT0: u32 = 1 << 7;
-const INT_LSC: u32 = 1 << 2;
-const INT_RXO: u32 = 1 << 6;
-const INT_RXDMT0: u32 = 1 << 4;
-/// Wat de RX-pomp wekt.
-const INT_RX: u32 = INT_RXT0 | INT_RXO | INT_RXDMT0 | INT_LSC;
 
 /// Eén RX- of TX-buffer: de SRRCTL-eenheid, ruim boven 1522.
 pub const BUF_SIZE: usize = 2048;
@@ -314,24 +302,6 @@ impl fmt::Display for Error {
 /// De `Result` van deze crate.
 pub type Result<T = (), E = Error> = core::result::Result<T, E>;
 
-/// Het interrupt-pad: alleen ICR (lezen wist, en laat de lijn vallen) en
-/// IMS/IMC. `Copy`, zodat het board hem naast de driver houdt.
-#[derive(Clone, Copy)]
-pub struct IrqAck {
-    base: Pa,
-}
-
-impl IrqAck {
-    /// Bevestigt de interrupt: ICR lezen wist hem, en de INTx-lijn valt.
-    /// Geeft de bits die stonden.
-    pub fn ack(&self) -> u32 {
-        // SAFETY: `base` kwam uit `Igb::new`, dat een gemapt blok eiste; ICR
-        // deelt niets met de ringen.
-        let r: &Regs = unsafe { dev::regs(self.base) };
-        r.icr.read()
-    }
-}
-
 /// Eén igb.
 pub struct Igb {
     base: Pa,
@@ -348,7 +318,6 @@ pub struct Igb {
     tx_head: u16,
     /// TX-descriptors klaargezet sinds de laatste doorbell.
     tx_pending: u16,
-    irq: Option<&'static Signal>,
     /// Meetlat: doorbells (RDT en TDT samen).
     pub doorbells: u64,
     /// Meetlat: RX-descriptors met een lengte of vlag die niet klopt.
@@ -401,7 +370,6 @@ impl Igb {
             rx_since: 0,
             tx_head: 0,
             tx_pending: 0,
-            irq: None,
             doorbells: 0,
             rx_bad: 0,
         }
@@ -542,30 +510,6 @@ impl Igb {
             return Err(mdio::Error::Bus { phy, reg });
         }
         Ok(v)
-    }
-
-    /// Het frame-bufferbereik (basis, grootte in hele blokken van 2 MB):
-    /// wat het board desgewenst cacheable mapt. De ringen vallen erbuiten.
-    #[must_use]
-    pub fn buf_region(&self) -> (Pa, u64) {
-        let total = (u64::from(N_RX) + u64::from(N_TX)) * BUF_SIZE as u64;
-        (self.rx_bufs, total.next_multiple_of(BUF_OFF))
-    }
-
-    /// Het interrupt-pad, voor het board.
-    #[must_use]
-    pub fn irq_ack(&self) -> IrqAck {
-        IrqAck { base: self.base }
-    }
-
-    /// Hangt de bel van de NIC-interrupt aan de driver en zet de RX-set in
-    /// IMS: de RX-pomp wacht dan op de bel in plaats van te pollen.
-    /// Aanroepen nadat de lijn bij de controller scherp staat.
-    pub fn set_irq(&mut self, bell: &'static Signal) {
-        let r = self.regs();
-        let _ = r.icr.read(); // oude oorzaken weg
-        r.ims.write(INT_RX);
-        self.irq = Some(bell);
     }
 
     /// Geeft RX-descriptor `i` terug in lees-formaat met zijn eigen buffer.
@@ -732,10 +676,6 @@ impl netdev::Device for Igb {
 
     fn mac(&self) -> Mac {
         self.mac
-    }
-
-    fn irq(&self) -> Option<&'static Signal> {
-        self.irq
     }
 }
 

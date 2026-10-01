@@ -110,9 +110,8 @@ fn open_reads_count_keys_and_floats() {
     ]);
     let mut s = open(&m, rt).unwrap();
     assert_eq!(s.st.shmem, Some(m.sram.add(0x100)));
-    // De melding na het adres is geteld en niet als antwoord gezien.
+    // De melding na het adres is niet als antwoord gezien.
     assert_eq!(s.count().unwrap(), 4);
-    assert_eq!(s.notifications(), 1);
     assert_eq!(s.key_at(1).unwrap(), key("TC0P"));
     assert_eq!(s.float(key("TC0P")).unwrap(), 51.5);
     assert_eq!(

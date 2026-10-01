@@ -18,9 +18,7 @@ pub(crate) struct Regs {
     _r2: [u32; 27],
     /// GMAC_VERSION: snpsver [7:0], userver [15:8].
     pub(crate) version: Reg<u32>,
-    _r3: [u32; 2],
-    /// GMAC_HW_FEATURE0.
-    pub(crate) hw_feature0: Reg<u32>,
+    _r3: [u32; 3],
     /// GMAC_HW_FEATURE1: de FIFO-maten.
     pub(crate) hw_feature1: Reg<u32>,
     _r4: [u32; 55],
@@ -107,7 +105,6 @@ const _: () = {
     assert!(offset_of!(Regs, packet_filter) == 0x0008);
     assert!(offset_of!(Regs, rxq_ctrl0) == 0x00A0);
     assert!(offset_of!(Regs, version) == 0x0110);
-    assert!(offset_of!(Regs, hw_feature0) == 0x011C);
     assert!(offset_of!(Regs, hw_feature1) == 0x0120);
     assert!(offset_of!(Regs, mdio_addr) == 0x0200);
     assert!(offset_of!(Regs, mdio_data) == 0x0204);

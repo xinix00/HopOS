@@ -133,7 +133,11 @@ fn ecam_offsets_follow_the_spec() {
 #[test]
 fn walk_follows_bridges_and_multifunction() {
     let c = fabric();
-    let found: BoundedVec<Function, 16> = scan(&c, 0).unwrap();
+    let mut found = Vec::new();
+    walk(&c, 0, |f| {
+        found.push(*f);
+        true
+    });
     let names: Vec<String> = found.iter().map(ToString::to_string).collect();
     assert_eq!(
         names,
@@ -149,12 +153,6 @@ fn walk_follows_bridges_and_multifunction() {
     assert!(found[1].is_bridge());
     assert!(found[2].multi);
     assert_eq!(found[0].revision, 1);
-}
-
-#[test]
-fn scan_says_when_it_is_full() {
-    let c = fabric();
-    assert_eq!(scan::<_, 3>(&c, 0).unwrap_err(), Error::TooMany { cap: 3 });
 }
 
 #[test]
@@ -236,25 +234,22 @@ fn enable_sets_decode_and_master() {
     let nic = probe(&c, bdf(1, 0, 0)).unwrap();
     nic.enable(&c);
     assert_eq!(nic.command(&c), CMD_MEM | CMD_MASTER);
-    nic.clear_command(&c, CMD_MASTER);
-    assert_eq!(nic.command(&c), CMD_MEM);
 }
 
 #[test]
-fn capabilities_msix_and_msi() {
+fn capabilities_and_msix() {
     let c = FakeCfg::default();
     c.add(
         bdf(0, 4, 0),
         Fake::new(0x1af4, 0x1041, 0x020000, 0).caps(&[
             (CAP_MSIX, 0x40, &[0x0002_0000, 0x0000_3001, 0x0000_3801]),
             (CAP_VENDOR, 0x50, &[0x0000_0000]),
-            (CAP_MSI, 0x60, &[0x0086_0000, 0, 0, 0]),
             (CAP_PCIE, 0x70, &[0, 0, 0, 0, 0x0042_0000]),
         ]),
     );
     let f = probe(&c, bdf(0, 4, 0)).unwrap();
     let ids: Vec<u8> = f.caps(&c).map(|(id, _)| id).collect();
-    assert_eq!(ids, [CAP_MSIX, CAP_VENDOR, CAP_MSI, CAP_PCIE]);
+    assert_eq!(ids, [CAP_MSIX, CAP_VENDOR, CAP_PCIE]);
     let m = f.msix(&c).unwrap();
     assert_eq!(m.size, 3);
     assert_eq!(
@@ -264,24 +259,9 @@ fn capabilities_msix_and_msi() {
             off: 0x3000
         }
     );
-    assert_eq!(
-        m.pba,
-        BarOffset {
-            bar: 1,
-            off: 0x3800
-        }
-    );
     f.msix_enable(&c, &m, true);
     assert_eq!(c.read32(f.bdf, 0x40) >> 16, 0x8002);
     assert_eq!(f.command(&c) & CMD_INTX_DISABLE, CMD_INTX_DISABLE);
-
-    let msi = f.msi(&c).unwrap();
-    assert!(msi.is64);
-    assert_eq!(msi.vectors, 8);
-    f.msi_enable(&c, &msi, 0x0808_0040, 0x55);
-    assert_eq!(c.read32(f.bdf, 0x64), 0x0808_0040);
-    assert_eq!(c.read32(f.bdf, 0x6c) & 0xffff, 0x55);
-    assert_eq!((c.read32(f.bdf, 0x60) >> 16) & 1, 1);
 
     assert_eq!(f.link(&c), Some(Link { speed: 2, width: 4 }));
 }
@@ -308,8 +288,6 @@ fn msix_table_entries() {
     assert!(t.set(2, 0x0808_0040, 77));
     assert!(!t.set(4, 0, 0));
     assert_eq!(&mem[8..12], &[0x0808_0040, 0, 77, 0]);
-    assert!(t.mask(2, true));
-    assert_eq!(mem[11], 1);
 }
 
 #[test]
@@ -348,7 +326,6 @@ fn msix_table_sits_in_its_bar() {
         cap: 0x50,
         size: 4,
         table: BarOffset { bar: 2, off: 0x40 },
-        pba: BarOffset { bar: 2, off: 0x80 },
     };
     assert_eq!(nic.msix_table_addr(&c, &m), Some(0x2000_0040));
     let unassigned = Msix {

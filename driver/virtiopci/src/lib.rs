@@ -54,8 +54,6 @@ pub mod status {
     pub const DRIVER_OK: u8 = 1 << 2;
     /// De feature-onderhandeling is rond (het device kan het weigeren).
     pub const FEATURES_OK: u8 = 1 << 3;
-    /// Er ging iets mis en de driver geeft het device op.
-    pub const FAILED: u8 = 1 << 7;
 }
 
 /// VIRTIO_F_VERSION_1 (bit 32): bit 0 van feature-venster 1.

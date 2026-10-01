@@ -39,13 +39,12 @@
     )
 )]
 
-use core::fmt;
 use core::mem::offset_of;
 use dev::{Pa, Reg};
 pub use driver_xhci::Timer;
 
-/// De globale registers vanaf GCTL (DWC_usb3 §6.1.1), op
-/// [`GLOBALS_OFF`] in het corevenster.
+/// De globale registers vanaf GCTL (DWC_usb3 §6.1.1) tot en met de PHY
+/// van poort 0, op [`GLOBALS_OFF`] in het corevenster.
 #[repr(C)]
 struct Globals {
     /// Global Core Control.
@@ -56,6 +55,12 @@ struct Globals {
     _guctl1: u32,
     /// Synopsys ID: familie (31:16) en revisie.
     gsnpsid: Reg<u32>,
+    _r0: [u32; 55],
+    /// GUSB2PHYCFG0 (poort 0).
+    usb2_phy: Reg<u32>,
+    _r1: [u32; 47],
+    /// GUSB3PIPECTL0 (poort 0).
+    usb3_pipe: Reg<u32>,
 }
 
 /// De plek van [`Globals`] in het corevenster.
@@ -65,12 +70,9 @@ const _: () = {
     assert!(GLOBALS_OFF + offset_of!(Globals, gctl) as u64 == 0xC110);
     assert!(GLOBALS_OFF + offset_of!(Globals, gsts) as u64 == 0xC118);
     assert!(GLOBALS_OFF + offset_of!(Globals, gsnpsid) as u64 == 0xC120);
+    assert!(GLOBALS_OFF + offset_of!(Globals, usb2_phy) as u64 == 0xC200);
+    assert!(GLOBALS_OFF + offset_of!(Globals, usb3_pipe) as u64 == 0xC2C0);
 };
-
-/// GUSB2PHYCFG0 (poort 0).
-const USB2_PHY_OFF: u64 = 0xC200;
-/// GUSB3PIPECTL0 (poort 0).
-const USB3_PIPE_OFF: u64 = 0xC2C0;
 
 // GCTL-bits (DWC_usb3 §6.1.1.5).
 const CTL_DIS_CLK_GATING: u32 = 1 << 0;
@@ -129,16 +131,6 @@ impl Error {
     pub const fn value(&self) -> u64 {
         match self {
             Self::NotDwc3 { id, .. } => *id as u64,
-        }
-    }
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotDwc3 { base, id } => {
-                write!(f, "dwc3: GSNPSID {id:#010x} at {base:#x}: {}", self.what())
-            }
         }
     }
 }
@@ -206,19 +198,9 @@ impl Core {
     }
 
     fn globals(&self) -> &'static Globals {
-        // SAFETY: de voorwaarde van `new`: de globale registers liggen op
-        // +0xC110 in het venster.
+        // SAFETY: de voorwaarde van `new`: de globale registers liggen van
+        // +0xC110 tot en met +0xC2C0 in het venster.
         unsafe { dev::regs(self.base.add(GLOBALS_OFF)) }
-    }
-
-    fn usb2_phy(&self) -> &'static Reg<u32> {
-        // SAFETY: zie `globals`; GUSB2PHYCFG0 ligt op +0xC200.
-        unsafe { dev::regs(self.base.add(USB2_PHY_OFF)) }
-    }
-
-    fn usb3_pipe(&self) -> &'static Reg<u32> {
-        // SAFETY: zie `globals`; GUSB3PIPECTL0 ligt op +0xC2C0.
-        unsafe { dev::regs(self.base.add(USB3_PIPE_OFF)) }
     }
 
     /// GSNPSID: de familie en de revisie; nul of alle enen betekent dat het
@@ -235,8 +217,8 @@ impl Core {
         Snapshot {
             id: g.gsnpsid.read(),
             ctl: g.gctl.read(),
-            usb2_phy: self.usb2_phy().read(),
-            usb3_pipe: self.usb3_pipe().read(),
+            usb2_phy: g.usb2_phy.read(),
+            usb3_pipe: g.usb3_pipe.read(),
             sts: g.gsts.read(),
         }
     }
@@ -260,17 +242,17 @@ impl Core {
         // De core in reset vóór de PHY's eruit gaan: een PHY-reset onder
         // een lopende core is undefined (`dwc3_core_soft_reset`).
         modify(&g.gctl, 0, CTL_CORE_SOFT_RESET);
-        modify(self.usb3_pipe(), 0, U3_PHY_SOFT_RESET);
-        modify(self.usb2_phy(), 0, U2_PHY_SOFT_RESET);
+        modify(&g.usb3_pipe, 0, U3_PHY_SOFT_RESET);
+        modify(&g.usb2_phy, 0, U2_PHY_SOFT_RESET);
         t.sleep(RESET_NS).await;
-        modify(self.usb3_pipe(), U3_PHY_SOFT_RESET, 0);
-        modify(self.usb2_phy(), U2_PHY_SOFT_RESET, 0);
+        modify(&g.usb3_pipe, U3_PHY_SOFT_RESET, 0);
+        modify(&g.usb2_phy, U2_PHY_SOFT_RESET, 0);
         t.sleep(RESET_NS).await;
         modify(&g.gctl, CTL_CORE_SOFT_RESET, 0);
 
         // PHY's wakker en op volle snelheid.
-        self.usb2_phy().update(usb2_phy_cfg);
-        modify(self.usb3_pipe(), U3_SUS_PHY, 0);
+        g.usb2_phy.update(usb2_phy_cfg);
+        modify(&g.usb3_pipe, U3_SUS_PHY, 0);
         g.gctl.update(host_ctl);
         dev::mb();
         t.sleep(MODE_SETTLE_NS).await;
@@ -318,6 +300,6 @@ mod tests {
             id: 0,
         };
         assert_eq!(e.value(), 0);
-        assert!(e.to_string().contains("not clocked"));
+        assert!(e.what().contains("not clocked"));
     }
 }

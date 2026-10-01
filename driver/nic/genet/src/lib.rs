@@ -38,7 +38,6 @@ use core::mem::{offset_of, size_of};
 use dev::{Pa, Reg};
 use driver_mdio::{Link, Mdio};
 use netdev::{Mac, TxError};
-use sync::Signal;
 
 #[cfg(test)]
 mod tests;
@@ -286,7 +285,6 @@ pub struct Genet {
     rx_cons: u32,
     tx_prod: u32,
     clock: fn() -> u64,
-    irq: Option<&'static Signal>,
 }
 
 impl Genet {
@@ -316,7 +314,6 @@ impl Genet {
             rx_cons: 0,
             tx_prod: 0,
             clock,
-            irq: None,
         }
     }
 
@@ -541,12 +538,6 @@ impl Genet {
         tx.buf_size.write(((N_BD as u32) << 16) | BUF_SIZE as u32);
         tx.ring_cfg.write(1 << 16);
     }
-
-    /// Geeft de NIC een wek-signaal (de RX-pomp wacht erop in plaats van te
-    /// pollen). Op de Pi 4 is de lijn nog niet bedraad: `None` = pollen.
-    pub fn set_irq(&mut self, bell: &'static Signal) {
-        self.irq = Some(bell);
-    }
 }
 
 /// UMAC_CMD voor een link: snelheid [3:2] (2 = 1000, 1 = 100), HD_EN bij
@@ -652,10 +643,6 @@ impl netdev::Device for Genet {
 
     fn mac(&self) -> Mac {
         Mac(self.mac)
-    }
-
-    fn irq(&self) -> Option<&'static Signal> {
-        self.irq
     }
 }
 

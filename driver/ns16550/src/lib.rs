@@ -33,8 +33,6 @@ const THR: u64 = 0;
 const LSR: u64 = 5;
 /// LSR: de THR is leeg.
 const LSR_THRE: u32 = 1 << 5;
-/// LSR: er staat een ontvangen byte klaar.
-const LSR_DR: u32 = 1 << 0;
 /// Hoe vaak we op THRE pollen voor de UART dood heet.
 const POLL_MAX: u32 = 1 << 20;
 
@@ -115,14 +113,6 @@ impl Ns16550 {
             self.putc(c);
         }
     }
-
-    /// Eén ontvangen byte, als er een klaarstaat.
-    pub fn getc(&self) -> Option<u8> {
-        if self.is_dead() || self.read(LSR) & LSR_DR == 0 {
-            return None;
-        }
-        Some(self.read(THR) as u8)
-    }
 }
 
 #[cfg(test)]
@@ -152,6 +142,5 @@ mod tests {
         u.putc(b'x');
         assert!(u.is_dead());
         assert_eq!(regs[0], 0);
-        assert_eq!(u.getc(), None);
     }
 }

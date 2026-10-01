@@ -279,12 +279,6 @@ impl Console {
         Ok(())
     }
 
-    /// Staat de console op het glas?
-    #[must_use]
-    pub fn is_active(&self) -> bool {
-        self.active
-    }
-
     /// De descriptor waar de console op tekent (ook als hij uit staat).
     #[must_use]
     pub fn desc(&self) -> Desc {
@@ -428,7 +422,7 @@ impl Console {
         }
         let row = self.d.base.add(u64::from(py) * u64::from(self.d.stride));
         if self.bpx == 4 && row.is_aligned(8) {
-            let v = self.encode(argb);
+            let v = self.d.encode(argb);
             let pair = u64::from(v) << 32 | u64::from(v);
             let pairs = self.d.width / 2;
             for i in 0..pairs {
@@ -444,12 +438,6 @@ impl Console {
         }
     }
 
-    /// Het pixelwoord voor `argb` (0xAARRGGBB) in het formaat van het
-    /// scherm.
-    fn encode(&self, argb: u32) -> u32 {
-        self.d.encode(argb)
-    }
-
     /// Schrijft één pixel. Buiten het scherm is een no-op (de invariant
     /// zegt dat het niet gebeurt; de toets kost niets).
     fn put(&mut self, px: u32, py: u32, argb: u32) {
@@ -458,7 +446,7 @@ impl Console {
         }
         let off = u64::from(py) * u64::from(self.d.stride) + u64::from(px) * u64::from(self.bpx);
         let pa = self.d.base.add(off);
-        let v = self.encode(argb);
+        let v = self.d.encode(argb);
         if self.bpx == 2 {
             dev::write16(pa, v as u16);
         } else {
@@ -522,7 +510,7 @@ mod tests {
         let s = Screen::new(64, 16);
         let mut c = Console::new();
         c.init(s.desc()).unwrap();
-        assert!(c.is_active());
+        assert!(c.active);
         c.header(&["header"]);
         let before = s.snapshot();
         c.header_status(u32::MAX, "bad");
@@ -559,7 +547,7 @@ mod tests {
         ];
         for d in bad {
             assert!(c.init(d).is_err(), "{d:?}");
-            assert!(!c.is_active(), "invalid framebuffer active: {d:?}");
+            assert!(!c.active, "invalid framebuffer active: {d:?}");
         }
         // Uit is uit: niets raakt het glas.
         let before = s.snapshot();

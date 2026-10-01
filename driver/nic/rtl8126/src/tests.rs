@@ -176,7 +176,6 @@ fn new_brings_the_mac_up_with_the_rings_in_place() {
     );
     // De TX-ring: leeg, de laatste met RingEnd.
     assert_eq!(dev::read32(m.dma.add(0x1000 + 63 * 16)), RING_END);
-    assert_eq!(n.buf_region(), (m.dma.add(BUF_OFF), BUF_OFF));
 }
 
 #[test]
@@ -438,15 +437,4 @@ fn the_irq_masks_on_ack_and_rearms_on_flush() {
     dev::write32(m.dma, FIRST_FRAG | LAST_FRAG | 64);
     n.flush();
     assert!(BELL.take());
-    assert_eq!(n.self_rings, 1);
-}
-
-#[test]
-fn the_mdio_view_is_clause_22_over_ocp() {
-    let m = chip(0x649, false);
-    let mut n = up(&m);
-    Mdio::write(&mut n, 0, mdio::reg::ANAR, 0x01e1).unwrap();
-    assert_eq!(Mdio::read(&mut n, 0, mdio::reg::ANAR).unwrap(), 0x01e1);
-    let writes = CHIP.with(|c| c.borrow().phy_writes.clone());
-    assert_eq!(writes.last(), Some(&(0xa408, 0x01e1)));
 }

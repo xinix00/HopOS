@@ -51,8 +51,6 @@ fn fake() -> Fake {
     let dma = mem(NEED_BYTES as usize);
     let n = Dwmac4 {
         base: regs.base,
-        csr: CSR_100_150M,
-        now: clock,
         mac: TEST_MAC,
         ring: Rings::at(dma.base),
         rx_cur: 0,
@@ -232,7 +230,12 @@ fn program_lays_out_the_rings_and_the_registers() {
     assert_ne!(rxc & CHAN_START, 0);
     assert_ne!(c.tx_control.read() & CHAN_START, 0);
     // Het MAC-adres in de filter, en de MAC aan op gigabit full duplex.
-    assert_eq!(n.filter_mac(), TEST_MAC);
+    let m = TEST_MAC.0;
+    assert_eq!(
+        r.addr0_lo.read(),
+        u32::from_le_bytes([m[0], m[1], m[2], m[3]])
+    );
+    assert_eq!(r.addr0_hi.read(), (u32::from(m[5]) << 8) | u32::from(m[4]));
     assert_eq!(r.rxq_ctrl0.read(), RXQ0_DCB_ENABLE);
     let cfg = r.config.read();
     assert_eq!(cfg & (CFG_TE | CFG_RE | CFG_DM), CFG_TE | CFG_RE | CFG_DM);

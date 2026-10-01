@@ -131,21 +131,7 @@ pub(crate) static V8125B: Variant = Variant {
     adv: 0x0080,
 };
 
-pub(crate) static V8125D: Variant = Variant {
-    name: "RTL8125D",
-    ephy: &[],
-    rx_desc_fmt: false,
-    e614: 0x0300,
-    e63e: 0x0020,
-    ea1c_second: 0x0004,
-    mitig_end: 0xb00,
-    int_cfg1: false,
-    clkreq_cfg2: true,
-    phy: &[],
-    eee_phy: true,
-    dash: false,
-    adv: 0x0080,
-};
+pub(crate) static V8125D: Variant = V8125D_BASE;
 
 pub(crate) static V8125CP: Variant = Variant {
     name: "RTL8125CP",
@@ -160,7 +146,7 @@ pub(crate) static V8125BP: Variant = Variant {
     ..V8125D_BASE
 };
 
-/// De 8125D-waarden als bouwsteen voor CP en BP (die ze delen).
+/// De 8125D-waarden, ook als bouwsteen voor CP en BP (die ze delen).
 const V8125D_BASE: Variant = Variant {
     name: "RTL8125D",
     ephy: &[],

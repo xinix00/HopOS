@@ -134,12 +134,12 @@ fn paced_chunks_by_max_transfer_and_round_trips() {
     let data: Vec<u8> = (0..10_240u32).map(|i| (i % 251) as u8).collect();
     block_on(p.write(8, &data)).unwrap();
     // 10 KiB in brokken van 4 KiB: 4 + 4 + 2, elk op de juiste LBA.
-    assert_eq!(p.dev().submits, vec![(8, 4096), (16, 4096), (24, 2048)]);
+    assert_eq!(p.dev.submits, vec![(8, 4096), (16, 4096), (24, 2048)]);
     let mut got = vec![0; data.len()];
     block_on(p.read(8, &mut got)).unwrap();
     assert_eq!(got, data);
     block_on(p.flush()).unwrap();
-    assert_eq!(p.dev().flushes, 1);
+    assert_eq!(p.dev.flushes, 1);
 }
 
 #[test]

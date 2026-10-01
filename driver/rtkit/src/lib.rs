@@ -351,12 +351,6 @@ pub struct Rtkit {
     bufs: [Buf; SYS_EPS],
     /// Applicatie-endpoints waarop iets binnenkwam, één bit per endpoint.
     app_seen: [u64; 4],
-    /// Meetlat: ontvangen berichten.
-    pub received: u64,
-    /// Meetlat: verstuurde berichten.
-    pub sent: u64,
-    /// Meetlat: berichten op systeem-endpoints die we niet kennen.
-    pub dropped: u64,
 }
 
 impl Rtkit {
@@ -395,9 +389,6 @@ impl Rtkit {
             ap_power: 0,
             bufs: [Buf::default(); SYS_EPS],
             app_seen: [0; 4],
-            received: 0,
-            sent: 0,
-            dropped: 0,
         })
     }
 
@@ -405,18 +396,6 @@ impl Rtkit {
     #[must_use]
     pub fn name(&self) -> &'static str {
         self.name
-    }
-
-    /// De laatst gemelde power-staat van de coprocessor.
-    #[must_use]
-    pub fn iop_power(&self) -> u16 {
-        self.iop_power
-    }
-
-    /// De laatst bevestigde power-staat van de AP-kant.
-    #[must_use]
-    pub fn ap_power(&self) -> u16 {
-        self.ap_power
     }
 
     fn cpu(&self) -> &'static Cpu {
@@ -447,7 +426,6 @@ impl Rtkit {
         dev::mb();
         m.a2i_send0.write(msg);
         m.a2i_send1.write(u64::from(ep));
-        self.sent += 1;
         Ok(())
     }
 
@@ -464,7 +442,6 @@ impl Rtkit {
         // msg.msg1`).
         let ep = (m.i2a_recv1.read() & 0xff) as u8;
         dev::mb();
-        self.received += 1;
         (t, Some((ep, msg)))
     }
 
@@ -552,7 +529,7 @@ impl Rtkit {
             EP_MGMT => match t {
                 MSG_IOP_PWR_ACK => self.iop_power = (msg & 0xffff) as u16,
                 MSG_AP_PWR_STATE => self.ap_power = (msg & 0xffff) as u16,
-                _ => self.dropped += 1,
+                _ => {}
             },
             EP_SYSLOG => match t {
                 MSG_BUFFER_REQUEST => return self.give_buffer(ep, msg),
@@ -562,7 +539,7 @@ impl Rtkit {
                 // bericht terug, anders houdt hij op met loggen en
                 // uiteindelijk met werken. De inhoud laten we liggen.
                 MSG_SYSLOG_LOG => return self.post(ep, msg),
-                _ => self.dropped += 1,
+                _ => {}
             },
             EP_CRASHLOG if t == MSG_BUFFER_REQUEST => {
                 // Een tweede crashlog-buffervraag is hoe de coprocessor
@@ -577,7 +554,7 @@ impl Rtkit {
                 MSG_BUFFER_REQUEST => return self.give_buffer(ep, msg),
                 // Onbekend maar moet bevestigd worden (m1n1 doet hetzelfde).
                 0x8 | 0xc => return self.post(ep, msg),
-                _ => self.dropped += 1,
+                _ => {}
             },
             ep if ep >= EP_APP => {
                 // Van een driver: de SMC praat op 0x20. Zonder haak vielen
@@ -588,7 +565,7 @@ impl Rtkit {
                 }
                 app(ep, msg);
             }
-            _ => self.dropped += 1,
+            _ => {}
         }
         Ok(())
     }

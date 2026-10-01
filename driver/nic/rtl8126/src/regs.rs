@@ -201,19 +201,8 @@ pub(crate) const fn phy_c22(r: u8) -> u16 {
     PHY_C22_BASE + 2 * r as u16
 }
 
-/// Descriptor-opbouw: opts1, opts2, adres (laag, hoog).
-#[repr(C)]
-pub(crate) struct Desc {
-    pub(crate) opts1: u32,
-    pub(crate) opts2: u32,
-    pub(crate) addr_lo: u32,
-    pub(crate) addr_hi: u32,
-}
-
-const _: () = {
-    assert!(size_of::<Desc>() == 16);
-    assert!(offset_of!(Desc, opts1) == 0);
-    assert!(offset_of!(Desc, opts2) == 4);
-    assert!(offset_of!(Desc, addr_lo) == 8);
-    assert!(offset_of!(Desc, addr_hi) == 12);
-};
+/// Eén descriptor: opts1 (op 0), opts2, adres laag, adres hoog.
+pub(crate) const DESC: u64 = 16;
+pub(crate) const DESC_OPTS2: u64 = 4;
+pub(crate) const DESC_ADDR_LO: u64 = 8;
+pub(crate) const DESC_ADDR_HI: u64 = 12;

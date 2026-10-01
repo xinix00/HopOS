@@ -409,7 +409,7 @@ impl Hc {
     /// controller PED pas ná een geslaagde reset; op USB3 gebeurt dat als
     /// deel van de link-training. In beide gevallen is "PED staat aan" het
     /// signaal dat er een bruikbaar apparaat aan hangt.
-    pub async fn reset_port(&mut self, n: u8, t: &impl Timer) -> Result {
+    async fn reset_port(&mut self, n: u8, t: &impl Timer) -> Result {
         if !self.probed {
             return Err(Error::NotProbed);
         }
@@ -436,6 +436,63 @@ impl Hc {
             }
             t.sleep(POLL_STEP_NS).await;
         }
+    }
+
+    /// Een commando met het input context van `slot` als parameter (Address
+    /// Device, Evaluate Context, Configure Endpoint).
+    pub(crate) async fn ctx_command(
+        &mut self,
+        slot: usize,
+        trb: u32,
+        what: &'static str,
+        t: &impl Timer,
+    ) -> Result {
+        let p = self.res_ref(slot)?.in_ctx.0 + self.bus_off;
+        self.command(
+            t,
+            p as u32,
+            (p >> 32) as u32,
+            0,
+            trb << TRB_TYPE_SHIFT | (slot as u32) << 24,
+            what,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Een endpoint-commando (Reset Endpoint, Stop Endpoint, Set TR
+    /// Dequeue Pointer) op `dci` van `slot`, met `p` als parameter.
+    async fn ep_command(
+        &mut self,
+        slot: usize,
+        dci: u32,
+        trb: u32,
+        p: u64,
+        what: &'static str,
+        t: &impl Timer,
+    ) -> Result {
+        self.command(
+            t,
+            p as u32,
+            (p >> 32) as u32,
+            0,
+            trb << TRB_TYPE_SHIFT | (slot as u32) << 24 | dci << 16,
+            what,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Vult endpoint-context `dci` in het input context `inp`: CErr 3, het
+    /// type, de pakketgrootte, de dequeue-pointer en `dw4` (Average TRB
+    /// Length en Max ESIT Payload). DW0 blijft wat [`Hc::build_input`]
+    /// achterliet (nul) tenzij de aanroeper hem zelf zet.
+    pub(crate) fn write_ep(&self, inp: Pa, dci: u32, ep_type: u32, mps: u32, deq: u64, dw4: u32) {
+        let i = dci + 1;
+        dev::write32(self.ctx_dw(inp, i, 1), 3 << 1 | ep_type << 3 | mps << 16);
+        dev::write32(self.ctx_dw(inp, i, 2), deq as u32);
+        dev::write32(self.ctx_dw(inp, i, 3), (deq >> 32) as u32);
+        dev::write32(self.ctx_dw(inp, i, 4), dw4);
     }
 
     async fn disable_slot(&mut self, slot: usize, t: &impl Timer) -> Result {
@@ -496,22 +553,6 @@ impl Hc {
             return self.quarantine(Poison::SlotCleanup { slot, n_slots });
         }
         Error::SlotOutOfRange { slot, n_slots }
-    }
-
-    /// De host-testbare vorm van de claim met zijn cleanup.
-    #[cfg(test)]
-    pub(crate) fn claim_enabled_slot_with(
-        &mut self,
-        slot: u8,
-        disable: impl FnOnce(&mut Self, usize) -> Result,
-    ) -> Result {
-        match self.claim_enabled_slot(slot)? {
-            Claim::Owned => Ok(()),
-            Claim::Stray(s) => {
-                let r = disable(self, s);
-                Err(self.stray_released(slot, r))
-            }
-        }
     }
 
     /// Ruimt een half geënumereerd slot op. Faalt de cleanup, dan is dat de
@@ -609,22 +650,13 @@ impl Hc {
         let r = self.res_mut(slot)?;
         r.ctrl.reset();
         dev::clear(r.dev_ctx, (csz * 32) as usize);
-        let (dev_ctx, in_ctx) = (r.dev_ctx, r.in_ctx);
+        let dev_ctx = r.dev_ctx;
         dev::write64(self.dcbaa.add(slot as u64 * 8), dev_ctx.0 + bus_off);
         dev::mb();
 
         self.build_input(slot, 1, ADD_SLOT | ADD_EP0)?;
-        let p = in_ctx.0 + bus_off;
-        self.command(
-            t,
-            p as u32,
-            (p >> 32) as u32,
-            0,
-            TRB_ADDRESS_DEV << TRB_TYPE_SHIFT | (slot as u32) << 24,
-            "address device",
-        )
-        .await
-        .map(|_| ())
+        self.ctx_command(slot, TRB_ADDRESS_DEV, "address device", t)
+            .await
     }
 
     /// Vult het input context met het slot context en EP0. `entries` is de
@@ -659,14 +691,8 @@ impl Hc {
         );
         dev::write32(self.ctx_dw(inp, 1, 1), u32::from(st.port) << 16);
 
-        // EP0 (index 2 = DCI 1): control, 3 retries, onze control ring.
-        dev::write32(
-            self.ctx_dw(inp, 2, 1),
-            3 << 1 | EP_TYPE_CONTROL << 3 | st.mps0 << 16,
-        );
-        dev::write32(self.ctx_dw(inp, 2, 2), deq as u32);
-        dev::write32(self.ctx_dw(inp, 2, 3), (deq >> 32) as u32);
-        dev::write32(self.ctx_dw(inp, 2, 4), 8); // average TRB length
+        // EP0 (DCI 1): control, onze control ring, average TRB length 8.
+        self.write_ep(inp, 1, EP_TYPE_CONTROL, st.mps0, deq, 8);
         dev::mb();
         Ok(())
     }
@@ -823,16 +849,8 @@ impl Hc {
             self.dev_mut(slot)?.mps0 = mps;
             // Evaluate Context: alleen EP0 aanpassen, het slot laten staan.
             self.build_input(slot, 1, ADD_EP0)?;
-            let p = self.res_ref(slot)?.in_ctx.0 + self.bus_off;
-            self.command(
-                t,
-                p as u32,
-                (p >> 32) as u32,
-                0,
-                TRB_EVAL_CTX << TRB_TYPE_SHIFT | (slot as u32) << 24,
-                "evaluate context (EP0 packet size)",
-            )
-            .await?;
+            self.ctx_command(slot, TRB_EVAL_CTX, "evaluate context (EP0 packet size)", t)
+                .await?;
         }
 
         self.get_descriptor(slot, DESC_DEVICE, 18, 18, "device descriptor (18)", t)
@@ -901,37 +919,22 @@ impl Hc {
         let inp = r.in_ctx;
         let st = r.dev.as_ref().ok_or(Error::Detached)?;
         for (f, ring) in st.ifaces.iter().zip(r.intr.iter()) {
-            let deq = ring.deq_ptr();
-            let i = f.dci + 1;
             dev::write32(
-                self.ctx_dw(inp, i, 0),
+                self.ctx_dw(inp, f.dci + 1, 0),
                 interval_exponent(st.speed, f.interval) << 16,
             );
-            dev::write32(
-                self.ctx_dw(inp, i, 1),
-                3 << 1 | EP_TYPE_INTR_IN << 3 | f.mps << 16,
-            );
-            dev::write32(self.ctx_dw(inp, i, 2), deq as u32);
-            dev::write32(self.ctx_dw(inp, i, 3), (deq >> 32) as u32);
             // Average TRB length en Max ESIT Payload: bij een
             // interrupt-endpoint zonder burst is dat allebei gewoon de
             // pakketgrootte.
-            dev::write32(self.ctx_dw(inp, i, 4), f.mps | f.mps << 16);
+            let dw4 = f.mps | f.mps << 16;
+            self.write_ep(inp, f.dci, EP_TYPE_INTR_IN, f.mps, ring.deq_ptr(), dw4);
         }
         let conf_val = st.conf_val;
         let n_if = st.ifaces.len();
         dev::mb();
 
-        let p = inp.0 + self.bus_off;
-        self.command(
-            t,
-            p as u32,
-            (p >> 32) as u32,
-            0,
-            TRB_CONFIG_EP << TRB_TYPE_SHIFT | (slot as u32) << 24,
-            "configure endpoint",
-        )
-        .await?;
+        self.ctx_command(slot, TRB_CONFIG_EP, "configure endpoint", t)
+            .await?;
         self.control(slot, 0x00, REQ_SET_CONFIG, u16::from(conf_val), 0, 0, t)
             .await?;
         for i in 0..n_if {
@@ -1111,29 +1114,14 @@ impl Hc {
         id: RingId,
         t: &impl Timer,
     ) -> Result {
-        let s = (slot as u32) << 24 | dci << 16;
         match self.ep_state(slot, dci)? {
             EP_HALTED => {
-                self.command(
-                    t,
-                    0,
-                    0,
-                    0,
-                    TRB_RESET_EP << TRB_TYPE_SHIFT | s,
-                    "reset endpoint",
-                )
-                .await?;
+                self.ep_command(slot, dci, TRB_RESET_EP, 0, "reset endpoint", t)
+                    .await?;
             }
             EP_RUNNING => {
-                self.command(
-                    t,
-                    0,
-                    0,
-                    0,
-                    TRB_STOP_EP << TRB_TYPE_SHIFT | s,
-                    "stop endpoint",
-                )
-                .await?;
+                self.ep_command(slot, dci, TRB_STOP_EP, 0, "stop endpoint", t)
+                    .await?;
             }
             _ => {}
         }
@@ -1141,15 +1129,8 @@ impl Hc {
         ring.reset();
         let ring = *ring;
         let deq = ring.deq_ptr();
-        self.command(
-            t,
-            deq as u32,
-            (deq >> 32) as u32,
-            0,
-            TRB_SET_TR_DEQ << TRB_TYPE_SHIFT | s,
-            "set TR dequeue pointer",
-        )
-        .await?;
+        self.ep_command(slot, dci, TRB_SET_TR_DEQ, deq, "set TR dequeue pointer", t)
+            .await?;
         self.drop_ring(slot, &ring);
         Ok(())
     }
@@ -1182,28 +1163,12 @@ impl Hc {
             return Ok(());
         }
         let r = self.disable_slot(slot, t).await;
-        self.release_end(slot, r, Hc::clear_slot)
-    }
-
-    /// De host-testbare vorm van `release_slot`: dezelfde boekhouding met
-    /// Disable Slot als gewone functie.
-    #[cfg(test)]
-    pub(crate) fn release_slot_with(
-        &mut self,
-        slot: usize,
-        disable: impl FnOnce(&mut Self, usize) -> Result,
-        clear: impl FnOnce(&mut Self, usize),
-    ) -> Result {
-        if !self.release_begin(slot)? {
-            return Ok(());
-        }
-        let r = disable(self, slot);
-        self.release_end(slot, r, clear)
+        self.release_end(slot, r)
     }
 
     /// Mag `slot` vrijgegeven worden, en moet er Disable Slot heen? `false`:
     /// niets te doen (idempotent).
-    fn release_begin(&mut self, slot: usize) -> Result<bool> {
+    pub(crate) fn release_begin(&mut self, slot: usize) -> Result<bool> {
         if slot < 1 || slot > self.n_slots || self.res_ref(slot).is_err() {
             return Err(self.quarantine(Poison::UnknownRelease { slot }));
         }
@@ -1213,14 +1178,9 @@ impl Hc {
         Ok(in_use || quarantined)
     }
 
-    /// De boekhouding na Disable Slot: bevestigd is vrij, anders
-    /// quarantaine.
-    fn release_end(
-        &mut self,
-        slot: usize,
-        disabled: Result,
-        clear: impl FnOnce(&mut Self, usize),
-    ) -> Result {
+    /// De boekhouding na Disable Slot: bevestigd is vrij (en DCBAA[slot]
+    /// leeg), anders quarantaine.
+    pub(crate) fn release_end(&mut self, slot: usize, disabled: Result) -> Result {
         if disabled.is_err() {
             if let Ok(r) = self.res_mut(slot) {
                 r.in_use = true;
@@ -1228,7 +1188,7 @@ impl Hc {
             }
             return Err(self.quarantine(Poison::DisableUnconfirmed { slot: slot as u8 }));
         }
-        clear(self, slot);
+        self.clear_slot(slot);
         if let Ok(r) = self.res_mut(slot) {
             r.in_use = false;
             r.quarantined = false;

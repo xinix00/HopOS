@@ -201,20 +201,22 @@ impl fmt::Display for Error {
 /// De `Result` van deze crate.
 pub type Result<T = (), E = Error> = core::result::Result<T, E>;
 
-fn regs(base: Pa) -> &'static Regs {
-    // SAFETY: elke aanroeper houdt de voorwaarde van `Gem::new` of
-    // `ack_irq`: `base` is het gemapte GEM-blok.
+/// Het registerblok op `base`.
+///
+/// # Safety
+///
+/// `base` is het gemapte GEM-blok, voor altijd (de voorwaarde van
+/// [`Gem::new`]).
+unsafe fn regs(base: Pa) -> &'static Regs {
+    // SAFETY: de voorwaarde van deze functie.
     unsafe { dev::regs(base) }
 }
 
 /// De eerste vier RX-descriptors (w0, w1) zoals de CPU ze nu leest, voor de
-/// diagnose: staat OWNED (bit 0 van w0) waar de hardware al vulde?
-///
-/// # Safety
-///
-/// `ring` is de RX-ring van een levende `Gem` (`rx_ring` uit `new`).
+/// diagnose: staat OWNED (bit 0 van w0) waar de hardware al vulde? `ring`
+/// is de RX-ring van een levende `Gem` (`rx_ring` uit `new`).
 #[must_use]
-pub unsafe fn ring_words(ring: Pa) -> [u32; 8] {
+pub fn ring_words(ring: Pa) -> [u32; 8] {
     let mut out = [0u32; 8];
     for i in 0..4 {
         out[2 * i] = dev::read32(ring.add((i * 16) as u64));
@@ -231,7 +233,8 @@ pub unsafe fn ring_words(ring: Pa) -> [u32; 8] {
 /// `base` is het gemapte GEM-blok (de voorwaarde van `Gem::new`).
 #[must_use]
 pub unsafe fn diag(base: Pa) -> [u32; 9] {
-    let r = regs(base);
+    // SAFETY: de voorwaarde van deze functie.
+    let r = unsafe { regs(base) };
     [
         r.nwctrl.read(),
         r.nwcfg.read(),
@@ -258,7 +261,8 @@ pub unsafe fn diag(base: Pa) -> [u32; 9] {
 ///
 /// `base` is het gemapte GEM-blok van een [`Gem`] die leeft.
 pub unsafe fn ack_irq(base: Pa) {
-    let r = regs(base);
+    // SAFETY: de voorwaarde van deze functie.
+    let r = unsafe { regs(base) };
     r.idr.write(INT_RCOMP);
     r.isr.write(INT_RCOMP);
 }
@@ -319,7 +323,8 @@ impl Gem {
     }
 
     fn r(&self) -> &'static Regs {
-        regs(self.base)
+        // SAFETY: de voorwaarde van `new`.
+        unsafe { regs(self.base) }
     }
 
     fn delay(&self, ns: u64) {
@@ -327,12 +332,6 @@ impl Gem {
         while (self.clock)() < end {
             core::hint::spin_loop();
         }
-    }
-
-    /// Het GEM-blok, voor de device-ack ([`ack_irq`]).
-    #[must_use]
-    pub fn base(&self) -> Pa {
-        self.base
     }
 
     /// Alleen de management-poort aan: MDIO-scan zonder verder iets te
@@ -442,13 +441,6 @@ impl Gem {
         r.isr.write(INT_RCOMP);
         board();
         r.ier.write(INT_RCOMP);
-    }
-
-    /// ISR, IMR en de RX-status: de stats-vraag.
-    #[must_use]
-    pub fn irq_diag(&self) -> (u32, u32, u32) {
-        let r = self.r();
-        (r.isr.read(), r.imr.read(), r.rxstatus.read())
     }
 }
 

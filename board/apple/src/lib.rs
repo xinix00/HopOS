@@ -486,10 +486,6 @@ impl Board for Apple {
                 return Err(Error::Nic("no link"));
             }
         }
-        // Eén keer bij de boot: staan de ringen waar de chip ze zoekt (de
-        // RCB's in NIC-SRAM)? Alleen lezen: `self_test` schrijft in de
-        // send-RCB en hoort vóór de init, niet hier.
-        println!("{}", nic.rcb_dump());
         Ok(Some(nic))
     }
 }

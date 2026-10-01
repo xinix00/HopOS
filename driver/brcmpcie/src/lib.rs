@@ -242,7 +242,9 @@ fn reg(pa: Pa) -> &'static Reg<u32> {
     unsafe { dev::regs(pa) }
 }
 
-fn delay(clock: fn() -> u64, ns: u64) {
+/// Spint `ns` nanoseconden op `clock` (de klok die het board aan [`Rc`]
+/// geeft; de Pi 5 wacht er ook zijn RP1-resets mee).
+pub fn delay(clock: fn() -> u64, ns: u64) {
     let end = clock().saturating_add(ns);
     while clock() < end {
         core::hint::spin_loop();
@@ -441,9 +443,9 @@ impl Rc {
 
     /// `brcm_pcie_setup` plus `post_setup_bcm2712`: bridge-resetcyclus,
     /// SerDes wekken, windows, de 54 MHz-refclk-PLL. De link blijft down
-    /// (PERST# vast) tot [`start_link`](Self::start_link). Geeft (rc-modus,
-    /// PLL bevestigd).
-    pub fn setup(&self) -> (bool, bool) {
+    /// (PERST# vast) tot [`start_link`](Self::start_link). Geeft of de
+    /// bridge als root complex gestrapt is.
+    pub fn setup(&self) -> bool {
         // Op de BCM2711 mag de firmware PERST# al gelost hebben (Linux zet
         // hem expliciet terug), en een endpoint die tijdens de bridge-setup
         // uit reset staat traint half.
@@ -483,7 +485,7 @@ impl Rc {
         }
 
         if self.r(off::MISC_PCIE_STATUS).read() & STATUS_RC_MODE == 0 {
-            return (false, false);
+            return false;
         }
         // SCB0_SIZE: hoe groot het geheugen is dat een endpoint via RC_BAR2
         // mag lezen. Linux zet het op elke STB-chip behalve de 7712-familie
@@ -512,17 +514,17 @@ impl Rc {
         self.r(off::MISC_WIN0_LIMIT_HI).update(|v| (v & !0xff) | lh);
         self.r(off::CFG_VENDOR_SPEC1).update(|v| v & !0xc);
 
-        if self.soc == Soc::Bcm2711 {
-            return (true, true);
+        if self.soc == Soc::Bcm2712 {
+            self.post_setup_2712();
         }
-        (true, self.post_setup_2712())
+        true
     }
 
     /// De PHY-PLL naar de 54 MHz-kristalrefclk (blok 0x1600), en de
     /// UBUS/AXI-foutonderdrukking: een mislukte read geeft all-ones in
     /// plaats van een SError.
-    fn post_setup_2712(&self) -> bool {
-        let mut ok = self.mdio_write(0, 0x1f, 0x1600);
+    fn post_setup_2712(&self) {
+        self.mdio_write(0, 0x1f, 0x1600);
         for (r, v) in [
             (0x16, 0x50b9),
             (0x17, 0xbda1),
@@ -532,7 +534,7 @@ impl Rc {
             (0x1c, 0x5030),
             (0x1e, 0x0007),
         ] {
-            ok &= self.mdio_write(0, r, v);
+            self.mdio_write(0, r, v);
         }
         delay(self.clock, 200_000);
         // PM-klokperiode 18,52 ns = 1/54 MHz.
@@ -558,18 +560,18 @@ impl Rc {
         self.r(off::RC_TL_VDM_CTL1).write(0);
         self.r(off::RC_TL_VDM_CTL0).update(|v| v | 0x7_0000);
         self.r(off::MISC_CTRL1).update(|v| v | (1 << 5));
-        ok
     }
 
     /// Schrijft een intern PHY-register (port [19:16], regad [15:0]) en wacht
-    /// tot bit 31 zakt.
-    fn mdio_write(&self, port: u32, regad: u32, data: u16) -> bool {
+    /// hoogstens 1000 lezingen tot bit 31 zakt. Of de PLL vastliep, toetst
+    /// de link-training erna.
+    fn mdio_write(&self, port: u32, regad: u32, data: u16) {
         self.r(off::MDIO_ADDR)
             .write(((port & 0xf) << 16) | (regad & 0xffff));
         let _ = self.r(off::MDIO_ADDR).read();
         let w = self.r(off::MDIO_WR_DATA);
         w.write((1 << 31) | u32::from(data));
-        (0..1000).any(|_| w.read() & (1 << 31) == 0)
+        let _ = (0..1000).any(|_| w.read() & (1 << 31) == 0);
     }
 
     /// Lost PERST# en wacht op de link (PCIe CEM: 100 ms, dan pollen tot
@@ -674,7 +676,7 @@ impl Rc {
         if rescal_base != 0 && !unsafe { rescal(Pa(rescal_base), self.clock) } {
             return Err(Error::Rescal);
         }
-        if !self.setup().0 {
+        if !self.setup() {
             return Err(Error::NotRc {
                 status: self.status(),
             });

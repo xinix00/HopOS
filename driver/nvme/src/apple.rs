@@ -28,9 +28,9 @@
 //! leeskant werkt") staan op de plek waar ze gelden: het wekbericht
 //! ([`Ans::start`]), CC bijstellen in plaats van overschrijven
 //! ([`Ans::start`]), de opdracht op het slot dat de deurbel aanwijst
-//! (`submit`), en netjes afsluiten ([`Ans::shutdown`]).
+//! (`post`), en netjes afsluiten ([`Ans::shutdown`]).
 //!
-//! Schrijven is dezelfde submit-weg als lezen met opcode 0x01: m1n1 en
+//! Schrijven is dezelfde weg als lezen met opcode 0x01: m1n1 en
 //! Linux zetten de DMA-richting van de TCB op `opcode & 1`. De Go-versie
 //! (`OLD/metal/driver/nvme/apple.go`) kon alleen lezen. Referentie: m1n1
 //! `src/nvme.c`, Linux `drivers/nvme/host/apple.c`.
@@ -147,9 +147,8 @@ pub const MMIO_LEN: u64 = size_of::<Regs>() as u64;
 /// Hoeveel van het NVMMU-venster het board moet mappen.
 pub const NVMMU_LEN: u64 = size_of::<Nvmmu>() as u64;
 
-/// Eén submission-entry (NVMe §4.2). De afstand tussen entries komt uit
-/// CC.IOSQES, dat iBoot zet (128 bytes op de M4); op slot 0 doet die niet
-/// mee.
+/// Eén submission-entry (NVMe §4.2). In de lineaire modus staat hij op
+/// `tag * 64`, ongeacht CC.IOSQES ([`write_sqe`]).
 #[repr(C)]
 struct Sqe {
     /// Opcode [7:0], CID [31:16].
@@ -261,8 +260,7 @@ pub const BLOCK: u64 = 4096;
 const PER_BLOCK: u64 = BLOCK / SECTOR;
 
 /// Het slot van de opdrachten die ter plekke wachten (admin, de GPT): 0. De
-/// lineaire deurbel wijst het slot aan, en op slot 0 doet de entry-afstand
-/// niet mee.
+/// lineaire deurbel wijst het slot aan.
 const SLOT: u16 = 0;
 
 /// Zoveel I/O-opdrachten staan hoogstens tegelijk op de controller: de
@@ -311,8 +309,8 @@ pub const DMA_NEED: u64 = DATA_OFF + DATA_SIZE;
 pub const DMA_ALIGN: u64 = 0x4000;
 
 const _: () = {
-    // 128 bytes per SQE (IOSQES = 7 van iBoot) en per TCB passen in 16 KB.
-    assert!(Q_ENTRIES as u64 * 128 <= 0x4000 && Q_ENTRIES as u64 * CQE <= 0x4000);
+    // Een TCB per slot van de NVMMU en de completions passen in 16 KB.
+    assert!(Q_ENTRIES as u64 * TCB <= 0x4000 && Q_ENTRIES as u64 * CQE <= 0x4000);
     // Een PRP-lijst van een pagina per tag, vóór het datablok.
     assert!(PRP_OFF + DEPTH as u64 * PAGE <= DATA_OFF);
     assert!((TAG_PAGES - 1) * 8 <= PAGE as usize);
@@ -738,12 +736,6 @@ impl<C: Coprocessor> Ans<C> {
         &mut self.cop
     }
 
-    /// Geeft de coprocessor terug (na een mislukte start: in slaap, reset,
-    /// opnieuw).
-    pub fn into_coprocessor(self) -> C {
-        self.cop
-    }
-
     /// Trekt de mailbox van de coprocessor leeg. Een fout is een
     /// omgevallen coprocessor: dan komt er geen completion meer.
     fn service(&mut self) -> Result<(), C::Error> {
@@ -806,10 +798,10 @@ impl<C: Coprocessor> Ans<C> {
         // Vanaf hier gewoon NVMe: admin-queue aanmelden, aan.
         //
         // CC wordt NIET overschreven maar bijgesteld (les 2, 29-08). iBoot
-        // laat er een waarde in achter (0x474000: shutdown-normal, 128-byte
-        // SQE's) en de entry-maten dáárin zijn wat de controller gebruikt.
-        // Een verse CC met onze eigen maten komt niet ready; m1n1 wist
-        // daarom alleen SHN en zet EN.
+        // laat er een waarde in achter (0x474000: shutdown-normal, IOSQES 7,
+        // IOCQES 4). Een verse CC met onze eigen maten komt niet ready; m1n1
+        // wist daarom alleen SHN en zet EN. De SQE's staan in de lineaire
+        // modus toch per 64 bytes ([`write_sqe`]).
         r.aqa.write((q << 16) | q);
         write_lo_hi(&r.asq, self.admin.sq.0);
         write_lo_hi(&r.acq, self.admin.cq.0);
@@ -1298,17 +1290,6 @@ impl<C: Coprocessor> Ans<C> {
         Ok(())
     }
 
-    /// Haalt het schrijfvenster weg: vanaf nu weigert elke schrijf.
-    pub fn clear_window(&mut self) {
-        self.window = None;
-    }
-
-    /// Het schrijfvenster als (eerste blok, blokken).
-    #[must_use]
-    pub fn window(&self) -> Option<(u64, u64)> {
-        self.window.map(|w| (w.first, w.blocks))
-    }
-
     /// Geeft de ANS terug zoals we hem aantroffen: I/O-queues weg, de
     /// controller via CC.SHN netjes uit, en de coprocessor in slaap.
     ///
@@ -1397,12 +1378,6 @@ impl<C: Coprocessor> Ans<C> {
             .get(..end)
             .and_then(|m| core::str::from_utf8(m).ok())
             .unwrap_or("?")
-    }
-
-    /// Het datablok (basis, maat) dat het board cacheable mag mappen.
-    #[must_use]
-    pub fn data_region(&self) -> (Pa, u64) {
-        (self.data(), DATA_SIZE)
     }
 
     /// Wat de controller, de NVMMU en de coprocessor ervan vinden, als iets
@@ -1973,9 +1948,9 @@ mod tests {
     //! DMA-regio in RAM, en de klok van de test IS de controller. Bij elke
     //! blik op de klok spiegelt hij CC in CSTS (maar alleen na het
     //! wekbericht en met iBoots IOSQES = 7 in CC: les 1 en 2), voert hij de
-    //! opdracht uit op het slot dat een lineaire deurbel aanwijst, met de
-    //! entry-afstand uit CC (les 3), toetst hij de TCB, en zet hij de
-    //! completion terug. De schijf is RAM met een GPT-header op blok 1.
+    //! opdracht uit op het slot dat een lineaire deurbel aanwijst, op 64
+    //! bytes per entry ongeacht IOSQES (les 3, M26), toetst hij de TCB, en
+    //! zet hij de completion terug. De schijf is RAM met een GPT-header op blok 1.
 
     use super::*;
     use blkdev::{BlockIo, Paced, Spin, block_on};
@@ -2448,7 +2423,7 @@ mod tests {
         assert!(b.iter().all(|&x| x == 0x5a));
         with(|c| assert_eq!(c.dirs.last(), Some(&TCB_FROM_DEVICE)));
 
-        a.clear_window();
+        a.window = None;
         assert!(matches!(
             write_abs(&mut a, 13, &data),
             Err(Error::NoWindow { .. })
@@ -2465,9 +2440,15 @@ mod tests {
                 "{first}+{n}"
             );
         }
-        assert_eq!(a.window(), None);
+        assert_eq!(a.window, None);
         a.set_window(USABLE.0, USABLE.1 - USABLE.0 + 1).unwrap();
-        assert_eq!(a.window(), Some((6, 53)));
+        assert_eq!(
+            a.window,
+            Some(Window {
+                first: 6,
+                blocks: 53
+            })
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@
 //! `async` pad tot het eind ([`block`]).
 
 use super::*;
-use crate::device::{descriptor_mps0, interval_exponent, parse_config};
+use crate::device::{Claim, descriptor_mps0, interval_exponent, parse_config};
 use crate::host::SlotRes;
 use core::future::{Future, ready};
 use core::pin::pin;
@@ -197,81 +197,80 @@ fn ten_root_hosts_fit_existing_dma_window() {
             assert!(h.bulk_size >= BULK_BUF_MIN && h.bulk_size <= BULK_BUF_MAX);
             assert!(h.bulk_buf.0 + h.bulk_size <= start + span);
         }
-        assert!(h.is_running());
+        assert!(h.running);
     }
 }
 
 // --- ownership_test.go ------------------------------------------------------
 
+/// Een controller met twee slots waarvan slot 1 bezet is, en een DCBAA in
+/// nep-geheugen met een device context op [1].
+fn releasing_hc(dcbaa: &Mem) -> Hc {
+    let mut h = ownership_hc(2);
+    h.res[1].as_mut().unwrap().in_use = true;
+    h.dcbaa = dcbaa.pa();
+    dev::write64(dcbaa.pa().add(8), 0xfeed000);
+    h
+}
+
 // Go: TestReleaseSlotClearsOwnershipOnlyAfterConfirmedDisable
 #[test]
 fn release_slot_clears_ownership_only_after_confirmed_disable() {
-    let mut h = ownership_hc(2);
-    h.res[1].as_mut().unwrap().in_use = true;
-    let mut table = [0u64, 0xfeed000, 0];
-    let r = h.release_slot_with(
-        1,
-        |_, slot| {
-            assert_eq!(slot, 1, "Disable Slot kreeg {slot}, wil 1");
-            Ok(())
-        },
-        |_, slot| table[slot] = 0,
-    );
-    assert_eq!(r, Ok(()));
+    let dcbaa = Mem::new(3 * 8);
+    let mut h = releasing_hc(&dcbaa);
+    assert_eq!(h.release_begin(1), Ok(true), "Disable Slot moet naar 1");
+    assert_eq!(h.release_end(1, Ok(())), Ok(()));
     let s = h.res[1].as_ref().unwrap();
     assert!(!s.in_use && !s.quarantined);
-    assert_eq!(table[1], 0, "DCBAA[1] niet gewist");
+    assert_eq!(dev::read64(dcbaa.pa().add(8)), 0, "DCBAA[1] niet gewist");
     assert_eq!(h.poisoned, None, "controller ten onrechte poisoned");
+    // Idempotent: een vrij slot vraagt geen Disable Slot meer.
+    assert_eq!(h.release_begin(1), Ok(false));
 }
 
 // Go: TestReleaseSlotFailureQuarantinesWithoutClearingState
 #[test]
 fn release_slot_failure_quarantines_without_clearing_state() {
-    let mut h = ownership_hc(2);
-    h.res[1].as_mut().unwrap().in_use = true;
-    let mut table = [0u64, 0xfeed000, 0];
-    let r = h.release_slot_with(
-        1,
-        |_, _| {
-            Err(Error::EventTimeout {
-                what: "disable slot",
-                usbsts: 0,
-            })
-        },
-        |_, slot| table[slot] = 0,
-    );
+    let dcbaa = Mem::new(3 * 8);
+    let mut h = releasing_hc(&dcbaa);
+    let timeout = Err(Error::EventTimeout {
+        what: "disable slot",
+        usbsts: 0,
+    });
     assert_eq!(
-        r,
+        h.release_end(1, timeout),
         Err(Error::Poisoned(Poison::DisableUnconfirmed { slot: 1 })),
         "release-fout zonder expliciete reset-eis"
     );
     let s = h.res[1].as_ref().unwrap();
     assert!(s.in_use && s.quarantined, "onbevestigd slot werd vergeten");
     assert_eq!(
-        table[1], 0xfeed000,
+        dev::read64(dcbaa.pa().add(8)),
+        0xfeed000,
         "DCBAA[1] gewist zonder disable-bevestiging"
     );
     assert!(h.poisoned.is_some());
+    // Een slot dat software niet kent, quarantaint ook.
+    let mut h = ownership_hc(2);
+    assert_eq!(
+        h.release_begin(3),
+        Err(Error::Poisoned(Poison::UnknownRelease { slot: 3 }))
+    );
 }
 
 // Go: TestOutOfRangeEnabledSlotIsDisabledOrControllerPoisoned
 #[test]
 fn out_of_range_enabled_slot_is_disabled_or_controller_poisoned() {
-    // Bevestigde cleanup.
+    // Bevestigde cleanup: precies het gemelde slot gaat naar Disable Slot.
     let mut h = ownership_hc(2);
-    let mut disabled = 0;
-    let r = h.claim_enabled_slot_with(3, |_, slot| {
-        disabled = slot;
-        Ok(())
-    });
+    assert_eq!(h.claim_enabled_slot(3), Ok(Claim::Stray(3)));
     assert_eq!(
-        r,
-        Err(Error::SlotOutOfRange {
+        h.stray_released(3, Ok(())),
+        Error::SlotOutOfRange {
             slot: 3,
             n_slots: 2
-        })
+        }
     );
-    assert_eq!(disabled, 3);
     assert_eq!(
         h.poisoned, None,
         "bevestigd opgeruimd slot poisonde de controller"
@@ -279,28 +278,23 @@ fn out_of_range_enabled_slot_is_disabled_or_controller_poisoned() {
 
     // Cleanup faalt.
     let mut h = ownership_hc(2);
-    let r = h.claim_enabled_slot_with(3, |_, _| Err(Error::NotRunning));
-    assert!(matches!(r, Err(Error::Poisoned(_))) && h.poisoned.is_some());
+    assert_eq!(h.claim_enabled_slot(3), Ok(Claim::Stray(3)));
+    let e = h.stray_released(3, Err(Error::NotRunning));
+    assert!(matches!(e, Error::Poisoned(_)) && h.poisoned.is_some());
 
-    // Slot 0 kan niet gedisabled worden.
+    // Slot 0 kan niet gedisabled worden: geen Stray, dus geen Disable Slot.
     let mut h = ownership_hc(2);
-    let mut called = false;
-    let r = h.claim_enabled_slot_with(0, |_, _| {
-        called = true;
-        Ok(())
-    });
-    assert_eq!(r, Err(Error::Poisoned(Poison::SlotZero)));
-    assert!(
-        !called,
-        "Disable Slot werd ten onrechte met slot 0 verstuurd"
+    assert_eq!(
+        h.claim_enabled_slot(0),
+        Err(Error::Poisoned(Poison::SlotZero))
     );
 
     // Een slot in bereik dat al bezet is.
     let mut h = ownership_hc(2);
-    assert_eq!(h.claim_enabled_slot_with(1, |_, _| Ok(())), Ok(()));
+    assert_eq!(h.claim_enabled_slot(1), Ok(Claim::Owned));
     assert!(h.res[1].as_ref().unwrap().in_use);
     assert_eq!(
-        h.claim_enabled_slot_with(1, |_, _| Ok(())),
+        h.claim_enabled_slot(1),
         Err(Error::Poisoned(Poison::SlotBusy { slot: 1 }))
     );
 }
@@ -331,21 +325,9 @@ fn poisoned_hc() -> Hc {
 #[test]
 fn recover_rebuilds_retained_dma_window() {
     let mut h = poisoned_hc();
-    let steps = core::cell::RefCell::new(Vec::new());
-    let r = h.recover_with(
-        |_| {
-            steps.borrow_mut().push("reset");
-            Ok(())
-        },
-        |_, base, size| {
-            steps.borrow_mut().push("start");
-            assert_eq!((base, size), (Pa(0x12_0000), 0x20_0000));
-            Ok(())
-        },
-        |_| steps.borrow_mut().push("power"),
-    );
-    assert_eq!(r, Ok(()));
-    assert_eq!(*steps.borrow(), ["reset", "start", "power"]);
+    assert_eq!(h.recover_begin(), Ok(Some((Pa(0x12_0000), 0x20_0000))));
+    assert_eq!(h.recover_reset(Ok(())), Ok(()));
+    assert_eq!(h.recover_start(Ok(())), Ok(()));
     assert_eq!(h.recovery_needed(), None);
 }
 
@@ -354,37 +336,17 @@ fn recover_rebuilds_retained_dma_window() {
 fn recover_start_failure_stays_poisoned_and_can_retry() {
     let mut h = poisoned_hc();
     h.running = true;
-    let (mut resets, mut starts, mut powers) = (0, 0, 0);
     let fail = Error::DmaFull { want: 1, left: 0 };
-    let r = h.recover_with(
-        |_| {
-            resets += 1;
-            Ok(())
-        },
-        |_, _, _| {
-            starts += 1;
-            Err(fail)
-        },
-        |_| powers += 1,
-    );
-    assert_eq!(r, Err(fail));
+    assert_eq!(h.recover_reset(Ok(())), Ok(()));
+    assert_eq!(h.recover_start(Err(fail)), Err(fail));
     assert_eq!(h.recovery_needed(), Some(Poison::RecoveryStart));
     assert!(!h.running, "Start-fout liet running staan");
-    assert_eq!(powers, 0, "PowerOn na mislukte Start");
 
-    let r = h.recover_with(
-        |_| {
-            resets += 1;
-            Ok(())
-        },
-        |_, _, _| {
-            starts += 1;
-            Ok(())
-        },
-        |_| powers += 1,
-    );
-    assert_eq!(r, Ok(()));
-    assert_eq!((resets, starts, powers), (2, 2, 1));
+    // Opnieuw: de poison van de mislukte start vraagt weer een herstel in
+    // hetzelfde venster, en dat lukt nu.
+    assert_eq!(h.recover_begin(), Ok(Some((Pa(0x12_0000), 0x20_0000))));
+    assert_eq!(h.recover_reset(Ok(())), Ok(()));
+    assert_eq!(h.recover_start(Ok(())), Ok(()));
     assert_eq!(h.recovery_needed(), None);
 }
 
@@ -398,17 +360,7 @@ fn recover_reset_failure_does_not_start() {
         mask: 2,
         want: 0,
     };
-    let (mut started, mut powered) = (false, false);
-    let r = h.recover_with(
-        |_| Err(want),
-        |_, _, _| {
-            started = true;
-            Ok(())
-        },
-        |_| powered = true,
-    );
-    assert_eq!(r, Err(want));
-    assert!(!started && !powered);
+    assert_eq!(h.recover_reset(Err(want)), Err(want));
     assert_eq!(h.recovery_needed(), Some(Poison::RecoveryReset));
 }
 
@@ -417,17 +369,15 @@ fn recover_reset_failure_does_not_start() {
 fn recover_healthy_controller_does_nothing() {
     let mut h = poisoned_hc();
     h.poisoned = None;
-    let mut called = false;
-    let r = h.recover_with(
-        |_| {
-            called = true;
-            Ok(())
-        },
-        |_, _, _| Ok(()),
-        |_| {},
+    assert_eq!(
+        h.recover_begin(),
+        Ok(None),
+        "gezonde controller werd gereset"
     );
-    assert_eq!(r, Ok(()));
-    assert!(!called, "gezonde controller werd gereset");
+    // Zonder bewaard venster valt er niets te herbouwen.
+    let mut h = poisoned_hc();
+    h.dma_size = 0;
+    assert!(matches!(h.recover_begin(), Err(Error::Dma { .. })));
 }
 
 // --- Rust-eigen toetsen -------------------------------------------------------

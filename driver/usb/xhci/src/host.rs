@@ -127,16 +127,6 @@ impl SlotRes {
     }
 }
 
-/// Schrijft een uitgelijnd 64-bit registerpaar (CRCR, ERSTBA) in één
-/// MMIO-transactie. Hoog, laag, hoog verliest op de CIX (de O6N) de
-/// ringstand; alleen laag-dan-hoog mist QEMU's latch op het hoge woord
-/// (`hw/usb/hcd-xhci.c`). Eén native 64-bit-schrijf publiceert adres en
-/// stuurbits samen, en beide latchers zien het volledige adres. GEMETEN
-/// 30-09 op de O6N: tien xHCI's up en de Blu-ray-drive over USB-BOT.
-fn write64(lo: &Reg<u32>, _hi: &Reg<u32>, v: u64) {
-    dev::write64(Pa(core::ptr::from_ref(lo) as usize as u64), v);
-}
-
 impl Hc {
     /// Bouwt de datastructuren op in de DMA-regio `[dma, dma+size)` en zet
     /// de controller aan. De regio moet buiten élke RAM-declaratie liggen
@@ -222,18 +212,18 @@ impl Hc {
         // Nu de registers. CONFIG eerst: hoeveel slots we gaan gebruiken.
         let o = self.opr();
         o.config.write(self.n_slots as u32);
-        write64(&o.dcbaap_lo, &o.dcbaap_hi, self.dcbaa.0 + self.bus_off);
+        o.dcbaap.write(self.dcbaa.0 + self.bus_off);
         // CRCR: het lage dword draagt RCS (Ring Cycle State); dat moet 1
         // zijn, want een nieuwe ring begint met cycle 1.
-        write64(&o.crcr_lo, &o.crcr_hi, cmd.bus | 1);
+        o.crcr.write(cmd.bus | 1);
 
         // De interrupter: ERSTSZ vóór ERSTBA (het schrijven van ERSTBA
         // latcht de tabel), en ERDP ertussen zodat de leespositie klopt
         // vanaf het eerste event. IMAN blijft dicht: wij pollen.
         let ir = self.ir();
         ir.erstsz.write(1);
-        write64(&ir.erdp_lo, &ir.erdp_hi, evt.bus | u64::from(ERDP_EHB));
-        write64(&ir.erstba_lo, &ir.erstba_hi, erst.0 + self.bus_off);
+        ir.erdp.write(evt.bus | ERDP_EHB);
+        ir.erstba.write(erst.0 + self.bus_off);
         ir.imod.write(0);
 
         self.setup_bulk_buf();
@@ -347,27 +337,6 @@ impl Hc {
         Ok(())
     }
 
-    /// De host-testbare vorm van [`Hc::recover`]: dezelfde boekhouding met
-    /// de drie hardwarestappen als gewone functies.
-    #[cfg(test)]
-    pub(crate) fn recover_with(
-        &mut self,
-        mut reset: impl FnMut(&mut Self) -> Result,
-        mut start: impl FnMut(&mut Self, Pa, u64) -> Result,
-        mut power: impl FnMut(&mut Self),
-    ) -> Result {
-        let Some((base, size)) = self.recover_begin()? else {
-            return Ok(());
-        };
-        let r = reset(self);
-        self.recover_reset(r)?;
-        let r = start(self, base, size);
-        self.recover_start(r)?;
-        power(self);
-        self.poisoned = None;
-        Ok(())
-    }
-
     /// Geeft de controller het krabbelgeheugen dat hij in HCSPARAMS2 opeist.
     /// Nul buffers is normaal (dan slaan we het over); DCBAA[0] blijft dan
     /// nul, zoals de spec voorschrijft.
@@ -468,11 +437,7 @@ impl Hc {
             // (write-1-to-clear), anders blijft de controller denken dat we
             // nog bezig zijn.
             let ir = self.ir();
-            write64(
-                &ir.erdp_lo,
-                &ir.erdp_hi,
-                evt.deq_bus() | u64::from(ERDP_EHB),
-            );
+            ir.erdp.write(evt.deq_bus() | ERDP_EHB);
             dev::mb();
         }
     }

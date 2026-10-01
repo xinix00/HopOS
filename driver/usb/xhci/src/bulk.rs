@@ -150,34 +150,22 @@ impl Hc {
         };
         let max_dci = f.in_dci.max(f.out_dci);
         self.build_input(slot, max_dci, ADD_SLOT | 1 << f.in_dci | 1 << f.out_dci)?;
-        for (dci, ep_type, mps, deq) in [
-            (f.in_dci, EP_TYPE_BULK_IN, f.in_mps, in_deq),
-            (f.out_dci, EP_TYPE_BULK_OUT, f.out_mps, out_deq),
-        ] {
-            let i = dci + 1;
-            // DW0 is nul: een bulk-endpoint heeft geen interval, geen mult en
-            // geen streams. Verder dezelfde velden als bij interrupt: CErr 3,
-            // het type, de pakketgrootte, en de dequeue-pointer met cycle 1.
-            dev::write32(self.ctx_dw(inp, i, 0), 0);
-            dev::write32(self.ctx_dw(inp, i, 1), 3 << 1 | ep_type << 3 | mps << 16);
-            dev::write32(self.ctx_dw(inp, i, 2), deq as u32);
-            dev::write32(self.ctx_dw(inp, i, 3), (deq >> 32) as u32);
-            // Average TRB Length is een hint voor de scheduler; Max ESIT
-            // Payload blijft nul want dat veld is alleen voor periodiek
-            // verkeer.
-            dev::write32(self.ctx_dw(inp, i, 4), mps);
-        }
+        // DW0 blijft nul: een bulk-endpoint heeft geen interval, geen mult
+        // en geen streams. Average TRB Length is een hint voor de
+        // scheduler; Max ESIT Payload blijft nul want dat veld is alleen
+        // voor periodiek verkeer.
+        self.write_ep(inp, f.in_dci, EP_TYPE_BULK_IN, f.in_mps, in_deq, f.in_mps);
+        self.write_ep(
+            inp,
+            f.out_dci,
+            EP_TYPE_BULK_OUT,
+            f.out_mps,
+            out_deq,
+            f.out_mps,
+        );
         dev::mb();
-        let p = inp.0 + self.bus_off;
-        self.command(
-            t,
-            p as u32,
-            (p >> 32) as u32,
-            0,
-            TRB_CONFIG_EP << TRB_TYPE_SHIFT | (slot as u32) << 24,
-            "configure endpoint",
-        )
-        .await?;
+        self.ctx_command(slot, TRB_CONFIG_EP, "configure endpoint", t)
+            .await?;
         let conf_val = self.dev_ref(slot)?.conf_val_of();
         self.control(slot, 0x00, REQ_SET_CONFIG, u16::from(conf_val), 0, 0, t)
             .await?;

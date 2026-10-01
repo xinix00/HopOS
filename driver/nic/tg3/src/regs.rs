@@ -122,28 +122,7 @@ pub(crate) struct Regs {
     pub(crate) rcv_rule_cfg: Reg<u32>,
     /// MAC_LOW_WMARK_MAX_RX_FRAME.
     pub(crate) low_wmark: Reg<u32>,
-    _r12: [u8; 0x2f8],
-    /// MAC_TX_STATS_OCTETS.
-    pub(crate) tx_octets: Reg<u32>,
-    _r13: [u8; 0x68],
-    /// MAC_TX_STATS_UCAST.
-    pub(crate) tx_ucast: Reg<u32>,
-    _r14: [u8; 0x4],
-    /// MAC_TX_STATS_BCAST.
-    pub(crate) tx_bcast: Reg<u32>,
-    _r15: [u8; 0x8],
-    /// MAC_RX_STATS_OCTETS.
-    pub(crate) rx_octets: Reg<u32>,
-    _r16: [u8; 0x8],
-    /// MAC_RX_STATS_UCAST.
-    pub(crate) rx_ucast: Reg<u32>,
-    /// MAC_RX_STATS_MCAST.
-    pub(crate) rx_mcast: Reg<u32>,
-    /// MAC_RX_STATS_BCAST.
-    pub(crate) rx_bcast: Reg<u32>,
-    /// MAC_RX_STATS_FCS_ERRORS.
-    pub(crate) rx_fcs_err: Reg<u32>,
-    _r17: [u8; 0x364],
+    _r12: [u8; 0x6f8],
     /// SNDDATAI_MODE.
     pub(crate) snddatai_mode: Reg<u32>,
     _r18: [u8; 0x4],
@@ -166,56 +145,28 @@ pub(crate) struct Regs {
     _r23: [u8; 0x3fc],
     /// RCVLPC_MODE.
     pub(crate) rcvlpc_mode: Reg<u32>,
-    /// RCVLPC_STATUS.
-    pub(crate) rcvlpc_status: Reg<u32>,
-    _r24: [u8; 0x4],
-    /// RCVLPC_NON_EMPTY_BITS.
-    pub(crate) rcvlpc_nonempty: Reg<u32>,
+    _r24: [u8; 0xc],
     /// RCVLPC_CONFIG.
     pub(crate) rcvlpc_config: Reg<u32>,
     /// RCVLPC_STATSCTRL.
     pub(crate) rcvlpc_stats_ctrl: Reg<u32>,
     /// RCVLPC_STATS_ENABLE.
     pub(crate) rcvlpc_stats_enable: Reg<u32>,
-    _r25: [u8; 0x224],
-    /// RCVLPC_STATS: door een filter gevallen.
-    pub(crate) lpc_drop_filter: Reg<u32>,
-    /// RCVLPC_STATS: werkrij vol.
-    pub(crate) lpc_wq_full: Reg<u32>,
-    _r26: [u8; 0x4],
-    /// RCVLPC_STATS: geen ontvangst-BD beschikbaar.
-    pub(crate) lpc_no_rcv_bd: Reg<u32>,
-    /// RCVLPC_STATS: weggegooid.
-    pub(crate) lpc_in_discards: Reg<u32>,
-    /// RCVLPC_STATS: fouten.
-    pub(crate) lpc_in_errors: Reg<u32>,
-    /// RCVLPC_STATS: drempel geraakt.
-    pub(crate) lpc_thresh_hit: Reg<u32>,
-    _r27: [u8; 0x1a4],
+    _r25: [u8; 0x3e4],
     /// RCVDBDI_MODE.
     pub(crate) rcvdbdi_mode: Reg<u32>,
-    /// RCVDBDI_STATUS.
-    pub(crate) rcvdbdi_status: Reg<u32>,
-    _r28: [u8; 0x38],
+    _r28: [u8; 0x3c],
     /// RCVDBDI_JUMBO_BD: de jumbo-ring (bij ons uit).
     pub(crate) rcvdbdi_jumbo_bd: BdInfo,
     /// RCVDBDI_STD_BD: de standaard-producer-ring.
     pub(crate) rcvdbdi_std_bd: BdInfo,
-    _r29: [u8; 0x14],
-    /// RCVDBDI_STD_CON_IDX.
-    pub(crate) rcvdbdi_std_con: Reg<u32>,
-    _r30: [u8; 0x388],
+    _r29: [u8; 0x3a0],
     /// RCVDCC_MODE.
     pub(crate) rcvdcc_mode: Reg<u32>,
     _r31: [u8; 0x3fc],
     /// RCVBDI_MODE.
     pub(crate) rcvbdi_mode: Reg<u32>,
-    /// RCVBDI_STATUS.
-    pub(crate) rcvbdi_status: Reg<u32>,
-    _r32: [u8; 0x4],
-    /// RCVBDI_STD_PROD_IDX.
-    pub(crate) rcvbdi_std_prod: Reg<u32>,
-    _r33: [u8; 0x8],
+    _r32: [u8; 0x14],
     /// RCVBDI_STD_THRESH.
     pub(crate) rcvbdi_std_thresh: Reg<u32>,
     _r34: [u8; 0xe4],
@@ -302,14 +253,6 @@ const _: () = {
     assert!(offset_of!(Regs, hash) == 0x0470);
     assert!(offset_of!(Regs, rcv_rule_cfg) == 0x0500);
     assert!(offset_of!(Regs, low_wmark) == 0x0504);
-    assert!(offset_of!(Regs, tx_octets) == 0x0800);
-    assert!(offset_of!(Regs, tx_ucast) == 0x086c);
-    assert!(offset_of!(Regs, tx_bcast) == 0x0874);
-    assert!(offset_of!(Regs, rx_octets) == 0x0880);
-    assert!(offset_of!(Regs, rx_ucast) == 0x088c);
-    assert!(offset_of!(Regs, rx_mcast) == 0x0890);
-    assert!(offset_of!(Regs, rx_bcast) == 0x0894);
-    assert!(offset_of!(Regs, rx_fcs_err) == 0x0898);
     assert!(offset_of!(Regs, snddatai_mode) == 0x0c00);
     assert!(offset_of!(Regs, snddatai_stats_ctrl) == 0x0c08);
     assert!(offset_of!(Regs, snddatai_stats_enab) == 0x0c0c);
@@ -318,26 +261,14 @@ const _: () = {
     assert!(offset_of!(Regs, sndbdi_mode) == 0x1800);
     assert!(offset_of!(Regs, sndbdc_mode) == 0x1c00);
     assert!(offset_of!(Regs, rcvlpc_mode) == 0x2000);
-    assert!(offset_of!(Regs, rcvlpc_status) == 0x2004);
-    assert!(offset_of!(Regs, rcvlpc_nonempty) == 0x200c);
     assert!(offset_of!(Regs, rcvlpc_config) == 0x2010);
     assert!(offset_of!(Regs, rcvlpc_stats_ctrl) == 0x2014);
     assert!(offset_of!(Regs, rcvlpc_stats_enable) == 0x2018);
-    assert!(offset_of!(Regs, lpc_drop_filter) == 0x2240);
-    assert!(offset_of!(Regs, lpc_wq_full) == 0x2244);
-    assert!(offset_of!(Regs, lpc_no_rcv_bd) == 0x224c);
-    assert!(offset_of!(Regs, lpc_in_discards) == 0x2250);
-    assert!(offset_of!(Regs, lpc_in_errors) == 0x2254);
-    assert!(offset_of!(Regs, lpc_thresh_hit) == 0x2258);
     assert!(offset_of!(Regs, rcvdbdi_mode) == 0x2400);
-    assert!(offset_of!(Regs, rcvdbdi_status) == 0x2404);
     assert!(offset_of!(Regs, rcvdbdi_jumbo_bd) == 0x2440);
     assert!(offset_of!(Regs, rcvdbdi_std_bd) == 0x2450);
-    assert!(offset_of!(Regs, rcvdbdi_std_con) == 0x2474);
     assert!(offset_of!(Regs, rcvdcc_mode) == 0x2800);
     assert!(offset_of!(Regs, rcvbdi_mode) == 0x2c00);
-    assert!(offset_of!(Regs, rcvbdi_status) == 0x2c04);
-    assert!(offset_of!(Regs, rcvbdi_std_prod) == 0x2c0c);
     assert!(offset_of!(Regs, rcvbdi_std_thresh) == 0x2c18);
     assert!(offset_of!(Regs, std_replenish_lwm) == 0x2d00);
     assert!(offset_of!(Regs, rcvcc_mode) == 0x3000);
@@ -470,8 +401,6 @@ pub(crate) const RDMA_RSRVCTRL_FIFO_OFLW_FIX: u32 = 0x4;
 
 /// 32-byte status-blok (`tp->coalesce_mode`).
 pub(crate) const HOSTCC_MODE_32BYTE: u32 = 0x100;
-/// HOSTCC_MODE_NOW: status-blok nú bijwerken (`tg3_int_reenable`).
-pub(crate) const HOSTCC_MODE_NOW: u32 = 0x8;
 /// De ringgrootte staat in de RCB.
 pub(crate) const RCVDBDI_INV_RING_SZ: u32 = 0x10;
 pub(crate) const RCVBDI_RCB_ATTN: u32 = 0x4;

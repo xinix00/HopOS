@@ -524,8 +524,6 @@ impl Probe {
         self.reset()?;
         let mut n = Dwmac4 {
             base: self.base,
-            csr: self.csr,
-            now: self.now,
             mac,
             ring: Rings::at(dma),
             rx_cur: 0,
@@ -671,8 +669,6 @@ impl IrqAck {
 /// Eén draaiende DWMAC4.
 pub struct Dwmac4 {
     base: Pa,
-    csr: u32,
-    now: Clock,
     mac: Mac,
     ring: Rings,
     /// De volgende RX-descriptor die wij lezen.
@@ -813,25 +809,6 @@ impl Dwmac4 {
         c.status.write(STAT_RI | STAT_NIS);
         c.intr_ena.write(INTR_NIE | INTR_RIE);
         self.stats.rearms += 1;
-    }
-
-    /// Het MAC-adres zoals het in de perfect-filter staat.
-    #[must_use]
-    pub fn filter_mac(&self) -> Mac {
-        let r = self.regs();
-        let h = r.addr0_hi.read().to_le_bytes();
-        let l = r.addr0_lo.read().to_le_bytes();
-        Mac([l[0], l[1], l[2], l[3], h[0], h[1]])
-    }
-
-    /// De MDIO-master, ook na de start (link-status, diagnose).
-    #[must_use]
-    pub fn mdio(&self) -> Probe {
-        Probe {
-            base: self.base,
-            csr: self.csr,
-            now: self.now,
-        }
     }
 
     /// Eén regel voor een mislukte bring-up: liep de DMA, waar staan beide

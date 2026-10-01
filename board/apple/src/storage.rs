@@ -158,9 +158,12 @@ pub(crate) fn probe_disk(cfg: &str) -> Result<Option<Disk>, Error> {
     }
     // SAFETY: `/arm-io/sart-ans` reg[0], Device-gemapt; alleen deze code
     // schrijft er, één keer bij boot.
-    let mut s = unsafe { Sart::new(Pa(sart), version) }.map_err(|_| Error::Disk("sart version"))?;
-    s.allow(BLK_DMA.base, BLK_DMA.size)
-        .map_err(|_| Error::Disk("SART would not open a window for the queues"))?;
+    unsafe { Sart::new(Pa(sart), version) }
+        .and_then(|mut s| s.allow(BLK_DMA.base, BLK_DMA.size))
+        .map_err(|e| {
+            println!("disk: {e}");
+            Error::Disk("SART would not open a window for the queues")
+        })?;
 
     let mut disk = match open(asc, nvmmu, nvme, secure_bar) {
         Ok(d) => d,

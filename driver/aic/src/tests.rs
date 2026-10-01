@@ -54,9 +54,7 @@ fn init(aic: &Aic, f: &Fake, p: Props) -> Result {
 fn init_lays_out_the_tables_and_enables_the_controller() {
     let f = Fake::new(40, 64);
     let aic = Aic::empty();
-    assert!(!aic.is_ready());
     init(&aic, &f, Fake::props()).unwrap();
-    assert!(aic.is_ready());
     assert_eq!(aic.nr_irq(), 40);
     assert_ne!(f.get(GLB) & GLB_ENABLE, 0, "iBoot laat hem uit");
     // 64 lijnen: 256 bytes config, dan vijf tabellen van twee woorden.
@@ -79,7 +77,11 @@ fn enable_writes_the_target_and_opens_the_mask() {
     init(&aic, &f, Fake::props()).unwrap();
     aic.set_target(0x13); // alleen de onderste vier bits
     aic.enable(Line(5)).unwrap();
-    assert_eq!(aic.cfg(5), 0xabc0 | 0x3, "de rest van het woord blijft");
+    assert_eq!(
+        f.get(EXTINT + 4 * 5),
+        0xabc0 | 0x3,
+        "de rest van het woord blijft"
+    );
     let mask_clr = EXTINT + 4 * 64 + 3 * 8;
     assert_eq!(f.get(mask_clr), 1 << 5);
     aic.disable(Line(5));
@@ -104,7 +106,6 @@ fn claim_decodes_hw_events_and_skips_the_rest() {
     // overslaan, geen hang.
     f.put(IACK, 4 << 16);
     assert_eq!(aic.claim(), None);
-    assert_eq!(aic.odd_events.load(Relaxed), 16);
 }
 
 #[test]

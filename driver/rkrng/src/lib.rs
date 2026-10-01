@@ -103,12 +103,6 @@ impl Mmio {
     pub const unsafe fn new(base: Pa) -> Self {
         Self { base }
     }
-
-    /// Het basisadres, voor de logregel.
-    #[must_use]
-    pub const fn base(&self) -> Pa {
-        self.base
-    }
 }
 
 impl Regs for Mmio {
@@ -173,11 +167,6 @@ impl<R: Regs> Trng<R> {
             clock,
             last: None,
         }
-    }
-
-    /// De registers, voor de logregel van het board.
-    pub fn regs(&self) -> &R {
-        &self.regs
     }
 
     /// Vult `dst` volledig, per ronde van 32 bytes, en zet de ring daarna

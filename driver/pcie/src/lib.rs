@@ -1,5 +1,5 @@
 //! PCIe via ECAM: enumeratie, BAR's lezen en toewijzen, bus-master,
-//! capabilities, MSI en MSI-X.
+//! capabilities en MSI-X.
 //!
 //! De Rust-vorm van `OLD/metal/driver/pcie`: een [`Config`]-venster (op
 //! ijzer [`Ecam`], in de tests een nep-config-space), een [`Function`] per
@@ -12,7 +12,7 @@
 //!
 //! - **Door de firmware geconfigureerd** (UEFI/ACPI: EDK2 op QEMU, de
 //!   Ampere Altra, de O6N onder zijn UEFI): de busnummers staan in de
-//!   bridges en de BAR's zijn toegewezen. [`walk`] en [`scan`] lezen alleen;
+//!   bridges en de BAR's zijn toegewezen. [`walk`] leest alleen;
 //!   [`Function::bar`] geeft wat de firmware koos.
 //! - **Kaal** (wij booten zonder firmware-hulp, de Pi 5): niemand wees iets
 //!   toe. [`Function::assign_bars`] deelt BAR's uit een [`MmioWindow`] van
@@ -70,8 +70,6 @@ pub const CMD_INTX_DISABLE: u16 = 1 << 10;
 /// Status (in het hoge half van [`reg::COMMAND`]): er is een capability-lijst.
 const STATUS_CAP_LIST: u32 = 1 << (16 + 4);
 
-/// Capability-ID: MSI.
-pub const CAP_MSI: u8 = 0x05;
 /// Capability-ID: vendor-specifiek (virtio-pci zet er zijn structuren in).
 pub const CAP_VENDOR: u8 = 0x09;
 /// Capability-ID: PCI Express.
@@ -86,11 +84,6 @@ const CAP_WALK_MAX: usize = 48;
 /// Waarom een PCIe-handeling weigert.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
-    /// De verzameling van [`scan`] liep vol.
-    TooMany {
-        /// De capaciteit.
-        cap: usize,
-    },
     /// Het MMIO-venster heeft geen plek voor een BAR van deze maat.
     NoSpace {
         /// De gevraagde maat.
@@ -108,7 +101,6 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::TooMany { cap } => write!(f, "pcie: more than {cap} functions"),
             Self::NoSpace { size } => write!(f, "pcie: no window space for a {size:#x}-byte BAR"),
             Self::BadBar { bdf, idx } => write!(f, "pcie: {bdf} has no usable BAR {idx}"),
         }
@@ -167,7 +159,7 @@ pub trait Config {
     /// Schrijft een dword.
     fn write32(&self, bdf: Bdf, off: u16, v: u32);
     /// Schrijft een woord. Nodig voor Command en de message-control van
-    /// MSI(-X): een dword-schrijf zou de RW1C-bits van Status wissen.
+    /// MSI-X: een dword-schrijf zou de RW1C-bits van Status wissen.
     fn write16(&self, bdf: Bdf, off: u16, v: u16);
 
     /// Leest een woord (via het dword eromheen).
@@ -349,8 +341,8 @@ impl MmioWindow {
     }
 }
 
-/// Plek in een BAR: de BAR-index en de offset erin (de MSI-X-tabel en de
-/// PBA, de virtio-structuren).
+/// Plek in een BAR: de BAR-index en de offset erin (de MSI-X-tabel, de
+/// virtio-structuren).
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct BarOffset {
     /// De BAR-index (0 tot en met 5).
@@ -368,21 +360,6 @@ pub struct Msix {
     pub size: u16,
     /// Waar de tabel staat (16 bytes per vector).
     pub table: BarOffset,
-    /// Waar de pending-bits staan.
-    pub pba: BarOffset,
-}
-
-/// De MSI-capability van een functie.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub struct Msi {
-    /// De config-offset van de capability.
-    pub cap: u16,
-    /// 64-bit adressen.
-    pub is64: bool,
-    /// Per-vector-maskering.
-    pub maskable: bool,
-    /// Hoeveel vectoren het device maximaal vraagt (1, 2, 4, ..., 32).
-    pub vectors: u8,
 }
 
 /// De link van een PCIe-functie, voor de bootlog: een NIC op x1 Gen1 terwijl
@@ -466,23 +443,6 @@ fn functions_on<C: Config + ?Sized>(c: &C, bus: u8) -> impl Iterator<Item = Func
     })
 }
 
-/// Verzamelt [`walk`] in een begrensde lijst.
-pub fn scan<C: Config + ?Sized, const N: usize>(
-    c: &C,
-    start_bus: u8,
-) -> Result<BoundedVec<Function, N>> {
-    let mut out = BoundedVec::new();
-    let mut full = false;
-    walk(c, start_bus, |f| {
-        full = out.push(*f).is_err();
-        !full
-    });
-    if full {
-        return Err(Error::TooMany { cap: N });
-    }
-    Ok(out)
-}
-
 /// De eerste functie waarop `is` ja zegt.
 pub fn find<C: Config + ?Sized>(
     c: &C,
@@ -522,12 +482,6 @@ impl Function {
     pub fn set_command<C: Config + ?Sized>(&self, c: &C, bits: u16) {
         let cmd = self.command(c);
         c.write16(self.bdf, reg::COMMAND, cmd | bits);
-    }
-
-    /// Wist bits in Command.
-    pub fn clear_command<C: Config + ?Sized>(&self, c: &C, bits: u16) {
-        let cmd = self.command(c);
-        c.write16(self.bdf, reg::COMMAND, cmd & !bits);
     }
 
     /// Memory-decode en bus-mastering (DMA) aan. EDK2 laat bus-master bij
@@ -732,17 +686,12 @@ impl Function {
         let cap = self.find_cap(c, CAP_MSIX)?;
         let ctrl = (c.read32(self.bdf, cap) >> 16) as u16;
         let table = c.read32(self.bdf, cap + 4);
-        let pba = c.read32(self.bdf, cap + 8);
         Some(Msix {
             cap,
             size: (ctrl & 0x7ff) + 1,
             table: BarOffset {
                 bar: (table & 7) as u8,
                 off: table & !7,
-            },
-            pba: BarOffset {
-                bar: (pba & 7) as u8,
-                off: pba & !7,
             },
         })
     }
@@ -762,36 +711,6 @@ impl Function {
         if on {
             self.set_command(c, CMD_INTX_DISABLE);
         }
-    }
-
-    /// De MSI-capability, als de functie er een heeft.
-    pub fn msi<C: Config + ?Sized>(&self, c: &C) -> Option<Msi> {
-        let cap = self.find_cap(c, CAP_MSI)?;
-        let ctrl = (c.read32(self.bdf, cap) >> 16) as u16;
-        Some(Msi {
-            cap,
-            is64: ctrl & (1 << 7) != 0,
-            maskable: ctrl & (1 << 8) != 0,
-            vectors: 1 << ((ctrl >> 1) & 7).min(5),
-        })
-    }
-
-    /// Eén MSI-vector: `addr` (de doorbell, op ARM de GITS_TRANSLATER of
-    /// het GICv2m-frame) en `data`, dan MSI aan en INTx uit.
-    pub fn msi_enable<C: Config + ?Sized>(&self, c: &C, m: &Msi, addr: u64, data: u16) {
-        let bdf = self.bdf;
-        c.write32(bdf, m.cap + 4, addr as u32);
-        let data_off = if m.is64 {
-            c.write32(bdf, m.cap + 8, (addr >> 32) as u32);
-            m.cap + 12
-        } else {
-            m.cap + 8
-        };
-        c.write16(bdf, data_off, data);
-        // Eén vector (Multiple Message Enable = 0), enable aan.
-        let ctrl = (c.read32(bdf, m.cap) >> 16) as u16;
-        c.write16(bdf, m.cap + 2, (ctrl & !(7 << 4)) | 1);
-        self.set_command(c, CMD_INTX_DISABLE);
     }
 
     /// Het fysieke adres van de MSI-X-tabel van `m`: het adres van zijn
@@ -902,12 +821,6 @@ impl MsixTable {
         Self { base, size }
     }
 
-    /// Het aantal vectoren.
-    #[must_use]
-    pub const fn size(&self) -> u16 {
-        self.size
-    }
-
     /// Zet vector `idx` op `addr`/`data` en haalt zijn masker eraf. Een
     /// index buiten de tabel is een no-op met `false`.
     pub fn set(&self, idx: u16, addr: u64, data: u32) -> bool {
@@ -920,15 +833,6 @@ impl MsixTable {
         dev::write32(e.add(4), (addr >> 32) as u32);
         dev::write32(e.add(8), data);
         dev::write32(e.add(12), 0);
-        true
-    }
-
-    /// Maskeert vector `idx` (of haalt het masker eraf).
-    pub fn mask(&self, idx: u16, on: bool) -> bool {
-        if idx >= self.size {
-            return false;
-        }
-        dev::write32(self.base.add(u64::from(idx) * 16 + 12), u32::from(on));
         true
     }
 }

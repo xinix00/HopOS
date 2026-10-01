@@ -17,9 +17,8 @@
 //! (chip-id, `hw_init`, `hw_reset`, MAC, ringen, `hw_start`), dan
 //! [`Rtl8126::link_up`] (PHY aan, autoneg, wachten).
 //!
-//! De PHY zit achter de PHY-OCP-ruimte: clause 22 op 0xa400 + 2 · reg. De
-//! driver levert die als [`Mdio`], zodat BMCR, BMSR en de advertenties uit
-//! de gedeelde laag (`driver-mdio`) komen.
+//! De PHY zit achter de PHY-OCP-ruimte: clause 22 op 0xa400 + 2 · reg; de
+//! registernamen en bits komen uit de gedeelde laag (`driver-mdio`).
 //!
 //! De interrupt heeft een eigen les, en die staat bij [`IrqAck::ack`] en
 //! [`flush`](netdev::Device::flush): masker dicht bij de ack, en pas na het
@@ -42,7 +41,7 @@ mod variant;
 use core::fmt;
 use core::mem::size_of;
 use dev::Pa;
-use driver_mdio::{self as mdio, Link, Mdio};
+use driver_mdio::{self as mdio, Link};
 use netdev::{Mac, TxError};
 use regs::*;
 use sync::Signal;
@@ -72,7 +71,6 @@ pub const BUF_SIZE: usize = 2048;
 pub const N_RX: u16 = 256;
 /// TX-descriptors.
 pub const N_TX: u16 = 64;
-const DESC: u64 = size_of::<Desc>() as u64;
 /// De ringen: 256-byte-gealigneerd (eis van het silicium), elk op een eigen
 /// pagina.
 const RX_RING_OFF: u64 = 0;
@@ -124,8 +122,6 @@ pub enum Error {
     },
     /// Geen geldig unicast-MAC in MAC0_BKP of MAC0.
     NoMac,
-    /// De PHY-laag faalde.
-    Phy(mdio::Error),
     /// Geen link binnen de grens.
     NoLink {
         /// De laatste BMSR.
@@ -155,7 +151,6 @@ impl fmt::Display for Error {
                 write!(f, "rtl8126: {what} timed out (reg {reg:#x}={val:#x})")
             }
             Self::NoMac => f.write_str("rtl8126: no valid MAC in MAC0_BKP/MAC0"),
-            Self::Phy(e) => write!(f, "rtl8126: {e}"),
             Self::NoLink {
                 bmsr,
                 phy_status,
@@ -166,12 +161,6 @@ impl fmt::Display for Error {
             ),
             Self::Speed(v) => write!(f, "rtl8126: unknown PHYSR speed code {v:#x}"),
         }
-    }
-}
-
-impl From<mdio::Error> for Error {
-    fn from(e: mdio::Error) -> Self {
-        Self::Phy(e)
     }
 }
 
@@ -237,8 +226,6 @@ pub struct Rtl8126 {
     pub doorbells: u64,
     /// Meetlat: RX-descriptors met een fout, fragment of kromme lengte.
     pub rx_bad: u64,
-    /// Meetlat: flushes die een wachtend frame zagen en zelf belden.
-    pub self_rings: u64,
 }
 
 impl Rtl8126 {
@@ -285,7 +272,6 @@ impl Rtl8126 {
             irq: None,
             doorbells: 0,
             rx_bad: 0,
-            self_rings: 0,
         }
     }
 
@@ -678,8 +664,7 @@ impl Rtl8126 {
 
     /// PHY aan (BMCR.PDOWN weg), de VER_70-PHY-config zonder firmware-blob,
     /// een soft-reset, alles adverteren en autoneg herstarten. De link zelf
-    /// komt later: [`poll_link`](Self::poll_link) of
-    /// [`link_up`](Self::link_up).
+    /// komt later: [`link_up`](Self::link_up).
     pub fn start_link(&mut self) -> Result {
         let bmcr = phy_c22(mdio::reg::BMCR);
         // genphy_resume: power-down eraf, 20 ms (rtlgen_resume).
@@ -741,7 +726,7 @@ impl Rtl8126 {
 
     /// Eén kijkje naar de link: BMSR is latched-low, dus twee keer lezen
     /// (`genphy_update_link`); staat hij, dan de snelheid uit PHYSR.
-    pub fn poll_link(&mut self) -> Result<(Option<Link>, u16)> {
+    fn poll_link(&mut self) -> Result<(Option<Link>, u16)> {
         let bmsr = phy_c22(mdio::reg::BMSR);
         let _ = self.phy_ocp_read(bmsr)?;
         let s = self.phy_ocp_read(bmsr)?;
@@ -772,13 +757,6 @@ impl Rtl8126 {
             }
             self.sleep(LINK_POLL_NS);
         }
-    }
-
-    /// De MAC-kant van de link (PHYstatus bit 1): goedkoop en zonder
-    /// PHY-OCP-verkeer, voor een statusregel.
-    #[must_use]
-    pub fn link_status(&self) -> bool {
-        self.regs().phy_status.read() & 0x02 != 0
     }
 
     /// De variantnaam ("RTL8126A", "RTL8125B", ...).
@@ -822,13 +800,6 @@ impl Rtl8126 {
         self.commit();
     }
 
-    /// Het frame-bufferbereik (basis, grootte in hele blokken van 2 MB).
-    #[must_use]
-    pub fn buf_region(&self) -> (Pa, u64) {
-        let total = (u64::from(N_RX) + u64::from(N_TX)) * BUF_SIZE as u64;
-        (self.rx_bufs, total.next_multiple_of(BUF_OFF))
-    }
-
     fn rx_desc(&self, i: u16) -> Pa {
         self.rx_ring.add(u64::from(i) * DESC)
     }
@@ -846,9 +817,9 @@ impl Rtl8126 {
     /// (`rtl8169_mark_to_asic`).
     fn arm_rx(&self, i: u16) {
         let d = self.rx_desc(i);
-        dev::write32(d.add(8), self.rx_buf(i).0 as u32);
-        dev::write32(d.add(12), (self.rx_buf(i).0 >> 32) as u32);
-        dev::write32(d.add(4), 0);
+        dev::write32(d.add(DESC_ADDR_LO), self.rx_buf(i).0 as u32);
+        dev::write32(d.add(DESC_ADDR_HI), (self.rx_buf(i).0 >> 32) as u32);
+        dev::write32(d.add(DESC_OPTS2), 0);
         dev::mb();
         let end = if i == N_RX - 1 { RING_END } else { 0 };
         dev::write32(d, DESC_OWN | end | BUF_SIZE as u32);
@@ -862,20 +833,6 @@ impl Rtl8126 {
     fn ring_tx(&mut self) {
         self.regs().tx_poll.write(1);
         self.doorbells += 1;
-    }
-}
-
-impl Mdio for Rtl8126 {
-    /// Clause 22 via de PHY-OCP-ruimte; het adres doet niet mee (één
-    /// interne PHY).
-    fn read(&mut self, _phy: u8, reg: u8) -> mdio::Result<u16> {
-        self.phy_ocp_read(phy_c22(reg))
-            .map_err(|_| mdio::Error::Bus { phy: 0, reg })
-    }
-
-    fn write(&mut self, _phy: u8, reg: u8, val: u16) -> mdio::Result {
-        self.phy_ocp_write(phy_c22(reg), val)
-            .map_err(|_| mdio::Error::Bus { phy: 0, reg })
     }
 }
 
@@ -927,9 +884,9 @@ impl netdev::Device for Rtl8126 {
             len = ETH_MIN_FRAME;
         }
         dev::push(buf, len);
-        dev::write32(d.add(8), buf.0 as u32);
-        dev::write32(d.add(12), (buf.0 >> 32) as u32);
-        dev::write32(d.add(4), 0);
+        dev::write32(d.add(DESC_ADDR_LO), buf.0 as u32);
+        dev::write32(d.add(DESC_ADDR_HI), (buf.0 >> 32) as u32);
+        dev::write32(d.add(DESC_OPTS2), 0);
         dev::mb();
         let end = if i == N_TX - 1 { RING_END } else { 0 };
         dev::write32(d, DESC_OWN | FIRST_FRAG | LAST_FRAG | end | len as u32);
@@ -993,7 +950,6 @@ impl netdev::Device for Rtl8126 {
         if let Some(bell) = self.irq {
             self.rearm();
             if self.rx_waiting() {
-                self.self_rings += 1;
                 bell.set();
             }
         }

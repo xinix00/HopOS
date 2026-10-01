@@ -116,7 +116,6 @@ fn new_resets_reads_the_mac_and_programs_the_rings() {
     let want = m.dma.0 + BUF_OFF + 3 * BUF_SIZE as u64;
     assert_eq!(dev::read32(d3), want as u32);
     assert_eq!(dev::read32(d3.add(8)), 0);
-    assert_eq!(n.buf_region(), (m.dma.add(BUF_OFF), BUF_OFF));
 }
 
 #[test]
@@ -307,17 +306,4 @@ impl Mem {
     fn tx_ring_desc(&self, i: u16) -> Pa {
         self.dma.add(TX_RING_OFF + u64::from(i) * 16)
     }
-}
-
-#[test]
-fn the_irq_path_reads_icr_and_arms_ims() {
-    static BELL: Signal = Signal::new();
-    let m = mem(hw());
-    let mut n = fake(&m);
-    dev::write32(reg(0x1500), INT_RXT0);
-    let ack = n.irq_ack();
-    assert_eq!(ack.ack(), INT_RXT0);
-    n.set_irq(&BELL);
-    assert_eq!(dev::read32(reg(0x1508)), INT_RX);
-    assert!(n.irq().is_some());
 }
