@@ -680,28 +680,28 @@ dependencies = [
 
 [[package]]
 name = "leandhcp"
-version = "3.0.0"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.0.0#a7e089448c903fe199b604d246401cbd88640de3"
+version = "3.1.1"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.2#7752616cb52122a1ca25aedec33c0c0594e4c982"
 
 [[package]]
 name = "leanelf"
-version = "3.0.0"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.0.0#a7e089448c903fe199b604d246401cbd88640de3"
+version = "3.1.1"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.2#7752616cb52122a1ca25aedec33c0c0594e4c982"
 
 [[package]]
 name = "leanh2"
 version = "3.1.1"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.1#db6724745a2c579382c54a68c73c18d643d40038"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.2#7752616cb52122a1ca25aedec33c0c0594e4c982"
 
 [[package]]
 name = "leanhttp"
 version = "3.1.1"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.1#db6724745a2c579382c54a68c73c18d643d40038"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.2#7752616cb52122a1ca25aedec33c0c0594e4c982"
 
 [[package]]
 name = "leanhttps"
 version = "3.1.1"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.1#db6724745a2c579382c54a68c73c18d643d40038"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.2#7752616cb52122a1ca25aedec33c0c0594e4c982"
 dependencies = [
  "leanhttp",
  "leantls",
@@ -709,18 +709,18 @@ dependencies = [
 
 [[package]]
 name = "leannet"
-version = "3.0.0"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.0.0#a7e089448c903fe199b604d246401cbd88640de3"
+version = "3.1.1"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.2#7752616cb52122a1ca25aedec33c0c0594e4c982"
 
 [[package]]
 name = "leanrand"
 version = "3.1.1"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.1#db6724745a2c579382c54a68c73c18d643d40038"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.2#7752616cb52122a1ca25aedec33c0c0594e4c982"
 
 [[package]]
 name = "leantls"
 version = "3.1.1"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.1#db6724745a2c579382c54a68c73c18d643d40038"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.2#7752616cb52122a1ca25aedec33c0c0594e4c982"
 
 [[package]]
 name = "media-mve"

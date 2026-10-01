@@ -16,13 +16,13 @@ bounded = { path = "../bounded" }
 netdev = { path = "../netdev" }
 # De netstack (PORT.md §2.1), op een tag en nooit over een pad: lean is een
 # eigen repo met een eigen poort.
-leannet = { git = "https://github.com/xinix00/lean.git", tag = "v3.0.0" }
+leannet = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.2" }
 # De codec-namen en -nummers (feature `media`, src/codec.rs): dezelfde
 # nummering als de kern, uit het contract zelf.
 driver-codec = { path = "../driver/codec", optional = true }
 # De brug naar leanhttp (feature `http`, src/tcp.rs): dezelfde tag als Hop,
 # zodat `hop-http` en de apps één `AsyncRead` kennen.
-leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.1", optional = true }
+leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.2", optional = true }
 
 [features]
 default = []
