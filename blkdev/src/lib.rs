@@ -18,6 +18,24 @@
 //! ([`Spin`]): dezelfde driver, dezelfde `start` en `poll_done`, geen
 //! tweede pad.
 //!
+//! # Meer opdrachten tegelijk: tickets en de [`Queue`]
+//!
+//! Een driver met tags (de ANS: zestien) zegt dat met
+//! [`depth`](AsyncBlockDevice::depth) en levert per opdracht een ticket
+//! ([`start_tag`](AsyncBlockDevice::start_tag),
+//! [`poll_tag`](AsyncBlockDevice::poll_tag), en één
+//! [`reap`](AsyncBlockDevice::reap) die alle completions ophaalt). Een
+//! driver zonder tags hoeft niets: de standaard is zijn ene opdracht als
+//! ticket 0. De [`Queue`] is de voorkant (Linux blk-mq in het klein): wie
+//! I/O wil, krijgt een ticket en wacht op zijn eigen completion; precies één
+//! wachter tegelijk pollt het device (de "pacer", op het ritme van hierboven)
+//! en wekt de anderen waarvan de completion binnenkwam. Zo kost een
+//! node met zestien opdrachten in de lucht één poll per ronde, niet
+//! zestien. GEMETEN 01-10 op de M4 (`hopos.nvmebench=1`): willekeurig
+//! 4 KiB lezen haalt 11.888 per seconde met één opdracht tegelijk (~84 us
+//! per lees) en 175.055 met zestien tegelijk door deze wachtrij. De
+//! wachtrij is er voor de node, niet voor de app.
+//!
 //! # Waarom er één pad is
 //!
 //! Les van 30-09 (de soak, ruim 1100 runs): tot alpha.14 was de grens
@@ -190,6 +208,43 @@ pub trait AsyncBlockDevice {
         (POLL_SPIN_NS, POLL_PERIOD)
     }
 
+    /// Hoeveel opdrachten het device tegelijk aanneemt: tickets
+    /// `0..depth`. Eén voor een driver zonder tags; dan is de standaard van
+    /// de drie methoden hieronder zijn ene opdracht als ticket 0.
+    fn depth(&self) -> usize {
+        1
+    }
+
+    /// Zet `op` op het device onder een eigen ticket en keert meteen terug.
+    /// [`Error::Busy`] = nu geen plaats (alle tags of de DMA-ruimte bezet):
+    /// probeer het na een completion opnieuw.
+    fn start_tag(&mut self, op: Op<'_>) -> Result<usize> {
+        self.start(op).map(|()| 0)
+    }
+
+    /// Is ticket `t` klaar? Een driver met tags kijkt hier alleen naar wat
+    /// [`reap`](Self::reap) al ophaalde. Bij `Ready` is het ticket weer vrij
+    /// en staan de bytes van een lees vooraan in `into`.
+    fn poll_tag(&mut self, t: usize, into: &mut [u8]) -> Poll<Result> {
+        let _ = t;
+        self.poll_done(into)
+    }
+
+    /// Haalt alle completions op die er zijn en toetst de time-outs; geeft
+    /// de tickets die daarbij klaar kwamen (bit `t`). Een fout is een dood
+    /// device: daarna geeft elke [`poll_tag`](Self::poll_tag) de fout.
+    fn reap(&mut self) -> Result<u64> {
+        Ok(0)
+    }
+
+    /// De meetlat van de driver als tekst voor één consoleregel (opdrachten,
+    /// read-ahead, de traagste), en een teller die verandert zodra er iets
+    /// gebeurde. Leeg en nul voor een driver zonder meetlat.
+    fn stats(&self, out: &mut dyn fmt::Write) -> Result<u64, fmt::Error> {
+        let _ = out;
+        Ok(0)
+    }
+
     /// Zet `op` op het device; de [`InFlight`] wacht op de completion.
     fn submit(&mut self, op: Op<'_>) -> Result<InFlight<'_, Self>>
     where
@@ -218,6 +273,21 @@ impl<D: AsyncBlockDevice + ?Sized> AsyncBlockDevice for &mut D {
     }
     fn poll_pace(&self) -> (u64, Duration) {
         (**self).poll_pace()
+    }
+    fn depth(&self) -> usize {
+        (**self).depth()
+    }
+    fn start_tag(&mut self, op: Op<'_>) -> Result<usize> {
+        (**self).start_tag(op)
+    }
+    fn poll_tag(&mut self, t: usize, into: &mut [u8]) -> Poll<Result> {
+        (**self).poll_tag(t, into)
+    }
+    fn reap(&mut self) -> Result<u64> {
+        (**self).reap()
+    }
+    fn stats(&self, out: &mut dyn fmt::Write) -> Result<u64, fmt::Error> {
+        (**self).stats(out)
     }
 }
 
@@ -434,6 +504,9 @@ pub fn block_on<F: Future>(f: F) -> F::Output {
         core::hint::spin_loop();
     }
 }
+
+mod queue;
+pub use queue::{MAX_DEPTH, Queue};
 
 #[cfg(test)]
 mod tests;
