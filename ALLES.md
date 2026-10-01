@@ -296,9 +296,18 @@ De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
       overleeft elke flip), en hopos/efi.ld legt 2 MiB speling in
       SizeOfImage zonder sectie of segment (de firmware geeft ze mee, het
       platte beeld van een bundel telt ze niet). Pas werkzaam na een koude
-      boot met zo'n kern op de stick (de set staat klaar; QEMU/EDK2 meldt
-      3888 KB, de O6N-kern 4252 KiB). Ook: `hopos.nvmebench=1` moet in de
+      boot met zo'n kern op de stick. Bewezen 01-10 08:50: de O6N koud op
+      de Y-kern (50989f6: "image 0x7fa3c5000+0x427000"), daarna de
+      Z-bundel geflipt in tien seconden (gen 2, drie bewoners
+      overgenomen, Hop niet herstart), en de geflipte kern meldt hetzelfde
+      venster uit de feitenpagina. Ook: `hopos.nvmebench=1` moet in de
       cfg op de stick, een flipbundel draagt geen cfg.
+- [ ] **Na een flip zaait de kern uit jitter, niet uit de TRNG van de
+      firmware:** de O6N meldt na de Z-flip `HOPOS_RNG_SLOTS source=jitter`
+      waar de koude boot `source=hardware` had (efi-rng is een boot
+      service, en die is weg). Klein: de feitenpagina kan 64 bytes zaad van
+      de koude boot meedragen, of de oude kern geeft zijn DRBG-stand door
+      in de handoff.
 - [ ] **Storm door de NAT (hairpin) stokt 1 s per ronde** op de Pi 4 (H):
       p50 2,5 ms, p99 1002 ms, 96 conn/s, zonder `HOPOS_MASQ_SLOT_FULL`.
       Eén SYN per ronde valt (RTO 1 s); ook node naar node (Pi 4 naar Pi 5,
