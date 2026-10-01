@@ -319,3 +319,23 @@ van `docs/measurements.md` (het commando staat daar en in de README).
 - [ ] De netmeter-doorvoer (`netmeter NODE:80 --repeat 3`, bench in een
       slot) per board in de tabellen Netwerk en Latentie van
       docs/measurements.md; alleen de QEMU-kolom staat.
+
+## Het plafond: Linux of macOS op dezelfde M4 tegen HopOS (01-10 avond, M33)
+
+Uit reviews en Asahi-metingen, niet door ons gemeten; HopOS wel.
+
+| pad | Linux/macOS op de M4 | HopOS M33 |
+| --- | --- | --- |
+| sequentieel lezen, rauw | 3000 tot 3500 MB/s | 1925 rauw, 1690 door de app |
+| sequentieel schrijven, rauw | 2500 tot 3000 | 4950 rauw, 1270 door de app |
+| willekeurig 4 KiB lezen, één tegelijk | 15.000 tot 20.000 per seconde | 11.900 |
+| willekeurig 4 KiB lezen, met wachtrij, één proces | 100.000 tot 200.000 | 175.000 rauw in de kern |
+| willekeurig 4 KiB lezen, door apps | 100.000 tot 200.000 (met page cache veel meer) | 25.000 met vier apps, 36.000 met acht |
+| app naar app, één stroom (loopback) | 5000 tot 10.000 MB/s | 6380 |
+| hete data uit RAM | page cache, tientallen GB/s | geen cache |
+
+App naar app zit op het Linux-niveau, de schijf zelf halen we (175.000 is
+het ijzer). Wat ertussen zit, de OS-core met ~27 µs per call, is de
+resterende factor vier tot acht voor veel kleine leesopdrachten door apps,
+naast de page cache voor hete data. Derek (01-10): "ik vind dit al
+behoorlijk". Geen haast.
