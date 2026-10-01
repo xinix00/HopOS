@@ -109,9 +109,6 @@ pub const HYP_TIMER_PPI: u32 = 26;
 /// wereld (Linux' IPI's), en wij zijn daar de enige. NOG NIET GEMETEN.
 pub const KICK_SGI: u32 = 7;
 
-/// Meetlat: kicks van app-cores die de dispatch claimde.
-pub static KICKS: AtomicU64 = AtomicU64::new(0);
-
 /// Waar het DRAM begint. GEMETEN 05-08: U-Boot's /memory-node begint op
 /// 0x20_0000; de eerste 2 MB is TF-A.
 pub const DRAM_BASE: u64 = 0x0020_0000;
@@ -683,7 +680,7 @@ impl Board for Rk3566 {
                     d.timer += 1;
                 }
                 (KICK_SGI, _) => {
-                    KICKS.fetch_add(1, Relaxed);
+                    cpu::el2::OS_STATS.kicks.fetch_add(1, Relaxed);
                 }
                 // De NIC: masker dicht en status gewist (de level-lijn valt),
                 // dan de bel. De driver zet het masker weer open als de pomp

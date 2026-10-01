@@ -366,10 +366,16 @@ pub fn tx_desc23(len: usize) -> Option<(u32, u32)> {
 
 /// De framelengte uit RDES3, zonder de vier FCS-bytes (ACS staat uit, zoals
 /// bij stmmac voor deze generatie). Vergeet je dat, dan komt elk frame vier
-/// bytes te lang de stack in en faalt elke checksum.
+/// bytes te lang de stack in en faalt elke checksum. `None` als de melding
+/// niet kan: niet langer dan een FCS, of langer dan de buffer. Een lengte
+/// uit het device mag nooit bytes uit de naburige DMA-buffer blootgeven.
 #[must_use]
-pub fn rx_len(rdes3: u32) -> usize {
-    ((rdes3 & RX_PKT_LEN_MASK) as usize).saturating_sub(FCS_LEN)
+pub fn rx_len(rdes3: u32) -> Option<usize> {
+    let raw = (rdes3 & RX_PKT_LEN_MASK) as usize;
+    if raw <= FCS_LEN || raw > BUF_SIZE {
+        return None;
+    }
+    Some(raw - FCS_LEN)
 }
 
 /// Het MDIO-commandowoord (dwmac4_core.c `dwmac4_setup`: addr_shift 21,
@@ -622,8 +628,9 @@ pub struct Stats {
     pub rx_frames: u64,
     /// Afgekeurde descriptors (foutframe of gesplitst frame).
     pub rx_errors: u64,
-    /// Te lange meldingen (lengte voorbij de buffer).
-    pub rx_oversize: u64,
+    /// Onmogelijke lengtes (niet langer dan een FCS of voorbij de buffer):
+    /// geteld en overgeslagen, nooit gekopieerd.
+    pub rx_bad_len: u64,
     /// De rauwe RDES3 van het laatst afgekeurde frame: zonder dat is
     /// "afgekeurd" op ijzer niet te ontleden.
     pub rx_last_err: u32,
@@ -993,19 +1000,17 @@ impl Dwmac4 {
                     self.stats.rx_errors += 1;
                     self.stats.rx_last_err = sts;
                     None
-                } else {
-                    let len = rx_len(sts);
-                    if len > BUF_SIZE - FCS_LEN {
-                        self.stats.rx_oversize += 1;
-                        None
-                    } else {
-                        let n = len.min(buf.len());
-                        if let Some(dst) = buf.get_mut(..n) {
-                            dev::copy_out(dst, self.ring.rx_buf(i));
-                        }
-                        self.stats.rx_frames += 1;
-                        Some(n)
+                } else if let Some(len) = rx_len(sts) {
+                    let n = len.min(buf.len());
+                    if let Some(dst) = buf.get_mut(..n) {
+                        dev::copy_out(dst, self.ring.rx_buf(i));
                     }
+                    self.stats.rx_frames += 1;
+                    Some(n)
+                } else {
+                    self.stats.rx_bad_len += 1;
+                    self.stats.rx_last_err = sts;
+                    None
                 };
             self.give_rx(i);
             self.rx_cur = (i + 1) % NUM_RX;

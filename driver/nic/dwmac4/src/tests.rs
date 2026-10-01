@@ -148,14 +148,15 @@ fn tx_descriptor_words_carry_the_length_twice() {
 }
 
 #[test]
-fn rx_len_strips_the_fcs() {
-    assert_eq!(rx_len(RX_OWN | RX_FIRST | RX_LAST | 1518), 1514);
-    // Een onzinnig korte melding geeft geen negatieve lengte.
-    for raw in [0, 1, 4] {
-        assert_eq!(rx_len(raw), 0);
+fn rx_len_strips_the_fcs_and_refuses_the_impossible() {
+    assert_eq!(rx_len(RX_OWN | RX_FIRST | RX_LAST | 1518), Some(1514));
+    assert_eq!(rx_len(5), Some(1));
+    assert_eq!(rx_len(BUF_SIZE as u32), Some(BUF_SIZE - FCS_LEN));
+    for raw in [0, 1, FCS_LEN as u32, BUF_SIZE as u32 + 1, RX_PKT_LEN_MASK] {
+        assert_eq!(rx_len(raw), None, "{raw}");
     }
     // De statusbits boven [14:0] lekken niet in de lengte.
-    assert_eq!(rx_len(0xFFFF_8000 | 100), 96);
+    assert_eq!(rx_len(0xFFFF_8000 | 100), Some(96));
 }
 
 #[test]
@@ -339,6 +340,20 @@ fn a_bad_frame_is_counted_and_skipped() {
     assert_eq!(n.stats.rx_last_err, RX_FIRST | 68);
     assert_eq!(n.rx_cur, 3);
     assert_eq!(n.receive(&mut out), None);
+}
+
+#[test]
+fn a_frame_of_only_fcs_is_no_frame() {
+    let mut f = running();
+    let n = &mut f.n;
+    // Descriptor 0 meldt vier bytes: alleen een FCS. Descriptor 1 is nog
+    // van de DMA.
+    dev::write32(n.ring.rx(0).add(12), RX_FIRST | RX_LAST | FCS_LEN as u32);
+    let mut out = [0u8; 2048];
+    assert_eq!(n.receive(&mut out), None);
+    assert_eq!((n.stats.rx_bad_len, n.stats.rx_frames), (1, 0));
+    assert_eq!(n.stats.rx_last_err, RX_FIRST | RX_LAST | FCS_LEN as u32);
+    assert_eq!(n.rx_cur, 1);
 }
 
 #[test]
