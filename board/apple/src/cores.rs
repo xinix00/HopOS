@@ -293,7 +293,7 @@ pub fn cpu_on_mpidr(target: u64, entry: u64, ctx: u64) -> Result<(), cpu::psci::
 /// Wekt de core met affiniteit `mpidr` met een fast IPI (m1n1's wek op dit
 /// silicium: deep WFI plus IPI_RR_GLOBAL, ack via IPI_SR).
 pub fn kick(mpidr: u64) {
-    driver_aic::ipi::kick(mpidr);
+    cpu::el2::kick(cpu::el2::Flavor::AppleVhe, mpidr);
 }
 
 #[cfg(test)]

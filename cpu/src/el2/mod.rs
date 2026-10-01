@@ -40,8 +40,8 @@ pub use dispatch::{
 };
 pub use oscore::{
     Back, Bell, OsCore, Probe, SCHED_OS_KICK, SCHED_OS_KICK_PA, STATS as OS_STATS,
-    Stats as OsStats, TURN_CAP_NS, Turn, held, hold, host, hosts, last_fault, rehost, release_held,
-    unhost,
+    Stats as OsStats, TURN_CAP_NS, Turn, apple_ipi_ack, held, hold, host, hosts, last_fault,
+    rehost, release_held, unhost,
 };
 
 use core::fmt;

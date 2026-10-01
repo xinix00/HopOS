@@ -107,7 +107,7 @@ pub(crate) fn dispatch() -> Round {
         arch::timer_off();
         r.timer = 1;
     }
-    if driver_aic::ipi::ack() {
+    if cpu::el2::apple_ipi_ack() {
         IPIS.fetch_add(1, Relaxed);
         cpu::el2::OS_STATS.kicks.fetch_add(1, Relaxed);
         r.ipi = 1;

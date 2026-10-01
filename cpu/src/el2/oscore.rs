@@ -335,6 +335,17 @@ impl Bell {
     }
 }
 
+/// Ackt een wachtende fast IPI op deze Apple-core (IPI_SR_EL1); `true` = er
+/// stond er een. Voor de dispatch van een kern zonder switcher eronder: een
+/// IPI die niemand ackt, blijft staan en de core slaapt nooit meer (04-09).
+pub fn apple_ipi_ack() -> bool {
+    let up = arch::apple_ipi_pending() != 0;
+    if up {
+        arch::apple_ipi_ack();
+    }
+    up
+}
+
 /// De meetlat van de OS-core: overgangen naar een bewoner en waardoor de
 /// kern terugkwam. Zonder deze getallen is "Hop krijgt tijd" niet te
 /// onderscheiden van "de kern spint".
@@ -1060,9 +1071,9 @@ mod arch {
     /// (de peek van [`super::Bell::apple`]); alleen op Apple silicium.
     pub(super) fn apple_ipi_pending() -> u32 {
         let v: u64;
-        // SAFETY: IPI_SR_EL1 lezen heeft geen neveneffect; de aanroeper is
-        // de bel van `Bell::apple`, en die bestaat alleen op een Apple-core,
-        // waar het register er is.
+        // SAFETY: IPI_SR_EL1 lezen heeft geen neveneffect; de aanroepers
+        // zijn de bel van `Bell::apple` en `apple_ipi_ack`, en die bestaan
+        // alleen op een Apple-core, waar het register er is.
         unsafe { asm!("mrs {}, s3_5_c15_c1_1", out(reg) v, options(nomem, nostack)) };
         if v & 1 != 0 {
             super::Bell::APPLE_INTID
@@ -1074,7 +1085,8 @@ mod arch {
     /// Ackt de fast IPI van deze core (IPI_SR_EL1, bit 0 is W1C).
     pub(super) fn apple_ipi_ack() {
         // SAFETY: raakt alleen de IPI-status van deze core; alleen geroepen
-        // onder `Flavor::AppleVhe`, dus op een Apple-core.
+        // onder `Flavor::AppleVhe` of uit de dispatch van het Apple-board,
+        // dus op een Apple-core.
         unsafe { asm!("msr s3_5_c15_c1_1, {}", "isb", in(reg) 1u64, options(nomem, nostack)) };
     }
 

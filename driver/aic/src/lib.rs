@@ -1,6 +1,5 @@
 //! De Apple Interrupt Controller (AIC2/AIC3: de M2 en later, hier de t8132
-//! van de Mac mini M4) achter het contract van `cpu::irq`, plus Apples
-//! fast IPI.
+//! van de Mac mini M4) achter het contract van `cpu::irq`.
 //!
 //! Registers en indeling zoals m1n1 (`src/aic.c`) ze uit de ADT afleidt: één
 //! config-woord per IRQ vanaf `extint-baseaddress`, daarna SW_SET, SW_CLR,
@@ -21,7 +20,8 @@
 //!   aanname (Go `board/apple/hop/irq.go`, 19-09).
 //!
 //! De IPI's lopen op dit silicium niet over de AIC maar over de fast IPI
-//! ([`ipi`]): een systeemregister per core, dat als FIQ aankomt. Dat is
+//! (`cpu::el2::kick` en `cpu::el2::apple_ipi_ack`): een systeemregister per
+//! core, dat als FIQ aankomt. Dat is
 //! m1n1's eigen wek-recept (`smp.c`: deep_wfi, IPI_RR_GLOBAL, IPI_SR-ack) en
 //! Linux' AIC-driver bevestigt de vorm.
 
@@ -370,67 +370,6 @@ impl Controller for Aic {
 
     fn complete(&self, l: Line) {
         self.write_bit(&self.mask_clr, l.0);
-    }
-}
-
-pub mod ipi {
-    //! Apples fast IPI: IPI_RR_GLOBAL_EL1 om een core te wekken, IPI_SR_EL1
-    //! om de eigen IPI te acken. Beide zijn systeemregisters van EL1/EL2
-    //! (op1 = 5); de IPI komt aan als FIQ.
-    //!
-    //! De ack is geen detail (04-09): een FIQ die niet geackt wordt, blijft
-    //! staan, en de core die hem hoort (de kern in zijn dispatch, of de
-    //! switcher op EL2) komt dan nooit meer tot slapen.
-
-    /// Het doel-woord van een core met affiniteit `mpidr`: core | cluster <<
-    /// 16 uit aff0 en aff1 (m1n1 `smp.c`; dezelfde vorm als
-    /// `cpu::el2::apple_ipi_target`).
-    #[must_use]
-    pub const fn target(mpidr: u64) -> u64 {
-        (mpidr & 0xff) | (((mpidr >> 8) & 0xff) << 16)
-    }
-
-    /// Wekt de core met affiniteit `mpidr` met een fast IPI.
-    pub fn kick(mpidr: u64) {
-        arch::send(target(mpidr));
-    }
-
-    /// Ackt een wachtende IPI op deze core. `true` = er stond er een.
-    pub fn ack() -> bool {
-        arch::ack()
-    }
-
-    #[cfg(all(target_os = "none", target_arch = "aarch64"))]
-    mod arch {
-        use core::arch::asm;
-
-        pub(super) fn send(v: u64) {
-            // SAFETY: IPI_RR_GLOBAL_EL1 stuurt alleen een IPI; het register
-            // bestaat op elke Apple-core (dit crate draait alleen daar).
-            unsafe { asm!("msr s3_5_c15_c0_1, {}", "isb", in(reg) v, options(nostack)) };
-        }
-
-        pub(super) fn ack() -> bool {
-            let v: u64;
-            // SAFETY: IPI_SR_EL1 lezen en bit 0 terugschrijven (W1C) raakt
-            // alleen de IPI-status van deze core.
-            unsafe {
-                asm!("mrs {}, s3_5_c15_c1_1", out(reg) v, options(nomem, nostack));
-                if v & 1 != 0 {
-                    asm!("msr s3_5_c15_c1_1, {}", "isb", in(reg) 1u64, options(nostack));
-                }
-            }
-            v & 1 != 0
-        }
-    }
-
-    #[cfg(not(all(target_os = "none", target_arch = "aarch64")))]
-    mod arch {
-        //! Host-stubs: geen IPI's.
-        pub(super) fn send(_v: u64) {}
-        pub(super) fn ack() -> bool {
-            false
-        }
     }
 }
 

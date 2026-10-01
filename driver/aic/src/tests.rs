@@ -127,19 +127,6 @@ fn impossible_sizes_are_refused() {
 }
 
 #[test]
-fn ipi_target_is_core_and_cluster() {
-    // cpu6 van de M4: MPIDR 0x80010100 → core 0, cluster 1.
-    assert_eq!(ipi::target(0x8001_0100), 1 << 16);
-    assert_eq!(ipi::target(0x8001_0103), (1 << 16) | 3);
-    assert_eq!(ipi::target(0x8000_0005), 5);
-    assert_eq!(
-        ipi::target(0x8001_0102),
-        cpu::el2::apple_ipi_target(0x8001_0102)
-    );
-    assert!(!ipi::ack());
-}
-
-#[test]
 fn decode_is_die_type_number() {
     assert_eq!(decode(0, 64), None);
     assert_eq!(decode((1 << 16) | 9, 64), Some((1, 9)));
