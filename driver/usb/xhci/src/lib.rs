@@ -713,7 +713,6 @@ pub struct Hc {
     bulk_buf: Pa,
     bulk_size: u64,
     pending: bounded::BoundedVec<ring::Event, PENDING_CAP>,
-    dropped: u64,
     running: bool,
     /// De volgende generatie voor een geclaimd slot: een handvat van vóór
     /// een herplug of een herstel past nooit op het slot van nu.
@@ -784,7 +783,6 @@ impl Hc {
             bulk_buf: Pa(0),
             bulk_size: 0,
             pending: bounded::BoundedVec::new(),
-            dropped: 0,
             running: false,
             next_gen: 1,
             poisoned: None,
@@ -1026,13 +1024,6 @@ impl Hc {
             }
             t.sleep(POLL_STEP_NS).await;
         }
-    }
-
-    /// Hoeveel events er zijn weggevallen omdat niemand ze ophaalde. Nul
-    /// hoort het te zijn, en anders is het een meting en geen ruis.
-    #[must_use]
-    pub fn dropped(&self) -> u64 {
-        self.dropped
     }
 
     /// De ownership-fout die een volledige controllerreset vereist, of

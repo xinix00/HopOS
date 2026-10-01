@@ -832,7 +832,7 @@ pub fn rehost(plan: &Plan, ctx: Pa) -> Result<bool, Error> {
             dev::write64(sched.add(SCHED_COUNT), count as u64 + 1);
             count
         }
-        None => return Err(Error::BadContextId { id }),
+        None => return Err(Error::RosterFull { count }),
     };
     dev::write8(sched.add(SCHED_LIST + i as u64), id);
     dev::mb();

@@ -446,12 +446,18 @@ impl Hc {
         let mut got = false;
         while let Some(ev) = evt.poll() {
             got = true;
+            // Alleen wat `take` ooit ophaalt. Een Port Status Change (elke
+            // poortreset levert er een) is een wekker en geen antwoord: de
+            // poortstaat zelf staat in PORTSC, en die leest de scan. In de
+            // rij zou hij blijven staan tot hij er als oudste uit valt.
+            if ev.kind != TRB_TRANSFER_EVT && ev.kind != TRB_CMD_COMP_EVT {
+                continue;
+            }
             if self.pending.is_full() {
                 // Overloop kan alleen als niemand meer wacht op wat er
                 // binnenkomt (een losgetrokken apparaat waarvan de transfers
                 // blijven falen). De oudste laten vallen houdt het pad
-                // levend; de teller maakt het zichtbaar in plaats van stil.
-                self.dropped += 1;
+                // levend.
                 self.pending.remove(0);
             }
             let _ = self.pending.push(ev);

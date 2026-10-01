@@ -97,6 +97,20 @@ fn unhost_leaves_a_gap_that_the_next_host_reuses() {
 }
 
 #[test]
+fn a_full_roster_says_so() {
+    let (_b, plan) = plan();
+    let sched = os_sched(&plan).unwrap();
+    dev::write64(sched.add(SCHED_COUNT), SLOT_CAP as u64);
+    for i in 0..SLOT_CAP as u64 {
+        dev::write8(sched.add(SCHED_LIST + i), 0xEE);
+    }
+    assert_eq!(
+        host(&plan, ctx(&plan, 1), 1, 0x1000),
+        Err(Error::RosterFull { count: SLOT_CAP })
+    );
+}
+
+#[test]
 fn the_rotation_turns_round_robin_and_sleeps_on_the_earliest_wake() {
     let (_b, plan) = plan();
     let mut os = OsCore::new(&plan, Flavor::Nvhe, None).unwrap();

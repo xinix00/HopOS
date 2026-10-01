@@ -534,6 +534,33 @@ fn event_ring_respects_cycle() {
     assert_eq!(e.deq_bus(), 0x2010);
 }
 
+/// Port Status Change-events komen niet in de wachtrij: niemand haalt ze
+/// op, dus honderd poortresets mogen hem niet vullen en geen transfer eruit
+/// duwen.
+#[test]
+fn port_status_events_skip_the_queue() {
+    const PSC: u32 = 34; // xHCI tabel 6-91
+    let mem = Mem::new(128 * 16);
+    let mut h = Hc::at(Pa(0), "test", 0);
+    h.evt = Some(EvRing::new(mem.pa(), 0x2000, 128));
+    for i in 0..100u64 {
+        let a = mem.pa().add(i * 16);
+        dev::write32(a, (i as u32 % 4 + 1) << 24);
+        dev::write32(a.add(12), PSC << ring::TRB_TYPE_SHIFT | 1);
+    }
+    let a = mem.pa().add(100 * 16);
+    dev::write32(a, 0x4000);
+    dev::write32(a.add(8), ring::CC_SUCCESS << 24);
+    dev::write32(
+        a.add(12),
+        1 << 24 | ring::TRB_TRANSFER_EVT << ring::TRB_TYPE_SHIFT | 1,
+    );
+    h.pump();
+    assert_eq!(h.pending.len(), 1);
+    let ev = h.take(|e| e.kind == ring::TRB_TRANSFER_EVT).unwrap();
+    assert_eq!((ev.ptr, ev.slot), (0x4000, 1));
+}
+
 /// Een handvat van een vorig leven wordt geweigerd, ook als het slot weer
 /// bezet is.
 #[test]

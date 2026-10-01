@@ -30,7 +30,6 @@ pub(crate) const TRB_STOP_EP: u32 = 15;
 pub(crate) const TRB_SET_TR_DEQ: u32 = 16;
 pub(crate) const TRB_TRANSFER_EVT: u32 = 32;
 pub(crate) const TRB_CMD_COMP_EVT: u32 = 33;
-pub(crate) const TRB_PORT_STAT_EVT: u32 = 34;
 
 // Vlaggen in het derde dword van een TRB (xHCI 6.4.1).
 pub(crate) const TRB_CYCLE: u32 = 1 << 0;
@@ -211,7 +210,8 @@ pub(crate) struct EvRing {
 /// Eén gelezen event-TRB, ontdaan van bitgefrommel.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Event {
-    /// `TRB_TRANSFER_EVT`, `TRB_CMD_COMP_EVT` of `TRB_PORT_STAT_EVT`.
+    /// Het TRB-type; de pomp houdt alleen `TRB_TRANSFER_EVT` en
+    /// `TRB_CMD_COMP_EVT`.
     pub(crate) kind: u32,
     /// Transfer/command: het bus-adres van het TRB dat dit veroorzaakte.
     pub(crate) ptr: u64,
@@ -220,8 +220,6 @@ pub(crate) struct Event {
     /// Transfer: RESTERENDE bytes, niet de overgedragen.
     pub(crate) rem: u32,
     pub(crate) slot: u8,
-    /// Alleen bij een port status change event.
-    pub(crate) port: u8,
 }
 
 impl EvRing {
@@ -250,19 +248,12 @@ impl EvRing {
         let p0 = dev::read32(a);
         let p1 = dev::read32(a.add(4));
         let p2 = dev::read32(a.add(8));
-        let kind = ctrl >> TRB_TYPE_SHIFT & 0x3F;
         let ev = Event {
-            kind,
+            kind: ctrl >> TRB_TYPE_SHIFT & 0x3F,
             ptr: u64::from(p0) & !0xF | u64::from(p1) << 32,
             comp: p2 >> 24,
             rem: p2 & 0xFF_FFFF,
             slot: (ctrl >> 24) as u8,
-            // Port Status Change: het poortnummer zit in [31:24] van dword 0.
-            port: if kind == TRB_PORT_STAT_EVT {
-                (p0 >> 24) as u8
-            } else {
-                0
-            },
         };
         self.deq += 1;
         if self.deq == self.n {
