@@ -1,6 +1,6 @@
 //! Het geheugen-attribuut van een venster in de EIGEN stage-1-map van de
-//! kern (TTBR0_EL2): van Device-nGnRnE naar Normal-WB ([`normal_wb`]) of
-//! Normal-NC ([`normal_nc`]).
+//! kern (TTBR0_EL2, onder E2H = 0 of 1): van Device-nGnRnE naar Normal-WB
+//! ([`normal_wb`]) of Normal-NC ([`normal_nc`]), altijd execute-never.
 //!
 //! Dit bezit: de rekenkunde over de vertaaltabellen (venster, 2 MB-blokken,
 //! het splitsen van een 1 GB-blok, de weigeringen) en de TLB- en
@@ -62,9 +62,6 @@ const DESC_TABLE: u64 = 0b11;
 /// Het uitvoer-adresveld van een descriptor (bits 47:12). Alles daarbuiten
 /// is attribuut: laag type, AttrIndx, AP, SH en AF, hoog XN.
 const ADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
-/// Execute-never in het EL2-regime. Een datavenster hoort nooit code te
-/// zijn.
-const XN: u64 = 1 << 54;
 /// Over hoeveel gigabytes één venster mag lopen. Een codec-arena is al
 /// gauw honderden megabytes en landt zelden binnen één GB; zestien is ruim
 /// boven alles wat de Go-kern ooit mapte.
@@ -80,25 +77,29 @@ pub enum Attr {
 }
 
 impl Attr {
-    /// De 2 MB-blokdescriptor voor `pa`: geldig, AF, inner shareable, de
-    /// MAIR-index uit [`crate::boot`], en XN.
+    /// De 2 MB-blokdescriptor voor `pa` in een map onder HCR_EL2.E2H =
+    /// `e2h`: geldig, AF, inner shareable, de MAIR-index uit
+    /// [`crate::boot`], en [`crate::boot::xn`]: een datavenster is nooit
+    /// code, ook niet voor de kern zelf.
     #[must_use]
-    pub const fn block(self, pa: u64) -> u64 {
+    pub const fn block(self, pa: u64, e2h: bool) -> u64 {
         let idx = match self {
             Self::NormalWb => ATTR_NORMAL,
             Self::NormalNc => ATTR_NORMAL_NC,
         };
-        crate::boot::block(pa, idx) | XN
+        crate::boot::block_e2h(pa, idx, e2h) | crate::boot::xn(e2h)
     }
 }
 
-/// De vorm van de eigen map, gelezen uit TTBR0_EL2 en TCR_EL2.
+/// De vorm van de eigen map, gelezen uit TTBR0_EL2, TCR_EL2 en HCR_EL2.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Regime {
     /// De wortel van de vertaling.
     pub ttbr0: u64,
     /// TCR.T0SZ: 64 min het aantal VA-bits.
     pub t0sz: u64,
+    /// HCR_EL2.E2H: bepaalt welke bits execute-never zijn.
+    pub e2h: bool,
 }
 
 /// Waarom een venster zijn attribuut niet kreeg. Elke variant draagt de
@@ -284,7 +285,7 @@ pub fn remap_in(
             .get((gb - first) as usize)
             .copied()
             .ok_or(Error::TooWide { first, last })?;
-        dev::write64(l2.add(idx * 8), attr.block(a));
+        dev::write64(l2.add(idx * 8), attr.block(a, regime.e2h));
         a += BLOCK_2M;
     }
     Ok(())
@@ -353,8 +354,9 @@ fn l2_for_gb(regime: &Regime, gb: u64, new_table: &mut dyn FnMut() -> Option<Pa>
 
 #[cfg(all(target_os = "none", target_arch = "aarch64"))]
 mod arch {
-    //! De registers van de eigen map (EL2, niet-VHE) en de TLB-invalidatie.
-    //! De kern draait op EL2 (boot.rs), dus de map is die van TTBR0_EL2.
+    //! De registers van de eigen map en de TLB-invalidatie. De kern draait
+    //! op EL2 (boot.rs), dus de map is die van TTBR0_EL2; onder E2H = 1
+    //! dezelfde registers in de EL2&0-vorm, en TLBI ALLE2IS dekt dat regime.
     extern crate alloc;
 
     use super::{Attr, Regime, Result, remap_in};
@@ -394,6 +396,7 @@ mod arch {
         let regime = Regime {
             ttbr0: read_ttbr0(),
             t0sz: read_tcr() & 0x3F,
+            e2h: read_hcr() & (1 << 34) != 0,
         };
         let r = remap_in(&regime, va, size, attr, &mut heap_table);
         // Ook na een fout: een gesplitst 1 GB-blok is dan al een tabel, en
@@ -432,6 +435,13 @@ mod arch {
         let v: u64;
         // SAFETY: TCR_EL2 lezen heeft geen neveneffect.
         unsafe { asm!("mrs {}, tcr_el2", out(reg) v, options(nomem, nostack)) };
+        v
+    }
+
+    fn read_hcr() -> u64 {
+        let v: u64;
+        // SAFETY: HCR_EL2 lezen heeft geen neveneffect; dit draait op EL2.
+        unsafe { asm!("mrs {}, hcr_el2", out(reg) v, options(nomem, nostack)) };
         v
     }
 
@@ -516,6 +526,7 @@ mod tests {
             Regime {
                 ttbr0: self.root().0,
                 t0sz: 25,
+                e2h: false,
             }
         }
         fn alloc(&mut self) -> Option<Pa> {
@@ -568,9 +579,9 @@ mod tests {
         // Het venster: vier NC-blokken, XN, op hun eigen adres.
         for a in (va..va + 8 * MB).step_by(BLOCK_2M as usize) {
             let d = walk(&r, a).unwrap();
-            assert_eq!(d, Attr::NormalNc.block(a));
+            assert_eq!(d, Attr::NormalNc.block(a, false));
             assert_eq!(attr_index(d), ATTR_NORMAL_NC);
-            assert_ne!(d & XN, 0);
+            assert_ne!(d & crate::boot::xn(false), 0);
         }
         // De buren: dezelfde attributen als het oude 1 GB-blok.
         let after = walk(&r, 3 * GB + 100 * MB).unwrap();
@@ -600,9 +611,9 @@ mod tests {
         remap(&mut m, &r, 0x0020_0000, 2 * MB, Attr::NormalWb).unwrap();
         assert_eq!(m.next, taken);
         let d = walk(&r, 0x0020_0000).unwrap();
-        assert_eq!(d, Attr::NormalWb.block(0x0020_0000));
+        assert_eq!(d, Attr::NormalWb.block(0x0020_0000, false));
         assert_eq!(attr_index(d), ATTR_NORMAL);
-        assert_ne!(d & XN, 0, "a data window is never code");
+        assert_ne!(d & crate::boot::xn(false), 0, "a data window is never code");
     }
 
     #[test]
@@ -615,7 +626,7 @@ mod tests {
         let va = 2 * GB - 4 * MB;
         remap(&mut m, &r, va, 8 * MB, Attr::NormalNc).unwrap();
         for a in (va..va + 8 * MB).step_by(BLOCK_2M as usize) {
-            assert_eq!(walk(&r, a).unwrap(), Attr::NormalNc.block(a));
+            assert_eq!(walk(&r, a).unwrap(), Attr::NormalNc.block(a, false));
         }
         assert_eq!(m.next, 3);
     }
@@ -667,6 +678,7 @@ mod tests {
         let r = Regime {
             ttbr0: l0.0,
             t0sz: 16,
+            e2h: true,
         };
         // GB 1047 hangt onder L0-entry 2.
         let e = remap(&mut m, &r, 1047 * GB, 2 * MB, Attr::NormalNc);
@@ -677,7 +689,7 @@ mod tests {
         remap(&mut m, &r, 1047 * GB, 2 * MB, Attr::NormalNc).unwrap();
         assert_eq!(
             walk(&r, 1047 * GB).unwrap(),
-            Attr::NormalNc.block(1047 * GB)
+            Attr::NormalNc.block(1047 * GB, true)
         );
     }
 
@@ -707,10 +719,44 @@ mod tests {
         assert_eq!(e, Err(Error::TooWide { first: 1, last: 17 }));
         let e = remap(&mut m, &r, GB, 2 * MB, Attr::NormalNc);
         assert!(e.is_err());
-        let bad = Regime { ttbr0: 0, t0sz: 40 };
+        let bad = Regime {
+            ttbr0: 0,
+            t0sz: 40,
+            e2h: false,
+        };
         assert_eq!(
             remap(&mut m, &bad, GB, 2 * MB, Attr::NormalNc),
             Err(Error::Regime { t0sz: 40 })
+        );
+    }
+
+    #[test]
+    fn execute_never_holds_for_the_kern_in_both_regimes() {
+        const UXN_OR_XN: u64 = 1 << 54;
+        const PXN: u64 = 1 << 53;
+        for attr in [Attr::NormalWb, Attr::NormalNc] {
+            // E2H = 0: bit 54 is XN voor EL2, bit 53 is RES0.
+            let d = attr.block(GB, false);
+            assert_eq!(d & (UXN_OR_XN | PXN), UXN_OR_XN);
+            // E2H = 1 (de O6N, Apple): bit 54 is alleen UXN, de kern
+            // houdt pas PXN tegen.
+            let d = attr.block(GB, true);
+            assert_eq!(d & (UXN_OR_XN | PXN), UXN_OR_XN | PXN);
+        }
+        // De rest van de descriptor hangt niet af van het regime.
+        assert_eq!(
+            Attr::NormalNc.block(GB, true) & !PXN,
+            Attr::NormalNc.block(GB, false)
+        );
+        // De boot-map: Device en NC krijgen hetzelfde, de kern-RAM blijft
+        // in beide regimes uitvoerbaar.
+        assert_eq!(
+            crate::boot::block_e2h(0, crate::boot::ATTR_DEVICE, true) & PXN,
+            PXN
+        );
+        assert_eq!(
+            crate::boot::block_e2h(GB, ATTR_NORMAL, true) & (UXN_OR_XN | PXN),
+            0
         );
     }
 

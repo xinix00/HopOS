@@ -29,31 +29,13 @@
 //!
 //! De tabellen liggen in de BSS van het image (Normal WB zodra de MMU aan
 //! is; de table-walker leest cacheable met IRGN/ORGN = WB). De bouw draait
-//! met de MMU uit, dus ze staan meteen in het geheugen.
+//! met de MMU uit, dus ze staan meteen in het geheugen. Elk blok is van
+//! `cpu::boot::block_e2h` met E2H = 1 (zie [`tcr`]): XN is UXN plus PXN.
 
 use crate::storage::ANS_DATA;
 use crate::{DMA, DRAM_BASE, KERN_RAM, LOADER, WINDOW_END};
-use cpu::boot::{ATTR_DEVICE, ATTR_NORMAL, ATTR_NORMAL_NC};
+use cpu::boot::{ATTR_DEVICE, ATTR_NORMAL, ATTR_NORMAL_NC, block_e2h};
 use dev::Pa;
-
-/// XN van `cpu::boot::block`: in het EL2&0-regime (E2H = 1) is bit 54 UXN,
-/// alleen voor EL0.
-const UXN: u64 = 1 << 54;
-/// PXN: wat de kern op EL2 onder E2H = 1 werkelijk niet laat uitvoeren.
-const PXN: u64 = 1 << 53;
-
-/// Een blokdescriptor zoals `cpu::boot::block`, plus PXN op elk blok dat
-/// daar XN is. `cpu::boot` schrijft de nVHE-vorm (bit 54 is daar XN voor
-/// EL2); op dit VHE-only silicium is bit 54 alleen UXN en mocht de kern
-/// speculatief instructies halen uit Device-blokken (MMIO, de firmware in
-/// het DRAM, het kooi-venster) en uit de DMA-regio. Het gat zag de
-/// VHE-agent bij board-uefi (29-09, `board_uefi::el2::PXN`); hier dezelfde
-/// regel. De kern-RAM en de loader-regio blijven uitvoerbaar.
-#[must_use]
-pub(crate) const fn block(pa: u64, attr: u64) -> u64 {
-    let d = cpu::boot::block(pa, attr);
-    if d & UXN != 0 { d | PXN } else { d }
-}
 
 /// Geldig, tabel.
 const TABLE: u64 = 0b11;
@@ -128,7 +110,7 @@ pub(crate) const fn dram_block(pa: u64) -> Option<u64> {
     if !pa.is_multiple_of(MB2) {
         return None;
     }
-    Some(block(pa, dram_attr(pa)))
+    Some(block_e2h(pa, dram_attr(pa), true))
 }
 
 /// Hoeveel GB DRAM we mappen: het fysieke RAM uit boot_args, naar boven op
@@ -163,7 +145,7 @@ pub(crate) unsafe fn build(pool: u64, mem_size_actual: u64, guard: u64) -> u64 {
     dev::write64(l0, lo.0 | TABLE);
     dev::write64(l0.add(8 * (DRAM_BASE >> 39)), hi.0 | TABLE);
     for g in 0..512 {
-        dev::write64(lo.add(8 * g), block(g * GB, ATTR_DEVICE));
+        dev::write64(lo.add(8 * g), block_e2h(g * GB, ATTR_DEVICE, true));
     }
     for g in 0..dram_gb(mem_size_actual) {
         let l2 = page(3 + g);
@@ -223,7 +205,7 @@ unsafe fn remap_in(root: u64, pa: u64, size: u64, flush: fn()) -> Result<(), &'s
     let mut at = pa;
     while at < end {
         let entry = l2_entry(root, at).ok_or("no 2 MB block there")?;
-        let want = block(at, ATTR_NORMAL) | UXN | PXN;
+        let want = cpu::memattr::Attr::NormalWb.block(at, true);
         let have = dev::read64(entry);
         if have != want {
             if have & 0b11 != 0b01 || have & 0x0000_ffff_ffe0_0000 != at {
@@ -333,8 +315,9 @@ mod tests {
         let after = walk(&pool[off..], tail).unwrap();
         assert_eq!((after >> 2) & 7, ATTR_NORMAL);
         assert_eq!(after & 0x0000_ffff_ffe0_0000, tail);
-        assert!(
-            after & UXN != 0 && after & PXN != 0,
+        assert_eq!(
+            after & cpu::boot::xn(true),
+            cpu::boot::xn(true),
             "de staart is geen code voor de kern"
         );
         assert_eq!((after >> 8) & 3, 0b11, "inner shareable");
@@ -391,7 +374,7 @@ mod tests {
         assert_eq!((walk(tables, LOADER.base.0).unwrap() >> 2) & 7, ATTR_NORMAL);
         // De kern-RAM is uitvoerbaar, de rest niet: onder E2H = 1 is dat PXN
         // (53), niet alleen UXN (54).
-        let xn = UXN | PXN;
+        let xn = cpu::boot::xn(true);
         assert_eq!(walk(tables, KERN_RAM.base.0).unwrap() & xn, 0);
         assert_eq!(walk(tables, LOADER.base.0).unwrap() & xn, 0);
         assert_eq!(walk(tables, WINDOW_END).unwrap() & xn, xn);
@@ -414,7 +397,7 @@ mod tests {
         let next = l3(guard + 4096);
         assert_eq!(next & 0xffff_ffff_f000, guard + 4096);
         assert_eq!((next >> 2) & 7, ATTR_NORMAL);
-        assert_eq!(next & (UXN | PXN), 0);
+        assert_eq!(next & cpu::boot::xn(true), 0);
     }
 
     #[test]

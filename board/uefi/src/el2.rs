@@ -3,8 +3,7 @@
 //!
 //! Dit bezit alleen getallen en twee losse instructies: de waarden van
 //! HCR_EL2, SCTLR_EL2, TCR_EL2, CPTR_EL2 en CNTHCTL_EL2 die de ingang
-//! (`crate::entry`, `crate::boot`) schrijft, de PXN-bit van de map
-//! (`crate::mmu`), en het herstel van de timertoegang van EL1 na
+//! (`crate::entry`, `crate::boot`) schrijft, en het herstel van de timertoegang van EL1 na
 //! `cpu::idle::ArmSleeper::new`. Niet van hier: welke switcher-smaak de
 //! app-cores krijgen (`hopos/src/cage.rs` `FLAVOR`); die moet wel met deze
 //! vorm overeenkomen, en de binary toetst dat bij het bouwen.
@@ -75,10 +74,6 @@ mod imp {
     )]
     pub(crate) const CPTR: u64 = 0x33ff;
 
-    /// PXN bestaat niet in het EL2-regime met één VA-bereik (bit 53 is daar
-    /// RES0); XN (bit 54) is het hele verbod.
-    pub(crate) const PXN: u64 = 0;
-
     /// CNTHCTL_EL2 van de timertoegang van EL1: EL1PCTEN en EL1PCEN
     /// (bits 0 en 1 in de nVHE-lay-out).
     pub(crate) const CNTHCTL_EL1_ACCESS: u64 = 0b11;
@@ -131,12 +126,6 @@ mod imp {
         allow(dead_code) // alleen de ingang (entry.rs) gebruikt hem, en de tests
     )]
     pub(crate) const CPTR: u64 = 0x30_0000;
-
-    /// PXN (bit 53): in het EL2&0-regime is bit 54 UXN, dus een XN-blok
-    /// krijgt ook PXN, anders mag de kern er speculatief instructies uit
-    /// halen, en dat is voor Device-geheugen precies wat XN moest
-    /// voorkomen.
-    pub(crate) const PXN: u64 = 1 << 53;
 
     /// CNTHCTL_EL2 van de timertoegang van EL1: EL1PCTEN en EL1PTEN (bits
     /// 10 en 11 in de VHE-lay-out, `cpu/src/el2/switch.rs` `hopos_el2_drop`).

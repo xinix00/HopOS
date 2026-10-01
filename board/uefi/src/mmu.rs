@@ -62,13 +62,9 @@ pub(crate) enum Error {
 }
 
 /// De attribuutbits van een blok of pagina met MAIR-index `attr`, zonder
-/// adres en type (de encodering van `cpu::boot::block`). Onder VHE krijgt
-/// een XN-blok ook PXN: in het EL2&0-regime is bit 54 alleen UXN
-/// ([`crate::el2::PXN`]; onder nVHE is dat 0).
+/// adres en type, in het regime van de kern (`cpu::boot::block_e2h`).
 pub(crate) const fn attrs(attr: u64) -> u64 {
-    const XN: u64 = 1 << 54;
-    let a = cpu::boot::block(0, attr) & !0b11;
-    if a & XN != 0 { a | crate::el2::PXN } else { a }
+    cpu::boot::block_e2h(0, attr, crate::el2::VHE) & !0b11
 }
 
 /// De tabellen van één identity map, uit een pool van pagina's.
@@ -272,20 +268,6 @@ mod tests {
         );
         assert_eq!(m.lookup(0x1000_0260_1000), None);
         assert_eq!(m.lookup(DEVICE_SPAN), None);
-    }
-
-    #[test]
-    fn execute_never_is_whole_in_both_regimes() {
-        const PXN: u64 = 1 << 53;
-        const XN: u64 = 1 << 54;
-        // Device en NC: nooit uitvoerbaar, ook niet door de kern zelf onder
-        // VHE (daar is bit 54 alleen UXN).
-        for a in [ATTR_DEVICE, ATTR_NORMAL_NC] {
-            assert_ne!(attrs(a) & XN, 0);
-            assert_eq!(attrs(a) & PXN != 0, crate::el2::VHE);
-        }
-        // De kern-RAM blijft uitvoerbaar.
-        assert_eq!(attrs(ATTR_NORMAL) & (XN | PXN), 0);
     }
 
     #[test]

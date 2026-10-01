@@ -58,22 +58,43 @@ pub const MAIR: u64 =
     (0x00 << (8 * ATTR_DEVICE)) | (0xff << (8 * ATTR_NORMAL)) | (0x44 << (8 * ATTR_NORMAL_NC));
 
 /// Een blokbeschrijving (niveau 1: 1 GB, niveau 2: 2 MB) voor `pa` met
-/// MAIR-index `attr`: AF gezet, inner shareable voor Normal, en XN voor
-/// alles wat geen gecachte kern-RAM is (code draait alleen uit de kern).
+/// MAIR-index `attr`, voor een kern onder HCR_EL2.E2H = 0: zie
+/// [`block_e2h`].
 #[must_use]
 pub const fn block(pa: u64, attr: u64) -> u64 {
+    block_e2h(pa, attr, false)
+}
+
+/// Een blokbeschrijving voor `pa` met MAIR-index `attr` in het regime van
+/// een kern met HCR_EL2.E2H = `e2h`: AF gezet, inner shareable voor Normal,
+/// en [`xn`] voor alles wat geen gecachte kern-RAM is (code draait alleen
+/// uit de kern).
+#[must_use]
+pub const fn block_e2h(pa: u64, attr: u64, e2h: bool) -> u64 {
     const VALID_BLOCK: u64 = 0b01;
     const AF: u64 = 1 << 10;
     const SH_INNER: u64 = 0b11 << 8;
-    const XN: u64 = 1 << 54;
     let mut d = pa | VALID_BLOCK | (attr << 2) | AF;
     if attr != ATTR_DEVICE {
         d |= SH_INNER;
     }
     if attr != ATTR_NORMAL {
-        d |= XN;
+        d |= xn(e2h);
     }
     d
+}
+
+/// Execute-never voor de kern zelf. Onder E2H = 0 (het EL2-regime, één
+/// privilegeniveau) is dat bit 54 en is bit 53 RES0. Onder E2H = 1 (het
+/// EL2&0-regime: Apple, de O6N, board-uefi met `vhe`) is bit 54 alleen UXN
+/// en verbiedt pas PXN (bit 53) het de kern; zonder PXN mag EL2 er
+/// speculatief instructies uit halen, en voor Device is dat precies wat XN
+/// moest voorkomen (Linux: `PTE_PXN | PTE_UXN` op elke niet-code-mapping).
+#[must_use]
+pub const fn xn(e2h: bool) -> u64 {
+    const XN: u64 = 1 << 54;
+    const PXN: u64 = 1 << 53;
+    if e2h { XN | PXN } else { XN }
 }
 
 /// Maakt de 4 KB-pagina van `guard` ongeldig in een map die de MMU nog niet
