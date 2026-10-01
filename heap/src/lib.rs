@@ -672,12 +672,6 @@ impl<C: Core> Heap<C> {
         self.st.with(|st| st.init(start, end));
     }
 
-    /// Zet het plafond voor de bytes in gebruik, hooguit de maat van het
-    /// gebied. Wat al uitgegeven is, blijft staan.
-    pub fn set_ceiling(&self, bytes: usize) {
-        self.st.with(|st| st.ceiling = bytes.min(st.end - st.start));
-    }
-
     /// Reserveert `size` bytes met uitlijning `align` (een macht van twee,
     /// hooguit [`MAX_ALIGN`]); het adres, of `None` als het niet past.
     pub fn reserve(&self, size: usize, align: usize) -> Option<usize> {

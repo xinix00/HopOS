@@ -19,7 +19,7 @@
 //! kick van een app-core, de CNTHP op de deadline) naar EL2 trapt; dan keert
 //! `run` terug en draait de executor zijn ronde. De ctx-blokken zijn die van
 //! de switcher, byte voor byte (zelfde bewaarvolgorde, zelfde staten), zodat
-//! alles wat de kern van een bewoner leest (`ctx_state`, `wake_due`, het
+//! alles wat de kern van een bewoner leest (`ctx_state`, `rx_due`, het
 //! fault-rapport) hier ook klopt.
 //!
 //! De verloren-wek-race blijft dicht zoals in `cpu::idle`: de executor
@@ -45,7 +45,8 @@ extern crate alloc;
 
 use super::Error;
 use super::dispatch::{
-    Flavor, HVC_EXIT, HVC_YIELD, VEC_SYNC_LOWER, context_id, ctx_read, ctx_state, ctx_write, rx_due,
+    Flavor, HVC_EXIT, HVC_YIELD, VEC_FIQ_LOWER, VEC_SYNC_LOWER, context_id, ctx_read, ctx_state,
+    ctx_write, rx_due,
 };
 use super::layout::{
     CAGE_STRIDE, CTX_CTRL_PA, CTX_GPRS, CTX_KICK_PENDING, CTX_OFF, CTX_REGIME,
@@ -67,13 +68,13 @@ use dev::Pa;
 /// RISC-V-kick (de PA van `msip`), en in blok 0 is dat hier dezelfde rol,
 /// "het wek-IPI van de kern". Regel 3 van het blok: de kern schrijft, de
 /// switcher leest.
-pub const SCHED_OS_KICK: u64 = SCHED_MSIP_PA;
+pub(crate) const SCHED_OS_KICK: u64 = SCHED_MSIP_PA;
 
 /// Het woord in sched-blok 0 met de PA van GICD_SGIR als de kick een
 /// MMIO-schrijf is (GICv2, de GIC-400 van de Pi's); 0 = de kick is een
 /// ICC_SGI1R-systeemregister (GICv3). Op ARM ongebruikt veld: op RISC-V is
 /// het de PA van `mtimecmp`. Eén keer gezet door [`OsCore::new`].
-pub const SCHED_OS_KICK_PA: u64 = SCHED_CLINT_PA;
+pub(crate) const SCHED_OS_KICK_PA: u64 = SCHED_CLINT_PA;
 
 /// SCTLR_EL1 bij een koude start: de RES1-bits, M/C/I/A/WXN uit. Nooit
 /// erven (de Pi 5-les van 10-07). Eén bron voor de drop van de switcher en
@@ -94,10 +95,9 @@ const HCR_TSC: u64 = 1 << 19;
 const HCR_TGE: u64 = 1 << 27;
 const HCR_GUEST: u64 = HCR_VM | HCR_FMO | HCR_IMO | HCR_AMO | HCR_TSC;
 
-/// De vectorindexen die niet [`VEC_SYNC_LOWER`] zijn en toch geen fault:
-/// IRQ en FIQ uit een lagere EL.
+/// De vectorindex van een IRQ uit een lagere EL: met [`VEC_FIQ_LOWER`] de
+/// ingangen die niet [`VEC_SYNC_LOWER`] zijn en toch geen fault.
 const VEC_IRQ_LOWER: u64 = 9;
-const VEC_FIQ_LOWER: u64 = 10;
 
 /// Bit 63 van het kick-woord op Apple: "scherp". Het doel van de fast IPI
 /// (core | cluster << 16) is voor E-core 0 in cluster 0 gewoon 0, en 0 is

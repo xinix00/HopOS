@@ -3,46 +3,8 @@
 //! overgang zelf bewijst het board (de zelftest bij boot).
 
 use super::*;
-use abi::Region;
-use abi::layout::{CTX_LEN, PlanSpec, Slot};
-
-/// Een buffer met een gegarandeerde uitlijning; het adres is de `Pa`.
-struct Buf {
-    _mem: Vec<u64>,
-    base: u64,
-}
-
-impl Buf {
-    fn new(len: usize, align: u64) -> Buf {
-        let mut mem = vec![0u64; (len + align as usize) / 8 + 1];
-        let raw = mem.as_mut_ptr() as usize as u64;
-        let base = (raw + align - 1) & !(align - 1);
-        Buf { _mem: mem, base }
-    }
-}
-
-/// Een plan over een host-buffer: drie slots, twee app-cores.
-fn plan() -> (Buf, Plan) {
-    let slots = 3u64;
-    let cage = (slots + 1) * CAGE_STRIDE;
-    let ctrl = (slots + 1) * 0x1000;
-    let buf = Buf::new((cage + ctrl + 0x1000) as usize, CAGE_STRIDE);
-    let end = buf.base + cage + ctrl + 0x1000;
-    let mut pool = abi::layout::Pool::new();
-    let grain = 2u64 << 20;
-    pool.push(Region::new((end + 2 * grain) & !(grain - 1), grain))
-        .unwrap();
-    let spec = PlanSpec {
-        node_ctrl_pa: buf.base + cage,
-        cage_pa: buf.base,
-        boot_scratch_pa: buf.base + cage + ctrl,
-        pool,
-        max_slots: slots as usize,
-        app_cores: 2,
-        ..PlanSpec::default()
-    };
-    (buf, Plan::new(spec).unwrap())
-}
+use crate::el2::harness::plan;
+use abi::layout::{CTX_LEN, Slot};
 
 fn ctx(plan: &Plan, i: usize) -> Pa {
     plan.ctx_pa(Slot::new(i).unwrap()).unwrap()
@@ -58,7 +20,7 @@ fn list(plan: &Plan) -> Vec<u8> {
 
 #[test]
 fn host_prepares_the_first_turn_and_joins_the_list() {
-    let (_b, plan) = plan();
+    let (_b, plan) = plan(2);
     let c = ctx(&plan, 1);
     // Rommel in het blok: verse DRAM is geen nul.
     for off in (0..CTX_LEN).step_by(8) {
@@ -82,7 +44,7 @@ fn host_prepares_the_first_turn_and_joins_the_list() {
 
 #[test]
 fn unhost_leaves_a_gap_that_the_next_host_reuses() {
-    let (_b, plan) = plan();
+    let (_b, plan) = plan(2);
     host(&plan, ctx(&plan, 1), 1, 0x1000).unwrap();
     host(&plan, ctx(&plan, 2), 1, 0x2000).unwrap();
     assert_eq!(list(&plan), [1, 2]);
@@ -98,7 +60,7 @@ fn unhost_leaves_a_gap_that_the_next_host_reuses() {
 
 #[test]
 fn a_full_roster_says_so() {
-    let (_b, plan) = plan();
+    let (_b, plan) = plan(2);
     let sched = os_sched(&plan).unwrap();
     dev::write64(sched.add(SCHED_COUNT), SLOT_CAP as u64);
     for i in 0..SLOT_CAP as u64 {
@@ -112,7 +74,7 @@ fn a_full_roster_says_so() {
 
 #[test]
 fn the_rotation_turns_round_robin_and_sleeps_on_the_earliest_wake() {
-    let (_b, plan) = plan();
+    let (_b, plan) = plan(2);
     let mut os = OsCore::new(&plan, Flavor::Nvhe, None).unwrap();
     assert_eq!(os.run(0), Turn::Idle { wake: None });
     let (c1, c2) = (ctx(&plan, 1), ctx(&plan, 2));
@@ -143,7 +105,7 @@ fn the_rotation_turns_round_robin_and_sleeps_on_the_earliest_wake() {
 
 #[test]
 fn the_kick_is_told_apart_from_an_irq() {
-    let (_b, plan) = plan();
+    let (_b, plan) = plan(2);
     fn kick() -> u32 {
         9
     }
@@ -168,7 +130,7 @@ fn the_kick_is_told_apart_from_an_irq() {
 
 #[test]
 fn apple_shares_its_os_core_with_the_fast_ipi() {
-    let (_b, plan) = plan();
+    let (_b, plan) = plan(2);
     // De OS-core op P-core 6 (cpu6, MPIDR 0x80010100, GEMETEN 28-08):
     // cluster 1, core 0.
     let bell = Bell::apple(0x8001_0100);
@@ -228,7 +190,7 @@ fn the_vector_index_tells_how_a_turn_ended() {
 
 #[test]
 fn a_gicv2_bell_publishes_its_mmio_address() {
-    let (_b, plan) = plan();
+    let (_b, plan) = plan(2);
     fn none() -> u32 {
         1023
     }
@@ -267,7 +229,7 @@ fn the_selftest_names_the_line_that_interrupted_it() {
     // welke lijn. Op de host komt elke beurt terug op vector 9; de bel
     // peekt hier de NIC-lijn van de Pi 5 (INTID 166), die al vóór de
     // overgang pending stond.
-    let (_b, plan) = plan();
+    let (_b, plan) = plan(2);
     fn nic() -> u32 {
         166
     }

@@ -31,17 +31,14 @@ mod switch;
 mod switch;
 
 pub use dispatch::{
-    CoreState, Flavor, HVC_DOOR_ACK, HVC_EXIT, HVC_KICK_OS, HVC_WAKE, HVC_YIELD, Installed, Join,
-    MAX_BLOB, SW_ENTRY, SW_HASH, SW_HEAD, SW_LEN, SW_SMP, SW_TRAMP, SWITCH_MAGIC, Start, VEC_COUNT,
-    VEC_FIQ_LOWER, VEC_STRIDE, VEC_SYNC_LOWER, VEC_TABLE_LEN, adopt, apple_ipi_target, arm_context,
-    chain, check_parked, context_id, context_pa, core_state, ctx_read, ctx_state, ctx_write,
-    dispatch, evict, forget, image_hash, init_app_cores, install_switch_code, installed_hash, join,
-    kick, prepare_secondary, prepare_smp, residents, revoke, rx_due, unwind_cold, wake_due,
+    CoreState, Flavor, Installed, Join, MAX_BLOB, Start, adopt, apple_ipi_target, arm_context,
+    chain, core_state, ctx_read, ctx_state, ctx_write, dispatch, evict, forget, image_hash,
+    init_app_cores, install_switch_code, installed_hash, join, kick, prepare_secondary,
+    prepare_smp, residents, revoke, rx_due, unwind_cold,
 };
 pub use oscore::{
-    Back, Bell, OsCore, Probe, SCHED_OS_KICK, SCHED_OS_KICK_PA, STATS as OS_STATS,
-    Stats as OsStats, TURN_CAP_NS, Turn, apple_ipi_ack, held, hold, host, hosts, last_fault,
-    rehost, release_held, unhost,
+    Back, Bell, OsCore, Probe, STATS as OS_STATS, TURN_CAP_NS, Turn, apple_ipi_ack, held, hold,
+    host, hosts, last_fault, rehost, release_held, unhost,
 };
 
 use core::fmt;
@@ -143,9 +140,6 @@ pub enum Error {
     },
     /// Het plan weigerde een index.
     Plan(abi::Error),
-    /// Deze EL2-smaak kan de OS-core niet delen (Apple: geen GIC-kick, en
-    /// het FIQ-pad van de OS-core is niet geport).
-    OsCoreFlavor,
     /// De bewonerslijst van een core is vol, zonder gat.
     RosterFull {
         /// Het aantal ingangen.
@@ -214,9 +208,6 @@ impl fmt::Display for Error {
                 write!(f, "mailbox argument {arg:#x} reads as cold or parked")
             }
             Self::Plan(e) => write!(f, "plan: {e}"),
-            Self::OsCoreFlavor => {
-                write!(f, "this EL2 flavor cannot share the OS core with residents")
-            }
             Self::RosterFull { count } => {
                 write!(f, "resident list is full ({count}) with no free gap")
             }
@@ -253,4 +244,56 @@ mod arch {
     //! Host-kant: er is geen EL2 en geen TLB. De tests bewijzen de inhoud
     //! van de tabellen, niet de intrekking zelf (zoals stage2_host.go).
     pub(super) fn hvc_revoke() {}
+}
+
+/// Het testharnas van de switcher en de OS-core: buffers met een adres, en
+/// een plan erover.
+#[cfg(test)]
+mod harness {
+    use abi::Region;
+    use abi::layout::{CAGE_STRIDE, Plan, PlanSpec, Pool};
+    use dev::Pa;
+
+    /// Een buffer met een gegarandeerde uitlijning; het adres is de `Pa`.
+    pub(super) struct Buf {
+        pub(super) mem: Vec<u64>,
+        pub(super) base: u64,
+    }
+
+    impl Buf {
+        pub(super) fn new(len: usize, align: u64) -> Buf {
+            let mut mem = vec![0u64; (len + align as usize) / 8 + 1];
+            let raw = mem.as_mut_ptr() as usize as u64;
+            let base = (raw + align - 1) & !(align - 1);
+            Buf { mem, base }
+        }
+        pub(super) fn pa(&self) -> Pa {
+            Pa(self.base)
+        }
+    }
+
+    /// Een plan over een host-buffer: drie slots en `app_cores` app-cores.
+    /// De kooi-regio, de node-pages en de boot-scratch liggen in dezelfde
+    /// buffer, de pool er ver voorbij (hij wordt nooit aangeraakt).
+    pub(super) fn plan(app_cores: usize) -> (Buf, Plan) {
+        let slots = 3u64;
+        let cage = (slots + 1) * CAGE_STRIDE;
+        let ctrl = (slots + 1) * 0x1000;
+        let buf = Buf::new((cage + ctrl + 0x1000) as usize, CAGE_STRIDE);
+        let end = buf.base + cage + ctrl + 0x1000;
+        let mut pool = Pool::new();
+        let grain = 2u64 << 20;
+        pool.push(Region::new((end + 2 * grain) & !(grain - 1), grain))
+            .unwrap();
+        let spec = PlanSpec {
+            node_ctrl_pa: buf.base + cage,
+            cage_pa: buf.base,
+            boot_scratch_pa: buf.base + cage + ctrl,
+            pool,
+            max_slots: slots as usize,
+            app_cores,
+            ..PlanSpec::default()
+        };
+        (buf, Plan::new(spec).unwrap())
+    }
 }

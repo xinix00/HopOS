@@ -13,14 +13,14 @@
 
 use core::fmt;
 
-/// PSCI_VERSION.
-pub const VERSION: u32 = 0x8400_0000;
 /// CPU_OFF.
 pub const CPU_OFF: u32 = 0x8400_0002;
 /// CPU_ON (64-bit conventie).
 pub const CPU_ON: u32 = 0xC400_0003;
 /// AFFINITY_INFO (64-bit conventie).
 pub const AFFINITY_INFO: u32 = 0xC400_0004;
+/// SYSTEM_RESET (SMC32).
+pub const SYSTEM_RESET: u32 = 0x8400_0009;
 
 /// Een PSCI-fout: de code die de firmware teruggaf.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -119,16 +119,10 @@ impl Affinity {
     }
 }
 
-/// (major, minor) uit een PSCI_VERSION-woord.
+/// (major, minor) uit een versiewoord (PSCI_VERSION, TRNG_VERSION).
 #[must_use]
 pub const fn split_version(v: u64) -> (u16, u16) {
     ((v >> 16) as u16, v as u16)
-}
-
-/// De versie van de PSCI-provider als (major, minor).
-#[must_use]
-pub fn version() -> (u16, u16) {
-    split_version(smc(VERSION, 0, 0, 0))
 }
 
 /// Start een secundaire core. `target` is het MPIDR-target (al vertaald uit
@@ -141,26 +135,10 @@ pub fn cpu_on(target: u64, entry: u64, ctx: u64) -> Result<(), Error> {
     }
 }
 
-/// Zet de aanroepende core uit. Keert alleen terug als de firmware
-/// weigert, met de reden.
-///
-/// HopOS zet zijn app-cores nooit uit (PSCI CPU_OFF is op de Pi 5-stock
-/// firmware een one-way door, gemeten 10-07); ze parkeren op EL2. Dit is er
-/// voor de rest.
-pub fn cpu_off() -> Error {
-    Error::from_ret(smc(CPU_OFF, 0, 0, 0)).unwrap_or(Error::Other(0))
-}
-
 /// De powertoestand van een core (MPIDR-target).
 #[must_use]
 pub fn affinity_info(target: u64) -> Affinity {
     Affinity::from_ret(smc(AFFINITY_INFO, target, 0, 0))
-}
-
-/// De firmware-consoleregel van een PSCI-board: versie en boot-EL.
-pub fn describe(el: u32, f: &mut dyn fmt::Write) -> fmt::Result {
-    let (major, minor) = version();
-    write!(f, "psci: v{major}.{minor} (boot EL{el}, SMC conduit)")
 }
 
 /// Een SMC #0 met vier argumenten (SMCCC: x0..x3 in, resultaat in x0).
@@ -242,6 +220,5 @@ mod tests {
     #[test]
     fn host_has_no_firmware() {
         assert_eq!(cpu_on(1, 0x4000_0000, 0), Err(Error::NotSupported));
-        assert_eq!(cpu_off(), Error::NotSupported);
     }
 }

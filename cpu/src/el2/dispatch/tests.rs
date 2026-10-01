@@ -2,52 +2,22 @@
 //! startschot en de ctx-lezers, over buffers. De assembly bewijst het board.
 
 use super::*;
-use abi::Region;
+use crate::el2::harness::{Buf, plan};
 use abi::checksum::fnv64;
-use abi::layout::{CTX_BOOT_PC, CTX_NEXT_PA, CTX_SLEEPS, CTX_SMP, PlanSpec};
+use abi::layout::{CTX_BOOT_PC, CTX_NEXT_PA, CTX_SLEEPS, CTX_SMP, CTX_WAKE_NO_PEEK};
 
-/// Een buffer met een gegarandeerde uitlijning; het adres is de `Pa`.
-struct Buf {
-    mem: Vec<u64>,
-    base: u64,
-}
-
-impl Buf {
-    fn new(len: usize, align: u64) -> Buf {
-        let mut mem = vec![0u64; (len + align as usize) / 8 + 1];
-        let raw = mem.as_mut_ptr() as usize as u64;
-        let base = (raw + align - 1) & !(align - 1);
-        Buf { mem, base }
+/// Het ctx-blok van context-id `id`: dezelfde rekensom als de switcher
+/// (`hopos_el2_ctx_of`), om [`context_id`] tegen te toetsen.
+fn context_pa(plan: &Plan, id: u8) -> Result<Pa, Error> {
+    let i = usize::from(id);
+    if let Some(slot) = Slot::new(i) {
+        return plan.ctx_pa(slot).map_err(Error::Plan);
     }
-    fn pa(&self) -> Pa {
-        Pa(self.base)
-    }
-}
-
-/// Een plan over een host-buffer: drie slots, drie app-cores. De
-/// kooi-regio, de node-pages en de boot-scratch liggen in dezelfde buffer,
-/// de pool er ver voorbij (hij wordt nooit aangeraakt).
-fn plan() -> (Buf, Plan) {
-    let slots = 3u64;
-    let cage = (slots + 1) * CAGE_STRIDE;
-    let ctrl = (slots + 1) * 0x1000;
-    let buf = Buf::new((cage + ctrl + 0x1000) as usize, CAGE_STRIDE);
-    let end = buf.base + cage + ctrl + 0x1000;
-    let mut pool = abi::layout::Pool::new();
-    let grain = 2u64 << 20;
-    pool.push(Region::new((end + 2 * grain) & !(grain - 1), grain))
-        .unwrap();
-    let spec = PlanSpec {
-        node_ctrl_pa: buf.base + cage,
-        cage_pa: buf.base,
-        boot_scratch_pa: buf.base + cage + ctrl,
-        pool,
-        max_slots: slots as usize,
-        app_cores: 3,
-        ..PlanSpec::default()
-    };
-    let p = Plan::new(spec).unwrap();
-    (buf, p)
+    let core = i
+        .checked_sub(SLOT_CAP - 1)
+        .and_then(Core::new)
+        .ok_or(Error::BadContextId { id })?;
+    plan.smp_ctx_pa(core).map_err(Error::Plan)
 }
 
 fn core(i: usize) -> Core {
@@ -142,7 +112,7 @@ fn switch_code_that_does_not_fit_is_refused() {
 
 #[test]
 fn host_has_no_switch_code() {
-    let (_buf, p) = plan();
+    let (_buf, p) = plan(3);
     assert_eq!(
         install_switch_code(&p, Flavor::Nvhe),
         Err(Error::NoSwitchCode)
@@ -179,7 +149,7 @@ fn thunk_matches_the_go_generator() {
 
 #[test]
 fn init_writes_thunks_park_schedules_and_empty_contexts() {
-    let (_buf, p) = plan();
+    let (_buf, p) = plan(3);
     // Vuil, zoals verse DRAM.
     dev::write64(p.park_mbox_pa(core(2)).unwrap().add(SCHED_COUNT), 77);
     dev::write64(p.ctx_pa(slot(3)).unwrap(), 0xdead);
@@ -211,7 +181,7 @@ fn init_writes_thunks_park_schedules_and_empty_contexts() {
 
 #[test]
 fn a_kept_park_loop_keeps_mailbox_word_zero() {
-    let (_buf, p) = plan();
+    let (_buf, p) = plan(3);
     let mb = p.park_mbox_pa(core(1)).unwrap();
     dev::write64(mb, PARK_PARKED);
     dev::write64(p.park_code_pa(), 0x1234);
@@ -235,7 +205,7 @@ fn a_kept_park_loop_keeps_mailbox_word_zero() {
 
 #[test]
 fn context_ids_round_trip_like_the_switcher() {
-    let (_buf, p) = plan();
+    let (_buf, p) = plan(3);
     for id in 1..=3u8 {
         let ctx = context_pa(&p, id).unwrap();
         assert_eq!(ctx, p.ctx_pa(slot(usize::from(id))).unwrap());
@@ -256,7 +226,7 @@ fn context_ids_round_trip_like_the_switcher() {
 
 #[test]
 fn dispatch_resets_the_rotation_and_fires_the_mailbox() {
-    let (_buf, p) = plan();
+    let (_buf, p) = plan(3);
     init_region(&p, Pa(0x4000_0000), Some(&[0; 4])).unwrap();
     let ctx = p.ctx_pa(slot(2)).unwrap();
     let mb = p.park_mbox_pa(core(1)).unwrap();
@@ -339,36 +309,27 @@ fn smp_handoff_owns_privileges_and_freezes_request() {
 }
 
 #[test]
-fn wake_due_mirrors_the_rotation() {
+fn rx_due_wants_an_armed_door_and_a_head_past_it() {
     let ctx = Buf::new(CTX_LEN as usize, 64);
     let page = Buf::new(0x1000, 64);
     let head = Buf::new(64, 64);
     let c = ctx.pa();
-    // Nu, en een verstreken wektijd.
-    assert!(wake_due(c, 100));
-    ctx_write(c, CTX_WAKE, 500);
-    assert!(!wake_due(c, 499));
-    assert!(wake_due(c, 500));
     // RX: gewapend en de kop voorbij de drempel.
     arm_context(c, page.pa(), slot(1), head.base);
     assert_eq!(ctx_read(c, CTX_KICK_TARGET), CTX_KICK_NONE);
     dev::write64(page.pa().add(CTRL_RX_DOOR), RX_DOOR_ARMED | 10);
     dev::write64(head.pa(), 10);
     assert!(
-        !wake_due(c, 0),
+        !rx_due(c),
         "a head that did not pass the threshold is no traffic"
     );
     dev::write64(head.pa(), 11);
-    assert!(wake_due(c, 0));
+    assert!(rx_due(c));
     // Ongewapend: geen peek.
     dev::write64(page.pa().add(CTRL_RX_DOOR), 10);
     assert!(!rx_due(c));
-    // Een wachter zonder P: alleen zijn wektijd.
-    dev::write64(page.pa().add(CTRL_RX_DOOR), RX_DOOR_ARMED | 10);
-    ctx_write(c, CTX_WAKE, CTX_WAKE_NO_PEEK | 500);
-    assert!(!wake_due(c, 0));
-    assert!(wake_due(c, 500));
     // Geen control-page: nooit RX.
+    dev::write64(page.pa().add(CTRL_RX_DOOR), RX_DOOR_ARMED | 10);
     ctx_write(c, CTX_CTRL_PA, 0);
     assert!(!rx_due(c));
 }
@@ -404,7 +365,7 @@ fn apple_kick_targets_core_and_cluster() {
 
 #[test]
 fn revoke_clears_the_tables_of_the_slot_only() {
-    let (_buf, p) = plan();
+    let (_buf, p) = plan(3);
     let block = p.cage_table_pa(slot(2)).unwrap();
     dev::write64(block, 0x1234_0003);
     dev::write64(block.add(CTX_OFF), CtxState::Saved.raw());
@@ -466,7 +427,7 @@ fn yield_at(ctx: Pa, wake: u64) {
 // boot-pending, en daarna wisselen ze elkaar af op hun yields.
 #[test]
 fn two_residents_take_turns_on_one_app_core() {
-    let (_buf, p) = plan();
+    let (_buf, p) = plan(3);
     init_region(&p, Pa(0x4000_0000), Some(&[0; 4])).unwrap();
     let (a, b) = (p.ctx_pa(slot(1)).unwrap(), p.ctx_pa(slot(2)).unwrap());
     let mb = p.park_mbox_pa(core(1)).unwrap();
@@ -537,7 +498,7 @@ fn two_residents_take_turns_on_one_app_core() {
 // las, ziet bij de hercontrole het gat en start hem niet.
 #[test]
 fn a_forgotten_slot_is_never_booted_by_its_old_core() {
-    let (_buf, p) = plan();
+    let (_buf, p) = plan(3);
     init_region(&p, Pa(0x4000_0000), Some(&[0; 4])).unwrap();
     let (a, b) = (p.ctx_pa(slot(1)).unwrap(), p.ctx_pa(slot(2)).unwrap());
     dispatch(&p, core(1), a, Pa(0x4000_A100), 0x5100_0000).unwrap();
@@ -567,7 +528,7 @@ fn a_forgotten_slot_is_never_booted_by_its_old_core() {
 // RX-peek, en de keten loopt rond.
 #[test]
 fn secondary_contexts_chain_back_to_the_primary() {
-    let (_buf, p) = plan();
+    let (_buf, p) = plan(3);
     init_region(&p, Pa(0x4000_0000), Some(&[0; 4])).unwrap();
     let prim = p.ctx_pa(slot(1)).unwrap();
     let ctrl = Pa(0x5100_0000);

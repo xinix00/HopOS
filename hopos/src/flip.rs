@@ -125,9 +125,6 @@ const ACTOR_WAIT: Duration = Duration::from_secs(2);
 /// kern die hangt, korter verliest een trage DHCP.
 pub(crate) const GRACE: Duration = Duration::from_secs(120);
 
-/// PSCI SYSTEM_RESET (SMC32): de koude weg terug.
-const PSCI_SYSTEM_RESET: u32 = 0x8400_0009;
-
 /// De coöperatieve kans van een bewoner die de koude flip stopt: Hop
 /// stopte zijn eigen taken al; wat nu nog leeft, krijgt een seconde en
 /// dan de kill van de lifecycle.
@@ -140,7 +137,7 @@ const CORES_OFF_WAIT: Duration = Duration::from_secs(1);
 
 /// Keert PSCI CPU_OFF op dit board terug, dat wil zeggen: start CPU_ON een
 /// uitgezette core weer? Op de Pi 5-stockfirmware niet: daar was CPU_OFF
-/// een deur zonder terugweg (gemeten 10-07, `cpu::psci::cpu_off`). Daar
+/// een deur zonder terugweg (gemeten 10-07). Daar
 /// weigert de koude flip dus zodra een app-core ooit draaide; een core die
 /// nooit startte, is al uit en telt niet.
 const CPU_OFF_RETURNS: bool = !cfg!(feature = "board-rpi5");
@@ -551,7 +548,7 @@ fn report_black_box(mem: &mut DevMem, p: &FlipPlan) {
 /// De koude weg terug: PSCI SYSTEM_RESET. Keert niet terug; lukt de reset
 /// niet, dan parkeert de core (de watchdog is de tweede lijn).
 fn reset() -> ! {
-    let _ = cpu::psci::smc(PSCI_SYSTEM_RESET, 0, 0, 0);
+    let _ = psci::smc(psci::SYSTEM_RESET, 0, 0, 0);
     cpu::boot::park()
 }
 

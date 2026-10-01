@@ -285,32 +285,31 @@ fn table_for(out: &mut Tables, base: u64, gi: u64) -> Result<usize, Error> {
     Ok(page)
 }
 
-/// Waar `link` volgens de tabellen naartoe gaat, met de bladvlaggen: een
-/// walk in software, voor de tests en het post-mortem.
-#[must_use]
-pub fn walk(base: u64, t: &Tables, link: u64) -> Option<(u64, u64)> {
-    let root = *t.pages.first()?.get(((link >> 30) & 511) as usize)?;
-    if root & V == 0 || root & (R | W | X) != 0 {
-        return None;
-    }
-    let page = (((root >> 10) << 12) - base) / PAGE;
-    let leaf = *t
-        .pages
-        .get(page as usize)?
-        .get(((link >> 21) & 511) as usize)?;
-    if leaf & V == 0 {
-        return None;
-    }
-    let phys = ((leaf >> 10) & ((1 << 44) - 1)) << 12;
-    Some((
-        phys + (link & (BLOCK - 1)),
-        leaf & 0x3ff | leaf & (THEAD_BUF | THEAD_CACHE),
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Waar `link` volgens de tabellen naartoe gaat, met de bladvlaggen: een
+    /// walk in software.
+    fn walk(base: u64, t: &Tables, link: u64) -> Option<(u64, u64)> {
+        let root = *t.pages.first()?.get(((link >> 30) & 511) as usize)?;
+        if root & V == 0 || root & (R | W | X) != 0 {
+            return None;
+        }
+        let page = (((root >> 10) << 12) - base) / PAGE;
+        let leaf = *t
+            .pages
+            .get(page as usize)?
+            .get(((link >> 21) & 511) as usize)?;
+        if leaf & V == 0 {
+            return None;
+        }
+        let phys = ((leaf >> 10) & ((1 << 44) - 1)) << 12;
+        Some((
+            phys + (link & (BLOCK - 1)),
+            leaf & 0x3ff | leaf & (THEAD_BUF | THEAD_CACHE),
+        ))
+    }
 
     fn slot(link: u64, phys: u64, size: u64) -> [MapWindow; 2] {
         let tail = 2 << 20;

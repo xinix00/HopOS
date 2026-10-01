@@ -1,14 +1,6 @@
-//! De node-cores: meer cores voor de kern zelf, en de park-mailboxen
-//! waarmee de kern een core start of herstart.
-//!
-//! In Go gaf `ConfigureNode` de HOP-runtime meer cores via `goos.Task` en
-//! `GOMAXPROCS`: de Go-scheduler vroeg lui een M, en de kern bracht dan de
-//! volgende core op via PSCI CPU_ON naar de gedeelde EL2-trampoline. In
-//! Rust is er geen scheduler die om threads vraagt: elke HOP-core draait een
-//! eigen executor met eigen taken (handboek §4, PORT §5 `GOMAXPROCS`), en
-//! [`configure_node`] brengt ze bij boot in één keer op. Tussen cores gaan
-//! berichten door een ring met een kick; een `Local` van core 0 raakt een
-//! andere core nooit aan.
+//! De opgang van een core op het EL2-regime van de kern: de verhuizing
+//! van de kern naar de OS-core bij boot ([`start_one`]), en de CPU_ON van
+//! het board ([`cpu_on`]).
 //!
 //! De opgang van één core:
 //!
@@ -23,38 +15,25 @@
 //!    QEMU (geen cachemodel) viel dat nooit op; op de M4 las de tweede core
 //!    de vorige inhoud: rommel als sp en ttbr0 (02-09).
 //! 3. CPU_ON naar `hopos_smp_entry` met de handoff in x0. De entry zet
-//!    het regime, de MMU aan en de stack, en springt naar Rust; Rust telt de
-//!    core ([`node_started`]) en roept de main van het board, die de
-//!    executor van die core draait.
+//!    het regime, de MMU aan en de stack, en springt naar de main van het
+//!    board.
 //!
 //! CPU_ON is PSCI, behalve op een board dat een eigen haak zet
 //! ([`set_cpu_on`]): Apple silicium heeft geen PSCI (een SMC zonder EL3) en
 //! start een core via m1n1's spin-table of PMGR plus een brievenbus
 //! (`board_apple::cores`). Alles in de kern dat een core koud start, gaat
 //! door [`cpu_on`].
-//!
-//! De park-mailboxen ([`dispatch`], [`park_state`]) zijn het
-//! ARM-mechanisme voor de levenscyclus van een app-core: HopOS bezit zijn
-//! cores, dus een gestopte core gaat niet terug naar de firmware (PSCI
-//! CPU_OFF is op de Pi 5-stockfirmware een eenrichtingsdeur, gemeten 10-07)
-//! maar parkeert op EL2 in een WFE-lus op zijn mailbox. PSCI CPU_ON is
-//! alleen de éérste opgang per core; daarna is dispatch {ctx, doel-PC} in
-//! de mailbox plus een SEV.
 
 extern crate alloc;
 
 use crate::psci;
-use abi::layout::{PARK_COLD, PARK_DISPATCHED, PARK_PARKED, SCHED_MBOX_CTX, SCHED_MBOX_PC};
 use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::{
-    AtomicBool, AtomicPtr, AtomicUsize,
-    Ordering::{AcqRel, Acquire, Release},
+    AtomicPtr,
+    Ordering::{Acquire, Release},
 };
 use dev::Pa;
-
-/// Hoeveel cores de kern hoogstens krijgt, core 0 meegeteld.
-pub const MAX_NODE_CORES: usize = 8;
 
 /// De stack van een node-core: 64 KB, gelijk aan de boot-stack van core 0.
 pub const NODE_STACK: usize = 64 << 10;
@@ -64,11 +43,6 @@ pub const NODE_STACK: usize = 64 << 10;
 /// `cores - 1`).
 pub type CoreMain = fn(core: usize) -> !;
 
-/// De vertaling core-index naar MPIDR-target; die is per board (de
-/// nummering verschilt per cluster, zie [`crate::psci`]). `None` = deze
-/// core bestaat niet.
-pub type Target = fn(core: usize) -> Option<u64>;
-
 /// De CPU_ON van een board zonder PSCI: start de core met MPIDR `target`
 /// op `entry` (fysiek, EL2, MMU uit) met `ctx` in x0. De fout in
 /// PSCI-vorm, zodat de kern één soort weigering telt.
@@ -76,13 +50,6 @@ pub type CpuOn = fn(target: u64, entry: u64, ctx: u64) -> core::result::Result<(
 
 /// De haak van het board als rauwe pointer; null = PSCI.
 static CPU_ON_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
-
-/// Hoeveel node-cores hun Rust-entry bereikten.
-static STARTED: AtomicUsize = AtomicUsize::new(0);
-/// Hoeveel node-cores PSCI CPU_ON kregen.
-static DISPATCHED: AtomicUsize = AtomicUsize::new(0);
-/// [`configure_node`] is geweest: één keer per boot.
-static CONFIGURED: AtomicBool = AtomicBool::new(false);
 
 /// Wat een node-core bij zijn entry leest, met de MMU uit.
 ///
@@ -163,23 +130,9 @@ impl Handoff {
     }
 }
 
-/// Waarom een core niet opkwam of niet gedispatcht werd.
+/// Waarom een core niet opkwam.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Error {
-    /// Meer cores gevraagd dan [`MAX_NODE_CORES`].
-    TooMany {
-        /// Gevraagd.
-        cores: usize,
-        /// Het maximum.
-        max: usize,
-    },
-    /// [`configure_node`] is al geroepen.
-    AlreadyConfigured,
-    /// Het board kent deze core niet.
-    NoSuchCore {
-        /// De core-index.
-        core: usize,
-    },
     /// Geen heap voor de stack of de handoff.
     OutOfMemory {
         /// De core-index.
@@ -192,34 +145,15 @@ pub enum Error {
         /// De reden.
         err: psci::Error,
     },
-    /// De ctx van een dispatch is geen adres (0, 1 en 2 zijn toestanden).
-    BadCtx {
-        /// De ctx.
-        ctx: u64,
-    },
-    /// De core draait nog: de mailbox staat niet op cold of parked.
-    Busy {
-        /// Woord 0 van de mailbox.
-        word: u64,
-    },
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            Self::TooMany { cores, max } => {
-                write!(f, "smp: {cores} node cores asked, at most {max}")
-            }
-            Self::AlreadyConfigured => f.write_str("smp: node cores already configured"),
-            Self::NoSuchCore { core } => write!(f, "smp: core {core}: no such core on this board"),
             Self::OutOfMemory { core } => {
                 write!(f, "smp: core {core}: no heap for its stack or handoff")
             }
             Self::Psci { target, err } => write!(f, "smp: CPU_ON {target:#x}: {err}"),
-            Self::BadCtx { ctx } => {
-                write!(f, "smp: dispatch ctx {ctx:#x} is a state, not an address")
-            }
-            Self::Busy { word } => write!(f, "smp: core not parked (mailbox word0 {word:#x})"),
         }
     }
 }
@@ -229,7 +163,7 @@ pub type Result<T = (), E = Error> = core::result::Result<T, E>;
 
 /// Zet de CPU_ON van het board, in plaats van PSCI. Eén keer bij boot, in
 /// `discover`, vóór de eerste core koud start (de verhuizing naar de
-/// OS-core, een kooi). Zelfde vorm als `vectors::set_hvc_handler`.
+/// OS-core, een kooi).
 pub fn set_cpu_on(f: CpuOn) {
     CPU_ON_HOOK.store(f as *mut (), Release);
 }
@@ -253,46 +187,10 @@ pub fn cpu_on(target: u64, entry: u64, ctx: u64) -> core::result::Result<(), psc
     }
 }
 
-/// Geeft de kern `cores` cores (core 0 telt mee): cores 1 tot `cores - 1`
-/// komen op via PSCI CPU_ON en draaien elk `main`. Geeft het aantal
-/// gedispatchte cores.
-///
-/// No-op bij `cores <= 1`: dan blijft de node single-core, zoals altijd.
-/// Aanroepen op core 0, ná de vectoren en de heap en vóór de eerste
-/// `spawn`. Eén keer per boot.
-pub fn configure_node(cores: usize, target: Target, main: CoreMain) -> Result<usize> {
-    if cores <= 1 {
-        return Ok(0);
-    }
-    if cores > MAX_NODE_CORES {
-        return Err(Error::TooMany {
-            cores,
-            max: MAX_NODE_CORES,
-        });
-    }
-    if CONFIGURED.swap(true, AcqRel) {
-        return Err(Error::AlreadyConfigured);
-    }
-    let regime = arch::regime();
-    let entry = arch::entry_pa();
-    for core in 1..cores {
-        let mpidr = target(core).ok_or(Error::NoSuchCore { core })?;
-        let sp = new_stack().ok_or(Error::OutOfMemory { core })?;
-        let h =
-            new_handoff(Handoff::new(core, sp, main, regime)).ok_or(Error::OutOfMemory { core })?;
-        let pa = Pa(core::ptr::from_ref(h) as usize as u64);
-        dev::push(pa, core::mem::size_of::<Handoff>());
-        cpu_on(mpidr, entry, pa.0).map_err(|err| Error::Psci { target: mpidr, err })?;
-        DISPATCHED.fetch_add(1, Release);
-    }
-    Ok(DISPATCHED.load(Acquire))
-}
-
 /// Start precies één core op het EL2-regime van deze core, met een verse
 /// stack en `main`: de verhuizing van de kern naar de OS-core bij boot
-/// (PORT.md beslissing 2, `hopos.oscore`), dezelfde opgang als
-/// [`configure_node`] maar los van de node-telling. De aanroeper geeft
-/// daarna zijn eigen core op (`cpu::el2::hold`).
+/// (PORT.md beslissing 2, `hopos.oscore`). De aanroeper geeft daarna zijn
+/// eigen core op (`cpu::el2::hold`).
 pub fn start_one(core: usize, target: u64, main: CoreMain) -> Result {
     let regime = arch::regime();
     let entry = arch::entry_pa();
@@ -301,33 +199,6 @@ pub fn start_one(core: usize, target: u64, main: CoreMain) -> Result {
     let pa = Pa(core::ptr::from_ref(h) as usize as u64);
     dev::push(pa, core::mem::size_of::<Handoff>());
     cpu_on(target, entry, pa.0).map_err(|err| Error::Psci { target, err })
-}
-
-/// Hoeveel node-cores (naast core 0) hun Rust-entry bereikten: het bewijs
-/// dat de extra cores écht draaien, niet alleen gevraagd zijn.
-#[must_use]
-pub fn node_started() -> usize {
-    STARTED.load(Acquire)
-}
-
-/// Hoeveel node-cores PSCI CPU_ON kregen.
-#[must_use]
-pub fn node_dispatched() -> usize {
-    DISPATCHED.load(Acquire)
-}
-
-/// De core-index uit een MPIDR-woord: aff0 (de core in zijn cluster) plus
-/// twee bits van aff1 (het cluster), zodat cores over clusters heen elk
-/// een eigen index houden (idle_arm64.go `coreIndex`). Altijd onder 64.
-#[must_use]
-pub const fn core_index_of(mpidr: u64) -> usize {
-    ((mpidr & 0xF) | (((mpidr >> 8) & 0x3) << 4)) as usize
-}
-
-/// De index van de core waar dit draait.
-#[must_use]
-pub fn core_index() -> usize {
-    core_index_of(arch::mpidr())
 }
 
 /// Een stack van [`NODE_STACK`] bytes van de heap, voor altijd; de top,
@@ -355,94 +226,13 @@ fn new_handoff(h: Handoff) -> Option<&'static Handoff> {
     s.first()
 }
 
-// ---------------------------------------------------------------------------
-// De park-mailboxen.
-// ---------------------------------------------------------------------------
-
-/// De toestand van een park-mailbox (woord 0 van het sched-blok).
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum Park {
-    /// Nooit geparkeerd: de eerste opgang gaat via PSCI CPU_ON.
-    Cold,
-    /// Geparkeerd in de EL2-WFE-lus, wachtend op dispatch.
-    Parked,
-    /// De trampoline bevestigde de dispatch.
-    Dispatched,
-    /// Het startschot staat erin: de ctx die de kern zette.
-    Running(u64),
-}
-
-impl Park {
-    /// De toestand bij woord 0.
-    #[must_use]
-    pub const fn from_word(w: u64) -> Park {
-        match w {
-            PARK_COLD => Self::Cold,
-            PARK_PARKED => Self::Parked,
-            PARK_DISPATCHED => Self::Dispatched,
-            ctx => Self::Running(ctx),
-        }
-    }
-}
-
-/// Hoe een dispatch de core bereikte.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum Start {
-    /// Eerste opgang: PSCI CPU_ON.
-    Cold,
-    /// Een geparkeerde core, gewekt met een SEV.
-    Kicked,
-}
-
-/// De toestand van de core achter mailbox `mbox`.
-#[must_use]
-pub fn park_state(mbox: Pa) -> Park {
-    Park::from_word(dev::read64(mbox.add(SCHED_MBOX_CTX)))
-}
-
-/// Geeft het startschot: {ctx, doel-PC} in de mailbox, dan de eenmalige
-/// CPU_ON (cold) of een SEV die de parkeerlus de trampoline in laat
-/// springen. Woord 0 = ctx maakt de core meteen "running".
-///
-/// Weigert een core die niet cold of parked is: twee startschoten op één
-/// core is twee bewoners op één stack.
-pub fn dispatch(mbox: Pa, target: u64, entry: u64, ctx: u64) -> Result<Start> {
-    if ctx <= PARK_DISPATCHED {
-        return Err(Error::BadCtx { ctx });
-    }
-    let state = park_state(mbox);
-    let cold = match state {
-        Park::Cold => true,
-        Park::Parked => false,
-        Park::Dispatched | Park::Running(_) => {
-            return Err(Error::Busy {
-                word: dev::read64(mbox.add(SCHED_MBOX_CTX)),
-            });
-        }
-    };
-    // Eerst de PC, dan de ctx: de lus kijkt naar woord 0, en mag de PC dan
-    // al zien. `push` brengt beide naar DRAM (de parkeerlus draait met de
-    // MMU uit) en sluit af met een DSB, zodat ze er staan vóór de SEV of de
-    // SMC.
-    dev::write64(mbox.add(SCHED_MBOX_PC), entry);
-    dev::write64(mbox.add(SCHED_MBOX_CTX), ctx);
-    dev::push(mbox, 16);
-    if cold {
-        cpu_on(target, entry, ctx).map_err(|err| Error::Psci { target, err })?;
-        return Ok(Start::Cold);
-    }
-    dev::notify();
-    Ok(Start::Kicked)
-}
-
 #[cfg(all(target_os = "none", target_arch = "aarch64"))]
 mod arch {
-    //! De registers van het regime, MPIDR, en de entry van een node-core.
+    //! De registers van het regime en de entry van een node-core.
     use super::{
         Handoff, OFF_HCR, OFF_MAIR, OFF_SCTLR, OFF_SP, OFF_TCR, OFF_TTBR0, OFF_VBAR, Regime,
     };
     use core::arch::asm;
-    use core::sync::atomic::Ordering::Release;
 
     macro_rules! mrs {
         ($reg:literal) => {{
@@ -465,10 +255,6 @@ mod arch {
         }
     }
 
-    pub(super) fn mpidr() -> u64 {
-        mrs!("mpidr_el1")
-    }
-
     unsafe extern "C" {
         /// De entry hieronder; alleen zijn adres wordt gebruikt.
         fn hopos_smp_entry();
@@ -480,9 +266,8 @@ mod arch {
         hopos_smp_entry as *const () as usize as u64
     }
 
-    /// De Rust-kant van de entry: tellen, dan de main van het board.
+    /// De Rust-kant van de entry: de main van het board.
     extern "C" fn node_entry(h: &'static Handoff) -> ! {
-        super::STARTED.fetch_add(1, Release);
         (h.main)(h.core as usize)
     }
 
@@ -490,8 +275,7 @@ mod arch {
     // handoff. Alles wat Rust nog niet kan en niets meer:
     //
     // - Niet op EL2 (een firmware die ons ergens anders aflevert): parkeren.
-    //   Stil, want er is nog geen stack om te melden; core 0 ziet het aan
-    //   `node_started`.
+    //   Stil, want er is nog geen stack om te melden.
     // - De maskers dicht en SCTLR_EL2.M/C/I uit. Na PSCI staat dat al zo, en
     //   is dit niets. Maar m1n1 ROEPT een core uit zijn spin-table AAN als
     //   functie, met zijn eigen MMU en caches nog aan (Apple, 29-08): de
@@ -584,9 +368,6 @@ mod arch {
     pub(super) fn regime() -> Regime {
         Regime::default()
     }
-    pub(super) fn mpidr() -> u64 {
-        0
-    }
     pub(super) fn entry_pa() -> u64 {
         0
     }
@@ -595,6 +376,7 @@ mod arch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::sync::atomic::AtomicUsize;
 
     fn main_stub(_core: usize) -> ! {
         loop {
@@ -602,44 +384,15 @@ mod tests {
         }
     }
 
-    fn two_cores(core: usize) -> Option<u64> {
-        (core < 2).then_some(core as u64)
-    }
-
     #[test]
-    fn core_index_follows_idle_arm64() {
-        assert_eq!(core_index_of(0x8000_0000), 0);
-        assert_eq!(core_index_of(0x0000_0003), 3);
-        // Cluster 1, core 2: index 18.
-        assert_eq!(core_index_of(0x0000_0102), 18);
-        // Aff1 boven 3 en aff0 boven 15 vallen weg: altijd onder 64.
-        assert!(core_index_of(u64::MAX) < 64);
-        assert_eq!(core_index(), 0);
-    }
-
-    #[test]
-    fn configure_node_on_the_host() {
-        // Eén core is geen werk; te veel is een weigering.
-        assert_eq!(configure_node(1, two_cores, main_stub), Ok(0));
+    fn start_one_on_the_host() {
+        // De host heeft geen firmware: CPU_ON zegt NOT_SUPPORTED.
         assert_eq!(
-            configure_node(9, two_cores, main_stub),
-            Err(Error::TooMany { cores: 9, max: 8 })
-        );
-        // De host heeft geen firmware: CPU_ON zegt NOT_SUPPORTED, en er is
-        // niets gestart.
-        assert_eq!(
-            configure_node(2, two_cores, main_stub),
+            start_one(1, 1, main_stub),
             Err(Error::Psci {
                 target: 1,
                 err: psci::Error::NotSupported
             })
-        );
-        assert_eq!(node_dispatched(), 0);
-        assert_eq!(node_started(), 0);
-        // En één keer per boot.
-        assert_eq!(
-            configure_node(2, two_cores, main_stub),
-            Err(Error::AlreadyConfigured)
         );
     }
 
@@ -663,12 +416,6 @@ mod tests {
         assert_eq!(top % 16, 0);
     }
 
-    fn mailbox() -> (Vec<u64>, Pa) {
-        let mut v = vec![0u64; 32];
-        let pa = Pa(v.as_mut_ptr() as usize as u64);
-        (v, pa)
-    }
-
     /// Het doel dat de test-haak aanneemt; elk ander zegt NOT_SUPPORTED,
     /// zoals PSCI op de host (de andere tests draaien parallel en zien de
     /// haak ook).
@@ -687,51 +434,8 @@ mod tests {
     #[test]
     fn a_board_cpu_on_replaces_psci() {
         set_cpu_on(board_cpu_on);
-        let (_buf, mb) = mailbox();
-        assert_eq!(dispatch(mb, HOOKED, 0x8000, 0x4000_1000), Ok(Start::Cold));
+        assert_eq!(cpu_on(HOOKED, 0x8000, 0x4000_1000), Ok(()));
         assert_eq!(HOOK_CALLS.load(Acquire), 1);
         assert_eq!(cpu_on(7, 0x8000, 0), Err(psci::Error::NotSupported));
-    }
-
-    #[test]
-    fn park_words_decode() {
-        assert_eq!(Park::from_word(0), Park::Cold);
-        assert_eq!(Park::from_word(1), Park::Parked);
-        assert_eq!(Park::from_word(2), Park::Dispatched);
-        assert_eq!(Park::from_word(0x4000_1000), Park::Running(0x4000_1000));
-    }
-
-    #[test]
-    fn dispatch_kicks_a_parked_core() {
-        let (_buf, mb) = mailbox();
-        dev::write64(mb, PARK_PARKED);
-        assert_eq!(dispatch(mb, 5, 0x8000, 0x4000_1000), Ok(Start::Kicked));
-        assert_eq!(dev::read64(mb.add(SCHED_MBOX_PC)), 0x8000);
-        assert_eq!(park_state(mb), Park::Running(0x4000_1000));
-        // Nu draait hij: een tweede startschot is een weigering.
-        assert_eq!(
-            dispatch(mb, 5, 0x8000, 0x4000_2000),
-            Err(Error::Busy { word: 0x4000_1000 })
-        );
-        dev::write64(mb, PARK_DISPATCHED);
-        assert!(matches!(
-            dispatch(mb, 5, 0x8000, 0x4000_2000),
-            Err(Error::Busy { .. })
-        ));
-    }
-
-    #[test]
-    fn dispatch_of_a_cold_core_goes_through_psci() {
-        let (_buf, mb) = mailbox();
-        // Op de host weigert de "firmware"; de mailbox draagt het
-        // startschot al, precies zoals in Go (cageDispatch schrijft eerst).
-        assert_eq!(
-            dispatch(mb, 7, 0x8000, 0x4000_1000),
-            Err(Error::Psci {
-                target: 7,
-                err: psci::Error::NotSupported
-            })
-        );
-        assert_eq!(dispatch(mb, 7, 0x8000, 2), Err(Error::BadCtx { ctx: 2 }));
     }
 }

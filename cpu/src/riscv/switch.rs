@@ -341,11 +341,11 @@ __hopos_mentry:
     csrr t0, sstatus
     sd t0, {resume}+8(t1)
     csrr t0, satp
-    sd t0, {regime}+0(t1)
+    sd t0, {regime}+{rsatp}(t1)
     csrr t0, stvec
-    sd t0, {regime}+8(t1)
+    sd t0, {regime}+{rstvec}(t1)
     csrr t0, sscratch
-    sd t0, {regime}+16(t1)
+    sd t0, {regime}+{rsscratch}(t1)
     // Het regime van de kooi zelf verandert niet (de bewoner kan PMP niet
     // aanraken); de kern schreef het, en het staat al in het ctx-blok.
     sd a0, {wake}(t1)
@@ -425,7 +425,7 @@ __hopos_mentry:
     csrr t0, mscratch
     sd t0, {gprs}+8(t1)
     csrr t0, satp
-    sd t0, {regime}+0(t1)
+    sd t0, {regime}+{rsatp}(t1)
 
     // --- teardown: exit, fault, intrekking -----------------------------
     // De cache van de dode bewoner naar DRAM vóór de dood gemeld wordt: de
@@ -634,12 +634,12 @@ __hopos_mentry:
     mv t1, s6
     j 45b
 71:
-    ld t0, {regime}+0(s6)
+    ld t0, {regime}+{rsatp}(s6)
     csrw satp, t0
     sfence.vma
-    ld t0, {regime}+8(s6)
+    ld t0, {regime}+{rstvec}(s6)
     csrw stvec, t0
-    ld t0, {regime}+16(s6)
+    ld t0, {regime}+{rsscratch}(s6)
     csrw sscratch, t0
     ld t0, {bootpc}(s6)
     csrw mepc, t0
@@ -692,12 +692,12 @@ __hopos_mentry:
     csrw pmpaddr7, t0
     ld t0, {regime}+{cfg}(s6)
     csrw pmpcfg0, t0
-    ld t0, {regime}+0(s6)
+    ld t0, {regime}+{rsatp}(s6)
     csrw satp, t0
     sfence.vma
-    ld t0, {regime}+8(s6)
+    ld t0, {regime}+{rstvec}(s6)
     csrw stvec, t0
-    ld t0, {regime}+16(s6)
+    ld t0, {regime}+{rsscratch}(s6)
     csrw sscratch, t0
     ld t0, {resume}+0(s6)
     csrw mepc, t0
@@ -773,6 +773,9 @@ __hopos_mmode_end:
     gprs = const CTX_GPRS,
     resume = const CTX_RESUME,
     regime = const CTX_REGIME,
+    rsatp = const REGIME_SATP,
+    rstvec = const REGIME_STVEC,
+    rsscratch = const REGIME_SSCRATCH,
     pa0 = const REGIME_PMPADDR0,
     cfg = const REGIME_PMPCFG0,
     wake = const CTX_WAKE,

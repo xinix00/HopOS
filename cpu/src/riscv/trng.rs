@@ -9,12 +9,6 @@
 //! elke boot, één regel die een operator niet kan missen: geen geheimen van
 //! waarde op deze node.
 
-/// Is er een hardware-TRNG? Op RISC-V (vandaag): nee.
-#[must_use]
-pub const fn available() -> bool {
-    false
-}
-
 /// De bootregel die het zegt, met de marker uit de Go-kern.
 pub const WARNING: &str = "trng: WARNING no hardware TRNG on this board: crypto (TLS keys, nonces) runs on a jitter-seeded DRBG, not hardware entropy; avoid high-value secrets on this node HOPOS_RNG_INSECURE";
 
@@ -41,7 +35,6 @@ pub fn jitter(out: &mut [u8]) {
 mod tests {
     #[test]
     fn it_says_so() {
-        assert!(!super::available());
         assert!(super::WARNING.contains("HOPOS_RNG_INSECURE"));
         let mut b = [0u8; 4];
         super::jitter(&mut b);

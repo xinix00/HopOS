@@ -116,9 +116,8 @@ ok`). Op de M4 zelf heeft het nog niet gedraaid: dat is de checklist.
    `Back::Timer` (de CNTHP ging af) of `Back::Ipi` terug, een IRQ (de AIC)
    als `Back::Irq`. FMO, IMO en AMO staan in het HCR van elke bewoner.
 3. **Een CPU_ON van het board in `cpu::smp`.** `cpu::smp::set_cpu_on`
-   (gezet in `discover`) laat `start_one` (de verhuizing naar de OS-core),
-   `configure_node`, `smp::dispatch` en de koude start van een kooi
-   (`cage.rs`) via `board_apple::cores::cpu_on_mpidr` lopen: m1n1's
+   (gezet in `discover`) laat `start_one` (de verhuizing naar de OS-core)
+   en de koude start van een kooi (`cage.rs`) via `board_apple::cores::cpu_on_mpidr` lopen: m1n1's
    spin-table, of PMGR plus de brievenbus als wij het bootobject zijn. De
    ingangen die zo'n core krijgt (`hopos_smp_entry`, en de trampolines van
    de Apple-switcher) zetten eerst DAIF dicht en SCTLR_EL2.M/C/I uit, zonder

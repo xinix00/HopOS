@@ -19,8 +19,9 @@ use super::csr;
 use super::oscore::OsCore;
 use crate::el2::{TURN_CAP_NS, Turn};
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use dev::Pa;
 use executor::Sleeper;
+
+pub use crate::idle::{Stats, ns_to_ticks, ticks_to_ns};
 
 /// De vangrail van één slaap op de LicheeRV: 2 ms, het getal van de
 /// Go-kern (`SleepCapTicks`, 2 × 25.000 tikken op de SG2002). Geen
@@ -56,25 +57,6 @@ pub fn hz() -> u64 {
     HZ.load(Relaxed)
 }
 
-/// Tikken naar nanoseconden zonder overloop: seconden en rest apart.
-#[must_use]
-pub const fn ticks_to_ns(ticks: u64, hz: u64) -> u64 {
-    if hz == 0 {
-        return 0;
-    }
-    let frac = ((ticks % hz) as u128 * 1_000_000_000 / hz as u128) as u64;
-    (ticks / hz)
-        .saturating_mul(1_000_000_000)
-        .saturating_add(frac)
-}
-
-/// Nanoseconden naar tikken, dezelfde splitsing.
-#[must_use]
-pub const fn ns_to_ticks(ns: u64, hz: u64) -> u64 {
-    let frac = ((ns % 1_000_000_000) as u128 * hz as u128 / 1_000_000_000) as u64;
-    (ns / 1_000_000_000).saturating_mul(hz).saturating_add(frac)
-}
-
 /// De ruwe teller (TIME-CSR).
 #[must_use]
 pub fn counter() -> u64 {
@@ -85,17 +67,6 @@ pub fn counter() -> u64 {
 #[must_use]
 pub fn now() -> u64 {
     ticks_to_ns(csr::rdtime(), hz())
-}
-
-/// De meetlat van de slaap (handboek §4).
-#[derive(Default, Debug)]
-pub struct Stats {
-    /// Geslapen tijd in tikken.
-    pub idle_ticks: AtomicU64,
-    /// Slaaprondes.
-    pub wakes: AtomicU64,
-    /// Rondes waarin `ready()` al waar was met MIE dicht.
-    pub caught: AtomicU64,
 }
 
 /// De [`Sleeper`] van het hart van de kern: `wfi` op de eigen `mtimecmp`,
@@ -151,12 +122,6 @@ impl RvSleeper {
             self.hart
         );
         self.os = Some(os);
-    }
-
-    /// De `mtimecmp`-PA van dit hart, voor een sched-blok (0 = geen).
-    #[must_use]
-    pub fn timecmp_pa(&self) -> Pa {
-        self.clint.map_or(Pa(0), |c| c.mtimecmp(self.hart))
     }
 
     fn nap(&self, clint: Clint, now: u64, until: Option<u64>) -> u64 {
@@ -230,6 +195,7 @@ impl Sleeper for RvSleeper {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dev::Pa;
 
     #[test]
     fn conversions_at_the_board_rates() {

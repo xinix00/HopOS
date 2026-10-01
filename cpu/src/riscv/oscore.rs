@@ -27,7 +27,7 @@
 //! zijn masker opent, precies zoals uit een `wfi`.
 //!
 //! De ctx-blokken zijn die van de switcher, byte voor byte: alles wat de kern
-//! van een bewoner leest (`ctx_state`, `wake_due`, het fault-rapport) klopt
+//! van een bewoner leest (`ctx_state`, `rx_due`, het fault-rapport) klopt
 //! hier ook.
 //!
 //! FP: de kern gebruikt geen f-registers (gemeten 29-09: nul
@@ -354,7 +354,9 @@ mod arch {
     use super::{
         CAUSE_CAGE_VERIFY, CTX_BOOT_PC, CTX_GPRS, CTX_REGIME, CTX_RESUME, SAVE_MTVAL, SAVE_WORDS,
     };
-    use crate::riscv::switch::{REGIME_PMPADDR0, REGIME_PMPCFG0};
+    use crate::riscv::switch::{
+        REGIME_PMPADDR0, REGIME_PMPCFG0, REGIME_SATP, REGIME_SSCRATCH, REGIME_STVEC,
+    };
     use abi::layout::CTX_BOOT_ARG;
 
     /// Offsets in `SAVE` (bytes): ra, sp, gp, tp en s0..s11 op 0..128, dan
@@ -446,12 +448,12 @@ __hopos_os_enter:
     csrw mscratch, a2
     la t0, __hopos_os_trap
     csrw mtvec, t0
-    ld t0, {regime}+0(a0)
+    ld t0, {regime}+{rsatp}(a0)
     csrw satp, t0
     sfence.vma
-    ld t0, {regime}+8(a0)
+    ld t0, {regime}+{rstvec}(a0)
     csrw stvec, t0
-    ld t0, {regime}+16(a0)
+    ld t0, {regime}+{rsscratch}(a0)
     csrw sscratch, t0
     beqz a1, 2f
 
@@ -595,11 +597,11 @@ __hopos_os_trap:
     csrr t1, sstatus
     sd t1, {resume}+8(t0)
     csrr t1, satp
-    sd t1, {regime}+0(t0)
+    sd t1, {regime}+{rsatp}(t0)
     csrr t1, stvec
-    sd t1, {regime}+8(t0)
+    sd t1, {regime}+{rstvec}(t0)
     csrr t1, sscratch
-    sd t1, {regime}+16(t0)
+    sd t1, {regime}+{rsscratch}(t0)
     csrr t1, mtval
     sd t1, {smtval}(sp)
     csrr a0, mcause
@@ -637,6 +639,9 @@ __hopos_os_trap:
         smtval = const SAVE_MTVAL,
         sscratch = const SAVE_SCRATCH,
         regime = const CTX_REGIME,
+        rsatp = const REGIME_SATP,
+        rstvec = const REGIME_STVEC,
+        rsscratch = const REGIME_SSCRATCH,
         pa0 = const REGIME_PMPADDR0,
         cfg = const REGIME_PMPCFG0,
         bootpc = const CTX_BOOT_PC,

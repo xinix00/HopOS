@@ -2,9 +2,9 @@
 //! ([`now`]) die de executor als [`executor::Clock`] krijgt.
 //!
 //! Dit bezit: de keuze van de event-stream (EVNTI per CNTFRQ), de manieren
-//! van slapen (WFE met event-stream, WFI op de fysieke timer, de yield naar
-//! de EL2-switcher op een gedeelde core, en op de OS-core de rotatie over
-//! zijn bewoners) en de tellers die zeggen of een core slaapt of spint.
+//! van slapen (WFE met event-stream, WFI op de fysieke timer, en op de
+//! OS-core de rotatie over zijn bewoners) en de tellers die zeggen of een
+//! core slaapt of spint.
 //! Niet van hier: wat er te doen is. De deuren
 //! (IRQ-vlag, ringkoppen) zitten in de executor en komen binnen als het
 //! `ready`-predicaat; de governor uit de Go-kern, met zijn `nested`-vlaggen,
@@ -16,7 +16,6 @@
 
 use crate::el2::{OsCore, TURN_CAP_NS, Turn};
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use dev::Pa;
 use executor::Sleeper;
 
 /// De event-stream mag hooguit zo lang zijn: 1,5 ms. De kleinste periode
@@ -171,18 +170,13 @@ pub fn freq() -> u64 {
 pub enum Mode {
     /// WFE tot werk of de deadline ([`wfe_until`]), met de event-stream
     /// (~1 ms) als klok: de default, want hij wekt op elk silicium dat we
-    /// kennen (behalve de M4, zie `Yield`). Zonder deadline houdt
+    /// kennen (behalve de M4). Zonder deadline houdt
     /// [`WFI_CAP_NS`] de vangrail.
     Wfe,
     /// WFI met de fysieke timer op de deadline. Alleen kiezen waar het board
     /// bewezen heeft dat de timer-PPI de WFI wekt: een slaap die niet wekt
     /// is een hang, en die hoort niet uit een redenering te komen.
     Wfi,
-    /// HVC #1 naar de EL2-switcher, met de wektijd in x1. Voor een gedeelde
-    /// core, en voor silicium waar een core op EL1 niet kan slapen (de M4,
-    /// gemeten 02-09: WFE keert direct terug en geen FIQ wekt een WFI); de
-    /// slaap gebeurt dan op EL2, waar hij wél werkt.
-    Yield,
     /// De OS-core (PORT.md beslissing 2): idle is een beurt voor de volgende
     /// bewoner die aan de beurt is ([`OsCore::run`]), op EL1 onder stage-2,
     /// tot een interrupt, de kick van een app-core, de deadline of zijn
@@ -216,14 +210,10 @@ pub struct Stats {
 ///
 /// Eén per core, eigendom van de executor-lus van die core (`run` neemt
 /// hem als `&mut`). De modus kiest het board, na zijn bewijs op dít
-/// silicium; `shared` en de publicatie-adressen zijn de control-page-woorden
-/// van een app (HOP's eigen core laat ze leeg).
+/// silicium.
 pub struct ArmSleeper {
     mode: Mode,
     hz: u64,
-    shared: Option<Pa>,
-    publish_idle: Option<Pa>,
-    publish_wakes: Option<Pa>,
     os: Option<OsCore>,
     /// De meetlat.
     pub stats: Stats,
@@ -250,9 +240,6 @@ impl ArmSleeper {
         Self {
             mode,
             hz,
-            shared: None,
-            publish_idle: None,
-            publish_wakes: None,
             os: None,
             stats: Stats::default(),
         }
@@ -265,63 +252,28 @@ impl ArmSleeper {
         self.os = Some(os);
     }
 
-    /// Kijk elke ronde naar dit woord (CtrlShared): niet-nul betekent dat
-    /// HOP deze core met een buur liet delen, en dan is idle een yield.
-    pub fn watch_shared(&mut self, word: Pa) {
-        self.shared = Some(word);
-    }
-
-    /// Publiceer de idle-tijd en de wek-teller ook op deze woorden
-    /// (CtrlIdle, CtrlWakes op de eigen control-page). Eén 64-bit store per
-    /// ronde, in dezelfde ronde; HOP leest ze, of niet.
-    pub fn publish(&mut self, idle: Pa, wakes: Pa) {
-        self.publish_idle = Some(idle);
-        self.publish_wakes = Some(wakes);
-    }
-
-    /// Welke modus deze ronde geldt: een gedeelde core yieldt altijd, de
-    /// OS-core geeft zijn idle aan zijn bewoners.
+    /// Welke modus deze ronde geldt: de OS-core geeft zijn idle aan zijn
+    /// bewoners.
     fn round_mode(&self) -> Mode {
-        match self.shared {
-            Some(w) if dev::read64(w) != 0 => Mode::Yield,
-            _ if self.os.is_some() => Mode::Resident,
-            _ => self.mode,
+        if self.os.is_some() {
+            Mode::Resident
+        } else {
+            self.mode
         }
     }
 
     /// De slaap zelf als niemand de core krijgt: de basismodus. `Resident`
-    /// als basis is WFE; `Yield` ook, want de kern staat zelf op EL2 en een
-    /// HVC daar is een trap naar zichzelf.
+    /// als basis is WFE.
     fn base_mode(&self) -> Mode {
         match self.mode {
             Mode::Wfi => Mode::Wfi,
-            Mode::Wfe | Mode::Resident | Mode::Yield => Mode::Wfe,
+            Mode::Wfe | Mode::Resident => Mode::Wfe,
         }
-    }
-
-    /// De yield-wektijd: 0 = nu, anders de counterstand van de deadline,
-    /// geklemd op een uur ("nooit" genoeg; een kick komt eerder).
-    fn yield_deadline(&self, now_ns: u64, until: Option<u64>) -> u64 {
-        const HOUR_NS: u64 = 3_600_000_000_000;
-        let Some(u) = until else {
-            return arch::counter().saturating_add(ns_to_ticks(HOUR_NS, self.hz));
-        };
-        let d = u.saturating_sub(now_ns).min(HOUR_NS);
-        if d == 0 {
-            return 0;
-        }
-        arch::counter().saturating_add(ns_to_ticks(d, self.hz))
     }
 
     fn account(&self, slept: u64) {
-        let idle = self.stats.idle_ticks.fetch_add(slept, Relaxed) + slept;
-        let wakes = self.stats.wakes.fetch_add(1, Relaxed) + 1;
-        if let Some(pa) = self.publish_idle {
-            dev::write64(pa, idle);
-        }
-        if let Some(pa) = self.publish_wakes {
-            dev::write64(pa, wakes);
-        }
+        self.stats.idle_ticks.fetch_add(slept, Relaxed);
+        self.stats.wakes.fetch_add(1, Relaxed);
     }
 }
 
@@ -394,10 +346,6 @@ impl ArmSleeper {
                 let slept = arch::wfi_until(deadline_ticks(now, u, self.hz));
                 arch::restore(daif);
                 slept
-            }
-            Mode::Yield => {
-                arch::restore(daif);
-                arch::hvc_yield(self.yield_deadline(now, until))
             }
         }
     }
@@ -579,35 +527,6 @@ mod arch {
         }
         b.wrapping_sub(a)
     }
-
-    /// HVC #1 naar de EL2-switcher, met de wektijd in x1. Geeft de
-    /// idle-wall-tijd (co-resident-runtijd plus slaap) in ticks.
-    ///
-    /// De switcher bewaart x0..x30 en het EL1-regime, maar GEEN FP: EL2
-    /// draait met de MMU uit, en een SIMD-store naar Device faultt op ijzer
-    /// (QEMU verhult dat). Op dit target (softfloat) bestaat er geen
-    /// FP-staat om te bewaren; een build met FP moet d8..d15 en FPCR hier
-    /// zelf om de HVC heen zetten, zoals idle_arm64.s dat deed.
-    pub(super) fn hvc_yield(deadline: u64) -> u64 {
-        let (a, b): (u64, u64);
-        // SAFETY: de switcher hervat ons na de HVC met al onze
-        // GP-registers en het EL1-regime intact (switch.rs `yield`); x0 en
-        // x1 geven we als klad op.
-        unsafe {
-            asm!(
-                "mrs x0, cntpct_el0",
-                "hvc #1",
-                "mrs {b}, cntpct_el0",
-                "mov {a}, x0",
-                a = out(reg) a,
-                b = out(reg) b,
-                inout("x1") deadline => _,
-                out("x0") _,
-                options(nostack),
-            );
-        }
-        b.wrapping_sub(a)
-    }
 }
 
 #[cfg(not(all(target_os = "none", target_arch = "aarch64")))]
@@ -638,9 +557,6 @@ mod arch {
         0
     }
     pub(super) fn wfi_until(_deadline: u64) -> u64 {
-        0
-    }
-    pub(super) fn hvc_yield(_deadline: u64) -> u64 {
         0
     }
 }
@@ -749,16 +665,5 @@ mod tests {
         assert_eq!(s.stats.wakes.load(Relaxed), 0);
         s.sleep(0, Some(10), &|| false);
         assert_eq!(s.stats.wakes.load(Relaxed), 1);
-    }
-
-    #[test]
-    fn shared_word_turns_idle_into_yield() {
-        let mut word = [0u64; 1];
-        let pa = Pa(word.as_mut_ptr() as usize as u64);
-        let mut s = ArmSleeper::new(Mode::Wfe);
-        s.watch_shared(pa);
-        assert_eq!(s.round_mode(), Mode::Wfe);
-        dev::write64(pa, 1);
-        assert_eq!(s.round_mode(), Mode::Yield);
     }
 }

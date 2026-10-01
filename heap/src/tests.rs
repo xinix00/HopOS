@@ -168,28 +168,6 @@ fn holes_are_reused_before_the_tail() {
 }
 
 #[test]
-fn the_ceiling_holds_and_gives_way_on_free() {
-    let a = Arena::new(64 << 10);
-    a.heap.set_ceiling(4096);
-    let mut ps = Vec::new();
-    while let Some(p) = a.alloc(200, 8) {
-        ps.push(p);
-    }
-    let s = a.heap.stats();
-    assert!(s.used <= 4096 && s.used + 216 > 4096, "{s:?}");
-    assert_eq!(s.ceiling, 4096);
-    assert_eq!(s.failed, 1);
-    assert_eq!(s.peak, s.used);
-    a.free(ps.pop().unwrap());
-    assert!(a.alloc(200, 8).is_some());
-    // Groter dan het plafond maar kleiner dan het gebied: geweigerd.
-    a.heap.set_ceiling(usize::MAX);
-    assert_eq!(a.heap.stats().ceiling, 64 << 10);
-    assert_eq!(a.alloc(1 << 20, 8), None);
-    a.walk();
-}
-
-#[test]
 fn a_double_or_foreign_free_is_ignored_and_counted() {
     let a = Arena::new(16 << 10);
     let p = a.alloc(64, 8).unwrap();

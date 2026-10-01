@@ -28,10 +28,9 @@
 use super::layout::{
     CAGE_STRIDE, CTX_BOOT_ARG, CTX_BOOT_PC, CTX_CTRL_PA, CTX_KICK_NONE, CTX_KICK_PENDING,
     CTX_KICK_TARGET, CTX_LEN, CTX_NEXT_PA, CTX_OFF, CTX_RING_HEAD_PA, CTX_STATE, CTX_UNIT_SLOT,
-    CTX_WAKE, CTX_WAKE_NO_PEEK, Core, CtxState, PARK_CODE_OFF, PARK_COLD, PARK_MBOX_LEN,
-    PARK_MBOX_OFF, PARK_PARKED, Plan, SCHED_COUNT, SCHED_CURRENT, SCHED_CURSOR, SCHED_LIST,
-    SCHED_MBOX_CTX, SCHED_MBOX_PC, SCHED_ROTOR, SCHED_S2_PA, SLOT_CAP, SMP_CTX_OFF,
-    SWITCH_CODE_MAX, Slot,
+    CTX_WAKE, Core, CtxState, PARK_CODE_OFF, PARK_COLD, PARK_MBOX_LEN, PARK_MBOX_OFF, PARK_PARKED,
+    Plan, SCHED_COUNT, SCHED_CURRENT, SCHED_CURSOR, SCHED_LIST, SCHED_MBOX_CTX, SCHED_MBOX_PC,
+    SCHED_ROTOR, SCHED_S2_PA, SLOT_CAP, SMP_CTX_OFF, SWITCH_CODE_MAX, Slot,
 };
 use super::{Error, stage2, switch};
 use abi::checksum::Fnv64;
@@ -47,50 +46,62 @@ use dev::Pa;
 // ---------------------------------------------------------------------------
 
 /// HVC #0: de coöperatieve exit (de app zette zijn status al).
-pub const HVC_EXIT: u64 = 0;
-/// HVC #1: de idle-yield, met de wektijd in x1 (`idle.rs` `hvc_yield`).
+pub(crate) const HVC_EXIT: u64 = 0;
+/// HVC #1: de idle-yield, met de wektijd in x1 (applib `arch::hvc_yield`).
 /// Elke immediate die hieronder niet staat, is ook een yield.
-pub const HVC_YIELD: u64 = 1;
+pub(crate) const HVC_YIELD: u64 = 1;
 /// HVC #4: wek een sibling-core van dezelfde app (x0 = zijn affiniteit).
-pub const HVC_WAKE: u64 = 4;
+#[cfg_attr(
+    not(all(target_os = "none", target_arch = "aarch64")),
+    allow(dead_code) // alleen de switcher-asm leest dit
+)]
+pub(crate) const HVC_WAKE: u64 = 4;
 /// HVC #5: de doorbell-interrupt is afgehandeld (alleen Apple).
-pub const HVC_DOOR_ACK: u64 = 5;
+#[cfg_attr(
+    not(all(target_os = "none", target_arch = "aarch64")),
+    allow(dead_code) // alleen de switcher-asm leest dit
+)]
+pub(crate) const HVC_DOOR_ACK: u64 = 5;
 /// HVC #6: bel de kern op de OS-core (een frame op de TX-ring, een
 /// system-call): de switcher stuurt zijn kick-SGI als de kern op dat moment
 /// geen SEV hoort (`oscore::SCHED_OS_KICK`), en keert meteen terug. Een
 /// yield (HVC #1) belt ook, want een app die idle gaat na een publicatie
 /// wacht meestal op het antwoord.
-pub const HVC_KICK_OS: u64 = 6;
+#[cfg_attr(
+    not(all(target_os = "none", target_arch = "aarch64")),
+    allow(dead_code) // alleen de switcher-asm leest dit
+)]
+pub(crate) const HVC_KICK_OS: u64 = 6;
 
 /// De vectorindex van een synchrone exception uit een lagere EL (AArch64).
-pub const VEC_SYNC_LOWER: u64 = 8;
+pub(crate) const VEC_SYNC_LOWER: u64 = 8;
 /// De vectorindex van een FIQ uit een lagere EL (AArch64): de Apple-kick.
-pub const VEC_FIQ_LOWER: u64 = 10;
+pub(crate) const VEC_FIQ_LOWER: u64 = 10;
 /// De afstand tussen twee vectoringangen.
-pub const VEC_STRIDE: u64 = 0x80;
+pub(crate) const VEC_STRIDE: u64 = 0x80;
 /// Het aantal vectoringangen.
-pub const VEC_COUNT: u64 = 16;
+pub(crate) const VEC_COUNT: u64 = 16;
 /// De maat van de vectortabel: 2 KB, ook de uitlijning die VBAR_EL2 eist.
-pub const VEC_TABLE_LEN: u64 = VEC_STRIDE * VEC_COUNT;
+pub(crate) const VEC_TABLE_LEN: u64 = VEC_STRIDE * VEC_COUNT;
 
 /// Waar de thunk x2/x3 op de sched-scratch zet (SP_EL2 = scratch); de
 /// switcher legt er zelf x0/x1 op +0/+8 bij.
 pub(super) const SCRATCH_X2: u64 = 16;
 
 /// "HOPSWTC1" little-endian: de magic van de switch-code-descriptor.
-pub const SWITCH_MAGIC: u64 = 0x3143_5457_5350_4F48;
+pub(crate) const SWITCH_MAGIC: u64 = 0x3143_5457_5350_4F48;
 /// Descriptor +8: de totale lengte (descriptor plus blobs).
-pub const SW_LEN: u64 = 8;
+pub(crate) const SW_LEN: u64 = 8;
 /// Descriptor +16: de FNV-1a-64 over de blobs, in kopieervolgorde.
-pub const SW_HASH: u64 = 16;
+pub(crate) const SW_HASH: u64 = 16;
 /// Descriptor +24: de offset van de switcher (el2entry).
-pub const SW_ENTRY: u64 = 24;
+pub(crate) const SW_ENTRY: u64 = 24;
 /// Descriptor +32: de offset van de stage-2-trampoline.
-pub const SW_TRAMP: u64 = 32;
+pub(crate) const SW_TRAMP: u64 = 32;
 /// Descriptor +40: de offset van de SMP-trampoline.
-pub const SW_SMP: u64 = 40;
+pub(crate) const SW_SMP: u64 = 40;
 /// De maat van de descriptor: de blobs beginnen hier.
-pub const SW_HEAD: u64 = 0x40;
+pub(crate) const SW_HEAD: u64 = 0x40;
 /// De uitlijning van elke blob in de kopie: een cacheline.
 const SW_ALIGN: u64 = 64;
 
@@ -313,7 +324,7 @@ const _: () = assert!(7 * 4 <= VEC_STRIDE);
 /// Faalt als een app-core niet in de parkeerlus staat: een geldige lege
 /// flip kan cores in de lus hebben, maar een core met een dispatch in zijn
 /// mailbox draait, en dan is "niemand leeft" gelogen.
-pub fn check_parked(plan: &Plan) -> Result<(), Error> {
+pub(crate) fn check_parked(plan: &Plan) -> Result<(), Error> {
     for c in 1..=plan.app_cores() {
         let core = Core::new(c).ok_or(Error::Plan(abi::Error::OutOfPlan {
             index: c,
@@ -407,25 +418,12 @@ fn init_region(plan: &Plan, entry: Pa, park: Option<&[u8]>) -> Result<(), Error>
 // Contexten en cores.
 // ---------------------------------------------------------------------------
 
-/// Het ctx-blok van context-id `id`: 1..=`SLOT_CAP` is een kooi, erboven
-/// een secundaire core ([`Core::smp_context_id`]). Dezelfde rekensom als de
-/// switcher (`hopos_el2_ctx_of`).
-pub fn context_pa(plan: &Plan, id: u8) -> Result<Pa, Error> {
-    let i = usize::from(id);
-    if let Some(slot) = Slot::new(i) {
-        return plan.ctx_pa(slot).map_err(Error::Plan);
-    }
-    let core = i
-        .checked_sub(SLOT_CAP - 1)
-        .and_then(Core::new)
-        .ok_or(Error::BadContextId { id })?;
-    plan.smp_ctx_pa(core).map_err(Error::Plan)
-}
-
 /// De context-id van ctx-blok `ctx`, of `None` als `ctx` geen ctx-blok van
-/// dit plan is. De inverse van [`context_pa`].
+/// dit plan is: 1..=`SLOT_CAP` is een kooi, erboven een secundaire core
+/// ([`Core::smp_context_id`]). De inverse van de rekensom van de switcher
+/// (`hopos_el2_ctx_of`).
 #[must_use]
-pub fn context_id(plan: &Plan, ctx: Pa) -> Option<u8> {
+pub(crate) fn context_id(plan: &Plan, ctx: Pa) -> Option<u8> {
     let off = ctx.0.checked_sub(plan.vec_base_pa().0)?;
     let index = usize::try_from(off / CAGE_STRIDE).ok()?;
     if index == 0 || index > plan.max_slots() {
@@ -850,21 +848,6 @@ pub fn arm_context(ctx: Pa, ctrl_pa: Pa, unit: Slot, ring_head_pa: u64) {
     ctx_write(ctx, CTX_UNIT_SLOT, unit.get() as u64);
     ctx_write(ctx, CTX_RING_HEAD_PA, ring_head_pa);
     ctx_write(ctx, CTX_KICK_TARGET, CTX_KICK_NONE);
-}
-
-/// Is de geyielde bewoner van `ctx` aan de beurt op counterstand `now`: op
-/// tijd (0 = meteen), of op RX? Dezelfde vraag als de rotatie zelf stelt,
-/// voor de wekker op een board waar de app-core zichzelf niet kan wekken.
-#[must_use]
-pub fn wake_due(ctx: Pa, now: u64) -> bool {
-    let t = ctx_read(ctx, CTX_WAKE);
-    let no_peek = t & CTX_WAKE_NO_PEEK != 0;
-    let t = t & !CTX_WAKE_NO_PEEK;
-    if t == 0 || now >= t {
-        return true;
-    }
-    // Een wachter zonder P: alleen zijn wektijd of een kick (HVC #4).
-    !no_peek && rx_due(ctx)
 }
 
 /// Ligt er RX voor de bewoner van `ctx`: is zijn doorbell gewapend en groeide
