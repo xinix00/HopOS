@@ -157,6 +157,11 @@ const DHCP_TIMEOUT: Duration = Duration::from_secs(10);
 /// De wacht tussen twee mislukte DHCP-pogingen.
 const DHCP_RETRY: Duration = Duration::from_secs(5);
 
+/// De proeflease na een verlopen lease: renew na 1 s, rebind na 2 s, op na
+/// 60 s. Een keeper daarop rebindt elke ~70 s; de eerste ACK legt de echte
+/// looptijd eroverheen.
+const DHCP_PROBE: (u32, u32, u32) = (60, 1, 2);
+
 /// Het bufferbudget van de node-stack. De Go-kern nam 1/8 van het RAM-raam
 /// (30 MB op QEMU), maar de heap is hier nog een bump-allocator: wat een
 /// verbinding teruggeeft, lekt. 8 MB is dus het plafond op wat tegelijk
@@ -550,7 +555,10 @@ impl Node {
                     return l;
                 }
                 Err(e) => {
-                    println!("{e}, attempt {attempt}, retry in 5 s HOPOS_DHCP_FAIL");
+                    // Go: de eerste poging en daarna elke tiende, niet elke 15 s.
+                    if attempt == 1 || attempt.is_multiple_of(10) {
+                        println!("{e}, attempt {attempt}, retry in 5 s HOPOS_DHCP_FAIL");
+                    }
                     self.exec.after(DHCP_RETRY).await;
                 }
             }
@@ -736,6 +744,11 @@ fn poll_stack<T>(
 /// De keeper-taak (Go: `keepLease`): RENEW op T1, REBIND op T2, luid als het
 /// adres weg is. Zodra de stack de ringen bezit, spreekt de keeper UDP op
 /// poort 68 en zendt de stack.
+///
+/// Een verlopen lease zonder antwoord is een netwerk zonder server, geen
+/// adresconflict: het adres blijft in gebruik en een keeper op een proeflease
+/// blijft rebinden tot een server het bevestigt. Alleen een NAK of een ander
+/// adres kost het adres.
 async fn keep_lease(exec: &'static Executor, mac: [u8; 6], lease: Lease) {
     let now = || Instant::from_duration(Duration::from_nanos(exec.now()));
     let h = match io(|st| st.udp_bind(leandhcp::CLIENT_PORT)) {
@@ -750,6 +763,8 @@ async fn keep_lease(exec: &'static Executor, mac: [u8; 6], lease: Lease) {
         }
     };
     let mut k = Keeper::new(mac, lease, now());
+    // Gezet na het verlopen: de mislukte pogingen zwijgen tot de eerste ACK.
+    let mut held = false;
     let mut out = [0u8; leannet::UDP_MAX_PAYLOAD];
     let mut inb = [0u8; leannet::UDP_MAX_PAYLOAD];
     loop {
@@ -763,19 +778,43 @@ async fn keep_lease(exec: &'static Executor, mac: [u8; 6], lease: Lease) {
             }
             Ok(KeepAction::Wait(until)) => Keep::Wait(until),
             Ok(KeepAction::Event(e)) => {
-                println!("{e}");
+                if matches!(e, leandhcp::Event::Extended { .. }) {
+                    held = false;
+                }
+                if !held {
+                    println!("{e}");
+                }
                 continue;
             }
             Ok(KeepAction::Done) => {
                 println!("dhcp: lease without end, nothing to keep");
                 return;
             }
+            Err(leandhcp::Error::Expired { ip }) => {
+                // De keeper stopt na het verlopen; een nieuwe op de proeflease
+                // rebindt verder (Go: keepLease na KeepAlive).
+                if !held {
+                    println!(
+                        "dhcp: lease on {ip} expired without an answer, keeping the address and rebinding HOPOS_DHCP_RETRY"
+                    );
+                    held = true;
+                }
+                let (lease_secs, t1_secs, t2_secs) = DHCP_PROBE;
+                let probe = Lease {
+                    lease_secs,
+                    t1_secs,
+                    t2_secs,
+                    ..*k.lease()
+                };
+                k = Keeper::new(mac, probe, now());
+                continue;
+            }
             Err(e) => {
-                // Go hing `requestNodeReset` aan `hopnet.AddressLost`: de stack
-                // kan niet van adres wisselen, dus een verloren lease is het
-                // einde van deze node-levensduur. De watchdog houdt zijn pets
-                // in en het ijzer reset; zonder gewapende watchdog blijft het
-                // bij de melding.
+                // Een NAK of een ander adres (Go hing `requestNodeReset` aan
+                // `hopnet.AddressLost`): de stack kan niet van adres wisselen,
+                // dus dat is het einde van deze node-levensduur. De watchdog
+                // houdt zijn pets in en het ijzer reset; zonder gewapende
+                // watchdog blijft het bij de melding.
                 println!("{e} HOPOS_DHCP_LOST");
                 crate::watchdog::request_reset("dhcp lease lost");
                 return;
