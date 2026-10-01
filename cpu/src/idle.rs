@@ -165,6 +165,17 @@ pub fn freq() -> u64 {
     arch::freq()
 }
 
+/// De fysieke EL1-timer (CNTP) van deze core uit: zijn lijn valt, tot de
+/// slaap hem weer zet.
+pub fn timer_off() {
+    arch::timer_off();
+}
+
+/// De EL2-timer (CNTHP) van deze core uit: zijn lijn valt.
+pub fn hyp_timer_off() {
+    arch::hyp_timer_off();
+}
+
 /// Hoe een core slaapt als hij niets te doen heeft.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -500,6 +511,18 @@ mod arch {
         b.wrapping_sub(a)
     }
 
+    pub(super) fn timer_off() {
+        // SAFETY: CNTP_CTL_EL0 = 0 zet de eigen fysieke timer van deze core
+        // uit; geen geheugeneffect.
+        unsafe { asm!("msr cntp_ctl_el0, xzr", "isb", options(nomem, nostack)) };
+    }
+
+    pub(super) fn hyp_timer_off() {
+        // SAFETY: CNTHP_CTL_EL2 = 0 zet de EL2-timer van deze core uit; geen
+        // geheugeneffect.
+        unsafe { asm!("msr cnthp_ctl_el2, xzr", "isb", options(nomem, nostack)) };
+    }
+
     /// Zet de fysieke EL1-timer op `deadline`, doet één WFI en zet de timer
     /// weer uit (anders blijft hij pending). De interrupt wordt niet genomen
     /// (DAIF dicht) maar wekt WFI wél: dat belooft de architectuur voor
@@ -559,6 +582,8 @@ mod arch {
     pub(super) fn wfi_until(_deadline: u64) -> u64 {
         0
     }
+    pub(super) fn timer_off() {}
+    pub(super) fn hyp_timer_off() {}
 }
 
 #[cfg(test)]

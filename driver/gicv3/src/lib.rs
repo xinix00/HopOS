@@ -19,8 +19,9 @@
 //! isolatieregel, niet "meestal".
 //!
 //! De CPU-interface (de ICC-systeemregisters) is een instructie, geen
-//! MMIO, en assembly hoort in `cpu` en `board` (handboek §5): het board
-//! levert hem via de trait [`Icc`]. Zo test de driver op de host met een
+//! MMIO, en assembly hoort in `cpu` en `board` (handboek §5): de driver
+//! krijgt hem via de trait [`Icc`], met [`SysRegIcc`] (de instructies van
+//! `cpu::gicv3`) op ijzer. Zo test de driver op de host met een
 //! nep-interface.
 
 #![cfg_attr(not(test), no_std)]
@@ -209,8 +210,7 @@ const TYPER_VLPIS: u64 = 1 << 1;
 /// dan is hij al wakker, want de firmware bracht deze core op.
 const WAKER_POLLS: u32 = 1 << 16;
 
-/// De CPU-interface: de ICC-systeemregisters van de Group-1-set. Het board
-/// levert ze met `asm!`.
+/// De CPU-interface: de ICC-systeemregisters van de Group-1-set.
 pub trait Icc {
     /// Zet de systeemregister-interface aan (ICC_SRE_EL2 en _EL1: SRE, en
     /// op EL2 ook Enable).
@@ -223,6 +223,28 @@ pub trait Icc {
     fn iar1(&self) -> u32;
     /// Schrijft ICC_EOIR1_EL1: priority drop én deactivate (EOImode 0).
     fn eoir1(&self, intid: u32);
+}
+
+/// De CPU-interface als systeemregisters ([`cpu::gicv3`]): de [`Icc`] van
+/// elk board met een GICv3.
+pub struct SysRegIcc;
+
+impl Icc for SysRegIcc {
+    fn enable_sre(&self) {
+        cpu::gicv3::enable_sre();
+    }
+    fn set_pmr(&self, pmr: u8) {
+        cpu::gicv3::set_pmr(pmr);
+    }
+    fn set_grp1(&self, on: bool) {
+        cpu::gicv3::set_grp1(on);
+    }
+    fn iar1(&self) -> u32 {
+        cpu::gicv3::iar1()
+    }
+    fn eoir1(&self, intid: u32) {
+        cpu::gicv3::eoir1(intid);
+    }
 }
 
 /// Waarom de GIC iets weigert.

@@ -1,22 +1,17 @@
 //! De Altra als [`Board`]: het UEFI-board met de igb, de NVMe en de SMpro.
 //! Wat niet anders is dan op elke UEFI-machine, gaat door naar [`Uefi`].
 
-use crate::{CLASS_NVME, LINK_TIMEOUT_NS, first, is_nic};
+use crate::{LINK_TIMEOUT_NS, is_nic};
 use board::heap::Heap;
 use board::{Board, CoreClass, Dispatched, Error, Plan};
-use board_uefi::{BLK_DMA, NET_DMA, Uefi};
-use bounded::BoundedVec;
+use board_uefi::{NET_DMA, Uefi, pcie};
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use dev::Pa;
 use driver_igb::Igb;
 use driver_nvme::Nvme;
-use driver_pcie::Ecam;
 use driver_smpro::{HWMON_CHANNEL, Smpro};
 use sync::{Local, Signal};
-
-/// Zoveel ECAM-vensters: de Altra heeft er tot acht.
-const MAX_SEGMENTS: usize = 8;
 
 static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
 static DISK_CLAIMED: AtomicBool = AtomicBool::new(false);
@@ -37,51 +32,13 @@ impl Altra {
         Self { uefi: Uefi::new() }
     }
 
-    fn segments() -> BoundedVec<(Ecam, u8), MAX_SEGMENTS> {
-        let mut v = BoundedVec::new();
-        for (e, _seg, start) in board_uefi::pcie_segments() {
-            if v.push((e, start)).is_err() {
-                break;
-            }
-        }
-        v
-    }
-
     /// Vindt en initialiseert de eerste NVMe (het hele device) in de
     /// schijf-helft van de DMA-regio. `Ok(None)` = geen NVMe; één keer.
     pub fn probe_disk(&self) -> Result<Option<Nvme>, Error> {
         if DISK_CLAIMED.swap(true, Relaxed) {
             return Err(Error::Twice("probe_disk"));
         }
-        let segs = Self::segments();
-        let Some(hit) = first(segs.as_slice().iter().map(|(e, s)| (e, *s)), 0, |f| {
-            f.class == CLASS_NVME
-        }) else {
-            return Ok(None);
-        };
-        // Een hoge BAR (boven 1 TB) moet eerst in de identity map.
-        if !board_uefi::map_device(hit.bar, driver_nvme::MMIO_LEN) {
-            return Err(Error::Disk("NVMe BAR0 unreachable"));
-        }
-        enable(&segs, &hit.f);
-        // SAFETY: BAR0 is door de firmware toegewezen en nu Device-gemapt;
-        // memory-decode en bus-mastering staan aan. BLK_DMA is van deze
-        // driver alleen, Normal-NC gemapt door `board-uefi`.
-        let disk = unsafe { Nvme::new(Pa(hit.bar), BLK_DMA.base, BLK_DMA.size, cpu::idle::now) }
-            .map_err(|e| {
-                cpu::println!("disk: {e} HOPOS_NVME_FAIL");
-                Error::Disk("nvme init failed")
-            })?;
-        cpu::println!(
-            "disk: nvme {} at {} bar0 {:#x}, {} blocks of {} bytes, max transfer {} HOPOS_NVME_UP",
-            disk.model(),
-            hit.f.bdf,
-            hit.bar,
-            disk.blocks(),
-            disk.block_size(),
-            disk.max_transfer()
-        );
-        Ok(Some(disk))
+        pcie::probe_nvme()
     }
 
     /// Opent de SMpro op subkanaal [`HWMON_CHANNEL`] van de PCCT-tabel
@@ -132,18 +89,6 @@ impl Altra {
     }
 }
 
-fn enable(segs: &BoundedVec<(Ecam, u8), MAX_SEGMENTS>, f: &driver_pcie::Function) {
-    // De functie hoort bij het venster waarin `first` hem vond; de
-    // config-lees gaat via elk venster dat zijn bus bestrijkt.
-    for (e, _) in segs.as_slice() {
-        let (lo, hi) = e.buses();
-        if (lo..=hi).contains(&f.bdf.bus) && f.command(e) != u16::MAX {
-            f.enable(e);
-            return;
-        }
-    }
-}
-
 /// Wat de binary buiten [`Board`] om van het UEFI-board vraagt (de
 /// core-0-lijm: `this_core`, `os_bell`, `kick_self`, `config`), is hier
 /// hetzelfde; de eigen methodes van dit board ([`Altra::probe_disk`]) gaan
@@ -183,10 +128,6 @@ impl Board for Altra {
     /// het generieke UEFI-board ze vindt (docs/gui.md).
     fn usb_hosts(&self) -> board::UsbHosts {
         self.uefi.usb_hosts()
-    }
-
-    fn privilege(&self, el: u8) -> Result<(), Error> {
-        self.uefi.privilege(el)
     }
 
     fn firmware(&self) -> &'static str {
@@ -239,14 +180,16 @@ impl Board for Altra {
         if NIC_CLAIMED.swap(true, Relaxed) {
             return Err(Error::Twice("probe_nic"));
         }
-        let segs = Self::segments();
-        let Some(hit) = first(segs.as_slice().iter().map(|(e, s)| (e, *s)), 0, is_nic) else {
+        let segs = pcie::segments();
+        let Some(hit) = pcie::first_in(&segs, 0, is_nic) else {
             return Ok(None);
         };
         if !board_uefi::map_device(hit.bar, driver_igb::MMIO_LEN) {
             return Err(Error::Nic("igb BAR0 unreachable"));
         }
-        enable(&segs, &hit.f);
+        if let Some((e, _)) = segs.get(hit.win) {
+            hit.f.enable(e);
+        }
         // SAFETY: BAR0 is door de firmware toegewezen en nu Device-gemapt;
         // memory-decode en bus-mastering staan aan. NET_DMA is van deze
         // driver alleen, 2 MB-gealigneerd en Normal-NC gemapt.

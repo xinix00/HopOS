@@ -146,7 +146,7 @@ fn prepare(efi: &Efi, el: u8) -> Result<Enter, (&'static str, Status)> {
     // (EfiLoaderData), identity-gemapt door de firmware, en alleen hier in
     // gebruik.
     let buf = unsafe { core::slice::from_raw_parts_mut(scratch as usize as *mut u8, ACPI_SCRATCH) };
-    let tables = facts::discover(rsdp, buf, crate::arch::mpidr())
+    let tables = facts::discover(rsdp, buf, cpu::mpidr())
         .map_err(|_| ("ACPI tables unreadable", efi::LOAD_ERROR))?;
     acpi_line(&tables, rsdp);
 

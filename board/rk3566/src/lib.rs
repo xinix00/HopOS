@@ -35,7 +35,6 @@
 
 extern crate alloc;
 
-mod arch;
 #[cfg(feature = "gui")]
 mod display;
 pub mod initrd;
@@ -64,13 +63,12 @@ mod display {
 mod tests;
 
 use abi::layout::Pool;
-use board::heap::Heap;
 use board::{Board, CoreClass, Dispatched, Error, NoDisk, Plan, Region};
 use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use dev::Pa;
 use driver_dwmac4::{CSR_100_150M, Dwmac4, IrqAck, Probe};
-use driver_gicv3::Gic;
+use driver_gicv3::{Gic, SysRegIcc};
 use driver_mdio::{Phy, rtl8211f};
 use driver_ns16550::Ns16550;
 use fw::fdt::Fdt;
@@ -184,6 +182,8 @@ const _: () = {
     assert!(FB_RAM.base.0 + FB_RAM.size == STAGE_WINDOW.base.0);
     assert!(STAGE_WINDOW.base.0 + STAGE_WINDOW.size == POOL_BASE);
     assert!(1920 * 1080 * 4 <= FB_RAM.size);
+    // Een arm64 Image landt 2 MB-gealigneerd, onder de DMA-regio.
+    assert!(KERN_RAM.end().0 <= DMA.base.0 && KERN_RAM.base.0.is_multiple_of(0x20_0000));
 };
 
 /// De UART. Eén per board.
@@ -194,7 +194,7 @@ static UART: Ns16550 = unsafe { Ns16550::new(UART2, 2) };
 /// De GIC. Het redistributor-frame is dat van de OS-core;
 /// `start_interrupts` zoekt het op met `find_redistributor` en zet het.
 // SAFETY: GICD en GICR zijn de GIC-600-blokken van de RK3566 (Device).
-static GIC: Gic<arch::SysRegIcc> = unsafe { Gic::new(GICD, GICR, arch::SysRegIcc) };
+static GIC: Gic<SysRegIcc> = unsafe { Gic::new(GICD, GICR, SysRegIcc) };
 
 /// De bel van de NIC: de dispatch luidt hem, de RX-pomp wacht erop.
 static NIC_BELL: Signal = Signal::new();
@@ -286,12 +286,10 @@ fn take_initrd(start: u64, len: u64) {
 }
 
 /// De rol van de staging uit `hopos.stage` (config of APPEND), als woord
-/// in het plan zoals op de Pi's: de binary noemt het woord bij een
-/// onbekende rol. Meldt wat er gestaged is.
+/// zoals op de Pi's. Meldt wat er gestaged is.
 fn take_role() {
-    let role = slots::role_code(boot_param("hopos.stage"));
+    let role = board::stage::role_code(boot_param("hopos.stage"));
     slots::ROLE.store(role, Relaxed);
-    dev::write64(Pa(slots::STAGE_ROLE_PA), role);
     let name = match role {
         0 => "app",
         1 => "hop",
@@ -464,39 +462,36 @@ impl Rk3566 {
     /// De fysieke index van de core waar dit draait.
     #[must_use]
     pub fn this_core(&self) -> usize {
-        slots::core_of(arch::mpidr())
+        slots::core_of(cpu::mpidr())
     }
 
     /// De OS-core die de bootargs vragen (`hopos.oscore=N`), met een reden
-    /// als de vraag niet kon: dan de boot-core (0). Homogene A55's, dus een
-    /// klasse is altijd core 0.
+    /// als de vraag niet kon: dan de boot-core (0). Homogene A55's, dus
+    /// `big` is core 0 en `small` of `mid` valt terug.
     #[must_use]
     pub fn os_core(&self) -> (usize, Option<&'static str>) {
-        let v = boot_param("hopos.oscore");
-        match v {
-            "" | "small" | "mid" | "big" => (0, None),
-            v => match v.parse::<usize>() {
-                Ok(n) if n < self.cores() => (n, None),
-                Ok(_) => (0, Some("no such core")),
-                Err(_) => (0, Some("not small, mid, big or a core number")),
-            },
-        }
+        board::os_core(
+            boot_param("hopos.oscore"),
+            self.cores(),
+            |c| self.core_class(c),
+            0,
+        )
     }
 
     /// De kick van de OS-core voor de rotatie van `cpu::el2`.
     #[must_use]
     pub fn os_bell(&self) -> cpu::el2::Bell {
         cpu::el2::Bell {
-            sgi1r: driver_gicv3::sgi1r(arch::mpidr(), KICK_SGI),
+            sgi1r: driver_gicv3::sgi1r(cpu::mpidr(), KICK_SGI),
             sgir: 0,
             intid: KICK_SGI,
-            pending: arch::hppir1,
+            pending: cpu::gicv3::hppir1,
         }
     }
 
     /// Stuurt de kick naar deze core zelf: de zelftest van het IPI-pad.
     pub fn kick_self(&self) {
-        arch::sgi1r(driver_gicv3::sgi1r(arch::mpidr(), KICK_SGI));
+        cpu::gicv3::sgi1r(driver_gicv3::sgi1r(cpu::mpidr(), KICK_SGI));
     }
 
     /// Het MAC-adres uit `hopos.mac` of `hopos.node` (Go: `nodemac`). Dit
@@ -590,14 +585,6 @@ impl Board for Rk3566 {
         "boot: Radxa Zero 3E, U-Boot booti at EL2, TF-A bl31 at EL3 (PSCI via SMC)"
     }
 
-    fn init_heap(&self, heap: &Heap) {
-        let (start, end) = arch::heap_bounds();
-        // SAFETY: `link-rk3566.ld` legt `__heap_start` achter image en stack
-        // en `__heap_end` op het einde van de kern-RAM; dat bereik is gemapt
-        // (Normal) en niemand anders gebruikt het.
-        unsafe { heap.init(start, end) };
-    }
-
     /// De DTB uit x0, en de initrd die hij aanwijst, naar de heap. Wat de
     /// kern straks vraagt (DRAM, cores, de pool) staat daarna vast. Dan de
     /// DRBG van de kern uit het TRNG (`rng`), met of zonder DTB: het blok
@@ -611,12 +598,12 @@ impl Board for Rk3566 {
         cpu::idle::now
     }
 
-    /// De buffer uit het plan ([`FB_RAM`]); met `gui` start de eerste
-    /// aanroep de scanout naar HDMI, zonder is het board headless (`None`).
     fn usb_hosts(&self) -> board::UsbHosts {
         usb::hosts()
     }
 
+    /// De buffer uit het plan ([`FB_RAM`]); met `gui` start de eerste
+    /// aanroep de scanout naar HDMI, zonder is het board headless (`None`).
     fn framebuffer(&self) -> Option<driver_fb::Desc> {
         display::framebuffer(cpu::idle::now)
     }
@@ -656,7 +643,7 @@ impl Board for Rk3566 {
     }
 
     fn start_interrupts(&self) -> Result<&'static Signal, Error> {
-        let mpidr = arch::mpidr();
+        let mpidr = cpu::mpidr();
         // SAFETY: de reeks is de GICR van de RK3566, gemapt als Device.
         let rd = unsafe { driver_gicv3::find_redistributor(GICR, GICR_LEN, mpidr) }
             .ok_or(Error::Irq("no redistributor frame for the OS core"))?;
@@ -672,7 +659,7 @@ impl Board for Rk3566 {
         GIC.enable(KICK_SGI, mpidr)
             .map_err(|_| Error::Irq("kick SGI refused"))?;
         cpu::println!("irq: {}", GIC.describe());
-        arch::irq_unmask();
+        cpu::irq::unmask();
         Ok(&cpu::irq::IRQ_PENDING)
     }
 
@@ -682,11 +669,11 @@ impl Board for Rk3566 {
         while let Some(id) = GIC.claim() {
             match (id, nic) {
                 (TIMER_PPI, _) => {
-                    arch::timer_off();
+                    cpu::idle::timer_off();
                     d.timer += 1;
                 }
                 (HYP_TIMER_PPI, _) => {
-                    arch::hyp_timer_off();
+                    cpu::idle::hyp_timer_off();
                     d.timer += 1;
                 }
                 (KICK_SGI, _) => {
@@ -704,7 +691,7 @@ impl Board for Rk3566 {
             }
             GIC.eoi(id);
         }
-        arch::irq_unmask();
+        cpu::irq::unmask();
         d
     }
 
@@ -760,7 +747,7 @@ impl Board for Rk3566 {
                     Error::Nic("dwmac4 start failed")
                 })?;
         // 9. De lijn. Een lijn die niet aan wil, laat de NIC pollen.
-        if GIC.enable(GMAC1_INTID, arch::mpidr()).is_ok() {
+        if GIC.enable(GMAC1_INTID, cpu::mpidr()).is_ok() {
             NIC_IRQ.get().set(Some((GMAC1_INTID, nic.irq_ack())));
             nic.set_irq(&NIC_BELL);
         }

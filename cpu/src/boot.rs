@@ -20,7 +20,10 @@
 //! - `__stack_guard`: de pagina direct onder de boot-stack (4 KB-gealigneerd,
 //!   de stack begint erboven). De stub maakt hem ongeldig in de map (zie
 //!   de wachtpagina hieronder);
-//! - `kmain`: `extern "C" fn(dtb: u64, el: u64) -> !`.
+//! - `kmain`: `extern "C" fn(dtb: u64, el: u64) -> !`;
+//! - `__heap_start`, `__heap_end`: de heap ([`heap_bounds`]), achter image,
+//!   BSS en stack. Ook in de riscv-linkscripts; de UEFI-boards nemen hun
+//!   heap uit de EFI-allocatie en noemen deze symbolen niet.
 //!
 //! # De wachtpagina
 //!
@@ -157,6 +160,38 @@ pub const fn admits(aff: u64, x3: u64) -> bool {
 pub fn park() -> ! {
     loop {
         arch::wfe();
+    }
+}
+
+/// Het heap-bereik uit het linkscript: `[__heap_start, __heap_end)`. Op de
+/// host leeg.
+#[must_use]
+pub fn heap_bounds() -> (usize, usize) {
+    heap::bounds()
+}
+
+#[cfg(target_os = "none")]
+mod heap {
+    unsafe extern "C" {
+        /// Het begin van de heap (het linkscript van het board).
+        static __heap_start: u8;
+        /// Het einde van de heap.
+        static __heap_end: u8;
+    }
+
+    pub(super) fn bounds() -> (usize, usize) {
+        (
+            (&raw const __heap_start) as usize,
+            (&raw const __heap_end) as usize,
+        )
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+mod heap {
+    //! Host-stub: geen linkscript.
+    pub(super) fn bounds() -> (usize, usize) {
+        (0, 0)
     }
 }
 

@@ -186,6 +186,7 @@ use abi::place::{self, SYM_ABI, SYM_RAM_SIZE, SYM_RAM_START, SYM_SLOT_HINT, Wind
 use alloc::string::String;
 use alloc::vec::Vec;
 use board::Board;
+use board::stage::StagedRole;
 #[cfg(not(target_arch = "riscv64"))]
 use cage::{ArmCage as SlotCage, ArmCores as SlotCores};
 #[cfg(target_arch = "riscv64")]
@@ -204,7 +205,7 @@ use kern::slots::{
 use kern::system::{LogTee, SlotLogs};
 use kern::{Region, Slot};
 use sync::mpsc::Mailbox;
-use vboard::slots::{self as vslots, StagedRole};
+use vboard::slots as vslots;
 
 /// De brievenbus van de lifecycle-actor. Hij staat in `main` naast de
 /// system-listener, die er zijn verzoeken heen stuurt; de actor die hem
@@ -281,7 +282,7 @@ const SERVICE_BUF: usize = (RING_DATA_CAP / 2) as usize;
 /// Hop krijgt de zijne uit `hopos.cfg`.
 pub(crate) fn start(
     exec: &'static Executor,
-    role: Option<StagedRole>,
+    role: Result<StagedRole, u64>,
     adopt: Option<Vec<kern::slots::SlotState>>,
     app_env: Vec<u8>,
     hop_cfg: String,
@@ -444,12 +445,11 @@ pub(crate) fn start(
         return;
     }
     let spawned = match role {
-        Some(StagedRole::App) => exec.spawn(place_first(exec, plan, app_env)),
-        Some(StagedRole::Hop) => exec.spawn(place_hop(exec, plan, pool_bytes, hop_cfg)),
-        None => {
+        Ok(StagedRole::App) => exec.spawn(place_first(exec, plan, app_env)),
+        Ok(StagedRole::Hop) => exec.spawn(place_hop(exec, plan, pool_bytes, hop_cfg)),
+        Err(word) => {
             println!(
-                "slots: staged role word {:#x} is neither app (0) nor hop (1), nothing placed HOPOS_SLOT_NONE",
-                dev::read64(dev::Pa(vslots::STAGE_ROLE_PA))
+                "slots: staged role word {word:#x} is neither app (0) nor hop (1), nothing placed HOPOS_SLOT_NONE"
             );
             return;
         }

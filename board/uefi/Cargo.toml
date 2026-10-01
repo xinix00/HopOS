@@ -23,6 +23,8 @@ driver-pcie = { path = "../../driver/pcie" }
 driver-virtiopci = { path = "../../driver/virtiopci" }
 driver-virtionet = { path = "../../driver/virtionet" }
 driver-virtioblk = { path = "../../driver/virtioblk" }
+# De NVMe van de O6N en de Altra (pcie.rs `probe_nvme`).
+driver-nvme = { path = "../../driver/nvme" }
 # De framebuffer-beschrijving van `Board::framebuffer` (gop.rs).
 driver-fb = { path = "../../driver/fb" }
 

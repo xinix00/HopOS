@@ -24,6 +24,7 @@
 use crate::{POOL_BASE, RAM_MAPPED_END, STRUCT_WINDOW};
 use abi::Region;
 use abi::layout::{Plan, PlanSpec, Pool, carve_pool};
+use board::stage::{self, StagedRole};
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 /// De control-pages van de eigen cores van de kern (Go: `nodeCtrlPA`).
@@ -48,11 +49,8 @@ pub const BLACK_BOX: Region = Region::new(WAKE_PA + 0x8000, 32 << 10);
 /// Het maatwoord van de staging (de vorm van QEMU virt): een MB in het
 /// staging-venster. Niemand vult het op dit board (het image staat in de
 /// heap); de kern-flip gebruikt het venster erachter als plek voor een
-/// platgelegde nieuwe kern.
+/// platgelegde nieuwe kern, en het blob eronder.
 pub const STAGE_HDR_PA: u64 = crate::STAGE_WINDOW.base.0 + 0x10_0000;
-/// Het rolwoord, direct na de maat. `discover` schrijft de rolcode hier
-/// zoals op de Pi's; de binary noemt het woord bij een onbekende rol.
-pub const STAGE_ROLE_PA: u64 = STAGE_HDR_PA + 8;
 /// Waar een gestaged image begint.
 pub const STAGE_PA: u64 = STAGE_HDR_PA + 0x10_0000;
 /// De grootste staging: tot het einde van het venster.
@@ -146,15 +144,6 @@ pub const fn core_of(mpidr: u64) -> usize {
     ((mpidr >> 8) & 0xff) as usize
 }
 
-/// Wat het gestagede image is.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum StagedRole {
-    /// Een gewone app.
-    App,
-    /// Hop, de bevoorrechte bewoner.
-    Hop,
-}
-
 /// De rol uit `hopos.stage`: 0 = app, 1 = Hop, anders onbekend. Zonder
 /// DTB (dus zonder initrd) blijft hij app: de kern zoekt dan het image,
 /// vindt het niet en zegt `HOPOS_SLOT_NONE`, zonder token voor een Hop die
@@ -171,26 +160,10 @@ pub fn staged_image() -> Option<&'static [u8]> {
     crate::copied(&crate::STAGE_COPY)
 }
 
-/// De rol van de staging; een onbekende `hopos.stage` is `None` (de kern
-/// plaatst dan niets en zegt dat luid).
-#[must_use]
-pub fn staged_role() -> Option<StagedRole> {
-    match ROLE.load(Relaxed) {
-        0 => Some(StagedRole::App),
-        1 => Some(StagedRole::Hop),
-        _ => None,
-    }
-}
-
-/// De rolcode van een `hopos.stage`-waarde: leeg of `hop` is Hop (de vorm
-/// van de Pi's, `board_raspi::slots::role_code`).
-#[must_use]
-pub fn role_code(v: &str) -> u64 {
-    match v {
-        "" | "hop" => 1,
-        "app" => 0,
-        _ => 2,
-    }
+/// De rol van de staging; een onbekende `hopos.stage` komt als rauw woord
+/// terug (de kern plaatst dan niets en zegt dat luid).
+pub fn staged_role() -> Result<StagedRole, u64> {
+    stage::role(ROLE.load(Relaxed))
 }
 
 // --- De kern-flip (hopos/src/flip.rs, docs/flip.md) ---------------------
@@ -212,18 +185,7 @@ pub const FLIP_PIE: bool = false;
 pub const FLIP_TRAMP_PA: u64 = crate::KERN_RAM.base.0 + crate::KERN_RAM.size - 0x1000;
 /// Het beeld blijft onder de trampoline.
 pub const FLIP_IMAGE_END: u64 = FLIP_TRAMP_PA;
-/// De staging van het platte, gerelokeerde beeld.
-pub const FLIP_STAGE_PA: u64 = STAGE_PA;
-/// De grootste staging.
-pub const FLIP_STAGE_MAX: u64 = STAGE_MAX;
 /// De vluchtrecorder: het woord dat al voor een watchdog-reset vrijlag.
 pub const FLIP_RECORDER_PA: u64 = FLIP_SCRATCH_PA;
-/// De maat van het handoff-blob.
-pub const FLIP_HANDOFF_LEN: u64 = 0x4_0000;
-/// Het handoff-blob, direct onder het staging-maatwoord.
-pub const FLIP_HANDOFF_PA: u64 = STAGE_HDR_PA - FLIP_HANDOFF_LEN;
 
-const _: () = {
-    assert!(FLIP_HANDOFF_PA >= crate::STAGE_WINDOW.base.0);
-    assert!(FLIP_HANDOFF_PA + FLIP_HANDOFF_LEN <= STAGE_HDR_PA);
-};
+const _: () = assert!(abi::layout::flip_handoff_pa(STAGE_HDR_PA) >= crate::STAGE_WINDOW.base.0);

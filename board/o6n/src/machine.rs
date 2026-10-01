@@ -5,11 +5,11 @@
 use crate::class::{self, CoreFacts};
 use crate::clock::{self, CpcKnob};
 use crate::cpc::{self, Cpc, MAX_CPCS};
-use crate::probe::{self, CLASS_NVME};
+use crate::probe;
 use crate::thermal::{self, SCMI_CHANNEL, Thermo};
 use board::heap::Heap;
 use board::{Board, CoreClass, Dispatched, Error, Plan};
-use board_uefi::{BLK_DATA, BLK_DMA, NET_DMA, Uefi};
+use board_uefi::{BLK_DATA, BLK_DMA, NET_DMA, Uefi, pcie};
 
 // Het cacheable datablok van de stub is precies dat van de driver.
 const _: () = assert!(
@@ -21,7 +21,6 @@ use core::cell::{Cell, RefCell};
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use dev::Pa;
 use driver_nvme::Nvme;
-use driver_pcie::Ecam;
 use driver_rtl8126::Rtl8126;
 use driver_scmi::{Channel, Sensor};
 use sync::{Local, Signal};
@@ -29,9 +28,6 @@ use sync::{Local, Signal};
 /// Hoe lang de Realtek op een link wacht: NBASE-T-autonegotiatie kan
 /// seconden duren (het Go-board gaf 12 s, ruimer dan de igb).
 pub const LINK_TIMEOUT_NS: u64 = 12_000_000_000;
-
-/// Zoveel ECAM-vensters: de O6N heeft er vijf (x1_0, x1_1, x2, x4, x8).
-const MAX_SEGMENTS: usize = 8;
 
 static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
 static DISK_CLAIMED: AtomicBool = AtomicBool::new(false);
@@ -53,17 +49,6 @@ impl O6n {
         Self { uefi: Uefi::new() }
     }
 
-    /// De ECAM-vensters met hun eerste bus.
-    fn segments() -> BoundedVec<(Ecam, u8), MAX_SEGMENTS> {
-        let mut v = BoundedVec::new();
-        for (e, _seg, start) in board_uefi::pcie_segments() {
-            if v.push((e, start)).is_err() {
-                break;
-            }
-        }
-        v
-    }
-
     /// Vindt en initialiseert de NVMe (de eerste, het hele device) in de
     /// schijf-helft van de DMA-regio. `Ok(None)` = geen NVMe; één keer.
     /// Geen methode van [`Board`], net als op virt: het blokcontract is van
@@ -72,37 +57,7 @@ impl O6n {
         if DISK_CLAIMED.swap(true, Relaxed) {
             return Err(Error::Twice("probe_disk"));
         }
-        let segs = Self::segments();
-        let Some(hit) = probe::first(segs.as_slice().iter().map(|(e, s)| (e, *s)), 0, |f| {
-            f.class == CLASS_NVME
-        }) else {
-            return Ok(None);
-        };
-        if !board_uefi::map_device(hit.bar, driver_nvme::MMIO_LEN) {
-            return Err(Error::Disk("NVMe BAR0 unreachable"));
-        }
-        if let Some((e, _)) = segs.as_slice().iter().find(|(_, s)| *s == hit.root_bus) {
-            hit.f.enable(e);
-        }
-        // SAFETY: BAR0 is door de firmware toegewezen en nu Device-gemapt
-        // (`map_device`); memory-decode en bus-mastering staan aan. BLK_DMA
-        // is van deze driver alleen, Normal-NC gemapt door `board-uefi`.
-        let disk = unsafe { Nvme::new(Pa(hit.bar), BLK_DMA.base, BLK_DMA.size, cpu::idle::now) }
-            .map_err(|e| {
-                cpu::println!("disk: {e} HOPOS_NVME_FAIL");
-                Error::Disk("nvme init failed")
-            })?;
-        let (major, minor) = disk.version();
-        cpu::println!(
-            "disk: nvme {} at {} bar0 {:#x}, NVMe {major}.{minor}, {} blocks of {} bytes, max transfer {} HOPOS_NVME_UP",
-            disk.model(),
-            hit.f.bdf,
-            hit.bar,
-            disk.blocks(),
-            disk.block_size(),
-            disk.max_transfer()
-        );
-        Ok(Some(disk))
+        pcie::probe_nvme()
     }
 
     /// Is dit werkelijk een Cix P1 (de XSDT-OEM-ID)? Het image draait ook
@@ -265,10 +220,6 @@ impl Board for O6n {
         self.uefi.console()
     }
 
-    fn privilege(&self, el: u8) -> Result<(), Error> {
-        self.uefi.privilege(el)
-    }
-
     fn firmware(&self) -> &'static str {
         "boot: Radxa Orion O6N (Cix P1) over UEFI: PE stub, ACPI discovery, 48-bit identity map"
     }
@@ -350,10 +301,9 @@ impl Board for O6n {
         if NIC_CLAIMED.swap(true, Relaxed) {
             return Err(Error::Twice("probe_nic"));
         }
-        let segs = Self::segments();
-        let Some(hit) = probe::first(segs.as_slice().iter().map(|(e, s)| (e, *s)), 2, |f| {
-            driver_rtl8126::supported(f.vendor, f.device)
-        }) else {
+        let segs = pcie::segments();
+        let Some(hit) = pcie::first_in(&segs, 2, |f| driver_rtl8126::supported(f.vendor, f.device))
+        else {
             return Ok(None);
         };
         if !board_uefi::map_device(hit.bar, driver_rtl8126::MMIO_LEN) {

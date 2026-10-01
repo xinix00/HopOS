@@ -382,11 +382,3 @@ pub fn trng_clock_on() {
     dev::write32(CRU.add(SOFTRST6), hiword(0, 1, SRST_TRNG));
     dev::mb();
 }
-
-/// Herstart de hele SoC via de CRU (`RK3568_GLB_SRST_FST`, dezelfde write
-/// die clk-rk3568.c als restart-handler registreert).
-pub fn global_reset() -> ! {
-    dev::write32(CRU.add(0xD4), 0xFDB9);
-    dev::mb();
-    cpu::boot::park()
-}

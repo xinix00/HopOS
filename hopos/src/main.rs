@@ -40,6 +40,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 use board::Board;
 use board::heap::Heap;
+use board::stage::StagedRole;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use cpu::println;
@@ -50,7 +51,7 @@ use kern::system::{Hooks, LogTee, Privilege, System};
 use netdev::Device;
 use sync::mpsc::Mailbox;
 use sync::{Local, Signal};
-use vboard::slots::{StagedRole, staged_role};
+use vboard::slots::staged_role;
 
 // Precies één board. Twee geven al twee keer `vboard`, geen geeft geen
 // `Machine`; deze som zegt het in woorden.
@@ -305,7 +306,7 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     // system-listener de eerste verbinding ziet (PORT.md beslissing 1).
     let role = staged_role();
     let privilege = match role {
-        Some(StagedRole::Hop) => kern::Slot::new(slots::HOP_SLOT).and_then(Privilege::boot),
+        Ok(StagedRole::Hop) => kern::Slot::new(slots::HOP_SLOT).and_then(Privilege::boot),
         _ => None,
     };
     if let Some(p) = &privilege {
@@ -349,7 +350,7 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     if cfg!(any(
         feature = "board-qemuvirt",
         feature = "board-qemuvirt-riscv"
-    )) && role == Some(StagedRole::Hop)
+    )) && role == Ok(StagedRole::Hop)
     {
         hop_cfg.push_str(kern::nodecfg::QEMU_CFG);
     }
@@ -388,7 +389,7 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     flip::start(exec, landing.is_some());
     // De env van een gestagede app (appspike op QEMU): `hopos.appenv`.
     let app_env = match role {
-        Some(StagedRole::App) => slots::app_env(&bench::bootparam(dtb, "hopos.appenv")),
+        Ok(StagedRole::App) => slots::app_env(&bench::bootparam(dtb, "hopos.appenv")),
         _ => alloc::vec::Vec::new(),
     };
     slots::start(exec, role, landing.map(|h| h.slots), app_env, hop_cfg);

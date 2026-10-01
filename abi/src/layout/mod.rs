@@ -32,7 +32,7 @@
 mod plan;
 
 pub use crate::Region;
-pub use plan::{POOL_MAX, Plan, PlanSpec, Pool, carve_pool, coalesce};
+pub use plan::{POOL_MAX, Plan, PlanSpec, Pool, carve_pool, coalesce, pool_of};
 
 use core::fmt;
 use core::mem::{offset_of, size_of};
@@ -112,6 +112,17 @@ pub const HANDOFF_MAGIC_OFF: u64 = HANDOFF_PTR_OFF + 8;
 /// Hoeveel van de boot-scratch het plan reserveert: tot en met het
 /// handoff-paar.
 pub const BOOT_SCRATCH_LEN: u64 = HANDOFF_MAGIC_OFF + 8;
+
+/// De maat van het handoff-blob van de kern-flip
+/// (`kern::kernflip::HANDOFF_TAIL`, de binary toetst het).
+pub const FLIP_HANDOFF_LEN: u64 = 0x4_0000;
+
+/// Waar het handoff-blob van de kern-flip staat: de [`FLIP_HANDOFF_LEN`]
+/// bytes direct onder het staging-maatwoord `stage_hdr`, op elk board.
+#[must_use]
+pub const fn flip_handoff_pa(stage_hdr: u64) -> u64 {
+    stage_hdr - FLIP_HANDOFF_LEN
+}
 
 const _: () = assert!(HANDOFF_PTR_OFF / dev::LINE != 0x40 / dev::LINE);
 const _: () = assert!(HANDOFF_PTR_OFF / dev::LINE == HANDOFF_MAGIC_OFF / dev::LINE);

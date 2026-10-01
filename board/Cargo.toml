@@ -10,6 +10,8 @@ description = "Het board-contract: wat een machine moet kunnen (cores, geheugen,
 heap = { path = "../heap" }
 dev = { path = "../dev" }
 abi = { path = "../abi" }
+# De heap-grenzen van het linkscript (`Board::init_heap`).
+cpu = { path = "../cpu" }
 netdev = { path = "../netdev" }
 executor = { path = "../executor" }
 sync = { path = "../sync" }

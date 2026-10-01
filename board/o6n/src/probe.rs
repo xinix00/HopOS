@@ -1,53 +1,8 @@
-//! Wat de O6N op zijn PCIe-bussen zoekt: de Realtek-NIC (de eerste
-//! ondersteunde poort, geen twee-poorts-aggregatie) en de NVMe (klasse
-//! 01:08:02, het hele device voor HopOS). Generiek over een
-//! [`Config`]-venster, zodat de zoektocht op de host te toetsen is; welke
-//! vensters er zijn, zegt de MCFG via `board-uefi`.
-//!
-//! De firmware (UEFI) configureerde de hiërarchie en wees de BAR's toe: we
-//! lezen alleen (Go: "hem overschrijven zou de controller op PA 0 zetten").
-
-use driver_pcie::{Config, Function, find};
-
-/// De klassecode van een NVMe-controller: mass storage, NVM, NVMe.
-pub const CLASS_NVME: u32 = 0x01_08_02;
-
-/// Een gevonden device: de functie, de BAR die de driver wil, en de eerste
-/// bus van het ECAM-venster (op de O6N heeft elke root-poort zijn eigen
-/// venster; de INTx-lijn hangt eraan).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Found {
-    /// De functie.
-    pub f: Function,
-    /// Het adres van de BAR.
-    pub bar: u64,
-    /// De eerste bus van het venster.
-    pub root_bus: u8,
-}
-
-/// Zoekt over `windows` (config, eerste bus) de eerste functie waarop `is`
-/// ja zegt, met een toegewezen memory-BAR `bar`. Een functie waarvan de BAR
-/// nul is, telt niet: de firmware wees hem niet toe, en hem zelf toewijzen
-/// doen we op een UEFI-machine niet.
-pub fn first<'a, C: Config + 'a>(
-    windows: impl IntoIterator<Item = (&'a C, u8)>,
-    bar: u8,
-    is: impl Fn(&Function) -> bool,
-) -> Option<Found> {
-    for (c, start) in windows {
-        let hit = find(c, start, |f| {
-            !f.is_bridge() && is(f) && f.bar_addr(c, bar) != 0
-        });
-        if let Some(f) = hit {
-            return Some(Found {
-                f,
-                bar: f.bar_addr(c, bar),
-                root_bus: start,
-            });
-        }
-    }
-    None
-}
+//! Wat de O6N op zijn PCIe-bussen eigen heeft: de INTx-lijn van de
+//! Realtek per root-poort. De zoektocht zelf (de Realtek, de eerste
+//! ondersteunde poort zonder twee-poorts-aggregatie, en de NVMe) is die
+//! van `board_uefi::pcie`; de toetsen ervan over de vensters van de O6N
+//! staan hieronder.
 
 /// De NIC-interrupt: INTx van de root-poort waar de NIC achter hangt, als
 /// GIC-INTID. Bron: de mainline-DT (sky1.dtsi interrupt-map, GIC_SPI n is
@@ -72,7 +27,8 @@ pub fn nic_intid(root_bus: u8) -> Option<u32> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use driver_pcie::Bdf;
+    use board_uefi::pcie::{CLASS_NVME, first};
+    use driver_pcie::{Bdf, Config};
     use std::cell::RefCell;
     use std::collections::HashMap;
 

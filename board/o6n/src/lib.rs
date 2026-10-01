@@ -8,8 +8,8 @@
 //! de console uit de SPCR, CPU_ON via PSCI. Wat dit crate toevoegt, is de
 //! kennis die geen ACPI-tabel draagt:
 //!
-//! - de NIC ([`probe`]): de Realtek achter de eerste root-poort die er een
-//!   heeft, en zijn INTx-lijn per root-poort;
+//! - de NIC: de Realtek achter de eerste root-poort die er een heeft
+//!   (`board_uefi::pcie`), en zijn INTx-lijn per root-poort ([`probe`]);
 //! - de schijf: de NVMe via dezelfde zoektocht;
 //! - de klok ([`clock`], [`cpc`]): de `_CPC`-fastchannels en de knop voor
 //!   `driver-dvfs`;
@@ -68,12 +68,6 @@ pub type Disk = driver_nvme::Nvme;
 /// generieke UEFI-doos met dit image krijgt dan gewoon het UEFI-gedrag (de
 /// Ampere draaide dit image op 19-09).
 pub const OEM_ID: [u8; 6] = *b"CIXTEK";
-
-/// UART2, de 3-pins debug-header van de Orion O6/O6N (PL011, 115200 8n1,
-/// door de firmware al opgezet: haar eigen console). De SPCR wijst naar
-/// UART0 of UART3 (in dmesg: ttyAMA0 op 0x040b0000), die de SCP dicht houdt;
-/// zonder deze spiegel ziet de kabel niets.
-pub const HEADER_UART: u64 = 0x040d_0000;
 
 /// De naam, voor de bootlog.
 pub const NAME: &str = "o6n";

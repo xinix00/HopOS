@@ -52,9 +52,6 @@ pub const LOADER: Region = Region::new(0x0800_0000, 0x0800_0000);
 pub const DTB_PA: u64 = 0x0F00_0000;
 /// De boot-scratch van het plan (`abi::layout::BOOT_SCRATCH_LEN` bytes).
 pub const BOOT_SCRATCH_PA: u64 = 0x0F10_0000;
-/// Het rolwoord van de staging (0 = app, 1 = Hop), buiten de boot-scratch;
-/// `discover` schrijft het.
-pub const STAGE_ROLE_PA: u64 = BOOT_SCRATCH_PA + 0x100;
 /// Het maatwoord van een staging door de kern zelf (de flip-bundel,
 /// `hopos/src/flip.rs`): het handoff-blob ligt in de 256 KiB eronder, de
 /// vluchtrecorder en de trampoline op de boot-scratch-pagina's erboven.
@@ -85,7 +82,6 @@ const _: () = {
     assert!(NET_DMA.size == abi::layout::NET_DMA_SIZE);
     assert!(VCMAIL_BUF >= NET_DMA.base + NET_DMA.size);
     assert!(VCMAIL_BUF + driver_vcmail::BUFFER_BYTES as u64 <= DMA.base + DMA.size);
-    assert!(BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN <= STAGE_ROLE_PA);
     assert!(BOOT_SCRATCH_PA + 0x3000 + 0x4_0000 <= STAGE_HDR_PA && STAGE_HDR_PA + 8 <= STAGE_PA);
     assert!(DTB_PA >= LOADER.base && STAGE_PA < LOADER.base + LOADER.size);
     assert!(FIXED_END.is_multiple_of(MB2));

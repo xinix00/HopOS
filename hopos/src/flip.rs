@@ -75,7 +75,7 @@
 //! niet).
 
 use crate::DevMem;
-use abi::layout::{HANDOFF_MAGIC_OFF, HANDOFF_PTR_OFF};
+use abi::layout::{FLIP_HANDOFF_LEN, HANDOFF_MAGIC_OFF, HANDOFF_PTR_OFF};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::cell::Cell;
@@ -100,9 +100,11 @@ use net::nat::{self as nat, MAX_ADOPT};
 use net::switch::{Ack, Command, NatReply, NatSnapshot};
 use sync::{Either, Local, Signal, select};
 use vboard::slots::{
-    BOOT_SCRATCH_PA, FLIP_HANDOFF_LEN, FLIP_HANDOFF_PA, FLIP_RECORDER_PA, FLIP_STAGE_MAX,
-    FLIP_STAGE_PA, FLIP_TRAMP_PA,
+    BOOT_SCRATCH_PA, FLIP_RECORDER_PA, FLIP_TRAMP_PA, STAGE_HDR_PA, STAGE_MAX, STAGE_PA,
 };
+
+/// Het handoff-blob: direct onder het staging-maatwoord, op elk board.
+const FLIP_HANDOFF_PA: u64 = abi::layout::flip_handoff_pa(STAGE_HDR_PA);
 
 // Het blob van de kern en de plek van het board zijn even groot: een
 // nieuwe kern leest precies [`HANDOFF_TAIL`] bytes op [`FLIP_HANDOFF_PA`].
@@ -215,8 +217,9 @@ fn plan() -> FlipPlan {
     feature = "board-rpi5"
 ))]
 mod black_box {
+    use super::FLIP_HANDOFF_PA;
     use kern::kernflip::BOX_LEN;
-    use vboard::slots::{FLIP_HANDOFF_PA, FLIP_RECORDER_PA, FLIP_TRAMP_PA};
+    use vboard::slots::{FLIP_RECORDER_PA, FLIP_TRAMP_PA};
 
     /// Het begin van de doos.
     pub(super) const PA: u64 = FLIP_HANDOFF_PA - 0x8000;
@@ -235,8 +238,9 @@ mod black_box {
 /// de feiten.
 #[cfg(any(feature = "board-uefi", feature = "board-o6n", feature = "board-altra"))]
 mod black_box {
+    use super::FLIP_HANDOFF_PA;
     use kern::kernflip::BOX_LEN;
-    use vboard::slots::{FLIP_FACTS_LEN, FLIP_FACTS_PA, FLIP_HANDOFF_PA};
+    use vboard::slots::{FLIP_FACTS_LEN, FLIP_FACTS_PA};
 
     /// Het begin van de doos.
     pub(super) const PA: u64 = FLIP_HANDOFF_PA - 0x8000;
@@ -777,10 +781,10 @@ fn stage_slot(flat: u64, cold: bool) -> Result<u64, Refused> {
             kern::Error::NoEnt,
         ));
     }
-    if let Some(at) = kernflip::stage_slot(FLIP_STAGE_PA, FLIP_STAGE_MAX, flat, staged) {
+    if let Some(at) = kernflip::stage_slot(STAGE_PA, STAGE_MAX, flat, staged) {
         return Ok(at);
     }
-    let alone = kernflip::stage_slot(FLIP_STAGE_PA, FLIP_STAGE_MAX, flat, None);
+    let alone = kernflip::stage_slot(STAGE_PA, STAGE_MAX, flat, None);
     match (alone, cold) {
         (Some(at), false) => {
             println!(
@@ -789,7 +793,7 @@ fn stage_slot(flat: u64, cold: bool) -> Result<u64, Refused> {
             );
             Ok(at)
         }
-        _ => Err(too_large(flat, FLIP_STAGE_MAX)),
+        _ => Err(too_large(flat, STAGE_MAX)),
     }
 }
 

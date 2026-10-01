@@ -90,10 +90,7 @@ pub(crate) fn start(exec: &'static Executor) {
         return;
     };
     let flip = crate::flip::generation() > 1;
-    let hop = matches!(
-        vboard::slots::staged_role(),
-        Some(vboard::slots::StagedRole::Hop)
-    );
+    let hop = vboard::slots::staged_role() == Ok(board::stage::StagedRole::Hop);
     if let Err(e) = exec.spawn(run(exec, hw, flip, hop)) {
         println!("watchdog: task not spawned ({e:?}) - node liveness is UNGUARDED HOPOS_WD_NONE");
     }

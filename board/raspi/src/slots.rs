@@ -12,14 +12,13 @@
 //! (de standaard: Hop, de bevoorrechte bewoner).
 
 use crate::map;
-use abi::Region;
 use abi::layout::{Plan, PlanSpec, Pool};
+use board::stage::{self, StagedRole};
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use sync::LocalCell;
 
 pub use crate::map::{
     BOOT_SCRATCH_PA, CAGE_PA, DEVICE_WINDOW, NODE_CTRL_PA, STAGE_HDR_PA, STAGE_MAX, STAGE_PA,
-    STAGE_ROLE_PA,
 };
 
 /// De pool uit de DTB; `discover` vult hem, `plan` leest hem.
@@ -38,9 +37,10 @@ pub(crate) static ROLE: AtomicU64 = AtomicU64::new(1);
 pub fn plan(cores: usize, os_core: usize) -> abi::Result<Plan> {
     let app_cores = cores.saturating_sub(1).max(1);
     let pool = POOL.borrow().clone();
-    let plan = Plan::new(PlanSpec {
+    Plan::new(PlanSpec {
         node_ctrl_pa: NODE_CTRL_PA,
         cage_pa: CAGE_PA,
+        device_window: DEVICE_WINDOW,
         boot_scratch_pa: BOOT_SCRATCH_PA,
         net_dma_pa: map::NET_DMA.base,
         pool,
@@ -49,49 +49,13 @@ pub fn plan(cores: usize, os_core: usize) -> abi::Result<Plan> {
         app_cores,
         os_core,
         ..PlanSpec::default()
-    })?;
-    // De kooi-regio moet helemaal in het Device-venster vallen: een
-    // gecachte park-mailbox is op ijzer een verloren startschot.
-    let blocks = plan.max_slots() as u64 + 1;
-    let cage_end = CAGE_PA + blocks * abi::layout::CAGE_STRIDE;
-    let window_end = DEVICE_WINDOW.base + DEVICE_WINDOW.size;
-    if cage_end > window_end {
-        return Err(abi::Error::Overlap {
-            a: Region::new(CAGE_PA, cage_end - CAGE_PA),
-            b: DEVICE_WINDOW,
-        });
-    }
-    Ok(plan)
+    })
 }
 
-/// Wat het gestagede image is: welke weg de kern ermee gaat.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum StagedRole {
-    /// Een gewone app: de kern plaatst hem zelf, twee keer (het ABI-bewijs).
-    App,
-    /// Hop: de kern plaatst hem één keer, in slot 1, met de bevoegdheid.
-    Hop,
-}
-
-/// De rol van de staging; een onbekende `hopos.stage` is `None` (de kern
-/// plaatst dan niets en zegt dat luid).
-#[must_use]
-pub fn staged_role() -> Option<StagedRole> {
-    match ROLE.load(Relaxed) {
-        0 => Some(StagedRole::App),
-        1 => Some(StagedRole::Hop),
-        _ => None,
-    }
-}
-
-/// De rolcode van een `hopos.stage`-waarde: leeg of `hop` is Hop.
-#[must_use]
-pub fn role_code(v: &str) -> u64 {
-    match v {
-        "" | "hop" => 1,
-        "app" => 0,
-        _ => 2,
-    }
+/// De rol van de staging; een onbekende `hopos.stage` komt als rauw woord
+/// terug (de kern plaatst dan niets en zegt dat luid).
+pub fn staged_role() -> Result<StagedRole, u64> {
+    stage::role(ROLE.load(Relaxed))
 }
 
 /// Het image dat de firmware vóór de boot neerlegde, of `None`. Alleen de
@@ -133,21 +97,11 @@ pub const FLIP_LINK_BASE: u64 = map::KERN_BASE;
 pub const FLIP_PIE: bool = false;
 /// Het beeld blijft onder het einde van de kern-RAM.
 pub const FLIP_IMAGE_END: u64 = map::KERN_END;
-/// De staging van het platte, gerelokeerde beeld.
-pub const FLIP_STAGE_PA: u64 = STAGE_PA;
-/// De grootste staging.
-pub const FLIP_STAGE_MAX: u64 = STAGE_MAX;
 /// De vluchtrecorder.
 pub const FLIP_RECORDER_PA: u64 = BOOT_SCRATCH_PA + 0x1000;
 /// De trampoline (Normal, want het laadvenster is RAM).
 pub const FLIP_TRAMP_PA: u64 = BOOT_SCRATCH_PA + 0x2000;
-/// De maat van het handoff-blob.
-pub const FLIP_HANDOFF_LEN: u64 = 0x4_0000;
-/// Het handoff-blob, direct onder het staging-maatwoord.
-pub const FLIP_HANDOFF_PA: u64 = STAGE_HDR_PA - FLIP_HANDOFF_LEN;
-
 const _: () = {
-    assert!(FLIP_RECORDER_PA >= STAGE_ROLE_PA + 8);
-    assert!(FLIP_TRAMP_PA + 0x1000 <= FLIP_HANDOFF_PA);
-    assert!(FLIP_HANDOFF_PA + FLIP_HANDOFF_LEN <= STAGE_HDR_PA);
+    assert!(FLIP_RECORDER_PA >= BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN);
+    assert!(FLIP_TRAMP_PA + 0x1000 <= abi::layout::flip_handoff_pa(STAGE_HDR_PA));
 };

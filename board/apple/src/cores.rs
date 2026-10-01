@@ -33,7 +33,6 @@ use dev::Pa;
 /// Het PMGR-startblok ligt op deze offset van `/arm-io/pmgr` reg[0] (de
 /// familie t8112/t8122/t8132 deelt hem; m1n1 `smp.c`).
 pub const PMGR_CPU_START_OFF: u64 = 0x34000;
-const PMGR_STOP: u64 = 0x0;
 const PMGR_ENABLE: u64 = 0x4;
 const PMGR_START: u64 = 0x8;
 /// m1n1 `PMGR_DIE_OFFSET`; de mini heeft één die.
@@ -170,19 +169,6 @@ pub fn pmgr_start(i: usize) -> Result<(), Error> {
     dev::write32(b.add(PMGR_ENABLE), 1 << (4 * cluster + core));
     dev::mb();
     dev::write32(b.add(PMGR_START + 4 * u64::from(cluster)), 1 << core);
-    dev::mb();
-    Ok(())
-}
-
-/// Het PMGR-stopbit. GEMETEN 02-09: dit zet een core NIET stil ("gereset"
-/// cores parkeerden zich binnen de flip opnieuw); er is geen bewezen
-/// core-down-recept, dus niemand roept dit tot er een is.
-pub fn pmgr_stop(i: usize) -> Result<(), Error> {
-    let reg = fwinfo::cpu_reg(i).ok_or(Error::NoCore(i))?;
-    let base = pmgr_base().ok_or(Error::NoPmgr)?;
-    let (core, cluster, die) = (reg & 0xff, (reg >> 8) & 0x7, (reg >> 11) & 0xf);
-    let b = Pa(base + u64::from(die) * PMGR_DIE_STEP);
-    dev::write32(b.add(PMGR_STOP), 1 << (4 * cluster + core));
     dev::mb();
     Ok(())
 }

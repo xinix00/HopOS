@@ -141,7 +141,7 @@ async fn idlestat(exec: &'static Executor, every: u64) {
         let s = &crate::net::STATS;
         let h = crate::HEAP.stats();
         println!(
-            "idle: totals rx full {}, rx drops {}, uplink drops rx {} tx {}, nat oversize {} no-route {} flow-full {}, nic tx errors {}, host drops rx {} tx {}; os exits {} faults {}; kern heap {} KB used, {} leaked, {} refused",
+            "idle: totals rx full {}, rx drops {}, uplink drops rx {} tx {}, nat oversize {} no-route {} flow-full {}, nic tx errors {}, host drops rx {} tx {}; os exits {} faults {}; kern heap {} KB used, {} refused",
             s.rx_full.load(Relaxed),
             s.rx_drops.load(Relaxed),
             s.uplink_rx_drops.load(Relaxed),
@@ -155,7 +155,6 @@ async fn idlestat(exec: &'static Executor, every: u64) {
             now.os[5],
             now.os[6],
             h.used >> 10,
-            h.leaked,
             h.refused,
         );
         prev = now;

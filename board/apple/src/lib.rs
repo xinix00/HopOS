@@ -56,7 +56,6 @@ pub mod slots;
 pub mod storage;
 pub mod wdt;
 
-use board::heap::Heap;
 use board::{Board, CoreClass, Dispatched, Error, Plan, Region};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use cpu::el2::Flavor;
@@ -126,6 +125,7 @@ const _: () = {
     assert!(ADMIN.end().0 == LOADER.base.0 && LOADER.end().0 == WINDOW_END);
     assert!(RAM_BASE.is_multiple_of(2 << 20) && WINDOW_END.is_multiple_of(2 << 20));
     assert!(driver_tg3::DMA_NEED <= NET_DMA.size);
+    assert!(PARAMS == SCRATCH + 0x100);
 };
 
 /// De EL2-smaak van dit silicium: E2H is RES1 (VHE-only, GEMETEN 28-08) en
@@ -135,33 +135,6 @@ const _: () = {
 pub const FLAVOR: Flavor = Flavor::AppleVhe;
 
 static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
-
-/// De OS-core uit de config-waarde `v` op een board met `cores` cores en
-/// klassen `class` (dezelfde regel als op virt en UEFI).
-fn os_core_of(
-    v: &str,
-    cores: usize,
-    class: impl Fn(usize) -> CoreClass,
-) -> (usize, Option<&'static str>) {
-    let want = match v {
-        "" => return (usize::MAX, None),
-        "small" => Some(CoreClass::Small),
-        "mid" => Some(CoreClass::Mid),
-        "big" => Some(CoreClass::Big),
-        _ => None,
-    };
-    if let Some(k) = want {
-        return match (0..cores).find(|c| class(*c) == k) {
-            Some(c) => (c, None),
-            None => (usize::MAX, Some("no core of that class")),
-        };
-    }
-    match v.parse::<usize>() {
-        Ok(n) if n < cores => (n, None),
-        Ok(_) => (usize::MAX, Some("no such core")),
-        Err(_) => (usize::MAX, Some("not small, mid, big or a core number")),
-    }
-}
 
 /// Eén bootparameter uit `hopos.cfg` van de loader ("" als hij er niet
 /// is): de bron van de bench en de knoppen van de kern.
@@ -186,7 +159,7 @@ impl Apple {
     /// De fysieke index (ADT-volgorde) van de core waar dit draait.
     #[must_use]
     pub fn this_core(&self) -> usize {
-        slots::core_of(arch::mpidr())
+        slots::core_of(cpu::mpidr())
     }
 
     /// De OS-core die `hopos.cfg` vraagt (`hopos.oscore=<small|mid|big|N>`),
@@ -202,13 +175,8 @@ impl Apple {
     /// (`HOPOS_APPLE_PREFLIGHT_FAIL`): de verhuizing kost de kooien, luid.
     #[must_use]
     pub fn os_core(&self) -> (usize, Option<&'static str>) {
-        let here = self.this_core();
         let v = fw::bootcfg::first(fw::bootcfg::all(self.config(), "hopos.oscore"));
-        match os_core_of(v, self.cores(), |c| self.core_class(c)) {
-            (_, Some(why)) => (here, Some(why)),
-            (usize::MAX, None) => (here, None),
-            (w, None) => (w, None),
-        }
+        board::os_core(v, self.cores(), |c| self.core_class(c), self.this_core())
     }
 
     /// De kick van de OS-core voor de rotatie van `cpu::el2`: de fast IPI
@@ -216,18 +184,12 @@ impl Apple {
     /// EL2), want Apple heeft geen GIC-SGI.
     #[must_use]
     pub fn os_bell(&self) -> cpu::el2::Bell {
-        cpu::el2::Bell::apple(arch::mpidr())
+        cpu::el2::Bell::apple(cpu::mpidr())
     }
 
     /// De fast IPI naar deze core zelf: de zelftest van het IPI-pad.
     pub fn kick_self(&self) {
-        cores::kick(arch::mpidr());
-    }
-
-    /// De CPU_ON van dit board (zie [`cores`]): core `core` op `entry` met
-    /// `ctx` in x0.
-    pub fn cpu_on(&self, core: usize, entry: u64, ctx: u64) -> Result<(), cores::Error> {
-        cores::cpu_on(core, self.this_core(), entry, ctx)
+        cores::kick(cpu::mpidr());
     }
 
     /// `hopos.cfg`: het venster dat `image/apple-m4.sh` in het image bakte,
@@ -345,14 +307,6 @@ impl Board for Apple {
 
     fn firmware(&self) -> &'static str {
         "boot: iBoot or m1n1 (boot_args in x0, ADT), no PSCI, VHE-only EL2, 48-bit identity map"
-    }
-
-    fn init_heap(&self, heap: &Heap) {
-        let (start, end) = arch::heap_bounds();
-        // SAFETY: `hopos/link-apple.ld` legt `__heap_start` achter image,
-        // BSS en stack en `__heap_end` op het einde van de kern-RAM; dat
-        // bereik is Normal gemapt (`mmu::build`) en niemand anders gebruikt het.
-        unsafe { heap.init(start, end) };
     }
 
     /// Leest boot_args en de ADT (x0), zet de watchdogs van de firmware
@@ -600,27 +554,6 @@ pub(crate) fn serror_check(stage: &'static str) -> bool {
 mod arch {
     use core::arch::asm;
 
-    unsafe extern "C" {
-        /// Het begin van de heap (`hopos/link-apple.ld`).
-        static __heap_start: u8;
-        /// Het einde van de heap: het einde van de kern-RAM.
-        static __heap_end: u8;
-    }
-
-    pub(super) fn heap_bounds() -> (usize, usize) {
-        (
-            (&raw const __heap_start) as usize,
-            (&raw const __heap_end) as usize,
-        )
-    }
-
-    pub(super) fn mpidr() -> u64 {
-        let v: u64;
-        // SAFETY: MPIDR_EL1 lezen heeft geen neveneffect.
-        unsafe { asm!("mrs {}, mpidr_el1", out(reg) v, options(nomem, nostack)) };
-        v
-    }
-
     /// HCR_EL2 zoals hij nu staat (de teruglezing van Go's el2Apple).
     pub(super) fn hcr() -> u64 {
         let v: u64;
@@ -681,12 +614,6 @@ mod arch {
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 mod arch {
     //! Host-stubs.
-    pub(super) fn heap_bounds() -> (usize, usize) {
-        (0, 0)
-    }
-    pub(super) fn mpidr() -> u64 {
-        0x8001_0100
-    }
     pub(super) fn hcr() -> u64 {
         0
     }
@@ -710,31 +637,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_window_layout_is_consistent() {
-        assert_eq!(KERN_RAM.end(), DMA.base);
-        assert_eq!(slots::STAGE_PA + slots::STAGE_MAX, LOADER.end().0);
-        assert_eq!(slots::DEVICE_WINDOW.base, ADMIN.base.0);
-        assert_eq!(PARAMS, SCRATCH + 0x100);
-    }
-
-    #[test]
-    fn the_os_core_follows_the_config() {
-        // De M4: cpu0..5 E (small), cpu6..9 P (big).
-        let class = |c: usize| {
-            if c < 6 {
-                CoreClass::Small
-            } else {
-                CoreClass::Big
-            }
-        };
-        assert_eq!(os_core_of("", 10, class), (usize::MAX, None));
-        assert_eq!(os_core_of("small", 10, class), (0, None));
-        assert_eq!(os_core_of("big", 10, class), (6, None));
-        assert_eq!(
-            os_core_of("mid", 10, class).1,
-            Some("no core of that class")
-        );
-        assert_eq!(os_core_of("12", 10, class).1, Some("no such core"));
+    fn without_a_tree_one_big_core() {
         // Zonder boom: één core, big. (`os_core` leest het param-blok op
         // zijn vaste adres: dat is ijzer, geen host.)
         let a = Apple::new();

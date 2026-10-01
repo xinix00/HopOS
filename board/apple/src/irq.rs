@@ -19,7 +19,7 @@
 //! eeuwig terwijl de timer wél afgaat. `apple.TimerWakes` in Go.
 
 use crate::fwinfo;
-use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use core::sync::atomic::Ordering::Relaxed;
 use cpu::irq::Line;
 use dev::Pa;
 use driver_aic::{Aic, Props};
@@ -27,9 +27,6 @@ use driver_aic::{Aic, Props};
 /// De AIC van dit board: leeg tot [`start`], daarna de controller van
 /// `cpu::irq`.
 pub(crate) static AIC: Aic = Aic::empty();
-
-/// Meetlat: geackte fast IPI's en timer-FIQ's.
-pub(crate) static IPIS: AtomicU64 = AtomicU64::new(0);
 
 /// Het ISR_EL1-bit van een wachtende IRQ en FIQ.
 const ISR_I: u64 = 1 << 7;
@@ -108,7 +105,6 @@ pub(crate) fn dispatch() -> Round {
         r.timer = 1;
     }
     if cpu::el2::apple_ipi_ack() {
-        IPIS.fetch_add(1, Relaxed);
         cpu::el2::OS_STATS.kicks.fetch_add(1, Relaxed);
         r.ipi = 1;
     }

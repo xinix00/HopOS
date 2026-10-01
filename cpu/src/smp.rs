@@ -187,6 +187,13 @@ pub fn cpu_on(target: u64, entry: u64, ctx: u64) -> core::result::Result<(), psc
     }
 }
 
+/// MPIDR_EL1 van deze core: de affiniteit voor de GIC-route, de kick en
+/// `core_of` van het board. Op de host 0.
+#[must_use]
+pub fn mpidr() -> u64 {
+    arch::mpidr()
+}
+
 /// Start precies één core op het EL2-regime van deze core, met een verse
 /// stack en `main`: de verhuizing van de kern naar de OS-core bij boot
 /// (PORT.md beslissing 2, `hopos.oscore`). De aanroeper geeft daarna zijn
@@ -237,11 +244,15 @@ mod arch {
     macro_rules! mrs {
         ($reg:literal) => {{
             let v: u64;
-            // SAFETY: een systeemregister van het eigen EL2-regime lezen
-            // heeft geen neveneffect.
+            // SAFETY: een systeemregister van het eigen EL2-regime (of
+            // MPIDR_EL1) lezen heeft geen neveneffect.
             unsafe { asm!(concat!("mrs {}, ", $reg), out(reg) v, options(nomem, nostack)) };
             v
         }};
+    }
+
+    pub(super) fn mpidr() -> u64 {
+        mrs!("mpidr_el1")
     }
 
     pub(super) fn regime() -> Regime {
@@ -365,6 +376,9 @@ mod arch {
     //! en PSCI zegt op de host NOT_SUPPORTED.
     use super::Regime;
 
+    pub(super) fn mpidr() -> u64 {
+        0
+    }
     pub(super) fn regime() -> Regime {
         Regime::default()
     }

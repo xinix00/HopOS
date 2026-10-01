@@ -41,7 +41,7 @@ pub type Machine = Altra;
 pub use board_uefi::{DMA, KERN_RAM, KERN_VHE, facts, irq, slots, watchdog};
 
 use board::CoreClass;
-use driver_pcie::{Config, Function, find};
+use driver_pcie::Function;
 
 /// De schijf die `probe_disk` geeft: de NVMe. De binary noemt hem
 /// `vboard::Disk`, zodat de geprobede schijf van de bench naar de opslag gaat
@@ -50,9 +50,6 @@ pub type Disk = driver_nvme::Nvme;
 
 /// De naam, voor de bootlog.
 pub const NAME: &str = "altra";
-
-/// De klassecode van een NVMe-controller.
-pub const CLASS_NVME: u32 = 0x01_08_02;
 
 /// Hoe lang de igb op een link wacht (het Altra-recept sinds 13-07).
 pub const LINK_TIMEOUT_NS: u64 = 8_000_000_000;
@@ -64,51 +61,17 @@ pub const fn core_class(_core: usize) -> CoreClass {
     CoreClass::Big
 }
 
-/// Een gevonden device en het adres van de BAR die de driver wil.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Found {
-    /// De functie.
-    pub f: Function,
-    /// Het BAR-adres (door de firmware toegewezen; op de Altra vaak hoog).
-    pub bar: u64,
-}
-
-/// De eerste functie over `windows` (config, eerste bus) waarop `is` ja
-/// zegt en die een toegewezen memory-BAR `bar` heeft. De firmware wees de
-/// BAR's toe; wij lezen alleen (hem overschrijven zette de controller op PA
-/// 0: op de Altra een data-abort).
-pub fn first<'a, C: Config + 'a>(
-    windows: impl IntoIterator<Item = (&'a C, u8)>,
-    bar: u8,
-    is: impl Fn(&Function) -> bool,
-) -> Option<Found> {
-    windows.into_iter().find_map(|(c, start)| {
-        find(c, start, |f| {
-            !f.is_bridge() && is(f) && f.bar_addr(c, bar) != 0
-        })
-        .map(|f| Found {
-            f,
-            bar: f.bar_addr(c, bar),
-        })
-    })
-}
-
 /// Is `f` een NIC van dit board?
 #[must_use]
 pub fn is_nic(f: &Function) -> bool {
     driver_igb::supported(f.vendor, f.device)
 }
 
-/// Is `f` een NVMe-controller?
-#[must_use]
-pub fn is_nvme(f: &Function) -> bool {
-    f.class == CLASS_NVME
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use driver_pcie::Bdf;
+    use board_uefi::pcie::{CLASS_NVME, first};
+    use driver_pcie::{Bdf, Config};
     use std::cell::RefCell;
     use std::collections::HashMap;
 
@@ -168,8 +131,8 @@ mod tests {
         );
         let nic = first([(&seg0, 0), (&seg1, 0)], 0, is_nic).unwrap();
         assert_eq!((nic.f.device, nic.bar), (0x1533, 0x3000_0010_0000));
-        let disk = first([(&seg0, 0), (&seg1, 0)], 0, is_nvme).unwrap();
-        assert_eq!(disk.bar, 0x3000_0020_0000);
-        assert_eq!(core_class(127), CoreClass::Big);
+        assert_eq!(nic.win, 1);
+        let disk = first([(&seg0, 0), (&seg1, 0)], 0, |f| f.class == CLASS_NVME).unwrap();
+        assert_eq!((disk.bar, disk.win), (0x3000_0020_0000, 1));
     }
 }

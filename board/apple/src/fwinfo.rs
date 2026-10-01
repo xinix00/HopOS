@@ -22,8 +22,6 @@ use fw::xnuboot::{self, Args};
 /// Zoveel cores houden we bij (de M4 heeft er tien).
 pub const MAX_CPUS: usize = 16;
 
-/// Het boot_args-blok, zoals gelezen (0 = geen).
-static BOOT_ARGS: AtomicU64 = AtomicU64::new(0);
 /// De ADT: fysiek adres en maat.
 static ADT: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 /// Het RAM-contract: phys_base, mem_size, top_of_kernel_data,
@@ -65,7 +63,6 @@ fn read_args(x0: u64) -> Option<Args> {
 /// vanuit `discover`. Geeft de boot_args als ze er zijn.
 pub(crate) fn load(x0: u64) -> Option<Args> {
     let a = read_args(x0)?;
-    BOOT_ARGS.store(x0, Relaxed);
     RAM[0].store(a.phys_base, Relaxed);
     RAM[1].store(a.mem_size, Relaxed);
     RAM[2].store(a.top_of_kernel_data, Relaxed);
@@ -325,12 +322,6 @@ fn carry(ours: &[u8], theirs: &mut [u8]) -> bool {
         *t = *o;
     }
     true
-}
-
-/// De x0 waarmee we binnenkwamen (boot_args), 0 als er geen was.
-#[must_use]
-pub fn boot_args_pa() -> u64 {
-    BOOT_ARGS.load(Relaxed)
 }
 
 #[cfg(test)]

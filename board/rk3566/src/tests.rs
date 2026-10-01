@@ -5,19 +5,6 @@ use super::*;
 use crate::soc::{self, GMAC1_M1_PINS, hiword, iomux_reg};
 
 #[test]
-fn the_plan_is_consistent() {
-    let p = Rk3566::new().plan();
-    assert!(p.dma.contains(p.net_dma.base));
-    assert!(p.net_dma.end().0 <= p.dma.end().0);
-    assert!(p.kern_ram.end().0 <= p.dma.base.0);
-    assert_eq!(
-        p.kern_ram.base.0 % 0x20_0000,
-        0,
-        "an arm64 Image lands 2 MB aligned"
-    );
-}
-
-#[test]
 fn the_slot_plan_validates_and_keeps_clear_of_the_kern() {
     // Zonder DTB: de luide terugval, en die moet valideren.
     let p = slots::plan(4, 0).unwrap();
@@ -100,13 +87,6 @@ fn the_iomux_offsets_follow_pinctrl_rockchip() {
     assert_eq!(iomux_reg(0, 0).0, soc::PMU_GRF);
     // Zestien pinnen, allemaal functie 3 behalve de PHY-reset.
     assert_eq!(GMAC1_M1_PINS.iter().filter(|p| p.func == 3).count(), 15);
-}
-
-#[test]
-fn homogeneous_cores_are_all_big() {
-    let b = Rk3566::new();
-    assert_eq!(b.cores(), CORES_DEFAULT);
-    assert!((0..b.cores()).all(|c| b.core_class(c) == CoreClass::Big));
 }
 
 #[test]

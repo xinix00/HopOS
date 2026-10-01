@@ -60,7 +60,6 @@ mod vcfb {
 mod tests;
 
 use abi::Region as AbiRegion;
-use board::heap::Heap;
 use board::{Board, CoreClass, Dispatched, Error, NoDisk, Plan, Region};
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
@@ -239,7 +238,7 @@ impl<S: Soc> Raspi<S> {
     /// De fysieke index van de core waar dit draait.
     #[must_use]
     pub fn this_core(&self) -> usize {
-        S::core_of(arch::mpidr())
+        S::core_of(cpu::mpidr())
     }
 
     /// De OS-core die de bootargs vragen (`hopos.oscore=`), met een reden
@@ -370,9 +369,9 @@ impl<S: Soc> Raspi<S> {
 
     /// De staging uit /chosen/linux,initrd-* en de rol uit de cmdline.
     fn stage(&self, f: &Fdt<'static>) -> AbiRegion {
-        let role = slots::role_code(f.bootargs().map_or("", |a| cfg::param(a, "hopos.stage")));
+        let role =
+            board::stage::role_code(f.bootargs().map_or("", |a| cfg::param(a, "hopos.stage")));
         slots::ROLE.store(role, Relaxed);
-        dev::write64(Pa(map::STAGE_ROLE_PA), role);
         let Some((start, end)) = f.initrd() else {
             cpu::println!("stage: no initramfs in the DTB, nothing staged");
             return AbiRegion::default();
@@ -411,9 +410,9 @@ pub const HYP_TIMER_PPI: u32 = 26;
 /// app-core die de kern nodig heeft terwijl die geen SEV hoort (PORT.md
 /// beslissing 2).
 ///
-/// Dezelfde 8 als QEMU virt en UEFI, niet de 7 van Rockchip: daar houdt
-/// TF-A SGI 8..15 als Secure Group 1, en een niet-beveiligde schrijf is
-/// RAZ/WI. De Pi's hebben die beperking niet: de BL31 van de Pi 4 en de
+/// Dezelfde 8 als QEMU virt, niet de 7 van Rockchip of de 1 van UEFI: daar
+/// houdt TF-A SGI 8..15 als Secure Group 1, en een niet-beveiligde schrijf
+/// is RAZ/WI. De Pi's hebben die beperking niet: de BL31 van de Pi 4 en de
 /// Pi 5 (plat/rpi) kent geen beveiligde interrupts, `gicv2_pcpu_distif_init`
 /// zet alle SGI's en PPI's dus in Group 1, en de VideoCore-firmware gebruikt
 /// geen SGI (de secundaire cores wachten in een spin-table op WFE). 0..7
@@ -422,7 +421,7 @@ pub const HYP_TIMER_PPI: u32 = 26;
 pub const KICK_SGI: u32 = 8;
 
 /// De device-ack van de CNTHP.
-static HYP_TIMER_ACK: fn() = arch::hyp_timer_off;
+static HYP_TIMER_ACK: fn() = cpu::idle::hyp_timer_off;
 
 /// De "ack" van de kick: er is geen device om los te laten (de core is al
 /// terug bij de kern); alleen tellen.
@@ -459,14 +458,6 @@ impl<S: Soc> Board for Raspi<S> {
 
     fn firmware(&self) -> &'static str {
         "boot: Raspberry Pi firmware, EL2, PSCI via SMC (TF-A)"
-    }
-
-    fn init_heap(&self, heap: &Heap) {
-        let (start, end) = arch::heap_bounds();
-        // SAFETY: `link-raspi.ld` legt `__heap_start` achter image en stack
-        // en `__heap_end` op het einde van de kern-RAM; dat bereik is gemapt
-        // (Normal) en niemand anders gebruikt het.
-        unsafe { heap.init(start, end) };
     }
 
     /// De DTB uit x0 (de firmware legt hem op `device_tree_address`), dan
@@ -578,7 +569,7 @@ impl<S: Soc> Board for Raspi<S> {
         cpu::println!("irq: {}", gic.describe());
         // Vanaf hier mag de vector komen: hij zet de vlag, wekt de
         // dispatch-taak via `cpu::irq::on_irq` en keert gemaskeerd terug.
-        arch::irq_unmask();
+        cpu::irq::unmask();
         Ok(&cpu::irq::IRQ_PENDING)
     }
 
@@ -586,7 +577,7 @@ impl<S: Soc> Board for Raspi<S> {
         let k0 = cpu::el2::OS_STATS.kicks.load(Relaxed);
         let pass = cpu::irq::global().dispatch();
         // De vector liet I dicht; de ronde is klaar, dus weer open.
-        arch::irq_unmask();
+        cpu::irq::unmask();
         // De kicks van deze ronde zijn geen NIC-werk.
         let kicks = cpu::el2::OS_STATS.kicks.load(Relaxed).wrapping_sub(k0);
         let kicks = u32::try_from(kicks).unwrap_or(u32::MAX);

@@ -24,8 +24,6 @@ pub struct HeapStats {
     pub allocs: u64,
     /// Vrijgaven.
     pub frees: u64,
-    /// Niet-herbruikbare vrijgaven (altijd nul bij deze allocator).
-    pub leaked: u64,
     /// Geweigerde allocaties.
     pub refused: u64,
 }
@@ -56,7 +54,6 @@ impl Heap {
             free: s.ceiling.saturating_sub(s.used) as usize,
             allocs: s.allocs,
             frees: s.frees,
-            leaked: 0,
             refused: s.failed,
         }
     }

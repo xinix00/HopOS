@@ -63,6 +63,7 @@ mod gop {
 }
 mod memmap;
 mod mmu;
+pub mod pcie;
 pub mod slots;
 // De xHCI's op PCIe (usb.rs), alleen in de gui-smaak; het DMA-stuk ook
 // voor de O6N.
@@ -73,7 +74,7 @@ use board::heap::Heap;
 use board::{Board, CoreClass, Dispatched, Error, Plan, Region};
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering::Relaxed};
 use dev::Pa;
-use driver_gicv3::Gic;
+use driver_gicv3::{Gic, SysRegIcc};
 use driver_ns16550::Ns16550;
 use driver_pcie::{Ecam, Function};
 use driver_pl011::Pl011;
@@ -185,7 +186,8 @@ pub const LOADER: Region = Region {
 const _: () = {
     assert!(HEAP.end().0 == TABLES.base.0 && TABLES.end().0 == KERN_RAM.end().0);
     assert!(KERN_RAM.end().0 == DMA.base.0 && DMA.end().0 == ADMIN.base.0);
-    assert!(NET_DMA.end().0 == ITS_DMA.base.0 && ITS_DMA.end().0 == BLK_DMA.base.0);
+    assert!(NET_DMA.base.0 == DMA.base.0 && NET_DMA.end().0 == ITS_DMA.base.0);
+    assert!(ITS_DMA.end().0 == BLK_DMA.base.0);
     assert!(BLK_DMA.end().0 == DMA.end().0 && ITS_DMA.base.0.is_multiple_of(0x1_0000));
     assert!(ADMIN.end().0 == LOADER.base.0 && LOADER.end().0 == WINDOW_PA + WINDOW);
     assert!(driver_virtioblk::DMA_NEED <= BLK_DMA.size);
@@ -256,33 +258,6 @@ fn own_line(id: u32) -> bool {
     true
 }
 
-/// De OS-core uit de config-waarde `v` op een board met `cores` cores en
-/// klassen `class` (dezelfde regel als op virt).
-fn os_core_of(
-    v: &str,
-    cores: usize,
-    class: impl Fn(usize) -> CoreClass,
-) -> (usize, Option<&'static str>) {
-    let want = match v {
-        "" => return (0, None),
-        "small" => Some(CoreClass::Small),
-        "mid" => Some(CoreClass::Mid),
-        "big" => Some(CoreClass::Big),
-        _ => None,
-    };
-    if let Some(k) = want {
-        return match (0..cores).find(|c| class(*c) == k) {
-            Some(c) => (c, None),
-            None => (0, Some("no core of that class")),
-        };
-    }
-    match v.parse::<usize>() {
-        Ok(n) if n < cores => (n, None),
-        Ok(_) => (0, Some("no such core")),
-        Err(_) => (0, Some("not small, mid, big or a core number")),
-    }
-}
-
 /// De PCIe-segmenten die we afzoeken, en hoeveel functies per segment we
 /// in de bootlog noemen.
 const PCI_LOG_MAX: usize = 32;
@@ -332,7 +307,7 @@ fn is_16550(ty: u8) -> bool {
 }
 
 /// De GIC, uit de feiten.
-fn gic() -> Gic<arch::SysRegIcc> {
+fn gic() -> Gic<SysRegIcc> {
     // SAFETY: GICD en het redistributor-frame van core 0 komen uit de MADT
     // en de identity map mapt ze als Device (onder 1 TB standaard, daarboven
     // expliciet in `boot::build_map`).
@@ -340,7 +315,7 @@ fn gic() -> Gic<arch::SysRegIcc> {
         Gic::new(
             Pa(facts::GICD.load(Relaxed)),
             Pa(facts::GICR_BASE.load(Relaxed)),
-            arch::SysRegIcc,
+            SysRegIcc,
         )
     }
 }
@@ -406,7 +381,7 @@ impl Uefi {
     /// De fysieke index van de core waar dit draait.
     #[must_use]
     pub fn this_core(&self) -> usize {
-        slots::core_of(arch::mpidr())
+        slots::core_of(cpu::mpidr())
     }
 
     /// De kick van de OS-core voor de rotatie van `cpu::el2`: de SGI naar
@@ -415,10 +390,10 @@ impl Uefi {
     #[must_use]
     pub fn os_bell(&self) -> cpu::el2::Bell {
         cpu::el2::Bell {
-            sgi1r: driver_gicv3::sgi1r(arch::mpidr(), KICK_SGI),
+            sgi1r: driver_gicv3::sgi1r(cpu::mpidr(), KICK_SGI),
             sgir: 0,
             intid: KICK_SGI,
-            pending: arch::hppir1,
+            pending: cpu::gicv3::hppir1,
         }
     }
 
@@ -427,14 +402,16 @@ impl Uefi {
     /// één luide regel met het woord, het doel en wat de redistributor zei:
     /// de zelftest ziet daarna alleen nog `Timer` en weet niet waarom.
     pub fn kick_self(&self) {
-        let mpidr = arch::mpidr();
+        let mpidr = cpu::mpidr();
         let word = driver_gicv3::sgi1r(mpidr, KICK_SGI);
-        arch::sgi1r(word);
+        cpu::gicv3::sgi1r(word);
         let gic = gic();
         let hz = cpu::idle::freq();
         let limit = cpu::idle::counter().wrapping_add(cpu::idle::ns_to_ticks(KICK_SEEN_NS, hz));
         for _ in 0..KICK_SEEN_POLLS {
-            if gic.local(KICK_SGI).is_some_and(|l| l.is_pending()) || arch::hppir1() == KICK_SGI {
+            if gic.local(KICK_SGI).is_some_and(|l| l.is_pending())
+                || cpu::gicv3::hppir1() == KICK_SGI
+            {
                 return;
             }
             if cpu::idle::counter().wrapping_sub(limit) as i64 >= 0 {
@@ -446,7 +423,7 @@ impl Uefi {
             cpu::println!(
                 "irq: kick SGI {KICK_SGI} did not arrive: ICC_SGI1R {word:#x} to MPIDR {mpidr:#x}, {}, ICC_HPPIR1 {} HOPOS_KICK_LOST",
                 Seen(seen),
-                arch::hppir1()
+                cpu::gicv3::hppir1()
             );
         }
     }
@@ -457,7 +434,7 @@ impl Uefi {
     #[must_use]
     pub fn os_core(&self) -> (usize, Option<&'static str>) {
         let v = fw::bootcfg::first(fw::bootcfg::all(self.config(), "hopos.oscore"));
-        os_core_of(v, self.cores(), |c| self.core_class(c))
+        board::os_core(v, self.cores(), |c| self.core_class(c), 0)
     }
 
     /// Een ACPI-tabel met signature `sig` (de eerste; `DSDT` via de FADT),
@@ -498,7 +475,7 @@ impl Uefi {
             return irq::enable_lpi(intid);
         }
         gic()
-            .enable(intid, arch::mpidr())
+            .enable(intid, cpu::mpidr())
             .map_err(|_| Error::Irq("line refused"))
     }
 
@@ -674,7 +651,7 @@ impl Board for Uefi {
     }
 
     fn start_interrupts(&self) -> Result<&'static Signal, Error> {
-        let mpidr = arch::mpidr();
+        let mpidr = cpu::mpidr();
         if facts::GICD.load(Relaxed) == 0 {
             return Err(Error::Irq("no GICD in the MADT"));
         }
@@ -712,7 +689,7 @@ impl Board for Uefi {
         }
         cpu::println!("irq: {}", gic.describe());
         irq::start_its(&gic);
-        arch::irq_unmask();
+        cpu::irq::unmask();
         Ok(&cpu::irq::IRQ_PENDING)
     }
 
@@ -726,7 +703,7 @@ impl Board for Uefi {
                 arch::timer_off();
                 d.timer += 1;
             } else if id == hyp {
-                arch::hyp_timer_off();
+                cpu::idle::hyp_timer_off();
                 d.timer += 1;
             } else if id == KICK_SGI {
                 cpu::el2::OS_STATS.kicks.fetch_add(1, Relaxed);
@@ -737,7 +714,7 @@ impl Board for Uefi {
             }
             gic.eoi(id);
         }
-        arch::irq_unmask();
+        cpu::irq::unmask();
         d
     }
 
@@ -844,37 +821,6 @@ static EFI_USED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsi
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_window_layout_is_consistent() {
-        assert_eq!(KERN_RAM.end(), DMA.base);
-        assert!(DMA.contains(NET_DMA.base) && DMA.contains(BLK_DMA.base));
-        assert_eq!(slots::STAGE_PA + slots::STAGE_MAX, LOADER.end().0);
-        assert_eq!(slots::DEVICE_WINDOW.base, ADMIN.base.0);
-    }
-
-    #[test]
-    fn the_os_core_follows_the_config() {
-        // Een O6N-achtige indeling: 0-3 small, 4-7 mid, 8-11 big.
-        let class = |c: usize| match c {
-            0..=3 => CoreClass::Small,
-            4..=7 => CoreClass::Mid,
-            _ => CoreClass::Big,
-        };
-        assert_eq!(os_core_of("", 12, class), (0, None));
-        assert_eq!(os_core_of("mid", 12, class), (4, None));
-        assert_eq!(os_core_of("big", 12, class), (8, None));
-        assert_eq!(os_core_of("11", 12, class), (11, None));
-        assert_eq!(os_core_of("12", 12, class), (0, Some("no such core")));
-        assert_eq!(
-            os_core_of("fast", 12, class),
-            (0, Some("not small, mid, big or a core number"))
-        );
-        assert_eq!(
-            os_core_of("small", 4, |_| CoreClass::Big),
-            (0, Some("no core of that class"))
-        );
-    }
 
     #[test]
     fn the_kick_of_the_o6n_os_core_is_a_non_secure_sgi() {

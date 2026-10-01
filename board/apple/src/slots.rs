@@ -20,6 +20,7 @@
 use crate::{ADMIN, LOADER, RAM_BASE, WINDOW_END, fwinfo};
 use abi::Region;
 use abi::layout::{Plan, PlanSpec, Pool, carve_pool};
+use board::stage::{self, StagedRole};
 use core::sync::atomic::{AtomicU8, Ordering::Relaxed};
 use cpu::el2::{Back, Bell, OsCore};
 use cpu::println;
@@ -81,21 +82,11 @@ pub const FLIP_PIE: bool = false;
 pub const FLIP_TRAMP_PA: u64 = crate::KERN_RAM.base.0 + crate::KERN_RAM.size - 0x1000;
 /// Het beeld blijft onder de trampoline.
 pub const FLIP_IMAGE_END: u64 = FLIP_TRAMP_PA;
-/// De staging van het platte, gerelokeerde beeld.
-pub const FLIP_STAGE_PA: u64 = STAGE_PA;
-/// De grootste staging.
-pub const FLIP_STAGE_MAX: u64 = STAGE_MAX;
 /// De vluchtrecorder.
 pub const FLIP_RECORDER_PA: u64 = FLIP_SCRATCH_PA;
-/// De maat van het handoff-blob.
-pub const FLIP_HANDOFF_LEN: u64 = 0x4_0000;
-/// Het handoff-blob, direct onder het staging-maatwoord.
-pub const FLIP_HANDOFF_PA: u64 = STAGE_HDR_PA - FLIP_HANDOFF_LEN;
-
-const _: () = {
-    assert!(FLIP_HANDOFF_PA >= BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN);
-    assert!(FLIP_HANDOFF_PA + FLIP_HANDOFF_LEN <= STAGE_HDR_PA);
-};
+const _: () = assert!(
+    abi::layout::flip_handoff_pa(STAGE_HDR_PA) >= BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN
+);
 
 /// De pool uit het RAM-contract van boot_args, met de gaten eruit. Leeg of
 /// mislukt = de luide terugval (`false`).
@@ -169,7 +160,7 @@ fn preflight(plan: &Plan) -> bool {
         2 => return false,
         _ => {}
     }
-    let here = arch::mpidr();
+    let here = cpu::mpidr();
     // Het EL2-regime zoals iBoot of m1n1 het achterliet en de kern het
     // zette, teruggelezen zoals Go's el2Apple (30-09: onder kmutil gaf de
     // voorproef drie keer Fault, en zonder deze regel is dat blind).
@@ -276,15 +267,6 @@ pub fn core_of(mpidr: u64) -> usize {
     fwinfo::core_of(mpidr).unwrap_or(0)
 }
 
-/// Wat het gestagede image is.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum StagedRole {
-    /// Een gewone app: de kern plaatst hem zelf.
-    App,
-    /// Hop: één keer, in slot 1, met de bevoegdheid.
-    Hop,
-}
-
 fn staged() -> bool {
     dev::read64(Pa(STAGE_MAGIC_PA)) == STAGE_MAGIC
 }
@@ -300,22 +282,17 @@ fn embedded() -> Option<&'static [u8]> {
 
 /// De rol uit [`STAGE_ROLE_PA`]. Zonder staging "app": de kern zoekt dan het
 /// image, vindt het niet en zegt `HOPOS_SLOT_NONE`.
-#[must_use]
-pub fn staged_role() -> Option<StagedRole> {
+pub fn staged_role() -> Result<StagedRole, u64> {
     if !staged() {
         // Zonder loader: de ingebakken stage is Hop (image/apple-m4.sh
         // `EMBED=`), anders is er niets en zoekt de kern een app.
-        return Some(if embedded().is_some() {
+        return Ok(if embedded().is_some() {
             StagedRole::Hop
         } else {
             StagedRole::App
         });
     }
-    match dev::read64(Pa(STAGE_ROLE_PA)) {
-        0 => Some(StagedRole::App),
-        1 => Some(StagedRole::Hop),
-        _ => None,
-    }
+    stage::role_at(STAGE_ROLE_PA)
 }
 
 /// Het image dat de loader neerlegde, of `None`. Alleen de maat wordt hier
@@ -325,35 +302,7 @@ pub fn staged_image() -> Option<&'static [u8]> {
     if !staged() {
         return embedded();
     }
-    let size = dev::read64(Pa(STAGE_HDR_PA));
-    if size == 0 || size > STAGE_MAX {
-        return None;
-    }
-    let len = usize::try_from(size).ok()?;
-    // SAFETY: `[STAGE_PA, STAGE_PA + size)` ligt in de loader-regio van het
-    // venster (`size <= STAGE_MAX`, net getoetst): RAM van ons, Normal
-    // gemapt, buiten de pool; na de loader schrijft niemand erin.
-    Some(unsafe { core::slice::from_raw_parts(STAGE_PA as usize as *const u8, len) })
-}
-
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
-mod arch {
-    use core::arch::asm;
-
-    pub(super) fn mpidr() -> u64 {
-        let v: u64;
-        // SAFETY: MPIDR_EL1 lezen heeft geen neveneffect.
-        unsafe { asm!("mrs {}, mpidr_el1", out(reg) v, options(nomem, nostack)) };
-        v
-    }
-}
-
-#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-mod arch {
-    //! Host-stub: cpu6 van de M4.
-    pub(super) fn mpidr() -> u64 {
-        0x8001_0100
-    }
+    stage::staged_at(STAGE_HDR_PA, STAGE_PA, STAGE_MAX)
 }
 
 #[cfg(test)]

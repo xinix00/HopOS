@@ -426,8 +426,14 @@ pub async fn run(log: fn(fmt::Arguments<'_>)) {
         let before = d.stats.fired.load(Relaxed);
         let pass = d.dispatch();
         report(d, before, pass, log);
-        arch::unmask_irq();
+        unmask();
     }
+}
+
+/// Opent I (DAIFClr #2) op deze core: het einde van elke dispatch-ronde (de
+/// vector keert gemaskeerd terug).
+pub fn unmask() {
+    arch::unmask_irq();
 }
 
 fn report(d: &Dispatcher, before: u64, pass: Pass, log: fn(fmt::Arguments<'_>)) {

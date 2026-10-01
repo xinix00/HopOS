@@ -68,7 +68,6 @@ const GPIO_BASE: u64 = 0x3_9a00_0000;
 
 // De poortregisters (Linux `pcie-apple.c`; m1n1 dezelfde).
 const PORT_LTSSMCTL: u64 = 0x080;
-const PORT_INTSTAT: u64 = 0x100;
 const PORT_LINKSTS: u64 = 0x208;
 const PORT_APPCLK: u64 = 0x800;
 const PORT_STATUS: u64 = 0x804;
@@ -522,14 +521,6 @@ pub fn enumerate_nic() -> Result<Endpoint, Why> {
     dev::mb();
     let cfg = ECAM + f.bdf.ecam_offset();
     Ok(Endpoint { f, bar0, cfg })
-}
-
-/// Het poortregisterblok van de ethernet-poort (INTx-status op
-/// [`PORT_INTSTAT`], alleen leesbaar: een W1C-schrijf gaf een synchrone
-/// externe abort, ESR 0x96000410).
-#[must_use]
-pub fn eth_port_intstat() -> u32 {
-    dev::read32(Pa(ETH_PORT_BASE + PORT_INTSTAT))
 }
 
 #[cfg(test)]

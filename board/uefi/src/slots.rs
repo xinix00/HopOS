@@ -17,9 +17,9 @@
 use crate::memmap::{self, Map};
 use crate::{ADMIN, LOADER, facts};
 use abi::Region;
-use abi::layout::{POOL_MAX, Plan, PlanSpec, Pool};
+use abi::layout::{POOL_MAX, Plan, PlanSpec, Pool, pool_of};
+use board::stage::{self, StagedRole};
 use core::sync::atomic::Ordering::Relaxed;
-use dev::Pa;
 
 /// De control-pages van de eigen cores van de kern: het begin van het
 /// kooi-venster.
@@ -61,15 +61,7 @@ pub(crate) fn final_map() -> Map {
 /// De pool: het vrije DRAM uit de kaart van de exit.
 fn pool() -> abi::Result<Pool> {
     let (free, _dropped) = memmap::free_regions::<POOL_MAX>(&final_map());
-    let mut pool = Pool::new();
-    for r in free.iter() {
-        pool.push(Region::new(r.base.0, r.size))
-            .map_err(|_| abi::Error::TooMany {
-                what: "pool regions",
-                cap: POOL_MAX,
-            })?;
-    }
-    Ok(pool)
+    pool_of(free.iter().map(|r| Region::new(r.base.0, r.size)))
 }
 
 /// Het laagste RAM-adres uit de kaart (het meetpunt van `required_ram`).
@@ -88,9 +80,10 @@ fn ram_base() -> u64 {
 /// zoals op virt.
 pub fn plan(cores: usize, os_core: usize) -> abi::Result<Plan> {
     let app_cores = cores.saturating_sub(1).max(1);
-    let plan = Plan::new(PlanSpec {
+    Plan::new(PlanSpec {
         node_ctrl_pa: NODE_CTRL_PA,
         cage_pa: CAGE_PA,
+        device_window: DEVICE_WINDOW,
         boot_scratch_pa: BOOT_SCRATCH_PA,
         net_dma_pa: crate::NET_DMA.base.0,
         pool: pool()?,
@@ -99,16 +92,7 @@ pub fn plan(cores: usize, os_core: usize) -> abi::Result<Plan> {
         app_cores,
         os_core,
         ..PlanSpec::default()
-    })?;
-    let blocks = plan.max_slots() as u64 + 1;
-    let cage_end = CAGE_PA + blocks * abi::layout::CAGE_STRIDE;
-    if cage_end > DEVICE_WINDOW.base + DEVICE_WINDOW.size {
-        return Err(abi::Error::Overlap {
-            a: Region::new(CAGE_PA, cage_end - CAGE_PA),
-            b: DEVICE_WINDOW,
-        });
-    }
-    Ok(plan)
+    })
 }
 
 /// Het MPIDR-target van logische core `core`: uit de MADT (core 0 is de
@@ -127,39 +111,15 @@ pub fn core_of(mpidr: u64) -> usize {
     (0..n).find(|&c| self::mpidr(c) == aff).unwrap_or(0)
 }
 
-/// Wat het gestagede image is: welke weg de kern ermee gaat.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum StagedRole {
-    /// Een gewone app: de kern plaatst hem zelf, twee keer (het ABI-bewijs).
-    App,
-    /// Hop: de kern plaatst hem één keer, in slot 1, met de bevoegdheid.
-    Hop,
+/// De rol uit [`STAGE_ROLE_PA`]; een onbekend woord komt rauw terug.
+pub fn staged_role() -> Result<StagedRole, u64> {
+    stage::role_at(STAGE_ROLE_PA)
 }
 
-/// De rol uit [`STAGE_ROLE_PA`]; een onbekend woord is `None`.
-#[must_use]
-pub fn staged_role() -> Option<StagedRole> {
-    match dev::read64(Pa(STAGE_ROLE_PA)) {
-        0 => Some(StagedRole::App),
-        1 => Some(StagedRole::Hop),
-        _ => None,
-    }
-}
-
-/// Het image dat de stub van de ESP las, of `None`. Alleen de maat wordt
-/// hier getoetst; de inhoud is onvertrouwd en gaat door de ELF-lezer en
-/// `abi::place`.
+/// Het image dat de stub van de ESP las, of `None` (`board::stage`).
 #[must_use]
 pub fn staged_image() -> Option<&'static [u8]> {
-    let size = dev::read64(Pa(STAGE_HDR_PA));
-    if size == 0 || size > STAGE_MAX {
-        return None;
-    }
-    let len = usize::try_from(size).ok()?;
-    // SAFETY: `[STAGE_PA, STAGE_PA + size)` ligt in de loader-regio van het
-    // kernvenster (`size <= STAGE_MAX`, net getoetst): RAM van ons, Normal
-    // gemapt, buiten de pool; na de stub schrijft niemand erin.
-    Some(unsafe { core::slice::from_raw_parts(STAGE_PA as usize as *const u8, len) })
+    stage::staged_at(STAGE_HDR_PA, STAGE_PA, STAGE_MAX)
 }
 
 /// Mapt `[pa, pa + size)` als Device (zie [`crate::map_device`]).
@@ -206,10 +166,6 @@ pub const FLIP_LINK_BASE: u64 = 0;
 pub const FLIP_PIE: bool = true;
 /// Geen vaste grens: het nieuwe beeld moet in het oude passen.
 pub const FLIP_IMAGE_END: u64 = 0;
-/// De staging van het platte beeld.
-pub const FLIP_STAGE_PA: u64 = STAGE_PA;
-/// De grootste staging.
-pub const FLIP_STAGE_MAX: u64 = STAGE_MAX;
 /// De vluchtrecorder.
 pub const FLIP_RECORDER_PA: u64 = BOOT_SCRATCH_PA + 0x1000;
 /// De trampoline (Normal: de loader-regio is RAM uit de kaart).
@@ -218,14 +174,9 @@ pub const FLIP_TRAMP_PA: u64 = BOOT_SCRATCH_PA + 0x2000;
 pub const FLIP_FACTS_PA: u64 = BOOT_SCRATCH_PA + 0x3000;
 /// Hoeveel ruimte die feiten hebben.
 pub const FLIP_FACTS_LEN: u64 = 0x2000;
-/// De maat van het handoff-blob.
-pub const FLIP_HANDOFF_LEN: u64 = 0x4_0000;
-/// Het handoff-blob, direct onder het staging-maatwoord.
-pub const FLIP_HANDOFF_PA: u64 = STAGE_HDR_PA - FLIP_HANDOFF_LEN;
 
 const _: () = {
     assert!(FLIP_RECORDER_PA >= BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN);
     assert!(FLIP_TRAMP_PA + 0x1000 <= FLIP_FACTS_PA);
-    assert!(FLIP_FACTS_PA + FLIP_FACTS_LEN <= FLIP_HANDOFF_PA);
-    assert!(FLIP_HANDOFF_PA + FLIP_HANDOFF_LEN <= STAGE_HDR_PA);
+    assert!(FLIP_FACTS_PA + FLIP_FACTS_LEN <= abi::layout::flip_handoff_pa(STAGE_HDR_PA));
 };

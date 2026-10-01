@@ -1,31 +1,9 @@
-//! De losse instructies van de Pi's: de grenzen van de heap uit het
-//! linkscript, het I-masker, de TLB na een tabelwijziging, de slices over
-//! firmware-geheugen, en de ingang ([`pi_entry!`](crate::pi_entry)) die
-//! vóór `cpu::boot` draait.
+//! De losse instructies van de Pi's: de TLB na een tabelwijziging, de
+//! SError-peek, de slices over firmware-geheugen, en de ingang
+//! ([`pi_entry!`](crate::pi_entry)) die vóór `cpu::boot` draait.
 //!
 //! Op de host staan hier stubs met dezelfde signatuur, zodat de logica
 //! erboven test (handboek §7: `cfg` op module-niveau).
-
-/// Opent I: het einde van elke dispatch-ronde (de vector keert gemaskeerd
-/// terug).
-pub(crate) fn irq_unmask() {
-    imp::irq_unmask();
-}
-
-/// De MPIDR van deze core.
-pub(crate) fn mpidr() -> u64 {
-    imp::mpidr()
-}
-
-/// De EL2-timer (CNTHP) uit: zijn lijn valt.
-pub(crate) fn hyp_timer_off() {
-    imp::hyp_timer_off();
-}
-
-/// Het heap-bereik uit het linkscript.
-pub(crate) fn heap_bounds() -> (usize, usize) {
-    imp::heap_bounds()
-}
 
 /// Maakt nieuwe tabelregels zichtbaar voor de table-walker: de schrijfacties
 /// eerst naar het inner-shareable domein, dan de TLB van EL2 leeg.
@@ -56,45 +34,12 @@ pub(crate) fn dtb_slice(pa: u64, len: usize) -> Option<&'static [u8]> {
 mod imp {
     use core::arch::asm;
 
-    unsafe extern "C" {
-        /// Het begin van de heap (`hopos/link-raspi.ld`).
-        static __heap_start: u8;
-        /// Het einde van de heap: het einde van de kern-RAM.
-        static __heap_end: u8;
-    }
-
-    pub(super) fn heap_bounds() -> (usize, usize) {
-        (
-            (&raw const __heap_start) as usize,
-            (&raw const __heap_end) as usize,
-        )
-    }
-
-    pub(super) fn mpidr() -> u64 {
-        let v: u64;
-        // SAFETY: MPIDR_EL1 lezen heeft geen neveneffect.
-        unsafe { asm!("mrs {}, mpidr_el1", out(reg) v, options(nomem, nostack)) };
-        v
-    }
-
     pub(super) fn isr() -> u64 {
         let v: u64;
         // SAFETY: ISR_EL1 lezen heeft geen neveneffect; het neemt geen
         // exception en wist niets.
         unsafe { asm!("mrs {}, isr_el1", out(reg) v, options(nomem, nostack)) };
         v
-    }
-
-    pub(super) fn hyp_timer_off() {
-        // SAFETY: CNTHP_CTL_EL2 = 0 zet de EL2-timer van deze core uit; geen
-        // geheugeneffect.
-        unsafe { asm!("msr cnthp_ctl_el2, xzr", "isb", options(nomem, nostack)) };
-    }
-
-    pub(super) fn irq_unmask() {
-        // SAFETY: alleen PSTATE.I van deze core; geen `nomem`, zodat geen
-        // geheugentoegang over het openen heen schuift.
-        unsafe { asm!("msr daifclr, #2", options(nostack)) };
     }
 
     pub(super) fn tables_changed() {
@@ -127,17 +72,9 @@ mod imp {
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 mod imp {
     //! Host-stubs.
-    pub(super) fn heap_bounds() -> (usize, usize) {
-        (0, 0)
-    }
-    pub(super) fn mpidr() -> u64 {
-        0
-    }
     pub(super) fn isr() -> u64 {
         0
     }
-    pub(super) fn hyp_timer_off() {}
-    pub(super) fn irq_unmask() {}
     pub(super) fn tables_changed() {}
     pub(super) fn slice(_pa: u64, _len: u64) -> Option<&'static [u8]> {
         None

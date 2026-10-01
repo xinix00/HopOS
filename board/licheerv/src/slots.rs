@@ -19,7 +19,8 @@
 //! eigen code heen.
 
 use abi::Region;
-use abi::layout::{Plan, PlanSpec, Pool};
+use abi::layout::{Plan, PlanSpec, pool_of};
+use board::stage::StagedRole;
 
 /// De staart van het DRAM voor de structuren van de kern.
 pub const OS_BASE: u64 = 0x8FE0_0000;
@@ -35,13 +36,11 @@ pub const POOL: [Region; 3] = [
     Region::new(0x8000_0000, 0x0400_0000),
     Region::new(0x8700_0000, 0x0100_0000),
 ];
-/// De staging van een image: er is geen QEMU die iets neerlegt, dus het
-/// maatwoord blijft nul. Een plek in de staart, zodat de flip-lijm zijn
-/// namen heeft.
+/// Het maatwoord van een staging: er is geen QEMU die iets neerlegt (het
+/// image zit in de kern, [`staged_image`]). Een plek in de staart voor de
+/// flip-lijm: het handoff-blob eronder, het platte beeld erachter.
 pub const STAGE_HDR_PA: u64 = OS_BASE + 0x1C_0000;
-/// Het rolwoord.
-pub const STAGE_ROLE_PA: u64 = STAGE_HDR_PA + 8;
-/// De staging zelf.
+/// De staging van de flip.
 pub const STAGE_PA: u64 = STAGE_HDR_PA + 0x1000;
 /// De grootste staging: tot het einde van het DRAM.
 pub const STAGE_MAX: u64 = 0x9000_0000 - STAGE_PA;
@@ -54,18 +53,11 @@ const _: () = assert!(CAGE_PA + 3 * abi::layout::CAGE_STRIDE <= STAGE_HDR_PA);
 /// app-hart; twee kooien (Hop en één app).
 pub fn plan(cores: usize, os_core: usize) -> abi::Result<Plan> {
     let app_cores = cores.saturating_sub(1).max(1);
-    let mut pool = Pool::new();
-    for r in POOL {
-        pool.push(r).map_err(|_| abi::Error::TooMany {
-            what: "pool regions",
-            cap: abi::layout::POOL_MAX,
-        })?;
-    }
     Plan::new(PlanSpec {
         node_ctrl_pa: NODE_CTRL_PA,
         cage_pa: CAGE_PA,
         boot_scratch_pa: BOOT_SCRATCH_PA,
-        pool,
+        pool: pool_of(POOL)?,
         ram_base: 0x8000_0000,
         max_slots: app_cores + 1,
         app_cores,
@@ -102,21 +94,11 @@ pub fn staged_image() -> Option<&'static [u8]> {
     Some(&STAGE.0).filter(|b| !b.is_empty())
 }
 
-/// Wat het gestagede image is.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum StagedRole {
-    /// Een gewone app.
-    App,
-    /// Hop.
-    Hop,
-}
-
 /// Een gebakken image is altijd een gewone app (het ABI-bewijs, twee keer
 /// door de kern geplaatst); Hop op de LicheeRV komt via zijn eigen weg. Zonder
 /// image zegt de plaatsing dat er niets is (`HOPOS_SLOT_NONE`).
-#[must_use]
-pub fn staged_role() -> Option<StagedRole> {
-    Some(StagedRole::App)
+pub fn staged_role() -> Result<StagedRole, u64> {
+    Ok(StagedRole::App)
 }
 
 // --- De kern-flip (hopos/src/flip.rs, docs/flip.md) ---------------------
@@ -131,23 +113,14 @@ pub const FLIP_LINK_BASE: u64 = 0x8400_0000;
 pub const FLIP_PIE: bool = false;
 /// Het einde van het beeld: het begin van de DMA-regio.
 pub const FLIP_IMAGE_END: u64 = 0x8680_0000;
-/// De staging van het platte beeld.
-pub const FLIP_STAGE_PA: u64 = STAGE_PA;
-/// De grootste staging.
-pub const FLIP_STAGE_MAX: u64 = STAGE_MAX;
 /// De vluchtrecorder.
 pub const FLIP_RECORDER_PA: u64 = BOOT_SCRATCH_PA + 0x1000;
 /// De trampoline van de sprong.
 pub const FLIP_TRAMP_PA: u64 = BOOT_SCRATCH_PA + 0x2000;
-/// De maat van het handoff-blob.
-pub const FLIP_HANDOFF_LEN: u64 = 0x4_0000;
-/// Het handoff-blob: direct onder het staging-maatwoord.
-pub const FLIP_HANDOFF_PA: u64 = STAGE_HDR_PA - FLIP_HANDOFF_LEN;
 
 const _: () = {
     assert!(FLIP_RECORDER_PA >= BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN);
-    assert!(FLIP_TRAMP_PA + 0x1000 <= FLIP_HANDOFF_PA);
-    assert!(FLIP_HANDOFF_PA + FLIP_HANDOFF_LEN <= STAGE_HDR_PA);
+    assert!(FLIP_TRAMP_PA + 0x1000 <= abi::layout::flip_handoff_pa(STAGE_HDR_PA));
 };
 
 #[cfg(test)]

@@ -124,9 +124,6 @@ fn staging_must_lie_in_the_loader_window() {
     assert!(slots::check_stage(0x0400_0000, 0x0410_0000).is_none());
     assert!(slots::check_stage(0x0F20_0000, 0x1000_1000).is_none());
     assert!(slots::check_stage(0x0F20_0000, 0x0F20_0000).is_none());
-    assert_eq!(slots::role_code(""), 1);
-    assert_eq!(slots::role_code("app"), 0);
-    assert_eq!(slots::role_code("appspike"), 2);
 }
 
 #[test]

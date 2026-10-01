@@ -41,7 +41,6 @@ mod ephy;
 pub mod slots;
 pub mod watchdog;
 
-use board::heap::Heap;
 use board::{Board, CoreClass, Dispatched, Error, NoDisk, Plan, Region};
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use cpu::irq::{Controller, Line};
@@ -327,14 +326,6 @@ impl Board for LicheeRv {
         "boot: LicheeRV Nano (SG2002), machine mode monitor from the FIP (no SBI), app hart 1 (C906L)"
     }
 
-    fn init_heap(&self, heap: &Heap) {
-        let (start, end) = arch::heap_bounds();
-        // SAFETY: `link-riscv.ld` (basis 0x8400_0000, maat 48 MB voor dit
-        // board) legt de heap achter image en stack; tot `__heap_end`, het
-        // begin van de DMA-regio, gebruikt niemand anders dat bereik.
-        unsafe { heap.init(start, end) };
-    }
-
     fn discover(&self, _dtb: u64) {
         cpu::riscv::idle::set_hz(TIMEBASE_HZ);
         match CLINT_DEV.probe(self.this_core(), csr::rdtime()) {
@@ -487,28 +478,6 @@ impl Board for LicheeRv {
         }
         .map_err(|_| Error::Nic("dwmac start failed"))?;
         Ok(Some(nic))
-    }
-}
-
-mod arch {
-    //! De grenzen van de heap uit het linkscript; op de host een stub.
-    #[cfg(all(target_arch = "riscv64", target_os = "none"))]
-    pub(crate) fn heap_bounds() -> (usize, usize) {
-        unsafe extern "C" {
-            /// Het begin van de heap.
-            static __heap_start: u8;
-            /// Het einde van de heap.
-            static __heap_end: u8;
-        }
-        (
-            (&raw const __heap_start) as usize,
-            (&raw const __heap_end) as usize,
-        )
-    }
-
-    #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
-    pub(crate) fn heap_bounds() -> (usize, usize) {
-        (0, 0)
     }
 }
 

@@ -698,7 +698,7 @@ const HOLD_GRACE_NS: u64 = 100_000_000;
 /// CPU_OFF: dat was op de Pi 5-stockfirmware een deur zonder terugweg
 /// (10-07).
 pub fn hold() -> ! {
-    HELD.store(arch::mpidr() | (1 << 63), Release);
+    HELD.store((crate::mpidr() & 0xff_00ff_ffff) | (1 << 63), Release);
     dev::notify();
     loop {
         let (mbox, park) = (HOLD_MBOX.load(Acquire), HOLD_PARK.load(Acquire));
@@ -879,13 +879,6 @@ mod arch {
         // SAFETY: een lees van de teller heeft geen neveneffect.
         unsafe { asm!("isb", "mrs {}, cntpct_el0", out(reg) v, options(nomem, nostack)) };
         v
-    }
-
-    pub(super) fn mpidr() -> u64 {
-        let v: u64;
-        // SAFETY: MPIDR_EL1 lezen heeft geen neveneffect.
-        unsafe { asm!("mrs {}, mpidr_el1", out(reg) v, options(nomem, nostack)) };
-        v & 0xff_00ff_ffff
     }
 
     pub(super) fn freq() -> u64 {
@@ -1361,9 +1354,6 @@ mod arch {
         0
     }
     pub(super) fn restore(_daif: u64) {}
-    pub(super) fn mpidr() -> u64 {
-        0
-    }
     pub(super) fn freq() -> u64 {
         62_500_000
     }

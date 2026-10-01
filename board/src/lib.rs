@@ -11,8 +11,9 @@
 //! komt erbij zodra een laag erom vraagt; een methode zonder gebruiker is
 //! een methode die niemand test.
 //!
-//! Naast de trait staat [`heap`]: de allocator met een plafond die het
-//! board over zijn kern-RAM legt.
+//! Naast de trait staan [`heap`]: de allocator met een plafond die het
+//! board over zijn kern-RAM legt, en [`stage`]: het image dat een lader
+//! vóór de boot neerlegde.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -26,6 +27,7 @@
 )]
 
 pub mod heap;
+pub mod stage;
 
 /// De framebuffer-beschrijving van [`Board::framebuffer`], zodat een board
 /// hem noemt zonder eigen dependency.
@@ -159,12 +161,43 @@ impl fmt::Display for CoreClass {
     }
 }
 
+/// De OS-core bij de waarde `v` van `hopos.oscore` (`small`, `mid`, `big`
+/// of een core-nummer) op een board met `cores` cores en klassen `class`:
+/// een klasse is de eerste core van die klasse. Zonder vraag de boot-core
+/// `boot`; een vraag die niet kan, geeft ook `boot`, met de reden.
+pub fn os_core(
+    v: &str,
+    cores: usize,
+    class: impl Fn(usize) -> CoreClass,
+    boot: usize,
+) -> (usize, Option<&'static str>) {
+    let want = match v {
+        "" => return (boot, None),
+        "small" => Some(CoreClass::Small),
+        "mid" => Some(CoreClass::Mid),
+        "big" => Some(CoreClass::Big),
+        _ => None,
+    };
+    if let Some(k) = want {
+        return match (0..cores).find(|c| class(*c) == k) {
+            Some(c) => (c, None),
+            None => (boot, Some("no core of that class")),
+        };
+    }
+    match v.parse::<usize>() {
+        Ok(n) if n < cores => (n, None),
+        Ok(_) => (boot, Some("no such core")),
+        Err(_) => (boot, Some("not small, mid, big or a core number")),
+    }
+}
+
 /// Waarom een board iets weigert.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
-    /// Het privilege-niveau kan geen kooi dragen (EL2 op ARM).
+    /// Het privilege-niveau kan geen kooi dragen (EL2 op ARM, machine mode
+    /// op riscv).
     Privilege {
-        /// Het niveau waarop we booten.
+        /// Het niveau waarop we booten (op riscv de modus: 3 = machine).
         el: u8,
     },
     /// De NIC is gevonden maar zijn initialisatie faalde.
@@ -182,7 +215,7 @@ impl fmt::Display for Error {
         match self {
             Self::Privilege { el } => write!(
                 f,
-                "booted at EL{el}: HopOS requires EL2 (QEMU: virtualization=on)"
+                "booted at level {el}: HopOS requires EL2 (ARM; QEMU: virtualization=on) or machine mode (riscv)"
             ),
             Self::Nic(why) => write!(f, "nic init: {why}"),
             Self::Disk(why) => write!(f, "disk init: {why}"),
@@ -269,8 +302,17 @@ pub trait Board: Sync {
     fn firmware(&self) -> &'static str;
 
     /// Geeft `heap` het deel van de kern-RAM dat na image en stack over is.
-    /// Eén keer, vóór de eerste allocatie.
-    fn init_heap(&self, heap: &heap::Heap);
+    /// Eén keer, vóór de eerste allocatie. Standaard het bereik van het
+    /// linkscript ([`cpu::boot::heap_bounds`]); de UEFI-boards nemen het uit
+    /// de EFI-allocatie.
+    fn init_heap(&self, heap: &heap::Heap) {
+        let (start, end) = cpu::boot::heap_bounds();
+        // SAFETY: het linkscript van elk board met deze default legt
+        // `__heap_start` achter image, BSS en stack en `__heap_end` op het
+        // einde van de kern-RAM of het begin van de DMA-regio; dat bereik
+        // is gemapt en van niemand anders.
+        unsafe { heap.init(start, end) };
+    }
 
     /// Leest de firmware-beschrijving (op ARM de FDT uit x0 of een vaste
     /// plek) en onthoudt wat de kern later vraagt. `dtb` is x0 bij boot.
@@ -335,8 +377,33 @@ mod tests {
         assert!(require_el2(2).is_ok());
         assert_eq!(
             Error::Privilege { el: 1 }.to_string(),
-            "booted at EL1: HopOS requires EL2 (QEMU: virtualization=on)"
+            "booted at level 1: HopOS requires EL2 (ARM; QEMU: virtualization=on) or machine mode (riscv)"
         );
+    }
+
+    #[test]
+    fn the_os_core_follows_the_config() {
+        // Een O6N-achtige indeling: 0-3 small, 4-7 mid, 8-11 big.
+        let class = |c: usize| match c {
+            0..=3 => CoreClass::Small,
+            4..=7 => CoreClass::Mid,
+            _ => CoreClass::Big,
+        };
+        assert_eq!(os_core("", 12, class, 0), (0, None));
+        assert_eq!(os_core("mid", 12, class, 0), (4, None));
+        assert_eq!(os_core("big", 12, class, 0), (8, None));
+        assert_eq!(os_core("11", 12, class, 0), (11, None));
+        assert_eq!(os_core("12", 12, class, 0), (0, Some("no such core")));
+        assert_eq!(
+            os_core("fast", 12, class, 0),
+            (0, Some("not small, mid, big or a core number"))
+        );
+        // Een vraag die niet kan, blijft op de boot-core (de M4: cpu 6).
+        assert_eq!(
+            os_core("small", 4, |_| CoreClass::Big, 6),
+            (6, Some("no core of that class"))
+        );
+        assert_eq!(os_core("", 10, class, 6), (6, None));
     }
 
     #[test]

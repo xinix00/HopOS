@@ -8,6 +8,8 @@ description = "De GICv3-interruptcontroller: distributor, redistributor, claim e
 
 [dependencies]
 dev = { path = "../../dev" }
+# De ICC-instructies van `SysRegIcc` (handboek §5: asm in cpu).
+cpu = { path = "../../cpu" }
 
 [lints]
 workspace = true

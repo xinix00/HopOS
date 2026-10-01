@@ -8,7 +8,7 @@
 //!   UART-haak);
 //! - het kooi-spoor: [`el2`] (stage-2, de switcher, de HVC-handler),
 //!   [`psci`], [`smp`], [`irq`] (het contract: een lijn, een controller, één
-//!   werkwoord), [`idle`] (de `Sleeper` van de executor: WFE met event-stream,
+//!   werkwoord), [`gicv3`] (de CPU-interface als systeemregisters), [`idle`] (de `Sleeper` van de executor: WFE met event-stream,
 //!   WFI op de timer, de rotatie van de OS-core), [`trng`], [`drbg`],
 //!   [`memattr`].
 //!
@@ -43,6 +43,7 @@ pub mod boot;
 pub mod console;
 pub mod drbg;
 pub mod el2;
+pub mod gicv3;
 pub mod idle;
 pub mod irq;
 pub mod memattr;
@@ -50,5 +51,7 @@ pub mod psci;
 pub mod smp;
 pub mod trng;
 pub mod vectors;
+
+pub use smp::mpidr;
 
 pub mod riscv;

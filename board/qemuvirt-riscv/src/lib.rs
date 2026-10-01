@@ -28,7 +28,6 @@
 pub mod cage;
 pub mod slots;
 
-use board::heap::Heap;
 use board::{Board, CoreClass, Dispatched, Error, Plan, Region};
 use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
@@ -380,14 +379,6 @@ impl Board for QemuVirtRiscv {
         "boot: QEMU virt riscv64, machine mode, -bios none (HopOS is the monitor, no OpenSBI below us)"
     }
 
-    fn init_heap(&self, heap: &Heap) {
-        let (start, end) = arch::heap_bounds();
-        // SAFETY: `link-riscv.ld` legt `__heap_start` achter image en stack
-        // en `__heap_end` op het begin van de DMA-regio; niemand anders
-        // gebruikt dat bereik.
-        unsafe { heap.init(start, end) };
-    }
-
     fn discover(&self, dtb: u64) {
         cpu::riscv::idle::set_hz(TIMEBASE_HZ);
         match CLINT_DEV.probe(self.this_core(), csr::rdtime()) {
@@ -511,28 +502,6 @@ impl Board for QemuVirtRiscv {
             nic.queue_size()
         );
         Ok(Some(nic))
-    }
-}
-
-mod arch {
-    //! De grenzen van de heap uit het linkscript; op de host een stub.
-    #[cfg(all(target_arch = "riscv64", target_os = "none"))]
-    pub(crate) fn heap_bounds() -> (usize, usize) {
-        unsafe extern "C" {
-            /// Het begin van de heap (`hopos/link-riscv.ld`).
-            static __heap_start: u8;
-            /// Het einde van de heap: het begin van de DMA-regio.
-            static __heap_end: u8;
-        }
-        (
-            (&raw const __heap_start) as usize,
-            (&raw const __heap_end) as usize,
-        )
-    }
-
-    #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
-    pub(crate) fn heap_bounds() -> (usize, usize) {
-        (0, 0)
     }
 }
 
