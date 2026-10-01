@@ -289,6 +289,14 @@ De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
       I/O-coherent is (`_CCA` in de DSDT) bepaalt of de dc civac/cvac per
       MiB weg mag. Lean hoefde niet mee: de checksums op de slot-link
       stonden al uit.
+- [x] **De kernheap lekte onder gemengde allocaties** (01-10, crate `heap`):
+      de kern had een bump-allocator die alleen het laatste blok terugnam;
+      metadata-, netwerk- en I/O-allocaties door elkaar lieten vrijgegeven
+      geheugen bezet (O6N tijdens Lumen: `OP_SYNC out of memory 483328
+      bytes`, daarna viel ook 5555 uit). Nu dezelfde allocator met vrije
+      lijsten en grenslabels als de apps, in een eigen crate; alleen de
+      OS-core alloceert (`KernelCore::id()` is 0). Door een andere sessie
+      voor de prestaties geschreven (Derek: drie keer zo snel); docs/heap.md.
 - [x] **Het flipvenster van de O6N was de lopende kern: 2204 KiB.**
       `image::limit()` op UEFI was het einde van het lopende beeld, en een
       bundel is pas welkom als zijn beeld tot het einde van .stack daarin
