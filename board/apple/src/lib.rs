@@ -536,13 +536,15 @@ pub(crate) fn serror_check(stage: &str) {
     if let Some((esr, elr, far)) = cpu::vectors::serror_drain() {
         // De L2C-foutregisters van dit silicium (m1n1 `exception.c`:
         // SYS_IMP_APL_L2C_ERR_STS/ADR/INF): de ADR is het adres van de
-        // schrijf die stil misging; de STS terugschrijven wist hem, anders
-        // blijft de SError terugkomen.
+        // schrijf die stil misging. m1n1 schrijft de STS terug om hem te
+        // wissen; op de t8132 is die `msr` op EL2 UNDEFINED (sync-exception
+        // EC 0x0 precies op de msr, 01-10), dus wij lezen alleen. Een
+        // SError die blijft hangen, komt bij de volgende drain opnieuw
+        // langs, met dezelfde ADR: dat is dan de bron die weg moet.
         let (sts, adr, inf) = arch::l2c_err();
         println!(
             "apple: SError pending after {stage}: esr={esr:#x} elr={elr:#x} far={far:#x} l2c sts={sts:#x} adr={adr:#x} inf={inf:#x} HOPOS_APPLE_SERROR"
         );
-        arch::l2c_err_clear(sts);
     }
 }
 
@@ -622,14 +624,6 @@ mod arch {
         (sts, adr, inf)
     }
 
-    /// Wist de L2C-foutstatus door hem terug te schrijven (m1n1: "clear the
-    /// flag bits").
-    pub(super) fn l2c_err_clear(sts: u64) {
-        // SAFETY: het terugschrijven van de gelezen status wist de gezette
-        // vlaggen; het raakt geen geheugen.
-        unsafe { asm!("msr s3_3_c15_c8_0, {}", "isb", in(reg) sts, options(nomem, nostack)) };
-    }
-
     pub(super) fn unmask() {
         // SAFETY: opent I en F op deze core; de vectoren staan (boot).
         unsafe { asm!("msr daifclr, #3", options(nomem, nostack)) };
@@ -660,7 +654,6 @@ mod arch {
     pub(super) fn l2c_err() -> (u64, u64, u64) {
         (0, 0, 0)
     }
-    pub(super) fn l2c_err_clear(_sts: u64) {}
     pub(super) fn unmask() {}
 }
 

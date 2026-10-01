@@ -292,10 +292,14 @@ pub fn pstate_tune(target: [u64; 2], off: bool) {
         if apsc {
             let _ = (0..PS_SPINS).any(|_| dev::read64(base.add(CL_PSTATE)) & PS_APSC_BUSY == 0);
         }
-        for off in [0x48400, 0x48408, 0x40270, 0x40250] {
-            let a = base.add(off);
-            dev::write64(a, dev::read64(a) & !(1 << 63));
-        }
+        // Go schreef hier ook bit 63 weg in de "throttle-registers"
+        // (+0x48400, +0x48408, +0x40270, +0x40250; m1n1-gedrag voor oudere
+        // chips). Op de t8132 bestaat +0x48400 niet: de schrijf gaat stil mis
+        // en laat een SError achter (gemeten 01-10 na de p-state-tune:
+        // L2C sts=0x202 adr=0x1a82500211e48400, dat is P-cluster
+        // 0x211e00000 + 0x48400, inf=0x1400100007). Go droeg die SError
+        // stil mee (PSTATE.A dicht); wij drainen hem en zagen zo de
+        // bron. De bits staan op deze machine al op 0, dus niets te wissen.
         dev::write64(base.add(CL_UNK_440F8), 1);
         let want = target.get(cl).copied().unwrap_or(1).clamp(1, states as u64);
         let ok = set_pstate(base, want);
