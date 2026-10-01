@@ -55,6 +55,7 @@ name = "board"
 version = "3.0.0"
 dependencies = [
  "abi",
+ "blkdev",
  "bounded",
  "dev",
  "driver-fb",
@@ -113,7 +114,6 @@ dependencies = [
  "driver-dwmac",
  "driver-mdio",
  "driver-ns16550",
- "driver-virtioblk",
  "executor",
  "fw",
  "net",
@@ -183,7 +183,6 @@ name = "board-raspi"
 version = "3.0.0"
 dependencies = [
  "abi",
- "blkdev",
  "board",
  "bounded",
  "cpu",
@@ -214,7 +213,6 @@ dependencies = [
  "driver-mdio",
  "driver-ns16550",
  "driver-rkrng",
- "driver-virtioblk",
  "executor",
  "fw",
  "gui-rkscan",
@@ -655,7 +653,6 @@ dependencies = [
  "driver-dwc3",
  "driver-fb",
  "driver-hid",
- "driver-virtioblk",
  "driver-xhci",
  "executor",
  "fw",

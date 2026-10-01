@@ -65,7 +65,7 @@ mod tests;
 
 use abi::layout::Pool;
 use board::heap::Heap;
-use board::{Board, CoreClass, Dispatched, Error, Plan, Region};
+use board::{Board, CoreClass, Dispatched, Error, NoDisk, Plan, Region};
 use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use dev::Pa;
@@ -73,15 +73,15 @@ use driver_dwmac4::{CSR_100_150M, Dwmac4, IrqAck, Probe};
 use driver_gicv3::Gic;
 use driver_mdio::{Phy, rtl8211f};
 use driver_ns16550::Ns16550;
-use driver_virtioblk::VirtioBlk;
 use fw::fdt::Fdt;
 use netdev::Mac;
 use sync::{Local, Signal};
 
-/// De schijf die `probe_disk` geeft: het type van de opslag; er is nog geen SD-
-/// driver. De binary noemt hem `vboard::Disk`, zodat de geprobede schijf van de
-/// bench naar de opslag gaat zonder dat de binary het type per board kent.
-pub type Disk = VirtioBlk;
+/// De schijf die `probe_disk` geeft: geen, want er is nog geen SD-driver
+/// ([`board::NoDisk`]). De binary noemt hem `vboard::Disk`, zodat de
+/// geprobede schijf van de bench naar de opslag gaat zonder dat de binary het
+/// type per board kent.
+pub type Disk = NoDisk;
 
 /// De debug-UART (UART2 op de 40-pins header: pin 8 TX, 10 RX, 6 GND):
 /// DesignWare APB, 16550-compatibel, `reg-shift = 2`. U-Boot liet hem op
@@ -452,8 +452,9 @@ impl Rk3566 {
     }
 
     /// Geen schijf: de SD- en eMMC-controller (dw_mmc/sdhci) heeft nog geen
-    /// driver in v3. Het type is dat van de opslag van de kern-binary.
-    pub fn probe_disk(&self) -> Result<Option<VirtioBlk>, Error> {
+    /// driver in v3, dus altijd `Ok(None)`: de bestandscalls weigeren dan
+    /// luid.
+    pub fn probe_disk(&self) -> Result<Option<NoDisk>, Error> {
         Ok(None)
     }
 

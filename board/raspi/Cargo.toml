@@ -15,7 +15,6 @@ sync = { path = "../../sync" }
 bounded = { path = "../../bounded" }
 executor = { path = "../../executor" }
 netdev = { path = "../../netdev" }
-blkdev = { path = "../../blkdev" }
 board = { path = "../../board" }
 driver-pl011 = { path = "../../driver/pl011" }
 driver-gicv2 = { path = "../../driver/gicv2" }

@@ -18,6 +18,8 @@ sync = { path = "../sync" }
 driver-fb = { path = "../driver/fb" }
 # De lijst van `Board::usb_hosts`: begrensd, zonder heap.
 bounded = { path = "../bounded" }
+# Het blokcontract van `NoDisk`, de schijf van een board zonder schijf.
+blkdev = { path = "../blkdev" }
 
 [lints]
 workspace = true

@@ -20,7 +20,6 @@ board = { path = "../../board" }
 driver-ns16550 = { path = "../../driver/ns16550" }
 driver-mdio = { path = "../../driver/nic/mdio" }
 driver-dwmac = { path = "../../driver/nic/dwmac" }
-driver-virtioblk = { path = "../../driver/virtioblk" }
 
 [lints]
 workspace = true

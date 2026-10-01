@@ -42,7 +42,7 @@ pub mod slots;
 pub mod watchdog;
 
 use board::heap::Heap;
-use board::{Board, CoreClass, Dispatched, Error, Plan, Region};
+use board::{Board, CoreClass, Dispatched, Error, NoDisk, Plan, Region};
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use cpu::irq::{Controller, Line};
 use cpu::riscv::clint::Clint;
@@ -54,10 +54,11 @@ use driver_ns16550::Ns16550;
 use netdev::Mac;
 use sync::Signal;
 
-/// De schijf die `probe_disk` geeft: het type van de opslag; er is nog geen SD-
-/// driver. De binary noemt hem `vboard::Disk`, zodat de geprobede schijf van de
-/// bench naar de opslag gaat zonder dat de binary het type per board kent.
-pub type Disk = driver_virtioblk::VirtioBlk;
+/// De schijf die `probe_disk` geeft: geen, want er is nog geen SD-driver
+/// ([`board::NoDisk`]). De binary noemt hem `vboard::Disk`, zodat de
+/// geprobede schijf van de bench naar de opslag gaat zonder dat de binary het
+/// type per board kent.
+pub type Disk = NoDisk;
 
 /// UART0.
 pub const UART0: Pa = Pa(0x0414_0000);
@@ -241,7 +242,7 @@ impl LicheeRv {
     }
 
     /// Geen schijf: er is (nog) geen SD-driver.
-    pub fn probe_disk(&self) -> Result<Option<driver_virtioblk::VirtioBlk>, Error> {
+    pub fn probe_disk(&self) -> Result<Option<NoDisk>, Error> {
         Ok(None)
     }
 

@@ -192,6 +192,39 @@ impl fmt::Display for Error {
     }
 }
 
+/// Geen schijf: het blokapparaat van een board zonder blokdriver (de Pi's,
+/// de Radxa, de LicheeRV). Een lege enum, dus er bestaat nooit een waarde
+/// van; hun `probe_disk` geeft altijd `Ok(None)` en de bestandscalls
+/// weigeren luid.
+#[derive(Debug)]
+pub enum NoDisk {}
+
+impl NoDisk {
+    /// Het aantal sectoren (bestaat niet).
+    #[must_use]
+    pub fn sectors(&self) -> u64 {
+        match *self {}
+    }
+
+    /// Het model (bestaat niet).
+    #[must_use]
+    pub fn model(&self) -> &'static str {
+        match *self {}
+    }
+}
+
+impl blkdev::AsyncBlockDevice for NoDisk {
+    fn max_transfer(&self) -> usize {
+        match *self {}
+    }
+    fn start(&mut self, _op: blkdev::Op<'_>) -> blkdev::Result {
+        match *self {}
+    }
+    fn poll_done(&mut self, _into: &mut [u8]) -> core::task::Poll<blkdev::Result> {
+        match *self {}
+    }
+}
+
 /// De eis van ARM: HopOS draait op EL2. De Go-zin `board.RequireEL2`.
 pub fn require_el2(el: u8) -> Result<(), Error> {
     if el < 2 {

@@ -61,7 +61,7 @@ mod tests;
 
 use abi::Region as AbiRegion;
 use board::heap::Heap;
-use board::{Board, CoreClass, Dispatched, Error, Plan, Region};
+use board::{Board, CoreClass, Dispatched, Error, NoDisk, Plan, Region};
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use dev::Pa;
@@ -617,36 +617,5 @@ impl<S: Soc> Board for Raspi<S> {
             clock: cpu::idle::now,
         };
         S::probe_nic(&ctx)
-    }
-}
-
-/// Geen schijf: het blokapparaat van een board zonder blokapparaat. Een
-/// lege enum, dus er bestaat nooit een waarde van.
-#[derive(Debug)]
-pub enum NoDisk {}
-
-impl NoDisk {
-    /// Het aantal sectoren (bestaat niet).
-    #[must_use]
-    pub fn sectors(&self) -> u64 {
-        match *self {}
-    }
-
-    /// Het model (bestaat niet).
-    #[must_use]
-    pub fn model(&self) -> &'static str {
-        match *self {}
-    }
-}
-
-impl blkdev::AsyncBlockDevice for NoDisk {
-    fn max_transfer(&self) -> usize {
-        match *self {}
-    }
-    fn start(&mut self, _op: blkdev::Op<'_>) -> blkdev::Result {
-        match *self {}
-    }
-    fn poll_done(&mut self, _into: &mut [u8]) -> core::task::Poll<blkdev::Result> {
-        match *self {}
     }
 }

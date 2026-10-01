@@ -26,11 +26,10 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use blkdev::{AsyncBlockDevice, BlockIo, Op, Paced, Queue, Spin, block_on};
+use blkdev::{AsyncBlockDevice, BlockIo, LBA_SIZE, Op, Paced, Queue, Spin, block_on};
 use core::sync::atomic::Ordering::Relaxed;
 use core::task::Poll;
 use cpu::println;
-use driver_virtioblk::{MAX_TRANSFER, SECTOR};
 use executor::Executor;
 use kern::hopfs::Fs;
 use sync::Pool;
@@ -43,6 +42,10 @@ const PER_SIZE: u64 = 16 << 20;
 
 /// De commandomaten van de Go-tabel.
 const SIZES: [u64; 4] = [4 << 10, 64 << 10, 256 << 10, 1 << 20];
+
+/// De buffer van de bench: 1 MiB (Go: `make([]byte, 1<<20)`), de grootste
+/// commandomaat van de tabel en de calls van de hopfs-bench.
+const BUF: usize = 1 << 20;
 
 /// Hoogstens zoveel willekeurige 4 KiB-opdrachten (64 MiB).
 const RANDOM_OPS: u64 = 16384;
@@ -212,20 +215,23 @@ impl Snap {
 /// `block_on`: een bench-boot wacht erop, zoals in Go.
 fn bench_disk(exec: &'static Executor, disk: &mut vboard::Disk) {
     let sectors = disk.sectors();
-    let bytes = sectors.saturating_mul(SECTOR);
+    let bytes = sectors.saturating_mul(LBA_SIZE);
+    // De grootste opdracht die de schijf neemt (Go: `disk.MaxTransfer`),
+    // hoogstens de buffer.
+    let max = AsyncBlockDevice::max_transfer(&*disk).min(BUF);
     // De staart: de helft van de schijf, hoogstens 1 GiB, op hele MiB.
     let span = (bytes / 2).min(SPAN_MAX) & !((1 << 20) - 1);
     if span < 4 << 20 {
         println!("nvme bench: disk of {bytes} bytes is too small, skipped HOPOS_NVMEBENCH_FAIL");
         return;
     }
-    let base = sectors - span / SECTOR;
+    let base = sectors - span / LBA_SIZE;
     let mut buf: Vec<u8> = Vec::new();
-    if buf.try_reserve_exact(MAX_TRANSFER).is_err() {
-        println!("nvme bench: no heap for a {MAX_TRANSFER}-byte buffer HOPOS_NVMEBENCH_FAIL");
+    if buf.try_reserve_exact(BUF).is_err() {
+        println!("nvme bench: no heap for a {BUF}-byte buffer HOPOS_NVMEBENCH_FAIL");
         return;
     }
-    buf.resize(MAX_TRANSFER, 0);
+    buf.resize(BUF, 0);
     for (i, b) in buf.iter_mut().enumerate() {
         *b = (i as u8).wrapping_mul(7);
     }
@@ -236,7 +242,7 @@ fn bench_disk(exec: &'static Executor, disk: &mut vboard::Disk) {
         sectors - 1,
         span >> 20
     );
-    let t = Bench { exec, base };
+    let t = Bench { exec, base, max };
     let mut disk = Paced::new(disk, Spin);
     let ok = t.sizes(&mut disk, &mut buf, span)
         && t.sequential(&mut disk, &mut buf, span)
@@ -252,6 +258,9 @@ fn bench_disk(exec: &'static Executor, disk: &mut vboard::Disk) {
 struct Bench {
     exec: &'static Executor,
     base: u64,
+    /// De grootste opdracht in bytes: `max_transfer` van de schijf,
+    /// hoogstens [`BUF`].
+    max: usize,
 }
 
 impl Bench {
@@ -299,11 +308,11 @@ impl Bench {
     /// regelvorm als `nvmeBench`, zodat de getallen naast elkaar passen).
     fn sizes<D: BlockIo>(&self, disk: &mut D, buf: &mut [u8], span: u64) -> bool {
         for sz in SIZES {
-            if sz > MAX_TRANSFER as u64 {
+            if sz > self.max as u64 {
                 continue;
             }
             let n = PER_SIZE.min(span) / sz;
-            let step = sz / SECTOR;
+            let step = sz / LBA_SIZE;
             let base = self.base;
             let Some((w, r)) = self.pass(disk, buf, sz as usize, n, |k| base + k * step) else {
                 return false;
@@ -313,13 +322,14 @@ impl Bench {
         true
     }
 
-    /// Sequentieel over de hele staart in opdrachten van 1 MiB.
+    /// Sequentieel over de hele staart in de grootste opdrachten die de
+    /// schijf neemt (hoogstens 1 MiB).
     fn sequential<D: BlockIo>(&self, disk: &mut D, buf: &mut [u8], span: u64) -> bool {
-        let sz = MAX_TRANSFER as u64;
+        let sz = self.max as u64;
         let n = span / sz;
-        let step = sz / SECTOR;
+        let step = sz / LBA_SIZE;
         let base = self.base;
-        let Some((w, r)) = self.pass(disk, buf, MAX_TRANSFER, n, |k| base + k * step) else {
+        let Some((w, r)) = self.pass(disk, buf, self.max, n, |k| base + k * step) else {
             return false;
         };
         println!(
@@ -338,7 +348,7 @@ impl Bench {
         let sz: u64 = 4 << 10;
         let slots = span / sz;
         let n = slots.min(RANDOM_OPS);
-        let (base, step) = (self.base, sz / SECTOR);
+        let (base, step) = (self.base, sz / LBA_SIZE);
         let at = |k: u64| base + (xorshift(k) % slots) * step;
         let Some((w, r)) = self.pass(disk, buf, sz as usize, n, at) else {
             return false;
@@ -363,7 +373,7 @@ impl Bench {
         let sz: u64 = 4 << 10;
         let slots = span / sz;
         let n = slots.min(RANDOM_OPS);
-        let (base, step) = (self.base, sz / SECTOR);
+        let (base, step) = (self.base, sz / LBA_SIZE);
         let q = Queue::new(disk, Spin);
         let depth = q.depth().min(QUEUE_DEPTH);
         let mut pool = core::pin::pin!(Pool::<_, QUEUE_DEPTH>::new());
@@ -416,7 +426,7 @@ impl Bench {
     /// transport. Vóór de executor draait: elke call met `block_on`
     /// afgedraaid.
     fn hopfs<D: BlockIo>(&self, disk: D, buf: &mut [u8], span: u64) {
-        let mut fs = match Fs::new(disk, self.base, span / SECTOR, SECTOR, MAX_TRANSFER as u64) {
+        let mut fs = match Fs::new(disk, self.base, span / LBA_SIZE, LBA_SIZE, self.max as u64) {
             Ok(f) => f,
             Err(e) => {
                 println!("hopfs bench: {e} HOPOS_NVMEBENCH_FAIL");

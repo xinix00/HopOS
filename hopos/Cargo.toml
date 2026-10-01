@@ -135,8 +135,6 @@ driver-codec = { path = "../driver/codec", optional = true }
 media-mve = { path = "../media/mve", optional = true }
 media-optical = { path = "../media/optical", optional = true }
 bounded = { path = "../bounded", optional = true }
-# De schijf van het board: `storage.rs` kent haar maten (sector, transfer).
-driver-virtioblk = { path = "../driver/virtioblk" }
 
 [lints]
 workspace = true

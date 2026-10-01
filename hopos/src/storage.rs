@@ -31,13 +31,12 @@
 //! beginnen, geeft QEMU een verse schijf (image/qemu-run.sh).
 
 use alloc::boxed::Box;
-use blkdev::{AsyncBlockDevice, Pace, Queue, block_on};
+use blkdev::{AsyncBlockDevice, LBA_SIZE, Pace, Queue, block_on};
 use board::Board;
 use core::future::Future;
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use core::time::Duration;
 use cpu::println;
-use driver_virtioblk::{MAX_TRANSFER, SECTOR};
 use executor::Executor;
 use kern::cage::Timer;
 use kern::hopfs::{Fs, Mounted};
@@ -178,7 +177,7 @@ pub(crate) fn probe() -> Option<vboard::Disk> {
     match crate::BOARD.probe_disk() {
         Ok(Some(d)) => Some(d),
         Ok(None) => {
-            println!("disk: no virtio-blk on this board, file calls refused HOPOS_DISK_NONE");
+            println!("disk: none found on this board, file calls refused HOPOS_DISK_NONE");
             None
         }
         Err(e) => {
@@ -198,8 +197,11 @@ pub(crate) fn start(exec: &'static Executor, disk: Option<vboard::Disk>) -> bool
         return false;
     };
     let sectors = disk.sectors();
+    // De maat van het blokcontract, niet een eigen methode van de driver
+    // (de ANS heeft er een met dezelfde naam: de MDTS zonder afronding).
+    let max_transfer = AsyncBlockDevice::max_transfer(&disk);
     println!(
-        "disk: up HOPOS_DISK_UP model={} blocks={sectors} block_size={SECTOR} max_transfer={MAX_TRANSFER}",
+        "disk: up HOPOS_DISK_UP model={} blocks={sectors} block_size={LBA_SIZE} max_transfer={max_transfer}",
         disk.model()
     );
     // De wachtrij leeft zolang de kern: één keer bij de boot op de heap.
@@ -217,8 +219,8 @@ pub(crate) fn start(exec: &'static Executor, disk: Option<vboard::Disk>) -> bool
         disk,
         0,
         sectors,
-        SECTOR,
-        MAX_TRANSFER as u64,
+        LBA_SIZE,
+        max_transfer as u64,
         false,
     ));
     let (fs, found) = match mounted {
@@ -253,7 +255,7 @@ pub(crate) fn start(exec: &'static Executor, disk: Option<vboard::Disk>) -> bool
     };
     println!(
         "hopfs: mounted {} MiB ({what}) HOPOS_FS_UP fresh={fresh} generation={generation}",
-        (sectors * SECTOR) >> 20
+        (sectors * LBA_SIZE) >> 20
     );
     let max_slots = board.cores().saturating_sub(1).max(1);
     let actor = async move {
