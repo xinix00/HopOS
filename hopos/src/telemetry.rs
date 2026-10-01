@@ -426,9 +426,14 @@ mod hw {
         vboard::tsadc::temp_millic().unwrap_or(0)
     }
 
+    /// Geen knop, wel de klok die de firmware liet (de CRU, alleen gelezen):
+    /// app naar app is hier begrensd door de ene kopie op de OS-core, dus
+    /// dit getal is de grens (01-10, RX1: 258 tot 262 MB/s met de OS-core
+    /// vol).
     pub(super) fn governor(_exec: &'static Executor) {
+        let mhz = vboard::soc::core_hz().map_or(0, |hz| hz / 1_000_000);
         println!(
-            "dvfs: no clock knob on this board, the firmware keeps its clock HOPOS_CLOCK_NONE"
+            "dvfs: no clock knob on this board, the firmware keeps its clock: core 0 at {mhz} MHz HOPOS_CLOCK_NONE"
         );
     }
 }

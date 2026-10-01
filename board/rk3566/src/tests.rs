@@ -116,3 +116,20 @@ fn a_dtb_outside_dram_is_refused() {
     assert!(in_dram(0x7ce9_d000, 0x2_0000));
     assert!(!in_dram(u64::MAX - 4, 8));
 }
+
+#[test]
+fn the_pll_rate_follows_the_linux_table() {
+    // RK3036_PLL_RATE(816000000, 1, 68, 2, 1, 1, 0) en (1800000000, 1, 75, 1, 1, 1, 0)
+    // uit rk3568_pll_rates.
+    let con1 = |refdiv: u32, post2: u32| refdiv | (post2 << 6) | (1 << 12);
+    assert_eq!(
+        soc::pll_hz(68 | (2 << 12), con1(1, 1), 0),
+        Some(816_000_000)
+    );
+    assert_eq!(
+        soc::pll_hz(75 | (1 << 12), con1(1, 1), 0),
+        Some(1_800_000_000)
+    );
+    // Een deler nul is geen klok.
+    assert_eq!(soc::pll_hz(68, con1(1, 1), 0), None);
+}

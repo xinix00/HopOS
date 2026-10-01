@@ -147,6 +147,54 @@ pub fn gmac_clocks() -> (u32, u32, u32) {
     )
 }
 
+// --- CRU: de klok van de cores (alleen gelezen) ----------------------------
+
+/// `RK3568_PLL_CON(0)` en verder: de APLL (`pll_rk3328` in clk-rk3568.c,
+/// de velden van `RK3036_PLLCON` in clk-pll.c).
+const APLL_CON0: u64 = 0x0000;
+const APLL_CON1: u64 = 0x0004;
+const APLL_CON2: u64 = 0x0008;
+/// `RK3568_MODE_CON0`: [1:0] de modus van de APLL (0 xin24m, 1 de PLL).
+const MODE_CON0: u64 = 0x00C0;
+/// `RK3568_CLKSEL_CON(0)`: [4:0] de deler van core 0, bit 6 de bron (0 de
+/// APLL, 1 de GPLL), `rk3568_cpuclk_data`.
+const CLKSEL0: u64 = 0x100;
+
+/// De rate van een PLL van dit type bij een kristal van 24 MHz, zoals
+/// `rockchip_rk3036_pll_recalc_rate`; `None` bij een deler nul.
+#[must_use]
+pub fn pll_hz(con0: u32, con1: u32, con2: u32) -> Option<u64> {
+    let fbdiv = u64::from(con0 & 0xfff);
+    let post1 = u64::from((con0 >> 12) & 0x7);
+    let refdiv = u64::from(con1 & 0x3f);
+    let post2 = u64::from((con1 >> 6) & 0x7);
+    let dsmpd = (con1 >> 12) & 1;
+    let xin: u64 = 24_000_000;
+    let mut vco = (xin * fbdiv).checked_div(refdiv)?;
+    if dsmpd == 0 {
+        vco += ((xin * u64::from(con2 & 0xff_ffff)) / refdiv) >> 24;
+    }
+    vco.checked_div(post1)?.checked_div(post2)
+}
+
+/// De klok van core 0 zoals de firmware hem liet (U-Boot en TF-A; deze
+/// kern heeft hier geen knop): `None` als de core niet aan de APLL hangt
+/// of een deler nul leest.
+#[must_use]
+pub fn core_hz() -> Option<u64> {
+    let r = |off| dev::read32(CRU.add(off));
+    let sel = r(CLKSEL0);
+    if sel & (1 << 6) != 0 {
+        return None;
+    }
+    let apll = if r(MODE_CON0) & 0x3 == 1 {
+        pll_hz(r(APLL_CON0), r(APLL_CON1), r(APLL_CON2))?
+    } else {
+        24_000_000
+    };
+    Some(apll / u64::from((sel & 0x1f) + 1))
+}
+
 // --- GRF: RGMII-modus -----------------------------------------------------
 
 /// `RK3568_GRF_GMAC1_CON0`: rx-delay [14:8], tx-delay [6:0].
