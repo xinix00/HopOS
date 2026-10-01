@@ -352,6 +352,15 @@ node heeft er nog geen gedraaid.
 
 ### Prestaties: waar v3 onder de Go-lat zit (vitals 30-09)
 
+Stand 01-10 avond, de eerste versie: app naar app M4 4450 (E) en 6100 (P),
+O6N 1500 tot 1600, Pi 4 407 tot 435 (de A72 vol), Radxa 257 tot 262 (816
+MHz, vol); NVMe door de app op de M4 1270 schrijven en 1690 lezen, rauw op
+de Go-lat; Replica (SQLite op HopFS) 0,2 s per proef. Alles boven Go
+behalve schrijven door de app op de M4 (1270 tegen 1600) en willekeurig
+lezen (12.000 per seconde, de wachtrij is het weekendpunt). De punten
+hieronder zijn het logboek van 30-09 en de ochtend van 01-10; wat open is,
+staat per node hierboven.
+
 De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
 
 - [ ] **1 ms per switch-oversteek** bij connect en close: rtt app naar de
@@ -428,7 +437,9 @@ De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
       mapt alles boven 0x0880_0000 Device (de tamago-keuze), en met de
       belofte las hij langs de cache van de app heen (corrupte ringen in
       slot 3). Nu Maintained op Apple én de Radxa (AB); app naar app daar
-      29,8 MB/s, als vóór de belofte.
+      29,8 MB/s, als vóór de belofte. Later op 01-10 opgelost zoals op de
+      M4: de slotstaart Normal in de kernmap, 257 tot 262 MB/s (zie de
+      Radxa hierboven).
 - [x] **De kernheap lekte onder gemengde allocaties** (01-10, crate `heap`):
       de kern had een bump-allocator die alleen het laatste blok terugnam;
       metadata-, netwerk- en I/O-allocaties door elkaar lieten vrijgegeven
