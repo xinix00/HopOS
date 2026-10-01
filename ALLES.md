@@ -137,17 +137,44 @@ op `/dev/cu.kis-100000-ch-0`. Sinds 01-10 ook op het LAN: 5555, 8080,
       leider, de node-stack ziet TCP.
       De "connection refused" van Hop op de system-API was hetzelfde
       filter: applib meldt een time-out als refused.
-- [ ] **Flippen op de M4 landt, maar adopteert niet** (01-10, twee keer):
-      `image/flip-bundle.sh apple` bestaat; de nieuwe kern komt op binnen
-      tien seconden (`HOPOS_CLOCK_CARRIED`, hopfs-generatie mee, net up,
-      5555 open), maar slot 1 (Hop) wordt niet overgenomen (geen
-      `HOPOS_FLIP_ADOPT`, geen `HOP_UP`), de tik slaapt 193.000 keer per
-      seconde (een hangende SError?), er komt geen `HOPOS_FLIP_SETTLED`,
-      en de flip-watchdog reset na twee minuten terug naar het
-      geïnstalleerde image (veilig, en handig om een bundel te toetsen).
-      Geen PSCI, dus geen CPU_OFF; de warme flip met een geparkeerde
-      app-core is op dit silicium nooit gedaan. De zwarte doos staat alleen
-      op de dockchannel.
+- [x] **Flippen op de M4 met adoptie** (01-10 12:14, agent, stempels M3 tot
+      M7): de flip landde maar adopteerde niet, omdat de config op de M4 ín
+      het image zit (venster 0xF000) en een bundel een leeg venster over het
+      image legde: de geflipte kern bootte zonder `hopos.pstate=off`, de
+      tune gaf de SError, de OS-core-preflight faalde, geen plan, geen
+      slots, na twee minuten de guard. Fix: de draaiende kern draagt zijn
+      config-venster over in het gestagede beeld (`fwinfo::carry_config`,
+      `HOPOS_FLIP_CFG`), en `flip-bundle.sh apple` kan een `CFG=` meebakken
+      voor de overgang vanaf een kern zonder die code. Bewijs: twee warme
+      flips op rij (gen 1 → 2 → 3), `HOPOS_FLIP_ADOPT 3 of 3`,
+      `HOPOS_FLIP_NAT restored=4 of=4`, `HOPOS_HOP_RESUMED`,
+      `HOPOS_FLIP_SETTLED`, ~3.100 slaapjes/s, geen SError. Ook:
+      `conport::here()` direct na `discover`, anders kwamen de landing, de
+      bootregel en de zwarte doos nooit op 5555. De ANS van de oude kern
+      geeft de nieuwe geen HELLO; de nieuwe reset het domein en de schijf
+      komt op met de hopfs-generatie mee (zonder SError).
+- [x] **De p-state-tune zonder SError** (01-10, M5 tot M7): de tune loopt nu
+      stap voor stap in `start_interrupts` met na elke schrijf een
+      SError-toets (`HOPOS_APPLE_PSTATE_SERROR`). De bron was de schrijf
+      naar P-cluster +0x440f8 (het t8122-recept van m1n1; de t8132 kent
+      m1n1 niet); het E-cluster-recept is schoon. Zonder die schrijf: E
+      5/8 = 2172 MHz, P 6/20 = 2352 MHz, geen SError, zelftest ok,
+      settled. Een hangende SError is per core en overleeft een flip; alleen
+      een koude reset wist hem (een bundel met `hopos.cages=off` kan niet
+      adopteren en laat de guard de M4 binnen twee minuten koud herstarten).
+      Het geïnstalleerde image is nog D4b (pstate=off); de tune reist met
+      elke flip mee via de config-overdracht.
+- [ ] **De M4 app naar app: 52 MB/s** (M7, tune aan; 47 met pstate=off),
+      tegen 461 op de Pi 4 en 1500+ op de O6N: niet klokgebonden (2,4x
+      hogere E-klok gaf 10%). De pool is op Apple Device gemapt
+      (`dram_attr`), dus de ringbelofte staat daar uit en elke kopie uit en
+      naar een ring loopt per 8 bytes vluchtig; dat is de eerste verdachte.
+- [ ] **Hop en de slots lopen op de M4 uiteen na flips**: de kern nam 3
+      bewoners over terwijl Hop `jobs: []` meldde (Hop herstelt zijn staat
+      niet: "saved agent state not restored: store i/o failed"), een DELETE
+      van bench stopte slot 2, en een vitals-POST faalt daarna met "slot 5:
+      port 8090 is taken by slot 4" (`HOP_JOB_FAILED`). De wezenveger
+      (`sweep_strays`) draait alleen na een restore.
 - [ ] De koude flip werkt er niet (PSCI CPU_OFF zonder EL3); na een
       verhuizing met een rode voorproef spint de oude core.
 - [ ] Het diagnose-image van 06:45 (met `self_test` ná de init) bootte
