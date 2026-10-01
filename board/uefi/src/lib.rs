@@ -366,6 +366,9 @@ fn find_virtio(ty: u32) -> Option<(Ecam, Function, u16, u8)> {
 /// Het generieke UEFI-board.
 pub struct Uefi;
 
+/// Dit board onder de naam die de kern-binary kiest (`vboard::Machine`).
+pub type Machine = Uefi;
+
 impl Uefi {
     /// Het board. Alle staat staat in statics; dit is het handvat.
     #[must_use]

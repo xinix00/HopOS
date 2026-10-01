@@ -47,6 +47,9 @@ mod usb;
 
 pub use machine::{LINK_TIMEOUT_NS, O6n};
 
+/// Dit board onder de naam die de kern-binary kiest (`vboard::Machine`).
+pub type Machine = O6n;
+
 // De slot- en flip-lijm van de binary leest het plan onder deze namen
 // (`slots::plan`, `mpidr`, de staging, `KERN_RAM`, `DMA`), zoals bij de
 // Pi's; op de O6N zijn het die van het UEFI-board.

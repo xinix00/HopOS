@@ -1,9 +1,9 @@
 //! De kooi-lijm op riscv64: de traits van `kern::cage` over
 //! `cpu::riscv::{pmp, sv39, switch, boot}`, `dev` en de executor van hart 0.
 //!
-//! De riscv-helft van `hopos/src/cage.rs` (`ArmCage`), en bedoeld om ernaast
-//! gelezen te worden: dezelfde plichten, andere letters (Go,
-//! `OLD/metal/kern/slots/cage_riscv64.go`):
+//! De riscv-helft van `hopos/src/cage.rs` (`ArmCage`), met wat ze delen in
+//! `glue.rs`, en bedoeld om ernaast gelezen te worden: dezelfde plichten,
+//! andere letters (Go, `OLD/metal/kern/slots/cage_riscv64.go`):
 //!
 //! ```text
 //! ARM (cage.rs)                     RISC-V (dit bestand)
@@ -30,6 +30,7 @@
 //! van hier gaat met `dev::push` naar DRAM en elke lees van een
 //! switcher-woord met `dev::pull`.
 
+use crate::glue::{app_ram, attach, code, detach, err, publish_ports, tail_of, unpublish_ports};
 use abi::hopabi::{
     AppStatus, CTRL_CORES, CTRL_ENTRY, CTRL_EXIT_CODE, CTRL_FAULT_ESR, CTRL_FAULT_FAR,
     CTRL_FAULT_VEC, CTRL_HEARTBEAT, CTRL_IDLE_MODE, CTRL_KILL, CTRL_RAM_SIZE, CTRL_SLOT,
@@ -45,31 +46,13 @@ use abi::layout::{
 use abi::ring;
 use core::future::Future;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use core::time::Duration;
 use cpu::el2::{self, CoreState};
 use cpu::println;
 use cpu::riscv::switch::{self, AppHart, REGIME_PMPADDR0, REGIME_PMPCFG0, REGIME_SATP};
 use cpu::riscv::{boot, pmp, sv39};
 use dev::Pa;
-use executor::Executor;
-use kern::cage::{
-    Cage, CageError, Console, CoreClass, Cores, PhysMem, PortError, Power, Status, Timer,
-};
-use kern::slots::Outbox;
+use kern::cage::{Cage, CageError, CoreClass, Cores, PortError, Power, Status};
 use kern::{Core, Region, SLOT_CAP, Slot};
-use net::ring::AbiTx;
-use net::switch::{Ack, Command};
-
-/// De bevestiging van de `Attach` van een verse kooi aan de switch (zie
-/// `cage.rs`: niemand wacht erop, een weigering wordt bij de volgende
-/// attach gemeld).
-static ATTACH_ACK: Ack = Ack::new();
-/// De bevestiging van de `Detach` bij een stop.
-static DETACH_ACK: Ack = Ack::new();
-/// De bevestiging van elke `Publish` van de poorten van een jobspec.
-static PUBLISH_ACK: Ack = Ack::new();
-/// De bevestiging van de `UnpublishSlot` bij een stop.
-static UNPUBLISH_ACK: Ack = Ack::new();
 
 /// De bel (`msip`-PA) van elk app-hart, per logische core; 0 = geen bel.
 /// Eén schrijver ([`RvCage::new`], bij de boot), daarna alleen lezers: de
@@ -79,32 +62,6 @@ static BELLS: [AtomicU64; BELL_CAP] = [const { AtomicU64::new(0) }; BELL_CAP];
 
 /// Hoeveel app-harts [`BELLS`] draagt: de parkeerlus kent er niet meer.
 const BELL_CAP: usize = boot::MAX_HARTS;
-
-/// De foutcodes van [`CageError`] aan deze kant; de tekst met de getallen
-/// staat op de console (één regel met marker), de code gaat de kern in.
-/// Dezelfde nummers als `cage.rs` waar de betekenis dezelfde is.
-mod code {
-    /// Het plan weigerde een slot- of core-index.
-    pub(super) const PLAN: u32 = 1;
-    /// De partitie geeft geen geldige ABI-staart.
-    pub(super) const TAIL: u32 = 2;
-    /// De vertaling (Sv39) of de whitelist (PMP) weigerde.
-    pub(super) const CAGE: u32 = 3;
-    /// Een ring kon niet klaargezet worden.
-    pub(super) const RING: u32 = 4;
-    /// Dispatch zonder build.
-    pub(super) const NOT_BUILT: u32 = 5;
-    /// Het startschot weigerde (de OS-core, of een vol rooster).
-    pub(super) const DISPATCH: u32 = 6;
-    /// SMP: op riscv64 één core per slot.
-    pub(super) const SPAN: u32 = 7;
-    /// De bewonerslijst van het hart is vol.
-    pub(super) const ROSTER: u32 = 8;
-}
-
-const fn err(code: u32) -> CageError {
-    CageError { code }
-}
 
 /// Het hoogste linkadres dat één Sv39-niveau-1-tabel dekt: de gigabyte van
 /// [`LINK_BASE`] (0x4000_0000..0x8000_0000). De staart heeft plek voor de
@@ -126,16 +83,6 @@ pub(crate) fn link_window(size: u64) -> u64 {
 /// de whitelist onderworpen (Go, `kern/cage/relocate.go`).
 pub(crate) fn reserve(_size: u64) -> u64 {
     0
-}
-
-/// Het app-RAM van een partitie: alles onder de ABI-staart.
-fn app_ram(part: Region) -> Option<u64> {
-    part.size.checked_sub(ABI_TAIL).filter(|n| *n > 0)
-}
-
-/// De staart van een partitie, in fysieke adressen.
-fn tail_of(part: Region) -> Option<Tail> {
-    Tail::new(part.base, app_ram(part)?)
 }
 
 /// Waarom de kooi niet op kon.
@@ -579,85 +526,6 @@ fn code_hash(begin: u64, end: u64) -> u64 {
     h
 }
 
-/// Hangt de frame-ringen van een verse kooi aan de switch, zoals `cage.rs`.
-fn attach(s: layout::Slot, tail: Tail) {
-    if let Some(Err(e)) = ATTACH_ACK.try_take() {
-        println!("cage: an earlier attach was refused: {e} HOPOS_CAGE_ATTACH");
-    }
-    let (Ok(tx), Ok(rx)) = (
-        AbiTx::open(
-            tail.net_tx(),
-            NET_RING_DATA_CAP,
-            ring::Coherence::Maintained,
-        ),
-        ring::Writer::open(tail.net_rx(), NET_RING_DATA_CAP),
-    ) else {
-        println!("cage: slot {s}: frame rings do not open HOPOS_CAGE_ATTACH");
-        return;
-    };
-    let cmd = Command::Attach {
-        slot: s.get(),
-        tx,
-        rx,
-        ack: &ATTACH_ACK,
-    };
-    if crate::net::COMMANDS.try_send(cmd).is_err() {
-        println!("cage: slot {s}: switch mailbox full, no slot LAN HOPOS_CAGE_ATTACH");
-    }
-}
-
-/// Haalt de ringen van `slot` weer van de switch, bij elke stop (zie de
-/// FIXME in `cage.rs`: de kooi-trait is synchroon, niemand wacht).
-fn detach(slot: Slot) {
-    let _ = DETACH_ACK.try_take();
-    let cmd = Command::Detach {
-        slot: slot.get(),
-        ack: &DETACH_ACK,
-    };
-    if crate::net::COMMANDS.try_send(cmd).is_err() {
-        println!("cage: slot {slot}: switch mailbox full, detach not sent HOPOS_CAGE_DETACH");
-    }
-}
-
-/// Zet de poorten van een jobspec door, tcp en udp, zoals `cage.rs`.
-async fn publish_ports(slot: Slot, ports: &[u16]) -> Result<(), PortError> {
-    use net::nat::Proto;
-    if !crate::net::switch_up() {
-        let port = ports.first().copied().unwrap_or(0);
-        println!(
-            "cage: slot {slot}: no switch on this node, port {port} not published HOPOS_CAGE_PUBLISH"
-        );
-        return Err(PortError::Refused { port });
-    }
-    for &port in ports {
-        for proto in [Proto::Tcp, Proto::Udp] {
-            match crate::net::publish_via(&PUBLISH_ACK, proto, slot.get(), port).await {
-                Ok(()) => {}
-                Err(net::Error::AlreadyPublished { port, slot: owner }) => {
-                    return Err(PortError::Taken { port, owner });
-                }
-                Err(e) => {
-                    println!("cage: slot {slot}: port {port}: {e} HOPOS_CAGE_PUBLISH");
-                    return Err(PortError::Refused { port });
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Trekt de publicaties (en flows) van `slot` in, zonder te wachten.
-fn unpublish_ports(slot: Slot) {
-    let _ = UNPUBLISH_ACK.try_take();
-    let cmd = Command::UnpublishSlot {
-        slot: slot.get(),
-        ack: &UNPUBLISH_ACK,
-    };
-    if crate::net::COMMANDS.try_send(cmd).is_err() {
-        println!("cage: slot {slot}: switch mailbox full, unpublish not sent HOPOS_CAGE_PUBLISH");
-    }
-}
-
 impl Cage for RvCage {
     fn clear(&mut self, base: u64, len: u64) {
         let Ok(n) = usize::try_from(len) else { return };
@@ -1020,124 +888,4 @@ pub(crate) fn os_core(plan: &Plan) -> Result<OsCore, el2::Error> {
         }
     );
     Ok(os)
-}
-
-/// Fysiek geheugen over `dev` (dezelfde als in `cage.rs`).
-pub(crate) struct DevMem;
-
-impl PhysMem for DevMem {
-    fn read64(&self, pa: u64) -> u64 {
-        dev::read64(Pa(pa))
-    }
-
-    fn write64(&mut self, pa: u64, v: u64) {
-        dev::write64(Pa(pa), v);
-    }
-
-    fn clear(&mut self, pa: u64, len: u64) {
-        let Ok(n) = usize::try_from(len) else { return };
-        dev::clear(Pa(pa), n);
-        dev::push(Pa(pa), n);
-    }
-
-    fn clean_inv(&mut self, pa: u64, len: u64) {
-        if let Ok(n) = usize::try_from(len) {
-            dev::pull(Pa(pa), n);
-        }
-    }
-
-    fn copy_in(&mut self, pa: u64, src: &[u8]) {
-        dev::copy_in(Pa(pa), src);
-        // Het app-hart haalt zijn image uit DRAM.
-        dev::push(Pa(pa), src.len());
-    }
-
-    fn copy_out(&self, dst: &mut [u8], pa: u64) {
-        dev::pull(Pa(pa), dst.len());
-        dev::copy_out(dst, Pa(pa));
-    }
-}
-
-/// De tijd van de executor van hart 0.
-#[derive(Copy, Clone)]
-pub(crate) struct ExecTimer(pub(crate) &'static Executor);
-
-impl Timer for ExecTimer {
-    fn now(&self) -> u64 {
-        self.0.now()
-    }
-
-    fn sleep(&self, d: Duration) -> impl Future<Output = ()> {
-        self.0.after(d)
-    }
-
-    fn sleep_deferrable(&self, d: Duration) -> impl Future<Output = ()> {
-        self.0.after_deferrable(d)
-    }
-}
-
-/// De console van de kern: `cpu::println!`, en een app-regel als
-/// `slot N: <regel>`.
-#[derive(Copy, Clone)]
-pub(crate) struct KernConsole;
-
-impl Console for KernConsole {
-    fn log(&self, args: core::fmt::Arguments<'_>) {
-        println!("{args}");
-    }
-
-    fn app_line(&self, slot: Slot, line: &[u8]) {
-        match core::str::from_utf8(line) {
-            Ok(s) => println!("slot {slot}: {s}"),
-            Err(_) => println!("slot {slot}: {}", line.escape_ascii()),
-        }
-    }
-}
-
-/// De outbox van één levensduur (dezelfde als in `cage.rs`).
-pub(crate) struct SlotOutbox {
-    reader: Option<ring::Reader>,
-    ctx: Pa,
-    ctrl: Option<Pa>,
-}
-
-impl SlotOutbox {
-    /// Opent de outbox van de partitie `part`; `ctx` is het ctx-blok van
-    /// het slot.
-    pub(crate) fn open(part: Region, ctx: Pa) -> SlotOutbox {
-        let tail = tail_of(part);
-        SlotOutbox {
-            reader: tail.and_then(|t| ring::Reader::open(t.outbox(), RING_DATA_CAP).ok()),
-            ctx,
-            ctrl: tail.map(|t| t.ctrl_page()),
-        }
-    }
-}
-
-impl Outbox for SlotOutbox {
-    fn read_into(&mut self, buf: &mut [u8]) -> Option<(u8, usize)> {
-        let rec = self.reader.as_mut()?.read_into(buf)?;
-        Some((
-            u8::try_from(rec.kind.raw()).unwrap_or(u8::MAX),
-            rec.payload.len(),
-        ))
-    }
-
-    fn corrupt(&self) -> bool {
-        self.reader.as_ref().is_none_or(ring::Reader::is_corrupt)
-    }
-
-    fn live(&self) -> bool {
-        matches!(
-            el2::ctx_state(self.ctx),
-            Some(CtxState::Running | CtxState::Saved | CtxState::BootPending)
-        )
-    }
-
-    fn smp_pending(&self) -> bool {
-        self.ctrl.is_some_and(|c| {
-            dev::pull(c.add(CTRL_SMP_REQ), 8);
-            dev::read64(c.add(CTRL_SMP_REQ)) != 0
-        })
-    }
 }

@@ -10,10 +10,11 @@
 //! de config (kern::nodecfg: `hopos.console`, anders `hopos.insecure`).
 //!
 //! Eigendom: de ring is van de OS-core (`LocalCell`, zoals het glas in
-//! gui.rs). De tee schrijft alleen op die core; een regel van een andere
-//! core gaat naar de UART en niet in de ring. Een lening die al loopt (een
-//! noodregel uit exception-context midden in een regel) slaat de ring
-//! over, de UART krijgt alles. De lezers lenen de ring per hap
+//! gui.rs, dat de tee op dezelfde core als laatste schrijft). De tee schrijft
+//! alleen op die core; een regel van een andere core gaat naar de UART en
+//! niet in de ring of op het glas. Een lening die al loopt (een noodregel
+//! uit exception-context midden in een regel) slaat de ring over, de UART
+//! krijgt alles. De lezers lenen de ring per hap
 //! (`snapshot`), nooit over een await heen.
 //!
 //! De tee geeft elke regel ook aan de zwarte doos (`flip::black_box`): een
@@ -60,8 +61,8 @@ pub(crate) fn here() {
     RING_CORE.store(crate::BOARD.this_core(), Release);
 }
 
-/// De sink: eerst de zwarte doos, dan de vorige (de UART), dan de ring op
-/// de eigen core. De tee van het glas (gui.rs) roept dit als zijn "UART".
+/// De sink: eerst de zwarte doos, dan de vorige (de UART), dan de ring en
+/// het glas (`gui::glass`) op de eigen core.
 ///
 /// De doos eerst, zoals in Go (`conlog.Route`): hangt de UART-poll, dan
 /// staat de regel toch al in DRAM.
@@ -72,7 +73,7 @@ pub(crate) fn tee(b: &[u8]) {
         // SAFETY: `PREV` wordt alleen door `install` geschreven, met een
         // geldige `fn(&[u8])`; een functiepointer en een datapointer zijn op
         // onze targets even groot, en null is uitgesloten (zelfde vorm als
-        // `cpu::console::sink` en de tee in gui.rs).
+        // `cpu::console::sink`).
         let prev = unsafe { core::mem::transmute::<*mut (), fn(&[u8])>(p) };
         prev(b);
     }
@@ -82,6 +83,7 @@ pub(crate) fn tee(b: &[u8]) {
     if let Ok(mut r) = RING.try_borrow_mut() {
         r.write(b);
     }
+    crate::gui::glass(b);
 }
 
 /// Een hap uit de ring vanaf `seen`, voor `kern::conport::stream`. Een

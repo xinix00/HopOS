@@ -147,6 +147,9 @@ fn wait_us(us: u64) {
 /// De LicheeRV Nano als board.
 pub struct LicheeRv;
 
+/// Dit board onder de naam die de kern-binary kiest (`vboard::Machine`).
+pub type Machine = LicheeRv;
+
 impl LicheeRv {
     /// Het board.
     #[must_use]

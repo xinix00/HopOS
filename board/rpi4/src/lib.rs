@@ -74,6 +74,9 @@ pub struct Bcm2711;
 /// De Pi 4 als board.
 pub type Rpi4 = Raspi<Bcm2711>;
 
+/// Dit board onder de naam die de kern-binary kiest (`vboard::Machine`).
+pub type Machine = Rpi4;
+
 impl Soc for Bcm2711 {
     type Nic = Genet;
     const NAME: &'static str = "rpi4";

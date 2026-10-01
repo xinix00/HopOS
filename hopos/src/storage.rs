@@ -33,12 +33,10 @@
 use alloc::boxed::Box;
 use blkdev::{AsyncBlockDevice, LBA_SIZE, Pace, Queue, block_on};
 use board::Board;
-use core::future::Future;
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use core::time::Duration;
 use cpu::println;
 use executor::Executor;
-use kern::cage::Timer;
 use kern::hopfs::{Fs, Mounted};
 use kern::rpc::{self, FsActor, FsInbox, committer};
 use kern::slots::Reply;
@@ -99,18 +97,6 @@ pub(crate) async fn freeze_for_flip(
 #[must_use]
 pub(crate) fn thaw_after_flip() -> bool {
     !is_up() || rpc::thaw(&FS_INBOX)
-}
-
-/// De klok van de executor als `kern::cage::Timer`, voor de committer.
-struct ExecTimer(&'static Executor);
-
-impl Timer for ExecTimer {
-    fn now(&self) -> u64 {
-        self.0.now()
-    }
-    fn sleep(&self, d: Duration) -> impl Future<Output = ()> {
-        self.0.after(d)
-    }
 }
 
 /// De klok en de timers van de executor als `blkdev::Pace`: waarop de
@@ -271,7 +257,13 @@ pub(crate) fn start(exec: &'static Executor, disk: Option<vboard::Disk>) -> bool
         println!("disk: stats task not spawned HOPOS_DISK_STATS_FAIL");
     }
     let commit = async move {
-        committer(&crate::SERVICERS, &FS_INBOX, &ExecTimer(exec), max_slots).await;
+        committer(
+            &crate::SERVICERS,
+            &FS_INBOX,
+            &crate::clock::ExecTimer(exec),
+            max_slots,
+        )
+        .await;
     };
     if exec.spawn(commit).is_err() {
         // De calls werken; alleen het vastleggen niet. Luid, niet fataal.

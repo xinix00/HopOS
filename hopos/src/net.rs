@@ -25,6 +25,7 @@
 //! Wat hier niet staat: de lifecycle achter de system-API (die krijgt de
 //! listener als [`SystemApi`] van `main`), SNTP en DNS.
 
+use crate::clock::ExecTimer;
 use abi::layout::{HOST_IP4, NET_MTU, NET_PREFIX, NET_RING_DATA_CAP};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -37,11 +38,9 @@ use core::time::Duration;
 use cpu::println;
 use dev::Pa;
 use executor::{Clock, Executor, Sleeper};
-use kern::cage::{Console, PhysMem, Timer};
 use kern::slots::Reply;
 use kern::system::{
-    Admitted, Conn, End, Hooks, MAX_HOP_CONNS, MAX_IO_CHUNK, MAX_PAYLOAD, MAX_SYSTEM_CONNS, PORT,
-    System,
+    Admitted, Conn, End, MAX_HOP_CONNS, MAX_IO_CHUNK, MAX_PAYLOAD, MAX_SYSTEM_CONNS, PORT,
 };
 use leandhcp::{Action, Client, Instant, KeepAction, Keeper, Lease};
 use leannet::{Endpoint, ListenHandle, Stack, TcpHandle, UdpHandle};
@@ -73,7 +72,7 @@ type RingTx = abi::ring::Writer;
 /// apps foutloos draaide). Niet op RISC-V: de C906 is niet coherent met het
 /// andere hart. Elke ring kopieert pas zonder onderhoud als de tegenpartij
 /// hetzelfde belooft. De ringen van een slot krijgen op Apple en de Radxa
-/// toch Hardware zodra de kooi de staart Normal mapt (`cage::tail_rings`).
+/// toch Hardware zodra de kooi de staart Normal mapt (`glue::tail_rings`).
 pub(crate) const RINGS: abi::ring::Coherence = if cfg!(all(
     target_arch = "aarch64",
     not(any(feature = "board-apple", feature = "board-rk3566"))
@@ -228,7 +227,7 @@ pub(crate) async fn publish(slot: usize, port: u16) -> Result<(), net::Error> {
 /// `slot` en wacht op `ack`. Elke zender heeft zijn eigen `ack` en stuurt
 /// pas een volgende als de vorige bevestigd is: de plaatsing van Hop
 /// ([`publish`]) en de lifecycle-actor (de poorten van een jobspec,
-/// `cage.rs`). Alleen met een draaiende switch ([`switch_up`]): anders
+/// `glue.rs`). Alleen met een draaiende switch ([`switch_up`]): anders
 /// leest niemand de brievenbus en duurt de wacht eeuwig.
 pub(crate) async fn publish_via(
     ack: &'static Ack,
@@ -271,21 +270,17 @@ pub(crate) struct Params {
 }
 
 /// Wat de system-listener van de lifecycle-kant krijgt: de system-API en de
-/// lijm die `serve` vraagt. De gedeelde delen zijn `static` (alle
-/// verbindingstaken lenen ze); het geheugenhandvat krijgt elke taak als
-/// eigen kloon.
-pub(crate) struct SystemApi<const N: usize, M, H: 'static, C: 'static> {
+/// lijm die `serve` vraagt, alle `static` (alle verbindingstaken lenen ze).
+pub(crate) struct SystemApi {
     /// De system-API over de lifecycle-inbox en de servicers.
-    pub(crate) system: &'static System<'static, 'static, N>,
+    pub(crate) system: &'static crate::KernSystem,
     /// Eén antwoordplek per verbindingstaak: een antwoord van de actor
     /// landt nooit bij een andere verbinding.
     pub(crate) replies: &'static [Reply; SYSTEM_WORKERS],
-    /// Fysiek geheugen voor de image-stream.
-    pub(crate) mem: M,
     /// Klok en flip.
-    pub(crate) hooks: &'static H,
+    pub(crate) hooks: &'static crate::BootHooks,
     /// De console voor app-logregels.
-    pub(crate) log: &'static C,
+    pub(crate) log: &'static crate::SystemLog,
 }
 
 /// Waarom het netwerkvlak niet opkwam.
@@ -319,18 +314,12 @@ impl fmt::Display for Error {
 /// handboek §4 (de pompen eerst): de RX-pomp, de switch, de flow-expiry, de
 /// host-taak. De host-taak haalt de lease, zet de stack op en spawnt dan de
 /// DHCP-keeper en de system-listener.
-pub(crate) fn start<D, const N: usize, M, H, C>(
+pub(crate) fn start<D: Device + 'static>(
     exec: &'static Executor,
     nic: D,
     p: Params,
-    api: SystemApi<N, M, H, C>,
-) -> Result<(), Error>
-where
-    D: Device + 'static,
-    M: PhysMem + Clone + 'static,
-    H: Hooks + 'static,
-    C: Console + 'static,
-{
+    api: SystemApi,
+) -> Result<(), Error> {
     let mac = nic.mac().0;
     let (ing_tx, ing_rx) = INGRESS.split().ok_or(Error::Twice)?;
     let (eg_tx, eg_rx) = EGRESS.split().ok_or(Error::Twice)?;
@@ -463,12 +452,7 @@ struct Node {
 impl Node {
     /// De levensloop: lease, uplink, stack, keeper en listener, en dan de
     /// lus van poort 0 tot de stop.
-    async fn run<const N: usize, M, H, C>(mut self, api: SystemApi<N, M, H, C>)
-    where
-        M: PhysMem + Clone + 'static,
-        H: Hooks + 'static,
-        C: Console + 'static,
-    {
+    async fn run(mut self, api: SystemApi) {
         let exec = self.exec;
         let lease = self.lease().await;
         let cidr = lease.cidr();
@@ -704,13 +688,6 @@ fn on_stack<T>(f: impl FnOnce(&mut Stack) -> leannet::Result<T>) -> leannet::Res
     }
 }
 
-/// De tellers van de node-stack voor de diagnoseregel van de tik; `None`
-/// zonder stack of tijdens een lening.
-#[cfg(feature = "board-apple")]
-pub(crate) fn stack_stats() -> Option<leannet::Stats> {
-    on_stack(|st| Ok(st.stats())).ok()
-}
-
 /// Een socket-call van buiten de host-taak: na succes de bel van de
 /// host-taak, want een write, read of close kan uitgaand werk maken (data,
 /// een ACK, een vensterupdate, een FIN).
@@ -923,33 +900,12 @@ impl Door {
 /// De deuren van de pool, één per verbindingstaak.
 static DOORS: [Door; SYSTEM_WORKERS] = [const { Door::new() }; SYSTEM_WORKERS];
 
-/// De klok van de executor als `kern::cage::Timer`, voor het toezicht op
-/// een verbinding (`LIFE_TICK`, `IDLE_TIMEOUT`).
-struct NetTimer(&'static Executor);
-
-impl Timer for NetTimer {
-    fn now(&self) -> u64 {
-        self.0.now()
-    }
-    fn sleep(&self, d: Duration) -> impl Future<Output = ()> {
-        self.0.after(d)
-    }
-}
-
 /// De listener op [`PORT`] (Go: `ServeSystem`): per verbinding `admit`
 /// (het slot uit het bron-IP, een levende servicer, hooguit
 /// [`MAX_SYSTEM_CONNS`]) en dan de verbinding naar een vrije taak uit de
 /// pool. De listener zelf leest nooit van een verbinding, dus hij staat
 /// altijd weer bij `accept`: een zwijgende peer houdt niemand op.
-async fn system_listener<const N: usize, M, H, C>(
-    exec: &'static Executor,
-    ip: Ipv4Addr,
-    api: SystemApi<N, M, H, C>,
-) where
-    M: PhysMem + Clone + 'static,
-    H: Hooks + 'static,
-    C: Console + 'static,
-{
+async fn system_listener(exec: &'static Executor, ip: Ipv4Addr, api: SystemApi) {
     let l = match io(|st| st.tcp_listen(PORT)) {
         Ok(l) => l,
         Err(e) => {
@@ -1082,7 +1038,7 @@ async fn console_reader(
     let mut buf = [0u8; 1024];
     kern::conport::stream(
         &mut conn,
-        &NetTimer(exec),
+        &ExecTimer(exec),
         crate::conport::snapshot,
         crate::conport::oldest(),
         &mut buf,
@@ -1109,15 +1065,7 @@ fn hand(job: Job) -> Result<usize, Job> {
 
 /// Spawnt de verbindingstaken, elk met haar eigen buffers (boot: de heap
 /// geeft ze eenmalig) en haar eigen antwoordplek. Geeft hoeveel er draaien.
-fn spawn_workers<const N: usize, M, H, C>(
-    exec: &'static Executor,
-    api: &SystemApi<N, M, H, C>,
-) -> usize
-where
-    M: PhysMem + Clone + 'static,
-    H: Hooks + 'static,
-    C: Console + 'static,
-{
+fn spawn_workers(exec: &'static Executor, api: &SystemApi) -> usize {
     let mut n = 0;
     for (i, reply) in api.replies.iter().enumerate() {
         let (Ok(buf), Ok(out)) = (boot_buf(MAX_PAYLOAD), boot_buf(OUT_BUF)) else {
@@ -1131,7 +1079,6 @@ where
             door: i,
             system: api.system,
             reply,
-            mem: api.mem.clone(),
             hooks: api.hooks,
             log: api.log,
             buf,
@@ -1146,27 +1093,25 @@ where
     n
 }
 
-/// Eén verbindingstaak met haar eigendom: buffers, antwoordplek en
-/// geheugenhandvat. Ze dient de ene verbinding na de andere, nooit twee
-/// tegelijk.
-struct Worker<const N: usize, M, H: 'static, C: 'static> {
+/// Eén verbindingstaak met haar eigendom: buffers en antwoordplek. Ze dient
+/// de ene verbinding na de andere, nooit twee tegelijk.
+struct Worker {
     exec: &'static Executor,
     door: usize,
-    system: &'static System<'static, 'static, N>,
+    system: &'static crate::KernSystem,
     reply: &'static Reply,
-    mem: M,
-    hooks: &'static H,
-    log: &'static C,
+    hooks: &'static crate::BootHooks,
+    log: &'static crate::SystemLog,
     buf: Vec<u8>,
     out: Vec<u8>,
 }
 
-impl<const N: usize, M: PhysMem, H: Hooks, C: Console> Worker<N, M, H, C> {
+impl Worker {
     async fn run(mut self) {
         let Some(door) = DOORS.get(self.door) else {
             return;
         };
-        let timer = NetTimer(self.exec);
+        let timer = ExecTimer(self.exec);
         loop {
             door.bell.wait().await;
             let seat = core::mem::replace(&mut *door.seat.borrow_mut(), Seat::Busy);
@@ -1187,7 +1132,7 @@ impl<const N: usize, M: PhysMem, H: Hooks, C: Console> Worker<N, M, H, C> {
                     &job.who,
                     self.reply,
                     &timer,
-                    &mut self.mem,
+                    &mut crate::DevMem,
                     self.hooks,
                     self.log,
                     &mut self.buf,

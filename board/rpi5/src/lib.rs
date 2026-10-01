@@ -97,6 +97,9 @@ pub struct Bcm2712;
 /// De Pi 5 als board.
 pub type Rpi5 = Raspi<Bcm2712>;
 
+/// Dit board onder de naam die de kern-binary kiest (`vboard::Machine`).
+pub type Machine = Rpi5;
+
 impl Soc for Bcm2712 {
     type Nic = Gem;
     const NAME: &'static str = "rpi5";

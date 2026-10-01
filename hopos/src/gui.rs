@@ -37,8 +37,8 @@ mod off {
 
     use executor::Executor;
 
-    /// Niets te onthouden.
-    pub(crate) fn keep_uart(_uart: fn(&[u8])) {}
+    /// Geen glas achter de console-tee.
+    pub(crate) fn glass(_b: &[u8]) {}
 
     /// Geen framebuffer-console.
     pub(crate) fn init_framebuffer_console(_board: &'static crate::Machine) {}
@@ -63,24 +63,56 @@ mod off {
 mod on {
     use board::Board;
     use core::fmt::{self, Write as _};
-    use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering::Acquire, Ordering::Release};
+    use core::sync::atomic::{AtomicBool, Ordering::Acquire, Ordering::Release};
     use cpu::println;
     use driver_fb::{Console, Desc};
     use executor::Executor;
     use gui_fbgrant::FbGrant;
     use sync::LocalCell;
 
-    /// De console op het glas. Alleen de OS-core raakt hem aan.
+    /// De console op het glas. Alleen de OS-core raakt hem aan: de core die
+    /// ook de ring van de TCP-console bezit (`conport::here`, vlak vóór de
+    /// init), en alleen daar roept `conport::tee` [`glass`].
     static GLASS: LocalCell<Console> = LocalCell::cell(Console::new());
-    /// De core die het glas bezit (de OS-core bij de init); `usize::MAX` =
-    /// geen glas.
-    static GLASS_CORE: AtomicUsize = AtomicUsize::new(usize::MAX);
-    /// De UART-haak van het board, zoals `main` hem zette: de tee schrijft
-    /// eerst daarheen. Null = nog geen tee.
-    static UART: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+    /// Staat de console op het glas (gezet door de init)?
+    static GLASS_UP: AtomicBool = AtomicBool::new(false);
 
     /// De framebuffer-grant van deze node.
     static GRANT: LocalCell<FbGrant> = LocalCell::cell(FbGrant::new());
+
+    #[cfg(feature = "media")]
+    use crate::optical;
+
+    /// Zonder `media` geen optische schijven: dezelfde namen als
+    /// `crate::optical`, en de haken van de USB-sink doen niets
+    /// (handboek §7: één pad, de `cfg` op module-niveau).
+    #[cfg(not(feature = "media"))]
+    mod optical {
+        use gui_usbin::storage::{BulkError, BulkId, BulkInfo, BulkReq};
+
+        /// Wekt de USB-taak voor een optische transfer: hier nooit.
+        pub(super) static WAKE: sync::Signal = sync::Signal::new();
+
+        /// De brug naar de optical-owner: zonder owner. Met accolades, zodat
+        /// `Bridge::default()` dezelfde regel is als met `media`.
+        #[derive(Default)]
+        pub(super) struct Bridge {}
+
+        impl Bridge {
+            pub(super) fn attached(&mut self, _: &BulkInfo) {}
+            pub(super) fn gone(&mut self, _: BulkId) {}
+            pub(super) fn next(&mut self) -> Option<BulkReq> {
+                None
+            }
+            pub(super) fn output(&self, _: &BulkReq) -> &[u8] {
+                &[]
+            }
+            pub(super) fn input(&mut self, _: &BulkReq) -> &mut [u8] {
+                &mut []
+            }
+            pub(super) fn done(&mut self, _: &BulkReq, _: Result<usize, BulkError>) {}
+        }
+    }
 
     /// De kopregels: de bunny van `main`, zonder de lege scheidingsregel.
     /// De meetregels komen rechts op de eerste drie.
@@ -90,9 +122,6 @@ mod on {
     /// schone lei, de bunny als vaste kop, en vanaf nu gaat elke logregel
     /// naar de UART én het scherm. Geen framebuffer is geen fout: één regel.
     pub(crate) fn init_framebuffer_console(board: &'static crate::Machine) {
-        if UART.load(Acquire).is_null() {
-            return; // Zonder UART-haak geen tee: dan blijft het bij de UART.
-        }
         let Some(d) = board.framebuffer() else {
             println!("fb: no framebuffer on this board, console on the UART only HOPOS_FB_NONE");
             return;
@@ -100,18 +129,13 @@ mod on {
         normal_nc(&d);
         let r = GLASS.try_borrow_mut().map(|mut c| {
             c.init(d).map(|()| {
-                let mut lines = [""; HEADER_ROWS];
-                for (l, b) in lines.iter_mut().zip(crate::BUNNY.iter()) {
-                    *l = b;
-                }
-                c.header(&lines);
+                bunny_header(&mut c);
                 c.cells()
             })
         });
         match r {
             Ok(Ok((cols, rows))) => {
-                GLASS_CORE.store(board.this_core(), Release);
-                cpu::console::set_sink(tee);
+                GLASS_UP.store(true, Release);
                 if let Ok(mut g) = GRANT.try_borrow_mut()
                     && let Err(e) = g.offer(d)
                 {
@@ -139,30 +163,21 @@ mod on {
         }
     }
 
-    /// Onthoudt de UART-haak die `main` van het board kreeg (in `kmain`,
-    /// vóór een verhuizing naar de OS-core): de tee schrijft eerst
-    /// daarheen. `console()` een tweede keer vragen zou de UART midden in
-    /// de boot opnieuw opzetten.
-    pub(crate) fn keep_uart(uart: fn(&[u8])) {
-        UART.store(uart as *mut (), Release);
+    /// De bunny van `main` als vaste kop, zonder de lege scheidingsregel.
+    fn bunny_header(c: &mut Console) {
+        let mut lines = [""; HEADER_ROWS];
+        for (l, b) in lines.iter_mut().zip(crate::BUNNY.iter()) {
+            *l = b;
+        }
+        c.header(&lines);
     }
 
-    /// De console-haak in de gui-smaak: alles naar de UART, en op de
-    /// OS-core ook naar het glas.
-    fn tee(b: &[u8]) {
-        let p = UART.load(Acquire);
-        if !p.is_null() {
-            // SAFETY: `UART` wordt alleen door `tee_on` geschreven, met een
-            // geldige `fn(&[u8])`; een functiepointer en een datapointer
-            // zijn op onze targets even groot, en null is uitgesloten
-            // (zelfde vorm als `cpu::console::sink`).
-            let uart = unsafe { core::mem::transmute::<*mut (), fn(&[u8])>(p) };
-            uart(b);
-        }
-        if GLASS_CORE.load(Acquire) != crate::BOARD.this_core() {
-            return;
-        }
-        if let Ok(mut c) = GLASS.try_borrow_mut() {
+    /// Het glas als laatste stap van de console-tee (`conport::tee`), op de
+    /// OS-core.
+    pub(crate) fn glass(b: &[u8]) {
+        if GLASS_UP.load(Acquire)
+            && let Ok(mut c) = GLASS.try_borrow_mut()
+        {
             c.write(b);
         }
     }
@@ -171,7 +186,7 @@ mod on {
     /// datum en tijd met seconden, elke seconde. Een bevroren klok verraadt
     /// zo een hangende kern meteen (Derek, 15-07).
     pub(crate) fn start_screen_status(exec: &'static Executor) {
-        if GLASS_CORE.load(Acquire) == usize::MAX {
+        if !GLASS_UP.load(Acquire) {
             return;
         }
         if exec.spawn(screen_status(exec)).is_err() {
@@ -254,7 +269,7 @@ mod on {
         pub(super) static USB_LIVE: core::sync::atomic::AtomicBool =
             core::sync::atomic::AtomicBool::new(false);
 
-        use super::GRANT;
+        use super::{GRANT, optical};
         use board::{Board, UsbHost, UsbHosts, UsbKind};
         use core::fmt;
         use core::future::Future;
@@ -276,9 +291,6 @@ mod on {
         /// achter). Een meting, geen fout: invoer is lossy by design.
         pub(crate) static QUEUE_DROPS: AtomicU64 = AtomicU64::new(0);
 
-        /// Gebeurtenissen die de USB-taak las, totaal.
-        pub(crate) static EVENTS: AtomicU64 = AtomicU64::new(0);
-
         /// Het timerwiel van de executor als klok en slaap van de driver:
         /// een poortreset of een commando slaapt hierop in plaats van de
         /// core vast te houden.
@@ -298,13 +310,11 @@ mod on {
         /// console.
         struct UsbSink {
             tx: InputTx<'static>,
-            #[cfg(feature = "media")]
-            optical: crate::optical::Bridge,
+            optical: optical::Bridge,
         }
 
         impl Sink for UsbSink {
             fn input(&mut self, e: Event) {
-                EVENTS.fetch_add(1, Relaxed);
                 if !deliver::offer(&mut self.tx, e) {
                     // Eén regel bij de eerste, daarna tellen.
                     if QUEUE_DROPS.fetch_add(1, Relaxed) == 0 {
@@ -319,23 +329,18 @@ mod on {
             fn log(&mut self, args: fmt::Arguments<'_>) {
                 println!("{args}");
             }
-            #[cfg(feature = "media")]
             fn storage_attached(&mut self, info: &gui_usbin::storage::BulkInfo) {
                 self.optical.attached(info);
             }
-            #[cfg(feature = "media")]
             fn storage_gone(&mut self, id: gui_usbin::storage::BulkId) {
                 self.optical.gone(id);
             }
-            #[cfg(feature = "media")]
             fn bulk_out(&mut self, req: &gui_usbin::storage::BulkReq) -> &[u8] {
                 self.optical.output(req)
             }
-            #[cfg(feature = "media")]
             fn bulk_in(&mut self, req: &gui_usbin::storage::BulkReq) -> &mut [u8] {
                 self.optical.input(req)
             }
-            #[cfg(feature = "media")]
             fn bulk_done(
                 &mut self,
                 req: &gui_usbin::storage::BulkReq,
@@ -375,8 +380,7 @@ mod on {
                     hosts,
                     UsbSink {
                         tx,
-                        #[cfg(feature = "media")]
-                        optical: crate::optical::Bridge::default(),
+                        optical: optical::Bridge::default(),
                     },
                 ))
                 .is_err()
@@ -441,7 +445,6 @@ mod on {
             );
             USB_LIVE.store(true, core::sync::atomic::Ordering::Release);
             loop {
-                #[cfg(feature = "media")]
                 if let Some(req) = sink.optical.next() {
                     mgr.enqueue(req, &mut sink);
                 }
@@ -451,28 +454,18 @@ mod on {
                 // signaal telt in de stap én in de slaap erna: de slaap kan
                 // een seconde zijn, en de flip wacht hoogstens één (30-09:
                 // de eerste proef zag de stop nooit).
-                let wait = match sync::select(mgr.step(&mut sink), FLIP_STOP.wait()).await {
-                    sync::Either::Left(w) => w,
-                    sync::Either::Right(()) => {
-                        mgr.stop_all().await;
-                        println!("usb: {live} controller(s) halted for the flip HOPOS_USB_HALTED");
-                        USB_QUIET.set();
-                        return;
+                let flip = match sync::select(mgr.step(&mut sink), FLIP_STOP.wait()).await {
+                    sync::Either::Left(wait) => {
+                        let nap = sync::select(
+                            exec.after(Duration::from_nanos(wait)),
+                            optical::WAKE.wait(),
+                        );
+                        let slept = sync::select(nap, FLIP_STOP.wait()).await;
+                        matches!(slept, sync::Either::Right(()))
                     }
+                    sync::Either::Right(()) => true,
                 };
-                #[cfg(feature = "media")]
-                let slept = sync::select(
-                    sync::select(
-                        exec.after(Duration::from_nanos(wait)),
-                        crate::optical::WAKE.wait(),
-                    ),
-                    FLIP_STOP.wait(),
-                )
-                .await;
-                #[cfg(not(feature = "media"))]
-                let slept =
-                    sync::select(exec.after(Duration::from_nanos(wait)), FLIP_STOP.wait()).await;
-                if matches!(slept, sync::Either::Right(())) {
+                if flip {
                     mgr.stop_all().await;
                     println!("usb: {live} controller(s) halted for the flip HOPOS_USB_HALTED");
                     USB_QUIET.set();
@@ -588,7 +581,7 @@ mod on {
     /// De grant-haakjes voor de slot-lifecycle (`kern::grants::Grants`); de
     /// lifecycle-actor (slots.rs) is hun eigenaar en roept ze.
     pub(crate) mod hooks {
-        use super::{GLASS, GRANT, HEADER_ROWS};
+        use super::{GLASS, GRANT, bunny_header};
         use driver_fb::Desc;
         use gui_fbgrant::Glass;
         use kern::Slot;
@@ -609,11 +602,7 @@ mod on {
                 if let Ok(mut c) = GLASS.try_borrow_mut()
                     && c.init(d).is_ok()
                 {
-                    let mut lines = [""; HEADER_ROWS];
-                    for (l, b) in lines.iter_mut().zip(crate::BUNNY.iter()) {
-                        *l = b;
-                    }
-                    c.header(&lines);
+                    bunny_header(&mut c);
                 }
             }
         }

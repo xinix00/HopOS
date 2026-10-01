@@ -444,6 +444,9 @@ fn take_fdt(dtb: u64) {
 /// De Radxa Zero 3E als board.
 pub struct Rk3566;
 
+/// Dit board onder de naam die de kern-binary kiest (`vboard::Machine`).
+pub type Machine = Rk3566;
+
 impl Rk3566 {
     /// Het board. Alle staat staat in statics; dit is het handvat.
     #[must_use]

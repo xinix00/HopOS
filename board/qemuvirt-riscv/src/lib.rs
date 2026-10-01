@@ -173,6 +173,9 @@ pub fn bootargs() -> &'static str {
 /// QEMU virt (riscv64) als board.
 pub struct QemuVirtRiscv;
 
+/// Dit board onder de naam die de kern-binary kiest (`vboard::Machine`).
+pub type Machine = QemuVirtRiscv;
+
 impl QemuVirtRiscv {
     /// Het board. Alle staat staat in statics.
     #[must_use]

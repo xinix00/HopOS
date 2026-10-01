@@ -33,6 +33,9 @@ mod machine;
 
 pub use machine::Altra;
 
+/// Dit board onder de naam die de kern-binary kiest (`vboard::Machine`).
+pub type Machine = Altra;
+
 // De slot- en flip-lijm van de binary leest het plan onder deze namen,
 // zoals bij de Pi's; op de Altra zijn het die van het UEFI-board.
 pub use board_uefi::{DMA, KERN_RAM, KERN_VHE, facts, irq, slots, watchdog};

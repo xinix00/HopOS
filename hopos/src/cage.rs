@@ -15,8 +15,11 @@
 //! alleen rekent; die blijft de rekenkern voor de host-tests en de flip.
 //!
 //! Dit is de ARM-helft van `OLD/metal/kern/slots/cage_arm64.go` plus het
-//! schrijfwerk van `armSlot` (control-page, ringen, ctx-woorden).
+//! schrijfwerk van `armSlot` (control-page, ringen, ctx-woorden). Wat deze
+//! lijm met die van riscv64 deelt (de switch, de outbox, de foutcodes), staat
+//! in `glue.rs`.
 
+use crate::glue::{attach, detach, err, publish_ports, tail_of, unpublish_ports};
 use abi::hopabi::{
     AppStatus, CTRL_APP_FAULT_ELR, CTRL_APP_FAULT_ESR, CTRL_APP_FAULT_FAR, CTRL_APP_FAULT_VEC,
     CTRL_CORES, CTRL_ENTRY, CTRL_EXIT_CODE, CTRL_FAULT_ESR, CTRL_FAULT_FAR, CTRL_FAULT_VEC,
@@ -24,39 +27,18 @@ use abi::hopabi::{
     CTRL_SHARED, CTRL_SLOT, CTRL_SMP_REQ, CTRL_STATUS, CTRL_VEC_PA, CTRL_WALL_OFF, IDLE_YIELD,
 };
 use abi::layout::{
-    self, ABI_TAIL, CTRL_STRIDE, CTX_KICK_TARGET, CTX_SMP, CtxState, LINK_BASE, NET_RING_DATA_CAP,
-    Plan, RING_DATA_CAP, Tail,
+    self, CTRL_STRIDE, CTX_KICK_TARGET, CTX_SMP, CtxState, LINK_BASE, NET_RING_DATA_CAP, Plan,
+    RING_DATA_CAP, Tail,
 };
 use abi::ring;
 use board::Board;
 use core::future::Future;
-use core::time::Duration;
 use cpu::el2::{self, CoreState, Flavor, Installed, Join, Start};
 use cpu::println;
 use dev::Pa;
-use executor::Executor;
-use kern::cage::{
-    Cage, CageError, Console, CoreClass, Cores, PhysMem, PortError, Power, Status, Timer,
-};
-use kern::slots::Outbox;
+use kern::cage::{Cage, CageError, CoreClass, Cores, PortError, Power, Status};
 use kern::{Core, Region, SLOT_CAP, Slot};
-use net::ring::AbiTx;
-use net::switch::{Ack, Command};
 use vboard::slots::mpidr;
-
-/// De bevestiging van de `Attach` van een verse kooi aan de switch. Niemand
-/// wacht erop (de kooi-trait is synchroon); het resultaat wordt bij de
-/// volgende attach opgehaald en gemeld als het een weigering was.
-static ATTACH_ACK: Ack = Ack::new();
-/// De bevestiging van de `Detach` bij een stop.
-static DETACH_ACK: Ack = Ack::new();
-/// De bevestiging van elke `Publish` van de poorten van een jobspec. De
-/// lifecycle-actor is de enige zender en wacht elke bevestiging af.
-static PUBLISH_ACK: Ack = Ack::new();
-/// De bevestiging van de `UnpublishSlot` bij een stop. Niemand wacht erop:
-/// de brievenbus is een rij, dus een publicatie van een volgende start komt
-/// altijd ná deze intrekking aan de beurt.
-static UNPUBLISH_ACK: Ack = Ack::new();
 
 /// De EL2-smaak van de switcher (cpu::el2 `Flavor`), gekozen door het board
 /// en niet door een losse bouwvlag:
@@ -126,31 +108,15 @@ const APP_IDLE_MODE: u64 = IDLE_YIELD;
 #[cfg(not(feature = "board-qemuvirt"))]
 const APP_IDLE_MODE: u64 = 0;
 
-/// De foutcodes van [`CageError`] aan deze kant. De tekst met de getallen
-/// staat op de console (één regel met marker); de code gaat de kern in.
+/// De foutcodes van de lijm ([`crate::glue::code`]) plus die van CPU_ON.
 mod code {
-    /// Het plan weigerde een slot- of core-index.
-    pub(super) const PLAN: u32 = 1;
-    /// De partitie geeft geen geldige ABI-staart.
-    pub(super) const TAIL: u32 = 2;
-    /// De stage-2-bouw weigerde.
-    pub(super) const STAGE2: u32 = 3;
-    /// Een ring kon niet klaargezet worden.
-    pub(super) const RING: u32 = 4;
-    /// Dispatch zonder build.
-    pub(super) const NOT_BUILT: u32 = 5;
-    /// Het startschot via de mailbox weigerde.
-    pub(super) const DISPATCH: u32 = 6;
+    pub(super) use crate::glue::code::*;
     /// CPU_ON faalde (PSCI, of de haak van het board: `cpu::smp::cpu_on`);
     /// de code erbij is 0x100 plus de fout in PSCI-vorm.
     pub(super) const PSCI: u32 = 0x100;
     /// CPU_ON weigerde vóór de core aanging (`psci::Error::is_refusal`):
-    /// [`PSCI`] met [`CageError::NEVER_RAN`].
+    /// [`PSCI`] met [`CageError::NEVER_RAN`](super::CageError::NEVER_RAN).
     pub(super) const PSCI_REFUSED: u32 = PSCI | super::CageError::NEVER_RAN;
-    /// Een secundaire buiten de span van de kooi, of op de OS-core.
-    pub(super) const SPAN: u32 = 7;
-    /// De bewonerslijst van een gedeelde core weigerde de kooi.
-    pub(super) const ROSTER: u32 = 8;
 }
 
 /// Hoe lang [`ArmCage::dispatch`] op een gedeelde app-core wacht tot de
@@ -162,10 +128,6 @@ mod code {
 /// de park-race hieronder moet in dezelfde stap gesloten worden.
 const JOIN_WAIT_NS: u64 = 5_000_000;
 
-const fn err(code: u32) -> CageError {
-    CageError { code }
-}
-
 /// Het app-adresvenster van een partitie van `size` bytes: het canonieke
 /// venster vanaf [`LINK_BASE`] tot de rand van het 39-bit-regime
 /// (`cageLinkWindow`).
@@ -176,16 +138,6 @@ pub(crate) fn link_window(size: u64) -> u64 {
 /// De tabelopslag achter een partitie van `size` (`cageReserve`).
 pub(crate) fn reserve(size: u64) -> u64 {
     el2::stage2::table_reserve(LINK_BASE, size)
-}
-
-/// Het app-RAM van een partitie: alles onder de ABI-staart.
-fn app_ram(part: Region) -> Option<u64> {
-    part.size.checked_sub(ABI_TAIL).filter(|n| *n > 0)
-}
-
-/// De staart van een partitie, in fysieke adressen.
-pub(crate) fn tail_of(part: Region) -> Option<Tail> {
-    Tail::new(part.base, app_ram(part)?)
 }
 
 /// Wat de lijm per gebouwde kooi onthoudt.
@@ -409,132 +361,6 @@ impl ArmCage {
     }
 }
 
-/// Hangt de frame-ringen van een verse kooi aan de switch (`hopswitch.
-/// Attach` in `armSlot`): ná de ring-init, vóór het startschot. De switch
-/// wordt eigenaar van de handvatten; een oude poort op dit slot vervalt.
-/// Een volle brievenbus of een switch die er niet is (geen NIC) laat de app
-/// zonder slot-LAN draaien: één regel, geen weigering van de start.
-fn attach(s: layout::Slot, tail: Tail) {
-    if let Some(Err(e)) = ATTACH_ACK.try_take() {
-        println!("cage: an earlier attach was refused: {e} HOPOS_CAGE_ATTACH");
-    }
-    let rings = tail_rings::promise(s, tail.base());
-    let (Ok(tx), Ok(rx)) = (
-        AbiTx::open(tail.net_tx(), NET_RING_DATA_CAP, rings),
-        ring::Writer::open_with(tail.net_rx(), NET_RING_DATA_CAP, rings),
-    ) else {
-        println!("cage: slot {s}: frame rings do not open HOPOS_CAGE_ATTACH");
-        return;
-    };
-    let cmd = Command::Attach {
-        slot: s.get(),
-        tx,
-        rx,
-        ack: &ATTACH_ACK,
-    };
-    if crate::net::COMMANDS.try_send(cmd).is_err() {
-        println!("cage: slot {s}: switch mailbox full, no slot LAN HOPOS_CAGE_ATTACH");
-    }
-}
-
-/// De belofte van de kern voor de frame-ringen in de staart van een slot,
-/// op een board dat de pool Device mapt (Apple, de Radxa): de staart eerst
-/// Normal write-back in de kernmap (Go: `mapTailNormal`, slot-ABI 7), en
-/// alleen dan belooft de kern zijn kant zonder onderhoud. Weigert de remap,
-/// dan blijft het onderhoud: traag maar correct. GEMETEN 01-10: app naar
-/// app op de M4 van 52 naar duizenden MB/s (M8), op de Radxa van 29,83 met
-/// een corrupte RX-ring (Device tegen de cache van de app) naar 257 tot 262
-/// (RX1, ook 40 GiB foutloos).
-#[cfg(any(feature = "board-apple", feature = "board-rk3566"))]
-mod tail_rings {
-    use super::{ABI_TAIL, layout, ring};
-    use cpu::println;
-    use dev::Pa;
-
-    pub(super) fn promise(s: layout::Slot, base: Pa) -> ring::Coherence {
-        match vboard::map_tail_normal(base.0, ABI_TAIL) {
-            Ok(()) => ring::Coherence::Hardware,
-            Err(why) => {
-                println!(
-                    "cage: slot {s}: tail {:#x} stays device-mapped ({why}), rings with maintenance HOPOS_CAGE_TAIL",
-                    base.0
-                );
-                ring::Coherence::Maintained
-            }
-        }
-    }
-}
-
-/// De belofte van de kern voor de ringen van een slot waar de pool al zo
-/// gemapt is als [`crate::net::RINGS`] zegt.
-#[cfg(not(any(feature = "board-apple", feature = "board-rk3566")))]
-mod tail_rings {
-    use super::{layout, ring};
-    use dev::Pa;
-
-    pub(super) fn promise(_: layout::Slot, _: Pa) -> ring::Coherence {
-        crate::net::RINGS
-    }
-}
-
-/// Haalt de ringen van `slot` weer van de switch, bij elke stop. FIXME: de
-/// kooi-trait is synchroon, dus niemand wacht op de bevestiging; de
-/// partitie komt pas vrij na de stil-toets van de actor en een nieuwe claim
-/// is een later bericht, en in die tijd draait de switch zijn ronde. Een
-/// asynchrone ontkoppel-haak in `kern::slots::stop` maakt dit hard.
-fn detach(slot: Slot) {
-    let _ = DETACH_ACK.try_take();
-    let cmd = Command::Detach {
-        slot: slot.get(),
-        ack: &DETACH_ACK,
-    };
-    if crate::net::COMMANDS.try_send(cmd).is_err() {
-        println!("cage: slot {slot}: switch mailbox full, detach not sent HOPOS_CAGE_DETACH");
-    }
-}
-
-/// Zet de poorten van een jobspec door, elk voor tcp en udp (Go's
-/// `armSlot`: de jobspec kent geen protocol, en een app die er één bedient
-/// laat de ander onbeantwoord). Stopt bij de eerste weigering; wat er al
-/// open stond, trekt de lifecycle in ([`Cage::unpublish`]).
-async fn publish_ports(slot: Slot, ports: &[u16]) -> Result<(), PortError> {
-    use net::nat::Proto;
-    if !crate::net::switch_up() {
-        let port = ports.first().copied().unwrap_or(0);
-        println!(
-            "cage: slot {slot}: no switch on this node, port {port} not published HOPOS_CAGE_PUBLISH"
-        );
-        return Err(PortError::Refused { port });
-    }
-    for &port in ports {
-        for proto in [Proto::Tcp, Proto::Udp] {
-            match crate::net::publish_via(&PUBLISH_ACK, proto, slot.get(), port).await {
-                Ok(()) => {}
-                Err(net::Error::AlreadyPublished { port, slot: owner }) => {
-                    return Err(PortError::Taken { port, owner });
-                }
-                Err(e) => {
-                    println!("cage: slot {slot}: port {port}: {e} HOPOS_CAGE_PUBLISH");
-                    return Err(PortError::Refused { port });
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Trekt de publicaties (en flows) van `slot` in, zonder te wachten.
-fn unpublish_ports(slot: Slot) {
-    let _ = UNPUBLISH_ACK.try_take();
-    let cmd = Command::UnpublishSlot {
-        slot: slot.get(),
-        ack: &UNPUBLISH_ACK,
-    };
-    if crate::net::COMMANDS.try_send(cmd).is_err() {
-        println!("cage: slot {slot}: switch mailbox full, unpublish not sent HOPOS_CAGE_PUBLISH");
-    }
-}
-
 impl Cage for ArmCage {
     fn clear(&mut self, base: u64, len: u64) {
         let Ok(n) = usize::try_from(len) else { return };
@@ -565,7 +391,7 @@ impl Cage for ArmCage {
         })?;
         let l1 = el2::stage2::build(block, LINK_BASE, part.base, part.size).map_err(|e| {
             println!("cage: slot {slot}: stage-2 refused: {e} HOPOS_CAGE_STAGE2");
-            err(code::STAGE2)
+            err(code::CAGE)
         })?;
         self.arm_tail(s, tail, l1, entry, core, cores)?;
         self.arm_smp(s, tail.ctrl_page(), core, cores)?;
@@ -1102,128 +928,5 @@ impl Cores for ArmCores {
         if let Some(c) = layout::Core::new(core.get()).filter(|_| core != Core::OS) {
             el2::kick(FLAVOR, mpidr(self.plan.phys_core(c)));
         }
-    }
-}
-
-/// Fysiek geheugen over `dev`: de adressen komen uit het plan en uit de
-/// partitie van een grant, nergens anders vandaan.
-pub(crate) struct DevMem;
-
-impl PhysMem for DevMem {
-    fn read64(&self, pa: u64) -> u64 {
-        dev::read64(Pa(pa))
-    }
-
-    fn write64(&mut self, pa: u64, v: u64) {
-        dev::write64(Pa(pa), v);
-    }
-
-    fn clear(&mut self, pa: u64, len: u64) {
-        let Ok(n) = usize::try_from(len) else { return };
-        dev::clear(Pa(pa), n);
-        dev::push(Pa(pa), n);
-    }
-
-    fn clean_inv(&mut self, pa: u64, len: u64) {
-        if let Ok(n) = usize::try_from(len) {
-            dev::pull(Pa(pa), n);
-        }
-    }
-
-    fn copy_in(&mut self, pa: u64, src: &[u8]) {
-        dev::copy_in(Pa(pa), src);
-        // De app leest zijn image met de MMU uit: naar DRAM ermee.
-        dev::push(Pa(pa), src.len());
-    }
-
-    fn copy_out(&self, dst: &mut [u8], pa: u64) {
-        dev::pull(Pa(pa), dst.len());
-        dev::copy_out(dst, Pa(pa));
-    }
-}
-
-/// De tijd van de executor van core 0.
-#[derive(Copy, Clone)]
-pub(crate) struct ExecTimer(pub(crate) &'static Executor);
-
-impl Timer for ExecTimer {
-    fn now(&self) -> u64 {
-        self.0.now()
-    }
-
-    fn sleep(&self, d: Duration) -> impl Future<Output = ()> {
-        self.0.after(d)
-    }
-
-    fn sleep_deferrable(&self, d: Duration) -> impl Future<Output = ()> {
-        self.0.after_deferrable(d)
-    }
-}
-
-/// De console van de kern: `cpu::println!`, en een app-regel als
-/// `slot N: <regel>`.
-#[derive(Copy, Clone)]
-pub(crate) struct KernConsole;
-
-impl Console for KernConsole {
-    fn log(&self, args: core::fmt::Arguments<'_>) {
-        println!("{args}");
-    }
-
-    fn app_line(&self, slot: Slot, line: &[u8]) {
-        match core::str::from_utf8(line) {
-            Ok(s) => println!("slot {slot}: {s}"),
-            Err(_) => println!("slot {slot}: {}", line.escape_ascii()),
-        }
-    }
-}
-
-/// De outbox van één levensduur: de lezer op de ring in de staart, en het
-/// ctx-blok en de control-page voor de vragen van de servicer.
-pub(crate) struct SlotOutbox {
-    reader: Option<ring::Reader>,
-    ctx: Pa,
-    ctrl: Option<Pa>,
-}
-
-impl SlotOutbox {
-    /// Opent de outbox van de partitie `part`; `ctx` is het ctx-blok van
-    /// het slot. Een partitie zonder geldige staart geeft een outbox die
-    /// meteen corrupt meldt, zodat de servicer luid stopt.
-    pub(crate) fn open(part: Region, ctx: Pa) -> SlotOutbox {
-        let tail = tail_of(part);
-        SlotOutbox {
-            reader: tail.and_then(|t| ring::Reader::open(t.outbox(), RING_DATA_CAP).ok()),
-            ctx,
-            ctrl: tail.map(|t| t.ctrl_page()),
-        }
-    }
-}
-
-impl Outbox for SlotOutbox {
-    fn read_into(&mut self, buf: &mut [u8]) -> Option<(u8, usize)> {
-        let rec = self.reader.as_mut()?.read_into(buf)?;
-        Some((
-            u8::try_from(rec.kind.raw()).unwrap_or(u8::MAX),
-            rec.payload.len(),
-        ))
-    }
-
-    fn corrupt(&self) -> bool {
-        self.reader.as_ref().is_none_or(ring::Reader::is_corrupt)
-    }
-
-    fn live(&self) -> bool {
-        matches!(
-            el2::ctx_state(self.ctx),
-            Some(CtxState::Running | CtxState::Saved | CtxState::BootPending)
-        )
-    }
-
-    fn smp_pending(&self) -> bool {
-        self.ctrl.is_some_and(|c| {
-            dev::pull(c.add(CTRL_SMP_REQ), 8);
-            dev::read64(c.add(CTRL_SMP_REQ)) != 0
-        })
     }
 }

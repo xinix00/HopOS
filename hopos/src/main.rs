@@ -18,6 +18,7 @@ mod codec; // het media-vlak (codec.rs); kaal een stub, feature `media`
 mod config;
 mod conport; // de console over TCP: de ring achter de UART (conport.rs)
 mod flip; // FLIP: de kern-flip (flip.rs)
+mod glue; // de arch-vrije kooi-lijm, `DevMem` en `KernConsole` (glue.rs)
 mod gui; // het gui-vlak (gui.rs); kaal no-ops, feature `gui`
 #[cfg(all(
     target_arch = "aarch64",
@@ -43,7 +44,7 @@ use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use cpu::println;
 use executor::Executor;
-use kern::cage::{Console, PhysMem};
+use glue::{DevMem, KernConsole};
 use kern::slots::{Envelope, Reply, Servicers};
 use kern::system::{Hooks, LogTee, Privilege, System};
 use netdev::Device;
@@ -51,194 +52,55 @@ use sync::mpsc::Mailbox;
 use sync::{Local, Signal};
 use vboard::slots::{StagedRole, staged_role};
 
-#[cfg(not(any(
-    feature = "board-qemuvirt",
-    feature = "board-rpi4",
-    feature = "board-rpi5",
-    feature = "board-rk3566",
-    feature = "board-uefi",
-    feature = "board-o6n",
-    feature = "board-altra",
-    feature = "board-qemuvirt-riscv",
-    feature = "board-licheerv",
-    feature = "board-apple"
-)))]
-compile_error!(
+// Precies één board. Twee geven al twee keer `vboard`, geen geeft geen
+// `Machine`; deze som zegt het in woorden.
+const _: () = assert!(
+    cfg!(feature = "board-qemuvirt") as u8
+        + cfg!(feature = "board-rpi4") as u8
+        + cfg!(feature = "board-rpi5") as u8
+        + cfg!(feature = "board-rk3566") as u8
+        + cfg!(feature = "board-uefi") as u8
+        + cfg!(feature = "board-o6n") as u8
+        + cfg!(feature = "board-altra") as u8
+        + cfg!(feature = "board-qemuvirt-riscv") as u8
+        + cfg!(feature = "board-licheerv") as u8
+        + cfg!(feature = "board-apple") as u8
+        == 1,
     "kies precies één board: --features board-qemuvirt, board-rpi4, board-rpi5, board-rk3566, board-uefi, board-o6n, board-altra, board-qemuvirt-riscv, board-licheerv of board-apple"
 );
 
-// De Mac mini M4 heeft een eigen ingang en een eigen linkscript: naast een
-// ander board kan niet.
-#[cfg(all(
-    feature = "board-apple",
-    any(
-        feature = "board-qemuvirt",
-        feature = "board-rpi4",
-        feature = "board-rpi5",
-        feature = "board-rk3566",
-        feature = "board-uefi",
-        feature = "board-o6n",
-        feature = "board-altra",
-        feature = "board-qemuvirt-riscv",
-        feature = "board-licheerv"
-    )
-))]
-compile_error!("twee boards tegelijk: kies er één");
-
-// De riscv64-boards (`--target riscv64gc-unknown-none-elf`): naast elkaar
-// of naast een arm64-board kan niet.
-#[cfg(any(
-    all(feature = "board-qemuvirt-riscv", feature = "board-licheerv"),
-    all(
-        any(feature = "board-qemuvirt-riscv", feature = "board-licheerv"),
-        any(
-            feature = "board-qemuvirt",
-            feature = "board-rpi4",
-            feature = "board-rpi5",
-            feature = "board-rk3566",
-            feature = "board-uefi",
-            feature = "board-o6n",
-            feature = "board-altra"
-        )
-    )
-))]
-compile_error!("twee boards tegelijk: kies er één");
-
-// De O6N en de Altra bouwen op het UEFI-board; naast elkaar of naast een
-// ander board kan niet.
-#[cfg(any(
-    all(feature = "board-o6n", feature = "board-altra"),
-    all(
-        any(feature = "board-o6n", feature = "board-altra"),
-        any(
-            feature = "board-qemuvirt",
-            feature = "board-rpi4",
-            feature = "board-rpi5",
-            feature = "board-rk3566",
-            feature = "board-uefi"
-        )
-    )
-))]
-compile_error!("twee boards tegelijk: kies er één");
-
-#[cfg(any(
-    all(feature = "board-qemuvirt", feature = "board-rpi4"),
-    all(feature = "board-qemuvirt", feature = "board-rpi5"),
-    all(feature = "board-rpi4", feature = "board-rpi5"),
-    all(feature = "board-rk3566", feature = "board-qemuvirt"),
-    all(feature = "board-rk3566", feature = "board-rpi4"),
-    all(feature = "board-rk3566", feature = "board-rpi5"),
-    all(feature = "board-uefi", feature = "board-qemuvirt"),
-    all(feature = "board-uefi", feature = "board-rpi4"),
-    all(feature = "board-uefi", feature = "board-rpi5"),
-    all(feature = "board-uefi", feature = "board-rk3566")
-))]
-compile_error!("twee boards tegelijk: kies er één");
-
-/// Het board van deze binary: één, gekozen door een feature.
 // Het board onder een neutrale naam: de slot-, kooi- en flip-lijm
 // (slots.rs, cage.rs, flip.rs) lezen het plan van het board als `vboard`
 // (`slots::plan(cores, os_core)`, `mpidr`, `core_of`, de staging,
-// `KERN_RAM`, `DMA`), en elk board levert die namen met zijn eigen getallen.
+// `KERN_RAM`, `DMA`), en elk board levert die namen met zijn eigen getallen,
+// en zichzelf als `Machine`. De O6N en de Altra zijn het UEFI-board met hun
+// eigen NIC, NVMe en thermometer; de riscv64-boards (docs/boards-riscv.md)
+// bouwen op `--target riscv64gc-unknown-none-elf`.
+#[cfg(feature = "board-altra")]
+extern crate board_altra as vboard;
+#[cfg(feature = "board-apple")]
+extern crate board_apple as vboard;
+#[cfg(feature = "board-licheerv")]
+extern crate board_licheerv as vboard;
+#[cfg(feature = "board-o6n")]
+extern crate board_o6n as vboard;
 #[cfg(feature = "board-qemuvirt")]
 extern crate board_qemuvirt as vboard;
-
-#[cfg(feature = "board-qemuvirt")]
-type Machine = board_qemuvirt::QemuVirt;
-
-#[cfg(feature = "board-qemuvirt")]
-static BOARD: Machine = board_qemuvirt::QemuVirt::new();
-
-// De Pi's, onder dezelfde naam `vboard`.
-#[cfg(feature = "board-rpi4")]
-extern crate board_rpi4 as vboard;
-
-#[cfg(feature = "board-rpi4")]
-type Machine = board_rpi4::Rpi4;
-
-#[cfg(feature = "board-rpi4")]
-static BOARD: Machine = board_rpi4::Rpi4::new();
-
-#[cfg(feature = "board-rpi5")]
-extern crate board_rpi5 as vboard;
-
-#[cfg(feature = "board-rpi5")]
-type Machine = board_rpi5::Rpi5;
-
-#[cfg(feature = "board-rpi5")]
-static BOARD: Machine = board_rpi5::Rpi5::new();
-
-// De Radxa Zero 3E, onder dezelfde naam en om dezelfde reden als de Pi's.
+#[cfg(feature = "board-qemuvirt-riscv")]
+extern crate board_qemuvirt_riscv as vboard;
 #[cfg(feature = "board-rk3566")]
 extern crate board_rk3566 as vboard;
-
-#[cfg(feature = "board-rk3566")]
-type Machine = board_rk3566::Rk3566;
-
-#[cfg(feature = "board-rk3566")]
-static BOARD: Machine = board_rk3566::Rk3566::new();
-
-// Het generieke UEFI-board (QEMU onder EDK2; de basis van de O6N en de
-// Altra), onder dezelfde naam en om dezelfde reden als de Pi's.
+#[cfg(feature = "board-rpi4")]
+extern crate board_rpi4 as vboard;
+#[cfg(feature = "board-rpi5")]
+extern crate board_rpi5 as vboard;
 #[cfg(feature = "board-uefi")]
 extern crate board_uefi as vboard;
 
-#[cfg(feature = "board-uefi")]
-type Machine = board_uefi::Uefi;
+/// Het board van deze binary: één, gekozen door een feature.
+type Machine = vboard::Machine;
 
-#[cfg(feature = "board-uefi")]
-static BOARD: Machine = board_uefi::Uefi::new();
-
-// De Radxa Orion O6N en de Ampere Altra: het UEFI-board met hun eigen NIC,
-// NVMe en thermometer. Hun crates geven de namen van het UEFI-plan door.
-#[cfg(feature = "board-o6n")]
-extern crate board_o6n as vboard;
-
-#[cfg(feature = "board-o6n")]
-type Machine = board_o6n::O6n;
-
-#[cfg(feature = "board-o6n")]
-static BOARD: Machine = board_o6n::O6n::new();
-
-#[cfg(feature = "board-altra")]
-extern crate board_altra as vboard;
-
-#[cfg(feature = "board-altra")]
-type Machine = board_altra::Altra;
-
-#[cfg(feature = "board-altra")]
-static BOARD: Machine = board_altra::Altra::new();
-
-// De riscv64-boards (docs/boards-riscv.md): QEMU virt in machine mode als
-// proefbank en de LicheeRV Nano, onder dezelfde naam `vboard`.
-#[cfg(feature = "board-qemuvirt-riscv")]
-extern crate board_qemuvirt_riscv as vboard;
-
-#[cfg(feature = "board-qemuvirt-riscv")]
-type Machine = board_qemuvirt_riscv::QemuVirtRiscv;
-
-#[cfg(feature = "board-qemuvirt-riscv")]
-static BOARD: Machine = board_qemuvirt_riscv::QemuVirtRiscv::new();
-
-#[cfg(feature = "board-licheerv")]
-extern crate board_licheerv as vboard;
-
-#[cfg(feature = "board-licheerv")]
-type Machine = board_licheerv::LicheeRv;
-
-#[cfg(feature = "board-licheerv")]
-static BOARD: Machine = board_licheerv::LicheeRv::new();
-
-// De Mac mini M4 (board/apple), onder dezelfde naam en om dezelfde reden
-// als de Pi's.
-#[cfg(feature = "board-apple")]
-extern crate board_apple as vboard;
-
-#[cfg(feature = "board-apple")]
-type Machine = board_apple::Apple;
-
-#[cfg(feature = "board-apple")]
-static BOARD: Machine = board_apple::Apple::new();
+static BOARD: Machine = Machine::new();
 
 /// De architectuur van deze binary, voor de runtime-regel.
 const ARCH: &str = if cfg!(target_arch = "riscv64") {
@@ -281,11 +143,9 @@ extern "C" fn kmain(dtb: u64, el: u64) -> ! {
     let board: &'static Machine = &BOARD;
     let uart = board.console();
     cpu::console::set_sink(uart);
-    // De ring van de TCP-console achter de UART (conport.rs); het glas
-    // hangt straks vóór die twee: de tee van gui.rs schrijft naar de ring-tee
-    // als zijn "UART" (de tee naar het glas komt in `boot`).
+    // De ring van de TCP-console achter de UART (conport.rs); het glas komt
+    // er in `setup` achter, in dezelfde tee.
     conport::install(uart);
-    gui::keep_uart(conport::tee);
 
     println!();
     for line in BUNNY {
@@ -602,11 +462,7 @@ static STORE: kern::store::StoreQueue = kern::store::StoreQueue::new();
 /// precies één keer), dus de API wordt één keer bij boot gebouwd en leeft
 /// daarna voor altijd. Boot-code: een heap die dit niet kan geven, is
 /// parkeren.
-fn system(
-    privilege: Option<Privilege>,
-    fs: bool,
-    max_slots: usize,
-) -> &'static System<'static, 'static, LIFECYCLE_DEPTH> {
+fn system(privilege: Option<Privilege>, fs: bool, max_slots: usize) -> &'static KernSystem {
     let mut s = System::new(&LIFECYCLE, &SERVICERS, privilege, max_slots)
         .with_logs(&slots::LOGS)
         .with_store(&STORE);
@@ -624,18 +480,20 @@ fn system(
 /// een antwoord van de actor nooit bij een andere verbinding landt.
 static SYSTEM_REPLIES: [Reply; net::SYSTEM_WORKERS] = [const { Reply::new() }; net::SYSTEM_WORKERS];
 
+/// De system-API van de kern: één, bij boot gebouwd ([`system`]).
+type KernSystem = System<'static, 'static, LIFECYCLE_DEPTH>;
+/// De console van de system-API: de kernconsole met de logrij van de slots.
+type SystemLog = LogTee<'static, KernConsole>;
+
 /// De haken en de console van de system-API, gedeeld door alle taken.
 static SYSTEM_HOOKS: BootHooks = BootHooks;
-static SYSTEM_LOG: LogTee<'static, KernConsole> = LogTee::new(KernConsole, &slots::LOGS);
+static SYSTEM_LOG: SystemLog = LogTee::new(KernConsole, &slots::LOGS);
 
 /// De system-API voor de listener.
-fn system_api(
-    system: &'static System<'static, 'static, LIFECYCLE_DEPTH>,
-) -> net::SystemApi<LIFECYCLE_DEPTH, DevMem, BootHooks, LogTee<'static, KernConsole>> {
+fn system_api(system: &'static KernSystem) -> net::SystemApi {
     net::SystemApi {
         system,
         replies: &SYSTEM_REPLIES,
-        mem: DevMem,
         hooks: &SYSTEM_HOOKS,
         log: &SYSTEM_LOG,
     }
@@ -654,24 +512,6 @@ fn slot_count(board: &Machine) -> usize {
     board.cores().saturating_sub(1).max(1) + 1
 }
 
-/// Fysiek geheugen woordgewijs via `dev`, voor de image-stream van de
-/// system-API. Wat het adres mag zijn, bewaakt de grant van de lifecycle.
-/// Een handvat zonder staat: elke verbindingstaak krijgt een kloon.
-#[derive(Clone, Copy)]
-struct DevMem;
-
-impl PhysMem for DevMem {
-    fn read64(&self, pa: u64) -> u64 {
-        dev::read64(dev::Pa(pa))
-    }
-    fn write64(&mut self, pa: u64, v: u64) {
-        dev::write64(dev::Pa(pa), v);
-    }
-    fn clean_inv(&mut self, pa: u64, len: u64) {
-        dev::pull(dev::Pa(pa), usize::try_from(len).unwrap_or(0));
-    }
-}
-
 /// De haken van de system-API: de klok van Hop zet de wandklok van de kern
 /// (en daarmee die van elke kooi); de flip toetst de bundel en legt de
 /// nieuwe kern klaar (flip.rs), de sprong komt van de flip-taak.
@@ -684,19 +524,6 @@ impl Hooks for BootHooks {
     }
     fn flip(&self, bundle: &kern::system::FlipBundle, sha256: &[u8; 32]) -> kern::Result {
         flip::prepare(bundle, sha256) // FLIP: toetsen en klaarleggen (flip.rs)
-    }
-}
-
-/// De console van de kern voor de system-API: kernregels en app-logregels.
-struct KernConsole;
-
-impl Console for KernConsole {
-    fn log(&self, args: core::fmt::Arguments<'_>) {
-        println!("{args}");
-    }
-    fn app_line(&self, slot: kern::Slot, line: &[u8]) {
-        let text = core::str::from_utf8(line).unwrap_or("<not utf-8>");
-        println!("slot {slot}: {}", text.trim_end());
     }
 }
 
@@ -779,34 +606,6 @@ async fn tick(exec: &'static Executor) {
         #[cfg(feature = "board-rpi5")]
         if n == 5 || n == 30 {
             vboard::nic_diag();
-        }
-        // De M4 (01-10): DHCP slaagde en daarna kwam er niets meer binnen.
-        // Elke vijf tikken de node-stack en de naden van de switch, naast
-        // de chipregel van de pomp (HOPOS_NIC_DIAG).
-        #[cfg(feature = "board-apple")]
-        if n.is_multiple_of(5)
-            && let Some(st) = net::stack_stats()
-        {
-            let sw = &net::STATS;
-            println!(
-                "net: node stack tcp in={}/{} out={}/{} rtx={} drop short={} noport={} bad={} arp gave_up={} ignored={} full={} | host drops rx={} tx={} uplink rx drops={} nic tx err={} slot src drops={} HOPOS_NET_DIAG",
-                st.tcp_segs_in,
-                st.tcp_bytes_in,
-                st.tcp_segs_out,
-                st.tcp_bytes_out,
-                st.tcp_retransmits,
-                st.drop_short_frame,
-                st.drop_no_port,
-                st.drop_bad_frame,
-                st.arp.gave_up,
-                st.arp.ignored,
-                st.arp.full_drop,
-                sw.host_rx_drops.load(Relaxed),
-                sw.host_tx_drops.load(Relaxed),
-                sw.uplink_rx_drops.load(Relaxed),
-                sw.nic_tx_errors.load(Relaxed),
-                sw.slot_src_drops.load(Relaxed)
-            );
         }
         let due = start.saturating_add(n.saturating_mul(1_000_000_000));
         exec.until(due).await;

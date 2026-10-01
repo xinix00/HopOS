@@ -173,6 +173,9 @@ pub fn boot_param(key: &'static str) -> &'static str {
 /// De Mac mini M4.
 pub struct Apple;
 
+/// Dit board onder de naam die de kern-binary kiest (`vboard::Machine`).
+pub type Machine = Apple;
+
 impl Apple {
     /// Het board. Alle staat staat in statics; dit is het handvat.
     #[must_use]

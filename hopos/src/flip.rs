@@ -1333,7 +1333,6 @@ fn handoff_and_jump(p: Prepared, slots: Vec<SlotState>, nat: kernflip::NatState)
     };
     mem.clear(FLIP_HANDOFF_PA, FLIP_HANDOFF_LEN);
     mem.copy_in(FLIP_HANDOFF_PA, &blob);
-    dev::push(Pa(FLIP_HANDOFF_PA), HANDOFF_TAIL);
     // Het paar als laatste, en de regel zelf naar DRAM: hij deelt de
     // boot-scratch met woorden die straks met de MMU uit geschreven worden.
     let pair = BOOT_SCRATCH_PA + HANDOFF_PTR_OFF;

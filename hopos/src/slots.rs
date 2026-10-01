@@ -38,8 +38,9 @@
 extern crate alloc;
 
 // De kooi-lijm per architectuur: `cage.rs` (stage-2 en de EL2-switcher)
-// of `cage_riscv.rs` (PMP plus Sv39 en de M-mode-switcher). Beide geven de
-// kern dezelfde traits; de lifecycle hieronder is architectuur-neutraal.
+// of `cage_riscv.rs` (PMP plus Sv39 en de M-mode-switcher), met wat ze
+// delen in `glue.rs`. Beide geven de kern dezelfde traits; de lifecycle
+// hieronder is architectuur-neutraal.
 #[cfg_attr(not(target_arch = "riscv64"), path = "cage.rs")]
 #[cfg_attr(target_arch = "riscv64", path = "cage_riscv.rs")]
 mod cage;
@@ -177,6 +178,8 @@ mod arch {
     pub(super) use super::cage::{OsCore, SHARES_OS_CORE, core_state, os_core, wake_all};
 }
 
+use crate::clock::ExecTimer;
+use crate::glue::{DevMem, KernConsole, SlotOutbox};
 use abi::hopabi::{CTRL_ENV_DATA, CTRL_ENV_LEN, CTRL_ENV_MAX};
 use abi::layout::{ABI_CTRL_OFF, ABI_TAIL, CtxState, LINK_BASE, RING_DATA_CAP};
 use abi::place::{self, SYM_ABI, SYM_RAM_SIZE, SYM_RAM_START, SYM_SLOT_HINT, Window};
@@ -185,7 +188,6 @@ use alloc::vec::Vec;
 use board::Board;
 #[cfg(not(target_arch = "riscv64"))]
 use cage::{ArmCage as SlotCage, ArmCores as SlotCores};
-use cage::{DevMem, ExecTimer, KernConsole, SlotOutbox};
 #[cfg(target_arch = "riscv64")]
 use cage::{RvCage as SlotCage, RvCores as SlotCores};
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
