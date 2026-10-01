@@ -188,6 +188,9 @@ pub(crate) struct Params {
     pub(crate) addr: Option<String>,
     /// `hole=1`: disk leest gaten in plaats van geschreven data.
     pub(crate) hole: bool,
+    /// `rand`: disk doet zoveel willekeurige 4 KiB-lezingen (en houdt het
+    /// bestand voor de volgende run).
+    pub(crate) rand: Option<i64>,
 }
 
 impl Params {
@@ -205,6 +208,7 @@ impl Params {
             path: text("path"),
             addr: text("addr"),
             hole: get("hole").as_deref() == Some("1"),
+            rand: int("rand"),
         }
     }
 

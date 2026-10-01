@@ -7,6 +7,13 @@
 //! schijfblok. Alles boven die vloer is hopfs en schijf; ligt de vloer zelf
 //! hoog, dan zit de rem in het LAN-pad.
 //!
+//! Met `rand=N` meet hij in plaats daarvan willekeurige 4 KiB-lezingen
+//! (het patroon van een database die niet in het geheugen past): N
+//! lezingen op pseudo-willekeurige plekken in een bestand van `mb` MiB,
+//! elk met een inhoudscontrole, als opdrachten per seconde met p50 en p99.
+//! Het bestand blijft staan, zodat apps die tegelijk meten alleen lezen
+//! (de eerste run schrijft het).
+//!
 //! Een node zonder opslag zegt dat expliciet ("no storage layer on board");
 //! dan slaat de test zichzelf over. Elke andere fout is een fout.
 //!
@@ -131,11 +138,96 @@ pub(crate) async fn disk(sh: &'static Shared, r: &mut Report, p: &Params) {
         chunk: usize::try_from(kb << 10).unwrap_or(sys::MAX_CHUNK),
         hole: p.hole,
     };
+    let rand = Params::int(p.rand, 0, 0, 1 << 20);
+    if rand > 0 {
+        rand4k(sh, &mut sys, r, &plan, rand).await;
+        return;
+    }
     run(sh, &mut sys, r, &plan).await;
     if let Err(e) = sys.remove(plan.path).await {
         r.line(format_args!("cleanup: remove {}: {e}", plan.path));
     }
     r.add("chunk", kb as f64, "KiB");
+}
+
+/// De plek van lezing `k` (xorshift, vast zaad), in blokken van 4 KiB.
+fn spot(k: u64, blocks: u64) -> u64 {
+    let mut x = k.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    x % blocks.max(1)
+}
+
+/// Willekeurige 4 KiB-lezingen: `n` stuks over het bestand van `plan`, dat
+/// er eerst komt als het er niet (heel) is.
+async fn rand4k(sh: &Shared, sys: &mut SystemClient, r: &mut Report, plan: &Plan<'_>, n: u64) {
+    let Some(mut wbuf) = buffer(plan.chunk) else {
+        r.fail(format_args!("no heap for a {}-byte buffer", plan.chunk));
+        return;
+    };
+    for part in wbuf.chunks_mut(sh.blob.len().max(1)) {
+        let k = part.len();
+        part.copy_from_slice(sh.blob.get(..k).unwrap_or_default());
+    }
+    if sys.stat(plan.path).await.ok() != Some(plan.total) {
+        note(format_args!(
+            "disk rand4k: writing {} MB first",
+            plan.total >> 20
+        ));
+        let mut off = 0u64;
+        while off < plan.total {
+            let k = usize::try_from(plan.total - off)
+                .unwrap_or(plan.chunk)
+                .min(plan.chunk);
+            if let Err(e) = sys
+                .write_at(plan.path, off, wbuf.get(..k).unwrap_or_default())
+                .await
+            {
+                r.fail(format_args!("write at {off}: {e}"));
+                return;
+            }
+            off += k as u64;
+        }
+    }
+    let mut lat = samples(usize::try_from(n).unwrap_or(0));
+    let mut b = [0u8; SMALL];
+    let blocks = plan.total / SMALL as u64;
+    let t0 = clock::now_ns();
+    for k in 0..n {
+        let off = spot(k, blocks) * SMALL as u64;
+        let t = clock::now_ns();
+        match sys.read_into(plan.path, off, &mut b).await {
+            Ok(got) if got == SMALL => {}
+            Ok(got) => {
+                r.fail(format_args!("rand4k at {off}: {got} bytes, want {SMALL}"));
+                return;
+            }
+            Err(e) => {
+                r.fail(format_args!("rand4k at {off}: {e}"));
+                return;
+            }
+        }
+        record(&mut lat, us_since(t));
+        let at = (off % plan.chunk as u64) as usize;
+        if let Some(i) = first_diff(&b, wbuf.get(at..at + SMALL).unwrap_or_default()) {
+            r.fail(format_args!(
+                "rand4k at {off}: content mismatch (first bad byte at {i})"
+            ));
+            return;
+        }
+    }
+    let el = clock::now_ns().saturating_sub(t0);
+    let (p50, p99) = (pct(&mut lat, 50), pct(&mut lat, 99));
+    r.add("rand4k", n as f64 / secs(el), "IOPS");
+    r.add("rand4k_p50", f64::from(p50), "us");
+    r.add("rand4k_p99", f64::from(p99), "us");
+    r.line(format_args!(
+        "{n} random 4 KiB reads over {} MB of {}: {:.0}/s, p50 {p50} us, p99 {p99} us; the file stays for the next run",
+        plan.total >> 20,
+        plan.path,
+        n as f64 / secs(el)
+    ));
 }
 
 /// De run zelf; het opruimen doet [`disk`].
