@@ -11,9 +11,8 @@
 # EL1 meldt, bereiken Hop alleen als hij tegen deze applib bouwt. Dus: een
 # kopie van de hop-repo (`git archive`, HOP_REV, standaard HEAD) in
 # target/hop-patched-<target>/src, met een `[patch]` in de
-# .cargo/config.toml van die kopie, zoals tools/qemu-riscv-test-hop.sh het
-# al deed. De hop-repo zelf wordt niet aangeraakt (ook zijn Cargo.lock en
-# target/ niet). HOP_PATCH=0 bouwt in $HOP_DIR zelf, zonder patch, voor een
+# .cargo/config.toml van die kopie. De hop-repo zelf wordt niet aangeraakt
+# (ook zijn Cargo.lock en target/ niet). HOP_PATCH=0 bouwt in $HOP_DIR zelf, zonder patch, voor een
 # hop-repo die al een tag met deze applib pint.
 #
 #   HOP_DIR=pad    de hop-repo (standaard ../hop/hop)

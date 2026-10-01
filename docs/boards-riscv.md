@@ -250,11 +250,8 @@ slot 1: hop: adopted 1 running cage(s) from the saved state HOP_ADOPTED
 os(in=803 irq=5 ipi=0 timer=44 yield=754 exit=0 fault=0 idle=6218 res_ms=153 kicks=0)
 ```
 
-`tools/qemu-riscv-test-hop.sh` bouwt `agentd-hopos` uit een kopie van de
-hop-repo (`git archive`) tegen de applib en abi van deze werkboom: de
-hop-repo pint `v3.0.0-alpha.9`, waarin de riscv-`_start`, de paniek en de
-timebase nog ontbreken. Pint hij een tag met deze applib, dan bouwt hij ook
-zonder patch (`HOP_PATCH=0`).
+`tools/qemu-riscv-test-hop.sh` bouwt `agentd-hopos` met `tools/hop-build.sh`,
+net als de aarch64-toetsen: tegen de applib, abi en sync van deze werkboom.
 
 Wie wat schrijft (de regel van de cachelines, de C906 is niet coherent,
 30-07): van het sched-blok schrijft de kern alleen regel 1..3 (lijst,

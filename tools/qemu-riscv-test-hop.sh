@@ -20,15 +20,9 @@
 #   van buiten  GET http://127.0.0.1:$AGENTPORT/tasks toont "spike" running;
 #   de herstart  dezelfde schijf: HOPOS_FS_UP fresh=0 en HOP_ADOPTED.
 #
-# Hop zelf: agentd-hopos uit de hop-repo ($HOP_DIR, standaard ../hop/hop),
-# gebouwd voor riscv64gc-unknown-none-elf. De hop-repo pint applib op een
-# tag (v3.0.0-alpha.9) waarin de riscv-_start, de paniek en de timebase nog
-# ontbreken; tot hij een tag met deze applib pint, bouwt dit script hem
-# tegen de applib en abi van DEZE werkboom: een kopie van de hop-repo
-# (`git archive`, HOP_REV, standaard HEAD) in target/hop-riscv, met een
-# `[patch]` in de .cargo/config.toml van die kopie. De hop-repo zelf wordt
-# niet aangeraakt. HOP_PATCH=0 bouwt in $HOP_DIR zelf, zonder patch (voor
-# een hop-repo die al een geschikte tag pint).
+# Hop zelf: agentd-hopos uit de hop-repo, gebouwd door tools/hop-build.sh
+# voor riscv64gc-unknown-none-elf, tegen de applib, abi en sync van deze
+# werkboom (HOP_DIR, HOP_REV en HOP_PATCH: zie daar).
 #
 # Rood is rood: HOPOS_PANIC, HOPOS_EXCEPTION, HOPOS_HOP_FAULT,
 # HOPOS_HOP_EXIT, HOPOS_HOP_FAIL, HOP_STATE_SKIPPED, HOPOS_OS_SELFTEST_FAIL,
@@ -39,13 +33,12 @@
 #   KEEP_LOG=pad tools/qemu-riscv-test-hop.sh   bewaart ook een groene console
 #   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT   de host-poorten; bezet = een vrije
 #                                          poort van het OS, luid gemeld
+#   HOP_DIR=pad                            de hop-repo (standaard ../hop/hop)
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TIMEOUT="${TIMEOUT:-90}"
 HOP_DIR="${HOP_DIR:-$DIR/../hop/hop}"
-HOP_REV="${HOP_REV:-HEAD}"
-HOP_PATCH="${HOP_PATCH:-1}"
 TARGET=riscv64gc-unknown-none-elf
 LOG="$(mktemp -t hopos-rv-hop.XXXXXX)"
 ART="$(mktemp -d -t hopos-rv-art.XXXXXX)"
@@ -84,33 +77,10 @@ LEADERPORT="$(port "${LEADERPORT:-9080}" LEADERPORT)"
 ARTPORT="$(port "${ARTPORT:-8000}" ARTPORT)"
 
 cd "$DIR"
-[ -d "$HOP_DIR" ] || {
-	echo "FAIL: de hop-repo ontbreekt: $HOP_DIR (zet HOP_DIR)"
-	exit 1
-}
-echo "== bouwen: hopos (qemuvirt-riscv), appspike, en agentd-hopos ($HOP_DIR $HOP_REV)"
+echo "== bouwen: hopos (qemuvirt-riscv), appspike, en agentd-hopos in $HOP_DIR"
 cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt-riscv
 cargo build --quiet --release --target "$TARGET" -p appspike
-if [ "$HOP_PATCH" = 1 ]; then
-	HOP_SRC="$DIR/target/hop-riscv/src"
-	rm -rf "$HOP_SRC"
-	mkdir -p "$HOP_SRC/.cargo"
-	git -C "$HOP_DIR" archive -o "$ART/hop.tar" "$HOP_REV"
-	tar -x -C "$HOP_SRC" -f "$ART/hop.tar"
-	cat >"$HOP_SRC/.cargo/config.toml" <<EOF
-# Gezet door tools/qemu-riscv-test-hop.sh: applib en abi uit de werkboom
-# van hop-os, tot de hop-repo een tag met de riscv-applib pint.
-[patch."https://github.com/xinix00/HopOS.git"]
-applib = { path = "$DIR/applib" }
-abi = { path = "$DIR/abi" }
-EOF
-	(cd "$HOP_SRC" && cargo build --quiet --release --target "$TARGET" \
-		--target-dir "$DIR/target/hop-riscv/target" -p agentd-hopos)
-	HOP_ELF="$DIR/target/hop-riscv/target/$TARGET/release/agentd-hopos"
-else
-	(cd "$HOP_DIR" && cargo build --quiet --release --target "$TARGET" -p agentd-hopos)
-	HOP_ELF="$HOP_DIR/target/$TARGET/release/agentd-hopos"
-fi
+HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
 
 OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
 strip() {
