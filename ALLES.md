@@ -51,6 +51,11 @@ Alleen wat nog moet; wat af is staat in de tabel hierboven.
 
 ### Raspberry Pi 4 (pi4-1, 192.168.1.40)
 
+- [x] App naar app op main (PR1, 01-10): 407 tot 435 MB/s, binnen 5 procent
+      van AA; de OS-core vol (`busy_ms` 870 tot 978), `rxfull` 0, de A72 op
+      1500 MHz (de firmware-grens). De kopieën minder van vanmiddag raken dit
+      pad niet; alleen geen kopie (grants) zou nog helpen. Dit is de klok.
+
 - [ ] De VL805 koud: fix d0b6bd3 (RC met SCB0_SIZE, endpoint dicht tot de
       VideoCore de firmware meldt, twee pogingen, SError-diagnose) is
       alleen op QEMU getoetst; een koude boot van de nieuwe kaart moet
@@ -66,12 +71,17 @@ Alleen wat nog moet; wat af is staat in de tabel hierboven.
       APPEND-regel. De koude flip weigert (stateless: warm flippen of de
       kaart herstarten). De kaart in `target/` is van 14:41; de node draait
       warm op F.
-- [ ] **App naar app op AB wisselvallig** (01-10 14:40): de pull in slot 3
-      meldt `HOPOS_APPNET_RX_CORRUPT` (head=0, tail=0x3580e188) en arp
-      geeft op voor 10.100.0.2, terwijl AB 's ochtends 29,83 MB/s zonder
-      fouten deed. De Device-pool van de rk3566-kern (board/rk3566/src/mmu.rs,
-      alles boven 0x0880_0000) blijft de verdachte; de weg van de M4 (de
-      slotstaart Normal in de kernmap) is hier ook de kandidaat.
+- [x] **App naar app 29,83 MB/s met een corrupte RX-ring → 257 tot 262**
+      (01-10, RX1 en RX2, agent): de kern zette een verse ring door
+      Device-geheugen op terwijl core 2 nog oude cachelijnen van de vorige
+      pull had. Nu de slotstaart Normal in de kernmap (één pad met Apple,
+      `cage::tail_rings`), beide kanten Hardware; 40 GiB op 261 MB/s zonder
+      één fout. De OS-core zit dan vol op 816 MHz.
+- [ ] **De klok staat op 816 MHz** (de firmware; de rk3566 kan 1800, en per
+      MHz doet hij hetzelfde als de Pi 4): hoger vraagt vdd_cpu tot 1,15 V
+      via de RK8600 op i2c0 plus de SCMI-klok via TF-A. Spanning op het
+      board, dus bewust niet blind gedaan; verwacht tot 2x app naar app.
+      De host-ringen zijn hier nog Maintained (geen schijf om het te meten).
 
 ### Ampere Altra (altra-1)
 
