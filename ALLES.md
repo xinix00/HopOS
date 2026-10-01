@@ -284,17 +284,21 @@ De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
       I/O-coherent is (`_CCA` in de DSDT) bepaalt of de dc civac/cvac per
       MiB weg mag. Lean hoefde niet mee: de checksums op de slot-link
       stonden al uit.
-- [ ] **Het flipvenster van de O6N is de lopende kern: 2204 KiB.**
-      `image::limit()` op UEFI is het einde van het lopende beeld, en een
+- [x] **Het flipvenster van de O6N was de lopende kern: 2204 KiB.**
+      `image::limit()` op UEFI was het einde van het lopende beeld, en een
       bundel is pas welkom als zijn beeld tot het einde van .stack daarin
       past ("length 2269184 exceeds 2256896"). HEAD 4442f3d was al 2208
       KiB en paste niet; fb04980 past precies (`#[inline(never)]` op de
       mem-symbolen: LTO plakte de lus in elke aanroeper, +12 KiB; de IoPace
       van de system-API eruit, de versie met IoPace staat in de scratchpad).
-      Elke verdere kerngroei op de O6N vraagt eerst een koude boot met een
-      nieuwe kern op de stick, en die kern hoort ruimte boven zijn eigen
-      maat te reserveren. Ook: `hopos.nvmebench=1` moet in de cfg op de
-      stick, een flipbundel draagt geen cfg.
+      Fix 50989f6: de grens is de allocatie van de koude boot uit de
+      feitenpagina (`facts::image_window`, de SizeOfImage van de stick-kern,
+      overleeft elke flip), en hopos/efi.ld legt 2 MiB speling in
+      SizeOfImage zonder sectie of segment (de firmware geeft ze mee, het
+      platte beeld van een bundel telt ze niet). Pas werkzaam na een koude
+      boot met zo'n kern op de stick (de set staat klaar; QEMU/EDK2 meldt
+      3888 KB, de O6N-kern 4252 KiB). Ook: `hopos.nvmebench=1` moet in de
+      cfg op de stick, een flipbundel draagt geen cfg.
 - [ ] **Storm door de NAT (hairpin) stokt 1 s per ronde** op de Pi 4 (H):
       p50 2,5 ms, p99 1002 ms, 96 conn/s, zonder `HOPOS_MASQ_SLOT_FULL`.
       Eén SYN per ronde valt (RTO 1 s); ook node naar node (Pi 4 naar Pi 5,
