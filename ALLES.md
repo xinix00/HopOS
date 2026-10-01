@@ -16,7 +16,7 @@ of faalt, en een streep waar het bewust niet komt. Stand 30-09-2026, avond.
 | Boot, EL2, kooi, zelftest | ✓ | ✓ | ✓ (koud: SError bij de VL805; fix d0b6bd3 wacht op een koude boot) | ✓ | ○ | ✓ VHE, kick via SGI 1 (`kick=(Ipi, 0 us)`, stempel G) | ✓ iBoot-boot (cfg in het image op 0xF000), EL2; kooi en zelftest ok, tune aan zonder SError (M7 en later) | ○ |
 | Hop als bewoner, welcome door de DNAT | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ✓ ingebakken, HOP_UP, gaat warm mee over flips (HOPOS_HOP_RESUMED) | ○ |
 | Kern-flip, warm | ✓ | ✗ sterft na de landing (F en H, 3x); de nieuwe kaart (H, met de zwarte doos) ligt in target/ | ✓ (6x, gen 4 op I) | ✓ (5x, gen 3 op I) | ○ | ✓ gen 2 op H (gui-bundel); I geweigerd door de H-kern (bundelpartitie 8 KiB te krap, fix de61b4b zit in de I-stick): koude boot | ✓ gen 1 tot 8 op 01-10 (D4b naar M15), adoptie 3 van 3, de config reist mee; koud: – (geen CPU_OFF) | – |
-| NIC met interrupt | ✓ | ✓ MSI-X via de MIP | – (GENET gepold, zoals Go) | ✓ SPI 64 | – (igb gepold, bewust) | ✓ RTL8125B, MSI-X via de ITS (LPI 8192) | ✓ tg3 BCM57766, gepold; MAC-filter na link_up (4be8b60); app naar app 4375 tot 6099 MB/s (M13 tot M15) | ○ (dwmac) |
+| NIC met interrupt | ✓ | ✓ MSI-X via de MIP | – (GENET gepold, zoals Go) | ✓ SPI 64 | – (igb gepold, bewust) | ✓ RTL8125B, MSI-X via de ITS (LPI 8192) | ✓ tg3 BCM57766, gepold; MAC-filter na link_up (4be8b60); app naar app E 4450, P 6100 MB/s (M21), transport kern naar app 1860 | ○ (dwmac) |
 | Off-link door de NAT, SNTP | ✓ | ✓ | ✓ | ○ | ○ | ○ | ○ | ○ |
 | Watchdog gewapend en geaaid | – | ✓ PM (12 s) | ✓ PM | ✓ DW-WDT (89 s) | ○ SBSA | ✓ SBSA (8,5 s) | ✓ Apple WDT 30 s, canary op Hop's hartslag (HOPOS_CANARY_LIVE) | ○ DW-WDT |
 | Hardware-RNG voor de kern | ✗ (jitter) | ✓ RNG200 | ✓ RNG200 | ✓ rk3568-rng | ○ SMCCC-TRNG of rndr (fc5348f) | ○ efi-rng: geen FEAT_RNG of SMCCC-TRNG, wel het EFI_RNG_PROTOCOL van de firmware (`hopos.efirng=1`, volgende stick) | ○ jitter (geen FEAT_RNG, geen SMCCC) | ✗ (niets) |
@@ -208,14 +208,35 @@ op `/dev/cu.kis-100000-ch-0`. Sinds 01-10 ook op het LAN: 5555, 8080,
       lezen nog 158 tot 168 omdat het ANS-datablok Normal-NC stond, M10 WB;
       M11 de host-ringen van poort 0 Hardware: transport 930 → 1521; M12
       memcpy in het datablok; vitals-M15 vergelijkt met bcmp, 607 → 808).
-      Waar de tijd zit: schijf plus hopfs 0,59 ms per MiB, transport kern
-      naar app 0,66 ms per MiB, na elkaar (voorspeld 818, gemeten 808 tot
-      886). Weekendklus, twee stukken: (1) de ANS asynchroon (submit en poll
-      los, twee calls tegelijk, dan overlappen schijf en transport, lezen
-      rond 1500; 150 tot 250 regels); (2) een sneller transport dan TCP op
-      de OS-core (een E-core op 2172 MHz, plafond rond 1500 MB/s): een
-      datapad via gedeeld geheugen (400 tot 600 regels in ABI, applib en
-      kern) of een snellere OS-core via de tune (SError-risico).
+      Waar de tijd zit: schijf plus hopfs 0,59 ms per MiB en het transport
+      kern naar app 0,66 ms per MiB, na elkaar per call van 1 MiB (voorspeld
+      818, gemeten 808 tot 886). Het transport is 's middags goedkoper
+      gemaakt (M16 tot M21, agent): de 0,645 ms waren vijf kopieën van elke
+      byte op de OS-core (switch 238 us, tcp_write 152, poll_transmit 151,
+      framebuffer naar host-ring 75, ACK's 28); segmenten waren al 64 KiB en
+      de checksum binnen de node al uit. Nu leest de switch poort 0 in de
+      ring zelf (M17), zendt de kernstack direct in de host-ring (M18) en
+      kopieert de switch een unicast van slot naar slot in één keer van ring
+      naar ring (M20): transport 1554 → 1860 MB/s (0,533 ms per MiB), app
+      naar app op E 4330 → 4450, op P gelijk (6100: daar zijn het de apps
+      zelf, de switch is 107 van 137 ms bezig). Twee apps tegelijk schalen
+      niet (samen ~930 MB/s, net als één): de grens is het ene pad op de
+      OS-core. Lezen door de app blijft 870 tot 960 zolang schijf en
+      transport na elkaar lopen. Weekendklus: (1) de ANS asynchroon (submit
+      los van de poll in driver/nvme/src/apple.rs, 80 tot 120 regels) en een
+      tweede leesopdracht in de lucht (read-ahead in hopfs of de rpc-laag,
+      100 tot 150 regels): lezen naar 1 / max(0,59; 0,53) ≈ 1700 tot 1800;
+      (2) een tcp_write zonder kopie (152 us per MiB) vraagt een leannet-API
+      in de lean-repo plus een nieuwe tag; de twee andere kopieën zijn het
+      minimum voor TCP met één ring per slot. Geen apart datapad (Derek).
+- [ ] `hopos.replay=45` in de cfg zet de OS-core elke 45 tikken een halve
+      seconde stil (16 KiB synchroon naar de console, `late_ms` ~500 op tik
+      45, 90, 135): de uitschieters in elke meetreeks. Voor metingen lager
+      of uit; op de M4 (de lezer komt pas na de boot) is het een afweging.
+- [ ] Eén run van 470 MB/s app naar app op een E-core (M21, eerste run):
+      `rxfull` sprong van 0 naar 3110 zonder drops, de switch wachtte ~0,5 ms
+      per keer op de RX-ring van pull. Met één kopie haalt de switch een
+      ontvanger op een E-core soms in; niet teruggekomen in tien runs.
 - [ ] `dev::LINE` is 64 terwijl de cacheline van de M4 waarschijnlijk 128
       is: push en pull doen dubbel werk (correct, niet gemeten).
 - [ ] Het geïnstalleerde image is nog D4b (pstate=off, zonder de core-start
