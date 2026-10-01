@@ -55,7 +55,7 @@ use crate::pool::{CorePool, GroupName, Placement};
 use crate::{Core, Error, GRAIN, Region, Result, SLOT_CAP, Slot};
 use alloc::vec::Vec;
 use core::sync::atomic::{
-    AtomicU8, AtomicU32, AtomicU64,
+    AtomicU8, AtomicU64,
     Ordering::{AcqRel, Acquire, Relaxed, Release},
 };
 use core::time::Duration;
@@ -423,7 +423,6 @@ pub struct ServicerCtl {
     gone: Signal,
     start: Signal,
     conns: AtomicU8,
-    generation: AtomicU32,
     base: AtomicU64,
     size: AtomicU64,
 }
@@ -435,7 +434,6 @@ impl ServicerCtl {
             gone: Signal::new(),
             start: Signal::new(),
             conns: AtomicU8::new(0),
-            generation: AtomicU32::new(0),
             base: AtomicU64::new(0),
             size: AtomicU64::new(0),
         }
@@ -1123,7 +1121,6 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
         if let Some(ctl) = self.svc.ctl(slot) {
             let _ = ctl.stop.take();
             let _ = ctl.gone.take();
-            ctl.generation.store(generation, Release);
             ctl.base.store(region.base, Release);
             ctl.size.store(region.size, Release);
             self.svc.set(slot, Some(generation));
@@ -1522,29 +1519,15 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
         }
     }
 
-    /// De partitie-pool (alleen lezen: capaciteit, grootste gat).
-    #[must_use]
-    pub fn parts(&self) -> &PartitionPool {
-        &self.parts
-    }
-
-    /// De pool voor de flip-lening; de flip loopt door de actor.
-    pub fn parts_mut(&mut self) -> &mut PartitionPool {
-        &mut self.parts
-    }
-
-    /// De kooi (voor de board-glue en de tests).
-    pub fn cage(&mut self) -> &mut C {
+    /// De kooi (voor de tests).
+    #[cfg(test)]
+    pub(crate) fn cage(&mut self) -> &mut C {
         &mut self.cage
     }
 
-    /// De cores.
-    pub fn cores(&mut self) -> &mut K {
-        &mut self.cores
-    }
-
     /// De grant-aanbieder (voor de tests).
-    pub fn grants(&mut self) -> &mut G {
+    #[cfg(test)]
+    pub(crate) fn grants(&mut self) -> &mut G {
         &mut self.grants
     }
 }
@@ -1557,9 +1540,8 @@ pub fn validate_adoption(
     places: &CorePool,
     parts: &PartitionPool,
 ) -> Result {
-    let hop_reserved = places.hop_reserved();
     let app = cores.app_cores();
-    let is_app = |c: usize| c > hop_reserved && c <= app;
+    let is_app = |c: usize| (1..=app).contains(&c);
     // De OS-core (logische core 0, PORT.md beslissing 2): alleen een bewoner
     // van een groep die hem van deze kern mag delen (Hop's groep `hop`, en
     // wat de config vertrouwt), met één core en de OS-core als hele pool.
@@ -1644,7 +1626,7 @@ pub fn validate_adoption(
             let owns = |v: &SlotState, c: usize| {
                 (c >= v.core && c < v.core + v.cores) || v.group_cores.contains(&c)
             };
-            if let Some(c) = (hop_reserved + 1..=app).find(|c| owns(s, *c) && owns(p, *c)) {
+            if let Some(c) = (1..=app).find(|c| owns(s, *c) && owns(p, *c)) {
                 return Err(Error::CoreBusy { core: c });
             }
         }
@@ -1747,12 +1729,6 @@ pub(crate) mod tests {
     }
 
     impl Cage for FakeCage {
-        fn link_window(&self, size: u64) -> u64 {
-            size
-        }
-        fn reserve(&self, _: u64) -> u64 {
-            0
-        }
         fn clear(&mut self, base: u64, len: u64) {
             self.cleared.push((base, len));
         }
@@ -1893,7 +1869,6 @@ pub(crate) mod tests {
         let parts = PartitionPool::new(
             &[Region::new(0x8000_0000, pool_mib * MIB)],
             Region::default(),
-            Region::default(),
             Geometry::FLAT,
             SLOT_CAP,
         )
@@ -1904,7 +1879,7 @@ pub(crate) mod tests {
             FakeTimer::default(),
             con,
             parts,
-            CorePool::new(0),
+            CorePool::new(),
             svc,
             grants,
         )
@@ -2433,7 +2408,6 @@ pub(crate) mod tests {
         PartitionPool::new(
             &[Region::new(0x8000_0000, 256 * MIB)],
             Region::default(),
-            Region::default(),
             Geometry::FLAT,
             SLOT_CAP,
         )
@@ -2446,7 +2420,7 @@ pub(crate) mod tests {
         let p = pool();
         let first = st(1, 1, 1, 0x8000_0000);
         let second = st(2, 2, 1, 0x8400_0000);
-        validate_adoption(&[first.clone(), second.clone()], &b, &CorePool::new(0), &p).unwrap();
+        validate_adoption(&[first.clone(), second.clone()], &b, &CorePool::new(), &p).unwrap();
         let changes: [fn(&mut SlotState); 6] = [
             |s| s.slot = 1,
             |s| s.part_base = 0x8000_0000,
@@ -2458,13 +2432,13 @@ pub(crate) mod tests {
         for change in changes {
             let mut s2 = second.clone();
             change(&mut s2);
-            assert!(validate_adoption(&[first.clone(), s2], &b, &CorePool::new(0), &p).is_err());
+            assert!(validate_adoption(&[first.clone(), s2], &b, &CorePool::new(), &p).is_err());
         }
         let mut grouped = first;
         grouped.share_group = b"trusted".to_vec();
         grouped.group_cores = vec![1, 2];
         assert!(
-            validate_adoption(&[grouped, second], &b, &CorePool::new(0), &p).is_err(),
+            validate_adoption(&[grouped, second], &b, &CorePool::new(), &p).is_err(),
             "empty group core overlapped dedicated owner"
         );
     }
@@ -2476,7 +2450,7 @@ pub(crate) mod tests {
     fn adoption_takes_hop_on_the_os_core_and_nobody_else() {
         let b = FakeCores::new(1);
         let p = pool();
-        let mut places = CorePool::new(0);
+        let mut places = CorePool::new();
         places.share_os_core(crate::pool::HOP_GROUP).unwrap();
         let mut hop = st(1, 0, 1, 0x8000_0000);
         hop.share_group = crate::pool::HOP_GROUP.to_vec();
@@ -2484,7 +2458,7 @@ pub(crate) mod tests {
         let app = st(2, 1, 1, 0x8400_0000);
         validate_adoption(&[hop.clone(), app.clone()], &b, &places, &p).unwrap();
         // Dezelfde Hop bij een kern die de OS-core niet deelt: geweigerd.
-        assert!(validate_adoption(&[hop.clone()], &b, &CorePool::new(0), &p).is_err());
+        assert!(validate_adoption(&[hop.clone()], &b, &CorePool::new(), &p).is_err());
         // Een andere groep of een dedicated app op core 0: geweigerd.
         let mut other = hop.clone();
         other.share_group = b"web".to_vec();
@@ -2507,12 +2481,10 @@ pub(crate) mod tests {
         for core in [2, 3] {
             let second = st(1, core, 1, 0x8200_0000);
             assert!(
-                validate_adoption(&[first.clone(), second.clone()], &b, &CorePool::new(0), &p)
+                validate_adoption(&[first.clone(), second.clone()], &b, &CorePool::new(), &p)
                     .is_err()
             );
-            assert!(
-                validate_adoption(&[second, first.clone()], &b, &CorePool::new(0), &p).is_err()
-            );
+            assert!(validate_adoption(&[second, first.clone()], &b, &CorePool::new(), &p).is_err());
         }
     }
 

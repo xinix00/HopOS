@@ -363,7 +363,7 @@ pub(crate) fn start(
         link_window: cage::link_window,
         reserve: cage::reserve,
     };
-    let parts = match PartitionPool::new(&pool, Region::default(), own, geo, plan.max_slots()) {
+    let parts = match PartitionPool::new(&pool, own, geo, plan.max_slots()) {
         Ok(p) => p,
         Err(e) => {
             println!("slots: partition pool: {e} HOPOS_SLOT_PLAN");
@@ -740,7 +740,7 @@ pub(crate) fn os_plan() -> abi::Result<abi::layout::Plan> {
 /// kern (PORT.md beslissing 2). Kan de architectuur dat niet (Apple's
 /// EL2-smaak), dan krijgt Hop een app-core zoals vóór 30-09.
 fn os_pool() -> CorePool {
-    let mut pool = CorePool::new(0);
+    let mut pool = CorePool::new();
     if arch::SHARES_OS_CORE
         && let Err(e) = pool.share_os_core(kern::pool::HOP_GROUP)
     {

@@ -144,8 +144,9 @@ build gehasht. Console: USB-UART op de 40-pins header, pin 8 TX, 10 RX,
    `measured` betekent dat de teller na de kick nul las (Go las 2^31).
    Zodra het net op is en Hop slaat: `watchdog: liveness proven ...
    HOPOS_CANARY_LIVE`. Na een warme flip vanaf een kern die hem al
-   wapende komt eerst `watchdog: armed for the flip boot (... already
-   armed by the previous kernel) ... HOPOS_BOOT_GUARD`. Met `hopos.wd=off`:
+   wapende komt in plaats van `HOPOS_WD_ARMED` `watchdog: armed for the
+   flip boot (... already armed by the previous kernel) ...
+   HOPOS_BOOT_GUARD`. Met `hopos.wd=off`:
    `HOPOS_WD_OFF`, en na een flip vanaf een gewapende kern eerst
    `watchdog: disabled for a post-mortem`; zegt de regel ervoor `still
    enabled after pulsing SRST_P/T_WDT_NS`, dan houdt de reset hem niet

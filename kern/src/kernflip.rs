@@ -437,13 +437,6 @@ pub enum Boot {
     Adopted(Handoff),
 }
 
-/// Is er een overdracht KLAAR, zonder hem te consumeren? Het pointer/magic-
-/// paar is het enige harde bewijs; de recorder niet (die houdt "geland" vast
-/// tot de agent draait, en een koude boot daarna zou zich als adoptie zien).
-pub fn flip_pending(mem: &impl PhysMem, plan: &FlipPlan) -> bool {
-    mem.read64(plan.handoff_ptr_pa + 8) == HAND_MAGIC && mem.read64(plan.handoff_ptr_pa) != 0
-}
-
 /// Consumeert het pointer/magic-paar (vóór het vertrouwen, ook als het niet
 /// klopt: half garbage mag geen tweede boot besmetten) en leest het blob.
 ///
@@ -973,12 +966,6 @@ impl<'a> Bundle<'a> {
             .filter_map(|c| <[u8; 4]>::try_from(c).ok())
             .map(u32::from_le_bytes)
     }
-
-    /// Het aantal relocaties.
-    #[must_use]
-    pub fn reloc_count(&self) -> usize {
-        self.relocs.len() / 4
-    }
 }
 
 /// Legt de PT_LOAD-segmenten van de bundel plat neer op `dst` (het beeld
@@ -1411,7 +1398,6 @@ mod tests {
         mem.write64(PLAN.handoff_ptr_pa, 0x10_0000);
         mem.write64(PLAN.handoff_ptr_pa + 8, 0xdead);
         assert_eq!(adopted(&mut mem, &PLAN), Ok(Boot::Cold));
-        assert!(!flip_pending(&mem, &PLAN));
         // Een geldige overdracht.
         let h = Handoff {
             generation: 3,
@@ -1422,7 +1408,6 @@ mod tests {
         mem.copy_in(PLAN.own_ram_end, &b);
         mem.write64(PLAN.handoff_ptr_pa, PLAN.own_ram_end);
         mem.write64(PLAN.handoff_ptr_pa + 8, HAND_MAGIC);
-        assert!(flip_pending(&mem, &PLAN));
         assert_eq!(adopted(&mut mem, &PLAN), Ok(Boot::Adopted(h)));
         assert_eq!(mem.read64(PLAN.handoff_ptr_pa), 0, "pair not consumed");
         assert_eq!(
@@ -1724,7 +1709,6 @@ mod tests {
             (FLIP_ABI, link, 0x2000, link)
         );
         assert_eq!(bun.relocs().collect::<Vec<_>>(), [8]);
-        assert_eq!(bun.reloc_count(), 1);
         let mut mem = SparseMem::default();
         mem.write64(0x10_0000 + 0x1ff8, 0xdead); // rommel in de BSS
         assert_eq!(flatten(&bun, &mut mem, 0x10_0000).unwrap(), 1);

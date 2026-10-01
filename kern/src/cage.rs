@@ -58,9 +58,6 @@ pub enum Power {
 pub trait Cores {
     /// Het aantal logische app-cores (de hoogste logische core).
     fn app_cores(&self) -> usize;
-    /// Het fysieke core-ID van logische core `core`, of `None` als die niet
-    /// bestaat. De sentinel is `None`, niet 0: hart 0 is een geldig app-hart.
-    fn phys(&self, core: Core) -> Option<u32>;
     /// De klasse van `core`; `None` = het board kent geen klassen.
     fn class(&self, core: Core) -> Option<CoreClass>;
     /// De toestand van `core`.
@@ -187,12 +184,6 @@ pub const fn esr_class(esr: u64) -> &'static str {
 /// vanuit de lifecycle-actor aan, dus `&mut self` is de eigendomsregel: er
 /// is precies één aanroeper.
 pub trait Cage {
-    /// De grootste zichtbare partitie die het app-adresvenster voor een
-    /// aanvraag van `size` bytes kan beschrijven (`cageLinkWindow`).
-    fn link_window(&self, size: u64) -> u64;
-    /// Extra vertaalopslag achter de zichtbare partitie, in dezelfde claim
-    /// (`cageReserve`); een veelvoud van [`crate::GRAIN`].
-    fn reserve(&self, size: u64) -> u64;
     /// Wis `len` bytes op `base` en publiceer de writes (één brok van de
     /// scrub; de lifecycle yieldt ertussen).
     fn clear(&mut self, base: u64, len: u64);

@@ -536,14 +536,6 @@ fn unpublish_ports(slot: Slot) {
 }
 
 impl Cage for ArmCage {
-    fn link_window(&self, size: u64) -> u64 {
-        link_window(size)
-    }
-
-    fn reserve(&self, size: u64) -> u64 {
-        reserve(size)
-    }
-
     fn clear(&mut self, base: u64, len: u64) {
         let Ok(n) = usize::try_from(len) else { return };
         dev::clear(Pa(base), n);
@@ -1068,6 +1060,13 @@ impl ArmCores {
     pub(crate) fn new(plan: Plan) -> ArmCores {
         ArmCores { plan }
     }
+
+    /// De fysieke core van logische core `core`, of `None` als die niet
+    /// bestaat.
+    fn phys(&self, core: Core) -> Option<usize> {
+        let c = layout::Core::new(core.get()).filter(|_| core.get() <= self.plan.app_cores())?;
+        Some(self.plan.phys_core(c))
+    }
 }
 
 impl Cores for ArmCores {
@@ -1075,18 +1074,12 @@ impl Cores for ArmCores {
         self.plan.app_cores()
     }
 
-    fn phys(&self, core: Core) -> Option<u32> {
-        let c = layout::Core::new(core.get()).filter(|_| core.get() <= self.plan.app_cores())?;
-        u32::try_from(self.plan.phys_core(c)).ok()
-    }
-
     /// De klasse van de fysieke core volgens het board. Stond op `None`
     /// (de aanname van QEMU virt), en dan plaatste een jobspec met
     /// `core-class` nooit: GEMETEN 01-10 op de M4, "big" gaf "no free run"
     /// met drie P-cores vrij. Een spec zonder klasse merkt hier niets van.
     fn class(&self, core: Core) -> Option<CoreClass> {
-        let phys = usize::try_from(self.phys(core)?).ok()?;
-        Some(match crate::BOARD.core_class(phys) {
+        Some(match crate::BOARD.core_class(self.phys(core)?) {
             board::CoreClass::Small => CoreClass::Small,
             board::CoreClass::Mid => CoreClass::Mid,
             board::CoreClass::Big => CoreClass::Big,

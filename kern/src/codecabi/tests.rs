@@ -519,7 +519,7 @@ fn firmware_installed_after_boot_loads_on_open_and_survives_no_reboot() {
             &inbox,
             serve_loaded(&port, slot1(), 1, &req, &mut out, Some(&inbox), &reply),
             || {
-                assert!(port.with(|s, _| s.has_engine()).unwrap()); // geen dienstlening over await
+                assert!(port.with(|s, _| s.engine().is_some()).unwrap()); // geen dienstlening over await
             },
         );
         assert_eq!(

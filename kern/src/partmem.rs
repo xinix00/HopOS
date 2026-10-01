@@ -41,7 +41,7 @@ use bounded::BoundedVec;
 use core::marker::PhantomData;
 
 /// Het maximale aantal vrije stukken. Elke levende partitie splitst hooguit
-/// één stuk in twee, plus de regio's van het board en de kernlening.
+/// één stuk in twee, plus de regio's van het board.
 pub const MAX_FREE_REGIONS: usize = 2 * SLOT_CAP + 64;
 
 /// De vertaalregels van de architectuur die de pool nodig heeft.
@@ -207,30 +207,27 @@ struct Ledger {
     quarantined: bool,
 }
 
-/// De pool: vrije stukken, het grootboek per slot, en de flip-lening.
+/// De pool: vrije stukken en het grootboek per slot.
 ///
 /// # Invariants
 ///
 /// De vrije stukken zijn op basis gesorteerd, overlappen niet, en overlappen
-/// geen claim uit het grootboek of de lening. Elke claim loopt door
+/// geen claim uit het grootboek. Elke claim loopt door
 /// `carve`/`take_range`: dat is de dubbeluitgifte-invariant.
 pub struct PartitionPool {
     free: BoundedVec<Region, MAX_FREE_REGIONS>,
     capacity: u64,
     owners: [Option<Ledger>; SLOT_CAP + 1],
-    kern_window: Option<Region>,
-    cold: Region,
     max_slots: usize,
     geo: Geometry,
 }
 
 impl PartitionPool {
     /// Bouwt de eigendomskaart zoals elke boot hem bouwt: al het herbruikbare
-    /// geheugen (`pool` plus de koude kernreservering `cold`) minus de
-    /// actieve kern `own`. De vorige kern heeft na een overdracht geen claim.
+    /// geheugen (`pool`) minus de actieve kern `own`. De vorige kern heeft
+    /// na een overdracht geen claim.
     pub fn new(
         pool: &[Region],
-        cold: Region,
         own: Region,
         geo: Geometry,
         max_slots: usize,
@@ -239,13 +236,11 @@ impl PartitionPool {
             free: BoundedVec::new(),
             capacity: 0,
             owners: [None; SLOT_CAP + 1],
-            kern_window: None,
-            cold,
             max_slots: max_slots.min(SLOT_CAP),
             geo,
         };
         let mut sources: BoundedVec<Region, MAX_FREE_REGIONS> = BoundedVec::new();
-        for r in pool.iter().chain(core::iter::once(&cold)) {
+        for r in pool {
             if r.size == 0 {
                 continue;
             }
@@ -452,44 +447,6 @@ impl PartitionPool {
         Ok(())
     }
 
-    /// Leent een venster voor de kern-flip. Terug naar het koude venster
-    /// als dat helemaal vrij is (de oorspronkelijke geometrie); een bewoner
-    /// daar verhindert die voorkeur. Hooguit één lening tegelijk.
-    pub fn borrow_kern_window(&mut self, size: u64) -> Result<Region> {
-        let size = align_grain(size)
-            .filter(|s| *s != 0)
-            .ok_or(Error::PartitionSize { size })?;
-        if let Some(w) = self.kern_window {
-            return Err(Error::WindowBusy {
-                base: w.base,
-                size: w.size,
-            });
-        }
-        let cold = self.cold;
-        if cold.size >= size
-            && let Some(end) = cold.base.checked_add(size)
-            && self.free_span(cold.base, end)
-        {
-            self.take_range(cold.base, end)?;
-            let w = Region::new(cold.base, size);
-            self.kern_window = Some(w);
-            return Ok(w);
-        }
-        let base = self.carve(size).ok_or(Error::NoPartition { size })?;
-        let w = Region::new(base, size);
-        self.kern_window = Some(w);
-        Ok(w)
-    }
-
-    /// Geeft de flip-lening terug (een mislukte flip; een geslaagde keert
-    /// niet terug). No-op zonder lening.
-    pub fn return_kern_window(&mut self) -> Result {
-        if let Some(w) = self.kern_window.take() {
-            self.insert_free(w)?;
-        }
-        Ok(())
-    }
-
     /// Het zichtbare bereik van `slot`, als het er een heeft.
     #[must_use]
     pub fn partition_of(&self, slot: Slot) -> Option<Region> {
@@ -500,9 +457,9 @@ impl PartitionPool {
             .map(|l| l.region)
     }
 
-    /// Staat `slot` in quarantaine?
-    #[must_use]
-    pub fn is_quarantined(&self, slot: Slot) -> bool {
+    /// Staat `slot` in quarantaine? (Voor de tests.)
+    #[cfg(test)]
+    pub(crate) fn is_quarantined(&self, slot: Slot) -> bool {
         self.owners
             .get(slot.get())
             .copied()
@@ -648,14 +605,7 @@ mod tests {
     }
 
     fn pool(regs: &[Region]) -> PartitionPool {
-        PartitionPool::new(
-            regs,
-            Region::default(),
-            Region::default(),
-            Geometry::FLAT,
-            SLOT_CAP,
-        )
-        .unwrap()
+        PartitionPool::new(regs, Region::default(), Geometry::FLAT, SLOT_CAP).unwrap()
     }
 
     fn release(pool: &mut PartitionPool, p: Partition<Free>) {
@@ -703,7 +653,6 @@ mod tests {
         let before = p.largest();
         for size in [0, u64::MAX, u64::MAX - 1] {
             assert!(p.alloc(s(1), size).is_err());
-            assert!(p.borrow_kern_window(size).is_err());
         }
         assert_eq!(p.largest(), before);
         assert_eq!(p.capacity(), 64 * MIB);
@@ -806,46 +755,14 @@ mod tests {
         assert!(p.largest() < (218 - 120) * MIB);
     }
 
-    // Eigendom herbouwen zoals echte koude en flip-boots dat doen.
+    // De eigen kern valt uit de pool, ook midden in een regio.
     #[test]
-    fn kernel_double_flip_restores_cold_window_and_app_capacity() {
-        let cold = Region::new(0x8400_0000, 32 * MIB);
-        let regs = oud();
-        let boot = |own: Region| {
-            let p = PartitionPool::new(&regs, cold, own, Geometry::FLAT, SLOT_CAP).unwrap();
-            assert_eq!(p.capacity(), 222 * MIB, "kernel reservation leaked");
-            p
-        };
-        let mut p = boot(cold);
-        let resident = keep(p.alloc(s(2), 48 * MIB).unwrap());
-        let first = p.borrow_kern_window(32 * MIB).unwrap();
-        assert!(first.base != cold.base && first.size == cold.size);
-
-        let mut p = boot(Region::new(first.base, first.size - 0x40000));
-        let adopted = p.adopt(s(2), resident.base, 48 * MIB).unwrap();
-        let _ = adopted;
-        let second = p.borrow_kern_window(32 * MIB).unwrap();
-        assert_eq!(second, cold, "did not return home");
-        p.return_kern_window().unwrap();
-        assert!(p.free_span(cold.base, cold.base + cold.size));
-        let second = p.borrow_kern_window(32 * MIB).unwrap();
-
-        let mut p = boot(Region::new(second.base, second.size - 0x40000));
-        for (i, n) in [32u64, 48, 126].into_iter().enumerate() {
-            keep(p.alloc(s(i + 2), n * MIB).unwrap());
-        }
-    }
-
-    #[test]
-    fn borrow_kernel_does_not_displace_app_in_cold_window() {
-        let cold = Region::new(0x8400_0000, 32 * MIB);
-        let regs = [Region::new(0x8800_0000, 126 * MIB)];
-        let own = Region::new(0x8dc0_0000, 0x8fdc_0000 - 0x8dc0_0000);
-        let mut p = PartitionPool::new(&regs, cold, own, Geometry::FLAT, SLOT_CAP).unwrap();
-        let app = keep(p.alloc(s(2), 32 * MIB).unwrap());
-        assert_eq!(app.base, cold.base, "cold window unavailable to app");
-        let win = p.borrow_kern_window(32 * MIB).unwrap();
-        assert_ne!(win.base, cold.base, "flip overlapped resident app");
+    fn own_kernel_is_carved_out() {
+        let own = Region::new(0x8c00_0000, 32 * MIB);
+        let p = PartitionPool::new(&oud(), own, Geometry::FLAT, SLOT_CAP).unwrap();
+        assert_eq!(p.capacity(), (222 - 32) * MIB);
+        assert_eq!(p.largest(), 64 * MIB);
+        assert!(!p.free_span(own.base, own.base + own.size));
     }
 
     #[test]
@@ -885,20 +802,6 @@ mod tests {
             Err(Error::NotFree { .. })
         ));
         assert!(p.partition_of(s(2)).is_none());
-    }
-
-    #[test]
-    fn borrow_kern_window() {
-        let mut p = pool(&[Region::new(0x8000_0000, 64 * MIB)]);
-        let w = p.borrow_kern_window(9 * MIB).unwrap();
-        assert_eq!(w.size, 10 * MIB);
-        assert!(matches!(
-            p.borrow_kern_window(2 * MIB),
-            Err(Error::WindowBusy { .. })
-        ));
-        assert!(p.alloc(s(1), 60 * MIB).is_err());
-        p.return_kern_window().unwrap();
-        keep(p.alloc(s(1), 64 * MIB).unwrap());
     }
 
     #[test]
@@ -972,7 +875,6 @@ mod tests {
         };
         let mut p = PartitionPool::new(
             &[Region::new(0x8000_0000, 16 * MIB)],
-            Region::default(),
             Region::default(),
             geo,
             SLOT_CAP,

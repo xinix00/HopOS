@@ -97,8 +97,7 @@ pub const fn is_store_call(op: u8) -> bool {
     )
 }
 
-/// Bytes in een vaste buffer: de rij alloceert niets (de heap van de kern is
-/// een bump-allocator; wat terugkomt uit het midden, lekt).
+/// Bytes in een vaste buffer: de rij alloceert niets.
 #[derive(Copy, Clone)]
 struct Bytes<const N: usize> {
     b: [u8; N],

@@ -93,7 +93,6 @@ struct CagePlace {
 
 /// De plaatsing van alle kooien op de app-cores en de OS-core.
 pub struct CorePool {
-    hop_reserved: usize,
     os_groups: BoundedVec<GroupName, MAX_OS_GROUPS>,
     groups: [Option<Group>; MAX_GROUPS],
     core_group: [Option<u8>; CORE_CAP + 1],
@@ -105,12 +104,10 @@ pub struct CorePool {
 }
 
 impl CorePool {
-    /// Een lege plaatsing. App-cores zijn `hop_reserved + 1 ..= app_cores`:
-    /// de eerste `hop_reserved` cores draaien de HOP-runtime.
+    /// Een lege plaatsing over de app-cores `1..=app_cores`.
     #[must_use]
-    pub fn new(hop_reserved: usize) -> CorePool {
+    pub fn new() -> CorePool {
         CorePool {
-            hop_reserved,
             os_groups: BoundedVec::new(),
             groups: [const { None }; MAX_GROUPS],
             core_group: [None; CORE_CAP + 1],
@@ -155,7 +152,7 @@ impl CorePool {
     }
 
     fn is_app_core(&self, cores: &impl Cores, c: usize) -> bool {
-        c > self.hop_reserved && c <= cores.app_cores().min(CORE_CAP)
+        (1..=cores.app_cores().min(CORE_CAP)).contains(&c)
     }
 
     fn class_ok(cores: &impl Cores, c: usize, class: Option<CoreClass>) -> bool {
@@ -327,7 +324,7 @@ impl CorePool {
             .position(Option::is_none)
             .ok_or(Error::Full { cap: MAX_GROUPS })?;
         let mut members = BoundedVec::new();
-        for c in self.hop_reserved + 1..=cores.app_cores().min(CORE_CAP) {
+        for c in 1..=cores.app_cores().min(CORE_CAP) {
             if members.len() == pool_cores {
                 break;
             }
@@ -365,7 +362,7 @@ impl CorePool {
         n: usize,
         class: Option<CoreClass>,
     ) -> Result<Core> {
-        for c in self.hop_reserved + 1..=cores.app_cores().min(CORE_CAP) {
+        for c in 1..=cores.app_cores().min(CORE_CAP) {
             if self.run_free(cores, c, n, class)
                 && let Some(core) = Core::new(c)
             {
@@ -405,9 +402,9 @@ impl CorePool {
         }
     }
 
-    /// De primaire core en de span van `slot`.
-    #[must_use]
-    pub fn placement_of(&self, slot: Slot) -> Option<(Core, usize)> {
+    /// De primaire core en de span van `slot` (voor de tests).
+    #[cfg(test)]
+    pub(crate) fn placement_of(&self, slot: Slot) -> Option<(Core, usize)> {
         self.cages
             .get(slot.get())
             .copied()
@@ -464,11 +461,11 @@ impl CorePool {
         self.reserve(slot, primary, span, gid);
         Ok(())
     }
+}
 
-    /// Het aantal cores dat de HOP-runtime zelf houdt.
-    #[must_use]
-    pub fn hop_reserved(&self) -> usize {
-        self.hop_reserved
+impl Default for CorePool {
+    fn default() -> Self {
+        CorePool::new()
     }
 }
 
@@ -506,9 +503,6 @@ pub(crate) mod tests {
     impl Cores for FakeCores {
         fn app_cores(&self) -> usize {
             self.n
-        }
-        fn phys(&self, core: Core) -> Option<u32> {
-            (core.get() <= self.n).then_some(core.get() as u32)
         }
         fn class(&self, core: Core) -> Option<CoreClass> {
             self.classes.get(core.get()).copied().flatten()
@@ -554,7 +548,7 @@ pub(crate) mod tests {
     #[test]
     fn pool_dedicated_eigen_core() {
         let b = FakeCores::new(4);
-        let mut p = CorePool::new(0);
+        let mut p = CorePool::new();
         let mut seen = [false; 5];
         for cage in 1..=4 {
             let c = p.place(&b, s(cage), &ded(1, None)).unwrap().get();
@@ -568,7 +562,7 @@ pub(crate) mod tests {
     #[test]
     fn pool_sharegroup_balanceert() {
         let b = FakeCores::new(4);
-        let mut p = CorePool::new(0);
+        let mut p = CorePool::new();
         let mut got = [0; 5];
         for cage in 4..=7 {
             got[p.place(&b, s(cage), &shared("web", 2, None)).unwrap().get()] += 1;
@@ -582,7 +576,7 @@ pub(crate) mod tests {
     #[test]
     fn pool_release_geeft_pool_terug() {
         let b = FakeCores::new(4);
-        let mut p = CorePool::new(0);
+        let mut p = CorePool::new();
         for cage in 4..=7 {
             p.place(&b, s(cage), &shared("web", 2, None)).unwrap();
         }
@@ -597,7 +591,7 @@ pub(crate) mod tests {
     #[test]
     fn pool_grootte_mismatch_wordt_geweigerd() {
         let b = FakeCores::new(6);
-        let mut p = CorePool::new(0);
+        let mut p = CorePool::new();
         p.place(&b, s(4), &shared("web", 2, None)).unwrap();
         assert!(matches!(
             p.place(&b, s(5), &shared("web", 4, None)),
@@ -611,26 +605,16 @@ pub(crate) mod tests {
     #[test]
     fn place_cage_idempotent() {
         let b = FakeCores::new(4);
-        let mut p = CorePool::new(0);
+        let mut p = CorePool::new();
         let c1 = p.place(&b, s(4), &shared("web", 2, None)).unwrap();
         let c2 = p.place(&b, s(4), &shared("web", 2, None)).unwrap();
         assert_eq!(c1, c2);
     }
 
     #[test]
-    fn pool_respecteert_hop_reserved() {
-        let b = FakeCores::new(4);
-        let mut p = CorePool::new(1);
-        for cage in 1..=3 {
-            assert!(p.place(&b, s(cage), &ded(1, None)).unwrap().get() >= 2);
-        }
-        assert!(p.place(&b, s(4), &ded(1, None)).is_err());
-    }
-
-    #[test]
     fn pool_smp_reserves_independent_core_run() {
         let b = FakeCores::new(4);
-        let mut p = CorePool::new(0);
+        let mut p = CorePool::new();
         assert_eq!(p.place(&b, s(8), &ded(2, None)).unwrap().get(), 1);
         assert_eq!(p.place(&b, s(2), &ded(1, None)).unwrap().get(), 3);
         p.release(s(8));
@@ -640,7 +624,7 @@ pub(crate) mod tests {
     #[test]
     fn pool_smp_finds_run_after_shared_residents() {
         let b = FakeCores::new(4);
-        let mut p = CorePool::new(0);
+        let mut p = CorePool::new();
         for cage in 1..=6 {
             let c = p.place(&b, s(cage), &shared("trusted", 1, None)).unwrap();
             assert_eq!(c.get(), 1);
@@ -654,7 +638,7 @@ pub(crate) mod tests {
     #[test]
     fn pool_sharegroup_met_smp_wordt_geweigerd() {
         let b = FakeCores::new(4);
-        let mut p = CorePool::new(0);
+        let mut p = CorePool::new();
         let mut spec = shared("web", 2, None);
         spec.cores = 2;
         assert!(matches!(
@@ -667,7 +651,7 @@ pub(crate) mod tests {
     fn pool_class_sharing_and_smp() {
         use CoreClass::Big;
         let b = FakeCores::with(9, &[(7, Big), (8, Big), (9, Big)]);
-        let mut p = CorePool::new(0);
+        let mut p = CorePool::new();
         for cage in [10, 11] {
             assert_eq!(
                 p.place(&b, s(cage), &shared("trusted", 1, Some(Big)))
@@ -690,7 +674,7 @@ pub(crate) mod tests {
     #[test]
     fn pool_one_core_class_sharing() {
         let b = FakeCores::with(1, &[(1, CoreClass::Big)]);
-        let mut p = CorePool::new(0);
+        let mut p = CorePool::new();
         for cage in [2, 3] {
             let c = p.place(&b, s(cage), &shared("trusted", 1, Some(CoreClass::Big)));
             assert_eq!(c.unwrap().get(), 1);
@@ -701,7 +685,7 @@ pub(crate) mod tests {
     fn pool_class_mismatch_and_dedicated_fallback() {
         use CoreClass::{Big, Small};
         let b = FakeCores::with(3, &[(1, Small), (2, Big), (3, Big)]);
-        let mut p = CorePool::new(0);
+        let mut p = CorePool::new();
         p.place(&b, s(4), &shared("mixed", 1, None)).unwrap();
         assert!(matches!(
             p.place(&b, s(5), &shared("mixed", 1, Some(Big))),
@@ -722,7 +706,7 @@ pub(crate) mod tests {
     #[test]
     fn hop_and_trusted_groups_share_the_os_core() {
         let b = FakeCores::new(1);
-        let mut p = CorePool::new(0);
+        let mut p = CorePool::new();
         p.share_os_core(HOP_GROUP).unwrap();
         p.share_os_core(b"trusted").unwrap();
         p.share_os_core(HOP_GROUP).unwrap(); // idempotent
@@ -756,7 +740,7 @@ pub(crate) mod tests {
     fn hop_without_os_sharing_takes_an_app_core() {
         use CoreClass::{Big, Small};
         let b = FakeCores::with(4, &[(1, Big), (2, Big), (3, Small), (4, Small)]);
-        let mut p = CorePool::new(0);
+        let mut p = CorePool::new();
         let hop = p.place(&b, s(1), &Placement::hop().unwrap()).unwrap();
         assert_eq!(hop.get(), 1);
         let buddy = p.place(&b, s(2), &Placement::hop().unwrap()).unwrap();

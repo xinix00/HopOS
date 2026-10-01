@@ -321,12 +321,6 @@ impl<E: Engine, L: Lives, C: Coherence> CodecService<E, L, C> {
         self.engine = Some(engine);
     }
 
-    /// Heeft de dienst ijzer?
-    #[must_use]
-    pub fn has_engine(&self) -> bool {
-        self.engine.is_some()
-    }
-
     /// De engine, voor diagnose en het meetinstrument van de kern.
     pub fn engine(&mut self) -> Option<&mut E> {
         self.engine.as_mut()

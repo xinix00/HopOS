@@ -1993,7 +1993,6 @@ fn flip_sum(path: &[u8]) -> Result<[u8; 32]> {
     Ok(out)
 }
 
-/// Het doelslot van een bevoegde call (`off`).
 /// De kop van een bestandscall zonder lening: getallen en de bereiken van
 /// pad en data in de callbuffer.
 struct FsHead {
@@ -2018,6 +2017,7 @@ fn fail(out: &mut [u8], op: u8, seq: u32, e: &Fail) -> usize {
     encode_resp(out, op, status, seq, 0, msg.get(..n).unwrap_or(&[]))
 }
 
+/// Het doelslot van een bevoegde call (`off`).
 fn target(c: &Call<'_>) -> Result<Slot> {
     usize::try_from(c.off)
         .ok()
@@ -2028,7 +2028,6 @@ fn target(c: &Call<'_>) -> Result<Slot> {
         })
 }
 
-/// De core-vraag van een start.
 /// De poorten van een start, elk één keer: twee namen in de jobspec met
 /// hetzelfde nummer (`http` en `web` op 80) zijn één publicatie, geen
 /// botsing met zichzelf. De toetsen (hoeveel, geen 0) deed `StartReq::decode`.

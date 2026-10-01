@@ -32,8 +32,6 @@ pub enum Error {
     Quarantined { slot: usize },
     /// Een bereik dat vrij had moeten zijn, is (deels) van een ander.
     NotFree { base: u64, size: u64 },
-    /// Er staat al een geleend kernvenster uit.
-    WindowBusy { base: u64, size: u64 },
     /// De tabel of lijst is vol (een vaste maat uit de bron).
     Full { cap: usize },
     /// De heap kon de allocatie niet plaatsen.
@@ -120,9 +118,6 @@ impl fmt::Display for Error {
             }
             Self::NotFree { base, size } => {
                 write!(f, "range {base:#x}+{size:#x} is not free in this pool")
-            }
-            Self::WindowBusy { base, size } => {
-                write!(f, "kernel window {base:#x}+{size:#x} already borrowed")
             }
             Self::Full { cap } => write!(f, "table full ({cap} entries)"),
             Self::OutOfMemory { bytes } => write!(f, "out of memory ({bytes} bytes)"),

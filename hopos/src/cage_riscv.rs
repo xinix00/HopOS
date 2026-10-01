@@ -659,14 +659,6 @@ fn unpublish_ports(slot: Slot) {
 }
 
 impl Cage for RvCage {
-    fn link_window(&self, size: u64) -> u64 {
-        link_window(size)
-    }
-
-    fn reserve(&self, size: u64) -> u64 {
-        reserve(size)
-    }
-
     fn clear(&mut self, base: u64, len: u64) {
         let Ok(n) = usize::try_from(len) else { return };
         dev::clear(Pa(base), n);
@@ -932,11 +924,6 @@ impl RvCores {
 impl Cores for RvCores {
     fn app_cores(&self) -> usize {
         self.plan.app_cores()
-    }
-
-    fn phys(&self, core: Core) -> Option<u32> {
-        let c = layout::Core::new(core.get()).filter(|_| core.get() <= self.plan.app_cores())?;
-        u32::try_from(self.plan.phys_core(c)).ok()
     }
 
     fn class(&self, _core: Core) -> Option<CoreClass> {

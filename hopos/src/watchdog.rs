@@ -126,11 +126,11 @@ impl Beat {
 /// De watchdog-taak.
 async fn run(exec: &'static Executor, mut hw: hw::Hw, flip: bool, hop: bool) {
     let mut p = Policy::new(LOUD_EVERY);
-    if flip {
-        let e = p.arm_boot_guard(&mut hw, cpu::idle::counter(), cpu::idle::freq());
-        say(&e, &hw);
-    }
-    let e = p.start(&mut hw, cpu::idle::counter());
+    let e = if flip {
+        p.arm_boot_guard(&mut hw, cpu::idle::counter(), cpu::idle::freq())
+    } else {
+        p.start(&mut hw, cpu::idle::counter())
+    };
     say(&e, &hw);
     let mut beat = Beat {
         last: 0,
