@@ -8,15 +8,18 @@
 //! [`FS_INBOX`]. De committer bezit niets: hij kijkt naar de
 //! servicer-tabel en stuurt een `Commit`.
 //!
-//! Wachten op de schijf: de driver zit in een [`Paced`] met de klok en de
-//! timers van de executor ([`ExecPace`]). Elk blok-verzoek is een submit plus
-//! een await op de bel van de lijn (vangrail 10 ms) of, zonder lijn, pollend
-//! op een timer, en intussen draait de executor door. Les van 30-09 (de
-//! soak): de synchrone commit hield op een trage schijf de OS-core tot 7 s
-//! stil (`late_ms=6611` op de tik, Hop en de switch zonder beurt). De mount
-//! bij de boot draait vóór `exec.run`: dezelfde futures, afgedraaid met
-//! `blkdev::block_on`, dat bij elke ronde het device toetst. Er is geen
-//! tweede, synchroon driverpad (waarom: de crate-doc van `blkdev`).
+//! Wachten op de schijf: de driver zit in een [`Queue`] met de klok en de
+//! timers van de executor ([`ExecPace`]). Elk blok-verzoek is een ticket
+//! plus een await op zijn eigen completion; één wachter pollt het device
+//! (op de bel van de lijn met vangrail 10 ms, of zonder lijn op een timer)
+//! en wekt de anderen, en intussen draait de executor door. Zo heeft de
+//! actor meerdere calls tegelijk op de schijf (de ANS: zestien tags). Les
+//! van 30-09 (de soak): de synchrone commit hield op een trage schijf de
+//! OS-core tot 7 s stil (`late_ms=6611` op de tik, Hop en de switch zonder
+//! beurt). De mount bij de boot draait vóór `exec.run`: dezelfde futures,
+//! afgedraaid met `blkdev::block_on` (de enige wachter is dan de pacer en
+//! toetst het device bij elke ronde). Er is geen tweede, synchroon
+//! driverpad (waarom: de crate-doc van `blkdev`).
 //!
 //! De kern-flip: vóór de sprong legt de actor de boom vast en neemt hij
 //! niets meer aan ([`freeze_for_flip`]); de nieuwe kern mount dezelfde
@@ -27,7 +30,8 @@
 //! Hop's staat op `/hop/` moet een herstart overleven; wie leeg wil
 //! beginnen, geeft QEMU een verse schijf (image/qemu-run.sh).
 
-use blkdev::{Pace, Paced, block_on};
+use alloc::boxed::Box;
+use blkdev::{AsyncBlockDevice, Pace, Queue, block_on};
 use board::Board;
 use core::future::Future;
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -124,6 +128,48 @@ impl Pace for ExecPace {
     }
 }
 
+/// Hoe vaak de meetlat van de schijf een regel krijgt (als er iets
+/// gebeurde): het ritme van de commit.
+const STATS_EVERY: Duration = Duration::from_secs(10);
+
+/// De meetlat van de schijf, één regel per [`STATS_EVERY`] als er
+/// opdrachten waren: de driver (opdrachten, read-ahead, de traagste) en de
+/// wachtrij (het hoogste aantal tegelijk).
+async fn stats(exec: &'static Executor, disk: &'static Queue<vboard::Disk, ExecPace>) {
+    let mut last = 0;
+    loop {
+        exec.after(STATS_EVERY).await;
+        let now = disk.with_dev(|d| d.stats(&mut Sink).unwrap_or(0));
+        if now == last {
+            continue;
+        }
+        last = now;
+        println!(
+            "disk: {} queue_peak={} HOPOS_DISK_STATS",
+            DevStats(disk),
+            disk.peak()
+        );
+    }
+}
+
+/// Een schrijver die alles weggooit: alleen de teller telt.
+struct Sink;
+
+impl core::fmt::Write for Sink {
+    fn write_str(&mut self, _s: &str) -> core::fmt::Result {
+        Ok(())
+    }
+}
+
+/// De meetlat van de driver als `Display`, zonder buffer.
+struct DevStats(&'static Queue<vboard::Disk, ExecPace>);
+
+impl core::fmt::Display for DevStats {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.with_dev(|d| d.stats(f).map(drop))
+    }
+}
+
 /// Zoekt de schijf van het board, één keer voor de hele boot: `probe_disk`
 /// mag maar één keer, en de schijf gaat eerst langs de bench (bench.rs)
 /// en dan naar [`start`]. Geen schijf of een fout is één regel en `None`:
@@ -156,10 +202,17 @@ pub(crate) fn start(exec: &'static Executor, disk: Option<vboard::Disk>) -> bool
         "disk: up HOPOS_DISK_UP model={} blocks={sectors} block_size={SECTOR} max_transfer={MAX_TRANSFER}",
         disk.model()
     );
+    // De wachtrij leeft zolang de kern: één keer bij de boot op de heap.
+    let disk: &'static Queue<vboard::Disk, ExecPace> =
+        Box::leak(Box::new(Queue::new(disk, ExecPace(exec))));
+    println!(
+        "disk: queue of {} request(s) at once HOPOS_DISK_QUEUE depth={}",
+        disk.depth(),
+        disk.depth()
+    );
     // Vóór `exec.run`: de mount wacht zelf (block_on pollt het device over
     // hetzelfde pad als de actor straks), en er is nog niemand die stil zou
     // staan.
-    let disk = Paced::new(disk, ExecPace(exec));
     let mounted = block_on(Fs::mount(
         disk,
         0,
@@ -212,6 +265,9 @@ pub(crate) fn start(exec: &'static Executor, disk: Option<vboard::Disk>) -> bool
         return false;
     }
     UP.store(true, Relaxed);
+    if exec.spawn(stats(exec, disk)).is_err() {
+        println!("disk: stats task not spawned HOPOS_DISK_STATS_FAIL");
+    }
     let commit = async move {
         committer(&crate::SERVICERS, &FS_INBOX, &ExecTimer(exec), max_slots).await;
     };

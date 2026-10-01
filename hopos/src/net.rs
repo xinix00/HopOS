@@ -179,15 +179,23 @@ const OUT_BUF: usize = kern::system::REQ_HEADER + MAX_IO_CHUNK;
 
 /// Het totaalplafond op gelijktijdige system-verbindingen: de poolgrootte
 /// van de verbindingstaken (handboek §2: een verbinding is een taak uit een
-/// vaste pool). Per slot laat `admit` er [`MAX_SYSTEM_CONNS`] toe; dit is
-/// dat maal de drie app-slots van QEMU virt, plus [`MAX_HOP_CONNS`] voor Hop
-/// (zijn store-taak houdt er blijvend één). Elke taak
-/// houdt een callbuffer van [`MAX_PAYLOAD`] (1 MiB plus 64 KiB) en een
-/// antwoordbuffer van 1 MiB vast, dus 9 taken zijn ruim 19 MB van de 236 MB
-/// heap; een board met meer slots
-/// krijgt zijn weigering luid (`HOPOS_SYSTEM_FULL`) en tilt dit getal met
-/// een meting op.
-pub(crate) const SYSTEM_WORKERS: usize = 3 * MAX_SYSTEM_CONNS as usize + MAX_HOP_CONNS as usize;
+/// vaste pool). Per slot laat `admit` er [`MAX_SYSTEM_CONNS`] toe (één plus
+/// een herverbinding); de pool draagt één verbinding per app-slot van het
+/// grootste board, plus [`MAX_HOP_CONNS`] voor Hop (zijn store-taak houdt
+/// er blijvend één), plus één herverbinding. GEMETEN 01-10 op de M4: met
+/// de oude 9 (de drie app-slots van QEMU virt maal twee, plus Hop) kreeg de
+/// achtste app van acht geen verbinding ("connection closed") terwijl de
+/// schijf er ruimte voor had. Elke taak houdt een callbuffer van
+/// [`MAX_PAYLOAD`] (1 MiB plus 64 KiB) en een antwoordbuffer van 1 MiB
+/// vast, dus 13 taken zijn ruim 27 MB heap.
+pub(crate) const SYSTEM_WORKERS: usize = APP_SLOTS + MAX_HOP_CONNS as usize + 1;
+
+/// De app-slots van het grootste board: de M4 (tien cores, één voor de kern).
+const APP_SLOTS: usize = 9;
+
+// Elke verbinding heeft hoogstens één bestandscall uitstaan; de brievenbus
+// van de hopfs-actor draagt ze allemaal plus de committer en de flip.
+const _: () = assert!(SYSTEM_WORKERS + 2 <= kern::rpc::FS_DEPTH);
 
 /// Weigeringen van de listener die een eigen regel krijgen; daarna tellen
 /// we alleen (handboek §6: falen is luid, en één keer).

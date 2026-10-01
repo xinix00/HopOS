@@ -26,12 +26,14 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use blkdev::{BlockIo, Paced, Spin, block_on};
+use blkdev::{AsyncBlockDevice, BlockIo, Op, Paced, Queue, Spin, block_on};
 use core::sync::atomic::Ordering::Relaxed;
+use core::task::Poll;
 use cpu::println;
 use driver_virtioblk::{MAX_TRANSFER, SECTOR};
 use executor::Executor;
 use kern::hopfs::Fs;
+use sync::Pool;
 
 /// De staart die de bench hoogstens beschrijft.
 const SPAN_MAX: u64 = 1 << 30;
@@ -44,6 +46,10 @@ const SIZES: [u64; 4] = [4 << 10, 64 << 10, 256 << 10, 1 << 20];
 
 /// Hoogstens zoveel willekeurige 4 KiB-opdrachten (64 MiB).
 const RANDOM_OPS: u64 = 16384;
+
+/// Zoveel lezingen tegelijk in [`Bench::random_queue`]: de diepte van de
+/// hopfs-actor.
+const QUEUE_DEPTH: usize = kern::rpc::FS_DEPTH;
 
 /// Eén bootparameter: de eerste waarde van `key`, of "" als hij niet gezet
 /// is. De tekst komt van het board (`src::text`): de FDT-bootargs op virt en
@@ -228,7 +234,8 @@ fn bench_disk(exec: &'static Executor, disk: &mut vboard::Disk) {
     let mut disk = Paced::new(disk, Spin);
     let ok = t.sizes(&mut disk, &mut buf, span)
         && t.sequential(&mut disk, &mut buf, span)
-        && t.random(&mut disk, &mut buf, span);
+        && t.random(&mut disk, &mut buf, span)
+        && t.random_queue(disk.dev_mut(), span);
     if ok {
         t.hopfs(&mut disk, &mut buf, span);
     }
@@ -326,13 +333,7 @@ impl Bench {
         let slots = span / sz;
         let n = slots.min(RANDOM_OPS);
         let (base, step) = (self.base, sz / SECTOR);
-        let at = |k: u64| {
-            let mut x = k.wrapping_add(0x9e37_79b9_7f4a_7c15);
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            base + (x % slots) * step
-        };
+        let at = |k: u64| base + (xorshift(k) % slots) * step;
         let Some((w, r)) = self.pass(disk, buf, sz as usize, n, at) else {
             return false;
         };
@@ -343,6 +344,62 @@ impl Bench {
             rate(n * sz, w),
             iops(r),
             rate(n * sz, r)
+        );
+        true
+    }
+
+    /// Willekeurig lezen met de wachtrij vol: [`QUEUE_DEPTH`] lezingen van
+    /// 4 KiB tegelijk op de plekken van [`Self::random`], door de
+    /// `blkdev::Queue` die hopfs ook gebruikt. Het plafond van het device
+    /// voor de hele node (Linux: fio met iodepth); de bytes gaan niet naar
+    /// een buffer, alleen het device telt.
+    fn random_queue<D: AsyncBlockDevice>(&self, disk: &mut D, span: u64) -> bool {
+        let sz: u64 = 4 << 10;
+        let slots = span / sz;
+        let n = slots.min(RANDOM_OPS);
+        let (base, step) = (self.base, sz / SECTOR);
+        let q = Queue::new(disk, Spin);
+        let depth = q.depth().min(QUEUE_DEPTH);
+        let mut pool = core::pin::pin!(Pool::<_, QUEUE_DEPTH>::new());
+        let (mut k, mut fail) = (0u64, None);
+        let t0 = self.now();
+        block_on(core::future::poll_fn(|cx| {
+            loop {
+                while pool.len() < depth && k < n {
+                    let lba = base + (xorshift(k) % slots) * step;
+                    let read = q.io(
+                        Op::Read {
+                            lba,
+                            len: sz as usize,
+                        },
+                        &mut [],
+                    );
+                    if pool.as_mut().push(read).is_err() {
+                        break;
+                    }
+                    k += 1;
+                }
+                match pool.as_mut().poll_next(cx) {
+                    Poll::Ready(Some(Ok(()))) => {}
+                    Poll::Ready(Some(Err(e))) => {
+                        fail = Some(e);
+                        return Poll::Ready(());
+                    }
+                    Poll::Ready(None) => return Poll::Ready(()),
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+        }));
+        let ns = self.now().saturating_sub(t0);
+        if let Some(e) = fail {
+            println!("nvme bench: random read {depth} at once: {e} HOPOS_NVMEBENCH_FAIL");
+            return false;
+        }
+        println!(
+            "nvme bench: random 4 KiB read, {depth} at once (peak {}) x{n}: {} IOPS ({} MB/s) HOPOS_NVMEBENCH_RANDQ",
+            q.peak(),
+            n.saturating_mul(1_000_000_000) / ns.max(1),
+            rate(n * sz, ns)
         );
         true
     }
@@ -388,6 +445,16 @@ impl Bench {
             line("hopfs bench:", sz, n, w, r, "call");
         }
     }
+}
+
+/// De plek van opdracht `k` van de willekeurige fasen (xorshift, vast
+/// zaad: elke run dezelfde plekken).
+fn xorshift(k: u64) -> u64 {
+    let mut x = k.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    x
 }
 
 /// Eén regel van de Go-tabel: maat, aantal, en per richting MB/s en µs
