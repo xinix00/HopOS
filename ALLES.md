@@ -25,10 +25,10 @@ of faalt, en een streep waar het bewust niet komt. Stand 30-09-2026, avond.
 | Klokbeleid (dvfs) | – | ✓ 1500/800 | ✓ 1500/600 | – | ○ | ✓ vijf `_CPC`-domeinen, 2600 MHz | ✓ p-state-tune E 5/8 = 2172 MHz, P 6/20 = 2352 MHz (M7) | – |
 | Console op het glas | ✓ ramfb | ✓ via flip op de eerste kaart, ✗ sinds de herflash (firmware weigert) | ✓ 32 bpp | ✓ HDMI (geen EDID) | ○ GOP | ✓ GOP 1920x1080 | – | – |
 | USB xHCI (HID, display-app) | ✓ qemu-xhci | ○ 2 xHCI's up, niets ingeplugd | ○ VL805 koud: fix d0b6bd3 (SCB0_SIZE, notify, twee pogingen), koude boot nodig | ○ 2 DWC3 up, niets ingeplugd | ○ | ✓ 10 xHCI's up, de Blu-ray-drive over USB-BOT leest de disc (Lumen) | – | – |
-| Opslag (hopfs, volumes, OP_SYNC) | ✓ virtio-blk | – (bewust geen NVMe) | – | – (stateless, alles in het geheugen) | ○ NVMe | ✓ NVMe Lexar 4 TB, hopfs hersteld (generatie 3456) | ✓ ANS NVMe 414 GB, hopfs hersteld; rauw 4936 / 1719 MB/s (M14), door de app 1055 tot 1279 / 808 tot 886 (M15) | – |
+| Opslag (hopfs, volumes, OP_SYNC) | ✓ virtio-blk | – (bewust geen NVMe) | – | – (stateless, alles in het geheugen) | ○ NVMe | ✓ NVMe Lexar 4 TB, hopfs hersteld (generatie 3456) | ✓ ANS NVMe 414 GB, hopfs hersteld; de ANS asynchroon met read-ahead (M22): rauw 4952 / 1925 (M23), door de app 1270 / 1690 (M24) | – |
 | Console op 5555 | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ✓ (hopos.replay=45) | ○ |
 | Hardwaredecoder (media-smaak) | – | – | – | – | – | ✓ Linlon V8, 85,7 fps 4K P010 via de grant; nu tijdelijk weg (gui-flip H) tot de koude boot | – | – |
-| Kaart of stick klaar in `target/` | – | ✓ 22:37 (I) | ✓ 22:37 (I) | ✓ 22:38 (I, gepatchte Hop) | ✓ 18:12 | ✓ 22:38 stempel I (kern-fix bundelpartitie, verse Hop, efirng) | ✓ D4b geïnstalleerd (pstate=off, zonder de fixes van 01-10); art/hopos-apple.flip = M15; nieuw image met main gewenst | ✗ donor-FIP |
+| Kaart of stick klaar in `target/` | – | ✓ 22:37 (I) | ✓ 22:37 (I) | ✓ 22:38 (I, gepatchte Hop) | ✓ 18:12 | ✓ 22:38 stempel I (kern-fix bundelpartitie, verse Hop, efirng) | ✓ D4b geïnstalleerd (pstate=off, zonder de fixes van 01-10); art/hopos-apple.flip = M24 (cfg/m4-meet.cfg, replay=0); nieuw image met main gewenst | ✗ donor-FIP |
 
 ## De nodes, één voor één
 
@@ -201,34 +201,40 @@ op `/dev/cu.kis-100000-ch-0`. Sinds 01-10 ook op het LAN: 5555, 8080,
       Hop-repo, niet klein. Ook: Hop blijft een plaatsing zonder capaciteit
       opnieuw proberen (een vloed `HOP_JOB_FAILED`; sinds de retire
       onschuldig, maar ruis).
-- [ ] **NVMe door de app op de M4: 1055 tot 1279 schrijven / 808 tot 886
-      lezen** (M15, vitals-M15, twee P-cores, 256 MiB) tegen Go 1598 tot
-      1657 / 1064 tot 1072. De kern zelf zit op de Go-lat (M14,
-      `hopos.nvmebench=1`: rauw 4936 / 1719, hopfs 4931 / 1771; op M9 was
-      lezen nog 158 tot 168 omdat het ANS-datablok Normal-NC stond, M10 WB;
-      M11 de host-ringen van poort 0 Hardware: transport 930 → 1521; M12
-      memcpy in het datablok; vitals-M15 vergelijkt met bcmp, 607 → 808).
-      Waar de tijd zit: schijf plus hopfs 0,59 ms per MiB en het transport
-      kern naar app 0,66 ms per MiB, na elkaar per call van 1 MiB (voorspeld
-      818, gemeten 808 tot 886). Het transport is 's middags goedkoper
-      gemaakt (M16 tot M21, agent): de 0,645 ms waren vijf kopieën van elke
-      byte op de OS-core (switch 238 us, tcp_write 152, poll_transmit 151,
-      framebuffer naar host-ring 75, ACK's 28); segmenten waren al 64 KiB en
-      de checksum binnen de node al uit. Nu leest de switch poort 0 in de
-      ring zelf (M17), zendt de kernstack direct in de host-ring (M18) en
-      kopieert de switch een unicast van slot naar slot in één keer van ring
-      naar ring (M20): transport 1554 → 1860 MB/s (0,533 ms per MiB), app
-      naar app op E 4330 → 4450, op P gelijk (6100: daar zijn het de apps
-      zelf, de switch is 107 van 137 ms bezig). Twee apps tegelijk schalen
-      niet (samen ~930 MB/s, net als één): de grens is het ene pad op de
-      OS-core. Lezen door de app blijft 870 tot 960 zolang schijf en
-      transport na elkaar lopen. Weekendklus: (1) de ANS asynchroon (submit
-      los van de poll in driver/nvme/src/apple.rs, 80 tot 120 regels) en een
-      tweede leesopdracht in de lucht (read-ahead in hopfs of de rpc-laag,
-      100 tot 150 regels): lezen naar 1 / max(0,59; 0,53) ≈ 1700 tot 1800;
-      (2) een tcp_write zonder kopie (152 us per MiB) vraagt een leannet-API
-      in de lean-repo plus een nieuwe tag; de twee andere kopieën zijn het
-      minimum voor TCP met één ring per slot. Geen apart datapad (Derek).
+- [x] **NVMe door de app op de M4: lezen 808 tot 886 → 1683 tot 1696 MB/s,
+      schrijven 1270** (M24, vitals, twee P-cores, 256 MiB; Go 1598 tot 1657
+      / 1064 tot 1072). De kern zat al op de Go-lat (M14: rauw 4936 / 1719,
+      hopfs 4931 / 1771; M23: 4952 / 1925 en 5015 / 2026). De weg erheen op
+      01-10: M10 het ANS-datablok write-back (lezen 160 → 440), M11 de
+      host-ringen Hardware (transport 930 → 1521), M12 memcpy, vitals-M15
+      bcmp (607 → 808), M17 tot M20 drie kopieën minder in het transport
+      (1554 → 1860), M22 de ANS asynchroon: `start` zet de opdracht op de
+      controller en keert terug, `poll_done` haalt op wat terug is, diepte 2
+      (tags 0 en 2, elk een eigen MiB), read-ahead na twee volle happen op
+      rij, zodat schijf (0,59 ms per MiB) en transport (0,53) overlappen.
+      Synchroon blijft synchroon (SQLite): een schrijf of flush komt pas
+      terug met zijn eigen completion, OP_SYNC is een echte Flush, bewezen in
+      tests. Twee apps samen ~1400 MB/s tegen ~1280 voor één (op M21 samen
+      985, net als één). Geen apart datapad (Derek).
+- [ ] **De 4 KiB-schrijfjes van de ene app zakken naar ~18 MB/s zodra een
+      andere app bulk doet** (van 82 alleen; M24). Niet de schijf: met gaten
+      lezen (geen schijfblok) zakt het ook. De coöperatieve OS-core: het
+      transport van de bulk-app werkt in brokken van 1 MiB (`tcp_write`,
+      150 tot 180 us per poll) en de calls van de andere wachten daar
+      telkens achter. Fix: het transport eerlijk maken (kleinere brokken met
+      een yield in de verbindingstaak en leannet); netklus, 50 tot 150
+      regels, ongetoetst. Voor SQLite naast een bulk-lezer is dit het punt.
+- [ ] De hopfs-actor doet één call tegelijk: een flush van app A houdt app B
+      op. Echte parallelle calls vragen de splitsing in een metadata-actor en
+      een blok-actor (PORT.md §3). Groot.
+- [ ] Rauw willekeurig 4 KiB schrijven 140k IOPS op M23 tegen 162k op M14,
+      elk één monster per boot; sequentieel 4 KiB ging juist van 907 naar
+      1160 MB/s. `TCB_STAT`: Linux leest 0x28120, HopOS 0x29120; werkt, maar
+      een fout daar ziet HopOS waarschijnlijk nooit.
+- [ ] Verder dan ~1700 lezen door de app: OS-core (0,53 ms transport plus
+      kopie per MiB) en apparaat (0,53 tot 0,6) zijn nu in balans; meer
+      vraagt minder transportwerk (de laatste kopie, `tcp_write` in lean) of
+      de `dev::pull` van 1 MiB per lees weg als de ANS-DMA coherent blijkt.
 - [ ] `hopos.replay=45` in de cfg zet de OS-core elke 45 tikken een halve
       seconde stil (16 KiB synchroon naar de console, `late_ms` ~500 op tik
       45, 90, 135): de uitschieters in elke meetreeks. Voor metingen lager
