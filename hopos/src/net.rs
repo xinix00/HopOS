@@ -63,17 +63,24 @@ type RingTx = abi::ring::Writer;
 
 /// Hoe de kern zijn kant van elke frame-ring mapt ([`abi::ring::Coherence`]),
 /// de host-ringen van poort 0 en de ringen van de slots: Normal write-back
-/// inner shareable op elk arm64-board (`cpu::boot::ATTR_NORMAL` over RAM en
-/// de pool: de Pi's, de Radxa, de UEFI-boards, QEMU virt). Niet op Apple:
-/// daar mapt de kern de pool Device (board/apple/src/mmu.rs, `dram_attr`).
-/// Niet op RISC-V: de C906 is niet coherent met het andere hart. Elke ring
-/// kopieert pas zonder onderhoud als de tegenpartij hetzelfde belooft.
-pub(crate) const RINGS: abi::ring::Coherence =
-    if cfg!(all(target_arch = "aarch64", not(feature = "board-apple"))) {
-        abi::ring::Coherence::Hardware
-    } else {
-        abi::ring::Coherence::Maintained
-    };
+/// inner shareable waar de kern de pool zo mapt (`cpu::boot::ATTR_NORMAL`:
+/// de Pi's, de UEFI-boards, QEMU virt). Niet op Apple: daar mapt de kern de
+/// pool Device (board/apple/src/mmu.rs, `dram_attr`). Niet op de Radxa: de
+/// kern mapt daar alles boven 0x0880_0000 Device, de pool dus ook
+/// (board/rk3566/src/mmu.rs, de tamago-keuze), en met de belofte las hij
+/// langs de cache van de app heen (01-10, stempel AA: `HOPOS_NETRING_TX_CORRUPT`
+/// en een corrupte RX-ring in slot 3, terwijl de Pi 4 met dezelfde kern en
+/// apps foutloos draaide). Niet op RISC-V: de C906 is niet coherent met het
+/// andere hart. Elke ring kopieert pas zonder onderhoud als de tegenpartij
+/// hetzelfde belooft.
+pub(crate) const RINGS: abi::ring::Coherence = if cfg!(all(
+    target_arch = "aarch64",
+    not(any(feature = "board-apple", feature = "board-rk3566"))
+)) {
+    abi::ring::Coherence::Hardware
+} else {
+    abi::ring::Coherence::Maintained
+};
 
 /// De meetlat van het netwerkvlak.
 pub(crate) static STATS: Stats = Stats::new();

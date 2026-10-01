@@ -288,7 +288,12 @@ De vier rapporten staan in docs/measurements.md (kolommen v3). Open:
       over het RAM van de app, geen TCP). Of de PCIe van de O6N
       I/O-coherent is (`_CCA` in de DSDT) bepaalt of de dc civac/cvac per
       MiB weg mag. Lean hoefde niet mee: de checksums op de slot-link
-      stonden al uit.
+      stonden al uit. Les van de Radxa (01-10, stempel AA): de ringbelofte
+      van de kern moet volgen wat het board werkelijk mapt; de Radxa-kern
+      mapt alles boven 0x0880_0000 Device (de tamago-keuze), en met de
+      belofte las hij langs de cache van de app heen (corrupte ringen in
+      slot 3). Nu Maintained op Apple én de Radxa (AB); app naar app daar
+      29,8 MB/s, als vóór de belofte.
 - [x] **De kernheap lekte onder gemengde allocaties** (01-10, crate `heap`):
       de kern had een bump-allocator die alleen het laatste blok terugnam;
       metadata-, netwerk- en I/O-allocaties door elkaar lieten vrijgegeven
