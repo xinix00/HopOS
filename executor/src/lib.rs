@@ -95,6 +95,9 @@ pub struct Stats {
     pub dropped: AtomicU64,
     /// Timers die geen slot kregen (de wachter spint op ronde-korrel).
     pub timer_overflows: AtomicU64,
+    /// Nanoseconden in de slaper (handboek §4: de slaaptijd). Wat een tik
+    /// daar niet van heeft, was werk: zo is "de core zit vol" een getal.
+    pub slept_ns: AtomicU64,
 }
 
 struct Slot {
@@ -194,6 +197,7 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
                 sleeps: AtomicU64::new(0),
                 dropped: AtomicU64::new(0),
                 timer_overflows: AtomicU64::new(0),
+                slept_ns: AtomicU64::new(0),
             },
         }
     }
@@ -346,7 +350,10 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
                 continue;
             }
             self.stats.sleeps.fetch_add(1, Relaxed);
-            sleeper.sleep(self.now(), self.next_deadline(), &|| self.has_ready());
+            let t = self.now();
+            sleeper.sleep(t, self.next_deadline(), &|| self.has_ready());
+            let slept = self.now().saturating_sub(t);
+            self.stats.slept_ns.fetch_add(slept, Relaxed);
         }
     }
 

@@ -757,6 +757,9 @@ static REPLAY_AT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64:
 async fn tick(exec: &'static Executor) {
     let start = exec.now();
     let mut n: u64 = 0;
+    // De slaaptijd van de vorige tik (executor `slept_ns`): de rest van de
+    // tik was werk op de OS-core (`busy_ms`).
+    let (mut at, mut slept) = (start, 0u64);
     loop {
         n += 1;
         // Een late lezer (de M4 over de dockchannel) krijgt de boot alsnog:
@@ -814,6 +817,12 @@ async fn tick(exec: &'static Executor) {
         // de stilte was.
         let late_ms = exec.now().saturating_sub(due) / 1_000_000;
         let s = &exec.stats;
+        let (now, slept_now) = (exec.now(), s.slept_ns.load(Relaxed));
+        let busy_ms = now
+            .saturating_sub(at)
+            .saturating_sub(slept_now.wrapping_sub(slept))
+            / 1_000_000;
+        (at, slept) = (now, slept_now);
         // De OS-core: overgangen naar een bewoner, waardoor de kern terugkwam,
         // en de tijd die de bewoners kregen. Zonder deze getallen is "Hop
         // krijgt tijd" niet te onderscheiden van "de kern spint".
@@ -827,7 +836,7 @@ async fn tick(exec: &'static Executor) {
         let sw = &net::STATS;
         let stack_kb = stack_high_water() / 1024;
         println!(
-            "HOPOS_TICK {n} late_ms={late_ms} sleeps={} polls={} irq(timer={} nic={} other={}) os(in={} irq={} ipi={} timer={} yield={} exit={} fault={} idle={} res_ms={} kicks={}) turn(last={}:{} long_us={long_us}) stack_kb={stack_kb} sw(door={} timer={} rxfull={} rxdrop={} big={} noroute={} txdrop={} flowfull={} natin={} natmiss={}) temp={}",
+            "HOPOS_TICK {n} late_ms={late_ms} busy_ms={busy_ms} sleeps={} polls={} irq(timer={} nic={} other={}) os(in={} irq={} ipi={} timer={} yield={} exit={} fault={} idle={} res_ms={} kicks={}) turn(last={}:{} long_us={long_us}) stack_kb={stack_kb} sw(door={} timer={} rxfull={} rxdrop={} big={} noroute={} txdrop={} flowfull={} natin={} natmiss={}) temp={}",
             s.sleeps.load(Relaxed),
             s.polls.load(Relaxed),
             IRQS[0].load(Relaxed),
