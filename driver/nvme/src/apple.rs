@@ -585,7 +585,10 @@ impl<C: Coprocessor> Ans<C> {
     /// altijd. `[cfg.dma, cfg.dma + cfg.dma_size)` is gemapt geheugen dat
     /// alleen deze driver en de ANS gebruiken, binnen een SART-venster, op
     /// een adres dat de ANS ziet zoals de CPU. Het datablok (vanaf
-    /// [`DATA_OFF`]) mag gecached zijn; de rest niet.
+    /// [`DATA_OFF`]) is Normal gemapt (write-back of NC; de driver kopieert
+    /// er met `memcpy` in en uit, en doet zelf het cache-onderhoud); de
+    /// rest niet gecached. GEMETEN 01-10 op de M4: de vluchtige 8-byte-lus
+    /// kostte het leespad een kwart van zijn tijd.
     pub unsafe fn new(cfg: Config, cop: C, now: fn() -> u64) -> Result<Self, C::Error> {
         let d = cfg.dma;
         if d.0 == 0
@@ -1018,7 +1021,7 @@ impl<C: Coprocessor> Ans<C> {
         for chunk in buf.chunks_mut(step) {
             self.transfer(IO_READ, b, chunk.len())?;
             dev::pull(self.data(), chunk.len());
-            dev::copy_out(chunk, self.data());
+            dev::copy_out_normal(chunk, self.data());
             b += chunk.len() as u64 / BLOCK;
         }
         Ok(())
@@ -1039,7 +1042,7 @@ impl<C: Coprocessor> Ans<C> {
             if self.dead {
                 return Err(Error::Dead);
             }
-            dev::copy_in(self.data(), chunk);
+            dev::copy_in_normal(self.data(), chunk);
             dev::push(self.data(), chunk.len());
             self.transfer(IO_WRITE, b, chunk.len())?;
             b += chunk.len() as u64 / BLOCK;
@@ -1296,7 +1299,7 @@ impl<C: Coprocessor> blkdev::AsyncBlockDevice for Ans<C> {
             let n = read.min(into.len());
             dev::pull(self.data(), n);
             if let Some(d) = into.get_mut(..n) {
-                dev::copy_out(d, self.data());
+                dev::copy_out_normal(d, self.data());
             }
         }
         core::task::Poll::Ready(r)

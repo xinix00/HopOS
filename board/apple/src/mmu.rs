@@ -22,7 +22,8 @@
 //!   speculatieve toegang naar carve-outs van iBoot, en de firmware-
 //!   structuren boot_args en de ADT zijn met gealigneerde loads prima te
 //!   lezen; de target heeft `+strict-align`), behalve het kernvenster: de
-//!   kern-RAM en de loader-regio Normal WB, de DMA-regio Normal-NC (GEMETEN
+//!   kern-RAM, de loader-regio en het datablok van de ANS Normal WB, de rest
+//!   van de DMA-regio Normal-NC (GEMETEN
 //!   03-09: Device kost ~290 ns per 8-byte-load, 14-27 MB/s; NC is coherent
 //!   met de tg3 en de ANS zonder onderhoud), het kooi-venster Device.
 //!
@@ -30,6 +31,7 @@
 //! is; de table-walker leest cacheable met IRGN/ORGN = WB). De bouw draait
 //! met de MMU uit, dus ze staan meteen in het geheugen.
 
+use crate::storage::ANS_DATA;
 use crate::{DMA, DRAM_BASE, KERN_RAM, LOADER, WINDOW_END};
 use cpu::boot::{ATTR_DEVICE, ATTR_NORMAL, ATTR_NORMAL_NC};
 use dev::Pa;
@@ -103,7 +105,10 @@ pub(crate) const SCTLR: u64 =
 /// Het attribuut van het 2 MB-blok op `pa` in het DRAM.
 #[must_use]
 pub(crate) const fn dram_attr(pa: u64) -> u64 {
-    if in_region(pa, KERN_RAM.base.0, KERN_RAM.size) || in_region(pa, LOADER.base.0, LOADER.size) {
+    if in_region(pa, KERN_RAM.base.0, KERN_RAM.size)
+        || in_region(pa, LOADER.base.0, LOADER.size)
+        || in_region(pa, ANS_DATA.0, ANS_DATA.1)
+    {
         ATTR_NORMAL
     } else if in_region(pa, DMA.base.0, DMA.size) {
         ATTR_NORMAL_NC
@@ -376,6 +381,12 @@ mod tests {
             ATTR_NORMAL
         );
         assert_eq!((walk(tables, DMA.base.0).unwrap() >> 2) & 7, ATTR_NORMAL_NC);
+        // Het datablok van de ANS is gecached; de queues ervoor niet.
+        assert_eq!((walk(tables, ANS_DATA.0).unwrap() >> 2) & 7, ATTR_NORMAL);
+        assert_eq!(
+            (walk(tables, ANS_DATA.0 - MB2).unwrap() >> 2) & 7,
+            ATTR_NORMAL_NC
+        );
         assert_eq!((walk(tables, ADMIN.base.0).unwrap() >> 2) & 7, ATTR_DEVICE);
         assert_eq!((walk(tables, LOADER.base.0).unwrap() >> 2) & 7, ATTR_NORMAL);
         // De kern-RAM is uitvoerbaar, de rest niet: onder E2H = 1 is dat PXN

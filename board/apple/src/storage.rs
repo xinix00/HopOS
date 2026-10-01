@@ -63,6 +63,13 @@ pub type Disk = Ans<AnsRtkit>;
 
 /// De eerste 4 MB van de opslag-DMA: queues, TCB's, PRP en databuffer.
 const ANS_DMA: (u64, u64) = (BLK_DMA.base.0, ans::DMA_NEED);
+/// Het datablok van de ANS (2 MB, 2 MB-gealigneerd): de driver doet daar
+/// zelf het cache-onderhoud (`dev::push` na het vullen, `dev::pull` vóór
+/// het lezen), dus het board mapt het Normal WB ([`crate::mmu`]). Normal-NC
+/// kostte het leespad zijn snelheid: elke byte die de kern uit de buffer
+/// kopieerde, was een ongecachete load (GEMETEN 01-10 op M9: lezen 158 tot
+/// 168 MB/s tegen schrijven 723 tot 780; Go mapte dit blok gecached).
+pub(crate) const ANS_DATA: (u64, u64) = (ANS_DMA.0 + driver_nvme::DATA_OFF, driver_nvme::DATA_SIZE);
 /// Daarachter de buffers die de ANS bij zijn opstart vraagt (syslog,
 /// crashlog, ioreport).
 const ANS_POOL: (u64, u64) = (BLK_DMA.base.0 + ans::DMA_NEED, 0x30_0000);
@@ -72,6 +79,8 @@ const SMC_POOL: (u64, u64) = (ANS_POOL.0 + ANS_POOL.1, 0x10_0000);
 const _: () = {
     assert!(SMC_POOL.0 + SMC_POOL.1 == BLK_DMA.base.0 + BLK_DMA.size);
     assert!(ANS_DMA.0.is_multiple_of(ans::DMA_ALIGN));
+    assert!(ANS_DATA.0.is_multiple_of(2 << 20) && ANS_DATA.1 == 2 << 20);
+    assert!(ANS_DATA.0 + ANS_DATA.1 == ANS_DMA.0 + ANS_DMA.1);
     assert!(ANS_POOL.0.is_multiple_of(driver_rtkit::BUF_ALIGN));
     assert!(SMC_POOL.0.is_multiple_of(driver_rtkit::BUF_ALIGN));
 };
