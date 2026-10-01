@@ -82,6 +82,19 @@ pub(crate) const RINGS: abi::ring::Coherence = if cfg!(all(
     abi::ring::Coherence::Maintained
 };
 
+/// De belofte van de twee host-ringen van poort 0. Die liggen in de
+/// kern-heap (Normal write-back op elk ARM-board, ook op Apple) en beide
+/// kanten zijn de kern, dus daar geldt [`RINGS`] niet, dat over de pool
+/// gaat. Op Apple kostte het onderhoud elk frame van de node-stack een
+/// veeg per cacheline in beide richtingen (GEMETEN 01-10 op M10: het
+/// opslagpad haalde 930 MB/s uit gaten in het RAM van de kern, met de
+/// OS-core vol bezig, tegen 4300 MB/s app naar app door dezelfde switch).
+const HOST_RINGS: abi::ring::Coherence = if cfg!(feature = "board-apple") {
+    abi::ring::Coherence::Hardware
+} else {
+    RINGS
+};
+
 /// De meetlat van het netwerkvlak.
 pub(crate) static STATS: Stats = Stats::new();
 /// De brievenbus van de switch: `Attach`/`Detach` van de slots komen hier.
@@ -312,10 +325,10 @@ where
     // geen app ziet ze), dus hoeven ze niet in een DMA-regio.
     let host_tx = ring_backing(HOST_RING_DATA)?; // HOP → switch
     let host_rx = ring_backing(HOST_RING_DATA)?; // switch → HOP
-    let sw_tx = AbiTx::open(host_tx, HOST_RING_DATA, RINGS).map_err(Error::Ring)?;
-    let sw_rx = RingTx::open_with(host_rx, HOST_RING_DATA, RINGS).map_err(Error::Ring)?;
-    let hop_rx = AbiTx::open(host_rx, HOST_RING_DATA, RINGS).map_err(Error::Ring)?;
-    let hop_tx = RingTx::open_with(host_tx, HOST_RING_DATA, RINGS).map_err(Error::Ring)?;
+    let sw_tx = AbiTx::open(host_tx, HOST_RING_DATA, HOST_RINGS).map_err(Error::Ring)?;
+    let sw_rx = RingTx::open_with(host_rx, HOST_RING_DATA, HOST_RINGS).map_err(Error::Ring)?;
+    let hop_rx = AbiTx::open(host_rx, HOST_RING_DATA, HOST_RINGS).map_err(Error::Ring)?;
+    let hop_tx = RingTx::open_with(host_tx, HOST_RING_DATA, HOST_RINGS).map_err(Error::Ring)?;
 
     let mut sw = Switch::new(
         switch::Config {
