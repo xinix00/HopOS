@@ -227,6 +227,10 @@ pub const fn ps_mhz(raw: u32) -> u32 {
 
 fn set_pstate(base: Pa, ps: u64) -> bool {
     let v = dev::read64(base.add(CL_PSTATE));
+    if v & PS_DESIRED == ps {
+        // m1n1 schrijft niet als hij er al staat.
+        return true;
+    }
     dev::write64(
         base.add(CL_PSTATE),
         (v & !PS_DESIRED) | PS_SET | (ps & PS_DESIRED),
@@ -234,11 +238,33 @@ fn set_pstate(base: Pa, ps: u64) -> bool {
     (0..PS_SPINS).any(|_| dev::read64(base.add(CL_PSTATE)) & PS_BUSY == 0)
 }
 
+/// De stappen van het recept per cluster, met hun naam voor de SError-toets.
+const STEPS: [[&str; 4]; 2] = [
+    [
+        "cpufreq E: back to pstate 1",
+        "cpufreq E: the APSC and PLL bits",
+        "cpufreq E: the word at 0x440f8",
+        "cpufreq E: the target pstate",
+    ],
+    [
+        "cpufreq P: back to pstate 1",
+        "cpufreq P: the APSC and PLL bits",
+        "cpufreq P: (no word at 0x440f8)",
+        "cpufreq P: the target pstate",
+    ],
+];
+
 /// Het recept op beide clusters (0 = E, 1 = P): p-state 1, de APSC (de
-/// hardware-governor) aan als de pmgr-node `cpu-apsc` draagt, de
-/// throttle-features uit, het onverklaarde woord 0x440f8 op 1, en dan het
-/// doel. Eén regel per cluster; `off` = alleen meten.
-pub fn pstate_tune(target: [u64; 2], off: bool) {
+/// hardware-governor) aan als de pmgr-node `cpu-apsc` draagt, het
+/// onverklaarde woord 0x440f8 op 1 (alleen E), en dan het doel. Eén regel per
+/// cluster; `off` = alleen meten.
+///
+/// `serror(stap)` toetst na elke schrijf of er een SError pending staat
+/// (`true` = ja). Op dit silicium is een verboden schrijf stil en blijft
+/// zijn SError hangen (de M4, 01-10: 131.000 slapen per seconde en een rode
+/// voorproef). Dus: bij de eerste SError stopt het recept, en zegt de regel
+/// bij welke stap.
+pub fn pstate_tune(target: [u64; 2], off: bool, serror: &dyn Fn(&'static str) -> bool) {
     let Some(t) = fwinfo::adt() else { return };
     let Some(pm) = t.path("/arm-io/pmgr") else {
         return;
@@ -266,46 +292,69 @@ pub fn pstate_tune(target: [u64; 2], off: bool) {
             continue;
         };
         let base = Pa(cluster_base(imp));
-        let v = dev::read64(base.add(CL_PSTATE));
-        let cur = v & PS_DESIRED;
-        if v == u64::MAX || v & PS_BUSY != 0 {
+        let v0 = dev::read64(base.add(CL_PSTATE));
+        let cur = v0 & PS_DESIRED;
+        if v0 == u64::MAX || v0 & PS_BUSY != 0 {
             cpu::println!(
-                "cpufreq: cluster {cl} ({name}): CLUSTER_PSTATE reads {v:#x}, not touching it"
+                "cpufreq: cluster {cl} ({name}): CLUSTER_PSTATE reads {v0:#x}, not touching it"
             );
             continue;
         }
         if off {
             cpu::println!(
-                "cpufreq: cluster {cl} ({name}): pstate {cur}/{states} ({:?} MHz), measuring only",
+                "cpufreq: cluster {cl} ({name}): pstate {cur}/{states} ({:?} MHz), measuring only, CLUSTER_PSTATE {v0:#x}",
                 raw(cur)
             );
             continue;
         }
-        set_pstate(base, 1);
-        let mut v = dev::read64(base.add(CL_PSTATE));
-        v = if apsc {
-            v & !PS_APSC_DIS
-        } else {
-            v | PS_APSC_DIS
-        };
-        dev::write64(base.add(CL_PSTATE), v & !PS_PLL);
-        if apsc {
-            let _ = (0..PS_SPINS).any(|_| dev::read64(base.add(CL_PSTATE)) & PS_APSC_BUSY == 0);
-        }
-        // Go schreef hier ook bit 63 weg in de "throttle-registers"
-        // (+0x48400, +0x48408, +0x40270, +0x40250; m1n1-gedrag voor oudere
-        // chips). Op de t8132 bestaat +0x48400 niet: de schrijf gaat stil mis
-        // en laat een SError achter (gemeten 01-10 na de p-state-tune:
-        // L2C sts=0x202 adr=0x1a82500211e48400, dat is P-cluster
-        // 0x211e00000 + 0x48400, inf=0x1400100007). Go droeg die SError
-        // stil mee (PSTATE.A dicht); wij drainen hem en zagen zo de
-        // bron. De bits staan op deze machine al op 0, dus niets te wissen.
-        dev::write64(base.add(CL_UNK_440F8), 1);
+        let steps = STEPS.get(cl).copied().unwrap_or_default();
         let want = target.get(cl).copied().unwrap_or(1).clamp(1, states as u64);
-        let ok = set_pstate(base, want);
-        let after = dev::read64(base.add(CL_PSTATE)) & PS_DESIRED;
+        let mut ok = true;
+        for (i, step) in steps.iter().enumerate() {
+            match i {
+                0 => ok &= set_pstate(base, 1),
+                1 => {
+                    let v = dev::read64(base.add(CL_PSTATE));
+                    let v = if apsc {
+                        v & !PS_APSC_DIS
+                    } else {
+                        v | PS_APSC_DIS
+                    } & !PS_PLL;
+                    dev::write64(base.add(CL_PSTATE), v);
+                    if apsc {
+                        let _ = (0..PS_SPINS)
+                            .any(|_| dev::read64(base.add(CL_PSTATE)) & PS_APSC_BUSY == 0);
+                    }
+                }
+                // Go schreef hier ook bit 63 weg in de "throttle-registers"
+                // (+0x48400, +0x48408, +0x40270, +0x40250; m1n1-gedrag voor
+                // oudere chips). Op de t8132 bestaat +0x48400 niet: de
+                // schrijf gaat stil mis en laat een SError achter (gemeten
+                // 01-10: L2C sts=0x202 adr=0x1a82500211e48400, dat is
+                // P-cluster 0x211e00000 + 0x48400, inf=0x1400100007).
+                //
+                // Het woord +0x440f8 (m1n1: "Unknown", voor de hele
+                // M3-familie op elk cluster) neemt alleen het E-cluster aan;
+                // op het P-cluster laat de schrijf een SError achter die
+                // blijft hangen (gemeten 01-10, stempel M5: "SError after
+                // cpufreq P: the word at 0x440f8", l2c sts=0x0, daarna
+                // 46.000 slapen per seconde en een rode OS-core-zelftest).
+                2 if cl == 0 => dev::write64(base.add(CL_UNK_440F8), 1),
+                2 => {}
+                _ => ok &= set_pstate(base, want),
+            }
+            if serror(step) {
+                let v = dev::read64(base.add(CL_PSTATE));
+                cpu::println!(
+                    "cpufreq: SError after \"{step}\" (CLUSTER_PSTATE {v0:#x} -> {v:#x}); the tune stops here, the rest of the clusters stay as they are HOPOS_APPLE_PSTATE_SERROR"
+                );
+                return;
+            }
+        }
+        let v = dev::read64(base.add(CL_PSTATE));
+        let after = v & PS_DESIRED;
         cpu::println!(
-            "cpufreq: cluster {cl} ({name}): pstate {cur} ({:?} MHz) -> {after}/{states} ({:?} MHz), apsc={apsc}{}",
+            "cpufreq: cluster {cl} ({name}): pstate {cur} ({:?} MHz) -> {after}/{states} ({:?} MHz), apsc={apsc}, CLUSTER_PSTATE {v0:#x} -> {v:#x}{}",
             raw(cur),
             raw(after),
             if ok {
@@ -424,7 +473,7 @@ mod tests {
         assert!(arm(30_000).is_err());
         assert!(!off());
         pet();
-        pstate_tune(PS_DEFAULT, false);
+        pstate_tune(PS_DEFAULT, false, &|_| false);
         let mut w = PStateWatch::new();
         assert!(w.is_empty());
         w.poll();

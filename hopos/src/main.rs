@@ -311,6 +311,11 @@ extern "C" fn kmain(dtb: u64, el: u64) -> ! {
 
     board.init_heap(&HEAP);
     board.discover(dtb);
+    // De ring van 5555 opnieuw aan deze core: op de M4 kent `this_core`
+    // de cores pas na de ADT (in `discover`), en daarvóór was dit core 0.
+    // Zonder deze regel viel alles tot `conport::here` weg, de landing van
+    // een flip en de zwarte doos incluis (01-10).
+    conport::here();
     // De OS-core (PORT.md beslissing 2): de kern woont op de core die de
     // bootparameter kiest. Staat hij daar nog niet, dan verhuist hij nu,
     // vóór er één lijn, timer of bewoner aan deze core hangt; deze core

@@ -725,6 +725,12 @@ fn prepare_inner(b: &FlipBundle, sha256: &[u8; 32]) -> Result<(), Refused> {
         refuse("relocation", kern::Error::Corrupt { at: 0 })
     })?;
     kernflip::stage(&mut mem, &p, Stage::Rebased, generation);
+    // Apple: `hopos.cfg` staat in het image (0xF000) en niet op een
+    // bootmedium; de nieuwe kern gaat eroverheen, dus het venster mee.
+    #[cfg(feature = "board-apple")]
+    if vboard::fwinfo::carry_config(src, flat) {
+        println!("flip: hopos.cfg carried into the new image HOPOS_FLIP_CFG");
+    }
     let entry = bundle.entry.wrapping_add(delta);
     println!(
         "flip: bundle ok, sha256 verified: {} KiB image in {segs} segment(s) linked at {:#x}, {relocs} relocation(s) to {base:#x}, entry {entry:#x}, staged at {src:#x}{} HOPOS_FLIP_STAGED",

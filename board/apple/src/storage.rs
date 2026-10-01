@@ -156,6 +156,7 @@ pub(crate) fn probe_disk(cfg: &str) -> Result<Option<Disk>, Error> {
     let mut disk = match open(asc, nvmmu, nvme, secure_bar) {
         Ok(d) => d,
         Err(why) => {
+            crate::serror_check("the first ANS open");
             println!("disk: {why}, resetting the ANS power domain and retrying");
             let n = pmgr::reset_ans();
             if n == 0 {
@@ -163,6 +164,7 @@ pub(crate) fn probe_disk(cfg: &str) -> Result<Option<Disk>, Error> {
             }
             let t0 = now();
             while now().saturating_sub(t0) < 100_000_000 {}
+            crate::serror_check("the ANS reset");
             open(asc, nvmmu, nvme, secure_bar).map_err(Error::Disk)?
         }
     };

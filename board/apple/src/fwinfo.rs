@@ -292,6 +292,41 @@ pub fn config_source() -> CfgSource {
     config_of(window(), has_params()).1
 }
 
+/// FLIP: het config-venster gaat mee naar de volgende kern. Die wordt plat
+/// over dit image gelegd, venster incluis, en een bundel draagt geen
+/// config (die is van de installatie, niet van de build). Zonder dit boot
+/// een geflipte kern zonder `hopos.cfg`: geen `hopos.pstate=off`, dus de
+/// p-state-tune met zijn SError, en daarmee een rode OS-core-voorproef en
+/// geen adoptie (de M4, 01-10: geen `HOPOS_FLIP_ADOPT`, 193.000 slapen per
+/// seconde). `image` is het gestagede beeld van `len` bytes, op het koude
+/// adres [`crate::RAM_BASE`] gelinkt. Een bundel met een eigen venster
+/// houdt dat. Geeft of er gekopieerd is.
+#[must_use]
+pub fn carry_config(image: u64, len: u64) -> bool {
+    let off = CFG_PA - crate::RAM_BASE;
+    if off + CFG_SIZE as u64 > len {
+        return false;
+    }
+    // SAFETY: `[image, image+len)` is het gestagede beeld dat de flip net
+    // plat neerlegde (buiten de kern-RAM, Normal gemapt), en tot de sprong
+    // schrijft alleen de flip-taak erin; het venster valt erbinnen.
+    let theirs =
+        unsafe { core::slice::from_raw_parts_mut((image + off) as usize as *mut u8, CFG_SIZE) };
+    carry(window(), theirs)
+}
+
+/// Kopieert ons venster over het hunne als wij een ingebakken venster
+/// hebben en zij niet.
+fn carry(ours: &[u8], theirs: &mut [u8]) -> bool {
+    if theirs.starts_with(CFG_WINDOW_MAGIC) || !ours.starts_with(CFG_WINDOW_MAGIC) {
+        return false;
+    }
+    for (t, o) in theirs.iter_mut().zip(ours) {
+        *t = *o;
+    }
+    true
+}
+
 /// De x0 waarmee we binnenkwamen (boot_args), 0 als er geen was.
 #[must_use]
 pub fn boot_args_pa() -> u64 {
@@ -334,6 +369,27 @@ mod tests {
         let mut w = [0xffu8; 32];
         w[..CFG_WINDOW_MAGIC.len()].copy_from_slice(CFG_WINDOW_MAGIC);
         assert_eq!(config_of(&w, false), ("", CfgSource::None));
+    }
+
+    #[test]
+    fn the_config_window_crosses_the_flip() {
+        let v = b"#HOPCFG1 window=4096 len=0000000015\nhopos.pstate=off\n";
+        let mut ours = [0u8; 64];
+        ours[..v.len()].copy_from_slice(v);
+        // Een kale bundel krijgt ons venster.
+        let mut theirs = [0u8; 64];
+        assert!(carry(&ours, &mut theirs));
+        assert_eq!(theirs, ours);
+        // Een bundel met een eigen venster houdt dat.
+        let mut own = [0u8; 64];
+        own[..CFG_WINDOW_MAGIC.len()].copy_from_slice(CFG_WINDOW_MAGIC);
+        let before = own;
+        assert!(!carry(&ours, &mut own));
+        assert_eq!(own, before);
+        // Zonder ingebakken venster valt er niets mee te geven.
+        let mut bare = [0u8; 64];
+        assert!(!carry(&[0u8; 64], &mut bare));
+        assert_eq!(bare, [0u8; 64]);
     }
 
     #[test]

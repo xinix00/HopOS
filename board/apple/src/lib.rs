@@ -58,7 +58,7 @@ pub mod wdt;
 
 use board::heap::Heap;
 use board::{Board, CoreClass, Dispatched, Error, Plan, Region};
-use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use cpu::el2::Flavor;
 use cpu::println;
 use dev::Pa;
@@ -383,12 +383,6 @@ impl Board for Apple {
                 "cfg: no hopos.cfg (none baked in by image/apple-m4.sh CFG=, no loader) HOPOS_CFG_NONE"
             ),
         }
-        let ps = fw::bootcfg::first(fw::bootcfg::all(cfg, "hopos.pstate"));
-        match wdt::pstate_targets(ps) {
-            Some(t) => wdt::pstate_tune(t, false),
-            None => wdt::pstate_tune(wdt::PS_DEFAULT, true),
-        }
-        serror_check("the p-state tune");
         self.report_temp(cfg);
         serror_check("the temperature probe (SMC)");
     }
@@ -445,9 +439,22 @@ impl Board for Apple {
         }
     }
 
+    /// Eerst de klok van de clusters (`hopos.pstate`): hier en niet in
+    /// `discover`, want pas op de OS-core komen de regels op 5555, en de
+    /// tune is precies wat op ijzer bewezen moet worden (01-10).
     fn start_interrupts(&self) -> Result<&'static Signal, Error> {
+        let ps = fw::bootcfg::first(fw::bootcfg::all(self.config(), "hopos.pstate"));
+        match wdt::pstate_targets(ps) {
+            Some(t) => wdt::pstate_tune(t, false, &serror_check),
+            None => wdt::pstate_tune(wdt::PS_DEFAULT, true, &serror_check),
+        }
         let target = irq::start().map_err(Error::Irq)?;
         serror_check("the AIC bring-up");
+        if let Some(stage) = first_serror() {
+            println!(
+                "apple: the first SError of this boot was pending after {stage} HOPOS_APPLE_SERROR_FIRST"
+            );
+        }
         println!(
             "irq: {} (target {target} reaches this core), fast IPI and timer FIQ",
             irq::AIC.describe()
@@ -530,26 +537,50 @@ impl Board for Apple {
     }
 }
 
-/// Neemt een SError op die na `stage` pending staat en meldt hem. Op dit
-/// silicium is een verboden schrijf stil en landt de abort later als
-/// SError; op EL2 blijft hij achter PSTATE.A tot de eerste beurt op EL1
-/// (de M4 onder kmutil, 30-09: de voorproef zag ESR 0xbe000000, vector 11,
-/// drie keer). Zo staat er bij welke stap hij hoort, en start de voorproef
-/// schoon.
-pub(crate) fn serror_check(stage: &str) {
-    if let Some((esr, elr, far)) = cpu::vectors::serror_drain() {
-        // De L2C-foutregisters van dit silicium (m1n1 `exception.c`:
-        // SYS_IMP_APL_L2C_ERR_STS/ADR/INF): de ADR is het adres van de
-        // schrijf die stil misging. m1n1 schrijft de STS terug om hem te
-        // wissen; op de t8132 is die `msr` op EL2 UNDEFINED (sync-exception
-        // EC 0x0 precies op de msr, 01-10), dus wij lezen alleen. Een
-        // SError die blijft hangen, komt bij de volgende drain opnieuw
-        // langs, met dezelfde ADR: dat is dan de bron die weg moet.
-        let (sts, adr, inf) = arch::l2c_err();
-        println!(
-            "apple: SError pending after {stage}: esr={esr:#x} elr={elr:#x} far={far:#x} l2c sts={sts:#x} adr={adr:#x} inf={inf:#x} HOPOS_APPLE_SERROR"
-        );
+/// De eerste stap waarna een SError pending stond (adres en lengte van de
+/// stapnaam, 0 = nog geen). De stappen van `discover` draaien vóór de ring
+/// van 5555 ze ziet (hun regels gaan alleen naar de dockchannel), dus de
+/// bring-up van de AIC zegt het nog eens (`HOPOS_APPLE_SERROR_FIRST`).
+static FIRST_SERROR: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
+
+/// De stap uit [`FIRST_SERROR`], of `None`.
+fn first_serror() -> Option<&'static str> {
+    let (p, n) = (FIRST_SERROR[0].load(Relaxed), FIRST_SERROR[1].load(Relaxed));
+    if p == 0 {
+        return None;
     }
+    // SAFETY: `p` en `n` komen samen uit één `&'static str` in
+    // [`serror_check`] (de boot-core schrijft ze, vóór er een tweede core
+    // draait), dus de bytes leven en zijn UTF-8.
+    Some(unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(p as *const u8, n)) })
+}
+
+/// Neemt een SError op die na `stage` pending staat en meldt hem; `true`
+/// als er een was. Op dit silicium is een verboden schrijf stil en landt
+/// de abort later als SError; op EL2 blijft hij achter PSTATE.A tot de
+/// eerste beurt op EL1 (de M4 onder kmutil, 30-09: de voorproef zag ESR
+/// 0xbe000000, vector 11, drie keer). Zo staat er bij welke stap hij hoort,
+/// en start de voorproef schoon.
+pub(crate) fn serror_check(stage: &'static str) -> bool {
+    let Some((esr, elr, far)) = cpu::vectors::serror_drain() else {
+        return false;
+    };
+    if FIRST_SERROR[0].load(Relaxed) == 0 {
+        FIRST_SERROR[1].store(stage.len(), Relaxed);
+        FIRST_SERROR[0].store(stage.as_ptr() as usize, Relaxed);
+    }
+    // De L2C-foutregisters van dit silicium (m1n1 `exception.c`:
+    // SYS_IMP_APL_L2C_ERR_STS/ADR/INF): de ADR is het adres van de schrijf
+    // die stil misging. m1n1 schrijft de STS terug om hem te wissen; op de
+    // t8132 is die `msr` op EL2 UNDEFINED (sync-exception EC 0x0 precies op
+    // de msr, 01-10), dus wij lezen alleen. Een SError die blijft hangen,
+    // komt bij de volgende drain opnieuw langs, met dezelfde ADR: dat is dan
+    // de bron die weg moet.
+    let (sts, adr, inf) = arch::l2c_err();
+    println!(
+        "apple: SError pending after {stage}: esr={esr:#x} elr={elr:#x} far={far:#x} l2c sts={sts:#x} adr={adr:#x} inf={inf:#x} HOPOS_APPLE_SERROR"
+    );
+    true
 }
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]

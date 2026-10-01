@@ -82,6 +82,20 @@ image`, `... from the loader`, of `cfg: no hopos.cfg ... HOPOS_CFG_NONE`.
 `APP=hop` zonder `CFG=` is luid (Go 25-09: een agent zonder config draaide
 als `hopos-<random>` met een open API).
 
+Een kern-flip legt de nieuwe kern plat over het image, venster incluis, en
+een bundel draagt geen config. Daarom geeft de draaiende kern zijn venster
+mee aan het gestagede beeld (`fwinfo::carry_config`, `HOPOS_FLIP_CFG`);
+zonder dat booten geflipte kernen zonder `hopos.pstate=off` en adopteren
+ze niet (01-10). Een kern die dat nog niet kan (alles vóór 01-10), krijgt
+de config ín de bundel: `CFG=hopos-m4.cfg sh image/flip-bundle.sh apple`.
+
+De p-state-tune draait in `start_interrupts` (niet in `discover`: daar
+komen de regels niet op 5555) als recept in stappen met na elke stap een
+SError-toets; bij de eerste SError stopt hij (`HOPOS_APPLE_PSTATE_SERROR`).
+Op de t8132 laat de schrijf naar P-cluster +0x440f8 een SError achter die
+blijft hangen (en +0x48400 bestaat niet); E neemt het woord wel. Zonder die
+twee: E 5/8 (2172 MHz), P 6/20 (2352 MHz), geen SError (01-10, stempel M7).
+
 ## Wat de kern voor Apple draagt (29-09)
 
 Alles hieronder is gebouwd en op de host getest, en de gedeelde paden
