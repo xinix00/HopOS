@@ -210,12 +210,16 @@ op `/dev/cu.kis-100000-ch-0`. Sinds 01-10 ook op het LAN: 5555, 8080,
       bcmp (607 → 808), M17 tot M20 drie kopieën minder in het transport
       (1554 → 1860), M22 de ANS asynchroon: `start` zet de opdracht op de
       controller en keert terug, `poll_done` haalt op wat terug is, diepte 2
-      (tags 0 en 2, elk een eigen MiB), read-ahead na twee volle happen op
+      (tags 0 en 1, elk een eigen MiB; de SQE op tag maal 64: de lineaire
+      modus van de firmware leest per 64 bytes ongeacht CC.IOSQES, M25 op
+      tag maal 128 faalde elke opdracht op tag 1), read-ahead na twee volle happen op
       rij, zodat schijf (0,59 ms per MiB) en transport (0,53) overlappen.
       Synchroon blijft synchroon (SQLite): een schrijf of flush komt pas
       terug met zijn eigen completion, OP_SYNC is een echte Flush, bewezen in
-      tests. Twee apps samen ~1400 MB/s tegen ~1280 voor één (op M21 samen
-      985, net als één). Geen apart datapad (Derek).
+      tests. Twee apps samen winnen er NIET mee: M26 samen ~1200 tot 1300
+      MB/s tegen ~1300 voor één alleen (de agent mat 1400 op M22, dat is
+      ruis); de OS-core blijft de seriële bron (transport, en de hopfs-actor
+      met één call tegelijk). Geen apart datapad (Derek).
 - [ ] **De 4 KiB-schrijfjes van de ene app zakken naar ~18 MB/s zodra een
       andere app bulk doet** (van 82 alleen; M24). Niet de schijf: met gaten
       lezen (geen schijfblok) zakt het ook. De coöperatieve OS-core: het

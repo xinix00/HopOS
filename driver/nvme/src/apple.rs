@@ -270,19 +270,9 @@ const SLOT: u16 = 0;
 /// eigen MiB van het datablok ([`DATA_SIZE`] is 2 MiB).
 pub const DEPTH: usize = 2;
 
-/// De tags van die opdrachten. Tag 0 is sinds 29-08 op ijzer bewezen; de
-/// tweede is 2 en niet 1, om de entry-afstand. Linux (`apple.c`, t8103 en
-/// later) zet CC.IOSQES zelf op 6 en legt de opdracht van tag `t` op
-/// `t * 64`; wij houden iBoots CC (IOSQES = 7, les 2), en daarmee hoort hij
-/// volgens NVMe op `t * 128`. Welke van de twee de firmware leest, is op
-/// ijzer nooit gemeten, en een verkeerde plek is een crash van de
-/// coprocessor (les 3). Daarom staat een opdracht met een tag boven 0 op
-/// BEIDE plekken ([`write_sqe`]); voor tag 2 overlappen die met geen enkele
-/// plek van tag 0 (0..128) en met elkaar niet (128..192 en 256..384).
-const IO_TAGS: [u16; DEPTH] = [0, 2];
-
-/// De entry-afstand onder iBoots IOSQES = 7.
-const SQE_WIDE: u64 = 128;
+/// De tags van die opdrachten. Tag 0 is sinds 29-08 op ijzer bewezen, tag 1
+/// op 01-10 (M26: de read-ahead met de juiste bytes, zie [`write_sqe`]).
+const IO_TAGS: [u16; DEPTH] = [0, 1];
 
 /// Zonder lijn pollt de wachter zo lang per ronde van de executor: een
 /// opdracht van 4 KB is binnen ~10 us terug (M14: schrijven 4, lezen 9 us).
@@ -317,7 +307,7 @@ const _: () = {
     assert!(DATA_OFF.is_multiple_of(DMA_ALIGN));
     // Tags binnen de tabel van de NVMMU, de tweede plek van een tag in de
     // 16 KB van zijn queue.
-    assert!(IO_TAGS[DEPTH - 1] < Q_ENTRIES && (IO_TAGS[DEPTH - 1] as u64 + 1) * SQE_WIDE <= 0x4000);
+    assert!(IO_TAGS[DEPTH - 1] < Q_ENTRIES && (IO_TAGS[DEPTH - 1] as u64 + 1) * SQE <= 0x4000);
 };
 
 /// Hoe lang de firmware mag doen over BOOT_STATUS na het gesprek.
@@ -1662,26 +1652,24 @@ impl<C: Coprocessor> fmt::Display for Diag<'_, C> {
     }
 }
 
-/// Zet de SQE van `tag` op `tag * 64`, zoals Linux, en voor een tag boven 0
-/// ook op `tag * 128`, waar hij volgens NVMe hoort onder iBoots IOSQES = 7:
-/// welke plek de firmware leest, is nooit gemeten (zie [`IO_TAGS`]).
+/// Zet de SQE van `tag` op `tag * 64`, zoals Linux (`apple.c`): in de
+/// lineaire modus leest de firmware per 64 bytes, ONGEACHT CC.IOSQES (wij
+/// houden iBoots 7, les 2). GEMETEN 01-10 op de M4: op `tag * 128` (M25)
+/// faalt elke opdracht op tag 1 met een status, op `tag * 64` (M26) niet.
 fn write_sqe(sq: Pa, tag: u16, m: &Cmd) {
-    let t = u64::from(tag);
-    let wide = (tag != 0).then(|| sq.add(t * SQE_WIDE));
-    for sqe in core::iter::once(sq.add(t * SQE)).chain(wide) {
-        dev::clear(sqe, SQE as usize);
-        let at = |off: usize| sqe.add(off as u64);
-        dev::write32(
-            at(offset_of!(Sqe, cdw0)),
-            u32::from(m.opc) | (u32::from(tag) << 16),
-        );
-        dev::write32(at(offset_of!(Sqe, nsid)), m.nsid);
-        dev::write64(at(offset_of!(Sqe, prp1)), m.prp1);
-        dev::write64(at(offset_of!(Sqe, prp2)), m.prp2);
-        dev::write32(at(offset_of!(Sqe, cdw10)), m.cdw10);
-        dev::write32(at(offset_of!(Sqe, cdw11)), m.cdw11);
-        dev::write32(at(offset_of!(Sqe, cdw12)), m.cdw12);
-    }
+    let sqe = sq.add(u64::from(tag) * SQE);
+    dev::clear(sqe, SQE as usize);
+    let at = |off: usize| sqe.add(off as u64);
+    dev::write32(
+        at(offset_of!(Sqe, cdw0)),
+        u32::from(m.opc) | (u32::from(tag) << 16),
+    );
+    dev::write32(at(offset_of!(Sqe, nsid)), m.nsid);
+    dev::write64(at(offset_of!(Sqe, prp1)), m.prp1);
+    dev::write64(at(offset_of!(Sqe, prp2)), m.prp2);
+    dev::write32(at(offset_of!(Sqe, cdw10)), m.cdw10);
+    dev::write32(at(offset_of!(Sqe, cdw11)), m.cdw11);
+    dev::write32(at(offset_of!(Sqe, cdw12)), m.cdw12);
     dev::mb();
 }
 
@@ -1767,8 +1755,6 @@ mod tests {
         held: Vec<(u16, u16, u8)>,
         /// Bevestigde I/O-opdrachten, in volgorde: (opcode, tag).
         acked: Vec<(u8, u16)>,
-        /// De entry-afstand die de firmware leest; `None` = uit CC.IOSQES.
-        stride: Option<u64>,
         /// De MDTS van de identify (0 = geen grens).
         mdts: u8,
     }
@@ -1817,8 +1803,8 @@ mod tests {
             let slot = dev::read32(r.add(db));
             if slot != NOTHING {
                 dev::write32(r.add(db), NOTHING);
-                let stride = c.stride.unwrap_or(1 << iosqes);
-                exec(c, qi, slot, stride);
+                // De lineaire modus: 64 bytes per entry, ongeacht IOSQES (M26).
+                exec(c, qi, slot, SQE);
             }
         }
     }
@@ -2350,11 +2336,10 @@ mod tests {
     /// Een hap van 16 KB (MDTS 2) en een venster van 40 blokken vanaf het
     /// begin van het bruikbare deel: zo past een reeks happen op de
     /// nepschijf. Elk blok draagt zijn eigen nummer.
-    fn small_steps(hold: bool, stride: Option<u64>) -> (Mem, Ans<Cop>) {
+    fn small_steps(hold: bool) -> (Mem, Ans<Cop>) {
         let m = machine(false, true);
         with(|c| {
             c.mdts = 2;
-            c.stride = stride;
             for (i, b) in c.disk.chunks_mut(BLOCK as usize).enumerate().skip(2) {
                 b.fill(i as u8);
             }
@@ -2397,7 +2382,7 @@ mod tests {
 
     #[test]
     fn a_write_comes_back_only_after_its_completion_and_a_flush_after_it() {
-        let (_m, mut a) = small_steps(true, None);
+        let (_m, mut a) = small_steps(true);
         let data = vec![0x77u8; BLOCK as usize];
         op(
             &mut a,
@@ -2429,21 +2414,21 @@ mod tests {
 
     #[test]
     fn sequential_reads_keep_one_read_ahead_in_flight_and_a_flush_waits_for_it() {
-        let (_m, mut a) = small_steps(true, None);
+        let (_m, mut a) = small_steps(true);
         let mut b = vec![0u8; HAP];
         read_held(&mut a, 0, 0, &mut b);
         assert!(is_hap(&b, USABLE.0));
         read_held(&mut a, LBAS, 0, &mut b);
-        // Twee happen op rij: de derde staat al op de controller, op tag 2.
+        // Twee happen op rij: de derde staat al op de controller, op tag 1.
         with(|c| {
-            assert_eq!(c.held.iter().map(|h| h.0).collect::<Vec<_>>(), [2]);
-            assert_eq!(c.log.last(), Some(&(1, IO_READ, USABLE.0 + 8, 3, 2)));
+            assert_eq!(c.held.iter().map(|h| h.0).collect::<Vec<_>>(), [1]);
+            assert_eq!(c.log.last(), Some(&(1, IO_READ, USABLE.0 + 8, 3, 1)));
         });
         // Een flush is pas klaar als er niets meer in de lucht is.
         op(&mut a, Op::Flush).unwrap();
         release(0);
         assert!(poll(&mut a, &mut []).is_pending());
-        release(2);
+        release(1);
         assert_eq!(poll(&mut a, &mut []), Poll::Ready(Ok(())));
         // De derde hap komt van de read-ahead: geen nieuwe opdracht.
         let before = with(|c| c.log.len());
@@ -2467,11 +2452,11 @@ mod tests {
 
     #[test]
     fn a_write_over_the_read_ahead_makes_it_stale() {
-        let (_m, mut a) = small_steps(true, None);
+        let (_m, mut a) = small_steps(true);
         let mut b = vec![0u8; HAP];
         read_held(&mut a, 0, 0, &mut b);
         read_held(&mut a, LBAS, 0, &mut b);
-        // De read-ahead op tag 2 loopt nog; een schrijf over zijn blokken
+        // De read-ahead op tag 1 loopt nog; een schrijf over zijn blokken
         // gaat ernaast op tag 0, en komt eerder terug dan hij.
         let data = vec![0x5au8; BLOCK as usize];
         op(
@@ -2484,7 +2469,7 @@ mod tests {
         .unwrap();
         release(0);
         assert_eq!(poll(&mut a, &mut []), Poll::Ready(Ok(())));
-        release(2);
+        release(1);
         // De lees daarna ziet de schrijf, niet de oude bytes van de read-ahead.
         read_held(&mut a, 2 * LBAS, 0, &mut b);
         assert!(b[..4096].iter().all(|&x| x == 0x5a));
@@ -2493,28 +2478,27 @@ mod tests {
         with(|c| {
             assert_eq!(
                 c.acked.iter().map(|x| x.1).collect::<Vec<_>>(),
-                [0, 0, 0, 2, 0]
+                [0, 0, 0, 1, 0]
             );
             assert_eq!(c.tcb_mismatch, 0);
         });
     }
 
     #[test]
-    fn the_second_tag_is_found_at_either_entry_stride() {
-        // Linux' afstand (64) en die van NVMe onder iBoots IOSQES (128).
-        for stride in [Some(64), None] {
-            let (_m, mut a) = small_steps(false, stride);
-            let mut b = vec![0u8; HAP];
-            for k in 0..5u64 {
-                block_on(blk(&mut a).read(k * LBAS, &mut b)).unwrap();
-                assert!(is_hap(&b, USABLE.0 + 4 * k));
-            }
-            assert_eq!(a.ahead_hits, 3);
-            with(|c| {
-                assert_eq!(c.tcb_mismatch, 0, "stride {stride:?}");
-                assert!(c.log.iter().any(|l| l.4 == 2));
-            });
+    fn the_second_tag_sits_at_the_linear_entry_stride() {
+        // De nep-controller leest per 64 bytes zoals de firmware (M26), en
+        // niet op CC.IOSQES; de read-ahead op tag 1 komt met de juiste bytes.
+        let (_m, mut a) = small_steps(false);
+        let mut b = vec![0u8; HAP];
+        for k in 0..5u64 {
+            block_on(blk(&mut a).read(k * LBAS, &mut b)).unwrap();
+            assert!(is_hap(&b, USABLE.0 + 4 * k));
         }
+        assert_eq!(a.ahead_hits, 3);
+        with(|c| {
+            assert_eq!(c.tcb_mismatch, 0);
+            assert!(c.log.iter().any(|l| l.4 == 1));
+        });
     }
 
     #[test]
