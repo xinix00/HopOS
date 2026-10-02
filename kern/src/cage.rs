@@ -227,6 +227,19 @@ pub trait Cage {
     fn live(&self, slot: Slot) -> bool;
     /// De hard-kill: trek de vertaling van `slot` in, voor al zijn cores.
     fn revoke(&mut self, slot: Slot);
+    /// Wacht `slot` op een gedeelde app-core nog op zijn eerste beurt
+    /// (boot-pending)? Zonder sharegroups, of met een rotatie die zelf een
+    /// tijdschijf heeft, nooit lang: dan de standaard.
+    fn pending(&self, slot: Slot) -> bool {
+        let _ = slot;
+        false
+    }
+    /// Het slot dat app-core `core` nu draait (`SCHED_CURRENT`, share.go
+    /// `coreHog`), of `None` als de core niemand draait of het niet zegt.
+    fn holder(&self, core: Core) -> Option<Slot> {
+        let _ = core;
+        None
+    }
     /// Het onbeantwoorde SMP-verzoek van `slot` (0 = geen). De waarde komt
     /// van een app-schrijfbare page en wordt nooit vertrouwd.
     fn smp_request(&self, slot: Slot) -> u64;

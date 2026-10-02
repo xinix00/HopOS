@@ -29,7 +29,7 @@ use abi::hopabi::{
 };
 use abi::layout::{
     self, CTRL_STRIDE, CTX_CTRL_PA, CTX_KICK_NONE, CTX_KICK_TARGET, CTX_NEXT_PA, CTX_SMP, CtxState,
-    LINK_BASE, NET_RING_DATA_CAP, Plan, RING_DATA_CAP, Tail,
+    LINK_BASE, NET_RING_DATA_CAP, Plan, RING_DATA_CAP, SCHED_CURRENT, Tail,
 };
 use abi::ring;
 use board::Board;
@@ -135,10 +135,11 @@ mod code {
 /// Hoe lang [`ArmCage::dispatch`] op een gedeelde app-core wacht tot de
 /// rotatie een nieuwe bewoner oppikt. Een buur die idle is, geeft de core
 /// binnen een event-stream-periode (~1,5 ms) of meteen na de kick; langer
-/// is een buur die rekent, en dan start de nieuwe bewoner bij diens
-/// volgende yield (een regel, geen fout: compute hoort op een eigen core).
-/// Het wachten is een spin op de kern-core: de kooi-trait is synchroon, en
-/// de park-race hieronder moet in dezelfde stap gesloten worden.
+/// is een buur die rekent, en dan wacht de lifecycle verder zonder de
+/// kern-core te houden (`Cage::pending`, `kern::slots::RECLAIM_WAIT`), tot
+/// en met het offeren van de vasthouder. Het wachten hier is een spin op
+/// de kern-core: de kooi-trait is synchroon, en de park-race hieronder
+/// moet in dezelfde stap gesloten worden.
 const JOIN_WAIT_NS: u64 = 5_000_000;
 
 /// Het app-adresvenster van een partitie van `size` bytes: het canonieke
@@ -617,6 +618,19 @@ impl Cage for ArmCage {
         }
     }
 
+    fn pending(&self, slot: Slot) -> bool {
+        self.built(slot).is_some_and(|b| b.core.get() != 0)
+            && self.ctx_state(slot) == Some(CtxState::BootPending)
+    }
+
+    fn holder(&self, core: Core) -> Option<Slot> {
+        // Het sched-blok is Device gemapt: geen veeg nodig. Een secundaire
+        // SMP-context (een id boven SLOT_CAP) is geen kooi om te offeren.
+        let c = layout::Core::new(core.get()).filter(|_| core != Core::OS)?;
+        let mb = self.plan.park_mbox_pa(c).ok()?;
+        Slot::new(usize::try_from(dev::read64(mb.add(SCHED_CURRENT))).ok()?)
+    }
+
     fn smp_request(&self, slot: Slot) -> u64 {
         self.ctrl_read(slot, CTRL_SMP_REQ)
     }
@@ -736,8 +750,8 @@ impl ArmCage {
     /// boot-pending bewoner op, en ziet deze wacht de core geparkeerd: dan
     /// alsnog het mailbox-startschot, en dat is dan het enige (de
     /// parkeerlus leest geen lijst). Ziet de wacht niets binnen
-    /// [`JOIN_WAIT_NS`], dan rekent de buur, en start de bewoner bij diens
-    /// volgende yield.
+    /// [`JOIN_WAIT_NS`], dan rekent de buur, en wacht de lifecycle verder
+    /// (`Cage::pending`).
     fn join(
         &self,
         slot: Slot,

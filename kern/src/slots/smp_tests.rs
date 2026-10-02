@@ -173,3 +173,51 @@ fn members_share_the_group_core_and_stop_alone() {
         "the last member kept the pool"
     );
 }
+
+// share.go `bootPendingDispatch`: een buur die nooit yieldt, houdt de
+// gedeelde core vast. Na RECLAIM_WAIT wordt hij geofferd (zijn kooi
+// ingetrokken), en dan krijgt het nieuwe lid zijn beurt.
+#[test]
+fn a_neighbour_that_never_yields_is_sacrificed_for_the_new_member() {
+    let (svc, con) = (Servicers::new(), FakeConsole::default());
+    let mut a = actor(&svc, &con, Obey::Exit, 64, 2);
+    start_member(&mut a, 2, "demo").unwrap();
+    a.cage.hog = Some(2);
+    a.cage.boot_pending[3] = true;
+    start_member(&mut a, 3, "demo").unwrap();
+    assert!(a.cage.revoked[2], "the hog kept the core");
+    assert!(!a.cage.revoked[3]);
+    assert!(con.saw(
+        "slot 3: core 1 never yielded in 2 s, sacrificing resident slot 2 HOPOS_CORE_RECLAIM"
+    ));
+    assert_eq!(a.status(s(3)).occupancy, Occupancy::Running);
+}
+
+// Niets op te offeren (de core zegt niet wie hem houdt): de start faalt
+// zoals een dispatchfout, met de partitie in quarantaine, in plaats van
+// een start die gelukt heet en nooit draait.
+#[test]
+fn a_member_that_never_gets_a_turn_is_a_dispatch_failure() {
+    let (svc, con) = (Servicers::new(), FakeConsole::default());
+    let mut a = actor(&svc, &con, Obey::Exit, 64, 2);
+    start_member(&mut a, 2, "demo").unwrap();
+    a.cage.boot_pending[3] = true;
+    let e = start_member(&mut a, 3, "demo").unwrap_err();
+    assert_eq!(e, Error::Dispatch { slot: 3, core: 1 });
+    assert!(con.saw("HOPOS_CORE_RECLAIM_FAILED"));
+    assert!(!a.cage.revoked[2]);
+    assert_eq!(a.status(s(3)).occupancy, Occupancy::Quarantined);
+}
+
+// Hop is nooit het slachtoffer: zonder Hop herstart niemand iets.
+#[test]
+fn hop_is_never_sacrificed() {
+    let (svc, con) = (Servicers::new(), FakeConsole::default());
+    let mut a = actor(&svc, &con, Obey::Exit, 64, 2);
+    start_member(&mut a, 2, "hop").unwrap();
+    a.cage.hog = Some(2);
+    a.cage.boot_pending[3] = true;
+    assert!(start_member(&mut a, 3, "hop").is_err());
+    assert!(!a.cage.revoked[2], "Hop was sacrificed");
+    assert!(con.saw("HOPOS_CORE_RECLAIM_FAILED"));
+}

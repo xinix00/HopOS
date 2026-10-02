@@ -72,6 +72,10 @@ pub const STOP_POLL: Duration = Duration::from_millis(10);
 /// een gesavede bewoner pas bij zijn volgende hervatting (een paar
 /// yield-tikken).
 pub const REVOKE_GRACE: Duration = Duration::from_secs(1);
+/// Hoe lang een nieuwe bewoner van een gedeelde app-core op zijn eerste
+/// beurt wacht voordat de vasthouder geofferd wordt, en daarna nog eens
+/// (share.go `bootPendingDispatch`, 2 s).
+pub const RECLAIM_WAIT: Duration = Duration::from_secs(2);
 /// De start-gratie van een servicer: bij de start is de ctx heel even nog
 /// leeg. Zonder gratie stierf de servicer meteen en verdronk niemand meer de
 /// logs van de echte app (gemeten 30-07: de stervensreden van welcome bleef
@@ -992,17 +996,17 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
         {
             return Err(self.never_ran(grant, core, !ports.is_empty(), e).await);
         }
+        let booted = dispatch.is_ok() && self.boots(slot, core).await;
         let part = grant.part.dispatched();
-        let held = match dispatch {
-            Ok(()) => Held::Running(part),
-            Err(_) => {
-                // Onbekende uitkomst: de core kan alsnog aangaan. Partitie,
-                // volledige core-claim en servicer blijven staan.
-                self.log.log(format_args!(
-                    "slot {slot}: owner retained, execution unconfirmed HOPOS_PART_QUARANTINE"
-                ));
-                Held::Quarantined(part.quarantine(&mut self.parts))
-            }
+        let held = if booted {
+            Held::Running(part)
+        } else {
+            // Onbekende uitkomst: de core kan alsnog aangaan. Partitie,
+            // volledige core-claim en servicer blijven staan.
+            self.log.log(format_args!(
+                "slot {slot}: owner retained, execution unconfirmed HOPOS_PART_QUARANTINE"
+            ));
+            Held::Quarantined(part.quarantine(&mut self.parts))
         };
         let failed = matches!(held, Held::Quarantined(_));
         if let Some(r) = self.resident_mut(slot) {
@@ -1218,6 +1222,58 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             }
             self.timer.sleep(STOP_POLL).await;
         }
+    }
+
+    /// Wacht tot een nieuwe bewoner van een gedeelde app-core zijn eerste
+    /// beurt kreeg (share.go `bootPendingDispatch`). Op arm64 wisselt de
+    /// core alleen bij een vrijwillige yield, dus een buur die rekent houdt
+    /// hem vast tot iemand ingrijpt. GEMETEN 14/15-08 (Go, LicheeRV): uren
+    /// gijzeling en elke plaatsing dood. Na [`RECLAIM_WAIT`] dus één
+    /// escalatie: de vasthouder offeren (zijn kooi intrekken, de rotatie
+    /// leeft door), en nog één ronde. `false`: nog steeds niet opgepikt.
+    ///
+    /// Nooit op de OS-core (die heeft de rotatie van de kern), en nooit Hop
+    /// zelf: zonder Hop herstart niemand het slachtoffer.
+    async fn boots(&mut self, slot: Slot, core: Core) -> bool {
+        if core == Core::OS || self.boot_wait(slot).await {
+            return true;
+        }
+        let hog = self.cage.holder(core).filter(|h| {
+            *h != slot
+                && self.resident(*h).is_some_and(|r| r.core == core)
+                && self
+                    .places
+                    .group_of(*h)
+                    .is_none_or(|(g, _)| g.as_slice() != crate::pool::HOP_GROUP)
+        });
+        let Some(hog) = hog else {
+            self.log.log(format_args!(
+                "slot {slot}: core {core} holds no resident to reclaim HOPOS_CORE_RECLAIM_FAILED"
+            ));
+            return self.boot_wait(slot).await;
+        };
+        self.log.log(format_args!(
+            "slot {slot}: core {core} never yielded in {} s, sacrificing resident slot {hog} HOPOS_CORE_RECLAIM",
+            RECLAIM_WAIT.as_secs()
+        ));
+        self.cage.revoke(hog);
+        self.cores.kick(core);
+        self.boot_wait(slot).await
+    }
+
+    /// Hooguit [`RECLAIM_WAIT`] wachten tot `slot` niet meer boot-pending is.
+    async fn boot_wait(&self, slot: Slot) -> bool {
+        let deadline = self
+            .timer
+            .now()
+            .saturating_add(RECLAIM_WAIT.as_nanos() as u64);
+        while self.cage.pending(slot) {
+            if self.timer.now() >= deadline {
+                return false;
+            }
+            self.timer.sleep(STOP_POLL).await;
+        }
+        true
     }
 
     /// Stop: eerst de servicer weg, dan de coöperatieve kans, dan de
@@ -1701,6 +1757,11 @@ pub(crate) mod tests {
         pub(crate) stuck: [bool; 16],
         /// Welke (slot, core)-paren de stop naar stilte vroeg.
         pub(crate) asked_quiet: RefCell<Vec<(usize, usize)>>,
+        /// Slots die boot-pending blijven tot `hog` ingetrokken is (een buur
+        /// die nooit yieldt; zonder `hog` voor altijd).
+        pub(crate) boot_pending: [bool; 16],
+        /// Wat `SCHED_CURRENT` zegt: de vasthouder van de core.
+        pub(crate) hog: Option<usize>,
     }
 
     impl FakeCage {
@@ -1724,6 +1785,8 @@ pub(crate) mod tests {
                 taken: None,
                 stuck: [false; 16],
                 asked_quiet: RefCell::new(Vec::new()),
+                boot_pending: [false; 16],
+                hog: None,
             }
         }
     }
@@ -1792,6 +1855,12 @@ pub(crate) mod tests {
         fn revoke(&mut self, slot: Slot) {
             self.calls.set(self.calls.get() + 1);
             self.revoked[slot.get()] = true;
+        }
+        fn pending(&self, slot: Slot) -> bool {
+            self.boot_pending[slot.get()] && !self.hog.is_some_and(|h| self.revoked[h])
+        }
+        fn holder(&self, _: Core) -> Option<Slot> {
+            self.hog.and_then(Slot::new)
         }
         fn smp_request(&self, slot: Slot) -> u64 {
             self.smp_req[slot.get()]
