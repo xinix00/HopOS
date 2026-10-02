@@ -14,9 +14,11 @@
 //!   kost niets; het is wat tamago ook deed);
 //! - wat het board daarboven expliciet noemt (UART, ECAM, GIC,
 //!   EFI-MMIO) als Device;
-//! - elke RAM-descriptor als Normal WB, op 4 KB precies: een 2 MB-blok dat
-//!   een firmware-gat meeneemt, maakt dat gat speculatief leesbaar, en
-//!   daar vallen secure carve-outs onder;
+//! - het RAM als Normal WB, op 4 KB precies: een 2 MB-blok dat een
+//!   firmware-gat meeneemt, maakt dat gat speculatief leesbaar, en daar
+//!   vallen secure carve-outs onder. Aansluitende RAM-descriptors gaan als
+//!   één stuk (`memmap::Map::ram_runs`): alleen een echte grens kost een
+//!   L3-tabel, ook bij de duizenden descriptors van de Altra;
 //! - de DMA-regio als Normal non-cacheable, het kooi-venster als Device.
 //!
 //! De mapper splitst een blok in een tabel als een latere mapping maar een

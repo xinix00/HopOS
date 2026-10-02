@@ -86,9 +86,21 @@ const STAGE_NAME: [u16; 16] = efi::ucs2(b"hopos-stage.elf\0");
 /// De grootste config: 16 KB (Go: bij 4 KB verdween alles na byte 4096
 /// stil, 17-09).
 const CFG_MAX: u64 = 16 << 10;
-/// De buffer van de memory map: 64 KB (EDK2 op QEMU: ~60 descriptors van
-/// 0x30; een server een paar honderd).
-const MAP_CAP: usize = 64 << 10;
+/// De buffer van de memory map: 256 KB, ruim 5000 descriptors van 0x30
+/// (Go: "ruim voor een 700GB-server"; de Altra heeft er duizenden, 14-07).
+/// EDK2 op QEMU heeft er ~60. Vraagt de firmware toch meer, dan krijgt hij
+/// een tweede buffer ([`map_buffer`]).
+const MAP_CAP: usize = 256 << 10;
+/// De vensterkandidaten van Go (`SLOTS` in uefi-run.sh, 13-07), in zijn
+/// volgorde: de stub noemt de vrije als zijn eigen venster bezet is.
+const WINDOW_CANDIDATES: [u64; 6] = [
+    0xB000_0000,
+    0xA000_0000,
+    0xC800_0000,
+    0x8800_0000,
+    0xE800_0000,
+    0x5000_0000,
+];
 /// Scratch voor één ACPI-tabel tegelijk (de MADT van 128 cores is ~10 KB).
 const ACPI_SCRATCH: usize = 64 << 10;
 
@@ -120,6 +132,7 @@ struct Enter {
     tcr: u64,
     el: u8,
     map_buf: u64,
+    map_cap: usize,
     tables: (u64, u64),
 }
 
@@ -151,26 +164,17 @@ fn prepare(efi: &Efi, el: u8) -> Result<Enter, (&'static str, Status)> {
     acpi_line(&tables, rsdp);
 
     // Het kernvenster op zijn vaste plek: de vraag "is dit venster vrij op
-    // dít board?". Nee is luid, met de vrije regio's erbij: één boot levert
-    // zo het juiste venster op (Go, Altra 13-07: 0x9000_0000 was bezet).
-    let map_buf = efi
-        .allocate((MAP_CAP / 4096) as u64, 0)
-        .map_err(|s| ("memory map buffer", s))?;
+    // dít board?". Nee is luid, met de vrije regio's en de kandidaten van
+    // Go erbij: één boot levert zo het juiste venster op (Go, Altra 13-07:
+    // 0x9000_0000 was bezet).
+    let (map_buf, map_cap) = map_buffer(efi)?;
     if let Err(st) = efi.allocate_at(WINDOW_PA, WINDOW / 4096) {
-        println!(
-            "uefi: kernel window {WINDOW_PA:#x}+{WINDOW:#x} is taken; free regions of 32 MB or more:"
-        );
-        if let Ok(info) = efi.memory_map(map_buf, MAP_CAP) {
-            let map = Map {
+        if let Ok(info) = efi.memory_map(map_buf, map_cap) {
+            window_busy(&Map {
                 pa: map_buf,
                 size: info.size as u64,
                 stride: info.desc_size as u64,
-            };
-            for d in map.iter().filter(|d| d.ty == memmap::ty::CONVENTIONAL) {
-                if d.end() - d.base >= 32 << 20 {
-                    println!("uefi:   {:#x}..{:#x}", d.base, d.end());
-                }
-            }
+            });
         }
         return Err(("kernel window busy HOPOS_UEFI_WINDOW", st));
     }
@@ -222,15 +226,21 @@ fn prepare(efi: &Efi, el: u8) -> Result<Enter, (&'static str, Status)> {
     );
 
     let info = efi
-        .memory_map(map_buf, MAP_CAP)
-        .map_err(|s| ("GetMemoryMap", s))?;
+        .memory_map(map_buf, map_cap)
+        .map_err(|(s, _)| ("GetMemoryMap", s))?;
     let map = Map {
         pa: map_buf,
         size: info.size as u64,
         stride: info.desc_size as u64,
     };
-    let mmu =
-        build_map(&map).map_err(|_| ("identity map: out of tables", efi::OUT_OF_RESOURCES))?;
+    let mmu = build_map(&map).map_err(|e| {
+        println!(
+            "uefi: identity map {e:?} with {} map entries and {} tables HOPOS_UEFI_TABLES",
+            map.iter().count(),
+            TABLES.size / 4096
+        );
+        ("identity map: out of tables", efi::OUT_OF_RESOURCES)
+    })?;
     facts::MMU_TABLES.store(mmu.tables(), Relaxed);
     println!(
         "uefi: window {WINDOW_PA:#x}+{WINDOW:#x}, {} MB DRAM, {} map entries, {} page tables",
@@ -243,8 +253,63 @@ fn prepare(efi: &Efi, el: u8) -> Result<Enter, (&'static str, Status)> {
         tcr: tcr(),
         el,
         map_buf,
+        map_cap,
         tables: mmu.used_range(),
     })
+}
+
+/// De buffer van de memory map: [`MAP_CAP`], of als de firmware meer vraagt
+/// (BUFFER_TOO_SMALL) het dubbele van zijn maat, met ruimte voor de
+/// descriptors die de allocaties tot de exit er nog bij maken. De eerste
+/// buffer blijft dan ongebruikt liggen (EfiLoaderData, 256 KB).
+fn map_buffer(efi: &Efi) -> Result<(u64, usize), (&'static str, Status)> {
+    let pages = |bytes: usize| (bytes / 4096) as u64;
+    let buf = efi
+        .allocate(pages(MAP_CAP), 0)
+        .map_err(|s| ("memory map buffer", s))?;
+    let Err((efi::BUFFER_TOO_SMALL, need)) = efi.memory_map(buf, MAP_CAP) else {
+        return Ok((buf, MAP_CAP));
+    };
+    let cap = need.saturating_mul(2).next_multiple_of(4096);
+    println!(
+        "uefi: memory map needs {need} bytes, more than {MAP_CAP}; a buffer of {cap} HOPOS_UEFI_MAP_BIG"
+    );
+    let buf = efi
+        .allocate(pages(cap), 0)
+        .map_err(|s| ("memory map buffer", s))?;
+    Ok((buf, cap))
+}
+
+/// De diagnose van een bezet kernvenster: de vrije regio's van 32 MB en
+/// meer, en welke van Go's kandidaten met deze maat vrij zijn. De kern
+/// neemt er zelf geen andere: het venster is een constante van de build
+/// (zie `WINDOW_PA`), dus het antwoord is een herbouw.
+fn window_busy(map: &Map) {
+    println!(
+        "uefi: kernel window {WINDOW_PA:#x}+{WINDOW:#x} is taken; free regions of 32 MB or more:"
+    );
+    for d in map.iter().filter(|d| d.ty == memmap::ty::CONVENTIONAL) {
+        if d.end() - d.base >= 32 << 20 {
+            println!("uefi:   {:#x}..{:#x}", d.base, d.end());
+        }
+    }
+    let mut first = None;
+    for c in WINDOW_CANDIDATES {
+        let free = map.is_conventional(c, WINDOW);
+        println!(
+            "uefi:   candidate {c:#x}+{WINDOW:#x} {}",
+            if free { "free" } else { "taken" }
+        );
+        if free && first.is_none() {
+            first = Some(c);
+        }
+    }
+    match first {
+        Some(c) => println!(
+            "uefi: first free candidate {c:#x}: build with that window HOPOS_UEFI_WINDOW_FREE"
+        ),
+        None => println!("uefi: none of Go's window candidates is free HOPOS_UEFI_WINDOW_NONE"),
+    }
 }
 
 /// De ACPI-samenvatting op de firmware-console: de meting waarmee een
@@ -345,9 +410,7 @@ fn build_map(map: &Map) -> Result<Mmu, mmu::Error> {
         high(d.base, d.end() - d.base)?;
     }
     let ram_bits = mmu::attrs(ATTR_NORMAL);
-    for d in map.iter().filter(memmap::Desc::is_ram) {
-        m.map(d.base, d.end() - d.base, ram_bits)?;
-    }
+    map.ram_runs(|base, size| m.map(base, size, ram_bits))?;
     // De framebuffer Normal-NC, na de RAM: de laatste mapping wint.
     crate::gop::map(&mut m)?;
     m.map(DMA.base.0, DMA.size, mmu::attrs(ATTR_NORMAL_NC))?;
@@ -385,7 +448,7 @@ fn go(efi: Efi, e: Enter) -> Status {
     // Vanaf hier geen ConOut meer: een print kan alloceren en de MapKey
     // ongeldig maken, en na de exit is er geen firmware-console.
     CON_ST.store(0, Relaxed);
-    let final_map = match efi.exit_boot_services(e.map_buf, MAP_CAP) {
+    let final_map = match efi.exit_boot_services(e.map_buf, e.map_cap) {
         Ok(m) => m,
         Err((efi, st)) => {
             CON_ST.store(efi_st(&efi), Relaxed);

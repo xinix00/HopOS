@@ -212,8 +212,12 @@ const _: () = {
     assert!(BUF_SIZE >= netdev::MAX_FRAME);
 };
 
-/// Hoe lang een device-reset mag duren (Go: 10 ms plus 100 × 1 ms).
-const RESET_NS: u64 = 110_000_000;
+/// De pauze na CTRL.RST vóór de eerste blik op het register (Go: 10 ms,
+/// zoals Linux' `igb_reset_hw_82575` met zijn `msleep(10)`): wie RAL0/RAH0
+/// direct leest als het bit zakt, kan de NVM-autoload voor zijn.
+const RESET_PAUSE_NS: u64 = 10_000_000;
+/// Hoe lang een device-reset daarna nog mag duren (Go: 100 × 1 ms).
+const RESET_NS: u64 = 100_000_000;
 /// Hoe lang een MDIC-transactie mag duren.
 const MDIC_NS: u64 = 10_000_000;
 /// Hoe lang de queue-enable mag duren.
@@ -348,9 +352,7 @@ impl Igb {
         }
         let mut n = Self::at(base, dma, clock);
         n.reset()?;
-        n.init();
-        n.wait_queue(false)?;
-        n.wait_queue(true)?;
+        n.init()?;
         Ok(n)
     }
 
@@ -380,7 +382,8 @@ impl Igb {
         unsafe { dev::regs(self.base) }
     }
 
-    /// Wacht tot `done` of tot `ns` op de klok verstreken is.
+    /// Wacht tot `done` of tot `ns` op de klok verstreken is; met een
+    /// `done` die nooit waar wordt, een pauze van `ns`.
     fn wait(&self, ns: u64, mut done: impl FnMut(&Regs) -> bool) -> bool {
         let r = self.regs();
         let deadline = (self.clock)().saturating_add(ns);
@@ -409,6 +412,7 @@ impl Igb {
         r.tctl.write(TCTL_PSP);
         dev::mb();
         r.ctrl.update(|v| v | CTRL_RST);
+        let _ = self.wait(RESET_PAUSE_NS, |_| false);
         if !self.wait(RESET_NS, |r| r.ctrl.read() & CTRL_RST == 0) {
             return Err(Error::ResetStuck {
                 ctrl: r.ctrl.read(),
@@ -427,8 +431,11 @@ impl Igb {
     }
 
     /// Zet de ringen klaar en RX/TX aan, in de `igb_configure_rx_ring`-
-    /// volgorde: basis en lengte, buffers, enable, dán RDT vullen.
-    fn init(&mut self) {
+    /// volgorde: basis en lengte, buffers, enable, wachten tot de queue
+    /// ENABLE terugleest, dán RCTL en RDT (Go `Init`). Een RDT die de
+    /// queue mist terwijl hij nog uit staat, laat RDT == RDH: een lege ring
+    /// en een stil dove RX. Zo ook TX: TXDCTL, wachten, dan TCTL.
+    fn init(&mut self) -> Result {
         for i in 0..N_RX {
             self.arm_rx(i);
         }
@@ -443,6 +450,7 @@ impl Igb {
         r.rdh.write(0);
         r.rdt.write(0);
         r.rxdctl.write(Q_ENABLE);
+        self.wait_queue(false)?;
         r.rctl.write(RCTL_EN | RCTL_BAM | RCTL_SECRC);
         // Alles op één na aan de hardware: RDT == RDH is "leeg".
         r.rdt.write(u32::from(N_RX - 1));
@@ -455,8 +463,10 @@ impl Igb {
         r.tdh.write(0);
         r.tdt.write(0);
         r.txdctl.write(Q_ENABLE);
+        self.wait_queue(true)?;
         r.tctl.write(TCTL_EN | TCTL_PSP | TCTL_CT | TCTL_COLD);
         dev::mb();
+        Ok(())
     }
 
     fn wait_queue(&self, tx: bool) -> Result {

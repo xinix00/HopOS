@@ -44,7 +44,8 @@ BOARD=altra image/uefi-run.sh   # target/uefi-esp-altra/EFI/BOOT/BOOTAA64.EFI
 Op een stick: een FAT32-partitie met die boom erop (de `hopos.cfg` staat
 er al: de gedeelde config, of `CFG=`), Secure Boot uit. Een dd-bare stick
 maakt `tools/release.sh` (`hopos-o6n-headless.img.gz` en zo). Beide boards zijn het UEFI-board
-(`board-uefi`, kernvenster `window-8000` op 0x8800_0000) plus een eigen crate:
+(`board-uefi`; het kernvenster van de O6N is `window-8000` op 0x8800_0000,
+dat van de Altra `window-b000` op 0xB000_0000) plus een eigen crate:
 `board-o6n` en `board-altra`. De binary kiest met `--features board-o6n` of
 `board-altra`.
 
@@ -284,7 +285,7 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
 
 | Onderdeel | Crate | Hoe getest |
 | --- | --- | --- |
-| NIC: Intel igb (I210 8086:1533 en familie; QEMU's 82576 8086:10c9), advanced descriptors, RX 256 / TX 64, doorbell per burst | `driver-igb` | 11 host-tests tegen een nep-igb: reset, MAC uit RAL0/RAH0, ringen, link via MDIC en STATUS, RX-grenzen, zelf-flush per 32, TX-eigendom en de TDT≠TDH-rem |
+| NIC: Intel igb (I210 8086:1533 en familie; QEMU's 82576 8086:10c9), advanced descriptors, RX 256 / TX 64, doorbell per burst | `driver-igb` | 11 host-tests tegen een nep-igb: reset (met Go's pauze van 10 ms), MAC uit RAL0/RAH0, ringen, RDT pas na RXDCTL.ENABLE, link via MDIC en STATUS, RX-grenzen, zelf-flush per 32, TX-eigendom en de TDT≠TDH-rem |
 | NVMe | `driver-nvme` | zie de O6N |
 | Thermometer: SMpro via PCC-kanaal 14 (xgene-hwmon), PCCT-parser | `driver-smpro` | 4 host-tests, waaronder "een onafgemaakt commando laat de buffer van de firmware" |
 | Klassen: homogeen big | `board-altra` | host-test |
@@ -292,7 +293,20 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
 
 ### Wat je hoort te zien
 
+- Vóór de exit, op de firmware-console: `uefi: window 0xb0000000+0x14000000,
+  ... MB DRAM, N map entries, M page tables`. N is het aantal descriptors
+  (Go: duizenden); de buffer is 256 KB, en vraagt de firmware meer, dan
+  eerst `... HOPOS_UEFI_MAP_BIG`. Past de identity map niet in 1024
+  tabellen: `HOPOS_UEFI_TABLES` en terug naar de firmware.
+- Is 0xB000_0000 bezet: `kernel window ... is taken`, de vrije regio's,
+  Go's zes kandidaten elk met `free` of `taken`, en
+  `HOPOS_UEFI_WINDOW_FREE` met de eerste vrije (herbouw met dat venster).
+  Eén venster per build: de indeling, `slots` en de kern-flip rekenen met
+  constanten, de kern is wel een PIE.
 - `uefi: booted at EL2 ...`, `pcie: segment ...` voor elk segment.
+- `slots: pool ... MB in N regions, largest ... MB`. Valt er iets buiten
+  de pool (een volle lijst, het plafond van 64 regio's):
+  `HOPOS_UEFI_MAP_DROPPED` met het aantal stukken en de MB's.
 - `boot: HopOS v3.0.0 on altra, EL2, 128 cores (big) ... HOPOS_BOOT` (of 80,
   afhankelijk van de SKU).
 - `net: igb 8086:1533 at ... link 1000 Mbps full duplex, polled (hopos.nicirq=off) HOPOS_NIC_IRQ`,

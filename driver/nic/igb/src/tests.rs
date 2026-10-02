@@ -16,6 +16,8 @@ struct Hw {
     reset_clears: bool,
     /// De link komt op na de eerste MDIC-schrijf.
     link: bool,
+    /// RXDCTL.ENABLE blijft niet staan.
+    rx_queue_stuck: bool,
     now: u64,
 }
 
@@ -37,6 +39,9 @@ fn clock() -> u64 {
         let ctrl = h.regs.add(offset_of!(Regs, ctrl) as u64);
         if h.reset_clears {
             dev::write32(ctrl, dev::read32(ctrl) & !CTRL_RST);
+        }
+        if h.rx_queue_stuck {
+            dev::write32(h.regs.add(offset_of!(Regs, rxdctl) as u64), 0);
         }
         let mdic = h.regs.add(offset_of!(Regs, mdic) as u64);
         let m = dev::read32(mdic);
@@ -155,6 +160,23 @@ fn reset_failures_are_named() {
     assert_eq!(e, Some(Error::OffBus));
 }
 
+/// Go's volgorde (igb.go `Init`): RCTL en RDT pas als RXDCTL.ENABLE
+/// terugleest. Blijft de queue uit, dan staat de ring nog dicht en zegt de
+/// driver welke queue.
+#[test]
+fn rdt_waits_for_the_rx_queue_enable() {
+    let m = mem(Hw {
+        rx_queue_stuck: true,
+        ..hw()
+    });
+    with_mac(&m);
+    // SAFETY: registers en DMA liggen in `m`.
+    let e = unsafe { Igb::new(m.base, m.dma, DMA_NEED, clock) }.err();
+    assert_eq!(e, Some(Error::QueueStuck { tx: false }));
+    assert_eq!(dev::read32(reg(0x2818)), 0, "RDT untouched");
+    assert_eq!(dev::read32(reg(0x0100)), 0, "RCTL untouched");
+}
+
 #[test]
 fn link_up_restarts_autoneg_through_the_mdic() {
     let m = mem(Hw { link: true, ..hw() });
@@ -222,7 +244,7 @@ fn receive_bounds_and_recycle() {
     ] {
         let m = mem(hw());
         let mut n = fake(&m);
-        n.init();
+        n.init().unwrap();
         writeback(&m, 0, RX_DD | RX_EOP, size as u32);
         dev::copy_in(m.dma.add(BUF_OFF), &vec![0x5a; BUF_SIZE]);
         let mut out = vec![0xccu8; 8192];
@@ -245,7 +267,7 @@ fn receive_bounds_and_recycle() {
 fn receive_skips_a_fragment_and_delivers_the_next() {
     let m = mem(hw());
     let mut n = fake(&m);
-    n.init();
+    n.init().unwrap();
     writeback(&m, 0, RX_DD, 100); // geen EOP
     writeback(&m, 1, RX_DD | RX_EOP, 60);
     let mut out = [0u8; 2048];
@@ -258,7 +280,7 @@ fn receive_skips_a_fragment_and_delivers_the_next() {
 fn receive_rings_the_doorbell_itself_every_32_frames() {
     let m = mem(hw());
     let mut n = fake(&m);
-    n.init();
+    n.init().unwrap();
     let before = n.doorbells;
     for i in 0..RX_SELF_FLUSH {
         writeback(&m, i, RX_DD | RX_EOP, 60);
@@ -272,7 +294,7 @@ fn receive_rings_the_doorbell_itself_every_32_frames() {
 fn transmit_batches_until_flush_and_respects_ownership() {
     let m = mem(hw());
     let mut n = fake(&m);
-    n.init();
+    n.init().unwrap();
     assert_eq!(n.transmit(&[]), Err(TxError::Size(0)));
     assert_eq!(
         n.transmit(&[0; BUF_SIZE + 1]),

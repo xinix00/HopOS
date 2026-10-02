@@ -19,7 +19,7 @@ use crate::{ADMIN, LOADER, facts};
 use abi::Region;
 use abi::layout::{POOL_MAX, Plan, PlanSpec, Pool, pool_of};
 use board::stage::{self, StagedRole};
-use core::sync::atomic::Ordering::Relaxed;
+use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
 /// De control-pages van de eigen cores van de kern: het begin van het
 /// kooi-venster.
@@ -58,9 +58,22 @@ pub(crate) fn final_map() -> Map {
     }
 }
 
-/// De pool: het vrije DRAM uit de kaart van de exit.
+/// Heeft de pool zijn verlies al gemeld? Het plan wordt vaker gemaakt dan
+/// één keer, de regel komt één keer.
+static DROPPED_SAID: AtomicBool = AtomicBool::new(false);
+
+/// De pool: het vrije DRAM uit de kaart van de exit. Wat er niet in past,
+/// is één luide regel (Go 14-07: een stille pool gaf 12 van 127 taken een
+/// partitie).
 fn pool() -> abi::Result<Pool> {
-    let (free, _dropped) = memmap::free_regions::<POOL_MAX>(&final_map());
+    let (free, lost) = memmap::free_regions::<POOL_MAX>(&final_map());
+    if lost.count != 0 && !DROPPED_SAID.swap(true, Relaxed) {
+        cpu::println!(
+            "uefi: memory map: {} free spans ({} MB) left out of the pool HOPOS_UEFI_MAP_DROPPED",
+            lost.count,
+            lost.bytes >> 20
+        );
+    }
     pool_of(free.iter().map(|r| Region::new(r.base.0, r.size)))
 }
 

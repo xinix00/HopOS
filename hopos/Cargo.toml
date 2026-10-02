@@ -29,15 +29,17 @@ board-uefi = ["dep:board-uefi"]
 # De Radxa Orion O6N en de Ampere Altra, op het UEFI-board:
 # `BOARD=o6n|altra image/uefi-run.sh` bouwt er BOOTAA64.EFI van (efi.ld,
 # PIE, zoals board-uefi; build.rs).
-# Beide hebben DRAM vanaf 0x8000_0000: het kernvenster `window-8000` van
-# board-uefi (0x8800_0000, de Go-kandidaat van de Altra), via de feature
-# van hun eigen crate. Niet hier via `board-uefi/window-8000`: die vorm zet
-# ook de feature `board-uefi` van deze binary aan, en dan zijn het er twee.
+# Beide hebben DRAM vanaf 0x8000_0000, elk met een eigen kernvenster van
+# board-uefi via de feature van hun eigen crate: de O6N `window-8000`
+# (0x8800_0000, bewezen 30-09), de Altra `window-b000` (0xB000_0000, Go's
+# eerste kandidaat: 0x9000_0000 bleek daar bezet, 13-07). Niet hier via
+# `board-uefi/window-...`: die vorm zet ook de feature `board-uefi` van
+# deze binary aan, en dan zijn het er twee.
 # (Tot 29-09 zette niemand hem aan en zocht de stub op beide het venster
 # van QEMU, 0x5000_0000.) De O6N draait bovendien de hele kern onder
 # E2H = 1 (`vhe`, de A720 eist het: Go 17-09).
 board-o6n = ["dep:board-o6n", "board-o6n/window-8000", "board-o6n/vhe"]
-board-altra = ["dep:board-altra", "board-altra/window-8000"]
+board-altra = ["dep:board-altra", "board-altra/window-b000"]
 # VHE afdwingen op een board dat anders nVHE kiest: de switcher-smaak `Vhe`
 # (hopos/src/cage.rs `FLAVOR`) en de kern onder E2H = 1 (board-uefi `vhe`,
 # board/uefi/src/el2.rs). De proef op QEMU met een VHE-model

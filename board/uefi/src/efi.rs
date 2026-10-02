@@ -29,6 +29,9 @@ pub(crate) const SUCCESS: Status = 0;
 const ERROR_BIT: usize = 1 << 63;
 /// EFI_LOAD_ERROR, voor wat de stub zelf weigert.
 pub(crate) const LOAD_ERROR: Status = ERROR_BIT | 1;
+/// EFI_BUFFER_TOO_SMALL: de memory map past niet, de gevraagde maat staat
+/// in de uit-parameter.
+pub(crate) const BUFFER_TOO_SMALL: Status = ERROR_BIT | 5;
 /// EFI_OUT_OF_RESOURCES.
 pub(crate) const OUT_OF_RESOURCES: Status = ERROR_BIT | 9;
 /// EFI_NOT_FOUND.
@@ -210,8 +213,10 @@ impl Efi {
         Ok(())
     }
 
-    /// De memory map in `buf` (`cap` bytes, door de stub gealloceerd).
-    pub(crate) fn memory_map(&self, buf: u64, cap: usize) -> Result<MapInfo, Status> {
+    /// De memory map in `buf` (`cap` bytes, door de stub gealloceerd). Een
+    /// fout geeft naast de status de maat die de firmware vroeg (bij
+    /// [`BUFFER_TOO_SMALL`] wat de kaart nu nodig heeft).
+    pub(crate) fn memory_map(&self, buf: u64, cap: usize) -> Result<MapInfo, (Status, usize)> {
         let f = Self::func(self.bs, off::BS_GET_MEMORY_MAP);
         let (mut size, mut key, mut desc_size, mut ver) = (cap, 0usize, 0usize, 0u32);
         // SAFETY: de invariant van `Efi`; `buf` is `cap` bytes van ons, de
@@ -224,7 +229,7 @@ impl Efi {
             &mut ver,
         );
         if st != SUCCESS {
-            return Err(st);
+            return Err((st, size));
         }
         Ok(MapInfo {
             size,
@@ -246,7 +251,7 @@ impl Efi {
         for _ in 0..8 {
             let map = match self.memory_map(buf, cap) {
                 Ok(m) => m,
-                Err(e) => return Err((self, e)),
+                Err((e, _)) => return Err((self, e)),
             };
             // SAFETY: de invariant van `Efi`; na succes gebruikt niemand
             // `self` meer (hij gaat hier op).

@@ -94,7 +94,7 @@ opties).
 | QEMU virt | `flip-bundle.sh virt` | `0x4020_0000` (link.ld) | de staging van QEMU op `0xB020_0000`, de boot-scratch-pagina's op `0xB000_0000` | `sh tools/qemu-test-flip.sh`, ook `MISMATCH=1`, `COLD=1` en `OSCORE=1` |
 | UEFI (EDK2) | `flip-bundle.sh uefi` | de basis die de firmware koos (`__efi_head`), binnen `SizeOfImage` | de loader-regio van het kernvenster (`0x5000_0000` + 256 MB) | `BOARD=uefi sh tools/qemu-test-flip.sh`, ook `COLD=1` |
 | Orion O6N | `flip-bundle.sh o6n` | idem | idem, venster op `0x8800_0000` | nog niet op ijzer |
-| Ampere Altra | `flip-bundle.sh altra` | idem | idem, venster op `0x8800_0000` | nog niet op ijzer |
+| Ampere Altra | `flip-bundle.sh altra` | idem | idem, venster op `0xB000_0000` | nog niet op ijzer |
 | Pi 4, Pi 5 | `flip-bundle.sh rpi4` / `rpi5` | `0x80000` (link-raspi.ld) | achter de initramfs van Hop op `0x0F20_0000`, de boot-scratch op `0x0F10_0000` | bundels gebouwd; de ingang op QEMU raspi4b (`BOARD=rpi4 sh tools/qemu-test-flip.sh`); nog niet op ijzer |
 | Radxa Zero 3E | `flip-bundle.sh radxa` | `0x0221_0000` (link-rk3566.ld) | het staging-venster op `0x0780_0000`, de recorder op `FLIP_SCRATCH_PA`, de trampoline op de bovenste pagina van de kern-RAM | bundel gebouwd; de ingang is `_start`, dezelfde als virt (`OSCORE=1`); nog niet op ijzer |
 | QEMU virt riscv64 | `flip-bundle.sh virt-riscv` | `0x8000_0000` (link-riscv.ld) | achter Hop in de staging van QEMU op `0xA820_0000`; recorder, trampoline en de uit-stub van hart 1 op de boot-scratch (`0xA800_1000`, `+0x2000`, `+0x3000`) | alleen koud: `sh tools/qemu-riscv-test-flip.sh` (02-10) |

@@ -13,9 +13,9 @@ sync = { path = "../../sync" }
 executor = { path = "../../executor" }
 netdev = { path = "../../netdev" }
 bounded = { path = "../../bounded" }
-# Het generieke UEFI-board. Het kernvenster voor DRAM op 0x8000_0000
-# (`window-8000`) zet de binary aan (hopos/Cargo.toml), zodat de
-# host-tests van de werkruimte het standaardvenster houden.
+# Het generieke UEFI-board. Het kernvenster van de Altra (`window-b000`)
+# zet de binary aan (hopos/Cargo.toml), zodat de host-tests van de
+# werkruimte het standaardvenster houden.
 board-uefi = { path = "../uefi" }
 board = { path = "../../board" }
 driver-pcie = { path = "../../driver/pcie" }
@@ -35,7 +35,8 @@ workspace = true
 default = []
 # De GOP-framebuffer van de firmware (board-uefi, gop.rs), zoals op de O6N.
 gui = ["board-uefi/gui"]
-# Het kernvenster voor DRAM op 0x8000_0000 (board-uefi `WINDOW_PA`): de
-# binary zet het altijd aan (hopos/Cargo.toml `board-altra`), de host-tests
-# van de werkruimte niet.
-window-8000 = ["board-uefi/window-8000"]
+# Het kernvenster op 0xB000_0000 (board-uefi `WINDOW_PA`), Go's eerste
+# kandidaat op de Altra: 0x9000_0000 bleek daar bezet (13-07), en dat ligt
+# in het O6N-venster 0x8800_0000+320 MB. De binary zet het altijd aan
+# (hopos/Cargo.toml `board-altra`), de host-tests van de werkruimte niet.
+window-b000 = ["board-uefi/window-b000"]
