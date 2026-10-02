@@ -20,6 +20,7 @@ mod conport; // de console over TCP: de ring achter de UART (conport.rs)
 mod flip; // FLIP: de kern-flip (flip.rs)
 mod glue; // de arch-vrije kooi-lijm, `DevMem` en `KernConsole` (glue.rs)
 mod gui; // het gui-vlak (gui.rs); kaal no-ops, feature `gui`
+mod load; // de meetlat per slot: idle en wekken op de console (load.rs)
 #[cfg(all(
     target_arch = "aarch64",
     target_os = "none",
@@ -338,6 +339,7 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     // telemetrie: thermiek en klokbeleid.
     watchdog::start(exec);
     telemetry::start(exec);
+    load::start(exec); // de meetlat per slot (docs/apps.md)
     gui::start_screen_status(exec); // de meetregels naast de bunny
 
     // De config van de node: de tekst van het board (bench::cfg_text,

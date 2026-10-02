@@ -59,6 +59,7 @@ met de toetsen onder `#[cfg(test)]` apart; `-v` noemt de files per emmer.
 | Kern-flip | [flip.md](flip.md) | de procedure per board, de markers van kern A en kern B, de faalmodi, de boot-guard, de koude weg |
 | Gui | [gui.md](gui.md) | de console op het glas, de framebuffer-grant aan een display-app, de USB-invoer, de beeldketen van de Radxa |
 | Media | [media.md](media.md) | de videocodec van de O6N (Linlon V8), de codec-dienst, de optische drive, de checklist en de meting (24 fps 4K P010) |
+| Apps | [apps.md](apps.md) | hoe een app slaapt op gebeurtenissen en niet op de klok, de bouwstenen (`readable()`, `select`, `after` als deadline), de meetlat `HOPOS_SLOT_LOAD`, het Go-equivalent en de reviewchecklist |
 | Meten | [measurements.md](measurements.md) | de lat van v2 per meting, het commando en de marker, en de lege v3-kolommen per board; `tools/soak.sh` voor uren |
 
 ## Images per board
