@@ -198,6 +198,16 @@ node heeft er nog geen gedraaid.
 
 ## Overal
 
+- [ ] **De build van 03-10 hoort bij Hop v3.0.5** (hop main d30a9f3): de kern
+      stuurt SLOT_STATUS zonder maat het voorvoegsel van 88 bytes (Hop tot
+      v3.0.3 blijft werken, ook de Hop van de kaart over een flip), Hop 3.0.5
+      vraagt de volle 128; een Hop 3.0.4 op deze kern kan geen stand lezen.
+      Media met Hop 3.0.0 tot 3.0.3 hoeven dus niet eerst; media met 3.0.4 wel.
+- [ ] De M4 staat op R1 (gen 2) met Hop 3.0.0 zonder store-bevoegdheid
+      (HOPOS_PRIVILEGE ontbrak na de flip: fix 72370b6) en met de oude
+      SlotInfo-lus voor nieuwe plaatsingen (fix 425f192): de bundel
+      `hopos-apple-R2.flip` draagt beide, of de knop voor een koude boot.
+
 - [ ] **Op ijzer te toetsen na de opruiming van 1 en 2 oktober** (zo'n 5300
       regels minder in acht groepen, alles host en QEMU groen; de nodes
       zijn niet aangeraakt). Gedaan 02-10 ochtend op de Pi 4 (OP1: adoptie
