@@ -40,8 +40,6 @@ pub(crate) struct Hw {
     pub(crate) arena: Arena,
     /// Nanoseconden; ook de wachtlus van TERMINATE loopt erop.
     pub(crate) now: fn() -> u64,
-    /// Elk bericht van de firmware, als hij gezet is (bring-up).
-    pub(crate) trace: Option<fn(u16, &[u8])>,
 }
 
 /// Een buffer die bij de firmware ligt; `id` is de `host_handle` die de

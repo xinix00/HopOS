@@ -75,9 +75,6 @@ impl Ses {
                 Ok(None) => return,
                 Ok(Some((code, n))) => {
                     let body = buf.get(..n).unwrap_or(&[]);
-                    if let Some(t) = hw.trace {
-                        t(code, body);
-                    }
                     self.handle_message(hw, code, body);
                 }
             }
@@ -108,7 +105,6 @@ impl Ses {
                 self.publish_layout();
             }
             RESP_ERROR => {
-                // De tekst achter de code is voor de trace; de code gaat mee.
                 self.fail(Error::Firmware {
                     code: get32(body, 0),
                 });

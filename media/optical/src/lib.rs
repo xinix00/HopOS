@@ -5,22 +5,21 @@
 //! BOT is drie bulk-transfers per opdracht, altijd in die volgorde: een
 //! commandowrapper (CBW) eruit, de data heen of terug, een statuswrapper
 //! (CSW) terug. Wat hier NIET in zit is USB: dit crate kent alleen een
-//! [`Transport`] met twee pijpen en een uitweg. De xHCI-stack is van het
-//! gui-spoor (`driver/usb`), en zo is de hele commandolaag testbaar zonder
-//! ijzer.
+//! [`asynchronous::Transport`] met twee pijpen en een uitweg. De xHCI-stack
+//! is van het gui-spoor (`driver/usb`), en zo is de hele commandolaag
+//! testbaar zonder ijzer.
 //!
-//! Geport is de transportlaag: [`Bot::execute`] (grenzen, één richting,
-//! geen herhaling), de CSW-toetsen (signature, tag, residu, status), de
-//! reset-recovery op elk pad waar het gesprek zoek is, en REQUEST SENSE. De
-//! MMC-laag erboven (INQUIRY, GET CONFIGURATION, READ(10), SET STREAMING,
-//! `read_at` over sectoren van 2048 bytes) volgt met de USB-stack; zie
-//! docs/media.md.
+//! [`asynchronous::Bot`] is de transportlaag: grenzen, één richting, geen
+//! herhaling, de CSW-toetsen (signature, tag, residu, status), de
+//! reset-recovery op elk pad waar het gesprek zoek is, en REQUEST SENSE.
+//! [`mmc::Drive`] staat erboven: openen, de maat en READ(10) over sectoren
+//! van 2048 bytes.
 //!
 //! # Eigendom
 //!
-//! Een [`Bot`] bezit zijn transport en zijn tag-teller en is van één taak;
-//! Go's `commandMu` bestaat niet, want `&mut self` IS "één commando
-//! tegelijk".
+//! Een [`asynchronous::Bot`] bezit zijn transport en zijn tag-teller en is
+//! van één taak; Go's `commandMu` bestaat niet, want `&mut self` IS "één
+//! commando tegelijk".
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -38,19 +37,6 @@ use core::fmt;
 
 pub mod asynchronous;
 pub mod mmc;
-
-/// Wat een USB-apparaat met bulk-only transport levert.
-pub trait Transport {
-    /// Stuurt bytes naar de BULK-OUT-endpoint.
-    fn out(&mut self, data: &[u8]) -> Result<(), UsbError>;
-    /// Haalt hoogstens `buf.len()` bytes van de BULK-IN-endpoint; korter mag.
-    fn input(&mut self, buf: &mut [u8]) -> Result<usize, UsbError>;
-    /// Gooit de commandostaat van het apparaat weg en haalt beide endpoints
-    /// uit halted (BOT 1.0 §5.3.4).
-    fn reset_recovery(&mut self) -> Result<(), UsbError>;
-    /// Hoeveel bytes er in één keer door een pijp passen.
-    fn max_transfer(&self) -> usize;
-}
 
 /// Een fout van de USB-kant; het getal is dat van de controller.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -232,143 +218,6 @@ pub fn build_cbw(tag: u32, len: u32, input: bool, cdb: &[u8]) -> [u8; CBW_LEN] {
     b[14] = n as u8;
     b[15..15 + n].copy_from_slice(&cdb[..n]);
     b
-}
-
-/// Eén drive achter een bulk-only transport.
-pub struct Bot<T> {
-    t: T,
-    tag: u32,
-}
-
-impl<T: Transport> Bot<T> {
-    /// Een gesprek over `t`.
-    pub fn new(t: T) -> Bot<T> {
-        Bot { t, tag: 0 }
-    }
-
-    /// De transport, voor wie hem terug wil.
-    pub fn transport(&mut self) -> &mut T {
-        &mut self.t
-    }
-
-    /// Wisselt één SCSI-commando uit; geeft de bytes van de datafase, met de
-    /// sense als fout bij CHECK CONDITION. Hier wordt nooit herhaald: een
-    /// vendor-commando kan de staat van de drive veranderen ook als zijn
-    /// antwoord verloren gaat.
-    pub fn execute(&mut self, cdb: &[u8], data: Data<'_>) -> Result<usize> {
-        if cdb.is_empty() || cdb.len() > 16 {
-            return Err(Error::Invalid);
-        }
-        let max = self.t.max_transfer();
-        if data.len() > max {
-            return Err(Error::TooLarge {
-                len: data.len(),
-                max,
-            });
-        }
-        let (n, status) = self.exchange(cdb, data)?;
-        match status {
-            Status::Passed => Ok(n),
-            Status::Failed => Err(Error::Check(self.sense()?)),
-        }
-    }
-
-    /// REQUEST SENSE: waarom zei de drive nee?
-    pub fn sense(&mut self) -> Result<Sense> {
-        let mut buf = [0u8; 64];
-        let cdb = [OP_REQUEST_SENSE, 0, 0, 0, buf.len() as u8, 0];
-        let (n, status) = self.exchange(&cdb, Data::In(&mut buf))?;
-        if status != Status::Passed || n < 8 {
-            return Err(Error::NoSense);
-        }
-        Sense::parse(&buf[..n]).ok_or(Error::NoSense)
-    }
-
-    /// Reset en geeft `e` terug; faalt de reset ook, dan die fout.
-    fn reset(&mut self, e: Error) -> Error {
-        match self.t.reset_recovery() {
-            Ok(()) => e,
-            Err(r) => Error::Reset(r),
-        }
-    }
-
-    /// De drie fasen van één commando.
-    fn exchange(&mut self, cdb: &[u8], data: Data<'_>) -> Result<(usize, Status)> {
-        self.tag = self.tag.wrapping_add(1);
-        let tag = self.tag;
-        let len = data.len();
-        let input = matches!(data, Data::In(_));
-        if let Err(e) = self.t.out(&build_cbw(tag, len as u32, input, cdb)) {
-            // Het commando kwam niet eens weg: opnieuw beginnen is het enige
-            // eerlijke antwoord, anders wacht de drive op data die nooit komt.
-            return Err(self.reset(Error::Command(e)));
-        }
-        // Een gestalde datafase is hoe een drive "dat commando ken ik niet"
-        // zegt; de reden staat in de status die hierna komt.
-        let (mut n, data_err) = match data {
-            Data::None => (0, None),
-            Data::Out(b) => match self.t.out(b) {
-                Ok(()) => (b.len(), None),
-                Err(e) => (0, Some(e)),
-            },
-            Data::In(b) => match self.t.input(b) {
-                Ok(k) => (k.min(b.len()), None),
-                Err(e) => (0, Some(e)),
-            },
-        };
-        let (status, residue) = match self.status(tag) {
-            Ok(s) => s,
-            Err(e) => return Err(self.reset(e)),
-        };
-        if residue as usize > len {
-            return Err(self.reset(Error::Status {
-                at: 8,
-                got: residue,
-            }));
-        }
-        n = n.min(len - residue as usize);
-        match (status, data_err) {
-            (Some(Status::Passed), Some(e)) => Err(Error::Data(e)),
-            (Some(s), _) => Ok((n, s)),
-            (None, _) => Err(self.reset(Error::Phase)),
-        }
-    }
-
-    /// Leest en toetst de CSW; `None` als status is phase error.
-    fn status(&mut self, tag: u32) -> Result<(Option<Status>, u32)> {
-        let mut csw = [0u8; CSW_LEN];
-        // Eén herkansing: de spec schrijft voor dat een gestalde
-        // status-endpoint vrijgemaakt wordt en de CSW daarna alsnog komt.
-        let n = match self.t.input(&mut csw) {
-            Ok(n) => n,
-            Err(_) => self.t.input(&mut csw).map_err(Error::StatusTransport)?,
-        };
-        let le = |i: usize| u32::from_le_bytes([csw[i], csw[i + 1], csw[i + 2], csw[i + 3]]);
-        if n < CSW_LEN {
-            return Err(Error::Status {
-                at: 0,
-                got: n as u32,
-            });
-        }
-        if le(0) != CSW_SIGNATURE {
-            return Err(Error::Status { at: 0, got: le(0) });
-        }
-        if le(4) != tag {
-            return Err(Error::Status { at: 4, got: le(4) });
-        }
-        let status = match csw[12] {
-            0 => Some(Status::Passed),
-            1 => Some(Status::Failed),
-            2 => None,
-            s => {
-                return Err(Error::Status {
-                    at: 12,
-                    got: u32::from(s),
-                });
-            }
-        };
-        Ok((status, le(8)))
-    }
 }
 
 #[cfg(test)]

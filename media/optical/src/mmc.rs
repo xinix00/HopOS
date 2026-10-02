@@ -9,50 +9,26 @@ use crate::{
 pub const SECTOR: usize = 2048;
 /// Een leescommando blijft klein genoeg voor herstel en netwerkbeurten.
 pub const READ_BYTES: usize = 32 << 10;
-/// Eén drive, inclusief ongewijzigde INQUIRY-identiteit.
+/// Eén drive.
 pub struct Drive<T> {
     bot: Bot<T>,
-    inquiry: [u8; 36],
 }
 impl<T: Transport> Drive<T> {
     /// Opent uitsluitend een optical peripheral (MMC type 5).
     pub async fn open(t: T) -> Result<Self> {
-        let mut s = Self {
-            bot: Bot::new(t),
-            inquiry: [0; 36],
-        };
-        let n = s
-            .bot
-            .execute(&[0x12, 0, 0, 0, 36, 0], Data::In(&mut s.inquiry))
+        let mut bot = Bot::new(t);
+        let mut inquiry = [0; 36];
+        let n = bot
+            .execute(&[0x12, 0, 0, 0, 36, 0], Data::In(&mut inquiry))
             .await?;
-        if n != 36 || s.inquiry[0] & 31 != 5 {
+        if n != 36 || inquiry[0] & 31 != 5 {
             return Err(Error::Invalid);
         }
-        Ok(s)
-    }
-    /// Ruwe identiteit, bruikbaar voor een firmwarefingerprint.
-    pub fn inquiry(&self) -> &[u8; 36] {
-        &self.inquiry
+        Ok(Self { bot })
     }
     /// De geserialiseerde BOT voor expliciete apparaatcommando's.
     pub fn bot(&mut self) -> &mut Bot<T> {
         &mut self.bot
-    }
-    /// Eén TEST UNIT READY; de caller bepaalt wachten en de deadline.
-    pub async fn ready(&mut self) -> Result {
-        self.bot.execute(&[0; 6], Data::None).await.map(|_| ())
-    }
-    /// Profiel van het geplaatste medium.
-    pub async fn profile(&mut self) -> Result<u16> {
-        let mut b = [0; 8];
-        let n = self
-            .bot
-            .execute(&[0x46, 0, 0, 0, 0, 0, 0, 0, 8, 0], Data::In(&mut b))
-            .await?;
-        if n != 8 {
-            return Err(Error::Invalid);
-        }
-        Ok(u16::from_be_bytes([b[6], b[7]]))
     }
     /// Capaciteit, zonder overloop bij de READ CAPACITY(10)-sentinel.
     pub async fn size(&mut self) -> Result<u64> {
@@ -71,13 +47,6 @@ impl<T: Transport> Drive<T> {
             return Err(Error::Invalid);
         }
         Ok((u64::from(last) + 1) * u64::from(size))
-    }
-    /// Vraagt maximale leessnelheid; een weigering is zichtbaar aan de caller.
-    pub async fn maximum_speed(&mut self) -> Result {
-        self.bot
-            .execute(&[0xbb, 0, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0], Data::None)
-            .await
-            .map(|_| ())
     }
     /// Leest één begrensde sectorreeks. Geen verborgen retries na discwissels.
     pub async fn sectors(&mut self, lba: u32, dst: &mut [u8]) -> Result {
@@ -99,12 +68,11 @@ impl<T: Transport> Drive<T> {
         }
         Ok(())
     }
-    /// Onuitgelijnde bytelezing. `size` hoort bij de gecontroleerde mediumidentiteit.
-    /// Elke directe transfer is maximaal 32 KiB; een randsector staat op de stack.
-    pub async fn read_at(&mut self, size: u64, off: u64, dst: &mut [u8]) -> Result<usize> {
-        let n = dst
-            .len()
-            .min(usize::try_from(size.saturating_sub(off)).unwrap_or(usize::MAX));
+    /// Onuitgelijnde bytelezing; READ(10) toetst zelf het bereik van het
+    /// medium. Elke directe transfer is maximaal 32 KiB; een randsector staat
+    /// op de stack.
+    pub async fn read_at(&mut self, off: u64, dst: &mut [u8]) -> Result<usize> {
+        let n = dst.len();
         let mut done = 0;
         while done < n {
             let at = off.checked_add(done as u64).ok_or(Error::Invalid)?;

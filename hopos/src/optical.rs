@@ -295,7 +295,7 @@ async fn handle(
                 .min(out.len())
                 .min(32 << 10);
             drive
-                .read_at(u64::from(u32::MAX) * 2048, c.off, &mut out[..n])
+                .read_at(c.off, &mut out[..n])
                 .await
                 .map(|n| (0, n))
                 .map_err(optical_error)

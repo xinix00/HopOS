@@ -96,21 +96,6 @@ pub(crate) fn mbps(bytes: u64, ns: u64) -> f64 {
     bytes as f64 * 1000.0 / ns as f64
 }
 
-/// Een `ip:poort` uit de env (`BENCH_PEER`).
-pub(crate) fn parse_peer(s: &str) -> Option<([u8; 4], u16)> {
-    let (ip, port) = s.trim().rsplit_once(':')?;
-    let mut out = [0u8; 4];
-    let mut parts = ip.split('.');
-    for o in &mut out {
-        *o = parts.next()?.parse().ok()?;
-    }
-    if parts.next().is_some() {
-        return None;
-    }
-    let port = port.parse::<u16>().ok().filter(|p| *p != 0)?;
-    Some((out, port))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,14 +140,5 @@ mod tests {
     fn mbps_is_decimal() {
         assert!((mbps(1_000_000, 1_000_000_000) - 1.0).abs() < 1e-9);
         assert_eq!(mbps(5, 0), 0.0);
-    }
-
-    #[test]
-    fn peers_parse() {
-        assert_eq!(parse_peer("10.100.0.3:9000"), Some(([10, 100, 0, 3], 9000)));
-        assert_eq!(parse_peer("10.100.0:9000"), None);
-        assert_eq!(parse_peer("10.100.0.3.4:9000"), None);
-        assert_eq!(parse_peer("10.100.0.3:0"), None);
-        assert_eq!(parse_peer("host:80"), None);
     }
 }

@@ -61,8 +61,11 @@
 #   BOARD=uefi tools/qemu-test-flip.sh      dezelfde flip onder EDK2: de kern als
 #                                           BOOTAA64.EFI (image/uefi-run.sh), Hop
 #                                           als hopos-stage.elf op de ESP, de
-#                                           bundel van image/flip-bundle.sh uefi
-#                                           (tools/qemu-uefi-flip-test.sh)
+#                                           bundel van image/flip-bundle.sh uefi,
+#                                           TIMEOUT=180; plus wat alleen daar kan
+#                                           misgaan: de feitenpagina van de stub
+#                                           (board/uefi/src/flip.rs) en de
+#                                           PIE-basis (docs/flip.md)
 #   MISMATCH=1 tools/qemu-test-flip.sh      de weigering: dezelfde bundel met een
 #                                           andere switch-code-som (en dus een
 #                                           andere sha256). Groen alleen als de
@@ -288,9 +291,12 @@ echo "== bouwen ($BOARD, $MODE): kern A (stempel A), bundel B (stempel B), appsp
 cargo build --quiet --release --target "$TARGET" -p appspike
 HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
 if [ "$BOARD" = uefi ]; then
-	# De ESP van kern A met Hop als gestagede bewoner (rol hop).
+	# De ESP van kern A met Hop als gestagede bewoner (rol hop). Alleen virt
+	# zet voor Hop zelf QEMU_CFG achter de config (kern::nodecfg, 01-10);
+	# hier staat de insecure-regel in hopos.cfg, anders weigert Hop zijn API.
 	ESP="$ART/esp"
-	HOPOS_STAMP=A BUILD_ONLY=1 ESP="$ESP" APP="$HOP_ELF" ROLE=hop \
+	printf 'hopos.insecure=1\n' >"$ART/hopos.cfg"
+	HOPOS_STAMP=A BUILD_ONLY=1 ESP="$ESP" APP="$HOP_ELF" ROLE=hop CFG="$ART/hopos.cfg" \
 		sh "$DIR/image/uefi-run.sh" 2>&1 | sed 's/^/   /'
 	[ -e "$ESP/EFI/BOOT/BOOTAA64.EFI" ] || {
 		echo "ROOD: geen BOOTAA64.EFI"

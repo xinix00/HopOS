@@ -453,6 +453,13 @@ fn budget_env_and_address_parsing() {
     assert_eq!(parse_ip4("1.1.1"), None);
     assert_eq!(parse_ip4("1.1.1.1.1"), None);
     assert_eq!(parse_ip4("1.1.1.256"), None);
+    assert_eq!(parse_addr("10.100.0.3:9000"), Some(([10, 100, 0, 3], 9000)));
+    assert_eq!(parse_addr(" 10.100.0.1:10100\n"), Some((HOST, 10100)));
+    assert_eq!(parse_addr("10.100.0.1"), None);
+    assert_eq!(parse_addr("10.100.0:9000"), None);
+    assert_eq!(parse_addr("10.100.0.3.4:9000"), None);
+    assert_eq!(parse_addr("10.100.0.3:0"), None);
+    assert_eq!(parse_addr("node:80"), None);
     let c = slot_config(3, 2 << 20);
     assert_eq!(
         (c.ip, c.mac, c.gw, c.prefix),

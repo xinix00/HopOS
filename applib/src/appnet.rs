@@ -259,6 +259,13 @@ pub fn parse_ip4(s: &str) -> Option<[u8; 4]> {
     parts.next().is_none().then_some(ip)
 }
 
+/// Een `ip:poort` als `10.100.0.3:9000`; poort 0 is geen adres.
+#[must_use]
+pub fn parse_addr(s: &str) -> Option<([u8; 4], u16)> {
+    let (ip, port) = s.trim().rsplit_once(':')?;
+    Some((parse_ip4(ip)?, port.parse().ok().filter(|&p| p != 0)?))
+}
+
 /// De stack-config van slot `slot` met budget `budget`: het slot-IP en de
 /// MAC uit het netplan, de kern als gateway.
 #[must_use]

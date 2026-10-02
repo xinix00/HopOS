@@ -13,7 +13,7 @@
 //! klein is, geeft een fout in het rapport, geen paniek.
 
 use crate::Shared;
-use crate::report::{Report, pct};
+use crate::report::{Report, pct, secs};
 use crate::run::{Params, note};
 use alloc::vec::Vec;
 use applib::heap::HEAP;
@@ -39,11 +39,6 @@ const LAT_SIZES: [(usize, &str); 5] = [
 
 /// Zoveel meettijd per working-set.
 const LAT_TIME_NS: u64 = 80_000_000;
-
-/// Nanoseconden als seconden, minstens een nanoseconde.
-fn secs(ns: u64) -> f64 {
-    ns.max(1) as f64 / 1e9
-}
 
 /// Een buffer van `n` elementen `v`, of `None` als de heap nee zei.
 fn buffer<T: Copy>(n: usize, v: T) -> Option<Vec<T>> {

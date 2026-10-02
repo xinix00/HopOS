@@ -160,7 +160,7 @@ op de deadline zet; ze wisselen elkaar af op dezelfde core.
 tools/qemu-uefi-test.sh` (EDK2, 4 cores, de hele appspike-keten in twee
 slots en de toetsen van buiten) is drie keer groen, ook met de kern
 verhuisd naar core 2 (`hopos.oscore=2`), en `FEATURES=vhe CPU=neoverse-n1
-sh tools/qemu-uefi-flip-test.sh` (Hop als bewoner van de OS-core, de flip
+BOARD=uefi sh tools/qemu-test-flip.sh` (Hop als bewoner van de OS-core, de flip
 met de som over de vhe-blobs) is groen. De kale nVHE-weg (`sh
 tools/qemu-uefi-test.sh`, cortex-a57) is ongewijzigd. Het kernvenster van
 de O6N staat sinds 29-09 echt op 0x8800_0000: `window-8000` werd tot dan

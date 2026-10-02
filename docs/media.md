@@ -65,7 +65,6 @@ evict valt de tabel, vallen de handvatten, en sluit de engine de sessies:
 | (nieuw) | `driver/codec`, `applib/src/codec.rs` | nummering gelijk aan Go, het graveyard; de client spreekt de draad van de kern en herhaalt nooit; de codec uit de extensie (Go: `codecFromName`) |
 | `slots/partmem_test.go` (`ReserveDevice`) | `kern/src/slots.rs` `a_device_block_leaves_the_pool_and_comes_back` | het blok via de actor: op de korrel, van de capaciteit af, nooit in een partitie, een weigering met de getallen, en terug |
 | (nieuw) | `kern/src/rpc/tests.rs` `the_kern_reads_a_firmware_blob_without_a_slot` | de kern-lezing op de nep-hopfs: een blob van 300 KB heel door brievenbus en actor, te groot zonder allocatie, de naam die mist als `NoEnt`, in stukken met dezelfde buffers, de roots van de taken dicht, bevroren is `Busy` |
-| (nieuw) | `media/mve/src/tests.rs` | de firmwarelijst is precies wat `fw_name` vraagt |
 | (nieuw) | `apps/decode` | buffers op hele pagina's en terug te vinden op hun afstand, de fps en MB/s van de meting, de codec uit de naam van de stream |
 
 ## De drie haken
@@ -146,15 +145,14 @@ De optische drive (`media/optical`, Go `OLD/metal/media/driver/optical`) is
 in code aangesloten: de bulk-only-transportlaag (CBW, datafase, CSW met de
 toetsen op signature, tag, residu en status, reset-recovery, de ene
 herkansing op een gestalde status, REQUEST SENSE) tegen een
-`Transport`-trait, met zeven toetsen tegen een nep-drive. Daarnaast staat
-een async vorm van dezelfde laag (`media/optical/src/asynchronous.rs`) met
-de MMC-laag erboven (`mmc.rs`: openen, de maat, READ(10) over sectoren van
-2048 bytes) en de device-command-ABI (`OP_DEVICE_COMMAND`,
-`abi/src/hopabi/device.rs`). Een app bereikt een drive alleen via een
+async `Transport`-trait (`media/optical/src/asynchronous.rs`) met zeven
+toetsen tegen een nep-drive, de MMC-laag erboven (`mmc.rs`: openen, de
+maat, READ(10) over sectoren van 2048 bytes) en de device-command-ABI
+(`OP_DEVICE_COMMAND`, `abi/src/hopabi/device.rs`). Een app bereikt een drive alleen via een
 expliciete mount op `/devices/discN` (`kern/src/deviceabi.rs`); de
 optical-owner (`hopos/src/optical.rs`, feature `media`) is een eigen actor
 naast hopfs en leent zijn transfers één tegelijk aan de USB-eigenaar, die
-dus nooit in de hopfs-actor wacht. Die async laag heeft nog geen eigen
+dus nooit in de hopfs-actor wacht. De MMC-laag heeft nog geen eigen
 hosttest en is niet op QEMU of ijzer gedraaid. De owner start ook wanneer
 geen USB-controller beschikbaar is, zodat een discaanvraag dan `NoEnt` geeft
 in plaats van te blijven wachten. BOT-reset heeft een eigen begrensde deadline;

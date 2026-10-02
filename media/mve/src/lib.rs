@@ -140,12 +140,7 @@ impl<F: Firmware> Device<F> {
         dev::mb();
         regs.enable.write(1);
         Ok(Device {
-            hw: Hw {
-                regs,
-                arena,
-                now,
-                trace: None,
-            },
+            hw: Hw { regs, arena, now },
             fw,
             graves,
             ses,
@@ -173,46 +168,48 @@ impl<F: Firmware> Device<F> {
     pub fn arena(&self) -> &Arena {
         &self.hw.arena
     }
-
-    /// Zet de trace: elk bericht van de firmware (bring-up). Zonder te zien
-    /// wát de firmware zegt, is een stille sessie niet van een verkeerd
-    /// begrepen sessie te onderscheiden.
-    pub fn set_trace(&mut self, t: Option<fn(u16, &[u8])>) {
-        self.hw.trace = t;
-    }
 }
 
 /// Elke firmware die de Linlon V8 kent: elf decoders en vijf encoders, de
 /// zestien `.fwb`-bestanden die Lumen van Sky1-Linux/sky1-firmware haalt
-/// (OLD/docs/media-o6n.md). De kern leest ze bij `codec::up` van het volume;
-/// de volgorde is die van [`fw_name`].
-pub const FIRMWARE: [&str; 16] = [
-    "h264dec", "hevcdec", "av1dec", "vp8dec", "vp9dec", "mpeg2dec", "mpeg4dec", "vc1dec",
-    "jpegdec", "avsdec", "avs2dec", "h264enc", "hevcenc", "vp8enc", "vp9enc", "jpegenc",
+/// (OLD/docs/media-o6n.md), bij codec en richting.
+const TABLE: [(Direction, Codec, &str); 16] = [
+    (Direction::Decode, Codec::H264, "h264dec"),
+    (Direction::Decode, Codec::Hevc, "hevcdec"),
+    (Direction::Decode, Codec::Av1, "av1dec"),
+    (Direction::Decode, Codec::Vp8, "vp8dec"),
+    (Direction::Decode, Codec::Vp9, "vp9dec"),
+    (Direction::Decode, Codec::Mpeg2, "mpeg2dec"),
+    (Direction::Decode, Codec::Mpeg4, "mpeg4dec"),
+    (Direction::Decode, Codec::Vc1, "vc1dec"),
+    (Direction::Decode, Codec::Jpeg, "jpegdec"),
+    (Direction::Decode, Codec::Avs, "avsdec"),
+    (Direction::Decode, Codec::Avs2, "avs2dec"),
+    (Direction::Encode, Codec::H264, "h264enc"),
+    (Direction::Encode, Codec::Hevc, "hevcenc"),
+    (Direction::Encode, Codec::Vp8, "vp8enc"),
+    (Direction::Encode, Codec::Vp9, "vp9enc"),
+    (Direction::Encode, Codec::Jpeg, "jpegenc"),
 ];
+
+/// De namen uit de tabel: wat de kern bij `codec::up` van het volume leest.
+pub const FIRMWARE: [&str; 16] = {
+    let mut out = [""; 16];
+    let mut i = 0;
+    while i < TABLE.len() {
+        out[i] = TABLE[i].2;
+        i += 1;
+    }
+    out
+};
 
 /// De firmwarenaam bij codec en richting (`hevcdec`, `h264enc`); `None`:
 /// dit ijzer doet het niet.
 pub fn fw_name(c: Codec, dir: Direction) -> Option<&'static str> {
-    match (dir, c) {
-        (Direction::Decode, Codec::H264) => Some("h264dec"),
-        (Direction::Decode, Codec::Hevc) => Some("hevcdec"),
-        (Direction::Decode, Codec::Av1) => Some("av1dec"),
-        (Direction::Decode, Codec::Vp8) => Some("vp8dec"),
-        (Direction::Decode, Codec::Vp9) => Some("vp9dec"),
-        (Direction::Decode, Codec::Mpeg2) => Some("mpeg2dec"),
-        (Direction::Decode, Codec::Mpeg4) => Some("mpeg4dec"),
-        (Direction::Decode, Codec::Vc1) => Some("vc1dec"),
-        (Direction::Decode, Codec::Jpeg) => Some("jpegdec"),
-        (Direction::Decode, Codec::Avs) => Some("avsdec"),
-        (Direction::Decode, Codec::Avs2) => Some("avs2dec"),
-        (Direction::Encode, Codec::H264) => Some("h264enc"),
-        (Direction::Encode, Codec::Hevc) => Some("hevcenc"),
-        (Direction::Encode, Codec::Vp8) => Some("vp8enc"),
-        (Direction::Encode, Codec::Vp9) => Some("vp9enc"),
-        (Direction::Encode, Codec::Jpeg) => Some("jpegenc"),
-        _ => None,
-    }
+    TABLE
+        .iter()
+        .find(|&&(d, k, _)| d == dir && k == c)
+        .map(|&(_, _, n)| n)
 }
 
 /// Het pixelformaat als bitveldcode van de firmware.

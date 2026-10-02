@@ -91,7 +91,7 @@ opties).
 | Board | Bundel | Koud adres | Staging, blob, recorder, trampoline | Bewezen |
 | --- | --- | --- | --- | --- |
 | QEMU virt | `flip-bundle.sh virt` | `0x4020_0000` (link.ld) | de staging van QEMU op `0xB020_0000`, de boot-scratch-pagina's op `0xB000_0000` | `sh tools/qemu-test-flip.sh`, ook `MISMATCH=1`, `COLD=1` en `OSCORE=1` |
-| UEFI (EDK2) | `flip-bundle.sh uefi` | de basis die de firmware koos (`__efi_head`), binnen `SizeOfImage` | de loader-regio van het kernvenster (`0x5000_0000` + 256 MB) | `sh tools/qemu-uefi-flip-test.sh`, ook `COLD=1` |
+| UEFI (EDK2) | `flip-bundle.sh uefi` | de basis die de firmware koos (`__efi_head`), binnen `SizeOfImage` | de loader-regio van het kernvenster (`0x5000_0000` + 256 MB) | `BOARD=uefi sh tools/qemu-test-flip.sh`, ook `COLD=1` |
 | Orion O6N | `flip-bundle.sh o6n` | idem | idem, venster op `0x8800_0000` | nog niet op ijzer |
 | Ampere Altra | `flip-bundle.sh altra` | idem | idem, venster op `0x8800_0000` | nog niet op ijzer |
 | Pi 4, Pi 5 | `flip-bundle.sh rpi4` / `rpi5` | `0x80000` (link-raspi.ld) | achter de initramfs van Hop op `0x0F20_0000`, de boot-scratch op `0x0F10_0000` | bundels gebouwd; de ingang op QEMU raspi4b (`BOARD=rpi4 sh tools/qemu-test-flip.sh`); nog niet op ijzer |
@@ -345,7 +345,7 @@ die zelf niet opkomt.
 - `BOARD=rpi4 sh tools/qemu-test-flip.sh`: de flip-ingang van de Pi op QEMU
   raspi4b (geen net, dus geen flip): core 1 met de registers van de
   trampoline komt tot kmain met dezelfde DTB; zonder merkteken parkeert hij.
-- `sh tools/qemu-uefi-flip-test.sh`: hetzelfde als de eerste onder EDK2,
+- `BOARD=uefi sh tools/qemu-test-flip.sh`: hetzelfde als de eerste onder EDK2,
   met de PIE-basis en de feitenpagina; `COLD=1` ervoor is de koude flip
   onder EDK2 (Hop koud uit `hopos-stage.elf`, dat de feitenpagina terugwijst).
   Groen 29-09, beide.

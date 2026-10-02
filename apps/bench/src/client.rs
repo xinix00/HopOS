@@ -12,7 +12,7 @@
 //! - `BENCH=push`: `BENCH_BYTES` naar de peer (`sink`), in MB/s, met de
 //!   tijd die de peer zelf mat.
 
-use crate::proto::{self, CMD_MAX, PATTERN_LEN, parse_peer, percentile};
+use crate::proto::{self, CMD_MAX, PATTERN_LEN, percentile};
 use crate::serve::format_into;
 use alloc::vec::Vec;
 use applib::appnet::{self, NetError, TcpStream};
@@ -54,7 +54,7 @@ pub(crate) enum Role {
 /// Draait `role` tegen de peer uit de env en zet de uitkomst op het log.
 /// De exitcode van de app: 0 als de meting slaagde.
 pub(crate) async fn run(app: &'static App, role: Role) -> u64 {
-    let Some((ip, port)) = app.env("BENCH_PEER").and_then(parse_peer) else {
+    let Some((ip, port)) = app.env("BENCH_PEER").and_then(appnet::parse_addr) else {
         log!("bench: BENCH_PEER is not ip:port HOPOS_BENCH_FAIL role={role:?}");
         return 1;
     };

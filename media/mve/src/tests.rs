@@ -1199,22 +1199,6 @@ fn describe_en_state_dragen_de_getallen() {
     drop(s);
 }
 
-/// De lijst die de kern van het volume leest, is precies wat `fw_name` ooit
-/// vraagt: geen blob te veel (die niemand opent) en geen te weinig (een
-/// codec die altijd "no firmware" zou zeggen).
-#[test]
-fn de_firmwarelijst_is_die_van_fw_name() {
-    let mut gevraagd: Vec<&str> = Vec::new();
-    for dir in [Direction::Decode, Direction::Encode] {
-        for c in Codec::ALL {
-            if let Some(n) = fw_name(c, dir) {
-                gevraagd.push(n);
-            }
-        }
-    }
-    assert_eq!(gevraagd.as_slice(), FIRMWARE.as_slice());
-}
-
 #[test]
 fn missing_firmware_can_be_loaded_without_reprobing_the_device() {
     let mut f = FakeVpu::new(4, 2);

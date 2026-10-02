@@ -16,18 +16,18 @@
 //! hooguit één test tegelijk, dus nooit twee runs op dezelfde tellers.
 
 use crate::Shared;
-use crate::report::{ERR_CAP, Report, Short, pct};
+use crate::report::{ERR_CAP, Report, Short, pct, secs};
 use crate::run::{self, BOARD, Params, Test, note};
 use alloc::string::String;
 use alloc::vec::Vec;
 use applib::appnet::{self, TcpStream};
 use applib::rt::Exec;
-use applib::tcp::TcpConn;
+use applib::tcp::{Dialer, TcpConn};
 use applib::{EXEC, clock};
 use core::cell::{Cell, RefCell};
 use core::fmt::Write;
 use core::time::Duration;
-use leanhttp::{Call, Dial, Exchange, Header, Target};
+use leanhttp::{Call, Exchange, Header};
 use sync::{Either, Local, select};
 
 /// Een publiek bestand van 100 MB over plain http (leanhttp linkt bewust
@@ -51,46 +51,12 @@ const SINK_BUF: usize = 64 << 10;
 /// system-poort (de enige poort die de gateway zeker open heeft).
 const RTT_PORT: u16 = applib::sys::ADDRESS.1;
 
-/// Verbindingen voor leanhttp over de stack van de app: de naam via de
-/// DNS-server uit de env (een adres meteen), dan TCP met een termijn.
-struct Dialer {
-    exec: &'static Exec,
-}
-
-impl Dial for Dialer {
-    type Conn = TcpConn;
-
-    async fn dial(&mut self, t: Target<'_>) -> leanhttp::Result<TcpConn> {
-        let ip = appnet::resolve(t.host)
-            .await
-            .map_err(|_| leanhttp::Error::Connect)?;
-        let s = TcpStream::connect_timeout(ip, t.port, CONNECT)
-            .await
-            .map_err(|_| leanhttp::Error::Connect)?;
-        Ok(TcpConn::new(s, self.exec))
-    }
-}
-
-/// Een `ip:poort` als adres.
-pub(crate) fn parse_addr(s: &str) -> Option<([u8; 4], u16)> {
-    let (ip, port) = s.rsplit_once(':')?;
-    Some((
-        appnet::parse_ip4(ip)?,
-        port.parse().ok().filter(|&p| p != 0)?,
-    ))
-}
-
 /// Een kopie van `s`, of `None` als de heap nee zei.
 fn owned(s: &str) -> Option<String> {
     let mut o = String::new();
     o.try_reserve_exact(s.len()).ok()?;
     o.push_str(s);
     Some(o)
-}
-
-/// Nanoseconden als seconden, minstens een nanoseconde.
-fn secs(ns: u64) -> f64 {
-    ns.max(1) as f64 / 1e9
 }
 
 /// De tellers van één rx-run.
@@ -245,7 +211,10 @@ async fn rx_one(exec: &'static Exec, url: &str, share: u64) -> Result<(), RxErro
         header_timeout: Some(STALL),
         ..Call::default()
     };
-    let mut d = Dialer { exec };
+    let mut d = Dialer {
+        exec,
+        connect: CONNECT,
+    };
     let mut resp = leanhttp::fetch(&mut d, call).await.map_err(RxError::Http)?;
     if resp.status != 200 {
         return Err(RxError::Status(resp.status));
@@ -298,7 +267,7 @@ static STORM: Local<StormState> = Local::new(StormState {
 /// stormen (tools/netmeter).
 pub(crate) async fn storm(sh: &'static Shared, r: &mut Report, p: &Params) {
     let target = match p.addr.as_deref().or(sh.storm) {
-        Some(a) => match parse_addr(a) {
+        Some(a) => match appnet::parse_addr(a) {
             Some(t) => t,
             None => {
                 r.fail(format_args!("addr {a:?} is not ip:port"));
@@ -424,7 +393,7 @@ async fn ping(exec: &'static Exec, ([a, b, c, d], port): ([u8; 4], u16)) -> Resu
 /// is de kern op 10.100.0.1 op zijn system-poort, of `?addr=ip:poort`.
 pub(crate) async fn rtt(_sh: &'static Shared, r: &mut Report, p: &Params) {
     let (ip, port) = match p.addr.as_deref() {
-        Some(a) => match parse_addr(a) {
+        Some(a) => match appnet::parse_addr(a) {
             Some(t) => t,
             None => {
                 r.fail(format_args!("addr {a:?} is not ip:port"));
@@ -606,21 +575,6 @@ pub(crate) async fn serve_sink(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn an_addr_is_ip_and_port() {
-        assert_eq!(
-            parse_addr("10.100.0.1:10100"),
-            Some(([10, 100, 0, 1], 10100))
-        );
-        assert_eq!(
-            parse_addr("192.168.1.207:8090"),
-            Some(([192, 168, 1, 207], 8090))
-        );
-        assert_eq!(parse_addr("10.100.0.1"), None);
-        assert_eq!(parse_addr("10.100.0.1:0"), None);
-        assert_eq!(parse_addr("node:80"), None);
-    }
 
     #[test]
     fn the_rtt_target_is_the_system_port_of_the_gateway() {

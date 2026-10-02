@@ -20,7 +20,7 @@
 //! Dit module bezit de system-client van één run; hij gaat met de run weg.
 
 use crate::Shared;
-use crate::report::{Report, pct};
+use crate::report::{Report, pct, secs};
 use crate::run::{Params, note};
 use alloc::vec::Vec;
 use applib::appnet::SystemClient;
@@ -63,11 +63,6 @@ pub(crate) fn storage_of(res: sys::Result<u64>) -> sys::Result<Storage> {
 /// Microseconden sinds `t0`.
 fn us_since(t0: u64) -> u32 {
     u32::try_from(clock::now_ns().saturating_sub(t0) / 1000).unwrap_or(u32::MAX)
-}
-
-/// Nanoseconden als seconden, minstens een nanoseconde.
-fn secs(ns: u64) -> f64 {
-    ns.max(1) as f64 / 1e9
 }
 
 /// Een buffer van `n` bytes, of `None`.

@@ -287,9 +287,10 @@ impl Report {
     }
 }
 
-/// Nanoseconden als seconden.
+/// Nanoseconden als seconden, minstens een nanoseconde: een deling erdoor
+/// gaat nooit door nul.
 pub(crate) fn secs(ns: u64) -> f64 {
-    ns as f64 / 1e9
+    ns.max(1) as f64 / 1e9
 }
 
 /// Een getal voor de console: drie significante cijfers is genoeg voor een

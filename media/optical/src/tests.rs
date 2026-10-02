@@ -1,8 +1,11 @@
-//! De BOT-toetsen uit `optical_test.go`, tegen een drive van een paar
-//! dozijn regels: hij spreekt bulk-only transport en antwoordt op INQUIRY,
-//! REQUEST SENSE en een commando met data naar de drive.
+//! De BOT-toetsen uit `optical_test.go` op de async [`Bot`], tegen een drive
+//! van een paar dozijn regels: hij spreekt bulk-only transport en antwoordt
+//! op INQUIRY, REQUEST SENSE en een commando met data naar de drive.
 
+use super::asynchronous::{Bot, Transport};
 use super::*;
+use core::pin::pin;
+use core::task::{Context, Poll, Waker};
 use std::collections::VecDeque;
 
 const OP_INQUIRY: u8 = 0x12;
@@ -95,7 +98,7 @@ impl Fake {
 }
 
 impl Transport for &mut Fake {
-    fn out(&mut self, data: &[u8]) -> core::result::Result<(), UsbError> {
+    async fn out(&mut self, data: &[u8]) -> core::result::Result<(), UsbError> {
         if self.want_out > 0 {
             self.want_out = 0;
             if self.data_out_fails {
@@ -111,7 +114,7 @@ impl Transport for &mut Fake {
         Ok(())
     }
 
-    fn input(&mut self, buf: &mut [u8]) -> core::result::Result<usize, UsbError> {
+    async fn input(&mut self, buf: &mut [u8]) -> core::result::Result<usize, UsbError> {
         let d = self.rx.pop_front().ok_or(UsbError(6))?;
         if d.is_empty() {
             self.stall_status = false;
@@ -122,7 +125,7 @@ impl Transport for &mut Fake {
         Ok(n)
     }
 
-    fn reset_recovery(&mut self) -> core::result::Result<(), UsbError> {
+    async fn reset_recovery(&mut self) -> core::result::Result<(), UsbError> {
         self.resets += 1;
         self.rx.clear();
         self.want_out = 0;
@@ -134,9 +137,19 @@ impl Transport for &mut Fake {
     }
 }
 
+/// Draait één commando; de nep-drive wacht nooit, dus één poll volstaat
+/// (zoals `block_on` in `kern/src/testutil.rs`).
+fn exec(b: &mut Bot<&mut Fake>, cdb: &[u8], data: Data<'_>) -> Result<usize> {
+    let mut f = pin!(b.execute(cdb, data));
+    match f.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(r) => r,
+        Poll::Pending => panic!("the fake drive never waits"),
+    }
+}
+
 fn inquiry(b: &mut Bot<&mut Fake>) -> Result<usize> {
     let mut buf = [0u8; 36];
-    let n = b.execute(&[OP_INQUIRY, 0, 0, 0, 36, 0], Data::In(&mut buf))?;
+    let n = exec(b, &[OP_INQUIRY, 0, 0, 0, 36, 0], Data::In(&mut buf))?;
     assert_eq!(buf[0], PERIPHERAL_OPTICAL);
     Ok(n)
 }
@@ -163,20 +176,23 @@ fn execute_bounds_and_directions() {
     let mut b = Bot::new(&mut f);
     let big = vec![0u8; max + 1];
     let mut bigin = vec![0u8; max + 1];
-    assert_eq!(b.execute(&[], Data::None), Err(Error::Invalid));
-    assert_eq!(b.execute(&[0; 17], Data::None), Err(Error::Invalid));
+    assert_eq!(exec(&mut b, &[], Data::None), Err(Error::Invalid));
+    assert_eq!(exec(&mut b, &[0; 17], Data::None), Err(Error::Invalid));
     assert!(matches!(
-        b.execute(&[OP_INQUIRY], Data::In(&mut bigin)),
+        exec(&mut b, &[OP_INQUIRY], Data::In(&mut bigin)),
         Err(Error::TooLarge { .. })
     ));
     assert!(matches!(
-        b.execute(&[OP_SET_STREAMING], Data::Out(&big)),
+        exec(&mut b, &[OP_SET_STREAMING], Data::Out(&big)),
         Err(Error::TooLarge { .. })
     ));
     assert_eq!(b.transport().cbws, 0, "een ongeldig commando bereikte USB");
     assert_eq!(inquiry(&mut b), Ok(36));
     let payload = [1u8, 2, 3, 4];
-    assert_eq!(b.execute(&[OP_SET_STREAMING], Data::Out(&payload)), Ok(4));
+    assert_eq!(
+        exec(&mut b, &[OP_SET_STREAMING], Data::Out(&payload)),
+        Ok(4)
+    );
     assert_eq!(b.transport().got, payload);
     let s = Sense {
         key: 5,
@@ -201,11 +217,11 @@ fn execute_uses_the_drive_transfer_residue() {
     f.residue = Some(2);
     let mut b = Bot::new(&mut f);
     assert_eq!(
-        b.execute(&[OP_SET_STREAMING], Data::Out(&[1, 2, 3, 4])),
+        exec(&mut b, &[OP_SET_STREAMING], Data::Out(&[1, 2, 3, 4])),
         Ok(2)
     );
     b.transport().residue = Some(5);
-    let r = b.execute(&[OP_SET_STREAMING], Data::Out(&[1, 2, 3, 4]));
+    let r = exec(&mut b, &[OP_SET_STREAMING], Data::Out(&[1, 2, 3, 4]));
     assert_eq!(r, Err(Error::Status { at: 8, got: 5 }));
     assert_eq!(
         b.transport().resets,
@@ -219,7 +235,7 @@ fn execute_does_not_hide_a_data_transport_failure() {
     let mut f = Fake::new();
     f.data_out_fails = true;
     let mut b = Bot::new(&mut f);
-    let r = b.execute(&[OP_SET_STREAMING], Data::Out(&[1, 2, 3, 4]));
+    let r = exec(&mut b, &[OP_SET_STREAMING], Data::Out(&[1, 2, 3, 4]));
     assert_eq!(r, Err(Error::Data(UsbError(4))));
     // De status is wel gelezen: het volgende commando loopt gewoon.
     b.transport().data_out_fails = false;
@@ -251,7 +267,7 @@ fn a_stalled_status_gets_one_second_chance() {
     let mut f = Fake::new();
     f.stall_status = true;
     let mut b = Bot::new(&mut f);
-    assert_eq!(b.execute(&[OP_SET_STREAMING], Data::None), Ok(0));
+    assert_eq!(exec(&mut b, &[OP_SET_STREAMING], Data::None), Ok(0));
     assert_eq!(b.transport().resets, 0);
 }
 

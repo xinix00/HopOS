@@ -8,13 +8,12 @@
 //! een TCP-verbinding van de app, de body in stukken zoals hij binnenkomt.
 
 use crate::Sys;
-use applib::appnet::{self, TcpStream};
 use applib::rt::Exec;
 use applib::sys::{self, MAX_CHUNK};
-use applib::tcp::TcpConn;
+use applib::tcp::{Dialer, TcpConn};
 use core::fmt;
 use core::time::Duration;
-use leanhttp::{Dial, Response, Target};
+use leanhttp::Response;
 
 /// Hoe lang een verbinding naar de server van de stream mag duren.
 const CONNECT: Duration = Duration::from_secs(10);
@@ -80,7 +79,10 @@ impl Source {
         if !is_url(name) {
             return Ok(Source::File { path: name, off: 0 });
         }
-        let mut d = Dialer { exec };
+        let mut d = Dialer {
+            exec,
+            connect: CONNECT,
+        };
         let r = leanhttp::get(&mut d, name)
             .await
             .map_err(SourceError::Http)?;
@@ -119,26 +121,6 @@ impl Source {
             n += got;
         }
         Ok(n)
-    }
-}
-
-/// Verbindingen voor leanhttp over de stack van de app: de naam via de
-/// DNS-server uit de env (een adres meteen), dan TCP met een termijn.
-struct Dialer {
-    exec: &'static Exec,
-}
-
-impl Dial for Dialer {
-    type Conn = TcpConn;
-
-    async fn dial(&mut self, t: Target<'_>) -> leanhttp::Result<TcpConn> {
-        let ip = appnet::resolve(t.host)
-            .await
-            .map_err(|_| leanhttp::Error::Connect)?;
-        let s = TcpStream::connect_timeout(ip, t.port, CONNECT)
-            .await
-            .map_err(|_| leanhttp::Error::Connect)?;
-        Ok(TcpConn::new(s, self.exec))
     }
 }
 

@@ -80,7 +80,7 @@ esac
 # FEATURES (zoals bij image/uefi-run.sh) komt achter de board-feature. Met
 # `vhe` erin draait de kern onder E2H = 1 met de VHE-switcher
 # (hopos/src/cage.rs `FLAVOR`), en gaat de som over de vhe-blobs: de proef
-# `FEATURES=vhe CPU=neoverse-n1 sh tools/qemu-uefi-flip-test.sh`.
+# `FEATURES=vhe CPU=neoverse-n1 BOARD=uefi sh tools/qemu-test-flip.sh`.
 if [ -n "${FEATURES:-}" ]; then
 	FEATURE="$FEATURE,$FEATURES"
 	case ",$FEATURES," in

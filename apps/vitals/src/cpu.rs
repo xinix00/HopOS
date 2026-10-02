@@ -17,7 +17,7 @@
 //! tegelijk, en de dispatcher laat er maar één lopen.
 
 use crate::Shared;
-use crate::report::{Report, avg};
+use crate::report::{Report, avg, secs};
 use crate::run::{Params, note};
 use alloc::vec::Vec;
 use applib::{EXEC, clock, smp};
@@ -55,11 +55,6 @@ pub(crate) fn lcg(mut acc: u64, n: u64) -> u64 {
         acc = acc.wrapping_mul(LCG_MUL).wrapping_add(k);
     }
     black_box(acc)
-}
-
-/// Nanoseconden als seconden, minstens een nanoseconde.
-fn secs(ns: u64) -> f64 {
-    ns.max(1) as f64 / 1e9
 }
 
 /// cpu: LCG-stappen per seconde op één core, met de yield die elke nette

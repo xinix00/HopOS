@@ -21,6 +21,9 @@
 #                  (HOPOS_BENCH_RTT en HOPOS_BENCH_COLD); daarna weg;
 #      last        BURN=1 met een ritme van 5 s werk / 5 s rust:
 #                  HOPOS_BENCH_BURN, met de idlestat-regels ernaast;
+#      multicast   de bench van poort 80 maakt plaats, MCAST=listen joint
+#                  224.0.0.251 (HOPOS_BENCH_UP role=mcast-listen), MCAST=send
+#                  zendt, de switch floodt: HOPOS_BENCH_MCAST recv=3;
 #      de meetlat  minstens drie HOPOS_IDLESTAT-regels.
 #   2. Zonder app, met hopos.nvmebench=1 op een verse schijf: de Go-tabel
 #      per commandomaat, sequentieel, willekeurig en hopfs
@@ -132,6 +135,7 @@ BOOT_MARKS="HOPOS_BOOT|HOPOS_IDLESTAT_ON|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_HOP_
 PLACE_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|slot 2: 1 port\\(s\\) published tcp\\+udp on the uplink: :80 HOPOS_SLOT_PUBLISH|slot 2: .*HOPOS_BENCH_UP role=serve port=80"
 NODE_MARKS="HOPOS_BENCH_PULL|HOPOS_BENCH_RTT|HOPOS_BENCH_COLD"
 BURN_MARKS="HOPOS_BENCH_UP role=burn|HOPOS_BENCH_BURN_WORK|HOPOS_BENCH_BURN$"
+MCAST_MARKS="HOPOS_BENCH_UP role=mcast-listen|HOPOS_BENCH_MCAST recv=3"
 RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_APP_PANIC|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_SLOT_PUBLISH_FAIL|HOPOS_BENCH_FAIL"
 
 START=$(date +%s)
@@ -196,6 +200,15 @@ fi
 if [ -n "$NODE_OK" ]; then
 	client burn '"BURN":"1","BURN_WORK":"5","BURN_REST":"5"' "$BURN_MARKS" && BURN_OK=1
 fi
+
+# 5. Multicast: twee jobs tegelijk, dus de bench van poort 80 gaat eerst weg.
+if [ -n "$BURN_OK" ]; then
+	stop bench >/dev/null
+	job mlisten ',"env":{"MCAST":"listen"}' >/dev/null
+	while alive && ! has 'role=mcast-listen'; do step; done
+	client msend '"MCAST":"send"' "$MCAST_MARKS" || true
+	stop mlisten >/dev/null
+fi
 sleep 1
 kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
@@ -204,7 +217,7 @@ QPID=""
 fail=0
 IFS_WAS="$IFS"
 IFS='|'
-for m in $BOOT_MARKS $PLACE_MARKS $NODE_MARKS $BURN_MARKS; do
+for m in $BOOT_MARKS $PLACE_MARKS $NODE_MARKS $BURN_MARKS $MCAST_MARKS; do
 	if has "$m"; then
 		echo "   ok  $m: $(tr -d '\r' <"$LOG" | grep -m1 -E "$m")"
 	else
