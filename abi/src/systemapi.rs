@@ -787,12 +787,15 @@ pub struct SlotInfo {
 
 /// De lengte van [`SlotInfo`] op de draad.
 pub const SLOT_INFO_LEN: usize = 128;
-/// De lengte tot en met Hop v3.0.3 (vóór d827e5b, 02-10): de velden erna
-/// zijn het gebruik (`mem_sys`, `idle_ns`, `wakes`, `cores`, `at_ns`). Een
-/// lezer met een buffer van deze maat krijgt het voorvoegsel, zodat een
-/// nieuwe kern een oudere Hop niet breekt (de Hop van de kaart overleeft
-/// een kern-flip; gemeten als TooLarge op 03-10).
-pub const SLOT_INFO_LEN_V1: usize = 64;
+/// De lengte tot en met Hop v3.0.3 (vóór d827e5b, 02-10: tot en met
+/// `image_size`); de velden erna zijn het gebruik (`mem_sys`, `idle_ns`,
+/// `wakes`, `cores`, `at_ns`). Een lezer die geen maat vraagt krijgt dit
+/// voorvoegsel, zodat een nieuwe kern een oudere Hop niet breekt (de Hop
+/// van de kaart overleeft een kern-flip; gemeten 03-10: zijn client
+/// verbreekt de verbinding op een langer antwoord en elke nieuwe
+/// plaatsing kwam in een herstartlus).
+pub const SLOT_INFO_LEN_V1: usize = 88;
+const _: () = assert!(SLOT_INFO_LEN_V1 == 88 && SLOT_INFO_LEN_V1 < SLOT_INFO_LEN);
 
 const _: () = assert!(core::mem::size_of::<SlotInfo>() == SLOT_INFO_LEN);
 field!(SlotInfo, state, 0);

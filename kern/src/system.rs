@@ -1983,18 +1983,26 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             cores: st.cage.cores,
             at_ns: st.cage.at_ns,
         };
-        fit_info(&info.encode(), data)
+        fit_info(&info.encode(), c.n, data)
     }
 }
 
-/// Het SlotInfo in de buffer van de lezer: heel, of het voorvoegsel van
-/// [`abi::systemapi::SLOT_INFO_LEN_V1`] bytes voor een Hop van vóór het
-/// gebruik per taak (die leest met een buffer van 64; de kern mag hem niet
-/// breken, want de Hop van de kaart overleeft een kern-flip). Korter is
-/// een fout.
-fn fit_info(b: &[u8; abi::systemapi::SLOT_INFO_LEN], data: &mut [u8]) -> Answer {
+/// Het SlotInfo zoals de lezer het vraagt: `want` (het `n` van het
+/// verzoek) bytes, of het voorvoegsel van
+/// [`abi::systemapi::SLOT_INFO_LEN_V1`] als hij geen maat noemt. Een Hop
+/// tot v3.0.3 vraagt niets en leest met een buffer van 64; zijn client
+/// (applib::sys, "response longer than the buffer") verbreekt de verbinding
+/// op elk langer antwoord, en de kern mag hem niet breken: de Hop van de
+/// kaart overleeft een kern-flip (gemeten 03-10: elke nieuwe plaatsing in
+/// een herstartlus). Sinds v3.0.5 vraagt Hop de volle maat.
+fn fit_info(b: &[u8; abi::systemapi::SLOT_INFO_LEN], want: u64, data: &mut [u8]) -> Answer {
     let max = data.len();
-    let n = b.len().min(max);
+    let want = if want == 0 {
+        abi::systemapi::SLOT_INFO_LEN_V1
+    } else {
+        usize::try_from(want).unwrap_or(usize::MAX)
+    };
+    let n = b.len().min(want);
     let (dst, src) = match (data.get_mut(..n), b.get(..n)) {
         (Some(d), Some(s)) if n >= abi::systemapi::SLOT_INFO_LEN_V1 => (d, s),
         _ => return Err(Error::TooLarge { len: b.len(), max }.into()),
@@ -2427,14 +2435,17 @@ mod tests {
         }
         .encode();
         let mut wide = [0u8; abi::systemapi::SLOT_INFO_LEN + 8];
-        assert_eq!(fit_info(&full, &mut wide).unwrap().1, abi::systemapi::SLOT_INFO_LEN);
-        // De buffer van Hop tot v3.0.3: het voorvoegsel, en dat decodeert daar.
-        let mut old = [0u8; abi::systemapi::SLOT_INFO_LEN_V1];
-        assert_eq!(fit_info(&full, &mut old).unwrap().1, abi::systemapi::SLOT_INFO_LEN_V1);
-        assert_eq!(old[..], full[..abi::systemapi::SLOT_INFO_LEN_V1]);
-        // Korter dan dat is een fout, geen half antwoord.
+        // Wie de maat noemt (Hop sinds v3.0.5) krijgt alles.
+        let n = abi::systemapi::SLOT_INFO_LEN as u64;
+        assert_eq!(fit_info(&full, n, &mut wide).unwrap().1, abi::systemapi::SLOT_INFO_LEN);
+        // Zonder maat (Hop tot v3.0.3, een buffer van 88): het voorvoegsel,
+        // en dat decodeert daar.
+        assert_eq!(fit_info(&full, 0, &mut wide).unwrap().1, abi::systemapi::SLOT_INFO_LEN_V1);
+        assert_eq!(wide[..88], full[..abi::systemapi::SLOT_INFO_LEN_V1]);
+        // Korter dan het voorvoegsel is een fout, geen half antwoord.
         let mut tiny = [0u8; 32];
-        assert!(fit_info(&full, &mut tiny).is_err());
+        assert!(fit_info(&full, n, &mut tiny).is_err());
+        assert!(fit_info(&full, 32, &mut wide).is_err());
     }
 
     /// Een antwoord: (op, status, seq, size, data).
@@ -2761,7 +2772,7 @@ mod tests {
                 enc(&stream_req(2, 3, 0, &img[..c1])),
                 enc(&stream_req(3, 3, c1 as u64, &img[c1..c2])),
                 enc(&stream_req(4, 3, c2 as u64, &img[c2..])),
-                op(PrivOp::SlotStatus, 5, 3, 0),
+                op(PrivOp::SlotStatus, 5, 3, 128),
                 op(PrivOp::NextLog, 6, 3, 64),
                 op(PrivOp::NextLog, 7, 3, 64),
                 op(PrivOp::SetClock, 8, 0, 1_759_000_000),
@@ -2840,7 +2851,7 @@ mod tests {
             &[
                 op(PrivOp::StopSlot, 9, 3, 10),
                 start_call(10, 16, b""),
-                op(PrivOp::SlotStatus, 11, 3, 0),
+                op(PrivOp::SlotStatus, 11, 3, 128),
             ],
         );
         let _ = drive(
@@ -2854,7 +2865,7 @@ mod tests {
             NET | 2,
             &[
                 op(PrivOp::StopSlot, 12, 3, 50),
-                op(PrivOp::SlotStatus, 13, 3, 0),
+                op(PrivOp::SlotStatus, 13, 3, 128),
             ],
         );
         let _ = drive(
@@ -2970,7 +2981,7 @@ mod tests {
                 // Te veel bytes.
                 start_call(11, 4, b""),
                 enc(&stream_req(12, 3, 0, b"\x7fELF!")),
-                op(PrivOp::SlotStatus, 13, 3, 0),
+                op(PrivOp::SlotStatus, 13, 3, 128),
             ],
         );
         let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
@@ -3144,7 +3155,7 @@ mod tests {
                 start,
                 enc(&stream_req(2, 3, 0, &bundle[..40])),
                 enc(&stream_req(3, 3, 40, &bundle[40..])),
-                op(PrivOp::SlotStatus, 4, 3, 0),
+                op(PrivOp::SlotStatus, 4, 3, 128),
                 flip.clone(),
                 flip,
             ],
@@ -3263,7 +3274,7 @@ mod tests {
         let mut hop = Pipe::new(
             NET | 2,
             &[
-                op(PrivOp::SlotStatus, 1, 2, 0),
+                op(PrivOp::SlotStatus, 1, 2, 128),
                 op(PrivOp::SetClock, 2, 0, 42),
             ],
         );
