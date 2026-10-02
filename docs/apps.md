@@ -107,15 +107,22 @@ slot 3: idle=94% wakes=41/s cores=1 HOPOS_SLOT_LOAD
 Lees hem zo:
 
 - **idle** is de tijd die de app de core niet nodig had, over de laatste
-  dertig seconden. Een stille app zit boven de 95%. Een app die werkt zakt,
-  en dat hoort: de vraag is of hij weer stijgt als het werk klaar is.
+  dertig seconden. Op ijzer zit een stille app boven de 95%; een app die
+  werkt zakt, en dat hoort: de vraag is of hij weer stijgt als het werk
+  klaar is. De norm geldt alleen op ijzer: op QEMU-TCG is `WFE` een no-op en
+  meet een eigen core ~0%, dus een QEMU-run is op dit getal nooit rood.
 - **wakes** is hoe vaak de app wakker werd. Een stille app met één hartslag
   van 50 ms (de `watch`-taak van applib) en een paar echte timers zit in de
   tientallen per seconde. Honderden per seconde zonder verkeer is dutten;
   duizenden is rondkijken.
-- Op QEMU-TCG is `WFE` een no-op, dus daar is idle op een eigen core ~0 en
-  zegt alleen `wakes` iets. Op een gedeelde core telt de yield wél als idle,
-  ook onder QEMU (`tools/qemu-test-share.sh`).
+- Op QEMU-TCG zegt daarom alleen `wakes` iets, behalve op een gedeelde
+  core: daar telt de yield wél als idle, ook onder QEMU
+  (`tools/qemu-test-share.sh`).
+- Hop leest dezelfde twee tellers voor het cpu-percentage van een taak in
+  zijn API, over zijn eigen poll-interval: dat getal is "100 min idle" over
+  dát venster, de consoleregel is idle over dertig seconden. Ze komen uit
+  één bron en lopen alleen in ritme uiteen; leg ze niet tegen elkaar op de
+  seconde.
 
 In de app zelf staat hetzelfde fijner: `EXEC.get().stats` (`rounds`, `polls`,
 `sleeps`, `slept_ns`). Een app die een eigen diagnoseregel heeft, zet die
