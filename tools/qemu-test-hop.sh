@@ -23,14 +23,11 @@
 #   de plaatsing HOP_JOB_PLACED slot=2, HOPOS_SLOT_START slot=2 en
 #               "slot 2: HOPOS_APPSPIKE_DONE pass=9 fail=0" (met de
 #               FS-toets in de eigen root van slot 2);
-#   Hop's staat de kern ziet slot 1 zijn agent-state.json in zijn volume
-#               bewaren ("hopfs: slot 1 saved /hop/agent-state.json as
-#               /volumes/hop/..." HOPOS_FS_SAVED), en HOP_STATE_SKIPPED komt
-#               nergens voor (dan kon Hop zijn staat niet kwijt); daarna een
-#               HOPOS_FS_COMMIT (de boom op de schijf vastgelegd);
+#   Hop's staat geen agent-state.json op hopfs (Hop 3.0.2: alleen de
+#               object-store of de init-jobs);
 #   de herstart  een tweede boot op dezelfde schijf: HOPOS_FS_UP fresh=0
-#               ("hopfs: tree restored"), en Hop leest zijn staat terug
-#               (Node::restore) en neemt de kooi van spike over: HOP_ADOPTED;
+#               ("hopfs: tree restored"), en Hop begint schoon (HOP_UP, geen
+#               HOP_ADOPTED, geen zwerver);
 #   van buiten  GET http://127.0.0.1:$AGENTPORT/tasks toont de taak van
 #               "spike" als running. Een exit bestaat daar niet als staat:
 #               appspike stopt met code 0 (applib: shutdown code=0) en Hop
@@ -133,8 +130,8 @@ has() { tr -d '\r' <"$LOG" | grep -q -E "$1"; }
 # De vaste markers (grep -E), in de volgorde waarin ze horen te komen.
 BOOT_MARKS="HOPOS_BOOT|HOPOS_CLOCK_FIXED|HOPOS_PRIVILEGE|HOPOS_DISK_UP model=virtio-blk|HOPOS_FS_UP fresh=1|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_OS_SELFTEST ok|HOPOS_HOP_START slot=1 core=0 cpu=$OSCPU |uplink tcp :8080 -> slot 1 :8080 HOPOS_HOP_PUBLISH|uplink tcp :9080 -> slot 1 :9080 HOPOS_HOP_PUBLISH|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP|HOPOS_RNG_SLOTS source=jitter|slot 1: applib: rng seed from the kernel .*HOPOS_APP_RNG source=jitter"
 [ "$OSCPU" = 0 ] || BOOT_MARKS="$BOOT_MARKS|HOPOS_OSCORE_PARKED"
-PLACE_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|HOPOS_SLOT_START slot=2 core=1 cpu=$APPCPU |slot 2: HOPOS_APPSPIKE_FS ok|slot 2: HOPOS_APPSPIKE_DONE pass=9 fail=0|hopfs: slot 1 saved /hop/agent-state.json as /volumes/hop/agent-state.json .*HOPOS_FS_SAVED"
-RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOP_STATE_SKIPPED|HOPOS_OS_SELFTEST_FAIL|HOPOS_OS_CORE_FAIL|HOPOS_OSCORE_FALLBACK|HOPOS_CAGE_FAIL"
+PLACE_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|HOPOS_SLOT_START slot=2 core=1 cpu=$APPCPU |slot 2: HOPOS_APPSPIKE_FS ok|slot 2: HOPOS_APPSPIKE_DONE pass=9 fail=0"
+RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_OS_SELFTEST_FAIL|HOPOS_OS_CORE_FAIL|HOPOS_OSCORE_FALLBACK|HOPOS_CAGE_FAIL"
 
 all() {
 	(
@@ -188,12 +185,11 @@ sys.exit(0 if any(t.get("job_name") == "spike" and t.get("state") == "running" f
 	step
 done
 
-# De herstart hieronder leest terug wat er VASTGELEGD is: wacht tot de
-# committer (elke 10 s, kern::rpc::COMMIT_EVERY) de boom na de eerste
-# bewaarde staat van Hop wegschreef.
-committed() {
-	tr -d '\r' <"$LOG" | awk '/HOPOS_FS_SAVED/ { s = 1 } s && /HOPOS_FS_COMMIT($| )/ { c = 1 } END { exit !c }'
-}
+# De herstart hieronder leest terug wat er VASTGELEGD is: de FS-toets van
+# appspike schreef in zijn root, en de committer (elke 10 s,
+# kern::rpc::COMMIT_EVERY) legt de boom dan vast. Daarop wachten, anders is
+# de schijf bij de tweede boot nog vers.
+committed() { has 'HOPOS_FS_COMMIT($| )'; }
 if [ -n "$TASKS" ] && [ "${TASKS#(nog niet running)}" = "$TASKS" ]; then
 	i=0
 	while ! committed && [ "$i" -lt 150 ] && ! has "$RED"; do
@@ -240,10 +236,17 @@ if has "$RED"; then
 	fail=1
 fi
 if committed; then
-	echo "   ok  vastgelegd na de bewaarde staat: $(tr -d '\r' <"$LOG" | grep -E 'HOPOS_FS_COMMIT($| )' | tail -1)"
+	echo "   ok  vastgelegd: $(tr -d '\r' <"$LOG" | grep -E 'HOPOS_FS_COMMIT($| )' | tail -1)"
 else
-	echo "   ROOD geen HOPOS_FS_COMMIT na HOPOS_FS_SAVED"
+	echo "   ROOD geen HOPOS_FS_COMMIT na de FS-toets van appspike"
 	fail=1
+fi
+# Hop houdt geen staat op hopfs (sinds Hop 3.0.2): een agent-state.json is rood.
+if has "agent-state.json"; then
+	echo "   ROOD Hop schreef een agent-state.json; die staat bestaat niet meer"
+	fail=1
+else
+	echo "   ok  geen agent-staat op hopfs"
 fi
 echo "   tijd: $(($(date +%s) - START)) s na de start van QEMU"
 # De meetlat: de rtt van appspike's NET-toets en de laatste tik met de
@@ -261,16 +264,14 @@ fi
 [ -n "${KEEP_LOG:-}" ] && tr -d '\r' <"$LOG" >"$KEEP_LOG"
 
 # De herstart: dezelfde schijf, een nieuwe boot. hopfs vindt de boom terug
-# (fresh=0), Hop leest zijn agent-state.json uit /hop/ (Node::restore) en
-# neemt de kooi van zijn taak over: HOP_ADOPTED. Dat de kooi na een koude
-# boot leeg is, merkt Hop daarna zelf; hier telt dat hij zijn staat terugvond.
+# (fresh=0); Hop begint schoon, want hij houdt geen staat op hopfs.
 echo "== herstart op dezelfde schijf (tot ${TIMEOUT}s)"
 LOG1="$LOG"
 LOG="$(mktemp -t hopos-qemu-hop2.XXXXXX)"
 SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISK="$DISK" \
 	sh "$DIR/image/qemu-run.sh" </dev/null >"$LOG" 2>&1 &
 QPID=$!
-RESTART_MARKS="HOPOS_FS_UP fresh=0|hopfs: tree restored|HOPOS_HOP_START slot=1 core=0 cpu=$OSCPU |slot 1: .*HOP_ADOPTED"
+RESTART_MARKS="HOPOS_FS_UP fresh=0|hopfs: tree restored|HOPOS_HOP_START slot=1 core=0 cpu=$OSCPU |slot 1: .*HOP_UP"
 START=$(date +%s)
 elapsed=0
 while ! all "$RESTART_MARKS"; do
@@ -292,6 +293,14 @@ for m in $RESTART_MARKS; do
 	fi
 done
 IFS="$IFS_WAS"
+# Schoon begonnen: niets overgenomen uit een bestand (Hop 3.0.2: alleen de
+# object-store of de init-jobs), geen bewoner uit de vorige boot.
+if has "HOP_ADOPTED|HOP_STRAY_STOPPED"; then
+	echo "   ROOD $(tr -d '\r' <"$LOG" | grep -m1 -E "HOP_ADOPTED|HOP_STRAY_STOPPED")"
+	fail=1
+else
+	echo "   ok  Hop begon schoon: niets overgenomen, geen zwerver"
+fi
 if has "$RED"; then
 	echo "   ROOD $(tr -d '\r' <"$LOG" | grep -m1 -E "$RED")"
 	fail=1
