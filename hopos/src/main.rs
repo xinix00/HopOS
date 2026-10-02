@@ -306,14 +306,27 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     // token, en het hoort bij het slot waar de kern Hop plaatst, vóór de
     // system-listener de eerste verbinding ziet (PORT.md beslissing 1).
     let role = staged_role();
-    let privilege = match role {
-        Ok(StagedRole::Hop) => kern::Slot::new(slots::HOP_SLOT).and_then(Privilege::boot),
-        _ => None,
+    // FLIP: een geadopteerde Hop draagt zijn bevoegdheid mee, ook als deze
+    // kern zelf geen staging ziet. De M4 van 03-10: Hop ingebakken in de
+    // kaart-kern (EMBED=), de bundel zonder, dus `staged_role` zei "app"
+    // en elke store-call van de meegenomen Hop was "without privilege".
+    let hop_adopted = landing
+        .as_ref()
+        .is_some_and(|h| h.slots.iter().any(|st| st.slot == slots::HOP_SLOT));
+    let privilege = if role == Ok(StagedRole::Hop) || hop_adopted {
+        kern::Slot::new(slots::HOP_SLOT).and_then(Privilege::boot)
+    } else {
+        None
     };
     if let Some(p) = &privilege {
         println!(
-            "system: privilege minted for slot {} (Hop) HOPOS_PRIVILEGE",
-            p.slot()
+            "system: privilege minted for slot {} (Hop{}) HOPOS_PRIVILEGE",
+            p.slot(),
+            if hop_adopted && role != Ok(StagedRole::Hop) {
+                ", carried over the flip"
+            } else {
+                ""
+            }
         );
     }
     // De opslag vóór de system-API: die krijgt de hopfs-actor alleen als
