@@ -727,9 +727,9 @@ __hopos_mentry:
     // --- park -----------------------------------------------------------
     // Niemand aan de beurt: slapen tot de vroegste wektijd, geklemd op de
     // slaapgrens, of tot de kick. Zonder wekker (CLINT_PA 0) of zonder
-    // grens (SLEEP_CAP 0): meteen opnieuw rondkijken (spinnen kan niet
-    // hangen, Go 30-07). SCHED_CURRENT = 0 en naar DRAM: "dit hart draait
-    // niemand" is wat de kern hier leest.
+    // grens (SLEEP_CAP 0): spinnen (dat kan niet hangen, Go 30-07), met de
+    // pauze van de Go-switcher tussen twee rondes (62). SCHED_CURRENT = 0 en
+    // naar DRAM: "dit hart draait niemand" is wat de kern hier leest.
 60:
     sd zero, {current}(sp)
     fence
@@ -737,8 +737,8 @@ __hopos_mentry:
     HOPOS_RV_SYNC
     ld a3, {clint}(sp)
     ld a4, {cap}(sp)
-    beqz a3, 50b
-    beqz a4, 50b
+    beqz a3, 62f
+    beqz a4, 62f
     rdtime t0
     add t0, t0, a4
     bltu t0, s4, 61f
@@ -765,6 +765,21 @@ __hopos_mentry:
     beqz a4, 53b
     sw zero, 0(a4)
     j 53b
+
+    // --- spinnen (de C906L) ----------------------------------------------
+    // Een ronde zonder bewoner is op de C906 geen lege lus: elke ronde
+    // veegt de regels van het sched-blok en het ctx-blok van elke bewoner
+    // (`th.dcache.cipa` plus `th.sync.is`) en leest ze opnieuw uit DRAM,
+    // naast de kern en de DMA van de NIC. Daarom eerst 0x4000 rondjes niets,
+    // zoals de Go-switcher (`spin`/`pause` in cpu/mmode/switch.s, de
+    // v2-getallen van dit board): enkele tientallen µs op de 700 MHz van de C906L, onder elke wektijd
+    // van een app en onder de 300 µs van de NIC-poll van de kern.
+62:
+    li t0, 0x4000
+63:
+    addi t0, t0, -1
+    bnez t0, 63b
+    j 50b
 
     // --- koude boot van de bewoner in s6 (slot s5, index s2) ------------
     // Eerst de lijst nog eens, NÁ de staat. De kern haalt een slot uit de
