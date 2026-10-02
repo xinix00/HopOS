@@ -193,6 +193,25 @@ node heeft er nog geen gedraaid.
 
 ## Overal
 
+- [ ] **Op ijzer te toetsen na de opruiming van 1 en 2 oktober** (zo'n 5300
+      regels minder in acht groepen, alles host en QEMU groen; de nodes
+      zijn niet aangeraakt). Eén flip per board van main en kijken naar:
+      M4: start_one en de vectoringang 8 (cpu), de flip-boot-watchdog
+      (één keer wapenen, alleen HOPOS_BOOT_GUARD), core-class big op een
+      P-core, plaatsing en flip met de ene DevMem, de zwarte doos, mpidr uit
+      cpu, aic op afgeleide tabeladressen, ANS via SART, rtkit en smc, tg3
+      gepold zonder diag-regel. O6N: NVMe via board_uefi::pcie, xhci met de
+      nieuwe helpers en 64-bit registers (toetsenbord, Blu-ray), rtl8126,
+      de acpi-regel en de SPCR-console, de optical-owner (read_at zonder
+      size), Lumen. Pi 4: heap en GIC via cpu, xhci op de VL805, vcmail,
+      genet, device_enabled via Fdt::enabled, het glas via conport::tee.
+      Pi 5: xhci, RP1 en PLL via brcmpcie, gem. Radxa: het glas zonder
+      EDID (verwacht HOPOS_DISPLAY_UP zonder edid-regel, beeld op de
+      monitor), dwc3-registertabel, dwmac4, de riscv-achtige
+      REGIME-operanden niet (dat is de LicheeRV). Altra: NVMe en igb via
+      pcie::first_in. LicheeRV: de riscv-switcher met REGIME_*-operanden,
+      dwmac check en de diag-regel.
+
 - [ ] **De boot-stack van 256 KB heeft 43 KB marge** (02-10, na de
       display-regressie): setup draagt alle start-functies inline, en de
       grootste tijdelijke waarden zijn de future van gui::usb::run (123 KB:
