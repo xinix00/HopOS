@@ -57,13 +57,18 @@ mod arch {
 
     pub(super) use cpu::el2::{OsCore, core_state};
 
-    /// De kick van een slot na een schrijf in zijn RX-ring: op QEMU virt
-    /// (nVHE) een SEV, die elke WFE-slaper wekt, dus het slot kiest geen
-    /// doel; een board met een gerichte kick (Apple's fast IPI) zoekt hier
-    /// de core van het slot op.
-    pub(super) fn wake_all() {
-        el2::kick(FLAVOR, 0);
+    /// De kick van `slot` na een schrijf in zijn RX-ring: op de WFE-smaken
+    /// een SEV, die elke WFE-slaper wekt, dus het slot kiest geen doel; op
+    /// Apple de fast IPI naar de core van het slot (`wakeRX`).
+    pub(super) fn wake(slot: usize) {
+        if matches!(FLAVOR, el2::Flavor::AppleVhe) {
+            super::cage::wake_rx(slot);
+        } else {
+            el2::kick(FLAVOR, 0);
+        }
     }
+
+    pub(super) use super::cage::start_waker;
 
     /// Kan de EL2-smaak de OS-core met Hop delen? Apple niet.
     pub(super) const SHARES_OS_CORE: bool = !matches!(FLAVOR, el2::Flavor::AppleVhe);
@@ -175,7 +180,16 @@ mod arch {
 
 #[cfg(target_arch = "riscv64")]
 mod arch {
-    pub(super) use super::cage::{OsCore, SHARES_OS_CORE, core_state, os_core, wake_all};
+    pub(super) use super::cage::{OsCore, SHARES_OS_CORE, core_state, os_core};
+
+    /// De kick na een RX-schrijf: de bel van elk app-hart.
+    pub(super) fn wake(_slot: usize) {
+        super::cage::wake_all();
+    }
+
+    /// Geen wekker: een app-hart slaapt op de CLINT-timer van zijn
+    /// switcher.
+    pub(super) fn start_waker(_exec: &'static executor::Executor, _plan: &abi::layout::Plan) {}
 }
 
 /// De koude flip op riscv64 (flip.rs): de app-harts uit het kern-image en,
@@ -345,6 +359,7 @@ pub(crate) fn start(
         plan.app_cores(),
         plan.max_slots()
     );
+    arch::start_waker(exec, &plan);
     // De eerste meting: na de init moet elke app-core koud staan (mailbox
     // 0). Een ander woord is een core die al iets doet, of een map die de
     // regio niet raakt.
@@ -491,10 +506,30 @@ fn set_resident(slot: usize, on: bool) {
 }
 
 /// De kick van slot `slot` na een schrijf in zijn RX-ring (de `slot_wake`
-/// van de switch); zie `arch::wake_all`.
-pub(crate) fn wake(_slot: usize) {
-    arch::wake_all();
+/// van de switch); zie `arch::wake`.
+pub(crate) fn wake(slot: usize) {
+    arch::wake(slot);
 }
+
+/// De meetlat van de wekker van de app-cores (`waker.go` `WakerStats`),
+/// cumulatief, op de tikregel: rondes, geyielde bewoners gezien, kicks van
+/// de wekker en gerichte RX-kicks. Zonder deze vier is "de app slaapt en
+/// wordt nooit gewekt" niet te onderscheiden van "de app spint". Alleen
+/// Apple telt; elders blijven ze 0.
+pub(crate) struct WakerStats {
+    pub(crate) rounds: AtomicU64,
+    pub(crate) seen: AtomicU64,
+    pub(crate) kicks: AtomicU64,
+    pub(crate) rx: AtomicU64,
+}
+
+/// De tellers van de wekker.
+pub(crate) static WAKER: WakerStats = WakerStats {
+    rounds: AtomicU64::new(0),
+    seen: AtomicU64::new(0),
+    kicks: AtomicU64::new(0),
+    rx: AtomicU64::new(0),
+};
 
 /// De servicer-taak van één slot, met zijn eigen recordbuffer.
 async fn servicer(exec: &'static Executor, slot: Slot, ctx: dev::Pa) {

@@ -745,8 +745,10 @@ pub fn release_held(plan: &Plan, core: Core) -> Result<(), Error> {
 /// `None` als de geyielde bewoner van `ctx` aan de beurt is op
 /// counterstand `now`, anders zijn wektijd. Dezelfde vraag als de switcher
 /// stelt: de wektijd (0 = meteen), een kick, of RX voorbij de gewapende
-/// drempel (niet bij bit 63, een wachter zonder peek).
-fn due(ctx: Pa, now: u64) -> Option<u64> {
+/// drempel (niet bij bit 63, een wachter zonder peek). Ook de vraag van de
+/// wekker van de app-cores op Apple (`waker.go` `wakeDue`, hopos/src/cage.rs).
+#[must_use]
+pub fn due(ctx: Pa, now: u64) -> Option<u64> {
     let w = ctx_read(ctx, CTX_WAKE);
     let t = w & !CTX_WAKE_NO_PEEK;
     if t == 0 || now >= t || ctx_read(ctx, CTX_KICK_PENDING) != 0 {

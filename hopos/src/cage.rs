@@ -22,23 +22,28 @@
 use crate::glue::{attach, detach, err, publish_ports, tail_of, unpublish_ports};
 use abi::hopabi::{
     AppStatus, CTRL_APP_FAULT_ELR, CTRL_APP_FAULT_ESR, CTRL_APP_FAULT_FAR, CTRL_APP_FAULT_VEC,
-    CTRL_CORES, CTRL_ENTRY, CTRL_EXIT_CODE, CTRL_FAULT_ESR, CTRL_FAULT_FAR, CTRL_FAULT_VEC,
-    CTRL_HEARTBEAT, CTRL_IDLE, CTRL_IDLE_MODE, CTRL_KILL, CTRL_MBOX_PA, CTRL_MEM_SYS,
-    CTRL_RAM_SIZE, CTRL_S2_TABLE, CTRL_SHARED, CTRL_SLOT, CTRL_SMP_REQ, CTRL_STATUS, CTRL_VEC_PA,
-    CTRL_WAKES, CTRL_WALL_OFF, IDLE_YIELD,
+    CTRL_CORES, CTRL_DOOR_IRQ, CTRL_ENTRY, CTRL_EXIT_CODE, CTRL_FAULT_ESR, CTRL_FAULT_FAR,
+    CTRL_FAULT_VEC, CTRL_HEARTBEAT, CTRL_IDLE, CTRL_IDLE_MODE, CTRL_KILL, CTRL_MBOX_PA,
+    CTRL_MEM_SYS, CTRL_RAM_SIZE, CTRL_S2_TABLE, CTRL_SHARED, CTRL_SLOT, CTRL_SMP_REQ, CTRL_STATUS,
+    CTRL_VEC_PA, CTRL_WAKES, CTRL_WALL_OFF, IDLE_YIELD,
 };
 use abi::layout::{
-    self, CTRL_STRIDE, CTX_KICK_TARGET, CTX_SMP, CtxState, LINK_BASE, NET_RING_DATA_CAP, Plan,
-    RING_DATA_CAP, Tail,
+    self, CTRL_STRIDE, CTX_CTRL_PA, CTX_KICK_NONE, CTX_KICK_TARGET, CTX_NEXT_PA, CTX_SMP, CtxState,
+    LINK_BASE, NET_RING_DATA_CAP, Plan, RING_DATA_CAP, Tail,
 };
 use abi::ring;
 use board::Board;
+use core::cell::OnceCell;
 use core::future::Future;
+use core::sync::atomic::Ordering::Relaxed;
+use core::time::Duration;
 use cpu::el2::{self, CoreState, Flavor, Installed, Join, Start};
 use cpu::println;
 use dev::Pa;
+use executor::Executor;
 use kern::cage::{Cage, CageError, CoreClass, Cores, PortError, Power, Status};
 use kern::{Core, Region, SLOT_CAP, Slot};
+use sync::Local;
 use vboard::slots::mpidr;
 
 /// De EL2-smaak van de switcher (cpu::el2 `Flavor`), gekozen door het board
@@ -104,9 +109,16 @@ compile_error!(
 /// appspike 3840 en 3543 met WFE-idle, 2852 en 2852 met yield-idle, bij 38
 /// kicks per appspike-run. Een board met WFE in de kern hoort de SEV wel en
 /// laat het veld leeg (de app kiest dan zelf).
-#[cfg(feature = "board-qemuvirt")]
+///
+/// Op Apple om een andere reden (board.go `IdleMode`, 02-09): WFE op EL1
+/// slaapt op de M4 niet, dus een app-core met één bewoner spon op 100 %.
+/// Met de yield slaapt de switcher in WFI en kickt de [`waker`] hem op zijn
+/// wektijd; zonder die wekker sliep hij tot een toevallige kick, dus de
+/// modus hoort pas bij de wekker (GEMETEN 02-09 in Go: 74 % cpu en 1,3 M
+/// rondes/s werd 0 % en 47 wekken/s).
+#[cfg(any(feature = "board-qemuvirt", feature = "board-apple"))]
 const APP_IDLE_MODE: u64 = IDLE_YIELD;
-#[cfg(not(feature = "board-qemuvirt"))]
+#[cfg(not(any(feature = "board-qemuvirt", feature = "board-apple")))]
 const APP_IDLE_MODE: u64 = 0;
 
 /// De foutcodes van de lijm ([`crate::glue::code`]) plus die van CPU_ON.
@@ -945,4 +957,139 @@ impl Cores for ArmCores {
 fn idle_ns(ticks: u64) -> u64 {
     let f = cpu::idle::freq().max(1);
     u64::try_from(u128::from(ticks) * 1_000_000_000 / u128::from(f)).unwrap_or(u64::MAX)
+}
+
+// De wekker van de app-cores (`kern/slots/waker.go`), alleen voor Apple: een
+// app-core idlet daar met een yield en slaapt in de WFI van de switcher, en
+// geen FIQ van een eigen timer wekt hem (02-09); de kern is de enige die
+// het kan. De WFE-smaken hebben er geen nodig: daar wekt de event stream de
+// switcher, en de SEV van de switch elke slaper.
+
+/// Het plan van de wekker en de RX-kick, één keer gezet door
+/// [`start_waker`]. Alleen de executor van de kern raakt het aan: de
+/// wekker-taak en de switch (`slot_wake`).
+static WAKE_PLAN: Local<OnceCell<Plan>> = Local::new(OnceCell::new());
+
+/// Het ritme van de wekker: Go's 1 ms, de korrel van een wektijd.
+const WAKE_EVERY: Duration = Duration::from_millis(1);
+
+/// Start de wekker (`StartWaker`), alleen op `AppleVhe`; de marker
+/// `HOPOS_WAKER_UP` is de poort.
+pub(crate) fn start_waker(exec: &'static Executor, plan: &Plan) {
+    if !matches!(FLAVOR, Flavor::AppleVhe) || WAKE_PLAN.set(plan.clone()).is_err() {
+        return;
+    }
+    match exec.spawn(waker(exec)) {
+        Ok(()) => println!(
+            "idle: waker on, the kern kicks app cores that sleep on WFI every {} ms HOPOS_WAKER_UP",
+            WAKE_EVERY.as_millis()
+        ),
+        Err(e) => println!("idle: waker not spawned: {e:?} HOPOS_SLOT_SPAWN"),
+    }
+}
+
+/// De wekker-taak: elke [`WAKE_EVERY`] één ronde. Een gewone timer, geen
+/// uitstelbare: de wektijd van een bewoner wacht niet op werk van de kern.
+async fn waker(exec: &'static Executor) {
+    loop {
+        exec.after(WAKE_EVERY).await;
+        if let Some(plan) = WAKE_PLAN.get().get() {
+            wake_sleeping(plan, cpu::idle::counter());
+        }
+    }
+}
+
+/// Eén ronde (`wakeSleeping`): elke draaiende app-core met een geyielde
+/// bewoner die due is (zijn wektijd, een kick, of RX: [`el2::due`]) krijgt
+/// één fast IPI. De switcher wordt wakker, ackt hem en hervat wie due is;
+/// een kick te veel is een geackte FIQ op EL2.
+fn wake_sleeping(plan: &Plan, now: u64) {
+    let w = &super::WAKER;
+    w.rounds.fetch_add(1, Relaxed);
+    for c in (1..=plan.app_cores()).filter_map(layout::Core::new) {
+        if !matches!(el2::core_state(plan, c), Ok(CoreState::Running(_))) {
+            continue;
+        }
+        let mut due = false;
+        let _ = el2::residents(plan, c, |id| {
+            // Een id voorbij SLOT_CAP is de secundaire van deze core.
+            let ctx = match layout::Slot::new(usize::from(id)) {
+                Some(s) => plan.ctx_pa(s),
+                None => plan.smp_ctx_pa(c),
+            };
+            if let Ok(x) = ctx
+                && el2::ctx_state(x) == Some(CtxState::Saved)
+            {
+                w.seen.fetch_add(1, Relaxed);
+                due |= el2::due(x, now).is_none();
+            }
+        });
+        if due {
+            el2::kick(FLAVOR, mpidr(plan.phys_core(c)));
+            w.kicks.fetch_add(1, Relaxed);
+        }
+    }
+}
+
+/// De RX-kick van slot `slot` na een schrijf in zijn ring (`wakeRX`): de
+/// core van de bewoner, niet mpidr 0. Alleen als de deurbel gewapend is en
+/// de kop sindsdien bewoog: anders kickte de switch bij elke
+/// leeg-naar-niet-leeg-overgang van een bulk-transfer, en dat kostte HOP
+/// naar app 3,5x (04-09).
+///
+/// De core komt uit `CTX_KICK_TARGET`: de switcher zet daar bij elke yield
+/// de affiniteit van zijn core. De deurbel en de ring zijn van de eenheid,
+/// dus ook elke geyielde secundaire (de keten `CTX_NEXT_PA`) gaat erop
+/// wakker: daar sliep anders de pomp tot zijn eigen timer, tot een seconde
+/// (04-09, rtt p99 145 ms tot 4,8 s op een app met twee cores).
+pub(crate) fn wake_rx(slot: usize) {
+    let Some(plan) = WAKE_PLAN.get().get() else {
+        return;
+    };
+    let Some(prim) = layout::Slot::new(slot).and_then(|s| plan.ctx_pa(s).ok()) else {
+        return;
+    };
+    if !el2::rx_due(prim) {
+        return;
+    }
+    let mut next = el2::ctx_read(prim, CTX_NEXT_PA);
+    let single = next == 0;
+    for _ in 0..SMP_MAX {
+        if next == 0 || next == prim.0 {
+            break;
+        }
+        let x = Pa(next);
+        if el2::ctx_state(x) == Some(CtxState::Saved) {
+            kick_ctx(x);
+        }
+        next = el2::ctx_read(x, CTX_NEXT_PA);
+    }
+    // Draait de primaire, dan alleen voor een app met één core die zijn
+    // deurbel als interrupt neemt (CTRL_DOOR_IRQ): de switcher maakt van de
+    // IPI dan een virtuele FIQ. Anders ackt hij hem op EL2 en verder niets.
+    if el2::ctx_state(prim) != Some(CtxState::Saved) && !(single && door_irq(prim)) {
+        return;
+    }
+    kick_ctx(prim);
+}
+
+/// Neemt de bewoner van `ctx` zijn deurbel als interrupt (`CTRL_DOOR_IRQ`
+/// op zijn control-page, door de app geschreven)?
+fn door_irq(ctx: Pa) -> bool {
+    let cp = el2::ctx_read(ctx, CTX_CTRL_PA);
+    if cp == 0 {
+        return false;
+    }
+    let pa = Pa(cp).add(CTRL_DOOR_IRQ);
+    dev::pull(pa, 8);
+    dev::read64(pa) != 0
+}
+
+/// De fast IPI naar de core waarop context `ctx` het laatst yieldde.
+fn kick_ctx(ctx: Pa) {
+    let target = el2::ctx_read(ctx, CTX_KICK_TARGET);
+    if target != CTX_KICK_NONE {
+        el2::kick(FLAVOR, target);
+        super::WAKER.rx.fetch_add(1, Relaxed);
+    }
 }

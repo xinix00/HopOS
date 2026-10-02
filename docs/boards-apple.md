@@ -149,6 +149,16 @@ ok`). Op de M4 zelf heeft het nog niet gedraaid: dat is de checklist.
    standaard, want op v2 kwam het INITIALIZE-antwoord nooit (31-08) en
    een half opgestarte RTKit-coprocessor die niemand pollt loopt vol. Op de
    tik staat hij niet (elke meting praat de SMC wakker en weer in slaap).
+10. **De wekker van de app-cores** (02-10, `hopos/src/cage.rs`, Go's
+    `kern/slots/waker.go`): een app-core idlet met een yield
+    (`APP_IDLE_MODE = IDLE_YIELD`) en slaapt in de WFI van de switcher,
+    want WFE op EL1 slaapt op de M4 niet (02-09). Elke ms kickt de kern
+    elke draaiende app-core met een geyielde bewoner die due is (wektijd,
+    kick of RX); een RX-schrijf van de switch kickt de core van het slot
+    zelf (en de geyielde secundairen), niet meer mpidr 0. Marker
+    `HOPOS_WAKER_UP`; met `hopos.tick=1` staan de tellers op de tik
+    (`waker(rounds= seen= kicks= rx=)`). Go 02-09: een app-core van 74 %
+    cpu en 1,3 M rondes/s naar 0 % en 47 wekken/s.
 
 ## Checklist voor de M4
 
