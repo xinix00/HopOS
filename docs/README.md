@@ -43,6 +43,11 @@ de consoleregel die erbij hoort en wat een afwijking betekent.
 `-D warnings`, rustfmt, en de target-builds van alle boards (ook met `gui`
 en `media`, en de riscv64-boards).
 
+`cargo run -p loc` telt de regels zoals de compiler ze linkt: per board de
+release-build van het image, uit de dep-info de bronbestanden, en dan de
+emmers van de Go-meter (portable per laag, per ISA, per board, lean, gui)
+met de toetsen onder `#[cfg(test)]` apart; `-v` noemt de files per emmer.
+
 ## De vlakken
 
 | Vlak | Doc | Wat erin staat |

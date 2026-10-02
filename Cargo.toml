@@ -83,6 +83,9 @@ members = [
     # geen default-member (de target-build van de bibliotheken slaat hem
     # over); tools/gate.sh toetst hem apart.
     "tools/netmeter",
+    # De regelteller op de host: per board wat cargo echt linkt, in de emmers
+    # van de Go-meter (`cargo run -p loc`); std, dus ook geen default-member.
+    "tools/loc",
     "hopos",
     "apps/cloudflared-lean",
 ]

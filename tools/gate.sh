@@ -1,6 +1,6 @@
 #!/bin/sh
 # De poort van HopOS v3 (handboek §9): host-tests, clippy met de harde set,
-# rustfmt, de host-meetbank netmeter, de target-builds van de apps
+# rustfmt, de host-meetbank netmeter en de regelteller loc, de target-builds van de apps
 # (appspike, welcome, bench, display, vitals, cloudflared-lean, syncprobe)
 # en van ELK board. Rood is rood.
 #
@@ -36,6 +36,10 @@ echo "== host: netmeter (test en clippy)"
 # van de bibliotheken slaat hem over); hier zijn eigen ronde.
 cargo test --quiet -p netmeter
 cargo clippy --all-targets --quiet -p netmeter -- -D warnings
+echo "== host: loc (test en clippy)"
+# De regelteller op de host, net zo'n std-crate buiten de default-members.
+cargo test --quiet -p loc
+cargo clippy --all-targets --quiet -p loc -- -D warnings
 echo "== host: de gui-smaak van de boards (test en clippy)"
 # De framebuffer-code van de boards (vcfb, gop, ramfb, de rk3566-keten)
 # bestaat alleen met hun feature `gui`; de werkruimte-ronde hierboven ziet

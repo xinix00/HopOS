@@ -1,0 +1,19 @@
+[package]
+name = "loc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "De regelteller op de host: per board de regels die cargo echt linkt, in de emmers van de Go-meter (portable, ISA, board, lean, gui), met de toetsen apart."
+
+[[bin]]
+name = "loc"
+path = "src/main.rs"
+bench = false
+
+# Geen afhankelijkheden: std is genoeg (handboek §8). De JSON van cargo
+# lezen we zelf (json.rs): vijf velden per regel.
+[dependencies]
+
+[lints]
+workspace = true
