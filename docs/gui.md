@@ -1,8 +1,8 @@
 # Het gui-vlak
 
 Wat HopOS v3 met een scherm, een toetsenbord en een muis doet, en wat niet.
-De Go-generatie is de specificatie (`OLD/metal/driver/fb`, `OLD/metal/gui`,
-`OLD/docs/v1/archief/gui-ontwerp.md`); dit is de stand van de Rust-port.
+De Go-generatie is de specificatie (`OLD/metal/driver/fb`, `OLD/metal/gui`
+en `docs/v1/archief/gui-ontwerp.md` op tag v2.2.8); dit is de stand van de Rust-port.
 
 ## De beslissingen
 

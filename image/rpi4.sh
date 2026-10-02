@@ -13,11 +13,19 @@
 #                                    framebuffer-grant aan een display-app
 #   FW=pad image/rpi4.sh             waar start4.elf, fixup4.dat,
 #                                    bcm2711-rpi-4-b.dtb en bl31.bin liggen
-#                                    (standaard OLD/sd-rpi4; herkomst en het
-#                                    bl31-bouwrecept in OLD/sd-rpi4/LEESMIJ.txt)
+#                                    (standaard image/firmware/rpi4; herkomst
+#                                    en het bl31-bouwrecept in de LEESMIJ.txt
+#                                    daar)
+#   CFG=pad image/rpi4.sh            de config van de node (standaard
+#                                    image/cfg/hop-config-headless.cfg; met
+#                                    GUI=1 hoort hop-config-headfull.cfg
+#                                    erbij): elke regel wordt een token in
+#                                    cmdline.txt
+#   EXTRA="hopos.node=..." image/... meer tokens, vóór die van CFG (de
+#                                    eerste waarde wint)
 #
-# Het boot-recept is dat van de Go-generatie (OLD/image/rpi4-agent.sh): de
-# firmware laadt kernel8.img RAUW op 0x80000 (geen arm64-Image-header, het
+# Het boot-recept is dat van de Go-generatie (image/rpi4-agent.sh op tag
+# v2.2.8): de firmware laadt kernel8.img RAUW op 0x80000 (geen arm64-Image-header, het
 # bewezen pad), de DTB op 0x0f000000, en TF-A bl31.bin als armstub: de stock
 # armstub8 heeft GEEN PSCI, en de eerste CPU_ON zou in een lege EL3-vector
 # hangen. Nieuw in v3: het image van Hop gaat als `initramfs` op 0x0f200000
@@ -31,7 +39,7 @@ set -e
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET=aarch64-unknown-none-softfloat
 HOP_DIR="${HOP_DIR:-$DIR/../hop/hop}"
-FW="${FW:-$DIR/OLD/sd-rpi4}"
+FW="${FW:-$DIR/image/firmware/rpi4}"
 OUT="$DIR/target/sd-rpi4"
 CARD="$DIR/target/hopos-rpi4.img"
 STAGE_MAX=14680064 # 0x1000_0000 - 0x0F20_0000 (board_raspi::map::STAGE_MAX)
@@ -98,30 +106,40 @@ dtoverlay=disable-bt
 # Het image van Hop in het laadvenster (board/raspi/src/map.rs).
 $INITRAMFS
 EOF
-# EXTRA="hopos.insecure=1 hopos.node=pi5-1": meer hopos.*-sleutels in de
-# cmdline (de Pi leest zijn config uit /chosen/bootargs, niet uit een bestand).
-echo "hopos.stage=${ROLE:-hop}${EXTRA:+ $EXTRA}" >"$OUT/cmdline.txt"
+# De config: de Pi leest hem uit /chosen/bootargs (board/raspi/src/cfg.rs),
+# dus elke regel van CFG wordt een token in cmdline.txt, na hopos.stage en
+# EXTRA (de eerste waarde wint). Een bootarg heeft geen spatie: een waarde
+# met een spatie weigeren, anders knipt de Pi hem stil in tweeën.
+CFG="${CFG:-$DIR/image/cfg/hop-config-headless.cfg}"
+[ -f "$CFG" ] || {
+	echo "rpi4: CFG=$CFG does not exist" >&2
+	exit 1
+}
+TOKENS="$(sed -e 's/\r$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^#/d' -e '/^$/d' "$CFG")"
+if printf '%s\n' "$TOKENS" | grep -q '[[:space:]]'; then
+	echo "rpi4: $CFG has a value with a space; on the Pi every line is one cmdline token" >&2
+	exit 1
+fi
+echo "hopos.stage=${ROLE:-hop}${EXTRA:+ $EXTRA} $(printf '%s' "$TOKENS" | tr '\n' ' ')" >"$OUT/cmdline.txt"
 
 echo "rpi4: $OUT/kernel8.img ($(wc -c <"$OUT/kernel8.img" | tr -d ' ') bytes), config.txt, cmdline.txt${IMAGE:+, hop.elf ($SIZE bytes, role $ROLE)}" >&2
 
 # Het kaart-image: de firmware erbij, en een FAT die de Pi-firmware leest.
-# mkcard is het bewezen gereedschap van de Go-generatie (MBR + FAT16 met
-# LFN, reproduceerbaar, geen mount); ontbreekt iets, dan LUID overslaan en
-# is target/sd-rpi4/ plus de firmware op een bestaande kaart de weg.
+# tools/mkcard is de port van het bewezen gereedschap van de Go-generatie
+# (MBR + FAT16 met LFN, reproduceerbaar, geen mount); ontbreekt de
+# firmware, dan LUID overslaan en is target/sd-rpi4/ plus de firmware op een
+# bestaande kaart de weg.
 rm -f "$CARD"
 MISSING=""
 for f in start4.elf fixup4.dat bcm2711-rpi-4-b.dtb bl31.bin; do
 	if [ -f "$FW/$f" ]; then cp "$FW/$f" "$OUT/"; else MISSING="$MISSING $f"; fi
 done
-MKCARD="$DIR/OLD/image/mkcard/main.go"
 if [ -n "$MISSING" ]; then
-	echo "rpi4: NO card image, missing in $FW:$MISSING (see OLD/sd-rpi4/LEESMIJ.txt)" >&2
-elif ! command -v go >/dev/null 2>&1 || [ ! -f "$MKCARD" ]; then
-	echo "rpi4: NO card image, mkcard needs go and $MKCARD" >&2
+	echo "rpi4: NO card image, missing in $FW:$MISSING (see image/firmware/rpi4/LEESMIJ.txt)" >&2
 else
 	set -- "$OUT/kernel8.img" "$OUT/config.txt" "$OUT/cmdline.txt" \
 		"$OUT/start4.elf" "$OUT/fixup4.dat" "$OUT/bcm2711-rpi-4-b.dtb" "$OUT/bl31.bin"
 	[ -f "$OUT/hop.elf" ] && set -- "$@" "$OUT/hop.elf"
-	go run "$MKCARD" -o "$CARD" -size 64 -start 8192 -label bootfs -vollabel "$@" >&2
+	cargo run -q -p mkcard -- -o "$CARD" -size 64 -start 8192 -label bootfs -vollabel "$@" >&2
 	echo "rpi4: $CARD (dd: diskutil unmountDisk /dev/diskN && sudo dd if=$CARD of=/dev/rdiskN bs=4m)" >&2
 fi

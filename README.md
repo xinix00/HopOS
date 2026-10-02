@@ -3,8 +3,9 @@
 **A bare-metal operating system for edge computing. No Linux. One static binary *is* the OS.**
 
 This is HopOS v3, written in Rust. The Go generation (v2.x, built on TamaGo)
-lives in [OLD/](OLD/) with its own README, docs, drivers, images and build
-scripts; its releases stay tagged and downloadable. The Go tree is the
+is tag [v2.2.8](https://github.com/xinix00/HopOS/tree/v2.2.8) of this repository, with its own README, docs,
+drivers, images and build scripts; its releases stay tagged and
+downloadable. The Go tree is the
 specification the Rust tree is written from: every register sequence, every
 measurement and every hard-won comment moves over with the code.
 
@@ -52,4 +53,7 @@ Build and test: `sh tools/gate.sh` (host tests, clippy, fmt, target builds),
 then `sh tools/qemu-test.sh`, `sh tools/qemu-test-hop.sh`,
 `sh tools/qemu-test-welcome.sh`, `sh tools/qemu-test-flip.sh`, `sh tools/qemu-uefi-test.sh` and
 `sh tools/qemu-rpi4-test.sh`. Images: `image/uefi-run.sh` (`BOARD=uefi|o6n|altra`),
-`image/rpi4.sh`, `image/rpi5.sh`, `image/radxa-zero3.sh`, `image/flip-bundle.sh`.
+`image/rpi4.sh`, `image/rpi5.sh`, `image/radxa-zero3.sh`, `image/flip-bundle.sh`,
+with the firmware in `image/firmware/` and the shared node configs in
+`image/cfg/`. A release: `sh tools/release.sh <version>` (every board,
+headless and headfull, the flip bundles and the apps; `jobs/README.md`).

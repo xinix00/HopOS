@@ -32,7 +32,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::future::{Future, poll_fn};
 use core::net::Ipv4Addr;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 use core::task::{Context, Poll, Waker};
 use core::time::Duration;
 use cpu::println;
@@ -129,6 +129,10 @@ static UPLINK_ACK: Ack = Ack::new();
 /// zet het in `HOPOS_NODE_IP`, want de leader moet het endpoint zien dat
 /// van buiten bereikbaar is, niet het slot-adres.
 static UPLINK_IP: AtomicU32 = AtomicU32::new(0);
+/// Het MAC-adres van de uplink (big-endian in de lage 48 bits; 0 = geen
+/// NIC). Eén schrijver ([`start`]), gelezen door de plaatsing van Hop: de
+/// standaardnaam van de node (`kern::nodecfg::default_node`).
+static UPLINK_MAC: AtomicU64 = AtomicU64::new(0);
 /// De DNS-server uit de lease (big-endian als getal; 0 = geen): Hop krijgt
 /// hem in zijn env, want zonder resolver haalt hij niets op naam.
 static UPLINK_DNS: AtomicU32 = AtomicU32::new(0);
@@ -205,6 +209,14 @@ pub(crate) fn uplink_dns() -> Option<Ipv4Addr> {
     match UPLINK_DNS.load(Relaxed) {
         0 => None,
         ip => Some(Ipv4Addr::from(ip)),
+    }
+}
+
+/// Het MAC-adres van de uplink, of `None` zonder NIC.
+pub(crate) fn uplink_mac() -> Option<[u8; 6]> {
+    match UPLINK_MAC.load(Relaxed).to_be_bytes() {
+        [_, _, 0, 0, 0, 0, 0, 0] => None,
+        [_, _, m @ ..] => Some(m),
     }
 }
 
@@ -321,6 +333,8 @@ pub(crate) fn start<D: Device + 'static>(
     api: SystemApi,
 ) -> Result<(), Error> {
     let mac = nic.mac().0;
+    let [a, b, c, d, e, f] = mac;
+    UPLINK_MAC.store(u64::from_be_bytes([0, 0, a, b, c, d, e, f]), Relaxed);
     let (ing_tx, ing_rx) = INGRESS.split().ok_or(Error::Twice)?;
     let (eg_tx, eg_rx) = EGRESS.split().ok_or(Error::Twice)?;
 

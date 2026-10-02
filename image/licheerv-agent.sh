@@ -1,19 +1,22 @@
 #!/bin/sh
 # Bouw HopOS v3 voor de Sipeed LicheeRV Nano (Sophgo SG2002 / CV181x,
 # XuanTie C906): de kern-binary als MONITOR-slot van fip.bin, zoals de
-# Go-generatie (OLD/image/licheerv-agent.sh). De vendor-FSBL doet klok- en
+# Go-generatie (image/licheerv-agent.sh op tag v2.2.8). De vendor-FSBL doet klok- en
 # DDR-init en springt ons in MACHINE MODE binnen op RUNADDR; OpenSBI, U-Boot
 # en Linux komen er niet meer aan te pas. HopOS is zelf de monitor: de kooi is
 # PMP plus Sv39, en PMP kan alleen machine mode (docs/boards-riscv.md).
 #
 #   image/licheerv-agent.sh                → target/licheerv/fip-licheerv.bin
+#                                            en hopos-licheerv.img (de hele
+#                                            kaart, dd-baar)
 #   image/licheerv-agent.sh /dev/diskN     → idem, plus fip.bin op de
 #                                            FAT-bootpartitie van een kaart
 #                                            die er al een heeft (de snelle
-#                                            iteratie; de eerste kaart komt
-#                                            van het Sipeed donor-image)
-#   CFG=~/lrv.cfg image/licheerv-agent.sh  → met hopos.cfg in het image
-#                                            (hopos.node, hopos.mac, ...)
+#                                            iteratie)
+#   CFG=~/lrv.cfg image/licheerv-agent.sh  → een andere hopos.cfg in het
+#                                            image (standaard
+#                                            image/cfg/hop-config-headless.cfg;
+#                                            CFG= zonder pad: geen config)
 #   APP=appspike image/licheerv-agent.sh   → met appspike in de kern
 #                                            gebakken: de kern plaatst hem
 #                                            bij de boot twee keer op de
@@ -27,8 +30,9 @@
 # hopos.apikey) staat dan ook in fip.bin op de kaart.
 #
 # Nodig: de donor-FIP en fiptool.py uit een Sipeed-release
-# (LICHEERV_DONOR, LICHEERV_FIPTOOL; default image/licheerv/, vendor-
-# bestanden, gitignored) en rust-objcopy (rustup component add llvm-tools).
+# (LICHEERV_DONOR, LICHEERV_FIPTOOL; standaard image/firmware/licheerv/,
+# herkomst in de LEESMIJ.txt daar) en rust-objcopy (rustup component add
+# llvm-tools).
 #
 # GEHASHT: de donor is vendor-code die vóór ons draait (FSBL, DDR-training).
 # Het script drukt de SHA-256 van de donor en van de nieuwe FIP af; met
@@ -39,8 +43,8 @@ set -eu
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET=riscv64gc-unknown-none-elf
 OUT="$DIR/target/licheerv"
-DONOR="${LICHEERV_DONOR:-$DIR/image/licheerv/donor-fip.bin}"
-FIPTOOL="${LICHEERV_FIPTOOL:-$DIR/image/licheerv/fiptool.py}"
+DONOR="${LICHEERV_DONOR:-$DIR/image/firmware/licheerv/donor-fip.bin}"
+FIPTOOL="${LICHEERV_FIPTOOL:-$DIR/image/firmware/licheerv/fiptool.py}"
 
 # RUNADDR is NIET DRAM-start (GEMETEN 30-07): de FSBL laadt na ons image ook
 # LOADER_2ND (U-Boot) en decomprimeert dat naar 0x8020_0020 (~600 KB), en hij
@@ -92,7 +96,7 @@ ELF="$DIR/target/$TARGET/release/hopos"
 ENTRY="$(python3 -c 'import struct,sys; print(hex(struct.unpack_from("<Q", open(sys.argv[1],"rb").read(32), 24)[0]))' "$ELF")"
 [ "$ENTRY" = "$RUNADDR" ] || { echo "WEIGER: entry $ENTRY is niet RUNADDR $RUNADDR (linkscript?)" >&2; exit 1; }
 "$OBJCOPY" -O binary "$ELF" "$OUT/monitor.bin"
-CFG="${CFG:-}"
+CFG="${CFG-$DIR/image/cfg/hop-config-headless.cfg}"
 if [ -n "$CFG" ]; then
 	[ -f "$CFG" ] || { echo "config ontbreekt: $CFG" >&2; exit 1; }
 	# Het venster: "HOPOS.CFG.WINDOW", de lengte (u64 LE) op +16, de tekst
@@ -146,6 +150,13 @@ python3 "$FIPTOOL" genfip "$OUT/fip-licheerv.bin" \
 	--MONITOR "$OUT/monitor.bin" \
 	--MONITOR_RUNADDR "$RUNADDR" 2>/dev/null
 echo "fip: $OUT/fip-licheerv.bin sha256=$(sha "$OUT/fip-licheerv.bin")" >&2
+
+# De hele kaart (tools/mkcard): MBR plus FAT16 met alleen fip.bin, de
+# geometrie van het donor-image op LBA 1, dd-baar. GEEN -vollabel: de
+# BROM-parser is niet van ons, en dit is de vorm die Go bewees (tag v2.2.8).
+cargo run -q -p mkcard -- -o "$OUT/hopos-licheerv.img" -size 64 \
+	"$OUT/fip-licheerv.bin=fip.bin" >&2
+echo "card: $OUT/hopos-licheerv.img (dd: diskutil unmountDisk /dev/diskN && sudo dd if=$OUT/hopos-licheerv.img of=/dev/rdiskN bs=4m)" >&2
 
 DISK="${1:-}"
 [ -n "$DISK" ] || { echo "flash: image/licheerv-agent.sh /dev/diskN" >&2; exit 0; }

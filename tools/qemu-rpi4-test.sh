@@ -46,14 +46,14 @@
 # Markers: "no enabled brcm,bcm2711-pcie in the DTB, PCIe not touched" en
 # HOPOS_USB_NONE, zonder HOPOS_EXCEPTION.
 #
-# De DTB: DTB=pad, standaard OLD/sd-rpi4/bcm2711-rpi-4-b.dtb (niet in git;
-# herkomst in OLD/sd-rpi4/LEESMIJ.txt). Zonder DTB boot de kern ook, maar
+# De DTB: DTB=pad, standaard image/firmware/rpi4/bcm2711-rpi-4-b.dtb
+# (herkomst in de LEESMIJ.txt daar). Zonder DTB boot de kern ook, maar
 # zonder kaart, pool en staging; dan toetst het script alleen de boot.
 set -e
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET=aarch64-unknown-none-softfloat
-DTB="${DTB:-$DIR/OLD/sd-rpi4/bcm2711-rpi-4-b.dtb}"
+DTB="${DTB:-$DIR/image/firmware/rpi4/bcm2711-rpi-4-b.dtb}"
 SECS="${SECS:-8}"
 GUI="${GUI:-0}"
 case "$GUI" in

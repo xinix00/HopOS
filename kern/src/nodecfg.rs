@@ -11,7 +11,7 @@
 //!
 //! | `hopos.cfg` | env van Hop |
 //! | --- | --- |
-//! | `hopos.node` | `HOPOS_NODE` (anders `default_node` uit [`Facts`]) |
+//! | `hopos.node` | `HOPOS_NODE` (anders `default_node` uit [`Facts`], zie [`default_node`]) |
 //! | `hopos.cluster` | `HOPOS_CLUSTER` (anders `hopos`) |
 //! | `hopos.apikey` | `HOPOS_APIKEY` |
 //! | `hopos.insecure=1` | `HOPOS_INSECURE=1` |
@@ -58,6 +58,7 @@
 //! waarden door hun lengte.
 
 use abi::hopabi::CTRL_ENV_MAX;
+use alloc::format;
 use alloc::string::String;
 use core::fmt::{self, Write as _};
 use core::net::Ipv4Addr;
@@ -337,6 +338,15 @@ pub fn build(cfg: &NodeCfg<'_>, facts: &Facts<'_>) -> Result<EnvBlob, EnvError> 
     Ok(blob)
 }
 
+/// De naam van een node zonder `hopos.node`: het board en de laatste twee
+/// bytes van de uplink-MAC (`rpi4-4c54`). Zo draaien alle nodes op één
+/// gedeelde config (image/cfg) en heeft toch elke node op het LAN een eigen
+/// naam; Go gaf iedereen `hopos-1`.
+#[must_use]
+pub fn default_node(board: &str, mac: [u8; 6]) -> String {
+    format!("{board}-{:02x}{:02x}", mac[4], mac[5])
+}
+
 /// De sleutels behalve de init-jobs.
 fn base(out: &mut String, cfg: &NodeCfg<'_>, f: &Facts<'_>) -> fmt::Result {
     let node = match cfg.one("hopos.node") {
@@ -413,6 +423,22 @@ mod tests {
         // De bootargs vullen aan wat het bestand niet zegt.
         assert!(on(&text("hopos.node=a\n", "hopos.console=1")));
         assert!(!on(&text("hopos.console=off", "hopos.console=1")));
+    }
+
+    #[test]
+    fn the_default_name_is_the_board_and_the_mac_tail() {
+        let mac = [0xdc, 0xa6, 0x32, 0x01, 0x4c, 0x54];
+        assert_eq!(default_node("rpi4", mac), "rpi4-4c54");
+        let name = default_node("o6n", [0, 0, 0, 0, 0, 7]);
+        let facts = Facts {
+            default_node: &name,
+            ..FACTS
+        };
+        let env = build(&NodeCfg::parse("hopos.insecure=1\n"), &facts).unwrap();
+        assert_eq!(env.get("HOPOS_NODE"), Some("o6n-0007"));
+        // Een eigen hopos.node wint.
+        let env = build(&NodeCfg::parse("hopos.node=lumen-1\n"), &facts).unwrap();
+        assert_eq!(env.get("HOPOS_NODE"), Some("lumen-1"));
     }
 
     #[test]

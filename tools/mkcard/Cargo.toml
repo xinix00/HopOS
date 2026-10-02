@@ -1,0 +1,18 @@
+[package]
+name = "mkcard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "De kaartbouwer op de host: een dd-baar image met een MBR, één FAT16-bootpartitie met de bestanden en raw blobs vóór de partitie, byte voor byte de Go-mkcard."
+
+[[bin]]
+name = "mkcard"
+path = "src/main.rs"
+bench = false
+
+# Geen afhankelijkheden: std is genoeg (handboek §8).
+[dependencies]
+
+[lints]
+workspace = true

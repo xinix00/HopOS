@@ -1,0 +1,27 @@
+{
+ "name": "cloudflared-lean",
+ "driver": "hop",
+ "memory_limit": 33554432,
+ "tags": {
+  "sharegroup": "huis"
+ },
+ "env": {
+  "TUNNEL_TOKEN": "<TUNNEL_TOKEN>",
+  "TUNNEL_URL": "http://10.100.0.2:80",
+  "TUNNEL_CONNECTIONS": "2"
+ },
+ "artifacts": [
+  {
+   "url": "https://github.com/xinix00/HopOS/releases/download/apps/cloudflared-lean-arm64-tamago.elf",
+   "match": {
+    "node.arch": "arm64"
+   }
+  },
+  {
+   "url": "https://github.com/xinix00/HopOS/releases/download/apps/cloudflared-lean-riscv64-tamago.elf",
+   "match": {
+    "node.arch": "riscv64"
+   }
+  }
+ ]
+}

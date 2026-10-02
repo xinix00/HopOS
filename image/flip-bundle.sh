@@ -1,7 +1,7 @@
 #!/bin/sh
 # Bouwt de KERN-FLIP-BUNDEL van één board: het artifact waarmee een
 # draaiende HopOS zijn kern vervangt zonder herstart, terwijl de apps (en
-# Hop) doordraaien (OLD/image/flip-bundle.sh, docs/flip.md).
+# Hop) doordraaien (image/flip-bundle.sh op tag v2.2.8, docs/flip.md).
 #
 #   image/flip-bundle.sh <board>    -> target/hopos-<board>.flip (+ .sha256)
 #       board: virt, uefi, o6n, altra, rpi4, rpi5, radxa, apple

@@ -70,9 +70,19 @@ met de toetsen onder `#[cfg(test)]` apart; `-v` noemt de files per emmer.
 | Raspberry Pi 5 | `sh image/rpi5.sh` (met `GUI=1` voor het glas) | `target/hopos-rpi5.img` (dd) | [boards-pi.md](boards-pi.md) |
 | Radxa Zero 3E | `sh image/radxa-zero3.sh` (met `GUI=1` voor het glas) | `target/radxa-zero3/hopos-radxa-zero3.img` (dd) | [boards-radxa.md](boards-radxa.md) |
 | QEMU virt riscv64 | `sh tools/qemu-riscv-test.sh` | draait meteen (machine mode, `-bios none`) | [boards-riscv.md](boards-riscv.md) |
-| LicheeRV Nano (SG2002) | `sh image/licheerv-agent.sh` | `target/licheerv/fip-licheerv.bin` (naar de FAT-bootpartitie) | [boards-riscv.md](boards-riscv.md) |
+| LicheeRV Nano (SG2002) | `sh image/licheerv-agent.sh` | `target/licheerv/hopos-licheerv.img` (dd), en `fip-licheerv.bin` voor een bestaande kaart | [boards-riscv.md](boards-riscv.md) |
 | Mac mini M4 (t8132) | `sh image/apple-m4.sh` | `target/apple-m4/hopos-apple.img` (via m1n1: `image/apple/boot-cycle.sh`) | [boards-apple.md](boards-apple.md) |
 | Kern-flip-bundel | `HOPOS_STAMP=B sh image/flip-bundle.sh <virt\|uefi\|o6n\|altra\|rpi4\|rpi5\|radxa>` (met `GUI=1` voor de gui-smaak) | `target/hopos-<board>.flip` plus `.sha256` | [flip.md](flip.md) |
+| Een release (elk board headless en headfull, de bundels, de apps) | `sh tools/release.sh <versie>` (`--dry-run`: alleen bouwen) | `target/release-<versie>/` met `SHA256SUMS`, en de regels om te taggen en te publiceren | [jobs/README.md](../jobs/README.md) |
+
+De firmware van de boards staat in `image/firmware/<board>/` (de Pi's, de
+boot-keten van de Radxa, de donor van de LicheeRV; herkomst en sha256 in de
+`LEESMIJ.txt` ernaast). Elk image-script neemt standaard de gedeelde config
+`image/cfg/hop-config-headless.cfg`; `CFG=` vervangt hem
+([boards.md](boards.md), "De config"). De kaarten en sticks bouwt
+`tools/mkcard`, de port van Go's mkcard. De Go-generatie is tag
+[v2.2.8](https://github.com/xinix00/HopOS/tree/v2.2.8) van deze repo; een pad "op tag v2.2.8" in deze docs is een pad
+in die boom.
 
 Hop zelf komt uit de hop-repo (`agentd-hopos`); de image-scripts bouwen
 hem via `HOP_DIR` en bakken hem in als bewoner. Secure Boot moet uit op de

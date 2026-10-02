@@ -592,10 +592,28 @@ pub(crate) fn app_env(param: &str) -> Vec<u8> {
     env
 }
 
-/// De naam van deze node in Hop's cluster als `hopos.cfg` geen
-/// `hopos.node` zet (Go: `cfg.Node.ID = "hopos-1"`); QEMU zet de zijne in
+/// De naam van deze node zonder NIC als `hopos.cfg` geen `hopos.node` zet
+/// (Go: `cfg.Node.ID = "hopos-1"`); QEMU zet de zijne in
 /// `kern::nodecfg::QEMU_CFG`.
 const HOP_NODE: &str = "hopos-1";
+
+/// De naam van deze node in Hop's cluster als de config geen `hopos.node`
+/// zet: het board en de staart van de uplink-MAC
+/// (`kern::nodecfg::default_node`), zodat elke node op de gedeelde config
+/// (image/cfg) een eigen naam heeft. Eén regel op de console als hij
+/// gebruikt wordt.
+fn default_node(cfg: &kern::nodecfg::NodeCfg<'_>) -> String {
+    let Some(mac) = crate::net::uplink_mac() else {
+        return HOP_NODE.into();
+    };
+    let name = kern::nodecfg::default_node(<crate::Machine as Board>::NAME, mac);
+    if cfg.one("hopos.node").is_empty() {
+        println!(
+            "slots: no hopos.node, this node is {name} (board and uplink MAC) HOPOS_NODE_DEFAULT"
+        );
+    }
+    name
+}
 
 /// De plaatsing van Hop: het gestagede image één keer in slot 1, met de
 /// env van de node, dan de poorten op de uplink en de bewaking.
@@ -615,8 +633,9 @@ async fn place_hop(
     let node_ip = wait_uplink(exec).await;
     // De env van Hop komt uit de config van het board (kern::nodecfg).
     let cfg = kern::nodecfg::NodeCfg::parse(&hop_cfg);
+    let node = default_node(&cfg);
     let facts = kern::nodecfg::Facts {
-        default_node: HOP_NODE,
+        default_node: &node,
         node_ip,
         dns: crate::net::uplink_dns(),
         port: HOP_PORT,

@@ -744,6 +744,10 @@ name = "media-optical"
 version = "3.0.0"
 
 [[package]]
+name = "mkcard"
+version = "3.0.0"
+
+[[package]]
 name = "net"
 version = "3.0.0"
 dependencies = [

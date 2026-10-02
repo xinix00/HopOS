@@ -2,7 +2,7 @@
 
 De tweede architectuur, geport van de Go-kern (`OLD/metal/board/licheerv`,
 `cpu/mmode`, `cpu/thead`, `kern/cage`, `kern/slots/cage_riscv64.go`,
-`cpu/idle/idle_riscv64.go`, `driver/nic/dwmac`, `OLD/image/licheerv-agent.sh`).
+`cpu/idle/idle_riscv64.go`, `driver/nic/dwmac`, `image/licheerv-agent.sh` op tag v2.2.8).
 QEMU virt riscv64 is de proefbank, de Sipeed LicheeRV Nano (SG2002, XuanTie
 C906) het board. De Go-metingen (30-07 tot 19-08) staan in het commentaar van
 de code; deze pagina zegt wat er staat, hoe je het bouwt, en per stap wat de
@@ -126,28 +126,24 @@ van de switch.
 
 ### De donor van de LicheeRV
 
-`image/licheerv-agent.sh` heeft twee vendor-bestanden nodig die niet in de
-repo staan (gitignored, geen eigen werk): `image/licheerv/donor-fip.bin` en
-`image/licheerv/fiptool.py`. Beide komen van Sipeed, en beide zijn op 30-09
-teruggevonden en gehasht:
+`image/licheerv-agent.sh` heeft twee vendor-bestanden nodig (geen eigen
+werk): `image/firmware/licheerv/donor-fip.bin` en
+`image/firmware/licheerv/fiptool.py`. Beide komen van Sipeed, en beide zijn
+op 30-09 teruggevonden en gehasht:
 
 | Bestand | Herkomst | sha256 |
 | --- | --- | --- |
 | `donor-fip.bin` (440832 bytes) | Release `20260114` van [sipeed/LicheeRV-Nano-Build](https://github.com/sipeed/LicheeRV-Nano-Build/releases/tag/20260114), asset `2026-01-14-16-03-d4003f.tar.xz`; daarin `2026-01-14-16-03-d4003f.img`, partitie 1 (FAT16, type 0x0C, LBA 1 tot 32768, 16 MiB), het bestand `fip.bin` in de root. Naast hem staan daar `boot.sd`, `ver` (`2026-01-22-14-17-d4003f.img`) en de vlagbestanden. | `d85e68836f57a9fcb1bbfba3c1ccf93d1b062ac168305d7f0cc83a72a796c6b9` |
 | `fiptool.py` (25165 bytes) | Dezelfde repo, branch `main`: `fsbl/plat/cv181x/fiptool.py` (niet de `cv180x`-versie ernaast, die een ander hash heeft). | `cc1d37d0d8fbcb3e6180c0403bcf4fa5c7038306be13779f3b8b948915084bf5` |
 
-Dit is de donor van de Go-generatie: dezelfde bytes staan in de hoofd-checkout
-(`~/Git/haas.software/hop-os`) als `OLD/image/licheerv/donor-fip.bin` en
-`OLD/image/licheerv/fiptool.py` (gitignored, dus niet in een verse clone of
-een worktree). De kortste weg, vanuit een worktree naast de hoofd-checkout:
+Dit is de donor van de Go-generatie; sinds 02-10 staat hij in de repo
+(`image/firmware/licheerv/`), en het script vindt hem daar zelf:
 
 ```sh
-mkdir -p image/licheerv
-cp ../hop-os/OLD/image/licheerv/donor-fip.bin ../hop-os/OLD/image/licheerv/fiptool.py image/licheerv/
 LICHEERV_DONOR_SHA256=d85e68836f57a9fcb1bbfba3c1ccf93d1b062ac168305d7f0cc83a72a796c6b9 sh image/licheerv-agent.sh
 ```
 
-Zonder die kopie: pak de tar uit (1,7 GB image), en haal `fip.bin` van
+Opnieuw maken: pak de tar uit (1,7 GB image), en haal `fip.bin` van
 partitie 1, bijvoorbeeld op de Mac met
 `hdiutil attach -readonly -imagekey diskimage-class=CRawDiskImage 2026-01-14-16-03-d4003f.img`
 en een `cp` vanaf het gemounte `boot`-volume; of zonder mount met

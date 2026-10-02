@@ -2,7 +2,7 @@
 
 PORT.md §1: `measurements.md` is de lat, een Rust-HOP mag op geen gemeten
 getal langzamer zijn. Deze pagina zet de getallen van de Go-generatie
-(`OLD/docs/measurements.md`, september 2026) per meting naast een lege
+(`docs/measurements.md` op tag v2.2.8, september 2026) per meting naast een lege
 kolom per board voor v3, met het commando dat het v3-getal oplevert en de
 marker waar het op de console staat. Een devicedag vult de kolommen.
 

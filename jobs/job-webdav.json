@@ -1,0 +1,29 @@
+{
+ "name": "webdav",
+ "driver": "hop",
+ "artifacts": [
+  {
+   "url": "http://10.100.0.1:8088/webdav-arm64-tamago.elf",
+   "match": {
+    "node.arch": "arm64"
+   }
+  }
+ ],
+ "memory_limit": 268435456,
+ "cpu_shares": 1024,
+ "max_restarts": -1,
+ "priority": 1,
+ "ports": {
+  "http": 8080,
+  "ui": 8081
+ },
+ "volumes": {
+  "/medialib": "/media",
+  "/devices": "/mounts",
+  "/mediakeys": "/aacs"
+ },
+ "env": {
+  "WEBDAV_ROOT": "/media",
+  "WEBDAV_MOUNTS": "/mounts"
+ }
+}

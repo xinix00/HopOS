@@ -1,7 +1,7 @@
 # Radxa Zero 3E (RK3566) op HopOS v3
 
 De Radxa Zero 3E is geport van de Go-kern (`OLD/metal/board/rk3566`,
-`driver/nic/dwmac4`, `driver/nic/mdio`, `OLD/image/radxa-zero3.sh`) naar
+`driver/nic/dwmac4`, `driver/nic/mdio`, `image/radxa-zero3.sh` op tag v2.2.8) naar
 Rust. Alles hieronder is op de host getest en bouwt voor het target, maar
 niets ervan heeft in Rust op ijzer gedraaid. De Go-metingen (05-08 tot
 21-09) staan in het commentaar van de code; deze checklist zegt per stap
@@ -85,9 +85,9 @@ ging daarvoor van 2 MB (de DTB-grens) naar 64 MB (`MAX_INITRD`); onder de
 oude grens viel een groter image stil weg, ook op de Pi's.
 
 De donor (idbloader en u-boot.itb, LBA 64 tot 32767 van het Radxa
-b6-image) komt uit `image/radxa/donor-boot.bin`, anders uit de Go-cache
-`OLD/image/radxa/donor-boot.bin`, anders van GitHub; hij wordt bij elke
-build gehasht. Console: USB-UART op de 40-pins header, pin 8 TX, 10 RX,
+b6-image) staat in `image/firmware/radxa/donor-boot.bin` (herkomst in de
+`LEESMIJ.txt` ernaast); hij wordt bij elke build gehasht. De kaart bouwt
+`tools/mkcard` (tot 02-10 een eigen python-kaartbouwer in het script). Console: USB-UART op de 40-pins header, pin 8 TX, 10 RX,
 6 GND, 1500000 8N1.
 
 ## De checklist, in bootvolgorde

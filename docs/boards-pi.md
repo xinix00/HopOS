@@ -2,8 +2,8 @@
 
 De Pi 4 (BCM2711) en de Pi 5 (BCM2712) zijn geport van de Go-kern
 (`OLD/metal/board/raspi`, `rpi4`, `rpi5`, de drivers `vcmail`, `gicv2`,
-`nic/genet`, `nic/gem`, `brcmpcie`, en `OLD/image/rpi4-agent.sh`,
-`rpi5-agent.sh`) naar Rust. Alles hieronder is op de host getest en bouwt
+`nic/genet`, `nic/gem`, `brcmpcie`, en `image/rpi4-agent.sh`,
+`rpi5-agent.sh` op tag v2.2.8) naar Rust. Alles hieronder is op de host getest en bouwt
 voor het target; de Pi 4-kern boot bovendien op QEMU `raspi4b` tot de
 executor-tik. Niets ervan heeft in Rust op ijzer gedraaid. De Go-metingen
 (07-07 tot 21-09) staan in het commentaar van de code; deze checklist zegt
@@ -48,10 +48,10 @@ diskutil unmountDisk /dev/diskN
 sudo dd if=target/hopos-rpi4.img of=/dev/rdiskN bs=4m    # of hopos-rpi5.img
 ```
 
-Zonder kaart-image (geen firmware of geen `go` voor `OLD/image/mkcard`):
-kopieer `target/sd-rpi4/*` (of `sd-rpi5/*`) op de FAT-partitie van een
-bestaande Pi-kaart. De firmware komt uit `OLD/sd-rpi4` en `OLD/sd-rpi5`
-(niet in git; herkomst in hun `LEESMIJ.txt`). Pi 4: `start4.elf`,
+De kaart bouwt `tools/mkcard`. Zonder kaart-image (de firmware
+ontbreekt): kopieer `target/sd-rpi4/*` (of `sd-rpi5/*`) op de FAT-partitie
+van een bestaande Pi-kaart. De firmware staat in `image/firmware/rpi4` en
+`image/firmware/rpi5` (herkomst en sha256 in hun `LEESMIJ.txt`). Pi 4: `start4.elf`,
 `fixup4.dat`, `bcm2711-rpi-4-b.dtb` en een zelfgebouwde TF-A `bl31.bin`
 (VERPLICHT: de stock armstub8 heeft geen PSCI). Pi 5:
 `bcm2712-rpi-5-b.dtb` en `overlays/bcm2712d0.dtbo`.
@@ -59,7 +59,9 @@ bestaande Pi-kaart. De firmware komt uit `OLD/sd-rpi4` en `OLD/sd-rpi5`
 Nieuw ten opzichte van Go: `hopos.cfg` staat niet meer op de kaart. Het
 `initramfs`-kanaal draagt nu het image van Hop (`hop.elf`), en de config is
 `cmdline.txt`: `hopos.stage=hop|app` (standaard hop), `hopos.cores=N`,
-`hopos.oscore=` (op de Pi altijd core 0).
+`hopos.oscore=` (op de Pi altijd core 0). Het script zet elke regel van
+`CFG=` (standaard `image/cfg/hop-config-headless.cfg`, [boards.md](boards.md))
+daar als token achter, dus geen spatie in een waarde.
 
 UART: Pi 4 op de header (pin 8 TXD, 10 RXD, 6 GND, 3V3), `screen
 /dev/tty.usbserial-* 115200`. Pi 5 op de 3-pins debug-connector tussen de
@@ -145,8 +147,8 @@ Per stap: wat er moet staan, en wat het betekent als het er niet staat.
     event-stream van EL2 werkt. Staat `sleeps` op 0 of loopt de tik achter:
     de event-stream (CNTHCTL_EL2 in `pi_entry!`).
 17. **Minuten laten draaien met verkeer** (Pi 5): de C1-stepping kan stil
-    bevriezen onder RX-DMA plus fabric-werk (`OLD/docs/v1/archief/
-    bcm2712-c1-erratum.md`); noteer de stepping en de tijd tot de freeze.
+    bevriezen onder RX-DMA plus fabric-werk (`docs/v1/archief/
+    bcm2712-c1-erratum.md` op tag v2.2.8); noteer de stepping en de tijd tot de freeze.
 18. **RNG200** (in de log direct na stap 7): `trng: RNG200 at
     0x107d208000 (BCM2712) online, the kernel DRBG is seeded from rng200
     HOPOS_RNG200_UP` (Pi 4: `0xfe104000 (BCM2711)`). De Pi 4 mag hier tot

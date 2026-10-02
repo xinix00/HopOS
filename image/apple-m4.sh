@@ -4,7 +4,10 @@
 # `kmutil configure-boot --raw --entry-point 2048`.
 #
 #   image/apple-m4.sh                       → target/apple-m4/hopos-apple.img
-#   CFG=hopos-m4.cfg image/apple-m4.sh      + hopos.cfg ingebakken (0xF000)
+#   CFG=hopos-m4.cfg image/apple-m4.sh      een andere hopos.cfg ingebakken
+#                                           (0xF000; standaard
+#                                           image/cfg/hop-config-headless.cfg,
+#                                           CFG= zonder pad: geen)
 #   APP=appspike image/apple-m4.sh          + een app-ELF voor de staging
 #   APP=hop image/apple-m4.sh               + Hop (../hop/hop, rol hop)
 #   image/apple/boot-cycle.sh target/apple-m4/hopos-apple.img [s]
@@ -74,7 +77,7 @@ fi
 # moet kloppen met het ELF, en de stub-ingang op 0x800 moet code zijn. Met
 # CFG= daarna het config-venster op 0xF000 (dat moet leeg zijn: de linker
 # legt er niets, head.rs).
-CFG="${CFG-}"
+CFG="${CFG-$DIR/image/cfg/hop-config-headless.cfg}"
 if [ -n "$CFG" ] && [ ! -f "$CFG" ]; then
 	echo "apple-m4: CFG=$CFG does not exist" >&2
 	exit 1

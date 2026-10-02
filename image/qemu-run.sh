@@ -2,7 +2,7 @@
 # Boot HopOS v3 op QEMU -M virt. Altijd virtualization=on: HopOS eist een
 # EL2-boot (de stage-2-kooi is een invariant, geen optie); PSCI via SMC,
 # GICv3, tot 12 cores: dezelfde bouwstenen als de O6N. De QEMU-regel is die
-# van de Go-generatie (OLD/image/qemu-run.sh), met een virtio-blk-schijf in
+# van de Go-generatie (image/qemu-run.sh op tag v2.2.8), met een virtio-blk-schijf in
 # plaats van de NVMe: hopfs mount hem bij boot, en Hop bewaart er zijn staat
 # op (`/hop/`). Drie hostfwd's: de system-API (10.0.2.15:10100) op
 # 127.0.0.1:$SYSPORT, en de API van Hop: de agent (:8080) op

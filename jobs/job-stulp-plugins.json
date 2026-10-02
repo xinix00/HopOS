@@ -1,0 +1,29 @@
+{
+ "name": "stulp-plugins",
+ "driver": "hop",
+ "memory_limit": 132120576,
+ "tags": {
+  "sharegroup": "huis"
+ },
+ "ports": {
+  "matter": 5540
+ },
+ "env": {
+  "STULP_ATTACH": "10.100.0.2:7000",
+  "STULP_ATTACH_SECRET": "<STULP_ATTACH_SECRET>"
+ },
+ "artifacts": [
+  {
+   "url": "https://github.com/xinix00/stulp/releases/download/apps/all-plugins-arm64-tamago.elf",
+   "match": {
+    "node.arch": "arm64"
+   }
+  },
+  {
+   "url": "https://github.com/xinix00/stulp/releases/download/apps/all-plugins-riscv64-tamago.elf",
+   "match": {
+    "node.arch": "riscv64"
+   }
+  }
+ ]
+}

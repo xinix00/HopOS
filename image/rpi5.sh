@@ -13,11 +13,18 @@
 #                                    framebuffer-grant aan een display-app
 #   FW=pad image/rpi5.sh             waar bcm2712-rpi-5-b.dtb en
 #                                    overlays/bcm2712d0.dtbo liggen (standaard
-#                                    OLD/sd-rpi5; herkomst in
-#                                    OLD/sd-rpi5/LEESMIJ.txt)
+#                                    image/firmware/rpi5; herkomst in de
+#                                    LEESMIJ.txt daar)
+#   CFG=pad image/rpi5.sh            de config van de node (standaard
+#                                    image/cfg/hop-config-headless.cfg; met
+#                                    GUI=1 hoort hop-config-headfull.cfg
+#                                    erbij): elke regel wordt een token in
+#                                    cmdline.txt
+#   EXTRA="hopos.node=..." image/... meer tokens, vóór die van CFG (de
+#                                    eerste waarde wint)
 #
-# Het boot-recept is dat van de Go-generatie (OLD/image/rpi5-agent.sh): de
-# Pi 5 heeft geen start*.elf (de firmware zit in de EEPROM), laadt het image
+# Het boot-recept is dat van de Go-generatie (image/rpi5-agent.sh op tag
+# v2.2.8): de Pi 5 heeft geen start*.elf (de firmware zit in de EEPROM), laadt het image
 # RAUW op 0x80000 (hij negeert kernel_address, gemeten 09-07) en eist
 # `os_check=0`; zonder passende DTB weigert hij te booten. De armstub van de
 # EEPROM (TF-A BL31) levert PSCI. Nieuw in v3: het image van Hop gaat als
@@ -31,7 +38,7 @@ set -e
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET=aarch64-unknown-none-softfloat
 HOP_DIR="${HOP_DIR:-$DIR/../hop/hop}"
-FW="${FW:-$DIR/OLD/sd-rpi5}"
+FW="${FW:-$DIR/image/firmware/rpi5}"
 OUT="$DIR/target/sd-rpi5"
 CARD="$DIR/target/hopos-rpi5.img"
 STAGE_MAX=14680064 # 0x1000_0000 - 0x0F20_0000 (board_raspi::map::STAGE_MAX)
@@ -103,31 +110,41 @@ arm_freq=1500
 # Het image van Hop in het laadvenster (board/raspi/src/map.rs).
 $INITRAMFS
 EOF
-# EXTRA="hopos.insecure=1 hopos.node=pi5-1": meer hopos.*-sleutels in de
-# cmdline (de Pi leest zijn config uit /chosen/bootargs, niet uit een bestand).
-echo "hopos.stage=${ROLE:-hop}${EXTRA:+ $EXTRA}" >"$OUT/cmdline.txt"
+# De config: de Pi leest hem uit /chosen/bootargs (board/raspi/src/cfg.rs),
+# dus elke regel van CFG wordt een token in cmdline.txt, na hopos.stage en
+# EXTRA (de eerste waarde wint). Een bootarg heeft geen spatie: een waarde
+# met een spatie weigeren, anders knipt de Pi hem stil in tweeën.
+CFG="${CFG:-$DIR/image/cfg/hop-config-headless.cfg}"
+[ -f "$CFG" ] || {
+	echo "rpi5: CFG=$CFG does not exist" >&2
+	exit 1
+}
+TOKENS="$(sed -e 's/\r$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^#/d' -e '/^$/d' "$CFG")"
+if printf '%s\n' "$TOKENS" | grep -q '[[:space:]]'; then
+	echo "rpi5: $CFG has a value with a space; on the Pi every line is one cmdline token" >&2
+	exit 1
+fi
+echo "hopos.stage=${ROLE:-hop}${EXTRA:+ $EXTRA} $(printf '%s' "$TOKENS" | tr '\n' ' ')" >"$OUT/cmdline.txt"
 
 echo "rpi5: $OUT/hop-agent5.img ($(wc -c <"$OUT/hop-agent5.img" | tr -d ' ') bytes), config.txt, cmdline.txt${IMAGE:+, hop.elf ($SIZE bytes, role $ROLE)}" >&2
 
 # Het kaart-image: de firmware erbij, en een FAT die de Pi-firmware leest.
-# mkcard is het bewezen gereedschap van de Go-generatie (MBR + FAT16 met
-# LFN, reproduceerbaar, geen mount); ontbreekt iets, dan LUID overslaan en
-# is target/sd-rpi5/ plus de firmware op een bestaande kaart de weg.
+# tools/mkcard is de port van het bewezen gereedschap van de Go-generatie
+# (MBR + FAT16 met LFN, reproduceerbaar, geen mount); ontbreekt de
+# firmware, dan LUID overslaan en is target/sd-rpi5/ plus de firmware op een
+# bestaande kaart de weg.
 rm -f "$CARD"
 MISSING=""
 mkdir -p "$OUT/overlays"
 for f in bcm2712-rpi-5-b.dtb overlays/bcm2712d0.dtbo; do
 	if [ -f "$FW/$f" ]; then cp "$FW/$f" "$OUT/$f"; else MISSING="$MISSING $f"; fi
 done
-MKCARD="$DIR/OLD/image/mkcard/main.go"
 if [ -n "$MISSING" ]; then
-	echo "rpi5: NO card image, missing in $FW:$MISSING (see OLD/sd-rpi5/LEESMIJ.txt)" >&2
-elif ! command -v go >/dev/null 2>&1 || [ ! -f "$MKCARD" ]; then
-	echo "rpi5: NO card image, mkcard needs go and $MKCARD" >&2
+	echo "rpi5: NO card image, missing in $FW:$MISSING (see image/firmware/rpi5/LEESMIJ.txt)" >&2
 else
 	set -- "$OUT/hop-agent5.img" "$OUT/config.txt" "$OUT/cmdline.txt" \
 		"$OUT/bcm2712-rpi-5-b.dtb" "$OUT/overlays/bcm2712d0.dtbo=overlays/bcm2712d0.dtbo"
 	[ -f "$OUT/hop.elf" ] && set -- "$@" "$OUT/hop.elf"
-	go run "$MKCARD" -o "$CARD" -size 64 -start 8192 -label bootfs -vollabel "$@" >&2
+	cargo run -q -p mkcard -- -o "$CARD" -size 64 -start 8192 -label bootfs -vollabel "$@" >&2
 	echo "rpi5: $CARD (dd: diskutil unmountDisk /dev/diskN && sudo dd if=$CARD of=/dev/rdiskN bs=4m)" >&2
 fi

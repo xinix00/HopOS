@@ -63,6 +63,12 @@ MEDIA_PKGS="-p kern -p applib -p board-o6n"
 MEDIA_FEATS="kern/media,applib/media,board-o6n/media"
 cargo test --quiet $MEDIA_PKGS --features "$MEDIA_FEATS"
 cargo clippy --all-targets --quiet $MEDIA_PKGS --features "$MEDIA_FEATS" -- -D warnings
+echo "== host: mkcard (test en clippy)"
+# De kaartbouwer op de host, net als netmeter std en geen default-member.
+# Zijn toets legt drie kaarten byte voor byte naast de Go-mkcard, of naast
+# de sha256 die Go op 02-10 gaf.
+cargo test --quiet -p mkcard
+cargo clippy --all-targets --quiet -p mkcard -- -D warnings
 echo "== rustfmt"
 cargo fmt --check
 echo "== target: bibliotheken (aarch64)"

@@ -4,8 +4,8 @@ De hardwaredecoder van de Orion O6N (Arm China Linlon V8, "mve") en de
 codec-dienst waarmee een app een stream door de decoder haalt, in v3. De
 Go-bron is `OLD/metal/media/driver/vpu/mve`, `OLD/metal/driver/codec`,
 `OLD/metal/kern/slots/codec*.go` en `OLD/metal/board/o6n/hop/vpu*.go`; de
-stand van de Go-generatie en de lessen staan in `OLD/docs/media-o6n.md` en
-`OLD/docs/v1/technical/video-codec.md`.
+stand van de Go-generatie en de lessen staan in `docs/media-o6n.md` en
+`docs/v1/technical/video-codec.md` op tag v2.2.8.
 
 Alles zit achter de feature `media` (op `hopos`, `kern`, `applib` en
 `board-o6n`). Kaal kent de kern de codec-ops niet en antwoordt hij
@@ -92,7 +92,7 @@ elkaar, elk als bericht aan zijn eigenaar:
    door Lumen van Sky1-Linux/sky1-firmware gehaald) als
    `/firmware/<naam>.fwb` (het pad van de Go-kern) of
    `/codec-firmware/<naam>.fwb` (waar Lumen ze neerzet: zijn jobspec mount
-   `/firmware` op dat volume, `OLD/image/hopos-media-o6n.cfg`). Eén regel
+   `/firmware` op dat volume, `jobs/hopos-media-o6n.cfg`). Eén regel
    met het aantal; wat mist staat bij naam in `HOPOS_CODEC_NOFW
    missing=hevcdec,…`, en een open van die codec weigert met "no firmware
    for this codec". Zonder volume: `HOPOS_CODEC_NOFW missing=all`.
@@ -162,7 +162,7 @@ stack per daadwerkelijk gestarte secundaire core.
 
 ## Checklist: de O6N-mediatest
 
-Bouwen: `MEDIA=1 BOARD=o6n CFG=OLD/image/hopos-media-o6n.cfg sh
+Bouwen: `MEDIA=1 BOARD=o6n CFG=jobs/hopos-media-o6n.cfg sh
 image/uefi-run.sh` (de gate bouwt hetzelfde). De ESP staat in
 `target/uefi-esp-o6n-media/`: `EFI/BOOT/BOOTAA64.EFI` en `hopos.cfg` op een
 FAT32-stick. De config uit de Go-boom geldt (`hopos.codec=768`,

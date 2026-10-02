@@ -1,0 +1,28 @@
+Firmware voor de Raspberry Pi 4 (image/rpi4.sh, tools/qemu-rpi4-test.sh,
+tools/qemu-test-flip.sh). Dezelfde bytes als de Go-generatie (sd-rpi4/ op
+tag v2.2.8), waarmee de Pi 4 sinds juli boot. Geen eigen werk: vervangen
+is een nieuwe meting op ijzer.
+
+  start4.elf, fixup4.dat   VideoCore-firmware, raspberrypi/firmware boot/
+                           (opgehaald 09-07-2026), onder LICENCE.broadcom
+  bcm2711-rpi-4-b.dtb      dezelfde repo; bron in raspberrypi/linux (GPL-2.0)
+  bl31.bin                 TF-A BL31 (BSD-3-Clause), zelf gebouwd. Verplicht:
+                           de stock armstub8 heeft geen PSCI, en de eerste
+                           CPU_ON hangt dan in een lege EL3-vector.
+
+bl31.bin opnieuw bouwen:
+  git clone --depth 1 https://github.com/ARM-software/arm-trusted-firmware
+  cd arm-trusted-firmware
+  make PLAT=rpi4 CROSS_COMPILE=aarch64-none-elf- DEBUG=0 bl31
+  cp build/rpi4/release/bl31.bin image/firmware/rpi4/
+  (macOS: brew install --cask gcc-aarch64-embedded)
+
+sha256:
+  11201320007a5da68ceac1e9286a1066666d87aa019045a524144f3c0e58b844  start4.elf
+  795bfb2514b541dc6ad7ba1b0626c6bb7697f7f6a8f452c9c81ae861b82de6a6  fixup4.dat
+  75761b73c284e26623e4d1624bff13e67bce2ae620880efd81d6571a3739fcfb  bcm2711-rpi-4-b.dtb
+  58d43c2b7d6fd9b7e7ec47d6fedc2a88af4199833d822fc47fed63e91f0bce78  bl31.bin
+
+UART: PL011 op de 40-pins header, pin 8 TXD, 10 RXD, 6 GND, 115200 8N1.
+Blijft het stil na de bootloader-log: bl31.bin ontbreekt of de armstub-regel
+in config.txt (image/rpi4.sh schrijft hem) wordt niet gelezen.

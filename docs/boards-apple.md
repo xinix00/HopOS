@@ -5,11 +5,11 @@ cluster 0, 4 P-cores "everest" in cluster 1, 24 GB vanaf 1 TiB, een Broadcom
 57762 achter een Apple-PCIe-rootpoort, de SSD achter de ANS-coprocessor) is
 geport van de Go-kern (`OLD/metal/board/apple` met `hop/`, de drivers `aic`,
 `nic/tg3`, `rtkit`, `smc`, `nvme/apple.go`, de lezers `fw/adt`, `fw/xnuboot`,
-`fw/gpt`, en `OLD/image/apple-m4.sh` met `OLD/image/apple/`) naar Rust.
+`fw/gpt`, en `image/apple-m4.sh` met `image/apple/` op tag v2.2.8) naar Rust.
 Alles hieronder is op de host getest en bouwt voor het target
 (`image/apple-m4.sh` levert het raw image). Er is geen QEMU-model van de M4;
 niets ervan heeft in Rust op ijzer gedraaid. Het dossier met elke Go-meting
-(28-08 tot 04-09) is `OLD/docs/v1/archief/apple-m4.md`; de gedateerde lessen
+(28-08 tot 04-09) is `docs/v1/archief/apple-m4.md` op tag v2.2.8; de gedateerde lessen
 staan in het commentaar van de code.
 
 ## Wat er is

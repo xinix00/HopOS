@@ -384,7 +384,7 @@ mod on {
         /// Waar de blobs op het volume staan, in deze volgorde. `/firmware`
         /// is die van de Go-kern (`codecFirmwareDir`); `/codec-firmware` is
         /// waar Lumen ze neerzet: zijn jobspec mount `/firmware` op dat
-        /// volume (OLD/image/hopos-media-o6n.cfg), en een volume is een
+        /// volume (jobs/hopos-media-o6n.cfg), en een volume is een
         /// gewoon hopfs-pad.
         const FW_DIRS: [&str; 2] = ["/firmware", "/codec-firmware"];
 

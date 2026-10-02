@@ -1,0 +1,35 @@
+{
+  "name": "spin",
+  "driver": "hop",
+  "artifacts": [
+    {
+      "url": "https://github.com/xinix00/Spin/releases/download/rolling/spin-server-arm64-tamago.elf",
+      "match": {
+        "node.arch": "arm64"
+      }
+    },
+    {
+      "url": "https://github.com/xinix00/Spin/releases/download/rolling/spin-server-riscv64-tamago.elf",
+      "match": {
+        "node.arch": "riscv64"
+      }
+    }
+  ],
+  "memory_limit": 2147483648,
+  "cpu_shares": 1024,
+  "max_restarts": -1,
+  "priority": 1,
+  "ports": {
+    "http": 80
+  },
+  "volumes": {
+    "/spin": "/data"
+  },
+  "env": {
+    "SPIN_INTERNAL_URL": "https://bollenloods.getspin.app",
+    "SPIN_MASTER_KEY": "<SPIN_MASTER_KEY>",
+    "SPIN_PUBLIC_URL": "https://bollenloods.getspin.app",
+    "SPIN_WORKER_TOKEN": "<SPIN_WORKER_TOKEN>"
+  },
+  "update_policy": "recreate"
+}

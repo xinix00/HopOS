@@ -1,8 +1,8 @@
 #!/bin/sh
 # De soak van HopOS v3: uren lang jobs plaatsen en stoppen op een node, met
 # de kern-flip erin als optie, en aan het eind een rapport. De opvolger van
-# OLD/tools/soak-cycle.sh (de burn-jobs elk uur recyclen) en
-# OLD/tools/soak-monitor.sh (elke minuut agent en leader pollen, ALARM bij
+# tools/soak-cycle.sh (tag v2.2.8; de burn-jobs elk uur recyclen) en
+# tools/soak-monitor.sh (elke minuut agent en leader pollen, ALARM bij
 # een miss), in één lus.
 #
 # Eén ronde (elke $PERIOD seconden):

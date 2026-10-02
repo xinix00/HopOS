@@ -141,7 +141,7 @@ if [ "$BOARD" = rpi4 ]; then
 	T=aarch64-unknown-none-softfloat
 	W="$(mktemp -d -t hopos-flip-pi.XXXXXX)"
 	trap 'rm -rf "$W"' EXIT INT TERM
-	DTB="${DTB:-$DIR/OLD/sd-rpi4/bcm2711-rpi-4-b.dtb}"
+	DTB="${DTB:-$DIR/image/firmware/rpi4/bcm2711-rpi-4-b.dtb}"
 	cd "$DIR"
 	cargo build --quiet --release --target "$T" -p hopos --features board-rpi4
 	cargo build --quiet --release --target "$T" -p appspike

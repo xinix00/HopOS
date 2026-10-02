@@ -1,0 +1,15 @@
+De boot-keten van de Radxa Zero 3E (image/radxa-zero3.sh): de bytes LBA
+64..32767 van het officiele Radxa Zero 3-image, release b6. Dat is de
+idbloader (TPL/SPL, LBA 64) en u-boot.itb (TF-A en U-Boot, LBA 16384) die de
+BootROM raw leest; tools/mkcard legt ze op dezelfde plek (-raw ...@32768).
+Exact de bytes van alle metingen sinds 05-08; het script toetst de hash bij
+elke bouw. Geen eigen werk: U-Boot is GPL-2.0, TF-A BSD-3-Clause, de bron
+staat bij Radxa.
+
+  donor-boot.bin  16744448 bytes
+  sha256 9a582a0c6fcd8b41d5627284aa9b831a46a08e7606c6fc31901f48725354a7b9
+
+Opnieuw maken:
+  https://github.com/radxa-build/radxa-zero3/releases/download/b6/radxa-zero3_debian_bullseye_cli_b6.img.xz
+  xz -d radxa-zero3_debian_bullseye_cli_b6.img.xz
+  dd if=radxa-zero3_debian_bullseye_cli_b6.img of=donor-boot.bin bs=512 skip=64 count=32704

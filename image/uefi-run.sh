@@ -3,7 +3,7 @@
 # echte EDK2-firmware: de proeftuin voor de Orion O6N en de Ampere Altra
 # (zelfde firmware-familie, zelfde weg: FAT-medium, EFI/BOOT/BOOTAA64.EFI,
 # PE-stub, ExitBootServices, kmain). Wat hier boot, hoort van een stick te
-# booten. De Go-voorganger: OLD/image/uefi-run.sh.
+# booten. De Go-voorganger: image/uefi-run.sh op tag v2.2.8.
 #
 #   image/uefi-run.sh                 bouwen en booten op QEMU/EDK2
 #   BUILD_ONLY=1 image/uefi-run.sh    alleen de ESP-map bouwen
@@ -13,7 +13,11 @@
 #   APP=appspike image/uefi-run.sh    een app uit deze werkruimte als
 #                                     hopos-stage.elf op de ESP, rol app
 #   APP=/pad/elf ROLE=app|hop ...     een kant-en-klare ELF
-#   CFG=pad image/uefi-run.sh         hopos.cfg (standaard: een minimale)
+#   CFG=pad image/uefi-run.sh         hopos.cfg (standaard op o6n en altra
+#                                     image/cfg/hop-config-headless.cfg, met
+#                                     GUI=1 of MEDIA=1 hoort
+#                                     hop-config-headfull.cfg erbij; op QEMU
+#                                     een minimale zonder sleutels)
 #   GUI=1 image/uefi-run.sh           de gui-smaak (`--features gui`, docs/gui.md):
 #                                     de console op de GOP; QEMU krijgt
 #                                     `-device ramfb` (EDK2 maakt er een GOP van)
@@ -23,7 +27,7 @@
 #                                     O6N met de VPU. Eigen target-map
 #                                     (target/uefi-media) en eigen ESP
 #                                     (…-media), zodat de kale er niet door
-#                                     verdwijnt; CFG=OLD/image/hopos-media-o6n.cfg
+#                                     verdwijnt; CFG=jobs/hopos-media-o6n.cfg
 #                                     is de config van de mediatest
 #   image/uefi-run.sh -s -S           de rest gaat naar QEMU (gdb)
 #
@@ -152,7 +156,12 @@ print(f"uefi-run: {out} ({len(img)} bytes, {n} relocations, data at {data_start:
 PY
 rm -f "$EFI.raw"
 
-# De config: standaard een minimale (geen sleutels), of CFG.
+# De config: CFG, op de fysieke borden standaard de gedeelde
+# (image/cfg), op QEMU een minimale zonder sleutels (de QEMU-toetsen
+# rekenen op een dichte API).
+if [ -z "${CFG:-}" ] && [ "$BOARD" != uefi ]; then
+	CFG="$DIR/image/cfg/hop-config-headless.cfg"
+fi
 if [ -n "${CFG:-}" ]; then
 	cp "$CFG" "$ESP/hopos.cfg"
 elif [ ! -e "$ESP/hopos.cfg" ]; then

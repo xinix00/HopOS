@@ -1,0 +1,12 @@
+De vendor-bestanden van de Sipeed LicheeRV Nano (image/licheerv-agent.sh):
+de donor-FIP (FSBL, DDR-training) en het gereedschap dat er ons MONITOR-slot
+in zet. Geen eigen werk; dezelfde bytes als de Go-generatie en het recept in
+docs/boards-riscv.md ("De donor van de LicheeRV").
+
+  donor-fip.bin  release 20260114 van sipeed/LicheeRV-Nano-Build, image
+                 2026-01-14-16-03-d4003f.img, partitie 1, fip.bin
+  fiptool.py     dezelfde repo, branch main, fsbl/plat/cv181x/fiptool.py
+
+sha256:
+  d85e68836f57a9fcb1bbfba3c1ccf93d1b062ac168305d7f0cc83a72a796c6b9  donor-fip.bin
+  cc1d37d0d8fbcb3e6180c0403bcf4fa5c7038306be13779f3b8b948915084bf5  fiptool.py

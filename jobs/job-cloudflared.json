@@ -1,0 +1,16 @@
+{
+ "name": "cloudflared",
+ "driver": "hop",
+ "artifacts": [
+  {
+   "url": "https://github.com/xinix00/HopOS/releases/download/apps/cloudflared-arm64-tamago.elf"
+  }
+ ],
+ "memory_limit": 268435456,
+ "cpu_shares": 1024,
+ "max_restarts": -1,
+ "priority": 0,
+ "env": {
+  "TUNNEL_TOKEN": "<TUNNEL_TOKEN>"
+ }
+}

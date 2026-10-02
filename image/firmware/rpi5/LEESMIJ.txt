@@ -1,0 +1,14 @@
+Firmware voor de Raspberry Pi 5 (image/rpi5.sh). De Pi 5 heeft geen
+start*.elf (de firmware zit in de EEPROM) en de armstub van de EEPROM (TF-A
+BL31) levert PSCI; zonder passende DTB weigert hij te booten. Dezelfde bytes
+als de Go-generatie (sd-rpi5/ op tag v2.2.8).
+
+  bcm2712-rpi-5-b.dtb        raspberrypi/firmware boot/ (opgehaald 08-07-2026);
+  overlays/bcm2712d0.dtbo    bron in raspberrypi/linux (GPL-2.0)
+
+sha256:
+  e67017e5d45b97af478ebc93d651a086f2adcb6a650fe453eb9f1cf47e66473f  bcm2712-rpi-5-b.dtb
+  b73210c9256ff4b4963365f9acc49c0f7449f17eeddf21355e23dd011da899ec  overlays/bcm2712d0.dtbo
+
+Debug-UART: de 3-pins JST-SH tussen de HDMI-poorten, 115200 8N1. Komt er
+niets (ook geen bootloader-log): BOOT_UART=1 in de EEPROM-config.

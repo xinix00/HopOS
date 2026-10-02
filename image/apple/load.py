@@ -4,7 +4,7 @@
 # "firmware-rol" van dit script: wat U-Boot/booti op de Radxa doet, plus het
 # param-blok (board_apple::fwinfo) met wat alleen de loader weet: m1n1's
 # spin-table en de config-tekst. Overgenomen van de Go-meetbank
-# (OLD/image/apple/load-probe.py, bewezen 28-08 t/m 04-09); nieuw in v3: de
+# (image/apple/load-probe.py op tag v2.2.8, bewezen 28-08 t/m 04-09); nieuw in v3: de
 # staging (STAGE=pad, ROLE=app|hop) in de loader-regio, met een magic.
 #
 #   M1N1DEVICE=/dev/cu.usbmodem<serienr>1 python3 image/apple/load.py target/apple-m4/hopos-apple.img
