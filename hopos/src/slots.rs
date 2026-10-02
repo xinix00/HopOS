@@ -183,6 +183,7 @@ use crate::glue::{DevMem, KernConsole, SlotOutbox};
 use abi::hopabi::{CTRL_ENV_DATA, CTRL_ENV_LEN, CTRL_ENV_MAX};
 use abi::layout::{ABI_CTRL_OFF, ABI_TAIL, CtxState, LINK_BASE, RING_DATA_CAP};
 use abi::place::{self, SYM_ABI, SYM_RAM_SIZE, SYM_RAM_START, SYM_SLOT_HINT, Window};
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use board::Board;
@@ -392,9 +393,11 @@ pub(crate) fn start(
     // De actor buiten de future gebouwd (30-09): binnen `async move` stond
     // de verse `Lifecycle` als tijdelijke waarde in het frame van de
     // poll-functie, en dat frame (57 KB) reserveerde elke poll van de
-    // lifecycle opnieuw, bovenop de rest van de stack. Nu gaat hij als
-    // waarde de future in (de heap van de taak).
-    let mut lc = Lifecycle::new(
+    // lifecycle opnieuw, bovenop de rest van de stack. En in een `Box`
+    // (02-10): als waarde in de future stond hij (54 KB) nog een keer in
+    // de future van 56 KB, en die twee kopieën in het frame van `setup`
+    // brachten de boot-stack met de display-smaak over zijn wachtpagina.
+    let mut lc = Box::new(Lifecycle::new(
         cage,
         cores,
         ExecTimer(exec),
@@ -405,7 +408,7 @@ pub(crate) fn start(
         // De device-grants (gui.rs): de framebuffer in de gui-smaak,
         // kaal niets.
         crate::gui::slot_grants(),
-    );
+    ));
     let actor = async move {
         // FLIP: eerst alle eigendomsclaims terug, dan pas verzoeken.
         if let Some(states) = &adopt {
