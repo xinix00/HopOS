@@ -771,10 +771,22 @@ pub struct SlotInfo {
     pub received: u64,
     /// Tijdens een stroom: de aangekondigde image-maat.
     pub image_size: u64,
+    /// Het geheugen dat de app zelf in gebruik meldt (`CTRL_MEM_SYS`).
+    pub mem_sys: u64,
+    /// De meetlat (docs/apps.md), rauw: idle-nanoseconden van de app (alle
+    /// cores bij elkaar), wekken, cores, en de kernklok bij het lezen. Hop
+    /// vergelijkt twee standen voor cpu-procent en wek-tempo.
+    pub idle_ns: u64,
+    /// Het aantal wekken van de slaper van de app.
+    pub wakes: u64,
+    /// De cores van de app, zoals hij ze zelf telt.
+    pub cores: u64,
+    /// De klok van de kern (ns) bij het lezen van deze stand.
+    pub at_ns: u64,
 }
 
 /// De lengte van [`SlotInfo`] op de draad.
-pub const SLOT_INFO_LEN: usize = 88;
+pub const SLOT_INFO_LEN: usize = 128;
 
 const _: () = assert!(core::mem::size_of::<SlotInfo>() == SLOT_INFO_LEN);
 field!(SlotInfo, state, 0);
@@ -814,6 +826,11 @@ impl SlotInfo {
             self.partition,
             self.received,
             self.image_size,
+            self.mem_sys,
+            self.idle_ns,
+            self.wakes,
+            self.cores,
+            self.at_ns,
         ];
         for (w, o) in words.iter().zip(b[8..].chunks_exact_mut(8)) {
             o.copy_from_slice(&w.to_le_bytes());
@@ -842,6 +859,11 @@ impl SlotInfo {
             partition: le64(b, 64),
             received: le64(b, 72),
             image_size: le64(b, 80),
+            mem_sys: le64(b, 88),
+            idle_ns: le64(b, 96),
+            wakes: le64(b, 104),
+            cores: le64(b, 112),
+            at_ns: le64(b, 120),
         })
     }
 
@@ -1053,6 +1075,11 @@ mod tests {
             partition: 64 << 20,
             received: 0,
             image_size: 0,
+            mem_sys: 4096,
+            idle_ns: 7,
+            wakes: 8,
+            cores: 1,
+            at_ns: 9,
         };
         let b = i.encode();
         assert_eq!(SlotInfo::decode(&b).unwrap(), i);

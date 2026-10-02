@@ -23,8 +23,9 @@ use crate::glue::{attach, detach, err, publish_ports, tail_of, unpublish_ports};
 use abi::hopabi::{
     AppStatus, CTRL_APP_FAULT_ELR, CTRL_APP_FAULT_ESR, CTRL_APP_FAULT_FAR, CTRL_APP_FAULT_VEC,
     CTRL_CORES, CTRL_ENTRY, CTRL_EXIT_CODE, CTRL_FAULT_ESR, CTRL_FAULT_FAR, CTRL_FAULT_VEC,
-    CTRL_HEARTBEAT, CTRL_IDLE_MODE, CTRL_KILL, CTRL_MBOX_PA, CTRL_RAM_SIZE, CTRL_S2_TABLE,
-    CTRL_SHARED, CTRL_SLOT, CTRL_SMP_REQ, CTRL_STATUS, CTRL_VEC_PA, CTRL_WALL_OFF, IDLE_YIELD,
+    CTRL_HEARTBEAT, CTRL_IDLE, CTRL_IDLE_MODE, CTRL_KILL, CTRL_MBOX_PA, CTRL_MEM_SYS,
+    CTRL_RAM_SIZE, CTRL_S2_TABLE, CTRL_SHARED, CTRL_SLOT, CTRL_SMP_REQ, CTRL_STATUS, CTRL_VEC_PA,
+    CTRL_WAKES, CTRL_WALL_OFF, IDLE_YIELD,
 };
 use abi::layout::{
     self, CTRL_STRIDE, CTX_KICK_TARGET, CTX_SMP, CtxState, LINK_BASE, NET_RING_DATA_CAP, Plan,
@@ -634,6 +635,11 @@ impl Cage for ArmCage {
             exit_code: self.ctrl_read(slot, CTRL_EXIT_CODE),
             heartbeat: self.ctrl_read(slot, CTRL_HEARTBEAT),
             ram_size: self.ctrl_read(slot, CTRL_RAM_SIZE),
+            mem_sys: self.ctrl_read(slot, CTRL_MEM_SYS),
+            idle_ns: idle_ns(self.ctrl_read(slot, CTRL_IDLE)),
+            wakes: self.ctrl_read(slot, CTRL_WAKES),
+            cores: self.ctrl_read(slot, CTRL_CORES),
+            at_ns: cpu::idle::now(),
             fault_vec: self.ctrl_read(slot, CTRL_FAULT_VEC),
             fault_esr: self.ctrl_read(slot, CTRL_FAULT_ESR),
             fault_far: self.ctrl_read(slot, CTRL_FAULT_FAR),
@@ -929,4 +935,10 @@ impl Cores for ArmCores {
             el2::kick(FLAVOR, mpidr(self.plan.phys_core(c)));
         }
     }
+}
+
+/// De idle-ticks van de architectuurteller in nanoseconden.
+fn idle_ns(ticks: u64) -> u64 {
+    let f = cpu::idle::freq().max(1);
+    u64::try_from(u128::from(ticks) * 1_000_000_000 / u128::from(f)).unwrap_or(u64::MAX)
 }

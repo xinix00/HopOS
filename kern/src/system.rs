@@ -1968,6 +1968,11 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             partition: st.partition.map_or(0, |p| p.size),
             received,
             image_size,
+            mem_sys: st.cage.mem_sys,
+            idle_ns: st.cage.idle_ns,
+            wakes: st.cage.wakes,
+            cores: st.cage.cores,
+            at_ns: st.cage.at_ns,
         };
         let b = info.encode();
         let max = data.len();

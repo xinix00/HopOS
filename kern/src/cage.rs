@@ -118,6 +118,20 @@ pub struct Status {
     pub heartbeat: u64,
     /// De door de app gemelde RAM-maat.
     pub ram_size: u64,
+    /// Het geheugen dat de app zelf in gebruik meldt (`CTRL_MEM_SYS`).
+    pub mem_sys: u64,
+    /// De meetlat van docs/apps.md, rauw: de idle-tijd van de app in
+    /// nanoseconden (alle cores bij elkaar, `CTRL_IDLE` omgerekend), het
+    /// aantal wekken (`CTRL_WAKES`), zijn cores (`CTRL_CORES`) en de klok
+    /// van de kern bij het lezen. Wie twee standen vergelijkt heeft idle-
+    /// en wek-tempo; de kern zelf bewaart geen vorige stand.
+    pub idle_ns: u64,
+    /// Het aantal wekken van de slaper van de app.
+    pub wakes: u64,
+    /// De cores van de app, zoals hij ze zelf telt.
+    pub cores: u64,
+    /// De klok van de kern (ns) bij het lezen van deze stand.
+    pub at_ns: u64,
     /// De vectorindex van een fault (0 = geen).
     pub fault_vec: u64,
     /// Het syndroom van die fault.
