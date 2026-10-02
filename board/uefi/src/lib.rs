@@ -285,7 +285,7 @@ fn console_write(b: &[u8]) {
     }
     let ty = facts::CONSOLE_TYPE.load(Relaxed);
     let shift = facts::CONSOLE_SHIFT.load(Relaxed);
-    if is_16550(ty) {
+    if fw::acpi::is_16550(ty) {
         // SAFETY: de SPCR wees dit blok aan; de identity map mapt het als
         // Device (`boot::build_map`).
         let u = unsafe { Ns16550::new(Pa(base), shift) };
@@ -298,12 +298,6 @@ fn console_write(b: &[u8]) {
         u.write(b);
         CONSOLE_DEAD.store(u.is_dead(), Relaxed);
     }
-}
-
-/// SPCR Interface Type: de 16550-familie (16550, 16450, MAX311xE, 16550
-/// met GAS).
-fn is_16550(ty: u8) -> bool {
-    matches!(ty, 0x00 | 0x01 | 0x02 | 0x12)
 }
 
 /// De GIC, uit de feiten.
@@ -433,7 +427,7 @@ impl Uefi {
     /// klasse is de eerste core van die klasse (MADT-efficiëntieklasse).
     #[must_use]
     pub fn os_core(&self) -> (usize, Option<&'static str>) {
-        let v = fw::bootcfg::first(fw::bootcfg::all(self.config(), "hopos.oscore"));
+        let v = fw::bootcfg::get(self.config(), "hopos.oscore");
         board::os_core(v, self.cores(), |c| self.core_class(c), 0)
     }
 
@@ -546,7 +540,9 @@ impl Board for Uefi {
     }
 
     fn console(&self) -> fn(&[u8]) {
-        if !is_16550(facts::CONSOLE_TYPE.load(Relaxed)) && facts::CONSOLE_BASE.load(Relaxed) != 0 {
+        if !fw::acpi::is_16550(facts::CONSOLE_TYPE.load(Relaxed))
+            && facts::CONSOLE_BASE.load(Relaxed) != 0
+        {
             // SAFETY: zie `console_write`.
             unsafe { Pl011::new(Pa(facts::CONSOLE_BASE.load(Relaxed))) }.init();
         }
@@ -832,11 +828,5 @@ mod tests {
             (1 << 24) | (8 << 16) | 1
         );
         assert!(driver_gicv3::is_ns_sgi(KICK_SGI));
-    }
-
-    #[test]
-    fn spcr_types() {
-        assert!(is_16550(0x00) && is_16550(0x12));
-        assert!(!is_16550(0x03) && !is_16550(0x0e));
     }
 }

@@ -160,7 +160,7 @@ fn fdt() -> Option<Fdt<'static>> {
 /// `-append`); leeg als hij er niet is.
 #[must_use]
 pub fn boot_param(key: &'static str) -> &'static str {
-    fw::bootcfg::first(fw::bootcfg::cmdline(bootargs(), key))
+    fw::bootcfg::get_cmdline(bootargs(), key)
 }
 
 /// De FDT-bootargs (QEMU `-append`); "" zonder.

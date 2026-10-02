@@ -44,6 +44,7 @@
 //! maakt, en leest elk getal bytegewijs: er bestaat hier geen scheve
 //! woordlees meer.
 
+use crate::bytes::le32;
 use core::fmt;
 
 const PROP_NAME_LEN: usize = 32;
@@ -98,12 +99,6 @@ pub struct Node(usize);
 impl Node {
     /// De wortel.
     pub const ROOT: Node = Node(0);
-
-    /// De offset in de blob.
-    #[must_use]
-    pub const fn offset(self) -> usize {
-        self.0
-    }
 }
 
 /// Eén property: naam (zonder de NUL-opvulling) en waarde.
@@ -143,12 +138,6 @@ impl Chain {
 #[derive(Copy, Clone, Debug)]
 pub struct Adt<'a> {
     blob: &'a [u8],
-}
-
-/// Een little-endian u32 op `off`, bytegewijs gelezen.
-fn le32(b: &[u8], off: usize) -> Option<u32> {
-    let w = b.get(off..off.checked_add(4)?)?;
-    Some(u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
 }
 
 /// `n` cellen van 32 bits als één getal, laagste cel eerst (little-endian,

@@ -27,6 +27,7 @@ pub mod acpi;
 pub mod adt;
 pub mod aml;
 pub mod bootcfg;
+mod bytes;
 pub mod fdt;
 pub mod gpt;
 pub mod xnuboot;

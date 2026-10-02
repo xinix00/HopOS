@@ -423,7 +423,6 @@ fn madt_cpus_and_gic() {
     assert_eq!(
         cpus[1],
         Gicc {
-            uid: 1,
             mpidr: 0x100,
             enabled: true,
             gicr: 0x080c_0000,
@@ -474,9 +473,9 @@ fn a_broken_madt_entry_ends_the_walk() {
     // Een entry die voorbij het einde loopt.
     let mut long = gicc(0, 0, true, 0, 0);
     long[1] = 200;
-    let bytes = madt(&[gicc(5, 0, true, 0, 0), long]);
+    let bytes = madt(&[gicc(5, 0x500, true, 0, 0), long]);
     let m = Madt::new(&bytes).unwrap();
-    assert_eq!(m.cpus().map(|c| c.uid).collect::<Vec<_>>(), [5]);
+    assert_eq!(m.cpus().map(|c| c.mpidr).collect::<Vec<_>>(), [0x500]);
 }
 
 #[test]
@@ -562,11 +561,9 @@ fn spcr_pl011_on_qemu() {
             if_type: 3,
             space: 0,
             shift: 0,
-            baud: 9600
         }
     );
-    assert!(c.is_pl011());
-    assert!(!c.is_16550());
+    assert!(!is_16550(c.if_type));
 }
 
 #[test]
@@ -574,13 +571,13 @@ fn spcr_16550_with_32_bit_stride_on_the_o6n() {
     // De O6N: een DesignWare 8250 met dword-toegang, dus shift 2.
     let c = spcr(&spcr_table(0x12, 3, 0x040d_0000, 7)).unwrap();
     assert_eq!(c.shift, 2);
-    assert_eq!(c.baud, 115_200);
-    assert!(c.is_16550());
-    assert!(!c.is_pl011());
-    // Access 0 (niet gezegd) en een onbekende baudcode.
+    assert!(is_16550(c.if_type));
+    // Access 0 (niet gezegd), en de SBSA-UART is geen 16550.
     let c = spcr(&spcr_table(0x0e, 0, 0x100, 0)).unwrap();
-    assert_eq!((c.shift, c.baud), (0, 0));
-    assert!(c.is_pl011());
+    assert_eq!(c.shift, 0);
+    assert!(!is_16550(c.if_type));
+    assert!(is_16550(0x00) && is_16550(0x01) && is_16550(0x02));
+    assert!(!is_16550(0x0d));
     // Te kort.
     assert!(matches!(
         spcr(&sdt(b"SPCR", &[0; 10])).err(),
@@ -591,21 +588,9 @@ fn spcr_16550_with_32_bit_stride_on_the_o6n() {
 #[test]
 fn fadt_psci_conduits() {
     let smc = sdt_with(b"FACP", 276, &[(129, &1u16.to_le_bytes())]);
-    assert_eq!(
-        fadt_psci(&smc).unwrap(),
-        Psci {
-            compliant: true,
-            hvc: false
-        }
-    );
+    assert_eq!(fadt_psci(&smc).unwrap(), Psci { hvc: false });
     let hvc = sdt_with(b"FACP", 276, &[(129, &3u16.to_le_bytes())]);
-    assert_eq!(
-        fadt_psci(&hvc).unwrap(),
-        Psci {
-            compliant: true,
-            hvc: true
-        }
-    );
+    assert_eq!(fadt_psci(&hvc).unwrap(), Psci { hvc: true });
     assert_eq!(
         fadt_psci(&sdt_with(b"FACP", 130, &[])).err(),
         Some(Error::TooShort {
@@ -652,7 +637,6 @@ fn gtdt_skips_the_secure_watchdog() {
         Some(Watchdog {
             refresh: 0x2000_0000,
             control: 0x2001_0000,
-            gsiv: 61
         })
     );
     // Alleen een secure watchdog: geen.

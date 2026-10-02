@@ -113,7 +113,7 @@ const REPORT_BUF: usize = 16;
 /// taak die de bus bezit, dus mag blokkeren noch panieken.
 pub trait Sink {
     /// Eén invoergebeurtenis. De binary zet hem in de rij van de deliverer
-    /// ([`deliver::offer`]); vol is weggooien.
+    /// ([`deliver::InputTx`], met `try_send`); vol is weggooien.
     fn input(&mut self, e: Event);
 
     /// Eén logregel, Engels, met de getallen erin.

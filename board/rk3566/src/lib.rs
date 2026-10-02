@@ -327,11 +327,11 @@ pub fn cfg_text() -> &'static str {
 /// de bootargs (Go: `rk3566.BootParam`).
 #[must_use]
 pub fn boot_param(key: &'static str) -> &'static str {
-    let from_file = fw::bootcfg::first(fw::bootcfg::all(cfg_text(), key));
+    let from_file = fw::bootcfg::get(cfg_text(), key);
     if !from_file.is_empty() {
         return from_file;
     }
-    fw::bootcfg::first(fw::bootcfg::cmdline(bootargs(), key))
+    fw::bootcfg::get_cmdline(bootargs(), key)
 }
 
 /// De bootargs (de APPEND van extlinux.conf); "" zonder.

@@ -315,7 +315,7 @@ mod on {
 
         impl Sink for UsbSink {
             fn input(&mut self, e: Event) {
-                if !deliver::offer(&mut self.tx, e) {
+                if self.tx.try_send(e).is_err() {
                     // Eén regel bij de eerste, daarna tellen.
                     if QUEUE_DROPS.fetch_add(1, Relaxed) == 0 {
                         println!(

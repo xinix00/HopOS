@@ -37,7 +37,7 @@ De feature zet `gui` aan op het gekozen board (`board-x?/gui`) en linkt
 | `driver/fb` (`driver-fb`) | de console op een lineaire framebuffer: `Desc`, `Console` (kop, log, `header_status`), geen allocatie |
 | `kern::grants` | het `DeviceGrant`-primitief: één venster, één houder, `WindowMap` naar de stage-2, de adoptie na een flip, de haken (`Grants`) |
 | `gui/fbgrant` (`gui-fbgrant`) | het beleid: wie het glas krijgt, de `FB_*`-env, de console eraf en terug |
-| `gui/rkscan` (`gui-rkscan`) | de RK3566-keten: PD_VO, VOP2, DW-HDMI, EDID |
+| `gui/rkscan` (`gui-rkscan`) | de RK3566-keten: PD_VO, VOP2, DW-HDMI |
 | `driver/usb/xhci`, `driver/usb/hid`, `gui/usbin` | de USB-invoer: host, enumeratie, boot-HID, de bezorging aan de display-app |
 | `driver/usb/dwc3` (`driver-dwc3`) | een Synopsys DWC3-core in hostmodus (de RK3566), vóór de xHCI |
 | `board/<x>/src/usb.rs`, `Board::usb_hosts` | welke controllers een board heeft: venster, lijn, soort (xHCI of DWC3), en een eigen stuk DMA-geheugen; PCIe en firmware-handshake zijn dan gedaan |
@@ -75,16 +75,14 @@ De USB-invoer per board (`Board::usb_hosts`, `board/<x>/src/usb.rs`):
   PMU, de HPLL en de VOP2-klokken, de VOP-IOMMU uit, VP0 met Smart0 scant
   `FB_RAM` (0x0700_0000, 8 MB, Normal-NC, het PA-plan van het board), dan
   DW-HDMI met de PHY en de frame composer (DVI, geen infoframes, zoals
-  Go). De EDID wordt over de DDC gelezen en alleen gemeld: de keten drijft
-  altijd 1080p60 (`HOPOS_DISPLAY_MODE` als de monitor iets anders
-  prefereert). De console krijgt 16x16-cellen (120x67). Regels: `display:
+  Go). De keten drijft altijd 1080p60 en leest geen EDID, zoals Go. De
+  console krijgt 16x16-cellen (120x67). Regels: `display:
   1920x1080p60 on HDMI (sink attached: true) HOPOS_DISPLAY_UP`, dan `fb:
   console on 1920x1080 ... HOPOS_FB_CONSOLE`. Faalt een laag, dan zegt de
   regel welke, met de registers van die laag (`HOPOS_DISPLAY_FAIL`); de
   console tekent dan in een buffer die niemand uitscant (Go: de buffer
   blijft bruikbaar voor `/kvm`). `HOPOS_DISPLAY_NOLATCH` = VP0 nam de
-  config-done niet over. De EDID-lezer, de DDC-pinmux en de GRF-bits
-  daarvoor zijn nieuw ten opzichte van Go en ongemeten.
+  config-done niet over.
 - **Pi 4 en Pi 5 (HDMI via de firmware).** De firmware zet het beeld aan;
   wij vragen er een buffer van via de mailbox. Let op de diepte: GEMETEN
   11-07 op de Pi 5 bleef de scanout op 16 bpp terwijl de depth-tag 32 zei;

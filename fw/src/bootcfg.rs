@@ -44,9 +44,18 @@ pub fn cmdline<'a>(args: &'a str, key: &'a str) -> impl Iterator<Item = &'a str>
         .filter_map(move |tok| tok.strip_prefix(key)?.strip_prefix('='))
 }
 
-/// De eerste waarde, of "": de enkelvoudige-sleutel-vorm.
-pub fn first<'a>(mut values: impl Iterator<Item = &'a str>) -> &'a str {
-    values.next().unwrap_or("")
+/// De eerste waarde van `key` uit een configbestand, of "": de
+/// enkelvoudige-sleutel-vorm van [`all`].
+#[must_use]
+pub fn get<'a>(text: &'a str, key: &'a str) -> &'a str {
+    all(text, key).next().unwrap_or("")
+}
+
+/// De eerste waarde van `key` uit een kernel-cmdline-regel, of "": de
+/// enkelvoudige-sleutel-vorm van [`cmdline`].
+#[must_use]
+pub fn get_cmdline<'a>(args: &'a str, key: &'a str) -> &'a str {
+    cmdline(args, key).next().unwrap_or("")
 }
 
 #[cfg(test)]
@@ -84,7 +93,7 @@ mod tests {
         ] {
             assert_eq!(all(text, "hopos.insecure").count(), 0, "{text:?}");
         }
-        assert_eq!(first(all("hopos.insecure=1\n", "hopos.insecure")), "1");
+        assert_eq!(get("hopos.insecure=1\n", "hopos.insecure"), "1");
     }
 
     /// De cmdline: tokens op één regel, Linux-restanten negeren.
@@ -92,14 +101,16 @@ mod tests {
     fn cmdline_reads_tokens() {
         let args = "console=serial0,115200 root=/dev/mmcblk0p2 hopos.node=hop-1 \
             hopos.init[]={\"name\":\"a\"} hopos.init[]={\"name\":\"b\"}";
-        assert_eq!(first(cmdline(args, "hopos.node")), "hop-1");
+        assert_eq!(get_cmdline(args, "hopos.node"), "hop-1");
         assert_eq!(cmdline(args, "hopos.init[]").count(), 2);
         assert_eq!(cmdline(args, "hopos.cores").count(), 0);
     }
 
     #[test]
-    fn first_of_nothing_is_empty() {
-        assert_eq!(first(core::iter::empty()), "");
-        assert_eq!(first(["a", "b"].into_iter()), "a");
+    fn get_of_nothing_is_empty_and_takes_the_first() {
+        assert_eq!(get("", "hopos.node"), "");
+        assert_eq!(get_cmdline("hopos.x=a hopos.x=b", "hopos.cores"), "");
+        assert_eq!(get("hopos.x=a\nhopos.x=b\n", "hopos.x"), "a");
+        assert_eq!(get_cmdline("hopos.x=a hopos.x=b", "hopos.x"), "a");
     }
 }

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "De beeldketen van de RK3566 (Radxa Zero 3E): PD_VO, VOP2-scanout, DW-HDMI-TX op 1920x1080p60, en de EDID over de DDC."
+description = "De beeldketen van de RK3566 (Radxa Zero 3E): PD_VO, VOP2-scanout, DW-HDMI-TX op 1920x1080p60."
 
 [dependencies]
 dev = { path = "../../dev" }

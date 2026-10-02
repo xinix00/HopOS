@@ -293,10 +293,7 @@ pub fn wire(
 /// `hopos.nicirq` uit `hopos.cfg`, met `dflt` als hij er niet staat.
 #[must_use]
 pub fn nic_mode(dflt: Mode) -> Mode {
-    let v = fw::bootcfg::first(fw::bootcfg::all(
-        crate::Uefi::new().config(),
-        "hopos.nicirq",
-    ));
+    let v = fw::bootcfg::get(crate::Uefi::new().config(), "hopos.nicirq");
     let (m, ok) = Mode::parse(v, dflt);
     if !ok {
         cpu::println!("irq: hopos.nicirq={v:?} is not auto, msix, intx, off or an INTID; polling");

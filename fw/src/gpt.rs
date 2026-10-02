@@ -13,6 +13,7 @@
 //! met het gereedschap van zijn eigen OS (`diskutil apfs resizeContainer`).
 //! De lezer kent geen schijf: de aanroeper geeft een leesfunctie per blok.
 
+use crate::bytes::{le16, le32, le64};
 use bounded::BoundedVec;
 use core::fmt;
 
@@ -121,15 +122,6 @@ pub struct Table {
     pub parts: BoundedVec<Part, MAX_PARTS>,
 }
 
-fn le32(b: &[u8], off: usize) -> u32 {
-    b.get(off..off + 4)
-        .map_or(0, |w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
-}
-
-fn le64(b: &[u8], off: usize) -> u64 {
-    u64::from(le32(b, off)) | u64::from(le32(b, off + 4)) << 32
-}
-
 /// Leest de tabel van LBA 1. `block` is een buffer van precies één blok;
 /// `read(lba, block)` vult hem, `false` = het blok kwam niet.
 pub fn read(mut read: impl FnMut(u64, &mut [u8]) -> bool, block: &mut [u8]) -> Result<Table> {
@@ -140,14 +132,21 @@ pub fn read(mut read: impl FnMut(u64, &mut [u8]) -> bool, block: &mut [u8]) -> R
     if block.get(..8) != Some(b"EFI PART".as_slice()) {
         return Err(Error::NoSignature);
     }
+    let (Some(first_usable), Some(last_usable), Some(entry_lba), Some(count), Some(size)) = (
+        le64(block, 40),
+        le64(block, 48),
+        le64(block, 72),
+        le32(block, 80),
+        le32(block, 84),
+    ) else {
+        // Een blok dat de header niet draagt, draagt ook geen entry.
+        return Err(Error::EntrySize { size: 0, block: bs });
+    };
     let mut t = Table {
-        first_usable: le64(block, 40),
-        last_usable: le64(block, 48),
+        first_usable,
+        last_usable,
         parts: BoundedVec::new(),
     };
-    let entry_lba = le64(block, 72);
-    let count = le32(block, 80);
-    let size = le32(block, 84);
     if size < 128 || size as usize > bs {
         return Err(Error::EntrySize { size, block: bs });
     }
@@ -172,7 +171,8 @@ pub fn read(mut read: impl FnMut(u64, &mut [u8]) -> bool, block: &mut [u8]) -> R
         if e.get(..16).is_some_and(|g| g.iter().all(|&b| b == 0)) {
             continue; // Een lege sleuf: geen partitie.
         }
-        let (first, last) = (le64(e, 32), le64(e, 40));
+        // Een entry is minstens 128 bytes (getoetst), dus deze twee staan erin.
+        let (first, last) = (le64(e, 32).unwrap_or(0), le64(e, 40).unwrap_or(0));
         if last < first {
             return Err(Error::Backwards {
                 entry: i,
@@ -187,9 +187,7 @@ pub fn read(mut read: impl FnMut(u64, &mut [u8]) -> bool, block: &mut [u8]) -> R
             name_len: 0,
         };
         for k in 0..NAME_LEN {
-            let c = e
-                .get(56 + 2 * k..58 + 2 * k)
-                .map_or(0, |w| u16::from_le_bytes([w[0], w[1]]));
+            let c = le16(e, 56 + 2 * k).unwrap_or(0);
             if c == 0 {
                 break;
             }

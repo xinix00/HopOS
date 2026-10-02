@@ -14,12 +14,12 @@
 //! Twee keer zou de PLL onder een lopende scanout verzetten, en
 //! `framebuffer()` wordt vaker gevraagd (de logconsole, de fb-grant bij
 //! elke grant en release). Het "één keer" is een atomic, geen slot: alles
-//! draait op de executor van de OS-core, en de compare-exchange maakt ook
+//! draait op de executor van de OS-core, en de atomische swap maakt ook
 //! een tweede vrager op een andere core onschuldig (die krijgt de buffer
 //! en start niets).
 
 use crate::{DMA, FB_RAM, KERN_RAM, POOL_BASE, STAGE_WINDOW};
-use core::sync::atomic::{AtomicU8, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use driver_fb::Desc;
 use gui_rkscan::{Chain, Error, Layer, Status};
 
@@ -51,17 +51,8 @@ const _: () = {
     assert!(FB_RAM.base.0 + size <= 1 << 32);
 };
 
-/// Nog niet gestart.
-const IDLE: u8 = 0;
-/// De keten loopt nu (de eerste vrager).
-const RUNNING: u8 = 1;
-/// Beeld op HDMI.
-const UP: u8 = 2;
-/// De keten faalde; de buffer blijft voor het netwerk.
-const FAILED: u8 = 3;
-
-/// Waar de keten staat.
-static CHAIN: AtomicU8 = AtomicU8::new(IDLE);
+/// Is de keten al gestart (door de eerste vrager)?
+static STARTED: AtomicBool = AtomicBool::new(false);
 
 /// De framebuffer uit het plan.
 ///
@@ -84,32 +75,17 @@ const fn desc() -> Desc {
 /// ook als de keten faalt (zie de moduledoc).
 pub(crate) fn framebuffer(clock: fn() -> u64) -> Option<Desc> {
     let fb = desc();
-    if CHAIN
-        .compare_exchange(IDLE, RUNNING, Relaxed, Relaxed)
-        .is_ok()
-    {
-        let up = bring_up(fb, clock);
-        CHAIN.store(if up { UP } else { FAILED }, Relaxed);
+    if !STARTED.swap(true, Relaxed) {
+        match gui_rkscan::start(fb, clock) {
+            Ok(st) => report(&st),
+            Err(e) => fail(&e, clock),
+        }
     }
     Some(fb)
 }
 
-/// Start de keten en logt de uitkomst.
-fn bring_up(fb: Desc, clock: fn() -> u64) -> bool {
-    match gui_rkscan::start(fb, clock) {
-        Ok(st) => {
-            report(&st);
-            true
-        }
-        Err(e) => {
-            fail(&e, clock);
-            false
-        }
-    }
-}
-
-/// De regels van een geslaagde keten: de identificatie, de EDID, en de
-/// marker als laatste.
+/// De regels van een geslaagde keten: de identificatie en de marker als
+/// laatste.
 fn report(st: &Status) {
     cpu::println!(
         "display: HDMI-TX design {:#04x} rev {:#04x} phy {:#04x}, fb {:#x} {WIDTH}x{HEIGHT} stride {STRIDE}",
@@ -118,21 +94,6 @@ fn report(st: &Status) {
         st.ids.config2,
         FB_RAM.base.0
     );
-    match st.edid {
-        Ok(i) if i.preferred.is_driven() => cpu::println!(
-            "display: sink {} {:#06x} prefers {}, what we drive",
-            i.vendor_str(),
-            i.product,
-            i.preferred
-        ),
-        Ok(i) => cpu::println!(
-            "display: sink {} {:#06x} prefers {}, we drive {WIDTH}x{HEIGHT}p60 (fixed: the framebuffer in the plan) HOPOS_DISPLAY_MODE",
-            i.vendor_str(),
-            i.product,
-            i.preferred
-        ),
-        Err(e) => cpu::println!("display: {e}, driving {WIDTH}x{HEIGHT}p60 blind"),
-    }
     if !st.latched {
         cpu::println!(
             "display: WARNING VP0 did not latch its configuration within 50 ms, the scan may not run HOPOS_DISPLAY_NOLATCH"

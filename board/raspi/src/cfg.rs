@@ -15,7 +15,7 @@
 /// De eerste waarde van `key` in de cmdline; "" = niet gezet.
 #[must_use]
 pub fn param<'a>(args: &'a str, key: &'a str) -> &'a str {
-    fw::bootcfg::first(fw::bootcfg::cmdline(args, key))
+    fw::bootcfg::get_cmdline(args, key)
 }
 
 /// Het aantal cores: wat de firmware meldt, begrensd door `hopos.cores`

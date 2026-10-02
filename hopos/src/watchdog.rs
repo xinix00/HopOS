@@ -275,7 +275,7 @@ mod hw {
         feature = "board-rk3566"
     )))]
     pub(super) fn param(key: &'static str) -> &'static str {
-        fw::bootcfg::first(fw::bootcfg::all(crate::BOARD.config(), key))
+        fw::bootcfg::get(crate::BOARD.config(), key)
     }
 
     /// Een sleutel uit cmdline.txt (de Pi's: /chosen/bootargs), of op de
@@ -356,7 +356,7 @@ mod hw {
 
     /// Een sleutel uit `hopos.cfg` (het venster in het image, of de loader).
     pub(super) fn param(key: &'static str) -> &'static str {
-        fw::bootcfg::first(fw::bootcfg::all(crate::BOARD.config(), key))
+        fw::bootcfg::get(crate::BOARD.config(), key)
     }
 }
 

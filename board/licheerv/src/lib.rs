@@ -132,7 +132,7 @@ fn console_write(b: &[u8]) {
 /// geen bootargs, dus dit is het enige kanaal.
 #[must_use]
 pub fn boot_param(key: &'static str) -> &'static str {
-    fw::bootcfg::first(fw::bootcfg::all(cfg::text(), key))
+    fw::bootcfg::get(cfg::text(), key)
 }
 
 /// Wacht `us` microseconden op de TIME-CSR.

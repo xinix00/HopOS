@@ -127,7 +127,7 @@ pub(crate) fn probe_disk(cfg: &str) -> Result<Option<Disk>, Error> {
     if DISK_CLAIMED.swap(true, Relaxed) {
         return Err(Error::Twice("probe_disk"));
     }
-    if fw::bootcfg::first(fw::bootcfg::all(cfg, "hopos.disk")) == "off" {
+    if fw::bootcfg::get(cfg, "hopos.disk") == "off" {
         println!("disk: hopos.disk=off, the internal SSD stays untouched");
         return Ok(None);
     }
@@ -219,7 +219,7 @@ pub(crate) fn probe_disk(cfg: &str) -> Result<Option<Disk>, Error> {
 /// SMC daarna weer in slaap. `None` = onbekend; een board zonder
 /// thermometer is een board zonder thermometer.
 pub(crate) fn temp_milli_c(cfg: &str) -> Option<i32> {
-    if fw::bootcfg::first(fw::bootcfg::all(cfg, "hopos.smc")) != "1" {
+    if fw::bootcfg::get(cfg, "hopos.smc") != "1" {
         return None;
     }
     let (base, _) = fwinfo::reg("/arm-io/smc", 0)?;

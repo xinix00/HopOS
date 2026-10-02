@@ -140,7 +140,7 @@ static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// is): de bron van de bench en de knoppen van de kern.
 #[must_use]
 pub fn boot_param(key: &'static str) -> &'static str {
-    fw::bootcfg::first(fw::bootcfg::all(fwinfo::config_text(), key))
+    fw::bootcfg::get(fwinfo::config_text(), key)
 }
 
 /// De Mac mini M4.
@@ -175,7 +175,7 @@ impl Apple {
     /// (`HOPOS_APPLE_PREFLIGHT_FAIL`): de verhuizing kost de kooien, luid.
     #[must_use]
     pub fn os_core(&self) -> (usize, Option<&'static str>) {
-        let v = fw::bootcfg::first(fw::bootcfg::all(self.config(), "hopos.oscore"));
+        let v = fw::bootcfg::get(self.config(), "hopos.oscore");
         board::os_core(v, self.cores(), |c| self.core_class(c), self.this_core())
     }
 
@@ -220,7 +220,7 @@ impl Apple {
     /// `open`). Dat is op ijzer niet uitgesloten, dus blijft het één
     /// bewuste knop per installatie.
     fn report_temp(&self, cfg: &str) {
-        if fw::bootcfg::first(fw::bootcfg::all(cfg, "hopos.smc")) != "1" {
+        if fw::bootcfg::get(cfg, "hopos.smc") != "1" {
             println!(
                 "smc: no die temperature (hopos.smc=1 measures once at boot; the SMC answer is unproven on metal, 31-08) HOPOS_APPLE_SMC_OFF"
             );
@@ -400,7 +400,7 @@ impl Board for Apple {
     /// `discover`, want pas op de OS-core komen de regels op 5555, en de
     /// tune is precies wat op ijzer bewezen moet worden (01-10).
     fn start_interrupts(&self) -> Result<&'static Signal, Error> {
-        let ps = fw::bootcfg::first(fw::bootcfg::all(self.config(), "hopos.pstate"));
+        let ps = fw::bootcfg::get(self.config(), "hopos.pstate");
         match wdt::pstate_targets(ps) {
             Some(t) => wdt::pstate_tune(t, false, &serror_check),
             None => wdt::pstate_tune(wdt::PS_DEFAULT, true, &serror_check),

@@ -4,7 +4,6 @@
 use super::*;
 use crate::deliver::{
     ConnError, Deliverer, InputAddr, InputConn, InputQueue, KEEPALIVE_NS, Line, Lines, allowed,
-    offer,
 };
 use crate::register::{HostSpec, PrepareError, Registry};
 use crate::storage::{BULK_TIMEOUT_NS, Inflight, drop_bulk};
@@ -316,10 +315,11 @@ fn volle_rij_en_onbekende_controller() {
 
 // Go: TestInputListensOnNodeStackAndRejectsNonHolder
 //
-// De socket is van de binary; wat hier blijft is het adres dat met de grant
-// meereist en de weigering van wie het glas niet vasthoudt.
+// De socket is van de binary (hopos/src/net.rs, `input`) en wordt hier niet
+// getoetst; wat hier blijft is het adres dat met de grant meereist en de
+// weigering van wie het glas niet vasthoudt.
 #[test]
-fn input_listens_on_node_stack_and_rejects_non_holder() {
+fn input_addr_and_only_the_holder_is_allowed() {
     assert_eq!(
         format!("{InputAddr}"),
         "10.100.0.1:7879",
@@ -449,7 +449,7 @@ fn moves_merge_and_clamp() {
         ..Event::default()
     };
     for e in [mv(10, 10), mv(1000, 1000), ev(Kind::MouseDown, 0), mv(1, 1)] {
-        assert!(offer(&mut tx, e));
+        assert!(tx.try_send(e).is_ok());
     }
     let lines = run_ready(d.next(pending::<()>()));
     let got: Vec<_> = lines
@@ -477,9 +477,9 @@ fn full_queue_drops() {
     let q = InputQueue::new();
     let (mut tx, _rx) = q.split().unwrap();
     for _ in 0..deliver::QUEUE_DEPTH {
-        assert!(offer(&mut tx, ev(Kind::KeyDown, 65)));
+        assert!(tx.try_send(ev(Kind::KeyDown, 65)).is_ok());
     }
-    assert!(!offer(&mut tx, ev(Kind::KeyDown, 65)));
+    assert!(tx.try_send(ev(Kind::KeyDown, 65)).is_err());
 }
 
 // --- rondes en registratie ----------------------------------------------------

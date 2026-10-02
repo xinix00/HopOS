@@ -354,7 +354,7 @@ mod tests {
         for params in [false, true] {
             let (text, src) = config_of(&w, params);
             assert_eq!(src, CfgSource::Image);
-            assert_eq!(fw::bootcfg::first(fw::bootcfg::all(text, "hopos.smc")), "1");
+            assert_eq!(fw::bootcfg::get(text, "hopos.smc"), "1");
         }
         // Geen UTF-8: geen config, geen paniek.
         let mut w = [0xffu8; 32];

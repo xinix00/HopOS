@@ -61,7 +61,7 @@ Alleen wat nog moet; wat af is staat in de tabel hierboven.
 
 - [ ] De TSADC geeft geen geldige code (`HOPOS_TSADC_NONE`), zoals in Go op
       06-08; de init is die van Linux. Waarom converteert hij niet.
-- [ ] De echte watchdogtoets (DW-WDT 89 s); EDID ("no answer on the DDC").
+- [ ] De echte watchdogtoets (DW-WDT 89 s).
 - [ ] De config zit in `hopos.ird`: alleen te wijzigen met `CFG=` of in de
       APPEND-regel. De koude flip weigert (stateless: warm flippen of de
       kaart herstarten). De kaart in `target/` is van 14:41; de node draait

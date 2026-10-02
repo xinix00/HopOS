@@ -28,7 +28,6 @@ pub mod arch;
 pub mod cfg;
 // De klokknop van het klokbeleid: de ARM-klok via de mailbox (clock.rs).
 pub mod clock;
-pub mod dt;
 pub mod map;
 // De RNG200 als entropiebron van de kern (rng.rs).
 pub mod rng;
@@ -183,11 +182,10 @@ pub fn fdt() -> Option<Fdt<'static>> {
 }
 
 /// Staat het device met deze `compatible` aan in de DTB? `None` = geen DTB
-/// of geen zo'n node ([`dt::enabled`]).
+/// of geen zo'n node ([`Fdt::enabled`]).
 #[must_use]
 pub fn device_enabled(compatible: &str) -> Option<bool> {
-    let f = fdt()?;
-    dt::enabled(arch::dtb_slice(DTB.load(Relaxed), f.size())?, compatible)
+    fdt()?.enabled(compatible)
 }
 
 /// Eén `hopos.*`-sleutel van de cmdline (cmdline.txt, door de firmware in

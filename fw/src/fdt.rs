@@ -17,6 +17,7 @@
 //! hier is dat één keer [`Fdt::new`], en elke lezer loopt daarna alleen
 //! binnen gedeclareerde blokken.
 
+use crate::bytes::{be32, be64};
 use bounded::BoundedVec;
 use core::fmt;
 use core::ops::ControlFlow;
@@ -226,7 +227,7 @@ impl<'a> Fdt<'a> {
                     let rest = self.blob.get(p..end).unwrap_or_default();
                     let n = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
                     let name = rest.get(..n).unwrap_or_default();
-                    p = align4(p + n + 1);
+                    p = (p + n + 1).next_multiple_of(4);
                     f(depth, Token::Begin(name))
                 }
                 TOK_END => {
@@ -239,7 +240,7 @@ impl<'a> Fdt<'a> {
                     let name_off = be32(self.blob, p + 4).ok_or(Error::Truncated)? as usize;
                     p += 8;
                     let data = self.blob.get(p..p + len).ok_or(Error::Truncated)?;
-                    p = align4(p + len);
+                    p = (p + len).next_multiple_of(4);
                     if p > end {
                         return Err(Error::Truncated);
                     }
@@ -549,6 +550,51 @@ impl<'a> Fdt<'a> {
         .ok()?;
         found
     }
+
+    /// Staat de eerste node met `compatible` aan? `None` = geen zo'n node
+    /// (of een kromme blob); `Some(true)` = geen `status`, of "okay"/"ok".
+    ///
+    /// Waarom een board dat vraagt: een driver die een blok aanraakt dat er
+    /// niet is, krijgt een synchrone external abort. Gemeten 29-09 op QEMU
+    /// `raspi4b`: GENET staat er op "disabled" en de eerste lees op
+    /// 0xFD58_0000 gaf ESR 0x96000010.
+    ///
+    /// De properties van een node staan vóór zijn kinderen, dus het oordeel
+    /// valt bij het eerste kind of het einde van de node, en de status van
+    /// een kind lekt nooit naar zijn ouder.
+    #[must_use]
+    pub fn enabled(&self, compatible: &str) -> Option<bool> {
+        // (past, staat aan) van de node waarvan nu de properties lopen;
+        // `None` na een kind.
+        let mut cur: Option<(bool, bool)> = None;
+        let mut found = None;
+        self.walk(|_, tok| {
+            match tok {
+                Token::Prop(name, data) => {
+                    if let Some((hit, ok)) = cur.as_mut() {
+                        match name {
+                            b"compatible" => *hit |= has_compatible(data, compatible.as_bytes()),
+                            b"status" => {
+                                let v = data.split(|&c| c == 0).next().unwrap_or_default();
+                                *ok = v == b"okay" || v == b"ok";
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Token::Begin(_) | Token::End => {
+                    if let Some((true, ok)) = cur {
+                        found = Some(ok);
+                        return ControlFlow::Break(());
+                    }
+                    cur = matches!(tok, Token::Begin(_)).then_some((false, true));
+                }
+            }
+            ControlFlow::Continue(())
+        })
+        .ok()?;
+        found
+    }
 }
 
 /// Eén property van de framebuffer-node.
@@ -621,19 +667,6 @@ fn name_is(name: &[u8], s: &[u8], unit: bool) -> bool {
         Some([b'@', ..]) => unit,
         _ => false,
     }
-}
-
-fn align4(p: usize) -> usize {
-    (p + 3) & !3
-}
-
-fn be32(b: &[u8], off: usize) -> Option<u32> {
-    let w = b.get(off..off.checked_add(4)?)?;
-    Some(u32::from_be_bytes([w[0], w[1], w[2], w[3]]))
-}
-
-fn be64(b: &[u8], off: usize) -> Option<u64> {
-    Some((u64::from(be32(b, off)?) << 32) | u64::from(be32(b, off + 4)?))
 }
 
 #[cfg(test)]
@@ -1031,5 +1064,32 @@ mod tests {
         assert_eq!(gic.redist.size, 0xf6_0000);
         assert_eq!(f.framebuffer(), None);
         assert_eq!(f.cpu_count(), Ok(4));
+    }
+
+    /// `nodes.dts`, met `dtc` gebouwd: GENET uit met een kind dat aan staat.
+    const NODES: &[u8] = include_bytes!("../testdata/nodes.dtb");
+
+    fn enabled(blob: &[u8], compatible: &str) -> Option<bool> {
+        Fdt::new(blob).ok()?.enabled(compatible)
+    }
+
+    #[test]
+    fn status_decides_and_children_do_not_leak() {
+        assert_eq!(enabled(NODES, "brcm,bcm2711-genet-v5"), Some(false));
+        assert_eq!(enabled(NODES, "brcm,genet-mdio-v5"), Some(true));
+        assert_eq!(enabled(NODES, "brcm,bcm2711-pcie"), Some(true));
+        assert_eq!(enabled(NODES, "brcm,bcm2835-mbox"), Some(true));
+        assert_eq!(enabled(NODES, "brcm,bcm2712-pcie"), None);
+        // De root-compatible is een lijst: het tweede woord telt ook.
+        assert_eq!(enabled(NODES, "brcm,bcm2711"), Some(true));
+    }
+
+    #[test]
+    fn a_broken_blob_is_not_enabled() {
+        assert_eq!(enabled(&NODES[..40], "brcm,bcm2711-pcie"), None);
+        assert_eq!(enabled(&[0; 64], "x"), None);
+        let mut b = NODES.to_vec();
+        b[4..8].copy_from_slice(&0x40u32.to_be_bytes());
+        assert_eq!(enabled(&b, "brcm,bcm2711-pcie"), None);
     }
 }

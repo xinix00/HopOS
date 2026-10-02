@@ -39,11 +39,7 @@ use driver_fb::Desc;
 /// 0x100 + 4x, CLKGATE_CON(x) = 0x300 + 4x).
 #[repr(C)]
 pub(crate) struct Cru {
-    _r0: [u32; 101],
-    /// CLKSEL_CON(37): ACLK_VO-mux, HCLK_VO- en PCLK_VO-delers.
-    clksel37: Reg<u32>,
-    /// CLKSEL_CON(38): ACLK_VOP_PRE-mux en -deler.
-    clksel38: Reg<u32>,
+    _r0: [u32; 103],
     /// CLKSEL_CON(39): DCLK_VOP0-mux [11:10] en -deler [7:0].
     clksel39: Reg<u32>,
     _r1: [u32; 108],
@@ -54,9 +50,7 @@ pub(crate) struct Cru {
 }
 
 const _: () = {
-    assert!(offset_of!(Cru, clksel37) == 0x100 + 37 * 4);
-    assert!(offset_of!(Cru, clksel38) == 0x198);
-    assert!(offset_of!(Cru, clksel39) == 0x19C);
+    assert!(offset_of!(Cru, clksel39) == 0x100 + 39 * 4);
     assert!(offset_of!(Cru, gate20) == 0x300 + 20 * 4);
     assert!(offset_of!(Cru, gate21) == 0x354);
 };
@@ -383,26 +377,6 @@ const HDMI_REF_SHIFT: u32 = 7;
 /// hpll.
 const HDMI_REF_HPLL: u32 = 0;
 
-// De muxen en delers boven de VOP2-gates (clk-rk3568.c):
-//
-//     ACLK_VO      CLKSEL_CON(37) [1:0] over {gpll_300m, cpll_250m, gpll_100m, xin24m}
-//     HCLK_VO      CLKSEL_CON(37) [11:8]  deler op aclk_vo
-//     PCLK_VO      CLKSEL_CON(37) [15:12] deler op aclk_vo
-//     ACLK_VOP_PRE CLKSEL_CON(38) [7:6] over {cpll, gpll, hpll, vpll}, deler [4:0]
-//
-// Delervelden zijn "waarde + 1". 300 MHz voor de AXI-kant is ruim voor één
-// 1080p32-scanout (~475 MB/s).
-/// gpll_300m.
-const ACLK_VO_MUX_GPLL300: u32 = 0;
-/// Gedeeld door 2: 150 MHz.
-const HCLK_VO_DIV: u32 = 1;
-/// Gedeeld door 4: 75 MHz.
-const PCLK_VO_DIV: u32 = 3;
-/// gpll (1200 MHz).
-const ACLK_VOP_PRE_MUX_GPLL: u32 = 1;
-/// Gedeeld door 4: 300 MHz.
-const ACLK_VOP_PRE_DIV: u32 = 3;
-
 // De VOP2-timing, precies zoals vop2_crtc_atomic_enable ze rekent. Let op:
 // VOP2 telt hact_st vanaf de hsync (htotal - hsync_start = 192), de frame
 // composer van de HDMI-TX vanaf het einde van de actieve regio (88). Twee
@@ -505,6 +479,10 @@ impl Chain {
     /// CLKGATE_CON(20), 1 = dicht, dus waarde 0 met het maskerbit).
     /// Los van [`Chain::power_on_vo`] omdat het domein deze klokken nodig
     /// heeft tijdens het schakelen.
+    ///
+    /// De muxen en delers erboven (CLKSEL_CON 37 en 38) blijven op de stand
+    /// van U-Boot, zoals in Go's keten die 06-08 beeld gaf. Leest VOP2 ooit
+    /// dood, dan zijn die de eerste verdachte.
     pub fn vop_clock_on(&self) {
         let g = [
             GATE_ACLK_VO,
@@ -518,29 +496,6 @@ impl Chain {
         .iter()
         .fold(0, |g, &b| g | hiword(0, 1, b));
         put(&self.cru().gate20, g);
-        dev::mb();
-    }
-
-    /// Zet de muxen en delers boven de VOP2-gates.
-    ///
-    /// NIET in [`Chain::start`], en dat volgt Go: `rkscan.Start`, de keten
-    /// die 06-08 beeld gaf, riep hem niet aan. Go noemde hem "GEMETEN
-    /// NOODZAAK 06-08" omdat de APB-kant met alleen de gates dood bleef,
-    /// maar die meting leunde op de schrijf-lees-test die later zelf een
-    /// meetfout bleek (zie [`Chain::vop_write_read_back`]). Hij blijft voor
-    /// het meetinstrument, en als eerste verdachte als VOP2 ooit dood leest.
-    pub fn vop_clock_tree(&self) {
-        let c = self.cru();
-        put(
-            &c.clksel37,
-            hiword(ACLK_VO_MUX_GPLL300, 0x3, 0)
-                | hiword(HCLK_VO_DIV, 0xF, 8)
-                | hiword(PCLK_VO_DIV, 0xF, 12),
-        );
-        put(
-            &c.clksel38,
-            hiword(ACLK_VOP_PRE_MUX_GPLL, 0x3, 6) | hiword(ACLK_VOP_PRE_DIV, 0x1F, 0),
-        );
         dev::mb();
     }
 
@@ -628,28 +583,11 @@ impl Chain {
         }
     }
 
-    /// De oude schrijf-lees-test, gedegradeerd tot DIAGNOSE: geen poort,
-    /// alleen een extra regel in de log. Zo blijft zichtbaar of
-    /// VP-registers direct terugleesbaar zijn zonder dat een onbegrepen
-    /// uitslag de bring-up ophoudt.
-    pub fn vop_write_read_back(&self) -> bool {
-        const PAT: u32 = 0x00A5_5A00;
-        let bg = &self.vp0().dsp_bg;
-        let old = bg.read();
-        put(bg, PAT);
-        dev::mb();
-        let got = bg.read();
-        put(bg, old);
-        dev::mb();
-        got == PAT
-    }
-
     /// Brengt de VOP2 op en start de scanout van `fb` naar VP0. Na
     /// [`Chain::power_on_vo`] en [`Chain::vop_alive`].
     ///
     /// Er wordt geen modus gekozen: 1920x1080p60 staat vast, want de buffer
-    /// in het plan heeft die maat. De EDID (zie [`crate::edid`]) meldt wat
-    /// de sink liever had, maar verandert niets.
+    /// in het plan heeft die maat.
     ///
     /// ER IS BEWUST GEEN STOP-PAD. Komt dat er ooit, dan is dit wat je moet
     /// weten: STANDBY (bit 31 van DSP_CTRL, als VOLLE write) gaat pas in aan

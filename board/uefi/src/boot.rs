@@ -255,10 +255,12 @@ fn acpi_line(t: &fw::acpi::Tables, rsdp: u64) {
         let _ = write!(sigs, "{} ", core::str::from_utf8(&s).unwrap_or("?"));
     }
     println!(
-        "acpi: RSDP {rsdp:#x} rev {} OEM {:?}, tables {}",
+        "acpi: RSDP {rsdp:#x} rev {} OEM {:?}, tables {} (XSDT entries skipped: {} implausible, {} over the limit)",
         t.revision(),
         t.oem_id(),
-        sigs.as_str().trim_end()
+        sigs.as_str().trim_end(),
+        t.broken(),
+        t.overflow()
     );
     println!(
         "acpi: {} cores, GICD {:#x} v{}, GICR {:#x}, ITS {:#x}, console type {} at {:#x}, {} ECAM",
@@ -364,7 +366,7 @@ fn cfg_text() -> &'static str {
 /// De rol van de staging uit `hopos.stage` (0 = app, 1 = Hop; zonder
 /// sleutel Hop, zoals op de Pi's: op ijzer is wat er gestaged is Hop).
 fn stage_role(cfg: &str) -> u64 {
-    match fw::bootcfg::first(fw::bootcfg::all(cfg, "hopos.stage")) {
+    match fw::bootcfg::get(cfg, "hopos.stage") {
         "app" => 0,
         _ => 1,
     }

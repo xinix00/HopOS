@@ -24,6 +24,7 @@
 //! anders twee keer per boot uit device-geheugen kwam. Hier houdt de
 //! aanroeper de buffer vast: wie een tabel twee keer wil, laadt hem één keer.
 
+use crate::bytes::{le16, le32, le64};
 use bounded::BoundedVec;
 use core::fmt;
 
@@ -548,29 +549,9 @@ fn checked_table<'a>(t: &'a [u8], sig: &Sig, min: usize) -> Result<&'a [u8]> {
     })
 }
 
-fn le16(b: &[u8], off: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(
-        b.get(off..off.checked_add(2)?)?.try_into().ok()?,
-    ))
-}
-
-fn le32(b: &[u8], off: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(
-        b.get(off..off.checked_add(4)?)?.try_into().ok()?,
-    ))
-}
-
-fn le64(b: &[u8], off: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(
-        b.get(off..off.checked_add(8)?)?.try_into().ok()?,
-    ))
-}
-
 /// Eén GICC uit de MADT: een core zoals de firmware hem kent.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Gicc {
-    /// De ACPI processor UID (offset 8).
-    pub uid: u32,
     /// De affiniteitsroute voor PSCI CPU_ON (offset 68).
     pub mpidr: u64,
     /// GICC-flags bit 0.
@@ -620,7 +601,6 @@ impl<'a> Madt<'a> {
                 return None;
             }
             Some(Gicc {
-                uid: le32(e, 8)?,
                 mpidr: le64(e, 68)?,
                 enabled: le32(e, 12)? & 1 != 0,
                 gicr: le64(e, 60)?,
@@ -745,30 +725,20 @@ pub struct Console {
     /// 32-bit-stride), afgeleid van de GAS access size (1 = byte, 2 = word,
     /// 3 = dword, 4 = qword; 0 = niet gezegd, dus byte).
     pub shift: u8,
-    /// De baudrate, of 0: "zoals de firmware hem liet".
-    pub baud: u32,
 }
 
-impl Console {
-    /// Is dit een 16550-compatibele UART? (16550, 16450, MAX311xE, of
-    /// 16550 met GAS-parameters.)
-    #[must_use]
-    pub fn is_16550(&self) -> bool {
-        matches!(self.if_type, 0x00 | 0x01 | 0x02 | 0x12)
-    }
-
-    /// Is dit de PL011-familie? (PL011, of SBSA generic UART: een
-    /// PL011-subset met dezelfde DR/FR-offsets.) De Altra en QEMU melden
-    /// een van deze.
-    #[must_use]
-    pub fn is_pl011(&self) -> bool {
-        matches!(self.if_type, 0x03 | 0x0d | 0x0e)
-    }
+/// Is SPCR-interfacetype `if_type` een 16550-compatibele UART? (16550,
+/// 16450, MAX311xE, of 16550 met GAS-parameters.) Anders is het de
+/// PL011-familie (PL011, of de SBSA generic UART: een PL011-subset met
+/// dezelfde DR/FR-offsets), zoals de Altra en QEMU melden.
+#[must_use]
+pub const fn is_16550(if_type: u8) -> bool {
+    matches!(if_type, 0x00 | 0x01 | 0x02 | 0x12)
 }
 
-/// Leest de SPCR (minstens 52 bytes): interfacetype op 36, Generic Address
-/// Structure op 40 (space, bitbreedte, bitoffset, access size, adres op 44)
-/// en de baudrate-code op 58.
+/// Leest de SPCR (minstens 52 bytes): interfacetype op 36 en de Generic
+/// Address Structure op 40 (space, bitbreedte, bitoffset, access size,
+/// adres op 44).
 pub fn spcr(table: &[u8]) -> Result<Console> {
     let t = checked_table(table, b"SPCR", 52)?;
     let short = Error::TooShort {
@@ -777,13 +747,6 @@ pub fn spcr(table: &[u8]) -> Result<Console> {
         need: 52,
     };
     let access = *t.get(43).ok_or(short)?;
-    let baud = match t.get(58) {
-        Some(3) => 9600,
-        Some(4) => 19200,
-        Some(6) => 57600,
-        Some(7) => 115_200,
-        _ => 0,
-    };
     Ok(Console {
         base: le64(t, 44).ok_or(short)?,
         if_type: *t.get(36).ok_or(short)?,
@@ -793,16 +756,13 @@ pub fn spcr(table: &[u8]) -> Result<Console> {
         } else {
             0
         },
-        baud,
     })
 }
 
 /// De ARM-bootvlaggen uit de FADT.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Psci {
-    /// Er is PSCI (ARM_BOOT_ARCH bit 0).
-    pub compliant: bool,
-    /// De conduit is HVC, anders SMC (bit 1).
+    /// De conduit is HVC, anders SMC (ARM_BOOT_ARCH bit 1).
     pub hvc: bool,
 }
 
@@ -816,7 +776,6 @@ pub fn fadt_psci(table: &[u8]) -> Result<Psci> {
         need: 131,
     })?;
     Ok(Psci {
-        compliant: flags & 1 != 0,
         hvc: flags & 2 != 0,
     })
 }
@@ -828,8 +787,6 @@ pub struct Watchdog {
     pub refresh: u64,
     /// Het control-frame (WCS/WOR).
     pub control: u64,
-    /// De interrupt (GSIV).
-    pub gsiv: u32,
 }
 
 /// De eerste niet-secure SBSA-watchdog uit de GTDT (platform-timer-
@@ -857,7 +814,6 @@ pub fn gtdt_watchdog(table: &[u8]) -> Option<Watchdog> {
             return Some(Watchdog {
                 refresh: le64(e, 4)?,
                 control: le64(e, 12)?,
-                gsiv: le32(e, 20)?,
             });
         }
         off += len;

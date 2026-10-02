@@ -75,16 +75,11 @@ pub const LINE_MAX: usize = 96;
 /// De rij van de manager naar de deliverer: één producer (de taak die de
 /// bus bezit), één consument.
 pub type InputQueue = Channel<Event, QUEUE_DEPTH>;
-/// De zendkant van de rij, voor de sink van de manager.
+/// De zendkant van de rij, voor de sink van de manager. De pollus zendt
+/// met `try_send` en blokkeert nooit: vol is weggooien.
 pub type InputTx<'a> = Sender<'a, Event, QUEUE_DEPTH>;
 /// De ontvangkant van de rij, voor de deliverer.
 pub type InputRx<'a> = Receiver<'a, Event, QUEUE_DEPTH>;
-
-/// De kant die de pollus aanroept: nooit blokkeren. Geeft `false` als de rij
-/// vol was en de gebeurtenis wegviel.
-pub fn offer(tx: &mut InputTx<'_>, e: Event) -> bool {
-    tx.try_send(e).is_ok()
-}
 
 /// Het adres dat met de fb-grant meereist: `10.100.0.1:7879`. De switch
 /// vertaalt het gateway-adres naar het interface-adres van de node-stack.

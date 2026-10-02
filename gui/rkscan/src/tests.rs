@@ -4,13 +4,12 @@
 //! De blokken zijn gewoon geheugen; het model hieronder (`Model::on_write`)
 //! speelt het silicium: het ziet elke schrijf van de driver via het
 //! journaal en zet wat de hardware zou zetten (PWR_ST, de PLL-lock, de
-//! done-bits van de twee I2C-masters met hun write-1-to-clear, de
-//! PHY-lock, de EDID-bytes, het latchen van REG_CFG_DONE). Zo bewijst de
-//! host de waarden én de volgorde, en de klok is nep: een grens die
-//! verstrijkt, kost geen echte tijd.
+//! done-bits van de PHY-I2C-master met hun write-1-to-clear, de PHY-lock,
+//! het latchen van REG_CFG_DONE). Zo bewijst de host de waarden én de
+//! volgorde, en de klok is nep: een grens die verstrijkt, kost geen echte
+//! tijd.
 
 use super::*;
-use crate::edid::{self, Mode};
 use crate::hdmi::*;
 use crate::pd::{PD_VO_PWR, PD_VO_REQ};
 use crate::vop2::*;
@@ -38,14 +37,10 @@ struct Model {
     phy_i2c_answers: bool,
     /// De PHY lockt na power-on.
     phy_locks: bool,
-    /// Er hangt een sink aan de kabel (HPD en DDC).
+    /// Er hangt een sink aan de kabel (HPD).
     sink: bool,
-    /// De EDID van de sink.
-    edid: [u8; edid::BLOCK],
     /// IH_I2CMPHY_STAT0 (write-1-to-clear).
     phy_stat: u8,
-    /// IH_I2CM_STAT0 (write-1-to-clear).
-    ddc_stat: u8,
     /// Wat de PHY via zijn I2C-master kreeg.
     phy_writes: Vec<(u8, u16)>,
 }
@@ -126,20 +121,9 @@ impl Model {
                 let hpd = if self.sink { STAT0_HPD } else { 0 };
                 dev::write32(self.hd(PHY_STAT0), u32::from(u8::from(lock) | hpd));
             }
-            I2CM_OPERATION if v == I2C_OP_READ => {
-                if self.sink && rd(I2CM_SLAVE) == DDC_EDID_ADDR {
-                    let byte = self.edid[usize::from(rd(I2CM_ADDRESS))];
-                    dev::write32(self.hd(I2CM_DATAI), u32::from(byte));
-                    self.ddc_stat |= I2C_STAT_DONE;
-                } else {
-                    self.ddc_stat |= I2C_STAT_ERROR;
-                }
-            }
-            IH_I2CM_STAT0 => self.ddc_stat &= !v,
             _ => {}
         }
         dev::write32(self.hd(IH_I2CMPHY_STAT0), u32::from(self.phy_stat));
-        dev::write32(self.hd(IH_I2CM_STAT0), u32::from(self.ddc_stat));
     }
 }
 
@@ -151,8 +135,7 @@ struct Fake {
 
 impl Fake {
     /// Een RK3566 zoals U-Boot hem achterlaat: PD_VO uit, de IOMMU van de
-    /// eerste instantie aan, auto-gating aan, een sink met een
-    /// 1080p60-EDID.
+    /// eerste instantie aan, auto-gating aan, een sink aan de kabel.
     fn new() -> Self {
         let mut mem = vec![Page([0; 4096]); 40];
         let base = mem.as_mut_ptr() as u64;
@@ -161,7 +144,6 @@ impl Fake {
             cru: page(0),
             pmucru: page(1),
             pmu: page(2),
-            grf: page(3),
             vop: page(4),
             hdmi: page(8),
         };
@@ -191,9 +173,7 @@ impl Fake {
                 phy_i2c_answers: true,
                 phy_locks: true,
                 sink: true,
-                edid: edid::tests::monitor_1080p60(),
                 phy_stat: 0,
-                ddc_stat: 0,
                 phy_writes: Vec::new(),
             });
         });
@@ -321,9 +301,6 @@ fn the_whole_chain_comes_up_in_order() {
     let log = Log(journal::take());
     assert!(st.sink && st.latched);
     assert_eq!(st.ids.config2, 0xF3);
-    let info = st.edid.unwrap();
-    assert_eq!(info.preferred, Mode::CEA_1080P60);
-    assert_eq!(info.vendor_str(), "DEL");
 
     let (b, cru, pmu, pc) = (f.b, f.b.cru, f.b.pmu, f.b.pmucru);
     // Het domein: eerst de klokken (alle zeven gates in één hiword-write),
@@ -347,8 +324,6 @@ fn the_whole_chain_comes_up_in_order() {
         "frac is RMW, not hiword"
     );
     assert_eq!(log.to(pc.add(0x120)), [0x0080_0000]);
-    // De klokboom is niet van `start` (zoals in Go).
-    assert!(log.to(cru.add(0x194)).is_empty());
 
     // De IOMMU: alleen de instantie die pagede, en stall, uit, los.
     assert_eq!(log.to(b.vop.add(IOMMU[0] + 8)), [2, 1, 3]);
@@ -401,7 +376,6 @@ fn the_whole_chain_comes_up_in_order() {
     // HDMI pas ná de VOP2.
     let hdmi_clk = log.at(cru.add(0x354), 0x0018_0000);
     assert!(run < hdmi_clk);
-    assert_eq!(log.to(b.grf.add(0x364)), [0xC000_C000]);
     // De frame composer, byte voor byte.
     for (r, v) in [
         (FC_INHACTV1, 0x07),
@@ -431,9 +405,6 @@ fn the_whole_chain_comes_up_in_order() {
         [u32::from(INVIDCONF_DVI), u32::from(INVIDCONF_DVI)]
     );
     assert!(log.at(f.hd(MC_SWRSTZ), u32::from(MC_SWRSTZ_TMDS)) < log.last(f.hd(FC_INVIDCONF)));
-    // De EDID kwam over 0x50, vóór de PHY aanging.
-    assert_eq!(log.to(f.hd(I2CM_SLAVE)), [u32::from(DDC_EDID_ADDR)]);
-    assert!(log.last(f.hd(I2CM_OPERATION)) < log.at(f.hd(PHY_I2CM_SLAVE), 0x69));
 }
 
 #[test]
@@ -453,7 +424,6 @@ fn no_sink_still_drives_1080p60() {
     dev::write32(f.hd(PHY_STAT0), 0);
     let st = f.chain().start(&fb()).unwrap();
     assert!(!st.sink);
-    assert_eq!(st.edid, Err(edid::Error::Nack { byte: 0 }));
     assert_eq!(f.phy_writes().len(), 2 * PHY_148M5.len());
 }
 
@@ -607,5 +577,4 @@ fn hiword_puts_the_mask_sixteen_higher() {
     assert_eq!(hiword(0, 1, 7), 0x0080_0000);
     assert_eq!(hiword(1, 0x3, 2), 0x000C_0004);
     assert_eq!(hiword(99, 0xFFF, 0), 0x0FFF_0063);
-    assert_eq!(VO_CON1_DDC_IN, 0xC000_C000);
 }

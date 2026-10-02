@@ -197,7 +197,7 @@ mod hw {
     }
 
     fn param(key: &'static str) -> &'static str {
-        fw::bootcfg::first(fw::bootcfg::all(crate::BOARD.config(), key))
+        fw::bootcfg::get(crate::BOARD.config(), key)
     }
 
     /// Het klokbeleid: `hopos.clock` (`dvfs`, `max`, `quiet`, `firmware`)

@@ -25,6 +25,8 @@
 //! slice uit Normal-geheugen en leest bytegewijs, dus een scheve woordlees
 //! bestaat hier niet. Revisie en versie delen één woord (u16 + u16).
 
+use crate::bytes::{le16, le32, le64};
+
 const OFF_REVISION: usize = 0x00;
 const OFF_VERSION: usize = 0x02;
 const OFF_VIRT_BASE: usize = 0x08;
@@ -32,10 +34,8 @@ const OFF_PHYS_BASE: usize = 0x10;
 const OFF_MEM_SIZE: usize = 0x18;
 const OFF_TOP_OF_KERN: usize = 0x20;
 const OFF_VIDEO_BASE: usize = 0x28;
-const OFF_VIDEO_STRIDE: usize = 0x38;
 const OFF_VIDEO_W: usize = 0x40;
 const OFF_VIDEO_H: usize = 0x48;
-const OFF_VIDEO_DEPTH: usize = 0x50;
 const OFF_DEV_TREE: usize = 0x60;
 const OFF_DEV_TREE_SIZE: usize = 0x68;
 const OFF_CMDLINE: usize = 0x70;
@@ -59,19 +59,15 @@ const _: () = {
     assert!(MAX_LEN == 0x480);
 };
 
-/// Het framebuffer dat iBoot aanzette.
+/// Het framebuffer dat iBoot aanzette, zoals de bootregel het meldt.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 pub struct Fb {
     /// Het fysieke adres van de pixels.
     pub base: u64,
-    /// Bytes per regel.
-    pub stride: u64,
     /// Breedte in pixels.
     pub width: u64,
     /// Hoogte in pixels.
     pub height: u64,
-    /// De kleurdiepte zoals iBoot hem meldt (30 op de M4).
-    pub depth: u64,
 }
 
 /// Wat we uit boot_args gebruiken.
@@ -103,20 +99,6 @@ pub struct Args {
     pub dev_tree: u64,
 }
 
-fn le16(b: &[u8], off: usize) -> Option<u16> {
-    let w = b.get(off..off + 2)?;
-    Some(u16::from_le_bytes([w[0], w[1]]))
-}
-
-fn le32(b: &[u8], off: usize) -> Option<u32> {
-    let w = b.get(off..off + 4)?;
-    Some(u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
-}
-
-fn le64(b: &[u8], off: usize) -> Option<u64> {
-    Some(u64::from(le32(b, off)?) | u64::from(le32(b, off + 4)?) << 32)
-}
-
 impl Args {
     /// Leest het blok. `None` als het er niet plausibel uitziet (revisie
     /// buiten 1..=3, geen RAM-contract, of een te korte slice): dit is
@@ -142,10 +124,8 @@ impl Args {
         }
         a.fb = Fb {
             base: le64(b, OFF_VIDEO_BASE)?,
-            stride: le64(b, OFF_VIDEO_STRIDE)?,
             width: le64(b, OFF_VIDEO_W)?,
             height: le64(b, OFF_VIDEO_H)?,
-            depth: le64(b, OFF_VIDEO_DEPTH)?,
         };
         a.dev_tree = le64(b, OFF_DEV_TREE)?;
         a.adt_size = le32(b, OFF_DEV_TREE_SIZE)?;
@@ -153,12 +133,6 @@ impl Args {
         // Achter het cmdline-veld: boot_flags, dan de échte RAM-grootte.
         a.mem_size_actual = le64(b, OFF_CMDLINE + cmdline_len(revision) + 8)?;
         Some(a)
-    }
-
-    /// Het einde van het RAM dat van ons is.
-    #[must_use]
-    pub fn mem_end(&self) -> u64 {
-        self.phys_base.saturating_add(self.mem_size)
     }
 }
 
@@ -206,10 +180,8 @@ mod tests {
         put(OFF_MEM_SIZE, &0x5_df56_c000u64.to_le_bytes());
         put(OFF_TOP_OF_KERN, &0x100_03b1_4000u64.to_le_bytes());
         put(OFF_VIDEO_BASE, &0x105_e530_4000u64.to_le_bytes());
-        put(OFF_VIDEO_STRIDE, &2560u64.to_le_bytes());
         put(OFF_VIDEO_W, &640u64.to_le_bytes());
         put(OFF_VIDEO_H, &1136u64.to_le_bytes());
-        put(OFF_VIDEO_DEPTH, &30u64.to_le_bytes());
         put(OFF_DEV_TREE, &0x1f27_c000u64.to_le_bytes());
         put(OFF_DEV_TREE_SIZE, &0x7_0000u32.to_le_bytes());
         put(OFF_CMDLINE + 1024 + 8, &0x6_0000_0000u64.to_le_bytes());
@@ -231,7 +203,6 @@ mod tests {
             (a.fb.base, a.fb.width, a.fb.height),
             (0x105_e530_4000, 640, 1136)
         );
-        assert_eq!(a.mem_end(), 0x100_0137_4000 + 0x5_df56_c000);
         // Het blok is precies zo lang als nodig: één byte minder is None.
         assert!(Args::read(&m4()[..MAX_LEN]).is_some());
         assert!(Args::read(&m4()[..MAX_LEN - 1]).is_none());

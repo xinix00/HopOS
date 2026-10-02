@@ -1,9 +1,10 @@
 //! De beeldketen van de RK3566 (Radxa Zero 3E): het power-domein PD_VO
-//! (`pd`), de VOP2-scanout (`vop2`) en de DW-HDMI-transmitter (`hdmi`),
-//! plus een kleine EDID-lezer ([`edid`]). Eén crate, want de drie lagen
-//! zijn als één geheel geschreven en delen de 1080p60-modus, de foutvorm
-//! en de hiword-helper (Go: `gui/driver/rkscan`, gemeten werkend 06-08:
-//! 1920x1080p60 in DVI-mode op Dereks monitor).
+//! (`pd`), de VOP2-scanout (`vop2`) en de DW-HDMI-transmitter (`hdmi`).
+//! Eén crate, want de drie lagen zijn als één geheel geschreven en delen de
+//! 1080p60-modus, de foutvorm en de hiword-helper (Go: `gui/driver/rkscan`,
+//! gemeten werkend 06-08: 1920x1080p60 in DVI-mode op Dereks monitor). De
+//! modus staat vast en de EDID wordt niet gelezen: dit is de
+//! registervolgorde die Go op 06-08 werkend mat.
 //!
 //! Dit crate bezit de registers van dit silicium (de adressen veranderen
 //! niet per bord: [`RK3566`]) en de volgorde waarin ze geschreven worden.
@@ -38,7 +39,6 @@
     )
 )]
 
-pub mod edid;
 mod hdmi;
 mod pd;
 mod vop2;
@@ -66,8 +66,6 @@ pub struct Blocks {
     pub pmucru: Pa,
     /// De PMU: het power-domein PD_VO.
     pub pmu: Pa,
-    /// De SYS-GRF: de DDC-pinnen en de DDC-ingang van de HDMI-TX.
-    pub grf: Pa,
     /// De VOP2 (0x3000 groot) met zijn twee IOMMU's op +0x3E00 en +0x3F00.
     pub vop: Pa,
     /// De DW-HDMI-TX (0x20000 groot, registers op 4-byte-afstand).
@@ -85,8 +83,6 @@ pub const RK3566: Blocks = Blocks {
     pmucru: Pa(0xFDD0_0000),
     // power-management@fdd90000.
     pmu: Pa(0xFDD9_0000),
-    // syscon@fdc60000.
-    grf: Pa(0xFDC6_0000),
     // vop@fe040000; iommu@fe043e00 en @fe043f00 liggen er net achter.
     vop: Pa(0xFE04_0000),
     // hdmi@fe0a0000.
@@ -337,9 +333,6 @@ pub struct Status {
     /// De identificatie van de HDMI-TX. De bron noemt de RK3568 niet bij
     /// naam, dus printen we ze in plaats van erop te controleren.
     pub ids: HdmiIds,
-    /// Blok 0 van de EDID van de sink, of waarom die er niet is. Alleen
-    /// informatie: de modus staat vast op 1080p60.
-    pub edid: core::result::Result<edid::Info, edid::Error>,
 }
 
 /// De keten op één set blokken, met een klok voor de grenzen.
@@ -397,13 +390,12 @@ impl Chain {
         self.power_on_vo()?;
         self.vop_alive()?;
         self.vop_scanout(fb)?;
-        let (ids, edid) = self.hdmi_enable()?;
+        let ids = self.hdmi_enable()?;
         let latched = self.vop_cfg_done_taken();
         Ok(Status {
             sink: self.hdmi_hotplug(),
             latched,
             ids,
-            edid,
         })
     }
 }

@@ -1,9 +1,9 @@
 //! De HDMI-transmitter: een Synopsys DesignWare HDMI-TX, gevoed door VP0
-//! van de VOP2, met zijn interne PHY en de DDC (I2C) naar de sink.
+//! van de VOP2, met zijn interne PHY.
 //!
 //! REFERENTIE (opgehaald 05-08): Linux v6.13
 //! drivers/gpu/drm/bridge/synopsys/dw-hdmi.c en dw-hdmi.h (registers, de
-//! init-volgorde, de PHY-I2C-master, de DDC-I2C-master),
+//! init-volgorde, de PHY-I2C-master),
 //! drivers/gpu/drm/rockchip/dw_hdmi-rockchip.c (de PHY-tabellen en de
 //! GRF-bits voor dít silicium), rk356x-base.dtsi en rk3568-pinctrl.dtsi.
 //!
@@ -31,20 +31,12 @@
 //! moet je LEZEN: alleen 0xb2, 0xc2 en 0xf3 hebben SVSRET), en de
 //! verwachte DESIGN_ID/REVISION_ID (de driver noemt de RK3568 niet; we
 //! melden ze in [`HdmiIds`] in plaats van erop te controleren).
-//!
-//! De EDID-lezer (DDC-I2C-master, `ddc_*`) stond NIET in Go: daar stond de
-//! modus vast zonder te vragen. Hij is geport uit dw_hdmi_i2c_init,
-//! dw_hdmi_i2c_read en de RK3568-tak van dw_hdmi_rockchip_bind, en is NOG
-//! NIET GEMETEN op ijzer. Hij is informatief: faalt hij, dan draait de
-//! keten gewoon 1080p60.
 
-use crate::edid;
 use crate::{
     Chain, Error, H_DISPLAY, H_SYNC_LEN, H_SYNC_START, H_TOTAL, Result, Step, V_DISPLAY,
     V_SYNC_LEN, V_SYNC_START, V_TOTAL, hiword, journal, put,
 };
-use core::mem::offset_of;
-use dev::{Pa, Reg};
+use dev::Pa;
 
 // ---------------------------------------------------------------------------
 // De registers, in de nummering van dw-hdmi.h (maal vier in het blok).
@@ -69,8 +61,6 @@ pub(crate) const CONFIG2_ID: u16 = 0x0006;
 
 // Interrupts. Wij pollen, dus alles blijft gemute; de IH-statusbits zetten
 // zich ook gemute.
-/// IH_I2CM_STAT0: done en error van de DDC-master.
-pub(crate) const IH_I2CM_STAT0: u16 = 0x0105;
 /// IH_I2CMPHY_STAT0: done en error van de PHY-I2C-master.
 pub(crate) const IH_I2CMPHY_STAT0: u16 = 0x0108;
 /// IH_MUTE_FC_STAT0: de eerste van tien mute-registers (0x0180..0x0189).
@@ -202,29 +192,10 @@ pub(crate) const A_HDCPCFG1: u16 = 0x5001;
 /// A_VIDPOLCFG.
 pub(crate) const A_VIDPOLCFG: u16 = 0x5009;
 
-// De DDC-I2C-master (E-DDC naar de sink).
-/// I2CM_SLAVE: het 7-bits slave-adres.
-pub(crate) const I2CM_SLAVE: u16 = 0x7E00;
-/// I2CM_ADDRESS: het register in de slave.
-pub(crate) const I2CM_ADDRESS: u16 = 0x7E01;
-/// I2CM_DATAI: het gelezen byte.
-pub(crate) const I2CM_DATAI: u16 = 0x7E03;
-/// I2CM_OPERATION: 1 = lees, 0x10 = schrijf.
-pub(crate) const I2CM_OPERATION: u16 = 0x7E04;
-/// I2CM_INT.
-pub(crate) const I2CM_INT: u16 = 0x7E05;
-/// I2CM_CTLINT.
-pub(crate) const I2CM_CTLINT: u16 = 0x7E06;
-/// I2CM_DIV: 0 = standard mode (100 kHz).
-pub(crate) const I2CM_DIV: u16 = 0x7E07;
-/// I2CM_SOFTRSTZ: 0 schrijven reset de master.
-pub(crate) const I2CM_SOFTRSTZ: u16 = 0x7E09;
-
 const _: () = {
     assert!(at(FC_INVIDCONF) == 0x4000);
     assert!(at(PHY_CONF0) == 0xC000);
     assert!(at(MC_CLKDIS) == 0x10004);
-    assert!(at(I2CM_SLAVE) == 0x1F800);
     // dw-hdmi: max_register = HDMI_I2CM_FS_SCL_LCNT_0_ADDR (0x7E12) << 2.
     assert!(at(0x7E12) == 0x1F848 && at(0x7E12) < 0x20000);
 };
@@ -261,11 +232,9 @@ pub(crate) const STAT0_HPD: u8 = 0x02;
 pub(crate) const PHY_I2C_SLAVE_GEN2: u8 = 0x69;
 /// PHY_I2CM_OPERATION: schrijf.
 pub(crate) const I2C_OP_WRITE: u8 = 0x10;
-/// I2CM_OPERATION: lees.
-pub(crate) const I2C_OP_READ: u8 = 0x01;
-/// IH_I2CM(PHY)_STAT0: error.
+/// IH_I2CMPHY_STAT0: error.
 pub(crate) const I2C_STAT_ERROR: u8 = 0x01;
-/// IH_I2CM(PHY)_STAT0: done.
+/// IH_I2CMPHY_STAT0: done.
 pub(crate) const I2C_STAT_DONE: u8 = 0x02;
 
 /// MC_PHYRSTZ: op Gen2 ACTIEF HOOG, dus 1 en dan 0.
@@ -324,13 +293,9 @@ pub(crate) const PHY_148M5: [(u8, u16); 9] = [
 const PHY_I2C_WAIT_NS: u64 = 50_000_000;
 /// Hoe lang de PHY over (ont)locken mag doen (Go: 20 ms).
 const PHY_LOCK_WAIT_NS: u64 = 20_000_000;
-/// Hoe lang één DDC-byte mag duren (dw_hdmi_i2c_read: HZ / 10).
-const DDC_WAIT_NS: u64 = 100_000_000;
-/// Het E-DDC-adres van de EDID.
-pub(crate) const DDC_EDID_ADDR: u8 = 0x50;
 
 // ---------------------------------------------------------------------------
-// De klokken en de GRF.
+// De klokken.
 // ---------------------------------------------------------------------------
 
 // De klokken van het blok (rk356x-base.dtsi: "iahb", "isfr", "cec", "ref",
@@ -340,40 +305,6 @@ pub(crate) const DDC_EDID_ADDR: u8 = 0x50;
 const GATE_PCLK_HDMI_HOST: u32 = 3;
 /// CLKGATE_CON(21): CLK_HDMI_SFR ("isfr").
 const GATE_CLK_HDMI_SFR: u32 = 4;
-
-/// De SYS-GRF-registers die de DDC raakt.
-#[repr(C)]
-pub(crate) struct Grf {
-    _r0: [u32; 29],
-    /// GPIO4C_IOMUX_H: GPIO4_C7 (hdmitx_scl) op [15:12].
-    gpio4c_iomux_h: Reg<u32>,
-    /// GPIO4D_IOMUX_L: GPIO4_D0 (hdmitx_sda) op [3:0].
-    gpio4d_iomux_l: Reg<u32>,
-    _r1: [u32; 15],
-    /// GPIO4C_P: pull van GPIO4_C7 op [15:14].
-    gpio4c_p: Reg<u32>,
-    /// GPIO4D_P: pull van GPIO4_D0 op [1:0].
-    gpio4d_p: Reg<u32>,
-    _r2: [u32; 169],
-    /// VO_CON1: de DDC-ingangen van de HDMI-TX (bit 14 SCL, bit 15 SDA).
-    vo_con1: Reg<u32>,
-}
-
-const _: () = {
-    // pinctrl-rockchip, RK3568: iomux 0x20 per bank vanaf bank 1 op 0x00,
-    // 8 bytes per groep van 8 pinnen; pull op 0x80, 0x10 per bank.
-    assert!(offset_of!(Grf, gpio4c_iomux_h) == 3 * 0x20 + 2 * 8 + 4);
-    assert!(offset_of!(Grf, gpio4d_iomux_l) == 0x78);
-    assert!(offset_of!(Grf, gpio4c_p) == 0x80 + 3 * 0x10 + 2 * 4);
-    assert!(offset_of!(Grf, gpio4d_p) == 0xBC);
-    // dw_hdmi-rockchip.c: RK3568_GRF_VO_CON1.
-    assert!(offset_of!(Grf, vo_con1) == 0x0364);
-};
-
-/// RK3568_HDMI_SDAIN_MSK | RK3568_HDMI_SCLIN_MSK, als HIWORD_UPDATE.
-pub(crate) const VO_CON1_DDC_IN: u32 = hiword(0x3, 0x3, 14);
-/// rk3568-pinctrl.dtsi: hdmitx_scl en hdmitx_sda zijn functie 1.
-const FN_HDMITX: u32 = 1;
 
 /// De identificatie van de HDMI-TX.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -422,11 +353,6 @@ pub struct HdmiInfo {
 }
 
 impl Chain {
-    fn grf(&self) -> &'static Grf {
-        // SAFETY: de voorwaarde van `Chain::new`: `b.grf` is de SYS-GRF.
-        unsafe { dev::regs(self.b.grf) }
-    }
-
     fn hd(&self, off: u16) -> Pa {
         self.b.hdmi.add(at(off))
     }
@@ -561,11 +487,10 @@ impl Chain {
         })
     }
 
-    /// Brengt de transmitter op in DVI-mode voor 1920x1080p60 RGB, en leest
-    /// onderweg de EDID. NÁ [`Chain::vop_scanout`]: als de PHY aangaat
-    /// zonder dat VOP2 pixels en een dclk levert, staat de frame composer
-    /// tegen een stilstaande klok.
-    pub fn hdmi_enable(&self) -> Result<(HdmiIds, core::result::Result<edid::Info, edid::Error>)> {
+    /// Brengt de transmitter op in DVI-mode voor 1920x1080p60 RGB. NÁ
+    /// [`Chain::vop_scanout`]: als de PHY aangaat zonder dat VOP2 pixels en
+    /// een dclk levert, staat de frame composer tegen een stilstaande klok.
+    pub fn hdmi_enable(&self) -> Result<HdmiIds> {
         self.hdmi_clock_on();
         let ids = self.hdmi_ids();
         if !ids.is_hdmi_tx() {
@@ -575,15 +500,13 @@ impl Chain {
             });
         }
         self.hdmi_init_hw();
-        self.ddc_init();
-        let edid = self.ddc_read_edid();
         self.hdmi_frame_composer();
         // De PHY, twee keer.
         let svsret = ids.has_svsret();
         self.hdmi_phy_configure(svsret, 1)?;
         self.hdmi_phy_configure(svsret, 2)?;
         self.hdmi_video_path();
-        Ok((ids, edid))
+        Ok(ids)
     }
 
     /// Stap 1: frame composer, timings, polariteiten, DVI-mode.
@@ -671,61 +594,5 @@ impl Chain {
             invidconf: self.hrd(FC_INVIDCONF),
             vp_conf: self.hrd(VP_CONF),
         }
-    }
-
-    /// Zet de DDC klaar: de pinnen op hdmitx_scl/sda zonder pull, de
-    /// DDC-ingangen van de TX open in de GRF, en de DDC-master in de stand
-    /// van dw_hdmi_i2c_init.
-    ///
-    /// De GRF-bits zijn de RK3568-tak van dw_hdmi_rockchip_bind: zonder
-    /// SDAIN/SCLIN ziet de master de bus niet. De pinmux staat in het dtsi
-    /// (`pinctrl-0 = <&hdmitx_scl &hdmitx_sda ...>`), en Go deed hem niet
-    /// omdat Go geen EDID las. NOG NIET GEMETEN.
-    fn ddc_init(&self) {
-        let g = self.grf();
-        put(&g.vo_con1, VO_CON1_DDC_IN);
-        put(&g.gpio4c_iomux_h, hiword(FN_HDMITX, 0xF, 12));
-        put(&g.gpio4d_iomux_l, hiword(FN_HDMITX, 0xF, 0));
-        put(&g.gpio4c_p, hiword(0, 0x3, 14));
-        put(&g.gpio4d_p, hiword(0, 0x3, 0));
-        dev::mb();
-        self.hwr(I2CM_SOFTRSTZ, 0);
-        self.hwr(I2CM_DIV, 0); // standard mode, 100 kHz
-        self.hwr(I2CM_INT, 0x08); // DONE_POL, DONE_MASK gewist
-        self.hwr(I2CM_CTLINT, 0x88); // NAC_POL | ARB_POL
-        self.hwr(IH_I2CM_STAT0, I2C_STAT_ERROR | I2C_STAT_DONE);
-        dev::mb();
-    }
-
-    /// Leest één byte van de sink over de DDC, zoals dw_hdmi_i2c_read: per
-    /// byte het register, een lees-operatie, en wachten op done of error.
-    fn ddc_read_byte(&self, reg: u8) -> core::result::Result<u8, edid::Error> {
-        self.hwr(I2CM_ADDRESS, reg);
-        self.hwr(I2CM_OPERATION, I2C_OP_READ);
-        dev::mb();
-        let mut st = 0;
-        if !self.wait(DDC_WAIT_NS, || {
-            st = self.hrd(IH_I2CM_STAT0);
-            st != 0
-        }) {
-            return Err(edid::Error::Timeout { byte: reg });
-        }
-        self.hwr(IH_I2CM_STAT0, st);
-        if st & I2C_STAT_ERROR != 0 {
-            return Err(edid::Error::Nack { byte: reg });
-        }
-        Ok(self.hrd(I2CM_DATAI))
-    }
-
-    /// Leest blok 0 van de EDID (128 bytes vanaf 0x50:0) en ontleedt het.
-    /// ~0,4 ms per byte op 100 kHz, dus ~50 ms; zonder sink stopt hij bij
-    /// het eerste byte.
-    pub fn ddc_read_edid(&self) -> core::result::Result<edid::Info, edid::Error> {
-        self.hwr(I2CM_SLAVE, DDC_EDID_ADDR);
-        let mut block = [0u8; edid::BLOCK];
-        for (i, b) in block.iter_mut().enumerate() {
-            *b = self.ddc_read_byte(i as u8)?;
-        }
-        edid::parse(&block)
     }
 }

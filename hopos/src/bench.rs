@@ -57,7 +57,7 @@ const QUEUE_DEPTH: usize = kern::rpc::FS_DEPTH;
 /// Eén bootparameter: de eerste waarde van `key` in [`cfg_text`], of "" als
 /// hij niet gezet is.
 pub(crate) fn bootparam(dtb: u64, key: &'static str) -> String {
-    String::from(fw::bootcfg::first(fw::bootcfg::all(&cfg_text(dtb), key)))
+    String::from(fw::bootcfg::get(&cfg_text(dtb), key))
 }
 
 /// De config van het board als één tekst (`kern::nodecfg::text`):

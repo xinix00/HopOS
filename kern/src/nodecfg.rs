@@ -136,7 +136,7 @@ impl<'a> NodeCfg<'a> {
     /// De eerste waarde van `key`, of "" (de enkelvoudige sleutel).
     #[must_use]
     pub fn one(&self, key: &'a str) -> &'a str {
-        bootcfg::first(bootcfg::all(self.text, key))
+        bootcfg::get(self.text, key)
     }
 
     /// Alle waarden van `key` (de herhaalde sleutel, `hopos.init[]`).
