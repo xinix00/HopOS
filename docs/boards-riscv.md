@@ -329,16 +329,11 @@ zet hem; HopOS doet geen init). Bouw met
 
 ## Niet gedaan
 
-- **De hop-repo pint nog `v3.0.0-alpha.9`.** Hop draait op riscv64 (de
-  kring hierboven), maar alleen gebouwd tegen deze applib. Wat hij nodig
-  heeft: een tag van hop-os met deze applib (de riscv-`_start` en
-  paniek, `clock::adopt_timebase`) en abi (`CTRL_TIMEBASE_HZ`), en die tag
-  in de drie `Cargo.toml`'s van de hop-repo (`agentd-hopos`, `hop-http`,
-  `hopos-runner`). Code hoeft er niet te veranderen.
-- **Hop op de LicheeRV**: de OS-core draait daar dezelfde code, maar Hop
-  komt er alleen via de staging, en die heeft de LicheeRV niet voor een
-  image van deze maat (3,6 MB gestript); `APP=` van het image-script bakt
-  een gewone app, geen Hop.
+- **Hop op de LicheeRV, op ijzer**: sinds 3.0.1 bakt de release Hop
+  (riscv64, `tools/hop-build.sh`) in de kern als eerste bewoner
+  (`STAGE=... ROLE=hop` van het image-script, `HOPOS_LRV_ROLE` in
+  build.rs, `staged_role` van het board). De kring op QEMU virt is groen;
+  op het board zelf is Hop in slot 1 nog niet gezien.
 - **De kick van een app naar de kern** (de tegenhanger van HVC #6): een TX
   van een app wacht op de failsafe van de switch (`dial_us` 5,4 ms tegen 2,9
   op arm64). Een `ecall` met a7 = 2 in de switcher, die `msip` van hart 0

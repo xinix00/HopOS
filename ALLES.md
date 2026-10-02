@@ -168,8 +168,11 @@ op `/dev/cu.kis-100000-ch-0`. Sinds 01-10 ook op het LAN: 5555, 8080,
 
 ### LicheeRV Nano (RISC-V)
 
-- [ ] Donor-FIP aanwijzen (docs/boards-riscv.md: `fip.bin` uit sipeed
-      release 20260114) en de kaart bouwen met `CFG=` en `APP=`.
+- [ ] Hop in slot 1 op het board zelf: sinds 3.0.1 bakt de release Hop
+      (riscv64) in de kern (`STAGE=... ROLE=hop`, image/licheerv-agent.sh);
+      op QEMU virt groen, op ijzer nog niet gezien (v3.0.0 tikte daar
+      zonder bewoner, 02-10 op .150). Kijken naar HOPOS_HOP_START slot=1,
+      HOP_UP, en welcome (riscv64) uit de init-jobs op poort 80.
 - [ ] Eerste boot: `CLINT: mtimecmp writable`, de DW-WDT, dwmac 0x1037, de
       C906L via de reset-ingang, appspike.
 - [ ] Geen kick van app naar kern, geen SMP, geen flip op RISC-V; geen RNG.

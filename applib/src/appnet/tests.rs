@@ -872,3 +872,75 @@ fn an_address_needs_no_server_and_a_name_without_server_says_so() {
         Some((Ok([10, 0, 2, 2]), Err(NetError::Dns(DnsError::NoServer))))
     );
 }
+
+#[test]
+fn ipv6_udp_roundtrip_drop_and_timeout_use_the_real_pumps() {
+    let p = pair();
+    let server = p.kern.udp6_bind(5540).unwrap();
+    let address = Endpoint6 {
+        ip: p.kern.ipv6_addresses().unwrap().0,
+        port: server.local().unwrap().port,
+    };
+    let mut client = p.app.udp6_bind(0).unwrap();
+    client.set_timeout(Some(Duration::from_secs(3)));
+    let done = leak(Cell::new(false));
+    p.exec
+        .spawn(async move {
+            let mut bytes = [0; 64];
+            let (n, peer) = server.recv_from(&mut bytes).await.unwrap();
+            assert_eq!(&bytes[..n], b"Matter over IPv6");
+            server.send_to(peer, b"IPv6 reply").await.unwrap();
+        })
+        .unwrap();
+    p.exec
+        .spawn(async move {
+            client.send_to(address, b"Matter over IPv6").await.unwrap();
+            let mut bytes = [0; 64];
+            let (n, peer) = client.recv_from(&mut bytes).await.unwrap();
+            assert_eq!(peer, address);
+            assert_eq!(&bytes[..n], b"IPv6 reply");
+            client.set_timeout(Some(Duration::from_millis(10)));
+            assert!(matches!(
+                client.recv_from(&mut bytes).await,
+                Err(NetError::Timeout)
+            ));
+            let local = client.local().unwrap();
+            drop(client);
+            let rebound = p.app.udp6_bind(local.port).unwrap();
+            drop(rebound);
+            done.set(true);
+        })
+        .unwrap();
+    p.run_until(|| done.get());
+}
+
+#[test]
+fn aaaa_resolves_over_the_real_udp_pumps() {
+    let p = pair();
+    let server = p.kern.udp_bind(53).unwrap();
+    let got = slot();
+    let app = p.app;
+    p.exec
+        .spawn(async move {
+            let mut buf = [0; 512];
+            let (n, from) = server.recv_from(&mut buf).await.unwrap();
+            assert_eq!(&buf[n - 4..n - 2], &[0, 28]);
+            let mut response = buf[..n].to_vec();
+            response[2..4].copy_from_slice(&0x8180_u16.to_be_bytes());
+            response[6..8].copy_from_slice(&1_u16.to_be_bytes());
+            response.extend_from_slice(&[0xc0, 12, 0, 28, 0, 1, 0, 0, 0, 60, 0, 16]);
+            response.extend_from_slice(&[0xfd, 0x11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7]);
+            server.send_to(from, &response).await.unwrap();
+        })
+        .unwrap();
+    p.exec
+        .spawn(async move {
+            *got.borrow_mut() = Some(app.resolve6_via(HOST, "thread.example").await);
+        })
+        .unwrap();
+    p.run_until(|| got.borrow().is_some());
+    assert_eq!(
+        got.borrow_mut().take().unwrap(),
+        Ok([0xfd, 0x11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7])
+    );
+}

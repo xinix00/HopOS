@@ -30,7 +30,8 @@
 #                                  README; installeren uit Recovery met
 #                                  `sh /Volumes/HOPOS/install.sh go`
 #   hopos-licheerv-headless.img.gz image/licheerv-agent.sh, met de config
-#                                  in het venster en zonder bewoner
+#                                  in het venster en Hop (riscv64) in de
+#                                  kern gebakken (STAGE=, ROLE=hop)
 #   hopos-<board>-<smaak>.flip     image/flip-bundle.sh met HOPOS_STAMP=<versie>
 #                                  (niet voor de LicheeRV: riscv64)
 #
@@ -146,8 +147,9 @@ card target/apple-m4/hopos-apple-card.img hopos-apple-headless.img
 flip apple headless 0 ""
 skip "apple headfull: board-apple heeft geen gui-feature"
 
-step "licheerv headless"
-CFG="$HEADLESS" LICHEERV_DONOR_SHA256=$LRV_DONOR_SHA sh image/licheerv-agent.sh
+step "licheerv headless (Hop voor riscv64, tools/hop-build.sh)"
+HOP_RV="$(sh tools/hop-build.sh "$RV")"
+STAGE="$HOP_RV" ROLE=hop CFG="$HEADLESS" LICHEERV_DONOR_SHA256=$LRV_DONOR_SHA sh image/licheerv-agent.sh
 card target/licheerv/hopos-licheerv.img hopos-licheerv-headless.img
 skip "licheerv headfull: board-licheerv heeft geen gui-feature; en geen flipbundel (riscv64)"
 

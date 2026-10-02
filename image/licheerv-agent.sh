@@ -17,10 +17,17 @@
 #                                            image (standaard
 #                                            image/cfg/hop-config-headless.cfg;
 #                                            CFG= zonder pad: geen config)
+#   STAGE=/pad/hop.elf image/licheerv-agent.sh
+#                                          → met die ELF in de kern gebakken
+#                                            als Hop (ROLE=hop, de standaard
+#                                            bij STAGE=): de eerste bewoner,
+#                                            in slot 1 met de bevoegdheid,
+#                                            zoals op elk board (de release)
 #   APP=appspike image/licheerv-agent.sh   → met appspike in de kern
-#                                            gebakken: de kern plaatst hem
-#                                            bij de boot twee keer op de
-#                                            C906L (het ABI-bewijs op ijzer)
+#                                            gebakken als app (ROLE=app): de
+#                                            kern plaatst hem bij de boot
+#                                            twee keer op de C906L (het
+#                                            ABI-bewijs op ijzer)
 #
 # hopos.cfg: de FSBL geeft geen DTB en geen bootargs, en de kern leest (nog)
 # geen SD-kaart, dus de config gaat IN het image, in een venster van 64 KiB
@@ -69,21 +76,30 @@ echo "donor: $DONOR sha256=$DONOR_SHA" >&2
 
 mkdir -p "$OUT"
 cd "$DIR"
-# De app van de eerste plaatsing: er is geen QEMU die hem in het RAM legt,
-# dus gaat hij in de kern (board/licheerv/build.rs, HOPOS_LRV_STAGE). Zonder
-# debug-info, met de symbolen: de plaatsing leest RamStart en de rest uit de
-# symbooltabel.
+# De eerste bewoner: er is geen QEMU die hem in het RAM legt, dus gaat hij
+# in de kern (board/licheerv/build.rs, HOPOS_LRV_STAGE met zijn rol in
+# HOPOS_LRV_ROLE). Zonder debug-info, met de symbolen: de plaatsing leest
+# RamStart en de rest uit de symbooltabel.
 APP="${APP:-}"
-if [ -n "$APP" ]; then
+STAGE="${STAGE:-}"
+if [ -n "$STAGE" ]; then
+	[ -f "$STAGE" ] || { echo "STAGE=$STAGE bestaat niet" >&2; exit 1; }
+	HOPOS_LRV_ROLE="${ROLE:-hop}"
+	"$OBJCOPY" --strip-debug "$STAGE" "$OUT/stage.elf"
+	HOPOS_LRV_STAGE="$OUT/stage.elf"
+	echo "stage: $STAGE als $HOPOS_LRV_ROLE, $(wc -c <"$HOPOS_LRV_STAGE" | tr -d ' ') bytes sha256=$(sha "$HOPOS_LRV_STAGE")" >&2
+elif [ -n "$APP" ]; then
 	echo "== app bouwen ($APP, $TARGET) ==" >&2
 	cargo build --quiet --release --target "$TARGET" -p "$APP"
 	"$OBJCOPY" --strip-debug "$DIR/target/$TARGET/release/$APP" "$OUT/$APP.stage"
 	HOPOS_LRV_STAGE="$OUT/$APP.stage"
-	echo "app: $APP $(wc -c <"$HOPOS_LRV_STAGE" | tr -d ' ') bytes sha256=$(sha "$HOPOS_LRV_STAGE")" >&2
+	HOPOS_LRV_ROLE="${ROLE:-app}"
+	echo "app: $APP als $HOPOS_LRV_ROLE, $(wc -c <"$HOPOS_LRV_STAGE" | tr -d ' ') bytes sha256=$(sha "$HOPOS_LRV_STAGE")" >&2
 else
 	HOPOS_LRV_STAGE=""
+	HOPOS_LRV_ROLE=""
 fi
-export HOPOS_LRV_STAGE
+export HOPOS_LRV_STAGE HOPOS_LRV_ROLE
 echo "== kern bouwen (hopos --features board-licheerv, $TARGET) ==" >&2
 cargo build --quiet --release --target "$TARGET" -p hopos --features board-licheerv
 ELF="$DIR/target/$TARGET/release/hopos"

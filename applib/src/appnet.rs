@@ -53,13 +53,13 @@ use core::pin::pin;
 use core::sync::atomic::Ordering::Relaxed;
 use core::task::{Poll, Waker};
 use core::time::Duration;
-use leannet::{Config, ListenHandle, Stack, TcpHandle, UdpHandle};
+use leannet::{Config, ListenHandle, Stack, TcpHandle, Udp6Handle, UdpHandle};
 use sync::{Local, Signal, yield_now};
 
 pub mod dns;
 
 pub use dns::DnsError;
-pub use leannet::{Endpoint, Error as StackError, Stats, TcpState};
+pub use leannet::{Endpoint, Endpoint6, Error as StackError, Stats, TcpState};
 
 /// Het adres van de kern op het slot-LAN (de gateway).
 pub const HOST: [u8; 4] = abi::layout::HOST_IP4.to_be_bytes();
@@ -406,6 +406,7 @@ enum Open {
     Tcp(TcpHandle),
     Listen(ListenHandle),
     Udp(UdpHandle),
+    Udp6(Udp6Handle),
 }
 
 /// Wat [`Net::shutdown`] deed.
@@ -760,6 +761,33 @@ impl Net {
         })
     }
 
+    /// Bindt IPv6-UDP en activeert NDP/router discovery voor deze slot-interface.
+    pub fn udp6_bind(&'static self, port: u16) -> Result<Udp6Socket> {
+        self.admit()?;
+        let h = self.with(|st| st.udp6_bind(port, self.now()))??;
+        Ok(Udp6Socket {
+            net: self,
+            h,
+            deadline: None,
+            slot: self.track(Open::Udp6(h)),
+        })
+    }
+
+    /// Abonneert op ff02-multicast op de ene slot-interface.
+    pub fn join_group6(&self, group: [u8; 16]) -> Result {
+        self.with(|st| st.join_group6(group, self.now()))?
+            .map_err(NetError::Stack)
+    }
+
+    /// Link-local en optioneel SLAAC-adres; activeert de baan op eerste gebruik.
+    pub fn ipv6_addresses(&self) -> Result<([u8; 16], Option<[u8; 16]>)> {
+        self.with(|st| {
+            st.enable_ipv6(self.now())?;
+            st.ipv6_addresses(self.now()).ok_or(StackError::StackClosed)
+        })?
+        .map_err(NetError::Stack)
+    }
+
     /// Abonneert de stack op multicastgroep `group`, voor zijn hele
     /// levensduur; een tweede join van dezelfde groep doet niets.
     ///
@@ -800,6 +828,26 @@ impl Net {
     /// echt antwoord dat nee zegt (NXDOMAIN, geen A, kapot) is meteen de
     /// uitkomst; nog eens vragen verandert daar niets aan.
     pub async fn resolve_via(&'static self, server: [u8; 4], host: &str) -> Result<[u8; 4]> {
+        self.resolve_record(server, host, 1).await
+    }
+    /// Het AAAA-adres van een host, of het letterlijke IPv6-adres zelf.
+    pub async fn resolve6(&'static self, host: &str) -> Result<[u8; 16]> {
+        if let Ok(ip) = host.parse::<core::net::Ipv6Addr>() {
+            return Ok(ip.octets());
+        }
+        let server = self.dns.ok_or(NetError::Dns(DnsError::NoServer))?;
+        self.resolve6_via(server, host).await
+    }
+    /// AAAA via de geconfigureerde IPv4-DNS-server; DNS-transport en antwoordfamilie zijn onafhankelijk.
+    pub async fn resolve6_via(&'static self, server: [u8; 4], host: &str) -> Result<[u8; 16]> {
+        self.resolve_record(server, host, 28).await
+    }
+    async fn resolve_record<const N: usize>(
+        &'static self,
+        server: [u8; 4],
+        host: &str,
+        kind: u16,
+    ) -> Result<[u8; N]> {
         let mut query = [0u8; dns::QUERY_MAX];
         let mut buf = [0u8; dns::UDP_MAX];
         let mut sock = self.udp_bind(0)?;
@@ -809,7 +857,7 @@ impl Net {
         };
         for _ in 0..DNS_ATTEMPTS {
             let id = self.dns_id();
-            let n = dns::encode_query(id, host, &mut query)?;
+            let n = dns::encode_kind(id, host, &mut query, kind)?;
             sock.set_timeout(Some(DNS_TIMEOUT));
             sock.send_to(to, query.get(..n).unwrap_or_default()).await?;
             loop {
@@ -821,7 +869,7 @@ impl Net {
                 if from != to {
                     continue;
                 }
-                match dns::parse_answer(id, host, buf.get(..n).unwrap_or_default()) {
+                match dns::parse_kind(id, host, buf.get(..n).unwrap_or_default(), kind) {
                     Ok(ip) => return Ok(ip),
                     Err(DnsError::BadId { .. } | DnsError::Mismatch) => {}
                     Err(e) => return Err(NetError::Dns(e)),
@@ -952,6 +1000,10 @@ impl Net {
                 Open::Tcp(h) => st.tcp_close(h, now).is_ok(),
                 Open::Listen(h) => {
                     st.tcp_listen_close(h);
+                    true
+                }
+                Open::Udp6(h) => {
+                    st.udp6_close(h);
                     true
                 }
                 Open::Udp(h) => {
@@ -1275,6 +1327,72 @@ impl Drop for UdpSocket {
         let h = self.h;
         self.net.untrack(self.slot, Open::Udp(h));
         let _ = self.net.with(|st| st.udp_close(h));
+    }
+}
+
+/// Een IPv6-UDP-socket. Sluit in `Drop`.
+pub struct Udp6Socket {
+    net: &'static Net,
+    h: Udp6Handle,
+    deadline: Option<u64>,
+    /// De plek in de tabel van open handvatten.
+    slot: Option<usize>,
+}
+
+impl Udp6Socket {
+    /// Bindt `port` op de stack van deze app.
+    pub fn bind(port: u16) -> Result<Self> {
+        net().ok_or(NetError::NotUp)?.udp6_bind(port)
+    }
+
+    /// Zet de deadline van elke volgende send en recv; `None` wist hem.
+    pub fn set_deadline(&mut self, at: Option<u64>) {
+        self.deadline = at;
+    }
+
+    /// Zet de deadline op `d` vanaf nu; `None` wist hem.
+    pub fn set_timeout(&mut self, d: Option<Duration>) {
+        self.deadline = self.net.at(d);
+    }
+
+    /// Het lokale eindpunt.
+    pub fn local(&self) -> Result<Endpoint6> {
+        let h = self.h;
+        Ok(self.net.with(|st| st.udp6_local(h))??)
+    }
+
+    /// Verstuurt één datagram naar `to`; wacht op een route (NDP) of op
+    /// ruimte in de zendrij.
+    pub async fn send_to(&self, to: Endpoint6, data: &[u8]) -> Result<usize> {
+        let h = self.h;
+        self.net
+            .wait(
+                self.deadline,
+                |st, now| st.udp6_send_to(h, to, data, now),
+                |st, w| st.udp6_register_write_waker(h, w),
+            )
+            .await
+    }
+
+    /// Wacht op één datagram: lengte en afzender. Wat niet in `buf` past,
+    /// valt weg (UDP).
+    pub async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, Endpoint6)> {
+        let h = self.h;
+        self.net
+            .wait(
+                self.deadline,
+                |st, now| st.udp6_recv_from(h, buf, now),
+                |st, w| st.udp6_register_read_waker(h, w),
+            )
+            .await
+    }
+}
+
+impl Drop for Udp6Socket {
+    fn drop(&mut self) {
+        let h = self.h;
+        self.net.untrack(self.slot, Open::Udp6(h));
+        let _ = self.net.with(|st| st.udp6_close(h));
     }
 }
 
