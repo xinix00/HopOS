@@ -206,22 +206,33 @@ impl LicheeRv {
     ///   en zijn comparator is voor hem `mtimecmp(0)`;
     /// - "alle stille doden staan op naam van de C906L" (01-08, de
     ///   wfi-klasse): slapen op zijn wekker is daar nooit bewezen, dus de
-    ///   switcher spint (geen wekker, geen slaap, geen tick);
-    /// - het resetblok is het mes: de harde intrekking is reset vast (dat
-    ///   wist ook zijn PMP, gemeten 30-07) en opnieuw de parkeerlus in.
+    ///   switcher spint (slaapgrens 0);
+    /// - wel de kill-tick op zijn eigen comparator (`mtimecmp(0)`, de
+    ///   CLINT-decode is per core): de tick schrijft alleen de comparator en
+    ///   vuurt terwijl een bewoner draait, nooit een `wfi` (Go, hart.go: "wat
+    ///   stierf was een wfi"; de wek-keten zelf is op dit hart bewezen). Hij
+    ///   is de tijdschijf van het gedeelde hart (alle apps wonen hier) en de
+    ///   intrekking zonder de buren mee te resetten;
+    /// - het resetblok blijft er voor de herstart (reset vast wist ook zijn
+    ///   PMP, gemeten 30-07).
     ///
-    /// Wie de C906L wil laten slapen, probet eerst zijn wekker op dat hart
-    /// en zet dan `mtimecmp(0)` en een slaapgrens hier (docs/boards-riscv.md).
+    /// Wie de C906L wil laten slapen, probet eerst zijn `wfi` op dat hart in
+    /// een soak en zet dan een slaapgrens hier (docs/boards-riscv.md).
     #[must_use]
     pub fn app_hart(&self, hart: usize) -> cpu::riscv::switch::AppHart {
+        let little = hart == HART_LITTLE;
         cpu::riscv::switch::AppHart {
-            mtimecmp: Pa(0),
+            mtimecmp: if little { CLINT_DEV.mtimecmp(0) } else { Pa(0) },
             msip: Pa(0),
             sleep_cap: 0,
-            tick: 0,
+            tick: if little {
+                cpu::riscv::idle::ns_to_ticks(cpu::riscv::switch::KILL_TICK_NS, TIMEBASE_HZ)
+            } else {
+                0
+            },
             attrs: cpu::riscv::sv39::Attrs::Thead,
             pmp: cpu::riscv::pmp::C906,
-            resettable: hart == HART_LITTLE,
+            resettable: little,
         }
     }
 
@@ -489,5 +500,17 @@ mod tests {
         assert_eq!(b.core_class(1), CoreClass::Small);
         assert_eq!(b.core_class(0), CoreClass::Big);
         assert!(b.privilege(3).is_ok());
+    }
+
+    #[test]
+    fn the_little_core_ticks_but_spins() {
+        let t = LicheeRv::new().app_hart(HART_LITTLE);
+        // Zijn eigen comparator (index 0, de CLINT is per core), 10 ms op
+        // 25 MHz, en geen slaap: de tick wel, de `wfi` niet.
+        assert_eq!(t.mtimecmp, Pa(0x7400_4000));
+        assert_eq!(t.tick, 250_000);
+        assert_eq!(t.sleep_cap, 0);
+        assert_eq!(t.msip, Pa(0));
+        assert!(t.resettable);
     }
 }

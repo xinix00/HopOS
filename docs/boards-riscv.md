@@ -200,7 +200,9 @@ SMP-eenheden, sharegroepen        één bewoner per app-hart
   leest het bij elke yield, bij elke kill-tick (10 ms, alleen MTIE aan
   terwijl een bewoner draait; een tick hervat dezelfde bewoner, geen
   preemptie), en bij elke ronde over een slaper. Een hart met een resetblok
-  en zonder tick (de C906L) gaat in reset en opnieuw de switcher in.
+  en zonder tick gaat in reset en opnieuw de switcher in; de C906L heeft
+  sinds 02-10 de tick (de tijdschijf van zijn gedeelde hart), dus daar is
+  de reset niet meer het mes.
 - **Stil** (`quiet`): de ctx-staat is Empty of Dead. Dead schrijft de
   switcher pas na de volledige cache-veeg van het hart (de teardown), dus
   dan is de partitie echt terug.
@@ -300,14 +302,20 @@ zet hem; HopOS doet geen init). Bouw met
    invalidate die een CPU-schrijf weggooit), en de dwmac legt daarom alles op
    eigen cachelines.
 10. **Geen opslag**: `disk: none` is juist; er is geen SD-driver.
-11. **De C906L**: `cage: hart 1 (core 1) in the switcher: wake 0x0, bell 0x0,
-    sleep cap 0 ticks, kill tick 0 ticks, reset true HOPOS_RV_HART_UP`. De
+11. **De C906L**: `cage: hart 1 (core 1) in the switcher: wake 0x74004000,
+    bell 0x0, sleep cap 0 ticks, kill tick 250000 ticks, reset true
+    HOPOS_RV_HART_UP`. De
     kern haalt hem uit reset op de reset-ingang (`reset_pc`: zijn `mhartid`
     leest 0, net als dat van de C906B, gemeten 01-08), hij neemt het
     T-Head-regime (I-cache aan: anders ~77x trager, gemeten 18-08) en gaat
-    de switcher in. Hij SPINT (geen wekker, geen slaap): slapen op zijn
-    comparator is op dit hart nooit bewezen (de stille doden van 01-08), en
-    er is geen bel van de kern naar hem (de CLINT is per core).
+    de switcher in. Hij SPINT (geen slaap): slapen op zijn comparator is op
+    dit hart nooit bewezen (de stille doden van 01-08 waren een `wfi`), en
+    er is geen bel van de kern naar hem (de CLINT is per core). Zijn
+    comparator (`mtimecmp(0)`, per core) draagt wel de kill-tick van 10 ms:
+    die vuurt alleen terwijl een bewoner draait en is de tijdschijf van de
+    apps die dit ene hart delen. Op ijzer te zien: `tools/qemu-riscv-test-share.sh`
+    op QEMU, en op het board een `BURN=1` naast welcome die op :80 blijft
+    antwoorden.
 12. **appspike, twee keer**: `HOPOS_RV_DISPATCH` met "picked up by the
     spinning switcher", `HOPOS_SLOT_START slot=1 core=1 cpu=1`, dan de regels
     van de app. Verwacht `HOPOS_APPSPIKE_DONE pass=8 fail=1`: de FS-toets
@@ -348,6 +356,7 @@ zet hem; HopOS doet geen init). Bouw met
   weigert.
 - De switch-code draait op riscv64 uit het kern-image (op arm64 staat een
   kopie in de plan-regio, voor de flip).
-- De LicheeRV: slapen op de C906L (een probe van zijn comparator op dat
-  hart, dan `mtimecmp(0)` en een slaapgrens in `app_hart`), en een
+- De LicheeRV: slapen op de C906L (de comparator staat sinds 02-10 voor
+  de tick; een soak met `wfi` op dat hart, dan een slaapgrens in
+  `app_hart`), en een
   SD-driver (dan `hopos.cfg` naast `fip.bin` in plaats van in het image).
