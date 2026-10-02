@@ -56,6 +56,13 @@ use core::fmt;
 /// `CtrlCorePrep` met een ander bevel, en een oude app op een nieuwe kern
 /// voerde elke idle-ronde een IMP-DEF-write uit. Een woord hergebruiken kost
 /// een versie, ook als het adres blijft staan.
+///
+/// Versie 1 is byte voor byte de Go-ABI 10 (`OLD/metal/abi/layout`): de
+/// staart, de control-page-offsets, de ringgeometrie, de HVC-nummers en het
+/// systemapi-frame. Daarom laat [`place::build`] ook de Go-stempel
+/// ([`place::GO_ABI_VERSION`]) toe, en draait een tamago-image uit `OLD/`
+/// ongewijzigd (`docs/go-apps.md`). Wie hier 2 van maakt, haalt die alias
+/// weg of hertaalt de Go-applib mee.
 pub const ABI_VERSION: u32 = 1;
 
 /// Een regio fysiek geheugen: basis en maat in bytes.

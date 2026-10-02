@@ -16,6 +16,7 @@ de consoleregel die erbij hoort en wat een afwijking betekent.
 | `SMP=2 sh tools/qemu-test-hop.sh` | hetzelfde met twee cores: kern plus Hop op één core, de app op de andere |
 | `SMP=2 OSCORE=1 sh tools/qemu-test-hop.sh` | de kern verhuist bij boot naar core 1 |
 | `sh tools/qemu-test-welcome.sh` | Hop plaatst welcome met `"ports":{"http":80}`; de kern zet poort 80 door naar het slot, `curl` van de host krijgt de pagina met de bunny en `/health`, en na `DELETE /v1/jobs/welcome` is de poort weer dicht |
+| `GO_ELF=pad sh tools/qemu-test-welcome.sh` | hetzelfde met de tamago-welcome uit `OLD/apps` als artifact: een Go-image met slot-ABI 10 draait ongewijzigd op ABI 1 ([go-apps.md](go-apps.md)) |
 | `sh tools/qemu-test-smp.sh` | een SMP-app: appspike met `cores: 2` krijgt zijn tweede core in de eigen kooi, telt erop, en houdt beide cores na een herstart door Hop |
 | `sh tools/qemu-test-share.sh` | een sharegroep: twee appspikes delen één app-core in coöperatieve rotatie, allebei groen, en een lid dat stopt komt terug naast het levende lid |
 | `sh tools/qemu-test-bench.sh` | de meetketen: Hop plaatst `apps/bench` met poort 80, `tools/netmeter` meet van de host (rtt, storm, in, out), twee apps meten elkaar door de switch, BURN draait, multicast in de node (een bench joint 224.0.0.251, een tweede zendt, de switch floodt, `HOPOS_BENCH_MCAST recv=3`), `hopos.idlestat=1` drukt de meetlat, en een tweede boot doet `hopos.nvmebench=1`; de getallen staan in [measurements.md](measurements.md) |

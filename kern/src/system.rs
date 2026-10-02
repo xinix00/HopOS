@@ -949,24 +949,39 @@ impl Placer {
         len: u64,
         dst: &mut Vec<u8>,
     ) -> core::result::Result<(), Fail> {
-        match off.checked_add(len) {
-            Some(end) if off >= self.seg_end && end <= self.size => {}
-            _ => {
+        let end = off.saturating_add(len);
+        // Een bestandsoffset binnen een PT_LOAD staat al op zijn plek in de
+        // partitie; daarbuiten in de schrapruimte. De Go-linker zet de
+        // sectietabel vlak achter de program headers, dus in het eerste
+        // PT_LOAD (de Rust-linker achteraan); Go's `stream.go` vertaalde
+        // allebei en de poort las eerst alleen de schrapruimte (02-10).
+        let in_seg = self
+            .segs
+            .iter()
+            .find(|s| off >= s.off && end <= s.off + s.filesz)
+            .map(|s| s.paddr - LINK_BASE + (off - s.off));
+        let src = match in_seg {
+            Some(o) => o,
+            None if off >= self.seg_end && end <= self.size => self.scr_off + (off - self.seg_end),
+            None => {
                 return Err(Self::fail(
                     "symbol tables inside a PT_LOAD, not streamable",
                     off,
                     len,
                 ));
             }
-        }
+        };
         let at = dst.len();
         dst.try_reserve_exact(len as usize)
             .map_err(|_| Error::OutOfMemory {
                 bytes: len as usize,
             })?;
         dst.resize(at + len as usize, 0);
-        let pa = g.region().base + self.scr_off + (off - self.seg_end);
-        read_bytes(mem, pa, dst.get_mut(at..).unwrap_or(&mut []));
+        read_bytes(
+            mem,
+            g.region().base + src,
+            dst.get_mut(at..).unwrap_or(&mut []),
+        );
         Ok(())
     }
 
@@ -2891,7 +2906,7 @@ mod tests {
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
         let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
-        let bad_abi = elf(10);
+        let bad_abi = elf(9);
         let good = elf(u64::from(abi::ABI_VERSION));
         let mut p = Pipe::new(
             NET | 2,
@@ -2899,7 +2914,7 @@ mod tests {
                 // Geen ELF: de eerste brok wordt al geweigerd.
                 start_call(1, 16, b""),
                 enc(&stream_req(2, 3, 0, b"not an elf image")),
-                // ABI 10: alle bytes binnen, de plaatsing weigert.
+                // ABI 9: alle bytes binnen, de plaatsing weigert.
                 start_call(3, bad_abi.len() as u64, b""),
                 enc(&stream_req(4, 3, 0, &bad_abi)),
                 // Een brok op de verkeerde offset.

@@ -31,6 +31,10 @@
 #   tools/qemu-test-welcome.sh             TIMEOUT=60 standaard, in seconden
 #   KEEP_LOG=pad tools/qemu-test-welcome.sh   bewaart ook een groene console
 #   KEEP_PAGE=pad tools/qemu-test-welcome.sh  bewaart de pagina zoals curl hem gaf
+#   GO_ELF=pad tools/qemu-test-welcome.sh   een tamago-welcome uit OLD/apps
+#                                          als artifact (docs/go-apps.md): de
+#                                          Go-app zegt "serving http://" en
+#                                          kent /healthz in plaats van /health
 #   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT/WEBPORT   de host-poorten; bezet =
 #                                          een vrije poort van het OS, luid
 #   HOP_DIR=pad                            de hop-repo (standaard ../hop/hop)
@@ -82,17 +86,26 @@ WEBPORT="$(port "${WEBPORT:-8081}" WEBPORT)"
 cd "$DIR"
 echo "== bouwen: hopos (qemuvirt), welcome, en agentd-hopos in $HOP_DIR"
 cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt
-cargo build --quiet --release --target "$TARGET" -p welcome
 HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
 
 # De artifact-server: welcome zonder debug-info, de symbolen blijven voor
-# de plaatsing.
-OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
-if [ -n "$OBJCOPY" ]; then
-	"$OBJCOPY" --strip-debug "$DIR/target/$TARGET/release/welcome" "$ART/welcome.elf"
+# de plaatsing. Met GO_ELF het tamago-image, dat zijn eigen regel en pad heeft.
+UP_MARK="HOPOS_WELCOME_UP port=80"
+HEALTH_PATH=/health
+if [ -n "${GO_ELF:-}" ]; then
+	cp "$GO_ELF" "$ART/welcome.elf"
+	UP_MARK="serving http://"
+	HEALTH_PATH=/healthz
 else
-	cp "$DIR/target/$TARGET/release/welcome" "$ART/welcome.elf"
+	cargo build --quiet --release --target "$TARGET" -p welcome
+	OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
+	if [ -n "$OBJCOPY" ]; then
+		"$OBJCOPY" --strip-debug "$DIR/target/$TARGET/release/welcome" "$ART/welcome.elf"
+	else
+		cp "$DIR/target/$TARGET/release/welcome" "$ART/welcome.elf"
+	fi
 fi
+[ -n "${GO_ELF:-}" ] && cp "$GO_ELF" "$ART/welcome.elf"
 (cd "$ART" && exec python3 -m http.server "$ARTPORT" --bind 127.0.0.1) >"$ART/http.log" 2>&1 &
 HPID=$!
 
@@ -111,7 +124,7 @@ all() {
 }
 
 BOOT_MARKS="HOPOS_BOOT|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_HOP_START slot=1 |uplink tcp :8080 -> slot 1 :8080 HOPOS_HOP_PUBLISH|uplink tcp :9080 -> slot 1 :9080 HOPOS_HOP_PUBLISH|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
-PLACE_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|slot 2: 1 port\\(s\\) published tcp\\+udp on the uplink: :80 HOPOS_SLOT_PUBLISH|slot 2: .*HOPOS_WELCOME_UP port=80"
+PLACE_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|slot 2: 1 port\\(s\\) published tcp\\+udp on the uplink: :80 HOPOS_SLOT_PUBLISH|slot 2: .*$UP_MARK"
 STOP_MARKS="slot 2: ports withdrawn from the uplink HOPOS_SLOT_UNPUBLISH"
 RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_APP_PANIC|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_SLOT_PUBLISH_FAIL"
 
@@ -151,7 +164,7 @@ while alive && [ -z "$PAGE_OK" ]; do
 		code="$(curl -s -m 5 -o "$PAGE" -w '%{http_code}' "http://127.0.0.1:$WEBPORT/" 2>/dev/null || true)"
 		if [ "$code" = 200 ] && grep -q -F '( -.-)' "$PAGE" && grep -q 'slot 2' "$PAGE"; then
 			PAGE_OK="HTTP $code, $(wc -c <"$PAGE" | tr -d ' ') bytes"
-			HEALTH="$(curl -s -m 5 -w ' HTTP %{http_code}' "http://127.0.0.1:$WEBPORT/health" 2>&1 || true)"
+			HEALTH="$(curl -s -m 5 -w ' HTTP %{http_code}' "http://127.0.0.1:$WEBPORT$HEALTH_PATH" 2>&1 || true)"
 			break
 		fi
 	fi
@@ -204,8 +217,8 @@ else
 	fail=1
 fi
 case "$HEALTH" in
-"ok"*"HTTP 200") echo "   ok  GET /health: $(printf '%s' "$HEALTH" | tr '\n' ' ')" ;;
-*) echo "   ROOD GET /health: ${HEALTH:-nooit gevraagd}"; fail=1 ;;
+"ok"*"HTTP 200") echo "   ok  GET $HEALTH_PATH: $(printf '%s' "$HEALTH" | tr '\n' ' ')" ;;
+*) echo "   ROOD GET $HEALTH_PATH: ${HEALTH:-nooit gevraagd}"; fail=1 ;;
 esac
 case "$DELETED" in
 *"HTTP 2"*) echo "   ok  DELETE /v1/jobs/welcome: $DELETED" ;;
