@@ -36,7 +36,9 @@ Alleen wat nog moet; wat af is staat in de tabel hierboven.
 
 ### Raspberry Pi 5 (pi5-1, 192.168.1.207)
 
-- [ ] De warme flip sterft na de landing (stempel F, twee keer): koud terug
+- [ ] De warme flip sterft na de landing (stempel F, twee keer; 02-10 ook
+      op OP1 vanaf main: de node pingt niet meer na de POST, geen landing op
+      5555, de knop is nodig): koud terug
       van de kaart met "jump landed and the handover was consumed, died
       later in the new kernel's boot". De kaart-kern is te oud voor de
       zwarte doos; eerst de nieuwe kaart flashen, dan flippen en de doos
@@ -195,7 +197,11 @@ node heeft er nog geen gedraaid.
 
 - [ ] **Op ijzer te toetsen na de opruiming van 1 en 2 oktober** (zo'n 5300
       regels minder in acht groepen, alles host en QEMU groen; de nodes
-      zijn niet aangeraakt). Eén flip per board van main en kijken naar:
+      zijn niet aangeraakt). Gedaan 02-10 ochtend op de Pi 4 (OP1: adoptie
+      2 van 2, watchdog één keer, vitals cpu, app naar app 450) en de Radxa
+      (OP1: adoptie 2 van 2, het glas 1080p60 zonder edid-regel, app naar
+      app 269); de Pi 5 stierf op de flip (zie daar). Nog te doen: M4, O6N,
+      Altra, LicheeRV. Eén flip per board van main en kijken naar:
       M4: start_one en de vectoringang 8 (cpu), de flip-boot-watchdog
       (één keer wapenen, alleen HOPOS_BOOT_GUARD), core-class big op een
       P-core, plaatsing en flip met de ene DevMem, de zwarte doos, mpidr uit
