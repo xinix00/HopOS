@@ -9,12 +9,18 @@ use crate::probe;
 use crate::thermal::{self, SCMI_CHANNEL, Thermo};
 use board::heap::Heap;
 use board::{Board, CoreClass, Dispatched, Error, Plan};
-use board_uefi::{BLK_DATA, BLK_DMA, NET_DMA, Uefi, pcie};
+use board_uefi::{BLK_DATA, BLK_DMA, NET_BUF, NET_DMA, Uefi, pcie};
 
 // Het cacheable datablok van de stub is precies dat van de driver.
 const _: () = assert!(
     BLK_DATA.base.0 == BLK_DMA.base.0 + driver_nvme::DATA_OFF
         && BLK_DATA.size == driver_nvme::DATA_SIZE
+);
+// Idem het bufferblok van de NIC (`net-wb`): de frames van de rtl8126 en
+// niets anders; zijn ringen liggen ervoor en blijven NC.
+const _: () = assert!(
+    NET_BUF.base.0 == NET_DMA.base.0 + driver_rtl8126::BUF_OFF
+        && driver_rtl8126::DMA_NEED <= NET_BUF.end().0 - NET_DMA.base.0
 );
 use bounded::BoundedVec;
 use core::cell::{Cell, RefCell};
@@ -326,7 +332,8 @@ impl Board for O6n {
         }
         // SAFETY: BAR2 is door de firmware toegewezen en nu Device-gemapt;
         // memory-decode en bus-mastering staan aan. NET_DMA is van deze
-        // driver alleen, 2 MB-gealigneerd en Normal-NC gemapt.
+        // driver alleen, 2 MB-gealigneerd en Normal-NC gemapt, met het
+        // bufferblok Normal-WB (`NET_BUF`): dat veegt de driver zelf.
         let mut nic =
             unsafe { Rtl8126::new(Pa(hit.bar), NET_DMA.base, NET_DMA.size, cpu::idle::now) }
                 .map_err(|e| {

@@ -89,7 +89,9 @@ pub const KERN_RAM: Region = Region {
     size: 0x1000_0000,
 };
 /// De DMA-regio: 16 MB, Normal-NC (GEMETEN 03-09: Device kost ~290 ns per
-/// 8-byte-load; NC is coherent met de tg3 en de ANS zonder onderhoud).
+/// 8-byte-load; NC is coherent met de tg3 en de ANS zonder onderhoud),
+/// behalve de twee datablokken die hun driver zelf veegt: `NET_BUF` en
+/// het datablok van de ANS (`storage::ANS_DATA`), allebei Normal WB.
 pub const DMA: Region = Region {
     base: Pa(RAM_BASE + 0x1000_0000),
     size: 0x0100_0000,
@@ -99,6 +101,13 @@ pub const NET_DMA: Region = Region {
     base: Pa(RAM_BASE + 0x1000_0000),
     size: 0x0080_0000,
 };
+/// Het bufferblok van de tg3 binnen [`NET_DMA`]: Normal WB, de ringen en
+/// het status-blok ervoor blijven NC. Een bewuste keuze voor dit board, van
+/// de Go-kern overgenomen (board/apple/hop/net.go, 03-09: "Blijft het NC,
+/// dan werkt alles nog, alleen op ~100MB/s aan ongecachete loads"). Het
+/// mag omdat de driver het onderhoud zelf doet: `dev::push` vóór de
+/// TX-descriptor, `dev::pull` na de RX-completion (`driver_tg3::BUF_OFF`).
+pub(crate) const NET_BUF: (u64, u64) = (NET_DMA.base.0 + driver_tg3::BUF_OFF, driver_tg3::BUF_LEN);
 /// De opslag-helft: de queues en TCB's van de ANS, de databuffer, en de
 /// buffers die de coprocessor bij zijn opstart vraagt.
 pub const BLK_DMA: Region = Region {
@@ -125,6 +134,10 @@ const _: () = {
     assert!(ADMIN.end().0 == LOADER.base.0 && LOADER.end().0 == WINDOW_END);
     assert!(RAM_BASE.is_multiple_of(2 << 20) && WINDOW_END.is_multiple_of(2 << 20));
     assert!(driver_tg3::DMA_NEED <= NET_DMA.size);
+    // Het WB-blok op eigen 2 MB-grenzen (de korrel van de map), binnen de
+    // NIC-helft en na de ringen.
+    assert!(NET_BUF.0.is_multiple_of(2 << 20) && NET_BUF.1 == 2 << 20);
+    assert!(NET_BUF.0 > NET_DMA.base.0 && NET_BUF.0 + NET_BUF.1 <= NET_DMA.end().0);
     assert!(PARAMS == SCRATCH + 0x100);
 };
 
@@ -459,8 +472,9 @@ impl Board for Apple {
         let mac = fwinfo::nic_mac().ok_or(Error::Nic("no local-mac-address in the ADT"))?;
         // SAFETY: BAR0 is net toegewezen uit het 64-bit venster (onder 512 GB,
         // Device-gemapt) en `cfg` is de ECAM-config-space van deze functie;
-        // NET_DMA is van deze driver alleen, Normal-NC, en de DART staat in
-        // bypass, dus een DMA-adres is een fysiek adres.
+        // NET_DMA is van deze driver alleen, Normal-NC met het bufferblok
+        // Normal WB (`NET_BUF`, de driver veegt het zelf), en de DART staat
+        // in bypass, dus een DMA-adres is een fysiek adres.
         let mut nic = unsafe {
             Tg3::new(
                 Pa(ep.bar0),

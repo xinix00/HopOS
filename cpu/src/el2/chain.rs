@@ -29,6 +29,17 @@
 //!    01-09: het venster was net nog code van een ander), en `br` naar de
 //!    entry met x0 = de firmware-x0 die de oude kern ooit kreeg.
 //!
+//! Vóór stap 1 gaat VBAR_EL2 naar een kale vectortabel die met de
+//! trampoline meereist (2 KB verder op dezelfde pagina): een fault tijdens
+//! de kopie, of in de nieuwe kern voordat die zijn eigen vectoren zet, landt
+//! anders in de vectoren van de oude kern, die op dat moment half
+//! overschreven zijn. GEMETEN 01-09, de zevende ijzer-flip: een trace met
+//! oude nummers en oude adressen in plaats van de echte ESR/ELR/FAR (Go:
+//! `Chainload` met `layout.TrapVecPA`). De kale vector legt ESR, ELR en FAR
+//! in een record op de pagina, veegt dat naar DRAM en wacht; de kern die na
+//! de reset boot (koud, of adopterend want het blob ligt er) leest het
+//! ([`take_trap`]).
+//!
 //! De nieuwe kern komt zo binnen op exact de conditie van een koude boot
 //! (EL2, MMU uit, caches schoon), en zijn boot-stub zet alles zelf weer op.
 //! Eén verschil: x3 draagt [`crate::boot::FLIP_ENTRY`]. De sprong komt
@@ -177,6 +188,32 @@ pub fn trampoline() -> Option<&'static [u8]> {
     arch::trampoline()
 }
 
+/// "HOPTRAP1": het record van de kale vector van de trampoline is gevuld.
+const TRAP_MAGIC: u64 = u64::from_le_bytes(*b"HOPTRAP1");
+
+/// Wat de kale vector van de trampoline op `tramp` ([`Jump::tramp`])
+/// vastlegde: `(ESR, ELR, FAR)` van een fault tijdens de sprong of in de
+/// eerste stappen van de nieuwe kern, en daarna leeg. `None` zonder record
+/// (de gewone koude boot) en op een build zonder die vector (riscv64, de
+/// host). Voor de boot ná een flip die niet landde.
+pub fn take_trap(tramp: Pa) -> Option<(u64, u64, u64)> {
+    take_trap_at(tramp.add(arch::trap_off()?))
+}
+
+fn take_trap_at(rec: Pa) -> Option<(u64, u64, u64)> {
+    if dev::read64(rec) != TRAP_MAGIC {
+        return None;
+    }
+    let t = (
+        dev::read64(rec.add(8)),
+        dev::read64(rec.add(16)),
+        dev::read64(rec.add(24)),
+    );
+    dev::write64(rec, 0);
+    dev::push(rec, 8);
+    Some(t)
+}
+
 fn overlaps(a: u64, alen: u64, b: u64, blen: u64) -> bool {
     a < b.saturating_add(blen) && b < a.saturating_add(alen)
 }
@@ -216,6 +253,10 @@ impl Jump {
             || overlaps(self.tramp.0, t, self.src.0, self.len)
         {
             return bad("trampoline overlaps the image or the staging", self.tramp.0);
+        }
+        // Zijn kale vectoren liggen 2 KB verder, en VBAR_EL2 eist 2 KB.
+        if !self.tramp.0.is_multiple_of(0x800) {
+            return bad("trampoline not 2 KB aligned", self.tramp.0);
         }
         Ok(())
     }
@@ -305,11 +346,12 @@ pub unsafe fn chain(j: &Jump) -> ChainError {
 
 #[cfg(all(target_os = "none", target_arch = "aarch64"))]
 mod arch {
-    use super::{Jump, SCHED_MBOX_CTX};
+    use super::{Jump, SCHED_MBOX_CTX, TRAP_MAGIC};
     use crate::boot::FLIP_ENTRY;
 
     // De trampoline. Positie-onafhankelijk (alleen registers en relatieve
-    // sprongen), want hij draait op een adres dat hij niet kent.
+    // sprongen en adressen), want hij draait op een adres dat hij niet kent.
+    // Op 2 KB, zodat zijn vectortabel (2 KB verder) dat op de kopie ook is.
     //
     // In: x0 = dst, x1 = src, x2 = len (8-voud), x3 = entry, x4 = x0 van de
     // nieuwe kern, x5/x6 en x7/x8 = de twee te vegen vensters. Uit: x0 =
@@ -318,10 +360,15 @@ mod arch {
     core::arch::global_asm!(
         r#"
     .pushsection .text.hopos_chain, "ax"
-    .balign 64
+    .balign 2048
     .global hopos_chain_tramp
 hopos_chain_tramp:
     msr daifset, #0xf
+    // De vectoren op de kale dumper hieronder, vóór de kopie de oude
+    // overschrijft (Go 01-09).
+    adr x9, hopos_chain_vec
+    msr vbar_el2, x9
+    isb
     mov x16, x3
     // MMU, D- en I-cache uit: lezen en maskeren, geen gegokte vaste waarde.
     mrs x9, sctlr_el2
@@ -367,6 +414,39 @@ hopos_chain_tramp:
     movk x3, #{f2}, lsl #32
     movk x3, #{f3}, lsl #48
     br x16
+
+    // De kale dumper: ESR, ELR en FAR in het record, de magic als laatste,
+    // naar DRAM (een watchdog-reset spoelt geen cache), en stil.
+hopos_chain_dump:
+    mrs x9, esr_el2
+    mrs x10, elr_el2
+    mrs x11, far_el2
+    adr x12, hopos_chain_trap
+    stp x9, x10, [x12, #8]
+    str x11, [x12, #24]
+    dsb sy
+    movz x13, #{t0}
+    movk x13, #{t1}, lsl #16
+    movk x13, #{t2}, lsl #32
+    movk x13, #{t3}, lsl #48
+    str x13, [x12]
+    dc civac, x12
+    add x12, x12, #16
+    dc civac, x12
+    dsb sy
+7:  wfi
+    b 7b
+    .balign 64
+    .global hopos_chain_trap
+hopos_chain_trap:
+    .quad 0, 0, 0, 0
+    // De tabel: elke ingang naar de dumper.
+    .balign 2048
+hopos_chain_vec:
+    .rept 16
+    .balign 128
+    b hopos_chain_dump
+    .endr
     .global hopos_chain_tramp_end
 hopos_chain_tramp_end:
 
@@ -397,10 +477,15 @@ hopos_chain_off_end:
         mbox_ctx = const SCHED_MBOX_CTX,
         off0 = const crate::psci::CPU_OFF & 0xffff,
         off1 = const (crate::psci::CPU_OFF >> 16) & 0xffff,
+        t0 = const TRAP_MAGIC & 0xffff,
+        t1 = const (TRAP_MAGIC >> 16) & 0xffff,
+        t2 = const (TRAP_MAGIC >> 32) & 0xffff,
+        t3 = const (TRAP_MAGIC >> 48) & 0xffff,
     );
 
     unsafe extern "C" {
         safe static hopos_chain_tramp: u8;
+        safe static hopos_chain_trap: u8;
         safe static hopos_chain_tramp_end: u8;
         safe static hopos_chain_off: u8;
         safe static hopos_chain_off_end: u8;
@@ -417,6 +502,15 @@ hopos_chain_off_end:
         // sectie, met het einde erachter (net getoetst): code in de eigen
         // `.text`, leesbaar, `'static` en nooit beschreven.
         Some(unsafe { core::slice::from_raw_parts(start, len) })
+    }
+
+    /// Waar het record van de kale vector in de trampoline ligt.
+    pub(super) fn trap_off() -> Option<u64> {
+        let off = (&raw const hopos_chain_trap as usize)
+            .wrapping_sub(&raw const hopos_chain_tramp as usize);
+        trampoline()
+            .is_some_and(|t| off + 32 <= t.len())
+            .then_some(off as u64)
     }
 
     pub(super) fn trampoline() -> Option<&'static [u8]> {
@@ -554,6 +648,13 @@ hopos_chain_tramp_end:
         None
     }
 
+    /// De kale vector van arm64 ook niet: de trampoline draait in machine
+    /// mode met de interrupts dicht, en een trap gaat naar de mtvec van de
+    /// oude kern.
+    pub(super) fn trap_off() -> Option<u64> {
+        None
+    }
+
     /// # Safety
     ///
     /// Het contract van [`super::chain`].
@@ -599,6 +700,10 @@ mod arch {
         None
     }
 
+    pub(super) fn trap_off() -> Option<u64> {
+        None
+    }
+
     /// # Safety
     ///
     /// Op de host is er niets om in te springen.
@@ -623,6 +728,20 @@ mod tests {
         let n = relocate(base, 32, [0u32, 16].into_iter(), delta).unwrap();
         assert_eq!(n, 2);
         assert_eq!(img, [0x4020_0000, 7, 0x4020_1234, 0x6000_0000]);
+    }
+
+    #[test]
+    fn a_trap_record_is_read_once() {
+        let mut rec = vec![TRAP_MAGIC, 0x9600_0045, 0x4020_1234, 0x4800_0000];
+        let at = Pa(rec.as_mut_ptr() as u64);
+        assert_eq!(
+            take_trap_at(at),
+            Some((0x9600_0045, 0x4020_1234, 0x4800_0000))
+        );
+        assert_eq!(take_trap_at(at), None, "read twice");
+        rec[0] = 0x464C_4950;
+        assert_eq!(take_trap_at(Pa(rec.as_mut_ptr() as u64)), None, "no magic");
+        assert_eq!(take_trap(at), None, "the host carries no vector");
     }
 
     #[test]

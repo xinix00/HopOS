@@ -4,7 +4,7 @@
 use crate::{LINK_TIMEOUT_NS, is_nic};
 use board::heap::Heap;
 use board::{Board, CoreClass, Dispatched, Error, Plan};
-use board_uefi::{NET_DMA, Uefi, pcie};
+use board_uefi::{NET_BUF, NET_DMA, Uefi, pcie};
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use dev::Pa;
@@ -12,6 +12,13 @@ use driver_igb::Igb;
 use driver_nvme::Nvme;
 use driver_smpro::{HWMON_CHANNEL, Smpro};
 use sync::{Local, Signal};
+
+// Het cacheable bufferblok van de stub (`net-wb`) is precies dat van de
+// igb; zijn ringen liggen ervoor en blijven NC.
+const _: () = assert!(
+    NET_BUF.base.0 == NET_DMA.base.0 + driver_igb::BUF_OFF
+        && driver_igb::DMA_NEED <= NET_BUF.end().0 - NET_DMA.base.0
+);
 
 /// Leeft er een NIC uit `probe_nic`? Pas gezet na een gelukte probe: een
 /// mislukte (geen link) liet niets achter en mag opnieuw (hopos `nic_retry`).
@@ -194,7 +201,8 @@ impl Board for Altra {
         }
         // SAFETY: BAR0 is door de firmware toegewezen en nu Device-gemapt;
         // memory-decode en bus-mastering staan aan. NET_DMA is van deze
-        // driver alleen, 2 MB-gealigneerd en Normal-NC gemapt.
+        // driver alleen, 2 MB-gealigneerd en Normal-NC gemapt, met het
+        // bufferblok Normal-WB (`NET_BUF`): dat veegt de driver zelf.
         let mut nic = unsafe { Igb::new(Pa(hit.bar), NET_DMA.base, NET_DMA.size, cpu::idle::now) }
             .map_err(|e| {
                 cpu::println!("net: {e} at {} bar0 {:#x}", hit.f.bdf, hit.bar);

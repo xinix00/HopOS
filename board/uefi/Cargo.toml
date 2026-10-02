@@ -48,3 +48,8 @@ gui = []
 # hem altijd aan (A720: nVHE-EL1 stierf binnen 0,5 s, Go 17-09); op QEMU
 # is het de proef met `FEATURES=vhe CPU=neoverse-n1`.
 vhe = []
+# Het bufferblok van de NIC Normal-WB in plaats van NC (src/lib.rs
+# `NET_BUF`). Alleen voor een board waarvan de NIC-driver zelf veegt: de
+# O6N (rtl8126) en de Altra (igb) zetten hem aan in hun eigen Cargo.toml,
+# het generieke board met virtio-net niet.
+net-wb = []

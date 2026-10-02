@@ -155,6 +155,21 @@ pub const NET_DMA: Region = Region {
     size: 0x0070_0000,
 };
 
+/// Het bufferblok van de NIC binnen [`NET_DMA`]: het tweede blok van 2 MB,
+/// waar rtl8126 en igb hun frames leggen (hun `BUF_OFF`; board/o6n en
+/// board/altra toetsen dat). Met de feature `net-wb` mapt de stub het
+/// Normal-WB en niet uitvoerbaar, terwijl de ringen ervoor en de ITS erachter
+/// Normal-NC blijven: de Go-kern deed dat op de O6N en de Altra
+/// (`uefi/hop/board.go`: "de dure ongecachte 1500B-reads, het gemeten
+/// netdoorvoer-dak (17-07), worden cache-snelheid; de driver doet de
+/// DC-hygiëne"). Alleen een board waarvan de driver zelf veegt (`dev::push`
+/// vóór TX, `dev::pull` na RX) zet de feature aan; virtio-net op het
+/// generieke board doet dat niet en houdt NC.
+pub const NET_BUF: Region = Region {
+    base: Pa(NET_DMA.base.0 + 0x0020_0000),
+    size: 0x0020_0000,
+};
+
 /// De tabellen van de GICv3-ITS en de LPI's ([`irq`]): 1 MB aan het eind
 /// van de NIC-helft, 64 KB-gealigneerd en Normal-NC zoals alle DMA, zodat
 /// de GIC en wij hetzelfde zien zonder cache-onderhoud. Een NIC-driver
@@ -198,6 +213,8 @@ const _: () = {
     assert!(HEAP.end().0 == TABLES.base.0 && TABLES.end().0 == KERN_RAM.end().0);
     assert!(KERN_RAM.end().0 == DMA.base.0 && DMA.end().0 == ADMIN.base.0);
     assert!(NET_DMA.base.0 == DMA.base.0 && NET_DMA.end().0 == ITS_DMA.base.0);
+    assert!(NET_BUF.base.0 > NET_DMA.base.0 && NET_BUF.end().0 <= NET_DMA.end().0);
+    assert!(NET_BUF.base.0.is_multiple_of(2 << 20) && NET_BUF.size == 2 << 20);
     assert!(ITS_DMA.end().0 == BLK_DMA.base.0);
     assert!(BLK_DMA.end().0 == DMA.end().0 && ITS_DMA.base.0.is_multiple_of(0x1_0000));
     assert!(ADMIN.end().0 == LOADER.base.0 && LOADER.end().0 == WINDOW_PA + WINDOW);

@@ -449,6 +449,15 @@ pub(crate) fn land(x0: u64) -> Option<Handoff> {
     FIRMWARE_X0.store(x0, Relaxed);
     let (mut mem, p) = (DevMem, plan());
     kernflip::mark_early_boot(&mut mem, &p);
+    // De kale vector van de trampoline: een fault tijdens de kopie of in de
+    // eerste stappen van de nieuwe kern (Go 01-09). Na de reset komt de
+    // oude kern koud terug, of adopteert hij het blob dat de sprong
+    // achterliet; in beide gevallen zegt hij het hier.
+    if let Some((esr, elr, far)) = chain::take_trap(Pa(FLIP_TRAMP_PA)) {
+        println!(
+            "flip: the jump faulted before the new kernel had vectors: ESR {esr:#x} ELR {elr:#x} FAR {far:#x} HOPOS_FLIP_TRAP"
+        );
+    }
     match kernflip::adopted(&mut mem, &p) {
         Ok(Boot::Adopted(h)) if h.cold => {
             GENERATION.store(h.generation, Relaxed);

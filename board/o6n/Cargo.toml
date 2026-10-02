@@ -15,7 +15,10 @@ netdev = { path = "../../netdev" }
 # Het generieke UEFI-board. Het kernvenster voor DRAM op 0x8000_0000
 # (`window-8000`) zet de binary aan (hopos/Cargo.toml), zodat de
 # host-tests van de werkruimte het standaardvenster houden.
-board-uefi = { path = "../uefi" }
+# `net-wb`: het bufferblok van de NIC Normal-WB (board-uefi `NET_BUF`). De
+# rtl8126 veegt zelf (push vóór TX, pull na RX), en de Go-kern mapte de
+# frame-buffers van dit board ook zo (uefi/hop/board.go, 17-07).
+board-uefi = { path = "../uefi", features = ["net-wb"] }
 bounded = { path = "../../bounded" }
 board = { path = "../../board" }
 driver-pcie = { path = "../../driver/pcie" }

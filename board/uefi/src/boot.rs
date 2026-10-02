@@ -417,6 +417,14 @@ fn build_map(map: &Map) -> Result<Mmu, mmu::Error> {
     // Het datablok van de NVMe erbovenop Normal-WB (de laatste mapping
     // wint): zie `BLK_DATA`.
     m.map(crate::BLK_DATA.base.0, crate::BLK_DATA.size, ram_bits)?;
+    // Het bufferblok van de NIC idem, maar alleen waar het board dat kiest
+    // (`net-wb`), en niet uitvoerbaar: zie `NET_BUF`.
+    #[cfg(feature = "net-wb")]
+    m.map(
+        crate::NET_BUF.base.0,
+        crate::NET_BUF.size,
+        ram_bits | cpu::boot::xn(crate::el2::VHE),
+    )?;
     m.map(ADMIN.base.0, ADMIN.size, dev_bits)?;
     Ok(m)
 }

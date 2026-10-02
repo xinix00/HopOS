@@ -22,8 +22,9 @@
 //!   speculatieve toegang naar carve-outs van iBoot, en de firmware-
 //!   structuren boot_args en de ADT zijn met gealigneerde loads prima te
 //!   lezen; de target heeft `+strict-align`), behalve het kernvenster: de
-//!   kern-RAM, de loader-regio en het datablok van de ANS Normal WB, de rest
-//!   van de DMA-regio Normal-NC (GEMETEN
+//!   kern-RAM, de loader-regio, het datablok van de ANS en het bufferblok
+//!   van de tg3 Normal WB (die twee veegt hun driver zelf; de pakketbuffers
+//!   niet uitvoerbaar), de rest van de DMA-regio Normal-NC (GEMETEN
 //!   03-09: Device kost ~290 ns per 8-byte-load, 14-27 MB/s; NC is coherent
 //!   met de tg3 en de ANS zonder onderhoud), het kooi-venster Device.
 //!
@@ -33,7 +34,7 @@
 //! `cpu::boot::block_e2h` met E2H = 1 (zie [`tcr`]): XN is UXN plus PXN.
 
 use crate::storage::ANS_DATA;
-use crate::{DMA, DRAM_BASE, KERN_RAM, LOADER, WINDOW_END};
+use crate::{DMA, DRAM_BASE, KERN_RAM, LOADER, NET_BUF, WINDOW_END};
 use cpu::boot::{ATTR_DEVICE, ATTR_NORMAL, ATTR_NORMAL_NC, block_e2h};
 use dev::Pa;
 
@@ -90,6 +91,7 @@ pub(crate) const fn dram_attr(pa: u64) -> u64 {
     if in_region(pa, KERN_RAM.base.0, KERN_RAM.size)
         || in_region(pa, LOADER.base.0, LOADER.size)
         || in_region(pa, ANS_DATA.0, ANS_DATA.1)
+        || in_region(pa, NET_BUF.0, NET_BUF.1)
     {
         ATTR_NORMAL
     } else if in_region(pa, DMA.base.0, DMA.size) {
@@ -110,7 +112,13 @@ pub(crate) const fn dram_block(pa: u64) -> Option<u64> {
     if !pa.is_multiple_of(MB2) {
         return None;
     }
-    Some(block_e2h(pa, dram_attr(pa), true))
+    let d = block_e2h(pa, dram_attr(pa), true);
+    // De pakketbuffers zijn gecached, maar wat het net erin schrijft is
+    // nooit code voor de kern.
+    if in_region(pa, NET_BUF.0, NET_BUF.1) {
+        return Some(d | cpu::boot::xn(true));
+    }
+    Some(d)
 }
 
 /// Hoeveel GB DRAM we mappen: het fysieke RAM uit boot_args, naar boven op
@@ -368,6 +376,19 @@ mod tests {
         assert_eq!((walk(tables, ANS_DATA.0).unwrap() >> 2) & 7, ATTR_NORMAL);
         assert_eq!(
             (walk(tables, ANS_DATA.0 - MB2).unwrap() >> 2) & 7,
+            ATTR_NORMAL_NC
+        );
+        // Het bufferblok van de tg3 is gecached en niet uitvoerbaar; de
+        // ringen ervoor en de rest van de NIC-helft blijven NC.
+        let buf = walk(tables, NET_BUF.0).unwrap();
+        assert_eq!((buf >> 2) & 7, ATTR_NORMAL);
+        assert_eq!(buf & cpu::boot::xn(true), cpu::boot::xn(true));
+        assert_eq!(
+            (walk(tables, NET_BUF.0 - MB2).unwrap() >> 2) & 7,
+            ATTR_NORMAL_NC
+        );
+        assert_eq!(
+            (walk(tables, NET_BUF.0 + MB2).unwrap() >> 2) & 7,
             ATTR_NORMAL_NC
         );
         assert_eq!((walk(tables, ADMIN.base.0).unwrap() >> 2) & 7, ATTR_DEVICE);

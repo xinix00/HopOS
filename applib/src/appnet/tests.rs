@@ -55,16 +55,27 @@ fn nic(tx: &Backing, rx: &Backing, slot: u64) -> Nic {
     )
 }
 
-fn spawn_pump(exec: &'static Exec, net: &'static Net, mut nic: Nic, rx: &Backing) -> Door {
+fn spawn_pump(
+    exec: &'static Exec,
+    net: &'static Net,
+    mut nic: Nic,
+    rx: &Backing,
+    poll: RxPoll,
+) -> Door {
     let bell: &'static Signal = leak(Signal::new());
     let mut buf = frame_buf(net.frame_len()).unwrap();
-    exec.spawn(async move { net.pump(&mut nic, &mut buf, bell, POLL).await })
+    exec.spawn(async move { net.pump(&mut nic, &mut buf, bell, poll).await })
         .unwrap();
     (Peek::new(rx.pa(), CAP), bell)
 }
 
 /// De kern en slot 1 aan één draad, met hun pompen al gespawnd.
 fn pair() -> Pair {
+    pair_with(POLL)
+}
+
+/// Als [`pair`], met de pompen op `poll`.
+fn pair_with(poll: RxPoll) -> Pair {
     let exec: &'static Exec = leak(Exec::new());
     exec.set_clock(now);
     let up = leak(Backing::new(CAP));
@@ -72,8 +83,8 @@ fn pair() -> Pair {
     let kern = leak(Net::new(slot_config(0, BUDGET), 7, exec, now).unwrap());
     let app = leak(Net::new(slot_config(1, BUDGET), 9, exec, now).unwrap());
     app.seed_neighbor(host_ip(), mac_of(0).0).unwrap();
-    let k = spawn_pump(exec, kern, nic(down, up, 0), up);
-    let a = spawn_pump(exec, app, nic(up, down, 1), down);
+    let k = spawn_pump(exec, kern, nic(down, up, 0), up, poll);
+    let a = spawn_pump(exec, app, nic(up, down, 1), down, poll);
     Pair {
         exec,
         kern,
@@ -383,6 +394,56 @@ fn udp_round_trip() {
         got.borrow_mut().take(),
         Some((b"gnip".to_vec(), Endpoint { ip: HOST, port: 53 }))
     );
+}
+
+/// Een core die blijft rekenen slaapt niet, dus niemand belt de deurbel:
+/// zijn pomp ziet RX dan op de uitstelbare ronde van `lo`, ook als zijn
+/// poll-ronde na stilte al op `hi` stond. Zonder die ronde wachtte het
+/// datagram hier op de timer van de kern-pomp, een (gesimuleerde) seconde.
+#[test]
+fn a_busy_core_still_sees_rx_within_lo() {
+    let p = pair_with(RxPoll {
+        lo: Duration::from_micros(300),
+        hi: Duration::from_secs(1),
+        hold: 0,
+    });
+    let (kern, app) = (p.kern, p.app);
+    // Eerst stilte, tot beide pompen op `hi` staan.
+    let t0 = now();
+    p.run_until(|| elapsed(t0) >= 5_000_000_000);
+    let got: &'static Cell<Option<u64>> = leak(Cell::new(None));
+    let server = kern.udp_bind(53).unwrap();
+    p.exec
+        .spawn(async move {
+            let mut buf = [0u8; 64];
+            let (n, from) = server.recv_from(&mut buf).await.unwrap();
+            server.send_to(from, &buf[..n]).await.unwrap();
+        })
+        .unwrap();
+    // De rekenaar: elke ronde 20 µs werk en een yield, tot het antwoord er
+    // is; zolang hij leeft, doet geen ronde niets.
+    p.exec
+        .spawn(async move {
+            while got.get().is_none() {
+                NOW.with(|c| c.set(c.get() + 20_000));
+                yield_now().await;
+            }
+        })
+        .unwrap();
+    let sent = now();
+    p.exec
+        .spawn(async move {
+            let s = app.udp_bind(0).unwrap();
+            let to = Endpoint { ip: HOST, port: 53 };
+            s.send_to(to, b"ping").await.unwrap();
+            let mut buf = [0u8; 64];
+            s.recv_from(&mut buf).await.unwrap();
+            got.set(Some(now()));
+        })
+        .unwrap();
+    p.run_until(|| got.get().is_some());
+    let rtt = got.get().unwrap() - sent;
+    assert!(rtt < 5_000_000, "round trip on a busy core took {rtt} ns");
 }
 
 /// Multicast: een socket op de poort van de groep hoort een datagram naar

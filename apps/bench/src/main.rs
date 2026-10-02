@@ -7,6 +7,7 @@
 //! | `BENCH=ping BENCH_PEER=ip:poort` | rtt tegen een andere bench in de node, warm en koud ([`client`]) | `HOPOS_BENCH_RTT`, `HOPOS_BENCH_COLD` |
 //! | `BENCH=pull`, `BENCH=push` (met `BENCH_PEER`, `BENCH_BYTES`) | doorvoer app naar app door de switch | `HOPOS_BENCH_PULL`, `HOPOS_BENCH_PUSH` |
 //! | `BURN=1` (`BURN_WORK`, `BURN_REST`) | rekenen in een werk/rust-ritme ([`load::burn`]) | `HOPOS_BENCH_BURN` |
+//! | `BURN=1 BENCH=serve` | rekenen náást de server, op dezelfde core: de rtt van een bezette app (`BENCH=ping` ertegen) | `HOPOS_BENCH_BURN`, `HOPOS_BENCH_UP role=serve` |
 //! | `THRASH=1` | de heap tot 3/5 vullen en churnen ([`load::thrash`]) | `HOPOS_BENCH_THRASH` |
 //! | `MCAST=send` of `MCAST=listen` | mDNS-groep 224.0.0.251:5353 ([`load::mcast`]); `listen` joint de groep | `HOPOS_BENCH_MCAST`, bij `listen` met `recv=N` |
 //! | `NETDEMO=out` (`NETDEMO_NAME`) | één DNS-vraag door de NAT naar buiten | `HOPOS_BENCH_NETDEMO` |
@@ -52,7 +53,17 @@ const DEFAULT_PORT: u16 = 9000;
 async fn bench(app: &'static applib::App) {
     use applib::log;
     if app.env("BURN").is_some_and(|v| !v.is_empty()) {
-        load::burn(app).await;
+        if app.env("BENCH") != Some("serve") {
+            load::burn(app).await;
+        }
+        // Naast de server: deze core slaapt dan niet, en de pomp ziet RX
+        // zonder deurbel (applib appnet, de ronde van `RxPoll::lo`).
+        if applib::EXEC
+            .spawn(async move { load::burn(app).await })
+            .is_err()
+        {
+            log!("bench: no task for BURN next to serve HOPOS_BENCH_FAIL");
+        }
     }
     if app.env("THRASH").is_some_and(|v| !v.is_empty()) {
         load::thrash(app).await;

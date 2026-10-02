@@ -16,7 +16,11 @@ bounded = { path = "../../bounded" }
 # Het generieke UEFI-board. Het kernvenster van de Altra (`window-b000`)
 # zet de binary aan (hopos/Cargo.toml), zodat de host-tests van de
 # werkruimte het standaardvenster houden.
-board-uefi = { path = "../uefi" }
+# `net-wb`: het bufferblok van de NIC Normal-WB (board-uefi `NET_BUF`). De
+# igb veegt zelf (push vóór TX, pull na RX), en de Go-kern mapte de
+# frame-buffers van dit board zo: het netdoorvoer-dak van 17-07 lag hier
+# (uefi/mmu48.go `MapNormal`).
+board-uefi = { path = "../uefi", features = ["net-wb"] }
 board = { path = "../../board" }
 driver-pcie = { path = "../../driver/pcie" }
 driver-igb = { path = "../../driver/nic/igb" }

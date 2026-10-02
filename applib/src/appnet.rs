@@ -367,6 +367,9 @@ enum Wake {
     Bell,
     /// De timer: poll-ronde of een deadline van de stack.
     Timer,
+    /// De uitstelbare ronde van `lo`: de core bleef bezig, dus de slaper
+    /// (en met hem de deurbel) kwam niet aan de beurt.
+    Busy,
     /// De stack (een write, een close, een accept) of een loze wek.
     Stack,
 }
@@ -544,7 +547,7 @@ impl Net {
                 log!("appnet: RX ring corrupt: {why} HOPOS_APPNET_RX_CORRUPT");
                 corrupt_logged = true;
             }
-            match self.idle(bell, self.deadline(d)).await {
+            match self.idle(bell, self.deadline(d), poll.lo).await {
                 Wake::Bell => {
                     PUMP_EARLY.fetch_add(1, Relaxed);
                 }
@@ -553,6 +556,9 @@ impl Net {
                     empty = empty.saturating_add(1);
                     d = poll.next(d, empty);
                 }
+                // Geen lege ronde voor de verdubbeling: `d` is de slaap van
+                // een stille core, en deze core was niet stil.
+                Wake::Busy => {}
                 // De app praat: het antwoord hoort in het scherpe venster te
                 // komen, dus terug naar `lo` (de `hold` van Go).
                 Wake::Stack => {
@@ -635,13 +641,21 @@ impl Net {
 
     /// Slaapt tot de bel, de timer op `deadline`, of een wek van de stack.
     ///
+    /// Plus een uitstelbare ronde na `busy` (`RxPoll::lo`): de bel gaat
+    /// alleen vanuit de slaper, en een app die blijft rekenen (BURN, de
+    /// vitals-cpu) slaapt niet. Zonder deze ronde zag zijn pomp RX alleen
+    /// op de timer, die na stilte oploopt tot `RxPoll::hi` (1 s). Hij wekt
+    /// een slapende core nooit (`Exec::after_deferrable`): een stille app
+    /// kost hij hooguit één pomp-ronde per wek die er toch al was.
+    ///
     /// De stack wekt via de waker van deze taak en zegt niet dat hij het
     /// deed. Daarom: wie ons na de eerste poll opnieuw pollt zonder bel of
     /// timer, is de stack (of een loze wek, en dan kost dat één ronde).
     /// De waker gaat ná het leegpompen de stack in en zonder `.await`
     /// ertussen, dus er valt geen wek tussen wal en schip.
-    async fn idle(&self, bell: &'static Signal, deadline: u64) -> Wake {
+    async fn idle(&self, bell: &'static Signal, deadline: u64, busy: Duration) -> Wake {
         let mut timer = pin!(self.exec.until(deadline));
+        let mut round = pin!(self.exec.after_deferrable(busy));
         let mut ring = pin!(bell.wait());
         let mut armed = false;
         poll_fn(|cx| {
@@ -650,6 +664,9 @@ impl Net {
             }
             if timer.as_mut().poll(cx).is_ready() {
                 return Poll::Ready(Wake::Timer);
+            }
+            if round.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(Wake::Busy);
             }
             if armed {
                 return Poll::Ready(Wake::Stack);
