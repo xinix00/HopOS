@@ -17,9 +17,13 @@ vraagt) is het een yield naar de kern, en de switcher geeft de core aan de
 volgende bewoner. Bij de wektijd, of eerder bij de deurbel (een frame in de
 RX-ring), komt de app terug.
 
-De kern verdeelt de tijd dus eerlijk tussen bewoners die slapen. Wat hij niet
-kan, is tijd afpakken van een bewoner die niet slaapt: er is geen preëmptie.
-Een beurt duurt tot de executor idle is. Daar volgen twee regels uit:
+De kern verdeelt de tijd dus eerlijk tussen bewoners die slapen. Wat hij op
+arm64 niet kan, is tijd afpakken van een bewoner die niet slaapt: er is geen
+preëmptie, een beurt duurt tot de executor idle is. Op riscv64 (de LicheeRV,
+alle apps op één hart) neemt de switcher sinds 02-10 na 10 ms de beurt af
+als er buren zijn; dat houdt de node bereikbaar, maar een app die daarop
+leunt, verbrandt nog steeds de tijd van zijn buren. Daar volgen twee regels
+uit:
 
 1. Elk dutje (`after(5 ms)` om te kijken of er al iets is) is een wek van het
    slot, een volle ronde van alles wat klaarstaat, en pas daarna weer

@@ -40,9 +40,14 @@
 //! - **De kill-tick** (`SCHED_TICK_TICKS`, 0 = geen): vóór elke sprong naar
 //!   een bewoner de eigen comparator op nu + de periode en alleen MTIE aan.
 //!   Een tick kijkt naar één woord (`CTX_REVOKE`) en gaat bij niet-nul naar
-//!   de teardown; anders terug dezelfde bewoner in. Geen preemptie: een
-//!   bewoner die nooit yieldt, houdt het hart, maar de kern kan hem wel
-//!   beëindigen zonder resetblok.
+//!   de teardown. Met één bewoner in de lijst gaat hij terug dezelfde
+//!   bewoner in; met meer is de tick ook de **tijdschijf** (sinds 02-10):
+//!   de context gaat weg zoals bij een yield, met wektijd 0, en de rotatie
+//!   beslist wie nu mag. Een bewoner die nooit yieldt, houdt het hart dus
+//!   hooguit één tick (10 ms) van zijn buren af. Dit is de enige plek in
+//!   HopOS met preemptie, en alleen op een gedeeld hart; de LicheeRV droeg
+//!   vier apps op zijn ene app-hart, en een CASE of TLS-handshake van
+//!   seconden hield de rest zonder beurt.
 //! - **De intrekking van een slaper**: een bewoner die geyield is of nog
 //!   BootPending staat en ingetrokken wordt, gaat bij de volgende ronde
 //!   dood zonder nog één instructie te draaien.
@@ -54,15 +59,16 @@
 //!   de staat: een slot dat naar een ander hart verhuisde, start niet op
 //!   twee.
 //!
-//! Wat hier NIET is: de FP-registers. Een bewoner met `f`-registers
-//! (riscv64gc) houdt ze over een yield alleen omdat er één bewoner per hart
-//! is; een gedeeld hart vraagt eerst het bewaren van f0..f31 en `fcsr`.
+//! De FP-registers (f0..f31 en `fcsr`, `CTX_FPRS` achter het ctx-blok) gaan
+//! mee bij elke yield en elke tijdschijf en komen terug bij het hervatten;
+//! een koude boot begint met nullen, zodat een bewoner niets van zijn
+//! voorganger in de f-registers vindt.
 
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 use abi::layout::{
-    CTX_BOOT_ARG, CTX_BOOT_PC, CTX_CTRL_PA, CTX_GPRS, CTX_OFF, CTX_REGIME, CTX_RESUME, CTX_REVOKE,
-    CTX_RING_HEAD_PA, CTX_STATE, CTX_WAKE, CTX_WAKE_NO_PEEK, CtxState, SCHED_CLINT_PA, SCHED_COUNT,
-    SCHED_CURRENT, SCHED_LIST, SCHED_MSIP_PA, SCHED_ROTOR, SCHED_S2_PA, SCHED_SCRATCH,
+    CTX_BOOT_ARG, CTX_BOOT_PC, CTX_CTRL_PA, CTX_FPRS, CTX_GPRS, CTX_OFF, CTX_REGIME, CTX_RESUME,
+    CTX_REVOKE, CTX_RING_HEAD_PA, CTX_STATE, CTX_WAKE, CTX_WAKE_NO_PEEK, CtxState, SCHED_CLINT_PA,
+    SCHED_COUNT, SCHED_CURRENT, SCHED_LIST, SCHED_MSIP_PA, SCHED_ROTOR, SCHED_S2_PA, SCHED_SCRATCH,
     SCHED_SLEEP_CAP, SCHED_TICK_TICKS,
 };
 
@@ -255,10 +261,172 @@ core::arch::global_asm!(
 1:
     .endm
 
+    // De GPR's van de bewoner naar zijn ctx-blok (\base): xN op
+    // CTX_GPRS + 8*(N-1); x2 uit mscratch, x5..x7 uit de scratch van het
+    // sched-blok (sp). Clobbert t0.
+    .macro HOPOS_RV_SAVE_GPRS base
+    sd x1, {gprs}+0(\base)
+    csrr t0, mscratch
+    sd t0, {gprs}+8(\base)
+    sd x3, {gprs}+16(\base)
+    sd x4, {gprs}+24(\base)
+    ld t0, {scratch}+0(sp)
+    sd t0, {gprs}+32(\base)
+    ld t0, {scratch}+8(sp)
+    sd t0, {gprs}+40(\base)
+    ld t0, {scratch}+16(sp)
+    sd t0, {gprs}+48(\base)
+    sd x8, {gprs}+56(\base)
+    sd x9, {gprs}+64(\base)
+    sd x10, {gprs}+72(\base)
+    sd x11, {gprs}+80(\base)
+    sd x12, {gprs}+88(\base)
+    sd x13, {gprs}+96(\base)
+    sd x14, {gprs}+104(\base)
+    sd x15, {gprs}+112(\base)
+    sd x16, {gprs}+120(\base)
+    sd x17, {gprs}+128(\base)
+    sd x18, {gprs}+136(\base)
+    sd x19, {gprs}+144(\base)
+    sd x20, {gprs}+152(\base)
+    sd x21, {gprs}+160(\base)
+    sd x22, {gprs}+168(\base)
+    sd x23, {gprs}+176(\base)
+    sd x24, {gprs}+184(\base)
+    sd x25, {gprs}+192(\base)
+    sd x26, {gprs}+200(\base)
+    sd x27, {gprs}+208(\base)
+    sd x28, {gprs}+216(\base)
+    sd x29, {gprs}+224(\base)
+    sd x30, {gprs}+232(\base)
+    sd x31, {gprs}+240(\base)
+    .endm
+    // De FP-registers en fcsr naar / uit CTX_FPRS van \base. Clobbert t0.
+    .macro HOPOS_RV_FSAVE base
+    .option push
+    .option arch, +f, +d
+    fsd f0, {fprs}+0(\base)
+    fsd f1, {fprs}+8(\base)
+    fsd f2, {fprs}+16(\base)
+    fsd f3, {fprs}+24(\base)
+    fsd f4, {fprs}+32(\base)
+    fsd f5, {fprs}+40(\base)
+    fsd f6, {fprs}+48(\base)
+    fsd f7, {fprs}+56(\base)
+    fsd f8, {fprs}+64(\base)
+    fsd f9, {fprs}+72(\base)
+    fsd f10, {fprs}+80(\base)
+    fsd f11, {fprs}+88(\base)
+    fsd f12, {fprs}+96(\base)
+    fsd f13, {fprs}+104(\base)
+    fsd f14, {fprs}+112(\base)
+    fsd f15, {fprs}+120(\base)
+    fsd f16, {fprs}+128(\base)
+    fsd f17, {fprs}+136(\base)
+    fsd f18, {fprs}+144(\base)
+    fsd f19, {fprs}+152(\base)
+    fsd f20, {fprs}+160(\base)
+    fsd f21, {fprs}+168(\base)
+    fsd f22, {fprs}+176(\base)
+    fsd f23, {fprs}+184(\base)
+    fsd f24, {fprs}+192(\base)
+    fsd f25, {fprs}+200(\base)
+    fsd f26, {fprs}+208(\base)
+    fsd f27, {fprs}+216(\base)
+    fsd f28, {fprs}+224(\base)
+    fsd f29, {fprs}+232(\base)
+    fsd f30, {fprs}+240(\base)
+    fsd f31, {fprs}+248(\base)
+    frcsr t0
+    sd t0, {fprs}+256(\base)
+    .option pop
+    .endm
+    .macro HOPOS_RV_FLOAD base
+    .option push
+    .option arch, +f, +d
+    fld f0, {fprs}+0(\base)
+    fld f1, {fprs}+8(\base)
+    fld f2, {fprs}+16(\base)
+    fld f3, {fprs}+24(\base)
+    fld f4, {fprs}+32(\base)
+    fld f5, {fprs}+40(\base)
+    fld f6, {fprs}+48(\base)
+    fld f7, {fprs}+56(\base)
+    fld f8, {fprs}+64(\base)
+    fld f9, {fprs}+72(\base)
+    fld f10, {fprs}+80(\base)
+    fld f11, {fprs}+88(\base)
+    fld f12, {fprs}+96(\base)
+    fld f13, {fprs}+104(\base)
+    fld f14, {fprs}+112(\base)
+    fld f15, {fprs}+120(\base)
+    fld f16, {fprs}+128(\base)
+    fld f17, {fprs}+136(\base)
+    fld f18, {fprs}+144(\base)
+    fld f19, {fprs}+152(\base)
+    fld f20, {fprs}+160(\base)
+    fld f21, {fprs}+168(\base)
+    fld f22, {fprs}+176(\base)
+    fld f23, {fprs}+184(\base)
+    fld f24, {fprs}+192(\base)
+    fld f25, {fprs}+200(\base)
+    fld f26, {fprs}+208(\base)
+    fld f27, {fprs}+216(\base)
+    fld f28, {fprs}+224(\base)
+    fld f29, {fprs}+232(\base)
+    fld f30, {fprs}+240(\base)
+    fld f31, {fprs}+248(\base)
+    ld t0, {fprs}+256(\base)
+    fscsr t0
+    .option pop
+    .endm
+    // Een koude boot begint met lege f-registers: niets van de voorganger.
+    .macro HOPOS_RV_FZERO
+    .option push
+    .option arch, +f, +d
+    fmv.d.x f0, zero
+    fmv.d.x f1, zero
+    fmv.d.x f2, zero
+    fmv.d.x f3, zero
+    fmv.d.x f4, zero
+    fmv.d.x f5, zero
+    fmv.d.x f6, zero
+    fmv.d.x f7, zero
+    fmv.d.x f8, zero
+    fmv.d.x f9, zero
+    fmv.d.x f10, zero
+    fmv.d.x f11, zero
+    fmv.d.x f12, zero
+    fmv.d.x f13, zero
+    fmv.d.x f14, zero
+    fmv.d.x f15, zero
+    fmv.d.x f16, zero
+    fmv.d.x f17, zero
+    fmv.d.x f18, zero
+    fmv.d.x f19, zero
+    fmv.d.x f20, zero
+    fmv.d.x f21, zero
+    fmv.d.x f22, zero
+    fmv.d.x f23, zero
+    fmv.d.x f24, zero
+    fmv.d.x f25, zero
+    fmv.d.x f26, zero
+    fmv.d.x f27, zero
+    fmv.d.x f28, zero
+    fmv.d.x f29, zero
+    fmv.d.x f30, zero
+    fmv.d.x f31, zero
+    fscsr zero
+    .option pop
+    .endm
     .balign 4
     .global __hopos_parkenter
 __hopos_parkenter:
     csrw mie, zero
+    // FP aan in machine mode (mstatus.FS = Initial): de switcher bewaart
+    // de f-registers van zijn bewoners zelf.
+    li t0, 1 << 13
+    csrs mstatus, t0
     // Geen erfenis: MIE uit (park rekent erop dat een wek nooit als trap
     // genomen wordt) en mscratch meteen op het sched-blok, zodat een trap
     // vóór de eerste bewoner niet op een willekeurige sp spilt (Go,
@@ -300,41 +468,7 @@ __hopos_mentry:
 
     // De GPR's: xN op CTX_GPRS + 8*(N-1); x2 uit mscratch, x5..x7 uit de
     // scratch.
-    sd x1, {gprs}+0(t1)
-    csrr t0, mscratch
-    sd t0, {gprs}+8(t1)
-    sd x3, {gprs}+16(t1)
-    sd x4, {gprs}+24(t1)
-    ld t0, {scratch}+0(sp)
-    sd t0, {gprs}+32(t1)
-    ld t0, {scratch}+8(sp)
-    sd t0, {gprs}+40(t1)
-    ld t0, {scratch}+16(sp)
-    sd t0, {gprs}+48(t1)
-    sd x8, {gprs}+56(t1)
-    sd x9, {gprs}+64(t1)
-    sd x10, {gprs}+72(t1)
-    sd x11, {gprs}+80(t1)
-    sd x12, {gprs}+88(t1)
-    sd x13, {gprs}+96(t1)
-    sd x14, {gprs}+104(t1)
-    sd x15, {gprs}+112(t1)
-    sd x16, {gprs}+120(t1)
-    sd x17, {gprs}+128(t1)
-    sd x18, {gprs}+136(t1)
-    sd x19, {gprs}+144(t1)
-    sd x20, {gprs}+152(t1)
-    sd x21, {gprs}+160(t1)
-    sd x22, {gprs}+168(t1)
-    sd x23, {gprs}+176(t1)
-    sd x24, {gprs}+184(t1)
-    sd x25, {gprs}+192(t1)
-    sd x26, {gprs}+200(t1)
-    sd x27, {gprs}+208(t1)
-    sd x28, {gprs}+216(t1)
-    sd x29, {gprs}+224(t1)
-    sd x30, {gprs}+232(t1)
-    sd x31, {gprs}+240(t1)
+    HOPOS_RV_SAVE_GPRS t1
     csrr t0, mepc
     addi t0, t0, 4
     sd t0, {resume}+0(t1)
@@ -346,6 +480,7 @@ __hopos_mentry:
     sd t0, {regime}+{rstvec}(t1)
     csrr t0, sscratch
     sd t0, {regime}+{rsscratch}(t1)
+    HOPOS_RV_FSAVE t1
     // Het regime van de kooi zelf verandert niet (de bewoner kan PMP niet
     // aanraken); de kern schreef het, en het staat al in het ctx-blok.
     sd a0, {wake}(t1)
@@ -386,6 +521,34 @@ __hopos_mentry:
     HOPOS_RV_SYNC
     ld t0, 0(t0)
     bnez t0, 45f
+    // De tijdschijf: met meer dan één bewoner in de lijst is de tick ook het
+    // einde van de beurt. De volle context weg zoals bij een yield (mepc
+    // zoals hij is: een interrupt wijst naar de instructie die nog komt),
+    // wektijd 0 (meteen weer aan de beurt), Saved, en de rotatie beslist wie
+    // nu mag; de rotor begint ná deze bewoner, dus de buren gaan voor.
+    ld t0, {count}(sp)
+    li t2, 2
+    bltu t0, t2, 37f
+    HOPOS_RV_SAVE_GPRS t1
+    csrr t0, mepc
+    sd t0, {resume}+0(t1)
+    csrr t0, sstatus
+    sd t0, {resume}+8(t1)
+    csrr t0, satp
+    sd t0, {regime}+{rsatp}(t1)
+    csrr t0, stvec
+    sd t0, {regime}+{rstvec}(t1)
+    csrr t0, sscratch
+    sd t0, {regime}+{rsscratch}(t1)
+    HOPOS_RV_FSAVE t1
+    sd zero, {wake}(t1)
+    li t0, {saved}
+    sd t0, {state}(t1)
+    fence
+    HOPOS_RV_CIPA t1
+    HOPOS_RV_SYNC
+    j 50f
+37:
     HOPOS_RV_ARMTICK
     j 38f
 39:
@@ -669,6 +832,7 @@ __hopos_mentry:
     li sp, 0
     li gp, 0
     li tp, 0
+    HOPOS_RV_FZERO
     fence.i
     mret
 
@@ -718,6 +882,7 @@ __hopos_mentry:
     HOPOS_RV_SYNC
     HOPOS_RV_ARMTICK
     csrw mscratch, sp
+    HOPOS_RV_FLOAD s6
     mv x31, s6
     ld x1, {gprs}+0(x31)
     ld x2, {gprs}+8(x31)
@@ -771,6 +936,7 @@ __hopos_mmode_end:
     bootpc = const CTX_BOOT_PC,
     bootarg = const CTX_BOOT_ARG,
     gprs = const CTX_GPRS,
+    fprs = const CTX_FPRS,
     resume = const CTX_RESUME,
     regime = const CTX_REGIME,
     rsatp = const REGIME_SATP,
@@ -796,7 +962,9 @@ __hopos_mmode_end:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use abi::layout::{CTX_BOOT_ARG, CTX_GPRS, CTX_REGIME, CTX_RESUME, CTX_WAKE, SCHED_MSIP_PA};
+    use abi::layout::{
+        CTX_BOOT_ARG, CTX_FPRS, CTX_GPRS, CTX_REGIME, CTX_RESUME, CTX_WAKE, SCHED_MSIP_PA,
+    };
 
     #[test]
     fn the_offsets_fit_the_immediates() {
@@ -808,6 +976,7 @@ mod tests {
             CTX_REGIME + REGIME_PMPADDR0 + 56,
             CTX_WAKE,
             CTX_BOOT_ARG,
+            CTX_FPRS + 256,
             SCHED_MSIP_PA,
         ] {
             assert!(off < 2048, "{off}");

@@ -338,10 +338,11 @@ zet hem; HopOS doet geen init). Bouw met
   van een app wacht op de failsafe van de switch (`dial_us` 5,4 ms tegen 2,9
   op arm64). Een `ecall` met a7 = 2 in de switcher, die `msip` van hart 0
   zet, is de vorm.
-- **FP op een gedeeld hart**: de switcher bewaart f0..f31 en `fcsr` niet.
-  Met één bewoner per app-hart is dat geen fout; een sharegroep op riscv64
-  vraagt het eerst.
-- **SMP-apps en sharegroepen** op riscv64: één bewoner per app-hart.
+- **SMP-apps** op riscv64: één core per bewoner. Meerdere bewoners op één
+  hart kan wel (sinds 3.0.3 telt een kooi niet als core): de switcher
+  bewaart sinds 02-10 f0..f31 en `fcsr`, en de kill-tick is op een gedeeld
+  hart de tijdschijf (10 ms), de enige preemptie in HopOS
+  (`tools/qemu-riscv-test-share.sh`).
 - De kern-flip op riscv64: de `FLIP_*`-getallen staan in de boards zodat de
   lijm bouwt, de sprong (`cpu::el2::chain`) is arm64; `RvCage::adopt`
   weigert.

@@ -605,6 +605,13 @@ pub const CTX_SMP: u64 = 768;
 /// De maat van het hele ctx-blok. FP staat er bewust niet in: de laag die
 /// de kern bezit draait met de MMU uit en een SIMD-store naar Device faultt.
 pub const CTX_LEN: u64 = 1024;
+/// De FP-registers van een bewoner op riscv64, in de kier achter het
+/// ctx-blok (vóór [`SMP_CTX_OFF`]): f0..f31 en `fcsr`, 33 woorden. De
+/// riscv-switcher bewaart ze bij een yield en een tijdschijf en zet ze
+/// terug bij het hervatten; een gedeeld hart draagt sinds 02-10 meer dan één
+/// bewoner. ARM gebruikt dit niet (de kern-laag daar heeft de MMU uit).
+pub const CTX_FPRS: u64 = CTX_LEN;
+const _: () = assert!(CTX_OFF + CTX_FPRS + 33 * 8 <= SMP_CTX_OFF);
 
 /// De toestand van een ctx-blok ([`CTX_STATE`]). De kern schrijft `Empty`,
 /// `BootPending` en `Running`; de switcher `Running`, `Saved` en `Dead`.
