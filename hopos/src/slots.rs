@@ -621,6 +621,7 @@ async fn place_hop(
         dns: crate::net::uplink_dns(),
         port: HOP_PORT,
         app_cores: plan.app_cores(),
+        hop_on_os: arch::SHARES_OS_CORE,
         pool_bytes,
         hop_mem: HOP_MEM,
     };
