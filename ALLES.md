@@ -193,6 +193,15 @@ node heeft er nog geen gedraaid.
 
 ## Overal
 
+- [ ] **De boot-stack van 256 KB heeft 43 KB marge** (02-10, na de
+      display-regressie): setup draagt alle start-functies inline, en de
+      grootste tijdelijke waarden zijn de future van gui::usb::run (123 KB:
+      Manager 61 KB plus de bring_up-future 59 KB, twee kopieën) en het
+      FsActor-blok in storage.rs (85 KB). Die op de heap zetten zoals de
+      Lifecycle nu, en een wachtpost in qemu-test.sh (rood als stack_kb bij
+      HOPOS_TICK 1 boven 224 KB komt), anders breekt de volgende opruiming
+      dit weer stil.
+
 De leesreview van 01-10 (wat weg kan, wat simpeler kan, wat goed is, met
 de fouten die erbij gevonden zijn) staat in docs/review-2026-10-01.md.
 
