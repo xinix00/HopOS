@@ -1983,14 +1983,24 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             cores: st.cage.cores,
             at_ns: st.cage.at_ns,
         };
-        let b = info.encode();
-        let max = data.len();
-        let dst = data
-            .get_mut(..b.len())
-            .ok_or(Error::TooLarge { len: b.len(), max })?;
-        dst.copy_from_slice(&b);
-        Ok((0, b.len()))
+        fit_info(&info.encode(), data)
     }
+}
+
+/// Het SlotInfo in de buffer van de lezer: heel, of het voorvoegsel van
+/// [`abi::systemapi::SLOT_INFO_LEN_V1`] bytes voor een Hop van vóór het
+/// gebruik per taak (die leest met een buffer van 64; de kern mag hem niet
+/// breken, want de Hop van de kaart overleeft een kern-flip). Korter is
+/// een fout.
+fn fit_info(b: &[u8; abi::systemapi::SLOT_INFO_LEN], data: &mut [u8]) -> Answer {
+    let max = data.len();
+    let n = b.len().min(max);
+    let (dst, src) = match (data.get_mut(..n), b.get(..n)) {
+        (Some(d), Some(s)) if n >= abi::systemapi::SLOT_INFO_LEN_V1 => (d, s),
+        _ => return Err(Error::TooLarge { len: b.len(), max }.into()),
+    };
+    dst.copy_from_slice(src);
+    Ok((0, n))
 }
 
 /// De som van een FLIP: 32 rauwe bytes, of 64 hex-tekens (de client van
@@ -2407,6 +2417,24 @@ mod tests {
 
     fn op(o: PrivOp, seq: u32, slot: u64, n: u64) -> Vec<u8> {
         enc(&plain_req(o, seq, slot, n))
+    }
+
+    #[test]
+    fn an_older_hop_gets_the_slot_info_prefix() {
+        let full = SlotInfo {
+            partition: 8 * MIB,
+            ..SlotInfo::default()
+        }
+        .encode();
+        let mut wide = [0u8; abi::systemapi::SLOT_INFO_LEN + 8];
+        assert_eq!(fit_info(&full, &mut wide).unwrap().1, abi::systemapi::SLOT_INFO_LEN);
+        // De buffer van Hop tot v3.0.3: het voorvoegsel, en dat decodeert daar.
+        let mut old = [0u8; abi::systemapi::SLOT_INFO_LEN_V1];
+        assert_eq!(fit_info(&full, &mut old).unwrap().1, abi::systemapi::SLOT_INFO_LEN_V1);
+        assert_eq!(old[..], full[..abi::systemapi::SLOT_INFO_LEN_V1]);
+        // Korter dan dat is een fout, geen half antwoord.
+        let mut tiny = [0u8; 32];
+        assert!(fit_info(&full, &mut tiny).is_err());
     }
 
     /// Een antwoord: (op, status, seq, size, data).
