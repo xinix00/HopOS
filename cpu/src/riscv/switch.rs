@@ -167,6 +167,13 @@ pub fn code_range() -> (u64, u64) {
 /// parkeerlus van het postvak. Positie-onafhankelijk, op het adres van
 /// `_start` na: dat is een woord in de stub, en het koude adres van elke
 /// kern van dit board.
+///
+/// Een hart zonder bel (`SCHED_MSIP_PA` 0: de C906B van de LicheeRV, die
+/// ook geen resetblok heeft) kan niet slapen op een `msip` en mag niet
+/// naar `_start` (daar loopt de loterij van het board, die hem voor de
+/// C906L zou houden). Het pollt zijn eigen woord, de regel vers uit DRAM,
+/// tot de nieuwe kern er een andere ingang in zet (`boot::reset_pc`, met
+/// het hart-id in `set_reset_hart`), wist het woord en springt daarheen.
 #[must_use]
 pub fn off_stub() -> Option<&'static [u8]> {
     imp::off_stub()
@@ -1028,14 +1035,15 @@ __hopos_mmode_end:
 __hopos_rv_off:
     csrw mie, zero
     HOPOS_RV_CIALL
-    ld t0, {msip}(sp)
-    beqz t0, 1f
-    sw zero, 0(t0)
+    ld t2, {msip}(sp)
+    beqz t2, 1f
+    sw zero, 0(t2)
 1:  lla t1, __hopos_rv_off
     sd t1, {mbox}(sp)
     fence
     HOPOS_RV_CPA sp
     HOPOS_RV_SYNC
+    beqz t2, 4f
     li t0, 8
     csrw mie, t0
 2:  wfi
@@ -1045,6 +1053,24 @@ __hopos_rv_off:
     csrw mie, zero
     lla t0, 3f
     ld t0, 0(t0)
+    fence.i
+    jr t0
+    // Geen bel: pollen op het eigen woord (10 000 tikken pauze, dan de
+    // regel vers) tot er een andere ingang in staat.
+4:  rdtime t3
+    li t4, 10000
+    add t3, t3, t4
+5:  rdtime t4
+    bltu t4, t3, 5b
+    HOPOS_RV_CIPA sp
+    HOPOS_RV_SYNC
+    ld t0, {mbox}(sp)
+    beq t0, t1, 4b
+    beqz t0, 4b
+    sd zero, {mbox}(sp)
+    fence
+    HOPOS_RV_CPA sp
+    HOPOS_RV_SYNC
     fence.i
     jr t0
     .balign 8

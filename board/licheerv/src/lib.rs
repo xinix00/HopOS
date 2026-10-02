@@ -16,11 +16,15 @@
 //! RTCCLK   25 MHz        de timebase van de TIME-CSR
 //! ```
 //!
-//! Twee harts: hart 0 is de C906B (1 GHz, de firmware-core, hier de kern),
-//! hart 1 de C906L (700 MHz, het app-hart). De C906L komt via het resetblok
-//! op ([`LicheeRv::start_little`]): reset vast, boot-vector zetten, reset los.
-//! De Go-lottery (de kern verhuist naar de kleine core) is niet geport: de
-//! kern blijft op hart 0 (docs/boards-riscv.md).
+//! Twee harts, genoemd zoals het resetblok ze noemt (beide lezen `mhartid`
+//! 0): hart 0 is de C906B (1 GHz, de firmware-core), hart 1 de C906L
+//! (700 MHz). De kern hoort op de C906L en de apps op de C906B, zoals in Go
+//! (`HopCore = 1`): dat regelt de loterij vóór de boot-stub ([`lottery`]).
+//! De C906L komt via het resetblok op ([`LicheeRv::start_little`]): reset
+//! vast, boot-vector zetten, reset los; de C906B heeft geen resetblok en
+//! parkeert in het postvak van de boot-stub tot de kooi hem adopteert. Gaf
+//! de C906L bij boot geen levensteken, dan bleef de kern op de C906B en is
+//! de C906L het app-hart ([`lottery::State::Rescued`]).
 //!
 //! Wat hier NIET is: een hardware-TRNG (luid, `cpu::riscv::trng`) en een
 //! SD-driver (geen opslag; hopfs draait zonder schijf).
@@ -38,6 +42,7 @@
 
 pub mod cfg;
 mod ephy;
+pub mod lottery;
 pub mod slots;
 pub mod watchdog;
 
@@ -110,8 +115,10 @@ const SEC_SYS_CTRL: Pa = Pa(0x020B_0004);
 const SEC_SYS_VEC_LO: Pa = Pa(0x020B_0020);
 const SEC_SYS_VEC_HI: Pa = Pa(0x020B_0024);
 
-/// Het app-hart.
+/// De C906L, het hart met het resetblok.
 pub const HART_LITTLE: usize = 1;
+/// De C906B, de firmware-core: geen resetblok, parkeert.
+pub const HART_BIG: usize = 0;
 
 // SAFETY: de DW-APB-16550 van de SG2002 met 32-bit-stride; in machine mode
 // altijd bereikbaar, en de FSBL zette hem op 115200.
@@ -157,17 +164,25 @@ impl LicheeRv {
         Self
     }
 
-    /// Het hart waar dit draait.
+    /// Het hart waar de kern draait: `mhartid` zegt het niet (beide cores
+    /// lezen 0), de uitkomst van de loterij wel.
     #[must_use]
     pub fn this_core(&self) -> usize {
-        csr::mhartid() as usize
+        lottery::os_hart()
     }
 
-    /// De OS-core: hart 0. De lottery van de Go-kern (de kern naar de kleine
-    /// core) is niet geport; een `hopos.oscore` is er dus niet.
+    /// De OS-core: het hart van de kern. De verhuizing deed de loterij al
+    /// vóór de boot-stub; een `hopos.oscore` is er niet.
     #[must_use]
     pub fn os_core(&self) -> (usize, Option<&'static str>) {
-        (0, None)
+        (self.this_core(), None)
+    }
+
+    /// De index van dit hart in zijn CLINT: altijd 0, want de CLINT is per
+    /// core en beide cores noemen zichzelf hart 0 (gemeten 01-08, boot 8).
+    #[must_use]
+    pub const fn clint_hart(&self) -> usize {
+        0
     }
 
     /// De bel van de arm64-rotatie: een stub, zie `board-qemuvirt-riscv`.
@@ -183,7 +198,7 @@ impl LicheeRv {
 
     /// De kick naar dit hart zelf.
     pub fn kick_self(&self) {
-        CLINT_DEV.set_msip(self.this_core(), true);
+        CLINT_DEV.set_msip(self.clint_hart(), true);
     }
 
     /// De CLINT van dit board.
@@ -200,49 +215,43 @@ impl LicheeRv {
     }
 
     /// Wat de kooi van app-hart `hart` moet weten (Go,
-    /// board/licheerv/hop/hart.go `HartTimer`). Het app-hart is de C906L:
+    /// board/licheerv/hop/hart.go `HartTimer`), voor beide harts:
     ///
     /// - de CLINT is per core en beide cores noemen zichzelf hart 0
-    ///   (gemeten 01-08, boot 8): er is GEEN bel van de kern naar de C906L,
-    ///   en zijn comparator is voor hem `mtimecmp(0)`;
-    /// - "alle stille doden staan op naam van de C906L" (01-08, de
-    ///   wfi-klasse): slapen op zijn wekker is daar nooit bewezen, dus de
-    ///   switcher spint (slaapgrens 0);
-    /// - wel de kill-tick op zijn eigen comparator (`mtimecmp(0)`, de
-    ///   CLINT-decode is per core): de tick schrijft alleen de comparator en
-    ///   vuurt terwijl een bewoner draait, nooit een `wfi` (Go, hart.go: "wat
-    ///   stierf was een wfi"; de wek-keten zelf is op dit hart bewezen). Hij
-    ///   is de tijdschijf van het gedeelde hart (alle apps wonen hier) en de
-    ///   intrekking zonder de buren mee te resetten;
-    /// - het resetblok blijft er voor de herstart (reset vast wist ook zijn
-    ///   PMP, gemeten 30-07).
-    ///
-    /// Wie de C906L wil laten slapen, probet eerst zijn `wfi` op dat hart in
-    /// een soak en zet dan een slaapgrens hier (docs/boards-riscv.md).
+    ///   (gemeten 01-08, boot 8): er is GEEN bel tussen de harts, en de
+    ///   comparator van elk hart is voor hemzelf `mtimecmp(0)`;
+    /// - de kill-tick op die comparator: hij schrijft alleen de comparator
+    ///   en vuurt terwijl een bewoner draait, nooit een `wfi` (Go, hart.go:
+    ///   "wat stierf was een wfi"). Hij is de tijdschijf van het gedeelde
+    ///   hart (alle apps wonen op één hart) en op de C906B, zonder
+    ///   resetblok, het enige mes;
+    /// - slapen: "alle stille doden staan op naam van de C906L" (01-08, de
+    ///   wfi-klasse), en de C906B droeg in Go twee weken productie-`wfi`.
+    ///   De switcher spint op allebei (slaapgrens 0) tot een soak op dít
+    ///   silicium met déze switcher het anders bewijst (docs/boards-riscv.md);
+    /// - het resetblok alleen op de C906L (reset vast wist ook zijn PMP,
+    ///   gemeten 30-07); de C906B wordt nooit gereset (geen boot-vector-
+    ///   override, zie Go hart.go).
     #[must_use]
     pub fn app_hart(&self, hart: usize) -> cpu::riscv::switch::AppHart {
-        let little = hart == HART_LITTLE;
         cpu::riscv::switch::AppHart {
-            mtimecmp: if little { CLINT_DEV.mtimecmp(0) } else { Pa(0) },
+            mtimecmp: CLINT_DEV.mtimecmp(0),
             msip: Pa(0),
             // Geen bel naar de kern: de CLINT is per core (de mailbox van de
             // CV181x is de kandidaat, op ijzer te bewijzen).
             kick: Pa(0),
             sleep_cap: 0,
-            tick: if little {
-                cpu::riscv::idle::ns_to_ticks(cpu::riscv::switch::KILL_TICK_NS, TIMEBASE_HZ)
-            } else {
-                0
-            },
+            tick: cpu::riscv::idle::ns_to_ticks(cpu::riscv::switch::KILL_TICK_NS, TIMEBASE_HZ),
             attrs: cpu::riscv::sv39::Attrs::Thead,
             pmp: cpu::riscv::pmp::C906,
-            resettable: little,
+            resettable: hart == HART_LITTLE,
         }
     }
 
     /// Brengt app-hart `hart` naar de parkeerlus van de boot-stub: de C906L
     /// uit reset op de reset-ingang, met zijn logische hart-id erbij (zijn
-    /// `mhartid` leest 0, net als dat van de C906B).
+    /// `mhartid` leest 0, net als dat van de C906B). De C906B staat er al
+    /// sinds de loterij en leest zijn postvak zelf.
     pub fn start_app_hart(&self, hart: usize) {
         if hart == HART_LITTLE {
             cpu::riscv::boot::set_reset_hart(hart);
@@ -338,12 +347,30 @@ impl Board for LicheeRv {
     }
 
     fn firmware(&self) -> &'static str {
-        "boot: LicheeRV Nano (SG2002), machine mode monitor from the FIP (no SBI), app hart 1 (C906L)"
+        match lottery::state() {
+            lottery::State::Swapped => {
+                "boot: LicheeRV Nano (SG2002), machine mode monitor from the FIP (no SBI), the kern on hart 1 (C906L), app hart 0 (C906B)"
+            }
+            _ => {
+                "boot: LicheeRV Nano (SG2002), machine mode monitor from the FIP (no SBI), the kern on hart 0 (C906B), app hart 1 (C906L)"
+            }
+        }
     }
 
     fn discover(&self, _dtb: u64) {
         cpu::riscv::idle::set_hz(TIMEBASE_HZ);
-        match CLINT_DEV.probe(self.this_core(), csr::rdtime()) {
+        match lottery::state() {
+            lottery::State::Swapped => cpu::println!(
+                "lottery: the kern runs on the C906L (hart 1, 700 MHz), the C906B (hart 0, 1 GHz) is the app hart HOPOS_LOTTERY_SWAPPED"
+            ),
+            lottery::State::Rescued => cpu::println!(
+                "lottery: the C906L gave no sign of life within 10 s, the kern stays on the C906B and the C906L is the app hart HOPOS_LOTTERY_RESCUED"
+            ),
+            lottery::State::None => cpu::println!(
+                "lottery: no lottery block on the boot scratch, the kern stays on the C906B HOPOS_LOTTERY_NONE"
+            ),
+        }
+        match CLINT_DEV.probe(self.clint_hart(), csr::rdtime()) {
             Ok(()) => {
                 CLINT_OK.store(true, Relaxed);
                 cpu::println!("board: CLINT: mtimecmp writable, the kern sleeps on it (wfi)");
@@ -384,9 +411,18 @@ impl Board for LicheeRv {
         cpu::riscv::idle::now
     }
 
+    /// De slaap van de kern: op de C906L pollen (daar is een `wfi` nooit
+    /// bewezen en tweemaal een stille dood geweest, Go 01-08 en 17-08; Go's
+    /// HOP sliep er ook niet), op de C906B de `wfi` op de wekker (twee weken
+    /// productie in Go, 30-07 tot 16-08).
     fn sleeper(&self) -> Self::Sleeper {
         let clint = CLINT_OK.load(Relaxed).then_some(CLINT_DEV);
-        cpu::riscv::idle::RvSleeper::new(clint, self.this_core())
+        let s = cpu::riscv::idle::RvSleeper::new(clint, self.clint_hart());
+        if self.this_core() == HART_LITTLE {
+            s.polling()
+        } else {
+            s
+        }
     }
 
     fn mem_total(&self) -> u64 {
@@ -424,7 +460,7 @@ impl Board for LicheeRv {
     fn dispatch_interrupts(&self) -> Dispatched {
         let mut d = Dispatched::default();
         cpu::riscv::trap::take_irq();
-        CLINT_DEV.set_msip(self.this_core(), false);
+        CLINT_DEV.set_msip(self.clint_hart(), false);
         while let Some(l) = PLIC_DEV.claim() {
             // Niemand heeft een lijn: de dwmac pollt. Wat vuurt, gaat uit.
             PLIC_DEV.disable(l);
@@ -507,15 +543,21 @@ mod tests {
     }
 
     #[test]
-    fn the_little_core_ticks_but_spins() {
-        let t = LicheeRv::new().app_hart(HART_LITTLE);
-        // Zijn eigen comparator (index 0, de CLINT is per core), 10 ms op
-        // 25 MHz, en geen slaap: de tick wel, de `wfi` niet.
-        assert_eq!(t.mtimecmp, Pa(0x7400_4000));
-        assert_eq!(t.tick, 250_000);
-        assert_eq!(t.sleep_cap, 0);
-        assert_eq!(t.msip, Pa(0));
-        assert_eq!(t.kick, Pa(0));
-        assert!(t.resettable);
+    fn both_harts_tick_on_their_own_comparator_and_spin() {
+        let b = LicheeRv::new();
+        for hart in [HART_BIG, HART_LITTLE] {
+            let t = b.app_hart(hart);
+            // De eigen comparator (index 0, de CLINT is per core), 10 ms op
+            // 25 MHz, geen bel en geen slaap: de tick wel, de `wfi` niet.
+            assert_eq!(t.mtimecmp, Pa(0x7400_4000));
+            assert_eq!(t.tick, 250_000);
+            assert_eq!(t.sleep_cap, 0);
+            assert_eq!(t.msip, Pa(0));
+            assert_eq!(t.kick, Pa(0));
+        }
+        // Alleen de C906L heeft het resetblok.
+        assert!(b.app_hart(HART_LITTLE).resettable);
+        assert!(!b.app_hart(HART_BIG).resettable);
+        assert_eq!(b.clint_hart(), 0);
     }
 }

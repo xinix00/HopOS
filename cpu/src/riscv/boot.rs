@@ -18,6 +18,15 @@
 //! deze generatie: onder OpenSBI zou het SBI HSM `hart_start` zijn, maar
 //! machine mode heeft niemand onder zich om het aan te vragen.
 //!
+//! Drie ingangen, en `s3` zegt welke: `_start` (-1, het boot-hart of een
+//! hart dat QEMU op `mhartid` laat beginnen), [`reset_pc`] (0, een hart
+//! dat de kern zelf uit reset haalt en zijn id uit [`set_reset_hart`]
+//! leest) en, met de feature `lottery`, de terugkeer uit de loterij van het
+//! board (1: de boot-core parkeert als hart 0 zonder bel en pollt zijn
+//! postvak, de regel vers uit DRAM). De loterij zelf is board-code
+//! (`board-licheerv/lottery`): `_start` springt er als eerste heen, en ze
+//! komt terug op `__hopos_stubenter` met `s3` gezet.
+//!
 //! Het linkcontract (`hopos/link-riscv.ld`): `__stack_top`, `__bss_start`,
 //! `__bss_end` (8-gealigneerd), `__hopos_trap` ([`super::trap`]) en
 //! `kmain`: `extern "C" fn(dtb: u64, mode: u64) -> !`.
@@ -229,6 +238,57 @@ macro_rules! thead_regime {
     };
 }
 
+// De eerste sprong van `_start`: met `lottery` naar de loterij van het
+// board (die komt terug op `__hopos_stubenter`), anders meteen de stub in.
+#[cfg(all(feature = "lottery", target_arch = "riscv64", target_os = "none"))]
+macro_rules! first_jump {
+    () => {
+        r#"
+    la t0, __hopos_lottery
+    jr t0
+"#
+    };
+}
+#[cfg(all(not(feature = "lottery"), target_arch = "riscv64", target_os = "none"))]
+macro_rules! first_jump {
+    () => {
+        "    j 10f\n"
+    };
+}
+
+// Het wachten van de parkeerlus tussen twee blikken in het postvak. Zonder
+// bel (`lottery`: de SG2002 heeft geen IPI tussen zijn harts) een pauze van
+// 10 000 tikken (400 µs op 25 MHz, de poll-pauze van Go's loterij) en dan
+// de regel van het postvak vers uit DRAM (`th.dcache.cipa` plus
+// `th.sync.is`: de cores zijn niet coherent); anders een `wfi` die de
+// `msip` van [`start_hart`] wekt.
+#[cfg(all(feature = "lottery", target_arch = "riscv64", target_os = "none"))]
+macro_rules! park_wait {
+    () => {
+        r#"
+21: rdtime t4
+    li t5, 10000
+    add t4, t4, t5
+24: rdtime t5
+    bltu t5, t4, 24b
+23: la t1, {entry}
+    add t1, t1, s2
+    .insn r 0x0b, 0, 1, x0, t1, x11
+    .4byte 0x01b0000b
+"#
+    };
+}
+#[cfg(all(not(feature = "lottery"), target_arch = "riscv64", target_os = "none"))]
+macro_rules! park_wait {
+    () => {
+        r#"
+21: wfi
+23: la t1, {entry}
+    add t1, t1, s2
+"#
+    };
+}
+
 // De stub. s0 = hart-id, s1 = DTB (a1 van QEMU of de FSBL).
 //
 // Secundaire harts: MSIE aan en MIE uit, dus een `msip` wekt de `wfi`
@@ -241,12 +301,17 @@ core::arch::global_asm!(
     .global _start
 _start:
     li s3, -1
-    j 10f
+"#,
+    first_jump!(),
+    r#"
     // De reset-ingang: hetzelfde regime, maar het hart-id uit RESET_HART
     // en altijd de parkeerlus in (zie `reset_pc`).
     .global __hopos_resetenter
 __hopos_resetenter:
     li s3, 0
+    // De terugkeer uit de loterij van het board, met s3 gezet.
+    .global __hopos_stubenter
+__hopos_stubenter:
 10:
     csrw mie, zero
     la t0, __hopos_trap
@@ -259,7 +324,11 @@ __hopos_resetenter:
     csrr s0, mhartid
     mv s1, a1
     bltz s3, 11f
-    la t0, {reset}
+    beqz s3, 12f
+    // Uit de loterij (s3 = 1): de boot-core parkeert als hart 0.
+    li s0, 0
+    j 20f
+12: la t0, {reset}
     ld s0, 0(t0)
     j 20f
 11:
@@ -289,9 +358,9 @@ __hopos_resetenter:
     // ingang al in het postvak. Een bel ná de toets staat pending en laat
     // de `wfi` meteen terugkeren.
     j 23f
-21: wfi
-23: la t1, {entry}
-    add t1, t1, s2
+"#,
+    park_wait!(),
+    r#"
     ld t3, 0(t1)
     beqz t3, 21b
     sd zero, 0(t1)

@@ -26,7 +26,8 @@ firmware: dan is er geen kooi, en `kmain` weigert net als "HopOS eist EL2" op
 ARM (`board.privilege(3)`). SBI HSM voor de harts is daarmee ook geen weg: in
 machine mode is er niemand onder ons om het te vragen. Een hart start via de
 parkeerlus van de boot-stub (`cpu::riscv::boot::start_hart`: postvak plus
-`msip`) of, op de LicheeRV, via het resetblok van de C906L.
+`msip`) of, op de LicheeRV, via het resetblok van de C906L; de C906B van
+de LicheeRV heeft geen bel en geen resetblok en pollt zijn postvak.
 
 De tabel ARM naar RISC-V (`cpu/src/riscv/mod.rs`):
 
@@ -37,7 +38,8 @@ EL1-app                 supervisor mode      (een slot)
 HVC-yield               ecall-yield          (a0 = wektijd, a7 = 0/1)
 stage-2 (VTTBR)         Sv39 (satp) + PMP    (verplaatsen + begrenzen)
 ERET                    mret
-PSCI CPU_ON             msip op een geparkeerd hart; resetblok op de C906L
+PSCI CPU_ON             msip op een geparkeerd hart; resetblok op de C906L;
+                        de C906B pollt zijn postvak
 GIC                     PLIC + CLINT
 ```
 
@@ -304,20 +306,40 @@ zet hem; HopOS doet geen init). Bouw met
    invalidate die een CPU-schrijf weggooit), en de dwmac legt daarom alles op
    eigen cachelines.
 10. **Geen opslag**: `disk: none` is juist; er is geen SD-driver.
-11. **De C906L**: `cage: hart 1 (core 1) in the switcher: wake 0x74004000,
-    bell 0x0, sleep cap 0 ticks, kill tick 250000 ticks, reset true
-    HOPOS_RV_HART_UP`. De
-    kern haalt hem uit reset op de reset-ingang (`reset_pc`: zijn `mhartid`
-    leest 0, net als dat van de C906B, gemeten 01-08), hij neemt het
-    T-Head-regime (I-cache aan: anders ~77x trager, gemeten 18-08) en gaat
-    de switcher in. Hij SPINT (geen slaap): slapen op zijn comparator is op
-    dit hart nooit bewezen (de stille doden van 01-08 waren een `wfi`), en
-    er is geen bel van de kern naar hem (de CLINT is per core). Zijn
-    comparator (`mtimecmp(0)`, per core) draagt wel de kill-tick van 10 ms:
-    die vuurt alleen terwijl een bewoner draait en is de tijdschijf van de
-    apps die dit ene hart delen. Op ijzer te zien: `tools/qemu-riscv-test-share.sh`
-    op QEMU, en op het board een `BURN=1` naast welcome die op :80 blijft
-    antwoorden.
+11. **De loterij** (`board/licheerv/src/lottery.rs`, Go's cpuinit): de
+    FSBL start het image op de C906B (1 GHz), maar de kern hoort op de
+    C906L (700 MHz) zodat de apps de grote core krijgen (Go `HopCore = 1`).
+    Het allereerste op `_start`, met de D-cache uit: de C906B zet de C906L
+    in reset, de boot-vector op `_start` met de override aan, laat hem los
+    en wacht op een levensteken op de boot-scratch (+88); de C906L herkent
+    zichzelf aan die override (beide lezen `mhartid` 0) en boot als de
+    kern. Dan parkeert de C906B als app-hart 0 in het postvak van de
+    boot-stub, pollend met `th.dcache.cipa` (geen bel op dit silicium).
+    Op de console: `lottery: the kern runs on the C906L (hart 1, 700 MHz),
+    the C906B (hart 0, 1 GHz) is the app hart HOPOS_LOTTERY_SWAPPED`, dan
+    `the kern on hart 1 (C906L), app hart 0 (C906B)` in de boot-regel. Blijft
+    het levensteken tien seconden uit: de C906L terug in reset en de C906B
+    boot zelf als de kern, `HOPOS_LOTTERY_RESCUED` (de oude rolverdeling,
+    de C906L als app-hart via het resetblok): een mislukte wissel is een
+    console-regel, geen baksteen. `HOPOS_LOTTERY_NONE`: geen loterij-blok,
+    dat hoort niet. De kern pollt op de C906L in plaats van `wfi`
+    (`RvSleeper::polling`, de stille doden van 01-08 en 17-08 waren een
+    `wfi`); zijn CLINT-index is 0 (één CLINT per core), de rotatie van de
+    OS-core met Hop blijft.
+12. **Het app-hart**: `cage: hart 0 (core 1) in the switcher: wake
+    0x74004000, bell 0x0, sleep cap 0 ticks, kill tick 250000 ticks, reset
+    false HOPOS_RV_HART_UP`. De C906B haalt zijn eerste werk uit het
+    postvak (na een zelfredding: de C906L, `reset true`, uit reset op de
+    reset-ingang). Elk hart neemt het T-Head-regime (I-cache aan: anders
+    ~77x trager, gemeten 18-08) en gaat de switcher in. Hij SPINT (geen
+    slaap): op de C906L is slapen nooit bewezen, de C906B droeg in Go twee
+    weken `wfi` maar niet met deze switcher; er is geen bel van de kern
+    naar hem (de CLINT is per core). Zijn comparator (`mtimecmp(0)`, per
+    core) draagt de kill-tick van 10 ms: die vuurt alleen terwijl een
+    bewoner draait, is de tijdschijf van de apps die dit ene hart delen en
+    op de C906B (geen resetblok) het enige mes. Op ijzer te zien:
+    `tools/qemu-riscv-test-share.sh` op QEMU, en op het board een `BURN=1`
+    naast welcome die op :80 blijft antwoorden.
 12. **appspike, twee keer**: `HOPOS_RV_DISPATCH` met "picked up by the
     spinning switcher", `HOPOS_SLOT_START slot=1 core=1 cpu=1`, dan de regels
     van de app. Verwacht `HOPOS_APPSPIKE_DONE pass=8 fail=1`: de FS-toets
@@ -352,9 +374,13 @@ Zonder `CFG=` krijgt de nieuwe kern het config-venster van de draaiende
 (`HOPOS_FLIP_CFG`). Op de console (TCP 5555 of de UART), in volgorde:
 `HOP_FLIP_COLD_STOP`, `HOPOS_FLIP_COLD_ASKED`, `HOPOS_FLIP_CFG`,
 `HOPOS_FLIP_STAGED ... staged at 0x86900000, cold`, `HOPOS_FLIP_COLD
-stopped=N cores_off=1` (de C906L in reset), `HOPOS_FLIP_JUMP gen=G`, dan de
-bunny, `HOPOS_FLIP_BOOT gen=G HOPOS_FLIP_COLD_BOOT`, `HOPOS_BOOT gen=G
-stamp=<naam>`, `HOPOS_RV_HART_UP` met `reset true` (de C906L uit reset),
+stopped=N cores_off=1` (de C906B in de uit-stub; na een zelfredding de
+C906L in reset), `HOPOS_FLIP_JUMP gen=G`, dan de bunny, `HOPOS_FLIP_BOOT
+gen=G HOPOS_FLIP_COLD_BOOT`, `HOPOS_BOOT gen=G stamp=<naam>`,
+`HOPOS_LOTTERY_SWAPPED` (de nieuwe kern komt op de C906L `_start` in en
+herkent zichzelf aan de vector-override), `HOPOS_RV_OFF_LEAVE` (de C906B
+krijgt in zijn sched-blok de parkeer-ingang van de nieuwe kern, want
+`_start` is van de loterij), `HOPOS_RV_HART_UP`,
 `HOPOS_HOP_START`, `HOP_UP` en `HOPOS_FLIP_SETTLED`. De TCP-console valt
 weg met de sprong en komt terug na DHCP; wat ertussen gebeurt staat alleen
 op de UART (er is op riscv64 nog geen zwarte doos).
@@ -396,7 +422,8 @@ watchdog of de stroom, en de kaart start de oude kern.
 - De warme kern-flip op riscv64: de switch-code draait uit het kern-image
   (op arm64 staat een kopie in de plan-regio), dus `RvCage::adopt` weigert
   en de flip is alleen koud. Een zwarte doos voor riscv64 ook niet.
-- De LicheeRV: slapen op de C906L (de comparator staat sinds 02-10 voor
-  de tick; een soak met `wfi` op dat hart, dan een slaapgrens in
-  `app_hart`), en een
-  SD-driver (dan `hopos.cfg` naast `fip.bin` in plaats van in het image).
+- De LicheeRV: slapen in de switcher (de C906B droeg in Go twee weken
+  `wfi`; een soak met deze switcher, dan een slaapgrens in `app_hart`), de
+  loterij op ijzer (03-10: alleen op QEMU-vrije logica gebouwd, de
+  zelfredding is het vangnet), en een SD-driver (dan `hopos.cfg` naast
+  `fip.bin` in plaats van in het image).

@@ -229,6 +229,13 @@ impl QemuVirtRiscv {
         CLINT_DEV.set_msip(self.this_core(), true);
     }
 
+    /// De index van dit hart in de CLINT: op virt is de CLINT gedeeld en
+    /// is dat het hart-id (de LicheeRV heeft er een per core: daar 0).
+    #[must_use]
+    pub fn clint_hart(&self) -> usize {
+        self.this_core()
+    }
+
     /// De CLINT van dit board.
     #[must_use]
     pub const fn clint(&self) -> Clint {

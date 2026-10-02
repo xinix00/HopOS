@@ -55,8 +55,8 @@ const _: () = assert!(FLIP_TRAMP_PA + 0x1000 <= NODE_CTRL_PA);
 const _: () = assert!(NODE_CTRL_PA + 3 * 0x1000 <= CAGE_PA);
 const _: () = assert!(CAGE_PA + 3 * abi::layout::CAGE_STRIDE <= STAGE_HDR_PA);
 
-/// Het PA-plan: hart 0 (de C906B) is de kern, hart 1 (de C906L) het
-/// app-hart; twee kooien (Hop en één app).
+/// Het PA-plan: de kern op `os_core` (hart 1, de C906L, na de loterij;
+/// hart 0 na een zelfredding), het andere hart het app-hart.
 pub fn plan(cores: usize, os_core: usize) -> abi::Result<Plan> {
     let app_cores = cores.saturating_sub(1).max(1);
     Plan::new(PlanSpec {
@@ -153,5 +153,9 @@ mod tests {
     fn the_plan_fits_the_tail() {
         let p = super::plan(2, 0).unwrap();
         assert_eq!(p.app_cores(), 1);
+        // Na de loterij: de kern op hart 1, app-core 1 is fysiek hart 0.
+        let p = super::plan(2, 1).unwrap();
+        assert_eq!((p.app_cores(), p.os_core()), (1, 1));
+        assert_eq!(p.phys_core(abi::layout::Core::new(1).unwrap()), 0);
     }
 }

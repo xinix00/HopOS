@@ -76,6 +76,9 @@ pub struct RvSleeper {
     clint: Option<Clint>,
     hart: usize,
     cap_ns: u64,
+    /// `false`: de wekker wapent wel (de OS-core-rotatie heeft hem nodig)
+    /// maar de kern pollt tot de deadline in plaats van een `wfi`.
+    wfi: bool,
     os: Option<OsCore>,
     /// De meetlat.
     pub stats: Stats,
@@ -91,9 +94,21 @@ impl RvSleeper {
             clint,
             hart,
             cap_ns: WFI_CAP_NS,
+            wfi: true,
             os: None,
             stats: Stats::default(),
         }
+    }
+
+    /// Pollen in plaats van `wfi`, voor een hart waar een `wfi` niet
+    /// bewezen is maar de wekker wel (de C906L van de LicheeRV: "wat stierf
+    /// was een wfi", Go 01-08 en 17-08). De OS-core-rotatie blijft; alleen
+    /// de slaap van de kern zelf spint tot de deadline of een pending
+    /// interrupt (de interrupts staan dicht, `mip` toont ze).
+    #[must_use]
+    pub const fn polling(mut self) -> Self {
+        self.wfi = false;
+        self
     }
 
     /// Een andere vangrail dan [`WFI_CAP_NS`], voor een board dat bewezen
@@ -130,11 +145,17 @@ impl RvSleeper {
         let u = until.map_or(cap, |u| u.min(cap));
         let start = csr::rdtime();
         let deadline = start.saturating_add(ns_to_ticks(u.saturating_sub(now), hz));
-        clint.set_timecmp(self.hart, deadline);
-        csr::mie_set(csr::MIP_MTIP);
-        csr::wfi();
-        csr::mie_clear(csr::MIP_MTIP);
-        clint.set_timecmp(self.hart, NEVER);
+        if self.wfi {
+            clint.set_timecmp(self.hart, deadline);
+            csr::mie_set(csr::MIP_MTIP);
+            csr::wfi();
+            csr::mie_clear(csr::MIP_MTIP);
+            clint.set_timecmp(self.hart, NEVER);
+        } else {
+            while csr::rdtime() < deadline && csr::mip() & (csr::MIP_MEIP | csr::MIP_MSIP) == 0 {
+                core::hint::spin_loop();
+            }
+        }
         csr::rdtime().wrapping_sub(start)
     }
 }
