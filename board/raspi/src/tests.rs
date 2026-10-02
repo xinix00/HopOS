@@ -214,7 +214,8 @@ fn the_board_plan_matches_the_map() {
     assert_eq!(b.cores(), CORES_DEFAULT);
     assert!(b.probe_disk().unwrap().is_none());
     assert!(b.probe_nic().unwrap().is_none());
-    assert_eq!(b.probe_nic().err(), Some(Error::Twice("probe_nic")));
+    // Zonder NIC is er niets geclaimd: een tweede probe kijkt opnieuw.
+    assert!(b.probe_nic().unwrap().is_none());
     // Een RNG200 die de DTB uitzet, wordt niet aangeraakt: de DRBG zaait op
     // jitter, en de watchdog heeft zonder `discover` geen blok.
     rng::seed::<Fake>(Some(false));

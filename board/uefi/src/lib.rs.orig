@@ -276,8 +276,7 @@ const PCI_LOG_MAX: usize = 32;
 /// De bel van de NIC-lijn (MSI-X of INTx), zie [`Uefi::probe_nic`].
 static NIC_BELL: Signal = Signal::new();
 
-/// Leeft er een NIC uit `probe_nic`? Pas gezet na een gelukte probe: een
-/// mislukte (geen link) liet niets achter en mag opnieuw (hopos `nic_retry`).
+/// Is de NIC al geprobed? `probe_nic` mag één keer.
 static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// Is de schijf al geprobed? `probe_disk` mag één keer.
 static DISK_CLAIMED: AtomicBool = AtomicBool::new(false);
@@ -734,7 +733,7 @@ impl Board for Uefi {
     /// beide queues), anders gepold op de vangrail (`hopos.nicirq=off`
     /// kiest het tweede).
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error> {
-        if NIC_CLAIMED.load(Relaxed) {
+        if NIC_CLAIMED.swap(true, Relaxed) {
             return Err(Error::Twice("probe_nic"));
         }
         let Some((e, f, seg, root_bus)) = find_virtio(1) else {
@@ -773,7 +772,6 @@ impl Board for Uefi {
             f.bdf,
             nic.queue_size()
         );
-        NIC_CLAIMED.store(true, Relaxed);
         Ok(Some(nic))
     }
 }

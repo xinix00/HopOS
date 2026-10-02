@@ -78,9 +78,20 @@ static RESET: Local<Cell<Option<&'static str>>> = Local::new(Cell::new(None));
 /// melding. De DHCP-keeper in net.rs roept dit bij `HOPOS_DHCP_LOST`.
 /// Een aai buiten de watchdog-taak om: vlak vóór de sprong van een flip en
 /// meteen na een landing, zodat de teller van de vertrekkende kern (12 s op
-/// de Pi) niet afloopt terwijl de nieuwe kern nog boot (30-09).
+/// de Pi) niet afloopt terwijl de nieuwe kern nog boot (30-09). En vóór
+/// elke tweede probe van de NIC (main.rs `nic_retry`): die spint tot de
+/// linktermijn van het board.
 pub(crate) fn pet_now() {
     hw::pet_now();
+}
+
+/// De reset van de flip op een board zonder PSCI (`flip::reset`): de
+/// watchdog opnieuw gewapend op een kort alarm, daarna aait niemand meer
+/// (de aanroeper parkeert). Ook met `hopos.wd=off`: dit is een gevraagde
+/// reset, geen bewaking. `false` als het board er geen heeft of hij niet
+/// wapent.
+pub(crate) fn fire() -> bool {
+    hw::fire()
 }
 
 pub(crate) fn request_reset(reason: &'static str) {
@@ -322,6 +333,12 @@ mod hw {
         wd::reload_if_armed(TIMEOUT_MS);
     }
 
+    /// Wapent op een seconde voor [`super::fire`]: kort, maar ruim boven de
+    /// proef van 2 ms op de Pi's, die zelf niet de reset mag zijn.
+    pub(super) fn fire() -> bool {
+        wd::arm(1000).is_ok()
+    }
+
     impl fmt::Display for Hw {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match &self.desc {
@@ -407,6 +424,13 @@ mod hw {
         wdt::pet();
     }
 
+    /// Wapent op het kortste alarm voor [`super::fire`] (`alarm_ticks`
+    /// klemt op een seconde). Go resette hier door de pets in te houden;
+    /// dit is dezelfde weg, zonder 30 s te wachten.
+    pub(super) fn fire() -> bool {
+        wdt::arm(0).is_ok()
+    }
+
     impl fmt::Display for Hw {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match &self.desc {
@@ -462,6 +486,11 @@ mod hw {
 
     /// Geen watchdog: niets te aaien.
     pub(super) fn pet_now() {}
+
+    /// Geen watchdog: geen reset.
+    pub(super) fn fire() -> bool {
+        false
+    }
 
     impl fmt::Display for Hw {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

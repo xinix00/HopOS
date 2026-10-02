@@ -567,6 +567,11 @@ fn code_hash(begin: u64, end: u64) -> u64 {
 impl Cage for RvCage {
     fn clear(&mut self, base: u64, len: u64) {
         let Ok(n) = usize::try_from(len) else { return };
+        // Geen `dev::pull` vooraf zoals op ARM: `th.dcache.cipa` raakt alleen
+        // de cache van dit hart, en wat de vorige huurder vuil achterliet,
+        // veegde zijn eigen switcher al vóór hij Dead meldde
+        // (`HOPOS_RV_CIALL` in de teardown). Een regel in de cache van de
+        // kern zelf overschrijft `dev::clear` hieronder.
         dev::clear(Pa(base), n);
         // Naar DRAM: de nieuwe eigenaar draait op een ander hart.
         dev::push(Pa(base), n);

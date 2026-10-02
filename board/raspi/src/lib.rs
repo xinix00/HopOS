@@ -148,7 +148,8 @@ static DTB: AtomicU64 = AtomicU64::new(0);
 static MEM_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// Het aantal cores uit de DTB (of `hopos.cores`), 0 = onbekend.
 static CORES: AtomicUsize = AtomicUsize::new(0);
-/// Is de NIC al geprobed? `probe_nic` mag één keer.
+/// Leeft er een NIC uit `probe_nic`? Pas gezet na een gelukte probe: een
+/// mislukte (geen link) liet niets achter en mag opnieuw (hopos `nic_retry`).
 static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// De mailbox: één eigenaar, de executor van core 0.
 static MBOX: LocalCell<Option<Mbox>> = LocalCell::cell(None);
@@ -597,7 +598,7 @@ impl<S: Soc> Board for Raspi<S> {
     }
 
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error> {
-        if NIC_CLAIMED.swap(true, Relaxed) {
+        if NIC_CLAIMED.load(Relaxed) {
             return Err(Error::Twice("probe_nic"));
         }
         let ctx = NicCtx {
@@ -605,6 +606,10 @@ impl<S: Soc> Board for Raspi<S> {
             mac: cfg::mac_bytes(MAC.load(Relaxed), S::MAC_FALLBACK),
             clock: cpu::idle::now,
         };
-        S::probe_nic(&ctx)
+        let r = S::probe_nic(&ctx);
+        if matches!(r, Ok(Some(_))) {
+            NIC_CLAIMED.store(true, Relaxed);
+        }
+        r
     }
 }

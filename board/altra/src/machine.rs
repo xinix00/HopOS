@@ -13,6 +13,8 @@ use driver_nvme::Nvme;
 use driver_smpro::{HWMON_CHANNEL, Smpro};
 use sync::{Local, Signal};
 
+/// Leeft er een NIC uit `probe_nic`? Pas gezet na een gelukte probe: een
+/// mislukte (geen link) liet niets achter en mag opnieuw (hopos `nic_retry`).
 static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
 static DISK_CLAIMED: AtomicBool = AtomicBool::new(false);
 
@@ -177,7 +179,7 @@ impl Board for Altra {
     /// De eerste igb: BAR0, reset en MAC, ringen, dan de link. Gepold, en
     /// dat is het profiel (zie de crate-doc: de INTx doodt de SoC).
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error> {
-        if NIC_CLAIMED.swap(true, Relaxed) {
+        if NIC_CLAIMED.load(Relaxed) {
             return Err(Error::Twice("probe_nic"));
         }
         let segs = pcie::segments();
@@ -209,6 +211,7 @@ impl Board for Altra {
             hit.f.bdf,
             hit.bar
         );
+        NIC_CLAIMED.store(true, Relaxed);
         Ok(Some(nic))
     }
 }

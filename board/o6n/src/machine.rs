@@ -29,6 +29,18 @@ use sync::{Local, Signal};
 /// seconden duren (het Go-board gaf 12 s, ruimer dan de igb).
 pub const LINK_TIMEOUT_NS: u64 = 12_000_000_000;
 
+/// De linkwacht van een tweede probe (hopos `nic_retry`). Die draait met de
+/// SBSA-watchdog gewapend, en die valt op de 1 GHz-teller van de O6N op
+/// 8,6 s (`board_uefi::watchdog`); de wacht spint de executor stil, dus
+/// moet hij eronder blijven. Een autonegotiatie die langer duurt, haalt
+/// de retry niet (elke poging herstart hem); de koude boot wacht 12 s.
+const RETRY_LINK_NS: u64 = 7_000_000_000;
+
+/// Is `probe_nic` al eens gelopen? Dan is dit de retry ([`RETRY_LINK_NS`]).
+static NIC_TRIED: AtomicBool = AtomicBool::new(false);
+
+/// Leeft er een NIC uit `probe_nic`? Pas gezet na een gelukte probe: een
+/// mislukte (geen link) liet niets achter en mag opnieuw (hopos `nic_retry`).
 static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
 static DISK_CLAIMED: AtomicBool = AtomicBool::new(false);
 
@@ -298,7 +310,7 @@ impl Board for O6n {
     /// de level-lijn laten vallen (de freeze van 17/18-09), bij MSI-X de
     /// voorwaarde voor een volgende flank.
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error> {
-        if NIC_CLAIMED.swap(true, Relaxed) {
+        if NIC_CLAIMED.load(Relaxed) {
             return Err(Error::Twice("probe_nic"));
         }
         let segs = pcie::segments();
@@ -321,7 +333,12 @@ impl Board for O6n {
                     cpu::println!("net: {e} at {} bar2 {:#x}", hit.f.bdf, hit.bar);
                     Error::Nic("rtl8126 init failed")
                 })?;
-        let link = nic.link_up(LINK_TIMEOUT_NS).map_err(|e| {
+        let wait = if NIC_TRIED.swap(true, Relaxed) {
+            RETRY_LINK_NS
+        } else {
+            LINK_TIMEOUT_NS
+        };
+        let link = nic.link_up(wait).map_err(|e| {
             cpu::println!("net: {} {e}", nic_name(&nic));
             Error::Nic("rtl8126 has no link")
         })?;
@@ -351,6 +368,7 @@ impl Board for O6n {
             nic.xid(),
             probe::nic_intid(hit.root_bus).unwrap_or(0)
         );
+        NIC_CLAIMED.store(true, Relaxed);
         Ok(Some(nic))
     }
 }

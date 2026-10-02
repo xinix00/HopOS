@@ -363,22 +363,21 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
 
     // Het netwerkvlak (net.rs): de pomp op de NIC, de switch, poort 0 met
     // de node-stack, DHCP en de system-listener. Zonder NIC draait de kern
-    // door zonder net; dat is een board, geen fout.
+    // door zonder net; dat is een board, geen fout. Een NIC die faalt (geen
+    // link), probeert [`nic_retry`] opnieuw, naast de rest van de boot.
     match board.probe_nic() {
-        Ok(Some(nic)) => {
-            println!("net: nic up HOPOS_NIC_UP mac={}", nic.mac());
-            let params = net::Params {
-                max_slots: slot_count(board),
-                clock: board.clock(),
-                slot_wake: slots::wake,
-                resident: slots::resident,
-            };
-            if let Err(e) = net::start(exec, nic, params, system_api(system)) {
-                println!("net: {e} HOPOS_NET_FAIL");
+        Ok(Some(nic)) => nic_up(exec, board, system, nic),
+        Ok(None) => println!("net: no NIC on this board HOPOS_NIC_NONE"),
+        Err(e) => {
+            println!("net: {e} HOPOS_NIC_FAIL");
+            if matches!(e, board::Error::Nic(_)) {
+                NIC_RETRY.store(true, Relaxed);
+                if exec.spawn(nic_retry(exec, board, system)).is_err() {
+                    NIC_RETRY.store(false, Relaxed);
+                    println!("net: retry task not spawned, no net until a reboot HOPOS_NIC_FAIL");
+                }
             }
         }
-        Ok(None) => println!("net: no NIC on this board HOPOS_NIC_NONE"),
-        Err(e) => println!("net: {e} HOPOS_NIC_FAIL"),
     }
     // De USB-invoer na het netwerk (gui.rs): de stroom naar de display-app
     // loopt over de switch.
@@ -406,6 +405,73 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
         Err(e) => println!("oscore: {e}, the kern keeps its core to itself HOPOS_OS_CORE_FAIL"),
     }
     sleeper
+}
+
+/// Het netwerkvlak op een NIC die opkwam, bij de boot of bij een
+/// [`nic_retry`].
+fn nic_up(
+    exec: &'static Executor,
+    board: &'static Machine,
+    system: &'static KernSystem,
+    nic: <Machine as Board>::Nic,
+) {
+    println!("net: nic up HOPOS_NIC_UP mac={}", nic.mac());
+    let params = net::Params {
+        max_slots: slot_count(board),
+        clock: board.clock(),
+        slot_wake: slots::wake,
+        resident: slots::resident,
+    };
+    if let Err(e) = net::start(exec, nic, params, system_api(system)) {
+        println!("net: {e} HOPOS_NET_FAIL");
+    }
+}
+
+/// Loopt er een [`nic_retry`]? Dan wacht de plaatsing van Hop op de lease
+/// in plaats van na tien seconden zonder adres te starten (slots.rs,
+/// `wait_uplink`). Eén schrijver: de boot en daarna de retry-taak.
+pub(crate) static NIC_RETRY: AtomicBool = AtomicBool::new(false);
+
+/// Geen net bij de boot is geen eindtoestand (Go, cmd/hopos/main.go, 19-09,
+/// Derek: "als alles opstart zonder netwerk wil ik niet ineens 100 dode
+/// nodes hebben"): een kabel die er straks in gaat, een switch die later
+/// opkomt. Dus de probe opnieuw, met een pauze die zoals in Go van 5 tot
+/// 30 s oploopt, een regel per poging, tot de NIC er is.
+///
+/// De probe spint op de linktermijn van het board (8 s; de O6N 12 s bij
+/// de boot en 7 s bij een retry, onder zijn watchdog van 8,6 s) en houdt
+/// zo lang deze executor vast. Daarom vlak ervoor een aai: de watchdog
+/// staat nu wel gewapend (de eerste probe liep ervoor).
+async fn nic_retry(exec: &'static Executor, board: &'static Machine, system: &'static KernSystem) {
+    let mut wait = core::time::Duration::from_secs(5);
+    let mut attempt = 1u32;
+    loop {
+        exec.after(wait).await;
+        watchdog::pet_now();
+        match board.probe_nic() {
+            Ok(Some(nic)) => {
+                println!("net: the NIC came up on retry {attempt} HOPOS_NIC_RETRY_OK");
+                NIC_RETRY.store(false, Relaxed);
+                nic_up(exec, board, system, nic);
+                return;
+            }
+            Err(e @ board::Error::Nic(_)) => {
+                if wait.as_secs() < 30 {
+                    wait += core::time::Duration::from_secs(5);
+                }
+                println!(
+                    "net: {e}, retry {attempt}, next in {} s HOPOS_NIC_RETRY",
+                    wait.as_secs()
+                );
+            }
+            Ok(None) | Err(_) => {
+                println!("net: the NIC is gone on retry {attempt}, no more retries HOPOS_NIC_FAIL");
+                NIC_RETRY.store(false, Relaxed);
+                return;
+            }
+        }
+        attempt = attempt.saturating_add(1);
+    }
 }
 
 /// Meetlat van de IRQ-dispatch: timer-, NIC- en onbekende interrupts.

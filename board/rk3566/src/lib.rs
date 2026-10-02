@@ -217,7 +217,8 @@ static FW_HOLES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 static MEM_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// Het aantal cores uit de FDT, 0 = onbekend.
 static CORES: AtomicUsize = AtomicUsize::new(0);
-/// `probe_nic` mag één keer.
+/// Leeft er een NIC uit `probe_nic`? Pas gezet na een gelukte probe: een
+/// mislukte (geen link) liet niets achter en mag opnieuw (hopos `nic_retry`).
 static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
 
 fn console_write(b: &[u8]) {
@@ -701,7 +702,7 @@ impl Board for Rk3566 {
     /// zichzelf mét het gemeten getal: een boot-cyclus kost hier een
     /// kaartwissel.
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error> {
-        if NIC_CLAIMED.swap(true, Relaxed) {
+        if NIC_CLAIMED.load(Relaxed) {
             return Err(Error::Twice("probe_nic"));
         }
         // 1-3. Klokken open, pinnen naar M1, RGMII met nul-delays.
@@ -759,6 +760,7 @@ impl Board for Rk3566 {
             NET_DMA.base.0
         );
         cpu::println!("net: dwmac4 {}", nic.diag());
+        NIC_CLAIMED.store(true, Relaxed);
         Ok(Some(nic))
     }
 }

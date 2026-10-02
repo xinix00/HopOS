@@ -169,7 +169,8 @@ static MEM_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// Het aantal cores uit de FDT, 0 = onbekend.
 static CORES: AtomicUsize = AtomicUsize::new(0);
 
-/// Is de NIC al geprobed? `probe_nic` mag één keer.
+/// Leeft er een NIC uit `probe_nic`? Pas gezet na een gelukte probe: een
+/// mislukte (geen link) liet niets achter en mag opnieuw (hopos `nic_retry`).
 static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
 
 /// Is de schijf al geprobed? `probe_disk` mag één keer.
@@ -514,7 +515,7 @@ impl Board for QemuVirt {
     /// hangt zijn lijn aan de GIC. Een lijn die niet aan wil, laat de NIC
     /// pollen: interrupts zijn een verbetering, geen voorwaarde.
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error> {
-        if NIC_CLAIMED.swap(true, Relaxed) {
+        if NIC_CLAIMED.load(Relaxed) {
             return Err(Error::Twice("probe_nic"));
         }
         let Some((base, intid)) = Self::find_virtio_net() else {
@@ -534,6 +535,7 @@ impl Board for QemuVirt {
             base.0,
             nic.queue_size()
         );
+        NIC_CLAIMED.store(true, Relaxed);
         Ok(Some(nic))
     }
 }

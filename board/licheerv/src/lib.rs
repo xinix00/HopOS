@@ -129,6 +129,8 @@ static PLIC_DEV: Plic = unsafe { Plic::new(PLIC, PLIC_SOURCES) };
 const CLINT_DEV: Clint = unsafe { Clint::new(CLINT) };
 
 static CLINT_OK: AtomicBool = AtomicBool::new(false);
+/// Leeft er een NIC uit `probe_nic`? Pas gezet na een gelukte probe: een
+/// mislukte (geen link) liet niets achter en mag opnieuw (hopos `nic_retry`).
 static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
 
 fn console_write(b: &[u8]) {
@@ -476,7 +478,7 @@ impl Board for LicheeRv {
     /// met het getal erbij: een boot-cyclus is hier duur (kaart eruit, in de
     /// Mac, terug).
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error> {
-        if NIC_CLAIMED.swap(true, Relaxed) {
+        if NIC_CLAIMED.load(Relaxed) {
             return Err(Error::Twice("probe_nic"));
         }
         if !ephy::clocks_on() {
@@ -526,6 +528,7 @@ impl Board for LicheeRv {
         }
         .map_err(|_| Error::Nic("dwmac start failed"))?;
         cpu::println!("net: dwmac {}", nic.diag());
+        NIC_CLAIMED.store(true, Relaxed);
         Ok(Some(nic))
     }
 }

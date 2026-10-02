@@ -134,6 +134,8 @@ const _: () = {
 /// De kooi-lijm van de binary moet déze smaak installeren, niet Nvhe.
 pub const FLAVOR: Flavor = Flavor::AppleVhe;
 
+/// Leeft er een NIC uit `probe_nic`? Pas gezet na een gelukte probe: een
+/// mislukte (geen link) liet niets achter en mag opnieuw (hopos `nic_retry`).
 static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
 
 /// Eén bootparameter uit `hopos.cfg` van de loader ("" als hij er niet
@@ -434,7 +436,7 @@ impl Board for Apple {
     /// de chip alleen nog Broadcom's default). Gepold: de INTx-bedrading
     /// van Go (19-09) is nog niet geport.
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error> {
-        if NIC_CLAIMED.swap(true, Relaxed) {
+        if NIC_CLAIMED.load(Relaxed) {
             return Err(Error::Twice("probe_nic"));
         }
         serror_check("the disk and everything before the NIC");
@@ -486,6 +488,7 @@ impl Board for Apple {
                 return Err(Error::Nic("no link"));
             }
         }
+        NIC_CLAIMED.store(true, Relaxed);
         Ok(Some(nic))
     }
 }

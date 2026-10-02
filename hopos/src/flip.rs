@@ -156,6 +156,14 @@ const CORES_OFF_WAIT: Duration = Duration::from_secs(1);
 #[cfg(not(target_arch = "riscv64"))]
 const CPU_OFF_RETURNS: bool = !cfg!(feature = "board-rpi5");
 
+/// Antwoordt er een PSCI op een SMC? Op Apple niet: daar is geen EL3, en
+/// een SMC op EL2 is een UNDEF (de core parkeert in de vectoren). Go deed
+/// op Apple geen enkele PSCI-call (hop/board.go, 02-09). Op riscv64 is er
+/// geen PSCI. Bewust board-kennis en geen `cpu::trng::has_monitor`: QEMU
+/// virt zonder `secure=on` heeft ook geen EL3 (ID_AA64PFR0_EL1.EL3 = 0),
+/// maar emuleert PSCI over SMC, en daar draaien de koude flip en de reset.
+const PSCI: bool = !cfg!(any(feature = "board-apple", target_arch = "riscv64"));
+
 /// Kan deze kern bewoners over de sprong heen dragen (de warme flip)? Op
 /// riscv64 niet: de switch-code draait daar uit het kern-image, en de
 /// nieuwe kern adopteert niemand (`RvCage::adopt`). Een warme flip zou de
@@ -571,10 +579,21 @@ fn report_black_box(mem: &mut DevMem, p: &FlipPlan) {
     );
 }
 
-/// De koude weg terug: PSCI SYSTEM_RESET. Keert niet terug; lukt de reset
-/// niet, dan parkeert de core (de watchdog is de tweede lijn).
+/// De koude weg terug: PSCI SYSTEM_RESET. Keert niet terug. Zonder PSCI
+/// (Apple, riscv64), of als de reset terugkeert, de watchdog op zijn
+/// kortst en dan parkeren: een geparkeerde core aait niet meer (Go op
+/// Apple: de pets inhouden, cmd/hopos/watchdog.go). Zonder watchdog blijft
+/// het bij parkeren, met een regel die dat zegt.
 fn reset() -> ! {
-    let _ = psci::smc(psci::SYSTEM_RESET, 0, 0, 0);
+    if PSCI {
+        let _ = psci::smc(psci::SYSTEM_RESET, 0, 0, 0);
+    }
+    println!("flip: resetting through the watchdog at its shortest alarm HOPOS_FLIP_RESET_WDT");
+    if !crate::watchdog::fire() {
+        println!(
+            "flip: no PSCI reset and no watchdog on this board: this core parks and the node stays down until a power cycle HOPOS_FLIP_RESET_PARK"
+        );
+    }
     cpu::boot::park()
 }
 
@@ -712,6 +731,21 @@ fn prepare_inner(b: &FlipBundle, sha256: &[u8; 32]) -> Result<(), Refused> {
             kern::Error::Version {
                 have: 0,
                 want: abi::systemapi::FLIP_COLD,
+            },
+        ));
+    }
+    if cold && !PSCI && !cfg!(target_arch = "riscv64") {
+        // De koude flip zet de app-cores uit met PSCI CPU_OFF en wacht op
+        // AFFINITY_INFO: zonder PSCI een UNDEF ná het bevriezen van de
+        // opslag. Dus hier weigeren, vóór er iets onherroepelijks gebeurt.
+        println!(
+            "flip: cold flip refused: this board has no PSCI (no EL3, an SMC is UNDEF), so its app cores cannot be powered off; ask warm HOPOS_FLIP_COLD_NO_PSCI"
+        );
+        return Err(refuse(
+            "cold flip needs PSCI, ask warm",
+            kern::Error::Version {
+                have: abi::systemapi::FLIP_COLD,
+                want: 0,
             },
         ));
     }
@@ -1249,6 +1283,10 @@ async fn stop_residents(exec: &'static Executor) -> Result<usize, JumpError> {
 #[cfg(not(target_arch = "riscv64"))]
 async fn cores_off(exec: &'static Executor) -> Result<usize, JumpError> {
     use cpu::el2::CoreState;
+    if !PSCI {
+        // `prepare` weigerde al; dit is de tweede lijn vóór de eerste SMC.
+        return Err(JumpError::Cold("no PSCI on this board, app cores", 0));
+    }
     let Ok(plan) = crate::slots::os_plan() else {
         // Geen slots op dit board: geen app-cores om uit te zetten.
         return Ok(0);

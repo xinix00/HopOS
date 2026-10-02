@@ -378,6 +378,13 @@ impl ArmCage {
 impl Cage for ArmCage {
     fn clear(&mut self, base: u64, len: u64) {
         let Ok(n) = usize::try_from(len) else { return };
+        // Eerst de regels van de vorige huurder weg (clean + invalidate,
+        // `dc civac` gaat naar het hele inner-shareable domein): die draaide
+        // cacheable op deze fysieke regels, en waar de kern de pool Device
+        // ziet (Apple, rk3566) gaan de nullen langs de cache. Een vuile regel
+        // die later evict, klobbert dan de verse bytes (Go `slots.Scrub`:
+        // CleanInv, Clear, Push; op de A76 gemeten 10-07).
+        dev::pull(Pa(base), n);
         dev::clear(Pa(base), n);
         // Naar DRAM: de nieuwe eigenaar leest zijn partitie ongecached.
         dev::push(Pa(base), n);

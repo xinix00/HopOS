@@ -762,11 +762,16 @@ async fn resume_hop(exec: &'static Executor, plan: abi::layout::Plan, core: usiz
 }
 
 /// Wacht tot de lease er is, hooguit [`UPLINK_WAIT`]; `None` na de termijn.
+/// Zolang de NIC opnieuw geprobeerd wordt (`NIC_RETRY`), telt de termijn
+/// niet: Hop heeft een adres nodig (Go wachtte er net zo op, 19-09).
 async fn wait_uplink(exec: &'static Executor) -> Option<core::net::Ipv4Addr> {
-    let deadline = exec.now().saturating_add(UPLINK_WAIT.as_nanos() as u64);
+    let mut deadline = exec.now().saturating_add(UPLINK_WAIT.as_nanos() as u64);
     loop {
         if let Some(ip) = crate::net::uplink_ip() {
             return Some(ip);
+        }
+        if crate::NIC_RETRY.load(Relaxed) {
+            deadline = exec.now().saturating_add(UPLINK_WAIT.as_nanos() as u64);
         }
         if exec.now() >= deadline {
             println!(

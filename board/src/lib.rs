@@ -345,7 +345,9 @@ pub trait Board: Sync {
     /// taak, nooit in exception-context.
     fn dispatch_interrupts(&self) -> Dispatched;
 
-    /// Vindt en initialiseert de NIC. `Ok(None)` = geen NIC; één keer.
+    /// Vindt en initialiseert de NIC. `Ok(None)` = geen NIC. Eén keer
+    /// gelukt; na een `Err` (geen link) mag een tweede poging, en die begint
+    /// weer bij het begin (hopos `nic_retry`).
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error>;
 
     /// De lineaire framebuffer van dit board, als er een beeld loopt (GOP,
