@@ -32,7 +32,6 @@
 
 use alloc::boxed::Box;
 use blkdev::{AsyncBlockDevice, LBA_SIZE, Pace, Queue, block_on};
-use board::Board;
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use core::time::Duration;
 use cpu::println;
@@ -243,7 +242,7 @@ pub(crate) fn start(exec: &'static Executor, disk: Option<vboard::Disk>) -> bool
         "hopfs: mounted {} MiB ({what}) HOPOS_FS_UP fresh={fresh} generation={generation}",
         (sectors * LBA_SIZE) >> 20
     );
-    let max_slots = board.cores().saturating_sub(1).max(1);
+    let max_slots = crate::slot_count(board);
     let actor = async move {
         let mut a = FsActor::new(fs, &crate::SERVICERS, crate::KernConsole);
         a.run(&FS_INBOX).await;

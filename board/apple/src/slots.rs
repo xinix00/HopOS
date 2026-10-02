@@ -238,7 +238,7 @@ pub fn plan(cores: usize, os_core: usize) -> abi::Result<Plan> {
         net_dma_pa: crate::NET_DMA.base.0,
         ram_base: crate::DRAM_BASE,
         pool: pool().0,
-        max_slots: app_cores + 1,
+        max_slots: (app_cores + 1).max(abi::layout::SLOTS_DEFAULT),
         app_cores,
         os_core,
         ..PlanSpec::default()

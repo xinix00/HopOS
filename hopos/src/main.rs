@@ -510,8 +510,9 @@ fn system_api(system: &'static KernSystem) -> net::SystemApi {
 /// daar geen capaciteitstekort in en bleef elke paar seconden opnieuw
 /// vragen, en elke vraag was 128 statuscalls door de lifecycle-mailbox: een
 /// koude flip vond hem vol ("actor mailbox full").
-fn slot_count(board: &Machine) -> usize {
-    board.cores().saturating_sub(1).max(1) + 1
+pub(crate) fn slot_count(board: &Machine) -> usize {
+    // Kooien tellen niet als cores: het plan van het board zegt hoeveel.
+    vboard::slots::plan(board.cores(), 0).map_or(2, |p| p.max_slots())
 }
 
 /// De haken van de system-API: de klok van Hop zet de wandklok van de kern

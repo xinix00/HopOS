@@ -71,6 +71,13 @@ pub const SLOT_STRIDE: u64 = 0x2000_0000;
 /// (control-pages van node-cores, kooi-blokken) worden voor
 /// [`PlanSpec::max_slots`] gereserveerd; een board zet die lager.
 pub const SLOT_CAP: usize = 128;
+/// De kooi-capaciteit die een board standaard neemt: kooien tellen niet
+/// mee als cores (meerdere kooien delen één core, Go: `MaxSlots` los van
+/// `NumAppCores`), dus een board met één app-core heeft toch plaats voor
+/// 32 apps. Elke kooi kost een servicer-taak, een control-page en een
+/// kooi-blok; een board met een kleine staart (LicheeRV, Radxa) zet het
+/// lager, een board met meer app-cores dan dit neemt die plus één.
+pub const SLOTS_DEFAULT: usize = 32;
 /// De basis waartegen elk app-image gelinkt is: het venster van slot 1.
 /// [`crate::place::build`] toetst segmenten tegen `[LINK_BASE, LINK_BASE +
 /// app_ram)`.

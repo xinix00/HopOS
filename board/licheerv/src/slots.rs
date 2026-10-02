@@ -59,12 +59,21 @@ pub fn plan(cores: usize, os_core: usize) -> abi::Result<Plan> {
         boot_scratch_pa: BOOT_SCRATCH_PA,
         pool: pool_of(POOL)?,
         ram_base: 0x8000_0000,
-        max_slots: app_cores + 1,
+        max_slots: (app_cores + 1).max(SLOTS),
         app_cores,
         os_core,
         ..PlanSpec::default()
     })
 }
+
+/// De kooi-capaciteit: 16, zoals Go (`SetMaxSlots(16)`), want de staart
+/// van 2 MB draagt 28 control-pages en 26 kooi-blokken; de cores tellen
+/// niet (kooien delen de ene app-hart).
+pub const SLOTS: usize = 16;
+const _: () = {
+    assert!(NODE_CTRL_PA + (SLOTS as u64 + 1) * 0x1000 <= CAGE_PA);
+    assert!(CAGE_PA + (SLOTS as u64 + 1) * abi::layout::CAGE_STRIDE <= STAGE_HDR_PA);
+};
 
 /// Het hart-id als "MPIDR" voor de gedeelde lijm.
 #[must_use]
