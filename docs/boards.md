@@ -91,14 +91,19 @@ Zonder ITS: `HOPOS_ITS_NONE`; LPI's die al aan stonden met andermans tabel:
 
 **De watchdog** (`hopos::watchdog`, het beleid in `kern::watchdog` met zijn
 policy-tests): de SBSA-watchdog uit de GTDT, 12 s
-gevraagd, aaien elke 2 s. Fase 1 blind tot het levensteken (het net op, en
-als Hop op de node woont zijn heartbeat die loopt), op een flip-boot
-hoogstens twee minuten op de rauwe teller; fase 2 alleen op bewijs.
-`hopos.wd=off` zet hem uit (ook een die de vorige kern wapende). Regels:
-`HOPOS_WD_ARMED`, `HOPOS_CANARY_LIVE`, `HOPOS_CANARY_MISS`,
-`HOPOS_BOOT_GUARD`, `HOPOS_BOOT_GUARD_EXPIRED`, `HOPOS_RESET_REQUESTED`;
-QEMU heeft er geen: `watchdog: no SBSA watchdog in the GTDT (QEMU?) - node
-liveness is UNGUARDED HOPOS_WD_NONE`. Let op een teller van 1 GHz
+gevraagd, aaien elke 2 s. Fase 1 blind tot het levensteken, op een
+flip-boot hoogstens twee minuten op de rauwe teller; fase 2 alleen op
+bewijs. Het levensteken is de canary van Go: elke ronde een nieuwe
+TCP-verbinding over de node-stack (3 s geduld, hooguit 15 s oud), naar
+Hop's agent op 10.100.0.2:8080 als Hop op de node woont (door de switch en
+Hop's accept-laag, plus zijn heartbeat), anders naar de eigen system-poort
+op het uplink-adres. `hopos.wd=off` zet hem uit (ook een die de vorige kern
+wapende). Regels: `HOPOS_WD_ARMED`, `HOPOS_CANARY_LIVE`,
+`HOPOS_CANARY_MISS`, `HOPOS_BOOT_GUARD`, `HOPOS_BOOT_GUARD_EXPIRED`,
+`HOPOS_RESET_REQUESTED`, en per wissel van de dial `HOPOS_WD_CANARY_OK` of
+`HOPOS_WD_CANARY_FAIL` (ook zonder blok, dus ook op QEMU); QEMU heeft er
+geen: `watchdog: no SBSA watchdog in the GTDT (QEMU?) - node liveness is
+UNGUARDED HOPOS_WD_NONE`. Let op een teller van 1 GHz
 (Armv8.6+, de O6N): WOR is 32 bits, dus de timeout wordt 8,6 s en de
 armed-regel zegt dat.
 

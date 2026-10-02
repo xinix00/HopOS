@@ -270,7 +270,7 @@ const HOP_VOLUME: (&[u8], &[u8]) = (b"/hop", b"/volumes/hop");
 
 /// De agent-poort van Hop; de leader luistert op poort + 1000 (zoals Go).
 /// Beide worden op de uplink doorgezet.
-const HOP_PORT: u16 = 8080;
+pub(crate) const HOP_PORT: u16 = 8080;
 
 /// Hoe lang de plaatsing van Hop op de DHCP-lease wacht voor
 /// `HOPOS_NODE_IP`. QEMU's user-net antwoordt binnen een milliseconde; zonder

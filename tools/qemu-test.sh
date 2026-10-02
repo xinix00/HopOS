@@ -12,6 +12,11 @@
 #   HOPOS_FS_UP     hopfs erop gemount, vers (fresh=1);
 #   HOPOS_NET_UP    pomp, switch, poort 0 en een DHCP-lease van user-net;
 #   HOPOS_SYSTEM_UP de system-listener op poort 10100;
+#   HOPOS_WD_CANARY_OK de canary van de watchdog: een nieuwe verbinding van
+#                   de node-stack naar zijn eigen system-poort slaagde (virt
+#                   heeft geen watchdog-blok, de taak draait toch), en
+#                   zonder weigerregel: die drie blijven van de toets
+#                   van buiten;
 #   extern          een TCP-verbinding van de host via hostfwd naar
 #                   10.0.2.15:10100 die de kern accepteert en weigert (geen
 #                   slot achter 10.0.2.2): de host ziet EOF en de kern meldt
@@ -287,7 +292,7 @@ probe_at() {
 
 # Wachten tot alle markers er zijn en alle toetsen van buiten gedaan,
 # iets roods verschijnt, QEMU stopt, of de tijd op is.
-need="HOPOS_BOOT|HOPOS_TICK 3|HOPOS_NIC_UP|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_SYSTEM_REFUSED"
+need="HOPOS_BOOT|HOPOS_TICK 3|HOPOS_NIC_UP|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_SYSTEM_REFUSED|HOPOS_WD_CANARY_OK"
 PROBES=""
 next_probe=1
 nprobes=$(echo "$PROBE_AT" | awk -F'|' '{print NF}')
@@ -327,7 +332,7 @@ while :; do
 		fi
 	fi
 	ok=1
-	for m in "HOPOS_BOOT" "HOPOS_TICK 3" "HOPOS_NIC_UP" "HOPOS_NET_UP" "HOPOS_SYSTEM_UP" "HOPOS_SYSTEM_REFUSED"; do
+	for m in "HOPOS_BOOT" "HOPOS_TICK 3" "HOPOS_NIC_UP" "HOPOS_NET_UP" "HOPOS_SYSTEM_UP" "HOPOS_SYSTEM_REFUSED" "HOPOS_WD_CANARY_OK"; do
 		grep -q "$m" "$LOG" || ok=0
 	done
 	(IFS='|' && for m in $SLOT_MARKS; do grep -q -E "$m" "$LOG" || exit 1; done) || ok=0
@@ -376,7 +381,7 @@ wait "$QPID" 2>/dev/null || true
 QPID=""
 
 fail=0
-for m in "HOPOS_BOOT" "HOPOS_TICK 3" "HOPOS_NIC_UP" "HOPOS_NET_UP" "HOPOS_SYSTEM_UP" "HOPOS_SYSTEM_REFUSED"; do
+for m in "HOPOS_BOOT" "HOPOS_TICK 3" "HOPOS_NIC_UP" "HOPOS_NET_UP" "HOPOS_SYSTEM_UP" "HOPOS_SYSTEM_REFUSED" "HOPOS_WD_CANARY_OK"; do
 	if grep -q "$m" "$LOG"; then
 		echo "   ok  $m: $(grep -m1 "$m" "$LOG" | tr -d '\r')"
 	else

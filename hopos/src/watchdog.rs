@@ -3,18 +3,35 @@
 //! `nodeCanary`, `armBootGuard`, `requestNodeReset`).
 //!
 //! Dit bezit de watchdog-taak en het levensbewijs: elke [`PET_EVERY`] kijkt
-//! hij of de node gezond is (het net op, en als Hop op deze node woont zijn
-//! heartbeat die loopt) en geeft dat aan het beleid, dat dan wel of niet
-//! aait. Omdat de pets uit een taak op de executor komen, stopt een
-//! bevroren executor ze vanzelf; dat is de helft van het vangnet. De andere
-//! helft is het bewijs: een node die draait maar doof is, aait niet meer.
+//! hij of de node gezond is (een verse verbinding door de eigen
+//! accept-laag, en als Hop op deze node woont zijn heartbeat die loopt) en
+//! geeft dat aan het beleid, dat dan wel of niet aait. Omdat de pets uit
+//! een taak op de executor komen, stopt een bevroren executor ze vanzelf;
+//! dat is de helft van het vangnet. De andere helft is het bewijs: een node
+//! die draait maar doof is, aait niet meer.
 //!
-//! Wat de Go-canary deed (een nieuwe TCP-verbinding naar de eigen
-//! agent-poort) is hier de heartbeat van Hop op zijn control-page plus het
-//! adres van de uplink: de agent is een bewoner in een kooi, en zijn
-//! heartbeat is zijn eigen bewijs van leven, zonder een verbinding door de
-//! stack van de kern. Beperking, eerlijk genoteerd: een doofheid die alleen
-//! in de NAT naar Hop zit, mist dit.
+//! Het bewijs is de canary van Go (`nodeCanary`): elke ronde een NIEUWE
+//! TCP-verbinding over de node-stack, met 3 s geduld, en alleen een
+//! geslaagde handshake telt. De les is van 02-08: nieuwe verbindingen en
+//! ICMP dood terwijl alle interne lussen kerngezond waren; een heartbeat
+//! alleen ziet dat niet. Woont Hop hier, dan belt de kern Hop's agent op
+//! zijn slot-adres (10.100.0.2:8080): de node-stack, de host-taak, de
+//! switch-actor, Hop's ring, Hop's stack en Hop's accept-laag, heen en
+//! terug. Zonder Hop belt hij zijn eigen system-poort op het uplink-adres
+//! (de loopback in de stack, zoals Go's self-dial door locdev): de
+//! accept-laag van de kern, die er altijd luistert. Een geslaagde dial is
+//! [`STALE_NS`] lang vers, net als de heartbeat: een herstart van Hop is
+//! een hapering, geen hang.
+//!
+//! Niet via de DNAT van de uplink: een dial van de node-stack naar het
+//! eigen uplink-adres keert in de stack zelf om (loopback) en de switch
+//! kent voor poort 0 geen haarspeld, dus zo'n verbinding komt nooit bij
+//! Hop. Beperkingen, eerlijk genoteerd: de NIC, de pomp en de NAT-tabel
+//! zelf zitten niet in het pad (Go miste de NIC-demux ook), en de dial naar
+//! 10.100.0.2 loopt in de stack via de ARP van de LAN-gateway (een adres
+//! buiten het subnet van de lease), net als elk antwoord van de kern aan
+//! een app. Een dode router kost dan één reset; daarna wacht de koude boot
+//! blind in fase 1 tot het eerste bewijs, dus geen lus.
 //!
 //! `hopos.wd=off` zet alles uit, op elk board dezelfde knop: voor een
 //! UART-postmortem moet een bevroren node blijven staan.
@@ -28,6 +45,7 @@
 //! zoals Go), en niets op virt.
 
 use core::cell::Cell;
+use core::net::Ipv4Addr;
 use core::time::Duration;
 use cpu::println;
 use executor::Executor;
@@ -38,9 +56,14 @@ use sync::Local;
 /// teller van 1 GHz loopt WOR vol en wordt het 8,6 s), zodat een trage
 /// ronde geen reset is.
 const PET_EVERY: Duration = Duration::from_secs(2);
-/// Hoe oud de laatste heartbeat van Hop mag zijn voor hij als "stil" telt.
-/// Hop slaat elke seconde; vijftien is een hapering, geen hang.
-const HOP_STALE_NS: u64 = 15_000_000_000;
+/// Hoe oud de laatste heartbeat van Hop en de laatste geslaagde dial mogen
+/// zijn voor ze als "stil" tellen. Hop slaat elke seconde en de dial gaat
+/// elke ronde; vijftien seconden is een hapering, geen hang.
+const STALE_NS: u64 = 15_000_000_000;
+/// Het geduld van één dial (Go: `probe(3 * time.Second)`). Met
+/// [`PET_EVERY`] erbij is een ronde hooguit 5 s, ruim onder de kleinste
+/// hardware-timeout (8,6 s op een teller van 1 GHz).
+const DIAL_TIMEOUT: Duration = Duration::from_secs(3);
 /// De wachtregel van fase 1 komt elke ~5 minuten (in aai-rondes).
 const LOUD_EVERY: u64 = 300 / PET_EVERY.as_secs();
 
@@ -69,8 +92,9 @@ pub(crate) fn request_reset(reason: &'static str) {
 }
 
 /// Start de watchdog: `hopos.wd=off` zet hem uit (ook een die de vorige
-/// kern wapende), een board zonder hardware zegt dat hij onbewaakt is, en
-/// anders spawnt de taak. Op een flip-boot wapent de taak meteen de
+/// kern wapende), en anders spawnt de taak. Op een board zonder hardware
+/// weigert `arm` en zegt het beleid dat de node onbewaakt is, maar de taak
+/// draait de canary toch, voor de console. Op een flip-boot wapent de taak meteen de
 /// boot-guard met twee minuten blinde gratie (de haak die flip.rs zou
 /// roepen: de generatie zegt het ook).
 pub(crate) fn start(exec: &'static Executor) {
@@ -83,12 +107,7 @@ pub(crate) fn start(exec: &'static Executor) {
         );
         return;
     }
-    let Some(hw) = hw::hardware() else {
-        println!(
-            "watchdog: this board wires no hardware watchdog - node liveness is UNGUARDED HOPOS_WD_NONE"
-        );
-        return;
-    };
+    let hw = hw::hardware();
     let flip = crate::flip::generation() > 1;
     let hop = vboard::slots::staged_role() == Ok(board::stage::StagedRole::Hop);
     if let Err(e) = exec.spawn(run(exec, hw, flip, hop)) {
@@ -103,7 +122,7 @@ struct Beat {
 }
 
 impl Beat {
-    /// Leest de heartbeat van Hop; `true` als hij binnen [`HOP_STALE_NS`]
+    /// Leest de heartbeat van Hop; `true` als hij binnen [`STALE_NS`]
     /// bewoog.
     fn fresh(&mut self, now: u64) -> bool {
         let Some(page) = crate::clock::ctrl_page(crate::slots::HOP_SLOT) else {
@@ -116,7 +135,59 @@ impl Beat {
             self.last = v;
             self.at = now;
         }
-        v != 0 && now.saturating_sub(self.at) < HOP_STALE_NS
+        v != 0 && now.saturating_sub(self.at) < STALE_NS
+    }
+}
+
+/// De canary: wanneer de dial voor het laatst slaagde, en of de console de
+/// laatste uitkomst al meldde.
+struct Canary {
+    ok_at: Option<u64>,
+    ok: bool,
+}
+
+impl Canary {
+    /// Eén dial (zie de moduledoc voor het doel); `true` als er binnen
+    /// [`STALE_NS`] een slaagde. Eén regel per wissel: de eerste geslaagde
+    /// en elke wissel daarna, niet elke ronde. Een mislukking vóór het
+    /// eerste succes is de boot (Hop komt nog op) en zwijgt; de
+    /// wachtregel van het beleid zegt dan genoeg.
+    async fn probe(&mut self, exec: &'static Executor, hop: bool) -> bool {
+        let Some(own) = crate::net::uplink_ip() else {
+            return false;
+        };
+        let target = match abi::layout::Slot::new(crate::slots::HOP_SLOT) {
+            Some(s) if hop => (
+                Ipv4Addr::from(abi::layout::slot_ip4(s)),
+                crate::slots::HOP_PORT,
+            ),
+            _ => (own, kern::system::PORT),
+        };
+        let r = crate::net::dial(exec, target.0, target.1, DIAL_TIMEOUT).await;
+        let now = exec.now();
+        match r {
+            Ok(()) => {
+                if !self.ok {
+                    println!(
+                        "watchdog: self-dial {}:{} connected - a new connection gets through the accept path HOPOS_WD_CANARY_OK",
+                        target.0, target.1
+                    );
+                }
+                self.ok = true;
+                self.ok_at = Some(now);
+            }
+            Err(e) => {
+                if self.ok {
+                    println!(
+                        "watchdog: self-dial {}:{} failed ({e}) - no pet once the last connection is 15 s old HOPOS_WD_CANARY_FAIL",
+                        target.0, target.1
+                    );
+                }
+                self.ok = false;
+            }
+        }
+        self.ok_at
+            .is_some_and(|at| now.saturating_sub(at) < STALE_NS)
     }
 }
 
@@ -133,18 +204,23 @@ async fn run(exec: &'static Executor, mut hw: hw::Hw, flip: bool, hop: bool) {
         last: 0,
         at: exec.now(),
     };
+    let mut canary = Canary {
+        ok_at: None,
+        ok: false,
+    };
     loop {
         exec.after(PET_EVERY).await;
-        if p.phase() == Phase::Withheld || p.phase() == Phase::Idle {
-            // Niets meer te doen: de hardware reset, of er is geen.
+        if p.phase() == Phase::Withheld {
+            // Niets meer te doen: de hardware reset.
             continue;
         }
         if let Some(r) = RESET.get().get() {
             p.request_reset(r);
         }
-        let now = exec.now();
-        let net = crate::net::uplink_ip().is_some();
-        let alive = net && (!hop || beat.fresh(now));
+        // Ook zonder hardware (Idle): dan aait niemand, maar de console
+        // toont het levensteken toch (QEMU virt, de toets).
+        let dialed = canary.probe(exec, hop).await;
+        let alive = dialed && (!hop || beat.fresh(exec.now()));
         if let Some(e) = p.tick(&mut hw, cpu::idle::counter(), alive) {
             say(&e, &hw);
         }
@@ -167,10 +243,10 @@ fn say(e: &Event, hw: &hw::Hw) {
             "watchdog: hardware reset armed ({hw}) - boot guard: blind pets until the node proves liveness HOPOS_WD_ARMED"
         ),
         Event::Waiting(n) => println!(
-            "watchdog: no liveness sign yet ({n} rounds: net up and Hop beating) - boot guard only: a full freeze resets, deafness does not yet"
+            "watchdog: no liveness sign yet ({n} rounds: a self-dial that connects, and Hop beating) - boot guard only: a full freeze resets, deafness does not yet"
         ),
         Event::Live => println!(
-            "watchdog: liveness proven - pets now require the net up and Hop beating HOPOS_CANARY_LIVE"
+            "watchdog: liveness proven - pets now require a fresh self-dial and Hop beating HOPOS_CANARY_LIVE"
         ),
         Event::Miss(n) => println!(
             "watchdog: liveness check failed ({n} in a row) - withholding the pet; hardware reset follows unless the node recovers HOPOS_CANARY_MISS"
@@ -256,11 +332,11 @@ mod hw {
     }
 
     /// Er is een kandidaat; of hij er werkelijk is, zegt `arm`.
-    pub(super) fn hardware() -> Option<Hw> {
-        Some(Hw {
+    pub(super) fn hardware() -> Hw {
+        Hw {
             desc: None,
             why: "not armed",
-        })
+        }
     }
 
     /// Zet een gewapende watchdog uit (`hopos.wd=off` na een flip).
@@ -342,11 +418,11 @@ mod hw {
 
     /// Er is een kandidaat als de boom er een beschrijft; of hij wapent,
     /// zegt `arm`.
-    pub(super) fn hardware() -> Option<Hw> {
-        Some(Hw {
+    pub(super) fn hardware() -> Hw {
+        Hw {
             desc: None,
             why: "not armed",
-        })
+        }
     }
 
     /// Zet een gewapende watchdog uit (`hopos.wd=off`).
@@ -393,8 +469,10 @@ mod hw {
         }
     }
 
-    pub(super) fn hardware() -> Option<Hw> {
-        None
+    /// Geen blok: `arm` weigert en het beleid zegt `HOPOS_WD_NONE`, maar
+    /// de taak draait, zodat de canary op de console staat.
+    pub(super) fn hardware() -> Hw {
+        Hw
     }
 
     pub(super) fn off() -> bool {

@@ -53,7 +53,7 @@ use net::switch::{self, Ack, Command, Commands, Doorbell, Published, Switch, Wir
 use net::{Egress, Ingress, Stats};
 use netdev::Device;
 use sync::mpsc::Mailbox;
-use sync::{LocalCell, Signal, Stop, select};
+use sync::{Either, LocalCell, Signal, Stop, select};
 
 /// De leeskant van een ring zoals de switch en poort 0 hem zien.
 type RingRx = AbiTx;
@@ -950,6 +950,12 @@ async fn system_listener(exec: &'static Executor, ip: Ipv4Addr, api: SystemApi) 
             }
         };
         let remote = io(|st| st.tcp_remote(h)).map_or(0, |ep| u32::from_be_bytes(ep.ip));
+        if remote == u32::from(ip) {
+            // De self-dial van de watchdog ([`dial`]): de handshake was het
+            // bewijs. Geen weigerregel; die zijn voor wie van buiten belt.
+            close(exec, h);
+            continue;
+        }
         let Some(who) = api.system.admit(remote) else {
             refused = refused.wrapping_add(1);
             if refused <= LOUD_REFUSALS {
@@ -1172,6 +1178,40 @@ impl Worker {
 fn close(exec: &Executor, h: TcpHandle) {
     let t = exec.now();
     let _ = io(|st| st.tcp_close(h, t));
+}
+
+/// De self-dial van de watchdog (Go: `probe` in `nodeCanary`, een
+/// `net.DialTimeout` met 3 s): een nieuwe TCP-verbinding over de node-stack
+/// naar `ip:port`, en na de handshake meteen weer dicht. Na `timeout` geeft
+/// hij op, ook als de host-taak niet meer pompt en de stack dus niemand
+/// wekt: dat is juist een doofheid die hij moet zien.
+pub(crate) async fn dial(
+    exec: &'static Executor,
+    ip: Ipv4Addr,
+    port: u16,
+    timeout: Duration,
+) -> leannet::Result {
+    let now = exec.now();
+    let deadline = now.saturating_add(u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX));
+    let h = io(|st| st.tcp_connect(ip.octets(), port, Some(deadline), now))?;
+    let connect = poll_fn(move |cx| {
+        poll_stack(
+            exec,
+            cx,
+            |st, now| st.tcp_poll_connect(h, now),
+            |st, w| st.tcp_register_write_waker(h, w),
+        )
+    });
+    let r = match select(connect, exec.until(deadline)).await {
+        Either::Left(r) => r,
+        // De klok won: nog één keer kijken geeft `DeadlineExceeded` en ruimt
+        // de dial op.
+        Either::Right(()) => io(|st| st.tcp_poll_connect(h, exec.now())),
+    };
+    if r.is_ok() {
+        close(exec, h);
+    }
+    r
 }
 
 /// Wacht op de volgende verbinding van de listener.
