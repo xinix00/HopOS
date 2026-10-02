@@ -620,13 +620,17 @@ impl Cage for ArmCage {
             if b.core.get() == 0 {
                 self.ctx(slot).is_some_and(|c| el2::hosts(&self.plan, c))
             } else {
-                // Op een app-core de context van DEZE kooi, niet alleen de
-                // core: een gedeelde core draait door zolang er een buur
-                // leeft, en Hop las een lid dat al exit deed dan als
-                // draaiend (30-09, de SHARE-toets: nooit herstart).
-                el2::core_state(&self.plan, b.core)
-                    .is_ok_and(|st| matches!(st, CoreState::Running(_)))
-                    && self.live(slot)
+                // Op een app-core de context van DEZE kooi, zoals de
+                // RISC-V-kooi: een gedeelde core draait door zolang er een
+                // buur leeft (Hop las een lid dat al exit deed als draaiend,
+                // 30-09), en hij slaapt zodra elk lid yieldt. Dat slapen is
+                // geen exit: met de core-toestand erbij las Hop een
+                // slapende controller in een sharegroup als gestopt en
+                // herplaatste hem acht keer per boot (02-10, qemu-controller
+                // met STULP_QEMU_BUNDLE=1). De ctx-staat van de kooi zegt
+                // of de bewoner leeft; de mailbox van de core zegt alleen
+                // wie er nu aan de beurt is.
+                self.live(slot)
             }
         });
         Status {
