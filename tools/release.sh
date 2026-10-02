@@ -32,7 +32,9 @@
 #                                  `sh /Volumes/HOPOS/install.sh go`
 #   hopos-licheerv-headless.img.gz image/licheerv-agent.sh, met de config
 #                                  in het venster en Hop (riscv64) in de
-#                                  kern gebakken (STAGE=, ROLE=hop)
+#                                  kern gebakken (STAGE=, ROLE=hop); en de
+#   hopos-licheerv-fip.bin         losse fip.bin voor een kaart die er al een
+#                                  heeft (alleen dat bestand vervangen)
 #   hopos-<board>-<smaak>.flip     image/flip-bundle.sh met HOPOS_STAMP=<versie>
 #                                  (niet voor de LicheeRV: riscv64)
 #
@@ -190,6 +192,10 @@ apple() {
 licheerv() {
 	STAGE="$HOP_RV" ROLE=hop CFG="$HEADLESS" LICHEERV_DONOR_SHA256=$LRV_DONOR_SHA sh image/licheerv-agent.sh
 	card target/licheerv/hopos-licheerv.img hopos-licheerv-headless.img
+	# Ook de losse fip.bin: een kaart die al een HopOS-kaart is, krijgt zo een
+	# nieuwe versie door alleen dat bestand te vervangen (ook vanaf een
+	# telefoon), zonder dd.
+	cp target/licheerv/fip-licheerv.bin "$OUT/hopos-licheerv-fip.bin"
 }
 
 step "de boards, $JOBS tegelijk (JOBS=)"
