@@ -23,8 +23,12 @@
 #   hopos-o6n-<smaak>.img.gz       image/uefi-run.sh plus tools/mkcard: de
 #   hopos-altra-<smaak>.img.gz     ESP als stick (EFI/BOOT/BOOTAA64.EFI,
 #                                  hopos.cfg, Hop als hopos-stage.elf)
-#   hopos-apple-headless.img       image/apple-m4.sh met de config en Hop
-#                                  ingebakken: het bootobject voor kmutil
+#   hopos-apple-headless.img.gz    geen bootmedium maar een FAT-stick (zoals
+#                                  Go, tag v2.2.8): image/apple-m4.sh met de
+#                                  config en Hop ingebakken als
+#                                  hopos-apple.img, naast install.sh en de
+#                                  README; installeren uit Recovery met
+#                                  `sh /Volumes/HOPOS/install.sh go`
 #   hopos-licheerv-headless.img.gz image/licheerv-agent.sh, met de config
 #                                  in het venster en zonder bewoner
 #   hopos-<board>-<smaak>.flip     image/flip-bundle.sh met HOPOS_STAMP=<versie>
@@ -132,7 +136,13 @@ done
 
 step "apple headless"
 CFG="$HEADLESS" EMBED="$HOP_ELF" sh image/apple-m4.sh
-cp target/apple-m4/hopos-apple.img "$OUT/hopos-apple-headless.img"
+# De stick: het bootobject, de installer en de uitleg op één FAT-partitie
+# (LBA 2048, label HOPOS), zodat er in Recovery niets te typen valt behalve
+# het pad naar install.sh; die zoekt het image naast zichzelf.
+cargo run -q -p mkcard -- -o target/apple-m4/hopos-apple-card.img -size 32 -start 2048 \
+	-label HOPOS -vollabel "target/apple-m4/hopos-apple.img=hopos-apple.img" \
+	"image/apple/install.sh=install.sh" "image/apple/README-m4.txt=README.txt" >&2
+card target/apple-m4/hopos-apple-card.img hopos-apple-headless.img
 flip apple headless 0 ""
 skip "apple headfull: board-apple heeft geen gui-feature"
 
@@ -197,7 +207,7 @@ board and the tail of its MAC (\`rpi4-4c54\`).
 | Radxa Zero 3E | \`hopos-radxa-headless.img.gz\` | \`hopos-radxa-headfull.img.gz\` |
 | Radxa Orion O6N (USB stick) | \`hopos-o6n-headless.img.gz\` | \`hopos-o6n-headfull.img.gz\` (media) |
 | Ampere Altra (USB stick) | \`hopos-altra-headless.img.gz\` | \`hopos-altra-headfull.img.gz\` |
-| Mac mini M4 | \`hopos-apple-headless.img\` (kmutil boot object) | none |
+| Mac mini M4 | \`hopos-apple-headless.img.gz\` (USB stick: image, installer, README) | none |
 | Sipeed LicheeRV Nano | \`hopos-licheerv-headless.img.gz\` | none |
 
 Flash a card or stick: \`gunzip -c hopos-rpi4-headless.img.gz | sudo dd of=/dev/rdiskN bs=4m\`.
@@ -205,6 +215,9 @@ The boot partition mounts afterwards; add \`hopos.node\`, \`hopos.apikey\` or
 your own jobs in \`hopos.cfg\` (the UEFI sticks), \`cmdline.txt\` (the Pi's)
 or the \`append\` line of \`extlinux/extlinux.conf\` (the Radxa). The M4 and
 the LicheeRV carry their config inside the image: rebuild with \`CFG=\`.
+The M4 stick is not a boot medium: write it to a USB drive, boot the mini
+into Recovery and run \`sh /Volumes/HOPOS/install.sh go\` (the README on
+the stick has the steps); from then on the Mac powers on into HopOS.
 
 Kernel flip bundles, \`hopos-<board>-<flavor>.flip\`, replace a running
 kernel without a reboot (docs/flip.md): put one on a web server and
