@@ -87,13 +87,23 @@ truncate -s 64m "$DISK"
 
 # De kern gebruikt geen f-registers: daarop rust de overgang naar een
 # bewoner op de OS-core (cpu/src/riscv/oscore.rs), die f0..f31 niet bewaart.
-# Met een riscv-objdump in het PATH wordt dat hier getoetst.
+# De enige uitzondering is de switcher van de app-harts (__hopos_parkenter
+# tot __hopos_mmode_end, cpu/src/riscv/switch.rs): die bewaart juist de
+# f-registers van zijn bewoners, met de hand geschreven, en telt hier niet
+# mee. Met een riscv-objdump in het PATH wordt dat hier getoetst.
 if command -v riscv64-elf-objdump >/dev/null 2>&1; then
+	SW_LO=$(riscv64-elf-nm "$KERNEL" | awk '$3 == "__hopos_parkenter" { print $1 }')
+	SW_HI=$(riscv64-elf-nm "$KERNEL" | awk '$3 == "__hopos_mmode_end" { print $1 }')
 	# Veld 3 van objdump is het mnemonic (adres, hex, mnemonic, operanden):
-	# zo telt een hexwoord als `fadde7e3` niet mee.
-	FP=$(riscv64-elf-objdump -d "$KERNEL" | awk -F'\t' '$3 ~ /^(fl[dw]|fs[dw]|fmv\.|fcvt|fadd|fsub|fmul|fdiv|fsqrt|fsgnj|fmin|fmax|fmadd|fmsub|fnm|feq|flt|fle|fclass|frcsr|fscsr|frrm|fsrm|frflags|fsflags)/ { n++ } END { print n + 0 }')
+	# zo telt een hexwoord als `fadde7e3` niet mee. Alles min de switcher.
+	fp_count() {
+		riscv64-elf-objdump -d "$@" "$KERNEL" | awk -F'\t' '$3 ~ /^(fl[dw]|fs[dw]|fmv\.|fcvt|fadd|fsub|fmul|fdiv|fsqrt|fsgnj|fmin|fmax|fmadd|fmsub|fnm|feq|flt|fle|fclass|fr?csr|fs?csr|frflags|fsflags)/ { n++ } END { print n + 0 }'
+	}
+	FP_ALL=$(fp_count)
+	FP_SW=$(fp_count --start-address="0x${SW_LO:-0}" --stop-address="0x${SW_HI:-0}")
+	FP=$((FP_ALL - FP_SW))
 	if [ "$FP" != 0 ]; then
-		echo "FAIL: the kern image carries $FP FP instructions; the OS-core switch does not save f0..f31 (cpu/src/riscv/oscore.rs)"
+		echo "FAIL: the kern image carries $FP FP instructions outside the switcher; the OS-core switch does not save f0..f31 (cpu/src/riscv/oscore.rs)"
 		exit 1
 	fi
 fi
