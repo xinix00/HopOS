@@ -19,8 +19,12 @@
 //! Het wisselmoment is een EXPLICIETE yield, net als op ARM: `ecall` uit
 //! S-mode met a7 = 0 en de wektijd in a0 ("hervat me niet vóór deze tik";
 //! zonder dat getal pingpongen twee lege apps op volle snelheid, gemeten
-//! 31-07: allebei 36% van het hart). a7 = 1 is exit. Al het andere is een
-//! fault: mcause en mtval naar de control-page, de bewoner dood.
+//! 31-07: allebei 36% van het hart). a7 = 1 is exit. a7 = 2 is de kick (de
+//! tegenhanger van HVC #6, sinds 02-10): een 1 op de bel van de OS-core
+//! (`SCHED_OS_BELL`, 0 = geen) en meteen terug, zonder beurtwissel, zodat
+//! de kern een frame op de TX-ring nu leest en niet op zijn failsafe van
+//! 1 ms. Al het andere is een fault: mcause en mtval naar de control-page,
+//! de bewoner dood.
 //!
 //! Drie dingen die anders zijn dan op ARM, alle drie architectuur:
 //!
@@ -68,8 +72,8 @@
 use abi::layout::{
     CTX_BOOT_ARG, CTX_BOOT_PC, CTX_CTRL_PA, CTX_FPRS, CTX_GPRS, CTX_OFF, CTX_REGIME, CTX_RESUME,
     CTX_REVOKE, CTX_RING_HEAD_PA, CTX_STATE, CTX_WAKE, CTX_WAKE_NO_PEEK, CtxState, SCHED_CLINT_PA,
-    SCHED_COUNT, SCHED_CURRENT, SCHED_LIST, SCHED_MSIP_PA, SCHED_ROTOR, SCHED_S2_PA, SCHED_SCRATCH,
-    SCHED_SLEEP_CAP, SCHED_TICK_TICKS,
+    SCHED_COUNT, SCHED_CURRENT, SCHED_LIST, SCHED_MSIP_PA, SCHED_OS_BELL, SCHED_ROTOR, SCHED_S2_PA,
+    SCHED_SCRATCH, SCHED_SLEEP_CAP, SCHED_TICK_TICKS,
 };
 
 /// De verschuiving van slot naar kooi-blok (`CAGE_STRIDE` = 64 KB).
@@ -127,6 +131,10 @@ pub struct AppHart {
     /// kern kan het hart niet wekken, en een dispatch wacht op de volgende
     /// ronde van de switcher).
     pub msip: dev::Pa,
+    /// De bel naar de OS-core zoals HET hart hem adresseert: waar de kick
+    /// van een bewoner (`ecall`, a7 = 2) een 1 schrijft (0 = geen bel: de
+    /// app kickt dan niet, `abi::hopabi::IDLE_KICK`).
+    pub kick: dev::Pa,
     /// De langste slaap in tikken (0 = niet slapen: spinnen).
     pub sleep_cap: u64,
     /// De kill-tick in tikken (0 = geen).
@@ -464,6 +472,8 @@ __hopos_mentry:
     add t1, t1, t0
     li t0, {ctxoff}
     add t1, t1, t0
+    li t0, 2
+    beq a7, t0, 46f
     bnez a7, 45f
 
     // De GPR's: xN op CTX_GPRS + 8*(N-1); x2 uit mscratch, x5..x7 uit de
@@ -559,6 +569,22 @@ __hopos_mentry:
     ld t2, {scratch}+16(sp)
     csrrw sp, mscratch, sp
     mret
+
+    // --- de kick (ecall, a7 = 2): de bel van de OS-core, en terug ---------
+    // Geen beurtwissel en geen ctx: alleen t0..t2 waren klad (de scratch).
+    // De publicatie op de TX-ring staat al vóór de ecall (de staart is
+    // device-gemapt); de fence zet de bel erachter.
+46:
+    ld t0, {osbell}(sp)
+    beqz t0, 47f
+    fence iorw, iorw
+    li t1, 1
+    sw t1, 0(t0)
+47:
+    csrr t0, mepc
+    addi t0, t0, 4
+    csrw mepc, t0
+    j 38b
 
     // --- fault --------------------------------------------------------
     // mcause, mtval en vec 1 naar de control-page van de bewoner, mepc,
@@ -928,6 +954,7 @@ __hopos_mmode_end:
     clint = const SCHED_CLINT_PA,
     cap = const SCHED_SLEEP_CAP,
     msip = const SCHED_MSIP_PA,
+    osbell = const SCHED_OS_BELL,
     tick = const SCHED_TICK_TICKS,
     shift = const CAGE_SHIFT,
     ctxoff = const CTX_OFF,

@@ -224,6 +224,9 @@ impl LicheeRv {
         cpu::riscv::switch::AppHart {
             mtimecmp: if little { CLINT_DEV.mtimecmp(0) } else { Pa(0) },
             msip: Pa(0),
+            // Geen bel naar de kern: de CLINT is per core (de mailbox van de
+            // CV181x is de kandidaat, op ijzer te bewijzen).
+            kick: Pa(0),
             sleep_cap: 0,
             tick: if little {
                 cpu::riscv::idle::ns_to_ticks(cpu::riscv::switch::KILL_TICK_NS, TIMEBASE_HZ)
@@ -511,6 +514,7 @@ mod tests {
         assert_eq!(t.tick, 250_000);
         assert_eq!(t.sleep_cap, 0);
         assert_eq!(t.msip, Pa(0));
+        assert_eq!(t.kick, Pa(0));
         assert!(t.resettable);
     }
 }

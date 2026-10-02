@@ -449,6 +449,11 @@ pub const SCHED_ROTOR: u64 = 56;
 /// preemptie: een tick hervat dezelfde bewoner en kijkt alleen of de kern
 /// hem dood wil ([`CTX_REVOKE`]).
 pub const SCHED_TICK_TICKS: u64 = 64;
+/// De bel naar de OS-core zoals DIT hart hem adresseert (RISC-V): de PA
+/// waar de kick van een bewoner (`ecall` met a7 = 2) een 1 schrijft, op
+/// QEMU virt `msip` van hart 0. 0 = geen bel: de kick is dan een no-op en
+/// de kern hoort het frame op zijn failsafe.
+pub const SCHED_OS_BELL: u64 = 72;
 /// De laatst geplande lijst-index (ARM).
 pub const SCHED_CURSOR: u64 = 80;
 /// De lijstlengte (monotoon; 0-bytes zijn gaten).
@@ -498,7 +503,8 @@ pub struct SchedBlock {
     pub rotor: u64,
     /// De kill-tick-periode.
     pub tick_ticks: u64,
-    _pad0: u64,
+    /// De bel naar de OS-core (RISC-V).
+    pub os_bell: u64,
     /// De cursor (ARM).
     pub cursor: u64,
     /// De lijstlengte.
@@ -522,6 +528,7 @@ const _: () = assert!(offset_of!(SchedBlock, scratch) as u64 == SCHED_SCRATCH);
 const _: () = assert!(offset_of!(SchedBlock, current) as u64 == SCHED_CURRENT);
 const _: () = assert!(offset_of!(SchedBlock, rotor) as u64 == SCHED_ROTOR);
 const _: () = assert!(offset_of!(SchedBlock, tick_ticks) as u64 == SCHED_TICK_TICKS);
+const _: () = assert!(offset_of!(SchedBlock, os_bell) as u64 == SCHED_OS_BELL);
 const _: () = assert!(offset_of!(SchedBlock, cursor) as u64 == SCHED_CURSOR);
 const _: () = assert!(offset_of!(SchedBlock, count) as u64 == SCHED_COUNT);
 const _: () = assert!(offset_of!(SchedBlock, list) as u64 == SCHED_LIST);

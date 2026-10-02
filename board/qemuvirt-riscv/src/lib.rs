@@ -251,6 +251,9 @@ impl QemuVirtRiscv {
                 Pa(0)
             },
             msip: CLINT_DEV.msip(hart),
+            // De kick van een bewoner: `msip` van hart 0, de kern (een
+            // gedeelde CLINT, elk hart bereikt elke bel).
+            kick: if hart == 0 { Pa(0) } else { CLINT_DEV.msip(0) },
             sleep_cap: cpu::riscv::idle::ns_to_ticks(cpu::riscv::idle::WFI_CAP_QEMU_NS, hz),
             tick: cpu::riscv::idle::ns_to_ticks(cpu::riscv::switch::KILL_TICK_NS, hz),
             attrs: cpu::riscv::sv39::Attrs::Spec,

@@ -247,6 +247,13 @@ pub const RX_DOOR_ARMED: u64 = 1 << 63;
 /// niet (gemeten 02-09). De kern zet dit niet op een SMP-slot.
 pub const IDLE_YIELD: u64 = 1;
 
+/// [`CTRL_IDLE_MODE`]: de kern hoort de kick van deze app (RISC-V: `ecall`
+/// met a7 = 2; de switcher belt de OS-core en hervat de app meteen, de
+/// rotatie van de OS-core neemt hem als een yield naar nu). Zonder dit bit
+/// kickt de app niet: voor een switcher van vóór 02-10 is elke a7 anders dan
+/// 0 een exit.
+pub const IDLE_KICK: u64 = 2;
+
 /// [`CTRL_FAULT_VEC`]: geen fault gezien sinds de laatste start.
 pub const FAULT_NONE: u64 = 0;
 /// [`CTRL_FAULT_VEC`]: synchroon vanuit EL1 (index 8), een stage-2-fault;

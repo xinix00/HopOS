@@ -64,6 +64,10 @@ const CAUSE_CAGE_VERIFY: u64 = 1 << 62;
 /// Het woord van `a7` (x17) en `a0` (x10) in de GPR's van het ctx-blok:
 /// xN staat op `CTX_GPRS + 8 * (N - 1)`.
 const CTX_A7: u64 = CTX_GPRS + 8 * 16;
+/// `a7` van de kick (`ecall`, de tegenhanger van HVC #6): op de OS-core een
+/// yield naar nu, de kern draait zijn ronde (en leest de TX-ring) en geeft
+/// het hart terug, zoals op arm64.
+const A7_KICK: u64 = 2;
 const CTX_A0: u64 = CTX_GPRS + 8 * 9;
 
 /// De bewaarplaats van de kern tijdens een beurt (`mscratch` wijst erheen):
@@ -315,7 +319,8 @@ fn settle(ctx: Pa, cause: u64, mtval: u64, count: bool) -> Back {
     }
     // Een ecall wijst met mepc naar zichzelf: hervatten op + 4.
     ctx_write(ctx, CTX_RESUME, ctx_read(ctx, CTX_RESUME).wrapping_add(4));
-    if ctx_read(ctx, CTX_A7) != 0 {
+    let a7 = ctx_read(ctx, CTX_A7);
+    if a7 != 0 && a7 != A7_KICK {
         ctx_write(ctx, CTX_STATE, CtxState::Dead.raw());
         tally(&STATS.exits);
         return Back::Exit;
@@ -326,7 +331,12 @@ fn settle(ctx: Pa, cause: u64, mtval: u64, count: bool) -> Back {
         tally(&STATS.exits);
         return Back::Exit;
     }
-    ctx_write(ctx, CTX_WAKE, ctx_read(ctx, CTX_A0));
+    let wake = if a7 == A7_KICK {
+        0
+    } else {
+        ctx_read(ctx, CTX_A0)
+    };
+    ctx_write(ctx, CTX_WAKE, wake);
     ctx_write(ctx, CTX_STATE, CtxState::Saved.raw());
     tally(&STATS.yields);
     Back::Yield
@@ -689,6 +699,12 @@ mod tests {
         assert_eq!(ctx_read(ctx, CTX_RESUME), 0x5000_0014);
         assert_eq!(settle(ctx, CAUSE_INTERRUPT | IRQ_MSI, 0, false), Back::Ipi);
         assert_eq!(settle(ctx, CAUSE_INTERRUPT | 11, 0, false), Back::Irq);
+        // De kick (a7 = 2): een yield naar nu, wat a0 ook zegt.
+        ctx_write(ctx, CTX_A7, A7_KICK);
+        assert_eq!(settle(ctx, CAUSE_ECALL_S, 0, false), Back::Yield);
+        assert_eq!(ctx_read(ctx, CTX_WAKE), 0);
+        assert_eq!(ctx_read(ctx, CTX_RESUME), 0x5000_0018);
+        assert_eq!(ctx_state(ctx), Some(CtxState::Saved));
         // Exit (a7 = 1): dood.
         ctx_write(ctx, CTX_A7, 1);
         assert_eq!(settle(ctx, CAUSE_ECALL_S, 0, false), Back::Exit);

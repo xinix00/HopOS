@@ -342,10 +342,19 @@ zet hem; HopOS doet geen init). Bouw met
   (`STAGE=... ROLE=hop` van het image-script, `HOPOS_LRV_ROLE` in
   build.rs, `staged_role` van het board). De kring op QEMU virt is groen;
   op het board zelf is Hop in slot 1 nog niet gezien.
-- **De kick van een app naar de kern** (de tegenhanger van HVC #6): een TX
-  van een app wacht op de failsafe van de switch (`dial_us` 5,4 ms tegen 2,9
-  op arm64). Een `ecall` met a7 = 2 in de switcher, die `msip` van hart 0
-  zet, is de vorm.
+- **De kick van een app naar de kern op de LicheeRV**: de vorm staat sinds
+  02-10 (`ecall` met a7 = 2; de switcher schrijft een 1 op `SCHED_OS_BELL`,
+  de rotatie van de OS-core neemt hem als een yield naar nu; de app kickt
+  alleen met `IDLE_KICK` op zijn control-page). Op QEMU virt is de bel
+  `msip` van hart 0: appspike `dial_us` van mediaan 7,5 en 9,6 ms naar 4,4
+  en 4,0 ms (tien runs per kant, TCG). De C906L heeft geen bel naar de C906B
+  (de CLINT is per core); de kandidaat is de mailbox van de CV181x
+  (0x0190_0000, PLIC-bron 101 in de vendor-DTS; Linux
+  `drivers/mailbox/cv1800-mailbox.c`: `MBOX_EN_REG(cpu)`, dan `MBOX_SET_REG`
+  0x60 met het kanaalbit, en de ontvanger wist met `MBOX_SET_CLR_REG`).
+  Tot die bewezen is, hoort de kern een app op de 300 µs-poll van de NIC
+  (`net::pump::NIC_POLL`): daarom geen NIC-interrupt op de LicheeRV zonder
+  die bel, anders wacht een TX van een app weer op de failsafe van 1 ms.
 - **SMP-apps** op riscv64: één core per bewoner. Meerdere bewoners op één
   hart kan wel (sinds 3.0.3 telt een kooi niet als core): de switcher
   bewaart sinds 02-10 f0..f31 en `fcsr`, en de kill-tick is op een gedeeld

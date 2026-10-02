@@ -35,14 +35,14 @@ use abi::hopabi::{
     AppStatus, CTRL_CORES, CTRL_ENTRY, CTRL_EXIT_CODE, CTRL_FAULT_ESR, CTRL_FAULT_FAR,
     CTRL_FAULT_VEC, CTRL_HEARTBEAT, CTRL_IDLE, CTRL_IDLE_MODE, CTRL_KILL, CTRL_MEM_SYS,
     CTRL_RAM_SIZE, CTRL_SLOT, CTRL_SMP_REQ, CTRL_STATUS, CTRL_TIMEBASE_HZ, CTRL_WAKES,
-    CTRL_WALL_OFF, IDLE_YIELD,
+    CTRL_WALL_OFF, IDLE_KICK, IDLE_YIELD,
 };
 use abi::layout::{
     self, ABI_CTRL_OFF, ABI_MAP_PAGES, ABI_TAIL, CTRL_STRIDE, CTX_BOOT_ARG, CTX_BOOT_PC,
     CTX_CTRL_PA, CTX_LEN, CTX_REGIME, CTX_REVOKE, CTX_RING_HEAD_PA, CTX_STATE, CTX_UNIT_SLOT,
     CtxState, LINK_BASE, NET_RING_DATA_CAP, PARK_MBOX_LEN, Plan, RING_DATA_CAP, SCHED_CLINT_PA,
-    SCHED_COUNT, SCHED_CURRENT, SCHED_LIST, SCHED_MSIP_PA, SCHED_S2_PA, SCHED_SLEEP_CAP,
-    SCHED_TICK_TICKS, Tail,
+    SCHED_COUNT, SCHED_CURRENT, SCHED_LIST, SCHED_MSIP_PA, SCHED_OS_BELL, SCHED_S2_PA,
+    SCHED_SLEEP_CAP, SCHED_TICK_TICKS, Tail,
 };
 use abi::ring;
 use core::future::Future;
@@ -189,8 +189,8 @@ impl RvCage {
                 ring_bell(&t);
             }
             println!(
-                "cage: hart {hart} (core {core}) in the switcher: wake {:#x}, bell {:#x}, sleep cap {} ticks, kill tick {} ticks, reset {} HOPOS_RV_HART_UP",
-                t.mtimecmp.0, t.msip.0, t.sleep_cap, t.tick, t.resettable
+                "cage: hart {hart} (core {core}) in the switcher: wake {:#x}, bell {:#x}, kick {:#x}, sleep cap {} ticks, kill tick {} ticks, reset {} HOPOS_RV_HART_UP",
+                t.mtimecmp.0, t.msip.0, t.kick.0, t.sleep_cap, t.tick, t.resettable
             );
             if !t.resettable && (t.mtimecmp.0 == 0 || t.tick == 0) {
                 // Go, `HOPOS_CORE_NO_KILL`: geen stille stand.
@@ -333,6 +333,7 @@ impl RvCage {
         part: Region,
         entry: u64,
         t: &AppHart,
+        kick: bool,
     ) -> Result<(Tail, u64, pmp::Encoded), CageError> {
         let ram = app_ram(part).ok_or(err(code::TAIL))?;
         let tail = tail_of(part).ok_or(err(code::TAIL))?;
@@ -348,8 +349,12 @@ impl RvCage {
             // Een app-hart idlet met de yield (a0 = wektijd): een `wfi` van
             // een bewoner wekt nooit (hij draait met mie = 0), en de switcher
             // slaapt dan voor hem op de CLINT (Go, idle_riscv64.go: "de
-            // ecall is zijn enige route naar een wfi").
-            (CTRL_IDLE_MODE, IDLE_YIELD),
+            // ecall is zijn enige route naar een wfi"). Met IDLE_KICK belt
+            // hij de kern na een publicatie (ecall, a7 = 2).
+            (
+                CTRL_IDLE_MODE,
+                IDLE_YIELD | if kick { IDLE_KICK } else { 0 },
+            ),
             // De timebase van de TIME-CSR: RISC-V heeft geen CNTFRQ.
             (CTRL_TIMEBASE_HZ, cpu::riscv::idle::hz()),
         ] {
@@ -449,6 +454,7 @@ fn arm_sched(sched: Pa, cage: u64, t: &AppHart, fresh: bool) {
         (SCHED_S2_PA, cage),
         (SCHED_CLINT_PA, t.mtimecmp.0),
         (SCHED_MSIP_PA, t.msip.0),
+        (SCHED_OS_BELL, t.kick.0),
         (SCHED_SLEEP_CAP, t.sleep_cap),
         (SCHED_TICK_TICKS, t.tick),
     ] {
@@ -567,7 +573,10 @@ impl Cage for RvCage {
         self.forget(s);
         dev::clear(ctx, CTX_LEN as usize);
         dev::push(ctx, CTX_LEN as usize);
-        let (tail, satp, enc) = self.arm_tail(slot, s, part, entry, &t)?;
+        // De kick: op de OS-core een yield naar nu (de rotatie van de kern),
+        // op een app-hart alleen met een bel naar de kern.
+        let kick = first == Core::OS || t.kick.0 != 0;
+        let (tail, satp, enc) = self.arm_tail(slot, s, part, entry, &t, kick)?;
         let ram = app_ram(part).ok_or(err(code::TAIL))?;
         let regime = ctx.add(CTX_REGIME);
         dev::write64(regime.add(REGIME_SATP), satp);

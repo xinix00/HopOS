@@ -118,6 +118,8 @@ where
     // De timebase vóór de eerste klok-lees: op RISC-V komt hij alleen van de
     // control-page (de kern zet hem bij de bouw, `CTRL_TIMEBASE_HZ`).
     clock::adopt_timebase(&app.ctrl());
+    // De kick naar de kern, als de kern hem hoort (RISC-V, `IDLE_KICK`).
+    crate::arch::adopt_kick(app.ctrl().get(abi::hopabi::CTRL_IDLE_MODE));
     exec.set_clock(clock::now_ns);
     clock::start_event_stream();
     app.announce();
