@@ -31,7 +31,7 @@
 #   tools/qemu-test-welcome.sh             TIMEOUT=60 standaard, in seconden
 #   KEEP_LOG=pad tools/qemu-test-welcome.sh   bewaart ook een groene console
 #   KEEP_PAGE=pad tools/qemu-test-welcome.sh  bewaart de pagina zoals curl hem gaf
-#   GO_ELF=pad tools/qemu-test-welcome.sh   een tamago-welcome uit OLD/apps
+#   GO_ELF=pad tools/qemu-test-welcome.sh   een Go-welcome (tamago)
 #                                          als artifact (docs/go-apps.md): de
 #                                          Go-app zegt "serving http://" en
 #                                          kent /healthz in plaats van /health

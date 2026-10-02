@@ -5,9 +5,9 @@ bring-up en diagnose van nieuwe boards: plaats vitals, open de pagina, druk
 op **Run all**, en vergelijk het rapport (knop **Copy report**) met een
 gezond board.
 
-De Rust-port van `OLD/apps/vitals` (Go). De tests meten hetzelfde, met
-dezelfde werklast en dezelfde rekensom, zodat de v3-getallen naast die van
-de Go-generatie liggen (`docs/measurements.md`, tabel Vitals).
+De tests meten hetzelfde als vitals van v2, met dezelfde werklast en
+dezelfde rekensom, zodat de v3-getallen naast die van v2 liggen
+(`docs/measurements.md`, tabel Vitals).
 
 | test | meet | zegt iets over | marker |
 |---|---|---|---|

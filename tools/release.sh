@@ -36,9 +36,9 @@
 # welcome. Die gaan ook naar de rollende release `apps`, waar de gedeelde
 # configs welcome vandaan halen.
 #
-# Optioneel de Go-apps (docs/go-apps.md): staan ~/tamago-go/bin/go en
-# OLD/tools/apps-release.sh er, dan bouwt dat script ze met PUBLISH=0, en
-# gaan ze als <app>-<arch>-tamago.elf mee naar `apps`.
+# Optioneel de Go-apps (docs/go-apps.md): staat ~/tamago-go/bin/go er, dan
+# bouwt go/apps-release.sh ze met PUBLISH=0, en gaan ze als
+# <app>-<arch>-tamago.elf mee naar `apps`.
 #
 # Wat de gebruiker meegeeft: de versie, en HOP_DIR als de hop-repo niet naast
 # deze staat. Een eigen config per machine hoort niet in een publieke
@@ -159,17 +159,15 @@ done
 GO_ELFS=""
 if [ "${GO_APPS:-1}" = 0 ]; then
 	skip "Go-apps: GO_APPS=0"
-elif [ ! -x "$HOME/tamago-go/bin/go" ] || [ ! -f OLD/tools/apps-release.sh ]; then
-	skip "Go-apps: ~/tamago-go/bin/go of OLD/tools/apps-release.sh ontbreekt (docs/go-apps.md)"
+elif [ ! -x "$HOME/tamago-go/bin/go" ]; then
+	skip "Go-apps: ~/tamago-go/bin/go ontbreekt (docs/go-apps.md)"
 else
-	step "Go-apps (OLD/tools/apps-release.sh, PUBLISH=0)"
-	# Niet fataal: de lijst van dat script noemt ook de satellieten van de
-	# easy-repo's, en de Rust-release hangt niet aan de Go-apps.
-	if PUBLISH=0 sh OLD/tools/apps-release.sh; then
-		cp OLD/metal/out/apps/*-tamago.elf "$OUT/"
+	step "Go-apps (go/apps-release.sh, PUBLISH=0)"
+	# Niet fataal: de Rust-release hangt niet aan de Go-apps.
+	if PUBLISH=0 OUT="$OUT" sh go/apps-release.sh; then
 		GO_ELFS=" $OUT/*-tamago.elf"
 	else
-		skip "Go-apps: OLD/tools/apps-release.sh faalde (de reden staat erboven)"
+		skip "Go-apps: go/apps-release.sh faalde (de reden staat erboven)"
 	fi
 fi
 

@@ -153,7 +153,7 @@ kern weigert terwijl Hop nog wacht op zijn FLIP-antwoord, krijgt Hop terug
 | `HOPOS_FLIP_REFUSED sha256 mismatch` | haak | de bytes zijn niet wat de som zegt |
 | `HOPOS_FLIP_REFUSED bundle invalid` | haak | geen HOPRELO1-staart, een afgekapte stroom, een beeld buiten de grenzen, een relocatie die niet klopt |
 | `HOPOS_FLIP_REFUSED bundle carries no switch code sum` | haak | een bundel van versie 1 (alpha.7 en ouder): die kan de switch-code niet laten toetsen |
-| `HOPOS_FLIP_REFUSED flip ABI mismatch` | haak | een bundel van een andere generatie (Go was ABI 2) |
+| `HOPOS_FLIP_REFUSED flip ABI mismatch` | haak | een bundel met een andere flip-ABI (v2 was ABI 2) |
 | `HOPOS_FLIP_REFUSED switch code mismatch` | haak | de EL2-switch-code van de nieuwe kern is een andere dan die waarin de bewoners draaien; zie "De koude flip" |
 | `HOPOS_FLIP_REFUSED image too large` | haak | het beeld past niet in de staging of niet op het koude adres (UEFI: niet in het oude image) |
 | `HOPOS_FLIP_REFUSED same bundle` | haak | deze kern kwam al uit die bundel; een flip naar zichzelf wordt geen lus |
@@ -187,8 +187,7 @@ stierf daar vlak na de landing; de koude boot erna meldde alleen
 komt pas na DHCP en zijn ring ligt in de BSS van de dode kern.
 
 Elke consoleregel gaat daarom ook naar een ring op een vaste plek naast de
-recorder (de tee in `conport.rs`, eerst de doos, dan de UART, zoals Go's
-`conlog.Route`). De vorm (`kern::kernflip::box_open`): een kop van één
+recorder (de tee in `conport.rs`, eerst de doos, dan de UART). De vorm (`kern::kernflip::box_open`): een kop van één
 cacheregel met de magic `HOPBOX02`, de generatie van de schrijver, de
 schrijfpositie (monotoon) en de ringmaat, daarachter 16 KiB ring. Elke
 schrijf gaat eerst met de bytes en dan met de positie naar DRAM (clean en
@@ -202,8 +201,7 @@ geen cache.
   ASCII, de halve eerste regel weg), en een slotregel
   `... HOPOS_FLIP_BLACKBOX_END`. Alleen bij de magic, de eigen ringmaat en
   een generatie; daarna is de doos leeg. Stond er niets:
-  `HOPOS_FLIP_BLACKBOX_EMPTY` (zoals Go's "black box: 0 bytes carried
-  over"), zodat "geen post-mortem" te onderscheiden is van "gewist". Dan pas
+  `HOPOS_FLIP_BLACKBOX_EMPTY`, zodat "geen post-mortem" te onderscheiden is van "gewist". Dan pas
   begint hij een verse doos met zijn eigen generatie (1): ook een koude
   dood staat zo op de volgende koude boot, en een kern drukt nooit zijn
   eigen regels af.
@@ -218,7 +216,7 @@ geen cache.
 | Pi 4, Pi 5 | `0x0F1B_7000` (het blob min 32 KiB) | het laadvenster, in het gat van de boot-scratch tussen de trampoline (`0x0F10_2000`) en het blob (`0x0F1B_F000`), met de recorder (`0x0F10_1000`); de firmware schrijft er alleen de DTB (`0x0F00_0000`) en de initramfs (`0x0F20_0000`) |
 | QEMU virt | `0xB00B_8000` | hetzelfde gat onder `0xB00C_0000`; een QEMU-reset laadt alleen de ROM's terug (de kern op `0x4020_0000`, de staging) |
 | UEFI, O6N, Altra | loader-regio + `0xB_8000` (virt: `0x600B_8000`) | hetzelfde gat, boven de feitenpagina van de stub (+ `0x3000`, 8 KiB) |
-| Radxa Zero 3E | `0x0630_8000` (`slots::BLACK_BOX`, 32 KiB) | het plan had de doos al (uit Go), naast de recorder op `0x0630_1000`, Device |
+| Radxa Zero 3E | `0x0630_8000` (`slots::BLACK_BOX`, 32 KiB) | het plan had de doos al, naast de recorder op `0x0630_1000`, Device |
 | Mac mini M4 | ADMIN + `0xc0_8000` (`slots::BLACK_BOX`, 32 KiB) | idem, naast de recorder; niet op de boot-scratch, want iBoot legt daar het bootobject terug (01-09) |
 | riscv64 | geen (`HOPOS_FLIP_BLACKBOX_NONE`) | nog geen plek die bewezen een reset overleeft |
 
@@ -228,8 +226,7 @@ valt.
 
 ## De boot-guard
 
-Een geflipte kern krijgt twee minuten gratie (`GRACE`, de les van de
-Go-kern: langer blind petten verbergt een kern die hangt, korter verliest
+Een geflipte kern krijgt twee minuten gratie (`GRACE`: langer blind petten verbergt een kern die hangt, korter verliest
 een trage DHCP). Binnen die tijd moeten de bewoners geadopteerd zijn én
 moet de uplink een adres hebben. Dan `HOPOS_FLIP_SETTLED`, en gaat de
 vluchtrecorder leeg: een latere koude boot is geen mislukte flip. Zo niet,

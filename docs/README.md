@@ -4,6 +4,9 @@ Wat er is, hoe je het bouwt, en wat er per board te bewijzen valt. De
 checklists per board zijn de lat voor een dag op het ijzer; elke stap noemt
 de consoleregel die erbij hoort en wat een afwijking betekent.
 
+De IPv6-slotbaan voor Matter/Thread staat in [ipv6.md](ipv6.md), inclusief
+de SDK-API, de bronkopie en de resterende hardwareproef.
+
 ## Bewezen op QEMU (30-09-2026)
 
 | Test | Wat hij bewijst |
@@ -16,7 +19,7 @@ de consoleregel die erbij hoort en wat een afwijking betekent.
 | `SMP=2 sh tools/qemu-test-hop.sh` | hetzelfde met twee cores: kern plus Hop op één core, de app op de andere |
 | `SMP=2 OSCORE=1 sh tools/qemu-test-hop.sh` | de kern verhuist bij boot naar core 1 |
 | `sh tools/qemu-test-welcome.sh` | Hop plaatst welcome met `"ports":{"http":80}`; de kern zet poort 80 door naar het slot, `curl` van de host krijgt de pagina met de bunny en `/health`, en na `DELETE /v1/jobs/welcome` is de poort weer dicht |
-| `GO_ELF=pad sh tools/qemu-test-welcome.sh` | hetzelfde met de tamago-welcome uit `OLD/apps` als artifact: een Go-image met slot-ABI 10 draait ongewijzigd op ABI 1 ([go-apps.md](go-apps.md)) |
+| `GO_ELF=pad sh tools/qemu-test-welcome.sh` | hetzelfde met een Go-welcome (tamago) als artifact: een Go-image met slot-ABI 10 draait ongewijzigd op ABI 1 ([go-apps.md](go-apps.md)) |
 | `sh tools/qemu-test-smp.sh` | een SMP-app: appspike met `cores: 2` krijgt zijn tweede core in de eigen kooi, telt erop, en houdt beide cores na een herstart door Hop |
 | `sh tools/qemu-test-share.sh` | een sharegroep: twee appspikes delen één app-core in coöperatieve rotatie, allebei groen, en een lid dat stopt komt terug naast het levende lid |
 | `sh tools/qemu-test-bench.sh` | de meetketen: Hop plaatst `apps/bench` met poort 80, `tools/netmeter` meet van de host (rtt, storm, in, out), twee apps meten elkaar door de switch, BURN draait, multicast in de node (een bench joint 224.0.0.251, een tweede zendt, de switch floodt, `HOPOS_BENCH_MCAST recv=3`), `hopos.idlestat=1` drukt de meetlat, en een tweede boot doet `hopos.nvmebench=1`; de getallen staan in [measurements.md](measurements.md) |
@@ -45,7 +48,7 @@ en `media`, en de riscv64-boards).
 
 `cargo run -p loc` telt de regels zoals de compiler ze linkt: per board de
 release-build van het image, uit de dep-info de bronbestanden, en dan de
-emmers van de Go-meter (portable per laag, per ISA, per board, lean, gui)
+vaste emmers (portable per laag, per ISA, per board, lean, gui)
 met de toetsen onder `#[cfg(test)]` apart; `-v` noemt de files per emmer.
 
 ## De vlakken
@@ -56,7 +59,7 @@ met de toetsen onder `#[cfg(test)]` apart; `-v` noemt de files per emmer.
 | Kern-flip | [flip.md](flip.md) | de procedure per board, de markers van kern A en kern B, de faalmodi, de boot-guard, de koude weg |
 | Gui | [gui.md](gui.md) | de console op het glas, de framebuffer-grant aan een display-app, de USB-invoer, de beeldketen van de Radxa |
 | Media | [media.md](media.md) | de videocodec van de O6N (Linlon V8), de codec-dienst, de optische drive, de checklist en de meting (24 fps 4K P010) |
-| Meten | [measurements.md](measurements.md) | de lat van de Go-generatie per meting, het commando en de marker, en de lege v3-kolommen per board; `tools/soak.sh` voor uren |
+| Meten | [measurements.md](measurements.md) | de lat van v2 per meting, het commando en de marker, en de lege v3-kolommen per board; `tools/soak.sh` voor uren |
 
 ## Images per board
 
@@ -80,9 +83,8 @@ boot-keten van de Radxa, de donor van de LicheeRV; herkomst en sha256 in de
 `LEESMIJ.txt` ernaast). Elk image-script neemt standaard de gedeelde config
 `image/cfg/hop-config-headless.cfg`; `CFG=` vervangt hem
 ([boards.md](boards.md), "De config"). De kaarten en sticks bouwt
-`tools/mkcard`, de port van Go's mkcard. De Go-generatie is tag
-[v2.2.8](https://github.com/xinix00/HopOS/tree/v2.2.8) van deze repo; een pad "op tag v2.2.8" in deze docs is een pad
-in die boom.
+`tools/mkcard`. Go-apps zoals cloudflared staan in `go/`
+([go-apps.md](go-apps.md)).
 
 Hop zelf komt uit de hop-repo (`agentd-hopos`); de image-scripts bouwen
 hem via `HOP_DIR` en bakken hem in als bewoner. Secure Boot moet uit op de

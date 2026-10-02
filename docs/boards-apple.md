@@ -2,21 +2,17 @@
 
 De Mac mini M4 (Apple t8132, J773g, Mac16,10: 6 E-cores "sawtooth" in
 cluster 0, 4 P-cores "everest" in cluster 1, 24 GB vanaf 1 TiB, een Broadcom
-57762 achter een Apple-PCIe-rootpoort, de SSD achter de ANS-coprocessor) is
-geport van de Go-kern (`OLD/metal/board/apple` met `hop/`, de drivers `aic`,
-`nic/tg3`, `rtkit`, `smc`, `nvme/apple.go`, de lezers `fw/adt`, `fw/xnuboot`,
-`fw/gpt`, en `image/apple-m4.sh` met `image/apple/` op tag v2.2.8) naar Rust.
+57762 achter een Apple-PCIe-rootpoort, de SSD achter de ANS-coprocessor).
 Alles hieronder is op de host getest en bouwt voor het target
 (`image/apple-m4.sh` levert het raw image). Er is geen QEMU-model van de M4;
-niets ervan heeft in Rust op ijzer gedraaid. Het dossier met elke Go-meting
-(28-08 tot 04-09) is `docs/v1/archief/apple-m4.md` op tag v2.2.8; de gedateerde lessen
-staan in het commentaar van de code.
+niets ervan heeft in v3 op ijzer gedraaid. De gedateerde lessen (28-08 tot
+04-09) staan in het commentaar van de code.
 
 ## Wat er is
 
 | Deel | Waar | Getest |
 | --- | --- | --- |
-| ADT-lezer: nodes, properties, paden, `-`/`_` gelijk, de ranges-vertaling, diepte begrensd | `fw/src/adt.rs` | 9 host-tests (de Go-tests geport, plus afkapping op elke byte en een te diepe boom) |
+| ADT-lezer: nodes, properties, paden, `-`/`_` gelijk, de ranges-vertaling, diepte begrensd | `fw/src/adt.rs` | 9 host-tests (plus afkapping op elke byte en een te diepe boom) |
 | boot_args-lezer: RAM-contract, framebuffer, het ADT-adres met de virt-naar-fys-omrekening modulo 2^64 (30-08) | `fw/src/xnuboot.rs` | 3 host-tests met de getallen van 29-08 en de twee vormen van virt_base |
 | GPT: tabel lezen, het grootste gat TUSSEN of NA de partities | `fw/src/gpt.rs` | 5 host-tests (de echte M4-tabel van 30-08) |
 | AIC als `cpu::irq::Controller` (claim = ack, complete = masker open, het 4-bit doel), plus de fast IPI (kick, ack) | `driver/aic` | 6 host-tests op een nep-registerblok |
@@ -27,7 +23,7 @@ staan in het commentaar van de code.
 | Board: bootstub, VHE-ingang, 48-bit-map met PXN, console, boot_args en ADT, cores met klasse, de CPU_ON-haak, AIC, timer-FIQ, fast IPI, PCIe-bring-up, tg3, ANS, SMC, watchdogs, p-states en hun wachter, het config-venster, slot-plan met voorproef | `board/apple` | 21 host-tests (map en PXN, plan, pool uit het contract, tunables, os-core-keuze, config-venster, watchdog-alarm, p-state-plafond, `hopos.cages`) |
 | OS-core-rotatie voor `AppleVhe`: de fast IPI als bel, de ack op EL2, de FIQ als `Back::Timer`/`Back::Ipi`; de Apple-kick in de switcher; de CPU_ON-haak en de SCTLR-wis in `cpu::smp`; de VHE-bewuste event-stream | `cpu/src/el2`, `cpu/src/smp.rs`, `cpu/src/idle.rs` | host-tests (het kick-woord, de vectorindex, de haak, de stream-bits); de gedeelde paden op QEMU (virt, UEFI, UEFI+VHE) |
 | Linkscript: raw image op 0x101_0000_0000, stub op 0, kern op 0x10000 | `hopos/link-apple.ld` | link-asserties; `image/apple-m4.sh` toetst het parameterblok |
-| Loader (m1n1-proxy), meetcyclus, console, installer | `image/apple/` | overgenomen van de Go-meetbank |
+| Loader (m1n1-proxy), meetcyclus, console, installer | `image/apple/` | de meetbank |
 
 ## Het plan
 
@@ -73,13 +69,12 @@ kooien als de voorproef slaagt), `hopos.wd=off`.
 
 De config reist in het image: `CFG=hopos-m4.cfg sh image/apple-m4.sh` bakt
 hem als venster van 4 KB op offset 0xF000 (kopregel `#HOPCFG1
-window=4096 len=...`, de config, `#`-padding: het formaat van Go's
-`image/hopcfg`). Zonder loader (na de installatie) is dat de enige
+window=4096 len=...`, de config, `#`-padding). Zonder loader (na de installatie) is dat de enige
 config. De loader laat het venster staan, tenzij hij zelf een `CFG=`
 krijgt; `BARE=1` laat het ook staan (zo boot de node na `kmutil`). De
 bootregel zegt waar hij vandaan kwam: `cfg: hopos.cfg baked into the
 image`, `... from the loader`, of `cfg: no hopos.cfg ... HOPOS_CFG_NONE`.
-`APP=hop` zonder `CFG=` is luid (Go 25-09: een agent zonder config draaide
+`APP=hop` zonder `CFG=` is luid (25-09: een agent zonder config draaide
 als `hopos-<random>` met een open API).
 
 Een kern-flip legt de nieuwe kern plat over het image, venster incluis, en
@@ -148,10 +143,10 @@ ok`). Op de M4 zelf heeft het nog niet gedraaid: dat is de checklist.
    `board_apple::wdt::{arm, pet, off}` op de primaire van `/arm-io/wdt`,
    30 s op 24 MHz (de klok staat niet in de boom: de regel zegt het).
 9. **De klok en de temperatuur** (`hopos/src/telemetry.rs`): de wachter op
-   de p-states (Go `PStateWatch`, `board_apple::wdt::PStateWatch`) meldt
+   de p-states (`board_apple::wdt::PStateWatch`) meldt
    elke sprong (`HOPOS_APPLE_PSTATE`). De temperatuur staat met
    `hopos.smc=1` één keer in de bootlog (`HOPOS_APPLE_TEMP`); niet
-   standaard, want onder Go kwam het INITIALIZE-antwoord nooit (31-08) en
+   standaard, want op v2 kwam het INITIALIZE-antwoord nooit (31-08) en
    een half opgestarte RTKit-coprocessor die niemand pollt loopt vol. Op de
    tik staat hij niet (elke meting praat de SMC wakker en weer in slaap).
 
@@ -185,7 +180,7 @@ betekent. Onder m1n1 eerst; pas daarna installeren. Bouw met een config:
    HOPOS_OSCORE_UP`. Stil daarna: de nieuwe core kwam niet uit m1n1's
    spin-table of niet door `hopos_smp_entry` (SCTLR-wis, dan het regime);
    een `cores: cpu 0 ... not started` zegt waarom. Een "address size fault,
-   level 0" in het lage DRAM op die core is het open raadsel van Go 29-08
+   level 0" in het lage DRAM op die core is het open raadsel van 29-08
    (alleen onder m1n1; opnieuw na de installatie). Zonder `hopos.oscore`
    blijft de kern op core 6 en is er geen regel.
 7. `boot: HopOS v3.0.0 on apple-m4, EL2, 10 cores (big), 24576 MB DRAM
@@ -265,5 +260,5 @@ betekent. Onder m1n1 eerst; pas daarna installeren. Bouw met een config:
 - Een timer van een bewoner zelf (CNTV of CNTP op EL1 met de interrupt
   aan) is op Apple een FIQ die de kern als device ziet; de bewoners van
   HopOS slapen via de HVC-yield en zetten die niet aan.
-- De framebuffer: iBoot laat er een achter, maar niemand scant hem uit (Go
-  30-08); bewust uit.
+- De framebuffer: iBoot laat er een achter, maar niemand scant hem uit
+  (30-08); bewust uit.

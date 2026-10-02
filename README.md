@@ -2,19 +2,15 @@
 
 **A bare-metal operating system for edge computing. No Linux. One static binary *is* the OS.**
 
-This is HopOS v3, written in Rust. The Go generation (v2.x, built on TamaGo)
-is tag [v2.2.8](https://github.com/xinix00/HopOS/tree/v2.2.8) of this repository, with its own README, docs,
-drivers, images and build scripts; its releases stay tagged and
-downloadable. The Go tree is the
-specification the Rust tree is written from: every register sequence, every
-measurement and every hard-won comment moves over with the code.
+This is HopOS v3, written in Rust. An app whose source is Go, such as
+cloudflared, runs as it is ([docs/go-apps.md](docs/go-apps.md)).
 
-What does not change: the idea. Core 0 runs the kernel. Every app runs on its
+The idea: core 0 runs the kernel. Every app runs on its
 own hardware, inside its own hardware-enforced memory partition, natively on
 its own core or a core it explicitly shares. No shell, no libc, no userland,
 no processes.
 
-What changes: the kernel is mechanism only. HOP, the orchestrator, is the
+The kernel is mechanism only. HOP, the orchestrator, is the
 first resident: an app with one privilege no other app has, the right to
 place, stop and replace apps. The kernel owns the cage, the switch, the
 storage and the clock; HOP owns the policy.

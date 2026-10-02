@@ -1,11 +1,8 @@
 # Raspberry Pi 4 en 5 op HopOS v3
 
-De Pi 4 (BCM2711) en de Pi 5 (BCM2712) zijn geport van de Go-kern
-(`OLD/metal/board/raspi`, `rpi4`, `rpi5`, de drivers `vcmail`, `gicv2`,
-`nic/genet`, `nic/gem`, `brcmpcie`, en `image/rpi4-agent.sh`,
-`rpi5-agent.sh` op tag v2.2.8) naar Rust. Alles hieronder is op de host getest en bouwt
-voor het target; de Pi 4-kern boot bovendien op QEMU `raspi4b` tot de
-executor-tik. Niets ervan heeft in Rust op ijzer gedraaid. De Go-metingen
+Alles over de Pi 4 (BCM2711) en de Pi 5 (BCM2712) hieronder is op de host
+getest en bouwt voor het target; de Pi 4-kern boot bovendien op QEMU `raspi4b` tot de
+executor-tik. Niets ervan heeft in v3 op ijzer gedraaid. De metingen
 (07-07 tot 21-09) staan in het commentaar van de code; deze checklist zegt
 per stap wat de console moet tonen en wat een afwijking betekent.
 
@@ -56,8 +53,8 @@ van een bestaande Pi-kaart. De firmware staat in `image/firmware/rpi4` en
 (VERPLICHT: de stock armstub8 heeft geen PSCI). Pi 5:
 `bcm2712-rpi-5-b.dtb` en `overlays/bcm2712d0.dtbo`.
 
-Nieuw ten opzichte van Go: `hopos.cfg` staat niet meer op de kaart. Het
-`initramfs`-kanaal draagt nu het image van Hop (`hop.elf`), en de config is
+`hopos.cfg` staat niet op de kaart. Het
+`initramfs`-kanaal draagt het image van Hop (`hop.elf`), en de config is
 `cmdline.txt`: `hopos.stage=hop|app` (standaard hop), `hopos.cores=N`,
 `hopos.oscore=` (op de Pi altijd core 0). Het script zet elke regel van
 `CFG=` (standaard `image/cfg/hop-config-headless.cfg`, [boards.md](boards.md))
@@ -106,7 +103,7 @@ Per stap: wat er moet staan, en wat het betekent als het er niet staat.
     INTID 166`. De lijn is een flank (een MSI via de MIP): het board
     registreert hem als `Trigger::Edge` en de dispatcher zet GICD_ICFGR
     vóór de enable (`cpu::irq::enable_as`). `PCIe bring-up failed` met de status in de regel ervoor:
-    RESCAL, PLL of training (de reeks is Go's bewezen probe6-reeks).
+    RESCAL, PLL of training (de bewezen probe6-reeks).
     `RX polled: ...`: de NIC werkt, de MSI-X-weg niet; noteer de reden.
 12. **`slots: cage up HOPOS_CAGE_UP`** en `core 1..3 mailbox Ok(Cold)`.
 13. **`oscore: cpu 0 self-test timer=(Timer, ~1000 us) yield=(Yield, ..
@@ -129,7 +126,7 @@ Per stap: wat er moet staan, en wat het betekent als het er niet staat.
     mpidr=0x1` (Pi 5: `0x100`) `-> Ok(())` en `HOPOS_SLOT_START`. Hangt
     het na `cage: slot 1 built`: geen PSCI (Pi 4: `bl31.bin` ontbreekt of
     `armstub=` staat er niet). `Err(AlreadyOn)` op de Pi 5: de armstub
-    zette de cores al aan; dan een upstream-TF-A als armstub (Go-notitie).
+    zette de cores al aan; dan een upstream-TF-A als armstub.
 15. **Hop**: `slot 1: applib: stage-1 on: RAM write-back, control page
     Normal-NC, rings write-back, 16 KB of tables HOPOS_APP_MMU` als eerste
     regel, dan zijn regels via de servicer, `HOPOS_NODE_IP`, en `curl
@@ -147,13 +144,12 @@ Per stap: wat er moet staan, en wat het betekent als het er niet staat.
     event-stream van EL2 werkt. Staat `sleeps` op 0 of loopt de tik achter:
     de event-stream (CNTHCTL_EL2 in `pi_entry!`).
 17. **Minuten laten draaien met verkeer** (Pi 5): de C1-stepping kan stil
-    bevriezen onder RX-DMA plus fabric-werk (`docs/v1/archief/
-    bcm2712-c1-erratum.md` op tag v2.2.8); noteer de stepping en de tijd tot de freeze.
+    bevriezen onder RX-DMA plus fabric-werk; noteer de stepping en de tijd tot de freeze.
 18. **RNG200** (in de log direct na stap 7): `trng: RNG200 at
     0x107d208000 (BCM2712) online, the kernel DRBG is seeded from rng200
     HOPOS_RNG200_UP` (Pi 4: `0xfe104000 (BCM2711)`). De Pi 4 mag hier tot
     twee seconden staan: de eerste FIFO-woorden na de warm-up komen op de
-    BCM2711 traag (Go 11-07). `trng: WARNING RNG200 ... HOPOS_RNG_INSECURE`
+    BCM2711 traag (11-07). `trng: WARNING RNG200 ... HOPOS_RNG_INSECURE`
     noemt de reden: `no such node in the DTB` (de DTB mist de node, of een
     overlay haalde hem weg), `RNG_CTRL reads 0x... after enabling RBGEN`
     (het blok antwoordt niet), `FIFO stayed empty for 2000 ms after the
@@ -280,8 +276,7 @@ gefikst en op de host en QEMU getoetst, nog niet op ijzer:
 - **`cpu::idle` zet de event-stream in CNTKCTL_EL1**; onder E2H=0 geldt
   voor EL2 CNTHCTL_EL2. De Pi-ingang zet die voor core 0 (1,2 ms op
   54 MHz); andere EL2-boards (O6N, Altra) hebben hetzelfde nodig.
-- **GENET-interrupt** (Pi 4, SPI 157/158): niet bedraad, gepold zoals in
-  Go.
+- **GENET-interrupt** (Pi 4, SPI 157/158): niet bedraad, gepold.
 - **Framebuffer-console**: in de gui-smaak (`GUI=1 sh image/rpi5.sh`, of
   `GUI=1 sh image/flip-bundle.sh rpi5` op een draaiende node), via `FB_ALLOC`
   op de mailbox (board/raspi/src/vcfb.rs). Gemeten 30-09 op de Pi 5:

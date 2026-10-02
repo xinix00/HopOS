@@ -1,16 +1,14 @@
 # RISC-V op HopOS v3: QEMU virt riscv64 en de LicheeRV Nano
 
-De tweede architectuur, geport van de Go-kern (`OLD/metal/board/licheerv`,
-`cpu/mmode`, `cpu/thead`, `kern/cage`, `kern/slots/cage_riscv64.go`,
-`cpu/idle/idle_riscv64.go`, `driver/nic/dwmac`, `image/licheerv-agent.sh` op tag v2.2.8).
-QEMU virt riscv64 is de proefbank, de Sipeed LicheeRV Nano (SG2002, XuanTie
-C906) het board. De Go-metingen (30-07 tot 19-08) staan in het commentaar van
+De tweede architectuur. QEMU virt riscv64 is de proefbank, de Sipeed
+LicheeRV Nano (SG2002, XuanTie C906) het board. De metingen op dit board
+(30-07 tot 19-08) staan in het commentaar van
 de code; deze pagina zegt wat er staat, hoe je het bouwt, en per stap wat de
 console op het ijzer moet tonen.
 
 ## Machine mode, en waarom
 
-HopOS draait op RISC-V in machine mode, zoals de Go-generatie. De kooi is een
+HopOS draait op RISC-V in machine mode. De kooi is een
 PMP-whitelist (begrenzen) plus een Sv39-tabel (verplaatsen), en PMP
 programmeren kan alleen machine mode. Het image neemt daarom de plek van
 OpenSBI in:
@@ -53,8 +51,8 @@ GIC                     PLIC + CLINT
 | Slaap en klok: `wfi` op de eigen `mtimecmp` met MIE dicht, TIME-CSR | `cpu/src/riscv/idle.rs` | QEMU; host-tests |
 | PLIC als `cpu::irq::Controller` | `cpu/src/riscv/plic.rs` | QEMU (virtio-net-lijn); host-tests |
 | TRNG: geen, luid (`HOPOS_RNG_INSECURE`) | `cpu/src/riscv/trng.rs` | |
-| PMP-whitelist als TOR (Go `cage.Encode`) | `cpu/src/riscv/pmp.rs` | 5 host-tests |
-| Sv39-relocatie in 2 MB-blokken (Go `cage.Relocate`), T-Head-attributen | `cpu/src/riscv/sv39.rs` | 4 host-tests |
+| PMP-whitelist als TOR | `cpu/src/riscv/pmp.rs` | 5 host-tests |
+| Sv39-relocatie in 2 MB-blokken, T-Head-attributen | `cpu/src/riscv/sv39.rs` | 4 host-tests |
 | De M-mode-switcher: yield met wektijd, exit, fault, park op de CLINT, de kick als wek, de deurbel (RX), de kill-tick, de intrekking van een slaper, de hercontrole van de lijst bij een koude boot | `cpu/src/riscv/switch.rs` | QEMU: zelftest en appspike |
 | De kooi-lijm: `kern::cage::{Cage, Cores}` over PMP, Sv39 en de switcher (`RvCage`, `RvCores`) | `hopos/src/cage_riscv.rs` | QEMU: appspike twee keer door de lifecycle |
 | De OS-core: bewoners op het hart van de kern, in zijn idle (de overgang M naar S en terug, de rotatie over sched-blok 0, de wekker op de deadline) | `cpu/src/riscv/oscore.rs`, `idle.rs` (`RvSleeper::host`) | QEMU: zelftest bij elke boot, Hop als bewoner |
@@ -136,7 +134,7 @@ op 30-09 teruggevonden en gehasht:
 | `donor-fip.bin` (440832 bytes) | Release `20260114` van [sipeed/LicheeRV-Nano-Build](https://github.com/sipeed/LicheeRV-Nano-Build/releases/tag/20260114), asset `2026-01-14-16-03-d4003f.tar.xz`; daarin `2026-01-14-16-03-d4003f.img`, partitie 1 (FAT16, type 0x0C, LBA 1 tot 32768, 16 MiB), het bestand `fip.bin` in de root. Naast hem staan daar `boot.sd`, `ver` (`2026-01-22-14-17-d4003f.img`) en de vlagbestanden. | `d85e68836f57a9fcb1bbfba3c1ccf93d1b062ac168305d7f0cc83a72a796c6b9` |
 | `fiptool.py` (25165 bytes) | Dezelfde repo, branch `main`: `fsbl/plat/cv181x/fiptool.py` (niet de `cv180x`-versie ernaast, die een ander hash heeft). | `cc1d37d0d8fbcb3e6180c0403bcf4fa5c7038306be13779f3b8b948915084bf5` |
 
-Dit is de donor van de Go-generatie; sinds 02-10 staat hij in de repo
+Dit is de donor; sinds 02-10 staat hij in de repo
 (`image/firmware/licheerv/`), en het script vindt hem daar zelf:
 
 ```sh

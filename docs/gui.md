@@ -1,8 +1,6 @@
 # Het gui-vlak
 
 Wat HopOS v3 met een scherm, een toetsenbord en een muis doet, en wat niet.
-De Go-generatie is de specificatie (`OLD/metal/driver/fb`, `OLD/metal/gui`
-en `docs/v1/archief/gui-ontwerp.md` op tag v2.2.8); dit is de stand van de Rust-port.
 
 ## De beslissingen
 
@@ -21,8 +19,7 @@ en `docs/v1/archief/gui-ontwerp.md` op tag v2.2.8); dit is de stand van de Rust-
    een kooi. Een xHCI is een bus-master en er is geen IOMMU: die blijft van
    de kern, en de app krijgt de invoer als stroom (06-08).
 4. **Kaal is kaal.** Zonder de feature `gui` linkt de binary geen regel
-   display-code en is elk board headless (Go: 183 KB voor de hele
-   gui-smaak op de Radxa, 06-08).
+   display-code en is elk board headless.
 
 ## Bouwen
 
@@ -74,14 +71,13 @@ De USB-invoer per board (`Board::usb_hosts`, `board/<x>/src/usb.rs`):
 - **Radxa (HDMI).** 1920x1080p60 uit de eigen keten: PD_VO aan via de
   PMU, de HPLL en de VOP2-klokken, de VOP-IOMMU uit, VP0 met Smart0 scant
   `FB_RAM` (0x0700_0000, 8 MB, Normal-NC, het PA-plan van het board), dan
-  DW-HDMI met de PHY en de frame composer (DVI, geen infoframes, zoals
-  Go). De keten drijft altijd 1080p60 en leest geen EDID, zoals Go. De
+  DW-HDMI met de PHY en de frame composer (DVI, geen infoframes).
+  De keten drijft altijd 1080p60 en leest geen EDID. De
   console krijgt 16x16-cellen (120x67). Regels: `display:
   1920x1080p60 on HDMI (sink attached: true) HOPOS_DISPLAY_UP`, dan `fb:
   console on 1920x1080 ... HOPOS_FB_CONSOLE`. Faalt een laag, dan zegt de
   regel welke, met de registers van die laag (`HOPOS_DISPLAY_FAIL`); de
-  console tekent dan in een buffer die niemand uitscant (Go: de buffer
-  blijft bruikbaar voor `/kvm`). `HOPOS_DISPLAY_NOLATCH` = VP0 nam de
+  console tekent dan in een buffer die niemand uitscant. `HOPOS_DISPLAY_NOLATCH` = VP0 nam de
   config-done niet over.
 - **Pi 4 en Pi 5 (HDMI via de firmware).** De firmware zet het beeld aan;
   wij vragen er een buffer van via de mailbox. Let op de diepte: GEMETEN
@@ -101,7 +97,7 @@ De USB-invoer per board (`Board::usb_hosts`, `board/<x>/src/usb.rs`):
 ## De grant
 
 Een job vraagt het glas met `GUI=display` in zijn env; dat is wat de kern
-leest (`FB=1`, de Go-vorm, werkt ook). Hop's `StartSpec` draagt geen eigen
+leest (`FB=1` werkt ook). Hop's `StartSpec` draagt geen eigen
 `gui`-veld (hop/runner, 29-09): de jobspec zet het met
 `"env":{"GUI":"display"}`, en Hop geeft de env ongewijzigd door. De kern
 geeft de houder in de env:
@@ -139,10 +135,7 @@ de checklist).
 
 ## De display-app
 
-In Go is het `cmd/display` in hop-os-surf: de compositor die `/screen.png`,
-`/kvm` en `POST /input` serveert, en met `FB_*` in de env naar het glas
-blit (`fbblit.go`). In Rust is het `apps/display`, een gewone app op
-`applib`, teruggebracht tot wat het glas en de invoer bewijzen: een
+`apps/display` is een gewone app op `applib`, teruggebracht tot wat het glas en de invoer bewijzen: een
 achtergrond, een klok, de tellers, de laatste tien invoerregels en een
 cursor. Geen compositor, geen `/screen.png`, geen `/kvm`. Wat hij van
 `applib` gebruikt (`applib::fb`):
@@ -243,7 +236,7 @@ De keten, na het netwerk (`hopos::gui::start_usb_input`):
    regel).
 
 De les van 29-09 op QEMU: de driver schreef 64-bit registers hoog-eerst
-(de Go-keuze, omdat het lage woord laat latchen), maar `qemu-xhci` latcht
+(omdat het lage woord laat latchen), maar `qemu-xhci` latcht
 CRCR en ERSTBA op het hoge woord (Linux schrijft laag-dan-hoog). De
 controller haalde zijn eerste commando van adres 0 en zette HCE; elke
 Enable Slot bleef zonder completion. `write64` schrijft nu hoog, laag,
@@ -321,7 +314,7 @@ Elke stap met de consoleregel die erbij hoort.
   verkeerd gelezen adres).
 - [ ] Pi 5, USB: zonder `usb: the RP1 link is down` (de NIC-probe traint
   hem); `usb: rp1-usb0 xHCI ...` en `rp1-usb1`, hun PORTSC-regels, en een
-  toetsenbord (Go 06-08: een Logi Bolt gaf toetsenbord én muis op één
+  toetsenbord (06-08: een Logi Bolt gaf toetsenbord én muis op één
   dongle) als `keyboard` en `mouse`.
 - [ ] Pi 4, USB, KOUD geboot: `usb: vl805 firmware 0x... loaded by the
   VideoCore after N us (attempt 1, reply 0x...)` (of `already loaded` na
@@ -358,10 +351,9 @@ Elke stap met de consoleregel die erbij hoort.
 
 - Alles buiten QEMU is gebouwd en niet gedraaid: de O6N-parser toetst
   tegen de vastgelegde DSDT, de Pi's en de Radxa alleen tegen hun
-  datasheet en de Go-bedrading. De VL805-handshake en de
-  `highmem`-gigabyte van de Pi 4 zijn nieuw ten opzichte van Go.
+  datasheet.
 - Interrupts: elke controller heeft een `irq` in zijn `UsbHost`, maar de
-  driver pollt (elke 4 ms, zoals Go); de lijnen (RP1-MSI-X via de MIP, de
+  driver pollt (elke 4 ms); de lijnen (RP1-MSI-X via de MIP, de
   GIC-SPI's van de Radxa, de `_CRS` van de O6N) zijn nog niet bedraad.
 - Opslag op USB: de manager meldt een drive (`mass storage vid:pid`), maar
   de binary heeft nog geen verzoekenrij voor `BulkReq` en geen
@@ -373,5 +365,5 @@ Elke stap met de consoleregel die erbij hoort.
 - `tools/qemu-uefi-test.sh` heeft nog geen `GUI=display`-stand; de
   UEFI-keten is met de hand gedraaid (zie de checklist).
 - De O6N-toets dat het variabelen-RAM van de firmware in de ACPI-RAM van de
-  EFI-geheugenkaart ligt (Go deed dat); het UEFI-board geeft die kaart
+  EFI-geheugenkaart ligt; het UEFI-board geeft die kaart
   niet door.

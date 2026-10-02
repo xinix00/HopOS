@@ -3,9 +3,8 @@
 Stand 29-09-2026, nacht (interrupts over PCI, watchdog, klok en thermiek
 erbij). Wat er voor de Radxa Orion O6N en de Ampere Altra
 in v3 gebouwd is, wat je bij de eerste boot op de console hoort te zien, wat
-er nog niet is, en wat je meet. De lat is de contractmatrix van de Go-kern
-(`docs/support.md` op tag v2.2.8): een v3-board is pas klaar als het op elk gemeten
-punt minstens doet wat de Go-kern deed.
+er nog niet is, en wat je meet. De lat is die van v2 ([measurements.md](measurements.md)):
+een v3-board is pas klaar als het op elk gemeten punt minstens doet wat v2 deed.
 
 ## De config (alle boards)
 
@@ -56,7 +55,7 @@ interrupts over PCI. Toets vóór je naar het board loopt: die test groen, en
 
 ## Interrupts over PCI, watchdog, klok en thermiek (alle UEFI-boards)
 
-Wat de Go-kern op UEFI nooit had: MSI-X. Een PCIe-device krijgt nu, in deze
+MSI-X. Een PCIe-device krijgt, in deze
 volgorde (`board_uefi::irq`, `hopos.nicirq=auto`):
 
 1. **MSI-X via de GICv3-ITS** (`driver_gicv3::its`): de ITS uit de MADT, zijn
@@ -70,7 +69,7 @@ volgorde (`board_uefi::irq`, `hopos.nicirq=auto`):
 2. **INTx uit de `_PRT`** van de host-bridge (`fw::aml`: een minimale lezer
    die alleen statische `_PRT`-pakketten leest en een methode of een
    link-device luid weigert), na de swizzle door de bridges. Op de O6N zegt
-   de DSDT precies wat de Go-tabel uit de device tree wist (host-test tegen
+   de DSDT precies wat de device tree zegt (host-test tegen
    de echte DSDT: 477 voor bus 0x30, en de vier andere root-poorten).
 3. **Pollen** op 300 µs, met de reden op de regel.
 
@@ -89,8 +88,8 @@ HOPOS_TICK 2 sleeps=1120 polls=2070 irq(timer=0 nic=17 other=0) os(...) temp=-
 Zonder ITS: `HOPOS_ITS_NONE`; LPI's die al aan stonden met andermans tabel:
 `HOPOS_ITS_FAIL` (EnableLPIs is eenmaal gezet vaak niet terug te zetten).
 
-**De watchdog** (`hopos::watchdog`, het beleid in `kern::watchdog` met de
-policy-tests van Go naam voor naam): de SBSA-watchdog uit de GTDT, 12 s
+**De watchdog** (`hopos::watchdog`, het beleid in `kern::watchdog` met zijn
+policy-tests): de SBSA-watchdog uit de GTDT, 12 s
 gevraagd, aaien elke 2 s. Fase 1 blind tot het levensteken (het net op, en
 als Hop op de node woont zijn heartbeat die loopt), op een flip-boot
 hoogstens twee minuten op de rauwe teller; fase 2 alleen op bewijs.
@@ -113,7 +112,7 @@ SMCCC TRNG van TF-A op de Altra, en anders jitter (EDK2 op QEMU). Tot
 30-09 zaaide dit board niets: de O6N bootte zonder één `trng:`-regel en
 de DRBG bleef ongeseed. De verwachte regels:
 
-Een UEFI-board zonder FEAT_RNG en zonder SMCCC-TRNG (de O6N: de Cix heeft geen van beide, 30-09) kan met `hopos.efirng=1` in hopos.cfg de TRNG achter de firmware gebruiken: de stub vraagt vóór ExitBootServices 64 bytes aan het EFI_RNG_PROTOCOL (wat Linux' `efi_get_random_bytes` ook doet) en de kern zaait zijn DRBG daarmee als bron `efi-rng` (`HOPOS_RNG_EFI_UP`). Alleen op verzoek: Go zag op 13-07 een firmware die in dat protocol bleef hangen. Na een flip is de firmware weg en zaait de kern weer uit de CPU.
+Een UEFI-board zonder FEAT_RNG en zonder SMCCC-TRNG (de O6N: de Cix heeft geen van beide, 30-09) kan met `hopos.efirng=1` in hopos.cfg de TRNG achter de firmware gebruiken: de stub vraagt vóór ExitBootServices 64 bytes aan het EFI_RNG_PROTOCOL (wat Linux' `efi_get_random_bytes` ook doet) en de kern zaait zijn DRBG daarmee als bron `efi-rng` (`HOPOS_RNG_EFI_UP`). Alleen op verzoek: op 13-07 bleef een firmware in dat protocol hangen. Na een flip is de firmware weg en zaait de kern weer uit de CPU.
 
 ```
 trng: rndr online, the kernel DRBG is seeded from rndr (FEAT_RNG) HOPOS_RNG_RNDR_UP                  (O6N)
@@ -169,8 +168,8 @@ pint, `hopos.mhz=` klemt het plafond.
 
 ### EL2: de hele kern onder VHE (E2H = 1)
 
-Op de Cortex-A720 stierf een EL1 onder nVHE binnen een halve seconde (Go,
-17-09), dus de O6N draait VHE, en niet alleen in de switcher van de
+Op de Cortex-A720 stierf een EL1 onder nVHE binnen een halve seconde
+(17-09), dus de O6N draait VHE, en niet alleen in de switcher van de
 app-cores: de hele kern draait onder E2H = 1 (`board-o6n` zet altijd
 `board-uefi/vhe` aan, `board/uefi/src/el2.rs`). De ingang zet E2H met de
 MMU nog uit en schrijft TCR_EL2 en SCTLR_EL2 in de vorm van TCR_EL1 en
@@ -259,12 +258,12 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
   als slot.
 - Twee poorten tegelijk (de eerste ondersteunde wint), VPU en USB (media/gui).
 
-### Wat je meet (lat: L74-L83 van de Go-kern)
+### Wat je meet (lat: L74-L83 van v2)
 
 1. Boot tot `HOPOS_NET_UP` en `HOPOS_FS_UP`; noteer de variant (XID) en de
    linksnelheid.
-2. Netwerk gepold: rtt p50 (Go gepold 160-168 µs) en doorvoer M4 ↔ O6N (Go
-   met IRQ 112-117 MB/s). Pomp-rondes per seconde idle (Go gepold 3333/s).
+2. Netwerk gepold: rtt p50 (v2 gepold 160-168 µs) en doorvoer M4 ↔ O6N (v2
+   met IRQ 112-117 MB/s). Pomp-rondes per seconde idle (v2 gepold 3333/s).
 3. NVMe: 1 GiB schrijven en teruglezen met positie-afhankelijke inhoud;
    MB/s beide kanten; `slowest_ns`. Herstart: hopfs herstelt (`restored`).
 4. Core-klassen: klopt de indeling met het ijzer (4× A520, 8× A720)? Is
@@ -274,7 +273,7 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
 6. Interrupts: `nic=` in de tik tegen de pakketten; rtt p50 met MSI-X tegen
    INTx (`hopos.nicirq=intx`) tegen gepold (`off`); geen `stray`-regel.
 7. Klok: `HOPOS_CLOCK_EDGE` naar quiet na 30 s idle, en binnen ~20 ms terug
-   naar vol onder last (Go L83: 867 tegen 267 Msteps/s).
+   naar vol onder last (v2 L83: 867 tegen 267 Msteps/s).
 8. Watchdog: armed-regel (de echte timeout), `HOPOS_CANARY_LIVE`; dan de
    kabel eruit tot `HOPOS_CANARY_MISS` en de reset (de O6N-refresh: WRR
    werkt daar niet, WOR opnieuw schrijven wel).
@@ -313,13 +312,13 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
   onbewezen). `hopos.nicirq=msix` is een experiment, geen profiel.
 - **De NVMe-lijn**: zoals op de O6N (synchroon blokcontract).
 - Het geheugenplan is dat van `board-uefi`: of de pool de ~300 GB boven de
-  512 GB haalt (Go 15-07: 1,62 GB zonder de hoge map), zegt de bootregel van
+  512 GB haalt (v2 15-07: 1,62 GB zonder de hoge map), zegt de bootregel van
   `board-uefi`.
 
 ### Wat je meet
 
 1. Boot tot `HOPOS_NET_UP`/`HOPOS_FS_UP`; de igb-variant en de link.
-2. Doorvoer gepold (Go: inbound 5 MB/s met een ring van 64, dus nu met 256
+2. Doorvoer gepold (v2: inbound 5 MB/s met een ring van 64, dus nu met 256
    opnieuw meten) en rtt p50/p99.
 3. NVMe zoals op de O6N; de BAR ligt hoog: klopt `map_device`?
 4. Het aantal cores en de pool-grootte tegen de firmware-memory-map.
