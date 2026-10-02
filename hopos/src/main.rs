@@ -42,7 +42,7 @@ use board::Board;
 use board::heap::Heap;
 use board::stage::StagedRole;
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use cpu::println;
 use executor::Executor;
 use glue::{DevMem, KernConsole};
@@ -357,6 +357,7 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     let node_cfg = kern::nodecfg::NodeCfg::parse(&hop_cfg);
     conport::enable(kern::nodecfg::console_enabled(&node_cfg));
     REPLAY_AT.store(kern::nodecfg::replay_after(&node_cfg), Relaxed);
+    TICK_LOG.store(node_cfg.one("hopos.tick") == "1", Relaxed);
 
     // Het netwerkvlak (net.rs): de pomp op de NIC, de switch, poort 0 met
     // de node-stack, DHCP en de system-listener. Zonder NIC draait de kern
@@ -582,6 +583,8 @@ fn stack_high_water() -> u64 {
 /// `hopos.replay=N` (kern::nodecfg): de tik waarop de kern het begin van zijn
 /// console herhaalt; 0 = nooit.
 static REPLAY_AT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// `hopos.tick=1`: de tikregel elke seconde op de console, niet alleen de eerste drie.
+static TICK_LOG: AtomicBool = AtomicBool::new(false);
 
 async fn tick(exec: &'static Executor) {
     let start = exec.now();
@@ -636,6 +639,12 @@ async fn tick(exec: &'static Executor) {
         let long_us = o.longest.swap(0, Relaxed) / (OS_HZ() / 1_000_000).max(1);
         let sw = &net::STATS;
         let stack_kb = stack_high_water() / 1024;
+        // De eerste drie tikken altijd (de QEMU-toetsen lezen HOPOS_TICK 3),
+        // daarna alleen met `hopos.tick=1`: een node op het LAN hoeft zijn
+        // console niet elke seconde vol te zetten (Derek, 02-10).
+        if n > 3 && !TICK_LOG.load(Relaxed) {
+            continue;
+        }
         println!(
             "HOPOS_TICK {n} late_ms={late_ms} busy_ms={busy_ms} sleeps={} polls={} irq(timer={} nic={} other={}) os(in={} irq={} ipi={} timer={} yield={} exit={} fault={} idle={} res_ms={} kicks={}) turn(last={}:{} long_us={long_us}) stack_kb={stack_kb} sw(door={} timer={} rxfull={} rxdrop={} big={} noroute={} txdrop={} flowfull={} natin={} natmiss={}) temp={}",
             s.sleeps.load(Relaxed),

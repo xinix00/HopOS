@@ -66,6 +66,10 @@ case "$VERSION" in
 	exit 64
 	;;
 esac
+# De banner van de kern ("runtime ... (HopOS vX)") komt uit de workspace-versie;
+# die moet dezelfde zijn als de release (02-10: 3.0.1 zei v3.0.0).
+WS="$(sed -n 's/^version = "\(.*\)"/\1/p' "$DIR/Cargo.toml" | head -1)"
+[ "$WS" = "$VERSION" ] || { echo "release $VERSION: Cargo.toml [workspace.package] version is $WS; zet die eerst gelijk" >&2; exit 65; }
 OUT="$DIR/target/release-$VERSION"
 NOTES="$DIR/target/release-$VERSION.notes.md"
 HEADLESS="$DIR/image/cfg/hop-config-headless.cfg"

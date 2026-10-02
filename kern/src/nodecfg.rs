@@ -34,8 +34,9 @@
 //! `hopos.*`-tokens van de bootargs (de Pi's, de Radxa, QEMU). De eerste
 //! waarde wint, dus het bestand wint van de bootargs (Go:
 //! `rk3566.BootParam`). Alleen QEMU, dat geen bootmedium heeft, krijgt
-//! voor Hop [`QEMU_CFG`] erachter (Go: `board_virt.go`); een board met een
-//! bootmedium krijgt nooit een stille `hopos.insecure=1`.
+//! voor Hop [`QEMU_CFG`] erachter (Go: `board_virt.go`). Zonder
+//! `hopos.apikey` is een node open (API en console, [`insecure`]): hij
+//! draait uit de doos, ook als zijn config niet aankomt; een sleutel sluit.
 //!
 //! # De init-jobs: env, niet een bestand
 //!
@@ -274,7 +275,20 @@ pub fn console_enabled(cfg: &NodeCfg<'_>) -> bool {
     match cfg.one("hopos.console") {
         "1" | "on" => true,
         "0" | "off" => false,
-        _ => cfg.one("hopos.insecure") == "1",
+        _ => insecure(cfg),
+    }
+}
+
+/// Open API en console: `hopos.insecure=1` zet het aan, `=0` uit; zonder
+/// die sleutel is een node zonder `hopos.apikey` open (02-10: een node moet
+/// uit de doos draaien, ook als zijn config niet aankomt), met een sleutel
+/// dicht.
+#[must_use]
+pub fn insecure(cfg: &NodeCfg<'_>) -> bool {
+    match cfg.one("hopos.insecure") {
+        "1" => true,
+        "0" => false,
+        _ => cfg.one("hopos.apikey").is_empty(),
     }
 }
 
@@ -365,7 +379,7 @@ fn base(out: &mut String, cfg: &NodeCfg<'_>, f: &Facts<'_>) -> fmt::Result {
     }
     // Het vlag gaat mee zoals hij er staat, ook naast een sleutel: Hop
     // beslist (de sleutel wint) en zegt het zelf.
-    if cfg.one("hopos.insecure") == "1" {
+    if insecure(cfg) {
         writeln!(out, "HOPOS_INSECURE=1")?;
     }
     for (from, to) in S3_KEYS.iter().chain(CLUSTER_KEYS.iter()) {
@@ -419,7 +433,10 @@ mod tests {
         assert!(on("hopos.insecure=1\n"));
         assert!(!on("hopos.console=0\nhopos.insecure=1\n"));
         assert!(on("hopos.console=on\n"));
-        assert!(!on(""));
+        // Zonder sleutel is een node open, en dus ook zijn console.
+        assert!(on(""));
+        assert!(!on("hopos.apikey=geheim\n"));
+        assert!(!on("hopos.insecure=0\n"));
         // De bootargs vullen aan wat het bestand niet zegt.
         assert!(on(&text("hopos.node=a\n", "hopos.console=1")));
         assert!(!on(&text("hopos.console=off", "hopos.console=1")));
@@ -584,6 +601,9 @@ mod tests {
         let b = build(&NodeCfg::parse(""), &FACTS).unwrap();
         assert_eq!(b.get("HOPOS_NODE"), Some("hopos-1"));
         assert_eq!(b.get("HOPOS_CLUSTER"), Some("hopos"));
+        // Open uit de doos: zonder sleutel komt de vlag mee, met sleutel niet.
+        assert_eq!(b.get("HOPOS_INSECURE"), Some("1"));
+        let b = build(&NodeCfg::parse("hopos.apikey=geheim\n"), &FACTS).unwrap();
         assert_eq!(b.get("HOPOS_INSECURE"), None);
     }
 }
