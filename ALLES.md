@@ -200,8 +200,10 @@ node heeft er nog geen gedraaid.
       zijn niet aangeraakt). Gedaan 02-10 ochtend op de Pi 4 (OP1: adoptie
       2 van 2, watchdog één keer, vitals cpu, app naar app 450) en de Radxa
       (OP1: adoptie 2 van 2, het glas 1080p60 zonder edid-regel, app naar
-      app 269); de Pi 5 stierf op de flip (zie daar). Nog te doen: M4, O6N,
-      Altra, LicheeRV. Eén flip per board van main en kijken naar:
+      app 269) en de O6N (OP1: twaalf cores, Hop in de OS-core-rotatie,
+      app-cores 11, Lumen en bench overgenomen, de Lexar via board_uefi::pcie
+      op 1 MiB); de Pi 5 stierf op de flip (zie daar). Nog te doen: M4 (in
+      gebruik door een andere sessie met Spin), Altra, LicheeRV. Eén flip per board van main en kijken naar:
       M4: start_one en de vectoringang 8 (cpu), de flip-boot-watchdog
       (één keer wapenen, alleen HOPOS_BOOT_GUARD), core-class big op een
       P-core, plaatsing en flip met de ene DevMem, de zwarte doos, mpidr uit
