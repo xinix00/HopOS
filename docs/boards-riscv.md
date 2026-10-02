@@ -64,6 +64,7 @@ GIC                     PLIC + CLINT
 | dwmac (DWMAC1000, 3.x) met elke descriptor en buffer op een eigen cacheline | `driver/nic/dwmac` | 26 host-tests |
 | Linkscript | `hopos/link-riscv.ld` (build.rs zet de basis per board) | |
 | FIP uit de donor, gehasht, met `hopos.cfg` en appspike erin | `image/licheerv-agent.sh` | niet op ijzer |
+| De koude kern-flip: het app-hart uit het image (resetblok of de uit-stub van de switcher), de M-mode-trampoline, de bundel (`virt-riscv`, `licheerv`) | `hopos/src/flip.rs`, `cpu/src/el2/chain.rs`, `cpu/src/riscv/switch.rs` (`off_stub`), `image/flip-bundle.sh` | QEMU: `tools/qemu-riscv-test-flip.sh`; niet op ijzer |
 
 ## Bouwen en draaien
 
@@ -73,6 +74,7 @@ cargo build --target riscv64gc-unknown-none-elf -p appspike
 sh tools/qemu-riscv-test.sh               # boot, kooi-zelftest, appspike in slot 1 en 2, de toets van buiten
 APP= sh tools/qemu-riscv-test.sh          # alleen de boot-poort
 sh tools/qemu-riscv-test-hop.sh           # de kring: Hop op hart 0, een jobspec, appspike op hart 1, de herstart
+sh tools/qemu-riscv-test-flip.sh          # de koude kern-flip met `hop flip --cold` (docs/flip.md, "riscv64")
 
 sh image/licheerv-agent.sh                                  # target/licheerv/fip-licheerv.bin
 CFG=~/lrv.cfg APP=appspike sh image/licheerv-agent.sh /dev/diskN   # met config en appspike, op de kaart
@@ -335,6 +337,37 @@ zet hem; HopOS doet geen init). Bouw met
       een regel die de kern of de switcher niet veegde (de C906L is niet
       coherent met de C906B).
 
+## De koude flip op de LicheeRV
+
+Een nieuwe kern over het net in plaats van via de SD-kaart (docs/flip.md,
+"riscv64"; alleen koud). Op de Mac:
+
+```sh
+HOPOS_STAMP=<naam> sh image/flip-bundle.sh licheerv    # Hop van tools/hop-build.sh, of STAGE=<hop.elf>
+cd target && python3 -m http.server 8000
+hop --agent <node>:8080 flip http://<mac>:8000/hopos-licheerv.flip $(cat target/hopos-licheerv.flip.sha256) --cold
+```
+
+Zonder `CFG=` krijgt de nieuwe kern het config-venster van de draaiende
+(`HOPOS_FLIP_CFG`). Op de console (TCP 5555 of de UART), in volgorde:
+`HOP_FLIP_COLD_STOP`, `HOPOS_FLIP_COLD_ASKED`, `HOPOS_FLIP_CFG`,
+`HOPOS_FLIP_STAGED ... staged at 0x86900000, cold`, `HOPOS_FLIP_COLD
+stopped=N cores_off=1` (de C906L in reset), `HOPOS_FLIP_JUMP gen=G`, dan de
+bunny, `HOPOS_FLIP_BOOT gen=G HOPOS_FLIP_COLD_BOOT`, `HOPOS_BOOT gen=G
+stamp=<naam>`, `HOPOS_RV_HART_UP` met `reset true` (de C906L uit reset),
+`HOPOS_HOP_START`, `HOP_UP` en `HOPOS_FLIP_SETTLED`. De TCP-console valt
+weg met de sprong en komt terug na DHCP; wat ertussen gebeurt staat alleen
+op de UART (er is op riscv64 nog geen zwarte doos).
+
+Wat alleen het ijzer bewijst: de trampoline op de C906 (`th.dcache.ciall`
+en `th.icache.iall` vóór en na de kopie), de C906L die uit een reset komt
+die de oude kern vasthield, de DW-watchdog die doorloopt over de sprong
+(de oude kern aait vlak ervoor, de nieuwe wapent hem meteen als
+boot-guard), en een node waarvan de pool vol is: de bundel (10,7 MB) moet
+eerst in een partitie passen, dus haal jobs weg als Hop "out of memory"
+meldt. Faalt de nieuwe kern vóór zijn console, dan helpt alleen de
+watchdog of de stroom, en de kaart start de oude kern.
+
 ## Niet gedaan
 
 - **Hop op de LicheeRV, op ijzer**: sinds 3.0.1 bakt de release Hop
@@ -360,11 +393,9 @@ zet hem; HopOS doet geen init). Bouw met
   bewaart sinds 02-10 f0..f31 en `fcsr`, en de kill-tick is op een gedeeld
   hart de tijdschijf (10 ms), de enige preemptie in HopOS
   (`tools/qemu-riscv-test-share.sh`).
-- De kern-flip op riscv64: de `FLIP_*`-getallen staan in de boards zodat de
-  lijm bouwt, de sprong (`cpu::el2::chain`) is arm64; `RvCage::adopt`
-  weigert.
-- De switch-code draait op riscv64 uit het kern-image (op arm64 staat een
-  kopie in de plan-regio, voor de flip).
+- De warme kern-flip op riscv64: de switch-code draait uit het kern-image
+  (op arm64 staat een kopie in de plan-regio), dus `RvCage::adopt` weigert
+  en de flip is alleen koud. Een zwarte doos voor riscv64 ook niet.
 - De LicheeRV: slapen op de C906L (de comparator staat sinds 02-10 voor
   de tick; een soak met `wfi` op dat hart, dan een slaapgrens in
   `app_hart`), en een

@@ -178,6 +178,11 @@ mod arch {
     pub(super) use super::cage::{OsCore, SHARES_OS_CORE, core_state, os_core, wake_all};
 }
 
+/// De koude flip op riscv64 (flip.rs): de app-harts uit het kern-image en,
+/// als de sprong niet doorgaat, terug.
+#[cfg(target_arch = "riscv64")]
+pub(crate) use cage::{Off, is_off, park_for_flip, unpark_after_flip};
+
 use crate::clock::ExecTimer;
 use crate::glue::{DevMem, KernConsole, SlotOutbox};
 use abi::hopabi::{CTRL_ENV_DATA, CTRL_ENV_LEN, CTRL_ENV_MAX};

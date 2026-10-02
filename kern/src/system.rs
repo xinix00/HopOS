@@ -1772,7 +1772,16 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         if !self.has_room() {
             return Err(Error::Full { cap: MAX_STREAMS }.into());
         }
-        let placement = placement(&req)?;
+        // Een flipbundel draait nooit: hij is een rauwe partitie tot
+        // PrivOp::FLIP hem opeist. Dus geen eigen core, maar die van Hop
+        // (`Placement::hop`); anders weigert een node met elke app-core
+        // bezet de flip al bij de reservering (QEMU riscv64 en de LicheeRV
+        // met hun ene app-hart, 02-10: "no free run of 1 app core(s)").
+        let placement = if req.job == FLIP_BUNDLE_JOB {
+            Placement::hop()?
+        } else {
+            placement(&req)?
+        };
         // De partitie van een flipbundel bemeet de kern zelf: de bundel
         // plus de ABI-staart, op hele 2 MB. Wat Hop vraagt is een
         // ondergrens, geen maat: een Hop die precies `bundel + staart`

@@ -80,14 +80,15 @@ pub const KERN_RAM: Region = Region {
     base: Pa(0x8400_0000),
     size: 0x0280_0000,
 };
-/// De DMA-regio: de laatste 8 MB van het kernvenster. Op de C906 GECACHET:
+/// De DMA-regio: 1 MB achter de kern-RAM (Go had 8 MB; de rest is sinds
+/// 02-10 de staging van de kern-flip, `slots::STAGE_PA`). Op de C906 GECACHET:
 /// in machine mode is er geen MMU en bepaalt de sysmap de attributen. De
 /// dwmac doet daarom cache-onderhoud per overdracht (dev::push/pull met
 /// `thead`), en elke descriptor en buffer staat op een eigen regel (de les
 /// van 30-07).
 pub const DMA: Region = Region {
     base: Pa(0x8680_0000),
-    size: 0x0080_0000,
+    size: 0x0010_0000,
 };
 /// De NIC-helft: wat de dwmac vraagt, ruim.
 pub const NET_DMA: Region = Region {
@@ -98,7 +99,7 @@ pub const NET_DMA: Region = Region {
 const _: () = {
     assert!(KERN_RAM.end().0 == DMA.base.0);
     assert!(driver_dwmac::NEED_BYTES <= NET_DMA.size);
-    assert!(DMA.end().0 == 0x8700_0000);
+    assert!(DMA.end().0 == slots::STAGE_PA);
 };
 
 /// Het resetblok van de C906L: SOFT_CPU_RSTN, bit 6.

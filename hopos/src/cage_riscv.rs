@@ -41,8 +41,8 @@ use abi::layout::{
     self, ABI_CTRL_OFF, ABI_MAP_PAGES, ABI_TAIL, CTRL_STRIDE, CTX_BOOT_ARG, CTX_BOOT_PC,
     CTX_CTRL_PA, CTX_LEN, CTX_REGIME, CTX_REVOKE, CTX_RING_HEAD_PA, CTX_STATE, CTX_UNIT_SLOT,
     CtxState, LINK_BASE, NET_RING_DATA_CAP, PARK_MBOX_LEN, Plan, RING_DATA_CAP, SCHED_CLINT_PA,
-    SCHED_COUNT, SCHED_CURRENT, SCHED_LIST, SCHED_MSIP_PA, SCHED_OS_BELL, SCHED_S2_PA,
-    SCHED_SLEEP_CAP, SCHED_TICK_TICKS, Tail,
+    SCHED_COUNT, SCHED_CURRENT, SCHED_LIST, SCHED_MBOX_CTX, SCHED_MSIP_PA, SCHED_OFF_PC,
+    SCHED_OS_BELL, SCHED_S2_PA, SCHED_SLEEP_CAP, SCHED_TICK_TICKS, Tail,
 };
 use abi::ring;
 use core::future::Future;
@@ -93,7 +93,7 @@ pub(crate) enum Error {
     Plan(abi::Error),
     /// Een app-hart kwam niet in de parkeerlus.
     Start(boot::StartError),
-    /// De kern-flip bestaat op riscv64 niet (de sprong is arm64).
+    /// Een warme flip bestaat op riscv64 niet: er is niets te adopteren.
     NoFlip,
 }
 
@@ -102,7 +102,7 @@ impl core::fmt::Display for Error {
         match self {
             Self::Plan(e) => write!(f, "plan: {e}"),
             Self::Start(e) => write!(f, "app hart: {e}"),
-            Self::NoFlip => f.write_str("the kern flip is arm64 only, nothing to adopt on riscv64"),
+            Self::NoFlip => f.write_str("riscv64 flips cold only, nothing to adopt"),
         }
     }
 }
@@ -212,8 +212,9 @@ impl RvCage {
         })
     }
 
-    /// De kern-flip is arm64 (`cpu::el2::chain`): er valt niets over te
-    /// nemen.
+    /// Een warme flip bestaat op riscv64 niet (de switch-code draait uit het
+    /// kern-image, en de koude flip draagt niemand over): er valt niets over
+    /// te nemen. De flip weigert warm al vóór de sprong (`flip::WARM`).
     pub(crate) fn adopt(_plan: Plan) -> Result<RvCage, Error> {
         Err(Error::NoFlip)
     }
@@ -846,6 +847,105 @@ pub(crate) fn core_state(plan: &Plan, core: layout::Core) -> Result<CoreState, e
         0 => CoreState::Parked,
         s => CoreState::Running(s),
     })
+}
+
+/// Waar een app-hart staat na [`park_for_flip`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Off {
+    /// Nooit gestart: er draait niets van het image.
+    Cold,
+    /// In reset (de C906L): de nieuwe kern haalt hem eruit zoals bij elke
+    /// boot (`start_app_hart`).
+    Reset,
+    /// Op weg naar de uit-stub; [`is_off`] zegt wanneer hij er is.
+    Sent,
+}
+
+/// De app-harts die [`park_for_flip`] uit het image haalde (bit per core),
+/// voor [`unpark_after_flip`]. Eén schrijver: de flip-taak.
+static FLIP_PARKED: AtomicU64 = AtomicU64::new(0);
+
+/// Haalt app-core `core` uit het kern-image voor de koude flip: de nieuwe
+/// kern gaat over de switch-code heen, en die draait op riscv64 uit het
+/// image. Een hart met een resetblok (de C906L) gaat in reset; een hart
+/// zonder (QEMU) krijgt `SCHED_OFF_PC` = de uit-stub op `stub`
+/// (`cpu::riscv::switch::off_stub`, buiten het image) en de bel, en springt
+/// er aan het begin van zijn volgende ronde heen. Alleen een hart waarop
+/// niemand draait: de bewoners zijn dan al gestopt.
+///
+/// De bevestiging is het adres van de stub in `SCHED_MBOX_CTX` (regel 0).
+/// Elke start van een hart in deze boot wiste zijn sched-blok
+/// ([`arm_sched`], de zelftest van het board), en alleen de stub schrijft
+/// dat woord: staat er al iets, dan is het hart niet waar de kern denkt.
+pub(crate) fn park_for_flip(
+    plan: &Plan,
+    core: layout::Core,
+    stub: Pa,
+) -> Result<Off, &'static str> {
+    match core_state(plan, core) {
+        Ok(CoreState::Cold) => return Ok(Off::Cold),
+        Ok(CoreState::Parked) => {}
+        Ok(CoreState::Running(_)) | Err(_) => return Err("app core still runs a resident"),
+    }
+    let hart = plan.phys_core(core);
+    let t = crate::BOARD.app_hart(hart);
+    let bit = 1u64 << core.get().min(63);
+    if t.resettable && crate::BOARD.hold_app_hart(hart) {
+        FLIP_PARKED.fetch_or(bit, Relaxed);
+        return Ok(Off::Reset);
+    }
+    let sched = plan.park_mbox_pa(core).map_err(|_| "no sched block")?;
+    dev::pull(sched.add(SCHED_MBOX_CTX), 8);
+    if dev::read64(sched.add(SCHED_MBOX_CTX)) != 0 {
+        return Err("sched block carries an off mark already");
+    }
+    if !switch::place_off_stub(stub) {
+        return Err("no off stub in this build");
+    }
+    dev::write64(sched.add(SCHED_OFF_PC), stub.0);
+    dev::push(sched.add(SCHED_OFF_PC), 8);
+    FLIP_PARKED.fetch_or(bit, Relaxed);
+    ring_bell(&t);
+    Ok(Off::Sent)
+}
+
+/// Staat app-core `core` in de uit-stub op `stub` (zijn bevestiging)?
+pub(crate) fn is_off(plan: &Plan, core: layout::Core, stub: Pa) -> bool {
+    plan.park_mbox_pa(core).is_ok_and(|sched| {
+        dev::pull(sched.add(SCHED_MBOX_CTX), 8);
+        dev::read64(sched.add(SCHED_MBOX_CTX)) == stub.0
+    })
+}
+
+/// De koude flip ging niet door: elk hart dat [`park_for_flip`] uit het
+/// image haalde, gaat terug de switcher in, zoals na een harde intrekking
+/// ([`RvCage::reset_hart`]): een vers sched-blok, het postvak en de bel
+/// (de uit-stub springt op de bel naar `_start`, de parkeerlus), of het
+/// resetblok los. De lijst is leeg: de bewoners waren al gestopt.
+pub(crate) fn unpark_after_flip(plan: &Plan) {
+    let parked = FLIP_PARKED.swap(0, Relaxed);
+    for c in 1..=plan.app_cores() {
+        let Some(core) = layout::Core::new(c).filter(|c| parked & 1u64 << c.get().min(63) != 0)
+        else {
+            continue;
+        };
+        let (hart, Ok(sched)) = (plan.phys_core(core), plan.park_mbox_pa(core)) else {
+            continue;
+        };
+        let t = crate::BOARD.app_hart(hart);
+        arm_sched(sched, plan.vec_base_pa().0, &t, true);
+        match boot::start_hart(hart, switch::park_pc(), sched.0, t.msip) {
+            Ok(()) => {
+                crate::BOARD.start_app_hart(hart);
+                println!(
+                    "cage: hart {hart} back in the switcher after a cold flip that did not jump HOPOS_FLIP_CORE_BACK"
+                );
+            }
+            Err(e) => {
+                println!("cage: hart {hart} stays out of the switcher: {e} HOPOS_FLIP_CORE_BACK")
+            }
+        }
+    }
 }
 
 /// De kick na een schrijf in een RX-ring van een slot (`slot_wake` van de

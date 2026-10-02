@@ -4,13 +4,19 @@
 # Hop) doordraaien (image/flip-bundle.sh op tag v2.2.8, docs/flip.md).
 #
 #   image/flip-bundle.sh <board>    -> target/hopos-<board>.flip (+ .sha256)
-#       board: virt, uefi, o6n, altra, rpi4, rpi5, radxa, apple
+#       board: virt, uefi, o6n, altra, rpi4, rpi5, radxa, apple,
+#              virt-riscv, licheerv (riscv64: alleen de koude flip)
 #   HOPOS_STAMP=B image/flip-bundle.sh virt   een ander versie-stempel op
 #                                   de boot-regel (tools/qemu-test-flip.sh)
 #   GUI=1 image/flip-bundle.sh rpi5 de gui-smaak (de korte vorm van
 #                                   FEATURES=gui, zoals image/uefi-run.sh)
 #   CFG=m4.cfg image/flip-bundle.sh apple   hopos.cfg in het venster op
-#                                   0xF000 van de bundel (alleen apple)
+#                                   0xF000 van de bundel (apple), of in het
+#                                   venster HOPOS.CFG.WINDOW (licheerv)
+#   STAGE=hop.elf image/flip-bundle.sh licheerv  de Hop die de kern in zich
+#                                   draagt (de LicheeRV heeft geen staging
+#                                   van een lader: Hop zit in het image);
+#                                   zonder STAGE bouwt tools/hop-build.sh hem
 #
 # Een bundel is de kern-ELF (zonder debug-info, mét symbolen) plus een
 # HOPRELO1-staart (versie 2, kern::kernflip::Bundle) met de relocatietabel
@@ -36,7 +42,8 @@
 #
 # De switch-code-som: de FNV-1a-64 over de drie nVHE-blobs
 # (cpu::el2::image_hash, `hopos_el2_nvhe_{entry,tramp,smp}`), gelezen uit
-# de symbolen van de KOUDE link. De draaiende kern weigert de bundel vóór
+# de symbolen van de KOUDE link; op riscv64 over de M-mode-switcher
+# (`__hopos_parkenter` tot `__hopos_mmode_end`, de som van HOPOS_CAGE_UP). De draaiende kern weigert de bundel vóór
 # de sprong als die som niet die van de geïnstalleerde kopie is
 # (`HOPOS_FLIP_REFUSED switch code mismatch`): de bewoners draaien in die
 # kopie, en de nieuwe kern mag hem alleen adopteren bij een gelijke som.
@@ -72,8 +79,11 @@ altra) FEATURE=board-altra COLD=0 PIE=1 FLAVOR=nvhe ;;
 # De M4: vast linkadres (hopos/link-apple.ld KERN_BASE), de apple-switcher;
 # board/apple/build.rs wil HOPOS_EMBED (de Hop-ELF, of leeg).
 apple) FEATURE=board-apple COLD=0x10100000000 PIE=0 FLAVOR=apple ;;
+# riscv64 (hopos/link-riscv.ld, KERN_BASE per board in hopos/build.rs).
+virt-riscv) FEATURE=board-qemuvirt-riscv COLD=0x80000000 PIE=0 FLAVOR=riscv ;;
+licheerv) FEATURE=board-licheerv COLD=0x84000000 PIE=0 FLAVOR=riscv ;;
 *)
-	echo "gebruik: $0 virt|uefi|o6n|altra|rpi4|rpi5|radxa|apple" >&2
+	echo "gebruik: $0 virt|uefi|o6n|altra|rpi4|rpi5|radxa|apple|virt-riscv|licheerv" >&2
 	exit 64
 	;;
 esac
@@ -92,6 +102,22 @@ fi
 # de Pi 5 op 30-09 zijn console op het glas, van generatie 3 (kaal) naar 4.
 if [ "${GUI:-0}" = 1 ]; then
 	FEATURE="$FEATURE,gui"
+fi
+[ "$FLAVOR" = riscv ] && TARGET=riscv64gc-unknown-none-elf
+OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
+# De LicheeRV draagt Hop in het image (board/licheerv/build.rs, zoals
+# image/licheerv-agent.sh): de nieuwe kern start na een koude flip die Hop.
+# Een bundel zonder Hop zou een node zonder Hop opleveren, dus geen bundel
+# zonder: STAGE= of de Hop van tools/hop-build.sh.
+if [ "$BOARD" = licheerv ]; then
+	STAGE="${STAGE:-$(sh "$DIR/tools/hop-build.sh" "$TARGET")}"
+	[ -f "$STAGE" ] || { echo "flip-bundle: STAGE=$STAGE bestaat niet" >&2; exit 1; }
+	mkdir -p "$DIR/target/flip-$BOARD"
+	HOPOS_LRV_STAGE="$DIR/target/flip-$BOARD/stage.elf"
+	"$OBJCOPY" --strip-debug "$STAGE" "$HOPOS_LRV_STAGE"
+	HOPOS_LRV_ROLE=hop
+	export HOPOS_LRV_STAGE HOPOS_LRV_ROLE
+	echo "flip-bundle: Hop in het image: $STAGE ($(wc -c <"$HOPOS_LRV_STAGE" | tr -d ' ') bytes)" >&2
 fi
 
 OUT="$DIR/target/hopos-$BOARD.flip"
@@ -119,30 +145,31 @@ else
 	SHADOW_ELF="$TD/flip-shadow.elf"
 fi
 
-OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
 if [ -n "$OBJCOPY" ]; then
 	"$OBJCOPY" --strip-debug "$SHADOW_ELF" "$TD/flip-bundle.stripped"
 else
 	cp "$SHADOW_ELF" "$TD/flip-bundle.stripped"
 fi
 
-# CFG=<pad> (alleen apple): een hopos.cfg in het venster op 0xF000 van de
-# bundel, zoals image/apple-m4.sh hem in het image bakt. Normaal draagt de
-# draaiende kern zijn eigen venster over naar de nieuwe (HOPOS_FLIP_CFG);
-# dit is voor een kern die dat nog niet kon (de geïnstalleerde D4b, 01-10)
-# of voor een andere config. Een bundel met een venster houdt het zijne.
+# CFG=<pad> (apple en licheerv): een hopos.cfg in het venster van de
+# bundel, zoals image/apple-m4.sh en image/licheerv-agent.sh hem in het
+# image bakken. Normaal draagt de draaiende kern zijn eigen venster over
+# naar de nieuwe (HOPOS_FLIP_CFG); dit is voor een kern die dat nog niet
+# kon (de geïnstalleerde D4b, 01-10) of voor een andere config. Een bundel
+# met een venster houdt het zijne.
 CFG="${CFG-}"
-if [ -n "$CFG" ] && { [ "$BOARD" != apple ] || [ ! -f "$CFG" ]; }; then
-	echo "flip-bundle: CFG= is alleen voor apple, en $CFG moet bestaan" >&2
+if [ -n "$CFG" ] && { { [ "$BOARD" != apple ] && [ "$BOARD" != licheerv ]; } || [ ! -f "$CFG" ]; }; then
+	echo "flip-bundle: CFG= is alleen voor apple en licheerv, en $CFG moet bestaan" >&2
 	exit 64
 fi
-python3 - "$SHADOW_ELF" "$TD/flip-cold.elf" "$TD/flip-bundle.stripped" "$OUT" "$SHIFT" "$COLD" "$PIE" "$FLAVOR" "$CFG" <<'PY'
+python3 - "$SHADOW_ELF" "$TD/flip-cold.elf" "$TD/flip-bundle.stripped" "$OUT" "$SHIFT" "$COLD" "$PIE" "$FLAVOR" "$CFG" "$BOARD" <<'PY'
 import hashlib, struct, sys
 
 shadow_path, cold_path, stripped_path, out_path = sys.argv[1:5]
 shift, cold_base, pie = int(sys.argv[5], 16), int(sys.argv[6], 16), sys.argv[7] == "1"
 flavor = sys.argv[8]  # nvhe | vhe | apple: de symboolnaam van de blobs
-cfg_path = sys.argv[9]  # alleen apple: hopos.cfg in het venster op 0xF000
+cfg_path = sys.argv[9]  # apple of licheerv: hopos.cfg in het venster
+board = sys.argv[10]
 MAGIC = 0x314F4C4552504F48  # "HOPRELO1"
 VERSION = 2                 # kern::kernflip::BUNDLE_VERSION
 FLIP_ABI = 3                # kern::kernflip::FLIP_ABI
@@ -202,6 +229,18 @@ def switch_sum(elf):
     syms = symbols(elf)
     base, _entry, img = flat(elf)
     h = 0xcbf29ce484222325
+    if flavor == "riscv":
+        # hopos/src/cage_riscv.rs `code_hash`: woordgewijs vanaf het
+        # 8-voud onder de parkeer-ingang tot voorbij het einde.
+        a, b = syms.get("__hopos_parkenter"), syms.get("__hopos_mmode_end")
+        if a is None or b is None or b <= a:
+            die("no riscv switch code symbols (__hopos_parkenter, __hopos_mmode_end)")
+        a &= ~7
+        while a < b:
+            for x in img[a - base:a - base + 8]:
+                h = ((h ^ x) * 0x100000001b3) & M64
+            a += 8
+        return h
     for blob in ("entry", "tramp", "smp"):
         a = syms.get(f"hopos_el2_{flavor}_{blob}")
         b = syms.get(f"hopos_el2_{flavor}_{blob}_end")
@@ -268,7 +307,27 @@ sw = switch_sum(c_elf)
 
 elf = open(stripped_path, "rb").read()
 b = bytearray(elf)
-if cfg_path:
+if cfg_path and board == "licheerv":
+    # Het venster van board/licheerv/src/cfg.rs, zoals image/licheerv-agent.sh
+    # het vult: "HOPOS.CFG.WINDOW", de lengte (u64 LE) op +16, de tekst op
+    # +24, 64 KiB. Het staat in .data van de bundel-ELF, zonder relocatie.
+    WMAGIC, WSIZE = b"HOPOS.CFG.WINDOW", 64 << 10
+    text = open(cfg_path, "rb").read()
+    try:
+        text.decode("utf-8")
+    except UnicodeDecodeError:
+        die(f"{cfg_path} is not UTF-8")
+    if len(text) > WSIZE - 24:
+        die(f"config of {len(text)} bytes does not fit the {WSIZE - 24}-byte window")
+    at = b.find(WMAGIC)
+    if at < 0 or b.find(WMAGIC, at + 1) >= 0:
+        die("not exactly one HOPOS.CFG.WINDOW in the kernel")
+    if any(b[at + 16:at + WSIZE]):
+        die("the config window of the kernel is not empty")
+    struct.pack_into("<Q", b, at + 16, len(text))
+    b[at + 24:at + 24 + len(text)] = text
+    print(f"flip-bundle: config baked in: {cfg_path} ({len(text)} bytes)", file=sys.stderr)
+elif cfg_path:
     # Het venster van image/apple-m4.sh (board_apple::fwinfo::CFG_PA), in
     # de PT_LOAD van de bundel-ELF die het linkadres + 0xF000 draagt. Het
     # valt buiten elke relocatie: in beide links waren het nullen.
@@ -315,6 +374,11 @@ SHA="$(cat "$OUT.sha256")"
 echo "" >&2
 echo "$OUT gebouwd (board $BOARD, stempel $STAMP), sha256 $SHA" >&2
 echo "Zet hem op een webserver en vraag de flip aan op de agent-API van Hop:" >&2
+if [ "$FLAVOR" = riscv ]; then
+	# riscv64 flipt alleen koud (hopos/src/flip.rs `WARM`).
+	echo "  hop --agent <node>:8080 flip http://<ip>:<poort>/$(basename "$OUT") $SHA --cold" >&2
+	exit 0
+fi
 echo "  curl -X POST http://<node>:8080/flip -d '{\"url\":\"http://<ip>:<poort>/$(basename "$OUT")\",\"sha256\":\"$SHA\"}'" >&2
 echo "Weigert de node hem warm (switch code mismatch), dan koud: de taken stoppen, Hop start opnieuw:" >&2
 echo "  curl -X POST http://<node>:8080/flip -d '{\"url\":\"http://<ip>:<poort>/$(basename "$OUT")\",\"sha256\":\"$SHA\",\"cold\":true}'" >&2

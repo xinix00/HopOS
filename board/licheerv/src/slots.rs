@@ -5,9 +5,10 @@
 //! 0x8000_0000  64 MB  pool B: hier decomprimeert de FSBL U-Boot vóór hij
 //!                     ons aanspringt; daarna vrij DRAM voor partities, maar
 //!                     nooit voor ons IMAGE (dat zou de FSBL overschrijven)
-//! 0x8400_0000  48 MB  de kern: image, stack, heap (link-riscv.ld), en de
-//!                     laatste 8 MB de DMA-regio van de dwmac
-//! 0x8700_0000  16 MB  pool C
+//! 0x8400_0000  41 MB  de kern: image, stack, heap (link-riscv.ld, 40 MB),
+//!                     en de laatste MB de DMA-regio van de dwmac
+//! 0x8690_0000  13 MB  de staging van de kern-flip
+//! 0x8760_0000  10 MB  pool C
 //! 0x8800_0000 126 MB  pool A: de partities; het linkadres van elk
 //!                     riscv64-app-image (SlotBase in Go)
 //! 0x8FE0_0000   2 MB  de staart: boot-scratch, control-pages, kooi-regio
@@ -34,16 +35,21 @@ pub const CAGE_PA: u64 = OS_BASE + 0x2_0000;
 pub const POOL: [Region; 3] = [
     Region::new(0x8800_0000, 0x07e0_0000),
     Region::new(0x8000_0000, 0x0400_0000),
-    Region::new(0x8700_0000, 0x0100_0000),
+    Region::new(STAGE_PA + STAGE_MAX, 0x8800_0000 - (STAGE_PA + STAGE_MAX)),
 ];
 /// Het maatwoord van een staging: er is geen QEMU die iets neerlegt (het
 /// image zit in de kern, [`staged_image`]). Een plek in de staart voor de
-/// flip-lijm: het handoff-blob eronder, het platte beeld erachter.
+/// flip-lijm: het handoff-blob eronder (`abi::layout::flip_handoff_pa`).
 pub const STAGE_HDR_PA: u64 = OS_BASE + 0x1C_0000;
-/// De staging van de flip.
-pub const STAGE_PA: u64 = STAGE_HDR_PA + 0x1000;
-/// De grootste staging: tot het einde van het DRAM.
-pub const STAGE_MAX: u64 = 0x9000_0000 - STAGE_PA;
+/// De staging van de kern-flip: waar het nieuwe beeld plat ligt tot de
+/// sprong. Het beeld met Hop erin is groter dan de staart (9,2 MB met
+/// BSS en de Hop van 02-10), de kern-RAM is van de heap (QEMU riscv64 met
+/// Hop: 31 MB in gebruik, 02-10) en wordt geveegd, dus: direct achter de
+/// DMA-regio, die daarvoor van 8 MB (Go) naar 1 MB ging (de dwmac vraagt
+/// 512 KB), en de kop van pool C (die van 16 naar 10 MB ging).
+pub const STAGE_PA: u64 = 0x8690_0000;
+/// De grootste staging: 13 MB, tot pool C.
+pub const STAGE_MAX: u64 = 0x00D0_0000;
 
 const _: () = assert!(FLIP_TRAMP_PA + 0x1000 <= NODE_CTRL_PA);
 const _: () = assert!(NODE_CTRL_PA + 3 * 0x1000 <= CAGE_PA);
@@ -117,9 +123,9 @@ pub fn staged_role() -> Result<StagedRole, u64> {
 
 // --- De kern-flip (hopos/src/flip.rs, docs/flip.md) ---------------------
 //
-// Alleen getallen, zoals op arm64 (board/qemuvirt/src/slots.rs; op de LicheeRV bestaat geen staging). De flip is
-// op riscv64 niet bewezen (docs/boards-riscv.md): de sprong zelf
-// (`cpu::el2::chain`) is arm64. Deze namen laten de gedeelde lijm bouwen.
+// Alleen getallen, zoals op arm64 (board/qemuvirt/src/slots.rs). Op riscv64
+// alleen koud; de C906L gaat in reset en de nieuwe kern haalt hem eruit,
+// dus de uit-stub op FLIP_PARK_PA draait hier niet (wel op QEMU).
 
 /// Het koude linkadres (`hopos/link-riscv.ld`, `KERN_BASE`).
 pub const FLIP_LINK_BASE: u64 = 0x8400_0000;
@@ -131,10 +137,14 @@ pub const FLIP_IMAGE_END: u64 = 0x8680_0000;
 pub const FLIP_RECORDER_PA: u64 = BOOT_SCRATCH_PA + 0x1000;
 /// De trampoline van de sprong.
 pub const FLIP_TRAMP_PA: u64 = BOOT_SCRATCH_PA + 0x2000;
+/// De uit-stub van een app-hart zonder resetblok (`cpu::riscv::switch`).
+pub const FLIP_PARK_PA: u64 = BOOT_SCRATCH_PA + 0x3000;
 
 const _: () = {
     assert!(FLIP_RECORDER_PA >= BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN);
+    assert!(FLIP_PARK_PA + 0x1000 <= NODE_CTRL_PA);
     assert!(FLIP_TRAMP_PA + 0x1000 <= abi::layout::flip_handoff_pa(STAGE_HDR_PA));
+    assert!(FLIP_IMAGE_END < STAGE_PA && (STAGE_PA + STAGE_MAX).is_multiple_of(2 << 20));
 };
 
 #[cfg(test)]

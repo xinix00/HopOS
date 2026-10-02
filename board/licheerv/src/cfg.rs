@@ -80,6 +80,54 @@ pub fn text() -> &'static str {
     core::str::from_utf8(bytes).unwrap_or("")
 }
 
+/// Draagt dit venster over naar het nieuwe beeld van een kern-flip
+/// (`hopos/src/flip.rs`, `HOPOS_FLIP_CFG`), als dat beeld zelf geen tekst
+/// draagt: de nieuwe kern gaat over deze heen, en zonder venster zou de
+/// node zijn naam, zijn MAC en de config van Hop kwijt zijn. Een bundel
+/// met een eigen config houdt die (`CFG=` van image/flip-bundle.sh).
+///
+/// `image` is het platte beeld van `len` bytes in de staging, net
+/// neergelegd door de flip, die er tot de sprong als enige in schrijft. Het
+/// venster ligt in `.data`, dus op een andere plek in elke build: het
+/// nieuwe venster is de eerste 8-uitgelijnde plek met onze magic (gelezen
+/// uit ons eigen venster, zodat de code de magic geen tweede keer in het
+/// image zet; het script vindt hem precies één keer). Geeft of er
+/// gekopieerd is.
+pub fn carry_config(image: u64, len: u64) -> bool {
+    carry(&CFG, image, len)
+}
+
+/// [`carry_config`] met `ours` als ons venster (de host-tests geven een
+/// eigen venster).
+fn carry(ours: &Window, image: u64, len: u64) -> bool {
+    let n = match usize::try_from(ours.len.load(Relaxed)) {
+        Ok(n) if n > 0 && n <= WINDOW - TEXT_OFF => n,
+        _ => return false,
+    };
+    let (m0, m1) = (ours.magic[0].load(Relaxed), ours.magic[1].load(Relaxed));
+    let end = image.saturating_add(len).saturating_sub(WINDOW as u64);
+    let mut at = image.next_multiple_of(8);
+    while at <= end {
+        if dev::read64(dev::Pa(at)) == m0 && dev::read64(dev::Pa(at + 8)) == m1 {
+            break;
+        }
+        at += 8;
+    }
+    if at > end || dev::read64(dev::Pa(at + 16)) != 0 {
+        return false;
+    }
+    // De tekst eerst, de lengte als laatste: een half venster is geen config.
+    let words = n.div_ceil(8);
+    for (i, w) in ours.text.iter().take(words).enumerate() {
+        dev::write64(
+            dev::Pa(at + TEXT_OFF as u64 + 8 * i as u64),
+            w.load(Relaxed),
+        );
+    }
+    dev::write64(dev::Pa(at + 16), n as u64);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,5 +139,55 @@ mod tests {
         let head: [u8; 8] = CFG.magic[0].load(Relaxed).to_le_bytes();
         assert_eq!(&head, b"HOPOS.CF");
         assert_eq!(core::mem::size_of_val(&CFG), WINDOW);
+    }
+
+    /// Ons venster in de toets: een eigen static (één toets gebruikt hem),
+    /// want een venster van 64 KiB hoort niet op de stack.
+    static OURS: Window = Window {
+        magic: [
+            AtomicU64::new(u64::from_le_bytes(*b"HOPOS.CF")),
+            AtomicU64::new(u64::from_le_bytes(*b"G.WINDOW")),
+        ],
+        len: AtomicU64::new(0),
+        text: [const { AtomicU64::new(0) }; WORDS - 3],
+    };
+
+    /// Zet `text` in [`OURS`], zoals het script het schrijft.
+    fn window(text: &[u8]) -> &'static Window {
+        OURS.len.store(text.len() as u64, Relaxed);
+        for (i, c) in text.chunks(8).enumerate() {
+            let mut b = [0u8; 8];
+            b[..c.len()].copy_from_slice(c);
+            OURS.text[i].store(u64::from_le_bytes(b), Relaxed);
+        }
+        &OURS
+    }
+
+    #[test]
+    fn the_window_goes_along_only_into_an_image_without_one() {
+        let ours = window(b"hopos.node=lrv\n");
+        // Een beeld met een leeg venster op +0x2008, en ervoor rommel.
+        let mut img = std::vec![0x5555u64; 3 * WINDOW / 8];
+        let at = 0x2008 / 8;
+        img[at] = ours.magic[0].load(Relaxed);
+        img[at + 1] = ours.magic[1].load(Relaxed);
+        img[at + 2] = 0;
+        let base = img.as_mut_ptr() as u64;
+        let len = (img.len() * 8) as u64;
+        assert!(carry(ours, base, len));
+        assert_eq!(img[at + 2], 15);
+        let text: std::vec::Vec<u8> = img[at + 3..at + 5]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        assert_eq!(&text[..15], b"hopos.node=lrv\n");
+        // Nu draagt het beeld een venster: het houdt het zijne.
+        assert!(!carry(window(b"x=1\n"), base, len));
+        assert_eq!(img[at + 2], 15);
+        // Zonder eigen tekst, of zonder venster in het beeld: niets.
+        assert!(!carry(window(b""), base, len));
+        img[at] = 0;
+        img[at + 2] = 0;
+        assert!(!carry(window(b"hopos.node=lrv\n"), base, len));
     }
 }

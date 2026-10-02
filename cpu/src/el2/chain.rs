@@ -48,6 +48,18 @@
 //! firmware, dan springt hij terug in de parkeerlus, en is er niets
 //! verloren. De stub ligt op de plek van de trampoline: die komt pas na de
 //! laatste CPU_OFF, en op dat moment voert geen core de stub nog uit.
+//!
+//! # riscv64
+//!
+//! Dezelfde sprong in machine mode (alleen koud: `hopos/src/flip.rs`). Er is
+//! geen MMU om uit te zetten; de trampoline zet de interrupts dicht, veegt op
+//! de C906 de hele D-cache naar DRAM (`th.dcache.ciall`, feature `thead`),
+//! kopieert het beeld, veegt opnieuw, maakt de I-cache leeg en springt naar
+//! `_start` met a0 = 0 en a1 = de a1 die de firmware (QEMU: de DTB) de oude
+//! kern gaf, zoals bij de boot (`cpu::riscv::boot`). Het app-hart staat dan
+//! al buiten het image: in reset of in de uit-stub van de switcher
+//! (`cpu::riscv::switch::off_stub`); [`place_off_stub`] en [`send_off`] zijn
+//! van arm64.
 
 use abi::layout::{Core, PARK_PARKED, Plan, SCHED_MBOX_CTX, SCHED_MBOX_PC};
 use dev::Pa;
@@ -453,7 +465,127 @@ hopos_chain_off_end:
     }
 }
 
-#[cfg(not(all(target_os = "none", target_arch = "aarch64")))]
+#[cfg(all(target_os = "none", target_arch = "riscv64"))]
+mod arch {
+    use super::Jump;
+
+    // Het cache-onderhoud van de C906 (T-Head, feature `thead`): de hele
+    // D-cache naar DRAM en ongeldig, dan de I-cache ongeldig; zonder (QEMU,
+    // coherent) alleen de `fence.i` erachter.
+    #[cfg(feature = "thead")]
+    macro_rules! flush {
+        () => {
+            r#"
+    .4byte 0x0030000b
+    .4byte 0x01b0000b
+    .4byte 0x0100000b
+    .4byte 0x01b0000b
+"#
+        };
+    }
+    #[cfg(not(feature = "thead"))]
+    macro_rules! flush {
+        () => {
+            ""
+        };
+    }
+
+    // De trampoline. Positie-onafhankelijk (alleen registers en relatieve
+    // sprongen), want hij draait op een adres dat hij niet kent.
+    //
+    // In: a0 = dst, a1 = src, a2 = len (8-voud), a3 = entry, a4 = de a1 van
+    // de firmware. Eerst de D-cache leeg (geen vuile regel van de oude kern
+    // die later over de nieuwe heen valt), dan de kopie, dan alles naar
+    // DRAM en de I-cache leeg (het venster was net nog code van de oude
+    // kern, op dezelfde adressen).
+    core::arch::global_asm!(
+        r#"
+    .pushsection .text.hopos_chain, "ax"
+    .balign 64
+    .global hopos_chain_tramp
+hopos_chain_tramp:
+    csrw mie, zero
+    csrci mstatus, 8
+    mv t6, a3
+"#,
+        flush!(),
+        r#"
+1:  beqz a2, 2f
+    ld t0, 0(a1)
+    sd t0, 0(a0)
+    addi a1, a1, 8
+    addi a0, a0, 8
+    addi a2, a2, -8
+    j 1b
+2:  fence
+"#,
+        flush!(),
+        r#"
+    fence.i
+    li a0, 0
+    mv a1, a4
+    jr t6
+    .global hopos_chain_tramp_end
+hopos_chain_tramp_end:
+    .popsection
+"#
+    );
+
+    unsafe extern "C" {
+        safe static hopos_chain_tramp: u8;
+        safe static hopos_chain_tramp_end: u8;
+    }
+
+    pub(super) fn trampoline() -> Option<&'static [u8]> {
+        let start = &raw const hopos_chain_tramp;
+        let len = (&raw const hopos_chain_tramp_end as usize).wrapping_sub(start as usize);
+        if len == 0 || len > 4096 {
+            return None;
+        }
+        // SAFETY: twee labels in dezelfde `global_asm!` hierboven, in één
+        // sectie, met het einde erachter (net getoetst): code in de eigen
+        // `.text`, leesbaar, `'static` en nooit beschreven.
+        Some(unsafe { core::slice::from_raw_parts(start, len) })
+    }
+
+    /// De uit-stub van arm64 bestaat hier niet: een app-hart gaat via de
+    /// switcher naar `cpu::riscv::switch::off_stub`.
+    pub(super) fn off_stub() -> Option<&'static [u8]> {
+        None
+    }
+
+    /// # Safety
+    ///
+    /// Het contract van [`super::chain`].
+    pub(super) unsafe fn jump(j: &Jump) -> ! {
+        // SAFETY: de interrupts gaan dicht (een timer tussen de kopie en de
+        // sprong zou in code landen die er straks niet meer is); de I-cache
+        // wordt ongeldig zodat de net gekopieerde trampoline vers gehaald
+        // wordt; de sprong gaat naar code die `chain` op `tramp` legde en
+        // naar DRAM veegde. Er komt niets terug.
+        unsafe {
+            core::arch::asm!(
+                "csrw mie, zero",
+                "csrci mstatus, 8",
+                flush!(),
+                "fence.i",
+                "jr {t}",
+                t = in(reg) j.tramp.0,
+                in("a0") j.dst.0,
+                in("a1") j.src.0,
+                in("a2") j.len,
+                in("a3") j.entry,
+                in("a4") j.x0,
+                options(noreturn, nostack)
+            )
+        }
+    }
+}
+
+#[cfg(not(all(
+    target_os = "none",
+    any(target_arch = "aarch64", target_arch = "riscv64")
+)))]
 mod arch {
     //! Host-kant: geen trampoline en geen sprong; de tests bewijzen de
     //! relocatie en de indeling.

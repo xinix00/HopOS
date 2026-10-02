@@ -71,6 +71,18 @@
 //! kern stierf, maar ook wat hij daarvoor zei: de Pi 5 zonder UART (30-09),
 //! waar de TCP-console de enige was en zijn ring met de kern verdween.
 //!
+//! # riscv64
+//!
+//! Alleen koud: de switch-code draait daar uit het kern-image, dus er is
+//! niets wat een nieuwe kern kan adopteren (`RvCage::adopt` weigert), en een
+//! warme flip weigert vóór de sprong ([`WARM`]). De koude weg is dezelfde
+//! als op arm64, met twee riscv-stappen: het app-hart gaat uit het image
+//! ([`cores_off`]: het resetblok van de C906L, of de uit-stub van de
+//! switcher op QEMU) en de sprong is de M-mode-trampoline van
+//! `cpu::el2::chain`. De LicheeRV draagt Hop en zijn config in het image:
+//! het nieuwe beeld start zijn eigen Hop, en krijgt het config-venster van
+//! deze kern als het zelf geen heeft (`HOPOS_FLIP_CFG`).
+//!
 //! Wat hier bewust NIET gebeurt: een hardware-watchdog op QEMU (die is er
 //! niet).
 
@@ -84,10 +96,9 @@ use core::sync::atomic::{
     Ordering::{Acquire, Relaxed, Release},
 };
 use core::time::Duration;
-use cpu::el2::CoreState;
 use cpu::el2::chain::{self, Jump};
 use cpu::println;
-use cpu::psci::{self, Affinity};
+use cpu::psci;
 use dev::Pa;
 use executor::Executor;
 use kern::cage::PhysMem;
@@ -142,7 +153,15 @@ const CORES_OFF_WAIT: Duration = Duration::from_secs(1);
 /// een deur zonder terugweg (gemeten 10-07). Daar
 /// weigert de koude flip dus zodra een app-core ooit draaide; een core die
 /// nooit startte, is al uit en telt niet.
+#[cfg(not(target_arch = "riscv64"))]
 const CPU_OFF_RETURNS: bool = !cfg!(feature = "board-rpi5");
+
+/// Kan deze kern bewoners over de sprong heen dragen (de warme flip)? Op
+/// riscv64 niet: de switch-code draait daar uit het kern-image, en de
+/// nieuwe kern adopteert niemand (`RvCage::adopt`). Een warme flip zou de
+/// bewoners dan pas na de gratie verliezen (`HOPOS_FLIP_ADOPT_FAIL`, de
+/// guard); daarom weigert hij hier vóór de sprong, en is de koude de weg.
+const WARM: bool = !cfg!(target_arch = "riscv64");
 
 /// Wat de firmware deze kern in x0 gaf: de nieuwe krijgt hetzelfde.
 static FIRMWARE_X0: AtomicU64 = AtomicU64::new(0);
@@ -380,6 +399,7 @@ mod image {
 /// daar en op Apple toetst de ingang zelf.
 #[cfg(any(
     feature = "board-qemuvirt",
+    feature = "board-qemuvirt-riscv",
     feature = "board-rpi4",
     feature = "board-rpi5",
     feature = "board-rk3566"
@@ -398,12 +418,14 @@ mod facts {
 
 #[cfg(not(any(
     feature = "board-qemuvirt",
+    feature = "board-qemuvirt-riscv",
     feature = "board-rpi4",
     feature = "board-rpi5",
     feature = "board-rk3566"
 )))]
 mod facts {
-    /// Geen DTB in x0 (UEFI: ImageHandle, Apple: de boot-args van m1n1).
+    /// Geen DTB in x0 (UEFI: ImageHandle, Apple: de boot-args van m1n1, de
+    /// LicheeRV: wat de FSBL in a1 liet).
     pub(super) fn intact(_x0: u64) -> bool {
         true
     }
@@ -684,6 +706,15 @@ fn prepare_inner(b: &FlipBundle, sha256: &[u8; 32]) -> Result<(), Refused> {
         ));
     }
     let cold = b.cold;
+    if !cold && !WARM {
+        return Err(refuse(
+            "warm flip not on riscv64, ask cold",
+            kern::Error::Version {
+                have: 0,
+                want: abi::systemapi::FLIP_COLD,
+            },
+        ));
+    }
     if cold {
         // Koud: de nieuwe kern installeert zijn eigen switch-code en
         // adopteert niemand, dus de som doet er niet toe. Dit is precies de
@@ -730,6 +761,13 @@ fn prepare_inner(b: &FlipBundle, sha256: &[u8; 32]) -> Result<(), Refused> {
     // bootmedium; de nieuwe kern gaat eroverheen, dus het venster mee.
     #[cfg(feature = "board-apple")]
     if vboard::fwinfo::carry_config(src, flat) {
+        println!("flip: hopos.cfg carried into the new image HOPOS_FLIP_CFG");
+    }
+    // De LicheeRV idem: het venster staat in `.data` van het image (de FSBL
+    // geeft geen bootargs), en het nieuwe beeld krijgt het onze als het zelf
+    // geen tekst draagt.
+    #[cfg(feature = "board-licheerv")]
+    if vboard::cfg::carry_config(src, flat) {
         println!("flip: hopos.cfg carried into the new image HOPOS_FLIP_CFG");
     }
     let entry = bundle.entry.wrapping_add(delta);
@@ -1146,7 +1184,9 @@ async fn cold_jump(exec: &'static Executor, p: Prepared) -> JumpError {
     println!(
         "flip: cold flip, {stopped} resident(s) stopped and {off} app core(s) powered off, nothing to hand over HOPOS_FLIP_COLD stopped={stopped} cores_off={off}"
     );
-    handoff_and_jump(p, Vec::new(), kernflip::NatState::default())
+    let e = handoff_and_jump(p, Vec::new(), kernflip::NatState::default());
+    cores_back();
+    e
 }
 
 /// Vraagt de lifecycle-actor iets, hooguit [`ACTOR_WAIT`] plus `extra`.
@@ -1206,7 +1246,9 @@ async fn stop_residents(exec: &'static Executor) -> Result<usize, JumpError> {
 /// `cpu::el2::chain`) en wacht tot AFFINITY_INFO voor elke app-core "uit"
 /// zegt. Een core die nooit startte, is al uit. Geeft het aantal
 /// uitgezette cores.
+#[cfg(not(target_arch = "riscv64"))]
 async fn cores_off(exec: &'static Executor) -> Result<usize, JumpError> {
+    use cpu::el2::CoreState;
     let Ok(plan) = crate::slots::os_plan() else {
         // Geen slots op dit board: geen app-cores om uit te zetten.
         return Ok(0);
@@ -1245,11 +1287,11 @@ async fn cores_off(exec: &'static Executor) -> Result<usize, JumpError> {
         let target = vboard::slots::mpidr(plan.phys_core(core));
         loop {
             match psci::affinity_info(target) {
-                Affinity::Off => break,
+                psci::Affinity::Off => break,
                 // Een firmware zonder AFFINITY_INFO: dan zegt de mailbox
                 // het (de stub schreef "koud" vlak voor zijn CPU_OFF), plus
                 // een tik voor de CPU_OFF zelf.
-                Affinity::Err(psci::Error::NotSupported)
+                psci::Affinity::Err(psci::Error::NotSupported)
                     if matches!(cpu::el2::core_state(&plan, core), Ok(CoreState::Cold)) =>
                 {
                     exec.after(Duration::from_millis(10)).await;
@@ -1270,6 +1312,69 @@ async fn cores_off(exec: &'static Executor) -> Result<usize, JumpError> {
         }
     }
     Ok(sent)
+}
+
+/// Na een koude sprong die niet doorging: niets op arm64, de volgende
+/// dispatch is daar weer een PSCI CPU_ON (de mailbox staat op koud).
+#[cfg(not(target_arch = "riscv64"))]
+fn cores_back() {}
+
+/// De app-harts uit het kern-image voor de koude flip (riscv64): elk hart
+/// dat in de switcher staat, gaat in reset (de C906L) of naar de uit-stub
+/// op `FLIP_PARK_PA` (QEMU), en de taak wacht tot de stub bevestigt. Een
+/// hart dat nooit startte, telt niet. Faalt er één, dan komen de andere
+/// terug in de switcher ([`cores_back`]). Geeft het aantal harts buiten het
+/// image.
+#[cfg(target_arch = "riscv64")]
+async fn cores_off(exec: &'static Executor) -> Result<usize, JumpError> {
+    use crate::slots::{self as rv, Off};
+    let Ok(plan) = crate::slots::os_plan() else {
+        return Ok(0);
+    };
+    let stub = Pa(vboard::slots::FLIP_PARK_PA);
+    let mut n = 0usize;
+    for c in 1..=plan.app_cores() {
+        let Some(core) = abi::layout::Core::new(c) else {
+            continue;
+        };
+        match rv::park_for_flip(&plan, core, stub) {
+            Ok(Off::Cold) => continue,
+            Ok(Off::Reset) => {
+                n += 1;
+                continue;
+            }
+            Ok(Off::Sent) => {}
+            Err(why) => {
+                println!("flip: app core {c}: {why} HOPOS_FLIP_COLD_CORE");
+                cores_back();
+                return Err(JumpError::Cold(why, c));
+            }
+        }
+        let deadline = exec.now().saturating_add(CORES_OFF_WAIT.as_nanos() as u64);
+        while !rv::is_off(&plan, core, stub) {
+            if exec.now() >= deadline {
+                println!(
+                    "flip: app core {c} did not reach the off stub at {:#x} within {} ms HOPOS_FLIP_COLD_CORE",
+                    stub.0,
+                    CORES_OFF_WAIT.as_millis()
+                );
+                cores_back();
+                return Err(JumpError::Cold("app core did not leave the image", c));
+            }
+            exec.after(Duration::from_millis(1)).await;
+        }
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Na een koude sprong die niet doorging (riscv64): elk app-hart dat
+/// [`cores_off`] uit het image haalde, terug de switcher in.
+#[cfg(target_arch = "riscv64")]
+fn cores_back() {
+    if let Ok(plan) = crate::slots::os_plan() {
+        crate::slots::unpark_after_flip(&plan);
+    }
 }
 
 /// Vraagt de switch-actor om de conntrack (en zet daarmee de masquerade

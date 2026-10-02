@@ -41,7 +41,8 @@ opties).
    HOPOS_STAMP=B sh image/flip-bundle.sh <board>
    ```
 
-   Board: `virt`, `uefi`, `o6n`, `altra`, `rpi4`, `rpi5`, `radxa`. Uitvoer:
+   Board: `virt`, `uefi`, `o6n`, `altra`, `rpi4`, `rpi5`, `radxa`, en voor
+   riscv64 (alleen koud) `virt-riscv` en `licheerv`. Uitvoer:
    `target/hopos-<board>.flip`, `.sha256` (het vertrouwensanker) en
    `.switch` (de som van de switch-code, ter controle).
 
@@ -96,6 +97,8 @@ opties).
 | Ampere Altra | `flip-bundle.sh altra` | idem | idem, venster op `0x8800_0000` | nog niet op ijzer |
 | Pi 4, Pi 5 | `flip-bundle.sh rpi4` / `rpi5` | `0x80000` (link-raspi.ld) | achter de initramfs van Hop op `0x0F20_0000`, de boot-scratch op `0x0F10_0000` | bundels gebouwd; de ingang op QEMU raspi4b (`BOARD=rpi4 sh tools/qemu-test-flip.sh`); nog niet op ijzer |
 | Radxa Zero 3E | `flip-bundle.sh radxa` | `0x0221_0000` (link-rk3566.ld) | het staging-venster op `0x0780_0000`, de recorder op `FLIP_SCRATCH_PA`, de trampoline op de bovenste pagina van de kern-RAM | bundel gebouwd; de ingang is `_start`, dezelfde als virt (`OSCORE=1`); nog niet op ijzer |
+| QEMU virt riscv64 | `flip-bundle.sh virt-riscv` | `0x8000_0000` (link-riscv.ld) | achter Hop in de staging van QEMU op `0xA820_0000`; recorder, trampoline en de uit-stub van hart 1 op de boot-scratch (`0xA800_1000`, `+0x2000`, `+0x3000`) | alleen koud: `sh tools/qemu-riscv-test-flip.sh` (02-10) |
+| LicheeRV Nano | `flip-bundle.sh licheerv` (Hop en desgewenst `CFG=` in het image) | `0x8400_0000` (RUNADDR) | de staging op `0x8690_0000` (13 MB, tussen de DMA-regio van 1 MB en pool C); recorder en trampoline op de staart (`0x8FE0_1000`, `+0x2000`) | alleen koud; bundel gebouwd (9,2 MB beeld); nog niet op ijzer |
 
 Wat per board eerst te kijken is, morgen op het ijzer:
 
@@ -163,6 +166,8 @@ kern weigert terwijl Hop nog wacht op zijn FLIP-antwoord, krijgt Hop terug
 | `HOPOS_FLIP_FAIL` na `HOPOS_FS_FROZEN` | flip-taak | de conntrack, de bewoners, het blob of de indeling van de sprong faalde; hopfs ontdooit (`HOPOS_FS_THAWED`) en de masquerade gaat weer open |
 | `HOPOS_FLIP_COLD_STOP_FAIL`, `HOPOS_FLIP_COLD_CORE`, dan `HOPOS_FLIP_FAIL` | flip-taak, koud | een bewoner stopte niet, of een app-core ging niet uit binnen een seconde (AFFINITY_INFO); hopfs ontdooit. Gestopte bewoners blijven gestopt (Hop plaatst ze opnieuw), een uitgezette core staat op "koud" in zijn mailbox, dus de volgende dispatch is weer een CPU_ON |
 | `HOPOS_FLIP_FAIL cold flip: CPU_OFF has no way back on this board` | flip-taak, koud | de Pi 5: CPU_OFF is daar een deur zonder terugweg (10-07), dus koud kan alleen zolang geen app-core ooit draaide |
+| `HOPOS_FLIP_REFUSED warm flip not on riscv64, ask cold` | haak | riscv64 flipt alleen koud (zie "riscv64" hieronder); Hop krijgt `version 0x0, want 0x1` |
+| `HOPOS_FLIP_COLD_CORE`, `HOPOS_FLIP_CORE_BACK`, dan `HOPOS_FLIP_FAIL` | flip-taak, koud, riscv64 | een app-hart draaide nog een bewoner of bereikte de uit-stub niet binnen een seconde; elk hart dat al uit het image was, gaat terug de switcher in (`HOPOS_FLIP_CORE_BACK`) en hopfs ontdooit |
 
 Na de sprong bestaat kern A niet meer, en is een koude herstart de enige
 weg terug. Dat is geen geslaagde flip: de apps beginnen dan opnieuw (hopfs
@@ -303,6 +308,46 @@ De koude installatie (het image op het bootmedium en een herstart) blijft
 de weg voor een node zonder staging van Hop (de Radxa) en voor een kern
 die zelf niet opkomt.
 
+### riscv64
+
+Op riscv64 is er alleen de koude flip (02-10). De switch-code draait daar
+uit het kern-image (niet uit een kopie in de plan-regio zoals op arm64),
+dus de nieuwe kern kan niemand adopteren (`RvCage::adopt`), en een warme
+flip weigert vóór de sprong (`flip::WARM`). Dezelfde weg als hierboven,
+met drie verschillen:
+
+- **Het app-hart uit het image** (`flip::cores_off`, `slots::park_for_flip`):
+  de C906L van de LicheeRV gaat in reset (het resetblok, zoals een harde
+  intrekking), en de nieuwe kern haalt hem eruit zoals bij elke boot
+  (`start_app_hart`). Een hart zonder resetblok (QEMU) krijgt in zijn
+  sched-blok `SCHED_OFF_PC` en de bel; de switcher springt aan het begin
+  van zijn volgende ronde naar de uit-stub (`cpu::riscv::switch::off_stub`,
+  een kopie op `FLIP_PARK_PA`, buiten het image), die zijn D-cache veegt,
+  bevestigt in `SCHED_MBOX_CTX` en slaapt tot de bel. Die komt van de
+  nieuwe kern (`boot::start_hart`), en dan gaat het hart diens `_start` in,
+  de parkeerlus van het postvak. `cores_off=1` op de console.
+- **De sprong** is de M-mode-trampoline van `cpu::el2::chain`: interrupts
+  dicht, op de C906 de hele D-cache naar DRAM (`th.dcache.ciall`), de
+  kopie, opnieuw vegen, de I-cache leeg, en naar `_start` met a0 = 0 en a1
+  = wat de firmware de eerste kern gaf (QEMU: de DTB, die de oude kern
+  vóór de sprong toetst).
+- **De LicheeRV draagt Hop en zijn config in het image.** De bundel bakt
+  Hop erin (`STAGE=` of de Hop van `tools/hop-build.sh`); de nieuwe kern
+  start díe Hop. Het config-venster van de draaiende kern gaat mee als de
+  bundel er zelf geen tekst in heeft (`HOPOS_FLIP_CFG`); `CFG=` bij het
+  bouwen geeft de nieuwe kern een eigen config. De staging (13 MB op
+  `0x8690_0000`) ligt tussen de DMA-regio (van 8 naar 1 MB) en pool C (van
+  16 naar 10 MB): de heap van de kern bleef heel.
+
+De reservering van de bundel in Hop kreeg daarbij de plaatsing van Hop
+zelf (de OS-core, `kern::system`): een bundel draait nooit, en met één
+app-hart bezet faalde de reservering ("no free run of 1 app core(s)").
+
+Na de koude flip plaatst Hop wat hij uit de init-jobs (`hopos.init[]`) of
+van de leader krijgt; de huidige Hop bewaart zijn eigen jobs niet over een
+herstart (`GET /tasks` is na een koude flip zonder init-jobs leeg, ook op
+arm64, 02-10).
+
 ## Toetsen
 
 - `sh tools/qemu-test-flip.sh`: virt, alles hierboven, plus een
@@ -346,6 +391,13 @@ die zelf niet opkomt.
   met de PIE-basis en de feitenpagina; `COLD=1` ervoor is de koude flip
   onder EDK2 (Hop koud uit `hopos-stage.elf`, dat de feitenpagina terugwijst).
   Groen 29-09, beide.
+- `sh tools/qemu-riscv-test-flip.sh`: de koude flip op QEMU virt riscv64,
+  met de hop-CLI als trigger. Kern A met Hop op hart 0 en een appspike die
+  blijft (een init-job) op hart 1; `hop flip` warm wordt geweigerd,
+  `hop flip --cold` springt (`cores_off=1`), kern B landt koud, de
+  kooi-zelftest op hart 1 slaagt na de sprong (het hart kwam uit de
+  uit-stub), Hop start koud, dezelfde hopfs-generatie, en de appspike komt
+  terug op hart 1. Groen 02-10.
 - Host: `net` (`de_conntrack_overleeft_de_flip_via_de_actor`), `kern`
   (`black_box_keeps_the_tail_and_is_read_once`: elke schrijf geveegd,
   `black_box_short_and_oversized_writes`,
@@ -356,7 +408,8 @@ die zelf niet opkomt.
   `the_new_image_goes_behind_hop_in_the_staging`, en in `system` de vlag
   tot aan de haak), `cpu` (`chain`: `only_a_parked_core_is_sent_to_the_off_stub`;
   `boot`: `only_core_zero_boots_cold_and_any_core_lands_a_flip`), `sync`
-  (`one_place_holds_one_and_never_spins`).
+  (`one_place_holds_one_and_never_spins`), `board-licheerv`
+  (`the_window_goes_along_only_into_an_image_without_one`).
 
 ## Lessen
 
