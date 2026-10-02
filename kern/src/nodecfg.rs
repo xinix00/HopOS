@@ -156,8 +156,14 @@ pub struct Facts<'a> {
     pub dns: Option<Ipv4Addr>,
     /// De agent-poort; de leader luistert op poort + 1000.
     pub port: u16,
-    /// Alle app-cores van het plan (Hop plant tegen deze min de zijne).
+    /// Alle app-cores van het plan (Hop plant tegen deze, min de zijne als
+    /// hij er zelf een bezet).
     pub app_cores: usize,
+    /// Deelt Hop de OS-core met de kern? Dan bezet hij geen app-core en
+    /// plant hij tegen alle app-cores (GEMETEN 02-10: de O6N gaf Hop 10 van
+    /// 11 en de Pi 4 2 van 3 terwijl Hop op de OS-core zat: één core per
+    /// node onbenut).
+    pub hop_on_os: bool,
     /// Het geheugen van de pool (Hop plant tegen dit min het zijne).
     pub pool_bytes: u64,
     /// De partitie van Hop zelf.
@@ -365,9 +371,15 @@ fn base(out: &mut String, cfg: &NodeCfg<'_>, f: &Facts<'_>) -> fmt::Result {
         writeln!(out, "DNS={dns}")?;
     }
     writeln!(out, "HOPOS_PORT={}", f.port)?;
-    // Hop plant tegen de cores die hij kan uitdelen: alle app-cores min de
-    // zijne (hij deelt zijn core niet met jobs, alleen met zijn groep).
-    writeln!(out, "HOPOS_CORES={}", f.app_cores.saturating_sub(1).max(1))?;
+    // Hop plant tegen de cores die hij kan uitdelen: alle app-cores, min de
+    // zijne als hij er een bezet (hij deelt zijn core niet met jobs, alleen
+    // met zijn groep); op de OS-core bezet hij er geen.
+    let own = usize::from(!f.hop_on_os);
+    writeln!(
+        out,
+        "HOPOS_CORES={}",
+        f.app_cores.saturating_sub(own).max(1)
+    )?;
     writeln!(
         out,
         "HOPOS_MEMORY={}",
@@ -386,6 +398,7 @@ mod tests {
         dns: Some(Ipv4Addr::new(10, 0, 2, 3)),
         port: 8080,
         app_cores: 3,
+        hop_on_os: false,
         pool_bytes: 512 << 20,
         hop_mem: 64 << 20,
     };
@@ -467,6 +480,18 @@ mod tests {
             "HOPOS_NODE=hopos-qemu\nHOPOS_CLUSTER=hopos\nHOPOS_INSECURE=1\n\
              HOPOS_NODE_IP=10.0.2.15\nDNS=10.0.2.3\nHOPOS_PORT=8080\nHOPOS_CORES=2\n\
              HOPOS_MEMORY=469762048\n"
+        );
+    }
+
+    #[test]
+    fn hop_on_the_os_core_plans_against_every_app_core() {
+        let mut f = FACTS;
+        f.hop_on_os = true;
+        let b = build(&NodeCfg::parse(QEMU_CFG), &f).unwrap();
+        assert!(
+            core::str::from_utf8(b.as_bytes())
+                .unwrap()
+                .contains("HOPOS_CORES=3\n")
         );
     }
 
