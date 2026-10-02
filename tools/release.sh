@@ -5,6 +5,7 @@
 #
 #   sh tools/release.sh 3.0.0             bouwen, klaarzetten, de notes en de regels
 #   sh tools/release.sh --dry-run 3.0.0   alleen bouwen en klaarzetten
+#   JOBS=8 sh tools/release.sh ...        zoveel boards tegelijk (standaard 4)
 #   HOP_DIR=pad sh tools/release.sh ...   de hop-repo (standaard ../hop/hop)
 #   GO_APPS=0 sh tools/release.sh ...     de Go-apps overslaan
 #
@@ -95,10 +96,103 @@ flip() {
 	cp "target/hopos-$1.flip" "$OUT/hopos-$1-$2.flip"
 }
 
-# Hop, één keer voor arm64: elk board krijgt hetzelfde image als bewoner.
-step "Hop (tools/hop-build.sh, $HOP_DIR)"
-HOP_ELF="$(sh tools/hop-build.sh "$TARGET")"
+# Hop één keer, arm64 en riscv64 naast elkaar (tools/hop-build.sh heeft per
+# target een eigen map): elk board krijgt hetzelfde image als bewoner.
+step "Hop (tools/hop-build.sh, $HOP_DIR): arm64 en riscv64 naast elkaar"
+sh tools/hop-build.sh "$TARGET" >"$OUT/.hop-arm64" &
+sh tools/hop-build.sh "$RV" >"$OUT/.hop-riscv64" &
+wait
+HOP_ELF="$(cat "$OUT/.hop-arm64")"
+HOP_RV="$(cat "$OUT/.hop-riscv64")"
+rm -f "$OUT/.hop-arm64" "$OUT/.hop-riscv64"
+[ -f "$HOP_ELF" ] && [ -f "$HOP_RV" ] || { echo "release $VERSION: Hop niet gebouwd (zie hierboven)" >&2; exit 1; }
 
+# Elk board en elke smaak in een eigen kopie van de boom met een eigen
+# target-map, JOBS tegelijk (standaard 4): de image-scripts schrijven op
+# vaste paden in target/, en cargo zet één slot per target-map, dus in één
+# boom gaat het één voor één (02-10: vijf minuten op één core in de
+# link-fases). Een kopie bouwt zijn afhankelijkheden zelf opnieuw; dat is
+# CPU-tijd, geen wachttijd.
+JOBS="${JOBS:-4}"
+RUNNING=0
+# job <naam> <functie> [argumenten]: start de functie in een kopie.
+job() {
+	name=$1
+	shift
+	WORK="$DIR/target/rel-$name"
+	rm -rf "$WORK"
+	mkdir -p "$WORK"
+	(cd "$DIR" && tar --exclude=./target --exclude=./.git -cf - .) | tar -x -C "$WORK"
+	(
+		cd "$WORK" || exit 1
+		export CARGO_TARGET_DIR="$WORK/target"
+		"$@" >"$WORK/build.log" 2>&1
+		echo $? >"$WORK/status"
+	) &
+	RUNNING=$((RUNNING + 1))
+	[ "$RUNNING" -lt "$JOBS" ] || batch
+}
+# batch: wacht op de lopende kopieën en stopt bij de eerste die faalde.
+batch() {
+	wait
+	RUNNING=0
+	for w in "$DIR"/target/rel-*; do
+		[ -f "$w/status" ] || continue
+		if [ "$(cat "$w/status")" != 0 ]; then
+			echo "== release $VERSION: ${w##*/rel-} FAALDE; het einde van $w/build.log:" >&2
+			tail -n 30 "$w/build.log" >&2
+			exit 1
+		fi
+		rm -rf "$w"
+	done
+}
+# De bouwstappen per board, in de kopie (cwd), met de uitkomst naar $OUT.
+pi() {
+	GUI=$2 CFG="$3" APP="$HOP_ELF" ROLE=hop sh "image/$1.sh"
+	card "target/hopos-$1.img" "hopos-$1-$4.img"
+	flip "$1" "$4" "$2" ""
+}
+radxa() {
+	GUI=$1 CFG="$2" APP="$HOP_ELF" ROLE=hop sh image/radxa-zero3.sh
+	card target/radxa-zero3/hopos-radxa-zero3.img "hopos-radxa-$3.img"
+	flip radxa "$3" "$1" ""
+}
+uefi() {
+	ESP="$PWD/target/release-esp"
+	# De O6N heeft de VPU: headfull is daar de media-smaak (die zet gui
+	# zelf aan, hopos/Cargo.toml).
+	if [ "$1" = o6n ] && [ "$2" = 1 ]; then
+		MEDIA=1 BOARD=$1 CFG="$3" APP="$HOP_ELF" ROLE=hop ESP="$ESP" sh image/uefi-run.sh
+		flip "$1" "$4" 0 media
+	else
+		GUI=$2 BOARD=$1 CFG="$3" APP="$HOP_ELF" ROLE=hop ESP="$ESP" sh image/uefi-run.sh
+		flip "$1" "$4" "$2" ""
+	fi
+	# De stick: dezelfde vorm als de Go-stick (tag v2.2.8, image/uefi-run.sh
+	# stap 3b), op het hopcfg-venster na. UEFI leest FAT16 van removable
+	# media; na het flashen mount de partitie en is hopos.cfg te bewerken.
+	cargo run -q -p mkcard -- -o "$ESP.img" -size 64 -start 8192 -label hopos -vollabel \
+		"$ESP/EFI/BOOT/BOOTAA64.EFI=EFI/BOOT/BOOTAA64.EFI" "$ESP/hopos.cfg" \
+		"$ESP/hopos-stage.elf" >&2
+	card "$ESP.img" "hopos-$1-$4.img"
+}
+apple() {
+	CFG="$HEADLESS" EMBED="$HOP_ELF" sh image/apple-m4.sh
+	# De stick: het bootobject, de installer en de uitleg op één FAT-partitie
+	# (LBA 2048, label HOPOS), zodat er in Recovery niets te typen valt behalve
+	# het pad naar install.sh; die zoekt het image naast zichzelf.
+	cargo run -q -p mkcard -- -o target/apple-m4/hopos-apple-card.img -size 32 -start 2048 \
+		-label HOPOS -vollabel "target/apple-m4/hopos-apple.img=hopos-apple.img" \
+		"image/apple/install.sh=install.sh" "image/apple/README-m4.txt=README.txt" >&2
+	card target/apple-m4/hopos-apple-card.img hopos-apple-headless.img
+	flip apple headless 0 ""
+}
+licheerv() {
+	STAGE="$HOP_RV" ROLE=hop CFG="$HEADLESS" LICHEERV_DONOR_SHA256=$LRV_DONOR_SHA sh image/licheerv-agent.sh
+	card target/licheerv/hopos-licheerv.img hopos-licheerv-headless.img
+}
+
+step "de boards, $JOBS tegelijk (JOBS=)"
 for FLAVOR in headless headfull; do
 	if [ "$FLAVOR" = headless ]; then
 		G=0 CONF="$HEADLESS"
@@ -106,55 +200,17 @@ for FLAVOR in headless headfull; do
 		G=1 CONF="$HEADFULL"
 	fi
 	for b in rpi4 rpi5; do
-		step "$b $FLAVOR"
-		GUI=$G CFG="$CONF" APP="$HOP_ELF" ROLE=hop sh "image/$b.sh"
-		card "target/hopos-$b.img" "hopos-$b-$FLAVOR.img"
-		flip "$b" "$FLAVOR" "$G" ""
+		job "$b-$FLAVOR" pi "$b" "$G" "$CONF" "$FLAVOR"
 	done
-	step "radxa $FLAVOR"
-	GUI=$G CFG="$CONF" APP="$HOP_ELF" ROLE=hop sh image/radxa-zero3.sh
-	card target/radxa-zero3/hopos-radxa-zero3.img "hopos-radxa-$FLAVOR.img"
-	flip radxa "$FLAVOR" "$G" ""
+	job "radxa-$FLAVOR" radxa "$G" "$CONF" "$FLAVOR"
 	for b in o6n altra; do
-		step "$b $FLAVOR"
-		ESP="$DIR/target/release-esp-$b-$FLAVOR"
-		rm -rf "$ESP"
-		# De O6N heeft de VPU: headfull is daar de media-smaak (die zet gui
-		# zelf aan, hopos/Cargo.toml).
-		if [ "$b" = o6n ] && [ "$G" = 1 ]; then
-			MEDIA=1 BOARD=$b CFG="$CONF" APP="$HOP_ELF" ROLE=hop ESP="$ESP" sh image/uefi-run.sh
-			flip "$b" "$FLAVOR" 0 media
-		else
-			GUI=$G BOARD=$b CFG="$CONF" APP="$HOP_ELF" ROLE=hop ESP="$ESP" sh image/uefi-run.sh
-			flip "$b" "$FLAVOR" "$G" ""
-		fi
-		# De stick: dezelfde vorm als de Go-stick (tag v2.2.8, image/uefi-run.sh
-		# stap 3b), op het hopcfg-venster na. UEFI leest FAT16 van removable
-		# media; na het flashen mount de partitie en is hopos.cfg te bewerken.
-		cargo run -q -p mkcard -- -o "$ESP.img" -size 64 -start 8192 -label hopos -vollabel \
-			"$ESP/EFI/BOOT/BOOTAA64.EFI=EFI/BOOT/BOOTAA64.EFI" "$ESP/hopos.cfg" \
-			"$ESP/hopos-stage.elf" >&2
-		card "$ESP.img" "hopos-$b-$FLAVOR.img"
-		rm -rf "$ESP" "$ESP.img"
+		job "$b-$FLAVOR" uefi "$b" "$G" "$CONF" "$FLAVOR"
 	done
 done
-
-step "apple headless"
-CFG="$HEADLESS" EMBED="$HOP_ELF" sh image/apple-m4.sh
-# De stick: het bootobject, de installer en de uitleg op één FAT-partitie
-# (LBA 2048, label HOPOS), zodat er in Recovery niets te typen valt behalve
-# het pad naar install.sh; die zoekt het image naast zichzelf.
-cargo run -q -p mkcard -- -o target/apple-m4/hopos-apple-card.img -size 32 -start 2048 \
-	-label HOPOS -vollabel "target/apple-m4/hopos-apple.img=hopos-apple.img" \
-	"image/apple/install.sh=install.sh" "image/apple/README-m4.txt=README.txt" >&2
-card target/apple-m4/hopos-apple-card.img hopos-apple-headless.img
-flip apple headless 0 ""
+job apple-headless apple
+job licheerv-headless licheerv
+batch
 skip "apple headfull: board-apple heeft geen gui-feature"
-
-step "licheerv headless (Hop voor riscv64, tools/hop-build.sh)"
-HOP_RV="$(sh tools/hop-build.sh "$RV")"
-STAGE="$HOP_RV" ROLE=hop CFG="$HEADLESS" LICHEERV_DONOR_SHA256=$LRV_DONOR_SHA sh image/licheerv-agent.sh
-card target/licheerv/hopos-licheerv.img hopos-licheerv-headless.img
 skip "licheerv headfull: board-licheerv heeft geen gui-feature; en geen flipbundel (riscv64)"
 
 # De apps: zonder debug-info, met de symbolen (de kern leest er RamStart en
