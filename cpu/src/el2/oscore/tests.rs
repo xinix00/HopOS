@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::el2::harness::plan;
-use abi::layout::{CTX_LEN, Slot};
+use abi::layout::Slot;
 
 fn ctx(plan: &Plan, i: usize) -> Pa {
     plan.ctx_pa(Slot::new(i).unwrap()).unwrap()
@@ -23,10 +23,14 @@ fn host_prepares_the_first_turn_and_joins_the_list() {
     let (_b, plan) = plan(2);
     let c = ctx(&plan, 1);
     // Rommel in het blok: verse DRAM is geen nul.
-    for off in (0..CTX_LEN).step_by(8) {
+    for off in (0..CTX_FP_END).step_by(8) {
         dev::write64(c.add(off), 0xdead_beef);
     }
     host(&plan, c, 0x5001_0000, 0xbfe0_0000).unwrap();
+    // Lege FP-registers, en de overgang zet ze terug: niets van de vorige
+    // huurder in q0..q31.
+    assert!((0..CTX_FPRS_ARM_WORDS).all(|w| dev::read64(c.add(CTX_FPRS + 8 * w)) == 0));
+    assert_eq!(dev::read64(c.add(CTX_FP_LIVE)), 1);
     assert_eq!(ctx_state(c), Some(CtxState::BootPending));
     assert_eq!(ctx_read(c, CTX_GPRS), 0xbfe0_0000);
     assert!((1..31).all(|r| ctx_read(c, CTX_GPRS + 8 * r) == 0));

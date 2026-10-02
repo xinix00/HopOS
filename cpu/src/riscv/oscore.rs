@@ -30,11 +30,17 @@
 //! van een bewoner leest (`ctx_state`, `rx_due`, het fault-rapport) klopt
 //! hier ook.
 //!
-//! FP: de kern gebruikt geen f-registers (gemeten 29-09: nul
-//! f-instructies in het image; `tools/qemu-riscv-test.sh` toetst het bij
-//! elke run). Daarom bewaart deze overgang f0..f31 niet: wat de bewoner erin
-//! had, staat er bij zijn volgende beurt nog. Gaat de kern ooit FP
-//! gebruiken, dan hoort het bewaren hier eerst.
+//! FP: een beurt kan asynchroon eindigen (PLIC, kick, wekker), en daarna
+//! kan een ándere bewoner aan de beurt komen. Daarom bewaart de trap f0..f31
+//! en `fcsr` in `CTX_FPRS` (dezelfde plek en volgorde als de switcher) en zet
+//! de overgang ze terug bij het hervatten; een koude start begint met
+//! nullen. Bij elke trap, ook een `ecall`: applib laat de f-registers bij
+//! een yield niet zelf bewaren (`clobber_abi("C")` houdt fs0..fs11 voor
+//! levend), net als op de app-harts. `mstatus.FS` gaat er eerst aan: een
+//! bewoner die zijn FPU uitzette, mag de kern geen illegal instruction in
+//! machine mode bezorgen. De kern zelf gebruikt geen f-registers (gemeten
+//! 29-09; `tools/qemu-riscv-test.sh` telt ze buiten de switcher en deze
+//! overgang), dus de zijne hoeven niet mee.
 
 use super::clint::{Clint, NEVER};
 use super::csr;
@@ -42,9 +48,9 @@ use super::pmp;
 use crate::el2::{self, Back, OS_STATS as STATS, Turn, ctx_read, ctx_state, ctx_write, rx_due};
 use abi::hopabi::{CTRL_FAULT_ESR, CTRL_FAULT_FAR, CTRL_FAULT_VEC};
 use abi::layout::{
-    CAGE_STRIDE, CTX_BOOT_PC, CTX_CTRL_PA, CTX_GPRS, CTX_LEN, CTX_OFF, CTX_REGIME, CTX_RESUME,
-    CTX_REVOKE, CTX_STATE, CTX_WAKE, CTX_WAKE_NO_PEEK, Core, CtxState, Plan, SCHED_COUNT,
-    SCHED_CURRENT, SCHED_CURSOR, SCHED_LIST, SLOT_CAP,
+    CAGE_STRIDE, CTX_BOOT_PC, CTX_CTRL_PA, CTX_FPRS, CTX_GPRS, CTX_LEN, CTX_OFF, CTX_REGIME,
+    CTX_RESUME, CTX_REVOKE, CTX_STATE, CTX_WAKE, CTX_WAKE_NO_PEEK, Core, CtxState, Plan,
+    SCHED_COUNT, SCHED_CURRENT, SCHED_CURSOR, SCHED_LIST, SLOT_CAP,
 };
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 use dev::Pa;
@@ -253,10 +259,11 @@ pub enum Probe {
 struct Page([AtomicU32; 1024]);
 static STUB: Page = Page([const { AtomicU32::new(0) }; 1024]);
 
-/// Het ctx-blok van de zelftest.
+/// Het ctx-blok van de zelftest, met de FP-kier die de trap beschrijft.
 #[repr(C, align(64))]
-struct CtxScratch([AtomicU64; (CTX_LEN / 8) as usize]);
-static SCRATCH_CTX: CtxScratch = CtxScratch([const { AtomicU64::new(0) }; (CTX_LEN / 8) as usize]);
+struct CtxScratch([AtomicU64; SCRATCH_WORDS]);
+const SCRATCH_WORDS: usize = ((CTX_FPRS + 33 * 8) / 8) as usize;
+static SCRATCH_CTX: CtxScratch = CtxScratch([const { AtomicU64::new(0) }; SCRATCH_WORDS]);
 
 /// Byte `i` van de bewonerslijst van `sched` (woordgewijs gelezen).
 fn list_get(sched: Pa, i: usize) -> u8 {
@@ -362,8 +369,10 @@ fn report(ctx: Pa, vec: u64, esr: u64, far: u64) {
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 mod arch {
     use super::{
-        CAUSE_CAGE_VERIFY, CTX_BOOT_PC, CTX_GPRS, CTX_REGIME, CTX_RESUME, SAVE_MTVAL, SAVE_WORDS,
+        CAUSE_CAGE_VERIFY, CTX_BOOT_PC, CTX_FPRS, CTX_GPRS, CTX_REGIME, CTX_RESUME, SAVE_MTVAL,
+        SAVE_WORDS,
     };
+    use crate::riscv::csr::MSTATUS_FS_INITIAL;
     use crate::riscv::switch::{
         REGIME_PMPADDR0, REGIME_PMPCFG0, REGIME_SATP, REGIME_SSCRATCH, REGIME_STVEC,
     };
@@ -390,8 +399,8 @@ mod arch {
         // De assembly bewaart ra, sp, gp, tp en s0..s11 van de kern en zet
         // ze terug, zet `mtvec` en `mscratch` terug, en keert als een gewone
         // C-functie terug; de caller-saved registers zijn volgens de ABI
-        // verloren. De kern gebruikt geen f-registers (de kop van dit
-        // bestand), dus die hoeven niet mee.
+        // verloren. De f-registers van de kern hoeven niet mee: hij gebruikt
+        // ze niet (de kop van dit bestand).
         unsafe { __hopos_os_enter(ctx, fresh, save) }
     }
 
@@ -465,10 +474,20 @@ __hopos_os_enter:
     csrw stvec, t0
     ld t0, {regime}+{rsscratch}(a0)
     csrw sscratch, t0
+    // FP aan voor beide wegen hieronder (de FS van een vorige bewoner kan
+    // uit staan); de `.option pop` staat na het laden bij het hervatten.
+    li t0, {fs}
+    csrs mstatus, t0
+    .option push
+    .option arch, +f, +d
     beqz a1, 2f
 
     // Koud: de ingang, a0 = het argument, alle andere registers nul (geen
-    // kern-adres lekt de kooi in).
+    // kern-adres en niets van een voorganger lekt de kooi in).
+    .irp n, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
+    fmv.d.x f\n, zero
+    .endr
+    fscsr zero
     ld t0, {bootpc}(a0)
     csrw mepc, t0
     li t0, 3 << 11
@@ -511,9 +530,16 @@ __hopos_os_enter:
     fence.i
     mret
 
-    // Hervatten: sstatus vóór de MPP-bits (sstatus is een venster op
-    // mstatus), dan de GPR's met x31 als basis, x31 als laatste.
+    // Hervatten: de f-registers, dan sstatus (met de FS van de bewoner)
+    // vóór de MPP-bits (sstatus is een venster op mstatus), dan de GPR's
+    // met x31 als basis, x31 als laatste.
 2:
+    .irp n, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
+    fld f\n, {fprs}+8*\n(a0)
+    .endr
+    ld t0, {fprs}+256(a0)
+    fscsr t0
+    .option pop
     ld t0, {resume}+0(a0)
     csrw mepc, t0
     ld t0, {resume}+8(a0)
@@ -612,6 +638,17 @@ __hopos_os_trap:
     sd t1, {regime}+{rstvec}(t0)
     csrr t1, sscratch
     sd t1, {regime}+{rsscratch}(t0)
+    // De FP-staat, na sstatus (die draagt de FS van de bewoner zelf).
+    li t1, {fs}
+    csrs mstatus, t1
+    .option push
+    .option arch, +f, +d
+    .irp n, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
+    fsd f\n, {fprs}+8*\n(t0)
+    .endr
+    frcsr t1
+    sd t1, {fprs}+256(t0)
+    .option pop
     csrr t1, mtval
     sd t1, {smtval}(sp)
     csrr a0, mcause
@@ -642,6 +679,9 @@ __hopos_os_trap:
     ld s11, 120(a2)
     ld sp, 8(a2)
     ret
+    // Het einde van de overgang: tot hier telt de FP-toets niet mee.
+    .global __hopos_os_end
+__hopos_os_end:
 "#,
         sctx = const SAVE_CTX,
         smtvec = const SAVE_MTVEC,
@@ -659,6 +699,8 @@ __hopos_os_trap:
         gprs = const CTX_GPRS,
         resume = const CTX_RESUME,
         verify = const CAUSE_CAGE_VERIFY,
+        fprs = const CTX_FPRS,
+        fs = const MSTATUS_FS_INITIAL,
     );
 }
 

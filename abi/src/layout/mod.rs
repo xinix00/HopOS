@@ -620,13 +620,32 @@ pub const CTX_SMP: u64 = 768;
 /// De maat van het hele ctx-blok. FP staat er bewust niet in: de laag die
 /// de kern bezit draait met de MMU uit en een SIMD-store naar Device faultt.
 pub const CTX_LEN: u64 = 1024;
-/// De FP-registers van een bewoner op riscv64, in de kier achter het
-/// ctx-blok (vóór [`SMP_CTX_OFF`]): f0..f31 en `fcsr`, 33 woorden. De
-/// riscv-switcher bewaart ze bij een yield en een tijdschijf en zet ze
-/// terug bij het hervatten; een gedeeld hart draagt sinds 02-10 meer dan één
-/// bewoner. ARM gebruikt dit niet (de kern-laag daar heeft de MMU uit).
+/// De FP-registers van een bewoner, in de kier achter het ctx-blok (vóór
+/// [`SMP_CTX_OFF`]). Alleen voor kooi-contexten: een secundair ctx-blok
+/// heeft deze kier niet.
+///
+/// riscv64: f0..f31 en `fcsr`, 33 woorden. De riscv-switcher en de
+/// OS-core bewaren ze bij elke trap en zetten ze terug bij het hervatten;
+/// een gedeeld hart draagt sinds 02-10 meer dan één bewoner.
+///
+/// arm64: q0..q31 (elk twee woorden, laag dan hoog), FPCR en FPSR,
+/// [`CTX_FPRS_ARM_WORDS`] woorden, met daarachter [`CTX_FP_LIVE`]. Alleen
+/// de OS-core gebruikt ze (`cpu::el2::oscore`, die onderbreekt), via
+/// GP-registers, want ook deze kier is op sommige borden Device. De
+/// switcher van de app-cores wisselt alleen op een yield en bewaart geen FP.
 pub const CTX_FPRS: u64 = CTX_LEN;
 const _: () = assert!(CTX_OFF + CTX_FPRS + 33 * 8 <= SMP_CTX_OFF);
+/// Het aantal FP-woorden op arm64: 32 keer 16 bytes plus FPCR en FPSR.
+pub const CTX_FPRS_ARM_WORDS: u64 = 66;
+/// arm64: niet-nul = [`CTX_FPRS`] draagt de FP-staat van de bewoner en de
+/// OS-core zet hem terug bij de volgende beurt. De OS-core schrijft het bij
+/// elke terugkeer (1 na een onderbreking, 0 na een yield); een verse
+/// bewoner krijgt 1 met nullen, zodat hij niets van een voorganger ziet.
+pub const CTX_FP_LIVE: u64 = CTX_FPRS + 8 * CTX_FPRS_ARM_WORDS;
+/// Het einde van wat een ctx-blok van een kooi-context inclusief zijn
+/// FP-kier beslaat, voor een kladblok buiten het plan (de zelftests).
+pub const CTX_FP_END: u64 = CTX_FP_LIVE + 8;
+const _: () = assert!(CTX_OFF + CTX_FP_END <= SMP_CTX_OFF);
 
 /// De toestand van een ctx-blok ([`CTX_STATE`]). De kern schrijft `Empty`,
 /// `BootPending` en `Running`; de switcher `Running`, `Saved` en `Dead`.

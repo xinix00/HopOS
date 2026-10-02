@@ -40,6 +40,18 @@
 //! vectoren hieronder (`fiq/lower-a64`, index 10), en de kern ackt de IPI
 //! zelf op EL2 voor hij terugkeert (les 04-09: een ongeackte fast IPI blijft
 //! staan en de core komt nooit meer tot slapen).
+//!
+//! FP: een beurt kan asynchroon eindigen (IRQ, kick, CNTHP), en daarna kan
+//! een ándere bewoner aan de beurt komen. Daarom bewaart de terugweg q0..q31,
+//! FPCR en FPSR in de FP-kier achter het ctx-blok (`CTX_FPRS`) bij elke
+//! terugkeer behalve HVC #1, en zet de overgang ze terug als `CTX_FP_LIVE`
+//! dat zegt. Bij HVC #1 bewaart de app zelf wat de ABI hem opdraagt (d8..d15,
+//! FPCR, FPSR; applib `hvc_yield`, Go `hvcYield`), en een yield kost dan
+//! niets extra. Een HVC #4 of #6 bewaart de app niet, en hier is dat een
+//! yield naar nu: die telt als onderbreking. Via GP-registers (`fmov`), want
+//! het ctx-blok is op sommige borden Device (rk3566) en een SIMD-store
+//! daarheen is niet te vertrouwen. Een verse bewoner begint met nullen. De
+//! kern zelf is softfloat; CPTR_EL2 trapt FP niet ([`OsCore::new`]).
 
 extern crate alloc;
 
@@ -49,10 +61,10 @@ use super::dispatch::{
     ctx_write, rx_due,
 };
 use super::layout::{
-    CAGE_STRIDE, CTX_CTRL_PA, CTX_GPRS, CTX_KICK_PENDING, CTX_OFF, CTX_REGIME,
-    CTX_REGIME_ARM_WORDS, CTX_RESUME, CTX_SP, CTX_STATE, CTX_UNIT_SLOT, CTX_WAKE, CTX_WAKE_NO_PEEK,
-    Core, CtxState, Plan, SCHED_CLINT_PA, SCHED_COUNT, SCHED_CURRENT, SCHED_CURSOR, SCHED_LIST,
-    SCHED_MSIP_PA, SLOT_CAP,
+    CAGE_STRIDE, CTX_CTRL_PA, CTX_FP_END, CTX_FP_LIVE, CTX_FPRS, CTX_FPRS_ARM_WORDS, CTX_GPRS,
+    CTX_KICK_PENDING, CTX_OFF, CTX_REGIME, CTX_REGIME_ARM_WORDS, CTX_RESUME, CTX_SP, CTX_STATE,
+    CTX_UNIT_SLOT, CTX_WAKE, CTX_WAKE_NO_PEEK, Core, CtxState, Plan, SCHED_CLINT_PA, SCHED_COUNT,
+    SCHED_CURRENT, SCHED_CURSOR, SCHED_LIST, SCHED_MSIP_PA, SLOT_CAP,
 };
 use abi::hopabi::{CTRL_FAULT_ESR, CTRL_FAULT_FAR, CTRL_FAULT_VEC};
 use core::sync::atomic::{
@@ -181,8 +193,9 @@ fn spin_limit(now: u64, ticks: u64, hz: u64) -> u64 {
     now.wrapping_add(ticks.saturating_mul(2).saturating_add(grace))
 }
 
-/// Het ctx-blok in woorden, voor de scratch van de zelftest.
-const CTX_WORDS: usize = (super::layout::CTX_LEN / 8) as usize;
+/// Het ctx-blok met zijn FP-kier in woorden, voor de scratch van de
+/// zelftest.
+const CTX_WORDS: usize = (CTX_FP_END / 8) as usize;
 
 /// De langste beurt zonder deadline: 10 ms, dezelfde vangrail als de
 /// WFI-slaap (`cpu::idle::WFI_CAP_NS`). "Geen deadline" als oneindig lezen
@@ -763,8 +776,9 @@ pub fn due(ctx: Pa, now: u64) -> Option<u64> {
 /// Legt de eerste beurt van een bewoner klaar: x0 = `arg` (de control-page,
 /// zoals de trampoline hem doorgeeft), de rest nul, hervatten op `entry` in
 /// EL1h met DAIF dicht, en een schoon EL1-regime (SCTLR zonder MMU, de rest
-/// nul). Wat de trampoline van een app-core verder zet (VTCR, CPTR, CNTHCTL,
-/// CNTVOFF) deed [`OsCore::new`] één keer voor de hele core.
+/// nul), en lege FP-registers die de overgang terugzet. Wat de trampoline
+/// van een app-core verder zet (VTCR, CPTR, CNTHCTL, CNTVOFF) deed
+/// [`OsCore::new`] één keer voor de hele core.
 fn prepare(ctx: Pa, entry: u64, arg: u64) {
     for r in 0..31 {
         ctx_write(ctx, CTX_GPRS + 8 * r, 0);
@@ -780,6 +794,9 @@ fn prepare(ctx: Pa, entry: u64, arg: u64) {
     ctx_write(ctx, CTX_REGIME, SCTLR_EL1_CLEAN);
     ctx_write(ctx, CTX_WAKE, 0);
     ctx_write(ctx, CTX_KICK_PENDING, 0);
+    dev::clear(ctx.add(CTX_FPRS), (8 * CTX_FPRS_ARM_WORDS) as usize);
+    dev::write64(ctx.add(CTX_FP_LIVE), 1);
+    dev::push(ctx.add(CTX_FPRS), (CTX_FP_END - CTX_FPRS) as usize);
 }
 
 /// Sched-blok 0: de bewonerslijst van de OS-core.
@@ -869,8 +886,12 @@ mod arch {
     //! De instructies van de overgang: de EL2-kant van de OS-core. Elk blok
     //! raakt alleen registers van deze core, en de enige sprong naar een
     //! lagere EL is [`enter`].
-    use super::super::layout::{CTX_GPRS, CTX_REGIME, CTX_RESUME, CTX_SP};
+    use super::super::dispatch::{HVC_YIELD, VEC_SYNC_LOWER};
+    use super::super::layout::{
+        CTX_FP_LIVE, CTX_FPRS, CTX_FPRS_ARM_WORDS, CTX_GPRS, CTX_REGIME, CTX_RESUME, CTX_SP,
+    };
     use super::Flavor;
+    use crate::vectors::EC_HVC64;
     use core::arch::{asm, global_asm};
     use dev::Pa;
 
@@ -970,9 +991,9 @@ mod arch {
     /// Het EL2-regime dat een bewoner nodig heeft en de kern niet raakt,
     /// eenmalig: VTCR (4 KB-granule, 39-bit IPA, PS = min(PARange, 44 bit),
     /// dezelfde waarde als de trampoline), CPTR zonder FP-trap (de kern is
-    /// softfloat), CNTHCTL met de teller- en timertoegang van EL1 in beide
-    /// lay-outs, en CNTVOFF 0: de wektijd van een yield is dan dezelfde
-    /// stand als CNTPCT.
+    /// softfloat; de overgang bewaart de FP van een bewoner op EL2),
+    /// CNTHCTL met de teller- en timertoegang van EL1 in beide lay-outs, en
+    /// CNTVOFF 0: de wektijd van een yield is dan dezelfde stand als CNTPCT.
     pub(super) fn prepare(flavor: Flavor) {
         const VTCR_NO_PS: u64 = 0x8000_3559;
         const PARANGE_44: u64 = 4;
@@ -1143,12 +1164,31 @@ mod arch {
     // +112 HCR en VBAR van de kern. SP_EL2 verandert niet door een beurt op
     // EL1, dus de exception komt binnen met SP = deze frame.
     //
+    // FP (de moduledoc): q0..q31 per register via x2/x3 naar of uit de
+    // FP-kier, laag dan hoog (`fmov d` wist de hoge helft, dus die tweede),
+    // dan FPCR en FPSR. De terugweg schrijft `CTX_FP_LIVE` altijd.
+    //
     // Veiligheid (als gewone regel: clippy weigert een SAFETY-tag op
     // `global_asm!`): deze code draait alleen via `enter` hierboven, met de
     // maskers dicht; de regime-save en -restore zijn die van de switcher
     // (switch.rs), die ze op ijzer bewees.
     global_asm!(
         r#"
+    // Eén q-register via x2/x3 naar of uit [x4], met x4 een register
+    // verder. Eigen macro's: in de `.irp` van een smaak eet de smaak de
+    // `\()` op, en `\n.d` leest de assembler als één naam. Het doel is
+    // softfloat: FP en SIMD gaan alleen rond deze blokken aan.
+    .macro hopos_os_qsave n
+    fmov x2, d\n
+    fmov x3, v\n\().d[1]
+    stp x2, x3, [x4], #16
+    .endm
+    .macro hopos_os_qload n
+    ldp x2, x3, [x4], #16
+    fmov d\n, x2
+    fmov v\n\().d[1], x3
+    .endm
+
     .macro hopos_os_flavor p, op1
     .pushsection .text.hopos_os, "ax"
     .balign 16
@@ -1204,6 +1244,20 @@ mod arch {
     ldp x2, x3, [x1, #{resume}]
     msr elr_el2, x2
     msr spsr_el2, x3
+    ldr x2, [x1, #{fp_live}]
+    cbz x2, 1f
+    .arch_extension fp
+    .arch_extension simd
+    add x4, x1, #{fprs}
+    .irp n, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
+    hopos_os_qload \n
+    .endr
+    ldp x2, x3, [x4]
+    msr fpcr, x2
+    msr fpsr, x3
+    .arch_extension nosimd
+    .arch_extension nofp
+1:
     ldp x4, x5, [x1, #({gprs} + 4 * 8)]
     ldp x6, x7, [x1, #({gprs} + 6 * 8)]
     ldp x8, x9, [x1, #({gprs} + 8 * 8)]
@@ -1280,6 +1334,32 @@ mod arch {
     stp x2, x3, [x1, #({regime} + 16 * 8)]
     mrs x2, s3_\op1\()_c6_c0_0
     str x2, [x1, #({regime} + 18 * 8)]
+    cmp x0, #{vsync}
+    b.ne 2f
+    mrs x2, esr_el2
+    ubfx x3, x2, #26, #6
+    cmp x3, #{ec_hvc}
+    b.ne 2f
+    and x3, x2, #0xffff
+    cmp x3, #{hvc_yield}
+    b.ne 2f
+    str xzr, [x1, #{fp_live}]
+    b 3f
+2:
+    .arch_extension fp
+    .arch_extension simd
+    add x4, x1, #{fprs}
+    .irp n, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
+    hopos_os_qsave \n
+    .endr
+    mrs x2, fpcr
+    mrs x3, fpsr
+    .arch_extension nosimd
+    .arch_extension nofp
+    stp x2, x3, [x4]
+    mov x2, #1
+    str x2, [x1, #{fp_live}]
+3:
     ldp x2, x3, [sp, #112]
     msr hcr_el2, x2
     msr vbar_el2, x3
@@ -1339,7 +1419,14 @@ hopos_os_stub_yield:
         regime = const CTX_REGIME,
         resume = const CTX_RESUME,
         ctx_sp = const CTX_SP,
+        fprs = const CTX_FPRS,
+        fp_live = const CTX_FP_LIVE,
+        vsync = const VEC_SYNC_LOWER,
+        ec_hvc = const EC_HVC64,
+        hvc_yield = const HVC_YIELD,
     );
+    // De twee lussen hierboven lopen 32 keer 16 bytes plus FPCR/FPSR.
+    const _: () = assert!(CTX_FPRS_ARM_WORDS == 32 * 2 + 2);
 }
 
 #[cfg(not(all(target_os = "none", target_arch = "aarch64")))]
