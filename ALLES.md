@@ -144,9 +144,13 @@ Per node, de dingen die een node of een meting nu nog stuk maken.
 
 ### Raspberry Pi 5 (pi5-1, 192.168.1.207)
 
-- [ ] De warme flip sterft na de landing: met de nieuwe kaart flippen en
-      de doos lezen (`HOPOS_FLIP_BLACKBOX`); de oude kern zei "jump landed
-      and the handover was consumed, died later in the new kernel's boot".
+- [ ] **De warme flip: het net is dood na de landing.** De zwarte doos van
+      P1 (03-10) zegt het: de nieuwe kern leeft (tikken, dvfs, Hop
+      meegenomen met HOPOS_HOP_RESUMED), maar de RP1-NIC ontvangt niets meer
+      (MSI-X-entry `fffff000`, rx-ring blijft leeg, `nic=1` interrupt, geen
+      DHCP, Hop's systeemtransport "connection refused"), en na 120 s reset
+      de guard koud (HOPOS_FLIP_GUARD). Een agent zoekt de fix
+      (scratchpad/fixes/pi5-flip.patch); de koude boot erna is gewoon goed.
 - [ ] De koude flip weigert zodra er een app-core draaide (CPU_OFF komt op
       de Pi 5 niet terug).
 - [ ] Het glas: sinds de herflash weigert de firmware elke framebuffer
