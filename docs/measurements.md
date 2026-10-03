@@ -249,13 +249,16 @@ bij de kern.
 | NIC-interrupts per seconde in rust | 0 (gepold) | 51 tot 68 |
 | Temperatuur in rust | 59,4 tot 59,8 C | 52 tot 57 C |
 | welcome vanaf het LAN in rust | 12 ms | 12 tot 15 ms |
-| vitals cpu 5 s, Msteps/s | 93,6 (C906B alleen, naast welcome in de sharegroup) | 60,6 (C906B gedeeld met de kern en welcome in `system`) |
-| welcome tijdens de brand | 12 tot 38 ms | 18 tot 36 ms |
+| vitals cpu 5 s, Msteps/s | 93,6 (C906B alleen, naast welcome in de sharegroup) | 60,6 (C906B gedeeld met de kern en welcome in `system`); 65,1 bij Hop op de C906L (groep `hop`, R12) |
+| welcome tijdens de brand | 12 tot 38 ms | 18 tot 36 ms (brand in `system`); 13 tot 27 ms (brand op de C906L) |
 | Hop (slot 1) in rust | 2 tot 3 % van de C906L, gedeeld met de kern | 1 tot 4 % van de C906L, alleen |
 
 Lezing: zonder loterij is de kern tien keer stiller en het bord koeler, en
 is de pomp geen vaste last meer op de core van de apps. Een rekenaar in
 `system` krijgt op de C906B de idle van de kern (60,6 tegen 93,6 op een
-eigen C906B); een rekenaar bij Hop op de C906L (groep `hop`) is nog niet
-gemeten omdat Hop die plaatsing nog weigert (zie ALLES, ronde 4).
+eigen C906B); een rekenaar bij Hop op de C906L (groep `hop`) haalt 65,1,
+precies de 700 van de 1000 MHz. Een job zonder tag valt bij de kern in
+`system` (HOPOS_PLACE_SYSTEM), een job met de tag `hop` komt bij Hop op de
+C906L, en een job die niet past geeft bij Hop één regel HOP_NO_CAPACITY
+(R12, Hop 9c4a311, 03-10).
 
