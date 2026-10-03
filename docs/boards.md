@@ -322,6 +322,14 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
   dan `HOPOS_NIC_UP`, `HOPOS_NET_PUMP` met `irq line, 10 ms guard` en
   `HOPOS_NET_UP`. Komt de afgevuurde vector niet aan:
   `polled (the forced interrupt (EICS) did not arrive within 50 ms)`.
+  Daarvoor dan één regel `net: igb MSI-X diag: ... HOPOS_NIC_IRQ_DIAG`: de
+  DeviceID en de IORT-weg (SMMUv3 met CR0 en GBPA, de ITS die de groep
+  noemt tegen de onze uit de MADT), of MAPD/MAPTI/INV/SYNC in dit kernleven
+  liepen, de MSI-X-control, het command-register, entry 0 en de PBA zoals
+  de functie ze teruggeeft, GPIE/IVAR0/EIMS/EICR van de igb, en een `INT`
+  vanuit de ITS zelf: komt die wel, dan werkt de ITS-kant en haalt de
+  schrijf van de igb de ITS niet; blijft hij stil, dan zit het in de ITS,
+  de redistributor of de collectie.
 - `hwmon: SoC 45.2C (SMpro, PCC channel 14)` en daarna `temp=` op de tik.
 - `watchdog: hardware reset armed (SBSA watchdog, 12.0 s ...) ... HOPOS_WD_ARMED`
   (servers zijn braaf SBSA; de eerste echte proef van dit pad).

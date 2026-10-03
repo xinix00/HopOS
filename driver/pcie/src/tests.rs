@@ -261,6 +261,7 @@ fn capabilities_and_msix() {
     );
     f.msix_enable(&c, &m, true);
     assert_eq!(c.read32(f.bdf, 0x40) >> 16, 0x8002);
+    assert_eq!(f.msix_control(&c, &m), 0x8002);
     assert_eq!(f.command(&c) & CMD_INTX_DISABLE, CMD_INTX_DISABLE);
 
     assert_eq!(f.link(&c), Some(Link { speed: 2, width: 4 }));
@@ -288,6 +289,8 @@ fn msix_table_entries() {
     assert!(t.set(2, 0x0808_0040, 77));
     assert!(!t.set(4, 0, 0));
     assert_eq!(&mem[8..12], &[0x0808_0040, 0, 77, 0]);
+    assert_eq!(t.get(2), Some([0x0808_0040, 0, 77, 0]));
+    assert_eq!(t.get(4), None);
 }
 
 #[test]

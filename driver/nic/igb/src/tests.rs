@@ -361,6 +361,13 @@ fn set_irq_writes_the_single_vector_msix_mode() {
     assert_eq!(dev::read32(reg(0x1528)), 1, "EIMC");
     n.fire_irq();
     assert_eq!(dev::read32(reg(0x1520)), 1, "EICS");
+    dev::write32(reg(0x1580), 1);
+    let d = n.irq_regs();
+    assert_eq!((d.gpie, d.ivar0, d.eicr), (0xc000_0011, 0x8180, 1));
+    assert_eq!(
+        d.to_string(),
+        "GPIE 0xc0000011 IVAR0 0x8180 EIMS 0x1 EICR 0x1"
+    );
 
     // Terug naar pollen: alles dicht, geen bel.
     n.clear_irq();

@@ -119,6 +119,7 @@ const POLLS: u32 = 1 << 20;
 
 /// De commando's (ARM IHI 0069, §5.13).
 mod cmd {
+    pub(super) const INT: u64 = 0x03;
     pub(super) const SYNC: u64 = 0x05;
     pub(super) const MAPD: u64 = 0x08;
     pub(super) const MAPC: u64 = 0x09;
@@ -220,6 +221,14 @@ pub const fn mapti(dev: u32, ev: u32, lpi: u32, icid: u16) -> Command {
 #[must_use]
 pub const fn inv(dev: u32, ev: u32) -> Command {
     [cmd::INV | ((dev as u64) << 32), ev as u64, 0, 0]
+}
+
+/// `INT`: de ITS doet alsof `dev` event `ev` schreef. De proef van de
+/// ITS-kant zonder device: komt de LPI hierop wel en op de MSI niet, dan
+/// zit de fout tussen device en ITS.
+#[must_use]
+pub const fn int(dev: u32, ev: u32) -> Command {
+    [cmd::INT | ((dev as u64) << 32), ev as u64, 0, 0]
 }
 
 /// `SYNC`: alles vóór dit commando is bij redistributor `rd` aangekomen.
@@ -657,6 +666,34 @@ impl Its {
         Ok(true)
     }
 
+    /// De LPI van event `ev` van `dev`, als `route` hem in dit kernleven
+    /// toewees (dan liepen `MAPD`, `MAPTI`, `INV` en `SYNC` zonder fout).
+    #[must_use]
+    pub fn routed(&self, dev: u32, ev: u32) -> Option<u32> {
+        self.routes
+            .iter()
+            .flatten()
+            .find(|r| r.dev == dev && r.ev == ev)
+            .map(|r| r.lpi)
+    }
+
+    /// Vuurt een toegewezen event vanuit de ITS zelf (`INT`, `SYNC`).
+    /// `Ok(false)` als het event niet van ons is.
+    pub fn fire(&mut self, dev: u32, ev: u32) -> Result<bool> {
+        if self.routed(dev, ev).is_none() {
+            return Ok(false);
+        }
+        self.run(&[int(dev, ev), sync(self.rd)])?;
+        Ok(true)
+    }
+
+    /// GITS_CTLR, CREADR en CWRITER, voor een diagnoseregel.
+    #[must_use]
+    pub fn state(&self) -> (u32, u64, u64) {
+        let g = self.g();
+        (g.ctlr.read(), g.creadr.read(), g.cwriter.read())
+    }
+
     /// Is `lpi` een LPI die deze ITS uitdeelde?
     #[must_use]
     pub fn owns(&self, lpi: u32) -> bool {
@@ -714,6 +751,7 @@ mod tests {
         );
         assert_eq!(inv(0x10, 2), [0xc | (0x10 << 32), 2, 0, 0]);
         assert_eq!(sync(0x80a), [0x5, 0, 0x80a << 16, 0]);
+        assert_eq!(int(0x10, 2), [0x3 | (0x10 << 32), 2, 0, 0]);
         // Een ITT-adres onder 256 bytes wordt afgekapt: de spec eist die
         // alignment, dus de lage bits bestaan niet.
         assert_eq!(mapd(1, 1, 0x1234)[2], BASER_VALID | 0x1200);

@@ -37,6 +37,31 @@ static NIC_ACK: Local<Cell<Option<IrqAck>>> = Local::new(Cell::new(None));
 /// M4).
 const NIC_TEST_NS: u64 = 50_000_000;
 
+/// Wat een `INT` vanuit de ITS deed (de proef zonder device).
+enum IntTest {
+    /// De LPI kwam, na zoveel microseconden.
+    Arrived(u64),
+    /// Geen LPI binnen [`NIC_TEST_NS`].
+    Silent,
+    /// Het commando liep niet.
+    Refused(&'static str),
+}
+
+impl core::fmt::Display for IntTest {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Arrived(us) => write!(
+                f,
+                "arrived after {us} us (the ITS side works; the igb write does not reach it)"
+            ),
+            Self::Silent => f.write_str(
+                "silent within 50 ms (the ITS, redistributor or collection side is broken)",
+            ),
+            Self::Refused(why) => write!(f, "not run: {why}"),
+        }
+    }
+}
+
 /// De ack van de NIC-lijn, uit de dispatch vóór de EOI.
 fn igb_ack() {
     if let Some(a) = NIC_ACK.get().get() {
@@ -141,20 +166,51 @@ impl Altra {
         let _ = NIC_BELL.take();
         nic.set_irq(&NIC_BELL);
         nic.fire_irq();
+        if let Some(us) = self.bell_within(NIC_TEST_NS) {
+            // De ack sloot de vector; de eerste lege ring van de pomp
+            // heropent hem.
+            return Ok((wired, us));
+        }
+        if let Wired::Msix { dev_id, .. } = wired {
+            self.diagnose(&at, dev_id, nic);
+        }
+        nic.clear_irq();
+        Err("the forced interrupt (EICS) did not arrive within 50 ms")
+    }
+
+    /// Draait de dispatch tot de NIC-bel gaat (de microseconden tot dan)
+    /// of `ns` verstreken is.
+    fn bell_within(&self, ns: u64) -> Option<u64> {
         let t0 = cpu::idle::now();
         loop {
             let _ = self.uefi.dispatch_interrupts();
             let dt = cpu::idle::now().saturating_sub(t0);
             if NIC_BELL.take() {
-                // De ack sloot de vector; de eerste lege ring van de pomp
-                // heropent hem.
-                return Ok((wired, dt / 1_000));
+                return Some(dt / 1_000);
             }
-            if dt > NIC_TEST_NS {
-                nic.clear_irq();
-                return Err("the forced interrupt (EICS) did not arrive within 50 ms");
+            if dt > ns {
+                return None;
             }
         }
+    }
+
+    /// Eén regel na een zelftest die niet aankwam, om te kiezen tussen de
+    /// verdachten: eerst wat de functie en de NIC zeggen (de PBA en EICR
+    /// vóór iets ze verandert), de IORT-weg met de SMMU en de ITS, en dan
+    /// een `INT` vanuit de ITS zelf. Komt die wel, dan is de ITS-kant goed
+    /// en zit de fout tussen de igb en de ITS (doorbell, DeviceID, SMMU).
+    fn diagnose(&self, at: &At<'_>, dev_id: u32, nic: &Igb) {
+        let d = board_uefi::irq::msix_diag(at, dev_id);
+        let regs = nic.irq_regs();
+        let _ = NIC_BELL.take();
+        let int = match board_uefi::irq::its_fire(dev_id) {
+            Ok(()) => match self.bell_within(NIC_TEST_NS) {
+                Some(us) => IntTest::Arrived(us),
+                None => IntTest::Silent,
+            },
+            Err(why) => IntTest::Refused(why),
+        };
+        cpu::println!("net: igb MSI-X diag: {d}; igb {regs}; ITS INT {int} HOPOS_NIC_IRQ_DIAG");
     }
 
     /// De SoC-temperatuur in milligraden, 0 = geen meting.

@@ -22,7 +22,7 @@
 use crate::facts;
 use board::Error;
 use core::cell::RefCell;
-use core::sync::atomic::Ordering::Relaxed;
+use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use dev::Pa;
 use driver_gicv3::its::Its;
 use driver_gicv3::{FIRST_LPI, Gic, Icc};
@@ -33,6 +33,11 @@ use sync::{Local, Signal};
 /// kern-core raakt hem aan (boot, en het bedraden van een device), en de
 /// lening loopt nooit over een `.await`.
 static ITS: Local<RefCell<Option<Its>>> = Local::new(RefCell::new(None));
+
+/// Stonden de LPI's al aan toen [`start_its`] liep (een warme flip): dan
+/// houdt de redistributor de tabellen van de vorige kern (op hetzelfde
+/// adres) en wist deze kern alleen de ITS-kant. Voor de diagnoseregel.
+static LPIS_REUSED: AtomicBool = AtomicBool::new(false);
 
 /// Zet de ITS op als de MADT er een noemt: LPI's aan op de redistributor
 /// van de kern-core, de tabellen, collectie 0 naar deze core. Eén regel op
@@ -49,6 +54,7 @@ pub(crate) fn start_its<I: Icc>(gic: &Gic<I>) {
     // anders (de const-toets in lib.rs).
     let mut its = unsafe { Its::new(Pa(base), crate::ITS_DMA.base) };
     let reused = gic.lpis_enabled();
+    LPIS_REUSED.store(reused, Relaxed);
     if !reused {
         its.clear_pending();
     }
@@ -299,6 +305,202 @@ pub fn nic_mode(dflt: Mode) -> Mode {
         cpu::println!("irq: hopos.nicirq={v:?} is not auto, msix, intx, off or an INTID; polling");
     }
     m
+}
+
+/// Vuurt event 0 van `dev_id` vanuit de ITS zelf (`INT`): de LPI zonder
+/// device. Komt hij hierop wel en op de MSI van het device niet, dan zit
+/// de fout tussen device en ITS (doorbell, DeviceID, SMMU).
+pub fn its_fire(dev_id: u32) -> Result<(), &'static str> {
+    let mut its = ITS.get().borrow_mut();
+    let its = its.as_mut().ok_or("no ITS")?;
+    match its.fire(dev_id, 0) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("not routed in this kernel"),
+        Err(_) => Err("the ITS refused INT"),
+    }
+}
+
+/// Wat er te zien is als de MSI-X van `at` (DeviceID `dev_id`, vector 0)
+/// niet aankomt: de weg door de IORT met de SMMU, welke ITS de IORT noemt
+/// tegen de onze, of de ITS-mapping in dit kernleven liep, en de
+/// MSI-X-stand van de functie zoals hij hem teruggeeft. Alleen lezen.
+pub fn msix_diag(at: &At<'_>, dev_id: u32) -> MsixDiag {
+    let e = at.ecam;
+    let rid = rid(at.f);
+    let route = facts::tables(*b"IORT")
+        .next()
+        .and_then(|t| fw::acpi::iort_route(t, at.seg, rid));
+    let smmu = match route.and_then(|r| r.smmu) {
+        Some((4, base)) if base != 0 && crate::map_device(base, 0x1000) => {
+            // SMMU_CR0 (0x20) en SMMU_GBPA (0x44), pagina 0, niet-secure.
+            Some((dev::read32(Pa(base + 0x20)), dev::read32(Pa(base + 0x44))))
+        }
+        _ => None,
+    };
+    let ours = facts::ITS.load(Relaxed);
+    let mut its_n = 0u32;
+    let (mut ours_id, mut named_base) = (None, None);
+    if let Some(m) = facts::tables(*b"APIC")
+        .next()
+        .and_then(|t| fw::acpi::Madt::new(t).ok())
+    {
+        for (id, base) in m.its_ids() {
+            its_n += 1;
+            if base == ours {
+                ours_id = Some(id);
+            }
+            if route.and_then(|r| r.its.1) == Some(id) {
+                named_base = Some(base);
+            }
+        }
+    }
+    let (routed, state) = ITS
+        .get()
+        .borrow()
+        .as_ref()
+        .map_or((None, (0, 0, 0)), |i| (i.routed(dev_id, 0), i.state()));
+    let m = at.f.msix(e);
+    let entry = m.and_then(|m| {
+        let t = at.f.msix_table_addr(e, &m)?;
+        // SAFETY: zoals in `wire_msix`: de tabel in een BAR van deze
+        // functie, Device-gemapt door de bedrading, memory-decode aan.
+        unsafe { MsixTable::new(Pa(t), m.size) }.get(0)
+    });
+    let pba = m
+        .and_then(|m| at.f.msix_pba_addr(e, &m))
+        .filter(|&p| crate::map_device(p, 8))
+        .map(|p| dev::read32(Pa(p)));
+    MsixDiag {
+        dev_id,
+        seg: at.seg,
+        rid,
+        route,
+        smmu,
+        its_n,
+        ours: (ours_id, ours),
+        named_base,
+        reused: LPIS_REUSED.load(Relaxed),
+        routed,
+        state,
+        control: m.map(|m| at.f.msix_control(e, &m)),
+        command: at.f.command(e),
+        entry,
+        pba,
+    }
+}
+
+/// Zie [`msix_diag`].
+#[derive(Copy, Clone, Debug)]
+pub struct MsixDiag {
+    dev_id: u32,
+    seg: u16,
+    rid: u16,
+    route: Option<fw::acpi::IortRoute>,
+    smmu: Option<(u32, u32)>,
+    its_n: u32,
+    ours: (Option<u32>, u64),
+    named_base: Option<u64>,
+    reused: bool,
+    routed: Option<u32>,
+    state: (u32, u64, u64),
+    control: Option<u16>,
+    command: u16,
+    entry: Option<[u32; 4]>,
+    pba: Option<u32>,
+}
+
+impl core::fmt::Display for MsixDiag {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "DeviceID {:#x} (seg {} rid {:#x}, ",
+            self.dev_id, self.seg, self.rid
+        )?;
+        match self.route {
+            None => f.write_str("no IORT route, guessed")?,
+            Some(r) => {
+                match r.smmu {
+                    None => f.write_str("IORT: no SMMU")?,
+                    Some((4, base)) => match self.smmu {
+                        Some((cr0, gbpa)) => write!(
+                            f,
+                            "IORT: SMMUv3 at {base:#x} CR0 {cr0:#x} (SMMUEN {}) GBPA {gbpa:#x} ({})",
+                            cr0 & 1,
+                            if gbpa & (1 << 20) != 0 {
+                                "abort"
+                            } else {
+                                "bypass"
+                            }
+                        )?,
+                        None => write!(f, "IORT: SMMUv3 at {base:#x}, not readable")?,
+                    },
+                    Some((t, base)) => {
+                        write!(f, "IORT: SMMUv1/2 (node type {t}) at {base:#x}, not read")?;
+                    }
+                }
+                match (r.its.1, self.named_base) {
+                    (Some(id), Some(b)) => {
+                        write!(f, ", group of {} names ITS id {id} at {b:#x}", r.its.0)?;
+                    }
+                    (Some(id), None) => {
+                        write!(
+                            f,
+                            ", group of {} names ITS id {id}, not in the MADT",
+                            r.its.0
+                        )?;
+                    }
+                    (None, _) => f.write_str(", empty ITS group")?,
+                }
+            }
+        }
+        match self.ours.0 {
+            Some(id) => write!(f, "); ours ITS id {id} at {:#x}", self.ours.1)?,
+            None => write!(f, "); ours ITS at {:#x}", self.ours.1)?,
+        }
+        write!(
+            f,
+            " of {} in the MADT, LPIs {}; ",
+            self.its_n,
+            if self.reused { "reused" } else { "fresh" }
+        )?;
+        let (ctlr, creadr, cwriter) = self.state;
+        match self.routed {
+            Some(lpi) => write!(f, "MAPD/MAPTI/INV/SYNC ran in this kernel (LPI {lpi})")?,
+            None => f.write_str("NOT routed in this kernel")?,
+        }
+        write!(
+            f,
+            ", GITS_CTLR {ctlr:#x} CREADR {creadr:#x} CWRITER {cwriter:#x}; "
+        )?;
+        match self.control {
+            Some(c) => write!(
+                f,
+                "MSI-X control {c:#x} (enable {} function mask {})",
+                (c >> 15) & 1,
+                (c >> 14) & 1
+            )?,
+            None => f.write_str("no MSI-X capability")?,
+        }
+        write!(
+            f,
+            ", command {:#x} (memory {} bus master {})",
+            self.command,
+            (self.command >> 1) & 1,
+            (self.command >> 2) & 1
+        )?;
+        match self.entry {
+            Some([lo, hi, data, ctl]) => write!(
+                f,
+                ", entry 0 address {:#x} data {data:#x} control {ctl:#x}",
+                (u64::from(hi) << 32) | u64::from(lo)
+            )?,
+            None => f.write_str(", entry 0 unreadable")?,
+        }
+        match self.pba {
+            Some(p) => write!(f, ", PBA {p:#x}"),
+            None => f.write_str(", PBA unreadable"),
+        }
+    }
 }
 
 /// Een ack die niets doet: MSI-X is een flank, er is geen lijn te laten

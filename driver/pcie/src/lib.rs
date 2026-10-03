@@ -720,6 +720,20 @@ impl Function {
         (bar != 0).then(|| bar + u64::from(m.table.off))
     }
 
+    /// De message-control van `m` zoals hij nu staat: bit 15 MSI-X aan, bit
+    /// 14 de functiemaskering, [10:0] de tabelmaat min één.
+    pub fn msix_control<C: Config + ?Sized>(&self, c: &C, m: &Msix) -> u16 {
+        c.read16(self.bdf, m.cap + 2)
+    }
+
+    /// Het fysieke adres van de pending-bit-array van `m` (BIR en offset op
+    /// cap + 8). `None` als die BAR niet toegewezen is.
+    pub fn msix_pba_addr<C: Config + ?Sized>(&self, c: &C, m: &Msix) -> Option<u64> {
+        let pba = c.read32(self.bdf, m.cap + 8);
+        let bar = self.bar_addr(c, (pba & 7) as u8);
+        (bar != 0).then(|| bar + u64::from(pba & !7))
+    }
+
     /// De INTx-pin van de functie: 0 = INTA tot 3 = INTD, `None` als hij
     /// geen INTx heeft (register 0x3d is 0) of een onzinwaarde meldt.
     pub fn intx_pin<C: Config + ?Sized>(&self, c: &C) -> Option<u8> {
@@ -834,5 +848,16 @@ impl MsixTable {
         dev::write32(e.add(8), data);
         dev::write32(e.add(12), 0);
         true
+    }
+
+    /// Vector `idx` zoals de functie hem teruggeeft: adres laag, adres
+    /// hoog, data, vector-control. `None` buiten de tabel.
+    #[must_use]
+    pub fn get(&self, idx: u16) -> Option<[u32; 4]> {
+        if idx >= self.size {
+            return None;
+        }
+        let e = self.base.add(u64::from(idx) * 16);
+        Some([0, 4, 8, 12].map(|o| dev::read32(e.add(o))))
     }
 }

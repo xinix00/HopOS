@@ -78,7 +78,10 @@ struct Regs {
     eiac: Reg<u32>,
     /// Extended interrupt auto mask: EIMS-bits wissen bij het bericht.
     eiam: Reg<u32>,
-    _r5b: [u32; 115],
+    _r5b: [u32; 19],
+    /// Extended interrupt cause read (lezen wist met GPIE.NSICR).
+    eicr: Reg<u32>,
+    _r5d: [u32; 95],
     /// IVAR0: welke vector RX- en TX-queue 0 en 1 krijgen.
     ivar0: Reg<u32>,
     _r5c: [u32; 1087],
@@ -121,6 +124,7 @@ const _: () = {
     assert!(offset_of!(Regs, eimc) == 0x1528);
     assert!(offset_of!(Regs, eiac) == 0x152c);
     assert!(offset_of!(Regs, eiam) == 0x1530);
+    assert!(offset_of!(Regs, eicr) == 0x1580);
     assert!(offset_of!(Regs, ivar0) == 0x1700);
     assert!(offset_of!(Regs, rdbal) == 0x2800);
     assert!(offset_of!(Regs, rdbah) == 0x2804);
@@ -387,6 +391,32 @@ impl IrqAck {
     }
 }
 
+/// De MSI-X-stand van de NIC na een vector die niet aankwam. EIMS 0 en
+/// EICR 0 na EICS: EIAM en EIAC deden hun werk, de NIC zond het bericht.
+/// EIMS 1 en EICR 1: hij zond niet (GPIE niet blijven staan, functie
+/// gemaskeerd).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IrqRegs {
+    /// GPIE.
+    pub gpie: u32,
+    /// IVAR0.
+    pub ivar0: u32,
+    /// EIMS (het masker).
+    pub eims: u32,
+    /// EICR.
+    pub eicr: u32,
+}
+
+impl fmt::Display for IrqRegs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "GPIE {:#x} IVAR0 {:#x} EIMS {:#x} EICR {:#x}",
+            self.gpie, self.ivar0, self.eims, self.eicr
+        )
+    }
+}
+
 /// Eén igb.
 pub struct Igb {
     base: Pa,
@@ -503,6 +533,19 @@ impl Igb {
     pub fn fire_irq(&self) {
         self.regs().eics.write(RX_EIMS);
         let _ = self.regs().status.read(); // commit
+    }
+
+    /// De MSI-X-registers voor een diagnoseregel. EICR lezen wist hem
+    /// (GPIE.NSICR), dus alleen als de lijn toch al niet werkt.
+    #[must_use]
+    pub fn irq_regs(&self) -> IrqRegs {
+        let r = self.regs();
+        IrqRegs {
+            gpie: r.gpie.read(),
+            ivar0: r.ivar0.read(),
+            eims: r.eims.read(),
+            eicr: r.eicr.read(),
+        }
     }
 
     /// Het masker van de RX-vector open (`igb_ring_irq_enable`).

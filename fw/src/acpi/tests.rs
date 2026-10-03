@@ -438,6 +438,7 @@ fn madt_cpus_and_gic() {
         [(0x080a_0000, 0x00f6_0000)]
     );
     assert_eq!(m.its().collect::<Vec<_>>(), [0x0808_0000]);
+    assert_eq!(m.its_ids().collect::<Vec<_>>(), [(0, 0x0808_0000)]);
 }
 
 #[test]
@@ -776,19 +777,24 @@ fn iort() -> Vec<u8> {
     };
     b[0..4].copy_from_slice(&4u32.to_le_bytes()); // vier knopen
     b[4..8].copy_from_slice(&48u32.to_le_bytes());
-    // 48: de ITS-groep.
-    b.extend(node(0, 24, 0, 0));
-    // 72: SMMUv3, eigen MSI (single) plus 0..0xffff naar de ITS op 0x2_0000.
-    let mut smmu = node(4, 16 + 40, 2, 16);
-    smmu[16..36].copy_from_slice(&map(0, 0, 0x99, 48, 1));
-    smmu[36..56].copy_from_slice(&map(0, 0xffff, 0x2_0000, 48, 0));
+    // 48: de ITS-groep met één ITS, GIC ITS ID 7.
+    let mut group = node(0, 24, 0, 0);
+    group[16..20].copy_from_slice(&1u32.to_le_bytes());
+    group[20..24].copy_from_slice(&7u32.to_le_bytes());
+    b.extend(group);
+    // 72: SMMUv3 op 0x4000_0000, eigen MSI (single) plus 0..0xffff naar de
+    // ITS op 0x2_0000.
+    let mut smmu = node(4, 24 + 40, 2, 24);
+    smmu[16..24].copy_from_slice(&0x4000_0000u64.to_le_bytes());
+    smmu[24..44].copy_from_slice(&map(0, 0, 0x99, 48, 1));
+    smmu[44..64].copy_from_slice(&map(0, 0xffff, 0x2_0000, 48, 0));
     b.extend(smmu);
-    // 128: root-complex segment 0.
+    // 136: root-complex segment 0.
     let mut rc0 = node(2, 36 + 20, 1, 36);
     rc0[28..32].copy_from_slice(&0u32.to_le_bytes());
     rc0[36..56].copy_from_slice(&map(0, 0xffff, 0x1_0000, 48, 0));
     b.extend(rc0);
-    // 184: root-complex segment 1, door de SMMU.
+    // 192: root-complex segment 1, door de SMMU.
     let mut rc1 = node(2, 36 + 20, 1, 36);
     rc1[28..32].copy_from_slice(&1u32.to_le_bytes());
     rc1[36..56].copy_from_slice(&map(0, 0xffff, 0x100, 72, 0));
@@ -805,4 +811,9 @@ fn iort_maps_a_requester_id_to_its_device_id() {
     assert_eq!(iort_device_id(&t, 2, 0x10), None);
     // Een kromme tabel is `None`, geen panic.
     assert_eq!(iort_device_id(&t[..60], 0, 0), None);
+    // De weg zelf: de SMMU onderweg en de ITS die de groep noemt.
+    let r = iort_route(&t, 1, 0x10).unwrap();
+    assert_eq!(r.smmu, Some((4, 0x4000_0000)));
+    assert_eq!(r.its, (1, Some(7)));
+    assert_eq!(iort_route(&t, 0, 0x10).unwrap().smmu, None);
 }

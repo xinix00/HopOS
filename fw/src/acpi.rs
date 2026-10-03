@@ -635,11 +635,17 @@ impl<'a> Madt<'a> {
 
     /// De ITS-bases (type 0x0f: PhysicalBase op 8).
     pub fn its(&self) -> impl Iterator<Item = u64> + 'a + use<'a> {
+        self.its_ids().map(|(_, base)| base)
+    }
+
+    /// De ITS'en met hun GIC ITS ID (op 4), het nummer waarmee de
+    /// ITS-groep van de IORT ze noemt.
+    pub fn its_ids(&self) -> impl Iterator<Item = (u32, u64)> + 'a + use<'a> {
         self.entries().filter_map(|(typ, e)| {
             if typ != 0x0f || e.len() < 16 {
                 return None;
             }
-            le64(e, 8)
+            Some((le32(e, 4)?, le64(e, 8)?))
         })
     }
 }
@@ -842,6 +848,24 @@ const IORT_HOPS: usize = 4;
 /// segment een eigen basis geven.
 #[must_use]
 pub fn iort_device_id(table: &[u8], seg: u16, rid: u16) -> Option<u32> {
+    iort_route(table, seg, rid).map(|r| r.dev_id)
+}
+
+/// De weg van een requester-id door de IORT, voor de diagnose van een
+/// MSI die niet aankomt: de DeviceID, de SMMU onderweg en de ITS-groep.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct IortRoute {
+    /// De DeviceID die de ITS ziet.
+    pub dev_id: u32,
+    /// De SMMU onderweg: knooptype (3 = v1/v2, 4 = v3) en zijn basis.
+    pub smmu: Option<(u8, u64)>,
+    /// Hoeveel ITS'en de groep noemt, en de eerste GIC ITS ID.
+    pub its: (u32, Option<u32>),
+}
+
+/// De weg van [`iort_device_id`], met de knopen erbij.
+#[must_use]
+pub fn iort_route(table: &[u8], seg: u16, rid: u16) -> Option<IortRoute> {
     let t = checked_table(table, b"IORT", 48).ok()?;
     let count = le32(t, 36)?;
     let first = le32(t, 40)? as usize;
@@ -862,11 +886,22 @@ pub fn iort_device_id(table: &[u8], seg: u16, rid: u16) -> Option<u32> {
     }
     let mut at = node?;
     let mut id = u32::from(rid);
+    let mut smmu = None;
     for _ in 0..IORT_HOPS {
         let (next, out) = iort_map(t, at, id)?;
         match *t.get(next)? {
-            IORT_ITS_GROUP => return Some(out),
-            IORT_SMMU | IORT_SMMU_V3 => {
+            IORT_ITS_GROUP => {
+                let n = le32(t, next + 16).unwrap_or(0);
+                let first = if n > 0 { le32(t, next + 20) } else { None };
+                return Some(IortRoute {
+                    dev_id: out,
+                    smmu,
+                    its: (n, first),
+                });
+            }
+            typ @ (IORT_SMMU | IORT_SMMU_V3) => {
+                // De basis staat bij beide op 16.
+                smmu = Some((typ, le64(t, next + 16).unwrap_or(0)));
                 at = next;
                 id = out;
             }
