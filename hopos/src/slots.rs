@@ -692,6 +692,7 @@ async fn place_hop(
         hop_on_os: hop_on_os(),
         os_shared: arch::SHARES_OS_CORE,
         hop_group: core::str::from_utf8(hop_group.as_slice()).unwrap_or("hop"),
+        cold_flip: crate::flip::COLD_FLIP,
         pool_bytes,
         hop_mem: HOP_MEM,
     };

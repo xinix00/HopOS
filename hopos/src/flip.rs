@@ -105,6 +105,7 @@ use kern::cage::PhysMem;
 use kern::kernflip::{
     self, BOX_SHOW, Boot, Bundle, FLIP_ABI, FlipPlan, HAND_MAGIC, HANDOFF_TAIL, Handoff, Stage,
 };
+use kern::nodecfg::ColdFlip;
 use kern::slots::{Reply, Request, Response, SlotState};
 use kern::system::FlipBundle;
 use net::nat::{self as nat, MAX_ADOPT};
@@ -153,7 +154,6 @@ const CORES_OFF_WAIT: Duration = Duration::from_secs(1);
 /// een deur zonder terugweg (gemeten 10-07). Daar
 /// weigert de koude flip dus zodra een app-core ooit draaide; een core die
 /// nooit startte, is al uit en telt niet.
-#[cfg(not(target_arch = "riscv64"))]
 const CPU_OFF_RETURNS: bool = !cfg!(feature = "board-rpi5");
 
 /// Antwoordt er een PSCI op een SMC? Op Apple niet: daar is geen EL3, en
@@ -163,6 +163,22 @@ const CPU_OFF_RETURNS: bool = !cfg!(feature = "board-rpi5");
 /// virt zonder `secure=on` heeft ook geen EL3 (ID_AA64PFR0_EL1.EL3 = 0),
 /// maar emuleert PSCI over SMC, en daar draaien de koude flip en de reset.
 const PSCI: bool = !cfg!(any(feature = "board-apple", target_arch = "riscv64"));
+
+/// Kan dit board koud flippen? Eén waarde uit [`PSCI`] en
+/// [`CPU_OFF_RETURNS`] voor twee lezers: [`prepare`] (en [`no_way_back`])
+/// weigeren ermee, en Hop krijgt hem als `HOPOS_COLD_FLIP` in zijn env
+/// (`kern::nodecfg::ColdFlip`), zodat hij vooraf beslist en geen taak
+/// stopt voor een weigering. Op riscv64 haalt de koude flip de harts uit
+/// het image, zonder PSCI.
+pub(crate) const COLD_FLIP: ColdFlip = if cfg!(target_arch = "riscv64") {
+    ColdFlip::Yes
+} else if !PSCI {
+    ColdFlip::No
+} else if !CPU_OFF_RETURNS {
+    ColdFlip::Fresh
+} else {
+    ColdFlip::Yes
+};
 
 /// Kan deze kern bewoners over de sprong heen dragen (de warme flip)? Op
 /// riscv64 niet: de switch-code draait daar uit het kern-image, en de
@@ -743,7 +759,7 @@ fn prepare_inner(b: &FlipBundle, sha256: &[u8; 32]) -> Result<(), Refused> {
             },
         ));
     }
-    if cold && !PSCI && !cfg!(target_arch = "riscv64") {
+    if cold && COLD_FLIP == ColdFlip::No {
         // De koude flip zet de app-cores uit met PSCI CPU_OFF en wacht op
         // AFFINITY_INFO: zonder PSCI een UNDEF ná het bevriezen van de
         // opslag. Dus hier weigeren, vóór er iets onherroepelijks gebeurt.
@@ -844,7 +860,7 @@ fn prepare_inner(b: &FlipBundle, sha256: &[u8; 32]) -> Result<(), Refused> {
 }
 
 /// De app-core die een koude flip op dit board onmogelijk maakt: CPU_OFF
-/// keert hier niet terug ([`CPU_OFF_RETURNS`]), en elke core die ooit
+/// keert hier niet terug ([`COLD_FLIP`] is `Fresh`), en elke core die ooit
 /// draaide (geparkeerd, of nog bezet en straks geparkeerd) moet uit.
 /// Dezelfde toets als in [`cores_off`], maar in de haak: Hop krijgt de
 /// weigering op zijn FLIP, vóór hopfs bevriest en vóór de flip-taak een
@@ -852,7 +868,7 @@ fn prepare_inner(b: &FlipBundle, sha256: &[u8; 32]) -> Result<(), Refused> {
 #[cfg(not(target_arch = "riscv64"))]
 fn no_way_back() -> Option<usize> {
     use cpu::el2::CoreState;
-    if CPU_OFF_RETURNS {
+    if COLD_FLIP != ColdFlip::Fresh {
         return None;
     }
     let plan = crate::slots::os_plan().ok()?;

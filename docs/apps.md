@@ -73,6 +73,15 @@ niet meer zodra de kern core 0 meldt. Met `HOPOS_SYSTEM_CORE` mag
 Hop er minstens 1 van. Een weigering is één regel per job op de console:
 `hop: job NAAM refused here: no capacity (cpu; ...) HOP_NO_CAPACITY`.
 
+Naast de cores zegt de kern ook of het board koud kan flippen:
+`HOPOS_COLD_FLIP=yes|no|fresh` (`hopos/src/flip.rs`, `COLD_FLIP`, dezelfde
+waarde waarmee de kern zelf weigert). `no` op een board zonder PSCI (de M4):
+de app-cores gaan niet uit. `fresh` op een board waar CPU_OFF niet terugkeert
+(de Pi 5): koud alleen zolang er nog nooit een app-core draaide. Anders `yes`.
+Hop beslist ermee vóór hij een taak stopt: bij `no`, en bij `fresh` zodra hij
+ooit iets op een app-core zette (of zelf op een app-core woont), is een koude
+flip meteen een 502 met "ask warm", zonder dat er een taak stopt.
+
 ## De regel
 
 Een taak wacht op precies de dingen die hem werk kunnen geven, met één
