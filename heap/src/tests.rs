@@ -336,9 +336,9 @@ fn json_like_churn_cost() {
     };
     let size = |r: u64| -> usize {
         match r % 100 {
-            0..=69 => 8 + (r as usize >> 8) % 56,    // korte strings, kleine objecten
+            0..=69 => 8 + (r as usize >> 8) % 56, // korte strings, kleine objecten
             70..=94 => 64 + (r as usize >> 8) % 192, // grotere strings, vecs
-            _ => 256 + (r as usize >> 8) % 3840,     // buffers
+            _ => 256 + (r as usize >> 8) % 3840,  // buffers
         }
     };
     let mut live: Vec<usize> = Vec::new();
@@ -361,4 +361,42 @@ fn json_like_churn_cost() {
         dt.as_nanos() as f64 / f64::from(ops),
         w.free_blocks
     );
+}
+
+/// De vorm van Stulp (03-10): duizenden vrije blokken van 32 bytes (vraag
+/// 16) en dan vragen van 48 (vraag 32), tot de exacte klassen allebei in de
+/// klasse 32 tot 63. Draai met
+/// `cargo test -p heap --release -- --ignored stulp_shape --nocapture`.
+#[test]
+#[ignore = "meting, geen toets"]
+fn stulp_shape_cost() {
+    let a = Arena::new(32 << 20);
+    let mut small = Vec::new();
+    let mut keep = Vec::new();
+    for _ in 0..4547 {
+        small.push(a.alloc(16, 8).unwrap());
+        // Een bezet blok ertussen, anders smelten de vrije samen.
+        keep.push(a.alloc(16, 8).unwrap());
+    }
+    for b in small {
+        a.free(b);
+    }
+    let ops: u32 = 100_000;
+    let mut p = a.alloc(32, 8).unwrap();
+    let t0 = std::time::Instant::now();
+    for _ in 0..ops {
+        a.free(p);
+        p = a.alloc(32, 8).unwrap();
+    }
+    let dt = t0.elapsed();
+    let w = a.walk();
+    std::println!(
+        "stulp_shape: {:.0} ns per free+alloc met {} vrije blokken",
+        dt.as_nanos() as f64 / f64::from(ops),
+        w.free_blocks
+    );
+    a.free(p);
+    for b in keep {
+        a.free(b);
+    }
 }

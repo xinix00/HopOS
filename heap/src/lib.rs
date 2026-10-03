@@ -15,9 +15,11 @@
 //!   bezet-vlag in bit 0, en de maat van de fysieke voorganger. Met die twee
 //!   vindt `free` beide buren in O(1) en voegt ze samen.
 //! - Een vrij blok draagt in zijn lijf twee schakels (volgende, vorige) van
-//!   een dubbel gelinkte lijst. Er is één lijst per klasse: klasse `i` houdt
-//!   de blokken met maat in `[2^i, 2^(i+1))`. `alloc` zoekt first-fit in de
-//!   klasse van de vraag en neemt daarboven het eerste blok dat past.
+//!   een dubbel gelinkte lijst. Er is één lijst per klasse: tot en met
+//!   [`SMALL_LIMIT`] een klasse per maat (een veelvoud van de korrel),
+//!   daarboven klasse `i` voor de maten in `[2^i, 2^(i+1))`. `alloc` zoekt
+//!   first-fit in de klasse van de vraag en neemt daarboven, via een bitmap
+//!   van niet-lege klassen, het eerste blok dat past.
 //! - Uitlijning tot [`MAX_ALIGN`] (een pagina): past de gevraagde uitlijning
 //!   niet op het begin van een vrij blok, dan wordt de voorkant als eigen
 //!   vrij blok afgesplitst. Een rest achter het blok die groot genoeg is,
@@ -578,7 +580,11 @@ impl State {
                 if Self::bin_of(self.size(b)) != i {
                     return bad(b, "free block in the wrong class");
                 }
-                if self.nonempty.get(i / 64).is_none_or(|w| w & (1 << (i % 64)) == 0) {
+                if self
+                    .nonempty
+                    .get(i / 64)
+                    .is_none_or(|w| w & (1 << (i % 64)) == 0)
+                {
                     return bad(b, "non-empty class not marked");
                 }
                 if self.prev_free(b) != back {
