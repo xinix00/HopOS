@@ -13,7 +13,7 @@ Eén gedeelde config voor alle nodes, in twee smaken, in plaats van een
 
 | Bestand | Voor | Wat erin staat |
 | --- | --- | --- |
-| `image/cfg/hop-config-headless.cfg` | een kern zonder gui; de standaard van elk image-script | `hopos.cluster=hopos`, `hopos.insecure=1` en `hopos.console=1` (open op het eigen LAN), `hopos.cages=on`, `hopos.replay=0`, en welcome als `hopos.init[]` van de release `apps` |
+| `image/cfg/hop-config-headless.cfg` | een kern zonder gui; de standaard van elk image-script | `hopos.cluster=hopos`, `hopos.insecure=1` en `hopos.console=1` (open op het eigen LAN), `hopos.cages=on`, `hopos.replay=0`, `hopos.hop.sharegroup=system` (Hop op de OS-core naast de kern; elke andere naam is een eigen app-core die jobs met die tag delen; de LicheeRV heeft als enige `image/cfg/hop-config-licheerv.cfg` met `hop`), en welcome als `hopos.init[]` van de release `apps` |
 | `image/cfg/hop-config-headfull.cfg` | een kern met gui (en media op de O6N): `GUI=1` of `MEDIA=1` met `CFG=` erbij | hetzelfde, plus de display-app als regel met een hekje |
 
 Geen `hopos.node` erin: zonder heet een node naar zijn board en de laatste

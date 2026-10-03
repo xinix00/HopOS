@@ -45,6 +45,11 @@ keek elke 1 tot 5 ms of er al iets lag.
 
 ## Welke core
 
+Waar Hop zelf woont zegt de config: `hopos.hop.sharegroup=system` (de
+OS-core naast de kern, de standaard waar de kern zijn core deelt) of een
+andere naam (een eigen app-core; jobs met dezelfde tag delen hem). Hop
+krijgt die naam als `HOPOS_HOP_GROUP` en telt haar vrij in zijn planning.
+
 Welke core een slot krijgt, kiest de kern (`kern/src/pool.rs`): zonder
 `sharegroup` een eigen core (of `cores` aaneengesloten), met een
 `sharegroup` de cores van die groep. De core van de kern zelf is ook

@@ -190,7 +190,7 @@ apple() {
 	flip apple headless 0 ""
 }
 licheerv() {
-	STAGE="$HOP_RV" ROLE=hop CFG="$HEADLESS" LICHEERV_DONOR_SHA256=$LRV_DONOR_SHA sh image/licheerv-agent.sh
+	STAGE="$HOP_RV" ROLE=hop CFG="$DIR/image/cfg/hop-config-licheerv.cfg" LICHEERV_DONOR_SHA256=$LRV_DONOR_SHA sh image/licheerv-agent.sh
 	card target/licheerv/hopos-licheerv.img hopos-licheerv-headless.img
 	# Ook de losse fip.bin: een kaart die al een HopOS-kaart is, krijgt zo een
 	# nieuwe versie door alleen dat bestand te vervangen (ook vanaf een

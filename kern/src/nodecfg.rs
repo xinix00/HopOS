@@ -174,6 +174,9 @@ pub struct Facts<'a> {
     /// HOPOS_PLACE_SYSTEM). Zonder dat weigerde Hop zelf al met "no
     /// capacity" (03-10).
     pub os_shared: bool,
+    /// De sharegroup van Hop zelf (`hopos.hop.sharegroup`; `system` is de
+    /// OS-core): jobs met die tag delen Hop's core, dus Hop telt haar vrij.
+    pub hop_group: &'a str,
     /// Het geheugen van de pool (Hop plant tegen dit min het zijne).
     pub pool_bytes: u64,
     /// De partitie van Hop zelf.
@@ -414,6 +417,7 @@ fn base(out: &mut String, cfg: &NodeCfg<'_>, f: &Facts<'_>) -> fmt::Result {
     if f.os_shared {
         writeln!(out, "HOPOS_SYSTEM_CORE=1")?;
     }
+    writeln!(out, "HOPOS_HOP_GROUP={}", f.hop_group)?;
     writeln!(
         out,
         "HOPOS_MEMORY={}",
@@ -434,6 +438,7 @@ mod tests {
         app_cores: 3,
         hop_on_os: false,
         os_shared: false,
+        hop_group: "hop",
         pool_bytes: 512 << 20,
         hop_mem: 64 << 20,
     };
@@ -533,7 +538,7 @@ mod tests {
             core::str::from_utf8(b.as_bytes()).unwrap(),
             "HOPOS_NODE=hopos-qemu\nHOPOS_CLUSTER=hopos\nHOPOS_INSECURE=1\n\
              HOPOS_NODE_IP=10.0.2.15\nDNS=10.0.2.3\nHOPOS_PORT=8080\nHOPOS_CORES=2\n\
-             HOPOS_MEMORY=469762048\n"
+             HOPOS_HOP_GROUP=hop\nHOPOS_MEMORY=469762048\n"
         );
     }
 

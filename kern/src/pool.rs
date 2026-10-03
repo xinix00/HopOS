@@ -55,8 +55,44 @@ pub struct Placement {
     pub class: Option<CoreClass>,
 }
 
-/// De naam van Hops eigen sharegroup.
+/// De naam van Hops sharegroup als de config er geen noemt
+/// (`hopos.hop.sharegroup`): een eigen core, gedeeld met jobs in `hop`.
 pub const HOP_GROUP: &[u8] = b"hop";
+
+/// De groep die Hop echt kreeg (`hopos.hop.sharegroup`): `system` is de
+/// OS-core bij de kern, elke andere naam een eigen core die jobs met
+/// dezelfde tag delen. Eén keer gezet bij boot, daarna gelezen door de
+/// plaatsing van Hop, van een flipbundel en door de core-reclaim. Een rij
+/// atomics (de kern kent geen unsafe): eerst de bytes, dan de lengte.
+static HOP_GROUP_BYTES: [core::sync::atomic::AtomicU8; MAX_GROUP_NAME] =
+    [const { core::sync::atomic::AtomicU8::new(0) }; MAX_GROUP_NAME];
+static HOP_GROUP_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Zet de groep van Hop; de naam blijft voor de rest van de boot staan.
+pub fn set_hop_group(name: &[u8]) -> Result {
+    group_name(name)?;
+    HOP_GROUP_LEN.store(0, core::sync::atomic::Ordering::Release);
+    for (slot, b) in HOP_GROUP_BYTES.iter().zip(name) {
+        slot.store(*b, core::sync::atomic::Ordering::Relaxed);
+    }
+    HOP_GROUP_LEN.store(name.len(), core::sync::atomic::Ordering::Release);
+    Ok(())
+}
+
+/// De groep van Hop: wat [`set_hop_group`] zette, anders [`HOP_GROUP`].
+#[must_use]
+pub fn hop_group() -> GroupName {
+    let n = HOP_GROUP_LEN.load(core::sync::atomic::Ordering::Acquire);
+    let mut g = GroupName::new();
+    let src: &[u8] = if n == 0 { HOP_GROUP } else { &[] };
+    for b in src {
+        let _ = g.push(*b);
+    }
+    for slot in HOP_GROUP_BYTES.iter().take(n) {
+        let _ = g.push(slot.load(core::sync::atomic::Ordering::Relaxed));
+    }
+    g
+}
 /// De groep van de OS-core zelf: wie hierin plaatst, deelt de core van de
 /// kern ([`CorePool::share_os_core`] bij boot, op elk board dat het kan).
 pub const SYSTEM_GROUP: &[u8] = b"system";
@@ -83,7 +119,7 @@ impl Placement {
     /// jobspec.
     pub fn hop() -> Result<Placement> {
         Ok(Placement {
-            group: Some(group_name(HOP_GROUP)?),
+            group: Some(hop_group()),
             pool_cores: 1,
             cores: 1,
             class: None,

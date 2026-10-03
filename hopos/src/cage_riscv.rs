@@ -972,7 +972,7 @@ pub(crate) fn wake_all() {
 }
 
 /// Kan de kern zijn core delen (de groep `system`, en Hop als het board
-/// dat wil: `vboard::HOP_ON_OS_CORE`)? Ja: de kern geeft zijn bewoners het
+/// dat wil: `hopos.hop.sharegroup=system`)? Ja: de kern geeft zijn bewoners het
 /// hart in zijn idle (`cpu::riscv::oscore`, PORT.md beslissing 2).
 pub(crate) const SHARES_OS_CORE: bool = true;
 

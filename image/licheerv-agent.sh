@@ -112,7 +112,7 @@ ELF="$DIR/target/$TARGET/release/hopos"
 ENTRY="$(python3 -c 'import struct,sys; print(hex(struct.unpack_from("<Q", open(sys.argv[1],"rb").read(32), 24)[0]))' "$ELF")"
 [ "$ENTRY" = "$RUNADDR" ] || { echo "WEIGER: entry $ENTRY is niet RUNADDR $RUNADDR (linkscript?)" >&2; exit 1; }
 "$OBJCOPY" -O binary "$ELF" "$OUT/monitor.bin"
-CFG="${CFG-$DIR/image/cfg/hop-config-headless.cfg}"
+CFG="${CFG-$DIR/image/cfg/hop-config-licheerv.cfg}"
 if [ -n "$CFG" ]; then
 	[ -f "$CFG" ] || { echo "config ontbreekt: $CFG" >&2; exit 1; }
 	# Het venster: "HOPOS.CFG.WINDOW", de lengte (u64 LE) op +16, de tekst

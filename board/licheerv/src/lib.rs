@@ -22,7 +22,7 @@
 //! (700 MHz). Sinds 03-10 blijft de kern op de C906B, waar de FSBL hem
 //! start: alleen de PLIC van dat hart heeft de dwmac ([`GMAC_IRQ`]). Hij
 //! deelt zijn core als groep `system` (welcome en wat geen eigen core
-//! vindt), en de C906L is het app-hart van Hop ([`HOP_ON_OS_CORE`]). De
+//! vindt), en de C906L is het app-hart van Hop (`hopos.hop.sharegroup=hop` in image/cfg/hop-config-licheerv.cfg). De
 //! C906L komt via het resetblok op ([`LicheeRv::start_little`]): reset
 //! vast, boot-vector zetten, reset los.
 //!
@@ -88,10 +88,6 @@ pub const GMAC_IRQ: u32 = 31;
 pub const WDT: Pa = Pa(0x0301_0000);
 /// De timebase: de vaste 25 MHz-osc, exact 40 ns per tik.
 pub const TIMEBASE_HZ: u64 = 25_000_000;
-/// Woont Hop op de OS-core? Niet op dit bord: de kern staat op de C906B en
-/// Hop krijgt de C906L voor zich, zodat welcome en de rest de grote core
-/// met de kern delen (groep `system`).
-pub const HOP_ON_OS_CORE: bool = false;
 
 /// De kern-RAM: image, stack en heap (`link-riscv.ld` met de basis en maat
 /// van dit board uit build.rs), tot de DMA-regio.

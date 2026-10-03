@@ -1251,7 +1251,7 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
                 && self
                     .places
                     .group_of(*h)
-                    .is_none_or(|(g, _)| g.as_slice() != crate::pool::HOP_GROUP)
+                    .is_none_or(|(g, _)| g.as_slice() != crate::pool::hop_group().as_slice())
         });
         let Some(hog) = hog else {
             self.log.log(format_args!(
