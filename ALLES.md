@@ -39,13 +39,11 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
-- [ ] OS-core: na de snoei van de deur, de switch-ronde en lazy FP
-      (b6878f9) op de O6N rtt p50 50
-86 us (was 308); per hop zonder bel
-      zit nu 13 tot 24 us in de executor-ronde, de rest is trap 9, wissel
-      4,5, bewoner 10. LicheeRV rtt 527 (was 644). Volgende snoei: de
-      executor-ronde zelf, dan de registerstaat in Normal-WB; doel O6N
-      onder 100 us per rondreis.
+- [ ] OS-core: de O6N zit na de snoei van de deur, de switch-ronde en lazy
+      FP (b6878f9) op rtt p50 86 us (was 308): het doel onder 100 is daar
+      gehaald. LicheeRV rtt 527 (was 644), doel onder 300: de agent kijkt
+      naar de riscv-kant (de executor-ronde, de C906-barrières), meten
+      zodra Derek klaar is op het bord.
 - [ ] Ontdubbelen: binnen en op ijzer gezien Placer (koude flip O6N),
       stmmac (LicheeRV R16; Radxa nog, zodra de dvfs-agent klaar is),
       poll_until (NIC up op O6N, Pi 4, Pi 5, Altra, LicheeRV; M4 nog), heap
