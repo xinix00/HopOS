@@ -9,7 +9,7 @@ in docs/measurements.md, de details per board in docs/boards-*.md.
 De afvinkmatrix van de Go-tijd (OLD/docs/support.md: boot, idle en klokken,
 devices en diensten per board), nu voor v3 en bijgehouden op ijzer. Legenda:
 ✓ gezien op het board, ○ gebouwd maar op dit board nog niet gezien, ✗ ontbreekt
-of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, avond (LicheeRV R17, O6N O10h, Pi 4 P9g, Radxa X3, Pi 5 P6g, Altra A12g, M4 M1; main loopt voor op de release v3.0.6 en Hop v3.0.7).
+of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, avond (LicheeRV R17, O6N O14h, Pi 4 P9g, Radxa X13, Pi 5 P6g, Altra A12g, M4 M1; main loopt voor op de release v3.0.6 en Hop v3.0.7).
 Een cel zegt alleen of het slaagt, met hooguit de stempel of een paar
 woorden waarom niet; een gepolde NIC is geen ✓. De getallen staan in
 docs/measurements.md, de details per board in docs/boards-*.md.
@@ -39,36 +39,28 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
-- [ ] OS-core: de O6N zat na de snoei van de deur, de switch-ronde en lazy
-      FP (b6878f9) op rtt p50 86 us (was 308). Met de kooi (a5885f7) is dat
-      180: per bel-hop gaat de fase tot slot_wake van 8,9 naar 24,5 us en
-      er zijn veel meer hops per venster; de kooi-agent zoekt de regressie
-      (kooi2). De riscv-snoei (hop-cost3: abi::ring met eigen index, de
-      deur met één pull, HOST_RINGS Hardware, lazy FP via mstatus.FS) wordt
-      herbasseerd op de kooi; daarna de frame-ringen van een OS-core-bewoner
-      op Hardware (hop-cost4), het stuk dat de LicheeRV van 527 naar 300 us
-      moet brengen.
-- [ ] OS-core: een rekenende bewoner in `system` stoppen (DELETE van een
-      BURN-job) gaf op de O6N binnen 60 s geen `HOPOS_SLOT_STOPPED` en geen
-      `HOPOS_OS_UNHOST`; op QEMU op de oude boom net zo. Bij de kooi-agent.
-- [ ] Ontdubbelen: geland en op ijzer gezien zijn Placer, stmmac (LicheeRV
-      en Radxa), poll_until, de negen kleine plus één ARP-tabel (lean
-      v3.1.9), NVMe als één kern (depth 16 op O6N en Altra; de bench met
-      `hopos.nvmebench=1` en de M4 nog), de kooi (zie hierboven), en de
-      Radxa-dvfs: 816 MHz op 850 mV stil tot 1800 op 1150 vol via SCMI en
-      de buck op i2c0, pull 108 en push 111 MB/s op vol (agent); X3 bij mij
-      pull 75 en push 110, één run.
-- [ ] Radxa: na 8 tot 10 bench-rondes van 256 MiB blijft de kern 100% bezig,
-      Hop krijgt geen beurt, de canary faalt en de watchdog reset naar de
-      kaart-kern; ook op 1ff50cc zonder dvfs. Agent op het bord.
+- [ ] OS-core op de O6N: de 86 us van O8h komt niet terug. Dezelfde commit
+      (b6878f9) opnieuw gebouwd geeft 185, net als 2788067, 6c79e19 en main
+      (178 tot 185, allemaal GUI=1 met hopcost, klok vol op 2600). De kooi
+      is het dus niet (op QEMU ook geen verschil per beurt). Open: wat was
+      er anders bij O8h; eerst een koude flip in plaats van de warme keten
+      (gen 7 toen, gen 13 nu), dan de bench-ELF.
+- [ ] OS-core op de LicheeRV: hop-cost3b en hop-cost4 zitten in main (de
+      ringen van een OS-core-bewoner zonder cache-onderhoud via CTRL_HART,
+      lazy FP via mstatus.FS, de deur met één pull): meten met R18 zodra de
+      draad-agent van het bord af is; verwachting van 527 richting 300 us.
 - [ ] LicheeRV over de draad: pull van de O6N 3,92 MB/s op een link van 100
-      Mbps (plafond ~11,5), lokaal 20,5. Agent op het bord (A/B tegen R15,
-      microbench van de framekopie, de dwmac-tellers, de pomp).
-- [ ] De volgende bump: HopOS 3.0.7 met tag, Hop erop naar 3.0.8, release.sh,
-      media (main heeft sinds v3.0.6 en Hop v3.0.7 de avondfixes van 03-10:
-      de NAT-recycler, de Radxa over de draad, de OS-core-beurt, de koude
-      flip vooraf, de heap-melding); daarmee het M4-image via Recovery
-      (spin daarna opnieuw POSTen) en de Altra-stick.
+      Mbps (plafond ~11,5), lokaal 20,5. Agent op het bord.
+- [ ] Op ijzer nog te zien van wat landde: de NVMe-bench (`hopos.nvmebench=1`:
+      RANDQ met 16 tegelijk, SEQ niet lager dan 2705 MB/s op de O6N) op
+      O6N en Altra; de M4 (tg3 en apple pcie via poll_until, de ANS als
+      transport van de NVMe-kern); de Radxa op main (X13 van de agent deed
+      12 rondes 99 tot 110 in, 111 uit, zonder reset).
+- [ ] De volgende bump: HopOS 3.0.7 met tag, Hop erop naar 3.0.8 (de
+      lean-tags naar v3.1.9, zoals tools/hop-build.sh nu al doet),
+      release.sh, media. De Radxa-kaart heeft de dwmac4-fout met de
+      MMC-maskers (v3.0.5 stormt na 2 GiB verkeer): nieuwe kaart. Het
+      M4-image via Recovery (spin daarna opnieuw POSTen) en de Altra-stick.
 
 ### Fixen
 
@@ -110,6 +102,9 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 - [ ] Radxa: TSADC geeft geen code (daardoor geen thermische rem op 1800 MHz;
       `hopos.mhz=1416` klemt); geen serienummer-terugval voor de MAC.
+- [ ] Radxa: de pull op de OS-core is rekengebonden (kern ~930 ms per seconde
+      bezig, ~40k NIC-interrupts per seconde bij 100 tot 110 MB/s); de
+      volgende hefboom is RX-interrupt-matiging (RIWT, zoals Linux).
 - [ ] Altra RNG: de firmware heeft geen SMCCC-TRNG (TRNG_VERSION
       NOT_SUPPORTED, 03-10) en het EFI_RNG_PROTOCOL hing er in juli; blijft
       jitter tot iemand efi-rng daar met een tijdslimiet durft te proberen.
