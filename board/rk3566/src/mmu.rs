@@ -22,7 +22,9 @@
 //!   kooien, boot-scratch, levenstekens, vluchtrecorder): Device, coherent
 //!   met een core die met de MMU uit binnenkomt.
 //! - 0x0640_0000 tot 0x0780_0000: NIC-DMA, USB-DMA en de framebuffer:
-//!   Normal-NC.
+//!   Normal-NC, behalve het bufferblok van de NIC (`NET_BUF`, 0x0660_0000
+//!   tot 0x0680_0000): Normal-WB en XN, de driver veegt het (een frame uit
+//!   NC kopiëren kostte de A55 35 µs, uit WB 1,9: driver/nic/dwmac4).
 //! - 0x0780_0000 tot 0x0880_0000: het staging-venster van de kern-flip.
 //!   Device.
 //! - 0x0880_0000 tot 0x1_0000_0000: de pool, de DTB en de initrd van U-Boot
@@ -57,7 +59,15 @@ __boot_l2_lo:
     .quad {dev0} + (blk * 0x200000)
     .set blk, blk + 1
     .endr
-    .rept {nc_blocks}
+    .rept {nc_lo_blocks}
+    .quad {nc0} + (blk * 0x200000)
+    .set blk, blk + 1
+    .endr
+    .rept {buf_blocks}
+    .quad {wb_xn0} + (blk * 0x200000)
+    .set blk, blk + 1
+    .endr
+    .rept {nc_hi_blocks}
     .quad {nc0} + (blk * 0x200000)
     .set blk, blk + 1
     .endr
@@ -69,13 +79,16 @@ __boot_l2_lo:
     dev0 = const cpu::boot::block(0, cpu::boot::ATTR_DEVICE),
     ram0 = const cpu::boot::block(0, cpu::boot::ATTR_NORMAL),
     nc0 = const cpu::boot::block(0, cpu::boot::ATTR_NORMAL_NC),
+    wb_xn0 = const cpu::boot::block(0, cpu::boot::ATTR_NORMAL) | cpu::boot::xn(false),
     dev1 = const cpu::boot::block(0x4000_0000, cpu::boot::ATTR_DEVICE),
     dev2 = const cpu::boot::block(0x8000_0000, cpu::boot::ATTR_DEVICE),
     dev3 = const cpu::boot::block(0xC000_0000, cpu::boot::ATTR_DEVICE),
     fw_blocks = const FW_BLOCKS,
     kern_blocks = const KERN_BLOCKS,
     struct_blocks = const STRUCT_BLOCKS,
-    nc_blocks = const NC_BLOCKS,
+    nc_lo_blocks = const NC_LO_BLOCKS,
+    buf_blocks = const BUF_BLOCKS,
+    nc_hi_blocks = const NC_BLOCKS - NC_LO_BLOCKS - BUF_BLOCKS,
     pool_blocks = const POOL_BLOCKS,
 );
 
@@ -87,15 +100,19 @@ const FW_BLOCKS: u64 = (crate::KERN_RAM.base.0 - crate::DRAM_BASE) / MB2;
 const KERN_BLOCKS: u64 = crate::KERN_RAM.size / MB2;
 /// Het structurenvenster.
 const STRUCT_BLOCKS: u64 = crate::STRUCT_WINDOW.size / MB2;
-/// De ongecachete DMA-regio's.
+/// De DMA-regio's (ongecachet, op het bufferblok van de NIC na).
 const NC_BLOCKS: u64 = crate::DMA.size / MB2;
+/// De NC-blokken vóór het bufferblok van de NIC.
+const NC_LO_BLOCKS: u64 = (crate::NET_BUF.base.0 - crate::DMA.base.0) / MB2;
+/// Het bufferblok van de NIC, Normal-WB.
+const BUF_BLOCKS: u64 = crate::NET_BUF.size / MB2;
 /// De rest van de eerste gigabyte.
 const POOL_BLOCKS: u64 = 512 - 1 - FW_BLOCKS - KERN_BLOCKS - STRUCT_BLOCKS - NC_BLOCKS;
 
 // De `.rept`-tellingen moeten op het plan passen: aaneengesloten, 2
 // MB-gealigneerd, en samen precies de eerste gigabyte.
 const _: () = {
-    use crate::{DMA, DRAM_BASE, KERN_RAM, STAGE_WINDOW, STRUCT_WINDOW};
+    use crate::{DMA, DRAM_BASE, KERN_RAM, NET_BUF, STAGE_WINDOW, STRUCT_WINDOW};
     assert!(DRAM_BASE == MB2);
     assert!(KERN_RAM.base.0.is_multiple_of(MB2) && KERN_RAM.size.is_multiple_of(MB2));
     assert!(KERN_RAM.base.0 + KERN_RAM.size == STRUCT_WINDOW.base.0);
@@ -103,6 +120,9 @@ const _: () = {
     assert!(DMA.base.0 + DMA.size == STAGE_WINDOW.base.0);
     assert!(1 + FW_BLOCKS + KERN_BLOCKS + STRUCT_BLOCKS + NC_BLOCKS + POOL_BLOCKS == 512);
     assert!(POOL_BLOCKS > 0);
+    // Het bufferblok van de NIC: hele blokken, binnen de DMA-regio.
+    assert!(NET_BUF.base.0.is_multiple_of(MB2) && NET_BUF.size.is_multiple_of(MB2));
+    assert!(NET_BUF.base.0 >= DMA.base.0 && NC_LO_BLOCKS + BUF_BLOCKS <= NC_BLOCKS);
 };
 
 #[cfg(test)]
@@ -115,6 +135,12 @@ mod tests {
         assert_eq!(KERN_BLOCKS, 32);
         assert_eq!(STRUCT_BLOCKS, 1);
         assert_eq!(NC_BLOCKS, 10);
+        // Blok 51 (0x0660_0000) is het bufferblok van de NIC.
+        assert_eq!((NC_LO_BLOCKS, BUF_BLOCKS), (1, 1));
+        assert_eq!(
+            crate::NET_BUF.base.0 / MB2,
+            1 + FW_BLOCKS + KERN_BLOCKS + STRUCT_BLOCKS + NC_LO_BLOCKS
+        );
         assert_eq!(POOL_BLOCKS, 452);
     }
 }

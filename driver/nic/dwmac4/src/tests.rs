@@ -173,6 +173,10 @@ fn the_rings_fit_need_bytes_without_overlap() {
         }
     }
     assert_eq!(r.tx_buf(NUM_TX - 1).0 + BUF_SIZE as u64, NEED_BYTES);
+    // De buffers in hun eigen blok van 2 MB (het board mapt het Normal-WB),
+    // de descriptors ervoor (NC).
+    assert_eq!(r.rx_buf.0, BUF_OFF);
+    assert!(r.tx(NUM_TX - 1).0 + DESC_SIZE <= BUF_OFF);
 }
 
 #[test]
@@ -322,6 +326,34 @@ fn receive_bounds_and_recycle() {
         assert_eq!(n.regs().chan.rx_end.read(), lo(n.ring.tx_desc));
         n.flush();
         assert_eq!(n.regs().chan.rx_end.read(), lo(n.ring.rx(1)));
+    }
+}
+
+/// De kopie in en uit de buffers is `memcpy` met een veeg (zie de
+/// crate-doc): byte voor byte het frame, met een staart die niet op 8 of 16
+/// valt, en niets ernaast.
+#[test]
+fn frames_cross_the_buffers_byte_for_byte() {
+    let pattern = |n: usize| (0..n).map(|i| (i * 7 + 3) as u8).collect::<Vec<u8>>();
+    for size in [17, 61, 1514] {
+        let mut f = running();
+        let n = &mut f.n;
+        let frame = pattern(size);
+        n.transmit(&frame).unwrap();
+        let mut sent = vec![0u8; BUF_SIZE];
+        dev::copy_out(&mut sent, n.ring.tx_buf(0));
+        assert_eq!(&sent[..size], &frame[..], "tx {size}");
+        assert!(sent[size..].iter().all(|&b| b == 0), "tx {size}: beyond");
+
+        dev::write32(
+            n.ring.rx(0).add(12),
+            (size + FCS_LEN) as u32 | RX_FIRST | RX_LAST,
+        );
+        dev::copy_in(n.ring.rx_buf(0), &pattern(BUF_SIZE));
+        let mut out = vec![0xccu8; 2048];
+        assert_eq!(n.receive(&mut out), Some(size), "rx {size}");
+        assert_eq!(&out[..size], &frame[..], "rx {size}");
+        assert!(out[size..].iter().all(|&b| b == 0xcc), "rx {size}: beyond");
     }
 }
 

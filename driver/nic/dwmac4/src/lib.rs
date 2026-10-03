@@ -33,11 +33,24 @@
 //! generatie) vallen pas in [`flush`](netdev::Device::flush), één keer per
 //! burst.
 //!
-//! CACHE-COHERENTIE: de DMA-regio ligt buiten de kern-RAM en is ongecachet
-//! gemapt (Normal-NC op de RK3566); de descriptors staan daarom gewoon 16
-//! bytes uit elkaar en er is geen cache-onderhoud. Normal-NC is wel zwakker
-//! geordend dan Device: de CPU mag loads herordenen, vandaar de `mb` tussen
-//! de OWN-lees en de bufferlees (Linux: `dma_rmb()` op dezelfde plek).
+//! CACHE-COHERENTIE: de DMA-regio ligt buiten de kern-RAM. De descriptors
+//! liggen ongecachet (Normal-NC op de RK3566): ze staan gewoon 16 bytes uit
+//! elkaar, zonder onderhoud. Normal-NC is wel zwakker geordend dan Device:
+//! de CPU mag loads herordenen, vandaar de `mb` tussen de OWN-lees en de
+//! bufferlees (Linux: `dma_rmb()` op dezelfde plek).
+//!
+//! De framebuffers liggen in een eigen blok van 2 MB ([`BUF_OFF`]) dat het
+//! board Normal-WB mapt, en de driver veegt zelf: `dev::pull` vóór elke
+//! RX-lees, `dev::push` na elke TX-schrijf, en één `pull` over alle buffers
+//! bij de start (de net-wb van de O6N en de Altra, en Linux'
+//! `dma_sync_single_for_cpu`/`_for_device`). De kopieën zijn `memcpy`. Een
+//! lees uit NC gaat elke keer naar het DRAM, en de in-order A55 wacht per
+//! woord op die rondreis. GEMETEN 03-10 op de Radxa (een app die 1514 bytes
+//! kopieert, 816 MHz): uit NC met vluchtige woorden van 8 bytes (zoals
+//! `dev::copy_out`) 35,3 µs per frame, uit NC met `memcpy` 16,8 µs (wat Go
+//! deed), uit WB na `dc civac` 1,9 µs. Over de draad met de O6N (X1, bench):
+//! 32 MB/s in en 85 uit, waarvan de kopie bij 32 MB/s al 76% van de OS-core
+//! was; Go haalde 56 in en 99 uit met `memmove` uit NC.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -213,16 +226,21 @@ pub const MAX_FRAME: usize = 1518;
 const DESC_BYTES: u64 = (NUM_RX as u64 + NUM_TX as u64) * DESC_SIZE;
 const BUF_BYTES: u64 = (NUM_RX as u64 + NUM_TX as u64) * BUF_SIZE as u64;
 
+/// Waar de framebuffers beginnen: het tweede blok van 2 MB van de
+/// DMA-regio, zodat het board ze Normal-WB mapt terwijl de descriptors
+/// ervoor NC blijven (zoals `BUF_OFF` van de rtl8126 en de igb).
+pub const BUF_OFF: u64 = 2 << 20;
+/// De maat van dat blok.
+pub const BUF_BLOCK: u64 = 2 << 20;
+
 /// De DMA-regio die deze driver nodig heeft; het board reserveert dit in
-/// zijn plan. 256 + 64 descriptors met buffers is 0,5 MB van de 8 MB
-/// net-DMA van de RK3566.
+/// zijn plan: de descriptors onderin, de 320 buffers (480 KB) vanaf
+/// [`BUF_OFF`]. 2,5 MB van de 8 MB net-DMA van de RK3566.
 ///
-/// GEPROBEERD EN TERUGGEDRAAID 21-09: de buffers op eigen 2 MB-blokken
-/// zodat het board de zendkant gecached kan mappen, zoals de GEM op de Pi 5.
-/// Daar wint het; hier niet: met Normal-NC op de hele regio doet dit
-/// silicium al 56 MB/s in en 99 uit, en gecached zenden veranderde daar
-/// niets aan.
-pub const NEED_BYTES: u64 = DESC_BYTES + BUF_BYTES;
+/// Op 21-09 (Go) gaven gecachete buffers aan de zendkant niets; de winst zit
+/// aan de ontvangkant, waar elke byte uit NC gelezen werd (zie de
+/// crate-doc).
+pub const NEED_BYTES: u64 = BUF_OFF + BUF_BYTES;
 
 const _: () = {
     assert!(BUF_SIZE >= MAX_FRAME + FCS_LEN);
@@ -231,6 +249,10 @@ const _: () = {
     // buffergrootte die door een te smal veld naar nul werd geveegd (30-07).
     assert!(((BUF_SIZE as u32) << RX_RBSZ_SHIFT) & !RX_RBSZ_MASK == 0);
     assert!(NUM_RX.is_power_of_two() && NUM_TX.is_power_of_two());
+    // De descriptors vóór het bufferblok, de buffers erin, en elke buffer op
+    // eigen cachelijnen: een veeg van de ene raakt de andere niet.
+    assert!(DESC_BYTES <= BUF_OFF && BUF_BYTES <= BUF_BLOCK);
+    assert!((BUF_SIZE as u64).is_multiple_of(dev::LINE));
 };
 
 /// Waarom de driver weigert.
@@ -501,9 +523,11 @@ impl Probe {
     ///
     /// # Safety
     ///
-    /// `[dma, dma + dma_size)` is gemapt, ongecachet geheugen onder 4 GB
-    /// dat alleen deze driver en het device gebruiken, nu en zolang het
-    /// programma draait.
+    /// `[dma, dma + dma_size)` ligt onder 4 GB en wordt alleen door deze
+    /// driver en het device gebruikt, nu en zolang het programma draait. De
+    /// descriptors (`[dma, dma + BUF_OFF)`) zijn Normal-NC gemapt, het
+    /// bufferblok erna Normal-NC of Normal-WB (de driver veegt het), nooit
+    /// Device: de frames gaan er met `memcpy` in en uit.
     pub unsafe fn start(
         mut self,
         dma: Pa,
@@ -571,8 +595,8 @@ fn mdio_write(p: &Probe, phy: u8, reg: u8, val: u16) -> driver_mdio::Result {
     if p.mdio_wait() { Ok(()) } else { Err(bus) }
 }
 
-/// Waar de ringen en buffers liggen: rx-desc, tx-desc, rx-buf, tx-buf, op
-/// een rij in de DMA-regio.
+/// Waar de ringen en buffers liggen: rx-desc en tx-desc onderin de
+/// DMA-regio, rx-buf en tx-buf op een rij vanaf [`BUF_OFF`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct Rings {
     rx_desc: Pa,
@@ -586,8 +610,8 @@ impl Rings {
         Self {
             rx_desc: dma,
             tx_desc: dma.add(NUM_RX as u64 * DESC_SIZE),
-            rx_buf: dma.add(DESC_BYTES),
-            tx_buf: dma.add(DESC_BYTES + NUM_RX as u64 * BUF_SIZE as u64),
+            rx_buf: dma.add(BUF_OFF),
+            tx_buf: dma.add(BUF_OFF + NUM_RX as u64 * BUF_SIZE as u64),
         }
     }
 
@@ -717,7 +741,10 @@ impl Dwmac4 {
             .update(|v| (v & !SYS_BUS_OSR_MASK) | SYS_BUS_MODE);
 
         // 2. De ringen vóórdat de DMA er iets van weet: RX meteen van de
-        //    DMA, TX van ons.
+        //    DMA, TX van ons. Eerst geen regel van het bufferblok meer in
+        //    de cache (een vorige kern kan er een achtergelaten hebben):
+        //    niets vuils dat later over een frame van de DMA heen valt.
+        dev::pull(self.ring.rx_buf, BUF_BYTES as usize);
         for i in 0..NUM_RX {
             self.give_rx(i);
         }
@@ -896,7 +923,8 @@ impl netdev::Device for Dwmac4 {
             return Err(TxError::Full);
         }
         let b = self.ring.tx_buf(self.tx_cur);
-        dev::copy_in(b, frame);
+        dev::copy_in_normal(b, frame);
+        dev::push(b, frame.len());
         // De afgeronde descriptor draagt status in alle vier de woorden, dus
         // het bufferadres moet er per frame opnieuw in. Dit gaat pas fout ná
         // één ronde door de ring: het soort bug dat een korte test overleeft
@@ -980,7 +1008,9 @@ impl Dwmac4 {
                 } else if let Some(len) = rx_len(sts) {
                     let n = len.min(buf.len());
                     if let Some(dst) = buf.get_mut(..n) {
-                        dev::copy_out(dst, self.ring.rx_buf(i));
+                        let src = self.ring.rx_buf(i);
+                        dev::pull(src, n);
+                        dev::copy_out_normal(dst, src);
                     }
                     self.stats.rx_frames += 1;
                     Some(n)
