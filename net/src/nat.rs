@@ -950,13 +950,7 @@ impl Nat {
     fn oldest_closed(&mut self, slot: u8) -> Option<Id> {
         const SAMPLE: usize = 64;
         let mut best: Option<(Id, u64)> = None;
-        let ids: BoundedVec<Id, SAMPLE> = {
-            let mut v = BoundedVec::new();
-            for id in self.flows.sample(SAMPLE) {
-                let _ = v.push(id);
-            }
-            v
-        };
+        let ids: BoundedVec<Id, SAMPLE> = self.flows.sample();
         for &id in ids.iter() {
             let Some(fl) = self.flows.get(id) else {
                 continue;

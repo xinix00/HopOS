@@ -1266,3 +1266,69 @@ fn hairpin_reply_zonder_flow_dropt() {
     assert!(io.sent.is_empty() && io.read(2).is_none());
     let _ = host_ip4();
 }
+
+/// De Pi 4-storm (03-10): slot 3 bestormt zijn eigen gepubliceerde poort
+/// via het node-IP, 8 verbindingen tegelijk, 600 achter elkaar (drie
+/// rondes binnen de sluit-TTL), terwijl Hop in slot 1 de laagste plekken
+/// van de slab vasthoudt. Boven de 512 moet de recycler elke SYN een
+/// gesloten flow van slot 3 geven; vóór de fix vond de steekproef na de
+/// wrap telkens Hops flows en vielen 64 SYNs (op de node: 1 s RTO).
+#[test]
+fn hairpin_storm_recyclet_achter_buurflows() {
+    let (mut nat, mut io) = setup();
+    io.attach(3);
+    nat.publish(Proto::Tcp, 8090, 3, 8090, SLOT_CAP).unwrap();
+    for i in 0..60 {
+        flow_for(&mut nat, &mut io, PROTO_TCP, 1, 1000 + i, EXT_IP, 443, T0).unwrap();
+    }
+    let ip = slot_ip4(3);
+    // Per verbinding: client-poort, masq-poort, fase van de handshake.
+    let mut act: Vec<(u16, u16, u8)> = Vec::new();
+    let (mut started, mut done, mut now) = (0u16, 0, T0);
+    while done < 600 {
+        while act.len() < 8 && started < 600 {
+            act.push((50000 + started, 0, 0));
+            started += 1;
+        }
+        now += 100_000;
+        let mut k = 0;
+        while let Some(&(cport, masq, fase)) = act.get(k) {
+            let (sport, dport, fl) = match fase {
+                0 => (cport, 8090, TCP_SYN),
+                1 => (8090, masq, TCP_SYN | TCP_ACK),
+                3 => (cport, 8090, TCP_FIN | TCP_ACK),
+                4 => (8090, masq, TCP_FIN | TCP_ACK),
+                _ => (cport, 8090, TCP_ACK),
+            };
+            let mut f = mk_frame(
+                PROTO_TCP,
+                HOST_MAC,
+                slot_mac(3),
+                ip,
+                NODE_IP,
+                sport,
+                dport,
+                &[],
+            );
+            set_tcp_flags(&mut f, fl);
+            if sport == 8090 {
+                nat.slot_reply(&mut io, 3, &mut f, now);
+            } else {
+                nat.outbound(&mut io, 3, &mut f, now);
+            }
+            let got = io
+                .read(3)
+                .unwrap_or_else(|| panic!("verbinding {cport}: fase {fase} gedropt"));
+            if fase == 5 {
+                act.remove(k);
+                done += 1;
+                continue;
+            }
+            let masq = if fase == 0 { be16(l4(&got), 0) } else { masq };
+            act[k] = (cport, masq, fase + 1);
+            k += 1;
+        }
+    }
+    assert_eq!(nat.flows.count(3), MAX_FLOWS_PER_SLOT);
+    assert_eq!(io.stats.nat_flow_full.load(Relaxed), 0);
+}
