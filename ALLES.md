@@ -9,7 +9,7 @@ in docs/measurements.md, de details per board in docs/boards-*.md.
 De afvinkmatrix van de Go-tijd (OLD/docs/support.md: boot, idle en klokken,
 devices en diensten per board), nu voor v3 en bijgehouden op ijzer. Legenda:
 ✓ gezien op het board, ○ gebouwd maar op dit board nog niet gezien, ✗ ontbreekt
-of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, avond (LicheeRV R16, O6N O8h, Pi 4 P7g, Radxa X2, Pi 5 P5g, Altra A11g, M4 M1; main loopt voor op de release v3.0.6 en Hop v3.0.7).
+of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, avond (LicheeRV R17, O6N O9, Pi 4 P8g, Radxa X2, Pi 5 P6g, Altra A12g, M4 M1; main loopt voor op de release v3.0.6 en Hop v3.0.7).
 Een cel zegt alleen of het slaagt, met hooguit de stempel of een paar
 woorden waarom niet; een gepolde NIC is geen ✓. De getallen staan in
 docs/measurements.md, de details per board in docs/boards-*.md.
@@ -44,18 +44,21 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       gehaald. LicheeRV rtt 527 (was 644), doel onder 300: de agent kijkt
       naar de riscv-kant (de executor-ronde, de C906-barrières), meten
       zodra Derek klaar is op het bord.
-- [ ] Ontdubbelen: binnen en op ijzer gezien Placer (koude flip O6N),
-      stmmac (LicheeRV R16; Radxa nog, zodra de dvfs-agent klaar is),
-      poll_until (NIC up op O6N, Pi 4, Pi 5, Altra, LicheeRV; M4 nog), heap
-      (Derek). Patch klaar, wacht op de lean-tag v3.1.7: één ARP-tabel.
-      Agenten nog bezig: de negen kleine (ook met een lean-patch), NVMe,
-      kooi/OS-core per ISA, Radxa-dvfs.
+- [ ] Ontdubbelen: geland en op ijzer gezien zijn Placer (koude flip
+      O6N), stmmac (LicheeRV; Radxa zodra de dvfs-agent klaar is),
+      poll_until (NIC up op O6N, Pi 4, Pi 5, Altra, LicheeRV; M4 nog), de
+      negen kleine plus één ARP-tabel met lean v3.1.9 (`HOPOS_FLIP_NAT
+      restored=1 of=1` en de canary overal; Pi 4 hairpin twee keer 1900
+      conn/s), NVMe als één kern (`HOPOS_DISK_QUEUE depth=16` op O6N en
+      Altra, `HOPOS_NVME_UP`; de bench met `hopos.nvmebench=1` en de M4 nog).
+      Agenten nog bezig: kooi/OS-core per ISA, Radxa-dvfs, de riscv-kant van
+      de beurt, de LicheeRV over de draad.
 - [ ] LicheeRV over de draad: pull van de O6N 3,92 MB/s op een link van 100
-      Mbps (plafond ~11,5); eerste meting op dit bord, A/B tegen R15 (vóór
-      stmmac) zodra Derek klaar is met zijn test.
-- [ ] Koude flip vooraf (`HOPOS_COLD_FLIP=yes|no|fresh`) zit in main en in
-      Hop (db0226c); op ijzer te zien: de M4 weigert koud zonder een taak
-      te stoppen, de Pi 5 weigert zodra een app-core heeft gedraaid.
+      Mbps (plafond ~11,5), lokaal 20,5. Agent op het bord (A/B tegen R15,
+      microbench van de framekopie, de dwmac-tellers, de pomp).
+- [ ] Pi 4: vitals `rx` via de NAT naar de Mac gaf een leeg resultaat en
+      een warme flip tijdens die pull een 502; uitzoeken (de Mac is geen
+      meetpunt, wel een NAT-pad).
 - [ ] De volgende bump: HopOS 3.0.7 met tag, Hop erop naar 3.0.8, release.sh,
       media (main heeft sinds v3.0.6 en Hop v3.0.7 de avondfixes van 03-10:
       de NAT-recycler, de Radxa over de draad, de OS-core-beurt, de koude
