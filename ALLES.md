@@ -9,7 +9,7 @@ in docs/measurements.md, de details per board in docs/boards-*.md.
 De afvinkmatrix van de Go-tijd (OLD/docs/support.md: boot, idle en klokken,
 devices en diensten per board), nu voor v3 en bijgehouden op ijzer. Legenda:
 ✓ gezien op het board, ○ gebouwd maar op dit board nog niet gezien, ✗ ontbreekt
-of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, avond (LicheeRV R32, O6N O16h, Pi 4 P9g, Radxa X20, Pi 5 P6g, Altra A12g, M4 M1; release v3.0.7 in de maak, Hop v3.0.7 volgt met 3.0.8).
+of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, avond (LicheeRV R32, O6N O16h, Pi 4 P9g, Radxa X20, Pi 5 P6g, Altra A12g, M4 M1; release v3.0.7 is uit, Hop v3.0.7 volgt met 3.0.8).
 Een cel zegt alleen of het slaagt, met hooguit de stempel of een paar
 woorden waarom niet; een gepolde NIC is geen ✓. De getallen staan in
 docs/measurements.md, de details per board in docs/boards-*.md.
@@ -43,12 +43,11 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       RANDQ met 16 tegelijk, SEQ niet lager dan 2705 MB/s op de O6N) op
       O6N en Altra; de M4 (tg3 en apple pcie via poll_until, de ANS als
       transport van de NVMe-kern, de twee wissels per rondreis).
-- [ ] De volgende bump: HopOS 3.0.7 met tag, Hop erop naar 3.0.8 (de
-      lean-tags naar v3.1.9, zoals tools/hop-build.sh nu al doet),
-      release.sh, media; de apps opnieuw (de winst van de twee wissels zit
-      in applib). De Radxa-kaart heeft de dwmac4-fout met de MMC-maskers
-      (v3.0.5 stormt na 2 GiB verkeer): nieuwe kaart. Het M4-image via
-      Recovery (spin daarna opnieuw POSTen) en de Altra-stick.
+- [ ] Na HopOS v3.0.7 (uit, 36 assets, apps vernieuwd): Hop 3.0.8 met de pin
+      op v3.0.7 en de lean-tags naar v3.1.9 (hop-gui ook opnieuw tegen
+      v3.0.7); dan de media: nieuwe Radxa-kaart (v3.0.5 stormt na 2 GiB
+      verkeer door de MMC-maskers), het M4-image via Recovery (spin daarna
+      opnieuw POSTen) en de Altra-stick.
 
 ### Fixen
 
