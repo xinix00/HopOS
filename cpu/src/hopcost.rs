@@ -320,12 +320,27 @@ mod imp {
 
     /// Begint bij hop `k` een vraag: een bel na een hop zonder bel (de
     /// klant draaide, rekende en stuurde; een bel direct na een bel is een
-    /// antwoord of een ack). `who`: alleen van die afzender.
+    /// antwoord of een ack), of een bel van de klant op een antwoord dat
+    /// zelf op een bel van hem volgde (`3>2 2>3 3>2`: vraag, antwoord met
+    /// de ack erin, en de volgende vraag met de ack erin; hop-cost5).
+    /// `who`: alleen van die afzender.
     fn opens(k: u64, first: u64, who: Option<u64>, hz: u64) -> bool {
         let h = read(k, hz);
-        h[1] & BELL != 0
-            && who.is_none_or(|w| h[0] == w)
-            && (k == first || read(k - 1, hz)[1] & BELL == 0)
+        if h[1] & BELL == 0 || who.is_some_and(|w| h[0] != w) {
+            return false;
+        }
+        if k == first {
+            return true;
+        }
+        let prev = read(k - 1, hz);
+        if prev[1] & BELL == 0 {
+            return true;
+        }
+        // Een antwoord van de ander aan deze afzender, op een bel van hem.
+        k - 1 > first && prev[0] != h[0] && prev[1] & !BELL == h[0] && {
+            let before = read(k - 2, hz);
+            before[1] & BELL != 0 && before[0] == h[0]
+        }
     }
 
     /// De rondreis vanaf hop `k`: tot de volgende vraag van `who` (of het
@@ -544,5 +559,22 @@ mod tests {
         assert!(lines[6].starts_with(
                 "hopcost hop nobell n=6 a=2.0 (asm 1.0) b=0.0 c=6.0 (executor 3.0 door+mask 1.0 next 2.0)"
             ), "{}", lines[6]);
+
+        // Met de ack in het antwoord en in de volgende vraag (hop-cost5):
+        // twee hops per rondreis, allebei met bel.
+        hop(3, false);
+        for _ in 0..3 {
+            hop(2, true);
+            hop(3, true);
+        }
+        hop(2, true);
+        lines.clear();
+        drain(&mut |a| lines.push(format!("{a}")));
+        assert_eq!(lines.len(), 7, "{lines:?}");
+        for l in &lines[..3] {
+            assert!(l.contains("hops=2 "), "{l}");
+            assert!(l.contains("[3>2 2>3]"), "{l}");
+        }
+        assert!(lines[4].contains("HOPOS_HOPCOST_P50"), "{}", lines[4]);
     }
 }

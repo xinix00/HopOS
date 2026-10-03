@@ -80,6 +80,14 @@ pub const RX_BATCH: usize = 16;
 /// Zoveel frames zendt de pomp achter elkaar voor hij een beurt afgeeft.
 pub const TX_BATCH: usize = 16;
 
+/// Zoveel rondes van de executor geeft de pomp na een ontvangst hooguit aan
+/// de taken die hij wekte, voor hij zendt ([`Net::readers`]). Een gewekte
+/// taak draait in de ronde na de wek; staat de pomp in die ronde vóór hem,
+/// dan is er één ronde meer nodig. Meer niet: een taak die altijd klaar is
+/// (BURN, ~0,3 ms per ronde) houdt de ACK zo hooguit één ronde langer op
+/// dan zijn eigen antwoord toch al kostte.
+pub const READER_ROUNDS: u32 = 2;
+
 /// De ruimte die één maximaal frame in een slot-ring inneemt: kop en
 /// payload, op 8 afgerond.
 const FRAME_ROOM: u64 = (abi::ring::REC_HDR + NET_MTU as u64 + 14).next_multiple_of(8);
@@ -530,7 +538,13 @@ impl Net {
         let mut corrupt_logged = false;
         loop {
             let got = self.ingest(nic, buf);
+            let busy = got > 0 && got < RX_BATCH && self.readers().await;
             self.transmit(nic, buf).await;
+            if busy {
+                // De core blijft bezig na wat we net zonden: niet wachten
+                // tot de idle-yield of `TURN_CAP` (OS-core, `net::TX_OWED`).
+                crate::net::kick_owed();
+            }
             if got == RX_BATCH {
                 // Er ligt waarschijnlijk meer; eerst de rest een beurt.
                 yield_now().await;
@@ -557,8 +571,12 @@ impl Net {
                     d = poll.next(d, empty);
                 }
                 // Geen lege ronde voor de verdubbeling: `d` is de slaap van
-                // een stille core, en deze core was niet stil.
-                Wake::Busy => {}
+                // een stille core, en deze core was niet stil. Wel een kick
+                // die nog openstaat: de core sliep al `lo` lang niet, dus
+                // de idle-yield komt niet snel (`net::TX_OWED`).
+                Wake::Busy => {
+                    crate::net::kick_owed();
+                }
                 // De app praat: het antwoord hoort in het scherpe venster te
                 // komen, dus terug naar `lo` (de `hold` van Go).
                 Wake::Stack => {
@@ -567,6 +585,26 @@ impl Net {
                 }
             }
         }
+    }
+
+    /// Na een ontvangst eerst de taken die hij wekte, dan pas zenden: wat
+    /// de lezer terugschrijft, gaat zo in hetzelfde segment als de ACK (de
+    /// stack stuurt een kale ACK alleen als er geen data ligt). Zenden we
+    /// meteen, dan gaat de ACK alleen de deur uit, en op de OS-core is elk
+    /// frame naar de buur een beurt voor die buur: een rondreis van `bench
+    /// ping` was zes hops (vraag, ack, lege yield, antwoord, ack, lege
+    /// yield) in plaats van twee (03-10, hop-cost5). Hooguit
+    /// [`READER_ROUNDS`] rondes van de executor; staat er na de eerste
+    /// niemand meer klaar, dan meteen. `true`: na de laatste ronde stond er
+    /// nog een taak klaar, de core blijft bezig.
+    async fn readers(&self) -> bool {
+        for _ in 0..READER_ROUNDS {
+            yield_now().await;
+            if !self.exec.has_ready() {
+                return false;
+            }
+        }
+        true
     }
 
     /// Hooguit [`RX_BATCH`] frames uit de RX-ring de stack in; het aantal.

@@ -17,7 +17,7 @@ use crate::app::App;
 use crate::contract::{NET_MTU, NET_RING_DATA_CAP, slot_ip4, slot_mac};
 use crate::ring::{Corrupt, Kind, Peek, Reader, Writer};
 use crate::sleep::{self, RxDoor};
-use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use core::time::Duration;
 use netdev::{Device, Mac, TxError};
 use sync::{Signal, yield_now};
@@ -49,6 +49,43 @@ pub static PUMP_TIMER: AtomicU64 = AtomicU64::new(0);
 /// tot zijn flush). 3 à 4 kicks tot en met de dial.
 pub static TX_KICKS: AtomicU64 = AtomicU64::new(0);
 
+/// Een publicatie op de TX-ring die de kern nog niet hoorde: op het hart
+/// van de kern (de OS-core) kickt de [`Nic`] niet bij elke burst. Daar is
+/// de kick een yield naar nu, en dus een wissel naar de buur terwijl deze
+/// bewoner zelf nog werk heeft (verder rekenen, tot zijn eigen idle komen):
+/// hij bleef met wektijd 0 "aan de beurt" en kreeg later een beurt zonder
+/// signaal, die hij met een lege yield teruggaf (03-10, hop-cost5). Het
+/// principe: een bewoner van de OS-core houdt de core tot hij wacht (zijn
+/// idle-yield, en die laat de kern het frame bezorgen, [`owed_by_yield`])
+/// of tot `TURN_CAP`; een ander komt alleen aan de beurt met een signaal.
+/// Blijft hij bezig (een taak die altijd klaar is, BURN), dan kickt de pomp
+/// alsnog ([`kick_owed`]): dan wacht het frame niet op `TURN_CAP`.
+static TX_OWED: AtomicBool = AtomicBool::new(false);
+
+/// De kick naar de kern: SEV voor een kern in WFE, HVC #6 (riscv: de
+/// kick-ecall) voor een kern die een bewoner draait of in WFI slaapt.
+fn kick() {
+    dev::notify();
+    crate::arch::hvc_kick_os();
+    TX_KICKS.fetch_add(1, Relaxed);
+}
+
+/// Betaalt een uitgestelde kick (zie [`TX_OWED`]): de app blijft bezig, of
+/// slaapt zonder yield. `true` als er een kick was.
+pub fn kick_owed() -> bool {
+    let owed = TX_OWED.swap(false, Relaxed);
+    if owed {
+        kick();
+    }
+    owed
+}
+
+/// De idle-yield naar de kern: die bezorgt wat er op de TX-ring ligt, dus
+/// een uitgestelde kick vervalt.
+pub(crate) fn owed_by_yield() {
+    TX_OWED.store(false, Relaxed);
+}
+
 /// Het interne IPv4 van slot `slot` (big-endian).
 #[must_use]
 pub const fn slot_ip(slot: u64) -> [u8; 4] {
@@ -73,6 +110,9 @@ pub struct Nic {
     rx: Reader,
     rx_peek: Peek,
     mac: Mac,
+    /// Op het hart van de kern: de kick wacht op de idle-yield
+    /// ([`TX_OWED`]).
+    defer: bool,
 }
 
 impl Nic {
@@ -81,12 +121,14 @@ impl Nic {
     /// zodra de kern hetzelfde belooft.
     pub fn open(app: &App) -> Result<Self, abi::Error> {
         let t = app.tail();
-        let c = crate::mmu::ring_coherence(app.ctrl().on_kern_hart());
+        let on_kern = app.ctrl().on_kern_hart();
+        let c = crate::mmu::ring_coherence(on_kern);
         Ok(Self {
             tx: Writer::open_with(t.net_tx(), NET_RING_DATA_CAP, c)?,
             rx: Reader::open_with(t.net_rx(), NET_RING_DATA_CAP, c)?,
             rx_peek: Peek::new(t.net_rx(), NET_RING_DATA_CAP),
             mac: mac_of(app.slot()),
+            defer: on_kern,
         })
     }
 
@@ -99,7 +141,16 @@ impl Nic {
             rx,
             rx_peek,
             mac,
+            defer: false,
         }
+    }
+
+    /// Kickt de kern niet bij elke burst maar laat de kick wachten op de
+    /// idle-yield ([`TX_OWED`]), zoals [`Nic::open`] op het hart van de kern.
+    #[must_use]
+    pub fn deferring(mut self, yes: bool) -> Self {
+        self.defer = yes;
+        self
     }
 
     /// Hangt de deurbel aan: de idle van de app-core wapent vanaf nu
@@ -119,7 +170,7 @@ impl Nic {
             return Err(TxError::Size(frame.len()));
         }
         let r = self.tx.write(Kind::FRAME, frame).map(Some);
-        Self::sent(r, frame.len()).map(|_| ())
+        self.sent(r, frame.len()).map(|_| ())
     }
 
     /// Als [`Nic::try_transmit`], maar `fill` bouwt het frame in de TX-ring
@@ -138,29 +189,40 @@ impl Nic {
             len = fill(dst).min(dst.len());
             len
         });
-        Self::sent(r, max).map(|sent| if sent { len } else { 0 })
+        self.sent(r, max).map(|sent| if sent { len } else { 0 })
     }
 
     /// De afloop van een schrijf in de TX-ring: de kick bij de overgang van
-    /// leeg naar niet-leeg, de bel bij vol. `Ok(false)`: geen record.
-    fn sent(r: Result<Option<bool>, abi::Error>, len: usize) -> Result<bool, TxError> {
+    /// leeg naar niet-leeg (op het hart van de kern de schuld, [`TX_OWED`]),
+    /// de bel bij vol. `Ok(false)`: geen record.
+    fn sent(&self, r: Result<Option<bool>, abi::Error>, len: usize) -> Result<bool, TxError> {
         match r {
             Ok(Some(was_empty)) => {
-                if was_empty {
+                if self.defer {
+                    // De kern draait pas als wij de core teruggeven; dat doet
+                    // de idle-yield, of de pomp als we bezig blijven.
+                    TX_OWED.store(true, Relaxed);
+                } else if was_empty {
                     // De SEV wekt een kern in WFE; de kick een kern die een
                     // bewoner draait of in WFI slaapt (Go: `dev.Notify`, dat
                     // op de M4 beide deed). Zonder kick hoorde de kern een
                     // app die na zijn publicatie blijft rekenen pas op zijn
                     // failsafe van 1 ms of op de idle-yield van de app.
-                    dev::notify();
-                    crate::arch::hvc_kick_os();
-                    TX_KICKS.fetch_add(1, Relaxed);
+                    kick();
                 }
                 Ok(true)
             }
             Ok(None) => Ok(false),
             Err(abi::Error::RingFull { .. }) => {
-                dev::notify();
+                // Op het hart van de kern leest niemand de ring leeg tot we
+                // de core teruggeven: nu dus, anders wacht `transmit_wait`
+                // zijn hele tegendruk voor niets.
+                if self.defer {
+                    TX_OWED.store(false, Relaxed);
+                    kick();
+                } else {
+                    dev::notify();
+                }
                 Err(TxError::Full)
             }
             Err(abi::Error::RecordTooLarge { .. }) => Err(TxError::Size(len)),

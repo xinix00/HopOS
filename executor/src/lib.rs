@@ -211,6 +211,12 @@ pub struct Executor<const TASKS: usize = 512, const TIMERS: usize = 256> {
     /// zijn plaats al kwijt is (verlopen, hergebruikt) nooit die van een
     /// ander wist.
     timer_gen: Cell<u32>,
+    /// De gereed-bits van het woord dat de lopende ronde afwerkt en die
+    /// nog aan de beurt komen: de ronde haalt een woord in één swap leeg,
+    /// dus zonder dit ziet [`Self::has_ready`] vanuit een taak niet dat er
+    /// in deze ronde na hem nog een klaarstaat (de pomp van applib vraagt
+    /// het, hop-cost5).
+    rest: AtomicU64,
     clock: Cell<Option<Clock>>,
     /// De meetlat.
     pub stats: Stats,
@@ -240,6 +246,7 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
             timers_hi: Cell::new(0),
             timers_at: Cell::new(u64::MAX),
             timer_gen: Cell::new(0),
+            rest: AtomicU64::new(0),
             clock: Cell::new(None),
             stats: Stats {
                 rounds: AtomicU64::new(0),
@@ -303,10 +310,13 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
         }
     }
 
-    /// Ligt er werk: een gezet bit of een spawn in de rij?
+    /// Ligt er werk: een gezet bit, een spawn in de rij, of (vanuit een
+    /// taak) een taak die in deze ronde nog na hem gepolld wordt?
     #[must_use]
     pub fn has_ready(&self) -> bool {
-        !self.spawn.is_empty() || self.ready.iter().any(|w| w.load(Relaxed) != 0)
+        !self.spawn.is_empty()
+            || self.rest.load(Relaxed) != 0
+            || self.ready.iter().any(|w| w.load(Relaxed) != 0)
     }
 
     /// De vroegste deadline van een timer die een slapende core mag wekken
@@ -383,6 +393,9 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
     pub fn step(&'static self) -> bool {
         let mut worked = self.drain_spawns();
         worked |= self.expire_timers(self.now());
+        // Een geneste ronde (een taak die zelf rondes draait) laat de rest
+        // van de buitenste zoals hij hem vond.
+        let outer = self.rest.load(Relaxed);
         for (w, word) in self.ready.iter().enumerate() {
             // Eerst kijken, dan pas de atomaire swap: een AMO per leeg woord
             // is op de C906 geen kleingeld.
@@ -393,12 +406,14 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
             while bits != 0 {
                 let i = w * 64 + bits.trailing_zeros() as usize;
                 bits &= bits - 1;
+                self.rest.store(bits, Relaxed);
                 let Some(slot) = self.slots.get(i) else {
                     continue;
                 };
                 worked |= self.poll(slot);
             }
         }
+        self.rest.store(outer, Relaxed);
         if worked {
             self.stats.rounds.fetch_add(1, Relaxed);
         }
@@ -579,6 +594,24 @@ mod tests {
         assert!(e.step());
         assert!(DONE.load(SeqCst));
         assert_eq!(e.live_tasks(), 0);
+    }
+
+    #[test]
+    fn a_task_sees_who_comes_after_it_in_the_same_round() {
+        // De pomp van applib vraagt na een ontvangst of de lezer die hij
+        // wekte nog moet draaien. Die staat in hetzelfde woord, dat de
+        // ronde al leeghaalde: `has_ready` moet hem toch zien, en een taak
+        // die als laatste draait niemand.
+        static SAW: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+        let e = exec();
+        for saw in &SAW {
+            e.spawn(async move { saw.store(e.has_ready(), SeqCst) })
+                .unwrap();
+        }
+        assert!(e.step());
+        assert!(SAW[0].load(SeqCst), "de eerste ziet de tweede");
+        assert!(!SAW[1].load(SeqCst), "na de laatste komt niemand meer");
+        assert!(!e.has_ready(), "buiten de ronde telt alleen het woord");
     }
 
     #[test]

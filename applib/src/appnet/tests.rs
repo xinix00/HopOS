@@ -281,6 +281,68 @@ fn bulk_both_ways_then_close() {
 }
 
 #[test]
+fn a_small_answer_carries_the_ack_in_the_same_frame() {
+    // De rondreis van `bench ping` (03-10, hop-cost5): op de OS-core is elk
+    // frame naar de buur een beurt voor die buur. Zond de pomp na een
+    // ontvangst meteen, dan ging de ACK alleen (een frame van 54 bytes) en
+    // kwam het antwoord in een tweede: drie frames per rondreis en zes hops.
+    // Nu wacht hij tot de lezer die hij wekte schreef, en per richting is er
+    // per rondreis één frame: kop (8) plus 54 plus 64 bytes, op 8 = 128.
+    const ROUNDS: u64 = 20;
+    const LEN: usize = 64;
+    const RECORD: u64 = 128;
+    let p = pair();
+    let l = p.kern.tcp_listen(7).unwrap();
+    p.exec
+        .spawn(async move {
+            let mut c = l.accept().await.unwrap();
+            let mut buf = [0u8; LEN];
+            loop {
+                let n = c.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                c.write_all(&buf[..n]).await.unwrap();
+            }
+        })
+        .unwrap();
+    let app = p.app;
+    let (up, down) = (p.doors[0].0, p.doors[1].0);
+    let result = slot();
+    p.exec
+        .spawn(async move {
+            let mut c = app.tcp_connect([10, 100, 0, 1], 7).await.unwrap();
+            let mut msg = [0x5au8; LEN];
+            let heads = || (up.head_pending().0, down.head_pending().0);
+            // Eén rondreis warm: de handshake en zijn ACK's tellen niet.
+            c.write_all(&msg).await.unwrap();
+            read_exact(&mut c, &mut msg).await;
+            let before = heads();
+            for _ in 0..ROUNDS {
+                c.write_all(&msg).await.unwrap();
+                read_exact(&mut c, &mut msg).await;
+            }
+            let after = heads();
+            *result.borrow_mut() = Some((after.0 - before.0, after.1 - before.1));
+        })
+        .unwrap();
+    p.run_until(|| result.borrow().is_some());
+    let (sent, answered) = result.borrow_mut().take().unwrap();
+    assert_eq!(
+        sent,
+        ROUNDS * RECORD,
+        "de vragen: {} bytes per rondreis",
+        sent / ROUNDS
+    );
+    assert_eq!(
+        answered,
+        ROUNDS * RECORD,
+        "de antwoorden: {} bytes per rondreis",
+        answered / ROUNDS
+    );
+}
+
+#[test]
 fn a_closed_port_is_refused() {
     let p = pair();
     let got = slot();
