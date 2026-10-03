@@ -9,7 +9,7 @@ in docs/measurements.md, de details per board in docs/boards-*.md.
 De afvinkmatrix van de Go-tijd (OLD/docs/support.md: boot, idle en klokken,
 devices en diensten per board), nu voor v3 en bijgehouden op ijzer. Legenda:
 ✓ gezien op het board, ○ gebouwd maar op dit board nog niet gezien, ✗ ontbreekt
-of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, avond (LicheeRV R17, O6N O9, Pi 4 P8g, Radxa X2, Pi 5 P6g, Altra A12g, M4 M1; main loopt voor op de release v3.0.6 en Hop v3.0.7).
+of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, avond (LicheeRV R17, O6N O10h, Pi 4 P9g, Radxa X3, Pi 5 P6g, Altra A12g, M4 M1; main loopt voor op de release v3.0.6 en Hop v3.0.7).
 Een cel zegt alleen of het slaagt, met hooguit de stempel of een paar
 woorden waarom niet; een gepolde NIC is geen ✓. De getallen staan in
 docs/measurements.md, de details per board in docs/boards-*.md.
@@ -39,20 +39,28 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
-- [ ] OS-core: de O6N zit na de snoei van de deur, de switch-ronde en lazy
-      FP (b6878f9) op rtt p50 86 us (was 308): het doel onder 100 is daar
-      gehaald. LicheeRV rtt 527 (was 644), doel onder 300: de agent kijkt
-      naar de riscv-kant (de executor-ronde, de C906-barrières), meten
-      zodra Derek klaar is op het bord.
-- [ ] Ontdubbelen: geland en op ijzer gezien zijn Placer (koude flip
-      O6N), stmmac (LicheeRV; Radxa zodra de dvfs-agent klaar is),
-      poll_until (NIC up op O6N, Pi 4, Pi 5, Altra, LicheeRV; M4 nog), de
-      negen kleine plus één ARP-tabel met lean v3.1.9 (`HOPOS_FLIP_NAT
-      restored=1 of=1` en de canary overal; Pi 4 hairpin twee keer 1900
-      conn/s), NVMe als één kern (`HOPOS_DISK_QUEUE depth=16` op O6N en
-      Altra, `HOPOS_NVME_UP`; de bench met `hopos.nvmebench=1` en de M4 nog).
-      Agenten nog bezig: kooi/OS-core per ISA, Radxa-dvfs, de riscv-kant van
-      de beurt, de LicheeRV over de draad.
+- [ ] OS-core: de O6N zat na de snoei van de deur, de switch-ronde en lazy
+      FP (b6878f9) op rtt p50 86 us (was 308). Met de kooi (a5885f7) is dat
+      180: per bel-hop gaat de fase tot slot_wake van 8,9 naar 24,5 us en
+      er zijn veel meer hops per venster; de kooi-agent zoekt de regressie
+      (kooi2). De riscv-snoei (hop-cost3: abi::ring met eigen index, de
+      deur met één pull, HOST_RINGS Hardware, lazy FP via mstatus.FS) wordt
+      herbasseerd op de kooi; daarna de frame-ringen van een OS-core-bewoner
+      op Hardware (hop-cost4), het stuk dat de LicheeRV van 527 naar 300 us
+      moet brengen.
+- [ ] OS-core: een rekenende bewoner in `system` stoppen (DELETE van een
+      BURN-job) gaf op de O6N binnen 60 s geen `HOPOS_SLOT_STOPPED` en geen
+      `HOPOS_OS_UNHOST`; op QEMU op de oude boom net zo. Bij de kooi-agent.
+- [ ] Ontdubbelen: geland en op ijzer gezien zijn Placer, stmmac (LicheeRV
+      en Radxa), poll_until, de negen kleine plus één ARP-tabel (lean
+      v3.1.9), NVMe als één kern (depth 16 op O6N en Altra; de bench met
+      `hopos.nvmebench=1` en de M4 nog), de kooi (zie hierboven), en de
+      Radxa-dvfs: 816 MHz op 850 mV stil tot 1800 op 1150 vol via SCMI en
+      de buck op i2c0, pull 108 en push 111 MB/s op vol (agent); X3 bij mij
+      pull 75 en push 110, één run.
+- [ ] Radxa: na 8 tot 10 bench-rondes van 256 MiB blijft de kern 100% bezig,
+      Hop krijgt geen beurt, de canary faalt en de watchdog reset naar de
+      kaart-kern; ook op 1ff50cc zonder dvfs. Agent op het bord.
 - [ ] LicheeRV over de draad: pull van de O6N 3,92 MB/s op een link van 100
       Mbps (plafond ~11,5), lokaal 20,5. Agent op het bord (A/B tegen R15,
       microbench van de framekopie, de dwmac-tellers, de pomp).
@@ -100,7 +108,8 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Later
 
-- [ ] Radxa: TSADC geeft geen code; geen serienummer-terugval voor de MAC.
+- [ ] Radxa: TSADC geeft geen code (daardoor geen thermische rem op 1800 MHz;
+      `hopos.mhz=1416` klemt); geen serienummer-terugval voor de MAC.
 - [ ] Altra RNG: de firmware heeft geen SMCCC-TRNG (TRNG_VERSION
       NOT_SUPPORTED, 03-10) en het EFI_RNG_PROTOCOL hing er in juli; blijft
       jitter tot iemand efi-rng daar met een tijdslimiet durft te proberen.
