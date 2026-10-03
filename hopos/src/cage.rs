@@ -1,48 +1,42 @@
-//! De kooi-lijm: de traits van `kern::cage` over `cpu::el2`, `cpu::smp` (CPU_ON),
-//! `dev` en de executor van core 0.
+//! De kooi op arm64: wat `crate::kooi` van de architectuur vraagt
+//! ([`Isa`]), over `cpu::el2` (stage-2 en de switcher), `cpu::smp` (CPU_ON)
+//! en `dev`. Het beleid (bouwen, starten, stoppen, intrekken, stil) is van
+//! `kooi.rs` en dezelfde als op riscv64 (`cage_riscv.rs`).
 //!
-//! Dit bezit de per-slot wetenschap die de kern niet heeft en de switcher
-//! niet mag hebben: waar de control-page van een levende kooi staat en op
-//! welke core hij draait. De boekhouding (wie welke partitie en core heeft)
-//! is van de lifecycle-actor; die krijgt [`ArmCage`] en [`ArmCores`] als
-//! waarde en is dus de enige aanroeper (`&mut self`, handboek §1).
-//!
-//! De stage-2-bouwer is die van `cpu::el2::stage2`, de enige: de intrekking
-//! (`cpu::el2::revoke`) en de switcher lezen dezelfde tabellen via hetzelfde
-//! kooiblok, en hij doet het cache-onderhoud (de walker van de app-core
-//! leest cacheable).
-//!
-//! Dit is de ARM-helft van `OLD/metal/kern/slots/cage_arm64.go` plus het
-//! schrijfwerk van `armSlot` (control-page, ringen, ctx-woorden). Wat deze
-//! lijm met die van riscv64 deelt (de switch, de outbox, de foutcodes), staat
-//! in `glue.rs`.
+//! Wat hier staat: de stage-2-tabel van een kooi (de bouwer van
+//! `cpu::el2::stage2`, de enige: de intrekking en de switcher lezen
+//! dezelfde tabellen via hetzelfde kooiblok, en hij doet het
+//! cache-onderhoud voor de walker van de app-core), de woorden van de
+//! trampoline op de control-page, het startschot van een app-core
+//! (mailbox plus SEV, of koud PSCI CPU_ON, of erbij in een draaiende
+//! rotatie), de SMP-eenheden, en de wekker van Apple. Dit is de ARM-helft
+//! van `OLD/metal/kern/slots/cage_arm64.go` plus het schrijfwerk van
+//! `armSlot`.
 
-use crate::glue::{attach, detach, err, publish_ports, tail_of, unpublish_ports};
+use crate::kooi::{Built, Isa, Kooi, KooiCores, err};
 use abi::hopabi::{
-    AppStatus, CTRL_APP_FAULT_ELR, CTRL_APP_FAULT_ESR, CTRL_APP_FAULT_FAR, CTRL_APP_FAULT_VEC,
-    CTRL_CORES, CTRL_DOOR_IRQ, CTRL_ENTRY, CTRL_EXIT_CODE, CTRL_FAULT_ESR, CTRL_FAULT_FAR,
-    CTRL_FAULT_VEC, CTRL_HEARTBEAT, CTRL_IDLE, CTRL_IDLE_MODE, CTRL_KILL, CTRL_MBOX_PA,
-    CTRL_MEM_SYS, CTRL_RAM_SIZE, CTRL_S2_TABLE, CTRL_SHARED, CTRL_SLOT, CTRL_SMP_REQ, CTRL_STATUS,
-    CTRL_VEC_PA, CTRL_WAKES, CTRL_WALL_OFF, IDLE_YIELD,
+    CTRL_DOOR_IRQ, CTRL_IDLE_MODE, CTRL_MBOX_PA, CTRL_S2_TABLE, CTRL_VEC_PA, IDLE_YIELD,
 };
 use abi::layout::{
-    self, CTRL_STRIDE, CTX_CTRL_PA, CTX_KICK_NONE, CTX_KICK_TARGET, CTX_NEXT_PA, CTX_SMP, CtxState,
-    LINK_BASE, NET_RING_DATA_CAP, Plan, RING_DATA_CAP, SCHED_CURRENT, Tail,
+    self, CTX_CTRL_PA, CTX_KICK_NONE, CTX_KICK_TARGET, CTX_NEXT_PA, CTX_SMP, CtxState, LINK_BASE,
+    Plan,
 };
-use abi::ring;
 use board::Board;
 use core::cell::OnceCell;
-use core::future::Future;
 use core::sync::atomic::Ordering::Relaxed;
 use core::time::Duration;
-use cpu::el2::{self, CoreState, Flavor, Installed, Join, Start};
+use cpu::el2::{self, CoreState, Flavor, Installed, Join, Start, roster};
 use cpu::println;
 use dev::Pa;
 use executor::Executor;
-use kern::cage::{Cage, CageError, CoreClass, Cores, PortError, Power, Status};
-use kern::{Core, Region, SLOT_CAP, Slot};
+use kern::cage::{CageError, CoreClass};
 use sync::Local;
 use vboard::slots::mpidr;
+
+/// De kooi van deze node, en zijn cores.
+pub(crate) type SlotCage = Kooi<Arm>;
+/// Zie [`SlotCage`].
+pub(crate) type SlotCores = KooiCores<Arm>;
 
 /// De EL2-smaak van de switcher (cpu::el2 `Flavor`), gekozen door het board
 /// en niet door een losse bouwvlag:
@@ -119,9 +113,9 @@ const APP_IDLE_MODE: u64 = IDLE_YIELD;
 #[cfg(not(any(feature = "board-qemuvirt", feature = "board-apple")))]
 const APP_IDLE_MODE: u64 = 0;
 
-/// De foutcodes van de lijm ([`crate::glue::code`]) plus die van CPU_ON.
+/// De foutcodes van de kooi ([`crate::kooi::code`]) plus die van CPU_ON.
 mod code {
-    pub(super) use crate::glue::code::*;
+    pub(super) use crate::kooi::code::*;
     /// CPU_ON faalde (PSCI, of de haak van het board: `cpu::smp::cpu_on`);
     /// de code erbij is 0x100 plus de fout in PSCI-vorm.
     pub(super) const PSCI: u32 = 0x100;
@@ -130,7 +124,7 @@ mod code {
     pub(super) const PSCI_REFUSED: u32 = PSCI | super::CageError::NEVER_RAN;
 }
 
-/// Hoe lang [`ArmCage::dispatch`] op een gedeelde app-core wacht tot de
+/// Hoe lang [`Arm::start`] op een gedeelde app-core wacht tot de
 /// rotatie een nieuwe bewoner oppikt. Een buur die idle is, geeft de core
 /// binnen een event-stream-periode (~1,5 ms) of meteen na de kick; langer
 /// is een buur die rekent, en dan wacht de lifecycle verder zonder de
@@ -152,378 +146,173 @@ pub(crate) fn reserve(size: u64) -> u64 {
     el2::stage2::table_reserve(LINK_BASE, size)
 }
 
-/// Wat de lijm per gebouwde kooi onthoudt.
-#[derive(Copy, Clone, Debug)]
-struct Built {
-    /// De control-page (fysiek), het x0 van de trampoline.
-    ctrl: Pa,
-    /// De primaire core.
-    core: layout::Core,
-    /// De entry uit de ELF en de partitie, voor de startregel.
-    entry: u64,
-    /// De partitie van deze levensduur.
-    part: Region,
-    /// De stage-2-L1 van de kooi: het gezag van elke secundaire, uit de
-    /// bouw en nooit van de app-schrijfbare page (`CTRL_S2_TABLE`).
-    l1: Pa,
-    /// De vertrouwde SMP-breedte (1 = geen SMP).
-    cores: usize,
-}
+/// De grootste SMP-eenheid die de kooi aan elkaar ketent: meer dan de
+/// app-cores van elk board dat we hebben (de O6N: 12).
+const SMP_MAX: usize = 16;
 
-/// De kooi van QEMU virt: stage-2 onder EL2, de switcher in de plan-regio,
-/// de park-mailboxen, PSCI voor de eerste opgang.
-pub(crate) struct ArmCage {
-    plan: Plan,
+/// De arm64-kant van de kooi: de geïnstalleerde switch-code in de
+/// plan-regio (de switcher, de trampolines en de parkeerlus).
+pub(crate) struct Arm {
     installed: Installed,
-    built: [Option<Built>; SLOT_CAP + 1],
 }
 
-impl ArmCage {
-    /// Zet de switch-code in de plan-regio en de app-cores klaar (vectoren,
-    /// parkeerlus, sched-blokken, lege ctx-staten). Eén keer bij boot, vóór
-    /// de eerste dispatch; er leven nog geen bewoners.
-    pub(crate) fn new(plan: Plan) -> Result<ArmCage, el2::Error> {
-        let installed = el2::install_switch_code(&plan, FLAVOR)?;
-        el2::init_app_cores(&plan, &installed, false)?;
-        // De boot-core, als de kern bij boot naar de OS-core verhuisde
-        // (main, `hopos.oscore`): nu is er een parkeerlus, en wordt hij een
-        // geparkeerde app-core, vóór de eerste dispatch.
-        if let Some(m) = el2::held() {
-            let phys = vboard::slots::core_of(m);
-            let core = plan.logical_core(phys).ok_or(el2::Error::UnparkedCore {
-                core: phys,
-                mbox: 0,
-            })?;
-            el2::release_held(&plan, core)?;
-            println!("oscore: boot core {phys} parked as app core {core} HOPOS_OSCORE_PARKED");
-        }
-        Ok(ArmCage {
-            plan,
-            installed,
-            built: [None; SLOT_CAP + 1],
-        })
-    }
-
+impl Arm {
     /// De geïnstalleerde switch-code.
     pub(crate) fn installed(&self) -> &Installed {
         &self.installed
     }
-
-    fn slot(&self, slot: Slot) -> Result<layout::Slot, CageError> {
-        layout::Slot::new(slot.get()).ok_or(err(code::PLAN))
-    }
-
-    fn ctx(&self, slot: Slot) -> Option<Pa> {
-        self.plan.ctx_pa(layout::Slot::new(slot.get())?).ok()
-    }
-
-    fn built(&self, slot: Slot) -> Option<Built> {
-        self.built.get(slot.get()).copied().flatten()
-    }
-
-    /// Leest woord `off` van de control-page van `slot`, vers uit DRAM: de
-    /// app schrijft hem met de MMU uit, wij lezen hem gecached.
-    fn ctrl_read(&self, slot: Slot, off: u64) -> u64 {
-        self.built(slot).map_or(0, |b| {
-            dev::pull(b.ctrl.add(off), 8);
-            dev::read64(b.ctrl.add(off))
-        })
-    }
-
-    fn ctrl_write(&self, slot: Slot, off: u64, v: u64) {
-        if let Some(b) = self.built(slot) {
-            dev::write64(b.ctrl.add(off), v);
-            dev::push(b.ctrl.add(off), 8);
-        }
-    }
-
-    /// De ctx-staat van `slot`, voor de metingen van de boot-plaatsing.
-    pub(crate) fn ctx_state(&self, slot: Slot) -> Option<CtxState> {
-        el2::ctx_state(self.ctx(slot)?)
-    }
-
-    /// De control-page, de ringen en de ctx-woorden van een verse bewoner
-    /// (het schrijfwerk van `armSlot`, zonder de switch en de mounts).
-    fn arm_tail(
-        &self,
-        s: layout::Slot,
-        tail: Tail,
-        l1: Pa,
-        entry: u64,
-        core: layout::Core,
-        cores: usize,
-    ) -> Result<(), CageError> {
-        let mbox = self.plan.park_mbox_pa(core).map_err(|_| err(code::PLAN))?;
-        // Geen veeg van de page: de claim wiste de partitie al (E3), en een
-        // stream via de system-API legde de env (CTRL_ENV_LEN, CTRL_ENV_DATA)
-        // er vóór de Arm al op. Alleen de woorden van de kern.
-        let ctrl = tail.ctrl_page();
-        for (off, v) in [
-            (CTRL_ENTRY, entry),
-            (CTRL_S2_TABLE, l1.0),
-            (CTRL_VEC_PA, self.plan.vec_base_pa().0),
-            (CTRL_SLOT, s.get() as u64),
-            (CTRL_MBOX_PA, mbox.0),
-            (CTRL_CORES, cores as u64),
-            (CTRL_STATUS, AppStatus::Booting as u64),
-            // De wandklok vóór de start, zoals de Go-kern: Hop stempelt
-            // zijn taken ermee vanaf zijn eerste regel (clock.rs).
-            (CTRL_WALL_OFF, crate::clock::offset()),
-            (CTRL_IDLE_MODE, APP_IDLE_MODE),
-        ] {
-            dev::write64(ctrl.add(off), v);
-        }
-        // Het zaad vóór de start: de app mengt het bij zijn eerste
-        // willekeur (applib::rand, seed.rs).
-        crate::seed::plant(ctrl);
-        // De hele verse page naar DRAM: de trampoline leest hem met de MMU
-        // uit, langs elke cache heen.
-        dev::push(ctrl, CTRL_STRIDE as usize);
-        for (base, cap) in [
-            (tail.outbox(), RING_DATA_CAP),
-            (tail.net_tx(), NET_RING_DATA_CAP),
-            (tail.net_rx(), NET_RING_DATA_CAP),
-        ] {
-            ring::init(base, cap).map_err(|e| {
-                println!("cage: slot {s}: ring at {:#x}: {e} HOPOS_CAGE_RING", base.0);
-                err(code::RING)
-            })?;
-        }
-        let ctx = self.plan.ctx_pa(s).map_err(|_| err(code::PLAN))?;
-        el2::arm_context(ctx, ctrl, s, tail.net_rx().0 + ring::HEAD_OFF);
-        dev::mb();
-        attach(s, tail);
-        Ok(())
-    }
 }
 
-// FLIP: de adoptie na een kern-flip (hopos/src/flip.rs).
-impl ArmCage {
-    /// Neemt de zittende kooi-regio over: de switch-code moet dezelfde som
-    /// hebben als de onze (`cpu::el2::adopt`), en er wordt niets
-    /// geschreven, want er draaien cores in.
-    pub(crate) fn adopt(plan: Plan) -> Result<ArmCage, el2::Error> {
-        let installed = el2::adopt(&plan, FLAVOR)?;
-        Ok(ArmCage {
-            plan,
-            installed,
-            built: [None; SLOT_CAP + 1],
-        })
-    }
-
-    /// Geeft een levende bewoner zijn plek in de lijm terug: de
-    /// control-page, de core en de SMP-breedte `cores` (voor status, stop,
-    /// klok en de secundaires bij een revoke), en zijn frame-ringen aan de
-    /// switch van deze kern. Zonder ring-init: de indexen staan in de ring
-    /// zelf, en de app schrijft er nog in. De breedte komt uit het
-    /// handoff-blob (de kern schreef het, niet de app), dus hij is even
-    /// vertrouwd als die van de bouw.
-    pub(crate) fn adopt_slot(
-        &mut self,
-        slot: Slot,
-        part: Region,
-        core: usize,
-        cores: usize,
-    ) -> Result<(), CageError> {
-        let s = self.slot(slot)?;
-        let c = layout::Core::new(core).ok_or(err(code::PLAN))?;
-        let tail = tail_of(part).ok_or(err(code::TAIL))?;
-        let ctrl = tail.ctrl_page();
-        dev::pull(ctrl.add(CTRL_ENTRY), 8);
-        let entry = dev::read64(ctrl.add(CTRL_ENTRY));
-        let l1 = self.plan.cage_table_pa(s).map_err(|_| err(code::PLAN))?;
-        if let Some(b) = self.built.get_mut(slot.get()) {
-            *b = Some(Built {
-                ctrl,
-                core: c,
-                entry,
-                part,
-                l1,
-                cores: cores.max(1),
-            });
-        }
-        // De OS-core: de nieuwe kern geeft Hop de core weer in zijn idle.
-        // Het plan (en dus de bewonerslijst van sched-blok 0) overleefde de
-        // flip ongeschreven; staat hij er toch niet meer in, dan terug, met
-        // zijn bewaarde staat.
-        if core == 0 {
-            let ctx = self.plan.ctx_pa(s).map_err(|_| err(code::PLAN))?;
-            match el2::rehost(&self.plan, ctx) {
-                Ok(again) => println!(
-                    "cage: slot {slot} back in the OS core rotation (re-added: {again}) HOPOS_OS_HOST"
-                ),
-                Err(e) => {
-                    println!(
-                        "cage: slot {slot} not back on the OS core: {e} HOPOS_FLIP_ADOPT_FAIL"
-                    );
-                    return Err(err(code::DISPATCH));
-                }
-            }
-        }
-        attach(s, tail);
-        crate::clock::attach(slot, ctrl);
-        // Vers zaad van déze kern; de generatie telt door vanaf die van de
-        // vorige, dus de bewoner ziet hem als nieuw (seed.rs).
-        crate::seed::plant(ctrl);
-        println!(
-            "cage: slot {slot} adopted: part {:#x}+{:#x}, ctrl {:#x}, core {core}, entry {entry:#x}",
-            part.base, part.size, ctrl.0
-        );
-        Ok(())
-    }
-}
-
-impl Cage for ArmCage {
-    fn clear(&mut self, base: u64, len: u64) {
-        let Ok(n) = usize::try_from(len) else { return };
-        // Eerst de regels van de vorige huurder weg (clean + invalidate,
-        // `dc civac` gaat naar het hele inner-shareable domein): die draaide
-        // cacheable op deze fysieke regels, en waar de kern de pool Device
-        // ziet (Apple, rk3566) gaan de nullen langs de cache. Een vuile regel
-        // die later evict, klobbert dan de verse bytes (Go `slots.Scrub`:
-        // CleanInv, Clear, Push; op de A76 gemeten 10-07).
-        dev::pull(Pa(base), n);
-        dev::clear(Pa(base), n);
-        // Naar DRAM: de nieuwe eigenaar leest zijn partitie ongecached.
-        dev::push(Pa(base), n);
-    }
-
-    fn build(
-        &mut self,
-        slot: Slot,
-        part: Region,
-        entry: u64,
-        first: Core,
-        cores: usize,
-    ) -> Result<(), CageError> {
-        let s = self.slot(slot)?;
-        let core = layout::Core::new(first.get()).ok_or(err(code::PLAN))?;
-        let tail = tail_of(part).ok_or(err(code::TAIL))?;
-        let block = self.plan.cage_table_pa(s).map_err(|_| err(code::PLAN))?;
-        // Eerst uit elke oude bewonerslijst (een vorige levensduur op een
-        // gedeelde core laat een dode byte achter), vóór enige staatswissel
-        // van deze levensduur: zie `el2::forget` en de hercontrole van de
-        // rotatie.
-        el2::forget(&self.plan, s).map_err(|e| {
-            println!("cage: slot {slot}: resident lists: {e} HOPOS_CAGE_ROSTER");
-            err(code::ROSTER)
+/// Zet de switch-code in de plan-regio en de app-cores klaar (vectoren,
+/// parkeerlus, sched-blokken, lege ctx-staten). Eén keer bij boot, vóór de
+/// eerste dispatch; er leven nog geen bewoners.
+pub(crate) fn new(plan: Plan) -> Result<SlotCage, el2::Error> {
+    let installed = el2::install_switch_code(&plan, FLAVOR)?;
+    el2::init_app_cores(&plan, &installed, false)?;
+    // De boot-core, als de kern bij boot naar de OS-core verhuisde (main,
+    // `hopos.oscore`): nu is er een parkeerlus, en wordt hij een
+    // geparkeerde app-core, vóór de eerste dispatch.
+    if let Some(m) = el2::held() {
+        let phys = vboard::slots::core_of(m);
+        let core = plan.logical_core(phys).ok_or(el2::Error::UnparkedCore {
+            core: phys,
+            mbox: 0,
         })?;
-        let l1 = el2::stage2::build(block, LINK_BASE, part.base, part.size).map_err(|e| {
-            println!("cage: slot {slot}: stage-2 refused: {e} HOPOS_CAGE_STAGE2");
+        el2::release_held(&plan, core)?;
+        println!("oscore: boot core {phys} parked as app core {core} HOPOS_OSCORE_PARKED");
+    }
+    Ok(Kooi::new(plan, Arm { installed }))
+}
+
+/// FLIP: neemt de zittende kooi-regio over (hopos/src/flip.rs): de
+/// switch-code moet dezelfde som hebben als de onze (`cpu::el2::adopt`), en
+/// er wordt niets geschreven, want er draaien cores in. De bewoners zelf
+/// komen terug met `Kooi::adopt_slot`.
+pub(crate) fn adopt(plan: Plan) -> Result<SlotCage, el2::Error> {
+    let installed = el2::adopt(&plan, FLAVOR)?;
+    Ok(Kooi::new(plan, Arm { installed }))
+}
+
+/// De MPIDR-affiniteit van logische `core`, zoals de switcher hem bij een
+/// yield in `CTX_KICK_TARGET` zet (aff0..aff2).
+fn affinity(plan: &Plan, core: layout::Core) -> u64 {
+    mpidr(plan.phys_core(core)) & 0xFF_FFFF
+}
+
+impl Isa for Arm {
+    const MAX_CORES: usize = SMP_MAX;
+    // De switcher wisselt alleen op een yield: een buur die rekent, houdt
+    // de core tot de kern hem offert (`kern::slots::RECLAIM_WAIT`).
+    const TIME_SLICE: bool = false;
+    const PARKS: bool = true;
+    // `dc civac` gaat naar het hele inner-shareable domein: de vorige
+    // huurder draaide cacheable op deze fysieke regels, en waar de kern de
+    // pool Device ziet (Apple, rk3566) gaan de nullen langs de cache (op de
+    // A76 gemeten 10-07).
+    const SCRUB: bool = true;
+
+    /// De stage-2-tabel van de kooi in zijn kooiblok (dat ook het ctx-blok
+    /// wist), de woorden van de trampoline op de control-page, en de
+    /// contexten van een SMP-eenheid (`prepareSMPContexts`): per secundaire
+    /// een gewist ctx-blok op zijn eigen core, en de vertrouwde wek-keten
+    /// rond. Eén core: de keten van een vorige SMP-levensduur van dit slot
+    /// gaat eraf. Het wekdoel van ook de primaire staat er meteen: een
+    /// secundaire die de primaire wekt (HVC #4) vóór diens eerste yield,
+    /// vond hem anders niet in de keten, en die wek was dan verloren tot de
+    /// wektijd.
+    fn build(&self, plan: &Plan, b: &Built) -> Result<u64, CageError> {
+        let (s, ctx) = (b.s, b.ctx);
+        let block = plan.cage_table_pa(s).map_err(|_| err(code::PLAN))?;
+        let mbox = plan.park_mbox_pa(b.core).map_err(|_| err(code::PLAN))?;
+        let l1 = el2::stage2::build(block, LINK_BASE, b.part.base, b.part.size).map_err(|e| {
+            println!("cage: slot {s}: stage-2 refused: {e} HOPOS_CAGE_STAGE2");
             err(code::CAGE)
         })?;
-        self.arm_tail(s, tail, l1, entry, core, cores)?;
-        self.arm_smp(s, tail.ctrl_page(), core, cores)?;
-        if let Some(b) = self.built.get_mut(slot.get()) {
-            *b = Some(Built {
-                ctrl: tail.ctrl_page(),
-                core,
-                entry,
-                part,
-                l1,
-                cores,
-            });
+        // Op de OS-core is idle een yield: WFE op EL1 zou de hele core laten
+        // slapen, en op QEMU spinnen tot de volgende interrupt. Zijn eerste
+        // beurt legt de kern zelf klaar: geen trampoline.
+        let os = b.core.get() == 0;
+        if os {
+            el2::prepare(ctx, b.entry, b.ctrl.0);
         }
-        crate::clock::attach(slot, tail.ctrl_page());
+        for (off, v) in [
+            (CTRL_S2_TABLE, l1.0),
+            (CTRL_VEC_PA, plan.vec_base_pa().0),
+            (CTRL_MBOX_PA, mbox.0),
+            (CTRL_IDLE_MODE, if os { IDLE_YIELD } else { APP_IDLE_MODE }),
+        ] {
+            dev::write64(b.ctrl.add(off), v);
+        }
+        // Nog geen wekdoel. Niet nul maar `CTX_KICK_NONE`: nul is fysieke
+        // core 0, en dat gaf de O6N-hang van 21-09.
+        el2::ctx_write(ctx, CTX_KICK_TARGET, CTX_KICK_NONE);
+        if b.cores <= 1 {
+            el2::chain(&[ctx]);
+            return Ok(l1.0);
+        }
+        let mut ring = [ctx; SMP_MAX];
+        for (k, x) in ring.iter_mut().enumerate().take(b.cores).skip(1) {
+            let c = layout::Core::new(b.core.get() + k).ok_or(err(code::SPAN))?;
+            *x = el2::prepare_secondary(plan, c, s, b.ctrl, affinity(plan, c)).map_err(|e| {
+                println!("cage: slot {s}: SMP context on core {c}: {e} HOPOS_CAGE_SMP");
+                err(code::SPAN)
+            })?;
+        }
+        el2::ctx_write(ctx, CTX_KICK_TARGET, affinity(plan, b.core));
+        el2::chain(ring.get(..b.cores).unwrap_or(&[]));
         println!(
-            "cage: slot {slot} built: part {:#x}+{:#x} -> ipa {LINK_BASE:#x}, l1 {:#x}, ctrl {:#x}, core {core}",
-            part.base,
-            part.size,
-            l1.0,
-            tail.ctrl_page().0
+            "cage: slot {s}: {} cores from core {}, contexts chained HOPOS_CAGE_SMP",
+            b.cores, b.core
         );
-        Ok(())
+        Ok(l1.0)
     }
 
-    fn dispatch(&mut self, slot: Slot, core: Core) -> Result<(), CageError> {
-        let b = self.built(slot).ok_or(err(code::NOT_BUILT))?;
-        let s = self.slot(slot)?;
-        let c = layout::Core::new(core.get()).ok_or(err(code::PLAN))?;
-        let ctx = self.plan.ctx_pa(s).map_err(|_| err(code::PLAN))?;
-        let tramp = self.installed.tramp;
-        let phys = self.plan.phys_core(c);
-        // De startregel van elke levensduur, welke weg hij ook kwam (de
-        // boot-plaatsing of `STREAM_IMAGE` van Hop): hier, want dit is de
-        // ene plek waar elke start langskomt. `core` is logisch (0 = de
-        // OS-core), `cpu` fysiek.
-        let started = || {
-            println!(
-                "HOPOS_SLOT_START slot={slot} core={core} cpu={phys} entry={:#x} part={:#x}+{:#x}",
-                b.entry, b.part.base, b.part.size
-            );
-        };
-        if core == Core::OS {
-            return self.host(slot, ctx, b, phys, started);
-        }
-        // Een app-core: stond dit slot ooit op de OS-core, dan niet meer.
-        let _ = el2::unhost(&self.plan, ctx);
+    fn start(&self, plan: &Plan, b: &Built) -> Result<(), CageError> {
+        let (slot, c, ctx, tramp) = (b.s, b.core, b.ctx, self.installed.tramp);
+        let phys = plan.phys_core(c);
         // Draait de core al (een buur uit dezelfde sharegroup), dan komt de
         // kooi erbij in de rotatie; anders is het een gewoon startschot.
-        if matches!(el2::core_state(&self.plan, c), Ok(CoreState::Running(_))) {
-            match self.join(slot, c, ctx, tramp, b.ctrl) {
-                Ok(true) => {
-                    started();
-                    return Ok(());
-                }
-                Ok(false) => {} // De core parkeerde: het startschot hieronder.
-                Err(e) => return Err(e),
-            }
+        if matches!(el2::core_state(plan, c), Ok(CoreState::Running(_))) && join(plan, b, tramp)? {
+            return Ok(());
         }
-        match el2::dispatch(&self.plan, c, ctx, tramp, b.ctrl.0) {
+        match el2::dispatch(plan, c, ctx, tramp, b.ctrl.0) {
             Ok(Start::Woken) => {
-                println!("cage: slot {slot} dispatched to parked core {core} (mailbox + SEV)");
-                started();
+                println!("cage: slot {slot} dispatched to parked core {c} (mailbox + SEV)");
                 Ok(())
             }
             Ok(Start::Cold) => {
-                // De eerste opgang van deze core: CPU_ON rechtstreeks
-                // de trampoline in, x0 = de control-page. Daarna leeft hij
-                // in de parkeerlus van HopOS en gaat elke dispatch via de
-                // mailbox.
+                // De eerste opgang van deze core: CPU_ON rechtstreeks de
+                // trampoline in, x0 = de control-page. Daarna leeft hij in de
+                // parkeerlus van HopOS en gaat elke dispatch via de mailbox.
                 let target = mpidr(phys);
                 let r = cpu::smp::cpu_on(target, tramp.0, b.ctrl.0);
                 println!(
-                    "cage: slot {slot} core {core} cold: CPU_ON mpidr={target:#x} entry={:#x} x0={:#x} -> {r:?}",
+                    "cage: slot {slot} core {c} cold: CPU_ON mpidr={target:#x} entry={:#x} x0={:#x} -> {r:?}",
                     tramp.0, b.ctrl.0
                 );
                 match r {
-                    Ok(()) => {
-                        started();
-                        Ok(())
-                    }
+                    Ok(()) => Ok(()),
                     // Geweigerd vóór de core aanging: hij liep zeker niet.
                     // De mailbox weer koud, zodat de kern de partitie mag
                     // teruggeven in plaats van haar in quarantaine te zetten.
-                    Err(e) if e.is_refusal() && el2::unwind_cold(&self.plan, c, ctx).is_ok() => {
+                    Err(e) if e.is_refusal() && el2::unwind_cold(plan, c, ctx).is_ok() => {
                         Err(err(code::PSCI_REFUSED + e.code().unsigned_abs() as u32))
                     }
                     Err(e) => Err(err(code::PSCI + e.code().unsigned_abs() as u32)),
                 }
             }
             Err(e) => {
-                println!("cage: slot {slot} core {core}: {e} HOPOS_CAGE_DISPATCH");
+                println!("cage: slot {slot} core {c}: {e} HOPOS_CAGE_DISPATCH");
                 Err(err(code::DISPATCH))
             }
         }
     }
 
-    fn dispatch_secondary(&mut self, slot: Slot, core: Core) -> Result<(), CageError> {
-        let b = self.built(slot).ok_or(err(code::NOT_BUILT))?;
-        let s = self.slot(slot)?;
-        let c = layout::Core::new(core.get()).ok_or(err(code::PLAN))?;
-        // De kern gaf de breedte al tegen zijn eigen boekhouding (nooit de
-        // page); hier alleen nog de vorm: een secundaire is een andere core
-        // van de span, nooit de OS-core.
-        let span = b.core.get()..b.core.get() + b.cores;
-        if core == Core::OS || c == b.core || !span.contains(&c.get()) {
-            println!(
-                "cage: slot {slot}: SMP core {core} outside span {}..{} HOPOS_SMP_DISPATCH_FAIL",
-                span.start, span.end
-            );
-            return Err(err(code::SPAN));
-        }
-        let ctx = self.plan.smp_ctx_pa(c).map_err(|_| err(code::PLAN))?;
-        let mbox = self.plan.park_mbox_pa(c).map_err(|_| err(code::PLAN))?;
+    fn start_secondary(&self, plan: &Plan, b: &Built, c: layout::Core) -> Result<(), CageError> {
+        let (slot, s) = (b.s, b.s);
+        let ctx = plan.smp_ctx_pa(c).map_err(|_| err(code::PLAN))?;
+        let mbox = plan.park_mbox_pa(c).map_err(|_| err(code::PLAN))?;
+        let l1 = plan.cage_table_pa(s).map_err(|_| err(code::PLAN))?;
         // De handoff is node-owned: de EL1-staat komt van de page van de app,
         // al het EL2-gezag (tabel, VMID, mailbox, vectoren) van hier. Na de
         // kopie kan de app hem niet meer veranderen.
@@ -531,17 +320,17 @@ impl Cage for ArmCage {
         el2::prepare_smp(
             handoff,
             b.ctrl,
-            b.l1.0,
+            l1.0,
             s.get() as u64,
             mbox,
-            self.plan.vec_base_pa(),
+            plan.vec_base_pa(),
         );
         let tramp = self.installed.smp_tramp;
-        let phys = self.plan.phys_core(c);
-        match el2::dispatch(&self.plan, c, ctx, tramp, handoff.0) {
+        let phys = plan.phys_core(c);
+        match el2::dispatch(plan, c, ctx, tramp, handoff.0) {
             Ok(Start::Woken) => {
                 println!(
-                    "cage: slot {slot} SMP core {core} (cpu {phys}) dispatched to parked core HOPOS_SMP_CORE"
+                    "cage: slot {slot} SMP core {c} (cpu {phys}) dispatched to parked core HOPOS_SMP_CORE"
                 );
                 Ok(())
             }
@@ -549,309 +338,32 @@ impl Cage for ArmCage {
                 let target = mpidr(phys);
                 let r = cpu::smp::cpu_on(target, tramp.0, handoff.0);
                 println!(
-                    "cage: slot {slot} SMP core {core} (cpu {phys}) cold: CPU_ON mpidr={target:#x} -> {r:?} HOPOS_SMP_CORE"
+                    "cage: slot {slot} SMP core {c} (cpu {phys}) cold: CPU_ON mpidr={target:#x} -> {r:?} HOPOS_SMP_CORE"
                 );
                 r.map_err(|e| err(code::PSCI + e.code().unsigned_abs() as u32))
             }
             Err(e) => {
-                println!("cage: slot {slot} SMP core {core}: {e} HOPOS_SMP_DISPATCH_FAIL");
+                println!("cage: slot {slot} SMP core {c}: {e} HOPOS_SMP_DISPATCH_FAIL");
                 Err(err(code::DISPATCH))
             }
         }
     }
 
-    fn request_exit(&mut self, slot: Slot) {
-        // Elke stop begint hier: eerst van de switch af, dan de kill-vlag.
-        detach(slot);
-        self.ctrl_write(slot, CTRL_KILL, 1);
-        // Een buur die alleen overblijft, hoeft niet meer te yielden.
-        if let Some(b) = self.built(slot) {
-            self.refresh_shared(b.core, Some(slot));
-        }
-    }
-
-    fn quiet(&self, slot: Slot, core: Core) -> bool {
-        let dead = matches!(self.ctx_state(slot), Some(CtxState::Empty | CtxState::Dead));
-        if core == Core::OS {
-            // De OS-core parkeert nooit (de kern draait er); stil is dood,
-            // of niet meer in zijn rotatie.
-            return dead || !self.ctx(slot).is_some_and(|c| el2::hosts(&self.plan, c));
-        }
-        let Some(c) = layout::Core::new(core.get()) else {
-            return false;
-        };
-        let parked = el2::core_state(&self.plan, c)
-            .is_ok_and(|st| matches!(st, CoreState::Cold | CoreState::Parked));
-        // De primaire is de context van de kooi; elke andere core van de
-        // span is een secundaire met een eigen ctx-blok. Tot 30-09 las dit
-        // voor elke core de staat van de primaire: een SMP-app waarvan de
-        // primaire al dood was, telde zo een secundaire die nog draaide als
-        // stil (E9).
-        if self.built(slot).is_none_or(|b| b.core == c) {
-            return dead || parked;
-        }
-        let sec_dead = self
-            .plan
-            .smp_ctx_pa(c)
-            .is_ok_and(|x| matches!(el2::ctx_state(x), Some(CtxState::Empty | CtxState::Dead)));
-        sec_dead || parked
-    }
-
-    fn live(&self, slot: Slot) -> bool {
-        matches!(
-            self.ctx_state(slot),
-            Some(CtxState::Running | CtxState::Saved | CtxState::BootPending)
-        )
-    }
-
-    fn revoke(&mut self, slot: Slot) {
-        crate::clock::detach(slot);
-        let Ok(s) = self.slot(slot) else { return };
-        if let Err(e) = el2::revoke(&self.plan, s) {
+    /// De tabel nul en de TLBI (met de SEV voor de WFE-slapers): elke core
+    /// van het slot faultt op zijn volgende vertaalde toegang. Daarna elke
+    /// context van een app-core uit zijn rotatie: een geyielde context met
+    /// een verre wektijd hervatte anders pas op die wektijd en voelde de
+    /// intrekking zo lang niet; dan liep de stop in quarantaine terwijl er
+    /// niets meer draaide (`el2::evict`). Op de OS-core doet de rotatie van
+    /// de kern dat (`el2::next`).
+    fn revoke(&self, plan: &Plan, slot: layout::Slot, b: Option<&Built>) {
+        if let Err(e) = el2::revoke(plan, slot) {
             println!("cage: slot {slot}: revoke: {e} HOPOS_CAGE_REVOKE");
         }
-        self.evict_all(slot);
-        // Op de OS-core is de kern de enige die een bewoner de core geeft:
-        // uit de rotatie is een bevestigd einde, ook voor een bewoner die
-        // met een verre wektijd lag te slapen en de intrekking nooit zou
-        // voelen.
-        if let Some(ctx) = self.ctx(slot)
-            && el2::unhost(&self.plan, ctx).unwrap_or(false)
-        {
-            el2::ctx_write(ctx, layout::CTX_STATE, CtxState::Dead.raw());
-            println!("cage: slot {slot}: out of the OS core rotation HOPOS_OS_UNHOST");
-        }
-    }
-
-    fn pending(&self, slot: Slot) -> bool {
-        self.built(slot).is_some_and(|b| b.core.get() != 0)
-            && self.ctx_state(slot) == Some(CtxState::BootPending)
-    }
-
-    fn holder(&self, core: Core) -> Option<Slot> {
-        // Het sched-blok is Device gemapt: geen veeg nodig. Een secundaire
-        // SMP-context (een id boven SLOT_CAP) is geen kooi om te offeren.
-        let c = layout::Core::new(core.get()).filter(|_| core != Core::OS)?;
-        let mb = self.plan.park_mbox_pa(c).ok()?;
-        Slot::new(usize::try_from(dev::read64(mb.add(SCHED_CURRENT))).ok()?)
-    }
-
-    fn smp_request(&self, slot: Slot) -> u64 {
-        self.ctrl_read(slot, CTRL_SMP_REQ)
-    }
-
-    fn clear_smp_request(&mut self, slot: Slot) {
-        self.ctrl_write(slot, CTRL_SMP_REQ, 0);
-    }
-
-    fn status(&self, slot: Slot) -> Status {
-        // Op de OS-core staat de core altijd aan; de vraag is of de bewoner
-        // er nog in de rotatie staat.
-        let core_on = self.built(slot).is_some_and(|b| {
-            if b.core.get() == 0 {
-                self.ctx(slot).is_some_and(|c| el2::hosts(&self.plan, c))
-            } else {
-                // Op een app-core de context van DEZE kooi, zoals de
-                // RISC-V-kooi: een gedeelde core draait door zolang er een
-                // buur leeft (Hop las een lid dat al exit deed als draaiend,
-                // 30-09), en hij slaapt zodra elk lid yieldt. Dat slapen is
-                // geen exit: met de core-toestand erbij las Hop een
-                // slapende controller in een sharegroup als gestopt en
-                // herplaatste hem acht keer per boot (02-10, qemu-controller
-                // met STULP_QEMU_BUNDLE=1). De ctx-staat van de kooi zegt
-                // of de bewoner leeft; de mailbox van de core zegt alleen
-                // wie er nu aan de beurt is.
-                self.live(slot)
-            }
-        });
-        Status {
-            core_on,
-            app: self.ctrl_read(slot, CTRL_STATUS),
-            exit_code: self.ctrl_read(slot, CTRL_EXIT_CODE),
-            heartbeat: self.ctrl_read(slot, CTRL_HEARTBEAT),
-            ram_size: self.ctrl_read(slot, CTRL_RAM_SIZE),
-            mem_sys: self.ctrl_read(slot, CTRL_MEM_SYS),
-            idle_ns: idle_ns(self.ctrl_read(slot, CTRL_IDLE)),
-            wakes: self.ctrl_read(slot, CTRL_WAKES),
-            cores: self.ctrl_read(slot, CTRL_CORES),
-            at_ns: cpu::idle::now(),
-            fault_vec: self.ctrl_read(slot, CTRL_FAULT_VEC),
-            fault_esr: self.ctrl_read(slot, CTRL_FAULT_ESR),
-            fault_far: self.ctrl_read(slot, CTRL_FAULT_FAR),
-            app_fault_vec: self.ctrl_read(slot, CTRL_APP_FAULT_VEC),
-            app_fault_esr: self.ctrl_read(slot, CTRL_APP_FAULT_ESR),
-            app_fault_elr: self.ctrl_read(slot, CTRL_APP_FAULT_ELR),
-            app_fault_far: self.ctrl_read(slot, CTRL_APP_FAULT_FAR),
-        }
-    }
-
-    fn publish(
-        &mut self,
-        slot: Slot,
-        ports: &[u16],
-    ) -> impl Future<Output = Result<(), PortError>> {
-        publish_ports(slot, ports)
-    }
-
-    fn unpublish(&mut self, slot: Slot) {
-        unpublish_ports(slot);
-    }
-}
-
-// SMP-apps en sharegroups op de app-cores (30-09).
-impl ArmCage {
-    /// De MPIDR-affiniteit van logische `core`, zoals de switcher hem bij
-    /// een yield in `CTX_KICK_TARGET` zet (aff0..aff2).
-    fn affinity(&self, core: layout::Core) -> u64 {
-        mpidr(self.plan.phys_core(core)) & 0xFF_FFFF
-    }
-
-    /// De contexten van een SMP-eenheid vóór de eerste dispatch
-    /// (`prepareSMPContexts`): per secundaire een gewist ctx-blok op zijn
-    /// eigen core, en de vertrouwde wek-keten rond. Eén core: de keten van
-    /// een vorige SMP-levensduur van dit slot gaat eraf.
-    ///
-    /// Het wekdoel van ook de primaire staat er meteen: een secundaire die
-    /// de primaire wekt (HVC #4) vóór diens eerste yield, vond hem anders
-    /// niet in de keten, en die wek was dan verloren tot de wektijd.
-    fn arm_smp(
-        &self,
-        s: layout::Slot,
-        ctrl: Pa,
-        core: layout::Core,
-        cores: usize,
-    ) -> Result<(), CageError> {
-        let prim = self.plan.ctx_pa(s).map_err(|_| err(code::PLAN))?;
-        if cores <= 1 {
-            el2::chain(&[prim]);
-            return Ok(());
-        }
-        if cores > SMP_MAX {
-            println!("cage: slot {s}: {cores} cores, the chain carries {SMP_MAX} HOPOS_CAGE_SMP");
-            return Err(err(code::SPAN));
-        }
-        let mut ring = [prim; SMP_MAX];
-        let n = cores;
-        for (k, slot) in ring.iter_mut().enumerate().take(n).skip(1) {
-            let c = layout::Core::new(core.get() + k).ok_or(err(code::SPAN))?;
-            *slot =
-                el2::prepare_secondary(&self.plan, c, s, ctrl, self.affinity(c)).map_err(|e| {
-                    println!("cage: slot {s}: SMP context on core {c}: {e} HOPOS_CAGE_SMP");
-                    err(code::SPAN)
-                })?;
-        }
-        el2::ctx_write(prim, CTX_KICK_TARGET, self.affinity(core));
-        el2::chain(ring.get(..n).unwrap_or(&[]));
-        println!("cage: slot {s}: {n} cores from core {core}, contexts chained HOPOS_CAGE_SMP");
-        Ok(())
-    }
-
-    /// Zet `slot` erbij op de draaiende app-core `c` (een sharegroup) en
-    /// wacht kort tot de rotatie hem oppikt. `Ok(false)`: de core staat
-    /// stil, en het is een gewoon startschot.
-    ///
-    /// De park-race uit share.go: de rotatie las de lijst nét vóór onze
-    /// append, zag niemand meer, en parkeert. Dan pikt niemand de
-    /// boot-pending bewoner op, en ziet deze wacht de core geparkeerd: dan
-    /// alsnog het mailbox-startschot, en dat is dan het enige (de
-    /// parkeerlus leest geen lijst). Ziet de wacht niets binnen
-    /// [`JOIN_WAIT_NS`], dan rekent de buur, en wacht de lifecycle verder
-    /// (`Cage::pending`).
-    fn join(
-        &self,
-        slot: Slot,
-        c: layout::Core,
-        ctx: Pa,
-        tramp: Pa,
-        ctrl: Pa,
-    ) -> Result<bool, CageError> {
-        let joined = el2::join(&self.plan, c, ctx, tramp, ctrl.0).map_err(|e| {
-            println!("cage: slot {slot} on shared core {c}: {e} HOPOS_CAGE_DISPATCH");
-            err(code::ROSTER)
-        })?;
-        if joined == Join::Idle {
-            return Ok(false);
-        }
-        el2::kick(FLAVOR, mpidr(self.plan.phys_core(c)));
-        let t0 = cpu::idle::now();
-        let mut parked = false;
-        let seen = dev::poll_until(cpu::idle::now, JOIN_WAIT_NS, || {
-            if el2::ctx_state(ctx) != Some(CtxState::BootPending) {
-                return true;
-            }
-            parked = matches!(el2::core_state(&self.plan, c), Ok(CoreState::Parked));
-            parked
-        });
-        let picked = seen.then_some(!parked);
-        let mut others = 0usize;
-        let _ = el2::residents(&self.plan, c, |id| {
-            if usize::from(id) != slot.get() {
-                others += 1;
-            }
-        });
-        match picked {
-            Some(false) => {
-                println!(
-                    "cage: slot {slot}: shared core {c} parked while it joined, dispatching HOPOS_SHARE_JOIN"
-                );
-                return Ok(false);
-            }
-            Some(true) => println!(
-                "cage: slot {slot} joined shared core {c} next to {others} resident(s), up in {} us HOPOS_SHARE_JOIN",
-                cpu::idle::now().saturating_sub(t0) / 1000
-            ),
-            None => println!(
-                "cage: slot {slot} waits on shared core {c}: a neighbour has not yielded in {} ms HOPOS_SHARE_PENDING",
-                JOIN_WAIT_NS / 1_000_000
-            ),
-        }
-        self.refresh_shared(c, None);
-        Ok(true)
-    }
-
-    /// Zet `CTRL_SHARED` van elke levende bewoner van app-core `c`: 1 als er
-    /// twee of meer zijn (hun idle yieldt dan, zodat de buren draaien),
-    /// anders 0 (share.go `refreshShared`). `leaving` telt niet meer mee:
-    /// die is gevraagd te stoppen. De kern is de enige schrijver van dit
-    /// woord; de app leest het alleen.
-    fn refresh_shared(&self, c: layout::Core, leaving: Option<Slot>) {
-        if c.get() == 0 {
+        let Some(b) = b.filter(|b| b.core.get() != 0) else {
             return;
-        }
-        let mut live = [0u8; SHARE_SCAN];
-        let mut n = 0;
-        let _ = el2::residents(&self.plan, c, |id| {
-            let cage = usize::from(id);
-            let Some(slot) = Slot::new(cage).filter(|s| Some(*s) != leaving) else {
-                return;
-            };
-            if self.live(slot)
-                && let Some(x) = live.get_mut(n)
-            {
-                *x = id;
-                n += 1;
-            }
-        });
-        let shared = u64::from(n >= 2);
-        for id in live.iter().take(n) {
-            if let Some(slot) = Slot::new(usize::from(*id)) {
-                self.ctrl_write(slot, CTRL_SHARED, shared);
-            }
-        }
-    }
-
-    /// Haalt elke context van `slot` uit de rotatie van zijn core(s), na de
-    /// intrekking: de primaire van zijn core, elke secundaire van de zijne.
-    /// Een geyielde context met een verre wektijd hervatte anders pas op
-    /// die wektijd en voelde de intrekking zo lang niet; dan liep de stop
-    /// in quarantaine terwijl er niets meer draaide (`el2::evict`).
-    fn evict_all(&self, slot: Slot) {
-        let Some(b) = self.built(slot) else { return };
-        if b.core.get() == 0 {
-            return; // De OS-core: `unhost`, hieronder in `revoke`.
-        }
-        let Some(prim) = self.ctx(slot) else { return };
-        if let Err(e) = el2::evict(&self.plan, b.core, prim) {
+        };
+        if let Err(e) = el2::evict(plan, b.core, b.ctx) {
             println!(
                 "cage: slot {slot}: evict from core {}: {e} HOPOS_CAGE_REVOKE",
                 b.core
@@ -861,118 +373,88 @@ impl ArmCage {
             let Some(c) = layout::Core::new(b.core.get() + k) else {
                 break;
             };
-            if let Ok(x) = self.plan.smp_ctx_pa(c)
-                && let Err(e) = el2::evict(&self.plan, c, x)
+            if let Ok(x) = plan.smp_ctx_pa(c)
+                && let Err(e) = el2::evict(plan, c, x)
             {
                 println!("cage: slot {slot}: evict SMP core {c}: {e} HOPOS_CAGE_REVOKE");
             }
         }
-        self.refresh_shared(b.core, Some(slot));
-    }
-}
-
-/// De grootste SMP-eenheid die de lijm aan elkaar ketent: meer dan de
-/// app-cores van elk board dat we hebben (de O6N: 12).
-const SMP_MAX: usize = 16;
-
-/// Hoeveel bewoners van één gedeelde core [`ArmCage::refresh_shared`]
-/// hoogstens bijwerkt.
-const SHARE_SCAN: usize = SLOT_CAP;
-
-// De OS-core (PORT.md beslissing 2): de bewoners van de kern-core.
-impl ArmCage {
-    /// Maakt `slot` bewoner van de OS-core (fysiek `cpu`): de rotatie van
-    /// de kern (`cpu::el2::OsCore`) geeft hem de core in de idle van de
-    /// executor. Zijn idle wordt een yield (`CTRL_IDLE_MODE`): WFE op EL1
-    /// zou de hele core laten slapen, en op QEMU spinnen tot de volgende
-    /// interrupt.
-    fn host(
-        &self,
-        slot: Slot,
-        ctx: Pa,
-        b: Built,
-        cpu: usize,
-        started: impl Fn(),
-    ) -> Result<(), CageError> {
-        dev::write64(b.ctrl.add(CTRL_IDLE_MODE), IDLE_YIELD);
-        dev::push(b.ctrl.add(CTRL_IDLE_MODE), 8);
-        match el2::host(&self.plan, ctx, b.entry, b.ctrl.0) {
-            Ok(()) => {
-                println!(
-                    "cage: slot {slot} hosted on the OS core (cpu {cpu}), next to the kern HOPOS_OS_HOST"
-                );
-                started();
-                Ok(())
-            }
-            Err(e) => {
-                println!("cage: slot {slot} on the OS core: {e} HOPOS_CAGE_DISPATCH");
-                Err(err(code::DISPATCH))
-            }
-        }
-    }
-}
-
-/// De cores van QEMU virt: logische core 0 is de OS-core, app-core i de
-/// i-de andere fysieke core (`Plan::phys_core`), MPIDR via `mpidr`; de
-/// toestand van een app-core komt uit de park-mailbox.
-pub(crate) struct ArmCores {
-    plan: Plan,
-}
-
-impl ArmCores {
-    /// De cores van dit plan.
-    pub(crate) fn new(plan: Plan) -> ArmCores {
-        ArmCores { plan }
     }
 
-    /// De fysieke core van logische core `core`, of `None` als die niet
-    /// bestaat.
-    fn phys(&self, core: Core) -> Option<usize> {
-        let c = layout::Core::new(core.get()).filter(|_| core.get() <= self.plan.app_cores())?;
-        Some(self.plan.phys_core(c))
+    fn core_state(plan: &Plan, c: layout::Core) -> Result<CoreState, el2::Error> {
+        el2::core_state(plan, c)
     }
-}
 
-impl Cores for ArmCores {
-    fn app_cores(&self) -> usize {
-        self.plan.app_cores()
+    fn kick(plan: &Plan, c: layout::Core) {
+        el2::kick(FLAVOR, mpidr(plan.phys_core(c)));
     }
 
     /// De klasse van de fysieke core volgens het board. Stond op `None`
     /// (de aanname van QEMU virt), en dan plaatste een jobspec met
     /// `core-class` nooit: GEMETEN 01-10 op de M4, "big" gaf "no free run"
     /// met drie P-cores vrij. Een spec zonder klasse merkt hier niets van.
-    fn class(&self, core: Core) -> Option<CoreClass> {
-        Some(match crate::BOARD.core_class(self.phys(core)?) {
+    fn class(phys: usize) -> Option<CoreClass> {
+        Some(match crate::BOARD.core_class(phys) {
             board::CoreClass::Small => CoreClass::Small,
             board::CoreClass::Mid => CoreClass::Mid,
             board::CoreClass::Big => CoreClass::Big,
         })
     }
-
-    fn power(&self, core: Core) -> Power {
-        if core == Core::OS {
-            return Power::On; // de kern zelf
-        }
-        match layout::Core::new(core.get()).and_then(|c| el2::core_state(&self.plan, c).ok()) {
-            Some(CoreState::Running(_)) => Power::On,
-            _ => Power::Off,
-        }
-    }
-
-    fn kick(&mut self, core: Core) {
-        // De OS-core hoeft geen kick: de kern geeft zijn bewoners zelf de
-        // core, in elke idle-ronde.
-        if let Some(c) = layout::Core::new(core.get()).filter(|_| core != Core::OS) {
-            el2::kick(FLAVOR, mpidr(self.plan.phys_core(c)));
-        }
-    }
 }
 
-/// De idle-ticks van de architectuurteller in nanoseconden.
-fn idle_ns(ticks: u64) -> u64 {
-    let f = cpu::idle::freq().max(1);
-    u64::try_from(u128::from(ticks) * 1_000_000_000 / u128::from(f)).unwrap_or(u64::MAX)
+/// Zet `b` erbij op zijn draaiende app-core (een sharegroup) en wacht kort
+/// tot de rotatie hem oppikt. `Ok(false)`: de core staat stil, en het
+/// is een gewoon startschot.
+///
+/// De park-race uit share.go: de rotatie las de lijst nét vóór onze
+/// append, zag niemand meer, en parkeert. Dan pikt niemand de boot-pending
+/// bewoner op, en ziet deze wacht de core geparkeerd: dan alsnog het
+/// mailbox-startschot, en dat is dan het enige (de parkeerlus leest geen
+/// lijst). Ziet de wacht niets binnen [`JOIN_WAIT_NS`], dan rekent de buur,
+/// en wacht de lifecycle verder (`Cage::pending`).
+fn join(plan: &Plan, b: &Built, tramp: Pa) -> Result<bool, CageError> {
+    let (slot, c, ctx) = (b.s, b.core, b.ctx);
+    let joined = el2::join(plan, c, ctx, tramp, b.ctrl.0).map_err(|e| {
+        println!("cage: slot {slot} on shared core {c}: {e} HOPOS_CAGE_DISPATCH");
+        err(code::ROSTER)
+    })?;
+    if joined == Join::Idle {
+        return Ok(false);
+    }
+    el2::kick(FLAVOR, mpidr(plan.phys_core(c)));
+    let t0 = cpu::idle::now();
+    let mut parked = false;
+    let seen = dev::poll_until(cpu::idle::now, JOIN_WAIT_NS, || {
+        if el2::ctx_state(ctx) != Some(CtxState::BootPending) {
+            return true;
+        }
+        parked = matches!(el2::core_state(plan, c), Ok(CoreState::Parked));
+        parked
+    });
+    let picked = seen.then_some(!parked);
+    let mut others = 0usize;
+    let _ = roster::residents(plan, c, |id| {
+        if usize::from(id) != slot.get() {
+            others += 1;
+        }
+    });
+    match picked {
+        Some(false) => {
+            println!(
+                "cage: slot {slot}: shared core {c} parked while it joined, dispatching HOPOS_SHARE_JOIN"
+            );
+            return Ok(false);
+        }
+        Some(true) => println!(
+            "cage: slot {slot} joined shared core {c} next to {others} resident(s), up in {} us HOPOS_SHARE_JOIN",
+            cpu::idle::now().saturating_sub(t0) / 1000
+        ),
+        None => println!(
+            "cage: slot {slot} waits on shared core {c}: a neighbour has not yielded in {} ms HOPOS_SHARE_PENDING",
+            JOIN_WAIT_NS / 1_000_000
+        ),
+    }
+    Ok(true)
 }
 
 // De wekker van de app-cores (`kern/slots/waker.go`), alleen voor Apple: een
@@ -1027,7 +509,7 @@ fn wake_sleeping(plan: &Plan, now: u64) {
             continue;
         }
         let mut due = false;
-        let _ = el2::residents(plan, c, |id| {
+        let _ = roster::residents(plan, c, |id| {
             // Een id voorbij SLOT_CAP is de secundaire van deze core.
             let ctx = match layout::Slot::new(usize::from(id)) {
                 Some(s) => plan.ctx_pa(s),

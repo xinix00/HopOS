@@ -317,7 +317,7 @@ die zelf niet opkomt.
 
 Op riscv64 is er alleen de koude flip (02-10). De switch-code draait daar
 uit het kern-image (niet uit een kopie in de plan-regio zoals op arm64),
-dus de nieuwe kern kan niemand adopteren (`RvCage::adopt`), en een warme
+dus de nieuwe kern kan niemand adopteren (`cage_riscv::adopt`), en een warme
 flip weigert vóór de sprong (`flip::WARM`). Dezelfde weg als hierboven,
 met drie verschillen:
 

@@ -15,7 +15,7 @@
 //! (Normal write-back) en het glas (Normal-NC): registers en vensters van
 //! devices gaan via de vluchtige toegang van `dev`. Op Apple en de Radxa
 //! mapt de kern de pool Device, behalve de staart van elk slot
-//! (`glue::tail_rings`): een ringrecord kopieert hij met `memcpy` alleen
+//! (`kooi::tail_rings`): een ringrecord kopieert hij met `memcpy` alleen
 //! als die remap lukte; wat hij verder uit de pool kopieert, is niet
 //! nagelopen.
 //!

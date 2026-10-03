@@ -843,7 +843,7 @@ __hopos_mentry:
     // --- koude boot van de bewoner in s6 (slot s5, index s2) ------------
     // Eerst de lijst nog eens, NÁ de staat. De kern haalt een slot uit de
     // lijst van zijn vorige hart vóór hij het op een ander hart BootPending
-    // zet (`cage_riscv.rs`, `forget`); een rotatie die de lijst nog oud las
+    // zet (`el2::roster::forget`); een rotatie die de lijst nog oud las
     // en de staat al nieuw, zou het slot anders op twee harts starten. Wie de
     // nieuwe staat ziet, ziet ook de lijst van daarvóór.
 70:

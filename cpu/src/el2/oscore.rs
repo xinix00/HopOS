@@ -55,7 +55,6 @@
 
 extern crate alloc;
 
-use super::Error;
 use super::dispatch::{
     Flavor, HVC_EXIT, HVC_YIELD, VEC_FIQ_LOWER, VEC_SYNC_LOWER, context_id, ctx_read, ctx_state,
     ctx_write, rx_due,
@@ -64,8 +63,9 @@ use super::layout::{
     CAGE_STRIDE, CTX_CTRL_PA, CTX_FP_END, CTX_FP_LIVE, CTX_FPRS, CTX_FPRS_ARM_WORDS, CTX_GPRS,
     CTX_KICK_PENDING, CTX_OFF, CTX_REGIME, CTX_REGIME_ARM_WORDS, CTX_RESUME, CTX_REVOKE, CTX_SP,
     CTX_STATE, CTX_UNIT_SLOT, CTX_WAKE, CTX_WAKE_NO_PEEK, Core, CtxState, Plan, SCHED_CLINT_PA,
-    SCHED_COUNT, SCHED_CURRENT, SCHED_CURSOR, SCHED_LIST, SCHED_MSIP_PA, SLOT_CAP,
+    SCHED_CURRENT, SCHED_CURSOR, SCHED_MSIP_PA, SLOT_CAP,
 };
+use super::{Error, roster};
 use abi::hopabi::{CTRL_FAULT_ESR, CTRL_FAULT_FAR, CTRL_FAULT_VEC};
 use core::sync::atomic::{
     AtomicU64,
@@ -413,7 +413,7 @@ pub static STATS: Stats = Stats {
 /// op die core (`cpu::idle::ArmSleeper::host`).
 ///
 /// De bewonerslijst zelf staat in sched-blok 0 van het plan: de plaatsing
-/// schrijft hem ([`host`], [`unhost`]), de rotatie leest hem. Dat is
+/// schrijft hem ([`host`], `roster::forget`), de rotatie leest hem. Dat is
 /// dezelfde tabel als die van een gedeelde app-core, en beide schrijvers
 /// draaien op deze ene core tussen twee rondes van de executor.
 pub struct OsCore {
@@ -457,8 +457,7 @@ impl OsCore {
     /// [`Bell::apple`] te zijn: een GIC-bel zou de switcher daar nooit
     /// sturen (hij kent alleen de fast IPI).
     pub fn new(plan: &Plan, flavor: Flavor, bell: Option<Bell>) -> Result<OsCore, Error> {
-        let core0 = Core::new(0).ok_or(Error::BadContextId { id: 0 })?;
-        let sched = plan.park_mbox_pa(core0).map_err(Error::Plan)?;
+        let sched = os_sched(plan)?;
         arch::prepare(flavor);
         dev::write64(sched.add(SCHED_OS_KICK), 0);
         dev::write64(sched.add(SCHED_OS_KICK_PA), bell.map_or(0, |b| b.sgir));
@@ -482,29 +481,19 @@ impl OsCore {
         dev::mb();
     }
 
-    /// Eén beurt: de volgende bewoner die aan de beurt is (round-robin vanaf
-    /// de cursor: een verse, of een geyielde wiens wektijd verstreek of
-    /// wiens RX-ring groeide) draait tot hij de core teruggeeft of tot
-    /// `deadline` (CNTPCT). Aanroepen met I en F gemaskeerd, ná de laatste
-    /// `ready()`-toets van de executor.
+    /// Eén beurt: de bewoner die [`next`] aanwijst draait tot hij de core
+    /// teruggeeft of tot `deadline` (CNTPCT). Aanroepen met I en F
+    /// gemaskeerd, ná de laatste `ready()`-toets van de executor.
     pub fn run(&mut self, deadline: u64) -> Turn {
-        crate::hopcost::mark(crate::hopcost::RUN);
-        match next(self.sched, self.cage, arch::counter()) {
-            Next::Turn { i, id, ctx, fresh } => Turn::Ran(self.turn(i, id, ctx, deadline, fresh)),
-            Next::Idle { wake } => {
-                STATS.idle.fetch_add(1, Relaxed);
-                Turn::Idle { wake }
-            }
-        }
+        let (sched, cage) = (self.sched, self.cage);
+        round(sched, cage, arch::counter(), |i, id, ctx, fresh| {
+            self.turn(i, id, ctx, deadline, fresh)
+        })
     }
 
     /// De beurt van bewoner `id` op lijstplek `i`.
     fn turn(&mut self, i: usize, id: u8, ctx: Pa, deadline: u64, fresh: bool) -> Back {
-        crate::hopcost::pick(id);
-        dev::write64(self.sched.add(SCHED_CURSOR), i as u64);
-        dev::write64(self.sched.add(SCHED_CURRENT), u64::from(id));
-        ctx_write(ctx, CTX_KICK_PENDING, 0);
-        ctx_write(ctx, CTX_STATE, CtxState::Running.raw());
+        begin(self.sched, i, id, ctx);
         // VTTBR naar de EENHEID van de bewoner (zoals de switcher): tabel en
         // VMID van zijn slot. Geen TLBI bij een hervatting: de entries zijn
         // VMID-getagd. Bij een verse bewoner wel, plus de I-cache: de VMID
@@ -514,18 +503,14 @@ impl OsCore {
         arch::set_vttbr(vttbr, fresh);
         arch::timer_arm(deadline);
         self.listen(true);
-        STATS.entries.fetch_add(1, Relaxed);
         let fp = fp_turn(id, fresh);
         crate::hopcost::mark(crate::hopcost::ENTER);
         let t0 = arch::counter();
         let vec = arch::enter(self.flavor, ctx, self.hcr, fp);
         crate::hopcost::mark(crate::hopcost::BACK);
-        let dt = arch::counter().wrapping_sub(t0);
-        STATS.ticks.fetch_add(dt, Relaxed);
-        STATS.longest.fetch_max(dt, Relaxed);
+        home(self.sched, arch::counter().wrapping_sub(t0));
         self.listen(false);
         let fired = arch::timer_disarm();
-        dev::write64(self.sched.add(SCHED_CURRENT), 0);
         let back = if exit_of(vec) == Exit::Sync && arch::esr() >> 26 == EC_FP {
             // Een FP-instructie met de trap aan: meteen weer aan de beurt op
             // dezelfde instructie, nu met FP (de FP-staat in zijn ctx-blok
@@ -541,9 +526,7 @@ impl OsCore {
         } else {
             self.settle(ctx, vec, fired)
         };
-        STATS.last.store(u64::from(id) | back.code() << 8, Relaxed);
-        crate::hopcost::ran(id);
-        back
+        end(id, back)
     }
 
     /// Zet de staat van een bewoner na zijn beurt, en zegt waardoor de kern
@@ -855,9 +838,17 @@ pub enum Next {
 /// regel van de switcher van een gedeelde app-core. Round-robin vanaf de
 /// plek ná de cursor; aan de beurt is de eerste die boot-pending is, of
 /// geyield en [`due`] (zijn wektijd, een kick, of RX achter zijn deurbel).
-/// Een ingetrokken bewoner die slaapt of nog niet draaide, gaat hier dood
-/// zonder nog één instructie, zoals in de switcher. Niemand: de vroegste
-/// wektijd, en dan pas mag de kern slapen.
+/// Niemand: de vroegste wektijd, en dan pas mag de kern slapen.
+///
+/// Hier, en alleen hier, gaat een ingetrokken bewoner dood: wie aan de
+/// beurt zou zijn en `CTX_REVOKE` draagt, wordt Dead zonder nog één
+/// instructie, en de ronde gaat door. Zoals KVM: de intrekking is een
+/// aanvraag plus een kick (`kvm_make_all_cpus_request` met
+/// `KVM_REQ_VM_DEAD`), en de vCPU leest zijn aanvragen op één plek, vlak
+/// vóór de ingang (`vcpu_enter_guest`), niet bij zijn exit. De kick is
+/// [`recall`]: een slaper met een verre wektijd is dan meteen aan de beurt
+/// en komt zo hier langs. Zo leest de rotatie `CTX_REVOKE` één keer per
+/// beurt, niet voor elke slaper in elke ronde.
 ///
 /// Waar de kern afwijkt, staat niet hier maar bij de aanroeper: hij is
 /// zelf geen bewoner en gaat altijd voor (de rotatie draait alleen als zijn
@@ -865,51 +856,81 @@ pub enum Next {
 /// een interrupt of de kick).
 #[must_use]
 pub fn next(sched: Pa, cage: Pa, now: u64) -> Next {
-    let count = usize::try_from(dev::read64(sched.add(SCHED_COUNT)))
-        .unwrap_or(0)
-        .min(SLOT_CAP);
+    let count = roster::len(sched);
     let cursor = usize::try_from(dev::read64(sched.add(SCHED_CURSOR))).unwrap_or(0);
     let mut earliest: Option<u64> = None;
     for k in 1..=count {
         let i = (cursor + k) % count;
-        // Woordgewijs gelezen: dezelfde lees op elke architectuur.
-        let word = dev::read64(sched.add(SCHED_LIST + (i as u64 & !7))).to_le_bytes();
-        let id = word.get(i & 7).copied().unwrap_or(0);
+        let id = roster::get(sched, i);
         if id == 0 || usize::from(id) > SLOT_CAP {
             continue;
         }
         let ctx = cage.add(u64::from(id) * CAGE_STRIDE + CTX_OFF);
-        let state = ctx_state(ctx);
-        if matches!(state, Some(CtxState::BootPending | CtxState::Saved))
-            && ctx_read(ctx, CTX_REVOKE) != 0
-        {
+        let fresh = match ctx_state(ctx) {
+            Some(CtxState::BootPending) => true,
+            Some(CtxState::Saved) => match due(ctx, now) {
+                None => false,
+                Some(t) => {
+                    earliest = Some(earliest.map_or(t, |e| e.min(t)));
+                    continue;
+                }
+            },
+            _ => continue,
+        };
+        if ctx_read(ctx, CTX_REVOKE) != 0 {
             ctx_write(ctx, CTX_STATE, CtxState::Dead.raw());
             continue;
         }
-        match state {
-            Some(CtxState::BootPending) => {
-                return Next::Turn {
-                    i,
-                    id,
-                    ctx,
-                    fresh: true,
-                };
-            }
-            Some(CtxState::Saved) => match due(ctx, now) {
-                None => {
-                    return Next::Turn {
-                        i,
-                        id,
-                        ctx,
-                        fresh: false,
-                    };
-                }
-                Some(t) => earliest = Some(earliest.map_or(t, |e| e.min(t))),
-            },
-            _ => {}
-        }
+        return Next::Turn { i, id, ctx, fresh };
     }
     Next::Idle { wake: earliest }
+}
+
+/// Eén ronde van de rotatie, op elke architectuur: [`next`] kiest, `turn`
+/// draait de gekozen bewoner (lijstplek, id, ctx-blok, koud) en zegt hoe
+/// de kern terugkwam.
+pub(crate) fn round(
+    sched: Pa,
+    cage: Pa,
+    now: u64,
+    turn: impl FnOnce(usize, u8, Pa, bool) -> Back,
+) -> Turn {
+    crate::hopcost::mark(crate::hopcost::RUN);
+    match next(sched, cage, now) {
+        Next::Turn { i, id, ctx, fresh } => Turn::Ran(turn(i, id, ctx, fresh)),
+        Next::Idle { wake } => {
+            STATS.idle.fetch_add(1, Relaxed);
+            Turn::Idle { wake }
+        }
+    }
+}
+
+/// Het begin van de beurt van bewoner `id` op lijstplek `i`, op elke
+/// architectuur: de stempel van `hopcost` (de keuze), de cursor, wie er
+/// draait, een kick die nu vervalt, en zijn staat.
+pub(crate) fn begin(sched: Pa, i: usize, id: u8, ctx: Pa) {
+    crate::hopcost::pick(id);
+    dev::write64(sched.add(SCHED_CURSOR), i as u64);
+    dev::write64(sched.add(SCHED_CURRENT), u64::from(id));
+    ctx_write(ctx, CTX_KICK_PENDING, 0);
+    ctx_write(ctx, CTX_STATE, CtxState::Running.raw());
+    STATS.entries.fetch_add(1, Relaxed);
+}
+
+/// De kern is terug na een beurt van `dt` tikken: de meetlat, en niemand
+/// draait meer.
+pub(crate) fn home(sched: Pa, dt: u64) {
+    STATS.ticks.fetch_add(dt, Relaxed);
+    STATS.longest.fetch_max(dt, Relaxed);
+    dev::write64(sched.add(SCHED_CURRENT), 0);
+}
+
+/// Het einde van de beurt van `id`, na zijn `settle`: de laatste beurt in
+/// de meetlat en de stempel van `hopcost` (de kern is terug).
+pub(crate) fn end(id: u8, back: Back) -> Back {
+    STATS.last.store(u64::from(id) | back.code() << 8, Relaxed);
+    crate::hopcost::ran(id);
+    back
 }
 
 /// `None` als de geyielde bewoner van `ctx` aan de beurt is op
@@ -930,13 +951,14 @@ pub fn due(ctx: Pa, now: u64) -> Option<u64> {
     Some(t)
 }
 
-/// Legt de eerste beurt van een bewoner klaar: x0 = `arg` (de control-page,
-/// zoals de trampoline hem doorgeeft), de rest nul, hervatten op `entry` in
-/// EL1h met DAIF dicht, en een schoon EL1-regime (SCTLR zonder MMU, de rest
-/// nul), en lege FP-registers die de overgang terugzet. Wat de trampoline
-/// van een app-core verder zet (VTCR, CPTR, CNTHCTL, CNTVOFF) deed
-/// [`OsCore::new`] één keer voor de hele core.
-fn prepare(ctx: Pa, entry: u64, arg: u64) {
+/// Legt de eerste beurt van een bewoner van de OS-core klaar: x0 = `arg`
+/// (de control-page, zoals de trampoline hem doorgeeft), de rest nul,
+/// hervatten op `entry` in EL1h met DAIF dicht, en een schoon EL1-regime
+/// (SCTLR zonder MMU, de rest nul), en lege FP-registers die de overgang
+/// terugzet. Wat de trampoline van een app-core verder zet (VTCR, CPTR,
+/// CNTHCTL, CNTVOFF) deed [`OsCore::new`] één keer voor de hele core. Vóór
+/// [`host`]; op riscv64 staat de koude start al in het ctx-blok.
+pub fn prepare(ctx: Pa, entry: u64, arg: u64) {
     for r in 0..31 {
         ctx_write(ctx, CTX_GPRS + 8 * r, 0);
     }
@@ -958,8 +980,7 @@ fn prepare(ctx: Pa, entry: u64, arg: u64) {
 
 /// Sched-blok 0: de bewonerslijst van de OS-core.
 fn os_sched(plan: &Plan) -> Result<Pa, Error> {
-    let core0 = Core::new(0).ok_or(Error::BadContextId { id: 0 })?;
-    plan.park_mbox_pa(core0).map_err(Error::Plan)
+    roster::sched(plan, Core::new(0).ok_or(Error::BadContextId { id: 0 })?)
 }
 
 /// De kooi-context-id van `ctx`, alleen voor een kooi (geen secundaire).
@@ -969,25 +990,12 @@ fn cage_id(plan: &Plan, ctx: Pa) -> Result<u8, Error> {
         .ok_or(Error::BadContext { pa: ctx.0 })
 }
 
-/// De plek van `id` in de bewonerslijst van `sched`.
-fn position(sched: Pa, id: u8) -> Option<usize> {
-    let count = (dev::read64(sched.add(SCHED_COUNT)) as usize).min(SLOT_CAP);
-    (0..count).find(|i| dev::read8(sched.add(SCHED_LIST + *i as u64)) == id)
-}
-
-/// Maakt de bewoner met ctx-blok `ctx` bewoner van de OS-core: zijn eerste
-/// beurt begint op `entry` met x0 = `arg` (de control-page), en de rotatie
-/// neemt hem mee zodra de executor idle is. Het tegenstuk van
-/// [`super::dispatch`] voor een app-core, zonder mailbox: de kern ís de
-/// core.
-///
-/// Eerst de ctx, dan de lijst: de rotatie leest de lijst pas in de
-/// volgende idle-ronde, op deze zelfde core.
-pub fn host(plan: &Plan, ctx: Pa, entry: u64, arg: u64) -> Result<(), Error> {
-    cage_id(plan, ctx)?;
-    prepare(ctx, entry, arg);
-    ctx_write(ctx, CTX_STATE, CtxState::BootPending.raw());
-    rehost(plan, ctx).map(|_| ())
+/// Maakt de bewoner met ctx-blok `ctx` bewoner van de OS-core: de rotatie
+/// neemt hem mee zodra de executor idle is ([`roster::enlist`]: eerst de
+/// lijst, dan boot-pending). Het tegenstuk van [`super::dispatch`] voor een
+/// app-core, zonder mailbox: de kern ís de core.
+pub fn host(plan: &Plan, ctx: Pa) -> Result<(), Error> {
+    roster::enlist(os_sched(plan)?, ctx, cage_id(plan, ctx)?)
 }
 
 /// Zet de bewoner met ctx-blok `ctx` terug in de rotatie van de OS-core
@@ -995,47 +1003,25 @@ pub fn host(plan: &Plan, ctx: Pa, entry: u64, arg: u64) -> Result<(), Error> {
 /// zijn bewaarde staat nog, en de nieuwe kern hervat hem waar de oude hem
 /// liet. Geeft `true` als hij er niet meer in stond.
 pub fn rehost(plan: &Plan, ctx: Pa) -> Result<bool, Error> {
-    let id = cage_id(plan, ctx)?;
-    let sched = os_sched(plan)?;
-    if position(sched, id).is_some() {
-        return Ok(false);
-    }
-    let count = (dev::read64(sched.add(SCHED_COUNT)) as usize).min(SLOT_CAP);
-    let at = (0..count).find(|i| dev::read8(sched.add(SCHED_LIST + *i as u64)) == 0);
-    let i = match at {
-        Some(i) => i,
-        None if count < SLOT_CAP => {
-            dev::write64(sched.add(SCHED_COUNT), count as u64 + 1);
-            count
-        }
-        None => return Err(Error::RosterFull { count }),
-    };
-    dev::write8(sched.add(SCHED_LIST + i as u64), id);
-    dev::mb();
-    Ok(true)
-}
-
-/// Haalt de bewoner met ctx-blok `ctx` uit de rotatie van de OS-core (een
-/// gat in de lijst, zoals bij de switcher). Geeft of hij erin stond. Daarna
-/// draait hij hier nooit meer: de kern is de enige die hem de core geeft.
-pub fn unhost(plan: &Plan, ctx: Pa) -> Result<bool, Error> {
-    let id = cage_id(plan, ctx)?;
-    let sched = os_sched(plan)?;
-    let Some(i) = position(sched, id) else {
-        return Ok(false);
-    };
-    dev::write8(sched.add(SCHED_LIST + i as u64), 0);
-    dev::mb();
-    Ok(true)
+    roster::add(os_sched(plan)?, cage_id(plan, ctx)?)
 }
 
 /// Staat de bewoner met ctx-blok `ctx` in de rotatie van de OS-core?
 #[must_use]
 pub fn hosts(plan: &Plan, ctx: Pa) -> bool {
     match (cage_id(plan, ctx), os_sched(plan)) {
-        (Ok(id), Ok(sched)) => position(sched, id).is_some(),
+        (Ok(id), Ok(sched)) => roster::find(sched, id).is_some(),
         _ => false,
     }
+}
+
+/// Trekt de bewoner van de OS-core met ctx-blok `ctx` in: de aanvraag
+/// (`CTX_REVOKE`) en de kick (`CTX_KICK_PENDING`), zodat hij aan de beurt
+/// is en [`next`] hem doodt zonder dat hij nog draait. Op de OS-core draait
+/// hij nu niet (de kern draait, deze code), dus er is niets te onderbreken.
+pub fn recall(ctx: Pa) {
+    ctx_write(ctx, CTX_REVOKE, 1);
+    ctx_write(ctx, CTX_KICK_PENDING, 1);
 }
 
 #[cfg(all(target_os = "none", target_arch = "aarch64"))]

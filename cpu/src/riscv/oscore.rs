@@ -9,8 +9,8 @@
 //! bewonerslijst van logische core 0 (sched-blok 0 van het plan), de eigen
 //! `mtimecmp` die de deadline van de executor bewaakt terwijl een bewoner
 //! draait, en de meetlat (`cpu::el2::OS_STATS`, dezelfde getallen als op
-//! arm64). Niet van hier: wie er bewoner wordt (de kooi-lijm,
-//! `hopos/src/cage_riscv.rs`) en wat de kern doet als hij terug is (de
+//! arm64). Niet van hier: wie er bewoner wordt (de kooi,
+//! `hopos/src/kooi.rs`) en wat de kern doet als hij terug is (de
 //! executor).
 //!
 //! Waarom niet de M-mode-switcher van de app-harts ([`super::switch`]): die
@@ -45,11 +45,12 @@
 use super::clint::{Clint, NEVER};
 use super::csr;
 use super::pmp;
+use crate::el2::oscore::{begin, end, home, round};
 use crate::el2::{self, Back, OS_STATS as STATS, Turn, ctx_read, ctx_write};
 use abi::hopabi::{CTRL_FAULT_ESR, CTRL_FAULT_FAR, CTRL_FAULT_VEC};
 use abi::layout::{
-    CTX_BOOT_PC, CTX_CTRL_PA, CTX_FPRS, CTX_GPRS, CTX_KICK_PENDING, CTX_LEN, CTX_REGIME,
-    CTX_RESUME, CTX_REVOKE, CTX_STATE, CTX_WAKE, Core, CtxState, Plan, SCHED_CURRENT, SCHED_CURSOR,
+    CTX_BOOT_PC, CTX_CTRL_PA, CTX_FPRS, CTX_GPRS, CTX_LEN, CTX_REGIME, CTX_RESUME, CTX_STATE,
+    CTX_WAKE, Core, CtxState, Plan,
 };
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 use dev::Pa;
@@ -168,25 +169,15 @@ impl OsCore {
     /// `deadline` (TIME-tikken). Aanroepen met `mstatus.MIE` uit, ná de
     /// laatste `ready()`-toets van de executor.
     pub fn run(&mut self, deadline: u64) -> Turn {
-        crate::hopcost::mark(crate::hopcost::RUN);
-        match el2::next(self.sched, self.cage, csr::rdtime()) {
-            el2::Next::Turn { i, id, ctx, fresh } => {
-                Turn::Ran(self.turn(i, id, ctx, deadline, fresh))
-            }
-            el2::Next::Idle { wake } => {
-                STATS.idle.fetch_add(1, Relaxed);
-                Turn::Idle { wake }
-            }
-        }
+        let (sched, cage) = (self.sched, self.cage);
+        round(sched, cage, csr::rdtime(), |i, id, ctx, fresh| {
+            self.turn(i, id, ctx, deadline, fresh)
+        })
     }
 
     /// De beurt van bewoner `id` op lijstplek `i`.
     fn turn(&mut self, i: usize, id: u8, ctx: Pa, deadline: u64, fresh: bool) -> Back {
-        crate::hopcost::pick(id);
-        dev::write64(self.sched.add(SCHED_CURSOR), i as u64);
-        dev::write64(self.sched.add(SCHED_CURRENT), u64::from(id));
-        ctx_write(ctx, CTX_KICK_PENDING, 0);
-        ctx_write(ctx, CTX_STATE, CtxState::Running.raw());
+        begin(self.sched, i, id, ctx);
         // De ASID van de bewoner is zijn id: de kern zet hem, elke beurt
         // (TVM houdt de bewoner er vanaf). Een flush alleen bij een koude
         // start: de vertalingen van een vorige huurder met dit id weg, zoals
@@ -200,16 +191,10 @@ impl OsCore {
                 dev::write64(at, want);
             }
         }
-        STATS.entries.fetch_add(1, Relaxed);
         let t0 = csr::rdtime();
         let (cause, mtval) = self.enter(ctx, fresh, flush, deadline);
-        STATS
-            .ticks
-            .fetch_add(csr::rdtime().wrapping_sub(t0), Relaxed);
-        dev::write64(self.sched.add(SCHED_CURRENT), 0);
-        let back = settle(ctx, cause, mtval, true);
-        crate::hopcost::ran(id);
-        back
+        home(self.sched, csr::rdtime().wrapping_sub(t0));
+        end(id, settle(ctx, cause, mtval, true))
     }
 
     /// De overgang zelf: de wekker op `deadline`, de drie bronnen aan die de
@@ -350,12 +335,8 @@ fn settle(ctx: Pa, cause: u64, mtval: u64, count: bool) -> Back {
         tally(&STATS.exits);
         return Back::Exit;
     }
-    if ctx_read(ctx, CTX_REVOKE) != 0 {
-        // De intrekking bij de yield, zoals de switcher.
-        ctx_write(ctx, CTX_STATE, CtxState::Dead.raw());
-        tally(&STATS.exits);
-        return Back::Exit;
-    }
+    // Een intrekking leest de rotatie, niet de terugweg: `el2::next` doodt
+    // hem vóór zijn volgende beurt, op beide architecturen.
     let wake = if a7 == A7_KICK {
         0
     } else {
@@ -811,6 +792,11 @@ mod tests {
         assert_eq!(settle(ctx, CAUSE_ECALL_S, 0, false), Back::Yield);
         assert_eq!(ctx_read(ctx, CTX_WAKE), 0);
         assert_eq!(ctx_read(ctx, CTX_RESUME), 0x5000_0018);
+        assert_eq!(ctx_state(ctx), Some(CtxState::Saved));
+        // Een intrekking leest de terugweg niet: dat doet `el2::next`, vóór
+        // de volgende beurt, op beide architecturen.
+        ctx_write(ctx, abi::layout::CTX_REVOKE, 1);
+        assert_eq!(settle(ctx, CAUSE_ECALL_S, 0, false), Back::Yield);
         assert_eq!(ctx_state(ctx), Some(CtxState::Saved));
         // Exit (a7 = 1): dood.
         ctx_write(ctx, CTX_A7, 1);

@@ -26,13 +26,13 @@
 //! bewoner, waarna die dood is en de core doorroteert.
 
 use super::layout::{
-    CAGE_STRIDE, CTX_BOOT_ARG, CTX_BOOT_PC, CTX_CTRL_PA, CTX_KICK_NONE, CTX_KICK_PENDING,
-    CTX_KICK_TARGET, CTX_LEN, CTX_NEXT_PA, CTX_OFF, CTX_RING_HEAD_PA, CTX_STATE, CTX_UNIT_SLOT,
-    CTX_WAKE, Core, CtxState, PARK_CODE_OFF, PARK_COLD, PARK_MBOX_LEN, PARK_MBOX_OFF, PARK_PARKED,
-    Plan, SCHED_COUNT, SCHED_CURRENT, SCHED_CURSOR, SCHED_LIST, SCHED_MBOX_CTX, SCHED_MBOX_PC,
-    SCHED_ROTOR, SCHED_S2_PA, SLOT_CAP, SMP_CTX_OFF, SWITCH_CODE_MAX, Slot,
+    CAGE_STRIDE, CTX_BOOT_ARG, CTX_BOOT_PC, CTX_CTRL_PA, CTX_KICK_PENDING, CTX_KICK_TARGET,
+    CTX_LEN, CTX_NEXT_PA, CTX_OFF, CTX_RING_HEAD_PA, CTX_STATE, CTX_UNIT_SLOT, CTX_WAKE, Core,
+    CtxState, PARK_CODE_OFF, PARK_COLD, PARK_MBOX_LEN, PARK_MBOX_OFF, PARK_PARKED, Plan,
+    SCHED_CURRENT, SCHED_CURSOR, SCHED_MBOX_CTX, SCHED_MBOX_PC, SCHED_ROTOR, SCHED_S2_PA, SLOT_CAP,
+    SMP_CTX_OFF, SWITCH_CODE_MAX, Slot,
 };
-use super::{Error, stage2, switch};
+use super::{Error, roster, stage2, switch};
 use abi::checksum::Fnv64;
 use abi::hopabi::{
     CTRL_RX_DOOR, CTRL_S2_TABLE, CTRL_SLOT, CTRL_SMP_FN, CTRL_SMP_G0, CTRL_SMP_MAIR, CTRL_SMP_MBOX,
@@ -503,10 +503,7 @@ pub fn dispatch(plan: &Plan, core: Core, ctx: Pa, entry: Pa, arg: u64) -> Result
     dev::write64(mb.add(SCHED_CURSOR), 0);
     dev::write64(mb.add(SCHED_ROTOR), 0);
     dev::write64(mb.add(SCHED_CURRENT), u64::from(id));
-    dev::clear(mb.add(SCHED_LIST), SLOT_CAP);
-    dev::write8(mb.add(SCHED_LIST), id);
-    dev::write64(mb.add(SCHED_COUNT), 1);
-    dev::mb();
+    roster::reset(mb, Some(id));
     dev::push(mb, PARK_MBOX_LEN as usize);
     ctx_write(ctx, CTX_STATE, CtxState::Running.raw());
     // Het doel vóór het startschot: woord 0 = arg maakt de core meteen
@@ -529,8 +526,7 @@ pub fn unwind_cold(plan: &Plan, core: Core, ctx: Pa) -> Result<(), Error> {
     let mb = plan.park_mbox_pa(core).map_err(Error::Plan)?;
     dev::write64(mb.add(SCHED_MBOX_CTX), PARK_COLD);
     dev::write64(mb.add(SCHED_MBOX_PC), 0);
-    dev::write64(mb.add(SCHED_COUNT), 0);
-    dev::mb();
+    roster::reset(mb, None);
     dev::push(mb, PARK_MBOX_LEN as usize);
     ctx_write(ctx, CTX_STATE, CtxState::Empty.raw());
     Ok(())
@@ -551,79 +547,6 @@ pub enum Join {
     Idle,
 }
 
-/// Het sched-blok van `core` en de lengte van zijn bewonerslijst, geklemd
-/// op [`SLOT_CAP`]. Die klem is een isolatiegrens: één plek voorbij de
-/// lijst is het woord `SCHED_S2_PA`, waarmee de switcher elk ctx-blok op
-/// deze core vindt (share.go `residents`, en daar ook op één plek).
-fn roster(plan: &Plan, core: Core) -> Result<(Pa, usize), Error> {
-    let mb = plan.park_mbox_pa(core).map_err(Error::Plan)?;
-    let n = usize::try_from(dev::read64(mb.add(SCHED_COUNT))).unwrap_or(SLOT_CAP);
-    Ok((mb, n.min(SLOT_CAP)))
-}
-
-/// De context-id's in de bewonerslijst van `core`, gaten overgeslagen, in
-/// lijstvolgorde. Geeft het aantal.
-pub fn residents(plan: &Plan, core: Core, mut each: impl FnMut(u8)) -> Result<usize, Error> {
-    let (mb, n) = roster(plan, core)?;
-    let mut count = 0;
-    for i in 0..n {
-        let id = dev::read8(mb.add(SCHED_LIST + i as u64));
-        if id != 0 {
-            each(id);
-            count += 1;
-        }
-    }
-    Ok(count)
-}
-
-/// Zet `id` in de lijst van sched-blok `mb` (lengte `n`): staat hij er al,
-/// dan niets; anders het eerste gat, anders achteraan. Eerst kijken of hij
-/// er al staat, dán pas "vol": andersom weigerde Go een geldige herstart
-/// zodra de lijst ooit tot `SLOT_CAP` gegroeid was, want gaten laten de
-/// lengte staan (share.go `residentAdd`).
-fn list_add(mb: Pa, n: usize, id: u8) -> Result<(), Error> {
-    let mut gap = None;
-    for i in 0..n {
-        match dev::read8(mb.add(SCHED_LIST + i as u64)) {
-            x if x == id => return Ok(()),
-            0 if gap.is_none() => gap = Some(i),
-            _ => {}
-        }
-    }
-    match gap {
-        Some(i) => dev::write8(mb.add(SCHED_LIST + i as u64), id),
-        // `>=` en niet `>`: bij n == SLOT_CAP schreef de append op
-        // SCHED_S2_PA.
-        None if n >= SLOT_CAP => return Err(Error::RosterFull { count: n }),
-        None => {
-            // De ingang vóór de lengte, met een barrière: de rotatie ziet
-            // nooit een staart die nog niet geschreven is.
-            dev::write8(mb.add(SCHED_LIST + n as u64), id);
-            dev::mb();
-            dev::write64(mb.add(SCHED_COUNT), n as u64 + 1);
-        }
-    }
-    dev::mb();
-    dev::push(mb, PARK_MBOX_LEN as usize);
-    Ok(())
-}
-
-/// Haalt `id` uit de lijst van `core` (een gat; de rotatie slaat nullen
-/// over en [`join`] hergebruikt ze). Geeft of hij erin stond.
-fn list_remove(plan: &Plan, core: Core, id: u8) -> Result<bool, Error> {
-    let (mb, n) = roster(plan, core)?;
-    let mut was = false;
-    for i in 0..n {
-        if dev::read8(mb.add(SCHED_LIST + i as u64)) == id {
-            dev::write8(mb.add(SCHED_LIST + i as u64), 0);
-            was = true;
-        }
-    }
-    dev::mb();
-    dev::push(mb, PARK_MBOX_LEN as usize);
-    Ok(was)
-}
-
 /// Zet de bewoner met ctx-blok `ctx` erbij op de DRAAIENDE app-core `core`
 /// (`bootPendingDispatch` in share.go): `entry` en `arg` zoals bij
 /// [`dispatch`], de staat boot-pending, en hij in de bewonerslijst. De
@@ -637,15 +560,15 @@ fn list_remove(plan: &Plan, core: Core, id: u8) -> Result<bool, Error> {
 /// [`dispatch`]. Zo'n core staat in de parkeerlus en leest geen lijst meer,
 /// dus dat startschot is het enige.
 ///
-/// De volgorde is die van de rotatie-hercontrole (`switch.rs`): eerst de
-/// ctx, dan de staat, dan de lijst. De rotatie leest byte, staat en de byte
-/// nog eens; wie de nieuwe staat ziet, ziet ook de lijst die erbij hoort.
+/// De volgorde is die van [`roster::enlist`]: eerst de ctx, dan de lijst,
+/// dan de staat. De rotatie leest byte, staat en de byte nog eens; wie de
+/// nieuwe staat ziet, ziet ook de lijst die erbij hoort.
 pub fn join(plan: &Plan, core: Core, ctx: Pa, entry: Pa, arg: u64) -> Result<Join, Error> {
     if arg <= PARK_PARKED {
         return Err(Error::BadArg { arg });
     }
     let id = context_id(plan, ctx).ok_or(Error::BadContext { pa: ctx.0 })?;
-    let (mb, n) = roster(plan, core)?;
+    let mb = roster::sched(plan, core)?;
     if dev::read64(mb.add(SCHED_MBOX_CTX)) <= PARK_PARKED {
         return Ok(Join::Idle);
     }
@@ -654,11 +577,7 @@ pub fn join(plan: &Plan, core: Core, ctx: Pa, entry: Pa, arg: u64) -> Result<Joi
     ctx_write(ctx, CTX_WAKE, 0);
     ctx_write(ctx, CTX_KICK_PENDING, 0);
     dev::mb();
-    ctx_write(ctx, CTX_STATE, CtxState::BootPending.raw());
-    if let Err(e) = list_add(mb, n, id) {
-        ctx_write(ctx, CTX_STATE, CtxState::Empty.raw());
-        return Err(e);
-    }
+    roster::enlist(mb, ctx, id)?;
     Ok(Join::Joined)
 }
 
@@ -675,7 +594,7 @@ pub fn join(plan: &Plan, core: Core, ctx: Pa, entry: Pa, arg: u64) -> Result<Joi
 /// is hij opnieuw dood.
 pub fn evict(plan: &Plan, core: Core, ctx: Pa) -> Result<bool, Error> {
     let id = context_id(plan, ctx).ok_or(Error::BadContext { pa: ctx.0 })?;
-    let was = list_remove(plan, core, id)?;
+    let was = roster::remove(roster::sched(plan, core)?, id);
     if matches!(
         ctx_state(ctx),
         Some(CtxState::BootPending | CtxState::Saved)
@@ -683,24 +602,6 @@ pub fn evict(plan: &Plan, core: Core, ctx: Pa) -> Result<bool, Error> {
         ctx_write(ctx, CTX_STATE, CtxState::Dead.raw());
     }
     Ok(was)
-}
-
-/// Haalt kooi `slot` uit de lijst van ELKE app-core, vóór zijn nieuwe
-/// levensduur. Een gestopt lid van een groep blijft als dode byte in de
-/// lijst van zijn oude core staan; komt het slot daarna op een andere core
-/// terecht, dan zou die oude rotatie zijn verse boot-pending staat zien en
-/// hem daar óók starten. Vóór elke staatswissel van het slot, zodat de
-/// hercontrole van de rotatie de verwijdering ziet.
-pub fn forget(plan: &Plan, slot: Slot) -> Result<(), Error> {
-    let id = u8::try_from(slot.get()).map_err(|_| Error::BadContextId { id: 0 })?;
-    for c in 1..=plan.app_cores() {
-        let core = Core::new(c).ok_or(Error::Plan(abi::Error::OutOfPlan {
-            index: c,
-            max: SLOT_CAP,
-        }))?;
-        list_remove(plan, core, id)?;
-    }
-    Ok(())
 }
 
 /// Maakt het ctx-blok van de secundaire op `core` klaar voor een nieuwe
@@ -835,19 +736,6 @@ pub fn ctx_write(ctx: Pa, off: u64, v: u64) {
 #[must_use]
 pub fn ctx_state(ctx: Pa) -> Option<CtxState> {
     CtxState::from_raw(ctx_read(ctx, CTX_STATE))
-}
-
-/// Zet de vier woorden die de switcher van een verse bewoner leest
-/// (`armSlot`): de control-page (het fault-rapport en de RX-peek vinden hem
-/// hier, sinds de ABI in de partitie woont), de eenheid (tabel en VMID bij
-/// een hervatting), het kopwoord van de RX-ring (0 = geen peek), en nog
-/// geen wekdoel. Niet nul maar `CTX_KICK_NONE`: nul is fysieke core 0, en
-/// dat gaf de O6N-hang van 21-09.
-pub fn arm_context(ctx: Pa, ctrl_pa: Pa, unit: Slot, ring_head_pa: u64) {
-    ctx_write(ctx, CTX_CTRL_PA, ctrl_pa.0);
-    ctx_write(ctx, CTX_UNIT_SLOT, unit.get() as u64);
-    ctx_write(ctx, CTX_RING_HEAD_PA, ring_head_pa);
-    ctx_write(ctx, CTX_KICK_TARGET, CTX_KICK_NONE);
 }
 
 /// Ligt er RX voor de bewoner van `ctx`: is zijn doorbell gewapend en groeide

@@ -8,7 +8,8 @@
 //! parkeerlus, als `global_asm!`); en de Rust-kant daarvan (`dispatch.rs`):
 //! de switch-code naar de plan-regio met descriptor en som, de thunks en
 //! sched-blokken, [`dispatch`], [`kick`], [`revoke`], [`prepare_smp`],
-//! [`adopt`] en de lezers van het ctx-blok; en de OS-core (`oscore.rs`,
+//! [`adopt`] en de lezers van het ctx-blok; de bewonerslijst van elke core
+//! ([`roster`], één implementatie voor beide architecturen); en de OS-core (`oscore.rs`,
 //! PORT.md beslissing 2): de kern op EL2 als eerste bewoner van zijn eigen
 //! core, die zijn idle aan de andere bewoners geeft ([`OsCore`], [`host`])
 //! en ze terugneemt op elke interrupt, kick of deadline.
@@ -22,7 +23,8 @@
 pub mod chain;
 mod dispatch;
 mod layout;
-mod oscore;
+pub(crate) mod oscore;
+pub mod roster;
 pub mod stage2;
 #[cfg(all(target_os = "none", target_arch = "aarch64"))]
 mod switch;
@@ -31,14 +33,14 @@ mod switch;
 mod switch;
 
 pub use dispatch::{
-    CoreState, Flavor, Installed, Join, MAX_BLOB, Start, adopt, apple_ipi_target, arm_context,
-    chain, core_state, ctx_read, ctx_state, ctx_write, dispatch, evict, forget, image_hash,
-    init_app_cores, install_switch_code, installed_hash, join, kick, prepare_secondary,
-    prepare_smp, residents, revoke, rx_due, unwind_cold,
+    CoreState, Flavor, Installed, Join, MAX_BLOB, Start, adopt, apple_ipi_target, chain,
+    core_state, ctx_read, ctx_state, ctx_write, dispatch, evict, image_hash, init_app_cores,
+    install_switch_code, installed_hash, join, kick, prepare_secondary, prepare_smp, revoke,
+    rx_due, unwind_cold,
 };
 pub use oscore::{
     Back, Bell, Next, OsCore, Probe, STATS as OS_STATS, TURN_CAP_NS, Turn, apple_ipi_ack, due,
-    held, hold, host, hosts, last_fault, next, rehost, release_held, unhost,
+    held, hold, host, hosts, last_fault, next, prepare, recall, rehost, release_held,
 };
 
 use core::fmt;

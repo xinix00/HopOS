@@ -74,7 +74,7 @@
 //! # riscv64
 //!
 //! Alleen koud: de switch-code draait daar uit het kern-image, dus er is
-//! niets wat een nieuwe kern kan adopteren (`RvCage::adopt` weigert), en een
+//! niets wat een nieuwe kern kan adopteren (`cage_riscv::adopt` weigert), en een
 //! warme flip weigert vóór de sprong ([`WARM`]). De koude weg is dezelfde
 //! als op arm64, met twee riscv-stappen: het app-hart gaat uit het image
 //! ([`cores_off`]: het resetblok van de C906L, of de uit-stub van de
@@ -182,7 +182,7 @@ pub(crate) const COLD_FLIP: ColdFlip = if cfg!(target_arch = "riscv64") {
 
 /// Kan deze kern bewoners over de sprong heen dragen (de warme flip)? Op
 /// riscv64 niet: de switch-code draait daar uit het kern-image, en de
-/// nieuwe kern adopteert niemand (`RvCage::adopt`). Een warme flip zou de
+/// nieuwe kern adopteert niemand (`cage_riscv::adopt`). Een warme flip zou de
 /// bewoners dan pas na de gratie verliezen (`HOPOS_FLIP_ADOPT_FAIL`, de
 /// guard); daarom weigert hij hier vóór de sprong, en is de koude de weg.
 const WARM: bool = !cfg!(target_arch = "riscv64");

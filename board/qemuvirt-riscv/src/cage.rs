@@ -27,8 +27,8 @@
 use abi::hopabi::{CTRL_FAULT_ESR, CTRL_FAULT_FAR, CTRL_FAULT_VEC};
 use abi::layout::{
     CTX_BOOT_ARG, CTX_BOOT_PC, CTX_CTRL_PA, CTX_LEN, CTX_REGIME, CTX_RESUME, CTX_REVOKE, CTX_STATE,
-    CtxState, LINK_BASE, PARK_MBOX_LEN, SCHED_CLINT_PA, SCHED_COUNT, SCHED_LIST, SCHED_MSIP_PA,
-    SCHED_S2_PA, SCHED_SLEEP_CAP, SCHED_TICK_TICKS,
+    CtxState, LINK_BASE, PARK_MBOX_LEN, SCHED_CLINT_PA, SCHED_MSIP_PA, SCHED_S2_PA,
+    SCHED_SLEEP_CAP, SCHED_TICK_TICKS,
 };
 use cpu::riscv::pmp::{self, Window};
 use cpu::riscv::sv39::{self, Attrs, MapWindow, Tables};
@@ -123,7 +123,7 @@ pub fn selftest(
     part: u64,
     clint: cpu::riscv::clint::Clint,
 ) -> Result<Report, &'static str> {
-    const SLOT: u64 = 1;
+    const SLOT: u8 = 1;
     let ctrl = part + 0x10_0000;
     let tables = part + 0x18_0000;
     dev::clear(sched, PARK_MBOX_LEN as usize);
@@ -140,8 +140,7 @@ pub fn selftest(
         sched.add(SCHED_TICK_TICKS),
         cpu::riscv::idle::ns_to_ticks(TICK_NS, cpu::riscv::idle::hz()),
     );
-    dev::write64(sched.add(SCHED_LIST), SLOT);
-    dev::write64(sched.add(SCHED_COUNT), 1);
+    cpu::el2::roster::reset(sched, Some(SLOT));
     dev::push(sched, PARK_MBOX_LEN as usize);
 
     // De eerste bewoner: gelinkt op LINK_BASE, fysiek op `part`.
@@ -216,8 +215,7 @@ pub fn selftest(
     let after = wait_state(ctx, CtxState::Dead as u64, 200);
 
     // Opruimen: de lijst leeg, de partitie terug naar nul.
-    dev::write64(sched.add(SCHED_COUNT), 0);
-    dev::push(sched, PARK_MBOX_LEN as usize);
+    cpu::el2::roster::reset(sched, None);
     dev::clear(Pa(part), 2 << 20);
     dev::clear(ctx, CTX_LEN as usize);
     Ok(Report {

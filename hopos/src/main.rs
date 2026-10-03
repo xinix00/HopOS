@@ -18,8 +18,9 @@ mod codec; // het media-vlak (codec.rs); kaal een stub, feature `media`
 mod config;
 mod conport; // de console over TCP: de ring achter de UART (conport.rs)
 mod flip; // FLIP: de kern-flip (flip.rs)
-mod glue; // de arch-vrije kooi-lijm, `DevMem` en `KernConsole` (glue.rs)
+mod glue; // `DevMem`, `KernConsole` en de outbox van een slot (glue.rs)
 mod gui; // het gui-vlak (gui.rs); kaal no-ops, feature `gui`
+mod kooi; // de kooi als beleid, voor elke architectuur (kooi.rs)
 mod load; // de meetlat per slot: idle en wekken op de console (load.rs)
 #[cfg(all(
     target_arch = "aarch64",

@@ -38,10 +38,10 @@
 
 extern crate alloc;
 
-// De kooi-lijm per architectuur: `cage.rs` (stage-2 en de EL2-switcher)
-// of `cage_riscv.rs` (PMP plus Sv39 en de M-mode-switcher), met wat ze
-// delen in `glue.rs`. Beide geven de kern dezelfde traits; de lifecycle
-// hieronder is architectuur-neutraal.
+// De kooi per architectuur: `cage.rs` (stage-2 en de EL2-switcher) of
+// `cage_riscv.rs` (PMP plus Sv39 en de M-mode-switcher), onder het beleid
+// van `kooi.rs`, dat de kern de traits geeft; de lifecycle hieronder is
+// architectuur-neutraal.
 #[cfg_attr(not(target_arch = "riscv64"), path = "cage.rs")]
 #[cfg_attr(target_arch = "riscv64", path = "cage_riscv.rs")]
 mod cage;
@@ -208,10 +208,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use board::Board;
 use board::stage::StagedRole;
-#[cfg(not(target_arch = "riscv64"))]
-use cage::{ArmCage as SlotCage, ArmCores as SlotCores};
-#[cfg(target_arch = "riscv64")]
-use cage::{RvCage as SlotCage, RvCores as SlotCores};
+use cage::SlotCores;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use core::time::Duration;
 use cpu::el2::{self, CoreState};
@@ -326,8 +323,8 @@ pub(crate) fn start(
     // FLIP: een geadopteerde kern schrijft geen byte in de plan-regio: er
     // draaien cores in de switch-code (`cpu::el2::adopt` eist de som).
     let cage = match &adopt {
-        Some(_) => SlotCage::adopt(plan.clone()),
-        None => SlotCage::new(plan.clone()),
+        Some(_) => cage::adopt(plan.clone()),
+        None => cage::new(plan.clone()),
     };
     let mut cage = match cage {
         Ok(c) => c,
@@ -356,7 +353,7 @@ pub(crate) fn start(
             }
         }
     }
-    let sw = cage.installed();
+    let sw = cage.isa().installed();
     println!(
         "slots: cage up HOPOS_CAGE_UP region={:#x} switch={:#x}+{:#x} tramp={:#x} hash={:#x} app-cores={} max-slots={}",
         plan.vec_base_pa().0,

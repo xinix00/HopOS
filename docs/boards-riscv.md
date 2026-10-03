@@ -56,7 +56,7 @@ GIC                     PLIC + CLINT
 | PMP-whitelist als TOR | `cpu/src/riscv/pmp.rs` | 5 host-tests |
 | Sv39-relocatie in 2 MB-blokken, T-Head-attributen | `cpu/src/riscv/sv39.rs` | 4 host-tests |
 | De M-mode-switcher: yield met wektijd, exit, fault, park op de CLINT, de kick als wek, de deurbel (RX), de kill-tick, de intrekking van een slaper, de hercontrole van de lijst bij een koude boot | `cpu/src/riscv/switch.rs` | QEMU: zelftest en appspike |
-| De kooi-lijm: `kern::cage::{Cage, Cores}` over PMP, Sv39 en de switcher (`RvCage`, `RvCores`) | `hopos/src/cage_riscv.rs` | QEMU: appspike twee keer door de lifecycle |
+| De kooi: `kern::cage::{Cage, Cores}` als beleid voor beide architecturen (`Kooi`, `KooiCores`), met de riscv-kant over PMP, Sv39 en de switcher (`Rv`) | `hopos/src/kooi.rs`, `hopos/src/cage_riscv.rs` | QEMU: appspike twee keer door de lifecycle |
 | De OS-core: bewoners op het hart van de kern, in zijn idle (de overgang M naar S en terug, de rotatie over sched-blok 0, de wekker op de deadline) | `cpu/src/riscv/oscore.rs`, `idle.rs` (`RvSleeper::host`) | QEMU: zelftest bij elke boot, Hop als bewoner |
 | De zelftest van de kooi (yield, exit, escape, kill-tick, slaper) | `board/qemuvirt-riscv/src/cage.rs` | QEMU, elke boot |
 | applib op riscv64: `_start` in S-mode, de paniek, de timebase van de control-page (`CTRL_TIMEBASE_HZ`) | `applib/src/rt.rs`, `arch.rs`, `clock.rs` | QEMU: appspike 9 van 9 |
@@ -167,8 +167,11 @@ weigert.
 
 Op QEMU bewezen (29-09) door de lifecycle van de kern: appspike in slot 1
 en slot 2, na elkaar op hart 1, elk in zijn eigen partitie achter PMP plus
-Sv39, met al zijn toetsen groen, exit 0 en de bevestigde stop. De lijm
-(`hopos/src/cage_riscv.rs`) naast die van arm64:
+Sv39, met al zijn toetsen groen, exit 0 en de bevestigde stop. Het beleid
+(bouwen, starten, stoppen, intrekken, stil) is voor beide architecturen
+hetzelfde (`hopos/src/kooi.rs`); per ISA verschillen alleen de registers en
+de tabellen (`hopos/src/cage_riscv.rs` naast `cage.rs` van arm64), en de
+bewonerslijst van elke core is één implementatie (`cpu::el2::roster`):
 
 ```text
 ARM (cage.rs)                     RISC-V (cage_riscv.rs)
@@ -240,7 +243,12 @@ zodra hij zijn masker opent, zoals na een `wfi`. De beurt is hooguit 10 ms
 en arm64, met de regel van de switcher van een gedeelde app-core (wie werk
 heeft, een idle is een yield, RX achter de deurbel maakt een slaper meteen
 due, de core slaapt pas als niemand werk heeft); de kern is zelf geen
-bewoner en gaat altijd voor.
+bewoner en gaat altijd voor. Een intrekking op de OS-core is een aanvraag
+plus een kick (`CTX_REVOKE` en `CTX_KICK_PENDING`, `el2::recall`), en
+`el2::next` is de enige plek die er een dode bewoner van maakt, vóór zijn
+volgende beurt en zonder dat hij nog één instructie draait: de terugweg
+(`settle`) leest de intrekking niet, op beide architecturen. Zo doet KVM
+het ook (`KVM_REQ_VM_DEAD`, gelezen in `vcpu_enter_guest`).
 
 De kern gebruikt geen f-registers (0 f-instructies in het image, getoetst
 door `tools/qemu-riscv-test.sh`), dus de overgang bewaart f0..f31 niet: wat
@@ -433,7 +441,7 @@ watchdog of de stroom, en de kaart start de oude kern.
   hart de tijdschijf (10 ms), de enige preemptie in HopOS
   (`tools/qemu-riscv-test-share.sh`).
 - De warme kern-flip op riscv64: de switch-code draait uit het kern-image
-  (op arm64 staat een kopie in de plan-regio), dus `RvCage::adopt` weigert
+  (op arm64 staat een kopie in de plan-regio), dus `cage_riscv::adopt` weigert
   en de flip is alleen koud. Een zwarte doos voor riscv64 ook niet.
 - De LicheeRV: slapen in de switcher (de C906B droeg in Go twee weken
   `wfi`; een soak met deze switcher, dan een slaapgrens in `app_hart`), en een SD-driver (dan `hopos.cfg` naast

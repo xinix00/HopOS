@@ -72,7 +72,7 @@ type RingTx = abi::ring::Writer;
 /// apps foutloos draaide). Niet op RISC-V: de C906 is niet coherent met het
 /// andere hart. Elke ring kopieert pas zonder onderhoud als de tegenpartij
 /// hetzelfde belooft. De ringen van een slot krijgen op Apple en de Radxa
-/// toch Hardware zodra de kooi de staart Normal mapt (`glue::tail_rings`).
+/// toch Hardware zodra de kooi de staart Normal mapt (`kooi::tail_rings`).
 pub(crate) const RINGS: abi::ring::Coherence = if cfg!(all(
     target_arch = "aarch64",
     not(any(feature = "board-apple", feature = "board-rk3566"))
@@ -239,7 +239,7 @@ pub(crate) async fn publish(slot: usize, port: u16) -> Result<(), net::Error> {
 /// `slot` en wacht op `ack`. Elke zender heeft zijn eigen `ack` en stuurt
 /// pas een volgende als de vorige bevestigd is: de plaatsing van Hop
 /// ([`publish`]) en de lifecycle-actor (de poorten van een jobspec,
-/// `glue.rs`). Alleen met een draaiende switch ([`switch_up`]): anders
+/// `kooi.rs`). Alleen met een draaiende switch ([`switch_up`]): anders
 /// leest niemand de brievenbus en duurt de wacht eeuwig.
 pub(crate) async fn publish_via(
     ack: &'static Ack,

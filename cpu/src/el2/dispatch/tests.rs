@@ -3,8 +3,9 @@
 
 use super::*;
 use crate::el2::harness::{Buf, plan};
+use crate::el2::roster::{forget, residents};
 use abi::checksum::fnv64;
-use abi::layout::{CTX_BOOT_PC, CTX_NEXT_PA, CTX_SLEEPS, CTX_SMP, CTX_WAKE_NO_PEEK};
+use abi::layout::{CTX_BOOT_PC, CTX_NEXT_PA, CTX_SLEEPS, CTX_SMP, SCHED_COUNT, SCHED_LIST};
 
 /// Het ctx-blok van context-id `id`: dezelfde rekensom als de switcher
 /// (`hopos_el2_ctx_of`), om [`context_id`] tegen te toetsen.
@@ -315,8 +316,8 @@ fn rx_due_wants_an_armed_door_and_a_head_past_it() {
     let head = Buf::new(64, 64);
     let c = ctx.pa();
     // RX: gewapend en de kop voorbij de drempel.
-    arm_context(c, page.pa(), slot(1), head.base);
-    assert_eq!(ctx_read(c, CTX_KICK_TARGET), CTX_KICK_NONE);
+    ctx_write(c, CTX_CTRL_PA, page.pa().0);
+    ctx_write(c, CTX_RING_HEAD_PA, head.base);
     dev::write64(page.pa().add(CTRL_RX_DOOR), RX_DOOR_ARMED | 10);
     dev::write64(head.pa(), 10);
     assert!(
@@ -378,42 +379,22 @@ fn revoke_clears_the_tables_of_the_slot_only() {
     );
 }
 
-/// De keuze van de rotatie (`switch.rs`, `.Lrotate`), in Rust naast de
-/// assembly gelegd: round-robin vanaf cursor+1, de eerste die boot-pending
-/// is, of Saved en aan de beurt op `now`; met de hercontrole van de byte.
-/// Schrijft wat de switcher schrijft (cursor, current, staat) en geeft de
-/// gekozen context-id, of `None` (slapen of parkeren).
+/// De keuze van de rotatie (`switch.rs`, `.Lrotate`): [`crate::el2::next`]
+/// is dezelfde regel in Rust (round-robin vanaf cursor+1, de eerste die
+/// boot-pending is, of Saved en aan de beurt op `now`). Schrijft wat de
+/// switcher dan schrijft (cursor, current, staat) en geeft de gekozen
+/// context-id, of `None` (slapen of parkeren).
 fn rotate(p: &Plan, c: Core, now: u64) -> Option<u8> {
     let mb = p.park_mbox_pa(c).unwrap();
-    let n = dev::read64(mb.add(SCHED_COUNT)) as usize;
-    let mut cur = dev::read64(mb.add(SCHED_CURSOR)) as usize;
-    for _ in 0..n {
-        cur = (cur + 1) % n;
-        let id = dev::read8(mb.add(SCHED_LIST + cur as u64));
-        if id == 0 {
-            continue;
-        }
-        let ctx = context_pa(p, id).unwrap();
-        let st = ctx_state(ctx);
-        if dev::read8(mb.add(SCHED_LIST + cur as u64)) != id {
-            continue;
-        }
-        let due = match st {
-            Some(CtxState::BootPending) => true,
-            Some(CtxState::Saved) => {
-                let w = ctx_read(ctx, CTX_WAKE) & !CTX_WAKE_NO_PEEK;
-                w == 0 || now >= w
-            }
-            _ => false,
-        };
-        if due {
-            dev::write64(mb.add(SCHED_CURSOR), cur as u64);
+    match crate::el2::next(mb, p.vec_base_pa(), now) {
+        crate::el2::Next::Turn { i, id, ctx, .. } => {
+            dev::write64(mb.add(SCHED_CURSOR), i as u64);
             dev::write64(mb.add(SCHED_CURRENT), u64::from(id));
             ctx_write(ctx, CTX_STATE, CtxState::Running.raw());
-            return Some(id);
+            Some(id)
         }
+        crate::el2::Next::Idle { .. } => None,
     }
-    None
 }
 
 /// Een yield zoals de switcher hem bewaart: Saved met wektijd `wake`.
