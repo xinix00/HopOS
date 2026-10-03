@@ -1094,10 +1094,8 @@ async fn stop(slot: Slot) -> bool {
     })
     .await
     {
-        Ok(_) => {
-            println!("slot {slot}: stopped, partition and core released HOPOS_SLOT_STOPPED");
-            true
-        }
+        // De regel `HOPOS_SLOT_STOPPED` schrijft de actor zelf, bij elke stop.
+        Ok(_) => true,
         Err(e) => {
             println!("slot {slot}: stop: {e} HOPOS_SLOT_STOP_FAIL");
             false

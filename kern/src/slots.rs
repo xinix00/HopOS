@@ -1353,6 +1353,13 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             p.release(&mut self.parts, Stopped::confirmed(slot))?;
         }
         self.places.release(slot);
+        // Eén regel per bevestigde stop, wie hem ook vroeg (Hop, de boot,
+        // een flip): tot 04-10 schreef alleen de boot-plaatsing hem, en een
+        // stop door Hop was op de console onzichtbaar (O6N, een BURN-job in
+        // `system`: geen marker, wel gestopt).
+        self.log.log(format_args!(
+            "slot {slot}: stopped, partition and core released HOPOS_SLOT_STOPPED"
+        ));
         Ok(())
     }
 
