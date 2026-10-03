@@ -164,7 +164,10 @@ na 30 s stil. Elke 10 s een meetregel `dvfs: clock <MHz> (full|quiet), temp
 <C>, busy <bron> HOPOS_CLOCK` (`busy slot 3 (0 permille idle)`, of `none
 (last slot 3, 14 s ago)`), en een regel per flank (`HOPOS_CLOCK_EDGE`, met
 de bron: `(full, busy: slot 3 (...))`). `hopos.clock=dvfs|max|quiet|firmware`
-pint, `hopos.mhz=` klemt het plafond.
+pint, `hopos.mhz=` klemt het plafond. De knoppen: de Pi's de ARM-klok via de
+mailbox, de O6N de `_CPC`-woorden, de Radxa `SCMI_CLK_CPU` van de TF-A met
+vdd_cpu over I2C (`board_rk3566::clock`, 816 tot 1800 MHz); de rest houdt de
+klok van de firmware.
 
 ## Radxa Orion O6N
 

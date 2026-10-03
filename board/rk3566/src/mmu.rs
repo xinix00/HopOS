@@ -14,8 +14,10 @@
 //! nooit in, dus een gat in het DRAM (een bord van 1 GB onder een map van 4
 //! GB) kan geen SError geven.
 //!
-//! - 0x0000_0000 tot 0x0020_0000: TF-A (bl31). Ongemapt: wij blijven eraf,
-//!   en een niet-beveiligde toegang daar faultt.
+//! - 0x0000_0000 tot 0x0020_0000: TF-A (bl31). Device, voor één pagina:
+//!   het SCMI-shmem op 0x0010_f000 dat de TF-A aan de normal world geeft
+//!   (de klok, `clock`; Linux mapt hetzelfde adres). De rest raken we niet
+//!   aan, en Device met XN haalt de CPU nooit speculatief op.
 //! - 0x0020_0000 tot 0x0220_0000: de firmware-keten (U-Boot). Device.
 //! - 0x0220_0000 tot 0x0620_0000: de kern-RAM, Normal WB (64 MB, zoals Go).
 //! - 0x0620_0000 tot 0x0640_0000: de structuren van de kern (control-pages,
@@ -45,7 +47,7 @@ __boot_ttbr0:
 
     .balign 4096
 __boot_l2_lo:
-    .quad 0
+    .quad {dev0}
     .set blk, 1
     .rept {fw_blocks}
     .quad {dev0} + (blk * 0x200000)
@@ -94,7 +96,7 @@ __boot_l2_lo:
 
 /// Eén blok van niveau 2.
 const MB2: u64 = 0x20_0000;
-/// De firmware-blokken na blok 0 (TF-A, ongemapt).
+/// De firmware-blokken na blok 0 (de TF-A, Device).
 const FW_BLOCKS: u64 = (crate::KERN_RAM.base.0 - crate::DRAM_BASE) / MB2;
 /// De kern-RAM.
 const KERN_BLOCKS: u64 = crate::KERN_RAM.size / MB2;

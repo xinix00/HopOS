@@ -112,4 +112,10 @@ fn the_pll_rate_follows_the_linux_table() {
     );
     // Een deler nul is geen klok.
     assert_eq!(soc::pll_hz(68, con1(1, 1), 0), None);
+    // Wat de TF-A na een SCMI-rate achterliet (03-10, met de lock-bit):
+    // 1800 en 816, en de core hangt beide keren aan de APLL.
+    assert_eq!(soc::pll_hz(0x104b, 0x1441, 0), Some(1_800_000_000));
+    assert_eq!(soc::pll_hz(0x2044, 0x1441, 0), Some(816_000_000));
+    assert!(soc::on_apll(0x80c0) && soc::on_apll(0x00c0) && soc::on_apll(0));
+    assert!(!soc::on_apll(0x0040), "bit 6 alone is the GPLL");
 }

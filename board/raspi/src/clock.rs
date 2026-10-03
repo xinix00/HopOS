@@ -109,12 +109,6 @@ pub struct MboxKnob {
 }
 
 impl MboxKnob {
-    /// De standen van deze knop.
-    #[must_use]
-    pub fn plan(&self) -> Plan {
-        self.plan
-    }
-
     /// Zet de ARM-klok; `None` als de mailbox er niet is of weigert.
     fn set(&mut self, hz: u32) -> Option<Level> {
         let mut m = crate::MBOX.borrow_mut();
@@ -126,6 +120,21 @@ impl MboxKnob {
             value: got / 1_000_000,
             unit: "MHz",
         })
+    }
+}
+
+/// De knop voor de regel `HOPOS_CLOCK_UP`.
+impl fmt::Display for MboxKnob {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let p = self.plan;
+        write!(
+            f,
+            "ARM via the mailbox, full {} MHz, quiet {} MHz (firmware min/max {}/{})",
+            p.full_hz / 1_000_000,
+            p.quiet_hz / 1_000_000,
+            p.min_hz / 1_000_000,
+            p.max_hz / 1_000_000
+        )
     }
 }
 

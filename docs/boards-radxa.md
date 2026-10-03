@@ -9,9 +9,10 @@ wat de console moet tonen en wat een afwijking betekent.
 
 | Deel | Waar | Getest |
 | --- | --- | --- |
-| Board: DTB uit x0 naar de heap, geheugen en cores uit de DTB, UART2 (ns16550, stap 4), GIC-600, de klok, het plan, de NIC-probe | `board/rk3566` | 21 host-tests (24 met `gui`): plan, pool uit de banken min de gaten, CRU-, GRF- en iomux-woorden, aff1-nummering, de map-tellingen, de zes van de initrd hieronder, en die van de vier stukken hieronder |
+| Board: DTB uit x0 naar de heap, geheugen en cores uit de DTB, UART2 (ns16550, stap 4), GIC-600, de klok, het plan, de NIC-probe | `board/rk3566` | 28 host-tests (31 met `gui`): plan, pool uit de banken min de gaten, CRU-, GRF- en iomux-woorden, aff1-nummering, de map-tellingen, de zes van de initrd hieronder, en die van de vier stukken hieronder |
 | Watchdog: de DW-WDT gewapend op TOP 15 (89,5 s), geaaid door de watchdog-taak van de kern, de erfenis over een flip (staat ENABLE al, dan alleen TORR en een kick), `hopos.wd=off` pulst SRST_P/T_WDT_NS (zoals Linux' `dw_wdt_stop`) en kijkt of ENABLE valt | `board/rk3566/src/watchdog.rs`, `hopos/src/watchdog.rs` | host-tests op een nep-WDT en nep-CRU in RAM: de TOP-tabel, wapenen (timeout, kick, enable, response mode 0), de erfenis één keer, geen kick zonder pclk, de reset-woorden van `off` |
 | TRNG: `rockchip,rk3568-rng` op 0xFE38_8000 als bron van de DRBG van de kern, gezaaid in `discover` | `driver/rkrng`, `board/rk3566/src/rng.rs`, de klokken en de reset in `soc.rs` | 9 host-tests op een nep-blok met hiword-masker: hele rondes, START maskeert alleen zichzelf, een dood blok is nul en geen entropie, de continue toets, de timeout zet de ring uit |
+| Klok: de cores tussen 816 MHz (850 mV) en 1800 MHz (1150 mV) onder het klokbeleid van de kern. De klok is `SCMI_CLK_CPU` van de TF-A (SMC 0x82000010, shmem 0x0010_f000), zoals in mainline Linux; vdd_cpu is de rk860x op i2c0 0x40 (niet de RK817), via een gepolde rk3x-I2C. Omhoog eerst de spanning, omlaag eerst de klok, nooit een klok boven de teruggelezen spanning | `board/rk3566/src/clock.rs`, `i2c.rs`, `hopos/src/telemetry.rs` | host-tests: de werkpunten van rk3566.dtsi en hun VSEL-codes, welke klok een spanning draagt, het plafond, de ramp, de volgorde, een buck die stopt, een stand of klok zonder antwoord, de I2C-woorden |
 | TSADC: temperatuur (warmste van CPU en GPU) op de tik en de heartbeat | `board/rk3566/src/tsadc.rs`, `hopos/src/telemetry.rs` | host-tests: de rk3568-codetabel met interpolatie, nul is geen meting, het delerwoord is het teruggelezen `0x1715` |
 | usbdrd30: klokken (CLKGATE_CON(10) bit 8..10), reset (SRST_USB3OTG0) en de OTG-poort van usb2phy0 (`phy_sus`), met de gates van usbhost30 als vangrail | `board/rk3566/src/usb.rs` (alleen met `gui`) | host-tests: de gate- en resetwoorden uit clk-rk3568.c en rk3568-cru.h, de vangrail |
 | Hop als bewoner: de initrd draagt `hopos.cfg` én het image (de container), `discover` haalt hem naar de heap en splitst hem, de rol uit `hopos.stage` | `board/rk3566/src/initrd.rs`, `slots.rs`; `image/radxa-initrd.py` | host-tests: de container uit het script (`testdata/mini.ird`), de oude kale config, zonder image, elk fout getal, de rolcodes, de grens |
@@ -157,6 +158,16 @@ b6-image) staat in `image/firmware/radxa/donor-boot.bin` (herkomst in de
    clksel51 .. grf_tsadc_con ..) ... HOPOS_TSADC_NONE`, en de tik houdt
    `temp=-`. Noteer de vier registers: v2 las `0x8fc0`, `0x10033`,
    `0x1715` en `0x107`.
+   Daarna de klok: `dvfs: rk3566 vdd_cpu at i2c0 0x40 id1 0x88: vsel0
+   0x8f = 900 mV (running), vsel1 0x97 = 1000 mV (suspend), i2c clkdiv
+   0x3e003d; core 816 MHz by SCMI, apll 816 MHz by the CRU HOPOS_RK_VDD`
+   (gemeten 03-10), `HOPOS_CLOCK_UP` en de boot-flank `dvfs: rk3566 core
+   816 -> 1800 MHz (apll 816 -> 1800), vdd_cpu 900 -> 1150 mV
+   HOPOS_RK_DVFS`; na 30 s stil `1800 -> 816 ..., vdd_cpu 1150 -> 850 mV`.
+   `HOPOS_CLOCK_NONE` met `vdd_cpu at i2c0 0x40: i2c0 ...` of
+   `SCMI_CLK_CPU via the TF-A: ...` noemt waarom er geen knop is; de klok
+   blijft dan waar U-Boot hem liet. `short of the asked operating point`
+   in de regel: de buck kwam niet op zijn spanning en de klok bleef eronder.
    Met `GUI=1` komt na het net (stap 13) de USB: `usb: usbdrd30 clocked (clkgate10
    0x...0700 -> 0x...0000, softrst9 was .., otg phy_sus .. -> 0x0,
    pipe-grf usb3otg0_con1 ..); it is the USB-C power input: ...` en, als de
@@ -273,10 +284,14 @@ DHCP-lease (hooguit 10 s, `UPLINK_WAIT`; zonder lease
   hardware-thermal-shutdown blijft uit tot er een meting is.
 - usbdrd30 is de USB-C, en dat is ook de voedingsingang: in hostmodus
   levert hij geen VBUS (de boost van de RK817, `OTG_SWITCH`, zit achter
-  I2C, en v3 heeft geen I2C). Een apparaat dat van de bus leeft, heeft daar
+  I2C; v3 praat op i2c0 alleen met vdd_cpu, `board/rk3566/src/i2c.rs`). Een apparaat dat van de bus leeft, heeft daar
   een hub met eigen voeding nodig. De USB3-poort van deze core bestaat op
   de RK3566 niet (geen combphy0); `pipe-grf usb3otg0_con1` in de regel
   zegt hoe U-Boot hem liet.
+- Geen temperatuurrem op de klok: de TSADC geeft geen code, dus de cores
+  blijven onder last op 1800 MHz. Linux remt de rk3566 bij 85 C (passief)
+  en de hardware schakelt bij 95 C uit; hier geen van beide. `hopos.mhz=`
+  klemt het plafond (1416, 1608) als het bord zonder koeling warm wordt.
 - Geen `hopos.cfg`-venster voor raw patchen.
 - De pool eindigt op 0xF000_0000: een bord met 8 GB gebruikt alleen de onderste
   3,75 GB.

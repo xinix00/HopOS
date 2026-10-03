@@ -12,7 +12,8 @@
 //! sensoren (beschrijving en lezing) voor de thermometer, en de power-,
 //! perf- en klok-berichten die de media-kant straks vraagt. DVFS loopt op de
 //! O6N niet hierlangs maar via de SCMI-fastchannels uit de `_CPC` (een
-//! MMIO-woord per domein; `board-o6n`).
+//! MMIO-woord per domein; `board-o6n`); op de Radxa wel: de klok van de
+//! A55's is daar `SCMI_CLK_CPU` van de TF-A (`board-rk3566::clock`).
 //!
 //! Eén aanroeper tegelijk: het kanaal is van wie `&mut` heeft (de
 //! thermiek-taak van het board). De Go-`thermMu` verdwijnt daarmee.
@@ -95,6 +96,7 @@ const POWER_STATE_SET: u8 = 0x04;
 const POWER_STATE_GET: u8 = 0x05;
 const PERF_LEVEL_SET: u8 = 0x07;
 const PERF_LEVEL_GET: u8 = 0x08;
+const CLOCK_RATE_SET: u8 = 0x05;
 const CLOCK_RATE_GET: u8 = 0x06;
 const CLOCK_CONFIG_SET: u8 = 0x07;
 const SENSOR_DESCRIPTION_GET: u8 = 0x03;
@@ -436,6 +438,15 @@ impl Channel {
         let lo = u64::from(w.get(1).copied().unwrap_or(0));
         let hi = u64::from(w.get(2).copied().unwrap_or(0));
         Ok(lo | (hi << 32))
+    }
+
+    /// Zet een klok op `hz`, synchroon (flags 0: het platform antwoordt pas
+    /// als de klok staat, en rondt af naar beneden), zoals Linux'
+    /// `scmi_clock_rate_set`.
+    pub fn set_clock_rate(&mut self, id: u32, hz: u64) -> Result {
+        let (lo, hi) = (hz as u32, (hz >> 32) as u32);
+        self.call(proto::CLOCK, CLOCK_RATE_SET, &[0, id, lo, hi])
+            .map(|_| ())
     }
 
     /// Somt de sensoren op in `out`: per aanroep vanaf index `i` één

@@ -15,9 +15,10 @@
 //! firmware, de Mac mini meet één keer bij de boot (de SMC) en bewaakt zijn
 //! p-states, de Pi's meten en klokken via de VideoCore-mailbox
 //! (`board_raspi::clock`), de Radxa meet met de TSADC van de SoC
-//! (`board_rk3566::tsadc`), de LicheeRV met de TEMPSEN van de SoC
+//! (`board_rk3566::tsadc`) en klokt via SCMI met vdd_cpu over I2C
+//! (`board_rk3566::clock`), de LicheeRV meet met de TEMPSEN van de SoC
 //! (`board_licheerv::temp`), de rest meet (nog) niets. Het beleid leest op de
-//! O6N en de Pi's dezelfde tellers ([`counters`]).
+//! O6N, de Pi's en de Radxa dezelfde tellers ([`counters`]).
 
 use core::sync::atomic::{AtomicI32, Ordering::Relaxed};
 use core::time::Duration;
@@ -85,8 +86,13 @@ async fn thermal(exec: &'static Executor) {
 /// de executor voor de kern (dezelfde als `busy_ms` van de tik en slot 0 van
 /// SLOT_STATUS), en voor elk slot de idle-teller en de status op zijn
 /// control-page en of zijn bewoner de core wil. De last van de node is de
-/// kern plus elke bewoner. Eén keer, voor de O6N en de Pi's.
-#[cfg(any(feature = "board-o6n", feature = "board-rpi4", feature = "board-rpi5"))]
+/// kern plus elke bewoner. Eén keer, voor de O6N, de Pi's en de Radxa.
+#[cfg(any(
+    feature = "board-o6n",
+    feature = "board-rpi4",
+    feature = "board-rpi5",
+    feature = "board-rk3566"
+))]
 mod counters {
     use core::time::Duration;
     use cpu::println;
@@ -141,7 +147,11 @@ mod counters {
         /// De slaap van de executor (ns) in tikken van de teller, het
         /// tempo van de idle-tellers van de slots.
         fn kern_idle(&self) -> u64 {
-            let ns = self.exec.stats.slept_ns.load(core::sync::atomic::Ordering::Relaxed);
+            let ns = self
+                .exec
+                .stats
+                .slept_ns
+                .load(core::sync::atomic::Ordering::Relaxed);
             let ticks = u128::from(ns) * u128::from(cpu::idle::freq()) / 1_000_000_000;
             u64::try_from(ticks).unwrap_or(u64::MAX)
         }
@@ -344,28 +354,23 @@ mod hw {
     }
 }
 
-/// De Pi's: de SoC-temperatuur via de VideoCore-mailbox
-/// (`board_raspi::temp_millic`, dezelfde tag als de bootregel `vcmail:
-/// 58.713 C`), en de ARM-klok als knop via dezelfde mailbox
-/// (`board_raspi::clock`, Go `StartDVFS`).
-#[cfg(any(feature = "board-rpi4", feature = "board-rpi5"))]
-mod hw {
+/// Het klokbeleid met een knop van het board, de boot-flank synchroon vóór
+/// het net: de Pi's (de ARM-klok via de mailbox, `board_raspi::clock`, Go
+/// `StartDVFS`) en de Radxa (SCMI_CLK_CPU met vdd_cpu over I2C,
+/// `board_rk3566::clock`). Eén keer: de knop zegt zelf wat hij is.
+#[cfg(any(
+    feature = "board-rpi4",
+    feature = "board-rpi5",
+    feature = "board-rk3566"
+))]
+mod policy {
     use super::counters::{SOURCES, SlotHost};
     use cpu::println;
     use executor::Executor;
     use vboard::dvfs::{self, Knob, SAMPLE_NS};
 
-    pub(super) fn open() {}
-
-    /// Geen knop hier: niets te doen vóór een flip.
-    /// Milligraden uit de mailbox; 0 = geen meting (de mailbox is nog niet
-    /// open, of de firmware antwoordde niet).
-    pub(super) fn temp() -> i32 {
-        vboard::temp_millic().map_or(0, |t| i32::try_from(t).unwrap_or(0))
-    }
-
     /// Het klokbeleid: `hopos.clock` (`dvfs`, `max`, `quiet`, `firmware`)
-    /// en `hopos.mhz` (het plafond) uit cmdline.txt, zoals op de O6N.
+    /// en `hopos.mhz` (het plafond), zoals op de O6N.
     pub(super) fn governor(exec: &'static Executor) {
         let v = vboard::boot_param("hopos.clock");
         let (hold, ok) = dvfs::hold_of(v);
@@ -379,20 +384,15 @@ mod hw {
             return;
         };
         let mhz = vboard::boot_param("hopos.mhz").parse::<u32>().ok();
-        let knob = match crate::BOARD.clock_knob(mhz) {
+        let mut knob = match crate::BOARD.clock_knob(mhz) {
             Ok(k) => k,
             Err(e) => {
                 println!("dvfs: {e}, the clock stays where the firmware left it HOPOS_CLOCK_NONE");
                 return;
             }
         };
-        let p = knob.plan();
         println!(
-            "dvfs: ARM via the mailbox, full {} MHz, quiet {} MHz (firmware min/max {}/{}), policy {hold:?}, cap {}, sample {} ms, window 50 ms, cooldown 30 s HOPOS_CLOCK_UP",
-            p.full_hz / 1_000_000,
-            p.quiet_hz / 1_000_000,
-            p.min_hz / 1_000_000,
-            p.max_hz / 1_000_000,
+            "dvfs: {knob}, policy {hold:?}, cap {}, sample {} ms, window 50 ms, cooldown 30 s HOPOS_CLOCK_UP",
             mhz.map_or(0, |m| m),
             SAMPLE_NS / 1_000_000
         );
@@ -400,8 +400,8 @@ mod hw {
         // gaat vóór net::start): de NIC-init hoort op de volle klok, zoals op
         // een koude boot. Na een flip vanuit een stille kern (800 MHz)
         // initialiseerde de NIC op 800 en sprong de klok er meteen na, en
-        // twee keer meldde de NIC daarna nooit meer (30-09, generatie 2).
-        let mut knob = knob;
+        // twee keer meldde de NIC daarna nooit meer (30-09, generatie 2, de
+        // Pi's).
         let level = knob.full();
         match level {
             Some(l) => println!("dvfs: -> {l} (full, boot) HOPOS_CLOCK_EDGE"),
@@ -420,8 +420,8 @@ mod hw {
 
     /// De klok vol vlak vóór de sprong van een flip (flip.rs): de
     /// vertrekkende kern laat de nieuwe niet op een stille klok landen. Een
-    /// eigen knop op dezelfde mailbox; de governor-taak komt niet meer aan
-    /// de beurt.
+    /// eigen knop op dezelfde mailbox of bus; de governor-taak komt niet
+    /// meer aan de beurt.
     pub(super) fn full_for_flip() {
         if let Ok(mut k) = crate::BOARD.clock_knob(None) {
             match k.full() {
@@ -432,14 +432,30 @@ mod hw {
     }
 }
 
+/// De Pi's: de SoC-temperatuur via de VideoCore-mailbox
+/// (`board_raspi::temp_millic`, dezelfde tag als de bootregel `vcmail:
+/// 58.713 C`), en de ARM-klok als knop via dezelfde mailbox ([`policy`]).
+#[cfg(any(feature = "board-rpi4", feature = "board-rpi5"))]
+mod hw {
+    pub(super) use super::policy::{full_for_flip, governor};
+
+    pub(super) fn open() {}
+
+    /// Milligraden uit de mailbox; 0 = geen meting (de mailbox is nog niet
+    /// open, of de firmware antwoordde niet).
+    pub(super) fn temp() -> i32 {
+        vboard::temp_millic().map_or(0, |t| i32::try_from(t).unwrap_or(0))
+    }
+}
+
 /// De Radxa: de TSADC van de SoC (`board_rk3566::tsadc`), het warmste van
-/// de twee kanalen (CPU en GPU); geen knop, de klok blijft waar U-Boot hem
-/// liet. De sensor gaf in Go nooit een conversie (06-08); `open` zegt in
-/// één regel wat hij nu teruggeeft.
+/// de twee kanalen (CPU en GPU), en de klok via SCMI met vdd_cpu over I2C
+/// ([`policy`]). De sensor gaf in Go nooit een conversie (06-08); `open`
+/// zegt in één regel wat hij nu teruggeeft. Zonder meting geen rem: de
+/// knop gaat tot 1800 MHz (`board_rk3566::clock`).
 #[cfg(feature = "board-rk3566")]
 mod hw {
-    use cpu::println;
-    use executor::Executor;
+    pub(super) use super::policy::{full_for_flip, governor};
 
     /// Brengt de sensor op (busy-waits van ~5 ms, één keer bij de boot) en
     /// meldt de eerste lezing.
@@ -447,23 +463,9 @@ mod hw {
         vboard::tsadc::open();
     }
 
-    /// Geen knop hier: niets te doen vóór een flip.
-    pub(super) fn full_for_flip() {}
-
     /// Milligraden; 0 = geen geldige code.
     pub(super) fn temp() -> i32 {
         vboard::tsadc::temp_millic().unwrap_or(0)
-    }
-
-    /// Geen knop, wel de klok die de firmware liet (de CRU, alleen gelezen):
-    /// app naar app is hier begrensd door de ene kopie op de OS-core, dus
-    /// dit getal is de grens (01-10, RX1: 258 tot 262 MB/s met de OS-core
-    /// vol).
-    pub(super) fn governor(_exec: &'static Executor) {
-        let mhz = vboard::soc::core_hz().map_or(0, |hz| hz / 1_000_000);
-        println!(
-            "dvfs: no clock knob on this board, the firmware keeps its clock: core 0 at {mhz} MHz HOPOS_CLOCK_NONE"
-        );
     }
 }
 

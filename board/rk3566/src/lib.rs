@@ -14,8 +14,9 @@
 //! Dit crate bezit de adressen van het board (RK3566-TRM en
 //! rk356x-base.dtsi), de identity map, het plan, de bedrading van de
 //! drivers en de SoC-glue eronder ([`soc`]), de watchdog ([`watchdog`]), de
-//! temperatuursensor ([`tsadc`]) en het TRNG als bron van de DRBG van de
-//! kern (`rng`). De drivers kennen geen adres.
+//! temperatuursensor ([`tsadc`]), de klokknop ([`clock`], met de I2C-bus
+//! van vdd_cpu in [`i2c`]) en het TRNG als bron van de DRBG van de kern
+//! (`rng`). De drivers kennen geen adres.
 //!
 //! De DTB en de initrd worden bij [`Board::discover`] naar de heap
 //! gekopieerd: U-Boot legt ze in DRAM dat de identity map als Device mapt
@@ -35,8 +36,10 @@
 
 extern crate alloc;
 
+pub mod clock;
 #[cfg(feature = "gui")]
 mod display;
+pub mod i2c;
 pub mod initrd;
 mod mmu;
 mod rng;
@@ -74,6 +77,8 @@ use driver_stmmac::dwmac4::{self, CSR_100_150M, Dwmac4, IrqAck, Probe};
 use fw::fdt::Fdt;
 use netdev::Mac;
 use sync::{Local, Signal};
+
+pub use driver_dvfs as dvfs;
 
 /// De schijf die `probe_disk` geeft: geen, want er is nog geen SD-driver
 /// ([`board::NoDisk`]). De binary noemt hem `vboard::Disk`, zodat de
@@ -468,6 +473,14 @@ impl Rk3566 {
     /// luid.
     pub fn probe_disk(&self) -> Result<Option<NoDisk>, Error> {
         Ok(None)
+    }
+
+    /// De klokknop voor het klokbeleid: SCMI_CLK_CPU van de TF-A met vdd_cpu
+    /// over i2c0, begrensd op `mhz` (`hopos.mhz`). Een reden als de spanning
+    /// niet terug te lezen is of de klok niet antwoordt: dan blijft alles
+    /// waar U-Boot het liet.
+    pub fn clock_knob(&self, mhz: Option<u32>) -> Result<clock::RkKnob<clock::Hw>, clock::Error> {
+        clock::knob(mhz)
     }
 
     /// De fysieke index van de core waar dit draait.

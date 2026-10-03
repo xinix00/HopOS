@@ -144,7 +144,7 @@ pub fn gmac_clocks() -> (u32, u32, u32) {
     )
 }
 
-// --- CRU: de klok van de cores (alleen gelezen) ----------------------------
+// --- CRU: de klok van de cores (alleen gelezen; de knop is SCMI, `clock`) ---
 
 /// `RK3568_PLL_CON(0)` en verder: de APLL (`pll_rk3328` in clk-rk3568.c,
 /// de velden van `RK3036_PLLCON` in clk-pll.c).
@@ -154,7 +154,8 @@ const APLL_CON2: u64 = 0x0008;
 /// `RK3568_MODE_CON0`: [1:0] de modus van de APLL (0 xin24m, 1 de PLL).
 const MODE_CON0: u64 = 0x00C0;
 /// `RK3568_CLKSEL_CON(0)`: [4:0] de deler van core 0, bit 6 de bron (0 de
-/// APLL, 1 de GPLL), `rk3568_cpuclk_data`.
+/// APLL, 1 de GPLL, `rk3568_cpuclk_data`), bit 7 de APLL rechtstreeks
+/// (U-Boot `CLK_CORE_PRE_SEL_APLL`).
 const CLKSEL0: u64 = 0x100;
 
 /// De rate van een PLL van dit type bij een kristal van 24 MHz, zoals
@@ -174,14 +175,23 @@ pub fn pll_hz(con0: u32, con1: u32, con2: u32) -> Option<u64> {
     vco.checked_div(post1)?.checked_div(post2)
 }
 
-/// De klok van core 0 zoals de firmware hem liet (U-Boot en TF-A; deze
-/// kern heeft hier geen knop): `None` als de core niet aan de APLL hangt
-/// of een deler nul leest.
+/// Hangt core 0 met dit `CLKSEL_CON(0)` aan de APLL? Bit 7 kiest hem
+/// rechtstreeks, anders kiest bit 6 tussen APLL en GPLL. GEMETEN 03-10: na
+/// U-Boot staan beide uit; na een SCMI-rate zet de TF-A 0x80c0 (1800) of
+/// 0x00c0 (816), en de APLL staat dan precies op de gevraagde rate.
+#[must_use]
+pub fn on_apll(sel: u32) -> bool {
+    sel & (1 << 7) != 0 || sel & (1 << 6) == 0
+}
+
+/// De klok van core 0 zoals de CRU hem leest: een tweede getuige naast
+/// wat de TF-A over SCMI meldt (`clock`), die de APLL zelf verzet. `None`
+/// als de core niet aan de APLL hangt of een deler nul leest.
 #[must_use]
 pub fn core_hz() -> Option<u64> {
     let r = |off| dev::read32(CRU.add(off));
     let sel = r(CLKSEL0);
-    if sel & (1 << 6) != 0 {
+    if !on_apll(sel) {
         return None;
     }
     let apll = if r(MODE_CON0) & 0x3 == 1 {

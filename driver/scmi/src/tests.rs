@@ -160,6 +160,13 @@ fn short_replies_are_errors_not_zeroes() {
     assert_eq!(&p[..3], &[0x11, 0x13, 0x15]);
     c.power_set(7, POWER_ON).unwrap();
     assert_eq!(seen().last().unwrap().2, vec![0, 7, POWER_ON]);
+    // Synchroon (flags 0), laag woord eerst: de vorm van Linux.
+    c.set_clock_rate(0, 0x1_6b49_d200).unwrap();
+    assert_eq!(
+        seen().last().unwrap().2,
+        vec![0, 0, 0x6b49_d200, 1],
+        "flags, id, rate"
+    );
 }
 
 #[test]
