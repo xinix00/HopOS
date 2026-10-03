@@ -71,6 +71,9 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Meten
 
+- [ ] O6N vitals cpu 299 Msteps/s per core (03-10) tegen 855 op 30-09: dvfs
+      staat op 800 MHz "quiet" en komt bij de brand niet omhoog; de
+      edge-regel van dvfs bij een rekenaar nalopen, dan opnieuw meten.
 - [ ] Storm door de NAT (hairpin) stokt 1 s per ronde op de Pi 4 (p99 1 s):
       verdacht de listen-backlog van 8 in leannet.
 - [ ] Radxa over de draad ~21 MB/s (Go 56 in, 99 uit); Pi 5 uit ~43 MB/s.
