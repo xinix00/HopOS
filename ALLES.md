@@ -56,9 +56,6 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       een eigen core 21 tot 47 us; op de O6N (A720, O4) 301 us tegen 42 op
       eigen cores. De rest zit in de wissel zelf (VTTBR/satp, TLB, de
       kernronde): profileren per beurt, dan pas snoeien.
-- [ ] Plaatsing zonder `core-class`: eerst de grote cores, dan de kleine. Op
-      de O6N zijn core 1 tot 4 de A520's, dus een job zonder tag krijgt een
-      kleine core (vitals 299 Msteps/s; met `core-class` big 754, dvfs vol).
 - [ ] Pi 4 hairpin door de NAT: 1 s hik per ronde (listen-backlog 8 in
       leannet).
 - [ ] Hop: een koude flip eerst aan de kern vragen (een proef zonder te
