@@ -308,6 +308,11 @@ impl fmt::Display for Describe {
 pub struct Its {
     base: Pa,
     mem: Pa,
+    /// De LPI-configuratietabel van de redistributor: de eigen, of die van
+    /// de eerste ITS ([`Its::beside`]).
+    prop: Pa,
+    /// De eerste LPI die deze ITS uitdeelt.
+    lpi_base: u32,
     /// Waar het volgende commando komt (offset in de rij).
     cwriter: u64,
     /// Het RDbase-veld van de kern-core, voor MAPC en SYNC.
@@ -337,6 +342,8 @@ impl Its {
         Self {
             base,
             mem,
+            prop: mem.add(PROP_OFF),
+            lpi_base: crate::FIRST_LPI,
             cwriter: 0,
             rd: 0,
             ite: 8,
@@ -348,6 +355,25 @@ impl Its {
         }
     }
 
+    /// Een tweede ITS naast een eerste op dezelfde redistributor (een SoC
+    /// met een ITS per root-complex, de Altra): de LPI-configuratie is die
+    /// van de redistributor, dus van de eerste (`prop`), en de LPI-nummers
+    /// komen uit een eigen stuk vanaf `lpi_base`, zodat twee ITS'en nooit
+    /// dezelfde LPI uitdelen. Zijn eigen pending- en configuratiestuk in
+    /// `mem` blijft dan ongebruikt; [`Its::clear`] raakt alleen `mem`.
+    #[must_use]
+    pub const fn beside(mut self, prop: Pa, lpi_base: u32) -> Self {
+        self.prop = prop;
+        self.lpi_base = lpi_base;
+        self
+    }
+
+    /// Het GITS-frame.
+    #[must_use]
+    pub const fn base(&self) -> Pa {
+        self.base
+    }
+
     fn g(&self) -> &'static Gits {
         // SAFETY: de invariant van `Its`.
         unsafe { dev::regs(self.base) }
@@ -356,7 +382,7 @@ impl Its {
     /// De LPI-configuratietabel voor [`crate::Gic::enable_lpis`].
     #[must_use]
     pub const fn prop_table(&self) -> Pa {
-        self.mem.add(PROP_OFF)
+        self.prop
     }
 
     /// De pending-tabel voor [`crate::Gic::enable_lpis`].
@@ -611,7 +637,7 @@ impl Its {
             .iter()
             .position(Option::is_none)
             .ok_or(Error::Full)?;
-        let lpi = crate::FIRST_LPI + slot as u32;
+        let lpi = self.lpi_base + slot as u32;
         let mut cmds: [Command; 5] = [[0; 4]; 5];
         let mut n = 0;
         if !self.devices.contains(&Some(dev)) {
@@ -819,6 +845,41 @@ mod tests {
         // Een tweede in dezelfde pagina hergebruikt hem.
         its.cover(0x3_0011).unwrap();
         assert_eq!(its.l2_next, 1);
+    }
+
+    /// Een tweede ITS naast de eerste (de Altra: een per root-complex):
+    /// zijn configuratiebyte landt in de tabel van de eerste, zijn LPI's
+    /// komen uit zijn eigen stuk, en zijn `clear` laat die tabel staan.
+    #[test]
+    fn a_second_its_shares_the_prop_table_and_not_the_lpis() {
+        let dev_baser = (BASER_TYPE_DEVICES << 56) | (7 << 48);
+        let mut a = Fake::new(TYPER, &[dev_baser]);
+        let mut b = Fake::new(TYPER, &[dev_baser]);
+        // SAFETY: frames en regio's liggen in `a` en `b`.
+        let first = unsafe { Its::new(a.base(), a.mem()) };
+        // SAFETY: zie hierboven.
+        let mut second = unsafe { Its::new(b.base(), b.mem()) }
+            .beside(first.prop_table(), crate::FIRST_LPI + MAX_LPIS as u32);
+        assert_eq!(second.base(), b.base());
+        dev::write8(first.prop_table(), 0x55);
+        second.clear();
+        assert_eq!(
+            dev::read8(first.prop_table()),
+            0x55,
+            "not cleared by the second"
+        );
+        let _ = second.init(Pa(0), 0);
+        let at = second.cwriter;
+        dev::write64(b.base().add(0x90), at);
+        let _ = second.route(0x70100 & 0xffff, 0);
+        let lpi = crate::FIRST_LPI + MAX_LPIS as u32;
+        assert_eq!(
+            dev::read8(first.prop_table().add(u64::from(lpi - crate::FIRST_LPI))),
+            LPI_PRIO | 1
+        );
+        let mem = b.mem();
+        let q = |i: u64, w: u64| dev::read64(mem.add(CMDQ_OFF + at + 32 * i + 8 * w));
+        assert_eq!(q(1, 1), u64::from(lpi) << 32, "MAPTI with the second's LPI");
     }
 
     #[test]

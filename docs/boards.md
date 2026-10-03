@@ -64,9 +64,14 @@ volgorde (`board_uefi::irq`, `hopos.nicirq=auto`):
    (`ITS_DMA`, Normal-NC), één collectie op de redistributor van de
    OS-core, per device `MAPD`/`MAPTI`, vector 0 in de MSI-X-tabel. De
    DeviceID komt uit de IORT (root-complex, eventueel door een SMMU, naar
-   de ITS-groep). Zonder IORT-weg geen MSI-X (een verkeerde DeviceID is
-   stil: de ITS gooit de schrijf weg), tenzij `hopos.nicirq=msix` de gok
-   DeviceID = requester-id afdwingt.
+   de ITS-groep). Noemt die groep een andere ITS dan de eerste uit de MADT
+   (de Altra: acht, een per root-complex), dan komt die ITS erbij op
+   (`HOPOS_ITS_MORE`; eigen tabellen in `ITS_MORE_DMA`, de LPI-configuratie
+   en de redistributor gedeeld, een eigen stuk LPI-nummers) en krijgt het
+   device zijn doorbell: een MSI naar de doorbell van een andere ITS komt
+   nooit aan (A7g, 03-10). Zonder IORT-weg geen MSI-X (een verkeerde
+   DeviceID is stil: de ITS gooit de schrijf weg), tenzij
+   `hopos.nicirq=msix` de gok DeviceID = requester-id afdwingt.
 2. **INTx uit de `_PRT`** van de host-bridge (`fw::aml`: een minimale lezer
    die alleen statische `_PRT`-pakketten leest en een methode of een
    link-device luid weigert), na de swizzle door de bridges. Op de O6N zegt
@@ -318,7 +323,9 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
   `HOPOS_UEFI_MAP_DROPPED` met het aantal stukken en de MB's.
 - `boot: HopOS v3.0.0 on altra, EL2, 128 cores (big) ... HOPOS_BOOT` (of 80,
   afhankelijk van de SKU).
-- `net: igb 8086:1533 at ... link 1000 Mbps full duplex, MSI-X via the ITS, LPI 8192 (DeviceID 0x...), first interrupt after N us, pump on the line with a 10 ms guard HOPOS_NIC_IRQ`,
+- `irq: ITS IIDR ... doorbell 0x100100130040, for 01:00.0 (the IORT's ITS for its root complex), collection on the redistributor at ... HOPOS_ITS_MORE`
+  (de igb hangt aan ITS 7 van de acht),
+- `net: igb 8086:1533 at ... link 1000 Mbps full duplex, MSI-X via the ITS, LPI 8224 (DeviceID 0x70100), first interrupt after N us, pump on the line with a 10 ms guard HOPOS_NIC_IRQ`,
   dan `HOPOS_NIC_UP`, `HOPOS_NET_PUMP` met `irq line, 10 ms guard` en
   `HOPOS_NET_UP`. Komt de afgevuurde vector niet aan:
   `polled (the forced interrupt (EICS) did not arrive within 50 ms)`.

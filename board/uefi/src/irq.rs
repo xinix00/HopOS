@@ -1,7 +1,9 @@
 //! Interrupts over PCI op een UEFI-machine: MSI-X via de GICv3-ITS, en
 //! INTx via de `_PRT` als terugval.
 //!
-//! Dit bezit de ITS (zijn tabellen in [`crate::ITS_DMA`]) en de keuze per
+//! Dit bezit de ITS'en (de eerste uit de MADT met zijn tabellen in
+//! [`crate::ITS_DMA`], en zo nodig de ITS die de IORT voor het root-complex
+//! van een device noemt, in [`crate::ITS_MORE_DMA`]) en de keuze per
 //! device: `hopos.nicirq` (`auto`, `msix`, `intx`, `off` of een INTID) en
 //! de volgorde MSI-X, dan INTx, dan pollen. Het resultaat is altijd een
 //! lijn in [`crate::Uefi::enable_line`] (een LPI of een SPI) plus een bel;
@@ -22,17 +24,28 @@
 use crate::facts;
 use board::Error;
 use core::cell::RefCell;
-use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use dev::Pa;
 use driver_gicv3::its::Its;
 use driver_gicv3::{FIRST_LPI, Gic, Icc};
 use driver_pcie::{Ecam, Function, MsixTable};
 use sync::{Local, Signal};
 
-/// De ITS, zodra [`start_its`] hem opzette. Alleen de executor van de
-/// kern-core raakt hem aan (boot, en het bedraden van een device), en de
-/// lening loopt nooit over een `.await`.
-static ITS: Local<RefCell<Option<Its>>> = Local::new(RefCell::new(None));
+/// Hoeveel ITS'en we opzetten: de eerste uit de MADT plus wat in
+/// [`crate::ITS_MORE_DMA`] past.
+const ITS_MAX: usize = 1 + crate::ITS_MORE;
+
+/// De ITS'en: plek 0 is de eerste uit de MADT, zodra [`start_its`] hem
+/// opzette; de rest komt erbij als een device een andere ITS heeft
+/// ([`its_for`]). Alleen de executor van de kern-core raakt ze aan (boot,
+/// en het bedraden van een device), en de lening loopt nooit over een
+/// `.await`.
+static ITS: Local<RefCell<[Option<Its>; ITS_MAX]>> =
+    Local::new(RefCell::new([const { None }; ITS_MAX]));
+
+/// De redistributor van de kern-core (RD_base en GICR_TYPER), voor de
+/// collectie van een ITS die later opkomt.
+static RD: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 
 /// Stonden de LPI's al aan toen [`start_its`] liep (een warme flip): dan
 /// houdt de redistributor de tabellen van de vorige kern (op hetzelfde
@@ -67,6 +80,8 @@ pub(crate) fn start_its<I: Icc>(gic: &Gic<I>) {
         }
     }
     let (rd, typer) = gic.redistributor();
+    RD[0].store(rd.0, Relaxed);
+    RD[1].store(typer, Relaxed);
     match its.init(rd, typer) {
         Ok(d) => {
             cpu::println!(
@@ -74,7 +89,9 @@ pub(crate) fn start_its<I: Icc>(gic: &Gic<I>) {
                 if reused { "reused" } else { "enabled" },
                 rd.0
             );
-            *ITS.get().borrow_mut() = Some(its);
+            if let Some(s) = ITS.get().borrow_mut().first_mut() {
+                *s = Some(its);
+            }
         }
         Err(e) => cpu::println!("irq: {e}, PCI devices use INTx or poll HOPOS_ITS_FAIL"),
     }
@@ -82,13 +99,99 @@ pub(crate) fn start_its<I: Icc>(gic: &Gic<I>) {
 
 /// Zet een LPI aan (de lijn van [`crate::Uefi::enable_line`]).
 pub(crate) fn enable_lpi(lpi: u32) -> Result<(), Error> {
-    let mut its = ITS.get().borrow_mut();
-    let its = its.as_mut().ok_or(Error::Irq("LPI without an ITS"))?;
+    let mut list = ITS.get().borrow_mut();
+    let its = list
+        .iter_mut()
+        .flatten()
+        .find(|i| i.owns(lpi))
+        .ok_or(Error::Irq("LPI not routed by an ITS"))?;
     match its.enable(lpi, true) {
         Ok(true) => Ok(()),
         Ok(false) => Err(Error::Irq("LPI not routed by this ITS")),
         Err(_) => Err(Error::Irq("ITS refused the LPI")),
     }
+}
+
+/// Het frame van de ITS die de IORT voor het root-complex van `at` noemt
+/// (de GIC ITS ID van de ITS-groep, opgezocht in de MADT); anders de eerste
+/// uit de MADT. De Altra heeft een ITS per root-complex, en een MSI naar de
+/// doorbell van een andere komt nooit aan (A7g, 03-10: de igb op segment 5
+/// hoort bij ITS 7, de schrijf naar ITS 0 verdween; een `INT` vanuit ITS 0
+/// kwam wel).
+fn its_base_for(at: &At<'_>) -> u64 {
+    let named = facts::tables(*b"IORT")
+        .next()
+        .and_then(|t| fw::acpi::iort_route(t, at.seg, rid(at.f)))
+        .and_then(|r| r.its.1);
+    let madt = facts::tables(*b"APIC")
+        .next()
+        .and_then(|t| fw::acpi::Madt::new(t).ok());
+    pick_its(
+        facts::ITS.load(Relaxed),
+        named,
+        madt.iter().flat_map(fw::acpi::Madt::its_ids),
+    )
+}
+
+/// De keuze van [`its_base_for`]: de basis van de ITS met GIC ITS ID
+/// `named` uit `madt`, anders `first`.
+fn pick_its(first: u64, named: Option<u32>, mut madt: impl Iterator<Item = (u32, u64)>) -> u64 {
+    named
+        .and_then(|id| madt.find(|&(i, _)| i == id))
+        .map_or(first, |(_, base)| base)
+}
+
+/// De plek in [`ITS`] van de ITS op `base`, die zo nodig nu opkomt: eigen
+/// tabellen en commandorij in [`crate::ITS_MORE_DMA`], de
+/// LPI-configuratie van de redistributor (die van de eerste ITS), een eigen
+/// stuk LPI-nummers, en collectie 0 op dezelfde redistributor (Linux doet
+/// zo elke ITS-knoop op in `its_probe_one`). Eén regel op de console.
+fn its_for(base: u64, bdf: driver_pcie::Bdf) -> Result<usize, &'static str> {
+    let mut list = ITS.get().borrow_mut();
+    if let Some(i) = list
+        .iter()
+        .position(|s| s.as_ref().is_some_and(|i| i.base().0 == base))
+    {
+        return Ok(i);
+    }
+    let prop = list
+        .first()
+        .and_then(Option::as_ref)
+        .map(Its::prop_table)
+        .ok_or("no ITS")?;
+    let slot = list
+        .iter()
+        .position(Option::is_none)
+        .ok_or("no room for another ITS")?;
+    if !crate::map_device(base, 0x2_0000) {
+        return Err("the device's ITS is unreachable");
+    }
+    let mem = crate::ITS_MORE_DMA
+        .base
+        .add((slot as u64 - 1) * driver_gicv3::its::MEM_LEN);
+    // SAFETY: het frame komt uit de MADT (de ITS die de IORT noemt) en is nu
+    // Device-gemapt; `mem` is plek `slot - 1` van ITS_MORE_DMA, 64 KB-
+    // gealigneerd, Normal-NC, en alleen van deze ITS (elke plek één keer).
+    let mut its = unsafe { Its::new(Pa(base), mem) }.beside(
+        prop,
+        FIRST_LPI + (slot * driver_gicv3::its::MAX_LPIS) as u32,
+    );
+    its.clear();
+    let rd = Pa(RD[0].load(Relaxed));
+    match its.init(rd, RD[1].load(Relaxed)) {
+        Ok(d) => cpu::println!(
+            "irq: {d}, for {bdf} (the IORT's ITS for its root complex), collection on the redistributor at {:#x} HOPOS_ITS_MORE",
+            rd.0
+        ),
+        Err(e) => {
+            cpu::println!("irq: ITS at {base:#x} for {bdf}: {e} HOPOS_ITS_FAIL");
+            return Err("the device's ITS did not come up");
+        }
+    }
+    if let Some(s) = list.get_mut(slot) {
+        *s = Some(its);
+    }
+    Ok(slot)
 }
 
 /// Is `id` een LPI (en geen SPI, PPI of SGI)?
@@ -218,9 +321,10 @@ pub fn wire_msix(
     if !crate::map_device(table, 16 * u64::from(m.size)) {
         return Err("MSI-X table unreachable");
     }
+    let k = its_for(its_base_for(at), at.f.bdf)?;
     let (lpi, doorbell) = {
-        let mut its = ITS.get().borrow_mut();
-        let its = its.as_mut().ok_or("no ITS")?;
+        let mut list = ITS.get().borrow_mut();
+        let its = list.get_mut(k).and_then(Option::as_mut).ok_or("no ITS")?;
         let lpi = its.route(dev_id, 0).map_err(|e| {
             cpu::println!("irq: {} DeviceID {dev_id:#x}: {e}", at.f.bdf);
             "ITS refused the device"
@@ -311,8 +415,12 @@ pub fn nic_mode(dflt: Mode) -> Mode {
 /// device. Komt hij hierop wel en op de MSI van het device niet, dan zit
 /// de fout tussen device en ITS (doorbell, DeviceID, SMMU).
 pub fn its_fire(dev_id: u32) -> Result<(), &'static str> {
-    let mut its = ITS.get().borrow_mut();
-    let its = its.as_mut().ok_or("no ITS")?;
+    let mut list = ITS.get().borrow_mut();
+    let its = list
+        .iter_mut()
+        .flatten()
+        .find(|i| i.routed(dev_id, 0).is_some())
+        .ok_or("not routed in this kernel")?;
     match its.fire(dev_id, 0) {
         Ok(true) => Ok(()),
         Ok(false) => Err("not routed in this kernel"),
@@ -337,7 +445,16 @@ pub fn msix_diag(at: &At<'_>, dev_id: u32) -> MsixDiag {
         }
         _ => None,
     };
-    let ours = facts::ITS.load(Relaxed);
+    // De ITS die de device-route heeft, anders de eerste.
+    let list = ITS.get().borrow();
+    let mine = list
+        .iter()
+        .flatten()
+        .find(|i| i.routed(dev_id, 0).is_some())
+        .or_else(|| list.first().and_then(Option::as_ref));
+    let ours = mine.map_or(facts::ITS.load(Relaxed), |i| i.base().0);
+    let (routed, state) = mine.map_or((None, (0, 0, 0)), |i| (i.routed(dev_id, 0), i.state()));
+    drop(list);
     let mut its_n = 0u32;
     let (mut ours_id, mut named_base) = (None, None);
     if let Some(m) = facts::tables(*b"APIC")
@@ -354,11 +471,6 @@ pub fn msix_diag(at: &At<'_>, dev_id: u32) -> MsixDiag {
             }
         }
     }
-    let (routed, state) = ITS
-        .get()
-        .borrow()
-        .as_ref()
-        .map_or((None, (0, 0, 0)), |i| (i.routed(dev_id, 0), i.state()));
     let m = at.f.msix(e);
     let entry = m.and_then(|m| {
         let t = at.f.msix_table_addr(e, &m)?;
@@ -510,6 +622,30 @@ pub fn no_ack() {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_iorts_its_wins_over_the_first() {
+        let madt = [(0, 0x1001_0004_0000), (7, 0x1001_0012_0000)];
+        // De Altra: de igb op segment 5 hoort bij ITS 7.
+        assert_eq!(
+            pick_its(0x1001_0004_0000, Some(7), madt.into_iter()),
+            0x1001_0012_0000
+        );
+        // QEMU en de O6N: één ITS, de IORT noemt hem.
+        assert_eq!(
+            pick_its(0x808_0000, Some(0), [(0, 0x808_0000)].into_iter()),
+            0x808_0000
+        );
+        // Geen IORT-weg, of een ID die de MADT niet kent: de eerste.
+        assert_eq!(
+            pick_its(0x1001_0004_0000, None, madt.into_iter()),
+            0x1001_0004_0000
+        );
+        assert_eq!(
+            pick_its(0x1001_0004_0000, Some(3), madt.into_iter()),
+            0x1001_0004_0000
+        );
+    }
 
     #[test]
     fn the_config_picks_the_mode() {

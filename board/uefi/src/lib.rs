@@ -159,10 +159,24 @@ pub const DMA: Region = Region {
     size: 0x0100_0000,
 };
 
-/// De NIC-helft van de DMA-regio, min de laatste MB (de ITS).
+/// De NIC-helft van de DMA-regio, min de laatste 3 MB (de ITS'en). Een
+/// NIC-driver vraagt hoogstens 2 MB plus 640 KB (rtl8126, igb: `DMA_NEED`).
 pub const NET_DMA: Region = Region {
     base: Pa(WINDOW_PA + 0x0e00_0000),
-    size: 0x0070_0000,
+    size: 0x0050_0000,
+};
+
+/// Hoeveel ITS'en er naast de eerste op kunnen (`irq`): een device waarvan
+/// de IORT een andere ITS noemt dan de eerste uit de MADT (de Altra: een
+/// per root-complex), elk met 1 MB tabellen.
+pub const ITS_MORE: usize = 2;
+
+/// De tabellen van die ITS'en, vóór [`ITS_DMA`]. Die van de eerste blijft
+/// waar hij was: na een warme flip wijst de redistributor nog naar zijn
+/// LPI-configuratie.
+pub const ITS_MORE_DMA: Region = Region {
+    base: Pa(WINDOW_PA + 0x0e50_0000),
+    size: ITS_MORE as u64 * driver_gicv3::its::MEM_LEN,
 };
 
 /// Het bufferblok van de NIC binnen [`NET_DMA`]: het tweede blok van 2 MB,
@@ -222,7 +236,9 @@ pub const LOADER: Region = Region {
 const _: () = {
     assert!(HEAP.end().0 == TABLES.base.0 && TABLES.end().0 == KERN_RAM.end().0);
     assert!(KERN_RAM.end().0 == DMA.base.0 && DMA.end().0 == ADMIN.base.0);
-    assert!(NET_DMA.base.0 == DMA.base.0 && NET_DMA.end().0 == ITS_DMA.base.0);
+    assert!(NET_DMA.base.0 == DMA.base.0 && NET_DMA.end().0 == ITS_MORE_DMA.base.0);
+    assert!(ITS_MORE_DMA.end().0 == ITS_DMA.base.0);
+    assert!(ITS_MORE_DMA.base.0.is_multiple_of(0x1_0000));
     assert!(NET_BUF.base.0 > NET_DMA.base.0 && NET_BUF.end().0 <= NET_DMA.end().0);
     assert!(NET_BUF.base.0.is_multiple_of(2 << 20) && NET_BUF.size == 2 << 20);
     assert!(ITS_DMA.end().0 == BLK_DMA.base.0);
