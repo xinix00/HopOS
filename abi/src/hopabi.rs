@@ -95,6 +95,16 @@ pub const CTRL_SMP_MBOX: u64 = 0xD0;
 /// levende registers, geen afgeleide kopie: de 39-bit-standaard kon de
 /// Altra-UART op 16 TB niet vertalen, gemeten 17-07).
 pub const CTRL_SMP_TCR: u64 = 0xD8;
+/// Kern naar app: deelt dit slot het hart van de kern ([`HART_MAGIC`]
+/// bovenin, [`HART_KERN`] onderin; [`shares_kern_hart`] leest hem)? Dan
+/// draaien app en kern in één cache, en kan de app zijn frame-ringen
+/// zonder onderhoud beloven ([`crate::ring::Coherence::Hardware`]), ook op
+/// een architectuur waar de harts onderling niet coherent zijn (de C906 van
+/// de LicheeRV, 03-10: per rondreis tussen twee bewoners van de OS-core
+/// ~270 payload-regels plus de indexen, aan beide kanten). Een oude kern
+/// liet dit woord 0 (in Go droeg het de maat van het gestagede image, en
+/// geen v3-kern schreef het); zonder de magic belooft de app niets.
+pub const CTRL_HART: u64 = 0xE0;
 /// App naar kern: de werkelijke geheugen-draw van de runtime (0 = nog niet
 /// gerapporteerd).
 pub const CTRL_MEM_SYS: u64 = 0xE8;
@@ -212,6 +222,25 @@ pub const RNG_SRC_SMCCC: u8 = 3;
 /// de Pi's, de RKRNG van de Radxa).
 pub const RNG_SRC_SOC: u8 = 4;
 
+/// De bovenste 32 bits van [`CTRL_HART`]; elke byte boven 0x7F, zoals
+/// [`RNG_MAGIC`], zodat env-tekst van een oude kern hem nooit vormt.
+pub const HART_MAGIC: u32 = 0xC0DE_4A87;
+/// [`CTRL_HART`]: de app draait op het hart van de kern (de OS-core).
+pub const HART_KERN: u64 = 1;
+
+/// Het woord voor [`CTRL_HART`]: `kern` = op het hart van de kern.
+#[must_use]
+pub const fn hart_word(kern: bool) -> u64 {
+    ((HART_MAGIC as u64) << 32) | if kern { HART_KERN } else { 0 }
+}
+
+/// Zegt het [`CTRL_HART`]-woord `word` dat de app op het hart van de kern
+/// draait? Zonder de magic nooit.
+#[must_use]
+pub const fn shares_kern_hart(word: u64) -> bool {
+    (word >> 32) as u32 == HART_MAGIC && word & HART_KERN != 0
+}
+
 /// Het woord voor [`CTRL_RNG_SOURCE`] bij bron `src` (een `RNG_SRC_*`).
 #[must_use]
 pub const fn rng_source_word(src: u8) -> u64 {
@@ -303,9 +332,10 @@ impl AppStatus {
 /// Elk veld van de control-page als (offset, lengte), oplopend. De toets
 /// eronder maakt een botsing zoals `CtrlSMPTcr` en `CtrlIdle` op 0xD8
 /// (18-07) een compilefout: elk veld is 8-uitgelijnd, begint niet vóór het
-/// einde van het vorige, en het laatste sluit de page af. Vrij: 0x80, 0xE0
-/// en 0xF0 droegen in Go de SMP-trampoline, de maat van het gestagede image
-/// en de zelfplaatsing; niemand leest ze nog.
+/// einde van het vorige, en het laatste sluit de page af. Vrij: 0x80 en 0xF0
+/// droegen in Go de SMP-trampoline en de zelfplaatsing; niemand leest ze
+/// nog. 0xE0 (in Go de maat van het gestagede image) is sinds 03-10
+/// [`CTRL_HART`].
 const FIELDS: &[(u64, u64)] = &[
     (CTRL_STATUS, 8),
     (CTRL_EXIT_CODE, 8),
@@ -334,6 +364,7 @@ const FIELDS: &[(u64, u64)] = &[
     (CTRL_MBOX_PA, 8),
     (CTRL_SMP_MBOX, 8),
     (CTRL_SMP_TCR, 8),
+    (CTRL_HART, 8),
     (CTRL_MEM_SYS, 8),
     (CTRL_SMP_MAIR, 8),
     (CTRL_SHARED, 8),
@@ -618,6 +649,10 @@ mod tests {
         assert_eq!(rng_source(u64::from_le_bytes(*b"HOP_X=1\n")), None);
         assert_eq!(CTRL_ENV_LEGACY_MAX, 0xEA8);
         assert_eq!(CTRL_ENV_MAX, 0xE78);
+        assert!(shares_kern_hart(hart_word(true)));
+        assert!(!shares_kern_hart(hart_word(false)));
+        assert!(!shares_kern_hart(u64::from_le_bytes(*b"HOP_X=1\n")));
+        assert!(!shares_kern_hart(HART_KERN));
     }
 
     #[test]

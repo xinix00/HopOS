@@ -29,8 +29,8 @@
 use abi::hopabi::{
     AppStatus, CTRL_APP_FAULT_ELR, CTRL_APP_FAULT_ESR, CTRL_APP_FAULT_FAR, CTRL_APP_FAULT_VEC,
     CTRL_CORES, CTRL_ENTRY, CTRL_EXIT_CODE, CTRL_FAULT_ESR, CTRL_FAULT_FAR, CTRL_FAULT_VEC,
-    CTRL_HEARTBEAT, CTRL_IDLE, CTRL_KILL, CTRL_MEM_SYS, CTRL_RAM_SIZE, CTRL_SHARED, CTRL_SLOT,
-    CTRL_SMP_REQ, CTRL_STATUS, CTRL_WAKES, CTRL_WALL_OFF,
+    CTRL_HART, CTRL_HEARTBEAT, CTRL_IDLE, CTRL_KILL, CTRL_MEM_SYS, CTRL_RAM_SIZE, CTRL_SHARED,
+    CTRL_SLOT, CTRL_SMP_REQ, CTRL_STATUS, CTRL_WAKES, CTRL_WALL_OFF, hart_word,
 };
 use abi::layout::{
     self, ABI_TAIL, CTRL_STRIDE, CTX_CTRL_PA, CTX_LEN, CTX_REVOKE, CTX_RING_HEAD_PA, CTX_UNIT_SLOT,
@@ -231,6 +231,9 @@ impl<I: Isa> Kooi<I> {
             // De wandklok vóór de start, zoals de Go-kern: Hop stempelt
             // zijn taken ermee vanaf zijn eerste regel (clock.rs).
             (CTRL_WALL_OFF, crate::clock::offset()),
+            // Op het hart van de kern: de app mag zijn ringen dan zonder
+            // onderhoud beloven (abi `CTRL_HART`, [`attach`]).
+            (CTRL_HART, hart_word(b.core.get() == 0)),
         ] {
             dev::write64(ctrl.add(off), v);
         }
@@ -349,7 +352,7 @@ impl<I: Isa> Kooi<I> {
                 }
             }
         }
-        attach(s, tail);
+        attach(s, tail, core == 0);
         crate::clock::attach(slot, ctrl);
         // Vers zaad van déze kern; de generatie telt door vanaf die van de
         // vorige, dus de bewoner ziet hem als nieuw (seed.rs).
@@ -424,7 +427,7 @@ impl<I: Isa> Cage for Kooi<I> {
         }
         dev::push(ctx, CTX_LEN as usize);
         dev::mb();
-        attach(s, tail);
+        attach(s, tail, b.core.get() == 0);
         if let Some(x) = self.built.get_mut(slot.get()) {
             *x = Some(b);
         }
@@ -699,11 +702,22 @@ static UNPUBLISH_ACK: Ack = Ack::new();
 /// wordt eigenaar van de handvatten; een oude poort op dit slot vervalt.
 /// Een volle brievenbus of een switch die er niet is (geen NIC) laat de app
 /// zonder slot-LAN draaien: één regel, geen weigering van de start.
-fn attach(s: layout::Slot, tail: Tail) {
+///
+/// `os`: het slot woont op de OS-core, het hart van de kern. Op riscv64
+/// belooft de kern dan [`ring::Coherence::Hardware`]: app en kern delen één
+/// cache, dus onderhoud is aan geen van beide kanten nodig (de app belooft
+/// hetzelfde zodra hij `CTRL_HART` leest; een oude app belooft niets en dan
+/// doet de kern per record toch het onderhoud). Op arm64 belooft de kern
+/// al wat [`tail_rings`] zegt.
+fn attach(s: layout::Slot, tail: Tail, os: bool) {
     if let Some(Err(e)) = ATTACH_ACK.try_take() {
         println!("cage: an earlier attach was refused: {e} HOPOS_CAGE_ATTACH");
     }
-    let rings = tail_rings::promise(s, tail.base());
+    let rings = if os && cfg!(target_arch = "riscv64") {
+        ring::Coherence::Hardware
+    } else {
+        tail_rings::promise(s, tail.base())
+    };
     let (Ok(tx), Ok(rx)) = (
         AbiTx::open(tail.net_tx(), NET_RING_DATA_CAP, rings),
         ring::Writer::open_with(tail.net_rx(), NET_RING_DATA_CAP, rings),

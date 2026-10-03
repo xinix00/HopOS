@@ -140,7 +140,9 @@ pub enum Coherence {
     /// Apple), Normal-NC, een app met de MMU uit, een niet-coherent hart.
     Maintained,
     /// Deze kant mapt de ring Normal write-back inner shareable op een core
-    /// in het coherente domein van arm64. Belooft de tegenpartij hetzelfde,
+    /// in het coherente domein van arm64; op RISC-V: deze kant draait op
+    /// hetzelfde hart als de tegenpartij (een bewoner van de OS-core en de
+    /// kern, `hopabi::CTRL_HART`), dus in één cache. Belooft de tegenpartij hetzelfde,
     /// dan zien de cores elkaars caches en is onderhoud loos werk; erger,
     /// een `dc civac` vóór de lees gooit de regels uit de gedeelde L2, zodat
     /// de kopie erna uit DRAM komt (O6N 01-10: app naar app van 545 naar
@@ -230,6 +232,23 @@ impl Geom {
     fn set_tail(self, v: u64) {
         dev::write64(self.base.add(TAIL_OFF), v);
         dev::push(self.base.add(TAIL_OFF), 8);
+    }
+
+    /// De index van de tegenpartij op `off` (head of tail), met haar belofte
+    /// op `wb_off` in dezelfde regel: is deze kant `hw` en belooft zij ook,
+    /// dan zien de twee kanten elkaars cache (arm64 inner shareable WB, of
+    /// op RISC-V hetzelfde hart, `hopabi::CTRL_HART`) en is een gewone lees
+    /// genoeg; anders eerst de regel vers (`pull`). Geeft de index en of de
+    /// payload zonder onderhoud kan. 03-10: op de C906 was die pull per
+    /// record een `th.dcache.cipa` met `th.sync.is`, aan beide kanten.
+    /// Een woord dat de tegenpartij niet schreef, is na [`init`] 0 in de
+    /// regel van deze kant, dus zonder belofte valt hij naar de `pull`.
+    fn peer(self, off: u64, wb_off: u64, hw: bool) -> (u64, bool) {
+        if hw && dev::read64(self.base.add(wb_off)) == WB_WORD {
+            return (dev::read64(self.base.add(off)), true);
+        }
+        dev::pull(self.base.add(off), 8);
+        (dev::read64(self.base.add(off)), hw && self.peer_wb(wb_off))
     }
 
     /// Belooft de tegenpartij write-back? Direct na [`Geom::head`] of
@@ -388,8 +407,10 @@ impl Writer {
                 max: size / 2,
             });
         }
-        let (mut head, tail) = (self.head, self.g.tail());
-        let hw = self.local == Coherence::Hardware && self.g.peer_wb(CONSUMER_WB_OFF);
+        let mut head = self.head;
+        let (tail, hw) = self
+            .g
+            .peer(TAIL_OFF, CONSUMER_WB_OFF, self.local == Coherence::Hardware);
         let used = head.wrapping_sub(tail);
         if used > size {
             // Onmogelijke indexen (een malafide consument): niets schrijven.
@@ -437,7 +458,15 @@ impl Writer {
         }
         dev::mb(); // Payload gepubliceerd vóór de index.
         self.head = r.head.wrapping_add(REC_HDR + align8(len as u64));
-        self.g.set_head(self.head);
+        // De clean van head is voor een lezer zonder cache-blik: de
+        // EL2-switcher die met de MMU uit de RX-kop van een slapende app peekt
+        // (arm64). Op RISC-V betekent `hw` hetzelfde hart (`CTRL_HART`), en
+        // daar peekt alleen de kern zelf, in dezelfde cache.
+        if r.hw && cfg!(target_arch = "riscv64") {
+            dev::write64(self.g.base.add(HEAD_OFF), self.head);
+        } else {
+            self.g.set_head(self.head);
+        }
     }
 }
 
@@ -605,7 +634,9 @@ impl Reader {
     /// houdt de omloop van de teller heel.
     #[must_use]
     pub fn head_pending(&self) -> (u64, bool) {
-        let h = self.g.head();
+        let (h, _) = self
+            .g
+            .peer(HEAD_OFF, PRODUCER_WB_OFF, self.local == Coherence::Hardware);
         let n = h.wrapping_sub(self.tail);
         (h, n != 0 && n <= self.g.size)
     }
@@ -625,7 +656,7 @@ impl Reader {
             dev::pull(r.at, r.len);
             dev::copy_out(payload, r.at);
         }
-        self.free(r.end);
+        self.free(r.end, r.hw);
         Some(Record {
             kind: r.kind,
             payload,
@@ -644,7 +675,7 @@ impl Reader {
             dev::pull(r.at, r.len);
         }
         let out = dev::view(r.at, r.len, |p| f(r.kind, p));
-        self.free(r.end);
+        self.free(r.end, r.hw);
         Some(out)
     }
 
@@ -657,8 +688,9 @@ impl Reader {
         }
         let size = self.g.size;
         loop {
-            let head = self.g.head();
-            let hw = self.local == Coherence::Hardware && self.g.peer_wb(PRODUCER_WB_OFF);
+            let (head, hw) =
+                self.g
+                    .peer(HEAD_OFF, PRODUCER_WB_OFF, self.local == Coherence::Hardware);
             let tail = self.tail;
             if head == tail {
                 return None;
@@ -700,7 +732,7 @@ impl Reader {
             }
             let end = tail.wrapping_add(need);
             let Some(kind) = Kind::new(raw) else {
-                self.free(end);
+                self.free(end, hw);
                 continue;
             };
             return Some(Next {
@@ -714,12 +746,18 @@ impl Reader {
     }
 
     /// Geeft de ruimte tot `end` terug aan de producer, ná alles wat de
-    /// lezer van het record las.
+    /// lezer van het record las. `hw`: beide kanten beloven write-back, dus
+    /// de producer leest tail uit de gedeelde cache en is de clean loos (de
+    /// enige lezer zonder MMU, de EL2-switcher, kijkt alleen naar head).
     #[inline(always)]
-    fn free(&mut self, end: u64) {
+    fn free(&mut self, end: u64, hw: bool) {
         dev::mb();
         self.tail = end;
-        self.g.set_tail(end);
+        if hw {
+            dev::write64(self.g.base.add(TAIL_OFF), end);
+        } else {
+            self.g.set_tail(end);
+        }
     }
 }
 

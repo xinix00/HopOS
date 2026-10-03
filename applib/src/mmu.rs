@@ -400,10 +400,13 @@ pub(crate) fn normal() -> bool {
 /// Normal, en weigert die remap, dan belooft hij niets).
 ///
 /// RISC-V: geen ARM-stage-1 (`hw::PRESENT` is onwaar) en de C906 is niet
-/// coherent met het andere hart; daar altijd onderhoud.
+/// coherent met het andere hart; daar onderhoud, behalve als de app op het
+/// hart van de kern zelf draait (`on_kern_hart`, de control-page): dan is
+/// er één cache en belooft hij [`Hardware`](abi::ring::Coherence::Hardware),
+/// zoals de kern dan ook doet.
 #[must_use]
-pub fn ring_coherence() -> abi::ring::Coherence {
-    if hw::PRESENT && state().is_ok() {
+pub fn ring_coherence(on_kern_hart: bool) -> abi::ring::Coherence {
+    if (hw::PRESENT && state().is_ok()) || (cfg!(target_arch = "riscv64") && on_kern_hart) {
         abi::ring::Coherence::Hardware
     } else {
         abi::ring::Coherence::Maintained

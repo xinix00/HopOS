@@ -340,7 +340,7 @@ pub fn up(app: &'static App) -> Result<&'static Net> {
     let [a, b, c, d] = net.ip();
     // Hoe de frame-ringen kopiëren (zie `Nic::open`): op ijzer de eerste
     // vraag als de doorvoer van een app verandert.
-    let rings = match crate::mmu::ring_coherence() {
+    let rings = match crate::mmu::ring_coherence(app.ctrl().on_kern_hart()) {
         crate::ring::Coherence::Hardware => "wb",
         crate::ring::Coherence::Maintained => "maintained",
     };

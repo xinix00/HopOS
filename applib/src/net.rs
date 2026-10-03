@@ -81,7 +81,7 @@ impl Nic {
     /// zodra de kern hetzelfde belooft.
     pub fn open(app: &App) -> Result<Self, abi::Error> {
         let t = app.tail();
-        let c = crate::mmu::ring_coherence();
+        let c = crate::mmu::ring_coherence(app.ctrl().on_kern_hart());
         Ok(Self {
             tx: Writer::open_with(t.net_tx(), NET_RING_DATA_CAP, c)?,
             rx: Reader::open_with(t.net_rx(), NET_RING_DATA_CAP, c)?,
