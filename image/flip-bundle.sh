@@ -108,13 +108,14 @@ OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/n
 # De LicheeRV draagt Hop in het image (board/licheerv/build.rs, zoals
 # image/licheerv-agent.sh): de nieuwe kern start na een koude flip die Hop.
 # Een bundel zonder Hop zou een node zonder Hop opleveren, dus geen bundel
-# zonder: STAGE= of de Hop van tools/hop-build.sh.
+# zonder: STAGE= of de Hop van tools/hop-build.sh. Gestript zoals in
+# image/licheerv-agent.sh (zonder lokale symbolen, voor de schrapruimte).
 if [ "$BOARD" = licheerv ]; then
 	STAGE="${STAGE:-$(sh "$DIR/tools/hop-build.sh" "$TARGET")}"
 	[ -f "$STAGE" ] || { echo "flip-bundle: STAGE=$STAGE bestaat niet" >&2; exit 1; }
 	mkdir -p "$DIR/target/flip-$BOARD"
 	HOPOS_LRV_STAGE="$DIR/target/flip-$BOARD/stage.elf"
-	"$OBJCOPY" --strip-debug "$STAGE" "$HOPOS_LRV_STAGE"
+	"$OBJCOPY" --strip-debug --discard-all "$STAGE" "$HOPOS_LRV_STAGE"
 	HOPOS_LRV_ROLE=hop
 	export HOPOS_LRV_STAGE HOPOS_LRV_ROLE
 	echo "flip-bundle: Hop in het image: $STAGE ($(wc -c <"$HOPOS_LRV_STAGE" | tr -d ' ') bytes)" >&2

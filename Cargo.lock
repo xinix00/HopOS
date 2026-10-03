@@ -663,7 +663,6 @@ dependencies = [
  "gui-usbin",
  "kern",
  "leandhcp",
- "leanelf",
  "leannet",
  "media-mve",
  "media-optical",

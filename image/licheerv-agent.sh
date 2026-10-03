@@ -83,20 +83,24 @@ mkdir -p "$OUT"
 cd "$DIR"
 # De eerste bewoner: er is geen QEMU die hem in het RAM legt, dus gaat hij
 # in de kern (board/licheerv/build.rs, HOPOS_LRV_STAGE met zijn rol in
-# HOPOS_LRV_ROLE). Zonder debug-info, met de symbolen: de plaatsing leest
-# RamStart en de rest uit de symbooltabel.
+# HOPOS_LRV_ROLE). Zonder debug-info en zonder lokale symbolen (zoals
+# tools/release.sh), met de globale: de plaatsing leest RamStart en de rest
+# uit de symbooltabel, en die ligt tijdens de plaatsing in de schrapruimte
+# boven de segmenten (kern::system::place). Met de lokale labels van
+# riscv64 is die tabel bij Hop 6,6 MB (image 8,3 MB) en bleef er in zijn
+# 10 MiB 2 KB over; zonder is de staart 2 KB (image 1,7 MB, 03-10).
 APP="${APP:-}"
 STAGE="${STAGE:-}"
 if [ -n "$STAGE" ]; then
 	[ -f "$STAGE" ] || { echo "STAGE=$STAGE bestaat niet" >&2; exit 1; }
 	HOPOS_LRV_ROLE="${ROLE:-hop}"
-	"$OBJCOPY" --strip-debug "$STAGE" "$OUT/stage.elf"
+	"$OBJCOPY" --strip-debug --discard-all "$STAGE" "$OUT/stage.elf"
 	HOPOS_LRV_STAGE="$OUT/stage.elf"
 	echo "stage: $STAGE als $HOPOS_LRV_ROLE, $(wc -c <"$HOPOS_LRV_STAGE" | tr -d ' ') bytes sha256=$(sha "$HOPOS_LRV_STAGE")" >&2
 elif [ -n "$APP" ]; then
 	echo "== app bouwen ($APP, $TARGET) ==" >&2
 	cargo build --quiet --release --target "$TARGET" -p "$APP"
-	"$OBJCOPY" --strip-debug "$DIR/target/$TARGET/release/$APP" "$OUT/$APP.stage"
+	"$OBJCOPY" --strip-debug --discard-all "$DIR/target/$TARGET/release/$APP" "$OUT/$APP.stage"
 	HOPOS_LRV_STAGE="$OUT/$APP.stage"
 	HOPOS_LRV_ROLE="${ROLE:-app}"
 	echo "app: $APP als $HOPOS_LRV_ROLE, $(wc -c <"$HOPOS_LRV_STAGE" | tr -d ' ') bytes sha256=$(sha "$HOPOS_LRV_STAGE")" >&2

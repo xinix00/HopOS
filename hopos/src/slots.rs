@@ -9,8 +9,9 @@
 //! <regel>`). Er wordt nooit per start gespawnd.
 //!
 //! De eerste plaatsing leest het image dat QEMU vóór de boot neerlegde
-//! (`vboard::slots::staged_image`, image/qemu-run.sh) en loopt de
-//! gewone weg: Claim, de bytes in de grant, Arm met de entry uit de ELF,
+//! (`vboard::slots::staged_image`, image/qemu-run.sh) en loopt de weg van
+//! elke start (`kern::system::place`, de `Placer` van de system-API):
+//! Claim, het image door de plaatsing, Arm met de entry uit de ELF,
 //! de status pollen tot de app exit meldt, en Stop. Dat twee keer: slot 1
 //! op een koude core (PSCI CPU_ON), slot 2 op dezelfde core nu hij
 //! geparkeerd staat (mailbox plus SEV). Markers: `HOPOS_SLOT_START`, de
@@ -200,9 +201,8 @@ pub(crate) use cage::{Off, is_off, park_for_flip, unpark_after_flip};
 
 use crate::clock::ExecTimer;
 use crate::glue::{DevMem, KernConsole, SlotOutbox};
-use abi::hopabi::{CTRL_ENV_DATA, CTRL_ENV_LEN, CTRL_ENV_MAX};
-use abi::layout::{ABI_CTRL_OFF, ABI_TAIL, CtxState, LINK_BASE, RING_DATA_CAP};
-use abi::place::{self, SYM_ABI, SYM_RAM_SIZE, SYM_RAM_START, SYM_SLOT_HINT, Window};
+use abi::hopabi::CTRL_ENV_MAX;
+use abi::layout::{CtxState, RING_DATA_CAP};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -220,10 +220,10 @@ use executor::Executor;
 use kern::partmem::{Geometry, PartitionPool};
 use kern::pool::{CorePool, Placement};
 use kern::slots::{
-    Envelope, ImageGrant, Lifecycle, Mount, Reply, Request, Response, Servicers, SlotStatus,
-    StartSpec, call, servicer_task,
+    Envelope, Lifecycle, Mount, Reply, Request, Response, Servicers, SlotStatus, StartSpec, call,
+    servicer_task,
 };
-use kern::system::{LogTee, SlotLogs};
+use kern::system::{Fail, LogTee, SlotLogs};
 use kern::{Region, Slot};
 use sync::mpsc::Mailbox;
 use vboard::slots as vslots;
@@ -561,34 +561,10 @@ async fn servicer(exec: &'static Executor, slot: Slot, ctx: dev::Pa) {
     .await;
 }
 
-/// Waarom de eerste plaatsing niet doorging; één regel met de getallen.
-#[derive(Debug)]
-enum PlaceError {
-    /// De ELF-lezer weigerde.
-    Elf(leanelf::Error),
-    /// De plaatsingstoets weigerde.
-    Place(abi::Error),
-    /// De actor weigerde.
-    Kern(kern::Error),
-    /// De actor gaf een antwoord dat niet bij de vraag hoort.
-    Reply,
-}
-
-impl core::fmt::Display for PlaceError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Elf(e) => write!(f, "elf: {e}"),
-            Self::Place(e) => write!(f, "place: {e}"),
-            Self::Kern(e) => write!(f, "kern: {e}"),
-            Self::Reply => write!(f, "unexpected reply from the lifecycle"),
-        }
-    }
-}
-
 /// Stuurt één verzoek naar de actor.
-async fn ask(req: Request) -> Result<Response, PlaceError> {
+async fn ask(req: Request) -> kern::Result<Response> {
     match call(INBOX, &BOOT_REPLY, req).await {
-        Ok(Response::Failed(e)) | Err(e) => Err(PlaceError::Kern(e)),
+        Ok(Response::Failed(e)) | Err(e) => Err(e),
         Ok(r) => Ok(r),
     }
 }
@@ -1007,9 +983,9 @@ fn kern_mounts(list: &[(&[u8], &[u8])]) -> kern::Result<Vec<Mount>> {
     Ok(out)
 }
 
-/// Plaatst `img` in `slot` met `mem` bytes, de core-vraag `at` en de
-/// volumes `mounts`: Claim, de segmenten, de patches, de env langs de
-/// grant-aanbieder van de actor en dan in de grant, Arm. Geeft de entry.
+/// Plaatst `img` in `slot` met `mem` bytes, de core-vraag `at`, de env en
+/// de volumes `mounts`, langs de plaatsing van elke start
+/// (`kern::system::place`). Geeft de entry.
 async fn place(
     slot: Slot,
     img: &[u8],
@@ -1017,158 +993,10 @@ async fn place(
     at: Placement,
     env: &[u8],
     mounts: Vec<Mount>,
-) -> Result<u64, PlaceError> {
+) -> Result<u64, Fail> {
     let mut spec = StartSpec::new(slot, mem, at);
     spec.mounts = mounts;
-    let grant = match ask(Request::Claim(spec)).await? {
-        Response::Granted(g) => g,
-        _ => return Err(PlaceError::Reply),
-    };
-    match fill(&grant, img) {
-        Ok(placement) => {
-            let mut grant = grant;
-            let mut mem = DevMem;
-            let mut written = write_image(&mut grant, &mut mem, img, &placement);
-            if written.is_ok() {
-                // De grant-haak, zoals een start van Hop (kern/src/system.rs):
-                // de actor laat de aanbieder de env aanvullen.
-                written = match grant_env(slot, env).await {
-                    Ok(env) => write_env(&mut grant, &mut mem, &env),
-                    Err(e) => Err(e),
-                };
-            }
-            if let Err(e) = written {
-                let _ = ask(Request::Abort(grant)).await;
-                return Err(e);
-            }
-            let entry = placement.entry;
-            ask(Request::Arm { grant, entry }).await?;
-            Ok(entry)
-        }
-        Err(e) => {
-            let _ = ask(Request::Abort(grant)).await;
-            Err(e)
-        }
-    }
-}
-
-/// De env van een start langs de grant-aanbieder van de actor
-/// (`Request::Env`); het antwoord is de complete blob.
-async fn grant_env(slot: Slot, env: &[u8]) -> Result<Vec<u8>, PlaceError> {
-    let mut own = Vec::new();
-    own.try_reserve_exact(env.len())
-        .map_err(|_| PlaceError::Kern(kern::Error::OutOfMemory { bytes: env.len() }))?;
-    own.extend_from_slice(env);
-    match ask(Request::Env { slot, env: own }).await? {
-        Response::Env(e) => Ok(e),
-        _ => Err(PlaceError::Reply),
-    }
-}
-
-/// Leest de ELF en bouwt het plaatsingsplan tegen de partitie van de grant
-/// (`abi::place`: één bron van waarheid voor kern en apploader).
-fn fill(grant: &ImageGrant, img: &[u8]) -> Result<place::Placement, PlaceError> {
-    let f = leanelf::File::parse(img).map_err(PlaceError::Elf)?;
-    let mut segs = [place::Segment::default(); place::MAX_SEGMENTS];
-    let mut n = 0;
-    for s in f.segments().filter(|s| s.kind == leanelf::PT_LOAD) {
-        let Some(d) = segs.get_mut(n) else {
-            return Err(PlaceError::Place(abi::Error::TooMany {
-                what: "PT_LOAD segments",
-                cap: place::MAX_SEGMENTS,
-            }));
-        };
-        *d = place::Segment {
-            paddr: s.paddr,
-            off: s.off,
-            filesz: s.filesz,
-            memsz: s.memsz,
-        };
-        n += 1;
-    }
-    let [start, size, hint, stamp] = f
-        .lookup([SYM_RAM_START, SYM_RAM_SIZE, SYM_SLOT_HINT, SYM_ABI])
-        .map_err(PlaceError::Elf)?;
-    // Het stempel is inhoud, geen adres: de waarde op het symbool.
-    let abi = match stamp {
-        Some(s) => {
-            let mut w = [0u8; 8];
-            f.read_at_paddr(&mut w, s.value).map_err(PlaceError::Elf)?;
-            Some(u64::from_le_bytes(w))
-        }
-        None => None,
-    };
-    let app_ram = grant.region().size.saturating_sub(ABI_TAIL);
-    let image = place::Image {
-        size: img.len() as u64,
-        entry: f.entry,
-        segments: segs.get(..n).unwrap_or(&[]),
-        symbols: place::Symbols {
-            ram_start: start.map(|s| s.value),
-            ram_size: size.map(|s| s.value),
-            slot_hint: hint.map(|s| s.value),
-            abi,
-        },
-    };
-    let slot = abi::layout::Slot::new(grant.slot().get()).ok_or(PlaceError::Reply)?;
-    place::build(
-        &image,
-        &Window::canonical(app_ram, 0, app_ram),
-        slot,
-        Some(abi::ABI_VERSION),
-    )
-    .map_err(PlaceError::Place)
-}
-
-/// Schrijft de segmenten en de patches door de grant. De BSS-staart hoeft
-/// niet: de claim wiste de partitie al (E3).
-fn write_image(
-    grant: &mut ImageGrant,
-    mem: &mut DevMem,
-    img: &[u8],
-    p: &place::Placement,
-) -> Result<(), PlaceError> {
-    for s in p.segments.iter() {
-        let bytes = usize::try_from(s.off)
-            .ok()
-            .zip(usize::try_from(s.filesz).ok())
-            .and_then(|(o, n)| img.get(o..o.checked_add(n)?))
-            .ok_or(PlaceError::Place(abi::Error::Segment {
-                paddr: s.paddr,
-                memsz: s.memsz,
-                filesz: s.filesz,
-                off: s.off,
-            }))?;
-        grant
-            .write(mem, s.paddr - LINK_BASE, bytes)
-            .map_err(PlaceError::Kern)?;
-    }
-    for pt in p.patches.iter() {
-        grant
-            .write(mem, pt.addr - LINK_BASE, &pt.val.to_le_bytes())
-            .map_err(PlaceError::Kern)?;
-    }
-    Ok(())
-}
-
-/// Legt de env-blob (`key=val\n`) op de control-page, zoals `put_env` van
-/// de system-API: de app leest hem bij zijn start (`applib::App::env`).
-/// Een lege env schrijft niets; de claim wiste de page al (E3).
-fn write_env(grant: &mut ImageGrant, mem: &mut DevMem, env: &[u8]) -> Result<(), PlaceError> {
-    if env.is_empty() {
-        return Ok(());
-    }
-    if env.len() as u64 > CTRL_ENV_MAX {
-        return Err(PlaceError::Kern(kern::Error::TooLarge {
-            len: env.len(),
-            max: CTRL_ENV_MAX as usize,
-        }));
-    }
-    let ctrl = grant.region().size.saturating_sub(ABI_TAIL) + ABI_CTRL_OFF;
-    grant
-        .write(mem, ctrl + CTRL_ENV_DATA, env)
-        .and_then(|()| grant.write(mem, ctrl + CTRL_ENV_LEN, &(env.len() as u64).to_le_bytes()))
-        .map_err(PlaceError::Kern)
+    kern::system::place(INBOX, &BOOT_REPLY, &mut DevMem, spec, img, env).await
 }
 
 /// Volgt een bewoner tot zijn exit: elke statuswissel één regel met de

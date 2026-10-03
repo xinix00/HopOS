@@ -27,7 +27,9 @@
 //! symbolen, bouwt [`abi::place::build`] het plan met álle toetsen, gaan de
 //! patches en de env erin, en krijgt de actor de grant terug met
 //! [`Request::Arm`]. Faalt iets, dan gaat de grant terug met
-//! [`Request::Abort`]: de kern ruimt zijn eigen reserveringen op.
+//! [`Request::Abort`]: de kern ruimt zijn eigen reserveringen op. De
+//! boot (Hop in slot 1, de gestagede app op QEMU) loopt dezelfde weg, met
+//! het hele image in één brok ([`place()`]): er is één plaatsing.
 //!
 //! De TCP-verbinding komt van `leannet`, over de [`Conn`]-trait.
 //!
@@ -574,11 +576,15 @@ impl<C: Console> Console for LogTee<'_, C> {
 // De streamende plaatsing.
 // ---------------------------------------------------------------------------
 
-/// Waarom een start of stroom niet lukte; de tekst gaat naar Hop.
+/// Waarom een plaatsing niet lukte; de tekst gaat naar Hop of, bij de
+/// boot, naar de console.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Fail {
+pub enum Fail {
+    /// De kern of de actor weigerde.
     Kern(Error),
+    /// De plaatsingstoets ([`abi::place`]) weigerde.
     Place(abi::Error),
+    /// De ELF-lezer weigerde.
     Elf(leanelf::Error),
     /// Een stroom die niet klopt, met twee getallen.
     Stream(&'static str, u64, u64),
@@ -750,6 +756,21 @@ impl Placer {
         p.raw = true;
         p.ready = true;
         Ok(p)
+    }
+
+    /// De plaatsing van `size` bytes in de partitie van `g`: het app-RAM is
+    /// de partitie min de ABI-staart.
+    fn for_grant(g: &ImageGrant, size: u64, raw: bool) -> core::result::Result<Placer, Fail> {
+        let part = g.region().size;
+        let ram = part
+            .checked_sub(ABI_TAIL)
+            .filter(|&ram| abi::layout::Tail::new(LINK_BASE, ram).is_some())
+            .ok_or(Fail::Kern(Error::PartitionSize { size: part }))?;
+        if raw {
+            Placer::raw(size, ram)
+        } else {
+            Placer::new(size, ram)
+        }
     }
 
     /// Hoeveel bytes er binnen zijn.
@@ -1178,6 +1199,122 @@ impl Stream {
         mem.clean_inv(self.grant.region().base + ctrl, abi::layout::CTRL_STRIDE);
         Ok(())
     }
+
+    /// Sluit een complete stroom af: plaatsen ([`Placer::finish`]), de env
+    /// langs de grant-aanbieder van de actor en op de control-page, en
+    /// armen. Faalt een stap vóór de arm, dan gaat de grant terug
+    /// ([`Request::Abort`]): de kern ruimt zijn eigen reserveringen op.
+    /// Geeft de entry.
+    async fn arm<'r, const N: usize>(
+        mut self,
+        inbox: &Mailbox<Envelope<'r>, N>,
+        reply: &'r Reply,
+        mem: &mut impl PhysMem,
+    ) -> core::result::Result<u64, Fail> {
+        let slot = self.slot();
+        let placed = match self.placer.finish(&mut self.grant, mem, slot) {
+            // De grant-haak vóór de env op de control-page gaat (Go:
+            // `prepareGrantedEnv`): de actor bezit de aanbieder en geeft de
+            // complete env terug.
+            Ok(entry) => match grant_env(inbox, reply, slot, &mut self.env).await {
+                Ok(()) => self.put_env(mem).map(|()| entry).map_err(Fail::from),
+                Err(e) => Err(Fail::from(e)),
+            },
+            Err(e) => Err(e),
+        };
+        let entry = match placed {
+            Ok(entry) => entry,
+            Err(e) => {
+                let _ = slots::call(inbox, reply, Request::Abort(self.grant)).await;
+                return Err(e);
+            }
+        };
+        let grant = self.grant;
+        match slots::call(inbox, reply, Request::Arm { grant, entry }).await? {
+            Response::Done => Ok(entry),
+            Response::Failed(e) => Err(e.into()),
+            _ => Err(Error::Busy.into()),
+        }
+    }
+}
+
+/// Laat de grant-aanbieder van de actor de env van `slot` aanvullen
+/// ([`Request::Env`]); `env` wordt de complete blob.
+async fn grant_env<'r, const N: usize>(
+    inbox: &Mailbox<Envelope<'r>, N>,
+    reply: &'r Reply,
+    slot: Slot,
+    env: &mut Vec<u8>,
+) -> Result {
+    let asked = Request::Env {
+        slot,
+        env: core::mem::take(env),
+    };
+    match slots::call(inbox, reply, asked).await? {
+        Response::Env(e) => {
+            *env = e;
+            Ok(())
+        }
+        Response::Failed(e) => Err(e),
+        _ => Err(Error::Busy),
+    }
+}
+
+/// De claim van een start: de grant, of waarom niet.
+async fn claim<'r, const N: usize>(
+    inbox: &Mailbox<Envelope<'r>, N>,
+    reply: &'r Reply,
+    spec: StartSpec,
+) -> Result<ImageGrant> {
+    match slots::call(inbox, reply, Request::Claim(spec)).await? {
+        Response::Granted(g) => Ok(g),
+        Response::Failed(e) => Err(e),
+        _ => Err(Error::Busy),
+    }
+}
+
+/// De env van een start, eigen gemaakt; meer dan de control-page draagt
+/// is een weigering vóór de claim.
+fn start_env(env: &[u8]) -> Result<Vec<u8>> {
+    if env.len() as u64 > abi::hopabi::CTRL_ENV_MAX {
+        return Err(Error::TooLarge {
+            len: env.len(),
+            max: abi::hopabi::CTRL_ENV_MAX as usize,
+        });
+    }
+    try_vec(env)
+}
+
+/// Plaatst een image dat al heel in het geheugen staat: de boot (Hop in
+/// slot 1, of de gestagede app op QEMU). Dezelfde weg als een start van
+/// Hop over de system-API: de claim met `spec`, het image in één brok door
+/// de `Placer` en `Stream::arm`, dus ook hier BSS en schrapruimte
+/// gewist en de cache van de segmenten en de control-page geveegd. Faalt
+/// een stap, dan gaat de grant terug. Geeft de entry.
+///
+/// # Errors
+///
+/// Wat de claim, de plaatsing of de arm weigerde.
+pub async fn place<'r, const N: usize>(
+    inbox: &Mailbox<Envelope<'r>, N>,
+    reply: &'r Reply,
+    mem: &mut impl PhysMem,
+    spec: StartSpec,
+    img: &[u8],
+    env: &[u8],
+) -> core::result::Result<u64, Fail> {
+    let env = start_env(env)?;
+    let mut grant = claim(inbox, reply, spec).await?;
+    let fed = Placer::for_grant(&grant, img.len() as u64, false)
+        .and_then(|mut p| p.feed(&mut grant, mem, img).map(|()| p));
+    let placer = match fed {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = slots::call(inbox, reply, Request::Abort(grant)).await;
+            return Err(e);
+        }
+    };
+    Stream { grant, placer, env }.arm(inbox, reply, mem).await
 }
 
 /// Wat een bevoegde op teruggeeft: `size` en hoeveel databytes er al op
@@ -1786,13 +1923,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         if req.image_size == 0 {
             return Err(Fail::Place(abi::Error::ImageSize(0)));
         }
-        if req.env.len() as u64 > abi::hopabi::CTRL_ENV_MAX {
-            return Err(Error::TooLarge {
-                len: req.env.len(),
-                max: abi::hopabi::CTRL_ENV_MAX as usize,
-            }
-            .into());
-        }
+        let env = start_env(req.env)?;
         if req.memory_limit <= ABI_TAIL {
             return Err(Error::PartitionSize {
                 size: req.memory_limit,
@@ -1827,33 +1958,15 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         } else {
             req.memory_limit
         };
-        let env = try_vec(req.env)?;
         let job = try_vec(req.job)?;
         let slot = self.free_slot(reply).await?;
         let mut spec = StartSpec::new(slot, mem, placement);
         spec.job = job;
         spec.ports = start_ports(&req)?;
         spec.mounts = start_mounts(&req)?;
-        let grant = match slots::call(self.inbox, reply, Request::Claim(spec)).await? {
-            Response::Granted(g) => g,
-            Response::Failed(e) => return Err(e.into()),
-            _ => return Err(Error::Busy.into()),
-        };
-        let region = grant.region();
+        let grant = claim(self.inbox, reply, spec).await?;
         let flip = req.job == FLIP_BUNDLE_JOB;
-        let placer = region
-            .size
-            .checked_sub(ABI_TAIL)
-            .filter(|&ram| abi::layout::Tail::new(LINK_BASE, ram).is_some())
-            .ok_or(Fail::Kern(Error::PartitionSize { size: region.size }))
-            .and_then(|ram| {
-                if flip {
-                    Placer::raw(req.image_size, ram)
-                } else {
-                    Placer::new(req.image_size, ram)
-                }
-            });
-        let placer = match placer {
+        let placer = match Placer::for_grant(&grant, req.image_size, flip) {
             Ok(p) => p,
             Err(e) => {
                 let _ = slots::call(self.inbox, reply, Request::Abort(grant)).await;
@@ -1930,50 +2043,12 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         if self.with_stream(slot, |s| s.placer.raw) == Some(true) {
             return answer_stream(data, received, StreamState::Placed, None);
         }
-        let Some(mut s) = self.take_stream(slot) else {
+        let Some(s) = self.take_stream(slot) else {
             return Err(Error::NotOwned { slot: slot.get() }.into());
         };
-        let placed = match s.placer.finish(&mut s.grant, mem, slot) {
-            // De grant-haak vóór de env op de control-page gaat (Go:
-            // `prepareGrantedEnv`): de actor bezit de aanbieder en geeft de
-            // complete env terug. Faalt de stap, dan ruimt de abort
-            // hieronder de grant op.
-            Ok(entry) => match self.grant_env(reply, slot, &mut s.env).await {
-                Ok(()) => s.put_env(mem).map(|()| entry).map_err(Fail::from),
-                Err(e) => Err(Fail::from(e)),
-            },
-            Err(e) => Err(e),
-        };
-        let r = match placed {
-            Ok(entry) => {
-                let grant = s.grant;
-                slots::call(self.inbox, reply, Request::Arm { grant, entry }).await
-            }
-            Err(e) => {
-                let _ = slots::call(self.inbox, reply, Request::Abort(s.grant)).await;
-                return answer_stream(data, received, StreamState::Failed, Some(e));
-            }
-        };
-        match r.map_err(Fail::from).and_then(done) {
+        match s.arm(self.inbox, reply, mem).await {
             Ok(_) => answer_stream(data, received, StreamState::Placed, None),
             Err(e) => answer_stream(data, received, StreamState::Failed, Some(e)),
-        }
-    }
-
-    /// Laat de grant-aanbieder van de actor de env van `slot` aanvullen
-    /// ([`Request::Env`]); `env` wordt de complete blob.
-    async fn grant_env(&self, reply: &'r Reply, slot: Slot, env: &mut Vec<u8>) -> Result {
-        let asked = Request::Env {
-            slot,
-            env: core::mem::take(env),
-        };
-        match slots::call(self.inbox, reply, asked).await? {
-            Response::Env(e) => {
-                *env = e;
-                Ok(())
-            }
-            Response::Failed(e) => Err(e),
-            _ => Err(Error::Busy),
         }
     }
 
@@ -2809,11 +2884,33 @@ mod tests {
         assert!(w.tx.is_empty(), "oversized frame half written");
     }
 
-    /// De grant-haak in de stroom: een start met `GUI=display` krijgt de
-    /// regels van de aanbieder op de control-page, achter een slotregel,
-    /// en de aanbieder wordt pas na de bouw gearmd.
+    /// Fysiek geheugen dat de cache-veeg onthoudt.
+    #[derive(Default)]
+    struct Swept(SparseMem, Vec<(u64, u64)>);
+
+    impl PhysMem for Swept {
+        fn read64(&self, pa: u64) -> u64 {
+            self.0.read64(pa)
+        }
+        fn write64(&mut self, pa: u64, v: u64) {
+            self.0.write64(pa, v);
+        }
+        fn clear(&mut self, pa: u64, len: u64) {
+            self.0.clear(pa, len);
+        }
+        fn clean_inv(&mut self, pa: u64, len: u64) {
+            self.1.push((pa, len));
+        }
+    }
+
+    /// De boot plaatst langs dezelfde weg als een start van Hop ([`place`]):
+    /// het image in één brok, gepatcht, BSS en de schrapruimte met de
+    /// symbooltabel gewist, segment en control-page geveegd, en de env met
+    /// de regel van de grant-aanbieder op de page; de aanbieder wordt pas
+    /// na de bouw gearmd. Weigert de ELF-lezer of de plaatsing, dan gaat
+    /// het slot terug.
     #[test]
-    fn the_grant_env_lands_on_the_control_page() {
+    fn the_boot_places_like_a_start() {
         /// Een aanbieder die bij `GUI=display` één regel geeft en telt.
         #[derive(Default)]
         struct Glass {
@@ -2834,46 +2931,63 @@ mod tests {
             }
             fn release(&mut self, _: Slot) {}
         }
-        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
-        let tee = LogTee::new(&con, &logs);
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
         let mut a =
             crate::slots::tests::actor_with(&svc, &con, Obey::Exit, 64, 4, Glass::default());
-        crate::slots::tests::start(&mut a, 1, 8, 1).unwrap();
         let reply = Reply::new();
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
-        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8).with_logs(&logs);
+        let mut mem = Swept::default();
+        let mut boot = |a: &mut Actor<'_, Glass>, slot: usize, img: &[u8]| {
+            let spec = StartSpec::new(s(slot), 8 * MIB, crate::slots::tests::ded(1));
+            let mut placed = pin!(place(&inbox, &reply, &mut mem, spec, img, b"GUI=display"));
+            let mut run = pin!(a.run(&inbox));
+            let mut cx = Context::from_waker(Waker::noop());
+            for _ in 0..1000 {
+                let _ = run.as_mut().poll(&mut cx);
+                if let Poll::Ready(r) = placed.as_mut().poll(&mut cx) {
+                    return r;
+                }
+            }
+            panic!("place did not finish");
+        };
         let img = elf(u64::from(abi::ABI_VERSION));
-        assert!(img.len() <= MAX_IO_CHUNK, "one chunk");
-        let mut p = Pipe::new(
-            NET | 2,
-            &[
-                start_call(1, img.len() as u64, b"GUI=display"),
-                enc(&stream_req(2, 2, 0, &img)),
-            ],
-        );
-        let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
-        let r = drive(
-            &sys, &mut a, &inbox, &reply, &mut p, &mut mem, &hooks, &tee, None,
-        );
-        assert_eq!(r, End::Peer);
-        let res = results(&p.tx);
-        assert_eq!(
-            (res[0].1, res[0].3),
-            (STATUS_OK, 2),
-            "the kern picks slot 2"
-        );
-        assert_eq!(stream_state(&res[1]), StreamState::Placed, "{:?}", res[1]);
-        assert_eq!(a.grants().armed, [1, 2]);
-        let part = a.status(s(2)).partition.unwrap();
-        let ctrl = part.base + part.size - ABI_TAIL + ABI_CTRL_OFF;
+        assert_eq!(boot(&mut a, 1, &img), Ok(SEG_IPA));
+        let bad = boot(&mut a, 2, b"not an elf image");
+        assert!(matches!(bad, Err(Fail::Elf(_))), "{bad:?}");
+        let bad = boot(&mut a, 2, &elf(9));
+        assert!(matches!(bad, Err(Fail::Place(_))), "{bad:?}");
+        assert_eq!(a.status(s(2)).occupancy, Occupancy::Empty);
+        assert_eq!(a.grants().armed, [1]);
+
+        let part = a.status(s(1)).partition.unwrap();
+        assert_eq!(a.status(s(1)).occupancy, Occupancy::Running);
+        let app_ram = part.size - ABI_TAIL;
+        let at = |ipa: u64| mem.0.read64(part.base + (ipa - LINK_BASE));
+        assert_eq!(at(SEG_IPA + 0x80), LINK_BASE, "RamStart patched");
+        assert_eq!(at(SEG_IPA + 0x88), app_ram, "RamSize patched");
+        assert_eq!(at(SEG_IPA + 0x90), u64::from(abi::ABI_VERSION));
+        let ctrl = part.base + app_ram + ABI_CTRL_OFF;
         let want = b"GUI=display\nFB_BASE=0x20000000\n";
         assert_eq!(
-            mem.read64(ctrl + abi::hopabi::CTRL_ENV_LEN),
+            mem.0.read64(ctrl + abi::hopabi::CTRL_ENV_LEN),
             want.len() as u64
         );
         let mut got = [0u8; 31];
-        read_bytes(&mem, ctrl + abi::hopabi::CTRL_ENV_DATA, &mut got);
+        read_bytes(&mem.0, ctrl + abi::hopabi::CTRL_ENV_DATA, &mut got);
         assert_eq!(&got, want);
+        let seg = part.base + (SEG_IPA - LINK_BASE);
+        assert!(
+            mem.0.0.keys().all(|&k| k < part.base
+                || k >= part.base + part.size
+                || (seg..seg + SEG_FILESZ as u64).contains(&k)
+                || (ctrl..ctrl + 0x1000).contains(&k)),
+            "residue in the partition"
+        );
+        assert!(mem.1.contains(&(seg, SEG_MEMSZ)), "segment swept");
+        assert!(
+            mem.1.contains(&(ctrl, abi::layout::CTRL_STRIDE)),
+            "control page swept"
+        );
     }
 
     /// De hele levensloop: start (de kern kiest slot 3), het image in drie
@@ -2951,36 +3065,20 @@ mod tests {
         assert_eq!(a.cage().published, [(3, vec![80, 8443])]);
         assert!(con.saw("slot 3: 2 port(s) published tcp+udp on the uplink: :80 :8443"));
 
-        // Het image staat op zijn plek, gepatcht, met de env op de page.
+        // De brokken kwamen op hun plek, met de env van de start op de
+        // page; de afronding (patches, BSS, schrapruimte, veeg) is die van
+        // de boot (`the_boot_places_like_a_start`).
         let part = a.status(s(3)).partition.unwrap();
         assert_eq!(a.status(s(3)).occupancy, Occupancy::Running);
-        let app_ram = part.size - ABI_TAIL;
         let at = |ipa: u64| mem.read64(part.base + (ipa - LINK_BASE));
         assert_eq!(
             at(SEG_IPA),
             u64::from_le_bytes(img[SEG_OFF..SEG_OFF + 8].try_into().unwrap())
         );
-        assert_eq!(at(SEG_IPA + 0x80), LINK_BASE, "RamStart patched");
-        assert_eq!(at(SEG_IPA + 0x88), app_ram, "RamSize patched");
-        assert_eq!(at(SEG_IPA + 0x90), u64::from(abi::ABI_VERSION));
-        let ctrl = part.base + app_ram + ABI_CTRL_OFF;
-        assert_eq!(
-            mem.read64(ctrl + abi::hopabi::CTRL_ENV_LEN),
-            env.len() as u64
-        );
+        let ctrl = part.base + part.size - ABI_TAIL + ABI_CTRL_OFF;
         let mut got = [0u8; 16];
         read_bytes(&mem, ctrl + abi::hopabi::CTRL_ENV_DATA, &mut got);
         assert_eq!(&got, env);
-        // Buiten het segment en de control-page staat niets: BSS en de
-        // schrapruimte met de symbooltabel zijn gewist.
-        let seg = part.base + (SEG_IPA - LINK_BASE);
-        assert!(
-            mem.0.keys().all(|&k| k < part.base
-                || k >= part.base + part.size
-                || (seg..seg + SEG_FILESZ as u64).contains(&k)
-                || (ctrl..ctrl + 0x1000).contains(&k)),
-            "residue in the partition"
-        );
 
         // Slot 2 is niet bevoegd: stop, start en status worden geweigerd.
         let mut other = Pipe::new(
