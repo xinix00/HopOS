@@ -609,6 +609,22 @@ impl Hooks for BootHooks {
     fn flip(&self, bundle: &kern::system::FlipBundle, sha256: &[u8; 32]) -> kern::Result {
         flip::prepare(bundle, sha256) // FLIP: toetsen en klaarleggen (flip.rs)
     }
+    /// Slot 0: de slaap van de executor (`slept_ns`, `sleeps`, dezelfde als
+    /// `busy_ms` van de tik) en zijn klok, ná de slaap gelezen: de system-API
+    /// draait in een ronde, dus elke slaap in `slept_ns` is al voorbij.
+    fn kern(&self) -> kern::cage::Status {
+        let exec: &Executor = EXEC.get();
+        let idle_ns = exec.stats.slept_ns.load(Relaxed);
+        kern::cage::Status {
+            heartbeat: TICKS.load(Relaxed),
+            ram_size: BOARD.plan().kern_ram.size,
+            mem_sys: HEAP.stats().used as u64,
+            idle_ns,
+            wakes: exec.stats.sleeps.load(Relaxed),
+            at_ns: exec.now(),
+            ..Default::default()
+        }
+    }
 }
 
 /// De maat van de kern-stack: `STACK_SIZE` in elk linkscript (hopos/*.ld),
@@ -667,6 +683,8 @@ fn stack_high_water() -> u64 {
 static REPLAY_AT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// `hopos.tick=1`: de tikregel elke seconde op de console, niet alleen de eerste drie.
 static TICK_LOG: AtomicBool = AtomicBool::new(false);
+/// Het tiknummer: de hartslag van slot 0, de kern (SLOT_STATUS).
+static TICKS: AtomicU64 = AtomicU64::new(0);
 
 async fn tick(exec: &'static Executor) {
     let start = exec.now();
@@ -695,6 +713,7 @@ async fn tick(exec: &'static Executor) {
         }
         let due = start.saturating_add(n.saturating_mul(1_000_000_000));
         exec.until(due).await;
+        TICKS.store(n, Relaxed);
         // Hoe laat deze tik kwam. Een kern die een tijd niets rondmaakte
         // (30-09, tot alpha.14: de periodieke hopfs-commit wachtte synchroon
         // op twee FLUSHes van de schijf, op macOS F_FULLFSYNC's van het

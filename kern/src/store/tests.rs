@@ -85,6 +85,9 @@ impl Hooks for NoHooks {
     fn flip(&self, _: &FlipBundle, _: &[u8; 32]) -> crate::Result {
         Ok(())
     }
+    fn kern(&self) -> crate::cage::Status {
+        crate::cage::Status::default()
+    }
 }
 
 fn call(op: u8, seq: u32, off: u64, n: u64, path: &[u8], data: &[u8]) -> Vec<u8> {

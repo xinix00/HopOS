@@ -218,6 +218,12 @@ pub trait Hooks {
     /// sprong zelf komt later, van de eigenaar van de flip (hij moet dit
     /// antwoord nog naar Hop laten gaan).
     fn flip(&self, bundle: &FlipBundle, sha256: &[u8; 32]) -> Result;
+    /// De meetlat van de kern zelf, voor slot 0 van SLOT_STATUS: `heartbeat`
+    /// (de tik), `ram_size` (de kern-RAM), `mem_sys` (de heap in gebruik),
+    /// `idle_ns` en `wakes` (de slaap van de executor, cumulatief) en `at_ns`
+    /// (de klok waarop `idle_ns` telt, gelezen ná `idle_ns`). De rest zet
+    /// de system-API ([`kern_status`]).
+    fn kern(&self) -> crate::cage::Status;
 }
 
 /// De jobnaam waarmee Hop een slot reserveert voor een flip-bundel: de
@@ -1667,7 +1673,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
                 let timeout = Duration::from_millis(c.n);
                 done(slots::call(self.inbox, reply, Request::Stop { slot, timeout }).await?)
             }
-            PrivOp::SlotStatus => self.status(c, reply, data).await,
+            PrivOp::SlotStatus => self.status(c, reply, hooks, data).await,
             PrivOp::NextLog => {
                 let slot = target(c)?;
                 let max = usize::try_from(c.n).unwrap_or(usize::MAX).min(data.len());
@@ -1971,18 +1977,28 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         }
     }
 
-    /// SLOT_STATUS: het grootboek van de actor plus de stand van een stroom.
-    async fn status(&self, c: &Call<'_>, reply: &'r Reply, data: &mut [u8]) -> Answer {
-        let slot = target(c)?;
-        let st = match slots::call(self.inbox, reply, Request::Status(slot)).await? {
-            Response::Status(st) => st,
-            Response::Failed(e) => return Err(e.into()),
-            _ => return Err(Error::Busy.into()),
+    /// SLOT_STATUS: het grootboek van de actor plus de stand van een stroom;
+    /// slot 0 is de kern zelf ([`kern_status`]).
+    async fn status(
+        &self,
+        c: &Call<'_>,
+        reply: &'r Reply,
+        hooks: &impl Hooks,
+        data: &mut [u8],
+    ) -> Answer {
+        let (st, (received, image_size)) = if c.off == 0 {
+            (kern_status(hooks.kern()), (0, 0))
+        } else {
+            let slot = target(c)?;
+            let st = match slots::call(self.inbox, reply, Request::Status(slot)).await? {
+                Response::Status(st) => st,
+                Response::Failed(e) => return Err(e.into()),
+                _ => return Err(Error::Busy.into()),
+            };
+            let stream = self.with_stream(slot, |s| (s.placer.received(), s.placer.size));
+            (st, stream.unwrap_or((0, 0)))
         };
         let (core, span) = st.core.map_or((0, 0), |(c, s)| (c.get() as u16, s as u16));
-        let (received, image_size) = self
-            .with_stream(slot, |s| (s.placer.received(), s.placer.size))
-            .unwrap_or((0, 0));
         let info = SlotInfo {
             state: match st.occupancy {
                 Occupancy::Empty => SlotState::Empty,
@@ -2011,6 +2027,22 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             at_ns: st.cage.at_ns,
         };
         fit_info(&info.encode(), c.n, data)
+    }
+}
+
+/// Slot 0 van SLOT_STATUS: de kern, levend op de OS-core, één core, met de
+/// meetlat van [`Hooks::kern`]; geen partitie, geen stroom, geen fault.
+fn kern_status(cage: crate::cage::Status) -> slots::SlotStatus {
+    slots::SlotStatus {
+        occupancy: Occupancy::Running,
+        core: Some((crate::Core::OS, 1)),
+        partition: None,
+        cage: crate::cage::Status {
+            core_on: true,
+            app: abi::hopabi::AppStatus::Ready as u64,
+            cores: 1,
+            ..cage
+        },
     }
 }
 
@@ -2478,6 +2510,58 @@ mod tests {
     /// Een antwoord: (op, status, seq, size, data).
     type Res = (u8, u16, u32, u64, Vec<u8>);
 
+    /// Slot 0 is de kern: Hop leest hem als een levende app op de OS-core
+    /// met één core, en twee standen geven een idle die de tijd niet
+    /// inhaalt. Elke andere op op slot 0 blijft geweigerd, en een
+    /// onbevoegde lezer blijft onbevoegd.
+    #[test]
+    fn slot_zero_is_the_kern() {
+        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
+        let tee = LogTee::new(&con, &logs);
+        let mut a = node(&svc, &con);
+        let reply = Reply::new();
+        let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8).with_logs(&logs);
+        let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
+        let mut hop = Pipe::new(
+            NET | 2,
+            &[
+                op(PrivOp::SlotStatus, 1, 0, 128),
+                op(PrivOp::SlotStatus, 2, 0, 128),
+                op(PrivOp::StopSlot, 3, 0, 10),
+                op(PrivOp::NextLog, 4, 0, 64),
+            ],
+        );
+        let r = drive(
+            &sys, &mut a, &inbox, &reply, &mut hop, &mut mem, &hooks, &tee, None,
+        );
+        assert_eq!(r, End::Peer);
+        let res = results(&hop.tx);
+        assert_eq!(res.len(), 4);
+        let one = SlotInfo::decode(&res[0].4).unwrap();
+        let two = SlotInfo::decode(&res[1].4).unwrap();
+        assert_eq!(one.slot_state(), Some(SlotState::Running));
+        assert_eq!((one.core_on, one.core, one.span, one.cores), (1, 0, 1, 1));
+        assert_eq!(one.app, abi::hopabi::AppStatus::Ready as u64);
+        assert_eq!(
+            (one.ram_size, one.mem_sys, one.partition),
+            (64 * MIB, 3 * MIB, 0)
+        );
+        assert!(one.at_ns > 0);
+        let dt = two.at_ns - one.at_ns;
+        assert!(dt > 0 && two.idle_ns - one.idle_ns <= dt);
+        assert!(two.heartbeat > one.heartbeat && two.wakes > one.wakes);
+        assert_ne!(res[2].1, STATUS_OK, "STOP_SLOT 0 stopped the kern");
+        assert_ne!(res[3].1, STATUS_OK, "NEXT_LOG 0 answered");
+        // Een gewone app vraagt slot 0: onbevoegd, zoals elke bevoegde op.
+        let mut app = Pipe::new(NET | 3, &[op(PrivOp::SlotStatus, 1, 0, 128)]);
+        let r = drive(
+            &sys, &mut a, &inbox, &reply, &mut app, &mut mem, &hooks, &tee, None,
+        );
+        assert_eq!(r, End::Peer);
+        assert_eq!(results(&app.tx)[0].1, STATUS_DENIED);
+    }
+
     fn results(mut b: &[u8]) -> Vec<Res> {
         let mut out = Vec::new();
         while b.len() >= HEADER_LEN {
@@ -2499,8 +2583,15 @@ mod tests {
         StreamResp::decode(&resp).unwrap().state
     }
 
+    /// De haken, met de klok van de kern in `.3`: elke [`Hooks::kern`] is
+    /// een seconde later, waarvan de executor driekwart sliep.
     #[derive(Default)]
-    struct NoHooks(Cell<u64>, Cell<Option<(usize, [u8; 32])>>, Cell<bool>);
+    struct NoHooks(
+        Cell<u64>,
+        Cell<Option<(usize, [u8; 32])>>,
+        Cell<bool>,
+        Cell<u64>,
+    );
     impl Hooks for NoHooks {
         fn set_clock(&self, unix_ns: u64) {
             self.0.set(unix_ns);
@@ -2509,6 +2600,19 @@ mod tests {
             self.1.set(Some((bundle.slot.get(), *sha256)));
             self.2.set(bundle.cold);
             Ok(())
+        }
+        fn kern(&self) -> crate::cage::Status {
+            let at_ns = self.3.get() + 1_000_000_000;
+            self.3.set(at_ns);
+            crate::cage::Status {
+                heartbeat: at_ns / 1_000_000_000,
+                ram_size: 64 * MIB,
+                mem_sys: 3 * MIB,
+                idle_ns: at_ns / 4 * 3,
+                wakes: at_ns / 1_000_000,
+                at_ns,
+                ..Default::default()
+            }
         }
     }
 

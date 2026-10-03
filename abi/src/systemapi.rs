@@ -25,7 +25,7 @@
 //! STREAM_IMAGE(slot, n, brok)  -> More
 //! STREAM_IMAGE(slot, m, brok)  -> Placed      laatste byte: plaatsen + starten
 //!                              |  Failed(tekst)
-//! SLOT_STATUS(slot)            -> SlotInfo    staat, core, heartbeat, exit
+//! SLOT_STATUS(slot)            -> SlotInfo    staat, core, heartbeat, exit (slot 0: de kern)
 //! NEXT_LOG(slot, max)          -> regel | leeg
 //! STOP_SLOT(slot, timeout_ms)  -> Ok (de kern geeft vrij) | fout (quarantaine)
 //! ```
@@ -738,6 +738,14 @@ pub enum SlotState {
 }
 
 /// Het antwoord op een [`PrivOp::SlotStatus`], in `data` (little-endian).
+///
+/// Slot 0 is de kern: `Running`, `core_on` 1, de OS-core met span 1, `app`
+/// [`crate::hopabi::AppStatus::Ready`], `heartbeat` het tiknummer,
+/// `ram_size` de kern-RAM, `mem_sys` de heap in gebruik, `idle_ns` en
+/// `wakes` de slaap van zijn executor (cumulatief, op dezelfde klok als
+/// `at_ns`), `cores` 1, de rest 0. Een lezer rekent er cpu en geheugen van
+/// de kern mee uit zoals van elke app. Elke andere bevoegde op weigert
+/// slot 0.
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 pub struct SlotInfo {

@@ -127,6 +127,12 @@ Lees hem zo:
   dát venster, de consoleregel is idle over dertig seconden. Ze komen uit
   één bron en lopen alleen in ritme uiteen; leg ze niet tegen elkaar op de
   seconde.
+- De kern zelf staat er als slot 0: `SLOT_STATUS` van slot 0 geeft hem als
+  levende app op de OS-core met één core, met de slaaptijd van zijn executor
+  (dezelfde als `busy_ms` van `HOPOS_TICK`) als idle, de heap in gebruik als
+  geheugen en de tik als hartslag. Zo toont Hop per node ook de kern. De
+  beurten van Hop op de gedeelde OS-core tellen daar als idle van de kern;
+  ze staan in slot 1.
 
 In de app zelf staat hetzelfde fijner: `EXEC.get().stats` (`rounds`, `polls`,
 `sleeps`, `slept_ns`). Een app die een eigen diagnoseregel heeft, zet die
