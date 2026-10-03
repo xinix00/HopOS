@@ -297,10 +297,11 @@ if [ "$BOARD" = uefi ]; then
 	# zet voor Hop zelf QEMU_CFG achter de config (kern::nodecfg, 01-10);
 	# hier staat de insecure-regel in hopos.cfg, anders weigert Hop zijn API.
 	ESP="$ART/esp"
-	# hopos.efirng=1: kern A zaait uit het EFI_RNG_PROTOCOL van EDK2 (de
-	# virtio-rng hieronder), kern B uit het zaad dat A meegaf.
-	printf 'hopos.insecure=1\nhopos.efirng=1\n' >"$ART/hopos.cfg"
+	# De feature efi-rng (zoals de O6N): kern A zaait uit het EFI_RNG_PROTOCOL
+	# van EDK2 (de virtio-rng hieronder), kern B uit het zaad dat A meegaf.
+	printf 'hopos.insecure=1\n' >"$ART/hopos.cfg"
 	HOPOS_STAMP=A BUILD_ONLY=1 ESP="$ESP" APP="$HOP_ELF" ROLE=hop CFG="$ART/hopos.cfg" \
+		FEATURES="${FEATURES:+$FEATURES,}board-uefi/efi-rng" \
 		sh "$DIR/image/uefi-run.sh" 2>&1 | sed 's/^/   /'
 	[ -e "$ESP/EFI/BOOT/BOOTAA64.EFI" ] || {
 		echo "ROOD: geen BOOTAA64.EFI"

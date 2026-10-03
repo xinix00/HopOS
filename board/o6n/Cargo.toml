@@ -40,6 +40,7 @@ doctest = false
 workspace = true
 
 [features]
+efi-rng = ["board-uefi/efi-rng"]
 default = []
 # De GOP-framebuffer van de firmware (board-uefi, gop.rs).
 gui = ["board-uefi/gui"]

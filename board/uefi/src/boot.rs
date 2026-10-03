@@ -186,11 +186,11 @@ fn prepare(efi: &Efi, el: u8) -> Result<Enter, (&'static str, Status)> {
         facts::CFG[0].store(f.pa, Relaxed);
         facts::CFG[1].store(f.len, Relaxed);
     }
-    // De TRNG achter de firmware (EFI_RNG_PROTOCOL), alleen op verzoek: Go
-    // zag op 13-07 een firmware die er eeuwig in bleef hangen, dus
-    // `hopos.efirng=1` in hopos.cfg zet hem aan. Voor de O6N: geen
-    // FEAT_RNG en geen SMCCC-TRNG (30-09), en dit is wat Linux daar doet.
-    if cfg_text().contains("hopos.efirng=1") {
+    // De TRNG achter de firmware (EFI_RNG_PROTOCOL), per board (feature
+    // `efi-rng`): de O6N heeft geen FEAT_RNG en geen SMCCC-TRNG (30-09) en
+    // dit is wat Linux daar doet; op de Altra hing de firmware er eeuwig in
+    // (Go, 13-07), dus daar staat de vlag uit.
+    if cfg!(feature = "efi-rng") {
         let mut seed = [0u8; 64];
         if efi.rng(&mut seed) {
             for (w, b) in facts::EFI_SEED.iter().zip(seed.chunks_exact(8)) {

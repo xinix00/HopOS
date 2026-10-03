@@ -131,7 +131,7 @@ pub(crate) fn publish(ttbr0: u64, tcr: u64, el: u8, cnthctl: u64) {
 /// als zaad voor de volgende kern, zoals Linux bij kexec een `rng-seed`
 /// uit zijn eigen RNG in de DTB van de nieuwe kern legt
 /// (`drivers/of/kexec.c`). Alleen als de DRBG uit het EFI_RNG_PROTOCOL
-/// komt (`hopos.efirng=1`): die bron is na de koude boot weg, en zonder dit
+/// komt (feature `efi-rng`): die bron is na de koude boot weg, en zonder dit
 /// zaaide elke geflipte O6N uit jitter (Z, 01-10). RNDR en de SMCCC TRNG
 /// vindt de nieuwe kern zelf terug. Geeft terug of er zaad ligt.
 pub fn carry_seed() -> bool {

@@ -45,6 +45,8 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       riscv) en bij een kick direct naar die bewoner; doel O6N onder 100 us
       (nu 301), LicheeRV onder 300 (nu 644). Agent bezig, daarna ik op het
       bord.
+- [ ] Altra: de SMCCC-TRNG zoals Go (onze probe zegt "no SMCCC TRNG" met
+      een EL3-monitor; Go zaaide er wel uit). Agent bezig, daarna een flip.
 - [ ] De volgende bump: HopOS 3.0.7 met tag, Hop erop naar 3.0.8, release.sh,
       media (main heeft sinds v3.0.6 en Hop v3.0.7 de avondfixes van 03-10);
       daarmee het M4-image via Recovery (spin daarna opnieuw POSTen) en de
@@ -52,9 +54,6 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Fixen
 
-- [ ] efi-rng standaard aan op de UEFI-borden als het protocol er is (nu
-      `hopos.efirng=1`); dan toont de Altra na een flip `HOPOS_FLIP_SEED` en
-      `source=hardware`.
 - [ ] O6N: na `DELETE` van Lumen weigert de kern elke plaatsing tot een
       koude boot (reproduceren op QEMU met een job met devices).
 - [ ] Pi 4 hairpin door de NAT: 1 s hik per ronde (listen-backlog 8 in

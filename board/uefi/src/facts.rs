@@ -26,7 +26,7 @@ pub(crate) const MAX_ECAM: usize = 8;
 
 /// De MPIDR-affiniteit per logische core; core 0 is de onze.
 pub(crate) static CORE_MPIDR: [AtomicU64; MAX_CORES] = [const { AtomicU64::new(0) }; MAX_CORES];
-/// Het zaad uit het EFI_RNG_PROTOCOL (boot.rs, alleen met `hopos.efirng=1`):
+/// Het zaad uit het EFI_RNG_PROTOCOL (boot.rs, feature `efi-rng`):
 /// 64 bytes in acht woorden; [`EFI_SEED_LEN`] 0 = geen.
 pub(crate) static EFI_SEED: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
 /// Hoeveel bytes van [`EFI_SEED`] gelden.

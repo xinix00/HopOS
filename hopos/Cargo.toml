@@ -38,7 +38,7 @@ board-uefi = ["dep:board-uefi"]
 # (Tot 29-09 zette niemand hem aan en zocht de stub op beide het venster
 # van QEMU, 0x5000_0000.) De O6N draait bovendien de hele kern onder
 # E2H = 1 (`vhe`, de A720 eist het: Go 17-09).
-board-o6n = ["dep:board-o6n", "board-o6n/window-8000", "board-o6n/vhe"]
+board-o6n = ["dep:board-o6n", "board-o6n/window-8000", "board-o6n/vhe", "board-o6n/efi-rng"]
 board-altra = ["dep:board-altra", "board-altra/window-a000"]
 # VHE afdwingen op een board dat anders nVHE kiest: de switcher-smaak `Vhe`
 # (hopos/src/cage.rs `FLAVOR`) en de kern onder E2H = 1 (board-uefi `vhe`,

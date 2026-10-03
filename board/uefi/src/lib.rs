@@ -644,7 +644,7 @@ impl Board for Uefi {
         } else if facts::EFI_SEED_LEN.load(Relaxed) > 0 {
             cpu::drbg::init(efi_fill, cpu::idle::counter);
             cpu::println!(
-                "trng: EFI_RNG_PROTOCOL online, the kernel DRBG is seeded from the firmware TRNG (64 bytes at boot, hopos.efirng=1) HOPOS_RNG_EFI_UP"
+                "trng: EFI_RNG_PROTOCOL online, the kernel DRBG is seeded from the firmware TRNG (64 bytes at boot, feature efi-rng) HOPOS_RNG_EFI_UP"
             );
         } else {
             cpu::println!("{}", cpu::drbg::seed_from_cpu(cpu::idle::counter));
