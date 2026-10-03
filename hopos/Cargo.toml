@@ -91,6 +91,10 @@ media = [
     "board-o6n?/media",
 ]
 
+# De meetlat van een hop tussen twee bewoners van de OS-core (cpu/src/hopcost.rs):
+# per rondreis de vijf fasen op de console (HOPOS_HOPCOST). Niet in productie.
+hopcost = ["cpu/hopcost"]
+
 # Alleen wat de binary gebruikt (een ongebruikte dep bouwt alleen mee).
 [dependencies]
 sync = { path = "../sync" }

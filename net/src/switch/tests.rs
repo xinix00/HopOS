@@ -348,6 +348,44 @@ fn switch_pending_leest_onder_lock_contention() {
     assert!(!h.published.pending(), "een ontkoppelde poort belt nog");
 }
 
+/// De bitmaps van 03-10: de deur en de ronde kijken alleen naar poorten
+/// die hangen, ook voorbij het eerste woord (slot 100), en een ontkoppelde
+/// poort valt eruit.
+#[test]
+fn ronde_en_deur_kennen_alleen_de_poorten_die_hangen() {
+    assert_eq!(
+        ports_of([1 << 3 | 1 << 63, 0, 1]).collect::<Vec<_>>(),
+        vec![3, 63, 128]
+    );
+    let mut h = harness();
+    let mut low = h.attach(2);
+    let mut high = h.attach(100);
+    assert!(!h.published.pending());
+    let f = mk_frame(
+        PROTO_TCP,
+        slot_mac(2),
+        slot_mac(100),
+        slot_ip4(100),
+        slot_ip4(2),
+        1,
+        2,
+        b"x",
+    );
+    assert!(high.tx.push(KIND_FRAME, &f));
+    assert!(h.published.pending(), "slot 100 belt niet");
+    let mut buf = vec![0u8; MAX_LAN_FRAME];
+    assert!(h.sw.switch_pass(&mut buf));
+    assert_eq!(low.rx.frame().as_deref(), Some(&f[..]));
+    assert!(!h.published.pending());
+    h.sw.detach(100).unwrap();
+    assert!(high.tx.push(KIND_FRAME, &f));
+    assert!(!h.published.pending(), "een ontkoppelde poort belt nog");
+    assert!(
+        !h.sw.switch_pass(&mut buf),
+        "een ronde leest een ontkoppelde poort"
+    );
+}
+
 #[test]
 fn slot_mag_geen_vreemde_bron_mac_of_ip_gebruiken() {
     let mut h = harness();

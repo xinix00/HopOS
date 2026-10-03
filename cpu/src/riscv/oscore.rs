@@ -93,26 +93,74 @@ pub struct OsCore {
     clint: Clint,
     hart: usize,
     pmp: pmp::Profile,
+    /// De ASID-breedte van dit hart ([`asid_bits`]).
+    asid_bits: u32,
+    /// Elke bewoner zijn eigen ASID (zijn kooi-context-id), dus geen
+    /// TLB-flush per wissel: het hart heeft er genoeg (minstens
+    /// [`ASID_BITS_NEEDED`]) en de kern wil ze. Anders een volle
+    /// `sfence.vma` bij elke beurt, zoals tot 03-10.
+    asids: bool,
+}
+
+/// Het ASID-veld van `satp` (Sv39: bits 59..44).
+const SATP_ASID_SHIFT: u64 = 44;
+const SATP_ASID: u64 = 0xffff << SATP_ASID_SHIFT;
+
+/// Zoveel ASID-bits zijn er minstens nodig: één per kooi-context-id
+/// (1..=`SLOT_CAP`), 0 blijft van de zelftest (Bare).
+const ASID_BITS_NEEDED: u32 = u64::BITS - (abi::layout::SLOT_CAP as u64).leading_zeros();
+
+/// Hoeveel ASID-bits dit hart heeft: alle enen in het veld schrijven en
+/// teruglezen (de spec, en Linux' `asids_init`). `satp` raakt de kern in
+/// machine mode niet (geen MPRV), dus de proef kan hier.
+fn asid_bits() -> u32 {
+    let field =
+        (arch::satp_probe(SATP_ASID | super::sv39::SATP_SV39) & SATP_ASID) >> SATP_ASID_SHIFT;
+    field.trailing_ones()
 }
 
 impl OsCore {
     /// De rotatie over het plan `plan`, op hart `hart` met zijn wekker op
-    /// `clint`. `pmp` is de PMP van de CPU, voor de zelftest.
+    /// `clint`. `pmp` is de PMP van de CPU, voor de zelftest. `asids`: een
+    /// ASID per bewoner als het hart ze heeft (`false`: een flush per
+    /// wissel, de vergelijking op ijzer).
     pub fn new(
         plan: &Plan,
         clint: Clint,
         hart: usize,
         pmp: pmp::Profile,
+        asids: bool,
     ) -> Result<OsCore, el2::Error> {
         let core0 = Core::new(0).ok_or(el2::Error::BadContextId { id: 0 })?;
         let sched = plan.park_mbox_pa(core0).map_err(el2::Error::Plan)?;
+        // ASID's in plaats van een flush per wissel, de VMID van arm64. Op
+        // riscv schrijft een bewoner in S-mode `satp` zelf, ASID inbegrepen;
+        // dan kon hij de vertalingen van een ander (met diens PMP) lenen.
+        // Daarom TVM: op de OS-core is `satp` (en `sfence.vma`) van de kern,
+        // een bewoner die eraan komt is een illegal instruction en dood.
+        // Geen app doet het (applib, Hop); een kooi op een app-hart mag het
+        // nog steeds.
+        let asid_bits = asid_bits();
+        let asids = asids && asid_bits >= ASID_BITS_NEEDED;
+        if asids {
+            arch::trap_vm();
+        }
         Ok(OsCore {
             sched,
             cage: plan.vec_base_pa(),
             clint,
             hart,
             pmp,
+            asid_bits,
+            asids,
         })
+    }
+
+    /// De ASID-breedte van dit hart, en of de rotatie ze gebruikt (en dus
+    /// niet flusht per wissel).
+    #[must_use]
+    pub fn asid(&self) -> (u32, bool) {
+        (self.asid_bits, self.asids)
     }
 
     /// Eén beurt: de bewoner die [`el2::next`] aanwijst (dezelfde regel als
@@ -133,29 +181,50 @@ impl OsCore {
 
     /// De beurt van bewoner `id` op lijstplek `i`.
     fn turn(&mut self, i: usize, id: u8, ctx: Pa, deadline: u64, fresh: bool) -> Back {
+        crate::hopcost::pick(id);
         dev::write64(self.sched.add(SCHED_CURSOR), i as u64);
         dev::write64(self.sched.add(SCHED_CURRENT), u64::from(id));
         ctx_write(ctx, CTX_KICK_PENDING, 0);
         ctx_write(ctx, CTX_STATE, CtxState::Running.raw());
+        // De ASID van de bewoner is zijn id: de kern zet hem, elke beurt
+        // (TVM houdt de bewoner er vanaf). Een flush alleen bij een koude
+        // start: de vertalingen van een vorige huurder met dit id weg, zoals
+        // de TLBI bij een verse bewoner op arm64.
+        let flush = fresh || !self.asids;
+        if self.asids {
+            let at = ctx.add(CTX_REGIME + super::switch::REGIME_SATP);
+            let satp = dev::read64(at);
+            let want = (satp & !SATP_ASID) | u64::from(id) << SATP_ASID_SHIFT;
+            if satp >> 60 != 0 && satp != want {
+                dev::write64(at, want);
+            }
+        }
         STATS.entries.fetch_add(1, Relaxed);
         let t0 = csr::rdtime();
-        let (cause, mtval) = self.enter(ctx, fresh, deadline);
+        let (cause, mtval) = self.enter(ctx, fresh, flush, deadline);
         STATS
             .ticks
             .fetch_add(csr::rdtime().wrapping_sub(t0), Relaxed);
         dev::write64(self.sched.add(SCHED_CURRENT), 0);
-        settle(ctx, cause, mtval, true)
+        let back = settle(ctx, cause, mtval, true);
+        crate::hopcost::ran(id);
+        back
     }
 
     /// De overgang zelf: de wekker op `deadline`, de drie bronnen aan die de
     /// kern terughalen (PLIC, kick, wekker), de sprong, en alles terug zoals
     /// het stond. Geeft `mcause` en `mtval` van de trap.
-    fn enter(&self, ctx: Pa, fresh: bool, deadline: u64) -> (u64, u64) {
+    fn enter(&self, ctx: Pa, fresh: bool, flush: bool, deadline: u64) -> (u64, u64) {
         const BACK: u64 = csr::MIP_MEIP | csr::MIP_MSIP | csr::MIP_MTIP;
         let mie = csr::mie();
         self.clint.set_timecmp(self.hart, deadline);
         csr::mie_set(BACK);
-        let cause = arch::enter(ctx.0, u64::from(fresh), SAVE.as_ptr() as u64);
+        let cause = arch::enter(
+            ctx.0,
+            u64::from(fresh),
+            SAVE.as_ptr() as u64,
+            u64::from(flush),
+        );
         csr::mie_clear(BACK);
         csr::mie_set(mie & BACK);
         self.clint.set_timecmp(self.hart, NEVER);
@@ -200,7 +269,7 @@ impl OsCore {
         let prev = csr::mask();
         kick();
         let t0 = csr::rdtime();
-        let (cause, mtval) = self.enter(ctx, true, t0.wrapping_add(ticks));
+        let (cause, mtval) = self.enter(ctx, true, true, t0.wrapping_add(ticks));
         let dt = csr::rdtime().wrapping_sub(t0);
         // De kick staat nog: de dispatch van de kern wist hem pas later.
         self.clint.set_msip(self.hart, false);
@@ -334,12 +403,41 @@ mod arch {
 
     unsafe extern "C" {
         /// De overgang (hieronder): a0 = ctx-blok, a1 = koud (1) of
-        /// hervatten (0), a2 = de bewaarplaats. Geeft `mcause`.
-        fn __hopos_os_enter(ctx: u64, fresh: u64, save: u64) -> u64;
+        /// hervatten (0), a2 = de bewaarplaats, a3 = de TLB flushen (1) of
+        /// niet (0, de ASID van de bewoner is genoeg). Geeft `mcause`.
+        fn __hopos_os_enter(ctx: u64, fresh: u64, save: u64, flush: u64) -> u64;
+    }
+
+    /// Schrijft `v` in `satp`, leest hem terug en zet `satp` weer op 0 met
+    /// een flush: de proef op de ASID-breedte.
+    pub(super) fn satp_probe(v: u64) -> u64 {
+        let r: u64;
+        // SAFETY: machine mode vertaalt niet (geen MPRV), dus `satp` raakt
+        // hier niets dan de TLB, en die is na de flush leeg.
+        unsafe {
+            core::arch::asm!(
+                "csrw satp, {v}",
+                "csrr {r}, satp",
+                "csrw satp, zero",
+                "sfence.vma",
+                v = in(reg) v,
+                r = out(reg) r,
+                options(nostack),
+            );
+        }
+        r
+    }
+
+    /// `mstatus.TVM`: `satp` en `sfence.vma` zijn in S-mode een illegal
+    /// instruction (zie [`super::OsCore::new`]).
+    pub(super) fn trap_vm() {
+        // SAFETY: raakt alleen S-mode van dit hart; de kern zelf draait in
+        // machine mode.
+        unsafe { core::arch::asm!("csrs mstatus, {}", in(reg) 1u64 << 20, options(nostack)) };
     }
 
     /// De overgang naar de bewoner van `ctx` en terug.
-    pub(super) fn enter(ctx: u64, fresh: u64, save: u64) -> u64 {
+    pub(super) fn enter(ctx: u64, fresh: u64, save: u64, flush: u64) -> u64 {
         // SAFETY: `ctx` is een ctx-blok van het plan met een kooi die de
         // kern bouwde (of die van de zelftest); `save` is de static `SAVE`.
         // De assembly bewaart ra, sp, gp, tp en s0..s11 van de kern en zet
@@ -347,11 +445,12 @@ mod arch {
         // C-functie terug; de caller-saved registers zijn volgens de ABI
         // verloren. De f-registers van de kern hoeven niet mee: hij gebruikt
         // ze niet (de kop van dit bestand).
-        unsafe { __hopos_os_enter(ctx, fresh, save) }
+        unsafe { __hopos_os_enter(ctx, fresh, save, flush) }
     }
 
     core::arch::global_asm!(
-        r#"
+        concat!(
+            r#"
     .section .text.hopos_os, "ax"
     .balign 4
     .global __hopos_os_enter
@@ -415,7 +514,9 @@ __hopos_os_enter:
     csrw mtvec, t0
     ld t0, {regime}+{rsatp}(a0)
     csrw satp, t0
+    beqz a3, 3f
     sfence.vma
+3:
     ld t0, {regime}+{rstvec}(a0)
     csrw stvec, t0
     ld t0, {regime}+{rsscratch}(a0)
@@ -427,7 +528,9 @@ __hopos_os_enter:
     .option push
     .option arch, +f, +d
     beqz a1, 2f
-
+"#,
+            crate::hopcost::rv_in!(),
+            r#"
     // Koud: de ingang, a0 = het argument, alle andere registers nul (geen
     // kern-adres en niets van een voorganger lekt de kooi in).
     .irp n, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
@@ -494,6 +597,9 @@ __hopos_os_enter:
     csrc mstatus, t0
     li t0, 1 << 11
     csrs mstatus, t0
+"#,
+            crate::hopcost::rv_in!(),
+            r#"
     mv x31, a0
     ld x1, {gprs}+0(x31)
     ld x2, {gprs}+8(x31)
@@ -538,6 +644,9 @@ __hopos_os_trap:
     sd t0, {sscratch}+0(sp)
     sd t1, {sscratch}+8(sp)
     sd t2, {sscratch}+16(sp)
+"#,
+            crate::hopcost::rv_out!(),
+            r#"
     ld t0, {sctx}(sp)
     sd x1, {gprs}+0(t0)
     csrr t1, mscratch
@@ -600,10 +709,10 @@ __hopos_os_trap:
     csrr a0, mcause
     mv a2, sp
 
-    // De kern terug (a2 = de bewaarplaats, a0 = wat enter geeft).
+    // De kern terug (a2 = de bewaarplaats, a0 = wat enter geeft). `satp`
+    // blijft staan: machine mode vertaalt niet, en de volgende beurt zet de
+    // zijne (met zijn ASID, of met een flush).
 9:
-    csrw satp, zero
-    sfence.vma
     ld t0, {smtvec}(a2)
     csrw mtvec, t0
     ld t0, {smscratch}(a2)
@@ -628,7 +737,8 @@ __hopos_os_trap:
     // Het einde van de overgang: tot hier telt de FP-toets niet mee.
     .global __hopos_os_end
 __hopos_os_end:
-"#,
+"#
+        ),
         sctx = const SAVE_CTX,
         smtvec = const SAVE_MTVEC,
         smscratch = const SAVE_MSCRATCH,
@@ -653,9 +763,14 @@ __hopos_os_end:
 #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
 mod arch {
     //! Host-stub: er is geen bewoner; een beurt is meteen een yield.
-    pub(super) fn enter(_ctx: u64, _fresh: u64, _save: u64) -> u64 {
+    pub(super) fn enter(_ctx: u64, _fresh: u64, _save: u64, _flush: u64) -> u64 {
         super::CAUSE_ECALL_S
     }
+    /// Host: een hart zonder ASID's.
+    pub(super) fn satp_probe(_v: u64) -> u64 {
+        0
+    }
+    pub(super) fn trap_vm() {}
 }
 
 #[cfg(test)]

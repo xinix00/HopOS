@@ -348,6 +348,8 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
         Err(e) => println!("irq: {e}, running on the sleep failsafe HOPOS_IRQ_FAIL"),
     }
     exec.spawn(tick(exec)).expect("spawn tick");
+    #[cfg(feature = "hopcost")]
+    exec.spawn(hopcost(exec)).expect("spawn hopcost");
     // De node-watchdog (op een flip-boot meteen met de boot-guard) en de
     // telemetrie: thermiek en klokbeleid.
     watchdog::start(exec);
@@ -373,6 +375,7 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     conport::enable(kern::nodecfg::console_enabled(&node_cfg));
     REPLAY_AT.store(kern::nodecfg::replay_after(&node_cfg), Relaxed);
     TICK_LOG.store(node_cfg.one("hopos.tick") == "1", Relaxed);
+    OS_ASID.store(node_cfg.one("hopos.oscore.asid") != "0", Relaxed);
 
     // Het netwerkvlak (net.rs): de pomp op de NIC, de switch, poort 0 met
     // de node-stack, DHCP en de system-listener. Zonder NIC draait de kern
@@ -683,8 +686,29 @@ fn stack_high_water() -> u64 {
 static REPLAY_AT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// `hopos.tick=1`: de tikregel elke seconde op de console, niet alleen de eerste drie.
 static TICK_LOG: AtomicBool = AtomicBool::new(false);
+/// `hopos.oscore.asid=0`: op riscv64 een TLB-flush bij elke wissel op de
+/// OS-core in plaats van een ASID per bewoner (cpu/src/riscv/oscore.rs), de
+/// vergelijking op ijzer. Standaard aan; arm64 heeft zijn VMID altijd.
+#[cfg_attr(not(target_arch = "riscv64"), allow(dead_code))]
+static OS_ASID: AtomicBool = AtomicBool::new(true);
 /// Het tiknummer: de hartslag van slot 0, de kern (SLOT_STATUS).
 static TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// De meetlat van een hop tussen twee bewoners van de OS-core (feature
+/// `hopcost`, cpu/src/hopcost.rs): de rondreizen op de console zodra het
+/// 200 ms stil is, zodat de UART niet in de meting valt.
+#[cfg(feature = "hopcost")]
+async fn hopcost(exec: &'static Executor) {
+    let mut seen = 0;
+    loop {
+        exec.after(core::time::Duration::from_millis(200)).await;
+        let n = cpu::hopcost::recorded();
+        if n == seen {
+            cpu::hopcost::drain(&mut |a| println!("{a}"));
+        }
+        seen = n;
+    }
+}
 
 async fn tick(exec: &'static Executor) {
     let start = exec.now();

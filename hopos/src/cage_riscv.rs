@@ -995,6 +995,7 @@ pub(crate) fn os_core(plan: &Plan) -> Result<OsCore, el2::Error> {
         board.clint(),
         board.clint_hart(),
         board.app_hart(hart).pmp,
+        crate::OS_ASID.load(Relaxed),
     )?;
     let ms = cpu::riscv::idle::hz() / 1000;
     let t = os.selftest(Probe::Spin, ms, &|| {});

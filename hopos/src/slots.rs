@@ -516,6 +516,7 @@ fn set_resident(slot: usize, on: bool) {
 /// De kick van slot `slot` na een schrijf in zijn RX-ring (de `slot_wake`
 /// van de switch); zie `arch::wake`.
 pub(crate) fn wake(slot: usize) {
+    cpu::hopcost::wake();
     arch::wake(slot);
 }
 

@@ -117,9 +117,15 @@ impl RvSleeper {
             );
             return;
         }
+        let (bits, used) = os.asid();
         crate::println!(
-            "oscore: hart {} hosts residents in the idle of the kern HOPOS_OS_CORE_UP",
-            self.hart
+            "oscore: hart {} hosts residents in the idle of the kern, asid_bits={bits} ({}) HOPOS_OS_CORE_UP",
+            self.hart,
+            if used {
+                "an ASID per resident, no TLB flush per switch"
+            } else {
+                "a TLB flush per switch"
+            }
         );
         self.os = Some(os);
     }

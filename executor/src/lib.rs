@@ -200,6 +200,12 @@ pub struct Executor<const TASKS: usize = 512, const TIMERS: usize = 256> {
     /// ronde stoppen daar. Een plaats wordt van onderen af genomen, dus dit
     /// is de handvol timers die echt loopt, niet de hele tabel.
     timers_hi: Cell<usize>,
+    /// De vroegste deadline in het wiel, of eerder (een `After` die vóór
+    /// zijn tijd gedropt is, laat hem staan): een ronde scant het wiel
+    /// alleen als die verstreken is. 03-10: elke ronde scande, en op de
+    /// OS-core draait de kern tussen twee beurten van zijn bewoners een
+    /// paar rondes zonder dat er iets verloopt.
+    timers_at: Cell<u64>,
     /// De generatie van de volgende registratie: elke plaats in het wiel
     /// draagt de generatie van zijn huidige bewoner, zodat een `After` die
     /// zijn plaats al kwijt is (verlopen, hergebruikt) nooit die van een
@@ -232,6 +238,7 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
             spawn: Mailbox::new(),
             timers: RefCell::new([const { None }; TIMERS]),
             timers_hi: Cell::new(0),
+            timers_at: Cell::new(u64::MAX),
             timer_gen: Cell::new(0),
             clock: Cell::new(None),
             stats: Stats {
@@ -347,8 +354,12 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
     }
 
     fn expire_timers(&self, now: u64) -> bool {
+        if now < self.timers_at.get() {
+            return false;
+        }
         let mut worked = false;
         let mut hi = 0;
+        let mut at = u64::MAX;
         let mut timers = self.timers.borrow_mut();
         for (i, entry) in timers.iter_mut().enumerate().take(self.timers_hi.get()) {
             if entry.as_ref().is_some_and(|t| t.at <= now)
@@ -357,11 +368,13 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
                 t.waker.wake();
                 worked = true;
             }
-            if entry.is_some() {
+            if let Some(t) = entry {
                 hi = i + 1;
+                at = at.min(t.at);
             }
         }
         self.timers_hi.set(hi);
+        self.timers_at.set(at);
         worked
     }
 
@@ -371,6 +384,11 @@ impl<const TASKS: usize, const TIMERS: usize> Executor<TASKS, TIMERS> {
         let mut worked = self.drain_spawns();
         worked |= self.expire_timers(self.now());
         for (w, word) in self.ready.iter().enumerate() {
+            // Eerst kijken, dan pas de atomaire swap: een AMO per leeg woord
+            // is op de C906 geen kleingeld.
+            if word.load(Relaxed) == 0 {
+                continue;
+            }
             let mut bits = word.swap(0, AcqRel);
             while bits != 0 {
                 let i = w * 64 + bits.trailing_zeros() as usize;
@@ -468,6 +486,9 @@ impl<const TASKS: usize, const TIMERS: usize> Future for After<TASKS, TIMERS> {
                 if i >= this.exec.timers_hi.get() {
                     this.exec.timers_hi.set(i + 1);
                 }
+                this.exec
+                    .timers_at
+                    .set(this.exec.timers_at.get().min(this.deadline));
                 timers[i] = Some(Timer {
                     at: this.deadline,
                     owner: g,

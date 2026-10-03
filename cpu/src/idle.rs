@@ -29,6 +29,9 @@ pub const EVENT_STREAM_MAX_NS: u64 = 1_500_000;
 /// zolang niets anders wekt, pollt de core dus op deze korrel.
 pub const WFI_CAP_NS: u64 = 10_000_000;
 
+/// Nanoseconden per seconde.
+const NS_PER_S: u64 = 1_000_000_000;
+
 /// Omrekenen van counter-ticks naar nanoseconden zonder overloop.
 ///
 /// Seconden en rest apart: zelfs een uur maal 1 GHz loopt over als je eerst
@@ -37,6 +40,14 @@ pub const WFI_CAP_NS: u64 = 10_000_000;
 pub const fn ticks_to_ns(ticks: u64, hz: u64) -> u64 {
     if hz == 0 {
         return 0;
+    }
+    // Een tik van een heel aantal nanoseconden (1 GHz, 62,5, 25 en 10 MHz;
+    // niet de 54 en 24 MHz van de Pi's en de RK3566): één vermenigvuldiging
+    // en hetzelfde getal. De deling door een u128 is software
+    // (`__udivti3`), en de klok wordt per beurt op de OS-core een paar keer
+    // gelezen.
+    if NS_PER_S.is_multiple_of(hz) {
+        return ticks.saturating_mul(NS_PER_S / hz);
     }
     let secs = ticks / hz;
     let rest = ticks % hz;
@@ -48,6 +59,9 @@ pub const fn ticks_to_ns(ticks: u64, hz: u64) -> u64 {
 /// Omrekenen van nanoseconden naar counter-ticks, zelfde splitsing.
 #[must_use]
 pub const fn ns_to_ticks(ns: u64, hz: u64) -> u64 {
+    if NS_PER_S.is_multiple_of(hz) {
+        return ns / (NS_PER_S / hz);
+    }
     let secs = ns / 1_000_000_000;
     let rest = ns % 1_000_000_000;
     let frac = (rest as u128 * hz as u128 / 1_000_000_000) as u64;
@@ -687,6 +701,18 @@ mod tests {
         assert_eq!(wfe_until(540_000, &|| true, &mut wfe, &counter), 0);
         assert_eq!(wfe_until(0, &|| false, &mut wfe, &counter), 0);
         assert_eq!(wfes.get(), 0);
+    }
+
+    #[test]
+    fn whole_nanosecond_ticks_take_the_short_way_to_the_same_number() {
+        for hz in [1_000_000_000, 62_500_000, 25_000_000, 10_000_000, 54_000_000, 24_000_000] {
+            for t in [0u64, 1, 7, 999_999, 123_456_789_012, 1 << 40] {
+                let want = u64::try_from(u128::from(t) * 1_000_000_000 / u128::from(hz)).unwrap();
+                assert_eq!(ticks_to_ns(t, hz), want, "{t} at {hz}");
+                let back = u64::try_from(u128::from(want) * u128::from(hz) / 1_000_000_000).unwrap();
+                assert_eq!(ns_to_ticks(want, hz), back, "{want} at {hz}");
+            }
+        }
     }
 
     #[test]

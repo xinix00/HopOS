@@ -274,7 +274,28 @@ pub enum Command<'a, R, W> {
 /// en de actor kijkt zelf nog een keer.
 pub struct Published<R> {
     tx: [AtomicU64; PORTS],
+    /// Welke poorten een handvat hebben, bit `i % 64` van woord `i / 64`:
+    /// de deur kijkt alleen daar (de gereed-bits van de executor, Linux'
+    /// `for_each_set_bit`). Tot 03-10 las elke blik alle 129 woorden, en
+    /// de deur kijkt twee keer per beurt van een bewoner van de OS-core.
+    live: [AtomicU64; PORT_WORDS],
     _ring: PhantomData<fn() -> R>,
+}
+
+/// De woorden van een poort-bitmap.
+const PORT_WORDS: usize = PORTS.div_ceil(64);
+
+/// De gezette bits van `words`, oplopend: de poortnummers.
+fn ports_of(words: [u64; PORT_WORDS]) -> impl Iterator<Item = usize> {
+    words.into_iter().enumerate().flat_map(|(w, mut bits)| {
+        core::iter::from_fn(move || {
+            (bits != 0).then(|| {
+                let i = w * 64 + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                i
+            })
+        })
+    })
 }
 
 impl<R: Reader> Published<R> {
@@ -283,6 +304,7 @@ impl<R: Reader> Published<R> {
     pub const fn new() -> Self {
         Self {
             tx: [const { AtomicU64::new(0) }; PORTS],
+            live: [const { AtomicU64::new(0) }; PORT_WORDS],
             _ring: PhantomData,
         }
     }
@@ -291,8 +313,9 @@ impl<R: Reader> Published<R> {
     /// en zie [`Reader::probe`] voor de 1,7M-rondes/s-les van 04-09).
     #[must_use]
     pub fn pending(&self) -> bool {
-        self.tx.iter().any(|h| {
-            let v = h.load(Relaxed);
+        let live = core::array::from_fn(|w| self.live.get(w).map_or(0, |b| b.load(Relaxed)));
+        ports_of(live).any(|i| {
+            let v = self.tx.get(i).map_or(0, |h| h.load(Relaxed));
             v != 0 && R::probe(v - 1)
         })
     }
@@ -312,6 +335,14 @@ impl<R: Reader> Published<R> {
     fn set(&self, port: usize, handle: Option<u64>) {
         if let Some(h) = self.tx.get(port) {
             h.store(handle.map_or(0, |v| v.wrapping_add(1)), Relaxed);
+        }
+        if let Some(w) = self.live.get(port / 64) {
+            let bit = 1u64 << (port % 64);
+            if handle.is_some() {
+                w.fetch_or(bit, Relaxed);
+            } else {
+                w.fetch_and(!bit, Relaxed);
+            }
         }
     }
 }
@@ -359,6 +390,10 @@ impl<R: Reader, S: Sleeper> Sleeper for Doorbell<'_, R, S> {
         let (published, door) = (self.published, self.door);
         self.inner
             .sleep(now, until, &|| ready() || published.ring(door));
+        // Terug uit een beurt van een bewoner van de OS-core (of een wek):
+        // wat hij schreef, meteen naar de switch, zonder eerst een lege
+        // ronde van de executor en een tweede slaapvraag (03-10).
+        published.ring(door);
     }
 }
 
@@ -423,6 +458,11 @@ pub struct Wiring<'a, R: Reader, W: Writer> {
 /// De poorten en de uitgangen: alles wat de NAT als [`NatIo`] ziet.
 struct Core<'a, R, W> {
     ports: [Option<Port<R, W>>; PORTS],
+    /// Welke poorten hangen, als bits ([`ports_of`]): een ronde loopt
+    /// alleen langs die, niet langs alle [`SLOT_CAP`] (03-10: een lege
+    /// ronde kostte 2300 instructies, twee per hop tussen twee bewoners van
+    /// de OS-core).
+    live: [u64; PORT_WORDS],
     cfg: Config,
     stats: &'a Stats,
     host_bell: Option<&'a Signal>,
@@ -451,6 +491,7 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
         Ok(Self {
             core: Core {
                 ports: core::array::from_fn(|_| None),
+                live: [0; PORT_WORDS],
                 cfg,
                 stats: w.stats,
                 host_bell: w.host_bell,
@@ -478,6 +519,7 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
                 src_warned: false,
             });
         }
+        self.core.set_live(0, true);
     }
 
     /// Koppelt slot `i` (de actor-kant van [`Command::Attach`]; vóór `run`
@@ -498,6 +540,7 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
             src_warned: false,
         });
         self.published.set(i, Some(handle));
+        self.core.set_live(i, true);
         Ok(())
     }
 
@@ -510,6 +553,7 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
         if let Some(p) = self.core.ports.get_mut(i) {
             *p = None;
         }
+        self.core.set_live(i, false);
         Ok(())
     }
 
@@ -602,7 +646,7 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
         let now = (self.core.cfg.clock)();
         let mut worked = self.drain_host();
         self.warn_corrupt(0);
-        for i in 1..=self.core.cfg.max_slots {
+        for i in ports_of(self.core.live).filter(|i| *i != 0) {
             for _ in 0..MAX_BURST {
                 match self.step_slot(i, buf, now) {
                     None => break,
@@ -749,8 +793,17 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
                     &self.core.stats.work_by_door
                 };
                 c.fetch_add(1, Relaxed);
-                yield_now().await;
-                continue;
+                // Nog werk in een TX-ring (een burst die de grens raakte, een
+                // app die intussen schreef): na de anderen nog een ronde.
+                // Anders meteen wachten: een lege tweede ronde was op de
+                // OS-core de helft van de kern tussen twee beurten (03-10),
+                // en wie daarna schrijft, belt de deur zelf (de pomp, de
+                // host-poort, de [`Doorbell`] bij de volgende idle).
+                if self.published.pending() || self.ingress.as_ref().is_some_and(|r| !r.is_empty())
+                {
+                    yield_now().await;
+                    continue;
+                }
             }
             self.flush_uplink();
             if cmds {
@@ -793,6 +846,17 @@ pub async fn flow_expiry<R: Reader, W: Writer, const T: usize, const M: usize>(
 }
 
 impl<R: Reader, W: Writer> Core<'_, R, W> {
+    fn set_live(&mut self, i: usize, on: bool) {
+        if let Some(w) = self.live.get_mut(i / 64) {
+            let bit = 1u64 << (i % 64);
+            if on {
+                *w |= bit;
+            } else {
+                *w &= !bit;
+            }
+        }
+    }
+
     fn port(&mut self, i: usize) -> Option<&mut Port<R, W>> {
         self.ports.get_mut(i).and_then(Option::as_mut)
     }

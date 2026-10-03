@@ -499,6 +499,7 @@ impl OsCore {
 
     /// De beurt van bewoner `id` op lijstplek `i`.
     fn turn(&mut self, i: usize, id: u8, ctx: Pa, deadline: u64, fresh: bool) -> Back {
+        crate::hopcost::pick(id);
         dev::write64(self.sched.add(SCHED_CURSOR), i as u64);
         dev::write64(self.sched.add(SCHED_CURRENT), u64::from(id));
         ctx_write(ctx, CTX_KICK_PENDING, 0);
@@ -523,6 +524,7 @@ impl OsCore {
         dev::write64(self.sched.add(SCHED_CURRENT), 0);
         let back = self.settle(ctx, vec, fired);
         STATS.last.store(u64::from(id) | back.code() << 8, Relaxed);
+        crate::hopcost::ran(id);
         back
     }
 
@@ -1235,7 +1237,8 @@ mod arch {
     // maskers dicht; de regime-save en -restore zijn die van de switcher
     // (switch.rs), die ze op ijzer bewees.
     global_asm!(
-        r#"
+        concat!(
+            r#"
     // Eén q-register via x2/x3 naar of uit [x4], met x4 een register
     // verder. Eigen macro's: in de `.irp` van een smaak eet de smaak de
     // `\()` op, en `\n.d` leest de assembler als één naam. Het doel is
@@ -1320,6 +1323,9 @@ mod arch {
     .arch_extension nosimd
     .arch_extension nofp
 1:
+"#,
+            crate::hopcost::arm_in!(),
+            r#"
     ldp x4, x5, [x1, #({gprs} + 4 * 8)]
     ldp x6, x7, [x1, #({gprs} + 6 * 8)]
     ldp x8, x9, [x1, #({gprs} + 8 * 8)]
@@ -1345,6 +1351,9 @@ mod arch {
 \p\()_back:
     ldr x1, [sp, #(16 + 104)]
     stp x2, x3, [x1, #({gprs} + 2 * 8)]
+"#,
+            crate::hopcost::arm_out!(),
+            r#"
     stp x4, x5, [x1, #({gprs} + 4 * 8)]
     stp x6, x7, [x1, #({gprs} + 6 * 8)]
     stp x8, x9, [x1, #({gprs} + 8 * 8)]
@@ -1476,7 +1485,8 @@ hopos_os_stub_yield:
     hvc #1
     b hopos_os_stub_yield
     .popsection
-"#,
+"#
+        ),
         gprs = const CTX_GPRS,
         regime = const CTX_REGIME,
         resume = const CTX_RESUME,

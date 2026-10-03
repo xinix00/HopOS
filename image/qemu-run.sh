@@ -99,6 +99,7 @@ DISK="${DISK:-$DIR/target/hopos-disk.img}"
 DISK_MIB="${DISK_MIB:-64}"
 
 cd "$DIR"
+EXTRA_FEATURES="${FEATURES:-}"
 # GUI=display: de gui-kern, ramfb in een venster, en de USB-invoer.
 FEATURES=board-qemuvirt
 SCREEN="-nographic"
@@ -115,6 +116,10 @@ display)
 	exit 2
 	;;
 esac
+# FEATURES=hopcost (of een andere lijst) komt achter de board-feature,
+# zoals in uefi-run.sh: de meetlat van een hop op de OS-core
+# (cpu/src/hopcost.rs).
+FEATURES="$FEATURES${EXTRA_FEATURES:+,$EXTRA_FEATURES}"
 cargo build --quiet --release --target "$TARGET" -p hopos --features "$FEATURES"
 KERNEL="$DIR/target/$TARGET/release/hopos"
 

@@ -23,6 +23,11 @@
 #                                            bij STAGE=): de eerste bewoner,
 #                                            in slot 1 met de bevoegdheid,
 #                                            zoals op elk board (de release)
+#   FEATURES=hopcost image/licheerv-agent.sh
+#                                          → met die features van hopos
+#                                            achter board-licheerv (zoals
+#                                            uefi-run.sh; hopcost: de meetlat
+#                                            van een hop op de OS-core)
 #   APP=appspike image/licheerv-agent.sh   → met appspike in de kern
 #                                            gebakken als app (ROLE=app): de
 #                                            kern plaatst hem bij de boot
@@ -100,8 +105,8 @@ else
 	HOPOS_LRV_ROLE=""
 fi
 export HOPOS_LRV_STAGE HOPOS_LRV_ROLE
-echo "== kern bouwen (hopos --features board-licheerv, $TARGET) ==" >&2
-cargo build --quiet --release --target "$TARGET" -p hopos --features board-licheerv
+echo "== kern bouwen (hopos --features board-licheerv${FEATURES:+,$FEATURES}, $TARGET) ==" >&2
+cargo build --quiet --release --target "$TARGET" -p hopos --features "board-licheerv${FEATURES:+,$FEATURES}"
 ELF="$DIR/target/$TARGET/release/hopos"
 
 # Het ELF begint op RUNADDR met _start (link-riscv.ld, KERN_BASE uit
