@@ -233,3 +233,29 @@ staat hieronder, per board, zoals het er stond.
 - Watchdog: canary `HOPOS_WD_CANARY_OK` (R3, 03-10).
 - Temperatuur: TEMPSEN 59,8 C bij de boot, in de tik en de heartbeat (R5, 03-10); Go `temp.go` geport; `HOPOS_TEMPSEN_UP` of `_NONE`.
 - Kaart: R3 (fip met de loterij, Hop 3.0.6) draait op .150.
+
+## De LicheeRV met en zonder loterij (03-10)
+
+Zelfde bord, zelfde dag, zelfde vitals-riscv64 en welcome. Met de loterij
+(R10) staat de kern op de C906L (700 MHz) en pollt hij de dwmac elke 300 us;
+zonder (R11) staat hij op de C906B (1 GHz) met de dwmac op PLIC-bron 31 en
+slaapt hij in wfi, Hop zit op de C906L en de apps in de sharegroup `system`
+bij de kern.
+
+| Meting | R10, loterij | R11, zonder loterij |
+| --- | --- | --- |
+| Kern-cpu in rust (slot 0) | 46 tot 48 % | 4 tot 5 % |
+| HOPOS_TICK busy_ms per seconde in rust | 470 tot 490 | 74 tot 78 |
+| NIC-interrupts per seconde in rust | 0 (gepold) | 51 tot 68 |
+| Temperatuur in rust | 59,4 tot 59,8 C | 52 tot 57 C |
+| welcome vanaf het LAN in rust | 12 ms | 12 tot 15 ms |
+| vitals cpu 5 s, Msteps/s | 93,6 (C906B alleen, naast welcome in de sharegroup) | 60,6 (C906B gedeeld met de kern en welcome in `system`) |
+| welcome tijdens de brand | 12 tot 38 ms | 18 tot 36 ms |
+| Hop (slot 1) in rust | 2 tot 3 % van de C906L, gedeeld met de kern | 1 tot 4 % van de C906L, alleen |
+
+Lezing: zonder loterij is de kern tien keer stiller en het bord koeler, en
+is de pomp geen vaste last meer op de core van de apps. Een rekenaar in
+`system` krijgt op de C906B de idle van de kern (60,6 tegen 93,6 op een
+eigen C906B); een rekenaar bij Hop op de C906L (groep `hop`) is nog niet
+gemeten omdat Hop die plaatsing nog weigert (zie ALLES, ronde 4).
+
