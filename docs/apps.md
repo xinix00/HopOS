@@ -57,7 +57,16 @@ vindt en geen `core-class` vraagt die de OS-core uitsluit, met één regel:
 HOPOS_PLACE_SYSTEM`. Een job die een andere groep noemt, blijft bij zijn
 groep. Op de M4 deelt de kern zijn core niet (de EL2-smaak van Apple), dus
 daar is er geen `system`. Of Hop zo'n job uitstuurt, beslist Hop: hij plant
-tegen `HOPOS_CORES` (de app-cores, min de zijne als hij er een bezet).
+tegen `HOPOS_CORES` (de eigen app-cores die hij uitdeelt, min de zijne als
+hij er een bezet; de OS-core telt niet mee), en `HOPOS_SYSTEM_CORE=1` zegt
+hem dat de kern zijn core deelt. Dan kost een job in `system` hem geen core
+en past hij altijd (geheugen telt wel), net als een job in `hop` op Hop's
+eigen core (op elke node); een job zonder groep van één core zonder
+`core-class` laat hij bij een volle node door naar de terugval, en telt hem
+niet meer zodra de kern core 0 meldt. Met `HOPOS_SYSTEM_CORE` mag
+`HOPOS_CORES` 0 zijn (de LicheeRV: Hop op de enige app-core); zonder maakt
+Hop er minstens 1 van. Een weigering is één regel per job op de console:
+`hop: job NAAM refused here: no capacity (cpu; ...) HOP_NO_CAPACITY`.
 
 ## De regel
 

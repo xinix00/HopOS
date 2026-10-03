@@ -23,8 +23,9 @@
 //! | `hopos.init[]` (herhaald) | `HOPOS_INIT_JOBS`: één JSON-array |
 //!
 //! en uit de kern zelf ([`Facts`]): `HOPOS_NODE_IP`, `HOPOS_PORT`,
-//! `HOPOS_CORES`, `HOPOS_MEMORY` en `DNS` (de server uit de lease, voor de
-//! resolver van applib).
+//! `HOPOS_CORES` (de eigen app-cores die Hop uitdeelt), `HOPOS_SYSTEM_CORE=1`
+//! (de kern deelt zijn core als groep `system`), `HOPOS_MEMORY` en `DNS` (de
+//! server uit de lease, voor de resolver van applib).
 //!
 //! # Per board één tekst
 //!
@@ -166,10 +167,12 @@ pub struct Facts<'a> {
     /// 11 en de Pi 4 2 van 3 terwijl Hop op de OS-core zat: één core per
     /// node onbenut).
     pub hop_on_os: bool,
-    /// Deelt de kern zijn core (de sharegroup `system`)? Dan telt die core
-    /// mee in wat Hop kan uitdelen: een job zonder vrije eigen core komt
-    /// daar bij de kern (HOPOS_PLACE_SYSTEM), en zonder deze telling
-    /// weigerde Hop zelf al met "no capacity" (03-10).
+    /// Deelt de kern zijn core (de sharegroup `system`)? Dan zegt
+    /// `HOPOS_SYSTEM_CORE=1` het Hop: die core deelt hij niet uit maar een
+    /// job in `system` past er altijd, en een job zonder groep van één core
+    /// mag bij een volle node door (de kern zet hem dan daar,
+    /// HOPOS_PLACE_SYSTEM). Zonder dat weigerde Hop zelf al met "no
+    /// capacity" (03-10).
     pub os_shared: bool,
     /// Het geheugen van de pool (Hop plant tegen dit min het zijne).
     pub pool_bytes: u64,
@@ -402,14 +405,15 @@ fn base(out: &mut String, cfg: &NodeCfg<'_>, f: &Facts<'_>) -> fmt::Result {
     writeln!(out, "HOPOS_PORT={}", f.port)?;
     // Hop plant tegen de cores die hij kan uitdelen: alle app-cores, min de
     // zijne als hij er een bezet (hij deelt zijn core niet met jobs, alleen
-    // met zijn groep); op de OS-core bezet hij er geen.
+    // met zijn groep `hop`); op de OS-core bezet hij er geen. De OS-core
+    // telt niet mee: die is van de kern en wordt gedeeld, niet uitgedeeld.
+    // Met system-core is 0 de waarheid (de LicheeRV); zonder maakt Hop er
+    // zelf minstens 1 van, zoals altijd.
     let own = usize::from(!f.hop_on_os);
-    let system = usize::from(f.os_shared);
-    writeln!(
-        out,
-        "HOPOS_CORES={}",
-        (f.app_cores.saturating_sub(own) + system).max(1)
-    )?;
+    writeln!(out, "HOPOS_CORES={}", f.app_cores.saturating_sub(own))?;
+    if f.os_shared {
+        writeln!(out, "HOPOS_SYSTEM_CORE=1")?;
+    }
     writeln!(
         out,
         "HOPOS_MEMORY={}",
@@ -534,16 +538,22 @@ mod tests {
     }
 
     #[test]
-    fn a_shared_os_core_counts_as_a_core_hop_can_hand_out() {
+    fn a_shared_os_core_is_told_apart_from_the_cores_hop_hands_out() {
         let mut f = FACTS;
         f.os_shared = true;
         let b = build(&NodeCfg::parse(QEMU_CFG), &f).unwrap();
-        // 3 app-cores min de eigen core van Hop, plus de system-core.
-        assert!(
-            core::str::from_utf8(b.as_bytes())
-                .unwrap()
-                .contains("HOPOS_CORES=3\n")
-        );
+        // 3 app-cores min de eigen core van Hop; de OS-core apart.
+        assert_eq!(b.get("HOPOS_CORES"), Some("2"));
+        assert_eq!(b.get("HOPOS_SYSTEM_CORE"), Some("1"));
+        // De LicheeRV: Hop op de enige app-core, alles via `system`.
+        f.app_cores = 1;
+        let b = build(&NodeCfg::parse(QEMU_CFG), &f).unwrap();
+        assert_eq!(b.get("HOPOS_CORES"), Some("0"));
+        assert_eq!(b.get("HOPOS_SYSTEM_CORE"), Some("1"));
+        // Zonder gedeelde core (de M4) zegt de kern niets.
+        f.os_shared = false;
+        let b = build(&NodeCfg::parse(QEMU_CFG), &f).unwrap();
+        assert_eq!(b.get("HOPOS_SYSTEM_CORE"), None);
     }
 
     #[test]
