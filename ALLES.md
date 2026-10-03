@@ -41,26 +41,15 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 - [ ] M4: de scrub (twee keer dezelfde Go-app) en de koude-flipweigering
       zien; dan een nieuw image via Recovery met main.
-- [ ] De bump: Hop en HopOS op de volgende versie, release.sh, media.
 
 ### Fixen
 
 - [ ] O6N: na `DELETE` van Lumen weigert de kern elke plaatsing tot een
       koude boot (reproduceren op QEMU met een job met devices).
-- [ ] O6N: dvfs blijft op 800 MHz quiet tijdens een rekenaar (299 tegen
-      855 Msteps/s per core); de edge-regel nalopen.
-- [ ] Console 5555: lezersplaatsen lekken bij abrupt sluitende clients
-      (O6N, Radxa); "vol" melden aan de client; `stats` en `disc` porten.
 - [ ] Pi 4 hairpin door de NAT: 1 s hik per ronde (listen-backlog 8 in
       leannet).
-- [ ] Hop: een rolling update met een vaste poort op één node slaagt nooit;
-      bij een poortbotsing de oude eerst stoppen.
-- [ ] Hop: de leader-API staat stil tijdens een download; chunked transfer
-      weigert; een plaatsing zonder capaciteit blijft proberen (ruis); na
-      een flip één `NEXT_STORE failed`.
-- [ ] Hop: `sha256` in de jobspec, dan is een oud of gecachet image een
-      luide fout.
-- [ ] De kern zaait na een flip uit jitter, niet uit de TRNG van het board.
+- [ ] Hop: chunked transfer weigert; een plaatsing zonder capaciteit blijft
+      proberen (ruis); na een flip één `NEXT_STORE failed`.
 - [ ] vitals: de standaard-rx-URL werkt niet (`CONNECT is not supported`).
 - [ ] M4: het transport van een bulk-app in kleinere brokken met een yield
       (4 KiB-calls van de buurman blijven rond 19 tot 20).
