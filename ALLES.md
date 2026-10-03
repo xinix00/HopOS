@@ -51,8 +51,10 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 - [ ] O6N: na `DELETE` van Lumen (10 cores, devices) weigert de kern elke
       plaatsing tot een koude boot; op QEMU naspelen, de kooi, partitie of
       grant die niet vrijkomt. Agent bezig.
-- [ ] Pi 4 hairpin door de NAT: 1 s hik per ronde (p99 1002 ms); de
-      backlog van 8 in leannet, de NAT-tabel of de accept-lus. Agent bezig.
+- [ ] NAT-recycler (gezien op de Pi 4, geldt overal): bij een vol slot valt
+      een hairpin-SYN nog soms stil weg (1 van 5 stormen p99 1 s, na
+      68c4597 de steekproef-fix; geen leannet-punt). Agent maakt de
+      recycler bij vol deterministisch.
 - [ ] Koude flip: het board zegt het vooraf in de env van Hop
       (`HOPOS_COLD_FLIP=yes|no|fresh`), Hop weigert dan zonder een taak te
       stoppen (M4 geen PSCI; Pi 5 alleen vóór de eerste app-core). Agent
