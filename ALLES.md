@@ -13,28 +13,31 @@ nog te bewijzen in ronde 1).
 De afvinkmatrix van de Go-tijd (OLD/docs/support.md: boot, idle en klokken,
 devices en diensten per board), nu voor v3 en bijgehouden op ijzer. Legenda:
 ✓ gezien op het board, ○ gebouwd maar op dit board nog niet gezien, ✗ ontbreekt
-of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, ochtend (de Pi 4, de Radxa en de O6N op R2; de LicheeRV op R3 met de loterij).
+of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, ochtend (de Pi 4, de Radxa en de O6N op R2; de LicheeRV op R10, R11 zonder loterij klaar voor de kaart).
+Een cel zegt alleen of het slaagt, met hooguit de stempel of een paar
+woorden waarom niet; een gepolde NIC is geen ✓. De getallen staan in
+docs/measurements.md, de details per board in docs/boards-*.md.
 
 | | QEMU virt | Pi 5 | Pi 4 | Radxa | Altra | O6N | M4 | LicheeRV |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Boot, EL2, kooi, zelftest | ✓ | ✓ | ✓ (koud: SError bij de VL805; fix d0b6bd3 wacht op een koude boot) | ✓ | ○ | ✓ VHE, kick via SGI 1 (`kick=(Ipi, 0 us)`, stempel G) | ✓ iBoot-boot (cfg in het image op 0xF000), EL2; kooi en zelftest ok, tune aan zonder SError (M7 en later) | ○ sinds 03-10 de kern op de C906B (de bootcore, 1 GHz) als groep `system`, Hop op de C906L, de loterij uit (feature `lottery`); te zien: `the kern on hart 0 (C906B), app hart 1 (C906L)`, `HOPOS_RV_HART_UP` met `reset true`, `HOPOS_HOP_START slot=1 core=1 cpu=1`, zelftest ok; de eerste flip vanaf een loterij-kern landt op de C906L: `HOPOS_WRONG_HART` en een reset via de DW-WDT, de kaart boot. Met de loterij ✓ R3 tot R10 (`HOPOS_LOTTERY_SWAPPED`, de PLIC-context van `clint_hart()`, ac79e91) |
-| Hop als bewoner, welcome door de DNAT | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ✓ ingebakken, HOP_UP, gaat warm mee over flips (HOPOS_HOP_RESUMED) | ✓ Hop in slot 1 (`HOPOS_PRIVILEGE`), welcome in slot 2, vanaf het LAN 200 in 12 ms |
-| Kern-flip, warm | ✓ | ✗ sterft na de landing (F en H, 3x); de nieuwe kaart (H, met de zwarte doos) ligt in target/ | ✓ (6x, gen 4 op I) | ✓ (5x, gen 3 op I) | ○ | ✓ gen 2 op H (gui-bundel); I geweigerd door de H-kern (bundelpartitie 8 KiB te krap, fix de61b4b zit in de I-stick): koude boot | ✓ gen 1 tot 8 op 01-10 (D4b naar M15), adoptie 3 van 3, de config reist mee; koud: – (geen CPU_OFF) | koud ✓ gen 2 (R3) tot gen 10 (R10, 03-10, negen koude flips op één dag; vanaf R4 de symtab-stroom en de riscv-klok) (03-10: `HOPOS_FLIP_COLD_BOOT`, de loterij na de koude boot opnieuw `HOPOS_LOTTERY_SWAPPED`, `HOPOS_FLIP_SETTLED` na 70 s, Hop zaait welcome uit `hopos.init`); warm bestaat op riscv64 niet (`flip::WARM` weigert vóór de sprong) |
-| NIC met interrupt | ✓ | ✓ MSI-X via de MIP | – (GENET gepold, zoals Go) | ✓ SPI 64 | – (igb gepold, bewust) | ✓ RTL8125B, MSI-X via de ITS (LPI 8192) | – tg3 BCM57766 bewust gepold (geen MSI, INTx niet teruggebracht, driver/nic/tg3); MAC-filter na link_up (4be8b60); app naar app E 4450, P 6100 MB/s (M21), transport kern naar app 1860 | ○ dwmac op PLIC-bron 31 van de C906B (Linux, vendor-DTS, TRM), want de kern staat daar sinds 03-10; te zien: `net: dwmac irq 31 on the PLIC HOPOS_NIC_IRQ` en `HOPOS_NET_PUMP` met `irq line`. De C906L heeft geen ethernetbron (TRM, tabel van de slave-C906; vendor-FreeRTOS `ETH0_SBD_INTR_O` NA): met de loterij gepold |
-| Hardware-IRQ (NIC, kick, timer) | ✓ NIC op de interrupt, kick via SGI 8 | ✓ GEM op INTID 166 (flank, MSI via de MIP), kick via SGI 8 | ✓ kick via SGI 8; GENET gepold | ✓ NIC op INTID 64, kick via SGI 7 (TF-A houdt 8 tot en met 15), timer-PPI 30 (WFI) | ○ igb gepold (de `_PRT`-INTx doodt de SoC), kick via SGI 1 | ✓ RTL8125B MSI-X via de ITS (LPI 8192), kick via SGI 1, timer CNTHP (PPI 26) | ✓ fast IPI en timer als FIQ, AIC voor de rest; tg3 gepold | ○ dwmac op bron 31 van de C906B (`HOPOS_NIC_IRQ`), kick via MSIP van de CLINT per core, timer op `mtimecmp` (wfi op de C906B), PLIC context 0 met de 102 bronnen van de C906B; andere externe lijnen gaan uit zodra ze vuren. Met de loterij ✓ maar de dwmac gepold (300 us) |
-| Gebruik per taak, van de kern en van Hop (cpu, geheugen; slot 0, systeemtaken) | ✓ vitals 100 tijdens de brand, 1 in rust (arm64, 03-10) | ○ | ○ | ○ | ○ | ○ | ○ | ✓ R10 (03-10, met de loterij): kern 46 tot 48 % en 31,5 van 40 MB in rust (de NIC-pomp van 300 µs), Hop 2 tot 3 % en 0,5 van 10 MiB (zijn partitie is op dit bord 10 MiB), welcome 1 % en 0,4 %; in /v1/agents naast de temperatuur, in /v1/tasks als `system`, en in de hop-gui op het bord zelf (:8081, agent openen). ○ De nieuwe rolverdeling: welcome bij de kern op core 0 (`HOPOS_PLACE_SYSTEM`), Hop op core 1, de kern-cpu in rust ver onder de 46 % (de lijn in plaats van de pomp) |
-| Off-link door de NAT, SNTP | ✓ | ✓ | ✓ | ○ | ○ | ○ | ○ | ○ |
-| Watchdog gewapend en geaaid | – | ✓ PM (12 s) | ✓ PM | ✓ DW-WDT (89 s) | ○ SBSA | ✓ SBSA (8,5 s) | ✓ Apple WDT 30 s; canary sinds R1 een self-dial naar Hop (HOPOS_WD_CANARY_OK), op alle borden | ✓ DW-WDT gewapend (TOP 13, 21 s, `HOPOS_WD_ARMED`), canary `HOPOS_WD_CANARY_OK` en `HOPOS_CANARY_LIVE` (R3, 03-10) |
-| Hardware-RNG voor de kern | ✗ (jitter) | ✓ RNG200 | ✓ RNG200 | ✓ rk3568-rng | ○ SMCCC-TRNG of rndr (fc5348f) | ○ efi-rng: geen FEAT_RNG of SMCCC-TRNG, wel het EFI_RNG_PROTOCOL van de firmware (`hopos.efirng=1`, volgende stick) | ○ jitter (geen FEAT_RNG, geen SMCCC) | ✗ (niets) |
-| Hardware-RNG voor de slots (CTRL_RNG_SEED, fc5348f) | ○ jitter | ○ (kaart-kern van vóór fc5348f) | ✓ rng200 (F) | ✓ rk3568-rng (F) | ○ | ○ jitter (G); efi-rng met de volgende stick | ○ jitter | ○ |
-| Temperatuur in de tik | – | ✓ mailbox | ✓ mailbox | ✗ TSADC converteert niet (Go ook niet) | ○ SMpro | ✓ SCMI (39 C in de agentlijst) | ○ | ✓ TEMPSEN 59,8 C bij de boot, in de tik en de heartbeat (R5, 03-10) (Go `temp.go`, geport; `HOPOS_TEMPSEN_UP` of `_NONE`) |
-| Klokbeleid (dvfs) | – | ✓ 1500/800 | ✓ 1500/600 | – | ○ | ✓ vijf `_CPC`-domeinen, 2600 MHz | ✓ p-state-tune E 5/8 = 2172 MHz, P 6/20 = 2352 MHz (M7) | – |
-| Console op het glas | ✓ ramfb | ✓ via flip op de eerste kaart, ✗ sinds de herflash (firmware weigert) | ✓ 32 bpp | ✓ HDMI (geen EDID) | ○ GOP | ✓ GOP 1920x1080 | – | – |
-| USB xHCI (HID, display-app) | ✓ qemu-xhci | ○ 2 xHCI's up, niets ingeplugd | ○ VL805 koud: fix d0b6bd3 (SCB0_SIZE, notify, twee pogingen), koude boot nodig | ○ 2 DWC3 up, niets ingeplugd | ○ | ✓ 10 xHCI's up, de Blu-ray-drive over USB-BOT leest de disc (Lumen) | – | – |
-| Opslag (hopfs, volumes, OP_SYNC) | ✓ virtio-blk | – (bewust geen NVMe) | – | – (stateless, alles in het geheugen) | ○ NVMe | ✓ NVMe Lexar 4 TB, hopfs hersteld (generatie 3456) | ✓ ANS NVMe 414 GB, hopfs hersteld; de ANS asynchroon met read-ahead (M22): rauw 4952 / 1925 (M23), door de app 1270 / 1690 (M24) | – |
-| Console op 5555 | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ✓ (hopos.replay=45) | ○ |
-| Hardwaredecoder (media-smaak) | – | – | – | – | – | ✓ Linlon V8, 85,7 fps 4K P010 via de grant; nu tijdelijk weg (gui-flip H) tot de koude boot | – | – |
-| Kaart of stick klaar in `target/` | – | ✓ 22:37 (I) | ✓ 22:37 (I) | ✓ 22:38 (I, gepatchte Hop) | ✓ 18:12 | ✓ 22:38 stempel I (kern-fix bundelpartitie, verse Hop, efirng) | ✓ D4b geïnstalleerd (pstate=off, zonder de fixes van 01-10); art/hopos-apple.flip = M24 (cfg/m4-meet.cfg, replay=0); nieuw image met main gewenst | ✓ R3 (fip met de loterij, Hop 3.0.6) draait op .150 |
+| Boot, EL2, kooi, zelftest | ✓ | ✓ | ✓; koud ✗ faalt bij USB, fix d0b6bd3 | ✓ | ○ nog nooit geboot | ✓ G | ✓ M7 | ○ R11, kaart nog niet gewisseld |
+| Hop als bewoner, welcome door de DNAT | ✓ | ✓ | ✓ | ✓ | ○ nog nooit geboot | ✓ | ✓ | ✓ R10, 03-10 |
+| Kern-flip, warm | ✓ | ✗ sterft na de landing | ✓ I | ✓ I | ○ nog nooit geboot | ✓ H; I ○ koude boot, fix de61b4b | ✓ 01-10; koud – geen PSCI | – niet op riscv64; koud ✓ R10, 03-10 |
+| NIC met interrupt | ✓ | ✓ | – gepold, zoals Go | ✓ | – gepold, bewust | ✓ | – gepold, bewust | ○ R11, kaart nog niet gewisseld |
+| Hardware-IRQ (NIC, kick, timer) | ✓ | ✓ | ✓, NIC gepold | ✓ | ○ nog nooit geboot | ✓ | ✓, NIC gepold | ○ R11, kaart nog niet gewisseld |
+| Gebruik per taak, van de kern en van Hop (cpu, geheugen; slot 0, systeemtaken) | ✓ arm64, 03-10 | ○ niet nagelopen | ○ niet nagelopen | ○ niet nagelopen | ○ nog nooit geboot | ○ niet nagelopen | ○ niet nagelopen | ✓ R10, 03-10; ○ R11, kaart nog niet gewisseld |
+| Off-link door de NAT, SNTP | ✓ | ✓ | ✓ | ○ niet nagelopen | ○ nog nooit geboot | ○ niet nagelopen | ○ niet nagelopen | ○ niet nagelopen |
+| Watchdog gewapend en geaaid | – geen watchdog in virt | ✓ | ✓ | ✓ | ○ nog nooit geboot | ✓ | ✓ | ✓ R3, 03-10 |
+| Hardware-RNG voor de kern | ✗ alleen jitter | ✓ | ✓ | ✓ | ○ nog nooit geboot | ○ wacht op de stick | ✗ alleen jitter | ✗ geen bron |
+| Hardware-RNG voor de slots (CTRL_RNG_SEED, fc5348f) | ○ alleen jitter | ○ kaart van vóór fc5348f | ✓ F | ✓ F | ○ nog nooit geboot | ○ wacht op de stick | ○ alleen jitter | ○ niet nagelopen |
+| Temperatuur in de tik | – geen sensor in virt | ✓ | ✓ | ✗ sensor converteert niet | ○ nog nooit geboot | ✓ | ✗ niet gebouwd | ✓ R5, 03-10 |
+| Klokbeleid (dvfs) | – geen klok in virt | ✓ | ✓ | – klok van de firmware, bewust | ○ nog nooit geboot | ✓ | ✓ M7 | – vaste klok |
+| Console op het glas | ✓ | ✗ firmware weigert sinds de herflash | ✓ | ✓ | ○ nog nooit geboot | ✓ | – bewust uit | – geen scherm |
+| USB xHCI (HID, display-app) | ✓ | ○ niets ingeplugd | ○ koude boot nodig, fix d0b6bd3 | ○ niets ingeplugd | ○ nog nooit geboot | ✓ | – niet gepland | – niet gepland |
+| Opslag (hopfs, volumes, OP_SYNC) | ✓ | – bewust geen schijf | – geen schijf | – stateless, bewust | ○ nog nooit geboot | ✓ | ✓ M24 | – geen SD-driver |
+| Console op 5555 | ✓ | ✓ | ✓ | ✓ | ○ nog nooit geboot | ✓ | ✓ | ○ niet nagelopen |
+| Hardwaredecoder (media-smaak) | – geen media-smaak | – geen media-smaak | – geen media-smaak | – geen media-smaak | – geen media-smaak | ✓ 30-09, weg tot de koude boot | – geen media-smaak | – geen media-smaak |
+| Kaart of stick klaar in `target/` | – niets te flashen | ✓ I | ✓ I | ✓ I | ✓ | ✓ I | ✓ M24 | ○ R11 gebouwd, kaart nog niet gewisseld |
 
 ## Ronde 0: de ochtend van 03-10, vóór alles
 

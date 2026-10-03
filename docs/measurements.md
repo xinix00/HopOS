@@ -148,3 +148,88 @@ de host. Dat app naar app in de node (6,9 MB/s) trager is dan host naar app
 (71 tot 122 MB/s), zegt op QEMU vooral dat twee vCPU's elkaar via de kern
 wekken; op ijzer is dat precies het getal om te vergelijken met de 769 MB/s
 van de M4.
+
+## Uit de tabel van ALLES.md (03-10)
+
+De tabel in ALLES.md zegt sinds 03-10 alleen nog of iets slaagt. Wat de
+cellen daarvoor droegen en nog niet hier of in een docs/boards-*.md stond,
+staat hieronder, per board, zoals het er stond.
+
+**QEMU virt**
+
+- Console op het glas via `ramfb`, USB via `qemu-xhci`.
+- Gebruik per taak (arm64, 03-10): vitals 100 tijdens de brand, 1 in rust.
+
+**Raspberry Pi 5**
+
+- Warme flip: sterft na de landing (stempels F en H, drie keer); de nieuwe kaart (H, met de zwarte doos) ligt in target/.
+- Console op het glas: eerst gezien via een flip op de eerste kaart; sinds de herflash weigert de firmware.
+- Kaart in target/: stempel I, 22:37.
+
+**Raspberry Pi 4**
+
+- Warme flip: zes keer, gen 4 op stempel I.
+- Console op het glas: 32 bpp.
+- Kaart in target/: stempel I, 22:37.
+
+**Radxa Zero 3E**
+
+- NIC met interrupt op SPI 64 (de rij Hardware-IRQ noemde INTID 64).
+- Warme flip: vijf keer, gen 3 op stempel I.
+- Console op het glas: HDMI, zonder EDID.
+- USB: twee DWC3's up, niets ingeplugd.
+- Kaart in target/: stempel I, 22:38, met de gepatchte Hop.
+
+**Ampere Altra** (gebouwd, nog nooit geboot)
+
+- NIC: igb gepold, bewust: de `_PRT`-INTx doodt de SoC.
+- Kick via SGI 1.
+- Watchdog: SBSA.
+- RNG voor de kern: SMCCC-TRNG of `rndr` (fc5348f).
+- Temperatuur: SMpro.
+- Console op het glas: GOP.
+- Opslag: NVMe.
+- Stick in target/: 18:12.
+
+**Orion O6N**
+
+- Boot: VHE, kick via SGI 1 (`kick=(Ipi, 0 us)`, stempel G).
+- Warme flip: gen 2 op H (gui-bundel); I geweigerd door de H-kern (de bundelpartitie van 8 KiB te krap, fix de61b4b zit in de I-stick), dus een koude boot.
+- NIC: RTL8125B, MSI-X via de ITS (LPI 8192).
+- Timer: CNTHP (PPI 26).
+- Watchdog: SBSA, 8,5 s.
+- RNG voor de kern: geen FEAT_RNG of SMCCC-TRNG, wel het EFI_RNG_PROTOCOL van de firmware (`hopos.efirng=1`, de volgende stick).
+- RNG voor de slots: jitter (G); efi-rng met de volgende stick.
+- Temperatuur: SCMI, 39 C in de agentlijst.
+- Klokbeleid: vijf `_CPC`-domeinen.
+- Console op het glas: GOP 1920x1080.
+- USB: 10 xHCI's up, de Blu-ray-drive over USB-BOT leest de disc (Lumen).
+- Opslag: NVMe Lexar 4 TB, hopfs hersteld (generatie 3456).
+- Hardwaredecoder: Linlon V8; nu tijdelijk weg (gui-flip H) tot de koude boot.
+- Stick in target/: stempel I, 22:38 (kern-fix bundelpartitie, verse Hop, efirng).
+
+**Mac mini M4**
+
+- Hop: ingebakken, `HOP_UP`, gaat warm mee over flips (`HOPOS_HOP_RESUMED`).
+- Warme flip: gen 1 tot 8 op 01-10 (D4b naar M15), adoptie 3 van 3, de config reist mee; koud niet (geen CPU_OFF).
+- NIC: tg3 BCM57766 gepold, geen MSI, INTx niet teruggebracht (driver/nic/tg3); MAC-filter na `link_up` (4be8b60).
+- Watchdog: de canary is sinds R1 een self-dial naar Hop (`HOPOS_WD_CANARY_OK`), op alle borden.
+- RNG voor de kern: geen FEAT_RNG, geen SMCCC, dus jitter.
+- Opslag: ANS NVMe 414 GB, hopfs hersteld; de ANS asynchroon met read-ahead sinds M22.
+- Console op 5555: `hopos.replay=45`.
+- Image: D4b geïnstalleerd (pstate=off, zonder de fixes van 01-10); `art/hopos-apple.flip` = M24 (`cfg/m4-meet.cfg`, replay=0); een nieuw image met main gewenst.
+
+**LicheeRV Nano**
+
+- Boot met de loterij: gezien op R3 tot R10 (`HOPOS_LOTTERY_SWAPPED`, de PLIC-context van `clint_hart()`, ac79e91).
+- Koude flip: gen 2 (R3) tot gen 10 (R10, 03-10), negen koude flips op één dag; vanaf R4 de symtab-stroom en de riscv-klok.
+- Koude flip met de loterij: na de koude boot opnieuw `HOPOS_LOTTERY_SWAPPED`, `HOPOS_FLIP_SETTLED` na 70 s.
+- Warme flip: `flip::WARM` weigert vóór de sprong.
+- Hardware-IRQ: kick via MSIP van de CLINT per core; PLIC context 0 met de 102 bronnen van de C906B; andere externe lijnen gaan uit zodra ze vuren.
+- Hardware-IRQ met de loterij: gezien, met de NIC gepold.
+- Gebruik per taak (R10, 03-10, met de loterij): de kern 31,5 van 40 MB in rust, Hop 2 tot 3 %, welcome 1 % en 0,4 %.
+- Gebruik per taak is te zien in /v1/agents naast de temperatuur, in /v1/tasks als `system`, en in de hop-gui op het bord zelf (:8081, agent openen).
+- Gebruik per taak zonder de loterij, nog te zien: de kern-cpu in rust ver onder de 46 % (de lijn in plaats van de pomp).
+- Watchdog: canary `HOPOS_WD_CANARY_OK` (R3, 03-10).
+- Temperatuur: TEMPSEN 59,8 C bij de boot, in de tik en de heartbeat (R5, 03-10); Go `temp.go` geport; `HOPOS_TEMPSEN_UP` of `_NONE`.
+- Kaart: R3 (fip met de loterij, Hop 3.0.6) draait op .150.
