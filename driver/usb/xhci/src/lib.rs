@@ -107,14 +107,38 @@ const _: () = {
     assert!(offset_of!(CapRegs, _hccparams2) == 0x1C);
 };
 
+/// Een 64-bit register (CRCR, DCBAAP, ERSTBA, ERDP) als twee
+/// 32-bit-helften, en zo wordt het ook aangeraakt: laag, dan hoog, zoals
+/// Linux (`xhci_write_64` is `lo_hi_writeq`, `xhci_read_64` is
+/// `lo_hi_readq`) en de terugval van xHCI 5.1. Nooit één native 64-bit
+/// toegang: de VL805 achter de BCM2711-root-complex (de Pi 4) behandelt
+/// die als één dword. GEMETEN 03-10: een 64-bit lezing van CRCR gaf
+/// 0x8_0000_0008, het lage woord (CRR) twee keer, waar de spec 0x8 zegt;
+/// en na de 64-bit schrijf van CRCR en ERSTBA kreeg Enable Slot geen
+/// completion en kwam er in de event ring nooit iets, ook niet de Port
+/// Status Change van de poortreset (USBSTS.PCD stond): de controller had
+/// ze dus niet met onze adressen. Hoog, laag, hoog verloor op de CIX (de
+/// O6N) de ringstand; QEMU latcht op het hoge woord (`hw/usb/hcd-xhci.c`),
+/// en dat komt hier als laatste.
+#[repr(C)]
+struct Reg64 {
+    lo: Reg<u32>,
+    hi: Reg<u32>,
+}
+
+impl Reg64 {
+    fn read(&self) -> u64 {
+        let lo = self.lo.read();
+        u64::from(lo) | u64::from(self.hi.read()) << 32
+    }
+
+    fn write(&self, v: u64) {
+        self.lo.write(v as u32);
+        self.hi.write((v >> 32) as u32);
+    }
+}
+
 /// De operational-registers (xHCI 5.4), op `base + CAPLENGTH`.
-///
-/// De 64-bit registers (CRCR, DCBAAP, en ERSTBA en ERDP in [`IrRegs`])
-/// zijn `Reg<u64>`: één native 64-bit-schrijf publiceert adres en
-/// stuurbits samen. Hoog, laag, hoog verliest op de CIX (de O6N) de
-/// ringstand; alleen laag-dan-hoog mist QEMU's latch op het hoge woord
-/// (`hw/usb/hcd-xhci.c`). GEMETEN 30-09 op de O6N: tien xHCI's up en de
-/// Blu-ray-drive over USB-BOT.
 #[repr(C)]
 struct OpRegs {
     usbcmd: Reg<u32>,
@@ -123,10 +147,10 @@ struct OpRegs {
     _r0: [u32; 2],
     _dnctrl: Reg<u32>,
     /// Command ring control; het lage woord draagt RCS.
-    crcr: Reg<u64>,
+    crcr: Reg64,
     _r1: [u32; 4],
     /// Device context base address array pointer.
-    dcbaap: Reg<u64>,
+    dcbaap: Reg64,
     config: Reg<u32>,
 }
 
@@ -166,9 +190,9 @@ struct IrRegs {
     imod: Reg<u32>,
     erstsz: Reg<u32>,
     _r0: u32,
-    erstba: Reg<u64>,
+    erstba: Reg64,
     /// Bit 3 = EHB (event handler busy, write-1-to-clear).
-    erdp: Reg<u64>,
+    erdp: Reg64,
 }
 
 const RT_IR0: u64 = 0x20;
@@ -656,6 +680,31 @@ impl fmt::Display for Error {
     }
 }
 
+/// Een momentopname van de controller bij een mislukte enumeratie
+/// ([`Hc::diagnostic`]): wat de registers zeggen naast waar onze ringen
+/// liggen. Controllerstand, nooit apparaatdata.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Diag {
+    /// USBSTS.
+    pub usbsts: u32,
+    /// CRCR zoals gelezen: de pointer leest als nul (xHCI 5.4.5), bit 3 is
+    /// CRR (de command ring loopt).
+    pub crcr: u64,
+    /// Het busadres van de command ring.
+    pub cmd_bus: u64,
+    /// ERDP zoals gelezen (bit 3 is EHB).
+    pub erdp: u64,
+    /// Het busadres van het segment van de event ring.
+    pub evt_bus: u64,
+    /// ERSTBA zoals gelezen.
+    pub erstba: u64,
+    /// Het busadres van onze ERST, wat ERSTBA hoort te zijn.
+    pub erst_bus: u64,
+    /// Het eerste TRB van de event ring, vier dwords: nul is een
+    /// controller die er nooit iets schreef.
+    pub trb0: [u32; 4],
+}
+
 /// De `Result` van deze crate.
 pub type Result<T = (), E = Error> = core::result::Result<T, E>;
 
@@ -706,6 +755,8 @@ pub struct Hc {
     res: [Option<SlotRes>; MAX_DEVICES + 1],
     cmd: Option<Ring>,
     evt: Option<EvRing>,
+    /// Het busadres van de ERST (voor [`Hc::diagnostic`]).
+    erst_bus: u64,
     /// De gedeelde bouncebuffer voor bulk-transfers (bulk.rs). Maat nul als
     /// er na de vaste structuren niets meer over was: dan draagt deze
     /// controller alleen HID en weigert elke bulk-transfer.
@@ -779,6 +830,7 @@ impl Hc {
             res: [const { None }; MAX_DEVICES + 1],
             cmd: None,
             evt: None,
+            erst_bus: 0,
             bulk_buf: Pa(0),
             bulk_size: 0,
             pending: bounded::BoundedVec::new(),
@@ -1035,21 +1087,30 @@ impl Hc {
     }
 
     /// Een momentopname van de registers en ringen bij een mislukte
-    /// enumeratie, vóór het herstel: USBSTS, CRCR, het busadres van de
-    /// command ring en de stand van de event ring. Controllerstand, nooit
-    /// apparaatdata.
-    pub fn diagnostic(&self) -> [u64; 4] {
+    /// enumeratie, vóór het herstel ([`Diag`]).
+    #[must_use]
+    pub fn diagnostic(&self) -> Diag {
         if !self.probed {
-            return [0; 4];
+            return Diag::default();
         }
         let o = self.opr();
-        [
-            u64::from(o.usbsts.read()),
-            o.crcr.read(),
-            self.cmd.map_or(0, |r| r.bus),
-            self.evt
-                .map_or(0, |r| u64::from(dev::read32(r.base.add(12)))),
-        ]
+        let ir = self.ir();
+        let mut trb0 = [0; 4];
+        if let Some(e) = self.evt {
+            for (k, w) in (0u64..).zip(trb0.iter_mut()) {
+                *w = dev::read32(e.base.add(4 * k));
+            }
+        }
+        Diag {
+            usbsts: o.usbsts.read(),
+            crcr: o.crcr.read(),
+            cmd_bus: self.cmd.map_or(0, |r| r.bus),
+            erdp: ir.erdp.read(),
+            evt_bus: self.evt.map_or(0, |r| r.bus),
+            erstba: ir.erstba.read(),
+            erst_bus: self.erst_bus,
+            trb0,
+        }
     }
 }
 

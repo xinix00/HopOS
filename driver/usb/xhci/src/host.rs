@@ -208,6 +208,7 @@ impl Hc {
         dev::write32(erst.add(8), evt.n as u32); // segmentgrootte in TRB's
         dev::write32(erst.add(12), 0);
         self.evt = Some(evt);
+        self.erst_bus = erst.0 + self.bus_off;
 
         // Nu de registers. CONFIG eerst: hoeveel slots we gaan gebruiken.
         let o = self.opr();
@@ -223,7 +224,7 @@ impl Hc {
         let ir = self.ir();
         ir.erstsz.write(1);
         ir.erdp.write(evt.bus | ERDP_EHB);
-        ir.erstba.write(erst.0 + self.bus_off);
+        ir.erstba.write(self.erst_bus);
         ir.imod.write(0);
 
         self.setup_bulk_buf();

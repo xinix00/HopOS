@@ -535,3 +535,72 @@ fn stale_device_handle_is_detached() {
         "keyboard 0000:0000 on port 1 (low-speed, slot 1)"
     );
 }
+
+// --- de Pi 4 van 03-10 -------------------------------------------------------
+
+/// De 64-bit registers zijn twee dwords: laag op +0, hoog op +4, en een
+/// lezing is die twee dwords en niets anders (de VL805 gaf op één native
+/// 64-bit lezing van CRCR 0x8_0000_0008: het lage woord twee keer).
+#[test]
+fn reg64_is_two_dwords_low_at_the_register() {
+    let m = Mem::new(8);
+    // SAFETY: `m` is 8 bytes, 8-uitgelijnd, en leeft tot het eind.
+    let r: &Reg64 = unsafe { dev::regs(m.pa()) };
+    r.write(0x0000_0010_14a3_f001);
+    assert_eq!(dev::read32(m.pa()), 0x14a3_f001);
+    assert_eq!(dev::read32(m.pa().add(4)), 0x10);
+    // CRCR zoals de spec hem teruggeeft: pointer nul, alleen CRR.
+    dev::write32(m.pa(), 0x8);
+    dev::write32(m.pa().add(4), 0);
+    assert_eq!(r.read(), 0x8);
+}
+
+/// Wat `start` in de registers en de ERST zet, met een verschoven bus (de
+/// RP1 van de Pi 5): CRCR, DCBAAP, ERSTBA en ERDP dragen BUSadressen, laag
+/// en hoog op hun eigen dword, RCS en EHB in het lage, en de ERST wijst
+/// met de segmentmaat naar het segment van de event ring. Hetzelfde komt
+/// terug uit `diagnostic`.
+#[test]
+fn start_programs_bus_addresses_in_both_dwords() {
+    const OFF: u64 = 0x10_0000_0000;
+    let memory = Mem::new(256 << 10);
+    let regs = Mem::new(8192);
+    let p = regs.pa();
+    let mut h = Hc::at(p, "test", OFF);
+    h.probed = true;
+    h.op = p.add(0x40);
+    h.rt = p.add(0x200);
+    h.db = p.add(0x1000);
+    h.max_slots = 32;
+    h.max_ports = 1;
+    h.ac64 = true;
+    dev::write32(h.op.add(0x08), 1); // PAGESIZE: 4KB
+    block(h.start(memory.pa(), 256 << 10, &Clock)).unwrap();
+
+    let lo_hi = |pa: Pa| (dev::read32(pa), dev::read32(pa.add(4)));
+    let bus = |pa: Pa| pa.0 + OFF;
+    let cmd = h.cmd.unwrap();
+    let evt = h.evt.unwrap();
+    assert_eq!(cmd.bus, bus(cmd.base));
+    assert_eq!(evt.bus, bus(evt.base));
+    let split = |v: u64| (v as u32, (v >> 32) as u32);
+    assert_eq!(lo_hi(h.op.add(0x18)), split(cmd.bus | 1), "CRCR met RCS");
+    assert_eq!(lo_hi(h.op.add(0x30)), split(bus(h.dcbaa)), "DCBAAP");
+    let ir = h.rt.add(RT_IR0);
+    assert_eq!(dev::read32(ir.add(0x08)), 1, "ERSTSZ");
+    assert_eq!(lo_hi(ir.add(0x10)), split(h.erst_bus), "ERSTBA");
+    assert_eq!(lo_hi(ir.add(0x18)), split(evt.bus | ERDP_EHB), "ERDP");
+
+    // De ERST zelf: het segment (busadres) en zijn maat in TRB's.
+    let erst = Pa(h.erst_bus - OFF);
+    assert_eq!(lo_hi(erst), split(evt.bus), "ERST-segment");
+    assert_eq!(dev::read32(erst.add(8)), 4096 / 16, "ERST-segmentmaat");
+    assert_eq!(dev::read32(erst.add(12)), 0);
+
+    let d = h.diagnostic();
+    assert_eq!(d.crcr, cmd.bus | 1);
+    assert_eq!((d.cmd_bus, d.evt_bus), (cmd.bus, evt.bus));
+    assert_eq!((d.erstba, d.erst_bus), (h.erst_bus, h.erst_bus));
+    assert_eq!(d.erdp, evt.bus | ERDP_EHB);
+    assert_eq!(d.trb0, [0; 4], "nog geen event");
+}

@@ -55,7 +55,7 @@ use bounded::BoundedVec;
 use core::fmt;
 use dev::Pa;
 use driver_hid::{Event, Events, Keyboard, Mouse};
-use driver_xhci::{Device, Hc, PROTO_MOUSE};
+use driver_xhci::{Device, Hc, PROTO_MOUSE, Poison};
 
 pub use driver_xhci::Timer;
 
@@ -453,8 +453,21 @@ async fn attach_port(
             let d = c.hc.diagnostic();
             sink.log(format_args!(
                 "usb: {name} port {n}: {e}; sts={:x} crcr={:x} cmdpa={:x} event={:x}",
-                d[0], d[1], d[2], d[3]
+                d.usbsts, d.crcr, d.cmd_bus, d.trb0[3]
             ));
+            if matches!(
+                e,
+                driver_xhci::Error::Poisoned(Poison::CommandTimeout { .. })
+            ) {
+                // Zwijgt de command ring, dan is de vraag waar de controller
+                // zijn events heen schrijft: ERSTBA en ERDP zoals hij ze
+                // teruggeeft, naast waar onze ringen liggen.
+                let [t0, t1, t2, t3] = d.trb0;
+                sink.log(format_args!(
+                    "usb: {name} port {n}: event ring: erdp={:x} (ring {:x}) erstba={:x} (erst {:x}) trb0={t0:08x} {t1:08x} {t2:08x} {t3:08x}",
+                    d.erdp, d.evt_bus, d.erstba, d.erst_bus
+                ));
+            }
             return;
         }
     };
