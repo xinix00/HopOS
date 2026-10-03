@@ -871,9 +871,10 @@ pub fn rx_due(ctx: Pa) -> bool {
     if head_pa == 0 {
         return false;
     }
-    // De kop staat in de staart van de app en is gecached: eerst vegen,
-    // anders leest de kern zijn eigen oude regel.
-    dev::pull(Pa(head_pa), 8);
+    // De kop van een RX-ring schrijft alleen de kern zelf (de switch is de
+    // enige producer), dus zijn eigen cache heeft de laatste waarde: geen
+    // `dc civac` en twee `dsb sy` per blik (03-10, O6N: `el2::next` kijkt
+    // zo bij elke beurt).
     dev::read64(Pa(head_pa)) > door & !RX_DOOR_ARMED
 }
 

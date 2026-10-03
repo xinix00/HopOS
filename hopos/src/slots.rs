@@ -59,13 +59,13 @@ mod arch {
     pub(super) use cpu::el2::{OsCore, core_state};
 
     /// De kick van `slot` na een schrijf in zijn RX-ring: op de WFE-smaken
-    /// een SEV, die elke WFE-slaper wekt, dus het slot kiest geen doel; op
-    /// Apple de fast IPI naar de core van het slot (`wakeRX`).
+    /// de SEV, die elke WFE-slaper wekt, dus het slot kiest geen doel; die
+    /// gaf de switch zelf al (`dev::notify` in `Core::wake`, net vóór deze
+    /// haak), een tweede `dsb sy; sev` per frame is loos (03-10). Op Apple
+    /// de fast IPI naar de core van het slot (`wakeRX`).
     pub(super) fn wake(slot: usize) {
         if matches!(FLAVOR, el2::Flavor::AppleVhe) {
             super::cage::wake_rx(slot);
-        } else {
-            el2::kick(FLAVOR, 0);
         }
     }
 

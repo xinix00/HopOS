@@ -65,6 +65,17 @@ pub trait Reader {
     /// spinde op 1,7M rondes/s, 04-09). Mag racen: een verouderd handvat
     /// geeft hooguit een overbodige bel.
     fn probe(handle: u64) -> bool;
+
+    /// Is de ring zeker leeg, en is dat zonder cache-onderhoud te zien?
+    /// `false` = misschien niet leeg, of alleen met onderhoud te weten: dan
+    /// leest de actor hem gewoon. Zo slaat een ronde van de switch een stille
+    /// coherente ring over zonder `dc civac` en twee `dsb sy` op kop en
+    /// staart (03-10, O6N: c van een hop tussen twee bewoners van de
+    /// OS-core).
+    fn quiet(handle: u64) -> bool {
+        let _ = handle;
+        false
+    }
 }
 
 /// De producerkant van een ring (RX van een app, gezien vanuit de switch).
@@ -141,7 +152,9 @@ impl Reader for AbiTx {
     }
 
     fn probe_handle(&self) -> u64 {
-        self.base.0
+        // De kop is 8-gealigneerd (`abi::ring::Reader::open_with`), dus bit
+        // 0 is vrij: de belofte van de kern-kant.
+        self.base.0 | u64::from(self.ring.coherence() == Coherence::Hardware)
     }
 
     fn probe(handle: u64) -> bool {
@@ -150,7 +163,10 @@ impl Reader for AbiTx {
         // tegenpartij wijzigen, maar het stuurt alleen een bel, nooit een
         // geheugentoegang. Hoort als vrije functie in `abi::ring`; tot die er
         // is staat hij hier.
-        let base = Pa(handle);
+        if let Some(work) = coherent_peek(handle) {
+            return work;
+        }
+        let base = Pa(handle & !HANDLE_HW);
         let at = |off: u64| {
             dev::pull(base.add(off), 8);
             dev::read64(base.add(off))
@@ -158,6 +174,36 @@ impl Reader for AbiTx {
         let n = at(abi::ring::HEAD_OFF).wrapping_sub(at(abi::ring::TAIL_OFF));
         n != 0 && n <= at(abi::ring::SIZE_OFF)
     }
+
+    fn quiet(handle: u64) -> bool {
+        coherent_peek(handle) == Some(false)
+    }
+}
+
+/// Bit 0 van een probe-handvat: de kern mapt de ring Normal write-back
+/// ([`Coherence::Hardware`]).
+const HANDLE_HW: u64 = 1;
+
+/// Ligt er werk, gezien zonder cache-onderhoud: alleen als beide kanten de
+/// ring Normal write-back in het coherente domein mappen (de kern volgens
+/// bit 0 van `handle`, de producer met [`abi::ring::WB_WORD`] in zijn regel
+/// van de kop). Dan zijn kop en staart gewone loads; de `dc civac` en de
+/// twee `dsb sy` van [`dev::pull`] waren per blik loos werk, en de deur en
+/// de rotatie kijken een paar keer per beurt (03-10, O6N). `None`: dat
+/// weten kost onderhoud, de aanroeper doet het zelf. Een producer die
+/// opnieuw opent zonder belofte, ziet de kern na de `init` van de ring (die
+/// het woord wist) meteen weer als 0.
+fn coherent_peek(handle: u64) -> Option<bool> {
+    if handle & HANDLE_HW == 0 {
+        return None;
+    }
+    let base = Pa(handle & !HANDLE_HW);
+    if dev::read64(base.add(abi::ring::PRODUCER_WB_OFF)) != abi::ring::WB_WORD {
+        return None;
+    }
+    let n = dev::read64(base.add(abi::ring::HEAD_OFF))
+        .wrapping_sub(dev::read64(base.add(abi::ring::TAIL_OFF)));
+    Some(n != 0 && n <= dev::read64(base.add(abi::ring::SIZE_OFF)))
 }
 
 impl Writer for abi::ring::Writer {

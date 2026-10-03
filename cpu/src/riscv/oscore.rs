@@ -168,6 +168,7 @@ impl OsCore {
     /// `deadline` (TIME-tikken). Aanroepen met `mstatus.MIE` uit, ná de
     /// laatste `ready()`-toets van de executor.
     pub fn run(&mut self, deadline: u64) -> Turn {
+        crate::hopcost::mark(crate::hopcost::RUN);
         match el2::next(self.sched, self.cage, csr::rdtime()) {
             el2::Next::Turn { i, id, ctx, fresh } => {
                 Turn::Ran(self.turn(i, id, ctx, deadline, fresh))
@@ -219,12 +220,14 @@ impl OsCore {
         let mie = csr::mie();
         self.clint.set_timecmp(self.hart, deadline);
         csr::mie_set(BACK);
+        crate::hopcost::mark(crate::hopcost::ENTER);
         let cause = arch::enter(
             ctx.0,
             u64::from(fresh),
             SAVE.as_ptr() as u64,
             u64::from(flush),
         );
+        crate::hopcost::mark(crate::hopcost::BACK);
         csr::mie_clear(BACK);
         csr::mie_set(mie & BACK);
         self.clint.set_timecmp(self.hart, NEVER);

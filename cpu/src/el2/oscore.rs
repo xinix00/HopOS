@@ -488,6 +488,7 @@ impl OsCore {
     /// `deadline` (CNTPCT). Aanroepen met I en F gemaskeerd, ná de laatste
     /// `ready()`-toets van de executor.
     pub fn run(&mut self, deadline: u64) -> Turn {
+        crate::hopcost::mark(crate::hopcost::RUN);
         match next(self.sched, self.cage, arch::counter()) {
             Next::Turn { i, id, ctx, fresh } => Turn::Ran(self.turn(i, id, ctx, deadline, fresh)),
             Next::Idle { wake } => {
@@ -514,15 +515,32 @@ impl OsCore {
         arch::timer_arm(deadline);
         self.listen(true);
         STATS.entries.fetch_add(1, Relaxed);
+        let fp = fp_turn(id, fresh);
+        crate::hopcost::mark(crate::hopcost::ENTER);
         let t0 = arch::counter();
-        let vec = arch::enter(self.flavor, ctx, self.hcr);
+        let vec = arch::enter(self.flavor, ctx, self.hcr, fp);
+        crate::hopcost::mark(crate::hopcost::BACK);
         let dt = arch::counter().wrapping_sub(t0);
         STATS.ticks.fetch_add(dt, Relaxed);
         STATS.longest.fetch_max(dt, Relaxed);
         self.listen(false);
         let fired = arch::timer_disarm();
         dev::write64(self.sched.add(SCHED_CURRENT), 0);
-        let back = self.settle(ctx, vec, fired);
+        let back = if exit_of(vec) == Exit::Sync && arch::esr() >> 26 == EC_FP {
+            // Een FP-instructie met de trap aan: meteen weer aan de beurt op
+            // dezelfde instructie, nu met FP (de FP-staat in zijn ctx-blok
+            // zet de volgende overgang terug), zie [`FP_USER`].
+            if fp_trapped(id) {
+                crate::println!(
+                    "oscore: resident {id} uses FP, its FP state goes along from now on HOPOS_OS_FP"
+                );
+            }
+            ctx_write(ctx, CTX_WAKE, 0);
+            ctx_write(ctx, CTX_STATE, CtxState::Saved.raw());
+            Back::Yield
+        } else {
+            self.settle(ctx, vec, fired)
+        };
         STATS.last.store(u64::from(id) | back.code() << 8, Relaxed);
         crate::hopcost::ran(id);
         back
@@ -638,7 +656,7 @@ impl OsCore {
         arch::timer_arm(arch::counter().wrapping_add(ticks));
         kick();
         let t0 = arch::counter();
-        let vec = arch::enter(self.flavor, ctx, hcr);
+        let vec = arch::enter(self.flavor, ctx, hcr, true);
         let dt = arch::counter().wrapping_sub(t0);
         let after = peek();
         let fired = arch::timer_disarm();
@@ -733,6 +751,81 @@ pub fn release_held(plan: &Plan, core: Core) -> Result<(), Error> {
         }
         core::hint::spin_loop();
     }
+}
+
+/// De EC van een getrapte FP/SIMD-instructie (CPTR_EL2.TFP, of FPEN = 0
+/// onder E2H = 1).
+const EC_FP: u64 = 0x07;
+
+/// Lazy FP zoals KVM (`kvm_hyp_handle_fpsimd`), per kooi-context-id
+/// (1..=`SLOT_CAP`), drie bitmaps: [`FP_USER`], [`FP_SEEN`] en [`FP_ONCE`].
+///
+/// Een bewoner die geen FP-bewoner is, draait met de FP-trap van CPTR_EL2
+/// aan, en dan gaat er bij zijn beurt geen FP-woord heen of terug. Zonder
+/// dit kostte elke kick (HVC #6) en elke interrupt 66 stores en de beurt
+/// erna 66 loads in het ctx-blok, op de O6N Device-geheugen (03-10). Een
+/// Rust-app is softfloat; zijn enige FP-instructies zijn de `msr fpcr` en
+/// `msr fpsr` van `_start` (applib). Daarom maakt de eerste trap hem nog
+/// geen FP-bewoner: hij krijgt die ene beurt FP (zijn staat uit het ctx-blok
+/// heen, en terug), en pas een tweede trap maakt hem FP-bewoner voor de
+/// rest van dit kern-leven (een Go-app, een hardfloat-app). Een koude start
+/// wist alle drie.
+struct FpBits([AtomicU64; 3]);
+
+impl FpBits {
+    const fn new() -> Self {
+        Self([const { AtomicU64::new(0) }; 3])
+    }
+
+    fn get(&self, id: u8) -> bool {
+        self.0
+            .get(usize::from(id) / 64)
+            .is_some_and(|w| w.load(Relaxed) & 1 << (id % 64) != 0)
+    }
+
+    fn set(&self, id: u8, on: bool) {
+        if let Some(w) = self.0.get(usize::from(id) / 64) {
+            if on {
+                w.fetch_or(1 << (id % 64), Relaxed);
+            } else {
+                w.fetch_and(!(1 << (id % 64)), Relaxed);
+            }
+        }
+    }
+}
+
+/// Zijn FP-staat gaat elke beurt mee (eager, zoals tot 03-10).
+static FP_USER: FpBits = FpBits::new();
+/// Hij trapte al een keer op FP.
+static FP_SEEN: FpBits = FpBits::new();
+/// Zijn volgende beurt met FP aan (na zijn eerste trap).
+static FP_ONCE: FpBits = FpBits::new();
+
+/// Gaat de FP-staat van bewoner `id` deze beurt mee? Een koude start
+/// (`fresh`) begint opnieuw.
+fn fp_turn(id: u8, fresh: bool) -> bool {
+    if fresh {
+        for b in [&FP_USER, &FP_SEEN, &FP_ONCE] {
+            b.set(id, false);
+        }
+    }
+    let once = FP_ONCE.get(id);
+    if once {
+        FP_ONCE.set(id, false);
+    }
+    once || FP_USER.get(id)
+}
+
+/// Bewoner `id` trapte op FP: deze keer één beurt FP, de tweede keer voor
+/// altijd. `true` = vanaf nu FP-bewoner.
+fn fp_trapped(id: u8) -> bool {
+    if FP_SEEN.get(id) {
+        FP_USER.set(id, true);
+        return true;
+    }
+    FP_SEEN.set(id, true);
+    FP_ONCE.set(id, true);
+    false
 }
 
 /// Wat [`next`] besluit.
@@ -1061,10 +1154,7 @@ mod arch {
     pub(super) fn prepare(flavor: Flavor) {
         const VTCR_NO_PS: u64 = 0x8000_3559;
         const PARANGE_44: u64 = 4;
-        let cptr: u64 = match flavor {
-            Flavor::Nvhe => 0x33FF,
-            Flavor::Vhe | Flavor::AppleVhe => 0x30_0000,
-        };
+        let cptr = cptr(flavor, true);
         // SAFETY: registers van het EL2-regime die alleen een lagere EL
         // raken (VTCR, CNTVOFF, de EL1-toegang in CNTHCTL) of een trap
         // weghalen die de softfloat-kern nooit raakt (CPTR); geen geheugen.
@@ -1089,6 +1179,18 @@ mod arch {
                 cptr = in(reg) cptr,
                 options(nomem, nostack),
             );
+        }
+    }
+
+    /// CPTR_EL2 zonder FP-trap (`fp`) of met: nVHE TFP (bit 10), onder
+    /// E2H = 1 FPEN = 0. Beide trappen ook EL2 zelf; de overgang zet de
+    /// trap daarom terug uit vóór de kern weer verder gaat.
+    pub(super) fn cptr(flavor: Flavor, fp: bool) -> u64 {
+        match (flavor, fp) {
+            (Flavor::Nvhe, true) => 0x33FF,
+            (Flavor::Nvhe, false) => 0x33FF | 1 << 10,
+            (Flavor::Vhe | Flavor::AppleVhe, true) => 0x30_0000,
+            (Flavor::Vhe | Flavor::AppleVhe, false) => 0,
         }
     }
 
@@ -1171,8 +1273,8 @@ mod arch {
     }
 
     unsafe extern "C" {
-        fn hopos_os_nvhe_enter(ctx: u64, hcr: u64, vbar: u64) -> u64;
-        fn hopos_os_vhe_enter(ctx: u64, hcr: u64, vbar: u64) -> u64;
+        fn hopos_os_nvhe_enter(ctx: u64, hcr: u64, vbar: u64, cptr: u64, cptr_fp: u64) -> u64;
+        fn hopos_os_vhe_enter(ctx: u64, hcr: u64, vbar: u64, cptr: u64, cptr_fp: u64) -> u64;
         safe static hopos_os_nvhe_vectors: u8;
         safe static hopos_os_vhe_vectors: u8;
         safe static hopos_os_stub_spin: u8;
@@ -1195,11 +1297,13 @@ mod arch {
 
     /// Eén beurt van de bewoner met ctx-blok `ctx`, onder HCR_EL2 = `hcr`.
     /// Geeft de vectorindex waarmee hij terugkwam (8 synchroon, 9 IRQ, 10
-    /// FIQ, 11 SError, 12..15 AArch32).
-    pub(super) fn enter(flavor: Flavor, ctx: Pa, hcr: u64) -> u64 {
+    /// FIQ, 11 SError, 12..15 AArch32). `fp`: de bewoner gebruikt FP (zijn
+    /// FP-staat gaat mee); anders draait hij met de FP-trap aan.
+    pub(super) fn enter(flavor: Flavor, ctx: Pa, hcr: u64, fp: bool) -> u64 {
         // Apple is VHE (E2H RES1): dezelfde overgang als de O6N. Het verschil
         // (de kick als FIQ, de ack op EL2) zit in `settle`, niet hier.
-        let (f, vbar): (unsafe extern "C" fn(u64, u64, u64) -> u64, u64) = match flavor {
+        type Enter = unsafe extern "C" fn(u64, u64, u64, u64, u64) -> u64;
+        let (f, vbar): (Enter, u64) = match flavor {
             Flavor::Nvhe => (hopos_os_nvhe_enter, addr(&raw const hopos_os_nvhe_vectors)),
             Flavor::Vhe | Flavor::AppleVhe => {
                 (hopos_os_vhe_enter, addr(&raw const hopos_os_vhe_vectors))
@@ -1213,7 +1317,7 @@ mod arch {
         // zelftest, zonder MMU op een eigen stub in het kern-image) en kan
         // de EL2-stack niet zien. Elke exception uit de bewoner komt op
         // `vbar` en keert via dezelfde frame terug.
-        unsafe { f(ctx.0, hcr, vbar) }
+        unsafe { f(ctx.0, hcr, vbar, cptr(flavor, fp), cptr(flavor, true)) }
     }
 
     // De overgang en de vectoren, twee smaken uit één bron (zoals de
@@ -1224,9 +1328,11 @@ mod arch {
     // Het board kiest die vorm (board/uefi/src/el2.rs), de binary toetst
     // dat die bij de smaak past (hopos/src/cage.rs).
     //
-    // De frame op SP_EL2 (128 bytes): +0..+88 x19..x30, +96 x18 en de ctx,
-    // +112 HCR en VBAR van de kern. SP_EL2 verandert niet door een beurt op
-    // EL1, dus de exception komt binnen met SP = deze frame.
+    // De frame op SP_EL2 (144 bytes): +0..+88 x19..x30, +96 x18 en de ctx,
+    // +112 HCR en VBAR van de kern, +128 CPTR van deze beurt en die zonder
+    // FP-trap (lazy FP: zijn ze gelijk, dan gaat de FP-staat mee). SP_EL2
+    // verandert niet door een beurt op EL1, dus de exception komt binnen met
+    // SP = deze frame.
     //
     // FP (de moduledoc): q0..q31 per register via x2/x3 naar of uit de
     // FP-kier, laag dan hoog (`fmov d` wist de hoge helft, dus die tweede),
@@ -1259,7 +1365,7 @@ mod arch {
     .balign 16
     .global \p\()_enter
 \p\()_enter:
-    sub sp, sp, #128
+    sub sp, sp, #144
     stp x19, x20, [sp, #0]
     stp x21, x22, [sp, #16]
     stp x23, x24, [sp, #32]
@@ -1270,6 +1376,8 @@ mod arch {
     mrs x9, hcr_el2
     mrs x10, vbar_el2
     stp x9, x10, [sp, #112]
+    stp x3, x4, [sp, #128]
+    msr cptr_el2, x3
     msr vbar_el2, x2
     msr hcr_el2, x1
     isb
@@ -1311,6 +1419,9 @@ mod arch {
     msr spsr_el2, x3
     ldr x2, [x1, #{fp_live}]
     cbz x2, 1f
+    ldp x2, x3, [sp, #128]
+    cmp x2, x3
+    b.ne 1f
     .arch_extension fp
     .arch_extension simd
     add x4, x1, #{fprs}
@@ -1405,6 +1516,16 @@ mod arch {
     stp x2, x3, [x1, #({regime} + 16 * 8)]
     mrs x2, s3_\op1\()_c6_c0_0
     str x2, [x1, #({regime} + 18 * 8)]
+    // Lazy FP: draaide hij met de trap aan, dan raakte hij FP niet (anders
+    // was hij hier op die trap): niets te bewaren, en de trap uit vóór er
+    // op EL2 nog FP komt. FP_LIVE blijft zoals hij was.
+    ldp x2, x3, [sp, #128]
+    cmp x2, x3
+    b.eq 5f
+    msr cptr_el2, x3
+    isb
+    b 3f
+5:
     cmp x0, #{vsync}
     b.ne 2f
     mrs x2, esr_el2
@@ -1442,7 +1563,7 @@ mod arch {
     ldp x27, x28, [sp, #64]
     ldp x29, x30, [sp, #80]
     ldr x18, [sp, #96]
-    add sp, sp, #128
+    add sp, sp, #144
     ret
 
 // De vectoren tijdens een beurt. De huidige EL (0..7) is de kern zelf: door
@@ -1550,7 +1671,7 @@ mod arch {
     pub(super) fn apple_ipi_ack() {}
     /// Op de host komt elke beurt meteen terug op een IRQ (vector 9); de
     /// tests toetsen de rotatie, niet de overgang.
-    pub(super) fn enter(_flavor: Flavor, _ctx: Pa, _hcr: u64) -> u64 {
+    pub(super) fn enter(_flavor: Flavor, _ctx: Pa, _hcr: u64, _fp: bool) -> u64 {
         super::VEC_IRQ_LOWER
     }
 }

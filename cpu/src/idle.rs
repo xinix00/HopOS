@@ -318,6 +318,7 @@ impl Sleeper for ArmSleeper {
     /// `dev::notify` bij elke `Signal::set`. De eerstvolgende WFE valt er
     /// dan meteen doorheen.
     fn sleep(&mut self, now: u64, until: Option<u64>, ready: &dyn Fn() -> bool) {
+        crate::hopcost::mark(crate::hopcost::SLEEP);
         let daif = arch::mask();
         if ready() {
             arch::restore(daif);
@@ -705,11 +706,19 @@ mod tests {
 
     #[test]
     fn whole_nanosecond_ticks_take_the_short_way_to_the_same_number() {
-        for hz in [1_000_000_000, 62_500_000, 25_000_000, 10_000_000, 54_000_000, 24_000_000] {
+        for hz in [
+            1_000_000_000,
+            62_500_000,
+            25_000_000,
+            10_000_000,
+            54_000_000,
+            24_000_000,
+        ] {
             for t in [0u64, 1, 7, 999_999, 123_456_789_012, 1 << 40] {
                 let want = u64::try_from(u128::from(t) * 1_000_000_000 / u128::from(hz)).unwrap();
                 assert_eq!(ticks_to_ns(t, hz), want, "{t} at {hz}");
-                let back = u64::try_from(u128::from(want) * u128::from(hz) / 1_000_000_000).unwrap();
+                let back =
+                    u64::try_from(u128::from(want) * u128::from(hz) / 1_000_000_000).unwrap();
                 assert_eq!(ns_to_ticks(want, hz), back, "{want} at {hz}");
             }
         }

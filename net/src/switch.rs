@@ -320,6 +320,13 @@ impl<R: Reader> Published<R> {
         })
     }
 
+    /// Is de TX-ring van poort `i` zeker leeg, zonder cache-onderhoud gezien
+    /// ([`Reader::quiet`])? Dan hoeft een ronde hem niet te openen.
+    fn quiet(&self, i: usize) -> bool {
+        let v = self.tx.get(i).map_or(0, |h| h.load(Relaxed));
+        v != 0 && R::quiet(v - 1)
+    }
+
     /// De deur zelf: ligt er werk, dan de bel van de switch. `true` = er
     /// werd gebeld. De bel is één `set`, en die gaat alleen bij werk: een
     /// CAS in elke idle-ronde zou op de M4 de volgende WFE laten
@@ -383,10 +390,9 @@ impl<'a, R: Reader, S: Sleeper> Doorbell<'a, R, S> {
 
 impl<R: Reader, S: Sleeper> Sleeper for Doorbell<'_, R, S> {
     fn sleep(&mut self, now: u64, until: Option<u64>, ready: &dyn Fn() -> bool) {
-        // Werk dat er al lag: geen slaap, de switch meteen.
-        if self.published.ring(self.door) {
-            return;
-        }
+        // Werk dat er al lag, ziet de slaper zelf: zijn eerste `ready()`
+        // (met de maskers dicht) belt dan en hij keert meteen terug. Een
+        // eigen blik hier ervoor was dezelfde blik twee keer (03-10).
         let (published, door) = (self.published, self.door);
         self.inner
             .sleep(now, until, &|| ready() || published.ring(door));
@@ -644,9 +650,12 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
     /// is de ene hergebruikte framebuffer: geen allocatie per frame.
     pub fn switch_pass(&mut self, buf: &mut [u8]) -> bool {
         let now = (self.core.cfg.clock)();
-        let mut worked = self.drain_host();
+        let mut worked = !self.published.quiet(0) && self.drain_host();
         self.warn_corrupt(0);
-        for i in ports_of(self.core.live).filter(|i| *i != 0) {
+        // Een stille coherente ring niet openen: het lezen van kop en staart
+        // kost daar per ring een `dc civac` en twee `dsb sy` (03-10, O6N).
+        let live = self.core.live;
+        for i in ports_of(live).filter(|i| *i != 0 && !self.published.quiet(*i)) {
             for _ in 0..MAX_BURST {
                 match self.step_slot(i, buf, now) {
                     None => break,

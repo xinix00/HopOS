@@ -815,9 +815,10 @@ fn de_conntrack_overleeft_de_flip_via_de_actor() {
     assert_eq!(be16(&got, ETH_LEN + 22), 5555);
 }
 
-/// Een slaper van het board zoals de deur hem ziet: telt zijn slapen en
-/// onthoudt wat `ready()` aan het eind ervan zei. `during` is wat een
-/// app-core doet terwijl de OS-core slaapt.
+/// Een slaper van het board zoals de deur hem ziet: toetst `ready()` eerst
+/// (het contract van [`Sleeper`], dat de slapers van het board houden),
+/// telt zijn slapen en onthoudt wat `ready()` aan het eind ervan zei.
+/// `during` is wat een app-core doet terwijl de OS-core slaapt.
 struct Spy {
     slept: &'static Cell<u32>,
     ready_at_end: &'static Cell<Option<bool>>,
@@ -826,6 +827,9 @@ struct Spy {
 
 impl Sleeper for Spy {
     fn sleep(&mut self, _now: u64, _until: Option<u64>, ready: &dyn Fn() -> bool) {
+        if ready() {
+            return;
+        }
         self.slept.set(self.slept.get() + 1);
         (self.during)();
         self.ready_at_end.set(Some(ready()));
@@ -894,11 +898,7 @@ fn deur_slaapt_als_er_niets_ligt() {
     assert_eq!(ready_at_end.get(), Some(false));
     assert!(!h.door.is_set(), "een loze bel in een stille idle");
     d.sleep(0, None, &|| true);
-    assert_eq!(
-        ready_at_end.get(),
-        Some(true),
-        "de taken van de executor vielen weg"
-    );
+    assert_eq!(slept.get(), 1, "de taken van de executor vielen weg");
 }
 
 /// Een corrupte TX-ring leest voor de deur als eeuwig werk; de switch haalt

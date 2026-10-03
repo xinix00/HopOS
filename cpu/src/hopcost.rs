@@ -17,8 +17,11 @@
 //! (de klant draaide, rekende en stuurde; een bel vlak na een bel is een
 //! antwoord of een ack), en de klant is wie de eerste vraag stelt. Eén regel
 //! per rondreis met de vijf fasen opgeteld en het pad (`3>2` met bel, `3~2`
-//! zonder), en per partij de mediaan. De kern zet de ring pas op de console als het stil is
-//! ([`drain`]), zodat de UART niet in de meting valt. Eén OS-core per node
+//! zonder), en per partij de mediaan. Daarnaast per soort hop (met en
+//! zonder bel) de mediaan van elke fase met de tussenstempels van [`mark`],
+//! los van de groepering (`HOPOS_HOPCOST_HOP`). De kern zet de ring pas op
+//! de console als het stil is ([`drain`]), zodat de UART niet in de meting
+//! valt. Eén OS-core per node
 //! en alleen de kern raakt dit aan, dus losse atomics zonder slot. Zonder de
 //! feature zijn alle haken leeg.
 
@@ -59,6 +62,28 @@ pub fn wake() {
     #[cfg(feature = "hopcost")]
     imp::wake(stamp());
 }
+
+/// Een tussenstempel in het beurtpad, de laatste telt: [`BACK`] (de
+/// asm-overgang is terug in Rust), [`SLEEP`] (de slaper begint), [`RUN`]
+/// (de rotatie begint, na de deur en het masker) en [`ENTER`] (vlak vóór de
+/// asm-overgang naar de bewoner). Zo splitst de regel a in asm en de rest,
+/// c in executor, deur plus masker en `el2::next`, en d in Rust en asm.
+#[inline]
+pub fn mark(at: usize) {
+    #[cfg(feature = "hopcost")]
+    imp::mark(at, stamp());
+    #[cfg(not(feature = "hopcost"))]
+    let _ = at;
+}
+
+/// Zie [`mark`].
+pub const BACK: usize = 0;
+/// Zie [`mark`].
+pub const SLEEP: usize = 1;
+/// Zie [`mark`].
+pub const RUN: usize = 2;
+/// Zie [`mark`].
+pub const ENTER: usize = 3;
 
 /// Hoeveel hops met een bel er tot nu toe vastgelegd zijn: staat dit
 /// getal stil, dan is het stil op het net van de OS-core (een bewoner die
@@ -201,8 +226,24 @@ mod imp {
     static FROM: AtomicU64 = AtomicU64::new(0);
     static TO: AtomicU64 = AtomicU64::new(0);
     static T: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
-    /// De ring: per hop `[van, naar, a, b, c, d, e]` in tikken.
-    static RING: [[AtomicU64; 7]; CAP] = [const { [const { AtomicU64::new(0) }; 7] }; CAP];
+    /// De ring: per hop `[van, naar, a, b, c, d, e, a-asm, c-executor,
+    /// c-deur, c-next, d-rust, d-asm]` in tikken (zie [`super::mark`]).
+    static RING: [[AtomicU64; W]; CAP] = [const { [const { AtomicU64::new(0) }; W] }; CAP];
+    const W: usize = 13;
+    /// De tussenstempels van [`super::mark`], en die van de terugweg van de
+    /// afzender van de open hop.
+    static M: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+    static SRC_BACK: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn mark(at: usize, now: u64) {
+        if let Some(w) = M.get(at) {
+            w.store(now, Relaxed);
+        }
+    }
+
+    fn m(at: usize) -> u64 {
+        M.get(at).map_or(0, |w| w.load(Relaxed))
+    }
     static HEAD: AtomicU64 = AtomicU64::new(0);
     pub(super) static BELLS: AtomicU64 = AtomicU64::new(0);
     static TAIL: AtomicU64 = AtomicU64::new(0);
@@ -234,7 +275,8 @@ mod imp {
         if t(1) != 0 && TO.load(Relaxed) == u64::from(id) {
             let bell = t(2) != 0;
             let t2 = if bell { t(2) } else { t(1) };
-            let hop = [
+            let (sleep, run, enter) = (m(super::SLEEP), m(super::RUN), m(super::ENTER));
+            let hop: [u64; W] = [
                 FROM.load(Relaxed),
                 u64::from(id) | if bell { BELL } else { 0 },
                 t(1).wrapping_sub(t(0)),
@@ -242,6 +284,12 @@ mod imp {
                 t(3).wrapping_sub(t2),
                 t4.wrapping_sub(t(3)),
                 back.wrapping_sub(t4),
+                SRC_BACK.load(Relaxed).saturating_sub(t(0)),
+                sleep.saturating_sub(t2),
+                run.saturating_sub(sleep.max(t2)),
+                t(3).saturating_sub(run.max(sleep).max(t2)),
+                enter.saturating_sub(t(3)),
+                t4.saturating_sub(enter.max(t(3))),
             ];
             let h = HEAD.load(Relaxed);
             if let Some(slot) = RING.get((h % CAP as u64) as usize) {
@@ -254,6 +302,7 @@ mod imp {
                 BELLS.fetch_add(1, Relaxed);
             }
         }
+        SRC_BACK.store(m(super::BACK), Relaxed);
         FROM.store(u64::from(id), Relaxed);
         set(0, back);
         set(1, now);
@@ -261,7 +310,7 @@ mod imp {
     }
 
     /// Hop `k` van de ring, de fasen in nanoseconden.
-    fn read(k: u64, hz: u64) -> [u64; 7] {
+    fn read(k: u64, hz: u64) -> [u64; W] {
         let slot = RING.get((k % CAP as u64) as usize);
         core::array::from_fn(|i| {
             let v = slot.and_then(|s| s.get(i)).map_or(0, |w| w.load(Relaxed));
@@ -316,7 +365,6 @@ mod imp {
     }
 
     pub(super) fn drain(out: &mut dyn FnMut(fmt::Arguments<'_>)) {
-        use super::Us;
         let (head, tail) = (HEAD.load(Relaxed), TAIL.load(Relaxed));
         if head == tail {
             return;
@@ -324,8 +372,14 @@ mod imp {
         TAIL.store(head, Relaxed);
         let lost = (head - tail).saturating_sub(CAP as u64);
         let hz = super::hz();
+        rounds(out, tail + lost, head, lost, hz);
+        classes(out, tail + lost, head, hz);
+    }
+
+    /// De rondreizen tussen `start` en `head`, en hun mediaan.
+    fn rounds(out: &mut dyn FnMut(fmt::Arguments<'_>), start: u64, head: u64, lost: u64, hz: u64) {
+        use super::Us;
         // De rondreis begint bij de eerste vraag: wie dan belt, is de klant.
-        let start = tail + lost;
         let mut first = start;
         while first < head && !opens(first, start, None, hz) {
             first += 1;
@@ -384,6 +438,48 @@ mod imp {
             Us(p50[5])
         ));
     }
+
+    /// Hoeveel hops één klasse voor de mediaan telt (de laatste).
+    const HOPS: usize = 512;
+
+    /// Per soort hop (met en zonder bel) de mediaan van elke fase en
+    /// tussenfase, los van hoe de hops tot rondreizen groeperen: op ijzer
+    /// draaien er meer bewoners en interrupts tussendoor.
+    fn classes(out: &mut dyn FnMut(fmt::Arguments<'_>), from: u64, head: u64, hz: u64) {
+        use super::Us;
+        for (bell, name) in [(true, "bell"), (false, "nobell")] {
+            let of = |k: &u64| (read(*k, hz)[1] & BELL != 0) == bell;
+            let n = (from..head).filter(of).count();
+            if n == 0 {
+                continue;
+            }
+            let skip = n.saturating_sub(HOPS);
+            let mut p = [0u64; W];
+            let mut v = [0u64; HOPS];
+            for (f, x) in p.iter_mut().enumerate().skip(2) {
+                let mut len = 0;
+                for (k, slot) in (from..head).filter(of).skip(skip).zip(v.iter_mut()) {
+                    *slot = read(k, hz).get(f).copied().unwrap_or(0);
+                    len += 1;
+                }
+                *x = super::median(v.get_mut(..len).unwrap_or(&mut []));
+            }
+            out(format_args!(
+                "hopcost hop {name} n={n} a={} (asm {}) b={} c={} (executor {} door+mask {} next {}) d={} (rust {} asm {}) e={} us HOPOS_HOPCOST_HOP",
+                Us(p[2]),
+                Us(p[7]),
+                Us(p[3]),
+                Us(p[4]),
+                Us(p[8]),
+                Us(p[9]),
+                Us(p[10]),
+                Us(p[5]),
+                Us(p[11]),
+                Us(p[12]),
+                Us(p[6]),
+            ));
+        }
+    }
 }
 
 #[cfg(all(test, feature = "hopcost"))]
@@ -391,28 +487,28 @@ mod tests {
     use super::*;
     use core::sync::atomic::Ordering::Relaxed;
 
-    /// Eén beurt van `id`: gekozen op `pick`, de sprong op `jump`, de trap
-    /// op `trap`, de kern terug op `back`.
-    fn turn(id: u8, pick: u64, jump: u64, trap: u64, back: u64) {
-        imp::pick(id, pick);
-        STAMPS[0].store(jump, Relaxed);
-        STAMPS[1].store(trap, Relaxed);
-        imp::ran(id, back);
-    }
-
     #[test]
     fn a_round_trip_runs_from_request_to_request() {
         // Het patroon van `bench ping` over TCP (03-10, QEMU): de klant 3
         // vraagt, de dienst 2 ackt, 3 yieldt zonder bel, 2 antwoordt, 3 ackt
         // (een bel vlak na een bel: geen nieuwe vraag), 2 yieldt, en 3
-        // vraagt opnieuw.
+        // vraagt opnieuw. Per hop in us: a 2 (asm 1), d 2 (rust 1), e 8; met
+        // bel b 5 en c 4 (executor 1, deur 1, next 2), zonder bel c 6.
         let mut t = 0;
         let mut hop = |id: u8, bell: bool| {
+            let k = if bell { 3000 } else { 0 };
             if bell {
-                imp::wake(t + 5);
+                imp::wake(t + 2000 + k);
             }
-            turn(id, t + 10, t + 11, t + 20, t + 21);
-            t += 100;
+            imp::mark(SLEEP, t + 3000 + k);
+            imp::mark(RUN, t + 4000 + k);
+            imp::pick(id, t + 6000 + k);
+            imp::mark(ENTER, t + 7000 + k);
+            STAMPS[0].store(t + 8000 + k, Relaxed);
+            STAMPS[1].store(t + 16000 + k, Relaxed);
+            imp::mark(BACK, t + 17000 + k);
+            imp::ran(id, t + 18000 + k);
+            t += 18000 + k;
         };
         hop(3, false);
         for _ in 0..3 {
@@ -430,7 +526,7 @@ mod tests {
         hop(2, true);
         let mut lines = Vec::new();
         drain(&mut |a| lines.push(format!("{a}")));
-        assert_eq!(lines.len(), 5, "{lines:?}");
+        assert_eq!(lines.len(), 7, "{lines:?}");
         for l in &lines[..3] {
             assert!(l.contains("hops=6 "), "{l}");
             assert!(l.contains("[3>2 2>3 3~2 2>3 3>2 2~3]"), "{l}");
@@ -438,5 +534,15 @@ mod tests {
         assert!(lines[3].contains("[3>2]"), "{}", lines[3]);
         assert!(lines[4].contains("HOPOS_HOPCOST_P50"), "{}", lines[4]);
         assert!(lines[4].contains("n=3 "), "{}", lines[4]);
+        assert!(
+            lines[5].starts_with(
+                "hopcost hop bell n=13 a=2.0 (asm 1.0) b=5.0 c=4.0 (executor 1.0 door+mask 1.0 next 2.0) d=2.0 (rust 1.0 asm 1.0) e=8.0 us"
+            ),
+            "{}",
+            lines[5]
+        );
+        assert!(lines[6].starts_with(
+                "hopcost hop nobell n=6 a=2.0 (asm 1.0) b=0.0 c=6.0 (executor 3.0 door+mask 1.0 next 2.0)"
+            ), "{}", lines[6]);
     }
 }
