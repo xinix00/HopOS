@@ -44,9 +44,10 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       POSTen).
 - [ ] O6N: na `DELETE` van Lumen weigert de kern elke plaatsing tot een
       koude boot (reproduceren op QEMU met een job met devices).
-- [ ] OS-core: een gewekte bewoner krijgt zijn beurt pas bij de tik (LicheeRV
-      rtt app naar app 1,05 ms in `system`, op een eigen core 21 tot 47 us);
-      delen hoort op last, niet tik voor tik.
+- [ ] OS-core: een hop tussen twee bewoners kost op de LicheeRV nog 644 us
+      (was 1049; de kern-executor is sinds 5655340 goedkoop per ronde), op
+      een eigen core 21 tot 47 us; de rest is de wissel zelf op de C906
+      (TLB-flush en fences per beurt). Op arm64 nog meten.
 - [ ] Plaatsing zonder `core-class`: eerst de grote cores, dan de kleine. Op
       de O6N zijn core 1 tot 4 de A520's, dus een job zonder tag krijgt een
       kleine core (vitals 299 Msteps/s; met `core-class` big 754, dvfs vol).
