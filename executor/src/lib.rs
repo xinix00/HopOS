@@ -633,10 +633,17 @@ mod tests {
 
     #[test]
     fn full_table_drops_and_counts() {
+        // De bus is zo groot als de tabel: een negende spawn vóór de eerste
+        // ronde is Full; een spawn ná de ronde past in de bus en valt pas
+        // bij het leegmaken op de volle tabel, geteld.
         let e = exec();
-        for _ in 0..9 {
+        for _ in 0..8 {
             e.spawn(core::future::pending()).unwrap();
         }
+        assert!(e.spawn(core::future::pending()).is_err());
+        e.step();
+        assert_eq!(e.live_tasks(), 8);
+        e.spawn(core::future::pending()).unwrap();
         e.step();
         assert_eq!(e.live_tasks(), 8);
         assert_eq!(e.stats.dropped.load(SeqCst), 1);
