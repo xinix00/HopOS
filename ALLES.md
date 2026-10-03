@@ -39,12 +39,13 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
-- [ ] OS-core op de O6N: de 86 us van O8h komt niet terug. Dezelfde commit
-      (b6878f9) opnieuw gebouwd geeft 185, net als 2788067, 6c79e19 en main
-      (178 tot 185, allemaal GUI=1 met hopcost, klok vol op 2600). De kooi
-      is het dus niet (op QEMU ook geen verschil per beurt). Open: wat was
-      er anders bij O8h; eerst een koude flip in plaats van de warme keten
-      (gen 7 toen, gen 13 nu), dan de bench-ELF.
+- [ ] OS-core op de O6N: de stand is rtt p50 174 us (koude flip van main
+      8635083, O15h). De 86 van O8h komt niet terug (dezelfde commit
+      opnieuw gebouwd 185; warm en koud, alle commits sindsdien 174 tot
+      190, klok vol, zelfde bench). Een hop kost ~35 us, een rondreis
+      is ongeveer vijf hops in plaats van twee: de meeste zonder bel.
+      Agent (hop-cost5) zoekt op QEMU waarom een bewoner een beurt krijgt
+      zonder werk; doel twee hops en onder 100 us.
 - [ ] OS-core op de LicheeRV: hop-cost3b en hop-cost4 zitten in main (de
       ringen van een OS-core-bewoner zonder cache-onderhoud via CTRL_HART,
       lazy FP via mstatus.FS, de deur met één pull): meten met R18 zodra de
