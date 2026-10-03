@@ -39,6 +39,12 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
+- [ ] OS-core: de hop tussen twee bewoners profileren in vijf fasen (yield,
+      pomp en bel, executor-stap, wissel, eerste instructie) en dan snoeien:
+      geen volledige TLB-flush tussen bewoners (VMID op arm64, ASID op
+      riscv) en bij een kick direct naar die bewoner; doel O6N onder 100 us
+      (nu 301), LicheeRV onder 300 (nu 644). Agent bezig, daarna ik op het
+      bord.
 - [ ] De volgende bump: HopOS 3.0.7 met tag, Hop erop naar 3.0.8, release.sh,
       media (main heeft sinds v3.0.6 en Hop v3.0.7 de avondfixes van 03-10);
       daarmee het M4-image via Recovery (spin daarna opnieuw POSTen) en de
@@ -51,11 +57,6 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       `source=hardware`.
 - [ ] O6N: na `DELETE` van Lumen weigert de kern elke plaatsing tot een
       koude boot (reproduceren op QEMU met een job met devices).
-- [ ] OS-core: een hop tussen twee bewoners kost op de LicheeRV nog 644 us
-      (was 1049; de kern-executor is sinds 5655340 goedkoop per ronde), op
-      een eigen core 21 tot 47 us; op de O6N (A720, O4) 301 us tegen 42 op
-      eigen cores. De rest zit in de wissel zelf (VTTBR/satp, TLB, de
-      kernronde): profileren per beurt, dan pas snoeien.
 - [ ] Pi 4 hairpin door de NAT: 1 s hik per ronde (listen-backlog 8 in
       leannet).
 - [ ] Hop: een koude flip eerst aan de kern vragen (een proef zonder te
