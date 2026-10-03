@@ -46,6 +46,9 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 - [ ] O6N: na `DELETE` van Lumen weigert de kern elke plaatsing tot een
       koude boot (reproduceren op QEMU met een job met devices).
+- [ ] OS-core: een gewekte bewoner krijgt zijn beurt pas bij de tik (LicheeRV
+      rtt app naar app 1,05 ms in `system`, op een eigen core 21 tot 47 us);
+      delen hoort op last, niet tik voor tik.
 - [ ] Pi 4 hairpin door de NAT: 1 s hik per ronde (listen-backlog 8 in
       leannet).
 - [ ] Hop: chunked transfer weigert; een plaatsing zonder capaciteit blijft
