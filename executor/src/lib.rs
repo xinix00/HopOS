@@ -163,7 +163,11 @@ struct Timer {
 /// een test een gelekte `Box`. Wakers wijzen naar zijn slots.
 pub struct Executor<const TASKS: usize = 512, const TIMERS: usize = 256> {
     slots: [Slot; TASKS],
-    spawn: Mailbox<Task, 64>,
+    /// Zo groot als de takentabel: bij boot spawnt de kern één servicer per
+    /// slot vóór de eerste ronde van de executor, en de Altra heeft er 128
+    /// (03-10, de eerste v3-boot: bus van 64 vol, "first placement not
+    /// spawned: Full", geen Hop).
+    spawn: Mailbox<Task, TASKS>,
     timers: RefCell<[Option<Timer>; TIMERS]>,
     /// De generatie van de volgende registratie: elke plaats in het wiel
     /// draagt de generatie van zijn huidige bewoner, zodat een `After` die
