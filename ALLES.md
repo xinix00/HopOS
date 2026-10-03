@@ -9,7 +9,7 @@ in docs/measurements.md, de details per board in docs/boards-*.md.
 De afvinkmatrix van de Go-tijd (OLD/docs/support.md: boot, idle en klokken,
 devices en diensten per board), nu voor v3 en bijgehouden op ijzer. Legenda:
 ✓ gezien op het board, ○ gebouwd maar op dit board nog niet gezien, ✗ ontbreekt
-of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, avond (LicheeRV R31, O6N O15h, Pi 4 P9g, Radxa X20, Pi 5 P6g, Altra A12g, M4 M1; main loopt voor op de release v3.0.6 en Hop v3.0.7).
+of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, avond (LicheeRV R32, O6N O16h, Pi 4 P9g, Radxa X20, Pi 5 P6g, Altra A12g, M4 M1; main loopt voor op de release v3.0.6 en Hop v3.0.7).
 Een cel zegt alleen of het slaagt, met hooguit de stempel of een paar
 woorden waarom niet; een gepolde NIC is geen ✓. De getallen staan in
 docs/measurements.md, de details per board in docs/boards-*.md.
@@ -39,27 +39,16 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
-- [ ] OS-core op de O6N: de stand is rtt p50 174 us (koude flip van main
-      8635083, O15h). De 86 van O8h komt niet terug (dezelfde commit
-      opnieuw gebouwd 185; warm en koud, alle commits sindsdien 174 tot
-      190, klok vol, zelfde bench). Een hop kost ~35 us, een rondreis
-      is ongeveer vijf hops in plaats van twee: de meeste zonder bel.
-      Agent (hop-cost5) zoekt op QEMU waarom een bewoner een beurt krijgt
-      zonder werk; doel twee hops en onder 100 us.
-- [ ] OS-core op de LicheeRV: rtt p50 372 us (R31, met de ringen van een
-      OS-core-bewoner zonder cache-onderhoud en de staart gecachet; was 527
-      vanavond en 644 gisteren). Doel onder 300: wat rest is ~82k
-      instructies per rondreis op de in-order C906 en de Hop-ringen op het
-      andere hart; samen met hop-cost5 (het aantal hops per rondreis).
 - [ ] Op ijzer nog te zien van wat landde: de NVMe-bench (`hopos.nvmebench=1`:
       RANDQ met 16 tegelijk, SEQ niet lager dan 2705 MB/s op de O6N) op
       O6N en Altra; de M4 (tg3 en apple pcie via poll_until, de ANS als
-      transport van de NVMe-kern).
+      transport van de NVMe-kern, de twee wissels per rondreis).
 - [ ] De volgende bump: HopOS 3.0.7 met tag, Hop erop naar 3.0.8 (de
       lean-tags naar v3.1.9, zoals tools/hop-build.sh nu al doet),
-      release.sh, media. De Radxa-kaart heeft de dwmac4-fout met de
-      MMC-maskers (v3.0.5 stormt na 2 GiB verkeer): nieuwe kaart. Het
-      M4-image via Recovery (spin daarna opnieuw POSTen) en de Altra-stick.
+      release.sh, media; de apps opnieuw (de winst van de twee wissels zit
+      in applib). De Radxa-kaart heeft de dwmac4-fout met de MMC-maskers
+      (v3.0.5 stormt na 2 GiB verkeer): nieuwe kaart. Het M4-image via
+      Recovery (spin daarna opnieuw POSTen) en de Altra-stick.
 
 ### Fixen
 
@@ -89,13 +78,10 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Meten
 
-- [ ] De ring doet het cache-onderhoud op head en tail altijd: eerst meten
-      (bench pull M4 en O6N met en zonder), dan 20 tot 30 regels.
 - [ ] O6N schrijven ~700 MB/s tegen 800 tot 1188; app-opslag O6N 414
       schrijven en 85 lezen.
 - [ ] De OS-core als grens voor veel kleine calls: meten met een echte
       database van 100 GB of meer.
-- [ ] `hopos.codecdemo` op de O6N.
 
 ### Later
 
@@ -108,9 +94,6 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 - [ ] LicheeRV: apps in groep `hop` op de C906L houden een device-staart
       (4,3 MB/s over de draad); gecachet kan pas als de app zelf
       cache-onderhoud doet.
-- [ ] Radxa: de pull op de OS-core is rekengebonden (kern ~930 ms per seconde
-      bezig, ~40k NIC-interrupts per seconde bij 100 tot 110 MB/s); de
-      volgende hefboom is RX-interrupt-matiging (RIWT, zoals Linux).
 - [ ] Altra RNG: de firmware heeft geen SMCCC-TRNG (TRNG_VERSION
       NOT_SUPPORTED, 03-10) en het EFI_RNG_PROTOCOL hing er in juli; blijft
       jitter tot iemand efi-rng daar met een tijdslimiet durft te proberen.
@@ -119,8 +102,7 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 - [ ] Hop op de host: SIGTERM; de S3-lock met twee HopOS-nodes op ijzer.
 - [ ] De plugins als node (hop-gui, hoplb, hopdns, hopprom, hoplockserver,
       cloudflared-lean met een echt token) en Replica (`sqlite-persist`).
-- [ ] applib `leave_group`; lean: de IPv6-baan en `Stack::leave_group`;
-      docs/boards-radxa.md bijwerken.
+- [ ] applib `leave_group` en lean `Stack::leave_group`.
 
 ## Het plafond: Linux of macOS op dezelfde M4 tegen HopOS (01-10 avond, M33)
 
