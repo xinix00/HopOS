@@ -83,11 +83,11 @@ const LAST: u32 = 1 << 28;
 const ERR: u32 = 1 << 15;
 const RING_END: u32 = 1 << 30;
 
-/// Een generatie met kleine ringen; `M` kiest de kopie.
+/// Een generatie met kleine ringen.
 #[derive(Clone, Copy)]
-struct Fake<const M: bool>;
+struct Fake;
 
-impl<const M: bool> Ops for Fake<M> {
+impl Ops for Fake {
     type Regs = FakeRegs;
 
     const NUM_RX: u16 = 8;
@@ -97,7 +97,6 @@ impl<const M: bool> Ops for Fake<M> {
     const BUF_OFF: u64 = 256;
     const MAX_FRAME: usize = 100;
     const RX_LIMIT: usize = 120;
-    const MEMCPY: bool = M;
     const MII: Mii = Mii {
         addr_shift: 21,
         reg_shift: 16,
@@ -160,7 +159,7 @@ impl<const M: bool> Ops for Fake<M> {
     }
 }
 
-type F = Fake<false>;
+type F = Fake;
 
 /// Een draaiende nep-driver.
 fn running<O: Ops>() -> Rig<O> {
@@ -429,34 +428,28 @@ fn transmit_batches_until_flush_wraps_and_stops_when_full() {
     assert_eq!(n.stats.tx_frames, u64::from(F::NUM_TX) + 1);
 }
 
-/// De kopie in en uit de buffers, met `memcpy` en met vluchtige woorden:
-/// byte voor byte het frame, met een staart die niet op 8 of 16 valt, en
-/// niets ernaast.
-fn frames_cross_the_buffers<const M: bool>() {
+/// De kopie in en uit de buffers: byte voor byte het frame, met een staart
+/// die niet op 8 of 16 valt, en niets ernaast.
+#[test]
+fn frames_cross_the_buffers_byte_for_byte() {
     let pattern = |n: usize| (0..n).map(|i| (i * 7 + 3) as u8).collect::<Vec<u8>>();
-    for size in [17, 61, Fake::<M>::MAX_FRAME] {
-        let mut f = running::<Fake<M>>();
+    for size in [17, 61, F::MAX_FRAME] {
+        let mut f = running::<F>();
         let n = &mut f.n;
         let frame = pattern(size);
         n.transmit(&frame).unwrap();
-        let mut sent = vec![0u8; Fake::<M>::BUF_SIZE];
+        let mut sent = vec![0u8; F::BUF_SIZE];
         dev::copy_out(&mut sent, n.ring.tx_buf(0));
         assert_eq!(&sent[..size], &frame[..], "tx {size}");
         assert!(sent[size..].iter().all(|&b| b == 0), "tx {size}: beyond");
 
         dev::write32(n.ring.rx(0), FIRST | LAST | (size + FCS_LEN) as u32);
-        dev::copy_in(n.ring.rx_buf(0), &pattern(Fake::<M>::BUF_SIZE));
+        dev::copy_in(n.ring.rx_buf(0), &pattern(F::BUF_SIZE));
         let mut out = vec![0xccu8; 2048];
         assert_eq!(n.receive(&mut out), Some(size), "rx {size}");
         assert_eq!(&out[..size], &frame[..], "rx {size}");
         assert!(out[size..].iter().all(|&b| b == 0xcc), "rx {size}: beyond");
     }
-}
-
-#[test]
-fn frames_cross_the_buffers_byte_for_byte() {
-    frames_cross_the_buffers::<true>();
-    frames_cross_the_buffers::<false>();
 }
 
 // --- de interrupt ---------------------------------------------------------

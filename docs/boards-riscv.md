@@ -187,7 +187,9 @@ SMP-eenheden, sharegroepen        één bewoner per app-hart
 - **Bouwen** (`build`): eerst uit elke bewonerslijst en het ctx-blok leeg,
   dan de control-page (entry, slot, `CTRL_IDLE_MODE` = yield, de wandklok,
   `CTRL_TIMEBASE_HZ`), de ringen, de Sv39-tabel in `ABI_MAP_OFF` van de
-  staart (het app-RAM rwx, de staart als device zonder T-Head-cachebits),
+  staart (het app-RAM rwx, de staart als device zonder T-Head-cachebits;
+  een bewoner van de OS-core deelt de L1 met de kern en krijgt de staart
+  gecachet: 03-10 de pull over de draad van 3,9 naar 9,8 MB/s),
   één TOR-venster over de claim plus de deny-all, het regime in
   `CTX_REGIME`, en de RX-kop voor de deurbel (`CTX_RING_HEAD_PA`). Het
   app-venster is 768 MB: de staart draagt een wortel plus één tabel

@@ -23,7 +23,7 @@
 //! board Normal-WB mapt; de kern veegt (`pull` vóór elke RX-lees, `push` na
 //! elke TX-schrijf, één `pull` over alle buffers bij de start: de net-wb
 //! van de O6N en de Altra, en Linux' `dma_sync_single_for_cpu`/
-//! `_for_device`), en de kopieën zijn `memcpy` ([`Ops::MEMCPY`]). Een lees
+//! `_for_device`), en de kopieën zijn `memcpy` (de kern). Een lees
 //! uit NC gaat elke keer naar het DRAM, en de in-order A55 wacht per woord
 //! op die rondreis. GEMETEN 03-10 op de Radxa (een app die 1514 bytes
 //! kopieert, 816 MHz): uit NC met vluchtige woorden van 8 bytes (zoals
@@ -284,7 +284,6 @@ impl Ops for Hw {
     const BUF_OFF: u64 = BUF_OFF;
     const MAX_FRAME: usize = MAX_FRAME;
     const RX_LIMIT: usize = BUF_SIZE;
-    const MEMCPY: bool = true;
     // dwmac4_core.c `dwmac4_setup`: addr_shift 21, reg_shift 16,
     // clk_csr_shift 8; stmmac_mdio.c: `MII_GMAC4_READ` = 3 << 2,
     // `MII_GMAC4_WRITE` = 1 << 2.

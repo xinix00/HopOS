@@ -158,11 +158,6 @@ pub trait Ops: Copy + 'static {
     /// als buffergrootte opgaven. Meer is een lengte die bytes uit de
     /// naburige buffer zou blootgeven.
     const RX_LIMIT: usize;
-    /// Hoe een frame de buffers in en uit gaat: `memcpy` voor buffers die
-    /// het board Normal mapt, anders vluchtige woorden van 8 bytes. Het
-    /// cache-onderhoud (`pull` vóór de lees, `push` na de schrijf) doet de
-    /// kern in beide gevallen.
-    const MEMCPY: bool;
     /// De velden van het MDIO-adresregister.
     const MII: Mii;
     /// De RX-interrupt in het enable-register.
@@ -416,8 +411,8 @@ impl<O: Ops> Probe<O> {
     ///
     /// `[dma, dma + dma_size)` ligt onder 4 GB en wordt alleen door deze
     /// driver en het device gebruikt, nu en zolang het programma draait. Het
-    /// mag gecachet zijn (de driver doet het onderhoud), maar niet Device
-    /// als de generatie [`Ops::MEMCPY`] zegt.
+    /// mag gecachet zijn (de driver doet het onderhoud), maar niet Device:
+    /// een frame gaat met `memcpy` de buffers in en uit.
     pub unsafe fn start(
         mut self,
         dma: Pa,
@@ -689,11 +684,7 @@ impl<O: Ops> Stmmac<O> {
         // alleen van deze buffer (BUF_SIZE is een veelvoud van een regel).
         dev::pull(src, n);
         if let Some(dst) = buf.get_mut(..n) {
-            if O::MEMCPY {
-                dev::copy_out_normal(dst, src);
-            } else {
-                dev::copy_out(dst, src);
-            }
+            dev::copy_out_normal(dst, src);
         }
         self.stats.rx_frames += 1;
         Some(n)
@@ -726,11 +717,7 @@ impl<O: Ops> netdev::Device for Stmmac<O> {
         // Eerst de buffer naar het geheugen, dan pas de descriptor die
         // ernaar wijst.
         let b = self.ring.tx_buf(self.tx_cur);
-        if O::MEMCPY {
-            dev::copy_in_normal(b, frame);
-        } else {
-            dev::copy_in(b, frame);
-        }
+        dev::copy_in_normal(b, frame);
         dev::push(b, len);
         O::tx_give(d, b, len, self.tx_cur == O::NUM_TX - 1);
         self.tx_cur = (self.tx_cur + 1) % O::NUM_TX;

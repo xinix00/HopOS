@@ -18,9 +18,10 @@
 //! core), dus de DMA-regio is gewoon cachebaar DRAM. Elke descriptor-
 //! toegang loopt daarom door [`dev::push`] (clean, vóór de controller
 //! leest) en [`dev::pull`] (clean en invalidate, vóór de CPU leest wat de
-//! controller schreef); de buffers krijgen dat onderhoud in de kern. De
-//! kopieën zijn vluchtige woorden ([`Ops::MEMCPY`] uit), zoals sinds de
-//! eerste boot.
+//! controller schreef); de buffers krijgen dat onderhoud in de kern, en na
+//! de `pull` is een buffer gewoon geheugen: de kopie is `memcpy`. Tot 03-10
+//! waren het vluchtige woorden van 8 bytes, 4,9 us per frame van 1514 bytes
+//! tegen 1,4 us (gemeten op de C906B, gecachet).
 //!
 //! En daarom staat elke descriptor en elke buffer op een eigen cacheline
 //! van [`LINE`] bytes: descriptors [`DESC_STRIDE`] uit elkaar via de
@@ -271,7 +272,6 @@ impl Ops for Hw {
     const BUF_OFF: u64 = DESC_BYTES;
     const MAX_FRAME: usize = MAX_FRAME;
     const RX_LIMIT: usize = MAX_FRAME;
-    const MEMCPY: bool = false;
     // designware.h; Linux stmmac: addr_shift 11, reg_shift 6, clk_csr_shift
     // 2, write = bit 1, lezen zonder opcode.
     const MII: Mii = Mii {

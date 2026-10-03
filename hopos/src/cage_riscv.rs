@@ -214,7 +214,7 @@ impl Isa for Rv {
         let ram = app_ram(part).ok_or(err(code::TAIL))?;
         let tail = tail_of(part).ok_or(err(code::TAIL))?;
         let t = crate::BOARD.app_hart(plan.phys_core(b.core));
-        let satp = relocate(s, part, ram, tail, &t)?;
+        let satp = relocate(s, part, ram, tail, &t, b.core.get() == 0)?;
         // De whitelist: één TOR-venster over de hele claim (app-RAM plus
         // staart), dan de deny-all. De switcher schrijft hem en leest
         // pmpcfg0 terug vóór hij de bewoner binnenlaat.
@@ -351,15 +351,23 @@ impl Rv {
 }
 
 /// Legt het linkvenster op de partitie: het app-RAM als normaal geheugen
-/// (rwx), de staart erboven als device (rw, zonder de cachebits van de
-/// C906: de kern leest en schrijft hem vanaf een ander hart, en de harts
-/// zijn niet coherent). De tabel gaat naar `ABI_MAP_OFF` van de staart.
+/// (rwx), de staart erboven (rw) als device, zonder de cachebits van de
+/// C906, behalve voor een bewoner op het hart van de kern (`own`). De kern
+/// leest en schrijft de staart, en de harts zijn niet coherent; op zijn
+/// eigen hart deelt de bewoner de L1 met hem, en dan is gecachet coherent
+/// (linkadres en partitie liggen op 2 MB, dus VA en PA vallen in dezelfde
+/// cacheset). Device kost daar alles: leannet leest elk frame in de
+/// RX-ring zelf, en zijn checksum over één segment uit device duurt 245 tot
+/// 258 us tegen 10 us uit RAM (03-10, LicheeRV, de pull van 100 MiB over de
+/// draad op 3,9 MB/s met de bewoner 78 % van de C906B bezig). De tabel gaat
+/// naar `ABI_MAP_OFF` van de staart.
 fn relocate(
     slot: layout::Slot,
     part: Region,
     ram: u64,
     tail: Tail,
     t: &AppHart,
+    own: bool,
 ) -> Result<u64, CageError> {
     let map = [
         sv39::MapWindow {
@@ -378,7 +386,7 @@ fn relocate(
             r: true,
             w: true,
             x: false,
-            device: true,
+            device: !own,
         },
     ];
     let mut tables = sv39::Tables::new();
