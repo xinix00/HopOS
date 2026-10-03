@@ -58,15 +58,9 @@ Wat de build en de media blokkeert. Volgorde telt.
       Daarna een nieuw image via Recovery met main en een cfg zonder
       `hopos.pstate=off` (nu nog D4b; `EMBED=` Hop 3.0.5): dan klopt ook de
       koude boot weer.
-- [ ] **De Altra**: de stick van de release (hopos-altra-headless.img.gz)
-      met de fixes van 03-10 (kaart 256 KB, HOPOS_UEFI_MAP_DROPPED, venster
-      0xB000_0000 met de zes kandidaten als het bezet is, igb na CTRL.RST);
-      v3 heeft daar nog nooit geboot.
-- [ ] **De Pi 5**: eerst de nieuwe kaart (met de zwarte doos), dan pas
-      flippen; de warme flip sterft daar na de landing (F, H en OP1, drie
-      keer) en de koude flip weigert zodra er een app-core draaide. De
-      kaart-kern is te oud voor de doos.
-
+- [ ] **De Altra**: de stick heeft A1 van main (03-10 middag, met de kaart
+      van 256 KB, HOPOS_UEFI_MAP_DROPPED, het venster 0xB000_0000 en igb na
+      CTRL.RST); v3 heeft daar nog nooit geboot, de eerste boot is de toets.
 ## Ronde 1: het ijzerbewijs van de fixes van 02 en 03-10
 
 Eén boot of flip per board van main, en per board de regels die het bewijs
