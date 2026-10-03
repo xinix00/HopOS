@@ -946,23 +946,20 @@ impl Nat {
         Some(*fl)
     }
 
-    /// De oudste al gesloten flow van `slot` uit een begrensde steekproef.
-    fn oldest_closed(&mut self, slot: u8) -> Option<Id> {
-        const SAMPLE: usize = 64;
-        let mut best: Option<(Id, u64)> = None;
-        let ids: BoundedVec<Id, SAMPLE> = self.flows.sample();
-        for &id in ids.iter() {
-            let Some(fl) = self.flows.get(id) else {
-                continue;
-            };
-            if fl.slot != slot || !fl.fin_fwd || !fl.fin_rev {
-                continue;
-            }
-            if best.is_none_or(|(_, seen)| fl.seen < seen) {
-                best = Some((id, fl.seen));
-            }
-        }
-        best.map(|(id, _)| id)
+    /// De oudste al gesloten flow van `slot`, uit een volle doorloop van de
+    /// slab: alleen bij een vol slot, één keer per nieuwe flow, en dan is
+    /// zeker weten goedkoper dan een SYN die 1 s op zijn RTO wacht. GEMETEN
+    /// 03-10 op de Pi 4: een steekproef van 64 vond in een slab vol flows
+    /// van Hop af en toe geen gesloten flow van het slot terwijl het er
+    /// honderden had (hairpin-storm, de derde run binnen een minuut: 180
+    /// conn/s, p99 1002 ms, HOPOS_MASQ_SLOT_FULL).
+    fn oldest_closed(&self, slot: u8) -> Option<Id> {
+        self.flows
+            .ids()
+            .filter_map(|id| self.flows.get(id).map(|fl| (id, fl)))
+            .filter(|(_, fl)| fl.slot == slot && fl.fin_fwd && fl.fin_rev)
+            .min_by_key(|(_, fl)| fl.seen)
+            .map(|(id, _)| id)
     }
 
     /// Het enige verwijderpad voor de conntrack.

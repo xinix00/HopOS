@@ -12,7 +12,6 @@ use crate::Error;
 use crate::map::{filled, mix};
 use crate::plan::SLOT_CAP;
 use alloc::vec::Vec;
-use bounded::BoundedVec;
 
 /// Het conntrack-plafond: de anti-DoS-grens; een app kan HOP's geheugen op
 /// core 0 nooit laten vollopen.
@@ -109,7 +108,6 @@ pub(crate) struct FlowTable {
     /// Het hoogste aantal flows sinds de laatste compactie: de meetlat van
     /// Go's `flowMapHighWater`.
     pub(crate) high_water: usize,
-    cursor: usize,
 }
 
 impl FlowTable {
@@ -128,7 +126,6 @@ impl FlowTable {
             len: 0,
             count_by_slot: [0; SLOT_CAP + 1],
             high_water: 0,
-            cursor: 0,
         })
     }
 
@@ -301,28 +298,6 @@ impl FlowTable {
             .enumerate()
             .filter(|(_, f)| f.is_some())
             .map(|(i, _)| i as Id)
-    }
-
-    /// Een begrensde steekproef van `N` levende flows vanaf een roterende
-    /// cursor: de vervanger van Go's willekeurige map-iteratie in
-    /// `oldestClosedLocked`. Begrensd, want dit pad loopt onder een storm
-    /// per pakket en een volle scan kost dan O(n) per pakket. De cursor gaat
-    /// verder waar de steekproef ophield, zodat opeenvolgende steekproeven
-    /// samen de hele tabel aflopen. GEMETEN 03-10 op de Pi 4: schoof hij
-    /// `N` plekken in plaats van `N` flows, dan gaf een dunne slab (512 van
-    /// 4096) bijna elke keer dezelfde eerste 64 flows na de wrap; stonden
-    /// daar de flows van Hop, dan vond de recycler geen gesloten flow van
-    /// het slot en viel de SYN (hairpin-storm: 96 conn/s, p99 1003 ms).
-    pub(crate) fn sample<const N: usize>(&mut self) -> BoundedVec<Id, N> {
-        let mut v = BoundedVec::new();
-        for k in 0..MAX_FLOWS {
-            let i = (self.cursor + k) % MAX_FLOWS;
-            if self.slab.get(i).is_some_and(Option::is_some) && v.push(i as Id).is_err() {
-                self.cursor = i;
-                break;
-            }
-        }
-        v
     }
 
     /// De compactie-meetlat na een piek (Go: `maybeCompactFlowMapsLocked`).

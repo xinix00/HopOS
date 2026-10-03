@@ -1332,3 +1332,60 @@ fn hairpin_storm_recyclet_achter_buurflows() {
     assert_eq!(nat.flows.count(3), MAX_FLOWS_PER_SLOT);
     assert_eq!(io.stats.nat_flow_full.load(Relaxed), 0);
 }
+
+/// Run 3 van de Pi 4-storm (03-10): slot 3 op zijn maximum met 504
+/// gesloten en 8 lopende hairpin-flows, tussen 300 flows van Hop (slot 1)
+/// die de slab domineren. De nieuwe SYN moet slagen en de oudste gesloten
+/// flow van slot 3 nemen, waar die ook in de slab staat.
+#[test]
+fn vol_slot_neemt_altijd_de_oudste_gesloten_flow() {
+    let (mut nat, mut io) = setup();
+    io.attach(3);
+    nat.publish(Proto::Tcp, 8090, 3, 8090, SLOT_CAP).unwrap();
+    let srv = slot_ip4(3);
+    let mut hop = 1000;
+    let mut buren = |nat: &mut Nat, io: &mut TestIo, n: u16| {
+        for _ in 0..n {
+            flow_for(nat, io, PROTO_TCP, 1, hop, EXT_IP, 443, T0).unwrap();
+            hop += 1;
+        }
+    };
+    buren(&mut nat, &mut io, 150);
+    let mut oudste = None;
+    for i in 0..MAX_FLOWS_PER_SLOT as u16 {
+        if i == 256 {
+            buren(&mut nat, &mut io, 150);
+        }
+        let id = flow_for(&mut nat, &mut io, PROTO_TCP, 3, 50000 + i, srv, 8090, T0).unwrap();
+        let fl = nat.flows.get_mut(id).unwrap();
+        if i >= 8 {
+            (fl.fin_fwd, fl.fin_rev) = (true, true);
+            fl.seen = T0 + u64::from(i) * SEC / 100;
+        }
+        if i == 8 {
+            oudste = Some(fl.fkey());
+        }
+    }
+    let mut syn = mk_frame(
+        PROTO_TCP,
+        HOST_MAC,
+        slot_mac(3),
+        srv,
+        NODE_IP,
+        60000,
+        8090,
+        &[],
+    );
+    set_tcp_flags(&mut syn, TCP_SYN);
+    let now = T0 + 20 * SEC;
+    nat.next_sweep = now + SEC; // geen veeg: de recycler moet het doen
+    assert!(nat.outbound(&mut io, 3, &mut syn, now));
+    assert!(io.read(3).is_some(), "de SYN viel bij een vol slot");
+    assert_eq!(nat.flows.count(3), MAX_FLOWS_PER_SLOT);
+    assert!(
+        nat.flows.by_fwd(&oudste.unwrap()).is_none(),
+        "niet de oudste gesloten flow gerecycled"
+    );
+    assert_eq!(io.stats.nat_flow_full.load(Relaxed), 0);
+    assert!(io.logs.borrow().is_empty());
+}
