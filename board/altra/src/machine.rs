@@ -1,14 +1,15 @@
 //! De Altra als [`Board`]: het UEFI-board met de igb, de NVMe en de SMpro.
 //! Wat niet anders is dan op elke UEFI-machine, gaat door naar [`Uefi`].
 
-use crate::{LINK_TIMEOUT_NS, is_nic};
+use crate::{LINK_TIMEOUT_NS, is_nic, nic_irq_mode};
 use board::heap::Heap;
 use board::{Board, CoreClass, Dispatched, Error, Plan};
+use board_uefi::irq::{At, Mode, Wired};
 use board_uefi::{NET_BUF, NET_DMA, Uefi, pcie};
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use dev::Pa;
-use driver_igb::Igb;
+use driver_igb::{Igb, IrqAck};
 use driver_nvme::Nvme;
 use driver_smpro::{HWMON_CHANNEL, Smpro};
 use sync::{Local, Signal};
@@ -24,6 +25,24 @@ const _: () = assert!(
 /// mislukte (geen link) liet niets achter en mag opnieuw (hopos `nic_retry`).
 static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
 static DISK_CLAIMED: AtomicBool = AtomicBool::new(false);
+
+/// De bel van de NIC-lijn.
+static NIC_BELL: Signal = Signal::new();
+
+/// De ack van de igb (EIMC), voor de dispatch op de kern-core; gezet vóór
+/// de lijn scherp gaat.
+static NIC_ACK: Local<Cell<Option<IrqAck>>> = Local::new(Cell::new(None));
+
+/// Hoe lang de zelftest op de afgevuurde vector wacht (zoals de tg3 op de
+/// M4).
+const NIC_TEST_NS: u64 = 50_000_000;
+
+/// De ack van de NIC-lijn, uit de dispatch vóór de EOI.
+fn igb_ack() {
+    if let Some(a) = NIC_ACK.get().get() {
+        a.ack();
+    }
+}
 
 /// De SMpro, zodra iemand het PCC-kanaal gaf ([`Altra::open_hwmon`]).
 /// Alleen de executor van core 0 raakt hem aan.
@@ -84,6 +103,58 @@ impl Altra {
             }
         }
         *HWMON.get().borrow_mut() = Some(d);
+    }
+
+    /// De lijn van de igb: MSI-X vector 0 via de ITS (`board_uefi::irq`),
+    /// en dan een zelftest: de driver vuurt de vector met de hand (EICS) en
+    /// de dispatch moet hem binnen [`NIC_TEST_NS`] zien. Een route die niet
+    /// klopt (de tabel, de DeviceID uit de IORT, de ITS) is stil; zonder
+    /// zelftest zou de pomp dan op zijn vangrail van 10 ms leven, trager dan
+    /// pollen. Nooit INTx: dat doodt deze SoC ([`nic_irq_mode`]). Geeft de
+    /// lijn en de microseconden tot de eerste aflevering, of de reden om te
+    /// pollen.
+    fn wire_nic(
+        &self,
+        segs: &pcie::Segments,
+        hit: &pcie::Found,
+        nic: &mut Igb,
+    ) -> Result<(Wired, u64), &'static str> {
+        let mode = nic_irq_mode(board_uefi::irq::nic_mode(Mode::Msix))?;
+        let (e, _) = segs.get(hit.win).ok_or("no config window for the NIC")?;
+        // Het segment van het venster: `segments` en `pcie_segments` lopen
+        // allebei de MCFG in volgorde af (op de Altra beginnen ze allemaal
+        // op bus 0, dus de bus zegt het niet).
+        let seg = board_uefi::pcie_segments()
+            .nth(hit.win)
+            .map_or(0, |(_, s, _)| s);
+        NIC_ACK.get().set(Some(nic.irq_ack()));
+        let at = At {
+            ecam: e,
+            seg,
+            root_bus: hit.root_bus,
+            f: &hit.f,
+        };
+        let wired = board_uefi::irq::wire(&at, mode, &NIC_BELL, igb_ack, igb_ack);
+        if let Wired::Polled(why) = wired {
+            return Err(why);
+        }
+        let _ = NIC_BELL.take();
+        nic.set_irq(&NIC_BELL);
+        nic.fire_irq();
+        let t0 = cpu::idle::now();
+        loop {
+            let _ = self.uefi.dispatch_interrupts();
+            let dt = cpu::idle::now().saturating_sub(t0);
+            if NIC_BELL.take() {
+                // De ack sloot de vector; de eerste lege ring van de pomp
+                // heropent hem.
+                return Ok((wired, dt / 1_000));
+            }
+            if dt > NIC_TEST_NS {
+                nic.clear_irq();
+                return Err("the forced interrupt (EICS) did not arrive within 50 ms");
+            }
+        }
     }
 
     /// De SoC-temperatuur in milligraden, 0 = geen meting.
@@ -183,8 +254,9 @@ impl Board for Altra {
         self.uefi.dispatch_interrupts()
     }
 
-    /// De eerste igb: BAR0, reset en MAC, ringen, dan de link. Gepold, en
-    /// dat is het profiel (zie de crate-doc: de INTx doodt de SoC).
+    /// De eerste igb: BAR0, reset en MAC, ringen, dan de link, en dan de
+    /// lijn: MSI-X via de ITS met een zelftest, anders gepold
+    /// ([`Altra::wire_nic`]; `hopos.nicirq=off` pollt zonder herbouw).
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error> {
         if NIC_CLAIMED.load(Relaxed) {
             return Err(Error::Twice("probe_nic"));
@@ -212,13 +284,15 @@ impl Board for Altra {
             cpu::println!("net: {e}");
             Error::Nic("igb has no link")
         })?;
-        cpu::println!(
-            "net: igb {:04x}:{:04x} at {} bar0 {:#x} link {link}, polled",
-            hit.f.vendor,
-            hit.f.device,
-            hit.f.bdf,
-            hit.bar
-        );
+        let (vendor, device, bdf, bar) = (hit.f.vendor, hit.f.device, hit.f.bdf, hit.bar);
+        match self.wire_nic(&segs, &hit, &mut nic) {
+            Ok((wired, us)) => cpu::println!(
+                "net: igb {vendor:04x}:{device:04x} at {bdf} bar0 {bar:#x} link {link}, {wired}, first interrupt after {us} us, pump on the line with a 10 ms guard HOPOS_NIC_IRQ"
+            ),
+            Err(why) => cpu::println!(
+                "net: igb {vendor:04x}:{device:04x} at {bdf} bar0 {bar:#x} link {link}, polled ({why}) HOPOS_NIC_IRQ"
+            ),
+        }
         NIC_CLAIMED.store(true, Relaxed);
         Ok(Some(nic))
     }

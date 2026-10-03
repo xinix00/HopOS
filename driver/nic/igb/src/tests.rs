@@ -7,6 +7,7 @@ use netdev::Device as _;
 use std::cell::RefCell;
 use std::vec;
 use std::vec::Vec;
+use sync::Signal;
 
 /// Wat de nep-hardware doet als de driver op de klok kijkt.
 #[derive(Default, Clone, Copy)]
@@ -116,6 +117,9 @@ fn new_resets_reads_the_mac_and_programs_the_rings() {
         TCTL_EN | TCTL_PSP | TCTL_CT | TCTL_COLD
     );
     assert_eq!(dev::read32(reg(0x150c)), u32::MAX, "interrupts masked");
+    assert_eq!(dev::read32(reg(0x1528)), u32::MAX, "MSI-X vectors masked");
+    assert_eq!(dev::read32(reg(0x1514)), 0, "GPIE untouched until set_irq");
+    assert!(n.irq().is_none(), "polled until set_irq");
     // RX-descriptor 3 wijst naar zijn eigen buffer in het 2 MB-blok.
     let d3 = m.dma.add(3 * 16);
     let want = m.dma.0 + BUF_OFF + 3 * BUF_SIZE as u64;
@@ -322,6 +326,66 @@ fn transmit_batches_until_flush_and_respects_ownership() {
     // De hardware verzond hem: DD in w3, en er is weer plaats.
     dev::write32(d0.add(12), TX_DD);
     n.transmit(&[9; 60]).unwrap();
+}
+
+static BELL: Signal = Signal::new();
+
+/// `igb_configure_msix` plus `igb_irq_enable` voor één vector: de waarden
+/// die Linux op een I210 met één queue schrijft.
+#[test]
+fn set_irq_writes_the_single_vector_msix_mode() {
+    let m = mem(hw());
+    let mut n = fake(&m);
+    n.init().unwrap();
+    // TX-queue 0 in byte 1 van IVAR0 blijft staan.
+    dev::write32(reg(0x1700), 0x0000_8100);
+    n.set_irq(&BELL);
+    assert_eq!(
+        dev::read32(reg(0x1514)),
+        0x0000_0010 | 0x8000_0000 | 0x4000_0000 | 0x0000_0001,
+        "GPIE: MSIX_MODE | PBA | EIAME | NSICR"
+    );
+    assert_eq!(
+        dev::read32(reg(0x1700)),
+        0x0000_8180,
+        "IVAR0: RX 0 on vector 0, valid"
+    );
+    assert_eq!(dev::read32(reg(0x152c)), 1, "EIAC");
+    assert_eq!(dev::read32(reg(0x1530)), 1, "EIAM");
+    assert_eq!(dev::read32(reg(0x1524)), 1, "EIMS");
+    assert!(core::ptr::eq(n.irq().unwrap(), &BELL));
+    assert_eq!(ivar_rx0(0xffff_ffff, 3), 0xffff_ff83);
+
+    // De ack sluit de vector (EIMC), de zelftest vuurt hem (EICS).
+    n.irq_ack().ack();
+    assert_eq!(dev::read32(reg(0x1528)), 1, "EIMC");
+    n.fire_irq();
+    assert_eq!(dev::read32(reg(0x1520)), 1, "EICS");
+
+    // Terug naar pollen: alles dicht, geen bel.
+    n.clear_irq();
+    assert_eq!(dev::read32(reg(0x1528)), u32::MAX);
+    assert!(n.irq().is_none());
+}
+
+/// Het ritme van de dwmac: een lege ring heropent het masker en kijkt nog
+/// één keer; een volle niet, en gepold blijft EIMS onaangeroerd.
+#[test]
+fn an_empty_ring_reopens_the_vector_and_looks_once_more() {
+    let m = mem(hw());
+    let mut n = fake(&m);
+    n.init().unwrap();
+    let mut out = [0u8; 2048];
+    assert_eq!(n.receive(&mut out), None);
+    assert_eq!(dev::read32(reg(0x1524)), 0, "polled: EIMS untouched");
+
+    n.set_irq(&BELL);
+    dev::write32(reg(0x1524), 0); // de ack/EIAM sloot hem
+    writeback(&m, 0, RX_DD | RX_EOP, 60);
+    assert_eq!(n.receive(&mut out), Some(60));
+    assert_eq!(dev::read32(reg(0x1524)), 0, "not while frames come");
+    assert_eq!(n.receive(&mut out), None);
+    assert_eq!(dev::read32(reg(0x1524)), 1, "reopened at the empty ring");
 }
 
 impl Mem {

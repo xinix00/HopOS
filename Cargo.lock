@@ -438,6 +438,7 @@ dependencies = [
  "dev",
  "driver-mdio",
  "netdev",
+ "sync",
 ]
 
 [[package]]

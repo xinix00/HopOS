@@ -318,8 +318,10 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
   `HOPOS_UEFI_MAP_DROPPED` met het aantal stukken en de MB's.
 - `boot: HopOS v3.0.0 on altra, EL2, 128 cores (big) ... HOPOS_BOOT` (of 80,
   afhankelijk van de SKU).
-- `net: igb 8086:1533 at ... link 1000 Mbps full duplex, polled (hopos.nicirq=off) HOPOS_NIC_IRQ`,
-  dan `HOPOS_NIC_UP` en `HOPOS_NET_UP`.
+- `net: igb 8086:1533 at ... link 1000 Mbps full duplex, MSI-X via the ITS, LPI 8192 (DeviceID 0x...), first interrupt after N us, pump on the line with a 10 ms guard HOPOS_NIC_IRQ`,
+  dan `HOPOS_NIC_UP`, `HOPOS_NET_PUMP` met `irq line, 10 ms guard` en
+  `HOPOS_NET_UP`. Komt de afgevuurde vector niet aan:
+  `polled (the forced interrupt (EICS) did not arrive within 50 ms)`.
 - `hwmon: SoC 45.2C (SMpro, PCC channel 14)` en daarna `temp=` op de tik.
 - `watchdog: hardware reset armed (SBSA watchdog, 12.0 s ...) ... HOPOS_WD_ARMED`
   (servers zijn braaf SBSA; de eerste echte proef van dit pad).
@@ -328,11 +330,14 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
 
 ### Wat er nog niet is
 
-- **Gepold, en dat blijft zo** (standaard `hopos.nicirq=off` op dit
-  board): de `_PRT`-INTx doodt de SoC (L83, 19-09, UART-bewijs). MSI-X via
-  de ITS is er nu wel, maar op deze machine nooit gemeten, en de igb vraagt
-  voor MSI-X nog GPIE/IVAR-werk in de driver (enkelvoudige MSI-X-modus is
-  onbewezen). `hopos.nicirq=msix` is een experiment, geen profiel.
+- **De igb op MSI-X is op ijzer nog niet gezien.** Standaard
+  `hopos.nicirq=msix`: vector 0 via de ITS, de driver in de MSI-X-modus van
+  Linux `igb_configure_msix` met één vector (GPIE, IVAR0 voor RX-queue 0,
+  EIAC/EIAM/EIMS; ack EIMC, de pomp heropent bij een lege ring), en een
+  zelftest met EICS: wat niet aankomt, pollt met de reden.
+  `hopos.nicirq=off` in `hopos.cfg` is de terugweg zonder herbouw. Nooit
+  INTx: de `_PRT`-INTx doodt de SoC (L83, 19-09, UART-bewijs); `intx` en
+  een INTID weigert het board (`board_altra::nic_irq_mode`).
 - **De NVMe-lijn**: zoals op de O6N (synchroon blokcontract).
 - Het geheugenplan is dat van `board-uefi`: of de pool de ~300 GB boven de
   512 GB haalt (v2 15-07: 1,62 GB zonder de hoge map), zegt de bootregel van
@@ -341,15 +346,17 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
 ### Wat je meet
 
 1. Boot tot `HOPOS_NET_UP`/`HOPOS_FS_UP`; de igb-variant en de link.
-2. Doorvoer gepold (v2: inbound 5 MB/s met een ring van 64, dus nu met 256
-   opnieuw meten) en rtt p50/p99.
+2. Doorvoer en rtt p50/p99 op MSI-X tegen `hopos.nicirq=off` (netmeter en
+   bench pull).
 3. NVMe zoals op de O6N; de BAR ligt hoog: klopt `map_device`?
 4. Het aantal cores en de pool-grootte tegen de firmware-memory-map.
 
 ## QEMU `-device igb`
 
-De igb-driver is QEMU-testbaar (82576). De stap: `board-altra` op QEMU/EDK2
-booten met `-device igb` in plaats van virtio-net. Dat kan pas als `hopos`
-met `board-altra` bouwt (zie "Stand van de build"); dan is het een
-`NIC=igb`-variant van de EDK2-test (`tools/qemu-uefi-test.sh`, van het
-UEFI-spoor) die `HOPOS_NIC_UP` en `HOPOS_NET_UP` moet halen. Niet gedaan.
+De igb-driver is QEMU-testbaar (82576), MSI-X inbegrepen. Met de hand
+(03-10): de ESP van `BOARD=altra image/uefi-run.sh` op de QEMU-regel van
+dat script, met `-cpu max` en `-device igb,netdev=n0,romfile=` in plaats van
+virtio-net. Dan `MSI-X via the ITS, LPI 8192 (DeviceID 0x10), first
+interrupt after ~120 us`, DHCP en `HOPOS_NET_UP` over de lijn, en de
+NIC-interrupts lopen op met het verkeer; met `hopos.nicirq=off` gepold. Nog
+geen script (een `NIC=igb`-variant van `tools/qemu-uefi-test.sh`).

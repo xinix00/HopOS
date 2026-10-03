@@ -15,8 +15,14 @@
 //! PHY-autoneg na reset, NVM-autoload van het MAC) staan gemarkeerd.
 //!
 //! De driver is een actor-onderdeel: wie `&mut self` heeft, is de enige die
-//! de ringen aanraakt. Geen interrupt: het board pollt. Doorbells (RDT, TDT)
-//! vallen in [`flush`](netdev::Device::flush), één keer per burst.
+//! de ringen aanraakt. Doorbells (RDT, TDT) vallen in
+//! [`flush`](netdev::Device::flush), één keer per burst.
+//!
+//! De interrupt is optioneel en alleen MSI-X: het board zet de MSI-X-tabel
+//! (vector 0) en de capability aan, en daarna zet [`Igb::set_irq`] de NIC
+//! in de MSI-X-modus van Linux `igb_configure_msix`, met één vector voor
+//! RX-queue 0 (zie daar). Zonder `set_irq` blijft alles dicht en pollt het
+//! board.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -34,6 +40,7 @@ use core::mem::{offset_of, size_of};
 use dev::{Pa, Reg};
 use driver_mdio::{self as mdio, Link, Mdio};
 use netdev::{Mac, TxError};
+use sync::Signal;
 
 /// De registers van de 82575+-familie (Linux `e1000_regs.h`): 82576 in
 /// QEMU, I210/I211 op de Altra. De queue-registers zijn de queue-0-aliassen
@@ -57,7 +64,24 @@ struct Regs {
     _ims: Reg<u32>,
     /// Interrupt mask clear.
     imc: Reg<u32>,
-    _r5: [u32; 1212],
+    _iam: u32,
+    /// General purpose interrupt enable: de MSI-X-modus.
+    gpie: Reg<u32>,
+    _r5: [u32; 2],
+    /// Extended interrupt cause set: een vector met de hand afvuren.
+    eics: Reg<u32>,
+    /// Extended interrupt mask set.
+    eims: Reg<u32>,
+    /// Extended interrupt mask clear.
+    eimc: Reg<u32>,
+    /// Extended interrupt auto clear: EICR-bits wissen bij het bericht.
+    eiac: Reg<u32>,
+    /// Extended interrupt auto mask: EIMS-bits wissen bij het bericht.
+    eiam: Reg<u32>,
+    _r5b: [u32; 115],
+    /// IVAR0: welke vector RX- en TX-queue 0 en 1 krijgen.
+    ivar0: Reg<u32>,
+    _r5c: [u32; 1087],
     rdbal: Reg<u32>,
     rdbah: Reg<u32>,
     rdlen: Reg<u32>,
@@ -91,6 +115,13 @@ const _: () = {
     assert!(offset_of!(Regs, tctl) == 0x0400);
     assert!(offset_of!(Regs, icr) == 0x1500);
     assert!(offset_of!(Regs, imc) == 0x150c);
+    assert!(offset_of!(Regs, gpie) == 0x1514);
+    assert!(offset_of!(Regs, eics) == 0x1520);
+    assert!(offset_of!(Regs, eims) == 0x1524);
+    assert!(offset_of!(Regs, eimc) == 0x1528);
+    assert!(offset_of!(Regs, eiac) == 0x152c);
+    assert!(offset_of!(Regs, eiam) == 0x1530);
+    assert!(offset_of!(Regs, ivar0) == 0x1700);
     assert!(offset_of!(Regs, rdbal) == 0x2800);
     assert!(offset_of!(Regs, rdbah) == 0x2804);
     assert!(offset_of!(Regs, rdlen) == 0x2808);
@@ -180,6 +211,23 @@ const TX_RS: u32 = 1 << 27;
 const TX_DEXT: u32 = 1 << 29;
 const TX_PAY_SHIFT: u32 = 14;
 const TX_DD: u32 = 1 << 0;
+// GPIE (Linux `e1000_defines.h`): de vier bits die `igb_configure_msix`
+// zet. NSICR: ICR lezen wist alles; MSIX_MODE: de causes gaan via IVAR naar
+// EICR; EIAME: EIAM maskeert bij het bericht; PBA: de pending-bits in de
+// MSI-X-PBA.
+const GPIE_NSICR: u32 = 1 << 0;
+const GPIE_MSIX_MODE: u32 = 1 << 4;
+const GPIE_EIAME: u32 = 1 << 30;
+const GPIE_PBA: u32 = 1 << 31;
+/// Wat `set_irq` in GPIE schrijft.
+pub const GPIE_MSIX: u32 = GPIE_MSIX_MODE | GPIE_PBA | GPIE_EIAME | GPIE_NSICR;
+/// `E1000_IVAR_VALID`: het allocatiebit naast het vectornummer.
+const IVAR_VALID: u32 = 0x80;
+/// De MSI-X-vector van RX-queue 0, en de enige: entry 0 van de MSI-X-tabel
+/// (die het board zet), dus EventID 0 bij de ITS.
+pub const RX_VECTOR: u32 = 0;
+/// Het bit van [`RX_VECTOR`] in EICR/EIMS/EIMC/EIAC/EIAM/EICS.
+pub const RX_EIMS: u32 = 1 << RX_VECTOR;
 
 /// Eén RX- of TX-buffer: de SRRCTL-eenheid, ruim boven 1522.
 pub const BUF_SIZE: usize = 2048;
@@ -306,6 +354,39 @@ impl fmt::Display for Error {
 /// De `Result` van deze crate.
 pub type Result<T = (), E = Error> = core::result::Result<T, E>;
 
+/// IVAR0 met RX-queue 0 op `vector`: Linux `igb_write_ivar(hw, vector, 0,
+/// 0)`, gelijk op de I210 (rij-gewijs) en de 82576 (kolom-gewijs), want
+/// voor queue 0 is index en offset bij beide 0. De rest (TX-queue 0, de
+/// queues van 1) blijft staan.
+#[must_use]
+pub const fn ivar_rx0(ivar: u32, vector: u32) -> u32 {
+    (ivar & !0xff) | ((vector & 0x1f) | IVAR_VALID)
+}
+
+/// Het interrupt-pad: alleen EIMC. `Copy`, zodat het board hem naast de
+/// driver houdt voor de dispatch.
+#[derive(Clone, Copy)]
+pub struct IrqAck {
+    base: Pa,
+}
+
+impl IrqAck {
+    fn regs(&self) -> &'static Regs {
+        // SAFETY: `base` kwam uit `Igb::new`, dat een gemapt blok eiste;
+        // EIMC deelt niets met de ringen.
+        unsafe { dev::regs(self.base) }
+    }
+
+    /// Masker van de RX-vector dicht, uit de dispatch vóór de EOI. EIAM
+    /// deed dat bij het bericht al (`GPIE.EIAME`); dit is dezelfde stand
+    /// zonder op dat bit te leunen, één geposte schrijf. Pas de pomp
+    /// heropent hem, bij een lege ring (`receive`), het ritme van NAPI
+    /// (`igb_msix_ring`, dan `igb_poll`, dan `igb_ring_irq_enable`).
+    pub fn ack(&self) {
+        self.regs().eimc.write(RX_EIMS);
+    }
+}
+
 /// Eén igb.
 pub struct Igb {
     base: Pa,
@@ -326,6 +407,8 @@ pub struct Igb {
     pub doorbells: u64,
     /// Meetlat: RX-descriptors met een lengte of vlag die niet klopt.
     pub rx_bad: u64,
+    /// De bel van de MSI-X-vector, als het board er een bedraadde.
+    irq: Option<&'static Signal>,
 }
 
 impl Igb {
@@ -374,7 +457,57 @@ impl Igb {
             tx_pending: 0,
             doorbells: 0,
             rx_bad: 0,
+            irq: None,
         }
+    }
+
+    /// Het interrupt-pad, voor het board.
+    #[must_use]
+    pub fn irq_ack(&self) -> IrqAck {
+        IrqAck { base: self.base }
+    }
+
+    /// Hangt de bel aan de driver en zet de NIC in de MSI-X-modus met één
+    /// vector, `igb_configure_msix` plus `igb_irq_enable` voor één queue:
+    /// GPIE, IVAR0 voor RX-queue 0 op [`RX_VECTOR`], dan EIAC, EIAM en EIMS
+    /// voor die vector. Geen "other"-vector: de link-wissel en de rest van
+    /// ICR blijven dicht (IMS 0, IVAR_MISC ongeldig), zoals gepold. Geen
+    /// EITR: de reset-stand 0 is geen demping, de pomp is de demping (het
+    /// masker blijft dicht tot de ring leeg is).
+    ///
+    /// Aanroepen nadat het board de MSI-X-capability aanzette en entry 0
+    /// van de tabel schreef: "Turn on MSI-X capability first, or our
+    /// settings won't stick" (Linux).
+    pub fn set_irq(&mut self, bell: &'static Signal) {
+        let r = self.regs();
+        r.gpie.write(GPIE_MSIX);
+        r.ivar0.update(|v| ivar_rx0(v, RX_VECTOR));
+        r.eiac.update(|v| v | RX_EIMS);
+        r.eiam.update(|v| v | RX_EIMS);
+        self.irq = Some(bell);
+        self.rearm();
+    }
+
+    /// Terug naar pollen: de vector dicht en de bel weg (het board na een
+    /// zelftest die niet aankwam).
+    pub fn clear_irq(&mut self) {
+        self.irq = None;
+        self.regs().eimc.write(u32::MAX);
+        let _ = self.regs().status.read(); // commit
+    }
+
+    /// Vuurt de RX-vector met de hand (EICS), de zelftest van het board:
+    /// zo deed `igb_watchdog_task` het ("Cause software interrupt to ensure
+    /// Rx ring is cleaned"). Komt hij niet aan, dan klopt de route
+    /// (tabel, DeviceID, ITS) niet en kan het board terug naar pollen.
+    pub fn fire_irq(&self) {
+        self.regs().eics.write(RX_EIMS);
+        let _ = self.regs().status.read(); // commit
+    }
+
+    /// Het masker van de RX-vector open (`igb_ring_irq_enable`).
+    fn rearm(&self) {
+        self.regs().eims.write(RX_EIMS);
     }
 
     fn regs(&self) -> &'static Regs {
@@ -407,6 +540,9 @@ impl Igb {
         if r.status.read() == u32::MAX {
             return Err(Error::OffBus);
         }
+        // Ook de MSI-X-vectoren: na een warme flip staat de vorige
+        // generatie nog in de MSI-X-modus (`igb_irq_disable`).
+        r.eimc.write(u32::MAX);
         r.imc.write(u32::MAX);
         r.rctl.write(0);
         r.tctl.write(TCTL_PSP);
@@ -418,6 +554,7 @@ impl Igb {
                 ctrl: r.ctrl.read(),
             });
         }
+        r.eimc.write(u32::MAX);
         r.imc.write(u32::MAX);
         let _ = r.icr.read(); // restjes wissen
         let (ral, rah) = (r.ral0.read(), r.rah0.read());
@@ -548,6 +685,48 @@ impl Igb {
         }
     }
 
+    /// Haalt één frame op, `None` = de ring is leeg. Een descriptor met een
+    /// lengte die niet in zijn buffer past, of zonder EOP (een frame groter
+    /// dan de buffer, kan niet bij 2 KB tegen MTU 1522), wordt herwapend
+    /// zonder kopie: een device-lengte mag nooit bytes van de buurbuffer
+    /// blootgeven.
+    fn receive_one(&mut self, buf: &mut [u8]) -> Option<usize> {
+        loop {
+            let i = self.rx_head;
+            let d = self.rx_ring.add(u64::from(i) * DESC);
+            let status = dev::read32(d.add(W2));
+            if status & RX_DD == 0 {
+                return None;
+            }
+            dev::mb();
+            let len = (dev::read32(d.add(W3)) & 0xffff) as usize;
+            let good = status & RX_EOP != 0 && len > 0 && len <= BUF_SIZE;
+            let n = if good { len.min(buf.len()) } else { 0 };
+            if n > 0 {
+                let src = self.rx_buf(i);
+                // Oude regels weg vóór de lees: de NIC schreef buiten de
+                // caches om. Op een Device-mapping onschadelijk.
+                dev::pull(src, n);
+                if let Some(dst) = buf.get_mut(..n) {
+                    dev::copy_out(dst, src);
+                }
+            } else {
+                self.rx_bad += 1;
+            }
+            self.arm_rx(i);
+            dev::mb();
+            self.rx_tail = Some(i);
+            self.rx_head = (i + 1) % N_RX;
+            self.rx_since += 1;
+            if self.rx_since >= RX_SELF_FLUSH {
+                self.flush_rx();
+            }
+            if n > 0 {
+                return Some(n);
+            }
+        }
+    }
+
     fn flush_tx(&mut self) {
         if self.tx_pending > 0 {
             dev::mb();
@@ -637,45 +816,21 @@ impl netdev::Device for Igb {
         Ok(())
     }
 
-    /// Haalt één frame op. Een descriptor met een lengte die niet in zijn
-    /// buffer past, of zonder EOP (een frame groter dan de buffer, kan niet
-    /// bij 2 KB tegen MTU 1522), wordt herwapend zonder kopie: een device-
-    /// lengte mag nooit bytes van de buurbuffer blootgeven.
+    /// Haalt één frame op (zie `receive_one`).
+    ///
+    /// Leeg met een bedrade lijn: dan gaat het masker weer open (EIAM en de
+    /// ack sloten het bij het bericht), en daarna kijkt de driver nog één
+    /// keer, zodat een frame dat tussen de lees en het openen binnenkwam
+    /// niet tot de vangrail blijft liggen (het patroon van de dwmac). Altijd
+    /// schrijven, nooit EIMS lezen: een geposte schrijf kost minder dan een
+    /// lees over PCIe, en een open masker nog eens openen doet niets.
     fn receive(&mut self, buf: &mut [u8]) -> Option<usize> {
-        loop {
-            let i = self.rx_head;
-            let d = self.rx_ring.add(u64::from(i) * DESC);
-            let status = dev::read32(d.add(W2));
-            if status & RX_DD == 0 {
-                return None;
-            }
-            dev::mb();
-            let len = (dev::read32(d.add(W3)) & 0xffff) as usize;
-            let good = status & RX_EOP != 0 && len > 0 && len <= BUF_SIZE;
-            let n = if good { len.min(buf.len()) } else { 0 };
-            if n > 0 {
-                let src = self.rx_buf(i);
-                // Oude regels weg vóór de lees: de NIC schreef buiten de
-                // caches om. Op een Device-mapping onschadelijk.
-                dev::pull(src, n);
-                if let Some(dst) = buf.get_mut(..n) {
-                    dev::copy_out(dst, src);
-                }
-            } else {
-                self.rx_bad += 1;
-            }
-            self.arm_rx(i);
-            dev::mb();
-            self.rx_tail = Some(i);
-            self.rx_head = (i + 1) % N_RX;
-            self.rx_since += 1;
-            if self.rx_since >= RX_SELF_FLUSH {
-                self.flush_rx();
-            }
-            if n > 0 {
-                return Some(n);
-            }
+        if let Some(n) = self.receive_one(buf) {
+            return Some(n);
         }
+        self.irq?;
+        self.rearm();
+        self.receive_one(buf)
     }
 
     /// Eén doorbell per ring per burst.
@@ -686,6 +841,10 @@ impl netdev::Device for Igb {
 
     fn mac(&self) -> Mac {
         self.mac
+    }
+
+    fn irq(&self) -> Option<&'static Signal> {
+        self.irq
     }
 }
 

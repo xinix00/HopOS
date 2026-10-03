@@ -15,9 +15,9 @@
 //! kent (de IORT zegt niets), en dan is een level-lijn met de ack van de
 //! driver en de STRAY-grens van de dispatch beter dan 300 µs pollen.
 //!
-//! En de Altra houdt zijn NIC gepold (`hopos.nicirq=off` als standaard van
-//! dat board): de `_PRT`-INTx aanzetten doodde daar de SoC (L83, 19-09,
-//! UART-bewijs), en MSI-X is op die machine nog nooit gemeten.
+//! De Altra neemt alleen MSI-X (of `off`), met een zelftest erachter: de
+//! `_PRT`-INTx aanzetten doodde daar de SoC (L83, 19-09, UART-bewijs), zie
+//! `board_altra::nic_irq_mode`.
 
 use crate::facts;
 use board::Error;
