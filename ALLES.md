@@ -9,7 +9,7 @@ in docs/measurements.md, de details per board in docs/boards-*.md.
 De afvinkmatrix van de Go-tijd (OLD/docs/support.md: boot, idle en klokken,
 devices en diensten per board), nu voor v3 en bijgehouden op ijzer. Legenda:
 ✓ gezien op het board, ○ gebouwd maar op dit board nog niet gezien, ✗ ontbreekt
-of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, avond (LicheeRV R17, O6N O14h, Pi 4 P9g, Radxa X13, Pi 5 P6g, Altra A12g, M4 M1; main loopt voor op de release v3.0.6 en Hop v3.0.7).
+of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, avond (LicheeRV R31, O6N O15h, Pi 4 P9g, Radxa X20, Pi 5 P6g, Altra A12g, M4 M1; main loopt voor op de release v3.0.6 en Hop v3.0.7).
 Een cel zegt alleen of het slaagt, met hooguit de stempel of een paar
 woorden waarom niet; een gepolde NIC is geen ✓. De getallen staan in
 docs/measurements.md, de details per board in docs/boards-*.md.
@@ -46,17 +46,15 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       is ongeveer vijf hops in plaats van twee: de meeste zonder bel.
       Agent (hop-cost5) zoekt op QEMU waarom een bewoner een beurt krijgt
       zonder werk; doel twee hops en onder 100 us.
-- [ ] OS-core op de LicheeRV: hop-cost3b en hop-cost4 zitten in main (de
-      ringen van een OS-core-bewoner zonder cache-onderhoud via CTRL_HART,
-      lazy FP via mstatus.FS, de deur met één pull): meten met R18 zodra de
-      draad-agent van het bord af is; verwachting van 527 richting 300 us.
-- [ ] LicheeRV over de draad: pull van de O6N 3,92 MB/s op een link van 100
-      Mbps (plafond ~11,5), lokaal 20,5. Agent op het bord.
+- [ ] OS-core op de LicheeRV: rtt p50 372 us (R31, met de ringen van een
+      OS-core-bewoner zonder cache-onderhoud en de staart gecachet; was 527
+      vanavond en 644 gisteren). Doel onder 300: wat rest is ~82k
+      instructies per rondreis op de in-order C906 en de Hop-ringen op het
+      andere hart; samen met hop-cost5 (het aantal hops per rondreis).
 - [ ] Op ijzer nog te zien van wat landde: de NVMe-bench (`hopos.nvmebench=1`:
       RANDQ met 16 tegelijk, SEQ niet lager dan 2705 MB/s op de O6N) op
       O6N en Altra; de M4 (tg3 en apple pcie via poll_until, de ANS als
-      transport van de NVMe-kern); de Radxa op main (X13 van de agent deed
-      12 rondes 99 tot 110 in, 111 uit, zonder reset).
+      transport van de NVMe-kern).
 - [ ] De volgende bump: HopOS 3.0.7 met tag, Hop erop naar 3.0.8 (de
       lean-tags naar v3.1.9, zoals tools/hop-build.sh nu al doet),
       release.sh, media. De Radxa-kaart heeft de dwmac4-fout met de
@@ -103,6 +101,13 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 - [ ] Radxa: TSADC geeft geen code (daardoor geen thermische rem op 1800 MHz;
       `hopos.mhz=1416` klemt); geen serienummer-terugval voor de MAC.
+- [ ] O6N: een zender op de OS-core (bench-serve in `system`) haalt over de
+      draad maar 22 tot 23 MB/s, op een eigen core 111 (gezien bij de
+      Radxa-meting, 04-10); dat is de prijs van de OS-core voor een app die
+      zelf zendt.
+- [ ] LicheeRV: apps in groep `hop` op de C906L houden een device-staart
+      (4,3 MB/s over de draad); gecachet kan pas als de app zelf
+      cache-onderhoud doet.
 - [ ] Radxa: de pull op de OS-core is rekengebonden (kern ~930 ms per seconde
       bezig, ~40k NIC-interrupts per seconde bij 100 tot 110 MB/s); de
       volgende hefboom is RX-interrupt-matiging (RIWT, zoals Linux).
