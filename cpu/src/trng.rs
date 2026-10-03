@@ -10,7 +10,10 @@
 //!    SMC op een machine zónder EL3-monitor is architecturaal UNDEF (en dus
 //!    een crash), daarom proberen we dit alleen als ID_AA64PFR0_EL1.EL3 niet
 //!    nul is: dán zit er een monitor onder ons die onbekende functie-ID's
-//!    netjes met NOT_SUPPORTED (-1) beantwoordt.
+//!    netjes met NOT_SUPPORTED (-1) beantwoordt. De probe is die van Linux
+//!    (`psci_init_smccc`, `smccc_probe_trng`): PSCI_FEATURES(SMCCC_VERSION),
+//!    SMCCC 1.1 of hoger, dan TRNG_VERSION als 32-bit getal met teken
+//!    (minstens 1.0); [`probe`] zegt bij boot wat hij zag.
 //!
 //! Dit bezit: de keuze van de bron en het vullen van een buffer. Niet van
 //! hier: wat er gebeurt als er geen bron is. Dat is de [`crate::drbg`], die
@@ -31,12 +34,18 @@ use core::fmt;
 
 /// SMCCC TRNG_VERSION (DEN 0098).
 pub const TRNG_VERSION: u32 = 0x8400_0050;
+/// SMCCC TRNG_FEATURES (DEN 0098): kent de firmware deze TRNG-functie?
+pub const TRNG_FEATURES: u32 = 0x8400_0051;
 /// SMCCC TRNG_RND64 (64-bit conventie).
 pub const TRNG_RND64: u32 = 0xC400_0053;
 /// De SMCCC-foutcode "entropie tijdelijk op": opnieuw proberen.
 const TRNG_NO_ENTROPY: i64 = -3;
 /// Het maximum per TRNG_RND64-call: 192 bits, 24 bytes in x1:x2:x3.
 const TRNG_RND_BITS: u64 = 192;
+/// De laagste SMCCC met de TRNG (Linux: `ARM_SMCCC_VERSION_1_1`).
+const SMCCC_1_1: i32 = 0x1_0001;
+/// De laagste TRNG-versie (Linux: `ARM_SMCCC_TRNG_MIN_VERSION`).
+const TRNG_1_0: i32 = 0x1_0000;
 
 /// Hoe vaak RNDR per woord opnieuw mag als de core net geen woord klaar had.
 const RNDR_TRIES: usize = 16;
@@ -120,7 +129,7 @@ pub fn fill(dst: &mut [u8]) -> Result<Kind> {
         Ok(k) => return Ok(k),
         Err(e) => e,
     };
-    if !arch::has_el3() || !smccc_present() {
+    if !matches!(probe(), Smccc::Trng { .. }) {
         return Err(cpu);
     }
     fill_smccc_with(dst, || psci::smc4(TRNG_RND64, TRNG_RND_BITS, 0, 0))?;
@@ -147,44 +156,122 @@ pub fn has_monitor() -> bool {
     arch::has_el3()
 }
 
-/// Welke bron [`fill`] op deze core zou kiezen, zonder entropie te trekken.
+/// Wat de SMCCC-probe zag, in de volgorde van Linux. De ruwe woorden zijn
+/// die van w0: een SMC32-call antwoordt in 32 bits, dus `as i32` is het
+/// teken (Linux: `(s32)res.a0`), niet `as i64`.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Smccc {
+    /// Geen EL3-monitor (ID_AA64PFR0_EL1.EL3 = 0): geen SMC, want die is
+    /// dan UNDEF.
+    NoMonitor,
+    /// SMCCC onder 1.1: `None` als PSCI_FEATURES SMCCC_VERSION niet kent
+    /// (dan is het 1.0), anders het antwoord van SMCCC_VERSION.
+    Old(Option<u32>),
+    /// SMCCC 1.1 of hoger, maar TRNG_VERSION gaf een fout of iets onder 1.0.
+    NoTrng {
+        /// SMCCC_VERSION.
+        smccc: u32,
+        /// Het antwoord van TRNG_VERSION.
+        version: u32,
+    },
+    /// DEN 0098 is er.
+    Trng {
+        /// SMCCC_VERSION.
+        smccc: u32,
+        /// TRNG_VERSION.
+        version: u32,
+        /// TRNG_FEATURES(TRNG_RND64): niet-negatief als RND64 er is.
+        rnd64: u32,
+    },
+}
+
+/// Probeert de SMCCC TRNG van de firmware, zonder entropie te trekken.
 #[must_use]
-pub fn source() -> Option<Kind> {
-    if arch::has_rndr() {
-        return Some(Kind::Rndr);
+pub fn probe() -> Smccc {
+    if !arch::has_el3() {
+        return Smccc::NoMonitor;
     }
-    if arch::has_el3() && smccc_present() {
-        return Some(Kind::SmcccTrng);
-    }
-    None
+    probe_with(|func, a1| psci::smc(func, a1, 0, 0) as u32)
 }
 
-/// De consoleregel over de entropiebron.
-///
-/// Geen bron is een luide regel met marker, bij elke boot: de DRBG draait
-/// dan op timing-jitter, en daar hoort niemand per ongeluk geheimen op te
-/// bouwen (de LicheeRV-regel, HOPOS_RNG_INSECURE).
-pub fn describe(f: &mut dyn fmt::Write) -> fmt::Result {
-    match source() {
-        Some(Kind::Rndr) => f.write_str("trng: rndr (FEAT_RNG)"),
-        Some(Kind::SmcccTrng) => {
-            let (major, minor) = psci::split_version(psci::smc(TRNG_VERSION, 0, 0, 0));
-            write!(f, "trng: smccc-trng v{major}.{minor} (DEN 0098)")
+/// [`probe`] met de firmware als `call` (functie-ID, x1; terug: w0).
+fn probe_with(mut call: impl FnMut(u32, u64) -> u32) -> Smccc {
+    if (call(psci::PSCI_FEATURES, u64::from(psci::SMCCC_VERSION)) as i32) < 0 {
+        return Smccc::Old(None);
+    }
+    let smccc = call(psci::SMCCC_VERSION, 0);
+    if (smccc as i32) < SMCCC_1_1 {
+        return Smccc::Old(Some(smccc));
+    }
+    let version = call(TRNG_VERSION, 0);
+    if (version as i32) < TRNG_1_0 {
+        return Smccc::NoTrng { smccc, version };
+    }
+    let rnd64 = call(TRNG_FEATURES, u64::from(TRNG_RND64));
+    Smccc::Trng {
+        smccc,
+        version,
+        rnd64,
+    }
+}
+
+/// Een versiewoord als major.minor, of de foutcode als het negatief is.
+struct Version(u32);
+
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 as i32 {
+            -1 => f.write_str("-1 (NOT_SUPPORTED)"),
+            c if c < 0 => write!(f, "{c}"),
+            _ => {
+                let (major, minor) = psci::split_version(u64::from(self.0));
+                write!(f, "{major}.{minor}")
+            }
         }
-        // Nooit uit `source()`: een SoC-blok meldt zijn board zelf.
-        Some(Kind::Soc(name)) => write!(f, "trng: {name} (SoC)"),
-        None => f.write_str(
-            "trng: WARNING no hardware TRNG on this core: the DRBG runs on \
-             jitter-seeded entropy, not hardware entropy; avoid high-value secrets on \
-             this node HOPOS_RNG_INSECURE",
-        ),
     }
 }
 
-/// Kent de firmware DEN 0098? TRNG_VERSION geeft een negatieve code als
-/// niet. Alleen aanroepen als [`arch::has_el3`] waar is.
-fn smccc_present() -> bool {
-    (psci::smc(TRNG_VERSION, 0, 0, 0) as i64) >= 0
+/// De bootregel: wat de probe zag, met marker.
+impl fmt::Display for Smccc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Trng {
+                smccc,
+                version,
+                rnd64,
+            } => {
+                write!(
+                    f,
+                    "trng: SMCCC TRNG version {} (SMCCC {}), RND64 ",
+                    Version(version),
+                    Version(smccc)
+                )?;
+                if (rnd64 as i32) < 0 {
+                    write!(f, "refused by TRNG_FEATURES: {}", Version(rnd64))?;
+                } else {
+                    f.write_str("available")?;
+                }
+                f.write_str(" HOPOS_SMCCC_TRNG")
+            }
+            Self::NoMonitor => f.write_str(
+                "trng: no SMCCC TRNG: no EL3 monitor under the kernel (ID_AA64PFR0_EL1.EL3 = 0), no SMC HOPOS_SMCCC_NO_TRNG",
+            ),
+            Self::Old(None) => f.write_str(
+                "trng: no SMCCC TRNG: PSCI_FEATURES does not know SMCCC_VERSION, so SMCCC 1.0 (the TRNG needs 1.1) HOPOS_SMCCC_NO_TRNG",
+            ),
+            Self::Old(Some(v)) => write!(
+                f,
+                "trng: no SMCCC TRNG: SMCCC_VERSION {} (the TRNG needs 1.1) HOPOS_SMCCC_NO_TRNG",
+                Version(v)
+            ),
+            Self::NoTrng { smccc, version } => write!(
+                f,
+                "trng: no SMCCC TRNG: SMCCC {}, TRNG_VERSION {} HOPOS_SMCCC_NO_TRNG",
+                Version(smccc),
+                Version(version)
+            ),
+        }
+    }
 }
 
 /// Vult `dst` per 8 bytes uit `read` (big-endian, zoals de Go-kern), met
@@ -346,10 +433,66 @@ mod tests {
         assert_eq!(fill(&mut buf), Err(Error::NoSource));
         assert_eq!(fill_cpu(&mut buf), Err(Error::NoSource));
         assert_eq!(fill(&mut []), Err(Error::Empty));
-        assert_eq!(source(), None);
-        let mut s = String::new();
-        describe(&mut s).unwrap();
-        assert!(s.contains("HOPOS_RNG_INSECURE"), "{s}");
+        assert_eq!(probe(), Smccc::NoMonitor);
+        assert!(probe().to_string().ends_with("HOPOS_SMCCC_NO_TRNG"));
+    }
+
+    /// Een nep-firmware: SMCCC 1.2, en TRNG_VERSION/TRNG_FEATURES zoals
+    /// gegeven; geeft de probe en de calls (functie-ID, x1).
+    fn fake(features: u32, smccc: u32, trng: u32) -> (Smccc, Vec<(u32, u64)>) {
+        let mut calls = Vec::new();
+        let got = probe_with(|func, a1| {
+            calls.push((func, a1));
+            match func {
+                psci::PSCI_FEATURES => features,
+                psci::SMCCC_VERSION => smccc,
+                TRNG_VERSION => trng,
+                TRNG_FEATURES => 0,
+                _ => u32::MAX,
+            }
+        });
+        (got, calls)
+    }
+
+    #[test]
+    fn probe_follows_linux() {
+        // TF-A met DEN 0098: vier calls, in de volgorde van Linux.
+        let (p, calls) = fake(0, 0x1_0002, 0x1_0000);
+        assert_eq!(
+            calls,
+            [
+                (psci::PSCI_FEATURES, u64::from(psci::SMCCC_VERSION)),
+                (psci::SMCCC_VERSION, 0),
+                (TRNG_VERSION, 0),
+                (TRNG_FEATURES, u64::from(TRNG_RND64)),
+            ]
+        );
+        assert_eq!(
+            p.to_string(),
+            "trng: SMCCC TRNG version 1.0 (SMCCC 1.2), RND64 available HOPOS_SMCCC_TRNG"
+        );
+
+        // Een monitor zonder DEN 0098: NOT_SUPPORTED als 32 bits (de
+        // bovenste helft van x0 telt niet).
+        let (p, _) = fake(0, 0x1_0002, u32::MAX);
+        assert_eq!(
+            p,
+            Smccc::NoTrng {
+                smccc: 0x1_0002,
+                version: u32::MAX
+            }
+        );
+        assert_eq!(
+            p.to_string(),
+            "trng: no SMCCC TRNG: SMCCC 1.2, TRNG_VERSION -1 (NOT_SUPPORTED) HOPOS_SMCCC_NO_TRNG"
+        );
+
+        // SMCCC 1.0: geen TRNG-call meer.
+        let (p, calls) = fake(u32::MAX, 0, 0);
+        assert_eq!((p, calls.len()), (Smccc::Old(None), 1));
+        let (p, calls) = fake(0, 0x1_0000, 0);
+        assert_eq!((p, calls.len()), (Smccc::Old(Some(0x1_0000)), 2));
+        assert!(p.to_string().contains("SMCCC_VERSION 1.0 (the TRNG needs 1.1)"));
     }
 
     #[test]

@@ -98,7 +98,7 @@ fn no_fill(_: &mut [u8]) -> trng::Result<trng::Kind> {
 }
 
 /// De luide regel als de RNG200 niets gaf (de LicheeRV-regel,
-/// `cpu::trng::describe`): de node draait, maar niet stil.
+/// `cpu::drbg::Seeded`): de node draait, maar niet stil.
 fn insecure<S: Soc>(why: core::fmt::Arguments<'_>) {
     cpu::println!(
         "trng: WARNING RNG200 at {:#x} ({}): {why}; the DRBG runs on jitter-seeded entropy, not hardware entropy; avoid high-value secrets on this node HOPOS_RNG_INSECURE",

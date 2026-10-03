@@ -21,6 +21,11 @@ pub const CPU_ON: u32 = 0xC400_0003;
 pub const AFFINITY_INFO: u32 = 0xC400_0004;
 /// SYSTEM_RESET (SMC32).
 pub const SYSTEM_RESET: u32 = 0x8400_0009;
+/// PSCI_FEATURES (SMC32): kent de firmware deze functie-ID?
+pub const PSCI_FEATURES: u32 = 0x8400_000A;
+/// SMCCC_VERSION (DEN 0028): de versie van de call-conventie zelf; alleen
+/// te vragen als PSCI_FEATURES hem kent (Linux, `psci_init_smccc`).
+pub const SMCCC_VERSION: u32 = 0x8000_0000;
 
 /// Een PSCI-fout: de code die de firmware teruggaf.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]

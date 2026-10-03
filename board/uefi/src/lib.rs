@@ -635,7 +635,10 @@ impl Board for Uefi {
         // zaaide dit board niets en bleef de DRBG stil ongeseed; nu krijgt
         // elk slot zijn zaad (`CTRL_RNG_SEED`) uit hardware waar die er is.
         // Na een flip is het EFI-zaad dat van de vorige kern (`flip.rs`,
-        // `carry_seed`): de firmware is weg, de bron dezelfde.
+        // `carry_seed`): de firmware is weg, de bron dezelfde. Eerst wat
+        // de SMCCC-probe zag, op elk UEFI-board: de Altra zei op 03-10
+        // alleen "no SMCCC TRNG" en niet waarom.
+        cpu::println!("{}", cpu::trng::probe());
         if facts::EFI_SEED_CARRIED.load(Relaxed) {
             cpu::drbg::init(efi_fill, cpu::idle::counter);
             cpu::println!(
