@@ -1503,6 +1503,16 @@ fn handoff_and_jump(p: Prepared, slots: Vec<SlotState>, nat: kernflip::NatState)
     crate::telemetry::clock_full_for_flip();
     // En de watchdog vol: de nieuwe kern krijgt de hele 12 s voor zijn boot.
     crate::watchdog::pet_now();
+    // UEFI: de TRNG achter de firmware (`hopos.efirng=1`) is na de koude
+    // boot weg, dus krijgt de nieuwe kern vers zaad uit onze DRBG, anders
+    // zaait hij uit jitter (board/uefi/src/flip.rs). De Pi's en de Radxa
+    // proberen hun TRNG zelf opnieuw, in `discover`.
+    #[cfg(any(feature = "board-uefi", feature = "board-o6n", feature = "board-altra"))]
+    if vboard::facts::carry_seed() {
+        println!(
+            "flip: 64 bytes of seed from the kernel DRBG (efi-rng) for the new kernel HOPOS_FLIP_SEED"
+        );
+    }
     // Koud of warm: het blob zegt het, de rest van de weg is dezelfde.
     let generation = generation() + 1;
     let (mut mem, fp) = (DevMem, plan());

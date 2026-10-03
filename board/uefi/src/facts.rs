@@ -12,7 +12,9 @@
 //! (de timer-PPI) en FADT (de PSCI-conduit). De tabellen liggen in
 //! EfiACPIReclaimMemory; de stub leest ze met de MMU van de firmware.
 
-use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
+use core::sync::atomic::{
+    AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed,
+};
 use dev::Pa;
 use fw::acpi::{self, Phys, Tables};
 
@@ -29,6 +31,11 @@ pub(crate) static CORE_MPIDR: [AtomicU64; MAX_CORES] = [const { AtomicU64::new(0
 pub(crate) static EFI_SEED: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
 /// Hoeveel bytes van [`EFI_SEED`] gelden.
 pub(crate) static EFI_SEED_LEN: AtomicUsize = AtomicUsize::new(0);
+/// Kwam [`EFI_SEED`] van de vorige kern (een flip, `crate::flip`) en niet
+/// van de firmware?
+pub(crate) static EFI_SEED_CARRIED: AtomicBool = AtomicBool::new(false);
+/// Het zaad voor de kern na de flip (`hopos/src/flip.rs`).
+pub use crate::flip::carry_seed;
 /// De efficiëntieklasse per logische core (MADT GICC offset 76).
 pub(crate) static CORE_CLASS: [AtomicU8; MAX_CORES] = [const { AtomicU8::new(0) }; MAX_CORES];
 /// Het aantal cores (enabled GICC's); 0 = geen MADT.

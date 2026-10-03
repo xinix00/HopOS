@@ -64,8 +64,10 @@
 #                                           bundel van image/flip-bundle.sh uefi,
 #                                           TIMEOUT=180; plus wat alleen daar kan
 #                                           misgaan: de feitenpagina van de stub
-#                                           (board/uefi/src/flip.rs) en de
-#                                           PIE-basis (docs/flip.md)
+#                                           (board/uefi/src/flip.rs), de
+#                                           PIE-basis (docs/flip.md) en het
+#                                           zaad over de flip (efi-rng via
+#                                           virtio-rng, HOPOS_RNG_EFI_CARRIED)
 #   MISMATCH=1 tools/qemu-test-flip.sh      de weigering: dezelfde bundel met een
 #                                           andere switch-code-som (en dus een
 #                                           andere sha256). Groen alleen als de
@@ -295,7 +297,9 @@ if [ "$BOARD" = uefi ]; then
 	# zet voor Hop zelf QEMU_CFG achter de config (kern::nodecfg, 01-10);
 	# hier staat de insecure-regel in hopos.cfg, anders weigert Hop zijn API.
 	ESP="$ART/esp"
-	printf 'hopos.insecure=1\n' >"$ART/hopos.cfg"
+	# hopos.efirng=1: kern A zaait uit het EFI_RNG_PROTOCOL van EDK2 (de
+	# virtio-rng hieronder), kern B uit het zaad dat A meegaf.
+	printf 'hopos.insecure=1\nhopos.efirng=1\n' >"$ART/hopos.cfg"
 	HOPOS_STAMP=A BUILD_ONLY=1 ESP="$ESP" APP="$HOP_ELF" ROLE=hop CFG="$ART/hopos.cfg" \
 		sh "$DIR/image/uefi-run.sh" 2>&1 | sed 's/^/   /'
 	[ -e "$ESP/EFI/BOOT/BOOTAA64.EFI" ] || {
@@ -419,6 +423,7 @@ if [ "$BOARD" = uefi ]; then
 		-netdev "user,id=n0,$FWD" \
 		-drive "if=none,format=raw,file=$DISK,id=disk0" \
 		-device virtio-blk-pci,drive=disk0 \
+		-device virtio-rng-pci \
 		</dev/null >"$LOG" 2>&1 &
 else
 	# QMP voor de reset van de zwarte doos (hieronder); qemu-run.sh geeft
@@ -470,6 +475,11 @@ cold)
 	RED="$BASE_RED|HOPOS_FLIP_FAIL|HOPOS_FLIP_ADOPT|HOPOS_HOP_RESUMED|HOPOS_FLIP_COLD_CORE|HOPOS_FLIP_COLD_STOP_FAIL|HOPOS_FLIP_REFUSED (sha256|bundle|flip ABI|image|same|firmware|cold)"
 	;;
 esac
+if [ "$BOARD" = uefi ] && [ "$MODE" != mismatch ]; then
+	# De TRNG achter de firmware is na de koude boot weg: de nieuwe kern
+	# zaait uit het zaad van de oude (board/uefi/src/flip.rs, carry_seed).
+	FLIP_MARKS="$FLIP_MARKS|HOPOS_RNG_EFI_UP|HOPOS_FLIP_SEED|HOPOS_RNG_EFI_CARRIED"
+fi
 AFTER_MARKS="${AFTER_MARKS:-}"
 
 JOB='{"name":"spike","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/appspike.elf"}],"memory_limit":33554432}'

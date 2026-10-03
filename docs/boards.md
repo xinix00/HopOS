@@ -118,7 +118,7 @@ SMCCC TRNG van TF-A op de Altra, en anders jitter (EDK2 op QEMU). Tot
 30-09 zaaide dit board niets: de O6N bootte zonder één `trng:`-regel en
 de DRBG bleef ongeseed. De verwachte regels:
 
-Een UEFI-board zonder FEAT_RNG en zonder SMCCC-TRNG (de O6N: de Cix heeft geen van beide, 30-09) kan met `hopos.efirng=1` in hopos.cfg de TRNG achter de firmware gebruiken: de stub vraagt vóór ExitBootServices 64 bytes aan het EFI_RNG_PROTOCOL (wat Linux' `efi_get_random_bytes` ook doet) en de kern zaait zijn DRBG daarmee als bron `efi-rng` (`HOPOS_RNG_EFI_UP`). Alleen op verzoek: op 13-07 bleef een firmware in dat protocol hangen. Na een flip is de firmware weg en zaait de kern weer uit de CPU.
+Een UEFI-board zonder FEAT_RNG en zonder SMCCC-TRNG (de O6N: de Cix heeft geen van beide, 30-09) kan met `hopos.efirng=1` in hopos.cfg de TRNG achter de firmware gebruiken: de stub vraagt vóór ExitBootServices 64 bytes aan het EFI_RNG_PROTOCOL (wat Linux' `efi_get_random_bytes` ook doet) en de kern zaait zijn DRBG daarmee als bron `efi-rng` (`HOPOS_RNG_EFI_UP`). Alleen op verzoek: op 13-07 bleef een firmware in dat protocol hangen. Na een flip is de firmware weg: de vertrekkende kern legt dan 64 verse bytes uit zijn DRBG achter de feitenpagina (`HOPOS_FLIP_SEED`; Linux legt bij kexec zo een `rng-seed` in de DTB van de nieuwe kern), en de nieuwe kern zaait daaruit, met dezelfde bron `efi-rng` (`HOPOS_RNG_EFI_CARRIED`). Tot 03-10 zaaide een geflipte O6N hier uit jitter.
 
 ```
 trng: rndr online, the kernel DRBG is seeded from rndr (FEAT_RNG) HOPOS_RNG_RNDR_UP                  (O6N)

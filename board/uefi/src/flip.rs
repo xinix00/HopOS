@@ -11,8 +11,10 @@
 //! (de Go-generatie deed hetzelfde met zijn "firmware-facts block";
 //! `OLD/docs/kernel-flip.md`, UEFI machines).
 //!
-//! De pagina wordt nooit meer herschreven: de firmware-feiten veranderen
-//! niet door een flip. Wat wél verandert, is het aantal tabellen van de
+//! De feiten worden nooit meer herschreven: de firmware-feiten veranderen
+//! niet door een flip. Eén uitzondering staat erachter: het zaad van
+//! [`carry_seed`], dat elke vertrekkende kern vers neerlegt en elke
+//! landende leest en wist. Wat wél verandert, is het aantal tabellen van de
 //! identity map (`map_device` voegt er tijdens het leven van een kern aan
 //! toe); dat telt de nieuwe kern opnieuw door de levende map af te lopen,
 //! want met de telling van de koude boot zou hij een tabel die in gebruik
@@ -43,7 +45,16 @@ const W_MPIDR: u64 = W_ECAM + 2 * MAX_ECAM as u64;
 const W_CLASS: u64 = W_MPIDR + MAX_CORES as u64;
 const W_END: u64 = W_CLASS + MAX_CORES as u64;
 
-const _: () = assert!(W_END * 8 <= FLIP_FACTS_LEN);
+/// Het zaad voor de volgende kern ([`carry_seed`]): een magic en daarna
+/// [`SEED_WORDS`] woorden, achter de feiten.
+const W_SEED: u64 = W_END;
+/// 64 bytes, de maat van het EFI-zaad ([`facts::EFI_SEED`]).
+const SEED_WORDS: u64 = 8;
+/// "HOPSEED1" little-endian.
+const SEED_MAGIC: u64 = 0x3144_4545_5350_4F48;
+
+const _: () = assert!((W_SEED + 1 + SEED_WORDS) * 8 <= FLIP_FACTS_LEN);
+const _: () = assert!(SEED_WORDS as usize == facts::EFI_SEED.len());
 
 fn at(w: u64) -> Pa {
     Pa(FLIP_FACTS_PA + w * 8)
@@ -110,8 +121,53 @@ pub(crate) fn publish(ttbr0: u64, tcr: u64, el: u8, cnthctl: u64) {
         dev::write64(at(W_MPIDR + i as u64), m.load(Relaxed));
         dev::write64(at(W_CLASS + i as u64), u64::from(k.load(Relaxed)));
     }
+    // Geen zaad van een flip die nooit landde.
+    dev::write64(at(W_SEED), 0);
     dev::write64(at(W_MAGIC), FACTS_MAGIC);
-    dev::push(Pa(FLIP_FACTS_PA), (W_END * 8) as usize);
+    dev::push(Pa(FLIP_FACTS_PA), ((W_SEED + 1) * 8) as usize);
+}
+
+/// De vertrekkende kern, vlak vóór de sprong: 64 verse bytes uit zijn DRBG
+/// als zaad voor de volgende kern, zoals Linux bij kexec een `rng-seed`
+/// uit zijn eigen RNG in de DTB van de nieuwe kern legt
+/// (`drivers/of/kexec.c`). Alleen als de DRBG uit het EFI_RNG_PROTOCOL
+/// komt (`hopos.efirng=1`): die bron is na de koude boot weg, en zonder dit
+/// zaaide elke geflipte O6N uit jitter (Z, 01-10). RNDR en de SMCCC TRNG
+/// vindt de nieuwe kern zelf terug. Geeft terug of er zaad ligt.
+pub fn carry_seed() -> bool {
+    use cpu::drbg::Source;
+    use cpu::trng::Kind;
+    let mut seed = [0u8; (SEED_WORDS * 8) as usize];
+    let ok = cpu::drbg::source() == Source::Hardware(Kind::Soc(crate::EFI_RNG))
+        && cpu::drbg::read(&mut seed).is_ok();
+    dev::write64(at(W_SEED), 0);
+    if ok {
+        for (i, w) in seed.chunks_exact(8).enumerate() {
+            let w = u64::from_le_bytes(w.try_into().unwrap_or([0; 8]));
+            dev::write64(at(W_SEED + 1 + i as u64), w);
+        }
+        dev::write64(at(W_SEED), SEED_MAGIC);
+    }
+    seed.fill(0);
+    core::hint::black_box(&mut seed);
+    dev::push(at(W_SEED), ((1 + SEED_WORDS) * 8) as usize);
+    ok
+}
+
+/// De landende kern: het zaad van [`carry_seed`] naar het EFI-zaad van
+/// deze kern, en van de pagina af (één kern, één keer).
+fn take_seed() {
+    if dev::read64(at(W_SEED)) == SEED_MAGIC {
+        for (i, s) in facts::EFI_SEED.iter().enumerate() {
+            let w = at(W_SEED + 1 + i as u64);
+            s.store(dev::read64(w), Relaxed);
+            dev::write64(w, 0);
+        }
+        facts::EFI_SEED_LEN.store((SEED_WORDS * 8) as usize, Relaxed);
+        facts::EFI_SEED_CARRIED.store(true, Relaxed);
+    }
+    dev::write64(at(W_SEED), 0);
+    dev::push(at(W_SEED), ((1 + SEED_WORDS) * 8) as usize);
 }
 
 /// De flip-ingang, met de MMU van de pagina aan en vóór `kmain`: de feiten
@@ -168,6 +224,7 @@ extern "C" fn hopos_efi_flip_facts(pa: u64) {
     let root = dev::read64(at(W_TTBR0)) & ADDR;
     let used = tables_in_use(root, 0).max(w(26));
     facts::MMU_TABLES.store(used, Relaxed);
+    take_seed();
 }
 
 /// De adresbits van een tabel-descriptor (4 KB-korrel, 48 bits).

@@ -106,10 +106,17 @@ pub type Disk = VirtioBlk<Pci>;
 /// geflipte kern zonder firmware op hetzelfde venster terugvindt. Is het
 /// venster bezet, dan toetst de stub Go's kandidaten tegen de memory map en
 /// noemt hij de vrije (`boot.rs`, `HOPOS_UEFI_WINDOW`).
-#[cfg(not(any(feature = "window-8000", feature = "window-a000", feature = "window-b000")))]
+#[cfg(not(any(
+    feature = "window-8000",
+    feature = "window-a000",
+    feature = "window-b000"
+)))]
 pub const WINDOW_PA: u64 = 0x5000_0000;
 /// Zie de standaardversie hierboven.
-#[cfg(all(feature = "window-8000", not(any(feature = "window-a000", feature = "window-b000"))))]
+#[cfg(all(
+    feature = "window-8000",
+    not(any(feature = "window-a000", feature = "window-b000"))
+))]
 pub const WINDOW_PA: u64 = 0x8800_0000;
 /// Zie de standaardversie hierboven: de Altra van 03-10 (B000 bezet).
 #[cfg(all(feature = "window-a000", not(feature = "window-b000")))]
@@ -611,7 +618,14 @@ impl Board for Uefi {
         // Altra, anders jitter (EDK2 op QEMU), met één luide regel. Tot 30-09
         // zaaide dit board niets en bleef de DRBG stil ongeseed; nu krijgt
         // elk slot zijn zaad (`CTRL_RNG_SEED`) uit hardware waar die er is.
-        if facts::EFI_SEED_LEN.load(Relaxed) > 0 {
+        // Na een flip is het EFI-zaad dat van de vorige kern (`flip.rs`,
+        // `carry_seed`): de firmware is weg, de bron dezelfde.
+        if facts::EFI_SEED_CARRIED.load(Relaxed) {
+            cpu::drbg::init(efi_fill, cpu::idle::counter);
+            cpu::println!(
+                "trng: the kernel DRBG is seeded from 64 bytes the previous kernel drew from its efi-rng DRBG, carried over the flip (the firmware TRNG is gone after the cold boot) HOPOS_RNG_EFI_CARRIED"
+            );
+        } else if facts::EFI_SEED_LEN.load(Relaxed) > 0 {
             cpu::drbg::init(efi_fill, cpu::idle::counter);
             cpu::println!(
                 "trng: EFI_RNG_PROTOCOL online, the kernel DRBG is seeded from the firmware TRNG (64 bytes at boot, hopos.efirng=1) HOPOS_RNG_EFI_UP"
@@ -824,16 +838,19 @@ pub fn map_device(pa: u64, size: u64) -> bool {
     slots::map_device(pa, size)
 }
 
+/// De naam van het EFI-zaad als bron, in de boot-log en in
+/// `cpu::drbg::source` (ook na een flip, `flip::carry_seed`).
+const EFI_RNG: &str = "efi-rng";
+
 /// De bron "efi-rng" voor de DRBG: het zaad dat de stub uit het
 /// EFI_RNG_PROTOCOL haalde, één keer (de firmware is na ExitBootServices
 /// weg). De DRBG vraagt bij `init` 48 bytes en bij een herzaai 24; na de
 /// 64 is de bron op en houdt de DRBG zijn staat (drbg.rs `reseed`).
 fn efi_fill(dst: &mut [u8]) -> cpu::trng::Result<cpu::trng::Kind> {
-    const NAME: &str = "efi-rng";
     let used = EFI_USED.load(Relaxed);
     let len = facts::EFI_SEED_LEN.load(Relaxed);
     if used + dst.len() > len {
-        return Err(cpu::trng::Error::Exhausted(cpu::trng::Kind::Soc(NAME)));
+        return Err(cpu::trng::Error::Exhausted(cpu::trng::Kind::Soc(EFI_RNG)));
     }
     for (i, b) in dst.iter_mut().enumerate() {
         let at = used + i;
@@ -841,7 +858,7 @@ fn efi_fill(dst: &mut [u8]) -> cpu::trng::Result<cpu::trng::Kind> {
         *b = w.to_le_bytes()[at % 8];
     }
     EFI_USED.store(used + dst.len(), Relaxed);
-    Ok(cpu::trng::Kind::Soc(NAME))
+    Ok(cpu::trng::Kind::Soc(EFI_RNG))
 }
 
 /// Hoeveel bytes van het EFI-zaad al gebruikt zijn.
