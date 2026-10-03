@@ -78,26 +78,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Een host-poort: de gevraagde als hij vrij is, anders een vrije van het
-# OS. Zo draait de toets naast een andere QEMU of een andere server.
-port() {
-	python3 - "$1" "$2" <<'PY'
-import socket, sys
-want, name = int(sys.argv[1]), sys.argv[2]
-s = socket.socket()
-try:
-    s.bind(("127.0.0.1", want))
-    print(want)
-except OSError:
-    s.close()
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    got = s.getsockname()[1]
-    print(f"   {name} {want} is taken, using {got}", file=sys.stderr)
-    print(got)
-s.close()
-PY
-}
+. "$(dirname "$0")/lib.sh"
 SYSPORT="$(port "${SYSPORT:-10100}" SYSPORT)"
 AGENTPORT="$(port "${AGENTPORT:-8080}" AGENTPORT)"
 LEADERPORT="$(port "${LEADERPORT:-9080}" LEADERPORT)"
@@ -128,20 +109,11 @@ SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP
 	sh "$DIR/image/qemu-run.sh" </dev/null >"$LOG" 2>&1 &
 QPID=$!
 
-has() { tr -d '\r' <"$LOG" | grep -q -E "$1"; }
-
 # De vaste markers (grep -E), in de volgorde waarin ze horen te komen.
 BOOT_MARKS="HOPOS_BOOT|HOPOS_CLOCK_FIXED|HOPOS_PRIVILEGE|HOPOS_DISK_UP model=virtio-blk|HOPOS_FS_UP fresh=1|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_OS_SELFTEST ok|HOPOS_HOP_START slot=1 core=0 cpu=$OSCPU |uplink tcp :8080 -> slot 1 :8080 HOPOS_HOP_PUBLISH|uplink tcp :9080 -> slot 1 :9080 HOPOS_HOP_PUBLISH|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP|HOPOS_RNG_SLOTS source=jitter|slot 1: applib: rng seed from the kernel .*HOPOS_APP_RNG source=jitter|self-dial 10.100.0.2:8080 connected .*HOPOS_WD_CANARY_OK"
 [ "$OSCPU" = 0 ] || BOOT_MARKS="$BOOT_MARKS|HOPOS_OSCORE_PARKED"
 PLACE_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|HOPOS_SLOT_START slot=2 core=1 cpu=$APPCPU |slot 2: HOPOS_APPSPIKE_FS ok|slot 2: HOPOS_APPSPIKE_DONE pass=9 fail=0"
 RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_OS_SELFTEST_FAIL|HOPOS_OS_CORE_FAIL|HOPOS_OSCORE_FALLBACK|HOPOS_CAGE_FAIL"
-
-all() {
-	(
-		IFS='|'
-		for m in $1; do has "$m" || exit 1; done
-	)
-}
 
 JOB='{"name":"spike","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/appspike.elf"}],"memory_limit":33554432}'
 POSTED=""

@@ -54,7 +54,7 @@ rust-objcopy --strip-debug target/aarch64-unknown-none-softfloat/release/decode 
 ## De jobspec
 
 Naar de leader van Hop (poort 9080 op het adres van de node), met de stream
-op het volume `/data` (hetzelfde bestand dat `hopos.codecdemo=1` meet):
+op het volume `/data`:
 
 ```sh
 curl -X POST -H 'Content-Type: application/json' \

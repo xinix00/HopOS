@@ -385,7 +385,7 @@ impl<E: Engine, L: Lives, C: Coherence> CodecService<E, L, C> {
         match r {
             Ok((size, n)) => answer(out, req, STATUS_OK, size, n),
             Err((status, why)) => {
-                let n = write_why(out.get_mut(REQ_HEADER..).unwrap_or(&mut []), &why);
+                let n = crate::fmt_into(out.get_mut(REQ_HEADER..).unwrap_or(&mut []), &why);
                 answer(out, req, status, 0, n)
             }
         }
@@ -699,25 +699,6 @@ fn answer(out: &mut [u8], req: &Req<'_>, status: u16, size: u64, n: usize) -> us
     abi::hopabi::encode_resp_head(out, &r, n).unwrap_or(0)
 }
 
-/// Zet de tekst van een fout in `dst`; geeft de lengte.
-fn write_why(dst: &mut [u8], why: &Why) -> usize {
-    struct W<'a>(&'a mut [u8], usize);
-    impl fmt::Write for W<'_> {
-        fn write_str(&mut self, s: &str) -> fmt::Result {
-            for &b in s.as_bytes() {
-                if let Some(d) = self.0.get_mut(self.1) {
-                    *d = b;
-                    self.1 += 1;
-                }
-            }
-            Ok(())
-        }
-    }
-    let mut w = W(dst, 0);
-    let _ = fmt::write(&mut w, format_args!("{why}"));
-    w.1
-}
-
 /// Eén beurt van de dienst: wat de system-API aanroept.
 pub trait Port {
     /// Bedient een codec-call; geeft de lengte van het antwoord in `out`.
@@ -838,12 +819,15 @@ async fn serve_loaded<'a>(
         match read_firmware(inbox, reply, name).await {
             Ok(bytes) => {
                 if let Err(e) = port.install_firmware(name, bytes) {
-                    let n = write_why(out.get_mut(REQ_HEADER..).unwrap_or(&mut []), &Why::Codec(e));
+                    let n = crate::fmt_into(
+                        out.get_mut(REQ_HEADER..).unwrap_or(&mut []),
+                        &Why::Codec(e),
+                    );
                     return answer(out, req, STATUS_ERROR, 0, n);
                 }
             }
             Err(error) => {
-                let n = write_why(
+                let n = crate::fmt_into(
                     out.get_mut(REQ_HEADER..).unwrap_or(&mut []),
                     &Why::FirmwareRead { name, error },
                 );

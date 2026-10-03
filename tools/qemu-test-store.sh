@@ -64,24 +64,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-port() {
-	python3 - "$1" "$2" <<'PY'
-import socket, sys
-want, name = int(sys.argv[1]), sys.argv[2]
-s = socket.socket()
-try:
-    s.bind(("127.0.0.1", want))
-    print(want)
-except OSError:
-    s.close()
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    got = s.getsockname()[1]
-    print(f"   {name} {want} is taken, using {got}", file=sys.stderr)
-    print(got)
-s.close()
-PY
-}
+. "$(dirname "$0")/lib.sh"
 SYSPORT="$(port "${SYSPORT:-10100}" SYSPORT)"
 AGENTPORT="$(port "${AGENTPORT:-8080}" AGENTPORT)"
 LEADERPORT="$(port "${LEADERPORT:-9080}" LEADERPORT)"
@@ -130,14 +113,7 @@ SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP
 	BOOTARGS="$S3ARGS" sh "$DIR/image/qemu-run.sh" </dev/null >"$LOG" 2>&1 &
 QPID=$!
 
-has() { tr -d '\r' <"$LOG" | grep -q -E "$1"; }
 s3has() { grep -q -E "$1" "$S3LOG" 2>/dev/null; }
-all() {
-	(
-		IFS='|'
-		for m in $1; do has "$m" || exit 1; done
-	)
-}
 s3all() {
 	(
 		IFS='|'

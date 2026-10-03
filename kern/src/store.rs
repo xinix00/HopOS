@@ -902,30 +902,11 @@ fn head(out: &mut [u8], h: &Head, status: u16, size: u64, len: usize) -> usize {
 /// Een foutantwoord: de status uit de fout en de tekst in de data.
 fn fail(out: &mut [u8], h: &Head, e: &Fail) -> usize {
     let data = out.get_mut(REQ_HEADER..).unwrap_or(&mut []);
-    let n = fmt_into(
+    let n = crate::fmt_into(
         data.get_mut(..MSG_MAX.min(data.len())).unwrap_or(&mut []),
         e,
     );
     head(out, h, e.status(), 0, n)
-}
-
-/// Schrijft `e` in `buf`, afgekapt; geeft de lengte.
-fn fmt_into(buf: &mut [u8], e: &impl fmt::Display) -> usize {
-    struct W<'b>(&'b mut [u8], usize);
-    impl fmt::Write for W<'_> {
-        fn write_str(&mut self, s: &str) -> fmt::Result {
-            for b in s.bytes() {
-                if let Some(x) = self.0.get_mut(self.1) {
-                    *x = b;
-                    self.1 += 1;
-                }
-            }
-            Ok(())
-        }
-    }
-    let mut w = W(buf, 0);
-    let _ = fmt::write(&mut w, format_args!("{e}"));
-    w.1
 }
 
 #[cfg(test)]

@@ -279,7 +279,6 @@ mod tests {
     use super::*;
     use core::cell::RefCell;
     use dev::Pa;
-    use kern::stage2::Stage2;
     use std::collections::HashMap;
     use std::string::String;
 
@@ -310,20 +309,26 @@ mod tests {
         }
     }
 
+    /// De kooien als een tabel van vensters; de tabellen zelf toetst
+    /// `cpu::el2::stage2`.
     #[derive(Default)]
-    struct Mem(HashMap<u64, u64>);
+    struct Cages(HashMap<usize, Window>);
 
-    impl kern::cage::PhysMem for Mem {
-        fn read64(&self, pa: u64) -> u64 {
-            self.0.get(&pa).copied().unwrap_or(0)
+    impl WindowMap for Cages {
+        fn map(&mut self, slot: Slot, w: Window) -> Result {
+            self.0.insert(slot.get(), w);
+            Ok(())
         }
-        fn write64(&mut self, pa: u64, v: u64) {
-            self.0.insert(pa, v);
+        fn is_mapped(&self, slot: Slot, w: Window) -> Result<bool> {
+            match self.0.get(&slot.get()) {
+                None => Ok(false),
+                Some(m) if *m == w => Ok(true),
+                Some(_) => Err(Error::Range {
+                    base: w.pa,
+                    size: w.size,
+                }),
+            }
         }
-        fn clear(&mut self, pa: u64, len: u64) {
-            self.0.retain(|a, _| *a < pa || *a >= pa + len);
-        }
-        fn clean_inv(&mut self, _: u64, _: u64) {}
     }
 
     fn desc() -> Desc {
@@ -429,13 +434,7 @@ mod tests {
     // hetzelfde venster vervangt de houder niet.
     #[test]
     fn adopt_holder_is_exclusive() {
-        let mut map = (
-            Stage2 {
-                cage_pa: 0x4000_0000,
-                max_slots: 8,
-            },
-            Mem::default(),
-        );
+        let mut map = Cages::default();
         let mut before = FbGrant::new();
         before.offer(desc()).unwrap();
         let (mut glass, log) = (TestGlass { on: true, back: 0 }, Log::default());

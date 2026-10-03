@@ -12,7 +12,8 @@
 //!
 //! 4 KB-granule, 39-bit IPA (VTCR.T0SZ=25, startlevel 1): elke L1-entry
 //! wijst één L2-tabel van 2 MB-blokken aan. GB0 blijft vrij voor een
-//! optionele framebuffer-grant ([`grant_window`]).
+//! optionele framebuffer-grant ([`grant_window`], en [`has_grant_window`]
+//! voor de adoptie na een flip).
 //!
 //! Alles hier is geheugenrekenkunde over `dev`: op de host test het over een
 //! buffer, en een walker leest de tabellen terug zoals de MMU dat zou doen.
@@ -260,6 +261,63 @@ pub fn grant_window(block: Pa, pa: u64, size: u64) -> Result<(), Error> {
     }
     dev::mb();
     Ok(())
+}
+
+/// Toetst zonder te wijzigen of de kooi in blok `block` precies het venster
+/// `[pa, pa+size)` mapt zoals [`grant_window`] het legt: de adoptie na een
+/// kern-flip. Alleen de eigen vaste tabellen van het kooiblok worden
+/// gevolgd; app-geheugen is nooit een tabelpointer. Een lege FB-ingang is
+/// `false`; een afwijkende map is een fout, want een bredere oude grant is
+/// geen bewijs van eigendom van déze framebuffer.
+pub fn has_grant_window(block: Pa, pa: u64, size: u64) -> Result<bool, Error> {
+    let bad = Error::Grant { pa, size };
+    if pa == 0 || size == 0 || pa >= 1 << 48 || size > (1 << 48) - pa {
+        return Err(bad);
+    }
+    let lo = pa & !(BLOCK - 1);
+    let pg_lo = pa & !(PAGE - 1);
+    let pg_hi = (pa + size + PAGE - 1) & !(PAGE - 1);
+    if pg_hi - lo > GB - (FB_IPA & (GB - 1)) {
+        return Err(bad);
+    }
+    let l2fb = block.add(L2_FB_OFF);
+    match dev::read64(block.add(L1_OFF + (FB_IPA >> 30) * 8)) {
+        0 => return Ok(false),
+        root if root == l2fb.0 | DESC_TABLE => {}
+        _ => return Err(bad),
+    }
+    let first = ((FB_IPA + pg_lo - lo) >> 21) & 511;
+    let last = ((FB_IPA + pg_hi - lo - 1) >> 21) & 511;
+    for idx in 0..512u64 {
+        let e = dev::read64(l2fb.add(idx * 8));
+        if idx < first || idx > last {
+            if e != 0 {
+                return Err(bad);
+            }
+            continue;
+        }
+        let p = (lo + (idx << 21)).wrapping_sub(FB_IPA & (GB - 1));
+        if p >= pg_lo && p + BLOCK <= pg_hi && e == p | BLOCK_RW_NC {
+            continue;
+        }
+        let table = [L3_FB_HEAD_OFF, L3_FB_TAIL_OFF]
+            .map(|off| block.add(off))
+            .into_iter()
+            .find(|t| e == t.0 | DESC_TABLE)
+            .ok_or(bad)?;
+        for j in 0..512u64 {
+            let page = p + j * PAGE;
+            let want = if (pg_lo..pg_hi).contains(&page) {
+                page | PAGE_RW_NC
+            } else {
+                0
+            };
+            if dev::read64(table.add(j * 8)) != want {
+                return Err(bad);
+            }
+        }
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -541,5 +599,43 @@ mod tests {
         // Een botsing in het FB-GB wordt geweigerd.
         dev::write64(c.block.add((FB_IPA >> 30) * 8), 0x1234_5003);
         assert!(grant_window(c.block, fb, size).is_err());
+    }
+
+    /// De toets van de adoptie leest precies terug wat `grant_window` legde,
+    /// en niets anders: een kortere of langere buffer, een vreemde
+    /// tabelpointer, een lege of te zwakke rand-pagina of een extra blok
+    /// is een fout.
+    #[test]
+    fn has_grant_window_reads_back_exactly_the_grant() {
+        let size = (8u64 << 20) - 3;
+        let fb = 0x3E10_8000u64;
+        let c = cage();
+        build(c.block, SLOT1, POOL, 4 << 20).unwrap();
+        assert_eq!(has_grant_window(c.block, fb, size), Ok(false));
+        for pa in [fb, 0x1_bc7a_0000, 0x4000_0000] {
+            let c = cage();
+            build(c.block, SLOT1, POOL, 4 << 20).unwrap();
+            grant_window(c.block, pa, size).unwrap();
+            assert_eq!(has_grant_window(c.block, pa, size), Ok(true));
+            assert!(has_grant_window(c.block, pa, size - PAGE).is_err());
+            assert!(has_grant_window(c.block, pa, size + PAGE).is_err());
+        }
+        let head = L3_FB_HEAD_OFF + ((fb & (BLOCK - 1)) >> 12) * 8;
+        for (off, value) in [
+            (L1_OFF + (FB_IPA >> 30) * 8, 0x1003),
+            (L2_FB_OFF + (FB_IPA >> 21) * 8, 0x1003),
+            (head, 0),
+            (head, fb | (PAGE_RW_NC & !ATTR_RW)),
+            (L2_FB_OFF, 0x4000_0000 | BLOCK_RW_NC),
+        ] {
+            let c = cage();
+            build(c.block, SLOT1, POOL, 4 << 20).unwrap();
+            grant_window(c.block, fb, size).unwrap();
+            dev::write64(c.block.add(off), value);
+            assert!(!matches!(has_grant_window(c.block, fb, size), Ok(true)));
+        }
+        for pa in [0, u64::MAX - 1, 1 << 48] {
+            assert!(has_grant_window(c.block, pa, 4096).is_err());
+        }
     }
 }

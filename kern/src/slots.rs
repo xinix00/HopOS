@@ -2683,13 +2683,13 @@ pub(crate) mod tests {
         // Meer dan er is: een weigering met de getallen, geen blok.
         let r = block_on(a.handle(Request::ReserveDevice {
             size: 128 * MIB,
-            what: "the codecdemo buffers",
+            what: "the codec arena",
         }));
         assert!(
             matches!(r, Response::Failed(Error::NoPartition { .. })),
             "{r:?}"
         );
-        assert!(con.saw("pool: no 128 MB for the codecdemo buffers"));
+        assert!(con.saw("pool: no 128 MB for the codec arena"));
         assert!(con.saw("HOPOS_POOL_DEVICE_FAIL"));
         // Het ijzer kwam niet op: terug.
         let r = block_on(a.handle(Request::ReleaseDevice {

@@ -25,9 +25,9 @@
 //! Paden zijn al door de mount-resolutie heen: dit is de laatste grens, dus
 //! `..` is een fout.
 
-use crate::sha256::Sha256;
 use crate::slots::{try_push, try_vec};
 use crate::{Error, Result};
+use abi::sha256::Sha256;
 use alloc::vec::Vec;
 use sync::LocalCell;
 

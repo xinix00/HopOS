@@ -2194,7 +2194,7 @@ fn fail(out: &mut [u8], op: u8, seq: u32, e: &Fail) -> usize {
         _ => STATUS_ERROR,
     };
     let mut msg = [0u8; 160];
-    let n = fmt_into(&mut msg, e);
+    let n = crate::fmt_into(&mut msg, e);
     encode_resp(out, op, status, seq, 0, msg.get(..n).unwrap_or(&[]))
 }
 
@@ -2288,7 +2288,7 @@ fn placement(req: &StartReq<'_>) -> Result<Placement> {
 /// Schrijft het stroom-antwoord in `data`.
 fn answer_stream(data: &mut [u8], received: u64, state: StreamState, why: Option<Fail>) -> Answer {
     let mut msg = [0u8; 160];
-    let n = why.map_or(0, |e| fmt_into(&mut msg, &e));
+    let n = why.map_or(0, |e| crate::fmt_into(&mut msg, &e));
     let r = StreamResp {
         received,
         state,
@@ -2304,24 +2304,6 @@ fn done(r: Response) -> Answer {
         Response::Failed(e) => Err(e.into()),
         _ => Err(Error::Busy.into()),
     }
-}
-
-fn fmt_into(buf: &mut [u8], e: &impl fmt::Display) -> usize {
-    struct W<'b>(&'b mut [u8], usize);
-    impl fmt::Write for W<'_> {
-        fn write_str(&mut self, s: &str) -> fmt::Result {
-            for b in s.bytes() {
-                if let Some(x) = self.0.get_mut(self.1) {
-                    *x = b;
-                    self.1 += 1;
-                }
-            }
-            Ok(())
-        }
-    }
-    let mut w = W(buf, 0);
-    let _ = fmt::write(&mut w, format_args!("{e}"));
-    w.1
 }
 
 /// Een toegelaten verbinding; `Drop` geeft de plaats terug.
@@ -2351,9 +2333,9 @@ impl Drop for Admitted<'_> {
 mod tests {
     use super::*;
     use crate::Region;
+    use crate::cage::tests::SparseMem;
     use crate::slots::tests::{Actor, FakeConsole, Obey, actor, s};
     use crate::slots::{Outbox, servicer_task};
-    use crate::stage2::tests::SparseMem;
     use crate::testutil::FakeTimer;
     use abi::systemapi::{StreamState, plain_req, stream_req};
     use core::cell::Cell;

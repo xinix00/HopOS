@@ -9,9 +9,27 @@
 //! daarvoor pointer-gelijkheid).
 
 use crate::Error;
-use crate::map::{filled, mix};
 use crate::plan::SLOT_CAP;
 use alloc::vec::Vec;
+
+/// De finalizer van splitmix64: goedkoop, en genoeg om opeenvolgende IP's en
+/// poorten over de indexen te spreiden.
+const fn mix(mut x: u64) -> u64 {
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
+/// Reserveert `n` plaatsen faalbaar (bij boot) en vult ze met `v`.
+fn filled<T: Clone>(n: usize, v: T) -> Result<Vec<T>, Error> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(n)
+        .map_err(|_| Error::OutOfMemory(n.saturating_mul(core::mem::size_of::<T>())))?;
+    out.resize(n, v);
+    Ok(out)
+}
 
 /// Het conntrack-plafond: de anti-DoS-grens; een app kan HOP's geheugen op
 /// core 0 nooit laten vollopen.
@@ -76,6 +94,19 @@ impl Flow {
     pub(crate) fn rkey(&self) -> RKey {
         RKey(self.proto, self.node_port, self.dst_ip, self.dst_port)
     }
+    fn hash(&self, d: Dir) -> u64 {
+        match d {
+            Dir::Fwd => self.fkey().hash(),
+            Dir::Rev => self.rkey().hash(),
+        }
+    }
+}
+
+/// Een van de twee indexen; ze zijn elkaars spiegelbeeld op de sleutel na.
+#[derive(Clone, Copy)]
+enum Dir {
+    Fwd,
+    Rev,
 }
 
 impl FKey {
@@ -150,34 +181,36 @@ impl FlowTable {
         self.slab.get_mut(usize::from(id))?.as_mut()
     }
 
-    fn fpos(&self, k: &FKey) -> Result<usize, usize> {
+    fn index(&self, d: Dir) -> &[Id] {
+        match d {
+            Dir::Fwd => &self.fwd,
+            Dir::Rev => &self.rev,
+        }
+    }
+
+    /// De plek in index `d` van de flow waarvoor `is` geldt (`Ok`), of de
+    /// lege plek waar hij zou komen (`Err`): lineair proberen vanaf `hash`.
+    fn pos(&self, d: Dir, hash: u64, is: impl Fn(&Flow) -> bool) -> Result<usize, usize> {
         let mask = INDEX - 1;
-        let mut i = (k.hash() as usize) & mask;
+        let mut i = (hash as usize) & mask;
         loop {
-            let id = self.fwd.get(i).copied().unwrap_or(EMPTY);
+            let id = self.index(d).get(i).copied().unwrap_or(EMPTY);
             if id == EMPTY {
                 return Err(i);
             }
-            if self.get(id).is_some_and(|f| f.fkey() == *k) {
+            if self.get(id).is_some_and(&is) {
                 return Ok(i);
             }
             i = (i + 1) & mask;
         }
     }
 
+    fn fpos(&self, k: &FKey) -> Result<usize, usize> {
+        self.pos(Dir::Fwd, k.hash(), |f| f.fkey() == *k)
+    }
+
     fn rpos(&self, k: &RKey) -> Result<usize, usize> {
-        let mask = INDEX - 1;
-        let mut i = (k.hash() as usize) & mask;
-        loop {
-            let id = self.rev.get(i).copied().unwrap_or(EMPTY);
-            if id == EMPTY {
-                return Err(i);
-            }
-            if self.get(id).is_some_and(|f| f.rkey() == *k) {
-                return Ok(i);
-            }
-            i = (i + 1) & mask;
-        }
+        self.pos(Dir::Rev, k.hash(), |f| f.rkey() == *k)
     }
 
     /// De flow met voorwaartse sleutel `k`.
@@ -216,12 +249,12 @@ impl FlowTable {
             return false;
         };
         if let Ok(p) = self.fpos(&fl.fkey()) {
-            self.unindex_fwd(p);
+            self.unindex(Dir::Fwd, p);
         }
         if let Ok(p) = self.rpos(&fl.rkey())
             && self.rev.get(p) == Some(&id)
         {
-            self.unindex_rev(p);
+            self.unindex(Dir::Rev, p);
         }
         if let Some(s) = self.slab.get_mut(usize::from(id)) {
             *s = None;
@@ -235,55 +268,35 @@ impl FlowTable {
         true
     }
 
-    fn unindex_fwd(&mut self, mut i: usize) {
+    /// Haalt plek `i` uit index `d` en schuift de probe-keten erachter op
+    /// (backward-shift deletion: geen grafstenen).
+    fn unindex(&mut self, d: Dir, mut i: usize) {
         let mask = INDEX - 1;
-        if let Some(e) = self.fwd.get_mut(i) {
+        let index = match d {
+            Dir::Fwd => &mut self.fwd,
+            Dir::Rev => &mut self.rev,
+        };
+        if let Some(e) = index.get_mut(i) {
             *e = EMPTY;
         }
         let mut j = i;
         loop {
             j = (j + 1) & mask;
-            let id = self.fwd.get(j).copied().unwrap_or(EMPTY);
-            let Some(fl) = self.get(id) else { break };
-            let h = (fl.fkey().hash() as usize) & mask;
+            let id = index.get(j).copied().unwrap_or(EMPTY);
+            let Some(Some(fl)) = self.slab.get(usize::from(id)) else {
+                break;
+            };
+            let h = (fl.hash(d) as usize) & mask;
             let stays = if i <= j {
                 i < h && h <= j
             } else {
                 i < h || h <= j
             };
             if !stays {
-                if let Some(e) = self.fwd.get_mut(i) {
+                if let Some(e) = index.get_mut(i) {
                     *e = id;
                 }
-                if let Some(e) = self.fwd.get_mut(j) {
-                    *e = EMPTY;
-                }
-                i = j;
-            }
-        }
-    }
-
-    fn unindex_rev(&mut self, mut i: usize) {
-        let mask = INDEX - 1;
-        if let Some(e) = self.rev.get_mut(i) {
-            *e = EMPTY;
-        }
-        let mut j = i;
-        loop {
-            j = (j + 1) & mask;
-            let id = self.rev.get(j).copied().unwrap_or(EMPTY);
-            let Some(fl) = self.get(id) else { break };
-            let h = (fl.rkey().hash() as usize) & mask;
-            let stays = if i <= j {
-                i < h && h <= j
-            } else {
-                i < h || h <= j
-            };
-            if !stays {
-                if let Some(e) = self.rev.get_mut(i) {
-                    *e = id;
-                }
-                if let Some(e) = self.rev.get_mut(j) {
+                if let Some(e) = index.get_mut(j) {
                     *e = EMPTY;
                 }
                 i = j;

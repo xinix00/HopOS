@@ -679,28 +679,28 @@ dependencies = [
 
 [[package]]
 name = "leandhcp"
-version = "3.1.6"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.6#222aa18fe6e60aae0b9d45daec04a42a65c5f1f6"
+version = "3.1.9"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.9#c406246d84b4a9e96a3e731f6ef5acf2413c4c90"
 
 [[package]]
 name = "leanelf"
-version = "3.1.6"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.6#222aa18fe6e60aae0b9d45daec04a42a65c5f1f6"
+version = "3.1.9"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.9#c406246d84b4a9e96a3e731f6ef5acf2413c4c90"
 
 [[package]]
 name = "leanh2"
-version = "3.1.6"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.6#222aa18fe6e60aae0b9d45daec04a42a65c5f1f6"
+version = "3.1.9"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.9#c406246d84b4a9e96a3e731f6ef5acf2413c4c90"
 
 [[package]]
 name = "leanhttp"
-version = "3.1.6"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.6#222aa18fe6e60aae0b9d45daec04a42a65c5f1f6"
+version = "3.1.9"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.9#c406246d84b4a9e96a3e731f6ef5acf2413c4c90"
 
 [[package]]
 name = "leanhttps"
-version = "3.1.6"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.6#222aa18fe6e60aae0b9d45daec04a42a65c5f1f6"
+version = "3.1.9"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.9#c406246d84b4a9e96a3e731f6ef5acf2413c4c90"
 dependencies = [
  "leanhttp",
  "leantls",
@@ -708,18 +708,18 @@ dependencies = [
 
 [[package]]
 name = "leannet"
-version = "3.1.6"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.6#222aa18fe6e60aae0b9d45daec04a42a65c5f1f6"
+version = "3.1.9"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.9#c406246d84b4a9e96a3e731f6ef5acf2413c4c90"
 
 [[package]]
 name = "leanrand"
-version = "3.1.6"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.6#222aa18fe6e60aae0b9d45daec04a42a65c5f1f6"
+version = "3.1.9"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.9#c406246d84b4a9e96a3e731f6ef5acf2413c4c90"
 
 [[package]]
 name = "leantls"
-version = "3.1.6"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.6#222aa18fe6e60aae0b9d45daec04a42a65c5f1f6"
+version = "3.1.9"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.9#c406246d84b4a9e96a3e731f6ef5acf2413c4c90"
 
 [[package]]
 name = "loc"
@@ -750,6 +750,7 @@ dependencies = [
  "bounded",
  "dev",
  "executor",
+ "leannet",
  "netdev",
  "sync",
 ]

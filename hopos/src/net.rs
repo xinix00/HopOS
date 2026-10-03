@@ -45,7 +45,7 @@ use kern::system::{
 use leandhcp::{Action, Client, Instant, KeepAction, Keeper, Lease};
 use leannet::{Endpoint, ListenHandle, Stack, TcpHandle, UdpHandle};
 use net::host::{HostPort, HostStack};
-use net::nat::Uplink;
+use net::nat::{Neighbors, Uplink};
 use net::plan::MAX_LAN_FRAME;
 use net::pump::Pump;
 use net::ring::{AbiTx, KIND_UPLINK, Reader as _, Writer as _};
@@ -354,6 +354,7 @@ pub(crate) fn start<D: Device + 'static>(
             log: log_line,
             slot_wake: p.slot_wake,
             resident: p.resident,
+            neighbors: NEIGHBORS,
         },
         Wiring {
             commands: &COMMANDS,
@@ -534,10 +535,9 @@ impl Node {
             ..
         } = self;
         let node = NodeStack { exec };
-        match HostPort::new(node, rx, tx, &HOST_BELL, &DOOR, &STATS, mac, ip, max_slots) {
-            Ok(mut port) => port.run(exec, &mut buf, &STOP).await,
-            Err(e) => println!("net: host port: {e} HOPOS_NET_FAIL"),
-        }
+        HostPort::new(node, rx, tx, &HOST_BELL, &DOOR, &STATS, mac, ip, max_slots)
+            .run(exec, &mut buf, &STOP)
+            .await;
     }
 
     /// Haalt een lease, en blijft het proberen: een node zonder adres kan
@@ -687,6 +687,34 @@ impl HostStack for NodeStack {
         on_stack(|st| Ok(st.next_timeout(now))).ok().flatten()
     }
 }
+
+/// De neighbour-tabel van de node-stack voor de NAT van de switch: Linux
+/// heeft er één, en de forwarding put eruit. Geen stack (nog niet, of een
+/// lening die al loopt) is onbekend; een vraag of twijfel belt de host-taak,
+/// die de ARP-vraag de draad op zet.
+const NEIGHBORS: Neighbors = Neighbors {
+    resolve: |dst, now| {
+        let mac = on_stack(|st| Ok(st.neighbor(dst.to_be_bytes(), now)))
+            .ok()
+            .flatten();
+        if mac.is_none() {
+            HOST_BELL.set();
+        }
+        mac
+    },
+    probe: |dst, now| {
+        let _ = io(|st| {
+            st.probe_neighbor(dst.to_be_bytes(), now);
+            Ok(())
+        });
+    },
+    confirm: |src, mac, now| {
+        let _ = on_stack(|st| {
+            st.confirm_neighbor(src.to_be_bytes(), mac, now);
+            Ok(())
+        });
+    },
+};
 
 /// Eén korte lening op de stack, zonder `.await`. Geen stack (nog niet, of
 /// een lening die al loopt) is `StackClosed`: de aanroeper probeert het na

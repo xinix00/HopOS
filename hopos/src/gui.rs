@@ -609,8 +609,8 @@ mod on {
 
         /// Het venster in de kooi, op ijzer: het tabelblok van het slot uit het
         /// plan van deze node, en `cpu::el2::stage2::grant_window` (dezelfde
-        /// bouwer als de kooi zelf, cage.rs). De toets na een flip leest met de
-        /// pure rekenkunde van `kern::stage2` over `dev`.
+        /// bouwer als de kooi zelf, cage.rs); de toets na een flip is
+        /// `has_grant_window` ernaast.
         struct CageWindows;
 
         impl CageWindows {
@@ -638,13 +638,12 @@ mod on {
 
             fn is_mapped(&self, slot: Slot, w: Window) -> kern::Result<bool> {
                 let block = Self::block(slot)?;
-                let s2 = kern::stage2::Stage2 {
-                    cage_pa: block
-                        .0
-                        .wrapping_sub(slot.get() as u64 * kern::stage2::CAGE_STRIDE),
-                    max_slots: abi::layout::SLOT_CAP,
-                };
-                s2.has_grant_window(&crate::DevMem, slot.get(), w.pa, w.size)
+                cpu::el2::stage2::has_grant_window(block, w.pa, w.size).map_err(|_| {
+                    kern::Error::Range {
+                        base: w.pa,
+                        size: w.size,
+                    }
+                })
             }
         }
 
@@ -673,7 +672,7 @@ mod on {
                 if g.arm(slot, &mut CageWindows)? {
                     crate::KernConsole.log(format_args!(
                         "slot {slot}: fb window mapped at ipa {:#x} HOPOS_FB_ARM",
-                        kern::stage2::FB_IPA
+                        abi::layout::FB_IPA
                     ));
                 }
                 Ok(())

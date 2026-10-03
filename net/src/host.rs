@@ -1,38 +1,27 @@
 //! HOP's poort 0: de node-stack aan de switch (Go: `hostDevice` in
 //! `hopswitch.go`, en `locnet.go`, `internal.go` in `hopnet`).
 //!
-//! De node-stack heeft één NIC en drie soorten frames die de draad nooit op
-//! mogen; die vangen we allemaal op déze naad, zodat de stack zelf nergens
-//! van hoeft te weten:
+//! Het interne subnet (10.100.0.0/24) mag de draad nooit op: dat gaat hier
+//! de switch in, via de statische 1:1-gateway-vertaling ([`crate::gw`]). De
+//! rest gaat als [`KIND_UPLINK`] de host-TX-ring in; de switch zet hem in de
+//! egress-rij van de pomp. Verkeer naar het eigen adres (de agent belt de
+//! leader op het eigen externe IP) komt hier niet langs: leannet stuurt een
+//! frame naar zijn eigen MAC zelf terug zijn eigen ingress in, en ARP't
+//! nooit naar zijn eigen IP (`Stack::route`, `Stack::send_eth`).
 //!
-//! 1. self-dial: dst-MAC is onze eigen MAC, dus terug de eigen RX-rij in. De
-//!    agent belt de leader op het eigen externe IP (de S3-lock adverteert dat
-//!    adres).
-//! 2. ARP naar het eigen IP: zelf beantwoorden; niemand op het LAN gaat onze
-//!    vraag naar ons eigen adres beantwoorden.
-//! 3. het interne subnet (10.100.0.0/24): niet de draad op maar de switch
-//!    in, via de statische 1:1-gateway-vertaling ([`crate::gw`]).
-//!
-//! De rest gaat als [`KIND_UPLINK`] de host-TX-ring in; de switch zet hem in
-//! de egress-rij van de pomp. Zo voedt alleen de switch de uplink, en
-//! bestaan Go's `uplinkTxMu` en `hostDevice.txMu` niet meer: elke ring heeft
-//! één producer, en die is een taak.
+//! Zo voedt alleen de switch de uplink, en bestaan Go's `uplinkTxMu` en
+//! `hostDevice.txMu` niet meer: elke ring heeft één producer, en die is een
+//! taak.
 
+use crate::Stats;
 use crate::gw;
 use crate::plan::MAX_LAN_FRAME;
 use crate::plan::is_internal;
 use crate::ring::{InPlace, KIND_FRAME, KIND_UPLINK, Reader, Writer};
-use crate::wire::{ET_ARP, ET_IPV4, ETH_LEN, be16, be32, mac_at, put_mac, put16, put32};
-use crate::{Error, Frame, Result, Stats};
-use alloc::vec::Vec;
+use crate::wire::{ET_IPV4, ETH_LEN, be16, be32, put_mac};
 use core::sync::atomic::Ordering::Relaxed;
 use executor::Executor;
 use sync::{Either, Signal, Stop, select, yield_now};
-
-/// De lokale rij (self-dial, ARP-antwoorden aan onszelf): node-intern
-/// verkeer, een handvol frames volstaat. Vol = drop, TCP herstelt; nooit
-/// ongebonden groeien op een app-gedreven pad.
-pub const LOOPBACK_QUEUE: usize = 64;
 
 /// Frames per richting per ronde, zodat de host-taak de rest niet
 /// verhongert.
@@ -73,14 +62,10 @@ pub struct HostPort<'a, S, R, W> {
     mac: [u8; 6],
     ip: u32,
     max_slots: usize,
-    loopback: Vec<Frame>,
-    lb_head: usize,
-    lb_len: usize,
 }
 
 impl<'a, S: HostStack, R: Reader, W: Writer> HostPort<'a, S, R, W> {
-    /// Poort 0 voor `stack` met extern adres `ip`/`mac`. Alloceert de
-    /// lokale rij (boot).
+    /// Poort 0 voor `stack` met extern adres `ip`/`mac`.
     #[expect(
         clippy::too_many_arguments,
         reason = "de bedrading van poort 0, één keer bij boot"
@@ -95,13 +80,8 @@ impl<'a, S: HostStack, R: Reader, W: Writer> HostPort<'a, S, R, W> {
         mac: [u8; 6],
         ip: u32,
         max_slots: usize,
-    ) -> Result<Self> {
-        let mut loopback = Vec::new();
-        loopback
-            .try_reserve_exact(LOOPBACK_QUEUE)
-            .map_err(|_| Error::OutOfMemory(LOOPBACK_QUEUE * core::mem::size_of::<Frame>()))?;
-        loopback.resize(LOOPBACK_QUEUE, Frame::new());
-        Ok(Self {
+    ) -> Self {
+        Self {
             stack,
             rx,
             tx,
@@ -111,108 +91,12 @@ impl<'a, S: HostStack, R: Reader, W: Writer> HostPort<'a, S, R, W> {
             mac,
             ip,
             max_slots,
-            loopback,
-            lb_head: 0,
-            lb_len: 0,
-        })
+        }
     }
 
     /// De stack, voor wie hem van buiten de lus aanraakt (dezelfde taak).
     pub fn stack(&mut self) -> &mut S {
         &mut self.stack
-    }
-
-    fn enqueue(&mut self, p: &[u8]) {
-        if self.lb_len >= LOOPBACK_QUEUE {
-            self.stats.host_rx_drops.fetch_add(1, Relaxed);
-            return;
-        }
-        let i = (self.lb_head + self.lb_len) % LOOPBACK_QUEUE;
-        if let Some(f) = self.loopback.get_mut(i)
-            && f.set(p)
-        {
-            self.lb_len += 1;
-        } else {
-            self.stats.host_rx_drops.fetch_add(1, Relaxed);
-        }
-    }
-
-    fn drain_loopback(&mut self) -> bool {
-        let worked = self.lb_len > 0;
-        while self.lb_len > 0 {
-            let i = self.lb_head;
-            self.lb_head = (self.lb_head + 1) % LOOPBACK_QUEUE;
-            self.lb_len -= 1;
-            if let Some(f) = self.loopback.get(i) {
-                self.stack.receive(f.bytes());
-            }
-        }
-        worked
-    }
-
-    /// Eén frame van de stack de naad over (Go: `locdev.Transmit`).
-    fn transmit(&mut self, p: &mut [u8]) {
-        if p.len() >= ETH_LEN {
-            if mac_at(p, 0) == self.mac {
-                self.enqueue(p); // self-dial: nooit de draad op
-                return;
-            }
-            if let Some(r) = self.arp_self_reply(p) {
-                self.enqueue(&r);
-                return;
-            }
-            if be16(p, 12) == ET_IPV4
-                && p.len() >= ETH_LEN + 20
-                && is_internal(be32(p, ETH_LEN + 16))
-            {
-                // Intern verkeer verlaat de node nooit: ook een frame dat de
-                // vertaling weigert (fragment, vreemd slot) gaat niet de
-                // draad op, dat zou het interne adresplan naar buiten lekken.
-                if gw::from_host(p, self.ip, self.max_slots) {
-                    self.write(KIND_FRAME, p);
-                } else {
-                    self.stats.host_rx_drops.fetch_add(1, Relaxed);
-                }
-                return;
-            }
-        }
-        self.write(KIND_UPLINK, p);
-    }
-
-    fn write(&mut self, kind: u32, p: &[u8]) {
-        // Geen wachten: de consument is de switch op déze core, en die kan
-        // pas draaien als wij afgeven. Vol = drop, TCP herstelt.
-        if self.tx.write_notify(kind, p).is_none() {
-            self.stats.host_tx_drops.fetch_add(1, Relaxed);
-        }
-    }
-
-    /// Beantwoordt een ARP-request naar het eigen IP (RFC 826).
-    fn arp_self_reply(&self, p: &[u8]) -> Option<[u8; ETH_LEN + 28]> {
-        let a = ETH_LEN;
-        if p.len() < a + 28 || be16(p, 12) != ET_ARP {
-            return None;
-        }
-        if be16(p, a) != 1 || be16(p, a + 2) != 0x0800 || be16(p, a + 6) != 1 {
-            return None;
-        }
-        if be32(p, a + 24) != self.ip {
-            return None; // niet ons adres: gewoon de draad op
-        }
-        let mut r = [0u8; ETH_LEN + 28];
-        put_mac(&mut r, 0, &mac_at(p, a + 8));
-        put_mac(&mut r, 6, &self.mac);
-        put16(&mut r, 12, ET_ARP);
-        put16(&mut r, a, 1);
-        put16(&mut r, a + 2, 0x0800);
-        r[a + 4] = 6;
-        r[a + 5] = 4;
-        put16(&mut r, a + 6, 2);
-        put_mac(&mut r, a + 8, &self.mac);
-        put32(&mut r, a + 14, self.ip);
-        put_mac(&mut r, a + 18, &mac_at(p, a + 8));
-        put32(&mut r, a + 24, be32(p, a + 14));
-        Some(r)
     }
 
     /// Het system-service-IP is een capability die uitsluitend uit een
@@ -221,11 +105,11 @@ impl<'a, S: HostStack, R: Reader, W: Writer> HostPort<'a, S, R, W> {
         p.len() >= ETH_LEN + 20 && be16(p, 12) == ET_IPV4 && is_internal(be32(p, ETH_LEN + 12))
     }
 
-    /// Eén ronde: de lokale rij en de host-RX-ring de stack in, dan wat de
-    /// stack wil zenden de naad over. `buf` is de ene framebuffer van de
-    /// taak (groot genoeg voor een LAN-jumbo). `true` = er was werk.
+    /// Eén ronde: de host-RX-ring de stack in, dan wat de stack wil zenden
+    /// de naad over. `buf` is de ene framebuffer van de taak (groot genoeg
+    /// voor een LAN-jumbo). `true` = er was werk.
     pub fn pass(&mut self, buf: &mut [u8]) -> bool {
-        let mut worked = self.drain_loopback();
+        let mut worked = false;
         for _ in 0..HOST_BURST {
             let Some((kind, n)) = self.rx.read_into(buf) else {
                 break;
@@ -245,7 +129,7 @@ impl<'a, S: HostStack, R: Reader, W: Writer> HostPort<'a, S, R, W> {
                 }
             }
         }
-        let (sent, full) = self.send_burst(buf);
+        let (sent, full) = self.send_burst();
         if sent {
             // De switch nú wekken: de bel via de deur van de executor werkt
             // alleen als HOP idle is, en onder verkeer is HOP dat niet.
@@ -258,47 +142,26 @@ impl<'a, S: HostStack, R: Reader, W: Writer> HostPort<'a, S, R, W> {
     /// Tot [`HOST_BURST`] frames van de stack de naad over, elk in de
     /// host-TX-ring zelf gebouwd: geen kopie uit de framebuffer (GEMETEN
     /// 01-10 op de M4, M17: 76 us per MiB van de kern naar een app). Zo zendt
-    /// de app al (applib `try_transmit_with`). Wat de lokale rij in moet
-    /// (zelf-bellen, ARP) gaat de oude weg via `buf`; dat is zeldzaam.
-    /// Geeft (iets gezonden, de ring was vol).
-    fn send_burst(&mut self, buf: &mut [u8]) -> (bool, bool) {
+    /// de app al (applib `try_transmit_with`). Geeft (iets gezonden, de ring
+    /// was vol).
+    fn send_burst(&mut self) -> (bool, bool) {
         let mut sent = false;
         for _ in 0..HOST_BURST {
-            let mut got = Got::Empty;
-            let (stack, mac, ip, slots, aside) = (
-                &mut self.stack,
-                self.mac,
-                self.ip,
-                self.max_slots,
-                &mut *buf,
-            );
+            let mut refused = false;
+            let (stack, ip, slots) = (&mut self.stack, self.ip, self.max_slots);
             let r = self.tx.write_in_place(MAX_LAN_FRAME, |p| {
                 let n = stack.poll_transmit(p)?;
-                let f = p.get_mut(..n)?;
-                match classify(f, mac, ip, slots) {
-                    Out::Ring(kind) => return Some((kind, n)),
-                    Out::Drop => got = Got::Drop,
-                    Out::Aside => {
-                        if let Some(d) = aside.get_mut(..n) {
-                            d.copy_from_slice(f);
-                            got = Got::Aside(n);
-                        }
-                    }
-                }
-                None
+                let kind = classify(p.get_mut(..n)?, ip, slots);
+                refused = kind.is_none();
+                Some((kind?, n))
             });
-            match (r, got) {
-                (InPlace::Full, _) => return (sent, true),
-                (InPlace::Written(_), _) => {}
-                (_, Got::Aside(n)) => {
-                    if let Some(f) = buf.get_mut(..n) {
-                        self.transmit(f);
-                    }
-                }
-                (_, Got::Drop) => {
+            match r {
+                InPlace::Full => return (sent, true),
+                InPlace::Written(_) => {}
+                InPlace::Nothing if refused => {
                     self.stats.host_rx_drops.fetch_add(1, Relaxed);
                 }
-                (_, Got::Empty) => return (sent, false),
+                InPlace::Nothing => return (sent, false),
             }
             sent = true;
         }
@@ -339,44 +202,15 @@ impl<'a, S: HostStack, R: Reader, W: Writer> HostPort<'a, S, R, W> {
     }
 }
 
-/// Wat [`HostPort::send_burst`] in één beurt van de stack kreeg.
-#[derive(Clone, Copy)]
-enum Got {
-    /// De stack had niets, of zijn frame staat in de ring.
-    Empty,
-    /// Een frame van zoveel bytes voor de oude weg, in `buf`.
-    Aside(usize),
-    /// Een intern frame dat de vertaling weigerde.
-    Drop,
-}
-
-/// Waar een frame van de stack heen moet.
-enum Out {
-    /// De host-TX-ring in, met deze soort (vertaald als hij intern is).
-    Ring(u32),
-    /// De oude weg ([`HostPort::transmit`]): zelf-bellen en ARP, die de
-    /// lokale rij in kunnen.
-    Aside,
-    /// Intern maar niet vertaalbaar: nooit de draad op (zie `transmit`).
-    Drop,
-}
-
-/// De keuze van [`HostPort::transmit`] zonder de lokale rij, op het frame in
-/// de ring; een intern frame wordt hier al vertaald.
-fn classify(f: &mut [u8], mac: [u8; 6], ip: u32, max_slots: usize) -> Out {
-    if f.len() >= ETH_LEN {
-        if mac_at(f, 0) == mac || be16(f, 12) == ET_ARP {
-            return Out::Aside;
-        }
-        if be16(f, 12) == ET_IPV4 && f.len() >= ETH_LEN + 20 && is_internal(be32(f, ETH_LEN + 16)) {
-            return if gw::from_host(f, ip, max_slots) {
-                Out::Ring(KIND_FRAME)
-            } else {
-                Out::Drop
-            };
-        }
+/// De soort waarmee een frame van de stack de host-TX-ring in gaat; een
+/// intern frame wordt hier al vertaald. `None`: intern maar niet
+/// vertaalbaar (fragment, vreemd slot). Dat gaat ook niet de draad op, want
+/// dat zou het interne adresplan naar buiten lekken.
+fn classify(f: &mut [u8], ip: u32, max_slots: usize) -> Option<u32> {
+    if f.len() >= ETH_LEN + 20 && be16(f, 12) == ET_IPV4 && is_internal(be32(f, ETH_LEN + 16)) {
+        return gw::from_host(f, ip, max_slots).then_some(KIND_FRAME);
     }
-    Out::Ring(KIND_UPLINK)
+    Some(KIND_UPLINK)
 }
 
 #[cfg(test)]
@@ -384,8 +218,8 @@ mod tests {
     use super::*;
     use crate::plan::{HOST_MAC, SLOT_CAP, host_ip4, slot_ip4, slot_mac};
     use crate::ring::mem::{self, MemReader, MemWriter};
-    use crate::wire::PROTO_TCP;
     use crate::wire::testutil::*;
+    use crate::wire::{PROTO_TCP, mac_at};
     use std::collections::VecDeque;
 
     const IP: u32 = 0x0A00_020F;
@@ -432,8 +266,7 @@ mod tests {
             MAC,
             IP,
             SLOT_CAP,
-        )
-        .unwrap();
+        );
         T {
             port,
             sw_tx,
@@ -445,39 +278,6 @@ mod tests {
     fn pass(t: &mut T) -> bool {
         let mut buf = vec![0u8; crate::plan::MAX_LAN_FRAME];
         t.port.pass(&mut buf)
-    }
-
-    #[test]
-    fn self_dial_gaat_nooit_de_draad_op() {
-        let mut t = setup();
-        let f = mk_frame(PROTO_TCP, MAC, MAC, IP, IP, 1, 2, b"zelf");
-        t.port.stack().out.push_back(f.clone());
-        assert!(pass(&mut t));
-        assert!(t.sw_tx.pop().is_none(), "self-dial ging de switch in");
-        assert!(pass(&mut t));
-        assert_eq!(t.port.stack().got, [f]);
-    }
-
-    #[test]
-    fn arp_naar_het_eigen_ip_beantwoordt_de_naad() {
-        let mut t = setup();
-        let mut req = ether_frame([0xff; 6], MAC, 0x0806);
-        req.resize(ETH_LEN + 28, 0);
-        put16(&mut req, 14, 1);
-        put16(&mut req, 16, 0x0800);
-        req[18] = 6;
-        req[19] = 4;
-        put16(&mut req, 20, 1);
-        req[22..28].copy_from_slice(&MAC);
-        put32(&mut req, 28, IP);
-        put32(&mut req, 38, IP);
-        t.port.stack().out.push_back(req);
-        pass(&mut t);
-        pass(&mut t);
-        let got = &t.port.stack().got;
-        assert_eq!(got.len(), 1);
-        assert_eq!((be16(&got[0], 20), be32(&got[0], 28)), (2, IP));
-        assert!(t.sw_tx.pop().is_none());
     }
 
     #[test]
@@ -524,13 +324,18 @@ mod tests {
         assert_eq!(t.sw_tx.pop(), Some((KIND_UPLINK, f)));
     }
 
+    /// Extern verkeer en ARP gaan onvertaald als uplink de switch in; de
+    /// naad kent geen eigen ARP- of zelfbelpad meer (dat doet leannet).
     #[test]
-    fn extern_verkeer_gaat_als_uplink_de_switch_in() {
+    fn extern_verkeer_en_arp_gaan_als_uplink_de_switch_in() {
         let mut t = setup();
         let f = mk_frame(PROTO_TCP, [0xaa; 6], MAC, IP, 0x0808_0808, 5555, 53, &[]);
-        t.port.stack().out.push_back(f.clone());
+        let mut arp = ether_frame([0xff; 6], MAC, 0x0806);
+        arp.resize(ETH_LEN + 28, 0);
+        t.port.stack().out.extend([f.clone(), arp.clone()]);
         pass(&mut t);
         assert_eq!(t.sw_tx.pop(), Some((KIND_UPLINK, f)));
+        assert_eq!(t.sw_tx.pop(), Some((KIND_UPLINK, arp)));
     }
 
     #[test]

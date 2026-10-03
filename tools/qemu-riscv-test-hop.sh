@@ -54,24 +54,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-port() {
-	python3 - "$1" "$2" <<'PY'
-import socket, sys
-want, name = int(sys.argv[1]), sys.argv[2]
-s = socket.socket()
-try:
-    s.bind(("127.0.0.1", want))
-    print(want)
-except OSError:
-    s.close()
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    got = s.getsockname()[1]
-    print(f"   {name} {want} is taken, using {got}", file=sys.stderr)
-    print(got)
-s.close()
-PY
-}
+. "$(dirname "$0")/lib.sh"
 SYSPORT="$(port "${SYSPORT:-10100}" SYSPORT)"
 AGENTPORT="$(port "${AGENTPORT:-8080}" AGENTPORT)"
 LEADERPORT="$(port "${LEADERPORT:-9080}" LEADERPORT)"
@@ -117,18 +100,9 @@ boot() {
 echo "== booten op QEMU virt riscv64 met Hop op hart 0 (tot ${TIMEOUT}s; system :$SYSPORT, agent :$AGENTPORT, leader :$LEADERPORT, artifacts :$ARTPORT)"
 boot
 
-has() { tr -d '\r' <"$LOG" | grep -q -E "$1"; }
-
 BOOT_MARKS="HOPOS_BOOT|HOPOS_CLOCK_FIXED|HOPOS_PRIVILEGE|HOPOS_DISK_UP model=virtio-blk|HOPOS_FS_UP fresh=1|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_OS_SELFTEST ok|HOPOS_OS_CORE_UP|HOPOS_HOP_START slot=1 core=0 cpu=0 |uplink tcp :8080 -> slot 1 :8080 HOPOS_HOP_PUBLISH|uplink tcp :9080 -> slot 1 :9080 HOPOS_HOP_PUBLISH|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
 PLACE_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|HOPOS_SLOT_START slot=2 core=1 cpu=1 |slot 2: HOPOS_APPSPIKE_FS ok|slot 2: HOPOS_APPSPIKE_DONE pass=9 fail=0"
 RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_OS_SELFTEST_FAIL|HOPOS_OS_CORE_FAIL|HOPOS_OS_CORE_NONE|HOPOS_CAGE_FAIL"
-
-all() {
-	(
-		IFS='|'
-		for m in $1; do has "$m" || exit 1; done
-	)
-}
 
 JOB='{"name":"spike","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/appspike.elf"}],"memory_limit":33554432}'
 POSTED=""

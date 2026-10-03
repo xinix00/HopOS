@@ -6,8 +6,7 @@
 //! aanbieden, events ophalen, en tellen. Er gaat geen beeld over de
 //! verbinding: een buffer is een stuk van de eigen partitie, de kern hangt
 //! het in de page tables van de codec (docs/media.md). Aan het eind één
-//! regel: `HOPOS_DECODE fps=… MBps=…`, de meting van `hopos.codecdemo` maar
-//! dan door de hele ABI heen.
+//! regel: `HOPOS_DECODE fps=… MBps=…`, de meting door de hele ABI heen.
 //!
 //! De stream komt van het eigen volume (`DECODE_FILE`, standaard
 //! `/data/clip.hevc`) of van een URL over `appnet` (`DECODE_URL`); de codec

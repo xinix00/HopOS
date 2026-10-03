@@ -12,8 +12,10 @@ bij de app-adapter: elk slot heeft precies één interface. De IPv6-pakketgrens
 is 1280 bytes, dus maximaal 1232 bytes UDP-payload. Zonder socket of groepsjoin
 is de IPv6-baan uit en heeft zij geen dynamische tabellen of timers.
 
-IPv6 heeft één bron: `leannet` in Lean, sinds tag v3.1.4. HopOS bevat geen
-kopie van de netstack en geen pad buiten deze repo (PORT.md §6.6).
+IPv6 heeft één bron: `leannet` in Lean, sinds tag v3.1.4, achter zijn feature
+`ipv6`. Die zet applib aan (`applib/Cargo.toml`); de kern bouwt zonder en
+draagt geen IPv6-code. HopOS bevat geen kopie van de netstack en geen pad
+buiten deze repo (PORT.md §6.6).
 
 Gevalideerd: Lean-hosttests, Go-draadfixtures, SDK-UDP/AAAA-tests met de echte
 async pompen, HopOS-switchtests en de Stulp-QEMU-proef met twee slots. De

@@ -33,9 +33,9 @@
 use crate::App;
 use core::fmt;
 
-/// De IPA-basis van het glas in de kooi (`kern::stage2::FB_IPA`): het
-/// venster staat daar plus de offset in zijn 2 MB-blok.
-pub const FB_IPA: u64 = 0x2000_0000;
+/// De IPA-basis van het glas in de kooi: het venster staat daar plus de
+/// offset in zijn 2 MB-blok.
+pub use abi::layout::FB_IPA;
 
 /// De langste invoerregel die de lezer bewaart. De langste regel van de
 /// kern (`gui_usbin::deliver::LINE_MAX`) is 96 bytes.

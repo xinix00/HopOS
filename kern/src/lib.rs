@@ -49,9 +49,7 @@ pub mod nodecfg;
 pub mod partmem;
 pub mod pool;
 pub mod rpc;
-mod sha256;
 pub mod slots;
-pub mod stage2;
 pub mod store;
 pub mod system;
 pub mod watchdog;
@@ -202,4 +200,24 @@ pub const fn align_grain(n: u64) -> Option<u64> {
         Some(v) => Some(v & !(GRAIN - 1)),
         None => None,
     }
+}
+
+/// Schrijft `e` in `buf`, afgekapt; geeft de lengte. De fouttekst van een
+/// antwoord (de system-API, hopfs, de codec-dienst).
+pub(crate) fn fmt_into(buf: &mut [u8], e: &impl core::fmt::Display) -> usize {
+    struct W<'b>(&'b mut [u8], usize);
+    impl core::fmt::Write for W<'_> {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            for b in s.bytes() {
+                if let Some(x) = self.0.get_mut(self.1) {
+                    *x = b;
+                    self.1 += 1;
+                }
+            }
+            Ok(())
+        }
+    }
+    let mut w = W(buf, 0);
+    let _ = core::fmt::write(&mut w, format_args!("{e}"));
+    w.1
 }

@@ -9,10 +9,10 @@
 //! [`crate::slots::Lifecycle::adopt`].
 //!
 //! Daarnaast de bundel ([`Bundle`]: de kern-ELF plus zijn relocatietabel,
-//! `image/flip-bundle.sh`), het platte neerleggen ervan ([`flatten`]) en de
-//! som die hem vertrouwd maakt ([`sha256`]). Het relokeren en de sprong met
-//! de MMU uit zijn van `cpu::el2::chain`; het ophalen doet Hop (`POST
-//! /flip`), dat de bundel in een gereserveerd slot stroomt.
+//! `image/flip-bundle.sh`) en het platte neerleggen ervan ([`flatten`]); de
+//! som die hem vertrouwd maakt is [`abi::sha256`]. Het relokeren en de
+//! sprong met de MMU uit zijn van `cpu::el2::chain`; het ophalen doet Hop
+//! (`POST /flip`), dat de bundel in een gereserveerd slot stroomt.
 
 use crate::cage::PhysMem;
 use crate::slots::{Mount, SlotState, try_push};
@@ -36,36 +36,13 @@ pub const MAX_FLOWS: usize = 4096;
 const HAND_HEAD: usize = 128;
 const SLOT_HEAD: usize = 80;
 
-/// Eén NAT-flow uit de conntrack van de switch.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct FlowState {
-    /// IP-protocol (6 of 17).
-    pub proto: u8,
-    /// Het slot.
-    pub slot: u8,
-    /// Hoeveel FIN's er gezien zijn.
-    pub fins: u8,
-    /// De poort van de app.
-    pub slot_port: u16,
-    /// De bestemmingspoort.
-    pub dst_port: u16,
-    /// Het IP van de app.
-    pub slot_ip: u32,
-    /// Het bestemmings-IP.
-    pub dst_ip: u32,
-    /// De node-poort van de masquerade.
-    pub node_port: u16,
-}
+pub use abi::FlowState;
 
 /// De NAT-staat van de switch.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NatState {
     /// De volgende masquerade-poort.
     pub masq_next: u16,
-    /// Het MAC van de gateway.
-    pub gw_mac: [u8; 6],
-    /// Is dat MAC bekend?
-    pub gw_known: bool,
     /// De flows.
     pub flows: Vec<FlowState>,
 }
@@ -195,15 +172,11 @@ pub fn encode(h: &Handoff, max: usize) -> Result<Vec<u8>> {
             pad8(&mut b)?;
         }
     }
-    let mut mac = 0u64;
-    for (i, v) in h.nat.gw_mac.iter().enumerate() {
-        mac |= u64::from(*v) << (8 * i);
-    }
-    if h.nat.gw_known {
-        mac |= 1 << 56;
-    }
     put64(&mut b, u64::from(h.nat.masq_next))?;
-    put64(&mut b, mac)?;
+    // Het woord van de gateway-MAC: altijd "onbekend" (bit 56 nul). De
+    // next-hops staan in de neighbour-tabel van de node-stack, en de nieuwe
+    // kern vraagt ze opnieuw; het woord blijft voor de oudere kern.
+    put64(&mut b, 0)?;
     put64(&mut b, h.nat.flows.len() as u64)?;
     for f in &h.nat.flows {
         put64(
@@ -355,11 +328,7 @@ pub fn decode(b: &[u8]) -> Result<Handoff> {
     }
     // Deze versie draagt altijd beide dienstblokken, ook leeg.
     h.nat.masq_next = r.u64()? as u16;
-    let mac = r.u64()?;
-    for (i, v) in h.nat.gw_mac.iter_mut().enumerate() {
-        *v = (mac >> (8 * i)) as u8;
-    }
-    h.nat.gw_known = mac & (1 << 56) != 0;
+    r.u64()?; // de gateway-MAC van een oudere kern: niet overgenomen
     let nf = bounded(r.u64()?, MAX_FLOWS as u64, r.pos)?;
     if nf * 24 > r.left() {
         return Err(Error::Corrupt { at: r.pos });
@@ -1009,138 +978,6 @@ pub fn flatten(bundle: &Bundle<'_>, mem: &mut impl PhysMem, dst: u64) -> Result<
     Ok(n)
 }
 
-// ---------------------------------------------------------------------------
-// SHA-256 (FIPS 180-4): de som van de bundel is het vertrouwensanker.
-// ---------------------------------------------------------------------------
-
-/// Een incrementele SHA-256. Hier en niet uit `leantls`: die houdt hem
-/// crate-privé, en een kern die één hash nodig heeft linkt geen TLS-stapel
-/// (dezelfde afweging als `leans3/src/sha256.rs`).
-#[derive(Clone)]
-pub struct Sha256 {
-    h: [u32; 8],
-    buf: [u8; 64],
-    fill: usize,
-    len: u64,
-}
-
-const SHA_K: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-];
-
-impl Default for Sha256 {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Sha256 {
-    /// Een verse hash.
-    #[must_use]
-    pub const fn new() -> Sha256 {
-        Sha256 {
-            h: [
-                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-                0x5be0cd19,
-            ],
-            buf: [0; 64],
-            fill: 0,
-            len: 0,
-        }
-    }
-
-    fn block(&mut self, b: &[u8; 64]) {
-        let mut w = [0u32; 64];
-        for (i, c) in b.chunks_exact(4).enumerate() {
-            if let (Some(d), Ok(v)) = (w.get_mut(i), <[u8; 4]>::try_from(c)) {
-                *d = u32::from_be_bytes(v);
-            }
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-        let [mut a, mut b2, mut c, mut d, mut e, mut f, mut g, mut h] = self.h;
-        for (k, wi) in SHA_K.iter().zip(w.iter()) {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ (!e & g);
-            let t1 = h
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(*k)
-                .wrapping_add(*wi);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b2) ^ (a & c) ^ (b2 & c);
-            let t2 = s0.wrapping_add(maj);
-            h = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(t1);
-            d = c;
-            c = b2;
-            b2 = a;
-            a = t1.wrapping_add(t2);
-        }
-        for (s, v) in self.h.iter_mut().zip([a, b2, c, d, e, f, g, h]) {
-            *s = s.wrapping_add(v);
-        }
-    }
-
-    /// Voert bytes in.
-    pub fn update(&mut self, mut data: &[u8]) {
-        self.len = self.len.wrapping_add(data.len() as u64);
-        while !data.is_empty() {
-            let take = (64 - self.fill).min(data.len());
-            let (now, rest) = data.split_at(take);
-            if let Some(d) = self.buf.get_mut(self.fill..self.fill + take) {
-                d.copy_from_slice(now);
-            }
-            self.fill += take;
-            data = rest;
-            if self.fill == 64 {
-                let b = self.buf;
-                self.block(&b);
-                self.fill = 0;
-            }
-        }
-    }
-
-    /// De som.
-    #[must_use]
-    pub fn finish(mut self) -> [u8; 32] {
-        let bits = self.len.wrapping_mul(8);
-        self.update(&[0x80]);
-        while self.fill != 56 {
-            self.update(&[0]);
-        }
-        self.update(&bits.to_be_bytes());
-        let mut out = [0u8; 32];
-        for (o, v) in out.chunks_exact_mut(4).zip(self.h) {
-            o.copy_from_slice(&v.to_be_bytes());
-        }
-        out
-    }
-}
-
-/// De SHA-256 van `data` in één keer.
-#[must_use]
-pub fn sha256(data: &[u8]) -> [u8; 32] {
-    let mut h = Sha256::new();
-    h.update(data);
-    h.finish()
-}
-
 /// De eerste acht bytes van een som als getal: de `bundle_sum` in het
 /// handoff-blob ("flip naar deze bundel" mag geen eeuwige lus worden).
 #[must_use]
@@ -1153,8 +990,7 @@ pub fn sum64(sum: &[u8; 32]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stage2::tests::SparseMem;
-    use std::string::String;
+    use crate::cage::tests::SparseMem;
     use std::vec;
 
     fn m(l: &str, s: &str) -> Mount {
@@ -1284,8 +1120,6 @@ mod tests {
             generation: 1,
             nat: NatState {
                 masq_next: 20345,
-                gw_mac: [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
-                gw_known: true,
                 flows: vec![
                     FlowState {
                         proto: 6,
@@ -1565,36 +1399,6 @@ mod tests {
         box_write(&mut mem, &none, b"nothing");
         assert!(mem.0.is_empty());
         assert_eq!(box_take(&mut mem, &none, &mut out), None);
-    }
-
-    #[test]
-    fn sha256_known_vectors() {
-        let hex = |s: [u8; 32]| {
-            s.iter()
-                .map(|b| std::format!("{b:02x}"))
-                .collect::<String>()
-        };
-        assert_eq!(
-            hex(sha256(b"abc")),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-        assert_eq!(
-            hex(sha256(b"")),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-        // Over een blokgrens, in brokken: dezelfde som als in één keer.
-        let long: Vec<u8> = (0..1000u32).map(|i| i as u8).collect();
-        let mut h = Sha256::new();
-        for c in long.chunks(37) {
-            h.update(c);
-        }
-        assert_eq!(h.finish(), sha256(&long));
-        assert_eq!(
-            hex(sha256(
-                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
-            )),
-            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
-        );
     }
 
     /// Een minimale ELF64 met één PT_LOAD: `code` op `paddr`, `memsz` groot.

@@ -48,6 +48,14 @@ fn wakes(slot: usize) -> usize {
 
 fn no_log(_: fmt::Arguments<'_>) {}
 
+/// De neighbour-tabel van de node-stack kent hier alleen de gateway: de
+/// tabel zelf toetsen leannet en de NAT-toetsen.
+const NEIGHBORS: Neighbors = Neighbors {
+    resolve: |_, _| Some(GW_MAC0),
+    probe: |_, _| {},
+    confirm: |_, _, _| {},
+};
+
 type Sw = Switch<'static, MemReader, MemWriter>;
 
 struct H {
@@ -81,6 +89,7 @@ fn harness() -> H {
             log: no_log,
             slot_wake: record_wake,
             resident: slot_seven_is_resident,
+            neighbors: NEIGHBORS,
         },
         Wiring {
             commands,
@@ -133,20 +142,6 @@ impl H {
             .set_uplink(Uplink::new(NODE_IP, 24, NIC_MAC, GW_IP).unwrap());
     }
 
-    fn leer_gateway(&mut self) {
-        let mut f = mk_frame(
-            PROTO_TCP,
-            NIC_MAC,
-            GW_MAC0,
-            EXT_IP,
-            NODE_IP,
-            443,
-            16001,
-            &[],
-        );
-        assert!(!self.sw.nat.inbound(&mut self.sw.core, &mut f, fake_now()));
-    }
-
     fn forward_once(&mut self, src: usize, p: &[u8]) {
         let mut f = p.to_vec();
         forward(&mut self.sw.core, &mut self.sw.nat, src, &mut f, fake_now());
@@ -170,7 +165,6 @@ impl H {
 fn gateway_ip_gaat_lan_poort_nul_in() {
     let mut h = harness();
     h.uplink();
-    h.leer_gateway();
     let mut host = h.host();
     let f = mk_frame(
         PROTO_TCP,
@@ -240,7 +234,6 @@ fn ingress_framegrens_voor_lan_ringen() {
 fn extern_blijft_masquerade() {
     let mut h = harness();
     h.uplink();
-    h.leer_gateway();
     let mut host = h.host();
     let f = mk_frame(
         PROTO_TCP,
@@ -390,7 +383,6 @@ fn ronde_en_deur_kennen_alleen_de_poorten_die_hangen() {
 fn slot_mag_geen_vreemde_bron_mac_of_ip_gebruiken() {
     let mut h = harness();
     h.uplink();
-    h.leer_gateway();
     let mut host = h.host();
     let mac = mk_frame(
         PROTO_TCP,
@@ -746,7 +738,6 @@ fn run_loop_attach_forward_detach() {
 fn de_conntrack_overleeft_de_flip_via_de_actor() {
     let mut old = harness();
     old.uplink();
-    old.leer_gateway();
     let _host = old.host();
     let _app = old.attach(1);
     let out = mk_frame(
@@ -770,7 +761,6 @@ fn de_conntrack_overleeft_de_flip_via_de_actor() {
     let snap = reply.snap.try_recv().expect("geen snapshot");
     assert_eq!(snap.flows.len(), 1);
     assert_eq!(snap.flows[0].node_port, node_port);
-    assert_eq!(snap.gw_mac, Some(GW_MAC0));
 
     // Bevroren: een nieuwe uitgaande verbinding krijgt geen flow meer.
     let other = mk_frame(
@@ -799,7 +789,6 @@ fn de_conntrack_overleeft_de_flip_via_de_actor() {
     let state = NatState {
         flows,
         masq_next: snap.masq_next,
-        gw_mac: snap.gw_mac,
     };
     new.sw.handle(Command::RestoreNat { state, ack });
     assert_eq!(ack.try_take(), Some(Ok(1)), "de flow kwam niet terug");

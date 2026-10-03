@@ -16,7 +16,7 @@
 //! de enige producer per RX-ring en de enige consument per TX-ring, zonder
 //! slot. De deur van de executor leest alleen [`Published`], met kale loads.
 
-use crate::nat::{FlowState, Nat, NatIo, NatState, Proto, Uplink};
+use crate::nat::{FlowState, Nat, NatIo, NatState, Neighbors, Proto, Uplink};
 use crate::plan::{
     HOST_MAC, MAX_LAN_FRAME, PORTS, SLOT_CAP, UPLINK_MAX_FRAME, host_ip4, slot_ip4, slot_mac,
 };
@@ -114,16 +114,14 @@ impl Default for Ack {
 }
 
 /// De conntrack zoals de kern-flip hem meeneemt: de flows in de buffer
-/// die de aanroeper meegaf (verplaatst, niet gedeeld), plus de twee
-/// woorden van [`NatState`].
+/// die de aanroeper meegaf (verplaatst, niet gedeeld), plus het woord van
+/// [`NatState`].
 #[derive(Debug, Default)]
 pub struct NatSnapshot {
     /// De levende flows (de buffer van de aanroeper, ingekort).
     pub flows: Vec<FlowState>,
     /// De volgende masquerade-kandidaat.
     pub masq_next: u16,
-    /// De geleerde gateway-MAC.
-    pub gw_mac: Option<[u8; 6]>,
 }
 
 impl NatSnapshot {
@@ -133,7 +131,6 @@ impl NatSnapshot {
         NatState {
             flows: &self.flows,
             masq_next: self.masq_next,
-            gw_mac: self.gw_mac,
         }
     }
 }
@@ -439,6 +436,8 @@ pub struct Config {
     /// OS-core, zoals Hop)? Dan wacht [`write_rx`](Core::write_rx) niet op
     /// ruimte: die consument kan pas draaien als de executor afgeeft.
     pub resident: fn(usize) -> bool,
+    /// De neighbour-tabel van de node-stack, voor de next-hops van de NAT.
+    pub neighbors: Neighbors,
 }
 
 /// De gedeelde kanten van de switch: wat andere taken van hem zien.
@@ -624,12 +623,11 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
                 // claimlijst past altijd.
                 let _ = self.nat.hold_adoption(&[]);
                 let st = self.nat.snapshot(now, &mut buf);
-                let (n, masq_next, gw_mac) = (st.flows.len(), st.masq_next, st.gw_mac);
+                let (n, masq_next) = (st.flows.len(), st.masq_next);
                 buf.truncate(n);
                 reply.complete(NatSnapshot {
                     flows: buf,
                     masq_next,
-                    gw_mac,
                 });
             }
             Command::Sweep => self.nat.sweep(now),
@@ -1018,6 +1016,18 @@ impl<R: Reader, W: Writer> NatIo for Core<'_, R, W> {
         Core::uplink_tx(self, f);
     }
 
+    fn neighbor(&mut self, dst: u32, now: u64) -> Option<[u8; 6]> {
+        (self.cfg.neighbors.resolve)(dst, now)
+    }
+
+    fn probe(&mut self, dst: u32, now: u64) {
+        (self.cfg.neighbors.probe)(dst, now);
+    }
+
+    fn confirm(&mut self, src: u32, mac: [u8; 6], now: u64) {
+        (self.cfg.neighbors.confirm)(src, mac, now);
+    }
+
     fn stats(&self) -> &Stats {
         self.stats
     }
@@ -1225,8 +1235,7 @@ fn uplink_in<R: Reader, W: Writer>(
         core.deliver(dst, f);
         return;
     }
-    // ARP eerst, niet claimen: de node-stack wil replies óók zien.
-    nat.arp_learn(f, now);
+    // ARP claimt de NAT nooit: de neighbour-tabel is van de node-stack.
     if nat.inbound(core, f, now) {
         return;
     }

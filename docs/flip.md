@@ -25,7 +25,7 @@ bundel), de `FLIP_*`-blokken in `board/*/src/slots.rs` (de adressen) en
 | Niet: de system-API-verbindingen | Die zijn van de kern; Hop's system-client bouwt ze opnieuw op. |
 | Niet: file calls tussen bevriezing en sprong | Die krijgen `Busy` (`HOPOS_FS_FROZEN_CALL`); de aanroeper doet ze opnieuw op de nieuwe kern. |
 | Niet: een nieuwe uitgaande verbinding tussen snapshot en sprong | Die krijgt geen flow; zijn SYN-retransmit krijgt er op de nieuwe kern een. |
-| Niet: de neighbor-cache | Leert passief terug binnen één ARP-ronde (een verkeerd overgenomen next-hop is erger). |
+| Niet: de next-hops (ook de gateway niet) | Die staan in de neighbour-tabel van de node-stack; de nieuwe vraagt ze opnieuw op het eerste frame, één ARP-ronde (een verkeerd overgenomen next-hop is erger). Het woord van de gateway-MAC in het blob blijft, altijd leeg. |
 
 ## De procedure, voor elk board
 

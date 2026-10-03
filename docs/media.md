@@ -18,7 +18,7 @@ Alles zit achter de feature `media` (op `hopos`, `kern`, `applib` en
 | `applib/src/codec.rs` | De client: `Session::{open, feed, offer, poll, close}` over `sys::Client::call_once` (nooit herhaald: twee keer dezelfde feed is twee happen bitstream). |
 | `board/o6n/src/codec.rs` | De VPU aanzetten: vensters, interrupt en `_CCA` uit de DSDT (`scan_dsdt`), arena ongecached, stroomdomeinen via SCMI naar de TF-A, klokken en perf-domein via de SCP, reset, en de stroomcyclus als het blok vastzit (`needs_recovery`, `cycle_domains`). |
 | `media/optical` (`media-optical`) | De bulk-only-transportlaag van een optische drive over een `Transport`-trait (zie hieronder). |
-| `hopos/src/codec.rs` | `codec::up` ná de opslag: de dienst aanmelden bij de system-API en de bring-up als taak: de arena van de lifecycle-actor, de firmware van de hopfs-actor, op de O6N de VPU aan en de driver erin, de opruimtaak die eens per seconde de sessies van gestopte bewoners sluit, en het meetinstrument `hopos.codecdemo`. |
+| `hopos/src/codec.rs` | `codec::up` ná de opslag: de dienst aanmelden bij de system-API en de bring-up als taak: de arena van de lifecycle-actor, de firmware van de hopfs-actor, op de O6N de VPU aan en de driver erin en de opruimtaak die eens per seconde de sessies van gestopte bewoners sluit. |
 | `kern/src/slots.rs`, `kern/src/partmem.rs` | De arena buiten de partitie-pool: `Request::ReserveDevice` en `ReleaseDevice` aan de lifecycle-actor (de eigenaar van de pool), `PartitionPool::reserve_device` eronder. Eén regel `HOPOS_POOL_DEVICE`. |
 | `kern/src/rpc.rs` | De kern als lezer van hopfs: `FsMsg::KernRead`, `kern_read` (in stukken, de buffers heen en terug) en `read_file` (een heel bestand, begrensd). Zonder slot en generatie; de roots van de taken zijn ook voor de kern dicht. |
 | `apps/decode` | De kleinste app op de codec-dienst: een stream van het volume of een URL door `applib::codec`, en de fps (`HOPOS_DECODE`). |
@@ -109,32 +109,6 @@ slot 2: decode: the node has no hevc decoder for this app: system call op 14: st
 De reservering komt vóór de plaatsing van Hop, en Hop krijgt daarna precies
 het blok dat terugkwam. Decode blijft staan (geen exit, geen herstart).
 
-## Het meetinstrument: `hopos.codecdemo`
-
-Zonder app: één bestand van het volume door de decoder,
-met de tijd erbij. Het bewijst op ijzer dat de firmware start, dat de page
-tables kloppen en dat de frames in het geheugen landen, zonder ABI, slot of
-kooi. De buffers (320 MB) komen in dezelfde
-reservering als de arena, erachter, ongecached zoals de arena.
-
-| Bootparameter | Wat |
-| --- | --- |
-| `hopos.codecdemo=1` | `/data/clip.hevc` van het volume |
-| `hopos.codecdemo=/pad/film.h264` | een ander bestand; de codec uit de extensie |
-| `hopos.codecdemo.pixel=p010\|nv12` | het uitvoerformaat (standaard p010) |
-| `hopos.codecdemo.chunk=<KB>` | de hap bitstream (standaard 256; één hap voor het hele bestand gaf 22-09 nul kapotte beelden, 26 happen gaven er 25) |
-| `hopos.codecdemo.bufs=<n>` | de beeldbuffers (standaard 12) |
-
-De regel: `codecdemo: <n> frames (<w>x<h> <pixel>) from <MB> MB in <ms> ms:
-<fps> fps, <MB/s> MB/s through the grant HOPOS_CODECDEMO fps=… MBps=…`,
-met ervoor de eerste zestien luma-bytes (de bit-indeling van P010) en erna
-de staat van het ijzer. Stil voor 20 s, een Fault of een leesfout is
-`HOPOS_CODECDEMO_FAIL` met de reden en de staat; op een board zonder VPU
-`HOPOS_CODECDEMO_SKIP`. Bewust niet: de hash per beeld en het
-wegschrijven naar `<pad>.yuv` (beide meten iets anders dan de decoder), en
-de ingebakken teststream van een meetbundel (`codecblob`): de stream komt
-van het volume.
-
 ## De optische drive
 
 De optische drive (`media/optical`) is
@@ -162,14 +136,14 @@ Bouwen: `MEDIA=1 BOARD=o6n CFG=jobs/hopos-media-o6n.cfg sh
 image/uefi-run.sh` (de gate bouwt hetzelfde). De ESP staat in
 `target/uefi-esp-o6n-media/`: `EFI/BOOT/BOOTAA64.EFI` en `hopos.cfg` op een
 FAT32-stick. De config geldt (`hopos.codec=768`,
-`hopos.storage=stateful`); voor de meting zonder Lumen erbij
-`hopos.codecdemo=1` en een stream op `/data/clip.hevc` van het volume.
-apps/decode: `cargo build --release --target aarch64-unknown-none-softfloat
--p decode`, de jobspec in `apps/decode/README.md`.
+`hopos.storage=stateful`); voor de meting zonder Lumen erbij apps/decode
+met een stream op `/data/clip.hevc` van het volume: `cargo build --release
+--target aarch64-unknown-none-softfloat -p decode`, de jobspec in
+`apps/decode/README.md`.
 
 | Stap | Marker of regel | Wat het bewijst | Afwijking |
 | --- | --- | --- | --- |
-| 0a | `pool: 768 MB for the codec arena at 0x… outside the partition pool, N MB left for slots … HOPOS_POOL_DEVICE base=0x… mb=768` (met codecdemo: 1088 MB, "the codec arena and the codecdemo buffers") | de arena komt uit de pool, vóór de eerste plaatsing | `HOPOS_POOL_DEVICE_FAIL` met vrij en grootste gat: `hopos.codec` omlaag, of de pool is kleiner dan gedacht; "did not answer": de slots kwamen niet op |
+| 0a | `pool: 768 MB for the codec arena at 0x… outside the partition pool, N MB left for slots … HOPOS_POOL_DEVICE base=0x… mb=768` | de arena komt uit de pool, vóór de eerste plaatsing | `HOPOS_POOL_DEVICE_FAIL` met vrij en grootste gat: `hopos.codec` omlaag, of de pool is kleiner dan gedacht; "did not answer": de slots kwamen niet op |
 | 0b | `codec: 16 of 16 firmware blobs read from the volume (… KB)` | de kern-lezing van hopfs: `/firmware` of `/codec-firmware` | `HOPOS_CODEC_NOFW missing=…`: die blobs staan niet op het volume (Lumen haalt ze vóór zijn eerste back-up; de eerstvolgende open laadt ze bij); `missing=all` zonder volume |
 | 1 | `vpu: TF-A SCMI channel alive, power protocol vX.Y` | het SMC-kanaal naar de TF-A antwoordt | geen regel: het kanaal op 0x84380000 is niet gemapt of de SMC-functie klopt niet |
 | 2 | `vpu: power domains 4 5 11-15 on (confirmed by the firmware)` | hub, top en vier cores aan, teruggevraagd | `power domain N not on`: de TF-A weigert; niet verder, de eerste registerlees zou een SError zijn |
@@ -177,8 +151,7 @@ apps/decode: `cargo build --release --target aarch64-unknown-none-softfloat
 | 4 | `HOPOS_VPU_RECOVER` (alleen na een vastgelopen blok) | de stroomcyclus 15..11 uit, 11..15 aan | na de cyclus moet PGCTRL `0x07cefffc` zijn en TERMINATE nul (gemeten 27-09) |
 | 5 | `vpu: id 0x56648002 rcsu ... (windows 0x14240000/0x14230000, intid 358, cca Some(false))` | het blok leeft; vensters, interrupt en `_CCA = 0` uit de DSDT | id 0: geen klok of hub; 0xffffffff: geen bus; `cca Some(true)`: de firmware noemt het blok coherent, de arena mag dan gecached |
 | 6 | `codec: Linlon V8 (id 0x56648002 rev ...): 4 cores, N sessions, fuse ..., arena 768 MB (768 MB free) HOPOS_CODEC_UP` | de driver draait, de arena is heel | `HOPOS_CODEC_OFF` met de reden (stroom, probe), en dan `HOPOS_POOL_DEVICE_RELEASE`: de arena is terug in de pool |
-| 6a | met `hopos.codecdemo=1`: `codecdemo: /data/clip.hevc (… KB, hevc to p010) …`, `codecdemo: 3840x2160 p010, … bytes per frame, N buffers wanted`, `codecdemo: first luma bytes …`, en `… HOPOS_CODECDEMO fps=… MBps=…` | de decoder zonder app: firmware, page tables, frames in DRAM, en de meting | `HOPOS_CODECDEMO_FAIL` met de reden en `hardware says …`; "gave up after 20 s": de firmware zweeg, eerst `state` |
-| 6b | apps/decode via Hop (`apps/decode/README.md`): `slot N: decode: hevc session 1 open … HOPOS_DECODE_OPEN`, dan `… HOPOS_DECODE fps=… MBps=…` | dezelfde meting door de hele ABI: open, feed, offer, poll over de draad, de grant in de eigen partitie | `HOPOS_DECODE_NOCODEC` met de tekst van de kern ("no firmware for this codec", "all hardware sessions in use"); `HOPOS_DECODE_FAIL` met de reden. Lager dan 6a: de pomp over de system-calls (de poll per milliseconde) |
+| 6a | apps/decode via Hop (`apps/decode/README.md`): `slot N: decode: hevc session 1 open … HOPOS_DECODE_OPEN`, dan `… HOPOS_DECODE fps=… MBps=…` | dezelfde meting door de hele ABI: open, feed, offer, poll over de draad, de grant in de eigen partitie | `HOPOS_DECODE_NOCODEC` met de tekst van de kern ("no firmware for this codec", "all hardware sessions in use"); `HOPOS_DECODE_FAIL` met de reden |
 | 7 | Lumen start een back-up | open, feed, offer, poll over de draad; de firmware vraagt zijn referentieframes (RPC) | een Fault met `firmware asked for N MB and arena ran out`: `hopos.codec` omhoog |
 | 8 | fps in `/api/state` van Lumen | de meting: **24 fps 4K P010 = 24.883.200 bytes per beeld = 597 MB/s door de grant**, geen byte over de verbinding. v2 haalde 27,25 fps met Lumen op GAMEOFTHRONES_S1_D1 (27-09, met de software-encoder erachter) | lager dan 24 op 4K: eerst de cache-ops (`dc civac` over 24 MB per beeld), dan de pomp (de opruimtaak en de poll van de app) |
 | 9 | stop Lumen midden in een film; start hem opnieuw | evict sluit de sessies binnen één seconde (de opruimtaak); de nieuwe levensduur opent op hetzelfde LSID | "all hardware sessions in use": een levensduur die niet viel |

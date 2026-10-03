@@ -12,8 +12,7 @@
 //! - [`pump`] drijft de NIC: RX de switch in, TX van de switch de draad op,
 //!   via twee eigen rijen.
 //! - [`host`] is HOP's poort 0: de node-stack achter de [`host::HostStack`]
-//!   -trait, met de lokale gevallen (self-dial, ARP naar het eigen IP, de
-//!   gateway-vertaling) op de naad.
+//!   -trait, met de gateway-vertaling van het interne subnet op de naad.
 //!
 //! Wat hier niet staat: de node-stack zelf (die komt uit `leannet`), DHCP en
 //! SNTP.
@@ -35,7 +34,6 @@ extern crate alloc;
 mod flows;
 pub mod gw;
 pub mod host;
-mod map;
 pub mod nat;
 pub mod nodemac;
 pub mod plan;

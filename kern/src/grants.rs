@@ -6,8 +6,7 @@
 //! vragen, welke env erbij hoort, wat de console doet als het glas weg is):
 //! dat is van de aanbieder, vandaag `gui-fbgrant` voor de framebuffer. En
 //! het bezit geen tabellen: het mappen gaat via [`WindowMap`], die op ijzer
-//! `cpu::el2::stage2::grant_window` is en op de host
-//! [`Stage2::grant_window`] over nep-geheugen.
+//! `cpu::el2::stage2::grant_window` en `has_grant_window` is.
 //!
 //! Waarom een primitief in de kern en het beleid erbuiten (Go:
 //! `kern/slots/grants.go`, 19-07): de kern draagt alleen de
@@ -28,8 +27,8 @@
 //! | Bij de adoptie na een kern-flip | [`Grants::adopt`] | `GrantHooks.Adopt` |
 //! | Na een bevestigde stop, en bij een abort | [`Grants::release`] | `grantRelease` in `releaseSlot` |
 
-use crate::stage2::{FB_IPA, Stage2};
-use crate::{Error, Result, Slot, cage::PhysMem};
+use crate::{Error, Result, Slot};
+use abi::layout::FB_IPA;
 use alloc::vec::Vec;
 use core::fmt::{self, Write as _};
 
@@ -75,19 +74,6 @@ pub trait WindowMap {
     /// (de adoptie na een flip). Een afwijkende map is een fout, geen
     /// `false`: een bredere oude grant is geen bewijs van eigendom.
     fn is_mapped(&self, slot: Slot, w: Window) -> Result<bool>;
-}
-
-/// De host- en testvorm: de pure stage-2-rekenkunde over [`PhysMem`].
-impl<M: PhysMem> WindowMap for (Stage2, M) {
-    fn map(&mut self, slot: Slot, w: Window) -> Result {
-        let (s2, mem) = self;
-        s2.grant_window(mem, slot.get(), w.pa, w.size)
-    }
-
-    fn is_mapped(&self, slot: Slot, w: Window) -> Result<bool> {
-        let (s2, mem) = self;
-        s2.has_grant_window(mem, slot.get(), w.pa, w.size)
-    }
 }
 
 /// Eén grant: een venster en zijn houder. Eén houder tegelijk; de eerste
@@ -290,7 +276,7 @@ pub fn env_put(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stage2::tests::SparseMem;
+    use std::collections::HashMap;
 
     const FB_PA: u64 = 0x1_bc7a_0000; // de ramfb van 19-07, boven 4 GB
 
@@ -298,14 +284,30 @@ mod tests {
         Slot::new(i).unwrap()
     }
 
-    fn map() -> (Stage2, SparseMem) {
-        (
-            Stage2 {
-                cage_pa: 0x4000_0000,
-                max_slots: 4,
-            },
-            SparseMem::default(),
-        )
+    /// De kooien als een tabel van vensters; de tabellen zelf toetst
+    /// `cpu::el2::stage2`.
+    #[derive(Default)]
+    struct Cages(HashMap<usize, Window>);
+
+    impl WindowMap for Cages {
+        fn map(&mut self, slot: Slot, w: Window) -> Result {
+            self.0.insert(slot.get(), w);
+            Ok(())
+        }
+        fn is_mapped(&self, slot: Slot, w: Window) -> Result<bool> {
+            match self.0.get(&slot.get()) {
+                None => Ok(false),
+                Some(m) if *m == w => Ok(true),
+                Some(_) => Err(Error::Range {
+                    base: w.pa,
+                    size: w.size,
+                }),
+            }
+        }
+    }
+
+    fn map() -> Cages {
+        Cages::default()
     }
 
     fn fb() -> Window {

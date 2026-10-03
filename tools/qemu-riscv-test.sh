@@ -58,26 +58,7 @@ DISK="$(mktemp -t hopos-rvdisk.XXXXXX)"
 STAGE="$(mktemp -t hopos-rvstage.XXXXXX)"
 trap 'rm -f "$LOG" "$DISK" "$STAGE"; [ -n "${QPID:-}" ] && kill "$QPID" 2>/dev/null; true' EXIT INT TERM
 
-# Een host-poort: de gevraagde als hij vrij is, anders een vrije van het
-# OS (zoals tools/qemu-test.sh), zodat de toets naast een andere QEMU draait.
-port() {
-	python3 - "$1" "$2" <<'PY'
-import socket, sys
-want, name = int(sys.argv[1]), sys.argv[2]
-s = socket.socket()
-try:
-    s.bind(("127.0.0.1", want))
-    print(want)
-except OSError:
-    s.close()
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    got = s.getsockname()[1]
-    print(f"   {name} {want} is taken, using {got}", file=sys.stderr)
-    print(got)
-s.close()
-PY
-}
+. "$(dirname "$0")/lib.sh"
 SYSPORT="$(port "${SYSPORT:-10100}" SYSPORT)"
 
 cd "$DIR"

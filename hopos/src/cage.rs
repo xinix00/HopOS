@@ -7,12 +7,10 @@
 //! is van de lifecycle-actor; die krijgt [`ArmCage`] en [`ArmCores`] als
 //! waarde en is dus de enige aanroeper (`&mut self`, handboek §1).
 //!
-//! De stage-2-bouwer is die van `cpu::el2::stage2`, niet `kern::stage2`:
-//! de intrekking (`cpu::el2::revoke`) en de switcher lezen dezelfde tabellen
-//! via hetzelfde kooiblok, en één bouwer naast zijn eigen intrekker kan niet
-//! uit elkaar groeien. Hij doet bovendien het cache-onderhoud (de walker van
-//! de app-core leest cacheable) waar `kern::stage2` over een `PhysMem`
-//! alleen rekent; die blijft de rekenkern voor de host-tests en de flip.
+//! De stage-2-bouwer is die van `cpu::el2::stage2`, de enige: de intrekking
+//! (`cpu::el2::revoke`) en de switcher lezen dezelfde tabellen via hetzelfde
+//! kooiblok, en hij doet het cache-onderhoud (de walker van de app-core
+//! leest cacheable).
 //!
 //! Dit is de ARM-helft van `OLD/metal/kern/slots/cage_arm64.go` plus het
 //! schrijfwerk van `armSlot` (control-page, ringen, ctx-woorden). Wat deze

@@ -54,6 +54,15 @@ else
 	git -C "$HOP_DIR" archive "$HOP_REV" | tar -x -C "$SRC"
 	REV_NAME="$HOP_REV $(git -C "$HOP_DIR" rev-parse --short "$HOP_REV")"
 fi
+# De lean-tags van Hop gelijk aan die van deze werkboom: applib brengt
+# leannet op onze tag mee, en Hop's eigen leanhttp op een oudere tag zou
+# een tweede leannet (en dus een tweede TcpConn) in het image zetten. Dit
+# is wat de volgende bump van Hop ook doet.
+LEAN_TAG=$(grep -o 'lean.git", tag = "v[0-9.]*"' "$DIR/applib/Cargo.toml" | head -1 | grep -o 'v[0-9.]*')
+if [ -n "$LEAN_TAG" ]; then
+	find "$SRC" -name Cargo.toml -exec perl -pi -e 's#(xinix00/lean\.git"[^}]*?tag = ")v[0-9.]+#${1}'"$LEAN_TAG"'#g' {} +
+	rm -f "$SRC/Cargo.lock"
+fi
 # applib en abi uit deze werkboom, en sync erbij: Hop gebruikt sync ook
 # zelf, en twee sync's in één image (één van de tag, één van hier) is een
 # stille dubbele `Local`. De rest van applib's afhankelijkheden (dev,

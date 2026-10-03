@@ -284,12 +284,12 @@ pub trait Console {
     }
 }
 
-/// Fysiek geheugen buiten de eigen heap, woordgewijs: de stage-2-tabellen,
-/// de boot-scratch, de recorder van de flip, de handoff.
+/// Fysiek geheugen buiten de eigen heap, woordgewijs: de boot-scratch, de
+/// recorder van de flip, de handoff.
 ///
 /// Het board vult hem met `dev::read64`/`write64` op adressen uit `layout`;
-/// de tests met een ijle tabel. Zo blijft de rekenkunde van stage2 en
-/// kernflip puur en zonder `unsafe`.
+/// de tests met een ijle tabel. Zo blijft de rekenkunde van kernflip puur
+/// en zonder `unsafe`.
 pub trait PhysMem {
     /// Lees het 64-bit woord op `pa` (8-uitgelijnd).
     fn read64(&self, pa: u64) -> u64;
@@ -353,8 +353,30 @@ pub trait Timer {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::esr_class;
+pub(crate) mod tests {
+    use super::{PhysMem, esr_class};
+    use std::collections::HashMap;
+
+    /// IJl fysiek geheugen: alleen wat geschreven is, bestaat.
+    #[derive(Default, Clone, PartialEq, Debug)]
+    pub(crate) struct SparseMem(pub(crate) HashMap<u64, u64>);
+
+    impl PhysMem for SparseMem {
+        fn read64(&self, pa: u64) -> u64 {
+            self.0.get(&pa).copied().unwrap_or(0)
+        }
+        fn write64(&mut self, pa: u64, v: u64) {
+            if v == 0 {
+                self.0.remove(&pa);
+            } else {
+                self.0.insert(pa, v);
+            }
+        }
+        fn clear(&mut self, pa: u64, len: u64) {
+            self.0.retain(|a, _| *a < pa || *a >= pa + len);
+        }
+        fn clean_inv(&mut self, _: u64, _: u64) {}
+    }
 
     // De ESR's van de eerste Pi 5-boot (30-09) en wat een app op EL1 het
     // vaakst doet, in de woorden van de fault-regel.

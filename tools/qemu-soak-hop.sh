@@ -108,11 +108,9 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Een vrije host-poort van het OS. Nooit de standaardpoort: twee soaks
+# Poorten altijd van het OS (`port 0`), nooit de standaardpoort: twee soaks
 # naast elkaar zouden allebei 8080 vrij zien en dan botsen.
-port() {
-	python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
-}
+. "$(dirname "$0")/lib.sh"
 
 echo "== bouwen: hopos (qemuvirt) en welcome hier, hoplb-hopos in $HOPLB_DIR, agentd-hopos in $HOP_DIR"
 (cd "$DIR" && cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt) || exit 1
@@ -126,7 +124,7 @@ strip_to() {
 }
 strip_to "$DIR/target/$TARGET/release/welcome" "$ART/welcome.elf"
 strip_to "$HOPLB_DIR/target/$TARGET/release/hoplb-hopos" "$ART/hoplb.elf"
-ARTPORT="$(port)"
+ARTPORT="$(port 0)"
 (cd "$ART" && exec python3 -m http.server "$ARTPORT" --bind 127.0.0.1) >"$ART/http.log" 2>&1 &
 HPID=$!
 
@@ -293,13 +291,6 @@ while True:
 PY
 }
 
-has() { tr -d '\r' <"$1" | grep -q -E "$2"; }
-all() {
-	(
-		IFS='|'
-		for m in $2; do has "$1" "$m" || exit 1; done
-	)
-}
 post() {
 	curl -s -m 20 -w ' HTTP %{http_code}' -X POST -H 'Content-Type: application/json' \
 		-d "$2" "http://127.0.0.1:$1/v1/jobs" 2>&1 || echo "curl failed"
@@ -316,8 +307,8 @@ noise() {
 	# andere toets praat dan met de Hop van wie 8080 net heeft): hij houdt
 	# de SSE-stroom /v1/events open en pollt de agent.
 	if [ -n "${HOSTLB:-}" ]; then
-		"$HOSTLB" -agent "http://127.0.0.1:$AGENTPORT" -listen "127.0.0.1:$(port)" \
-			-admin-listen "127.0.0.1:$(port)" >"$1/hostlb.log" 2>&1 &
+		"$HOSTLB" -agent "http://127.0.0.1:$AGENTPORT" -listen "127.0.0.1:$(port 0)" \
+			-admin-listen "127.0.0.1:$(port 0)" >"$1/hostlb.log" 2>&1 &
 		LBPID=$!
 		trap 'kill "$LBPID" 2>/dev/null; exit 0' TERM
 	fi
@@ -371,10 +362,10 @@ run_one() {
 	LOG="$R/console.log"
 	# De socket kort houden: een unix-pad mag hooguit 104 bytes zijn.
 	MON="$ART/m$1.sock"
-	SYSPORT="$(port)"
-	AGENTPORT="$(port)"
-	LEADERPORT="$(port)"
-	WEBPORT="$(port)"
+	SYSPORT="$(port 0)"
+	AGENTPORT="$(port 0)"
+	LEADERPORT="$(port 0)"
+	WEBPORT="$(port 0)"
 	SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" WEBPORT="$WEBPORT" \
 		HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISK="$R/disk.img" \
 		sh "$DIR/image/qemu-run.sh" -monitor "unix:$MON,server,nowait" </dev/null >"$LOG" 2>&1 &
@@ -390,28 +381,28 @@ run_one() {
 	while :; do
 		el=$(($(date +%s) - start))
 		[ -e "$R/verdict" ] && break
-		if has "$LOG" "$RED"; then why="$(tr -d '\r' <"$LOG" | grep -m1 -E "$RED")"; break; fi
+		if has "$RED"; then why="$(tr -d '\r' <"$LOG" | grep -m1 -E "$RED")"; break; fi
 		kill -0 "$QPID" 2>/dev/null || { why="QEMU exited"; break; }
 		case "$phase" in
 		boot)
-			if all "$LOG" "$BOOT_MARKS"; then
+			if all "$BOOT_MARKS"; then
 				echo "   welcome: $(post "$LEADERPORT" "$WELCOME")" >>"$R/steps.txt"
 				phase=welcome
 			fi
 			;;
 		welcome)
-			if all "$LOG" "$WELCOME_MARKS" && [ -n "$DIRECT" ]; then
+			if all "$WELCOME_MARKS" && [ -n "$DIRECT" ]; then
 				phase=load
 				load_end=$(($(date +%s) + LOAD))
 				noise "$R" &
 				NPID=$!
-			elif all "$LOG" "$WELCOME_MARKS"; then
+			elif all "$WELCOME_MARKS"; then
 				echo "   hoplb: $(post "$LEADERPORT" "$HOPLB")" >>"$R/steps.txt"
 				phase=hoplb
 			fi
 			;;
 		hoplb)
-			if all "$LOG" "$HOPLB_MARKS"; then
+			if all "$HOPLB_MARKS"; then
 				phase=load
 				load_end=$(($(date +%s) + LOAD))
 				noise "$R" &

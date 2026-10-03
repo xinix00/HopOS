@@ -2,10 +2,10 @@
 //! Hop naar hopfs en terug, door de echte system-API.
 
 use super::*;
+use crate::cage::tests::SparseMem;
 use crate::rpc::{FsActor, tests::disk};
 use crate::slots::Mount;
 use crate::slots::tests::{FakeConsole, Obey, actor, s, start_job, stop};
-use crate::stage2::tests::SparseMem;
 use crate::system::{
     Conn, End, FlipBundle, Hooks, KIND_CALL, KIND_RESULT, LogTee, MAGIC, NET, SlotLogs, System,
     VERSION,

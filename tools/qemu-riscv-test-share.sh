@@ -43,24 +43,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-port() {
-	python3 - "$1" "$2" <<'PY'
-import socket, sys
-want, name = int(sys.argv[1]), sys.argv[2]
-s = socket.socket()
-try:
-    s.bind(("127.0.0.1", want))
-    print(want)
-except OSError:
-    s.close()
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    got = s.getsockname()[1]
-    print(f"   {name} {want} is taken, using {got}", file=sys.stderr)
-    print(got)
-s.close()
-PY
-}
+. "$(dirname "$0")/lib.sh"
 SYSPORT="$(port "${SYSPORT:-10100}" SYSPORT)"
 AGENTPORT="$(port "${AGENTPORT:-8080}" AGENTPORT)"
 LEADERPORT="$(port "${LEADERPORT:-9080}" LEADERPORT)"
@@ -97,13 +80,6 @@ qemu-system-riscv64 -M virt -m 1G -smp 2 -bios none -nographic \
 	</dev/null >"$LOG" 2>&1 &
 QPID=$!
 
-has() { tr -d '\r' <"$LOG" | grep -q -E "$1"; }
-all() {
-	(
-		IFS='|'
-		for m in $1; do has "$m" || exit 1; done
-	)
-}
 BOOT_MARKS="HOPOS_BOOT|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_OS_CORE_UP|HOPOS_HOP_START slot=1 core=0 cpu=0 |slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
 PLACE_MARKS="HOPOS_SLOT_START slot=2 core=1 cpu=1 |HOPOS_SLOT_START slot=3 core=1 cpu=1 |slot 3: BURN: .*HOPOS_BENCH_BURN"
 RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_OS_SELFTEST_FAIL|HOPOS_OS_CORE_FAIL|HOPOS_OS_CORE_NONE|HOPOS_CAGE_FAIL|HOPOS_APP_PANIC"

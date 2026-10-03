@@ -716,7 +716,7 @@ fn prepare_inner(b: &FlipBundle, sha256: &[u8; 32]) -> Result<(), Refused> {
     // Het geheugen is pool-RAM, Normal gemapt in de identity map. Alleen
     // lezen, en de slice leeft niet langer dan deze functie.
     let bytes = unsafe { core::slice::from_raw_parts(b.base as usize as *const u8, len) };
-    let sum = kernflip::sha256(bytes);
+    let sum = abi::sha256::digest(bytes);
     if &sum != sha256 {
         return Err(refuse(
             "sha256 mismatch",
@@ -1039,16 +1039,10 @@ async fn restore_nat(exec: &'static Executor, state: kernflip::NatState) {
         exec.after(Duration::from_millis(20)).await;
     }
     let restored = if ADOPTED.load(Relaxed) {
-        let mut flows: Vec<nat::FlowState> = Vec::new();
-        if flows.try_reserve_exact(total).is_ok() {
-            flows.extend(state.flows.iter().map(to_net));
-        }
         // 'static voor de brievenbus, zoals de poorten.
-        let flows: &'static [nat::FlowState] = Box::leak(flows.into_boxed_slice());
         let st = nat::NatState {
-            flows,
+            flows: Vec::leak(state.flows),
             masq_next: state.masq_next,
-            gw_mac: state.gw_known.then_some(state.gw_mac),
         };
         let send = || {
             let cmd = Command::RestoreNat {
@@ -1115,32 +1109,6 @@ async fn send_and_wait(
             );
             None
         }
-    }
-}
-
-fn to_net(f: &kernflip::FlowState) -> nat::FlowState {
-    nat::FlowState {
-        proto: f.proto,
-        slot: f.slot,
-        fins: f.fins,
-        slot_port: f.slot_port,
-        dst_port: f.dst_port,
-        node_port: f.node_port,
-        slot_ip: f.slot_ip,
-        dst_ip: f.dst_ip,
-    }
-}
-
-fn to_kern(f: &nat::FlowState) -> kernflip::FlowState {
-    kernflip::FlowState {
-        proto: f.proto,
-        slot: f.slot,
-        fins: f.fins,
-        slot_port: f.slot_port,
-        dst_port: f.dst_port,
-        slot_ip: f.slot_ip,
-        dst_ip: f.dst_ip,
-        node_port: f.node_port,
     }
 }
 
@@ -1247,18 +1215,9 @@ async fn capture_and_jump(exec: &'static Executor, p: Prepared, frozen: &mut Fro
             Ok(Response::Failed(e)) | Err(e) => return JumpError::Kern(e),
             Ok(_) => return JumpError::Kern(kern::Error::Busy),
         };
-    let mut flows: Vec<kernflip::FlowState> = Vec::new();
-    if flows.try_reserve_exact(snap.flows.len()).is_err() {
-        return JumpError::Kern(kern::Error::OutOfMemory {
-            bytes: snap.flows.len() * 24,
-        });
-    }
-    flows.extend(snap.flows.iter().map(to_kern));
     let nat = kernflip::NatState {
         masq_next: snap.masq_next,
-        gw_mac: snap.gw_mac.unwrap_or_default(),
-        gw_known: snap.gw_mac.is_some(),
-        flows,
+        flows: snap.flows,
     };
     handoff_and_jump(p, slots, nat)
 }

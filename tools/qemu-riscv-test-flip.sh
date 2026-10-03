@@ -57,24 +57,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-port() {
-	python3 - "$1" "$2" <<'PY'
-import socket, sys
-want, name = int(sys.argv[1]), sys.argv[2]
-s = socket.socket()
-try:
-    s.bind(("127.0.0.1", want))
-    print(want)
-except OSError:
-    s.close()
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    got = s.getsockname()[1]
-    print(f"   {name} {want} is taken, using {got}", file=sys.stderr)
-    print(got)
-s.close()
-PY
-}
+. "$(dirname "$0")/lib.sh"
 SYSPORT="$(port "${SYSPORT:-10100}" SYSPORT)"
 AGENTPORT="$(port "${AGENTPORT:-8080}" AGENTPORT)"
 LEADERPORT="$(port "${LEADERPORT:-9080}" LEADERPORT)"
@@ -123,18 +106,10 @@ qemu-system-riscv64 -M virt -m 1G -smp 2 -bios none -nographic \
 QPID=$!
 echo "== booten op QEMU virt riscv64, kern A (tot ${TIMEOUT}s; agent :$AGENTPORT, leader :$LEADERPORT, artifacts :$ARTPORT)"
 
-has() { tr -d '\r' <"$LOG" | grep -q -E "$1"; }
 # Alleen wat ná de sprong op de console kwam: kern B. Niet pas vanaf
 # HOPOS_FLIP_BOOT, want de kooi-zelftest op hart 1 draait in de discover
 # van het board, vóór de landing.
 after() { tr -d '\r' <"$LOG" | awk '/HOPOS_FLIP_JUMP/ { f = 1 } f' | grep -q -E "$1"; }
-count() { tr -d '\r' <"$LOG" | grep -c -E "$1" || true; }
-all() {
-	(
-		IFS='|'
-		for m in $1; do has "$m" || exit 1; done
-	)
-}
 all_after() {
 	(
 		IFS='|'

@@ -1,6 +1,6 @@
 //! De control-page van een slot en de payload van een system-call.
 //!
-//! **De control-page** ([`CtrlPage`]) is de eerste pagina van de staart
+//! **De control-page** is de eerste pagina van de staart
 //! ([`crate::layout::Tail::ctrl_page`]): 64-bit woorden in de kop, een
 //! env-blob in het midden, en woorden die later kwamen bovenaan de page,
 //! naar beneden groeiend. Elk veld heeft één schrijver; die staat bij het
@@ -25,7 +25,6 @@
 //! haar driver; hun opcode staat er wel, zodat het nummer bezet blijft.
 
 use crate::{Error, Result};
-use core::mem::{offset_of, size_of};
 
 pub mod device;
 
@@ -55,8 +54,8 @@ pub const CTRL_S2_TABLE: u64 = 0x38;
 pub const CTRL_WALL_OFF: u64 = 0x40;
 /// App naar kern: geaccumuleerde idle-TIJD in timer-tikken. Sinds 18-07
 /// tijd in plaats van rondes: rondes bleken op ijzer door SEV-ruis
-/// opgeblazen. Stond op 0xD8 en botste daar met [`CTRL_SMP_TCR`];
-/// [`CtrlPage`] bewaakt dat voortaan.
+/// opgeblazen. Stond op 0xD8 en botste daar met [`CTRL_SMP_TCR`]; de
+/// veldtabel onder de offsets bewaakt dat voortaan.
 pub const CTRL_IDLE: u64 = 0x48;
 /// Kern naar trampoline: de fysieke basis van de EL2-vectoren.
 pub const CTRL_VEC_PA: u64 = 0x50;
@@ -301,164 +300,72 @@ impl AppStatus {
     }
 }
 
-/// De indeling van de control-page, als type: de offsets hierboven zijn de
-/// velden van deze struct, en de asserties eronder houden ze byte voor
-/// byte gelijk. Een botsing zoals `CtrlSMPTcr` en `CtrlIdle` op 0xD8
-/// (18-07) is zo een compilefout.
-#[repr(C)]
-#[derive(Debug)]
-pub struct CtrlPage {
-    /// [`CTRL_STATUS`].
-    pub status: u64,
-    /// [`CTRL_EXIT_CODE`].
-    pub exit_code: u64,
-    /// [`CTRL_KILL`].
-    pub kill: u64,
-    /// [`CTRL_HEARTBEAT`].
-    pub heartbeat: u64,
-    /// [`CTRL_RAM_SIZE`].
-    pub ram_size: u64,
-    /// [`CTRL_ENV_LEN`].
-    pub env_len: u64,
-    /// [`CTRL_ENTRY`].
-    pub entry: u64,
-    /// [`CTRL_S2_TABLE`].
-    pub s2_table: u64,
-    /// [`CTRL_WALL_OFF`].
-    pub wall_off: u64,
-    /// [`CTRL_IDLE`].
-    pub idle: u64,
-    /// [`CTRL_VEC_PA`].
-    pub vec_pa: u64,
-    /// [`CTRL_FAULT_ESR`].
-    pub fault_esr: u64,
-    /// [`CTRL_FAULT_FAR`].
-    pub fault_far: u64,
-    /// [`CTRL_FAULT_VEC`].
-    pub fault_vec: u64,
-    /// [`CTRL_CORES`].
-    pub cores: u64,
-    /// [`CTRL_SMP_VBAR`].
-    pub smp_vbar: u64,
-    // Vrij: 0x80, 0xE0 en 0xF0 droegen in Go de SMP-trampoline, de maat
-    // van het gestagede image en de zelfplaatsing; niemand leest ze nog.
-    _pad0: u64,
-    /// [`CTRL_SMP_SP`].
-    pub smp_sp: u64,
-    /// [`CTRL_SMP_MP`].
-    pub smp_mp: u64,
-    /// [`CTRL_SMP_G0`].
-    pub smp_g0: u64,
-    /// [`CTRL_SMP_FN`].
-    pub smp_fn: u64,
-    /// [`CTRL_SMP_STUB`].
-    pub smp_stub: u64,
-    /// [`CTRL_SMP_TTBR0`].
-    pub smp_ttbr0: u64,
-    /// [`CTRL_SLOT`].
-    pub slot: u64,
-    /// [`CTRL_SMP_REQ`].
-    pub smp_req: u64,
-    /// [`CTRL_MBOX_PA`].
-    pub mbox_pa: u64,
-    /// [`CTRL_SMP_MBOX`].
-    pub smp_mbox: u64,
-    /// [`CTRL_SMP_TCR`].
-    pub smp_tcr: u64,
-    _pad1: u64,
-    /// [`CTRL_MEM_SYS`].
-    pub mem_sys: u64,
-    _pad2: u64,
-    /// [`CTRL_SMP_MAIR`].
-    pub smp_mair: u64,
-    /// [`CTRL_SHARED`].
-    pub shared: u64,
-    /// [`CTRL_WAKES`].
-    pub wakes: u64,
-    /// [`CTRL_RX_DOOR`].
-    pub rx_door: u64,
-    /// [`CTRL_DOOR_IRQ`].
-    pub door_irq: u64,
-    /// [`CTRL_ENV_DATA`].
-    pub env: [u8; CTRL_ENV_MAX as usize],
-    /// [`CTRL_RNG_SOURCE`].
-    pub rng_source: u64,
-    /// [`CTRL_RNG_GEN`].
-    pub rng_gen: u64,
-    /// [`CTRL_RNG_SEED`].
-    pub rng_seed: [u64; CTRL_RNG_SEED_LEN / 8],
-    /// [`CTRL_APP_FAULT_FAR`].
-    pub app_fault_far: u64,
-    /// [`CTRL_APP_FAULT_ELR`].
-    pub app_fault_elr: u64,
-    /// [`CTRL_APP_FAULT_ESR`].
-    pub app_fault_esr: u64,
-    /// [`CTRL_APP_FAULT_VEC`].
-    pub app_fault_vec: u64,
-    /// [`CTRL_TIMEBASE_HZ`].
-    pub timebase_hz: u64,
-    /// [`CTRL_TEMP`].
-    pub temp: u64,
-    /// [`CTRL_IDLE_MODE`].
-    pub idle_mode: u64,
-}
+/// Elk veld van de control-page als (offset, lengte), oplopend. De toets
+/// eronder maakt een botsing zoals `CtrlSMPTcr` en `CtrlIdle` op 0xD8
+/// (18-07) een compilefout: elk veld is 8-uitgelijnd, begint niet vóór het
+/// einde van het vorige, en het laatste sluit de page af. Vrij: 0x80, 0xE0
+/// en 0xF0 droegen in Go de SMP-trampoline, de maat van het gestagede image
+/// en de zelfplaatsing; niemand leest ze nog.
+const FIELDS: &[(u64, u64)] = &[
+    (CTRL_STATUS, 8),
+    (CTRL_EXIT_CODE, 8),
+    (CTRL_KILL, 8),
+    (CTRL_HEARTBEAT, 8),
+    (CTRL_RAM_SIZE, 8),
+    (CTRL_ENV_LEN, 8),
+    (CTRL_ENTRY, 8),
+    (CTRL_S2_TABLE, 8),
+    (CTRL_WALL_OFF, 8),
+    (CTRL_IDLE, 8),
+    (CTRL_VEC_PA, 8),
+    (CTRL_FAULT_ESR, 8),
+    (CTRL_FAULT_FAR, 8),
+    (CTRL_FAULT_VEC, 8),
+    (CTRL_CORES, 8),
+    (CTRL_SMP_VBAR, 8),
+    (CTRL_SMP_SP, 8),
+    (CTRL_SMP_MP, 8),
+    (CTRL_SMP_G0, 8),
+    (CTRL_SMP_FN, 8),
+    (CTRL_SMP_STUB, 8),
+    (CTRL_SMP_TTBR0, 8),
+    (CTRL_SLOT, 8),
+    (CTRL_SMP_REQ, 8),
+    (CTRL_MBOX_PA, 8),
+    (CTRL_SMP_MBOX, 8),
+    (CTRL_SMP_TCR, 8),
+    (CTRL_MEM_SYS, 8),
+    (CTRL_SMP_MAIR, 8),
+    (CTRL_SHARED, 8),
+    (CTRL_WAKES, 8),
+    (CTRL_RX_DOOR, 8),
+    (CTRL_DOOR_IRQ, 8),
+    (CTRL_ENV_DATA, CTRL_ENV_MAX),
+    (CTRL_RNG_SOURCE, 8),
+    (CTRL_RNG_GEN, 8),
+    (CTRL_RNG_SEED, CTRL_RNG_SEED_LEN as u64),
+    (CTRL_APP_FAULT_FAR, 8),
+    (CTRL_APP_FAULT_ELR, 8),
+    (CTRL_APP_FAULT_ESR, 8),
+    (CTRL_APP_FAULT_VEC, 8),
+    (CTRL_TIMEBASE_HZ, 8),
+    (CTRL_TEMP, 8),
+    (CTRL_IDLE_MODE, 8),
+];
 
-macro_rules! at {
-    ($field:ident, $off:expr) => {
-        const _: () = assert!(offset_of!(CtrlPage, $field) as u64 == $off);
-    };
-}
-
-const _: () = assert!(size_of::<CtrlPage>() as u64 == crate::layout::CTRL_STRIDE);
-at!(status, CTRL_STATUS);
-at!(exit_code, CTRL_EXIT_CODE);
-at!(kill, CTRL_KILL);
-at!(heartbeat, CTRL_HEARTBEAT);
-at!(ram_size, CTRL_RAM_SIZE);
-at!(env_len, CTRL_ENV_LEN);
-at!(entry, CTRL_ENTRY);
-at!(s2_table, CTRL_S2_TABLE);
-at!(wall_off, CTRL_WALL_OFF);
-at!(idle, CTRL_IDLE);
-at!(vec_pa, CTRL_VEC_PA);
-at!(fault_esr, CTRL_FAULT_ESR);
-at!(fault_far, CTRL_FAULT_FAR);
-at!(fault_vec, CTRL_FAULT_VEC);
-at!(cores, CTRL_CORES);
-at!(smp_vbar, CTRL_SMP_VBAR);
-at!(_pad0, 0x80);
-at!(smp_sp, CTRL_SMP_SP);
-at!(smp_mp, CTRL_SMP_MP);
-at!(smp_g0, CTRL_SMP_G0);
-at!(smp_fn, CTRL_SMP_FN);
-at!(smp_stub, CTRL_SMP_STUB);
-at!(smp_ttbr0, CTRL_SMP_TTBR0);
-at!(slot, CTRL_SLOT);
-at!(smp_req, CTRL_SMP_REQ);
-at!(mbox_pa, CTRL_MBOX_PA);
-at!(smp_mbox, CTRL_SMP_MBOX);
-at!(smp_tcr, CTRL_SMP_TCR);
-at!(_pad1, 0xE0);
-at!(mem_sys, CTRL_MEM_SYS);
-at!(_pad2, 0xF0);
-at!(smp_mair, CTRL_SMP_MAIR);
-at!(shared, CTRL_SHARED);
-at!(wakes, CTRL_WAKES);
-at!(rx_door, CTRL_RX_DOOR);
-at!(door_irq, CTRL_DOOR_IRQ);
-at!(env, CTRL_ENV_DATA);
-at!(rng_source, CTRL_RNG_SOURCE);
-at!(rng_gen, CTRL_RNG_GEN);
-at!(rng_seed, CTRL_RNG_SEED);
+const _: () = {
+    let mut end = 0;
+    let mut i = 0;
+    while i < FIELDS.len() {
+        let (off, len) = FIELDS[i];
+        assert!(off % 8 == 0 && off >= end);
+        end = off + len;
+        i += 1;
+    }
+    assert!(end == crate::layout::CTRL_STRIDE);
+};
 // Het zaad sluit precies aan op het fault-rapport erboven.
 const _: () = assert!(CTRL_RNG_SEED + CTRL_RNG_SEED_LEN as u64 == CTRL_APP_FAULT_FAR);
-at!(app_fault_far, CTRL_APP_FAULT_FAR);
-at!(app_fault_elr, CTRL_APP_FAULT_ELR);
-at!(app_fault_esr, CTRL_APP_FAULT_ESR);
-at!(app_fault_vec, CTRL_APP_FAULT_VEC);
-at!(timebase_hz, CTRL_TIMEBASE_HZ);
-at!(temp, CTRL_TEMP);
-at!(idle_mode, CTRL_IDLE_MODE);
 // De SMP-handoff in het ctx-blok draagt de control-velden onder 256 bytes.
 const _: () = assert!(CTRL_SMP_MAIR + 8 <= crate::layout::CTX_LEN - crate::layout::CTX_SMP);
 
