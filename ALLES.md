@@ -9,7 +9,7 @@ in docs/measurements.md, de details per board in docs/boards-*.md.
 De afvinkmatrix van de Go-tijd (OLD/docs/support.md: boot, idle en klokken,
 devices en diensten per board), nu voor v3 en bijgehouden op ijzer. Legenda:
 ✓ gezien op het board, ○ gebouwd maar op dit board nog niet gezien, ✗ ontbreekt
-of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, avond (LicheeRV R15, O6N O5h, Pi 4 P6g, Radxa X2, Pi 5 P4, Altra A8g, M4 M1; main loopt voor op de release v3.0.6 en Hop v3.0.7).
+of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, avond (LicheeRV R16, O6N O8h, Pi 4 P7g, Radxa X2, Pi 5 P5g, Altra A11g, M4 M1; main loopt voor op de release v3.0.6 en Hop v3.0.7).
 Een cel zegt alleen of het slaagt, met hooguit de stempel of een paar
 woorden waarom niet; een gepolde NIC is geen ✓. De getallen staan in
 docs/measurements.md, de details per board in docs/boards-*.md.
@@ -39,21 +39,22 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
-- [ ] OS-core: op de O6N gemeten met `hopcost` (O5h): per hop trap 27, tot
-      slot_wake 16, tot `el2::next` 79, wissel 14, bewoner 20 us; rtt p50
-      308. De fase tot `el2::next` is de grootste; agent snoeit daarop
-      verder, doel onder 100 us per rondreis. LicheeRV niet gemeten
-      (Dereks bord).
-- [ ] Ontdubbelen, acht agenten tegelijk, daarna ik (toepassen, de
-      QEMU-ringen, op ijzer): de negen kleine (SHA-256, stage-2, de dode
-      loopback, IPv6 als feature van leannet, ongebruikte leannet-API's,
-      tools/lib.sh, codecdemo weg, FlowState, fmt_into); NVMe als één kern
-      met een PCI- en een Apple-transport (bijvangst: 16 tags op O6N en
-      Altra); dwmac en dwmac4 als stmmac; kooi en OS-core per ISA gelijk;
-      één plaatsingspad (Placer ook bij de boot); één ARP-tabel (de NAT
-      zonder eigen cache); `dev::poll_until` voor de 35 wachtlussen; Radxa
-      echte dvfs (APLL 816 naar 1800, vdd_cpu via de RK817 over I2C; op
-      ijzer zodra de draadmeting klaar was, dat is nu).
+- [ ] OS-core: na de snoei van de deur, de switch-ronde en lazy FP
+      (b6878f9) op de O6N rtt p50 50
+86 us (was 308); per hop zonder bel
+      zit nu 13 tot 24 us in de executor-ronde, de rest is trap 9, wissel
+      4,5, bewoner 10. LicheeRV rtt 527 (was 644). Volgende snoei: de
+      executor-ronde zelf, dan de registerstaat in Normal-WB; doel O6N
+      onder 100 us per rondreis.
+- [ ] Ontdubbelen: binnen en op ijzer gezien Placer (koude flip O6N),
+      stmmac (LicheeRV R16; Radxa nog, zodra de dvfs-agent klaar is),
+      poll_until (NIC up op O6N, Pi 4, Pi 5, Altra, LicheeRV; M4 nog), heap
+      (Derek). Patch klaar, wacht op de lean-tag v3.1.7: één ARP-tabel.
+      Agenten nog bezig: de negen kleine (ook met een lean-patch), NVMe,
+      kooi/OS-core per ISA, Radxa-dvfs.
+- [ ] LicheeRV over de draad: pull van de O6N 3,92 MB/s op een link van 100
+      Mbps (plafond ~11,5); eerste meting op dit bord, A/B tegen R15 (vóór
+      stmmac) zodra Derek klaar is met zijn test.
 - [ ] Koude flip vooraf (`HOPOS_COLD_FLIP=yes|no|fresh`) zit in main en in
       Hop (db0226c); op ijzer te zien: de M4 weigert koud zonder een taak
       te stoppen, de Pi 5 weigert zodra een app-core heeft gedraaid.
