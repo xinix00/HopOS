@@ -317,3 +317,12 @@ p99 6,8 ms; timer overslaap 1 ms p50 48 us. Een vitals met vier cores
 (cpu_shares 4096, 256 MB) in slot 3 draaide gewoon (de fout van 02-10,
 "stopt na HOPOS_APP_MMU boven 3 GiB", kwam op O2 niet terug).
 
+De 299 Msteps/s per core tegen 855 op 30-09 is geen regressie maar de core:
+de O6N heeft 4 kleine (A520), 0 mid en 7 grote app-cores (`classes from
+Mpidr - small 4, mid 0, big 7`), en een job zonder `core-class` krijgt de
+eerste vrije core, een kleine. Met `"tags":{"core-class":"big"}` haalt
+dezelfde vitals 754 Msteps/s (O3, 03-10 avond, dvfs op 2600 MHz met
+`busy slot 3`). Op O2 stond dvfs bovendien op 800 MHz quiet tijdens de
+brand; sinds 68a86c6 telt een rekenaar in elk slot mee en klokt de O6N
+binnen één ronde naar vol.
+
