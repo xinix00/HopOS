@@ -716,6 +716,7 @@ async fn tick(exec: &'static Executor) {
     // De slaaptijd van de vorige tik (executor `slept_ns`): de rest van de
     // tik was werk op de OS-core (`busy_ms`).
     let (mut at, mut slept) = (start, 0u64);
+    let mut refused = 0u64;
     loop {
         n += 1;
         // Een late lezer (de M4 over de dockchannel) krijgt de boot alsnog:
@@ -764,6 +765,20 @@ async fn tick(exec: &'static Executor) {
         let long_us = o.longest.swap(0, Relaxed) / (OS_HZ() / 1_000_000).max(1);
         let sw = &net::STATS;
         let stack_kb = stack_high_water() / 1024;
+        // Een kernheap die weigert, zegt dat altijd, ook zonder
+        // `hopos.tick=1`. De O6N op 30-09: de bump-heap van toen was op, elke
+        // START_SLOT faalde met "out of memory", Hop las dat als
+        // "unplaceable", en de console zweeg tot een koude boot.
+        let h = HEAP.stats();
+        if h.refused != refused {
+            println!(
+                "heap: {} allocation(s) refused, {} KB used, {} KB free HOPOS_HEAP_REFUSED",
+                h.refused.wrapping_sub(refused),
+                h.used / 1024,
+                h.free / 1024
+            );
+            refused = h.refused;
+        }
         // De eerste drie tikken altijd (de QEMU-toetsen lezen HOPOS_TICK 3),
         // daarna alleen met `hopos.tick=1`: een node op het LAN hoeft zijn
         // console niet elke seconde vol te zetten (Derek, 02-10).

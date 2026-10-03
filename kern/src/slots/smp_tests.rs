@@ -8,6 +8,7 @@ use super::tests::{Actor, FakeConsole, Obey, actor, s, start, stop};
 use super::*;
 use crate::pool::GroupName;
 use crate::testutil::block_on;
+use std::vec;
 
 fn group(name: &str) -> Placement {
     let mut g = GroupName::new();
@@ -247,4 +248,99 @@ fn a_job_without_a_free_core_joins_the_system_group() {
     );
     stop(&mut a, 3).unwrap();
     assert_eq!(a.status(s(4)).occupancy, Occupancy::Running);
+}
+
+/// Eén echt venster ([`crate::grants::DeviceGrant`]) achter de haakjes,
+/// zoals de gui-smaak: een grant die bij de stop niet terugkomt, weigert de
+/// volgende houder.
+struct OneWindow(crate::grants::DeviceGrant);
+
+impl Grants for OneWindow {
+    fn env(&mut self, slot: Slot, env: &[u8], out: &mut Vec<u8>) {
+        if crate::grants::env_get(env, "FB") == Some(b"1") && self.0.claim(slot).is_ok() {
+            out.extend_from_slice(b"FB_BASE=0x20000000\n");
+        }
+    }
+    fn arm(&mut self, _: Slot) -> Result {
+        Ok(())
+    }
+    fn adopt(&mut self, _: Slot) -> Result {
+        Ok(())
+    }
+    fn release(&mut self, slot: Slot) {
+        self.0.release(slot);
+    }
+}
+
+/// Een Lumen-start zoals de system-listener hem doet (claim, env langs de
+/// actor, arm), en daarna elke secundaire van de span: de env die op de
+/// control-page zou gaan.
+fn start_wide(a: &mut Actor<'_, OneWindow>, slot: usize, cores: usize) -> Result<Vec<u8>> {
+    let mut spec = StartSpec::new(s(slot), 768 << 20, super::tests::ded(cores));
+    spec.mounts = vec![Mount {
+        local: b"/mounts".to_vec(),
+        shared: b"/devices".to_vec(),
+    }];
+    let g = block_on(a.claim(spec))?;
+    let env = match block_on(a.handle(Request::Env {
+        slot: s(slot),
+        env: b"FB=1\n".to_vec(),
+    })) {
+        Response::Env(e) => e,
+        other => panic!("the env step answered {other:?}"),
+    };
+    block_on(a.arm(g, 0x4001_0000))?;
+    a.svc.ctl(s(slot)).unwrap().gone.set();
+    for k in 1..cores {
+        a.cage.smp_req[slot] = (slot + k) as u64;
+        a.smp(s(slot));
+    }
+    Ok(env)
+}
+
+// De vorm van Lumen op de O6N (30-09: na de DELETE weigerde elke
+// plaatsing tot een koude boot): Hop op de OS-core, één app op core 1, en
+// een job over de andere tien app-cores met de grootste partitie, een
+// volume en een device-grant, die pas op de intrekking stopt. Na de stop is
+// alles terug: dezelfde span met hetzelfde venster, de partitie, een
+// gewone job en een plaatsing in de groep van Hop (een flipbundel).
+#[test]
+fn a_wide_job_with_devices_leaves_everything_placeable() {
+    let (svc, con) = (Servicers::new(), FakeConsole::default());
+    let mut fb = crate::grants::DeviceGrant::new("fb");
+    fb.offer(crate::grants::Window {
+        pa: 0x1_bc7a_0000,
+        size: 4 << 20,
+    })
+    .unwrap();
+    let mut a = super::tests::actor_with(&svc, &con, Obey::Revoke, 1024, 11, OneWindow(fb));
+    a.places.share_os_core(crate::pool::SYSTEM_GROUP).unwrap();
+    let hop = StartSpec::new(s(1), 8 << 20, group("system"));
+    let g = block_on(a.claim(hop)).unwrap();
+    block_on(a.arm(g, 0x4001_0000)).unwrap();
+    start(&mut a, 2, 8, 1).unwrap();
+    let env = start_wide(&mut a, 3, 10).unwrap();
+    assert!(env.ends_with(b"FB_BASE=0x20000000\n"), "no grant: {env:?}");
+    assert_eq!(a.status(s(3)).core.map(|(c, n)| (c.get(), n)), Some((2, 10)));
+    assert_eq!(a.cage.secondaries.len(), 9);
+    stop(&mut a, 3).unwrap();
+    assert!(a.cage.revoked[3], "the stop never revoked");
+    assert_eq!(a.status(s(3)).occupancy, Occupancy::Empty);
+    assert_eq!(a.parts.partition_of(s(3)), None);
+    assert_eq!(a.grants.0.holder(), None, "the window stayed with slot 3");
+    for c in 2..=11 {
+        assert!(a.places.core_free(c), "core {c} stayed claimed");
+    }
+    // Een flipbundel (de groep van Hop) en een gewone job.
+    let flip = StartSpec::new(s(4), 64 << 20, group("system"));
+    let g = block_on(a.claim(flip)).unwrap();
+    a.abort(g);
+    start(&mut a, 4, 8, 1).unwrap();
+    assert_eq!(a.status(s(4)).core.map(|(c, _)| c.get()), Some(2));
+    stop(&mut a, 4).unwrap();
+    // En Lumen zelf weer, in hetzelfde slot, met zijn venster.
+    let env = start_wide(&mut a, 3, 10).unwrap();
+    assert!(env.ends_with(b"FB_BASE=0x20000000\n"), "no grant again: {env:?}");
+    assert_eq!(a.status(s(3)).core.map(|(c, n)| (c.get(), n)), Some((2, 10)));
+    assert!(!con.saw("HOPOS_PART_QUARANTINE"));
 }
