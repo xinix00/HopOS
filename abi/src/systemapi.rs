@@ -755,7 +755,8 @@ pub struct SlotInfo {
     pub core_on: u8,
     /// Gereserveerd, 0.
     pub reserved: u16,
-    /// De primaire fysieke core (0 = geen).
+    /// De primaire core van het slot, het logische nummer van de kern (0 is
+    /// de OS-core; zonder core is `span` 0).
     pub core: u16,
     /// Het aantal cores van het slot.
     pub span: u16,

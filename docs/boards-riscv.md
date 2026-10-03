@@ -402,7 +402,9 @@ watchdog of de stroom, en de kaart start de oude kern.
   (riscv64, `tools/hop-build.sh`) in de kern als eerste bewoner
   (`STAGE=... ROLE=hop` van het image-script, `HOPOS_LRV_ROLE` in
   build.rs, `staged_role` van het board). De kring op QEMU virt is groen, en
-  sinds 03-10 (R3) ook op het board: Hop in slot 1 met `HOPOS_PRIVILEGE`,
+  sinds 03-10 (R3) ook op het board: Hop in slot 1 met `HOPOS_PRIVILEGE` (op
+  dit board in een partitie van 10 MiB, `HOP_MEM` in hopos/src/slots.rs;
+  Hop meet er 0,5 MB), op de OS-core naast de kern (core 0, de C906L),
   welcome in slot 2, en na een koude flip zaait Hop welcome opnieuw uit
   `hopos.init` (`HOP_INIT_SEEDED`).
 - **De kick van een app naar de kern op de LicheeRV**: de vorm staat sinds
