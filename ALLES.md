@@ -56,9 +56,6 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 - [ ] LicheeRV over de draad: pull van de O6N 3,92 MB/s op een link van 100
       Mbps (plafond ~11,5), lokaal 20,5. Agent op het bord (A/B tegen R15,
       microbench van de framekopie, de dwmac-tellers, de pomp).
-- [ ] Pi 4: vitals `rx` via de NAT naar de Mac gaf een leeg resultaat en
-      een warme flip tijdens die pull een 502; uitzoeken (de Mac is geen
-      meetpunt, wel een NAT-pad).
 - [ ] De volgende bump: HopOS 3.0.7 met tag, Hop erop naar 3.0.8, release.sh,
       media (main heeft sinds v3.0.6 en Hop v3.0.7 de avondfixes van 03-10:
       de NAT-recycler, de Radxa over de draad, de OS-core-beurt, de koude
