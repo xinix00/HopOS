@@ -262,3 +262,17 @@ precies de 700 van de 1000 MHz. Een job zonder tag valt bij de kern in
 C906L, en een job die niet past geeft bij Hop één regel HOP_NO_CAPACITY
 (R12, Hop 9c4a311, 03-10).
 
+## De O6N op O2 (03-10, main 8a91d57, Hop d785ef5)
+
+Van de stick, koude boot, headfull met media; Hop in `system` op core 0
+naast de kern (kern 4 tot 8 procent, Hop 4 tot 5 procent in rust), welcome
+op core 1, 33 C via SCMI, canary OK, ringen write-back. vitals met één
+core (`test=all`, 5 s): cpu 298,8 Msteps/s (burst 1755 us); smp 4 cores
+speedup 3,99; burn 1663 Msteps/s zonder degradatie, 43 C; membw copy 15,8
+GB/s, triad 10,8 GB/s; memlat 32 KB 2,8 ns, 2 MB 37,7 ns, 8 MB 38,5 ns;
+alloc 6397 MB/s; disk 838 schrijven, 777 lezen, 4k 47,4 MB/s, vloer p50 75
+us; storm 2457 conn/s p50 3,1 ms p99 5,3 ms; rtt naar de kern p50 715 us
+p99 6,8 ms; timer overslaap 1 ms p50 48 us. Een vitals met vier cores
+(cpu_shares 4096, 256 MB) in slot 3 draaide gewoon (de fout van 02-10,
+"stopt na HOPOS_APP_MMU boven 3 GiB", kwam op O2 niet terug).
+
