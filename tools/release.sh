@@ -219,8 +219,10 @@ batch
 skip "apple headfull: board-apple heeft geen gui-feature"
 skip "licheerv headfull: board-licheerv heeft geen gui-feature; en geen flipbundel (riscv64)"
 
-# De apps: zonder debug-info, met de symbolen (de kern leest er RamStart en
-# de stempel uit), zoals de image-scripts ze stagen.
+# De apps: zonder debug-info en zonder lokale symbolen, met de globale (de
+# kern leest er RamStart en de stempel uit; een riscv64-ELF draagt 42 000
+# lokale symbolen, 1 MB symtab, en die reserveert de kern op zijn heap:
+# op de LicheeRV "out of memory (1012680 bytes)" bij elke welcome, 03-10).
 step "apps"
 OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
 ARM_APPS="appspike welcome bench display vitals cloudflared-lean syncprobe decode"
@@ -228,10 +230,10 @@ RV_APPS="appspike welcome"
 cargo build --quiet --release --target "$TARGET" $(for a in $ARM_APPS; do printf ' -p %s' "$a"; done)
 cargo build --quiet --release --target "$RV" $(for a in $RV_APPS; do printf ' -p %s' "$a"; done)
 for a in $ARM_APPS; do
-	"$OBJCOPY" --strip-debug "target/$TARGET/release/$a" "$OUT/$a-arm64.elf"
+	"$OBJCOPY" --strip-debug --discard-all "target/$TARGET/release/$a" "$OUT/$a-arm64.elf"
 done
 for a in $RV_APPS; do
-	"$OBJCOPY" --strip-debug "target/$RV/release/$a" "$OUT/$a-riscv64.elf"
+	"$OBJCOPY" --strip-debug --discard-all "target/$RV/release/$a" "$OUT/$a-riscv64.elf"
 done
 
 GO_ELFS=""
