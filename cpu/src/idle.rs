@@ -555,12 +555,31 @@ mod arch {
 #[cfg(not(all(target_os = "none", target_arch = "aarch64")))]
 mod arch {
     //! Host-stubs: geen teller, geen slaap. De rekenkunde hierboven is wat
-    //! de host-tests bewijzen; de slaap zelf bewijst het board.
+    //! de host-tests bewijzen; de slaap zelf bewijst het board. Op riscv64
+    //! zijn de teller en de timebase wel echt (de TIME-CSR en de hz van het
+    //! board, `cpu::riscv::idle`): de kooi stempelt er `at_ns` mee en
+    //! rekent er `CTRL_IDLE` mee om, en met de stub (0 en 62,5 MHz) zag Hop
+    //! op de LicheeRV nooit een cpu-procent en stond de meetlat 2,5 keer te
+    //! laag (03-10).
     pub(super) fn counter() -> u64 {
-        0
+        #[cfg(all(target_os = "none", target_arch = "riscv64"))]
+        {
+            crate::riscv::idle::counter()
+        }
+        #[cfg(not(all(target_os = "none", target_arch = "riscv64")))]
+        {
+            0
+        }
     }
     pub(super) fn freq() -> u64 {
-        62_500_000
+        #[cfg(all(target_os = "none", target_arch = "riscv64"))]
+        {
+            crate::riscv::idle::hz()
+        }
+        #[cfg(not(all(target_os = "none", target_arch = "riscv64")))]
+        {
+            62_500_000
+        }
     }
     pub(super) fn has_ecv() -> bool {
         false
