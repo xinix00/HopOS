@@ -5,11 +5,16 @@
 //! er nog in de ring staat) en dan de rest zodra het komt. Een trage lezer
 //! verliest de oudste bytes, nooit de node: de schrijver wacht op niemand.
 //! Hooguit [`MAX_READERS`] lezers tegelijk; elke lezer houdt een verbinding
-//! vast op HOP's eigen stack.
+//! vast op HOP's eigen stack, en geeft zijn plaats terug zodra de peer weg
+//! is ([`Gone`]).
 
 use crate::cage::Timer;
 use crate::system::Conn;
-use core::sync::atomic::{AtomicU8, Ordering::AcqRel};
+use core::fmt;
+use core::sync::atomic::{
+    AtomicU8, AtomicU64,
+    Ordering::{AcqRel, Relaxed},
+};
 use core::time::Duration;
 use sync::{Either, select};
 
@@ -17,6 +22,27 @@ use sync::{Either, select};
 pub const MAX_READERS: u8 = 4;
 /// Hoe vaak een lezer naar nieuwe bytes kijkt.
 pub const POLL: Duration = Duration::from_millis(100);
+/// Zo lang mag data uitstaan zonder dat de peer iets bevestigt; daarna is
+/// hij weg. Zonder deze grens hield een lezer die verdween zonder RST zijn
+/// plaats tot de hertransmissieladder van de stack opgaf (12 pogingen tot
+/// 60 s RTO: minuten), en een peer in een nulvenster voorgoed. Op de O6N en
+/// de Radxa (02-10) liep zo de console vol na een dag meetrondes met
+/// `nc | head` die abrupt sluiten. Een levende lezer bevestigt binnen een
+/// RTT; tien seconden is ook op wifi ruim.
+pub const STALL: Duration = Duration::from_secs(10);
+/// Elke zoveelste vrijgegeven plaats geeft een regel met de tellers.
+pub const FREED_LINE: u64 = 100;
+/// Wat een client hoort als alle plaatsen bezet zijn: één regel vóór de
+/// close, in plaats van een stille weigering die op een dode node lijkt.
+pub const FULL: &[u8] = &full();
+
+/// Bouwt [`FULL`] met [`MAX_READERS`] erin.
+const fn full() -> [u8; 25] {
+    const { assert!(MAX_READERS < 10) };
+    let mut m = *b"console: full, 0 readers\n";
+    m[15] += MAX_READERS;
+    m
+}
 
 /// De ring: `N` bytes, met een monotone schrijfpositie.
 ///
@@ -76,23 +102,44 @@ impl<const N: usize> Default for Ring<N> {
     }
 }
 
-/// Telt de lezers; [`Readers::admit`] geeft een plaats of `None`.
-pub struct Readers(AtomicU8);
+/// Telt de lezers; [`Readers::admit`] geeft een plaats of `None`, en
+/// [`Readers::freed`] telt waarom een plaats vrijkwam.
+pub struct Readers {
+    seats: AtomicU8,
+    /// Vrijgegeven plaatsen per [`Gone`], in die volgorde.
+    freed: [AtomicU64; 3],
+}
 
 impl Readers {
     /// Nul lezers.
     #[must_use]
     pub const fn new() -> Readers {
-        Readers(AtomicU8::new(0))
+        Readers {
+            seats: AtomicU8::new(0),
+            freed: [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)],
+        }
     }
 
     /// Een plaats, als er nog een is. `Drop` geeft hem terug.
     pub fn admit(&self) -> Option<Seat<'_>> {
-        if self.0.fetch_add(1, AcqRel) >= MAX_READERS {
-            self.0.fetch_sub(1, AcqRel);
+        if self.seats.fetch_add(1, AcqRel) >= MAX_READERS {
+            self.seats.fetch_sub(1, AcqRel);
             return None;
         }
         Some(Seat(self))
+    }
+
+    /// Telt een plaats die vrijkwam omdat de lezer `why` wegging; elke
+    /// [`FREED_LINE`]-ste geeft de tellers voor één luide regel.
+    pub fn freed(&self, why: Gone) -> Option<Freed> {
+        if let Some(c) = self.freed.get(why as usize) {
+            c.fetch_add(1, Relaxed);
+        }
+        let [fin, reset, stall] = self.freed.each_ref().map(|c| c.load(Relaxed));
+        let total = fin.wrapping_add(reset).wrapping_add(stall);
+        total
+            .is_multiple_of(FREED_LINE)
+            .then_some(Freed { fin, reset, stall })
     }
 }
 
@@ -107,46 +154,136 @@ pub struct Seat<'a>(&'a Readers);
 
 impl Drop for Seat<'_> {
     fn drop(&mut self) {
-        (self.0).0.fetch_sub(1, AcqRel);
+        self.0.seats.fetch_sub(1, AcqRel);
     }
 }
 
-/// Speelt de ring af naar `conn` en volgt hem, tot de lezer weggaat.
+/// Waarom een lezer wegging.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gone {
+    /// Een nette FIN (EOF op de leeskant).
+    Fin = 0,
+    /// Een RST, een mislukte schrijf of een verbinding die de stack al
+    /// opruimde.
+    Reset = 1,
+    /// Data stond langer dan [`STALL`] uit zonder één bevestiging.
+    Stall = 2,
+}
+
+/// De tellers achter [`Readers::freed`], voor de regel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Freed {
+    /// Vertrokken met een FIN.
+    pub fin: u64,
+    /// Vertrokken met een RST of een mislukte schrijf.
+    pub reset: u64,
+    /// Opgegeven na [`STALL`] zonder bevestiging.
+    pub stall: u64,
+}
+
+impl fmt::Display for Freed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let total = self.fin.wrapping_add(self.reset).wrapping_add(self.stall);
+        write!(
+            f,
+            "{total} reader seats freed: fin {}, reset {}, no ack in {} s {}",
+            self.fin,
+            self.reset,
+            STALL.as_secs(),
+            self.stall
+        )
+    }
+}
+
+/// Speelt de ring af naar `conn` en volgt hem, tot de lezer weggaat; geeft
+/// waarom.
 ///
 /// `snapshot` kopieert de bytes vanaf een positie uit de ring (de ring woont
 /// bij zijn eigenaar, meestal een `LocalCell`; de lening leeft alleen in die
-/// aanroep). Een lezer die sluit, wordt gezien zonder dat er eerst nog een
-/// consoleregel hoeft te komen: de lus wacht op lezen OF de tik.
+/// aanroep). `unacked` geeft wat de peer nog niet bevestigde, of `None` als
+/// de verbinding weg is (een RST, of al opgeruimd); dat is de sonde die
+/// elke beurt kijkt, ook als een schrijf vastzit op een volle zendring.
+///
+/// Elke wacht, op schrijven of op lezen, duurt hooguit [`POLL`]. Weg is:
+/// EOF of een fout op de leeskant, een mislukte schrijf, `unacked` zegt
+/// `None`, of data die [`STALL`] uitstaat zonder dat de peer iets bevestigt
+/// (een peer die zonder RST verdween, of in een nulvenster bleef hangen).
 pub async fn stream(
     conn: &mut impl Conn,
     timer: &impl Timer,
     mut snapshot: impl FnMut(u64, &mut [u8]) -> (usize, u64),
+    mut unacked: impl FnMut() -> Option<usize>,
     start: u64,
     buf: &mut [u8],
-) {
+) -> Gone {
     let mut seen = start;
     let mut sink = [0u8; 64];
+    let mut acks = Acks::new(timer.now());
     loop {
-        loop {
-            let (n, next) = snapshot(seen, buf);
-            if n == 0 {
-                break;
-            }
-            let mut off = 0;
-            while off < n {
-                match conn.write(buf.get(off..n).unwrap_or(&[])).await {
-                    Ok(w) if w > 0 => off += w,
-                    _ => return, // Lezer weg.
+        let (n, next) = snapshot(seen, buf);
+        if n > 0 {
+            let w = select(conn.write(buf.get(..n).unwrap_or(&[])), timer.sleep(POLL)).await;
+            match w {
+                Either::Left(Ok(w)) if w > 0 => {
+                    seen = next - (n - w.min(n)) as u64;
+                    acks.sent(w);
                 }
+                Either::Left(_) => return Gone::Reset,
+                Either::Right(()) => {}
             }
-            seen = next;
+        } else {
+            // Wat de lezer stuurt, wordt weggegooid; EOF of een fout is: weg.
+            match select(conn.read(&mut sink), timer.sleep(POLL)).await {
+                Either::Left(Ok(0)) => return Gone::Fin,
+                Either::Left(Err(_)) => return Gone::Reset,
+                Either::Left(Ok(_)) | Either::Right(()) => {}
+            }
         }
-        // Wat de lezer stuurt, wordt weggegooid; EOF of een fout is: weg.
-        if let Either::Left(r) = select(conn.read(&mut sink), timer.sleep(POLL)).await
-            && !matches!(r, Ok(n) if n > 0)
-        {
-            return;
+        if let Some(why) = acks.check(unacked(), timer.now()) {
+            return why;
         }
+    }
+}
+
+/// Of de peer nog bevestigt: wat de stack van ons aannam min wat nog
+/// uitstaat, is wat de peer bevestigde.
+struct Acks {
+    /// Bytes die de stack van ons aannam.
+    sent: u64,
+    /// Het hoogste bevestigde getal tot nu toe.
+    acked: u64,
+    /// Het laatste moment dat de peer leefde: niets uitstaand, of een
+    /// nieuwe bevestiging.
+    heard: u64,
+}
+
+impl Acks {
+    fn new(now: u64) -> Acks {
+        Acks {
+            sent: 0,
+            acked: 0,
+            heard: now,
+        }
+    }
+
+    fn sent(&mut self, n: usize) {
+        self.sent = self.sent.saturating_add(n as u64);
+    }
+
+    /// `None` zolang de peer er is, anders waarom niet.
+    fn check(&mut self, unacked: Option<usize>, now: u64) -> Option<Gone> {
+        let Some(out) = unacked else {
+            return Some(Gone::Reset);
+        };
+        let out = out as u64;
+        let acked = self.sent.saturating_sub(out);
+        if out == 0 || acked > self.acked {
+            self.acked = acked;
+            self.heard = now;
+            return None;
+        }
+        let stall = u64::try_from(STALL.as_nanos()).unwrap_or(u64::MAX);
+        (now.saturating_sub(self.heard) >= stall).then_some(Gone::Stall)
     }
 }
 
@@ -185,52 +322,140 @@ mod tests {
         assert!(rd.admit().is_some());
     }
 
+    #[test]
+    fn full_names_the_readers() {
+        assert_eq!(FULL, b"console: full, 4 readers\n");
+    }
+
+    #[test]
+    fn every_hundredth_freed_seat_gives_a_line() {
+        let rd = Readers::new();
+        for _ in 0..FREED_LINE - 2 {
+            assert_eq!(rd.freed(Gone::Reset), None);
+        }
+        assert_eq!(rd.freed(Gone::Stall), None);
+        let line = rd.freed(Gone::Fin).unwrap();
+        assert_eq!(
+            line,
+            Freed {
+                fin: 1,
+                reset: FREED_LINE - 2,
+                stall: 1
+            }
+        );
+        assert!(line.to_string().starts_with("100 reader seats freed"));
+    }
+
     struct Client {
         got: Vec<u8>,
         closed: bool,
+        /// Een volle zendring: elke schrijf wacht voorgoed.
+        stuck: bool,
+    }
+
+    impl Client {
+        fn new(closed: bool, stuck: bool) -> Client {
+            Client {
+                got: Vec::new(),
+                closed,
+                stuck,
+            }
+        }
     }
 
     impl Conn for Client {
         fn read(&mut self, _: &mut [u8]) -> impl Future<Output = Result<usize>> {
             let closed = self.closed;
             async move {
-                if closed {
-                    Ok(0)
-                } else {
+                if !closed {
                     core::future::pending::<()>().await;
-                    Ok(0)
                 }
+                Ok(0)
             }
         }
         fn write(&mut self, b: &[u8]) -> impl Future<Output = Result<usize>> {
-            self.got.extend_from_slice(b);
-            core::future::ready(Ok(b.len()))
+            let stuck = self.stuck;
+            if !stuck {
+                self.got.extend_from_slice(b);
+            }
+            let n = b.len();
+            async move {
+                if stuck {
+                    core::future::pending::<()>().await;
+                }
+                Ok(n)
+            }
         }
         fn remote_ip4(&self) -> u32 {
             0
         }
     }
 
+    /// Speelt een ring met de bootregel af naar `c`, met `unacked` als
+    /// sonde; geeft waarom de lezer wegging en de klok op dat moment.
+    fn run(c: &mut Client, unacked: impl FnMut() -> Option<usize>) -> (Gone, u64) {
+        let ring = RefCell::new(Ring::<64>::new());
+        ring.borrow_mut().write(b"HOPOS_CONPORT_UP\n");
+        let timer = FakeTimer::default();
+        let mut buf = [0u8; 16];
+        let start = ring.borrow().oldest();
+        let why = block_on(stream(
+            c,
+            &timer,
+            |s, o| ring.borrow().since(s, o),
+            unacked,
+            start,
+            &mut buf,
+        ));
+        (why, timer.now.get())
+    }
+
     // Een lezer die zonder verdere consoleregel verdwijnt, geeft zijn
     // plaats terug (conport_test.go).
     #[test]
     fn idle_console_disconnect_releases_stream() {
-        let ring = RefCell::new(Ring::<64>::new());
-        ring.borrow_mut().write(b"HOPOS_CONPORT_UP\n");
-        let mut c = Client {
-            got: Vec::new(),
-            closed: true,
-        };
-        let timer = FakeTimer::default();
-        let mut buf = [0u8; 16];
-        let start = ring.borrow().oldest();
-        block_on(stream(
-            &mut c,
-            &timer,
-            |s, o| ring.borrow().since(s, o),
-            start,
-            &mut buf,
-        ));
+        let mut c = Client::new(true, false);
+        let (why, _) = run(&mut c, || Some(0));
+        assert_eq!(why, Gone::Fin);
         assert_eq!(c.got, b"HOPOS_CONPORT_UP\n", "replay missing");
+    }
+
+    // Een RST terwijl de schrijf op een volle zendring wacht: de sonde ziet
+    // hem na één tik, niet pas als de stack opgeeft.
+    #[test]
+    fn reset_frees_a_reader_stuck_in_write() {
+        let mut c = Client::new(false, true);
+        let (why, now) = run(&mut c, || None);
+        assert_eq!(why, Gone::Reset);
+        assert!(now <= 2 * POLL.as_nanos() as u64, "took {now} ns");
+    }
+
+    // Een peer die zonder RST verdween: de data staat uit, er komt geen ack,
+    // en na STALL is de plaats terug.
+    #[test]
+    fn silent_peer_is_dropped_after_stall() {
+        let mut c = Client::new(false, false);
+        let (why, now) = run(&mut c, || Some(17));
+        assert_eq!(why, Gone::Stall);
+        assert_eq!(c.got, b"HOPOS_CONPORT_UP\n");
+        let stall = STALL.as_nanos() as u64;
+        assert!(now >= stall && now <= stall + 2 * POLL.as_nanos() as u64);
+    }
+
+    // Wie bevestigt, blijft, ook als er steeds iets uitstaat; wie niets
+    // uitstaan heeft, blijft ook. Pas STALL zonder voortgang is weg.
+    #[test]
+    fn acks_keep_a_slow_reader() {
+        let stall = STALL.as_nanos() as u64;
+        let mut a = Acks::new(0);
+        a.sent(100);
+        assert_eq!(a.check(Some(100), stall - 1), None);
+        assert_eq!(a.check(Some(60), stall + 1), None); // 40 bevestigd.
+        a.sent(100);
+        assert_eq!(a.check(Some(150), 2 * stall), None); // Weer 10 erbij.
+        assert_eq!(a.check(Some(150), 3 * stall), Some(Gone::Stall));
+        let mut idle = Acks::new(0);
+        assert_eq!(idle.check(Some(0), 10 * stall), None);
+        assert_eq!(idle.check(None, 10 * stall), Some(Gone::Reset));
     }
 }

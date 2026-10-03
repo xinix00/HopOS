@@ -103,7 +103,11 @@ slot, de uptime, de verzoeken en de heap. Daarna de meetreeks uit
 
 De console van een node zonder UART aan de laptop: `nc NODE 5555` geeft
 eerst de bewaarde console (een ring van 64 KiB, de hele boot) en leest dan
-live mee; hoogstens vier lezers tegelijk. Aan met `hopos.console=1` in de
+live mee; hoogstens vier lezers tegelijk, en de vijfde hoort
+`console: full, 4 readers`. Een lezer die weg is (een FIN, een RST, een
+mislukte schrijf, of 10 s data uit zonder ack) geeft zijn plaats meteen
+terug; elke honderdste is een regel `HOPOS_CONPORT_FREED` met de redenen en
+het budget van de stack. Aan met `hopos.console=1` in de
 config of cmdline, uit met `hopos.console=0`; zonder die sleutel volgt hij
 `hopos.insecure=1` (`HOPOS_CONPORT_UP` in de boot).
 
