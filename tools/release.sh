@@ -221,8 +221,9 @@ skip "licheerv headfull: board-licheerv heeft geen gui-feature; en geen flipbund
 
 # De apps: zonder debug-info en zonder lokale symbolen, met de globale (de
 # kern leest er RamStart en de stempel uit; een riscv64-ELF draagt 42 000
-# lokale symbolen, 1 MB symtab, en die reserveert de kern op zijn heap:
-# op de LicheeRV "out of memory (1012680 bytes)" bij elke welcome, 03-10).
+# lokale symbolen, 1 MB symtab, en die reserveerde de kern tot 03-10 op zijn
+# heap: op de LicheeRV "out of memory (1012680 bytes)" bij elke welcome; nu
+# zoekt hij in brokken, maar het image blijft 1,4 MB tegen 329 KB).
 step "apps"
 OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
 ARM_APPS="appspike welcome bench display vitals cloudflared-lean syncprobe decode"

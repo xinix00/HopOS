@@ -101,11 +101,6 @@ pub const MAX_STREAMS: usize = 8;
 /// enige heap die een streamende plaatsing per stroom kost (`maxHead` in
 /// `stream.go`).
 pub const MAX_HEAD: usize = 64 << 10;
-/// De grootste symbooltabel plus stringtabel die de plaatsing leest. Ze
-/// komen één keer, bij de laatste byte, uit de schrapruimte naar de heap,
-/// omdat `leanelf` over een `&[u8]` werkt; een Go-image draagt er een paar
-/// MB van. Koud pad; de grens maakt een verzonnen header geen OOM.
-pub const MAX_SYMBOLS: u64 = 16 << 20;
 /// De logring per slot voor `NEXT_LOG`, in bytes (kop van 2 bytes per regel).
 pub const LOG_RING_BYTES: usize = 2048;
 /// De langste regel in die ring; langer wordt afgekapt.
@@ -636,6 +631,22 @@ fn read_bytes(mem: &impl PhysMem, pa: u64, dst: &mut [u8]) {
     }
 }
 
+/// De naam op `at` in de stringtabel van `len` bytes op `pa`, als hij met
+/// zijn NUL in `buf` past; een langere naam is geen van de gezochte.
+fn name_at<'b>(
+    mem: &impl PhysMem,
+    pa: u64,
+    len: u64,
+    at: u64,
+    buf: &'b mut [u8],
+) -> Option<&'b [u8]> {
+    let n = len.checked_sub(at)?.min(buf.len() as u64) as usize;
+    let s = buf.get_mut(..n)?;
+    read_bytes(mem, pa + at, s);
+    let end = s.iter().position(|&c| c == 0)?;
+    s.get(..end)
+}
+
 /// Nult `len` bytes op offset `off` van de partitie van `g`: de randen via
 /// de grant, het gealigneerde midden in één `clear`.
 fn zero(g: &mut ImageGrant, mem: &mut impl PhysMem, off: u64, len: u64) -> Result {
@@ -940,15 +951,9 @@ impl Placer {
         Ok(())
     }
 
-    /// Leest `len` bytes van bestandsoffset `off` uit de schrapruimte.
-    fn tail_bytes(
-        &self,
-        g: &ImageGrant,
-        mem: &impl PhysMem,
-        off: u64,
-        len: u64,
-        dst: &mut Vec<u8>,
-    ) -> core::result::Result<(), Fail> {
+    /// Het fysieke adres van `len` bytes op bestandsoffset `off`, binnen één
+    /// PT_LOAD of in de schrapruimte.
+    fn tail_pa(&self, g: &ImageGrant, off: u64, len: u64) -> core::result::Result<u64, Fail> {
         let end = off.saturating_add(len);
         // Een bestandsoffset binnen een PT_LOAD staat al op zijn plek in de
         // partitie; daarbuiten in de schrapruimte. De Go-linker zet de
@@ -971,78 +976,108 @@ impl Placer {
                 ));
             }
         };
-        let at = dst.len();
-        dst.try_reserve_exact(len as usize)
-            .map_err(|_| Error::OutOfMemory {
-                bytes: len as usize,
-            })?;
-        dst.resize(at + len as usize, 0);
-        read_bytes(
-            mem,
-            g.region().base + src,
-            dst.get_mut(at..).unwrap_or(&mut []),
-        );
-        Ok(())
+        Ok(g.region().base + src)
     }
 
-    /// Een ELF met alleen de header, de sectietabel, `.symtab` en zijn
-    /// stringtabel, met de offsets herschreven: genoeg voor
-    /// [`leanelf::File::lookup`], zonder het hele image op de heap.
-    fn symbol_image(
+    /// Zoekt de plaatsingssymbolen zoals [`leanelf::File::lookup`], met
+    /// dezelfde fouten, maar in brokken uit de partitie in plaats van de
+    /// hele tabel op de heap: een riscv64-welcome draagt 42 000 lokale
+    /// symbolen, en op de LicheeRV was dat 03-10 "out of memory (1012680
+    /// bytes)" bij elke plaatsing.
+    fn symbols(
         &self,
         g: &ImageGrant,
         mem: &impl PhysMem,
-    ) -> core::result::Result<Vec<u8>, Fail> {
-        const SHDR: u64 = 64;
-        let mut img = Vec::new();
-        img.try_reserve_exact(64)
-            .map_err(|_| Error::OutOfMemory { bytes: 64 })?;
-        img.extend_from_slice(&self.ehdr);
-        // Geen program headers: de synthetische ELF heeft er geen.
-        for r in [32..40, 56..58] {
-            if let Some(b) = img.get_mut(r) {
-                b.fill(0);
+    ) -> core::result::Result<[Option<leanelf::Symbol<'static>>; 4], Fail> {
+        use leanelf::Error as E;
+        const NAMES: [&str; 4] = [
+            place::SYM_RAM_START,
+            place::SYM_RAM_SIZE,
+            place::SYM_SLOT_HINT,
+            place::SYM_ABI,
+        ];
+        const LONGEST: usize = {
+            let (mut m, mut i) = (0, 0);
+            while i < NAMES.len() {
+                if NAMES[i].len() > m {
+                    m = NAMES[i].len();
+                }
+                i += 1;
             }
-        }
-        let shoff = le(&self.ehdr, 40, 8);
-        let shentsize = le(&self.ehdr, 58, 2);
-        let shnum = le(&self.ehdr, 60, 2);
-        if shoff == 0 || shnum == 0 || shentsize != SHDR || shnum > u64::from(leanelf::MAX_SHNUM) {
-            // Laat leanelf de precieze fout zeggen.
-            return Ok(img);
-        }
-        let tab_len = shnum * SHDR;
-        self.tail_bytes(g, mem, shoff, tab_len, &mut img)?;
-        if let Some(b) = img.get_mut(40..48) {
-            b.copy_from_slice(&64u64.to_le_bytes());
-        }
-        let entry = |i: u64| 64 + (i * SHDR) as usize;
-        let Some(sym) = (0..shnum).find(|&i| le(&img, entry(i) + 4, 4) == 2) else {
-            return Ok(img); // Geen .symtab: leanelf zegt NoSymtab.
+            m
         };
-        let link = le(&img, entry(sym) + 40, 4);
-        if link >= shnum {
-            return Ok(img); // leanelf zegt SymtabLink.
+        let shoff = le(&self.ehdr, 40, 8);
+        let shentsize = le(&self.ehdr, 58, 2) as u16;
+        let shnum = le(&self.ehdr, 60, 2) as u16;
+        if shoff == 0 || shnum == 0 {
+            return Err(E::NoSectionHeaders.into());
         }
-        let (sym_off, sym_len) = (le(&img, entry(sym) + 24, 8), le(&img, entry(sym) + 32, 8));
-        let (str_off, str_len) = (le(&img, entry(link) + 24, 8), le(&img, entry(link) + 32, 8));
-        if sym_len.saturating_add(str_len) > MAX_SYMBOLS {
-            return Err(Self::fail(
-                "symbol tables larger than",
-                sym_len.saturating_add(str_len),
-                MAX_SYMBOLS,
-            ));
+        if shnum > leanelf::MAX_SHNUM {
+            return Err(E::TooManyShdrs(shnum).into());
         }
-        let new_sym = img.len() as u64;
-        self.tail_bytes(g, mem, sym_off, sym_len, &mut img)?;
-        let new_str = img.len() as u64;
-        self.tail_bytes(g, mem, str_off, str_len, &mut img)?;
-        for (i, at) in [(sym, new_sym), (link, new_str)] {
-            if let Some(b) = img.get_mut(entry(i) + 24..entry(i) + 32) {
-                b.copy_from_slice(&at.to_le_bytes());
+        if shentsize != 64 {
+            return Err(E::ShentSize(shentsize).into());
+        }
+        let tab = self.tail_pa(g, shoff, u64::from(shnum) * 64)?;
+        let shdr = |i: u64| {
+            let mut h = [0u8; 64];
+            read_bytes(mem, tab + i * 64, &mut h);
+            h
+        };
+        let Some(sym) = (0..u64::from(shnum)).map(shdr).find(|h| le(h, 4, 4) == 2) else {
+            return Err(E::NoSymtab.into());
+        };
+        if le(&sym, 56, 8) != 24 {
+            return Err(E::SymEntSize(le(&sym, 56, 8)).into());
+        }
+        let link = le(&sym, 40, 4);
+        if link >= u64::from(shnum) {
+            return Err(E::SymtabLink {
+                link: link as u32,
+                count: shnum,
+            }
+            .into());
+        }
+        let strh = shdr(link);
+        if le(&strh, 4, 4) != 3 {
+            return Err(E::LinkNotStrtab.into());
+        }
+        let n = le(&sym, 32, 8) / 24;
+        let syms = self.tail_pa(g, le(&sym, 24, 8), le(&sym, 32, 8))?;
+        let str_len = le(&strh, 32, 8);
+        let strs = self.tail_pa(g, le(&strh, 24, 8), str_len)?;
+
+        let mut out = [None; 4];
+        let (mut buf, mut name) = ([0u8; 64 * 24], [0u8; LONGEST + 1]);
+        // Ingang nul is de ABI-schildwacht van allemaal nullen.
+        for i in (1..n).step_by(64) {
+            if out.iter().all(Option::is_some) {
+                break;
+            }
+            let chunk = buf
+                .get_mut(..((n - i).min(64) * 24) as usize)
+                .unwrap_or(&mut []);
+            read_bytes(mem, syms + i * 24, chunk);
+            for e in chunk.chunks_exact(24).filter(|e| le(e, 6, 2) != 0) {
+                let Some(raw) = name_at(mem, strs, str_len, le(e, 0, 4), &mut name) else {
+                    continue;
+                };
+                let hit = NAMES
+                    .iter()
+                    .zip(out.iter_mut())
+                    .find(|(w, o)| o.is_none() && w.as_bytes() == raw);
+                if let Some((&w, o)) = hit {
+                    *o = Some(leanelf::Symbol {
+                        name: w,
+                        value: le(e, 8, 8),
+                        size: le(e, 16, 8),
+                        info: le(e, 4, 1) as u8,
+                        shndx: le(e, 6, 2) as u16,
+                    });
+                }
             }
         }
-        Ok(img)
+        Ok(out)
     }
 
     /// Sluit de plaatsing af: symbolen lezen, het plan bouwen en toetsen,
@@ -1056,14 +1091,7 @@ impl Placer {
         if !self.ready || self.pos != self.size {
             return Err(Self::fail("image incomplete", self.received(), self.size));
         }
-        let img = self.symbol_image(g, mem)?;
-        let f = leanelf::File::parse(&img)?;
-        let [ram_start, ram_size, hint, stamp] = f.lookup([
-            place::SYM_RAM_START,
-            place::SYM_RAM_SIZE,
-            place::SYM_SLOT_HINT,
-            place::SYM_ABI,
-        ])?;
+        let [ram_start, ram_size, hint, stamp] = self.symbols(g, mem)?;
         // De stempel is inhoud, geen adres: hij staat al op zijn plek.
         let abi_value = stamp.and_then(|s| {
             let n = if s.size == 4 { 4 } else { 8 };
@@ -1095,7 +1123,6 @@ impl Placer {
             max: SLOT_CAP,
         })?;
         let plan = place::build(&image, &w, abi_slot, Some(abi::ABI_VERSION))?;
-        drop(img);
         // Build zag dezelfde headers; toch getoetst, want uiteenlopen is
         // precies de klasse fouten die stil blijft.
         if plan.segments.as_slice() != self.segs.as_slice() {
@@ -2516,6 +2543,12 @@ mod tests {
     }
 
     fn elf(stamp: u64) -> Vec<u8> {
+        elf_with(stamp, &[])
+    }
+
+    /// Als [`elf`], met `extra` (naam, `st_shndx`, `st_value`) vóór de
+    /// gezochte symbolen in `.symtab`.
+    fn elf_with(stamp: u64, extra: &[(&str, u64, u64)]) -> Vec<u8> {
         let mut img = vec![0u8; SEG_OFF + SEG_FILESZ];
         img[..4].copy_from_slice(b"\x7fELF");
         img[4..7].copy_from_slice(&[2, 1, 1]);
@@ -2545,23 +2578,23 @@ mod tests {
         put(&mut img, SEG_OFF + 0x90, stamp, 8);
         // De stringtabel en de symbolen.
         let names = [place::SYM_RAM_START, place::SYM_RAM_SIZE, place::SYM_ABI];
+        let wanted = names
+            .iter()
+            .enumerate()
+            .map(|(i, &n)| (n, 1, SEG_IPA + 0x80 + 8 * i as u64));
         let mut strtab = vec![0u8];
-        let mut name_at = Vec::new();
-        for n in names {
-            name_at.push(strtab.len() as u64);
-            strtab.extend_from_slice(n.as_bytes());
-            strtab.push(0);
-        }
         let symtab_off = img.len();
         img.extend_from_slice(&[0u8; 24]);
-        for (i, at) in name_at.iter().enumerate() {
+        for (n, shndx, value) in extra.iter().copied().chain(wanted) {
             let mut e = [0u8; 24];
-            put(&mut e, 0, *at, 4);
+            put(&mut e, 0, strtab.len() as u64, 4);
             e[4] = 0x11;
-            put(&mut e, 6, 1, 2);
-            put(&mut e, 8, SEG_IPA + 0x80 + 8 * i as u64, 8);
+            put(&mut e, 6, shndx, 2);
+            put(&mut e, 8, value, 8);
             put(&mut e, 16, 8, 8);
             img.extend_from_slice(&e);
+            strtab.extend_from_slice(n.as_bytes());
+            strtab.push(0);
         }
         let symtab_len = img.len() - symtab_off;
         let strtab_off = img.len();
@@ -2947,6 +2980,56 @@ mod tests {
         assert!(con.saw(
             "slot 3: 2 volume(s) mounted: /media -> /volumes/media, /data -> /volumes/demo HOPOS_SLOT_MOUNTS"
         ));
+    }
+
+    /// Een symbooltabel met 12 000 symbolen vóór de gezochte, zoals een
+    /// riscv64-welcome met zijn 42 000 lokale (03-10, LicheeRV: "out of
+    /// memory (1012680 bytes)"): de kern vindt ze in brokken, slaat een
+    /// ongedefinieerde en een te lange naam over, en patcht dezelfde plekken.
+    #[test]
+    fn a_large_symtab_is_searched_in_chunks() {
+        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
+        let tee = LogTee::new(&con, &logs);
+        let mut a = node(&svc, &con);
+        let reply = Reply::new();
+        let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let fill: Vec<std::string::String> = (0..12_000)
+            .map(|i| std::format!("core::fmt::rt::local{i}"))
+            .collect();
+        let long = std::format!("{}{}", place::SYM_RAM_START, "x".repeat(200));
+        let wrong = SEG_IPA + 0x10;
+        let mut extra: Vec<(&str, u64, u64)> = vec![
+            (place::SYM_RAM_START, 0, wrong),
+            (&long, 1, wrong),
+            (&place::SYM_RAM_SIZE[1..], 1, wrong),
+        ];
+        extra.extend(fill.iter().map(|n| (n.as_str(), 1, wrong)));
+        let img = elf_with(u64::from(abi::ABI_VERSION), &extra);
+        assert!(img.len() > 12_000 * 24, "the symtab is large");
+        let mut calls = vec![start_call(1, img.len() as u64, b"")];
+        for (i, c) in img.chunks(32 << 10).enumerate() {
+            calls.push(enc(&stream_req(2 + i as u32, 3, (i << 15) as u64, c)));
+        }
+        let mut p = Pipe::new(NET | 2, &calls);
+        let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
+        let r = drive(
+            &sys, &mut a, &inbox, &reply, &mut p, &mut mem, &hooks, &tee, None,
+        );
+        assert_eq!(r, End::Peer);
+        let res = results(&p.tx);
+        let last = res.last().unwrap();
+        assert_eq!(stream_state(last), StreamState::Placed, "{last:?}");
+        let part = a.status(s(3)).partition.unwrap();
+        let at = |ipa: u64| mem.read64(part.base + (ipa - LINK_BASE));
+        assert_eq!(at(SEG_IPA + 0x80), LINK_BASE, "RamStart patched");
+        assert_eq!(at(SEG_IPA + 0x88), part.size - ABI_TAIL, "RamSize patched");
+        let o = SEG_OFF + 0x10;
+        assert_eq!(
+            at(wrong),
+            u64::from_le_bytes(img[o..o + 8].try_into().unwrap()),
+            "decoys left alone"
+        );
     }
 
     /// Een kapot image, een verkeerde ABI-stempel, een verkeerde offset en

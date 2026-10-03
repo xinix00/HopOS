@@ -58,8 +58,8 @@ GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 `prepare-cloudflared.sh` zet de gepinde cloudflared met twee
 platform-fallbacks in `build/cloudflared-patched`; tot dan faalt elk
 go-commando in die module (zie `go/cloudflared/README.md`). Het image is
-28 MB; de kern streamt het rechtstreeks de partitie in en leest alleen de
-symbooltabel op de heap (`kern::system::MAX_SYMBOLS`, 16 MB).
+28 MB; de kern streamt het rechtstreeks de partitie in en zoekt zijn
+symbolen daar in brokken op, niet op de heap.
 
 `go/apps-release.sh` doet hetzelfde voor alle Go-apps in één keer en toetst
 dat er geen gvisor-symbool in zit; `METAL=<tag>` bouwt ze tegen een andere
