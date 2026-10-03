@@ -452,7 +452,11 @@ impl Board for LicheeRv {
     }
 
     fn start_interrupts(&self) -> Result<&'static Signal, Error> {
-        PLIC_DEV.set_context(machine_context(self.this_core()));
+        // De PLIC is, net als de CLINT, per core en elke core is voor
+        // zichzelf hart 0: na de loterij vanaf de C906L is context 2 een
+        // load access fault op het claim-register (03-10, mtval
+        // 0x7020_2004), context 0 is de zijne.
+        PLIC_DEV.set_context(machine_context(self.clint_hart()));
         cpu::println!("irq: {}", PLIC_DEV.describe());
         csr::mie_set(csr::MIP_MEIP | csr::MIP_MSIP);
         csr::restore(csr::MSTATUS_MIE);
