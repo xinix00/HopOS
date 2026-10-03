@@ -24,7 +24,7 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 | Gebruik per taak, van de kern en van Hop (cpu, geheugen; slot 0, systeemtaken) | ✓ arm64, 03-10 | ✓ P1, 03-10 | ✓ P1, 03-10 | ✓ X1, 03-10 | ✓ A3, 03-10 | ✓ O2, 03-10 | ✓ M1, 03-10 | ✓ R13, 03-10 |
 | Off-link door de NAT, SNTP | ✓ | ✓ | ✓ | ○ niet nagelopen | ✓ A3 (welcome van GitHub, klok van Hop) | ○ niet nagelopen | ○ niet nagelopen | ○ niet nagelopen |
 | Watchdog gewapend en geaaid | – geen watchdog in virt | ✓ P1, canary | ✓ P1, canary | ✓ X1, canary | ✓ A3, SBSA, canary | ✓ O2, canary | ✓ | ✓ R3, 03-10 |
-| Hardware-RNG voor de kern | ✗ alleen jitter | ✓ | ✓ | ✓ | ✗ alleen jitter (geen efi-rng gezien) | ○ wacht op de stick | ✗ alleen jitter | ✗ geen bron |
+| Hardware-RNG voor de kern | ✗ alleen jitter | ✓ | ✓ | ✓ | ✗ jitter: geen SMCCC-TRNG in de firmware, efi-rng hing (juli) | ○ wacht op de stick | ✗ alleen jitter | ✗ geen bron |
 | Hardware-RNG voor de slots (CTRL_RNG_SEED, fc5348f) | ○ alleen jitter | ✓ P1, 03-10 | ✓ F | ✓ F | ○ jitter | ○ wacht op de stick | ○ alleen jitter | ○ niet nagelopen |
 | Temperatuur in de tik | – geen sensor in virt | ✓ | ✓ | ✗ sensor converteert niet | ✓ A3, SMpro 47 C | ✓ | ✗ niet gebouwd | ✓ R5, 03-10 |
 | Klokbeleid (dvfs) | – geen klok in virt | ✓ | ✓ | – klok van de firmware, bewust | – firmware-domein, bewust | ✓ | ✓ M7 | – vaste klok |
@@ -45,8 +45,6 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       riscv) en bij een kick direct naar die bewoner; doel O6N onder 100 us
       (nu 301), LicheeRV onder 300 (nu 644). Agent bezig, daarna ik op het
       bord.
-- [ ] Altra: de SMCCC-TRNG zoals Go (onze probe zegt "no SMCCC TRNG" met
-      een EL3-monitor; Go zaaide er wel uit). Agent bezig, daarna een flip.
 - [ ] Radxa en Pi 5 over de draad: Radxa ~21 MB/s beide kanten (Go 56 in,
       99 uit), Pi 5 uit ~43; meten node naar node, dan de dwmac-weg, de NAT
       of leannet. Agent bezig, daarna ik op het bord.
@@ -100,6 +98,9 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 - [ ] Radxa: TSADC geeft geen code; klok 816 MHz (kan 1800); geen
       serienummer-terugval voor de MAC.
+- [ ] Altra RNG: de firmware heeft geen SMCCC-TRNG (TRNG_VERSION
+      NOT_SUPPORTED, 03-10) en het EFI_RNG_PROTOCOL hing er in juli; blijft
+      jitter tot iemand efi-rng daar met een tijdslimiet durft te proberen.
 - [ ] Guard-pagina op UEFI en RISC-V; de device-op (19) zonder hosttests; de
       schijf-interruptlijn buiten QEMU virt.
 - [ ] Hop op de host: SIGTERM; de S3-lock met twee HopOS-nodes op ijzer.
