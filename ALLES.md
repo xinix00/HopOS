@@ -22,7 +22,7 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Boot, EL2, kooi, zelftest | ✓ | ✓ P1, 03-10 | ✓ P1, 03-10; koud ✓ de VL805-firmware laadt (P1g) | ✓ X1, 03-10 | ✓ A3, 03-10 (eerste v3-boot; venster A000, 128 cores) | ✓ O2, 03-10 | ✓ M7 | ✓ R13, 03-10 |
 | Hop als bewoner, welcome door de DNAT | ✓ | ✓ P1, in `system` | ✓ P1, in `system` | ✓ X1, in `system` | ✓ A3, in `system` | ✓ O2, in `system` | ✓ | ✓ R10, 03-10 |
-| Kern-flip, warm | ✓ | ✓ P2g en P3g, 03-10 (a04ffcd: de RP1 eerst stil); koud ✗ weigert zodra een app-core parkeerde (geen CPU_OFF terug), bekend | ✓ I | ✓ I | ✓ A4g, 03-10 (gen 2, bewoners en NAT mee) | ✓ H; I ○ koude boot, fix de61b4b | ✓ 01-10; koud – geen PSCI | – niet op riscv64; koud ✓ R10, 03-10 |
+| Kern-flip, warm | ✓ | ✓ P2g tot P4g, 03-10 (a04ffcd: de RP1 eerst stil); koud weigert vroeg en netjes (f2ad39e, HOPOS_FLIP_COLD_NO_WAY_BACK), Hop zet de gestopte taken terug (2180acc, na de volgende koude start van de kaart) | ✓ I | ✓ I | ✓ A4g, 03-10 (gen 2, bewoners en NAT mee) | ✓ H; I ○ koude boot, fix de61b4b | ✓ 01-10; koud – geen PSCI | – niet op riscv64; koud ✓ R10, 03-10 |
 | NIC met interrupt | ✓ | ✓ | – gepold, zoals Go | ✓ | – gepold, bewust (igb) | ✓ | ✗ gepold; INTx via de AIC nog niet bedraad | ✓ R13, 03-10 |
 | Hardware-IRQ (NIC, kick, timer) | ✓ | ✓ | ✓, NIC gepold | ✓ | ✓ A3 (ITS, timer); NIC gepold | ✓ | ✓, NIC gepold | ✓ R13, 03-10 |
 | Gebruik per taak, van de kern en van Hop (cpu, geheugen; slot 0, systeemtaken) | ✓ arm64, 03-10 | ✓ P1, 03-10 | ✓ P1, 03-10 | ✓ X1, 03-10 | ✓ A3, 03-10 | ✓ O2, 03-10 | ○ niet nagelopen | ✓ R13, 03-10 |
