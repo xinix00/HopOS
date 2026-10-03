@@ -322,10 +322,12 @@ zet hem; HopOS doet geen init). Bouw met
     boot zelf als de kern, `HOPOS_LOTTERY_RESCUED` (de oude rolverdeling,
     de C906L als app-hart via het resetblok): een mislukte wissel is een
     console-regel, geen baksteen. `HOPOS_LOTTERY_NONE`: geen loterij-blok,
-    dat hoort niet. De kern pollt op de C906L in plaats van `wfi`
-    (`RvSleeper::polling`, de stille doden van 01-08 en 17-08 waren een
-    `wfi`); zijn CLINT-index is 0 (één CLINT per core), de rotatie van de
-    OS-core met Hop blijft.
+    dat hoort niet. Op ijzer sinds 03-10 (R3): de kern slaapt op
+    de C906L op `mtimecmp` met `wfi` (`board: CLINT: mtimecmp writable`);
+    zijn CLINT-index is 0 (één CLINT per core) en zijn PLIC-context ook 0:
+    de PLIC is net zo per core, context 2 was op de eerste boot een load
+    access fault op het claim-register (mtval 0x7020_2004, ac79e91). De
+    rotatie van de OS-core met Hop blijft.
 12. **Het app-hart**: `cage: hart 0 (core 1) in the switcher: wake
     0x74004000, bell 0x0, sleep cap 0 ticks, kill tick 250000 ticks, reset
     false HOPOS_RV_HART_UP`. De C906B haalt zijn eerste werk uit het
@@ -399,8 +401,10 @@ watchdog of de stroom, en de kaart start de oude kern.
 - **Hop op de LicheeRV, op ijzer**: sinds 3.0.1 bakt de release Hop
   (riscv64, `tools/hop-build.sh`) in de kern als eerste bewoner
   (`STAGE=... ROLE=hop` van het image-script, `HOPOS_LRV_ROLE` in
-  build.rs, `staged_role` van het board). De kring op QEMU virt is groen;
-  op het board zelf is Hop in slot 1 nog niet gezien.
+  build.rs, `staged_role` van het board). De kring op QEMU virt is groen, en
+  sinds 03-10 (R3) ook op het board: Hop in slot 1 met `HOPOS_PRIVILEGE`,
+  welcome in slot 2, en na een koude flip zaait Hop welcome opnieuw uit
+  `hopos.init` (`HOP_INIT_SEEDED`).
 - **De kick van een app naar de kern op de LicheeRV**: de vorm staat sinds
   02-10 (`ecall` met a7 = 2; de switcher schrijft een 1 op `SCHED_OS_BELL`,
   de rotatie van de OS-core neemt hem als een yield naar nu; de app kickt
@@ -423,7 +427,5 @@ watchdog of de stroom, en de kaart start de oude kern.
   (op arm64 staat een kopie in de plan-regio), dus `RvCage::adopt` weigert
   en de flip is alleen koud. Een zwarte doos voor riscv64 ook niet.
 - De LicheeRV: slapen in de switcher (de C906B droeg in Go twee weken
-  `wfi`; een soak met deze switcher, dan een slaapgrens in `app_hart`), de
-  loterij op ijzer (03-10: alleen op QEMU-vrije logica gebouwd, de
-  zelfredding is het vangnet), en een SD-driver (dan `hopos.cfg` naast
+  `wfi`; een soak met deze switcher, dan een slaapgrens in `app_hart`), en een SD-driver (dan `hopos.cfg` naast
   `fip.bin` in plaats van in het image).

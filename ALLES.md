@@ -13,16 +13,17 @@ nog te bewijzen in ronde 1).
 De afvinkmatrix van de Go-tijd (OLD/docs/support.md: boot, idle en klokken,
 devices en diensten per board), nu voor v3 en bijgehouden op ijzer. Legenda:
 ✓ gezien op het board, ○ gebouwd maar op dit board nog niet gezien, ✗ ontbreekt
-of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, nacht (de Pi 4, de Radxa en de O6N op R2).
+of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, ochtend (de Pi 4, de Radxa en de O6N op R2; de LicheeRV op R3 met de loterij).
 
 | | QEMU virt | Pi 5 | Pi 4 | Radxa | Altra | O6N | M4 | LicheeRV |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Boot, EL2, kooi, zelftest | ✓ | ✓ | ✓ (koud: SError bij de VL805; fix d0b6bd3 wacht op een koude boot) | ✓ | ○ | ✓ VHE, kick via SGI 1 (`kick=(Ipi, 0 us)`, stempel G) | ✓ iBoot-boot (cfg in het image op 0xF000), EL2; kooi en zelftest ok, tune aan zonder SError (M7 en later) | ○ |
-| Hop als bewoner, welcome door de DNAT | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ✓ ingebakken, HOP_UP, gaat warm mee over flips (HOPOS_HOP_RESUMED) | ○ |
-| Kern-flip, warm | ✓ | ✗ sterft na de landing (F en H, 3x); de nieuwe kaart (H, met de zwarte doos) ligt in target/ | ✓ (6x, gen 4 op I) | ✓ (5x, gen 3 op I) | ○ | ✓ gen 2 op H (gui-bundel); I geweigerd door de H-kern (bundelpartitie 8 KiB te krap, fix de61b4b zit in de I-stick): koude boot | ✓ gen 1 tot 8 op 01-10 (D4b naar M15), adoptie 3 van 3, de config reist mee; koud: – (geen CPU_OFF) | – |
-| NIC met interrupt | ✓ | ✓ MSI-X via de MIP | – (GENET gepold, zoals Go) | ✓ SPI 64 | – (igb gepold, bewust) | ✓ RTL8125B, MSI-X via de ITS (LPI 8192) | ✓ tg3 BCM57766, gepold; MAC-filter na link_up (4be8b60); app naar app E 4450, P 6100 MB/s (M21), transport kern naar app 1860 | ○ (dwmac) |
+| Boot, EL2, kooi, zelftest | ✓ | ✓ | ✓ (koud: SError bij de VL805; fix d0b6bd3 wacht op een koude boot) | ✓ | ○ | ✓ VHE, kick via SGI 1 (`kick=(Ipi, 0 us)`, stempel G) | ✓ iBoot-boot (cfg in het image op 0xF000), EL2; kooi en zelftest ok, tune aan zonder SError (M7 en later) | ✓ de loterij: de kern op de C906L, de apps op de C906B (`HOPOS_LOTTERY_SWAPPED`), `HOPOS_RV_HART_UP`, zelftest ok; de PLIC-context van `clint_hart()` (ac79e91) |
+| Hop als bewoner, welcome door de DNAT | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ✓ ingebakken, HOP_UP, gaat warm mee over flips (HOPOS_HOP_RESUMED) | ✓ Hop in slot 1 (`HOPOS_PRIVILEGE`), welcome in slot 2, vanaf het LAN 200 in 12 ms |
+| Kern-flip, warm | ✓ | ✗ sterft na de landing (F en H, 3x); de nieuwe kaart (H, met de zwarte doos) ligt in target/ | ✓ (6x, gen 4 op I) | ✓ (5x, gen 3 op I) | ○ | ✓ gen 2 op H (gui-bundel); I geweigerd door de H-kern (bundelpartitie 8 KiB te krap, fix de61b4b zit in de I-stick): koude boot | ✓ gen 1 tot 8 op 01-10 (D4b naar M15), adoptie 3 van 3, de config reist mee; koud: – (geen CPU_OFF) | koud ✓ gen 2 (R3, 03-10: `HOPOS_FLIP_COLD_BOOT`, de loterij na de koude boot opnieuw `HOPOS_LOTTERY_SWAPPED`, `HOPOS_FLIP_SETTLED` na 70 s, Hop zaait welcome uit `hopos.init`); warm bestaat op riscv64 niet (`flip::WARM` weigert vóór de sprong) |
+| NIC met interrupt | ✓ | ✓ MSI-X via de MIP | – (GENET gepold, zoals Go) | ✓ SPI 64 | – (igb gepold, bewust) | ✓ RTL8125B, MSI-X via de ITS (LPI 8192) | ✓ tg3 BCM57766, gepold; MAC-filter na link_up (4be8b60); app naar app E 4450, P 6100 MB/s (M21), transport kern naar app 1860 | – dwmac gepold, PLIC-context 0 na de wissel (ac79e91) |
+| Hardware-IRQ (NIC, kick, timer) | ✓ NIC op de interrupt, kick via SGI 8 | ✓ GEM op INTID 166 (flank, MSI via de MIP), kick via SGI 8 | ✓ kick via SGI 8; GENET gepold | ✓ NIC op INTID 64, kick via SGI 7 (TF-A houdt 8 tot en met 15), timer-PPI 30 (WFI) | ○ igb gepold (de `_PRT`-INTx doodt de SoC), kick via SGI 1 | ✓ RTL8125B MSI-X via de ITS (LPI 8192), kick via SGI 1, timer CNTHP (PPI 26) | ✓ fast IPI en timer als FIQ, AIC voor de rest; tg3 gepold | ✓ dwmac gepold (300 us), kick via MSIP van de CLINT per core, timer op `mtimecmp` (wfi), PLIC context 0; externe lijnen gaan uit zodra ze vuren (niemand heeft een lijn) |
 | Off-link door de NAT, SNTP | ✓ | ✓ | ✓ | ○ | ○ | ○ | ○ | ○ |
-| Watchdog gewapend en geaaid | – | ✓ PM (12 s) | ✓ PM | ✓ DW-WDT (89 s) | ○ SBSA | ✓ SBSA (8,5 s) | ✓ Apple WDT 30 s; canary sinds R1 een self-dial naar Hop (HOPOS_WD_CANARY_OK), op alle borden | ○ DW-WDT |
+| Watchdog gewapend en geaaid | – | ✓ PM (12 s) | ✓ PM | ✓ DW-WDT (89 s) | ○ SBSA | ✓ SBSA (8,5 s) | ✓ Apple WDT 30 s; canary sinds R1 een self-dial naar Hop (HOPOS_WD_CANARY_OK), op alle borden | ✓ DW-WDT gewapend (TOP 13, 21 s, `HOPOS_WD_ARMED`), canary `HOPOS_WD_CANARY_OK` en `HOPOS_CANARY_LIVE` (R3, 03-10) |
 | Hardware-RNG voor de kern | ✗ (jitter) | ✓ RNG200 | ✓ RNG200 | ✓ rk3568-rng | ○ SMCCC-TRNG of rndr (fc5348f) | ○ efi-rng: geen FEAT_RNG of SMCCC-TRNG, wel het EFI_RNG_PROTOCOL van de firmware (`hopos.efirng=1`, volgende stick) | ○ jitter (geen FEAT_RNG, geen SMCCC) | ✗ (niets) |
 | Hardware-RNG voor de slots (CTRL_RNG_SEED, fc5348f) | ○ jitter | ○ (kaart-kern van vóór fc5348f) | ✓ rng200 (F) | ✓ rk3568-rng (F) | ○ | ○ jitter (G); efi-rng met de volgende stick | ○ jitter | ○ |
 | Temperatuur in de tik | – | ✓ mailbox | ✓ mailbox | ✗ TSADC converteert niet (Go ook niet) | ○ SMpro | ✓ SCMI (39 C in de agentlijst) | ○ | – |
@@ -32,7 +33,7 @@ of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, nacht (de P
 | Opslag (hopfs, volumes, OP_SYNC) | ✓ virtio-blk | – (bewust geen NVMe) | – | – (stateless, alles in het geheugen) | ○ NVMe | ✓ NVMe Lexar 4 TB, hopfs hersteld (generatie 3456) | ✓ ANS NVMe 414 GB, hopfs hersteld; de ANS asynchroon met read-ahead (M22): rauw 4952 / 1925 (M23), door de app 1270 / 1690 (M24) | – |
 | Console op 5555 | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ✓ (hopos.replay=45) | ○ |
 | Hardwaredecoder (media-smaak) | – | – | – | – | – | ✓ Linlon V8, 85,7 fps 4K P010 via de grant; nu tijdelijk weg (gui-flip H) tot de koude boot | – | – |
-| Kaart of stick klaar in `target/` | – | ✓ 22:37 (I) | ✓ 22:37 (I) | ✓ 22:38 (I, gepatchte Hop) | ✓ 18:12 | ✓ 22:38 stempel I (kern-fix bundelpartitie, verse Hop, efirng) | ✓ D4b geïnstalleerd (pstate=off, zonder de fixes van 01-10); art/hopos-apple.flip = M24 (cfg/m4-meet.cfg, replay=0); nieuw image met main gewenst | ✗ donor-FIP |
+| Kaart of stick klaar in `target/` | – | ✓ 22:37 (I) | ✓ 22:37 (I) | ✓ 22:38 (I, gepatchte Hop) | ✓ 18:12 | ✓ 22:38 stempel I (kern-fix bundelpartitie, verse Hop, efirng) | ✓ D4b geïnstalleerd (pstate=off, zonder de fixes van 01-10); art/hopos-apple.flip = M24 (cfg/m4-meet.cfg, replay=0); nieuw image met main gewenst | ✓ R3 (fip met de loterij, Hop 3.0.6) draait op .150 |
 
 ## Ronde 0: de ochtend van 03-10, vóór alles
 
@@ -53,9 +54,6 @@ Wat de build en de media blokkeert. Volgorde telt.
       Daarna een nieuw image via Recovery met main en een cfg zonder
       `hopos.pstate=off` (nu nog D4b; `EMBED=` Hop 3.0.5): dan klopt ook de
       koude boot weer.
-- [ ] **De LicheeRV**: de kaart met de loterij en Hop 3.0.5 staat klaar
-      (`scratchpad/art/hopos-licheerv-R2.img`, dd; of `fip-lrv-R2.bin` via
-      de telefoon). De node op .150 draait nog 3.0.3 en weigert elke flip.
 - [ ] **De Altra**: de stick van de release (hopos-altra-headless.img.gz)
       met de fixes van 03-10 (kaart 256 KB, HOPOS_UEFI_MAP_DROPPED, venster
       0xB000_0000 met de zes kandidaten als het bezet is, igb na CTRL.RST);
@@ -90,23 +88,28 @@ leveren. Rood is een regressie van de port-review, niet van het bord.
       v2 111 tot 116 MB/s inkomend was het vermoeden).
 - [ ] Pi 4 koud: `usb: vl805 firmware 0x... loaded` (fix d0b6bd3, alleen op
       QEMU getoetst).
-- [ ] LicheeRV: `HOPOS_LOTTERY_SWAPPED` (de kern op de C906L, de apps op
-      de C906B), `cage: hart 0 (core 1) ... reset false HOPOS_RV_HART_UP`,
-      HOP_UP, welcome op :80; bij `HOPOS_LOTTERY_RESCUED` de oude
-      rolverdeling en dan de console lezen. Dan de deeltoets op ijzer
-      (welcome plus BURN in één sharegroup), de kolom in docs/measurements.md
-      (vitals-riscv64, bench), en de rondes via `hop flip --cold` met
-      `scratchpad/art/hopos-licheerv.flip` (R2). Nog zonder bel van app naar
-      kern (de CV181x-mailbox is de kandidaat), zonder SMP en zonder RNG.
+- [ ] LicheeRV (R3, de loterij en de koude flip sinds 03-10 op ijzer): voor
+      de kolom in docs/measurements.md de netmeter-doorvoer en bench (een
+      peer op de draad). Nog zonder bel van app naar kern (de CV181x-mailbox
+      is de kandidaat), zonder SMP en zonder RNG.
+- [ ] **De kern reserveert de hele symtab van een app op zijn heap**, voor
+      de paar globale symbolen die hij leest (RamStart, de stempel): op de
+      LicheeRV weigerde 03-10 elke welcome `hop driver: refused: out of
+      memory (1012680 bytes) HOP_JOB_FAILED`, exact de .symtab van
+      welcome-riscv64.elf (42 185 lokale symbolen). Omweg: `tools/release.sh`
+      levert de apps met `--discard-all` (welcome-riscv64 van 1,4 MB naar
+      329 KB). De kernkant, de symbolen streamen, is onderhanden
+      (`scratchpad/fixes/symtab.patch`); een tamago-app op riscv64 (Stulp
+      all-plugins) heeft een nog grotere symtab. Bewijs: een app met
+      lokale symbolen op de LicheeRV plaatsen.
 - [ ] Een sharegroup met een rekenaar: `HOPOS_CORE_RECLAIM` na 2 s en het
       nieuwe lid op (tools/qemu-test-reclaim.sh is het voorbeeld).
 - [ ] De opruiming van 1 en 2 oktober, wat nog niet op ijzer gezien is:
       M4 start_one en de vectoringang 8, de flip-boot-watchdog (één keer
       wapenen, alleen HOPOS_BOOT_GUARD), core-class big op een P-core, de
       zwarte doos, aic op afgeleide tabeladressen, ANS via SART, rtkit en
-      smc; Altra NVMe en igb via pcie::first_in; LicheeRV de riscv-switcher
-      met REGIME_*-operanden en de dwmac-diag. De Pi 4, de Radxa en de O6N
-      zijn op 02-10 ochtend gedaan (OP1).
+      smc; Altra NVMe en igb via pcie::first_in. De Pi 4, de Radxa en de
+      O6N zijn op 02-10 ochtend gedaan (OP1), de LicheeRV op 03-10 (R3).
 
 ## Ronde 2: de bordfouten die we kennen
 
@@ -254,6 +257,12 @@ Alles boven Go behalve schrijven door de app op de M4 en willekeurig lezen.
       Content-Length"): of chunked lezen, of luid in de docs van de jobspec.
 - [ ] Na een flip meldt Hop één keer `NEXT_STORE failed: system call timed
       out`: de lange wacht van de store-taak liep over de flip heen.
+- [ ] Hop houdt een gedownload ELF per URL in zijn geheugen (`HttpImages`):
+      na het vervangen van het bestand in `apps` (LicheeRV, 03-10) bleef
+      Hop het oude plaatsen, ook over DELETE en POST van de job heen; pas
+      na een paar minuten haalde hij het nieuwe. Een vervangen artefact
+      hoort hij te zien zonder herstart en zonder wachten: If-None-Match,
+      of de sha in de jobspec.
 - [ ] Hop blijft een plaatsing zonder capaciteit opnieuw proberen (een vloed
       `HOP_JOB_FAILED`; onschuldig, maar ruis).
 - [ ] Hop op de host: SIGTERM (std heeft geen signaal-API: beslissing); op
