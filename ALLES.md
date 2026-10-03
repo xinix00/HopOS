@@ -50,6 +50,9 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 - [ ] Radxa en Pi 5 over de draad: Radxa ~21 MB/s beide kanten (Go 56 in,
       99 uit), Pi 5 uit ~43; meten node naar node, dan de dwmac-weg, de NAT
       of leannet. Agent bezig, daarna ik op het bord.
+- [ ] O6N: na `DELETE` van Lumen (10 cores, devices) weigert de kern elke
+      plaatsing tot een koude boot; op QEMU naspelen, de kooi, partitie of
+      grant die niet vrijkomt. Agent bezig.
 - [ ] De volgende bump: HopOS 3.0.7 met tag, Hop erop naar 3.0.8, release.sh,
       media (main heeft sinds v3.0.6 en Hop v3.0.7 de avondfixes van 03-10);
       daarmee het M4-image via Recovery (spin daarna opnieuw POSTen) en de
@@ -57,8 +60,6 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Fixen
 
-- [ ] O6N: na `DELETE` van Lumen weigert de kern elke plaatsing tot een
-      koude boot (reproduceren op QEMU met een job met devices).
 - [ ] Pi 4 hairpin door de NAT: 1 s hik per ronde (listen-backlog 8 in
       leannet).
 - [ ] Hop: een koude flip eerst aan de kern vragen (een proef zonder te
