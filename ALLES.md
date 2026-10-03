@@ -9,7 +9,7 @@ in docs/measurements.md, de details per board in docs/boards-*.md.
 De afvinkmatrix van de Go-tijd (OLD/docs/support.md: boot, idle en klokken,
 devices en diensten per board), nu voor v3 en bijgehouden op ijzer. Legenda:
 ✓ gezien op het board, ○ gebouwd maar op dit board nog niet gezien, ✗ ontbreekt
-of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, middag (de LicheeRV op R14, de O6N op O2, de Pi 4 op P1, de Radxa op X1, de Pi 5 op P1, de Altra op A4 met NVMe; alles van main 8a91d57 met Hop d785ef5).
+of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, avond (LicheeRV R15, O6N O4, Pi 4 P2g, Radxa X1, Pi 5 P4, Altra A8g, M4 M1; main loopt voor op de release v3.0.6 en Hop v3.0.7).
 Een cel zegt alleen of het slaagt, met hooguit de stempel of een paar
 woorden waarom niet; een gepolde NIC is geen ✓. De getallen staan in
 docs/measurements.md, de details per board in docs/boards-*.md.
@@ -39,9 +39,15 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
-- [ ] M4: een nieuw image via Recovery met main (Hop 3.0.7; de leader van de
-      Hop 3.0.0 van de kaart kent spin niet meer, dus spin daarna opnieuw
-      POSTen).
+- [ ] De volgende bump: main heeft sinds v3.0.6 en Hop v3.0.7 de avondfixes
+      van 03-10 (dvfs op de slotlast, de 5555-lek, het zaad over een flip, de
+      OS-core-beurt, de igb op MSI-X, in Hop de vaste poort en de
+      downloadtaak); HopOS 3.0.7 met tag, Hop erop naar 3.0.8, release.sh,
+      media.
+- [ ] M4: een nieuw image via Recovery met main (de leader van de Hop 3.0.0
+      van de kaart kent spin niet meer, dus spin daarna opnieuw POSTen).
+- [ ] Altra: `hopos.efirng=1` in de config van de stick en dan een flip:
+      `HOPOS_FLIP_SEED`, `HOPOS_RNG_EFI_CARRIED` en `source=hardware` zien.
 - [ ] O6N: na `DELETE` van Lumen weigert de kern elke plaatsing tot een
       koude boot (reproduceren op QEMU met een job met devices).
 - [ ] OS-core: een hop tussen twee bewoners kost op de LicheeRV nog 644 us
@@ -93,7 +99,6 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 - [ ] Radxa: TSADC geeft geen code; klok 816 MHz (kan 1800); geen
       serienummer-terugval voor de MAC.
-- [ ] Altra: efi-rng voor de kern.
 - [ ] Guard-pagina op UEFI en RISC-V; de device-op (19) zonder hosttests; de
       schijf-interruptlijn buiten QEMU virt.
 - [ ] Hop op de host: SIGTERM; de S3-lock met twee HopOS-nodes op ijzer.
