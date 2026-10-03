@@ -151,10 +151,14 @@ het zaad is nodig vóór er een verbinding is (de ISS van de netstack, de
 eerste TLS-handshake van Hop), en een woord op de page is de vorm van de
 temperatuur en de wandklok.
 
-**De klok** (`driver_dvfs::run` op de OS-core): sample elke 10 ms, oordeel
-over 50 ms, omhoog op last, omlaag na 30 s stil; elke 10 s een meetregel
-`dvfs: clock <MHz> (full|quiet), temp <C>, busy <bron> HOPOS_CLOCK`, en een
-regel per flank (`HOPOS_CLOCK_EDGE`). `hopos.clock=dvfs|max|quiet|firmware`
+**De klok** (`driver_dvfs::run` op de OS-core): de last van de node is de
+kern (de slaap van zijn executor) plus elk slot (`CTRL_IDLE`, alle cores).
+Sample elke 10 ms, oordeel over 50 ms: mist een bewoner meer dan 30% van één
+core aan idle (de kern: 70%, zijn UART-console is gepold), dan vol; omlaag
+na 30 s stil. Elke 10 s een meetregel `dvfs: clock <MHz> (full|quiet), temp
+<C>, busy <bron> HOPOS_CLOCK` (`busy slot 3 (0 permille idle)`, of `none
+(last slot 3, 14 s ago)`), en een regel per flank (`HOPOS_CLOCK_EDGE`, met
+de bron: `(full, busy: slot 3 (...))`). `hopos.clock=dvfs|max|quiet|firmware`
 pint, `hopos.mhz=` klemt het plafond.
 
 ## Radxa Orion O6N

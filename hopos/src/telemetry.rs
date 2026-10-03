@@ -81,9 +81,11 @@ async fn thermal(exec: &'static Executor) {
     }
 }
 
-/// De tellers van het klokbeleid, voor elk board met een knop: de
-/// idle-teller en de status van elk slot op zijn control-page, en of zijn
-/// bewoner nu rekent. Eén keer, voor de O6N en de Pi's.
+/// De tellers van het klokbeleid, voor elk board met een knop: de slaap van
+/// de executor voor de kern (dezelfde als `busy_ms` van de tik en slot 0 van
+/// SLOT_STATUS), en voor elk slot de idle-teller en de status op zijn
+/// control-page en of zijn bewoner de core wil. De last van de node is de
+/// kern plus elke bewoner. Eén keer, voor de O6N en de Pi's.
 #[cfg(any(feature = "board-o6n", feature = "board-rpi4", feature = "board-rpi5"))]
 mod counters {
     use core::time::Duration;
@@ -91,9 +93,11 @@ mod counters {
     use executor::Executor;
     use vboard::dvfs::{Host, SAMPLE_NS, Sample};
 
-    /// De bronnen van het beleid: de kern-core en zestien slots (de O6N heeft
-    /// er twaalf, een Pi vier).
-    pub(super) const SOURCES: usize = 17;
+    /// De bronnen van het beleid: de kern en elk slot dat er kan zijn, zoals
+    /// de meetlat (load.rs). Tot 03-10 waren het er zestien, en het plan
+    /// geeft er 32 (`SLOTS_DEFAULT`): een rekenaar in slot 17 of hoger zag
+    /// het beleid niet.
+    pub(super) const SOURCES: usize = kern::SLOT_CAP + 1;
 
     /// De tellers voor het beleid: de idle-teller en de status van elk slot
     /// op zijn control-page, en of zijn bewoner nu rekent (het ctx-blok).
@@ -111,17 +115,35 @@ mod counters {
             }
         }
 
-        /// Rekent de bewoner van slot `i` nu (niet geyield)? Op de O6N
-        /// idlet een app met een yield (HVC), en zonder deze vraag las elke
-        /// slapende app als 100% bezig en zakte de klok nooit (23-09).
+        /// Wil de bewoner van slot `i` de core? Hij rekent (`Running`), of hij
+        /// staat klaar: onderbroken of zijn wektijd voorbij (`Saved` en
+        /// `due`, dezelfde vraag als de rotatie stelt). Een bewoner die in
+        /// zijn yield slaapt, publiceert zijn idle pas bij terugkomst, en
+        /// zonder deze vraag las elke slapende app als 100% bezig (23-09).
+        /// Alleen `Running` was te weinig: een bewoner van de OS-core is
+        /// `Saved` zodra de kern (en dus deze taak) draait, ook als de CNTHP
+        /// hem midden in zijn rekenwerk onderbrak.
         fn running(&self, i: usize) -> bool {
+            use abi::layout::CtxState;
             let Some(plan) = &self.plan else {
                 return true;
             };
-            abi::layout::Slot::new(i)
-                .and_then(|s| plan.ctx_pa(s).ok())
-                .and_then(cpu::el2::ctx_state)
-                .is_none_or(|st| st == abi::layout::CtxState::Running)
+            let Some(ctx) = abi::layout::Slot::new(i).and_then(|s| plan.ctx_pa(s).ok()) else {
+                return true;
+            };
+            match cpu::el2::ctx_state(ctx) {
+                None | Some(CtxState::Running) => true,
+                Some(CtxState::Saved) => cpu::el2::due(ctx, cpu::idle::counter()).is_none(),
+                Some(_) => false,
+            }
+        }
+
+        /// De slaap van de executor (ns) in tikken van de teller, het
+        /// tempo van de idle-tellers van de slots.
+        fn kern_idle(&self) -> u64 {
+            let ns = self.exec.stats.slept_ns.load(core::sync::atomic::Ordering::Relaxed);
+            let ticks = u128::from(ns) * u128::from(cpu::idle::freq()) / 1_000_000_000;
+            u64::try_from(ticks).unwrap_or(u64::MAX)
         }
     }
 
@@ -143,15 +165,21 @@ mod counters {
             cpu::idle::freq().saturating_mul(SAMPLE_NS) / 1_000_000_000
         }
 
-        /// Bron 0 (de kern-core zelf) telt niet mee: zijn idle-tijd houdt de
-        /// slaper van de executor bij en die leest geen taak. Hop, die de
-        /// OS-core met de kern deelt, telt wel: als slot, met zijn eigen
-        /// teller.
+        /// Bron 0 is de kern: de slaap van zijn executor, één core. Op een
+        /// gedeelde OS-core is de beurt van een bewoner slaap van de kern;
+        /// die bewoner (Hop, of een groep `system`) telt als zijn eigen slot,
+        /// met zijn eigen teller.
         fn sample(&mut self, out: &mut [Sample; SOURCES]) {
             use abi::hopabi::{AppStatus, CTRL_CORES, CTRL_IDLE, CTRL_STATUS};
             for (i, s) in out.iter_mut().enumerate() {
                 *s = Sample::default();
                 if i == 0 {
+                    *s = Sample {
+                        live: true,
+                        idle: self.kern_idle(),
+                        cores: 1,
+                        running: true,
+                    };
                     continue;
                 }
                 let Some(page) = crate::clock::ctrl_page(i) else {

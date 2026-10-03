@@ -38,6 +38,7 @@ struct World {
     idle: [u64; 2],
     slot: bool,
     running: bool,
+    cores: u64,
 }
 
 impl World {
@@ -49,17 +50,19 @@ impl World {
             idle: [0; 2],
             slot: false,
             running: true,
+            cores: 1,
         };
         let c = w.g.boot(0, &mut w.k);
         assert_eq!((c.full, c.why), (true, "boot"));
         w
     }
 
-    /// Eén sample waarin de kern `hop` en het slot `app` promille idle was.
+    /// Eén sample waarin de kern `hop` en het slot `app` promille idle was
+    /// (`app` over al zijn cores).
     fn tick(&mut self, hop: u64, app: u64) -> Option<Change> {
         self.now += SAMPLE_NS;
         self.idle[0] += EXPECT * hop / 1000;
-        self.idle[1] += EXPECT * app / 1000;
+        self.idle[1] += EXPECT * self.cores * app / 1000;
         let s = [
             Sample {
                 live: true,
@@ -70,7 +73,7 @@ impl World {
             Sample {
                 live: self.slot,
                 idle: self.idle[1],
-                cores: 1,
+                cores: self.cores,
                 running: self.running,
             },
         ];
@@ -102,12 +105,32 @@ fn boot_is_full_and_thirty_quiet_seconds_bring_it_down() {
 #[test]
 fn sustained_load_clocks_up_within_two_samples() {
     let mut w = World::new();
+    w.slot = true;
     w.until_quiet();
     // Volle last in een venster van vijf stille samples: na één sample is
     // het venster nog 80% idle, na twee 60%, en dan gaat hij vol.
-    assert_eq!(w.tick(0, 1000), None);
-    assert_eq!(w.tick(0, 1000).map(|c| c.why), Some("busy"));
+    assert_eq!(w.tick(1000, 0), None);
+    assert_eq!(w.tick(1000, 0).map(|c| c.why), Some("busy"));
     assert!(w.g.is_full());
+    assert_eq!(w.g.busy.map(|b| b.source), Some(1));
+}
+
+#[test]
+fn the_kern_counts_once_its_core_is_mostly_busy() {
+    let mut w = World::new();
+    w.until_quiet();
+    // Een console-burst: 23 ms werk in 50 ms is geen last.
+    for _ in 0..50 {
+        assert_eq!(w.tick(540, 1000), None);
+    }
+    for _ in 0..WINDOW {
+        w.tick(1000, 1000);
+    }
+    // Een volle OS-core: na vier samples is het venster 20% idle.
+    for _ in 0..3 {
+        assert_eq!(w.tick(0, 1000), None);
+    }
+    assert_eq!(w.tick(0, 1000).map(|c| c.why), Some("busy"));
     assert_eq!(w.g.busy.map(|b| b.source), Some(0));
 }
 
@@ -149,8 +172,52 @@ fn a_sleeping_slot_is_idle_even_when_its_counter_stands_still() {
 }
 
 #[test]
+fn one_burning_core_of_a_four_core_slot_clocks_up() {
+    // O6N 03-10: vitals rekende op één core van vier en de klok bleef stil.
+    // Over de hele bron is dat 75% idle, boven de oude drempel van 70%.
+    let mut w = World::new();
+    w.slot = true;
+    w.cores = 4;
+    w.until_quiet();
+    assert_eq!(w.tick(1000, 750), None);
+    let c = w.tick(1000, 750).unwrap();
+    assert_eq!((c.full, c.why), (true, "busy"));
+    let b = w.g.busy.unwrap();
+    assert_eq!((b.source, b.idle_permille, b.cores), (1, 900, 4));
+}
+
+#[test]
+fn many_quiet_cores_with_jitter_stay_quiet() {
+    // Tien cores die elk 98% idle zijn: samen 0,2 core werk, geen rekenaar.
+    let mut w = World::new();
+    w.slot = true;
+    w.cores = 10;
+    w.until_quiet();
+    for _ in 0..50 {
+        assert_eq!(w.tick(1000, 980), None);
+    }
+    assert!(!w.g.is_full());
+}
+
+#[test]
+fn the_busiest_source_is_named() {
+    let mut w = World::new();
+    w.slot = true;
+    w.until_quiet();
+    w.tick(500, 0);
+    let c = w.tick(500, 0).unwrap();
+    assert_eq!(c.why, "busy");
+    // De kern is 50% idle (ook druk), maar het slot brandt: het slot.
+    assert_eq!(
+        w.g.busy.map(|b| (b.source, b.idle_permille)),
+        Some((1, 600))
+    );
+}
+
+#[test]
 fn hold_pins_the_clock_and_release_waits_a_full_cooldown() {
     let mut w = World::new();
+    w.slot = true;
     w.g.hold = Hold::Quiet;
     let c = w.tick(0, 0).unwrap();
     assert_eq!((c.full, c.why), (false, "held"));
@@ -272,8 +339,9 @@ fn the_task_cools_down_reports_and_wakes_on_load() {
     let mut knob = Knob2::default();
     {
         let mut fut = core::pin::pin!(run(&mut knob, Hold::Auto, &mut host));
-        // 45 s aan samples: 30 s stil (zakken), dan last (opklokken).
-        for _ in 0..4_500 {
+        // 55 s aan samples: 30 s stil (zakken), vanaf 40 s last (opklokken),
+        // en de meetregel van 50 s.
+        for _ in 0..5_500 {
             let _ = fut.as_mut().poll(&mut cx);
         }
     }
@@ -283,9 +351,17 @@ fn the_task_cools_down_reports_and_wakes_on_load() {
         log.iter()
             .any(|l| l.contains("-> 800 MHz (quiet, idle 30s)"))
     );
-    assert!(log.iter().any(|l| l.contains("(full, busy)")));
+    assert!(
+        log.iter().any(|l| l.contains("(full, busy: slot 1 (")),
+        "{log:?}"
+    );
     let report = log.iter().find(|l| l.ends_with("HOPOS_CLOCK")).unwrap();
     assert!(report.contains("temp 41.5 C"), "{report}");
+    assert!(report.ends_with("busy none HOPOS_CLOCK"), "{report}");
+    // Na de last: de meetregel noemt het slot dat de klok vol houdt.
+    let last = log.iter().rfind(|l| l.ends_with("HOPOS_CLOCK")).unwrap();
+    assert!(last.contains("(full)"), "{last}");
+    assert!(last.contains("busy slot 1 ("), "{last}");
     assert_eq!((knob.full, knob.quiet), (2, 1));
 }
 
@@ -324,8 +400,32 @@ fn run_after_boot_skips_the_boot_edge() {
             .any(|l| l.contains("-> 800 MHz (quiet, idle 30s)")),
         "{log:?}"
     );
-    assert!(log.iter().any(|l| l.contains("(full, busy)")));
+    assert!(log.iter().any(|l| l.contains("(full, busy: slot 1 (")));
     assert_eq!((knob.full, knob.quiet), (1, 1));
+}
+
+#[test]
+fn the_report_names_the_last_lifter_while_cooling() {
+    let b = Busy {
+        source: 3,
+        at_ns: 5_000_000_000,
+        idle_permille: 0,
+        cores: 1,
+    };
+    let at = |now| std::format!("{}", BusyText { last: Some(b), now });
+    assert_eq!(at(6_000_000_000), "slot 3 (0 permille idle)");
+    assert_eq!(at(19_000_000_000), "none (last slot 3, 14 s ago)");
+    let four = Busy {
+        source: 0,
+        idle_permille: 750,
+        cores: 4,
+        ..b
+    };
+    assert_eq!(
+        std::format!("{}", Who(Some(four))),
+        "kern (750 permille idle over 4 cores)"
+    );
+    assert_eq!(std::format!("{}", BusyText { last: None, now: 0 }), "none");
 }
 
 #[test]

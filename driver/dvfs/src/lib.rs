@@ -5,10 +5,12 @@
 //!
 //! - het signaal is de idle-teller: idle-tijd in generic-timer-tikken. Een
 //!   idle core telt ~CNTFRQ per seconde op, een drukke staat stil. Apps
-//!   publiceren hem op hun control-page, de kern-core telt zelf;
-//! - de wachter sampelt elke ~10 ms en oordeelt over de laatste 50 ms:
-//!   íéts onder tempo, dan de klok vol (~20 ms bij aanhoudende last);
-//!   álles ~30 s op tempo, dan de klok laag;
+//!   publiceren hem op hun control-page, de kern telt zelf (de slaap van
+//!   zijn executor);
+//! - de last van de node is de kern plus elke bewoner: de wachter sampelt
+//!   elke ~10 ms en oordeelt over de laatste 50 ms. Mist een bewoner meer
+//!   dan 30% van één core aan idle (de kern: 70%), dan de klok vol (~20 ms
+//!   bij aanhoudende last); is álles ~30 s stil, dan de klok laag;
 //! - de knop ([`Knob`]) alleen op de flank: op de Pi de firmware-mailbox,
 //!   op de O6N het `_CPC`-fastchannel per domein; de firmware-throttle
 //!   blijft het vangnet.
@@ -45,10 +47,22 @@ pub const SAMPLE_NS: u64 = 10_000_000;
 pub const WINDOW: usize = 5;
 /// De hysterese omlaag.
 pub const COOLDOWN_NS: u64 = 30_000_000_000;
-/// Een bron is druk onder 70% van het verwachte tempo: ruim onder de
-/// jitter van de event-stream, ruim boven "half werk".
-const BUSY_NUM: u64 = 7;
-const BUSY_DEN: u64 = 10;
+/// Een bron is druk als hij over het venster meer dan 30% van één core aan
+/// idle mist: ruim boven de jitter van de event-stream, ruim onder "half
+/// werk". Per core, niet per bron (Linux' schedutil kijkt ook naar de
+/// drukste CPU van een domein, niet naar het gemiddelde): een rekenaar op
+/// één core van een app met vier cores mist een kwart van het geheel, en
+/// telde onder de oude drempel (70% van de hele bron) nooit. Voor een bron
+/// met één core is het dezelfde regel: onder 70% idle.
+const SHORT_NUM: u64 = 3;
+const SHORT_DEN: u64 = 10;
+/// De kern (bron 0) is pas druk boven 70% van zijn core: zijn console is een
+/// UART die hij pollt (115200 baud, 87 us per teken), en vijf regels
+/// `HOPOS_SLOT_LOAD` elke 30 s zijn ~23 ms in één venster van 50 ms. Onder
+/// de drempel van de bewoners hield dat de klok met de cooldown van 30 s
+/// voorgoed vol. Een OS-core die het net, de switch of de system-API
+/// draagt, haalt 70% wel.
+const KERN_SHORT_NUM: u64 = 7;
 /// Een klonter van een lange slaap telt hoogstens voor vier samples.
 const CLAMP: u64 = 4;
 
@@ -99,7 +113,7 @@ pub enum Hold {
     Quiet,
 }
 
-/// Eén bron in één sample. Bron 0 is de kern-core; de rest zijn app-slots.
+/// Eén bron in één sample. Bron 0 is de kern; bron n is slot n.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Sample {
     /// Draait er iets (een slot met status Ready en cores > 0)?
@@ -108,10 +122,11 @@ pub struct Sample {
     pub idle: u64,
     /// Het aantal cores van de bron: het verwachte tempo schaalt mee.
     pub cores: u64,
-    /// Rekent de bron nu (niet geyield)? Een teller die niet steeg, telt
-    /// alleen als druk als dit waar is: op een yield-idle-board (O6N) slaapt
-    /// een stille app tientallen ms in zijn yield, en zonder deze vraag las
-    /// elke slapende app als 100% bezig en zakte de klok nooit.
+    /// Wil de bron de core (hij rekent, of hij staat klaar: onderbroken, of
+    /// zijn wektijd is voorbij)? Een teller die niet steeg, telt alleen als
+    /// druk als dit waar is: een app die in zijn yield slaapt, publiceert
+    /// zijn idle pas bij terugkomst, en zonder deze vraag las elke slapende
+    /// app als 100% bezig en zakte de klok nooit (23-09).
     pub running: bool,
 }
 
@@ -130,12 +145,14 @@ pub struct Change {
 /// moet kunnen zeggen wie hem wakker houdt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Busy {
-    /// De bron (0 = kern-core, n = slot n).
+    /// De bron (0 = de kern, n = slot n).
     pub source: usize,
     /// Wanneer.
     pub at_ns: u64,
-    /// Idle in promille van het verwachte tempo.
+    /// Idle in promille van het verwachte tempo (alle cores van de bron).
     pub idle_permille: u64,
+    /// De cores van de bron.
+    pub cores: u64,
 }
 
 /// Het glijdende venster van één bron: idle-tikken en verwacht tempo van
@@ -267,9 +284,10 @@ impl<const N: usize> Governor<N> {
         Change { full, why, level }
     }
 
-    /// Leest de bronnen in de vensters; `true` als er één druk is.
+    /// Leest de bronnen in de vensters; `true` als er één druk is. De
+    /// drukste (minste idle) wordt [`Governor::busy`].
     fn measure(&mut self, now: u64, expect: u64, samples: &[Sample; N]) -> bool {
-        let mut busy = false;
+        let mut worst: Option<Busy> = None;
         for (i, s) in samples.iter().enumerate() {
             let (Some(h), Some(last), Some(seen)) = (
                 self.hist.get_mut(i),
@@ -294,19 +312,28 @@ impl<const N: usize> Governor<N> {
                     d = d.max(want); // slaapt in zijn yield: dit sample was idle
                 }
                 let (sd, sw) = h.add(d, want);
-                if sd.saturating_mul(BUSY_DEN) < sw.saturating_mul(BUSY_NUM) {
-                    busy = true;
-                    self.busy = Some(Busy {
-                        source: i,
-                        at_ns: now,
-                        idle_permille: sd.saturating_mul(1000) / sw.max(1),
-                    });
+                let short = sw.saturating_sub(sd);
+                let one = sw / s.cores; // het venster van één core
+                let num = if i == 0 { KERN_SHORT_NUM } else { SHORT_NUM };
+                if short.saturating_mul(SHORT_DEN) > one.saturating_mul(num) {
+                    let idle_permille = sd.saturating_mul(1000) / sw.max(1);
+                    if worst.is_none_or(|b| idle_permille < b.idle_permille) {
+                        worst = Some(Busy {
+                            source: i,
+                            at_ns: now,
+                            idle_permille,
+                            cores: s.cores,
+                        });
+                    }
                 }
             }
             *seen = true;
             *last = s.idle;
         }
-        busy
+        if worst.is_some() {
+            self.busy = worst;
+        }
+        worst.is_some()
     }
 }
 
@@ -340,7 +367,7 @@ pub async fn run<const N: usize>(mut knob: impl Knob, hold: Hold, host: &mut imp
     let mut g: Governor<N> = Governor::new();
     g.hold = hold;
     let c = g.boot(host.now(), &mut knob);
-    report_change(host, &c);
+    report_change(host, &c, None);
     run_governor(g, knob, host, c.level).await;
 }
 
@@ -378,7 +405,7 @@ async fn run_governor<const N: usize>(
         let now = host.now();
         host.sample(&mut samples);
         if let Some(c) = g.step(now, host.expect(), &samples, &mut knob) {
-            report_change(host, &c);
+            report_change(host, &c, g.busy);
             if c.level.is_some() {
                 level = c.level;
             }
@@ -386,7 +413,6 @@ async fn run_governor<const N: usize>(
         if now.saturating_sub(last_report) >= REPORT_NS {
             last_report = now;
             let t = host.temp_milli_c();
-            let busy = g.busy.filter(|b| now.saturating_sub(b.at_ns) < REPORT_NS);
             host.log(format_args!(
                 "dvfs: clock {} ({}), temp {}.{} C, busy {} HOPOS_CLOCK",
                 level.map_or(
@@ -399,18 +425,23 @@ async fn run_governor<const N: usize>(
                 if g.is_full() { "full" } else { "quiet" },
                 t / 1000,
                 (t % 1000).abs() / 100,
-                Busy::describe(busy),
+                BusyText { last: g.busy, now },
             ));
         }
     }
 }
 
-fn report_change<const N: usize>(host: &impl Host<N>, c: &Change) {
+/// De flank, met de drukke bron erbij als hij de reden is
+/// (`(full, busy: slot 3 (0 permille idle))`).
+fn report_change<const N: usize>(host: &impl Host<N>, c: &Change, busy: Option<Busy>) {
+    let by = busy.filter(|_| c.why == "busy");
     match c.level {
         Some(l) => host.log(format_args!(
-            "dvfs: -> {l} ({}, {}) HOPOS_CLOCK_EDGE",
+            "dvfs: -> {l} ({}, {}{}{}) HOPOS_CLOCK_EDGE",
             if c.full { "full" } else { "quiet" },
-            c.why
+            c.why,
+            if by.is_some() { ": " } else { "" },
+            Who(by)
         )),
         None => host.log(format_args!(
             "dvfs: clock change to {} ({}) failed, the policy keeps its state",
@@ -420,24 +451,47 @@ fn report_change<const N: usize>(host: &impl Host<N>, c: &Change) {
     }
 }
 
-impl Busy {
-    /// "none", of de bron en zijn idle.
-    fn describe(b: Option<Busy>) -> BusyText {
-        BusyText(b)
+/// Een drukke bron als tekst: `kern (40 permille idle)`, `slot 3 (0
+/// permille idle)`, `slot 4 (750 permille idle over 4 cores)`; leeg zonder.
+struct Who(Option<Busy>);
+
+impl fmt::Display for Who {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Some(b) = self.0 else {
+            return Ok(());
+        };
+        match b.source {
+            0 => f.write_str("kern")?,
+            n => write!(f, "slot {n}")?,
+        }
+        write!(f, " ({} permille idle", b.idle_permille)?;
+        if b.cores > 1 {
+            write!(f, " over {} cores", b.cores)?;
+        }
+        f.write_str(")")
     }
 }
 
-/// [`Busy`] als tekst voor de meetregel.
-struct BusyText(Option<Busy>);
+/// Het `busy`-veld van de meetregel: de drukke bron van de laatste
+/// [`REPORT_NS`], anders `none`, met de laatste drukke bron erachter als er
+/// een was (een volle klok zonder drukke bron koelt af: wie tilde hem?).
+struct BusyText {
+    last: Option<Busy>,
+    now: u64,
+}
 
 impl fmt::Display for BusyText {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0 {
-            None => f.write_str("none"),
-            Some(b) if b.source == 0 => {
-                write!(f, "kern core ({} permille idle)", b.idle_permille)
+        match self.last {
+            Some(b) if self.now.saturating_sub(b.at_ns) < REPORT_NS => Who(Some(b)).fmt(f),
+            Some(b) => {
+                let ago = self.now.saturating_sub(b.at_ns) / 1_000_000_000;
+                match b.source {
+                    0 => write!(f, "none (last kern, {ago} s ago)"),
+                    n => write!(f, "none (last slot {n}, {ago} s ago)"),
+                }
             }
-            Some(b) => write!(f, "slot {} ({} permille idle)", b.source, b.idle_permille),
+            None => f.write_str("none"),
         }
     }
 }
