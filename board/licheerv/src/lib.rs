@@ -1,6 +1,6 @@
 //! De Sipeed LicheeRV Nano (Sophgo SG2002 / CV181x, XuanTie C906) in machine
 //! mode: ns16550, de dwmac met de interne 100M-ePHY, CLINT, PLIC, de
-//! T-Head-caches en de DW-watchdog. Het eerste RISC-V-board van HopOS, en
+//! T-Head-caches, de DW-watchdog en de temperatuursensor ([`temp`]). Het eerste RISC-V-board van HopOS, en
 //! het tweede van v3 na QEMU virt riscv64.
 //!
 //! Registeradressen uit de vendor-DTS (LicheeRV-Nano-Build, cv181x_riscv en
@@ -12,6 +12,7 @@
 //! UART0    0x0414_0000   DW-APB-16550, reg-shift 2, door de FSBL op 115200
 //! GMAC     0x0407_0000   DWMAC1000 (versie 0x1037), interne ePHY via RMII
 //! WDT      0x0301_0000   Synopsys DW-WDT, 25 MHz pclk
+//! TEMPSEN  0x030E_0000   de on-die sensor, klokgate bit 9 van CLK_EN0
 //! DRAM     0x8000_0000   256 MB
 //! RTCCLK   25 MHz        de timebase van de TIME-CSR
 //! ```
@@ -44,6 +45,7 @@ pub mod cfg;
 mod ephy;
 pub mod lottery;
 pub mod slots;
+pub mod temp;
 pub mod watchdog;
 
 use board::{Board, CoreClass, Dispatched, Error, NoDisk, Plan, Region};

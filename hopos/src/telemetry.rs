@@ -15,7 +15,8 @@
 //! firmware, de Mac mini meet één keer bij de boot (de SMC) en bewaakt zijn
 //! p-states, de Pi's meten en klokken via de VideoCore-mailbox
 //! (`board_raspi::clock`), de Radxa meet met de TSADC van de SoC
-//! (`board_rk3566::tsadc`), de rest meet (nog) niets. Het beleid leest op de
+//! (`board_rk3566::tsadc`), de LicheeRV met de TEMPSEN van de SoC
+//! (`board_licheerv::temp`), de rest meet (nog) niets. Het beleid leest op de
 //! O6N en de Pi's dezelfde tellers ([`counters`]).
 
 use core::sync::atomic::{AtomicI32, Ordering::Relaxed};
@@ -438,13 +439,42 @@ mod hw {
     }
 }
 
+/// De LicheeRV: de TEMPSEN van de SoC (`board_licheerv::temp`, Go
+/// `temp.go`); geen knop, de klok blijft waar de FSBL hem liet.
+#[cfg(feature = "board-licheerv")]
+mod hw {
+    use cpu::println;
+    use executor::Executor;
+
+    /// Brengt de sensor op (10 ms busy-wait, één keer bij de boot) en meldt
+    /// de eerste lezing.
+    pub(super) fn open() {
+        vboard::temp::open();
+    }
+
+    /// Geen knop hier: niets te doen vóór een flip.
+    pub(super) fn full_for_flip() {}
+
+    /// Milligraden; 0 = geen geldige code.
+    pub(super) fn temp() -> i32 {
+        vboard::temp::temp_millic().unwrap_or(0)
+    }
+
+    pub(super) fn governor(_exec: &'static Executor) {
+        println!(
+            "dvfs: no clock knob on this board, the firmware keeps its clock HOPOS_CLOCK_NONE"
+        );
+    }
+}
+
 #[cfg(not(any(
     feature = "board-o6n",
     feature = "board-altra",
     feature = "board-apple",
     feature = "board-rpi4",
     feature = "board-rpi5",
-    feature = "board-rk3566"
+    feature = "board-rk3566",
+    feature = "board-licheerv"
 )))]
 mod hw {
     use cpu::println;

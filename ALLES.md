@@ -26,7 +26,7 @@ of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, ochtend (de
 | Watchdog gewapend en geaaid | – | ✓ PM (12 s) | ✓ PM | ✓ DW-WDT (89 s) | ○ SBSA | ✓ SBSA (8,5 s) | ✓ Apple WDT 30 s; canary sinds R1 een self-dial naar Hop (HOPOS_WD_CANARY_OK), op alle borden | ✓ DW-WDT gewapend (TOP 13, 21 s, `HOPOS_WD_ARMED`), canary `HOPOS_WD_CANARY_OK` en `HOPOS_CANARY_LIVE` (R3, 03-10) |
 | Hardware-RNG voor de kern | ✗ (jitter) | ✓ RNG200 | ✓ RNG200 | ✓ rk3568-rng | ○ SMCCC-TRNG of rndr (fc5348f) | ○ efi-rng: geen FEAT_RNG of SMCCC-TRNG, wel het EFI_RNG_PROTOCOL van de firmware (`hopos.efirng=1`, volgende stick) | ○ jitter (geen FEAT_RNG, geen SMCCC) | ✗ (niets) |
 | Hardware-RNG voor de slots (CTRL_RNG_SEED, fc5348f) | ○ jitter | ○ (kaart-kern van vóór fc5348f) | ✓ rng200 (F) | ✓ rk3568-rng (F) | ○ | ○ jitter (G); efi-rng met de volgende stick | ○ jitter | ○ |
-| Temperatuur in de tik | – | ✓ mailbox | ✓ mailbox | ✗ TSADC converteert niet (Go ook niet) | ○ SMpro | ✓ SCMI (39 C in de agentlijst) | ○ | – |
+| Temperatuur in de tik | – | ✓ mailbox | ✓ mailbox | ✗ TSADC converteert niet (Go ook niet) | ○ SMpro | ✓ SCMI (39 C in de agentlijst) | ○ | ✓ TEMPSEN 59,8 C bij de boot, in de tik en de heartbeat (R5, 03-10) (Go `temp.go`, geport; `HOPOS_TEMPSEN_UP` of `_NONE`) |
 | Klokbeleid (dvfs) | – | ✓ 1500/800 | ✓ 1500/600 | – | ○ | ✓ vijf `_CPC`-domeinen, 2600 MHz | ✓ p-state-tune E 5/8 = 2172 MHz, P 6/20 = 2352 MHz (M7) | – |
 | Console op het glas | ✓ ramfb | ✓ via flip op de eerste kaart, ✗ sinds de herflash (firmware weigert) | ✓ 32 bpp | ✓ HDMI (geen EDID) | ○ GOP | ✓ GOP 1920x1080 | – | – |
 | USB xHCI (HID, display-app) | ✓ qemu-xhci | ○ 2 xHCI's up, niets ingeplugd | ○ VL805 koud: fix d0b6bd3 (SCB0_SIZE, notify, twee pogingen), koude boot nodig | ○ 2 DWC3 up, niets ingeplugd | ○ | ✓ 10 xHCI's up, de Blu-ray-drive over USB-BOT leest de disc (Lumen) | – | – |
@@ -93,9 +93,8 @@ leveren. Rood is een regressie van de port-review, niet van het bord.
       peer op de draad). Nog zonder bel van app naar kern (de CV181x-mailbox
       is de kandidaat), zonder SMP en zonder RNG.
 - [ ] **De temperatuur per bord, werkt de sensor**: de rij "Temperatuur in
-      de tik" per node aflopen. De LicheeRV heeft er een (Go: board/licheerv/
-      temp.go, de SG2002 TEMPSEN), dus het streepje in de tabel is fout: de
-      Go-weg porten en de tik laten melden. De Radxa (TSADC converteert niet),
+      de tik" per node aflopen. De LicheeRV is af (TEMPSEN, R5, 03-10). De
+      Radxa (TSADC converteert niet),
       de Altra (SMpro), de M4 (○) en de O6N (SCMI, 39 C) nalopen; welk bord
       meldt wat in `temp=` van de tik en bij Hop (`temp_milli_c` in de
       heartbeat).
