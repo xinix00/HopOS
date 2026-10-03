@@ -280,30 +280,8 @@ impl Rtl8126 {
         unsafe { dev::regs(self.base) }
     }
 
-    /// Spint `ns` nanoseconden op de klok.
-    fn sleep(&self, ns: u64) {
-        let until = (self.clock)().saturating_add(ns);
-        while (self.clock)() < until {
-            core::hint::spin_loop();
-        }
-    }
-
-    /// Wacht begrensd tot `done` (`rtl_loop_wait`): `budget` in
-    /// nanoseconden, de Go-maat was pogingen maal pauze.
-    fn wait(&self, budget: u64, mut done: impl FnMut(&Regs) -> bool) -> bool {
-        let r = self.regs();
-        let deadline = (self.clock)().saturating_add(budget);
-        loop {
-            if done(r) {
-                return true;
-            }
-            if (self.clock)() >= deadline {
-                return done(r);
-            }
-            core::hint::spin_loop();
-        }
-    }
-
+    /// Wacht begrensd tot `reg & mask == want` (`rtl_loop_wait_high` en
+    /// `_low`): `budget` in nanoseconden, de Go-maat was pogingen maal pauze.
     fn wait8(
         &self,
         what: &'static str,
@@ -313,7 +291,7 @@ impl Rtl8126 {
         want: u8,
         budget: u64,
     ) -> Result {
-        if self.wait(budget, |_| reg.read() & mask == want) {
+        if dev::poll_until(self.clock, budget, || reg.read() & mask == want) {
             return Ok(());
         }
         Err(Error::Timeout {
@@ -351,7 +329,7 @@ impl Rtl8126 {
         let r = self.regs();
         r.gphy_ocp
             .write(OCP_FLAG | (u32::from(reg) << 15) | u32::from(v));
-        if self.wait(2_500_000, |r| r.gphy_ocp.read() & OCP_FLAG == 0) {
+        if dev::poll_until(self.clock, 2_500_000, || r.gphy_ocp.read() & OCP_FLAG == 0) {
             return Ok(());
         }
         Err(Error::Timeout {
@@ -364,7 +342,7 @@ impl Rtl8126 {
     fn phy_ocp_read(&self, reg: u16) -> Result<u16> {
         let r = self.regs();
         r.gphy_ocp.write(u32::from(reg) << 15);
-        if self.wait(2_500_000, |r| r.gphy_ocp.read() & OCP_FLAG != 0) {
+        if dev::poll_until(self.clock, 2_500_000, || r.gphy_ocp.read() & OCP_FLAG != 0) {
             return Ok((r.gphy_ocp.read() & 0xffff) as u16);
         }
         Err(Error::Timeout {
@@ -400,14 +378,14 @@ impl Rtl8126 {
         let r = self.regs();
         r.ephyar
             .write(0x8000_0000 | u32::from(v) | (u32::from(reg & 0x1f) << 16));
-        self.wait(1_000_000, |r| r.ephyar.read() & 0x8000_0000 == 0);
-        self.sleep(10_000);
+        let _ = dev::poll_until(self.clock, 1_000_000, || r.ephyar.read() & 0x8000_0000 == 0);
+        dev::delay(self.clock, 10_000);
     }
 
     fn ephy_read(&self, reg: u16) -> u16 {
         let r = self.regs();
         r.ephyar.write(u32::from(reg & 0x1f) << 16);
-        if self.wait(1_000_000, |r| r.ephyar.read() & 0x8000_0000 != 0) {
+        if dev::poll_until(self.clock, 1_000_000, || r.ephyar.read() & 0x8000_0000 != 0) {
             return (r.ephyar.read() & 0xffff) as u16;
         }
         0xffff
@@ -463,7 +441,7 @@ impl Rtl8126 {
     fn enable_rxdv_gate(&self) -> Result {
         let r = self.regs();
         r.misc.update(|v| v | MISC_RXDV_GATED);
-        self.sleep(2_000_000);
+        dev::delay(self.clock, 2_000_000);
         r.chip_cmd.update(|v| v | CMD_STOP_REQ);
         self.wait8(
             "rx/tx fifo empty",
@@ -473,7 +451,9 @@ impl Rtl8126 {
             MCU_RXTX_EMPTY,
             4_200_000,
         )?;
-        if self.wait(4_200_000, |r| r.intr_mitig.read() & 0x0103 == 0x0103) {
+        if dev::poll_until(self.clock, 4_200_000, || {
+            r.intr_mitig.read() & 0x0103 == 0x0103
+        }) {
             return Ok(());
         }
         Err(Error::Timeout {
@@ -489,7 +469,7 @@ impl Rtl8126 {
         let r = self.regs();
         self.enable_rxdv_gate()?;
         r.chip_cmd.update(|v| v & !(CMD_TX_ENB | CMD_RX_ENB));
-        self.sleep(1_000_000);
+        dev::delay(self.clock, 1_000_000);
         r.mcu.update(|v| v & !MCU_NOW_IS_OOB);
         self.mac_ocp_modify(0xe8de, 1 << 14, 0);
         let ok = MCU_LINK_LIST_OK;
@@ -526,7 +506,7 @@ impl Rtl8126 {
         for (reg, data) in [(0x14u32, 0x05u32), (0x18, 0x00), (0x10, 0x01)] {
             r.eridr.write(data);
             r.eriar.write(0x8000_0000 | 0x0002_0000 | 0x1000 | reg);
-            self.wait(10_000_000, |r| r.eriar.read() & 0x8000_0000 == 0);
+            let _ = dev::poll_until(self.clock, 10_000_000, || r.eriar.read() & 0x8000_0000 == 0);
         }
     }
 
@@ -545,7 +525,7 @@ impl Rtl8126 {
         let r = self.regs();
         r.rx_config.update(|v| v & !RX_ACCEPT_MASK);
         self.enable_rxdv_gate()?;
-        self.sleep(2_000_000);
+        dev::delay(self.clock, 2_000_000);
         self.hw_reset()?;
         self.hw_start()
     }
@@ -643,7 +623,7 @@ impl Rtl8126 {
         self.mac_ocp_modify(0xd430, 0x0fff, 0x047f);
         self.mac_ocp_modify(0xea1c, 0x0004, 0x0000);
         self.mac_ocp_modify(0xeb54, 0x0000, 0x0001); // TCAM wissen
-        self.sleep(1_000);
+        dev::delay(self.clock, 1_000);
         self.mac_ocp_modify(0xeb54, 0x0001, 0x0000);
         r.r1880.update(|x| x & !0x0030);
         self.mac_ocp_write(0xe098, 0xc302);
@@ -652,7 +632,9 @@ impl Rtl8126 {
     /// Mac-OCP 0xe00e bit 13 moet zakken (`rtl_hw_start_8125_common`, het
     /// eind).
     fn wait_e00e(&self) -> Result {
-        if self.wait(10_000_000, |_| self.mac_ocp_read(0xe00e) & (1 << 13) == 0) {
+        if dev::poll_until(self.clock, 10_000_000, || {
+            self.mac_ocp_read(0xe00e) & (1 << 13) == 0
+        }) {
             return Ok(());
         }
         Err(Error::Timeout {
@@ -669,7 +651,7 @@ impl Rtl8126 {
         let bmcr = phy_c22(mdio::reg::BMCR);
         // genphy_resume: power-down eraf, 20 ms (rtlgen_resume).
         self.phy_ocp_modify(bmcr, BMCR_POWER_DOWN, 0)?;
-        self.sleep(20_000_000);
+        dev::delay(self.clock, 20_000_000);
         // rtl81xx_hw_phy_config zonder blob: 10M-gphy aan, de variant-
         // stappen, legacy force mode (clause 22), ALDPS uit, EEE-PHY uit.
         self.phy_ocp_modify(0xa442, 0, 1 << 11)?; // rtl8168g_enable_gphy_10m
@@ -696,21 +678,20 @@ impl Rtl8126 {
             bmcr,
             (b & !BMCR_ISOLATE) | BMCR_RESET | mdio::BMCR_AN_RESTART,
         )?;
-        let deadline = (self.clock)().saturating_add(600_000_000);
-        loop {
-            let b = self.phy_ocp_read(bmcr)?;
-            if b & BMCR_RESET == 0 {
-                break;
-            }
-            if (self.clock)() >= deadline {
-                return Err(Error::Timeout {
-                    what: "PHY soft reset",
-                    reg: bmcr,
-                    val: u32::from(b),
-                });
-            }
+        let mut b = Ok(0);
+        let done = dev::poll_until(self.clock, 600_000_000, || {
+            b = self.phy_ocp_read(bmcr);
+            b.map_or(true, |b| b & BMCR_RESET == 0)
+        });
+        let b = b?;
+        if !done {
+            return Err(Error::Timeout {
+                what: "PHY soft reset",
+                reg: bmcr,
+                val: u32::from(b),
+            });
         }
-        self.sleep(1_000_000);
+        dev::delay(self.clock, 1_000_000);
 
         // rtl822x_config_aneg + genphy_restart_aneg: alle advertenties
         // expliciet (mainline leunt niet op power-on-defaults).
@@ -742,20 +723,22 @@ impl Rtl8126 {
     /// board gaf 12 s).
     pub fn link_up(&mut self, timeout_ns: u64) -> Result<Link> {
         self.start_link()?;
-        let deadline = (self.clock)().saturating_add(timeout_ns);
-        loop {
-            let (link, bmsr) = self.poll_link()?;
-            if let Some(l) = link {
-                return Ok(l);
+        let mut seen = Ok((None, 0));
+        let _ = dev::poll_until(self.clock, timeout_ns, || {
+            seen = self.poll_link();
+            let up = matches!(seen, Err(_) | Ok((Some(_), _)));
+            if !up {
+                dev::delay(self.clock, LINK_POLL_NS);
             }
-            if (self.clock)() >= deadline {
-                return Err(Error::NoLink {
-                    bmsr,
-                    phy_status: self.regs().phy_status.read(),
-                    ms: timeout_ns / 1_000_000,
-                });
-            }
-            self.sleep(LINK_POLL_NS);
+            up
+        });
+        match seen? {
+            (Some(l), _) => Ok(l),
+            (None, bmsr) => Err(Error::NoLink {
+                bmsr,
+                phy_status: self.regs().phy_status.read(),
+                ms: timeout_ns / 1_000_000,
+            }),
         }
     }
 

@@ -432,7 +432,7 @@ impl Chain {
         self.hwr(PHY_I2CM_OPERATION, I2C_OP_WRITE);
         dev::mb();
         let mut st = 0;
-        if self.wait(PHY_I2C_WAIT_NS, || {
+        if dev::poll_until(self.clock, PHY_I2C_WAIT_NS, || {
             st = self.hrd(IH_I2CMPHY_STAT0) & (I2C_STAT_ERROR | I2C_STAT_DONE);
             st != 0
         }) {
@@ -453,7 +453,9 @@ impl Chain {
         // lock die blijft staan is geen reden om te stoppen (Go ook niet):
         // de reset hieronder haalt hem toch weg.
         self.hmod(PHY_CONF0, CONF0_TXPWRON, 0);
-        let _ = self.wait(PHY_LOCK_WAIT_NS, || self.hrd(PHY_STAT0) & STAT0_LOCK == 0);
+        let _ = dev::poll_until(self.clock, PHY_LOCK_WAIT_NS, || {
+            self.hrd(PHY_STAT0) & STAT0_LOCK == 0
+        });
         self.hmod(PHY_CONF0, CONF0_PDDQ, CONF0_PDDQ);
         if svsret {
             self.hmod(PHY_CONF0, CONF0_SVSRET, CONF0_SVSRET);
@@ -475,7 +477,9 @@ impl Chain {
         self.hmod(PHY_CONF0, CONF0_TXPWRON, CONF0_TXPWRON);
         self.hmod(PHY_CONF0, CONF0_PDDQ, 0);
         dev::mb();
-        if self.wait(PHY_LOCK_WAIT_NS, || self.hrd(PHY_STAT0) & STAT0_LOCK != 0) {
+        if dev::poll_until(self.clock, PHY_LOCK_WAIT_NS, || {
+            self.hrd(PHY_STAT0) & STAT0_LOCK != 0
+        }) {
             return Ok(());
         }
         Err(Error::Settle {

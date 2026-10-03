@@ -356,12 +356,8 @@ impl Ses {
         // is ruim; daarna is het slot vast (het beeld van 27-09: "session
         // slot 0 will not terminate", opgelost door de stroomcyclus van het
         // board, zie board-o6n).
-        let deadline = (hw.now)().saturating_add(TERMINATE_NS);
-        while l.terminate.read() != 0 {
-            if (hw.now)() >= deadline {
-                return Err(Error::Terminate { lsid: self.lsid });
-            }
-            core::hint::spin_loop();
+        if !dev::poll_until(hw.now, TERMINATE_NS, || l.terminate.read() == 0) {
+            return Err(Error::Terminate { lsid: self.lsid });
         }
         // Eén core per sessie: geen core verboden, hoogstens één tegelijk.
         // Spreiden kost een firmwarekopie per extra core en is voor 8K.

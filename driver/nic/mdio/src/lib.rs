@@ -220,23 +220,21 @@ pub fn autoneg<M: Mdio + ?Sized>(
         m.write(phy, reg::GBCR, GBCR_1000_FD)?;
     }
     m.write(phy, reg::BMCR, BMCR_AN_ENABLE | BMCR_AN_RESTART)?;
-    let deadline = now().saturating_add(timeout_ns);
-    loop {
-        let s = m.read(phy, reg::BMSR)?;
-        if s & BMSR_AN_COMPLETE != 0 && s & BMSR_LINK != 0 {
-            break;
+    let mut s = Ok(0);
+    let up = dev::poll_until(now, timeout_ns, || {
+        s = m.read(phy, reg::BMSR);
+        let up = s.map_or(true, |s| s & BMSR_AN_COMPLETE != 0 && s & BMSR_LINK != 0);
+        if !up {
+            dev::delay(now, POLL_NS);
         }
-        let t = now();
-        if t >= deadline {
-            return Err(Error::NoLink {
-                bmsr: s,
-                ms: timeout_ns / 1_000_000,
-            });
-        }
-        let next = t.saturating_add(POLL_NS).min(deadline);
-        while now() < next {
-            core::hint::spin_loop();
-        }
+        up
+    });
+    let s = s?;
+    if !up {
+        return Err(Error::NoLink {
+            bmsr: s,
+            ms: timeout_ns / 1_000_000,
+        });
     }
     if gigabit && m.read(phy, reg::GBSR)? & GBSR_LP_1000_FD != 0 {
         return Ok(Link {

@@ -364,21 +364,6 @@ impl Chain {
         unsafe { Self::new(RK3566, clock) }
     }
 
-    /// Wacht begrensd tot `done` ja zegt. Begrensd en niet eeuwig: een
-    /// blok dat niet schakelt mag de boot niet ophouden.
-    fn wait(&self, ns: u64, mut done: impl FnMut() -> bool) -> bool {
-        let deadline = (self.clock)().saturating_add(ns);
-        loop {
-            if done() {
-                return true;
-            }
-            if (self.clock)() > deadline {
-                return false;
-            }
-            core::hint::spin_loop();
-        }
-    }
-
     /// Brengt de hele keten op: power-domein, VOP2-scanout, HDMI-TX.
     ///
     /// Eén keer per boot: een tweede aanroep verzet de PLL onder een

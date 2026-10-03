@@ -776,18 +776,15 @@ impl ArmCage {
         }
         el2::kick(FLAVOR, mpidr(self.plan.phys_core(c)));
         let t0 = cpu::idle::now();
-        let picked = loop {
+        let mut parked = false;
+        let seen = dev::poll_until(cpu::idle::now, JOIN_WAIT_NS, || {
             if el2::ctx_state(ctx) != Some(CtxState::BootPending) {
-                break Some(true);
+                return true;
             }
-            if matches!(el2::core_state(&self.plan, c), Ok(CoreState::Parked)) {
-                break Some(false);
-            }
-            if cpu::idle::now().saturating_sub(t0) > JOIN_WAIT_NS {
-                break None;
-            }
-            core::hint::spin_loop();
-        };
+            parked = matches!(el2::core_state(&self.plan, c), Ok(CoreState::Parked));
+            parked
+        });
+        let picked = seen.then_some(!parked);
         let mut others = 0usize;
         let _ = el2::residents(&self.plan, c, |id| {
             if usize::from(id) != slot.get() {

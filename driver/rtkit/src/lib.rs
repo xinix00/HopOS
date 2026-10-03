@@ -414,14 +414,9 @@ impl Rtkit {
     /// schrijfacties.
     fn post(&mut self, ep: u8, msg: u64) -> Result {
         let m = self.mbox();
-        if m.a2i_control.read() & MBOX_FULL != 0 {
-            let start = (self.now)();
-            while m.a2i_control.read() & MBOX_FULL != 0 {
-                if (self.now)().saturating_sub(start) >= SEND_TIMEOUT_NS {
-                    return Err(Error::MailboxFull { name: self.name });
-                }
-                core::hint::spin_loop();
-            }
+        let room = || m.a2i_control.read() & MBOX_FULL == 0;
+        if !room() && !dev::poll_until(self.now, SEND_TIMEOUT_NS, room) {
+            return Err(Error::MailboxFull { name: self.name });
         }
         dev::mb();
         m.a2i_send0.write(msg);

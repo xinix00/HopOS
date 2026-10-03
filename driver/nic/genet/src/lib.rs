@@ -342,13 +342,6 @@ impl Genet {
         self.at(TX_BD + (12 * (i % N_BD)) as u64)
     }
 
-    fn delay(&self, ns: u64) {
-        let end = (self.clock)().saturating_add(ns);
-        while (self.clock)() < end {
-            core::hint::spin_loop();
-        }
-    }
-
     /// Het rauwe SYS_REV_CTRL; nibble [27:24] hoort 6 te zijn.
     #[must_use]
     pub fn rev(&self) -> u32 {
@@ -375,7 +368,7 @@ impl Genet {
         let u = self.umac();
         u.cmd.update(|c| c & !(1 << 1));
         self.stop_dma(true)?;
-        self.delay(10_000_000);
+        dev::delay(self.clock, 10_000_000);
         self.stop_dma(false)?;
         self.tx().ctrl.update(|c| c & !DMA_ENABLE_MASK);
         self.rx().ctrl.update(|c| c & !DMA_ENABLE_MASK);
@@ -383,15 +376,15 @@ impl Genet {
         let s = self.sys();
         let r = s.rbuf_flush_ctrl.read();
         s.rbuf_flush_ctrl.write(r | 2);
-        self.delay(10_000);
+        dev::delay(self.clock, 10_000);
         s.rbuf_flush_ctrl.write(r & !2);
-        self.delay(10_000);
+        dev::delay(self.clock, 10_000);
         s.rbuf_flush_ctrl.write(0);
-        self.delay(10_000);
+        dev::delay(self.clock, 10_000);
 
         u.cmd.write(0);
         u.cmd.write((1 << 13) | (1 << 15));
-        self.delay(2_000);
+        dev::delay(self.clock, 2_000);
         u.cmd.write(0);
 
         u.mib_ctrl.write(7);
@@ -419,17 +412,14 @@ impl Genet {
             (&self.rx().ctrl, &self.rx().status, "RX")
         };
         ctrl.update(|c| c & !1);
-        let deadline = (self.clock)().saturating_add(DMA_STOP_NS);
-        loop {
-            let v = status.read();
-            if v & DMA_DISABLED != 0 {
-                return Ok(());
-            }
-            if (self.clock)() >= deadline {
-                return Err(Error::Stop { dir, status: v });
-            }
-            core::hint::spin_loop();
+        let mut v = 0;
+        if dev::poll_until(self.clock, DMA_STOP_NS, || {
+            v = status.read();
+            v & DMA_DISABLED != 0
+        }) {
+            return Ok(());
         }
+        Err(Error::Stop { dir, status: v })
     }
 
     /// Zet de START_BUSY-bit en wacht begrensd tot de transactie klaar is.
@@ -468,14 +458,14 @@ impl Genet {
 
         // Reset bevestigde de DMA-stop; eerst flushen, dan de ringen.
         u.tx_flush.write(1);
-        self.delay(10_000);
+        dev::delay(self.clock, 10_000);
         u.tx_flush.write(0);
         let s = self.sys();
         let r = s.rbuf_flush_ctrl.read();
         s.rbuf_flush_ctrl.write(r | 1);
-        self.delay(10_000);
+        dev::delay(self.clock, 10_000);
         s.rbuf_flush_ctrl.write(r);
-        self.delay(10_000);
+        dev::delay(self.clock, 10_000);
 
         self.init_rx();
         self.init_tx();

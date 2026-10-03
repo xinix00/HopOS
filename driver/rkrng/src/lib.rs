@@ -212,16 +212,12 @@ impl<R: Regs> Trng<R> {
     /// twee controles.
     fn round(&mut self) -> Result<[u8; ROUND]> {
         self.regs.write(RNG_CTL, (CTL_START << 16) | CTL_START);
-        let end = (self.clock)().saturating_add(ROUND_NS);
-        loop {
-            let ctl = self.regs.read(RNG_CTL);
-            if ctl & CTL_START == 0 {
-                break;
-            }
-            if (self.clock)() >= end {
-                return Err(Error::Timeout(ctl));
-            }
-            core::hint::spin_loop();
+        let mut ctl = 0;
+        if !dev::poll_until(self.clock, ROUND_NS, || {
+            ctl = self.regs.read(RNG_CTL);
+            ctl & CTL_START == 0
+        }) {
+            return Err(Error::Timeout(ctl));
         }
         let mut out = [0u8; ROUND];
         for (i, w) in out.chunks_exact_mut(4).enumerate() {

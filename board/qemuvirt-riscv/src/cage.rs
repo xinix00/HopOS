@@ -103,15 +103,13 @@ fn revoke(ctx: Pa) {
 }
 
 fn wait_state(ctx: Pa, want: u64, ms: u64) -> u64 {
-    let until = cpu::riscv::idle::now().saturating_add(ms * 1_000_000);
-    loop {
+    let mut s = 0;
+    let _ = dev::poll_until(cpu::riscv::idle::now, ms * 1_000_000, || {
         dev::pull(ctx, 8);
-        let s = dev::read64(ctx.add(CTX_STATE));
-        if s == want || cpu::riscv::idle::now() >= until {
-            return s;
-        }
-        core::hint::spin_loop();
-    }
+        s = dev::read64(ctx.add(CTX_STATE));
+        s == want
+    });
+    s
 }
 
 /// De zelftest: `sched` en `ctx` zijn het sched-blok van hart `hart` en het

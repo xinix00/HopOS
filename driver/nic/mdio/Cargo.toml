@@ -6,5 +6,8 @@ rust-version.workspace = true
 publish.workspace = true
 description = "De gedeelde clause-22-PHY-laag: scan, autonegotiatie, link-decodering, en de RTL8211F-delays."
 
+[dependencies]
+dev = { path = "../../../dev" }
+
 [lints]
 workspace = true

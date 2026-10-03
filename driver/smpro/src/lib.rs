@@ -210,12 +210,8 @@ impl Smpro {
         // Linux budgetteert 500 maal de PCCT-latentie; hetzelfde, met een
         // vloer.
         let budget = (u64::from(self.pcc.latency_us) * 500_000).max(BUDGET_FLOOR_NS);
-        let deadline = (self.clock)().saturating_add(budget);
-        while s.cmd_status.read() & complete == 0 {
-            if (self.clock)() >= deadline {
-                return None;
-            }
-            core::hint::spin_loop();
+        if !dev::poll_until(self.clock, budget, || s.cmd_status.read() & complete != 0) {
+            return None;
         }
         self.pending = false;
         dev::mb();

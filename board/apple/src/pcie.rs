@@ -148,23 +148,9 @@ fn rmw(a: u64, clear: u32, set: u32) {
     dev::mb();
 }
 
+/// Wacht tot `(read32(a) & mask) == want`, hoogstens `ns` (m1n1 `poll32`).
 fn poll(a: u64, mask: u32, want: u32, ns: u64) -> bool {
-    let t0 = now();
-    loop {
-        if dev::read32(Pa(a)) & mask == want {
-            return true;
-        }
-        if now().saturating_sub(t0) > ns {
-            return false;
-        }
-    }
-}
-
-fn sleep_ns(ns: u64) {
-    let t0 = now();
-    while now().saturating_sub(t0) < ns {
-        core::hint::spin_loop();
-    }
+    dev::poll_until(now, ns, || dev::read32(Pa(a)) & mask == want)
 }
 
 /// Meldt de volgende stap en zet een barrière, zodat een uitgestelde abort
@@ -225,7 +211,7 @@ pub fn init() -> Result<&'static str, Why> {
     // 3. De PHY: twee klokken, dan uit reset.
     phy_clocks(phy)?;
     rmw(phy + PHY_CTRL, PHY_RESET_T8132, 0);
-    sleep_ns(MS);
+    dev::delay(now, MS);
     rmw(phy + 4, 0, 0x01);
     apply(node, "apcie-phy-ip-pll-tunables", phy_ip);
     apply(node, "apcie-phy-ip-auspma-tunables", phy_ip);
@@ -435,10 +421,10 @@ pub fn link_up(timeout_ns: u64) -> Result<(), Why> {
     }
     rmw(b + PORT_APPCLK, 0, 1);
     gpio_set(ETH_PERST_PIN, false);
-    sleep_ns(10 * MS);
+    dev::delay(now, 10 * MS);
     rmw(b + PORT_PERST, 0, 1);
     gpio_set(ETH_PERST_PIN, true);
-    sleep_ns(100 * MS);
+    dev::delay(now, 100 * MS);
     if dev::read32(Pa(b + PORT_STATUS)) & 1 == 0 {
         return Err("apcie: ethernet port not ready");
     }
@@ -537,7 +523,7 @@ pub fn enumerate_nic() -> Result<Endpoint, Why> {
     e.write32(br, 0x2c, (end >> 32) as u32);
     e.write32(br, 0x20, 0x0000_fff0);
     dev::mb();
-    sleep_ns(10 * MS);
+    dev::delay(now, 10 * MS);
     let f = driver_pcie::find(&e, ETH_BUS, |f| !f.is_bridge()).ok_or("link up but no endpoint")?;
     let mut win = MmioWindow::new(MMIO, MMIO_SIZE);
     let bars = f

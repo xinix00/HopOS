@@ -330,14 +330,17 @@ impl Mbox {
     /// van zijn voorganger: 0.0 graden, ARM 0 MHz).
     fn drain(&self) -> Result {
         let r = self.regs();
-        let deadline = (self.clock)().saturating_add(TIMEOUT_NS);
-        while r.status0.read() & STATUS_EMPTY == 0 {
-            if (self.clock)() > deadline {
-                return Err(Error::Timeout { stage: "drain" });
+        let empty = || {
+            let empty = r.status0.read() & STATUS_EMPTY != 0;
+            if !empty {
+                let _ = r.read.read();
             }
-            let _ = r.read.read();
+            empty
+        };
+        if dev::poll_until(self.clock, TIMEOUT_NS, empty) {
+            return Ok(());
         }
-        Ok(())
+        Err(Error::Timeout { stage: "drain" })
     }
 
     /// Schrijft het bericht en geeft het aan de firmware.
@@ -345,11 +348,10 @@ impl Mbox {
         encode(&mut DevBuf(self.buf), tags)?;
         dev::mb();
         let r = self.regs();
-        let deadline = (self.clock)().saturating_add(TIMEOUT_NS);
-        while r.status1.read() & STATUS_FULL != 0 {
-            if (self.clock)() > deadline {
-                return Err(Error::Timeout { stage: "full" });
-            }
+        if !dev::poll_until(self.clock, TIMEOUT_NS, || {
+            r.status1.read() & STATUS_FULL == 0
+        }) {
+            return Err(Error::Timeout { stage: "full" });
         }
         // Past, want `buffer_ok` toetste de 32 bits.
         let addr = (self.buf.0 as u32) | CH_PROPS;
@@ -362,16 +364,12 @@ impl Mbox {
     /// `pending` staan, zodat de volgende call de buffer niet overschrijft.
     fn wait_reply(&self, addr: u32) -> Result {
         let r = self.regs();
-        let deadline = (self.clock)().saturating_add(TIMEOUT_NS);
-        loop {
-            if r.status0.read() & STATUS_EMPTY == 0 && r.read.read() == addr {
-                return Ok(());
-            }
-            if (self.clock)() > deadline {
-                return Err(Error::Timeout { stage: "reply" });
-            }
-            core::hint::spin_loop();
+        if dev::poll_until(self.clock, TIMEOUT_NS, || {
+            r.status0.read() & STATUS_EMPTY == 0 && r.read.read() == addr
+        }) {
+            return Ok(());
         }
+        Err(Error::Timeout { stage: "reply" })
     }
 
     fn one(&mut self, id: u32, words: &mut [u32]) -> Result {

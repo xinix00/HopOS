@@ -242,15 +242,10 @@ impl<R: Regs> Rng200<R> {
     /// of [`WORD_NS`], door de continue toets.
     fn word(&mut self, warmup: bool) -> Result<u32> {
         let budget = if warmup { WARMUP_NS } else { WORD_NS };
-        let end = (self.clock)().saturating_add(budget);
-        loop {
-            if self.regs.read(RNG_FIFO_COUNT) & FIFO_COUNT_MASK != 0 {
-                break;
-            }
-            if (self.clock)() >= end {
-                return Err(Error::Timeout { warmup });
-            }
-            core::hint::spin_loop();
+        if !dev::poll_until(self.clock, budget, || {
+            self.regs.read(RNG_FIFO_COUNT) & FIFO_COUNT_MASK != 0
+        }) {
+            return Err(Error::Timeout { warmup });
         }
         let w = self.regs.read(RNG_FIFO_DATA);
         if self.last == Some(w) {

@@ -304,17 +304,14 @@ impl Channel {
 
     fn wait_free(&self) -> core::result::Result<(), u32> {
         let s = self.shm();
-        let deadline = (self.clock)().saturating_add(TIMEOUT_NS);
-        loop {
-            let st = s.status.read();
-            if st & STATUS_FREE != 0 {
-                return Ok(());
-            }
-            if (self.clock)() >= deadline {
-                return Err(st);
-            }
-            core::hint::spin_loop();
+        let mut st = 0;
+        if dev::poll_until(self.clock, TIMEOUT_NS, || {
+            st = s.status.read();
+            st & STATUS_FREE != 0
+        }) {
+            return Ok(());
         }
+        Err(st)
     }
 
     /// Stuurt één commando en wacht op het antwoord. De volgorde is die van

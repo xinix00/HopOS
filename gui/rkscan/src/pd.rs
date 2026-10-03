@@ -97,7 +97,7 @@ impl Chain {
     /// Wacht tot `mask` in `reg` nul is. De fout draagt de rauwe inhoud,
     /// zodat één boot genoeg is om te weten welke stap bleef hangen.
     fn pmu_wait(&self, step: Step, reg: &Reg<u32>, mask: u32) -> Result {
-        if self.wait(PMU_WAIT_NS, || reg.read() & mask == 0) {
+        if dev::poll_until(self.clock, PMU_WAIT_NS, || reg.read() & mask == 0) {
             return Ok(());
         }
         let off = core::ptr::from_ref(reg).addr() - self.b.pmu.as_usize();

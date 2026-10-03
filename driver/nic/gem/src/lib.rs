@@ -360,13 +360,6 @@ impl Gem {
         unsafe { regs(self.base) }
     }
 
-    fn delay(&self, ns: u64) {
-        let end = (self.clock)().saturating_add(ns);
-        while (self.clock)() < end {
-            core::hint::spin_loop();
-        }
-    }
-
     /// Alleen de management-poort aan: MDIO-scan zonder verder iets te
     /// initialiseren.
     pub fn mdio_enable(&mut self) {
@@ -567,7 +560,7 @@ impl netdev::Device for Gem {
             if r.txstatus.read() & TX_GO == 0 {
                 r.nwctrl.write(start);
             }
-            self.delay(10_000);
+            dev::delay(self.clock, 10_000);
         }
         self.tx_head = (self.tx_head + 1) % N_TX;
         Ok(())

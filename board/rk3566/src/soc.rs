@@ -47,10 +47,7 @@ fn delay_ms(ms: u64) {
 /// Busy-wait van `us` microseconden op de architectuurklok: de korte
 /// wachten van de SoC-glue (resets, analoge voorkanten), alleen bij boot.
 pub(crate) fn delay_us(us: u64) {
-    let until = cpu::idle::now().saturating_add(us.saturating_mul(1000));
-    while cpu::idle::now() < until {
-        core::hint::spin_loop();
-    }
+    dev::delay(cpu::idle::now, us.saturating_mul(1000));
 }
 
 // --- CRU: de GMAC1-klokken ------------------------------------------------

@@ -188,10 +188,7 @@ fn discover(mbox: &RefCell<Option<Mbox>>) -> Option<Desc> {
                 // De watchdog van de vorige kern loopt door dit geduld heen
                 // (een flip-landing, 30-09): elke stap een herlaad.
                 crate::watchdog::reload_if_armed(crate::watchdog::MAX_MS);
-                let until = cpu::idle::now().saturating_add(FB_STEP_NS);
-                while cpu::idle::now() < until {
-                    core::hint::spin_loop();
-                }
+                dev::delay(cpu::idle::now, FB_STEP_NS);
             }
             Err(e) => {
                 cpu::println!("fb: mailbox framebuffer: {e} HOPOS_FB_NONE");

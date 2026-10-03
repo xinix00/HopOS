@@ -36,7 +36,7 @@ use board_raspi::{NicCtx, Raspi, Soc};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use cpu::irq::{Line, Trigger};
 use dev::Pa;
-use driver_brcmpcie::{EpBar, InWin, OutWin, Rc, delay};
+use driver_brcmpcie::{EpBar, InWin, OutWin, Rc};
 use driver_gem::Gem;
 use driver_pl011::Pl011;
 
@@ -156,9 +156,9 @@ impl Soc for Bcm2712 {
         // (actief laag, DT phy-reset-gpios; gemeten: zonder dit géén PHY op
         // MDIO).
         rp1_gpio_out(32, false);
-        delay(ctx.clock, 10_000_000);
+        dev::delay(ctx.clock, 10_000_000);
         rp1_gpio_out(32, true);
-        delay(ctx.clock, 50_000_000);
+        dev::delay(ctx.clock, 50_000_000);
 
         // SAFETY: RP1_ETH ligt achter de net getrainde link in het
         // outbound-window (Device-gigabyte 124); de NIC-regio is van deze

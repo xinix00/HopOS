@@ -162,10 +162,7 @@ pub fn boot_param(key: &'static str) -> &'static str {
 
 /// Wacht `us` microseconden op de TIME-CSR.
 fn wait_us(us: u64) {
-    let until = cpu::riscv::idle::now().saturating_add(us.saturating_mul(1000));
-    while cpu::riscv::idle::now() < until {
-        core::hint::spin_loop();
-    }
+    dev::delay(cpu::riscv::idle::now, us.saturating_mul(1000));
 }
 
 /// De LicheeRV Nano als board.

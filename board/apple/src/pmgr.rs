@@ -161,8 +161,7 @@ impl<'a> Pmgr<'a> {
             }
             dev::write32(a, dev::read32(a) | DEV_DISABLE);
             dev::write32(a, dev::read32(a) | RESET);
-            let t0 = now();
-            while now().saturating_sub(t0) < 10_000 {}
+            dev::delay(now, 10_000);
             dev::write32(a, dev::read32(a) & !RESET);
             dev::write32(a, dev::read32(a) & !DEV_DISABLE);
             done += 1;
@@ -177,15 +176,7 @@ fn set_state(a: u64, mode: u32) -> bool {
     let a = Pa(a);
     let v = dev::read32(a) & !(AUTO_ENABLE | WAS_CLK_GATED | WAS_PWR_GATED | PS_TARGET);
     dev::write32(a, v | mode);
-    let t0 = now();
-    loop {
-        if (dev::read32(a) >> 4) & 0xf == mode {
-            return true;
-        }
-        if now().saturating_sub(t0) > POLL_NS {
-            return false;
-        }
-    }
+    dev::poll_until(now, POLL_NS, || (dev::read32(a) >> 4) & 0xf == mode)
 }
 
 /// Past de tunables `prop` van node `n` toe op `base`: 24 bytes per regel

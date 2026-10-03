@@ -183,16 +183,11 @@ fn hits_within(bell: &Signal, ns: u64) -> u32 {
 /// verstreken is.
 fn fires_within(bell: &Signal, ns: u64) -> Option<u64> {
     let t0 = cpu::idle::now();
-    loop {
+    let fired = dev::poll_until(cpu::idle::now, ns, || {
         let _ = dispatch();
-        let dt = cpu::idle::now().saturating_sub(t0);
-        if bell.take() {
-            return Some(dt);
-        }
-        if dt > ns {
-            return None;
-        }
-    }
+        bell.take()
+    });
+    fired.then(|| cpu::idle::now().saturating_sub(t0))
 }
 
 /// Wat één dispatch-ronde zag, voor `board::Dispatched`.

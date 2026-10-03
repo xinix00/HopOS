@@ -245,15 +245,6 @@ fn reg(pa: Pa) -> &'static Reg<u32> {
     unsafe { dev::regs(pa) }
 }
 
-/// Spint `ns` nanoseconden op `clock` (de klok die het board aan [`Rc`]
-/// geeft; de Pi 5 wacht er ook zijn RP1-resets mee).
-pub fn delay(clock: fn() -> u64, ns: u64) {
-    let end = clock().saturating_add(ns);
-    while clock() < end {
-        core::hint::spin_loop();
-    }
-}
-
 /// Kalibreert het gedeelde analoge blok (brcm,bcm7216-pcie-sata-rescal;
 /// BCM2712: 0x10_0011_9500). Eén keer per boot, vóór de eerste
 /// bridge-reset: START zetten, teruglezen, STATUS pollen, START wissen
@@ -276,7 +267,7 @@ pub unsafe fn rescal(base: Pa, clock: fn() -> u64) -> bool {
             ok = true;
             break;
         }
-        delay(clock, 100_000);
+        dev::delay(clock, 100_000);
     }
     start.update(|v| v & !1);
     ok
@@ -456,11 +447,11 @@ impl Rc {
         if self.soc == Soc::Bcm2711 {
             self.perst(true);
         }
-        delay(self.clock, 200_000);
+        dev::delay(self.clock, 200_000);
         self.bridge_reset(false);
-        delay(self.clock, 200_000);
+        dev::delay(self.clock, 200_000);
         self.r(self.hard_debug()).update(|v| v & !HD_SERDES_IDDQ);
-        delay(self.clock, 200_000);
+        dev::delay(self.clock, 200_000);
 
         // SCB_ACCESS_EN | CFG_READ_UR_MODE (een config-read naar niets geeft
         // all-ones in plaats van een abort) | RCB_MPS | RCB_64B, en
@@ -539,7 +530,7 @@ impl Rc {
         ] {
             self.mdio_write(0, r, v);
         }
-        delay(self.clock, 200_000);
+        dev::delay(self.clock, 200_000);
         // PM-klokperiode 18,52 ns = 1/54 MHz.
         self.r(off::CFG_PHY_CTL15).update(|v| (v & !0xff) | 0x12);
         self.r(off::MISC_UBUS_CTRL)
@@ -589,13 +580,13 @@ impl Rc {
             v & !(HD_CLKREQ_DEBUG | HD_REFCLK_OVRD_EN | HD_REFCLK_OVRD_OUT | HD_L1SS_ENABLE)
         });
         self.perst(false);
-        delay(self.clock, 100_000_000);
+        dev::delay(self.clock, 100_000_000);
         for _ in 0..40 {
             let l = self.link_status();
             if l.0 && l.1 {
                 return l;
             }
-            delay(self.clock, 5_000_000);
+            dev::delay(self.clock, 5_000_000);
         }
         self.link_status()
     }
@@ -719,7 +710,7 @@ impl Rc {
         let cmd = self.cfg_read32(1, 0, 0, off::CFG_COMMAND);
         self.cfg_write32(1, 0, 0, off::CFG_COMMAND, cmd & !CMD_BUS_MASTER);
         // Wat al onderweg was, komt nog aan; er vertrekt niets nieuws meer.
-        delay(self.clock, 1_000_000);
+        dev::delay(self.clock, 1_000_000);
         self.perst(true);
     }
 

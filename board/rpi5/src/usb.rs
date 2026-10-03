@@ -86,16 +86,7 @@ fn halt(base: Pa, clock: fn() -> u64) -> bool {
     }
     let op = base.add(u64::from(caplen));
     dev::write32(op, dev::read32(op) & !USBCMD_RS);
-    let end = clock().saturating_add(HALT_NS);
-    loop {
-        if dev::read32(op.add(4)) & USBSTS_HCH != 0 {
-            return true;
-        }
-        if clock() >= end {
-            return false;
-        }
-        core::hint::spin_loop();
-    }
+    dev::poll_until(clock, HALT_NS, || dev::read32(op.add(4)) & USBSTS_HCH != 0)
 }
 
 #[cfg(test)]

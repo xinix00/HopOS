@@ -521,33 +521,6 @@ impl Tg3 {
         unsafe { dev::regs(self.cfg) }
     }
 
-    /// Spint `ns` nanoseconden op de klok.
-    fn sleep(&self, ns: u64) {
-        let until = (self.now)().saturating_add(ns);
-        while (self.now)() < until {
-            core::hint::spin_loop();
-        }
-    }
-
-    /// Wacht begrensd tot `done`, met `pause` nanoseconden tussen twee
-    /// blikken; na de grens telt nog één laatste blik.
-    fn wait(&self, budget: u64, pause: u64, mut done: impl FnMut(&Self) -> bool) -> bool {
-        let deadline = (self.now)().saturating_add(budget);
-        loop {
-            if done(self) {
-                return true;
-            }
-            if (self.now)() >= deadline {
-                return done(self);
-            }
-            if pause > 0 {
-                self.sleep(pause);
-            } else {
-                core::hint::spin_loop();
-            }
-        }
-    }
-
     // ── Reset ───────────────────────────────────────────────────────────────
 
     /// `tg3_enable_register_access`: MISC_HOST_CTRL zo zetten dat
@@ -593,15 +566,15 @@ impl Tg3 {
         // register is wat we willen.
         let r = self.regs();
         wr(&r.mac_mode, MAC_MODE_HALF_DUPLEX);
-        self.sleep(MS);
+        dev::delay(self.now, MS);
         wr(&r.grc_misc_cfg, GRC_MISC_CFG_PCIE);
         wr(
             &r.grc_misc_cfg,
             GRC_MISC_CFG_PCIE | GRC_MISC_CFG_CORECLK_RESET,
         );
-        self.sleep(120 * US);
+        dev::delay(self.now, 120 * US);
         let _ = c.command.read(); // posted write eruit duwen; tg3 doet exact dit
-        self.sleep(120 * US);
+        dev::delay(self.now, 120 * US);
 
         // `tg3_restore_pci_state`: venster terug, retry-gedrag, command-bits
         // terug.
@@ -616,8 +589,14 @@ impl Tg3 {
 
         // Antwoordt hij weer? De config-shadow op offset 0 draagt
         // vendor/device.
-        let answers = |n: &Self| n.regs().cfg.id.read() & 0xffff == u32::from(VENDOR);
-        if !self.wait(500 * MS, 5 * MS, answers) {
+        let answers = || {
+            let up = r.cfg.id.read() & 0xffff == u32::from(VENDOR);
+            if !up {
+                dev::delay(self.now, 5 * MS);
+            }
+            up
+        };
+        if !dev::poll_until(self.now, 500 * MS, answers) {
             return Err(Error::NoAnswer {
                 id: r.cfg.id.read(),
             });
@@ -636,8 +615,8 @@ impl Tg3 {
     /// nul, een levend `0xb49a89ab`.
     fn poll_firmware(&self) -> u32 {
         let mut val = 0;
-        self.wait(1_000 * MS, 0, |n| {
-            val = n.read_mem(SRAM_FW_MBOX);
+        let _ = dev::poll_until(self.now, 1_000 * MS, || {
+            val = self.read_mem(SRAM_FW_MBOX);
             val == !FW_MBOX_MAGIC1
         });
         val
@@ -808,8 +787,8 @@ impl Tg3 {
         wr(&r.bufmgr_dma_low, 0x5);
         wr(&r.bufmgr_dma_high, 0xa);
         wr(&r.bufmgr_mode, MODE_ENABLE | MODE_ATTN);
-        let on = |n: &Self| n.regs().bufmgr_mode.read() & MODE_ENABLE != 0;
-        if self.wait(100 * MS, 0, on) {
+        let on = || r.bufmgr_mode.read() & MODE_ENABLE != 0;
+        if dev::poll_until(self.now, 100 * MS, on) {
             return Ok(());
         }
         Err(Error::BufMgr {
@@ -923,8 +902,8 @@ impl Tg3 {
     fn start_coalescing(&self) {
         let r = self.regs();
         wr(&r.hostcc_mode, 0);
-        let off = |n: &Self| n.regs().hostcc_mode.read() & MODE_ENABLE == 0;
-        let _ = self.wait(50 * MS, 0, off);
+        let off = || r.hostcc_mode.read() & MODE_ENABLE == 0;
+        let _ = dev::poll_until(self.now, 50 * MS, off);
         wr(&r.hostcc_rx_ticks, 60);
         wr(&r.hostcc_tx_ticks, 60);
         wr(&r.hostcc_rx_frames, 1); // één frame is genoeg om het blok bij te werken
@@ -951,7 +930,7 @@ impl Tg3 {
             &r.mac_mode,
             r.mac_mode.read() | MAC_MODE_RUN | MAC_MODE_RXSTAT_CLEAR | MAC_MODE_TXSTAT_CLEAR,
         );
-        self.sleep(40 * US);
+        dev::delay(self.now, 40 * US);
 
         // De DMA-engines. De FIFO-overflow-fix hoort bij 57765-plus.
         wr(
@@ -962,7 +941,7 @@ impl Tg3 {
             &r.wdmac_mode,
             MODE_ENABLE | DMAC_ERR_ENAB | WDMAC_STATUS_TAG_FIX,
         );
-        self.sleep(40 * US);
+        dev::delay(self.now, 40 * US);
         wr(
             &r.rdmac_mode,
             MODE_ENABLE
@@ -971,7 +950,7 @@ impl Tg3 {
                 | RDMAC_IPV6_LSO_EN
                 | RDMAC_JMB_2K_MMRR,
         );
-        self.sleep(40 * US);
+        dev::delay(self.now, 40 * US);
 
         // En de blokken erboven.
         wr(&r.rcvdcc_mode, MODE_ENABLE | MODE_ATTN);
@@ -985,9 +964,9 @@ impl Tg3 {
 
         // Pas nu de MAC zelf.
         wr(&r.tx_mode, TX_MODE_ENABLE | TX_MODE_MBUF_LOCKUP_FIX);
-        self.sleep(100 * US);
+        dev::delay(self.now, 100 * US);
         wr(&r.rx_mode, RX_MODE_ENABLE | RX_MODE_IPV6_CSUM);
-        self.sleep(10 * US);
+        dev::delay(self.now, 10 * US);
         wr(&r.mi_stat, MI_STAT_LNKSTAT_ATTN);
         wr(&r.low_wmark, 1); // 57765-klasse: niet droppen bij flow control
     }
@@ -998,7 +977,7 @@ impl Tg3 {
     /// MI_COM-transacties met de zijne.
     fn mdio_setup(&self) {
         wr(&self.regs().mi_mode, MI_MODE_BASE);
-        self.sleep(40 * US);
+        dev::delay(self.now, 40 * US);
     }
 
     /// Eén MI_COM-transactie, begrensd op 50 ms.
@@ -1007,8 +986,8 @@ impl Tg3 {
         let addr =
             u32::from(phy & 0x1f) << MI_COM_PHY_SHIFT | u32::from(reg & 0x1f) << MI_COM_REG_SHIFT;
         wr(&r.mi_com, cmd | MI_COM_BUSY | addr);
-        let idle = |n: &Self| n.regs().mi_com.read() & MI_COM_BUSY == 0;
-        if self.wait(MDIO_NS, 0, idle) {
+        let idle = || r.mi_com.read() & MI_COM_BUSY == 0;
+        if dev::poll_until(self.now, MDIO_NS, idle) {
             return Ok((r.mi_com.read() & MI_COM_DATA_MASK) as u16);
         }
         Err(Error::Mdio {
@@ -1047,31 +1026,34 @@ impl Tg3 {
             let v = bmcr | mdio::BMCR_AN_ENABLE | mdio::BMCR_AN_RESTART;
             self.mdio_write(PHY_ADDR, mdio::reg::BMCR, v)?;
         }
-        let deadline = (self.now)().saturating_add(timeout_ns);
-        loop {
-            // BMSR twee keer: het link-bit is latching-laag.
-            let _ = self.mdio_read(PHY_ADDR, mdio::reg::BMSR)?;
-            let bmsr = self.mdio_read(PHY_ADDR, mdio::reg::BMSR)?;
-            if bmsr & mdio::BMSR_LINK != 0 {
-                let link = decode_aux(self.mdio_read(PHY_ADDR, MII_AUX_STAT)?)?;
-                self.set_port_mode(link);
-                // Het adres nog eens, ná de link: de bootcode van de chip zet
-                // na de reset Broadcom's default (00:10:18:00:00:00) terug in
-                // MAC_ADDR_0, ook nadat hij zijn mailbox-magic gaf, en de M4
-                // (01-10) nam daardoor geen unicast aan (de diagnoseregel las
-                // de default terug). Go schreef het adres pas in Init, ná
-                // LinkUp, en had er geen last van.
-                self.set_mac();
-                return Ok(link);
+        // BMSR twee keer: het link-bit is latching-laag.
+        let mut bmsr = Ok(0);
+        let up = dev::poll_until(self.now, timeout_ns, || {
+            bmsr = self
+                .mdio_read(PHY_ADDR, mdio::reg::BMSR)
+                .and_then(|_| self.mdio_read(PHY_ADDR, mdio::reg::BMSR));
+            let up = bmsr.map_or(true, |b| b & mdio::BMSR_LINK != 0);
+            if !up {
+                dev::delay(self.now, LINK_POLL_NS);
             }
-            if (self.now)() >= deadline {
-                return Err(Error::NoLink {
-                    bmsr,
-                    ms: timeout_ns / MS,
-                });
-            }
-            self.sleep(LINK_POLL_NS);
+            up
+        });
+        let bmsr = bmsr?;
+        if !up {
+            return Err(Error::NoLink {
+                bmsr,
+                ms: timeout_ns / MS,
+            });
         }
+        let link = decode_aux(self.mdio_read(PHY_ADDR, MII_AUX_STAT)?)?;
+        self.set_port_mode(link);
+        // Het adres nog eens, ná de link: de bootcode van de chip zet na de
+        // reset Broadcom's default (00:10:18:00:00:00) terug in MAC_ADDR_0,
+        // ook nadat hij zijn mailbox-magic gaf, en de M4 (01-10) nam daardoor
+        // geen unicast aan (de diagnoseregel las de default terug). Go schreef
+        // het adres pas in Init, ná LinkUp, en had er geen last van.
+        self.set_mac();
+        Ok(link)
     }
 
     /// De MAC in de modus die bij de snelheid hoort: GMII voor gigabit, MII

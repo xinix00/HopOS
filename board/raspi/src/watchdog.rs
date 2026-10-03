@@ -101,10 +101,7 @@ fn arm_at(pm: Pa, timeout_ms: u64, now: fn() -> u64) -> Result<Desc, &'static st
             PASSWORD | (rstc & !WRCFG_MASK & !0xff00_0000) | WRCFG_FULL_RESET,
         );
         dev::mb();
-        let end = now().saturating_add(PROBE_NS);
-        while now() < end {
-            core::hint::spin_loop();
-        }
+        dev::delay(now, PROBE_NS);
         let left = dev::read32(pm.add(WDOG)) & TICKS_MASK;
         if left == 0 || left >= ticks {
             // Geen watchdog: WRCFG terug naar clear, zodat er ook geen

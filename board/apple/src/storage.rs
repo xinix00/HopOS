@@ -174,8 +174,7 @@ pub(crate) fn probe_disk(cfg: &str) -> Result<Option<Disk>, Error> {
             if n == 0 {
                 return Err(Error::Disk("no ANS power domain to reset"));
             }
-            let t0 = now();
-            while now().saturating_sub(t0) < 100_000_000 {}
+            dev::delay(now, 100_000_000);
             crate::serror_check("the ANS reset");
             open(asc, nvmmu, nvme, secure_bar).map_err(Error::Disk)?
         }

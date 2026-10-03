@@ -558,22 +558,6 @@ impl Igb {
         unsafe { dev::regs(self.base) }
     }
 
-    /// Wacht tot `done` of tot `ns` op de klok verstreken is; met een
-    /// `done` die nooit waar wordt, een pauze van `ns`.
-    fn wait(&self, ns: u64, mut done: impl FnMut(&Regs) -> bool) -> bool {
-        let r = self.regs();
-        let deadline = (self.clock)().saturating_add(ns);
-        loop {
-            if done(r) {
-                return true;
-            }
-            if (self.clock)() >= deadline {
-                return done(r);
-            }
-            core::hint::spin_loop();
-        }
-    }
-
     /// De `igb_reset_hw`-kern: interrupts dicht, RX/TX uit, CTRL.RST,
     /// wachten tot hij zichzelf wist, interrupts opnieuw dicht, en het MAC
     /// uit RAL0/RAH0. Daar laadt de NVM het na een reset (I210-aanname,
@@ -591,8 +575,8 @@ impl Igb {
         r.tctl.write(TCTL_PSP);
         dev::mb();
         r.ctrl.update(|v| v | CTRL_RST);
-        let _ = self.wait(RESET_PAUSE_NS, |_| false);
-        if !self.wait(RESET_NS, |r| r.ctrl.read() & CTRL_RST == 0) {
+        dev::delay(self.clock, RESET_PAUSE_NS);
+        if !dev::poll_until(self.clock, RESET_NS, || r.ctrl.read() & CTRL_RST == 0) {
             return Err(Error::ResetStuck {
                 ctrl: r.ctrl.read(),
             });
@@ -650,11 +634,9 @@ impl Igb {
     }
 
     fn wait_queue(&self, tx: bool) -> Result {
-        let ok = self.wait(QUEUE_NS, |r| {
-            let v = if tx { r.txdctl.read() } else { r.rxdctl.read() };
-            v & Q_ENABLE != 0
-        });
-        if ok {
+        let r = self.regs();
+        let q = if tx { &r.txdctl } else { &r.rxdctl };
+        if dev::poll_until(self.clock, QUEUE_NS, || q.read() & Q_ENABLE != 0) {
             Ok(())
         } else {
             Err(Error::QueueStuck { tx })
@@ -683,17 +665,19 @@ impl Igb {
     /// [`start_link`](Self::start_link) en dan begrensd wachten.
     pub fn link_up(&mut self, timeout_ns: u64) -> Result<Link> {
         self.start_link()?;
-        self.wait(timeout_ns, |r| r.status.read() & STATUS_LU != 0);
+        let r = self.regs();
+        let _ = dev::poll_until(self.clock, timeout_ns, || r.status.read() & STATUS_LU != 0);
         self.link().ok_or(Error::NoLink {
-            status: self.regs().status.read(),
+            status: r.status.read(),
             ms: timeout_ns / 1_000_000,
         })
     }
 
     fn mdic_wait(&self, phy: u8, reg: u8) -> mdio::Result<u32> {
+        let mdic = &self.regs().mdic;
         let mut v = 0;
-        self.wait(MDIC_NS, |r| {
-            v = r.mdic.read();
+        let _ = dev::poll_until(self.clock, MDIC_NS, || {
+            v = mdic.read();
             v & (MDIC_READY | MDIC_ERROR) != 0
         });
         if v & MDIC_ERROR != 0 || v & MDIC_READY == 0 {

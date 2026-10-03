@@ -182,16 +182,11 @@ impl Altra {
     /// of `ns` verstreken is.
     fn bell_within(&self, ns: u64) -> Option<u64> {
         let t0 = cpu::idle::now();
-        loop {
+        let rang = dev::poll_until(cpu::idle::now, ns, || {
             let _ = self.uefi.dispatch_interrupts();
-            let dt = cpu::idle::now().saturating_sub(t0);
-            if NIC_BELL.take() {
-                return Some(dt / 1_000);
-            }
-            if dt > ns {
-                return None;
-            }
-        }
+            NIC_BELL.take()
+        });
+        rang.then(|| cpu::idle::now().saturating_sub(t0) / 1_000)
     }
 
     /// Eén regel na een zelftest die niet aankwam, om te kiezen tussen de

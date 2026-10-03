@@ -16,6 +16,10 @@
 //! store op een niet-8-gealigneerd adres abort. De bulk-helpers doen daarom
 //! een byte-proloog tot 8-alignment, dan 8-byte-woorden, dan een
 //! byte-epiloog (bytes zijn per definitie gealigneerd).
+//!
+//! En de ene wachtlus van elke driver: [`poll_until`] (een register tot het
+//! goed staat, hoogstens zo lang) en [`delay`], op de klok die het board de
+//! driver geeft.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -270,6 +274,40 @@ pub unsafe fn regs<R>(pa: Pa) -> &'static R {
     unsafe { &*(pa.as_usize() as *const R) }
 }
 
+/// Wacht tot `cond` waar is, hoogstens `ns` nanoseconden op de klok `now`
+/// (monotone nanoseconden, de klok die het board de driver gaf): Linux'
+/// `read_poll_timeout` uit include/linux/iopoll.h, spinnend. Geeft of
+/// `cond` waar werd.
+///
+/// Na het verlopen kijkt hij nog één keer, zoals Linux: een wachter die zelf
+/// laat aan de beurt kwam (een interrupt, een trage console) meldt anders een
+/// time-out over een device dat al klaar was. Een wacht met een pauze tussen
+/// twee blikken pauzeert in `cond` ([`delay`]).
+///
+/// Busy-wait: voor de korte wachten van een driver bij de start of in een
+/// call die de core toch al heeft; een taak wacht op de executor.
+#[must_use]
+pub fn poll_until(now: fn() -> u64, ns: u64, mut cond: impl FnMut() -> bool) -> bool {
+    let deadline = now().saturating_add(ns);
+    loop {
+        if cond() {
+            return true;
+        }
+        if now() >= deadline {
+            return cond();
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Spint `ns` nanoseconden op de klok `now` (Linux `ndelay`).
+pub fn delay(now: fn() -> u64, ns: u64) {
+    let end = now().saturating_add(ns);
+    while now() < end {
+        core::hint::spin_loop();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Barrières en cache-onderhoud: per architectuur, op de host een no-op.
 // ---------------------------------------------------------------------------
@@ -508,6 +546,68 @@ mod tests {
         assert!(buf[..5].iter().all(|&b| b == 0xff));
         assert!(buf[5..25].iter().all(|&b| b == 0));
         assert!(buf[25..].iter().all(|&b| b == 0xff));
+    }
+
+    std::thread_local! {
+        static NOW: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+    }
+
+    /// Een klok die per lees één nanoseconde verspringt.
+    fn tick() -> u64 {
+        NOW.with(|n| {
+            n.set(n.get() + 1);
+            n.get()
+        })
+    }
+
+    fn time() -> u64 {
+        NOW.with(core::cell::Cell::get)
+    }
+
+    #[test]
+    fn poll_until_stops_at_the_first_yes() {
+        let mut looks = 0;
+        assert!(poll_until(tick, 1_000, || {
+            looks += 1;
+            looks == 3
+        }));
+        assert_eq!(looks, 3);
+    }
+
+    #[test]
+    fn poll_until_gives_up_after_ns_with_one_last_look() {
+        let start = time();
+        let mut last = 0;
+        assert!(!poll_until(tick, 10, || {
+            last = time();
+            false
+        }));
+        assert!(
+            last >= start + 1 + 10,
+            "the last look comes after the deadline"
+        );
+    }
+
+    #[test]
+    fn a_yes_on_the_last_look_counts() {
+        let deadline = time() + 1 + 10;
+        assert!(poll_until(tick, 10, || time() >= deadline));
+    }
+
+    #[test]
+    fn poll_until_without_end_does_not_overflow() {
+        let mut looks = 0;
+        assert!(poll_until(tick, u64::MAX, || {
+            looks += 1;
+            looks == 5
+        }));
+    }
+
+    #[test]
+    fn delay_spins_at_least_ns() {
+        let start = time();
+        delay(tick, 25);
+        assert!(time() >= start + 1 + 25);
     }
 
     #[repr(C)]
