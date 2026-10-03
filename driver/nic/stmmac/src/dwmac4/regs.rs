@@ -6,7 +6,7 @@ use dev::Reg;
 
 /// De MAC-, MTL- en DMA-registers vanaf de basis.
 #[repr(C)]
-pub(crate) struct Regs {
+pub struct Regs {
     /// GMAC_CONFIG.
     pub(crate) config: Reg<u32>,
     _r0: u32,
@@ -98,7 +98,7 @@ pub(crate) struct Chan {
 }
 
 /// De grootte van het blok tot en met de kanaalstatus.
-pub(crate) const REGS_SIZE: usize = size_of::<Regs>();
+const REGS_SIZE: usize = size_of::<Regs>();
 
 const _: () = {
     assert!(offset_of!(Regs, config) == 0x0000);
@@ -136,20 +136,6 @@ const _: () = {
     assert!(offset_of!(Chan, status) == 0x60);
     assert!(REGS_SIZE == 0x1164);
 };
-
-// De MDIO-velden (dwmac4_core.c `dwmac4_setup` en stmmac_mdio.c).
-/// De machine is bezig.
-pub(crate) const MDIO_BUSY: u32 = 1 << 0;
-/// `MII_GMAC4_WRITE`.
-pub(crate) const MDIO_WRITE: u32 = 1 << 2;
-/// `MII_GMAC4_READ`.
-pub(crate) const MDIO_READ: u32 = 3 << 2;
-/// Het PHY-adres in [25:21].
-pub(crate) const MDIO_ADDR_SHIFT: u32 = 21;
-/// Het register in [20:16].
-pub(crate) const MDIO_REG_SHIFT: u32 = 16;
-/// De CSR-klokrange in [11:8].
-pub(crate) const MDIO_CSR_SHIFT: u32 = 8;
 
 /// De CSR-klokrange voor de MDC-deler (`include/linux/stmmac.h`): de
 /// "stmmaceth"-klok van de RK3566 is SCLK_GMAC1 op 125 MHz (clk-rk3568.c:

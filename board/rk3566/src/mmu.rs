@@ -24,7 +24,7 @@
 //! - 0x0640_0000 tot 0x0780_0000: NIC-DMA, USB-DMA en de framebuffer:
 //!   Normal-NC, behalve het bufferblok van de NIC (`NET_BUF`, 0x0660_0000
 //!   tot 0x0680_0000): Normal-WB en XN, de driver veegt het (een frame uit
-//!   NC kopiëren kostte de A55 35 µs, uit WB 1,9: driver/nic/dwmac4).
+//!   NC kopiëren kostte de A55 35 µs, uit WB 1,9: driver/nic/stmmac, dwmac4).
 //! - 0x0780_0000 tot 0x0880_0000: het staging-venster van de kern-flip.
 //!   Device.
 //! - 0x0880_0000 tot 0x1_0000_0000: de pool, de DTB en de initrd van U-Boot

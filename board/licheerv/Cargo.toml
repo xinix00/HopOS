@@ -19,7 +19,7 @@ net = { path = "../../net" }
 board = { path = "../../board" }
 driver-ns16550 = { path = "../../driver/ns16550" }
 driver-mdio = { path = "../../driver/nic/mdio" }
-driver-dwmac = { path = "../../driver/nic/dwmac" }
+driver-stmmac = { path = "../../driver/nic/stmmac", default-features = false, features = ["dwmac1000"] }
 
 [lints]
 workspace = true

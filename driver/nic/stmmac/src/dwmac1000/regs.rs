@@ -7,7 +7,7 @@ use dev::Reg;
 
 /// De MAC- en DMA-registers vanaf de basis.
 #[repr(C)]
-pub(crate) struct Regs {
+pub struct Regs {
     /// MAC_CONFIG.
     pub(crate) conf: Reg<u32>,
     /// MAC_FRAME_FILTER.
@@ -64,7 +64,7 @@ pub(crate) struct Regs {
 }
 
 /// De grootte van het blok tot en met de huidige RX-descriptor.
-pub(crate) const REGS_SIZE: usize = size_of::<Regs>();
+const REGS_SIZE: usize = size_of::<Regs>();
 
 const _: () = {
     assert!(offset_of!(Regs, conf) == 0x0000);
@@ -91,20 +91,6 @@ const _: () = {
     assert!(offset_of!(Regs, cur_rx_desc) == 0x104C);
     assert!(REGS_SIZE == 0x1050);
 };
-
-// De MDIO-velden in GMII_ADDR (designware.h; Linux stmmac: addr_shift 11,
-// reg_shift 6, clk_csr_shift 2). Andere posities dan de DWMAC4: daarom een
-// eigen crate per generatie.
-/// De machine is bezig; zelf gezet om een transactie te starten.
-pub(crate) const MII_BUSY: u32 = 1 << 0;
-/// Schrijven in plaats van lezen.
-pub(crate) const MII_WRITE: u32 = 1 << 1;
-/// De CSR-klokrange in [5:2].
-pub(crate) const MII_CSR_SHIFT: u32 = 2;
-/// Het register in [10:6].
-pub(crate) const MII_REG_SHIFT: u32 = 6;
-/// Het PHY-adres in [15:11].
-pub(crate) const MII_ADDR_SHIFT: u32 = 11;
 
 /// De CSR-klokrange voor de MDC-deler: eth_csrclk staat op de SG2002 vast
 /// op 250 MHz (dts), dus de range 250-300 MHz = 0b0101 (Linux

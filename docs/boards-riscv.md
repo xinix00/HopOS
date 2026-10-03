@@ -63,7 +63,7 @@ GIC                     PLIC + CLINT
 | T-Head-cache-onderhoud in `dev::push`/`pull` | `dev/src/lib.rs` (feature `thead`) | bouwt |
 | Board QEMU virt riscv64: ns16550, CLINT, PLIC, virtio-mmio net en blk | `board/qemuvirt-riscv` | `tools/qemu-riscv-test.sh` |
 | Board LicheeRV: ns16550 (stride 4), dwmac plus ePHY-recept, CLINT, PLIC, de DW-watchdog (probe, wapenen, aaien), `hopos.cfg` uit een venster in het image, de C906L via het resetblok, appspike in het image | `board/licheerv` | bouwt; host-tests |
-| dwmac (DWMAC1000, 3.x) met elke descriptor en buffer op een eigen cacheline | `driver/nic/dwmac` | 26 host-tests |
+| dwmac (DWMAC1000, 3.x) met elke descriptor en buffer op een eigen cacheline, als ops-tabel op de gedeelde stmmac-kern | `driver/nic/stmmac` (feature `dwmac1000`) | 12 host-tests voor de DWMAC1000, 12 voor de kern |
 | Linkscript | `hopos/link-riscv.ld` (build.rs zet de basis per board) | |
 | FIP uit de donor, gehasht, met `hopos.cfg` en appspike erin | `image/licheerv-agent.sh` | niet op ijzer |
 | De koude kern-flip: het app-hart uit het image (resetblok of de uit-stub van de switcher), de M-mode-trampoline, de bundel (`virt-riscv`, `licheerv`) | `hopos/src/flip.rs`, `cpu/src/el2/chain.rs`, `cpu/src/riscv/switch.rs` (`off_stub`), `image/flip-bundle.sh` | QEMU: `tools/qemu-riscv-test-flip.sh`; niet op ijzer |

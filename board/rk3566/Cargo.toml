@@ -19,7 +19,7 @@ board = { path = "../../board" }
 driver-ns16550 = { path = "../../driver/ns16550" }
 driver-gicv3 = { path = "../../driver/gicv3" }
 driver-mdio = { path = "../../driver/nic/mdio" }
-driver-dwmac4 = { path = "../../driver/nic/dwmac4" }
+driver-stmmac = { path = "../../driver/nic/stmmac", default-features = false, features = ["dwmac4"] }
 # Het TRNG-blok van de SoC: de bron van de DRBG van de kern (rng.rs).
 driver-rkrng = { path = "../../driver/rkrng" }
 # De beschrijving van een framebuffer (`Board::framebuffer`): ook zonder

@@ -67,10 +67,10 @@ use board::{Board, CoreClass, Dispatched, Error, NoDisk, Plan, Region};
 use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use dev::Pa;
-use driver_dwmac4::{CSR_100_150M, Dwmac4, IrqAck, Probe};
 use driver_gicv3::{Gic, SysRegIcc};
 use driver_mdio::{Phy, rtl8211f};
 use driver_ns16550::Ns16550;
+use driver_stmmac::dwmac4::{self, CSR_100_150M, Dwmac4, IrqAck, Probe};
 use fw::fdt::Fdt;
 use netdev::Mac;
 use sync::{Local, Signal};
@@ -133,10 +133,10 @@ pub const NET_DMA: Region = Region {
 /// Het bufferblok van de dwmac4 binnen [`NET_DMA`] (zijn `BUF_OFF`):
 /// Normal-WB en niet uitvoerbaar (`mmu`), de driver veegt het zelf, zoals de
 /// net-wb van de O6N en de Altra. Het waarom en de meting: de crate-doc van
-/// driver/nic/dwmac4.
+/// driver/nic/stmmac (dwmac4).
 pub const NET_BUF: Region = Region {
-    base: Pa(NET_DMA.base.0 + driver_dwmac4::BUF_OFF),
-    size: driver_dwmac4::BUF_BLOCK,
+    base: Pa(NET_DMA.base.0 + dwmac4::BUF_OFF),
+    size: dwmac4::BUF_BLOCK,
 };
 /// De xHCI-DMA (2 MB), Normal-NC: de twee DWC3-cores (`usb`), elk de helft.
 pub const USB_DMA: Region = Region {
@@ -182,9 +182,9 @@ const CORES_DEFAULT: usize = 4;
 pub const INITRD_MAX: u64 = 16 << 20;
 
 const _: () = {
-    assert!(driver_dwmac4::NEED_BYTES <= NET_DMA.size);
+    assert!(dwmac4::NEED_BYTES <= NET_DMA.size);
     assert!(NET_BUF.end().0 <= NET_DMA.end().0);
-    assert!(NET_DMA.base.0 + driver_dwmac4::NEED_BYTES <= NET_BUF.end().0);
+    assert!(NET_DMA.base.0 + dwmac4::NEED_BYTES <= NET_BUF.end().0);
     assert!(NET_DMA.size == abi::layout::NET_DMA_SIZE);
     assert!(USB_DMA.size == abi::layout::USB_DMA_SIZE);
     assert!(NET_DMA.base.0 == DMA.base.0 && USB_DMA.base.0 == NET_DMA.base.0 + NET_DMA.size);
@@ -766,8 +766,8 @@ impl Board for Rk3566 {
         cpu::println!(
             "net: dwmac4 at {:#x} version {version:#x}, PHY {phy}, link {link}, intid {GMAC1_INTID}, rings {}+{} in {:#x}",
             GMAC1.0,
-            driver_dwmac4::NUM_RX,
-            driver_dwmac4::NUM_TX,
+            dwmac4::NUM_RX,
+            dwmac4::NUM_TX,
             NET_DMA.base.0
         );
         cpu::println!("net: dwmac4 {}", nic.diag());

@@ -17,7 +17,7 @@ wat de console moet tonen en wat een afwijking betekent.
 | Hop als bewoner: de initrd draagt `hopos.cfg` én het image (de container), `discover` haalt hem naar de heap en splitst hem, de rol uit `hopos.stage` | `board/rk3566/src/initrd.rs`, `slots.rs`; `image/radxa-initrd.py` | host-tests: de container uit het script (`testdata/mini.ird`), de oude kale config, zonder image, elk fout getal, de rolcodes, de grens |
 | SoC-glue: klokgates, bronkeuze en snelheidsdeler (CRU), AXI-reset, RGMII-modus (GRF), de gmac1m1-pinmux, de PHY-reset op GPIO3 PC0, de klokken en de reset van het TRNG | `board/rk3566/src/soc.rs` | idem |
 | Identity map: kern-RAM Normal, DMA Normal-NC, de rest Device | `board/rk3566/src/mmu.rs` | const-asserties tegen het plan |
-| DWMAC4: registerblok, ringen, DMA, MTL, MDIO-master, `netdev::Device`, IRQ-ack en rearm | `driver/nic/dwmac4` | 19 host-tests op een nep-registerblok en nep-DMA in RAM |
+| DWMAC4: registerblok, descriptors, MTL, de ops-tabel op de gedeelde stmmac-kern (reset, MDIO-master, ringen, `netdev::Device`, IRQ-ack en rearm) | `driver/nic/stmmac` (feature `dwmac4`) | 12 host-tests voor de DWMAC4, 12 voor de kern op een nagebootste core, op een nep-registerblok en nep-DMA in RAM |
 | MDIO: scan, autonegotiatie, RTL8211F-delays | `driver/nic/mdio` | 10 host-tests (samen met de Pi-port) |
 | Linkscript: Image op 0x0220_0000, tekst op 0x0221_0000 | `hopos/link-rk3566.ld` | het image-script leest het ELF terug |
 | Kaart-image: build, ELF naar arm64-Image, Hop (of een app), de initrd, donor, MBR plus FAT16 | `image/radxa-zero3.sh` | levert het kaart-image en leest het terug: `hopos.img`, `extlinux.conf`, `hopos.cfg` en `hop.elf` komen met hun sha256 uit de FAT (30-09 ook door macOS gemount: dezelfde hashes) |

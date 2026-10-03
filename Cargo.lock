@@ -112,9 +112,9 @@ dependencies = [
  "board",
  "cpu",
  "dev",
- "driver-dwmac",
  "driver-mdio",
  "driver-ns16550",
+ "driver-stmmac",
  "executor",
  "fw",
  "net",
@@ -208,12 +208,12 @@ dependencies = [
  "board",
  "cpu",
  "dev",
- "driver-dwmac4",
  "driver-fb",
  "driver-gicv3",
  "driver-mdio",
  "driver-ns16550",
  "driver-rkrng",
+ "driver-stmmac",
  "executor",
  "fw",
  "gui-rkscan",
@@ -363,26 +363,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "driver-dwmac"
-version = "3.0.6"
-dependencies = [
- "dev",
- "driver-mdio",
- "netdev",
- "sync",
-]
-
-[[package]]
-name = "driver-dwmac4"
-version = "3.0.6"
-dependencies = [
- "dev",
- "driver-mdio",
- "netdev",
- "sync",
-]
-
-[[package]]
 name = "driver-fb"
 version = "3.0.6"
 dependencies = [
@@ -526,6 +506,16 @@ name = "driver-smpro"
 version = "3.0.6"
 dependencies = [
  "dev",
+]
+
+[[package]]
+name = "driver-stmmac"
+version = "3.0.6"
+dependencies = [
+ "dev",
+ "driver-mdio",
+ "netdev",
+ "sync",
 ]
 
 [[package]]

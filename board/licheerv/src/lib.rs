@@ -54,8 +54,8 @@ use cpu::riscv::clint::Clint;
 use cpu::riscv::csr;
 use cpu::riscv::plic::{Plic, machine_context};
 use dev::Pa;
-use driver_dwmac::{Dwmac, IrqAck, Probe};
 use driver_ns16550::Ns16550;
+use driver_stmmac::dwmac1000::{self, Dwmac1000, IrqAck, Probe};
 use netdev::Mac;
 use sync::{Local, Signal};
 
@@ -113,7 +113,7 @@ pub const NET_DMA: Region = Region {
 
 const _: () = {
     assert!(KERN_RAM.end().0 == DMA.base.0);
-    assert!(driver_dwmac::NEED_BYTES <= NET_DMA.size);
+    assert!(dwmac1000::NEED_BYTES <= NET_DMA.size);
     assert!(DMA.end().0 == slots::STAGE_PA);
 };
 
@@ -344,7 +344,7 @@ impl Default for LicheeRv {
 }
 
 impl Board for LicheeRv {
-    type Nic = Dwmac;
+    type Nic = Dwmac1000;
     type Sleeper = cpu::riscv::idle::RvSleeper;
 
     const NAME: &'static str = "licheerv";
@@ -495,8 +495,7 @@ impl Board for LicheeRv {
             }
         }
         // SAFETY: GMAC is de dwmac van de SG2002 met open klokgates.
-        let mut probe =
-            unsafe { Probe::new(GMAC, driver_dwmac::CSR_250_300M, cpu::riscv::idle::now) };
+        let mut probe = unsafe { Probe::new(GMAC, dwmac1000::CSR_250_300M, cpu::riscv::idle::now) };
         let v = probe
             .check()
             .map_err(|_| Error::Nic("no MAC at 0x04070000 (version reads 0 or all-ones)"))?;

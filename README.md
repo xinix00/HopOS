@@ -32,7 +32,7 @@ cpu/        architecture: boot, vectors, EL2 with the switcher and the OS-core
 fw/         firmware readers: FDT, ACPI, bootcfg
 driver/     one crate per device: pl011, ns16550, gicv2, gicv3, pcie, virtio
             (mmio and pci), virtionet, virtioblk, nvme, vcmail, brcmpcie,
-            nic/{mdio, igb, rtl8126, genet, gem, dwmac4}, scmi, smpro, dvfs
+            nic/{mdio, igb, rtl8126, genet, gem, stmmac}, scmi, smpro, dvfs
 net/        the switch, NAT, node networking
 kern/       slots, cage, hopfs, the system API, the kernel flip, the console
 board/      the Board contract; qemuvirt, uefi, o6n, altra, raspi, rpi4,
