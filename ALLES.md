@@ -17,11 +17,11 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 | | QEMU virt | Pi 5 | Pi 4 | Radxa | Altra | O6N | M4 | LicheeRV |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Boot, EL2, kooi, zelftest | ✓ | ✓ P1, 03-10 | ✓ P1, 03-10; koud ✓ de VL805-firmware laadt (P1g) | ✓ X1, 03-10 | ✓ A3, 03-10 (eerste v3-boot; venster A000, 128 cores) | ✓ O2, 03-10 | ✓ M7 | ✓ R13, 03-10 |
-| Hop als bewoner, welcome door de DNAT | ✓ | ✓ P1, in `system` | ✓ P1, in `system` | ✓ X1, in `system` | ✓ A3, in `system` | ✓ O2, in `system` | ✓ | ✓ R10, 03-10 |
-| Kern-flip, warm | ✓ | ✓ P2g tot P4g, 03-10 (a04ffcd: de RP1 eerst stil); koud weigert vroeg en netjes (f2ad39e, HOPOS_FLIP_COLD_NO_WAY_BACK), Hop zet de gestopte taken terug (2180acc, na de volgende koude start van de kaart) | ✓ I | ✓ I | ✓ A4g, 03-10 (gen 2, bewoners en NAT mee) | ✓ H; I ○ koude boot, fix de61b4b | ✓ 01-10; koud – geen PSCI | – niet op riscv64; koud ✓ R10, 03-10 |
-| NIC met interrupt | ✓ | ✓ | – gepold, zoals Go | ✓ | – gepold, bewust (igb) | ✓ | ○ INTx op AIC 1253 gebouwd (225fd1e+), zelftest valt terug op pollen; wacht op de M4 | ✓ R13, 03-10 |
-| Hardware-IRQ (NIC, kick, timer) | ✓ | ✓ | ✓, NIC gepold | ✓ | ✓ A3 (ITS, timer); NIC gepold | ✓ | ✓, NIC gepold | ✓ R13, 03-10 |
-| Gebruik per taak, van de kern en van Hop (cpu, geheugen; slot 0, systeemtaken) | ✓ arm64, 03-10 | ✓ P1, 03-10 | ✓ P1, 03-10 | ✓ X1, 03-10 | ✓ A3, 03-10 | ✓ O2, 03-10 | ○ niet nagelopen | ✓ R13, 03-10 |
+| Hop als bewoner, welcome door de DNAT | ✓ | ✓ P1, in `system` | ✓ P1, in `system` | ✓ X1, in `system` | ✓ A3, in `system` | ✓ O2, in `system` | ✓ M1, HOPOS_HOP_RESUMED met HOPOS_PRIVILEGE | ✓ R10, 03-10 |
+| Kern-flip, warm | ✓ | ✓ P2g tot P4g, 03-10 (a04ffcd: de RP1 eerst stil); koud weigert vroeg en netjes (f2ad39e, HOPOS_FLIP_COLD_NO_WAY_BACK), Hop zet de gestopte taken terug (2180acc, na de volgende koude start van de kaart) | ✓ I | ✓ I | ✓ A4g, 03-10 (gen 2, bewoners en NAT mee) | ✓ H; I ○ koude boot, fix de61b4b | ✓ M1, 03-10 (gen 2, Hop met bevoegdheid mee, spin door); koud – geen PSCI | – niet op riscv64; koud ✓ R10, 03-10 |
+| NIC met interrupt | ✓ | ✓ | – gepold, zoals Go | ✓ | – gepold, bewust (igb) | ✓ | ✓ M1, 03-10 (AIC 1253, eerste interrupt na 6 us) | ✓ R13, 03-10 |
+| Hardware-IRQ (NIC, kick, timer) | ✓ | ✓ | ✓, NIC gepold | ✓ | ✓ A3 (ITS, timer); NIC gepold | ✓ | ✓ M1 (timer-FIQ, fast IPI, NIC op de AIC) | ✓ R13, 03-10 |
+| Gebruik per taak, van de kern en van Hop (cpu, geheugen; slot 0, systeemtaken) | ✓ arm64, 03-10 | ✓ P1, 03-10 | ✓ P1, 03-10 | ✓ X1, 03-10 | ✓ A3, 03-10 | ✓ O2, 03-10 | ✓ M1, 03-10 | ✓ R13, 03-10 |
 | Off-link door de NAT, SNTP | ✓ | ✓ | ✓ | ○ niet nagelopen | ✓ A3 (welcome van GitHub, klok van Hop) | ○ niet nagelopen | ○ niet nagelopen | ○ niet nagelopen |
 | Watchdog gewapend en geaaid | – geen watchdog in virt | ✓ P1, canary | ✓ P1, canary | ✓ X1, canary | ✓ A3, SBSA, canary | ✓ O2, canary | ✓ | ✓ R3, 03-10 |
 | Hardware-RNG voor de kern | ✗ alleen jitter | ✓ | ✓ | ✓ | ✗ alleen jitter (geen efi-rng gezien) | ○ wacht op de stick | ✗ alleen jitter | ✗ geen bron |
@@ -41,10 +41,9 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 - [ ] Pi 5 op P4 (kaart met Hop 2180acc): één koude flip laten weigeren en
       zien dat Hop welcome terugzet (`HOP_FLIP_COLD_BACK`).
-- [ ] M4: `scratchpad/art/hopos-apple-M1.flip` (tg3 op AIC 1253 met zelftest,
-      `hopos.nicirq=off` als terugweg) op jouw go; daarna `HOPOS_WAKER_UP`,
-      de koude-flipweigering, de scrub (twee keer dezelfde Go-app) en de
-      canary daar zien. Daarna een nieuw image via Recovery met main.
+- [ ] M4 (op M1 sinds 03-10 avond, NIC op interrupt, wekker en bevoegdheid
+      gezien): nog de scrub (twee keer dezelfde Go-app), de
+      koude-flipweigering, en een nieuw image via Recovery met main.
 - [ ] De prestatie-agent: `scratchpad/fixes/perf.patch` op measurements.md
       toepassen als hij klaar is.
 - [ ] De bump: Hop en HopOS op de volgende versie, release.sh, media.
