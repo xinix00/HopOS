@@ -13,19 +13,19 @@ nog te bewijzen in ronde 1).
 De afvinkmatrix van de Go-tijd (OLD/docs/support.md: boot, idle en klokken,
 devices en diensten per board), nu voor v3 en bijgehouden op ijzer. Legenda:
 ✓ gezien op het board, ○ gebouwd maar op dit board nog niet gezien, ✗ ontbreekt
-of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, ochtend (de Pi 4, de Radxa en de O6N op R2; de LicheeRV op R11).
+of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, ochtend (de Pi 4, de Radxa en de O6N op R2; de LicheeRV op R13, van de kaart).
 Een cel zegt alleen of het slaagt, met hooguit de stempel of een paar
 woorden waarom niet; een gepolde NIC is geen ✓. De getallen staan in
 docs/measurements.md, de details per board in docs/boards-*.md.
 
 | | QEMU virt | Pi 5 | Pi 4 | Radxa | Altra | O6N | M4 | LicheeRV |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Boot, EL2, kooi, zelftest | ✓ | ✓ | ✓; koud ✗ faalt bij USB, fix d0b6bd3 | ✓ | ○ nog nooit geboot | ✓ G | ✓ M7 | ✓ R11, 03-10 |
+| Boot, EL2, kooi, zelftest | ✓ | ✓ | ✓; koud ✗ faalt bij USB, fix d0b6bd3 | ✓ | ○ nog nooit geboot | ✓ G | ✓ M7 | ✓ R13, 03-10 |
 | Hop als bewoner, welcome door de DNAT | ✓ | ✓ | ✓ | ✓ | ○ nog nooit geboot | ✓ | ✓ | ✓ R10, 03-10 |
 | Kern-flip, warm | ✓ | ✗ sterft na de landing | ✓ I | ✓ I | ○ nog nooit geboot | ✓ H; I ○ koude boot, fix de61b4b | ✓ 01-10; koud – geen PSCI | – niet op riscv64; koud ✓ R10, 03-10 |
-| NIC met interrupt | ✓ | ✓ | – gepold, zoals Go | ✓ | – gepold, bewust | ✓ | – gepold, bewust | ✓ R11, 03-10 |
-| Hardware-IRQ (NIC, kick, timer) | ✓ | ✓ | ✓, NIC gepold | ✓ | ○ nog nooit geboot | ✓ | ✓, NIC gepold | ✓ R11, 03-10 |
-| Gebruik per taak, van de kern en van Hop (cpu, geheugen; slot 0, systeemtaken) | ✓ arm64, 03-10 | ○ niet nagelopen | ○ niet nagelopen | ○ niet nagelopen | ○ nog nooit geboot | ○ niet nagelopen | ○ niet nagelopen | ✓ R11, 03-10 |
+| NIC met interrupt | ✓ | ✓ | – gepold, zoals Go | ✓ | – gepold, bewust | ✓ | – gepold, bewust | ✓ R13, 03-10 |
+| Hardware-IRQ (NIC, kick, timer) | ✓ | ✓ | ✓, NIC gepold | ✓ | ○ nog nooit geboot | ✓ | ✓, NIC gepold | ✓ R13, 03-10 |
+| Gebruik per taak, van de kern en van Hop (cpu, geheugen; slot 0, systeemtaken) | ✓ arm64, 03-10 | ○ niet nagelopen | ○ niet nagelopen | ○ niet nagelopen | ○ nog nooit geboot | ○ niet nagelopen | ○ niet nagelopen | ✓ R13, 03-10 |
 | Off-link door de NAT, SNTP | ✓ | ✓ | ✓ | ○ niet nagelopen | ○ nog nooit geboot | ○ niet nagelopen | ○ niet nagelopen | ○ niet nagelopen |
 | Watchdog gewapend en geaaid | – geen watchdog in virt | ✓ | ✓ | ✓ | ○ nog nooit geboot | ✓ | ✓ | ✓ R3, 03-10 |
 | Hardware-RNG voor de kern | ✗ alleen jitter | ✓ | ✓ | ✓ | ○ nog nooit geboot | ○ wacht op de stick | ✗ alleen jitter | ✗ geen bron |
@@ -37,7 +37,7 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 | Opslag (hopfs, volumes, OP_SYNC) | ✓ | – bewust geen schijf | – geen schijf | – stateless, bewust | ○ nog nooit geboot | ✓ | ✓ M24 | – geen SD-driver |
 | Console op 5555 | ✓ | ✓ | ✓ | ✓ | ○ nog nooit geboot | ✓ | ✓ | ○ niet nagelopen |
 | Hardwaredecoder (media-smaak) | – geen media-smaak | – geen media-smaak | – geen media-smaak | – geen media-smaak | – geen media-smaak | ✓ 30-09, weg tot de koude boot | – geen media-smaak | – geen media-smaak |
-| Kaart of stick klaar in `target/` | – niets te flashen | ✓ I | ✓ I | ✓ I | ✓ | ✓ I | ✓ M24 | ✓ R11 |
+| Kaart of stick klaar in `target/` | – niets te flashen | ✓ I | ✓ I | ✓ I | ✓ | ✓ I | ✓ M24 | ✓ R13 |
 
 ## Ronde 0: de ochtend van 03-10, vóór alles
 
