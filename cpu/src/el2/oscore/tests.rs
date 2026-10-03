@@ -108,6 +108,43 @@ fn the_rotation_turns_round_robin_and_sleeps_on_the_earliest_wake() {
 }
 
 #[test]
+fn next_is_the_rule_of_the_switcher() {
+    let (_b, plan) = plan(2);
+    let sched = os_sched(&plan).unwrap();
+    let cage = plan.vec_base_pa();
+    let (c1, c2) = (ctx(&plan, 1), ctx(&plan, 2));
+    host(&plan, c1, 1, 0x1000).unwrap();
+    host(&plan, c2, 1, 0x2000).unwrap();
+    for c in [c1, c2] {
+        ctx_write(c, CTX_STATE, CtxState::Saved.raw());
+        ctx_write(c, CTX_WAKE, 500);
+    }
+    assert_eq!(next(sched, cage, 0), Next::Idle { wake: Some(500) });
+    // RX achter een gewapende deurbel maakt een slaper meteen due, ook
+    // vóór zijn wektijd: de bel van de switch is geen tik.
+    let mut page = vec![0u64; 512];
+    let mut head = vec![0u64; 8];
+    ctx_write(c2, CTX_CTRL_PA, page.as_mut_ptr() as u64);
+    ctx_write(c2, abi::layout::CTX_RING_HEAD_PA, head.as_mut_ptr() as u64);
+    page[(abi::hopabi::CTRL_RX_DOOR / 8) as usize] = 64 | abi::hopabi::RX_DOOR_ARMED;
+    head[0] = 64;
+    assert_eq!(next(sched, cage, 0), Next::Idle { wake: Some(500) });
+    head[0] = 128;
+    assert!(matches!(
+        next(sched, cage, 0),
+        Next::Turn {
+            id: 2,
+            fresh: false,
+            ..
+        }
+    ));
+    // Ingetrokken terwijl hij sliep: dood, zonder beurt.
+    ctx_write(c2, CTX_REVOKE, 1);
+    assert_eq!(next(sched, cage, 0), Next::Idle { wake: Some(500) });
+    assert_eq!(ctx_state(c2), Some(CtxState::Dead));
+}
+
+#[test]
 fn the_kick_is_told_apart_from_an_irq() {
     let (_b, plan) = plan(2);
     fn kick() -> u32 {

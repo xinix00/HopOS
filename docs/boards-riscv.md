@@ -236,7 +236,11 @@ de kick, de wekker op de deadline van de executor, die in S-mode altijd
 genomen worden) bewaart hem in zijn ctx-blok en keert terug in de kern
 alsof `enter` klaar was. De interrupt blijft pending en de kern neemt hem
 zodra hij zijn masker opent, zoals na een `wfi`. De beurt is hooguit 10 ms
-(`TURN_CAP_NS`).
+(`TURN_CAP_NS`). Wie er aan de beurt is, beslist `cpu::el2::next` op riscv64
+en arm64, met de regel van de switcher van een gedeelde app-core (wie werk
+heeft, een idle is een yield, RX achter de deurbel maakt een slaper meteen
+due, de core slaapt pas als niemand werk heeft); de kern is zelf geen
+bewoner en gaat altijd voor.
 
 De kern gebruikt geen f-registers (0 f-instructies in het image, getoetst
 door `tools/qemu-riscv-test.sh`), dus de overgang bewaart f0..f31 niet: wat

@@ -45,12 +45,11 @@
 use super::clint::{Clint, NEVER};
 use super::csr;
 use super::pmp;
-use crate::el2::{self, Back, OS_STATS as STATS, Turn, ctx_read, ctx_state, ctx_write, rx_due};
+use crate::el2::{self, Back, OS_STATS as STATS, Turn, ctx_read, ctx_write};
 use abi::hopabi::{CTRL_FAULT_ESR, CTRL_FAULT_FAR, CTRL_FAULT_VEC};
 use abi::layout::{
-    CAGE_STRIDE, CTX_BOOT_PC, CTX_CTRL_PA, CTX_FPRS, CTX_GPRS, CTX_LEN, CTX_OFF, CTX_REGIME,
-    CTX_RESUME, CTX_REVOKE, CTX_STATE, CTX_WAKE, CTX_WAKE_NO_PEEK, Core, CtxState, Plan,
-    SCHED_COUNT, SCHED_CURRENT, SCHED_CURSOR, SCHED_LIST, SLOT_CAP,
+    CTX_BOOT_PC, CTX_CTRL_PA, CTX_FPRS, CTX_GPRS, CTX_KICK_PENDING, CTX_LEN, CTX_REGIME,
+    CTX_RESUME, CTX_REVOKE, CTX_STATE, CTX_WAKE, Core, CtxState, Plan, SCHED_CURRENT, SCHED_CURSOR,
 };
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 use dev::Pa;
@@ -116,59 +115,27 @@ impl OsCore {
         })
     }
 
-    /// Eén beurt: de volgende bewoner die aan de beurt is (round-robin vanaf
-    /// de cursor: een verse, of een geyielde wiens wektijd verstreek of wiens
-    /// RX-ring groeide) draait tot hij het hart teruggeeft of tot `deadline`
-    /// (TIME-tikken). Aanroepen met `mstatus.MIE` uit, ná de laatste
-    /// `ready()`-toets van de executor.
-    ///
-    /// Een ingetrokken bewoner die slaapt of nog niet draaide, gaat hier
-    /// dood zonder nog één instructie (zoals de rotatie van de switcher).
+    /// Eén beurt: de bewoner die [`el2::next`] aanwijst (dezelfde regel als
+    /// op arm64 en in de switcher) draait tot hij het hart teruggeeft of tot
+    /// `deadline` (TIME-tikken). Aanroepen met `mstatus.MIE` uit, ná de
+    /// laatste `ready()`-toets van de executor.
     pub fn run(&mut self, deadline: u64) -> Turn {
-        let now = csr::rdtime();
-        let count = usize::try_from(dev::read64(self.sched.add(SCHED_COUNT)))
-            .unwrap_or(0)
-            .min(SLOT_CAP);
-        let cursor = usize::try_from(dev::read64(self.sched.add(SCHED_CURSOR))).unwrap_or(0);
-        let mut earliest: Option<u64> = None;
-        for k in 1..=count {
-            let i = (cursor + k) % count;
-            let id = list_get(self.sched, i);
-            if id == 0 || usize::from(id) > SLOT_CAP {
-                continue;
+        match el2::next(self.sched, self.cage, csr::rdtime()) {
+            el2::Next::Turn { i, id, ctx, fresh } => {
+                Turn::Ran(self.turn(i, id, ctx, deadline, fresh))
             }
-            let ctx = self.ctx(id);
-            let state = ctx_state(ctx);
-            if matches!(state, Some(CtxState::BootPending | CtxState::Saved))
-                && ctx_read(ctx, CTX_REVOKE) != 0
-            {
-                ctx_write(ctx, CTX_STATE, CtxState::Dead.raw());
-                continue;
-            }
-            match state {
-                Some(CtxState::BootPending) => {
-                    return Turn::Ran(self.turn(i, id, ctx, deadline, true));
-                }
-                Some(CtxState::Saved) => match due(ctx, now) {
-                    None => return Turn::Ran(self.turn(i, id, ctx, deadline, false)),
-                    Some(t) => earliest = Some(earliest.map_or(t, |e| e.min(t))),
-                },
-                _ => {}
+            el2::Next::Idle { wake } => {
+                STATS.idle.fetch_add(1, Relaxed);
+                Turn::Idle { wake }
             }
         }
-        STATS.idle.fetch_add(1, Relaxed);
-        Turn::Idle { wake: earliest }
-    }
-
-    /// Het ctx-blok van kooi-context `id` (1..=SLOT_CAP).
-    fn ctx(&self, id: u8) -> Pa {
-        self.cage.add(u64::from(id) * CAGE_STRIDE + CTX_OFF)
     }
 
     /// De beurt van bewoner `id` op lijstplek `i`.
     fn turn(&mut self, i: usize, id: u8, ctx: Pa, deadline: u64, fresh: bool) -> Back {
         dev::write64(self.sched.add(SCHED_CURSOR), i as u64);
         dev::write64(self.sched.add(SCHED_CURRENT), u64::from(id));
+        ctx_write(ctx, CTX_KICK_PENDING, 0);
         ctx_write(ctx, CTX_STATE, CtxState::Running.raw());
         STATS.entries.fetch_add(1, Relaxed);
         let t0 = csr::rdtime();
@@ -264,27 +231,6 @@ static STUB: Page = Page([const { AtomicU32::new(0) }; 1024]);
 struct CtxScratch([AtomicU64; SCRATCH_WORDS]);
 const SCRATCH_WORDS: usize = ((CTX_FPRS + 33 * 8) / 8) as usize;
 static SCRATCH_CTX: CtxScratch = CtxScratch([const { AtomicU64::new(0) }; SCRATCH_WORDS]);
-
-/// Byte `i` van de bewonerslijst van `sched` (woordgewijs gelezen).
-fn list_get(sched: Pa, i: usize) -> u8 {
-    let w = dev::read64(sched.add(SCHED_LIST + (i as u64 & !7))).to_le_bytes();
-    w.get(i & 7).copied().unwrap_or(0)
-}
-
-/// Is de geyielde bewoner van `ctx` aan de beurt op `now`? `None` = ja;
-/// anders zijn wektijd. Dezelfde vraag als de rotatie van de switcher:
-/// de wektijd, of RX voorbij de gewapende drempel (tenzij no-peek).
-fn due(ctx: Pa, now: u64) -> Option<u64> {
-    let w = ctx_read(ctx, CTX_WAKE);
-    let t = w & !CTX_WAKE_NO_PEEK;
-    if t == 0 || now >= t {
-        return None;
-    }
-    if w & CTX_WAKE_NO_PEEK == 0 && rx_due(ctx) {
-        return None;
-    }
-    Some(t)
-}
 
 /// Zet de staat van een bewoner na zijn beurt, en zegt waardoor de kern
 /// terug is. `count` = meetellen in de meetlat (niet voor de zelftest).
@@ -715,6 +661,7 @@ mod arch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::el2::ctx_state;
 
     fn block() -> (Vec<u64>, Pa) {
         let mut v = vec![0u64; (CTX_LEN / 8) as usize];
@@ -768,17 +715,5 @@ mod tests {
             page[(CTRL_FAULT_VEC / 8) as usize],
             super::super::switch::FAULT_CAGE_VERIFY
         );
-    }
-
-    #[test]
-    fn due_follows_the_wake_time() {
-        let (_v, ctx) = block();
-        ctx_write(ctx, CTX_WAKE, 0);
-        assert_eq!(due(ctx, 10), None);
-        ctx_write(ctx, CTX_WAKE, 100);
-        assert_eq!(due(ctx, 10), Some(100));
-        assert_eq!(due(ctx, 100), None);
-        ctx_write(ctx, CTX_WAKE, 100 | CTX_WAKE_NO_PEEK);
-        assert_eq!(due(ctx, 10), Some(100));
     }
 }

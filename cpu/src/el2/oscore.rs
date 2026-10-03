@@ -62,9 +62,9 @@ use super::dispatch::{
 };
 use super::layout::{
     CAGE_STRIDE, CTX_CTRL_PA, CTX_FP_END, CTX_FP_LIVE, CTX_FPRS, CTX_FPRS_ARM_WORDS, CTX_GPRS,
-    CTX_KICK_PENDING, CTX_OFF, CTX_REGIME, CTX_REGIME_ARM_WORDS, CTX_RESUME, CTX_SP, CTX_STATE,
-    CTX_UNIT_SLOT, CTX_WAKE, CTX_WAKE_NO_PEEK, Core, CtxState, Plan, SCHED_CLINT_PA, SCHED_COUNT,
-    SCHED_CURRENT, SCHED_CURSOR, SCHED_LIST, SCHED_MSIP_PA, SLOT_CAP,
+    CTX_KICK_PENDING, CTX_OFF, CTX_REGIME, CTX_REGIME_ARM_WORDS, CTX_RESUME, CTX_REVOKE, CTX_SP,
+    CTX_STATE, CTX_UNIT_SLOT, CTX_WAKE, CTX_WAKE_NO_PEEK, Core, CtxState, Plan, SCHED_CLINT_PA,
+    SCHED_COUNT, SCHED_CURRENT, SCHED_CURSOR, SCHED_LIST, SCHED_MSIP_PA, SLOT_CAP,
 };
 use abi::hopabi::{CTRL_FAULT_ESR, CTRL_FAULT_FAR, CTRL_FAULT_VEC};
 use core::sync::atomic::{
@@ -488,35 +488,13 @@ impl OsCore {
     /// `deadline` (CNTPCT). Aanroepen met I en F gemaskeerd, ná de laatste
     /// `ready()`-toets van de executor.
     pub fn run(&mut self, deadline: u64) -> Turn {
-        let now = arch::counter();
-        let count = (dev::read64(self.sched.add(SCHED_COUNT)) as usize).min(SLOT_CAP);
-        let cursor = dev::read64(self.sched.add(SCHED_CURSOR)) as usize;
-        let mut earliest: Option<u64> = None;
-        for k in 1..=count {
-            let i = (cursor + k) % count;
-            let id = dev::read8(self.sched.add(SCHED_LIST + i as u64));
-            if id == 0 || usize::from(id) > SLOT_CAP {
-                continue;
-            }
-            let ctx = self.ctx(id);
-            match ctx_state(ctx) {
-                Some(CtxState::BootPending) => {
-                    return Turn::Ran(self.turn(i, id, ctx, deadline, true));
-                }
-                Some(CtxState::Saved) => match due(ctx, now) {
-                    None => return Turn::Ran(self.turn(i, id, ctx, deadline, false)),
-                    Some(t) => earliest = Some(earliest.map_or(t, |e| e.min(t))),
-                },
-                _ => {}
+        match next(self.sched, self.cage, arch::counter()) {
+            Next::Turn { i, id, ctx, fresh } => Turn::Ran(self.turn(i, id, ctx, deadline, fresh)),
+            Next::Idle { wake } => {
+                STATS.idle.fetch_add(1, Relaxed);
+                Turn::Idle { wake }
             }
         }
-        STATS.idle.fetch_add(1, Relaxed);
-        Turn::Idle { wake: earliest }
-    }
-
-    /// Het ctx-blok van kooi-context `id` (1..=SLOT_CAP).
-    fn ctx(&self, id: u8) -> Pa {
-        self.cage.add(u64::from(id) * CAGE_STRIDE + CTX_OFF)
     }
 
     /// De beurt van bewoner `id` op lijstplek `i`.
@@ -753,6 +731,90 @@ pub fn release_held(plan: &Plan, core: Core) -> Result<(), Error> {
         }
         core::hint::spin_loop();
     }
+}
+
+/// Wat [`next`] besluit.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Next {
+    /// Bewoner `id` op lijstplek `i`, met zijn ctx-blok; `fresh` = zijn
+    /// eerste beurt (boot-pending).
+    Turn {
+        /// De lijstplek: de nieuwe cursor.
+        i: usize,
+        /// De kooi-context.
+        id: u8,
+        /// Zijn ctx-blok.
+        ctx: Pa,
+        /// Koud starten.
+        fresh: bool,
+    },
+    /// Niemand heeft werk; de vroegste wektijd, als er een wacht.
+    Idle {
+        /// De vroegste wektijd (tellerstand).
+        wake: Option<u64>,
+    },
+}
+
+/// Wie nu op de OS-core: het besluitpunt van de rotatie op beide
+/// architecturen (`OsCore::run` hier en in `cpu::riscv::oscore`), met de
+/// regel van de switcher van een gedeelde app-core. Round-robin vanaf de
+/// plek ná de cursor; aan de beurt is de eerste die boot-pending is, of
+/// geyield en [`due`] (zijn wektijd, een kick, of RX achter zijn deurbel).
+/// Een ingetrokken bewoner die slaapt of nog niet draaide, gaat hier dood
+/// zonder nog één instructie, zoals in de switcher. Niemand: de vroegste
+/// wektijd, en dan pas mag de kern slapen.
+///
+/// Waar de kern afwijkt, staat niet hier maar bij de aanroeper: hij is
+/// zelf geen bewoner en gaat altijd voor (de rotatie draait alleen als zijn
+/// executor niets klaar heeft, en hij neemt de core terug op zijn deadline,
+/// een interrupt of de kick).
+#[must_use]
+pub fn next(sched: Pa, cage: Pa, now: u64) -> Next {
+    let count = usize::try_from(dev::read64(sched.add(SCHED_COUNT)))
+        .unwrap_or(0)
+        .min(SLOT_CAP);
+    let cursor = usize::try_from(dev::read64(sched.add(SCHED_CURSOR))).unwrap_or(0);
+    let mut earliest: Option<u64> = None;
+    for k in 1..=count {
+        let i = (cursor + k) % count;
+        // Woordgewijs gelezen: dezelfde lees op elke architectuur.
+        let word = dev::read64(sched.add(SCHED_LIST + (i as u64 & !7))).to_le_bytes();
+        let id = word.get(i & 7).copied().unwrap_or(0);
+        if id == 0 || usize::from(id) > SLOT_CAP {
+            continue;
+        }
+        let ctx = cage.add(u64::from(id) * CAGE_STRIDE + CTX_OFF);
+        let state = ctx_state(ctx);
+        if matches!(state, Some(CtxState::BootPending | CtxState::Saved))
+            && ctx_read(ctx, CTX_REVOKE) != 0
+        {
+            ctx_write(ctx, CTX_STATE, CtxState::Dead.raw());
+            continue;
+        }
+        match state {
+            Some(CtxState::BootPending) => {
+                return Next::Turn {
+                    i,
+                    id,
+                    ctx,
+                    fresh: true,
+                };
+            }
+            Some(CtxState::Saved) => match due(ctx, now) {
+                None => {
+                    return Next::Turn {
+                        i,
+                        id,
+                        ctx,
+                        fresh: false,
+                    };
+                }
+                Some(t) => earliest = Some(earliest.map_or(t, |e| e.min(t))),
+            },
+            _ => {}
+        }
+    }
+    Next::Idle { wake: earliest }
 }
 
 /// `None` als de geyielde bewoner van `ctx` aan de beurt is op
