@@ -33,7 +33,7 @@ use board::Error;
 use board_raspi::driver_gicv2::Gic;
 use board_raspi::map::{self, L2, Tables};
 use board_raspi::{NicCtx, Raspi, Soc};
-use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use cpu::irq::{Line, Trigger};
 use dev::Pa;
 use driver_brcmpcie::{EpBar, InWin, OutWin, Rc, delay};
@@ -149,7 +149,9 @@ impl Soc for Bcm2712 {
             cpu::println!("net: {GEM_COMPAT} disabled in the DTB, no NIC");
             return Ok(None);
         }
+        rp1_quiesce(ctx.clock);
         let rc = rp1_link(ctx.clock)?;
+        LINK_OURS.store(true, Relaxed);
         // De ethernet-PHY (BCM54213PE) hangt in reset aan RP1-GPIO32
         // (actief laag, DT phy-reset-gpios; gemeten: zonder dit géén PHY op
         // MDIO).
@@ -193,6 +195,77 @@ impl Soc for Bcm2712 {
         Ok(Some(nic))
     }
 }
+
+/// Heeft deze kern de RP1-link zelf getraind? Tot dan is een link die up
+/// staat een erfenis van de kern vóór een flip, met zijn DMA-masters nog
+/// aan het werk ([`rp1_quiesce`]).
+static LINK_OURS: AtomicBool = AtomicBool::new(false);
+
+/// Een RC-handvat zonder windows, om te lezen wat er staat of een
+/// endpoint stil te leggen: er wordt niets opgezet.
+pub(crate) fn rc_bare(clock: fn() -> u64) -> Rc {
+    let none = OutWin {
+        cpu: 0,
+        pcie: 0,
+        size: 0,
+    };
+    // SAFETY: PCIE2 en de SW_INIT-bank zijn BCM2712-blokken in de
+    // Device-gigabyte 64 (de vaste tabel); zonder windows zet het handvat
+    // niets op.
+    unsafe {
+        Rc::new(
+            driver_brcmpcie::Soc::Bcm2712,
+            PCIE2,
+            PCIE_SW_INIT,
+            PCIE2_SW_INIT_ID,
+            0,
+            none,
+            [None; driver_brcmpcie::MAX_IN],
+            clock,
+        )
+    }
+}
+
+/// Legt een RP1 stil die de vorige kern liet draaien, vóór [`rp1_link`]
+/// de link eronder reset. Een koude boot vindt de link down (de RP1 in
+/// PERST#) en doet niets; een warme landing erft hem up, met een GEM die
+/// nog ontvangt en (gui) xHCI's die nog lopen. Wie daaronder de bridge
+/// reset, kan hun AXI-transacties naar de host halverwege laten staan, en
+/// de GEM heeft geen eigen reset die dat opruimt. Dat is de verklaring
+/// voor 03-10 (P1g, warm: de ring van de nieuwe kern bleef onaangeroerd,
+/// `irq(nic=1)`, geen lease); op ijzer nog niet bewezen. De volgorde is
+/// die van Linux' kexec-weg: eerst de drivers (`macb_shutdown`,
+/// de xHCI-halt), dan de bus-master-bit, dan PERST# (`brcm_pcie_turn_off`).
+/// De O6N kent dit niet: daar blijft de link van de firmware staan en
+/// stopt de CmdReset van de RTL zijn eigen DMA.
+fn rp1_quiesce(clock: fn() -> u64) {
+    if LINK_OURS.load(Relaxed) {
+        return;
+    }
+    let rc = rc_bare(clock);
+    let (phy, dl) = rc.link_status();
+    if !(phy && dl) {
+        return;
+    }
+    let id = rc.cfg_read32(1, 0, 0, 0);
+    if id != RP1_ID {
+        cpu::println!(
+            "net: the RP1 link was up but the endpoint reads {id:#x}, nothing quiesced HOPOS_RP1_QUIESCE"
+        );
+        return;
+    }
+    // SAFETY: RP1_ETH is het GEM-blok achter de link die DL actief meldt;
+    // de vorige kern opende de BAR's, en niemand anders raakt de GEM nu.
+    unsafe { driver_gem::stop(RP1_ETH) };
+    let halted = usb::halt_inherited(clock);
+    rc.turn_off();
+    cpu::println!(
+        "net: the RP1 link was up from the previous kernel: gem stopped, {halted} of 2 xHCIs halted, bus mastering off and PERST# held before the bring-up HOPOS_RP1_QUIESCE"
+    );
+}
+
+/// De RP1 in zijn configruimte: device 0x0001, vendor 0x1de4.
+const RP1_ID: u32 = 0x0001_1de4;
 
 /// De link naar de RP1, boardvast bewezen met probe6 (10-07, runs 2/4/5):
 /// RESCAL, de pcie2-RC (54 MHz-PLL!), link-training (gen 2), de RP1
@@ -254,7 +327,7 @@ fn rp1_link(clock: fn() -> u64) -> Result<Rc, Error> {
         },
     ];
     // SAFETY: PCIE_RESCAL is het gedeelde RESCAL-blok (Device-gigabyte 64).
-    unsafe { rc.bring_up(PCIE_RESCAL, 0x0001_1de4, &bars) }.map_err(|e| {
+    unsafe { rc.bring_up(PCIE_RESCAL, RP1_ID, &bars) }.map_err(|e| {
         cpu::println!("net: {e}");
         Error::Nic("rp1: PCIe bring-up failed")
     })?;
@@ -331,22 +404,7 @@ const fn mip_line(v: u32) -> (Line, Trigger) {
 /// Elke stap die faalt laat de NIC pollen, met de reden.
 fn wire_irq(rc: &Rc, nic: &mut Gem) -> Result<u32, &'static str> {
     // 1. De MSI-X-capability van de RP1 (bus 1, dev 0): tabel-BAR en offset.
-    let mut ptr = u64::from(rc.cfg_read32(1, 0, 0, 0x34) & 0xff);
-    let mut cap = 0;
-    for _ in 0..48 {
-        if ptr < 0x40 {
-            break;
-        }
-        let hdr = rc.cfg_read32(1, 0, 0, ptr);
-        if hdr & 0xff == 0x11 {
-            cap = ptr;
-            break;
-        }
-        ptr = u64::from((hdr >> 8) & 0xff);
-    }
-    if cap == 0 {
-        return Err("rp1: no MSI-X capability");
-    }
+    let cap = msix_cap(rc).ok_or("rp1: no MSI-X capability")?;
     let hdr = rc.cfg_read32(1, 0, 0, cap);
     let entries = ((hdr >> 16) & 0x7ff) + 1;
     if entries <= RP1_INT_ETH {
@@ -401,37 +459,37 @@ fn wire_irq(rc: &Rc, nic: &mut Gem) -> Result<u32, &'static str> {
     Ok(id)
 }
 
+/// De offset van de MSI-X-capability van de RP1 (bus 1, dev 0) in zijn
+/// configruimte, of `None`.
+fn msix_cap(rc: &Rc) -> Option<u64> {
+    let mut ptr = u64::from(rc.cfg_read32(1, 0, 0, 0x34) & 0xff);
+    for _ in 0..48 {
+        if ptr < 0x40 {
+            return None;
+        }
+        let hdr = rc.cfg_read32(1, 0, 0, ptr);
+        if hdr & 0xff == 0x11 {
+            return Some(ptr);
+        }
+        ptr = u64::from((hdr >> 8) & 0xff);
+    }
+    None
+}
+
 /// De MSI-X-entry van de GEM in de RP1-tabel, zoals `wire_irq` hem zette
 /// (0 = nog niet), voor [`nic_diag`].
 static MSIX_ENTRY: AtomicU64 = AtomicU64::new(0);
 
-/// Registerdump van de RP1-NIC-keten voor de flip-jacht van 30-09 (drie
+/// Registerdump van de RP1-NIC-keten voor de flip-jacht (30-09 en 03-10:
 /// warme flips vanuit de koud gebootte kaart-kern eindigden met een NIC die
-/// niets meer ontving, `irq(nic=0)`, terwijl acht flips uit de kale kern
-/// slaagden): de PCIe-status van de RC, de MIP (raw, status en de zes
-/// maskers), het RP1-MSIX_CFG-woord van de GEM, de MSI-X-entry en de GEM
-/// zelf (`driver_gem::diag`). De tik roept hem op 5 en 30 s, dus een koude
-/// boot geeft de referentie en een landing het verschil.
+/// niets meer ontving): de RX-ring, dan de PCIe-kant (de status van de RC,
+/// het command-register van de RP1 met de bus-master-bit, de MSI-X-
+/// capability met enable en function mask, de entry met zijn mask-bit, het
+/// RP1-MSIX_CFG-woord en de MIP), dan de GEM zelf, met waar zijn
+/// RX-queue-pointer in onze ring staat. De tik roept hem op 5 en 30 s, dus
+/// een koude boot geeft de referentie en een landing het verschil.
 pub fn nic_diag() {
-    let none = OutWin {
-        cpu: 0,
-        pcie: 0,
-        size: 0,
-    };
-    // SAFETY: PCIE2 en de SW_INIT-bank zijn BCM2712-blokken in de
-    // Device-gigabyte 64 (de vaste tabel); er wordt alleen gelezen.
-    let rc = unsafe {
-        Rc::new(
-            driver_brcmpcie::Soc::Bcm2712,
-            PCIE2,
-            PCIE_SW_INIT,
-            PCIE2_SW_INIT_ID,
-            0,
-            none,
-            [None; driver_brcmpcie::MAX_IN],
-            cpu::idle::now,
-        )
-    };
+    let rc = rc_bare(cpu::idle::now);
     let (phy, dl) = rc.link_status();
     if !(phy && dl) {
         cpu::println!(
@@ -440,16 +498,6 @@ pub fn nic_diag() {
         );
         return;
     }
-    let mip = [0x00u64, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70].map(|o| dev::read32(MIP.add(o)));
-    let cfg = dev::read32(Pa(RP1 + 0x10_8000 + 0x8 + 4 * u64::from(RP1_INT_ETH)));
-    let e = MSIX_ENTRY.load(Relaxed);
-    let entry = if e == 0 {
-        [0; 4]
-    } else {
-        [0u64, 4, 8, 12].map(|o| dev::read32(Pa(e).add(o)))
-    };
-    // SAFETY: RP1_ETH is het GEM-blok achter de getrainde link (net gelezen).
-    let g = unsafe { driver_gem::diag(RP1_ETH) };
     // De RX-ring ligt vooraan in NET_DMA (driver_gem::Gem::new: rx_ring =
     // dma). Eerst zoals de CPU hem leest, dan na een clean-en-invalidate
     // van die regels: verschillen ze, dan leest de CPU uit zijn cache en is
@@ -462,15 +510,35 @@ pub fn nic_diag() {
         "net: rp1 diag: rx ring {:#x}: desc0..3 (w0,w1) {before:x?}, after invalidate {after:x?}",
         ring.0
     );
+    let cmd = rc.cfg_read32(1, 0, 0, 0x04);
+    let ctl = msix_cap(&rc).map_or(0, |c| rc.cfg_read32(1, 0, 0, c) >> 16);
+    let e = MSIX_ENTRY.load(Relaxed);
+    let entry = if e == 0 {
+        [0; 4]
+    } else {
+        [0u64, 4, 8, 12].map(|o| dev::read32(Pa(e).add(o)))
+    };
+    let cfg = dev::read32(Pa(RP1 + 0x10_8000 + 0x8 + 4 * u64::from(RP1_INT_ETH)));
+    let mip = [0x00u64, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70].map(|o| dev::read32(MIP.add(o)));
     cpu::println!(
-        "net: rp1 diag: pcie {:#x}, mip {mip:x?}, msix_cfg[eth] {cfg:#x}, entry {entry:x?}, gem nwctrl {:#x} nwcfg {:#x} nwstatus {:#x} dmacfg {:#x} txstatus {:#x} rxqbase {:#x} rxstatus {:#x} isr {:#x} imr {:#x} HOPOS_RP1_DIAG",
+        "net: rp1 diag: pcie {:#x}, rp1 cmd {cmd:#x} (bus master {}), msix ctl {ctl:#x} (enable {}, function mask {}), entry {entry:x?} (masked {}), msix_cfg[eth] {cfg:#x}, mip {mip:x?} HOPOS_RP1_DIAG",
         rc.status(),
+        cmd & (1 << 2) != 0,
+        ctl & (1 << 15) != 0,
+        ctl & (1 << 14) != 0,
+        entry[3] & 1 != 0,
+    );
+    // SAFETY: RP1_ETH is het GEM-blok achter de getrainde link (net gelezen).
+    let g = unsafe { driver_gem::diag(RP1_ETH) };
+    cpu::println!(
+        "net: rp1 diag: gem nwctrl {:#x} nwcfg {:#x} nwstatus {:#x} dmacfg {:#x} txstatus {:#x} rxqbase {:#x} (rx desc {:?} of our ring) rxstatus {:#x} isr {:#x} imr {:#x} HOPOS_RP1_DIAG",
         g[0],
         g[1],
         g[2],
         g[3],
         g[4],
         g[5],
+        driver_gem::rx_index(g[5], ring.0 + RP1_BUS_OFF),
         g[6],
         g[7],
         g[8]

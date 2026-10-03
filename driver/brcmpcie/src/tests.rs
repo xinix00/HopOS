@@ -242,6 +242,29 @@ fn a_trained_link_checks_the_endpoint_and_assigns_bars() {
 }
 
 #[test]
+fn turn_off_stops_bus_mastering_and_holds_perst() {
+    let mut b = block(MMIO_SIZE);
+    let mut sw = block(0x100);
+    let (bp, sp) = (pa(&mut b), pa(&mut sw));
+    // Wat een vorige eigenaar achterliet: PERST# los, de endpoint open.
+    dev::write32(bp.add(off::MISC_PCIE_CTRL), (1 << 2) | 1);
+    dev::write32(bp.add(off::EXT_CFG_DATA + 4), 0x0010_0006);
+    let r = rc(Soc::Bcm2712, bp, sp);
+    r.turn_off();
+    assert_eq!(dev::read32(bp.add(off::EXT_CFG_INDEX)), 1 << 20);
+    assert_eq!(
+        dev::read32(bp.add(off::EXT_CFG_DATA + 4)),
+        0x0010_0002,
+        "only bus mastering off"
+    );
+    assert_eq!(dev::read32(bp.add(off::MISC_PCIE_CTRL)), 1, "PERSTB 0");
+    // De BCM2711: PERST# in RGR1.
+    let r = rc(Soc::Bcm2711, bp, sp);
+    r.turn_off();
+    assert_eq!(dev::read32(bp.add(off::RGR1_SW_INIT)) & RGR1_PERST, 1);
+}
+
+#[test]
 fn rescal_needs_start_to_stick_and_status_to_rise() {
     let mut blk = block(12);
     let p = pa(&mut blk);

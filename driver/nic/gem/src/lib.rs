@@ -248,6 +248,39 @@ pub unsafe fn diag(base: Pa) -> [u32; 9] {
     ]
 }
 
+/// Waar de RX-queue-pointer (RXQBASE gelezen: de descriptor die de DMA nu
+/// heeft) in de ring staat waarvan de eerste descriptor op busadres
+/// `ring_bus` ligt: de index, of `None` als hij erbuiten wijst (de ring van
+/// een vorige eigenaar, of een DMA die zijn nieuwe basis nooit oppakte).
+#[must_use]
+pub fn rx_index(rxqbase: u32, ring_bus: u64) -> Option<usize> {
+    let off = rxqbase.wrapping_sub(ring_bus as u32) as usize;
+    (off.is_multiple_of(16) && off / 16 < N_RX).then_some(off / 16)
+}
+
+/// Zet de GEM stil: RX en TX uit, de tellers en alle statusbits gewist,
+/// elke interrupt dicht en de latch leeg (Linux `macb_reset_hw`, ook de
+/// eerste stap van [`Gem::init`]). Ook voor een GEM die een vorige kern liet
+/// draaien: zijn DMA hoort stil te staan vóór iemand de PCIe-link eronder
+/// reset, zoals `macb_shutdown` op Linux' kexec-weg (03-10).
+///
+/// # Safety
+///
+/// `base` is het gemapte GEM-blok (de voorwaarde van [`Gem::new`]).
+pub unsafe fn stop(base: Pa) {
+    // SAFETY: de voorwaarde van deze functie.
+    let r = unsafe { regs(base) };
+    r.nwctrl.write(0);
+    r.nwctrl.write(CTRL_CLR_STAT);
+    r.idr.write(u32::MAX);
+    // De ISR van de RP1-GEM wist bij schrijven (`ack_irq`); Linux schrijft
+    // dan ook alle bits (MACB_CAPS_ISR_CLEAR_ON_WRITE).
+    r.isr.write(u32::MAX);
+    r.txstatus.write(u32::MAX);
+    r.rxstatus.write(u32::MAX);
+    r.pbuf_rx_cut.write(0);
+}
+
 /// De device-ack van de dispatcher: masker dicht (IDR) en de latch gewist.
 ///
 /// Alleen wissen is niet genoeg: zolang de ring werk heeft, zet de GEM RCOMP
@@ -356,13 +389,9 @@ impl Gem {
                 need: DMA_NEED,
             });
         }
+        // SAFETY: de voorwaarde van `new`.
+        unsafe { stop(self.base) };
         let r = self.r();
-        r.nwctrl.write(0);
-        r.nwctrl.write(CTRL_CLR_STAT);
-        r.idr.write(u32::MAX);
-        r.txstatus.write(u32::MAX);
-        r.rxstatus.write(u32::MAX);
-        r.pbuf_rx_cut.write(0);
 
         // RX-ring: elke descriptor wijst naar zijn eigen buffer; de DMA is
         // eigenaar.

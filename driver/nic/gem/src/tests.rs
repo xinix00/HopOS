@@ -155,6 +155,35 @@ fn ack_masks_and_clears_the_explicit_bit() {
 }
 
 #[test]
+fn stop_is_macb_reset_hw_for_a_gem_someone_left_running() {
+    let mut f = Fake::new();
+    let b = f.base();
+    // Een GEM zoals een vorige kern hem achterliet: RX en TX aan, RCOMP
+    // open en gelatcht.
+    dev::write32(b, CTRL_MGMT_EN | CTRL_TX_EN | CTRL_RX_EN);
+    dev::write32(b.add(0x030), !INT_RCOMP);
+    dev::write32(b.add(0x044), 5);
+    // SAFETY: het nep-blok leeft de hele test.
+    unsafe { stop(b) };
+    assert_eq!(dev::read32(b) & (CTRL_TX_EN | CTRL_RX_EN), 0);
+    assert_eq!(dev::read32(b.add(0x02c)), u32::MAX, "every interrupt off");
+    assert_eq!(dev::read32(b.add(0x024)), u32::MAX, "the latch cleared");
+    assert_eq!(dev::read32(b.add(0x014)), u32::MAX);
+    assert_eq!(dev::read32(b.add(0x020)), u32::MAX);
+    assert_eq!(dev::read32(b.add(0x044)), 0);
+}
+
+#[test]
+fn the_rx_queue_pointer_names_its_descriptor() {
+    let ring = 0x10_1400_0000;
+    assert_eq!(rx_index(0x1400_0000, ring), Some(0));
+    assert_eq!(rx_index(0x1400_0000 + 16 * 37, ring), Some(37));
+    assert_eq!(rx_index(0x1400_0000 + 16 * N_RX as u32, ring), None);
+    assert_eq!(rx_index(0x1400_0008, ring), None);
+    assert_eq!(rx_index(0x13ff_fff0, ring), None, "below the ring");
+}
+
+#[test]
 fn mdio_frames_and_a_stuck_bus() {
     let mut f = Fake::new();
     let b = f.base();

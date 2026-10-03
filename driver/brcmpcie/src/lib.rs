@@ -139,6 +139,9 @@ const HD_SERDES_IDDQ: u32 = 1 << 27;
 /// log2(maat) - 15.
 const MISC_CTRL_SCB0_SHIFT: u32 = 27;
 const MISC_CTRL_SCB0_MASK: u32 = 0x1f << MISC_CTRL_SCB0_SHIFT;
+/// Command-register van de endpoint: bus-mastering (PCI 3.0 §6.2.2).
+const CMD_BUS_MASTER: u32 = 1 << 2;
+
 const RGR1_PERST: u32 = 1 << 0;
 const RGR1_BRIDGE_RST: u32 = 1 << 1;
 
@@ -704,6 +707,20 @@ impl Rc {
     pub fn open_endpoint(&self) {
         let cmd = self.cfg_read32(1, 0, 0, off::CFG_COMMAND);
         self.cfg_write32(1, 0, 0, off::CFG_COMMAND, cmd | 0x6);
+    }
+
+    /// Legt een endpoint stil die een vorige eigenaar liet draaien:
+    /// bus-mastering uit en PERST# vast, Linux' kexec-weg
+    /// (`pci_device_shutdown` wist de master-bit, `brcm_pcie_turn_off` zet
+    /// PERST#). Daarna begint [`bring_up`](Self::bring_up) zoals na een
+    /// koude start. Alleen met DL actief: anders is een configtoegang op
+    /// bus 1 een bus-abort.
+    pub fn turn_off(&self) {
+        let cmd = self.cfg_read32(1, 0, 0, off::CFG_COMMAND);
+        self.cfg_write32(1, 0, 0, off::CFG_COMMAND, cmd & !CMD_BUS_MASTER);
+        // Wat al onderweg was, komt nog aan; er vertrekt niets nieuws meer.
+        delay(self.clock, 1_000_000);
+        self.perst(true);
     }
 
     /// Het rauwe MISC_CTRL (diagnose: SCB0_SIZE staat in [31:27]).

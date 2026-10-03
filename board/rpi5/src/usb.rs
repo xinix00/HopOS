@@ -9,11 +9,10 @@
 //! noemen we geen controller: een toegang op een dood PCIe-venster is op
 //! de BCM2712 geen nette 0xffffffff maar een gok.
 
-use crate::{PCIE_SW_INIT, PCIE2, PCIE2_SW_INIT_ID, RP1, RP1_BUS_OFF};
+use crate::{RP1, RP1_BUS_OFF, rc_bare};
 use board::{Region, UsbHost, UsbHosts, UsbKind, usb_dma_slice};
 use board_raspi::usb::UsbCtx;
 use dev::Pa;
-use driver_brcmpcie::{OutWin, Rc};
 
 /// De eerste USB3-hostcontroller van de RP1 (datasheet §5; Linux-DT
 /// `xhci@200000`).
@@ -32,7 +31,7 @@ const RP1_USB_SIZE: u64 = 0x10_0000;
 /// foutmelding, alleen stilte (Go, 06-08).
 pub(crate) fn hosts(ctx: &UsbCtx) -> UsbHosts {
     let mut out = UsbHosts::new();
-    let (phy, dl) = link_status(ctx.clock);
+    let (phy, dl) = rc_bare(ctx.clock).link_status();
     if !(phy && dl) {
         cpu::println!(
             "usb: the RP1 link is down (phy {phy}, dl {dl}): the NIC probe trains it, no USB HOPOS_USB_NONE"
@@ -60,30 +59,43 @@ pub(crate) fn hosts(ctx: &UsbCtx) -> UsbHosts {
     out
 }
 
-/// De stand van de RP1-link, alleen gelezen: een RC-handvat zonder
-/// windows, want er wordt niets opgezet.
-fn link_status(clock: fn() -> u64) -> (bool, bool) {
-    let none = OutWin {
-        cpu: 0,
-        pcie: 0,
-        size: 0,
-    };
-    // SAFETY: PCIE2 en de SW_INIT-bank zijn BCM2712-blokken in de
-    // Device-gigabyte 64 (de vaste tabel); `link_status` leest alleen
-    // PCIE_STATUS.
-    let rc = unsafe {
-        Rc::new(
-            driver_brcmpcie::Soc::Bcm2712,
-            PCIE2,
-            PCIE_SW_INIT,
-            PCIE2_SW_INIT_ID,
-            0,
-            none,
-            [None; driver_brcmpcie::MAX_IN],
-            clock,
-        )
-    };
-    rc.link_status()
+/// USBCMD (de eerste operationele register, op CAPLENGTH): Run/Stop.
+const USBCMD_RS: u32 = 1 << 0;
+/// USBSTS (operationeel +4): HCHalted.
+const USBSTS_HCH: u32 = 1 << 0;
+/// Hoe lang een halt mag duren: xHCI 1.2 §5.4.1 zegt 16 ms na Run/Stop = 0.
+const HALT_NS: u64 = 20_000_000;
+
+/// Halteert de twee xHCI's van een RP1 die de vorige kern liet draaien
+/// (Linux' kexec-weg: `usb_hcd_platform_shutdown`), vóór de link eronder
+/// reset ([`crate::rp1_quiesce`]). Alleen met DL actief. Geeft hoeveel er
+/// stilstaan.
+pub(crate) fn halt_inherited(clock: fn() -> u64) -> usize {
+    [RP1_USB0, RP1_USB1]
+        .into_iter()
+        .filter(|&base| halt(base, clock))
+        .count()
+}
+
+/// Run/Stop eraf en wachten op HCHalted, hoogstens [`HALT_NS`]. Een
+/// venster zonder controller (CAPLENGTH 0 of all-ones) telt niet.
+fn halt(base: Pa, clock: fn() -> u64) -> bool {
+    let caplen = dev::read32(base) & 0xff;
+    if caplen == 0 || caplen == 0xff {
+        return false;
+    }
+    let op = base.add(u64::from(caplen));
+    dev::write32(op, dev::read32(op) & !USBCMD_RS);
+    let end = clock().saturating_add(HALT_NS);
+    loop {
+        if dev::read32(op.add(4)) & USBSTS_HCH != 0 {
+            return true;
+        }
+        if clock() >= end {
+            return false;
+        }
+        core::hint::spin_loop();
+    }
 }
 
 #[cfg(test)]
@@ -96,5 +108,27 @@ mod tests {
         assert_eq!(RP1_USB1.0 >> 30, 124);
         let d = board_raspi::usb::USB_DMA;
         assert_eq!(usb_dma_slice(d, 1, 2).base.0, d.base.0 + d.size / 2);
+    }
+
+    static NOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// 1 ms per lezing: de halt-termijn loopt in twintig lezingen af.
+    fn ticking() -> u64 {
+        NOW.fetch_add(1_000_000, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[test]
+    fn halt_clears_run_stop_and_waits_for_hchalted() {
+        let mut blk = vec![0u64; 16];
+        let base = Pa(blk.as_mut_ptr() as usize as u64);
+        // Geen controller: CAPLENGTH 0.
+        assert!(!halt(base, ticking));
+        // CAPLENGTH 0x20, lopend (RS plus INTE), nog niet gehalteerd.
+        dev::write32(base, 0x0100_0020);
+        dev::write32(base.add(0x20), USBCMD_RS | (1 << 2));
+        assert!(!halt(base, ticking), "HCHalted never came");
+        assert_eq!(dev::read32(base.add(0x20)), 1 << 2, "only Run/Stop off");
+        dev::write32(base.add(0x24), USBSTS_HCH);
+        assert!(halt(base, ticking));
     }
 }
