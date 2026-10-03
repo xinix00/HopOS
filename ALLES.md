@@ -53,6 +53,10 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       grant die niet vrijkomt. Agent bezig.
 - [ ] Pi 4 hairpin door de NAT: 1 s hik per ronde (p99 1002 ms); de
       backlog van 8 in leannet, de NAT-tabel of de accept-lus. Agent bezig.
+- [ ] Koude flip: het board zegt het vooraf in de env van Hop
+      (`HOPOS_COLD_FLIP=yes|no|fresh`), Hop weigert dan zonder een taak te
+      stoppen (M4 geen PSCI; Pi 5 alleen vóór de eerste app-core). Agent
+      bezig.
 - [ ] De volgende bump: HopOS 3.0.7 met tag, Hop erop naar 3.0.8, release.sh,
       media (main heeft sinds v3.0.6 en Hop v3.0.7 de avondfixes van 03-10);
       daarmee het M4-image via Recovery (spin daarna opnieuw POSTen) en de
@@ -60,9 +64,6 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Fixen
 
-- [ ] Hop: een koude flip eerst aan de kern vragen (een proef zonder te
-      springen) en pas dan de taken vasthouden; nu stopt Hop alles vóór een
-      weigering die de kern al vooraf weet (geen PSCI, geen CPU_OFF terug).
 - [ ] Hop: chunked transfer weigert; een plaatsing zonder capaciteit blijft
       proberen (ruis); na een flip één `NEXT_STORE failed`.
 - [ ] vitals: de standaard-rx-URL werkt niet (`CONNECT is not supported`).
