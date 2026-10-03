@@ -165,7 +165,7 @@ kern weigert terwijl Hop nog wacht op zijn FLIP-antwoord, krijgt Hop terug
 | `HOPOS_FS_FREEZE_FAIL` en `HOPOS_FLIP_FAIL` | flip-taak | de commit faalde of de actor antwoordde niet binnen 2 s; er is niets bevroren |
 | `HOPOS_FLIP_FAIL` na `HOPOS_FS_FROZEN` | flip-taak | de conntrack, de bewoners, het blob of de indeling van de sprong faalde; hopfs ontdooit (`HOPOS_FS_THAWED`) en de masquerade gaat weer open |
 | `HOPOS_FLIP_COLD_STOP_FAIL`, `HOPOS_FLIP_COLD_CORE`, dan `HOPOS_FLIP_FAIL` | flip-taak, koud | een bewoner stopte niet, of een app-core ging niet uit binnen een seconde (AFFINITY_INFO); hopfs ontdooit. Gestopte bewoners blijven gestopt (Hop plaatst ze opnieuw), een uitgezette core staat op "koud" in zijn mailbox, dus de volgende dispatch is weer een CPU_ON |
-| `HOPOS_FLIP_FAIL cold flip: CPU_OFF has no way back on this board` | flip-taak, koud | de Pi 5: CPU_OFF is daar een deur zonder terugweg (10-07), dus koud kan alleen zolang geen app-core ooit draaide |
+| `HOPOS_FLIP_COLD_NO_WAY_BACK`, dan `HOPOS_FLIP_REFUSED cold flip: CPU_OFF has no way back, ask warm` | haak, koud | de Pi 5: CPU_OFF is daar een deur zonder terugweg (10-07), dus koud kan alleen zolang geen app-core ooit draaide; Hop krijgt een 502 met `version 0x1, want 0x0` en herstart de taken die hij al stopte (`HOP_FLIP_COLD_BACK`). Tot 03-10 toetste pas de flip-taak dit, na een 202 (`HOPOS_FLIP_FAIL`) |
 | `HOPOS_FLIP_REFUSED warm flip not on riscv64, ask cold` | haak | riscv64 flipt alleen koud (zie "riscv64" hieronder); Hop krijgt `version 0x0, want 0x1` |
 | `HOPOS_FLIP_COLD_CORE`, `HOPOS_FLIP_CORE_BACK`, dan `HOPOS_FLIP_FAIL` | flip-taak, koud, riscv64 | een app-hart draaide nog een bewoner of bereikte de uit-stub niet binnen een seconde; elk hart dat al uit het image was, gaat terug de switcher in (`HOPOS_FLIP_CORE_BACK`) en hopfs ontdooit |
 
@@ -263,12 +263,17 @@ curl -X POST -H 'Content-Type: application/json' \
 Wat er gebeurt, in volgorde:
 
 1. **Hop** haalt de bundel en stroomt hem de kern in, zoals warm. Pas dan
-   stopt hij zijn eigen taken op deze node (`agent.stop_all`, dezelfde
+   stopt hij zijn eigen taken op deze node (`agent.hold_for_flip`, dezelfde
    Stop-acties als een preemptie: `HOP_FLIP_COLD_STOP stopped=N`); de jobs
    blijven in de agent-staat op hopfs. Dan de FLIP met `n` =
    `abi::systemapi::FLIP_COLD`. Een URL die niet werkt, stopt dus niets.
+   De agent houdt de gestopte taken vast: weigert de kern de FLIP, of
+   leeft Hop 30 s na een aangenomen FLIP nog (de sprong ging niet door),
+   dan herstarten ze (`HOP_FLIP_COLD_BACK`).
 2. **De haak** toetst de som en de bundel, maar niet de switch-code
-   (`HOPOS_FLIP_COLD_ASKED`), en eist een ELF in de staging: de nieuwe
+   (`HOPOS_FLIP_COLD_ASKED`), weigert op een board waar CPU_OFF geen
+   terugweg heeft zodra een app-core ooit draaide
+   (`HOPOS_FLIP_COLD_NO_WAY_BACK`), en eist een ELF in de staging: de nieuwe
    kern start Hop daaruit. Het nieuwe beeld gaat ACHTER dat image
    (`kernflip::stage_slot`), niet eroverheen; ook bij een warme flip, zodat
    Hop na elke warme flip nog klaarligt voor een latere koude. Geen extra

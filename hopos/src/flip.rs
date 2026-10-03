@@ -758,6 +758,18 @@ fn prepare_inner(b: &FlipBundle, sha256: &[u8; 32]) -> Result<(), Refused> {
             },
         ));
     }
+    if cold && let Some(c) = no_way_back() {
+        println!(
+            "flip: cold flip refused: CPU_OFF has no way back on this board and app core {c} ran; ask warm HOPOS_FLIP_COLD_NO_WAY_BACK"
+        );
+        return Err(refuse(
+            "cold flip: CPU_OFF has no way back, ask warm",
+            kern::Error::Version {
+                have: abi::systemapi::FLIP_COLD,
+                want: 0,
+            },
+        ));
+    }
     if cold {
         // Koud: de nieuwe kern installeert zijn eigen switch-code en
         // adopteert niemand, dus de som doet er niet toe. Dit is precies de
@@ -829,6 +841,32 @@ fn prepare_inner(b: &FlipBundle, sha256: &[u8; 32]) -> Result<(), Refused> {
     }));
     BELL.set();
     Ok(())
+}
+
+/// De app-core die een koude flip op dit board onmogelijk maakt: CPU_OFF
+/// keert hier niet terug ([`CPU_OFF_RETURNS`]), en elke core die ooit
+/// draaide (geparkeerd, of nog bezet en straks geparkeerd) moet uit.
+/// Dezelfde toets als in [`cores_off`], maar in de haak: Hop krijgt de
+/// weigering op zijn FLIP, vóór hopfs bevriest en vóór de flip-taak een
+/// bewoner stopt (de Pi 5, 03-10: een 202, dan `HOPOS_FLIP_FAIL`).
+#[cfg(not(target_arch = "riscv64"))]
+fn no_way_back() -> Option<usize> {
+    use cpu::el2::CoreState;
+    if CPU_OFF_RETURNS {
+        return None;
+    }
+    let plan = crate::slots::os_plan().ok()?;
+    (1..=plan.app_cores()).find(|&c| {
+        abi::layout::Core::new(c)
+            .is_some_and(|core| !matches!(cpu::el2::core_state(&plan, core), Ok(CoreState::Cold)))
+    })
+}
+
+/// Op riscv64 haalt de koude flip elk app-hart uit het image en zet de
+/// nieuwe kern het terug ([`cores_off`]): er is geen deur zonder terugweg.
+#[cfg(target_arch = "riscv64")]
+fn no_way_back() -> Option<usize> {
+    None
 }
 
 fn too_large(flat: u64, max: u64) -> Refused {
@@ -1309,6 +1347,7 @@ async fn cores_off(exec: &'static Executor) -> Result<usize, JumpError> {
         match cpu::el2::core_state(&plan, core) {
             Ok(CoreState::Cold) => {}
             Ok(CoreState::Parked) if !CPU_OFF_RETURNS => {
+                // `prepare` weigerde al ([`no_way_back`]); de tweede lijn.
                 return Err(JumpError::Cold(
                     "CPU_OFF has no way back on this board, parked app core",
                     c,
