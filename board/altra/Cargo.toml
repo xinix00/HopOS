@@ -44,3 +44,4 @@ gui = ["board-uefi/gui"]
 # in het O6N-venster 0x8800_0000+320 MB. De binary zet het altijd aan
 # (hopos/Cargo.toml `board-altra`), de host-tests van de werkruimte niet.
 window-b000 = ["board-uefi/window-b000"]
+window-a000 = ["board-uefi/window-a000"]

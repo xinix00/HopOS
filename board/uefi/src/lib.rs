@@ -106,11 +106,14 @@ pub type Disk = VirtioBlk<Pci>;
 /// geflipte kern zonder firmware op hetzelfde venster terugvindt. Is het
 /// venster bezet, dan toetst de stub Go's kandidaten tegen de memory map en
 /// noemt hij de vrije (`boot.rs`, `HOPOS_UEFI_WINDOW`).
-#[cfg(not(any(feature = "window-8000", feature = "window-b000")))]
+#[cfg(not(any(feature = "window-8000", feature = "window-a000", feature = "window-b000")))]
 pub const WINDOW_PA: u64 = 0x5000_0000;
 /// Zie de standaardversie hierboven.
-#[cfg(all(feature = "window-8000", not(feature = "window-b000")))]
+#[cfg(all(feature = "window-8000", not(any(feature = "window-a000", feature = "window-b000"))))]
 pub const WINDOW_PA: u64 = 0x8800_0000;
+/// Zie de standaardversie hierboven: de Altra van 03-10 (B000 bezet).
+#[cfg(all(feature = "window-a000", not(feature = "window-b000")))]
+pub const WINDOW_PA: u64 = 0xA000_0000;
 /// Zie de standaardversie hierboven.
 #[cfg(feature = "window-b000")]
 pub const WINDOW_PA: u64 = 0xB000_0000;
