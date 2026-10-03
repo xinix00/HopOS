@@ -8,6 +8,7 @@ description = "Synopsys DesignWare MAC 3.x (DWMAC1000/GMAC): descriptorringen op
 
 [dependencies]
 dev = { path = "../../../dev" }
+sync = { path = "../../../sync" }
 netdev = { path = "../../../netdev" }
 driver-mdio = { path = "../mdio" }
 

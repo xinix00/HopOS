@@ -6,8 +6,10 @@
 //! boom, en het enige waar de DMA-regio gecachet is (zie CACHE hieronder).
 //!
 //! Geschreven naar de vendor U-Boot-driver (`designware.c`, bindt
-//! "cvitek,ethernet") en de Linux stmmac-glue (`dwmac-cvitek.c`); gepold,
-//! één RX- en één TX-ring (Go: `metal/driver/nic/dwmac`).
+//! "cvitek,ethernet") en de Linux stmmac-glue (`dwmac-cvitek.c`); één RX-
+//! en één TX-ring (Go: `metal/driver/nic/dwmac`). Gepold, of op de
+//! RX-interrupt als het board een lijn heeft ([`Dwmac::set_irq`], het ritme
+//! van `driver-dwmac4`).
 //!
 //! Waarom een eigen crate naast `driver-dwmac4`: die generatie (4.x/5.x)
 //! deelt met deze alleen de naam en de leverancier. Hier zit de MDIO op
@@ -76,6 +78,7 @@ use dev::{LINE, Pa};
 use driver_mdio::Mdio;
 use netdev::{Mac, TxError};
 use regs::Regs;
+use sync::Signal;
 
 pub use regs::CSR_250_300M;
 
@@ -120,6 +123,28 @@ const OP_FLUSH_TX_FIFO: u32 = 1 << 20;
 const OP_TX_START: u32 = 1 << 13;
 /// De RX-DMA loopt.
 const OP_RX_START: u32 = 1 << 1;
+
+// De RX-interrupt (Linux `dwmac_dma.h`). De 3.x-indeling: NIE en NIS op bit
+// 16, niet op 15 zoals de 4.10+ van `driver-dwmac4`. Status is W1C.
+/// DMA_INTR_ENA: normal interrupt summary enable.
+const INTR_NIE: u32 = 1 << 16;
+/// DMA_INTR_ENA: receive interrupt enable.
+const INTR_RIE: u32 = 1 << 6;
+/// DMA_STATUS: receive interrupt.
+const STAT_RI: u32 = 1 << 6;
+/// DMA_STATUS: normal interrupt summary.
+const STAT_NIS: u32 = 1 << 16;
+
+/// GMAC_INT_MASK: RGMII, PCS-link, PCS-AN, PMT, timestamp en LPI dicht. Die
+/// lopen buiten DMA_INTR_ENA om naar dezelfde lijn (GLI, GPI in
+/// DMA_STATUS), en niemand hier wist ze. Linux (`dwmac1000_core_init`)
+/// laat alleen open wat het afhandelt; wij handelen er geen af.
+const GMAC_INT_ALL: u32 = 0x60F;
+/// De MMC-tellers: alle interrupts dicht (Linux
+/// `dwmac_mmc_intr_all_mask`). Een teller op de helft of vol zet anders
+/// GMI, ook langs DMA_INTR_ENA heen, en de octettellers halen dat bij
+/// 10 MB/s binnen minuten.
+const MMC_INT_ALL: u32 = 0xFFFF_FFFF;
 
 // Het descriptorformaat: "normal format", 16 bytes, géén ALTDESCRIPTOR (bit
 // 7 van DMA_BUS_MODE blijft 0, net als bij de vendor).
@@ -532,6 +557,7 @@ impl Probe {
             tx_cur: 0,
             rx_dirty: false,
             tx_dirty: false,
+            irq: None,
             stats: Stats::default(),
         };
         n.program(conf);
@@ -646,6 +672,32 @@ pub struct Stats {
     pub tx_full: u64,
     /// Poll-demand-schrijfacties: de doorbells.
     pub doorbells: u64,
+    /// Keren dat de RX-interrupt weer open ging.
+    pub rearms: u64,
+}
+
+/// Het interrupt-pad van de NIC: alleen het enable- en het statusregister
+/// van de DMA, die niets met de ringen delen. `Copy`, zodat het board hem
+/// naast de driver houdt.
+#[derive(Clone, Copy)]
+pub struct IrqAck {
+    base: Pa,
+}
+
+impl IrqAck {
+    /// Laat de level-lijn los: masker dicht, status gewist (het ritme van
+    /// `driver-dwmac4`). De driver zet het masker weer open als de pomp de
+    /// ring leeg las (`receive` die `None` geeft), dus één claim per burst
+    /// in plaats van per frame. Geeft de DMA-status die stond.
+    pub fn ack(&self) -> u32 {
+        // SAFETY: `base` kwam uit een `Probe`, die een gemapt blok eiste;
+        // het enable- en statusregister delen niets met de ringen.
+        let r: &Regs = unsafe { dev::regs(self.base) };
+        let st = r.status.read();
+        r.intr_ena.write(0);
+        r.status.write(STAT_RI | STAT_NIS);
+        st
+    }
 }
 
 /// Eén draaiende DWMAC1000.
@@ -661,6 +713,7 @@ pub struct Dwmac {
     rx_dirty: bool,
     /// Er zijn TX-descriptors gevuld sinds de laatste poll-demand.
     tx_dirty: bool,
+    irq: Option<&'static Signal>,
     /// De meetlat.
     pub stats: Stats,
 }
@@ -725,10 +778,38 @@ impl Dwmac {
         r.rx_list.write(lo(self.ring.rx_desc));
         r.tx_list.write(lo(self.ring.tx_desc));
         r.op_mode.write(OP_STORE_FORWARD | OP_FLUSH_TX_FIFO);
+        // Alles wat buiten DMA_INTR_ENA om de lijn kan zetten, dicht; de
+        // RX-interrupt zelf gaat pas open met `set_irq`.
+        r.int_mask.write(GMAC_INT_ALL);
+        r.mmc_rx_mask.write(MMC_INT_ALL);
+        r.mmc_tx_mask.write(MMC_INT_ALL);
+        r.mmc_ipc_mask.write(MMC_INT_ALL);
         r.status.update(|v| v); // sticky bits van vóór de reset wissen (W1C)
         r.conf.write(conf);
         r.op_mode.update(|v| v | OP_TX_START | OP_RX_START);
         dev::mb();
+    }
+
+    /// Het interrupt-pad, voor het board.
+    #[must_use]
+    pub fn irq_ack(&self) -> IrqAck {
+        IrqAck { base: self.base }
+    }
+
+    /// Hangt de bel van de NIC-interrupt aan de driver en zet de
+    /// RX-interrupt open. De RX-pomp wacht dan op de bel in plaats van te
+    /// pollen.
+    pub fn set_irq(&mut self, bell: &'static Signal) {
+        self.irq = Some(bell);
+        self.rearm();
+    }
+
+    /// Status gewist, masker open.
+    fn rearm(&mut self) {
+        let r = self.regs();
+        r.status.write(STAT_RI | STAT_NIS);
+        r.intr_ena.write(INTR_NIE | INTR_RIE);
+        self.stats.rearms += 1;
     }
 
     /// Leest de Missed Frame and Buffer Overflow Counter en telt hem op bij
@@ -915,7 +996,20 @@ impl netdev::Device for Dwmac {
     /// leeg, dan valt de RX-poll-demand meteen: de pomp flusht alleen na
     /// een frame, en een RX-DMA die stilstond op een volle ring moet het
     /// horen.
+    ///
+    /// Leeg met een bedrade lijn: dan gaat het masker weer open (de
+    /// dispatch sloot het bij de claim), en daarna kijkt de driver nog één
+    /// keer, zodat een frame dat tussen de lees en het openen binnenkwam
+    /// niet tot de vangrail blijft liggen.
     fn receive(&mut self, buf: &mut [u8]) -> Option<usize> {
+        if let Some(n) = self.receive_one(buf) {
+            return Some(n);
+        }
+        self.kick_rx();
+        if self.irq.is_none() || self.regs().intr_ena.read() != 0 {
+            return None;
+        }
+        self.rearm();
         let got = self.receive_one(buf);
         if got.is_none() {
             self.kick_rx();
@@ -936,5 +1030,9 @@ impl netdev::Device for Dwmac {
 
     fn mac(&self) -> Mac {
         self.mac
+    }
+
+    fn irq(&self) -> Option<&'static Signal> {
+        self.irq
     }
 }

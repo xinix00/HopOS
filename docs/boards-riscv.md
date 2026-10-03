@@ -418,8 +418,20 @@ watchdog of de stroom, en de kaart start de oude kern.
   `drivers/mailbox/cv1800-mailbox.c`: `MBOX_EN_REG(cpu)`, dan `MBOX_SET_REG`
   0x60 met het kanaalbit, en de ontvanger wist met `MBOX_SET_CLR_REG`).
   Tot die bewezen is, hoort de kern een app op de 300 µs-poll van de NIC
-  (`net::pump::NIC_POLL`): daarom geen NIC-interrupt op de LicheeRV zonder
-  die bel, anders wacht een TX van een app weer op de failsafe van 1 ms.
+  (`net::pump::NIC_POLL`).
+- **De NIC-interrupt op de LicheeRV bestaat niet op de C906L.** De TRM
+  (sophgo-doc, SG200X, "Interrupt number and Interrupt source mapping for
+  Slave RISCV C906 @ 700Mhz") kent op de PLIC van de C906L geen ethernetbron
+  (31 is daar UART1), en de vendor-FreeRTOS voor dat hart zet
+  `ETH0_SBD_INTR_O` op NA. Dus zolang de loterij de kern op de C906L zet,
+  pollt de dwmac (300 µs) en dat kost in rust 46 tot 48 procent van de
+  OS-core (03-10). Alleen als de kern op de C906B blijft (`RESCUED`,
+  `NONE`) hangt de dwmac aan PLIC-bron 31 (Linux `cv180x.dtsi`
+  `SOC_PERIPHERAL_IRQ(15)` = 15 + 16, vendor-DTS 31, TRM "Master RISCV
+  C906" 31 Ethnet0), met de vangrail van 10 ms; dan hoort de kern een app
+  op de failsafe van 1 ms in plaats van de poll, want er is geen bel.
+  `HOPOS_NIC_IRQ` zegt bij boot welke van de twee het werd; NOG NIET OP
+  IJZER.
 - **SMP-apps** op riscv64: één core per bewoner. Meerdere bewoners op één
   hart kan wel (sinds 3.0.3 telt een kooi niet als core): de switcher
   bewaart sinds 02-10 f0..f31 en `fcsr`, en de kill-tick is op een gedeeld

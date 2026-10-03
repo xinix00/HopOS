@@ -59,6 +59,7 @@ fn fake() -> Fake {
         tx_cur: 0,
         rx_dirty: false,
         tx_dirty: false,
+        irq: None,
         stats: Stats::default(),
     };
     Fake {
@@ -514,4 +515,40 @@ fn diag_is_one_line_with_the_numbers_and_samples_missed() {
     assert!(s.contains("rxdesc[0] 0x80000000"), "{s}");
     assert!(s.contains("missed-ring=5 missed-fifo=2"), "{s}");
     assert_eq!(f.n.stats.rx_missed_ring, 5);
+}
+
+#[test]
+fn program_masks_the_mac_and_mmc_interrupts_and_leaves_rx_shut() {
+    let f = running();
+    let r = f.n.regs();
+    assert_eq!(r.int_mask.read(), GMAC_INT_ALL);
+    assert_eq!(r.mmc_rx_mask.read(), MMC_INT_ALL);
+    assert_eq!(r.mmc_tx_mask.read(), MMC_INT_ALL);
+    assert_eq!(r.mmc_ipc_mask.read(), MMC_INT_ALL);
+    // Zonder `set_irq` blijft de RX-interrupt dicht en pollt de pomp.
+    assert_eq!(r.intr_ena.read(), 0);
+    assert!(f.n.irq().is_none());
+}
+
+#[test]
+fn the_irq_masks_on_ack_and_rearms_when_the_ring_is_empty() {
+    static BELL: Signal = Signal::new();
+    let mut f = running();
+    let n = &mut f.n;
+    n.set_irq(&BELL);
+    let r = n.regs();
+    // De 3.x-indeling: NIE op bit 16, niet de 15 van de DWMAC4.
+    assert_eq!(r.intr_ena.read(), 0x0001_0040);
+    r.status.write(STAT_RI | STAT_NIS);
+    let ack = n.irq_ack();
+    assert_eq!(ack.ack(), STAT_RI | STAT_NIS);
+    assert_eq!(r.intr_ena.read(), 0, "ack leaves the line masked");
+    // De pomp leest de ring leeg: het masker gaat weer open, één keer.
+    let mut out = [0u8; 64];
+    let rearms = n.stats.rearms;
+    assert_eq!(n.receive(&mut out), None);
+    assert_eq!(r.intr_ena.read(), INTR_NIE | INTR_RIE);
+    assert_eq!(n.receive(&mut out), None);
+    assert_eq!(n.stats.rearms, rearms + 1);
+    assert!(n.irq().is_some());
 }

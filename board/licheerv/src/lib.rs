@@ -49,16 +49,17 @@ pub mod temp;
 pub mod watchdog;
 
 use board::{Board, CoreClass, Dispatched, Error, NoDisk, Plan, Region};
+use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use cpu::irq::{Controller, Line};
 use cpu::riscv::clint::Clint;
 use cpu::riscv::csr;
 use cpu::riscv::plic::{Plic, machine_context};
 use dev::Pa;
-use driver_dwmac::{Dwmac, Probe};
+use driver_dwmac::{Dwmac, IrqAck, Probe};
 use driver_ns16550::Ns16550;
 use netdev::Mac;
-use sync::Signal;
+use sync::{Local, Signal};
 
 /// De schijf die `probe_disk` geeft: geen, want er is nog geen SD-driver
 /// ([`board::NoDisk`]). De binary noemt hem `vboard::Disk`, zodat de
@@ -76,6 +77,15 @@ pub const PLIC: Pa = Pa(0x7000_0000);
 pub const PLIC_SOURCES: u32 = 102;
 /// De dwmac.
 pub const GMAC: Pa = Pa(0x0407_0000);
+/// De PLIC-bron van de dwmac (`macirq`) op de PLIC van de C906B: 31.
+/// Linux `cv180x.dtsi` zegt `SOC_PERIPHERAL_IRQ(15)` en `sg2002.dtsi` maakt
+/// daar `15 + 16` van, de vendor-DTS (`cv181x_base_riscv.dtsi`) zegt 31
+/// direct, en de TRM (sophgo-doc, de tabel "Master RISCV C906 @ 1.0Ghz")
+/// noemt 31 en 32 Ethnet0 (32 is de LPI-lijn). De PLIC van de C906L heeft
+/// GEEN ethernetbron: in de TRM-tabel "Slave RISCV C906 @ 700Mhz" staat er
+/// geen (daar is 31 UART1), en de vendor-FreeRTOS voor dat hart zet
+/// `ETH0_SBD_INTR_O` op NA (`hal/cv181x/config/intr_conf.h`).
+pub const GMAC_IRQ: u32 = 31;
 /// De DW-watchdog.
 pub const WDT: Pa = Pa(0x0301_0000);
 /// De timebase: de vaste 25 MHz-osc, exact 40 ns per tik.
@@ -131,6 +141,11 @@ static PLIC_DEV: Plic = unsafe { Plic::new(PLIC, PLIC_SOURCES) };
 const CLINT_DEV: Clint = unsafe { Clint::new(CLINT) };
 
 static CLINT_OK: AtomicBool = AtomicBool::new(false);
+/// De bel van de NIC: de dispatch luidt hem, de RX-pomp wacht erop.
+static NIC_BELL: Signal = Signal::new();
+/// De ack van de NIC-lijn, gezet door `probe_nic` als de lijn er is, gelezen
+/// door de dispatch-taak. Beide draaien op de executor van de kern.
+static NIC_IRQ: Local<Cell<Option<IrqAck>>> = Local::new(Cell::new(None));
 /// Leeft er een NIC uit `probe_nic`? Pas gezet na een gelukte probe: een
 /// mislukte (geen link) liet niets achter en mag opnieuw (hopos `nic_retry`).
 static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
@@ -466,14 +481,27 @@ impl Board for LicheeRv {
     }
 
     fn dispatch_interrupts(&self) -> Dispatched {
+        let nic = NIC_IRQ.get().get();
         let mut d = Dispatched::default();
         cpu::riscv::trap::take_irq();
         CLINT_DEV.set_msip(self.clint_hart(), false);
         while let Some(l) = PLIC_DEV.claim() {
-            // Niemand heeft een lijn: de dwmac pollt. Wat vuurt, gaat uit.
-            PLIC_DEV.disable(l);
-            PLIC_DEV.complete(Line(l.0));
-            d.other += 1;
+            match nic {
+                // De NIC: masker dicht en status gewist (de level-lijn
+                // valt), dan de bel. De driver zet het masker weer open als
+                // de pomp de ring leeg las.
+                Some(ack) if l.0 == GMAC_IRQ => {
+                    ack.ack();
+                    NIC_BELL.set();
+                    d.nic += 1;
+                }
+                // Niemand anders heeft een lijn: wat vuurt, gaat uit.
+                _ => {
+                    PLIC_DEV.disable(l);
+                    d.other += 1;
+                }
+            }
+            PLIC_DEV.complete(l);
         }
         csr::mie_set(csr::MIP_MEIP | csr::MIP_MSIP);
         d
@@ -533,6 +561,24 @@ impl Board for LicheeRv {
             )
         }
         .map_err(|_| Error::Nic("dwmac start failed"))?;
+        // De lijn, alleen als de kern op de C906B staat: de PLIC van de C906L
+        // heeft geen ethernetbron ([`GMAC_IRQ`]). Daar, en bij een lijn die
+        // niet aan wil, pollt de pomp zoals voorheen (300 µs). Op de C906B
+        // hoort de kern een app dan op de failsafe van de switch (1 ms) in
+        // plaats van de poll: er is geen bel van de C906L naar de C906B.
+        let why = if self.this_core() != HART_BIG {
+            Some("the PLIC of the C906L has no ethernet source")
+        } else if PLIC_DEV.enable(Line(GMAC_IRQ)).is_err() {
+            Some("the PLIC refused the source")
+        } else {
+            NIC_IRQ.get().set(Some(nic.irq_ack()));
+            nic.set_irq(&NIC_BELL);
+            None
+        };
+        match why {
+            None => cpu::println!("net: dwmac irq {GMAC_IRQ} on the PLIC HOPOS_NIC_IRQ"),
+            Some(why) => cpu::println!("net: dwmac polled, {why} HOPOS_NIC_IRQ"),
+        }
         cpu::println!("net: dwmac {}", nic.diag());
         NIC_CLAIMED.store(true, Relaxed);
         Ok(Some(nic))

@@ -20,12 +20,23 @@ pub(crate) struct Regs {
     _r1: [u32; 2],
     /// VERSION: snpsver in [7:0]; 0x1037 op de SG2002 (30-07).
     pub(crate) version: Reg<u32>,
-    _r2: [u32; 7],
+    _r2: [u32; 6],
+    /// GMAC_INT_MASK: de interrupts van de MAC zelf (RGMII, PCS, PMT,
+    /// timestamp, LPI); 1 = dicht.
+    pub(crate) int_mask: Reg<u32>,
     /// MAC_ADDR0_HI: bytes 4 en 5.
     pub(crate) addr0_hi: Reg<u32>,
     /// MAC_ADDR0_LO: bytes 0 tot en met 3.
     pub(crate) addr0_lo: Reg<u32>,
-    _r3: [u32; 1006],
+    _r3: [u32; 49],
+    /// MMC_RX_INTR_MASK (MMC op 0x100 bij de 3.x, Linux `MMC_GMAC3_X_OFFSET`).
+    pub(crate) mmc_rx_mask: Reg<u32>,
+    /// MMC_TX_INTR_MASK.
+    pub(crate) mmc_tx_mask: Reg<u32>,
+    _r3b: [u32; 59],
+    /// MMC_RX_IPC_INTR_MASK.
+    pub(crate) mmc_ipc_mask: Reg<u32>,
+    _r3c: [u32; 895],
     /// DMA_BUS_MODE.
     pub(crate) bus_mode: Reg<u32>,
     /// DMA_XMT_POLL_DEMAND: elke schrijf laat de TX-DMA de ring opnieuw
@@ -41,7 +52,8 @@ pub(crate) struct Regs {
     pub(crate) status: Reg<u32>,
     /// DMA_CONTROL (operation mode).
     pub(crate) op_mode: Reg<u32>,
-    _r4: u32,
+    /// DMA_INTR_ENA: welke DMA-status de lijn (sbd_intr) mag hoog zetten.
+    pub(crate) intr_ena: Reg<u32>,
     /// DMA_MISSED_FRAME_CTR: leest én wist.
     pub(crate) missed: Reg<u32>,
     _r5: [u32; 9],
@@ -60,8 +72,12 @@ const _: () = {
     assert!(offset_of!(Regs, gmii_addr) == 0x0010);
     assert!(offset_of!(Regs, gmii_data) == 0x0014);
     assert!(offset_of!(Regs, version) == 0x0020);
+    assert!(offset_of!(Regs, int_mask) == 0x003C);
     assert!(offset_of!(Regs, addr0_hi) == 0x0040);
     assert!(offset_of!(Regs, addr0_lo) == 0x0044);
+    assert!(offset_of!(Regs, mmc_rx_mask) == 0x010C);
+    assert!(offset_of!(Regs, mmc_tx_mask) == 0x0110);
+    assert!(offset_of!(Regs, mmc_ipc_mask) == 0x0200);
     assert!(offset_of!(Regs, bus_mode) == 0x1000);
     assert!(offset_of!(Regs, tx_poll) == 0x1004);
     assert!(offset_of!(Regs, rx_poll) == 0x1008);
@@ -69,6 +85,7 @@ const _: () = {
     assert!(offset_of!(Regs, tx_list) == 0x1010);
     assert!(offset_of!(Regs, status) == 0x1014);
     assert!(offset_of!(Regs, op_mode) == 0x1018);
+    assert!(offset_of!(Regs, intr_ena) == 0x101C);
     assert!(offset_of!(Regs, missed) == 0x1020);
     assert!(offset_of!(Regs, cur_tx_desc) == 0x1048);
     assert!(offset_of!(Regs, cur_rx_desc) == 0x104C);
