@@ -166,19 +166,26 @@ impl Reader for AbiTx {
         if let Some(work) = coherent_peek(handle) {
             return work;
         }
+        // Met onderhoud: één `pull`, op de regel van head (waar ook het
+        // maatwoord staat). Tail is van de kern zelf (de switch is de lezer),
+        // dus zijn eigen cache heeft hem; tot 03-10 waren het drie pulls per
+        // ring per blik, en op de C906 is elk een `th.dcache.cipa` met
+        // `th.sync.is` en een lees uit DRAM erna.
         let base = Pa(handle & !HANDLE_HW);
-        let at = |off: u64| {
-            dev::pull(base.add(off), 8);
-            dev::read64(base.add(off))
-        };
-        let n = at(abi::ring::HEAD_OFF).wrapping_sub(at(abi::ring::TAIL_OFF));
-        n != 0 && n <= at(abi::ring::SIZE_OFF)
+        dev::pull(base.add(abi::ring::HEAD_OFF), 8);
+        let n = dev::read64(base.add(abi::ring::HEAD_OFF))
+            .wrapping_sub(dev::read64(base.add(abi::ring::TAIL_OFF)));
+        n != 0 && n <= dev::read64(base.add(abi::ring::SIZE_OFF))
     }
 
     fn quiet(handle: u64) -> bool {
         coherent_peek(handle) == Some(false)
     }
 }
+
+// Het maatwoord ligt in de regel van head: de ene `pull` van `probe` dekt
+// beide.
+const _: () = assert!(abi::ring::SIZE_OFF / dev::LINE == abi::ring::HEAD_OFF / dev::LINE);
 
 /// Bit 0 van een probe-handvat: de kern mapt de ring Normal write-back
 /// ([`Coherence::Hardware`]).

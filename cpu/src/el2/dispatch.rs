@@ -732,6 +732,38 @@ pub fn ctx_write(ctx: Pa, off: u64, v: u64) {
     dev::push(ctx.add(off), 8);
 }
 
+/// Een woord van het ctx-blok van een bewoner van de OS-core, gelezen door
+/// de rotatie (`el2::next`, `due`, `rx_due`). Op riscv64 schrijft alleen het
+/// hart van de kern die woorden (de kern en de overgang van de OS-core; de
+/// switcher van een app-hart kent alleen zijn eigen bewoners, en niemand
+/// anders zet daar een kick), dus heeft zijn cache de laatste waarde en is
+/// de `th.dcache.cipa` met `th.sync.is` van [`ctx_read`] loos: per hop een
+/// stuk of zeven op de C906 (03-10). Op arm64 kan een switcher met de MMU
+/// uit er een kick in zetten: daar [`ctx_read`].
+#[must_use]
+pub fn os_ctx_read(ctx: Pa, off: u64) -> u64 {
+    if cfg!(target_arch = "riscv64") {
+        debug_assert!(off < CTX_LEN && off.is_multiple_of(8));
+        dev::read64(ctx.add(off))
+    } else {
+        ctx_read(ctx, off)
+    }
+}
+
+/// Schrijft een woord van het ctx-blok van een bewoner van de OS-core vanuit
+/// de beurt (`begin`, `settle`), om dezelfde reden als [`os_ctx_read`]: op
+/// riscv64 zonder `th.dcache.cpa` en `th.sync.is` (een lezer elders in de
+/// kern doet zelf een `pull`, en die cleant eerst; de boot-stub doet
+/// `th.dcache.ciall`), op arm64 [`ctx_write`].
+pub fn os_ctx_write(ctx: Pa, off: u64, v: u64) {
+    if cfg!(target_arch = "riscv64") {
+        debug_assert!(off < CTX_LEN && off.is_multiple_of(8));
+        dev::write64(ctx.add(off), v);
+    } else {
+        ctx_write(ctx, off, v);
+    }
+}
+
 /// De staat van ctx-blok `ctx`, of `None` voor een onbekend woord.
 #[must_use]
 pub fn ctx_state(ctx: Pa) -> Option<CtxState> {
@@ -745,17 +777,22 @@ pub fn ctx_state(ctx: Pa) -> Option<CtxState> {
 pub fn rx_due(ctx: Pa) -> bool {
     // De control-page via het ctx-blok: een secundaire heeft geen eigen
     // partitie, wel een ctx-blok met de gedeelde page.
-    let cp = ctx_read(ctx, CTX_CTRL_PA);
+    let cp = os_ctx_read(ctx, CTX_CTRL_PA);
     if cp == 0 {
         return false;
     }
     let door_pa = Pa(cp).add(CTRL_RX_DOOR);
-    dev::pull(door_pa, 8);
+    // De deurbel zet de bewoner zelf; op riscv64 vraagt alleen de rotatie
+    // van de OS-core dit, over een bewoner op hetzelfde hart (zie
+    // [`os_ctx_read`]).
+    if !cfg!(target_arch = "riscv64") {
+        dev::pull(door_pa, 8);
+    }
     let door = dev::read64(door_pa);
     if door & RX_DOOR_ARMED == 0 {
         return false;
     }
-    let head_pa = ctx_read(ctx, CTX_RING_HEAD_PA);
+    let head_pa = os_ctx_read(ctx, CTX_RING_HEAD_PA);
     if head_pa == 0 {
         return false;
     }

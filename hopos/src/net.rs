@@ -89,11 +89,18 @@ pub(crate) const RINGS: abi::ring::Coherence = if cfg!(all(
 /// veeg per cacheline in beide richtingen (GEMETEN 01-10 op M10: het
 /// opslagpad haalde 930 MB/s uit gaten in het RAM van de kern, met de
 /// OS-core vol bezig, tegen 4300 MB/s app naar app door dezelfde switch).
-const HOST_RINGS: abi::ring::Coherence = if cfg!(feature = "board-apple") {
-    abi::ring::Coherence::Hardware
-} else {
-    RINGS
-};
+///
+/// Ook op RISC-V: daar is [`RINGS`] `Maintained` omdat de app-harts niet
+/// coherent zijn met de kern, maar beide kanten van poort 0 draaien in de
+/// executor van de kern op zijn eigen hart, dus in één cache. Het onderhoud
+/// was daar per frame `th.dcache.cipa`/`cpa` met `th.sync.is` op kop, staart
+/// en payload voor niets (03-10, de hop op de C906).
+const HOST_RINGS: abi::ring::Coherence =
+    if cfg!(any(feature = "board-apple", target_arch = "riscv64")) {
+        abi::ring::Coherence::Hardware
+    } else {
+        RINGS
+    };
 
 /// De meetlat van het netwerkvlak.
 pub(crate) static STATS: Stats = Stats::new();

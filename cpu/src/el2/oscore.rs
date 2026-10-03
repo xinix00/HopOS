@@ -55,9 +55,11 @@
 
 extern crate alloc;
 
+#[cfg(test)]
+use super::dispatch::ctx_state;
 use super::dispatch::{
-    Flavor, HVC_EXIT, HVC_YIELD, VEC_FIQ_LOWER, VEC_SYNC_LOWER, context_id, ctx_read, ctx_state,
-    ctx_write, rx_due,
+    Flavor, HVC_EXIT, HVC_YIELD, VEC_FIQ_LOWER, VEC_SYNC_LOWER, context_id, ctx_read, ctx_write,
+    os_ctx_read, os_ctx_write, rx_due,
 };
 use super::layout::{
     CAGE_STRIDE, CTX_CTRL_PA, CTX_FP_END, CTX_FP_LIVE, CTX_FPRS, CTX_FPRS_ARM_WORDS, CTX_GPRS,
@@ -866,7 +868,7 @@ pub fn next(sched: Pa, cage: Pa, now: u64) -> Next {
             continue;
         }
         let ctx = cage.add(u64::from(id) * CAGE_STRIDE + CTX_OFF);
-        let fresh = match ctx_state(ctx) {
+        let fresh = match CtxState::from_raw(os_ctx_read(ctx, CTX_STATE)) {
             Some(CtxState::BootPending) => true,
             Some(CtxState::Saved) => match due(ctx, now) {
                 None => false,
@@ -877,7 +879,7 @@ pub fn next(sched: Pa, cage: Pa, now: u64) -> Next {
             },
             _ => continue,
         };
-        if ctx_read(ctx, CTX_REVOKE) != 0 {
+        if os_ctx_read(ctx, CTX_REVOKE) != 0 {
             ctx_write(ctx, CTX_STATE, CtxState::Dead.raw());
             continue;
         }
@@ -912,8 +914,8 @@ pub(crate) fn begin(sched: Pa, i: usize, id: u8, ctx: Pa) {
     crate::hopcost::pick(id);
     dev::write64(sched.add(SCHED_CURSOR), i as u64);
     dev::write64(sched.add(SCHED_CURRENT), u64::from(id));
-    ctx_write(ctx, CTX_KICK_PENDING, 0);
-    ctx_write(ctx, CTX_STATE, CtxState::Running.raw());
+    os_ctx_write(ctx, CTX_KICK_PENDING, 0);
+    os_ctx_write(ctx, CTX_STATE, CtxState::Running.raw());
     STATS.entries.fetch_add(1, Relaxed);
 }
 
@@ -940,9 +942,9 @@ pub(crate) fn end(id: u8, back: Back) -> Back {
 /// wekker van de app-cores op Apple (`waker.go` `wakeDue`, hopos/src/cage.rs).
 #[must_use]
 pub fn due(ctx: Pa, now: u64) -> Option<u64> {
-    let w = ctx_read(ctx, CTX_WAKE);
+    let w = os_ctx_read(ctx, CTX_WAKE);
     let t = w & !CTX_WAKE_NO_PEEK;
-    if t == 0 || now >= t || ctx_read(ctx, CTX_KICK_PENDING) != 0 {
+    if t == 0 || now >= t || os_ctx_read(ctx, CTX_KICK_PENDING) != 0 {
         return None;
     }
     if w & CTX_WAKE_NO_PEEK == 0 && rx_due(ctx) {

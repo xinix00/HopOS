@@ -46,7 +46,7 @@ use super::clint::{Clint, NEVER};
 use super::csr;
 use super::pmp;
 use crate::el2::oscore::{begin, end, home, round};
-use crate::el2::{self, Back, OS_STATS as STATS, Turn, ctx_read, ctx_write};
+use crate::el2::{self, Back, OS_STATS as STATS, Turn, ctx_read, ctx_write, os_ctx_write};
 use abi::hopabi::{CTRL_FAULT_ESR, CTRL_FAULT_FAR, CTRL_FAULT_VEC};
 use abi::layout::{
     CTX_BOOT_PC, CTX_CTRL_PA, CTX_FPRS, CTX_GPRS, CTX_LEN, CTX_REGIME, CTX_RESUME, CTX_STATE,
@@ -305,8 +305,8 @@ fn settle(ctx: Pa, cause: u64, mtval: u64, count: bool) -> Back {
     if cause & CAUSE_INTERRUPT != 0 {
         // Onderbroken midden in zijn werk: meteen weer aan de beurt, op
         // mepc zelf (een interrupt wijst naar de instructie die nog moet).
-        ctx_write(ctx, CTX_WAKE, 0);
-        ctx_write(ctx, CTX_STATE, CtxState::Saved.raw());
+        os_ctx_write(ctx, CTX_WAKE, 0);
+        os_ctx_write(ctx, CTX_STATE, CtxState::Saved.raw());
         return match cause & !CAUSE_INTERRUPT {
             IRQ_MTI => {
                 tally(&STATS.timer);
@@ -327,11 +327,16 @@ fn settle(ctx: Pa, cause: u64, mtval: u64, count: bool) -> Back {
         tally(&STATS.faults);
         return Back::Fault;
     }
-    // Een ecall wijst met mepc naar zichzelf: hervatten op + 4.
-    ctx_write(ctx, CTX_RESUME, ctx_read(ctx, CTX_RESUME).wrapping_add(4));
-    let a7 = ctx_read(ctx, CTX_A7);
+    // Een ecall wijst met mepc naar zichzelf: hervatten op + 4. De woorden
+    // van de register-staat (mepc, a7, a0) schreef de trap net op dit hart,
+    // en alleen de overgang op dit hart leest ze terug: gewone toegang, geen
+    // `th.dcache.cipa` die de regel eerst naar DRAM schrijft en dan uit de
+    // cache gooit (03-10, de hop op de C906).
+    let resume = ctx.add(CTX_RESUME);
+    dev::write64(resume, dev::read64(resume).wrapping_add(4));
+    let a7 = dev::read64(ctx.add(CTX_A7));
     if a7 != 0 && a7 != A7_KICK {
-        ctx_write(ctx, CTX_STATE, CtxState::Dead.raw());
+        os_ctx_write(ctx, CTX_STATE, CtxState::Dead.raw());
         tally(&STATS.exits);
         return Back::Exit;
     }
@@ -340,10 +345,10 @@ fn settle(ctx: Pa, cause: u64, mtval: u64, count: bool) -> Back {
     let wake = if a7 == A7_KICK {
         0
     } else {
-        ctx_read(ctx, CTX_A0)
+        dev::read64(ctx.add(CTX_A0))
     };
-    ctx_write(ctx, CTX_WAKE, wake);
-    ctx_write(ctx, CTX_STATE, CtxState::Saved.raw());
+    os_ctx_write(ctx, CTX_WAKE, wake);
+    os_ctx_write(ctx, CTX_STATE, CtxState::Saved.raw());
     tally(&STATS.yields);
     Back::Yield
 }
@@ -677,7 +682,18 @@ __hopos_os_trap:
     sd t1, {regime}+{rstvec}(t0)
     csrr t1, sscratch
     sd t1, {regime}+{rsscratch}(t0)
-    // De FP-staat, na sstatus (die draagt de FS van de bewoner zelf).
+    // De FP-staat, na sstatus (die draagt de FS van de bewoner zelf), en
+    // alleen als hij niet Clean is: Clean betekent dat de f-registers sinds
+    // de vorige bewaring niet veranderd zijn, en die staat al in zijn
+    // ctx-blok (lazy FP zoals Linux' `__fstate_save` bij SR_FS_DIRTY). Na
+    // het bewaren hervat hij Clean, en pas een FP-schrijf maakt hem weer
+    // Dirty. Initial (een koude start die nog niets bewaarde) en Off bewaren
+    // wel, zoals tot 03-10.
+    ld t1, {resume}+8(t0)
+    li t2, {fs_mask}
+    and t1, t1, t2
+    li t2, {fs_clean}
+    beq t1, t2, 7f
     li t1, {fs}
     csrs mstatus, t1
     .option push
@@ -688,6 +704,17 @@ __hopos_os_trap:
     frcsr t1
     sd t1, {fprs}+256(t0)
     .option pop
+    // Hervatten als Clean; een bewoner die FP uit had (Off), houdt het uit.
+    ld t1, {resume}+8(t0)
+    li t2, {fs_mask}
+    and t2, t1, t2
+    beqz t2, 7f
+    li t2, {fs_mask}
+    or t1, t1, t2
+    li t2, {fs}
+    xor t1, t1, t2
+    sd t1, {resume}+8(t0)
+7:
     csrr t1, mtval
     sd t1, {smtval}(sp)
     csrr a0, mcause
@@ -741,6 +768,8 @@ __hopos_os_end:
         verify = const CAUSE_CAGE_VERIFY,
         fprs = const CTX_FPRS,
         fs = const MSTATUS_FS_INITIAL,
+        fs_mask = const 3 * MSTATUS_FS_INITIAL,
+        fs_clean = const 2 * MSTATUS_FS_INITIAL,
     );
 }
 

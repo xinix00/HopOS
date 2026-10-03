@@ -348,14 +348,17 @@ mod tests {
         let txb = Backing::new(4096);
         let rxb = Backing::new(4096);
         let mut filler = Writer::open(txb.pa(), 4096).unwrap();
-        let tx = Writer::open(txb.pa(), 4096).unwrap();
-        let rx = Reader::open(rxb.pa(), 4096).unwrap();
         let frame = [0xabu8; 1000];
         let mut filled = 0;
         while filler.write(Kind::FRAME, &frame).is_ok() {
             filled += 1;
         }
         assert!(filled >= 2, "testring vulde al na {filled} frames");
+        // De echte producer pas nu: een schrijver houdt zijn eigen head bij
+        // (`abi::ring::Writer`), dus hij opent na de vuller, zoals een app
+        // de ring één keer opent en daarna de enige schrijver is.
+        let tx = Writer::open(txb.pa(), 4096).unwrap();
+        let rx = Reader::open(rxb.pa(), 4096).unwrap();
 
         let mut nic = Nic::over(tx, rx, Peek::new(rxb.pa(), 4096), mac_of(1));
         let mut fut = pin!(nic.transmit_wait(&frame, now_zero));
@@ -383,10 +386,11 @@ mod tests {
         let txb = Backing::new(256);
         let rxb = Backing::new(256);
         let mut filler = Writer::open(txb.pa(), 256).unwrap();
+        while filler.write(Kind::FRAME, &[1; 100]).is_ok() {}
+        // Na de vuller, zie hierboven.
         let tx = Writer::open(txb.pa(), 256).unwrap();
         let rx = Reader::open(rxb.pa(), 256).unwrap();
         let mut nic = Nic::over(tx, rx, Peek::new(rxb.pa(), 256), mac_of(1));
-        while filler.write(Kind::FRAME, &[1; 100]).is_ok() {}
         let drops = TX_DROPS.load(Relaxed);
         let mut fut = pin!(nic.transmit_wait(&[1; 100], clock));
         let mut cx = Context::from_waker(Waker::noop());

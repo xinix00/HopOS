@@ -314,7 +314,10 @@ fn head_pending_snapshots() {
         let h = new_ring(CAP);
         h.g.set_head(head);
         h.g.set_tail(tail);
-        assert_eq!(h.r.head_pending(), (head, pending), "{name}");
+        // De lezer leest zijn eigen tail bij het openen (daarna houdt hij hem
+        // zelf bij), dus een lezer die de gezette tail ziet.
+        let r = Reader::open(h.g.base, h.g.size).unwrap();
+        assert_eq!(r.head_pending(), (head, pending), "{name}");
     }
 }
 
@@ -445,4 +448,25 @@ fn in_place_reader_refuses_a_header_above_max() {
     h.w.write(Kind::FRAME, &[1; 40]).unwrap();
     assert!(h.r.read_with(32, |_, _| ()).is_none());
     assert!(matches!(h.r.corrupt(), Some(Corrupt::BadHeader { .. })));
+}
+
+/// De eigen index komt van de eigen kant (03-10): een tegenpartij die tail
+/// (of head) in gedeeld geheugen overschrijft, laat de lezer niet opnieuw
+/// lezen of de schrijver niet over ongelezen records heen schrijven.
+#[test]
+fn own_index_is_kept_by_its_owner() {
+    let mut h = new_ring(256);
+    assert!(h.w.write(Kind::FRAME, &[1; 8]).unwrap());
+    let mut buf = [0u8; 64];
+    assert_eq!(h.r.read_into(&mut buf).map(|r| r.payload.len()), Some(8));
+    // Een verzonnen tail terug naar 0: de lezer leest het record niet nog eens.
+    h.g.set_tail(0);
+    assert!(h.r.read_into(&mut buf).is_none());
+    // De schrijver gaat door vanaf zijn eigen head, niet vanaf een
+    // verzonnen head in gedeeld geheugen; de lezer vindt dat record achter
+    // het eerste.
+    h.g.set_head(0);
+    assert!(h.w.write(Kind::FRAME, &[2; 8]).is_ok());
+    let r = h.r.read_into(&mut buf).map(|r| r.payload.to_vec());
+    assert_eq!(r.as_deref(), Some(&[2u8; 8][..]));
 }

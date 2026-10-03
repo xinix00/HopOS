@@ -260,6 +260,13 @@ struct Reserved {
 pub struct Writer {
     g: Geom,
     local: Coherence,
+    /// De eigen index, één keer vers gelezen bij het openen: alleen deze
+    /// kant schrijft hem, dus zijn waarde staat hier en niet in een regel
+    /// die per record geveegd moet worden (kfifo houdt zijn eigen `in` ook
+    /// lokaal). Scheelt per record een `pull` (03-10: op de C906 een
+    /// `th.dcache.cipa` en een `th.sync.is`, op arm64 een `dc civac` met twee
+    /// `dsb sy`).
+    head: u64,
 }
 
 impl Writer {
@@ -276,9 +283,11 @@ impl Writer {
     pub fn open_with(base: Pa, size: u64, local: Coherence) -> Result<Writer> {
         check_backing(base, size)?;
         promise(base, PRODUCER_WB_OFF, local);
+        let g = Geom { base, size };
         Ok(Writer {
-            g: Geom { base, size },
+            g,
             local,
+            head: g.head(),
         })
     }
 
@@ -379,7 +388,7 @@ impl Writer {
                 max: size / 2,
             });
         }
-        let (mut head, tail) = (self.g.head(), self.g.tail());
+        let (mut head, tail) = (self.head, self.g.tail());
         let hw = self.local == Coherence::Hardware && self.g.peer_wb(CONSUMER_WB_OFF);
         let used = head.wrapping_sub(tail);
         if used > size {
@@ -427,8 +436,8 @@ impl Writer {
             dev::push(self.g.at(r.head).add(REC_HDR), align8(len as u64) as usize);
         }
         dev::mb(); // Payload gepubliceerd vóór de index.
-        self.g
-            .set_head(r.head.wrapping_add(REC_HDR + align8(len as u64)));
+        self.head = r.head.wrapping_add(REC_HDR + align8(len as u64));
+        self.g.set_head(self.head);
     }
 }
 
@@ -531,6 +540,10 @@ pub struct Reader {
     g: Geom,
     corrupt: Option<Corrupt>,
     local: Coherence,
+    /// De eigen index, zoals [`Writer`] zijn head: één keer vers gelezen,
+    /// daarna van deze kant. Een tegenpartij die tail in gedeeld geheugen
+    /// overschrijft, verandert zo niets meer aan wat de lezer leest.
+    tail: u64,
 }
 
 impl Reader {
@@ -548,10 +561,12 @@ impl Reader {
     pub fn open_with(base: Pa, size: u64, local: Coherence) -> Result<Reader> {
         check_backing(base, size)?;
         promise(base, CONSUMER_WB_OFF, local);
+        let g = Geom { base, size };
         Ok(Reader {
-            g: Geom { base, size },
+            g,
             corrupt: None,
             local,
+            tail: g.tail(),
         })
     }
 
@@ -591,7 +606,7 @@ impl Reader {
     #[must_use]
     pub fn head_pending(&self) -> (u64, bool) {
         let h = self.g.head();
-        let n = h.wrapping_sub(self.g.tail());
+        let n = h.wrapping_sub(self.tail);
         (h, n != 0 && n <= self.g.size)
     }
 
@@ -644,7 +659,7 @@ impl Reader {
         loop {
             let head = self.g.head();
             let hw = self.local == Coherence::Hardware && self.g.peer_wb(PRODUCER_WB_OFF);
-            let tail = self.g.tail();
+            let tail = self.tail;
             if head == tail {
                 return None;
             }
@@ -703,6 +718,7 @@ impl Reader {
     #[inline(always)]
     fn free(&mut self, end: u64) {
         dev::mb();
+        self.tail = end;
         self.g.set_tail(end);
     }
 }
