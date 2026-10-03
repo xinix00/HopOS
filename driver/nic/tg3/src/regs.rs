@@ -306,6 +306,10 @@ pub(crate) const MISC_MASK_PCI_INT: u32 = 1 << 1;
 pub(crate) const MISC_WORD_SWAP: u32 = 1 << 3;
 pub(crate) const MISC_PCISTATE_RW: u32 = 1 << 4;
 pub(crate) const MISC_INDIR_ACCESS: u32 = 1 << 7;
+/// MISC_HOST_CTRL_TAGGED_STATUS: de interrupt-mailbox draagt de tag van het
+/// laatst verwerkte status-blok (bits 31:24), en de chip trekt zijn lijn
+/// opnieuw als zijn tag intussen verder is (`tg3_int_reenable`).
+pub(crate) const MISC_TAGGED_STATUS: u32 = 1 << 9;
 pub(crate) const MISC_CHIPREV_MASK: u32 = 0xffff_0000;
 
 // PCISTATE zoals `tg3_restore_pci_state` hem na een reset achterlaat.
@@ -401,6 +405,12 @@ pub(crate) const RDMA_RSRVCTRL_FIFO_OFLW_FIX: u32 = 0x4;
 
 /// 32-byte status-blok (`tp->coalesce_mode`).
 pub(crate) const HOSTCC_MODE_32BYTE: u32 = 0x100;
+/// Nu een status-update, en met een open mailbox een interrupt
+/// (`coal_now`).
+pub(crate) const HOSTCC_MODE_NOW: u32 = 0x8;
+/// Wat tg3 met TAGGED_STATUS bij de coalesce-modus zet.
+pub(crate) const HOSTCC_MODE_CLRTICK_RXBD: u32 = 0x200;
+pub(crate) const HOSTCC_MODE_CLRTICK_TXBD: u32 = 0x400;
 /// De ringgrootte staat in de RCB.
 pub(crate) const RCVDBDI_INV_RING_SZ: u32 = 0x10;
 pub(crate) const RCVBDI_RCB_ATTN: u32 = 0x4;

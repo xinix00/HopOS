@@ -9,6 +9,7 @@ description = "Broadcom NetXtreme (tg3): de BCM57762 van de Mac mini M4 achter e
 [dependencies]
 dev = { path = "../../../dev" }
 netdev = { path = "../../../netdev" }
+sync = { path = "../../../sync" }
 driver-mdio = { path = "../mdio" }
 
 [lints]

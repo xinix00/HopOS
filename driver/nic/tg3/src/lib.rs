@@ -9,13 +9,19 @@
 //! praat kregen staan in `OLD/docs/v1/archief/apple-m4.md` ("Het netwerk:
 //! WERKT", 29-08).
 //!
-//! Wat deze driver NIET doet, en waarom dat mag: geen interrupt (het board
-//! pollt; wie INTx terugbrengt, kijkt eerst naar `tg3_int_reenable`: zonder
-//! HOSTCC_MODE_NOW na het heropenen bleef een los frame 10 ms liggen, L83,
-//! 20-09), geen jumbo-frames, geen TSO of checksum-offload, geen
-//! statistieken-DMA, geen WoL, geen ASF/firmware-management. De jumbo- en
-//! mini-ringen blijven leeg: één standaard-ring van 2 KB-buffers dekt
-//! 1500-byte frames.
+//! De interrupt is INTx (INTA#, level) en optioneel: zonder
+//! [`Tg3::set_irq`] blijft de mailbox dicht en pollt de pomp. Met een lijn
+//! is het Linux' tagged-status-pad: [`IrqAck::ack`] maskeert (mailbox 1,
+//! de lijn valt), en een `receive` die de ring leeg vindt heropent met de
+//! tag van het status-blok (`tg3_poll`, `tg3_int_reenable`), plus
+//! HOSTCC_MODE_NOW als er toch werk ligt: zonder dat bleef een los frame 10
+//! ms liggen (L83, 20-09).
+//!
+//! Wat deze driver NIET doet, en waarom dat mag: geen MSI (de doorbell van
+//! de Apple-poort is onbekend, 19-09), geen jumbo-frames, geen TSO of
+//! checksum-offload, geen statistieken-DMA, geen WoL, geen
+//! ASF/firmware-management. De jumbo- en mini-ringen blijven leeg: één
+//! standaard-ring van 2 KB-buffers dekt 1500-byte frames.
 //!
 //! DMA-model: de ringen en buffers liggen in één aaneengesloten regio die het
 //! board aanwijst (op Apple de NetDMA-regio uit het PA-plan, met de DART in
@@ -60,6 +66,7 @@ use dev::{Pa, Reg};
 use driver_mdio as mdio;
 use netdev::{Mac, TxError};
 use regs::*;
+use sync::Signal;
 
 pub use diag::Describe;
 pub use driver_mdio::Link;
@@ -145,6 +152,8 @@ const TX_BD: u64 = size_of::<TxBd>() as u64;
 const OFF_STATUS: u64 = 0x0000;
 /// De lengte van het status-blok (`struct tg3_hw_status`).
 const STATUS_LEN: u64 = 80;
+/// `status_tag`: de chip hoogt hem op bij elke update van het blok.
+const STATUS_TAG: u64 = 4;
 /// `idx[0]`: rx_producer in de lage helft, tx_consumer in de hoge.
 const STATUS_IDX0: u64 = 16;
 /// De producer-ring.
@@ -333,6 +342,34 @@ pub struct Tg3 {
     pub doorbells: u64,
     /// Meetlat: `transmit` op een volle ring.
     pub tx_full: u64,
+    /// De bel van de lijn ([`Tg3::set_irq`]); `None` = gepold.
+    irq: Option<&'static Signal>,
+}
+
+/// HOSTCC_MODE met een lijn: tg3's `coalesce_mode` onder TAGGED_STATUS.
+const COAL_IRQ: u32 =
+    MODE_ENABLE | HOSTCC_MODE_32BYTE | HOSTCC_MODE_CLRTICK_RXBD | HOSTCC_MODE_CLRTICK_TXBD;
+
+/// Het interrupt-pad: alleen de interrupt-mailbox. `Copy`, zodat het board
+/// hem naast de driver houdt voor de dispatch.
+#[derive(Clone, Copy)]
+pub struct IrqAck {
+    bar0: Pa,
+}
+
+impl IrqAck {
+    /// Laat INTA# los: de interrupt-mailbox op 1, en teruggelezen zodat de
+    /// lijn valt vóór de controller hem completeert (`tg3_interrupt_tagged`:
+    /// "writing any value to intr-mbox-0 clears PCI INTA#"; niet-nul houdt
+    /// de chip stil tot de heropening). Meer niet: het status-woord wissen
+    /// liet op de M4 geen interrupt meer door (Go, bundel 37, 20-09), en de
+    /// INTSTAT van de Apple-poort schrijven is een synchrone abort (19-09).
+    pub fn ack(&self) {
+        // SAFETY: `bar0` kwam uit `Tg3::new`, dat een voor altijd gemapt
+        // BAR0 eiste; de mailbox deelt niets met de ringen.
+        let r: &Regs = unsafe { dev::regs(self.bar0) };
+        Tg3::wr_mbox(&r.mb_interrupt, 1);
+    }
 }
 
 impl Tg3 {
@@ -398,7 +435,72 @@ impl Tg3 {
             rx_bad: 0,
             doorbells: 0,
             tx_full: 0,
+            irq: None,
         }
+    }
+
+    // ── De interrupt ────────────────────────────────────────────────────────
+
+    /// Het interrupt-pad, voor het board.
+    #[must_use]
+    pub fn irq_ack(&self) -> IrqAck {
+        IrqAck { bar0: self.bar0 }
+    }
+
+    /// Hangt de bel aan de driver en zet de lijn open: `tg3_enable_ints`
+    /// met TAGGED_STATUS. MASK_PCI_INT eraf (zonder dat trekt de chip
+    /// niets, Go 19-09), de mailbox op de huidige tag, en HOSTCC_MODE_NOW:
+    /// de eerste interrupt komt meteen, en daaraan ziet het board dat de
+    /// lijn leeft. Aanroepen nadat de lijn bij de controller scherp staat.
+    pub fn set_irq(&mut self, bell: &'static Signal) {
+        self.irq = Some(bell);
+        let c = self.config();
+        let misc = c.misc_host_ctrl.read();
+        wr(
+            &c.misc_host_ctrl,
+            (misc | MISC_TAGGED_STATUS) & !MISC_MASK_PCI_INT,
+        );
+        let r = self.regs();
+        Self::wr_mbox(&r.mb_interrupt, self.status_word(STATUS_TAG) << 24);
+        wr(&r.hostcc_mode, COAL_IRQ | HOSTCC_MODE_NOW);
+    }
+
+    /// Terug naar pollen, voor een board waarvan de lijn niet aankwam: de
+    /// mailbox en MASK_PCI_INT dicht (`tg3_disable_ints`), de coalesce-modus
+    /// van de init.
+    pub fn clear_irq(&mut self) {
+        self.irq = None;
+        let c = self.config();
+        wr(
+            &c.misc_host_ctrl,
+            c.misc_host_ctrl.read() | MISC_MASK_PCI_INT,
+        );
+        let r = self.regs();
+        Self::wr_mbox(&r.mb_interrupt, 1);
+        wr(&r.hostcc_mode, MODE_ENABLE | HOSTCC_MODE_32BYTE);
+    }
+
+    /// De ring is leeg: met een lijn de staart van `tg3_poll`. Eerst de
+    /// tag, dán nog één blik op de ring; staat er toch iets, dan `false` en
+    /// geen heropening (er is werk). Anders gaat de mailbox open op die tag:
+    /// werkte de chip het blok intussen bij, dan trekt hij de lijn meteen.
+    /// HOSTCC_MODE_NOW erbij als er na het openen toch een frame staat, de
+    /// heropening van Go die op ijzer stond (L83, 20-09).
+    fn idle(&mut self) -> bool {
+        if self.irq.is_none() {
+            return true;
+        }
+        let tag = self.status_word(STATUS_TAG);
+        dev::mb();
+        if self.rx_pending() {
+            return false;
+        }
+        let r = self.regs();
+        wr(&r.mb_interrupt, tag << 24);
+        if self.rx_pending() {
+            wr(&r.hostcc_mode, COAL_IRQ | HOSTCC_MODE_NOW);
+        }
+        true
     }
 
     fn regs(&self) -> &'static Regs {
@@ -781,7 +883,7 @@ impl Tg3 {
             );
         }
         let r = self.regs();
-        Self::wr_mbox(&r.mb_interrupt, 1); // gemaskeerd: het board pollt
+        Self::wr_mbox(&r.mb_interrupt, 1); // gemaskeerd tot `set_irq`
         Self::wr_mbox(&r.mb_tx_prod, 0);
         Self::wr_mbox(&r.mb_rx_ret_cons, 0);
         self.tx_prod = 0;
@@ -1192,9 +1294,10 @@ impl netdev::Device for Tg3 {
     /// Haalt één frame op. Een fout of een kromme lengte wordt teruggegeven
     /// aan de chip zonder kopie en geteld ([`Tg3::rx_bad`]); daarna kijkt
     /// hij naar de volgende. Hoogstens één ronde over de ring per aanroep.
+    /// Een lege ring heropent de lijn, als er een is (`idle`).
     fn receive(&mut self, buf: &mut [u8]) -> Option<usize> {
         for _ in 0..RX_RET_RING {
-            if !self.rx_pending() {
+            if !self.rx_pending() && self.idle() {
                 return None;
             }
             dev::mb(); // de completion zien vóór zijn descriptor en pakket
@@ -1217,6 +1320,10 @@ impl netdev::Device for Tg3 {
 
     fn mac(&self) -> Mac {
         self.mac
+    }
+
+    fn irq(&self) -> Option<&'static Signal> {
+        self.irq
     }
 }
 

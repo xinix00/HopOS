@@ -78,6 +78,18 @@ const PORT_RESET_T602X: u64 = 0x82c;
 /// m1n1 nult hem en zet er nooit iets in.
 const PORT_RID2SID: u64 = 0x3000;
 const PORT_MSIMAP: u64 = 0x3800;
+/// INTSTAT en INTMSK van de poort (Linux `pcie-apple.c`). INTSTAT is
+/// alleen te lezen: een W1C-schrijf is hier een synchrone abort (ESR
+/// 0x96000410, FAR 0x492028100, Go bundel 23/24, 19-09). Hoeft ook niet:
+/// INTA is level en valt met de interrupt-mailbox van de tg3.
+const PORT_INTSTAT: u64 = 0x100;
+const PORT_INTMSK: u64 = 0x104;
+/// INTA van een rootpoort is de vijfde lijn van zijn AIC-blok: het blok
+/// begint op het woord van de poort in `/arm-io/apcie` "interrupts" (één
+/// per poort, 1231, 1240, 1249 op de M4), INTA is + 4. GEMETEN door
+/// aflevering op 19-09 (Go bundel 25: AIC 1253 voor poort 2), niet uit
+/// documentatie.
+pub const INTA: u32 = 4;
 const RID2SID_VALID: u32 = 1 << 31;
 
 // DART (Linux `apple-dart.c`): per stream een TCR. Bit 2 (DAPF-bypass) is
@@ -436,6 +448,28 @@ pub fn link_up(timeout_ns: u64) -> Result<(), Why> {
         return Err("apcie: link did not come up");
     }
     Ok(())
+}
+
+/// Het eerste AIC-nummer van het blok van de ethernet-poort: woord
+/// [`ETH_PORT`] van `/arm-io/apcie` "interrupts".
+#[must_use]
+pub fn port_irq_base() -> Option<u32> {
+    let t = fwinfo::adt()?;
+    let v = t.prop(t.path("/arm-io/apcie")?, "interrupts")?;
+    let at = usize::from(ETH_PORT) * 4;
+    let w = v.get(at..at.checked_add(4)?)?;
+    Some(u32::from_le_bytes(w.try_into().ok()?))
+}
+
+/// INTSTAT en INTMSK van de ethernet-poort, voor de regel van een lijn die
+/// niet aankwam (INTMSK 0xfffffff0 laat INTA tot en met INTD door).
+#[must_use]
+pub fn port_intx() -> (u32, u32) {
+    let b = ETH_PORT_BASE;
+    (
+        dev::read32(Pa(b + PORT_INTSTAT)),
+        dev::read32(Pa(b + PORT_INTMSK)),
+    )
 }
 
 /// Alle streams van de ethernet-DART op bypass: welke stream de poort aan

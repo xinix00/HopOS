@@ -534,6 +534,90 @@ fn rx_flushes_itself_every_32_frames() {
     assert_eq!((m.r(0x0284), m.r(0x026c)), (32, 32), "self-flush");
 }
 
+// ── De interrupt ────────────────────────────────────────────────────────────
+
+fn set_tag(m: &Mem, tag: u32) {
+    dev::write32(m.dma.add(OFF_STATUS + STATUS_TAG), tag);
+}
+
+/// `tg3_enable_ints` met TAGGED_STATUS: MASK_PCI_INT eraf, de tag in de
+/// mailbox, en één gedwongen interrupt (HOSTCC_MODE_NOW).
+#[test]
+fn set_irq_opens_on_the_tag_and_forces_one_interrupt() {
+    static BELL: Signal = Signal::new();
+    let m = chip(false);
+    let mut n = up(&m);
+    assert!(n.irq().is_none(), "polled until set_irq");
+    assert_eq!(m.c(0x68) & MISC_MASK_PCI_INT, MISC_MASK_PCI_INT);
+    set_tag(&m, 0x2a);
+    n.set_irq(&BELL);
+    assert!(n.irq().is_some());
+    let misc = m.c(0x68);
+    assert_eq!(misc & MISC_MASK_PCI_INT, 0, "INTA# may be driven");
+    assert_eq!(misc & MISC_TAGGED_STATUS, MISC_TAGGED_STATUS);
+    assert_eq!(
+        misc & MISC_INDIR_ACCESS,
+        MISC_INDIR_ACCESS,
+        "the window stays"
+    );
+    assert_eq!(m.r(0x0204), 0x2a << 24, "open on the current tag");
+    assert_eq!(m.r(0x3c00), COAL_IRQ | HOSTCC_MODE_NOW);
+    n.clear_irq();
+    assert!(n.irq().is_none());
+    assert_eq!(m.c(0x68) & MISC_MASK_PCI_INT, MISC_MASK_PCI_INT);
+    assert_eq!(m.r(0x0204), 1, "masked again");
+    assert_eq!(
+        m.r(0x3c00),
+        MODE_ENABLE | HOSTCC_MODE_32BYTE,
+        "the polled mode"
+    );
+}
+
+/// De ack maskeert; de pomp leest, en pas de lege ring heropent, op de tag
+/// die vóór de laatste blik gelezen is (`tg3_poll`). Zolang er werk is,
+/// blijft de mailbox dicht.
+#[test]
+fn the_ack_masks_and_only_an_empty_ring_reopens_on_the_tag() {
+    static BELL: Signal = Signal::new();
+    let m = chip(false);
+    let mut n = up(&m);
+    n.set_irq(&BELL);
+    n.irq_ack().ack();
+    assert_eq!(m.r(0x0204), 1, "masked by the ack: INTA# drops");
+
+    // Twee frames, de chip zette tag 7.
+    for slot in 0..2 {
+        ret_desc(&m, slot, 68, slot as u32);
+    }
+    set_rx_producer(&m, 2);
+    set_tag(&m, 7);
+    dev::write32(at(m.bar0, 0x3c00), COAL_IRQ);
+    let mut out = [0u8; 2048];
+    assert_eq!(n.receive(&mut out), Some(64));
+    assert_eq!(n.receive(&mut out), Some(64));
+    assert_eq!(m.r(0x0204), 1, "work left: still masked");
+    assert_eq!(n.receive(&mut out), None);
+    assert_eq!(m.r(0x0204), 7 << 24, "empty: open on tag 7");
+    assert_eq!(m.r(0x3c00), COAL_IRQ, "nothing pending, no forced update");
+
+    // De tag loopt rond in de bovenste byte.
+    set_tag(&m, 0x1ff);
+    assert_eq!(n.receive(&mut out), None);
+    assert_eq!(m.r(0x0204), 0xff << 24);
+}
+
+/// Gepold blijft de mailbox dicht, ook op een lege ring.
+#[test]
+fn a_polled_empty_ring_leaves_the_mailbox_masked() {
+    let m = chip(false);
+    let mut n = up(&m);
+    set_tag(&m, 3);
+    let mut out = [0u8; 2048];
+    assert_eq!(n.receive(&mut out), None);
+    assert_eq!(m.r(0x0204), 1);
+    assert_eq!(m.r(0x3c00), MODE_ENABLE | HOSTCC_MODE_32BYTE);
+}
+
 // ── TX ──────────────────────────────────────────────────────────────────────
 
 #[test]

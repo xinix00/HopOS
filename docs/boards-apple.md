@@ -16,11 +16,11 @@ niets ervan heeft in v3 op ijzer gedraaid. De gedateerde lessen (28-08 tot
 | boot_args-lezer: RAM-contract, framebuffer, het ADT-adres met de virt-naar-fys-omrekening modulo 2^64 (30-08) | `fw/src/xnuboot.rs` | 3 host-tests met de getallen van 29-08 en de twee vormen van virt_base |
 | GPT: tabel lezen, het grootste gat TUSSEN of NA de partities | `fw/src/gpt.rs` | 5 host-tests (de echte M4-tabel van 30-08) |
 | AIC als `cpu::irq::Controller` (claim = ack, complete = masker open, het 4-bit doel), plus de fast IPI (kick, ack) | `driver/aic` | 6 host-tests op een nep-registerblok |
-| tg3 (BCM57762): reset, MAC, MDIO/PHY, ringen, `netdev::Device`, INTx-kant | `driver/nic/tg3` | 24 host-tests, o.a. de drie lessen van 29-08 (INDIR_ACCESS, PCI_COMMAND, NIC_ADDR van de std-ring) en FCS |
+| tg3 (BCM57762): reset, MAC, MDIO/PHY, ringen, `netdev::Device`, INTx met tagged status (ack = mailbox dicht, heropenen op de tag bij een lege ring, HOSTCC_MODE_NOW) | `driver/nic/tg3` | 24 host-tests, o.a. de drie lessen van 29-08 (INDIR_ACCESS, PCI_COMMAND, NIC_ADDR van de std-ring), FCS, en ack/heropenen op de tag |
 | RTKit-mailbox (ASC) en de SART v3 | `driver/rtkit` | 16 host-tests tegen een nep-coprocessor |
 | SMC: sleutels, floats, sensoren, de warmste | `driver/smc` | 7 host-tests |
 | ANS-NVMe: lezen én schrijven, flush, nette shutdown, het schrijfvenster | `driver/nvme/src/apple.rs` | 13 host-tests: de vier ANS-lessen, weigering buiten of zonder venster, 512-naar-4K |
-| Board: bootstub, VHE-ingang, 48-bit-map met PXN, console, boot_args en ADT, cores met klasse, de CPU_ON-haak, AIC, timer-FIQ, fast IPI, PCIe-bring-up, tg3, ANS, SMC, watchdogs, p-states en hun wachter, het config-venster, slot-plan met voorproef | `board/apple` | 21 host-tests (map en PXN, plan, pool uit het contract, tunables, os-core-keuze, config-venster, watchdog-alarm, p-state-plafond, `hopos.cages`) |
+| Board: bootstub, VHE-ingang, 48-bit-map met PXN, console, boot_args en ADT, cores met klasse, de CPU_ON-haak, AIC, timer-FIQ, fast IPI, PCIe-bring-up, tg3 met zijn INTx-lijn, ANS, SMC, watchdogs, p-states en hun wachter, het config-venster, slot-plan met voorproef | `board/apple` | 23 host-tests (map en PXN, plan, pool uit het contract, tunables, os-core-keuze, config-venster, watchdog-alarm, p-state-plafond, `hopos.cages`, `hopos.nicirq`) |
 | OS-core-rotatie voor `AppleVhe`: de fast IPI als bel, de ack op EL2, de FIQ als `Back::Timer`/`Back::Ipi`; de Apple-kick in de switcher; de CPU_ON-haak en de SCTLR-wis in `cpu::smp`; de VHE-bewuste event-stream | `cpu/src/el2`, `cpu/src/smp.rs`, `cpu/src/idle.rs` | host-tests (het kick-woord, de vectorindex, de haak, de stream-bits); de gedeelde paden op QEMU (virt, UEFI, UEFI+VHE) |
 | Linkscript: raw image op 0x101_0000_0000, stub op 0, kern op 0x10000 | `hopos/link-apple.ld` | link-asserties; `image/apple-m4.sh` toetst het parameterblok |
 | Loader (m1n1-proxy), meetcyclus, console, installer | `image/apple/` | de meetbank |
@@ -217,8 +217,17 @@ betekent. Onder m1n1 eerst; pas daarna installeren. Bouw met een config:
     abort landt bij de stap die hem veroorzaakte), `apcie: brought up by
     HopOS, 6 power gate(s), 263 tunable(s), 2 of 3 port(s)` (29-08), `apcie:
     link up, endpoint 02:00.0 14e4:1682`, `tg3: ASIC 0x57766 ...`, `tg3:
-    LINK UP, 1000 Mb/s full duplex`, `HOPOS_NIC_UP mac=1c:f6:4c:54:fa:90`.
-    Onder m1n1 kan de eerste regel `apcie: already up` zijn.
+    LINK UP, 1000 Mb/s full duplex`, `net: tg3 INTx on AIC irq 1253 (port
+    2 block 1249 + INTA 4), first interrupt after N us ... HOPOS_NIC_IRQ`,
+    `HOPOS_NIC_UP mac=1c:f6:4c:54:fa:90`. Onder m1n1 kan de eerste regel
+    `apcie: already up` zijn. `net: tg3 polled, AIC irq ...: the forced
+    interrupt did not arrive within 50 ms, port INTSTAT ...`: de lijn kwam
+    niet aan (bits 3:0 van INTSTAT zijn INTA tot INTD, Linux
+    `PORT_INT_INTx`, gelezen vóór de NIC weer dichtgaat; staat bit 0, dan
+    zag de poort INTA en klopt het AIC-nummer niet, en `hopos.nicirq=<n>`
+    probeert een ander). De zelftest is Go's
+    "gevonden door aflevering" (19-09). Daarna: `HOPOS_NET_PUMP` zegt `irq
+    line, 10 ms guard`, en `hopos.nicirq=off` is de A/B tegen pollen.
 12. **DHCP** (`HOPOS_NET_UP`) en de tik: `HOPOS_TICK n sleeps=...`.
     Wekken per seconde rond 954 (29-08): `HOPOS_APPLE_IDLE` moet dan `Wfi`
     zeggen. Veel meer: WFE op de event-stream; controleer EVNTIS (ECV).
@@ -261,8 +270,8 @@ betekent. Onder m1n1 eerst; pas daarna installeren. Bouw met een config:
 - Hop op de OS-core: `hopos/src/slots.rs` `os_pool` sluit `AppleVhe` nog
   uit van de gedeelde OS-core (een ander spoor), dus Hop krijgt op de M4
   een app-core. Weghalen zodra stap 13 op ijzer groen is.
-- De NIC-interrupt (INTx over de AIC; de pomp pollt), `pmgr_reset` als
-  herstelpad na een crash buiten de retry in `probe_disk` (die er wel is).
+- `pmgr_reset` als herstelpad na een crash buiten de retry in
+  `probe_disk` (die er wel is).
 - De temperatuur op de tik: vraagt een SMC die wakker blijft en gepolld
   wordt (zijn syslog), niet een open-meet-slaap per seconde.
 - Een core die in `cpu::el2::hold` wacht terwijl de kooien weigeren (een

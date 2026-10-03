@@ -19,10 +19,13 @@
 //! eeuwig terwijl de timer wél afgaat. `apple.TimerWakes` in Go.
 
 use crate::fwinfo;
+use core::cell::Cell;
 use core::sync::atomic::Ordering::Relaxed;
 use cpu::irq::Line;
 use dev::Pa;
 use driver_aic::{Aic, Props};
+use driver_tg3::{IrqAck, Tg3};
+use sync::{Local, Signal};
 
 /// De AIC van dit board: leeg tot [`start`], daarna de controller van
 /// `cpu::irq`.
@@ -81,6 +84,115 @@ fn find_target() -> Option<u32> {
         }
     }
     hit
+}
+
+/// Hoe de tg3 zijn interrupt krijgt (`hopos.nicirq`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NicIrq {
+    /// Leeg of `auto`: INTA van de ethernet-poort, uit de ADT
+    /// (`pcie::port_irq_base` + `pcie::INTA`).
+    Auto,
+    /// `0` of `off`: pollen.
+    Off,
+    /// Een getal: die AIC-lijn.
+    Line(u32),
+}
+
+impl NicIrq {
+    /// `None` = geen van de drie.
+    pub(crate) fn parse(v: &str) -> Option<Self> {
+        match v {
+            "" | "auto" => Some(Self::Auto),
+            "0" | "off" => Some(Self::Off),
+            n => n.parse().ok().filter(|&n| n > 0).map(Self::Line),
+        }
+    }
+}
+
+/// De ack van de tg3, gezet vóór de lijn scherp gaat; de dispatch roept
+/// hem op HOP's core, waar ook de probe draait.
+static NIC_ACK: Local<Cell<Option<IrqAck>>> = Local::new(Cell::new(None));
+
+/// De device-ack van de NIC-lijn: de interrupt-mailbox dicht, INTA valt.
+fn tg3_ack() {
+    if let Some(a) = NIC_ACK.get().get() {
+        a.ack();
+    }
+}
+
+static TG3_ACK: fn() = tg3_ack;
+
+/// Hoe lang de gedwongen eerste interrupt mag doen over de aflevering:
+/// Linux' `tg3_test_interrupt` wacht 5 x 10 ms.
+const NIC_TEST_NS: u64 = 50_000_000;
+
+/// Maakt AIC-lijn `line` de lijn van de tg3, maar alleen als hij aankomt:
+/// lijn scherp, de NIC open (`set_irq` dwingt meteen een interrupt af), en
+/// dan de dispatch draaien tot de lijn vuurt. Dat is Go's "gevonden door
+/// aflevering" (19-09) als zelftest: een verkeerd nummer kost geen 10 ms
+/// per frame op de vangrail van de pomp, maar wordt een gepolde NIC met
+/// een reden. Geeft de microseconden tot de aflevering, of de reden met
+/// INTSTAT en INTMSK van de poort, gelezen vóór de NIC weer dichtgaat (bij
+/// een poort die INTA wél zag, staat bit 0 dan nog).
+pub(crate) fn wire_nic(nic: &mut Tg3, line: u32) -> Result<u64, (&'static str, (u32, u32))> {
+    NIC_ACK.get().set(Some(nic.irq_ack()));
+    let bell = cpu::irq::enable(Line(line), Some(&TG3_ACK)).map_err(|e| {
+        let why = match e {
+            cpu::irq::Error::NoController => "no AIC",
+            _ => "the AIC refused the line",
+        };
+        (why, crate::pcie::port_intx())
+    })?;
+    let _ = bell.take();
+    nic.set_irq(bell);
+    let why = match fires_within(bell, NIC_TEST_NS) {
+        // De ack sloot de mailbox, dus nu moet de lijn stil zijn: één
+        // naloper mag (de deassert reist nog door de poort), maar blijft
+        // hij komen, dan trekt iets anders hem, en een lijn waarvan de ack
+        // niets laat zakken, houdt de dispatch voor altijd bezig.
+        Some(ns) if hits_within(bell, NIC_QUIET_NS) < NIC_QUIET_MAX => {
+            // De eerste lege ring van de pomp heropent de mailbox.
+            return Ok(ns / 1_000);
+        }
+        Some(_) => "the line keeps firing with the NIC masked, not the tg3's",
+        None => "the forced interrupt did not arrive within 50 ms",
+    };
+    let port = crate::pcie::port_intx();
+    cpu::irq::Controller::disable(&AIC, Line(line));
+    nic.clear_irq();
+    Err((why, port))
+}
+
+/// Hoe lang een gemaskeerde NIC-lijn stil moet blijven, en hoeveel
+/// dispatch-rondes met een treffer daarin nog stil heten.
+const NIC_QUIET_NS: u64 = 1_000_000;
+const NIC_QUIET_MAX: u32 = 4;
+
+/// Het aantal dispatch-rondes in `ns` waarin `bell` ging.
+fn hits_within(bell: &Signal, ns: u64) -> u32 {
+    let t0 = cpu::idle::now();
+    let mut hits = 0;
+    while cpu::idle::now().saturating_sub(t0) <= ns {
+        let _ = dispatch();
+        hits += u32::from(bell.take());
+    }
+    hits
+}
+
+/// Draait de dispatch tot `bell` gaat (de nanoseconden tot dan) of `ns`
+/// verstreken is.
+fn fires_within(bell: &Signal, ns: u64) -> Option<u64> {
+    let t0 = cpu::idle::now();
+    loop {
+        let _ = dispatch();
+        let dt = cpu::idle::now().saturating_sub(t0);
+        if bell.take() {
+            return Some(dt);
+        }
+        if dt > ns {
+            return None;
+        }
+    }
 }
 
 /// Wat één dispatch-ronde zag, voor `board::Dispatched`.
@@ -219,6 +331,17 @@ mod arch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nicirq_reads_auto_off_or_a_line() {
+        assert_eq!(NicIrq::parse(""), Some(NicIrq::Auto));
+        assert_eq!(NicIrq::parse("auto"), Some(NicIrq::Auto));
+        assert_eq!(NicIrq::parse("0"), Some(NicIrq::Off));
+        assert_eq!(NicIrq::parse("off"), Some(NicIrq::Off));
+        assert_eq!(NicIrq::parse("1253"), Some(NicIrq::Line(1253)));
+        assert_eq!(NicIrq::parse("intx"), None);
+        assert_eq!(NicIrq::parse("-1"), None);
+    }
 
     #[test]
     fn without_a_tree_there_is_no_aic() {
