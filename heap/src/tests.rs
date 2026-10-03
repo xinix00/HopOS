@@ -386,12 +386,16 @@ fn stulp_shape_cost() {
     let t0 = std::time::Instant::now();
     for _ in 0..ops {
         a.free(p);
+        // Een vraag van 16 neemt het blok van 48 dat net vrijkwam (de rest
+        // is kleiner dan een blok), zodat de vraag van 32 geen passend blok
+        // vooraan vindt en de 32'ers langs moet, of eroverheen springt.
+        keep.push(a.alloc(16, 8).unwrap());
         p = a.alloc(32, 8).unwrap();
     }
     let dt = t0.elapsed();
     let w = a.walk();
     std::println!(
-        "stulp_shape: {:.0} ns per free+alloc met {} vrije blokken",
+        "stulp_shape: {:.0} ns per free+alloc+alloc met {} vrije blokken",
         dt.as_nanos() as f64 / f64::from(ops),
         w.free_blocks
     );
