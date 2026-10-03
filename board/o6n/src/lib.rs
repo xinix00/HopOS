@@ -61,7 +61,7 @@ pub use driver_dvfs as dvfs;
 /// De schijf die `probe_disk` geeft: de NVMe. De binary noemt hem
 /// `vboard::Disk`, zodat de geprobede schijf van de bench naar de opslag gaat
 /// zonder dat de binary het type per board kent.
-pub type Disk = driver_nvme::Nvme;
+pub type Disk = driver_nvme::Nvme<driver_nvme::pci::Pci>;
 
 /// De XSDT-OEM-ID van de Cix-firmware: de runtime-toets dat dit werkelijk
 /// een Cix P1 is vóór er board-kennis (mailbox-adressen) in MMIO gaat. Een

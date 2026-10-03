@@ -26,7 +26,7 @@ use bounded::BoundedVec;
 use core::cell::{Cell, RefCell};
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use dev::Pa;
-use driver_nvme::Nvme;
+use driver_nvme::{Nvme, pci::Pci};
 use driver_rtl8126::Rtl8126;
 use driver_scmi::{Channel, Sensor};
 use sync::{Local, Signal};
@@ -71,7 +71,7 @@ impl O6n {
     /// schijf-helft van de DMA-regio. `Ok(None)` = geen NVMe; één keer.
     /// Geen methode van [`Board`], net als op virt: het blokcontract is van
     /// hopfs, en de binary kent haar board concreet.
-    pub fn probe_disk(&self) -> Result<Option<Nvme>, Error> {
+    pub fn probe_disk(&self) -> Result<Option<Nvme<Pci>>, Error> {
         if DISK_CLAIMED.swap(true, Relaxed) {
             return Err(Error::Twice("probe_disk"));
         }

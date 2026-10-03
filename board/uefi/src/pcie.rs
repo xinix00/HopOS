@@ -11,7 +11,7 @@ use crate::BLK_DMA;
 use board::Error;
 use bounded::BoundedVec;
 use dev::Pa;
-use driver_nvme::Nvme;
+use driver_nvme::{Nvme, pci::Pci};
 use driver_pcie::{Config, Ecam, Function, find};
 
 /// Zoveel ECAM-vensters: de Altra heeft er tot acht, de O6N vijf.
@@ -83,13 +83,13 @@ pub fn first_in(segs: &Segments, bar: u8, is: impl Fn(&Function) -> bool) -> Opt
 
 /// Vindt en initialiseert de eerste NVMe (het hele device) in [`BLK_DMA`].
 /// `Ok(None)` = geen NVMe. Eén keer: de aanroeper bewaakt dat.
-pub fn probe_nvme() -> Result<Option<Nvme>, Error> {
+pub fn probe_nvme() -> Result<Option<Nvme<Pci>>, Error> {
     let segs = segments();
     let Some(hit) = first_in(&segs, 0, |f| f.class == CLASS_NVME) else {
         return Ok(None);
     };
     // Een hoge BAR (boven 1 TB, de Altra) moet eerst in de identity map.
-    if !crate::map_device(hit.bar, driver_nvme::MMIO_LEN) {
+    if !crate::map_device(hit.bar, driver_nvme::pci::MMIO_LEN) {
         return Err(Error::Disk("NVMe BAR0 unreachable"));
     }
     if let Some((e, _)) = segs.get(hit.win) {
@@ -98,7 +98,7 @@ pub fn probe_nvme() -> Result<Option<Nvme>, Error> {
     // SAFETY: BAR0 is door de firmware toegewezen en nu Device-gemapt
     // (`map_device`); memory-decode en bus-mastering staan aan. BLK_DMA is
     // van deze driver alleen, Normal-NC gemapt door de stub.
-    let disk = unsafe { Nvme::new(Pa(hit.bar), BLK_DMA.base, BLK_DMA.size, cpu::idle::now) }
+    let disk = unsafe { Nvme::<Pci>::new(Pa(hit.bar), BLK_DMA.base, BLK_DMA.size, cpu::idle::now) }
         .map_err(|e| {
             cpu::println!("disk: {e} HOPOS_NVME_FAIL");
             Error::Disk("nvme init failed")

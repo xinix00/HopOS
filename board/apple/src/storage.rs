@@ -62,7 +62,7 @@ impl Coprocessor for AnsRtkit {
 pub type Disk = Ans<AnsRtkit>;
 
 /// De eerste 4 MB van de opslag-DMA: queues, TCB's, PRP en databuffer.
-const ANS_DMA: (u64, u64) = (BLK_DMA.base.0, ans::DMA_NEED);
+const ANS_DMA: (u64, u64) = (BLK_DMA.base.0, driver_nvme::DMA_NEED);
 /// Het datablok van de ANS (2 MB, 2 MB-gealigneerd): de driver doet daar
 /// zelf het cache-onderhoud (`dev::push` na het vullen, `dev::pull` vóór
 /// het lezen), dus het board mapt het Normal WB ([`crate::mmu`]). Normal-NC
@@ -72,7 +72,7 @@ const ANS_DMA: (u64, u64) = (BLK_DMA.base.0, ans::DMA_NEED);
 pub(crate) const ANS_DATA: (u64, u64) = (ANS_DMA.0 + driver_nvme::DATA_OFF, driver_nvme::DATA_SIZE);
 /// Daarachter de buffers die de ANS bij zijn opstart vraagt (syslog,
 /// crashlog, ioreport).
-const ANS_POOL: (u64, u64) = (BLK_DMA.base.0 + ans::DMA_NEED, 0x30_0000);
+const ANS_POOL: (u64, u64) = (BLK_DMA.base.0 + driver_nvme::DMA_NEED, 0x30_0000);
 /// En die van de SMC.
 const SMC_POOL: (u64, u64) = (ANS_POOL.0 + ANS_POOL.1, 0x10_0000);
 

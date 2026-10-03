@@ -10,7 +10,7 @@ use core::cell::{Cell, RefCell};
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use dev::Pa;
 use driver_igb::{Igb, IrqAck};
-use driver_nvme::Nvme;
+use driver_nvme::{Nvme, pci::Pci};
 use driver_smpro::{HWMON_CHANNEL, Smpro};
 use sync::{Local, Signal};
 
@@ -87,7 +87,7 @@ impl Altra {
 
     /// Vindt en initialiseert de eerste NVMe (het hele device) in de
     /// schijf-helft van de DMA-regio. `Ok(None)` = geen NVMe; één keer.
-    pub fn probe_disk(&self) -> Result<Option<Nvme>, Error> {
+    pub fn probe_disk(&self) -> Result<Option<Nvme<Pci>>, Error> {
         if DISK_CLAIMED.swap(true, Relaxed) {
             return Err(Error::Twice("probe_disk"));
         }

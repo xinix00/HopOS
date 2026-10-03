@@ -46,7 +46,7 @@ use driver_pcie::Function;
 /// De schijf die `probe_disk` geeft: de NVMe. De binary noemt hem
 /// `vboard::Disk`, zodat de geprobede schijf van de bench naar de opslag gaat
 /// zonder dat de binary het type per board kent.
-pub type Disk = driver_nvme::Nvme;
+pub type Disk = driver_nvme::Nvme<driver_nvme::pci::Pci>;
 
 /// De naam, voor de bootlog.
 pub const NAME: &str = "altra";

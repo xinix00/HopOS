@@ -173,7 +173,7 @@ pint, `hopos.mhz=` klemt het plafond.
 | Onderdeel | Crate | Hoe getest |
 | --- | --- | --- |
 | NIC: RTL8126A (5G, O6) en RTL8125B/D/CP/BP (2,5G, O6N), chip-XID kiest de variant | `driver-rtl8126` | 12 host-tests tegen een nep-chip: reset tot `hw_start`, ringen, MAC-terugval, EPHY-tabel en PHY-stappen van de 8125B, link via PHYSR, RX-grenzen, TX-padding en eigendom, IRQ-mask/rearm |
-| NVMe: admin- en I/O-queue, identify, PRP-lijsten, flush, 512-byte-sectoren boven 4K-namespaces | `driver-nvme` | 10 host-tests tegen een nep-controller die echte SQ's/CQ's en PRP's uitvoert, time-out en vreemde CID maken de driver dood |
+| NVMe: één core (admin- en I/O-queue, identify, zestien tickets met eigen pagina's en PRP-lijst, een ticket boven de MDTS als meer opdrachten, read-ahead, flush, 512-byte-sectoren boven 4K-namespaces) met het PCI-transport | `driver-nvme` (`lib.rs`, `pci.rs`) | 17 host-tests op de core met een nagebootst transport (ring en lineair) en 2 voor PCI (CAP, CC, stride), tegen een nep-controller die echte SQ's/CQ's en PRP's uitvoert; time-out, vreemde CID en een dood transport maken de driver dood |
 | Thermometer: SCP via SCMI op 0x065d0000 (het kanaal van de DSDT-`_TMP`) | `driver-scmi`, `board-o6n::thermal` | 6 + 2 host-tests; kiest CPU-sensoren, anders alle Celsius |
 | Klok: `_CPC`-scanner (AML zonder interpreter), domeinen, `CpcKnob` | `board-o6n::{cpc, clock}`, `driver-dvfs` | 3 + 3 host-tests; het beleid 8 host-tests |
 | Core-klassen: MADT, anders `_CPC` (25%-clustering), anders vast per MPIDR (aff1 0-3 small) | `board-o6n::class` | 4 host-tests, waaronder de meting van 17-09 (2232 ×4, 8192/7876/7246/6931 ×2 = small ×4, big ×8) |
@@ -263,9 +263,9 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
   als op INTx, zegt de eerste boot. Zonder IORT-weg valt hij terug op INTx
   477 (L80: één interrupt per frame, rtt p50 156-201 µs). Met
   `hopos.nicirq=intx` meet je de terugval los.
-- **De NVMe-lijn.** Het blokcontract (`blkdev`, hopfs) is synchroon: de
-  actor wacht op zijn completion, dus een bel heeft nog geen wachter. De
-  NVMe pollt zijn CQ; interrupts erop horen bij een asynchrone blok-actor.
+- **De NVMe-lijn.** De NVMe pollt zijn CQ: zestien tickets, en één wachter
+  (de pacer van `blkdev::Queue`) haalt alle completions op. Een lijn erop is
+  nog niet bedraad.
 - **De `_CPC`-klassenbron**: nu MADT, anders de MPIDR-tabel.
 - **De header-UART** (0x040d0000) als spiegel: de console is die van de SPCR.
 - **De kern-core in het klokbeleid**: zijn idle-tijd staat in de slaper van
@@ -353,7 +353,7 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
   `hopos.nicirq=off` in `hopos.cfg` is de terugweg zonder herbouw. Nooit
   INTx: de `_PRT`-INTx doodt de SoC (L83, 19-09, UART-bewijs); `intx` en
   een INTID weigert het board (`board_altra::nic_irq_mode`).
-- **De NVMe-lijn**: zoals op de O6N (synchroon blokcontract).
+- **De NVMe-lijn**: zoals op de O6N.
 - Het geheugenplan is dat van `board-uefi`: of de pool de ~300 GB boven de
   512 GB haalt (v2 15-07: 1,62 GB zonder de hoge map), zegt de bootregel van
   `board-uefi`.
