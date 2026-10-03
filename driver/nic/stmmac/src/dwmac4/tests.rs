@@ -125,7 +125,7 @@ fn a_returned_descriptor_gets_its_buffer_address_back() {
 }
 
 #[test]
-fn program_lays_out_the_rings_and_the_registers() {
+fn program_lays_out_the_rings_and_the_registers_and_masks_the_mmc() {
     let f = running();
     let n = &f.n;
     let r = n.regs();
@@ -163,6 +163,11 @@ fn program_lays_out_the_rings_and_the_registers() {
     assert_eq!(cfg & SPEED_MASK, 0);
     // Interrupts dicht tot het board ze bedraadt.
     assert_eq!(c.intr_ena.read(), 0);
+    // En de MMC-tellers zetten de lijn nooit: zonder deze maskers stormde
+    // de Radxa na 2 GiB binnen (03-10).
+    assert_eq!(r.mmc_rx_mask.read(), MMC_INT_ALL);
+    assert_eq!(r.mmc_tx_mask.read(), MMC_INT_ALL);
+    assert_eq!(r.mmc_ipc_mask.read(), MMC_INT_ALL);
 }
 
 #[test]

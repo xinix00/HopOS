@@ -36,7 +36,7 @@ mod regs;
 #[cfg(test)]
 mod tests;
 
-use crate::{Error, Mii, Ops, Result, Rings, lo, set_mac_addr};
+use crate::{Error, MMC_INT_ALL, Mii, Ops, Result, Rings, lo, set_mac_addr};
 use core::fmt;
 use dev::{Pa, Reg};
 use netdev::Mac;
@@ -374,6 +374,16 @@ impl Ops for Hw {
 
         // 5. De MAC-config: core-init plus snelheid en duplex.
         r.config.update(|v| mac_config(v, mbps, full_duplex));
+
+        // De MMC-interrupts dicht (Linux `stmmac_mmc_setup`). GEMETEN 03-10
+        // op de Radxa: toen de RX-octetteller over 0x8000_0000 ging, stond
+        // MMCRXIS in GMAC_INT_STATUS en MACIS in DMA_STATUS, claimde de
+        // node 500.000 NIC-interrupts per seconde en kreeg Hop op de
+        // OS-core geen beurt meer, tot de watchdog. GMAC_INT_EN blijft
+        // zoals de reset hem laat: nul, wij handelen geen MAC-interrupt af.
+        r.mmc_rx_mask.write(MMC_INT_ALL);
+        r.mmc_tx_mask.write(MMC_INT_ALL);
+        r.mmc_ipc_mask.write(MMC_INT_ALL);
 
         // 6. Lopen: sticky bits van vóór de reset weg, dan de DMA, dan de
         //    MAC.

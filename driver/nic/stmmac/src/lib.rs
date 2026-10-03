@@ -70,6 +70,15 @@ const MII_BUSY: u32 = 1 << 0;
 /// beide generaties uit.
 const FCS_LEN: usize = 4;
 
+/// De maskers van de MMC-tellers: alle interrupts dicht, in beide
+/// generaties (Linux `stmmac_mmc_setup`, `dwmac_mmc_intr_all_mask`). Een
+/// teller op de helft of vol zet anders de MAC-interrupt, langs het
+/// enable-register van de DMA heen op dezelfde lijn, en niemand hier wist
+/// hem: de lijn blijft hoog en de pomp wordt een interruptstorm. De
+/// octettellers zijn 32 bits; de Radxa haalde de helft (2 GiB in) na acht
+/// bench-rondes van 256 MiB (03-10).
+const MMC_INT_ALL: u32 = 0xFFFF_FFFF;
+
 /// De MDIO-grens: een PHY die niet reageert mag de boot niet ophouden.
 const MDIO_TIMEOUT_NS: u64 = 100_000_000;
 /// De grens van de DMA-softreset: 1 s, zoals Linux voor beide generaties

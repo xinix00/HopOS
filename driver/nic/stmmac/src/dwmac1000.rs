@@ -38,7 +38,7 @@ mod regs;
 #[cfg(test)]
 mod tests;
 
-use crate::{Mii, Ops, Result, Rings, lo, set_mac_addr};
+use crate::{MMC_INT_ALL, Mii, Ops, Result, Rings, lo, set_mac_addr};
 use core::fmt;
 use dev::{LINE, Pa, Reg};
 use netdev::Mac;
@@ -109,11 +109,6 @@ const STAT_NIS: u32 = 1 << 16;
 /// DMA_STATUS), en niemand hier wist ze. Linux (`dwmac1000_core_init`)
 /// laat alleen open wat het afhandelt; wij handelen er geen af.
 const GMAC_INT_ALL: u32 = 0x60F;
-/// De MMC-tellers: alle interrupts dicht (Linux
-/// `dwmac_mmc_intr_all_mask`). Een teller op de helft of vol zet anders
-/// GMI, ook langs DMA_INTR_ENA heen, en de octettellers halen dat bij
-/// 10 MB/s binnen minuten.
-const MMC_INT_ALL: u32 = 0xFFFF_FFFF;
 
 // Het descriptorformaat: "normal format", 16 bytes, géén ALTDESCRIPTOR (bit
 // 7 van DMA_BUS_MODE blijft 0, net als bij de vendor).

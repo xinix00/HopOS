@@ -31,7 +31,15 @@ pub struct Regs {
     pub(crate) addr0_hi: Reg<u32>,
     /// GMAC_ADDR_LOW(0).
     pub(crate) addr0_lo: Reg<u32>,
-    _r6: [u32; 638],
+    _r6: [u32; 257],
+    /// MMC_RX_INTR_MASK (MMC op 0x700 vanaf de 4.x, Linux `MMC_GMAC4_OFFSET`).
+    pub(crate) mmc_rx_mask: Reg<u32>,
+    /// MMC_TX_INTR_MASK.
+    pub(crate) mmc_tx_mask: Reg<u32>,
+    _r6b: [u32; 59],
+    /// MMC_RX_IPC_INTR_MASK.
+    pub(crate) mmc_ipc_mask: Reg<u32>,
+    _r6c: [u32; 319],
     /// MTL_CHAN_TX_OP_MODE(0).
     pub(crate) mtl_tx_op_mode: Reg<u32>,
     _r7: u32,
@@ -110,6 +118,9 @@ const _: () = {
     assert!(offset_of!(Regs, mdio_data) == 0x0204);
     assert!(offset_of!(Regs, addr0_hi) == 0x0300);
     assert!(offset_of!(Regs, addr0_lo) == 0x0304);
+    assert!(offset_of!(Regs, mmc_rx_mask) == 0x070C);
+    assert!(offset_of!(Regs, mmc_tx_mask) == 0x0710);
+    assert!(offset_of!(Regs, mmc_ipc_mask) == 0x0800);
     assert!(offset_of!(Regs, mtl_tx_op_mode) == 0x0D00);
     assert!(offset_of!(Regs, mtl_tx_debug) == 0x0D08);
     assert!(offset_of!(Regs, mtl_rx_op_mode) == 0x0D30);
