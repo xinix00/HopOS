@@ -203,7 +203,7 @@ impl QemuVirtRiscv {
 
     /// De OS-core: op riscv64 altijd het boot-hart (0). Een
     /// `hopos.oscore`-vraag wordt luid genegeerd: de verhuizing bestaat hier
-    /// nog niet (de lottery van de Go-generatie is niet geport).
+    /// niet.
     #[must_use]
     pub fn os_core(&self) -> (usize, Option<&'static str>) {
         let asked = fdt()

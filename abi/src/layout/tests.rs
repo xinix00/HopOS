@@ -327,7 +327,7 @@ fn sched_offsets() {
     }
 }
 
-// --- lottery_mirror_test.go: de RISC-V-cpuinit bestaat in v3 nog niet. -----
+// --- lottery_mirror_test.go: niet geport, v3 kent geen boot-hart-loterij. ---
 
 #[test]
 fn tail_rekent_uit_twee_waarden() {

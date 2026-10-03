@@ -18,11 +18,6 @@ bounded = { path = "../bounded" }
 # LicheeRV-board zet hem aan; op QEMU zijn het ongeldige instructies.
 [features]
 thead = ["dev/thead"]
-# De boot-hart-loterij van de SG2002 (board-licheerv/lottery): de boot-stub
-# springt op `_start` eerst naar `__hopos_lottery` van het board, en een hart
-# dat als "hart 0 zonder bel" terugkomt, pollt het postvak in plaats van te
-# slapen op een `msip` die dit silicium niet heeft.
-lottery = ["thead"]
 
 [lints]
 workspace = true

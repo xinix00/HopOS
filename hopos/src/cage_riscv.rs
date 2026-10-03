@@ -179,14 +179,10 @@ impl RvCage {
                 b.store(t.msip.0, Relaxed);
             }
             let fresh = !boot::is_started(hart);
-            let in_stub = fresh && in_off_stub(sched);
             arm_sched(sched, base.0, &t, fresh);
             if fresh {
                 boot::start_hart(hart, switch::park_pc(), sched.0, t.msip).map_err(Error::Start)?;
                 crate::BOARD.start_app_hart(hart);
-                if in_stub {
-                    leave_off_stub(hart, sched);
-                }
             } else {
                 // Al in de switcher (de zelftest van het board): de bel,
                 // zodat hij de verse regels leest.
@@ -466,32 +462,6 @@ fn arm_sched(sched: Pa, cage: u64, t: &AppHart, fresh: bool) {
         dev::write64(sched.add(off), v);
     }
     dev::push(sched, PARK_MBOX_LEN as usize);
-}
-
-/// Staat het hart van sched-blok `sched` in de uit-stub van de koude flip
-/// (zijn bevestiging in het eerste woord)? Lezen vóór [`arm_sched`], die
-/// het blok wist.
-fn in_off_stub(sched: Pa) -> bool {
-    let mbox = sched.add(SCHED_MBOX_CTX);
-    dev::pull(mbox, 8);
-    dev::read64(mbox) == vboard::slots::FLIP_PARK_PA
-}
-
-/// Een hart zonder bel in de uit-stub (de C906B van de LicheeRV) hoort de
-/// `msip` van [`boot::start_hart`] niet: het pollt zijn eerste woord en
-/// springt naar de ingang die daar komt (`switch::off_stub`). Dat is de
-/// reset-ingang van de boot-stub, met zijn hart-id erbij, want `_start` is
-/// van de loterij. Een hart mét bel is al onderweg naar `_start`.
-fn leave_off_stub(hart: usize, sched: Pa) {
-    let t = crate::BOARD.app_hart(hart);
-    if t.msip.0 != 0 {
-        return;
-    }
-    boot::set_reset_hart(hart);
-    let mbox = sched.add(SCHED_MBOX_CTX);
-    dev::write64(mbox, boot::reset_pc());
-    dev::push(mbox, 8);
-    println!("cage: hart {hart} sent from the off stub to the park loop HOPOS_RV_OFF_LEAVE");
 }
 
 /// De bel van een app-hart (`msip`), als hij er een heeft.
@@ -968,14 +938,10 @@ pub(crate) fn unpark_after_flip(plan: &Plan) {
             continue;
         };
         let t = crate::BOARD.app_hart(hart);
-        let in_stub = in_off_stub(sched);
         arm_sched(sched, plan.vec_base_pa().0, &t, true);
         match boot::start_hart(hart, switch::park_pc(), sched.0, t.msip) {
             Ok(()) => {
                 crate::BOARD.start_app_hart(hart);
-                if in_stub {
-                    leave_off_stub(hart, sched);
-                }
                 println!(
                     "cage: hart {hart} back in the switcher after a cold flip that did not jump HOPOS_FLIP_CORE_BACK"
                 );

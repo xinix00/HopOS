@@ -24,9 +24,7 @@
 //! deelt zijn core als groep `system` (welcome en wat geen eigen core
 //! vindt), en de C906L is het app-hart van Hop ([`HOP_ON_OS_CORE`]). De
 //! C906L komt via het resetblok op ([`LicheeRv::start_little`]): reset
-//! vast, boot-vector zetten, reset los. De loterij ([`lottery`], de kern op
-//! de C906L) staat uit; een kern die toch op de C906L wakker wordt, reset
-//! het bord (`discover`, `HOPOS_WRONG_HART`).
+//! vast, boot-vector zetten, reset los.
 //!
 //! Wat hier NIET is: een hardware-TRNG (luid, `cpu::riscv::trng`) en een
 //! SD-driver (geen opslag; hopfs draait zonder schijf).
@@ -44,7 +42,6 @@
 
 pub mod cfg;
 mod ephy;
-pub mod lottery;
 pub mod slots;
 pub mod temp;
 pub mod watchdog;
@@ -93,9 +90,8 @@ pub const WDT: Pa = Pa(0x0301_0000);
 pub const TIMEBASE_HZ: u64 = 25_000_000;
 /// Woont Hop op de OS-core? Niet op dit bord: de kern staat op de C906B en
 /// Hop krijgt de C906L voor zich, zodat welcome en de rest de grote core
-/// met de kern delen (groep `system`). Met de loterij (de kern op de
-/// C906L) wel, zoals tot 03-10.
-pub const HOP_ON_OS_CORE: bool = cfg!(feature = "lottery");
+/// met de kern delen (groep `system`).
+pub const HOP_ON_OS_CORE: bool = false;
 
 /// De kern-RAM: image, stack en heap (`link-riscv.ld` met de basis en maat
 /// van dit board uit build.rs), tot de DMA-regio.
@@ -189,11 +185,11 @@ impl LicheeRv {
         Self
     }
 
-    /// Het hart waar de kern draait: `mhartid` zegt het niet (beide cores
-    /// lezen 0); de C906B, of met de loterij de uitkomst ervan.
+    /// Het hart waar de kern draait: de C906B, waar de FSBL hem start.
+    /// `mhartid` zegt het niet (beide cores lezen 0).
     #[must_use]
-    pub fn this_core(&self) -> usize {
-        lottery::os_hart()
+    pub const fn this_core(&self) -> usize {
+        HART_BIG
     }
 
     /// De OS-core: het hart van de kern. Een `hopos.oscore` is er niet.
@@ -274,8 +270,7 @@ impl LicheeRv {
 
     /// Brengt app-hart `hart` naar de parkeerlus van de boot-stub: de C906L
     /// uit reset op de reset-ingang, met zijn logische hart-id erbij (zijn
-    /// `mhartid` leest 0, net als dat van de C906B). De C906B staat er al
-    /// sinds de loterij en leest zijn postvak zelf.
+    /// `mhartid` leest 0, net als dat van de C906B).
     pub fn start_app_hart(&self, hart: usize) {
         if hart == HART_LITTLE {
             cpu::riscv::boot::set_reset_hart(hart);
@@ -312,25 +307,6 @@ impl LicheeRv {
     /// zijn PMP, gemeten 30-07: na een hart-reset leest pmpcfg0 weer 0).
     pub fn hold_little(&self) {
         dev::write32(C906L_RESET, dev::read32(C906L_RESET) & !RESET_BIT);
-    }
-
-    /// Het vangnet van [`Board::discover`]: eerst de override van de vector
-    /// uit (anders ziet de C906B zich na een reset die SEC_SYS niet wist
-    /// voor de C906L aan), dan de DW-WDT op zijn kortst, zoals de flip-reset
-    /// op een bord zonder PSCI. Keert niet terug.
-    fn wrong_hart(&self) -> ! {
-        cpu::println!(
-            "boot: woke on the C906L without the lottery, resetting through the WDT to boot from the card HOPOS_WRONG_HART"
-        );
-        dev::write32(SEC_SYS_CTRL, dev::read32(SEC_SYS_CTRL) & !(1 << 13));
-        let ok = self.watchdog_probe();
-        watchdog::probed(ok);
-        if !ok || watchdog::arm(1000).is_err() {
-            cpu::println!(
-                "boot: the DW-WDT did not answer, this hart parks until a power cycle HOPOS_WRONG_HART_PARK"
-            );
-        }
-        cpu::boot::park()
     }
 
     /// De watchdog-probe (Go, `WatchdogProbe`): CCVR aanraken (de lees die
@@ -390,37 +366,11 @@ impl Board for LicheeRv {
     }
 
     fn firmware(&self) -> &'static str {
-        match lottery::state() {
-            lottery::State::Swapped => {
-                "boot: LicheeRV Nano (SG2002), machine mode monitor from the FIP (no SBI), the kern on hart 1 (C906L), app hart 0 (C906B)"
-            }
-            _ => {
-                "boot: LicheeRV Nano (SG2002), machine mode monitor from the FIP (no SBI), the kern on hart 0 (C906B), app hart 1 (C906L)"
-            }
-        }
+        "boot: LicheeRV Nano (SG2002), machine mode monitor from the FIP (no SBI), the kern on hart 0 (C906B), app hart 1 (C906L)"
     }
 
-    /// Als eerste het vangnet: een kern zonder loterij op de C906L (een
-    /// koude flip vanaf een loterij-kern springt op dat hart naar `_start`)
-    /// zou straks zijn eigen hart als app-hart in reset zetten. Dan liever
-    /// de reset van het bord, zodat de kaart bepaalt wat er boot.
     fn discover(&self, _dtb: u64) {
-        if !cfg!(feature = "lottery") && lottery::on_little() {
-            self.wrong_hart();
-        }
         cpu::riscv::idle::set_hz(TIMEBASE_HZ);
-        match lottery::state() {
-            lottery::State::Swapped => cpu::println!(
-                "lottery: the kern runs on the C906L (hart 1, 700 MHz), the C906B (hart 0, 1 GHz) is the app hart HOPOS_LOTTERY_SWAPPED"
-            ),
-            lottery::State::Rescued => cpu::println!(
-                "lottery: the C906L gave no sign of life within 10 s, the kern stays on the C906B and the C906L is the app hart HOPOS_LOTTERY_RESCUED"
-            ),
-            lottery::State::None if cfg!(feature = "lottery") => cpu::println!(
-                "lottery: no lottery block on the boot scratch, the kern stays on the C906B HOPOS_LOTTERY_NONE"
-            ),
-            lottery::State::None => {}
-        }
         match CLINT_DEV.probe(self.clint_hart(), csr::rdtime()) {
             Ok(()) => {
                 CLINT_OK.store(true, Relaxed);
@@ -462,18 +412,11 @@ impl Board for LicheeRv {
         cpu::riscv::idle::now
     }
 
-    /// De slaap van de kern: op de C906L pollen (daar is een `wfi` nooit
-    /// bewezen en tweemaal een stille dood geweest, Go 01-08 en 17-08; Go's
-    /// HOP sliep er ook niet), op de C906B de `wfi` op de wekker (twee weken
+    /// De slaap van de kern op de C906B: de `wfi` op de wekker (twee weken
     /// productie in Go, 30-07 tot 16-08).
     fn sleeper(&self) -> Self::Sleeper {
         let clint = CLINT_OK.load(Relaxed).then_some(CLINT_DEV);
-        let s = cpu::riscv::idle::RvSleeper::new(clint, self.clint_hart());
-        if self.this_core() == HART_LITTLE {
-            s.polling()
-        } else {
-            s
-        }
+        cpu::riscv::idle::RvSleeper::new(clint, self.clint_hart())
     }
 
     fn mem_total(&self) -> u64 {
@@ -502,10 +445,10 @@ impl Board for LicheeRv {
 
     fn start_interrupts(&self) -> Result<&'static Signal, Error> {
         // De PLIC is, net als de CLINT, per core en elke core is voor
-        // zichzelf hart 0: context 0 is de zijne (met de loterij vanaf de
-        // C906L was context 2 een load access fault op het claim-register,
-        // 03-10, mtval 0x7020_2004). De 102 bronnen zijn die van de C906B,
-        // het hart van de kern.
+        // zichzelf hart 0: context 0 is de zijne (context 2 vanaf de C906L
+        // was een load access fault op het claim-register, 03-10, mtval
+        // 0x7020_2004). De 102 bronnen zijn die van de C906B, het hart van
+        // de kern.
         PLIC_DEV.set_context(machine_context(self.clint_hart()));
         cpu::println!("irq: {}", PLIC_DEV.describe());
         csr::mie_set(csr::MIP_MEIP | csr::MIP_MSIP);
@@ -594,23 +537,16 @@ impl Board for LicheeRv {
             )
         }
         .map_err(|_| Error::Nic("dwmac start failed"))?;
-        // De lijn, alleen als de kern op de C906B staat: de PLIC van de C906L
-        // heeft geen ethernetbron ([`GMAC_IRQ`]). Daar, en bij een lijn die
-        // niet aan wil, pollt de pomp zoals voorheen (300 µs). Op de C906B
-        // hoort de kern een app dan op de failsafe van de switch (1 ms) in
-        // plaats van de poll: er is geen bel van de C906L naar de C906B.
-        let why = if self.this_core() != HART_BIG {
-            Some("the PLIC of the C906L has no ethernet source")
-        } else if PLIC_DEV.enable(Line(GMAC_IRQ)).is_err() {
-            Some("the PLIC refused the source")
-        } else {
+        // De lijn op de PLIC van de C906B ([`GMAC_IRQ`]); wil hij niet aan,
+        // dan pollt de pomp (300 µs). De kern hoort een app op de C906L op de
+        // failsafe van de switch (1 ms): er is geen bel van de C906L naar de
+        // C906B.
+        if PLIC_DEV.enable(Line(GMAC_IRQ)).is_ok() {
             NIC_IRQ.get().set(Some(nic.irq_ack()));
             nic.set_irq(&NIC_BELL);
-            None
-        };
-        match why {
-            None => cpu::println!("net: dwmac irq {GMAC_IRQ} on the PLIC HOPOS_NIC_IRQ"),
-            Some(why) => cpu::println!("net: dwmac polled, {why} HOPOS_NIC_IRQ"),
+            cpu::println!("net: dwmac irq {GMAC_IRQ} on the PLIC HOPOS_NIC_IRQ");
+        } else {
+            cpu::println!("net: dwmac polled, the PLIC refused the source HOPOS_NIC_IRQ");
         }
         cpu::println!("net: dwmac {}", nic.diag());
         NIC_CLAIMED.store(true, Relaxed);

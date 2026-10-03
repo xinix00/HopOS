@@ -317,19 +317,15 @@ flip weigert vóór de sprong (`flip::WARM`). Dezelfde weg als hierboven,
 met drie verschillen:
 
 - **Het app-hart uit het image** (`flip::cores_off`, `slots::park_for_flip`):
-  een hart met een resetblok (de C906L, het app-hart van de LicheeRV
-  sinds 03-10) gaat in reset, zoals een harde intrekking, en de nieuwe
-  kern haalt hem eruit zoals bij elke boot (`start_app_hart`). Een hart
-  zonder resetblok (QEMU, en de C906B met de loterij) krijgt in zijn
+  de C906L van de LicheeRV gaat in reset (het resetblok, zoals een harde
+  intrekking), en de nieuwe kern haalt hem eruit zoals bij elke boot
+  (`start_app_hart`). Een hart zonder resetblok (QEMU) krijgt in zijn
   sched-blok `SCHED_OFF_PC` en de bel; de switcher springt aan het begin
   van zijn volgende ronde naar de uit-stub (`cpu::riscv::switch::off_stub`,
-  een kopie op `FLIP_PARK_PA`, buiten het image), die zijn D-cache veegt
-  en bevestigt in `SCHED_MBOX_CTX`. Met een bel slaapt hij tot de nieuwe
-  kern belt (`boot::start_hart`) en gaat dan diens `_start` in, de
-  parkeerlus van het postvak. Zonder bel (de C906B) pollt hij zijn eigen
-  woord tot de nieuwe kern er de reset-ingang in zet
-  (`HOPOS_RV_OFF_LEAVE`), want `_start` is daar van de loterij.
-  `cores_off=1` op de console.
+  een kopie op `FLIP_PARK_PA`, buiten het image), die zijn D-cache veegt,
+  bevestigt in `SCHED_MBOX_CTX` en slaapt tot de bel. Die komt van de
+  nieuwe kern (`boot::start_hart`), en dan gaat het hart diens `_start` in,
+  de parkeerlus van het postvak. `cores_off=1` op de console.
 - **De sprong** is de M-mode-trampoline van `cpu::el2::chain`: interrupts
   dicht, op de C906 de hele D-cache naar DRAM (`th.dcache.ciall`), de
   kopie, opnieuw vegen, de I-cache leeg, en naar `_start` met a0 = 0 en a1

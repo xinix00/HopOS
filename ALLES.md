@@ -13,14 +13,14 @@ nog te bewijzen in ronde 1).
 De afvinkmatrix van de Go-tijd (OLD/docs/support.md: boot, idle en klokken,
 devices en diensten per board), nu voor v3 en bijgehouden op ijzer. Legenda:
 ✓ gezien op het board, ○ gebouwd maar op dit board nog niet gezien, ✗ ontbreekt
-of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, ochtend (de Pi 4, de Radxa en de O6N op R2; de LicheeRV op R11, zonder loterij).
+of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, ochtend (de Pi 4, de Radxa en de O6N op R2; de LicheeRV op R11).
 Een cel zegt alleen of het slaagt, met hooguit de stempel of een paar
 woorden waarom niet; een gepolde NIC is geen ✓. De getallen staan in
 docs/measurements.md, de details per board in docs/boards-*.md.
 
 | | QEMU virt | Pi 5 | Pi 4 | Radxa | Altra | O6N | M4 | LicheeRV |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Boot, EL2, kooi, zelftest | ✓ | ✓ | ✓; koud ✗ faalt bij USB, fix d0b6bd3 | ✓ | ○ nog nooit geboot | ✓ G | ✓ M7 | ✓ R11, 03-10 (zonder loterij) |
+| Boot, EL2, kooi, zelftest | ✓ | ✓ | ✓; koud ✗ faalt bij USB, fix d0b6bd3 | ✓ | ○ nog nooit geboot | ✓ G | ✓ M7 | ✓ R11, 03-10 |
 | Hop als bewoner, welcome door de DNAT | ✓ | ✓ | ✓ | ✓ | ○ nog nooit geboot | ✓ | ✓ | ✓ R10, 03-10 |
 | Kern-flip, warm | ✓ | ✗ sterft na de landing | ✓ I | ✓ I | ○ nog nooit geboot | ✓ H; I ○ koude boot, fix de61b4b | ✓ 01-10; koud – geen PSCI | – niet op riscv64; koud ✓ R10, 03-10 |
 | NIC met interrupt | ✓ | ✓ | – gepold, zoals Go | ✓ | – gepold, bewust | ✓ | – gepold, bewust | ✓ R11, 03-10 |
@@ -92,10 +92,12 @@ leveren. Rood is een regressie van de port-review, niet van het bord.
       v2 111 tot 116 MB/s inkomend was het vermoeden).
 - [ ] Pi 4 koud: `usb: vl805 firmware 0x... loaded` (fix d0b6bd3, alleen op
       QEMU getoetst).
-- [ ] LicheeRV (R3, de loterij en de koude flip sinds 03-10 op ijzer): voor
-      de kolom in docs/measurements.md de netmeter-doorvoer en bench (een
-      peer op de draad). Nog zonder bel van app naar kern (de CV181x-mailbox
-      is de kandidaat), zonder SMP en zonder RNG.
+- [ ] LicheeRV: de koude flip met de kern op de C906B op ijzer (R13), en
+      voor de kolom in docs/measurements.md de netmeter-doorvoer en bench
+      (een peer op de draad). Nog zonder bel van app naar kern (de
+      CV181x-mailbox is de kandidaat), zonder SMP en zonder RNG. De loterij
+      van 03-10 ochtend is dezelfde dag weer verwijderd: de PLIC van de
+      C906L heeft geen ethernetbron, de kern hoort op de C906B.
 - [ ] Een vervangen artefact in `apps` (`gh release upload --clobber`) komt
       pas na ongeveer twee minuten op een node aan: Hop bewaart niets (elke
       plaatsing haalt opnieuw, gemeten 03-10), maar GitHub cachet de 302 van

@@ -21,11 +21,5 @@ driver-ns16550 = { path = "../../driver/ns16550" }
 driver-mdio = { path = "../../driver/nic/mdio" }
 driver-dwmac = { path = "../../driver/nic/dwmac" }
 
-# De boot-hart-loterij (src/lottery.rs): de kern op de C906L, de apps op de
-# C906B. Uit sinds 03-10: de PLIC van de C906L heeft geen ethernetbron, de
-# kern hoort op de C906B voor de dwmac-interrupt.
-[features]
-lottery = ["cpu/lottery"]
-
 [lints]
 workspace = true

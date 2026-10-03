@@ -324,18 +324,8 @@ zet hem; HopOS doet geen init). Bouw met
     (`HOP_ON_OS_CORE` = false op dit board): `HOPOS_HOP_START slot=1
     core=1 cpu=1`.
 
-    **De loterij staat uit** (`board/licheerv/src/lottery.rs`, Go's
-    cpuinit, de feature `lottery` van het board): die zette de kern op de
-    C906L zodat de apps de grote core kregen (Go `HopCore = 1`, R3 tot R10
-    op 03-10), maar de PLIC van de C906L heeft geen ethernetbron en de pomp
-    kostte 46 tot 48 procent van de kern in rust. Met de feature terug
-    (`board-licheerv/lottery`) is alles weer als op R10, Hop op de OS-core
-    incluis. Het vangnet: een kern zonder loterij die toch op de C906L
-    wakker wordt (een koude flip vanaf een loterij-kern springt op dat hart
-    naar `_start`) herkent dat aan de override van de vector met `_start`
-    erin, zet de override uit en reset het bord via de DW-WDT: `boot: woke
-    on the C906L without the lottery, resetting through the WDT to boot
-    from the card HOPOS_WRONG_HART`. Dan boot wat op de kaart staat.
+    De loterij van 03-10 ochtend is dezelfde dag weer verwijderd: de PLIC
+    van de C906L heeft geen ethernetbron, de kern hoort op de C906B.
 12. **Het app-hart**: `cage: hart 1 (core 1) in the switcher: wake
     0x74004000, bell 0x0, sleep cap 0 ticks, kill tick 250000 ticks, reset
     true HOPOS_RV_HART_UP`. De C906L komt uit reset op de reset-ingang en
@@ -386,9 +376,7 @@ Zonder `CFG=` krijgt de nieuwe kern het config-venster van de draaiende
 stopped=N cores_off=1` (de C906L in reset), `HOPOS_FLIP_JUMP gen=G`, dan de
 bunny, `HOPOS_FLIP_BOOT gen=G HOPOS_FLIP_COLD_BOOT`, `HOPOS_BOOT gen=G
 stamp=<naam>` op de C906B, `HOPOS_RV_HART_UP` (de C906L uit reset),
-`HOPOS_HOP_START`, `HOP_UP` en `HOPOS_FLIP_SETTLED`. Een flip vanaf een
-kern met de loterij (R3 tot R10) landt op de C906L: dan `HOPOS_WRONG_HART`
-en een reset via de DW-WDT, en de kaart boot (punt 11). De TCP-console valt
+`HOPOS_HOP_START`, `HOP_UP` en `HOPOS_FLIP_SETTLED`. De TCP-console valt
 weg met de sprong en komt terug na DHCP; wat ertussen gebeurt staat alleen
 op de UART (er is op riscv64 nog geen zwarte doos).
 
@@ -409,8 +397,7 @@ watchdog of de stroom, en de kaart start de oude kern.
   build.rs, `staged_role` van het board). De kring op QEMU virt is groen, en
   sinds 03-10 (R3) ook op het board: Hop in slot 1 met `HOPOS_PRIVILEGE` (op
   dit board in een partitie van 10 MiB, `HOP_MEM` in hopos/src/slots.rs;
-  Hop meet er 0,5 MB), tot R10 op de OS-core naast de kern (core 0, de
-  C906L, de loterij) en sinds 03-10 op de C906L voor zich (core 1),
+  Hop meet er 0,5 MB), sinds R11 op de C906L voor zich (core 1),
   welcome in slot 2, en na een koude flip zaait Hop welcome opnieuw uit
   `hopos.init` (`HOP_INIT_SEEDED`).
 - **De kick van een app naar de kern op de LicheeRV**: de vorm staat sinds
@@ -429,9 +416,7 @@ watchdog of de stroom, en de kaart start de oude kern.
   (sophgo-doc, SG200X, "Interrupt number and Interrupt source mapping for
   Slave RISCV C906 @ 700Mhz") kent op de PLIC van de C906L geen ethernetbron
   (31 is daar UART1), en de vendor-FreeRTOS voor dat hart zet
-  `ETH0_SBD_INTR_O` op NA. Met de loterij (de kern op de C906L) pollde de
-  dwmac (300 µs) en dat kostte in rust 46 tot 48 procent van de OS-core
-  (03-10); daarom staat de loterij sinds 03-10 uit. Op de C906B hangt de
+  `ETH0_SBD_INTR_O` op NA; daarom staat de kern op de C906B. Daar hangt de
   dwmac aan PLIC-bron 31 (Linux `cv180x.dtsi`
   `SOC_PERIPHERAL_IRQ(15)` = 15 + 16, vendor-DTS 31, TRM "Master RISCV
   C906" 31 Ethnet0), met de vangrail van 10 ms; dan hoort de kern een app
