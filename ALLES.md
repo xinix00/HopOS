@@ -47,6 +47,9 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       bord.
 - [ ] Altra: de SMCCC-TRNG zoals Go (onze probe zegt "no SMCCC TRNG" met
       een EL3-monitor; Go zaaide er wel uit). Agent bezig, daarna een flip.
+- [ ] Radxa en Pi 5 over de draad: Radxa ~21 MB/s beide kanten (Go 56 in,
+      99 uit), Pi 5 uit ~43; meten node naar node, dan de dwmac-weg, de NAT
+      of leannet. Agent bezig, daarna ik op het bord.
 - [ ] De volgende bump: HopOS 3.0.7 met tag, Hop erop naar 3.0.8, release.sh,
       media (main heeft sinds v3.0.6 en Hop v3.0.7 de avondfixes van 03-10);
       daarmee het M4-image via Recovery (spin daarna opnieuw POSTen) en de
@@ -84,7 +87,6 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Meten
 
-- [ ] Radxa over de draad ~21 MB/s (Go 56 in, 99 uit); Pi 5 uit ~43 MB/s.
 - [ ] De ring doet het cache-onderhoud op head en tail altijd: eerst meten
       (bench pull M4 en O6N met en zonder), dan 20 tot 30 regels.
 - [ ] O6N schrijven ~700 MB/s tegen 800 tot 1188; app-opslag O6N 414
