@@ -9,7 +9,7 @@ in docs/measurements.md, de details per board in docs/boards-*.md.
 De afvinkmatrix van de Go-tijd (OLD/docs/support.md: boot, idle en klokken,
 devices en diensten per board), nu voor v3 en bijgehouden op ijzer. Legenda:
 ✓ gezien op het board, ○ gebouwd maar op dit board nog niet gezien, ✗ ontbreekt
-of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, avond (LicheeRV R15, O6N O4, Pi 4 P2g, Radxa X1, Pi 5 P4, Altra A8g, M4 M1; main loopt voor op de release v3.0.6 en Hop v3.0.7).
+of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, avond (LicheeRV R15, O6N O5h, Pi 4 P6g, Radxa X2, Pi 5 P4, Altra A8g, M4 M1; main loopt voor op de release v3.0.6 en Hop v3.0.7).
 Een cel zegt alleen of het slaagt, met hooguit de stempel of een paar
 woorden waarom niet; een gepolde NIC is geen ✓. De getallen staan in
 docs/measurements.md, de details per board in docs/boards-*.md.
@@ -39,30 +39,29 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
-- [ ] OS-core: de hop tussen twee bewoners profileren in vijf fasen (yield,
-      pomp en bel, executor-stap, wissel, eerste instructie) en dan snoeien:
-      geen volledige TLB-flush tussen bewoners (VMID op arm64, ASID op
-      riscv) en bij een kick direct naar die bewoner; doel O6N onder 100 us
-      (nu 301), LicheeRV onder 300 (nu 644). Agent bezig, daarna ik op het
-      bord.
-- [ ] Radxa en Pi 5 over de draad: Radxa ~21 MB/s beide kanten (Go 56 in,
-      99 uit), Pi 5 uit ~43; meten node naar node, dan de dwmac-weg, de NAT
-      of leannet. Agent bezig, daarna ik op het bord.
-- [ ] O6N: na `DELETE` van Lumen (10 cores, devices) weigert de kern elke
-      plaatsing tot een koude boot; op QEMU naspelen, de kooi, partitie of
-      grant die niet vrijkomt. Agent bezig.
-- [ ] NAT-recycler (gezien op de Pi 4, geldt overal): bij een vol slot valt
-      een hairpin-SYN nog soms stil weg (1 van 5 stormen p99 1 s, na
-      68c4597 de steekproef-fix; geen leannet-punt). Agent maakt de
-      recycler bij vol deterministisch.
-- [ ] Koude flip: het board zegt het vooraf in de env van Hop
-      (`HOPOS_COLD_FLIP=yes|no|fresh`), Hop weigert dan zonder een taak te
-      stoppen (M4 geen PSCI; Pi 5 alleen vóór de eerste app-core). Agent
-      bezig.
+- [ ] OS-core: op de O6N gemeten met `hopcost` (O5h): per hop trap 27, tot
+      slot_wake 16, tot `el2::next` 79, wissel 14, bewoner 20 us; rtt p50
+      308. De fase tot `el2::next` is de grootste; agent snoeit daarop
+      verder, doel onder 100 us per rondreis. LicheeRV niet gemeten
+      (Dereks bord).
+- [ ] Ontdubbelen, acht agenten tegelijk, daarna ik (toepassen, de
+      QEMU-ringen, op ijzer): de negen kleine (SHA-256, stage-2, de dode
+      loopback, IPv6 als feature van leannet, ongebruikte leannet-API's,
+      tools/lib.sh, codecdemo weg, FlowState, fmt_into); NVMe als één kern
+      met een PCI- en een Apple-transport (bijvangst: 16 tags op O6N en
+      Altra); dwmac en dwmac4 als stmmac; kooi en OS-core per ISA gelijk;
+      één plaatsingspad (Placer ook bij de boot); één ARP-tabel (de NAT
+      zonder eigen cache); `dev::poll_until` voor de 35 wachtlussen; Radxa
+      echte dvfs (APLL 816 naar 1800, vdd_cpu via de RK817 over I2C; op
+      ijzer zodra de draadmeting klaar was, dat is nu).
+- [ ] Koude flip vooraf (`HOPOS_COLD_FLIP=yes|no|fresh`) zit in main en in
+      Hop (db0226c); op ijzer te zien: de M4 weigert koud zonder een taak
+      te stoppen, de Pi 5 weigert zodra een app-core heeft gedraaid.
 - [ ] De volgende bump: HopOS 3.0.7 met tag, Hop erop naar 3.0.8, release.sh,
-      media (main heeft sinds v3.0.6 en Hop v3.0.7 de avondfixes van 03-10);
-      daarmee het M4-image via Recovery (spin daarna opnieuw POSTen) en de
-      Altra-stick.
+      media (main heeft sinds v3.0.6 en Hop v3.0.7 de avondfixes van 03-10:
+      de NAT-recycler, de Radxa over de draad, de OS-core-beurt, de koude
+      flip vooraf, de heap-melding); daarmee het M4-image via Recovery
+      (spin daarna opnieuw POSTen) en de Altra-stick.
 
 ### Fixen
 
@@ -85,7 +84,10 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 - [ ] Radxa: de scrub van een Device-gemapte pool (twee keer dezelfde
       tamago-app); op de M4 op 03-10 gezien.
 - [ ] Pi 4: HID en de display-app op de VL805.
-- [ ] O6N: de mediaketen met Lumen (MMC, HEVC, WebDAV) na een koude boot.
+- [ ] O6N: de mediaketen met Lumen (MMC, HEVC, WebDAV) na een koude boot,
+      en daarna `DELETE`: een gewone job en een flipbundel moeten plaatsen
+      (op 30-09 zat de oude bump-heap vol; nu meldt de tik
+      `HOPOS_HEAP_REFUSED` als dat gebeurt).
 
 ### Meten
 
@@ -99,8 +101,7 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Later
 
-- [ ] Radxa: TSADC geeft geen code; klok 816 MHz (kan 1800); geen
-      serienummer-terugval voor de MAC.
+- [ ] Radxa: TSADC geeft geen code; geen serienummer-terugval voor de MAC.
 - [ ] Altra RNG: de firmware heeft geen SMCCC-TRNG (TRNG_VERSION
       NOT_SUPPORTED, 03-10) en het EFI_RNG_PROTOCOL hing er in juli; blijft
       jitter tot iemand efi-rng daar met een tijdslimiet durft te proberen.
