@@ -19,7 +19,7 @@ of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, ochtend (de
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Boot, EL2, kooi, zelftest | ✓ | ✓ | ✓ (koud: SError bij de VL805; fix d0b6bd3 wacht op een koude boot) | ✓ | ○ | ✓ VHE, kick via SGI 1 (`kick=(Ipi, 0 us)`, stempel G) | ✓ iBoot-boot (cfg in het image op 0xF000), EL2; kooi en zelftest ok, tune aan zonder SError (M7 en later) | ✓ de loterij: de kern op de C906L, de apps op de C906B (`HOPOS_LOTTERY_SWAPPED`), `HOPOS_RV_HART_UP`, zelftest ok; de PLIC-context van `clint_hart()` (ac79e91) |
 | Hop als bewoner, welcome door de DNAT | ✓ | ✓ | ✓ | ✓ | ○ | ✓ | ✓ ingebakken, HOP_UP, gaat warm mee over flips (HOPOS_HOP_RESUMED) | ✓ Hop in slot 1 (`HOPOS_PRIVILEGE`), welcome in slot 2, vanaf het LAN 200 in 12 ms |
-| Kern-flip, warm | ✓ | ✗ sterft na de landing (F en H, 3x); de nieuwe kaart (H, met de zwarte doos) ligt in target/ | ✓ (6x, gen 4 op I) | ✓ (5x, gen 3 op I) | ○ | ✓ gen 2 op H (gui-bundel); I geweigerd door de H-kern (bundelpartitie 8 KiB te krap, fix de61b4b zit in de I-stick): koude boot | ✓ gen 1 tot 8 op 01-10 (D4b naar M15), adoptie 3 van 3, de config reist mee; koud: – (geen CPU_OFF) | koud ✓ gen 2 (R3, 03-10: `HOPOS_FLIP_COLD_BOOT`, de loterij na de koude boot opnieuw `HOPOS_LOTTERY_SWAPPED`, `HOPOS_FLIP_SETTLED` na 70 s, Hop zaait welcome uit `hopos.init`); warm bestaat op riscv64 niet (`flip::WARM` weigert vóór de sprong) |
+| Kern-flip, warm | ✓ | ✗ sterft na de landing (F en H, 3x); de nieuwe kaart (H, met de zwarte doos) ligt in target/ | ✓ (6x, gen 4 op I) | ✓ (5x, gen 3 op I) | ○ | ✓ gen 2 op H (gui-bundel); I geweigerd door de H-kern (bundelpartitie 8 KiB te krap, fix de61b4b zit in de I-stick): koude boot | ✓ gen 1 tot 8 op 01-10 (D4b naar M15), adoptie 3 van 3, de config reist mee; koud: – (geen CPU_OFF) | koud ✓ gen 2 (R3) en gen 4 (R4, met de symtab-stroom en de riscv-klok) (03-10: `HOPOS_FLIP_COLD_BOOT`, de loterij na de koude boot opnieuw `HOPOS_LOTTERY_SWAPPED`, `HOPOS_FLIP_SETTLED` na 70 s, Hop zaait welcome uit `hopos.init`); warm bestaat op riscv64 niet (`flip::WARM` weigert vóór de sprong) |
 | NIC met interrupt | ✓ | ✓ MSI-X via de MIP | – (GENET gepold, zoals Go) | ✓ SPI 64 | – (igb gepold, bewust) | ✓ RTL8125B, MSI-X via de ITS (LPI 8192) | ✓ tg3 BCM57766, gepold; MAC-filter na link_up (4be8b60); app naar app E 4450, P 6100 MB/s (M21), transport kern naar app 1860 | – dwmac gepold, PLIC-context 0 na de wissel (ac79e91) |
 | Hardware-IRQ (NIC, kick, timer) | ✓ NIC op de interrupt, kick via SGI 8 | ✓ GEM op INTID 166 (flank, MSI via de MIP), kick via SGI 8 | ✓ kick via SGI 8; GENET gepold | ✓ NIC op INTID 64, kick via SGI 7 (TF-A houdt 8 tot en met 15), timer-PPI 30 (WFI) | ○ igb gepold (de `_PRT`-INTx doodt de SoC), kick via SGI 1 | ✓ RTL8125B MSI-X via de ITS (LPI 8192), kick via SGI 1, timer CNTHP (PPI 26) | ✓ fast IPI en timer als FIQ, AIC voor de rest; tg3 gepold | ✓ dwmac gepold (300 us), kick via MSIP van de CLINT per core, timer op `mtimecmp` (wfi), PLIC context 0; externe lijnen gaan uit zodra ze vuren (niemand heeft een lijn) |
 | Off-link door de NAT, SNTP | ✓ | ✓ | ✓ | ○ | ○ | ○ | ○ | ○ |
@@ -92,16 +92,13 @@ leveren. Rood is een regressie van de port-review, niet van het bord.
       de kolom in docs/measurements.md de netmeter-doorvoer en bench (een
       peer op de draad). Nog zonder bel van app naar kern (de CV181x-mailbox
       is de kandidaat), zonder SMP en zonder RNG.
-- [ ] **De kern reserveert de hele symtab van een app op zijn heap**, voor
-      de paar globale symbolen die hij leest (RamStart, de stempel): op de
-      LicheeRV weigerde 03-10 elke welcome `hop driver: refused: out of
-      memory (1012680 bytes) HOP_JOB_FAILED`, exact de .symtab van
-      welcome-riscv64.elf (42 185 lokale symbolen). Omweg: `tools/release.sh`
-      levert de apps met `--discard-all` (welcome-riscv64 van 1,4 MB naar
-      329 KB). De kernkant, de symbolen streamen, is onderhanden
-      (`scratchpad/fixes/symtab.patch`); een tamago-app op riscv64 (Stulp
-      all-plugins) heeft een nog grotere symtab. Bewijs: een app met
-      lokale symbolen op de LicheeRV plaatsen.
+- [ ] **De temperatuur per bord, werkt de sensor**: de rij "Temperatuur in
+      de tik" per node aflopen. De LicheeRV heeft er een (Go: board/licheerv/
+      temp.go, de SG2002 TEMPSEN), dus het streepje in de tabel is fout: de
+      Go-weg porten en de tik laten melden. De Radxa (TSADC converteert niet),
+      de Altra (SMpro), de M4 (○) en de O6N (SCMI, 39 C) nalopen; welk bord
+      meldt wat in `temp=` van de tik en bij Hop (`temp_milli_c` in de
+      heartbeat).
 - [ ] Een sharegroup met een rekenaar: `HOPOS_CORE_RECLAIM` na 2 s en het
       nieuwe lid op (tools/qemu-test-reclaim.sh is het voorbeeld).
 - [ ] De opruiming van 1 en 2 oktober, wat nog niet op ijzer gezien is:

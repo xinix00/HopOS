@@ -8,7 +8,7 @@
 //!
 //! Op QEMU-TCG is `WFE` een no-op en meet een eigen core ~0% idle; een yield
 //! op een gedeelde core telt wel.
-use abi::hopabi::{AppStatus, CTRL_CORES, CTRL_IDLE, CTRL_STATUS, CTRL_WAKES};
+use abi::hopabi::{AppStatus, CTRL_CORES, CTRL_HEARTBEAT, CTRL_IDLE, CTRL_STATUS, CTRL_WAKES};
 use core::time::Duration;
 use cpu::println;
 use executor::Executor;
@@ -31,6 +31,11 @@ fn word(page: dev::Pa, off: u64) -> u64 {
 
 async fn run(exec: &'static Executor) {
     let mut last: [Option<Sample>; SLOT_CAP + 1] = [None; SLOT_CAP + 1];
+    // De hartslag van de vorige stand: een nieuwe bewoner in een oud slot
+    // begint bij 1, en zijn tellers bij 0. Zonder deze toets is zijn eerste
+    // regel het verschil met de vorige bewoner (03-10, LicheeRV:
+    // "wakes=614890035200089603/s").
+    let mut beats = [0u64; SLOT_CAP + 1];
     loop {
         exec.after(LOAD_EVERY).await;
         let at_ns = exec.now();
@@ -43,6 +48,11 @@ async fn run(exec: &'static Executor) {
                 *prev = None;
                 continue;
             }
+            let beat = word(page, CTRL_HEARTBEAT);
+            if beat < beats[slot] {
+                *prev = None;
+            }
+            beats[slot] = beat;
             let now = Sample {
                 idle: word(page, CTRL_IDLE),
                 wakes: word(page, CTRL_WAKES),
