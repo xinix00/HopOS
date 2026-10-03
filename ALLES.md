@@ -13,31 +13,31 @@ nog te bewijzen in ronde 1).
 De afvinkmatrix van de Go-tijd (OLD/docs/support.md: boot, idle en klokken,
 devices en diensten per board), nu voor v3 en bijgehouden op ijzer. Legenda:
 ✓ gezien op het board, ○ gebouwd maar op dit board nog niet gezien, ✗ ontbreekt
-of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, middag (de LicheeRV op R14, de O6N op O2, de Pi 4 op P1, de Radxa op X1, de Pi 5 krijgt P1; alles van main 8a91d57 met Hop d785ef5).
+of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, middag (de LicheeRV op R14, de O6N op O2, de Pi 4 op P1, de Radxa op X1, de Pi 5 op P1, de Altra-stick A1; alles van main 8a91d57 met Hop d785ef5).
 Een cel zegt alleen of het slaagt, met hooguit de stempel of een paar
 woorden waarom niet; een gepolde NIC is geen ✓. De getallen staan in
 docs/measurements.md, de details per board in docs/boards-*.md.
 
 | | QEMU virt | Pi 5 | Pi 4 | Radxa | Altra | O6N | M4 | LicheeRV |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Boot, EL2, kooi, zelftest | ✓ | ✓ | ✓ P1, 03-10; koud ✓ de VL805-firmware laadt (P1g) | ✓ X1, 03-10 | ○ nog nooit geboot | ✓ O2, 03-10 | ✓ M7 | ✓ R13, 03-10 |
-| Hop als bewoner, welcome door de DNAT | ✓ | ✓ | ✓ P1, in `system` | ✓ X1, in `system` | ○ nog nooit geboot | ✓ O2, in `system` | ✓ | ✓ R10, 03-10 |
-| Kern-flip, warm | ✓ | ✗ sterft na de landing | ✓ I | ✓ I | ○ nog nooit geboot | ✓ H; I ○ koude boot, fix de61b4b | ✓ 01-10; koud – geen PSCI | – niet op riscv64; koud ✓ R10, 03-10 |
+| Boot, EL2, kooi, zelftest | ✓ | ✓ P1, 03-10 | ✓ P1, 03-10; koud ✓ de VL805-firmware laadt (P1g) | ✓ X1, 03-10 | ○ nog nooit geboot | ✓ O2, 03-10 | ✓ M7 | ✓ R13, 03-10 |
+| Hop als bewoner, welcome door de DNAT | ✓ | ✓ P1, in `system` | ✓ P1, in `system` | ✓ X1, in `system` | ○ nog nooit geboot | ✓ O2, in `system` | ✓ | ✓ R10, 03-10 |
+| Kern-flip, warm | ✓ | ✗ net dood na de landing (de zwarte doos van P1 zegt het, agent bezig); koud ✓ | ✓ I | ✓ I | ○ nog nooit geboot | ✓ H; I ○ koude boot, fix de61b4b | ✓ 01-10; koud – geen PSCI | – niet op riscv64; koud ✓ R10, 03-10 |
 | NIC met interrupt | ✓ | ✓ | – gepold, zoals Go | ✓ | – gepold, bewust | ✓ | ✗ gepold; INTx via de AIC nog niet bedraad | ✓ R13, 03-10 |
 | Hardware-IRQ (NIC, kick, timer) | ✓ | ✓ | ✓, NIC gepold | ✓ | ○ nog nooit geboot | ✓ | ✓, NIC gepold | ✓ R13, 03-10 |
-| Gebruik per taak, van de kern en van Hop (cpu, geheugen; slot 0, systeemtaken) | ✓ arm64, 03-10 | ○ niet nagelopen | ✓ P1, 03-10 | ✓ X1, 03-10 | ○ nog nooit geboot | ✓ O2, 03-10 | ○ niet nagelopen | ✓ R13, 03-10 |
+| Gebruik per taak, van de kern en van Hop (cpu, geheugen; slot 0, systeemtaken) | ✓ arm64, 03-10 | ✓ P1, 03-10 | ✓ P1, 03-10 | ✓ X1, 03-10 | ○ nog nooit geboot | ✓ O2, 03-10 | ○ niet nagelopen | ✓ R13, 03-10 |
 | Off-link door de NAT, SNTP | ✓ | ✓ | ✓ | ○ niet nagelopen | ○ nog nooit geboot | ○ niet nagelopen | ○ niet nagelopen | ○ niet nagelopen |
-| Watchdog gewapend en geaaid | – geen watchdog in virt | ✓ | ✓ P1, canary | ✓ X1, canary | ○ nog nooit geboot | ✓ O2, canary | ✓ | ✓ R3, 03-10 |
+| Watchdog gewapend en geaaid | – geen watchdog in virt | ✓ P1, canary | ✓ P1, canary | ✓ X1, canary | ○ nog nooit geboot | ✓ O2, canary | ✓ | ✓ R3, 03-10 |
 | Hardware-RNG voor de kern | ✗ alleen jitter | ✓ | ✓ | ✓ | ○ nog nooit geboot | ○ wacht op de stick | ✗ alleen jitter | ✗ geen bron |
-| Hardware-RNG voor de slots (CTRL_RNG_SEED, fc5348f) | ○ alleen jitter | ○ kaart van vóór fc5348f | ✓ F | ✓ F | ○ nog nooit geboot | ○ wacht op de stick | ○ alleen jitter | ○ niet nagelopen |
+| Hardware-RNG voor de slots (CTRL_RNG_SEED, fc5348f) | ○ alleen jitter | ✓ P1, 03-10 | ✓ F | ✓ F | ○ nog nooit geboot | ○ wacht op de stick | ○ alleen jitter | ○ niet nagelopen |
 | Temperatuur in de tik | – geen sensor in virt | ✓ | ✓ | ✗ sensor converteert niet | ○ nog nooit geboot | ✓ | ✗ niet gebouwd | ✓ R5, 03-10 |
 | Klokbeleid (dvfs) | – geen klok in virt | ✓ | ✓ | – klok van de firmware, bewust | ○ nog nooit geboot | ✓ | ✓ M7 | – vaste klok |
 | Console op het glas | ✓ | ✗ firmware weigert sinds de herflash | ✓ | ✓ | ○ nog nooit geboot | ✓ | – bewust uit | – geen scherm |
-| USB xHCI (HID, display-app) | ✓ | ○ niets ingeplugd | ✗ enable slot krijgt geen completion (P1g, agent bezig) | ○ niets ingeplugd | ○ nog nooit geboot | ✓ | – niet gepland | – niet gepland |
+| USB xHCI (HID, display-app) | ✓ | ○ niets ingeplugd | ✓ P2g, 03-10 (enable slot met completion, d107b31) | ○ niets ingeplugd | ○ nog nooit geboot | ✓ | – niet gepland | – niet gepland |
 | Opslag (hopfs, volumes, OP_SYNC) | ✓ | – bewust geen schijf | – geen schijf | – stateless, bewust | ○ nog nooit geboot | ✓ | ✓ M24 | – geen SD-driver |
 | Console op 5555 | ✓ | ✓ | ✓ | ✓ | ○ nog nooit geboot | ✓ | ✓ | ○ niet nagelopen |
 | Hardwaredecoder (media-smaak) | – geen media-smaak | – geen media-smaak | – geen media-smaak | – geen media-smaak | – geen media-smaak | ✓ 30-09, weg tot de koude boot | – geen media-smaak | – geen media-smaak |
-| Kaart of stick klaar in `target/` | – niets te flashen | ✓ P1 geschreven | ✓ P1 | ✓ X1 | ✓ | ✓ O2 op de stick | ✓ M24 | ✓ R13 |
+| Kaart of stick klaar in `target/` | – niets te flashen | ✓ P1 geschreven | ✓ P1 | ✓ X1 | ✓ A1 op de stick | ✓ O2 op de stick | ✓ M24 | ✓ R13 |
 
 ## Ronde 0: de ochtend van 03-10, vóór alles
 
@@ -195,15 +195,6 @@ niet).
       Eerst meten met een echte database van 100 GB of meer.
 
 ### Raspberry Pi 4 (pi4-1, 192.168.1.40)
-
-- [ ] **xHCI: "enable slot" krijgt geen completion** (P1g, 03-10, koude
-      start van de gui-kern met een apparaat op poort 1): de VL805-firmware
-      laadt nu wel (d0b6bd3), maar het eerste commando op de command ring
-      blijft zonder antwoord (`sts=10 crcr=800000008 cmdpa=14a3f000
-      event=0`), de driver reset en herhaalt. Verdacht: het ringadres in de
-      CRCR (0x8 tegen 0x14a3f000: het bus-adres van de PCIe-DMA of een
-      64-bit write), anders de cache van de ringen. Een agent zoekt het
-      (scratchpad/fixes/pi4-usb.patch).
 
 - [ ] HID en de display-app op de VL805 (na de koude boot van ronde 1).
 
