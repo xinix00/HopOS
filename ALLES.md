@@ -90,6 +90,16 @@ leveren. Rood is een regressie van de port-review, niet van het bord.
       CV181x-mailbox is de kandidaat), zonder SMP en zonder RNG. De loterij
       van 03-10 ochtend is dezelfde dag weer verwijderd: de PLIC van de
       C906L heeft geen ethernetbron, de kern hoort op de C906B.
+- [ ] **Na een geweigerde koude flip komen de gestopte taken niet terug**
+      (Pi 5, P3g, 03-10): Hop stopt zijn taken voor de koude flip
+      (`HOP_FLIP_COLD_STOP stopped=1`), de kern weigert de sprong
+      (`HOPOS_FLIP_FAIL`, CPU_OFF) en draait door, maar de leader telt welcome
+      nog als geplaatst terwijl de agent geen taak meer heeft: niemand zet hem
+      terug, de node blijft zonder welcome tot een DELETE en POST. Hop hoort
+      na een mislukte flip (de kern meldt dat op de flip-call of de taak
+      verdwijnt zonder exit) de gestopte taken opnieuw te plaatsen of de
+      leader de taak te laten vervangen. Een agent zoekt het
+      (scratchpad/fixes/hop-coldfail.patch).
 - [ ] Een vervangen artefact in `apps` (`gh release upload --clobber`) komt
       pas na ongeveer twee minuten op een node aan: Hop bewaart niets (elke
       plaatsing haalt opnieuw, gemeten 03-10), maar GitHub cachet de 302 van
