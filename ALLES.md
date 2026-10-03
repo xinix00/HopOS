@@ -13,31 +13,31 @@ nog te bewijzen in ronde 1).
 De afvinkmatrix van de Go-tijd (OLD/docs/support.md: boot, idle en klokken,
 devices en diensten per board), nu voor v3 en bijgehouden op ijzer. Legenda:
 ✓ gezien op het board, ○ gebouwd maar op dit board nog niet gezien, ✗ ontbreekt
-of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, middag (de LicheeRV op R14, de O6N op O2, de Pi 4 op P1, de Radxa op X1, de Pi 5 op P1, de Altra-stick A1; alles van main 8a91d57 met Hop d785ef5).
+of faalt, en een streep waar het bewust niet komt. Stand 03-10-2026, middag (de LicheeRV op R14, de O6N op O2, de Pi 4 op P1, de Radxa op X1, de Pi 5 op P1, de Altra op A3 en A4g; alles van main 8a91d57 met Hop d785ef5).
 Een cel zegt alleen of het slaagt, met hooguit de stempel of een paar
 woorden waarom niet; een gepolde NIC is geen ✓. De getallen staan in
 docs/measurements.md, de details per board in docs/boards-*.md.
 
 | | QEMU virt | Pi 5 | Pi 4 | Radxa | Altra | O6N | M4 | LicheeRV |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Boot, EL2, kooi, zelftest | ✓ | ✓ P1, 03-10 | ✓ P1, 03-10; koud ✓ de VL805-firmware laadt (P1g) | ✓ X1, 03-10 | ○ nog nooit geboot | ✓ O2, 03-10 | ✓ M7 | ✓ R13, 03-10 |
-| Hop als bewoner, welcome door de DNAT | ✓ | ✓ P1, in `system` | ✓ P1, in `system` | ✓ X1, in `system` | ○ nog nooit geboot | ✓ O2, in `system` | ✓ | ✓ R10, 03-10 |
-| Kern-flip, warm | ✓ | ✓ P2g en P3g, 03-10 (a04ffcd: de RP1 eerst stil); koud ✗ weigert zodra een app-core parkeerde (geen CPU_OFF terug), bekend | ✓ I | ✓ I | ○ nog nooit geboot | ✓ H; I ○ koude boot, fix de61b4b | ✓ 01-10; koud – geen PSCI | – niet op riscv64; koud ✓ R10, 03-10 |
-| NIC met interrupt | ✓ | ✓ | – gepold, zoals Go | ✓ | – gepold, bewust | ✓ | ✗ gepold; INTx via de AIC nog niet bedraad | ✓ R13, 03-10 |
-| Hardware-IRQ (NIC, kick, timer) | ✓ | ✓ | ✓, NIC gepold | ✓ | ○ nog nooit geboot | ✓ | ✓, NIC gepold | ✓ R13, 03-10 |
-| Gebruik per taak, van de kern en van Hop (cpu, geheugen; slot 0, systeemtaken) | ✓ arm64, 03-10 | ✓ P1, 03-10 | ✓ P1, 03-10 | ✓ X1, 03-10 | ○ nog nooit geboot | ✓ O2, 03-10 | ○ niet nagelopen | ✓ R13, 03-10 |
-| Off-link door de NAT, SNTP | ✓ | ✓ | ✓ | ○ niet nagelopen | ○ nog nooit geboot | ○ niet nagelopen | ○ niet nagelopen | ○ niet nagelopen |
-| Watchdog gewapend en geaaid | – geen watchdog in virt | ✓ P1, canary | ✓ P1, canary | ✓ X1, canary | ○ nog nooit geboot | ✓ O2, canary | ✓ | ✓ R3, 03-10 |
-| Hardware-RNG voor de kern | ✗ alleen jitter | ✓ | ✓ | ✓ | ○ nog nooit geboot | ○ wacht op de stick | ✗ alleen jitter | ✗ geen bron |
-| Hardware-RNG voor de slots (CTRL_RNG_SEED, fc5348f) | ○ alleen jitter | ✓ P1, 03-10 | ✓ F | ✓ F | ○ nog nooit geboot | ○ wacht op de stick | ○ alleen jitter | ○ niet nagelopen |
-| Temperatuur in de tik | – geen sensor in virt | ✓ | ✓ | ✗ sensor converteert niet | ○ nog nooit geboot | ✓ | ✗ niet gebouwd | ✓ R5, 03-10 |
-| Klokbeleid (dvfs) | – geen klok in virt | ✓ | ✓ | – klok van de firmware, bewust | ○ nog nooit geboot | ✓ | ✓ M7 | – vaste klok |
-| Console op het glas | ✓ | ✗ firmware weigert sinds de herflash | ✓ | ✓ | ○ nog nooit geboot | ✓ | – bewust uit | – geen scherm |
-| USB xHCI (HID, display-app) | ✓ | ○ niets ingeplugd | ✓ P2g, 03-10 (enable slot met completion, d107b31) | ○ niets ingeplugd | ○ nog nooit geboot | ✓ | – niet gepland | – niet gepland |
-| Opslag (hopfs, volumes, OP_SYNC) | ✓ | – bewust geen schijf | – geen schijf | – stateless, bewust | ○ nog nooit geboot | ✓ | ✓ M24 | – geen SD-driver |
-| Console op 5555 | ✓ | ✓ | ✓ | ✓ | ○ nog nooit geboot | ✓ | ✓ | ○ niet nagelopen |
+| Boot, EL2, kooi, zelftest | ✓ | ✓ P1, 03-10 | ✓ P1, 03-10; koud ✓ de VL805-firmware laadt (P1g) | ✓ X1, 03-10 | ✓ A3, 03-10 (eerste v3-boot; venster A000, 128 cores) | ✓ O2, 03-10 | ✓ M7 | ✓ R13, 03-10 |
+| Hop als bewoner, welcome door de DNAT | ✓ | ✓ P1, in `system` | ✓ P1, in `system` | ✓ X1, in `system` | ✓ A3, in `system` | ✓ O2, in `system` | ✓ | ✓ R10, 03-10 |
+| Kern-flip, warm | ✓ | ✓ P2g en P3g, 03-10 (a04ffcd: de RP1 eerst stil); koud ✗ weigert zodra een app-core parkeerde (geen CPU_OFF terug), bekend | ✓ I | ✓ I | ✓ A4g, 03-10 (gen 2, bewoners en NAT mee) | ✓ H; I ○ koude boot, fix de61b4b | ✓ 01-10; koud – geen PSCI | – niet op riscv64; koud ✓ R10, 03-10 |
+| NIC met interrupt | ✓ | ✓ | – gepold, zoals Go | ✓ | – gepold, bewust (igb) | ✓ | ✗ gepold; INTx via de AIC nog niet bedraad | ✓ R13, 03-10 |
+| Hardware-IRQ (NIC, kick, timer) | ✓ | ✓ | ✓, NIC gepold | ✓ | ✓ A3 (ITS, timer); NIC gepold | ✓ | ✓, NIC gepold | ✓ R13, 03-10 |
+| Gebruik per taak, van de kern en van Hop (cpu, geheugen; slot 0, systeemtaken) | ✓ arm64, 03-10 | ✓ P1, 03-10 | ✓ P1, 03-10 | ✓ X1, 03-10 | ✓ A3, 03-10 | ✓ O2, 03-10 | ○ niet nagelopen | ✓ R13, 03-10 |
+| Off-link door de NAT, SNTP | ✓ | ✓ | ✓ | ○ niet nagelopen | ✓ A3 (welcome van GitHub, klok van Hop) | ○ niet nagelopen | ○ niet nagelopen | ○ niet nagelopen |
+| Watchdog gewapend en geaaid | – geen watchdog in virt | ✓ P1, canary | ✓ P1, canary | ✓ X1, canary | ✓ A3, SBSA, canary | ✓ O2, canary | ✓ | ✓ R3, 03-10 |
+| Hardware-RNG voor de kern | ✗ alleen jitter | ✓ | ✓ | ✓ | ✗ alleen jitter (geen efi-rng gezien) | ○ wacht op de stick | ✗ alleen jitter | ✗ geen bron |
+| Hardware-RNG voor de slots (CTRL_RNG_SEED, fc5348f) | ○ alleen jitter | ✓ P1, 03-10 | ✓ F | ✓ F | ○ jitter | ○ wacht op de stick | ○ alleen jitter | ○ niet nagelopen |
+| Temperatuur in de tik | – geen sensor in virt | ✓ | ✓ | ✗ sensor converteert niet | ✓ A3, SMpro 47 C | ✓ | ✗ niet gebouwd | ✓ R5, 03-10 |
+| Klokbeleid (dvfs) | – geen klok in virt | ✓ | ✓ | – klok van de firmware, bewust | – firmware-domein, bewust | ✓ | ✓ M7 | – vaste klok |
+| Console op het glas | ✓ | ✗ firmware weigert sinds de herflash | ✓ | ✓ | ✗ de headless stub geeft de GOP niet door; headfull stick A4 ligt klaar | ✓ | – bewust uit | – geen scherm |
+| USB xHCI (HID, display-app) | ✓ | ○ niets ingeplugd | ✓ P2g, 03-10 (enable slot met completion, d107b31) | ○ niets ingeplugd | ○ niets ingeplugd | ✓ | – niet gepland | – niet gepland |
+| Opslag (hopfs, volumes, OP_SYNC) | ✓ | – bewust geen schijf | – geen schijf | – stateless, bewust | ○ geen schijf gevonden (HOPOS_DISK_NONE) | ✓ | ✓ M24 | – geen SD-driver |
+| Console op 5555 | ✓ | ✓ | ✓ | ✓ | ✓ A3 | ✓ | ✓ | ○ niet nagelopen |
 | Hardwaredecoder (media-smaak) | – geen media-smaak | – geen media-smaak | – geen media-smaak | – geen media-smaak | – geen media-smaak | ✓ 30-09, weg tot de koude boot | – geen media-smaak | – geen media-smaak |
-| Kaart of stick klaar in `target/` | – niets te flashen | ✓ P1 geschreven | ✓ P1 | ✓ X1 | ✓ A1 op de stick | ✓ O2 op de stick | ✓ M24 | ✓ R13 |
+| Kaart of stick klaar in `target/` | – niets te flashen | ✓ P1 geschreven | ✓ P1 | ✓ X1 | ✓ A3 op de stick; A4 (gui) gebouwd | ✓ O2 op de stick | ✓ M24 | ✓ R13 |
 
 ## Ronde 0: de ochtend van 03-10, vóór alles
 
