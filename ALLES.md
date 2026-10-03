@@ -39,11 +39,9 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
-- [ ] M4: de scrub (twee keer dezelfde Go-app) en de koude-flipweigering
-      zien; dan een nieuw image via Recovery met main.
-
-### Fixen
-
+- [ ] M4: een nieuw image via Recovery met main (Hop 3.0.7; de leader van de
+      Hop 3.0.0 van de kaart kent spin niet meer, dus spin daarna opnieuw
+      POSTen).
 - [ ] O6N: na `DELETE` van Lumen weigert de kern elke plaatsing tot een
       koude boot (reproduceren op QEMU met een job met devices).
 - [ ] OS-core: een gewekte bewoner krijgt zijn beurt pas bij de tik (LicheeRV
@@ -51,6 +49,9 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       delen hoort op last, niet tik voor tik.
 - [ ] Pi 4 hairpin door de NAT: 1 s hik per ronde (listen-backlog 8 in
       leannet).
+- [ ] Hop: een koude flip eerst aan de kern vragen (een proef zonder te
+      springen) en pas dan de taken vasthouden; nu stopt Hop alles vóór een
+      weigering die de kern al vooraf weet (geen PSCI, geen CPU_OFF terug).
 - [ ] Hop: chunked transfer weigert; een plaatsing zonder capaciteit blijft
       proberen (ruis); na een flip één `NEXT_STORE failed`.
 - [ ] vitals: de standaard-rx-URL werkt niet (`CONNECT is not supported`).
@@ -67,8 +68,8 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       binnen de termijn); Altra ook de SBSA-watchdog en de koude flip.
 - [ ] Core-reclaim in een sharegroup met een rekenaar
       (`HOPOS_CORE_RECLAIM` na 2 s).
-- [ ] Radxa en M4: de scrub van een Device-gemapte pool (twee keer dezelfde
-      tamago-app).
+- [ ] Radxa: de scrub van een Device-gemapte pool (twee keer dezelfde
+      tamago-app); op de M4 op 03-10 gezien.
 - [ ] Pi 4: HID en de display-app op de VL805.
 - [ ] O6N: de mediaketen met Lumen (MMC, HEVC, WebDAV) na een koude boot.
 

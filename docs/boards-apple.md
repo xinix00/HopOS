@@ -263,6 +263,28 @@ betekent. Onder m1n1 eerst; pas daarna installeren. Bouw met een config:
     zonder loader meekwam. Stap 13 loopt dan via PMGR en de brievenbus.
     Terug: dezelfde regel met `m1n1.bin`.
 
+## Op ijzer gezien op M1 (03-10)
+
+- **De scrub van de Device-gemapte pool**: dezelfde Go-app (tamago,
+  `cloudflared-arm64-tamago.elf` van de rollende release `apps`, 64 MiB,
+  met een opzettelijk ongeldig `TUNNEL_TOKEN`) drie keer na elkaar
+  geplaatst met een `DELETE` ertussen, elke keer in dezelfde partitie
+  (`part=0x10068000000+0x4000000`, slot 4, core 4; de eerste keer `cold:
+  CPU_ON`, daarna `dispatched to parked core 4`). Alle drie dezelfde regels
+  (`mem: Go memory limit 27MB`, `appnet: RX doorbell served as
+  interrupt`, de banner, `62 MB RAM, arm64 go1.26.4`) en hetzelfde einde:
+  exit code 4294967295, de -1 van cloudflared's `UsageError` voor een
+  ongeldig token. Geen `HOPOS_SLOT_FAULT`, geen panic. De laatste
+  regels van de app (de reden) halen de console en de taaklog niet: de
+  kern sluit het slot (`HOPOS_SYSTEM_EVICTED`) voor de servicer ze leegt.
+- **De koude flip zonder PSCI**: niet op ijzer gevraagd. De kern weigert
+  vroeg in `flip::prepare` (`HOPOS_FLIP_COLD_NO_PSCI`, voor de staging en
+  het bevriezen), maar Hop stopt bij `"cold":true` eerst al zijn taken op
+  de node (`HOP_FLIP_COLD_STOP`, `agentd-hopos/src/node.rs`) en vraagt de
+  kern pas daarna; een weigering zet ze terug (`HOP_FLIP_COLD_BACK`). Met
+  een live werklast op de node is dat geen toets zonder bewoners te
+  stoppen.
+
 ## Niet gedaan
 
 - Een mini-proxy in het image (elke iteratie na de installatie kost een
