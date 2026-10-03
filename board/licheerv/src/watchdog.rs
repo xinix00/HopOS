@@ -49,12 +49,33 @@ pub fn probed(ok: bool) {
     PROBED.store(ok, Relaxed);
 }
 
-/// Wapent de watchdog op minstens `timeout_ms` (de volgorde van Go:
-/// TORR, de lijm, een restart, dan CR = enable met de vendor-pulslengte en
-/// response = directe reset).
+/// De reset-routering van het RTC-domein (Go, `WatchdogArm`, verbatim de
+/// enable-helft van `__system_reset` van de vendor-FSBL): zonder dit loopt
+/// de teller af en blijft de node dood staan (Go, 02-08). Adres en waarde.
+const RTC_ROUTING: [(u64, u32); 2] = [
+    (0x0502_60E0, 0x0001), // rtc_core: watchdog reset enable
+    (0x0502_60C8, 0x0001), // rtc_core: power cycle enable
+];
+/// Na een wachttijd van 100 µs (het RTC-domein is traag, de FSBL wacht ook).
+const RTC_CTRL: [(u64, u32); 3] = [
+    (0x0502_50AC, 0x0000_0000), // rtcsys_rstn_src_sel: WDT naar heel rtcsys
+    (0x0502_5004, 0x0000_AB18), // RTC_CTRL0 unlock
+    (0x0502_5008, 0x0040_0040), // rtc_ctrl: watchdog reset enable
+];
+
+/// Wapent de watchdog op minstens `timeout_ms` (de volgorde van Go: de
+/// reset-routering van het RTC-domein, TORR, de lijm, een restart, dan CR =
+/// enable met de vendor-pulslengte en response = directe reset).
 pub fn arm(timeout_ms: u64) -> Result<Desc, &'static str> {
     if !PROBED.load(Relaxed) {
         return Err("DW-WDT did not answer the boot probe, not armed");
+    }
+    for (pa, v) in RTC_ROUTING {
+        dev::write32(dev::Pa(pa), v);
+    }
+    crate::wait_us(100);
+    for (pa, v) in RTC_CTRL {
+        dev::write32(dev::Pa(pa), v);
     }
     let t = top_for(timeout_ms);
     dev::write32(WDT.add(TORR), t | t << 4);

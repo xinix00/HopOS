@@ -26,6 +26,14 @@
 //! blijven hangen). Het loterij-blok staat op de boot-scratch in de regel
 //! 0x40..0x7F (de woorden van de stubs, `abi::layout::HANDOFF_PTR_OFF`):
 //! +64 de voortgang, +88 het levensteken, de offsets van Go.
+//!
+//! UIT sinds 03-10 (de feature `lottery` van dit board, niet in de build):
+//! de PLIC van de C906L heeft geen ethernetbron ([`super::GMAC_IRQ`]), dus
+//! de kern hoort op de C906B voor de dwmac-interrupt 31 in plaats van de
+//! pomp van 300 µs (46 tot 48 procent van de kern in rust). Zonder de
+//! feature is [`state`] altijd [`State::None`], en herkent [`on_little`] een
+//! kern die toch op de C906L wakker wordt (een koude flip vanaf een
+//! loterij-kern) zodat `discover` het bord reset.
 
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use dev::Pa;
@@ -60,9 +68,14 @@ pub enum State {
 /// daarna een woord in het image).
 static STATE: AtomicU64 = AtomicU64::new(0);
 
-/// De uitkomst van de loterij op dit hart.
+/// De uitkomst van de loterij op dit hart; zonder de feature altijd
+/// [`State::None`] (het blok op de boot-scratch kan van een vorige boot
+/// zijn: DRAM overleeft een reset en een koude flip).
 #[must_use]
 pub fn state() -> State {
+    if !cfg!(feature = "lottery") {
+        return State::None;
+    }
     let decode = |v: u64| match v {
         1 => State::Swapped,
         2 => State::Rescued,
@@ -86,7 +99,36 @@ pub fn os_hart() -> usize {
     usize::from(state() == State::Swapped)
 }
 
+/// Ben ik de C906L, op `_start` gezet door een loterij? De discriminator
+/// van de asm hieronder: de vector-override aan mét `_start` erin. Een kern
+/// zonder loterij zet hem zelf nooit zo (`start_little` zet de
+/// reset-ingang, niet `_start`).
+#[must_use]
+pub fn on_little() -> bool {
+    let vec = u64::from(dev::read32(super::SEC_SYS_VEC_LO))
+        | u64::from(dev::read32(super::SEC_SYS_VEC_HI)) << 32;
+    dev::read32(super::SEC_SYS_CTRL) & OVERRIDE != 0 && vec == start_pc()
+}
+
+/// De vector-override in SEC_SYS_CTRL.
+const OVERRIDE: u32 = 1 << 13;
+
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+fn start_pc() -> u64 {
+    unsafe extern "C" {
+        /// De eerste instructie van het image (`cpu::riscv::boot`).
+        static _start: u8;
+    }
+    (&raw const _start) as u64
+}
+
+/// Host: geen image, geen `_start`.
+#[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
+fn start_pc() -> u64 {
+    u64::MAX
+}
+
+#[cfg(all(feature = "lottery", target_arch = "riscv64", target_os = "none"))]
 core::arch::global_asm!(
     r#"
     .section .text.hopos_lottery, "ax"
@@ -194,7 +236,7 @@ __hopos_lottery:
     ctrl = const super::SEC_SYS_CTRL.0,
     veclo = const super::SEC_SYS_VEC_LO.0,
     vechi = const super::SEC_SYS_VEC_HI.0,
-    ovr = const 1u64 << 13,
+    ovr = const OVERRIDE,
     rstn = const super::C906L_RESET.0,
     rbit = const super::RESET_BIT,
     scratch = const super::slots::BOOT_SCRATCH_PA,

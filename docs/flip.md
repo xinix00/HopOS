@@ -317,10 +317,10 @@ flip weigert vóór de sprong (`flip::WARM`). Dezelfde weg als hierboven,
 met drie verschillen:
 
 - **Het app-hart uit het image** (`flip::cores_off`, `slots::park_for_flip`):
-  een hart met een resetblok (de C906L, het app-hart na een zelfredding
-  van de loterij) gaat in reset, zoals een harde intrekking, en de nieuwe
+  een hart met een resetblok (de C906L, het app-hart van de LicheeRV
+  sinds 03-10) gaat in reset, zoals een harde intrekking, en de nieuwe
   kern haalt hem eruit zoals bij elke boot (`start_app_hart`). Een hart
-  zonder resetblok (QEMU, en de C906B van de LicheeRV) krijgt in zijn
+  zonder resetblok (QEMU, en de C906B met de loterij) krijgt in zijn
   sched-blok `SCHED_OFF_PC` en de bel; de switcher springt aan het begin
   van zijn volgende ronde naar de uit-stub (`cpu::riscv::switch::off_stub`,
   een kopie op `FLIP_PARK_PA`, buiten het image), die zijn D-cache veegt

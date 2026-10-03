@@ -15,8 +15,13 @@
 //! zijn eigen core met de groepen die hij daarvoor aanwijst
 //! ([`CorePool::share_os_core`]): Hop, en vertrouwde apps. Zo past het hele
 //! OS inclusief Hop op één core en houdt een board met twee cores een volle
-//! app-core over. Een groep die de OS-core niet mag delen, komt er nooit;
-//! een dedicated plaatsing ook niet.
+//! app-core over. Een groep die de OS-core niet mag delen, komt er nooit.
+//!
+//! De OS-core is een deelbare core als elke andere, als groep
+//! [`SYSTEM_GROUP`] (03-10): de kern is er de vaste bewoner met voorrang,
+//! een job met de tag `sharegroup: system` komt erbij, en een dedicated job
+//! van één core die geen vrije app-core vindt ook
+//! ([`CorePool::place_anywhere`]).
 //!
 //! Puur boekhouding, geen MMIO. Eigendom van de lifecycle-actor.
 
@@ -52,6 +57,21 @@ pub struct Placement {
 
 /// De naam van Hops eigen sharegroup.
 pub const HOP_GROUP: &[u8] = b"hop";
+/// De groep van de OS-core zelf: wie hierin plaatst, deelt de core van de
+/// kern ([`CorePool::share_os_core`] bij boot, op elk board dat het kan).
+pub const SYSTEM_GROUP: &[u8] = b"system";
+
+/// `name` als [`GroupName`].
+fn group_name(name: &[u8]) -> Result<GroupName> {
+    let mut g = GroupName::new();
+    for b in name {
+        g.push(*b).map_err(|_| Error::TooLarge {
+            len: name.len(),
+            max: MAX_GROUP_NAME,
+        })?;
+    }
+    Ok(g)
+}
 
 impl Placement {
     /// De plaatsing van Hop-de-bewoner: één core, gedeeld in de groep `hop`.
@@ -62,15 +82,8 @@ impl Placement {
     /// is, kiest de bootparameter van de OS-core (`hopos.oscore`), niet de
     /// jobspec.
     pub fn hop() -> Result<Placement> {
-        let mut name = GroupName::new();
-        for b in HOP_GROUP {
-            name.push(*b).map_err(|_| Error::TooLarge {
-                len: HOP_GROUP.len(),
-                max: MAX_GROUP_NAME,
-            })?;
-        }
         Ok(Placement {
-            group: Some(name),
+            group: Some(group_name(HOP_GROUP)?),
             pool_cores: 1,
             cores: 1,
             class: None,
@@ -133,15 +146,8 @@ impl CorePool {
         if self.os_group(name) {
             return Ok(());
         }
-        let mut g = GroupName::new();
-        for b in name {
-            g.push(*b).map_err(|_| Error::TooLarge {
-                len: name.len(),
-                max: MAX_GROUP_NAME,
-            })?;
-        }
         self.os_groups
-            .push(g)
+            .push(group_name(name)?)
             .map_err(|_| Error::Full { cap: MAX_OS_GROUPS })
     }
 
@@ -302,6 +308,37 @@ impl CorePool {
         }
         let core = best.ok_or(Error::NoCores { cores: 1 })?;
         Ok(self.reserve(slot, core, 1, Some(gid)))
+    }
+
+    /// [`Self::place`], en "waarever": een dedicated job van één core die
+    /// geen vrije app-core vindt, en geen klasse vraagt die de OS-core
+    /// uitsluit, komt in [`SYSTEM_GROUP`] op de OS-core als die gedeeld
+    /// wordt. Een job die zelf een groep noemt, blijft bij zijn groep.
+    /// `true`: hij ging naar `system` (de aanroeper zegt het luid).
+    pub fn place_anywhere(
+        &mut self,
+        cores: &impl Cores,
+        slot: Slot,
+        spec: &Placement,
+    ) -> Result<(Core, bool)> {
+        let err = match self.place(cores, slot, spec) {
+            Err(e @ Error::NoCores { .. }) => e,
+            r => return r.map(|c| (c, false)),
+        };
+        if spec.group.is_some()
+            || spec.cores.max(1) > 1
+            || spec.class.is_some_and(|w| cores.class(Core::OS) != Some(w))
+            || !self.os_group(SYSTEM_GROUP)
+        {
+            return Err(err);
+        }
+        let sys = Placement {
+            group: Some(group_name(SYSTEM_GROUP)?),
+            pool_cores: 1,
+            cores: 1,
+            class: spec.class,
+        };
+        self.place(cores, slot, &sys).map(|c| (c, true))
     }
 
     fn group_id(&self, name: &GroupName) -> Option<usize> {
@@ -731,6 +768,58 @@ pub(crate) mod tests {
         assert_eq!(
             p.place(&b, s(1), &Placement::hop().unwrap()).unwrap(),
             Core::OS
+        );
+    }
+
+    // De OS-core als groep `system` (03-10): de tag plaatst erbij, en een
+    // dedicated job van één core zonder vrije app-core valt erop terug.
+    // Een job met een eigen groep, een SMP-job en een klasse die de OS-core
+    // uitsluit, niet; zonder `system` (het board deelt niet) ook niet.
+    #[test]
+    fn the_system_group_shares_the_os_core_and_catches_the_overflow() {
+        use CoreClass::{Big, Small};
+        let b = FakeCores::with(1, &[(0, Big), (1, Small)]);
+        let mut p = CorePool::new();
+        let mut no = CorePool::new();
+        p.share_os_core(SYSTEM_GROUP).unwrap();
+        assert_eq!(
+            p.place(&b, s(1), &shared("system", 1, None)).unwrap(),
+            Core::OS
+        );
+        assert_eq!(
+            p.place_anywhere(&b, s(2), &ded(1, None)).unwrap(),
+            (Core::new(1).unwrap(), false)
+        );
+        assert_eq!(
+            p.place_anywhere(&b, s(3), &ded(1, None)).unwrap(),
+            (Core::OS, true)
+        );
+        assert_eq!(
+            p.group_of(s(3)).map(|(g, c)| (g.as_slice(), c)),
+            Some((SYSTEM_GROUP, &[Core::OS][..]))
+        );
+        assert_eq!(
+            p.place_anywhere(&b, s(4), &ded(1, Some(Big))).unwrap(),
+            (Core::OS, true)
+        );
+        assert!(matches!(
+            p.place_anywhere(&b, s(5), &ded(1, Some(Small))),
+            Err(Error::NoCores { cores: 1 })
+        ));
+        assert!(p.place_anywhere(&b, s(6), &ded(2, None)).is_err());
+        assert!(p.place_anywhere(&b, s(7), &shared("web", 1, None)).is_err());
+        assert!(matches!(
+            no.place_anywhere(&b, s(1), &ded(1, None)),
+            Ok((c, false)) if c.get() == 1
+        ));
+        assert!(no.place_anywhere(&b, s(2), &ded(1, None)).is_err());
+        // De groep blijft staan zolang er een lid is, en komt terug.
+        for i in [1, 3, 4] {
+            p.release(s(i));
+        }
+        assert_eq!(
+            p.place_anywhere(&b, s(3), &ded(1, None)).unwrap(),
+            (Core::OS, true)
         );
     }
 

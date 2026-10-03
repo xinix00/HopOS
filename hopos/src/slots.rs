@@ -70,8 +70,11 @@ mod arch {
 
     pub(super) use super::cage::start_waker;
 
-    /// Kan de EL2-smaak de OS-core met Hop delen? Apple niet.
+    /// Kan de EL2-smaak de OS-core delen (met Hop en de groep `system`)?
+    /// Apple niet.
     pub(super) const SHARES_OS_CORE: bool = !matches!(FLAVOR, el2::Flavor::AppleVhe);
+    /// Woont Hop op de OS-core? Op arm64 overal waar de core deelt.
+    pub(super) const HOP_ON_OS_CORE: bool = SHARES_OS_CORE;
 
     /// De rotatie van de OS-core, na de zelftest van de overgang (timer,
     /// yield, kick).
@@ -181,6 +184,9 @@ mod arch {
 #[cfg(target_arch = "riscv64")]
 mod arch {
     pub(super) use super::cage::{OsCore, SHARES_OS_CORE, core_state, os_core};
+    /// Woont Hop op de OS-core? De keuze van het board: de LicheeRV niet
+    /// (daar heeft hij de C906L voor zich, docs/boards-riscv.md).
+    pub(super) const HOP_ON_OS_CORE: bool = vboard::HOP_ON_OS_CORE;
 
     /// De kick na een RX-schrijf: de bel van elk app-hart.
     pub(super) fn wake(_slot: usize) {
@@ -262,7 +268,11 @@ pub(crate) const HOP_SLOT: usize = 1;
 /// de HTTP-verbindingen en de download-buffer (64 KiB per hap). Op de
 /// LicheeRV (256 MB, pool 200 MB) 10 MiB: Hop meet er 0,5 tot 0,9 MB
 /// (03-10, slot 1 als systeemtaak), en elke MB is daar een app-MB.
-const HOP_MEM: u64 = if cfg!(feature = "board-licheerv") { 10 << 20 } else { 64 << 20 };
+const HOP_MEM: u64 = if cfg!(feature = "board-licheerv") {
+    10 << 20
+} else {
+    64 << 20
+};
 
 /// Het volume van Hop: `/hop` in zijn zicht, `/volumes/hop` op hopfs. Daar
 /// bewaart `agentd-hopos` zijn `agent-state.json` en leest hij hem na een
@@ -682,7 +692,8 @@ async fn place_hop(
         dns: crate::net::uplink_dns(),
         port: HOP_PORT,
         app_cores: plan.app_cores(),
-        hop_on_os: arch::SHARES_OS_CORE,
+        hop_on_os: arch::HOP_ON_OS_CORE,
+        os_shared: arch::SHARES_OS_CORE,
         pool_bytes,
         hop_mem: HOP_MEM,
     };
@@ -709,7 +720,7 @@ async fn place_hop(
     };
     // Vóór de plaatsing: zodra de poort aan de switch hangt, mag hij niet
     // meer op Hop's ring wachten. Na de plaatsing volgt de echte core.
-    set_resident(slot.get(), arch::SHARES_OS_CORE);
+    set_resident(slot.get(), arch::HOP_ON_OS_CORE);
     let entry = match place(slot, img, HOP_MEM, at, env.as_bytes(), volume).await {
         Ok(e) => e,
         Err(e) => {
@@ -787,15 +798,18 @@ async fn wait_uplink(exec: &'static Executor) -> Option<core::net::Ipv4Addr> {
 }
 
 /// `Placement::hop`: sharegroup `hop`, die de OS-core met de kern deelt
-/// ([`os_pool`]). De klasse van die core koos de bootparameter
-/// (`hopos.oscore`), niet deze plaatsing.
+/// als het board dat wil ([`os_pool`]), en anders een eigen app-core. De
+/// klasse van die core koos de bootparameter (`hopos.oscore`), niet deze
+/// plaatsing.
 fn hop_placement(plan: &abi::layout::Plan) -> kern::Result<Placement> {
     let at = Placement::hop()?;
-    println!(
-        "slots: Hop shares the OS core (cpu {}) with the kern, {} app core(s) stay free HOPOS_HOP_OS_CORE",
-        plan.os_core(),
-        plan.app_cores()
-    );
+    if arch::HOP_ON_OS_CORE {
+        println!(
+            "slots: Hop shares the OS core (cpu {}) with the kern, {} app core(s) stay free HOPOS_HOP_OS_CORE",
+            plan.os_core(),
+            plan.app_cores()
+        );
+    }
     Ok(at)
 }
 
@@ -808,15 +822,25 @@ pub(crate) fn os_plan() -> abi::Result<abi::layout::Plan> {
     vslots::plan(board.cores(), board.this_core())
 }
 
-/// De core-plaatsing van deze node: Hop's groep deelt de OS-core met de
-/// kern (PORT.md beslissing 2). Kan de architectuur dat niet (Apple's
-/// EL2-smaak), dan krijgt Hop een app-core zoals vóór 30-09.
+/// De core-plaatsing van deze node: de OS-core is een deelbare core als
+/// groep `system` (de kern is er de vaste bewoner, PORT.md beslissing 2), en
+/// Hop's groep deelt hem als het board Hop daar wil. Kan de architectuur
+/// niet delen (Apple's EL2-smaak), dan geen van beide en krijgt Hop een
+/// app-core zoals vóór 30-09.
 fn os_pool() -> CorePool {
     let mut pool = CorePool::new();
-    if arch::SHARES_OS_CORE
-        && let Err(e) = pool.share_os_core(kern::pool::HOP_GROUP)
-    {
-        println!("slots: Hop may not share the OS core: {e} HOPOS_OS_CORE_FAIL");
+    let groups: &[&[u8]] = match (arch::SHARES_OS_CORE, arch::HOP_ON_OS_CORE) {
+        (false, _) => &[],
+        (true, false) => &[kern::pool::SYSTEM_GROUP],
+        (true, true) => &[kern::pool::SYSTEM_GROUP, kern::pool::HOP_GROUP],
+    };
+    for g in groups {
+        if let Err(e) = pool.share_os_core(g) {
+            println!(
+                "slots: group {} may not share the OS core: {e} HOPOS_OS_CORE_FAIL",
+                core::str::from_utf8(g).unwrap_or("?")
+            );
+        }
     }
     pool
 }

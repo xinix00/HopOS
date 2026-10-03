@@ -1005,8 +1005,9 @@ pub(crate) fn wake_all() {
     }
 }
 
-/// Mag Hop de OS-core met de kern delen? Ja: de kern geeft zijn bewoners
-/// het hart in zijn idle (`cpu::riscv::oscore`, PORT.md beslissing 2).
+/// Kan de kern zijn core delen (de groep `system`, en Hop als het board
+/// dat wil: `vboard::HOP_ON_OS_CORE`)? Ja: de kern geeft zijn bewoners het
+/// hart in zijn idle (`cpu::riscv::oscore`, PORT.md beslissing 2).
 pub(crate) const SHARES_OS_CORE: bool = true;
 
 /// De rotatie van de OS-core, zoals `slots.rs` hem aan de slaap van de
@@ -1023,7 +1024,12 @@ pub(crate) fn os_core(plan: &Plan) -> Result<OsCore, el2::Error> {
     let hart = board.this_core();
     // De CLINT-index van dit hart: op de LicheeRV altijd 0 (één CLINT per
     // core), op virt het hart-id.
-    let mut os = OsCore::new(plan, board.clint(), board.clint_hart(), board.app_hart(hart).pmp)?;
+    let mut os = OsCore::new(
+        plan,
+        board.clint(),
+        board.clint_hart(),
+        board.app_hart(hart).pmp,
+    )?;
     let ms = cpu::riscv::idle::hz() / 1000;
     let t = os.selftest(Probe::Spin, ms, &|| {});
     let y = os.selftest(Probe::Yield, 100 * ms, &|| {});

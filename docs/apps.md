@@ -43,6 +43,22 @@ sneller is, maar omdat Go blokkeerde op het echte ding: een `Read`, een
 `select` op channels, een timer voor de eerstvolgende deadline. De Rust-port
 keek elke 1 tot 5 ms of er al iets lag.
 
+## Welke core
+
+Welke core een slot krijgt, kiest de kern (`kern/src/pool.rs`): zonder
+`sharegroup` een eigen core (of `cores` aaneengesloten), met een
+`sharegroup` de cores van die groep. De core van de kern zelf is ook
+deelbaar, als groep `system`: de kern is er de vaste bewoner met voorrang
+en een bewoner krijgt de core in zijn idle (PORT.md beslissing 2). Daar
+komt een job met `"tags":{"sharegroup":"system"}` (één core, geen SMP), en
+"waarever" ook een job zonder groep van één core die geen vrije eigen core
+vindt en geen `core-class` vraagt die de OS-core uitsluit, met één regel:
+`slot N: no free app core, joining the system group on the OS core
+HOPOS_PLACE_SYSTEM`. Een job die een andere groep noemt, blijft bij zijn
+groep. Op de M4 deelt de kern zijn core niet (de EL2-smaak van Apple), dus
+daar is er geen `system`. Of Hop zo'n job uitstuurt, beslist Hop: hij plant
+tegen `HOPOS_CORES` (de app-cores, min de zijne als hij er een bezet).
+
 ## De regel
 
 Een taak wacht op precies de dingen die hem werk kunnen geven, met één

@@ -19,13 +19,14 @@
 //!
 //! Twee harts, genoemd zoals het resetblok ze noemt (beide lezen `mhartid`
 //! 0): hart 0 is de C906B (1 GHz, de firmware-core), hart 1 de C906L
-//! (700 MHz). De kern hoort op de C906L en de apps op de C906B, zoals in Go
-//! (`HopCore = 1`): dat regelt de loterij vóór de boot-stub ([`lottery`]).
-//! De C906L komt via het resetblok op ([`LicheeRv::start_little`]): reset
-//! vast, boot-vector zetten, reset los; de C906B heeft geen resetblok en
-//! parkeert in het postvak van de boot-stub tot de kooi hem adopteert. Gaf
-//! de C906L bij boot geen levensteken, dan bleef de kern op de C906B en is
-//! de C906L het app-hart ([`lottery::State::Rescued`]).
+//! (700 MHz). Sinds 03-10 blijft de kern op de C906B, waar de FSBL hem
+//! start: alleen de PLIC van dat hart heeft de dwmac ([`GMAC_IRQ`]). Hij
+//! deelt zijn core als groep `system` (welcome en wat geen eigen core
+//! vindt), en de C906L is het app-hart van Hop ([`HOP_ON_OS_CORE`]). De
+//! C906L komt via het resetblok op ([`LicheeRv::start_little`]): reset
+//! vast, boot-vector zetten, reset los. De loterij ([`lottery`], de kern op
+//! de C906L) staat uit; een kern die toch op de C906L wakker wordt, reset
+//! het bord (`discover`, `HOPOS_WRONG_HART`).
 //!
 //! Wat hier NIET is: een hardware-TRNG (luid, `cpu::riscv::trng`) en een
 //! SD-driver (geen opslag; hopfs draait zonder schijf).
@@ -90,6 +91,11 @@ pub const GMAC_IRQ: u32 = 31;
 pub const WDT: Pa = Pa(0x0301_0000);
 /// De timebase: de vaste 25 MHz-osc, exact 40 ns per tik.
 pub const TIMEBASE_HZ: u64 = 25_000_000;
+/// Woont Hop op de OS-core? Niet op dit bord: de kern staat op de C906B en
+/// Hop krijgt de C906L voor zich, zodat welcome en de rest de grote core
+/// met de kern delen (groep `system`). Met de loterij (de kern op de
+/// C906L) wel, zoals tot 03-10.
+pub const HOP_ON_OS_CORE: bool = cfg!(feature = "lottery");
 
 /// De kern-RAM: image, stack en heap (`link-riscv.ld` met de basis en maat
 /// van dit board uit build.rs), tot de DMA-regio.
@@ -184,14 +190,13 @@ impl LicheeRv {
     }
 
     /// Het hart waar de kern draait: `mhartid` zegt het niet (beide cores
-    /// lezen 0), de uitkomst van de loterij wel.
+    /// lezen 0); de C906B, of met de loterij de uitkomst ervan.
     #[must_use]
     pub fn this_core(&self) -> usize {
         lottery::os_hart()
     }
 
-    /// De OS-core: het hart van de kern. De verhuizing deed de loterij al
-    /// vóór de boot-stub; een `hopos.oscore` is er niet.
+    /// De OS-core: het hart van de kern. Een `hopos.oscore` is er niet.
     #[must_use]
     pub fn os_core(&self) -> (usize, Option<&'static str>) {
         (self.this_core(), None)
@@ -309,6 +314,25 @@ impl LicheeRv {
         dev::write32(C906L_RESET, dev::read32(C906L_RESET) & !RESET_BIT);
     }
 
+    /// Het vangnet van [`Board::discover`]: eerst de override van de vector
+    /// uit (anders ziet de C906B zich na een reset die SEC_SYS niet wist
+    /// voor de C906L aan), dan de DW-WDT op zijn kortst, zoals de flip-reset
+    /// op een bord zonder PSCI. Keert niet terug.
+    fn wrong_hart(&self) -> ! {
+        cpu::println!(
+            "boot: woke on the C906L without the lottery, resetting through the WDT to boot from the card HOPOS_WRONG_HART"
+        );
+        dev::write32(SEC_SYS_CTRL, dev::read32(SEC_SYS_CTRL) & !(1 << 13));
+        let ok = self.watchdog_probe();
+        watchdog::probed(ok);
+        if !ok || watchdog::arm(1000).is_err() {
+            cpu::println!(
+                "boot: the DW-WDT did not answer, this hart parks until a power cycle HOPOS_WRONG_HART_PARK"
+            );
+        }
+        cpu::boot::park()
+    }
+
     /// De watchdog-probe (Go, `WatchdogProbe`): CCVR aanraken (de lees die
     /// bus-fault als het blok dood is), TORR schrijven en teruglezen. TORR is
     /// inert zolang CR.enable uit staat, en de waarde is exact wat het
@@ -376,7 +400,14 @@ impl Board for LicheeRv {
         }
     }
 
+    /// Als eerste het vangnet: een kern zonder loterij op de C906L (een
+    /// koude flip vanaf een loterij-kern springt op dat hart naar `_start`)
+    /// zou straks zijn eigen hart als app-hart in reset zetten. Dan liever
+    /// de reset van het bord, zodat de kaart bepaalt wat er boot.
     fn discover(&self, _dtb: u64) {
+        if !cfg!(feature = "lottery") && lottery::on_little() {
+            self.wrong_hart();
+        }
         cpu::riscv::idle::set_hz(TIMEBASE_HZ);
         match lottery::state() {
             lottery::State::Swapped => cpu::println!(
@@ -385,9 +416,10 @@ impl Board for LicheeRv {
             lottery::State::Rescued => cpu::println!(
                 "lottery: the C906L gave no sign of life within 10 s, the kern stays on the C906B and the C906L is the app hart HOPOS_LOTTERY_RESCUED"
             ),
-            lottery::State::None => cpu::println!(
+            lottery::State::None if cfg!(feature = "lottery") => cpu::println!(
                 "lottery: no lottery block on the boot scratch, the kern stays on the C906B HOPOS_LOTTERY_NONE"
             ),
+            lottery::State::None => {}
         }
         match CLINT_DEV.probe(self.clint_hart(), csr::rdtime()) {
             Ok(()) => {
@@ -470,9 +502,10 @@ impl Board for LicheeRv {
 
     fn start_interrupts(&self) -> Result<&'static Signal, Error> {
         // De PLIC is, net als de CLINT, per core en elke core is voor
-        // zichzelf hart 0: na de loterij vanaf de C906L is context 2 een
-        // load access fault op het claim-register (03-10, mtval
-        // 0x7020_2004), context 0 is de zijne.
+        // zichzelf hart 0: context 0 is de zijne (met de loterij vanaf de
+        // C906L was context 2 een load access fault op het claim-register,
+        // 03-10, mtval 0x7020_2004). De 102 bronnen zijn die van de C906B,
+        // het hart van de kern.
         PLIC_DEV.set_context(machine_context(self.clint_hart()));
         cpu::println!("irq: {}", PLIC_DEV.describe());
         csr::mie_set(csr::MIP_MEIP | csr::MIP_MSIP);

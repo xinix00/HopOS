@@ -57,6 +57,9 @@ pub const PLIC: Pa = Pa(0x0c00_0000);
 pub const PLIC_SOURCES: u32 = 96;
 /// De timebase van de TIME-CSR op QEMU virt.
 pub const TIMEBASE_HZ: u64 = 10_000_000;
+/// Woont Hop op de OS-core? Ja: de kern en Hop delen hart 0, de app-harts
+/// blijven vrij (PORT.md beslissing 2).
+pub const HOP_ON_OS_CORE: bool = true;
 /// Het begin van het DRAM.
 pub const DRAM: Pa = Pa(0x8000_0000);
 

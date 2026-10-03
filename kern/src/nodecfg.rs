@@ -166,6 +166,11 @@ pub struct Facts<'a> {
     /// 11 en de Pi 4 2 van 3 terwijl Hop op de OS-core zat: één core per
     /// node onbenut).
     pub hop_on_os: bool,
+    /// Deelt de kern zijn core (de sharegroup `system`)? Dan telt die core
+    /// mee in wat Hop kan uitdelen: een job zonder vrije eigen core komt
+    /// daar bij de kern (HOPOS_PLACE_SYSTEM), en zonder deze telling
+    /// weigerde Hop zelf al met "no capacity" (03-10).
+    pub os_shared: bool,
     /// Het geheugen van de pool (Hop plant tegen dit min het zijne).
     pub pool_bytes: u64,
     /// De partitie van Hop zelf.
@@ -399,10 +404,11 @@ fn base(out: &mut String, cfg: &NodeCfg<'_>, f: &Facts<'_>) -> fmt::Result {
     // zijne als hij er een bezet (hij deelt zijn core niet met jobs, alleen
     // met zijn groep); op de OS-core bezet hij er geen.
     let own = usize::from(!f.hop_on_os);
+    let system = usize::from(f.os_shared);
     writeln!(
         out,
         "HOPOS_CORES={}",
-        f.app_cores.saturating_sub(own).max(1)
+        (f.app_cores.saturating_sub(own) + system).max(1)
     )?;
     writeln!(
         out,
@@ -423,6 +429,7 @@ mod tests {
         port: 8080,
         app_cores: 3,
         hop_on_os: false,
+        os_shared: false,
         pool_bytes: 512 << 20,
         hop_mem: 64 << 20,
     };
@@ -523,6 +530,19 @@ mod tests {
             "HOPOS_NODE=hopos-qemu\nHOPOS_CLUSTER=hopos\nHOPOS_INSECURE=1\n\
              HOPOS_NODE_IP=10.0.2.15\nDNS=10.0.2.3\nHOPOS_PORT=8080\nHOPOS_CORES=2\n\
              HOPOS_MEMORY=469762048\n"
+        );
+    }
+
+    #[test]
+    fn a_shared_os_core_counts_as_a_core_hop_can_hand_out() {
+        let mut f = FACTS;
+        f.os_shared = true;
+        let b = build(&NodeCfg::parse(QEMU_CFG), &f).unwrap();
+        // 3 app-cores min de eigen core van Hop, plus de system-core.
+        assert!(
+            core::str::from_utf8(b.as_bytes())
+                .unwrap()
+                .contains("HOPOS_CORES=3\n")
         );
     }
 

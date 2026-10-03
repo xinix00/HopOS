@@ -221,3 +221,30 @@ fn hop_is_never_sacrificed() {
     assert!(!a.cage.revoked[2], "Hop was sacrificed");
     assert!(con.saw("HOPOS_CORE_RECLAIM_FAILED"));
 }
+
+// De OS-core als groep `system` (03-10): met één app-core krijgt de eerste
+// dedicated job die core, de tweede gaat luid naar de OS-core in plaats
+// van te falen, een lid met de tag `system` komt erbij, en een job met een
+// eigen groep blijft bij zijn groep (en vindt hier geen core).
+#[test]
+fn a_job_without_a_free_core_joins_the_system_group() {
+    let (svc, con) = (Servicers::new(), FakeConsole::default());
+    let mut a = actor(&svc, &con, Obey::Exit, 64, 1);
+    a.places.share_os_core(crate::pool::SYSTEM_GROUP).unwrap();
+    start(&mut a, 2, 8, 1).unwrap();
+    assert_eq!(a.status(s(2)).core.map(|(c, _)| c.get()), Some(1));
+    start(&mut a, 3, 8, 1).unwrap();
+    assert_eq!(a.status(s(3)).core.map(|(c, _)| c), Some(Core::OS));
+    assert!(con.saw(
+        "slot 3: no free app core, joining the system group on the OS core HOPOS_PLACE_SYSTEM"
+    ));
+    start_member(&mut a, 4, "system").unwrap();
+    assert_eq!(a.status(s(4)).core.map(|(c, _)| c), Some(Core::OS));
+    assert!(start_member(&mut a, 5, "web").is_err());
+    assert!(
+        start(&mut a, 6, 8, 2).is_err(),
+        "an SMP job took the OS core"
+    );
+    stop(&mut a, 3).unwrap();
+    assert_eq!(a.status(s(4)).occupancy, Occupancy::Running);
+}

@@ -886,11 +886,18 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
         if self.resident(slot).is_some() || self.parts.partition_of(slot).is_some() {
             return Err(Error::StillOwned { slot: slot.get() });
         }
-        let core = self.places.place(&self.cores, slot, &spec.placement)?;
+        let (core, system) = self
+            .places
+            .place_anywhere(&self.cores, slot, &spec.placement)?;
+        if system {
+            self.log.log(format_args!(
+                "slot {slot}: no free app core, joining the system group on the OS core HOPOS_PLACE_SYSTEM"
+            ));
+        }
         let span = spec.placement.cores.max(1);
         // Dedicated: de cores moeten geparkeerd of koud zijn. Een gedeelde
         // core draait meestal juist (zijn buren).
-        if spec.placement.group.is_none()
+        if self.places.group_of(slot).is_none()
             && let Some(busy) = (core.get()..core.get() + span)
                 .filter_map(Core::new)
                 .find(|c| self.cores.power(*c) != Power::Off)
