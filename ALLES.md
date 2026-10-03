@@ -92,6 +92,12 @@ leveren. Rood is een regressie van de port-review, niet van het bord.
       de kolom in docs/measurements.md de netmeter-doorvoer en bench (een
       peer op de draad). Nog zonder bel van app naar kern (de CV181x-mailbox
       is de kandidaat), zonder SMP en zonder RNG.
+- [ ] Een vervangen artefact in `apps` (`gh release upload --clobber`) komt
+      pas na ongeveer twee minuten op een node aan: Hop bewaart niets (elke
+      plaatsing haalt opnieuw, gemeten 03-10), maar GitHub cachet de 302 van
+      releases/download zo lang, ook met no-cache. Dus bij een vervanging
+      twee minuten wachten of een unieke naam per build; later `sha256` in
+      de jobspec zodat een oud image een luide fout is.
 - [ ] **De temperatuur per bord, werkt de sensor**: de rij "Temperatuur in
       de tik" per node aflopen. De LicheeRV is af (TEMPSEN, R5, 03-10). De
       Radxa (TSADC converteert niet),
@@ -253,12 +259,6 @@ Alles boven Go behalve schrijven door de app op de M4 en willekeurig lezen.
       Content-Length"): of chunked lezen, of luid in de docs van de jobspec.
 - [ ] Na een flip meldt Hop één keer `NEXT_STORE failed: system call timed
       out`: de lange wacht van de store-taak liep over de flip heen.
-- [ ] Hop houdt een gedownload ELF per URL in zijn geheugen (`HttpImages`):
-      na het vervangen van het bestand in `apps` (LicheeRV, 03-10) bleef
-      Hop het oude plaatsen, ook over DELETE en POST van de job heen; pas
-      na een paar minuten haalde hij het nieuwe. Een vervangen artefact
-      hoort hij te zien zonder herstart en zonder wachten: If-None-Match,
-      of de sha in de jobspec.
 - [ ] Hop blijft een plaatsing zonder capaciteit opnieuw proberen (een vloed
       `HOP_JOB_FAILED`; onschuldig, maar ruis).
 - [ ] Hop op de host: SIGTERM (std heeft geen signaal-API: beslissing); op
