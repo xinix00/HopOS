@@ -23,7 +23,7 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 | Boot, EL2, kooi, zelftest | ✓ | ✓ | ✓; koud ✗ faalt bij USB, fix d0b6bd3 | ✓ | ○ nog nooit geboot | ✓ G | ✓ M7 | ✓ R13, 03-10 |
 | Hop als bewoner, welcome door de DNAT | ✓ | ✓ | ✓ | ✓ | ○ nog nooit geboot | ✓ | ✓ | ✓ R10, 03-10 |
 | Kern-flip, warm | ✓ | ✗ sterft na de landing | ✓ I | ✓ I | ○ nog nooit geboot | ✓ H; I ○ koude boot, fix de61b4b | ✓ 01-10; koud – geen PSCI | – niet op riscv64; koud ✓ R10, 03-10 |
-| NIC met interrupt | ✓ | ✓ | – gepold, zoals Go | ✓ | – gepold, bewust | ✓ | – gepold, bewust | ✓ R13, 03-10 |
+| NIC met interrupt | ✓ | ✓ | – gepold, zoals Go | ✓ | – gepold, bewust | ✓ | ✗ gepold; INTx via de AIC nog niet bedraad | ✓ R13, 03-10 |
 | Hardware-IRQ (NIC, kick, timer) | ✓ | ✓ | ✓, NIC gepold | ✓ | ○ nog nooit geboot | ✓ | ✓, NIC gepold | ✓ R13, 03-10 |
 | Gebruik per taak, van de kern en van Hop (cpu, geheugen; slot 0, systeemtaken) | ✓ arm64, 03-10 | ○ niet nagelopen | ○ niet nagelopen | ○ niet nagelopen | ○ nog nooit geboot | ○ niet nagelopen | ○ niet nagelopen | ✓ R13, 03-10 |
 | Off-link door de NAT, SNTP | ✓ | ✓ | ✓ | ○ niet nagelopen | ○ nog nooit geboot | ○ niet nagelopen | ○ niet nagelopen | ○ niet nagelopen |
