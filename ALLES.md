@@ -37,89 +37,72 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ## Te doen
 
-### Vandaag nog (03-10)
+### Nu
 
-- [ ] M4 (op M1 sinds 03-10 avond, NIC op interrupt, wekker en bevoegdheid
-      gezien): nog de scrub (twee keer dezelfde Go-app), de
-      koude-flipweigering, en een nieuw image via Recovery met main.
-- [ ] De prestatie-agent: `scratchpad/fixes/perf.patch` op measurements.md
-      toepassen als hij klaar is.
+- [ ] M4: de scrub (twee keer dezelfde Go-app) en de koude-flipweigering
+      zien; dan een nieuw image via Recovery met main.
 - [ ] De bump: Hop en HopOS op de volgende versie, release.sh, media.
 
-### Per bord
+### Fixen
 
-- [ ] Radxa: de TSADC geeft geen geldige code (Go ook); de klok staat op
-      816 MHz (de rk3566 kan 1800); de config zit in `hopos.ird` (alleen
-      met `CFG=` te wijzigen); geen serienummer-terugval voor de MAC.
-- [ ] Radxa en M4: de scrub van een Device-gemapte pool op ijzer (twee keer
-      dezelfde tamago-app plaatsen).
-- [ ] Pi 5: het glas (de firmware weigert elke framebuffer sinds de
-      herflash). De koude flip weigert bewust (geen CPU_OFF terug).
-- [ ] Pi 4: HID en de display-app op de VL805 nu de xHCI werkt.
 - [ ] O6N: na `DELETE` van Lumen weigert de kern elke plaatsing tot een
-      koude boot (reproduceren op QEMU met een job met devices); de
-      5555-listener lekt lezersplaatsen na veel abrupte clients; Lumen
-      terug na elke koude boot (`hopos.init[]`) en dan de mediaketen.
-- [ ] M4: de 4 KiB-schrijfjes naast 1 MiB-calls blijven rond 19 tot 20
-      (transport in kleinere brokken met een yield); de OS-core als grens
-      voor veel kleine calls (eerst meten met een echte database).
-- [ ] Altra: de SBSA-watchdog echt laten resetten; efi-rng voor de kern;
-      de koude flip.
+      koude boot (reproduceren op QEMU met een job met devices).
+- [ ] O6N: dvfs blijft op 800 MHz quiet tijdens een rekenaar (299 tegen
+      855 Msteps/s per core); de edge-regel nalopen.
+- [ ] Console 5555: lezersplaatsen lekken bij abrupt sluitende clients
+      (O6N, Radxa); "vol" melden aan de client; `stats` en `disc` porten.
+- [ ] Pi 4 hairpin door de NAT: 1 s hik per ronde (listen-backlog 8 in
+      leannet).
+- [ ] Hop: een rolling update met een vaste poort op één node slaagt nooit;
+      bij een poortbotsing de oude eerst stoppen.
+- [ ] Hop: de leader-API staat stil tijdens een download; chunked transfer
+      weigert; een plaatsing zonder capaciteit blijft proberen (ruis); na
+      een flip één `NEXT_STORE failed`.
+- [ ] Hop: `sha256` in de jobspec, dan is een oud of gecachet image een
+      luide fout.
+- [ ] De kern zaait na een flip uit jitter, niet uit de TRNG van het board.
+- [ ] vitals: de standaard-rx-URL werkt niet (`CONNECT is not supported`).
+- [ ] M4: het transport van een bulk-app in kleinere brokken met een yield
+      (4 KiB-calls van de buurman blijven rond 19 tot 20).
+- [ ] De boot-stack van 256 KB heeft 43 KB marge: gui::usb::run en het
+      FsActor-blok naar de heap, een wachtpost in qemu-test.sh.
+- [ ] Pi 5: het glas (de firmware weigert elke framebuffer sinds de
+      herflash).
+
+### Op ijzer te zien
+
 - [ ] Overal: de echte watchdogtoets (kabel eruit of Hop stoppen, reset
-      binnen de termijn), en core-reclaim in een sharegroup met een
-      rekenaar (`HOPOS_CORE_RECLAIM` na 2 s) op ijzer.
+      binnen de termijn); Altra ook de SBSA-watchdog en de koude flip.
+- [ ] Core-reclaim in een sharegroup met een rekenaar
+      (`HOPOS_CORE_RECLAIM` na 2 s).
+- [ ] Radxa en M4: de scrub van een Device-gemapte pool (twee keer dezelfde
+      tamago-app).
+- [ ] Pi 4: HID en de display-app op de VL805.
+- [ ] O6N: de mediaketen met Lumen (MMC, HEVC, WebDAV) na een koude boot.
 
 ### Meten
 
-- [ ] O6N vitals cpu 299 Msteps/s per core (03-10) tegen 855 op 30-09: dvfs
-      staat op 800 MHz "quiet" en komt bij de brand niet omhoog; de
-      edge-regel van dvfs bij een rekenaar nalopen, dan opnieuw meten.
-- [ ] Storm door de NAT (hairpin) stokt 1 s per ronde op de Pi 4 (p99 1 s):
-      verdacht de listen-backlog van 8 in leannet.
 - [ ] Radxa over de draad ~21 MB/s (Go 56 in, 99 uit); Pi 5 uit ~43 MB/s.
-- [ ] De ring doet het cache-onderhoud op head en tail altijd, ook bij
-      Coherence::Hardware: eerst meten (bench pull M4 en O6N), dan 20 tot
-      30 regels.
-- [ ] O6N schrijven ~700 MB/s in de middag tegen 800 tot 1188; app-opslag
-      O6N 414 schrijven en 85 lezen (Go beter).
-- [ ] Na een flip zaait de kern uit jitter, niet uit de TRNG van het board.
-- [ ] vitals: de standaard-rx-URL faalt zonder DNS in de env;
-      `hopos.codecdemo` op de O6N meten.
+- [ ] De ring doet het cache-onderhoud op head en tail altijd: eerst meten
+      (bench pull M4 en O6N met en zonder), dan 20 tot 30 regels.
+- [ ] O6N schrijven ~700 MB/s tegen 800 tot 1188; app-opslag O6N 414
+      schrijven en 85 lezen.
+- [ ] De OS-core als grens voor veel kleine calls: meten met een echte
+      database van 100 GB of meer.
+- [ ] `hopos.codecdemo` op de O6N.
 
-### Hop
+### Later
 
-- [ ] Een rolling update met een vaste poort op één node slaagt nooit (de
-      nieuwe wil :80 terwijl de oude hem houdt): bij een poortbotsing de
-      oude eerst stoppen, of tellen als "wacht".
-- [ ] Jobs over een koude boot zonder S3: in `hopos.init[]` (M4 spin en
-      spin-tunnel, O6N lumen).
-- [ ] De leader-API staat stil tijdens een download; chunked transfer
-      weigert; een plaatsing zonder capaciteit blijft proberen (ruis).
-- [ ] `sha256` in de jobspec (een vervangen artefact in `apps` komt door
-      GitHub's cache pas na twee minuten; met de sha is een oud image een
-      luide fout).
-- [ ] Na een flip één `NEXT_STORE failed: system call timed out`.
+- [ ] Radxa: TSADC geeft geen code; klok 816 MHz (kan 1800); geen
+      serienummer-terugval voor de MAC.
+- [ ] Altra: efi-rng voor de kern.
+- [ ] Guard-pagina op UEFI en RISC-V; de device-op (19) zonder hosttests; de
+      schijf-interruptlijn buiten QEMU virt.
 - [ ] Hop op de host: SIGTERM; de S3-lock met twee HopOS-nodes op ijzer.
-- [ ] De plugins als node (hop-gui, hoplb naar welcome, hopdns
-      `welcome.hop.local`, hopprom, hoplockserver, cloudflared-lean met een
-      echt token) en Replica (`sqlite-persist` op een node met schijf).
-
-### Klein
-
-- [ ] De console op 5555: Go's vraagvenster (`stats`, `disc`) en "vol"
-      melden aan de client.
-- [ ] De boot-stack van 256 KB heeft 43 KB marge: gui::usb::run en het
-      FsActor-blok naar de heap, een wachtpost in qemu-test.sh.
-- [ ] Guard-pagina op UEFI en RISC-V; de device-op (19) zonder hosttests;
-      de schijf-interruptlijn buiten QEMU virt.
-- [ ] Bewust gelaten tot er aanleiding is: de FP-lek tussen bewoners op een
-      app-core, de M4-wekker (1000 wekken per seconde), de laatste woorden
-      van een gestopte app, de Pi cmdline zonder lengtetoets, de
-      Pi-mailbox die tot 500 ms spint, de O6N-console op de SPCR-UART, de
-      O6N `_CPC`-klassenbron uit.
+- [ ] De plugins als node (hop-gui, hoplb, hopdns, hopprom, hoplockserver,
+      cloudflared-lean met een echt token) en Replica (`sqlite-persist`).
 - [ ] applib `leave_group`; lean: de IPv6-baan en `Stack::leave_group`;
-      docs/boards-radxa.md loopt achter.
-
+      docs/boards-radxa.md bijwerken.
 
 ## Het plafond: Linux of macOS op dezelfde M4 tegen HopOS (01-10 avond, M33)
 
