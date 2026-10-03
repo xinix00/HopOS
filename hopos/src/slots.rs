@@ -257,10 +257,12 @@ const FIRST_POLL: Duration = Duration::from_millis(20);
 /// draagt (`main` slaat het token vóór de system-listener start).
 pub(crate) const HOP_SLOT: usize = 1;
 
-/// De partitie van Hop: 64 MiB, staart inbegrepen. Ruim: de release-ELF is
-/// 594 KiB laadbaar (gemeten 29-09), de rest is heap voor agent, leader,
-/// de HTTP-verbindingen en de download-buffer (64 KiB per hap).
-const HOP_MEM: u64 = 64 << 20;
+/// De partitie van Hop, staart inbegrepen. 64 MiB is ruim: de release-ELF
+/// is 594 KiB laadbaar (gemeten 29-09), de rest is heap voor agent, leader,
+/// de HTTP-verbindingen en de download-buffer (64 KiB per hap). Op de
+/// LicheeRV (256 MB, pool 200 MB) 10 MiB: Hop meet er 0,5 tot 0,9 MB
+/// (03-10, slot 1 als systeemtaak), en elke MB is daar een app-MB.
+const HOP_MEM: u64 = if cfg!(feature = "board-licheerv") { 10 << 20 } else { 64 << 20 };
 
 /// Het volume van Hop: `/hop` in zijn zicht, `/volumes/hop` op hopfs. Daar
 /// bewaart `agentd-hopos` zijn `agent-state.json` en leest hij hem na een
