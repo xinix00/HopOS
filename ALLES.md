@@ -39,15 +39,16 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
-- [ ] De volgende bump: main heeft sinds v3.0.6 en Hop v3.0.7 de avondfixes
-      van 03-10 (dvfs op de slotlast, de 5555-lek, het zaad over een flip, de
-      OS-core-beurt, de igb op MSI-X, in Hop de vaste poort en de
-      downloadtaak); HopOS 3.0.7 met tag, Hop erop naar 3.0.8, release.sh,
-      media.
-- [ ] M4: een nieuw image via Recovery met main (de leader van de Hop 3.0.0
-      van de kaart kent spin niet meer, dus spin daarna opnieuw POSTen).
-- [ ] Altra: `hopos.efirng=1` in de config van de stick en dan een flip:
-      `HOPOS_FLIP_SEED`, `HOPOS_RNG_EFI_CARRIED` en `source=hardware` zien.
+- [ ] De volgende bump: HopOS 3.0.7 met tag, Hop erop naar 3.0.8, release.sh,
+      media (main heeft sinds v3.0.6 en Hop v3.0.7 de avondfixes van 03-10);
+      daarmee het M4-image via Recovery (spin daarna opnieuw POSTen) en de
+      Altra-stick.
+
+### Fixen
+
+- [ ] efi-rng standaard aan op de UEFI-borden als het protocol er is (nu
+      `hopos.efirng=1`); dan toont de Altra na een flip `HOPOS_FLIP_SEED` en
+      `source=hardware`.
 - [ ] O6N: na `DELETE` van Lumen weigert de kern elke plaatsing tot een
       koude boot (reproduceren op QEMU met een job met devices).
 - [ ] OS-core: een hop tussen twee bewoners kost op de LicheeRV nog 644 us
