@@ -9,7 +9,7 @@ in docs/measurements.md, de details per board in docs/boards-*.md.
 De afvinkmatrix van de Go-tijd (OLD/docs/support.md: boot, idle en klokken,
 devices en diensten per board), nu voor v3 en bijgehouden op ijzer. Legenda:
 ✓ gezien op het board, ○ gebouwd maar op dit board nog niet gezien, ✗ ontbreekt
-of faalt, en een streep waar het bewust niet komt. Stand 04-10-2026, ochtend (main 182480b; Pi 4 P40, Pi 5 Q40, Radxa X40, O6N O40, M4 M40 met Hop 3.0.0, LicheeRV R40, Altra A56g met de boot-stack-fix; release v3.0.9, Hop v3.0.8).
+of faalt, en een streep waar het bewust niet komt. Stand 04-10-2026, ochtend (main 182480b; Pi 4 P40, Pi 5 Q40, Radxa X40, O6N O40, M4 M40 met Hop 3.0.0, LicheeRV R40, Altra A56g met de boot-stack-fix; release v3.0.10 in de maak, Hop v3.0.8).
 Een cel zegt alleen of het slaagt, met hooguit de stempel of een paar
 woorden waarom niet; een gepolde NIC is geen ✓. De getallen staan in
 docs/measurements.md, de details per board in docs/boards-*.md.
@@ -39,17 +39,12 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
-- [ ] Hoofdstuk 8 van docs/description.md (de kanttekeningen vóór de release
-      van dit weekend), geland zijn 8.1, 8.2 en 8.3, 8.4, 8.5, 8.6, 8.9 (ebea7eb), 8.13
-      (249963d), 8.15 en 8.16, en de restjes (92071eb: clock naar now,
-      HOPOS_IRQ_STUCK en HOPOS_IRQ_STORM, de Hop-bootregel na een warme flip
-      met HOPOS_HOP_GROUP_COLD); 8.12 (pollen, 88acb8b), 8.14 (de scripts, d4d8700); de laatste twee,
-      8.7 en 8.8 (arm64 en riscv, de assembly) en 8.10 en 8.11 (oneshot, de
-      dubbele paden), worden herbasseerd op 88acb8b. Alles na 3.0.9
-      komt in een volgende release na een eigen ijzerronde (de bootregels
-      per bord letterlijk gelijk). Tweede golf daarna: 8.7 en 8.8 (arm64 en riscv, de assembly),
-      8.9 (config en firmware-feiten), 8.10 en 8.11 (oneshot, de dubbele
-      paden), 8.12 (pollen), 8.13 (apps).
+- [ ] Hoofdstuk 8 van docs/description.md: alles geland behalve 8.7 en 8.8
+      (arm64 en riscv naast elkaar, de assembly: d8-isa2.patch ligt klaar
+      maar past niet meer op slots.rs na 8.10/8.11; na het weekend
+      herbasseren, puur opruimen zonder gedrag). 3.0.10 draagt de rest; op
+      ijzer te zien per bord bij de flip van 3.0.10 (bootregels gelijk,
+      `HOPOS_SLOT_PUBLISH` voor Hop's poorten, `HOPOS_NVME_IRQ`).
 - [ ] De media met `hop image --config` op v3.0.9 (Derek; Hop blijft 3.0.8,
       de ABI is gelijk): Radxa-kaart
       (v3.0.5 stormt na 2 GiB door de MMC-maskers), Altra-stick (v3.0.7
