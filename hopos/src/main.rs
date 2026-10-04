@@ -532,13 +532,9 @@ fn dispatch_once(board: &Machine) {
 
 /// Handelt af wat al bij de controller wacht, buiten de dispatch-taak om:
 /// voor de zelftest van de OS-core, die in de boot draait, vóór de executor
-/// de taak ooit pollt (slots.rs, `probe`). Dezelfde context als de taak
-/// (de executor-core van de kern), en dezelfde ronde, dus de signalen die
-/// hij zet ziet de taak straks gewoon.
-#[cfg_attr(
-    target_arch = "riscv64",
-    allow(dead_code, reason = "de zelftest van RISC-V staat in cage_riscv.rs")
-)]
+/// de taak ooit pollt (`cpu::el2::selftest_tries`). Dezelfde context als
+/// de taak (de executor-core van de kern), en dezelfde ronde, dus de
+/// signalen die hij zet ziet de taak straks gewoon.
 pub(crate) fn drain_interrupts() {
     dispatch_once(&BOARD);
 }

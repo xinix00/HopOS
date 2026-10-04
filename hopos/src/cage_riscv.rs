@@ -599,7 +599,10 @@ pub(crate) use cpu::riscv::oscore::OsCore;
 /// De rotatie van de OS-core voor de slaap van de executor, na de zelftest
 /// van de overgang: de wekker (een spinner komt terug op de deadline), de
 /// yield en de kick (een spinner komt terug op de `msip` van het eigen
-/// hart), en de exit. Aanroepen op het hart van de kern, ná de interrupts.
+/// hart), en de exit. Elke proef na de dispatch-ronde over wat al bij de
+/// PLIC wacht, en opnieuw als een device-lijn hem onderbrak
+/// (`el2::selftest_tries`, zoals op arm64). Aanroepen op het hart van de
+/// kern, ná de interrupts.
 pub(crate) fn os_core(plan: &Plan) -> Result<OsCore, el2::Error> {
     use cpu::riscv::oscore::Probe;
     let board = &crate::BOARD;
@@ -614,18 +617,24 @@ pub(crate) fn os_core(plan: &Plan) -> Result<OsCore, el2::Error> {
         crate::OS_ASID.load(Relaxed),
     )?;
     let ms = cpu::riscv::idle::hz() / 1000;
-    let t = os.selftest(Probe::Spin, ms, &|| {});
-    let y = os.selftest(Probe::Yield, 100 * ms, &|| {});
-    let k = os.selftest(Probe::Spin, 100 * ms, &|| board.kick_self());
-    let x = os.selftest(Probe::Exit, 100 * ms, &|| {});
-    let us = |r: Option<(el2::Back, u64)>| r.map(|(b, dt)| (b, dt * 1000 / ms.max(1)));
-    let (t, y, k, x) = (us(t), us(y), us(k), us(x));
-    let ok = matches!(t, Some((el2::Back::Timer, _)))
-        && matches!(y, Some((el2::Back::Yield, _)))
-        && matches!(k, Some((el2::Back::Ipi, _)))
-        && matches!(x, Some((el2::Back::Exit, _)));
+    let mut probe = |p: Probe, ticks: u64, kick: &dyn Fn()| {
+        let (seen, tries) = el2::selftest_tries(
+            crate::drain_interrupts,
+            || os.selftest(p, ticks, kick),
+            |s| s.back,
+        );
+        Shown { seen, tries, ms }
+    };
+    let t = probe(Probe::Spin, ms, &|| {});
+    let y = probe(Probe::Yield, 100 * ms, &|| {});
+    let k = probe(Probe::Spin, 100 * ms, &|| board.kick_self());
+    let x = probe(Probe::Exit, 100 * ms, &|| {});
+    let ok = t.back() == Some(el2::Back::Timer)
+        && y.back() == Some(el2::Back::Yield)
+        && k.back() == Some(el2::Back::Ipi)
+        && x.back() == Some(el2::Back::Exit);
     println!(
-        "oscore: hart {hart} self-test timer={t:?} yield={y:?} kick={k:?} exit={x:?} (back, us) {}",
+        "oscore: hart {hart} self-test timer={t} yield={y} kick={k} exit={x} {}",
         if ok {
             "HOPOS_OS_SELFTEST ok"
         } else {
@@ -633,4 +642,44 @@ pub(crate) fn os_core(plan: &Plan) -> Result<OsCore, el2::Error> {
         }
     );
     Ok(os)
+}
+
+/// Een proef voor de zelftest-regel: `(Timer, 1645 us)`, en bij een andere
+/// terugkeer de `mcause` (`mcause irq 11` is de PLIC) en het aantal
+/// pogingen.
+struct Shown {
+    seen: Option<cpu::riscv::oscore::Seen>,
+    tries: u32,
+    ms: u64,
+}
+
+impl Shown {
+    fn back(&self) -> Option<el2::Back> {
+        self.seen.map(|s| s.back)
+    }
+}
+
+impl core::fmt::Display for Shown {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let Some(s) = self.seen else {
+            return f.write_str("(none: no cage for the stub)");
+        };
+        let us = s.ticks.saturating_mul(1000) / self.ms.max(1);
+        write!(f, "({:?}, {us} us", s.back)?;
+        if !matches!(
+            s.back,
+            el2::Back::Timer | el2::Back::Yield | el2::Back::Ipi | el2::Back::Exit
+        ) {
+            let code = s.cause & !(1 << 63);
+            if s.cause >> 63 != 0 {
+                write!(f, ", mcause irq {code}")?;
+            } else {
+                write!(f, ", mcause {code}")?;
+            }
+        }
+        if self.tries > 1 {
+            write!(f, ", try {}", self.tries)?;
+        }
+        f.write_str(")")
+    }
 }

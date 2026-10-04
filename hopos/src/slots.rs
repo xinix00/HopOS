@@ -109,10 +109,6 @@ mod arch {
         Ok(os)
     }
 
-    /// Hoe vaak één proef het opnieuw doet als een device-lijn hem
-    /// onderbrak.
-    const PROBE_TRIES: u32 = 3;
-
     /// Eén proef en hoe vaak hij het deed.
     #[derive(Copy, Clone)]
     struct Tried {
@@ -122,31 +118,15 @@ mod arch {
 
     /// Eén proef van de zelftest, met eerst de interrupts die al wachten
     /// afgehandeld (`crate::drain_interrupts`), en opnieuw als een
-    /// device-lijn hem onderbrak, hoogstens [`PROBE_TRIES`] keer.
-    ///
-    /// Waarom (30-09, de eerste Pi 5-boot: drie keer `Irq` na 0 us): de
-    /// zelftest draait in de boot, vóór de executor. Een lijn die al eerder
-    /// scherp stond (de NIC, INTID 166, sinds `probe_nic`) en daarna één
-    /// keer vuurde, liet de vector de vlag zetten en gemaskeerd terugkeren,
-    /// maar de dispatch-taak draait pas als de executor loopt. De lijn
-    /// stond dus nog pending bij de GIC, en elke proef kwam op 0 us terug
-    /// op een interrupt die niets met de overgang te maken had. Een lijn
-    /// die tijdens de proef komt (een frame op het LAN) is net zo min een
-    /// oordeel. Komt hij drie keer, dan zegt de regel welke lijn het was.
+    /// device-lijn hem onderbrak (`el2::selftest_tries`, waarom staat
+    /// daar).
     fn probe(os: &mut el2::OsCore, yield_: bool, ticks: u64, kick: &dyn Fn()) -> Tried {
-        let mut last = Tried {
-            probe: None,
-            tries: 0,
-        };
-        for n in 1..=PROBE_TRIES {
-            crate::drain_interrupts();
-            let probe = os.selftest(yield_, ticks, kick);
-            last = Tried { probe, tries: n };
-            if probe.is_none_or(|p| p.back != el2::Back::Irq) {
-                break;
-            }
-        }
-        last
+        let (probe, tries) = el2::selftest_tries(
+            crate::drain_interrupts,
+            || os.selftest(yield_, ticks, kick),
+            |p| p.back,
+        );
+        Tried { probe, tries }
     }
 
     /// Een proef voor de zelftest-regel: `(Timer, 1344 us)`, en bij een

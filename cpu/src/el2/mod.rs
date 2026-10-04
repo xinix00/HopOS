@@ -41,6 +41,7 @@ pub use dispatch::{
 pub use oscore::{
     Back, Bell, Next, OsCore, Probe, STATS as OS_STATS, TURN_CAP_NS, Turn, apple_ipi_ack, due,
     held, hold, host, hosts, last_fault, next, prepare, recall, rehost, release_held,
+    selftest_tries,
 };
 
 use core::fmt;

@@ -222,9 +222,9 @@ impl OsCore {
     /// De zelftest bij boot: een bewoner zonder vertaling, alleen de
     /// whitelist over een pagina met een stub in het kern-image, die spint,
     /// yieldt of exit doet, met `kick` vlak vóór de overgang en de wekker op
-    /// `ticks` na nu. Geeft waardoor de kern terugkwam en na hoeveel tikken;
-    /// `None` als de kooi van de stub niet te coderen was.
-    pub fn selftest(&mut self, probe: Probe, ticks: u64, kick: &dyn Fn()) -> Option<(Back, u64)> {
+    /// `ticks` na nu. Geeft wat de proef zag ([`Seen`]); `None` als de kooi
+    /// van de stub niet te coderen was.
+    pub fn selftest(&mut self, probe: Probe, ticks: u64, kick: &dyn Fn()) -> Option<Seen> {
         let code: &[u32] = match probe {
             Probe::Spin => &[0x0000_006f],
             Probe::Yield => &[0x0000_0513, 0x0000_0893, 0x0000_0073, 0x0000_006f],
@@ -262,8 +262,26 @@ impl OsCore {
         // De kick staat nog: de dispatch van de kern wist hem pas later.
         self.clint.set_msip(self.hart, false);
         csr::restore(prev);
-        Some((settle(ctx, cause, mtval, false), dt))
+        Some(Seen {
+            back: settle(ctx, cause, mtval, false),
+            ticks: dt,
+            cause,
+        })
     }
+}
+
+/// Wat één proef van [`OsCore::selftest`] zag: waardoor de kern terugkwam,
+/// na hoeveel tikken, en de `mcause` van de trap. Bij een [`Back::Irq`]
+/// zegt de interruptcode wélke bron (11 de PLIC, 1, 5 of 9 een S-mode-bron
+/// zonder delegatie); de riscv-tegenhanger van `el2::Probe`.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct Seen {
+    /// Waardoor de kern terugkwam.
+    pub back: Back,
+    /// Na hoeveel TIME-tikken.
+    pub ticks: u64,
+    /// De `mcause` van de trap, met de interruptbit (bit 63).
+    pub cause: u64,
 }
 
 /// Wat de zelftest van [`OsCore::selftest`] doet.

@@ -75,8 +75,6 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 - [ ] Hop: chunked transfer weigert; een plaatsing zonder capaciteit blijft
       proberen (ruis); na elke flip `HOP_STORE_KERNEL NEXT_STORE failed
       (timed out)` (04-10 op Pi 4, Pi 5 en M4).
-- [ ] LicheeRV: elke boot `HOPOS_OS_SELFTEST_FAIL` (alle vier de proeven
-      melden `Irq`, R40).
 - [ ] vitals: de standaard-rx-URL werkt niet (`CONNECT is not supported`).
 
 ### Op ijzer te zien

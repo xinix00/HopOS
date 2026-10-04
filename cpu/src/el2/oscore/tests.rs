@@ -328,3 +328,35 @@ fn the_selftest_names_the_line_that_interrupted_it() {
         None
     );
 }
+
+#[test]
+fn the_selftest_drains_first_and_retries_a_device_line() {
+    // 04-10, de LicheeRV: elke boot kwamen alle vier de proeven na 5 us
+    // terug op `Irq`, de NIC-lijn die sinds `probe_nic` onbehandeld bij de
+    // PLIC stond. Vóór elke poging gaat de dispatch-ronde eroverheen; een
+    // `Irq` is een tweede poging waard, een ander antwoord niet.
+    use core::cell::Cell;
+    let drained = Cell::new(0);
+    let answers = [Back::Irq, Back::Timer, Back::Yield];
+    let at = Cell::new(0);
+    let once = || {
+        let b = answers[at.get()];
+        at.set(at.get() + 1);
+        Some(b)
+    };
+    let r = selftest_tries(|| drained.set(drained.get() + 1), once, |b| *b);
+    assert_eq!(r, (Some(Back::Timer), 2));
+    assert_eq!(drained.get(), 2);
+    // Een lijn die blijft vuren: drie pogingen, en de regel zegt `Irq`.
+    drained.set(0);
+    let r = selftest_tries(
+        || drained.set(drained.get() + 1),
+        || Some(Back::Irq),
+        |b| *b,
+    );
+    assert_eq!(r, (Some(Back::Irq), SELFTEST_TRIES));
+    assert_eq!(drained.get(), SELFTEST_TRIES);
+    // Geen uitkomst (geen heap, geen kooi): niet opnieuw.
+    let r = selftest_tries(|| {}, || None::<Back>, |b| *b);
+    assert_eq!(r, (None, 1));
+}

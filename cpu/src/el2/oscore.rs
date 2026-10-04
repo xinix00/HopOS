@@ -294,6 +294,45 @@ impl Probe {
     }
 }
 
+/// Hoe vaak één proef van de zelftest het opnieuw doet als een device-lijn
+/// hem onderbrak.
+const SELFTEST_TRIES: u32 = 3;
+
+/// Eén proef van de zelftest van de OS-core, op beide architecturen: eerst
+/// afhandelen wat al bij de interrupt-controller wacht (`drain`, de ronde
+/// van de dispatch-taak), dan de proef (`once`), en opnieuw zolang een
+/// device-lijn hem onderbrak (`back` zegt [`Back::Irq`]), hoogstens
+/// `SELFTEST_TRIES` keer. Geeft de laatste uitkomst en het aantal
+/// pogingen.
+///
+/// Waarom (30-09, de eerste Pi 5-boot: drie keer `Irq` na 0 us; 04-10 op
+/// de LicheeRV elke boot alle vier de proeven `Irq` na 5 us): de zelftest
+/// draait in de boot, vóór de executor. Een lijn die al eerder scherp stond
+/// (de NIC, sinds `probe_nic`) en daarna één keer vuurde, liet de ingang
+/// de vlag zetten en gemaskeerd terugkeren, maar de dispatch-taak draait
+/// pas als de executor loopt. De lijn stond dus nog pending bij de
+/// controller (de GIC, de PLIC), en elke proef kwam meteen terug op een
+/// interrupt die niets met de overgang te maken had. Een lijn die tijdens
+/// de proef komt (een frame op het LAN) is net zo min een oordeel. Komt hij
+/// drie keer, dan zegt de regel welke lijn het was.
+pub fn selftest_tries<T>(
+    mut drain: impl FnMut(),
+    mut once: impl FnMut() -> Option<T>,
+    back: impl Fn(&T) -> Back,
+) -> (Option<T>, u32) {
+    let mut last = (None, 0);
+    for n in 1..=SELFTEST_TRIES {
+        drain();
+        let seen = once();
+        let again = seen.as_ref().is_some_and(|s| back(s) == Back::Irq);
+        last = (seen, n);
+        if !again {
+            break;
+        }
+    }
+    last
+}
+
 /// Wat één beurt van de rotatie deed.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Turn {
