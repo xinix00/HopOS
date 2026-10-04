@@ -5,6 +5,8 @@
     python3 tools/meet.py --only pi4,pi5     een paar borden
     python3 tools/meet.py --skip-wire        zonder de metingen over de draad
     python3 tools/meet.py --peer 192.168.1.122 --write
+    python3 tools/meet.py --write --no-run   de fragmenten van --out schrijven, niet meten
+    python3 tools/meet.py --selftest         de toets van --write
 
 Zes fasen, met de tijd van elk in de eindregel:
 1. inrichting: per bord drie peilingen van /v1/agents (*In rust*), dan
@@ -25,7 +27,8 @@ zijn wachttijd, want daar is de wachttijd de meting.
 
 Per bord komt een fragment in target/meet/<bord>.md (rij | cel | run, de
 vorm van de meetagenten) met de console ernaast; `--write` zet de cellen
-vooraan in docs/measurements.md (vet, de oude waarden erachter). Python met
+kaal in de kolom *Nu* van docs/measurements.md en in *Hoogste v3* waar Nu
+beter is (meer is beter, behalve de rijen in LAAG). Python met
 alleen de standaardbibliotheek: dit is regie (HTTP, JSON, tekst), het meten
 zelf gebeurt op de nodes.
 """
@@ -64,34 +67,36 @@ BOARDS = {
     'm4': dict(name='M4', ip='192.168.1.122', section='Mac mini M4', shares=2048, big=True, disk=64),
 }
 
-# De rijen: sleutel, tabel, rijnaam, en waar de borden die rij net anders
-# schrijven het voorvoegsel waarop --write zoekt.
+# De rijen: sleutel, tabel, rijnaam, en de voorvoegsels waaronder oudere
+# fragmenten en de borden die de rij net anders schrijven hem kennen.
 ROWS = [
     ('cpu', 'Vitals', 'cpu, Msteps/s'),
     ('smp', 'Vitals', 'smp, speedup'),
-    ('burn', 'Vitals', 'burn, Msteps/s, max °C', 'burn, Msteps/s'),
+    ('burn', 'Vitals', 'burn begin → eind, Msteps/s / max °C', 'burn'),
     ('membw', 'Vitals', 'membw copy / triad, GB/s'),
-    ('memlat', 'Vitals', 'memlat 32 KB / 2 MB / 8 MB, ns', 'memlat 32 KB / 2 MB'),
+    ('memlat', 'Vitals', 'memlat 32 KB / 2 MB / 8 MB, ns', 'memlat'),
     ('alloc', 'Vitals', 'alloc, allocs/s'),
     ('storm', 'Vitals', 'storm, conn/s (p99 ms)'),
     ('rtt', 'Vitals', 'rtt naar de kern p50 / p99, µs'),
     ('timer', 'Vitals', 'timer 1 ms, overslaap p50 / p99, µs'),
     ('idle', 'Vitals', 'idle, wekken/s'),
-    ('disk', 'Vitals', 'disk schrijven / lezen, MB/s'),
+    ('disk', 'Vitals', 'disk schrijven / lezen / 4 KiB schrijven, MB/s', 'disk'),
     ('in', 'Netwerk', 'De node in, MB/s'),
     ('out', 'Netwerk', 'De node uit, MB/s'),
-    ('wrtt', 'Netwerk', 'rtt over de draad p50, µs'),
+    ('wrtt', 'Netwerk', 'rtt over de draad p50 / p99 / koud, µs', 'rtt over de draad'),
     ('cycle', 'Netwerk', 'Verbindingscyclus p50, ms'),
-    ('wstorm', 'Netwerk', 'Storm over de draad, conn/s', 'Storm over de draad, conn/s'),
+    ('wstorm', 'Netwerk', 'Storm over de draad, conn/s (p99 ms)', 'Storm over de draad'),
     ('hairpin', 'Netwerk', 'Storm, hairpin naar zichzelf, conn/s (p99 ms)'),
     ('a2a', 'In de node', 'App naar app, MB/s'),
     ('nrtt', 'In de node', 'rtt warm p50 / p99, µs'),
     ('ncold', 'In de node', 'rtt koud p50, µs'),
-    ('kcpu', 'In rust', 'Kern-cpu'),
-    ('kmem', 'In rust', 'Kern-geheugen'),
-    ('hop', 'In rust', 'Hop'),
-    ('temp', 'In rust', 'Temperatuur'),
+    ('kcpu', 'In rust', 'Kern-cpu, %', 'Kern-cpu'),
+    ('kmem', 'In rust', 'Kern-geheugen gebruikt / totaal, MiB', 'Kern-geheugen'),
+    ('hop', 'In rust', 'Hop geheugen, MiB / cpu, %', 'Hop'),
+    ('temp', 'In rust', 'Temperatuur, °C', 'Temperatuur'),
 ]
+# Hier is minder beter (tijd, wekken, warmte, verbruik); elders meer.
+LAAG = {'memlat', 'rtt', 'timer', 'idle', 'wrtt', 'cycle', 'nrtt', 'ncold', 'kcpu', 'kmem', 'hop', 'temp'}
 # De O6N schrijft zijn vitals-disk in *Opslag*, met de 4 KiB apart.
 OVERRIDE = {'o6n': {'disk': ('Opslag', 'App-opslag via vitals disk, schrijven / lezen, MB/s'),
                     'disk4k': ('Opslag', '4 KiB schrijven via de app, MB/s')}}
@@ -357,6 +362,177 @@ def cores(n):
 
 def mbps(v):
     return nl(v, 1 if v < 1000 else 0)
+
+
+def sleutel(bord, row):
+    """De sleutel van een rij: exact op de naam, anders op een voorvoegsel."""
+    for key, (_, name) in OVERRIDE.get(bord, {}).items():
+        if row == name:
+            return key
+    for key, _, name, *pre in ROWS:
+        if row == name:
+            return key
+    return next((r[0] for r in ROWS for p in r[3:] if row.startswith(p)), None)
+
+
+def kaal(t):
+    """De cel zonder tekst: getallen, `/`, `→` en een getal tussen haakjes.
+    Peer, cores en grootte staan in de Opzet-regel."""
+    m = re.match(r'([\d.,–]+) \(naar [^,]+, p99 ([\d.,–]+)( ms)?[^)]*\)(?:, koud ([\d.,–]+))?', t)
+    if m:
+        return f'{m[1]} / {m[2]} / {m[4]}' if m[4] else f'{m[1]} ({m[2]})'
+    m = re.match(r'([\d.,–]+) van ([\d.,]+) MiB', t)
+    if m:
+        return f'{m[1]} / {m[2]}'
+    m = re.match(r'([\d–]+) %, ([\d.,–]+) MiB', t)
+    if m:
+        return f'{m[2]} / {m[1]}'
+    k4 = re.search(r'4 KiB ([\d.,]+)', t)
+    t = re.sub(r'\(p99 ([\d.,–]+) ms\)', r'(\1)', t)
+    t = re.sub(r'met `[^`]*`', '', t)
+    t = re.sub(r'\s*\([^)]*[A-Za-z][^)]*\)', '', t)
+    t = re.sub(r', (?=\d)', ' / ', t.replace(' %', '').replace(' °C', ''))
+    return ' '.join(t.split()) + (f' / {k4[1]}' if k4 else '')
+
+
+def getallen(t):
+    return [float(x.replace('.', '').replace(',', '.')) for x in re.findall(r'\d[\d.]*(?:,\d+)?', t)]
+
+
+def beter(key, nu, was):
+    """Is `nu` beter dan `was`? Het eerste getal telt, de volgende bij gelijkspel."""
+    a, b = getallen(nu), getallen(was)
+    if not a:
+        return False
+    return not b or (a < b if key in LAAG else a > b)
+
+
+def schrijf(lines, bord, stamp, date, opzet, cells):
+    """Eén bord in de regels van docs/measurements.md: *Nu* overschrijven,
+    *Hoogste v3* bijwerken waar Nu beter is, de Opzet-regel vervangen. Een
+    rij die er niet is komt achteraan in zijn tabel."""
+    cfg = BOARDS[bord]
+    try:
+        start = lines.index(f'## {cfg["section"]}')
+    except ValueError:
+        print(f'meet: geen sectie {cfg["section"]}')
+        return
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith('## ')), len(lines))
+    for key, text in cells.items():
+        table, row = OVERRIDE.get(bord, {}).get(key, next(((r[1], r[2]) for r in ROWS if r[0] == key), (None, None)))
+        if not row:
+            continue
+        nu = kaal(text)
+        top = f'{nu} ({stamp}, {date})'
+        at = next((i for i in range(start, end) if lines[i].startswith('| ')
+                   and sleutel(bord, lines[i].split(' | ')[0][2:]) == key), None)
+        if at is None:
+            head = next((i for i in range(start, end) if lines[i] == f'**{table}**'), None)
+            if head is None:
+                print(f'meet: {bord} {key}: geen tabel {table}')
+                continue
+            at = head + 1
+            while at + 1 < end and (not lines[at].startswith('|') or lines[at + 1].startswith('|')):
+                at += 1
+            lines.insert(at + 1, f'| {row} | {nu} | {top} | |')
+            end += 1
+            continue
+        c = [x.strip() for x in lines[at].strip()[1:-1].split('|')]
+        c[1] = nu
+        m = re.match(r'(.*) \((?:[^()]*, )?\d\d-\d\d\)$', c[2])
+        if not m or beter(key, nu, m[1]):
+            c[2] = top
+        lines[at] = ('| ' + ' | '.join(c) + ' |').replace('|  |', '| |')
+    o = next((i for i in range(start, end) if lines[i].startswith('Opzet:')), None)
+    if o is not None:
+        e = o
+        while e < end and lines[e].strip():
+            e += 1
+        lines[o:e] = textwrap.wrap(f'Opzet: {opzet}', 76, break_long_words=False, break_on_hyphens=False)
+
+
+def fragment(path, stamps):
+    """Een fragment van --out terug: (bord, stempel, opzet, cellen)."""
+    bord = path.stem
+    stamp, opzet, cells = stamps.get(bord), None, {}
+    for line in path.read_text().split('\n'):
+        if line.startswith('Opzet: '):
+            opzet = line[7:]
+        elif line.startswith('- ') and line.count(' | ') == 2:
+            row, text, run = line[2:].split(' | ')
+            key = sleutel(bord, row)
+            if key and not text.startswith('FOUT'):
+                cells[key] = text
+                stamp = stamp or (run.split()[0] if run.split()[0] != '?' else None)
+    if opzet and stamp:
+        opzet = re.sub(r'^(None|\?),', f'{stamp},', opzet)
+    return bord, stamp, opzet, cells
+
+
+def write(boards, date):
+    """Zet de borden in docs/measurements.md (zie 'Zo schrijf je deze pagina')."""
+    doc = ROOT / 'docs/measurements.md'
+    lines = doc.read_text().split('\n')
+    for bord, stamp, opzet, cells in boards:
+        if not stamp:
+            print(f'meet: {bord} niet geschreven: geen stempel (--stamp {bord}=...)')
+            continue
+        schrijf(lines, bord, stamp, date, opzet, cells)
+    doc.write_text('\n'.join(lines))
+    print(f'meet: {doc} bijgewerkt')
+
+
+def selftest():
+    """--write op een klein voorbeeld: nieuw record, geen record, een nieuwe
+    rij, de Opzet-regel, en twee keer schrijven verandert niets."""
+    doc = textwrap.dedent('''\
+        ## Raspberry Pi 4
+
+        Opzet: P90, 03-10, tools/meet.
+
+        **Vitals**
+
+        | Meting | Nu | Hoogste v3 | v2 |
+        | --- | --- | --- | --- |
+        | cpu, Msteps/s | 248 | 249 (P2g, 03-10) | |
+        | rtt naar de kern p50 / p99, µs | 448 / 1853 | 322 / 5312 (P40, 03-10) | 600 |
+
+        **Netwerk**
+
+        | Meting | Nu | Hoogste v3 | v2 |
+        | --- | --- | --- | --- |
+        | De node in, MB/s | 58,4 | 71,9 (P40, 03-10) | 6,6 |
+
+        ## Raspberry Pi 5
+        ''').split('\n')
+    cells = {'cpu': '250', 'rtt': '449 / 2672', 'in': '62,3 (bench pull van de O6N, 256 MiB)',
+             'wrtt': '1213 (naar de O6N, p99 1223), koud 1221', 'kcpu': '2 %'}
+    opzet = '3.0.10, 04-10, tools/meet. Vitals met 2 cores, 128 MiB.'
+    schrijf(doc, 'pi4', '3.0.10', '04-10', opzet, cells)
+    once = list(doc)
+    schrijf(doc, 'pi4', '3.0.10', '04-10', opzet, cells)
+    want = {
+        '| cpu, Msteps/s | 250 | 250 (3.0.10, 04-10) | |',
+        '| rtt naar de kern p50 / p99, µs | 449 / 2672 | 322 / 5312 (P40, 03-10) | 600 |',
+        '| De node in, MB/s | 62,3 | 71,9 (P40, 03-10) | 6,6 |',
+        '| rtt over de draad p50 / p99 / koud, µs | 1213 / 1223 / 1221 | 1213 / 1223 / 1221 (3.0.10, 04-10) | |',
+        'Opzet: 3.0.10, 04-10, tools/meet. Vitals met 2 cores, 128 MiB.',
+    }
+    missing = want - set(doc)
+    assert not missing, missing
+    assert doc == once, 'niet idempotent'
+    assert doc.index('| De node in, MB/s | 62,3 | 71,9 (P40, 03-10) | 6,6 |') + 1 == doc.index(
+        '| rtt over de draad p50 / p99 / koud, µs | 1213 / 1223 / 1221 | 1213 / 1223 / 1221 (3.0.10, 04-10) | |')
+    assert not any(l.startswith('| Kern-cpu') for l in doc)  # geen tabel In rust: niet geschreven
+    assert kaal('2990 → 2990, 47,0 °C (4 cores, 10 s)') == '2990 → 2990 / 47,0'
+    assert kaal('1337 / 2196 (64 MB; 4 KiB 77,6)') == '1337 / 2196 / 77,6'
+    assert kaal('4905 (naar de M4, p99 2,85 ms)') == '4905 (2,85)'
+    assert kaal('31,8–31,9 van 224 MiB (14,2 %)') == '31,8–31,9 / 224'
+    assert kaal('1 %, 0,45–0,46 MiB, core 0') == '0,45–0,46 / 1'
+    assert kaal('752 met `core-class: big`') == '752'
+    assert kaal('9971 (0,86)') == '9971 (0,86)' and kaal('844 (p99 19,6 ms)') == '844 (19,6)'
+    assert beter('cpu', '10.354', '9.999') and not beter('timer', '48 / 92', '48 / 71')
+    print('meet: selftest groen')
 
 
 class Round:
@@ -688,59 +864,10 @@ class Round:
         for n, k, t in fouten:
             print(f'FOUT {n.key} {k}: {t}')
         if self.a.write:
-            self.write()
+            write([(n.key, n.stamp, self.opzet(n), {k: t for k, (st, t) in n.cells.items() if st == 'ok'})
+                   for n in self.measured], self.date)
         print(f'\nmeet: fragmenten in {out}/; ' + ', '.join(f'{p} {s:.0f} s' for p, s in self.phases)
               + f'; totaal {time.time() - T0:.0f} s')
-
-    def write(self):
-        """Zet de cellen vooraan in docs/measurements.md (de regels onder
-        'Zo schrijf je deze pagina': vet, met stempel en datum, oud erachter)."""
-        doc = ROOT / 'docs/measurements.md'
-        lines = doc.read_text().split('\n')
-        for n in self.measured:
-            if not n.stamp:
-                print(f'meet: {n.key} niet geschreven: geen stempel (--stamp {n.key}=...)')
-                continue
-            try:
-                start = lines.index(f'## {n.cfg["section"]}')
-            except ValueError:
-                print(f'meet: geen sectie {n.cfg["section"]}')
-                continue
-            end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith('## ')), len(lines))
-            for key, table, row, prefix, st, text in self.rows(n):
-                if st != 'ok':
-                    continue
-                new = f'**{text} ({n.stamp}, {self.date})**'
-                at = next((i for i in range(start, end) if lines[i].startswith('| ') and (
-                    lines[i].split(' | ')[0][2:].startswith(prefix) if prefix
-                    else lines[i].split(' | ')[0][2:] == row)), None)
-                if at is None:
-                    head = next((i for i in range(start, end) if lines[i] == f'**{table}**'), None)
-                    if head is None:
-                        print(f'meet: {n.key} {key}: geen tabel {table}')
-                        continue
-                    at = head + 1
-                    while at + 1 < end and (not lines[at].startswith('|') or lines[at + 1].startswith('|')):
-                        at += 1
-                    lines.insert(at + 1, f'| {row} | {new} | | {n.stamp} {self.date} |')
-                    end += 1
-                    continue
-                c = [x.strip() for x in lines[at].strip().strip('|').split('|')]
-                old = c[1].replace('**', '').strip()
-                c[1] = new + (f'; {old}' if old and old != '—' else '')
-                c[3] = f'{n.stamp} {self.date}'
-                lines[at] = ('| ' + ' | '.join(c) + ' |').replace('|  |', '| |')
-            o = next((i for i in range(start, end) if lines[i].startswith('Opzet:')), None)
-            if o is not None:
-                e = o
-                while e < end and lines[e].strip():
-                    e += 1
-                para = ' '.join(lines[o:e])
-                was = re.search(r'\*\*(.*?)\*\*', para)
-                para = f'Opzet: **{self.opzet(n)}**' + (f' Daarvoor: {was.group(1)}' if was else '')
-                lines[o:e] = textwrap.wrap(para, 76, break_long_words=False, break_on_hyphens=False)
-        doc.write_text('\n'.join(lines))
-        print(f'meet: {doc} bijgewerkt')
 
 
 def main():
@@ -752,9 +879,17 @@ def main():
     p.add_argument('--stamp', action='append', default=[], help='bord=STEMPEL als de console hem niet meer heeft')
     p.add_argument('--date', help='dd-mm in de cellen (standaard vandaag)')
     p.add_argument('--out', default=str(ROOT / 'target/meet'), help='map voor de fragmenten')
-    p.add_argument('--write', action='store_true', help='de cellen vooraan in docs/measurements.md zetten')
+    p.add_argument('--write', action='store_true', help='Nu en Hoogste v3 in docs/measurements.md zetten')
+    p.add_argument('--no-run', action='store_true', help='niet meten, alleen de fragmenten van --out schrijven')
+    p.add_argument('--selftest', action='store_true', help='de toets van --write op een voorbeeld')
     a = p.parse_args()
     a.stamp = dict(s.split('=', 1) for s in a.stamp)
+    if a.selftest:
+        return selftest()
+    if a.no_run:
+        keys = a.only.split(',') if a.only else list(BOARDS)
+        paths = [Path(a.out) / f'{k}.md' for k in keys if (Path(a.out) / f'{k}.md').exists()]
+        return write([fragment(p, a.stamp) for p in paths], a.date or time.strftime('%d-%m'))
     Round(a).run()
 
 
