@@ -9,7 +9,7 @@ in docs/measurements.md, de details per board in docs/boards-*.md.
 De afvinkmatrix van de Go-tijd (OLD/docs/support.md: boot, idle en klokken,
 devices en diensten per board), nu voor v3 en bijgehouden op ijzer. Legenda:
 ✓ gezien op het board, ○ gebouwd maar op dit board nog niet gezien, ✗ ontbreekt
-of faalt, en een streep waar het bewust niet komt. Stand 04-10-2026, ochtend (main 182480b; Pi 4 P40, Pi 5 Q40, Radxa X40, O6N O40, M4 M40 met Hop 3.0.0, LicheeRV R40, Altra A56g met de boot-stack-fix; release v3.0.7, Hop v3.0.7).
+of faalt, en een streep waar het bewust niet komt. Stand 04-10-2026, ochtend (main 182480b; Pi 4 P40, Pi 5 Q40, Radxa X40, O6N O40, M4 M40 met Hop 3.0.0, LicheeRV R40, Altra A56g met de boot-stack-fix; release v3.0.8 in de maak, Hop v3.0.7).
 Een cel zegt alleen of het slaagt, met hooguit de stempel of een paar
 woorden waarom niet; een gepolde NIC is geen ✓. De getallen staan in
 docs/measurements.md, de details per board in docs/boards-*.md.
