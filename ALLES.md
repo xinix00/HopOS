@@ -55,6 +55,23 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Fixen
 
+- [ ] NVMe lezen is traag, schrijven niet: O6N 4 KiB lezen 212 MB/s (19 us
+      per opdracht) tegen 537 schrijven, willekeurig lezen 15,6k IOPS met
+      één opdracht en 71k met 16 tegelijk (4,5 keer, niet 16), sequentieel
+      3038 tegen 3586; Altra 4 KiB lezen 24,5k tegen 141k schrijven (186k
+      met 16); M4 11,9k tegen 140k. Schrijven wordt uit de DRAM van de SSD
+      bevestigd, lezen moet naar het flash, dus één opdracht tegelijk is
+      latentie: de leesweg moet meer opdrachten in de lucht houden (de
+      read-ahead van hopfs voor sequentieel, de wachtrij van 16 voor
+      willekeurig, en kijken waar de 19 us per 4 KiB zit).
+- [ ] rtt naar de kern p99 5 tot 9 ms terwijl p50 100 tot 300 us is: O6N
+      7761, Pi 5 9141, Pi 4 5312, Altra 9218 in `all` (alleen 158); M4 146
+      en Radxa 681 niet. Ook de timer-overslaap p99 2,7 tot 10 ms (M4,
+      LicheeRV). Een hapering van ~10 ms in de kern-weg (TURN_CAP, de
+      dvfs-sample van 10 ms, de switch-ronde?): zoeken.
+- [ ] Pi 5 uit 55 MB/s tegen in 111: de GEM zendt nog uit NC met losse
+      woorden; dezelfde fix als de dwmac4 (de buffers in WB met een veeg,
+      memcpy), ook voor de genet van de Pi 4 (in 52 tot 72 tegen uit 112).
 - [ ] Hop: chunked transfer weigert; een plaatsing zonder capaciteit blijft
       proberen (ruis); na elke flip `HOP_STORE_KERNEL NEXT_STORE failed
       (timed out)` (04-10 op Pi 4, Pi 5 en M4).
