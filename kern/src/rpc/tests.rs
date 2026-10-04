@@ -346,9 +346,9 @@ fn fs_call(
     n: u64,
     data: &[u8],
 ) -> FsCall {
-    let mut buf = vec![0u8; REQ_HEADER];
+    let mut buf = vec![0u8; HDR_LEN];
     buf.extend_from_slice(path.as_bytes());
-    let p = REQ_HEADER..buf.len();
+    let p = HDR_LEN..buf.len();
     buf.extend_from_slice(data);
     FsCall {
         slot: s(slot),
@@ -359,12 +359,12 @@ fn fs_call(
         data: p.end..buf.len(),
         path: p,
         buf,
-        out: vec![0u8; REQ_HEADER + (64 << 10)],
+        out: vec![0u8; HDR_LEN + (64 << 10)],
     }
 }
 
 fn data(c: &FsCall, n: usize) -> &[u8] {
-    &c.out[REQ_HEADER..REQ_HEADER + n]
+    &c.out[HDR_LEN..HDR_LEN + n]
 }
 
 #[test]
@@ -886,7 +886,7 @@ fn two_apps_have_their_reads_on_the_device_at_once_and_one_app_keeps_its_order()
     let d = ra2.take_fs().unwrap();
     assert_eq!(d.result, Ok((4096, 4096)));
     assert!(
-        d.out[REQ_HEADER..REQ_HEADER + 4096].iter().all(|&x| x == 7),
+        d.out[HDR_LEN..HDR_LEN + 4096].iter().all(|&x| x == 7),
         "de lees zag de schrijf"
     );
     assert!(r.0.borrow().peak >= 2);
@@ -934,7 +934,7 @@ fn a_remove_waits_until_no_io_is_running() {
     spin(&mut run);
     let d = rd.take_fs().unwrap();
     assert_eq!(d.result, Ok((4096, 4096)));
-    assert!(d.out[REQ_HEADER..REQ_HEADER + 4096].iter().all(|&x| x == 9));
+    assert!(d.out[HDR_LEN..HDR_LEN + 4096].iter().all(|&x| x == 9));
     assert_eq!(got(&rm), Some(Ok((0, 0))));
 }
 
@@ -1103,7 +1103,7 @@ fn bundle(slot: usize, generation: u32, path: &str, ops: &[(u64, u32)]) -> FsCal
 /// De uitkomsten uit het antwoord: per opdracht (bytes, status) en de
 /// bytes zelf, opgeknipt.
 fn outcomes(c: &FsCall, count: usize) -> Vec<(u32, u16, Vec<u8>)> {
-    let body = &c.out[REQ_HEADER..];
+    let body = &c.out[HDR_LEN..];
     let mut at = count * many::RESULT_LEN;
     (0..count)
         .map(|i| {
@@ -1299,7 +1299,7 @@ fn two_bundles_of_one_app_share_the_device_and_a_write_waits_for_both() {
     assert_eq!(got(&w), Some(Ok((4096, 0))));
     let d = b3.take_fs().unwrap();
     assert_eq!(d.result, Ok((4096, many::RESULT_LEN + 4096)));
-    let at = REQ_HEADER + many::RESULT_LEN;
+    let at = HDR_LEN + many::RESULT_LEN;
     assert!(
         d.out[at..at + 4096].iter().all(|&x| x == 9),
         "zag de schrijf"

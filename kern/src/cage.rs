@@ -21,7 +21,6 @@
 
 use crate::{Core, Region, Slot};
 use core::future::Future;
-use core::time::Duration;
 
 /// De klasse van een core, zoals een jobspec hem vraagt.
 ///
@@ -335,22 +334,9 @@ pub trait PhysMem {
     }
 }
 
-/// De tijd van de executor: slapen en de monotone klok.
-///
-/// De executor levert `after(d)`; het board wikkelt dat in deze trait zodat
-/// de lifecycle-actor zonder `&'static Executor` test.
-pub trait Timer {
-    /// Nanoseconden sinds boot.
-    fn now(&self) -> u64;
-    /// Slaap `d`.
-    fn sleep(&self, d: Duration) -> impl Future<Output = ()>;
-    /// Slaap `d`, maar wek er geen slapende core voor: de timer loopt af in
-    /// de eerste ronde na `d` (`Executor::after_deferrable`, Linux'
-    /// `TIMER_DEFERRABLE`). Zonder eigen vorm gewoon [`sleep`](Self::sleep).
-    fn sleep_deferrable(&self, d: Duration) -> impl Future<Output = ()> {
-        self.sleep(d)
-    }
-}
+/// De tijd van de executor: slapen en de monotone klok ([`sync::Timer`],
+/// dezelfde trait als de drivers en applib).
+pub use sync::Timer;
 
 #[cfg(test)]
 pub(crate) mod tests {

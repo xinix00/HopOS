@@ -19,34 +19,15 @@
 //! op, maar niet tegen de echte tijd; dat is beter dan tellen vanaf boot
 //! (1970), want de leader vergelijkt tijden van nodes.
 //!
-//! Hier staat ook de monotone klok van de executor als `kern::cage::Timer`
-//! ([`ExecTimer`]), voor de lifecycle, de servicers, de committer en het
-//! netwerkvlak.
+//! Hier staat ook de monotone klok van de executor als `sync::Timer`
+//! ([`ExecTimer`]), voor de lifecycle, de servicers, de committer, het
+//! netwerkvlak en de USB-taak.
 
-use core::future::Future;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use core::time::Duration;
-use executor::Executor;
-use kern::cage::Timer;
 use kern::{SLOT_CAP, Slot};
 
 /// De tijd van de executor van de OS-core.
-#[derive(Copy, Clone)]
-pub(crate) struct ExecTimer(pub(crate) &'static Executor);
-
-impl Timer for ExecTimer {
-    fn now(&self) -> u64 {
-        self.0.now()
-    }
-
-    fn sleep(&self, d: Duration) -> impl Future<Output = ()> {
-        self.0.after(d)
-    }
-
-    fn sleep_deferrable(&self, d: Duration) -> impl Future<Output = ()> {
-        self.0.after_deferrable(d)
-    }
-}
+pub(crate) use executor::ExecTimer;
 
 /// De wandklok bij de boot zonder SNTP: 2026-09-29T00:00:00Z in
 /// Unix-seconden (`calendar.timegm`, gerekend op 29-09-2026).

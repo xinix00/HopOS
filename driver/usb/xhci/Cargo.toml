@@ -9,6 +9,8 @@ description = "De USB-hostcontroller (xHCI 1.2): reset, ringen, enumeratie van b
 [dependencies]
 dev = { path = "../../../dev" }
 bounded = { path = "../../../bounded" }
+# De klok en de slaap van de USB-taak (`sync::Timer`).
+sync = { path = "../../../sync" }
 
 [lints]
 workspace = true

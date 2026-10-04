@@ -13,7 +13,7 @@
 //!
 //! De OS-core ([`Core::OS`], PORT.md beslissing 2, 30-09): de kern deelt
 //! zijn eigen core met de groepen die hij daarvoor aanwijst
-//! ([`CorePool::share_os_core`]): Hop, en vertrouwde apps. Zo past het hele
+//! ([`Places::share_os_core`]): Hop, en vertrouwde apps. Zo past het hele
 //! OS inclusief Hop op één core en houdt een board met twee cores een volle
 //! app-core over. Een groep die de OS-core niet mag delen, komt er nooit.
 //!
@@ -21,7 +21,7 @@
 //! [`SYSTEM_GROUP`] (03-10): de kern is er de vaste bewoner met voorrang,
 //! een job met de tag `sharegroup: system` komt erbij, en een dedicated job
 //! van één core die geen vrije app-core vindt ook
-//! ([`CorePool::place_anywhere`]).
+//! ([`Places::place_anywhere`]).
 //!
 //! Puur boekhouding, geen MMIO. Eigendom van de lifecycle-actor.
 
@@ -98,7 +98,7 @@ pub fn hop_group() -> GroupName {
     g
 }
 /// De groep van de OS-core zelf: wie hierin plaatst, deelt de core van de
-/// kern ([`CorePool::share_os_core`] bij boot, op elk board dat het kan).
+/// kern ([`Places::share_os_core`] bij boot, op elk board dat het kan).
 pub const SYSTEM_GROUP: &[u8] = b"system";
 
 /// `name` als [`GroupName`].
@@ -115,7 +115,7 @@ fn group_name(name: &[u8]) -> Result<GroupName> {
 
 impl Placement {
     /// De plaatsing van Hop-de-bewoner: één core, gedeeld in de groep `hop`.
-    /// Mag de groep de OS-core delen ([`CorePool::share_os_core`]), dan is
+    /// Mag de groep de OS-core delen ([`Places::share_os_core`]), dan is
     /// het die; anders een app-core, zoals vóór 30-09.
     ///
     /// Geen klasse als eis: op de OS-core kiest de bootparameter
@@ -148,7 +148,7 @@ struct CagePlace {
 }
 
 /// De plaatsing van alle kooien op de app-cores en de OS-core.
-pub struct CorePool {
+pub struct Places {
     os_groups: BoundedVec<GroupName, MAX_OS_GROUPS>,
     groups: [Option<Group>; MAX_GROUPS],
     core_group: [Option<u8>; CORE_CAP + 1],
@@ -159,11 +159,11 @@ pub struct CorePool {
     cages: [Option<CagePlace>; SLOT_CAP + 1],
 }
 
-impl CorePool {
+impl Places {
     /// Een lege plaatsing over de app-cores `1..=app_cores`.
     #[must_use]
-    pub fn new() -> CorePool {
-        CorePool {
+    pub fn new() -> Places {
+        Places {
             os_groups: BoundedVec::new(),
             groups: [const { None }; MAX_GROUPS],
             core_group: [None; CORE_CAP + 1],
@@ -549,9 +549,9 @@ impl CorePool {
     }
 }
 
-impl Default for CorePool {
+impl Default for Places {
     fn default() -> Self {
-        CorePool::new()
+        Places::new()
     }
 }
 
@@ -636,7 +636,7 @@ pub(crate) mod tests {
     #[test]
     fn pool_dedicated_eigen_core() {
         let b = FakeCores::new(4);
-        let mut p = CorePool::new();
+        let mut p = Places::new();
         let mut seen = [false; 5];
         for cage in 1..=4 {
             let c = p.place(&b, s(cage), &ded(1, None)).unwrap().get();
@@ -650,7 +650,7 @@ pub(crate) mod tests {
     #[test]
     fn pool_sharegroup_balanceert() {
         let b = FakeCores::new(4);
-        let mut p = CorePool::new();
+        let mut p = Places::new();
         let mut got = [0; 5];
         for cage in 4..=7 {
             got[p.place(&b, s(cage), &shared("web", 2, None)).unwrap().get()] += 1;
@@ -664,7 +664,7 @@ pub(crate) mod tests {
     #[test]
     fn pool_release_geeft_pool_terug() {
         let b = FakeCores::new(4);
-        let mut p = CorePool::new();
+        let mut p = Places::new();
         for cage in 4..=7 {
             p.place(&b, s(cage), &shared("web", 2, None)).unwrap();
         }
@@ -679,7 +679,7 @@ pub(crate) mod tests {
     #[test]
     fn pool_grootte_mismatch_wordt_geweigerd() {
         let b = FakeCores::new(6);
-        let mut p = CorePool::new();
+        let mut p = Places::new();
         p.place(&b, s(4), &shared("web", 2, None)).unwrap();
         assert!(matches!(
             p.place(&b, s(5), &shared("web", 4, None)),
@@ -693,7 +693,7 @@ pub(crate) mod tests {
     #[test]
     fn place_cage_idempotent() {
         let b = FakeCores::new(4);
-        let mut p = CorePool::new();
+        let mut p = Places::new();
         let c1 = p.place(&b, s(4), &shared("web", 2, None)).unwrap();
         let c2 = p.place(&b, s(4), &shared("web", 2, None)).unwrap();
         assert_eq!(c1, c2);
@@ -702,7 +702,7 @@ pub(crate) mod tests {
     #[test]
     fn pool_smp_reserves_independent_core_run() {
         let b = FakeCores::new(4);
-        let mut p = CorePool::new();
+        let mut p = Places::new();
         assert_eq!(p.place(&b, s(8), &ded(2, None)).unwrap().get(), 1);
         assert_eq!(p.place(&b, s(2), &ded(1, None)).unwrap().get(), 3);
         p.release(s(8));
@@ -712,7 +712,7 @@ pub(crate) mod tests {
     #[test]
     fn pool_smp_finds_run_after_shared_residents() {
         let b = FakeCores::new(4);
-        let mut p = CorePool::new();
+        let mut p = Places::new();
         for cage in 1..=6 {
             let c = p.place(&b, s(cage), &shared("trusted", 1, None)).unwrap();
             assert_eq!(c.get(), 1);
@@ -726,7 +726,7 @@ pub(crate) mod tests {
     #[test]
     fn pool_sharegroup_met_smp_wordt_geweigerd() {
         let b = FakeCores::new(4);
-        let mut p = CorePool::new();
+        let mut p = Places::new();
         let mut spec = shared("web", 2, None);
         spec.cores = 2;
         assert!(matches!(
@@ -739,7 +739,7 @@ pub(crate) mod tests {
     fn pool_class_sharing_and_smp() {
         use CoreClass::Big;
         let b = FakeCores::with(9, &[(7, Big), (8, Big), (9, Big)]);
-        let mut p = CorePool::new();
+        let mut p = Places::new();
         for cage in [10, 11] {
             assert_eq!(
                 p.place(&b, s(cage), &shared("trusted", 1, Some(Big)))
@@ -762,7 +762,7 @@ pub(crate) mod tests {
     #[test]
     fn pool_one_core_class_sharing() {
         let b = FakeCores::with(1, &[(1, CoreClass::Big)]);
-        let mut p = CorePool::new();
+        let mut p = Places::new();
         for cage in [2, 3] {
             let c = p.place(&b, s(cage), &shared("trusted", 1, Some(CoreClass::Big)));
             assert_eq!(c.unwrap().get(), 1);
@@ -773,7 +773,7 @@ pub(crate) mod tests {
     fn pool_class_mismatch_and_dedicated_fallback() {
         use CoreClass::{Big, Small};
         let b = FakeCores::with(3, &[(1, Small), (2, Big), (3, Big)]);
-        let mut p = CorePool::new();
+        let mut p = Places::new();
         p.place(&b, s(4), &shared("mixed", 1, None)).unwrap();
         assert!(matches!(
             p.place(&b, s(5), &shared("mixed", 1, Some(Big))),
@@ -794,7 +794,7 @@ pub(crate) mod tests {
     #[test]
     fn hop_and_trusted_groups_share_the_os_core() {
         let b = FakeCores::new(1);
-        let mut p = CorePool::new();
+        let mut p = Places::new();
         p.share_os_core(HOP_GROUP).unwrap();
         p.share_os_core(b"trusted").unwrap();
         p.share_os_core(HOP_GROUP).unwrap(); // idempotent
@@ -830,8 +830,8 @@ pub(crate) mod tests {
     fn the_system_group_shares_the_os_core_and_catches_the_overflow() {
         use CoreClass::{Big, Small};
         let b = FakeCores::with(1, &[(0, Big), (1, Small)]);
-        let mut p = CorePool::new();
-        let mut no = CorePool::new();
+        let mut p = Places::new();
+        let mut no = Places::new();
         p.share_os_core(SYSTEM_GROUP).unwrap();
         assert_eq!(
             p.place(&b, s(1), &shared("system", 1, None)).unwrap(),
@@ -880,7 +880,7 @@ pub(crate) mod tests {
     fn hop_without_os_sharing_takes_an_app_core() {
         use CoreClass::{Big, Small};
         let b = FakeCores::with(4, &[(1, Big), (2, Big), (3, Small), (4, Small)]);
-        let mut p = CorePool::new();
+        let mut p = Places::new();
         let hop = p.place(&b, s(1), &Placement::hop().unwrap()).unwrap();
         assert_eq!(hop.get(), 1);
         let buddy = p.place(&b, s(2), &Placement::hop().unwrap()).unwrap();
@@ -901,7 +901,7 @@ pub(crate) mod tests {
         };
         // De O6N in het klein: een big core vóór de small cores.
         let b = FakeCores::with(4, &[(1, Big), (2, Small), (3, Small), (4, Big)]);
-        let mut p = CorePool::new();
+        let mut p = Places::new();
         p.place(&b, s(9), &ded(1, Some(Small))).unwrap(); // core 2 bezet
         assert_eq!(p.place(&b, s(1), &hop(Some(Small))).unwrap().get(), 3);
         assert_eq!(p.place(&b, s(2), &hop(Some(Big))).unwrap().get(), 3);
@@ -911,16 +911,16 @@ pub(crate) mod tests {
             "a job tagged hop did not share Hop's core"
         );
         // Geen small core vrij: elke vrije core, geen weigering.
-        let mut p = CorePool::new();
+        let mut p = Places::new();
         p.place(&b, s(8), &ded(1, Some(Small))).unwrap();
         p.place(&b, s(9), &ded(1, Some(Small))).unwrap();
         assert_eq!(p.place(&b, s(1), &hop(Some(Small))).unwrap().get(), 1);
         // Een board zonder klassen (de Pi's, QEMU): de eerste vrije core.
         let flat = FakeCores::new(3);
-        let mut p = CorePool::new();
+        let mut p = Places::new();
         assert_eq!(p.place(&flat, s(1), &hop(Some(Small))).unwrap().get(), 1);
         // Een eis wint van de voorkeur.
-        let mut p = CorePool::new();
+        let mut p = Places::new();
         let spec = Placement {
             class: Some(Big),
             ..hop(Some(Small))

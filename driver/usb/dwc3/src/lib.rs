@@ -40,6 +40,7 @@
 )]
 
 use core::mem::offset_of;
+use core::time::Duration;
 use dev::{Pa, Reg};
 pub use driver_xhci::Timer;
 
@@ -244,10 +245,10 @@ impl Core {
         modify(&g.gctl, 0, CTL_CORE_SOFT_RESET);
         modify(&g.usb3_pipe, 0, U3_PHY_SOFT_RESET);
         modify(&g.usb2_phy, 0, U2_PHY_SOFT_RESET);
-        t.sleep(RESET_NS).await;
+        t.sleep(Duration::from_nanos(RESET_NS)).await;
         modify(&g.usb3_pipe, U3_PHY_SOFT_RESET, 0);
         modify(&g.usb2_phy, U2_PHY_SOFT_RESET, 0);
-        t.sleep(RESET_NS).await;
+        t.sleep(Duration::from_nanos(RESET_NS)).await;
         modify(&g.gctl, CTL_CORE_SOFT_RESET, 0);
 
         // PHY's wakker en op volle snelheid.
@@ -255,7 +256,7 @@ impl Core {
         modify(&g.usb3_pipe, U3_SUS_PHY, 0);
         g.gctl.update(host_ctl);
         dev::mb();
-        t.sleep(MODE_SETTLE_NS).await;
+        t.sleep(Duration::from_nanos(MODE_SETTLE_NS)).await;
         Ok(())
     }
 }

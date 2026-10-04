@@ -42,6 +42,7 @@
 //! bewaren voor later levert alleen een lawine bij het aansluiten. De cursor
 //! loopt wel mee, zoals in Go.
 
+use abi::glass::Input;
 use abi::layout::{HOST_IP4, Ip4, Slot, slot_ip4};
 use core::fmt::{self, Write as _};
 use core::future::Future;
@@ -49,10 +50,9 @@ use driver_hid::{Event, Kind};
 use sync::spsc::{Channel, Receiver, Sender};
 use sync::{Either, select};
 
-/// De poort op het interne gateway-adres (10.100.0.1). Naast 7878 (SURF)
-/// omdat het de andere helft van hetzelfde kanaal is. Het nummer hoeft niet
-/// beroemd te zijn: het reist mee in de grant.
-pub const INPUT_PORT: u16 = 7879;
+/// De poort op het interne gateway-adres (10.100.0.1) en de langste regel:
+/// het contract met de display-app staat in `abi`.
+pub use abi::glass::{INPUT_PORT, LINE_MAX};
 
 /// Invoer is LOSSY BY DESIGN, dezelfde afspraak als de input-pomp in de
 /// display zelf. Een display die even niet leest mag de USB-pollus niet
@@ -67,10 +67,6 @@ pub const KEEPALIVE_NS: u64 = 5_000_000_000;
 /// Hoe lang één regel schrijven mag duren voor de binary de verbinding
 /// dichtdoet en op een nieuwe wacht.
 pub const WRITE_DEADLINE_NS: u64 = 1_000_000_000;
-
-/// De langste regel: `{"k":"btn","c":..,"v":1,"x":..,"y":..}` met drie
-/// volle i32's past ruim.
-pub const LINE_MAX: usize = 96;
 
 /// De rij van de manager naar de deliverer: één producer (de taak die de
 /// bus bezit), één consument.
@@ -348,29 +344,26 @@ impl<'a> Deliverer<'a> {
         None
     }
 
-    /// Het JSON-event dat `/input` verwacht (surfserve, inputMsg). Met de
-    /// hand in elkaar gezet: vier velden, en dit pad loopt per toetsaanslag.
+    /// Het JSON-event dat `/input` verwacht (surfserve, inputMsg), in de
+    /// vorm van het contract ([`Input`]) op de plek van de cursor.
     pub fn body(&self, e: &Event, out: &mut Line) {
         let (x, y) = (self.cur.x, self.cur.y);
+        let input = match e.kind {
+            Kind::KeyDown | Kind::KeyUp => Input::Key {
+                code: e.code,
+                down: e.kind == Kind::KeyDown,
+            },
+            Kind::MouseMove => Input::Move { x, y },
+            Kind::MouseDown | Kind::MouseUp => Input::Button {
+                code: e.code,
+                down: e.kind == Kind::MouseDown,
+                x,
+                y,
+            },
+            Kind::MouseWheel => Input::Wheel { v: e.dy, x, y },
+        };
         // Een regel past altijd in LINE_MAX (drie i32's plus de vaste
         // tekst); een fout hier laat hoogstens een afgekapte regel achter.
-        let _ = match e.kind {
-            Kind::KeyDown | Kind::KeyUp => writeln!(
-                out,
-                r#"{{"k":"key","c":{},"v":{}}}"#,
-                e.code,
-                u8::from(e.kind == Kind::KeyDown)
-            ),
-            Kind::MouseMove => writeln!(out, r#"{{"k":"move","x":{x},"y":{y}}}"#),
-            Kind::MouseDown | Kind::MouseUp => writeln!(
-                out,
-                r#"{{"k":"btn","c":{},"v":{},"x":{x},"y":{y}}}"#,
-                e.code,
-                u8::from(e.kind == Kind::MouseDown)
-            ),
-            Kind::MouseWheel => {
-                writeln!(out, r#"{{"k":"wheel","c":0,"v":{},"x":{x},"y":{y}}}"#, e.dy)
-            }
-        };
+        let _ = writeln!(out, "{input}");
     }
 }

@@ -54,9 +54,15 @@ use crate::slots::{
     self, Envelope, ImageGrant, Occupancy, Reply, Request, Response, Servicers, StartSpec, try_vec,
 };
 use crate::{Error, Result, SLOT_CAP, Slot};
+use abi::hopabi::{
+    HDR_LEN, Req, Resp, STATUS_DENIED, STATUS_ERROR, STATUS_NO_ENT, STATUS_OK, decode_req,
+};
 use abi::layout::{ABI_CTRL_OFF, ABI_TAIL, LINK_BASE};
 use abi::place::{self, MAX_SEGMENTS, Segment};
-use abi::systemapi::{PrivOp, SlotInfo, SlotState, StartReq, StreamResp, StreamState};
+use abi::systemapi::{
+    Header, Kind, PrivOp, SlotInfo, SlotState, StartReq, StreamResp, StreamState, decode_header,
+    encode_header,
+};
 use alloc::vec::Vec;
 use bounded::BoundedVec;
 use core::fmt;
@@ -66,24 +72,10 @@ use core::time::Duration;
 use sync::mpsc::Mailbox;
 use sync::{Either, LocalCell, select};
 
-/// De versie van het frame (`systemapi.Version`).
-pub const VERSION: u8 = 1;
-/// HOP's vaste interne servicepoort.
-pub const PORT: u16 = 10100;
-/// Een call van de app.
-pub const KIND_CALL: u8 = 1;
-/// Het antwoord op een call.
-pub const KIND_RESULT: u8 = 2;
-/// Een logregel van de app.
-pub const KIND_LOG: u8 = 3;
-/// De grootste I/O-brok van één call.
-pub const MAX_IO_CHUNK: usize = 1 << 20;
-/// De grootste payload van één frame.
-pub const MAX_PAYLOAD: usize = MAX_IO_CHUNK + (64 << 10);
-/// "HOPS" little-endian op de draad.
-pub const MAGIC: u32 = 0x5350_4f48;
-/// De kop: magic, versie, soort, twee gereserveerd, lengte.
-pub const HEADER_LEN: usize = 12;
+// De framing, de kop van een call en het adresplan zijn van `abi`: de kern
+// codeert ze met dezelfde encoders als applib (review 01-10, "abi als
+// enige waarheid").
+pub use abi::systemapi::{MAX_IO_CHUNK, MAX_PAYLOAD};
 /// Open system-verbindingen per levensduur. applib houdt er één open; de
 /// tweede is voor een herverbinding waarvan HOP de FIN van de oude nog niet
 /// zag. Elke verbinding houdt netwerk- en callbuffers vast.
@@ -93,8 +85,6 @@ pub const MAX_SYSTEM_CONNS: u8 = 2;
 /// ([`crate::store`]). Gemeten 30-09: met twee kreeg de kloktaak van Hop
 /// geen verbinding meer zodra de store-taak er een hield.
 pub const MAX_HOP_CONNS: u8 = MAX_SYSTEM_CONNS + 1;
-/// Het interne net: 10.100.0.0/24, HOP is .1, slot i is .(i+1).
-pub const NET: u32 = (10 << 24) | (100 << 16);
 /// Hoeveel images tegelijk mogen stromen. Hop begrenst zelf op vier
 /// (`runner::MAX_CONCURRENT_DOWNLOADS`); de kern houdt ruimte voor een
 /// flip-bundel en een herstart ernaast.
@@ -131,36 +121,7 @@ pub const LIFE_TICK: Duration = Duration::from_millis(100);
 /// dat hoogstens één keer per vijf minuten.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
-// De framing en het adresplan zijn van `abi`; de kern spiegelt ze als
-// constanten en de compiler bewaakt dat ze gelijk blijven.
-const _: () = {
-    use abi::systemapi as sa;
-    assert!(VERSION == sa::VERSION && PORT == sa::PORT && MAGIC == sa::MAGIC);
-    assert!(MAX_IO_CHUNK == sa::MAX_IO_CHUNK && MAX_PAYLOAD == sa::MAX_PAYLOAD);
-    assert!(HEADER_LEN == sa::HEADER_LEN);
-    assert!(KIND_CALL == sa::Kind::Call as u8 && KIND_RESULT == sa::Kind::Result as u8);
-    assert!(KIND_LOG == sa::Kind::Log as u8);
-    assert!(NET | 1 == abi::layout::HOST_IP4);
-    assert!(ABI_VERSION == abi::hopabi::VERSION);
-    assert!(REQ_HEADER == abi::hopabi::HDR_LEN);
-    assert!(STATUS_OK == abi::hopabi::STATUS_OK && STATUS_ERROR == abi::hopabi::STATUS_ERROR);
-    assert!(STATUS_NO_ENT == abi::hopabi::STATUS_NO_ENT);
-    assert!(STATUS_DENIED == abi::hopabi::STATUS_DENIED);
-    assert!(LOG_LINE_MAX + 2 <= LOG_RING_BYTES);
-};
-
-/// De hopabi-versie van een call.
-pub const ABI_VERSION: u8 = 1;
-/// De kop van een hopabi-call of -antwoord.
-pub const REQ_HEADER: usize = 24;
-/// Status: gelukt.
-pub const STATUS_OK: u16 = 0;
-/// Status: fout (tekst in de data).
-pub const STATUS_ERROR: u16 = 1;
-/// Status: bestaat niet.
-pub const STATUS_NO_ENT: u16 = 2;
-/// Status: niet toegestaan.
-pub const STATUS_DENIED: u16 = 3;
+const _: () = assert!(LOG_LINE_MAX + 2 <= LOG_RING_BYTES);
 
 /// De bevoegdheid van Hop: het enige token waarmee de lifecycle over de
 /// system-API bestuurd wordt.
@@ -253,10 +214,7 @@ pub struct FlipBundle {
 /// Het slot achter een bron-IP, of `None` als het geen app-adres is.
 #[must_use]
 pub fn slot_from_remote(ip: u32, max_slots: usize) -> Option<Slot> {
-    if ip & 0xFFFF_FF00 != NET {
-        return None;
-    }
-    let slot = Slot::new(((ip & 0xFF) as usize).checked_sub(1)?)?;
+    let slot = Slot::new(abi::layout::ip4_port(ip)?)?;
     (slot.get() <= max_slots).then_some(slot)
 }
 
@@ -283,134 +241,44 @@ async fn write_all(c: &mut impl Conn, mut buf: &[u8]) -> Result {
     Ok(())
 }
 
-/// Leest een framekop: soort en lengte.
-pub async fn read_header(c: &mut impl Conn) -> Result<(u8, usize)> {
-    let mut h = [0u8; HEADER_LEN];
+/// Leest een framekop: soort en lengte, getoetst door `abi` (magie, versie,
+/// soort en maat vóór er één payloadbyte gelezen is).
+pub async fn read_header(c: &mut impl Conn) -> Result<Header> {
+    let mut h = [0u8; abi::systemapi::HEADER_LEN];
     read_full(c, &mut h).await?;
-    let magic = u32::from_le_bytes([h[0], h[1], h[2], h[3]]);
-    if magic != MAGIC {
-        return Err(Error::Version {
-            have: u64::from(magic),
-            want: u64::from(MAGIC),
-        });
-    }
-    if h[4] != VERSION {
-        return Err(Error::Version {
-            have: u64::from(h[4]),
-            want: u64::from(VERSION),
-        });
-    }
-    let n = u32::from_le_bytes([h[8], h[9], h[10], h[11]]) as usize;
-    if n > MAX_PAYLOAD {
-        return Err(Error::TooLarge {
-            len: n,
-            max: MAX_PAYLOAD,
-        });
-    }
-    Ok((h[5], n))
+    Ok(decode_header(&h)?)
 }
 
-/// Schrijft één frame.
-pub async fn write_frame(c: &mut impl Conn, kind: u8, payload: &[u8]) -> Result {
-    if payload.len() > MAX_PAYLOAD {
-        return Err(Error::TooLarge {
-            len: payload.len(),
-            max: MAX_PAYLOAD,
-        });
-    }
-    let mut h = [0u8; HEADER_LEN];
-    h[..4].copy_from_slice(&MAGIC.to_le_bytes());
-    h[4] = VERSION;
-    h[5] = kind;
-    h[8..].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+/// Schrijft één frame; een te groot frame gaat nooit (half) de draad op.
+pub async fn write_frame(c: &mut impl Conn, kind: Kind, payload: &[u8]) -> Result {
+    let h = encode_header(kind, payload.len())?;
     write_all(c, &h).await?;
     write_all(c, payload).await
 }
 
-/// Een hopabi-call.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Call<'a> {
-    /// De operatie.
-    pub op: u8,
-    /// Het volgnummer (komt terug in het antwoord).
-    pub seq: u32,
-    /// Offset (of slot, bij de bevoegde ops).
-    pub off: u64,
-    /// Lengte (of maat, adres, time-out).
-    pub n: u64,
-    /// Het pad.
-    pub path: &'a [u8],
-    /// De data.
-    pub data: &'a [u8],
+/// Schrijft de antwoordkop vóór de `n` databytes die al op `out[HDR_LEN..]`
+/// staan; geeft de lengte van het antwoord.
+fn answer(out: &mut [u8], op: u8, seq: u32, status: u16, size: u64, n: usize) -> usize {
+    let r = Resp {
+        op,
+        status,
+        seq,
+        size,
+        data: &[],
+    };
+    abi::hopabi::encode_resp_head(out, &r, n).unwrap_or(0)
 }
 
-impl<'a> Call<'a> {
-    /// Decodeert een call.
-    pub fn decode(b: &'a [u8]) -> Result<Call<'a>> {
-        let u = |o: usize| -> u64 {
-            b.get(o..o + 8)
-                .and_then(|s| <[u8; 8]>::try_from(s).ok())
-                .map_or(0, u64::from_le_bytes)
-        };
-        if b.len() < REQ_HEADER {
-            return Err(Error::Corrupt { at: b.len() });
-        }
-        if b[0] != ABI_VERSION {
-            return Err(Error::Version {
-                have: u64::from(b[0]),
-                want: u64::from(ABI_VERSION),
-            });
-        }
-        let plen = usize::from(u16::from_le_bytes([b[2], b[3]]));
-        let path = b
-            .get(REQ_HEADER..REQ_HEADER + plen)
-            .ok_or(Error::Corrupt { at: 2 })?;
-        Ok(Call {
-            op: b[1],
-            seq: u32::from_le_bytes([b[4], b[5], b[6], b[7]]),
-            off: u(8),
-            n: u(16),
-            path,
-            data: b.get(REQ_HEADER + plen..).unwrap_or(&[]),
-        })
-    }
-
-    /// Dezelfde call als [`abi::hopabi::Req`], voor de decoders van `abi`.
-    fn as_req(&self) -> abi::hopabi::Req<'a> {
-        abi::hopabi::Req {
-            op: self.op,
-            seq: self.seq,
-            off: self.off,
-            n: self.n,
-            path: self.path,
-            data: self.data,
-        }
-    }
-}
-
-/// Schrijft alleen de antwoordkop in `out[..REQ_HEADER]`.
-fn put_resp_head(out: &mut [u8], op: u8, status: u16, seq: u32, size: u64) {
-    if let Some(h) = out.get_mut(..REQ_HEADER) {
-        h[0] = ABI_VERSION;
-        h[1] = op;
-        h[2..4].copy_from_slice(&status.to_le_bytes());
-        h[4..8].copy_from_slice(&seq.to_le_bytes());
-        h[8..16].copy_from_slice(&size.to_le_bytes());
-        h[16..24].fill(0);
-    }
-}
-
-/// Schrijft een antwoordkop in `out` gevolgd door `data`; geeft de lengte.
-pub fn encode_resp(out: &mut [u8], op: u8, status: u16, seq: u32, size: u64, data: &[u8]) -> usize {
-    let n = (REQ_HEADER + data.len()).min(out.len());
-    put_resp_head(out, op, status, seq, size);
-    if let (Some(d), Some(s)) = (
-        out.get_mut(REQ_HEADER..n),
-        data.get(..n.saturating_sub(REQ_HEADER)),
-    ) {
-        d.copy_from_slice(s);
-    }
-    n
+/// Een antwoord met een fout-`status` en `text` in de data.
+fn refuse(out: &mut [u8], op: u8, seq: u32, status: u16, text: &[u8]) -> usize {
+    let r = Resp {
+        op,
+        status,
+        seq,
+        size: 0,
+        data: text,
+    };
+    abi::hopabi::encode_resp(out, &r).unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -1146,11 +1014,7 @@ impl Placer {
             },
         };
         let w = place::Window::canonical(self.app_ram, 0, self.scr_off);
-        let abi_slot = abi::layout::Slot::new(slot.get()).ok_or(Error::SlotRange {
-            slot: slot.get(),
-            max: SLOT_CAP,
-        })?;
-        let plan = place::build(&image, &w, abi_slot, Some(abi::ABI_VERSION))?;
+        let plan = place::build(&image, &w, slot, Some(abi::ABI_VERSION))?;
         // Build zag dezelfde headers; toch getoetst, want uiteenlopen is
         // precies de klasse fouten die stil blijft.
         if plan.segments.as_slice() != self.segs.as_slice() {
@@ -1319,7 +1183,7 @@ pub async fn place<'r, const N: usize>(
 }
 
 /// Wat een bevoegde op teruggeeft: `size` en hoeveel databytes er al op
-/// `out[REQ_HEADER..]` staan.
+/// `out[HDR_LEN..]` staan.
 type Answer = core::result::Result<(u64, usize), Fail>;
 
 /// Waarom een verbinding eindigde; de listener zet het in zijn regel.
@@ -1528,7 +1392,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
     /// is of een frame ongeldig is. Meerdere verbindingen tegelijk mogen
     /// (elk in een eigen taak): `buf` is de callbuffer van déze verbinding,
     /// `out` haar antwoordbuffer, `reply` haar antwoordplek bij de actor.
-    /// `timer` draagt de tik van het toezicht. Een `KIND_LOG`-frame gaat
+    /// `timer` draagt de tik van het toezicht. Een log-frame (`Kind::Log`) gaat
     /// naar `log.app_line`: geef een [`LogTee`] mee om het ook in `NEXT_LOG`
     /// te zien.
     #[expect(
@@ -1584,22 +1448,22 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
     ) -> Result {
         let slot = who.slot;
         loop {
-            let (kind, n) = read_header(w).await?;
-            if kind != KIND_CALL && kind != KIND_LOG {
+            let Header { kind, len: n } = read_header(w).await?;
+            if kind == Kind::Result {
                 return Err(Error::Corrupt { at: 5 });
             }
             let payload = buf.get_mut(..n).ok_or(Error::TooLarge { len: n, max: 0 })?;
             read_full(w, payload).await?;
             w.alive()?;
-            if kind == KIND_LOG {
+            if kind == Kind::Log {
                 log.app_line(slot, payload);
                 continue;
             }
-            let len = match Call::decode(payload) {
+            let len = match decode_req(payload) {
                 Ok(call) if rpc::is_fs_op(call.op) || call.op == abi::hopabi::OP_DEVICE_COMMAND => {
                     // Alleen getallen en bereiken: de lening van `buf` eindigt
                     // hier, want de buffer zelf gaat zo naar de hopfs-actor.
-                    let path = REQ_HEADER..REQ_HEADER + call.path.len();
+                    let path = HDR_LEN..HDR_LEN + call.path.len();
                     let head = FsHead {
                         op: call.op,
                         seq: call.seq,
@@ -1629,7 +1493,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
                     crate::codecabi::serve_with_firmware(
                         slot,
                         who.generation,
-                        &call.as_req(),
+                        &call,
                         out,
                         self.fs,
                         reply,
@@ -1637,9 +1501,9 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
                     .await
                 }
                 Ok(call) => self.call(slot, &call, reply, mem, hooks, out).await,
-                Err(_) => encode_resp(out, 0, STATUS_ERROR, 0, 0, b"bad request"),
+                Err(_) => refuse(out, 0, 0, STATUS_ERROR, b"bad request"),
             };
-            write_frame(w, KIND_RESULT, out.get(..len).unwrap_or(&[])).await?;
+            write_frame(w, Kind::Result, out.get(..len).unwrap_or(&[])).await?;
         }
     }
 
@@ -1666,14 +1530,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             return fail(out, h.op, h.seq, &Fail::Kern(Error::Denied));
         }
         if (device.is_some() && self.devices.is_none()) || (device.is_none() && self.fs.is_none()) {
-            return encode_resp(
-                out,
-                h.op,
-                STATUS_ERROR,
-                h.seq,
-                0,
-                b"no storage layer on board",
-            );
+            return refuse(out, h.op, h.seq, STATUS_ERROR, b"no storage layer on board");
         }
         let c = FsCall {
             slot: who.slot,
@@ -1708,10 +1565,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             }
         };
         match result {
-            Ok((size, data_len)) => {
-                put_resp_head(out, h.op, STATUS_OK, h.seq, size);
-                (REQ_HEADER + data_len).min(out.len())
-            }
+            Ok((size, data_len)) => answer(out, h.op, h.seq, STATUS_OK, size, data_len),
             Err(e) => fail(out, h.op, h.seq, &Fail::Kern(e)),
         }
     }
@@ -1733,12 +1587,11 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         out: &mut Vec<u8>,
     ) -> usize {
         let Some(queue) = self.store else {
-            return encode_resp(
+            return refuse(
                 out,
                 h.op,
-                STATUS_ERROR,
                 h.seq,
-                0,
+                STATUS_ERROR,
                 b"no object store on this node (the kernel has no store queue)",
             );
         };
@@ -1760,7 +1613,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
     async fn call(
         &self,
         slot: Slot,
-        c: &Call<'_>,
+        c: &Req<'_>,
         reply: &'r Reply,
         mem: &mut impl PhysMem,
         hooks: &impl Hooks,
@@ -1776,10 +1629,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             (Some(_), _) => Err(Fail::Kern(Error::Privilege { slot: slot.get() })),
         };
         match r {
-            Ok((size, data_len)) => {
-                put_resp_head(out, c.op, STATUS_OK, c.seq, size);
-                (REQ_HEADER + data_len).min(out.len())
-            }
+            Ok((size, data_len)) => answer(out, c.op, c.seq, STATUS_OK, size, data_len),
             Err(e) => fail(out, c.op, c.seq, &e),
         }
     }
@@ -1793,13 +1643,13 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         &self,
         _proof: &Privilege,
         op: PrivOp,
-        c: &Call<'_>,
+        c: &Req<'_>,
         reply: &'r Reply,
         mem: &mut impl PhysMem,
         hooks: &impl Hooks,
         out: &mut [u8],
     ) -> Answer {
-        let data = out.get_mut(REQ_HEADER..).unwrap_or(&mut []);
+        let data = out.get_mut(HDR_LEN..).unwrap_or(&mut []);
         match op {
             PrivOp::StartSlot => self.start(c, reply).await,
             PrivOp::StreamImage => self.stream(c, reply, mem, data).await,
@@ -1919,8 +1769,8 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
 
     /// START_SLOT: de kern kiest een leeg slot, claimt het en houdt de
     /// grant voor de stroom.
-    async fn start(&self, c: &Call<'_>, reply: &'r Reply) -> Answer {
-        let req = StartReq::decode(&c.as_req())?;
+    async fn start(&self, c: &Req<'_>, reply: &'r Reply) -> Answer {
+        let req = StartReq::decode(c)?;
         if req.image_size == 0 {
             return Err(Fail::Place(abi::Error::ImageSize(0)));
         }
@@ -2008,7 +1858,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
     /// STREAM_IMAGE: bytes naar hun plek; bij de laatste plaatsen en armen.
     async fn stream(
         &self,
-        c: &Call<'_>,
+        c: &Req<'_>,
         reply: &'r Reply,
         mem: &mut impl PhysMem,
         data: &mut [u8],
@@ -2057,7 +1907,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
     /// slot 0 is de kern zelf ([`kern_status`]).
     async fn status(
         &self,
-        c: &Call<'_>,
+        c: &Req<'_>,
         reply: &'r Reply,
         hooks: &impl Hooks,
         data: &mut [u8],
@@ -2196,11 +2046,11 @@ fn fail(out: &mut [u8], op: u8, seq: u32, e: &Fail) -> usize {
     };
     let mut msg = [0u8; 160];
     let n = crate::fmt_into(&mut msg, e);
-    encode_resp(out, op, status, seq, 0, msg.get(..n).unwrap_or(&[]))
+    refuse(out, op, seq, status, msg.get(..n).unwrap_or(&[]))
 }
 
 /// Het doelslot van een bevoegde call (`off`).
-fn target(c: &Call<'_>) -> Result<Slot> {
+fn target(c: &Req<'_>) -> Result<Slot> {
     usize::try_from(c.off)
         .ok()
         .and_then(Slot::new)
@@ -2338,6 +2188,7 @@ mod tests {
     use crate::slots::tests::{Actor, FakeConsole, Obey, actor, s};
     use crate::slots::{Outbox, servicer_task};
     use crate::testutil::FakeTimer;
+    use abi::layout::port_ip4;
     use abi::systemapi::{StreamState, plain_req, stream_req};
     use core::cell::Cell;
     use core::pin::pin;
@@ -2363,7 +2214,7 @@ mod tests {
         fn new(ip: u32, calls: &[Vec<u8>]) -> Pipe {
             let mut rx = Vec::new();
             for c in calls {
-                rx.extend(frame(KIND_CALL, c));
+                rx.extend(frame(Kind::Call, c));
             }
             Pipe {
                 rx: rx.into(),
@@ -2407,17 +2258,14 @@ mod tests {
         }
     }
 
-    fn frame(kind: u8, p: &[u8]) -> Vec<u8> {
-        let mut v = Vec::new();
-        v.extend_from_slice(&MAGIC.to_le_bytes());
-        v.extend_from_slice(&[VERSION, kind, 0, 0]);
-        v.extend_from_slice(&(p.len() as u32).to_le_bytes());
+    fn frame(kind: Kind, p: &[u8]) -> Vec<u8> {
+        let mut v = encode_header(kind, p.len()).unwrap().to_vec();
         v.extend_from_slice(p);
         v
     }
 
     fn enc(r: &abi::hopabi::Req<'_>) -> Vec<u8> {
-        let mut v = vec![0u8; REQ_HEADER + r.path.len() + r.data.len()];
+        let mut v = vec![0u8; HDR_LEN + r.path.len() + r.data.len()];
         let n = abi::hopabi::encode_req(&mut v, r).unwrap();
         v.truncate(n);
         v
@@ -2554,10 +2402,16 @@ mod tests {
         let mut wide = [0u8; abi::systemapi::SLOT_INFO_LEN + 8];
         // Wie de maat noemt (Hop sinds v3.0.5) krijgt alles.
         let n = abi::systemapi::SLOT_INFO_LEN as u64;
-        assert_eq!(fit_info(&full, n, &mut wide).unwrap().1, abi::systemapi::SLOT_INFO_LEN);
+        assert_eq!(
+            fit_info(&full, n, &mut wide).unwrap().1,
+            abi::systemapi::SLOT_INFO_LEN
+        );
         // Zonder maat (Hop tot v3.0.3, een buffer van 88): het voorvoegsel,
         // en dat decodeert daar.
-        assert_eq!(fit_info(&full, 0, &mut wide).unwrap().1, abi::systemapi::SLOT_INFO_LEN_V1);
+        assert_eq!(
+            fit_info(&full, 0, &mut wide).unwrap().1,
+            abi::systemapi::SLOT_INFO_LEN_V1
+        );
         assert_eq!(wide[..88], full[..abi::systemapi::SLOT_INFO_LEN_V1]);
         // Korter dan het voorvoegsel is een fout, geen half antwoord.
         let mut tiny = [0u8; 32];
@@ -2582,7 +2436,7 @@ mod tests {
         let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8).with_logs(&logs);
         let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
         let mut hop = Pipe::new(
-            NET | 2,
+            port_ip4(1),
             &[
                 op(PrivOp::SlotStatus, 1, 0, 128),
                 op(PrivOp::SlotStatus, 2, 0, 128),
@@ -2612,7 +2466,7 @@ mod tests {
         assert_ne!(res[2].1, STATUS_OK, "STOP_SLOT 0 stopped the kern");
         assert_ne!(res[3].1, STATUS_OK, "NEXT_LOG 0 answered");
         // Een gewone app vraagt slot 0: onbevoegd, zoals elke bevoegde op.
-        let mut app = Pipe::new(NET | 3, &[op(PrivOp::SlotStatus, 1, 0, 128)]);
+        let mut app = Pipe::new(port_ip4(2), &[op(PrivOp::SlotStatus, 1, 0, 128)]);
         let r = drive(
             &sys, &mut a, &inbox, &reply, &mut app, &mut mem, &hooks, &tee, None,
         );
@@ -2622,12 +2476,13 @@ mod tests {
 
     fn results(mut b: &[u8]) -> Vec<Res> {
         let mut out = Vec::new();
-        while b.len() >= HEADER_LEN {
-            assert_eq!(b[5], KIND_RESULT);
-            let n = u32::from_le_bytes(b[8..12].try_into().unwrap()) as usize;
-            let r = abi::hopabi::decode_resp(&b[HEADER_LEN..HEADER_LEN + n]).unwrap();
+        const FH: usize = abi::systemapi::HEADER_LEN;
+        while b.len() >= FH {
+            let h = decode_header(b[..FH].try_into().unwrap()).unwrap();
+            assert_eq!(h.kind, Kind::Result);
+            let r = abi::hopabi::decode_resp(&b[FH..FH + h.len]).unwrap();
             out.push((r.op, r.status, r.seq, r.size, r.data.to_vec()));
-            b = &b[HEADER_LEN + n..];
+            b = &b[FH + h.len..];
         }
         out
     }
@@ -2680,7 +2535,7 @@ mod tests {
         fn read_into(&mut self, buf: &mut [u8]) -> Option<(u8, usize)> {
             let l = self.0.take()?;
             buf[..l.len()].copy_from_slice(l);
-            Some((crate::slots::KIND_LOG, l.len()))
+            Some((crate::slots::RING_LOG, l.len()))
         }
         fn corrupt(&self) -> bool {
             false
@@ -2828,7 +2683,7 @@ mod tests {
 
     #[test]
     fn slot_from_remote_maps_the_internal_net() {
-        let ip = |d: u32| NET | d;
+        let ip = |d: u32| (abi::layout::HOST_IP4 & !0xff) | d;
         assert_eq!(slot_from_remote(ip(2), 8), Some(s(1)));
         assert_eq!(slot_from_remote(ip(9), 8), Some(s(8)));
         assert_eq!(slot_from_remote(ip(10), 8), None, "beyond max slots");
@@ -2853,17 +2708,17 @@ mod tests {
     fn frames_survive_fragmentation_and_oversize_is_refused() {
         let big = vec![0xa5u8; MAX_IO_CHUNK];
         let mut p = Pipe {
-            rx: frame(KIND_CALL, &big).into(),
+            rx: frame(Kind::Call, &big).into(),
             tx: Vec::new(),
             chunk: 1,
             ip: 0,
             hold: false,
         };
-        let (kind, n) = crate::testutil::block_on(read_header(&mut p)).unwrap();
-        assert_eq!((kind, n), (KIND_CALL, MAX_IO_CHUNK));
+        let h = crate::testutil::block_on(read_header(&mut p)).unwrap();
+        assert_eq!((h.kind, h.len), (Kind::Call, MAX_IO_CHUNK));
         let mut w = Pipe::new(0, &[]);
         let too_big = vec![0u8; MAX_PAYLOAD + 1];
-        assert!(crate::testutil::block_on(write_frame(&mut w, KIND_CALL, &too_big)).is_err());
+        assert!(crate::testutil::block_on(write_frame(&mut w, Kind::Call, &too_big)).is_err());
         assert!(w.tx.is_empty(), "oversized frame half written");
     }
 
@@ -2999,7 +2854,7 @@ mod tests {
         let (c1, c2) = (0x50, SEG_OFF + 0x80);
         let env = b"BUCKET=hop-apps\n";
         let mut p = Pipe::new(
-            NET | 2,
+            port_ip4(1),
             &[
                 // Twee namen op 80 (http en web) en 8443: twee publicaties.
                 start_call_ports(1, img.len() as u64, env, &[80, 0, 80, 0, 0xfb, 0x20]),
@@ -3065,7 +2920,7 @@ mod tests {
 
         // Slot 2 is niet bevoegd: stop, start en status worden geweigerd.
         let mut other = Pipe::new(
-            NET | 3,
+            port_ip4(2),
             &[
                 op(PrivOp::StopSlot, 9, 3, 10),
                 start_call(10, 16, b""),
@@ -3080,7 +2935,7 @@ mod tests {
 
         // Hop stopt slot 3: de kern bevestigt en geeft vrij.
         let mut stop = Pipe::new(
-            NET | 2,
+            port_ip4(1),
             &[
                 op(PrivOp::StopSlot, 12, 3, 50),
                 op(PrivOp::SlotStatus, 13, 3, 128),
@@ -3116,7 +2971,7 @@ mod tests {
         let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
         let img = elf(u64::from(abi::ABI_VERSION));
         let mut p = Pipe::new(
-            NET | 2,
+            port_ip4(1),
             &[
                 start_call_mounts(1, 16, &[(b"/data", b"/.tasks/slot2")]),
                 start_call_mounts(2, 16, &[(b"/", b"/volumes/a")]),
@@ -3196,7 +3051,7 @@ mod tests {
         for (i, c) in img.chunks(32 << 10).enumerate() {
             calls.push(enc(&stream_req(2 + i as u32, 3, (i << 15) as u64, c)));
         }
-        let mut p = Pipe::new(NET | 2, &calls);
+        let mut p = Pipe::new(port_ip4(1), &calls);
         let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
         let r = drive(
             &sys, &mut a, &inbox, &reply, &mut p, &mut mem, &hooks, &tee, None,
@@ -3230,7 +3085,7 @@ mod tests {
         let bad_abi = elf(9);
         let good = elf(u64::from(abi::ABI_VERSION));
         let mut p = Pipe::new(
-            NET | 2,
+            port_ip4(1),
             &[
                 // Geen ELF: de eerste brok wordt al geweigerd.
                 start_call(1, 16, b""),
@@ -3304,7 +3159,7 @@ mod tests {
             req(OP_STAT, 4, b"../slot1/x", b"", 0),
             req(OP_LIST, 5, b"/", b"", 0),
         ];
-        let mut p = Pipe::new(NET | 3, &calls);
+        let mut p = Pipe::new(port_ip4(2), &calls);
         let (fs, _) = crate::rpc::tests::disk(16);
         let mut fsa = crate::rpc::FsActor::new(fs, &svc, &con);
         let mut run: Servicer<'_> = std::boxed::Box::pin(async { fsa.run(&fsin).await });
@@ -3333,7 +3188,7 @@ mod tests {
 
         // Zonder schijf: een nette fout, en de verbinding leeft door.
         let bare = System::new(&inbox, &svc, None, 8);
-        let mut p = Pipe::new(NET | 3, &[req(OP_STAT, 1, b"x", b"", 0)]);
+        let mut p = Pipe::new(port_ip4(2), &[req(OP_STAT, 1, b"x", b"", 0)]);
         let _ = drive(
             &bare, &mut a, &inbox, &reply, &mut p, &mut mem, &hooks, &tee, None,
         );
@@ -3364,7 +3219,7 @@ mod tests {
             path: &sha[..31],
             ..flip
         };
-        let mut p = Pipe::new(NET | 2, &[enc(&flip), enc(&short)]);
+        let mut p = Pipe::new(port_ip4(1), &[enc(&flip), enc(&short)]);
         let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
         let _ = drive(
             &sys, &mut a, &inbox, &reply, &mut p, &mut mem, &hooks, &tee, None,
@@ -3418,7 +3273,7 @@ mod tests {
             ..Default::default()
         });
         let mut p = Pipe::new(
-            NET | 2,
+            port_ip4(1),
             &[
                 start,
                 enc(&stream_req(2, 3, 0, &bundle[..40])),
@@ -3486,24 +3341,33 @@ mod tests {
         crate::slots::tests::start(&mut a, 1, 8, 1).unwrap();
         let inbox: Mailbox<Envelope<'_>, 2> = Mailbox::new();
         let sys = System::new(&inbox, &svc, None, 8);
-        let one = sys.admit(NET | 2).unwrap();
-        let two = sys.admit(NET | 2).unwrap();
-        assert!(sys.admit(NET | 2).is_none(), "third connection admitted");
+        let one = sys.admit(port_ip4(1)).unwrap();
+        let two = sys.admit(port_ip4(1)).unwrap();
+        assert!(
+            sys.admit(port_ip4(1)).is_none(),
+            "third connection admitted"
+        );
         // Een weigering kost geen plaats: ook de vierde blijft buiten.
-        assert!(sys.admit(NET | 2).is_none(), "a refusal gave a seat back");
+        assert!(
+            sys.admit(port_ip4(1)).is_none(),
+            "a refusal gave a seat back"
+        );
         assert_eq!(svc.ctl(s(1)).unwrap().conns(), 2);
         drop(one);
-        assert!(sys.admit(NET | 2).is_some());
+        assert!(sys.admit(port_ip4(1)).is_some());
         drop(two);
         assert!(
-            sys.admit(NET | 3).is_none(),
+            sys.admit(port_ip4(2)).is_none(),
             "slot without servicer admitted"
         );
         // Het slot van Hop houdt er één meer, voor zijn store-taak.
         let hop = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
-        let seats: Vec<_> = (0..MAX_HOP_CONNS).map(|_| hop.admit(NET | 2)).collect();
+        let seats: Vec<_> = (0..MAX_HOP_CONNS).map(|_| hop.admit(port_ip4(1))).collect();
         assert!(seats.iter().all(Option::is_some));
-        assert!(hop.admit(NET | 2).is_none(), "a fourth connection for Hop");
+        assert!(
+            hop.admit(port_ip4(1)).is_none(),
+            "a fourth connection for Hop"
+        );
     }
 
     /// Een lege omgeving van één verbinding: buffers, antwoordplek, geheugen.
@@ -3538,9 +3402,9 @@ mod tests {
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
         let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8).with_logs(&logs);
         let (timer, hooks) = (FakeTimer::default(), NoHooks::default());
-        let mut quiet = Pipe::silent(NET | 3);
+        let mut quiet = Pipe::silent(port_ip4(2));
         let mut hop = Pipe::new(
-            NET | 2,
+            port_ip4(1),
             &[
                 op(PrivOp::SlotStatus, 1, 2, 128),
                 op(PrivOp::SetClock, 2, 0, 42),
@@ -3607,9 +3471,15 @@ mod tests {
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
         let sys = System::new(&inbox, &svc, None, 8);
         let (timer, hooks) = (FakeTimer::default(), NoHooks::default());
-        let (mut p1, mut p2) = (Pipe::silent(NET | 3), Pipe::silent(NET | 3));
-        let (w1, w2) = (sys.admit(NET | 3).unwrap(), sys.admit(NET | 3).unwrap());
-        assert!(sys.admit(NET | 3).is_none(), "third connection admitted");
+        let (mut p1, mut p2) = (Pipe::silent(port_ip4(2)), Pipe::silent(port_ip4(2)));
+        let (w1, w2) = (
+            sys.admit(port_ip4(2)).unwrap(),
+            sys.admit(port_ip4(2)).unwrap(),
+        );
+        assert!(
+            sys.admit(port_ip4(2)).is_none(),
+            "third connection admitted"
+        );
         let mut ends = [None, None];
         {
             let mut f1 = pin!(sys.serve(
@@ -3659,7 +3529,7 @@ mod tests {
         assert_eq!(ends, [Some(End::Evicted), Some(End::Evicted)]);
         drop((w1, w2));
         assert_eq!(svc.ctl(s(2)).unwrap().conns(), 0, "seats not given back");
-        assert!(sys.admit(NET | 3).is_none(), "stopped slot admitted");
+        assert!(sys.admit(port_ip4(2)).is_none(), "stopped slot admitted");
     }
 
     /// Een verbinding zonder verkeer van een levend slot sluit na
@@ -3673,8 +3543,8 @@ mod tests {
         let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
         let sys = System::new(&inbox, &svc, None, 8);
         let (timer, hooks) = (FakeTimer::default(), NoHooks::default());
-        let mut p = Pipe::silent(NET | 3);
-        let who = sys.admit(NET | 3).unwrap();
+        let mut p = Pipe::silent(port_ip4(2));
+        let who = sys.admit(port_ip4(2)).unwrap();
         let end = crate::testutil::block_on(sys.serve(
             &mut p,
             &who,

@@ -14,9 +14,10 @@
 //! deurbel-drempel op de control-page is van de idle ([`crate::sleep`]).
 
 use crate::app::App;
-use crate::contract::{NET_MTU, NET_RING_DATA_CAP, slot_ip4, slot_mac};
+use crate::contract::{NET_MTU, NET_RING_DATA_CAP};
 use crate::ring::{Corrupt, Kind, Peek, Reader, Writer};
 use crate::sleep::{self, RxDoor};
+use abi::layout::{port_ip4, port_mac};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use core::time::Duration;
 use netdev::{Device, Mac, TxError};
@@ -86,10 +87,11 @@ pub(crate) fn owed_by_yield() {
     TX_OWED.store(false, Relaxed);
 }
 
-/// Het interne IPv4 van slot `slot` (big-endian).
+/// Het interne IPv4 van slot `slot` (big-endian; een app kent zijn slot
+/// als getal, 0 is de kern).
 #[must_use]
 pub const fn slot_ip(slot: u64) -> [u8; 4] {
-    slot_ip4(slot).to_be_bytes()
+    port_ip4(slot as usize).to_be_bytes()
 }
 
 /// Het adres van de kern op het slot-LAN: de gateway.
@@ -101,7 +103,7 @@ pub const fn host_ip() -> [u8; 4] {
 /// De MAC van slot `slot` (de kern is slot 0).
 #[must_use]
 pub const fn mac_of(slot: u64) -> Mac {
-    Mac(slot_mac(slot))
+    Mac(port_mac(slot as usize))
 }
 
 /// De NIC van een app: de twee frame-ringen in zijn staart.

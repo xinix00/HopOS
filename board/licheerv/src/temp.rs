@@ -44,7 +44,7 @@ pub fn code_to_milli(code: u32) -> Option<i32> {
 
 /// De temperatuur in milligraden, of `None` zonder geldige meting.
 #[must_use]
-pub fn temp_millic() -> Option<i32> {
+pub fn temp_milli_c() -> Option<i32> {
     code_to_milli(dev::read32(TEMPSEN.add(RESULT)))
 }
 

@@ -5,6 +5,7 @@
 use crate::device::DevState;
 use crate::ring::{CC_SUCCESS, EvRing, Event, Ring, TRB_CMD_COMP_EVT, TRB_LEN, TRB_TRANSFER_EVT};
 use crate::{CMD_RUN, ERDP_EHB, Error, Hc, POLL_STEP_NS, Poison, Result, STS_HCH, Timer};
+use core::time::Duration;
 use dev::{Pa, Reg};
 
 /// Hoeveel apparaten we tegelijk geadresseerd kunnen hebben. De controller
@@ -467,7 +468,7 @@ impl Hc {
                 };
                 return Err(Error::EventTimeout { what, usbsts });
             }
-            t.sleep(POLL_STEP_NS).await;
+            t.sleep(Duration::from_nanos(POLL_STEP_NS)).await;
         }
     }
 

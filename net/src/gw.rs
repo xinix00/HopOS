@@ -11,7 +11,7 @@
 //! vollopen. ICMP heeft geen pseudo-header, dus daar volstaat de
 //! IP-checksum; fragmenten weigeren we (het interne net heeft één MTU).
 
-use crate::plan::{HOST_MAC, SLOT_CAP, host_ip4, slot_mac};
+use crate::plan::{HOST_MAC, SLOT_CAP, host_ip4, ip4_port, port_mac};
 use crate::wire::{
     ETH_LEN, PROTO_ICMP, PROTO_TCP, PROTO_UDP, be32, fix_csum32, fix_l4_ip, ipv4_head, put_mac,
     put32,
@@ -64,20 +64,18 @@ pub fn from_host(f: &mut [u8], host_ip: u32, max_slots: usize) -> bool {
     if be32(f, ETH_LEN + 12) != host_ip {
         return false;
     }
-    let dst = be32(f, ETH_LEN + 16);
-    // slot_ip4(i) eindigt op i+1.
-    let slot = (dst & 0xff) as usize;
-    if dst >> 8 != host_ip4() >> 8 || slot < 2 || slot - 1 > max_slots.min(SLOT_CAP) {
+    let Some(slot) =
+        ip4_port(be32(f, ETH_LEN + 16)).filter(|&s| s >= 1 && s <= max_slots.min(SLOT_CAP))
+    else {
         return false;
-    }
-    let slot = slot - 1;
+    };
     let gw = host_ip4();
     put32(f, ETH_LEN + 12, gw);
     fix_csum32(f, ETH_LEN + 10, host_ip, gw);
     if proto != PROTO_ICMP {
         fix_l4_ip(f, l4, proto, host_ip, gw);
     }
-    put_mac(f, 0, &slot_mac(slot));
+    put_mac(f, 0, &port_mac(slot));
     put_mac(f, 6, &HOST_MAC);
     true
 }
@@ -85,7 +83,7 @@ pub fn from_host(f: &mut [u8], host_ip: u32, max_slots: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::slot_ip4;
+    use crate::plan::port_ip4;
     use crate::wire::testutil::*;
     use crate::wire::{be16, put16};
 
@@ -94,12 +92,12 @@ mod tests {
 
     #[test]
     fn gw_to_host() {
-        let slot_ip = slot_ip4(3);
+        let slot_ip = port_ip4(3);
         for proto in [PROTO_TCP, PROTO_UDP] {
             let mut f = mk_frame(
                 proto,
                 HOST_MAC,
-                slot_mac(3),
+                port_mac(3),
                 slot_ip,
                 host_ip4(),
                 40000,
@@ -115,9 +113,9 @@ mod tests {
         let mut f = mk_frame(
             PROTO_TCP,
             HOST_MAC,
-            slot_mac(3),
+            port_mac(3),
             slot_ip,
-            slot_ip4(5),
+            port_ip4(5),
             40000,
             80,
             &[],
@@ -135,7 +133,7 @@ mod tests {
                 [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
                 [1, 2, 3, 4, 5, 6],
                 GW_TEST_HOST_IP,
-                slot_ip4(3),
+                port_ip4(3),
                 8080,
                 40000,
                 b"antwoord",
@@ -145,7 +143,7 @@ mod tests {
                 "proto {proto}: geweigerd"
             );
             assert_eq!(be32(&f, ETH_LEN + 12), host_ip4());
-            assert_eq!(f[0..6], slot_mac(3));
+            assert_eq!(f[0..6], port_mac(3));
             assert_eq!(f[6..12], HOST_MAC);
             check_frame(&f, "GwFromHost");
         }
@@ -179,7 +177,7 @@ mod tests {
             [0; 6],
             [0; 6],
             0x0102_0304,
-            slot_ip4(3),
+            port_ip4(3),
             8080,
             443,
             &[],
@@ -199,7 +197,7 @@ mod tests {
             put16(ip, 2, 28);
             ip[8] = 64;
             ip[9] = PROTO_ICMP;
-            put32(ip, 12, slot_ip4(2));
+            put32(ip, 12, port_ip4(2));
             put32(ip, 16, host_ip4());
             let c = !fold16(sum_words(&ip[..20]));
             put16(ip, 10, c);
@@ -221,8 +219,8 @@ mod tests {
             let mut f = mk_frame(
                 PROTO_TCP,
                 HOST_MAC,
-                slot_mac(3),
-                slot_ip4(3),
+                port_mac(3),
+                port_ip4(3),
                 host_ip4(),
                 40000,
                 8080,

@@ -176,7 +176,7 @@ pub fn raw() -> Raw {
 
 /// De warmste temperatuur in milligraden, of `None` zonder geldige meting.
 #[must_use]
-pub fn temp_millic() -> Option<i32> {
+pub fn temp_milli_c() -> Option<i32> {
     raw().hottest()
 }
 

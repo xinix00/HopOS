@@ -52,7 +52,7 @@ use crate::cage::{Cage, CageError, Console, Cores, PortError, Power, Status, Tim
 use crate::grants::{Grants, NoGrants};
 use crate::kernflip::{MAX_FLIP_JOB, MAX_FLIP_MOUNTS, MAX_FLIP_PATH, MAX_FLIP_PORTS};
 use crate::partmem::{Owned, Partition, PartitionPool, Quarantined, Stopped};
-use crate::pool::{CorePool, GroupName, Placement};
+use crate::pool::{GroupName, Placement, Places};
 use crate::{Core, Error, GRAIN, Region, Result, SLOT_CAP, Slot};
 use alloc::vec::Vec;
 use core::sync::atomic::{
@@ -99,9 +99,10 @@ pub const SERVICER_GUARD: Duration = Duration::from_millis(10);
 /// OS-core (de tik, Hop, de switch). Zestien logregels is een burst; meer
 /// wacht een ronde.
 pub const SERVICER_BATCH: usize = 16;
-/// De ringsoort van een logregel (`ring.TypeLog`).
-pub const KIND_LOG: u8 = 1;
-const _: () = assert!(KIND_LOG as u32 == abi::ring::Kind::LOG.raw());
+/// De ringsoort van een logregel (`ring.TypeLog`, [`abi::ring::Kind::LOG`]);
+/// niet de framesoort van de system-API ([`abi::systemapi::Kind::Log`], 3).
+pub const RING_LOG: u8 = 1;
+const _: () = assert!(RING_LOG as u32 == abi::ring::Kind::LOG.raw());
 
 /// Pusht met een faalbare reservering (handboek §6: `Vec::push` breekt bij
 /// OOM het programma af).
@@ -643,7 +644,7 @@ async fn serve<'a, O: Outbox, T: Timer, L: Console, const N: usize>(
         }
         if let Some((kind, n)) = out.read_into(buf) {
             let line = buf.get(..n).unwrap_or(&[]);
-            if kind == KIND_LOG {
+            if kind == RING_LOG {
                 log.app_line(slot, line);
             } else {
                 log.log(format_args!(
@@ -733,7 +734,7 @@ pub struct Lifecycle<'s, C, K, T, L, G = NoGrants> {
     timer: T,
     log: L,
     parts: PartitionPool,
-    places: CorePool,
+    places: Places,
     residents: [Option<Resident>; SLOT_CAP + 1],
     svc: &'s Servicers,
     generation: u32,
@@ -754,7 +755,7 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
         timer: T,
         log: L,
         parts: PartitionPool,
-        places: CorePool,
+        places: Places,
         svc: &'s Servicers,
         grants: G,
     ) -> Self {
@@ -1602,7 +1603,7 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
 pub fn validate_adoption(
     states: &[SlotState],
     cores: &impl Cores,
-    places: &CorePool,
+    places: &Places,
     parts: &PartitionPool,
 ) -> Result {
     let app = cores.app_cores();
@@ -1957,7 +1958,7 @@ pub(crate) mod tests {
             FakeTimer::default(),
             con,
             parts,
-            CorePool::new(),
+            Places::new(),
             svc,
             grants,
         )
@@ -2372,7 +2373,7 @@ pub(crate) mod tests {
         fn read_into(&mut self, buf: &mut [u8]) -> Option<(u8, usize)> {
             let l = self.lines.pop()?;
             buf[..l.len()].copy_from_slice(&l);
-            Some((KIND_LOG, l.len()))
+            Some((RING_LOG, l.len()))
         }
         fn corrupt(&self) -> bool {
             false
@@ -2499,7 +2500,7 @@ pub(crate) mod tests {
         let p = pool();
         let first = st(1, 1, 1, 0x8000_0000);
         let second = st(2, 2, 1, 0x8400_0000);
-        validate_adoption(&[first.clone(), second.clone()], &b, &CorePool::new(), &p).unwrap();
+        validate_adoption(&[first.clone(), second.clone()], &b, &Places::new(), &p).unwrap();
         let changes: [fn(&mut SlotState); 6] = [
             |s| s.slot = 1,
             |s| s.part_base = 0x8000_0000,
@@ -2511,13 +2512,13 @@ pub(crate) mod tests {
         for change in changes {
             let mut s2 = second.clone();
             change(&mut s2);
-            assert!(validate_adoption(&[first.clone(), s2], &b, &CorePool::new(), &p).is_err());
+            assert!(validate_adoption(&[first.clone(), s2], &b, &Places::new(), &p).is_err());
         }
         let mut grouped = first;
         grouped.share_group = b"trusted".to_vec();
         grouped.group_cores = vec![1, 2];
         assert!(
-            validate_adoption(&[grouped, second], &b, &CorePool::new(), &p).is_err(),
+            validate_adoption(&[grouped, second], &b, &Places::new(), &p).is_err(),
             "empty group core overlapped dedicated owner"
         );
     }
@@ -2529,7 +2530,7 @@ pub(crate) mod tests {
     fn adoption_takes_hop_on_the_os_core_and_nobody_else() {
         let b = FakeCores::new(1);
         let p = pool();
-        let mut places = CorePool::new();
+        let mut places = Places::new();
         places.share_os_core(crate::pool::HOP_GROUP).unwrap();
         let mut hop = st(1, 0, 1, 0x8000_0000);
         hop.share_group = crate::pool::HOP_GROUP.to_vec();
@@ -2537,7 +2538,7 @@ pub(crate) mod tests {
         let app = st(2, 1, 1, 0x8400_0000);
         validate_adoption(&[hop.clone(), app.clone()], &b, &places, &p).unwrap();
         // Dezelfde Hop bij een kern die de OS-core niet deelt: geweigerd.
-        assert!(validate_adoption(&[hop.clone()], &b, &CorePool::new(), &p).is_err());
+        assert!(validate_adoption(&[hop.clone()], &b, &Places::new(), &p).is_err());
         // Een andere groep of een dedicated app op core 0: geweigerd.
         let mut other = hop.clone();
         other.share_group = b"web".to_vec();
@@ -2560,10 +2561,10 @@ pub(crate) mod tests {
         for core in [2, 3] {
             let second = st(1, core, 1, 0x8200_0000);
             assert!(
-                validate_adoption(&[first.clone(), second.clone()], &b, &CorePool::new(), &p)
+                validate_adoption(&[first.clone(), second.clone()], &b, &Places::new(), &p)
                     .is_err()
             );
-            assert!(validate_adoption(&[second, first.clone()], &b, &CorePool::new(), &p).is_err());
+            assert!(validate_adoption(&[second, first.clone()], &b, &Places::new(), &p).is_err());
         }
     }
 

@@ -111,6 +111,10 @@ geeft de houder in de env:
 | `FB_SWAP` | `1` als rood en blauw ruilen (GOP-formaat RGB) |
 | `INPUT_ADDR` | waar HOP de invoer uitserveert, `10.100.0.1:7879`; alleen als het board USB-controllers noemt (en ingetrokken als er geen opkomt) |
 
+De sleutels, de poort, de pixelregel (`FB_SWAP`, r5g6b5 bij 16 bpp) en de
+JSON-regels van de invoer staan als contract in `abi::glass`; de grant,
+de deliverer, de console en applib lezen ze daar.
+
 De haken in de lifecycle (`kern::grants::Grants`, geïmplementeerd door
 `hopos::gui::GuiGrants`):
 
@@ -224,8 +228,8 @@ De keten, na het netwerk (`hopos::gui::start_usb_input`):
    ms), rapporten ophalen (elke 4 ms), slapen op het timerwiel.
 4. Elke wachtende hardwarestap van de driver (een poortreset tot 2 s, een
    commando tot 1 s, de DWC3-reset van 225 ms) is `async` en slaapt op de
-   `Timer` van de taak (`driver_xhci::Timer`, in de binary het timerwiel
-   van de executor). Tot 29-09 spinde de driver op de klok en hield een
+   `Timer` van de taak (`sync::Timer`, in de binary het timerwiel van de
+   executor, `executor::ExecTimer`). Tot 29-09 spinde de driver op de klok en hield een
    insteek de hele executor van de kern vast.
 5. Wat de taak leest, gaat als waarde door een SPSC-rij (256, vol is
    weggooien en tellen) naar de input-listener in `net.rs`. Die luistert

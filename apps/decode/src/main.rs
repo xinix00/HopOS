@@ -423,7 +423,7 @@ async fn run(
                             "decode: {}x{} {}, {} bytes per frame, {} buffers wanted",
                             e.width,
                             e.height,
-                            e.pixel,
+                            Pixel::from_raw(e.pixel),
                             e.size,
                             e.bytes
                         );
@@ -431,7 +431,7 @@ async fn run(
                     } else if b.outs.as_slice().first().is_some_and(|o| o.len() < e.size) {
                         return Err(Stop::Grew { size: e.size });
                     }
-                    (m.width, m.height, m.pixel) = (e.width, e.height, e.pixel);
+                    (m.width, m.height, m.pixel) = (e.width, e.height, Pixel::from_raw(e.pixel));
                 }
                 Kind::Consumed => {
                     if let Some(i) = Bufs::find(b.ins.as_slice(), b.ram, e.off) {

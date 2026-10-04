@@ -46,11 +46,11 @@
 use crate::cage::{Console, Timer};
 use crate::rpc::{self, FsCall, FsInbox, PathBuf, clean_abs};
 use crate::slots::{Reply, Servicers};
-use crate::system::{LIFE_TICK, MAX_IO_CHUNK, Privilege, REQ_HEADER};
+use crate::system::{LIFE_TICK, MAX_IO_CHUNK, Privilege};
 use crate::{Error, Slot};
 use abi::hopabi::{
-    OP_READ, OP_STAT, OP_STORE_DROP, OP_STORE_LIST, OP_STORE_PULL, OP_STORE_PUSH, OP_TRUNCATE,
-    OP_WRITE, STATUS_DENIED, STATUS_ERROR, STATUS_NO_ENT, STATUS_OK,
+    HDR_LEN, OP_READ, OP_STAT, OP_STORE_DROP, OP_STORE_LIST, OP_STORE_PULL, OP_STORE_PUSH,
+    OP_TRUNCATE, OP_WRITE, STATUS_DENIED, STATUS_ERROR, STATUS_NO_ENT, STATUS_OK,
 };
 use abi::systemapi::PrivOp;
 use abi::systemapi::store::{
@@ -509,7 +509,7 @@ impl Head {
     /// van `total` bytes.
     #[must_use]
     pub fn new(op: u8, seq: u32, off: u64, n: u64, path_len: usize, total: usize) -> Head {
-        let path = REQ_HEADER..REQ_HEADER + path_len;
+        let path = HDR_LEN..HDR_LEN + path_len;
         Head {
             op,
             seq,
@@ -602,7 +602,7 @@ async fn app_call<T: Timer, C: Console>(
             ),
         );
     };
-    let data = out.get_mut(REQ_HEADER..).unwrap_or(&mut []);
+    let data = out.get_mut(HDR_LEN..).unwrap_or(&mut []);
     let outcome = wait(cx, i, ticket, data).await;
     match outcome {
         Outcome::Done { status, size, len } if status == STATUS_OK => {
@@ -748,7 +748,7 @@ async fn next<T: Timer, C: Console>(
     let wait = Duration::from_millis(h.n.min(MAX_WAIT_MS));
     let until = cx.timer.now().saturating_add(nanos(wait));
     let hop = cx.hop_slot.and_then(|s| cx.svc.current(s));
-    let data = out.get_mut(REQ_HEADER..).unwrap_or(&mut []);
+    let data = out.get_mut(HDR_LEN..).unwrap_or(&mut []);
     loop {
         if let Some(n) = cx.queue.take(cx.svc, hop, data) {
             return Ok((1, n));
@@ -887,7 +887,7 @@ fn done<T, C: Console>(cx: &Ctx<'_, '_, T, C>, h: &Head, buf: &[u8]) -> Result<(
 }
 
 /// Schrijft de kop van een antwoord met `len` databytes die al op
-/// `out[REQ_HEADER..]` staan; geeft de lengte.
+/// `out[HDR_LEN..]` staan; geeft de lengte.
 fn head(out: &mut [u8], h: &Head, status: u16, size: u64, len: usize) -> usize {
     let r = abi::hopabi::Resp {
         op: h.op,
@@ -901,7 +901,7 @@ fn head(out: &mut [u8], h: &Head, status: u16, size: u64, len: usize) -> usize {
 
 /// Een foutantwoord: de status uit de fout en de tekst in de data.
 fn fail(out: &mut [u8], h: &Head, e: &Fail) -> usize {
-    let data = out.get_mut(REQ_HEADER..).unwrap_or(&mut []);
+    let data = out.get_mut(HDR_LEN..).unwrap_or(&mut []);
     let n = crate::fmt_into(
         data.get_mut(..MSG_MAX.min(data.len())).unwrap_or(&mut []),
         e,

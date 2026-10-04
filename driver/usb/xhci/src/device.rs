@@ -23,6 +23,7 @@ use crate::{
 };
 use bounded::BoundedVec;
 use core::fmt;
+use core::time::Duration;
 use dev::Pa;
 
 // USB-standaardrequests en descriptortypes (USB 2.0 §9.4, tabel 9-5).
@@ -434,7 +435,7 @@ impl Hc {
             if t.now() >= deadline {
                 return Err(Error::PortResetTimeout { port: n, portsc: v });
             }
-            t.sleep(POLL_STEP_NS).await;
+            t.sleep(Duration::from_nanos(POLL_STEP_NS)).await;
         }
     }
 

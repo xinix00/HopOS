@@ -26,7 +26,7 @@
 //! snapshot voor de kern-flip is een gewone lees-ronde.
 
 use crate::flows::{FKey, Flow, FlowTable, Id, MAX_FLOWS_PER_SLOT, RKey};
-use crate::plan::{HOST_MAC, SLOT_CAP, slot_ip4, slot_mac};
+use crate::plan::{HOST_MAC, SLOT_CAP, port_ip4, port_mac};
 use crate::wire::{
     ETH_LEN, PROTO_TCP, PROTO_UDP, TCP_ACK, TCP_FIN, TCP_RST, TCP_SYN, be16, be32, byte,
     fix_csum32, ipv4_l4, mac_at, put_mac, put32, rewrite_l4,
@@ -131,23 +131,14 @@ struct Pub {
     slot_port: u16,
 }
 
-pub use abi::FlowState;
-
-/// Alles wat de NAT aan een volgende kern doorgeeft.
+/// Alles wat de NAT aan een volgende kern doorgeeft ([`NatState`]).
 ///
 /// Wat BEWUST niet meegaat: de next-hops (die staan in de neighbour-tabel
 /// van de node-stack, en de nieuwe vraagt ze opnieuw op het eerste frame:
 /// een verkeerd overgenomen next-hop is erger dan één ARP-ronde), en `seen`
 /// per flow (de nieuwe kern zet hem op "nu"; de flip-duur telt zo niet als
-/// idle-tijd). `masq_next` gaat wél mee: één woord, en het scheelt de
-/// eerste allocaties een scan.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NatState<'a> {
-    /// De levende flows.
-    pub flows: &'a [FlowState],
-    /// De volgende masquerade-kandidaat.
-    pub masq_next: u16,
-}
+/// idle-tijd).
+pub use abi::{FlowState, NatState};
 
 /// De neighbour-tabel van de node-stack, waar de NAT zijn next-hops uit
 /// haalt (Linux: `neigh_resolve_output` uit dezelfde tabel als de eigen
@@ -285,7 +276,7 @@ impl Nat {
     pub fn unpublish_slot(&mut self, i: usize) {
         self.pubs.retain(|p| usize::from(p.slot) != i);
         let target = if (1..=SLOT_CAP).contains(&i) {
-            slot_ip4(i)
+            port_ip4(i)
         } else {
             0
         };
@@ -355,7 +346,7 @@ impl Nat {
         put32(f, ETH_LEN + 16, new_ip);
         fix_csum32(f, ETH_LEN + 10, old_ip, new_ip);
         rewrite_l4(f, l4, proto, 2, old_ip, new_ip, old_port, new_port);
-        put_mac(f, 0, &slot_mac(slot));
+        put_mac(f, 0, &port_mac(slot));
         put_mac(f, 6, &HOST_MAC);
         io.deliver(slot, f);
     }
@@ -442,7 +433,7 @@ impl Nat {
             l4,
             proto,
             u.ip,
-            slot_ip4(slot),
+            port_ip4(slot),
             dport,
             m.slot_port,
         );
@@ -505,7 +496,7 @@ impl Nat {
         let Some(ip) = ipv4_l4(f) else { return false };
         let Some(u) = self.uplink else { return false };
         let dst_ip = be32(f, ETH_LEN + 16);
-        let slot_ip = slot_ip4(src);
+        let slot_ip = port_ip4(src);
         let sport = be16(f, ip.l4);
         let dport = be16(f, ip.l4 + 2);
         let flags = byte(f, ip.l4 + 13);
@@ -581,7 +572,7 @@ impl Nat {
             return true;
         };
         let srv = usize::from(m.slot);
-        let srv_ip = slot_ip4(srv);
+        let srv_ip = port_ip4(srv);
         let flags = byte(f, l4 + 13);
         let Some((id, _)) = self.flow_for_packet(
             io,
@@ -623,7 +614,7 @@ impl Nat {
         u: Uplink,
         now: u64,
     ) -> bool {
-        let srv_ip = slot_ip4(usize::from(m.slot));
+        let srv_ip = port_ip4(usize::from(m.slot));
         let np = be16(f, l4 + 2);
         let Some(id) = self.flows.by_rev(&RKey(proto, np, srv_ip, m.slot_port)) else {
             return true;
@@ -912,7 +903,7 @@ impl Nat {
     /// Beschrijft de levende conntrack in `out` voor het handoff-blob.
     /// Verlopen flows gaan niet mee. Past niet alles, dan gaat het eerste
     /// deel mee (de staart heeft plaats voor `MAX_FLOWS`).
-    pub fn snapshot<'o>(&self, now: u64, out: &'o mut [FlowState]) -> NatState<'o> {
+    pub fn snapshot<'o>(&self, now: u64, out: &'o mut [FlowState]) -> NatState<&'o [FlowState]> {
         let mut n = 0;
         for id in self.flows.ids() {
             let Some(fl) = self.flows.get(id) else {
@@ -946,7 +937,7 @@ impl Nat {
     /// poort hoort vrij te komen.
     pub fn restore(
         &mut self,
-        s: &NatState<'_>,
+        s: &NatState<&[FlowState]>,
         attached: impl Fn(usize) -> bool,
         now: u64,
     ) -> usize {

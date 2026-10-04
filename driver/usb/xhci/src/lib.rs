@@ -58,8 +58,8 @@
 )]
 
 use core::fmt;
-use core::future::Future;
 use core::mem::offset_of;
+use core::time::Duration;
 use dev::{Pa, Reg};
 
 mod bulk;
@@ -258,17 +258,11 @@ const POWER_SETTLE_NS: u64 = 20_000_000;
 /// 10 ms zonder dat de taak de executor ronde na ronde bezet houdt.
 pub const POLL_STEP_NS: u64 = 250_000;
 
-/// De klok en de slaap van de taak die de controller bezit. De binary geeft
-/// het timerwiel van zijn executor (`after`); de host-tests een klok die
-/// bij elke slaap vooruit springt.
-pub trait Timer {
-    /// Monotone nanoseconden.
-    fn now(&self) -> u64;
-
-    /// Slaapt `ns` nanoseconden. De executor draait intussen de andere
-    /// taken: dit is waar de driver de core teruggeeft.
-    fn sleep(&self, ns: u64) -> impl Future<Output = ()>;
-}
+/// De klok en de slaap van de taak die de controller bezit
+/// ([`sync::Timer`]). De binary geeft het timerwiel van zijn executor; de
+/// host-tests een klok die bij elke slaap vooruit springt. Een slaap is
+/// waar de driver de core teruggeeft.
+pub use sync::Timer;
 
 /// De snelheid die de controller aan een poort meldt (xHCI 7.2.2.1.1: de
 /// default speed-ID's; een controller mag ze via zijn extended capabilities
@@ -998,7 +992,7 @@ impl Hc {
                 self.port_write(n, v | PSC_PP);
             }
         }
-        t.sleep(POWER_SETTLE_NS).await;
+        t.sleep(Duration::from_nanos(POWER_SETTLE_NS)).await;
     }
 
     /// Wist de w1c-statusbits van een poort. Nodig vóór je op een
@@ -1073,7 +1067,7 @@ impl Hc {
                     want,
                 });
             }
-            t.sleep(POLL_STEP_NS).await;
+            t.sleep(Duration::from_nanos(POLL_STEP_NS)).await;
         }
     }
 

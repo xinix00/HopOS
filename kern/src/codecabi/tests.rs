@@ -106,7 +106,7 @@ impl Lives for &FakeLives {
 #[derive(Default)]
 struct Cache(StdCell<Vec<(&'static str, u64, u64)>>);
 
-impl Coherence for &Cache {
+impl CacheMaint for &Cache {
     fn clean(&mut self, pa: u64, len: u64) {
         self.0.borrow_mut().push(("clean", pa, len));
     }
@@ -313,10 +313,10 @@ fn codec_poll_verliest_geen_events() {
     assert_eq!((st, n), (STATUS_OK, 2));
     let first = WireEvent::decode(&data).unwrap();
     let second = WireEvent::decode(&data[EVENT_LEN..]).unwrap();
-    assert_eq!((first.kind, first.tag), (EVENT_FAULT, 7));
+    assert_eq!((first.kind, first.tag), (WireKind::Fault, 7));
     assert_eq!(
         (second.kind, second.tag, second.off),
-        (EVENT_CONSUMED, 8, 4096)
+        (WireKind::Consumed, 8, 4096)
     );
 }
 
@@ -401,7 +401,7 @@ fn het_cache_onderhoud_volgt_de_richting() {
     let (st, n, data) = call(&mut s, 1, buf_req(OP_CODEC_POLL, &[1, 0, 0, 0]));
     assert_eq!((st, n), (STATUS_OK, 3));
     let f = WireEvent::decode(&data[2 * EVENT_LEN..]).unwrap();
-    assert_eq!((f.kind, f.size, f.bytes), (EVENT_FORMAT, 3110400, 6));
+    assert_eq!((f.kind, f.size, f.bytes), (WireKind::Format, 3110400, 6));
     assert_eq!(
         *cache.0.borrow(),
         alloc::vec![

@@ -27,6 +27,7 @@
 
 use crate::clock::ExecTimer;
 use abi::layout::{HOST_IP4, NET_MTU, NET_PREFIX, NET_RING_DATA_CAP};
+use abi::systemapi::PORT;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt;
@@ -40,7 +41,7 @@ use dev::Pa;
 use executor::{Clock, Executor, Sleeper};
 use kern::slots::Reply;
 use kern::system::{
-    Admitted, Conn, End, MAX_HOP_CONNS, MAX_IO_CHUNK, MAX_PAYLOAD, MAX_SYSTEM_CONNS, PORT,
+    Admitted, Conn, End, MAX_HOP_CONNS, MAX_IO_CHUNK, MAX_PAYLOAD, MAX_SYSTEM_CONNS,
 };
 use leandhcp::{Action, Client, Instant, KeepAction, Keeper, Lease};
 use leannet::{Endpoint, ListenHandle, Stack, TcpHandle, UdpHandle};
@@ -170,7 +171,7 @@ const NET_BUDGET: usize = 8 << 20;
 /// payload ([`MAX_PAYLOAD`]). Beide gaan per bestandscall als waarde naar
 /// de hopfs-actor en terug (`kern::rpc`); er wordt niets per call
 /// gealloceerd.
-const OUT_BUF: usize = kern::system::REQ_HEADER + MAX_IO_CHUNK;
+const OUT_BUF: usize = abi::hopabi::HDR_LEN + MAX_IO_CHUNK;
 
 /// Het totaalplafond op gelijktijdige system-verbindingen: de poolgrootte
 /// van de verbindingstaken (handboek §2: een verbinding is een taak uit een

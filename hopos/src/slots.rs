@@ -3,7 +3,7 @@
 //! slot op QEMU.
 //!
 //! Wat hier gebeurt, is de board-glue van `kern::slots`: het plan van het
-//! board wordt een `PartitionPool` en een `CorePool`, de kooi en de cores
+//! board wordt een `PartitionPool` en een `Places`, de kooi en de cores
 //! gaan als waarde de actor in, en per slot draait één servicer-taak uit
 //! een vaste pool die de outbox leegtrekt naar de console (`slot N:
 //! <regel>`). Er wordt nooit per start gespawnd.
@@ -196,7 +196,7 @@ use cpu::el2::{self, CoreState};
 use cpu::println;
 use executor::Executor;
 use kern::partmem::{Geometry, PartitionPool};
-use kern::pool::{CorePool, Placement};
+use kern::pool::{Placement, Places};
 use kern::slots::{
     Envelope, Lifecycle, Mount, Reply, Request, Response, Servicers, SlotStatus, StartSpec, call,
     servicer_task,
@@ -407,7 +407,7 @@ pub(crate) fn start(
         ExecTimer(exec),
         KernConsole,
         parts,
-        os_pool(),
+        os_places(),
         SERVICERS,
         // De device-grants (gui.rs): de framebuffer in de gui-smaak,
         // kaal niets.
@@ -839,8 +839,8 @@ fn init_hop_group(hop_cfg: &str) {
 /// groep `system` (de kern is er de vaste bewoner, PORT.md beslissing 2);
 /// Hop zit erbij als zijn groep `system` is. Kan de architectuur niet delen
 /// (Apple's EL2-smaak), dan krijgt Hop een app-core zoals vóór 30-09.
-fn os_pool() -> CorePool {
-    let mut pool = CorePool::new();
+fn os_places() -> Places {
+    let mut pool = Places::new();
     let groups: &[&[u8]] = if arch::SHARES_OS_CORE {
         &[kern::pool::SYSTEM_GROUP]
     } else {

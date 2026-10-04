@@ -31,9 +31,8 @@ fn filled<T: Clone>(n: usize, v: T) -> Result<Vec<T>, Error> {
     Ok(out)
 }
 
-/// Het conntrack-plafond: de anti-DoS-grens; een app kan HOP's geheugen op
-/// core 0 nooit laten vollopen.
-pub const MAX_FLOWS: usize = 4096;
+/// Het conntrack-plafond: de anti-DoS-grens, en wat een kern-flip draagt.
+pub use abi::MAX_FLOWS;
 
 /// Het eerlijke deel per slot ónder het globale plafond. Zonder dit is de
 /// conntrack één gedeelde pot: één app die 4096 verbindingen opent laat elke

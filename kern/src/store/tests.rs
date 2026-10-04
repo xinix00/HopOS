@@ -6,13 +6,12 @@ use crate::cage::tests::SparseMem;
 use crate::rpc::{FsActor, tests::disk};
 use crate::slots::Mount;
 use crate::slots::tests::{FakeConsole, Obey, actor, s, start_job, stop};
-use crate::system::{
-    Conn, End, FlipBundle, Hooks, KIND_CALL, KIND_RESULT, LogTee, MAGIC, NET, SlotLogs, System,
-    VERSION,
-};
+use crate::system::{Conn, End, FlipBundle, Hooks, LogTee, SlotLogs, System};
 use crate::testutil::FakeTimer;
 use abi::hopabi::{OP_READ as READ, OP_WRITE as WRITE, Req};
+use abi::layout::port_ip4;
 use abi::systemapi::store::{DoneHead, StoreTask, read_len};
+use abi::systemapi::{HEADER_LEN as FH, Kind, decode_header, encode_header};
 use core::future::Future;
 use core::pin::pin;
 use core::task::{Context, Poll, Waker};
@@ -32,9 +31,7 @@ impl Pipe {
     fn new(ip: u32, calls: &[Vec<u8>]) -> Pipe {
         let mut rx = VecDeque::new();
         for c in calls {
-            rx.extend(MAGIC.to_le_bytes());
-            rx.extend([VERSION, KIND_CALL, 0, 0]);
-            rx.extend((c.len() as u32).to_le_bytes());
+            rx.extend(encode_header(Kind::Call, c.len()).unwrap());
             rx.extend(c.iter().copied());
         }
         Pipe {
@@ -99,7 +96,7 @@ fn call(op: u8, seq: u32, off: u64, n: u64, path: &[u8], data: &[u8]) -> Vec<u8>
         path,
         data,
     };
-    let mut v = vec![0u8; REQ_HEADER + path.len() + data.len()];
+    let mut v = vec![0u8; HDR_LEN + path.len() + data.len()];
     let n = abi::hopabi::encode_req(&mut v, &r).unwrap();
     v.truncate(n);
     v
@@ -125,12 +122,12 @@ type Res = (u8, u16, u64, Vec<u8>);
 
 fn results(mut b: &[u8]) -> Vec<Res> {
     let mut out = Vec::new();
-    while b.len() >= 12 {
-        assert_eq!(b[5], KIND_RESULT);
-        let n = u32::from_le_bytes(b[8..12].try_into().unwrap()) as usize;
-        let r = abi::hopabi::decode_resp(&b[12..12 + n]).unwrap();
+    while b.len() >= FH {
+        let h = decode_header(b[..FH].try_into().unwrap()).unwrap();
+        assert_eq!(h.kind, Kind::Result);
+        let r = abi::hopabi::decode_resp(&b[FH..FH + h.len]).unwrap();
         out.push((r.op, r.status, r.size, r.data.to_vec()));
-        b = &b[12 + n..];
+        b = &b[FH + h.len..];
     }
     out
 }
@@ -169,7 +166,7 @@ fn a_store_call_travels_from_the_app_through_hop_and_back() {
         .with_store(&queue);
     let file = b"/data/state.json";
     let mut app = Pipe::new(
-        NET | 3,
+        port_ip4(2),
         &[
             call(WRITE, 1, 0, 0, file, b"hallo"),
             call(OP_STORE_PUSH, 2, 0, 0, file, b""),
@@ -180,7 +177,7 @@ fn a_store_call_travels_from_the_app_through_hop_and_back() {
         ],
     );
     let mut hop = Pipe::new(
-        NET | 2,
+        port_ip4(1),
         &[
             next(1),
             call(PrivOp::StoreRead.op(), 2, 1, 0, file, &read_len(1 << 20)),
@@ -281,7 +278,7 @@ fn a_stop_cancels_the_waiting_call_and_hop_drops_it() {
     let inbox: Mailbox<crate::slots::Envelope<'_>, 8> = Mailbox::new();
     let queue = StoreQueue::new();
     let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8).with_store(&queue);
-    let mut app = Pipe::new(NET | 3, &[call(OP_STORE_PUSH, 1, 0, 0, b"x", b"")]);
+    let mut app = Pipe::new(port_ip4(2), &[call(OP_STORE_PUSH, 1, 0, 0, b"x", b"")]);
     let timer = FakeTimer::default();
     let who = sys.admit(app.ip).unwrap();
     let (mut m, mut b, mut o) = (SparseMem::default(), vec![0u8; 4096], vec![0u8; 4096]);

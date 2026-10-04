@@ -68,19 +68,11 @@ pub struct Desc {
 impl Desc {
     /// Het pixelwoord voor `argb` (0xAARRGGBB) in het formaat van dit
     /// scherm: rood en blauw geruild bij [`Desc::swap_rb`], en r5g6b5 bij
-    /// 16 bpp. Ook voor de display-app, die met dezelfde regels tekent.
+    /// 16 bpp. De regel van het contract ([`abi::glass::encode`]): de
+    /// display-app tekent met dezelfde.
     #[must_use]
     pub fn encode(&self, argb: u32) -> u32 {
-        let argb = if self.swap_rb {
-            argb & 0xFF00_FF00 | (argb & 0xFF) << 16 | (argb >> 16) & 0xFF
-        } else {
-            argb
-        };
-        if self.bpp == 16 {
-            let (r, g, b) = ((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF);
-            return (r >> 3) << 11 | (g >> 2) << 5 | (b >> 3);
-        }
-        argb
+        abi::glass::encode(argb, u32::from(self.bpp), self.swap_rb)
     }
 
     /// De maat van de buffer in bytes (`stride * height`), of `None` bij

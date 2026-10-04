@@ -44,7 +44,7 @@ mod on {
     use cpu::println;
     use driver_codec::Firmware;
     use executor::Executor;
-    use kern::codecabi::{CodecCell, Coherence, Lives};
+    use kern::codecabi::{CacheMaint, CodecCell, Lives};
     use kern::slots::{Reply, Request, Response};
     use kern::{Region, Slot};
     use media_mve::Device;
@@ -100,7 +100,7 @@ mod on {
     /// Het cache-onderhoud via `dev`: `dc cvac` en `dc civac`.
     pub(crate) struct DevCache;
 
-    impl Coherence for DevCache {
+    impl CacheMaint for DevCache {
         fn clean(&mut self, pa: u64, len: u64) {
             dev::push(dev::Pa(pa), usize::try_from(len).unwrap_or(0));
         }

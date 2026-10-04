@@ -18,7 +18,7 @@
 
 use crate::nat::{FlowState, Nat, NatIo, NatState, Neighbors, Proto, Uplink};
 use crate::plan::{
-    HOST_MAC, MAX_LAN_FRAME, PORTS, SLOT_CAP, UPLINK_MAX_FRAME, host_ip4, slot_ip4, slot_mac,
+    HOST_MAC, MAX_LAN_FRAME, PORTS, SLOT_CAP, UPLINK_MAX_FRAME, host_ip4, port_ip4, port_mac,
 };
 use crate::ring::{InPlace, KIND_FRAME, KIND_UPLINK, Reader, Writer};
 use crate::wire::{ET_ARP, ET_IPV4, ET_IPV6, ETH_LEN, be16, be32, byte, mac_at, put_mac, put16};
@@ -113,33 +113,13 @@ impl Default for Ack {
     }
 }
 
-/// De conntrack zoals de kern-flip hem meeneemt: de flows in de buffer
-/// die de aanroeper meegaf (verplaatst, niet gedeeld), plus het woord van
-/// [`NatState`].
-#[derive(Debug, Default)]
-pub struct NatSnapshot {
-    /// De levende flows (de buffer van de aanroeper, ingekort).
-    pub flows: Vec<FlowState>,
-    /// De volgende masquerade-kandidaat.
-    pub masq_next: u16,
-}
-
-impl NatSnapshot {
-    /// De snapshot als [`NatState`] over zijn eigen flows.
-    #[must_use]
-    pub fn state(&self) -> NatState<'_> {
-        NatState {
-            flows: &self.flows,
-            masq_next: self.masq_next,
-        }
-    }
-}
-
 /// De antwoordplek van [`Command::SnapshotNat`]: de actor legt de snapshot
 /// erin en luidt de bel. Eén aanroeper tegelijk (de flip-taak).
 pub struct NatReply {
     done: Signal,
-    snap: Mailbox<NatSnapshot, 1>,
+    /// De conntrack zoals de kern-flip hem meeneemt: de flows in de buffer
+    /// die de aanroeper meegaf (verplaatst, niet gedeeld, ingekort).
+    snap: Mailbox<NatState<Vec<FlowState>>, 1>,
 }
 
 impl NatReply {
@@ -152,14 +132,14 @@ impl NatReply {
         }
     }
 
-    fn complete(&self, s: NatSnapshot) {
+    fn complete(&self, s: NatState<Vec<FlowState>>) {
         let _ = self.snap.try_send(s);
         self.done.set();
     }
 
     /// Wacht op de snapshot. Er leeft geen lening over de `.await`: de
     /// snapshot komt als waarde terug.
-    pub async fn wait(&self) -> NatSnapshot {
+    pub async fn wait(&self) -> NatState<Vec<FlowState>> {
         loop {
             self.done.wait().await;
             if let Some(s) = self.snap.try_recv() {
@@ -239,7 +219,7 @@ pub enum Command<'a, R, W> {
     /// aantal herstelde flows.
     RestoreNat {
         /// De staat van de vorige kern.
-        state: NatState<'a>,
+        state: NatState<&'a [FlowState]>,
         /// Bevestiging.
         ack: &'a Ack,
     },
@@ -625,7 +605,7 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
                 let st = self.nat.snapshot(now, &mut buf);
                 let (n, masq_next) = (st.flows.len(), st.masq_next);
                 buf.truncate(n);
-                reply.complete(NatSnapshot {
+                reply.complete(NatState {
                     flows: buf,
                     masq_next,
                 });
@@ -894,7 +874,7 @@ impl<R: Reader, W: Writer> Core<'_, R, W> {
     /// (die toetst op zijn eigen kopie en meldt een vreemde bron).
     fn relay(&mut self, src: usize, f: &[u8]) -> bool {
         let n = f.len();
-        if n < ETH_LEN || byte(f, 0) & 1 != 0 || mac_at(f, 0)[..5] != slot_mac(0)[..5] {
+        if n < ETH_LEN || byte(f, 0) & 1 != 0 || mac_at(f, 0)[..5] != port_mac(0)[..5] {
             return false;
         }
         let dst = usize::from(byte(f, 5));
@@ -904,7 +884,7 @@ impl<R: Reader, W: Writer> Core<'_, R, W> {
         if !self.port(dst).is_some_and(|p| p.rx.is_normal()) {
             return false;
         }
-        let (to, from) = (slot_mac(dst), slot_mac(src));
+        let (to, from) = (port_mac(dst), port_mac(src));
         self.write_rx_by(dst, |rx| {
             rx.write_in_place(n, |d| {
                 let d = d.get_mut(..n)?;
@@ -1070,7 +1050,7 @@ fn deliver<R: Reader, W: Writer>(
     // namens een adres dat niet van hem is: precies de aanval die je niet
     // wilt op een node waar HOP toetsaanslagen rondstuurt. Poort 0 is HOP
     // zelf, de vertrouwde kant.
-    if src >= 1 && (mac_at(p, 6) != slot_mac(src) || !valid_source_ip(src, p)) {
+    if src >= 1 && (mac_at(p, 6) != port_mac(src) || !valid_source_ip(src, p)) {
         core.stats.slot_src_drops.fetch_add(1, Relaxed);
         let log = core.cfg.log;
         if let Some(port) = core.ports.get_mut(src).and_then(Option::as_mut)
@@ -1080,7 +1060,7 @@ fn deliver<R: Reader, W: Writer>(
             log(format_args!(
                 "HOPOS_NETSWITCH_SRC_DROP: slot {src}: src mac {} (slot mac {}), ip ok {}, {} bytes, ethertype {:#06x}",
                 netdev::Mac(mac_at(p, 6)),
-                netdev::Mac(slot_mac(src)),
+                netdev::Mac(port_mac(src)),
                 valid_source_ip(src, p),
                 p.len(),
                 be16(p, 12)
@@ -1106,7 +1086,7 @@ fn deliver<R: Reader, W: Writer>(
         }
         return true;
     }
-    if mac_at(p, 0)[..5] != slot_mac(0)[..5] {
+    if mac_at(p, 0)[..5] != port_mac(0)[..5] {
         // Geen switch-MAC. IPv6-unicast van een slot naar een LAN-buur gaat
         // als écht L2-frame de NIC op, mét de slot-MAC als bron: v6 kent
         // geen NAT-pad, NDP heeft de slot al als buur geadverteerd. IPv4
@@ -1131,12 +1111,12 @@ fn deliver<R: Reader, W: Writer>(
 /// voor precies dat slot: een app kan niet de volumes of credentials van een
 /// buur lenen door diens adres als bron te schrijven.
 fn valid_source_ip(src: usize, p: &[u8]) -> bool {
-    let want = slot_ip4(src);
+    let want = port_ip4(src);
     if p.len() >= ETH_LEN + 20 && be16(p, 12) == ET_IPV4 {
         return be32(p, ETH_LEN + 12) == want;
     }
     if p.len() >= ETH_LEN + 28 && be16(p, 12) == ET_ARP {
-        return mac_at(p, ETH_LEN + 8) == slot_mac(src) && be32(p, ETH_LEN + 14) == want;
+        return mac_at(p, ETH_LEN + 8) == port_mac(src) && be32(p, ETH_LEN + 14) == want;
     }
     true
 }
@@ -1216,7 +1196,7 @@ fn uplink_in<R: Reader, W: Writer>(
     let dst = usize::from(byte(f, 5));
     if f.len() >= ETH_LEN
         && be16(f, 12) == ET_IPV6
-        && mac_at(f, 0)[..5] == slot_mac(0)[..5]
+        && mac_at(f, 0)[..5] == port_mac(0)[..5]
         && (1..=core.cfg.max_slots).contains(&dst)
     {
         // De terugweg van het IPv6-L2-pad: een LAN-buur antwoordt de slot

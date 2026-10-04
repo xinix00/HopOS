@@ -169,8 +169,8 @@ fn gateway_ip_gaat_lan_poort_nul_in() {
     let f = mk_frame(
         PROTO_TCP,
         HOST_MAC,
-        slot_mac(1),
-        slot_ip4(1),
+        port_mac(1),
+        port_ip4(1),
         host_ip4(),
         5555,
         9080,
@@ -191,8 +191,8 @@ fn ingress_framegrens_voor_lan_ringen() {
     let mut victim = h.attach(2);
     let mut host = h.host();
     let mut exact = vec![0u8; MAX_LAN_FRAME];
-    exact[0..6].copy_from_slice(&slot_mac(2));
-    exact[6..12].copy_from_slice(&slot_mac(1));
+    exact[0..6].copy_from_slice(&port_mac(2));
+    exact[6..12].copy_from_slice(&port_mac(1));
     h.forward_once(1, &exact);
     assert_eq!(victim.rx.frame().map(|f| f.len()), Some(MAX_LAN_FRAME));
 
@@ -211,8 +211,8 @@ fn ingress_framegrens_voor_lan_ringen() {
     let mut to_gw = mk_frame(
         PROTO_TCP,
         HOST_MAC,
-        slot_mac(1),
-        slot_ip4(1),
+        port_mac(1),
+        port_ip4(1),
         host_ip4(),
         5555,
         9080,
@@ -238,8 +238,8 @@ fn extern_blijft_masquerade() {
     let f = mk_frame(
         PROTO_TCP,
         HOST_MAC,
-        slot_mac(1),
-        slot_ip4(1),
+        port_mac(1),
+        port_ip4(1),
         EXT_IP,
         5555,
         443,
@@ -260,10 +260,10 @@ fn host_poort_antwoord_wordt_in_dezelfde_switchronde_bezorgd() {
     let mut app = h.attach(1);
     let f = mk_frame(
         PROTO_TCP,
-        slot_mac(1),
+        port_mac(1),
         HOST_MAC,
         host_ip4(),
-        slot_ip4(1),
+        port_ip4(1),
         9080,
         5555,
         b"hoi",
@@ -301,10 +301,10 @@ fn rx_wake_alleen_op_leeg_naar_niet_leeg() {
     let mut app = h.attach(2);
     let f = mk_frame(
         PROTO_TCP,
-        slot_mac(2),
-        slot_mac(1),
-        slot_ip4(1),
-        slot_ip4(2),
+        port_mac(2),
+        port_mac(1),
+        port_ip4(1),
+        port_ip4(2),
         1111,
         2222,
         &[],
@@ -356,10 +356,10 @@ fn ronde_en_deur_kennen_alleen_de_poorten_die_hangen() {
     assert!(!h.published.pending());
     let f = mk_frame(
         PROTO_TCP,
-        slot_mac(2),
-        slot_mac(100),
-        slot_ip4(100),
-        slot_ip4(2),
+        port_mac(2),
+        port_mac(100),
+        port_ip4(100),
+        port_ip4(2),
         1,
         2,
         b"x",
@@ -387,8 +387,8 @@ fn slot_mag_geen_vreemde_bron_mac_of_ip_gebruiken() {
     let mac = mk_frame(
         PROTO_TCP,
         HOST_MAC,
-        slot_mac(1),
-        slot_ip4(1),
+        port_mac(1),
+        port_ip4(1),
         host_ip4(),
         5555,
         9080,
@@ -399,8 +399,8 @@ fn slot_mag_geen_vreemde_bron_mac_of_ip_gebruiken() {
     let ip = mk_frame(
         PROTO_TCP,
         HOST_MAC,
-        slot_mac(2),
-        slot_ip4(1),
+        port_mac(2),
+        port_ip4(1),
         host_ip4(),
         5555,
         9080,
@@ -420,19 +420,19 @@ fn slot_mag_geen_vreemde_bron_mac_of_ip_gebruiken() {
 fn arp_voor_de_gateway_beantwoordt_de_switch_zelf() {
     let mut h = harness();
     let mut app = h.attach(1);
-    let mut req = ether_frame([0xff; 6], slot_mac(1), 0x0806);
+    let mut req = ether_frame([0xff; 6], port_mac(1), 0x0806);
     req.resize(ETH_LEN + 28, 0);
     put16(&mut req, 14, 1);
     put16(&mut req, 16, 0x0800);
     req[18] = 6;
     req[19] = 4;
     put16(&mut req, 20, 1);
-    req[22..28].copy_from_slice(&slot_mac(1));
-    crate::wire::put32(&mut req, 28, slot_ip4(1));
+    req[22..28].copy_from_slice(&port_mac(1));
+    crate::wire::put32(&mut req, 28, port_ip4(1));
     crate::wire::put32(&mut req, 38, host_ip4());
     h.forward_once(1, &req);
     let r = app.rx.frame().expect("geen ARP-antwoord");
-    assert_eq!(r[0..6], slot_mac(1));
+    assert_eq!(r[0..6], port_mac(1));
     assert_eq!(
         (be16(&r, 20), mac_at(&r, 22), be32(&r, 28)),
         (2, HOST_MAC, host_ip4())
@@ -448,10 +448,10 @@ fn ringpad_unicast_van_slot_naar_slot_en_spoof_niet() {
     let mut b = h.attach(2);
     let f = mk_frame(
         PROTO_TCP,
-        slot_mac(2),
-        slot_mac(1),
-        slot_ip4(1),
-        slot_ip4(2),
+        port_mac(2),
+        port_mac(1),
+        port_ip4(1),
+        port_ip4(2),
         1111,
         80,
         b"hallo",
@@ -461,10 +461,10 @@ fn ringpad_unicast_van_slot_naar_slot_en_spoof_niet() {
     assert_eq!(b.rx.frame().as_deref(), Some(&f[..]));
     let spoof = mk_frame(
         PROTO_TCP,
-        slot_mac(2),
-        slot_mac(1),
-        slot_ip4(3),
-        slot_ip4(2),
+        port_mac(2),
+        port_mac(1),
+        port_ip4(3),
+        port_ip4(2),
         1111,
         80,
         b"nep",
@@ -482,15 +482,15 @@ fn ringpad_unicast_van_slot_naar_slot_en_spoof_niet() {
 fn ringpad_arp_voor_de_gateway_bereikt_de_afzender() {
     let mut h = harness();
     let mut app = h.attach(1);
-    let mut req = ether_frame([0xff; 6], slot_mac(1), 0x0806);
+    let mut req = ether_frame([0xff; 6], port_mac(1), 0x0806);
     req.resize(ETH_LEN + 28, 0);
     put16(&mut req, 14, 1);
     put16(&mut req, 16, 0x0800);
     req[18] = 6;
     req[19] = 4;
     put16(&mut req, 20, 1);
-    req[22..28].copy_from_slice(&slot_mac(1));
-    crate::wire::put32(&mut req, 28, slot_ip4(1));
+    req[22..28].copy_from_slice(&port_mac(1));
+    crate::wire::put32(&mut req, 28, port_ip4(1));
     crate::wire::put32(&mut req, 38, host_ip4());
     assert!(app.tx.push(KIND_FRAME, &req));
     assert!(h.pass());
@@ -505,14 +505,14 @@ fn ipv6_outbound_branches() {
         let mut h = harness();
         h.uplink();
         let dst = [0x10, 0x20, 0x30, 0x40, 0x50, 0x60];
-        let v6 = ether_frame(dst, slot_mac(1), 0x86dd);
+        let v6 = ether_frame(dst, port_mac(1), 0x86dd);
         h.forward_once(1, &v6);
         assert_eq!(
             h.sent(),
             [v6],
             "IPv6-unicast ging niet ongewijzigd de uplink op"
         );
-        let v4 = ether_frame(dst, slot_mac(1), 0x0800);
+        let v4 = ether_frame(dst, port_mac(1), 0x0800);
         h.forward_once(1, &v4);
         assert!(
             h.sent().is_empty(),
@@ -524,7 +524,7 @@ fn ipv6_outbound_branches() {
         let mut h = harness();
         h.uplink();
         let mut peer = h.attach(2);
-        let f = ether_frame([0x33, 0x33, 0, 0, 0, 0xfb], slot_mac(1), 0x86dd);
+        let f = ether_frame([0x33, 0x33, 0, 0, 0, 0xfb], port_mac(1), 0x86dd);
         h.forward_once(1, &f);
         assert_eq!(peer.rx.frame().as_deref(), Some(&f[..]));
         assert_eq!(h.sent(), [f]);
@@ -540,8 +540,8 @@ fn ipv6_inbound_branches() {
         let mut app = h.attach(1);
         let mut host = h.host();
         let src = [0x10, 0x20, 0x30, 0x40, 0x50, 0x60];
-        let v4 = ether_frame(slot_mac(1), src, 0x0800);
-        let v6 = ether_frame(slot_mac(1), src, 0x86dd);
+        let v4 = ether_frame(port_mac(1), src, 0x0800);
+        let v6 = ether_frame(port_mac(1), src, 0x86dd);
         assert!(
             h.to_switch
                 .try_send(Frame::from_slice(&v4).unwrap())
@@ -686,10 +686,10 @@ fn run_loop_attach_forward_detach() {
 
     let f = mk_frame(
         PROTO_TCP,
-        slot_mac(2),
-        slot_mac(1),
-        slot_ip4(1),
-        slot_ip4(2),
+        port_mac(2),
+        port_mac(1),
+        port_ip4(1),
+        port_ip4(2),
         1,
         2,
         b"x",
@@ -738,8 +738,8 @@ fn de_conntrack_overleeft_de_flip_via_de_actor() {
     let out = mk_frame(
         PROTO_TCP,
         HOST_MAC,
-        slot_mac(1),
-        slot_ip4(1),
+        port_mac(1),
+        port_ip4(1),
         EXT_IP,
         5555,
         443,
@@ -761,8 +761,8 @@ fn de_conntrack_overleeft_de_flip_via_de_actor() {
     let other = mk_frame(
         PROTO_TCP,
         HOST_MAC,
-        slot_mac(1),
-        slot_ip4(1),
+        port_mac(1),
+        port_ip4(1),
         EXT_IP,
         6666,
         443,
@@ -795,7 +795,7 @@ fn de_conntrack_overleeft_de_flip_via_de_actor() {
     );
     assert!(new.sw.nat.inbound(&mut new.sw.core, &mut back, fake_now()));
     let got = app.rx.frame().expect("het antwoord landde niet in slot 1");
-    assert_eq!(be32(&got, ETH_LEN + 16), slot_ip4(1));
+    assert_eq!(be32(&got, ETH_LEN + 16), port_ip4(1));
     assert_eq!(be16(&got, ETH_LEN + 22), 5555);
 }
 

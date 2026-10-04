@@ -59,11 +59,10 @@ mod testutil;
 
 pub use error::{Error, Result};
 
-/// De harde kooi-bovengrens: het hoogste slotnummer dat de kern ooit kent.
-///
-/// 128 dekt de Ampere Altra (127 app-cores); een board zet zijn eigen,
-/// lagere `max_slots` bij boot. Zelfde getal als `layout.SlotCap` in Go.
-pub const SLOT_CAP: usize = 128;
+/// De harde kooi-bovengrens: het hoogste slotnummer dat de kern ooit kent
+/// (128, de Ampere Altra); een board zet zijn eigen, lagere `max_slots` bij
+/// boot.
+pub use abi::layout::SLOT_CAP;
 
 /// De hoogste logische core die de kern ooit kent.
 pub const CORE_CAP: usize = 256;
@@ -72,44 +71,9 @@ pub const CORE_CAP: usize = 256;
 /// 2 MiB zijn.
 pub const GRAIN: u64 = 2 << 20;
 
-const _: () = assert!(SLOT_CAP == abi::layout::SLOT_CAP);
-
-/// Een slotnummer (= kooinummer), 1 tot en met [`SLOT_CAP`].
-///
-/// # Invariants
-///
-/// `1 <= self.0 <= SLOT_CAP`; alleen [`Slot::new`] maakt er een.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct Slot(u8);
-
-impl Slot {
-    /// Het eerste slot: een geldige beginwaarde voor een vaste tabel.
-    // INVARIANT: 1 ligt in 1..=SLOT_CAP.
-    pub const FIRST: Slot = Slot(1);
-
-    /// Het slot `i`, of `None` buiten `1..=SLOT_CAP`.
-    #[must_use]
-    pub const fn new(i: usize) -> Option<Slot> {
-        if i >= 1 && i <= SLOT_CAP {
-            // INVARIANT: bereik net getoetst; SLOT_CAP past in een u8.
-            Some(Slot(i as u8))
-        } else {
-            None
-        }
-    }
-
-    /// Het nummer als index in een tabel van `SLOT_CAP + 1` plaatsen.
-    #[must_use]
-    pub const fn get(self) -> usize {
-        self.0 as usize
-    }
-}
-
-impl core::fmt::Display for Slot {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+/// Een slotnummer (= kooinummer), 1 tot en met [`SLOT_CAP`]: het type van
+/// het contract, want kern en app tellen dezelfde slots.
+pub use abi::layout::Slot;
 
 /// Een logisch corenummer (1 tot en met [`CORE_CAP`]); het fysieke nummer
 /// komt uit [`cage::Cores::phys`].
@@ -125,7 +89,7 @@ impl Core {
     /// met Hop en met de sharegroups die hem mogen delen (PORT.md beslissing
     /// 2). Geen app-core: [`Core::new`] geeft hem nooit, zodat een getal van
     /// buiten hem niet kan aanwijzen; alleen de plaatsing kiest hem
-    /// ([`crate::pool::CorePool::share_os_core`]).
+    /// ([`crate::pool::Places::share_os_core`]).
     pub const OS: Core = Core(0);
 
     /// Core `c`, of `None` buiten `1..=CORE_CAP`.
@@ -161,37 +125,9 @@ impl core::fmt::Display for Core {
     }
 }
 
-/// Een fysiek bereik `[base, base + size)`.
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
-pub struct Region {
-    /// Het eerste adres.
-    pub base: u64,
-    /// De maat in bytes.
-    pub size: u64,
-}
-
-impl Region {
-    /// Een bereik.
-    #[must_use]
-    pub const fn new(base: u64, size: u64) -> Region {
-        Region { base, size }
-    }
-
-    /// Het eerste adres erna, of `None` als het bereik de adresruimte omloopt.
-    #[must_use]
-    pub const fn end(self) -> Option<u64> {
-        self.base.checked_add(self.size)
-    }
-
-    /// Overlapt dit bereik `o`?
-    #[must_use]
-    pub fn overlaps(self, o: Region) -> bool {
-        let (Some(a), Some(b)) = (self.end(), o.end()) else {
-            return true; // Een omlopend bereik overlapt per definitie alles.
-        };
-        self.base < b && o.base < a
-    }
-}
+/// Een fysiek bereik `[base, base + size)`: dat van het contract (een
+/// partitie, een venster en het PA-plan zijn hetzelfde begrip).
+pub use abi::Region;
 
 /// Rondt `n` op naar de [`GRAIN`], of `None` bij omloop.
 #[must_use]

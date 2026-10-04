@@ -12,7 +12,7 @@
 //! de isolatie in één stap: het ijzer kan per constructie niets aanraken wat
 //! niet van deze taak is.
 //!
-//! De kern doet er het cache-onderhoud bij ([`Coherence`]): de VPU van de O6N
+//! De kern doet er het cache-onderhoud bij ([`CacheMaint`]): de VPU van de O6N
 //! is niet coherent (`_CCA = 0`), de partitie van een app wel gecached.
 //!
 //! # Eigendom
@@ -41,14 +41,13 @@
 //! er niet.
 
 use crate::cage::Console;
-use crate::system::{REQ_HEADER, STATUS_DENIED, STATUS_ERROR, STATUS_NO_ENT, STATUS_OK};
 use crate::{Region, Slot};
 use abi::hopabi::codec::{
-    BufArgs, EVENT_CONSUMED, EVENT_DONE, EVENT_FAULT, EVENT_FORMAT, EVENT_LEN, EVENT_PRODUCED,
-    Event as WireEvent, FeedArgs, OpenArgs,
+    BufArgs, EVENT_LEN, Event as WireEvent, FeedArgs, Kind as WireKind, OpenArgs,
 };
 use abi::hopabi::{
-    OP_CODEC_CLOSE, OP_CODEC_FEED, OP_CODEC_OFFER, OP_CODEC_OPEN, OP_CODEC_POLL, Req,
+    HDR_LEN, OP_CODEC_CLOSE, OP_CODEC_FEED, OP_CODEC_OFFER, OP_CODEC_OPEN, OP_CODEC_POLL, Req,
+    STATUS_DENIED, STATUS_ERROR, STATUS_NO_ENT, STATUS_OK,
 };
 use alloc::vec::Vec;
 use bounded::BoundedVec;
@@ -94,7 +93,7 @@ pub trait Lives {
 
 /// Het cache-onderhoud rond een buffer die het niet-coherente ijzer leest of
 /// schrijft. Op ARM `dc cvac` en `dc civac` via `dev`.
-pub trait Coherence {
+pub trait CacheMaint {
     /// Schrijft vuile regels uit (de app schreef, het ijzer leest DRAM).
     fn clean(&mut self, pa: u64, len: u64);
     /// Schrijft uit en gooit weg (het ijzer schrijft, de app leest straks).
@@ -248,7 +247,7 @@ fn was_input(held: &mut BoundedVec<HeldBuf, MAX_HELD>, pa: u64) -> bool {
 }
 
 /// Wat een call teruggeeft: status, het `size`-veld en het aantal
-/// databytes op `out[REQ_HEADER..]`.
+/// databytes op `out[HDR_LEN..]`.
 type Answer = Result<(u64, usize), (u16, Why)>;
 
 /// De tekst bij een foutstatus, zonder allocatie.
@@ -304,7 +303,7 @@ pub struct CodecService<E, L, C> {
     strays: u32,
 }
 
-impl<E: Engine, L: Lives, C: Coherence> CodecService<E, L, C> {
+impl<E: Engine, L: Lives, C: CacheMaint> CodecService<E, L, C> {
     /// Een dienst zonder ijzer: elke call antwoordt "no codec hardware".
     pub const fn new(lives: L, cache: C) -> Self {
         CodecService {
@@ -385,7 +384,7 @@ impl<E: Engine, L: Lives, C: Coherence> CodecService<E, L, C> {
         match r {
             Ok((size, n)) => answer(out, req, STATUS_OK, size, n),
             Err((status, why)) => {
-                let n = crate::fmt_into(out.get_mut(REQ_HEADER..).unwrap_or(&mut []), &why);
+                let n = crate::fmt_into(out.get_mut(HDR_LEN..).unwrap_or(&mut []), &why);
                 answer(out, req, status, 0, n)
             }
         }
@@ -559,7 +558,7 @@ impl<E: Engine, L: Lives, C: Coherence> CodecService<E, L, C> {
             .map(|e| &e.session)
             .ok_or((STATUS_NO_ENT, Why::NoSession))?;
         let base = part.map_or(u64::MAX, |p| p.base);
-        let data = out.get_mut(REQ_HEADER..).unwrap_or(&mut []);
+        let data = out.get_mut(HDR_LEN..).unwrap_or(&mut []);
         let max = (data.len() / EVENT_LEN).min(MAX_POLL);
         let mut n = 0;
         let mut strays = 0;
@@ -579,14 +578,14 @@ impl<E: Engine, L: Lives, C: Coherence> CodecService<E, L, C> {
                         forget(held, b.pa);
                     }
                     WireEvent {
-                        kind: EVENT_FAULT,
+                        kind: WireKind::Fault,
                         tag: ev.tag,
                         ..WireEvent::default()
                     }
                 }
             };
             if let Some(b) = ev.buf
-                && w.kind != EVENT_FAULT
+                && w.kind != WireKind::Fault
             {
                 let input = was_input(held, b.pa);
                 if ev.kind == Kind::Produced && b.size > 0 && !input {
@@ -651,11 +650,11 @@ fn split<'a, E, const N: usize>(
 /// de partitie ligt (een driver die dat oplevert is stuk).
 fn wire_event(ev: &Event, base: u64) -> Option<WireEvent> {
     let kind = match ev.kind {
-        Kind::Consumed => EVENT_CONSUMED,
-        Kind::Produced => EVENT_PRODUCED,
-        Kind::Format => EVENT_FORMAT,
-        Kind::Done => EVENT_DONE,
-        Kind::Fault => EVENT_FAULT,
+        Kind::Consumed => WireKind::Consumed,
+        Kind::Produced => WireKind::Produced,
+        Kind::Format => WireKind::Format,
+        Kind::Done => WireKind::Done,
+        Kind::Fault => WireKind::Fault,
     };
     let l = &ev.layout;
     let mut w = WireEvent {
@@ -724,7 +723,7 @@ pub struct CodecCell<E, L, C, K> {
     log: K,
 }
 
-impl<E: Engine, L: Lives, C: Coherence, K: Console> CodecCell<E, L, C, K> {
+impl<E: Engine, L: Lives, C: CacheMaint, K: Console> CodecCell<E, L, C, K> {
     /// Een lege dienst voor in een `static`.
     pub const fn new(lives: L, cache: C, log: K) -> Self {
         CodecCell {
@@ -741,7 +740,7 @@ impl<E: Engine, L: Lives, C: Coherence, K: Console> CodecCell<E, L, C, K> {
     }
 }
 
-impl<E: Engine, L: Lives, C: Coherence, K: Console> Port for CodecCell<E, L, C, K> {
+impl<E: Engine, L: Lives, C: CacheMaint, K: Console> Port for CodecCell<E, L, C, K> {
     fn firmware_needed(&self, slot: Slot, generation: u32, req: &Req<'_>) -> Option<&'static str> {
         self.with(|s, _| s.firmware_needed(slot, generation, req))
             .flatten()
@@ -766,8 +765,8 @@ impl<E: Engine, L: Lives, C: Coherence, K: Console> Port for CodecCell<E, L, C, 
 
 /// Een antwoord met foutstatus en een vaste tekst.
 fn refuse(out: &mut [u8], req: &Req<'_>, text: &[u8]) -> usize {
-    let n = text.len().min(out.len().saturating_sub(REQ_HEADER));
-    if let Some(d) = out.get_mut(REQ_HEADER..REQ_HEADER + n) {
+    let n = text.len().min(out.len().saturating_sub(HDR_LEN));
+    if let Some(d) = out.get_mut(HDR_LEN..HDR_LEN + n) {
         d.copy_from_slice(text.get(..n).unwrap_or(&[]));
     }
     answer(out, req, STATUS_ERROR, 0, n)
@@ -819,16 +818,14 @@ async fn serve_loaded<'a>(
         match read_firmware(inbox, reply, name).await {
             Ok(bytes) => {
                 if let Err(e) = port.install_firmware(name, bytes) {
-                    let n = crate::fmt_into(
-                        out.get_mut(REQ_HEADER..).unwrap_or(&mut []),
-                        &Why::Codec(e),
-                    );
+                    let n =
+                        crate::fmt_into(out.get_mut(HDR_LEN..).unwrap_or(&mut []), &Why::Codec(e));
                     return answer(out, req, STATUS_ERROR, 0, n);
                 }
             }
             Err(error) => {
                 let n = crate::fmt_into(
-                    out.get_mut(REQ_HEADER..).unwrap_or(&mut []),
+                    out.get_mut(HDR_LEN..).unwrap_or(&mut []),
                     &Why::FirmwareRead { name, error },
                 );
                 return answer(out, req, STATUS_ERROR, 0, n);

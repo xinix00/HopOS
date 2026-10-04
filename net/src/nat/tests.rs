@@ -134,8 +134,8 @@ fn seg(dst: u32, sport: u16, dport: u16, flags: u8) -> Vec<u8> {
     let mut s = mk_frame(
         PROTO_TCP,
         HOST_MAC,
-        slot_mac(1),
-        slot_ip4(1),
+        port_mac(1),
+        port_ip4(1),
         dst,
         sport,
         dport,
@@ -161,7 +161,7 @@ fn flow_for(
     dport: u16,
     now: u64,
 ) -> Option<Id> {
-    nat.flow_for(io, proto, slot, slot_ip4(slot), sport, dst, dport, now)
+    nat.flow_for(io, proto, slot, port_ip4(slot), sport, dst, dport, now)
         .map(|(id, _)| id)
 }
 
@@ -204,11 +204,11 @@ fn masquerade_uit_en_terug() {
     let (mut nat, mut io) = setup();
     leer_gateway(&mut io);
     let payload = b"GET / HTTP/1.1";
-    let slot_ip = slot_ip4(1);
+    let slot_ip = port_ip4(1);
     let mut out = mk_frame(
         PROTO_TCP,
         HOST_MAC,
-        slot_mac(1),
+        port_mac(1),
         slot_ip,
         EXT_IP,
         5555,
@@ -234,7 +234,7 @@ fn masquerade_uit_en_terug() {
     let mut out2 = mk_frame(
         PROTO_TCP,
         HOST_MAC,
-        slot_mac(1),
+        port_mac(1),
         slot_ip,
         EXT_IP,
         5555,
@@ -260,7 +260,7 @@ fn masquerade_uit_en_terug() {
     let inj = io.read(1).expect("antwoord niet bezorgd");
     assert_eq!(be32(&inj, ETH_LEN + 16), slot_ip);
     assert_eq!(be16(l4(&inj), 2), 5555);
-    assert_eq!(inj[0..6], slot_mac(1));
+    assert_eq!(inj[0..6], port_mac(1));
     assert_eq!(inj[6..12], HOST_MAC);
     check_frame(&inj, "antwoord");
 }
@@ -276,7 +276,7 @@ fn dnat_in_en_slot_antwoord_uit() {
     );
     assert!(nat.inbound(&mut io, &mut inf, T0));
     let inj = io.read(1).expect("DNAT-frame niet bezorgd");
-    assert_eq!(be32(&inj, ETH_LEN + 16), slot_ip4(1));
+    assert_eq!(be32(&inj, ETH_LEN + 16), port_ip4(1));
     assert_eq!(be16(l4(&inj), 2), 9090);
     check_frame(&inj, "DNAT-in");
 
@@ -298,8 +298,8 @@ fn dnat_in_en_slot_antwoord_uit() {
     let mut uit = mk_frame(
         PROTO_TCP,
         HOST_MAC,
-        slot_mac(1),
-        slot_ip4(1),
+        port_mac(1),
+        port_ip4(1),
         LAN_IP,
         9090,
         1234,
@@ -320,8 +320,8 @@ fn dnat_in_en_slot_antwoord_uit() {
     let mut vreemd = mk_frame(
         PROTO_TCP,
         HOST_MAC,
-        slot_mac(1),
-        slot_ip4(1),
+        port_mac(1),
+        port_ip4(1),
         LAN_IP,
         7777,
         1234,
@@ -344,7 +344,7 @@ fn alloc_port_slaat_bezet_over() {
             slot: 2,
             fin_fwd: false,
             fin_rev: false,
-            slot_ip: slot_ip4(2),
+            slot_ip: port_ip4(2),
             dst_ip: EXT_IP,
             slot_port: 1,
             dst_port: 443,
@@ -391,7 +391,7 @@ fn sweep_expired() {
     assert_eq!(nat.flows.len(), 1);
     assert!(
         nat.flows
-            .by_fwd(&FKey(PROTO_TCP, slot_ip4(1), EXT_IP, 1002, 443))
+            .by_fwd(&FKey(PROTO_TCP, port_ip4(1), EXT_IP, 1002, 443))
             .is_some()
     );
 }
@@ -430,7 +430,7 @@ fn flow_lookup_vervangt_verlopen_entry() {
     let old_port = nat.flows.get(old).unwrap().node_port;
     age(&mut nat, old, now - UDP_IDLE - SEC);
     let (rep, created) = nat
-        .flow_for(&mut io, PROTO_UDP, 1, slot_ip4(1), 1001, EXT_IP, 443, now)
+        .flow_for(&mut io, PROTO_UDP, 1, port_ip4(1), 1001, EXT_IP, 443, now)
         .unwrap();
     assert!(created, "exacte lookup gaf een verlopen flow terug");
     assert_ne!(nat.flows.get(rep).unwrap().node_port, old_port);
@@ -462,7 +462,7 @@ fn reverse_lookup_verwijdert_expired_en_valt_terug_op_dnat() {
     let got = io.read(2).expect("niet bij het gepubliceerde slot");
     assert_eq!(
         (be32(&got, ETH_LEN + 16), be16(l4(&got), 2)),
-        (slot_ip4(2), 8080)
+        (port_ip4(2), 8080)
     );
     check_frame(&got, "DNAT na stale reverse lookup");
     assert_eq!((nat.flows.len(), nat.flows.count(1)), (0, 0));
@@ -512,8 +512,8 @@ fn tcp_rst_bezorging_en_veilige_reclaim() {
         let mut rst = mk_frame(
             PROTO_TCP,
             HOST_MAC,
-            slot_mac(1),
-            slot_ip4(1),
+            port_mac(1),
+            port_ip4(1),
             EXT_IP,
             5555,
             443,
@@ -534,11 +534,11 @@ fn tcp_rst_bezorging_en_veilige_reclaim() {
     {
         let (mut nat, mut io) = setup();
         leer_gateway(&mut io);
-        let slot_ip = slot_ip4(1);
+        let slot_ip = port_ip4(1);
         let mut out = mk_frame(
             PROTO_TCP,
             HOST_MAC,
-            slot_mac(1),
+            port_mac(1),
             slot_ip,
             EXT_IP,
             5555,
@@ -568,11 +568,11 @@ fn tcp_rst_bezorging_en_veilige_reclaim() {
     {
         let (mut nat, mut io) = setup();
         leer_gateway(&mut io);
-        let slot_ip = slot_ip4(1);
+        let slot_ip = port_ip4(1);
         let mut first = mk_frame(
             PROTO_TCP,
             HOST_MAC,
-            slot_mac(1),
+            port_mac(1),
             slot_ip,
             EXT_IP,
             5555,
@@ -583,7 +583,7 @@ fn tcp_rst_bezorging_en_veilige_reclaim() {
         let mut rst = mk_frame(
             PROTO_TCP,
             HOST_MAC,
-            slot_mac(1),
+            port_mac(1),
             slot_ip,
             EXT_IP,
             5555,
@@ -625,7 +625,7 @@ fn vol_slot_rejectpad_is_rate_limited() {
     assert!(flow_for(&mut nat, &mut io, PROTO_UDP, 1, 60001, EXT_IP, 443, now).is_none());
     assert!(
         nat.flows
-            .by_fwd(&FKey(PROTO_UDP, slot_ip4(1), EXT_IP, 1000, 443))
+            .by_fwd(&FKey(PROTO_UDP, port_ip4(1), EXT_IP, 1000, 443))
             .is_some(),
         "tweede reject veegde opnieuw vóór de cadans"
     );
@@ -650,7 +650,7 @@ fn unpublish_slot_ruimt_op() {
     nat.publish(Proto::Tcp, 8081, 2, 8081, SLOT_CAP).unwrap();
     flow_for(&mut nat, &mut io, PROTO_TCP, 1, 1001, EXT_IP, 443, T0).unwrap();
     flow_for(&mut nat, &mut io, PROTO_TCP, 2, 1002, EXT_IP, 443, T0).unwrap();
-    flow_for(&mut nat, &mut io, PROTO_TCP, 2, 1003, slot_ip4(1), 8080, T0).unwrap(); // hairpin naar 1
+    flow_for(&mut nat, &mut io, PROTO_TCP, 2, 1003, port_ip4(1), 8080, T0).unwrap(); // hairpin naar 1
     nat.unpublish_slot(1);
     assert_eq!(nat.pubs.len(), 1);
     assert_eq!(nat.pubs[0].slot, 2);
@@ -658,7 +658,7 @@ fn unpublish_slot_ruimt_op() {
     for id in nat.flows.ids() {
         let fl = nat.flows.get(id).unwrap();
         assert!(
-            fl.slot == 2 && fl.dst_ip != slot_ip4(1),
+            fl.slot == 2 && fl.dst_ip != port_ip4(1),
             "verkeerde flow overleefde"
         );
     }
@@ -969,7 +969,7 @@ fn adoption_defers_outbound_until_old_mapping_restored() {
         let flows = [FlowState {
             proto,
             slot: 1,
-            slot_ip: slot_ip4(1),
+            slot_ip: port_ip4(1),
             slot_port: 5555,
             dst_ip: EXT_IP,
             dst_port: 443,
@@ -977,7 +977,7 @@ fn adoption_defers_outbound_until_old_mapping_restored() {
             fins: 0,
         }];
         let state = NatState {
-            flows: &flows,
+            flows: &flows[..],
             masq_next: 0,
         };
         nat.hold_adoption(&[old_port]).unwrap();
@@ -985,8 +985,8 @@ fn adoption_defers_outbound_until_old_mapping_restored() {
             let mut f = mk_frame(
                 proto,
                 HOST_MAC,
-                slot_mac(1),
-                slot_ip4(1),
+                port_mac(1),
+                port_ip4(1),
                 EXT_IP,
                 sport,
                 443,
@@ -1063,11 +1063,11 @@ fn hairpin_heen_en_terug() {
     io.attach(1);
     io.attach(2);
     nat.publish(Proto::Tcp, 7878, 1, 7878, SLOT_CAP).unwrap();
-    let (cli, srv) = (slot_ip4(2), slot_ip4(1));
+    let (cli, srv) = (port_ip4(2), port_ip4(1));
     let mut heen = mk_frame(
         PROTO_TCP,
         HOST_MAC,
-        slot_mac(2),
+        port_mac(2),
         cli,
         NODE_IP,
         5555,
@@ -1087,7 +1087,7 @@ fn hairpin_heen_en_terug() {
     let mut terug = mk_frame(
         PROTO_TCP,
         HOST_MAC,
-        slot_mac(1),
+        port_mac(1),
         srv,
         NODE_IP,
         7878,
@@ -1115,8 +1115,8 @@ fn hairpin_udp() {
     let mut heen = mk_frame(
         PROTO_UDP,
         HOST_MAC,
-        slot_mac(2),
-        slot_ip4(2),
+        port_mac(2),
+        port_ip4(2),
         NODE_IP,
         6666,
         5353,
@@ -1129,8 +1129,8 @@ fn hairpin_udp() {
     let mut terug = mk_frame(
         PROTO_UDP,
         HOST_MAC,
-        slot_mac(1),
-        slot_ip4(1),
+        port_mac(1),
+        port_ip4(1),
         NODE_IP,
         5353,
         masq,
@@ -1149,8 +1149,8 @@ fn hairpin_ongepubliceerd_dropt() {
     let mut f = mk_frame(
         PROTO_TCP,
         HOST_MAC,
-        slot_mac(2),
-        slot_ip4(2),
+        port_mac(2),
+        port_ip4(2),
         NODE_IP,
         5555,
         8080,
@@ -1168,8 +1168,8 @@ fn hairpin_reply_zonder_flow_dropt() {
     let mut f = mk_frame(
         PROTO_TCP,
         HOST_MAC,
-        slot_mac(1),
-        slot_ip4(1),
+        port_mac(1),
+        port_ip4(1),
         NODE_IP,
         7878,
         20001,
@@ -1194,7 +1194,7 @@ fn hairpin_storm_recyclet_achter_buurflows() {
     for i in 0..60 {
         flow_for(&mut nat, &mut io, PROTO_TCP, 1, 1000 + i, EXT_IP, 443, T0).unwrap();
     }
-    let ip = slot_ip4(3);
+    let ip = port_ip4(3);
     // Per verbinding: client-poort, masq-poort, fase van de handshake.
     let mut act: Vec<(u16, u16, u8)> = Vec::new();
     let (mut started, mut done, mut now) = (0u16, 0, T0);
@@ -1216,7 +1216,7 @@ fn hairpin_storm_recyclet_achter_buurflows() {
             let mut f = mk_frame(
                 PROTO_TCP,
                 HOST_MAC,
-                slot_mac(3),
+                port_mac(3),
                 ip,
                 NODE_IP,
                 sport,
@@ -1255,7 +1255,7 @@ fn vol_slot_neemt_altijd_de_oudste_gesloten_flow() {
     let (mut nat, mut io) = setup();
     io.attach(3);
     nat.publish(Proto::Tcp, 8090, 3, 8090, SLOT_CAP).unwrap();
-    let srv = slot_ip4(3);
+    let srv = port_ip4(3);
     let mut hop = 1000;
     let mut buren = |nat: &mut Nat, io: &mut TestIo, n: u16| {
         for _ in 0..n {
@@ -1282,7 +1282,7 @@ fn vol_slot_neemt_altijd_de_oudste_gesloten_flow() {
     let mut syn = mk_frame(
         PROTO_TCP,
         HOST_MAC,
-        slot_mac(3),
+        port_mac(3),
         srv,
         NODE_IP,
         60000,

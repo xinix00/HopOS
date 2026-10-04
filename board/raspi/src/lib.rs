@@ -248,15 +248,10 @@ impl<S: Soc> Raspi<S> {
 
     /// De rest van DRAM in de kaart, de pool eruit, de staging erbij.
     fn memory(&self, f: &Fdt<'static>, dtb: u64) {
-        let Ok(banks) = f.mem_regions() else {
+        let Ok(mut regs) = f.mem_regions() else {
             cpu::println!("WARNING HOPOS_POOL_FALLBACK: no /memory in the DTB, no pool");
             return;
         };
-        let mut regs: bounded::BoundedVec<AbiRegion, { fw::fdt::MAX_MEM_REGIONS }> =
-            bounded::BoundedVec::new();
-        for b in banks.iter() {
-            let _ = regs.push(AbiRegion::new(b.addr, b.size));
-        }
         let Ok(n) = abi::layout::coalesce(regs.as_mut_slice()) else {
             cpu::println!("WARNING HOPOS_POOL_FALLBACK: DTB /memory wraps, no pool");
             return;
@@ -266,11 +261,7 @@ impl<S: Soc> Raspi<S> {
         let mapped = map::plan_ram(regs.as_slice(), &t, normal_block, dev::write64);
         arch::tables_changed();
         let stage = self.stage(f);
-        let mut reserve: bounded::BoundedVec<AbiRegion, { fw::fdt::MAX_RESERVE }> =
-            bounded::BoundedVec::new();
-        for r in f.mem_reserve().iter() {
-            let _ = reserve.push(AbiRegion::new(r.addr, r.size));
-        }
+        let reserve = f.mem_reserve();
         let holes = map::holes(
             reserve.as_slice(),
             AbiRegion::new(dtb, f.size() as u64),

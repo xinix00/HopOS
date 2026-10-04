@@ -170,6 +170,26 @@ impl fmt::Display for Error {
     }
 }
 
+impl From<abi::Error> for Error {
+    /// Een draadfout van `abi` (een framekop, een call) in de termen van de
+    /// kern, met dezelfde getallen.
+    fn from(e: abi::Error) -> Self {
+        match e {
+            abi::Error::BadMagic(m) => Self::Version {
+                have: u64::from(m),
+                want: u64::from(abi::systemapi::MAGIC),
+            },
+            abi::Error::BadVersion { got, want } => Self::Version {
+                have: u64::from(got),
+                want: u64::from(want),
+            },
+            abi::Error::PayloadTooLarge { len, max } => Self::TooLarge { len, max },
+            abi::Error::Short { len, .. } => Self::Corrupt { at: len },
+            _ => Self::Corrupt { at: 0 },
+        }
+    }
+}
+
 impl From<blkdev::Error> for Error {
     /// Een blokfout wordt de I/O-fout van de kern, mét zijn LBA; een dood
     /// device of een verzoek buiten de schijf heeft geen betere plek dan de

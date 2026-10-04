@@ -57,10 +57,10 @@ use crate::hopfs::{
     truncate_shared, write_shared,
 };
 use crate::slots::{Mount, Reply, Servicers, try_push};
-use crate::system::{MAX_IO_CHUNK, REQ_HEADER};
+use crate::system::MAX_IO_CHUNK;
 use crate::{Error, Result, SLOT_CAP, Slot};
 use abi::hopabi::{
-    OP_LIST, OP_READ, OP_READ_MANY, OP_REMOVE, OP_STAT, OP_SYNC, OP_TRUNCATE, OP_WRITE,
+    HDR_LEN, OP_LIST, OP_READ, OP_READ_MANY, OP_REMOVE, OP_STAT, OP_SYNC, OP_TRUNCATE, OP_WRITE,
     STATUS_ERROR, STATUS_OK, many,
 };
 use alloc::vec::Vec;
@@ -71,7 +71,7 @@ use core::pin::Pin;
 use core::task::Poll;
 use core::time::Duration;
 use sync::mpsc::Mailbox;
-use sync::{LocalCell, Pool};
+use sync::{Futures, LocalCell};
 
 /// De map onder hopfs waar de eigen roots van de taken wonen.
 pub const TASKS_DIR: &[u8] = b"/.tasks";
@@ -263,7 +263,7 @@ pub fn resolve(slot: Slot, mounts: &[Mount], p: &[u8], out: &mut PathBuf) -> Res
 ///
 /// `buf` is de callbuffer (pad en data staan erin op `path` en `data`),
 /// `out` de antwoordbuffer: de data van een antwoord komt op
-/// `out[REQ_HEADER..]`, de kop schrijft de verbinding zelf.
+/// `out[HDR_LEN..]`, de kop schrijft de verbinding zelf.
 #[derive(Debug)]
 pub struct FsCall {
     /// Het slot van de peer.
@@ -292,7 +292,7 @@ pub struct FsCall {
 pub struct FsDone {
     /// De callbuffer, terug.
     pub buf: Vec<u8>,
-    /// De antwoordbuffer, terug; de data staat op `out[REQ_HEADER..]`.
+    /// De antwoordbuffer, terug; de data staat op `out[HDR_LEN..]`.
     pub out: Vec<u8>,
     /// Het `size`-veld van het antwoord en het aantal databytes.
     pub result: Result<(u64, usize)>,
@@ -490,7 +490,7 @@ pub fn thaw(inbox: &FsInbox<'_>) -> bool {
 ///
 /// Meerdere calls tegelijk: wat binnenkomt, wordt synchroon gepland (pad,
 /// generatie, node, een verse run) en loopt daarna als future in een vaste
-/// [`Pool`] van [`FS_DEPTH`] plaatsen, elk met zijn eigen I/O op de
+/// [`Futures`] van [`FS_DEPTH`] plaatsen, elk met zijn eigen I/O op de
 /// wachtrij (`blkdev::Queue`). De regels die het contract dragen
 /// (docs/storage-sync.md), allemaal in `Desk::admit`:
 ///
@@ -620,11 +620,11 @@ async fn run_call<D: BlockIo + Copy>(
     match work {
         Work::Done(size, len) => Ok((size, len)),
         Work::Read(n) => {
-            let room = c.out.len().saturating_sub(REQ_HEADER).min(MAX_IO_CHUNK);
+            let room = c.out.len().saturating_sub(HDR_LEN).min(MAX_IO_CHUNK);
             let len = usize::try_from(c.n).unwrap_or(usize::MAX).min(room);
             let dst = c
                 .out
-                .get_mut(REQ_HEADER..REQ_HEADER + len)
+                .get_mut(HDR_LEN..HDR_LEN + len)
                 .ok_or(Error::TooLarge { len, max: room })?;
             let got = read_shared(t, n, c.off, dst).await?;
             Ok((got as u64, got))
@@ -667,7 +667,7 @@ async fn read_many<D: BlockIo + Copy>(
     let list = buf.get(data.clone()).ok_or(Error::Corrupt { at: 0 })?;
     let count = (list.len() / many::OP_LEN).min(M);
     let short = Error::TooLarge { len: count, max: M };
-    let body = out.get_mut(REQ_HEADER..).ok_or(short)?;
+    let body = out.get_mut(HDR_LEN..).ok_or(short)?;
     let (table, rest) = body
         .split_at_mut_checked(count * many::RESULT_LEN)
         .ok_or(short)?;
@@ -815,7 +815,7 @@ impl<'s, D: BlockIo + Copy, L: Console> FsActor<'s, D, L> {
     pub async fn run(&mut self, inbox: &FsInbox<'_>) {
         let FsActor { tree, desk } = self;
         let tree = &*tree;
-        let mut pool = core::pin::pin!(Pool::<_, FS_DEPTH>::new());
+        let mut pool = core::pin::pin!(Futures::<_, FS_DEPTH>::new());
         let mut next: Option<FsEnvelope<'_>> = None;
         core::future::poll_fn(|cx| {
             loop {
@@ -853,7 +853,7 @@ impl<'s, D: BlockIo + Copy, L: Console> FsActor<'s, D, L> {
 
     /// Eén bestandscall, van begin tot eind, zonder brievenbus (de tests).
     /// Geeft het `size`-veld van het antwoord en het aantal databytes op
-    /// `c.out[REQ_HEADER..]`.
+    /// `c.out[HDR_LEN..]`.
     #[cfg(test)]
     pub(crate) async fn handle(&mut self, c: &mut FsCall) -> Result<(u64, usize)> {
         let (work, volume) = self.desk.plan(&self.tree, c)?;
@@ -1153,7 +1153,7 @@ impl<L: Console> Desk<'_, L> {
             return;
         }
         let count = c.data.len() / many::OP_LEN;
-        let table = c.out.get(REQ_HEADER..).unwrap_or(&[]);
+        let table = c.out.get(HDR_LEN..).unwrap_or(&[]);
         let bad = (0..count)
             .filter(|&i| many::result(table, i).is_some_and(|(_, s)| s != STATUS_OK))
             .count();
@@ -1304,7 +1304,7 @@ impl<L: Console> Desk<'_, L> {
                     },
                 })?;
                 let count = list.len() / many::OP_LEN;
-                let need = REQ_HEADER + count * (many::RESULT_LEN + BLOCK_SIZE) + sum;
+                let need = HDR_LEN + count * (many::RESULT_LEN + BLOCK_SIZE) + sum;
                 if need > c.out.len() {
                     return Err(Error::TooLarge {
                         len: need,
@@ -1326,11 +1326,8 @@ impl<L: Console> Desk<'_, L> {
                 Work::Write(fs.write_open(p, c.off, data.len())?)
             }
             OP_LIST => {
-                let room = c.out.len().saturating_sub(REQ_HEADER).min(MAX_IO_CHUNK);
-                let dst = c
-                    .out
-                    .get_mut(REQ_HEADER..REQ_HEADER + room)
-                    .unwrap_or(&mut []);
+                let room = c.out.len().saturating_sub(HDR_LEN).min(MAX_IO_CHUNK);
+                let dst = c.out.get_mut(HDR_LEN..HDR_LEN + room).unwrap_or(&mut []);
                 let (count, len) = fs.list_into(p, dst)?;
                 Work::Done(count as u64, len)
             }

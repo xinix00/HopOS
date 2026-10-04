@@ -383,6 +383,7 @@ dependencies = [
 name = "driver-fb"
 version = "3.0.9"
 dependencies = [
+ "abi",
  "dev",
 ]
 
@@ -593,6 +594,7 @@ version = "3.0.9"
 dependencies = [
  "bounded",
  "dev",
+ "sync",
 ]
 
 [[package]]
@@ -607,6 +609,7 @@ dependencies = [
 name = "fw"
 version = "3.0.9"
 dependencies = [
+ "abi",
  "bounded",
  "dev",
 ]
@@ -789,6 +792,9 @@ version = "3.0.9"
 [[package]]
 name = "sync"
 version = "3.0.9"
+dependencies = [
+ "bounded",
+]
 
 [[package]]
 name = "syncprobe"

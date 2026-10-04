@@ -9,7 +9,7 @@
 //! terugkomt als het slot vrijkomt (een gecrashte display-app geeft je zo
 //! vanzelf de bootconsole terug). Het primitief eronder (één houder, het
 //! venster in de kooi, de adoptie na een flip) is `kern::grants`; de console
-//! zelf is van de binary en komt binnen als [`Glass`].
+//! zelf is van de binary en komt binnen als [`GlassConsole`].
 //!
 //! De aanvraag: de jobspec zegt `gui: display`, en Hop zet dat als
 //! `GUI=display` in de env van de job. `FB=1` (de Go-vorm, 19-07) werkt
@@ -36,6 +36,7 @@
 
 extern crate alloc;
 
+use abi::glass;
 use alloc::vec::Vec;
 use core::net::Ipv4Addr;
 use driver_fb::Desc;
@@ -44,7 +45,7 @@ use kern::grants::{DeviceGrant, Window, WindowMap, env_get, env_put};
 use kern::{Error, Result, Slot};
 
 /// De console van HOP op het glas, zoals de grant hem ziet.
-pub trait Glass {
+pub trait GlassConsole {
     /// Het glas is van de app: de console eraf (hij tekent niets meer).
     fn hand_over(&mut self);
     /// Het glas is terug: de console erop, met een schone lei.
@@ -146,7 +147,7 @@ impl FbGrant {
         slot: Slot,
         env: &[u8],
         out: &mut Vec<u8>,
-        glass: &mut impl Glass,
+        glass: &mut impl GlassConsole,
         log: &impl Console,
     ) {
         if !wants_glass(env) {
@@ -202,7 +203,12 @@ impl FbGrant {
 
     /// De adoptie na een kern-flip: de houder komt alleen uit de geërfde
     /// kooi, nooit uit de env of uit wat een herverbindende app beweert.
-    pub fn adopt(&mut self, slot: Slot, map: &impl WindowMap, glass: &mut impl Glass) -> Result {
+    pub fn adopt(
+        &mut self,
+        slot: Slot,
+        map: &impl WindowMap,
+        glass: &mut impl GlassConsole,
+    ) -> Result {
         if self.grant.adopt(slot, map)? {
             glass.hand_over();
         }
@@ -212,7 +218,12 @@ impl FbGrant {
     /// De release-haak: geeft het glas terug bij het vrijkomen van het slot
     /// en zet HOP's console terug (verse init: schone lei, de log loopt
     /// weer). Geeft of er iets terugkwam.
-    pub fn release(&mut self, slot: Slot, glass: &mut impl Glass, log: &impl Console) -> bool {
+    pub fn release(
+        &mut self,
+        slot: Slot,
+        glass: &mut impl GlassConsole,
+        log: &impl Console,
+    ) -> bool {
         if !self.grant.release(slot) {
             return false;
         }
@@ -236,40 +247,17 @@ fn put_env(
 ) -> Result {
     // De app ziet het venster op het vaste IPA plus de offset in zijn
     // 2 MB-blok: de fysieke buffer mag boven de 4 GB liggen.
-    env_put(
-        out,
-        base,
-        ENV_MAX,
-        "FB_BASE",
-        format_args!("{:#x}", w.ipa()),
-    )?;
-    env_put(out, base, ENV_MAX, "FB_WIDTH", format_args!("{}", d.width))?;
-    env_put(
-        out,
-        base,
-        ENV_MAX,
-        "FB_HEIGHT",
-        format_args!("{}", d.height),
-    )?;
-    env_put(
-        out,
-        base,
-        ENV_MAX,
-        "FB_STRIDE",
-        format_args!("{}", d.stride),
-    )?;
-    env_put(out, base, ENV_MAX, "FB_BPP", format_args!("{}", d.bpp))?;
+    let mut put = |k: &str, v: core::fmt::Arguments<'_>| env_put(out, base, ENV_MAX, k, v);
+    put(glass::FB_BASE, format_args!("{:#x}", w.ipa()))?;
+    put(glass::FB_WIDTH, format_args!("{}", d.width))?;
+    put(glass::FB_HEIGHT, format_args!("{}", d.height))?;
+    put(glass::FB_STRIDE, format_args!("{}", d.stride))?;
+    put(glass::FB_BPP, format_args!("{}", d.bpp))?;
     if d.swap_rb {
-        env_put(out, base, ENV_MAX, "FB_SWAP", format_args!("1"))?;
+        put(glass::FB_SWAP, format_args!("1"))?;
     }
     if let Some((ip, port)) = input {
-        env_put(
-            out,
-            base,
-            ENV_MAX,
-            "INPUT_ADDR",
-            format_args!("{ip}:{port}"),
-        )?;
+        put(glass::INPUT_ADDR, format_args!("{ip}:{port}"))?;
     }
     Ok(())
 }
@@ -289,7 +277,7 @@ mod tests {
         back: u32,
     }
 
-    impl Glass for TestGlass {
+    impl GlassConsole for TestGlass {
         fn hand_over(&mut self) {
             self.on = false;
         }

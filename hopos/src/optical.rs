@@ -1,13 +1,13 @@
 //! De optical-owner en de berichtenbrug naar de enige USB-eigenaar.
 //! Alle buffers hebben één eigenaar; geen RefCell-lening over een await.
 use abi::hopabi::{
-    OP_DEVICE_COMMAND, OP_READ, OP_STAT,
+    HDR_LEN, OP_DEVICE_COMMAND, OP_READ, OP_STAT,
     device::{Command, RESULT_LEN, Reply},
 };
 use alloc::vec::Vec;
 use executor::Executor;
 use gui_usbin::storage::{BulkError, BulkId, BulkInfo, BulkOp, BulkReq};
-use kern::{Error, Result, deviceabi, rpc::FsCall, system::REQ_HEADER};
+use kern::{Error, Result, deviceabi, rpc::FsCall};
 use media_optical::{Data, UsbError, asynchronous::Transport, mmc::Drive};
 use sync::{LocalCell, mpsc::Mailbox};
 pub(crate) static WAKE: sync::Signal = sync::Signal::new();
@@ -247,8 +247,8 @@ async fn handle(
     drive.bot().transport().deadline = exec.now().saturating_add(10_000_000_000);
     let out = c
         .out
-        .get_mut(REQ_HEADER..)
-        .ok_or(Error::Corrupt { at: REQ_HEADER })?;
+        .get_mut(HDR_LEN..)
+        .ok_or(Error::Corrupt { at: HDR_LEN })?;
     let result = match c.op {
         OP_DEVICE_COMMAND => {
             let cmd = Command::decode(

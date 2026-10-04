@@ -179,7 +179,7 @@ impl Canary {
                 Ipv4Addr::from(abi::layout::slot_ip4(s)),
                 crate::slots::HOP_PORT,
             ),
-            _ => (own, kern::system::PORT),
+            _ => (own, abi::systemapi::PORT),
         };
         let r = crate::net::dial(exec, target.0, target.1, DIAL_TIMEOUT).await;
         let now = exec.now();

@@ -253,7 +253,7 @@ impl QemuVirt {
         if let Some(list) = fdt().and_then(|f| f.virtio_mmio().ok()) {
             return list
                 .iter()
-                .map(|t| (Pa(t.reg.addr), t.intid))
+                .map(|t| (Pa(t.reg.base), t.intid))
                 .filter(|&(pa, _)| in_window(pa))
                 .find(|&(pa, _)| is(pa));
         }
@@ -328,7 +328,7 @@ impl Board for QemuVirt {
         CORES.store(f.cpu_count().unwrap_or(0), Relaxed);
         let gic_ok = f
             .gic_v3()
-            .is_some_and(|g| g.dist.addr == GICD.0 && g.redist.addr == GICR.0);
+            .is_some_and(|g| g.dist.base == GICD.0 && g.redist.base == GICR.0);
         cpu::println!(
             "fdt: {} bytes at {pa:#x}, bootargs {:?}{}",
             f.size(),

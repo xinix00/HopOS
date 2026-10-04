@@ -7,7 +7,7 @@ use core::alloc::{GlobalAlloc, Layout};
 /// De enige allocerende kerncore.
 #[doc(hidden)]
 pub struct KernelCore;
-impl heap::Core for KernelCore {
+impl heap::CoreId for KernelCore {
     fn id() -> u64 {
         0
     }

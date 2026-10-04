@@ -246,13 +246,12 @@ mod on {
         .await;
     }
 
-    /// De houder van het glas als slot van de ABI (het bron-IP van de
-    /// display-app volgt eruit), voor de input-listener. `None` zonder
-    /// houder, of als de grant net geleend is (dan komt er niemand binnen,
-    /// en de volgende regel toetst opnieuw).
-    pub(crate) fn glass_holder() -> Option<abi::layout::Slot> {
-        let s = GRANT.try_borrow().ok()?.holder()?;
-        abi::layout::Slot::new(s.get())
+    /// De houder van het glas (het bron-IP van de display-app volgt eruit),
+    /// voor de input-listener. `None` zonder houder, of als de grant net
+    /// geleend is (dan komt er niemand binnen, en de volgende regel toetst
+    /// opnieuw).
+    pub(crate) fn glass_holder() -> Option<kern::Slot> {
+        GRANT.try_borrow().ok()?.holder()
     }
 
     /// De USB-taak (Go: `usbin.Start` en `Manager.Run`).
@@ -272,9 +271,9 @@ mod on {
             core::sync::atomic::AtomicBool::new(false);
 
         use super::{GRANT, optical};
+        use crate::clock::ExecTimer;
         use board::{Board, UsbHost, UsbHosts, UsbKind};
         use core::fmt;
-        use core::future::Future;
         use core::net::Ipv4Addr;
         use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
         use core::time::Duration;
@@ -284,7 +283,7 @@ mod on {
         use executor::Executor;
         use gui_usbin::deliver::{self, INPUT_PORT, InputQueue, InputTx};
         use gui_usbin::register::{HostSpec, PrepareError, Registry};
-        use gui_usbin::{Manager, Sink, Timer};
+        use gui_usbin::{Manager, Sink};
 
         /// De rij van de USB-taak naar de input-listener.
         static INPUT: InputQueue = InputQueue::new();
@@ -292,21 +291,6 @@ mod on {
         /// Gebeurtenissen die de rij niet meer in pasten (de listener liep
         /// achter). Een meting, geen fout: invoer is lossy by design.
         pub(crate) static QUEUE_DROPS: AtomicU64 = AtomicU64::new(0);
-
-        /// Het timerwiel van de executor als klok en slaap van de driver:
-        /// een poortreset of een commando slaapt hierop in plaats van de
-        /// core vast te houden.
-        #[derive(Clone, Copy)]
-        struct UsbTimer(&'static Executor);
-
-        impl Timer for UsbTimer {
-            fn now(&self) -> u64 {
-                self.0.now()
-            }
-            fn sleep(&self, ns: u64) -> impl Future<Output = ()> {
-                self.0.after(Duration::from_nanos(ns))
-            }
-        }
 
         /// De sink van de manager: invoer de rij in, logregels naar de
         /// console.
@@ -429,7 +413,10 @@ mod on {
                     );
                 }
             }
-            let t = UsbTimer(exec);
+            // Het timerwiel van de executor als klok en slaap van de driver:
+            // een poortreset of een commando slaapt hierop in plaats van de
+            // core vast te houden.
+            let t = ExecTimer(exec);
             let mut mgr = Manager::new(t);
             let live = reg
                 .bring_up(&mut mgr, &mut sink, async |spec: &HostSpec| {
@@ -478,7 +465,11 @@ mod on {
 
         /// Maakt de driver voor één aangeboden controller: een DWC3-core
         /// eerst in hostmodus, dan de xHCI op hetzelfde venster.
-        async fn make(hosts: &UsbHosts, spec: &HostSpec, t: &UsbTimer) -> Result<Hc, PrepareError> {
+        async fn make(
+            hosts: &UsbHosts,
+            spec: &HostSpec,
+            t: &ExecTimer,
+        ) -> Result<Hc, PrepareError> {
             let Some(h) = hosts.iter().find(|h| h.name == spec.name) else {
                 return Err(PrepareError {
                     what: "controller not offered by the board",
@@ -498,7 +489,7 @@ mod on {
         /// De DWC3-core van `h` in hostmodus (de RK3566), met de globale
         /// registers in één regel: op dat silicium is de vraag niet "werkt
         /// de driver" maar "staat de klok en de PHY aan" (Go, 06-08).
-        async fn dwc3_host_mode(h: &UsbHost, t: &UsbTimer) -> Result<(), PrepareError> {
+        async fn dwc3_host_mode(h: &UsbHost, t: &ExecTimer) -> Result<(), PrepareError> {
             // SAFETY: het board noemt dit venster als DWC3-core: de
             // globale registers liggen op +0xC100 binnen `h.regs`, Device
             // gemapt voor altijd.
@@ -585,16 +576,16 @@ mod on {
     pub(crate) mod hooks {
         use super::{GLASS, GRANT, bunny_header};
         use driver_fb::Desc;
-        use gui_fbgrant::Glass;
+        use gui_fbgrant::GlassConsole;
         use kern::Slot;
         use kern::cage::Console as _;
         use kern::grants::{Grants, Window, WindowMap};
 
-        /// De console als [`Glass`] voor de grant: eraf bij de toekenning,
+        /// De console als [`GlassConsole`] voor de grant: eraf bij de toekenning,
         /// terug (schone lei, bunny) bij het vrijkomen.
         struct KernGlass;
 
-        impl Glass for KernGlass {
+        impl GlassConsole for KernGlass {
             fn hand_over(&mut self) {
                 if let Ok(mut c) = GLASS.try_borrow_mut() {
                     c.disable();
@@ -622,8 +613,7 @@ mod on {
                     max: abi::layout::SLOT_CAP,
                 };
                 let plan = crate::slots::os_plan().map_err(|_| bad)?;
-                let s = abi::layout::Slot::new(slot.get()).ok_or(bad)?;
-                plan.cage_table_pa(s).map_err(|_| bad)
+                plan.cage_table_pa(slot).map_err(|_| bad)
             }
         }
 

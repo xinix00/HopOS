@@ -81,14 +81,9 @@ impl fmt::Display for Error {
 /// De `Result` van deze module.
 pub type Result<T = (), E = Error> = core::result::Result<T, E>;
 
-/// Een fysiek geheugenbereik in bytes.
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
-pub struct Region {
-    /// Het beginadres.
-    pub addr: u64,
-    /// De grootte.
-    pub size: u64,
-}
+/// Een fysiek geheugenbereik in bytes (een `reg`-paar): dezelfde
+/// [`abi::Region`] waar het PA-plan en de pool van de kern mee rekenen.
+pub use abi::Region;
 
 /// De firmware-simple-framebuffer uit /chosen (de simple-framebuffer-
 /// binding): het scherm dat de bootloader al aanzette.
@@ -396,7 +391,7 @@ impl<'a> Fdt<'a> {
             if addr == 0 && size == 0 {
                 break;
             }
-            if regs.push(Region { addr, size }).is_err() {
+            if regs.push(Region::new(addr, size)).is_err() {
                 break;
             }
         }
@@ -628,7 +623,7 @@ fn reg_pairs(data: &[u8], ac: usize, sc: usize) -> impl Iterator<Item = Region> 
     (0..n).filter_map(move |i| {
         let off = i * stride;
         Some(Region {
-            addr: cells(data, off, ac)?,
+            base: cells(data, off, ac)?,
             size: cells(data, off + ac * 4, sc)?,
         })
     })
@@ -814,11 +809,11 @@ mod tests {
             regs.as_slice(),
             &[
                 Region {
-                    addr: 0x4000_0000,
+                    base: 0x4000_0000,
                     size: 0x4000_0000
                 },
                 Region {
-                    addr: 0x8000_0000,
+                    base: 0x8000_0000,
                     size: 0x1_0000_0000
                 }
             ]
@@ -879,7 +874,7 @@ mod tests {
         assert_eq!(
             f.mem_reserve().as_slice(),
             &[Region {
-                addr: 0x3f00_0000,
+                base: 0x3f00_0000,
                 size: 0x10_0000
             }]
         );
@@ -1015,7 +1010,7 @@ mod tests {
             v.as_slice(),
             &[VirtioMmio {
                 reg: Region {
-                    addr: 0xa00_0200,
+                    base: 0xa00_0200,
                     size: 0x200
                 },
                 intid: 49
@@ -1025,11 +1020,11 @@ mod tests {
             f.gic_v3(),
             Some(GicV3 {
                 dist: Region {
-                    addr: 0x800_0000,
+                    base: 0x800_0000,
                     size: 0x1_0000
                 },
                 redist: Region {
-                    addr: 0x80a_0000,
+                    base: 0x80a_0000,
                     size: 0xf6_0000
                 }
             })
@@ -1047,20 +1042,20 @@ mod tests {
         assert_eq!(
             f.mem_regions().unwrap().as_slice(),
             &[Region {
-                addr: 0x4000_0000,
+                base: 0x4000_0000,
                 size: 0xc000_0000
             }]
         );
         assert_eq!(f.bootargs(), Some("hopos.node=virt-1 hopos.init[]=a"));
         let v = f.virtio_mmio().unwrap();
         assert_eq!(v.len(), 32);
-        let first = v.iter().find(|t| t.reg.addr == 0xa00_0000).unwrap();
+        let first = v.iter().find(|t| t.reg.base == 0xa00_0000).unwrap();
         assert_eq!(first.intid, 32 + 16);
-        let last = v.iter().find(|t| t.reg.addr == 0xa00_3e00).unwrap();
+        let last = v.iter().find(|t| t.reg.base == 0xa00_3e00).unwrap();
         assert_eq!(last.intid, 32 + 0x2f);
         let gic = f.gic_v3().unwrap();
-        assert_eq!(gic.dist.addr, 0x800_0000);
-        assert_eq!(gic.redist.addr, 0x80a_0000);
+        assert_eq!(gic.dist.base, 0x800_0000);
+        assert_eq!(gic.redist.base, 0x80a_0000);
         assert_eq!(gic.redist.size, 0xf6_0000);
         assert_eq!(f.framebuffer(), None);
         assert_eq!(f.cpu_count(), Ok(4));

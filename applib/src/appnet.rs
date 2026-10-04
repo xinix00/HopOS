@@ -39,7 +39,7 @@
 
 use crate::app::App;
 use crate::clock;
-use crate::contract::{KIND_LOG, NET_MTU, NET_RING_DATA_CAP, SYS_HEADER_LEN};
+use crate::contract::{NET_MTU, NET_RING_DATA_CAP, SYS_HEADER_LEN};
 use crate::log;
 use crate::log::LINE_MAX;
 use crate::net::{Nic, PUMP_EARLY, PUMP_TIMER, RxPoll, host_ip, mac_of, slot_ip, ws_shift_for};
@@ -1519,7 +1519,8 @@ impl Drop for Udp6Socket {
 // ---- De system-API over een echte verbinding ----
 
 /// De system-client van een app met netstack.
-pub type SystemClient = sys::Client<SysDial, ExecTimer>;
+pub type SystemClient =
+    sys::Client<SysDial, ExecTimer<{ crate::rt::TASKS }, { crate::rt::TIMERS }>>;
 
 /// Vertaalt een netfout naar de drie transportfouten van de client: wat
 /// de client herhaalt (reset, dicht) tegen wat hij als weigering ziet.
@@ -1572,14 +1573,8 @@ impl sys::Dial for SysDial {
     }
 }
 
-/// De timer van de system-client: het timerwiel van de executor.
-pub struct ExecTimer(pub &'static Exec);
-
-impl sys::Timer for ExecTimer {
-    fn sleep(&self, d: Duration) -> impl Future<Output = ()> {
-        self.0.after(d)
-    }
-}
+/// De timer van de system-client: het timerwiel van de executor van de app.
+pub use executor::ExecTimer;
 
 // ---- Logregels over de system-verbinding ----
 
@@ -1675,13 +1670,13 @@ pub(crate) fn try_log(line: &[u8]) -> bool {
     // zonder regel op de draad laten als de tweede niet meer paste.
     let mut frame = [0u8; LOG_FRAME];
     let len = SYS_HEADER_LEN + line.len();
-    let (Ok(len32), Some((head, body))) = (
-        u32::try_from(line.len()),
+    let (Ok(fh), Some((head, body))) = (
+        abi::systemapi::encode_header(abi::systemapi::Kind::Log, line.len()),
         frame.get_mut(..len).map(|f| f.split_at_mut(SYS_HEADER_LEN)),
     ) else {
         return false;
     };
-    head.copy_from_slice(&sys::frame_header(KIND_LOG, len32));
+    head.copy_from_slice(&fh);
     body.copy_from_slice(line);
     let (net, h) = (conn.net, conn.h);
     let now = net.now();

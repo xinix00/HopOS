@@ -38,7 +38,7 @@ use cpu::println;
 use executor::Executor;
 use kern::hopfs::Fs;
 use kern::slots::{Reply, Request, Response};
-use sync::Pool;
+use sync::Futures;
 
 /// De staart die de bench hoogstens beschrijft.
 const SPAN_MAX: u64 = 1 << 30;
@@ -459,7 +459,7 @@ impl Bench {
         };
         let q = Queue::new(Meter::new(disk), Spin);
         let depth = q.depth().min(depth).min(QUEUE_DEPTH);
-        let mut pool = core::pin::pin!(Pool::<_, QUEUE_DEPTH>::new());
+        let mut pool = core::pin::pin!(Futures::<_, QUEUE_DEPTH>::new());
         let (mut k, mut fail) = (0u64, None);
         let t0 = self.now();
         block_on(core::future::poll_fn(|cx| {

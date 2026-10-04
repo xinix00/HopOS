@@ -28,8 +28,6 @@ pub const HAND_VERSION: u64 = 6;
 /// de kop en de slot-records; 0,1% van een kernvenster, en daarvoor
 /// overleeft elke verbinding door de switch een kernwissel.
 pub const HANDOFF_TAIL: usize = 0x40000;
-/// De volle conntrack van de switch (`hopswitch.MaxFlows`).
-pub const MAX_FLOWS: usize = 4096;
 // De grenzen van wat het blob per slot draagt. Eén set voor beide kanten:
 // de export (`slots::Lifecycle::snapshot`) weigert erboven vóór de sprong,
 // en `decode` neemt niet meer (tot 04-10 las hij 64 volumes van 4096
@@ -47,16 +45,7 @@ pub const MAX_FLIP_PATH: usize = abi::systemapi::MAX_MOUNT_PATH;
 const HAND_HEAD: usize = 128;
 const SLOT_HEAD: usize = 80;
 
-pub use abi::FlowState;
-
-/// De NAT-staat van de switch.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct NatState {
-    /// De volgende masquerade-poort.
-    pub masq_next: u16,
-    /// De flows.
-    pub flows: Vec<FlowState>,
-}
+pub use abi::{FlowState, MAX_FLOWS, NatState};
 
 /// Wat de vertrekkende kern achterliet.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -78,7 +67,7 @@ pub struct Handoff {
     pub slots: Vec<SlotState>,
     /// De conntrack: zonder deze tabel breekt elke verbinding door de
     /// masquerade bij een kernwissel, terwijl de app doorleeft.
-    pub nat: NatState,
+    pub nat: NatState<Vec<FlowState>>,
     /// Een KOUDE flip: de vertrekkende kern stopte zijn bewoners en zette
     /// de app-cores uit, dus er valt niets te adopteren. De nieuwe kern
     /// boot koud (eigen switch-code, Hop koud uit de staging) en draagt

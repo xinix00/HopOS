@@ -374,7 +374,7 @@ pub(crate) fn pool_now() -> Pool {
     let mut nb = 0;
     if let Some(regs) = fdt().and_then(|f| f.mem_regions().ok()) {
         for (slot, r) in banks.iter_mut().zip(regs.iter()) {
-            *slot = abi::Region::new(r.addr, r.size);
+            *slot = *r;
             nb += 1;
         }
     }
@@ -385,7 +385,7 @@ pub(crate) fn pool_now() -> Pool {
     let mut nh = 2;
     if let Some(f) = fdt() {
         for (slot, r) in holes.iter_mut().skip(2).zip(f.mem_reserve().iter()) {
-            *slot = abi::Region::new(r.addr, r.size);
+            *slot = *r;
             nh += 1;
         }
     }
@@ -432,7 +432,7 @@ fn take_fdt(dtb: u64) {
     }
     let gic_ok = f
         .gic_v3()
-        .is_some_and(|g| g.dist.addr == GICD.0 && g.redist.addr == GICR.0);
+        .is_some_and(|g| g.dist.base == GICD.0 && g.redist.base == GICR.0);
     cpu::println!(
         "fdt: {} bytes at {dtb:#x}, bootargs {:?}, hopos.cfg {} bytes{}",
         f.size(),
@@ -580,7 +580,7 @@ impl board::Thermal for Rk3566 {
 
     /// 0 = geen geldige code.
     fn temp_milli_c(&self) -> i32 {
-        tsadc::temp_millic().unwrap_or(0)
+        tsadc::temp_milli_c().unwrap_or(0)
     }
 }
 

@@ -203,7 +203,7 @@ fn classify(f: &mut [u8], ip: u32, max_slots: usize) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::{HOST_MAC, SLOT_CAP, host_ip4, slot_ip4, slot_mac};
+    use crate::plan::{HOST_MAC, SLOT_CAP, host_ip4, port_ip4, port_mac};
     use crate::ring::mem::{self, MemReader, MemWriter};
     use crate::wire::testutil::*;
     use crate::wire::{PROTO_TCP, mac_at};
@@ -275,7 +275,7 @@ mod tests {
             [0xaa; 6],
             MAC,
             IP,
-            slot_ip4(3),
+            port_ip4(3),
             8080,
             40000,
             b"x",
@@ -286,7 +286,7 @@ mod tests {
         let (kind, got) = t.sw_tx.pop().unwrap();
         assert_eq!(kind, KIND_FRAME);
         assert_eq!(be32(&got, ETH_LEN + 12), host_ip4());
-        assert_eq!((mac_at(&got, 0), mac_at(&got, 6)), (slot_mac(3), HOST_MAC));
+        assert_eq!((mac_at(&got, 0), mac_at(&got, 6)), (port_mac(3), HOST_MAC));
         check_frame(&got, "intern");
         // Een intern frame dat de vertaling weigert, lekt niet naar buiten.
         let bad = mk_frame(PROTO_TCP, [0xaa; 6], MAC, IP, host_ip4(), 8080, 40000, &[]);
@@ -331,8 +331,8 @@ mod tests {
         let app = mk_frame(
             PROTO_TCP,
             HOST_MAC,
-            slot_mac(1),
-            slot_ip4(1),
+            port_mac(1),
+            port_ip4(1),
             host_ip4(),
             5555,
             9080,
@@ -341,7 +341,7 @@ mod tests {
         assert!(t.sw_rx.push(KIND_FRAME, &app));
         let ext = mk_frame(PROTO_TCP, MAC, [0xbb; 6], 0x0808_0808, IP, 53, 5555, &[]);
         assert!(t.sw_rx.push(KIND_UPLINK, &ext));
-        let spoof = mk_frame(PROTO_TCP, MAC, [0xbb; 6], slot_ip4(4), IP, 53, 5555, &[]);
+        let spoof = mk_frame(PROTO_TCP, MAC, [0xbb; 6], port_ip4(4), IP, 53, 5555, &[]);
         assert!(t.sw_rx.push(KIND_UPLINK, &spoof));
         pass(&mut t);
         let got = &t.port.stack().got;

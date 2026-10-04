@@ -8,6 +8,9 @@ description = "Firmware-lezers: FDT, ACPI, ADT, bootcfg. Lezen, geen registers."
 
 [dependencies]
 dev = { path = "../dev" }
+# `fdt::Region` is `abi::Region`: een `reg`-paar en een plan-regio zijn
+# hetzelfde begrip.
+abi = { path = "../abi" }
 bounded = { path = "../bounded" }
 
 [lints]

@@ -12,6 +12,7 @@ use core::future::{Future, pending, ready};
 use core::pin::pin;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use core::task::{Context, Poll, Waker};
+use core::time::Duration;
 use driver_hid::Kind;
 use std::format;
 use std::string::String;
@@ -31,8 +32,8 @@ impl Timer for Clock {
     fn now(&self) -> u64 {
         clock()
     }
-    fn sleep(&self, ns: u64) -> impl Future<Output = ()> {
-        NOW.fetch_add(ns, Relaxed);
+    fn sleep(&self, d: Duration) -> impl Future<Output = ()> {
+        NOW.fetch_add(u64::try_from(d.as_nanos()).unwrap_or(u64::MAX), Relaxed);
         ready(())
     }
 }

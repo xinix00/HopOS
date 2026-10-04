@@ -324,7 +324,7 @@ impl board::Thermal for LicheeRv {
 
     /// 0 = geen geldige code.
     fn temp_milli_c(&self) -> i32 {
-        temp::temp_millic().unwrap_or(0)
+        temp::temp_milli_c().unwrap_or(0)
     }
 }
 

@@ -118,7 +118,7 @@ use kern::nodecfg::ColdFlip;
 use kern::slots::{Reply, Request, Response, SlotState};
 use kern::system::FlipBundle;
 use net::nat::{self as nat, MAX_ADOPT};
-use net::switch::{Ack, Command, NatReply, NatSnapshot};
+use net::switch::{Ack, Command, NatReply};
 use sync::{Either, Local, Signal, select};
 use vboard::slots::{
     BOOT_SCRATCH_PA, FLIP_RECORDER_PA, FLIP_TRAMP_PA, STAGE_HDR_PA, STAGE_MAX, STAGE_PA,
@@ -225,11 +225,15 @@ struct Prepared {
     cold: bool,
 }
 
+/// De conntrack van de switch als eigendom: de snapshot vóór de sprong, het
+/// blob erna (`abi::NatState`, dezelfde vorm aan beide kanten).
+type Nat = abi::NatState<Vec<abi::FlowState>>;
+
 /// De klaargelegde flip, van de haak naar de flip-taak. Beide draaien op
 /// de executor van de OS-core.
 static PENDING: Local<Cell<Option<Prepared>>> = Local::new(Cell::new(None));
 /// De conntrack uit het blob, van de landing naar de herstel-taak.
-static LANDED_NAT: Local<Cell<Option<kernflip::NatState>>> = Local::new(Cell::new(None));
+static LANDED_NAT: Local<Cell<Option<Nat>>> = Local::new(Cell::new(None));
 /// De bel van de flip-taak.
 static BELL: Signal = Signal::new();
 /// De antwoordplek van de flip-taak bij de lifecycle-actor (één aanroeper).
@@ -969,7 +973,7 @@ pub(crate) fn start(exec: &'static Executor, landed: bool) {
 /// Meer dan [`MAX_ADOPT`] poorten: de eerste gaan vast, de rest niet, luid
 /// (die flows komen wel terug, maar een antwoord vóór het herstel kan bij
 /// de node-stack vallen).
-fn hold_ports(state: &kernflip::NatState) {
+fn hold_ports(state: &Nat) {
     let mut ports: Vec<u16> = Vec::new();
     let n = state.flows.len().min(MAX_ADOPT);
     if ports.try_reserve_exact(n).is_err() {
@@ -999,7 +1003,7 @@ fn hold_ports(state: &kernflip::NatState) {
 /// bewoners adopteerden (hun `Attach` staat dan vóór ons in de brievenbus,
 /// en `restore` houdt alleen flows van aangesloten slots), dan
 /// `RestoreNat`, dan de claim op de poorten los.
-async fn restore_nat(exec: &'static Executor, state: kernflip::NatState) {
+async fn restore_nat(exec: &'static Executor, state: Nat) {
     let total = state.flows.len();
     let deadline = exec.now().saturating_add(GRACE.as_nanos() as u64);
     while !ADOPTED.load(Relaxed) && exec.now() < deadline {
@@ -1008,7 +1012,7 @@ async fn restore_nat(exec: &'static Executor, state: kernflip::NatState) {
     let restored = if ADOPTED.load(Relaxed) {
         // 'static voor de brievenbus, zoals de poorten.
         let st = nat::NatState {
-            flows: Vec::leak(state.flows),
+            flows: &*Vec::leak(state.flows),
             masq_next: state.masq_next,
         };
         let send = || {
@@ -1182,11 +1186,7 @@ async fn capture_and_jump(exec: &'static Executor, p: Prepared, frozen: &mut Fro
             Ok(Response::Failed(e)) | Err(e) => return JumpError::Kern(e),
             Ok(_) => return JumpError::Kern(kern::Error::Busy),
         };
-    let nat = kernflip::NatState {
-        masq_next: snap.masq_next,
-        flows: snap.flows,
-    };
-    handoff_and_jump(p, slots, nat)
+    handoff_and_jump(p, slots, snap)
 }
 
 /// De koude weg na de bevriezing: elke bewoner die niet op de OS-core
@@ -1207,7 +1207,7 @@ async fn cold_jump(exec: &'static Executor, p: Prepared) -> JumpError {
     println!(
         "flip: cold flip, {stopped} resident(s) stopped and {off} app core(s) powered off, nothing to hand over HOPOS_FLIP_COLD stopped={stopped} cores_off={off}"
     );
-    let e = handoff_and_jump(p, Vec::new(), kernflip::NatState::default());
+    let e = handoff_and_jump(p, Vec::new(), Nat::default());
     cores_back();
     e
 }
@@ -1408,7 +1408,7 @@ fn cores_back() {
 /// Vraagt de switch-actor om de conntrack (en zet daarmee de masquerade
 /// dicht). `Ok(None)`: er is geen switch op deze node, dus ook niets om
 /// mee te nemen.
-async fn snapshot_nat(exec: &'static Executor) -> Result<Option<NatSnapshot>, &'static str> {
+async fn snapshot_nat(exec: &'static Executor) -> Result<Option<Nat>, &'static str> {
     if !crate::net::switch_up() {
         return Ok(None);
     }
@@ -1439,7 +1439,7 @@ async fn snapshot_nat(exec: &'static Executor) -> Result<Option<NatSnapshot>, &'
 
 /// Het blob, het paar en de sprong. Synchroon: vanaf hier verandert er
 /// niets meer aan de staat die overgaat.
-fn handoff_and_jump(p: Prepared, slots: Vec<SlotState>, nat: kernflip::NatState) -> JumpError {
+fn handoff_and_jump(p: Prepared, slots: Vec<SlotState>, nat: Nat) -> JumpError {
     // De klok vol: de nieuwe kern landt niet op een stille klok (30-09, de
     // Pi 5: twee flips vanuit 800 MHz met een NIC die nooit meer meldde).
     crate::telemetry::clock_full_for_flip();

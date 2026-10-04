@@ -4,10 +4,10 @@
 //! close en de system-client door precies de code die op het slot draait.
 
 use super::*;
-use crate::contract::{HOPABI_HDR_LEN, HOPABI_VERSION, KIND_RESULT, OP_STAT, SYS_HEADER_LEN};
+use crate::contract::{HOPABI_HDR_LEN, OP_STAT, SYS_HEADER_LEN};
 use crate::ring::tests::Backing;
 use crate::ring::{Peek, Reader, Writer};
-use crate::sys::{check_frame_header, frame_header};
+use abi::systemapi::{Kind, decode_header};
 use core::cell::Cell;
 use std::boxed::Box;
 
@@ -140,20 +140,14 @@ async fn fake_kern(l: TcpListener, seen: &'static RefCell<Option<(u8, Vec<u8>, u
     let mut c = l.accept().await.unwrap();
     let mut fh = [0u8; SYS_HEADER_LEN];
     read_exact(&mut c, &mut fh).await;
-    let (_, n) = check_frame_header(&fh).unwrap();
+    let n = decode_header(&fh).unwrap().len;
     let mut req = vec![0u8; n];
     read_exact(&mut c, &mut req).await;
     let op = req[1];
     let seq = u32::from_le_bytes(req[4..8].try_into().unwrap());
-    let mut resp = [0u8; HOPABI_HDR_LEN];
-    resp[0] = HOPABI_VERSION;
-    resp[1] = op;
-    resp[4..8].copy_from_slice(&seq.to_le_bytes());
-    resp[8..16].copy_from_slice(&4096u64.to_le_bytes());
-    c.write_all(&frame_header(KIND_RESULT, HOPABI_HDR_LEN as u32))
+    c.write_all(&crate::sys::tests::resp(seq, 0, 4096, &[]))
         .await
         .unwrap();
-    c.write_all(&resp).await.unwrap();
     // Na de call: de client sluit, en dat is EOF, geen reset.
     let mut rest = [0u8; 16];
     let eof = c.read(&mut rest).await.unwrap();
@@ -611,7 +605,6 @@ fn transport_errors_map_to_what_the_client_retries() {
 /// log-static aanraakt.
 #[test]
 fn log_lines_go_over_the_system_connection_once_it_is_up() {
-    use crate::contract::KIND_LOG;
     let p = pair();
     let l = p.kern.tcp_listen(sys::ADDRESS.1).unwrap();
     let seen = slot();
@@ -622,10 +615,10 @@ fn log_lines_go_over_the_system_connection_once_it_is_up() {
             for _ in 0..2 {
                 let mut fh = [0u8; SYS_HEADER_LEN];
                 read_exact(&mut c, &mut fh).await;
-                let (kind, n) = check_frame_header(&fh).unwrap();
-                let mut line = vec![0u8; n];
+                let h = decode_header(&fh).unwrap();
+                let mut line = vec![0u8; h.len];
                 read_exact(&mut c, &mut line).await;
-                got.push((kind, line));
+                got.push((h.kind, line));
             }
             *seen.borrow_mut() = Some(got);
         })
@@ -647,8 +640,8 @@ fn log_lines_go_over_the_system_connection_once_it_is_up() {
     assert_eq!(
         seen.borrow_mut().take().unwrap(),
         [
-            (KIND_LOG, b"slot 1 up".to_vec()),
-            (KIND_LOG, b"second".to_vec())
+            (Kind::Log, b"slot 1 up".to_vec()),
+            (Kind::Log, b"second".to_vec())
         ]
     );
 }
