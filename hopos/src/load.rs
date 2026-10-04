@@ -18,6 +18,7 @@ use kern::load::{Sample, slot_load};
 /// Het ritme van de regel.
 const LOAD_EVERY: Duration = Duration::from_secs(30);
 
+#[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
 pub(crate) fn start(exec: &'static Executor) {
     if let Err(e) = exec.spawn(run(exec)) {
         println!("load: task not spawned ({e:?}), no HOPOS_SLOT_LOAD lines");

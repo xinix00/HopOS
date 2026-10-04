@@ -160,6 +160,7 @@ mod on {
 
     /// Zet de dienst op: altijd aangemeld bij de system-API (zonder ijzer
     /// weigert hij luid), en de bring-up als taak (arena, firmware, ijzer).
+    #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
     pub(crate) fn up(exec: &'static Executor) {
         if !kern::codecabi::install(&CODEC) {
             println!("codec: service installed twice HOPOS_CODEC_FAIL");

@@ -461,6 +461,7 @@ mod facts {
 /// misschien bewoners, en een koude boot zou hun regio's vrij noemen. Op
 /// ijzer wacht de kern dan op de watchdog; QEMU heeft er geen, dus een
 /// PSCI-reset: de machine komt koud terug, zoals de watchdog dat ook deed.
+#[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
 pub(crate) fn land(x0: u64) -> Option<Handoff> {
     FIRMWARE_X0.store(x0, Relaxed);
     let (mut mem, p) = (DevMem, plan());
@@ -973,6 +974,7 @@ fn check_switch_code(bundle: &Bundle<'_>) -> Result<(), Refused> {
 /// Een koude landing geeft `main` geen overdracht (`landed` is dan
 /// onwaar), maar krijgt wel de guard: ook een koude kern moet binnen de
 /// gratie net hebben.
+#[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
 pub(crate) fn start(exec: &'static Executor, landed: bool) {
     if let Err(e) = exec.spawn(run(exec)) {
         println!("flip: task not spawned: {e:?} HOPOS_FLIP_SPAWN");

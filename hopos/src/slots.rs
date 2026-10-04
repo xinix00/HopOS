@@ -304,6 +304,7 @@ const SERVICE_BUF: usize = (RING_DATA_CAP / 2) as usize;
 ///
 /// `app_env` is de env van een gestagede app (`hopos.appenv`, [`app_env`]);
 /// Hop krijgt de zijne uit `hopos.cfg`.
+#[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
 pub(crate) fn start(
     exec: &'static Executor,
     role: Result<StagedRole, u64>,

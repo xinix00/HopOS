@@ -108,6 +108,7 @@ pub(crate) fn request_reset(reason: &'static str) {
 /// draait de canary toch, voor de console. Op een flip-boot wapent de taak meteen de
 /// boot-guard met twee minuten blinde gratie (de haak die flip.rs zou
 /// roepen: de generatie zegt het ook).
+#[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
 pub(crate) fn start(exec: &'static Executor) {
     if hw::param("hopos.wd") == "off" {
         if hw::off() {

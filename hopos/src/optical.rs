@@ -198,6 +198,7 @@ fn optical_error(e: media_optical::Error) -> Error {
     };
     Error::Device { reason }
 }
+#[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
 pub(crate) fn start(exec: &'static Executor) {
     if exec.spawn(run(exec)).is_err() {
         cpu::println!("optical: owner could not start HOPOS_OPTICAL_FATAL");

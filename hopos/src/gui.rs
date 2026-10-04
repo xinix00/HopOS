@@ -121,6 +121,7 @@ mod on {
     /// Zet de console op het glas als het board een framebuffer geeft:
     /// schone lei, de bunny als vaste kop, en vanaf nu gaat elke logregel
     /// naar de UART én het scherm. Geen framebuffer is geen fout: één regel.
+    #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
     pub(crate) fn init_framebuffer_console(board: &'static crate::Machine) {
         let Some(d) = board.framebuffer() else {
             println!("fb: no framebuffer on this board, console on the UART only HOPOS_FB_NONE");
@@ -225,6 +226,7 @@ mod on {
     /// interne gateway-adres, en dat bestaat pas na de switch. Het board
     /// noemt zijn controllers (`Board::usb_hosts`: PCIe en firmware zijn
     /// dan al gedaan); de USB-taak brengt ze op en pompt de rapporten.
+    #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
     pub(crate) fn start_usb_input(exec: &'static Executor) {
         usb::start(exec);
     }

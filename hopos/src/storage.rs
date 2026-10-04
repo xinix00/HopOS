@@ -158,6 +158,7 @@ impl core::fmt::Display for DevStats {
 /// mag maar één keer, en de schijf gaat eerst langs de bench (bench.rs)
 /// en dan naar [`start`]. Geen schijf of een fout is één regel en `None`:
 /// de node draait door en weigert elke bestandscall luid.
+#[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
 pub(crate) fn probe() -> Option<vboard::Disk> {
     match crate::BOARD.probe_disk() {
         Ok(Some(d)) => Some(d),
@@ -176,6 +177,7 @@ pub(crate) fn probe() -> Option<vboard::Disk> {
 /// en committer spawnen. Geeft `true` als de bestandscalls bediend worden;
 /// zonder schijf draait de node door en weigert elke bestandscall luid (de
 /// regel gaf [`probe`] al).
+#[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
 pub(crate) fn start(exec: &'static Executor, disk: Option<vboard::Disk>) -> bool {
     let board = &crate::BOARD;
     let Some(disk) = disk else {

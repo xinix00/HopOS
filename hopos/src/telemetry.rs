@@ -53,6 +53,7 @@ pub(crate) fn clock_full_for_flip() {
 
 /// Spawnt de thermiek-taak en, als het board een knop heeft, het
 /// klokbeleid.
+#[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
 pub(crate) fn start(exec: &'static Executor) {
     hw::open();
     if let Err(e) = exec.spawn(thermal(exec)) {

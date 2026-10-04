@@ -75,6 +75,7 @@ pub(crate) fn cfg_text(dtb: u64) -> String {
 /// Start wat de bootparameters vragen: de schijf-bench (synchroon, nu, op
 /// de geprobede schijf `disk`) en de idlestat-taak. Geeft de schijf terug
 /// voor `storage::start`: de bench leent hem alleen.
+#[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
 pub(crate) fn start(
     exec: &'static Executor,
     dtb: u64,

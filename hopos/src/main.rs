@@ -246,6 +246,15 @@ fn boot(board: &'static Machine, dtb: u64, el: u8) -> ! {
 /// Bouwt de boot op: de landing, de opslag, het net, de slots en de
 /// taken. Nooit inline: zijn frame (de grote boot-locals) moet weg zijn
 /// voordat [`boot`] de executor start.
+///
+/// En zelf houdt hij zijn helpers buiten zijn frame: elke `start` die een
+/// future bouwt en spawnt (opslag, slots, flip, USB, de bank) staat op
+/// `#[inline(never)]`. Ingelijnd lagen hun futures naast elkaar in dit ene
+/// frame (200 KB, de USB-future alleen al 125 KB in de gui-smaak) en kwam
+/// `nic_up` daar nog bovenop: op de Altra 264 KB van de 256 KB stack,
+/// zonder wachtpagina op UEFI, dus stil over `.bss` heen en dood vóór het
+/// net (04-10, sinds 302d257 vier KB dieper; A13b en elke kern daarna).
+/// Los zijn het buren: de diepste boot is daar 156 KB, warm en koud.
 #[inline(never)]
 fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleeper {
     // FLIP: de landing, als eerste na de heap. Een overdracht van een
@@ -549,6 +558,7 @@ static STORE: kern::store::StoreQueue = kern::store::StoreQueue::new();
 /// precies één keer), dus de API wordt één keer bij boot gebouwd en leeft
 /// daarna voor altijd. Boot-code: een heap die dit niet kan geven, is
 /// parkeren.
+#[inline(never)] // eigen frame, niet in dat van `setup`
 fn system(privilege: Option<Privilege>, fs: bool, max_slots: usize) -> &'static KernSystem {
     let mut s = System::new(&LIFECYCLE, &SERVICERS, privilege, max_slots)
         .with_logs(&slots::LOGS)
