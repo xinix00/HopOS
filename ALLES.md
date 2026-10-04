@@ -40,11 +40,13 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 ### Nu
 
 - [ ] Hoofdstuk 8 van docs/description.md (de kanttekeningen vóór de release
-      van dit weekend), eerste golf: geland zijn 8.1 (de zeven fouten, 0f03544), 8.5
-      (interrupts via één Controller, 8e8cea4) en 8.15 en 8.16 (docs en
-      dode code, f1917f0); nog bezig 8.2 en 8.3 abi als enige waarheid, 8.4
-      het Board-contract expliciet, 8.6 het NIC-skelet en de drivers, 8.14
-      de scripts in lib.sh met één runner. Tweede golf daarna: 8.7 en 8.8 (arm64 en riscv, de assembly),
+      van dit weekend), eerste golf: geland zijn 8.1 (de zeven fouten, 0f03544), 8.4 (het
+      Board-contract, a0eaeb0), 8.5 (interrupts via één Controller,
+      8e8cea4) en 8.15 en 8.16 (docs en dode code, f1917f0); 8.6 (de
+      drivers) wordt herbasseerd op het Board-contract; nog bezig 8.2 en
+      8.3 abi als enige waarheid en 8.14 de scripts in lib.sh met één
+      runner. Alles na 3.0.9 komt in een volgende release na een eigen
+      ijzerronde (de bootregels per bord letterlijk gelijk). Tweede golf daarna: 8.7 en 8.8 (arm64 en riscv, de assembly),
       8.9 (config en firmware-feiten), 8.10 en 8.11 (oneshot, de dubbele
       paden), 8.12 (pollen), 8.13 (apps).
 - [ ] De media met `hop image --config` op v3.0.9 (Derek; Hop blijft 3.0.8,
