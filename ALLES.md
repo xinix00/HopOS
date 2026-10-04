@@ -80,8 +80,6 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 - [ ] vitals: de standaard-rx-URL werkt niet (`CONNECT is not supported`).
 - [ ] M4: het transport van een bulk-app in kleinere brokken met een yield
       (4 KiB-calls van de buurman blijven rond 19 tot 20).
-- [ ] Pi 5: het glas (de firmware weigert elke framebuffer sinds de
-      herflash).
 
 ### Op ijzer te zien
 
@@ -109,6 +107,8 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Later
 
+- [ ] Pi 5: het glas (de firmware weigert elke framebuffer sinds de
+      herflash, 0x80000001).
 - [ ] Wachtpagina onder de boot-stack op UEFI en RISC-V (de overloop van
       302d257 schreef stil over .bss; na a6ceae5 is de diepste boot 156 KB
       van 256) en een wachtpost in qemu-test.sh; de device-op (19) zonder
