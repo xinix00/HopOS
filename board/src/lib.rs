@@ -293,6 +293,20 @@ pub trait Board: Sync {
     /// Eén keer, als eerste: de UART op. Geeft de console-haak.
     fn console(&self) -> fn(&[u8]);
 
+    /// Dezelfde UART zonder wachten, voor de pomp van de console in de
+    /// kern (hopos `conport`): schrijft van een stuk wat er nu in de
+    /// zend-FIFO past en geeft hoeveel bytes eruit zijn.
+    ///
+    /// `None` (de standaard): elke regel gaat meteen en wachtend naar
+    /// [`Board::console`]. Dat kost de OS-core per teken de baudrate zodra
+    /// de FIFO vol is (115200: 87 us per teken, een regel van 100 tekens
+    /// 7,7 ms waarin de switch en de node-stack stilstaan; gemeten 04-10 op
+    /// de Pi 4). Een snelle console (de dockchannel van Apple, de 16550 op
+    /// 1,5 Mbaud van de Radxa) mag dat houden.
+    fn console_nowait(&self) -> Option<fn(&[u8]) -> usize> {
+        None
+    }
+
     /// Het exception level waarop we booten, zoals de stub het las.
     fn privilege(&self, el: u8) -> Result<(), Error> {
         require_el2(el)

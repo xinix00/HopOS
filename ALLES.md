@@ -39,11 +39,6 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
-- [ ] Agent op de Pi 4. rtt naar de kern p99 5 tot 9 ms terwijl p50 100 tot 300 us is: O6N
-      7761, Pi 5 9141, Pi 4 5312, Altra 9218 in `all` (alleen 158); M4 146
-      en Radxa 681 niet. Ook de timer-overslaap p99 2,7 tot 10 ms (M4,
-      LicheeRV). Een hapering van ~10 ms in de kern-weg (TURN_CAP, de
-      dvfs-sample van 10 ms, de switch-ronde?): zoeken.
 - [ ] Agent op de Altra: gebundeld lezen door apps, zoals io_uring. Nu is
       elke lees van een app één RPC door de OS-core met één opdracht in de
       lucht (M4 01-10: 7.600 per app, 36.000 met acht apps, Linux op
@@ -113,6 +108,15 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Later
 
+- [ ] LicheeRV: de 16550-console wacht nog per teken (de PL011-borden
+      hebben sinds de conport-pomp een niet-wachtende UART); een
+      `write_nowait` dat tot de FIFO-diepte schrijft op THRE (Linux
+      tx_loadsz). En de timer-overslaap p99 van 2,7 ms op de LicheeRV en 3
+      tot 10 ms op de M4 is daarmee nog niet verklaard.
+- [ ] OS-core WFE-pad: met een vitals tegen de applib van HEAD had 4 van 25
+      runs één dial van 0,75 tot 1,3 ms: de kick van de app ging op +33 tot
+      +82 us uit, de kern pakte de SYN pas een event-stream-periode later op
+      (Pi 4, 04-10).
 - [ ] Eerlijkheid op de OS-core: 4 KiB-calls van een buurman zakken van 82
       naar 15 tot 19 MB/s naast een bulk-app (M4, 01-10); er blijft
       voortgang, dus pas knippen (kleinere brokken met een yield) als het

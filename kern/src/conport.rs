@@ -76,6 +76,12 @@ impl<const N: usize> Ring<N> {
         }
     }
 
+    /// De schrijfpositie: alles ervoor is geschreven.
+    #[must_use]
+    pub fn head(&self) -> u64 {
+        self.head
+    }
+
     /// De oudste positie die nog in de ring staat: waar een nieuwe lezer
     /// begint (de replay).
     #[must_use]
@@ -99,6 +105,86 @@ impl<const N: usize> Ring<N> {
 impl<const N: usize> Default for Ring<N> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// De UART als lezer van de ring: tot waar de ring op de draad staat.
+///
+/// De schrijver van een regel wacht niet op de baudrate: hij zet de regel
+/// in de ring, en [`Uart::pump`] geeft de UART wat er nu in zijn zend-FIFO
+/// past; de rest volgt bij de volgende pomp. Afgekeken van Linux: de
+/// `xmit`-ring van een `uart_port` die de TX-interrupt leegt, en de
+/// printer-thread van een nbcon-console (6.12), waar `printk` alleen nog
+/// in de ring schrijft. Valt de UART een hele ring achter, dan verliest hij
+/// de oudste bytes, en hij telt ze ([`Uart::take_dropped`]); de ring en de
+/// TCP-lezers houden ze.
+#[derive(Default)]
+pub struct Uart {
+    /// De eerste positie die nog niet op de draad staat.
+    seen: u64,
+    /// Bytes die de ring overschreef voor de UART ze had.
+    dropped: u64,
+}
+
+impl Uart {
+    /// Een UART die nog niets van de ring heeft.
+    #[must_use]
+    pub const fn new() -> Self {
+        Uart {
+            seen: 0,
+            dropped: 0,
+        }
+    }
+
+    /// Alles in `ring` staat al op de draad: de schrijver schreef het zelf,
+    /// wachtend.
+    pub fn caught_up<const N: usize>(&mut self, ring: &Ring<N>) {
+        self.seen = ring.head();
+    }
+
+    /// Zoveel bytes wachten nog op de UART.
+    #[must_use]
+    pub fn behind<const N: usize>(&self, ring: &Ring<N>) -> u64 {
+        ring.head().saturating_sub(self.seen.max(ring.oldest()))
+    }
+
+    /// De positie in de ring tot waar de UART hem heeft: loopt alleen op.
+    #[must_use]
+    pub fn at(&self) -> u64 {
+        self.seen
+    }
+
+    /// Geeft `put` de bytes die nog niet op de draad staan, in stukken, tot
+    /// hij er minder neemt dan hij kreeg (de FIFO is vol) of de ring op is.
+    /// `put` geeft hoeveel bytes eruit zijn. `true` = er blijft iets liggen.
+    pub fn pump<const N: usize>(
+        &mut self,
+        ring: &Ring<N>,
+        mut put: impl FnMut(&[u8]) -> usize,
+    ) -> bool {
+        let mut buf = [0u8; 64];
+        loop {
+            let from = self.seen.max(ring.oldest());
+            self.dropped = self.dropped.wrapping_add(from - self.seen.min(from));
+            let (n, _) = ring.since(from, &mut buf);
+            let Some(chunk) = buf.get(..n) else {
+                return false;
+            };
+            if n == 0 {
+                self.seen = from;
+                return false;
+            }
+            let took = put(chunk).min(n);
+            self.seen = from + took as u64;
+            if took < n {
+                return true;
+            }
+        }
+    }
+
+    /// De overschreven bytes sinds de vorige vraag.
+    pub fn take_dropped(&mut self) -> u64 {
+        core::mem::take(&mut self.dropped)
     }
 }
 
@@ -311,6 +397,50 @@ mod tests {
         let mut small = [0u8; 3];
         assert_eq!(r.since(5, &mut small), (3, 8));
         assert_eq!(&small, b"fgh");
+    }
+
+    #[test]
+    fn the_uart_takes_what_fits_and_the_rest_waits() {
+        let mut r: Ring<256> = Ring::new();
+        let mut u = Uart::new();
+        r.write(b"0123456789");
+        let mut wire = Vec::new();
+        // Een FIFO van vier: de pomp stopt na de eerste weigering.
+        let more = u.pump(&r, |b| {
+            let n = b.len().min(4);
+            wire.extend_from_slice(&b[..n]);
+            n
+        });
+        assert!(more);
+        assert_eq!(wire, b"0123");
+        assert_eq!(u.behind(&r), 6);
+        // De FIFO is leeg: de rest gaat eruit, de pomp is klaar.
+        assert!(!u.pump(&r, |b| {
+            wire.extend_from_slice(b);
+            b.len()
+        }));
+        assert_eq!(wire, b"0123456789");
+        assert_eq!(u.behind(&r), 0);
+        // Wat de schrijver zelf wachtend wegschreef, pompt niemand opnieuw.
+        r.write(b"abc");
+        u.caught_up(&r);
+        assert!(!u.pump(&r, |_| panic!("nothing is due")));
+        assert_eq!(u.take_dropped(), 0);
+    }
+
+    #[test]
+    fn a_uart_a_whole_ring_behind_counts_what_it_lost() {
+        let mut r: Ring<8> = Ring::new();
+        let mut u = Uart::new();
+        r.write(b"abcdefghijkl"); // 12 bytes in een ring van 8.
+        let mut wire = Vec::new();
+        assert!(!u.pump(&r, |b| {
+            wire.extend_from_slice(b);
+            b.len()
+        }));
+        assert_eq!(wire, b"efghijkl");
+        assert_eq!(u.take_dropped(), 4);
+        assert_eq!(u.take_dropped(), 0);
     }
 
     #[test]

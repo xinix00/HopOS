@@ -286,6 +286,13 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     // Zonder framebuffer of kaal gebouwd: één regel of niets.
     conport::here();
     gui::init_framebuffer_console(board);
+    // De UART als lezer van de ring (conport.rs): vanaf de eerste ronde van
+    // de executor wacht een regel op de OS-core niet meer op de baudrate.
+    if exec.spawn(conport::drain(exec)).is_err() {
+        println!(
+            "console: UART pump not spawned, every line waits for the UART HOPOS_CONSOLE_WAITING"
+        );
+    }
 
     // De wandklok vóór er een bewoner is. Na een flip draagt de overdracht
     // de offset van de vorige kern (Hop had hem via SNTP gezet, en de

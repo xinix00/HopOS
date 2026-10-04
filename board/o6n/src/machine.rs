@@ -238,6 +238,10 @@ impl Board for O6n {
         self.uefi.console()
     }
 
+    fn console_nowait(&self) -> Option<fn(&[u8]) -> usize> {
+        self.uefi.console_nowait()
+    }
+
     fn firmware(&self) -> &'static str {
         "boot: Radxa Orion O6N (Cix P1) over UEFI: PE stub, ACPI discovery, 48-bit identity map"
     }

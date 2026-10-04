@@ -30,6 +30,10 @@ static TAKEN: AtomicU64 = AtomicU64::new(0);
 static LONGEST_SPIN: AtomicU64 = AtomicU64::new(0);
 /// Meetlat: hoe vaak de grens verstreek en er zonder slot geschreven werd.
 static FORCED: AtomicU64 = AtomicU64::new(0);
+/// Is er een noodregel geschreven ([`emergency`])? Vanaf dan wacht elke
+/// regel weer op de UART: na een panic of een fatale exception draait er
+/// geen taak meer die een achterstand wegschrijft.
+static URGENT: AtomicBool = AtomicBool::new(false);
 
 /// De spin-grens van het slot. Op één core is er nooit een wachter (een
 /// taak geeft het slot terug vóór hij iets anders doet); op meer cores is
@@ -114,7 +118,15 @@ pub fn _print(args: fmt::Arguments<'_>, newline: bool) {
 /// het slot met de grens, en daarna hoe dan ook. Een fout die zichzelf
 /// niet kan melden, is een fout die niemand ooit vindt.
 pub fn emergency(args: fmt::Arguments<'_>) {
+    URGENT.store(true, Release);
     _print(args, true);
+}
+
+/// Is er een noodregel geweest? De sink van de binary schrijft dan alles
+/// wachtend, de achterstand eerst.
+#[must_use]
+pub fn urgent() -> bool {
+    URGENT.load(Acquire)
 }
 
 /// De meetlat van het console-slot: (keren gepakt, langste wacht in

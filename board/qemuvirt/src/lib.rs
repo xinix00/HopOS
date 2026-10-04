@@ -180,6 +180,10 @@ fn console_write(b: &[u8]) {
     UART.write(b);
 }
 
+fn console_nowait(b: &[u8]) -> usize {
+    UART.write_nowait(b)
+}
+
 /// De DTB op `pa` als slice, als er een geldige header staat.
 ///
 /// Het is de enige plek waar dit board firmware-geheugen als bytes leest:
@@ -337,6 +341,10 @@ impl Board for QemuVirt {
     fn console(&self) -> fn(&[u8]) {
         UART.init();
         console_write
+    }
+
+    fn console_nowait(&self) -> Option<fn(&[u8]) -> usize> {
+        Some(console_nowait)
     }
 
     fn firmware(&self) -> &'static str {

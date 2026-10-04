@@ -159,6 +159,35 @@ impl Pl011 {
         r.dr.write(u32::from(c));
     }
 
+    /// Schrijft van `b` wat er nu in de TX-FIFO past, zonder te wachten,
+    /// met `\n` als `\r\n`; geeft hoeveel bytes van `b` er helemaal uit
+    /// zijn. Een `\n` waarvan alleen de `\r` nog paste, telt niet mee: de
+    /// volgende schrijf begint er opnieuw mee, en de terminal ziet één `\r`
+    /// extra. Een dode UART slikt alles, zoals [`Pl011::write`].
+    ///
+    /// Voor de pomp van de console (hopos `conport`): de schrijver van een
+    /// regel wacht niet op de baudrate (Linux: `uart_port.xmit` met de
+    /// TX-interrupt, in plaats van de console die per teken op TXFF spint).
+    pub fn write_nowait(&self, b: &[u8]) -> usize {
+        if self.dead.load(Relaxed) {
+            return b.len();
+        }
+        let r = self.regs();
+        for (i, &c) in b.iter().enumerate() {
+            if c == b'\n' {
+                if r.fr.read() & FR_TXFF != 0 {
+                    return i;
+                }
+                r.dr.write(u32::from(b'\r'));
+            }
+            if r.fr.read() & FR_TXFF != 0 {
+                return i;
+            }
+            r.dr.write(u32::from(c));
+        }
+        b.len()
+    }
+
     /// Schrijft `b`, met `\n` als `\r\n` (een terminal wil beide).
     pub fn write(&self, b: &[u8]) {
         for &c in b {
@@ -213,6 +242,18 @@ mod tests {
         mem[0] = 0;
         u.putc(b'y'); // dood blijft dood: DR onaangeroerd
         assert_eq!(mem[0], 0);
+    }
+
+    #[test]
+    fn write_nowait_stops_at_a_full_fifo_and_never_spins() {
+        let (mut mem, u) = fake();
+        assert_eq!(u.write_nowait(b"ab\n"), 3);
+        assert_eq!(mem[0], u32::from(b'\n'));
+        mem[0x18 / 4] = FR_TXFF;
+        mem[0] = 0;
+        assert_eq!(u.write_nowait(b"cd"), 0);
+        assert_eq!(mem[0], 0, "a full FIFO gets nothing");
+        assert!(!u.is_dead(), "full is not dead: the pump comes back");
     }
 
     #[test]

@@ -444,6 +444,10 @@ fn console_write<S: Soc>(b: &[u8]) {
     S::uart().write(b);
 }
 
+fn console_nowait<S: Soc>(b: &[u8]) -> usize {
+    S::uart().write_nowait(b)
+}
+
 impl<S: Soc> Board for Raspi<S> {
     type Nic = S::Nic;
     type Sleeper = cpu::idle::ArmSleeper;
@@ -453,6 +457,10 @@ impl<S: Soc> Board for Raspi<S> {
     fn console(&self) -> fn(&[u8]) {
         S::uart().init();
         console_write::<S>
+    }
+
+    fn console_nowait(&self) -> Option<fn(&[u8]) -> usize> {
+        Some(console_nowait::<S>)
     }
 
     fn firmware(&self) -> &'static str {

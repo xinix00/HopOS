@@ -355,6 +355,23 @@ fn console_write(b: &[u8]) {
     }
 }
 
+/// [`console_write`] zonder wachten, voor een PL011 uit de SPCR (zie
+/// `Board::console_nowait`; een 16550 kent hier alleen THRE en blijft
+/// wachtend).
+fn console_nowait(b: &[u8]) -> usize {
+    if CONSOLE_DEAD.load(Relaxed) {
+        return b.len();
+    }
+    let base = facts::CONSOLE_BASE.load(Relaxed);
+    if base == 0 {
+        return b.len();
+    }
+    // SAFETY: zie `console_write`; `Board::console_nowait` geeft deze haak
+    // alleen bij een PL011.
+    let u = unsafe { Pl011::new(Pa(base)) };
+    u.write_nowait(b)
+}
+
 /// De GIC, uit de feiten.
 fn gic() -> Gic<SysRegIcc> {
     // SAFETY: GICD en het redistributor-frame van core 0 komen uit de MADT
@@ -609,6 +626,12 @@ impl Board for Uefi {
             unsafe { Pl011::new(Pa(facts::CONSOLE_BASE.load(Relaxed))) }.init();
         }
         console_write
+    }
+
+    fn console_nowait(&self) -> Option<fn(&[u8]) -> usize> {
+        let pl011 = !fw::acpi::is_16550(facts::CONSOLE_TYPE.load(Relaxed))
+            && facts::CONSOLE_BASE.load(Relaxed) != 0;
+        pl011.then_some(console_nowait as fn(&[u8]) -> usize)
     }
 
     fn firmware(&self) -> &'static str {

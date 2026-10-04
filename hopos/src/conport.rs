@@ -21,13 +21,29 @@
 //! ring op een vaste plek buiten het kernimage die een watchdog-reset
 //! overleeft, want deze ring in de BSS doet dat niet. Die schrijft vanaf elke
 //! core; de volgende koude boot drukt de staart af (`HOPOS_FLIP_BLACKBOX`).
+//!
+//! De UART is een lezer van de ring zoals de TCP-lezers ([`drain`]): op de
+//! OS-core wacht een regel niet meer op de baudrate. Tot 04-10 schreef de
+//! tee elke regel wachtend naar de UART, en op 115200 baud kostte een
+//! regel van 100 tekens 7,7 ms waarin de executor van de kern stilstond:
+//! de switch, de node-stack en elke bewoner van de OS-core. GEMETEN 04-10
+//! op de Pi 4 (vitals `test=all`, vijf runs per kern): de twee logregels
+//! van vitals vlak voor zijn rtt-toets hielden de servicer 9,8 ms bezig en
+//! de SYN van de tweede dial 5 ms in de ring; de rtt naar de kern had een
+//! p99 van 5361 tot 9282 us, met deze pomp 367 tot 592 (p50 336, gelijk).
+//! Wachtend blijft: een board zonder `console_nowait`, de boot tot de pomp
+//! draait, een regel van een andere core, en alles na een noodregel.
 
+use board::Board as _;
 use core::sync::atomic::{
     AtomicBool, AtomicPtr, AtomicUsize,
     Ordering::{Acquire, Relaxed, Release},
 };
-use kern::conport::{Readers, Ring};
-use sync::LocalCell;
+use core::time::Duration;
+use cpu::println;
+use executor::Executor;
+use kern::conport::{Readers, Ring, Uart};
+use sync::{LocalCell, Signal};
 
 /// De ring: 256 KiB. Een boot is 10 KB tot `HOP_UP` (de Pi 5, 30-09),
 /// maar de tik is 300 bytes per seconde, dus 64 KiB was na drie minuten
@@ -35,8 +51,36 @@ use sync::LocalCell;
 /// kwart megabyte houdt de boot een kwartier vast; .bss, geen heap.
 const RING_BYTES: usize = 256 * 1024;
 
+/// Zo vaak kijkt de pomp terug zolang de UART achterloopt: een FIFO van
+/// 16 tekens is op 115200 baud na 1,4 ms leeg.
+const UART_STEP: Duration = Duration::from_millis(1);
+
+/// Zo lang mag de UART niets aannemen voor de pomp hem opgeeft en de
+/// console weer wachtend schrijft (een UART zonder klok: de wachtende
+/// schrijver verklaart hem dan dood, `Pl011::is_dead`).
+const UART_STUCK_NS: u64 = 1_000_000_000;
+
+/// Hoeveel van de achterstand een wachtende schrijver eerst nog wegzet (de
+/// noodregel, de flip): 8 KiB, 0,7 s op 115200. De rest staat in de ring,
+/// op 5555 en in de zwarte doos.
+const FLUSH_MAX: usize = 8 * 1024;
+
+/// De ring en de UART als zijn lezer, samen van één eigenaar: de OS-core.
+struct Log {
+    ring: Ring<RING_BYTES>,
+    uart: Uart,
+}
+
 /// De ring zelf; alleen de OS-core raakt hem aan.
-static RING: LocalCell<Ring<RING_BYTES>> = LocalCell::cell(Ring::new());
+static LOG: LocalCell<Log> = LocalCell::cell(Log {
+    ring: Ring::new(),
+    uart: Uart::new(),
+});
+/// De UART zonder wachten (`Board::console_nowait`), gezet door [`drain`]
+/// zodra die draait. Null = elke regel gaat wachtend naar de UART.
+static NOWAIT: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+/// De bel van [`drain`]: de tee liet bytes liggen.
+static BEHIND: Signal = Signal::new();
 /// De core die de ring bezit (`usize::MAX` = nog geen).
 static RING_CORE: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// De sink vóór ons (de UART van het board), zoals `kmain` hem zette.
@@ -61,36 +105,161 @@ pub(crate) fn here() {
     RING_CORE.store(crate::BOARD.this_core(), Release);
 }
 
-/// De sink: eerst de zwarte doos, dan de vorige (de UART), dan de ring en
-/// het glas (`gui::glass`) op de eigen core.
+/// De vorige sink (de UART, wachtend), als die er is.
+fn prev() -> Option<fn(&[u8])> {
+    let p = PREV.load(Acquire);
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: `PREV` wordt alleen door `install` geschreven, met een
+    // geldige `fn(&[u8])`; een functiepointer en een datapointer zijn op
+    // onze targets even groot, en null is uitgesloten (zelfde vorm als
+    // `cpu::console::sink`).
+    Some(unsafe { core::mem::transmute::<*mut (), fn(&[u8])>(p) })
+}
+
+/// De UART zonder wachten, zodra [`drain`] draait en er geen noodregel
+/// was.
+fn nowait() -> Option<fn(&[u8]) -> usize> {
+    let p = NOWAIT.load(Acquire);
+    if p.is_null() || cpu::console::urgent() {
+        return None;
+    }
+    // SAFETY: `NOWAIT` wordt alleen door `drain` geschreven, met de
+    // `fn(&[u8]) -> usize` van het board; null is uitgesloten.
+    Some(unsafe { core::mem::transmute::<*mut (), fn(&[u8]) -> usize>(p) })
+}
+
+/// De sink: eerst de zwarte doos, dan de UART, dan de ring en het glas
+/// (`gui::glass`) op de eigen core.
 ///
 /// De doos eerst, zoals in Go (`conlog.Route`): hangt de UART-poll, dan
-/// staat de regel toch al in DRAM.
+/// staat de regel toch al in DRAM. Op de OS-core met een draaiende
+/// [`drain`] gaat de regel de ring in en krijgt de UART wat er nu in zijn
+/// FIFO past; anders schrijft de tee hem wachtend, na de achterstand.
 pub(crate) fn tee(b: &[u8]) {
     crate::flip::black_box(b);
-    let p = PREV.load(Acquire);
-    if !p.is_null() {
-        // SAFETY: `PREV` wordt alleen door `install` geschreven, met een
-        // geldige `fn(&[u8])`; een functiepointer en een datapointer zijn op
-        // onze targets even groot, en null is uitgesloten (zelfde vorm als
-        // `cpu::console::sink`).
-        let prev = unsafe { core::mem::transmute::<*mut (), fn(&[u8])>(p) };
-        prev(b);
+    if RING_CORE.load(Acquire) != crate::BOARD.this_core() {
+        if let Some(prev) = prev() {
+            prev(b);
+        }
+        return;
     }
+    match (nowait(), LOG.try_borrow_mut()) {
+        (Some(put), Ok(mut log)) => {
+            let Log { ring, uart } = &mut *log;
+            ring.write(b);
+            if uart.pump(ring, put) {
+                BEHIND.set();
+            }
+        }
+        (_, Ok(mut log)) => {
+            let Log { ring, uart } = &mut *log;
+            if let Some(prev) = prev() {
+                flush_into(ring, uart, prev);
+                prev(b);
+            }
+            ring.write(b);
+            uart.caught_up(ring);
+        }
+        // Een lening die al loopt (een noodregel midden in een regel): de
+        // UART krijgt hem meteen, de ring niet.
+        (_, Err(_)) => {
+            if let Some(prev) = prev() {
+                prev(b);
+            }
+        }
+    }
+    crate::gui::glass(b);
+}
+
+/// Zet hoogstens [`FLUSH_MAX`] van de achterstand wachtend op de UART.
+fn flush_into(ring: &Ring<RING_BYTES>, uart: &mut Uart, prev: fn(&[u8])) {
+    let mut budget = FLUSH_MAX;
+    uart.pump(ring, |b| {
+        let n = b.len().min(budget);
+        if let Some(chunk) = b.get(..n) {
+            prev(chunk);
+        }
+        budget -= n;
+        n
+    });
+    uart.caught_up(ring);
+}
+
+/// Zet de achterstand van de UART er wachtend op, vóór iets dat de pomp
+/// niet overleeft (de sprong van een flip). Alleen op de OS-core.
+pub(crate) fn flush() {
     if RING_CORE.load(Acquire) != crate::BOARD.this_core() {
         return;
     }
-    if let Ok(mut r) = RING.try_borrow_mut() {
-        r.write(b);
+    if let (Some(prev), Ok(mut log)) = (prev(), LOG.try_borrow_mut()) {
+        let Log { ring, uart } = &mut *log;
+        flush_into(ring, uart, prev);
     }
-    crate::gui::glass(b);
+}
+
+/// De pomp van de UART, een taak op de OS-core: zet de UART op niet
+/// wachten (`Board::console_nowait`) en geeft hem daarna wat er in zijn
+/// FIFO past, elke [`UART_STEP`] zolang hij achterloopt, en anders na de
+/// bel van de tee. Pas vanaf zijn eerste poll gaat de tee niet meer
+/// wachtend: tot de executor draait, staat elke bootregel meteen op de
+/// UART.
+pub(crate) async fn drain(exec: &'static Executor) {
+    let Some(put) = crate::BOARD.console_nowait() else {
+        return;
+    };
+    // De achterstand van vóór de pomp is er al (de tee schreef wachtend).
+    NOWAIT.store(put as *mut (), Release);
+    // De laatste positie van de UART en sinds wanneer hij daar staat, en
+    // wat de ring hem afnam.
+    let (mut at, mut since, mut lost) = (0u64, exec.now(), 0u64);
+    loop {
+        let (more, now_at) = match LOG.try_borrow_mut() {
+            Ok(mut log) => {
+                let Log { ring, uart } = &mut *log;
+                let more = uart.pump(ring, put);
+                lost = lost.saturating_add(uart.take_dropped());
+                (more, uart.at())
+            }
+            Err(_) => (true, at),
+        };
+        let now = exec.now();
+        if now_at != at || !more {
+            (at, since) = (now_at, now);
+        }
+        if !more {
+            // Eén regel per achterstand, pas als de UART weer bij is: een
+            // regel zolang hij achterligt, duwt zelf weer bytes uit de ring
+            // (04-10, P63: 1000 van die regels per seconde, zonder eind).
+            if lost != 0 {
+                println!(
+                    "console: the UART lost {lost} bytes the ring overwrote first; they are on tcp/5555 and in the black box HOPOS_CONSOLE_DROPPED"
+                );
+                lost = 0;
+                continue;
+            }
+            BEHIND.wait().await;
+            since = exec.now();
+            continue;
+        }
+        if now.saturating_sub(since) >= UART_STUCK_NS {
+            NOWAIT.store(core::ptr::null_mut(), Release);
+            println!(
+                "console: the UART took nothing for {} ms, writing it waiting again HOPOS_CONSOLE_STUCK",
+                UART_STUCK_NS / 1_000_000
+            );
+            return;
+        }
+        exec.after(UART_STEP).await;
+    }
 }
 
 /// Een hap uit de ring vanaf `seen`, voor `kern::conport::stream`. Een
 /// ring die net beschreven wordt geeft niets; de volgende poll wel.
 pub(crate) fn snapshot(seen: u64, out: &mut [u8]) -> (usize, u64) {
-    match RING.try_borrow() {
-        Ok(r) => r.since(seen, out),
+    match LOG.try_borrow() {
+        Ok(l) => l.ring.since(seen, out),
         Err(_) => (0, seen),
     }
 }
@@ -98,7 +267,7 @@ pub(crate) fn snapshot(seen: u64, out: &mut [u8]) -> (usize, u64) {
 /// Waar een nieuwe lezer begint: het oudste dat nog in de ring staat, niet
 /// nul, zodat wie na de boot verbindt de hele geschiedenis krijgt die er is.
 pub(crate) fn oldest() -> u64 {
-    RING.try_borrow().map_or(0, |r| r.oldest())
+    LOG.try_borrow().map_or(0, |l| l.ring.oldest())
 }
 
 /// Herhaalt het begin van deze boot op de vorige sink (de UART of de
@@ -108,13 +277,9 @@ pub(crate) fn oldest() -> u64 {
 /// dan al weg). Alleen op de core die de ring bezit; geeft het aantal
 /// bytes.
 pub(crate) fn replay(max: usize) -> usize {
-    let p = PREV.load(Acquire);
-    if p.is_null() {
+    let Some(prev) = prev() else {
         return 0;
-    }
-    // SAFETY: als in `tee`: `PREV` komt alleen uit `install`, met een
-    // geldige `fn(&[u8])`, en null is hierboven uitgesloten.
-    let prev = unsafe { core::mem::transmute::<*mut (), fn(&[u8])>(p) };
+    };
     let mut seen = oldest();
     let mut total = 0;
     let mut buf = [0u8; 512];

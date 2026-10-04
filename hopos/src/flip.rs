@@ -1565,6 +1565,9 @@ fn handoff_and_jump(p: Prepared, slots: Vec<SlotState>, nat: kernflip::NatState)
         p.entry
     );
     kernflip::stage(&mut mem, &fp, Stage::Jumping, generation);
+    // Wat de pomp van de UART nog had, gaat er nu wachtend uit: na de
+    // sprong is die pomp weg (de zwarte doos houdt het toch).
+    crate::conport::flush();
     let (a, b) = image::sweep();
     let j = Jump {
         dst: Pa(base),

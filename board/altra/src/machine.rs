@@ -248,6 +248,10 @@ impl Board for Altra {
         self.uefi.console()
     }
 
+    fn console_nowait(&self) -> Option<fn(&[u8]) -> usize> {
+        self.uefi.console_nowait()
+    }
+
     /// De GOP van de eigen firmware, zoals het UEFI-board hem las (alleen
     /// in de gui-smaak; kaal `None`, docs/gui.md). Een Altra-server heeft
     /// meestal een BMC-VGA; de GOP daarvan is een gewone lineaire buffer.
