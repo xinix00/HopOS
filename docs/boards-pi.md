@@ -53,12 +53,13 @@ van een bestaande Pi-kaart. De firmware staat in `image/firmware/rpi4` en
 (VERPLICHT: de stock armstub8 heeft geen PSCI). Pi 5:
 `bcm2712-rpi-5-b.dtb` en `overlays/bcm2712d0.dtbo`.
 
-`hopos.cfg` staat niet op de kaart. Het
-`initramfs`-kanaal draagt het image van Hop (`hop.elf`), en de config is
-`cmdline.txt`: `hopos.stage=hop|app` (standaard hop), `hopos.cores=N`,
-`hopos.oscore=` (op de Pi altijd core 0). Het script zet elke regel van
-`CFG=` (standaard `image/cfg/hop-config-headless.cfg`, [boards.md](boards.md))
-daar als token achter, dus geen spatie in een waarde.
+`hopos.cfg` staat niet als bestand op de kaart. Het
+`initramfs`-kanaal draagt het image van Hop (`hop.elf`), en de config staat
+in het venster van de kern ([boards.md](boards.md), "Het config-venster"):
+het script zet `CFG=` (standaard `image/cfg/hop-config-headless.cfg`) erin.
+`cmdline.txt` draagt `hopos.stage=hop|app` (standaard hop) en `EXTRA=`; daar
+mogen ook `hopos.cores=N` en `hopos.oscore=` (op de Pi altijd core 0), maar
+een sleutel in het venster wint.
 
 UART: Pi 4 op de header (pin 8 TXD, 10 RXD, 6 GND, 3V3), `screen
 /dev/tty.usbserial-* 115200`. Pi 5 op de 3-pins debug-connector tussen de

@@ -368,11 +368,20 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     gui::start_screen_status(exec); // de meetregels naast de bunny
 
     // De config van de node: de tekst van het board (bench::cfg_text,
-    // kern::nodecfg), en alleen op QEMU, dat geen bootmedium heeft, voor Hop
+    // kern::nodecfg; het venster in het image wint, board::cfgwin), en alleen op QEMU, dat geen bootmedium heeft, voor Hop
     // de vaste bankconfig erachter. Hier al, vóór het net: de console over
     // TCP (conport.rs) kiest uit dezelfde config, en haar listener start
     // zodra de lease er is, ook na een flip waarin Hop niet opnieuw wordt
     // geplaatst.
+    match board::cfgwin::state() {
+        board::cfgwin::State::Config(n) => println!(
+            "cfg: hopos.cfg from the window in the kernel image, {n} bytes HOPOS_CFG_WINDOW"
+        ),
+        board::cfgwin::State::Bad => println!(
+            "cfg: the window in the kernel image has a crooked head or no UTF-8, ignored HOPOS_CFG_BAD"
+        ),
+        board::cfgwin::State::Empty => {}
+    }
     let mut hop_cfg = bench::cfg_text(dtb);
     if cfg!(any(
         feature = "board-qemuvirt",

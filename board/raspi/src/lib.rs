@@ -189,14 +189,12 @@ pub fn device_enabled(compatible: &str) -> Option<bool> {
     fdt()?.enabled(compatible)
 }
 
-/// Eén `hopos.*`-sleutel van de cmdline (cmdline.txt, door de firmware in
-/// /chosen/bootargs gezet); "" = niet gezet.
+/// Eén `hopos.*`-sleutel: het venster in het image (`board::cfgwin`), dan
+/// de cmdline (cmdline.txt, door de firmware in /chosen/bootargs gezet);
+/// "" = niet gezet.
 #[must_use]
 pub fn boot_param(key: &'static str) -> &'static str {
-    fdt()
-        .and_then(|f| f.bootargs())
-        .map(|a| cfg::param(a, key))
-        .unwrap_or("")
+    board::cfgwin::param(key, fdt().and_then(|f| f.bootargs()).unwrap_or(""))
 }
 
 /// De SoC-temperatuur in milligraden, via de mailbox.
@@ -368,8 +366,10 @@ impl<S: Soc> Raspi<S> {
 
     /// De staging uit /chosen/linux,initrd-* en de rol uit de cmdline.
     fn stage(&self, f: &Fdt<'static>) -> AbiRegion {
-        let role =
-            board::stage::role_code(f.bootargs().map_or("", |a| cfg::param(a, "hopos.stage")));
+        let role = board::stage::role_code(board::cfgwin::param(
+            "hopos.stage",
+            f.bootargs().unwrap_or(""),
+        ));
         slots::ROLE.store(role, Relaxed);
         let Some((start, end)) = f.initrd() else {
             cpu::println!("stage: no initramfs in the DTB, nothing staged");
@@ -474,7 +474,7 @@ impl<S: Soc> Board for Raspi<S> {
         DTB.store(dtb, Relaxed);
         MEM_TOTAL.store(f.mem_total().unwrap_or(0), Relaxed);
         let fw_cores = f.cpu_count().unwrap_or(0);
-        let want = cfg::param(f.bootargs().unwrap_or(""), "hopos.cores")
+        let want = board::cfgwin::param("hopos.cores", f.bootargs().unwrap_or(""))
             .parse::<usize>()
             .unwrap_or(0);
         CORES.store(cfg::cores(fw_cores, want), Relaxed);

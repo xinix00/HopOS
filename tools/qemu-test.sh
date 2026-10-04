@@ -10,6 +10,12 @@
 #   HOPOS_DISK_UP   de virtio-blk op een verse schijf van 64 MiB (per run
 #                   een eigen tijdelijk bestand, dus altijd leeg);
 #   HOPOS_FS_UP     hopfs erop gemount, vers (fresh=1);
+#   HOPOS_CFG_WINDOW de config in het venster van het kern-image
+#                   (board/src/cfgwin.rs), erin gezet door image/hopcfg.py
+#                   zoals elk image-script het doet: de kern leest hem (de
+#                   bootregel) en gebruikt hem (de sharegroup van Hop komt
+#                   uit de config, "(hopos.hop.sharegroup)"; zonder config
+#                   staat er "(default)", HOPOS_HOP_GROUP);
 #   HOPOS_NET_UP    pomp, switch, poort 0 en een DHCP-lease van user-net;
 #   HOPOS_SYSTEM_UP de system-listener op poort 10100;
 #   HOPOS_WD_CANARY_OK de canary van de watchdog: een nieuwe verbinding van
@@ -118,7 +124,9 @@ if [ "$GUI" != 0 ]; then
 fi
 LOG="$(mktemp -t hopos-qemu.XXXXXX)"
 DISK="$(mktemp -t hopos-disk.XXXXXX)"
-trap 'rm -f "$LOG" "$DISK" ${MON:+"$MON"} ${SHOT:+"$SHOT"}; [ -n "${QPID:-}" ] && kill "$QPID" 2>/dev/null; true' EXIT INT TERM
+KCFG="$(mktemp -t hopos-kern.XXXXXX)"
+CFGWIN="$(mktemp -t hopos-cfg.XXXXXX)"
+trap 'rm -f "$LOG" "$DISK" "$KCFG" "$CFGWIN" ${MON:+"$MON"} ${SHOT:+"$SHOT"}; [ -n "${QPID:-}" ] && kill "$QPID" 2>/dev/null; true' EXIT INT TERM
 
 . "$(dirname "$0")/lib.sh"
 SYSPORT="$(port "${SYSPORT:-10100}" SYSPORT)" # de host-kant van de hostfwd naar de system-API
@@ -129,13 +137,19 @@ cd "$DIR"
 echo "== bouwen: hopos ($FEATURES)"
 cargo build --quiet --release --target "$TARGET" -p hopos --features "$FEATURES" 2>/dev/null ||
 	cargo build --release --target "$TARGET" -p hopos --features "$FEATURES"
-KERNEL="$DIR/target/$TARGET/release/hopos"
+# De kern met een config in zijn venster: een kopie, zodat de build zelf
+# leeg blijft (de andere toetsen rekenen op hun eigen config).
+printf '# tools/qemu-test.sh: de config in het venster van de kern\nhopos.hop.sharegroup=system\n' >"$CFGWIN"
+cp "$DIR/target/$TARGET/release/hopos" "$KCFG"
+python3 "$DIR/image/hopcfg.py" set "$KCFG" "$CFGWIN"
+KERNEL="$KCFG"
 echo "== bouwen: $APP_PKG"
 cargo build --quiet --release --target "$TARGET" -p "$APP_PKG" 2>/dev/null ||
 	cargo build --release --target "$TARGET" -p "$APP_PKG"
 SPIKE="$DIR/target/$TARGET/release/$APP_PKG"
 SPIKE_SIZE=$(wc -c <"$SPIKE" | tr -d ' ')
 SLOT_MARKS="HOPOS_DISK_UP model=virtio-blk blocks=131072|HOPOS_FS_UP fresh=1"
+SLOT_MARKS="$SLOT_MARKS|cfg: hopos.cfg from the window in the kernel image, [0-9]+ bytes HOPOS_CFG_WINDOW|slots: Hop in the sharegroup system \(hopos.hop.sharegroup\) HOPOS_HOP_GROUP"
 # De acties op de monitor (GUI=display), elk op zijn moment (grep -E), in
 # volgorde: "moment;commando;commando...". Een commando `shot` is de
 # screendump waarop de app moet staan.

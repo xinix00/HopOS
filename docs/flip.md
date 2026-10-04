@@ -22,6 +22,7 @@ bundel), de `FLIP_*`-blokken in `board/*/src/slots.rs` (de adressen) en
 | De NAT-flows (conntrack) | De switch-actor geeft een snapshot als waarde (`Command::SnapshotNat`) en zet daarmee de masquerade dicht; na de landing houdt de nieuwe switch de node-poorten vast vóór zijn eerste ronde, en na de adoptie komen de flows terug (`RestoreNat`). Een UITGAANDE TCP-verbinding van een app loopt zo door, over de slirp van QEMU heen: de toets FLIPCONN (hieronder). |
 | De volumes (hopfs) | Vóór de sprong legt de actor de boom vast en neemt hij niets meer aan (`HOPOS_FS_FROZEN generation=N`); de nieuwe kern mount precies die generatie (`HOPOS_FS_UP fresh=0 generation=N`). |
 | De switch-code van de app-cores | Blijft staan; de nieuwe kern adopteert haar alleen bij een gelijke som, en die som toetst de oude kern al vóór de sprong. |
+| De config (`hopos.cfg`) | Staat op elk board in het venster van het kern-image (`board/src/cfgwin.rs`, [boards.md](boards.md)). Een bundel met een leeg venster krijgt dat van de draaiende kern vóór de sprong (`HOPOS_FLIP_CFG`); een bundel met een gevuld venster (`CFG=` van `image/flip-bundle.sh`, of `hop image`) houdt het zijne (`HOPOS_FLIP_CFG_OWN`). Een kern van vóór het venster geeft niets mee; de terugval (de ESP, de bootargs, de initrd, 0xF000 op de M4) blijft dan tellen, behalve op de LicheeRV: daar `CFG=`. |
 | Niet: de system-API-verbindingen | Die zijn van de kern; Hop's system-client bouwt ze opnieuw op. |
 | Niet: file calls tussen bevriezing en sprong | Die krijgen `Busy` (`HOPOS_FS_FROZEN_CALL`); de aanroeper doet ze opnieuw op de nieuwe kern. |
 | Niet: een nieuwe uitgaande verbinding tussen snapshot en sprong | Die krijgt geen flow; zijn SYN-retransmit krijgt er op de nieuwe kern een. |
@@ -336,11 +337,9 @@ met drie verschillen:
   kopie, opnieuw vegen, de I-cache leeg, en naar `_start` met a0 = 0 en a1
   = wat de firmware de eerste kern gaf (QEMU: de DTB, die de oude kern
   vóór de sprong toetst).
-- **De LicheeRV draagt Hop en zijn config in het image.** De bundel bakt
-  Hop erin (`STAGE=` of de Hop van `tools/hop-build.sh`); de nieuwe kern
-  start díe Hop. Het config-venster van de draaiende kern gaat mee als de
-  bundel er zelf geen tekst in heeft (`HOPOS_FLIP_CFG`); `CFG=` bij het
-  bouwen geeft de nieuwe kern een eigen config. De staging (13 MB op
+- **De LicheeRV draagt Hop in het image.** De bundel bakt Hop erin
+  (`STAGE=` of de Hop van `tools/hop-build.sh`); de nieuwe kern start díe
+  Hop. De config gaat mee zoals op elk board (hieronder). De staging (13 MB op
   `0x8690_0000`) ligt tussen de DMA-regio (van 8 naar 1 MB) en pool C (van
   16 naar 10 MB): de heap van de kern bleef heel.
 
@@ -372,6 +371,11 @@ arm64, 02-10).
   van een watchdog-reset (het RAM blijft). Kern A boot koud en drukt de
   console van kern B af (`HOPOS_FLIP_BLACKBOX` voor generatie 2, met zijn
   laatste `HOPOS_APPSPIKE_DONE` erin, en `HOPOS_FLIP_BLACKBOX_END`).
+  In elke modus behalve `MISMATCH` draagt kern A een config in zijn
+  venster en de bundel een leeg: `HOPOS_FLIP_CFG` vóór de sprong en
+  `HOPOS_CFG_WINDOW` na de landing. Onder EDK2 staat er dan geen
+  `hopos.cfg` op de ESP, dus koud start Hop op kern B alleen met de
+  meegegeven config (groen 04-10, warm en koud).
 - `MISMATCH=1 sh tools/qemu-test-flip.sh`: dezelfde bundel met een andere
   switch-code-som; groen alleen bij een weigering vóór de sprong.
 - `COLD=1 sh tools/qemu-test-flip.sh`: de koude flip met die bundel. Eerst

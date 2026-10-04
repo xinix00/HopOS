@@ -547,8 +547,9 @@ fn rate(bytes: u64, ns: u64) -> String {
     alloc::format!("{}.{}", tenths / 10, tenths % 10)
 }
 
-/// De bron van de bootparameters op virt en de Pi's: de bootargs in de
-/// FDT (QEMU `-append`, de `cmdline.txt` van de Pi).
+/// De bron van de bootparameters op virt en de Pi's: het venster in het
+/// image (`board::cfgwin`), dan de bootargs in de FDT (QEMU `-append`, de
+/// `cmdline.txt` van de Pi).
 #[cfg(any(
     feature = "board-qemuvirt",
     feature = "board-rpi4",
@@ -562,13 +563,14 @@ mod src {
     const DTB_MAX: usize = 1 << 20;
 
     pub(super) fn text(dtb: u64) -> String {
+        let window = board::cfgwin::text();
         let Some(blob) = copy(dtb).or_else(|| copy(fallback())) else {
-            return String::new();
+            return kern::nodecfg::text(window, "");
         };
         let Ok(f) = fw::fdt::Fdt::new(&blob) else {
-            return String::new();
+            return kern::nodecfg::text(window, "");
         };
-        kern::nodecfg::text("", f.bootargs().unwrap_or(""))
+        kern::nodecfg::text(window, f.bootargs().unwrap_or(""))
     }
 
     /// Waar QEMU de DTB legt als x0 leeg is (een ELF-kern).
@@ -604,8 +606,9 @@ mod src {
     }
 }
 
-/// De bron op de boards met alleen een bestand: `hopos.cfg` van de ESP
-/// (UEFI), of het venster in het image (Apple, de LicheeRV).
+/// De bron op de boards met alleen een bestand: het venster in het image
+/// (`board::cfgwin`), anders `hopos.cfg` van de ESP (UEFI) of van de
+/// m1n1-loader (Apple); `config()` van het board kiest.
 #[cfg(any(
     feature = "board-uefi",
     feature = "board-o6n",
@@ -621,8 +624,8 @@ mod src {
     }
 }
 
-/// De bron op de Radxa (`hopos.cfg` in de initrd, dan de bootargs) en op
-/// QEMU riscv (alleen de bootargs).
+/// De bron op de Radxa (het venster, anders `hopos.cfg` in de initrd, dan
+/// de bootargs) en op QEMU riscv (het venster, dan de bootargs).
 #[cfg(any(feature = "board-rk3566", feature = "board-qemuvirt-riscv"))]
 mod src {
     use alloc::string::String;
@@ -631,7 +634,7 @@ mod src {
         #[cfg(feature = "board-rk3566")]
         let file = vboard::cfg_text();
         #[cfg(feature = "board-qemuvirt-riscv")]
-        let file = "";
+        let file = board::cfgwin::text();
         kern::nodecfg::text(file, vboard::bootargs())
     }
 }

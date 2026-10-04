@@ -13,11 +13,13 @@
 #   APP=appspike image/uefi-run.sh    een app uit deze werkruimte als
 #                                     hopos-stage.elf op de ESP, rol app
 #   APP=/pad/elf ROLE=app|hop ...     een kant-en-klare ELF
-#   CFG=pad image/uefi-run.sh         hopos.cfg (standaard op o6n en altra
+#   CFG=pad image/uefi-run.sh         hopos.cfg in het venster van
+#                                     BOOTAA64.EFI (standaard op o6n en altra
 #                                     image/cfg/hop-config-headless.cfg, met
 #                                     GUI=1 of MEDIA=1 hoort
 #                                     hop-config-headfull.cfg erbij; op QEMU
-#                                     een minimale zonder sleutels)
+#                                     een leeg venster en een minimale
+#                                     hopos.cfg op de ESP zonder sleutels)
 #   GUI=1 image/uefi-run.sh           de gui-smaak (`--features gui`, docs/gui.md):
 #                                     de console op de GOP; QEMU krijgt
 #                                     `-device ramfb` (EDK2 maakt er een GOP van)
@@ -32,7 +34,8 @@
 #   image/uefi-run.sh -s -S           de rest gaat naar QEMU (gdb)
 #
 # Het resultaat is een ESP-map, target/uefi-esp[-$BOARD]/: EFI/BOOT/
-# BOOTAA64.EFI, hopos.cfg en eventueel hopos-stage.elf. Op een stick: een
+# BOOTAA64.EFI (met de config in zijn venster), eventueel hopos-stage.elf,
+# en zonder CFG een hopos.cfg. Op een stick: een
 # FAT32-partitie (GPT of MBR) en die boom erop; Secure Boot uit (een
 # ongesigneerde BOOTAA64 weigert DxeImageVerificationLib anders, Go 13-07).
 #
@@ -156,20 +159,9 @@ print(f"uefi-run: {out} ({len(img)} bytes, {n} relocations, data at {data_start:
 PY
 rm -f "$EFI.raw"
 
-# De config: CFG, op de fysieke borden standaard de gedeelde
-# (image/cfg), op QEMU een minimale zonder sleutels (de QEMU-toetsen
-# rekenen op een dichte API).
-if [ -z "${CFG:-}" ] && [ "$BOARD" != uefi ]; then
-	CFG="$DIR/image/cfg/hop-config-headless.cfg"
-fi
-if [ -n "${CFG:-}" ]; then
-	cp "$CFG" "$ESP/hopos.cfg"
-elif [ ! -e "$ESP/hopos.cfg" ]; then
-	printf '# HopOS node config (hopos.cfg op de ESP-root)\n' >"$ESP/hopos.cfg"
-fi
-
 # Het gestagede image (de UEFI-tegenhanger van QEMU's -device loader).
 APP="${APP-}"
+ROLE="${ROLE:-app}"
 rm -f "$ESP/hopos-stage.elf"
 if [ -n "$APP" ]; then
 	case "$APP" in
@@ -180,10 +172,27 @@ if [ -n "$APP" ]; then
 		;;
 	esac
 	"$OBJCOPY" --strip-debug "$IMAGE" "$ESP/hopos-stage.elf"
-	ROLE="${ROLE:-app}"
-	grep -v '^hopos.stage=' "$ESP/hopos.cfg" >"$ESP/hopos.cfg.new" || true
-	echo "hopos.stage=$ROLE" >>"$ESP/hopos.cfg.new"
-	mv "$ESP/hopos.cfg.new" "$ESP/hopos.cfg"
+fi
+
+# De config: CFG, op de fysieke borden standaard de gedeelde (image/cfg),
+# in het venster van BOOTAA64.EFI (board/src/cfgwin.rs, image/hopcfg.py),
+# met de rol van het gestagede image erachter (hopos.stage). Het venster
+# wint van een hopos.cfg op de ESP, dus die gaat weg. Zonder CFG (QEMU,
+# BOARD=uefi) blijft het venster leeg en staat op de ESP een hopos.cfg met
+# alleen de rol: de terugval van de stub (de QEMU-toetsen rekenen op een
+# dichte API, dus geen sleutels).
+if [ -z "${CFG:-}" ] && [ "$BOARD" != uefi ]; then
+	CFG="$DIR/image/cfg/hop-config-headless.cfg"
+fi
+if [ -n "${CFG:-}" ]; then
+	[ -f "$CFG" ] || { echo "uefi-run: CFG=$CFG does not exist" >&2; exit 1; }
+	grep -v '^hopos.stage=' "$CFG" >"$TDIR/hopos.cfg" || true
+	if [ -n "$APP" ]; then echo "hopos.stage=$ROLE" >>"$TDIR/hopos.cfg"; fi
+	python3 "$DIR/image/hopcfg.py" set "$EFI" "$TDIR/hopos.cfg"
+	rm -f "$ESP/hopos.cfg"
+else
+	printf '# HopOS node config (hopos.cfg op de ESP-root)\n' >"$ESP/hopos.cfg"
+	if [ -n "$APP" ]; then echo "hopos.stage=$ROLE" >>"$ESP/hopos.cfg"; fi
 fi
 echo "uefi-run: ESP in $ESP" >&2
 [ -n "${BUILD_ONLY:-}" ] && exit 0

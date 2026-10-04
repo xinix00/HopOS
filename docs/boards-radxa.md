@@ -34,20 +34,23 @@ diskutil unmountDisk /dev/diskN
 sudo dd if=target/radxa-zero3/hopos-radxa-zero3.img of=/dev/rdiskN bs=4m
 ```
 
-Op de FAT staan `hopos.img` (de kern), `hopos.ird` (de initrd: `hopos.cfg`
-plus `hop.elf`) en `extlinux/extlinux.conf`, met in de APPEND-regel
+Op de FAT staan `hopos.img` (de kern, met de config in zijn venster),
+`hopos.ird` (de initrd: een lege `hopos.cfg` plus `hop.elf`) en
+`extlinux/extlinux.conf`, met in de APPEND-regel
 `hopos.node=radxa-1 hopos.stage=hop`. Het script bouwt `agentd-hopos` in
 `HOP_DIR`, stript hem (19 MB naar 1,5 MB, 30-09) en weigert een initrd
 boven 16 MB (`board_rk3566::INITRD_MAX`). Aan het eind leest het de kaart
 terug en vergelijkt elk bestand met wat erin ging; `FOUT` daar is een kapot
 kaart-image, niet een kapot board.
 
-De config zit nu ín `hopos.ird`, dus na het flashen is hij niet meer met
-een teksteditor te bewerken. Twee wegen: herbouw met `CFG=`, of zet een
-sleutel in de APPEND-regel van `extlinux/extlinux.conf` (die blijft tekst).
-Let op: een sleutel die in `hopos.cfg` staat, wint van dezelfde sleutel in
-de APPEND (`board_rk3566::boot_param`); de standaardconfig zet alleen
-`hopos.node`.
+De config zit in het venster van `hopos.img` ([boards.md](boards.md), "Het
+config-venster"), zoals op elk board. Drie wegen om hem te veranderen:
+herbouw met `CFG=`, `hop image` op het image of de kaart, of een sleutel in
+de APPEND-regel van `extlinux/extlinux.conf` (die blijft tekst). Let op:
+een sleutel in het venster wint van dezelfde sleutel in de APPEND
+(`board_rk3566::boot_param`); de standaardconfig zet geen `hopos.node`,
+dus die komt uit de APPEND. Een kaart met een kern zonder gevuld venster
+leest `hopos.cfg` uit de initrd, zoals vóór 04-10.
 
 ## Hop als bewoner: waarom één initrd
 
@@ -292,7 +295,6 @@ DHCP-lease (hooguit 10 s, `UPLINK_WAIT`; zonder lease
   blijven onder last op 1800 MHz. Linux remt de rk3566 bij 85 C (passief)
   en de hardware schakelt bij 95 C uit; hier geen van beide. `hopos.mhz=`
   klemt het plafond (1416, 1608) als het bord zonder koeling warm wordt.
-- Geen `hopos.cfg`-venster voor raw patchen.
 - De pool eindigt op 0xF000_0000: een bord met 8 GB gebruikt alleen de onderste
   3,75 GB.
 - `hopos/src` noemt het board nog `board_qemuvirt`; main.rs laat die naam

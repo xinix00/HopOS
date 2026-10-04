@@ -69,7 +69,7 @@ met de toetsen onder `#[cfg(test)]` apart; `-v` noemt de files per emmer.
 | --- | --- | --- | --- |
 | QEMU virt | `sh image/qemu-run.sh` | draait meteen | de tests hierboven |
 | UEFI generiek (EDK2, QEMU) | `BOARD=uefi sh image/uefi-run.sh` | `target/uefi-esp-uefi/` | [boards.md](boards.md) |
-| Orion O6N | `BOARD=o6n sh image/uefi-run.sh` (met `GUI=1` voor het glas) | `target/uefi-esp-o6n/` (naar een FAT32-stick, met `hopos.cfg` naast `EFI/`) | [boards.md](boards.md) |
+| Orion O6N | `BOARD=o6n sh image/uefi-run.sh` (met `GUI=1` voor het glas) | `target/uefi-esp-o6n/` (naar een FAT32-stick; de config in het venster van `BOOTAA64.EFI`) | [boards.md](boards.md) |
 | Ampere Altra | `BOARD=altra sh image/uefi-run.sh` | `target/uefi-esp-altra/` | [boards.md](boards.md) |
 | Raspberry Pi 4 | `sh image/rpi4.sh` (met `GUI=1` voor het glas) | `target/hopos-rpi4.img` (dd) | [boards-pi.md](boards-pi.md) |
 | Raspberry Pi 5 | `sh image/rpi5.sh` (met `GUI=1` voor het glas) | `target/hopos-rpi5.img` (dd) | [boards-pi.md](boards-pi.md) |
@@ -83,8 +83,10 @@ met de toetsen onder `#[cfg(test)]` apart; `-v` noemt de files per emmer.
 De firmware van de boards staat in `image/firmware/<board>/` (de Pi's, de
 boot-keten van de Radxa, de donor van de LicheeRV; herkomst en sha256 in de
 `LEESMIJ.txt` ernaast). Elk image-script neemt standaard de gedeelde config
-`image/cfg/hop-config-headless.cfg`; `CFG=` vervangt hem
-([boards.md](boards.md), "De config"). De kaarten en sticks bouwt
+`image/cfg/hop-config-headless.cfg`; `CFG=` vervangt hem. Hij komt op elk
+board in het venster van de kern (`image/hopcfg.py`; [boards.md](boards.md),
+"Het config-venster"), en `hop image` van de hop-repo zet er een andere in,
+in een image, een bundel of op een kaart. De kaarten en sticks bouwt
 `tools/mkcard`. Go-apps zoals cloudflared staan in `go/`
 ([go-apps.md](go-apps.md)).
 

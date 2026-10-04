@@ -40,7 +40,6 @@
     )
 )]
 
-pub mod cfg;
 mod ephy;
 pub mod slots;
 pub mod temp;
@@ -153,11 +152,11 @@ fn console_write(b: &[u8]) {
 }
 
 /// De eerste waarde van een boot-sleutel uit `hopos.cfg`, het venster in
-/// het image ([`cfg`]); "" als hij er niet is. De FSBL geeft geen DTB en
+/// het image (`board::cfgwin`); "" als hij er niet is. De FSBL geeft geen DTB en
 /// geen bootargs, dus dit is het enige kanaal.
 #[must_use]
 pub fn boot_param(key: &'static str) -> &'static str {
-    fw::bootcfg::get(cfg::text(), key)
+    fw::bootcfg::get(board::cfgwin::text(), key)
 }
 
 /// Wacht `us` microseconden op de TIME-CSR.
@@ -220,11 +219,11 @@ impl LicheeRv {
         CLINT_DEV
     }
 
-    /// De tekst van `hopos.cfg` (het venster in het image, [`cfg`]), voor
+    /// De tekst van `hopos.cfg` (het venster in het image, `board::cfgwin`), voor
     /// wie meer dan één sleutel leest (de watchdog-taak: `hopos.wd`).
     #[must_use]
     pub fn config(&self) -> &'static str {
-        cfg::text()
+        board::cfgwin::text()
     }
 
     /// Wat de kooi van app-hart `hart` moet weten (Go,
@@ -384,19 +383,12 @@ impl Board for LicheeRv {
                 "readback differs, it stays unarmed HOPOS_WD_PROBE_FAIL"
             }
         );
-        match cfg::len() {
-            Some(0) => cpu::println!(
-                "config: no hopos.cfg in the image window (CFG= of image/licheerv-agent.sh), defaults HOPOS_CFG_NONE"
+        match board::cfgwin::text().len() {
+            0 => cpu::println!(
+                "config: no hopos.cfg in the window in the image (CFG= of image/licheerv-agent.sh, or hop image), defaults HOPOS_CFG_NONE"
             ),
-            Some(n) if cfg::text().is_empty() => cpu::println!(
-                "config: {n} bytes in the image window are not UTF-8, ignored HOPOS_CFG_BAD"
-            ),
-            Some(n) => {
-                cpu::println!("config: hopos.cfg from the image window, {n} bytes HOPOS_CFG_UP")
-            }
-            None => cpu::println!(
-                "config: the image window claims more than {} bytes, ignored HOPOS_CFG_BAD",
-                cfg::WINDOW - cfg::TEXT_OFF
+            n => cpu::println!(
+                "config: hopos.cfg from the window in the image, {n} bytes HOPOS_CFG_UP"
             ),
         }
     }

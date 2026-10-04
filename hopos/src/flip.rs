@@ -79,9 +79,16 @@
 //! als op arm64, met twee riscv-stappen: het app-hart gaat uit het image
 //! ([`cores_off`]: het resetblok van de C906L, of de uit-stub van de
 //! switcher op QEMU) en de sprong is de M-mode-trampoline van
-//! `cpu::el2::chain`. De LicheeRV draagt Hop en zijn config in het image:
-//! het nieuwe beeld start zijn eigen Hop, en krijgt het config-venster van
-//! deze kern als het zelf geen heeft (`HOPOS_FLIP_CFG`).
+//! `cpu::el2::chain`. De LicheeRV draagt Hop in het image: het nieuwe beeld
+//! start zijn eigen Hop.
+//!
+//! # De config
+//!
+//! Op elk board staat `hopos.cfg` in het kern-image (`board::cfgwin`). Een
+//! bundel met een leeg venster krijgt het venster van deze kern
+//! (`HOPOS_FLIP_CFG`); een bundel met een gevuld venster houdt het zijne
+//! (`HOPOS_FLIP_CFG_OWN`): zo neemt een flip de config mee, of brengt hij
+//! bewust een andere.
 //!
 //! Wat hier bewust NIET gebeurt: een hardware-watchdog op QEMU (die is er
 //! niet).
@@ -90,6 +97,7 @@ use crate::DevMem;
 use abi::layout::{FLIP_HANDOFF_LEN, HANDOFF_MAGIC_OFF, HANDOFF_PTR_OFF};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use board::cfgwin::Carry;
 use core::cell::Cell;
 use core::sync::atomic::{
     AtomicBool, AtomicU64,
@@ -829,18 +837,32 @@ fn prepare_inner(b: &FlipBundle, sha256: &[u8; 32]) -> Result<(), Refused> {
         refuse("relocation", kern::Error::Corrupt { at: 0 })
     })?;
     kernflip::stage(&mut mem, &p, Stage::Rebased, generation);
-    // Apple: `hopos.cfg` staat in het image (0xF000) en niet op een
-    // bootmedium; de nieuwe kern gaat eroverheen, dus het venster mee.
+    // De config gaat mee: het venster in het image (`board::cfgwin`) is
+    // het configbestand van de node, en de nieuwe kern gaat over dit image
+    // heen. Een bundel met een gevuld venster (`CFG=` van
+    // image/flip-bundle.sh, of `hop image`) houdt het zijne.
+    // `view_mut` leent het gestagede beeld: de flip legde het net plat neer
+    // (Normal gemapt), en tot de sprong schrijft alleen de flip-taak erin.
+    let carried = usize::try_from(flat).map_or(Carry::NoWindow, |n| {
+        dev::view_mut(Pa(src), n, |img| {
+            board::cfgwin::carry(board::cfgwin::bytes(), img)
+        })
+    });
+    match carried {
+        Carry::Done => println!("flip: hopos.cfg carried into the new image HOPOS_FLIP_CFG"),
+        Carry::Own => println!(
+            "flip: the bundle carries its own hopos.cfg in its window, ours stays behind HOPOS_FLIP_CFG_OWN"
+        ),
+        Carry::NoWindow if !board::cfgwin::text().is_empty() => println!(
+            "flip: the new image has no config window, our hopos.cfg stays behind HOPOS_FLIP_CFG_NONE"
+        ),
+        Carry::NoWindow | Carry::Nothing => {}
+    }
+    // Apple: daarnaast de plek 0xF000 (de loader, of het venster van een
+    // kern van vóór `board::cfgwin`), zoals voorheen.
     #[cfg(feature = "board-apple")]
     if vboard::fwinfo::carry_config(src, flat) {
-        println!("flip: hopos.cfg carried into the new image HOPOS_FLIP_CFG");
-    }
-    // De LicheeRV idem: het venster staat in `.data` van het image (de FSBL
-    // geeft geen bootargs), en het nieuwe beeld krijgt het onze als het zelf
-    // geen tekst draagt.
-    #[cfg(feature = "board-licheerv")]
-    if vboard::cfg::carry_config(src, flat) {
-        println!("flip: hopos.cfg carried into the new image HOPOS_FLIP_CFG");
+        println!("flip: the 0xF000 hopos.cfg carried into the new image HOPOS_FLIP_CFG");
     }
     let entry = bundle.entry.wrapping_add(delta);
     println!(

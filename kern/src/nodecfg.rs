@@ -31,8 +31,9 @@
 //! # Per board één tekst
 //!
 //! Elk board geeft zijn config als één tekst in het bestandsformaat
-//! ([`text`]): `hopos.cfg` van het bootmedium (de ESP op UEFI, het venster
-//! op Apple en de LicheeRV, de initrd op de Radxa) en daarachter de
+//! ([`text`]): het venster in het kern-image (`board::cfgwin`, op elk
+//! board), of bij een leeg venster `hopos.cfg` van het bootmedium (de ESP op
+//! UEFI, 0xF000 op Apple, de initrd op de Radxa), en daarachter de
 //! `hopos.*`-tokens van de bootargs (de Pi's, de Radxa, QEMU). De eerste
 //! waarde wint, dus het bestand wint van de bootargs (Go:
 //! `rk3566.BootParam`). Alleen QEMU, dat geen bootmedium heeft, krijgt
@@ -544,6 +545,43 @@ mod tests {
         assert_eq!(b.get("HOPOS_NODE"), Some("hopos-qemu-2"));
         assert_eq!(b.get("HOPOS_APIKEY"), Some("k"));
         assert_eq!(b.get("HOPOS_INSECURE"), Some("1"), "QEMU blijft de bank");
+    }
+
+    #[test]
+    fn the_window_with_the_shared_config_wins_from_the_cmdline() {
+        // De gedeelde config zoals image/hopcfg.py hem in het venster van de
+        // kern zet (board/src/cfgwin.rs): kopregel, config, '#'-padding.
+        let cfg = include_str!("../../image/cfg/hop-config-headless.cfg");
+        let mut window = format!("#HOPCFG1 window=16384 len={:010}\n{cfg}", cfg.len());
+        while window.len() < 16384 {
+            let n = (16384 - window.len()).min(65);
+            window.extend(core::iter::repeat_n('#', n - 1));
+            window.push('\n');
+        }
+        // De Pi: de rol en een naam in cmdline.txt, en een sleutel die het
+        // venster ook zet.
+        let args = "console=ttyAMA0 hopos.stage=hop hopos.node=pi4-keuken hopos.insecure=0";
+        let t = text(cfg, args);
+        // Het hele venster lezen is hetzelfde als de config alleen (Go las
+        // het venster als bestand): de padding is commentaar.
+        let whole = text(&window, args);
+        for c in [&t, &whole] {
+            let b = build(&NodeCfg::parse(c), &FACTS).unwrap();
+            assert_eq!(b.get("HOPOS_INSECURE"), Some("1"), "het venster wint");
+            assert_eq!(
+                b.get("HOPOS_NODE"),
+                Some("pi4-keuken"),
+                "de cmdline vult aan"
+            );
+            assert_eq!(b.get("HOPOS_CLUSTER"), Some("hopos"));
+            assert!(
+                b.get("HOPOS_INIT_JOBS")
+                    .unwrap()
+                    .contains(r#""name":"welcome""#)
+            );
+            assert!(console_enabled(&NodeCfg::parse(c)));
+            assert_eq!(NodeCfg::parse(c).one("hopos.hop.sharegroup"), "system");
+        }
     }
 
     #[test]

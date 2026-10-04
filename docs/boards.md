@@ -20,13 +20,29 @@ Geen `hopos.node` erin: zonder heet een node naar zijn board en de laatste
 twee bytes van zijn uplink-MAC (`rpi4-4c54`, `o6n-1a2b`; de regel
 `HOPOS_NODE_DEFAULT` op de console), zodat dezelfde config op elke node
 past. Een eigen `CFG=` vervangt de gedeelde helemaal (een node buiten het
-eigen LAN: met `hopos.apikey`, zonder `hopos.insecure`). Hoe elk board hem
-leest: de ESP op de UEFI-boards, het venster op de Apple en de LicheeRV, de
-initrd op de Radxa, en op de Pi's elke regel als token in `cmdline.txt`.
-De losse configs per board van de testbank (`o6n.cfg`, `radxa.cfg`,
+eigen LAN: met `hopos.apikey`, zonder `hopos.insecure`). De losse configs per board van de testbank (`o6n.cfg`, `radxa.cfg`,
 `m4.cfg` en zo) vervallen hiermee; de media-node heeft zijn eigen
 `jobs/hopos-media-o6n.cfg`. `tools/release.sh` bouwt elk board in beide
 smaken.
+
+**Het config-venster** (`board/src/cfgwin.rs`, zoals v2 met `image/hopcfg`
+en `mkcard -cfgwindow`): elke kern draagt een venster van 16 KiB in
+`.data.hopcfg`, op een 4 KiB-grens: de kopregel `#HOPCFG1 window=16384
+len=0000000432`, de config, en `#`-regels als padding. Elk image-script zet
+`CFG=` (of de gedeelde config) daarin met `image/hopcfg.py`: in
+`kernel8.img` van de Pi's, `hopos.img` van de Radxa, `BOOTAA64.EFI` van de
+UEFI-boards, het bootobject van de M4, `monitor.bin` van de LicheeRV, en
+met `CFG=` van `image/flip-bundle.sh` in een flipbundel. Een gevuld venster
+is het configbestand van de node: het wint van `hopos.cfg` op de ESP, in de
+initrd van de Radxa, van de m1n1-loader op 0xF000 en van de bootargs
+(`cmdline.txt`, de APPEND), die blijven als terugval bij een leeg venster
+(`HOPOS_CFG_WINDOW` op de console zegt dat het venster telde). Een flip
+geeft het venster van de draaiende kern mee aan een bundel met een leeg
+venster (`HOPOS_FLIP_CFG`); een bundel met een eigen config houdt die
+(`HOPOS_FLIP_CFG_OWN`). Een eigen config in een release-image, een bundel
+of op een kaart zet `hop image` (de hop-repo): `hop image <img> --config
+mijn.cfg --write /dev/rdiskN` schrijft de kaart in één keer, `hop image
+<img|bundel|/dev/rdiskN>` toont wat erin staat.
 
 Kanttekening: de Radxa en de LicheeRV leiden hun MAC-adres af van
 `hopos.node` (anders een vaste MAC, `HOPOS_MAC_FIXED`). De Radxa zet daarom
@@ -41,8 +57,8 @@ BOARD=o6n   image/uefi-run.sh   # target/uefi-esp-o6n/EFI/BOOT/BOOTAA64.EFI
 BOARD=altra image/uefi-run.sh   # target/uefi-esp-altra/EFI/BOOT/BOOTAA64.EFI
 ```
 
-Op een stick: een FAT32-partitie met die boom erop (de `hopos.cfg` staat
-er al: de gedeelde config, of `CFG=`), Secure Boot uit. Een dd-bare stick
+Op een stick: een FAT32-partitie met die boom erop (de config staat in het
+venster van `BOOTAA64.EFI`: de gedeelde config, of `CFG=`), Secure Boot uit. Een dd-bare stick
 maakt `tools/release.sh` (`hopos-o6n-headless.img.gz` en zo). Beide boards zijn het UEFI-board
 (`board-uefi`; het kernvenster van de O6N is `window-8000` op 0x8800_0000,
 dat van de Altra `window-b000` op 0xB000_0000) plus een eigen crate:

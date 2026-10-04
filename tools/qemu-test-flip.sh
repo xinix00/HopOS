@@ -32,6 +32,12 @@
 #               allemaal ná de landing: de nieuwe kern plaatst.
 #   de som      HOPOS_FLIP_SWITCHCODE_OK: de switch-code van de bundel is die
 #               van de bewoners, getoetst vóór de sprong;
+#   de config   kern A draagt een config in het venster van zijn image
+#               (board/src/cfgwin.rs; virt: CFG= van image/qemu-run.sh,
+#               uefi: CFG= van image/uefi-run.sh, en dan staat er geen
+#               hopos.cfg op de ESP), de bundel een leeg venster: kern A
+#               geeft het zijne mee (HOPOS_FLIP_CFG vóór de sprong) en kern
+#               B leest het (HOPOS_CFG_WINDOW na de landing; ook koud);
 #   hopfs       HOPOS_FS_FROZEN generation=N vóór de sprong, en na de landing
 #               HOPOS_FS_UP fresh=0 generation=N: dezelfde generatie, dus de
 #               staat van Hop overleeft via de schijf én (Hop draait door)
@@ -278,7 +284,9 @@ HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
 if [ "$BOARD" = uefi ]; then
 	# De ESP van kern A met Hop als gestagede bewoner (rol hop). Alleen virt
 	# zet voor Hop zelf QEMU_CFG achter de config (kern::nodecfg, 01-10);
-	# hier staat de insecure-regel in hopos.cfg, anders weigert Hop zijn API.
+	# hier staat de insecure-regel in het venster van BOOTAA64.EFI (en geen
+	# hopos.cfg op de ESP), anders weigert Hop zijn API. Kern B krijgt hem
+	# alleen over de flip mee.
 	ESP="$ART/esp"
 	# De feature efi-rng (zoals de O6N): kern A zaait uit het EFI_RNG_PROTOCOL
 	# van EDK2 (de virtio-rng hieronder), kern B uit het zaad dat A meegaf.
@@ -412,7 +420,9 @@ if [ "$BOARD" = uefi ]; then
 else
 	# QMP voor de reset van de zwarte doos (hieronder); qemu-run.sh geeft
 	# zijn argumenten door aan QEMU.
-	HOPOS_STAMP=A SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISK="$DISK" \
+	# Kern A met een config in zijn venster; de bundel heeft een leeg.
+	printf 'hopos.hop.sharegroup=system\n' >"$ART/kern-a.cfg"
+	HOPOS_STAMP=A SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISK="$DISK" CFG="$ART/kern-a.cfg" \
 		sh "$DIR/image/qemu-run.sh" -qmp "unix:$ART/q.sock,server=on,wait=off" </dev/null >"$LOG" 2>&1 &
 fi
 QPID=$!
@@ -432,7 +442,7 @@ echoes() {
 
 A_MARKS="HOPOS_BOOT gen=1 stamp=A|HOPOS_HOP_START slot=1|uplink tcp :8080 -> slot 1 :8080 HOPOS_HOP_PUBLISH|slot 1: .*HOP_UP"
 WORK_MARKS="slot 1: .*HOP_JOB_PLACED slot=[2-9]|HOPOS_SLOT_START slot=[2-9]|slot [0-9]+: HOPOS_APPSPIKE_DONE pass=9 fail=0"
-BASE_RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_FLIP_BLOB_BAD|HOPOS_FLIP_GUARD|HOPOS_FS_FREEZE_FAIL|HOPOS_CAGE_FAIL"
+BASE_RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_FLIP_BLOB_BAD|HOPOS_FLIP_GUARD|HOPOS_FS_FREEZE_FAIL|HOPOS_CAGE_FAIL|HOPOS_CFG_BAD|HOPOS_FLIP_CFG_NONE|HOPOS_FLIP_CFG_OWN"
 case "$MODE" in
 warm)
 	FLIP_MARKS="HOPOS_FLIP_SWITCHCODE_OK|HOPOS_FLIP_STAGED|HOPOS_FS_FROZEN generation=|HOPOS_FLIP_NAT_CAPTURED flows=|HOPOS_FLIP_JUMP gen=2|HOPOS_BOOT gen=2 stamp=B|HOPOS_FLIP_BOOT gen=2|HOPOS_FLIP_ADOPT 2 of 2 resident\\(s\\)|HOPOS_HOP_RESUMED|HOPOS_FLIP_NAT restored=|HOPOS_FLIP_SETTLED"
@@ -457,6 +467,11 @@ if [ "$BOARD" = uefi ] && [ "$MODE" != mismatch ]; then
 	FLIP_MARKS="$FLIP_MARKS|HOPOS_RNG_EFI_UP|HOPOS_FLIP_SEED|HOPOS_RNG_EFI_CARRIED"
 fi
 AFTER_MARKS="${AFTER_MARKS:-}"
+if [ "$MODE" != mismatch ]; then
+	# De config over de flip: mee vóór de sprong, gelezen na de landing.
+	FLIP_MARKS="$FLIP_MARKS|flip: hopos.cfg carried into the new image HOPOS_FLIP_CFG"
+	AFTER_MARKS="${AFTER_MARKS:+$AFTER_MARKS|}cfg: hopos.cfg from the window in the kernel image, [0-9]+ bytes HOPOS_CFG_WINDOW"
+fi
 
 JOB='{"name":"spike","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/appspike.elf"}],"memory_limit":33554432}'
 # De bewoner vóór de flip: FLIPCONN (warm) of een appspike die blijft (koud).

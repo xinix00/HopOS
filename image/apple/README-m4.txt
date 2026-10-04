@@ -57,9 +57,10 @@ names itself apple-<tail of its MAC> unless the config says otherwise, and
 serves its welcome page on port 80. Its console is on TCP port 5555
 (`nc <node> 5555`).
 
-The config (hopos.cfg) is baked into the image: there is no filesystem on this
-board that HopOS can read. To change it, rebuild the image with
-`CFG=my-node.cfg sh image/apple-m4.sh` and run the installer again.
+The config (hopos.cfg) lives inside the image, in its config window: there is
+no filesystem on this board that HopOS can read. To change it, put another one
+in with `hop image /Volumes/HOPOS/hopos-apple.img --config my-node.cfg` (the
+hop command, github.com/xinix00/hop) and run the installer again.
 
 Going back to macOS
 -------------------

@@ -130,11 +130,7 @@ fn staging_must_lie_in_the_loader_window() {
 }
 
 #[test]
-fn cmdline_keys_cores_and_mac() {
-    let args = "coherent_pool=1M 8250.nr_uarts=1 hopos.cores=2 hopos.stage=app";
-    assert_eq!(cfg::param(args, "hopos.cores"), "2");
-    assert_eq!(cfg::param(args, "hopos.stage"), "app");
-    assert_eq!(cfg::param(args, "hopos.node"), "");
+fn cores_and_mac() {
     assert_eq!(cfg::cores(4, 0), 4);
     assert_eq!(cfg::cores(4, 2), 2);
     assert_eq!(cfg::cores(4, 9), 4);

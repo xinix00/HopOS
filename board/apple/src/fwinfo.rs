@@ -230,18 +230,20 @@ pub fn release_addr(i: usize) -> u64 {
     dev::read64(Pa(crate::PARAMS + PARAM_RELEASE + 8 * i as u64))
 }
 
-/// De kopregel van een ingebakken config-venster: het formaat van Go's
-/// `image/hopcfg` (kopregel, config, '#'-padding tot de venstermaat), dat
-/// voor de parser gewoon commentaar is. `image/apple-m4.sh` schrijft het op
-/// offset 0xF000 van het image.
-pub const CFG_WINDOW_MAGIC: &[u8] = b"#HOPCFG1 window=";
+/// De kopregel van een config-venster (`board::cfgwin`). Tot 04-10 schreef
+/// `image/apple-m4.sh` het venster van 4 KB op offset 0xF000; nu staat het
+/// in het image zelf (`board::cfgwin`) en is 0xF000 de plek van de loader,
+/// plus de terugval voor een kern van vóór die tijd en wat een flip van zo'n
+/// kern meenam.
+pub const CFG_WINDOW_MAGIC: &[u8] = board::cfgwin::MAGIC;
 
 /// Waar de config vandaan kwam.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CfgSource {
     /// Geen config: een leeg venster zonder loader.
     None,
-    /// Ingebakken in het image (`CFG=` van `image/apple-m4.sh`).
+    /// Een venster op 0xF000 (een image van vóór `board::cfgwin`, of door
+    /// een flip van zo'n kern meegenomen).
     Image,
     /// Van de m1n1-loader (`CFG=` van `image/apple/load.py`).
     Loader,

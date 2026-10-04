@@ -22,6 +22,8 @@ driver-fb = { path = "../driver/fb" }
 bounded = { path = "../bounded" }
 # Het blokcontract van `NoDisk`, de schijf van een board zonder schijf.
 blkdev = { path = "../blkdev" }
+# De lezer van `hopos.cfg` (`cfgwin::param`): één parser voor elk kanaal.
+fw = { path = "../fw" }
 
 [lints]
 workspace = true

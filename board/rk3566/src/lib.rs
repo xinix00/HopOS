@@ -331,12 +331,15 @@ fn fdt() -> Option<Fdt<'static>> {
     copied(&DTB_COPY).and_then(|b| Fdt::new(b).ok())
 }
 
-/// Het configbestand (de initrd) als tekst; "" zonder.
+/// Het configbestand: het venster in het image (`board::cfgwin`) als het
+/// gevuld is, anders `hopos.cfg` uit de initrd; "" zonder.
 #[must_use]
 pub fn cfg_text() -> &'static str {
-    copied(&CFG_COPY)
-        .and_then(|b| core::str::from_utf8(b).ok())
-        .unwrap_or("")
+    board::cfgwin::or(
+        copied(&CFG_COPY)
+            .and_then(|b| core::str::from_utf8(b).ok())
+            .unwrap_or(""),
+    )
 }
 
 /// De eerste waarde van een boot-sleutel: eerst uit `hopos.cfg`, dan uit

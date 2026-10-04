@@ -19,10 +19,11 @@
 #   CFG=pad image/rpi4.sh            de config van de node (standaard
 #                                    image/cfg/hop-config-headless.cfg; met
 #                                    GUI=1 hoort hop-config-headfull.cfg
-#                                    erbij): elke regel wordt een token in
-#                                    cmdline.txt
-#   EXTRA="hopos.node=..." image/... meer tokens, vóór die van CFG (de
-#                                    eerste waarde wint)
+#                                    erbij), in het venster van kernel8.img
+#                                    (board/src/cfgwin.rs, image/hopcfg.py)
+#   EXTRA="hopos.node=..." image/... meer tokens in cmdline.txt; een
+#                                    sleutel die ook in het venster staat,
+#                                    neemt het venster
 #
 # Het boot-recept is dat van de Go-generatie (image/rpi4-agent.sh op tag
 # v2.2.8): de firmware laadt kernel8.img RAUW op 0x80000 (geen arm64-Image-header, het
@@ -106,21 +107,16 @@ dtoverlay=disable-bt
 # Het image van Hop in het laadvenster (board/raspi/src/map.rs).
 $INITRAMFS
 EOF
-# De config: de Pi leest hem uit /chosen/bootargs (board/raspi/src/cfg.rs),
-# dus elke regel van CFG wordt een token in cmdline.txt, na hopos.stage en
-# EXTRA (de eerste waarde wint). Een bootarg heeft geen spatie: een waarde
-# met een spatie weigeren, anders knipt de Pi hem stil in tweeën.
+# De config: in het venster van de kern (board/src/cfgwin.rs), zoals op
+# elk board; de kern leest eerst het venster en dan /chosen/bootargs
+# (cmdline.txt: alleen de rol en EXTRA).
 CFG="${CFG:-$DIR/image/cfg/hop-config-headless.cfg}"
 [ -f "$CFG" ] || {
 	echo "rpi4: CFG=$CFG does not exist" >&2
 	exit 1
 }
-TOKENS="$(sed -e 's/\r$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^#/d' -e '/^$/d' "$CFG")"
-if printf '%s\n' "$TOKENS" | grep -q '[[:space:]]'; then
-	echo "rpi4: $CFG has a value with a space; on the Pi every line is one cmdline token" >&2
-	exit 1
-fi
-echo "hopos.stage=${ROLE:-hop}${EXTRA:+ $EXTRA} $(printf '%s' "$TOKENS" | tr '\n' ' ')" >"$OUT/cmdline.txt"
+python3 "$DIR/image/hopcfg.py" set "$OUT/kernel8.img" "$CFG"
+echo "hopos.stage=${ROLE:-hop}${EXTRA:+ $EXTRA}" >"$OUT/cmdline.txt"
 
 echo "rpi4: $OUT/kernel8.img ($(wc -c <"$OUT/kernel8.img" | tr -d ' ') bytes), config.txt, cmdline.txt${IMAGE:+, hop.elf ($SIZE bytes, role $ROLE)}" >&2
 

@@ -12,8 +12,8 @@
 //! een methode die niemand test.
 //!
 //! Naast de trait staan [`heap`]: de allocator met een plafond die het
-//! board over zijn kern-RAM legt, en [`stage`]: het image dat een lader
-//! vóór de boot neerlegde.
+//! board over zijn kern-RAM legt, [`stage`]: het image dat een lader
+//! vóór de boot neerlegde, en [`cfgwin`]: `hopos.cfg` in het kern-image.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -26,6 +26,7 @@
     )
 )]
 
+pub mod cfgwin;
 pub mod heap;
 pub mod stage;
 

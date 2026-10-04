@@ -61,6 +61,7 @@ dependencies = [
  "dev",
  "driver-fb",
  "executor",
+ "fw",
  "heap",
  "netdev",
  "sync",

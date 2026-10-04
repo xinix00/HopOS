@@ -10,9 +10,10 @@
 #                                   de boot-regel (tools/qemu-test-flip.sh)
 #   GUI=1 image/flip-bundle.sh rpi5 de gui-smaak (de korte vorm van
 #                                   FEATURES=gui, zoals image/uefi-run.sh)
-#   CFG=m4.cfg image/flip-bundle.sh apple   hopos.cfg in het venster op
-#                                   0xF000 van de bundel (apple), of in het
-#                                   venster HOPOS.CFG.WINDOW (licheerv)
+#   CFG=node.cfg image/flip-bundle.sh <board>  hopos.cfg in het venster
+#                                   van de bundel (board/src/cfgwin.rs), op
+#                                   elk board; zonder CFG neemt de flip de
+#                                   config van de draaiende kern mee
 #   STAGE=hop.elf image/flip-bundle.sh licheerv  de Hop die de kern in zich
 #                                   draagt (de LicheeRV heeft geen staging
 #                                   van een lader: Hop zit in het image);
@@ -152,25 +153,34 @@ else
 	cp "$SHADOW_ELF" "$TD/flip-bundle.stripped"
 fi
 
-# CFG=<pad> (apple en licheerv): een hopos.cfg in het venster van de
-# bundel, zoals image/apple-m4.sh en image/licheerv-agent.sh hem in het
-# image bakken. Normaal draagt de draaiende kern zijn eigen venster over
-# naar de nieuwe (HOPOS_FLIP_CFG); dit is voor een kern die dat nog niet
-# kon (de geïnstalleerde D4b, 01-10) of voor een andere config. Een bundel
-# met een venster houdt het zijne.
+# CFG=<pad>: hopos.cfg in het venster van de bundel (board/src/cfgwin.rs,
+# image/hopcfg.py), op elk board, zoals de image-scripts het in het image
+# zetten. Zonder CFG blijft het venster leeg en geeft de draaiende kern het
+# zijne mee (hopos/src/flip.rs, HOPOS_FLIP_CFG); een bundel met een gevuld
+# venster houdt het zijne (HOPOS_FLIP_CFG_OWN): zo brengt een flip bewust
+# een andere config. Het venster valt buiten elke relocatie: in beide links
+# stonden dezelfde bytes.
 CFG="${CFG-}"
-if [ -n "$CFG" ] && { { [ "$BOARD" != apple ] && [ "$BOARD" != licheerv ]; } || [ ! -f "$CFG" ]; }; then
-	echo "flip-bundle: CFG= is alleen voor apple en licheerv, en $CFG moet bestaan" >&2
-	exit 64
+if [ -n "$CFG" ]; then
+	[ -f "$CFG" ] || {
+		echo "flip-bundle: CFG=$CFG does not exist" >&2
+		exit 64
+	}
+	python3 "$DIR/image/hopcfg.py" set "$TD/flip-bundle.stripped" "$CFG"
+else
+	# Precies één leeg venster: de plek waar de flip de config neerlegt.
+	WIN="$(python3 "$DIR/image/hopcfg.py" show "$TD/flip-bundle.stripped" 2>/dev/null)"
+	[ -z "$WIN" ] || {
+		echo "flip-bundle: the config window of the kernel is not empty" >&2
+		exit 1
+	}
 fi
-python3 - "$SHADOW_ELF" "$TD/flip-cold.elf" "$TD/flip-bundle.stripped" "$OUT" "$SHIFT" "$COLD" "$PIE" "$FLAVOR" "$CFG" "$BOARD" <<'PY'
+python3 - "$SHADOW_ELF" "$TD/flip-cold.elf" "$TD/flip-bundle.stripped" "$OUT" "$SHIFT" "$COLD" "$PIE" "$FLAVOR" <<'PY'
 import hashlib, struct, sys
 
 shadow_path, cold_path, stripped_path, out_path = sys.argv[1:5]
 shift, cold_base, pie = int(sys.argv[5], 16), int(sys.argv[6], 16), sys.argv[7] == "1"
 flavor = sys.argv[8]  # nvhe | vhe | apple: de symboolnaam van de blobs
-cfg_path = sys.argv[9]  # apple of licheerv: hopos.cfg in het venster
-board = sys.argv[10]
 MAGIC = 0x314F4C4552504F48  # "HOPRELO1"
 VERSION = 2                 # kern::kernflip::BUNDLE_VERSION
 FLIP_ABI = 3                # kern::kernflip::FLIP_ABI
@@ -308,52 +318,6 @@ sw = switch_sum(c_elf)
 
 elf = open(stripped_path, "rb").read()
 b = bytearray(elf)
-if cfg_path and board == "licheerv":
-    # Het venster van board/licheerv/src/cfg.rs, zoals image/licheerv-agent.sh
-    # het vult: "HOPOS.CFG.WINDOW", de lengte (u64 LE) op +16, de tekst op
-    # +24, 64 KiB. Het staat in .data van de bundel-ELF, zonder relocatie.
-    WMAGIC, WSIZE = b"HOPOS.CFG.WINDOW", 64 << 10
-    text = open(cfg_path, "rb").read()
-    try:
-        text.decode("utf-8")
-    except UnicodeDecodeError:
-        die(f"{cfg_path} is not UTF-8")
-    if len(text) > WSIZE - 24:
-        die(f"config of {len(text)} bytes does not fit the {WSIZE - 24}-byte window")
-    at = b.find(WMAGIC)
-    if at < 0 or b.find(WMAGIC, at + 1) >= 0:
-        die("not exactly one HOPOS.CFG.WINDOW in the kernel")
-    if any(b[at + 16:at + WSIZE]):
-        die("the config window of the kernel is not empty")
-    struct.pack_into("<Q", b, at + 16, len(text))
-    b[at + 24:at + 24 + len(text)] = text
-    print(f"flip-bundle: config baked in: {cfg_path} ({len(text)} bytes)", file=sys.stderr)
-elif cfg_path:
-    # Het venster van image/apple-m4.sh (board_apple::fwinfo::CFG_PA), in
-    # de PT_LOAD van de bundel-ELF die het linkadres + 0xF000 draagt. Het
-    # valt buiten elke relocatie: in beide links waren het nullen.
-    CFG_OFF, CFG_SIZE, WMAGIC = 0xF000, 0x1000, b"#HOPCFG1 window="
-    text = open(cfg_path, "rb").read()
-    if b"\0" in text:
-        die(f"{cfg_path} contains a NUL byte")
-    if text and not text.endswith(b"\n"):
-        text += b"\n"
-    win = WMAGIC + b"%d len=%010d\n" % (CFG_SIZE, len(text)) + text
-    if len(win) > CFG_SIZE:
-        die(f"config of {len(text)} bytes does not fit the {CFG_SIZE}-byte window")
-    rest = CFG_SIZE - len(win)
-    while rest > 0:
-        n = min(64, rest - 1)
-        win += b"#" * n + b"\n"
-        rest -= n + 1
-    want = s_base + CFG_OFF
-    at = [off + want - pa for pa, off, fs, _ms in loads(bytes(b))[1] if pa <= want and want + CFG_SIZE <= pa + fs]
-    if not at:
-        die("no loaded segment carries the config window")
-    if any(b[at[0]:at[0] + CFG_SIZE]):
-        die("the config window of the kernel is not empty")
-    b[at[0]:at[0] + CFG_SIZE] = win
-    print(f"flip-bundle: config baked in: {cfg_path} ({len(text)} bytes in {CFG_SIZE})", file=sys.stderr)
 while len(b) % 8:
     b.append(0)
 head = len(b)

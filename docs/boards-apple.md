@@ -46,7 +46,7 @@ twee regio's); zonder boot_args 1 GB boven het venster, luid.
 
 ```sh
 sh image/apple-m4.sh                         # target/apple-m4/hopos-apple.img
-CFG=hopos-m4.cfg sh image/apple-m4.sh        # met hopos.cfg in het image (0xF000)
+CFG=hopos-m4.cfg sh image/apple-m4.sh        # met hopos.cfg in het venster van het image
 APP=appspike sh image/apple-m4.sh            # plus stage.elf voor de staging
 PYTHON=~/Git/m1n1/venv/bin/python3 CFG=hopos-m4.cfg \
   sh image/apple/boot-cycle.sh target/apple-m4/hopos-apple.img 90
@@ -67,22 +67,27 @@ overdracht als na `kmutil configure-boot --raw --entry-point 2048`.
 `hopos.disk=off`, `hopos.smc=1`, `hopos.cages=on|off` (zonder waarde:
 kooien als de voorproef slaagt), `hopos.wd=off`.
 
-De config reist in het image: `CFG=hopos-m4.cfg sh image/apple-m4.sh` bakt
-hem als venster van 4 KB op offset 0xF000 (kopregel `#HOPCFG1
-window=4096 len=...`, de config, `#`-padding). Zonder loader (na de installatie) is dat de enige
-config. De loader laat het venster staan, tenzij hij zelf een `CFG=`
-krijgt; `BARE=1` laat het ook staan (zo boot de node na `kmutil`). De
-bootregel zegt waar hij vandaan kwam: `cfg: hopos.cfg baked into the
-image`, `... from the loader`, of `cfg: no hopos.cfg ... HOPOS_CFG_NONE`.
+De config reist in het image, in het venster van elke kern
+([boards.md](boards.md), "Het config-venster"): `CFG=hopos-m4.cfg sh
+image/apple-m4.sh` of `hop image hopos-apple.img --config hopos-m4.cfg`.
+Zonder loader (na de installatie) is dat de enige config. De loader zet
+zijn `CFG=` in hetzelfde venster en als tekst op 0xF000; `BARE=1` laat
+alles staan (zo boot de node na `kmutil`). 0xF000 is de terugval bij een
+leeg venster: de tekst van de loader, of het venster van 4 KB dat
+`image/apple-m4.sh` daar tot 04-10 bakte. De bootregel zegt waar de config
+vandaan kwam: `cfg: hopos.cfg from the window in the image`, `... from the
+0xF000 window`, `... from the loader`, of `cfg: no hopos.cfg ...
+HOPOS_CFG_NONE`.
 `APP=hop` zonder `CFG=` is luid (25-09: een agent zonder config draaide
 als `hopos-<random>` met een open API).
 
-Een kern-flip legt de nieuwe kern plat over het image, venster incluis, en
-een bundel draagt geen config. Daarom geeft de draaiende kern zijn venster
-mee aan het gestagede beeld (`fwinfo::carry_config`, `HOPOS_FLIP_CFG`);
-zonder dat booten geflipte kernen zonder `hopos.pstate=off` en adopteren
-ze niet (01-10). Een kern die dat nog niet kan (alles vóór 01-10), krijgt
-de config ín de bundel: `CFG=hopos-m4.cfg sh image/flip-bundle.sh apple`.
+Een kern-flip legt de nieuwe kern plat over het image, en een bundel
+draagt normaal een leeg venster. Daarom geeft de draaiende kern zijn
+venster mee aan het gestagede beeld (`board::cfgwin::carry`,
+`HOPOS_FLIP_CFG`), en daarnaast 0xF000 (`fwinfo::carry_config`); zonder
+dat booten geflipte kernen zonder `hopos.pstate=off` en adopteren ze niet
+(01-10). Een kern die dat nog niet kan (alles vóór 01-10), krijgt de
+config ín de bundel: `CFG=hopos-m4.cfg sh image/flip-bundle.sh apple`.
 
 De p-state-tune draait in `start_interrupts` (niet in `discover`: daar
 komen de regels niet op 5555) als recept in stappen met na elke stap een
@@ -179,8 +184,8 @@ betekent. Onder m1n1 eerst; pas daarna installeren. Bouw met een config:
 4. `watchdog: firmware watchdogs silenced: reg[0] ... (N window(s), ...)`.
    Zonder deze regel reset de node natief na 1:43 (31-08).
 5. `cores: via m1n1's spin-table (...)` onder m1n1; `cores: ours` na de
-   installatie. `cfg: hopos.cfg baked into the image, N bytes HOPOS_CFG`
-   (of `from the loader`); `HOPOS_CFG_NONE` = geen `CFG=` gebakken.
+   installatie. `cfg: hopos.cfg from the window in the image, N bytes
+   HOPOS_CFG` (of `from the loader`); `HOPOS_CFG_NONE` = een leeg venster.
    `cpufreq: cluster 0 (E): pstate 1 (900 MHz) -> 5/...`. Met `hopos.smc=1`:
    `smc: die 41.5 C at boot HOPOS_APPLE_TEMP`; `HOPOS_APPLE_SMC_FAIL` of een
    `smc: ...`-fout is de meting van 31-08 opnieuw (geen shmem-adres), en
@@ -258,7 +263,7 @@ betekent. Onder m1n1 eerst; pas daarna installeren. Bouw met een config:
 14. **Installeren** (1TR, fysiek; `image/apple/install.sh`): `kmutil
     configure-boot -c hopos-apple.img --raw --entry-point 2048
     --lowest-virtual-address 0 -v "/Volumes/Macintosh HD"`. Daarna moet
-    stap 5 `cores: ours` en `cfg: hopos.cfg baked into the image` zeggen:
+    stap 5 `cores: ours` en `cfg: hopos.cfg from the window in the image` zeggen:
     dat zijn de metingen dat RVBAR naar ons image wijst en dat de config
     zonder loader meekwam. Stap 13 loopt dan via PMGR en de brievenbus.
     Terug: dezelfde regel met `m1n1.bin`.

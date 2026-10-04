@@ -15,7 +15,9 @@
 #   CFG=pad image/...                    de config van de node (standaard
 #                                        image/cfg/hop-config-headless.cfg;
 #                                        met GUI=1 hoort
-#                                        hop-config-headfull.cfg erbij)
+#                                        hop-config-headfull.cfg erbij), in
+#                                        het venster van hopos.img
+#                                        (board/src/cfgwin.rs)
 #   NODE=radxa-2 image/...               een andere hopos.node in de APPEND
 #                                        (ook de bron van het MAC-adres)
 #   RADXA_DONOR=pad image/...            een eigen donor-boot-blok (standaard
@@ -25,11 +27,12 @@
 #                                        via VOP2 en HDMI, de DWC3's voor de
 #                                        invoer, en de framebuffer-grant
 #
-# Uitvoer in target/radxa-zero3/: hopos.elf, hopos.img (het arm64-Image),
-# hop.elf (het image van de bewoner, gestript), hopos.cfg, hopos.ird (de
-# initrd: hopos.cfg plus hop.elf), extlinux.conf en hopos-radxa-zero3.img
-# (de kaart). Na de bouw leest het script hopos.img, extlinux.conf,
-# hopos.cfg en hop.elf terug uit het kaart-image en vergelijkt hun sha256.
+# Uitvoer in target/radxa-zero3/: hopos.elf, hopos.img (het arm64-Image,
+# met de config in zijn venster), hop.elf (het image van de bewoner,
+# gestript), hopos.ird (de initrd: een lege hopos.cfg plus hop.elf),
+# extlinux.conf en hopos-radxa-zero3.img (de kaart). Na de bouw leest het
+# script hopos.img, extlinux.conf en hop.elf terug uit het kaart-image en
+# vergelijkt hun sha256, en de config uit het enige venster op de kaart.
 #
 #   diskutil unmountDisk /dev/diskN
 #   sudo dd if=target/radxa-zero3/hopos-radxa-zero3.img of=/dev/rdiskN bs=4m
@@ -111,6 +114,11 @@ struct.pack_into("<I", img, 56, 0x644D5241)                # magic "ARM\x64"
 open(sys.argv[2], "wb").write(img)
 print(f"hopos.img: {len(img)} bytes, image_size {mem_end - IMAGE_BASE:#x}, entry {entry:#x} at {IMAGE_BASE:#x}", file=sys.stderr)
 PYEOF
+# De config in het venster van de kern (board/src/cfgwin.rs), zoals op elk
+# board: hij wint van hopos.cfg in de initrd en van de APPEND.
+CFG="${CFG:-$DIR/image/cfg/hop-config-headless.cfg}"
+[ -f "$CFG" ] || { echo "FOUT: CFG=$CFG bestaat niet" >&2; exit 1; }
+python3 "$DIR/image/hopcfg.py" set "$OUT/hopos.img" "$CFG"
 
 # 3. Het image van de bewoner: dezelfde keuzes als image/rpi4.sh. Gestript
 #    (Hop 19 MB naar 1,5 MB, 30-09): de kern haalt de hele initrd naar zijn
@@ -150,13 +158,14 @@ else
 	ROLE=app
 fi
 
-# 4. De config, de initrd en de extlinux-regel. De APPEND-regel is het
-#    bootargs-kanaal, INITRD het bestand-kanaal; beide GEMETEN werkend op
-#    05-08 (de kern leest ze in board_rk3566::boot_param). Een sleutel in
-#    hopos.cfg wint van dezelfde sleutel in de APPEND; de gedeelde config
-#    zet geen hopos.node, dus het MAC-adres komt uit die van de APPEND.
-CFG="${CFG:-$DIR/image/cfg/hop-config-headless.cfg}"
-cp "$CFG" "$OUT/hopos.cfg"
+# 4. De initrd en de extlinux-regel. De APPEND-regel is het bootargs-kanaal,
+#    INITRD het bestand-kanaal; beide GEMETEN werkend op 05-08 (de kern
+#    leest ze in board_rk3566::boot_param). De config staat in het venster
+#    van hopos.img (stap 2), dus hopos.cfg in de initrd blijft leeg: die is
+#    de terugval van een kern met een leeg venster. Een sleutel in het
+#    venster wint van dezelfde sleutel in de APPEND; de gedeelde config zet
+#    geen hopos.node, dus het MAC-adres komt uit die van de APPEND.
+: >"$OUT/hopos.cfg"
 python3 "$DIR/image/radxa-initrd.py" pack "$OUT/hopos.ird" "$OUT/hopos.cfg" \
 	${IMAGE:+"$OUT/hop.elf"}
 IRD_SIZE=$(wc -c <"$OUT/hopos.ird" | tr -d ' ')
@@ -166,7 +175,8 @@ if [ "$IRD_SIZE" -gt "$INITRD_MAX" ]; then
 fi
 cat > "$OUT/extlinux.conf" <<EOF
 # HopOS v3, Radxa Zero 3E. U-Boot's distro-boot pakt de eerste entry.
-# hopos.ird is hopos.cfg plus het image van de bewoner (image/radxa-initrd.py).
+# hopos.ird is het image van de bewoner (image/radxa-initrd.py); de config
+# staat in het venster van hopos.img (board/src/cfgwin.rs).
 timeout 1
 default hopos
 
@@ -195,8 +205,8 @@ fi
 
 # 6. De kaart (tools/mkcard): onze MBR (één FAT16-partitie, type 0x0C,
 #    actief, vanaf LBA 32768 = 16 MiB), de donor raw op LBA 64 (byte 32768),
-#    en de drie bestanden in de FAT. De vorm van de Go-kaart (tag v2.2.8),
-#    op -cfgwindow na: de config zit hier in hopos.ird.
+#    en de drie bestanden in de FAT. De vorm van de Go-kaart (tag v2.2.8);
+#    het venster van Go's -cfgwindow zit nu in de kern (hopos.img).
 CARD="$OUT/hopos-radxa-zero3.img"
 (cd "$DIR" && cargo run -q -p mkcard -- -o "$CARD" -size 64 -start 32768 \
 	-label hopos -vollabel -raw "$DONOR@32768" \
@@ -296,8 +306,12 @@ if ! grep -q "hopos.stage=$ROLE" "$RB/extlinux.conf"; then
 	echo "FOUT: hopos.stage=$ROLE staat niet in de APPEND van de kaart" >&2
 	exit 1
 fi
+# De config: precies één venster op de hele kaart, met wat erin ging.
+python3 "$DIR/image/hopcfg.py" show "$OUT/hopos.img" >"$RB/want.cfg" 2>/dev/null
+python3 "$DIR/image/hopcfg.py" show "$CARD" >"$RB/window.cfg"
+same "$RB/want.cfg" "$RB/window.cfg"
 
 echo "" >&2
-echo "$CARD klaar (dd-baar): hopos.img + hopos.ird (hopos.cfg${IMAGE:+ + hop.elf, rol $ROLE}) + extlinux/extlinux.conf" >&2
+echo "$CARD klaar (dd-baar): hopos.img (config $(basename "$CFG") in het venster) + hopos.ird${IMAGE:+ (hop.elf, rol $ROLE)} + extlinux/extlinux.conf" >&2
 echo "flash:   diskutil unmountDisk /dev/diskN && sudo dd if=$CARD of=/dev/rdiskN bs=4m" >&2
 echo "console: 1500000 8N1 op de 40-pins header (pin 8 TX, 10 RX, 6 GND)" >&2

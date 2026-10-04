@@ -207,11 +207,13 @@ impl Apple {
         cores::kick(cpu::mpidr());
     }
 
-    /// `hopos.cfg`: het venster dat `image/apple-m4.sh` in het image bakte,
-    /// of de tekst van de m1n1-loader ("" als er geen van beide is).
+    /// `hopos.cfg`: het venster in het image (`board::cfgwin`, gevuld door
+    /// `image/apple-m4.sh` of `hop image`), anders wat op 0xF000 staat (de
+    /// tekst van de m1n1-loader, of het venster van een kern van vóór
+    /// `board::cfgwin` dat een flip meenam); "" als er niets is.
     #[must_use]
     pub fn config(&self) -> &'static str {
-        fwinfo::config_text()
+        board::cfgwin::or(fwinfo::config_text())
     }
 
     /// De schijf: de ANS-NVMe, met het schrijfvenster uit de GPT. Geen
@@ -343,8 +345,12 @@ impl Board for Apple {
         cpu::smp::set_cpu_on(cores::cpu_on_mpidr);
         let cfg = self.config();
         match fwinfo::config_source() {
+            _ if !board::cfgwin::text().is_empty() => println!(
+                "cfg: hopos.cfg from the window in the image, {} bytes HOPOS_CFG",
+                cfg.len()
+            ),
             fwinfo::CfgSource::Image => println!(
-                "cfg: hopos.cfg baked into the image, {} bytes HOPOS_CFG",
+                "cfg: hopos.cfg from the 0xF000 window (an image from before the config window, or carried over a flip), {} bytes HOPOS_CFG",
                 cfg.len()
             ),
             fwinfo::CfgSource::Loader => println!(
@@ -352,7 +358,7 @@ impl Board for Apple {
                 cfg.len()
             ),
             fwinfo::CfgSource::None => println!(
-                "cfg: no hopos.cfg (none baked in by image/apple-m4.sh CFG=, no loader) HOPOS_CFG_NONE"
+                "cfg: no hopos.cfg (an empty window: CFG= of image/apple-m4.sh or hop image; no loader) HOPOS_CFG_NONE"
             ),
         }
         self.report_temp(cfg);

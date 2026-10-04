@@ -15,7 +15,8 @@
 //! De port van de Go-mkcard (`image/mkcard/main.go` op tag v2.2.8), met
 //! dezelfde opdrachtregel en byte voor byte hetzelfde image
 //! (`tests/go.rs`). Twee verschillen: `-cfgwindow` is weg (het raw
-//! patchbare venster van Go's `image/hopcfg`; v3 leest zijn config anders),
+//! patchbare venster van Go's `image/hopcfg` zit in v3 in de kern zelf:
+//! `board/src/cfgwin.rs`, gevuld door `image/hopcfg.py`),
 //! en een leeg bestand krijgt startcluster 0 zoals de FAT-spec zegt.
 #![cfg_attr(
     test,

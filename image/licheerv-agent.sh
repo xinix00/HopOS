@@ -14,9 +14,9 @@
 #                                            die er al een heeft (de snelle
 #                                            iteratie)
 #   CFG=~/lrv.cfg image/licheerv-agent.sh  → een andere hopos.cfg in het
-#                                            image (standaard
-#                                            image/cfg/hop-config-headless.cfg;
-#                                            CFG= zonder pad: geen config)
+#                                            venster van het image (standaard
+#                                            image/cfg/hop-config-licheerv.cfg;
+#                                            CFG= zonder pad: een leeg venster)
 #   STAGE=/pad/hop.elf image/licheerv-agent.sh
 #                                          → met die ELF in de kern gebakken
 #                                            als Hop (ROLE=hop, de standaard
@@ -35,11 +35,12 @@
 #                                            ABI-bewijs op ijzer)
 #
 # hopos.cfg: de FSBL geeft geen DTB en geen bootargs, en de kern leest (nog)
-# geen SD-kaart, dus de config gaat IN het image, in een venster van 64 KiB
-# dat de kern bij de boot leest (board/licheerv/src/cfg.rs; Go deed hetzelfde
-# met image/hopcfg). Het script patcht monitor.bin vóór genfip, dus de
-# checksums van de FIP kloppen vanzelf. Let op: wat erin staat (een
-# hopos.apikey) staat dan ook in fip.bin op de kaart.
+# geen SD-kaart, dus de config gaat IN het image, in het venster van 16 KiB
+# dat elke kern draagt (board/src/cfgwin.rs; Go deed hetzelfde met
+# image/hopcfg). Het script patcht monitor.bin vóór genfip, dus de
+# checksums van de FIP kloppen vanzelf; `hop image` op een kaart of op
+# fip.bin rekent ze zelf na. Let op: wat erin staat (een hopos.apikey)
+# staat dan ook in fip.bin op de kaart.
 #
 # Nodig: de donor-FIP en fiptool.py uit een Sipeed-release
 # (LICHEERV_DONOR, LICHEERV_FIPTOOL; standaard image/firmware/licheerv/,
@@ -124,26 +125,9 @@ ENTRY="$(python3 -c 'import struct,sys; print(hex(struct.unpack_from("<Q", open(
 CFG="${CFG-$DIR/image/cfg/hop-config-licheerv.cfg}"
 if [ -n "$CFG" ]; then
 	[ -f "$CFG" ] || { echo "config ontbreekt: $CFG" >&2; exit 1; }
-	# Het venster: "HOPOS.CFG.WINDOW", de lengte (u64 LE) op +16, de tekst
-	# op +24, 64 KiB in totaal. Precies één venster, en de tekst moet passen
-	# en UTF-8 zijn: anders weigeren, niet een halve config.
-	python3 - "$OUT/monitor.bin" "$CFG" <<'PYEOF'
-import struct, sys
-img = bytearray(open(sys.argv[1], "rb").read())
-text = open(sys.argv[2], "rb").read()
-magic = b"HOPOS.CFG.WINDOW"
-if img.count(magic) != 1:
-    sys.exit(f"cfg: {img.count(magic)} windows in the image, expected 1")
-at = img.find(magic)
-cap = 65536 - 24
-if len(text) > cap:
-    sys.exit(f"cfg: {len(text)} bytes, the window holds {cap}")
-text.decode("utf-8")
-struct.pack_into("<Q", img, at + 16, len(text))
-img[at + 24:at + 24 + len(text)] = text
-open(sys.argv[1], "wb").write(bytes(img))
-print(f"cfg: {sys.argv[2]} ({len(text)} bytes) in the window at +{at:#x}", file=sys.stderr)
-PYEOF
+	# Het venster van elke kern (board/src/cfgwin.rs): precies één, en de
+	# tekst moet passen en UTF-8 zijn, anders weigert image/hopcfg.py.
+	python3 "$DIR/image/hopcfg.py" set "$OUT/monitor.bin" "$CFG"
 else
 	echo "cfg: none (CFG=pad): the node boots on its defaults, HOPOS_MAC_FIXED" >&2
 fi

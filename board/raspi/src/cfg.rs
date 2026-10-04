@@ -1,6 +1,6 @@
-//! De node-config van een Pi: `hopos.*`-sleutels uit cmdline.txt (de
-//! firmware zet die in /chosen/bootargs), en de stabiele identiteit uit het
-//! serienummer.
+//! De node-config van een Pi: `hopos.*`-sleutels uit het venster in het
+//! image (`board::cfgwin`) en dan uit cmdline.txt (de firmware zet die in
+//! /chosen/bootargs), en de stabiele identiteit uit het serienummer.
 //!
 //! Node-configuratie zonder rebuild (Derek, 11-07). Sleutels zijn
 //! `hopos.`-geprefixt zodat Linux-restanten op de kaart onschadelijk zijn;
@@ -11,12 +11,6 @@
 //! - `hopos.cores=N`: hoogstens N cores gebruiken (de kern-core
 //!   meegeteld); meer dan de firmware meldt kan niet.
 //! - `hopos.stage=hop|app`: wat het `initramfs`-image is (standaard Hop).
-
-/// De eerste waarde van `key` in de cmdline; "" = niet gezet.
-#[must_use]
-pub fn param<'a>(args: &'a str, key: &'a str) -> &'a str {
-    fw::bootcfg::get_cmdline(args, key)
-}
 
 /// Het aantal cores: wat de firmware meldt, begrensd door `hopos.cores`
 /// (0 = geen grens). Zonder firmware-getal telt de grens alleen.

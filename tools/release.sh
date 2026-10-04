@@ -23,7 +23,11 @@
 #   hopos-radxa-<smaak>.img.gz     image/radxa-zero3.sh
 #   hopos-o6n-<smaak>.img.gz       image/uefi-run.sh plus tools/mkcard: de
 #   hopos-altra-<smaak>.img.gz     ESP als stick (EFI/BOOT/BOOTAA64.EFI,
-#                                  hopos.cfg, Hop als hopos-stage.elf)
+#                                  Hop als hopos-stage.elf)
+#
+# Op elk board staat de config in het venster van de kern
+# (board/src/cfgwin.rs): `hop image` (de hop-repo) zet er een eigen config
+# in, in het image, de flipbundel of op de kaart.
 #   hopos-apple-headless.img.gz    geen bootmedium maar een FAT-stick (zoals
 #                                  Go, tag v2.2.8): image/apple-m4.sh met de
 #                                  config en Hop ingebakken als
@@ -171,10 +175,11 @@ uefi() {
 		flip "$1" "$4" "$2" ""
 	fi
 	# De stick: dezelfde vorm als de Go-stick (tag v2.2.8, image/uefi-run.sh
-	# stap 3b), op het hopcfg-venster na. UEFI leest FAT16 van removable
-	# media; na het flashen mount de partitie en is hopos.cfg te bewerken.
+	# stap 3b). UEFI leest FAT16 van removable media. De config staat in het
+	# venster van BOOTAA64.EFI (image/uefi-run.sh), niet als hopos.cfg op de
+	# stick: `hop image` zet er een andere in.
 	cargo run -q -p mkcard -- -o "$ESP.img" -size 64 -start 8192 -label hopos -vollabel \
-		"$ESP/EFI/BOOT/BOOTAA64.EFI=EFI/BOOT/BOOTAA64.EFI" "$ESP/hopos.cfg" \
+		"$ESP/EFI/BOOT/BOOTAA64.EFI=EFI/BOOT/BOOTAA64.EFI" \
 		"$ESP/hopos-stage.elf" >&2
 	card "$ESP.img" "hopos-$1-$4.img"
 }
@@ -281,11 +286,22 @@ board and the tail of its MAC (\`rpi4-4c54\`).
 | Mac mini M4 | \`hopos-apple-headless.img.gz\` (USB stick: image, installer, README) | none |
 | Sipeed LicheeRV Nano | \`hopos-licheerv-headless.img.gz\` | none |
 
-Flash a card or stick: \`gunzip -c hopos-rpi4-headless.img.gz | sudo dd of=/dev/rdiskN bs=4m\`.
-The boot partition mounts afterwards; add \`hopos.node\`, \`hopos.apikey\` or
-your own jobs in \`hopos.cfg\` (the UEFI sticks), \`cmdline.txt\` (the Pi's)
-or the \`append\` line of \`extlinux/extlinux.conf\` (the Radxa). The M4 and
-the LicheeRV carry their config inside the image: rebuild with \`CFG=\`.
+Every image carries its node config (\`hopos.cfg\`) inside the kernel, in a
+16 KiB config window, the same on every board and in every flip bundle. Put
+your own config in (\`hopos.node\`, \`hopos.apikey\`, your jobs) and write the
+card or stick in one go with the \`hop\` command from
+[hop](https://github.com/xinix00/hop):
+
+\`\`\`
+gunzip hopos-rpi4-headless.img.gz
+hop image hopos-rpi4-headless.img --config my-node.cfg --write /dev/rdiskN
+\`\`\`
+
+\`hop image <file>\` shows the config in an image, a bundle or on a card;
+\`--keep\` writes a new image but keeps the config already on the card.
+Without \`hop\`: \`gunzip -c hopos-rpi4-headless.img.gz | sudo dd of=/dev/rdiskN bs=4m\`
+gives a node with the default config of its flavor.
+
 The M4 stick is not a boot medium: write it to a USB drive, boot the mini
 into Recovery and run \`sh /Volumes/HOPOS/install.sh go\` (the README on
 the stick has the steps); from then on the Mac powers on into HopOS.
@@ -293,7 +309,9 @@ the stick has the steps); from then on the Mac powers on into HopOS.
 Kernel flip bundles, \`hopos-<board>-<flavor>.flip\`, replace a running
 kernel without a reboot (docs/flip.md): put one on a web server and
 \`curl -X POST http://NODE:8080/flip -d '{"url":"...","sha256":"..."}'\`
-with its sum from SHA256SUMS.
+with its sum from SHA256SUMS. A bundle's config window is empty, so the
+node keeps its own config over the flip; \`hop image <bundle> --config
+<cfg>\` gives it another one (and prints the new sha256).
 
 Apps (rolling release [apps](https://github.com/xinix00/HopOS/releases/tag/apps),
 named \`<app>-<arch>.elf\`): appspike, welcome, bench, display, vitals,

@@ -48,6 +48,16 @@ STAGE_MAGIC = 0x4547415453504F48  # "HOPSTAGE"
 
 img_path = pathlib.Path(sys.argv[1])
 img = img_path.read_bytes()
+# CFG=pad: de config in het venster van het image (board/src/cfgwin.rs,
+# image/hopcfg.py), want dat wint van de tekst op 0xF000 hieronder. Een image
+# van vóór het venster heeft er geen: dan alleen 0xF000, zoals voorheen.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import hopcfg  # noqa: E402
+WINDOWS = hopcfg.windows(img)
+if os.environ.get("CFG") and len(WINDOWS) == 1:
+    at = WINDOWS[0]
+    size = hopcfg.head(img, at)[0]
+    img = img[:at] + hopcfg.window(pathlib.Path(os.environ["CFG"]).read_bytes(), size) + img[at + size:]
 
 # PHASE=all (default) doet alles over één lijn. De snelle meetbank splitst:
 # PHASE=load over m1n1's USB-gadget (serial-mode, ~9MB/s), dan macvdmtool
@@ -236,11 +246,13 @@ if not BARE:
     robust_writemem(PARAM_BASE, params)
 
 # Platform-config als tekst op CFG_BASE (board_apple::fwinfo::CFG_PA): het
-# hopos.cfg-bestand uit CFG=pad. Zonder CFG blijft staan wat het image daar
-# draagt: het venster dat image/apple-m4.sh met CFG= inbakte, of nullen
-# (gzdec schreef net het hele bestand, dus er liggen geen resten van een
-# vorige boot). BARE=1 laat het venster ook staan: na een `kmutil
-# configure-boot` is het ingebakken venster de enige config.
+# hopos.cfg-bestand uit CFG=pad, voor een kern met een leeg venster of een
+# van vóór het venster (die met een venster kreeg CFG= hierboven al in zijn
+# venster). Zonder CFG blijft staan wat het image draagt: het venster dat
+# image/apple-m4.sh met CFG= vulde, of nullen (gzdec schreef net het hele
+# bestand, dus er liggen geen resten van een vorige boot). BARE=1 laat het
+# venster ook staan: na een `kmutil configure-boot` is het venster de enige
+# config.
 CFG_BASE, CFG_SIZE = LOAD_AT + 0xF000, 0x1000
 cfg = ""
 if os.environ.get("CFG"):
@@ -248,7 +260,8 @@ if os.environ.get("CFG"):
 cfgb = cfg.encode()
 if len(cfgb) >= CFG_SIZE:
     raise SystemExit("config too large: %d >= %d" % (len(cfgb), CFG_SIZE))
-baked = img[0xF000:0xF000 + 16] == b"#HOPCFG1 window="
+baked = img[0xF000:0xF000 + 16] == hopcfg.MAGIC or (
+    len(WINDOWS) == 1 and hopcfg.head(img, WINDOWS[0])[2] > 0)
 if BARE:
     robust_writemem(PARAM_BASE, b"\0" * 0xB0)
     print("bare: no param block%s; the board reads the firmware itself" % (

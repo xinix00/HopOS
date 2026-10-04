@@ -528,9 +528,16 @@ impl Uefi {
             .map_err(|_| Error::Irq("line refused"))
     }
 
-    /// `hopos.cfg` van de ESP, als tekst (leeg als er geen was).
+    /// De config van de node: het venster in het image
+    /// (`board::cfgwin`) als het gevuld is, anders `hopos.cfg` van de ESP
+    /// ("" als er geen van beide is).
     #[must_use]
     pub fn config(&self) -> &'static str {
+        board::cfgwin::or(Self::esp_config())
+    }
+
+    /// `hopos.cfg` van de ESP, als tekst (leeg als er geen was).
+    fn esp_config() -> &'static str {
         let (pa, len) = (facts::CFG[0].load(Relaxed), facts::CFG[1].load(Relaxed));
         if pa == 0 || len == 0 {
             return "";
@@ -652,9 +659,17 @@ impl Board for Uefi {
         } else {
             cpu::println!("{}", cpu::drbg::seed_from_cpu(cpu::idle::counter));
         }
-        let cfg = self.config();
-        if !cfg.is_empty() {
-            cpu::println!("cfg: hopos.cfg from the ESP, {} bytes HOPOS_CFG", cfg.len());
+        let esp = Self::esp_config();
+        if !esp.is_empty() {
+            cpu::println!(
+                "cfg: hopos.cfg from the ESP, {} bytes{} HOPOS_CFG",
+                esp.len(),
+                if board::cfgwin::text().is_empty() {
+                    ""
+                } else {
+                    ", not read: the window in the image wins"
+                }
+            );
         }
         self.log_pcie();
     }
