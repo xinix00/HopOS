@@ -39,13 +39,7 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
-- [ ] Draad en handoff (agent o6n-ijzer): de pulls van de O6N naar de borden
-      liggen 10 tot 20 % onder gisteravond sinds bench-serve de applib van
-      hop-cost5 heeft (A/B met de oude ELF loopt); daarna de draadcellen
-      definitief. Dezelfde agent toetst handoff.patch op de O6N (de
-      stickkern moet na de watchdog-reset koud opkomen met
-      `HOPOS_FLIP_STALE`); dan commit ik hem.
-- [ ] HopOS 3.0.8 zodra handoff erin zit: het Altra-image van v3.0.7 boot
+- [ ] HopOS 3.0.8: het Altra-image van v3.0.7 boot
       niet (de boot-stack), het config-venster en `hop image` zijn nieuw.
       Daarop Hop 3.0.8 (pin v3.0.8, lean v3.1.9, hop-gui opnieuw). Dan de
       media met `hop image --config`: Radxa-kaart (v3.0.5 stormt na 2 GiB
@@ -82,6 +76,10 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 - [ ] Het config-venster: de bootregel `HOPOS_CFG_WINDOW` per bord, een
       warme flip met `HOPOS_FLIP_CFG`, en `hop image --write` op een echte
       kaart (de LicheeRV eerst met `CFG=`, anders boot hij zonder config).
+- [ ] De handoff-fix: het STALE-pad (een gepatchte stickkern die een oud
+      paar vindt, dus pas met een 3.0.8-stick) en de nieuwe flip-ingang op
+      de M4 en de Pi's (op de O6N gezien: O2 koud op met de doos van de
+      toetskern, O2 warm naar main landt).
 - [ ] Altra: de koude flip (met de boot-stack-fix moet hij nu lukken).
 - [ ] Core-reclaim in een sharegroup met een rekenaar
       (`HOPOS_CORE_RECLAIM` na 2 s).
@@ -94,6 +92,11 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Meten
 
+- [ ] De pull van de O6N naar Pi 5 en Radxa zakte van 111 MB/s (gisteravond
+      en 08:45) naar 85 (vanaf 10:00) en bleef daar, ook na een koude boot
+      van de O6N en met de oude bench-ELF aan beide kanten (A/B: nieuw 85,
+      oud 87, gemengd 62 tot 76); de push de andere kant op blijft 110. Wat
+      verandert er in de ontvangers of op de draad in die uren.
 - [ ] De OS-core als grens voor veel kleine calls: meten met een echte
       database van 100 GB of meer.
 - [ ] Radxa: de hairpin-storm haalt 620 tot 757 conn/s met p99 16 ms,
