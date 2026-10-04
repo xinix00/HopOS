@@ -64,6 +64,13 @@ release-build van het image, uit de dep-info de bronbestanden, en dan de
 vaste emmers (portable per laag, per ISA, per board, lean, gui)
 met de toetsen onder `#[cfg(test)]` apart; `-v` noemt de files per emmer.
 
+`python3 tools/meet.py` draait de meetronde van [measurements.md](measurements.md)
+op het ijzer: vitals op alle borden tegelijk, bench in de node, de draad
+serieel tegen de O6N (de O6N zelf tegen de M4), en daarna weer opgeruimd. Hij
+wacht op de markers op de console in plaats van te slapen, schrijft per bord
+een fragment in `target/meet/`, en zet met `--write` de cellen vooraan in
+measurements.md. Zeven borden kosten ruim drie minuten.
+
 ## De vlakken
 
 | Vlak | Doc | Wat erin staat |
