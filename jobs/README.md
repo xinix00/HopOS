@@ -41,9 +41,8 @@ https://github.com/xinix00/HopOS/releases/download/apps/welcome-arm64.elf
 https://github.com/xinix00/HopOS/releases/download/apps/cloudflared-lean-arm64.elf
 ```
 
-`tools/release.sh` bouwt ze (appspike, welcome, bench, display, vitals,
-cloudflared-lean, syncprobe en decode voor arm64; appspike en welcome ook
-voor riscv64) en zegt hoe ze in `apps` komen; de URL verschuift dus niet
+`tools/release.sh` bouwt ze (de lijst `APPS` in `tools/lib.sh` plus decode
+voor arm64, `APPS_RISCV64` ook voor riscv64) en zegt hoe ze in `apps` komen; de URL verschuift dus niet
 per versie, en de headfull-laag van de config (`image/cfg/headfull.cfg`)
 start welcome van daar.
 De Go-apps (`go/apps-release.sh`, [go-apps.md](../docs/go-apps.md)) staan

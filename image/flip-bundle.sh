@@ -60,6 +60,7 @@
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+. "$DIR/tools/lib.sh"
 BOARD="${1:-}"
 TARGET=aarch64-unknown-none-softfloat
 
@@ -109,7 +110,7 @@ if [ "${GUI:-0}" = 1 ]; then
 	FEATURE="$FEATURE,gui"
 fi
 [ "$FLAVOR" = riscv ] && TARGET=riscv64gc-unknown-none-elf
-OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
+need_objcopy flip-bundle
 # De LicheeRV draagt Hop in het image (board/licheerv/build.rs, zoals
 # image/licheerv-agent.sh): de nieuwe kern start na een koude flip die Hop.
 # Een bundel zonder Hop zou een node zonder Hop opleveren, dus geen bundel
@@ -119,11 +120,11 @@ if [ "$BOARD" = licheerv ]; then
 	STAGE="${STAGE:-$(sh "$DIR/tools/hop-build.sh" "$TARGET")}"
 	[ -f "$STAGE" ] || { echo "flip-bundle: STAGE=$STAGE bestaat niet" >&2; exit 1; }
 	mkdir -p "$DIR/target/flip-$BOARD"
-	HOPOS_LRV_STAGE="$DIR/target/flip-$BOARD/stage.elf"
-	"$OBJCOPY" --strip-debug --discard-all "$STAGE" "$HOPOS_LRV_STAGE"
-	HOPOS_LRV_ROLE=hop
-	export HOPOS_LRV_STAGE HOPOS_LRV_ROLE
-	echo "flip-bundle: Hop in het image: $STAGE ($(wc -c <"$HOPOS_LRV_STAGE" | tr -d ' ') bytes)" >&2
+	HOPOS_EMBED="$DIR/target/flip-$BOARD/stage.elf"
+	"$OBJCOPY" --strip-debug --discard-all "$STAGE" "$HOPOS_EMBED"
+	HOPOS_EMBED_ROLE=hop
+	export HOPOS_EMBED HOPOS_EMBED_ROLE
+	echo "flip-bundle: Hop in het image: $STAGE ($(wc -c <"$HOPOS_EMBED" | tr -d ' ') bytes)" >&2
 fi
 
 OUT="$DIR/target/hopos-$BOARD.flip"
@@ -185,8 +186,9 @@ else
 		exit 1
 	}
 fi
-python3 - "$SHADOW_ELF" "$TD/flip-cold.elf" "$TD/flip-bundle.stripped" "$OUT" "$SHIFT" "$COLD" "$PIE" "$FLAVOR" <<'PY'
+PYTHONPATH="$DIR/image" python3 - "$SHADOW_ELF" "$TD/flip-cold.elf" "$TD/flip-bundle.stripped" "$OUT" "$SHIFT" "$COLD" "$PIE" "$FLAVOR" <<'PY'
 import hashlib, struct, sys
+import elf as elfs  # image/elf.py
 
 shadow_path, cold_path, stripped_path, out_path = sys.argv[1:5]
 shift, cold_base, pie = int(sys.argv[5], 16), int(sys.argv[6], 16), sys.argv[7] == "1"
@@ -200,17 +202,10 @@ def die(msg):
     sys.exit("flip-bundle: " + msg)
 
 def loads(elf):
-    if elf[:4] != b"\x7fELF" or elf[4] != 2 or elf[5] != 1:
-        die("not a little-endian ELF64")
-    entry, phoff = struct.unpack_from("<QQ", elf, 24)
-    phentsize, phnum = struct.unpack_from("<HH", elf, 54)
-    segs = []
-    for i in range(phnum):
-        p = phoff + i * phentsize
-        kind, _flags, off, _vaddr, paddr, filesz, memsz = struct.unpack_from("<IIQQQQQ", elf, p)
-        if kind == 1:
-            segs.append((paddr, off, filesz, memsz))
-    return entry, segs
+    try:
+        return elfs.loads(elf)
+    except ValueError as e:
+        die(str(e))
 
 def flat(elf):
     entry, segs = loads(elf)
@@ -222,32 +217,11 @@ def flat(elf):
         img[paddr - base:paddr - base + filesz] = elf[off:off + filesz]
     return base, entry, img
 
-def sections(elf):
-    shoff, = struct.unpack_from("<Q", elf, 0x28)
-    shentsize, shnum, shstrndx = struct.unpack_from("<HHH", elf, 0x3a)
-    out = []
-    for i in range(shnum):
-        out.append(struct.unpack_from("<IIQQQQII", elf, shoff + i * shentsize))
-    return out
-
-def symbols(elf):
-    secs = sections(elf)
-    syms = {}
-    for s in secs:
-        if s[1] != 2:  # SHT_SYMTAB
-            continue
-        strtab = secs[s[6]]
-        for k in range(s[5] // 24):
-            name, _info, _other, _shndx, value, _size = struct.unpack_from("<IBBHQQ", elf, s[4] + k * 24)
-            o = strtab[4] + name
-            syms[elf[o:elf.index(b"\0", o)].decode()] = value
-    return syms
-
 def switch_sum(elf):
     # cpu::el2::dispatch::place: FNV-1a-64 over entry, tramp en smp, in die
     # volgorde, van de smaak van dit board (hopos/src/cage.rs `FLAVOR`; de
     # symbolen hopos_el2_{nvhe,vhe,apple}_* uit cpu/src/el2/switch.rs).
-    syms = symbols(elf)
+    syms = elfs.symbols(elf)
     base, _entry, img = flat(elf)
     h = 0xcbf29ce484222325
     if flavor == "riscv":
@@ -272,19 +246,11 @@ def switch_sum(elf):
     return h
 
 def pie_check(elf):
-    # Dezelfde toets als image/uefi-run.sh: alleen RELATIVE, alleen in RW.
-    secs = sections(elf)
-    ALLOC, WRITE = 2, 1
-    data_start = min(s[3] for s in secs if s[2] & ALLOC and s[2] & WRITE)
-    n = 0
-    for s in secs:
-        if s[1] != 4:  # SHT_RELA
-            continue
-        for k in range(s[5] // 24):
-            r_off, r_info, _ = struct.unpack_from("<QQq", elf, s[4] + k * 24)
-            n += 1
-            if r_info & 0xffffffff != 1027 or r_off < data_start:
-                die(f"relocation {k} is type {r_info & 0xffffffff} at {r_off:#x}: not RELATIVE in the RW section")
+    # De toets van image/elf.py, ook die van image/uefi-run.sh.
+    n, _data_start, bad = elfs.relative_only(elf)
+    if bad:
+        k, _sec, typ, off = bad[0]
+        die(f"relocation {k} is type {typ} at {off:#x}: not RELATIVE in the RW section")
     return n
 
 s_elf = open(shadow_path, "rb").read()

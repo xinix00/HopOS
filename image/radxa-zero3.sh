@@ -54,9 +54,9 @@
 # een ingebakken Hop). De rol staat als hopos.stage in de APPEND.
 set -e
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+. "$DIR/tools/lib.sh"
 OUT="$DIR/target/radxa-zero3"
 TARGET=aarch64-unknown-none-softfloat
-HOP_DIR="${HOP_DIR:-$DIR/../hop/hop}"
 # De grootste initrd die de kern naar de heap haalt (board_rk3566::INITRD_MAX).
 INITRD_MAX=16777216
 mkdir -p "$OUT"
@@ -126,31 +126,8 @@ python3 "$DIR/image/hopcfg.py" set "$OUT/hopos.img" $CFG
 # 3. Het image van de bewoner: dezelfde keuzes als image/rpi4.sh. Gestript
 #    (Hop 19 MB naar 1,5 MB, 30-09): de kern haalt de hele initrd naar zijn
 #    heap, en de symbolen staan in de build van de hop-repo.
-OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
-if [ -z "$OBJCOPY" ]; then
-	echo "FOUT: rust-objcopy ontbreekt (rustup component add llvm-tools)" >&2
-	exit 1
-fi
-APP="${APP-hop}"
-IMAGE=""
-case "$APP" in
-"") ;;
-hop)
-	echo "== tools/hop-build.sh (agentd-hopos uit $HOP_DIR)" >&2
-	IMAGE="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
-	ROLE="${ROLE:-hop}"
-	;;
-*/*)
-	IMAGE="$APP"
-	ROLE="${ROLE:-app}"
-	;;
-*)
-	echo "== cargo build ($APP)" >&2
-	(cd "$DIR" && cargo build --quiet --release --target "$TARGET" -p "$APP")
-	IMAGE="$DIR/target/$TARGET/release/$APP"
-	ROLE="${ROLE:-app}"
-	;;
-esac
+need_objcopy radxa-zero3
+pick_app hop
 rm -f "$OUT/hop.elf"
 if [ -n "$IMAGE" ]; then
 	"$OBJCOPY" --strip-debug "$IMAGE" "$OUT/hop.elf"
@@ -211,80 +188,19 @@ fi
 #    het venster van Go's -cfgwindow zit nu in de kern (hopos.img).
 CARD="$OUT/hopos-radxa-zero3.img"
 (cd "$DIR" && cargo run -q -p mkcard -- -o "$CARD" -size 64 -start 32768 \
-	-label hopos -vollabel -raw "$DONOR@32768" \
+	-label hopos -vollabel -verify -raw "$DONOR@32768" \
 	"$OUT/hopos.img" "$OUT/hopos.ird" "$OUT/extlinux.conf=extlinux/extlinux.conf") >&2
 
-# 7. De proef op de kaart: lees de FAT van het image terug zoals U-Boot hem
-#    leest (MBR, BPB, root, de cluster-keten, LFN), splits hopos.ird zoals
-#    de kern hem splitst, en vergelijk elk bestand met wat erin ging. Een
-#    fout in de kaartbouwer of de container is hier rood, niet pas op de
+# 7. De proef op de kaart: mkcard -verify las hierboven de FAT terug zoals
+#    U-Boot hem leest (MBR, BPB, root, de clusterketen, LFN) en vond elk
+#    bestand en de donor zoals ze erin gingen. Hier: hopos.ird gesplitst
+#    zoals de kern hem splitst, de rol in de APPEND, en precies één venster
+#    op de hele kaart. Een fout in de container is hier rood, niet pas op de
 #    seriële console.
 RB="$OUT/readback"
 rm -rf "$RB"
 mkdir -p "$RB"
-python3 - "$CARD" "$RB" <<'PYEOF'
-import struct, sys
-card, out = sys.argv[1:3]
-img = open(card, "rb").read()
-if img[510:512] != b"\x55\xAA" or img[446 + 4] != 0x0C:
-    sys.exit("readback: no MBR with a FAT partition (type 0x0C)")
-start = struct.unpack_from("<I", img, 446 + 8)[0] * 512
-bs = img[start:start + 512]
-sec, spc, res, nfat, rootent = struct.unpack_from("<HBHBH", bs, 11)
-spf = struct.unpack_from("<H", bs, 22)[0]
-fat_off = start + res * sec
-root_off = fat_off + nfat * spf * sec
-data_off = root_off + rootent * 32
-clus = sec * spc
-
-def chain(first, size):
-    data, c, seen = b"", first, set()
-    while 2 <= c < 0xFFF8:
-        if c in seen:
-            sys.exit(f"readback: cluster loop at {c}")
-        seen.add(c)
-        o = data_off + (c - 2) * clus
-        data += img[o:o + clus]
-        c = struct.unpack_from("<H", img, fat_off + 2 * c)[0]
-    if size is not None and len(data) < size:
-        sys.exit(f"readback: chain from {first} holds {len(data)} bytes, the entry says {size}")
-    return data[:size] if size is not None else data
-
-def entries(raw):
-    lfn = {}
-    for i in range(0, len(raw), 32):
-        e = raw[i:i + 32]
-        if e[0] == 0:
-            break
-        if e[0] == 0xE5:
-            continue
-        if e[11] == 0x0F:
-            lfn[e[0] & 0x1F] = e[1:11] + e[14:26] + e[28:32]
-            continue
-        if lfn:
-            name = b"".join(lfn[k] for k in sorted(lfn)).decode("utf-16-le").split("\x00")[0]
-        else:
-            base, ext = e[0:8].decode().strip(), e[8:11].decode().strip()
-            name = (base + ("." + ext if ext else "")).lower()
-        lfn = {}
-        yield name, e[11], struct.unpack_from("<H", e, 26)[0], struct.unpack_from("<I", e, 28)[0]
-
-root = {n: (a, c, s) for n, a, c, s in entries(img[root_off:data_off])}
-got = {}
-for n in ("hopos.img", "hopos.ird"):
-    if n not in root:
-        sys.exit(f"readback: {n} missing from the FAT root ({sorted(root)})")
-    got[n] = chain(root[n][1], root[n][2])
-if "extlinux" not in root or not root["extlinux"][0] & 0x10:
-    sys.exit("readback: no extlinux directory")
-sub = {n: (a, c, s) for n, a, c, s in entries(chain(root["extlinux"][1], None))}
-if "extlinux.conf" not in sub:
-    sys.exit(f"readback: extlinux/extlinux.conf missing ({sorted(sub)})")
-got["extlinux.conf"] = chain(sub["extlinux.conf"][1], sub["extlinux.conf"][2])
-for n, d in got.items():
-    open(f"{out}/{n}", "wb").write(d)
-PYEOF
-python3 "$DIR/image/radxa-initrd.py" split "$RB/hopos.ird" "$RB/hopos.cfg" "$RB/hop.elf"
+python3 "$DIR/image/radxa-initrd.py" split "$OUT/hopos.ird" "$RB/hopos.cfg" "$RB/hop.elf"
 same() {
 	a=$(shasum -a 256 "$1" | cut -d' ' -f1)
 	b=$(shasum -a 256 "$2" | cut -d' ' -f1)
@@ -294,9 +210,7 @@ same() {
 	fi
 	echo "   ok  $(basename "$2") terug uit de kaart, sha256 $a" >&2
 }
-echo "== proef: de kaart teruggelezen" >&2
-same "$OUT/hopos.img" "$RB/hopos.img"
-same "$OUT/extlinux.conf" "$RB/extlinux.conf"
+echo "== proef: de initrd gesplitst, de APPEND en het venster" >&2
 same "$OUT/hopos.cfg" "$RB/hopos.cfg"
 if [ -n "$IMAGE" ]; then
 	same "$OUT/hop.elf" "$RB/hop.elf"
@@ -304,7 +218,7 @@ elif [ -s "$RB/hop.elf" ]; then
 	echo "FOUT: er zit een image in hopos.ird terwijl APP leeg was" >&2
 	exit 1
 fi
-if ! grep -q "hopos.stage=$ROLE" "$RB/extlinux.conf"; then
+if ! grep -q "hopos.stage=$ROLE" "$OUT/extlinux.conf"; then
 	echo "FOUT: hopos.stage=$ROLE staat niet in de APPEND van de kaart" >&2
 	exit 1
 fi

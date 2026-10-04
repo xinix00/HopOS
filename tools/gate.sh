@@ -1,8 +1,7 @@
 #!/bin/sh
 # De poort van HopOS v3 (handboek §9): host-tests, clippy met de harde set,
 # rustfmt, de host-meetbank netmeter en de regelteller loc, de target-builds van de apps
-# (appspike, welcome, bench, display, vitals, cloudflared-lean, syncprobe)
-# en van ELK board. Rood is rood.
+# (de lijst APPS van tools/lib.sh) en van ELK board. Rood is rood.
 #
 # De boards: virt, rpi4, rpi5, rk3566 en de twee riscv64-boards (QEMU virt
 # in machine mode en de LicheeRV, docs/boards-riscv.md) als debug-build in de gedeelde
@@ -23,9 +22,14 @@
 # het echte bouwpad: `MEDIA=1 BOARD=o6n sh image/uefi-run.sh`, met clippy
 # op dezelfde features), en apps/decode bouwt voor het target.
 #
+# De QEMU-ringen staan niet in de gate (die blijft onder tien minuten):
+# tools/qemu-all.sh draait ze allemaal na elkaar.
+#
 # De duur staat onderaan, per stap: de grens is tien minuten.
 set -e
 cd "$(dirname "$0")/.."
+DIR="$(pwd)"
+. tools/lib.sh
 T0=$(date +%s)
 echo "== host: cargo test"
 cargo test --quiet
@@ -73,8 +77,9 @@ echo "== rustfmt"
 cargo fmt --check
 echo "== target: bibliotheken (aarch64)"
 cargo build --quiet --target aarch64-unknown-none-softfloat
-echo "== target: apps (appspike, welcome, bench, display, vitals, cloudflared-lean, syncprobe)"
-cargo build --quiet --target aarch64-unknown-none-softfloat -p appspike -p welcome -p bench -p display -p vitals -p cloudflared-lean -p syncprobe
+echo "== target: apps ($(echo $APPS | sed 's/ /, /g'))"
+# shellcheck disable=SC2086
+cargo build --quiet --target aarch64-unknown-none-softfloat $(printf ' -p %s' $APPS)
 # De stage-1 van applib::mmu (de MMU-aan, de vectortabel, het glas)
 # bestaat alleen op het target; de host-ronde ziet alleen de tabellen. Zo
 # ook de start van cloudflared-lean (op de host een lege `main`).

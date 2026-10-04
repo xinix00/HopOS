@@ -41,33 +41,18 @@
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-TIMEOUT="${TIMEOUT:-150}"
-HOP_DIR="${HOP_DIR:-$DIR/../hop/hop}"
-TARGET=riscv64gc-unknown-none-elf
-LOG="$(mktemp -t hopos-rv-flip.XXXXXX)"
-ART="$(mktemp -d -t hopos-rv-flip-art.XXXXXX)"
-DISK="$ART/disk.img"
-QPID=""
-HPID=""
-cleanup() {
-	[ -n "$QPID" ] && kill "$QPID" 2>/dev/null
-	[ -n "$HPID" ] && kill "$HPID" 2>/dev/null
-	rm -rf "$LOG" "$ART"
-	true
-}
-trap cleanup EXIT INT TERM
-
 . "$(dirname "$0")/lib.sh"
-SYSPORT="$(port "${SYSPORT:-10100}" SYSPORT)"
-AGENTPORT="$(port "${AGENTPORT:-8080}" AGENTPORT)"
-LEADERPORT="$(port "${LEADERPORT:-9080}" LEADERPORT)"
-ARTPORT="$(port "${ARTPORT:-8000}" ARTPORT)"
+TIMEOUT="${TIMEOUT:-150}"
+TARGET=riscv64gc-unknown-none-elf
+scratch rv-flip
+ports SYS AGENT LEADER ART
 
 cd "$DIR"
 echo "== bouwen: kern A (stempel A), bundel B (stempel B), appspike, agentd-hopos en de hop-CLI"
 HOPOS_STAMP=A cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt-riscv
-cargo build --quiet --release --target "$TARGET" -p appspike
-HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
+KERNEL="$DIR/target/$TARGET/release/hopos"
+apps appspike
+hop_elf
 if [ -z "${HOP_CLI:-}" ]; then
 	# De CLI uit dezelfde kopie van de hop-repo als Hop zelf, voor de host.
 	(cd "$DIR/target/hop-patched-$TARGET/src" &&
@@ -79,30 +64,14 @@ BUNDLE=hopos-virt-riscv.flip
 cp "$DIR/target/$BUNDLE" "$ART/$BUNDLE"
 SHA="$(cat "$DIR/target/$BUNDLE.sha256")"
 
-OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
-strip() {
-	if [ -n "$OBJCOPY" ]; then "$OBJCOPY" --strip-debug "$1" "$2"; else cp "$1" "$2"; fi
-}
-strip "$DIR/target/$TARGET/release/appspike" "$ART/appspike.elf"
-strip "$HOP_ELF" "$ART/hop.elf"
-HOP_SIZE=$(wc -c <"$ART/hop.elf" | tr -d ' ')
-(cd "$ART" && exec python3 -m http.server "$ARTPORT" --bind 127.0.0.1) >"$ART/http.log" 2>&1 &
-HPID=$!
+strip_elf "$HOP_ELF" "$ART/hop.elf"
+serve
 truncate -s 64m "$DISK"
 HOLD_JOB='{"name":"holder","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/appspike.elf"}],"memory_limit":33554432,"env":{"HOLD":"1"}}'
 
 # QEMU met Hop op de staging, zoals tools/qemu-riscv-test-hop.sh. De kern
 # van de flip komt niet van QEMU: kern A legt hem achter Hop in de staging.
-qemu-system-riscv64 -M virt -m 1G -smp 2 -bios none -nographic \
-	-kernel "$DIR/target/$TARGET/release/hopos" -append "hopos.init[]=$HOLD_JOB" \
-	-global virtio-mmio.force-legacy=false \
-	-netdev "user,id=n0,hostfwd=tcp:127.0.0.1:${SYSPORT}-:10100,hostfwd=tcp:127.0.0.1:${AGENTPORT}-:8080,hostfwd=tcp:127.0.0.1:${LEADERPORT}-:9080" \
-	-device virtio-net-device,netdev=n0 \
-	-drive file="$DISK",if=none,format=raw,id=d0 -device virtio-blk-device,drive=d0 \
-	-device loader,file="$ART/hop.elf",addr=0xa8200000,force-raw=on \
-	-device loader,addr=0xa8100000,data="$HOP_SIZE",data-len=8 \
-	-device loader,addr=0xa8100008,data=1,data-len=8 \
-	</dev/null >"$LOG" 2>&1 &
+qemu_rv "$ART/hop.elf" 1 -append "hopos.init[]=$HOLD_JOB" </dev/null >"$LOG" 2>&1 &
 QPID=$!
 echo "== booten op QEMU virt riscv64, kern A (tot ${TIMEOUT}s; agent :$AGENTPORT, leader :$LEADERPORT, artifacts :$ARTPORT)"
 
@@ -127,16 +96,8 @@ hop() { "$HOP_CLI" --agent "127.0.0.1:$AGENTPORT" "$@" 2>&1; }
 WARM=""
 COLD=""
 TASKS=""
-START=$(date +%s)
-elapsed=0
-step() {
-	sleep 0.2
-	elapsed=$(($(date +%s) - START))
-}
-while :; do
-	has "$RED" && break
-	kill -0 "$QPID" 2>/dev/null || break
-	[ "$elapsed" -ge "$TIMEOUT" ] && break
+started
+while alive; do
 	if [ -z "$COLD" ]; then
 		# Kern A met Hop, en de appspike die blijft draait op hart 1.
 		{ all "$A_MARKS" && has "slot [2-9]: HOPOS_APPSPIKE_DONE pass=9 fail=0"; } || {
@@ -167,21 +128,12 @@ while :; do
 	fi
 	step
 done
-kill "$QPID" 2>/dev/null || true
-wait "$QPID" 2>/dev/null || true
-QPID=""
+qemu_stop
 
 fail=0
+marks "$A_MARKS" "$FLIP_MARKS"
 IFS_WAS="$IFS"
 IFS='|'
-for m in $A_MARKS $FLIP_MARKS; do
-	if has "$m"; then
-		echo "   ok  $m: $(tr -d '\r' <"$LOG" | grep -m1 -E "$m")"
-	else
-		echo "   ROOD $m ontbreekt"
-		fail=1
-	fi
-done
 for m in $AFTER_MARKS; do
 	if after "$m"; then
 		echo "   ok  na de flip: $(tr -d '\r' <"$LOG" | awk '/HOPOS_FLIP_JUMP/ { f = 1 } f' | grep -m1 -E "$m")"
@@ -234,18 +186,7 @@ else
 	echo "   ROOD artifact-server: de bundel is nooit gevraagd"
 	fail=1
 fi
-if has "$RED"; then
-	echo "   ROOD $(tr -d '\r' <"$LOG" | grep -m1 -E "$RED")"
-	fail=1
-fi
-echo "   tijd: $(($(date +%s) - START)) s na de start van QEMU"
-if [ "$fail" != 0 ]; then
-	KEEP="$(mktemp -t hopos-rv-flip-rood.XXXXXX)"
-	tr -d '\r' <"$LOG" >"$KEEP"
-	echo "== console bewaard in $KEEP"
-	echo "== console:"
-	cat "$KEEP"
-	exit 1
-fi
-[ -n "${KEEP_LOG:-}" ] && tr -d '\r' <"$LOG" >"$KEEP_LOG"
+reds
+took
+verdict rv-flip
 echo "qemu-flip groen (riscv64, cold)"

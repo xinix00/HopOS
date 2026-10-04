@@ -2,7 +2,8 @@
 //! bakt een gestripte app-ELF in het kernimage, zodat een Mac die zonder
 //! loader boot (kmutil, het rauwe bootobject) toch een bewoner heeft: Hop.
 //! Go deed dit met `go:embed` (cmd/hopos-embed). Zonder de variabele is
-//! het bestand leeg en is er niets ingebakken.
+//! het bestand leeg en is er niets ingebakken. Dezelfde variabele als de
+//! LicheeRV (board/licheerv/build.rs, met de rol in `HOPOS_EMBED_ROLE`).
 
 use std::env;
 use std::error::Error;

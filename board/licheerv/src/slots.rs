@@ -98,7 +98,7 @@ pub const fn core_of(mpidr: u64) -> usize {
 struct Aligned<T: ?Sized>(T);
 
 /// Het image van de eerste bewoner, in de kern gebakken door
-/// `image/licheerv-agent.sh` (`STAGE=` of `APP=`, via `HOPOS_LRV_STAGE` en
+/// `image/licheerv-agent.sh` (`STAGE=` of `APP=`, via `HOPOS_EMBED` en
 /// build.rs); leeg zonder. Het staat in `.rodata` van het image dat de FSBL
 /// laadt, want er is geen QEMU die het in het RAM legt.
 static STAGE: &Aligned<[u8]> = &Aligned(*include_bytes!(concat!(env!("OUT_DIR"), "/stage.bin")));
@@ -109,7 +109,7 @@ pub fn staged_image() -> Option<&'static [u8]> {
     Some(&STAGE.0).filter(|b| !b.is_empty())
 }
 
-/// De rol van het gebakken image, uit build.rs (`HOPOS_LRV_ROLE`): Hop in
+/// De rol van het gebakken image, uit build.rs (`HOPOS_EMBED_ROLE`): Hop in
 /// slot 1 met de bevoegdheid (de release, `ROLE=hop`), of een gewone app
 /// (het ABI-bewijs, twee keer door de kern geplaatst). Zonder image zegt de
 /// plaatsing dat er niets is (`HOPOS_SLOT_NONE`).

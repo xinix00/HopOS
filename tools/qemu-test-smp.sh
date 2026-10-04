@@ -29,105 +29,38 @@
 #
 #   tools/qemu-test-smp.sh                 TIMEOUT=90 standaard, in seconden
 #   KEEP_LOG=pad tools/qemu-test-smp.sh    bewaart ook een groene console
-#   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT   de host-poorten; bezet = een vrije
+#   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT   de host-poorten; standaard vrije
 #   HOP_DIR=pad                            de hop-repo (standaard ../hop/hop)
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-TIMEOUT="${TIMEOUT:-90}"
-HOP_DIR="${HOP_DIR:-$DIR/../hop/hop}"
-TARGET=aarch64-unknown-none-softfloat
-LOG="$(mktemp -t hopos-qemu-smp.XXXXXX)"
-ART="$(mktemp -d -t hopos-art.XXXXXX)"
-DISK="$ART/disk.img"
-QPID=""
-HPID=""
-cleanup() {
-	[ -n "$QPID" ] && kill "$QPID" 2>/dev/null
-	[ -n "$HPID" ] && kill "$HPID" 2>/dev/null
-	rm -rf "$LOG" "$ART"
-	true
-}
-trap cleanup EXIT INT TERM
-
 . "$(dirname "$0")/lib.sh"
-SYSPORT="$(port "${SYSPORT:-10100}" SYSPORT)"
-AGENTPORT="$(port "${AGENTPORT:-8080}" AGENTPORT)"
-LEADERPORT="$(port "${LEADERPORT:-9080}" LEADERPORT)"
-ARTPORT="$(port "${ARTPORT:-8000}" ARTPORT)"
+TIMEOUT="${TIMEOUT:-90}"
+TARGET=aarch64-unknown-none-softfloat
+scratch qemu-smp
+ports SYS AGENT LEADER ART
 
 cd "$DIR"
 echo "== bouwen: hopos (qemuvirt), appspike, en agentd-hopos in $HOP_DIR"
 cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt
-cargo build --quiet --release --target "$TARGET" -p appspike
-HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
-
-OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
-if [ -n "$OBJCOPY" ]; then
-	"$OBJCOPY" --strip-debug "$DIR/target/$TARGET/release/appspike" "$ART/appspike.elf"
-else
-	cp "$DIR/target/$TARGET/release/appspike" "$ART/appspike.elf"
-fi
-(cd "$ART" && exec python3 -m http.server "$ARTPORT" --bind 127.0.0.1) >"$ART/http.log" 2>&1 &
-HPID=$!
+apps appspike
+hop_elf
+serve
 
 echo "== booten op QEMU virt met Hop, 4 cores (tot ${TIMEOUT}s; leader :$LEADERPORT, artifacts :$ARTPORT)"
-SMP=4 SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISK="$DISK" \
-	sh "$DIR/image/qemu-run.sh" </dev/null >"$LOG" 2>&1 &
-QPID=$!
+hop_virt SMP=4
 
 BOOT_MARKS="HOPOS_BOOT|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_HOP_START slot=1 core=0|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
 PLACE_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|HOPOS_SLOT_START slot=2 core=1 |slot 2: 2 cores from core 1, contexts chained HOPOS_CAGE_SMP|slot 2: SMP core 2 dispatched HOPOS_SMP_DISPATCH_OK|HOPOS_SMP_CORE|slot 2: applib: core 1 of 2 up .*HOPOS_APP_SMP_UP|slot 2: HOPOS_APPSPIKE_SMP ok cores=2|slot 2: HOPOS_APPSPIKE_DONE pass=10 fail=0"
 AGAIN="HOPOS_APPSPIKE_SMP ok cores=2"
 RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_APP_PANIC|HOPOS_PART_QUARANTINE|HOPOS_SMP_REJECT|HOPOS_SMP_DISPATCH_FAIL|HOPOS_APP_SMP_FAIL|HOPOS_APPSPIKE_[A-Z_]* FAIL|HOPOS_CAGE_FAIL"
 
-JOB='{"name":"smp","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/appspike.elf"}],"memory_limit":33554432,"cpu_shares":2048,"env":{"ROLE":"SMP"}}'
-POSTED=""
-START=$(date +%s)
-elapsed=0
-step() {
-	sleep 0.2
-	elapsed=$(($(date +%s) - START))
-}
-while :; do
-	has "$RED" && break
-	kill -0 "$QPID" 2>/dev/null || break
-	[ "$elapsed" -ge "$TIMEOUT" ] && break
-	if [ -z "$POSTED" ]; then
-		if all "$BOOT_MARKS"; then
-			if out="$(curl -s -m 20 -w ' HTTP %{http_code}' -X POST \
-				-H 'Content-Type: application/json' -d "$JOB" \
-				"http://127.0.0.1:$LEADERPORT/v1/jobs" 2>&1)"; then
-				POSTED="$out"
-			else
-				POSTED="ROOD curl: $out"
-				break
-			fi
-		fi
-		step
-		continue
-	fi
-	if all "$PLACE_MARKS" && [ "$(count "$AGAIN")" -ge 2 ]; then
-		break
-	fi
-	step
-done
-kill "$QPID" 2>/dev/null || true
-wait "$QPID" 2>/dev/null || true
-QPID=""
+again() { all "$PLACE_MARKS" && [ "$(count "$AGAIN")" -ge 2 ]; }
+job_loop '{"name":"smp","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/appspike.elf"}],"memory_limit":33554432,"cpu_shares":2048,"env":{"ROLE":"SMP"}}' again
+qemu_stop
 
 fail=0
-IFS_WAS="$IFS"
-IFS='|'
-for m in $BOOT_MARKS $PLACE_MARKS; do
-	if has "$m"; then
-		echo "   ok  $m: $(tr -d '\r' <"$LOG" | grep -m1 -E "$m")"
-	else
-		echo "   ROOD $m ontbreekt"
-		fail=1
-	fi
-done
-IFS="$IFS_WAS"
+marks "$BOOT_MARKS" "$PLACE_MARKS"
 n="$(count "$AGAIN")"
 if [ "$n" -ge 2 ]; then
 	echo "   ok  de stop over beide cores en de herstart: $n keer $AGAIN"
@@ -135,24 +68,9 @@ else
 	echo "   ROOD na de stop kwam de SMP-toets niet terug ($n keer $AGAIN)"
 	fail=1
 fi
-case "$POSTED" in
-*"HTTP 2"*) echo "   ok  POST /v1/jobs: $POSTED" ;;
-"") echo "   ROOD POST /v1/jobs nooit gedaan (Hop niet op tijd op)"; fail=1 ;;
-*) echo "   ROOD POST /v1/jobs: $POSTED"; fail=1 ;;
-esac
-if has "$RED"; then
-	echo "   ROOD $(tr -d '\r' <"$LOG" | grep -m1 -E "$RED")"
-	fail=1
-fi
-echo "   tijd: $(($(date +%s) - START)) s na de start van QEMU"
+posted
+reds
+took
 echo "   marker: $(tr -d '\r' <"$LOG" | grep -m1 -o 'HOPOS_APPSPIKE_SMP ok.*')"
-if [ "$fail" != 0 ]; then
-	KEEP="$(mktemp -t hopos-qemu-smp-rood.XXXXXX)"
-	tr -d '\r' <"$LOG" >"$KEEP"
-	echo "== console bewaard in $KEEP"
-	echo "== console (staart):"
-	tail -150 "$KEEP"
-	exit 1
-fi
-[ -n "${KEEP_LOG:-}" ] && tr -d '\r' <"$LOG" >"$KEEP_LOG"
+verdict qemu-smp 150
 echo "qemu-smp groen"

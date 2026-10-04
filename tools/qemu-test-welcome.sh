@@ -35,40 +35,23 @@
 #                                          als artifact (docs/go-apps.md): de
 #                                          Go-app zegt "serving http://" en
 #                                          kent /healthz in plaats van /health
-#   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT/WEBPORT   de host-poorten; bezet =
-#                                          een vrije poort van het OS, luid
+#   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT/WEBPORT   de host-poorten; standaard
+#                                          vrije van het OS
 #   HOP_DIR=pad                            de hop-repo (standaard ../hop/hop)
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-TIMEOUT="${TIMEOUT:-60}"
-HOP_DIR="${HOP_DIR:-$DIR/../hop/hop}"
-TARGET=aarch64-unknown-none-softfloat
-LOG="$(mktemp -t hopos-qemu-welcome.XXXXXX)"
-ART="$(mktemp -d -t hopos-art.XXXXXX)"
-DISK="$ART/disk.img"
-PAGE="$ART/page.html"
-QPID=""
-HPID=""
-cleanup() {
-	[ -n "$QPID" ] && kill "$QPID" 2>/dev/null
-	[ -n "$HPID" ] && kill "$HPID" 2>/dev/null
-	rm -rf "$LOG" "$ART"
-	true
-}
-trap cleanup EXIT INT TERM
-
 . "$(dirname "$0")/lib.sh"
-SYSPORT="$(port "${SYSPORT:-10100}" SYSPORT)"
-AGENTPORT="$(port "${AGENTPORT:-8080}" AGENTPORT)"
-LEADERPORT="$(port "${LEADERPORT:-9080}" LEADERPORT)"
-ARTPORT="$(port "${ARTPORT:-8000}" ARTPORT)"
-WEBPORT="$(port "${WEBPORT:-8081}" WEBPORT)"
+TIMEOUT="${TIMEOUT:-60}"
+TARGET=aarch64-unknown-none-softfloat
+scratch qemu-welcome
+PAGE="$ART/page.html"
+ports SYS AGENT LEADER ART WEB
 
 cd "$DIR"
 echo "== bouwen: hopos (qemuvirt), welcome, en agentd-hopos in $HOP_DIR"
 cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt
-HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
+hop_elf
 
 # De artifact-server: welcome zonder debug-info, de symbolen blijven voor
 # de plaatsing. Met GO_ELF het tamago-image, dat zijn eigen regel en pad heeft.
@@ -79,23 +62,12 @@ if [ -n "${GO_ELF:-}" ]; then
 	UP_MARK="serving http://"
 	HEALTH_PATH=/healthz
 else
-	cargo build --quiet --release --target "$TARGET" -p welcome
-	OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
-	if [ -n "$OBJCOPY" ]; then
-		"$OBJCOPY" --strip-debug "$DIR/target/$TARGET/release/welcome" "$ART/welcome.elf"
-	else
-		cp "$DIR/target/$TARGET/release/welcome" "$ART/welcome.elf"
-	fi
+	apps welcome
 fi
-[ -n "${GO_ELF:-}" ] && cp "$GO_ELF" "$ART/welcome.elf"
-(cd "$ART" && exec python3 -m http.server "$ARTPORT" --bind 127.0.0.1) >"$ART/http.log" 2>&1 &
-HPID=$!
+serve
 
 echo "== booten op QEMU virt met Hop (tot ${TIMEOUT}s; leader :$LEADERPORT, artifacts :$ARTPORT, web :$WEBPORT -> gast :80)"
-SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" WEBPORT="$WEBPORT" \
-	HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISK="$DISK" \
-	sh "$DIR/image/qemu-run.sh" </dev/null >"$LOG" 2>&1 &
-QPID=$!
+hop_virt
 
 BOOT_MARKS="HOPOS_BOOT|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_HOP_START slot=1 |uplink tcp :8080 -> slot 1 :8080 HOPOS_HOP_PUBLISH|uplink tcp :9080 -> slot 1 :9080 HOPOS_HOP_PUBLISH|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
 PLACE_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|slot 2: 1 port\\(s\\) published tcp\\+udp on the uplink: :80 HOPOS_SLOT_PUBLISH|slot 2: .*$UP_MARK"
@@ -108,27 +80,11 @@ PAGE_OK=""
 HEALTH=""
 DELETED=""
 GONE=""
-START=$(date +%s)
-elapsed=0
-step() {
-	sleep 0.2
-	elapsed=$(($(date +%s) - START))
-}
-alive() {
-	! has "$RED" && kill -0 "$QPID" 2>/dev/null && [ "$elapsed" -lt "$TIMEOUT" ]
-}
+started
 
 # 1. Boot, dan de jobspec naar de leader.
 while alive && [ -z "$POSTED" ]; do
-	if all "$BOOT_MARKS"; then
-		if out="$(curl -s -m 20 -w ' HTTP %{http_code}' -X POST \
-			-H 'Content-Type: application/json' -d "$JOB" \
-			"http://127.0.0.1:$LEADERPORT/v1/jobs" 2>&1)"; then
-			POSTED="$out"
-		else
-			POSTED="ROOD curl: $out"
-		fi
-	fi
+	if all "$BOOT_MARKS"; then post_job "$JOB" || true; fi
 	step
 done
 
@@ -163,27 +119,11 @@ if [ -n "$PAGE_OK" ]; then
 	fi
 fi
 
-kill "$QPID" 2>/dev/null || true
-wait "$QPID" 2>/dev/null || true
-QPID=""
+qemu_stop
 
 fail=0
-IFS_WAS="$IFS"
-IFS='|'
-for m in $BOOT_MARKS $PLACE_MARKS $STOP_MARKS; do
-	if has "$m"; then
-		echo "   ok  $m: $(tr -d '\r' <"$LOG" | grep -m1 -E "$m")"
-	else
-		echo "   ROOD $m ontbreekt"
-		fail=1
-	fi
-done
-IFS="$IFS_WAS"
-case "$POSTED" in
-*"HTTP 2"*) echo "   ok  POST /v1/jobs: $POSTED" ;;
-"") echo "   ROOD POST /v1/jobs nooit gedaan (Hop niet op tijd op)"; fail=1 ;;
-*) echo "   ROOD POST /v1/jobs: $POSTED"; fail=1 ;;
-esac
+marks "$BOOT_MARKS" "$PLACE_MARKS" "$STOP_MARKS"
+posted
 if [ -n "$PAGE_OK" ]; then
 	echo "   ok  GET http://127.0.0.1:$WEBPORT/: $PAGE_OK, met de bunny"
 else
@@ -204,24 +144,8 @@ else
 	echo "   ROOD na de stop: de poort gaf nog de pagina, of de stop kwam nooit"
 	fail=1
 fi
-if grep -q "GET /welcome.elf" "$ART/http.log" 2>/dev/null; then
-	echo "   ok  artifact-server: $(grep -c 'GET /welcome.elf' "$ART/http.log") download(s) van welcome.elf"
-else
-	echo "   ROOD artifact-server: nooit gevraagd"
-	fail=1
-fi
-if has "$RED"; then
-	echo "   ROOD $(tr -d '\r' <"$LOG" | grep -m1 -E "$RED")"
-	fail=1
-fi
-echo "   tijd: $(($(date +%s) - START)) s na de start van QEMU"
-if [ "$fail" != 0 ]; then
-	KEEP="$(mktemp -t hopos-qemu-welcome-rood.XXXXXX)"
-	tr -d '\r' <"$LOG" >"$KEEP"
-	echo "== console bewaard in $KEEP"
-	echo "== console:"
-	cat "$KEEP"
-	exit 1
-fi
-[ -n "${KEEP_LOG:-}" ] && tr -d '\r' <"$LOG" >"$KEEP_LOG"
+served welcome.elf
+reds
+took
+verdict qemu-welcome
 echo "welcome-kring groen"

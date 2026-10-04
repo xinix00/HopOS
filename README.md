@@ -55,7 +55,8 @@ docs/       the per-board checklists and the planes; start at docs/README.md
 ```
 
 Build and test: `sh tools/gate.sh` (host tests, clippy, fmt, target builds of
-every board), then the QEMU tests. The one list of those, and the one table
+every board), then the QEMU tests (`sh tools/qemu-all.sh` runs every ring
+in turn, one line each). The one list of those, and the one table
 of image scripts per board, is [docs/README.md](docs/README.md); how to build
 and flash a board is in its own doc there. A release: `sh tools/release.sh
 <version>` (every board, headless and headfull, the flip bundles and the apps;

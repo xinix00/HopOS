@@ -22,22 +22,12 @@
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-TIMEOUT="${TIMEOUT:-120}"
-QEMU_SHARE="${QEMU_SHARE:-/opt/homebrew/share/qemu}"
-LOG="$(mktemp -t hopos-nvme.XXXXXX)"
-DISK="$(mktemp -t hopos-nvme-disk.XXXXXX)"
-VARS="$(mktemp -t hopos-vars.XXXXXX)"
-ESP="$(mktemp -d -t hopos-esp.XXXXXX)"
-CFG="$(mktemp -t hopos-cfg.XXXXXX)"
-QPID=""
-cleanup() {
-	[ -n "$QPID" ] && kill "$QPID" 2>/dev/null
-	rm -rf "$LOG" "$DISK" "$VARS" "$ESP" "$CFG"
-	true
-}
-trap cleanup EXIT INT TERM
-
 . "$(dirname "$0")/lib.sh"
+TIMEOUT="${TIMEOUT:-120}"
+scratch nvme
+VARS="$ART/vars.fd"
+ESP="$ART/esp"
+CFG="$ART/hopos.cfg"
 # Een verse, ijle schijf van 64 MiB: hopfs begint leeg. Een lege config:
 # geen Hop, alleen de rol van het gestagede image (uefi-run.sh zet hem).
 dd if=/dev/zero of="$DISK" bs=1048576 count=0 seek=64 2>/dev/null
@@ -59,12 +49,7 @@ MARKS="$MARKS|slot 2: HOPOS_APPSPIKE_FS ok|slot 2: HOPOS_APPSPIKE_DONE pass=[0-9
 RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_NVME_FAIL|HOPOS_FS_FAIL|HOPOS_FS_IO|HOPOS_APPSPIKE_FS FAIL"
 
 echo "== booten op QEMU virt met EDK2 en een NVMe (tot ${TIMEOUT}s)"
-qemu-system-aarch64 -M virt,gic-version=3,virtualization=on -cpu neoverse-n1 -smp 4 -m 3G \
-	-nographic -monitor none -serial stdio \
-	-drive "if=pflash,format=raw,readonly=on,file=$QEMU_SHARE/edk2-aarch64-code.fd" \
-	-drive "if=pflash,format=raw,file=$VARS" \
-	-device qemu-xhci -drive "file=fat:$ESP,format=raw,if=none,id=esp,readonly=on" \
-	-device usb-storage,drive=esp,bootindex=0 \
+qemu_edk2 neoverse-n1 "$VARS" "$ESP" \
 	-device igb,netdev=n0,romfile= -netdev user,id=n0 \
 	-drive "if=none,format=raw,file=$DISK,id=nv0" -device nvme,drive=nv0,serial=hopnvme \
 	</dev/null >"$LOG" 2>&1 &
@@ -75,24 +60,12 @@ while ! all "$MARKS" && ! has "$RED" && kill -0 "$QPID" 2>/dev/null && [ "$elaps
 	sleep 0.2
 	elapsed=$((elapsed + 1))
 done
-kill "$QPID" 2>/dev/null || true
-wait "$QPID" 2>/dev/null || true
-QPID=""
+qemu_stop
 
 fail=0
-IFS_WAS="$IFS"
-IFS='|'
-for m in $MARKS; do
-	if has "$m"; then
-		echo "   ok  $m: $(tr -d '\r' <"$LOG" | grep -m1 -E "$m")"
-	else
-		echo "   ROOD $m ontbreekt"
-		fail=1
-	fi
-done
-IFS="$IFS_WAS"
+marks "$MARKS"
 if has "$RED"; then
-	echo "   ROOD: $(tr -d '\r' <"$LOG" | grep -m1 -E "$RED")"
+	echo "   ROOD: $(first "$RED")"
 	fail=1
 fi
 [ -n "${KEEP_LOG:-}" ] && cp "$LOG" "$KEEP_LOG"

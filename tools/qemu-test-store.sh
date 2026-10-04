@@ -39,55 +39,26 @@
 #   tools/qemu-test-store.sh                TIMEOUT=90 standaard, in seconden
 #   KEEP_LOG=pad tools/qemu-test-store.sh
 #   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT/S3PORT/NTPPORT  de host-poorten
+#                                           (standaard vrije van het OS)
 #   HOP_DIR=pad                             de hop-repo (standaard ../hop/hop)
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-TIMEOUT="${TIMEOUT:-90}"
-HOP_DIR="${HOP_DIR:-$DIR/../hop/hop}"
-TARGET=aarch64-unknown-none-softfloat
-LOG="$(mktemp -t hopos-qemu-store.XXXXXX)"
-ART="$(mktemp -d -t hopos-art.XXXXXX)"
-DISK="$ART/disk.img"
-S3LOG="$ART/s3.log"
-QPID=""
-HPID=""
-SPID=""
-NPID=""
-cleanup() {
-	[ -n "$QPID" ] && kill "$QPID" 2>/dev/null
-	[ -n "$NPID" ] && kill "$NPID" 2>/dev/null
-	[ -n "$HPID" ] && kill "$HPID" 2>/dev/null
-	[ -n "$SPID" ] && kill "$SPID" 2>/dev/null
-	rm -rf "$LOG" "$ART"
-	true
-}
-trap cleanup EXIT INT TERM
-
 . "$(dirname "$0")/lib.sh"
-SYSPORT="$(port "${SYSPORT:-10100}" SYSPORT)"
-AGENTPORT="$(port "${AGENTPORT:-8080}" AGENTPORT)"
-LEADERPORT="$(port "${LEADERPORT:-9080}" LEADERPORT)"
-ARTPORT="$(port "${ARTPORT:-8000}" ARTPORT)"
-S3PORT="$(port "${S3PORT:-9000}" S3PORT)"
-NTPPORT="$(port "${NTPPORT:-10123}" NTPPORT)"
+TIMEOUT="${TIMEOUT:-90}"
+TARGET=aarch64-unknown-none-softfloat
+scratch qemu-store
+S3LOG="$ART/s3.log"
+ports SYS AGENT LEADER ART S3 NTP
 
 cd "$DIR"
 echo "== bouwen: hopos (qemuvirt), appspike, en agentd-hopos in $HOP_DIR"
 cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt
-cargo build --quiet --release --target "$TARGET" -p appspike
-HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
-
-OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
-if [ -n "$OBJCOPY" ]; then
-	"$OBJCOPY" --strip-debug "$DIR/target/$TARGET/release/appspike" "$ART/appspike.elf"
-else
-	cp "$DIR/target/$TARGET/release/appspike" "$ART/appspike.elf"
-fi
-(cd "$ART" && exec python3 -m http.server "$ARTPORT" --bind 127.0.0.1) >"$ART/http.log" 2>&1 &
-HPID=$!
+apps appspike
+hop_elf
+serve
 python3 "$DIR/tools/fakes3.py" "$S3PORT" hop >"$S3LOG" 2>&1 &
-SPID=$!
+PIDS="$PIDS $!"
 # De tijd van de host als SNTP-server (modus 4, stratum 2; het transmit-veld
 # van de vraag terug als originate, dat toetst Hop).
 python3 - "$NTPPORT" >"$ART/ntp.log" 2>&1 <<'PY' &
@@ -105,13 +76,11 @@ while True:
     resp = bytes([0x24, 2, 6, 0xEC]) + bytes(8) + b"LOCL" + stamp(now) + req[40:48] + stamp(now) + stamp(time.time())
     s.sendto(resp, addr)
 PY
-NPID=$!
+PIDS="$PIDS $!"
 
 S3ARGS="hopos.s3.endpoint=http://10.0.2.2:$S3PORT hopos.s3.bucket=hop hopos.s3.region=us-east-1 hopos.s3.key=hopkey hopos.s3.secret=hopsecret hopos.s3.pathstyle=1 hopos.ntp=10.0.2.2:$NTPPORT"
 echo "== booten op QEMU virt met Hop en een S3-nep (tot ${TIMEOUT}s; agent :$AGENTPORT, leader :$LEADERPORT, artifacts :$ARTPORT, s3 :$S3PORT)"
-SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISK="$DISK" \
-	BOOTARGS="$S3ARGS" sh "$DIR/image/qemu-run.sh" </dev/null >"$LOG" 2>&1 &
-QPID=$!
+hop_virt BOOTARGS="$S3ARGS"
 
 s3has() { grep -q -E "$1" "$S3LOG" 2>/dev/null; }
 s3all() {
@@ -129,49 +98,21 @@ S3RED="S3 [A-Z]+ .* (403|400)$"
 
 JOB='{"name":"spike","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/appspike.elf"}],"memory_limit":33554432,"env":{"ROLE":"STORE"}}'
 POSTED=""
-START=$(date +%s)
-elapsed=0
-step() {
-	sleep 0.2
-	elapsed=$(($(date +%s) - START))
-}
-while :; do
-	has "$RED" && break
-	s3has "$S3RED" && break
-	kill -0 "$QPID" 2>/dev/null || break
-	[ "$elapsed" -ge "$TIMEOUT" ] && break
+started
+while alive && ! s3has "$S3RED"; do
 	if [ -z "$POSTED" ]; then
-		if all "$BOOT_MARKS"; then
-			if out="$(curl -s -m 20 -w ' HTTP %{http_code}' -X POST \
-				-H 'Content-Type: application/json' -d "$JOB" \
-				"http://127.0.0.1:$LEADERPORT/v1/jobs" 2>&1)"; then
-				POSTED="$out"
-			else
-				POSTED="ROOD curl: $out"
-				break
-			fi
-		fi
-		step
-		continue
+		if all "$BOOT_MARKS"; then post_job "$JOB" || break; fi
+	elif all "$RUN_MARKS" && s3all "$S3_MARKS"; then
+		break
 	fi
-	all "$RUN_MARKS" && s3all "$S3_MARKS" && break
 	step
 done
-kill "$QPID" 2>/dev/null || true
-wait "$QPID" 2>/dev/null || true
-QPID=""
+qemu_stop
 
 fail=0
+marks "$BOOT_MARKS" "$RUN_MARKS"
 IFS_WAS="$IFS"
 IFS='|'
-for m in $BOOT_MARKS $RUN_MARKS; do
-	if has "$m"; then
-		echo "   ok  $m: $(tr -d '\r' <"$LOG" | grep -m1 -E "$m")"
-	else
-		echo "   ROOD $m ontbreekt"
-		fail=1
-	fi
-done
 for m in $S3_MARKS; do
 	if s3has "$m"; then
 		echo "   ok  nep-S3: $(grep -m1 -E "$m" "$S3LOG")"
@@ -181,30 +122,17 @@ for m in $S3_MARKS; do
 	fi
 done
 IFS="$IFS_WAS"
-case "$POSTED" in
-*"HTTP 2"*) echo "   ok  POST /v1/jobs: $POSTED" ;;
-"") echo "   ROOD POST /v1/jobs nooit gedaan (Hop niet op tijd op)"; fail=1 ;;
-*) echo "   ROOD POST /v1/jobs: $POSTED"; fail=1 ;;
-esac
-if has "$RED"; then
-	echo "   ROOD $(tr -d '\r' <"$LOG" | grep -m1 -E "$RED")"
-	fail=1
-fi
+posted
+reds
 if s3has "$S3RED"; then
 	echo "   ROOD nep-S3: $(grep -m1 -E "$S3RED" "$S3LOG")"
 	fail=1
 fi
 echo "   nep-S3: $(grep -c '^S3 ' "$S3LOG") regels; alle keys: $(grep -o 'apps/[^ ]*' "$S3LOG" | sort -u | tr '\n' ' ')"
-echo "   tijd: $(($(date +%s) - START)) s na de start van QEMU"
+took
 if [ "$fail" != 0 ]; then
-	KEEP="$(mktemp -t hopos-qemu-store-rood.XXXXXX)"
-	tr -d '\r' <"$LOG" >"$KEEP"
-	echo "== console bewaard in $KEEP"
 	echo "== nep-S3:"
 	cat "$S3LOG"
-	echo "== console:"
-	cat "$KEEP"
-	exit 1
 fi
-[ -n "${KEEP_LOG:-}" ] && tr -d '\r' <"$LOG" >"$KEEP_LOG"
+verdict qemu-store
 echo "qemu-store groen"

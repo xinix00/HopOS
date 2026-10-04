@@ -26,58 +26,25 @@
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+. "$(dirname "$0")/lib.sh"
 TIMEOUT="${TIMEOUT:-120}"
 MAX_MS="${MAX_MS:-1000}"
-HOP_DIR="${HOP_DIR:-$DIR/../hop/hop}"
 TARGET=riscv64gc-unknown-none-elf
-LOG="$(mktemp -t hopos-rv-share.XXXXXX)"
-ART="$(mktemp -d -t hopos-rv-share-art.XXXXXX)"
-DISK="$ART/disk.img"
-QPID=""
-HPID=""
-cleanup() {
-	[ -n "$QPID" ] && kill "$QPID" 2>/dev/null
-	[ -n "$HPID" ] && kill "$HPID" 2>/dev/null
-	rm -rf "$LOG" "$LOG.posts" "$ART"
-	true
-}
-trap cleanup EXIT INT TERM
-
-. "$(dirname "$0")/lib.sh"
-SYSPORT="$(port "${SYSPORT:-10100}" SYSPORT)"
-AGENTPORT="$(port "${AGENTPORT:-8080}" AGENTPORT)"
-LEADERPORT="$(port "${LEADERPORT:-9080}" LEADERPORT)"
-ARTPORT="$(port "${ARTPORT:-8000}" ARTPORT)"
-WEBPORT="$(port "${WEBPORT:-8081}" WEBPORT)"
+scratch rv-share
+ports SYS AGENT LEADER ART WEB
 
 cd "$DIR"
 echo "== bouwen: hopos (qemuvirt-riscv), welcome, bench, en agentd-hopos in $HOP_DIR"
 cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt-riscv
-cargo build --quiet --release --target "$TARGET" -p welcome -p bench
-HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
-OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
-strip() {
-	if [ -n "$OBJCOPY" ]; then "$OBJCOPY" --strip-debug "$1" "$2"; else cp "$1" "$2"; fi
-}
-strip "$DIR/target/$TARGET/release/welcome" "$ART/welcome.elf"
-strip "$DIR/target/$TARGET/release/bench" "$ART/bench.elf"
-strip "$HOP_ELF" "$ART/hop.elf"
-HOP_SIZE=$(wc -c <"$ART/hop.elf" | tr -d ' ')
-(cd "$ART" && exec python3 -m http.server "$ARTPORT" --bind 127.0.0.1) >"$ART/http.log" 2>&1 &
-HPID=$!
+KERNEL="$DIR/target/$TARGET/release/hopos"
+apps welcome bench
+hop_elf
+strip_elf "$HOP_ELF" "$ART/hop.elf"
+serve
 truncate -s 64m "$DISK"
 
 echo "== booten op QEMU virt riscv64 met Hop op hart 0 (tot ${TIMEOUT}s; leader :$LEADERPORT, welcome :$WEBPORT)"
-qemu-system-riscv64 -M virt -m 1G -smp 2 -bios none -nographic \
-	-kernel "$DIR/target/$TARGET/release/hopos" \
-	-global virtio-mmio.force-legacy=false \
-	-netdev "user,id=n0,hostfwd=tcp:127.0.0.1:${SYSPORT}-:10100,hostfwd=tcp:127.0.0.1:${AGENTPORT}-:8080,hostfwd=tcp:127.0.0.1:${LEADERPORT}-:9080,hostfwd=tcp:127.0.0.1:${WEBPORT}-:80" \
-	-device virtio-net-device,netdev=n0 \
-	-drive file="$DISK",if=none,format=raw,id=d0 -device virtio-blk-device,drive=d0 \
-	-device loader,file="$ART/hop.elf",addr=0xa8200000,force-raw=on \
-	-device loader,addr=0xa8100000,data="$HOP_SIZE",data-len=8 \
-	-device loader,addr=0xa8100008,data=1,data-len=8 \
-	</dev/null >"$LOG" 2>&1 &
+qemu_rv "$ART/hop.elf" 1 </dev/null >"$LOG" 2>&1 &
 QPID=$!
 
 BOOT_MARKS="HOPOS_BOOT|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_OS_CORE_UP|HOPOS_HOP_START slot=1 core=0 cpu=0 |slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
@@ -86,23 +53,18 @@ RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|H
 WEB='{"name":"web","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/welcome.elf"}],"memory_limit":33554432,"tags":{"sharegroup":"demo"},"ports":{"http":80}}'
 BURN='{"name":"burn","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/bench.elf"}],"memory_limit":33554432,"tags":{"sharegroup":"demo"},"env":{"BURN":"1","BURN_WORK":"600","BURN_REST":"0"}}'
 POSTED=""
-START=$(date +%s)
-elapsed=0
-while :; do
-	has "$RED" && break
-	kill -0 "$QPID" 2>/dev/null || break
-	[ "$elapsed" -ge "$TIMEOUT" ] && break
+started
+while alive; do
 	if [ -z "$POSTED" ] && all "$BOOT_MARKS"; then
 		for j in "$WEB" "$BURN"; do
-			out="$(curl -s -m 30 -w ' HTTP %{http_code}' -X POST -H 'Content-Type: application/json' -d "$j" "http://127.0.0.1:$LEADERPORT/v1/jobs" 2>&1 || true)"
-			echo "   POST: $out" >>"$LOG.posts"
-			case "$out" in *"HTTP 2"*) ;; *) POSTED="ROOD $out"; break 2 ;; esac
+			POST_MAX=30 post_job "$j" || true
+			echo "   POST: ${POSTED#ROOD curl: }" >>"$ART/posts"
+			case "$POSTED" in *"HTTP 2"*) ;; *) POSTED="ROOD ${POSTED#ROOD curl: }"; break 2 ;; esac
 		done
 		POSTED="ok"
 	fi
 	[ "$POSTED" = ok ] && all "$PLACE_MARKS" && break
-	sleep 0.2
-	elapsed=$(($(date +%s) - START))
+	step
 done
 
 # De meting: twintig GETs naar welcome terwijl burn rekent (welcome kreeg
@@ -118,9 +80,7 @@ fi
 # De boekhouding van Hop, voor als het rood is.
 TASKS="$(curl -s -m 5 "http://127.0.0.1:$AGENTPORT/v1/tasks" 2>&1 || true)"
 JOBS="$(curl -s -m 5 "http://127.0.0.1:$LEADERPORT/v1/jobs" 2>&1 || true)"
-kill "$QPID" 2>/dev/null || true
-wait "$QPID" 2>/dev/null || true
-QPID=""
+qemu_stop
 fail=0
 IFS_WAS="$IFS"
 IFS='|'
@@ -151,20 +111,17 @@ else
 	echo "   ROOD geen meting: burn of welcome kwam niet op"
 	fail=1
 fi
-if has "$RED"; then
-	echo "   ROOD $(tr -d '\r' <"$LOG" | grep -m1 -E "$RED")"
-	fail=1
-fi
-echo "   tijd: $(($(date +%s) - START)) s na de start van QEMU"
+reds
+took
 if [ "$fail" != 0 ]; then
 	KEEP="$(mktemp -t hopos-rv-share-rood.XXXXXX)"
 	tr -d '\r' <"$LOG" >"$KEEP"
-	cat "$LOG.posts" 2>/dev/null
+	cat "$ART/posts" 2>/dev/null
 	echo "   leader /v1/jobs: $(printf '%s' "$JOBS" | cut -c1-400)"
 	echo "   agent /v1/tasks: $(printf '%s' "$TASKS" | cut -c1-600)"
 	echo "== console bewaard in $KEEP"
 	echo "ROOD"
 	exit 1
 fi
-[ -n "${KEEP_LOG:-}" ] && tr -d '\r' <"$LOG" >"$KEEP_LOG"
+if [ -n "${KEEP_LOG:-}" ]; then tr -d '\r' <"$LOG" >"$KEEP_LOG"; fi
 echo "GROEN"

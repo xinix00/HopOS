@@ -35,58 +35,31 @@
 #   DISKLAT=2500000000 tools/qemu-test-slowdisk.sh   de trage schijf van de soak
 #   WINDOW=30 tools/qemu-test-slowdisk.sh      het meetvenster in seconden
 #   KEEP_LOG=pad tools/qemu-test-slowdisk.sh   bewaart ook een groene console
-#   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT/WEBPORT   de host-poorten; bezet =
-#                                              een vrije poort van het OS
+#   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT/WEBPORT   de host-poorten; standaard
+#                                              vrije van het OS
 #   HOP_DIR=pad                                de hop-repo (standaard ../hop/hop)
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+. "$(dirname "$0")/lib.sh"
 TIMEOUT="${TIMEOUT:-120}"
 WINDOW="${WINDOW:-30}"
 DISKLAT="${DISKLAT:-1500000000}"
-HOP_DIR="${HOP_DIR:-$DIR/../hop/hop}"
 TARGET=aarch64-unknown-none-softfloat
-LOG="$(mktemp -t hopos-qemu-slowdisk.XXXXXX)"
-ART="$(mktemp -d -t hopos-art.XXXXXX)"
+scratch qemu-slowdisk
 PAGE="$ART/page.html"
 CURLS="$ART/curls.txt"
-QPID=""
-HPID=""
-cleanup() {
-	[ -n "$QPID" ] && kill "$QPID" 2>/dev/null
-	[ -n "$HPID" ] && kill "$HPID" 2>/dev/null
-	rm -rf "$LOG" "$ART"
-	true
-}
-trap cleanup EXIT INT TERM
-
-. "$(dirname "$0")/lib.sh"
-SYSPORT="$(port "${SYSPORT:-10100}" SYSPORT)"
-AGENTPORT="$(port "${AGENTPORT:-8080}" AGENTPORT)"
-LEADERPORT="$(port "${LEADERPORT:-9080}" LEADERPORT)"
-ARTPORT="$(port "${ARTPORT:-8000}" ARTPORT)"
-WEBPORT="$(port "${WEBPORT:-8081}" WEBPORT)"
+ports SYS AGENT LEADER ART WEB
 
 cd "$DIR"
 echo "== bouwen: hopos (qemuvirt), welcome, en agentd-hopos in $HOP_DIR"
 cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt
-cargo build --quiet --release --target "$TARGET" -p welcome
-HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
-
-OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
-if [ -n "$OBJCOPY" ]; then
-	"$OBJCOPY" --strip-debug "$DIR/target/$TARGET/release/welcome" "$ART/welcome.elf"
-else
-	cp "$DIR/target/$TARGET/release/welcome" "$ART/welcome.elf"
-fi
-(cd "$ART" && exec python3 -m http.server "$ARTPORT" --bind 127.0.0.1) >"$ART/http.log" 2>&1 &
-HPID=$!
+apps welcome
+hop_elf
+serve
 
 echo "== booten op QEMU virt met Hop op een schijf van $DISKLAT ns per verzoek (tot ${TIMEOUT}s; web :$WEBPORT -> gast :80)"
-SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" WEBPORT="$WEBPORT" \
-	HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISKLAT="$DISKLAT" \
-	sh "$DIR/image/qemu-run.sh" </dev/null >"$LOG" 2>&1 &
-QPID=$!
+hop_virt DISKLAT="$DISKLAT"
 
 # Het laatste tiknummer op de console: de klok van de gast.
 tick() { tr -d '\r' <"$LOG" | sed -n 's/^HOPOS_TICK \([0-9]*\) .*/\1/p' | tail -1; }
@@ -98,27 +71,11 @@ RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_APP_PANIC|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|
 JOB='{"name":"welcome","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/welcome.elf"}],"memory_limit":33554432,"ports":{"http":80}}'
 POSTED=""
 UP=""
-START=$(date +%s)
-elapsed=0
-step() {
-	sleep 0.2
-	elapsed=$(($(date +%s) - START))
-}
-alive() {
-	! has "$RED" && kill -0 "$QPID" 2>/dev/null && [ "$elapsed" -lt "$TIMEOUT" ]
-}
+started
 
 # 1. Boot, dan de jobspec naar de leader.
 while alive && [ -z "$POSTED" ]; do
-	if all "$BOOT_MARKS"; then
-		if out="$(curl -s -m 30 -w ' HTTP %{http_code}' -X POST \
-			-H 'Content-Type: application/json' -d "$JOB" \
-			"http://127.0.0.1:$LEADERPORT/v1/jobs" 2>&1)"; then
-			POSTED="$out"
-		else
-			POSTED="ROOD curl: $out"
-		fi
-	fi
+	if all "$BOOT_MARKS"; then POST_MAX=30 post_job "$JOB" || true; fi
 	step
 done
 
@@ -148,27 +105,11 @@ if [ -n "$UP" ]; then
 	done
 fi
 END_TICK="$(tick)"
-kill "$QPID" 2>/dev/null || true
-wait "$QPID" 2>/dev/null || true
-QPID=""
+qemu_stop
 
 fail=0
-IFS_WAS="$IFS"
-IFS='|'
-for m in $BOOT_MARKS $PLACE_MARKS; do
-	if has "$m"; then
-		echo "   ok  $m: $(tr -d '\r' <"$LOG" | grep -m1 -E "$m")"
-	else
-		echo "   ROOD $m ontbreekt"
-		fail=1
-	fi
-done
-IFS="$IFS_WAS"
-case "$POSTED" in
-*"HTTP 2"*) echo "   ok  POST /v1/jobs: $POSTED" ;;
-"") echo "   ROOD POST /v1/jobs nooit gedaan (Hop niet op tijd op)"; fail=1 ;;
-*) echo "   ROOD POST /v1/jobs: $POSTED"; fail=1 ;;
-esac
+marks "$BOOT_MARKS" "$PLACE_MARKS"
+posted
 if [ -z "$UP" ]; then
 	echo "   ROOD de pagina van welcome kwam nooit"
 	fail=1
@@ -247,18 +188,7 @@ sys.exit(1 if fail else 0)
 PY
 	fail=1
 fi
-if has "$RED"; then
-	echo "   ROOD $(tr -d '\r' <"$LOG" | grep -m1 -E "$RED")"
-	fail=1
-fi
-echo "   tijd: $(($(date +%s) - START)) s na de start van QEMU"
-if [ "$fail" != 0 ]; then
-	KEEP="$(mktemp -t hopos-qemu-slowdisk-rood.XXXXXX)"
-	tr -d '\r' <"$LOG" >"$KEEP"
-	echo "== console bewaard in $KEEP"
-	echo "== console:"
-	cat "$KEEP"
-	exit 1
-fi
-[ -n "${KEEP_LOG:-}" ] && tr -d '\r' <"$LOG" >"$KEEP_LOG"
+reds
+took
+verdict qemu-slowdisk
 echo "slowdisk groen"

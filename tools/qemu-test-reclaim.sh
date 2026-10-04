@@ -23,54 +23,26 @@
 #
 #   tools/qemu-test-reclaim.sh             TIMEOUT=120 standaard, in seconden
 #   KEEP_LOG=pad tools/qemu-test-reclaim.sh  bewaart ook een groene console
-#   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT   de host-poorten; bezet = een vrije
+#   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT   de host-poorten; standaard vrije
 #   HOP_DIR=pad                            de hop-repo (standaard ../hop/hop)
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-TIMEOUT="${TIMEOUT:-120}"
-HOP_DIR="${HOP_DIR:-$DIR/../hop/hop}"
-TARGET=aarch64-unknown-none-softfloat
-LOG="$(mktemp -t hopos-qemu-reclaim.XXXXXX)"
-ART="$(mktemp -d -t hopos-art.XXXXXX)"
-DISK="$ART/disk.img"
-QPID=""
-HPID=""
-cleanup() {
-	[ -n "$QPID" ] && kill "$QPID" 2>/dev/null
-	[ -n "$HPID" ] && kill "$HPID" 2>/dev/null
-	rm -rf "$LOG" "$ART"
-	true
-}
-trap cleanup EXIT INT TERM
-
 . "$(dirname "$0")/lib.sh"
-SYSPORT="$(port "${SYSPORT:-10100}" SYSPORT)"
-AGENTPORT="$(port "${AGENTPORT:-8080}" AGENTPORT)"
-LEADERPORT="$(port "${LEADERPORT:-9080}" LEADERPORT)"
-ARTPORT="$(port "${ARTPORT:-8000}" ARTPORT)"
+TIMEOUT="${TIMEOUT:-120}"
+TARGET=aarch64-unknown-none-softfloat
+scratch qemu-reclaim
+ports SYS AGENT LEADER ART
 
 cd "$DIR"
 echo "== bouwen: hopos (qemuvirt), bench, welcome, en agentd-hopos in $HOP_DIR"
 cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt
-cargo build --quiet --release --target "$TARGET" -p bench -p welcome
-HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
-
-OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
-for app in bench welcome; do
-	if [ -n "$OBJCOPY" ]; then
-		"$OBJCOPY" --strip-debug "$DIR/target/$TARGET/release/$app" "$ART/$app.elf"
-	else
-		cp "$DIR/target/$TARGET/release/$app" "$ART/$app.elf"
-	fi
-done
-(cd "$ART" && exec python3 -m http.server "$ARTPORT" --bind 127.0.0.1) >"$ART/http.log" 2>&1 &
-HPID=$!
+apps bench welcome
+hop_elf
+serve
 
 echo "== booten op QEMU virt met Hop, 4 cores (tot ${TIMEOUT}s; leader :$LEADERPORT, artifacts :$ARTPORT)"
-SMP=4 SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISK="$DISK" \
-	sh "$DIR/image/qemu-run.sh" </dev/null >"$LOG" 2>&1 &
-QPID=$!
+hop_virt SMP=4
 
 BOOT_MARKS="HOPOS_BOOT|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_HOP_START slot=1 core=0|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
 HOG_MARKS="HOPOS_SLOT_START slot=2 core=1 |slot 2: .*HOPOS_BENCH_UP role=burn"
@@ -80,18 +52,11 @@ RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|H
 job() {
 	printf '{"name":"%s","driver":"hop","artifacts":[{"url":"http://10.0.2.2:%s/%s.elf"}],"memory_limit":33554432,"cpu_shares":1024,"tags":{"sharegroup":"demo"},"env":{%s}}' "$1" "$ARTPORT" "$2" "$3"
 }
-post() {
-	curl -s -m 20 -w ' HTTP %{http_code}' -X POST -H 'Content-Type: application/json' \
-		-d "$1" "http://127.0.0.1:$LEADERPORT/v1/jobs" 2>&1 || true
-}
+post() { post_job "$1" || true; echo "$POSTED"; }
 POSTED=""
 STAGE=boot
-START=$(date +%s)
-elapsed=0
-while :; do
-	has "$RED" && break
-	kill -0 "$QPID" 2>/dev/null || break
-	[ "$elapsed" -ge "$TIMEOUT" ] && break
+started
+while alive; do
 	case "$STAGE" in
 	boot)
 		if all "$BOOT_MARKS"; then
@@ -108,42 +73,18 @@ while :; do
 		;;
 	reclaim) all "$RECLAIM_MARKS" && break ;;
 	esac
-	sleep 0.2
-	elapsed=$(($(date +%s) - START))
+	step
 done
-kill "$QPID" 2>/dev/null || true
-wait "$QPID" 2>/dev/null || true
-QPID=""
+qemu_stop
 
 fail=0
-IFS_WAS="$IFS"
-IFS='|'
-for m in $BOOT_MARKS $HOG_MARKS $RECLAIM_MARKS; do
-	if has "$m"; then
-		echo "   ok  $m: $(tr -d '\r' <"$LOG" | grep -m1 -E "$m")"
-	else
-		echo "   ROOD $m ontbreekt"
-		fail=1
-	fi
-done
-IFS="$IFS_WAS"
+marks "$BOOT_MARKS" "$HOG_MARKS" "$RECLAIM_MARKS"
 case "$POSTED" in
 "burn: "*"HTTP 2"*"web: "*"HTTP 2"*) echo "   ok  POST /v1/jobs: $POSTED" ;;
 "") echo "   ROOD POST /v1/jobs nooit gedaan (Hop niet op tijd op)"; fail=1 ;;
 *) echo "   ROOD POST /v1/jobs: $POSTED"; fail=1 ;;
 esac
-if has "$RED"; then
-	echo "   ROOD $(tr -d '\r' <"$LOG" | grep -m1 -E "$RED")"
-	fail=1
-fi
-echo "   tijd: $(($(date +%s) - START)) s na de start van QEMU"
-if [ "$fail" != 0 ]; then
-	KEEP="$(mktemp -t hopos-qemu-reclaim-rood.XXXXXX)"
-	tr -d '\r' <"$LOG" >"$KEEP"
-	echo "== console bewaard in $KEEP"
-	echo "== console (staart):"
-	tail -150 "$KEEP"
-	exit 1
-fi
-[ -n "${KEEP_LOG:-}" ] && tr -d '\r' <"$LOG" >"$KEEP_LOG"
+reds
+took
+verdict qemu-reclaim 150
 echo "qemu-reclaim groen"

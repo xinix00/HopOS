@@ -49,12 +49,17 @@
 # HOPOS_OS_CORE_FAIL, HOPOS_OSCORE_FALLBACK, HOPOS_CAGE_FAIL) is meteen rood.
 # Rood bewaart de console (en drukt hem af).
 #
-#   tools/qemu-test-hop.sh                 TIMEOUT=60 standaard, in seconden
+# Dezelfde kring op riscv64 is tools/qemu-riscv-test-hop.sh: dit script
+# met HOP_ARCH=riscv64 (QEMU virt in machine mode, twee harts, Hop op hart
+# 0, de app op hart 1; zonder het zaad en de canary, met HOPOS_OS_CORE_UP).
+#
+#   tools/qemu-test-hop.sh                 TIMEOUT=60 standaard (riscv64 90),
+#                                          in seconden
 #   SMP=2 tools/qemu-test-hop.sh           twee cores (standaard 4)
 #   SMP=2 OSCORE=1 tools/qemu-test-hop.sh  de kern en Hop op core 1
 #   KEEP_LOG=pad tools/qemu-test-hop.sh    bewaart ook een groene console
-#   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT   de host-poorten; bezet = een vrije
-#                                          poort van het OS, luid gemeld
+#   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT   de host-poorten; standaard vrije
+#                                          van het OS (bezet = een vrije, luid)
 #   HOP_DIR=pad                            de hop-repo (standaard ../hop/hop)
 #   HOP_PATCH=0                            Hop tegen de tag van de hop-repo in
 #                                          plaats van de applib van deze
@@ -62,103 +67,82 @@
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-TIMEOUT="${TIMEOUT:-60}"
-HOP_DIR="${HOP_DIR:-$DIR/../hop/hop}"
-TARGET=aarch64-unknown-none-softfloat
-LOG="$(mktemp -t hopos-qemu-hop.XXXXXX)"
-ART="$(mktemp -d -t hopos-art.XXXXXX)"
-DISK="$ART/disk.img"
-QPID=""
-HPID=""
-cleanup() {
-	[ -n "$QPID" ] && kill "$QPID" 2>/dev/null
-	[ -n "$HPID" ] && kill "$HPID" 2>/dev/null
-	rm -rf "$LOG" "$ART"
-	true
-}
-trap cleanup EXIT INT TERM
-
 . "$(dirname "$0")/lib.sh"
-SYSPORT="$(port "${SYSPORT:-10100}" SYSPORT)"
-AGENTPORT="$(port "${AGENTPORT:-8080}" AGENTPORT)"
-LEADERPORT="$(port "${LEADERPORT:-9080}" LEADERPORT)"
-ARTPORT="$(port "${ARTPORT:-8000}" ARTPORT)"
+case "${HOP_ARCH:-arm64}" in
+arm64)
+	TIMEOUT="${TIMEOUT:-60}"
+	TARGET=aarch64-unknown-none-softfloat
+	BOARD=qemuvirt
+	NAME=qemu-hop
+	OSCPU="${OSCORE:-0}"
+	APPCPU=1
+	[ "$OSCPU" = 0 ] || APPCPU=0
+	;;
+riscv64)
+	TIMEOUT="${TIMEOUT:-90}"
+	TARGET=riscv64gc-unknown-none-elf
+	BOARD=qemuvirt-riscv
+	NAME=rv-hop
+	OSCPU=0
+	APPCPU=1
+	POST_MAX=30
+	;;
+*)
+	echo "HOP_ARCH=$HOP_ARCH: arm64 of riscv64" >&2
+	exit 64
+	;;
+esac
+scratch "$NAME"
+ports SYS AGENT LEADER ART
 
 cd "$DIR"
-echo "== bouwen: hopos (qemuvirt), appspike, en agentd-hopos in $HOP_DIR"
-cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt
-cargo build --quiet --release --target "$TARGET" -p appspike
-HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
-
+echo "== bouwen: hopos ($BOARD), appspike, en agentd-hopos in $HOP_DIR"
+cargo build --quiet --release --target "$TARGET" -p hopos --features "board-$BOARD"
+KERNEL="$DIR/target/$TARGET/release/hopos"
 # De artifact-server: appspike zonder debug-info (1,8 MB naar 226 KB,
-# gemeten 29-09), symbolen blijven voor de plaatsing.
-OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
-if [ -n "$OBJCOPY" ]; then
-	"$OBJCOPY" --strip-debug "$DIR/target/$TARGET/release/appspike" "$ART/appspike.elf"
-else
-	cp "$DIR/target/$TARGET/release/appspike" "$ART/appspike.elf"
-fi
-(cd "$ART" && exec python3 -m http.server "$ARTPORT" --bind 127.0.0.1) >"$ART/http.log" 2>&1 &
-HPID=$!
+# gemeten 29-09).
+apps appspike
+hop_elf
+serve
 
-OSCPU="${OSCORE:-0}"
-APPCPU=1
-[ "$OSCPU" = 0 ] || APPCPU=0
-echo "== booten op QEMU virt met Hop, ${SMP:-4} cores, OS-core $OSCPU (tot ${TIMEOUT}s; system :$SYSPORT, agent :$AGENTPORT, leader :$LEADERPORT, artifacts :$ARTPORT)"
-SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISK="$DISK" \
-	sh "$DIR/image/qemu-run.sh" </dev/null >"$LOG" 2>&1 &
-QPID=$!
+# De boot: op arm64 image/qemu-run.sh (Hop gestaged met de rol Hop), op
+# riscv64 Hop rauw op de staging met rol 1.
+if [ "$TARGET" = riscv64gc-unknown-none-elf ]; then
+	strip_elf "$HOP_ELF" "$ART/hop.elf"
+	fits "$ART/hop.elf" agentd-hopos
+	truncate -s 64m "$DISK"
+	boot() {
+		qemu_rv "$ART/hop.elf" 1 </dev/null >"$LOG" 2>&1 &
+		QPID=$!
+	}
+	echo "== booten op QEMU virt riscv64 met Hop op hart 0 (tot ${TIMEOUT}s; system :$SYSPORT, agent :$AGENTPORT, leader :$LEADERPORT, artifacts :$ARTPORT)"
+else
+	boot() { hop_virt; }
+	echo "== booten op QEMU virt met Hop, ${SMP:-4} cores, OS-core $OSCPU (tot ${TIMEOUT}s; system :$SYSPORT, agent :$AGENTPORT, leader :$LEADERPORT, artifacts :$ARTPORT)"
+fi
+boot
 
 # De vaste markers (grep -E), in de volgorde waarin ze horen te komen.
-BOOT_MARKS="HOPOS_BOOT|HOPOS_CLOCK_FIXED|HOPOS_PRIVILEGE|HOPOS_DISK_UP model=virtio-blk|HOPOS_FS_UP fresh=1|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_OS_SELFTEST ok|HOPOS_HOP_START slot=1 core=0 cpu=$OSCPU |uplink tcp :8080 -> slot 1 :8080 HOPOS_HOP_PUBLISH|uplink tcp :9080 -> slot 1 :9080 HOPOS_HOP_PUBLISH|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP|HOPOS_RNG_SLOTS source=jitter|slot 1: applib: rng seed from the kernel .*HOPOS_APP_RNG source=jitter|self-dial 10.100.0.2:8080 connected .*HOPOS_WD_CANARY_OK"
-[ "$OSCPU" = 0 ] || BOOT_MARKS="$BOOT_MARKS|HOPOS_OSCORE_PARKED"
+BOOT_MARKS="HOPOS_BOOT|HOPOS_CLOCK_FIXED|HOPOS_PRIVILEGE|HOPOS_DISK_UP model=virtio-blk|HOPOS_FS_UP fresh=1|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_OS_SELFTEST ok"
+RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_OS_SELFTEST_FAIL|HOPOS_OS_CORE_FAIL"
+if [ "$TARGET" = riscv64gc-unknown-none-elf ]; then
+	BOOT_MARKS="$BOOT_MARKS|HOPOS_OS_CORE_UP"
+	RED="$RED|HOPOS_OS_CORE_NONE|HOPOS_CAGE_FAIL"
+else
+	RED="$RED|HOPOS_OSCORE_FALLBACK|HOPOS_CAGE_FAIL"
+fi
+BOOT_MARKS="$BOOT_MARKS|HOPOS_HOP_START slot=1 core=0 cpu=$OSCPU |uplink tcp :8080 -> slot 1 :8080 HOPOS_HOP_PUBLISH|uplink tcp :9080 -> slot 1 :9080 HOPOS_HOP_PUBLISH|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
+if [ "$TARGET" != riscv64gc-unknown-none-elf ]; then
+	BOOT_MARKS="$BOOT_MARKS|HOPOS_RNG_SLOTS source=jitter|slot 1: applib: rng seed from the kernel .*HOPOS_APP_RNG source=jitter|self-dial 10.100.0.2:8080 connected .*HOPOS_WD_CANARY_OK"
+	[ "$OSCPU" = 0 ] || BOOT_MARKS="$BOOT_MARKS|HOPOS_OSCORE_PARKED"
+fi
 PLACE_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|HOPOS_SLOT_START slot=2 core=1 cpu=$APPCPU |slot 2: HOPOS_APPSPIKE_FS ok|slot 2: HOPOS_APPSPIKE_DONE pass=9 fail=0"
-RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_OS_SELFTEST_FAIL|HOPOS_OS_CORE_FAIL|HOPOS_OSCORE_FALLBACK|HOPOS_CAGE_FAIL"
 
-JOB='{"name":"spike","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/appspike.elf"}],"memory_limit":33554432}'
-POSTED=""
+# Na de POST: de plaatsing, dan de taak van buiten running (Hop herstart
+# de service na zijn exit 0, dus even pollen).
 TASKS=""
-START=$(date +%s)
-elapsed=0
-step() {
-	sleep 0.2
-	elapsed=$(($(date +%s) - START))
-}
-while :; do
-	has "$RED" && break
-	kill -0 "$QPID" 2>/dev/null || break
-	[ "$elapsed" -ge "$TIMEOUT" ] && break
-	if [ -z "$POSTED" ]; then
-		if all "$BOOT_MARKS"; then
-			# De job van buiten, naar de leader via de hostfwd en de DNAT.
-			if out="$(curl -s -m 20 -w ' HTTP %{http_code}' -X POST \
-				-H 'Content-Type: application/json' -d "$JOB" \
-				"http://127.0.0.1:$LEADERPORT/v1/jobs" 2>&1)"; then
-				POSTED="$out"
-			else
-				POSTED="ROOD curl: $out"
-				break
-			fi
-		fi
-		step
-		continue
-	fi
-	if all "$PLACE_MARKS"; then
-		# De taak van buiten: running (Hop herstart de service na zijn
-		# exit 0, dus even pollen).
-		t="$(curl -s -m 5 "http://127.0.0.1:$AGENTPORT/tasks" 2>&1 || true)"
-		if printf '%s' "$t" | python3 -c '
-import json, sys
-tasks = json.load(sys.stdin)
-sys.exit(0 if any(t.get("job_name") == "spike" and t.get("state") == "running" for t in tasks) else 1)
-' 2>/dev/null; then
-			TASKS="$t"
-			break
-		fi
-		TASKS="(nog niet running) $t"
-	fi
-	step
-done
+placed() { all "$PLACE_MARKS" && running spike; }
+job_loop '{"name":"spike","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/appspike.elf"}],"memory_limit":33554432}' placed
 
 # De herstart hieronder leest terug wat er VASTGELEGD is: de FS-toets van
 # appspike schreef in zijn root, en de committer (elke 10 s,
@@ -172,27 +156,11 @@ if [ -n "$TASKS" ] && [ "${TASKS#(nog niet running)}" = "$TASKS" ]; then
 		i=$((i + 1))
 	done
 fi
-kill "$QPID" 2>/dev/null || true
-wait "$QPID" 2>/dev/null || true
-QPID=""
+qemu_stop
 
 fail=0
-IFS_WAS="$IFS"
-IFS='|'
-for m in $BOOT_MARKS $PLACE_MARKS; do
-	if has "$m"; then
-		echo "   ok  $m: $(tr -d '\r' <"$LOG" | grep -m1 -E "$m")"
-	else
-		echo "   ROOD $m ontbreekt"
-		fail=1
-	fi
-done
-IFS="$IFS_WAS"
-case "$POSTED" in
-*"HTTP 2"*) echo "   ok  POST /v1/jobs: $POSTED" ;;
-"") echo "   ROOD POST /v1/jobs nooit gedaan (Hop niet op tijd op)"; fail=1 ;;
-*) echo "   ROOD POST /v1/jobs: $POSTED"; fail=1 ;;
-esac
+marks "$BOOT_MARKS" "$PLACE_MARKS"
+posted
 case "$TASKS" in
 "(nog niet running)"* | "")
 	echo "   ROOD GET /tasks: geen running spike: ${TASKS:-nooit gevraagd}"
@@ -200,16 +168,8 @@ case "$TASKS" in
 	;;
 *) echo "   ok  GET /tasks: $TASKS" ;;
 esac
-if grep -q "GET /appspike.elf" "$ART/http.log" 2>/dev/null; then
-	echo "   ok  artifact-server: $(grep -c 'GET /appspike.elf' "$ART/http.log") download(s) van appspike.elf"
-else
-	echo "   ROOD artifact-server: nooit gevraagd"
-	fail=1
-fi
-if has "$RED"; then
-	echo "   ROOD $(tr -d '\r' <"$LOG" | grep -m1 -E "$RED")"
-	fail=1
-fi
+served appspike.elf
+reds
 if committed; then
 	echo "   ok  vastgelegd: $(tr -d '\r' <"$LOG" | grep -E 'HOPOS_FS_COMMIT($| )' | tail -1)"
 else
@@ -223,73 +183,47 @@ if has "agent-state.json"; then
 else
 	echo "   ok  geen agent-staat op hopfs"
 fi
-echo "   tijd: $(($(date +%s) - START)) s na de start van QEMU"
+took
 # De meetlat: de rtt van appspike's NET-toets en de laatste tik met de
 # overgangen van de OS-core (in/irq/ipi/timer/yield en de tijd van Hop).
 echo "   meting: $(tr -d '\r' <"$LOG" | grep -o 'dial_us=[0-9]*' | tr '\n' ' ')"
 echo "   meting: $(tr -d '\r' <"$LOG" | grep -o 'os(in=.*' | tail -1)"
-if [ "$fail" != 0 ]; then
-	KEEP="$(mktemp -t hopos-qemu-hop-rood.XXXXXX)"
-	tr -d '\r' <"$LOG" >"$KEEP"
-	echo "== console bewaard in $KEEP"
-	echo "== console:"
-	cat "$KEEP"
-	exit 1
-fi
-[ -n "${KEEP_LOG:-}" ] && tr -d '\r' <"$LOG" >"$KEEP_LOG"
+verdict "$NAME"
 
 # De herstart: dezelfde schijf, een nieuwe boot. hopfs vindt de boom terug
 # (fresh=0); Hop begint schoon, want hij houdt geen staat op hopfs.
 echo "== herstart op dezelfde schijf (tot ${TIMEOUT}s)"
 LOG1="$LOG"
-LOG="$(mktemp -t hopos-qemu-hop2.XXXXXX)"
-SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISK="$DISK" \
-	sh "$DIR/image/qemu-run.sh" </dev/null >"$LOG" 2>&1 &
-QPID=$!
+LOG="$(mktemp -t "hopos-$NAME-2.XXXXXX")"
+boot
 RESTART_MARKS="HOPOS_FS_UP fresh=0|hopfs: tree restored|HOPOS_HOP_START slot=1 core=0 cpu=$OSCPU |slot 1: .*HOP_UP"
-START=$(date +%s)
-elapsed=0
-while ! all "$RESTART_MARKS"; do
-	has "$RED" && break
-	kill -0 "$QPID" 2>/dev/null || break
-	[ "$elapsed" -ge "$TIMEOUT" ] && break
-	step
-done
-kill "$QPID" 2>/dev/null || true
-wait "$QPID" 2>/dev/null || true
-QPID=""
-IFS='|'
-for m in $RESTART_MARKS; do
-	if has "$m"; then
-		echo "   ok  $m: $(tr -d '\r' <"$LOG" | grep -m1 -E "$m")"
-	else
-		echo "   ROOD $m ontbreekt"
-		fail=1
-	fi
-done
-IFS="$IFS_WAS"
+started
+while alive && ! all "$RESTART_MARKS"; do step; done
+qemu_stop
+marks "$RESTART_MARKS"
 # Schoon begonnen: niets overgenomen uit een bestand (Hop 3.0.2: alleen de
 # object-store of de init-jobs), geen bewoner uit de vorige boot.
 if has "HOP_ADOPTED|HOP_STRAY_STOPPED"; then
-	echo "   ROOD $(tr -d '\r' <"$LOG" | grep -m1 -E "HOP_ADOPTED|HOP_STRAY_STOPPED")"
+	echo "   ROOD $(first "HOP_ADOPTED|HOP_STRAY_STOPPED")"
 	fail=1
 else
 	echo "   ok  Hop begon schoon: niets overgenomen, geen zwerver"
 fi
-if has "$RED"; then
-	echo "   ROOD $(tr -d '\r' <"$LOG" | grep -m1 -E "$RED")"
-	fail=1
-fi
-echo "   tijd: $(($(date +%s) - START)) s na de herstart"
+reds
+took "de herstart"
 if [ "$fail" != 0 ]; then
-	KEEP="$(mktemp -t hopos-qemu-hop-rood.XXXXXX)"
+	KEEP="$(mktemp -t "hopos-$NAME-rood.XXXXXX")"
 	tr -d '\r' <"$LOG" >"$KEEP"
 	echo "== console van de herstart bewaard in $KEEP"
 	cat "$KEEP"
 	rm -f "$LOG"
 	exit 1
 fi
-[ -n "${KEEP_LOG:-}" ] && tr -d '\r' <"$LOG" >"$KEEP_LOG.restart"
+if [ -n "${KEEP_LOG:-}" ]; then tr -d '\r' <"$LOG" >"$KEEP_LOG.restart"; fi
 rm -f "$LOG"
 LOG="$LOG1"
-echo "qemu-kring groen"
+if [ "$TARGET" = riscv64gc-unknown-none-elf ]; then
+	echo "qemu-kring riscv64 groen"
+else
+	echo "qemu-kring groen"
+fi

@@ -40,18 +40,14 @@
 set -e
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+. "$DIR/tools/lib.sh"
 TARGET=aarch64-unknown-none-softfloat
 OUT="$DIR/target/apple-m4"
-HOP_DIR="${HOP_DIR:-$DIR/../hop/hop}"
 RAM_BASE=0x10100000000
 
 cd "$DIR"
 mkdir -p "$OUT"
-OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
-if [ -z "$OBJCOPY" ]; then
-	echo "apple-m4: rust-objcopy missing (rustup component add llvm-tools)" >&2
-	exit 1
-fi
+need_objcopy apple-m4
 # EMBED=<ELF>: een gestripte app-ELF (Hop) in het kernimage zelf, voor een
 # boot zonder loader (kmutil): board/apple/build.rs bakt hem in, de kern
 # plaatst hem als Hop in slot 1 (Go: cmd/hopos-embed). Zonder EMBED= niets.
@@ -124,24 +120,13 @@ fi
 
 # Het image voor de staging (optioneel): de loader legt het in de
 # loader-regio (board_apple::slots::STAGE_PA) met maat, rol en magic.
-APP="${APP-}"
-case "$APP" in
-"") rm -f "$OUT/stage.elf" "$OUT/stage.role" ;;
-hop)
-	HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
-	"$OBJCOPY" --strip-debug "$HOP_ELF" "$OUT/stage.elf"
-	echo hop >"$OUT/stage.role"
-	;;
-*/*)
-	"$OBJCOPY" --strip-debug "$APP" "$OUT/stage.elf"
-	echo app >"$OUT/stage.role"
-	;;
-*)
-	cargo build --quiet --release --target "$TARGET" -p "$APP"
-	"$OBJCOPY" --strip-debug "$DIR/target/$TARGET/release/$APP" "$OUT/stage.elf"
-	echo app >"$OUT/stage.role"
-	;;
-esac
+pick_app ""
+if [ -n "$IMAGE" ]; then
+	strip_elf "$IMAGE" "$OUT/stage.elf"
+	echo "$ROLE" >"$OUT/stage.role"
+else
+	rm -f "$OUT/stage.elf" "$OUT/stage.role"
+fi
 
 echo "apple-m4: $IMG ($(wc -c <"$IMG" | tr -d ' ') bytes)${CFG:+, config $CFG}${APP:+, stage.elf ($(cat "$OUT/stage.role"))}" >&2
 echo "apple-m4: load with  STAGE=\${STAGE:-} image/apple/boot-cycle.sh $IMG 90" >&2

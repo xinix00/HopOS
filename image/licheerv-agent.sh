@@ -57,6 +57,7 @@
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+. "$DIR/tools/lib.sh"
 TARGET=riscv64gc-unknown-none-elf
 OUT="$DIR/target/licheerv"
 DONOR="${LICHEERV_DONOR:-$DIR/image/firmware/licheerv/donor-fip.bin}"
@@ -73,8 +74,7 @@ sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
 
 [ -f "$DONOR" ] || { echo "donor-fip ontbreekt: $DONOR (zet LICHEERV_DONOR)" >&2; exit 1; }
 [ -f "$FIPTOOL" ] || { echo "fiptool ontbreekt: $FIPTOOL (zet LICHEERV_FIPTOOL)" >&2; exit 1; }
-OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
-[ -n "$OBJCOPY" ] || { echo "rust-objcopy ontbreekt (rustup component add llvm-tools)" >&2; exit 1; }
+need_objcopy licheerv-agent
 
 DONOR_SHA="$(sha "$DONOR")"
 if [ -n "${LICHEERV_DONOR_SHA256:-}" ] && [ "$DONOR_SHA" != "$LICHEERV_DONOR_SHA256" ]; then
@@ -86,8 +86,8 @@ echo "donor: $DONOR sha256=$DONOR_SHA" >&2
 mkdir -p "$OUT"
 cd "$DIR"
 # De eerste bewoner: er is geen QEMU die hem in het RAM legt, dus gaat hij
-# in de kern (board/licheerv/build.rs, HOPOS_LRV_STAGE met zijn rol in
-# HOPOS_LRV_ROLE). Zonder debug-info en zonder lokale symbolen (zoals
+# in de kern (board/licheerv/build.rs, HOPOS_EMBED met zijn rol in
+# HOPOS_EMBED_ROLE). Zonder debug-info en zonder lokale symbolen (zoals
 # tools/release.sh), met de globale: de plaatsing leest RamStart en de rest
 # uit de symbooltabel, en die ligt tijdens de plaatsing in de schrapruimte
 # boven de segmenten (kern::system::place). Met de lokale labels van
@@ -97,22 +97,22 @@ APP="${APP:-}"
 STAGE="${STAGE:-}"
 if [ -n "$STAGE" ]; then
 	[ -f "$STAGE" ] || { echo "STAGE=$STAGE bestaat niet" >&2; exit 1; }
-	HOPOS_LRV_ROLE="${ROLE:-hop}"
+	HOPOS_EMBED_ROLE="${ROLE:-hop}"
 	"$OBJCOPY" --strip-debug --discard-all "$STAGE" "$OUT/stage.elf"
-	HOPOS_LRV_STAGE="$OUT/stage.elf"
-	echo "stage: $STAGE als $HOPOS_LRV_ROLE, $(wc -c <"$HOPOS_LRV_STAGE" | tr -d ' ') bytes sha256=$(sha "$HOPOS_LRV_STAGE")" >&2
+	HOPOS_EMBED="$OUT/stage.elf"
+	echo "stage: $STAGE als $HOPOS_EMBED_ROLE, $(wc -c <"$HOPOS_EMBED" | tr -d ' ') bytes sha256=$(sha "$HOPOS_EMBED")" >&2
 elif [ -n "$APP" ]; then
 	echo "== app bouwen ($APP, $TARGET) ==" >&2
 	cargo build --quiet --release --target "$TARGET" -p "$APP"
 	"$OBJCOPY" --strip-debug --discard-all "$DIR/target/$TARGET/release/$APP" "$OUT/$APP.stage"
-	HOPOS_LRV_STAGE="$OUT/$APP.stage"
-	HOPOS_LRV_ROLE="${ROLE:-app}"
-	echo "app: $APP als $HOPOS_LRV_ROLE, $(wc -c <"$HOPOS_LRV_STAGE" | tr -d ' ') bytes sha256=$(sha "$HOPOS_LRV_STAGE")" >&2
+	HOPOS_EMBED="$OUT/$APP.stage"
+	HOPOS_EMBED_ROLE="${ROLE:-app}"
+	echo "app: $APP als $HOPOS_EMBED_ROLE, $(wc -c <"$HOPOS_EMBED" | tr -d ' ') bytes sha256=$(sha "$HOPOS_EMBED")" >&2
 else
-	HOPOS_LRV_STAGE=""
-	HOPOS_LRV_ROLE=""
+	HOPOS_EMBED=""
+	HOPOS_EMBED_ROLE=""
 fi
-export HOPOS_LRV_STAGE HOPOS_LRV_ROLE
+export HOPOS_EMBED HOPOS_EMBED_ROLE
 echo "== kern bouwen (hopos --features board-licheerv${FEATURES:+,$FEATURES}, $TARGET) ==" >&2
 cargo build --quiet --release --target "$TARGET" -p hopos --features "board-licheerv${FEATURES:+,$FEATURES}"
 ELF="$DIR/target/$TARGET/release/hopos"
@@ -169,7 +169,7 @@ echo "fip: $OUT/fip-licheerv.bin sha256=$(sha "$OUT/fip-licheerv.bin")" >&2
 # De hele kaart (tools/mkcard): MBR plus FAT16 met alleen fip.bin, de
 # geometrie van het donor-image op LBA 1, dd-baar. GEEN -vollabel: de
 # BROM-parser is niet van ons, en dit is de vorm die Go bewees (tag v2.2.8).
-cargo run -q -p mkcard -- -o "$OUT/hopos-licheerv.img" -size 64 \
+cargo run -q -p mkcard -- -o "$OUT/hopos-licheerv.img" -size 64 -verify \
 	"$OUT/fip-licheerv.bin=fip.bin" >&2
 echo "card: $OUT/hopos-licheerv.img (dd: diskutil unmountDisk /dev/diskN && sudo dd if=$OUT/hopos-licheerv.img of=/dev/rdiskN bs=4m)" >&2
 

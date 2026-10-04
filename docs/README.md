@@ -13,6 +13,11 @@ De enige lijst van alle toetsen; de kop van elk script zegt welke markers
 hij eist en welke knoppen hij heeft. `sh image/qemu-run.sh` boot de kern op
 virt zonder toets.
 
+`sh tools/qemu-all.sh` draait alle ringen hieronder na elkaar (en de
+riscv-share- en riscv-flip-ring), per ring groen of ROOD met zijn laatste
+regel, en één eindregel; `sh tools/qemu-all.sh hop flip-cold` alleen die.
+Elke ring kiest vrije host-poorten, dus twee runners botsen niet.
+
 | Test | Wat hij bewijst |
 | --- | --- |
 | `sh tools/qemu-test.sh` | boot op virt, netwerk, opslag, appspike in slot 1 en 2 in een stage-2-kooi, tien toetsen; het zaad van de kern op de control-page (`HOPOS_RNG_SLOTS source=jitter`, en in de app `HOPOS_APP_RNG source=jitter`: virt heeft geen TRNG, [boards.md](boards.md)) |

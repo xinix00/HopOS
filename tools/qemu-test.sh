@@ -89,11 +89,12 @@
 #   SHOT_KEEP=pad.ppm           bewaart die screendump (met GUI=1 of display)
 #   tools/qemu-test.sh          TIMEOUT=30 standaard, in seconden
 #   KEEP_LOG=pad tools/qemu-test.sh   bewaart ook een groene console
-#   SYSPORT=poort               de host-kant van de hostfwd; bezet = een vrije
-#                               poort van het OS, luid gemeld
+#   SYSPORT=poort               de host-kant van de hostfwd; standaard een
+#                               vrije van het OS (bezet = een vrije, luid)
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+. "$(dirname "$0")/lib.sh"
 TARGET=aarch64-unknown-none-softfloat
 GUI="${GUI:-0}"
 FEATURES=board-qemuvirt
@@ -117,22 +118,19 @@ display)
 esac
 # De display-keten heeft twee plaatsingen met invoer ertussen: iets meer tijd.
 if [ "$GUI" = display ]; then TIMEOUT="${TIMEOUT:-45}"; else TIMEOUT="${TIMEOUT:-30}"; fi
+scratch qemu
+KCFG="$ART/kern"
+CFGWIN="$ART/cfg"
+CFGBORD="$ART/cfg-bord"
 if [ "$GUI" != 0 ]; then
 	FEATURES=board-qemuvirt,gui
 	# Kort pad: een unix-socket mag niet langer dan ~104 tekens zijn.
 	MON="$(mktemp -u /tmp/hopos-mon.XXXXXX)"
-	SHOT="$(mktemp -t hopos-shot.XXXXXX)"
+	SHOT="$ART/shot"
 	QGUI="-device ramfb -monitor unix:$MON,server,nowait"
+	trap 'cleanup; rm -f "$MON"' EXIT INT TERM
 fi
-LOG="$(mktemp -t hopos-qemu.XXXXXX)"
-DISK="$(mktemp -t hopos-disk.XXXXXX)"
-KCFG="$(mktemp -t hopos-kern.XXXXXX)"
-CFGWIN="$(mktemp -t hopos-cfg.XXXXXX)"
-CFGBORD="$(mktemp -t hopos-cfg.XXXXXX)"
-trap 'rm -f "$LOG" "$DISK" "$KCFG" "$CFGWIN" "$CFGBORD" ${MON:+"$MON"} ${SHOT:+"$SHOT"}; [ -n "${QPID:-}" ] && kill "$QPID" 2>/dev/null; true' EXIT INT TERM
-
-. "$(dirname "$0")/lib.sh"
-SYSPORT="$(port "${SYSPORT:-10100}" SYSPORT)" # de host-kant van de hostfwd naar de system-API
+ports SYS # de host-kant van de hostfwd naar de system-API
 # Een verse, ijle schijf van 64 MiB: hopfs begint leeg.
 dd if=/dev/zero of="$DISK" bs=1048576 count=0 seek=64 2>/dev/null
 
@@ -188,15 +186,9 @@ else
 fi
 
 echo "== booten op QEMU virt (tot ${TIMEOUT}s)"
-qemu-system-aarch64 -M virt,gic-version=3,highmem-ecam=off,virtualization=on \
-	-cpu cortex-a53 -smp 4 -m 3G \
-	-nographic $QGUI -serial stdio \
-	-global virtio-mmio.force-legacy=false \
-	-device virtio-net-device,netdev=n0,bus=virtio-mmio-bus.0 \
-	-netdev "user,id=n0,hostfwd=tcp:127.0.0.1:${SYSPORT}-:10100" \
+# shellcheck disable=SC2086
+qemu_virt 4 -nographic $QGUI $QUSB \
 	-drive "if=none,format=raw,file=$DISK,id=disk0" \
-	-device virtio-blk-device,drive=disk0,bus=virtio-mmio-bus.1 \
-	$QUSB \
 	-device "loader,file=$SPIKE,addr=0xb0200000,force-raw=on" \
 	-device "loader,addr=0xb0100000,data=$SPIKE_SIZE,data-len=8" \
 	${APPEND:+-append "$APPEND"} \
@@ -249,52 +241,9 @@ else:
 PY
 }
 
-# De toets van buiten: verbinden via de hostfwd en wachten tot de kern de
-# verbinding sluit (EOF). Slaagt alleen als de gast antwoordt.
-probe() {
-	python3 - "$SYSPORT" <<'PY'
-import socket, sys
-s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=5)
-s.settimeout(5)
-n = 0
-while True:
-    b = s.recv(4096)
-    if not b:
-        break
-    n += len(b)
-print(f"connected to 127.0.0.1:{sys.argv[1]}, closed by the kernel after {n} bytes")
-PY
-}
-
-refusals() { grep -c "HOPOS_SYSTEM_REFUSED" "$LOG" || true; }
-
-# Eén toets van buiten op moment $1: EOF van de host én een nieuwe
-# weigeringsregel van de kern (tot 3 s na de EOF, want de console loopt via
-# QEMU's stdio iets achter).
-probe_at() {
-	before=$(refusals)
-	if out="$(probe 2>&1)"; then
-		i=0
-		while [ "$(refusals)" -le "$before" ] && [ "$i" -lt 30 ]; do
-			sleep 0.1
-			i=$((i + 1))
-		done
-		if [ "$(refusals)" -gt "$before" ]; then
-			echo "ok  extern na '$1': $out"
-		else
-			echo "ROOD extern na '$1': EOF maar geen nieuwe HOPOS_SYSTEM_REFUSED"
-		fi
-	else
-		echo "ROOD extern na '$1': $(echo "$out" | tail -1)"
-	fi
-}
-
 # Wachten tot alle markers er zijn en alle toetsen van buiten gedaan,
 # iets roods verschijnt, QEMU stopt, of de tijd op is.
-need="HOPOS_BOOT|HOPOS_TICK 3|HOPOS_NIC_UP|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_SYSTEM_REFUSED|HOPOS_WD_CANARY_OK"
-PROBES=""
-next_probe=1
-nprobes=$(echo "$PROBE_AT" | awk -F'|' '{print NF}')
+NEED="HOPOS_BOOT|HOPOS_TICK 3|HOPOS_NIC_UP|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_SYSTEM_REFUSED|HOPOS_WD_CANARY_OK"
 ACTS=""
 next_act=1
 nacts=0
@@ -305,7 +254,7 @@ while :; do
 	if [ "$next_act" -le "$nacts" ]; then
 		act=$(echo "$ACT_AT" | cut -d'|' -f"$next_act")
 		at="${act%%;*}"
-		if grep -q -E "$at" "$LOG"; then
+		if has "$at"; then
 			cmds="${act#*;}"
 			IFS_WAS="$IFS"
 			IFS=';'
@@ -330,25 +279,14 @@ while :; do
 			continue
 		fi
 	fi
-	ok=1
-	for m in "HOPOS_BOOT" "HOPOS_TICK 3" "HOPOS_NIC_UP" "HOPOS_NET_UP" "HOPOS_SYSTEM_UP" "HOPOS_SYSTEM_REFUSED" "HOPOS_WD_CANARY_OK"; do
-		grep -q "$m" "$LOG" || ok=0
-	done
-	(IFS='|' && for m in $SLOT_MARKS; do grep -q -E "$m" "$LOG" || exit 1; done) || ok=0
 	# De toets van buiten, op zijn moment; de keten loopt intussen door.
-	if [ "$next_probe" -le "$nprobes" ]; then
-		at=$(echo "$PROBE_AT" | cut -d'|' -f"$next_probe")
-		if grep -q -E "$at" "$LOG"; then
-			PROBES="$PROBES
-   $(probe_at "$at")"
-			next_probe=$((next_probe + 1))
-			continue
-		fi
-		ok=0
-	fi
+	probe_due && continue
+	ok=1
+	all "$NEED|$SLOT_MARKS" || ok=0
+	probes_left && ok=0
 	[ "$next_act" -le "$nacts" ] && ok=0
 	[ "$ok" = 1 ] && break
-	grep -q -E "HOPOS_PANIC|HOPOS_EXCEPTION" "$LOG" && break
+	has "HOPOS_PANIC|HOPOS_EXCEPTION" && break
 	kill -0 "$QPID" 2>/dev/null || break
 	[ "$elapsed" -ge "$((TIMEOUT * 10))" ] && break
 	sleep 0.1
@@ -359,7 +297,7 @@ done
 SHOT_OK=""
 if [ "$GUI" != 0 ]; then
 	i=0
-	while ! grep -q "HOPOS_FB_CONSOLE" "$LOG" && [ "$i" -lt 50 ] && kill -0 "$QPID" 2>/dev/null; do
+	while ! has "HOPOS_FB_CONSOLE" && [ "$i" -lt 50 ] && kill -0 "$QPID" 2>/dev/null; do
 		sleep 0.1
 		i=$((i + 1))
 	done
@@ -375,34 +313,11 @@ if [ "$GUI" != 0 ]; then
 	fi
 	[ -n "${SHOT_KEEP:-}" ] && cp "$SHOT" "$SHOT_KEEP"
 fi
-kill "$QPID" 2>/dev/null || true
-wait "$QPID" 2>/dev/null || true
-QPID=""
+qemu_stop
 
 fail=0
-for m in "HOPOS_BOOT" "HOPOS_TICK 3" "HOPOS_NIC_UP" "HOPOS_NET_UP" "HOPOS_SYSTEM_UP" "HOPOS_SYSTEM_REFUSED" "HOPOS_WD_CANARY_OK"; do
-	if grep -q "$m" "$LOG"; then
-		echo "   ok  $m: $(grep -m1 "$m" "$LOG" | tr -d '\r')"
-	else
-		echo "   ROOD $m ontbreekt"
-		fail=1
-	fi
-done
-IFS_WAS="$IFS"
-IFS='|'
-for m in $SLOT_MARKS; do
-	if grep -q -E "$m" "$LOG"; then
-		echo "   ok  $m: $(grep -m1 -E "$m" "$LOG" | tr -d '\r')"
-	else
-		echo "   ROOD $m ontbreekt"
-		fail=1
-	fi
-done
-IFS="$IFS_WAS"
-[ -n "$PROBES" ] && echo "${PROBES#?}"
-case "$PROBES" in
-*ROOD*) fail=1 ;;
-esac
+marks "$NEED" "$SLOT_MARKS"
+probes_report
 [ -n "$ACTS" ] && echo "${ACTS#?}"
 case "$ACTS" in
 *ROOD*) fail=1 ;;
@@ -411,31 +326,14 @@ if [ "$next_act" -le "$nacts" ]; then
 	echo "   ROOD monitor: $((nacts - next_act + 1)) van de $nacts acties nooit gedaan (moment niet gezien)"
 	fail=1
 fi
-if [ "$next_probe" -le "$nprobes" ]; then
-	echo "   ROOD extern: $((nprobes - next_probe + 1)) van de $nprobes toetsen nooit geprobeerd (moment niet gezien)"
-	fail=1
-fi
 if [ "$GUI" != 0 ]; then
-	for m in "HOPOS_FB_UP" "HOPOS_FB_CONSOLE"; do
-		if grep -q "$m" "$LOG"; then
-			echo "   ok  $m: $(grep -m1 "$m" "$LOG" | tr -d '\r')"
-		else
-			echo "   ROOD $m ontbreekt"
-			fail=1
-		fi
-	done
+	marks "HOPOS_FB_UP|HOPOS_FB_CONSOLE"
 	echo "   screendump: $SHOT_OK"
 	case "$SHOT_OK" in ok*) ;; *) fail=1 ;; esac
 fi
-if grep -q -E "HOPOS_PANIC|HOPOS_EXCEPTION" "$LOG"; then
+if has "HOPOS_PANIC|HOPOS_EXCEPTION"; then
 	echo "   ROOD panic of exception"
 	fail=1
 fi
-if [ "$fail" != 0 ]; then
-	KEEP="${LOG}.rood"; cp "$LOG" "$KEEP"; echo "== console bewaard in $KEEP"
-	echo "== console (${need} gezocht):"
-	tr -d '\r' <"$LOG"
-	exit 1
-fi
-[ -n "${KEEP_LOG:-}" ] && tr -d '\r' <"$LOG" >"$KEEP_LOG"
+verdict qemu
 echo "qemu-poort groen"

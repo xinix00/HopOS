@@ -146,6 +146,7 @@
 #   KEEP_LOG=pad tools/qemu-test-flip.sh    bewaart ook een groene console (en
 #                                           die van na de reset in pad.reset)
 #   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT/ECHOPORT  de host-poorten
+#                                           (standaard vrije van het OS)
 #   HOP_DIR=pad                             de hop-repo (standaard ../hop/hop)
 #   FEATURES=vhe CPU=neoverse-n1 BOARD=uefi ...  de flip met de kern onder
 #                                           E2H = 1 (image/uefi-run.sh en
@@ -154,6 +155,7 @@
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+. "$(dirname "$0")/lib.sh"
 BOARD="${BOARD:-virt}"
 case "$BOARD" in
 virt) TIMEOUT="${TIMEOUT:-120}" ;;
@@ -174,9 +176,9 @@ if [ "$BOARD" = rpi4 ]; then
 	cd "$DIR"
 	cargo build --quiet --release --target "$T" -p hopos --features board-rpi4
 	cargo build --quiet --release --target "$T" -p appspike
-	OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
+	need_objcopy qemu-test-flip
+	strip_elf "$DIR/target/$T/release/appspike" "$W/app.elf"
 	"$OBJCOPY" -O binary "$DIR/target/$T/release/hopos" "$W/kernel8.img"
-	"$OBJCOPY" --strip-debug "$DIR/target/$T/release/appspike" "$W/app.elf"
 	# De stub op core 1, met de hand gecodeerd (geen assembler nodig): van
 	# EL3 (zo komt een core van raspi4b uit de reset als QEMU hem niet zelf
 	# start) naar EL2, dan precies wat de trampoline van cpu::el2::chain de
@@ -274,34 +276,14 @@ fi
 MODE=warm
 [ -n "$MISMATCH" ] && MODE=mismatch
 [ -n "$COLD" ] && MODE=cold
-HOP_DIR="${HOP_DIR:-$DIR/../hop/hop}"
 TARGET=aarch64-unknown-none-softfloat
-LOG="$(mktemp -t hopos-qemu-flip.XXXXXX)"
-ART="$(mktemp -d -t hopos-flip-art.XXXXXX)"
-DISK="$ART/disk.img"
-QPID=""
-HPID=""
-EPID=""
-cleanup() {
-	[ -n "$QPID" ] && kill "$QPID" 2>/dev/null
-	[ -n "$HPID" ] && kill "$HPID" 2>/dev/null
-	[ -n "$EPID" ] && kill "$EPID" 2>/dev/null
-	rm -rf "$LOG" "$ART"
-	true
-}
-trap cleanup EXIT INT TERM
-
-. "$(dirname "$0")/lib.sh"
-SYSPORT="$(port "${SYSPORT:-10100}" SYSPORT)"
-AGENTPORT="$(port "${AGENTPORT:-8080}" AGENTPORT)"
-LEADERPORT="$(port "${LEADERPORT:-9080}" LEADERPORT)"
-ARTPORT="$(port "${ARTPORT:-8000}" ARTPORT)"
-ECHOPORT="$(port "${ECHOPORT:-8007}" ECHOPORT)"
+scratch qemu-flip
+ports SYS AGENT LEADER ART ECHO
 
 cd "$DIR"
 echo "== bouwen ($BOARD, $MODE): kern A (stempel A), bundel B (stempel B), appspike, agentd-hopos"
-cargo build --quiet --release --target "$TARGET" -p appspike
-HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
+apps appspike
+hop_elf
 if [ "$BOARD" = uefi ]; then
 	# De ESP van kern A met Hop als gestagede bewoner (rol hop). Alleen virt
 	# zet voor Hop zelf QEMU_CFG achter de config (kern::nodecfg, 01-10);
@@ -351,12 +333,6 @@ print(hashlib.sha256(b).hexdigest())
 TAMPER
 )"
 	echo "   $MODE: de switch-code-som van de bundel is omgezet, sha256 $SHA"
-fi
-OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
-if [ -n "$OBJCOPY" ]; then
-	"$OBJCOPY" --strip-debug "$DIR/target/$TARGET/release/appspike" "$ART/appspike.elf"
-else
-	cp "$DIR/target/$TARGET/release/appspike" "$ART/appspike.elf"
 fi
 cat >"$ART/half.py" <<'HALF'
 import os, socket, sys, time
@@ -419,35 +395,24 @@ while True:
         f.write(str(n))
     threading.Thread(target=serve, args=(c, n), daemon=True).start()
 ECHO
-(cd "$ART" && exec python3 -m http.server "$ARTPORT" --bind 127.0.0.1) >"$ART/http.log" 2>&1 &
-HPID=$!
+serve
 python3 "$ART/echo.py" "$ECHOPORT" "$ART/echo" >"$ART/echo.log" 2>&1 &
-EPID=$!
+PIDS="$PIDS $!"
 
 echo "== booten op QEMU $BOARD met Hop, kern A (tot ${TIMEOUT}s; agent :$AGENTPORT, leader :$LEADERPORT, artifacts :$ARTPORT, echo :$ECHOPORT)"
 if [ "$BOARD" = uefi ]; then
 	# De QEMU-regel van image/uefi-run.sh, met de hostfwd's van Hop erbij
 	# (dat script zet alleen de system-API door).
-	QEMU_SHARE="${QEMU_SHARE:-/opt/homebrew/share/qemu}"
-	VARS="$ART/vars.fd"
-	dd if=/dev/zero of="$VARS" bs=1048576 count=64 2>/dev/null
+	dd if=/dev/zero of="$ART/vars.fd" bs=1048576 count=64 2>/dev/null
 	dd if=/dev/zero of="$DISK" bs=1048576 count=0 seek=64 2>/dev/null
-	FWD="hostfwd=tcp:127.0.0.1:${SYSPORT}-:10100"
-	FWD="$FWD,hostfwd=tcp:127.0.0.1:${AGENTPORT}-:8080,hostfwd=tcp:127.0.0.1:${LEADERPORT}-:9080"
-	qemu-system-aarch64 -M virt,gic-version=3,virtualization=on \
-		-cpu "${CPU:-cortex-a57}" -smp 4 -m 3G \
-		-nographic -monitor none -serial stdio \
-		-drive "if=pflash,format=raw,readonly=on,file=$QEMU_SHARE/edk2-aarch64-code.fd" \
-		-drive "if=pflash,format=raw,file=$VARS" \
-		-device qemu-xhci \
-		-drive "file=fat:$ESP,format=raw,if=none,id=esp,readonly=on" \
-		-device usb-storage,drive=esp,bootindex=0 \
+	qemu_edk2 "${CPU:-cortex-a57}" "$ART/vars.fd" "$ESP" \
 		-device virtio-net-pci,netdev=n0,romfile= \
-		-netdev "user,id=n0,$FWD" \
+		-netdev "user,id=n0,$QFWD" \
 		-drive "if=none,format=raw,file=$DISK,id=disk0" \
 		-device virtio-blk-pci,drive=disk0 \
 		-device virtio-rng-pci \
 		</dev/null >"$LOG" 2>&1 &
+	QPID=$!
 else
 	# QMP voor de reset van de zwarte doos (hieronder); qemu-run.sh geeft
 	# zijn argumenten door aan QEMU. Warm ook het oude paar ("eenmalig"
@@ -464,10 +429,8 @@ else
 	[ "$MODE" = warm ] && set -- "$@" \
 		-device loader,addr=0xb0000080,data=0xb00c0000,data-len=8 \
 		-device loader,addr=0xb0000088,data=0x31444e4148504f48,data-len=8
-	HOPOS_STAMP=A SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISK="$DISK" CFG="$ART/kern-a.cfg" \
-		sh "$DIR/image/qemu-run.sh" "$@" </dev/null >"$LOG" 2>&1 &
+	hop_virt HOPOS_STAMP=A CFG="$ART/kern-a.cfg" -- "$@"
 fi
-QPID=$!
 
 # Alleen wat ná de landing van kern B op de console kwam.
 after() { tr -d '\r' <"$LOG" | awk '/HOPOS_FLIP_BOOT/ { f = 1 } f' | grep -q -E "$1"; }
@@ -539,20 +502,12 @@ LASTPOST=""
 WARMTRY=""
 TASKS=""
 POSTED=""
-START=$(date +%s)
-elapsed=0
-step() {
-	sleep 0.2
-	elapsed=$(($(date +%s) - START))
-}
+started
 flip() {
 	curl -s -m 30 -w ' HTTP %{http_code}' -X POST -H 'Content-Type: application/json' \
 		-d "$1" "http://127.0.0.1:$AGENTPORT/flip" 2>&1
 }
-while :; do
-	has "$RED" && break
-	kill -0 "$QPID" 2>/dev/null || break
-	[ "$elapsed" -ge "$TIMEOUT" ] && break
+while alive; do
 	# De landing zet de fase van de echo om, zo vroeg als de console hem
 	# toont.
 	if [ ! -e "$ART/echo.landed" ] && has "HOPOS_FLIP_BOOT"; then
@@ -560,14 +515,13 @@ while :; do
 	fi
 	if [ -z "$PRE" ]; then
 		if all "$A_MARKS"; then
-			if out="$(curl -s -m 20 -w ' HTTP %{http_code}' -X POST \
-				-H 'Content-Type: application/json' -d "$PRE_JOB" \
-				"http://127.0.0.1:$LEADERPORT/v1/jobs" 2>&1)"; then
-				PRE="$out"
-			else
-				PRE="ROOD curl: $out"
+			post_job "$PRE_JOB" || {
+				PRE="$POSTED"
+				POSTED=""
 				break
-			fi
+			}
+			PRE="$POSTED"
+			POSTED=""
 		fi
 		step
 		continue
@@ -625,12 +579,9 @@ while :; do
 	if [ -z "$POSTED" ]; then
 		# Een curl die niets terugkrijgt, probeert het over een seconde
 		# opnieuw: de leader van een koud herstarte Hop moet nog opkomen.
-		if out="$(curl -s -m 20 -w ' HTTP %{http_code}' -X POST \
-			-H 'Content-Type: application/json' -d "$JOB" \
-			"http://127.0.0.1:$LEADERPORT/v1/jobs" 2>&1)"; then
-			POSTED="$out"
-		else
-			LASTPOST="curl: $out"
+		if ! post_job "$JOB"; then
+			LASTPOST="${POSTED#ROOD }"
+			POSTED=""
 			sleep 1
 		fi
 		step
@@ -670,9 +621,7 @@ QMP
 		n=$((n + 1))
 	done
 fi
-kill "$QPID" 2>/dev/null || true
-wait "$QPID" 2>/dev/null || true
-QPID=""
+qemu_stop
 if [ -n "$CUT" ]; then
 	tail -c +"$((CUT + 1))" "$LOG" | tr -d '\r' >"$ART/reset.log"
 	head -c "$CUT" "$LOG" >"$ART/before.log"
@@ -680,16 +629,9 @@ if [ -n "$CUT" ]; then
 fi
 
 fail=0
+marks "$A_MARKS" "$FLIP_MARKS"
 IFS_WAS="$IFS"
 IFS='|'
-for m in $A_MARKS $FLIP_MARKS; do
-	if has "$m"; then
-		echo "   ok  $m: $(tr -d '\r' <"$LOG" | grep -m1 -E "$m")"
-	else
-		echo "   ROOD $m ontbreekt"
-		fail=1
-	fi
-done
 for m in $AFTER_MARKS $WORK_MARKS; do
 	if after "$m"; then
 		echo "   ok  na de flip: $(tr -d '\r' <"$LOG" | awk '/HOPOS_FLIP_BOOT/ { f = 1 } f' | grep -m1 -E "$m")"
@@ -809,10 +751,7 @@ else
 	echo "   ROOD artifact-server: de bundel is nooit gevraagd"
 	fail=1
 fi
-if has "$RED"; then
-	echo "   ROOD $(tr -d '\r' <"$LOG" | grep -m1 -E "$RED")"
-	fail=1
-fi
+reds
 if [ "$BOARD" = virt ] && [ "$MODE" = warm ]; then
 	# De zwarte doos, uit de console van na de reset. Een regel van de doos
 	# zelf begint met "  | "; alleen de regels van kern A tellen als rood.
@@ -862,15 +801,7 @@ if [ -n "${OSCORE:-}" ]; then
 		fail=1
 	fi
 fi
-echo "   tijd: $(($(date +%s) - START)) s na de start van QEMU"
-if [ "$fail" != 0 ]; then
-	KEEP="$(mktemp -t hopos-qemu-flip-rood.XXXXXX)"
-	tr -d '\r' <"$LOG" >"$KEEP"
-	echo "== console bewaard in $KEEP"
-	echo "== console:"
-	cat "$KEEP"
-	exit 1
-fi
-[ -n "${KEEP_LOG:-}" ] && tr -d '\r' <"$LOG" >"$KEEP_LOG"
+took
+verdict qemu-flip
 [ -n "${KEEP_LOG:-}" ] && [ -s "$ART/reset.log" ] && cp "$ART/reset.log" "$KEEP_LOG.reset"
 echo "qemu-flip groen ($BOARD, $MODE)"

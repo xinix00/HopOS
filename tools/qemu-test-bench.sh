@@ -43,66 +43,38 @@
 #   BYTES=16777216 tools/qemu-test-bench.sh   bytes per doorvoerfase
 #   NVME=0 tools/qemu-test-bench.sh        zonder de tweede boot
 #   KEEP_LOG=pad / KEEP_JSON=pad           bewaart console en netmeter-json
-#   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT/WEBPORT   de host-poorten; bezet =
-#                                          een vrije poort van het OS, luid
+#   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT/WEBPORT   de host-poorten; standaard
+#                                          vrije van het OS
 #   HOP_DIR=pad                            de hop-repo (standaard ../hop/hop)
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+. "$(dirname "$0")/lib.sh"
 TIMEOUT="${TIMEOUT:-90}"
 BYTES="${BYTES:-16777216}"
-HOP_DIR="${HOP_DIR:-$DIR/../hop/hop}"
 TARGET=aarch64-unknown-none-softfloat
-LOG="$(mktemp -t hopos-qemu-bench.XXXXXX)"
-ART="$(mktemp -d -t hopos-art.XXXXXX)"
-DISK="$ART/disk.img"
+scratch qemu-bench
 JSON="$ART/netmeter.json"
-QPID=""
-HPID=""
-cleanup() {
-	[ -n "$QPID" ] && kill "$QPID" 2>/dev/null
-	[ -n "$HPID" ] && kill "$HPID" 2>/dev/null
-	rm -rf "$LOG" "$ART"
-	true
-}
-trap cleanup EXIT INT TERM
-
-. "$(dirname "$0")/lib.sh"
-SYSPORT="$(port "${SYSPORT:-10100}" SYSPORT)"
-AGENTPORT="$(port "${AGENTPORT:-8080}" AGENTPORT)"
-LEADERPORT="$(port "${LEADERPORT:-9080}" LEADERPORT)"
-ARTPORT="$(port "${ARTPORT:-8000}" ARTPORT)"
-WEBPORT="$(port "${WEBPORT:-8081}" WEBPORT)"
+ports SYS AGENT LEADER ART WEB
 
 cd "$DIR"
 echo "== bouwen: hopos (qemuvirt), bench, netmeter (host) en agentd-hopos in $HOP_DIR"
 cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt
-cargo build --quiet --release --target "$TARGET" -p bench
-cargo build --quiet --release -p netmeter
-NETMETER="$DIR/target/release/netmeter"
-HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
-
 # De artifact-server: bench zonder debug-info, de symbolen blijven voor de
 # plaatsing.
-OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
-if [ -n "$OBJCOPY" ]; then
-	"$OBJCOPY" --strip-debug "$DIR/target/$TARGET/release/bench" "$ART/bench.elf"
-else
-	cp "$DIR/target/$TARGET/release/bench" "$ART/bench.elf"
-fi
-(cd "$ART" && exec python3 -m http.server "$ARTPORT" --bind 127.0.0.1) >"$ART/http.log" 2>&1 &
-HPID=$!
+apps bench
+cargo build --quiet --release -p netmeter
+NETMETER="$DIR/target/release/netmeter"
+hop_elf
+serve
 
-# De bootargs: idlestat, en de OS-core als die gevraagd is (één -append;
-# qemu-run.sh zet hem dan niet zelf).
+# De bootargs: idlestat, en de OS-core als die gevraagd is (qemu-run.sh zet
+# hopos.oscore ervoor, in één -append).
 ARGS="hopos.idlestat=1"
 [ -n "${OSCORE:-}" ] && ARGS="hopos.oscore=$OSCORE $ARGS"
 
 echo "== boot 1: Hop + bench (tot ${TIMEOUT}s; leader :$LEADERPORT, artifacts :$ARTPORT, web :$WEBPORT -> gast :80; $ARGS)"
-SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" WEBPORT="$WEBPORT" \
-	HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISK="$DISK" OSCORE= \
-	sh "$DIR/image/qemu-run.sh" -append "$ARGS" </dev/null >"$LOG" 2>&1 &
-QPID=$!
+hop_virt BOOTARGS=hopos.idlestat=1
 
 BOOT_MARKS="HOPOS_BOOT|HOPOS_IDLESTAT_ON|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_HOP_START slot=1 |uplink tcp :9080 -> slot 1 :9080 HOPOS_HOP_PUBLISH|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
 PLACE_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|slot 2: 1 port\\(s\\) published tcp\\+udp on the uplink: :80 HOPOS_SLOT_PUBLISH|slot 2: .*HOPOS_BENCH_UP role=serve port=80"
@@ -111,15 +83,7 @@ BURN_MARKS="HOPOS_BENCH_UP role=burn|HOPOS_BENCH_BURN_WORK|HOPOS_BENCH_BURN$"
 MCAST_MARKS="HOPOS_BENCH_UP role=mcast-listen|HOPOS_BENCH_MCAST recv=3"
 RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_APP_PANIC|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_SLOT_PUBLISH_FAIL|HOPOS_BENCH_FAIL"
 
-START=$(date +%s)
-elapsed=0
-step() {
-	sleep 0.2
-	elapsed=$(($(date +%s) - START))
-}
-alive() {
-	! has "$RED" && kill -0 "$QPID" 2>/dev/null && [ "$elapsed" -lt "$TIMEOUT" ]
-}
+started
 job() { # naam env-json
 	curl -s -m 20 -w ' HTTP %{http_code}' -X POST -H 'Content-Type: application/json' \
 		-d '{"name":"'"$1"'","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/bench.elf"}],"memory_limit":67108864'"$2"'}' \
@@ -183,22 +147,10 @@ if [ -n "$BURN_OK" ]; then
 	stop mlisten >/dev/null
 fi
 sleep 1
-kill "$QPID" 2>/dev/null || true
-wait "$QPID" 2>/dev/null || true
-QPID=""
+qemu_stop
 
 fail=0
-IFS_WAS="$IFS"
-IFS='|'
-for m in $BOOT_MARKS $PLACE_MARKS $NODE_MARKS $BURN_MARKS $MCAST_MARKS; do
-	if has "$m"; then
-		echo "   ok  $m: $(tr -d '\r' <"$LOG" | grep -m1 -E "$m")"
-	else
-		echo "   ROOD $m ontbreekt"
-		fail=1
-	fi
-done
-IFS="$IFS_WAS"
+marks "$BOOT_MARKS" "$PLACE_MARKS" "$NODE_MARKS" "$BURN_MARKS" "$MCAST_MARKS"
 case "$POSTED" in
 *"HTTP 2"*) echo "   ok  POST /v1/jobs bench: $POSTED" ;;
 *) echo "   ROOD POST /v1/jobs bench: ${POSTED:-nooit gedaan}"; fail=1 ;;
@@ -219,10 +171,7 @@ else
 	echo "   ROOD idlestat: $IDLE_N regels"
 	fail=1
 fi
-if has "$RED"; then
-	echo "   ROOD $(tr -d '\r' <"$LOG" | grep -m1 -E "$RED")"
-	fail=1
-fi
+reds
 
 # De tabel: de rij van deze run, in de kolommen van docs/measurements.md.
 if [ -s "$JSON" ]; then
@@ -248,17 +197,9 @@ PY
 fi
 echo "== idlestat (de laatste drie):"
 tr -d '\r' <"$LOG" | grep 'HOPOS_IDLESTAT$' | tail -3 | sed 's/^/   /'
-echo "   tijd: $(($(date +%s) - START)) s na de start van QEMU"
+took
 [ -n "${KEEP_JSON:-}" ] && [ -s "$JSON" ] && cp "$JSON" "$KEEP_JSON"
-if [ "$fail" != 0 ]; then
-	KEEP="$(mktemp -t hopos-qemu-bench-rood.XXXXXX)"
-	tr -d '\r' <"$LOG" >"$KEEP"
-	echo "== console bewaard in $KEEP"
-	echo "== console:"
-	cat "$KEEP"
-	exit 1
-fi
-[ -n "${KEEP_LOG:-}" ] && tr -d '\r' <"$LOG" >"$KEEP_LOG"
+verdict qemu-bench
 
 # Boot 2: de schijf-bench, zonder app, op een verse schijf.
 if [ "${NVME:-1}" != 0 ]; then
@@ -267,16 +208,11 @@ if [ "${NVME:-1}" != 0 ]; then
 	LOG2="$(mktemp -t hopos-qemu-nvme.XXXXXX)"
 	LOG1="$LOG"
 	LOG="$LOG2"
-	SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" APP= DISK="$DISK" OSCORE= \
-		sh "$DIR/image/qemu-run.sh" -append "hopos.nvmebench=1" </dev/null >"$LOG" 2>&1 &
-	QPID=$!
+	hop_virt APP= OSCORE= BOOTARGS=hopos.nvmebench=1
 	NVME_MARKS="HOPOS_NVMEBENCH_START|HOPOS_NVMEBENCH_SEQ|HOPOS_NVMEBENCH_RAND|hopfs bench: .*HOPOS_NVMEBENCH|HOPOS_NVMEBENCH_DONE|HOPOS_DISK_UP|hopfs: mounted .*HOPOS_FS_UP"
-	START=$(date +%s)
-	elapsed=0
+	started
 	while alive && ! all "$NVME_MARKS"; do step; done
-	kill "$QPID" 2>/dev/null || true
-	wait "$QPID" 2>/dev/null || true
-	QPID=""
+	qemu_stop
 	tr -d '\r' <"$LOG" | grep -E 'nvme bench:|hopfs bench:|HOPOS_DISK_UP|HOPOS_FS_UP' | sed 's/^/   /'
 	IFS='|'
 	for m in $NVME_MARKS; do
@@ -287,7 +223,7 @@ if [ "${NVME:-1}" != 0 ]; then
 	done
 	IFS="$IFS_WAS"
 	if has "HOPOS_NVMEBENCH_FAIL|HOPOS_DISK_FAIL|HOPOS_FS_FAIL|HOPOS_PANIC|HOPOS_EXCEPTION"; then
-		echo "   ROOD $(tr -d '\r' <"$LOG" | grep -m1 -E 'HOPOS_NVMEBENCH_FAIL|HOPOS_DISK_FAIL|HOPOS_FS_FAIL|HOPOS_PANIC|HOPOS_EXCEPTION')"
+		echo "   ROOD $(first 'HOPOS_NVMEBENCH_FAIL|HOPOS_DISK_FAIL|HOPOS_FS_FAIL|HOPOS_PANIC|HOPOS_EXCEPTION')"
 		fail=1
 	fi
 	if [ "$fail" != 0 ]; then

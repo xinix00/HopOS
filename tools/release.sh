@@ -46,7 +46,7 @@
 #                                  (niet voor de LicheeRV: riscv64)
 #
 # De Apple en de LicheeRV hebben geen gui-feature, dus alleen headless. En de
-# apps van deze boom (de lijst van tools/gate.sh plus decode), als
+# apps van deze boom (APPS van tools/lib.sh plus decode), als
 # <app>-<arch>.elf (jobs/README.md): arm64 allemaal, riscv64 appspike en
 # welcome. Die gaan ook naar de rollende release `apps`, waar de gedeelde
 # configs welcome vandaan halen.
@@ -61,6 +61,7 @@
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+. "$DIR/tools/lib.sh"
 TARGET=aarch64-unknown-none-softfloat
 RV=riscv64gc-unknown-none-elf
 DRY=0
@@ -181,7 +182,7 @@ uefi() {
 	# stap 3b). UEFI leest FAT16 van removable media. De config staat in het
 	# venster van BOOTAA64.EFI (image/uefi-run.sh), niet als hopos.cfg op de
 	# stick: `hop image` zet er een andere in.
-	cargo run -q -p mkcard -- -o "$ESP.img" -size 64 -start 8192 -label hopos -vollabel \
+	cargo run -q -p mkcard -- -o "$ESP.img" -size 64 -start 8192 -label hopos -vollabel -verify \
 		"$ESP/EFI/BOOT/BOOTAA64.EFI=EFI/BOOT/BOOTAA64.EFI" \
 		"$ESP/hopos-stage.elf" >&2
 	card "$ESP.img" "hopos-$1-$4.img"
@@ -192,7 +193,7 @@ apple() {
 	# (LBA 2048, label HOPOS), zodat er in Recovery niets te typen valt behalve
 	# het pad naar install.sh; die zoekt het image naast zichzelf.
 	cargo run -q -p mkcard -- -o target/apple-m4/hopos-apple-card.img -size 32 -start 2048 \
-		-label HOPOS -vollabel "target/apple-m4/hopos-apple.img=hopos-apple.img" \
+		-label HOPOS -vollabel -verify "target/apple-m4/hopos-apple.img=hopos-apple.img" \
 		"image/apple/install.sh=install.sh" "image/apple/README-m4.txt=README.txt" >&2
 	card target/apple-m4/hopos-apple-card.img hopos-apple-headless.img
 	flip apple headless 0 ""
@@ -232,9 +233,9 @@ skip "licheerv headfull: board-licheerv heeft geen gui-feature; en geen flipbund
 # heap: op de LicheeRV "out of memory (1012680 bytes)" bij elke welcome; nu
 # zoekt hij in brokken, maar het image blijft 1,4 MB tegen 329 KB).
 step "apps"
-OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
-ARM_APPS="appspike welcome bench display vitals cloudflared-lean syncprobe decode"
-RV_APPS="appspike welcome"
+need_objcopy release
+ARM_APPS="$APPS decode"
+RV_APPS="$APPS_RISCV64"
 cargo build --quiet --release --target "$TARGET" $(for a in $ARM_APPS; do printf ' -p %s' "$a"; done)
 cargo build --quiet --release --target "$RV" $(for a in $RV_APPS; do printf ' -p %s' "$a"; done)
 for a in $ARM_APPS; do
@@ -322,9 +323,8 @@ node keeps its own config over the flip; \`hop image <bundle> --config
 <cfg>\` gives it another one (and prints the new sha256).
 
 Apps (rolling release [apps](https://github.com/xinix00/HopOS/releases/tag/apps),
-named \`<app>-<arch>.elf\`): appspike, welcome, bench, display, vitals,
-cloudflared-lean, syncprobe, decode for arm64; appspike and welcome for
-riscv64. Jobspecs in \`jobs/\`.
+named \`<app>-<arch>.elf\`): $(echo $ARM_APPS | sed 's/ /, /g') for arm64;
+$(echo $RV_APPS | sed 's/ /, /g; s/, \([^,]*\)$/ and \1/') for riscv64. Jobspecs in \`jobs/\`.
 
 SHA256SUMS:
 

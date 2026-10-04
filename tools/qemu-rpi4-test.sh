@@ -52,6 +52,7 @@
 set -e
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+. "$DIR/tools/lib.sh"
 TARGET=aarch64-unknown-none-softfloat
 DTB="${DTB:-$DIR/image/firmware/rpi4/bcm2711-rpi-4-b.dtb}"
 SECS="${SECS:-8}"
@@ -70,9 +71,9 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 cd "$DIR"
 cargo build --quiet --release --target "$TARGET" -p hopos --features "$FEATS"
 cargo build --quiet --release --target "$TARGET" -p appspike
-OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
+need_objcopy qemu-rpi4-test
 "$OBJCOPY" -O binary "$DIR/target/$TARGET/release/hopos" "$TMP/kernel8.img"
-"$OBJCOPY" --strip-debug "$DIR/target/$TARGET/release/appspike" "$TMP/app.elf"
+strip_elf "$DIR/target/$TARGET/release/appspike" "$TMP/app.elf"
 
 MARKERS="P2|HopOS|HOPOS_BOOT|irq: GIC-400|HOPOS_TICK 3|HOPOS_OS_SELFTEST ok|kicks=1)"
 set -- -kernel "$TMP/kernel8.img" -append "hopos.stage=none hopos.wd=off"

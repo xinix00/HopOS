@@ -118,12 +118,8 @@ echo "== bouwen: hopos (qemuvirt) en welcome hier, hoplb-hopos in $HOPLB_DIR, ag
 (cd "$HOPLB_DIR" && cargo build --quiet --release --target "$TARGET" --no-default-features --features hopos --bin hoplb-hopos) || exit 1
 HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")" || exit 1
 KERN="$DIR/target/$TARGET/release/hopos"
-OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
-strip_to() {
-	if [ -n "$OBJCOPY" ]; then "$OBJCOPY" --strip-debug "$1" "$2"; else cp "$1" "$2"; fi
-}
-strip_to "$DIR/target/$TARGET/release/welcome" "$ART/welcome.elf"
-strip_to "$HOPLB_DIR/target/$TARGET/release/hoplb-hopos" "$ART/hoplb.elf"
+strip_elf "$DIR/target/$TARGET/release/welcome" "$ART/welcome.elf"
+strip_elf "$HOPLB_DIR/target/$TARGET/release/hoplb-hopos" "$ART/hoplb.elf"
 ARTPORT="$(port 0)"
 (cd "$ART" && exec python3 -m http.server "$ARTPORT" --bind 127.0.0.1) >"$ART/http.log" 2>&1 &
 HPID=$!

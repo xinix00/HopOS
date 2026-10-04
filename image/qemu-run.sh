@@ -97,13 +97,12 @@
 set -e
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+. "$DIR/tools/lib.sh"
 SMP="${SMP:-4}"
 SYSPORT="${SYSPORT:-10100}"
 AGENTPORT="${AGENTPORT:-8080}"
 LEADERPORT="${LEADERPORT:-9080}"
-HOP_DIR="${HOP_DIR:-$DIR/../hop/hop}"
 TARGET=aarch64-unknown-none-softfloat
-STAGE_MAX=14680064 # 0xB100_0000 - 0xB020_0000
 DISK="${DISK:-$DIR/target/hopos-disk.img}"
 DISK_MIB="${DISK_MIB:-64}"
 
@@ -141,41 +140,19 @@ if [ -n "${CFG:-}" ]; then
 	KERNEL="$KERNEL.cfg"
 fi
 
-APP="${APP-hop}"
-IMAGE=""
-case "$APP" in
-"") ;;
-hop)
-	IMAGE="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
-	ROLE="${ROLE:-1}"
-	;;
-*/*)
-	IMAGE="$APP"
-	ROLE="${ROLE:-0}"
-	;;
-*)
-	cargo build --quiet --release --target "$TARGET" -p "$APP"
-	IMAGE="$DIR/target/$TARGET/release/$APP"
-	ROLE="${ROLE:-0}"
-	;;
-esac
-
+pick_app hop
 if [ -n "$IMAGE" ]; then
-	# Zonder debug-info: de release-profielen dragen `debug = true` voor de
-	# zwarte doos, en agentd-hopos is daarmee 12 MB (gemeten 29-09) tegen
-	# 594 KiB laadbaar.
-	OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
-	if [ -n "$OBJCOPY" ]; then
-		STAGED="$DIR/target/$TARGET/release/staged-$(basename "$IMAGE").elf"
-		"$OBJCOPY" --strip-debug "$IMAGE" "$STAGED"
-		IMAGE="$STAGED"
-	fi
-	SIZE=$(wc -c <"$IMAGE" | tr -d ' ')
-	if [ "$SIZE" -gt "$STAGE_MAX" ]; then
-		echo "qemu-run: $IMAGE is $SIZE bytes, the staging holds $STAGE_MAX" >&2
-		exit 1
-	fi
-	set -- -device "loader,file=$IMAGE,addr=0xb0200000,force-raw=on" \
+	# Zonder debug-info: agentd-hopos is met debug-info 12 MB (gemeten
+	# 29-09) tegen 594 KiB laadbaar. De rol in het woord op STAGE_ROLE_PA:
+	# 1 = Hop, 0 = app.
+	STAGED="$DIR/target/$TARGET/release/staged-$(basename "$IMAGE").elf"
+	strip_elf "$IMAGE" "$STAGED"
+	fits "$STAGED" "$IMAGE"
+	case "$ROLE" in
+	hop) ROLE=1 ;;
+	app) ROLE=0 ;;
+	esac
+	set -- -device "loader,file=$STAGED,addr=0xb0200000,force-raw=on" \
 		-device "loader,addr=0xb0100000,data=$SIZE,data-len=8" \
 		-device "loader,addr=0xb0100008,data=$ROLE,data-len=8" "$@"
 fi
@@ -222,12 +199,7 @@ if [ -n "${ARTIFACT:-}" ]; then
 	esac
 	ARTDIR="$(mktemp -d -t hopos-artifact.XXXXXX)"
 	ARTNAME="$(basename "$ARTELF" .elf).elf"
-	OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
-	if [ -n "$OBJCOPY" ]; then
-		"$OBJCOPY" --strip-debug "$ARTELF" "$ARTDIR/$ARTNAME"
-	else
-		cp "$ARTELF" "$ARTDIR/$ARTNAME"
-	fi
+	strip_elf "$ARTELF" "$ARTDIR/$ARTNAME"
 	(cd "$ARTDIR" && exec python3 -m http.server "$ARTPORT" --bind 127.0.0.1) >/dev/null 2>&1 &
 	ARTPID=$!
 	trap 'kill "$ARTPID" 2>/dev/null; rm -rf "$ARTDIR"' EXIT INT TERM
@@ -237,9 +209,7 @@ if [ -n "${ARTIFACT:-}" ]; then
 	} >&2
 fi
 
-# virtio-net expliciet op de mmio-bus (virt zet hem anders op PCIe) en
-# modern (force-legacy=false: transportversie 2). -m 3G: het PA-plan van
-# virt legt de slot-pool tot voorbij 0xC000_0000.
+# De QEMU-regel is tools/lib.sh qemu_virt; hier de hostfwd's.
 FWD="hostfwd=tcp:127.0.0.1:${SYSPORT}-:10100"
 FWD="$FWD,hostfwd=tcp:127.0.0.1:${AGENTPORT}-:8080,hostfwd=tcp:127.0.0.1:${LEADERPORT}-:9080"
 if [ -n "${WEBPORT:-}" ]; then
@@ -250,18 +220,13 @@ fi
 if [ -n "${DNSPORT:-}" ]; then
 	FWD="$FWD,hostfwd=udp:127.0.0.1:${DNSPORT}-:5353"
 fi
+QFWD="$FWD"
 # shellcheck disable=SC2086
-set -- -M virt,gic-version=3,highmem-ecam=off,virtualization=on \
-	-cpu cortex-a53 -smp "$SMP" -m 3G \
-	$SCREEN -monitor none -serial stdio $QUSB \
-	-global virtio-mmio.force-legacy=false \
-	-device virtio-net-device,netdev=n0,bus=virtio-mmio-bus.0 \
-	-netdev "user,id=n0,$FWD" \
-	$QDISK \
-	-device virtio-blk-device,drive=disk0,bus=virtio-mmio-bus.1 \
-	-kernel "$KERNEL" "$@"
+set -- $SCREEN -monitor none $QUSB $QDISK -kernel "$KERNEL" "$@"
+# Met een artifact-server draait QEMU als kind, zodat de server met hem
+# stopt; anders vervangt hij dit script.
 if [ -n "$ARTPID" ]; then
-	qemu-system-aarch64 "$@"
+	(qemu_virt "$SMP" "$@")
 else
-	exec qemu-system-aarch64 "$@"
+	qemu_virt "$SMP" "$@"
 fi

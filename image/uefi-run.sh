@@ -59,6 +59,7 @@
 set -e
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+. "$DIR/tools/lib.sh"
 TARGET=aarch64-unknown-none-softfloat
 QEMU_SHARE="${QEMU_SHARE:-/opt/homebrew/share/qemu}"
 BOARD="${BOARD:-uefi}"
@@ -103,11 +104,7 @@ if [ "${MEDIA:-0}" = 1 ]; then
 fi
 ESP="${ESP:-$DIR/target/uefi-esp$([ "$BOARD" = uefi ] || echo "-$BOARD")$FLAVOR}"
 TDIR="$DIR/target/uefi$FLAVOR"
-OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
-[ -n "$OBJCOPY" ] || {
-	echo "uefi-run: rust-objcopy ontbreekt in de toolchain" >&2
-	exit 1
-}
+need_objcopy uefi-run
 
 cd "$DIR"
 # Een eigen target-map: andere RUSTFLAGS dan de virt-build, en zo gooien de
@@ -119,61 +116,16 @@ ELF="$TDIR/$TARGET/release/hopos"
 mkdir -p "$ESP/EFI/BOOT"
 EFI="$ESP/EFI/BOOT/BOOTAA64.EFI"
 "$OBJCOPY" -O binary "$ELF" "$EFI.raw"
-python3 - "$ELF" "$EFI.raw" "$EFI" <<'PY'
-import struct, sys
-elf, raw, out = sys.argv[1], sys.argv[2], sys.argv[3]
-b = open(elf, "rb").read()
-shoff, = struct.unpack_from("<Q", b, 0x28)
-shentsize, shnum, shstrndx = struct.unpack_from("<HHH", b, 0x3a)
-secs = []
-for i in range(shnum):
-    name, typ, flags, addr, off, size = struct.unpack_from("<IIQQQQ", b, shoff + i * shentsize)
-    secs.append((name, typ, flags, addr, off, size))
-strtab = secs[shstrndx]
-def nm(s):
-    o = strtab[4] + s[0]
-    return b[o:b.index(b"\0", o)].decode()
-ALLOC, WRITE = 2, 1
-data_start = min(s[3] for s in secs if s[2] & ALLOC and s[2] & WRITE)
-bad = 0
-n = 0
-for s in secs:
-    if s[1] != 4:  # SHT_RELA
-        continue
-    for k in range(s[5] // 24):
-        r_off, r_info, _ = struct.unpack_from("<QQq", b, s[4] + k * 24)
-        n += 1
-        if r_info & 0xffffffff != 1027 or r_off < data_start:
-            bad += 1
-            if bad <= 5:
-                print(f"uefi-run: relocation {k} in {nm(s)}: type {r_info & 0xffffffff} at {r_off:#x} (data starts at {data_start:#x})", file=sys.stderr)
-if bad:
-    print(f"uefi-run: {bad} of {n} relocations are not RELATIVE in the RW section, refusing the image", file=sys.stderr)
-    sys.exit(1)
-img = open(raw, "rb").read()
-if img[:2] != b"MZ" or img[0x40:0x44] != b"PE\0\0":
-    print("uefi-run: no MZ/PE header at the start of the image", file=sys.stderr)
-    sys.exit(1)
-# De PE-header noemt .data met SizeOfRawData tot aan een paginagrens: vul aan.
-img += b"\0" * (-len(img) % 4096)
-open(out, "wb").write(img)
-print(f"uefi-run: {out} ({len(img)} bytes, {n} relocations, data at {data_start:#x})", file=sys.stderr)
-PY
+# De PIE-toets (alleen RELATIVE, alleen in RW: de stub past ze zelf toe)
+# en de PE-verpakking.
+python3 "$DIR/image/elf.py" pe "$ELF" "$EFI.raw" "$EFI"
 rm -f "$EFI.raw"
 
 # Het gestagede image (de UEFI-tegenhanger van QEMU's -device loader).
-APP="${APP-}"
-ROLE="${ROLE:-app}"
+pick_app ""
 rm -f "$ESP/hopos-stage.elf"
-if [ -n "$APP" ]; then
-	case "$APP" in
-	*/*) IMAGE="$APP" ;;
-	*)
-		cargo build --quiet --release --target "$TARGET" -p "$APP"
-		IMAGE="$DIR/target/$TARGET/release/$APP"
-		;;
-	esac
-	"$OBJCOPY" --strip-debug "$IMAGE" "$ESP/hopos-stage.elf"
+if [ -n "$IMAGE" ]; then
+	strip_elf "$IMAGE" "$ESP/hopos-stage.elf"
 fi
 
 # De config: CFG, op de fysieke borden standaard de gedeelde (image/cfg),
@@ -216,14 +168,8 @@ if [ ! -e "$DISK" ]; then
 	dd if=/dev/zero of="$DISK" bs=1048576 count=0 seek="$DISK_MIB" 2>/dev/null
 fi
 
-exec qemu-system-aarch64 -M virt,gic-version=3,virtualization=on \
-	-cpu "$CPU" -smp "$SMP" -m "$MEM" \
-	-nographic -monitor none -serial stdio $QGUI \
-	-drive "if=pflash,format=raw,readonly=on,file=$QEMU_SHARE/edk2-aarch64-code.fd" \
-	-drive "if=pflash,format=raw,file=$VARS" \
-	-device qemu-xhci \
-	-drive "file=fat:$ESP,format=raw,if=none,id=esp,readonly=on" \
-	-device usb-storage,drive=esp,bootindex=0 \
+# shellcheck disable=SC2086
+qemu_edk2 "$CPU" "$VARS" "$ESP" $QGUI \
 	-device virtio-net-pci,netdev=n0,romfile= \
 	-netdev "user,id=n0,hostfwd=tcp:127.0.0.1:${SYSPORT}-:10100" \
 	-drive "if=none,format=raw,file=$DISK,id=disk0" \

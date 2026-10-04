@@ -29,52 +29,26 @@
 #
 #   tools/qemu-test-share.sh               TIMEOUT=120 standaard, in seconden
 #   KEEP_LOG=pad tools/qemu-test-share.sh  bewaart ook een groene console
-#   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT   de host-poorten; bezet = een vrije
+#   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT   de host-poorten; standaard vrije
 #   HOP_DIR=pad                            de hop-repo (standaard ../hop/hop)
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-TIMEOUT="${TIMEOUT:-120}"
-HOP_DIR="${HOP_DIR:-$DIR/../hop/hop}"
-TARGET=aarch64-unknown-none-softfloat
-LOG="$(mktemp -t hopos-qemu-share.XXXXXX)"
-ART="$(mktemp -d -t hopos-art.XXXXXX)"
-DISK="$ART/disk.img"
-QPID=""
-HPID=""
-cleanup() {
-	[ -n "$QPID" ] && kill "$QPID" 2>/dev/null
-	[ -n "$HPID" ] && kill "$HPID" 2>/dev/null
-	rm -rf "$LOG" "$ART"
-	true
-}
-trap cleanup EXIT INT TERM
-
 . "$(dirname "$0")/lib.sh"
-SYSPORT="$(port "${SYSPORT:-10100}" SYSPORT)"
-AGENTPORT="$(port "${AGENTPORT:-8080}" AGENTPORT)"
-LEADERPORT="$(port "${LEADERPORT:-9080}" LEADERPORT)"
-ARTPORT="$(port "${ARTPORT:-8000}" ARTPORT)"
+TIMEOUT="${TIMEOUT:-120}"
+TARGET=aarch64-unknown-none-softfloat
+scratch qemu-share
+ports SYS AGENT LEADER ART
 
 cd "$DIR"
 echo "== bouwen: hopos (qemuvirt), appspike, en agentd-hopos in $HOP_DIR"
 cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt
-cargo build --quiet --release --target "$TARGET" -p appspike
-HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
-
-OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
-if [ -n "$OBJCOPY" ]; then
-	"$OBJCOPY" --strip-debug "$DIR/target/$TARGET/release/appspike" "$ART/appspike.elf"
-else
-	cp "$DIR/target/$TARGET/release/appspike" "$ART/appspike.elf"
-fi
-(cd "$ART" && exec python3 -m http.server "$ARTPORT" --bind 127.0.0.1) >"$ART/http.log" 2>&1 &
-HPID=$!
+apps appspike
+hop_elf
+serve
 
 echo "== booten op QEMU virt met Hop, 4 cores (tot ${TIMEOUT}s; leader :$LEADERPORT, artifacts :$ARTPORT)"
-SMP=4 SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISK="$DISK" \
-	sh "$DIR/image/qemu-run.sh" </dev/null >"$LOG" 2>&1 &
-QPID=$!
+hop_virt SMP=4
 
 BOOT_MARKS="HOPOS_BOOT|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_HOP_START slot=1 core=0|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
 PLACE_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|slot 1: .*HOP_JOB_PLACED slot=3|HOPOS_SLOT_START slot=2 core=1 |HOPOS_SLOT_START slot=3 core=1 |joined shared core 1 next to 1 resident.*HOPOS_SHARE_JOIN|slot 2: HOPOS_APPSPIKE_SHARE ok .*shared=1|slot 3: HOPOS_APPSPIKE_SHARE ok .*shared=1|slot 2: HOPOS_APPSPIKE_DONE pass=10 fail=0|slot 3: HOPOS_APPSPIKE_DONE pass=10 fail=0"
@@ -90,28 +64,20 @@ job() {
 	printf '{"name":"%s","driver":"hop","artifacts":[{"url":"http://10.0.2.2:%s/appspike.elf"}],"memory_limit":33554432,"cpu_shares":1024,"tags":{"sharegroup":"demo"},"env":{"ROLE":"SHARE"%s}}' "$1" "$ARTPORT" "$hold"
 }
 POSTED=""
-START=$(date +%s)
-elapsed=0
-step() {
-	sleep 0.2
-	elapsed=$(($(date +%s) - START))
-}
-while :; do
-	has "$RED" && break
-	kill -0 "$QPID" 2>/dev/null || break
-	[ "$elapsed" -ge "$TIMEOUT" ] && break
+started
+while alive; do
 	if [ -z "$POSTED" ]; then
 		if all "$BOOT_MARKS"; then
+			posts=""
 			for name in share-a share-b; do
-				if out="$(curl -s -m 20 -w ' HTTP %{http_code}' -X POST \
-					-H 'Content-Type: application/json' -d "$(job "$name")" \
-					"http://127.0.0.1:$LEADERPORT/v1/jobs" 2>&1)"; then
-					POSTED="$POSTED $name: $out"
+				if post_job "$(job "$name")"; then
+					posts="$posts $name: $POSTED"
 				else
-					POSTED="ROOD curl $name: $out"
+					posts="ROOD curl $name: ${POSTED#ROOD curl: }"
 					break
 				fi
 			done
+			POSTED="$posts"
 			case "$POSTED" in ROOD*) break ;; esac
 		fi
 		step
@@ -122,22 +88,10 @@ while :; do
 	fi
 	step
 done
-kill "$QPID" 2>/dev/null || true
-wait "$QPID" 2>/dev/null || true
-QPID=""
+qemu_stop
 
 fail=0
-IFS_WAS="$IFS"
-IFS='|'
-for m in $BOOT_MARKS $PLACE_MARKS; do
-	if has "$m"; then
-		echo "   ok  $m: $(tr -d '\r' <"$LOG" | grep -m1 -E "$m")"
-	else
-		echo "   ROOD $m ontbreekt"
-		fail=1
-	fi
-done
-IFS="$IFS_WAS"
+marks "$BOOT_MARKS" "$PLACE_MARKS"
 n="$(count "$AGAIN")"
 j="$(count "$JOIN")"
 b="$(count "HOPOS_SLOT_START slot=3 ")"
@@ -152,21 +106,10 @@ case "$POSTED" in
 "") echo "   ROOD POST /v1/jobs nooit gedaan (Hop niet op tijd op)"; fail=1 ;;
 *) echo "   ROOD POST /v1/jobs: $POSTED"; fail=1 ;;
 esac
-if has "$RED"; then
-	echo "   ROOD $(tr -d '\r' <"$LOG" | grep -m1 -E "$RED")"
-	fail=1
-fi
-echo "   tijd: $(($(date +%s) - START)) s na de start van QEMU"
-echo "   marker: $(tr -d '\r' <"$LOG" | grep -m1 -E 'slot 2: HOPOS_APPSPIKE_SHARE ok')"
-echo "   marker: $(tr -d '\r' <"$LOG" | grep -m1 -E 'slot 3: HOPOS_APPSPIKE_SHARE ok')"
-echo "   kern:   $(tr -d '\r' <"$LOG" | grep -m1 -E 'HOPOS_SHARE_JOIN')"
-if [ "$fail" != 0 ]; then
-	KEEP="$(mktemp -t hopos-qemu-share-rood.XXXXXX)"
-	tr -d '\r' <"$LOG" >"$KEEP"
-	echo "== console bewaard in $KEEP"
-	echo "== console (staart):"
-	tail -150 "$KEEP"
-	exit 1
-fi
-[ -n "${KEEP_LOG:-}" ] && tr -d '\r' <"$LOG" >"$KEEP_LOG"
+reds
+took
+echo "   marker: $(first 'slot 2: HOPOS_APPSPIKE_SHARE ok')"
+echo "   marker: $(first 'slot 3: HOPOS_APPSPIKE_SHARE ok')"
+echo "   kern:   $(first 'HOPOS_SHARE_JOIN')"
+verdict qemu-share 150
 echo "qemu-share groen"

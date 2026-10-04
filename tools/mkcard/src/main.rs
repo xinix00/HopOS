@@ -18,6 +18,10 @@
 //! patchbare venster van Go's `image/hopcfg` zit in v3 in de kern zelf:
 //! `board/src/cfgwin.rs`, gevuld door `image/hopcfg.py`),
 //! en een leeg bestand krijgt startcluster 0 zoals de FAT-spec zegt.
+//!
+//! `-verify` leest het geschreven image daarna terug van de schijf, los van
+//! de code die het schreef (`verify.rs`), en vergelijkt elk bestand en elke
+//! raw blob met wat erin ging; elk image-script zet hem aan.
 #![cfg_attr(
     test,
     allow(
@@ -29,6 +33,7 @@
 )]
 
 mod fat;
+mod verify;
 
 use std::fmt;
 use std::io;
@@ -37,7 +42,7 @@ use std::process::ExitCode;
 
 /// De hulptekst.
 const USAGE: &str = "usage: mkcard [-o img] [-size MB] [-start LBA] [-label name] [-vollabel] \
-[-raw path@offset]... file[=name]...";
+[-verify] [-raw path@offset]... file[=name]...";
 
 /// De opties, met de standaarden van Go.
 #[derive(Clone, Debug)]
@@ -50,6 +55,8 @@ struct Opts {
     raws: Vec<(String, usize)>,
     /// `bestand[=naam]` per bestand in de FAT.
     files: Vec<String>,
+    /// Het image na het schrijven teruglezen en vergelijken.
+    verify: bool,
 }
 
 /// Waarom er geen image is.
@@ -61,6 +68,8 @@ enum Error {
     Write(String, io::Error),
     /// De kaart zelf.
     Card(fat::Error),
+    /// De terugleesproef: het image op schijf is niet wat erin ging.
+    Verify(String, String),
 }
 
 impl fmt::Display for Error {
@@ -69,6 +78,7 @@ impl fmt::Display for Error {
             Self::Read(p, e) => write!(f, "read {p}: {e}"),
             Self::Write(p, e) => write!(f, "write {p}: {e}"),
             Self::Card(e) => e.fmt(f),
+            Self::Verify(p, e) => write!(f, "verify {p}: {e}"),
         }
     }
 }
@@ -95,6 +105,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         },
         raws: Vec::new(),
         files: Vec::new(),
+        verify: false,
     };
     let mut it = args.iter().peekable();
     while let Some(a) = it.peek() {
@@ -113,12 +124,17 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             Some((n, v)) => (n, Some(v)),
             None => (flag, None),
         };
-        if name == "vollabel" {
-            o.card.vol_entry = match inline {
+        if name == "vollabel" || name == "verify" {
+            let on = match inline {
                 None | Some("true" | "1") => true,
                 Some("false" | "0") => false,
-                Some(v) => return Err(format!("-vollabel={v}: not a bool")),
+                Some(v) => return Err(format!("-{name}={v}: not a bool")),
             };
+            if name == "verify" {
+                o.verify = on;
+            } else {
+                o.card.vol_entry = on;
+            }
             continue;
         }
         let v = match inline {
@@ -184,8 +200,28 @@ fn run(o: &Opts) -> Result<usize, Error> {
             })
         })
         .collect::<Result<Vec<_>, Error>>()?;
+    let want: Vec<(String, Vec<u8>)> = if o.verify {
+        files
+            .iter()
+            .map(|f| (f.name.clone(), f.data.clone()))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let img = fat::build(&o.card, &raws, files).map_err(Error::Card)?;
     std::fs::write(&o.out, &img).map_err(|e| Error::Write(o.out.clone(), e))?;
+    if o.verify {
+        let back = read(&o.out)?;
+        let raws: Vec<(&str, usize, &[u8])> = raws
+            .iter()
+            .map(|r| (r.name.as_str(), r.off, r.data.as_slice()))
+            .collect();
+        let files: Vec<(&str, &[u8])> = want
+            .iter()
+            .map(|(n, d)| (n.as_str(), d.as_slice()))
+            .collect();
+        verify::check(&back, &raws, &files).map_err(|e| Error::Verify(o.out.clone(), e))?;
+    }
     Ok(img.len())
 }
 
@@ -205,12 +241,17 @@ fn main() -> ExitCode {
     match run(&o) {
         Ok(len) => {
             println!(
-                "mkcard: {} ({} MB total, partition {} MB at LBA {}), {} file(s)",
+                "mkcard: {} ({} MB total, partition {} MB at LBA {}), {} file(s){}",
                 o.out,
                 len >> 20,
                 o.card.size_mb,
                 o.card.start,
-                o.files.len()
+                o.files.len(),
+                if o.verify {
+                    ", read back and verified"
+                } else {
+                    ""
+                }
             );
             ExitCode::SUCCESS
         }
