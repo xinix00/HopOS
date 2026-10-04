@@ -39,20 +39,18 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
+- [ ] IJzerronde vóór 3.0.9 (loopt): main 182a9f2 met de IRQ-Dispatcher op
+      elk bord en de lagenconfig in het venster; per bord de IRQ-regels
+      letterlijk gelijk, een pull, de LicheeRV koud met Dereks jobs terug.
+      Dan HopOS 3.0.9 en Hop 3.0.9 voor de media.
 - [ ] Hoofdstuk 8 van docs/description.md (de kanttekeningen vóór de release
-      van dit weekend), eerste golf: geland zijn 8.1 (de zeven fouten, 0f03544)
-      en 8.15 en 8.16 (docs en dode code, f1917f0); nog bezig 8.2 en 8.3
-      abi als enige waarheid, 8.4 het Board-contract expliciet, 8.5
-      interrupts via één Controller, 8.6 het NIC-skelet en de drivers, 8.14
+      van dit weekend), eerste golf: geland zijn 8.1 (de zeven fouten, 0f03544), 8.5
+      (interrupts via één Controller, 8e8cea4) en 8.15 en 8.16 (docs en
+      dode code, f1917f0); nog bezig 8.2 en 8.3 abi als enige waarheid, 8.4
+      het Board-contract expliciet, 8.6 het NIC-skelet en de drivers, 8.14
       de scripts in lib.sh met één runner. Tweede golf daarna: 8.7 en 8.8 (arm64 en riscv, de assembly),
       8.9 (config en firmware-feiten), 8.10 en 8.11 (oneshot, de dubbele
       paden), 8.12 (pollen), 8.13 (apps).
-- [ ] Agent op de O6N en de M4: Hop in zijn eigen groep `hop` op een kleine
-      core (`hopos.hop.core-class=small`, nieuw naast `hopos.hop.sharegroup`;
-      een app deelt mee met `sharegroup: hop`, op last). Vandaag gezien:
-      Hop in `system` krijgt 1 % en de API zwijgt 10 s zodra vier apps de
-      OS-core bestoken. headfull en headless krijgen `hop` en `small`;
-      daarna HopOS 3.0.9 zodat de media die sleutel kennen.
 - [ ] De media met `hop image --config` op v3.0.8 (Derek): Radxa-kaart
       (v3.0.5 stormt na 2 GiB door de MMC-maskers), Altra-stick (v3.0.7
       boot daar niet), M4 via Recovery (Hop is daar nog 3.0.0 en de leader
@@ -61,6 +59,13 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       M4, de Blu-ray-backup op de O6N.
 ### Fixen
 
+- [ ] `HOPOS_IRQ_STUCK` wordt nergens gedrukt (hing aan het dode irq::run;
+      docs/boards-pi.md belooft hem): één regel bij een storm die de ronde
+      beëindigt en bij de eerste verdwaalde lijn.
+- [ ] Een warme flip verplaatst Hop niet; na een flip met een andere groep
+      zegt de bootregel `hop` terwijl Hop nog in `system` zit, en jobs met
+      `sharegroup: hop` krijgen tot de volgende koude start een eigen core.
+      De bootregel moet zeggen waar Hop echt zit.
 - [ ] NVMe op PCI zonder interruptlijn: de pacer van blkdev::Queue pollt de
       eerste 100 us na elke opdracht elke ronde, dus de OS-core slaapt nooit
       zolang er een lees in de lucht is en kern-cpu zegt niets; MSI-X zoals
