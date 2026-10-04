@@ -12,15 +12,9 @@
  },
  "artifacts": [
   {
-   "url": "https://github.com/xinix00/HopOS/releases/download/apps/cloudflared-lean-arm64-tamago.elf",
+   "url": "https://github.com/xinix00/HopOS/releases/download/apps/cloudflared-lean-arm64.elf",
    "match": {
     "node.arch": "arm64"
-   }
-  },
-  {
-   "url": "https://github.com/xinix00/HopOS/releases/download/apps/cloudflared-lean-riscv64-tamago.elf",
-   "match": {
-    "node.arch": "riscv64"
    }
   }
  ]

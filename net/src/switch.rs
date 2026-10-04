@@ -31,7 +31,7 @@ use core::time::Duration;
 use executor::{Executor, Sleeper};
 use sync::mpsc::Mailbox;
 use sync::spsc::{Receiver, Sender};
-use sync::{Either, Signal, Stop, select, yield_now};
+use sync::{Either, Signal, select, yield_now};
 
 /// Het aantal frames per poort per switch-ronde, zodat één drukke poort de
 /// rest niet verhongert.
@@ -776,19 +776,15 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
     /// De lus: commando's, een switch-ronde, de uplink-doorbell, dan
     /// `yield_now` zodat de doelnetstack consumeert vóór een nieuwe volle
     /// burst. Niets te doen: wachten op de bel, een commando of de
-    /// failsafe. Keert terug als `stop` luidt; de staat blijft van de
-    /// aanroeper (de kern-flip leest dan de NAT).
+    /// failsafe. Keert niet terug; de kern-flip leest de NAT via de
+    /// brievenbus (`SnapshotNat`).
     pub async fn run<const T: usize, const M: usize>(
         &mut self,
         exec: &'static Executor<T, M>,
         buf: &mut [u8],
-        stop: &Stop,
     ) {
         let mut by_timer = false;
         loop {
-            if stop.is_set() {
-                return;
-            }
             let cmds = self.drain_commands();
             if self.switch_pass(buf) {
                 self.flush_uplink();
@@ -818,18 +814,14 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
             }
             let commands = self.commands;
             let idle = select(
-                stop.wait(),
-                select(
-                    commands.recv(),
-                    select(self.door.wait(), exec.after_deferrable(FAILSAFE)),
-                ),
+                commands.recv(),
+                select(self.door.wait(), exec.after_deferrable(FAILSAFE)),
             )
             .await;
             match idle {
-                Either::Left(()) => return,
-                Either::Right(Either::Left(cmd)) => self.handle(cmd),
-                Either::Right(Either::Right(Either::Left(()))) => by_timer = false,
-                Either::Right(Either::Right(Either::Right(()))) => by_timer = true,
+                Either::Left(cmd) => self.handle(cmd),
+                Either::Right(Either::Left(())) => by_timer = false,
+                Either::Right(Either::Right(())) => by_timer = true,
             }
         }
     }
@@ -841,13 +833,10 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
 pub async fn flow_expiry<R: Reader, W: Writer, const T: usize, const M: usize>(
     exec: &'static Executor<T, M>,
     commands: &Commands<'_, R, W>,
-    stop: &Stop,
 ) {
     let every = Duration::from_nanos(crate::nat::FLOW_SWEEP_EVERY);
     loop {
-        if let Either::Left(()) = select(stop.wait(), exec.after(every)).await {
-            return;
-        }
+        exec.after(every).await;
         let _ = commands.try_send(Command::Sweep);
     }
 }

@@ -30,6 +30,7 @@ sh image/radxa-zero3.sh                  # Hop als bewoner; of CFG=~/node.cfg, N
 APP=appspike sh image/radxa-zero3.sh     # de kale app-rol: appspike twee keer
 APP= sh image/radxa-zero3.sh             # zonder image (HOPOS_SLOT_NONE)
 HOP_DIR=~/Git/hop sh image/radxa-zero3.sh   # een andere hop-repo (standaard ../hop/hop)
+GUI=1 sh image/radxa-zero3.sh            # de gui-smaak (de beeldketen, docs/gui.md)
 diskutil unmountDisk /dev/diskN
 sudo dd if=target/radxa-zero3/hopos-radxa-zero3.img of=/dev/rdiskN bs=4m
 ```

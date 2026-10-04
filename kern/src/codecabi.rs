@@ -35,8 +35,8 @@
 //! Vóór open kan de verbindingstaak ontbrekende firmware async bijlezen;
 //! daarbij houdt zij geen lening van de dienst vast. De eigenlijke
 //! dienst is één synchrone beurt per call: de verbindingstaak leent
-//! hem via [`serve`] voor precies die beurt, zonder `.await` ertussen
-//! (handboek §1.1). Op de OS-core draait er tussen twee `.await`-punten
+//! hem via [`serve_with_firmware`] ([`Port::serve`]) voor precies die
+//! beurt, zonder `.await` ertussen (handboek §1.1). Op de OS-core draait er tussen twee `.await`-punten
 //! niemand anders, dus die lening is de beurt van de eigenaar; een slot is
 //! er niet.
 
@@ -863,16 +863,6 @@ async fn read_firmware<'a>(
         }
     }
     Err(crate::Error::NoEnt)
-}
-
-/// Bedient een codec-call vanuit de system-API; zonder dienst (een kern
-/// zonder codec-ijzer) is het antwoord een luide weigering.
-pub fn serve(slot: Slot, generation: u32, req: &Req<'_>, out: &mut [u8]) -> usize {
-    let port = *PORT.borrow();
-    match port {
-        Some(p) => p.serve(slot, generation, req, out),
-        None => refuse(out, req, b"this node has no codec hardware"),
-    }
 }
 
 #[cfg(test)]

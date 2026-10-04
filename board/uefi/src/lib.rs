@@ -97,7 +97,7 @@ pub type Disk = VirtioBlk<Pci>;
 /// 0x5000_0000: vrij op QEMU virt onder EDK2 met `-m 3G` (gemeten 29-09,
 /// zie `tools/qemu-uefi-test.sh`). Een board met DRAM elders kiest een
 /// eigen venster met een feature: de O6N `window-8000` (0x8800_0000,
-/// bewezen 30-09), de Altra `window-b000` (0xB000_0000).
+/// bewezen 30-09), de Altra `window-a000` (0xA000_0000, 03-10).
 ///
 /// Eén venster per build, waar Go er zes probeerde (`SLOTS` in
 /// uefi-run.sh, B0 eerst omdat 0x9000_0000 op de Altra bezet was, 13-07):
@@ -106,24 +106,14 @@ pub type Disk = VirtioBlk<Pci>;
 /// geflipte kern zonder firmware op hetzelfde venster terugvindt. Is het
 /// venster bezet, dan toetst de stub Go's kandidaten tegen de memory map en
 /// noemt hij de vrije (`boot.rs`, `HOPOS_UEFI_WINDOW`).
-#[cfg(not(any(
-    feature = "window-8000",
-    feature = "window-a000",
-    feature = "window-b000"
-)))]
+#[cfg(not(any(feature = "window-8000", feature = "window-a000")))]
 pub const WINDOW_PA: u64 = 0x5000_0000;
 /// Zie de standaardversie hierboven.
-#[cfg(all(
-    feature = "window-8000",
-    not(any(feature = "window-a000", feature = "window-b000"))
-))]
+#[cfg(all(feature = "window-8000", not(feature = "window-a000")))]
 pub const WINDOW_PA: u64 = 0x8800_0000;
 /// Zie de standaardversie hierboven: de Altra van 03-10 (B000 bezet).
-#[cfg(all(feature = "window-a000", not(feature = "window-b000")))]
+#[cfg(feature = "window-a000")]
 pub const WINDOW_PA: u64 = 0xA000_0000;
-/// Zie de standaardversie hierboven.
-#[cfg(feature = "window-b000")]
-pub const WINDOW_PA: u64 = 0xB000_0000;
 
 /// Draait de kern van dit board onder E2H = 1 (feature `vhe`, zie
 /// `el2`)? De binary toetst bij het bouwen dat de switcher-smaak van zijn

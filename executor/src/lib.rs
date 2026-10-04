@@ -22,6 +22,13 @@
 //! De verloren-wek-race is dicht doordat de [`Sleeper`] het `ready`-
 //! predicaat nog één keer toetst mét interrupts gemaskeerd.
 //!
+//! Een taak is een future in een box op de heap ([`Executor::spawn`]; een
+//! volle heap is [`SpawnError::OutOfMemory`]), in een vaste tabel van
+//! `TASKS` plaatsen. `spawn` zet hem in een rij; de volgende ronde geeft
+//! hem een plaats, en is de tabel dan vol, dan gaat hij weg en telt
+//! [`Stats::dropped`] (de kern zegt dat op zijn tik, `HOPOS_TASK_DROPPED`).
+//! Het aantal taken staat dus niet bij de compiler, alleen het plafond.
+//!
 //! Wat hier niet staat: prioriteiten, werk-stelen, een tweede core. Elke
 //! core heeft zijn eigen executor en zijn eigen taken; tussen cores gaan
 //! berichten door een ring.
@@ -102,7 +109,8 @@ pub struct Stats {
     pub polls: AtomicU64,
     /// Keren geslapen.
     pub sleeps: AtomicU64,
-    /// Taken die geen slot kregen (gedropt).
+    /// Taken die geen slot kregen (gedropt): `spawn` gaf `Ok`, maar de
+    /// tabel was vol toen de ronde hem een plaats wilde geven.
     pub dropped: AtomicU64,
     /// Timers die geen slot kregen (de wachter spint op ronde-korrel).
     pub timer_overflows: AtomicU64,

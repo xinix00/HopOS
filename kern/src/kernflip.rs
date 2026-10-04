@@ -28,9 +28,6 @@ pub const HAND_VERSION: u64 = 6;
 /// de kop en de slot-records; 0,1% van een kernvenster, en daarvoor
 /// overleeft elke verbinding door de switch een kernwissel.
 pub const HANDOFF_TAIL: usize = 0x40000;
-/// De grootste agent-state (JSON van Hop); groter is een teken dat er iets
-/// anders mis is, en strandt vóór de sprong.
-pub const MAX_AGENT_STATE: usize = 128 << 10;
 /// De volle conntrack van de switch (`hopswitch.MaxFlows`).
 pub const MAX_FLOWS: usize = 4096;
 const HAND_HEAD: usize = 128;
@@ -68,8 +65,6 @@ pub struct Handoff {
     /// De conntrack: zonder deze tabel breekt elke verbinding door de
     /// masquerade bij een kernwissel, terwijl de app doorleeft.
     pub nat: NatState,
-    /// De state van Hop zelf (JSON), anders worden de apps wezen.
-    pub agent: Vec<u8>,
     /// Een KOUDE flip: de vertrekkende kern stopte zijn bewoners en zette
     /// de app-cores uit, dus er valt niets te adopteren. De nieuwe kern
     /// boot koud (eigen switch-code, Hop koud uit de staging) en draagt
@@ -116,12 +111,6 @@ fn pad8(b: &mut Vec<u8>) -> Result {
 /// Bouwt het blob. Past het niet in `max`, dan is dat een fout vóór de
 /// sprong (en dus geen flip) in plaats van een half blob.
 pub fn encode(h: &Handoff, max: usize) -> Result<Vec<u8>> {
-    if h.agent.len() > MAX_AGENT_STATE {
-        return Err(Error::TooLarge {
-            len: h.agent.len(),
-            max: MAX_AGENT_STATE,
-        });
-    }
     let mut b = Vec::new();
     for v in [
         HAND_MAGIC,
@@ -190,9 +179,9 @@ pub fn encode(h: &Handoff, max: usize) -> Result<Vec<u8>> {
         put64(&mut b, u64::from(f.slot_ip) | u64::from(f.dst_ip) << 32)?;
         put64(&mut b, u64::from(f.node_port))?;
     }
-    put64(&mut b, h.agent.len() as u64)?;
-    put(&mut b, &h.agent)?;
-    pad8(&mut b)?;
+    // De lengte van de agent-state: altijd nul. Hop bewaart zijn staat zelf
+    // (`/hop/agent-state.json`); het woord blijft voor de oudere kern.
+    put64(&mut b, 0)?;
     if b.len() > max {
         return Err(Error::TooLarge { len: b.len(), max });
     }
@@ -349,8 +338,9 @@ pub fn decode(b: &[u8]) -> Result<Handoff> {
             },
         )?;
     }
-    let na = bounded(r.u64()?, MAX_AGENT_STATE as u64, r.pos)?;
-    h.agent = crate::slots::try_vec(r.bytes(na)?)?;
+    // De agent-state van een oudere kern: altijd leeg, niet overgenomen.
+    let na = r.u64()?;
+    r.bytes(na)?;
     Ok(h)
 }
 
@@ -495,7 +485,7 @@ pub enum Stage {
     Placed,
     /// Relocaties toegepast.
     Rebased,
-    /// Bewoners, NAT en agent vastgelegd.
+    /// Bewoners en NAT vastgelegd.
     Captured,
     /// Blob geschreven.
     Handoff,
@@ -547,7 +537,7 @@ impl Stage {
             Stage::Scrubbed => "window scrubbed",
             Stage::Placed => "segments placed",
             Stage::Rebased => "relocations applied",
-            Stage::Captured => "residents, NAT and agent state captured",
+            Stage::Captured => "residents and NAT captured",
             Stage::Handoff => "handoff blob written",
             Stage::Jumping => "about to jump into the new kernel",
             Stage::EarlyMain => "the new kernel reached main but died before the handover",
@@ -1214,11 +1204,7 @@ mod tests {
 
     #[test]
     fn handoff_rejects_truncated_services() {
-        let h = Handoff {
-            agent: b"owners".to_vec(),
-            ..Handoff::default()
-        };
-        let b = encode(&h, HANDOFF_TAIL).unwrap();
+        let b = encode(&Handoff::default(), HANDOFF_TAIL).unwrap();
         for n in [HAND_HEAD, HAND_HEAD + 24, b.len() - 8] {
             assert!(decode(&b[..n]).is_err(), "accepted truncation at {n}");
         }
@@ -1226,11 +1212,6 @@ mod tests {
 
     #[test]
     fn handoff_refuses_what_the_tail_cannot_hold() {
-        let h = Handoff {
-            agent: vec![0; MAX_AGENT_STATE + 1],
-            ..Handoff::default()
-        };
-        assert!(encode(&h, HANDOFF_TAIL).is_err());
         assert!(encode(&Handoff::default(), 64).is_err());
     }
 

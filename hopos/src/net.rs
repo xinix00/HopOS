@@ -53,7 +53,7 @@ use net::switch::{self, Ack, Command, Commands, Doorbell, Published, Switch, Wir
 use net::{Egress, Ingress, Stats};
 use netdev::Device;
 use sync::mpsc::Mailbox;
-use sync::{Either, LocalCell, Signal, Stop, select};
+use sync::{Either, LocalCell, Signal, select};
 
 /// De leeskant van een ring zoals de switch en poort 0 hem zien.
 type RingRx = AbiTx;
@@ -126,9 +126,6 @@ static PUMP_BELL: Signal = Signal::new();
 /// De bel van de host-taak: de switch zet hem na een schrijf in poort 0, en
 /// elke taak die de node-stack iets gaf (een write, een accept) ook.
 static HOST_BELL: Signal = Signal::new();
-/// De stop van de vier netwerktaken. Hij luidt nooit: de kern-flip die hem
-/// ooit zet, bestaat nog niet. Vier wachters, dus de standaard `Stop<4>`.
-static STOP: Stop = Stop::new();
 /// De bevestiging van `SetUplink` na DHCP.
 static UPLINK_ACK: Ack = Ack::new();
 /// Het uplink-adres na de lease (big-endian als getal; 0 = nog geen lease).
@@ -379,7 +376,7 @@ pub(crate) fn start<D: Device + 'static>(
 
     let mut pump = Pump::new(nic, ing_tx, eg_rx, &PUMP_BELL, &DOOR, &STATS);
     let irq = pump.nic().irq().is_some();
-    exec.spawn(async move { pump.run(exec, &STOP).await })
+    exec.spawn(async move { pump.run(exec).await })
         .map_err(|_| Error::Spawn("pump"))?;
     println!(
         "net: pump on the nic ({}), uplink queues 2x{} HOPOS_NET_PUMP",
@@ -392,10 +389,10 @@ pub(crate) fn start<D: Device + 'static>(
     );
 
     let mut sw_buf = boot_buf(MAX_LAN_FRAME)?;
-    exec.spawn(async move { sw.run(exec, &mut sw_buf, &STOP).await })
+    exec.spawn(async move { sw.run(exec, &mut sw_buf).await })
         .map_err(|_| Error::Spawn("switch"))?;
     SWITCH_UP.store(true, Relaxed);
-    exec.spawn(switch::flow_expiry(exec, &COMMANDS, &STOP))
+    exec.spawn(switch::flow_expiry(exec, &COMMANDS))
         .map_err(|_| Error::Spawn("flow expiry"))?;
     println!(
         "net: switch up, ports 0..={}, host rings 2x{} bytes HOPOS_SWITCH_UP",
@@ -543,7 +540,7 @@ impl Node {
         } = self;
         let node = NodeStack { exec };
         HostPort::new(node, rx, tx, &HOST_BELL, &DOOR, &STATS, mac, ip, max_slots)
-            .run(exec, &mut buf, &STOP)
+            .run(exec, &mut buf)
             .await;
     }
 

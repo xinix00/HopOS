@@ -120,7 +120,8 @@ const OS_HZ: fn() -> u64 = if cfg!(target_arch = "riscv64") {
     cpu::idle::freq
 };
 
-/// De heap: een bump-allocator met een plafond over de kern-RAM.
+/// De heap: de allocator met vrije lijsten en een plafond over de kern-RAM
+/// (`heap`, docs/heap.md).
 #[global_allocator]
 static HEAP: Heap = Heap::new();
 
@@ -739,7 +740,7 @@ async fn tick(exec: &'static Executor) {
     // De slaaptijd van de vorige tik (executor `slept_ns`): de rest van de
     // tik was werk op de OS-core (`busy_ms`).
     let (mut at, mut slept) = (start, 0u64);
-    let mut refused = 0u64;
+    let (mut refused, mut dropped) = (0u64, 0u64);
     loop {
         n += 1;
         // Een late lezer (de M4 over de dockchannel) krijgt de boot alsnog:
@@ -801,6 +802,16 @@ async fn tick(exec: &'static Executor) {
                 h.free / 1024
             );
             refused = h.refused;
+        }
+        // Een taak die geen plaats in de tabel van de executor kreeg, is weg
+        // terwijl zijn `spawn` Ok gaf: net zo luid, ook zonder `hopos.tick=1`.
+        let d = s.dropped.load(Relaxed);
+        if d != dropped {
+            println!(
+                "executor: {} task(s) dropped, the task table is full HOPOS_TASK_DROPPED",
+                d.wrapping_sub(dropped)
+            );
+            dropped = d;
         }
         // De eerste drie tikken altijd (de QEMU-toetsen lezen HOPOS_TICK 3),
         // daarna alleen met `hopos.tick=1`: een node op het LAN hoeft zijn

@@ -7,7 +7,11 @@ de consoleregel die erbij hoort en wat een afwijking betekent.
 De IPv6-slotbaan voor Matter/Thread staat in [ipv6.md](ipv6.md), inclusief
 de SDK-API, de bronkopie en de resterende hardwareproef.
 
-## Bewezen op QEMU (30-09-2026)
+## De QEMU-toetsen (04-10-2026)
+
+De enige lijst van alle toetsen; de kop van elk script zegt welke markers
+hij eist en welke knoppen hij heeft. `sh image/qemu-run.sh` boot de kern op
+virt zonder toets.
 
 | Test | Wat hij bewijst |
 | --- | --- |
@@ -43,6 +47,8 @@ de SDK-API, de bronkopie en de resterende hardwareproef.
 | `sh tools/qemu-rpi4-test.sh` | het Pi 4-board op QEMU's raspi4b tot de executor-tik |
 | `sh tools/qemu-riscv-test.sh` | QEMU virt riscv64 in machine mode: boot, net, opslag, de zelftest van de PMP-kooi (met de kill-tick), en appspike twee keer door de lifecycle van de kern in een PMP-plus-Sv39-kooi |
 | `sh tools/qemu-riscv-test-hop.sh` | Hop als bewoner op het hart van de kern op riscv64, een `POST /v1/jobs` plaatst appspike, en Hop komt na een herstart terug |
+| `sh tools/qemu-riscv-test-share.sh` | twee bewoners op het ene app-hart (de vorm van de LicheeRV), één yieldt nooit (bench, BURN=1): de tijdschijf van de switcher houdt welcome bereikbaar, twintig GETs elk binnen `MAX_MS` |
+| `sh tools/qemu-riscv-test-flip.sh` | de koude kern-flip op riscv64 met `hop flip --cold`: een warme flip wordt geweigerd, de koude landt (`HOPOS_FLIP_BOOT gen=2`), hart 1 komt uit de uit-stub terug, Hop start koud en plaatst de init-job opnieuw |
 
 `sh tools/gate.sh` is de poort vóór elke commit: host-tests, clippy met
 `-D warnings`, rustfmt, en de target-builds van alle boards (ook met `gui`
@@ -57,29 +63,31 @@ met de toetsen onder `#[cfg(test)]` apart; `-v` noemt de files per emmer.
 
 | Vlak | Doc | Wat erin staat |
 | --- | --- | --- |
-| Boards | [boards.md](boards.md), [boards-pi.md](boards-pi.md), [boards-radxa.md](boards-radxa.md), [boards-riscv.md](boards-riscv.md), [boards-apple.md](boards-apple.md) | per board de checklist met de verwachte regels, de interrupts, de watchdog, de klok en de thermiek |
+| Boards | [boards.md](boards.md), [boards-pi.md](boards-pi.md), [boards-radxa.md](boards-radxa.md), [boards-riscv.md](boards-riscv.md), [boards-apple.md](boards-apple.md) | per board het bouwen, de checklist met de verwachte regels, de interrupts, de watchdog, de klok en de thermiek; in boards.md ook de config van elke node en het config-venster |
 | Kern-flip | [flip.md](flip.md) | de procedure per board, de markers van kern A en kern B, de faalmodi, de boot-guard, de koude weg |
 | Gui | [gui.md](gui.md) | de console op het glas, de framebuffer-grant aan een display-app, de USB-invoer, de beeldketen van de Radxa |
 | Media | [media.md](media.md) | de videocodec van de O6N (Linlon V8), de codec-dienst, de optische drive, de checklist en de meting (24 fps 4K P010) |
 | Apps | [apps.md](apps.md) | hoe een app slaapt op gebeurtenissen en niet op de klok, de bouwstenen (`readable()`, `select`, `after` als deadline), de meetlat `HOPOS_SLOT_LOAD`, het Go-equivalent, de lessen uit de Stulp-port (hartslag, budget, meten per taak en per schakel, geen staatkopieën, allocator, één eigenaar per peer, niet op ACKs wachten, faalpaden, wachtrijen, timers) en de reviewchecklist |
 | Meten | [measurements.md](measurements.md) | per board de laatste v3-meting naast de lat van v2, het gereedschap, en de handleiding voor het bijwerken; `tools/soak.sh` voor uren |
+| Geheugen | [heap.md](heap.md), [stacktask.md](stacktask.md) | de gedeelde allocator van kern en apps (vrije lijsten, plafond, tellers) en waarom; synchrone C-code als taak met een eigen stack (`applib::stacktask`) |
+| Opslag | [storage-sync.md](storage-sync.md) | de bevestigde opslagbarrière `OP_SYNC` voor een database in een app |
+| Reviews | [description.md](description.md), [review-2026-10-01.md](review-2026-10-01.md), [review-port-2026-10-02.md](review-port-2026-10-02.md) | de omschrijving laag voor laag met wat dubbel of scheef is; de leesreview van 1 oktober (wat weg kan); de port-review Go v2.2.7 naast Rust v3 |
 
 ## Images per board
 
-| Board | Bouwen | Uitvoer | Checklist |
-| --- | --- | --- | --- |
-| QEMU virt | `sh image/qemu-run.sh` | draait meteen | de tests hierboven |
-| UEFI generiek (EDK2, QEMU) | `BOARD=uefi sh image/uefi-run.sh` | `target/uefi-esp-uefi/` | [boards.md](boards.md) |
-| Orion O6N | `BOARD=o6n sh image/uefi-run.sh` (met `GUI=1` voor het glas) | `target/uefi-esp-o6n/` (naar een FAT32-stick; de config in het venster van `BOOTAA64.EFI`) | [boards.md](boards.md) |
-| Ampere Altra | `BOARD=altra sh image/uefi-run.sh` | `target/uefi-esp-altra/` | [boards.md](boards.md) |
-| Raspberry Pi 4 | `sh image/rpi4.sh` (met `GUI=1` voor het glas) | `target/hopos-rpi4.img` (dd) | [boards-pi.md](boards-pi.md) |
-| Raspberry Pi 5 | `sh image/rpi5.sh` (met `GUI=1` voor het glas) | `target/hopos-rpi5.img` (dd) | [boards-pi.md](boards-pi.md) |
-| Radxa Zero 3E | `sh image/radxa-zero3.sh` (met `GUI=1` voor het glas) | `target/radxa-zero3/hopos-radxa-zero3.img` (dd) | [boards-radxa.md](boards-radxa.md) |
-| QEMU virt riscv64 | `sh tools/qemu-riscv-test.sh` | draait meteen (machine mode, `-bios none`) | [boards-riscv.md](boards-riscv.md) |
-| LicheeRV Nano (SG2002) | `sh image/licheerv-agent.sh` | `target/licheerv/hopos-licheerv.img` (dd), en `fip-licheerv.bin` voor een bestaande kaart | [boards-riscv.md](boards-riscv.md) |
-| Mac mini M4 (t8132) | `sh image/apple-m4.sh` | `target/apple-m4/hopos-apple.img` (via m1n1: `image/apple/boot-cycle.sh`) | [boards-apple.md](boards-apple.md) |
-| Kern-flip-bundel | `HOPOS_STAMP=B sh image/flip-bundle.sh <virt\|uefi\|o6n\|altra\|rpi4\|rpi5\|radxa>` (met `GUI=1` voor de gui-smaak) | `target/hopos-<board>.flip` plus `.sha256` | [flip.md](flip.md) |
-| Een release (elk board headless en headfull, de bundels, de apps) | `sh tools/release.sh <versie>` (`--dry-run`: alleen bouwen) | `target/release-<versie>/` met `SHA256SUMS`, en de regels om te taggen en te publiceren | [jobs/README.md](../jobs/README.md) |
+Hoe je een board bouwt en flasht staat op één plek: in zijn eigen doc,
+onder "Bouwen". `CFG=` geeft elk image een eigen config, `GUI=1` de
+gui-smaak op de boards met een framebuffer ([gui.md](gui.md)).
+
+| Board | Script | Doc |
+| --- | --- | --- |
+| UEFI generiek (EDK2, QEMU), Orion O6N, Ampere Altra | `image/uefi-run.sh` | [boards.md](boards.md) |
+| Raspberry Pi 4 en 5 | `image/rpi4.sh`, `image/rpi5.sh` | [boards-pi.md](boards-pi.md) |
+| Radxa Zero 3E | `image/radxa-zero3.sh` | [boards-radxa.md](boards-radxa.md) |
+| QEMU virt riscv64, LicheeRV Nano (SG2002) | `tools/qemu-riscv-test.sh`, `image/licheerv-agent.sh` | [boards-riscv.md](boards-riscv.md) |
+| Mac mini M4 (t8132) | `image/apple-m4.sh` | [boards-apple.md](boards-apple.md) |
+| Kern-flip-bundel (elk board) | `image/flip-bundle.sh` | [flip.md](flip.md) |
+| Een release (elk board headless en headfull, de bundels, de apps) | `tools/release.sh <versie>` (`--dry-run`: alleen bouwen) | [jobs/README.md](../jobs/README.md) |
 
 De firmware van de boards staat in `image/firmware/<board>/` (de Pi's, de
 boot-keten van de Radxa, de donor van de LicheeRV; herkomst en sha256 in de

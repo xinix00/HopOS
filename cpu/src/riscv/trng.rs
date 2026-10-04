@@ -12,31 +12,10 @@
 /// De bootregel die het zegt, met de marker uit de Go-kern.
 pub const WARNING: &str = "trng: WARNING no hardware TRNG on this board: crypto (TLS keys, nonces) runs on a jitter-seeded DRBG, not hardware entropy; avoid high-value secrets on this node HOPOS_RNG_INSECURE";
 
-/// Jitter-bytes uit de teller: de laagste bit van het verschil tussen twee
-/// lezingen rond een korte, geheugenafhankelijke lus. Voor het seeden van de
-/// DRBG, niet als bron op zich.
-pub fn jitter(out: &mut [u8]) {
-    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
-    for b in out.iter_mut() {
-        let mut v = 0u8;
-        for bit in 0..8 {
-            let a = super::csr::rdtime();
-            for _ in 0..16 {
-                x = x.rotate_left(7) ^ x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
-            }
-            let d = super::csr::rdtime().wrapping_sub(a) ^ x;
-            v |= ((d & 1) as u8) << bit;
-        }
-        *b = v;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
     fn it_says_so() {
         assert!(super::WARNING.contains("HOPOS_RNG_INSECURE"));
-        let mut b = [0u8; 4];
-        super::jitter(&mut b);
     }
 }

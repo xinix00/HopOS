@@ -33,21 +33,17 @@ workspace = true
 
 [features]
 default = []
-# Het kernvenster op 0x8800_0000 in plaats van 0x5000_0000: voor boards met
-# DRAM vanaf 0x8000_0000 (de O6N). Zie `WINDOW_PA`.
 # Het EFI_RNG_PROTOCOL van de firmware als bron voor de kern-DRBG: alleen op
 # een board waar dat bewezen werkt (de O6N, 30-09). Op de Altra hing de
 # firmware er eeuwig in (Go, 13-07), dus daar nooit; die krijgt de SMCCC-TRNG.
 efi-rng = []
+# Het kernvenster op 0x8800_0000 in plaats van 0x5000_0000: voor boards met
+# DRAM vanaf 0x8000_0000 (de O6N). Zie `WINDOW_PA`.
 window-8000 = []
 # 0xA000_0000: de Altra van 03-10. Go koos B000 (13-07), maar deze firmware
 # houdt B000 bezet en de stub noemt A000 als eerste vrije kandidaat
-# (HOPOS_UEFI_WINDOW). Wint van `window-8000`, verliest van `window-b000`.
+# (HOPOS_UEFI_WINDOW). Wint van `window-8000`.
 window-a000 = []
-# Het kernvenster op 0xB000_0000: de Altra, Go's eerste kandidaat (13-07:
-# 0x9000_0000 bezet, en dat ligt in het venster van `window-8000`). Wint
-# van `window-8000` als beide aan staan. Zie `WINDOW_PA`.
-window-b000 = []
 # De GOP-framebuffer (gop.rs): alleen de gui-smaak leest en mapt hem.
 gui = []
 # De kern onder E2H = 1 (src/el2.rs): HCR, TCR, SCTLR, CPTR en CNTHCTL in

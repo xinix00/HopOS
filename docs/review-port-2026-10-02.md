@@ -2,8 +2,7 @@
 
 Vijf leesagenten (Apple, Pi's, Radxa plus QEMU virt, UEFI/O6N/Altra, de
 arm64-kern) met hun deelreviews. Alleen gelezen, niets gebouwd. De
-rapporten: review-port-apple.md, review-port-raspi.md, review-port-rk3566.md,
-review-port-uefi.md, review-port-arm64-kern.md in deze map.
+deelrapporten staan niet in de repo; dit is hun samenvatting.
 
 ## Niet gevallen
 
@@ -44,12 +43,12 @@ review-port-uefi.md, review-port-arm64-kern.md in deze map.
    vasthouder intrekken, nog 2 s, anders ErrDispatch (14/15-08: uren
    gijzeling). Nu houdt een rekenende bewoner een sharegroup-core voor altijd
    vast en telt de start als gelukt. 30 tot 40 regels.
-5. **Watchdog aait op een zwakker bewijs** (hopos/src/watchdog.rs:147: uplink-IP
+5. **Watchdog aait op een zwakker bewijs** (hopos/src/watchdog.rs `run`: uplink-IP
    plus heartbeat van Hop). Go: een verse TCP-verbinding naar de eigen :8080
    (de doofheid van 02-08: nieuwe verbindingen en ICMP dood, alles binnen
    gezond). Een dove node reset nu niet. Self-dial 50 tot 80 regels, of een
    voortgangsteller van de switch-actor als goedkopere smaak (20 regels).
-6. **Flip op Apple roept PSCI** (hopos/src/flip.rs:577 SYSTEM_RESET, :1289
+6. **Flip op Apple roept PSCI** (hopos/src/flip.rs `reset` SYSTEM_RESET, `cores_off`
    AFFINITY_INFO). Zonder EL3 is dat een UNDEF: de weg terug parkeert de core
    (alleen de WDT haalt hem na 30 s terug) en de koude flip crasht de kern ná
    het bevriezen van de opslag. De koude flip op de M4 is nog nooit gedaan.

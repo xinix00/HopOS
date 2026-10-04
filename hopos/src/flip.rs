@@ -528,13 +528,12 @@ pub(crate) fn land(x0: u64) -> Option<Handoff> {
             open_box(h.generation);
             crate::clock::restore(h.wall_off);
             println!(
-                "flip: landed, generation {} from a {} MB kernel at {:#x}, {} resident(s), {} NAT flow(s), {} B agent state HOPOS_FLIP_BOOT gen={}",
+                "flip: landed, generation {} from a {} MB kernel at {:#x}, {} resident(s), {} NAT flow(s) HOPOS_FLIP_BOOT gen={}",
                 h.generation,
                 h.old_size >> 20,
                 h.old_base,
                 h.slots.len(),
                 h.nat.flows.len(),
-                h.agent.len(),
                 h.generation
             );
             // De conntrack is van de herstel-taak ([`start`]); de slots
@@ -1539,7 +1538,6 @@ fn handoff_and_jump(p: Prepared, slots: Vec<SlotState>, nat: kernflip::NatState)
         bundle_sum: p.sum,
         slots,
         nat,
-        agent: Vec::new(),
         cold: p.cold,
         wall_off: crate::clock::offset(),
     };

@@ -40,7 +40,7 @@ per stap wat de console moet tonen en wat een afwijking betekent.
 
 ```sh
 sh image/rpi4.sh            # Hop uit ../hop/hop; APP=appspike voor het ABI-bewijs
-sh image/rpi5.sh
+sh image/rpi5.sh            # GUI=1 voor de gui-smaak, CFG= voor een eigen config
 diskutil unmountDisk /dev/diskN
 sudo dd if=target/hopos-rpi4.img of=/dev/rdiskN bs=4m    # of hopos-rpi5.img
 ```

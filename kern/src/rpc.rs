@@ -305,8 +305,6 @@ pub enum CommitWhy {
     Periodic,
     /// Een slot stopte.
     Stopped(Slot),
-    /// De kern-flip: de laatste commit van deze kern, vlak vóór de sprong.
-    Flip,
 }
 
 /// Een bericht aan de actor.
@@ -550,8 +548,6 @@ struct Desk<'s, L> {
     committing: bool,
     /// Er loopt iets dat alleen mag lopen (truncate, freeze).
     alone: bool,
-    /// Meetlat: het hoogste aantal calls tegelijk in de lucht.
-    peak: usize,
 }
 
 /// Hoeveel mislukte commits (en blokfouten) een eigen regel krijgen.
@@ -810,7 +806,6 @@ impl<'s, D: BlockIo + Copy, L: Console> FsActor<'s, D, L> {
                 writing: [None; FS_DEPTH],
                 committing: false,
                 alone: false,
-                peak: 0,
             },
         }
     }
@@ -849,7 +844,6 @@ impl<'s, D: BlockIo + Copy, L: Console> FsActor<'s, D, L> {
                                 "hopfs: no room for an admitted call HOPOS_FS_FAIL"
                             ));
                         }
-                        desk.peak = desk.peak.max(pool.len());
                     }
                 }
             }
@@ -857,10 +851,11 @@ impl<'s, D: BlockIo + Copy, L: Console> FsActor<'s, D, L> {
         .await
     }
 
-    /// Eén bestandscall, van begin tot eind (de tests en wie zonder
-    /// brievenbus werkt). Geeft het `size`-veld van het antwoord en het
-    /// aantal databytes op `c.out[REQ_HEADER..]`.
-    pub async fn handle(&mut self, c: &mut FsCall) -> Result<(u64, usize)> {
+    /// Eén bestandscall, van begin tot eind, zonder brievenbus (de tests).
+    /// Geeft het `size`-veld van het antwoord en het aantal databytes op
+    /// `c.out[REQ_HEADER..]`.
+    #[cfg(test)]
+    pub(crate) async fn handle(&mut self, c: &mut FsCall) -> Result<(u64, usize)> {
         let (work, volume) = self.desk.plan(&self.tree, c)?;
         let r = run_call(&self.tree, c, work).await;
         if r.is_ok() && volume && matches!(work, Work::Write(_)) {
@@ -871,8 +866,10 @@ impl<'s, D: BlockIo + Copy, L: Console> FsActor<'s, D, L> {
 
     /// Eén lezing voor de kern ([`FsMsg::KernRead`]): de bestandsmaat en
     /// hoeveel bytes er vooraan in `out` kwamen. Een map is [`Error::Kind`],
-    /// een pad onder [`TASKS_DIR`] [`Error::Denied`].
-    pub async fn kern_read(
+    /// een pad onder [`TASKS_DIR`] [`Error::Denied`]. Zonder brievenbus (de
+    /// tests).
+    #[cfg(test)]
+    pub(crate) async fn kern_read(
         &mut self,
         path: &[u8],
         off: u64,
@@ -887,27 +884,19 @@ impl<'s, D: BlockIo + Copy, L: Console> FsActor<'s, D, L> {
     }
 
     /// Legt de boom vast als hij veranderde; één regel per nieuwe generatie.
-    pub async fn commit(&mut self, why: CommitWhy) {
+    /// Zonder brievenbus (de tests).
+    #[cfg(test)]
+    pub(crate) async fn commit(&mut self, why: CommitWhy) {
         let r = commit_shared(&self.tree).await;
         self.desk.committed(why, r);
     }
 
     /// De bevriezing van de kern-flip: eerst vastleggen, dan pas dicht.
-    pub async fn freeze(&mut self) -> Result<(u64, usize)> {
+    /// Zonder brievenbus (de tests).
+    #[cfg(test)]
+    pub(crate) async fn freeze(&mut self) -> Result<(u64, usize)> {
         let r = commit_shared(&self.tree).await;
         self.desk.frozen_after(&self.tree, r)
-    }
-
-    /// Meetlat: het hoogste aantal calls dat tegelijk in de lucht was.
-    #[must_use]
-    pub fn peak(&self) -> usize {
-        self.desk.peak
-    }
-
-    /// De generatie van de laatst vastgelegde boom.
-    #[must_use]
-    pub fn generation(&self) -> u64 {
-        self.tree.borrow().generation()
     }
 
     /// Geeft de boom terug (een test die opnieuw mount).
@@ -1191,9 +1180,6 @@ impl<L: Console> Desk<'_, L> {
                 CommitWhy::Stopped(s) => self.log.log(format_args!(
                     "hopfs: tree committed as generation {g} (slot {s} stopped) HOPOS_FS_COMMIT"
                 )),
-                CommitWhy::Flip => self.log.log(format_args!(
-                    "hopfs: tree committed as generation {g} (kernel flip) HOPOS_FS_COMMIT"
-                )),
             },
             Ok(None) => {}
             Err(e) => {
@@ -1211,6 +1197,7 @@ impl<L: Console> Desk<'_, L> {
     /// Na de vastlegging van de bevriezing: dicht. Een commit die faalt
     /// bevriest niet: dan zou de nieuwe kern een oudere boom mounten dan de
     /// apps denken, en dat is geen flip maar verlies.
+    #[cfg(test)]
     fn frozen_after<D: BlockIo>(
         &mut self,
         t: &Tree<D>,

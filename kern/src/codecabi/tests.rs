@@ -454,7 +454,15 @@ fn zonder_ijzer_weigert_de_dienst_luid() {
     assert_eq!(st, STATUS_ERROR);
     assert_eq!(msg, b"this node has no codec hardware");
     let mut out = [0u8; 256];
-    let n = serve(slot1(), 1, &open_req(&OPEN), &mut out);
+    let reply = crate::slots::Reply::new();
+    let n = crate::rpc::tests::on(serve_with_firmware(
+        slot1(),
+        1,
+        &open_req(&OPEN),
+        &mut out,
+        None,
+        &reply,
+    ));
     let r = abi::hopabi::decode_resp(&out[..n]).unwrap();
     assert_eq!(
         (r.op, r.status, r.data),

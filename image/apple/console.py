@@ -4,9 +4,9 @@
 #   sudo macvdmtool reboot debugusb   (of gewoon opnieuw opstarten)
 #   image/apple/console.py /dev/cu.kis-100000-ch-0 60
 #
-# Ná de installatie is dit het enige oor: load-probe.py leest de console door
+# Ná de installatie is dit het enige oor: load.py leest de console door
 # m1n1's proxy heen, en die bestaat dan niet meer. HopOS schrijft altijd naar
-# de dockchannel én uart0 (board/apple/console.go), dus dit leest wat er is.
+# de dockchannel én uart0 (board/apple/src/console.rs), dus dit leest wat er is.
 # Eén lezer per poort (twee lezers op één tty was les 1 van de meetbank), en
 # de baudrate op de open fd, niet via stty op het pad (les 2).
 import sys, time, serial

@@ -1,7 +1,9 @@
-# Boards: de UEFI-machines (O6N en Altra)
+# Boards: de config van elke node, en de UEFI-machines (O6N en Altra)
 
-Stand 29-09-2026, nacht (interrupts over PCI, watchdog, klok en thermiek
-erbij). Wat er voor de Radxa Orion O6N en de Ampere Altra
+Eerst de config die elk board deelt (de gedeelde bestanden en het
+config-venster in de kern), dan de UEFI-boards. Stand 29-09-2026, nacht
+(interrupts over PCI, watchdog, klok en thermiek erbij). Wat er voor de
+Radxa Orion O6N en de Ampere Altra
 in v3 gebouwd is, wat je bij de eerste boot op de console hoort te zien, wat
 er nog niet is, en wat je meet. De lat is die van v2 ([measurements.md](measurements.md)):
 een v3-board is pas klaar als het op elk gemeten punt minstens doet wat v2 deed.
@@ -53,15 +55,17 @@ twee op één LAN staan.
 ## Bouwen
 
 ```sh
-BOARD=o6n   image/uefi-run.sh   # target/uefi-esp-o6n/EFI/BOOT/BOOTAA64.EFI
-BOARD=altra image/uefi-run.sh   # target/uefi-esp-altra/EFI/BOOT/BOOTAA64.EFI
+BOARD=uefi  sh image/uefi-run.sh   # target/uefi-esp-uefi/: het generieke image, meteen op QEMU/EDK2 (BUILD_ONLY=1: alleen bouwen)
+BOARD=o6n   sh image/uefi-run.sh   # target/uefi-esp-o6n/EFI/BOOT/BOOTAA64.EFI
+BOARD=altra sh image/uefi-run.sh   # target/uefi-esp-altra/EFI/BOOT/BOOTAA64.EFI
+GUI=1 BOARD=o6n sh image/uefi-run.sh   # de gui-smaak (GOP); MEDIA=1 voor de VPU (docs/media.md)
 ```
 
 Op een stick: een FAT32-partitie met die boom erop (de config staat in het
 venster van `BOOTAA64.EFI`: de gedeelde config, of `CFG=`), Secure Boot uit. Een dd-bare stick
 maakt `tools/release.sh` (`hopos-o6n-headless.img.gz` en zo). Beide boards zijn het UEFI-board
 (`board-uefi`; het kernvenster van de O6N is `window-8000` op 0x8800_0000,
-dat van de Altra `window-b000` op 0xB000_0000) plus een eigen crate:
+dat van de Altra `window-a000` op 0xA000_0000) plus een eigen crate:
 `board-o6n` en `board-altra`. De binary kiest met `--features board-o6n` of
 `board-altra`.
 
@@ -326,12 +330,12 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
 
 ### Wat je hoort te zien
 
-- Vóór de exit, op de firmware-console: `uefi: window 0xb0000000+0x14000000,
+- Vóór de exit, op de firmware-console: `uefi: window 0xa0000000+0x14000000,
   ... MB DRAM, N map entries, M page tables`. N is het aantal descriptors
   (Go: duizenden); de buffer is 256 KB, en vraagt de firmware meer, dan
   eerst `... HOPOS_UEFI_MAP_BIG`. Past de identity map niet in 1024
   tabellen: `HOPOS_UEFI_TABLES` en terug naar de firmware.
-- Is 0xB000_0000 bezet: `kernel window ... is taken`, de vrije regio's,
+- Is 0xA000_0000 bezet: `kernel window ... is taken`, de vrije regio's,
   Go's zes kandidaten elk met `free` of `taken`, en
   `HOPOS_UEFI_WINDOW_FREE` met de eerste vrije (herbouw met dat venster).
   Eén venster per build: de indeling, `slots` en de kern-flip rekenen met

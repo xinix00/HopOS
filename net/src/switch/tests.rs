@@ -644,20 +644,19 @@ fn rx_dropt_na_de_vangrail() {
 }
 
 /// De hele lus over de executor: attach als bericht, een frame erdoor,
-/// detach als bericht, en stop.
+/// en detach als bericht.
 #[test]
 fn run_loop_attach_forward_detach() {
     let exec: &'static executor::Executor<8, 8> = leak(executor::Executor::new());
     exec.set_clock(fake_now);
     let mut h = harness();
-    let stop: &'static Stop = leak(Stop::new());
     let (commands, door, published) = (h.commands, h.door, h.published);
     let mut dst = h.attach(2);
     let H { sw, .. } = h;
     exec.spawn(async move {
         let mut sw = sw;
         let mut buf = vec![0u8; MAX_LAN_FRAME];
-        sw.run(exec, &mut buf, stop).await;
+        sw.run(exec, &mut buf).await;
     })
     .unwrap();
     let settle = || {
@@ -723,10 +722,6 @@ fn run_loop_attach_forward_detach() {
         !published.pending(),
         "ontkoppelde poort staat nog in de tabel"
     );
-
-    stop.set();
-    settle();
-    assert_eq!(exec.live_tasks(), 0, "de lus stopte niet op de stopbel");
 }
 
 /// De flip in het klein: een uitgaande TCP-flow van slot 1 op de oude

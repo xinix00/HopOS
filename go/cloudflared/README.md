@@ -116,9 +116,10 @@ sequence upstream does (`tunnel`, `updater`, `management`, `token`, `tracing`,
 `RegisterBuildInfo`) plus their own `QUIC_GO_DISABLE_ECN=1`.
 
 **2. The metrics listener — a slot has no loopback.** cloudflared binds its
-metrics/readiness server to `localhost:0` by default, and the per-slot gVisor
-netstack has exactly one NIC with the slot's own IP. Upstream's `virtual` runtime
-turns that into `0.0.0.0:0`, which the stack rejects with `bind: bad local
+metrics/readiness server to `localhost:0` by default, and the slot's netstack
+(the SDK's own; `go/apps-release.sh` checks that no gVisor is linked) has
+exactly one NIC with the slot's own IP. Upstream's `virtual` runtime turns that
+into `0.0.0.0:0`, which the stack rejects with `bind: bad local
 address`. It needs a **concrete address and a concrete port**, so the app passes
 `--metrics <own-ip>:20241` (see `DefaultMetricsPort`; `TUNNEL_METRICS` overrides).
 

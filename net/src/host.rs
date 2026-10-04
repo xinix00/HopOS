@@ -21,7 +21,7 @@ use crate::ring::{InPlace, KIND_FRAME, KIND_UPLINK, Reader, Writer};
 use crate::wire::{ET_IPV4, ETH_LEN, be16, be32, put_mac};
 use core::sync::atomic::Ordering::Relaxed;
 use executor::Executor;
-use sync::{Either, Signal, Stop, select, yield_now};
+use sync::{Signal, select, yield_now};
 
 /// Frames per richting per ronde, zodat de host-taak de rest niet
 /// verhongert.
@@ -168,35 +168,22 @@ impl<'a, S: HostStack, R: Reader, W: Writer> HostPort<'a, S, R, W> {
         (sent, false)
     }
 
-    /// De lus van de host-taak. Keert terug als `stop` luidt.
+    /// De lus van de host-taak; keert niet terug.
     pub async fn run<const T: usize, const M: usize>(
         &mut self,
         exec: &'static Executor<T, M>,
         buf: &mut [u8],
-        stop: &Stop,
     ) {
         loop {
-            if stop.is_set() {
-                return;
-            }
             if self.pass(buf) {
                 yield_now().await;
                 continue;
             }
-            let woke = match self.stack.poll_at() {
+            match self.stack.poll_at() {
                 Some(at) => {
-                    match select(stop.wait(), select(self.bell.wait(), exec.until(at))).await {
-                        Either::Left(()) => true,
-                        Either::Right(_) => false,
-                    }
+                    select(self.bell.wait(), exec.until(at)).await;
                 }
-                None => matches!(
-                    select(stop.wait(), self.bell.wait()).await,
-                    Either::Left(())
-                ),
-            };
-            if woke {
-                return;
+                None => self.bell.wait().await,
             }
         }
     }

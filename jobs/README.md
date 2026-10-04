@@ -12,13 +12,13 @@ curl -X POST -d @jobs/job-stulp.local.json http://NODE:9080/v1/jobs
 | Spec | Wat | Artifact |
 | --- | --- | --- |
 | `job-cloudflared.json` | cloudflared's eigen `tunnel run` als slot-app (30 MB, 256 MB partitie) | release `apps` van xinix00/HopOS, Go (`-tamago.elf`) |
-| `job-cloudflared-lean.json` | het tunnelprotocol zelf op lean, 4 MB; wijst naar welcome op `10.100.0.2:80` | release `apps` van xinix00/HopOS, Go (`-tamago.elf`) |
+| `job-cloudflared-lean.json` | het tunnelprotocol zelf op lean, 4 MB; wijst naar welcome op `10.100.0.2:80` | release `apps` van xinix00/HopOS, Rust (`apps/cloudflared-lean`, alleen arm64) |
 | `job-spin.json` | de Spin-server met zijn volume `/spin` | release `rolling` van xinix00/Spin |
 | `job-stulp.json` | Stulp, de huisautomatisering, poort 80 en de attach-poort 7000 | release `apps` van xinix00/stulp |
 | `job-stulp-plugins.json` | de plugins van Stulp (Matter op 5540), hangen aan Stulp | release `apps` van xinix00/stulp |
 | `job-lumen.json` | Lumen, de media-app op de O6N, met de codec-firmware op `/firmware` | een lokale server, `http://192.168.1.208:8002` |
 | `job-webdav.json` | de WebDAV-server op de media-volumes | een lokale server, `http://10.100.0.1:8088` |
-| `hopos-media-o6n.cfg` | de `hopos.cfg` van de media-node: Lumen als init-job | (geen spec; `CFG=jobs/hopos-media-o6n.cfg MEDIA=1 BOARD=o6n sh image/uefi-run.sh`) |
+| `hopos-media-o6n.cfg` | de config van de media-node: Lumen als init-job | (geen spec; `CFG=jobs/hopos-media-o6n.cfg MEDIA=1 BOARD=o6n sh image/uefi-run.sh`) |
 
 De inhoud is die van de Go-generatie, op de geheimen na: `TUNNEL_TOKEN`,
 `SPIN_MASTER_KEY`, `SPIN_WORKER_TOKEN`, `STULP_TOKEN` en
@@ -45,5 +45,6 @@ https://github.com/xinix00/HopOS/releases/download/apps/cloudflared-lean-arm64.e
 cloudflared-lean, syncprobe en decode voor arm64; appspike en welcome ook
 voor riscv64) en zegt hoe ze in `apps` komen; de URL verschuift dus niet
 per versie, en de gedeelde configs (`image/cfg`) starten welcome van daar.
-De Go-images van de Go-generatie staan in dezelfde release als
-`<app>-<arch>-tamago.elf`; de specs hierboven wijzen nog naar die vorm.
+De Go-apps (`go/apps-release.sh`, [go-apps.md](../docs/go-apps.md)) staan
+in dezelfde release als `<app>-<arch>-tamago.elf`; `job-cloudflared.json`
+wijst naar die vorm.

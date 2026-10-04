@@ -18,7 +18,7 @@ use core::time::Duration;
 use executor::Executor;
 use netdev::{Device, TxError};
 use sync::spsc::{Receiver, Sender};
-use sync::{Either, Signal, Stop, select, yield_now};
+use sync::{Signal, select, yield_now};
 
 /// De vangrail op de NIC-interrupt. Op het raster van 10 ms sinds boot,
 /// hetzelfde als de vangrail van de servicers (`kern::slots::SERVICER_GUARD`):
@@ -132,40 +132,25 @@ impl<'a, D: Device> Pump<'a, D> {
         sent || got > 0
     }
 
-    /// De lus van de pomp. Keert terug als `stop` luidt.
-    pub async fn run<const T: usize, const M: usize>(
-        &mut self,
-        exec: &'static Executor<T, M>,
-        stop: &Stop,
-    ) {
+    /// De lus van de pomp; keert niet terug.
+    pub async fn run<const T: usize, const M: usize>(&mut self, exec: &'static Executor<T, M>) {
         let irq = self.nic.irq();
         loop {
-            if stop.is_set() {
-                return;
-            }
             if self.pass() {
                 yield_now().await;
                 continue;
             }
             self.stats.rx_idle.fetch_add(1, Relaxed);
-            let stopped = match irq {
+            match irq {
                 Some(line) => {
                     let grid = u64::try_from(IRQ_GUARD.as_nanos()).unwrap_or(u64::MAX);
                     let guard =
                         exec.until((exec.now() / grid).saturating_add(1).saturating_mul(grid));
-                    let w = select(
-                        stop.wait(),
-                        select(self.bell.wait(), select(line.wait(), guard)),
-                    );
-                    matches!(w.await, Either::Left(()))
+                    select(self.bell.wait(), select(line.wait(), guard)).await;
                 }
                 None => {
-                    let w = select(stop.wait(), select(self.bell.wait(), exec.after(NIC_POLL)));
-                    matches!(w.await, Either::Left(()))
+                    select(self.bell.wait(), exec.after(NIC_POLL)).await;
                 }
-            };
-            if stopped {
-                return;
             }
         }
     }
@@ -306,7 +291,7 @@ mod tests {
         NOW.with(Cell::get)
     }
 
-    /// De lus pollt zonder lijn op zijn eigen klok, en stopt op de bel.
+    /// De lus pollt zonder lijn op zijn eigen klok.
     #[test]
     fn poll_lus_pakt_een_frame_na_de_poll_periode() {
         let exec: &'static Executor<4, 4> = leak(Executor::new());
@@ -314,7 +299,6 @@ mod tests {
         let (ing_tx, ing_rx) = leak(Ingress::new()).split().unwrap();
         let (_eg_tx, eg_rx) = leak(Egress::new()).split().unwrap();
         let stats = leak(Stats::new());
-        let stop: &'static Stop = leak(Stop::new());
         let nic = FakeNic {
             rx: VecDeque::new(),
             tx: Vec::new(),
@@ -331,7 +315,7 @@ mod tests {
         );
         p.nic().rx.push_back(vec![7; 64]);
         // De taak bezit de pomp; de test kijkt via de rij en de tellers.
-        exec.spawn(async move { p.run(exec, stop).await }).unwrap();
+        exec.spawn(async move { p.run(exec).await }).unwrap();
         while exec.step() {}
         assert_eq!(ing_rx.len(), 1, "het frame kwam niet door");
         assert!(stats.rx_idle.load(Relaxed) >= 1);
@@ -341,8 +325,5 @@ mod tests {
             stats.rx_idle.load(Relaxed) >= 2,
             "de poll-timer wekte de pomp niet"
         );
-        stop.set();
-        while exec.step() {}
-        assert_eq!(exec.live_tasks(), 0);
     }
 }
