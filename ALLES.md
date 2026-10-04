@@ -78,8 +78,6 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 - [ ] LicheeRV: elke boot `HOPOS_OS_SELFTEST_FAIL` (alle vier de proeven
       melden `Irq`, R40).
 - [ ] vitals: de standaard-rx-URL werkt niet (`CONNECT is not supported`).
-- [ ] M4: het transport van een bulk-app in kleinere brokken met een yield
-      (4 KiB-calls van de buurman blijven rond 19 tot 20).
 
 ### Op ijzer te zien
 
@@ -107,6 +105,10 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Later
 
+- [ ] Eerlijkheid op de OS-core: 4 KiB-calls van een buurman zakken van 82
+      naar 15 tot 19 MB/s naast een bulk-app (M4, 01-10); er blijft
+      voortgang, dus pas knippen (kleinere brokken met een yield) als het
+      ergens knelt; eerst opnieuw meten op main met TURN_CAP.
 - [ ] Pi 5: het glas (de firmware weigert elke framebuffer sinds de
       herflash, 0x80000001).
 - [ ] Wachtpagina onder de boot-stack op UEFI en RISC-V (de overloop van
