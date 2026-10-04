@@ -619,6 +619,17 @@ impl core::fmt::Display for MsixDiag {
 /// vallen.
 pub fn no_ack() {}
 
+/// Draait de dispatch tot `bell` gaat (de microseconden tot dan) of `ns`
+/// verstreken is: de zelftest van een lijn, vóór de executor.
+pub fn bell_within(bell: &Signal, ns: u64) -> Option<u64> {
+    let t0 = cpu::idle::now();
+    let rang = dev::poll_until(cpu::idle::now, ns, || {
+        let _ = board::Board::dispatch_interrupts(&crate::Uefi::new());
+        bell.take()
+    });
+    rang.then(|| cpu::idle::now().saturating_sub(t0) / 1_000)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

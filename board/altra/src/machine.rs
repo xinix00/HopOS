@@ -3,8 +3,8 @@
 //! UEFI-machine, is van [`On`].
 
 use crate::{LINK_TIMEOUT_NS, is_nic, nic_irq_mode};
-use board::{Board, ClockKnob, CoreClass, Error, Thermal};
-use board_uefi::irq::{At, Mode, Wired};
+use board::{ClockKnob, CoreClass, Error, Thermal};
+use board_uefi::irq::{At, Mode, Wired, bell_within};
 use board_uefi::{NET_BUF, NET_DMA, On, Platform, Uefi, pcie};
 use core::cell::RefCell;
 use dev::Pa;
@@ -147,7 +147,6 @@ fn open_hwmon(pcct: &[u8]) {
 /// lijn en de microseconden tot de eerste aflevering, of de reden om te
 /// pollen.
 fn wire_nic(
-    uefi: &Uefi,
     segs: &pcie::Segments,
     hit: &pcie::Found,
     nic: &mut Igb,
@@ -174,27 +173,16 @@ fn wire_nic(
     let _ = NIC_BELL.take();
     nic.set_irq(&NIC_BELL);
     nic.fire_irq();
-    if let Some(us) = bell_within(uefi, NIC_TEST_NS) {
+    if let Some(us) = bell_within(&NIC_BELL, NIC_TEST_NS) {
         // De ack sloot de vector; de eerste lege ring van de pomp
         // heropent hem.
         return Ok((wired, us));
     }
     if let Wired::Msix { dev_id, .. } = wired {
-        diagnose(uefi, &at, dev_id, nic);
+        diagnose(&at, dev_id, nic);
     }
     nic.clear_irq();
     Err("the forced interrupt (EICS) did not arrive within 50 ms")
-}
-
-/// Draait de dispatch tot de NIC-bel gaat (de microseconden tot dan)
-/// of `ns` verstreken is.
-fn bell_within(uefi: &Uefi, ns: u64) -> Option<u64> {
-    let t0 = cpu::idle::now();
-    let rang = dev::poll_until(cpu::idle::now, ns, || {
-        let _ = uefi.dispatch_interrupts();
-        NIC_BELL.take()
-    });
-    rang.then(|| cpu::idle::now().saturating_sub(t0) / 1_000)
 }
 
 /// Eén regel na een zelftest die niet aankwam, om te kiezen tussen de
@@ -202,12 +190,12 @@ fn bell_within(uefi: &Uefi, ns: u64) -> Option<u64> {
 /// vóór iets ze verandert), de IORT-weg met de SMMU en de ITS, en dan
 /// een `INT` vanuit de ITS zelf. Komt die wel, dan is de ITS-kant goed
 /// en zit de fout tussen de igb en de ITS (doorbell, DeviceID, SMMU).
-fn diagnose(uefi: &Uefi, at: &At<'_>, dev_id: u32, nic: &Igb) {
+fn diagnose(at: &At<'_>, dev_id: u32, nic: &Igb) {
     let d = board_uefi::irq::msix_diag(at, dev_id);
     let regs = nic.irq_regs();
     let _ = NIC_BELL.take();
     let int = match board_uefi::irq::its_fire(dev_id) {
-        Ok(()) => match bell_within(uefi, NIC_TEST_NS) {
+        Ok(()) => match bell_within(&NIC_BELL, NIC_TEST_NS) {
             Some(us) => IntTest::Arrived(us),
             None => IntTest::Silent,
         },
@@ -235,10 +223,15 @@ impl Platform for Ampere {
         pcie::probe_nvme()
     }
 
+    /// MSI-X vector 0 via de ITS, met een zelftest; anders pollt hij.
+    fn wire_disk(&self, disk: &mut Nvme<Pci>) {
+        pcie::wire_nvme(disk);
+    }
+
     /// De eerste igb: BAR0, reset en MAC, ringen, dan de link, en dan de
     /// lijn: MSI-X via de ITS met een zelftest, anders gepold
     /// ([`wire_nic`]; `hopos.nicirq=off` pollt zonder herbouw).
-    fn probe_nic(&self, uefi: &Uefi) -> Result<Option<Igb>, Error> {
+    fn probe_nic(&self, _uefi: &Uefi) -> Result<Option<Igb>, Error> {
         let segs = pcie::segments();
         let Some(hit) = pcie::first_in(&segs, 0, is_nic) else {
             return Ok(None);
@@ -263,7 +256,7 @@ impl Platform for Ampere {
             Error::Nic("igb has no link")
         })?;
         let (vendor, device, bdf, bar) = (hit.f.vendor, hit.f.device, hit.f.bdf, hit.bar);
-        match wire_nic(uefi, &segs, &hit, &mut nic) {
+        match wire_nic(&segs, &hit, &mut nic) {
             Ok((wired, us)) => cpu::println!(
                 "net: igb {vendor:04x}:{device:04x} at {bdf} bar0 {bar:#x} link {link}, {wired}, first interrupt after {us} us, pump on the line with a 10 ms guard HOPOS_NIC_IRQ"
             ),

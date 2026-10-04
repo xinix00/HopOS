@@ -224,6 +224,7 @@ fn admin(c: &mut Ctl, e: &Exec) -> u16 {
             });
         }
         ADM_CREATE_SQ => c.q[1].as_mut().unwrap().sq = buf,
+        ADM_GET_FEATURES => {}
         0x00 | 0x04 => c.events.push("delete queue"),
         _ => return 1, // invalid opcode
     }

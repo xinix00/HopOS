@@ -8,8 +8,10 @@
 #
 # Groen alleen als:
 #
-#   de kern   HOPOS_NVME_UP, "HOPOS_DISK_UP model=QEMU NVMe Ctrl" en
-#             HOPOS_FS_UP fresh=1 (een verse schijf);
+#   de kern   HOPOS_NVME_UP, "HOPOS_DISK_UP model=QEMU NVMe Ctrl",
+#             HOPOS_FS_UP fresh=1 (een verse schijf) en HOPOS_NVME_IRQ op
+#             MSI-X via de ITS (de wachtrij slaapt op de lijn; de zelftest
+#             kwam aan);
 #   per slot  HOPOS_APPSPIKE_FS ok en HOPOS_APPSPIKE_DONE ... fail=0.
 #
 # Rood is ook: HOPOS_PANIC, HOPOS_EXCEPTION, HOPOS_NVME_FAIL, HOPOS_FS_FAIL
@@ -51,6 +53,7 @@ BUILD_ONLY=1 BOARD=altra APP=appspike ESP="$ESP" CFG="$CFG" sh image/uefi-run.sh
 }
 
 MARKS="HOPOS_NVME_UP|HOPOS_DISK_UP model=QEMU NVMe Ctrl blocks=131072|HOPOS_FS_UP fresh=1"
+MARKS="$MARKS|MSI-X via the ITS, LPI [0-9]+.*HOPOS_NVME_IRQ"
 MARKS="$MARKS|slot 1: HOPOS_APPSPIKE_FS ok|slot 1: HOPOS_APPSPIKE_DONE pass=[0-9]+ fail=0"
 MARKS="$MARKS|slot 2: HOPOS_APPSPIKE_FS ok|slot 2: HOPOS_APPSPIKE_DONE pass=[0-9]+ fail=0"
 RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_NVME_FAIL|HOPOS_FS_FAIL|HOPOS_FS_IO|HOPOS_APPSPIKE_FS FAIL"

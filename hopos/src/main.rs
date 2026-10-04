@@ -360,17 +360,24 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     // wordt één keer geprobed; de meetbanken (bench.rs, alleen met
     // hopos.nvmebench of hopos.idlestat) lenen hem vóór de opslag hem mount.
     let disk = bench::start(exec, storage::probe());
-    let fs = storage::start(exec, disk);
+    let disk = storage::start(exec, disk);
     // MEDIA: de codec-dienst ná de opslag, want de firmware-blobs staan op
     // het volume (codec.rs); zonder VPU meldt hij luid dat er geen is.
     codec::up(exec);
-    let system = system(privilege, fs, slot_count(board));
+    let system = system(privilege, disk.is_some(), slot_count(board));
 
     // De IRQ-dispatch spawnt als eerste: hij is de pomp van alle lijnen.
     // Faalt de controller, dan draait de node door op de vangrail van de
     // slaap (interrupts zijn een verbetering, geen voorwaarde).
+    // De schijf kwam ervóór op (de bench en de mount pollen); zijn lijn
+    // komt nu.
     match board.start_interrupts() {
-        Ok(bell) => exec.spawn(irq_dispatch(board, bell)).expect("spawn irq"),
+        Ok(bell) => {
+            exec.spawn(irq_dispatch(board, bell)).expect("spawn irq");
+            if let Some(q) = disk {
+                q.with_dev(|d| board.wire_disk(d));
+            }
+        }
         Err(e) => println!("irq: {e}, running on the sleep failsafe HOPOS_IRQ_FAIL"),
     }
     exec.spawn(tick(exec)).expect("spawn tick");

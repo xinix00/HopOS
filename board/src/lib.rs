@@ -571,6 +571,13 @@ pub trait Board: Sync + Watchdog + Thermal + ClockKnob {
     /// board; één keer (de bench leent hem, dan neemt de opslag hem).
     fn probe_disk(&self) -> Result<Option<Self::Disk>, Error>;
 
+    /// De lijn van de schijf, zodra de interrupts er zijn
+    /// ([`start_interrupts`](Board::start_interrupts)): de schijf komt
+    /// ervóór op (de bench en de mount pollen), zijn bel daarna. Standaard
+    /// niets: de schijf pollt, of het board bedraadde hem al bij de probe
+    /// (QEMU virt).
+    fn wire_disk(&self, _disk: &mut Self::Disk) {}
+
     /// De fysieke index van de core waar dit draait.
     fn this_core(&self) -> usize;
 

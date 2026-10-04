@@ -11,7 +11,7 @@
 //!   opdracht voor de NVMMU, een coprocessor die bij elke wachtlus hoort, en
 //!   een schijf die van macOS is.
 //!
-//! Eén admin-queue en één I/O-queue-paar van [`Q_ENTRIES`], gepold. De
+//! Eén admin-queue en één I/O-queue-paar van [`Q_ENTRIES`]. De
 //! DMA-regio heeft per queue-paar drie tabellen van 16 KiB (de zijtabel
 //! van het transport, de SQ, de CQ), dan een PRP-lijstpagina per ticket, en
 //! vanaf [`DATA_OFF`] het datablok in een eigen blok van 2 MB dat het board
@@ -27,7 +27,9 @@
 //! CID (O6N 01-10: MDTS 512 KiB, een lees van 1 MiB werd twee seriële
 //! opdrachten). Niets wacht: `start_tag` zet de opdrachten op de controller
 //! en keert terug, `reap` haalt de completions op in elke volgorde, en de
-//! wachter (`blkdev::Queue`) pollt. Les van 30-09: de synchrone commit van
+//! wachter (`blkdev::Queue`) slaapt op de bel van de lijn als het board er
+//! een bedraadde (PCI: MSI-X vector 0, [`pci`]), anders pollt hij. Les van
+//! 30-09: de synchrone commit van
 //! hopfs hield op QEMU de OS-core tot 7 s stil. GEMETEN 01-10 op de M4:
 //! willekeurig 4 KiB lezen 11.888 per seconde met één tegelijk, 175.055 met
 //! zestien.
@@ -56,6 +58,7 @@ use core::mem::{offset_of, size_of};
 use core::task::Poll;
 use core::time::Duration;
 use dev::{Pa, Reg};
+use sync::Signal;
 
 pub mod apple;
 pub mod pci;
@@ -142,6 +145,10 @@ const CC_IOSQES: u32 = 6 << 16;
 /// 16-byte completion-entries (2^4).
 const CC_IOCQES: u32 = 4 << 20;
 const CC_SHN_MASK: u32 = 3 << 14;
+/// CREATE_IO_CQ/SQ: fysiek aaneengesloten.
+const Q_PC: u32 = 1 << 0;
+/// CREATE_IO_CQ: interrupts aan, op de vector in [31:16].
+const CQ_IEN: u32 = 1 << 1;
 const CSTS_RDY: u32 = 1 << 0;
 /// Controller Fatal Status.
 const CSTS_CFS: u32 = 1 << 1;
@@ -151,6 +158,7 @@ const CSTS_CFS: u32 = 1 << 1;
 const ADM_CREATE_SQ: u8 = 0x01;
 const ADM_CREATE_CQ: u8 = 0x05;
 const ADM_IDENTIFY: u8 = 0x06;
+const ADM_GET_FEATURES: u8 = 0x0a;
 const IO_FLUSH: u8 = 0x00;
 const IO_WRITE: u8 = 0x01;
 const IO_READ: u8 = 0x02;
@@ -446,6 +454,10 @@ pub trait Transport {
     /// Zonder lijn: hoe lang de wachter per ronde pollt en daarna op welke
     /// periode (`blkdev::AsyncBlockDevice::poll_pace`).
     const PACE: (u64, Duration) = (blkdev::POLL_SPIN_NS, blkdev::POLL_PERIOD);
+    /// De I/O-CQ meldt zijn completions met een interrupt (IEN, vector 0,
+    /// zoals de admin-CQ altijd doet), zodat het board de wachter op een
+    /// lijn kan zetten. PCI ja; de ANS pollt (zijn lijn loopt over de AIC).
+    const IRQ: bool = false;
 
     /// De SQE op plek `slot` van `q` staat klaar (met een barrière erna):
     /// zet hem op de controller. Een ring hoeft niets.
@@ -613,6 +625,8 @@ pub struct Nvme<T: Transport> {
     commands: u64,
     /// Meetlat: het langste ticket in nanoseconden.
     slowest_ns: u64,
+    /// De bel van de lijn van de I/O-CQ, als het board hem bedraadde.
+    irq: Option<&'static Signal>,
 }
 
 impl<T: Transport> Nvme<T> {
@@ -657,6 +671,7 @@ impl<T: Transport> Nvme<T> {
             ahead_waste: 0,
             commands: 0,
             slowest_ns: 0,
+            irq: None,
         })
     }
 
@@ -778,8 +793,9 @@ impl<T: Transport> Nvme<T> {
         Ok(())
     }
 
-    /// Meldt het I/O-queue-paar aan: CQ eerst, fysiek aaneengesloten, zonder
-    /// interrupts (de driver pollt).
+    /// Meldt het I/O-queue-paar aan: CQ eerst, fysiek aaneengesloten, met
+    /// interrupts op vector 0 als het transport dat zegt ([`Transport::IRQ`],
+    /// Linux `adapter_alloc_cq`).
     fn create_io_queues(&mut self) -> Result<(), T::Error> {
         let q = u32::from(Q_ENTRIES - 1) << 16;
         let id = u32::from(self.io.id);
@@ -787,14 +803,14 @@ impl<T: Transport> Nvme<T> {
             opc: ADM_CREATE_CQ,
             prp1: self.io.cq.0,
             cdw10: q | id,
-            cdw11: 1, // PC
+            cdw11: Q_PC | if T::IRQ { CQ_IEN } else { 0 }, // IV 0
             ..Cmd::default()
         })?;
         self.admin(Cmd {
             opc: ADM_CREATE_SQ,
             prp1: self.io.sq.0,
             cdw10: q | id,
-            cdw11: (id << 16) | 1, // CQID, PC
+            cdw11: (id << 16) | Q_PC, // CQID
             ..Cmd::default()
         })
     }
@@ -1568,6 +1584,10 @@ impl<T: Transport> blkdev::AsyncBlockDevice for Nvme<T> {
 
     fn poll_pace(&self) -> (u64, Duration) {
         T::PACE
+    }
+
+    fn irq(&self) -> Option<&'static Signal> {
+        self.irq
     }
 
     fn depth(&self) -> usize {

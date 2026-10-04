@@ -119,8 +119,8 @@ const STATS_EVERY: Duration = Duration::from_secs(10);
 
 /// De meetlat van de schijf, één regel per [`STATS_EVERY`] als er
 /// opdrachten waren: de driver (opdrachten, read-ahead, de traagste) en de
-/// wachtrij (het hoogste aantal tegelijk).
-async fn stats(exec: &'static Executor, disk: &'static Queue<Disk, ExecPace>) {
+/// wachtrij (het hoogste aantal tegelijk, en hoe vaak de pacer keek).
+async fn stats(exec: &'static Executor, disk: &'static DiskQueue) {
     let mut last = 0;
     loop {
         exec.after(STATS_EVERY).await;
@@ -130,9 +130,10 @@ async fn stats(exec: &'static Executor, disk: &'static Queue<Disk, ExecPace>) {
         }
         last = now;
         println!(
-            "disk: {} queue_peak={} HOPOS_DISK_STATS",
+            "disk: {} queue_peak={} queue_polls={} HOPOS_DISK_STATS",
             DevStats(disk),
-            disk.peak()
+            disk.peak(),
+            disk.polls()
         );
     }
 }
@@ -147,7 +148,7 @@ impl core::fmt::Write for Sink {
 }
 
 /// De meetlat van de driver als `Display`, zonder buffer.
-struct DevStats(&'static Queue<Disk, ExecPace>);
+struct DevStats(&'static DiskQueue);
 
 impl core::fmt::Display for DevStats {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -174,16 +175,18 @@ pub(crate) fn probe() -> Option<Disk> {
     }
 }
 
+/// De wachtrij van de opslag, zoals [`start`] hem geeft.
+pub(crate) type DiskQueue = Queue<Disk, ExecPace>;
+
 /// Zet de opslag op de geprobede schijf ([`probe`]): hopfs mounten, actor
-/// en committer spawnen. Geeft `true` als de bestandscalls bediend worden;
-/// zonder schijf draait de node door en weigert elke bestandscall luid (de
-/// regel gaf [`probe`] al).
+/// en committer spawnen. Geeft de wachtrij als de bestandscalls bediend
+/// worden (de lijn van de schijf komt erbij na `start_interrupts`,
+/// `Board::wire_disk`); zonder schijf draait de node door en weigert elke
+/// bestandscall luid (de regel gaf [`probe`] al).
 #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
-pub(crate) fn start(exec: &'static Executor, disk: Option<Disk>) -> bool {
+pub(crate) fn start(exec: &'static Executor, disk: Option<Disk>) -> Option<&'static DiskQueue> {
     let board = &crate::BOARD;
-    let Some(disk) = disk else {
-        return false;
-    };
+    let disk = disk?;
     let sectors = blkdev::Disk::sectors(&disk);
     // De maat van het blokcontract, niet een eigen methode van de driver
     // (de ANS heeft er een met dezelfde naam: de MDTS zonder afronding).
@@ -193,8 +196,7 @@ pub(crate) fn start(exec: &'static Executor, disk: Option<Disk>) -> bool {
         blkdev::Disk::model(&disk)
     );
     // De wachtrij leeft zolang de kern: één keer bij de boot op de heap.
-    let disk: &'static Queue<Disk, ExecPace> =
-        Box::leak(Box::new(Queue::new(disk, ExecPace(exec))));
+    let disk: &'static DiskQueue = Box::leak(Box::new(Queue::new(disk, ExecPace(exec))));
     println!(
         "disk: queue of {} request(s) at once HOPOS_DISK_QUEUE depth={}",
         disk.depth(),
@@ -215,7 +217,7 @@ pub(crate) fn start(exec: &'static Executor, disk: Option<Disk>) -> bool {
         Ok(m) => m,
         Err(e) => {
             println!("hopfs: mount failed: {e}, file calls refused HOPOS_FS_FAIL");
-            return false;
+            return None;
         }
     };
     let generation = fs.generation();
@@ -252,7 +254,7 @@ pub(crate) fn start(exec: &'static Executor, disk: Option<Disk>) -> bool {
     };
     if exec.spawn(actor).is_err() {
         println!("hopfs: actor not spawned, file calls refused HOPOS_FS_FAIL");
-        return false;
+        return None;
     }
     UP.store(true, Relaxed);
     if exec.spawn(stats(exec, disk)).is_err() {
@@ -271,5 +273,5 @@ pub(crate) fn start(exec: &'static Executor, disk: Option<Disk>) -> bool {
         // De calls werken; alleen het vastleggen niet. Luid, niet fataal.
         println!("hopfs: committer not spawned, the tree is not kept HOPOS_FS_COMMIT_FAIL");
     }
-    true
+    Some(disk)
 }

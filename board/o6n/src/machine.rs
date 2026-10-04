@@ -231,6 +231,11 @@ impl Platform for Cix {
         pcie::probe_nvme()
     }
 
+    /// MSI-X vector 0 via de ITS, met een zelftest; anders pollt hij.
+    fn wire_disk(&self, disk: &mut Nvme<Pci>) {
+        pcie::wire_nvme(disk);
+    }
+
     /// De eerste Realtek-poort (geen twee-poorts-aggregatie): BAR2 (het
     /// MMIO-blok; BAR0 is de I/O-alias), reset en MAC, ringen en MAC aan,
     /// dan PHY en autoneg, en dan de lijn (`board_uefi::irq`): MSI-X via de

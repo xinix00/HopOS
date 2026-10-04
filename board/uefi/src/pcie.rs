@@ -1,18 +1,22 @@
 //! De PCIe-zoektocht van een UEFI-machine met eigen drivers (de O6N, de
 //! Altra): de ECAM-vensters uit de MCFG, de eerste functie met een
-//! toegewezen BAR, en de NVMe. Generiek over een [`Config`]-venster, zodat
-//! de zoektocht op de host te toetsen is.
+//! toegewezen BAR, en de NVMe met zijn lijn. Generiek over een
+//! [`Config`]-venster, zodat de zoektocht op de host te toetsen is.
 //!
 //! De firmware configureerde de hiërarchie en wees de BAR's toe: we lezen
 //! alleen (Go: "hem overschrijven zou de controller op PA 0 zetten"; op de
 //! Altra een data-abort).
 
 use crate::BLK_DMA;
+use crate::irq::{self, At, Wired};
 use board::Error;
 use bounded::BoundedVec;
+use core::cell::Cell;
+use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use dev::Pa;
 use driver_nvme::{Nvme, pci::Pci};
-use driver_pcie::{Config, Ecam, Function, find};
+use driver_pcie::{CMD_INTX_DISABLE, Config, Ecam, Function, find};
+use sync::{Local, Signal};
 
 /// Zoveel ECAM-vensters: de Altra heeft er tot acht, de O6N vijf.
 pub const MAX_SEGMENTS: usize = 8;
@@ -94,7 +98,16 @@ pub fn probe_nvme() -> Result<Option<Nvme<Pci>>, Error> {
     }
     if let Some((e, _)) = segs.get(hit.win) {
         hit.f.enable(e);
+        // Stil tot zijn lijn er is ([`wire_nvme`]): geen INTx, en geen
+        // MSI-X van de vorige kern van een flip naar een ITS die deze kern
+        // nog niet opzette (Linux `msix_capability_init` zet hem ook eerst
+        // uit).
+        hit.f.set_command(e, CMD_INTX_DISABLE);
+        if let Some(m) = hit.f.msix(e) {
+            hit.f.msix_enable(e, &m, false);
+        }
     }
+    NVME.get().set(Some(hit));
     // SAFETY: BAR0 is door de firmware toegewezen en nu Device-gemapt
     // (`map_device`); memory-decode en bus-mastering staan aan. BLK_DMA is
     // van deze driver alleen, Normal-NC gemapt door de stub.
@@ -114,4 +127,73 @@ pub fn probe_nvme() -> Result<Option<Nvme<Pci>>, Error> {
         disk.max_transfer()
     );
     Ok(Some(disk))
+}
+
+/// De NVMe van [`probe_nvme`], voor [`wire_nvme`]. Alleen de executor van
+/// de kern-core raakt hem aan (de boot).
+static NVME: Local<Cell<Option<Found>>> = Local::new(Cell::new(None));
+
+/// De bel van de NVMe-lijn: de dispatch luidt hem, de wachter van de
+/// opslag (`blkdev::Queue`) slaapt erop.
+static NVME_BELL: Signal = Signal::new();
+
+/// De LPI van de NVMe, 0 = geen: de dispatch telt hem niet als NIC.
+pub(crate) static NVME_LPI: AtomicU32 = AtomicU32::new(0);
+
+/// Hoe lang de zelftest op de interrupt wacht (zoals de igb op de Altra).
+const IRQ_TEST_NS: u64 = 50_000_000;
+
+/// Zet de NVMe van [`probe_nvme`] op zijn lijn, na `start_interrupts`:
+/// MSI-X vector 0 via de ITS van zijn root-complex (`irq::wire_msix`, de
+/// weg van de NIC), en dan de zelftest: één admin-opdracht, en de dispatch
+/// moet zijn interrupt binnen [`IRQ_TEST_NS`] zien. Pas dan krijgt de
+/// driver de bel; anders pollt hij zoals voorheen (een stille route liet de
+/// wachter anders op zijn vangrail van 10 ms leven). Nooit INTx: dat doodt
+/// de Altra (L83). Eén regel, `HOPOS_NVME_IRQ`.
+pub fn wire_nvme(disk: &mut Nvme<Pci>) {
+    let Some(hit) = NVME.get().get() else {
+        return;
+    };
+    match wire_line(&hit, disk) {
+        Ok((wired, us, vectors)) => cpu::println!(
+            "disk: nvme at {} {wired}, vector 0 of {vectors}, first interrupt after {us} us, the queue waits on the line with a 10 ms guard HOPOS_NVME_IRQ",
+            hit.f.bdf
+        ),
+        Err(why) => cpu::println!("disk: nvme at {} polled ({why}) HOPOS_NVME_IRQ", hit.f.bdf),
+    }
+}
+
+/// Zie [`wire_nvme`]: de lijn, de microseconden tot de eerste interrupt en
+/// het aantal vectoren van de functie, of de reden om te pollen.
+fn wire_line(hit: &Found, disk: &mut Nvme<Pci>) -> Result<(Wired, u64, u16), &'static str> {
+    let segs = segments();
+    let (e, _) = segs.get(hit.win).ok_or("no config window")?;
+    // Het segment van het venster: `segments` en `pcie_segments` lopen
+    // allebei de MCFG in volgorde af.
+    let seg = crate::pcie_segments().nth(hit.win).map_or(0, |(_, s, _)| s);
+    let at = At {
+        ecam: e,
+        seg,
+        root_bus: hit.root_bus,
+        f: &hit.f,
+    };
+    let m = hit.f.msix(e).ok_or("no MSI-X capability")?;
+    let wired = irq::wire_msix(&at, &NVME_BELL, irq::no_ack, true)?;
+    let Wired::Msix { lpi, dev_id } = wired else {
+        return Err("not MSI-X");
+    };
+    NVME_LPI.store(lpi, Relaxed);
+    let _ = NVME_BELL.take();
+    disk.fire_irq()
+        .map_err(|_| "the self-test command failed")?;
+    if let Some(us) = irq::bell_within(&NVME_BELL, IRQ_TEST_NS) {
+        disk.set_irq(&NVME_BELL);
+        return Ok((wired, us, m.size));
+    }
+    cpu::println!(
+        "disk: nvme MSI-X diag: {} HOPOS_NVME_IRQ_DIAG",
+        irq::msix_diag(&at, dev_id)
+    );
+    hit.f.msix_enable(e, &m, false);
+    Err("the self-test interrupt did not arrive within 50 ms")
 }

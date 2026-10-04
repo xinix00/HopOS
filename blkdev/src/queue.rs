@@ -59,6 +59,8 @@ struct State<D> {
     pacer: Option<usize>,
     /// Meetlat: het hoogste aantal tickets tegelijk.
     peak: usize,
+    /// Meetlat: zo vaak keek de pacer naar het device (een `reap`).
+    polls: u64,
     /// De laatste beweging op het device (een submit of een completion),
     /// op de klok van de [`Pace`]: tot het spinvenster erna pollt de pacer
     /// per ronde.
@@ -80,6 +82,7 @@ impl<D: AsyncBlockDevice> State<D> {
     /// iedereen (elke `poll_tag` geeft dan de fout). Daarna de wezen. `now`
     /// wordt de laatste beweging als er iets terugkwam.
     fn collect(&mut self, now: u64) {
+        self.polls += 1;
         let done = self.dev.reap().unwrap_or(u64::MAX);
         if done & self.out != 0 {
             self.last = now;
@@ -198,6 +201,7 @@ impl<D: AsyncBlockDevice, P: Pace> Queue<D, P> {
                 wake: [const { None }; MAX_DEPTH],
                 pacer: None,
                 peak: 0,
+                polls: 0,
                 last: 0,
                 room: [const { None }; ROOM],
             }),
@@ -213,6 +217,13 @@ impl<D: AsyncBlockDevice, P: Pace> Queue<D, P> {
     /// Meetlat: het hoogste aantal tickets tegelijk tot nu.
     pub fn peak(&self) -> usize {
         self.st.borrow().peak
+    }
+
+    /// Meetlat: zo vaak keek de pacer tot nu naar het device. Met een lijn
+    /// hoogstens één keer per bel of vangrail; zonder per ronde zolang het
+    /// device beweegt.
+    pub fn polls(&self) -> u64 {
+        self.st.borrow().polls
     }
 
     /// Hoeveel tickets er nu uitstaan.
@@ -575,6 +586,8 @@ mod tests {
         reaps: usize,
         /// Een lees van deze LBA's weigert het device bij de start.
         bad: Vec<u64>,
+        /// De bel van de lijn, als de test er een bedraadt.
+        bell: Option<&'static sync::Signal>,
     }
 
     #[derive(Clone)]
@@ -588,6 +601,7 @@ mod tests {
             done: 0,
             reaps: 0,
             bad: Vec::new(),
+            bell: None,
         })))
     }
 
@@ -612,6 +626,9 @@ mod tests {
         }
         fn depth(&self) -> usize {
             self.0.borrow().tags.len()
+        }
+        fn irq(&self) -> Option<&'static sync::Signal> {
+            self.0.borrow().bell
         }
         fn start_tag(&mut self, op: Op<'_>) -> Result<usize> {
             let mut c = self.0.borrow_mut();
@@ -904,6 +921,31 @@ mod tests {
         clock.0.set(1_000_000 + 4 * crate::POLL_SPIN_NS);
         assert!(poll(f.as_mut(), &w).is_pending());
         assert_eq!(n.0.load(SeqCst), 2, "stil: slapen, geen wek");
+    }
+
+    /// Met een lijn pollt de pacer niet per ronde, ook niet vlak na zijn
+    /// submit: hij slaapt op de bel, en de bel wekt hem. Eén blik op het
+    /// device per bel.
+    #[test]
+    fn with_a_line_the_pacer_sleeps_on_the_bell_not_per_round() {
+        static BELL: sync::Signal = sync::Signal::new();
+        let dev = fake(4);
+        dev.0.borrow_mut().bell = Some(&BELL);
+        let clock = Clock(core::cell::Cell::new(1_000_000));
+        let q = Queue::new(dev.clone(), &clock);
+        let mut bufs = vec![vec![0u8; 512]; 2];
+        let mut ops = batch(&mut bufs, &[1, 2]);
+        let (n, w) = waker();
+        let mut io = &q;
+        let mut f = core::pin::pin!(io.read_batch(&mut ops));
+        assert!(poll(f.as_mut(), &w).is_pending());
+        assert_eq!(n.0.load(SeqCst), 0, "net gesubmit, toch geen wek per ronde");
+        dev.release(0);
+        dev.release(1);
+        BELL.set();
+        assert_eq!(n.0.load(SeqCst), 1, "de bel wekt de pacer");
+        assert_eq!(poll(f.as_mut(), &w), Poll::Ready(()));
+        assert_eq!(q.polls(), 2, "één blik bij de submit, één per bel");
     }
 
     /// Wie geen ticket krijgt, wordt gewekt door het eerste dat vrijkomt,

@@ -267,6 +267,12 @@ door niemand aangezet.
   HOPOS_WD_ARMED`, na DHCP (en Hop) `HOPOS_CANARY_LIVE`.
 - `disk: nvme <model> at ... HOPOS_NVME_UP`, dan `HOPOS_DISK_UP` en
   `HOPOS_FS_UP` (hopfs op de NVMe; het hele device is van HopOS, stateful).
+  Na de interrupts de lijn: `disk: nvme at ... MSI-X via the ITS, LPI N
+  (DeviceID ...), vector 0 of N, first interrupt after N us, ...
+  HOPOS_NVME_IRQ`, of `polled (<reden>) HOPOS_NVME_IRQ` met daarvoor
+  `HOPOS_NVME_IRQ_DIAG`. De schijf telt in de tik onder `other=`, niet
+  onder `nic=`; `queue_polls=` in `HOPOS_DISK_STATS` zegt hoe vaak de
+  wachter naar de CQ keek.
 - Hop met de bordlaag `image/cfg/o6n.cfg`: `slots: Hop in the sharegroup
   hop (hopos.hop.sharegroup) HOPOS_HOP_GROUP`, `slots: Hop prefers a small
   core for his group (hopos.hop.core-class) HOPOS_HOP_CLASS` en
@@ -300,9 +306,12 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
   als op INTx, zegt de eerste boot. Zonder IORT-weg valt hij terug op INTx
   477 (L80: één interrupt per frame, rtt p50 156-201 µs). Met
   `hopos.nicirq=intx` meet je de terugval los.
-- **De NVMe-lijn.** De NVMe pollt zijn CQ: zestien tickets, en één wachter
-  (de pacer van `blkdev::Queue`) haalt alle completions op. Een lijn erop is
-  nog niet bedraad.
+- **De NVMe-lijn op ijzer is onbewezen.** Vector 0 (de admin-CQ en de
+  I/O-CQ, IEN) via de ITS van zijn root-complex, `board_uefi::pcie::wire_nvme`
+  na `start_interrupts` (de bench en de mount pollen ervoor), met een
+  zelftest (een Get Features op de admin-CQ): wat niet aankomt, pollt met de
+  reden. De wachter van `blkdev::Queue` slaapt dan op de bel, met 10 ms
+  vangrail, in plaats van na elke submit 100 us per ronde te pollen.
 - **De `_CPC`-klassenbron**: nu MADT, anders de MPIDR-tabel.
 - **De header-UART** (0x040d0000) als spiegel: de console is die van de SPCR.
 - **De kern-core in het klokbeleid**: zijn idle-tijd staat in de slaper van
@@ -378,7 +387,10 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
 - `watchdog: hardware reset armed (SBSA watchdog, 12.0 s ...) ... HOPOS_WD_ARMED`
   (servers zijn braaf SBSA; de eerste echte proef van dit pad).
 - `dvfs: server clocks are firmware domain on this board HOPOS_CLOCK_NONE`.
-- `disk: nvme ... HOPOS_NVME_UP`, `HOPOS_DISK_UP`, `HOPOS_FS_UP`.
+- `disk: nvme ... HOPOS_NVME_UP`, `HOPOS_DISK_UP`, `HOPOS_FS_UP`, en na de
+  interrupts `disk: nvme at ... MSI-X via the ITS, LPI N ... HOPOS_NVME_IRQ`
+  (de NVMe heeft een eigen root-complex en dus misschien een eigen ITS:
+  `HOPOS_ITS_MORE` voor hem, vóór die van de igb).
 
 ### Wat er nog niet is
 
@@ -390,7 +402,8 @@ het woord de deur uit maar stond de SGI na 1 ms niet pending.
   `hopos.nicirq=off` in `hopos.cfg` is de terugweg zonder herbouw. Nooit
   INTx: de `_PRT`-INTx doodt de SoC (L83, 19-09, UART-bewijs); `intx` en
   een INTID weigert het board (`board_altra::nic_irq_mode`).
-- **De NVMe-lijn**: zoals op de O6N.
+- **De NVMe-lijn**: zoals op de O6N, nooit INTx (de functie staat vanaf de
+  probe met INTx uit).
 - Het geheugenplan is dat van `board-uefi`: of de pool de ~300 GB boven de
   512 GB haalt (v2 15-07: 1,62 GB zonder de hoge map), zegt de bootregel van
   `board-uefi`.

@@ -9,6 +9,8 @@ description = "NVMe: één core (admin- en I/O-queue, identify, zestien tickets,
 [dependencies]
 dev = { path = "../../dev" }
 blkdev = { path = "../../blkdev" }
+# De bel van de IRQ-lijn (`Signal`), zoals virtio-blk.
+sync = { path = "../../sync" }
 
 [lints]
 workspace = true

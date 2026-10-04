@@ -716,17 +716,23 @@ impl Board for Uefi {
         let pass = cpu::irq::global().dispatch();
         cpu::irq::unmask();
         // De kick telt nergens (hij staat in `os(kicks=)`); elke lijn van
-        // `enable_line` is een NIC-lijn, en wat niemand kent is `other`.
+        // `enable_line` behalve de schijf is een NIC-lijn, en de schijf en
+        // wat niemand kent zijn `other` (zoals op virt).
         let timer = pass
             .claims(Line(facts::TIMER_PPI.load(Relaxed)))
             .saturating_add(pass.claims(Line(facts::HYP_TIMER_PPI.load(Relaxed))));
         let kick = pass.claims(Line(KICK_SGI));
+        let disk = match pcie::NVME_LPI.load(Relaxed) {
+            0 => 0,
+            l => pass.claims(Line(l)),
+        };
+        let other = pass.unknown.saturating_add(disk);
         Dispatched {
             timer,
             nic: pass
                 .claimed
-                .saturating_sub(timer.saturating_add(kick).saturating_add(pass.unknown)),
-            other: pass.unknown,
+                .saturating_sub(timer.saturating_add(kick).saturating_add(other)),
+            other,
         }
     }
 

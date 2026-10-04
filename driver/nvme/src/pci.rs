@@ -6,10 +6,21 @@
 //! tail-deurbel, de deurbellen liggen op de stride die de controller zelf
 //! meldt (CAP.DSTRD); dat doet de core allemaal. Wat hier blijft, is de
 //! opstart: CAP lezen en toetsen, en CC met onze eigen entry-maten.
+//!
+//! De lijn: de admin-CQ en de I/O-CQ melden zich allebei op vector 0
+//! (Linux: de admin-queue deelt vector 0 met de eerste I/O-queue). Het
+//! board zet die vector op MSI-X ([`Nvme::set_irq`]), en dan slaapt de
+//! wachter van `blkdev::Queue` op de bel in plaats van na elke submit per
+//! ronde te pollen. Niets maskeren, geen ack: een MSI-X is een flank, en de
+//! wachter haalt de hele CQ leeg met één head-deurbel (Linux `nvme_irq`).
 
-use super::{CC_EN, CC_IOCQES, CC_IOSQES, COMMAND_TIMEOUT_NS, DB, Error, Nvme, Q_ENTRIES, Result};
+use super::{
+    ADM_GET_FEATURES, CC_EN, CC_IOCQES, CC_IOSQES, COMMAND_TIMEOUT_NS, Cmd, DB, Error, Nvme,
+    Q_ENTRIES, Result,
+};
 use core::convert::Infallible;
 use dev::Pa;
+use sync::Signal;
 
 /// Hoeveel van BAR0 het board moet mappen: registers en de doorbells van
 /// queue 0 en 1, bij de grootste stride die we accepteren.
@@ -25,7 +36,11 @@ pub struct Pci;
 
 impl super::Transport for Pci {
     type Error = Infallible;
+    const IRQ: bool = true;
 }
+
+/// Get Features: Number of Queues. Geen data, mag altijd.
+const FEAT_NUM_QUEUES: u32 = 0x07;
 
 impl Nvme<Pci> {
     /// Reset de controller, zet de admin-queue op, identificeert
@@ -68,6 +83,22 @@ impl Nvme<Pci> {
         n.started = true;
         Ok(n)
     }
+
+    /// Vanaf nu wekt `bell` de wachter: het board bedraadde vector 0.
+    pub fn set_irq(&mut self, bell: &'static Signal) {
+        self.irq = Some(bell);
+    }
+
+    /// De zelftest van de lijn: één admin-opdracht zonder data (Get
+    /// Features, Number of Queues) die ter plekke wacht; zijn completion op
+    /// de admin-CQ geeft een interrupt op vector 0.
+    pub fn fire_irq(&mut self) -> Result {
+        self.admin(Cmd {
+            opc: ADM_GET_FEATURES,
+            cdw10: FEAT_NUM_QUEUES,
+            ..Cmd::default()
+        })
+    }
 }
 
 #[cfg(test)]
@@ -78,7 +109,7 @@ mod tests {
     use super::*;
     use crate::tests::{machine, now, with};
     use crate::{ADM_CREATE_CQ, ADM_CREATE_SQ, ADM_IDENTIFY, DMA_NEED, MAX_TRANSFER, PAGE};
-    use blkdev::{BlockIo, Paced, Spin, block_on};
+    use blkdev::{AsyncBlockDevice, BlockIo, Paced, Spin, block_on};
     use std::vec;
     use std::vec::Vec;
 
@@ -100,14 +131,20 @@ mod tests {
             (n.max_transfer(), n.model()),
             (MAX_TRANSFER, "HopOS Fake NVMe")
         );
-        let admin: Vec<(u8, u64)> = with(|c| c.log.iter().map(|e| (e.opc, e.at & 0xff)).collect());
+        // CDW10 [7:0] en CDW11: de CQ met PC en IEN op vector 0.
+        let admin: Vec<(u8, u64)> = with(|c| {
+            c.log
+                .iter()
+                .map(|e| (e.opc, e.at & 0xffff_ffff_0000_00ff))
+                .collect()
+        });
         assert_eq!(
             admin,
             [
                 (ADM_IDENTIFY, 1),
                 (ADM_IDENTIFY, 0),
-                (ADM_CREATE_CQ, 1),
-                (ADM_CREATE_SQ, 1)
+                (ADM_CREATE_CQ, (3 << 32) | 1),
+                (ADM_CREATE_SQ, (0x1_0001 << 32) | 1)
             ]
         );
         let r = |off: u64| dev::read32(m.base.add(off));
@@ -118,6 +155,27 @@ mod tests {
         assert_eq!((r(0x1000), r(0x1010)), (4, 4));
         block_on(Paced::new(&mut n, Spin).write(0, &[1; 512])).unwrap();
         assert_eq!((r(0x1020), r(0x1030)), (1, 1));
+    }
+
+    /// Zonder lijn pollt de wachter; met de bel van het board slaapt hij
+    /// erop. De zelftest is één admin-opdracht op CID 0 zonder data.
+    #[test]
+    fn the_board_wires_the_bell_and_the_self_test_is_one_admin_command() {
+        static BELL: Signal = Signal::new();
+        let (_m, n) = new(1023, 9);
+        let mut n = n.unwrap();
+        assert!(n.irq().is_none());
+        n.set_irq(&BELL);
+        assert!(n.irq().is_some_and(|b| core::ptr::eq(b, &BELL)));
+        with(|c| c.log.clear());
+        n.fire_irq().unwrap();
+        let got: Vec<(u8, usize, u16, u64, u64)> = with(|c| {
+            c.log
+                .iter()
+                .map(|e| (e.opc, e.q, e.cid, e.at, e.prp1))
+                .collect()
+        });
+        assert_eq!(got, [(ADM_GET_FEATURES, 0, 0, 7, 0)]);
     }
 
     #[test]

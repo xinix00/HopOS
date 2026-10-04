@@ -41,6 +41,9 @@ pub trait Platform: Sync + Thermal + ClockKnob + 'static {
     /// keer; dat houdt [`On`] bij.
     fn probe_disk(&self) -> Result<Option<Self::Disk>, Error>;
 
+    /// De lijn van de schijf ([`Board::wire_disk`]); standaard niets.
+    fn wire_disk(&self, _disk: &mut Self::Disk) {}
+
     /// De USB-hostcontrollers; standaard die van het UEFI-board.
     fn usb_hosts(&self, uefi: &Uefi) -> UsbHosts {
         uefi.usb_hosts()
@@ -201,6 +204,10 @@ impl<P: Platform> Board for On<P> {
             return Err(Error::Twice("probe_disk"));
         }
         self.p.probe_disk()
+    }
+
+    fn wire_disk(&self, disk: &mut Self::Disk) {
+        self.p.wire_disk(disk);
     }
 
     fn this_core(&self) -> usize {
