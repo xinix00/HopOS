@@ -93,10 +93,11 @@
 //! Wat hier bewust NIET gebeurt: een hardware-watchdog op QEMU (die is er
 //! niet).
 
-use crate::DevMem;
+use crate::{BOARD, DevMem, Machine};
 use abi::layout::{FLIP_HANDOFF_LEN, HANDOFF_MAGIC_OFF, HANDOFF_PTR_OFF};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use board::Board;
 use board::cfgwin::Carry;
 use core::cell::Cell;
 use core::sync::atomic::{
@@ -157,20 +158,19 @@ const COLD_STOP: Duration = Duration::from_secs(1);
 /// uit is, staat niet in de stub.
 const CORES_OFF_WAIT: Duration = Duration::from_secs(1);
 
-/// Keert PSCI CPU_OFF op dit board terug, dat wil zeggen: start CPU_ON een
-/// uitgezette core weer? Op de Pi 5-stockfirmware niet: daar was CPU_OFF
-/// een deur zonder terugweg (gemeten 10-07). Daar
-/// weigert de koude flip dus zodra een app-core ooit draaide; een core die
-/// nooit startte, is al uit en telt niet.
-const CPU_OFF_RETURNS: bool = !cfg!(feature = "board-rpi5");
+/// Keert PSCI CPU_OFF op dit board terug (`Board::CPU_OFF_RETURNS`)? Zo
+/// niet (de Pi 5), dan weigert de koude flip zodra een app-core ooit
+/// draaide; een core die nooit startte, is al uit en telt niet.
+const CPU_OFF_RETURNS: bool = Machine::CPU_OFF_RETURNS;
 
-/// Antwoordt er een PSCI op een SMC? Op Apple niet: daar is geen EL3, en
-/// een SMC op EL2 is een UNDEF (de core parkeert in de vectoren). Go deed
-/// op Apple geen enkele PSCI-call (hop/board.go, 02-09). Op riscv64 is er
-/// geen PSCI. Bewust board-kennis en geen `cpu::trng::has_monitor`: QEMU
-/// virt zonder `secure=on` heeft ook geen EL3 (ID_AA64PFR0_EL1.EL3 = 0),
-/// maar emuleert PSCI over SMC, en daar draaien de koude flip en de reset.
-const PSCI: bool = !cfg!(any(feature = "board-apple", target_arch = "riscv64"));
+/// Antwoordt er een PSCI op een SMC (`Board::PSCI`)? Op Apple niet: daar
+/// is geen EL3, en een SMC op EL2 is een UNDEF (de core parkeert in de
+/// vectoren); Go deed er geen enkele PSCI-call (hop/board.go, 02-09). Op
+/// riscv64 is er geen PSCI. Bewust board-kennis en geen
+/// `cpu::trng::has_monitor`: QEMU virt zonder `secure=on` heeft ook geen
+/// EL3 (ID_AA64PFR0_EL1.EL3 = 0), maar emuleert PSCI over SMC, en daar
+/// draaien de koude flip en de reset.
+const PSCI: bool = Machine::PSCI;
 
 /// Kan dit board koud flippen? Eén waarde uit [`PSCI`] en
 /// [`CPU_OFF_RETURNS`] voor twee lezers: [`prepare`] (en [`no_way_back`])
@@ -251,80 +251,31 @@ fn plan() -> FlipPlan {
     }
 }
 
-/// De plek van de zwarte doos (`kernflip::BOX_LEN` bytes), per board een
-/// eigen module (handboek §7). Dezelfde levensduur als de recorder: naast
-/// diens plek, buiten het kernimage, de staging, de DTB, de pool en de DMA,
+/// De zwarte doos van de console: de plek van het board
+/// (`vboard::slots::BLACK_BOX`), naast de recorder en met dezelfde
+/// levensduur: buiten het kernimage, de staging, de DTB, de pool en de DMA,
 /// en nooit iets wat de firmware of de lader bij een verse boot beschrijft.
-///
-/// Virt en de Pi's: de 32 KiB direct onder het handoff-blob, boven de
-/// trampoline. Die pagina's liggen met de recorder in hetzelfde gat van de
-/// boot-scratch (de Pi: het laadvenster tussen de DTB op `0x0F00_0000` en
-/// de initramfs op `0x0F20_0000`; virt: tussen `0xB000_0000` en de
-/// staging), en daar schrijft alleen de flip: de recorder en de trampoline
-/// eronder, het blob erboven.
-#[cfg(any(
-    feature = "board-qemuvirt",
-    feature = "board-rpi4",
-    feature = "board-rpi5"
-))]
-mod black_box {
-    use super::FLIP_HANDOFF_PA;
-    use kern::kernflip::BOX_LEN;
-    use vboard::slots::{FLIP_RECORDER_PA, FLIP_TRAMP_PA};
-
-    /// Het begin van de doos.
-    pub(super) const PA: u64 = FLIP_HANDOFF_PA - 0x8000;
-
-    const _: () = assert!(
-        PA >= FLIP_TRAMP_PA + 0x1000
-            && PA > FLIP_RECORDER_PA
-            && PA + BOX_LEN <= FLIP_HANDOFF_PA
-            && PA.is_multiple_of(64)
-    );
-}
-
-/// UEFI (en de O6N en de Altra op dezelfde slots): hetzelfde gat, maar
-/// boven de feitenpagina van de stub. De loader-regio van het kernvenster
-/// is die van de recorder; de stub schrijft er alleen het staging-woord en
-/// de feiten.
-#[cfg(any(feature = "board-uefi", feature = "board-o6n", feature = "board-altra"))]
-mod black_box {
-    use super::FLIP_HANDOFF_PA;
-    use kern::kernflip::BOX_LEN;
-    use vboard::slots::{FLIP_FACTS_LEN, FLIP_FACTS_PA};
-
-    /// Het begin van de doos.
-    pub(super) const PA: u64 = FLIP_HANDOFF_PA - 0x8000;
-
-    const _: () = assert!(
-        PA >= FLIP_FACTS_PA + FLIP_FACTS_LEN
-            && PA + BOX_LEN <= FLIP_HANDOFF_PA
-            && PA.is_multiple_of(64)
-    );
-}
-
-/// De Radxa en de M4: hun plan heeft al een zwarte doos naast de recorder
-/// (`slots::BLACK_BOX`, in het plan als `black_box`, van de Go-kern
-/// overgenomen), net als hun recorder buiten de boot-scratch: op de M4 legt
-/// iBoot het bootobject bij elke boot terug over de scratch (01-09).
-/// Device-gemapt, dus het vegen is daar overbodig maar onschadelijk.
-#[cfg(any(feature = "board-rk3566", feature = "board-apple"))]
+/// Op virt, de Pi's en UEFI de 32 KiB direct onder het handoff-blob; op de
+/// Radxa en de M4 de doos van hun plan (van de Go-kern overgenomen, net als
+/// hun recorder buiten de boot-scratch: op de M4 legt iBoot het bootobject
+/// bij elke boot terug over de scratch, 01-09). Device-gemapt is het vegen
+/// overbodig maar onschadelijk. Maat 0 (riscv64): geen doos.
 mod black_box {
     use kern::kernflip::BOX_LEN;
     use vboard::slots::BLACK_BOX;
 
-    /// Het begin van de doos.
-    pub(super) const PA: u64 = BLACK_BOX.base;
+    /// Het begin van de doos; 0 = geen.
+    pub(super) const PA: u64 = if BLACK_BOX.size == 0 {
+        0
+    } else {
+        BLACK_BOX.base
+    };
 
-    const _: () = assert!(BLACK_BOX.size >= BOX_LEN && PA.is_multiple_of(64));
-}
-
-/// De riscv64-boards: nog geen plek die bewezen een reset overleeft (de
-/// LicheeRV legt zijn kooien in dezelfde staart), dus geen doos.
-#[cfg(any(feature = "board-qemuvirt-riscv", feature = "board-licheerv"))]
-mod black_box {
-    /// Geen doos.
-    pub(super) const PA: u64 = 0;
+    // De doos past (de maat min BOX_LEN bestaat) en ligt op 64 bytes.
+    const _: () = assert!(
+        BLACK_BOX.size == 0
+            || (BLACK_BOX.size.checked_sub(BOX_LEN).is_some() && PA.is_multiple_of(64))
+    );
 }
 
 /// De tee van de console (`conport::tee`): de bytes ook in de zwarte doos,
@@ -429,37 +380,19 @@ mod image {
 /// dat is liever een weigering dan een kern die na de sprong zonder pool
 /// verder moet. UEFI heeft een eigen feitenpagina (`board/uefi/src/flip.rs`);
 /// daar en op Apple toetst de ingang zelf.
-#[cfg(any(
-    feature = "board-qemuvirt",
-    feature = "board-qemuvirt-riscv",
-    feature = "board-rpi4",
-    feature = "board-rpi5",
-    feature = "board-rk3566"
-))]
 mod facts {
     /// De magic van een FDT-kop, big-endian in het geheugen.
     const FDT_MAGIC: u32 = 0xd00d_feed;
 
     /// Staat de DTB van de firmware er nog? x0 = 0 is een board dat zijn
     /// DTB op een vaste plek zoekt (QEMU met een ELF-kern), en dan is er
-    /// niets over te dragen.
+    /// niets over te dragen. Zonder DTB in x0 (`Board::DTB_IN_X0`: UEFI
+    /// geeft er de ImageHandle, Apple de boot-args van m1n1, de LicheeRV
+    /// wat de FSBL in a1 liet) altijd ja.
     pub(super) fn intact(x0: u64) -> bool {
-        x0 == 0 || (x0.is_multiple_of(8) && u32::from_be(dev::read32(dev::Pa(x0))) == FDT_MAGIC)
-    }
-}
-
-#[cfg(not(any(
-    feature = "board-qemuvirt",
-    feature = "board-qemuvirt-riscv",
-    feature = "board-rpi4",
-    feature = "board-rpi5",
-    feature = "board-rk3566"
-)))]
-mod facts {
-    /// Geen DTB in x0 (UEFI: ImageHandle, Apple: de boot-args van m1n1, de
-    /// LicheeRV: wat de FSBL in a1 liet).
-    pub(super) fn intact(_x0: u64) -> bool {
-        true
+        !<crate::Machine as board::Board>::DTB_IN_X0
+            || x0 == 0
+            || (x0.is_multiple_of(8) && u32::from_be(dev::read32(dev::Pa(x0))) == FDT_MAGIC)
     }
 }
 
@@ -871,8 +804,7 @@ fn prepare_inner(b: &FlipBundle, sha256: &[u8; 32]) -> Result<(), Refused> {
     }
     // Apple: daarnaast de plek 0xF000 (de loader, of het venster van een
     // kern van vóór `board::cfgwin`), zoals voorheen.
-    #[cfg(feature = "board-apple")]
-    if vboard::fwinfo::carry_config(src, flat) {
+    if BOARD.flip_carry_config(src, flat) {
         println!("flip: the 0xF000 hopos.cfg carried into the new image HOPOS_FLIP_CFG");
     }
     let entry = bundle.entry.wrapping_add(delta);
@@ -1517,8 +1449,7 @@ fn handoff_and_jump(p: Prepared, slots: Vec<SlotState>, nat: kernflip::NatState)
     // boot weg, dus krijgt de nieuwe kern vers zaad uit onze DRBG, anders
     // zaait hij uit jitter (board/uefi/src/flip.rs). De Pi's en de Radxa
     // proberen hun TRNG zelf opnieuw, in `discover`.
-    #[cfg(any(feature = "board-uefi", feature = "board-o6n", feature = "board-altra"))]
-    if vboard::facts::carry_seed() {
+    if BOARD.flip_carry_seed() {
         println!(
             "flip: 64 bytes of seed from the kernel DRBG (efi-rng) for the new kernel HOPOS_FLIP_SEED"
         );
@@ -1527,7 +1458,7 @@ fn handoff_and_jump(p: Prepared, slots: Vec<SlotState>, nat: kernflip::NatState)
     let generation = generation() + 1;
     let (mut mem, fp) = (DevMem, plan());
     kernflip::stage(&mut mem, &fp, Stage::Captured, generation);
-    let ram = vboard::KERN_RAM;
+    let ram = BOARD.plan().kern_ram;
     let base = image::base();
     let h = Handoff {
         old_base: ram.base.0,

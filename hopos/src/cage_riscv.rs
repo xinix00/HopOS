@@ -31,6 +31,7 @@ use abi::layout::{
     SCHED_MBOX_CTX, SCHED_MSIP_PA, SCHED_OFF_PC, SCHED_OS_BELL, SCHED_S2_PA, SCHED_SLEEP_CAP,
     SCHED_TICK_TICKS, Tail,
 };
+use board::Board;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use cpu::el2::{self, CoreState, roster};
 use cpu::println;

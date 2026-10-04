@@ -45,23 +45,15 @@ pub mod thermal;
 // De tien native xHCI's uit de DSDT (usb.rs), alleen in de gui-smaak.
 mod usb;
 
-pub use machine::{LINK_TIMEOUT_NS, O6n};
+pub use machine::{Cix, LINK_TIMEOUT_NS, O6n, is_cix};
 
 /// Dit board onder de naam die de kern-binary kiest (`vboard::Machine`).
 pub type Machine = O6n;
 
 // De slot- en flip-lijm van de binary leest het plan onder deze namen
-// (`slots::plan`, `mpidr`, de staging, `KERN_RAM`, `DMA`), zoals bij de
-// Pi's; op de O6N zijn het die van het UEFI-board.
-pub use board_uefi::{DMA, KERN_RAM, KERN_VHE, facts, irq, slots, watchdog};
-// De rekenkern en de taak van het klokbeleid, voor de telemetrie van de
-// binary (die dit crate alleen als `vboard` kent).
-pub use driver_dvfs as dvfs;
-
-/// De schijf die `probe_disk` geeft: de NVMe. De binary noemt hem
-/// `vboard::Disk`, zodat de geprobede schijf van de bench naar de opslag gaat
-/// zonder dat de binary het type per board kent.
-pub type Disk = driver_nvme::Nvme<driver_nvme::pci::Pci>;
+// (`slots`, en `facts` voor het beeld van een PIE-kern), zoals bij de Pi's;
+// op de O6N zijn het die van het UEFI-board.
+pub use board_uefi::{facts, slots};
 
 /// De XSDT-OEM-ID van de Cix-firmware: de runtime-toets dat dit werkelijk
 /// een Cix P1 is vóór er board-kennis (mailbox-adressen) in MMIO gaat. Een

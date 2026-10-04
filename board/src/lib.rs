@@ -11,7 +11,16 @@
 //! komt erbij zodra een laag erom vraagt; een methode zonder gebruiker is
 //! een methode die niemand test.
 //!
-//! Naast de trait staan [`heap`]: de allocator met een plafond die het
+//! Wat de kern van een board vraagt, staat hier, en nergens anders: de
+//! binary noemt zijn board alleen als `vboard::Machine` (en de module
+//! `vboard::slots` met het plan en de flip-adressen, constanten die in
+//! const-context gelezen worden). Naast [`Board`] drie kleine traits die
+//! elk board draagt: [`Watchdog`] (de hardware-watchdog), [`Thermal`] (de
+//! thermometer) en [`ClockKnob`] (de klokknop van het klokbeleid). Een
+//! eigenschap van het board is een constante van [`Board`], geen
+//! `cfg!(feature = "board-...")` in de binary.
+//!
+//! Naast de traits staan [`heap`]: de allocator met een plafond die het
 //! board over zijn kern-RAM legt, [`stage`]: het image dat een lader
 //! vóór de boot neerlegde, en [`cfgwin`]: `hopos.cfg` in het kern-image.
 
@@ -30,13 +39,19 @@ pub mod cfgwin;
 pub mod heap;
 pub mod stage;
 
+/// Het klokbeleid: de knop van [`ClockKnob`], en de rekenkern en de taak
+/// voor de binary.
+pub use driver_dvfs as dvfs;
 /// De framebuffer-beschrijving van [`Board::framebuffer`], zodat een board
 /// hem noemt zonder eigen dependency.
 pub use driver_fb as fb;
 
+use abi::ring::Coherence;
 use bounded::BoundedVec;
 use core::fmt;
+use cpu::el2::Flavor;
 use dev::Pa;
+use executor::Executor;
 use sync::Signal;
 
 /// Een fysiek geheugenbereik.
@@ -233,16 +248,11 @@ impl fmt::Display for Error {
 #[derive(Debug)]
 pub enum NoDisk {}
 
-impl NoDisk {
-    /// Het aantal sectoren (bestaat niet).
-    #[must_use]
-    pub fn sectors(&self) -> u64 {
+impl blkdev::Disk for NoDisk {
+    fn sectors(&self) -> u64 {
         match *self {}
     }
-
-    /// Het model (bestaat niet).
-    #[must_use]
-    pub fn model(&self) -> &'static str {
+    fn model(&self) -> &str {
         match *self {}
     }
 }
@@ -279,16 +289,188 @@ pub struct Dispatched {
     pub other: u32,
 }
 
+/// Waarom een board de ABI-staart van een slot niet Normal kon mappen
+/// ([`Board::map_tail_normal`]).
+#[derive(Copy, Clone, Debug)]
+pub enum TailError {
+    /// De reden van het board.
+    Refused(&'static str),
+    /// De reden van `cpu::memattr`.
+    Attr(cpu::memattr::Error),
+}
+
+impl fmt::Display for TailError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Refused(why) => f.write_str(why),
+            Self::Attr(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// De hardware-watchdog van een board: alleen het ijzer (wapenen, aaien,
+/// uitzetten). Het beleid (wanneer aaien) is `kern::watchdog`, de taak is
+/// van de binary. Een board zonder watchdog (QEMU virt) neemt de
+/// standaarden: `arm` weigert, en de node draait onbewaakt en luid.
+pub trait Watchdog {
+    /// Wat er gewapend staat, voor de consoleregel.
+    type Armed: fmt::Display;
+
+    /// De timeout die de kern vraagt (Go: 12 s).
+    const WD_TIMEOUT_MS: u64 = 12_000;
+    /// Het alarm van een gevraagde reset ([`Watchdog::fire`]): kort, maar
+    /// ruim boven de proef van 2 ms op de Pi's, die zelf niet de reset mag
+    /// zijn.
+    const WD_FIRE_MS: u64 = 1_000;
+
+    /// Wapent de watchdog op `timeout_ms` (of wat het ijzer daarvan kan).
+    /// `Ok` met wat er staat, of waarom niet.
+    fn arm(&self, _timeout_ms: u64) -> Result<Self::Armed, &'static str> {
+        Err("no watchdog on this board")
+    }
+
+    /// Herstart de teller.
+    fn pet(&self) {}
+
+    /// Een aai buiten de watchdog-taak om: vlak vóór de sprong van een
+    /// flip, meteen na een landing en vóór een tweede probe van de NIC.
+    /// Dan is deze kern misschien nog niet gewapend en telt de teller van
+    /// de vorige door.
+    fn pet_now(&self) {
+        self.pet();
+    }
+
+    /// Zet een gewapende watchdog uit (`hopos.wd=off`, ook een die de
+    /// vorige kern wapende). `false` = er was niets uit te zetten.
+    fn disarm(&self) -> bool {
+        false
+    }
+
+    /// De reset van de flip op een board zonder PSCI: opnieuw gewapend op
+    /// [`Watchdog::WD_FIRE_MS`], daarna aait niemand meer.
+    fn fire(&self) -> bool {
+        self.arm(Self::WD_FIRE_MS).is_ok()
+    }
+}
+
+/// De thermometer van een board, voor de tik en de heartbeat van Hop. Een
+/// board zonder neemt de standaarden: geen meting (0).
+pub trait Thermal {
+    /// Eén keer bij de boot: de sensor op, één regel over wat hij geeft.
+    fn open_thermal(&self) {}
+
+    /// De temperatuur in milligraden; 0 = geen meting.
+    fn temp_milli_c(&self) -> i32 {
+        0
+    }
+}
+
+/// De klokknop van een board voor het klokbeleid ([`dvfs`]). Een board
+/// zonder knop zet [`NoKnob`] en zegt bij de boot [`ClockKnob::no_knob`].
+pub trait ClockKnob {
+    /// De knop.
+    type Knob: dvfs::Knob + fmt::Display;
+    /// Waarom de knop niet opkwam.
+    type KnobError: fmt::Display;
+
+    /// Heeft dit board een knop? Zo niet, dan vraagt de kern er niet naar
+    /// en leest hij `hopos.clock` niet.
+    const HAS_KNOB: bool = false;
+
+    /// De knop, met het plafond op `mhz` als die gegeven is (`hopos.mhz`),
+    /// of waarom niet. `None` op een board zonder knop.
+    fn clock_knob(&self, _mhz: Option<u32>) -> Option<Result<Self::Knob, Self::KnobError>> {
+        None
+    }
+
+    /// Een board zonder knop, bij de boot: één regel, of wat het in plaats
+    /// van een knop heeft (de wachter van de p-states op Apple).
+    fn no_knob(&self, _exec: &'static Executor) {
+        cpu::println!(
+            "dvfs: no clock knob on this board, the firmware keeps its clock HOPOS_CLOCK_NONE"
+        );
+    }
+}
+
+/// Geen knop (en geen reden): het type van een board zonder klokknop.
+#[derive(Debug)]
+pub enum NoKnob {}
+
+impl dvfs::Knob for NoKnob {
+    fn full(&mut self) -> Option<dvfs::Level> {
+        match *self {}
+    }
+    fn quiet(&mut self) -> Option<dvfs::Level> {
+        match *self {}
+    }
+}
+
+impl fmt::Display for NoKnob {
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {}
+    }
+}
+
 /// Het board-contract. Alle methodes draaien op HOP's core; de binary
 /// houdt het board in een `static` en geeft `&'static` door.
-pub trait Board: Sync {
+pub trait Board: Sync + Watchdog + Thermal + ClockKnob {
     /// De NIC-driver van dit board.
     type Nic: netdev::Device;
     /// De slaap van de executor op dit board.
     type Sleeper: executor::Sleeper;
+    /// De schijf van dit board ([`NoDisk`] zonder blokdriver).
+    type Disk: blkdev::Disk;
 
     /// De naam, voor de bootlog.
     const NAME: &'static str;
+
+    /// De EL2-smaak van de switcher (`cpu::el2::Flavor`): `Nvhe` (E2H = 0,
+    /// slapen in WFE), `Vhe` op een kern onder E2H = 1 (de O6N: op de A720
+    /// stierf een EL1 onder nVHE binnen een halve seconde, Go 17-09; en het
+    /// UEFI-board met de feature `vhe`), `AppleVhe` op Apple silicium (E2H
+    /// is er RES1 en de kick is de fast IPI).
+    const FLAVOR: Flavor = Flavor::Nvhe;
+
+    /// Antwoordt er een PSCI op een SMC? Niet op Apple (geen EL3: een SMC
+    /// op EL2 is een UNDEF) en niet op riscv64. QEMU virt zonder
+    /// `secure=on` heeft ook geen EL3, maar emuleert PSCI over SMC.
+    const PSCI: bool = true;
+
+    /// Keert PSCI CPU_OFF terug, dat wil zeggen: start CPU_ON een
+    /// uitgezette core weer? Op de Pi 5-stockfirmware niet: daar was
+    /// CPU_OFF een deur zonder terugweg (gemeten 10-07), dus weigert de
+    /// koude flip daar zodra een app-core ooit draaide.
+    const CPU_OFF_RETURNS: bool = true;
+
+    /// Geeft de firmware een DTB in x0 (of a1), die een warme flip moet
+    /// laten staan? Niet op UEFI (ImageHandle), Apple (de boot-args) en de
+    /// LicheeRV.
+    const DTB_IN_X0: bool = false;
+
+    /// Heeft het board geen bootmedium (QEMU zonder ESP)? Dan krijgt Hop
+    /// `kern::nodecfg::QEMU_CFG` achter zijn config.
+    const NO_BOOT_MEDIUM: bool = false;
+
+    /// De belofte van de kern voor de frame-ringen in de pool van de slots
+    /// (`abi::ring::Coherence`): `Hardware` waar de kern de pool Normal
+    /// write-back mapt (de Pi's, de UEFI-boards, QEMU virt); `Maintained`
+    /// waar hij hem Device mapt (Apple, de Radxa) of waar de harts niet
+    /// coherent zijn (riscv64).
+    const SLOT_RINGS: Coherence = Coherence::Hardware;
+
+    /// De belofte van de host-ringen van poort 0: die liggen in de
+    /// kern-heap en beide kanten zijn de kern, dus `Hardware` waar de heap
+    /// Normal is en één cache deelt (Apple, riscv64), anders als
+    /// [`Board::SLOT_RINGS`].
+    const HOST_RINGS: Coherence = Self::SLOT_RINGS;
+
+    /// Idlet een app-core met een yield naar de switcher (`IDLE_YIELD`)?
+    /// Op QEMU virt (de kern slaapt daar in WFI, die geen SEV hoort) en op
+    /// Apple (WFE op EL1 slaapt op de M4 niet). Anders kiest de app zelf.
+    const APP_IDLE_YIELD: bool = false;
+
+    /// Het geheugen van Hop in bytes: 64 MiB, op een klein board minder.
+    const HOP_MEM: u64 = 64 << 20;
 
     /// Eén keer, als eerste: de UART op. Geeft de console-haak.
     fn console(&self) -> fn(&[u8]);
@@ -382,6 +564,72 @@ pub trait Board: Sync {
     fn usb_hosts(&self) -> UsbHosts {
         UsbHosts::new()
     }
+
+    /// Vindt en initialiseert de schijf. `Ok(None)` = geen schijf aan dit
+    /// board; één keer (de bench leent hem, dan neemt de opslag hem).
+    fn probe_disk(&self) -> Result<Option<Self::Disk>, Error>;
+
+    /// De fysieke index van de core waar dit draait.
+    fn this_core(&self) -> usize;
+
+    /// De OS-core die de config vraagt (`hopos.oscore=<small|mid|big|N>`),
+    /// met een reden als de vraag niet kon: dan de boot-core, luid.
+    fn os_core(&self) -> (usize, Option<&'static str>);
+
+    /// De kick van de OS-core voor de rotatie van `cpu::el2`: de SGI naar
+    /// deze core, en de peek waarmee de kern na een terugkeer ziet of het
+    /// de kick was.
+    fn os_bell(&self) -> cpu::el2::Bell;
+
+    /// Stuurt de kick naar deze core zelf: de zelftest van het IPI-pad.
+    fn kick_self(&self);
+
+    /// `hopos.cfg` als tekst: het venster in het image ([`cfgwin`]), of
+    /// bij een leeg venster het bestand van het bootmedium; "" zonder.
+    fn config(&self) -> &'static str {
+        cfgwin::text()
+    }
+
+    /// De bootargs van de firmware (de FDT, QEMU `-append`); "" zonder.
+    fn bootargs(&self) -> &'static str {
+        ""
+    }
+
+    /// Eén sleutel: eerst [`Board::config`], dan [`Board::bootargs`]; ""
+    /// als hij niet gezet is. Het bestand wint (Go: `rk3566.BootParam`).
+    fn boot_param(&self, key: &'static str) -> &'static str {
+        let v = fw::bootcfg::get(self.config(), key);
+        if v.is_empty() {
+            fw::bootcfg::get_cmdline(self.bootargs(), key)
+        } else {
+            v
+        }
+    }
+
+    /// De ABI-staart van een slot Normal write-back in de kernmap (Go:
+    /// `mapTailNormal`, slot-ABI 7), op een board dat de pool Device mapt
+    /// (Apple, de Radxa): dan beloven de ringen van dat slot `Hardware`.
+    /// `None` = de pool is al gemapt zoals [`Board::SLOT_RINGS`] zegt.
+    fn map_tail_normal(&self, _pa: u64, _size: u64) -> Option<Result<(), TailError>> {
+        None
+    }
+
+    /// Draagt `hopos.cfg` van het bootmedium mee in het nieuwe image van
+    /// een flip, dat gestaged op `src` ligt (`len` bytes)? `true` als dat
+    /// gebeurde. Alleen Apple: de plek 0xF000 van de loader.
+    fn flip_carry_config(&self, _src: u64, _len: u64) -> bool {
+        false
+    }
+
+    /// Geeft de nieuwe kern van een flip zaad mee (de UEFI-boards: 64 bytes
+    /// van de DRBG, want het EFI_RNG_PROTOCOL is na de koude boot weg)?
+    /// `true` als dat gebeurde.
+    fn flip_carry_seed(&self) -> bool {
+        false
+    }
+
+    /// Eén diagnose van de NIC voor de tik (de RP1-keten van de Pi 5).
+    fn nic_diag(&self) {}
 }
 
 #[cfg(test)]

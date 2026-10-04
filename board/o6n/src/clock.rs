@@ -131,6 +131,13 @@ impl CpcKnob {
     }
 }
 
+/// Voor de regel `HOPOS_CLOCK_UP`: hoeveel domeinen de knop draait.
+impl core::fmt::Display for CpcKnob {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{} _CPC domains", self.ds.len())
+    }
+}
+
 impl Knob for CpcKnob {
     fn full(&mut self) -> Option<Level> {
         Some(self.write(|d| d.highest))

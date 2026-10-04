@@ -1,15 +1,15 @@
-//! De O6N als [`Board`]: het UEFI-board met de O6N-drivers eroverheen. Wat
-//! niet anders is dan op elke UEFI-machine (console, heap, klok, slaap,
-//! GIC, plan), gaat door naar [`Uefi`].
+//! De O6N als [`Platform`] op het UEFI-board: de Realtek, de NVMe, de
+//! core-klassen, de SCMI-thermometer en de `_CPC`-knop. Het board-contract
+//! zelf, en alles wat niet anders is dan op elke UEFI-machine, is van
+//! [`On`].
 
 use crate::class::{self, CoreFacts};
 use crate::clock::{self, CpcKnob};
 use crate::cpc::{self, Cpc, MAX_CPCS};
 use crate::probe;
 use crate::thermal::{self, SCMI_CHANNEL, Thermo};
-use board::heap::Heap;
-use board::{Board, CoreClass, Dispatched, Error, Plan};
-use board_uefi::{BLK_DATA, BLK_DMA, NET_BUF, NET_DMA, Uefi, pcie};
+use board::{Board, ClockKnob, CoreClass, Error, Thermal};
+use board_uefi::{BLK_DATA, BLK_DMA, NET_BUF, NET_DMA, On, Platform, Uefi, pcie};
 
 // Het cacheable datablok van de stub is precies dat van de driver.
 const _: () = assert!(
@@ -45,89 +45,81 @@ const RETRY_LINK_NS: u64 = 7_000_000_000;
 /// Is `probe_nic` al eens gelopen? Dan is dit de retry ([`RETRY_LINK_NS`]).
 static NIC_TRIED: AtomicBool = AtomicBool::new(false);
 
-/// Leeft er een NIC uit `probe_nic`? Pas gezet na een gelukte probe: een
-/// mislukte (geen link) liet niets achter en mag opnieuw (hopos `nic_retry`).
-static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
-static DISK_CLAIMED: AtomicBool = AtomicBool::new(false);
-
 /// De thermometer: `None` tot de eerste vraag, daarna het kanaal of niets.
 /// Alleen de executor van core 0 raakt hem aan (de heartbeat en de
 /// telemetrie), en de lening loopt nooit over een `.await`.
 static THERMO: Local<RefCell<Option<Option<Thermo>>>> = Local::new(RefCell::new(None));
 
-/// De O6N.
-pub struct O6n {
-    uefi: Uefi,
+/// De O6N op het UEFI-board.
+pub type O6n = On<Cix>;
+
+/// Wat de O6N (Cix P1) boven het UEFI-board heeft.
+pub struct Cix;
+
+/// Is dit werkelijk een Cix P1 (de XSDT-OEM-ID)? Het image draait ook op
+/// andere UEFI-machines (de Ampere, 19-09); mailbox- en
+/// fastchannel-adressen zijn alleen hier van ons.
+#[must_use]
+pub fn is_cix() -> bool {
+    Uefi::new().oem_id() == crate::OEM_ID
 }
 
-impl O6n {
-    /// Het board. Alle staat staat in statics; dit is het handvat.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self { uefi: Uefi::new() }
+/// De klasse-indeling in één regel, voor de bootlog: de plaatsing moet
+/// kunnen zeggen waar ze op leunt.
+fn describe_classes(uefi: &Uefi) {
+    let n = uefi.cores();
+    let (mut small, mut mid, mut big) = (0, 0, 0);
+    for c in 1..n {
+        match Cix.core_class(uefi, c) {
+            CoreClass::Small => small += 1,
+            CoreClass::Mid => mid += 1,
+            CoreClass::Big => big += 1,
+        }
     }
+    cpu::println!(
+        "o6n: {} app cores, classes from {:?} - small {small}, mid {mid}, big {big}",
+        n.saturating_sub(1),
+        classes(uefi).source
+    );
+}
 
-    /// Vindt en initialiseert de NVMe (de eerste, het hele device) in de
-    /// schijf-helft van de DMA-regio. `Ok(None)` = geen NVMe; één keer.
-    /// Geen methode van [`Board`], net als op virt: het blokcontract is van
-    /// hopfs, en de binary kent haar board concreet.
-    pub fn probe_disk(&self) -> Result<Option<Nvme<Pci>>, Error> {
-        if DISK_CLAIMED.swap(true, Relaxed) {
-            return Err(Error::Twice("probe_disk"));
-        }
-        pcie::probe_nvme()
+/// De feiten van `core` voor de klasse-indeling: de MPIDR en de
+/// MADT-klasse zoals `board-uefi` hem rangschikt, als getal.
+fn facts_of(uefi: &Uefi, core: usize) -> CoreFacts {
+    CoreFacts {
+        mpidr: board_uefi::slots::mpidr(core),
+        eff: match uefi.core_class(core) {
+            CoreClass::Small => 0,
+            CoreClass::Mid => 1,
+            CoreClass::Big => 2,
+        },
+        highest: 0,
     }
+}
 
-    /// Is dit werkelijk een Cix P1 (de XSDT-OEM-ID)? Het image draait ook
-    /// op andere UEFI-machines (de Ampere, 19-09); mailbox- en
-    /// fastchannel-adressen zijn alleen hier van ons.
-    #[must_use]
-    pub fn is_cix(&self) -> bool {
-        self.uefi.oem_id() == crate::OEM_ID
+/// De bronnen van de klasse-indeling: de MADT (via `board-uefi`), anders
+/// de vaste MPIDR-tabel. De `_CPC`-bron vraagt de DSDT, en die geeft
+/// `board-uefi` (nog) niet door.
+fn classes(uefi: &Uefi) -> class::Classes {
+    let n = uefi.cores().min(16);
+    let mut facts: BoundedVec<CoreFacts, 16> = BoundedVec::new();
+    for c in 0..n {
+        let _ = facts.push(facts_of(uefi, c));
     }
+    // De kern-core telt niet mee in de MADT-rangschikking; is er onder de
+    // app-cores maar één klasse, dan is eff overal gelijk en valt de
+    // keuze op de MPIDR-tabel. Die geldt alleen voor de twaalf cores van
+    // de Cix P1 (het image is O6N-eigen).
+    class::Classes::new(facts.as_slice(), n == 12)
+}
 
-    /// De klokknop uit de `_CPC`'s van de DSDT en de SSDT's: één
-    /// desired-perf-woord per domein, het plafond geklemd op `mhz` als die
-    /// gegeven is (`hopos.mhz`). Of waarom niet.
-    pub fn clock_knob(&self, mhz: Option<u32>) -> Result<CpcKnob, &'static str> {
-        if !self.is_cix() {
-            return Err("not a Cix P1 (OEM ID), no _CPC fastchannels");
-        }
-        let mut cpcs: BoundedVec<Cpc, MAX_CPCS> = BoundedVec::new();
-        for t in self
-            .uefi
-            .acpi_tables(b"DSDT")
-            .chain(self.uefi.acpi_tables(b"SSDT"))
-        {
-            cpc::scan(t, &mut cpcs);
-        }
-        let mut ds = clock::domains(cpcs.as_slice());
-        if ds.is_empty() {
-            return Err("no _CPC with a 32-bit desired-perf register");
-        }
-        if let Some(m) = mhz {
-            clock::cap(ds.as_mut_slice(), m);
-        }
-        if !ds
-            .as_slice()
-            .iter()
-            .all(|d| board_uefi::map_device(d.reg.0, 4))
-        {
-            return Err("a desired-perf register is unreachable");
-        }
-        // SAFETY: elk register komt uit de `_CPC` van deze firmware (de
-        // OEM-toets hierboven) en is Device-gemapt (`map_device`); alleen
-        // deze knop schrijft erin.
-        Ok(unsafe { CpcKnob::new(ds) })
-    }
-
-    /// De heetste CPU-sensor van de SCP in milligraden, 0 = geen meting.
-    /// De eerste vraag opent het SCMI-kanaal en kiest de sensoren (één
-    /// regel op de console); daarna hoogstens één SCMI-ronde per seconde.
-    /// Alleen op een Cix P1: elders is het SCMI-adres niet van ons.
-    #[must_use]
-    pub fn temp_milli_c(&self) -> i32 {
-        if !self.is_cix() {
+/// De thermometer: de heetste CPU-sensor van de SCP. De eerste vraag opent
+/// het SCMI-kanaal en kiest de sensoren (één regel op de console); daarna
+/// hoogstens één SCMI-ronde per seconde. Alleen op een Cix P1: elders is
+/// het SCMI-adres niet van ons.
+impl Thermal for Cix {
+    fn temp_milli_c(&self) -> i32 {
+        if !is_cix() {
             return 0;
         }
         let mut t = THERMO.get().borrow_mut();
@@ -136,60 +128,51 @@ impl O6n {
             .as_mut()
             .map_or(0, |th| th.milli_c(now))
     }
+}
 
-    /// De OS-core die `hopos.oscore` vraagt, met de klassen van dit board
-    /// ([`Board::core_class`]: de MPIDR-tabel). Via `Deref` kwam de vraag
-    /// tot 04-10 bij [`Uefi::os_core`] met de MADT-klassen, die de Cix
-    /// overal 0 geeft: alles big, dus `small` viel terug op de boot-core.
-    #[must_use]
-    pub fn os_core(&self) -> (usize, Option<&'static str>) {
-        self.uefi.os_core_by(|c| self.core_class(c))
-    }
+/// De klokknop uit de `_CPC`'s van de DSDT en de SSDT's: één
+/// desired-perf-woord per domein.
+impl ClockKnob for Cix {
+    type Knob = CpcKnob;
+    type KnobError = &'static str;
 
-    /// De klasse-indeling in één regel, voor de bootlog: de plaatsing moet
-    /// kunnen zeggen waar ze op leunt.
-    fn describe_classes(&self) {
-        let n = self.cores();
-        let (mut small, mut mid, mut big) = (0, 0, 0);
-        for c in 1..n {
-            match self.core_class(c) {
-                CoreClass::Small => small += 1,
-                CoreClass::Mid => mid += 1,
-                CoreClass::Big => big += 1,
-            }
-        }
-        cpu::println!(
-            "o6n: {} app cores, classes from {:?} - small {small}, mid {mid}, big {big}",
-            n.saturating_sub(1),
-            self.classes().source
-        );
-    }
+    const HAS_KNOB: bool = true;
 
-    /// De bronnen van de klasse-indeling: de MADT (via `board-uefi`), anders
-    /// de vaste MPIDR-tabel. De `_CPC`-bron vraagt de DSDT, en die geeft
-    /// `board-uefi` (nog) niet door.
-    fn classes(&self) -> class::Classes {
-        let n = self.cores().min(16);
-        let mut facts: BoundedVec<CoreFacts, 16> = BoundedVec::new();
-        for c in 0..n {
-            // De MADT-klasse zoals `board-uefi` hem rangschikt, als getal.
-            let eff = match self.uefi.core_class(c) {
-                CoreClass::Small => 0,
-                CoreClass::Mid => 1,
-                CoreClass::Big => 2,
-            };
-            let _ = facts.push(CoreFacts {
-                mpidr: board_uefi::slots::mpidr(c),
-                eff,
-                highest: 0,
-            });
-        }
-        // De kern-core telt niet mee in de MADT-rangschikking; is er onder de
-        // app-cores maar één klasse, dan is eff overal gelijk en valt de
-        // keuze op de MPIDR-tabel. Die geldt alleen voor de twaalf cores van
-        // de Cix P1 (het image is O6N-eigen).
-        class::Classes::new(facts.as_slice(), n == 12)
+    /// Het plafond geklemd op `mhz` als die gegeven is (`hopos.mhz`); of
+    /// waarom niet.
+    fn clock_knob(&self, mhz: Option<u32>) -> Option<Result<CpcKnob, &'static str>> {
+        Some(cpc_knob(mhz))
     }
+}
+
+/// [`ClockKnob::clock_knob`] van de O6N.
+fn cpc_knob(mhz: Option<u32>) -> Result<CpcKnob, &'static str> {
+    if !is_cix() {
+        return Err("not a Cix P1 (OEM ID), no _CPC fastchannels");
+    }
+    let uefi = Uefi::new();
+    let mut cpcs: BoundedVec<Cpc, MAX_CPCS> = BoundedVec::new();
+    for t in uefi.acpi_tables(b"DSDT").chain(uefi.acpi_tables(b"SSDT")) {
+        cpc::scan(t, &mut cpcs);
+    }
+    let mut ds = clock::domains(cpcs.as_slice());
+    if ds.is_empty() {
+        return Err("no _CPC with a 32-bit desired-perf register");
+    }
+    if let Some(m) = mhz {
+        clock::cap(ds.as_mut_slice(), m);
+    }
+    if !ds
+        .as_slice()
+        .iter()
+        .all(|d| board_uefi::map_device(d.reg.0, 4))
+    {
+        return Err("a desired-perf register is unreachable");
+    }
+    // SAFETY: elk register komt uit de `_CPC` van deze firmware (de
+    // OEM-toets hierboven) en is Device-gemapt (`map_device`); alleen
+    // deze knop schrijft erin.
+    Ok(unsafe { CpcKnob::new(ds) })
 }
 
 /// Opent het SCMI-kanaal van de DSDT en kiest de sensoren; `None` = geen
@@ -219,102 +202,32 @@ fn open_thermo() -> Option<Thermo> {
     Some(Thermo::new(ch, picked))
 }
 
-/// Wat de binary buiten [`Board`] om van het UEFI-board vraagt (de
-/// core-0-lijm: `this_core`, `os_bell`, `kick_self`, `config`), is hier
-/// hetzelfde; de eigen methodes van dit board ([`O6n::probe_disk`]) gaan
-/// voor.
-impl core::ops::Deref for O6n {
-    type Target = Uefi;
-
-    fn deref(&self) -> &Uefi {
-        &self.uefi
-    }
-}
-
-impl Default for O6n {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Board for O6n {
+impl Platform for Cix {
     type Nic = Rtl8126;
-    type Sleeper = <Uefi as Board>::Sleeper;
+    /// De NVMe (de eerste, het hele device) in de schijf-helft van de
+    /// DMA-regio.
+    type Disk = Nvme<Pci>;
 
     const NAME: &'static str = "o6n";
+    const FIRMWARE: &'static str =
+        "boot: Radxa Orion O6N (Cix P1) over UEFI: PE stub, ACPI discovery, 48-bit identity map";
+    const NEW: Self = Cix;
 
-    fn console(&self) -> fn(&[u8]) {
-        self.uefi.console()
+    fn discover(&self, uefi: &Uefi) {
+        describe_classes(uefi);
     }
 
-    fn console_nowait(&self) -> Option<fn(&[u8]) -> usize> {
-        self.uefi.console_nowait()
-    }
-
-    fn firmware(&self) -> &'static str {
-        "boot: Radxa Orion O6N (Cix P1) over UEFI: PE stub, ACPI discovery, 48-bit identity map"
-    }
-
-    fn init_heap(&self, heap: &Heap) {
-        self.uefi.init_heap(heap);
-    }
-
-    fn discover(&self, dtb: u64) {
-        self.uefi.discover(dtb);
-        self.describe_classes();
-    }
-
-    fn clock(&self) -> executor::Clock {
-        self.uefi.clock()
-    }
-
-    fn sleeper(&self) -> Self::Sleeper {
-        self.uefi.sleeper()
-    }
-
-    fn mem_total(&self) -> u64 {
-        self.uefi.mem_total()
-    }
-
-    fn cores(&self) -> usize {
-        self.uefi.cores()
-    }
-
-    fn core_class(&self, core: usize) -> CoreClass {
-        let classes = self.classes();
-        let facts = CoreFacts {
-            mpidr: board_uefi::slots::mpidr(core),
-            eff: match self.uefi.core_class(core) {
-                CoreClass::Small => 0,
-                CoreClass::Mid => 1,
-                CoreClass::Big => 2,
-            },
-            highest: 0,
-        };
-        classes.of(&facts)
-    }
-
-    fn plan(&self) -> Plan {
-        self.uefi.plan()
-    }
-
-    fn start_interrupts(&self) -> Result<&'static Signal, Error> {
-        self.uefi.start_interrupts()
-    }
-
-    fn dispatch_interrupts(&self) -> Dispatched {
-        self.uefi.dispatch_interrupts()
-    }
-
-    /// De GOP van de eigen firmware, zoals het UEFI-board hem las (alleen
-    /// in de gui-smaak; kaal `None`, docs/gui.md).
-    fn framebuffer(&self) -> Option<board::fb::Desc> {
-        board_uefi::gop_framebuffer()
+    fn core_class(&self, uefi: &Uefi, core: usize) -> CoreClass {
+        classes(uefi).of(&facts_of(uefi, core))
     }
 
     /// De native xHCI's die de firmware aanzette (usb.rs; kaal geen).
-    fn usb_hosts(&self) -> board::UsbHosts {
-        crate::usb::hosts(&self.uefi)
+    fn usb_hosts(&self, uefi: &Uefi) -> board::UsbHosts {
+        crate::usb::hosts(uefi)
+    }
+
+    fn probe_disk(&self) -> Result<Option<Nvme<Pci>>, Error> {
+        pcie::probe_nvme()
     }
 
     /// De eerste Realtek-poort (geen twee-poorts-aggregatie): BAR2 (het
@@ -328,10 +241,7 @@ impl Board for O6n {
     /// schoon); de driver heropent het masker in `flush`. Bij INTx is dat
     /// de level-lijn laten vallen (de freeze van 17/18-09), bij MSI-X de
     /// voorwaarde voor een volgende flank.
-    fn probe_nic(&self) -> Result<Option<Self::Nic>, Error> {
-        if NIC_CLAIMED.load(Relaxed) {
-            return Err(Error::Twice("probe_nic"));
-        }
+    fn probe_nic(&self, _uefi: &Uefi) -> Result<Option<Rtl8126>, Error> {
         let segs = pcie::segments();
         let Some(hit) = pcie::first_in(&segs, 2, |f| driver_rtl8126::supported(f.vendor, f.device))
         else {
@@ -388,7 +298,6 @@ impl Board for O6n {
             nic.xid(),
             probe::nic_intid(hit.root_bus).unwrap_or(0)
         );
-        NIC_CLAIMED.store(true, Relaxed);
         Ok(Some(nic))
     }
 }

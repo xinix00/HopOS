@@ -640,6 +640,15 @@ fn blk_err(e: Error, lba: u64, len: usize) -> blkdev::Error {
     }
 }
 
+impl<T: Transport> blkdev::Disk for VirtioBlk<T> {
+    fn sectors(&self) -> u64 {
+        VirtioBlk::sectors(self)
+    }
+    fn model(&self) -> &str {
+        VirtioBlk::model(self)
+    }
+}
+
 impl<T: Transport> blkdev::AsyncBlockDevice for VirtioBlk<T> {
     fn max_transfer(&self) -> usize {
         MAX_TRANSFER

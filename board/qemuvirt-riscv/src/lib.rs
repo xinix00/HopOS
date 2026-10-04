@@ -28,6 +28,7 @@
 pub mod cage;
 pub mod slots;
 
+use abi::ring::Coherence;
 use board::{Board, CoreClass, Dispatched, Error, Plan, Region};
 use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
@@ -41,11 +42,6 @@ use driver_virtioblk::VirtioBlk;
 use driver_virtionet::{IrqAck, VirtioNet};
 use fw::fdt::Fdt;
 use sync::{Local, Signal};
-
-/// De schijf die `probe_disk` geeft: de virtio-blk op de mmio-bus. De binary
-/// noemt hem `vboard::Disk`, zodat de geprobede schijf van de bench naar de
-/// opslag gaat zonder dat de binary het type per board kent.
-pub type Disk = VirtioBlk;
 
 /// De ns16550 van virt (byte-stride).
 pub const UART0: Pa = Pa(0x1000_0000);
@@ -166,20 +162,6 @@ fn fdt() -> Option<Fdt<'static>> {
     dtb_at(DTB.load(Relaxed))
 }
 
-/// De waarde van een boot-sleutel: het venster in het image
-/// (`board::cfgwin`), dan de FDT-bootargs (QEMU `-append`); leeg als hij er
-/// niet is.
-#[must_use]
-pub fn boot_param(key: &'static str) -> &'static str {
-    board::cfgwin::param(key, bootargs())
-}
-
-/// De FDT-bootargs (QEMU `-append`); "" zonder.
-#[must_use]
-pub fn bootargs() -> &'static str {
-    fdt().and_then(|f| f.bootargs()).unwrap_or("")
-}
-
 /// QEMU virt (riscv64) als board.
 pub struct QemuVirtRiscv;
 
@@ -199,45 +181,6 @@ impl QemuVirtRiscv {
         (0..VIRTIO_SLOTS)
             .map(|i| (VIRTIO_MMIO.add(i * VIRTIO_STRIDE), VIRTIO_IRQ + i as u32))
             .find(|&(pa, _)| is(pa))
-    }
-
-    /// Het hart waar dit draait.
-    #[must_use]
-    pub fn this_core(&self) -> usize {
-        csr::mhartid() as usize
-    }
-
-    /// De OS-core: op riscv64 altijd het boot-hart (0). Een
-    /// `hopos.oscore`-vraag wordt luid genegeerd: de verhuizing bestaat hier
-    /// niet.
-    #[must_use]
-    pub fn os_core(&self) -> (usize, Option<&'static str>) {
-        let asked = fdt()
-            .and_then(|f| f.bootargs())
-            .is_some_and(|a| a.contains("hopos.oscore="));
-        (
-            0,
-            asked.then_some("the riscv64 kern stays on its boot hart"),
-        )
-    }
-
-    /// De bel van de OS-core-rotatie van arm64 (een GIC-SGI). Op riscv64
-    /// is de kick van de kern-hart zijn `msip` ([`Self::kick_self`],
-    /// `cpu::riscv::oscore`); dit is de stub die de gedeelde lijm laat
-    /// bouwen.
-    #[must_use]
-    pub fn os_bell(&self) -> cpu::el2::Bell {
-        cpu::el2::Bell {
-            sgi1r: 0,
-            sgir: 0,
-            intid: 0,
-            pending: || 1023,
-        }
-    }
-
-    /// De kick naar dit hart zelf: de `msip`.
-    pub fn kick_self(&self) {
-        CLINT_DEV.set_msip(self.this_core(), true);
     }
 
     /// De index van dit hart in de CLINT: op virt is de CLINT gedeeld en
@@ -342,32 +285,6 @@ impl QemuVirtRiscv {
             Err(e) => cpu::println!("cage: riscv switcher self-test: {e} HOPOS_RV_CAGE_FAIL"),
         }
     }
-
-    /// Vindt en initialiseert de schijf (virtio-blk). Eén keer.
-    pub fn probe_disk(&self) -> Result<Option<VirtioBlk>, Error> {
-        if DISK_CLAIMED.swap(true, Relaxed) {
-            return Err(Error::Twice("probe_disk"));
-        }
-        let Some((base, _irq)) = Self::find_virtio(|base| {
-            // SAFETY: `find_virtio` geeft alleen adressen in het
-            // virtio-mmio-venster van virt.
-            unsafe { driver_virtioblk::is_modern_blk(base) }
-        }) else {
-            return Ok(None);
-        };
-        // SAFETY: `base` is een virtio-mmio-transport van virt, en BLK_DMA is
-        // van deze driver alleen. De lijn blijft uit: de driver pollt.
-        let disk =
-            unsafe { VirtioBlk::new(base, BLK_DMA.base, BLK_DMA.size, cpu::riscv::idle::now) }
-                .map_err(|_| Error::Disk("virtio-blk init failed"))?;
-        cpu::println!(
-            "disk: virtio-blk at {:#x}, {} sectors, flush {}",
-            base.0,
-            disk.sectors(),
-            if disk.can_flush() { "yes" } else { "no" }
-        );
-        Ok(Some(disk))
-    }
 }
 
 impl Default for QemuVirtRiscv {
@@ -376,11 +293,34 @@ impl Default for QemuVirtRiscv {
     }
 }
 
+/// Geen watchdog bedraad.
+impl board::Watchdog for QemuVirtRiscv {
+    type Armed = &'static str;
+}
+
+/// Geen thermometer.
+impl board::Thermal for QemuVirtRiscv {}
+
+/// Geen klokknop.
+impl board::ClockKnob for QemuVirtRiscv {
+    type Knob = board::NoKnob;
+    type KnobError = board::NoKnob;
+}
+
 impl Board for QemuVirtRiscv {
     type Nic = VirtioNet;
     type Sleeper = cpu::riscv::idle::RvSleeper;
+    /// De virtio-blk op de mmio-bus.
+    type Disk = VirtioBlk;
 
     const NAME: &'static str = "qemuvirt-riscv";
+    const PSCI: bool = false;
+    const DTB_IN_X0: bool = true;
+    const NO_BOOT_MEDIUM: bool = true;
+    /// De app-harts zijn niet coherent met de kern; de host-ringen zijn
+    /// beide de kern, op zijn eigen hart.
+    const SLOT_RINGS: Coherence = Coherence::Maintained;
+    const HOST_RINGS: Coherence = Coherence::Hardware;
 
     fn console(&self) -> fn(&[u8]) {
         console_write
@@ -515,6 +455,73 @@ impl Board for QemuVirtRiscv {
         );
         NIC_CLAIMED.store(true, Relaxed);
         Ok(Some(nic))
+    }
+
+    /// Het hart waar dit draait.
+    fn this_core(&self) -> usize {
+        csr::mhartid() as usize
+    }
+
+    /// De OS-core: op riscv64 altijd het boot-hart (0). Een
+    /// `hopos.oscore`-vraag wordt luid genegeerd: de verhuizing bestaat hier
+    /// niet.
+    fn os_core(&self) -> (usize, Option<&'static str>) {
+        let asked = fdt()
+            .and_then(|f| f.bootargs())
+            .is_some_and(|a| a.contains("hopos.oscore="));
+        (
+            0,
+            asked.then_some("the riscv64 kern stays on its boot hart"),
+        )
+    }
+
+    /// De bel van de OS-core-rotatie van arm64 (een GIC-SGI). Op riscv64
+    /// is de kick van de kern-hart zijn `msip` ([`Self::kick_self`],
+    /// `cpu::riscv::oscore`); dit is de stub die de gedeelde lijm laat
+    /// bouwen.
+    fn os_bell(&self) -> cpu::el2::Bell {
+        cpu::el2::Bell {
+            sgi1r: 0,
+            sgir: 0,
+            intid: 0,
+            pending: || 1023,
+        }
+    }
+
+    /// De kick naar dit hart zelf: de `msip`.
+    fn kick_self(&self) {
+        CLINT_DEV.set_msip(self.this_core(), true);
+    }
+
+    /// De FDT-bootargs (QEMU `-append`).
+    fn bootargs(&self) -> &'static str {
+        fdt().and_then(|f| f.bootargs()).unwrap_or("")
+    }
+
+    /// Vindt en initialiseert de schijf (virtio-blk). Eén keer.
+    fn probe_disk(&self) -> Result<Option<VirtioBlk>, Error> {
+        if DISK_CLAIMED.swap(true, Relaxed) {
+            return Err(Error::Twice("probe_disk"));
+        }
+        let Some((base, _irq)) = Self::find_virtio(|base| {
+            // SAFETY: `find_virtio` geeft alleen adressen in het
+            // virtio-mmio-venster van virt.
+            unsafe { driver_virtioblk::is_modern_blk(base) }
+        }) else {
+            return Ok(None);
+        };
+        // SAFETY: `base` is een virtio-mmio-transport van virt, en BLK_DMA is
+        // van deze driver alleen. De lijn blijft uit: de driver pollt.
+        let disk =
+            unsafe { VirtioBlk::new(base, BLK_DMA.base, BLK_DMA.size, cpu::riscv::idle::now) }
+                .map_err(|_| Error::Disk("virtio-blk init failed"))?;
+        cpu::println!(
+            "disk: virtio-blk at {:#x}, {} sectors, flush {}",
+            base.0,
+            disk.sectors(),
+            if disk.can_flush() { "yes" } else { "no" }
+        );
+        Ok(Some(disk))
     }
 }
 

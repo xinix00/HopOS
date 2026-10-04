@@ -188,6 +188,17 @@ pub const FLIP_FACTS_PA: u64 = BOOT_SCRATCH_PA + 0x3000;
 /// Hoeveel ruimte die feiten hebben.
 pub const FLIP_FACTS_LEN: u64 = 0x2000;
 
+/// De zwarte doos van de kern-flip (`kern::kernflip`, de tee van de
+/// console): hetzelfde gat als op virt en de Pi's (direct onder het
+/// handoff-blob), maar boven de feitenpagina van de stub. De loader-regio
+/// van het kernvenster is die van de recorder; de stub schrijft er alleen
+/// het staging-woord en de feiten.
+pub const BLACK_BOX: Region =
+    Region::new(abi::layout::flip_handoff_pa(STAGE_HDR_PA) - 0x8000, 0x8000);
+
+const _: () =
+    assert!(BLACK_BOX.base >= FLIP_FACTS_PA + FLIP_FACTS_LEN && BLACK_BOX.base.is_multiple_of(64));
+
 const _: () = {
     assert!(FLIP_RECORDER_PA >= BOOT_SCRATCH_PA + abi::layout::BOOT_SCRATCH_LEN);
     assert!(FLIP_TRAMP_PA + 0x1000 <= FLIP_FACTS_PA);

@@ -137,6 +137,10 @@ pub const FLIP_IMAGE_END: u64 = 0x8680_0000;
 pub const FLIP_RECORDER_PA: u64 = BOOT_SCRATCH_PA + 0x1000;
 /// De trampoline van de sprong.
 pub const FLIP_TRAMP_PA: u64 = BOOT_SCRATCH_PA + 0x2000;
+
+/// Geen zwarte doos van de kern-flip: nog geen plek die bewezen een reset
+/// overleeft (de LicheeRV legt zijn kooien in dezelfde staart).
+pub const BLACK_BOX: Region = Region::new(0, 0);
 /// De uit-stub van een app-hart zonder resetblok (`cpu::riscv::switch`).
 pub const FLIP_PARK_PA: u64 = BOOT_SCRATCH_PA + 0x3000;
 

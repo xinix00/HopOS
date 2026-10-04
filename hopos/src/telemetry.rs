@@ -1,5 +1,6 @@
 //! De telemetrie van de node: de thermiek op de tik en op de heartbeat van
-//! Hop, en het klokbeleid (`driver_dvfs::run`) als taak op de OS-core.
+//! Hop, en het klokbeleid (`driver_dvfs::run_after_boot`) als taak op de
+//! OS-core.
 //!
 //! Dit bezit de laatste temperatuurmeting ([`temp_milli_c`]) en de twee
 //! taken die hem en de klok bijhouden. De temperatuur gaat elke seconde op
@@ -10,18 +11,24 @@
 //! thermiek-taak is ook de tik van het slot-zaad (`seed::refresh`); het
 //! zaad zelf is van seed.rs.
 //!
-//! Per board ([`hw`]): de O6N meet via de SCP (SCMI) en heeft een knop
+//! De thermometer en de knop zijn van het board (`board::Thermal`,
+//! `board::ClockKnob`): de O6N meet via de SCP (SCMI) en heeft een knop
 //! (`_CPC`), de Altra meet via de SMpro (PCC) en laat de klok aan de
 //! firmware, de Mac mini meet één keer bij de boot (de SMC) en bewaakt zijn
 //! p-states, de Pi's meten en klokken via de VideoCore-mailbox
 //! (`board_raspi::clock`), de Radxa meet met de TSADC van de SoC
 //! (`board_rk3566::tsadc`) en klokt via SCMI met vdd_cpu over I2C
 //! (`board_rk3566::clock`), de LicheeRV meet met de TEMPSEN van de SoC
-//! (`board_licheerv::temp`), de rest meet (nog) niets. Het beleid leest op de
-//! O6N, de Pi's en de Radxa dezelfde tellers ([`counters`]).
+//! (`board_licheerv::temp`), de rest meet (nog) niets. Het beleid is voor
+//! elk board met een knop hetzelfde ([`governor`]), met dezelfde tellers
+//! ([`counters`]).
 
+use crate::{BOARD, Machine};
+use board::dvfs::{self, Knob as _, SAMPLE_NS};
+use board::{Board, ClockKnob, Thermal};
 use core::sync::atomic::{AtomicI32, Ordering::Relaxed};
 use core::time::Duration;
+use counters::{SOURCES, SlotHost};
 use cpu::println;
 use executor::Executor;
 
@@ -45,21 +52,84 @@ impl core::fmt::Display for Temp {
     }
 }
 
-/// De klok vol vlak vóór de sprong van een flip (flip.rs), op de boards
-/// met een knop; de rest doet niets.
+/// De klok vol vlak vóór de sprong van een flip (flip.rs): de vertrekkende
+/// kern laat de nieuwe niet op een stille klok landen. Een eigen knop op
+/// dezelfde mailbox, bus of fastchannels; de governor-taak komt niet meer
+/// aan de beurt. Op een board zonder knop niets.
 pub(crate) fn clock_full_for_flip() {
-    hw::full_for_flip();
+    if !Machine::HAS_KNOB {
+        return;
+    }
+    if let Some(Ok(mut k)) = BOARD.clock_knob(None) {
+        match k.full() {
+            Some(l) => println!("dvfs: -> {l} (full, flip) HOPOS_CLOCK_EDGE"),
+            None => println!("dvfs: clock change to full (flip) failed"),
+        }
+    }
 }
 
 /// Spawnt de thermiek-taak en, als het board een knop heeft, het
 /// klokbeleid.
 #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
 pub(crate) fn start(exec: &'static Executor) {
-    hw::open();
+    BOARD.open_thermal();
     if let Err(e) = exec.spawn(thermal(exec)) {
         println!("hwmon: task not spawned ({e:?}), no temperature");
     }
-    hw::governor(exec);
+    governor(exec);
+}
+
+/// Het klokbeleid met de knop van het board: `hopos.clock` (`dvfs`, `max`,
+/// `quiet`, `firmware`) en `hopos.mhz` (het plafond). De boot-flank gaat
+/// synchroon en vóór het net (main: `telemetry::start` gaat vóór
+/// `net::start`): de NIC-init hoort op de volle klok, zoals op een koude
+/// boot. Na een flip vanuit een stille kern (800 MHz) initialiseerde de NIC
+/// op 800 en sprong de klok er meteen na, en twee keer meldde de NIC daarna
+/// nooit meer (30-09, generatie 2, de Pi's). Een board zonder knop zegt
+/// zelf wat het heeft (`ClockKnob::no_knob`).
+fn governor(exec: &'static Executor) {
+    if !Machine::HAS_KNOB {
+        BOARD.no_knob(exec);
+        return;
+    }
+    let v = BOARD.boot_param("hopos.clock");
+    let (hold, ok) = dvfs::hold_of(v);
+    if !ok {
+        println!("dvfs: hopos.clock={v:?} is not dvfs, max, quiet or firmware; following load");
+    }
+    let Some(hold) = hold else {
+        println!("dvfs: hopos.clock=firmware, the boot operating point stays HOPOS_CLOCK_FIRMWARE");
+        return;
+    };
+    let mhz = BOARD.boot_param("hopos.mhz").parse::<u32>().ok();
+    let mut knob = match BOARD.clock_knob(mhz) {
+        Some(Ok(k)) => k,
+        Some(Err(e)) => {
+            println!("dvfs: {e}, the clock stays where the firmware left it HOPOS_CLOCK_NONE");
+            return;
+        }
+        None => {
+            BOARD.no_knob(exec);
+            return;
+        }
+    };
+    println!(
+        "dvfs: {knob}, policy {hold:?}, cap {}, sample {} ms, window 50 ms, cooldown 30 s HOPOS_CLOCK_UP",
+        mhz.map_or(0, |m| m),
+        SAMPLE_NS / 1_000_000
+    );
+    let level = knob.full();
+    match level {
+        Some(l) => println!("dvfs: -> {l} (full, boot) HOPOS_CLOCK_EDGE"),
+        None => println!("dvfs: clock change to full (boot) failed, the policy keeps its state"),
+    }
+    let task = async move {
+        let mut host = SlotHost::new(exec);
+        dvfs::run_after_boot::<SOURCES>(knob, hold, &mut host, level).await;
+    };
+    if let Err(e) = exec.spawn(task) {
+        println!("dvfs: task not spawned ({e:?}), the clock stays at full");
+    }
 }
 
 /// Elke seconde: meten, bewaren, en op de control-page van elke kooi
@@ -69,7 +139,7 @@ pub(crate) fn start(exec: &'static Executor) {
 async fn thermal(exec: &'static Executor) {
     loop {
         crate::seed::refresh();
-        let t = hw::temp();
+        let t = BOARD.temp_milli_c();
         TEMP.store(t, Relaxed);
         for i in 0..=kern::SLOT_CAP {
             if let Some(page) = crate::clock::ctrl_page(i) {
@@ -87,18 +157,12 @@ async fn thermal(exec: &'static Executor) {
 /// de executor voor de kern (dezelfde als `busy_ms` van de tik en slot 0 van
 /// SLOT_STATUS), en voor elk slot de idle-teller en de status op zijn
 /// control-page en of zijn bewoner de core wil. De last van de node is de
-/// kern plus elke bewoner. Eén keer, voor de O6N, de Pi's en de Radxa.
-#[cfg(any(
-    feature = "board-o6n",
-    feature = "board-rpi4",
-    feature = "board-rpi5",
-    feature = "board-rk3566"
-))]
+/// kern plus elke bewoner.
 mod counters {
+    use board::dvfs::{Host, SAMPLE_NS, Sample};
     use core::time::Duration;
     use cpu::println;
     use executor::Executor;
-    use vboard::dvfs::{Host, SAMPLE_NS, Sample};
 
     /// De bronnen van het beleid: de kern en elk slot dat er kan zijn, zoals
     /// de meetlat (load.rs). Tot 03-10 waren het er zestien, en het plan
@@ -215,314 +279,5 @@ mod counters {
         fn log(&self, args: core::fmt::Arguments<'_>) {
             println!("{args}");
         }
-    }
-}
-
-/// De O6N: de SCP-sensoren en de `_CPC`-knop.
-#[cfg(feature = "board-o6n")]
-mod hw {
-    /// Nog niets vóór een flip: de `_CPC`-knop blijft van de governor-taak
-    /// (of een stille O6N ook een landende kern hindert, is ongemeten).
-    pub(super) fn full_for_flip() {}
-
-    use super::counters::{SOURCES, SlotHost};
-    use cpu::println;
-    use executor::Executor;
-    use vboard::dvfs::{self, SAMPLE_NS};
-
-    pub(super) fn open() {}
-
-    pub(super) fn temp() -> i32 {
-        crate::BOARD.temp_milli_c()
-    }
-
-    fn param(key: &'static str) -> &'static str {
-        fw::bootcfg::get(crate::BOARD.config(), key)
-    }
-
-    /// Het klokbeleid: `hopos.clock` (`dvfs`, `max`, `quiet`, `firmware`)
-    /// en `hopos.mhz` (het plafond).
-    pub(super) fn governor(exec: &'static Executor) {
-        let v = param("hopos.clock");
-        let (hold, ok) = dvfs::hold_of(v);
-        if !ok {
-            println!("dvfs: hopos.clock={v:?} is not dvfs, max, quiet or firmware; following load");
-        }
-        let Some(hold) = hold else {
-            println!(
-                "dvfs: hopos.clock=firmware, the boot operating point stays HOPOS_CLOCK_FIRMWARE"
-            );
-            return;
-        };
-        let mhz = param("hopos.mhz").parse::<u32>().ok();
-        let knob = match crate::BOARD.clock_knob(mhz) {
-            Ok(k) => k,
-            Err(e) => {
-                println!("dvfs: {e}, the clock stays where the firmware left it HOPOS_CLOCK_NONE");
-                return;
-            }
-        };
-        println!(
-            "dvfs: {} _CPC domains, policy {hold:?}, cap {}, sample {} ms, window 50 ms, cooldown 30 s HOPOS_CLOCK_UP",
-            knob.domains().len(),
-            mhz.map_or(0, |m| m),
-            SAMPLE_NS / 1_000_000
-        );
-        let task = async move {
-            let mut host = SlotHost::new(exec);
-            dvfs::run::<SOURCES>(knob, hold, &mut host).await;
-        };
-        if let Err(e) = exec.spawn(task) {
-            println!("dvfs: task not spawned ({e:?}), the clock stays at full");
-        }
-    }
-}
-
-/// De Altra: de SMpro via PCC-kanaal 14; de klok is op servers
-/// firmware-domein, dus geen beleid.
-#[cfg(feature = "board-altra")]
-mod hw {
-    use cpu::println;
-    use executor::Executor;
-
-    /// Opent de SMpro met de PCCT van de firmware (één proeflees, één regel).
-    /// Geen knop hier: niets te doen vóór een flip.
-    pub(super) fn full_for_flip() {}
-
-    pub(super) fn open() {
-        match crate::BOARD.acpi_table(b"PCCT") {
-            Some(pcct) => crate::BOARD.open_hwmon(pcct),
-            None => println!("hwmon: no PCCT - temperature telemetry off"),
-        }
-    }
-
-    pub(super) fn temp() -> i32 {
-        crate::BOARD.temp_milli_c()
-    }
-
-    pub(super) fn governor(_exec: &'static Executor) {
-        println!("dvfs: server clocks are firmware domain on this board HOPOS_CLOCK_NONE");
-    }
-}
-
-/// De Mac mini: de klok regelt het silicium zelf (de APSC, die
-/// `discover` aanzette onder het plafond van `hopos.pstate`), en de
-/// wachter meldt elke sprong (Go `PStateWatch`, `board_apple::wdt`). De
-/// thermometer is de SMC; die praat bij elke meting een RTKit-coprocessor
-/// wakker en weer in slaap (tot seconden), dus hij meet één keer bij de boot
-/// (`hopos.smc=1`, in de bootlog) en niet op de tik: een oude waarde op de
-/// heartbeat van Hop zou liegen, dus hier 0 (`-`).
-#[cfg(feature = "board-apple")]
-mod hw {
-    use core::time::Duration;
-    use cpu::println;
-    use executor::Executor;
-    use vboard::wdt::PStateWatch;
-
-    /// De cadans van de wachter (Go: twee seconden).
-    const WATCH_EVERY: Duration = Duration::from_secs(2);
-
-    pub(super) fn open() {}
-
-    /// Geen knop hier: niets te doen vóór een flip.
-    pub(super) fn full_for_flip() {}
-
-    pub(super) fn temp() -> i32 {
-        0
-    }
-
-    pub(super) fn governor(exec: &'static Executor) {
-        let w = PStateWatch::new();
-        if w.is_empty() {
-            println!("dvfs: no cluster blocks in the ADT, the boot clock stays HOPOS_CLOCK_NONE");
-            return;
-        }
-        println!(
-            "dvfs: the APSC governs under the hopos.pstate ceiling; watching the p-states every {} s HOPOS_APPLE_PSTATE_WATCH",
-            WATCH_EVERY.as_secs()
-        );
-        if let Err(e) = exec.spawn(watch(exec, w)) {
-            println!("dvfs: p-state watch not spawned ({e:?})");
-        }
-    }
-
-    /// De wachter: alleen-lezen, één regel per sprong.
-    async fn watch(exec: &'static Executor, mut w: PStateWatch) {
-        loop {
-            w.poll();
-            exec.after(WATCH_EVERY).await;
-        }
-    }
-}
-
-/// Het klokbeleid met een knop van het board, de boot-flank synchroon vóór
-/// het net: de Pi's (de ARM-klok via de mailbox, `board_raspi::clock`, Go
-/// `StartDVFS`) en de Radxa (SCMI_CLK_CPU met vdd_cpu over I2C,
-/// `board_rk3566::clock`). Eén keer: de knop zegt zelf wat hij is.
-#[cfg(any(
-    feature = "board-rpi4",
-    feature = "board-rpi5",
-    feature = "board-rk3566"
-))]
-mod policy {
-    use super::counters::{SOURCES, SlotHost};
-    use cpu::println;
-    use executor::Executor;
-    use vboard::dvfs::{self, Knob, SAMPLE_NS};
-
-    /// Het klokbeleid: `hopos.clock` (`dvfs`, `max`, `quiet`, `firmware`)
-    /// en `hopos.mhz` (het plafond), zoals op de O6N.
-    pub(super) fn governor(exec: &'static Executor) {
-        let v = vboard::boot_param("hopos.clock");
-        let (hold, ok) = dvfs::hold_of(v);
-        if !ok {
-            println!("dvfs: hopos.clock={v:?} is not dvfs, max, quiet or firmware; following load");
-        }
-        let Some(hold) = hold else {
-            println!(
-                "dvfs: hopos.clock=firmware, the boot operating point stays HOPOS_CLOCK_FIRMWARE"
-            );
-            return;
-        };
-        let mhz = vboard::boot_param("hopos.mhz").parse::<u32>().ok();
-        let mut knob = match crate::BOARD.clock_knob(mhz) {
-            Ok(k) => k,
-            Err(e) => {
-                println!("dvfs: {e}, the clock stays where the firmware left it HOPOS_CLOCK_NONE");
-                return;
-            }
-        };
-        println!(
-            "dvfs: {knob}, policy {hold:?}, cap {}, sample {} ms, window 50 ms, cooldown 30 s HOPOS_CLOCK_UP",
-            mhz.map_or(0, |m| m),
-            SAMPLE_NS / 1_000_000
-        );
-        // De boot-flank nu, synchroon en vóór het net (main: telemetry::start
-        // gaat vóór net::start): de NIC-init hoort op de volle klok, zoals op
-        // een koude boot. Na een flip vanuit een stille kern (800 MHz)
-        // initialiseerde de NIC op 800 en sprong de klok er meteen na, en
-        // twee keer meldde de NIC daarna nooit meer (30-09, generatie 2, de
-        // Pi's).
-        let level = knob.full();
-        match level {
-            Some(l) => println!("dvfs: -> {l} (full, boot) HOPOS_CLOCK_EDGE"),
-            None => {
-                println!("dvfs: clock change to full (boot) failed, the policy keeps its state")
-            }
-        }
-        let task = async move {
-            let mut host = SlotHost::new(exec);
-            dvfs::run_after_boot::<SOURCES>(knob, hold, &mut host, level).await;
-        };
-        if let Err(e) = exec.spawn(task) {
-            println!("dvfs: task not spawned ({e:?}), the clock stays at full");
-        }
-    }
-
-    /// De klok vol vlak vóór de sprong van een flip (flip.rs): de
-    /// vertrekkende kern laat de nieuwe niet op een stille klok landen. Een
-    /// eigen knop op dezelfde mailbox of bus; de governor-taak komt niet
-    /// meer aan de beurt.
-    pub(super) fn full_for_flip() {
-        if let Ok(mut k) = crate::BOARD.clock_knob(None) {
-            match k.full() {
-                Some(l) => println!("dvfs: -> {l} (full, flip) HOPOS_CLOCK_EDGE"),
-                None => println!("dvfs: clock change to full (flip) failed"),
-            }
-        }
-    }
-}
-
-/// De Pi's: de SoC-temperatuur via de VideoCore-mailbox
-/// (`board_raspi::temp_millic`, dezelfde tag als de bootregel `vcmail:
-/// 58.713 C`), en de ARM-klok als knop via dezelfde mailbox ([`policy`]).
-#[cfg(any(feature = "board-rpi4", feature = "board-rpi5"))]
-mod hw {
-    pub(super) use super::policy::{full_for_flip, governor};
-
-    pub(super) fn open() {}
-
-    /// Milligraden uit de mailbox; 0 = geen meting (de mailbox is nog niet
-    /// open, of de firmware antwoordde niet).
-    pub(super) fn temp() -> i32 {
-        vboard::temp_millic().map_or(0, |t| i32::try_from(t).unwrap_or(0))
-    }
-}
-
-/// De Radxa: de TSADC van de SoC (`board_rk3566::tsadc`), het warmste van
-/// de twee kanalen (CPU en GPU), en de klok via SCMI met vdd_cpu over I2C
-/// ([`policy`]). De sensor gaf in Go nooit een conversie (06-08); `open`
-/// zegt in één regel wat hij nu teruggeeft. Zonder meting geen rem: de
-/// knop gaat tot 1800 MHz (`board_rk3566::clock`).
-#[cfg(feature = "board-rk3566")]
-mod hw {
-    pub(super) use super::policy::{full_for_flip, governor};
-
-    /// Brengt de sensor op (busy-waits van ~5 ms, één keer bij de boot) en
-    /// meldt de eerste lezing.
-    pub(super) fn open() {
-        vboard::tsadc::open();
-    }
-
-    /// Milligraden; 0 = geen geldige code.
-    pub(super) fn temp() -> i32 {
-        vboard::tsadc::temp_millic().unwrap_or(0)
-    }
-}
-
-/// De LicheeRV: de TEMPSEN van de SoC (`board_licheerv::temp`, Go
-/// `temp.go`); geen knop, de klok blijft waar de FSBL hem liet.
-#[cfg(feature = "board-licheerv")]
-mod hw {
-    use cpu::println;
-    use executor::Executor;
-
-    /// Brengt de sensor op (10 ms busy-wait, één keer bij de boot) en meldt
-    /// de eerste lezing.
-    pub(super) fn open() {
-        vboard::temp::open();
-    }
-
-    /// Geen knop hier: niets te doen vóór een flip.
-    pub(super) fn full_for_flip() {}
-
-    /// Milligraden; 0 = geen geldige code.
-    pub(super) fn temp() -> i32 {
-        vboard::temp::temp_millic().unwrap_or(0)
-    }
-
-    pub(super) fn governor(_exec: &'static Executor) {
-        println!(
-            "dvfs: no clock knob on this board, the firmware keeps its clock HOPOS_CLOCK_NONE"
-        );
-    }
-}
-
-#[cfg(not(any(
-    feature = "board-o6n",
-    feature = "board-altra",
-    feature = "board-apple",
-    feature = "board-rpi4",
-    feature = "board-rpi5",
-    feature = "board-rk3566",
-    feature = "board-licheerv"
-)))]
-mod hw {
-    use cpu::println;
-    use executor::Executor;
-
-    pub(super) fn open() {}
-
-    /// Geen knop hier: niets te doen vóór een flip.
-    pub(super) fn full_for_flip() {}
-
-    pub(super) fn temp() -> i32 {
-        0
-    }
-
-    pub(super) fn governor(_exec: &'static Executor) {
-        println!(
-            "dvfs: no clock knob on this board, the firmware keeps its clock HOPOS_CLOCK_NONE"
-        );
     }
 }

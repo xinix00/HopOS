@@ -56,6 +56,7 @@ pub mod slots;
 pub mod storage;
 pub mod wdt;
 
+use abi::ring::Coherence;
 use board::{Board, CoreClass, Dispatched, Error, Plan, Region};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use cpu::el2::Flavor;
@@ -64,11 +65,6 @@ use dev::Pa;
 use driver_tg3::Tg3;
 use netdev::Mac;
 use sync::Signal;
-
-/// De schijf die `probe_disk` geeft: de ANS-NVMe. De binary noemt hem
-/// `vboard::Disk`, zodat de geprobede schijf van de bench naar de opslag gaat
-/// zonder dat de binary het type per board kent.
-pub type Disk = storage::Disk;
 
 /// De DRAM-basis van élk Apple-silicon-systeem sinds de M1 (GEMETEN 28-08:
 /// 0x100_0000_0000).
@@ -151,13 +147,6 @@ pub const FLAVOR: Flavor = Flavor::AppleVhe;
 /// mislukte (geen link) liet niets achter en mag opnieuw (hopos `nic_retry`).
 static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
 
-/// Eén bootparameter uit `hopos.cfg` van de loader ("" als hij er niet
-/// is): de bron van de bench en de knoppen van de kern.
-#[must_use]
-pub fn boot_param(key: &'static str) -> &'static str {
-    fw::bootcfg::get(fwinfo::config_text(), key)
-}
-
 /// De Mac mini M4.
 pub struct Apple;
 
@@ -171,62 +160,11 @@ impl Apple {
         Self
     }
 
-    /// De fysieke index (ADT-volgorde) van de core waar dit draait.
-    #[must_use]
-    pub fn this_core(&self) -> usize {
-        slots::core_of(cpu::mpidr())
-    }
-
-    /// De OS-core die `hopos.cfg` vraagt (`hopos.oscore=<small|mid|big|N>`),
-    /// met een reden als de kern er niet heen kan. De firmware levert ons af
-    /// op een P-core (cpu 6); `small` is de zuinige core die HopOS hoort te
-    /// bewonen (Go: "de hop", 29-08). De verhuizing start die core via
-    /// `cpu::smp::start_one`, en dat is sinds 29-09 de CPU_ON van dit board
-    /// ([`cores::cpu_on_mpidr`], gezet in `discover`).
-    ///
-    /// Let op (29-08): een core die de kern zelf opbracht, krijgt op t8132
-    /// geen timer-FIQ. De kern draait daar dan in WFE (`sleeper` meet het
-    /// opnieuw) en de voorproef van de kooien zakt op de timer-beurt
-    /// (`HOPOS_APPLE_PREFLIGHT_FAIL`): de verhuizing kost de kooien, luid.
-    #[must_use]
-    pub fn os_core(&self) -> (usize, Option<&'static str>) {
-        let v = fw::bootcfg::get(self.config(), "hopos.oscore");
-        board::os_core(v, self.cores(), |c| self.core_class(c), self.this_core())
-    }
-
-    /// De kick van de OS-core voor de rotatie van `cpu::el2`: de fast IPI
-    /// naar de core waar de kern draait (IPI_RR_GLOBAL, geackt via IPI_SR op
-    /// EL2), want Apple heeft geen GIC-SGI.
-    #[must_use]
-    pub fn os_bell(&self) -> cpu::el2::Bell {
-        cpu::el2::Bell::apple(cpu::mpidr())
-    }
-
-    /// De fast IPI naar deze core zelf: de zelftest van het IPI-pad.
-    pub fn kick_self(&self) {
-        cores::kick(cpu::mpidr());
-    }
-
-    /// `hopos.cfg`: het venster in het image (`board::cfgwin`, gevuld door
-    /// `image/apple-m4.sh` of `hop image`), anders wat op 0xF000 staat (de
-    /// tekst van de m1n1-loader, of het venster van een kern van vóór
-    /// `board::cfgwin` dat een flip meenam); "" als er niets is.
-    #[must_use]
-    pub fn config(&self) -> &'static str {
-        board::cfgwin::or(fwinfo::config_text())
-    }
-
-    /// De schijf: de ANS-NVMe, met het schrijfvenster uit de GPT. Geen
-    /// methode van [`Board`], net als op de andere boards.
-    pub fn probe_disk(&self) -> Result<Option<storage::Disk>, Error> {
-        storage::probe_disk(self.config())
-    }
-
     /// De temperatuur van de die in milli-°C via de SMC; `None` = onbekend
     /// (alleen met `hopos.smc=1`). Elke aanroep praat de SMC wakker en weer
     /// in slaap (tot seconden, RTKit): niet voor een lus.
     #[must_use]
-    pub fn temp_milli_c(&self) -> Option<i32> {
+    pub fn smc_temp_milli_c(&self) -> Option<i32> {
         storage::temp_milli_c(self.config())
     }
 
@@ -243,7 +181,7 @@ impl Apple {
             );
             return;
         }
-        match self.temp_milli_c() {
+        match self.smc_temp_milli_c() {
             Some(t) => println!(
                 "smc: die {}.{} C at boot HOPOS_APPLE_TEMP",
                 t / 1000,
@@ -312,11 +250,92 @@ impl Default for Apple {
     }
 }
 
+/// De primaire watchdog van `/arm-io/wdt` (`wdt`), dezelfde die `discover`
+/// bij de boot stil zette (iBoot laat er meer dan één gewapend achter;
+/// natief resette de node zonder dat op 1:43, 31-08).
+impl board::Watchdog for Apple {
+    type Armed = wdt::Desc;
+
+    /// 30 s (Go `wdtTimeout`): de ANS en de SMC blokkeren bij hun opstart
+    /// tot seconden (RTKit `POWER_TIMEOUT_NS`).
+    const WD_TIMEOUT_MS: u64 = wdt::WDT_TIMEOUT_MS;
+    /// Het kortste alarm (`alarm_ticks` klemt op een seconde). Go resette
+    /// hier door de pets in te houden; dit is dezelfde weg, zonder 30 s te
+    /// wachten.
+    const WD_FIRE_MS: u64 = 0;
+
+    fn arm(&self, timeout_ms: u64) -> Result<wdt::Desc, &'static str> {
+        wdt::arm(timeout_ms)
+    }
+
+    fn pet(&self) {
+        wdt::pet();
+    }
+
+    fn disarm(&self) -> bool {
+        wdt::off()
+    }
+}
+
+/// De thermometer is de SMC; die praat bij elke meting een
+/// RTKit-coprocessor wakker en weer in slaap (tot seconden), dus hij meet
+/// één keer bij de boot (`hopos.smc=1`, in de bootlog) en niet op de tik:
+/// een oude waarde op de heartbeat van Hop zou liegen, dus hier 0 (`-`).
+impl board::Thermal for Apple {}
+
+/// De klok regelt het silicium zelf (de APSC, die `discover` aanzette onder
+/// het plafond van `hopos.pstate`); in plaats van een knop meldt de wachter
+/// elke sprong (Go `PStateWatch`, `wdt`).
+impl board::ClockKnob for Apple {
+    type Knob = board::NoKnob;
+    type KnobError = board::NoKnob;
+
+    fn no_knob(&self, exec: &'static executor::Executor) {
+        let w = wdt::PStateWatch::new();
+        if w.is_empty() {
+            println!("dvfs: no cluster blocks in the ADT, the boot clock stays HOPOS_CLOCK_NONE");
+            return;
+        }
+        println!(
+            "dvfs: the APSC governs under the hopos.pstate ceiling; watching the p-states every {} s HOPOS_APPLE_PSTATE_WATCH",
+            PSTATE_WATCH_EVERY.as_secs()
+        );
+        if let Err(e) = exec.spawn(pstate_watch(exec, w)) {
+            println!("dvfs: p-state watch not spawned ({e:?})");
+        }
+    }
+}
+
+/// De cadans van de wachter op de p-states (Go: twee seconden).
+const PSTATE_WATCH_EVERY: core::time::Duration = core::time::Duration::from_secs(2);
+
+/// De wachter: alleen-lezen, één regel per sprong.
+async fn pstate_watch(exec: &'static executor::Executor, mut w: wdt::PStateWatch) {
+    loop {
+        w.poll();
+        exec.after(PSTATE_WATCH_EVERY).await;
+    }
+}
+
 impl Board for Apple {
     type Nic = Tg3;
     type Sleeper = cpu::idle::ArmSleeper;
+    /// De ANS-NVMe.
+    type Disk = storage::Disk;
 
     const NAME: &'static str = "apple-m4";
+    const FLAVOR: Flavor = FLAVOR;
+    const PSCI: bool = false;
+    /// De kern mapt de pool Device (`mmu`, `dram_attr`); de ringen van een
+    /// slot krijgen `Hardware` zodra de staart Normal gemapt is
+    /// ([`Board::map_tail_normal`]).
+    const SLOT_RINGS: Coherence = Coherence::Maintained;
+    /// De heap is Normal write-back: het onderhoud kostte elk frame van de
+    /// node-stack een veeg per cacheline (GEMETEN 01-10 op M10: 930 MB/s
+    /// tegen 4300 app naar app).
+    const HOST_RINGS: Coherence = Coherence::Hardware;
+    /// WFE op EL1 slaapt op de M4 niet (board.go `IdleMode`, 02-09).
+    const APP_IDLE_YIELD: bool = true;
 
     fn console(&self) -> fn(&[u8]) {
         console::write
@@ -511,6 +530,62 @@ impl Board for Apple {
         wire_nic(self.config(), &mut nic);
         NIC_CLAIMED.store(true, Relaxed);
         Ok(Some(nic))
+    }
+
+    /// De fysieke index (ADT-volgorde) van de core waar dit draait.
+    fn this_core(&self) -> usize {
+        slots::core_of(cpu::mpidr())
+    }
+
+    /// De OS-core die `hopos.cfg` vraagt (`hopos.oscore=<small|mid|big|N>`),
+    /// met een reden als de kern er niet heen kan. De firmware levert ons af
+    /// op een P-core (cpu 6); `small` is de zuinige core die HopOS hoort te
+    /// bewonen (Go: "de hop", 29-08). De verhuizing start die core via
+    /// `cpu::smp::start_one`, en dat is sinds 29-09 de CPU_ON van dit board
+    /// ([`cores::cpu_on_mpidr`], gezet in `discover`).
+    ///
+    /// Let op (29-08): een core die de kern zelf opbracht, krijgt op t8132
+    /// geen timer-FIQ. De kern draait daar dan in WFE (`sleeper` meet het
+    /// opnieuw) en de voorproef van de kooien zakt op de timer-beurt
+    /// (`HOPOS_APPLE_PREFLIGHT_FAIL`): de verhuizing kost de kooien, luid.
+    fn os_core(&self) -> (usize, Option<&'static str>) {
+        let v = fw::bootcfg::get(self.config(), "hopos.oscore");
+        board::os_core(v, self.cores(), |c| self.core_class(c), self.this_core())
+    }
+
+    /// De kick van de OS-core voor de rotatie van `cpu::el2`: de fast IPI
+    /// naar de core waar de kern draait (IPI_RR_GLOBAL, geackt via IPI_SR op
+    /// EL2), want Apple heeft geen GIC-SGI.
+    fn os_bell(&self) -> cpu::el2::Bell {
+        cpu::el2::Bell::apple(cpu::mpidr())
+    }
+
+    /// De fast IPI naar deze core zelf: de zelftest van het IPI-pad.
+    fn kick_self(&self) {
+        cores::kick(cpu::mpidr());
+    }
+
+    /// `hopos.cfg`: het venster in het image (`board::cfgwin`, gevuld door
+    /// `image/apple-m4.sh` of `hop image`), anders wat op 0xF000 staat (de
+    /// tekst van de m1n1-loader, of het venster van een kern van vóór
+    /// `board::cfgwin` dat een flip meenam); "" als er niets is.
+    fn config(&self) -> &'static str {
+        board::cfgwin::or(fwinfo::config_text())
+    }
+
+    /// De schijf: de ANS-NVMe, met het schrijfvenster uit de GPT.
+    fn probe_disk(&self) -> Result<Option<storage::Disk>, Error> {
+        storage::probe_disk(self.config())
+    }
+
+    fn map_tail_normal(&self, pa: u64, size: u64) -> Option<Result<(), board::TailError>> {
+        Some(map_tail_normal(pa, size).map_err(board::TailError::Refused))
+    }
+
+    /// Daarnaast de plek 0xF000 (de loader, of het venster van een kern van
+    /// vóór `board::cfgwin`), zoals voorheen.
+    fn flip_carry_config(&self, src: u64, len: u64) -> bool {
+        fwinfo::carry_config(src, len)
     }
 }
 

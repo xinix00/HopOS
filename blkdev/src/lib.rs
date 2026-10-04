@@ -255,6 +255,16 @@ pub trait AsyncBlockDevice {
     }
 }
 
+/// De hele schijf van een board (`board::Board::probe_disk`): het
+/// blokcontract plus zijn maat en zijn naam, voor de bootregel van de
+/// opslag en de meetbank.
+pub trait Disk: AsyncBlockDevice {
+    /// De capaciteit in sectoren van [`LBA_SIZE`] bytes.
+    fn sectors(&self) -> u64;
+    /// De modelnaam, voor de bootregel.
+    fn model(&self) -> &str;
+}
+
 /// Een geleende driver is ook een driver: zo leent de meetbank de schijf
 /// (`Paced::new(&mut disk, Spin)`) en geeft hij hem daarna terug aan de
 /// opslag.

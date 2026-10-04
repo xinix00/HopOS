@@ -27,6 +27,7 @@
 //! die ongevraagd op de schijf schrijft is geen bench maar een bug, dus
 //! alleen met de sleutel.
 
+use crate::Disk;
 use alloc::string::String;
 use alloc::vec::Vec;
 use blkdev::{AsyncBlockDevice, BlockIo, LBA_SIZE, Op, Paced, Queue, Spin, block_on};
@@ -65,27 +66,26 @@ const QUEUE_DEPTHS: [usize; 3] = [1, 4, QUEUE_DEPTH];
 
 /// Eén bootparameter: de laatste waarde van `key` in [`cfg_text`], of "" als
 /// hij niet gezet is.
-pub(crate) fn bootparam(dtb: u64, key: &'static str) -> String {
-    String::from(fw::bootcfg::get(&cfg_text(dtb), key))
+pub(crate) fn bootparam(key: &'static str) -> String {
+    String::from(fw::bootcfg::get(&cfg_text(), key))
 }
 
 /// De config van het board als één tekst (`kern::nodecfg::text`):
-/// `hopos.cfg` van het bootmedium en de `hopos.*`-tokens van de bootargs,
-/// per board wat het heeft.
-pub(crate) fn cfg_text(dtb: u64) -> String {
-    src::text(dtb)
+/// `hopos.cfg` van het bootmedium (`Board::config`: het venster in het
+/// image, anders de ESP, de initrd of de loader) en de `hopos.*`-tokens van
+/// de bootargs (`Board::bootargs`: QEMU `-append`, de `cmdline.txt` van de
+/// Pi, de APPEND-regel van de Radxa), per board wat het heeft.
+pub(crate) fn cfg_text() -> String {
+    use board::Board;
+    kern::nodecfg::text(crate::BOARD.config(), crate::BOARD.bootargs())
 }
 
 /// Start wat de bootparameters vragen: de schijf-bench (synchroon, nu, op
 /// de geprobede schijf `disk`) en de idlestat-taak. Geeft de schijf terug
 /// voor `storage::start`: de bench leent hem alleen.
 #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
-pub(crate) fn start(
-    exec: &'static Executor,
-    dtb: u64,
-    mut disk: Option<vboard::Disk>,
-) -> Option<vboard::Disk> {
-    let idle = bootparam(dtb, "hopos.idlestat");
+pub(crate) fn start(exec: &'static Executor, mut disk: Option<Disk>) -> Option<Disk> {
+    let idle = bootparam("hopos.idlestat");
     if !idle.is_empty() && idle != "0" {
         // `1` is elke seconde; een ander getal is de periode in seconden.
         let every = idle.parse::<u64>().unwrap_or(1).clamp(1, 3600);
@@ -103,7 +103,7 @@ pub(crate) fn start(
             Err(_) => println!("bench: wdtest not spawned HOPOS_WDTEST_FAIL"),
         }
     }
-    if cfg!(feature = "nvmebench") || bootparam(dtb, "hopos.nvmebench") == "1" {
+    if cfg!(feature = "nvmebench") || bootparam("hopos.nvmebench") == "1" {
         match disk.as_mut() {
             Some(d) => bench_disk(exec, d),
             None => println!("nvme bench: no disk on this board, skipped HOPOS_NVMEBENCH_NONE"),
@@ -263,8 +263,8 @@ impl Snap {
 /// De schijf-bench: rauw (de Go-tabel per commandomaat, dan sequentieel
 /// en willekeurig over de staart) en door hopfs. Vóór de executor, met
 /// `block_on`: een bench-boot wacht erop, zoals in Go.
-fn bench_disk(exec: &'static Executor, disk: &mut vboard::Disk) {
-    let sectors = disk.sectors();
+fn bench_disk(exec: &'static Executor, disk: &mut Disk) {
+    let sectors = blkdev::Disk::sectors(&*disk);
     let bytes = sectors.saturating_mul(LBA_SIZE);
     // De grootste opdracht die de schijf neemt (Go: `disk.MaxTransfer`),
     // hoogstens de buffer.
@@ -287,7 +287,7 @@ fn bench_disk(exec: &'static Executor, disk: &mut vboard::Disk) {
     }
     println!(
         "nvme bench: {} ({} MB), writing the tail LBA {base}..{} ({} MB); the disk goes to the storage after HOPOS_NVMEBENCH_START",
-        disk.model(),
+        blkdev::Disk::model(&*disk),
         bytes / 1_000_000,
         sectors - 1,
         span >> 20
@@ -690,96 +690,4 @@ fn line(what: &str, sz: u64, n: u64, w: u64, r: u64, per: &str) {
 fn rate(bytes: u64, ns: u64) -> String {
     let tenths = u128::from(bytes) * 10_000 / u128::from(ns.max(1));
     alloc::format!("{}.{}", tenths / 10, tenths % 10)
-}
-
-/// De bron van de bootparameters op virt en de Pi's: het venster in het
-/// image (`board::cfgwin`), dan de bootargs in de FDT (QEMU `-append`, de
-/// `cmdline.txt` van de Pi).
-#[cfg(any(
-    feature = "board-qemuvirt",
-    feature = "board-rpi4",
-    feature = "board-rpi5"
-))]
-mod src {
-    use alloc::string::String;
-    use alloc::vec::Vec;
-
-    /// De grootste DTB die gelezen wordt (die van de Pi 5 is ~80 KB).
-    const DTB_MAX: usize = 1 << 20;
-
-    pub(super) fn text(dtb: u64) -> String {
-        let window = board::cfgwin::text();
-        let Some(blob) = copy(dtb).or_else(|| copy(fallback())) else {
-            return kern::nodecfg::text(window, "");
-        };
-        let Ok(f) = fw::fdt::Fdt::new(&blob) else {
-            return kern::nodecfg::text(window, "");
-        };
-        kern::nodecfg::text(window, f.bootargs().unwrap_or(""))
-    }
-
-    /// Waar QEMU de DTB legt als x0 leeg is (een ELF-kern).
-    #[cfg(feature = "board-qemuvirt")]
-    fn fallback() -> u64 {
-        board_qemuvirt::DTB_FALLBACK.0
-    }
-
-    /// De Pi's krijgen hem altijd in x0.
-    #[cfg(not(feature = "board-qemuvirt"))]
-    fn fallback() -> u64 {
-        0
-    }
-
-    /// Een kopie van de DTB op `pa`, als daar een geldige kop staat: eerst
-    /// de acht kopbytes per woord via `dev`, dan de gedeclareerde maat. Het
-    /// board las hem bij boot op dezelfde plek (`discover`).
-    fn copy(pa: u64) -> Option<Vec<u8>> {
-        if pa == 0 || !pa.is_multiple_of(8) {
-            return None;
-        }
-        let mut head = [0u8; 8];
-        dev::copy_out(&mut head, dev::Pa(pa));
-        let total = fw::fdt::total_size(&head)?;
-        if total > DTB_MAX {
-            return None;
-        }
-        let mut blob = Vec::new();
-        blob.try_reserve_exact(total).ok()?;
-        blob.resize(total, 0);
-        dev::copy_out(&mut blob, dev::Pa(pa));
-        Some(blob)
-    }
-}
-
-/// De bron op de boards met alleen een bestand: het venster in het image
-/// (`board::cfgwin`), anders `hopos.cfg` van de ESP (UEFI) of van de
-/// m1n1-loader (Apple); `config()` van het board kiest.
-#[cfg(any(
-    feature = "board-uefi",
-    feature = "board-o6n",
-    feature = "board-altra",
-    feature = "board-apple",
-    feature = "board-licheerv"
-))]
-mod src {
-    use alloc::string::String;
-
-    pub(super) fn text(_dtb: u64) -> String {
-        kern::nodecfg::text(crate::BOARD.config(), "")
-    }
-}
-
-/// De bron op de Radxa (het venster, anders `hopos.cfg` in de initrd, dan
-/// de bootargs) en op QEMU riscv (het venster, dan de bootargs).
-#[cfg(any(feature = "board-rk3566", feature = "board-qemuvirt-riscv"))]
-mod src {
-    use alloc::string::String;
-
-    pub(super) fn text(_dtb: u64) -> String {
-        #[cfg(feature = "board-rk3566")]
-        let file = vboard::cfg_text();
-        #[cfg(feature = "board-qemuvirt-riscv")]
-        let file = board::cfgwin::text();
-        kern::nodecfg::text(file, vboard::bootargs())
-    }
 }

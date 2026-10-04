@@ -54,11 +54,6 @@ use driver_virtionet::{IrqAck, VirtioNet};
 use fw::fdt::Fdt;
 use sync::{Local, Signal};
 
-/// De schijf die `probe_disk` geeft: de virtio-blk op de mmio-bus. De binary
-/// noemt hem `vboard::Disk`, zodat de geprobede schijf van de bench naar de
-/// opslag gaat zonder dat de binary het type per board kent.
-pub type Disk = VirtioBlk;
-
 #[cfg(test)]
 mod tests;
 
@@ -266,81 +261,6 @@ impl QemuVirt {
             .map(|i| (VIRTIO_MMIO.add(i * VIRTIO_STRIDE), 48 + i as u32))
             .find(|&(pa, _)| is(pa))
     }
-
-    /// De fysieke index van de core waar dit draait.
-    #[must_use]
-    pub fn this_core(&self) -> usize {
-        slots::core_of(cpu::mpidr())
-    }
-
-    /// De OS-core die de config vraagt (`hopos.oscore=<small|mid|big|N>`,
-    /// het venster in het image en dan de bootargs, `board::cfgwin`), met
-    /// een reden als de vraag niet kon: dan de boot-core (0), luid. Op
-    /// QEMU virt zijn alle cores big, dus `small` en `mid` vallen terug.
-    #[must_use]
-    pub fn os_core(&self) -> (usize, Option<&'static str>) {
-        let args = fdt().and_then(|f| f.bootargs()).unwrap_or("");
-        let v = board::cfgwin::param("hopos.oscore", args);
-        board::os_core(v, self.cores(), |c| self.core_class(c), 0)
-    }
-
-    /// De kick van de OS-core voor de rotatie van `cpu::el2`: de SGI naar
-    /// deze core (aanroepen op de OS-core), en de peek waarmee de kern na
-    /// een terugkeer ziet of het de kick was.
-    #[must_use]
-    pub fn os_bell(&self) -> cpu::el2::Bell {
-        cpu::el2::Bell {
-            sgi1r: driver_gicv3::sgi1r(cpu::mpidr(), KICK_SGI),
-            sgir: 0,
-            intid: KICK_SGI,
-            pending: cpu::gicv3::hppir1,
-        }
-    }
-
-    /// Stuurt de kick naar deze core zelf: de zelftest van het IPI-pad.
-    pub fn kick_self(&self) {
-        cpu::gicv3::sgi1r(driver_gicv3::sgi1r(cpu::mpidr(), KICK_SGI));
-    }
-
-    /// Vindt en initialiseert de schijf (virtio-blk) in de schijf-helft van
-    /// de DMA-regio. `Ok(None)` = geen schijf aan dit board; één keer.
-    ///
-    /// Geen methode van [`Board`]: het blokcontract is van `kern::hopfs`,
-    /// en het board-contract hangt niet van de kern af. De binary kent haar
-    /// board concreet.
-    pub fn probe_disk(&self) -> Result<Option<VirtioBlk>, Error> {
-        if DISK_CLAIMED.swap(true, Relaxed) {
-            return Err(Error::Twice("probe_disk"));
-        }
-        let Some((base, intid)) = Self::find_virtio(|base| {
-            // SAFETY: `find_virtio` geeft alleen adressen in het
-            // virtio-mmio-venster van virt, in de Device-gigabyte.
-            unsafe { driver_virtioblk::is_modern_blk(base) }
-        }) else {
-            return Ok(None);
-        };
-        // SAFETY: `base` is een virtio-mmio-slot van virt (Device-gemapt),
-        // en BLK_DMA is van deze driver alleen: buiten de kern-RAM, Normal
-        // non-cacheable gemapt (`mmu`), en door niets anders uitgedeeld.
-        let mut disk = unsafe { VirtioBlk::new(base, BLK_DMA.base, BLK_DMA.size, cpu::idle::now) }
-            .map_err(|_| Error::Disk("virtio-blk init failed"))?;
-        // De lijn (30-09): de hopfs-actor wacht op de bel in plaats van de
-        // OS-core vast te houden tot het device klaar is. Scherp in de GIC
-        // pas in `start_interrupts` (vóór de GIC-init is een SPI-route niet
-        // te schrijven); tot dan, en als dat mislukt, kijkt de wachter op
-        // de vangrail van 10 ms.
-        if intid != 0 {
-            DISK_IRQ.get().set(Some((intid, disk.irq_ack())));
-            disk.set_irq(&DISK_BELL);
-        }
-        cpu::println!(
-            "disk: virtio-blk at {:#x}, intid {intid}, {} sectors, flush {}",
-            base.0,
-            disk.sectors(),
-            if disk.can_flush() { "yes" } else { "no" }
-        );
-        Ok(Some(disk))
-    }
 }
 
 impl Default for QemuVirt {
@@ -349,11 +269,33 @@ impl Default for QemuVirt {
     }
 }
 
+/// Geen watchdog bedraad: de node draait onbewaakt, en de canary staat
+/// toch op de console.
+impl board::Watchdog for QemuVirt {
+    type Armed = &'static str;
+}
+
+/// Geen thermometer.
+impl board::Thermal for QemuVirt {}
+
+/// Geen klokknop.
+impl board::ClockKnob for QemuVirt {
+    type Knob = board::NoKnob;
+    type KnobError = board::NoKnob;
+}
+
 impl Board for QemuVirt {
     type Nic = VirtioNet;
     type Sleeper = cpu::idle::ArmSleeper;
+    /// De virtio-blk op de mmio-bus.
+    type Disk = VirtioBlk;
 
     const NAME: &'static str = "qemuvirt";
+    const DTB_IN_X0: bool = true;
+    const NO_BOOT_MEDIUM: bool = true;
+    /// De kern slaapt hier in WFI, die geen SEV hoort (hopos cage.rs
+    /// `APP_IDLE_MODE`, gemeten 30-09).
+    const APP_IDLE_YIELD: bool = true;
 
     fn console(&self) -> fn(&[u8]) {
         UART.init();
@@ -535,5 +477,78 @@ impl Board for QemuVirt {
         );
         NIC_CLAIMED.store(true, Relaxed);
         Ok(Some(nic))
+    }
+
+    /// De fysieke index van de core waar dit draait.
+    fn this_core(&self) -> usize {
+        slots::core_of(cpu::mpidr())
+    }
+
+    /// De OS-core die de config vraagt (`hopos.oscore=<small|mid|big|N>`,
+    /// het venster in het image en dan de bootargs, `board::cfgwin`), met
+    /// een reden als de vraag niet kon: dan de boot-core (0), luid. Op
+    /// QEMU virt zijn alle cores big, dus `small` en `mid` vallen terug.
+    fn os_core(&self) -> (usize, Option<&'static str>) {
+        let args = fdt().and_then(|f| f.bootargs()).unwrap_or("");
+        let v = board::cfgwin::param("hopos.oscore", args);
+        board::os_core(v, self.cores(), |c| self.core_class(c), 0)
+    }
+
+    /// De kick van de OS-core voor de rotatie van `cpu::el2`: de SGI naar
+    /// deze core (aanroepen op de OS-core), en de peek waarmee de kern na
+    /// een terugkeer ziet of het de kick was.
+    fn os_bell(&self) -> cpu::el2::Bell {
+        cpu::el2::Bell {
+            sgi1r: driver_gicv3::sgi1r(cpu::mpidr(), KICK_SGI),
+            sgir: 0,
+            intid: KICK_SGI,
+            pending: cpu::gicv3::hppir1,
+        }
+    }
+
+    /// Stuurt de kick naar deze core zelf: de zelftest van het IPI-pad.
+    fn kick_self(&self) {
+        cpu::gicv3::sgi1r(driver_gicv3::sgi1r(cpu::mpidr(), KICK_SGI));
+    }
+
+    /// De FDT-bootargs (QEMU `-append`).
+    fn bootargs(&self) -> &'static str {
+        fdt().and_then(|f| f.bootargs()).unwrap_or("")
+    }
+
+    /// Vindt en initialiseert de schijf (virtio-blk) in de schijf-helft van
+    /// de DMA-regio. `Ok(None)` = geen schijf aan dit board; één keer.
+    fn probe_disk(&self) -> Result<Option<VirtioBlk>, Error> {
+        if DISK_CLAIMED.swap(true, Relaxed) {
+            return Err(Error::Twice("probe_disk"));
+        }
+        let Some((base, intid)) = Self::find_virtio(|base| {
+            // SAFETY: `find_virtio` geeft alleen adressen in het
+            // virtio-mmio-venster van virt, in de Device-gigabyte.
+            unsafe { driver_virtioblk::is_modern_blk(base) }
+        }) else {
+            return Ok(None);
+        };
+        // SAFETY: `base` is een virtio-mmio-slot van virt (Device-gemapt),
+        // en BLK_DMA is van deze driver alleen: buiten de kern-RAM, Normal
+        // non-cacheable gemapt (`mmu`), en door niets anders uitgedeeld.
+        let mut disk = unsafe { VirtioBlk::new(base, BLK_DMA.base, BLK_DMA.size, cpu::idle::now) }
+            .map_err(|_| Error::Disk("virtio-blk init failed"))?;
+        // De lijn (30-09): de hopfs-actor wacht op de bel in plaats van de
+        // OS-core vast te houden tot het device klaar is. Scherp in de GIC
+        // pas in `start_interrupts` (vóór de GIC-init is een SPI-route niet
+        // te schrijven); tot dan, en als dat mislukt, kijkt de wachter op
+        // de vangrail van 10 ms.
+        if intid != 0 {
+            DISK_IRQ.get().set(Some((intid, disk.irq_ack())));
+            disk.set_irq(&DISK_BELL);
+        }
+        cpu::println!(
+            "disk: virtio-blk at {:#x}, intid {intid}, {} sectors, flush {}",
+            base.0,
+            disk.sectors(),
+            if disk.can_flush() { "yes" } else { "no" }
+        );
+        Ok(Some(disk))
     }
 }

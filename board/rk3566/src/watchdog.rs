@@ -1,11 +1,12 @@
 //! De hardware-watchdog van de Radxa: de DesignWare-WDT van de RK3566
-//! (`watchdog@fe600000`, `rockchip,rk3568-wdt`, `snps,dw-wdt`), in de vorm
-//! van `board_raspi::watchdog` (`arm`, `pet`, `off`, [`Desc`]), zodat de
-//! watchdog-taak van de kern (`hopos/src/watchdog.rs`) hem aait zoals elke
-//! andere. Go: `OLD/metal/board/rk3566/wdt.go` en `cmd/hopos/board_rk3566.go`.
+//! (`watchdog@fe600000`, `rockchip,rk3568-wdt`, `snps,dw-wdt`; de registers
+//! in `driver_dwwdt`), achter `board::Watchdog` (`arm`, `pet`, `off`,
+//! [`Desc`]), zodat de watchdog-taak van de kern (`hopos/src/watchdog.rs`)
+//! hem aait zoals elke andere. Go: `OLD/metal/board/rk3566/wdt.go` en
+//! `cmd/hopos/board_rk3566.go`.
 //!
-//! Dit bezit het blok van de watchdog en zijn twee klokgates; het beleid
-//! (wanneer aaien) is `kern::watchdog`.
+//! Dit bezit het adres van de watchdog, zijn twee klokgates en zijn twee
+//! reset-lijnen; het beleid (wanneer aaien) is `kern::watchdog`.
 //!
 //! Wat GEMETEN is (Go, 06-08, op dit bord): de tclk is xin24m zonder deler en
 //! dit silicium heeft de vaste TOP-tabel (COMP_PARAMS_1 bit 6), dus TOP n is
@@ -29,26 +30,10 @@
 use crate::soc::{CRU, hiword};
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use dev::Pa;
+use driver_dwwdt::{self as dw, DwWdt, ENABLE, TOP_MAX};
 
 /// De watchdog (rk356x-base.dtsi: `watchdog@fe600000`, `reg = <... 0x100>`).
 pub const WDT: Pa = Pa(0xFE60_0000);
-
-/// Control: bit 0 ENABLE, bit 1 response mode (0 = meteen resetten).
-const CR: u64 = 0x00;
-/// Timeout range: TOP in [3:0], TOP_INIT in [7:4].
-const TORR: u64 = 0x04;
-/// De teller, loopt af.
-const CCVR: u64 = 0x08;
-/// Counter restart: [`KICK`] is aaien.
-const CRR: u64 = 0x0C;
-/// COMP_PARAMS_1: bit 6 = de vaste TOP-tabel is gesynthetiseerd.
-const PARAMS: u64 = 0xF4;
-/// CR: aan.
-const ENABLE: u32 = 1 << 0;
-/// Het vaste DesignWare-restart-wachtwoord.
-const KICK: u32 = 0x76;
-/// COMP_PARAMS_1: USE_FIX_TOP.
-const USE_FIX_TOP: u32 = 1 << 6;
 
 /// `CLKGATE_CON(26)`: bit 13 = pclk (de registers), bit 14 = tclk (de teller);
 /// clk-rk3568.c `PCLK_WDT_NS`, `TCLK_WDT_NS`. Actief-laag.
@@ -62,8 +47,6 @@ const SRST_T: u32 = 6;
 
 /// De tclk: xin24m zonder deler (clk-rk3568.c, en gemeten 06-08).
 pub const TCLK_HZ: u64 = 24_000_000;
-/// De hoogste TOP.
-pub const TOP_MAX: u32 = 15;
 /// De timeout van Go: TOP 15, 2^31 tikken, 89 478 ms.
 pub const TIMEOUT_MS: u64 = top_ms(TOP_MAX);
 
@@ -76,16 +59,14 @@ static ARMED: AtomicBool = AtomicBool::new(false);
 /// tikken).
 #[must_use]
 pub const fn top_ms(top: u32) -> u64 {
-    (1u64 << (16 + top)) * 1000 / TCLK_HZ
+    dw::top_ms(top, TCLK_HZ)
 }
 
 /// De kleinste TOP met een timeout van minstens `timeout_ms`, hoogstens
 /// [`TOP_MAX`].
 #[must_use]
 pub fn top_for(timeout_ms: u64) -> u32 {
-    (0..=TOP_MAX)
-        .find(|&t| top_ms(t) >= timeout_ms)
-        .unwrap_or(TOP_MAX)
+    dw::top_for(timeout_ms, TCLK_HZ, 0)
 }
 
 /// Wat er gewapend is, voor de consoleregel.
@@ -154,18 +135,19 @@ pub fn arm(timeout_ms: u64) -> Result<Desc, &'static str> {
 /// timeout en kick.
 fn arm_at(wdt: Pa, cru: Pa, timeout_ms: u64, armed: &AtomicBool) -> Result<Desc, &'static str> {
     clocks_on(cru);
+    let w = DwWdt::new(wdt);
     let top = top_for(timeout_ms);
-    let was_on = dev::read32(wdt.add(CR)) & ENABLE != 0;
+    let was_on = w.enabled();
     let inherited = was_on && !armed.load(Relaxed);
-    let fixed = dev::read32(wdt.add(PARAMS)) & USE_FIX_TOP != 0;
-    dev::write32(wdt.add(TORR), top | (top << 4));
-    dev::write32(wdt.add(CRR), KICK);
+    let fixed = w.fixed_top();
+    w.set_top(top);
+    w.kick();
     dev::mb();
-    let counts = dev::read32(wdt.add(CCVR));
+    let counts = w.counter();
     if !was_on {
-        dev::write32(wdt.add(CR), ENABLE);
+        w.enable(ENABLE);
         dev::mb();
-        if dev::read32(wdt.add(CR)) & ENABLE == 0 {
+        if !w.enabled() {
             return Err("DW-WDT ENABLE does not read back, not armed");
         }
     }
@@ -201,7 +183,7 @@ pub fn pet() {
 /// [`pet`] op het blok `wdt` met de CRU `cru`.
 fn pet_at(wdt: Pa, cru: Pa) {
     if dev::read32(cru.add(CLKGATE26)) & (1 << GATE_PCLK) == 0 {
-        dev::write32(wdt.add(CRR), KICK);
+        DwWdt::new(wdt).kick();
     }
 }
 
@@ -220,7 +202,8 @@ fn off_at(wdt: Pa, cru: Pa, armed: &AtomicBool, delay: fn(u64)) -> bool {
         // De pclk dicht: dan heeft niemand hem gewapend (arm opent hem).
         return false;
     }
-    if dev::read32(wdt.add(CR)) & ENABLE == 0 {
+    let w = DwWdt::new(wdt);
+    if !w.enabled() {
         return false;
     }
     clocks_on(cru);
@@ -235,8 +218,8 @@ fn off_at(wdt: Pa, cru: Pa, armed: &AtomicBool, delay: fn(u64)) -> bool {
         hiword(0, 1, SRST_P) | hiword(0, 1, SRST_T),
     );
     dev::mb();
-    if dev::read32(wdt.add(CR)) & ENABLE != 0 {
-        let top = dev::read32(wdt.add(TORR)) & 0xF;
+    if w.enabled() {
+        let top = w.top();
         cpu::println!(
             "watchdog: DW-WDT at {:#x} still enabled after pulsing SRST_P/T_WDT_NS: it cannot be stopped, and without pets the node resets within {} ms (TOP {top})",
             wdt.0,
@@ -251,6 +234,7 @@ fn off_at(wdt: Pa, cru: Pa, armed: &AtomicBool, delay: fn(u64)) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use driver_dwwdt::{CCVR, CR, CRR, KICK, PARAMS, TORR, USE_FIX_TOP};
 
     /// Een nep-WDT (0x100 bytes) en een nep-CRU tot en met SOFTRST_CON(26).
     fn blocks(cr: u32, ccvr: u32, params: u32) -> (Vec<u32>, Vec<u32>, Pa, Pa) {

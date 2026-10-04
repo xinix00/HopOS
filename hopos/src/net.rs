@@ -60,10 +60,10 @@ type RingRx = AbiTx;
 /// De schrijfkant.
 type RingTx = abi::ring::Writer;
 
-/// Hoe de kern zijn kant van elke frame-ring mapt ([`abi::ring::Coherence`]),
-/// de host-ringen van poort 0 en de ringen van de slots: Normal write-back
-/// inner shareable waar de kern de pool zo mapt (`cpu::boot::ATTR_NORMAL`:
-/// de Pi's, de UEFI-boards, QEMU virt). Niet op Apple: daar mapt de kern de
+/// Hoe de kern zijn kant van elke frame-ring in de pool mapt
+/// ([`abi::ring::Coherence`], `Board::SLOT_RINGS`): Normal write-back inner
+/// shareable waar de kern de pool zo mapt (`cpu::boot::ATTR_NORMAL`: de
+/// Pi's, de UEFI-boards, QEMU virt). Niet op Apple: daar mapt de kern de
 /// pool Device (board/apple/src/mmu.rs, `dram_attr`). Niet op de Radxa: de
 /// kern mapt daar alles boven 0x0880_0000 Device, de pool dus ook
 /// (board/rk3566/src/mmu.rs, de tamago-keuze), en met de belofte las hij
@@ -73,34 +73,22 @@ type RingTx = abi::ring::Writer;
 /// andere hart. Elke ring kopieert pas zonder onderhoud als de tegenpartij
 /// hetzelfde belooft. De ringen van een slot krijgen op Apple en de Radxa
 /// toch Hardware zodra de kooi de staart Normal mapt (`kooi::tail_rings`).
-pub(crate) const RINGS: abi::ring::Coherence = if cfg!(all(
-    target_arch = "aarch64",
-    not(any(feature = "board-apple", feature = "board-rk3566"))
-)) {
-    abi::ring::Coherence::Hardware
-} else {
-    abi::ring::Coherence::Maintained
-};
+pub(crate) const RINGS: abi::ring::Coherence = <crate::Machine as board::Board>::SLOT_RINGS;
 
-/// De belofte van de twee host-ringen van poort 0. Die liggen in de
-/// kern-heap (Normal write-back op elk ARM-board, ook op Apple) en beide
-/// kanten zijn de kern, dus daar geldt [`RINGS`] niet, dat over de pool
-/// gaat. Op Apple kostte het onderhoud elk frame van de node-stack een
-/// veeg per cacheline in beide richtingen (GEMETEN 01-10 op M10: het
-/// opslagpad haalde 930 MB/s uit gaten in het RAM van de kern, met de
-/// OS-core vol bezig, tegen 4300 MB/s app naar app door dezelfde switch).
+/// De belofte van de twee host-ringen van poort 0 (`Board::HOST_RINGS`).
+/// Die liggen in de kern-heap (Normal write-back op elk ARM-board, ook op
+/// Apple) en beide kanten zijn de kern, dus daar geldt [`RINGS`] niet, dat
+/// over de pool gaat. Op Apple kostte het onderhoud elk frame van de
+/// node-stack een veeg per cacheline in beide richtingen (GEMETEN 01-10 op
+/// M10: het opslagpad haalde 930 MB/s uit gaten in het RAM van de kern, met
+/// de OS-core vol bezig, tegen 4300 MB/s app naar app door dezelfde switch).
 ///
 /// Ook op RISC-V: daar is [`RINGS`] `Maintained` omdat de app-harts niet
 /// coherent zijn met de kern, maar beide kanten van poort 0 draaien in de
 /// executor van de kern op zijn eigen hart, dus in één cache. Het onderhoud
 /// was daar per frame `th.dcache.cipa`/`cpa` met `th.sync.is` op kop, staart
 /// en payload voor niets (03-10, de hop op de C906).
-const HOST_RINGS: abi::ring::Coherence =
-    if cfg!(any(feature = "board-apple", target_arch = "riscv64")) {
-        abi::ring::Coherence::Hardware
-    } else {
-        RINGS
-    };
+const HOST_RINGS: abi::ring::Coherence = <crate::Machine as board::Board>::HOST_RINGS;
 
 /// De meetlat van het netwerkvlak.
 pub(crate) static STATS: Stats = Stats::new();

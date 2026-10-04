@@ -40,6 +40,9 @@ mod entry;
 pub mod facts;
 mod flip; // FLIP: de feitenpagina voor een geflipte kern (het flip-spoor)
 pub mod irq;
+// Een machine op dit board (de O6N, de Altra): het board-contract één keer,
+// met wat de machine eigen heeft ernaast.
+mod on;
 // De framebuffer van de firmware (GOP), alleen in de gui-smaak; kaal een
 // stub met dezelfde signatuur (handboek §7, docs/gui.md).
 #[cfg(feature = "gui")]
@@ -70,9 +73,12 @@ pub mod slots;
 pub mod usb;
 pub mod watchdog;
 
+pub use on::{On, Platform};
+
 use board::heap::Heap;
 use board::{Board, CoreClass, Dispatched, Error, Plan, Region};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
+use cpu::el2::Flavor;
 use cpu::irq::{Controller, Line};
 use dev::Pa;
 use driver_gicv3::{Gic, SysRegIcc};
@@ -83,11 +89,6 @@ use driver_virtioblk::VirtioBlk;
 use driver_virtionet::VirtioNet;
 use driver_virtiopci::pci::{self, Pci};
 use sync::Signal;
-
-/// De schijf die `probe_disk` geeft: de virtio-blk over PCI. De binary noemt
-/// hem `vboard::Disk`, zodat de geprobede schijf van de bench naar de opslag
-/// gaat zonder dat de binary het type per board kent.
-pub type Disk = VirtioBlk<Pci>;
 
 /// Het kernvenster: één allocatie van de stub op een vast adres, zodat de
 /// kern-flip en de slot-lijm er constanten van kunnen maken (zoals op
@@ -115,11 +116,6 @@ pub const WINDOW_PA: u64 = 0x8800_0000;
 /// Zie de standaardversie hierboven: de Altra van 03-10 (B000 bezet).
 #[cfg(feature = "window-a000")]
 pub const WINDOW_PA: u64 = 0xA000_0000;
-
-/// Draait de kern van dit board onder E2H = 1 (feature `vhe`, zie
-/// `el2`)? De binary toetst bij het bouwen dat de switcher-smaak van zijn
-/// app-cores en zijn OS-core hiermee klopt (`hopos/src/cage.rs` `FLAVOR`).
-pub const KERN_VHE: bool = el2::VHE;
 
 /// De maat van het kernvenster: 320 MB.
 pub const WINDOW: u64 = 0x1400_0000;
@@ -410,93 +406,10 @@ impl Uefi {
         Self
     }
 
-    /// Vindt en initialiseert de schijf (virtio-blk over PCI) in de
-    /// schijf-helft van de DMA-regio. `Ok(None)` = geen schijf; één keer.
-    /// Geen methode van [`Board`] (het blokcontract is van `kern::hopfs`),
-    /// net als op virt.
-    pub fn probe_disk(&self) -> Result<Option<VirtioBlk<Pci>>, Error> {
-        if DISK_CLAIMED.swap(true, Relaxed) {
-            return Err(Error::Twice("probe_disk"));
-        }
-        let Some((e, f, _, _)) = find_virtio(2) else {
-            return Ok(None);
-        };
-        // SAFETY: de BAR's van een door de firmware geconfigureerde functie
-        // liggen onder 1 TB of in een expliciet gemapt venster (Device).
-        let t = unsafe { Pci::new(&e, &f) }.map_err(|_| Error::Disk("virtio-pci transport"))?;
-        // SAFETY: BLK_DMA is van deze driver alleen, Normal-NC gemapt.
-        let disk =
-            unsafe { VirtioBlk::with_transport(t, BLK_DMA.base, BLK_DMA.size, cpu::idle::now) }
-                .map_err(|_| Error::Disk("virtio-blk init failed"))?;
-        cpu::println!(
-            "disk: virtio-blk-pci at {}, {} sectors, flush {}",
-            f.bdf,
-            disk.sectors(),
-            if disk.can_flush() { "yes" } else { "no" }
-        );
-        Ok(Some(disk))
-    }
-
-    /// De fysieke index van de core waar dit draait.
-    #[must_use]
-    pub fn this_core(&self) -> usize {
-        slots::core_of(cpu::mpidr())
-    }
-
-    /// De kick van de OS-core voor de rotatie van `cpu::el2`: de SGI naar
-    /// deze core, en de peek waarmee de kern na een terugkeer ziet of het de
-    /// kick was. Zoals op virt (dezelfde GICv3-systeemregisters).
-    #[must_use]
-    pub fn os_bell(&self) -> cpu::el2::Bell {
-        cpu::el2::Bell {
-            sgi1r: driver_gicv3::sgi1r(cpu::mpidr(), KICK_SGI),
-            sgir: 0,
-            intid: KICK_SGI,
-            pending: cpu::gicv3::hppir1,
-        }
-    }
-
-    /// Stuurt de kick naar deze core zelf: de zelftest van het IPI-pad.
-    /// Komt hij niet pending (GICR_ISPENDR0, of ICC_HPPIR1 zegt hem), dan
-    /// één luide regel met het woord, het doel en wat de redistributor zei:
-    /// de zelftest ziet daarna alleen nog `Timer` en weet niet waarom.
-    pub fn kick_self(&self) {
-        let mpidr = cpu::mpidr();
-        let word = driver_gicv3::sgi1r(mpidr, KICK_SGI);
-        cpu::gicv3::sgi1r(word);
-        let gic = gic();
-        let hz = cpu::idle::freq();
-        let limit = cpu::idle::counter().wrapping_add(cpu::idle::ns_to_ticks(KICK_SEEN_NS, hz));
-        for _ in 0..KICK_SEEN_POLLS {
-            if gic.local(KICK_SGI).is_some_and(|l| l.is_pending())
-                || cpu::gicv3::hppir1() == KICK_SGI
-            {
-                return;
-            }
-            if cpu::idle::counter().wrapping_sub(limit) as i64 >= 0 {
-                break;
-            }
-        }
-        if KICKS_LOST.fetch_add(1, Relaxed) < KICK_LOST_LINES {
-            let seen = gic.local(KICK_SGI);
-            cpu::println!(
-                "irq: kick SGI {KICK_SGI} did not arrive: ICC_SGI1R {word:#x} to MPIDR {mpidr:#x}, {}, ICC_HPPIR1 {} HOPOS_KICK_LOST",
-                Seen(seen),
-                cpu::gicv3::hppir1()
-            );
-        }
-    }
-
-    /// De OS-core die `hopos.cfg` vraagt (`hopos.oscore=<small|mid|big|N>`),
-    /// met een reden als de vraag niet kon: dan de boot-core (0), luid. Een
-    /// klasse is de eerste core van die klasse (MADT-efficiëntieklasse).
-    #[must_use]
-    pub fn os_core(&self) -> (usize, Option<&'static str>) {
-        self.os_core_by(|c| self.core_class(c))
-    }
-
-    /// [`Self::os_core`] met de klassen van het board erboven: de O6N heeft
-    /// een eigen indeling (de MPIDR-tabel), want zijn MADT zegt overal 0.
+    /// De OS-core die `hopos.cfg` vraagt (`hopos.oscore=<small|mid|big|N>`)
+    /// met de klassen `class` van het board erboven: de O6N heeft een eigen
+    /// indeling (de MPIDR-tabel), want zijn MADT zegt overal 0. Een reden
+    /// als de vraag niet kon: dan de boot-core (0), luid.
     #[must_use]
     pub fn os_core_by(&self, class: impl Fn(usize) -> CoreClass) -> (usize, Option<&'static str>) {
         let v = fw::bootcfg::get(self.config(), "hopos.oscore");
@@ -534,14 +447,6 @@ impl Uefi {
             cpu::irq::Error::Full { .. } => Error::Irq("no free interrupt line slot"),
             _ => Error::Irq("line refused"),
         })
-    }
-
-    /// De config van de node: het venster in het image
-    /// (`board::cfgwin`) als het gevuld is, anders `hopos.cfg` van de ESP
-    /// ("" als er geen van beide is).
-    #[must_use]
-    pub fn config(&self) -> &'static str {
-        board::cfgwin::or(Self::esp_config())
     }
 
     /// `hopos.cfg` van de ESP, als tekst (leeg als er geen was).
@@ -592,18 +497,42 @@ impl Default for Uefi {
     }
 }
 
-/// De GOP-framebuffer van de stub, voor de boards op dit board (O6N,
-/// Altra): hun `Board::framebuffer` geeft deze door. Kaal altijd `None`.
-#[must_use]
-pub fn gop_framebuffer() -> Option<board::fb::Desc> {
-    gop::framebuffer()
+/// De SBSA-watchdog uit de GTDT (`watchdog`); QEMU heeft er geen.
+impl board::Watchdog for Uefi {
+    type Armed = watchdog::Desc;
+
+    fn arm(&self, timeout_ms: u64) -> Result<watchdog::Desc, &'static str> {
+        watchdog::arm(timeout_ms)
+    }
+
+    fn pet(&self) {
+        watchdog::pet();
+    }
+
+    fn disarm(&self) -> bool {
+        watchdog::off()
+    }
+}
+
+/// Geen thermometer op het generieke board.
+impl board::Thermal for Uefi {}
+
+/// Geen klokknop op het generieke board.
+impl board::ClockKnob for Uefi {
+    type Knob = board::NoKnob;
+    type KnobError = board::NoKnob;
 }
 
 impl Board for Uefi {
     type Nic = VirtioNet<Pci>;
     type Sleeper = cpu::idle::ArmSleeper;
+    /// De virtio-blk over PCI.
+    type Disk = VirtioBlk<Pci>;
 
     const NAME: &'static str = "uefi";
+    /// De kern onder E2H = 1 met de feature `vhe` (`el2`): dan ook de
+    /// switcher.
+    const FLAVOR: Flavor = if el2::VHE { Flavor::Vhe } else { Flavor::Nvhe };
 
     fn usb_hosts(&self) -> board::UsbHosts {
         usb::hosts()
@@ -854,6 +783,99 @@ impl Board for Uefi {
         );
         NIC_CLAIMED.store(true, Relaxed);
         Ok(Some(nic))
+    }
+
+    /// Vindt en initialiseert de schijf (virtio-blk over PCI) in de
+    /// schijf-helft van de DMA-regio. `Ok(None)` = geen schijf; één keer.
+    fn probe_disk(&self) -> Result<Option<VirtioBlk<Pci>>, Error> {
+        if DISK_CLAIMED.swap(true, Relaxed) {
+            return Err(Error::Twice("probe_disk"));
+        }
+        let Some((e, f, _, _)) = find_virtio(2) else {
+            return Ok(None);
+        };
+        // SAFETY: de BAR's van een door de firmware geconfigureerde functie
+        // liggen onder 1 TB of in een expliciet gemapt venster (Device).
+        let t = unsafe { Pci::new(&e, &f) }.map_err(|_| Error::Disk("virtio-pci transport"))?;
+        // SAFETY: BLK_DMA is van deze driver alleen, Normal-NC gemapt.
+        let disk =
+            unsafe { VirtioBlk::with_transport(t, BLK_DMA.base, BLK_DMA.size, cpu::idle::now) }
+                .map_err(|_| Error::Disk("virtio-blk init failed"))?;
+        cpu::println!(
+            "disk: virtio-blk-pci at {}, {} sectors, flush {}",
+            f.bdf,
+            disk.sectors(),
+            if disk.can_flush() { "yes" } else { "no" }
+        );
+        Ok(Some(disk))
+    }
+
+    /// De fysieke index van de core waar dit draait.
+    fn this_core(&self) -> usize {
+        slots::core_of(cpu::mpidr())
+    }
+
+    /// De kick van de OS-core voor de rotatie van `cpu::el2`: de SGI naar
+    /// deze core, en de peek waarmee de kern na een terugkeer ziet of het de
+    /// kick was. Zoals op virt (dezelfde GICv3-systeemregisters).
+    fn os_bell(&self) -> cpu::el2::Bell {
+        cpu::el2::Bell {
+            sgi1r: driver_gicv3::sgi1r(cpu::mpidr(), KICK_SGI),
+            sgir: 0,
+            intid: KICK_SGI,
+            pending: cpu::gicv3::hppir1,
+        }
+    }
+
+    /// Stuurt de kick naar deze core zelf: de zelftest van het IPI-pad.
+    /// Komt hij niet pending (GICR_ISPENDR0, of ICC_HPPIR1 zegt hem), dan
+    /// één luide regel met het woord, het doel en wat de redistributor zei:
+    /// de zelftest ziet daarna alleen nog `Timer` en weet niet waarom.
+    fn kick_self(&self) {
+        let mpidr = cpu::mpidr();
+        let word = driver_gicv3::sgi1r(mpidr, KICK_SGI);
+        cpu::gicv3::sgi1r(word);
+        let gic = gic();
+        let hz = cpu::idle::freq();
+        let limit = cpu::idle::counter().wrapping_add(cpu::idle::ns_to_ticks(KICK_SEEN_NS, hz));
+        for _ in 0..KICK_SEEN_POLLS {
+            if gic.local(KICK_SGI).is_some_and(|l| l.is_pending())
+                || cpu::gicv3::hppir1() == KICK_SGI
+            {
+                return;
+            }
+            if cpu::idle::counter().wrapping_sub(limit) as i64 >= 0 {
+                break;
+            }
+        }
+        if KICKS_LOST.fetch_add(1, Relaxed) < KICK_LOST_LINES {
+            let seen = gic.local(KICK_SGI);
+            cpu::println!(
+                "irq: kick SGI {KICK_SGI} did not arrive: ICC_SGI1R {word:#x} to MPIDR {mpidr:#x}, {}, ICC_HPPIR1 {} HOPOS_KICK_LOST",
+                Seen(seen),
+                cpu::gicv3::hppir1()
+            );
+        }
+    }
+
+    /// De OS-core die `hopos.cfg` vraagt (`hopos.oscore=<small|mid|big|N>`),
+    /// met een reden als de vraag niet kon: dan de boot-core (0), luid. Een
+    /// klasse is de eerste core van die klasse (MADT-efficiëntieklasse).
+    fn os_core(&self) -> (usize, Option<&'static str>) {
+        self.os_core_by(|c| self.core_class(c))
+    }
+
+    /// De config van de node: het venster in het image
+    /// (`board::cfgwin`) als het gevuld is, anders `hopos.cfg` van de ESP
+    /// ("" als er geen van beide is).
+    fn config(&self) -> &'static str {
+        board::cfgwin::or(Self::esp_config())
+    }
+
+    /// 64 bytes van de DRBG voor de nieuwe kern (`flip`): het
+    /// EFI_RNG_PROTOCOL is na de koude boot weg.
+    fn flip_carry_seed(&self) -> bool {
+        flip::carry_seed()
     }
 }
 

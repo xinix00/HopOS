@@ -66,6 +66,7 @@ mod display {
 mod tests;
 
 use abi::layout::Pool;
+use abi::ring::Coherence;
 use board::{Board, CoreClass, Dispatched, Error, NoDisk, Plan, Region};
 use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
@@ -78,14 +79,6 @@ use driver_stmmac::dwmac4::{self, CSR_100_150M, Dwmac4, IrqAck, Probe};
 use fw::fdt::Fdt;
 use netdev::Mac;
 use sync::{Local, Signal};
-
-pub use driver_dvfs as dvfs;
-
-/// De schijf die `probe_disk` geeft: geen, want er is nog geen SD-driver
-/// ([`board::NoDisk`]). De binary noemt hem `vboard::Disk`, zodat de
-/// geprobede schijf van de bench naar de opslag gaat zonder dat de binary het
-/// type per board kent.
-pub type Disk = NoDisk;
 
 /// De debug-UART (UART2 op de 40-pins header: pin 8 TX, 10 RX, 6 GND):
 /// DesignWare APB, 16550-compatibel, `reg-shift = 2`. U-Boot liet hem op
@@ -357,11 +350,7 @@ pub fn cfg_text() -> &'static str {
 /// de bootargs (Go: `rk3566.BootParam`).
 #[must_use]
 pub fn boot_param(key: &'static str) -> &'static str {
-    let from_file = fw::bootcfg::get(cfg_text(), key);
-    if !from_file.is_empty() {
-        return from_file;
-    }
-    fw::bootcfg::get_cmdline(bootargs(), key)
+    Board::boot_param(&Rk3566, key)
 }
 
 /// De bootargs (de APPEND van extlinux.conf); "" zonder.
@@ -482,56 +471,6 @@ impl Rk3566 {
         Self
     }
 
-    /// Geen schijf: de SD- en eMMC-controller (dw_mmc/sdhci) heeft nog geen
-    /// driver in v3, dus altijd `Ok(None)`: de bestandscalls weigeren dan
-    /// luid.
-    pub fn probe_disk(&self) -> Result<Option<NoDisk>, Error> {
-        Ok(None)
-    }
-
-    /// De klokknop voor het klokbeleid: SCMI_CLK_CPU van de TF-A met vdd_cpu
-    /// over i2c0, begrensd op `mhz` (`hopos.mhz`). Een reden als de spanning
-    /// niet terug te lezen is of de klok niet antwoordt: dan blijft alles
-    /// waar U-Boot het liet.
-    pub fn clock_knob(&self, mhz: Option<u32>) -> Result<clock::RkKnob<clock::Hw>, clock::Error> {
-        clock::knob(mhz)
-    }
-
-    /// De fysieke index van de core waar dit draait.
-    #[must_use]
-    pub fn this_core(&self) -> usize {
-        slots::core_of(cpu::mpidr())
-    }
-
-    /// De OS-core die de bootargs vragen (`hopos.oscore=N`), met een reden
-    /// als de vraag niet kon: dan de boot-core (0). Homogene A55's, dus
-    /// `big` is core 0 en `small` of `mid` valt terug.
-    #[must_use]
-    pub fn os_core(&self) -> (usize, Option<&'static str>) {
-        board::os_core(
-            boot_param("hopos.oscore"),
-            self.cores(),
-            |c| self.core_class(c),
-            0,
-        )
-    }
-
-    /// De kick van de OS-core voor de rotatie van `cpu::el2`.
-    #[must_use]
-    pub fn os_bell(&self) -> cpu::el2::Bell {
-        cpu::el2::Bell {
-            sgi1r: driver_gicv3::sgi1r(cpu::mpidr(), KICK_SGI),
-            sgir: 0,
-            intid: KICK_SGI,
-            pending: cpu::gicv3::hppir1,
-        }
-    }
-
-    /// Stuurt de kick naar deze core zelf: de zelftest van het IPI-pad.
-    pub fn kick_self(&self) {
-        cpu::gicv3::sgi1r(driver_gicv3::sgi1r(cpu::mpidr(), KICK_SGI));
-    }
-
     /// Het MAC-adres uit `hopos.mac` of `hopos.node` (Go: `nodemac`). Dit
     /// board heeft geen MAC in een fuse waarvan we de registerkaart gemeten
     /// hebben, dus zou anders elke Radxa hetzelfde adres dragen.
@@ -609,11 +548,71 @@ impl Default for Rk3566 {
     }
 }
 
+/// De DesignWare-WDT van de SoC (`watchdog`): TOP 15, ongeveer 89,5 s,
+/// zoals Go (de DW-WDT kent alleen machten van twee). Een kick op een
+/// gewapende DW-WDT herlaadt hem, dus de aai rond een flip is gewoon een
+/// aai.
+impl board::Watchdog for Rk3566 {
+    type Armed = watchdog::Desc;
+
+    const WD_TIMEOUT_MS: u64 = watchdog::TIMEOUT_MS;
+
+    fn arm(&self, timeout_ms: u64) -> Result<watchdog::Desc, &'static str> {
+        watchdog::arm(timeout_ms)
+    }
+
+    fn pet(&self) {
+        watchdog::pet();
+    }
+
+    fn disarm(&self) -> bool {
+        watchdog::off()
+    }
+}
+
+/// De TSADC van de SoC (`tsadc`): het warmste van de twee kanalen (CPU en
+/// GPU). De sensor gaf in Go nooit een conversie (06-08); `open` zegt in
+/// één regel wat hij nu teruggeeft.
+impl board::Thermal for Rk3566 {
+    /// Brengt de sensor op (busy-waits van ~5 ms, één keer bij de boot) en
+    /// meldt de eerste lezing.
+    fn open_thermal(&self) {
+        tsadc::open();
+    }
+
+    /// 0 = geen geldige code.
+    fn temp_milli_c(&self) -> i32 {
+        tsadc::temp_millic().unwrap_or(0)
+    }
+}
+
+/// SCMI_CLK_CPU van de TF-A met vdd_cpu over i2c0 (`clock`). Zonder meting
+/// geen rem: de knop gaat tot 1800 MHz.
+impl board::ClockKnob for Rk3566 {
+    type Knob = clock::RkKnob<clock::Hw>;
+    type KnobError = clock::Error;
+
+    const HAS_KNOB: bool = true;
+
+    /// Een reden als de spanning niet terug te lezen is of de klok niet
+    /// antwoordt: dan blijft alles waar U-Boot het liet.
+    fn clock_knob(&self, mhz: Option<u32>) -> Option<Result<Self::Knob, clock::Error>> {
+        Some(clock::knob(mhz))
+    }
+}
+
 impl Board for Rk3566 {
     type Nic = Dwmac4;
     type Sleeper = cpu::idle::ArmSleeper;
+    /// Geen: de SD- en eMMC-controller heeft nog geen driver.
+    type Disk = NoDisk;
 
     const NAME: &'static str = "rk3566";
+    const DTB_IN_X0: bool = true;
+    /// De kern mapt alles boven 0x0880_0000 Device, de pool dus ook
+    /// (`mmu`, de tamago-keuze); de ringen van een slot krijgen `Hardware`
+    /// zodra de staart Normal gemapt is ([`Board::map_tail_normal`]).
+    const SLOT_RINGS: Coherence = Coherence::Maintained;
 
     fn console(&self) -> fn(&[u8]) {
         console_write
@@ -788,5 +787,58 @@ impl Board for Rk3566 {
         cpu::println!("net: dwmac4 {}", nic.diag());
         NIC_CLAIMED.store(true, Relaxed);
         Ok(Some(nic))
+    }
+
+    /// Geen schijf: de SD- en eMMC-controller (dw_mmc/sdhci) heeft nog geen
+    /// driver in v3, dus altijd `Ok(None)`: de bestandscalls weigeren dan
+    /// luid.
+    fn probe_disk(&self) -> Result<Option<NoDisk>, Error> {
+        Ok(None)
+    }
+
+    /// De fysieke index van de core waar dit draait.
+    fn this_core(&self) -> usize {
+        slots::core_of(cpu::mpidr())
+    }
+
+    /// De OS-core die de bootargs vragen (`hopos.oscore=N`), met een reden
+    /// als de vraag niet kon: dan de boot-core (0). Homogene A55's, dus
+    /// `big` is core 0 en `small` of `mid` valt terug.
+    fn os_core(&self) -> (usize, Option<&'static str>) {
+        board::os_core(
+            boot_param("hopos.oscore"),
+            self.cores(),
+            |c| self.core_class(c),
+            0,
+        )
+    }
+
+    /// De kick van de OS-core voor de rotatie van `cpu::el2`.
+    fn os_bell(&self) -> cpu::el2::Bell {
+        cpu::el2::Bell {
+            sgi1r: driver_gicv3::sgi1r(cpu::mpidr(), KICK_SGI),
+            sgir: 0,
+            intid: KICK_SGI,
+            pending: cpu::gicv3::hppir1,
+        }
+    }
+
+    /// Stuurt de kick naar deze core zelf: de zelftest van het IPI-pad.
+    fn kick_self(&self) {
+        cpu::gicv3::sgi1r(driver_gicv3::sgi1r(cpu::mpidr(), KICK_SGI));
+    }
+
+    /// Het venster in het image, anders `hopos.cfg` uit de initrd.
+    fn config(&self) -> &'static str {
+        cfg_text()
+    }
+
+    /// De APPEND-regel van extlinux.conf.
+    fn bootargs(&self) -> &'static str {
+        bootargs()
+    }
+
+    fn map_tail_normal(&self, pa: u64, size: u64) -> Option<Result<(), board::TailError>> {
+        Some(map_tail_normal(pa, size).map_err(board::TailError::Attr))
     }
 }

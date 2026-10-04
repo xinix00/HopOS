@@ -69,15 +69,8 @@ use driver_vcmail::Mbox;
 use fw::fdt::Fdt;
 use sync::{LocalCell, Signal};
 
-pub use driver_dvfs as dvfs;
 pub use driver_gicv2;
 pub use driver_vcmail;
-
-/// De schijf die `probe_disk` geeft: geen, want de Pi's hebben nog geen
-/// blokdriver ([`NoDisk`]). De binary noemt hem `vboard::Disk`, zodat de
-/// geprobede schijf van de bench naar de opslag gaat zonder dat de binary het
-/// type per board kent.
-pub type Disk = NoDisk;
 
 /// De kern-RAM als board-regio.
 pub const KERN_RAM: Region = Region {
@@ -140,6 +133,10 @@ pub trait Soc: 'static {
         let _ = ctx;
         board::UsbHosts::new()
     }
+    /// Keert PSCI CPU_OFF terug ([`Board::CPU_OFF_RETURNS`])? Standaard ja.
+    const CPU_OFF_RETURNS: bool = true;
+    /// Eén diagnose van de NIC voor de tik ([`Board::nic_diag`]).
+    fn nic_diag() {}
 }
 
 /// Het adres van een geldige DTB, 0 = geen.
@@ -191,16 +188,11 @@ pub fn device_enabled(compatible: &str) -> Option<bool> {
 
 /// Eén `hopos.*`-sleutel: het venster in het image (`board::cfgwin`), dan
 /// de cmdline (cmdline.txt, door de firmware in /chosen/bootargs gezet);
-/// "" = niet gezet.
+/// "" = niet gezet. Hetzelfde als `Board::boot_param`, voor wie het board
+/// niet in de hand heeft.
 #[must_use]
 pub fn boot_param(key: &'static str) -> &'static str {
     board::cfgwin::param(key, fdt().and_then(|f| f.bootargs()).unwrap_or(""))
-}
-
-/// De SoC-temperatuur in milligraden, via de mailbox.
-#[must_use]
-pub fn temp_millic() -> Option<u32> {
-    MBOX.borrow_mut().as_mut()?.temp().ok()
 }
 
 /// De Pi als board, geparametriseerd met zijn SoC.
@@ -213,70 +205,6 @@ impl<S: Soc> Raspi<S> {
     #[must_use]
     pub const fn new() -> Self {
         Self { _soc: PhantomData }
-    }
-
-    /// De schijf. Een Pi heeft in deze kern geen blokapparaat (de Pi 5-NVMe
-    /// via pcie1 heeft nog geen driver), dus altijd `Ok(None)`: de
-    /// bestandscalls weigeren dan luid.
-    ///
-    /// Geen methode van [`Board`], zoals bij `board_qemuvirt`: het
-    /// blokcontract is van `kern::hopfs`.
-    pub fn probe_disk(&self) -> Result<Option<NoDisk>, Error> {
-        Ok(None)
-    }
-
-    /// De klokknop voor het klokbeleid: de ARM-klok via de mailbox,
-    /// begrensd op `mhz` (`hopos.mhz`). Een reden als er niets te draaien
-    /// valt (geen mailbox, of de firmware laat één klok over).
-    pub fn clock_knob(&self, mhz: Option<u32>) -> Result<clock::MboxKnob, clock::Error> {
-        clock::knob(mhz)
-    }
-
-    /// De fysieke index van de core waar dit draait.
-    #[must_use]
-    pub fn this_core(&self) -> usize {
-        S::core_of(cpu::mpidr())
-    }
-
-    /// De OS-core die de bootargs vragen (`hopos.oscore=`), met een reden
-    /// als het niet kan. Op de Pi blijft de kern op de boot-core: de cores
-    /// zijn homogeen (elke vraag om een klasse is core 0 al), en een
-    /// verhuizing zou de SPI-route van de GIC-400 (ITARGETSR wijst naar de
-    /// core die `enable` riep) en de stop van de boot-core op ijzer vragen,
-    /// en die zijn hier niet bewezen.
-    #[must_use]
-    pub fn os_core(&self) -> (usize, Option<&'static str>) {
-        match boot_param("hopos.oscore") {
-            "" | "0" | "small" | "mid" | "big" => (0, None),
-            _ => (0, Some("the Pi keeps the OS on core 0 (GIC-400 SPI route)")),
-        }
-    }
-
-    /// De kick van de OS-core voor de rotatie van `cpu::el2`: op een GIC-400
-    /// is er geen ICC_SGI1R, een SGI is een MMIO-schrijf naar GICD_SGIR. Dus
-    /// `sgir` = de PA daarvan (de switcher van een app-core draait met de
-    /// MMU uit) en `sgi1r` = het 32-bit woord `(1 << (16 + cpu)) | intid`
-    /// ([`driver_gicv2::Gic::sgi_word`]); de peek is GICC_HPPIR. Aanroepen
-    /// op de OS-core, na `start_interrupts` (het masker komt uit
-    /// `Gic::init`).
-    #[must_use]
-    pub fn os_bell(&self) -> cpu::el2::Bell {
-        let gic = S::gic();
-        cpu::el2::Bell {
-            sgi1r: u64::from(gic.sgi_word(KICK_SGI)),
-            sgir: gic.sgir_pa().0,
-            intid: KICK_SGI,
-            pending: hppir::<S>,
-        }
-    }
-
-    /// Stuurt de kick naar deze core zelf: de zelftest van het IPI-pad. Een
-    /// SGI naar het eigen masker in de doellijst is op GICv2 gewoon een SGI
-    /// (IHI 0048B 4.3.15); er is geen tweede core voor nodig, dus dit
-    /// bewijst ook QEMU `raspi4b` zonder PSCI.
-    pub fn kick_self(&self) {
-        let gic = S::gic();
-        gic.send_sgi(gic.sgi_word(KICK_SGI));
     }
 
     /// De mailbox op, en wat de firmware over zichzelf zegt.
@@ -437,11 +365,67 @@ fn console_nowait<S: Soc>(b: &[u8]) -> usize {
     S::uart().write_nowait(b)
 }
 
+/// De PM-watchdog van de BCM-familie (`watchdog`): wapent alleen als zijn
+/// teller loopt.
+impl<S: Soc> board::Watchdog for Raspi<S> {
+    type Armed = watchdog::Desc;
+
+    fn arm(&self, timeout_ms: u64) -> Result<watchdog::Desc, &'static str> {
+        watchdog::arm(timeout_ms)
+    }
+
+    fn pet(&self) {
+        watchdog::pet();
+    }
+
+    /// Vóór een eigen `arm` telt de teller van de vorige kern door (de
+    /// Pi 5, 30-09: gereset na 12 s tijdens 5 s framebuffer-geduld): dus
+    /// ook een herlaad van wat die wapende.
+    fn pet_now(&self) {
+        watchdog::pet();
+        watchdog::reload_if_armed(Self::WD_TIMEOUT_MS);
+    }
+
+    fn disarm(&self) -> bool {
+        watchdog::off()
+    }
+}
+
+/// De SoC-temperatuur via de VideoCore-mailbox (dezelfde tag als de
+/// bootregel `vcmail: 58.713 C`).
+impl<S: Soc> board::Thermal for Raspi<S> {
+    /// 0 als de mailbox niet open is of de firmware niet antwoordde.
+    fn temp_milli_c(&self) -> i32 {
+        MBOX.borrow_mut()
+            .as_mut()
+            .and_then(|m| m.temp().ok())
+            .map_or(0, |t| i32::try_from(t).unwrap_or(0))
+    }
+}
+
+/// De ARM-klok via de mailbox (`clock`, Go `StartDVFS`).
+impl<S: Soc> board::ClockKnob for Raspi<S> {
+    type Knob = clock::MboxKnob;
+    type KnobError = clock::Error;
+
+    const HAS_KNOB: bool = true;
+
+    /// Een reden als er niets te draaien valt (geen mailbox, of de firmware
+    /// laat één klok over).
+    fn clock_knob(&self, mhz: Option<u32>) -> Option<Result<clock::MboxKnob, clock::Error>> {
+        Some(clock::knob(mhz))
+    }
+}
+
 impl<S: Soc> Board for Raspi<S> {
     type Nic = S::Nic;
     type Sleeper = cpu::idle::ArmSleeper;
+    /// Geen: de Pi's hebben nog geen blokdriver.
+    type Disk = NoDisk;
 
     const NAME: &'static str = S::NAME;
+    const CPU_OFF_RETURNS: bool = S::CPU_OFF_RETURNS;
+    const DTB_IN_X0: bool = true;
 
     fn console(&self) -> fn(&[u8]) {
         S::uart().init();
@@ -615,5 +599,65 @@ impl<S: Soc> Board for Raspi<S> {
             NIC_CLAIMED.store(true, Relaxed);
         }
         r
+    }
+
+    /// De schijf. Een Pi heeft in deze kern geen blokapparaat (de Pi 5-NVMe
+    /// via pcie1 heeft nog geen driver), dus altijd `Ok(None)`: de
+    /// bestandscalls weigeren dan luid.
+    fn probe_disk(&self) -> Result<Option<NoDisk>, Error> {
+        Ok(None)
+    }
+
+    /// De fysieke index van de core waar dit draait.
+    fn this_core(&self) -> usize {
+        S::core_of(cpu::mpidr())
+    }
+
+    /// De OS-core die de bootargs vragen (`hopos.oscore=`), met een reden
+    /// als het niet kan. Op de Pi blijft de kern op de boot-core: de cores
+    /// zijn homogeen (elke vraag om een klasse is core 0 al), en een
+    /// verhuizing zou de SPI-route van de GIC-400 (ITARGETSR wijst naar de
+    /// core die `enable` riep) en de stop van de boot-core op ijzer vragen,
+    /// en die zijn hier niet bewezen.
+    fn os_core(&self) -> (usize, Option<&'static str>) {
+        match boot_param("hopos.oscore") {
+            "" | "0" | "small" | "mid" | "big" => (0, None),
+            _ => (0, Some("the Pi keeps the OS on core 0 (GIC-400 SPI route)")),
+        }
+    }
+
+    /// De kick van de OS-core voor de rotatie van `cpu::el2`: op een GIC-400
+    /// is er geen ICC_SGI1R, een SGI is een MMIO-schrijf naar GICD_SGIR. Dus
+    /// `sgir` = de PA daarvan (de switcher van een app-core draait met de
+    /// MMU uit) en `sgi1r` = het 32-bit woord `(1 << (16 + cpu)) | intid`
+    /// ([`driver_gicv2::Gic::sgi_word`]); de peek is GICC_HPPIR. Aanroepen
+    /// op de OS-core, na `start_interrupts` (het masker komt uit
+    /// `Gic::init`).
+    fn os_bell(&self) -> cpu::el2::Bell {
+        let gic = S::gic();
+        cpu::el2::Bell {
+            sgi1r: u64::from(gic.sgi_word(KICK_SGI)),
+            sgir: gic.sgir_pa().0,
+            intid: KICK_SGI,
+            pending: hppir::<S>,
+        }
+    }
+
+    /// De cmdline (cmdline.txt, door de firmware in /chosen/bootargs gezet).
+    fn bootargs(&self) -> &'static str {
+        fdt().and_then(|f| f.bootargs()).unwrap_or("")
+    }
+
+    fn nic_diag(&self) {
+        S::nic_diag();
+    }
+
+    /// Stuurt de kick naar deze core zelf: de zelftest van het IPI-pad. Een
+    /// SGI naar het eigen masker in de doellijst is op GICv2 gewoon een SGI
+    /// (IHI 0048B 4.3.15); er is geen tweede core voor nodig, dus dit
+    /// bewijst ook QEMU `raspi4b` zonder PSCI.
+    fn kick_self(&self) {
+        let gic = S::gic();
+        gic.send_sgi(gic.sgi_word(KICK_SGI));
     }
 }

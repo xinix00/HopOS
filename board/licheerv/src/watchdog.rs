@@ -1,7 +1,7 @@
-//! De DW-watchdog van de SG2002 (`snps,dw-wdt` op 0x0301_0000, pclk 25 MHz),
-//! in de vorm van `board_uefi::watchdog` (`arm`, `pet`, `off`, [`Desc`]),
-//! zodat de watchdog-taak van de kern (`hopos/src/watchdog.rs`) hem aait
-//! zoals elke andere (Go, `OLD/metal/board/licheerv/wdt.go`).
+//! De DW-watchdog van de SG2002 (`snps,dw-wdt` op 0x0301_0000, pclk 25 MHz;
+//! de registers in `driver_dwwdt`), achter `board::Watchdog` (`arm`, `pet`,
+//! [`Desc`]), zodat de watchdog-taak van de kern (`hopos/src/watchdog.rs`)
+//! hem aait zoals elke andere (Go, `OLD/metal/board/licheerv/wdt.go`).
 //!
 //! Alleen wapenen als de probe van de boot antwoordde (`probed`): een
 //! bus-fout op het WDT-blok overleeft de kern niet, en die gok nam
@@ -11,17 +11,12 @@
 
 use crate::WDT;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
+use driver_dwwdt::{self as dw, DwWdt};
 
-/// Het control-register.
-const CR: u64 = 0x00;
-/// De timeout-range (TOP in bit 3..0, TOP_INIT in bit 7..4).
-const TORR: u64 = 0x04;
-/// De restart: het vaste wachtwoord.
-const CRR: u64 = 0x0C;
 /// De vendor-lijm van de TOP_WDT (Go, verbatim).
 const GLUE: u64 = 0x1C;
-/// Het DW-restart-wachtwoord.
-const KICK: u32 = 0x76;
+/// CR: aan, met de vendor-pulslengte en response = directe reset (Go).
+const CR_ARM: u32 = 0x11;
 /// De klok van de teller: pclk, 25 MHz.
 const HZ: u64 = 25_000_000;
 
@@ -34,14 +29,14 @@ static ARMED: AtomicU32 = AtomicU32::new(0);
 /// De timeout van TOP `t`: 2^(16 + t) cycli.
 #[must_use]
 pub const fn top_ms(t: u32) -> u64 {
-    (1u64 << (16 + t)) * 1000 / HZ
+    dw::top_ms(t, HZ)
 }
 
 /// De kleinste TOP (1..=15) waarvan de timeout minstens `timeout_ms` is;
 /// 15 (~86 s) als niets volstaat.
 #[must_use]
 pub fn top_for(timeout_ms: u64) -> u32 {
-    (1..=15).find(|&t| top_ms(t) >= timeout_ms).unwrap_or(15)
+    dw::top_for(timeout_ms, HZ, 1)
 }
 
 /// Meldt de uitkomst van de probe (`LicheeRv::watchdog_probe`).
@@ -78,10 +73,11 @@ pub fn arm(timeout_ms: u64) -> Result<Desc, &'static str> {
         dev::write32(dev::Pa(pa), v);
     }
     let t = top_for(timeout_ms);
-    dev::write32(WDT.add(TORR), t | t << 4);
+    let w = DwWdt::new(WDT);
+    w.set_top(t);
     dev::write32(WDT.add(GLUE), 0x20);
-    dev::write32(WDT.add(CRR), KICK);
-    dev::write32(WDT.add(CR), 0x11);
+    w.kick();
+    w.enable(CR_ARM);
     dev::mb();
     ARMED.store(t, Relaxed);
     Ok(Desc {
@@ -93,7 +89,7 @@ pub fn arm(timeout_ms: u64) -> Result<Desc, &'static str> {
 /// Zet de teller terug op vol.
 pub fn pet() {
     if ARMED.load(Relaxed) != 0 {
-        dev::write32(WDT.add(CRR), KICK);
+        DwWdt::new(WDT).kick();
     }
 }
 

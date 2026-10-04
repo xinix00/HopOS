@@ -736,24 +736,27 @@ fn attach(s: layout::Slot, tail: Tail, os: bool) {
     }
 }
 
-/// De belofte van de kern voor de frame-ringen in de staart van een slot,
-/// op een board dat de pool Device mapt (Apple, de Radxa): de staart eerst
-/// Normal write-back in de kernmap (Go: `mapTailNormal`, slot-ABI 7), en
-/// alleen dan belooft de kern zijn kant zonder onderhoud. Weigert de remap,
-/// dan blijft het onderhoud: traag maar correct. GEMETEN 01-10: app naar
-/// app op de M4 van 52 naar duizenden MB/s (M8), op de Radxa van 29,83 met
-/// een corrupte RX-ring (Device tegen de cache van de app) naar 257 tot 262
-/// (RX1, ook 40 GiB foutloos).
-#[cfg(any(feature = "board-apple", feature = "board-rk3566"))]
+/// De belofte van de kern voor de frame-ringen in de staart van een slot.
+/// Op een board dat de pool Device mapt (Apple, de Radxa) eerst de staart
+/// Normal write-back in de kernmap (`Board::map_tail_normal`, Go:
+/// `mapTailNormal`, slot-ABI 7), en alleen dan belooft de kern zijn kant
+/// zonder onderhoud. Weigert de remap, dan blijft het onderhoud: traag maar
+/// correct. GEMETEN 01-10: app naar app op de M4 van 52 naar duizenden
+/// MB/s (M8), op de Radxa van 29,83 met een corrupte RX-ring (Device tegen
+/// de cache van de app) naar 257 tot 262 (RX1, ook 40 GiB foutloos). Elders
+/// is de pool al gemapt zoals [`crate::net::RINGS`] zegt (op riscv64
+/// `Maintained`: de harts van de C906 zijn niet coherent).
 mod tail_rings {
     use super::{ABI_TAIL, layout, ring};
+    use board::Board;
     use cpu::println;
     use dev::Pa;
 
     pub(super) fn promise(s: layout::Slot, base: Pa) -> ring::Coherence {
-        match vboard::map_tail_normal(base.0, ABI_TAIL) {
-            Ok(()) => ring::Coherence::Hardware,
-            Err(why) => {
+        match crate::BOARD.map_tail_normal(base.0, ABI_TAIL) {
+            None => crate::net::RINGS,
+            Some(Ok(())) => ring::Coherence::Hardware,
+            Some(Err(why)) => {
                 println!(
                     "cage: slot {s}: tail {:#x} stays device-mapped ({why}), rings with maintenance HOPOS_CAGE_TAIL",
                     base.0
@@ -761,19 +764,6 @@ mod tail_rings {
                 ring::Coherence::Maintained
             }
         }
-    }
-}
-
-/// De belofte van de kern voor de ringen van een slot waar de pool al zo
-/// gemapt is als [`crate::net::RINGS`] zegt (op riscv64 `Maintained`: de
-/// harts van de C906 zijn niet coherent).
-#[cfg(not(any(feature = "board-apple", feature = "board-rk3566")))]
-mod tail_rings {
-    use super::{layout, ring};
-    use dev::Pa;
-
-    pub(super) fn promise(_: layout::Slot, _: Pa) -> ring::Coherence {
-        crate::net::RINGS
     }
 }
 

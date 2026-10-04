@@ -43,8 +43,6 @@ use driver_pl011::Pl011;
 // De twee xHCI's in de RP1 (usb.rs).
 mod usb;
 
-pub use board_raspi::{DMA, Disk, KERN_RAM, boot_param, dvfs, temp_millic, watchdog};
-
 /// De debug-UART (PL011, de 3-pins JST-SH-connector; Linux ttyAMA10). De
 /// firmware zet hem op 115200 zodra hij zelf logt (`uart_2ndstage=1`).
 pub const UART10: Pa = Pa(0x10_7D00_1000);
@@ -127,6 +125,15 @@ impl Soc for Bcm2712 {
 
     fn usb_hosts(ctx: &board_raspi::usb::UsbCtx) -> board::UsbHosts {
         usb::hosts(ctx)
+    }
+
+    /// Op de stockfirmware was CPU_OFF een deur zonder terugweg (gemeten
+    /// 10-07).
+    const CPU_OFF_RETURNS: bool = false;
+
+    /// De RP1-keten op 5 en 30 s (de flip-jacht van 30-09).
+    fn nic_diag() {
+        nic_diag();
     }
 
     fn tables() -> Option<Tables> {

@@ -45,6 +45,7 @@ pub mod slots;
 pub mod temp;
 pub mod watchdog;
 
+use abi::ring::Coherence;
 use board::{Board, CoreClass, Dispatched, Error, NoDisk, Plan, Region};
 use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -57,12 +58,6 @@ use driver_ns16550::Ns16550;
 use driver_stmmac::dwmac1000::{self, Dwmac1000, IrqAck, Probe};
 use netdev::Mac;
 use sync::{Local, Signal};
-
-/// De schijf die `probe_disk` geeft: geen, want er is nog geen SD-driver
-/// ([`board::NoDisk`]). De binary noemt hem `vboard::Disk`, zodat de
-/// geprobede schijf van de bench naar de opslag gaat zonder dat de binary het
-/// type per board kent.
-pub type Disk = NoDisk;
 
 /// UART0.
 pub const UART0: Pa = Pa(0x0414_0000);
@@ -186,19 +181,6 @@ impl LicheeRv {
         Self
     }
 
-    /// Het hart waar de kern draait: de C906B, waar de FSBL hem start.
-    /// `mhartid` zegt het niet (beide cores lezen 0).
-    #[must_use]
-    pub const fn this_core(&self) -> usize {
-        HART_BIG
-    }
-
-    /// De OS-core: het hart van de kern. Een `hopos.oscore` is er niet.
-    #[must_use]
-    pub fn os_core(&self) -> (usize, Option<&'static str>) {
-        (self.this_core(), None)
-    }
-
     /// De index van dit hart in zijn CLINT: altijd 0, want de CLINT is per
     /// core en beide cores noemen zichzelf hart 0 (gemeten 01-08, boot 8).
     #[must_use]
@@ -206,33 +188,10 @@ impl LicheeRv {
         0
     }
 
-    /// De bel van de arm64-rotatie: een stub, zie `board-qemuvirt-riscv`.
-    #[must_use]
-    pub fn os_bell(&self) -> cpu::el2::Bell {
-        cpu::el2::Bell {
-            sgi1r: 0,
-            sgir: 0,
-            intid: 0,
-            pending: || 1023,
-        }
-    }
-
-    /// De kick naar dit hart zelf.
-    pub fn kick_self(&self) {
-        CLINT_DEV.set_msip(self.clint_hart(), true);
-    }
-
     /// De CLINT van dit board.
     #[must_use]
     pub const fn clint(&self) -> Clint {
         CLINT_DEV
-    }
-
-    /// De tekst van `hopos.cfg` (het venster in het image, `board::cfgwin`), voor
-    /// wie meer dan één sleutel leest (de watchdog-taak: `hopos.wd`).
-    #[must_use]
-    pub fn config(&self) -> &'static str {
-        board::cfgwin::text()
     }
 
     /// Wat de kooi van app-hart `hart` moet weten (Go,
@@ -285,11 +244,6 @@ impl LicheeRv {
             self.hold_little();
         }
         hart == HART_LITTLE
-    }
-
-    /// Geen schijf: er is (nog) geen SD-driver.
-    pub fn probe_disk(&self) -> Result<Option<NoDisk>, Error> {
-        Ok(None)
     }
 
     /// Start de C906L op `entry` via het resetblok: reset vast, de
@@ -348,11 +302,55 @@ impl Default for LicheeRv {
     }
 }
 
+/// De DW-WDT van de SG2002 (`watchdog`): wapent alleen als de probe van de
+/// boot antwoordde, en gaat daarna niet meer uit.
+impl board::Watchdog for LicheeRv {
+    type Armed = watchdog::Desc;
+
+    fn arm(&self, timeout_ms: u64) -> Result<watchdog::Desc, &'static str> {
+        watchdog::arm(timeout_ms)
+    }
+
+    fn pet(&self) {
+        watchdog::pet();
+    }
+}
+
+/// De TEMPSEN van de SoC (`temp`, Go `temp.go`).
+impl board::Thermal for LicheeRv {
+    /// Brengt de sensor op (10 ms busy-wait, één keer bij de boot) en meldt
+    /// de eerste lezing.
+    fn open_thermal(&self) {
+        temp::open();
+    }
+
+    /// 0 = geen geldige code.
+    fn temp_milli_c(&self) -> i32 {
+        temp::temp_millic().unwrap_or(0)
+    }
+}
+
+/// Geen knop: de klok blijft waar de FSBL hem liet.
+impl board::ClockKnob for LicheeRv {
+    type Knob = board::NoKnob;
+    type KnobError = board::NoKnob;
+}
+
 impl Board for LicheeRv {
     type Nic = Dwmac1000;
     type Sleeper = cpu::riscv::idle::RvSleeper;
+    /// Geen: er is nog geen SD-driver.
+    type Disk = NoDisk;
 
     const NAME: &'static str = "licheerv";
+    const PSCI: bool = false;
+    /// De harts van de C906 zijn niet coherent met elkaar; de host-ringen
+    /// zijn beide de kern, op zijn eigen hart.
+    const SLOT_RINGS: Coherence = Coherence::Maintained;
+    const HOST_RINGS: Coherence = Coherence::Hardware;
+    /// 256 MB, pool 200 MB: Hop meet er 0,5 tot 0,9 MB (03-10, slot 1 als
+    /// systeemtaak), en elke MB is hier een app-MB.
+    const HOP_MEM: u64 = 10 << 20;
 
     fn console(&self) -> fn(&[u8]) {
         console_write
@@ -531,6 +529,37 @@ impl Board for LicheeRv {
         cpu::println!("net: dwmac {}", nic.diag());
         NIC_CLAIMED.store(true, Relaxed);
         Ok(Some(nic))
+    }
+
+    /// Het hart waar de kern draait: de C906B, waar de FSBL hem start.
+    /// `mhartid` zegt het niet (beide cores lezen 0).
+    fn this_core(&self) -> usize {
+        HART_BIG
+    }
+
+    /// De OS-core: het hart van de kern. Een `hopos.oscore` is er niet.
+    fn os_core(&self) -> (usize, Option<&'static str>) {
+        (self.this_core(), None)
+    }
+
+    /// De bel van de arm64-rotatie: een stub, zie `board-qemuvirt-riscv`.
+    fn os_bell(&self) -> cpu::el2::Bell {
+        cpu::el2::Bell {
+            sgi1r: 0,
+            sgir: 0,
+            intid: 0,
+            pending: || 1023,
+        }
+    }
+
+    /// De kick naar dit hart zelf.
+    fn kick_self(&self) {
+        CLINT_DEV.set_msip(self.clint_hart(), true);
+    }
+
+    /// Geen schijf: er is (nog) geen SD-driver.
+    fn probe_disk(&self) -> Result<Option<NoDisk>, Error> {
+        Ok(None)
     }
 }
 

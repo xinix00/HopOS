@@ -1552,6 +1552,15 @@ impl<T: Transport> Nvme<T> {
 /// Daarnaast de ene opdracht van [`start`](blkdev::AsyncBlockDevice::start)
 /// en [`poll_done`](blkdev::AsyncBlockDevice::poll_done) (de meetbank, via
 /// `blkdev::Paced`): dat is gewoon een ticket dat de driver zelf onthoudt.
+impl<T: Transport> blkdev::Disk for Nvme<T> {
+    fn sectors(&self) -> u64 {
+        Nvme::sectors(self)
+    }
+    fn model(&self) -> &str {
+        Nvme::model(self)
+    }
+}
+
 impl<T: Transport> blkdev::AsyncBlockDevice for Nvme<T> {
     fn max_transfer(&self) -> usize {
         self.step()

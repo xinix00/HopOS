@@ -59,6 +59,7 @@ dependencies = [
  "bounded",
  "cpu",
  "dev",
+ "driver-dvfs",
  "driver-fb",
  "executor",
  "fw",
@@ -113,6 +114,7 @@ dependencies = [
  "board",
  "cpu",
  "dev",
+ "driver-dwwdt",
  "driver-mdio",
  "driver-ns16550",
  "driver-stmmac",
@@ -210,6 +212,7 @@ dependencies = [
  "cpu",
  "dev",
  "driver-dvfs",
+ "driver-dwwdt",
  "driver-fb",
  "driver-gicv3",
  "driver-mdio",
@@ -264,6 +267,7 @@ name = "board-uefi"
 version = "3.0.9"
 dependencies = [
  "abi",
+ "blkdev",
  "board",
  "bounded",
  "cpu",
@@ -363,6 +367,13 @@ version = "3.0.9"
 dependencies = [
  "dev",
  "driver-xhci",
+]
+
+[[package]]
+name = "driver-dwwdt"
+version = "3.0.9"
+dependencies = [
+ "dev",
 ]
 
 [[package]]

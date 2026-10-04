@@ -18,6 +18,7 @@ netdev = { path = "../../netdev" }
 net = { path = "../../net" }
 board = { path = "../../board" }
 driver-ns16550 = { path = "../../driver/ns16550" }
+driver-dwwdt = { path = "../../driver/dwwdt" }
 driver-mdio = { path = "../../driver/nic/mdio" }
 driver-stmmac = { path = "../../driver/nic/stmmac", default-features = false, features = ["dwmac1000"] }
 

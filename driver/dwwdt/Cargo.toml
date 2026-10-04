@@ -1,0 +1,13 @@
+[package]
+name = "driver-dwwdt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "De DesignWare APB-watchdog (snps,dw-wdt): de registers en de TOP-tabel, voor de Radxa (RK3566) en de LicheeRV (SG2002)."
+
+[dependencies]
+dev = { path = "../../dev" }
+
+[lints]
+workspace = true

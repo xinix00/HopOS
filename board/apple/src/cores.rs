@@ -268,7 +268,7 @@ pub fn cpu_on(i: usize, here: usize, entry: u64, ctx: u64) -> Result<(), Error> 
 /// is het MPIDR (`slots::mpidr`); de fout in PSCI-vorm ([`psci_code`]).
 pub fn cpu_on_mpidr(target: u64, entry: u64, ctx: u64) -> Result<(), cpu::psci::Error> {
     let i = fwinfo::core_of(target).ok_or(cpu::psci::Error::InvalidParams)?;
-    let here = crate::Apple::new().this_core();
+    let here = board::Board::this_core(&crate::Apple::new());
     cpu_on(i, here, entry, ctx).map_err(|e| {
         cpu::println!("cores: cpu {i} (mpidr {target:#x}) not started: {e}");
         let code = i64::from(psci_code(e)) as u64;

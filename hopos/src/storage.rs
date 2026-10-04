@@ -30,6 +30,7 @@
 //! Hop's staat op `/hop/` moet een herstart overleven; wie leeg wil
 //! beginnen, geeft QEMU een verse schijf (image/qemu-run.sh).
 
+use crate::Disk;
 use alloc::boxed::Box;
 use blkdev::{AsyncBlockDevice, LBA_SIZE, Pace, Queue, block_on};
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -119,7 +120,7 @@ const STATS_EVERY: Duration = Duration::from_secs(10);
 /// De meetlat van de schijf, één regel per [`STATS_EVERY`] als er
 /// opdrachten waren: de driver (opdrachten, read-ahead, de traagste) en de
 /// wachtrij (het hoogste aantal tegelijk).
-async fn stats(exec: &'static Executor, disk: &'static Queue<vboard::Disk, ExecPace>) {
+async fn stats(exec: &'static Executor, disk: &'static Queue<Disk, ExecPace>) {
     let mut last = 0;
     loop {
         exec.after(STATS_EVERY).await;
@@ -146,7 +147,7 @@ impl core::fmt::Write for Sink {
 }
 
 /// De meetlat van de driver als `Display`, zonder buffer.
-struct DevStats(&'static Queue<vboard::Disk, ExecPace>);
+struct DevStats(&'static Queue<Disk, ExecPace>);
 
 impl core::fmt::Display for DevStats {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -159,8 +160,8 @@ impl core::fmt::Display for DevStats {
 /// en dan naar [`start`]. Geen schijf of een fout is één regel en `None`:
 /// de node draait door en weigert elke bestandscall luid.
 #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
-pub(crate) fn probe() -> Option<vboard::Disk> {
-    match crate::BOARD.probe_disk() {
+pub(crate) fn probe() -> Option<Disk> {
+    match board::Board::probe_disk(&crate::BOARD) {
         Ok(Some(d)) => Some(d),
         Ok(None) => {
             println!("disk: none found on this board, file calls refused HOPOS_DISK_NONE");
@@ -178,21 +179,21 @@ pub(crate) fn probe() -> Option<vboard::Disk> {
 /// zonder schijf draait de node door en weigert elke bestandscall luid (de
 /// regel gaf [`probe`] al).
 #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
-pub(crate) fn start(exec: &'static Executor, disk: Option<vboard::Disk>) -> bool {
+pub(crate) fn start(exec: &'static Executor, disk: Option<Disk>) -> bool {
     let board = &crate::BOARD;
     let Some(disk) = disk else {
         return false;
     };
-    let sectors = disk.sectors();
+    let sectors = blkdev::Disk::sectors(&disk);
     // De maat van het blokcontract, niet een eigen methode van de driver
     // (de ANS heeft er een met dezelfde naam: de MDTS zonder afronding).
     let max_transfer = AsyncBlockDevice::max_transfer(&disk);
     println!(
         "disk: up HOPOS_DISK_UP model={} blocks={sectors} block_size={LBA_SIZE} max_transfer={max_transfer}",
-        disk.model()
+        blkdev::Disk::model(&disk)
     );
     // De wachtrij leeft zolang de kern: één keer bij de boot op de heap.
-    let disk: &'static Queue<vboard::Disk, ExecPace> =
+    let disk: &'static Queue<Disk, ExecPace> =
         Box::leak(Box::new(Queue::new(disk, ExecPace(exec))));
     println!(
         "disk: queue of {} request(s) at once HOPOS_DISK_QUEUE depth={}",

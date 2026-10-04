@@ -174,7 +174,7 @@ mod on {
     /// Eén bootparameter, of "" (de bron van het board: FDT-bootargs op
     /// virt, `hopos.cfg` op de UEFI-boards).
     fn param(key: &'static str) -> String {
-        crate::bench::bootparam(0, key)
+        crate::bench::bootparam(key)
     }
 
     /// De maat van de arena: `hopos.codec=<MB>`, of die van het board.
@@ -360,9 +360,8 @@ mod on {
         /// De O6N: firmware, stroom, driver. `false` als het ijzer niet
         /// opkwam; de aanroeper geeft de arena dan terug.
         pub(super) async fn up(exec: &'static Executor, arena: Region) -> bool {
-            let board = &crate::BOARD;
             let blobs = firmware(exec).await;
-            let w = match board.power_vpu(arena.base, arena.size) {
+            let w = match vboard::codec::power_vpu(arena.base, arena.size) {
                 Ok(w) => w,
                 Err(e) => {
                     println!("codec: {e}, video codec stays off HOPOS_CODEC_OFF");

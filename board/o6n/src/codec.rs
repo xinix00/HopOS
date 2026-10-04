@@ -238,70 +238,70 @@ impl core::fmt::Display for PowerError {
     }
 }
 
-impl crate::O6n {
-    /// Brengt de VPU zo ver dat een driver ermee kan praten: vensters uit de
-    /// DSDT, arena ongecached, stroom, klok, perf-domein en reset, en de
-    /// stroomcyclus als het blok vastzit. Eén keer bij het opstarten.
-    pub fn power_vpu(&self, arena: u64, size: u64) -> Result<VpuWindows, PowerError> {
-        if !self.is_cix() {
-            return Err(PowerError::NotHere);
-        }
-        let w = match self.acpi_table(b"DSDT").and_then(scan_dsdt) {
-            Some(w) => w,
-            None => {
-                println!(
-                    "vpu: no CIXH3010 windows in the DSDT, using the SoC constants {VPU_BASE:#x}/{VPU_RCSU:#x}"
-                );
-                VpuWindows {
-                    base: VPU_BASE,
-                    rcsu: VPU_RCSU,
-                    intid: VPU_IRQ,
-                    coherent: Some(false),
-                }
-            }
-        };
-        if size < 16 << 20 {
-            return Err(PowerError::Arena { mb: size >> 20 });
-        }
-        for pa in [w.base, w.rcsu] {
-            if !map_device(pa, VPU_SIZE) {
-                return Err(PowerError::Map { pa });
+/// Brengt de VPU zo ver dat een driver ermee kan praten: vensters uit de
+/// DSDT, arena ongecached, stroom, klok, perf-domein en reset, en de
+/// stroomcyclus als het blok vastzit. Eén keer bij het opstarten.
+pub fn power_vpu(arena: u64, size: u64) -> Result<VpuWindows, PowerError> {
+    if !crate::is_cix() {
+        return Err(PowerError::NotHere);
+    }
+    let w = match board_uefi::Uefi::new()
+        .acpi_table(b"DSDT")
+        .and_then(scan_dsdt)
+    {
+        Some(w) => w,
+        None => {
+            println!(
+                "vpu: no CIXH3010 windows in the DSDT, using the SoC constants {VPU_BASE:#x}/{VPU_RCSU:#x}"
+            );
+            VpuWindows {
+                base: VPU_BASE,
+                rcsu: VPU_RCSU,
+                intid: VPU_IRQ,
+                coherent: Some(false),
             }
         }
-        cpu::memattr::normal_nc(arena, size).map_err(|_| PowerError::Uncached)?;
-        let mut ch = tfa().ok_or(PowerError::Map { pa: TFA_SCMI_SHMEM })?;
-        power_on(&mut ch)?;
-        if !map_device(PM_SCMI_SHMEM, 0x1000) {
-            println!("vpu: cannot map the SCP SCMI channel");
+    };
+    if size < 16 << 20 {
+        return Err(PowerError::Arena { mb: size >> 20 });
+    }
+    for pa in [w.base, w.rcsu] {
+        if !map_device(pa, VPU_SIZE) {
+            return Err(PowerError::Map { pa });
         }
+    }
+    cpu::memattr::normal_nc(arena, size).map_err(|_| PowerError::Uncached)?;
+    let mut ch = tfa().ok_or(PowerError::Map { pa: TFA_SCMI_SHMEM })?;
+    power_on(&mut ch)?;
+    if !map_device(PM_SCMI_SHMEM, 0x1000) {
+        println!("vpu: cannot map the SCP SCMI channel");
+    }
+    clocks();
+    perf();
+    unreset()?;
+    let term =
+        core::array::from_fn(|i| dev::read32(Pa(w.base + LSID_TERMINATE + i as u64 * LSID_STRIDE)));
+    let pgctrl = dev::read32(Pa(w.rcsu + RCSU_PGCTRL));
+    if needs_recovery(pgctrl, term) {
+        println!(
+            "vpu: incomplete power state pgctrl={pgctrl:#x} terminate={term:?}; cycling VPU domains HOPOS_VPU_RECOVER"
+        );
+        cycle_domains(|d, s| ch.power_set(d, s))
+            .map_err(|(domain, _)| PowerError::Domain { domain })?;
         clocks();
         perf();
         unreset()?;
-        let term = core::array::from_fn(|i| {
-            dev::read32(Pa(w.base + LSID_TERMINATE + i as u64 * LSID_STRIDE))
-        });
-        let pgctrl = dev::read32(Pa(w.rcsu + RCSU_PGCTRL));
-        if needs_recovery(pgctrl, term) {
-            println!(
-                "vpu: incomplete power state pgctrl={pgctrl:#x} terminate={term:?}; cycling VPU domains HOPOS_VPU_RECOVER"
-            );
-            cycle_domains(|d, s| ch.power_set(d, s))
-                .map_err(|(domain, _)| PowerError::Domain { domain })?;
-            clocks();
-            perf();
-            unreset()?;
-        }
-        println!(
-            "vpu: id {:#x} rcsu {:#x} (windows {:#x}/{:#x}, intid {}, cca {:?})",
-            dev::read32(Pa(w.base)),
-            dev::read32(Pa(w.rcsu)),
-            w.base,
-            w.rcsu,
-            w.intid,
-            w.coherent
-        );
-        Ok(w)
     }
+    println!(
+        "vpu: id {:#x} rcsu {:#x} (windows {:#x}/{:#x}, intid {}, cca {:?})",
+        dev::read32(Pa(w.base)),
+        dev::read32(Pa(w.rcsu)),
+        w.base,
+        w.rcsu,
+        w.intid,
+        w.coherent
+    );
+    Ok(w)
 }
 
 /// Topdomein, vier cores en de hub aan, en terugvragen. Alle vijf VPU-

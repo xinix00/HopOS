@@ -431,7 +431,7 @@ fn build_map(map: &Map) -> Result<Mmu, mmu::Error> {
 
 /// `hopos.cfg` zoals de stub hem las (leeg zonder bestand).
 fn cfg_text() -> &'static str {
-    crate::Uefi::new().config()
+    board::Board::config(&crate::Uefi::new())
 }
 
 /// De rol van de staging uit `hopos.stage` (0 = app, 1 = Hop; zonder

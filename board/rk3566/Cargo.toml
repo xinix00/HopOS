@@ -22,6 +22,7 @@ driver-mdio = { path = "../../driver/nic/mdio" }
 driver-stmmac = { path = "../../driver/nic/stmmac", default-features = false, features = ["dwmac4"] }
 # Het TRNG-blok van de SoC: de bron van de DRBG van de kern (rng.rs).
 driver-rkrng = { path = "../../driver/rkrng" }
+driver-dwwdt = { path = "../../driver/dwwdt" }
 # De klokknop (clock.rs): het beleid kent de knop, de klok is SCMI_CLK_CPU
 # van de TF-A.
 driver-dvfs = { path = "../../driver/dvfs" }

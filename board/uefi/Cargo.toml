@@ -16,6 +16,8 @@ executor = { path = "../../executor" }
 netdev = { path = "../../netdev" }
 bounded = { path = "../../bounded" }
 board = { path = "../../board" }
+# Het schijfcontract van een machine op dit board (`Platform::Disk`).
+blkdev = { path = "../../blkdev" }
 driver-pl011 = { path = "../../driver/pl011" }
 driver-ns16550 = { path = "../../driver/ns16550" }
 driver-gicv3 = { path = "../../driver/gicv3" }

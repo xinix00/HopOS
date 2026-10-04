@@ -253,7 +253,7 @@ mod tests {
     /// 0, geen `_CPC` hier) en in de MADT-volgorde van de O6N (de
     /// CPU_ON-regels op de console: core 0 is 0xa00, core 1 0xb00, core 2 tot
     /// 11 zijn 0x000 tot 0x900): de klasse komt uit de MPIDR-tabel, niet uit
-    /// de MADT (`O6n::os_core`).
+    /// de MADT (`board_uefi::On::os_core`).
     #[test]
     fn oscore_on_the_cix_uses_the_mpidr_table() {
         let mut cs = cores(&[0; 12]);

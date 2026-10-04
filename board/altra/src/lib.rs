@@ -30,23 +30,19 @@
 
 mod machine;
 
-pub use machine::Altra;
+pub use machine::{Altra, Ampere};
 
 /// Dit board onder de naam die de kern-binary kiest (`vboard::Machine`).
 pub type Machine = Altra;
 
-// De slot- en flip-lijm van de binary leest het plan onder deze namen,
-// zoals bij de Pi's; op de Altra zijn het die van het UEFI-board.
-pub use board_uefi::{DMA, KERN_RAM, KERN_VHE, facts, irq, slots, watchdog};
+// De slot- en flip-lijm van de binary leest het plan onder deze namen
+// (`slots`, en `facts` voor het beeld van een PIE-kern), zoals bij de Pi's;
+// op de Altra zijn het die van het UEFI-board.
+pub use board_uefi::{facts, slots};
 
 use board::CoreClass;
 use board_uefi::irq::Mode;
 use driver_pcie::Function;
-
-/// De schijf die `probe_disk` geeft: de NVMe. De binary noemt hem
-/// `vboard::Disk`, zodat de geprobede schijf van de bench naar de opslag gaat
-/// zonder dat de binary het type per board kent.
-pub type Disk = driver_nvme::Nvme<driver_nvme::pci::Pci>;
 
 /// De naam, voor de bootlog.
 pub const NAME: &str = "altra";

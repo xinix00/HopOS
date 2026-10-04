@@ -72,13 +72,15 @@ const _: () = assert!(
     "kies precies één board: --features board-qemuvirt, board-rpi4, board-rpi5, board-rk3566, board-uefi, board-o6n, board-altra, board-qemuvirt-riscv, board-licheerv of board-apple"
 );
 
-// Het board onder een neutrale naam: de slot-, kooi- en flip-lijm
-// (slots.rs, cage.rs, flip.rs) lezen het plan van het board als `vboard`
-// (`slots::plan(cores, os_core)`, `mpidr`, `core_of`, de staging,
-// `KERN_RAM`, `DMA`), en elk board levert die namen met zijn eigen getallen,
-// en zichzelf als `Machine`. De O6N en de Altra zijn het UEFI-board met hun
-// eigen NIC, NVMe en thermometer; de riscv64-boards (docs/boards-riscv.md)
-// bouwen op `--target riscv64gc-unknown-none-elf`.
+// Het board onder een neutrale naam: zichzelf als `Machine`, met het
+// contract van `board::Board`. Daarnaast lezen de slot-, kooi- en flip-lijm
+// (slots.rs, cage.rs, flip.rs) het plan van het board als `vboard::slots`
+// (`plan(cores, os_core)`, `mpidr`, `core_of`, de staging, de
+// flip-adressen, de zwarte doos): constanten in const-context, die elk
+// board met zijn eigen getallen levert. De O6N en de Altra zijn het
+// UEFI-board met hun eigen NIC, NVMe en thermometer (`board_uefi::On`); de
+// riscv64-boards (docs/boards-riscv.md) bouwen op
+// `--target riscv64gc-unknown-none-elf`.
 #[cfg(feature = "board-altra")]
 extern crate board_altra as vboard;
 #[cfg(feature = "board-apple")]
@@ -100,8 +102,14 @@ extern crate board_rpi5 as vboard;
 #[cfg(feature = "board-uefi")]
 extern crate board_uefi as vboard;
 
-/// Het board van deze binary: één, gekozen door een feature.
+/// Het board van deze binary: één, gekozen door een feature. Wat de kern
+/// van hem vraagt, staat in het contract (`board::Board` en zijn drie
+/// traits); daarnaast alleen het plan in `vboard::slots`.
 type Machine = vboard::Machine;
+
+/// De schijf van het board (`Board::probe_disk`): de bench leent hem, de
+/// opslag neemt hem.
+type Disk = <Machine as Board>::Disk;
 
 static BOARD: Machine = Machine::new();
 
@@ -351,7 +359,7 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     // er een schijf is (anders weigert elke bestandscall luid). De schijf
     // wordt één keer geprobed; de meetbanken (bench.rs, alleen met
     // hopos.nvmebench of hopos.idlestat) lenen hem vóór de opslag hem mount.
-    let disk = bench::start(exec, dtb, storage::probe());
+    let disk = bench::start(exec, storage::probe());
     let fs = storage::start(exec, disk);
     // MEDIA: de codec-dienst ná de opslag, want de firmware-blobs staan op
     // het volume (codec.rs); zonder VPU meldt hij luid dat er geen is.
@@ -391,12 +399,8 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
         ),
         board::cfgwin::State::Empty => {}
     }
-    let mut hop_cfg = bench::cfg_text(dtb);
-    if cfg!(any(
-        feature = "board-qemuvirt",
-        feature = "board-qemuvirt-riscv"
-    )) && role == Ok(StagedRole::Hop)
-    {
+    let mut hop_cfg = bench::cfg_text();
+    if Machine::NO_BOOT_MEDIUM && role == Ok(StagedRole::Hop) {
         hop_cfg.insert_str(0, kern::nodecfg::QEMU_CFG);
     }
     let node_cfg = kern::nodecfg::NodeCfg::parse(&hop_cfg);
@@ -435,7 +439,7 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     flip::start(exec, landing.is_some());
     // De env van een gestagede app (appspike op QEMU): `hopos.appenv`.
     let app_env = match role {
-        Ok(StagedRole::App) => slots::app_env(&bench::bootparam(dtb, "hopos.appenv")),
+        Ok(StagedRole::App) => slots::app_env(&bench::bootparam("hopos.appenv")),
         _ => alloc::vec::Vec::new(),
     };
     slots::start(exec, role, landing.map(|h| h.slots), app_env, hop_cfg);
@@ -772,11 +776,11 @@ async fn tick(exec: &'static Executor) {
             let bytes = conport::replay(16 * 1024);
             println!("console: end of the replay ({bytes} bytes) HOPOS_CONSOLE_REPLAY_END");
         }
-        // De RP1-keten op 5 en 30 s (de flip-jacht van 30-09): een koude
-        // boot geeft de referentie, een landing het verschil.
-        #[cfg(feature = "board-rpi5")]
+        // De diagnose van de NIC op 5 en 30 s (de RP1-keten van de Pi 5, de
+        // flip-jacht van 30-09): een koude boot geeft de referentie, een
+        // landing het verschil.
         if n == 5 || n == 30 {
-            vboard::nic_diag();
+            BOARD.nic_diag();
         }
         let due = start.saturating_add(n.saturating_mul(1_000_000_000));
         exec.until(due).await;

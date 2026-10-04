@@ -49,8 +49,8 @@ De feature zet `gui` aan op het gekozen board (`board-x?/gui`) en linkt
 | --- | --- | --- | --- |
 | QEMU virt | `-device ramfb` | `board/qemuvirt/src/ramfb.rs`: fw_cfg `etc/ramfb`, 1280x800 op 0xC400_0000 | `GUI=1 sh tools/qemu-test.sh`: de console op het glas, screendump getoetst |
 | UEFI (EDK2, QEMU) | GOP | `board/uefi/src/gop.rs`, vóór `ExitBootServices`; met `-device ramfb` geeft EDK2 een GOP | `GUI=1 sh tools/qemu-uefi-test.sh`: GOP 800x600 op 0xfc7a_0000, de console erop, de hele keten groen |
-| Orion O6N | GOP van de eigen firmware | `board_uefi::gop_framebuffer` | nooit op ijzer |
-| Ampere Altra | GOP (BMC-VGA) | idem | niet bedraad: `board/altra` geeft `framebuffer()` nog niet door |
+| Orion O6N | GOP van de eigen firmware | die van het UEFI-board (`board_uefi::On`, `board/uefi/src/gop.rs`) | nooit op ijzer |
+| Ampere Altra | GOP (BMC-VGA) | idem | nooit op ijzer |
 | Raspberry Pi 4 en 5 | HDMI via de firmware | `board/raspi/src/vcfb.rs`: DTB-simplefb, anders `FB_ALLOC` over de mailbox (1920x1080) | nooit op ijzer |
 | Radxa Zero 3E | HDMI via onze eigen keten | `board/rk3566/src/display.rs` over `gui-rkscan` | nooit op ijzer |
 
@@ -360,8 +360,6 @@ Elke stap met de consoleregel die erbij hoort.
   optical-driver erachter (`Sink::storage_attached` is leeg).
 - De toets van `INPUT_ADDR` na een kern-flip op ijzer: de display belt na
   15 s stilte opnieuw; op QEMU is alleen de wissel van houder getoetst.
-- De Altra: `Board::framebuffer` en `Board::usb_hosts` doorgeven naar het
-  UEFI-board (`board_uefi::gop_framebuffer`, `board_uefi::usb::hosts`).
 - `tools/qemu-uefi-test.sh` heeft nog geen `GUI=display`-stand; de
   UEFI-keten is met de hand gedraaid (zie de checklist).
 - De O6N-toets dat het variabelen-RAM van de firmware in de ACPI-RAM van de

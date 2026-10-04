@@ -39,7 +39,7 @@ pub(crate) type SlotCage = Kooi<Arm>;
 pub(crate) type SlotCores = KooiCores<Arm>;
 
 /// De EL2-smaak van de switcher (cpu::el2 `Flavor`), gekozen door het board
-/// en niet door een losse bouwvlag:
+/// (`Board::FLAVOR`) en niet door een losse bouwvlag:
 /// - `Nvhe` (E2H=0, slapen in WFE) op QEMU virt, de Pi's, de Radxa en de
 ///   Altra;
 /// - `Vhe` (E2H=1, de EL1-registers als `_EL12`) op de O6N: op de A720
@@ -47,48 +47,22 @@ pub(crate) type SlotCores = KooiCores<Arm>;
 ///   daar is VHE geen keuze maar een eis;
 /// - `AppleVhe` op Apple silicium: E2H is er RES1 en de kick is de fast IPI.
 ///
-/// De feature `vhe` van hopos dwingt `Vhe` af op het UEFI-board, samen met
-/// de kern onder E2H = 1 (board-uefi `vhe`): zo worden de VHE-kern en de
-/// VHE-switcher op QEMU (`CPU=neoverse-n1`, EDK2) bewezen vóór ze op de
-/// O6N draaien. De keuze hangt aan de board-features omdat de andere boards
-/// geen `FLAVOR`-constante dragen; Apple heeft er wel een
-/// (`board_apple::FLAVOR`) en die hoort hiermee overeen te komen.
-pub(crate) const FLAVOR: Flavor = if cfg!(feature = "board-apple") {
-    Flavor::AppleVhe
-} else if cfg!(any(feature = "board-o6n", feature = "vhe")) {
-    Flavor::Vhe
-} else {
-    Flavor::Nvhe
-};
+/// De smaak `Vhe` eist een kern onder E2H = 1: de OS-core-rotatie gebruikt
+/// de `_EL12`-encoderingen op de core van de kern zelf, en die zijn onder
+/// E2H = 0 UNDEFINED (29-09, QEMU neoverse-n1: EC 0x0 in
+/// `hopos_os_vhe_enter` bij de zelftest). Op het UEFI-board volgen de twee
+/// uit dezelfde feature `vhe` van board-uefi (`el2::VHE`), dus ze verschillen
+/// nooit. De feature `vhe` van hopos zet die aan: zo worden de VHE-kern en
+/// de VHE-switcher op QEMU (`CPU=neoverse-n1`, EDK2) bewezen vóór ze op de
+/// O6N draaien.
+pub(crate) const FLAVOR: Flavor = <crate::Machine as board::Board>::FLAVOR;
 
-// De smaak `Vhe` eist een kern onder E2H = 1: de OS-core-rotatie gebruikt
-// de `_EL12`-encoderingen op de core van de kern zelf, en die zijn onder
-// E2H = 0 UNDEFINED (29-09, QEMU neoverse-n1: EC 0x0 in
-// `hopos_os_vhe_enter` bij de zelftest). Op het UEFI-board kiest de feature
-// `vhe` van board-uefi die vorm (`KERN_VHE`); hier toetst de build dat
-// switcher en kern dezelfde vorm hebben.
-#[cfg(any(feature = "board-uefi", feature = "board-o6n", feature = "board-altra"))]
-const _: () = assert!(
-    vboard::KERN_VHE == matches!(FLAVOR, Flavor::Vhe),
-    "the EL2 flavor of the switcher and the E2H form of the kern differ"
-);
-// Apple: het board draagt zijn eigen smaak (`board_apple::FLAVOR`, E2H is
-// RES1 en de kick is de fast IPI); de lijm moet precies die installeren, en
-// de OS-core-rotatie en de koude start (`cpu::smp::cpu_on`, de haak van het
-// board in plaats van PSCI) lopen dan over hetzelfde silicium.
-#[cfg(feature = "board-apple")]
-const _: () = assert!(
-    matches!(FLAVOR, Flavor::AppleVhe) && matches!(vboard::FLAVOR, Flavor::AppleVhe),
-    "the cage glue must install the Apple flavor of the board"
-);
 // Alleen het UEFI-board kent een kern onder E2H = 1 (Apple is er VHE-only
 // van zichzelf); `vhe` op een ander board gaf een nVHE-kern met een
 // VHE-rotatie, en die valt bij de eerste zelftest.
-#[cfg(all(
-    feature = "vhe",
-    not(any(feature = "board-uefi", feature = "board-o6n", feature = "board-apple"))
-))]
-compile_error!(
+#[cfg(feature = "vhe")]
+const _: () = assert!(
+    matches!(FLAVOR, Flavor::Vhe),
     "the feature `vhe` needs a board whose kern runs under E2H = 1 (board-uefi, board-o6n)"
 );
 
@@ -108,10 +82,11 @@ compile_error!(
 /// wektijd; zonder die wekker sliep hij tot een toevallige kick, dus de
 /// modus hoort pas bij de wekker (GEMETEN 02-09 in Go: 74 % cpu en 1,3 M
 /// rondes/s werd 0 % en 47 wekken/s).
-#[cfg(any(feature = "board-qemuvirt", feature = "board-apple"))]
-const APP_IDLE_MODE: u64 = IDLE_YIELD;
-#[cfg(not(any(feature = "board-qemuvirt", feature = "board-apple")))]
-const APP_IDLE_MODE: u64 = 0;
+const APP_IDLE_MODE: u64 = if <crate::Machine as board::Board>::APP_IDLE_YIELD {
+    IDLE_YIELD
+} else {
+    0
+};
 
 /// De foutcodes van de kooi ([`crate::kooi::code`]) plus die van CPU_ON.
 mod code {

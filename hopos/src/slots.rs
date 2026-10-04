@@ -53,6 +53,7 @@ mod cage;
 #[cfg(not(target_arch = "riscv64"))]
 mod arch {
     use super::cage::FLAVOR;
+    use board::Board;
     use cpu::el2;
     use cpu::println;
 
@@ -239,12 +240,9 @@ pub(crate) const HOP_SLOT: usize = 1;
 /// is 594 KiB laadbaar (gemeten 29-09), de rest is heap voor agent, leader,
 /// de HTTP-verbindingen en de download-buffer (64 KiB per hap). Op de
 /// LicheeRV (256 MB, pool 200 MB) 10 MiB: Hop meet er 0,5 tot 0,9 MB
-/// (03-10, slot 1 als systeemtaak), en elke MB is daar een app-MB.
-const HOP_MEM: u64 = if cfg!(feature = "board-licheerv") {
-    10 << 20
-} else {
-    64 << 20
-};
+/// (03-10, slot 1 als systeemtaak), en elke MB is daar een app-MB. Het
+/// board zegt het (`Board::HOP_MEM`).
+const HOP_MEM: u64 = <crate::Machine as board::Board>::HOP_MEM;
 
 /// Het volume van Hop: `/hop` in zijn zicht, `/volumes/hop` op hopfs. Daar
 /// bewaart `agentd-hopos` zijn `agent-state.json` en leest hij hem na een
