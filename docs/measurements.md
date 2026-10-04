@@ -5,8 +5,9 @@ langzamer zijn dan v2. Per board staat de laatste v3-meting naast het
 v2-getal.
 
 Stand: 04-10-2026 ochtend, main 2e34a2f. Pi 4 P40, Pi 5 Q40, Radxa X40,
-O6N O40, M4 M40, LicheeRV R40; de Altra nog A4 (stick). In een cel staat
-de nieuwste meting vooraan en vet, met stempel en datum; de oudere erachter.
+O6N O40, M4 M40, LicheeRV R40; de Altra A56g (met de boot-stack-fix 3b1db38).
+In een cel staat de nieuwste meting vooraan en vet, met stempel en datum;
+de oudere erachter.
 
 ## Zo schrijf je deze pagina
 
@@ -172,61 +173,86 @@ Bord:
 
 ## Ampere Altra
 
-Opzet: A4, 03-10. Vitals met 1 core, 128 MiB, slot 3; `vitals4` op :8091
-met 4 cores en 256 MiB.
+Opzet: **A56g, 04-10, main 2e34a2f plus de boot-stack-fix (nu in main als
+3b1db38), warm geflipt vanaf de stickkern A4; Hop van de stick (3.0.6).
+Vitals met 1 core, 128 MiB, slot 3; `vitals4` op :8091 met 4 cores en
+256 MiB. Opslag op de meetkern A57b (`nvmebench`), de watchdogtoets op A58w.
+Gewone main zonder de fix kwam vanaf A4 niet op (boot-stack 264 KB van
+256), dus release v3.0.7 boot op de Altra niet.** Daarvoor: A4, 03-10.
+Vitals met 1 core, 128 MiB, slot 3; `vitals4` op :8091 met 4 cores en
+256 MiB.
 
 **Vitals**
 
 | Meting | v3 | v2 | Run |
 | --- | --- | --- | --- |
-| cpu, Msteps/s | 494 | | A4 03-10 |
-| smp, speedup | 4,01 (4 cores) | | A4 03-10 |
-| burn, Msteps/s, max °C | 494 → 494, 46 °C; 4 cores 1979 | | A4 03-10 |
-| membw copy / triad, GB/s | 25,9 / 24,0 | | A4 03-10 |
-| memlat 32 KB / 2 MB / 8 MB, ns | 1,54 / 5,46 / 27,6 | | A4 03-10 |
-| alloc, allocs/s | 557.016 | | A4 03-10 |
-| storm, conn/s (p99 ms) | 9958 (0,92) | | A4 03-10 |
-| rtt naar de kern p50 / p99, µs | 110 / 5179 | | A4 03-10 |
-| timer 1 ms, overslaap p50 / p99, µs | 236 / 1022 | | A4 03-10 |
-| disk schrijven / lezen, MB/s | 873 / 1062 (NVMe SN770, 64 MB; 4 KiB 74,5) | | A4 03-10 |
+| cpu, Msteps/s | **494 (A56g, 04-10)**; 494 (A4, 03-10) | | A56g 04-10 |
+| smp, speedup | **4,00 (4 cores) (A56g, 04-10)**; 4,01 (4 cores) (A4, 03-10) | | A56g 04-10 |
+| burn, Msteps/s, max °C | **494 → 494, 38 °C; 4 cores 1979 → 1978 (A56g, 04-10)**; 494 → 494, 46 °C; 4 cores 1979 (A4, 03-10) | | A56g 04-10 |
+| membw copy / triad, GB/s | **25,0 / 23,3 (A56g, 04-10)**; 25,9 / 24,0 (A4, 03-10) | | A56g 04-10 |
+| memlat 32 KB / 2 MB / 8 MB, ns | **1,54 / 5,45 / 27,6 (A56g, 04-10)**; 1,54 / 5,46 / 27,6 (A4, 03-10) | | A56g 04-10 |
+| alloc, allocs/s | **551.123 (A56g, 04-10)**; 557.016 (A4, 03-10) | | A56g 04-10 |
+| storm, conn/s (p99 ms) | **9358 (0,94) (A56g, 04-10)**; 9958 (0,92) (A4, 03-10) | | A56g 04-10 |
+| rtt naar de kern p50 / p99, µs | **84 / 158 (tweede run; in test=all 280 / 9218) (A56g, 04-10)**; 110 / 5179 (A4, 03-10) | | A56g 04-10 |
+| timer 1 ms, overslaap p50 / p99, µs | **310 / 435 (A56g, 04-10)**; 236 / 1022 (A4, 03-10) | | A56g 04-10 |
+| idle, wekken/s | **24,1 (1 core, 99,7 % idle) (A56g, 04-10)** | | A56g 04-10 |
+| disk schrijven / lezen, MB/s | **1127 / 2188 (NVMe SN770, 64 MB; 4 KiB 146) (A56g, 04-10)**; 873 / 1062 (NVMe SN770, 64 MB; 4 KiB 74,5) (A4, 03-10) | | A56g 04-10 |
 
 **Netwerk**
 
 | Meting | v3 | v2 | Run |
 | --- | --- | --- | --- |
-| De node in, MB/s | — | 107,7–110,8 | |
-| De node uit, MB/s | — | 108,0–110,6 | |
+| De node in, MB/s | **86,4 (bench pull 400 MB van de O6N; O6N druk, wordt overgedaan) (A56g, 04-10)** | 107,7–110,8 | A56g 04-10 |
+| De node uit, MB/s | **108,8 (bench push naar de O6N; O6N druk, wordt overgedaan) (A56g, 04-10)** | 108,0–110,6 | A56g 04-10 |
+| rtt over de draad p50, µs | **178 (naar de O6N, p99 429), koud 308 (O6N druk, wordt overgedaan) (A56g, 04-10)** | | A56g 04-10 |
 | Verbindingscyclus p50, ms | — | 5,1 | |
+| Storm, hairpin naar zichzelf, conn/s (p99 ms) | **990–1074 (12,4–14,4) (A56g, 04-10)** | | A56g 04-10 |
 
 **In de node**
 
 | Meting | v3 | v2 | Run |
 | --- | --- | --- | --- |
-| App naar app, MB/s | 4970–4972 | | A4 03-10 |
-| rtt warm p50 / p99, µs | 21 / 37 | | A4 03-10 |
-| rtt koud p50, µs | 31–47 | | A4 03-10 |
+| App naar app, MB/s | **5384 (A56g, 04-10)**; 4970–4972 (A4, 03-10) | | A56g 04-10 |
+| rtt warm p50 / p99, µs | **15 / 34 (A56g, 04-10)**; 21 / 37 (A4, 03-10) | | A56g 04-10 |
+| rtt koud p50, µs | **21 (A56g, 04-10)**; 31–47 (A4, 03-10) | | A56g 04-10 |
 
 **In rust**
 
 | Meting | v3 | v2 | Run |
 | --- | --- | --- | --- |
-| Kern-cpu | 5 % | | A4 03-10 |
-| Kern-geheugen | 31,8 van 224 MiB (14,2 %) | | A4 03-10 |
-| Hop | 1 %, 0,46 MiB, core 0 | | A4 03-10 |
-| Temperatuur | 46,0 °C | | A4 03-10 |
+| Kern-cpu | **1 % (A56g, 04-10)**; 5 % (A4, 03-10) | | A56g 04-10 |
+| Kern-geheugen | **31,8 van 224 MiB (14,2 %) (A56g, 04-10)**; 31,8 van 224 MiB (14,2 %) (A4, 03-10) | | A56g 04-10 |
+| Hop | **1 %, 0,55–0,57 MiB, core 0 (A56g, 04-10)**; 1 %, 0,46 MiB, core 0 (A4, 03-10) | | A56g 04-10 |
+| Temperatuur | **38,0 °C (A56g, 04-10)**; 46,0 °C (A4, 03-10) | | A56g 04-10 |
 
 **Watchdog**
 
 | Meting | v3 | v2 | Run |
 | --- | --- | --- | --- |
-| Watchdogtoets (meetkern `wdtest`: Hop stopt na 60 s) | — (nog open) | | |
+| Watchdogtoets (meetkern `wdtest`: Hop stopt na 60 s) | **Hop gestopt 09:36:35, reset binnen 22 s; terug op de stickkern A4 om 09:40:14 (de firmware-boot duurt ruim 3 min); geen post-mortem, de zwarte doos overleeft op de Altra geen reset; daarna main plus fix warm vanaf A4 op (A58w, 04-10)** | | A58w 04-10 |
 
-Nog te meten: het netwerk over de draad, en een boot met `nvmebench`.
+**Opslag**
+
+| Meting | v3 | v2 | Run |
+| --- | --- | --- | --- |
+| Rauw 1 MiB, schrijven / lezen, MB/s | **2466 / 2109 (NVMe SN770 500 GB) (A57b, 04-10)** | | A57b 04-10 |
+| hopfs 1 MiB, schrijven / lezen, MB/s | **2493 / 2251 (A57b, 04-10)** | | A57b 04-10 |
+| Sequentieel 1 GiB, schrijven / lezen, MB/s | **2549 / 2459 (A57b, 04-10)** | | A57b 04-10 |
+| Willekeurig 4 KiB, schrijven / lezen, IOPS | **141.000 / 24.500 (A57b, 04-10)** | | A57b 04-10 |
+| Willekeurig 4 KiB lezen, 16 tegelijk, IOPS | **186.000 (762 MB/s) (A57b, 04-10)** | | A57b 04-10 |
+
+Nog te meten: de verbindingscyclus en de storm over de draad.
 
 Bord:
-- NIC: igb, bewust gepold (de `_PRT`-INTx doodt de SoC). Kick via SGI 1.
-- Watchdog: SBSA. RNG: SMCCC-TRNG of `rndr`. Temperatuur: SMpro.
-- Console op het glas: GOP. Opslag: NVMe.
+- NIC: **igb op MSI-X via de ITS van zijn root-complex (ITS 7, LPI 8224),
+  eerste interrupt na 4 µs (A56g, 04-10)**; eerder bewust gepold (de
+  `_PRT`-INTx doodt de SoC). Kick via SGI 1.
+- Watchdog: SBSA, 12,0 s. RNG: **geen SMCCC-TRNG (`TRNG_VERSION
+  NOT_SUPPORTED`), jitter (04-10)**; eerder SMCCC-TRNG of `rndr`.
+  Temperatuur: SMpro.
+- Console op het glas: GOP, alleen na een koude boot (na een warme flip
+  `HOPOS_FB_NONE`). Opslag: NVMe SN770 500 GB.
+- Zwarte doos: overleeft op de Altra geen reset (`HOPOS_FLIP_BLACKBOX_EMPTY`).
 
 ## Raspberry Pi 5
 
