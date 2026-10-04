@@ -39,6 +39,11 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
+- [ ] Agent: `tools/meet`, de meetronde als één programma (de O6N als
+      tegenpartij, per bord de kolom van measurements.md, wachten op markers
+      in plaats van op slaap, parallel waar het kan, opruimen, `--write` zet
+      de cellen vooraan); doel ongeveer tien minuten voor alle borden in
+      plaats van 80 minuten met zeven agenten.
 - [ ] Hoofdstuk 8 van docs/description.md (de kanttekeningen vóór de release
       van dit weekend), geland zijn 8.1 (0f03544), 8.2 en 8.3 (c6e0bf8), 8.4 (a0eaeb0), 8.5
       (8e8cea4), 8.6 (67e5a3a), 8.15 en 8.16 (f1917f0); nog bezig 8.14 (de
