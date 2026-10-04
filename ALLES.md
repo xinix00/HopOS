@@ -57,6 +57,12 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       kent geen jobs: spin opnieuw POSTen, daarna pas de watchdogtoets
       daar), de LicheeRV-kaart met `CFG=`. Daarna de twee soaks: spin op de
       M4, de Blu-ray-backup op de O6N.
+- [ ] SQLite op HopOS (replica, lokaal 2f3fdb5, geen remote): stromen zit op
+      230 tot 490 MiB/s op de M4, losse opzoekingen op één ronde per pagina,
+      een commit op drie flushes. Volgende: batch-atomic in hopfs
+      (`SQLITE_IOCAP_BATCH_ATOMIC`, hermappen via `pending`, één vastlegging
+      bij OP_SYNC) haalt het journal en twee van de drie syncs weg; na het
+      weekend. Replica docs/bench.md heeft de tabel.
 ### Fixen
 
 - [ ] `HOPOS_IRQ_STUCK` wordt nergens gedrukt (hing aan het dode irq::run;
